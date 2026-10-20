@@ -259,6 +259,7 @@ import {
   SandboxError,
   type DeployLog,
   type DeployResult,
+  type EvaluationAssetContent,
   type FileChange,
   type Sandbox,
   type ServiceStatusEvent,
@@ -2047,6 +2048,8 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
         emit(session, { type: 'boot_network', at: new Date().toISOString(), network });
       },
     });
+    // 샌드박스가 준비되면 평가 자산의 복사본도 마지막 체크포인트의 판으로 맞춘다(#745). 실패하면 세션을 ready로 두지 않는다
+    await syncEvaluationAssetsFromCheckpoint(session);
     const head = session.snapshot.checkpoints[0]!;
     if (!resumed) {
       // 서비스가 마이그레이션까지 마친 상태를 세션 시작 체크포인트의 데이터베이스 상태로 남긴다
@@ -2638,12 +2641,45 @@ async function ensureReadySessionInfra(session: Session, signal: AbortSignal): P
   return { ok: true };
 }
 
+/**
+ * 평가 자산의 복사본을 마지막 체크포인트에 커밋된 판으로 맞춘다(#745). 컨테이너에는 작업 복사본의 자산이 아니라 이 복사본이
+ * 읽기 전용으로 붙는다. 커밋된 판을 읽으므로 실행 전에 백그라운드나 사람이 작업 복사본에서 바꿔 둔 내용은 들어가지 않는다.
+ * 링크·서브모듈은 넣지 않는다(일반 파일 100644·100755만). 선언이 없거나 제공자가 복사본을 지원하지 않으면 아무 일도 하지 않는다.
+ * 읽기·쓰기에 실패하면 던진다 — 빈 복사본으로 테스트가 도는 것을 조용히 넘기지 않는다
+ */
+async function syncEvaluationAssetsFromCheckpoint(session: Session): Promise<void> {
+  const declared = session.project.spec.workflow?.evaluationAssets ?? [];
+  const sandbox = session.sandbox;
+  if (declared.length === 0 || !sandbox.syncEvaluationAssets) return;
+  const ref = session.snapshot.checkpoints[0]?.sha;
+  if (!ref) throw new StudioError(502, '평가 자산을 꺼낼 마지막 체크포인트가 없습니다');
+  const assets: EvaluationAssetContent[] = [];
+  for (const assetPath of declared) {
+    const blob = await session.checkpoints.blobAt(assetPath, ref);
+    if (blob.kind === 'file') {
+      assets.push({ path: assetPath, kind: 'file', files: [{ path: assetPath, content: blob.content, executable: blob.executable }] });
+      continue;
+    }
+    // 폴더 자산(또는 그 시점에 폴더·링크·없음)은 커밋된 일반 파일만 꺼낸다. 링크는 따라가지 않아 빈 폴더가 된다
+    const files = await session.checkpoints.listBlobs(ref, assetPath);
+    assets.push({ path: assetPath, kind: 'directory', files: files.map((file) => ({ path: file.path, content: file.content, executable: file.executable })) });
+  }
+  await sandbox.syncEvaluationAssets(assets);
+}
+
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
 async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
   // 세션 상태(ready)만 보고 핵심 컨테이너가 실제로 있다고 가정하지 않는다(도그푸딩 마찰 130). 이 확인은
   // 모델 호출·게이트보다 먼저다 — 실패하면 턴을 하나도 쓰지 않고 바로 알린다
   const infra = await ensureReadySessionInfra(session, signal);
   if (!infra.ok) return { preflightError: infra.reason };
+  // 컨테이너에 붙는 평가 자산은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 실행을 시작하기 전에
+  // 마지막 체크포인트에 커밋된 판으로 맞춘다 — 백그라운드가 작업 복사본에서 바꿔 둔 판이 기준이 되지 않는다
+  try {
+    await syncEvaluationAssetsFromCheckpoint(session);
+  } catch (error) {
+    return { preflightError: `평가 자산을 준비하지 못해 실행을 시작하지 않았습니다: ${describe(error)}` };
+  }
 
   // 이번 요청 전부터 작업 트리에 있던 변경(보관본 되살리기, 사람이 편집기로 바꾼 것 등 출처를 가리지 않는다).
   // 에이전트가 이번 실행에서 파일을 하나도 건드리지 않아도 게이트가 이 변경을 검증 대상으로 보게 한다(ADR-131:
@@ -8153,6 +8189,8 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     await ensureBooted(session);
     const infra = await ensureReadySessionInfra(session, signal);
     if (!infra.ok) throw new Error(infra.reason);
+    // 게이트를 만들기 전에 평가 자산의 복사본을 마지막 체크포인트의 판으로 맞춘다(#745). 실패하면 이 실행은 시작하지 않는다
+    await syncEvaluationAssetsFromCheckpoint(session);
     // 기준은 서버가 아는 마지막 체크포인트의 문서다(runPlan과 같은 이유, ADR-157)
     const lastCheckpointSha = session.snapshot.checkpoints[0]?.sha;
     const requirementsBaseline = (lastCheckpointSha ? await session.checkpoints.fileAt(REQUIREMENTS_FILE, lastCheckpointSha) : undefined) ?? null;

@@ -93,24 +93,25 @@ describe('planGitMask 마운트 꼴별 계획', () => {
 });
 
 describe('planEvaluationAssetMask 마운트 꼴별 계획', () => {
-  const assets = [{ relative: 'tests/acceptance' }];
+  const COPY = '/cache/evaluation-assets/sb/asset-1';
+  const assets = [{ path: 'tests/acceptance', source: COPY }];
 
-  it('프로젝트 루트를 마운트하면 자산 폴더가 컨테이너의 같은 자리에 읽기 전용으로 붙는다', () => {
+  it('프로젝트 루트를 마운트하면 자산 복사본이 컨테이너의 같은 자리에 읽기 전용으로 붙는다', () => {
     const plan = planEvaluationAssetMask([{ service: 'api', source: ROOT, target: '/app' }], ROOT, assets);
     expect(plan).toEqual({
-      api: [ro(`${ROOT}/tests/acceptance`, '/app/tests/acceptance')],
+      api: [ro(COPY, '/app/tests/acceptance')],
     });
   });
 
   it('자산을 품은 하위 폴더만 마운트하면 그 마운트 자리 기준으로 붙는다', () => {
     expect(planEvaluationAssetMask([{ service: 'api', source: `${ROOT}/tests`, target: '/t' }], ROOT, assets)).toEqual({
-      api: [ro(`${ROOT}/tests/acceptance`, '/t/acceptance')],
+      api: [ro(COPY, '/t/acceptance')],
     });
   });
 
-  it('자산 폴더 자체를 마운트하면 같은 자리를 읽기 전용으로 바꿔 쓴다', () => {
+  it('자산 폴더 자체를 마운트하면 같은 자리에 복사본을 붙인다', () => {
     expect(planEvaluationAssetMask([{ service: 'api', source: `${ROOT}/tests/acceptance`, target: '/x' }], ROOT, assets)).toEqual({
-      api: [ro(`${ROOT}/tests/acceptance`, '/x')],
+      api: [ro(COPY, '/x')],
     });
   });
 
@@ -136,9 +137,10 @@ describe('buildOverride의 .git 마스크', () => {
   });
 
   it('평가 자산 마스크도 서비스의 volumes에 적는다', () => {
-    const gitMask = planEvaluationAssetMask([{ service: 'api', source: ROOT, target: '/workspace' }], ROOT, [{ relative: 'tests/acceptance' }]);
+    const copy = { path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' };
+    const gitMask = planEvaluationAssetMask([{ service: 'api', source: ROOT, target: '/workspace' }], ROOT, [copy]);
     const override = buildOverride(project, 'studio-shop-abc123', { gitMask });
-    expect(override.services.api?.volumes).toEqual([ro(`${ROOT}/tests/acceptance`, '/workspace/tests/acceptance')]);
+    expect(override.services.api?.volumes).toEqual([ro(copy.source, '/workspace/tests/acceptance')]);
   });
 });
 
@@ -197,24 +199,59 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
     expect(mask).toEqual({ api: [ro(path.join(root, '.git'), '/workspace/.git'), empty(root, '/workspace/.git/b-studio')] });
   });
 
-  it('선언한 평가 자산 폴더만 git 마스크와 한 맵으로 합친다. 파일 자산·없는 자산·링크는 뺀다', async () => {
+  it('평가 자산은 선언 목록 그대로 git 마스크와 한 맵으로 합친다. 파일·링크·없는 자산도 기대에서 빠지지 않는다', async () => {
     const base = await temp();
     const root = path.join(base, 'proj');
     await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
-    await mkdir(path.join(root, 'tests', 'acceptance'), { recursive: true });
-    await writeFile(path.join(root, 'expected.json'), '{}\n');
-    await symlink(path.join(root, 'tests'), path.join(root, 'linked'));
+    // 붙일 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 작업 복사본의 모습은 마스크 목록에 영향이 없다
+    const copies = [
+      { path: 'tests/acceptance', source: path.join(base, 'copies', 'dir') },
+      { path: 'expected.json', source: path.join(base, 'copies', 'file') },
+      { path: 'missing.json', source: path.join(base, 'copies', 'missing') },
+      { path: 'linked', source: path.join(base, 'copies', 'linked') },
+    ];
 
     const mask = await computeGitMask(
       root,
       { services: { api: { volumes: [{ type: 'bind', source: root, target: '/app' }] } } },
-      { evaluationAssets: ['tests/acceptance', 'expected.json', 'missing.json', 'linked'] },
+      { evaluationAssets: copies },
     );
 
-    // 파일 자산(expected.json)은 마운트하지 않는다: bind 마운트가 inode를 붙잡아 호스트의 새 판을 보지 못한다
     expect(mask).toEqual({
-      api: [ro(path.join(root, '.git'), '/app/.git'), empty(root, '/app/.git/b-studio'), ro(path.join(root, 'tests', 'acceptance'), '/app/tests/acceptance')],
+      api: [
+        ro(path.join(root, '.git'), '/app/.git'),
+        empty(root, '/app/.git/b-studio'),
+        ro(copies[1]!.source, '/app/expected.json'),
+        ro(copies[3]!.source, '/app/linked'),
+        ro(copies[2]!.source, '/app/missing.json'),
+        ro(copies[0]!.source, '/app/tests/acceptance'),
+      ].sort((a, b) => a.target.localeCompare(b.target)),
     });
+  });
+
+  it('작업 복사본에서 자산을 지우거나 링크로 바꿔도 붙일 목록과 사후 확인 목록이 줄지 않는다(커밋 보안 검토)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    await mkdir(path.join(root, 'tests', 'acceptance'), { recursive: true });
+    const outside = path.join(base, 'outside');
+    await mkdir(outside);
+    const copies = [{ path: 'tests/acceptance', source: path.join(base, 'copies', 'dir') }];
+    const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/app' }] } } };
+
+    // 자산을 지운 뒤에도 같은 자리를 기대한다
+    await rm(path.join(root, 'tests', 'acceptance'), { recursive: true });
+    const afterDelete = await computeGitMask(root, config, { evaluationAssets: copies });
+    expect(afterDelete.api?.find((volume) => volume.target === '/app/tests/acceptance')?.source).toBe(copies[0]!.source);
+    expect(await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }], {}, { evaluationAssets: copies })).toContain('/app/tests/acceptance');
+
+    // 링크로 바꿔도 기대가 줄지 않고, 마운트 원본은 작업 복사본이 아니다
+    await symlink(outside, path.join(root, 'tests', 'acceptance'));
+    const afterLink = await computeGitMask(root, config, { evaluationAssets: copies });
+    const volume = afterLink.api?.find((entry) => entry.target === '/app/tests/acceptance');
+    expect(volume?.source).toBe(copies[0]!.source);
+    expect(volume?.source.startsWith(root)).toBe(false);
+    expect(await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }], {}, { evaluationAssets: copies })).toContain('/app/tests/acceptance');
   });
 
   it('서비스 여럿이 함께 재시작돼 동시에 불려도 실패하지 않고, 빈 폴더는 비어 있다(도그푸딩 마찰 187)', async () => {
@@ -383,18 +420,17 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
     expect(await findMissingMasks(root, [{ Type: 'volume', Name: 'db', Destination: '/data', RW: true }], {})).toEqual([]);
   });
 
-  it('평가 자산 자리의 실제 마운트가 없거나 쓰기 가능하면 그 자리를 돌려준다', async () => {
+  it('평가 자산 자리의 실제 마운트가 없거나 쓰기 가능하면 그 자리를 돌려준다(마운트 원본은 복사본)', async () => {
     const root = await project();
-    await mkdir(path.join(root, 'tests', 'acceptance'), { recursive: true });
-    const asset = path.join(root, 'tests', 'acceptance');
+    const copies = [{ path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' }];
     const base = [
       { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
       { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
       { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
     ];
-    const declared = { evaluationAssets: ['tests/acceptance'] };
+    const declared = { evaluationAssets: copies };
     expect(await findMissingMasks(root, base, {}, declared)).toEqual(['/workspace/tests/acceptance']);
-    expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: asset, Destination: '/workspace/tests/acceptance', RW: true }], {}, declared)).toEqual(['/workspace/tests/acceptance']);
-    expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: asset, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
+    expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: true }], {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
   });
 });

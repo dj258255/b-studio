@@ -4,6 +4,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
 import { SandboxError } from '../errors';
+import type { EvaluationAssetCopy } from './evaluation-assets';
 import type { BindMount } from './relay';
 
 const execFileAsync = promisify(execFile);
@@ -81,31 +82,23 @@ export function planGitMask(mounts: readonly Pick<BindMount, 'service' | 'source
   return Object.fromEntries([...plan].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
 }
 
-/** 호스트에 실제로 있는 평가 자산 폴더 하나. 링크·없는 것·특수 파일과 파일 자산은 부르는 쪽에서 뺀다 */
-export interface EvaluationAsset {
-  /** 프로젝트 폴더 기준 상대 경로 */
-  relative: string;
-}
-
 /**
- * 선언된 평가 자산 폴더를 서비스 컨테이너에 읽기 전용으로 덧붙이는 마운트 계획(ADR-175 후속).
+ * 선언된 평가 자산을 서비스 컨테이너에 읽기 전용으로 덧붙이는 마운트 계획(ADR-175 후속, #745).
  *
  * 평가 자산은 사람이 고치는 파일·폴더다. 작업 복사본이 서비스에 쓰기 가능하게 마운트되어 있으면 컨테이너 안 명령이 테스트 중에
  * 자산을 바꿀 수 있었다(게이트의 지문 견줌은 검사 앞뒤만 본다). `.git`과 같은 방식으로 더 구체적인 경로에 읽기 전용 마운트를 겹친다.
  *  - 마운트 소스가 자산을 품으면 그 자산만 읽기 전용으로 덧붙인다
  *  - 마운트 소스가 자산 안쪽(자산 폴더나 그 하위)이면 같은 자리의 마운트를 읽기 전용으로 바꿔 쓴다
  *  - 자산과 무관한 마운트는 건드리지 않는다
- * **파일 자산은 마운트하지 않는다.** 파일 하나를 bind 마운트하면 리눅스 네이티브 도커에서는 컨테이너가 그 inode를 붙잡아(colima 실측에서는
- * 공유 파일시스템이 경로로 다시 찾아 새 판이 보였다, ADR-175 덧붙임), 사람이 편집기로 고치거나(임시 파일에
- * 쓴 뒤 이름 바꾸기) git으로 되돌려도(지우고 새로 만들기) 컨테이너는 옛 판을 계속 본다. 게이트 지문은 새 판, 테스트는 옛 판을 보게
- * 되어 소리 없이 어긋난다. 그 자산을 컨테이너에서도 막아야 하면 파일이 든 폴더를 선언한다(폴더 마운트는 안의 항목을 매번 새로 찾는다).
- * 파일 자산은 지문 견줌으로만 지킨다.
+ * **원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다.** 작업 복사본의 경로를 붙이면 도커가 그 원본이 링크일 때 링크를
+ * 따라가고(서비스 재시작 때도 다시 따라간다), 마스크를 계산할 때 걸러도 막을 수 없다. 복사본은 b-studio만 쓰고, 같은 inode를
+ * 유지한 채 안을 바꾸므로 파일 하나를 붙여도 컨테이너가 옛 판을 붙잡지 않는다(evaluation-assets.ts)
  * 마운트의 source·target은 `docker compose config --format json`이 정규화한 값(절대 경로)이다
  */
 export function planEvaluationAssetMask(
   mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[],
   projectRoot: string,
-  assets: readonly EvaluationAsset[],
+  assets: readonly EvaluationAssetCopy[],
 ): Record<string, MaskVolume[]> {
   const plan = new Map<string, Map<string, MaskVolume>>();
   const add = (service: string, volume: MaskVolume) => {
@@ -118,12 +111,12 @@ export function planEvaluationAssetMask(
   for (const mount of mounts) {
     const source = path.resolve(mount.source);
     for (const asset of assets) {
-      const assetAbs = path.resolve(projectRoot, asset.relative);
+      const assetAbs = path.resolve(projectRoot, asset.path);
       if (isInside(source, assetAbs)) {
-        add(mount.service, readOnly(assetAbs, path.posix.join(mount.target, toPosix(path.relative(source, assetAbs)))));
+        add(mount.service, readOnly(asset.source, path.posix.join(mount.target, toPosix(path.relative(source, assetAbs)))));
       } else if (isInside(assetAbs, source)) {
-        // 자산 폴더나 그 하위를 직접 마운트했다. 같은 자리(target)의 마운트를 바꿔 쓴다
-        add(mount.service, readOnly(source, mount.target));
+        // 자산 폴더나 그 하위를 직접 마운트했다. 같은 자리(target)에 복사본의 같은 하위 경로를 붙인다
+        add(mount.service, readOnly(path.join(asset.source, path.relative(assetAbs, source)), mount.target));
       }
     }
   }
@@ -203,7 +196,7 @@ export function collectHostMounts(config: ComposeMountConfig): Array<Pick<BindMo
 export async function computeGitMask(
   projectRoot: string,
   config: ComposeMountConfig,
-  { evaluationAssets = [] }: { evaluationAssets?: readonly string[] } = {},
+  { evaluationAssets = [] }: { evaluationAssets?: readonly EvaluationAssetCopy[] } = {},
 ): Promise<Record<string, MaskVolume[]>> {
   const root = await real(projectRoot);
   const mounts = await Promise.all(collectHostMounts(config).map(async (mount) => ({ ...mount, source: await real(mount.source) })));
@@ -228,21 +221,8 @@ export async function computeGitMask(
     entry.hasState = true;
   }
   const gitMask = planGitMask(mounts, entries);
-  const assets = await selectEvaluationAssets(root, evaluationAssets);
-  return assets.length === 0 ? gitMask : mergeMasks(planEvaluationAssetMask(mounts, root, assets), gitMask);
-}
-
-/**
- * 선언 중 호스트에 실제로 있는 폴더만 고른다(파일·링크·없는 것·특수 파일은 뺀다).
- * 파일 자산은 마운트하지 않는다 — bind 마운트가 inode를 붙잡아 호스트의 새 판을 보지 못하는 까닭은 planEvaluationAssetMask에 적었다
- */
-async function selectEvaluationAssets(root: string, declared: readonly string[]): Promise<EvaluationAsset[]> {
-  const selected: EvaluationAsset[] = [];
-  for (const relative of declared) {
-    const info = await lstat(path.join(root, relative)).catch(() => undefined);
-    if (info?.isDirectory()) selected.push({ relative });
-  }
-  return selected;
+  // 목록은 선언에서만 정한다(작업 복사본의 지금 상태를 보지 않는다). 그래야 자산이 지워지거나 링크로 바뀌어도 기대가 줄지 않는다
+  return evaluationAssets.length === 0 ? gitMask : mergeMasks(planEvaluationAssetMask(mounts, root, evaluationAssets), gitMask);
 }
 
 /** 마스크 계획을 서비스·target으로 합친다. 뒤에 오는 계획이 같은 target에서 이긴다 */
@@ -307,7 +287,7 @@ export async function findMissingMasks(
   projectRoot: string,
   mounts: readonly InspectedMount[],
   volumeOptions: Readonly<Record<string, { driver?: string; driver_opts?: Record<string, string> } | undefined>>,
-  { evaluationAssets = [] }: { evaluationAssets?: readonly string[] } = {},
+  { evaluationAssets = [] }: { evaluationAssets?: readonly EvaluationAssetCopy[] } = {},
 ): Promise<string[]> {
   const root = await real(projectRoot);
   const hostMounts = await Promise.all(
@@ -319,8 +299,7 @@ export async function findMissingMasks(
   if (hostMounts.length === 0) return [];
   const entries = await detectGitEntries(root, hostMounts.map((mount) => mount.source));
   const gitMask = planGitMask(hostMounts, entries);
-  const assets = await selectEvaluationAssets(root, evaluationAssets);
-  const mask = assets.length === 0 ? gitMask : mergeMasks(planEvaluationAssetMask(hostMounts, root, assets), gitMask);
+  const mask = evaluationAssets.length === 0 ? gitMask : mergeMasks(planEvaluationAssetMask(hostMounts, root, evaluationAssets), gitMask);
   const missing: string[] = [];
   for (const volume of mask.container ?? []) {
     const actual = mounts.find((mount) => mount.Destination === volume.target);
@@ -356,11 +335,18 @@ function toPosix(relative: string): string {
  * 읽어, 프로젝트 폴더를 마운트한 서비스마다 `.git`을 막는 마운트를 계산한다. 마운트를 읽지 못하면 막을 자리를 알 수 없으므로
  * 보호 없이 띄우지 않고 멈춘다 — 같은 compose 파일을 읽지 못하면 `up`도 어차피 실패한다.
  * `up`을 부르는 `#composeArgs`와 같은 파일·프로젝트 이름·프로젝트 폴더·환경으로 읽는다(프로필만 모두 켠다).
+ * `evaluationAssets`(복사본 자리)를 주면 그 마스크도 함께 계산한다.
  * 오류에는 명령줄을 담지 않고 stderr만 `redact`로 가려 담는다(compose의 오류에 치환된 시크릿 값이 섞일 수 있다)
  */
 export async function loadGitMask(
-  project: Pick<LoadedProject, 'root' | 'composePath' | 'spec'>,
-  { dockerBin = 'docker', env = process.env, projectName, redact = (text: string) => text }: { dockerBin?: string; env?: NodeJS.ProcessEnv; projectName?: string; redact?: (text: string) => string } = {},
+  project: Pick<LoadedProject, 'root' | 'composePath'>,
+  {
+    dockerBin = 'docker',
+    env = process.env,
+    projectName,
+    evaluationAssets = [],
+    redact = (text: string) => text,
+  }: { dockerBin?: string; env?: NodeJS.ProcessEnv; projectName?: string; evaluationAssets?: readonly EvaluationAssetCopy[]; redact?: (text: string) => string } = {},
 ): Promise<Record<string, MaskVolume[]>> {
   const args = ['compose', ...(projectName ? ['--project-name', projectName] : []), '--profile', '*', '--project-directory', project.root, '--file', project.composePath, 'config', '--format', 'json'];
   let stdout: string;
@@ -377,5 +363,5 @@ export async function loadGitMask(
   } catch {
     throw new SandboxError('compose 설정(config --format json)을 해석하지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다');
   }
-  return computeGitMask(project.root, config, { evaluationAssets: project.spec.workflow?.evaluationAssets });
+  return computeGitMask(project.root, config, { evaluationAssets });
 }

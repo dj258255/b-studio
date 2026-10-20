@@ -128,7 +128,15 @@ export interface PendingChange {
  * 그 시점에 없으면 'missing', 심볼릭 링크(120000)·서브모듈(160000)·폴더 같은 그 밖의 종류는 'unsupported'다.
  * 내용은 작업 폴더가 아니라 커밋된 값이라, 그 뒤에 파일이 링크로 바뀌어도 이 값을 쓴다
  */
-export type BlobAt = { kind: 'file'; content: Buffer } | { kind: 'missing' } | { kind: 'unsupported'; mode: string };
+export type BlobAt = { kind: 'file'; content: Buffer; executable: boolean } | { kind: 'missing' } | { kind: 'unsupported'; mode: string };
+
+/** 체크포인트(ref)에 커밋된 일반 파일 하나. path는 프로젝트 폴더 기준이다 */
+export interface CheckpointBlob {
+  path: string;
+  content: Buffer;
+  /** 실행 비트(100755) */
+  executable: boolean;
+}
 
 /**
  * discard()·restore()가 체크포인트에 없던 변경을 버리기 직전에 남긴 백업(ADR-099, "절대 조용히 지우지 않는다").
@@ -832,8 +840,33 @@ export class CheckpointStore {
     if (!entry) return { kind: 'missing' };
     const tab = entry.indexOf('\t');
     const [mode = '', , oid = ''] = (tab < 0 ? entry : entry.slice(0, tab)).split(' ');
-    if (mode === '100644' || mode === '100755') return { kind: 'file', content: await this.#gitBytes(['cat-file', 'blob', oid]) };
+    if (mode === '100644' || mode === '100755') return { kind: 'file', content: await this.#gitBytes(['cat-file', 'blob', oid]), executable: mode === '100755' };
     return { kind: 'unsupported', mode };
+  }
+
+  /**
+   * 체크포인트(ref)에 커밋된 폴더 아래의 일반 파일(100644·100755)을 모두 꺼낸다. `git ls-tree -r`로 커밋된 판만 보므로,
+   * 작업 트리에서 파일을 지우거나 링크로 바꿔도 그 시점의 내용이 나온다. 링크(120000)·서브모듈(160000)은 넣지 않는다.
+   * 돌려주는 path는 프로젝트 폴더 기준이다(blobAt과 같은 규칙, 모노레포 하위 폴더도 같다)
+   */
+  async listBlobs(ref: string, dir: string): Promise<CheckpointBlob[]> {
+    const subdir = await this.#subdir();
+    const target = subdir ? `${subdir}/${dir}` : dir;
+    const entries = (await this.#git(['ls-tree', '-r', '-z', ref, '--', target])).split('\0').filter(Boolean);
+    const blobs: CheckpointBlob[] = [];
+    for (const entry of entries) {
+      const tab = entry.indexOf('\t');
+      if (tab < 0) continue;
+      const [mode = '', , oid = ''] = entry.slice(0, tab).split(' ');
+      if (mode !== '100644' && mode !== '100755') continue;
+      const rootPath = entry.slice(tab + 1);
+      if (subdir) {
+        if (!rootPath.startsWith(`${subdir}/`)) continue;
+      }
+      const path = subdir ? rootPath.slice(subdir.length + 1) : rootPath;
+      blobs.push({ path, content: await this.#gitBytes(['cat-file', 'blob', oid]), executable: mode === '100755' });
+    }
+    return blobs.sort((a, b) => a.path.localeCompare(b.path));
   }
 
   /**
