@@ -46,6 +46,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     },
     async *logs() {},
     async exec(_service: string, command: string[]) {
+      // 게이트가 테스트 전에 보고서 자리를 비우는 명령(#756)은 테스트 명령으로 세지 않는다
+      if (command[0] === 'sh' && command[2]?.startsWith('rm -f /tmp/b-studio-test-report.json ')) return { exitCode: 0, stdout: '', stderr: '' };
       fake.execCalls.push(command);
       if (fake.failCommands.some((word) => command.includes(word))) return { exitCode: 1, stdout: '', stderr: 'FAILED' };
       return { exitCode: 0, stdout: '', stderr: '' };

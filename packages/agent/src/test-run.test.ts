@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTestRunPlan, detectRunner, JEST_LIKE_REPORT_PATH, PYTEST_REPORT_PATH, splitCollectedReports } from './test-run';
+import { buildTestRunPlan, clearTestReportsCommand, detectRunner, JEST_LIKE_REPORT_PATH, PYTEST_REPORT_PATH, reportRootsForIncludes, splitCollectedReports, type Runner } from './test-run';
 
 describe('buildTestRunPlan', () => {
   it('gradle: 전체 실행', () => {
@@ -162,5 +162,32 @@ describe('buildTestRunPlan — includes 서브프로젝트 보고서(도그푸�
     const plan = buildTestRunPlan('gradle', undefined, { extraReportRoots: ['/workspace/media-service_2.0'] });
     const script = plan.collect[2] as string;
     expect(script).toContain("'/workspace/media-service_2.0'/build/test-results/test/*.xml");
+  });
+});
+
+describe('clearTestReportsCommand — 게이트 전에 보고서 자리 비우기 (#756)', () => {
+  /** collect 명령이 읽는 경로(고정 경로나 glob 식)를 꺼낸다 */
+  function collectedPaths(collect: string[]): string[] {
+    if (collect[0] === 'cat') return [collect[1]!];
+    return [...collect[2]!.matchAll(/for f in (\S+); do/g)].map((match) => match[1]!);
+  }
+
+  it('어느 실행기든 수거하는 경로를 모두 지운다. includes 아래 경로도 같다', () => {
+    const roots = reportRootsForIncludes(['shared/lib']);
+    const clear = clearTestReportsCommand(roots);
+    expect(clear.slice(0, 2)).toEqual(['sh', '-c']);
+    const removed = clear[2]!.replace(/^rm -f /, '').split(' ');
+    const runners: Runner[] = ['gradle', 'maven', 'vitest', 'jest', 'pytest'];
+    for (const runner of runners) {
+      for (const collected of collectedPaths(buildTestRunPlan(runner, undefined, { extraReportRoots: roots }).collect)) {
+        expect(removed, `${runner}: ${collected}`).toContain(collected);
+      }
+    }
+    expect(removed).toContain("'/workspace/shared/lib'/build/test-results/test/*.xml");
+  });
+
+  it('셸에 쓸 수 없는 includes 경로는 수거처럼 버린다', () => {
+    const clear = clearTestReportsCommand(['/workspace/media; touch /tmp/pwned']);
+    expect(clear[2]).not.toContain('pwned');
   });
 });

@@ -106,6 +106,25 @@ export function buildTestRunPlan(
   }
 }
 
+/** 서비스 컨테이너 안에서 프로젝트 루트를 마운트한 자리. studio의 CONTAINER_WORKSPACE_ROOT(ADR-088)와 같아야 한다 */
+export const CONTAINER_PROJECT_ROOT = '/workspace';
+
+/** 서비스의 `includes`(ADR-139)를 컨테이너 안 보고서 경로의 뿌리로 바꾼다. 보고서를 모으는 쪽(studio)과 비우는 쪽(게이트)이 같은 경로를 보게 한 곳에 둔다 */
+export function reportRootsForIncludes(includes: readonly string[] = [], root: string = CONTAINER_PROJECT_ROOT): string[] {
+  return includes.map((include) => `${root}/${include}`);
+}
+
+/**
+ * `collect`가 읽는 보고서 자리를 실행기와 상관없이 모두 지우는 명령(#756). 게이트가 선언된 테스트를 돌리기 직전에 보낸다.
+ * 게이트의 테스트 명령(사용자 스크립트)이 이 자리에 보고서를 남기지 않으면, 테스트 탭이 예전에 남긴 보고서나 에이전트가
+ * 실행 중에 만든 파일이 그대로 모여 새 체크포인트의 근거가 되기 때문이다. 고정 경로와 상수 glob만 따옴표 없이 두고,
+ * `extraReportRoots`는 수거와 같은 규칙(reportGlobExprs)으로 걸러 감싼다
+ */
+export function clearTestReportsCommand(extraReportRoots: readonly string[] = []): string[] {
+  const globs = [GRADLE_REPORT_GLOB, MAVEN_REPORT_GLOB].flatMap((pattern) => reportGlobExprs(pattern, extraReportRoots));
+  return ['sh', '-c', `rm -f ${[JEST_LIKE_REPORT_PATH, PYTEST_REPORT_PATH, ...globs].join(' ')}`];
+}
+
 /** collectGlobCommand의 stdout을 파일별로 나눈다. 경계 표지가 없으면(단일 cat 결과) 파일 하나로 본다 */
 export function splitCollectedReports(stdout: string, singleFileLabel = 'report'): Array<{ file: string; content: string }> {
   if (!stdout.includes(REPORT_BOUNDARY)) {

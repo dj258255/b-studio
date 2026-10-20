@@ -14,6 +14,7 @@ import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromCandidates, routesFromChanged
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
+import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
@@ -529,6 +530,7 @@ export class VerificationGate {
     if (tests.length > 0) this.#stage('test');
     if (concurrency.length > 0) this.#stage('concurrency_check');
 
+    if (tests.length > 0) await this.#clearTestReports(tests);
     const results = await runTaskGraph(nodes, { concurrency: CHECK_CONCURRENCY, signal: this.#options.signal });
     const checks = results.map((result, index) => {
       const entry = meta[index]!;
@@ -1095,6 +1097,24 @@ export class VerificationGate {
       }
     }
     return saved;
+  }
+
+  /**
+   * 게이트가 끝나면 studio가 테스트를 통과시킨 서비스의 고정 경로에서 보고서를 모아 새 체크포인트의 근거로 남긴다(collectGateTestReports).
+   * 그 자리에 테스트 탭이 예전에 남긴 보고서나 에이전트가 만든 파일이 있으면 이번 게이트의 결과처럼 모이므로, 테스트를 돌리기 전에
+   * 서비스마다 한 번 비운다(#756). 지우지 못해도 테스트는 돌린다 — 테스트 판정은 종료 코드로 하고, 보고서는 근거로만 쓴다
+   */
+  async #clearTestReports(tests: readonly WorkflowTest[]): Promise<void> {
+    const services = new Set(tests.map((test) => test.service));
+    await Promise.all(
+      [...services].map(async (service) => {
+        const spec = this.#project.managed.find(([name]) => name === service)?.[1];
+        if (!spec) return;
+        await this.#options.sandbox
+          .exec(service, clearTestReportsCommand(reportRootsForIncludes(spec.includes)), this.#options.signal ? { signal: this.#options.signal } : {})
+          .catch(() => {});
+      }),
+    );
   }
 
   async #runTest(test: WorkflowTest, signal: AbortSignal): Promise<string[]> {
