@@ -6,6 +6,7 @@ import path from 'node:path';
 import { formatBytes, SandboxError, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
+import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
 import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, withDeclaredChecks } from './declared-checks';
 import { judgeLoad, loadRequestFor } from './load-check';
@@ -76,6 +77,8 @@ const OUTPUT_TAIL_LINES = 30;
 const MAX_EVALUATION_ASSET_FILES = 2_000;
 /** 평가 자산이 바뀌었을 때 사유에 나열할 파일 수 상한 */
 const MAX_EVALUATION_ASSET_LIST = 20;
+/** 검사하는 동안 바뀐 도구 밖 파일을 사유에 나열할 수 상한 */
+const MAX_OUTSIDE_CHANGE_LIST = 20;
 
 /**
  * Next.js가 오류 화면을 대신 그릴 때 나오는 문구. 상태 코드가 200이어도 본문이 오류 화면이면 실패로 본다.
@@ -173,6 +176,15 @@ export interface GateOptions {
    * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다
    */
   reloadProject?: () => Promise<LoadedProject>;
+  /**
+   * b-studio 도구를 거치지 않고 바뀐 파일(CLI 내장 도구·서비스 안 명령 등). 주면 게이트가 만들 때 한 번,
+   * 그리고 check()마다 바뀐 파일 수를 보기 전에 이 목록을 작업 공간에 옮긴다. 게이트가 다룰 수 없는 경로(링크·비밀 파일 등)가
+   * 바뀌었으면 검증하지 않고 실패한다. 주지 않으면 지금과 같이 도구가 기록한 변경만 본다
+   */
+  outsideChanges?: {
+    pendingFiles: () => Promise<readonly string[]>;
+    fingerprint?: Fingerprinter;
+  };
 }
 
 /**
@@ -235,12 +247,15 @@ export class VerificationGate {
   readonly #evaluationAssets: readonly string[];
   /** 실행을 시작할 때 뜬 평가 자산의 지문. 검사 때 다시 떠서 견주고, 읽을 수 없었으면 그 사유를 담는다 */
   readonly #evaluationAssetBaseline: EvaluationAssetBaseline;
+  /** 도구 밖 변경을 작업 공간으로 옮기는 추적기. outsideChanges를 준 경우에만 있다 */
+  readonly #outsideTracker: ChangeTracker | undefined;
 
   private constructor(
     options: GateOptions,
     baselines: ReadonlyMap<string, OpenApiDocument>,
     evaluationAssets: readonly string[],
     evaluationAssetBaseline: EvaluationAssetBaseline,
+    outsideTracker: ChangeTracker | undefined,
   ) {
     this.#options = options;
     this.#project = options.project;
@@ -248,6 +263,7 @@ export class VerificationGate {
     this.#maxAttempts = options.maxVerifyAttempts;
     this.#evaluationAssets = evaluationAssets;
     this.#evaluationAssetBaseline = evaluationAssetBaseline;
+    this.#outsideTracker = outsideTracker;
   }
 
   /** 계약 비교 기준은 모델이 파일을 바꾸기 전에 잡아야 한다 */
@@ -256,11 +272,27 @@ export class VerificationGate {
     options.workspace.snapshotRead(REQUIREMENTS_FILE);
     // 평가 자산의 선언과 지문도 같은 이유로 여기서 고정한다. 에이전트가 명령(run_in_service 등)으로 고친 것도 검사가 잡는다
     const evaluationAssets = options.project.spec.workflow?.evaluationAssets ?? [];
+    // 도구 밖 변경의 기준을 여기서 잡는다. 이때 이미 바뀌어 있던 파일은 첫 check()에서 "이번에 바뀐 것"으로 다시 세지 않는다
+    const outsideTracker = options.outsideChanges
+      ? new ChangeTracker(options.workspace, options.outsideChanges.pendingFiles, {
+          tolerateExisting: true,
+          ...(options.outsideChanges.fingerprint ? { fingerprint: options.outsideChanges.fingerprint } : {}),
+        })
+      : undefined;
+    if (outsideTracker) await outsideTracker.sync();
     const [baselines, evaluationAssetBaseline] = await Promise.all([
       captureBaselines(options.sandbox, options.project, options.fetcher),
       fingerprintEvaluationAssets(options.project.root, evaluationAssets),
     ]);
-    return new VerificationGate(options, baselines, evaluationAssets, evaluationAssetBaseline);
+    return new VerificationGate(options, baselines, evaluationAssets, evaluationAssetBaseline, outsideTracker);
+  }
+
+  /**
+   * 마지막 sync()가 게이트에 알린 도구 밖 변경의 지문(프로젝트 기준 경로 → 지문). outsideChanges를 준 경우에만 있다.
+   * 호출자는 게이트를 통과한 실행의 결과에 실어, 체크포인트를 남기기 전에 스테이징될 내용이 검증한 내용과 같은지 견주는 데 쓴다
+   */
+  get verifiedFingerprints(): ReadonlyMap<string, string> | undefined {
+    return this.#outsideTracker?.tracked;
   }
 
   /**
@@ -329,6 +361,27 @@ export class VerificationGate {
   }
 
   /**
+   * 선언한 검사(테스트)를 돌리는 동안 도구 밖에서 파일이 바뀌었는지 다시 동기화한다(TOCTOU). 검사 전에만 동기화하면
+   * 검사가 바뀐 내용으로 판정해 놓고 지문은 그 전 것을 내게 되어, 검증하지 않은 내용이 체크포인트로 갈 수 있다.
+   * 바뀐 파일(또는 게이트가 다룰 수 없는 경로)이 있으면 outside-tool-changes 실패를 더한다. 검사 전에 이미 같은 실패가
+   * 있으면 그대로 둔다.
+   * 남은 한계: 검사가 도는 동안 바꿨다가 끝나기 전에 되돌리면 앞뒤 지문이 같아 잡지 못한다(#765).
+   */
+  async #recheckOutsideChanges(recordChecks: WorkflowCheck[]): Promise<void> {
+    const elapsed = await this.#outsideTracker?.sync();
+    if (!elapsed || (elapsed.changed.length === 0 && elapsed.rejected.length === 0)) return;
+    if (recordChecks.some((check) => check.name === 'outside-tool-changes' && !check.ok)) return;
+    const files = [...new Set([...elapsed.changed, ...elapsed.rejected])].sort();
+    const shown = files.slice(0, MAX_OUTSIDE_CHANGE_LIST);
+    const rest = files.length - shown.length;
+    const detail =
+      elapsed.changed.length > 0
+        ? `검사하는 동안 파일이 바뀌었습니다: ${rest > 0 ? `${shown.join(', ')} 외 ${rest}개` : shown.join(', ')}. 테스트나 백그라운드 명령이 추적되는 파일을 고쳐 쓰지 않게 하세요(생성물이면 .gitignore에 넣으세요).`
+        : rejectedChangeFeedback(elapsed.rejected);
+    recordChecks.push({ stage: 'review', name: 'outside-tool-changes', ok: false, attempts: 1, detail });
+  }
+
+  /**
    * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
    * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
    * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
@@ -351,11 +404,21 @@ export class VerificationGate {
 
   async #check(): Promise<GateOutcome> {
     const { sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
+    // 도구 밖 변경을 작업 공간에 옮긴다. 바뀐 파일 수를 보기 전에 해야, 그것만 바뀐 턴도 "바뀐 파일 없음"으로 지나가지 않는다.
+    // 게이트가 다룰 수 없는 경로(링크·비밀 파일 등)가 바뀌었으면 검증하지 않고 실패로 남긴다
+    const rejectedOutside = (await this.#outsideTracker?.sync())?.rejected ?? [];
     // 확인 선언을 먼저 정한다. 그 뒤의 모든 단계가 같은 선언을 본다
     const declaredChecks = await this.#reviewDeclaredChecks();
     const project = this.#project;
-    // 바뀐 파일 목록에 의존하지 않는 검사들(요구사항 검증 기록·평가 자산 지문). 바뀐 파일이 0개인 턴에서도 돈다
-    const recordChecks = [...(await this.#requirementRecordChecks()), ...(await this.#evaluationAssetChecks()), ...declaredChecks];
+    // 바뀐 파일 목록에 의존하지 않는 검사들(요구사항 검증 기록·평가 자산 지문·도구 밖 변경). 바뀐 파일이 0개인 턴에서도 돈다
+    const recordChecks = [
+      ...(await this.#requirementRecordChecks()),
+      ...(await this.#evaluationAssetChecks()),
+      ...declaredChecks,
+      ...(rejectedOutside.length > 0
+        ? [{ stage: 'review' as const, name: 'outside-tool-changes', ok: false, attempts: 1, detail: rejectedChangeFeedback(rejectedOutside) }]
+        : []),
+    ];
     if (workspace.changedFiles().length === 0) {
       if (recordChecks.every((check) => check.ok)) return { kind: 'pass' };
       // 바뀐 파일로 추적되지 않은 경로(서비스 안 명령 등)로 검증 기록만 고쳤다: 다른 단계는 돌릴 것이 없다
@@ -425,6 +488,9 @@ export class VerificationGate {
         signal?.throwIfAborted();
         // 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었을 수 있다. 검사 뒤에 지문을 다시 떠 견주고, 다르면 같은 실패로 바꾼다(TOCTOU)
         await this.#recheckEvaluationAssets(recordChecks);
+        // 도구 밖 변경도 같은 이유로 검사 뒤에 한 번 더 동기화한다. 검사 전에만 동기화하면 판정은 바뀐 내용으로 났는데 지문은
+        // 바뀌기 전 것이라, 검증하지 않은 내용이 체크포인트로 갈 수 있다. 바뀌었으면 실패로 남긴다
+        await this.#recheckOutsideChanges(recordChecks);
         // 부하 확인을 재지 못한 것이 b-studio 쪽 문제면 여기서 멈춘다. 서비스 재시작의 플랫폼 실패와 같은 규칙이다(트러블슈팅 117)
         if (this.#loadPlatformFailure) {
           this.checks = [...checks, ...recordChecks];

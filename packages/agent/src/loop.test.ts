@@ -1,7 +1,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { StartOptions } from '@b-studio/sandbox';
-import type { LoadedProject } from '@b-studio/spec';
+import type { LoadedProject, WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { runAgent, type AgentEvent, type ModelClient, type RunAgentOptions } from './loop';
@@ -14,6 +14,10 @@ let project: LoadedProject;
 beforeEach(async () => {
   project = await createOrdersProject('loop-test-');
 });
+
+function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
+  return { ...project, spec: { ...project.spec, workflow } } as LoadedProject;
+}
 
 function collect(events: AgentEvent[]) {
   return (event: AgentEvent) => events.push(event);
@@ -75,6 +79,42 @@ describe('runAgent', () => {
     expect(feedback.role).toBe('user');
     expect(String(feedback.content)).toContain('[b-studio 검증 게이트]');
     expect(String(feedback.content)).toContain('cannot find symbol');
+  });
+
+  it('run_in_service가 디스크에 보호 경로 파일을 쓰면 게이트가 실패하고 그 내용이 모델에 돌아간다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src/Order.java'] });
+    const outside: string[] = [];
+    const sandbox = fakeSandbox(target, [true]);
+    sandbox.exec = async () => {
+      await writeFile(path.join(target.root, 'api/src/Order.java'), 'class Order { String memo; }\n');
+      outside.push('api/src/Order.java');
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'run_in_service', input: { service: 'api', command: ['true'] } }] },
+      { text: '메모를 추가했습니다.' },
+      { text: '그대로 두었습니다.' },
+    ]);
+
+    const result = await runAgent({
+      request: '보호 경로를 고쳐줘',
+      project: target,
+      sandbox,
+      client,
+      fetcher: async () => contract,
+      outsideChanges: { pendingFiles: async () => outside },
+      maxVerifyAttempts: 2,
+    });
+
+    // 게이트가 protected-paths로 실패한 내용이 다음 모델 호출에 들어간다
+    const feedback = client.requests[2]!.messages.at(-1)!;
+    expect(feedback.role).toBe('user');
+    expect(String(feedback.content)).toContain('[b-studio 검증 게이트]');
+    expect(String(feedback.content)).toContain('protected-paths');
+    expect(String(feedback.content)).toContain('보호 경로가 바뀌었습니다');
+    expect(result.status).toBe('failed');
+    expect(result.verifiedFingerprints).toBeUndefined();
+    expect(sandbox.restarts.length).toBeGreaterThan(0);
   });
 
   it('질문 모드는 요청 앞에 읽기 전용 안내를 붙이고, 쓰기 도구를 거부하며, 검증 게이트 없이 답으로 끝난다', async () => {
