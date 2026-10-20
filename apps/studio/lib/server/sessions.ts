@@ -318,7 +318,7 @@ import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, warnSessionTerminal } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
@@ -8433,6 +8433,38 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
   return run.terminal.serial(() => finishTerminalTurn(session, run, text));
 }
 
+/**
+ * 검증 게이트가 지문을 견주는 동안(이슈 #765) 터미널 에이전트 컨테이너를 멈춘다. 게이트는 검사 시작과 끝에 작업 복사본의
+ * 지문을 견주는데, 그동안 컨테이너 안의 백그라운드 프로세스가 파일을 바꿨다가 끝나기 전에 되돌리면 잡지 못한다.
+ * CLI는 Stop 훅의 응답을 기다리며 멈춰 있고 그 훅도 같은 컨테이너 안에서 도므로, 이 구간에 멈춰도 잃는 것이 없다.
+ *
+ * 멈추지 못하면 게이트를 돌리지 않고 onPauseFailed로 돌려보낸다. 풀지 못하면 알림만 남긴다 —
+ * 다음에 이 세션의 컨테이너를 쓸 때 ensureAgentContainer가 멈춘 것을 먼저 푼다.
+ *
+ * 한계: 이 컴퓨터 방식(host)에는 멈출 컨테이너가 없어 pause가 undefined다. 그 방식에서는 컨테이너 밖의 셸이
+ * 검사 중에 파일을 바꿨다가 되돌리면 지금처럼 잡지 못한다(게이트의 지문 견줌에만 기댄다).
+ */
+async function duringAgentContainerPause(
+  session: Session,
+  pause: TerminalPause | undefined,
+  work: () => Promise<GateOutcome>,
+  onPauseFailed: (reason: string) => GateOutcome,
+): Promise<GateOutcome> {
+  if (!pause) return work();
+  try {
+    await pause.pause(session.sandbox.id);
+  } catch (error) {
+    return onPauseFailed(describe(error));
+  }
+  try {
+    return await work();
+  } finally {
+    await pause.unpause(session.sandbox.id).catch((error: unknown) => {
+      emit(session, { type: 'notice', text: `검증 뒤 에이전트 컨테이너를 다시 움직이지 못했습니다: ${describe(error)}`, at: new Date().toISOString() });
+    });
+  }
+}
+
 async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string): Promise<{ feedback?: string; message?: string }> {
   const state = run.terminal;
   if (state.settled) return {};
@@ -8538,7 +8570,6 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     const verification = await terminalVerification(session, run);
     const { tracker, gate } = verification;
     const started = performance.now();
-    const { rejected } = await tracker.sync();
     /** 게이트 밖의 이유로 통과시키지 않는다. 상한까지는 에이전트에게 돌려주고, 넘으면 실패로 끝낸다 */
     const unsettled = (summary: string, feedback: string): GateOutcome => {
       state.unsettledAttempts += 1;
@@ -8549,18 +8580,32 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         `검증하는 동안 파일이 계속 바뀌어 통과시키지 않았습니다: ${files.slice(0, 5).join(', ')}`,
         ['[b-studio 검증 게이트] 검증하는 동안 바뀐 파일이 있어 통과로 인정하지 않았습니다.', ...files.slice(0, 20).map((file) => `- ${file}`), '뒤에서 파일을 바꾸는 명령이 돌고 있으면 끝낸 뒤 턴을 끝내세요.'].join('\n'),
       );
-    let outcome: GateOutcome;
-    if (rejected.length > 0) {
-      // 게이트가 다룰 수 없는 경로(비밀 파일, 생성물, 링크)가 바뀌었다. 건너뛰면 검증하지 않은 파일이 체크포인트에 들어간다
-      outcome = unsettled(`게이트가 검증할 수 없는 경로가 남아 통과시키지 않았습니다: ${rejected.slice(0, 5).join(', ')}`, rejectedChangeFeedback(rejected));
-    } else {
-      outcome = await gate.check();
-      if (outcome.kind === 'pass') {
-        // 게이트는 수 초에서 수 분을 돈다. 그동안 파일이 바뀌었으면 게이트가 본 것과 지금이 다르다
-        const during = await tracker.sync();
-        if (during.changed.length > 0 || during.rejected.length > 0) outcome = moved([...during.changed, ...during.rejected]);
-      }
-    }
+    // 첫 지문 동기화부터 게이트를 지나 마지막 지문 동기화까지를 컨테이너 일시정지로 감싼다(이슈 #765).
+    // 이 컴퓨터 방식은 멈출 컨테이너가 없어 terminalPause가 undefined다 — 그 한계는 duringAgentContainerPause에 적었다
+    const pause = sessionTerminalMode() === 'container' ? terminalPause() : undefined;
+    let outcome: GateOutcome = await duringAgentContainerPause(
+      session,
+      pause,
+      async () => {
+        const { rejected } = await tracker.sync();
+        if (rejected.length > 0) {
+          // 게이트가 다룰 수 없는 경로(비밀 파일, 생성물, 링크)가 바뀌었다. 건너뛰면 검증하지 않은 파일이 체크포인트에 들어간다
+          return unsettled(`게이트가 검증할 수 없는 경로가 남아 통과시키지 않았습니다: ${rejected.slice(0, 5).join(', ')}`, rejectedChangeFeedback(rejected));
+        }
+        const checked = await gate.check();
+        if (checked.kind === 'pass') {
+          // 게이트는 수 초에서 수 분을 돈다. 그동안 파일이 바뀌었으면 게이트가 본 것과 지금이 다르다
+          const during = await tracker.sync();
+          if (during.changed.length > 0 || during.rejected.length > 0) return moved([...during.changed, ...during.rejected]);
+        }
+        return checked;
+      },
+      (reason) =>
+        unsettled(
+          `검증 동안 에이전트 컨테이너를 멈추지 못해 통과시키지 않았습니다: ${reason}`,
+          `[b-studio 검증 게이트] 검증 동안 에이전트 컨테이너를 멈추지 못해 통과로 인정하지 않았습니다(${reason}). 턴을 다시 끝내 주세요.`,
+        ),
+    );
     // 검증 상태가 이미 세워져 있어(도구 호출·쓰기 직전 훅) 이 게이트 경로로 왔더라도, 바뀐 파일이 없으면 게이트는 test 단계를
     // 돌리지 않는다(변경 0이면 곧바로 통과한다). 카드의 완료 검사가 있으면 여기서 대신 돌린다(#B6a 수정 3).
     // 바뀐 파일이 있으면 게이트의 test 단계가 workflow.tests(완료 검사 포함)를 이미 돌렸으므로 다시 돌리지 않는다

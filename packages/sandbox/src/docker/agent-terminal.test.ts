@@ -30,7 +30,9 @@ import {
   clampTerminalSize,
   ensureAgentContainer,
   openAgentTerminal,
+  pauseAgentContainer,
   probeAgentGateway,
+  unpauseAgentContainer,
   removeAgentGatewayConfig,
   writeAgentGatewayConfig,
   type AgentGatewayAddress,
@@ -670,6 +672,31 @@ describe('컨테이너를 띄운 뒤의 확인 (관문 설정)', { timeout: 30_0
     const runs = (await docker.calls()).filter((call) => call.startsWith('run '));
     expect(runs).toHaveLength(2);
     expect(runs[1]).not.toContain('/etc/claude-code');
+  });
+
+  it('검사 동안 컨테이너를 멈추고 다시 움직인다(이름은 sandboxId에서 정한 것만 가리킨다)', async () => {
+    const docker = await fakeDocker();
+    await pauseAgentContainer('sb', { dockerBin: docker.bin });
+    await unpauseAgentContainer('sb', { dockerBin: docker.bin });
+    expect(await docker.calls()).toEqual(['pause sb-agent', 'unpause sb-agent']);
+    // docker가 0이 아닌 값으로 끝나면(컨테이너가 없거나 데몬에 닿지 못하면) 삼키지 않고 던진다
+    await writeFile(docker.bin, '#!/bin/sh\necho "Error response from daemon: no such container" >&2\nexit 1\n');
+    await expect(pauseAgentContainer('sb', { dockerBin: docker.bin })).rejects.toThrow('멈추지 못했습니다');
+    await expect(unpauseAgentContainer('sb', { dockerBin: docker.bin })).rejects.toThrow('다시 움직이지 못했습니다');
+  });
+
+  it('검사 도중에 스튜디오가 죽어 멈춘 채 남은 컨테이너는 먼저 풀고 쓴다', async () => {
+    const docker = await fakeDocker();
+    const paused = JSON.parse(docker.mounts([])) as Array<{ State: { Running: boolean; Paused: boolean } }>;
+    paused[0]!.State.Paused = true;
+    await writeFile(path.join(docker.dir, 'inspect.json'), JSON.stringify(paused));
+
+    expect(await ensureAgentContainer('sb', docker.root, { projectId: 'p', dockerBin: docker.bin })).toBe('sb-agent');
+    const calls = await docker.calls();
+    // 멈춘 것을 풀고, 마운트가 그대로라 다시 띄우지 않는다
+    expect(calls[0]).toMatch(/^inspect /);
+    expect(calls[1]).toBe('unpause sb-agent');
+    expect(calls.some((call) => call.startsWith('run '))).toBe(false);
   });
 
   it('컨테이너에서 관문에 닿는지는 훅과 같은 스크립트로 묻는다. 명령줄에 주소나 토큰을 싣지 않는다', async () => {

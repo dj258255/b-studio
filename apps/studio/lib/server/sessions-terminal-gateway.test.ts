@@ -40,6 +40,18 @@ const fake = vi.hoisted(() => ({
   serviceUrl: 'http://127.0.0.1:1',
   /** 세션 터미널 방식. 'host'(이 컴퓨터 방식)면 작업 복사본의 Git을 더 의심한다(이슈 #706) */
   terminalMode: 'container' as 'container' | 'host',
+  /** 검사 동안 멈춘 컨테이너와 다시 움직인 컨테이너의 샌드박스 id(이슈 #765) */
+  pauses: [] as string[],
+  unpauses: [] as string[],
+  pauseAttempts: 0,
+  /** 값이 있으면 pause가 그 사유로 실패한다 */
+  pauseFails: undefined as string | undefined,
+  /** 값이 있으면 unpause가 그 사유로 실패한다 */
+  unpauseFails: undefined as string | undefined,
+  /** 게이트가 도는 동안(멈춘 채) 서비스 안 명령이 돈 횟수 */
+  execsWhilePaused: 0,
+  /** 남은 횟수만큼 시크릿 검사가 던진다(게이트를 예외로 끝내는 데 쓴다) */
+  findSecretsFailures: 0,
 }));
 
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
@@ -73,6 +85,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async exec(_service: string, command: string[]) {
       // 게이트가 테스트 전에 보고서 자리를 비우는 명령(#756)은 테스트 명령으로 세지 않는다
       if (command[0] === 'sh' && command[2]?.startsWith('rm -f /tmp/b-studio-test-report.json ')) return { exitCode: 0, stdout: '', stderr: '' };
+      if (fake.pauses.length > fake.unpauses.length) fake.execsWhilePaused += 1;
       fake.execCalls.push(command);
       if (fake.holdWord && command.includes(fake.holdWord)) await fake.hold;
       if (fake.failCommands.some((word) => command.includes(word))) return { exitCode: 1, stdout: '', stderr: 'FAILED: OrderTest' };
@@ -85,7 +98,13 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
       return { exitCode: 0, stdout: '', stderr: '' };
     },
     redact: (text: string) => text,
-    findSecrets: () => [],
+    findSecrets: () => {
+      if (fake.findSecretsFailures > 0) {
+        fake.findSecretsFailures -= 1;
+        throw new Error('시크릿 검사 오류');
+      }
+      return [];
+    },
     async callExternal() {
       return { decision: 'deny' as const, status: 404, body: '', masked: 0 };
     },
@@ -107,6 +126,20 @@ vi.mock('./session-terminal', () => ({
   warnSessionTerminal: (_sessionId: string, message: string) => {
     fake.warnings.push(message);
   },
+  terminalPause: () =>
+    fake.terminalMode === 'container'
+      ? {
+          pause: async (sandboxId: string) => {
+            fake.pauseAttempts += 1;
+            if (fake.pauseFails) throw new Error(fake.pauseFails);
+            fake.pauses.push(sandboxId);
+          },
+          unpause: async (sandboxId: string) => {
+            if (fake.unpauseFails) throw new Error(fake.unpauseFails);
+            fake.unpauses.push(sandboxId);
+          },
+        }
+      : undefined,
 }));
 
 import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
@@ -196,6 +229,13 @@ beforeEach(async () => {
   fake.holdWord = undefined;
   fake.hold = undefined;
   fake.terminalMode = 'container';
+  fake.pauses = [];
+  fake.unpauses = [];
+  fake.pauseAttempts = 0;
+  fake.pauseFails = undefined;
+  fake.unpauseFails = undefined;
+  fake.execsWhilePaused = 0;
+  fake.findSecretsFailures = 0;
   await serveContract();
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
@@ -2208,6 +2248,101 @@ describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린
     const denied = await write(session, 'api/link/a.txt', 'x');
     expect(denied.deny).toContain('범위 밖이라 쓰지 않았습니다');
     setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('검사 동안 에이전트 컨테이너를 멈춘다 (이슈 #765)', () => {
+  /** 가짜 샌드박스의 id. 멈추고 푸는 대상이다 */
+  const containerId = 'studio-termgw-fake';
+
+  it('게이트를 도는 동안 멈추고, 통과하면 다시 움직인다. 끝나기 전에 서비스 안 명령이 돌지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+
+    // 게이트의 첫 지문 동기화 전에 멈추고, 마지막 지문 동기화 뒤에 풀었다
+    expect(fake.pauses).toEqual([containerId]);
+    expect(fake.unpauses).toEqual([containerId]);
+    // 게이트의 테스트는 멈춘 동안 돌았다(멈춘 것은 에이전트 컨테이너뿐이다)
+    expect(fake.execsWhilePaused).toBeGreaterThan(0);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('검증이 실패해 돌려보낼 때도 다시 움직인다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo }\n');
+
+    fake.failCommands = ['test'];
+    const failed = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(failed.feedback).toContain('[b-studio 검증 게이트]');
+    expect(fake.pauses).toEqual([containerId]);
+    expect(fake.unpauses).toEqual([containerId]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('게이트가 예외로 끝나도 다시 움직인다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    // 게이트의 검증 단계에서 예외가 난다(시크릿 검사가 던진다)
+    fake.findSecretsFailures = 1;
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.message).toContain('검증을 끝내지 못했습니다');
+    expect(answer.message).toContain('시크릿 검사 오류');
+    expect(fake.pauses).toEqual([containerId]);
+    expect(fake.unpauses).toEqual([containerId]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('멈추지 못하면 게이트를 돌리지 않고 돌려보낸다(풀지도 않는다)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    fake.pauseFails = '도커에 닿지 못했습니다';
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toContain('검증 동안 에이전트 컨테이너를 멈추지 못해 통과로 인정하지 않았습니다');
+    expect(answer.feedback).toContain('도커에 닿지 못했습니다');
+    expect(answer.feedback).toContain('턴을 다시 끝내 주세요');
+    // 게이트를 돌리지 않았다(테스트도, 지문 동기화도). 멈추지 못했으니 풀지도 않는다
+    expect(fake.pauseAttempts).toBe(1);
+    expect(fake.execCalls).toEqual([]);
+    expect(fake.pauses).toEqual([]);
+    expect(fake.unpauses).toEqual([]);
+    // 실행은 열린 채로 다음 턴을 기다린다. 상한까지 가면 지금 규칙대로 실패로 닫힌다
+    expect(getSnapshot(session.id)!.running).toBe(true);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('풀지 못하면 알림을 남기고, 통과한 검증은 그대로 둔다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+    fake.unpauseFails = '도커에 닿지 못했습니다';
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    const notices = session.ofType('notice').filter((event) => event.text.includes('다시 움직이지 못했습니다'));
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.text).toContain('도커에 닿지 못했습니다');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('이 컴퓨터 방식은 멈출 컨테이너가 없어 부르지 않는다', async () => {
+    fake.terminalMode = 'host';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(fake.pauseAttempts).toBe(0);
+    expect(fake.pauses).toEqual([]);
+    expect(fake.unpauses).toEqual([]);
     await stopSession(session.id);
   }, 30_000);
 });
