@@ -1,5 +1,4 @@
-import http, { type IncomingHttpHeaders, type OutgoingHttpHeaders, type Server } from 'node:http';
-import net from 'node:net';
+import http, { type IncomingHttpHeaders, type IncomingMessage, type OutgoingHttpHeaders, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { pipeMaybeInjected } from './preview-inject';
 import { upstreamHeaders } from './preview-gateway';
@@ -21,9 +20,6 @@ export interface PreviewProxyOptions {
  * 쿠키는 들어오는 것도 나가는 것도 뗀다. 접두사로 거르면 studio 쿠키가 늘어나도 목록을 고칠 필요가 없다(닫힌 쪽)
  */
 export const STUDIO_COOKIE_PREFIX = 'b_studio_';
-
-/** 업그레이드 응답 머리를 읽을 때의 상한. 넘으면 양쪽을 닫는다(머리만 읽는 동안 무한히 쌓이지 않게) */
-const MAX_UPGRADE_HEAD = 64 * 1024;
 
 const HOST_MESSAGE = '미리보기는 127.0.0.1 또는 localhost 주소로만 열 수 있습니다.';
 const FORBIDDEN_UPGRADE = 'HTTP/1.1 403 Forbidden\r\nconnection: close\r\ncontent-length: 0\r\n\r\n';
@@ -67,16 +63,29 @@ export function dropStudioSetCookies(headers: { 'set-cookie'?: string[] }): void
   else delete headers['set-cookie'];
 }
 
-/** 업그레이드 응답 머리(문자열)에서 studio 쿠키를 심는 `set-cookie` 줄을 지운다 */
-function dropStudioSetCookieLines(head: string): string {
-  return head
-    .split('\r\n')
-    .filter((line) => {
-      const colon = line.indexOf(':');
-      if (colon < 0 || line.slice(0, colon).trim().toLowerCase() !== 'set-cookie') return true;
-      return !studioCookie(line.slice(colon + 1).trim());
-    })
-    .join('\r\n');
+/**
+ * 업그레이드 경로에서 업스트림 응답 머리를 브라우저에 다시 쓴다. Node의 HTTP 파서가 읽은 `rawHeaders`를 그대로 쓰되,
+ * 값에 줄바꿈이 있는 헤더는 버리고 studio 쿠키를 심는 `Set-Cookie`는 뺀다. `reframe`이면 파서가 청크를 푼 몸에
+ * 맞춰 `transfer-encoding`·`content-length`·`connection`을 빼고 `connection: close`를 붙인다(끝까지 읽고 닫는다)
+ */
+function writeResponseHead(socket: Duplex, response: IncomingMessage, reframe = false): void {
+  const statusMessage = (response.statusMessage ?? '').replace(/[\r\n]/g, ' ');
+  const lines = [`HTTP/1.1 ${response.statusCode ?? 502} ${statusMessage}`.trimEnd()];
+  for (let index = 0; index + 1 < response.rawHeaders.length; index += 2) {
+    const name = response.rawHeaders[index]!;
+    const value = response.rawHeaders[index + 1]!;
+    if (/[\r\n]/.test(name) || /[\r\n]/.test(value)) continue;
+    if (reframe && ['transfer-encoding', 'content-length', 'connection'].includes(name.toLowerCase())) continue;
+    if (name.toLowerCase() === 'set-cookie' && studioCookie(value)) continue;
+    lines.push(`${name}: ${value}`);
+  }
+  if (reframe) lines.push('connection: close');
+  socket.write(`${lines.join('\r\n')}\r\n\r\n`);
+}
+
+/** Node의 HTTP 파서가 응답을 읽다 낸 오류인가. 이런 오류에는 업스트림 바이트를 하나도 넘기지 않는다 */
+function isHttpParseError(error: Error): boolean {
+  return ((error as NodeJS.ErrnoException).code ?? '').startsWith('HPE_');
 }
 
 /** 요청 Host가 정확히 이 프록시가 듣는 `127.0.0.1:<포트>` 또는 `localhost:<포트>`(대소문자 무시)인가. 듣기 전에는 모두 거절 */
@@ -94,40 +103,6 @@ function proxiedHeaders(headers: IncomingHttpHeaders, upstream: URL, publicHost:
   if (cookie !== undefined) result.cookie = cookie;
   else delete result.cookie;
   return result;
-}
-
-/**
- * 업스트림 응답 머리를 먼저 읽어 studio 쿠키를 심는 `set-cookie` 줄을 지운 뒤 브라우저로 잇는다.
- * 머리 뒤에 이미 받은 바이트와 그 뒤의 나머지는 그대로 흘려보낸다
- */
-function relayUpgradeResponse(connection: Duplex, socket: Duplex): void {
-  let buffered = Buffer.alloc(0);
-  let headSent = false;
-  const forward = (chunk: Buffer) => {
-    if (!socket.write(chunk)) connection.pause();
-  };
-  connection.on('data', (chunk: Buffer) => {
-    if (headSent) {
-      forward(chunk);
-      return;
-    }
-    buffered = Buffer.concat([buffered, chunk]);
-    const end = buffered.indexOf('\r\n\r\n');
-    if (end < 0) {
-      if (buffered.length > MAX_UPGRADE_HEAD) {
-        connection.destroy();
-        socket.destroy();
-      }
-      return;
-    }
-    headSent = true;
-    const head = buffered.subarray(0, end + 4).toString('latin1');
-    const rest = buffered.subarray(end + 4);
-    buffered = Buffer.alloc(0);
-    forward(Buffer.from(dropStudioSetCookieLines(head), 'latin1'));
-    if (rest.length > 0) forward(rest);
-  });
-  socket.on('drain', () => connection.resume());
 }
 
 export function createPreviewProxy({ resolve }: PreviewProxyOptions): Server {
@@ -175,26 +150,47 @@ export function createPreviewProxy({ resolve }: PreviewProxyOptions): Server {
         return;
       }
       const upstream = new URL(base);
-      const connection = net.connect(Number(upstream.port), upstream.hostname, () => {
-        const headers = proxiedHeaders(request.headers, upstream, request.headers.host);
-        const lines = Object.entries(headers).flatMap(([name, value]) =>
-          value === undefined ? [] : Array.isArray(value) ? value.map((item) => `${name}: ${item}`) : [`${name}: ${value}`],
-        );
-        connection.write([`${request.method} ${request.url} HTTP/${request.httpVersion}`, ...lines, '', ''].join('\r\n'));
-        if (head.length > 0) connection.write(head);
-        socket.pipe(connection);
-        relayUpgradeResponse(connection, socket);
+      // 응답 머리는 손으로 나누지 않고 Node의 HTTP 파서가 읽게 한다. 파서가 거부한 응답은 브라우저에 넘기지 않는다
+      const proxied = http.request({
+        hostname: upstream.hostname,
+        port: upstream.port,
+        method: request.method,
+        path: request.url,
+        headers: proxiedHeaders(request.headers, upstream, request.headers.host),
       });
+      let headSent = false;
       // 반쯤 열린 연결이 남아 서버를 못 닫는 일이 없게, 어느 쪽이든 끝나면 양쪽을 모두 닫는다
       const close = () => {
-        connection.destroy();
+        proxied.destroy();
         socket.destroy();
       };
-      for (const side of [connection, socket]) {
-        side.on('end', close);
-        side.on('close', close);
-        side.on('error', close);
+      for (const event of ['end', 'close', 'error'] as const) {
+        socket.on(event, close);
+        proxied.on('socket', (upstreamSocket) => upstreamSocket.on(event, close));
       }
+      proxied.on('upgrade', (response, upstreamSocket, upstreamHead) => {
+        headSent = true;
+        writeResponseHead(socket, response);
+        if (upstreamHead.length > 0) socket.write(upstreamHead);
+        socket.pipe(upstreamSocket);
+        upstreamSocket.pipe(socket);
+      });
+      proxied.on('response', (response) => {
+        headSent = true;
+        writeResponseHead(socket, response, true);
+        response.on('error', close);
+        response.on('end', () => socket.end());
+        response.pipe(socket);
+      });
+      proxied.on('error', (error) => {
+        // 파서가 거부한 응답은 브라우저에 아무 바이트도 넘기지 않는다
+        if (headSent || isHttpParseError(error)) {
+          close();
+          return;
+        }
+        socket.end(BAD_GATEWAY_UPGRADE);
+      });
+      proxied.end(head.length > 0 ? head : undefined);
     })();
   });
 

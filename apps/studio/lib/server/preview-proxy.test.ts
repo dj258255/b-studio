@@ -6,7 +6,7 @@ import { PREVIEW_COOKIE, SESSION_COOKIE } from './auth';
 import { LOCAL_TOKEN_COOKIE } from './local-token';
 import { createPreviewProxy, STUDIO_COOKIE_PREFIX } from './preview-proxy';
 
-const servers: http.Server[] = [];
+const servers: (http.Server | net.Server)[] = [];
 const extraSockets = new Set<Duplex>();
 afterEach(async () => {
   // 업그레이드로 넘어간 소켓은 서버의 연결 목록에서 빠져 closeAllConnections가 닿지 않는다
@@ -14,13 +14,13 @@ afterEach(async () => {
   extraSockets.clear();
   await Promise.all(
     servers.splice(0).map((server) => {
-      server.closeAllConnections();
+      if ('closeAllConnections' in server) server.closeAllConnections();
       return new Promise((resolve) => server.close(resolve));
     }),
   );
 });
 
-async function listen(server: http.Server): Promise<number> {
+async function listen(server: http.Server | net.Server): Promise<number> {
   servers.push(server);
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   return (server.address() as AddressInfo).port;
@@ -132,6 +132,7 @@ function runawayHeadService() {
   server.on('upgrade', (_request, socket: Duplex) => {
     extraSockets.add(socket);
     socket.on('close', () => extraSockets.delete(socket));
+    socket.on('error', () => socket.destroy());
     socket.write(Buffer.alloc(70 * 1024, 0x61));
   });
   return server;
@@ -153,6 +154,65 @@ function upgradeUntilClosed(port: number, timeoutMs = 2000): Promise<{ received:
     socket.on('close', () => {
       clearTimeout(timer);
       resolve({ received, closed: true });
+    });
+  });
+}
+
+/** 날 바이트를 그대로 쓰는 테스트용 서버(HTTP 파서를 거치지 않게 net으로 띄운다). 소켓은 afterEach가 닫는다 */
+function rawService(respond: (socket: Duplex) => void): net.Server {
+  const server = net.createServer((socket) => {
+    extraSockets.add(socket);
+    socket.on('close', () => extraSockets.delete(socket));
+    socket.on('error', () => socket.destroy());
+    respond(socket);
+  });
+  return server;
+}
+
+/** 상태 줄과 머리를 `\n` 하나로만 나눠 보내는 업그레이드 응답(브라우저는 이것도 줄바꿈으로 받는다) */
+function newlineUpgradeService(): net.Server {
+  return rawService((socket) => {
+    socket.write(
+      'HTTP/1.1 101 Switching Protocols\nupgrade: websocket\nconnection: Upgrade\nSet-Cookie: b_studio_local=x\nSet-Cookie: app=1\r\n\r\n',
+    );
+    socket.on('data', (chunk) => {
+      if (chunk.toString().includes('ping')) socket.write('echo:ping');
+    });
+  });
+}
+
+/** 업그레이드 요청에 101이 아닌 응답과 몸을 돌려주는 테스트용 서버 */
+function rejectedUpgradeService(): net.Server {
+  return rawService((socket) => {
+    socket.write(
+      'HTTP/1.1 400 Bad Request\r\ncontent-type: text/plain\r\nset-cookie: b_studio_local=x\r\nset-cookie: app=1\r\ncontent-length: 5\r\n\r\nnope!',
+    );
+  });
+}
+
+/** 업그레이드 요청에 101이 아닌 청크 응답을 돌려주는 테스트용 서버(Node가 청크를 풀어 준다) */
+function chunkedRejectedService(): net.Server {
+  return rawService((socket) => {
+    socket.write('HTTP/1.1 400 Bad Request\r\ntransfer-encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n');
+  });
+}
+
+/** 업그레이드를 보내고 소켓이 닫힐 때까지 받은 바이트를 모은다(101이 아닌 응답용) */
+function upgradeRaw(port: number, timeoutMs = 2000): Promise<string> {
+  return new Promise((resolve) => {
+    const socket = net.connect(port, '127.0.0.1', () => {
+      socket.write(`GET /_next/hmr HTTP/1.1\r\nhost: 127.0.0.1:${port}\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n`);
+    });
+    let received = '';
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(received);
+    }, timeoutMs);
+    socket.on('data', (chunk) => (received += chunk.toString()));
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      clearTimeout(timer);
+      resolve(received);
     });
   });
 }
@@ -293,6 +353,41 @@ describe('createPreviewProxy', () => {
     expect(upgraded).toContain('set-cookie: app=1');
     expect(upgraded).not.toContain('b_studio_local');
     expect(upgraded).not.toContain('b_studio_session');
+  });
+
+  it('`\\n`만으로 나눈 101 응답 머리는 브라우저에 한 바이트도 넘기지 않고 닫는다', async () => {
+    const servicePort = await listen(newlineUpgradeService());
+    const proxy = createPreviewProxy({ resolve: () => `http://127.0.0.1:${servicePort}` });
+    const proxyPort = await listen(proxy);
+
+    const result = await upgradeUntilClosed(proxyPort);
+    expect(result.closed).toBe(true);
+    expect(result.received).toBe('');
+  });
+
+  it('업그레이드 요청에 101이 아닌 응답이 오면 걸러진 머리와 몸을 전달하고 닫는다', async () => {
+    const servicePort = await listen(rejectedUpgradeService());
+    const proxy = createPreviewProxy({ resolve: () => `http://127.0.0.1:${servicePort}` });
+    const proxyPort = await listen(proxy);
+
+    const received = await upgradeRaw(proxyPort);
+    expect(received).toContain('HTTP/1.1 400 Bad Request');
+    expect(received).toContain('app=1');
+    expect(received).not.toContain('b_studio_local');
+    expect(received).toContain('nope!');
+  });
+
+  it('101이 아닌 응답의 몸 틀을 다시 맞춘다(청크를 푼 몸에 transfer-encoding을 남기지 않는다)', async () => {
+    const servicePort = await listen(chunkedRejectedService());
+    const proxy = createPreviewProxy({ resolve: () => `http://127.0.0.1:${servicePort}` });
+    const proxyPort = await listen(proxy);
+
+    const received = await upgradeRaw(proxyPort);
+    expect(received).toContain('HTTP/1.1 400 Bad Request');
+    expect(received).toContain('connection: close');
+    expect(received).not.toContain('transfer-encoding');
+    expect(received).not.toContain('content-length');
+    expect(received.endsWith('hello')).toBe(true);
   });
 
   it('업그레이드 응답 머리가 상한을 넘으면 브라우저 쪽 소켓을 닫고 바이트를 하나도 넘기지 않는다', async () => {
