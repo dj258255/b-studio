@@ -253,7 +253,7 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
   let gate: VerificationGate | undefined;
   let gatePromise: Promise<VerificationGate> | undefined;
   const gateFor = (): Promise<VerificationGate> =>
-    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, allowCheckChanges: options.allowCheckChanges, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, allowCheckChanges: options.allowCheckChanges, outsideChanges: options.outsideChanges, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   const guide = await loadProjectGuide(project);
   const context: ToolContext = {
@@ -305,6 +305,9 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
       ...(status === 'done' && gate?.passedAtTurnLimit ? { incomplete: 'max_turns' as const } : {}),
       ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
+      ...((status === 'done' || status === 'awaiting_input') && gate?.lastOutcome === 'pass' && gate.verifiedFingerprints
+        ? { verifiedFingerprints: Object.fromEntries(gate.verifiedFingerprints) }
+        : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns: completedTurns,
       usage,

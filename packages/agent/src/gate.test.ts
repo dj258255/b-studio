@@ -6,7 +6,7 @@ import { SandboxError, type ExecResult, type LoadRequest, type LoadResult, type 
 import { SpecError, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
-import { autoPageCheck, nextErrorMarker, VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
+import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
 import { signatureFromCheck, signatureKey } from './coordination/signature';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
@@ -42,7 +42,16 @@ function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
 
 async function setup(
   target: LoadedProject,
-  options: { restarts?: boolean[]; exec?: (command: string[]) => ExecResult; page?: PageFetcher; browser?: BrowserRunner; verify?: 'full' | 'light'; reload?: () => Promise<LoadedProject>; allowCheckChanges?: boolean } = {},
+  options: {
+    restarts?: boolean[];
+    exec?: (command: string[]) => ExecResult | Promise<ExecResult>;
+    page?: PageFetcher;
+    browser?: BrowserRunner;
+    verify?: 'full' | 'light';
+    reload?: () => Promise<LoadedProject>;
+    allowCheckChanges?: boolean;
+    outsideChanges?: GateOptions['outsideChanges'];
+  } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
   const commands: string[][] = [];
@@ -70,6 +79,7 @@ async function setup(
     ...(options.verify ? { verify: options.verify } : {}),
     ...(options.reload ? { reloadProject: options.reload } : {}),
     ...(options.allowCheckChanges ? { allowCheckChanges: true } : {}),
+    ...(options.outsideChanges ? { outsideChanges: options.outsideChanges } : {}),
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
     ...(options.browser ? { browserRunner: options.browser } : {}),
@@ -149,6 +159,90 @@ describe('샌드박스·도커 쪽 실패는 에이전트의 게이트 실패로
     await gate.check();
     const result = events.find((event) => event.type === 'verify_result');
     expect(result?.type === 'verify_result' ? result.text : '').toContain('바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요');
+  });
+});
+
+describe('도구를 거치지 않고 바뀐 파일(outsideChanges)', () => {
+  it('보호 경로를 도구 밖에서 고치면 protected-paths로 실패한다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src/Order.java'] });
+    let pending: string[] = [];
+    const { gate } = await setup(target, { outsideChanges: { pendingFiles: async () => pending } });
+    await writeFile(path.join(target.root, 'api/src/Order.java'), 'class Order { String memo; }\n');
+    pending = ['api/src/Order.java'];
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ stage: 'review', name: 'protected-paths', ok: false })]),
+    );
+  });
+
+  it('일반 파일만 고치면 바뀐 파일 0개로 건너뛰지 않고 테스트 단계를 돌린다', async () => {
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }] });
+    let pending: string[] = [];
+    const { gate, commands } = await setup(target, { outsideChanges: { pendingFiles: async () => pending } });
+    await writeFile(path.join(target.root, 'api/src/Payment.java'), 'class Payment {}\n');
+    pending = ['api/src/Payment.java'];
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(commands).toEqual([['./gradlew', 'test']]);
+    // 통과한 내용의 지문을 결과로 넘길 수 있다
+    expect(gate.verifiedFingerprints?.has('api/src/Payment.java')).toBe(true);
+  });
+
+  it('링크를 만들면 바뀐 파일이 0개여도 outside-tool-changes로 실패한다', async () => {
+    let pending: string[] = [];
+    const { gate } = await setup(project, { outsideChanges: { pendingFiles: async () => pending } });
+    await symlink(path.join(project.root, 'api/src/Order.java'), path.join(project.root, 'link-order.java'));
+    pending = ['link-order.java'];
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks).toEqual(
+      expect.arrayContaining([expect.objectContaining({ stage: 'review', name: 'outside-tool-changes', ok: false })]),
+    );
+  });
+
+  it('선언한 테스트가 도는 동안 작업 폴더의 파일을 고치면 outside-tool-changes로 실패한다', async () => {
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }] });
+    let pending: string[] = [];
+    const { gate } = await setup(target, {
+      outsideChanges: { pendingFiles: async () => pending },
+      exec: async () => {
+        // 테스트가 추적되는 파일을 고쳐 쓴다. 게이트는 검사를 마친 뒤에 이 변경을 본다
+        await writeFile(path.join(target.root, 'api/src/Generated.java'), 'class Generated {}\n');
+        pending = ['api/src/Payment.java', 'api/src/Generated.java'];
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    await writeFile(path.join(target.root, 'api/src/Payment.java'), 'class Payment {}\n');
+    pending = ['api/src/Payment.java'];
+
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    expect(gate.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'review',
+          name: 'outside-tool-changes',
+          ok: false,
+          detail: expect.stringContaining('api/src/Generated.java'),
+        }),
+      ]),
+    );
+  });
+
+  it('outsideChanges를 주지 않으면 도구 밖에서 쓴 파일을 보지 않는다(지금 동작)', async () => {
+    const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }] });
+    const { gate, commands } = await setup(target);
+    await writeFile(path.join(target.root, 'api/src/Payment.java'), 'class Payment {}\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(commands).toEqual([]);
+    expect(gate.verifiedFingerprints).toBeUndefined();
   });
 });
 

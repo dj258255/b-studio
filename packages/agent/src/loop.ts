@@ -152,6 +152,12 @@ export interface AgentResult {
   checks?: WorkflowCheck[];
   /** 마지막 검증에서 통과한 워크플로 검증 단계 */
   passedStages?: import('@b-studio/spec').WorkflowStage[];
+  /**
+   * 게이트가 검증한, 도구를 거치지 않고 바뀐 파일의 지문(프로젝트 기준 경로 → 지문). 게이트를 통과한 결과에만 싣는다.
+   * 세션이 체크포인트를 남기기 전에 스테이징될 내용이 검증한 내용과 같은지 견주는 데 쓴다(StagedMismatchError).
+   * 도구 밖 변경을 게이트에 넘긴 러너만 채운다
+   */
+  verifiedFingerprints?: Record<string, string>;
   /** 'light'(가볍게 확인)면 테스트·화면 확인·동시 요청·리뷰를 건너뛰었다. full이면 없다 */
   verify?: VerifyMode;
   /** light에서 건너뛴 검증 단계(workflow.required 대조에서 실패로 보지 않음) */
@@ -312,6 +318,11 @@ export interface RunAgentOptions {
    */
   externalChanges?: readonly string[];
   /**
+   * 도구를 거치지 않고 바뀐 파일(CLI 내장 도구·서비스 안 명령 등)을 게이트가 보게 한다. 주면 게이트가 check()마다
+   * 이 목록을 작업 공간으로 옮기고, 통과한 결과에 검증한 내용의 지문(verifiedFingerprints)을 싣는다
+   */
+  outsideChanges?: GateOptions['outsideChanges'];
+  /**
    * 샌드박스를 지금 켠다(지연 기동 세션). 주면 게이트를 실행 시작 때 만들지 않고, 첫 파일 변경·샌드박스 도구 때
    * 그때 켠 뒤에 만든다 — 계약 기준을 샌드박스가 켜진 뒤, 변경 전에 잡기 위해서다. 없으면 지금처럼 시작할 때 만든다
    */
@@ -398,6 +409,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       maxVerifyAttempts,
       verify: options.verify,
       allowCheckChanges: options.allowCheckChanges,
+      outsideChanges: options.outsideChanges,
       fetcher,
       pageFetcher,
       browserRunner,
@@ -456,6 +468,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
       ...(status === 'done' && gate?.passedAtTurnLimit ? { incomplete: 'max_turns' as const } : {}),
       ...(gate && gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
+      ...((status === 'done' || status === 'awaiting_input') && gate?.lastOutcome === 'pass' && gate.verifiedFingerprints
+        ? { verifiedFingerprints: Object.fromEntries(gate.verifiedFingerprints) }
+        : {}),
       verifyAttempts: gate?.attempts ?? 0,
       turns,
       usage,

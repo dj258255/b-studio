@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, guardBuiltinTool, runClaudeGatewayAgent, terminalGatewayNote } from './claude-gateway-runner';
+import type { GateOptions } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { SANDBOX_TOOLS, WRITE_TOOLS } from './tools';
@@ -155,7 +156,11 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
       .map((entry) => entry.slice(3));
   }
 
-  async function run(rounds: Round[], restartOutcomes: boolean[], extra: { scenario?: Record<string, unknown>; maxVerifyAttempts?: number; signal?: AbortSignal } = {}) {
+  async function run(
+    rounds: Round[],
+    restartOutcomes: boolean[],
+    extra: { scenario?: Record<string, unknown>; maxVerifyAttempts?: number; signal?: AbortSignal; outsideChanges?: GateOptions['outsideChanges'] } = {},
+  ) {
     const scenarioPath = `${cliPath}.scenario.json`;
     const logPath = `${cliPath}.log.json`;
     await writeFile(scenarioPath, JSON.stringify({ rounds, ...extra.scenario }));
@@ -172,6 +177,7 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
       onEvent: (event) => events.push(event),
       ...(extra.maxVerifyAttempts !== undefined ? { maxVerifyAttempts: extra.maxVerifyAttempts } : {}),
       ...(extra.signal ? { signal: extra.signal } : {}),
+      ...(extra.outsideChanges ? { outsideChanges: extra.outsideChanges } : {}),
     });
     const log = async (): Promise<FakeLog> => JSON.parse(await readFile(logPath, 'utf8')) as FakeLog;
     return { promise, sandbox, events, log };
@@ -205,6 +211,33 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     expect(events.some((event) => event.type === 'verify_start')).toBe(true);
     expect(result.usage).toMatchObject({ inputTokens: 20, outputTokens: 10, cacheReadTokens: 200 });
     expect(result.metrics?.modelMs).toBe(1234);
+  });
+
+  it('outsideChanges를 주면 통과 결과에 그 fingerprint로 만든 지문이 실린다', async () => {
+    const fingerprinted: string[][] = [];
+    const { promise } = await run([{ writes: [{ file: 'api/src/Order.java', content: FIXED }], text: '고쳤습니다.' }], [true], {
+      outsideChanges: {
+        pendingFiles,
+        fingerprint: async (files: readonly string[]) => {
+          fingerprinted.push([...files]);
+          return new Map(files.map((file) => [file, `custom:${file}`]));
+        },
+      },
+    });
+    const result = await promise;
+
+    expect(result.status).toBe('done');
+    expect(result.verifiedFingerprints).toEqual({ 'api/src/Order.java': 'custom:api/src/Order.java' });
+    // 값은 outsideChanges.fingerprint가 만든 것이다(기본 내용 해시가 아니다)
+    expect(fingerprinted.flat()).toContain('api/src/Order.java');
+  });
+
+  it('outsideChanges가 없으면 지문을 싣지 않는다(예전 동작)', async () => {
+    const { promise } = await run([{ writes: [{ file: 'api/src/Order.java', content: FIXED }], text: '고쳤습니다.' }], [true]);
+    const result = await promise;
+
+    expect(result.status).toBe('done');
+    expect(result.verifiedFingerprints).toBeUndefined();
   });
 
   it('훅이 한 번도 불리지 않고 CLI가 끝나도 러너가 마지막에 게이트를 돌린다 — 실패하면 완료로 보지 않는다', async () => {

@@ -277,7 +277,11 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
 
   const workspace = new Workspace(project.root);
   workspace.beginRun(options.requirementsBaseline);
-  const tracker = new ChangeTracker(workspace, options.pendingFiles);
+  const pendingFiles = options.pendingFiles ?? options.outsideChanges?.pendingFiles;
+  if (!pendingFiles) throw new Error('관문 실행에 바뀐 파일 목록(pendingFiles)이 없습니다');
+  // 세션이 넘긴 지문은 커밋될 내용과 견줄 수 있는 꼴이다(CheckpointStore.stagedFingerprints). 주면 그것으로 만든다.
+  // 게이트에는 넘기지 않는다 — 이 러너가 자기 tracker로 이미 변경을 옮긴다
+  const tracker = new ChangeTracker(workspace, pendingFiles, options.outsideChanges?.fingerprint ? { fingerprint: options.outsideChanges.fingerprint } : {});
   // 실행 전부터 작업 트리에 있던 변경도 검증 대상이다(ADR-131)
   await tracker.sync();
 
@@ -573,6 +577,8 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
       ...(options.verify === 'light' ? { verify: 'light' as const } : {}),
       ...(status === 'done' && gate.passedAtTurnLimit ? { incomplete: 'max_turns' as const } : {}),
       ...(gate.skippedStages.length > 0 ? { skippedStages: [...gate.skippedStages] } : {}),
+      // 마지막 sync() 뒤의 지문. 세션이 체크포인트를 남기기 전에 스테이징될 내용과 견준다
+      ...(status === 'done' && options.outsideChanges ? { verifiedFingerprints: Object.fromEntries(tracker.tracked) } : {}),
       verifyAttempts: gate.attempts,
       turns: messageIds.size,
       usage,
