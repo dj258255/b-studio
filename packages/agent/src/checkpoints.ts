@@ -124,6 +124,13 @@ export interface PendingChange {
 }
 
 /**
+ * 체크포인트에 커밋된 경로 하나의 모습. 일반 파일(100644)·실행 파일(100755)만 내용(kind: 'file')을 주고,
+ * 그 시점에 없으면 'missing', 심볼릭 링크(120000)·서브모듈(160000)·폴더 같은 그 밖의 종류는 'unsupported'다.
+ * 내용은 작업 폴더가 아니라 커밋된 값이라, 그 뒤에 파일이 링크로 바뀌어도 이 값을 쓴다
+ */
+export type BlobAt = { kind: 'file'; content: Buffer } | { kind: 'missing' } | { kind: 'unsupported'; mode: string };
+
+/**
  * discard()·restore()가 체크포인트에 없던 변경을 버리기 직전에 남긴 백업(ADR-099, "절대 조용히 지우지 않는다").
  * 작업 복사본에 git apply로 그대로 되살릴 수 있는 패치 하나로 저장한다(추가·수정·삭제·바이너리 파일 모두 포함,
  * untracked 파일도 git add -A로 인덱스에 올린 뒤 떠서 새 파일 diff로 들어가므로 따로 보관할 필요가 없다).
@@ -806,6 +813,23 @@ export class CheckpointStore {
       (out) => out,
       () => undefined,
     );
+  }
+
+  /**
+   * 체크포인트(ref)에 커밋된 파일의 바이트를 파일 종류까지 보고 꺼낸다. 일반 파일(100644)·실행 파일(100755)만
+   * 내용을 주고, 심볼릭 링크(120000)·서브모듈(160000)·폴더 같은 그 밖의 종류는 unsupported로 알린다. 그 시점에
+   * 경로가 없으면 missing이다. 작업 폴더가 아니라 커밋된 값을 읽으므로, 체크포인트 뒤에 파일이 프로젝트 밖을
+   * 가리키는 링크로 바뀌어도 그 내용을 쓰지 않는다. 모노레포 하위 폴더 처리는 fileAt과 같다
+   */
+  async blobAt(file: string, ref: string): Promise<BlobAt> {
+    const subdir = await this.#subdir();
+    const target = subdir ? `${subdir}/${file}` : file;
+    const entry = (await this.#git(['ls-tree', '-z', ref, '--', target])).split('\0').find(Boolean);
+    if (!entry) return { kind: 'missing' };
+    const tab = entry.indexOf('\t');
+    const [mode = '', , oid = ''] = (tab < 0 ? entry : entry.slice(0, tab)).split(' ');
+    if (mode === '100644' || mode === '100755') return { kind: 'file', content: await this.#gitBytes(['cat-file', 'blob', oid]) };
+    return { kind: 'unsupported', mode };
   }
 
   /**
@@ -1814,6 +1838,15 @@ export class CheckpointStore {
     const hardened = command === 'diff' || command === 'show' ? [command, '--no-ext-diff', '--no-textconv', ...rest] : args;
     return runGit(this.#gitBin, ['-C', this.root, ...location, ...hardened], options);
   }
+
+  /**
+   * stdout을 문자열이 아니라 바이트로 받아야 하는 git 명령(cat-file blob). 위치·하드닝·재시도는 #git과 같다 —
+   * 내용이 utf8이 아닐 수 있어 문자열로 받으면 바이트가 바뀐다
+   */
+  async #gitBytes(args: string[], options?: { timeout?: number; env?: Record<string, string> }): Promise<Buffer> {
+    const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
+    return runGitBuffer(this.#gitBin, ['-C', this.root, ...location, ...args], options);
+  }
 }
 
 /**
@@ -1838,24 +1871,48 @@ export function isIndexLockFailure(stderr: string): boolean {
  * - 그래도 부딪히면(쓰기끼리, 또는 스튜디오 밖의 git과) 잠깐 기다렸다 다시 한다
  */
 async function runGit(gitBin: string, args: string[], { timeout, env }: { timeout?: number; env?: Record<string, string> } = {}): Promise<string> {
+  return runGitWithRetry(args, async () => {
+    const { stdout } = await execFileAsync(gitBin, [...GIT_HARDENING, ...args], {
+      maxBuffer: 64 * 1024 * 1024,
+      timeout,
+      env: { ...gitEnv(), ...env },
+    });
+    return stdout;
+  });
+}
+
+/** runGit과 같지만 stdout을 Buffer로 받는다(cat-file blob처럼 바이트를 그대로 옮겨야 하는 명령) */
+async function runGitBuffer(gitBin: string, args: string[], { timeout, env }: { timeout?: number; env?: Record<string, string> } = {}): Promise<Buffer> {
+  return runGitWithRetry(args, async () => {
+    const { stdout } = await execFileAsync(gitBin, [...GIT_HARDENING, ...args], {
+      maxBuffer: 64 * 1024 * 1024,
+      encoding: 'buffer',
+      timeout,
+      env: { ...gitEnv(), ...env },
+    });
+    return stdout;
+  });
+}
+
+/**
+ * 인덱스 잠금 충돌이나 시간 초과로 실패한 git 호출을 다시 해 보는 공통 루프(runGit·runGitBuffer). 문자열·바이트
+ * 양쪽이 같은 재시도·오류 문구를 쓰도록 여기 한 곳에 둔다. stderr는 인코딩에 따라 문자열일 수도 Buffer일 수도 있다
+ */
+async function runGitWithRetry<T>(args: readonly string[], run: () => Promise<T>): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
-      const { stdout } = await execFileAsync(gitBin, [...GIT_HARDENING, ...args], {
-        maxBuffer: 64 * 1024 * 1024,
-        timeout,
-        env: { ...gitEnv(), ...env },
-      });
-      return stdout;
+      return await run();
     } catch (error) {
-      const failure = error as { stderr?: string; killed?: boolean };
+      const failure = error as { stderr?: string | Buffer; killed?: boolean };
+      const stderr = typeof failure.stderr === 'string' ? failure.stderr : Buffer.isBuffer(failure.stderr) ? failure.stderr.toString('utf8') : '';
       const delay = INDEX_LOCK_RETRY_DELAYS_MS[attempt];
-      if (delay !== undefined && !failure.killed && isIndexLockFailure(failure.stderr ?? '')) {
+      if (delay !== undefined && !failure.killed && isIndexLockFailure(stderr)) {
         await new Promise((resolve) => setTimeout(resolve, delay));
         continue;
       }
       const command = subcommand(args);
-      const stderr = redactCredentials(failure.stderr?.trim() ?? '');
-      throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${stderr ? `: ${stderr}` : ''}`);
+      const trimmed = redactCredentials(stderr.trim());
+      throw new CheckpointError(`git ${command} 실패${failure.killed ? ' (시간 초과)' : ''}${trimmed ? `: ${trimmed}` : ''}`);
     }
   }
 }
