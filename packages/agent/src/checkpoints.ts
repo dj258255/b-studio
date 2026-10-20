@@ -543,11 +543,14 @@ export class CheckpointStore {
       .sort((a, b) => a.file.localeCompare(b.file));
   }
 
-  /** 파일 하나가 마지막 체크포인트 이후 어떻게 바뀌었는지. 아직 기록에 없는 새 파일은 빈 문자열이다 */
-  async pendingPatch(file: string): Promise<string> {
+  /**
+   * 파일 하나가 마지막 체크포인트 이후 어떻게 바뀌었는지. 아직 기록에 없는 새 파일은 빈 문자열이다.
+   * redact는 자르기 전에 적용한다. 자른 뒤에 가리면 경계에 걸친 시크릿의 앞부분이 남는다(#751)
+   */
+  async pendingPatch(file: string, redact: (text: string) => string = (text) => text): Promise<string> {
     const subdir = await this.#subdir();
     const target = subdir ? `${subdir}/${file}` : file;
-    return capText(await this.#git(['diff', '--no-color', ...(await this.#relative()), 'HEAD', '--', target]), MAX_PATCH_CHARS);
+    return capText(redact(await this.#git(['diff', '--no-color', ...(await this.#relative()), 'HEAD', '--', target])), MAX_PATCH_CHARS);
   }
 
   /**
@@ -779,7 +782,8 @@ export class CheckpointStore {
     return Promise.all([...shas, start].map((sha) => this.#checkpoint(sha)));
   }
 
-  async patch(sha: string): Promise<string> {
+  /** 체크포인트 하나의 변경. redact는 pendingPatch처럼 자르기 전에 적용한다(#751) */
+  async patch(sha: string, redact: (text: string) => string = (text) => text): Promise<string> {
     const commit = await this.#resolve(sha);
     // 복제한 저장소의 시작 커밋은 원본 기록의 커밋이라 그 diff는 이 세션의 변경이 아니다
     if (commit === (await this.#startSha()) && (await this.#getMeta('base'))) {
@@ -791,7 +795,7 @@ export class CheckpointStore {
     const patch = parent
       ? await this.#git(['diff', '--no-color', ...relative, parent, commit])
       : await this.#git(['show', '--format=', '--patch', '--no-color', ...relative, commit]);
-    return capText(patch, MAX_PATCH_CHARS);
+    return capText(redact(patch), MAX_PATCH_CHARS);
   }
 
   /**
