@@ -3,7 +3,7 @@ import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { SandboxError, type ExecResult, type LoadRequest, type LoadResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
-import { SpecError, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
+import { SpecError, SPEC_FILE, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, type PageFetcher, type ServiceRequest } from './gate';
@@ -34,10 +34,25 @@ let project: LoadedProject;
 
 beforeEach(async () => {
   project = await createOrdersProject('gate-test-');
+  // loadProject는 compose 파일도 읽는다. 확인 선언을 디스크에서 다시 읽는 테스트가 studio.yaml만 써도 되게 맞춰 둔다
+  await writeFile(path.join(project.root, 'compose.yaml'), 'services:\n  api: { build: ./api }\n  web: { build: ./web }\n');
 });
 
 function withWorkflow(workflow: Partial<WorkflowSpec>): LoadedProject {
   return { ...project, spec: { ...project.spec, workflow } } as LoadedProject;
+}
+
+/** 게이트가 디스크에서 읽을 studio.yaml. YAML은 JSON을 받아들이므로 그대로 적는다 */
+function studioYaml(workflow: Partial<WorkflowSpec> | undefined): string {
+  return JSON.stringify({
+    version: 1,
+    name: 'orders',
+    services: {
+      api: { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } },
+      web: { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' },
+    },
+    ...(workflow ? { workflow } : {}),
+  });
 }
 
 async function setup(
@@ -49,6 +64,7 @@ async function setup(
     browser?: BrowserRunner;
     verify?: 'full' | 'light';
     reload?: () => Promise<LoadedProject>;
+    declarationBaseline?: WorkflowSpec | undefined;
     allowCheckChanges?: boolean;
     outsideChanges?: GateOptions['outsideChanges'];
   } = {},
@@ -78,6 +94,7 @@ async function setup(
     maxVerifyAttempts: 3,
     ...(options.verify ? { verify: options.verify } : {}),
     ...(options.reload ? { reloadProject: options.reload } : {}),
+    ...(options.declarationBaseline !== undefined ? { declarationBaseline: options.declarationBaseline } : {}),
     ...(options.allowCheckChanges ? { allowCheckChanges: true } : {}),
     ...(options.outsideChanges ? { outsideChanges: options.outsideChanges } : {}),
     fetcher: async () => ORDERS_CONTRACT,
@@ -1834,7 +1851,7 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     expect(gate.checks.find((c) => c.name === 'web studio.yaml (자동, 건너뜀)')!.detail).toContain('dynamicRouteProbe가 실행을 시작할 때 꺼져 있어');
   });
 
-  it('실행 중 dynamicRouteProbe·followImports·maxPages·service·pageChecks를 바꿔도 같은 실행에서는 적용되지 않는다(확인이 줄지 않는다)', async () => {
+  it('실행 중 dynamicRouteProbe·followImports·maxPages·expectStatus·pageChecks를 바꿔도 같은 실행에서는 적용되지 않는다(확인이 줄지 않는다)', async () => {
     const declared = { service: 'web', path: '/dashboard', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false } as const;
     const target = nextjs(project, { pageChecks: [declared], autoPageChecks: auto() });
     const requested: string[] = [];
@@ -1851,6 +1868,13 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     await workspace.write('web/app/dashboard/page.tsx', page);
     await workspace.write('web/app/reports/page.tsx', page);
     await workspace.write('web/app/settings/page.tsx', page);
+    await workspace.write(
+      SPEC_FILE,
+      studioYaml({
+        pageChecks: [],
+        autoPageChecks: auto({ dynamicRouteProbe: false, followImports: false, maxPages: 1, expectStatus: 404, sampleParams: { id: '7' } }),
+      }),
+    );
 
     // 확인을 끄거나 줄이려는 변경은 이제 허용 없이는 통과하지 못한다(#767). 이번 검증은 시작 때의 선언으로 돈다
     expect((await gate.check()).kind).toBe('retry');
@@ -1889,6 +1913,7 @@ describe('자동 페이지 확인: 실행 중 바뀐 sample 값 (ADR-159)', () =
     await mkdir(path.join(target.root, 'web/components'), { recursive: true });
     await writeFile(path.join(target.root, 'web/app/orders/page.tsx'), "import { Card } from '../../components/Card';\nexport default function Page() { return Card(); }\n");
     await workspace.write('web/components/Card.tsx', 'export const Card = () => null;\n');
+    await workspace.write(SPEC_FILE, studioYaml({ autoPageChecks: auto({ followImports: false }) }));
 
     // 실행 중 선언을 약하게 바꾼 것은 허용 없이는 통과하지 못하지만, 이번 검증은 시작 때의 값으로 돈다
     expect((await gate.check()).kind).toBe('retry');
@@ -2862,13 +2887,13 @@ describe('VerificationGate 부하 확인 (ADR-163)', () => {
 describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 실행의 검증에 쓴다 (ADR-164)', () => {
   const unit = { name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 };
   const failing = (command: string[]): ExecResult => (command.includes('./gradlew') ? { exitCode: 1, stdout: '', stderr: 'FAILED' } : { exitCode: 0, stdout: '', stderr: '' });
-  const withLatest = (target: LoadedProject, workflow: Partial<WorkflowSpec>) => async () => ({ ...target, spec: { ...target.spec, workflow } }) as LoadedProject;
 
   it('허용이 없으면 에이전트가 고친 선언을 쓰지 않고, 왜 그런지와 다음에 할 일을 모델에게 알린다', async () => {
     const target = withWorkflow({ tests: [unit] });
     // 에이전트가 실패하는 테스트를 항상 통과하는 명령으로 바꿨다
-    const { gate, workspace, commands } = await setup(target, { exec: failing, reload: withLatest(target, { tests: [{ ...unit, command: ['true'] }] }) });
+    const { gate, workspace, commands } = await setup(target, { exec: failing });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [{ ...unit, command: ['true'] }] }));
 
     const outcome = await gate.check();
     expect(outcome.kind).toBe('retry');
@@ -2881,8 +2906,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용 없이 시도를 다 쓰면 사용자에게 보이는 사유에 빠져나오는 길을 적는다', async () => {
     const target = withWorkflow({ tests: [unit] });
-    const { gate, workspace } = await setup(target, { exec: failing, reload: withLatest(target, {}) });
+    const { gate, workspace } = await setup(target, { exec: failing });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({}));
 
     await gate.check();
     await gate.check();
@@ -2893,8 +2919,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('선언이 바뀌지 않았으면 실패 안내에 아무것도 덧붙이지 않는다', async () => {
     const target = withWorkflow({ tests: [unit] });
-    const { gate, workspace } = await setup(target, { exec: failing, reload: withLatest(target, { tests: [unit] }) });
+    const { gate, workspace } = await setup(target, { exec: failing });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [unit] }));
 
     const outcome = await gate.check();
     expect(outcome.kind === 'retry' && outcome.feedback).not.toContain('확인 선언');
@@ -2903,8 +2930,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
   it('허용하면 바뀐 선언으로 검증하고, 무엇이 바뀌었는지 리뷰 단계에 남긴다', async () => {
     const target = withWorkflow({ tests: [unit] });
     const latest = { tests: [{ ...unit, command: ['./gradlew', 'test', '--tests', 'OrderTest'] }, { name: 'lint', service: 'api', command: ['lint'], maxAttempts: 1 }] };
-    const { gate, workspace, commands } = await setup(target, { reload: withLatest(target, latest), allowCheckChanges: true });
+    const { gate, workspace, commands } = await setup(target, { allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml(latest));
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(commands).toEqual(expect.arrayContaining([['./gradlew', 'test', '--tests', 'OrderTest'], ['lint']]));
@@ -2917,8 +2945,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용하면 지운 확인은 돌지 않고, 지웠다는 사실이 남는다', async () => {
     const target = withWorkflow({ tests: [unit] });
-    const { gate, workspace, commands } = await setup(target, { exec: failing, reload: withLatest(target, {}), allowCheckChanges: true });
+    const { gate, workspace, commands } = await setup(target, { exec: failing, allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({}));
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(commands).toEqual([]);
@@ -2929,9 +2958,10 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용해도 실행 정책(바꿀 수 있는 파일 수 등)은 실행을 시작할 때의 것이다', async () => {
     const target = withWorkflow({ tests: [unit], maxChangedFiles: 1 });
-    const { gate, workspace } = await setup(target, { reload: withLatest(target, { tests: [unit], maxChangedFiles: 100, loadChecks: [] }), allowCheckChanges: true });
+    const { gate, workspace } = await setup(target, { allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
     await workspace.write('api/src/Item.java', 'class Item {}\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [unit], maxChangedFiles: 100, loadChecks: [] }));
 
     const outcome = await gate.check();
     expect(outcome.kind).toBe('retry');
@@ -2940,8 +2970,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용했는데 선언이 그대로면 기록을 남기지 않는다', async () => {
     const target = withWorkflow({ tests: [unit] });
-    const { gate, workspace } = await setup(target, { reload: withLatest(target, { tests: [unit] }), allowCheckChanges: true });
+    const { gate, workspace } = await setup(target, { allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [unit] }));
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(gate.checks.some((check) => check.name === 'declared-checks')).toBe(false);
@@ -2949,39 +2980,48 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용했는데 설정을 읽지 못하면 옛 선언으로 조용히 통과시키지 않고 실패로 알린다', async () => {
     const target = withWorkflow({ tests: [unit] });
-    const { gate, workspace } = await setup(target, {
-      reload: async () => {
-        throw new SpecError('studio.yaml 형식이 올바르지 않습니다', ['workflow.tests.0.command: 필수입니다']);
-      },
-      allowCheckChanges: true,
-    });
+    const { gate, workspace } = await setup(target, { allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    // command가 빠져 형식 검사에 걸리는 studio.yaml
+    await workspace.write(
+      SPEC_FILE,
+      `version: 1
+name: orders
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: /v3/api-docs } }
+workflow:
+  tests:
+    - name: unit
+      service: api
+`,
+    );
 
     const outcome = await gate.check();
     expect(outcome.kind).toBe('retry');
     const record = gate.checks.find((check) => check.name === 'declared-checks');
     expect(record).toMatchObject({ stage: 'review', ok: false });
     expect(record?.detail).toContain('다시 읽지 못해 바뀐 확인 선언으로 검증하지 못했습니다');
-    expect(record?.detail).toContain('workflow.tests.0.command: 필수입니다');
+    expect(record?.detail).toContain('workflow.tests.0.command');
     expect(gate.passedStages.has('review')).toBe(false);
   });
 
   it('시도마다 선언을 다시 본다: 첫 시도에 고친 선언이 둘째 시도에 또 바뀌면 그것으로 돈다', async () => {
     const target = withWorkflow({ tests: [unit] });
-    let latest: Partial<WorkflowSpec> = { tests: [{ ...unit, command: ['./gradlew', 'broken'] }] };
-    const { gate, workspace, commands } = await setup(target, { exec: failing, reload: async () => ({ ...target, spec: { ...target.spec, workflow: latest } }) as LoadedProject, allowCheckChanges: true });
+    const { gate, workspace, commands } = await setup(target, { exec: failing, allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [{ ...unit, command: ['./gradlew', 'broken'] }] }));
 
     expect((await gate.check()).kind).toBe('retry');
-    latest = { tests: [{ ...unit, command: ['lint'] }] };
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [{ ...unit, command: ['lint'] }] }));
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(commands).toEqual([['./gradlew', 'broken'], ['lint']]);
   });
 
   it('허용 없이 평가 자산 선언을 지우면 약해진 선언으로 리뷰 단계가 실패한다(#767)', async () => {
     const target = withWorkflow({ evaluationAssets: ['tests/acceptance'] });
-    const { gate, workspace } = await setup(target, { reload: withLatest(target, {}) });
+    const { gate, workspace } = await setup(target);
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({}));
 
     const outcome = await gate.check();
     expect(outcome.kind).toBe('retry');
@@ -2995,8 +3035,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
   it('허용 없이 테스트 선언 하나를 지우면 약해진 선언으로 리뷰 단계가 실패한다(#767)', async () => {
     const lint = { name: 'lint', service: 'api', command: ['lint'], maxAttempts: 1 };
     const target = withWorkflow({ tests: [unit, lint] });
-    const { gate, workspace, commands } = await setup(target, { reload: withLatest(target, { tests: [unit] }) });
+    const { gate, workspace, commands } = await setup(target);
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [unit] }));
 
     const outcome = await gate.check();
     expect(outcome.kind).toBe('retry');
@@ -3007,8 +3048,9 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용 없이 보호 경로를 더하는 것은 약해진 것이 아니므로 그대로 통과한다', async () => {
     const target = withWorkflow({ protectedPaths: ['.env'] });
-    const { gate, workspace } = await setup(target, { reload: withLatest(target, { protectedPaths: ['.env', 'api/src'] }) });
+    const { gate, workspace } = await setup(target);
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ protectedPaths: ['.env', 'api/src'] }));
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(gate.checks.some((entry) => entry.name === 'weakened-declarations')).toBe(false);
@@ -3016,13 +3058,63 @@ describe('확인 선언의 변경은 사용자가 허용한 요청에서만 그 
 
   it('허용하면 약해진 실행 정책도 리뷰 기록에 함께 남긴다', async () => {
     const target = withWorkflow({ evaluationAssets: ['tests/acceptance'] });
-    const { gate, workspace } = await setup(target, { reload: withLatest(target, {}), allowCheckChanges: true });
+    const { gate, workspace } = await setup(target, { allowCheckChanges: true });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({}));
 
     expect(await gate.check()).toEqual({ kind: 'pass' });
     const record = gate.checks.find((entry) => entry.name === 'declared-checks');
     expect(record).toMatchObject({ stage: 'review', ok: true, attempts: 1 });
     expect(record?.detail).toContain('삭제: 평가 자산 tests/acceptance');
+  });
+
+  it('declarationBaseline이 있으면 프로젝트에 덧입힌 완료 검사를 약화로 세지 않는다(#767)', async () => {
+    const fileWorkflow = { required: ['plan', 'implement', 'run', 'contract_check', 'review', 'checkpoint'], tests: [unit] } as WorkflowSpec;
+    // withDoneTests와 같은 규칙으로 완료 검사를 덧입힌 세션 프로젝트(required에 test가 생기고 done-card-1이 더해진다)
+    const overlaid = {
+      ...fileWorkflow,
+      required: ['plan', 'implement', 'run', 'contract_check', 'test', 'review', 'checkpoint'],
+      tests: [...fileWorkflow.tests!, { name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'], maxAttempts: 1 }],
+    } as WorkflowSpec;
+    const target = withWorkflow(overlaid);
+    const { gate, workspace } = await setup(target, { declarationBaseline: fileWorkflow });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    // 파일의 선언은 그대로다(덧입힌 값이 아니다)
+    await workspace.write(SPEC_FILE, studioYaml(fileWorkflow));
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.checks.some((entry) => entry.name === 'weakened-declarations')).toBe(false);
+  });
+
+  it('카드 맥락(declarationBaseline)에서도 studio.yaml이 링크면 읽을 수 없게 바꾼 것으로 실패한다(#767)', async () => {
+    const fileWorkflow = { tests: [unit] } as WorkflowSpec;
+    const overlaid = { ...fileWorkflow, tests: [...fileWorkflow.tests!, { name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'], maxAttempts: 1 }] } as WorkflowSpec;
+    const target = withWorkflow(overlaid);
+    const { gate, workspace } = await setup(target, { declarationBaseline: fileWorkflow });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await symlink(path.join(target.root, 'api/src/Order.java'), path.join(target.root, SPEC_FILE));
+    workspace.trackExternalChanges([SPEC_FILE]);
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.name === 'weakened-declarations');
+    expect(check).toMatchObject({ stage: 'review', ok: false, attempts: 1 });
+    expect(check?.detail).toContain('읽을 수 없게 바꿨습니다');
+    expect(check?.detail).toContain('되돌리세요');
+  });
+
+  it('이번 실행에서 studio.yaml의 형식을 깨뜨리면 허용 없이도 약해진 선언으로 실패한다(#767)', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    await workspace.write(SPEC_FILE, 'workflow: [unclosed');
+
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.name === 'weakened-declarations');
+    expect(check).toMatchObject({ stage: 'review', ok: false, attempts: 1 });
+    expect(check?.detail).toContain('읽을 수 없게 바꿨습니다');
+    expect(check?.detail).toContain('되돌리세요');
   });
 });
 

@@ -161,6 +161,21 @@ workflow:
 `;
 }
 
+/** required에서 test를 뺀 studio.yaml. 카드 완료 검사가 test를 도로 끼워 넣어 약화 판정을 가리는지 본다(수정 2) */
+function studioYamlWithoutRequiredTest(): string {
+  return `version: 1
+name: termgw
+services:
+  api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi, contract: { extract: /v3/api-docs } }
+workflow:
+  required: [plan, implement, run, contract_check, review, checkpoint]
+  tests:
+    - name: unit
+      service: api
+      command: [./gradlew, test]
+`;
+}
+
 beforeEach(async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'b-studio-termgw-session-'));
   const project = path.join(root, 'project');
@@ -2052,8 +2067,46 @@ describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린
     const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
     expect(answer.feedback).toContain('weakened-declarations');
     expect(answer.feedback).toContain('삭제: 테스트 unit');
-    // 카드의 완료 검사는 다시 읽은 workflow에도 덧입혀져 있으므로 삭제로 잡히지 않는다
+    // 카드의 완료 검사는 파일에 적힌 선언이 아니므로 견줌에 들어가지 않는다
     expect(answer.feedback).not.toContain('done-card-1');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('카드 맥락에서 required의 test를 지워도 완료 검사 덧입힘이 약화를 가리지 않는다 (수정 2)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, {
+      writableScope: ['api/src', 'studio.yaml'],
+      doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }],
+    });
+    await session.gateway.prompt({ prompt: '메모 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await write(session, 'studio.yaml', studioYamlWithoutRequiredTest());
+
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toContain('weakened-declarations');
+    expect(answer.feedback).toContain('변경: 필수 단계');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('카드 맥락에서 studio.yaml의 형식을 깨뜨리면 읽을 수 없게 바꾼 것으로 실패한다 (수정 2)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, {
+      writableScope: ['api/src', 'studio.yaml'],
+      doneTests: [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'echo done'] }],
+    });
+    await session.gateway.prompt({ prompt: '메모 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await write(session, 'studio.yaml', 'workflow: [unclosed');
+
+    const answer = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(answer.feedback).toContain('읽을 수 없게 바꿨습니다');
+    expect(answer.feedback).toContain('되돌리세요');
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
     setTerminalTaskContext(session.id, undefined);
     await stopSession(session.id);

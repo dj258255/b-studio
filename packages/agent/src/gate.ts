@@ -4,7 +4,7 @@ import { lstat, readdir, readFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { formatBytes, SandboxError, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
+import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
@@ -173,9 +173,15 @@ export interface GateOptions {
   /**
    * 자동 화면 확인의 sample 값(sampleParams·sampleIdFrom)만 같은 실행에서 반영하려고 디스크의 studio.yaml을 다시 읽는 함수(ADR-159).
    * 넘기지 않으면 이번 실행에서 studio.yaml이 바뀐 때만 `loadProject(project.root)`로 읽는다. 넘기면 자동 화면 확인을 계산할 때마다 부른다
-   * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다
+   * (테스트가 디스크 없이 바꿔 끼운다). 읽은 설정에서 sample 값 두 개 말고는 쓰지 않는다.
+   * 확인 선언의 변경·약화 판정에는 쓰지 않는다 — 그쪽은 언제나 디스크의 파일을 일반 파일 확인과 함께 읽는다(#767)
    */
   reloadProject?: () => Promise<LoadedProject>;
+  /**
+   * 실행을 시작할 때 **파일에 적힌** workflow(완료 검사 덧입힘 없음). 카드 맥락처럼 `project.spec.workflow`에 완료 검사를
+   * 덧입힌 경우, 변경 요약과 약화 판정의 시작 값으로 이 값을 쓴다. 주지 않으면 `project.spec.workflow`를 쓴다
+   */
+  declarationBaseline?: WorkflowSpec | undefined;
   /**
    * b-studio 도구를 거치지 않고 바뀐 파일(CLI 내장 도구·서비스 안 명령 등). 주면 게이트가 만들 때 한 번,
    * 그리고 check()마다 바뀐 파일 수를 보기 전에 이 목록을 작업 공간에 옮긴다. 게이트가 다룰 수 없는 경로(링크·비밀 파일 등)가
@@ -560,14 +566,29 @@ export class VerificationGate {
     this.#project = started;
     this.#unadoptedChange = undefined;
     const allowed = this.#options.allowCheckChanges === true;
+    // 카드 맥락처럼 세션 프로젝트에 완료 검사를 덧입혔으면, 견주는 시작 값은 덧입히기 전 **파일에 적힌** workflow다.
+    // 덧입힌 값을 기준으로 삼으면 파일에서 지운 선언이 도로 생겨 차이가 보이지 않는다(#767)
+    const baseline = this.#options.declarationBaseline ?? started.spec.workflow;
     const latest = await this.#latestWorkflow(allowed);
     if (!latest) return [];
     if ('error' in latest) {
-      if (!allowed) return [];
+      // 이번 실행에서 studio.yaml을 읽을 수 없게 바꿨으면 그대로 두지 않는다. 그대로 통과시키면 다음 실행부터
+      // 선언 없이 돌게 된다. 허용이 있으면 지금처럼 허용한 변경으로 검증하지 못했다고 알린다
+      if (!allowed) {
+        return [
+          {
+            stage: 'review',
+            name: 'weakened-declarations',
+            ok: false,
+            attempts: 1,
+            detail: this.#options.sandbox.redact(`${SPEC_FILE}을(를) 읽을 수 없게 바꿨습니다${latest.error}. 되돌리세요.`),
+          },
+        ];
+      }
       return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: false, attempts: 1, detail: `${SPEC_FILE}을(를) 다시 읽지 못해 바뀐 확인 선언으로 검증하지 못했습니다${latest.error}` }];
     }
-    const change = diffDeclaredChecks(started.spec.workflow, latest.workflow);
-    const weakened = weakenedDeclarations(started.spec.workflow, latest.workflow);
+    const change = diffDeclaredChecks(baseline, latest.workflow);
+    const weakened = weakenedDeclarations(baseline, latest.workflow);
     const changed = hasDeclaredCheckChange(change);
     if (!changed && weakened.length === 0) return [];
     const summary = this.#options.sandbox.redact(describeDeclaredCheckChange(change));
@@ -596,20 +617,17 @@ export class VerificationGate {
   /**
    * 지금 디스크의 studio.yaml에서 workflow를 읽는다. 읽을 까닭이 없으면(이번 실행에서 바뀌지 않았고 허용도 없으면) undefined.
    * 설정 파일이 일반 파일인지 먼저 본다 — 호스트에서 읽는 파일이라 다른 곳으로 가는 링크로 바뀌어 있으면 그 너머의 내용이
-   * 형식 오류 문구를 타고 모델에게 돌아갈 수 있다(#withLatestSampleValues와 같은 규칙)
+   * 형식 오류 문구를 타고 모델에게 돌아갈 수 있다(#withLatestSampleValues와 같은 규칙). 확인 선언의 변경·약화 판정은
+   * reloadProject를 쓰지 않고 이 경로로 읽는다(#767)
    */
   async #latestWorkflow(always: boolean): Promise<{ workflow: LoadedProject['spec']['workflow'] } | { error: string } | undefined> {
     const { workspace } = this.#options;
     const root = this.#options.project.root;
-    let reload = this.#options.reloadProject;
-    if (!reload) {
-      if (!always && !workspace.changedFiles().includes(SPEC_FILE)) return undefined;
-      const file = readProjectFileSync(root, SPEC_FILE);
-      if (file.kind !== 'text') return { error: `(${file.kind === 'irregular' ? file.reason : '파일 없음'})` };
-      reload = () => loadProject(root);
-    }
+    if (!always && !workspace.changedFiles().includes(SPEC_FILE)) return undefined;
+    const file = readProjectFileSync(root, SPEC_FILE);
+    if (file.kind !== 'text') return { error: `(${file.kind === 'irregular' ? file.reason : '파일 없음'})` };
     try {
-      return { workflow: (await reload()).spec.workflow };
+      return { workflow: (await loadProject(root)).spec.workflow };
     } catch (error) {
       // 형식 오류의 항목만 알려 준다. 그 밖의 오류 문구는 어디서 온 내용인지 알 수 없어 싣지 않는다
       return { error: error instanceof SpecError ? `: ${this.#options.sandbox.redact([error.message, ...error.issues].join(' / '))}` : '' };

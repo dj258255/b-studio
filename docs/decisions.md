@@ -7422,7 +7422,8 @@ C·D는 서로 겹치지 않는 약점을 메운다 — C는 재발 자체를 �
 - 약하게 바꾼 것: 확인 선언(`tests`·`pageChecks`·`concurrencyChecks`·`loadChecks`·`autoPageChecks`·`required`)의 삭제·변경, `protectedPaths`·`evaluationAssets`·`deniedCommands`·`requireApprovalFor`·`releaseRequires`에서 빠진 항목, `allowedTools`에 더해지거나 목록이 없어진 것, `maxChangedFiles`가 커지거나 없어진 것. 확인 선언의 **변경**은 강해졌는지 약해졌는지 기계로 가릴 수 없어 약해진 쪽으로 본다.
 - 더하기만 한 것은 지금처럼 통과시키고, 그 실행의 검증에는 쓰지 않는다.
 - 허용하면 지금처럼 받아들이고 약해진 정책도 리뷰 기록에 남긴다.
-- 작업 카드 맥락은 세션 workflow에 카드의 완료 검사를 덧입힌다. 다시 읽은 `studio.yaml`에도 같은 덧입힘을 해서 견준다(그러지 않으면 카드의 완료 검사가 "삭제"로 보였다).
+- 견줌은 덧입힘 없는 **파일 선언끼리** 한다. 작업 카드 맥락은 세션 workflow에 카드의 완료 검사를 덧입히는데, 디스크와 견주면 완료 검사가 "삭제"로 보였다. 처음에는 다시 읽은 쪽에도 덧입혔는데, 덧입힘이 `required`에 `test`를 도로 넣어 에이전트가 지운 것이 가려졌고 일반 파일 확인도 건너뛰었다(커밋 보안 검토: weakening detection masked). 이제 카드를 시작할 때의 원래 workflow와 디스크의 선언을 견준다.
+- 이번 실행에서 `studio.yaml`을 읽을 수 없게 바꾸면(형식 오류·링크·특수 파일) 허용이 없어도 실패다. 처음에는 읽지 못하면 검사 없이 통과했다(커밋 보안 검토: fail-open).
 
 대가: 쓰지 않게 된 테스트를 `studio.yaml`에서 정리하는 일도 허용이 있는 요청에서만 된다.
 ## ADR-165 로컬 CLI 러너의 지시문은 대화에 기록하지 않고 요청마다 지금의 것을 보낸다

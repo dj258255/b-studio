@@ -8256,23 +8256,17 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     await tracker.sync();
     const serviceStatus = (event: ServiceStatusEvent): void => onServiceStatus(session, event);
     // 카드 맥락의 완료 검사는 세션 프로젝트에만 덧입혀져 있다. 게이트가 studio.yaml을 다시 읽을 때 디스크의 workflow를
-    // 그대로 견주면 완료 검사가 "삭제"로 잡혀 약해진 선언으로 실패한다. 다시 읽은 workflow에도 그 시점의 완료 검사를
-    // 같은 규칙으로 입혀, 사용자가 선언한 테스트의 삭제·변경만 약화로 보게 한다(#767)
-    const reloadWithDoneTests = session.terminalTaskContext
-      ? async () => {
-          const reloaded = await loadProject(project.root);
-          const context = session.terminalTaskContext;
-          if (context) reloaded.spec.workflow = withDoneTests(reloaded.spec.workflow, context.doneTests);
-          return reloaded;
-        }
-      : undefined;
+    // 그대로 견주면 완료 검사가 "삭제"로 잡혀 약해진 선언으로 실패한다. 그래서 견주는 시작 값은 덧입히기 전 파일의 workflow를
+    // 넘기고, 지금 값은 게이트가 디스크에서 직접 읽는다 — 덧입힌 값을 다시 입혀 읽으면 파일에서 지운 선언이 도로 생겨
+    // 약화 판정이 가려진다(#767)
+    const declarationBaseline = session.terminalTaskContext ? session.terminalTaskContext.original : undefined;
     const gate = await VerificationGate.create({
       project,
       sandbox: session.sandbox,
       workspace,
       allowBreaking: false,
       maxVerifyAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
-      ...(reloadWithDoneTests ? { reloadProject: reloadWithDoneTests } : {}),
+      ...(declarationBaseline ? { declarationBaseline } : {}),
       fetcher: fetchContract,
       signal,
       onServiceStatus: serviceStatus,
