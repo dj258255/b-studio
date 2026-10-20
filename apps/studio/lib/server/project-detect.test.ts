@@ -2,9 +2,9 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
-import { workflowStages } from '@b-studio/agent';
+import { CONTAINER_PROJECT_ROOT, workflowStages } from '@b-studio/agent';
 import { afterEach, describe, expect, it } from 'vitest';
-import { detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, sanitize } from './project-detect';
+import { CONTAINER_WORKSPACE_ROOT, detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, sanitize } from './project-detect';
 import { excludeFromGit, projectIdFor, readRegistry, registerFolder, unregisterProject } from './project-registry';
 import { readServiceSelection } from './service-selection';
 
@@ -1277,5 +1277,11 @@ describe('generateFiles: systemPackagesByPath(도그푸딩 마찰 113, ADR-137)'
     const withoutOption = generateFiles(detection);
 
     expect(withOption).toEqual(withoutOption);
+  });
+});
+
+describe('컨테이너의 프로젝트 마운트 자리', () => {
+  it('게이트가 보고서를 비우는 자리와 compose가 마운트하는 자리가 같다 (#756)', () => {
+    expect(CONTAINER_PROJECT_ROOT).toBe(CONTAINER_WORKSPACE_ROOT);
   });
 });

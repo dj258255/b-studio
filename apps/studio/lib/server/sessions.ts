@@ -26,6 +26,7 @@ import {
   buildReviewRequirementsContext,
   buildReviewResolutionComment,
   buildTestRunPlan,
+  reportRootsForIncludes,
   buildTraceabilityMatrix,
   canCreatePullRequest,
   captureBaselines,
@@ -6462,7 +6463,7 @@ type ManagedSpec = LoadedProject['managed'][number][1];
  * extraReportRoots로 넘겨 같이 모은다
  */
 function extraReportRootsFor(spec: ManagedSpec): string[] {
-  return (spec.includes ?? []).map((include) => `${CONTAINER_WORKSPACE_ROOT}/${include}`);
+  return reportRootsForIncludes(spec.includes, CONTAINER_WORKSPACE_ROOT);
 }
 
 /** test-discovery.ts의 결과에 framework를 함께 붙인 행. attachResults는 구조적으로 호환되는 TestRow만 보고 돌려주므로, 돌아온 값도 이 모양 그대로다(as로 되돌린다) */
