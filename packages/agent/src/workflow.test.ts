@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { WorkflowLoadCheckSchema, WorkflowPageCheckSchema, type LoadedProject, type WorkflowSpec } from '@b-studio/spec';
+import { checkToolPolicy } from './policy';
 import {
   COVERAGE_GAP_PREFIX,
   DEFAULT_WORKFLOW,
@@ -299,5 +300,42 @@ describe('응답 시간 요구를 부하 확인으로 선언하게 하는 안내
 
   it('고정 문맥을 크게 늘리지 않는다(450자 이하)', () => {
     expect(LOAD_CHECK_GUIDE.length).toBeLessThanOrEqual(450);
+  });
+});
+
+describe('평가 자산 (ADR-175)', () => {
+  it('평가 자산만 선언하면 test 단계가 필수로 들어가지 않는다(테스트를 돌리지 않으므로)', () => {
+    // 평가 자산은 테스트를 돌리는 수단이 아니다 — 선언이 없을 때와 같은 단계다
+    expect(workflowStages(projectWith({ evaluationAssets: ['tests/acceptance'] }))).toEqual(DEFAULT_WORKFLOW);
+    expect(missingVerificationStages(projectWith({ evaluationAssets: ['tests/acceptance'] }), new Set(['run', 'contract_check', 'review']))).toEqual([]);
+    // 테스트를 선언했을 때만 test가 필수로 들어간다
+    expect(workflowStages(projectWith({ tests: [unit] }))).toEqual(['plan', 'implement', 'run', 'contract_check', 'test', 'review', 'checkpoint']);
+  });
+
+  it('평가 자산을 보호 경로로 합쳐 실행 정책과 리뷰 검사에 쓴다', () => {
+    const project = projectWith({ protectedPaths: ['.env'], evaluationAssets: ['tests/acceptance'] });
+    expect(executionPolicyFor(project)?.protectedPaths).toEqual(['.env', 'tests/acceptance']);
+    const policy = executionPolicyFor(project);
+    expect(checkToolPolicy('write_file', { path: 'tests/acceptance/a.test.js' }, policy, undefined)).toMatchObject({ decision: 'deny' });
+    expect(checkToolPolicy('write_file', { path: 'src/ok.js' }, policy, undefined)).toMatchObject({ decision: 'allow' });
+
+    const checks = reviewChanges(project, ['tests/acceptance/a.test.js']);
+    expect(checks[0]).toMatchObject({ name: 'protected-paths', ok: false });
+    expect(checks[0]!.detail).toContain('tests/acceptance/a.test.js (보호 경로 tests/acceptance)');
+  });
+
+  it('선언한 평가 자산을 모델 문맥에 알리고, 선언이 없으면 줄을 넣지 않는다', () => {
+    expect(workflowContext(projectWith({ evaluationAssets: ['tests/acceptance', 'scripts/grade.py'] }))).toContain(
+      '평가 자산(플랫폼이 지키고, 바꾸면 test 단계가 실패): tests/acceptance, scripts/grade.py',
+    );
+    expect(workflowContext(projectWith({}))).not.toContain('평가 자산');
+  });
+
+  it('Pi 확장이 읽는 보호 경로에도 평가 자산을 합친다', () => {
+    expect(piPolicyEnvironment(projectWith({ protectedPaths: ['infra'], evaluationAssets: ['tests/acceptance'] })).BSTUDIO_PROTECTED_PATHS).toBe(
+      'infra,tests/acceptance',
+    );
+    // 선언이 없으면 지금과 같다
+    expect(piPolicyEnvironment(projectWith({ protectedPaths: ['infra'] })).BSTUDIO_PROTECTED_PATHS).toBe('infra');
   });
 });

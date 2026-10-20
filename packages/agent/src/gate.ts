@@ -1,5 +1,7 @@
+import { createHash } from 'node:crypto';
+import { realpathSync } from 'node:fs';
+import { lstat, readdir, readFile } from 'node:fs/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { formatBytes, SandboxError, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
@@ -21,7 +23,7 @@ import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
 import { REQUIREMENTS_FILE } from './requirements';
-import { readProjectFileSync, type Workspace } from './workspace';
+import { readProjectFileSync, readRegularFileBytesSync, type Workspace } from './workspace';
 
 export type GateOutcome =
   | { kind: 'pass' }
@@ -70,6 +72,10 @@ const TEST_TIMEOUT_MS = 10 * 60_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const CHECK_CONCURRENCY = 2;
 const OUTPUT_TAIL_LINES = 30;
+/** 평가 자산 지문이 담을 수 있는 파일 수 상한. 넘으면 실패하고 선언을 좁히라고 알린다 */
+const MAX_EVALUATION_ASSET_FILES = 2_000;
+/** 평가 자산이 바뀌었을 때 사유에 나열할 파일 수 상한 */
+const MAX_EVALUATION_ASSET_LIST = 20;
 
 /**
  * Next.js가 오류 화면을 대신 그릴 때 나오는 문구. 상태 코드가 200이어도 본문이 오류 화면이면 실패로 본다.
@@ -222,19 +228,39 @@ export class VerificationGate {
   #project: LoadedProject;
   /** 이번 실행에서 확인 선언이 바뀌었지만 허용되지 않아 쓰지 않은 변경의 요약. 실패 안내에 싣는다 */
   #unadoptedChange: string | undefined;
+  /**
+   * 실행을 시작할 때의 프로젝트가 선언한 평가 자산 목록. 게이트를 만들 때 고정한다 — 에이전트가 실행 중에 studio.yaml에서
+   * 이 선언을 지우거나 줄여도 그 실행의 검사는 시작 때의 목록으로 돈다(ADR-175)
+   */
+  readonly #evaluationAssets: readonly string[];
+  /** 실행을 시작할 때 뜬 평가 자산의 지문. 검사 때 다시 떠서 견주고, 읽을 수 없었으면 그 사유를 담는다 */
+  readonly #evaluationAssetBaseline: EvaluationAssetBaseline;
 
-  private constructor(options: GateOptions, baselines: ReadonlyMap<string, OpenApiDocument>) {
+  private constructor(
+    options: GateOptions,
+    baselines: ReadonlyMap<string, OpenApiDocument>,
+    evaluationAssets: readonly string[],
+    evaluationAssetBaseline: EvaluationAssetBaseline,
+  ) {
     this.#options = options;
     this.#project = options.project;
     this.#baselines = baselines;
     this.#maxAttempts = options.maxVerifyAttempts;
+    this.#evaluationAssets = evaluationAssets;
+    this.#evaluationAssetBaseline = evaluationAssetBaseline;
   }
 
   /** 계약 비교 기준은 모델이 파일을 바꾸기 전에 잡아야 한다 */
   static async create(options: GateOptions): Promise<VerificationGate> {
     // 요구사항 문서의 실행 전 모습도 같은 이유로 여기서 고정한다(러너가 실행을 시작할 때 이미 불렀다면 그 값이 유지된다)
     options.workspace.snapshotRead(REQUIREMENTS_FILE);
-    return new VerificationGate(options, await captureBaselines(options.sandbox, options.project, options.fetcher));
+    // 평가 자산의 선언과 지문도 같은 이유로 여기서 고정한다. 에이전트가 명령(run_in_service 등)으로 고친 것도 검사가 잡는다
+    const evaluationAssets = options.project.spec.workflow?.evaluationAssets ?? [];
+    const [baselines, evaluationAssetBaseline] = await Promise.all([
+      captureBaselines(options.sandbox, options.project, options.fetcher),
+      fingerprintEvaluationAssets(options.project.root, evaluationAssets),
+    ]);
+    return new VerificationGate(options, baselines, evaluationAssets, evaluationAssetBaseline);
   }
 
   /**
@@ -266,6 +292,43 @@ export class VerificationGate {
   }
 
   /**
+   * 평가 자산(테스트·채점 스크립트·기대값 파일)의 지문이 이번 실행에서 바뀌었는지 본다(ADR-175).
+   * 바뀐 파일 목록이 아니라 디스크의 지문을 직접 견주므로 서비스 안 명령(run_in_service)이나 CLI 러너가 고친 것도 잡는다.
+   * 선언은 게이트를 만들 때 고정한 목록이라, 에이전트가 실행 중에 studio.yaml에서 지워도 그 실행에는 계속 돈다.
+   * 이 실행에 tests가 있으면 평가 자산이 바뀐 순간 그 테스트의 결과를 믿을 수 없으므로 test 단계를 실패시킨다.
+   * tests가 없으면(평가 자산만 선언) 테스트를 돌리지 않았으므로 review 단계로 남긴다 — 통과해도 test 단계를 채우지 않는다.
+   * 견줄 수 없으면(링크·특수 파일·상한 초과) 통과시키지 않는다. 단계와 무관하게 항상 돌린다.
+   */
+  async #evaluationAssetChecks(): Promise<WorkflowCheck[]> {
+    const assets = this.#evaluationAssets;
+    if (assets.length === 0) return [];
+    const stage: WorkflowCheck['stage'] = this.#project.spec.workflow?.tests?.length ? 'test' : 'review';
+    const baseline = this.#evaluationAssetBaseline;
+    const current = await fingerprintEvaluationAssets(this.#options.project.root, assets);
+    if (current.kind === 'error') return [evaluationAssetFailure(stage, current.detail)];
+    if (baseline.kind === 'error') return [evaluationAssetFailure(stage, baseline.detail)];
+    const changed = [...new Set([...baseline.digests.keys(), ...current.digests.keys()])]
+      .filter((file) => baseline.digests.get(file) !== current.digests.get(file))
+      .sort();
+    if (changed.length === 0) return [{ stage, name: 'evaluation-assets', ok: true, attempts: 1 }];
+    return [{ stage, name: 'evaluation-assets', ok: false, attempts: 1, detail: describeEvaluationAssetChange(changed) }];
+  }
+
+  /**
+   * 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었는지 다시 견준다(TOCTOU). 검사 전에만 견주면 검사가 도는 사이에 바뀐 것을
+   * 놓친다(그 뒤의 통과 판정은 고친 자산을 근거로 삼는다). 검사 뒤 디스크의 지문을 다시 떠 기준과 견주고, 다르면 같은
+   * evaluation-assets 실패로 결과를 바꾼다. 검사 전에 이미 실패했으면 그대로 둔다(바뀐 파일이 0개라 선언 검사를 건너뛰는
+   * 경로에서는 지금처럼 한 번만 견준다).
+   * 남은 한계: 테스트가 도는 동안 잠깐 바꿨다가 되돌리는 경우는 이 견줌으로 막지 못한다(평가 자산을 읽기 전용으로 따로 붙이는 후속).
+   */
+  async #recheckEvaluationAssets(recordChecks: WorkflowCheck[]): Promise<void> {
+    if (this.#evaluationAssets.length === 0) return;
+    const index = recordChecks.findIndex((check) => check.name === 'evaluation-assets');
+    if (index === -1 || !recordChecks[index]!.ok) return;
+    recordChecks[index] = (await this.#evaluationAssetChecks())[0]!;
+  }
+
+  /**
    * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
    * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
    * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
@@ -291,7 +354,8 @@ export class VerificationGate {
     // 확인 선언을 먼저 정한다. 그 뒤의 모든 단계가 같은 선언을 본다
     const declaredChecks = await this.#reviewDeclaredChecks();
     const project = this.#project;
-    const recordChecks = [...(await this.#requirementRecordChecks()), ...declaredChecks];
+    // 바뀐 파일 목록에 의존하지 않는 검사들(요구사항 검증 기록·평가 자산 지문). 바뀐 파일이 0개인 턴에서도 돈다
+    const recordChecks = [...(await this.#requirementRecordChecks()), ...(await this.#evaluationAssetChecks()), ...declaredChecks];
     if (workspace.changedFiles().length === 0) {
       if (recordChecks.every((check) => check.ok)) return { kind: 'pass' };
       // 바뀐 파일로 추적되지 않은 경로(서비스 안 명령 등)로 검증 기록만 고쳤다: 다른 단계는 돌릴 것이 없다
@@ -359,6 +423,8 @@ export class VerificationGate {
       } else {
         const checks = await this.#runDeclaredChecks();
         signal?.throwIfAborted();
+        // 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었을 수 있다. 검사 뒤에 지문을 다시 떠 견주고, 다르면 같은 실패로 바꾼다(TOCTOU)
+        await this.#recheckEvaluationAssets(recordChecks);
         // 부하 확인을 재지 못한 것이 b-studio 쪽 문제면 여기서 멈춘다. 서비스 재시작의 플랫폼 실패와 같은 규칙이다(트러블슈팅 117)
         if (this.#loadPlatformFailure) {
           this.checks = [...checks, ...recordChecks];
@@ -1231,6 +1297,99 @@ export class VerificationGate {
       }
     }
     return [...files].sort();
+  }
+}
+
+/** 평가 자산 지문: 정상이면 경로→sha256, 읽을 수 없었으면 그 사유 */
+type EvaluationAssetBaseline = { kind: 'ok'; digests: Map<string, string> } | { kind: 'error'; detail: string };
+
+interface EvaluationAssetScan {
+  digests: Map<string, string>;
+  count: number;
+}
+
+function evaluationAssetFailure(stage: WorkflowCheck['stage'], detail: string): WorkflowCheck {
+  return { stage, name: 'evaluation-assets', ok: false, attempts: 1, detail };
+}
+
+/** 평가 자산이 바뀌었을 때의 사유. 사람이 고치는 자산이라는 것과 되돌리는 방법을 알린다 (최대 20개까지 나열) */
+function describeEvaluationAssetChange(changed: readonly string[]): string {
+  const shown = changed.slice(0, MAX_EVALUATION_ASSET_LIST);
+  const rest = changed.length - shown.length;
+  const list = rest > 0 ? `${shown.join(', ')} 외 ${rest}개` : shown.join(', ');
+  return `평가 자산이 바뀌었습니다: ${list}. 평가 자산은 사람이 고칩니다 — 되돌리고 구현을 고치세요. 평가 자산이 틀렸다고 판단하면 그 까닭을 답에 적어 사람에게 알리세요.`;
+}
+
+/**
+ * 선언한 평가 자산의 지문을 뜬다(ADR-175). 경로별 sha256이고, 폴더면 그 아래 일반 파일을 모두 담는다.
+ * 링크·특수 파일이거나 읽을 수 없으면 실패로 알린다(닫힌 쪽 — 견줄 수 없으면 통과시키지 않는다).
+ * 없는 경로는 지문에 넣지 않는다(선언했지만 아직 없는 자산이 새로 생기면 그때 "바뀜"으로 잡힌다).
+ */
+async function fingerprintEvaluationAssets(root: string, assets: readonly string[]): Promise<EvaluationAssetBaseline> {
+  const scan: EvaluationAssetScan = { digests: new Map(), count: 0 };
+  for (const asset of assets) {
+    const error = await collectEvaluationAsset(root, path.normalize(asset), scan);
+    if (error) return { kind: 'error', detail: `${asset}: ${error}` };
+  }
+  return { kind: 'ok', digests: scan.digests };
+}
+
+/** 자산 하나(파일 또는 폴더)를 훑어 지문에 담는다. 문제가 있으면 사유를, 없으면 undefined를 돌려준다 */
+async function collectEvaluationAsset(root: string, relative: string, scan: EvaluationAssetScan): Promise<string | undefined> {
+  // 상위 폴더가 링크면 그 너머를 보지 않는다(readProjectFileSync와 같은 규칙)
+  if (!parentsAreReal(root, relative)) return '상위 폴더가 심볼릭 링크입니다';
+  const absolute = path.join(root, relative);
+  const info = await lstat(absolute).catch((error: NodeJS.ErrnoException) => error);
+  if (info instanceof Error) {
+    if (info.code === 'ENOENT' || info.code === 'ENOTDIR') return undefined;
+    return `읽을 수 없습니다(${info.code ?? '알 수 없는 오류'})`;
+  }
+  if (info.isSymbolicLink()) return '심볼릭 링크입니다';
+  if (!info.isDirectory()) return recordEvaluationFile(absolute, relative, scan);
+  return walkEvaluationAssetDir(absolute, relative, scan);
+}
+
+/** 폴더 아래의 일반 파일을 모두 지문에 담는다. 링크·특수 파일이 있으면 실패한다 */
+async function walkEvaluationAssetDir(dir: string, relative: string, scan: EvaluationAssetScan): Promise<string | undefined> {
+  const entries = await readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => error);
+  if (entries instanceof Error) return `폴더를 읽지 못했습니다(${entries.code ?? '알 수 없는 오류'})`;
+  entries.sort((a, b) => a.name.localeCompare(b.name));
+  for (const entry of entries) {
+    const childRelative = `${relative}/${entry.name}`;
+    if (entry.isSymbolicLink()) return `${childRelative}: 심볼릭 링크입니다`;
+    if (entry.isDirectory()) {
+      const error = await walkEvaluationAssetDir(path.join(dir, entry.name), childRelative, scan);
+      if (error) return error;
+    } else if (entry.isFile()) {
+      const error = recordEvaluationFile(path.join(dir, entry.name), childRelative, scan);
+      if (error) return error;
+    } else {
+      return `${childRelative}: 일반 파일도 폴더도 아닙니다`;
+    }
+  }
+  return undefined;
+}
+
+/** 일반 파일 하나의 내용을 지문에 담는다. 바이트로 해시한다 — 글자로 바꾸면 서로 다른 바이트가 같은 글자가 되어, 이미지·바이너리 자산을 바꿔도 지문이 같아진다(parser differential). 파일 수 상한을 넘거나 읽을 수 없거나 읽는 도중 바뀌었으면 실패한다 */
+function recordEvaluationFile(absolute: string, relative: string, scan: EvaluationAssetScan): string | undefined {
+  scan.count += 1;
+  if (scan.count > MAX_EVALUATION_ASSET_FILES) return `파일이 ${MAX_EVALUATION_ASSET_FILES}개를 넘습니다 — 선언을 좁히세요`;
+  const read = readRegularFileBytesSync(absolute);
+  if (read.kind !== 'bytes') return read.kind === 'irregular' ? read.reason : '파일이 없습니다';
+  // 확인한 크기만큼 다 읽지 못했으면 지문을 뜨는 동안 파일이 바뀐 것이다. 어중간하게 읽은 바이트를 지문으로 삼지 않는다(닫힌 쪽)
+  if (!read.complete) return '읽는 동안 파일이 바뀌었습니다';
+  scan.digests.set(relative, createHash('sha256').update(read.content).digest('hex'));
+  return undefined;
+}
+
+/** 프로젝트 루트 기준 상대 경로의 상위 폴더 중 링크가 있으면 false. 열 수 없으면 true(아래 lstat이 판정한다) */
+function parentsAreReal(root: string, relative: string): boolean {
+  const parent = path.dirname(relative);
+  if (parent === '.') return true;
+  try {
+    return realpathSync(path.join(root, parent)) === path.join(realpathSync(root), parent);
+  } catch {
+    return true;
   }
 }
 

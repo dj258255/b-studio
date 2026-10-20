@@ -33,7 +33,7 @@ function fakeSandbox(dumps: string[], failing: Partial<Record<string, ExecResult
     async execFromFile(service: string, command: string[], inputFile: string): Promise<ExecResult> {
       const input = await readFile(inputFile, 'utf8');
       calls.push({ service, command, inputFile, input });
-      const failure = failing[command[0]!];
+      const failure = failing.load ?? failing[command[0]!];
       if (failure) return failure;
       return { exitCode: 0, stdout: '', stderr: '' };
     },
@@ -80,21 +80,57 @@ describe('DatabaseBranches', () => {
     expect(calls.map((call) => call.command[0])).toEqual(['pg_dump', 'pg_dump']);
   });
 
-  it('바뀌었으면 데이터베이스를 다시 만들고 덤프를 넣은 뒤, 기대는 서비스를 알려 준다', async () => {
+  it('바뀌었으면 임시 DB에 덤프를 한 트랜잭션으로 넣고, 성공한 뒤에 원래 DB와 바꾼 다음 기대는 서비스를 알려 준다 (#753)', async () => {
     const saved = dump('CREATE TABLE orders ();', 'k1');
     const { sandbox, calls } = fakeSandbox([saved, dump('CREATE TABLE orders (memo text);', 'k2')]);
     const branches = new DatabaseBranches(sandbox, project, dir);
     await branches.save(SHA_A);
 
     expect(await branches.restore(SHA_A)).toMatchObject({ states: [{ service: 'db', action: 'restored' }], dependents: ['api'] });
-    const [recreate, load] = calls.slice(2);
-    expect(recreate?.command).toEqual([
+    const [prepare, load, swap] = calls.slice(2);
+    expect(prepare?.command).toEqual([
+      'psql', '-U', 'app', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q',
+      '-c', 'DROP DATABASE IF EXISTS "app__b_studio_restore" WITH (FORCE)',
+      '-c', 'CREATE DATABASE "app__b_studio_restore" OWNER "app"',
+    ]);
+    expect(load).toMatchObject({
+      service: 'db',
+      command: ['psql', '-U', 'app', '-d', 'app__b_studio_restore', '-v', 'ON_ERROR_STOP=1', '-q', '--single-transaction'],
+      input: saved,
+    });
+    expect(load?.inputFile).toBe(path.join(dir, 'db', `${SHA_A}.sql`));
+    expect(swap?.command).toEqual([
       'psql', '-U', 'app', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q',
       '-c', 'DROP DATABASE IF EXISTS "app" WITH (FORCE)',
-      '-c', 'CREATE DATABASE "app" OWNER "app"',
+      '-c', 'ALTER DATABASE "app__b_studio_restore" RENAME TO "app"',
     ]);
-    expect(load).toMatchObject({ service: 'db', command: ['psql', '-U', 'app', '-d', 'app', '-v', 'ON_ERROR_STOP=1', '-q'], input: saved });
-    expect(load?.inputFile).toBe(path.join(dir, 'db', `${SHA_A}.sql`));
+    expect(calls).toHaveLength(5);
+  });
+
+  it('덤프를 넣다 실패하면 원래 DB는 지우지 않고 임시 DB만 치운다 (#753)', async () => {
+    const { sandbox, calls } = fakeSandbox([dump('a', 'k1'), dump('b', 'k2')], {
+      load: { exitCode: 3, stdout: '', stderr: 'ERROR: extension "postgis" is not available' },
+    });
+    const branches = new DatabaseBranches(sandbox, project, dir);
+    await branches.save(SHA_A);
+
+    expect(await branches.restore(SHA_A)).toMatchObject({ states: [{ service: 'db', action: 'failed', detail: 'ERROR: extension "postgis" is not available' }] });
+    const sql = calls.flatMap((call) => call.command).filter((part) => /^(DROP|CREATE|ALTER) /.test(part));
+    expect(sql).not.toContain('DROP DATABASE IF EXISTS "app" WITH (FORCE)');
+    expect(sql.at(-1)).toBe('DROP DATABASE IF EXISTS "app__b_studio_restore" WITH (FORCE)');
+  });
+
+  it('임시 DB 이름은 식별자 상한(63자)을 넘지 않는다 (#753)', async () => {
+    const long = 'x'.repeat(63);
+    const longProject = { databases: [['db', { engine: 'postgres', database: long, user: 'app', dependents: [] }]] } as unknown as LoadedProject;
+    const { sandbox, calls } = fakeSandbox([dump('a', 'k1'), dump('b', 'k2')]);
+    const branches = new DatabaseBranches(sandbox, longProject, dir);
+    await branches.save(SHA_A);
+    await branches.restore(SHA_A);
+
+    const temp = calls[3]?.command[4];
+    expect(temp).toMatch(/__b_studio_restore$/);
+    expect(temp!.length).toBeLessThanOrEqual(63);
   });
 
   it('저장하지 못한 체크포인트는 되돌리지 못했다고 알린다', async () => {
