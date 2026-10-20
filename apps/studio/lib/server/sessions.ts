@@ -8255,12 +8255,18 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     const tracker = new ChangeTracker(workspace, () => changesOutsideTools(session), { tolerateExisting: false, fingerprint: (files) => session.checkpoints.stagedFingerprints(files) });
     await tracker.sync();
     const serviceStatus = (event: ServiceStatusEvent): void => onServiceStatus(session, event);
+    // 카드 맥락의 완료 검사는 세션 프로젝트에만 덧입혀져 있다. 게이트가 studio.yaml을 다시 읽을 때 디스크의 workflow를
+    // 그대로 견주면 완료 검사가 "삭제"로 잡혀 약해진 선언으로 실패한다. 그래서 견주는 시작 값은 덧입히기 전 파일의 workflow를
+    // 넘기고, 지금 값은 게이트가 디스크에서 직접 읽는다 — 덧입힌 값을 다시 입혀 읽으면 파일에서 지운 선언이 도로 생겨
+    // 약화 판정이 가려진다(#767)
+    const declarationBaseline = session.terminalTaskContext ? session.terminalTaskContext.original : undefined;
     const gate = await VerificationGate.create({
       project,
       sandbox: session.sandbox,
       workspace,
       allowBreaking: false,
       maxVerifyAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
+      ...(declarationBaseline ? { declarationBaseline } : {}),
       fetcher: fetchContract,
       signal,
       onServiceStatus: serviceStatus,

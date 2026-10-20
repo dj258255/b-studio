@@ -1,6 +1,6 @@
 import type { WorkflowSpec } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import { describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, withDeclaredChecks } from './declared-checks';
+import { describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, weakenedDeclarations, withDeclaredChecks } from './declared-checks';
 
 const unit = { name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 };
 const page = { service: 'web', path: '/cart', mode: 'http' as const, expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false };
@@ -37,6 +37,48 @@ describe('diffDeclaredChecks', () => {
     const started = { autoPageChecks: auto } as unknown as WorkflowSpec;
     expect(hasDeclaredCheckChange(diffDeclaredChecks(started, { autoPageChecks: { ...auto, sampleParams: { id: '7' } } } as unknown as WorkflowSpec))).toBe(false);
     expect(diffDeclaredChecks(started, { autoPageChecks: { ...auto, maxPages: 1 } } as unknown as WorkflowSpec).changed).toEqual(['바뀐 페이지 자동 확인']);
+  });
+});
+
+describe('weakenedDeclarations', () => {
+  it('같으면 빈 목록이다', () => {
+    expect(weakenedDeclarations({ tests: [unit], protectedPaths: ['.env'], maxChangedFiles: 3 } as WorkflowSpec, { tests: [unit], protectedPaths: ['.env'], maxChangedFiles: 3 } as WorkflowSpec)).toEqual([]);
+    expect(weakenedDeclarations(undefined, {} as WorkflowSpec)).toEqual([]);
+  });
+
+  it('확인 선언의 삭제·변경은 약하게 바꾼 것이고 추가는 아니다', () => {
+    const latest = { tests: [{ ...unit, command: ['true'] }], loadChecks: [load] } as WorkflowSpec;
+    expect(weakenedDeclarations({ tests: [unit], pageChecks: [page] } as WorkflowSpec, latest)).toEqual(['삭제: 화면 web /cart', '변경: 테스트 unit']);
+    // 더하기만 한 것은 약해진 것이 아니다
+    expect(weakenedDeclarations({ tests: [unit] } as WorkflowSpec, { tests: [unit], loadChecks: [load] } as WorkflowSpec)).toEqual([]);
+  });
+
+  it('보호·실행 정책 목록에서 빠진 항목을 센다', () => {
+    const started = { protectedPaths: ['api/src', '.env'], evaluationAssets: ['tests/acceptance'], deniedCommands: ['git push'], requireApprovalFor: ['write_file'], releaseRequires: ['test', 'checkpoint'] } as WorkflowSpec;
+    const latest = { protectedPaths: ['.env'], evaluationAssets: [], deniedCommands: [], requireApprovalFor: ['write_file', 'run'], releaseRequires: ['checkpoint'] } as WorkflowSpec;
+    expect(weakenedDeclarations(started, latest)).toEqual(['삭제: 보호 경로 api/src', '삭제: 평가 자산 tests/acceptance', '삭제: 금지 명령 git push', '삭제: 배포 조건 단계 test']);
+    // 더한 것은 약해진 것이 아니다
+    expect(weakenedDeclarations({ protectedPaths: ['.env'] } as WorkflowSpec, { protectedPaths: ['.env', 'api/src'] } as WorkflowSpec)).toEqual([]);
+  });
+
+  it('허용 도구 목록이 없어지거나 도구가 더해지면 약해진 것이다', () => {
+    expect(weakenedDeclarations({ allowedTools: ['read_file'] } as WorkflowSpec, {} as WorkflowSpec)).toEqual(['삭제: 허용 도구(모든 도구 허용)']);
+    expect(weakenedDeclarations({ allowedTools: ['read_file'] } as WorkflowSpec, { allowedTools: ['read_file', 'write_file'] } as WorkflowSpec)).toEqual(['추가: 허용 도구 write_file']);
+    expect(weakenedDeclarations({ allowedTools: ['read_file', 'write_file'] } as WorkflowSpec, { allowedTools: ['read_file'] } as WorkflowSpec)).toEqual([]);
+    // 시작할 때 목록이 없었으면(모든 도구 허용) 지금 목록을 보지 않는다
+    expect(weakenedDeclarations({ } as WorkflowSpec, { allowedTools: ['read_file'] } as WorkflowSpec)).toEqual([]);
+  });
+
+  it('변경 파일 수 상한이 없어지거나 커지면 약해진 것이다', () => {
+    expect(weakenedDeclarations({ maxChangedFiles: 3 } as WorkflowSpec, {} as WorkflowSpec)).toEqual(['삭제: 변경 파일 수 상한']);
+    expect(weakenedDeclarations({ maxChangedFiles: 3 } as WorkflowSpec, { maxChangedFiles: 100 } as WorkflowSpec)).toEqual(['변경: 변경 파일 수 상한 3 → 100']);
+    expect(weakenedDeclarations({ maxChangedFiles: 3 } as WorkflowSpec, { maxChangedFiles: 1 } as WorkflowSpec)).toEqual([]);
+    expect(weakenedDeclarations({} as WorkflowSpec, { maxChangedFiles: 1 } as WorkflowSpec)).toEqual([]);
+  });
+
+  it('maxTurns는 보호가 아니므로 보지 않는다', () => {
+    expect(weakenedDeclarations({ maxTurns: 20 } as WorkflowSpec, { maxTurns: 300 } as WorkflowSpec)).toEqual([]);
+    expect(weakenedDeclarations({ maxTurns: 20 } as WorkflowSpec, {} as WorkflowSpec)).toEqual([]);
   });
 });
 
