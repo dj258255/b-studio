@@ -113,6 +113,12 @@ export interface TaskPlanLaneView {
   workDir?: string;
   /** 레인이 바꾼 파일 (세션 시작 체크포인트를 뺀 체크포인트들의 파일 합집합, 정렬) */
   changedFiles?: string[];
+  /**
+   * 레인의 마지막 체크포인트 sha. 통합이 작업 폴더의 지금 파일이 아니라 이 커밋에 든 파일을 꺼내 쓴다 —
+   * 레인이 끝난 뒤에도 그 칸의 터미널이 살아 있어 작업 폴더의 파일을 바깥을 가리키는 링크로 바꿀 수 있기 때문이다(이슈 #744).
+   * 이 값이 없는 옛 계획은 작업 폴더에서 링크를 따라가지 않고 읽는다
+   */
+  checkpointSha?: string;
   paths: string[];
   status: TaskPlanStepStatus;
   tasks: TaskPlanTaskView[];
