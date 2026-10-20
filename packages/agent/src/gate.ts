@@ -1024,7 +1024,8 @@ export class VerificationGate {
     if (status < 200 || status >= 300) throw new Error(sandbox.redact(`${expect.service} GET ${expect.path}가 HTTP ${status}을 돌려줬습니다`));
     const value = readJsonPath(text, expect.jsonPath);
     if (value === undefined || value === null) {
-      throw new Error(sandbox.redact(`${expect.service} 응답에 ${expect.jsonPath}이 없습니다. 응답 앞부분: ${text.slice(0, 200)}`));
+      // 자르기 전에 가린다. 200자 경계에 걸친 시크릿의 앞부분이 남지 않게 한다(#751)
+      throw new Error(sandbox.redact(`${expect.service} 응답에 ${expect.jsonPath}이 없습니다. 응답 앞부분: ${sandbox.redact(text).slice(0, 200)}`));
     }
     if (typeof value === 'object') throw new Error(`${expect.jsonPath}는 ${Array.isArray(value) ? '배열' : '객체'}입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
     if (typeof value !== 'string' && typeof value !== 'number') throw new Error(`${expect.jsonPath}는 ${typeof value}입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);

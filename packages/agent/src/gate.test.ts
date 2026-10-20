@@ -1372,6 +1372,30 @@ describe('VerificationGate api 값 확인', () => {
     expect(failFeedback(outcome)).toContain(body);
   });
 
+  it('응답 앞부분은 가린 뒤에 잘라 200자 경계에 걸친 시크릿의 앞부분도 남기지 않는다 (#751)', async () => {
+    const target = withWorkflow({ pageChecks: [pageCheck()] });
+    const workspace = new Workspace(target.root);
+    const sandbox = fakeSandbox(target, [true]);
+    sandbox.redact = (text) => text.replaceAll('s3cr3t-value', '[가림]');
+    const prefix = '{"items":[],"token":"';
+    const body = `${prefix}${'x'.repeat(200 - prefix.length - 4)}s3cr3t-value"}`;
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: routingFetcher({ '/api/orders': { status: 200, text: body } }),
+      onEvent: () => {},
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    const feedback = failFeedback(await gate.check());
+    expect(feedback).toContain('응답 앞부분: ');
+    expect(feedback).not.toContain('xs3cr');
+  });
+
   it('가리킨 값이 배열·객체·빈 문자열이면 확인 설정 오류로 알린다', async () => {
     const withValue = async (value: unknown, jsonPath: string) => {
       const target = withWorkflow({ pageChecks: [pageCheck({ expectFromApi: { service: 'api', path: '/api/orders', jsonPath } })] });
