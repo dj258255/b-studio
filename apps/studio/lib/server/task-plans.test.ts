@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -7,7 +7,8 @@ import type { WorkflowPageCheck } from '@b-studio/spec';
 import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
 
-type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[] };
+/** 가짜 체크포인트. contents는 그 커밋 시점의 전체 파일 내용(실제 git 트리 대신), links는 그 커밋에 링크로 든 파일 */
+type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[]; contents?: Record<string, string>; links?: string[] };
 type Session = {
   id: string;
   projectId: string;
@@ -15,6 +16,8 @@ type Session = {
   status: 'ready';
   workDir: string;
   checkpoints: Checkpoint[];
+  /** 이 세션에서 지금까지 커밋된 파일 내용(누적). 체크포인트마다 스냅샷을 떠 통합의 blobAt이 읽는다 */
+  files?: Record<string, string>;
   bootNetwork?: Array<{ service: string; rxBytes: number; txBytes: number }>;
 };
 type SendOptions = {
@@ -113,14 +116,40 @@ const fake = vi.hoisted(() => ({
   terminalSends: [] as Array<{ sessionId: string; request: string; options: { writableScope: readonly string[]; doneTests: readonly unknown[]; onWaiting?: (note?: string) => void } }>,
   /** runTerminalTask가 결과에 실어 줄 비용(달러). undefined면 싣지 않는다(수정 6) */
   terminalCostUsd: undefined as number | undefined,
+  /** 작업 id → 그 작업이 끝나 체크포인트를 남긴 직후 작업 폴더에서 바꿔치기할 파일과 링크 대상(레인 뒤 터미널이 링크로 바꾼 상황) */
+  relinkAfterLane: {} as Record<string, { file: string; target: string }>,
+  /** 작업 id → 그 작업의 체크포인트에 링크(120000)로 든 파일. 통합이 unsupported로 멈춰야 한다 */
+  linkFiles: {} as Record<string, string[]>,
 }));
 
-// 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다
+// 원격 이슈 올리기는 실제 API를 부르므로 CheckpointStore.inspectSource와 createIssue·addSubIssue만 바꿔 끼운다.
+// 통합은 레인 작업 폴더로 CheckpointStore를 만들어 blobAt으로 커밋된 파일을 꺼내므로(이슈 #744), 가짜 저장소는
+// 그 세션의 체크포인트에 스냅샷한 내용을 돌려준다 — 작업 폴더의 지금 파일(링크로 바뀌었을 수 있다)은 보지 않는다
 vi.mock('@b-studio/agent', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@b-studio/agent')>();
   return {
     ...actual,
-    CheckpointStore: { inspectSource: async () => fake.source },
+    CheckpointStore: class {
+      readonly #root: string;
+      constructor(root: string) {
+        this.#root = root;
+      }
+      static async inspectSource() {
+        return fake.source;
+      }
+      async blobAt(file: string, ref: string) {
+        for (const session of fake.sessions.values()) {
+          if (session.workDir !== this.#root) continue;
+          const checkpoint = session.checkpoints.find((entry) => entry.sha === ref);
+          if (!checkpoint) continue;
+          if (checkpoint.links?.includes(file)) return { kind: 'unsupported' as const, mode: '120000' };
+          const content = checkpoint.contents?.[file];
+          if (content === undefined) return { kind: 'missing' as const };
+          return { kind: 'file' as const, content: Buffer.from(content, 'utf8') };
+        }
+        return { kind: 'missing' as const };
+      }
+    },
     createIssue: async (_remote: unknown, input: { title: string; body: string }) => {
       if (fake.failIssue) throw new Error('이슈를 만들지 못했습니다');
       fake.issues.push(input.title);
@@ -209,7 +238,8 @@ vi.mock('./sessions', () => ({
       status: 'ready',
       workDir,
       bootNetwork: fake.bootNetwork,
-      checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [] }],
+      files: { ...fake.sourceFiles },
+      checkpoints: [{ sha: `${id}-start`, shortSha: 'start', message: '세션 시작', createdAt: '', files: [], contents: { ...fake.sourceFiles } }],
     });
     return { id };
   },
@@ -272,13 +302,34 @@ vi.mock('./sessions', () => ({
     if (files === 'fail' || files === undefined) {
       finish('failed', '검증 게이트를 통과하지 못했습니다');
     } else {
+      // 실제 git 트리처럼 파일 내용을 세션에 누적해 두고, 체크포인트마다 그 시점의 스냅샷을 떠 둔다(통합의 blobAt이 읽는다)
+      const committed = (session.files ??= {});
       for (const [file, content] of Object.entries(files)) {
         mkdirSync(path.dirname(path.join(session.workDir, file)), { recursive: true });
         writeFileSync(path.join(session.workDir, file), content);
+        committed[file] = content;
       }
       // 레인이 지운 파일은 작업 폴더에서 사라지고 체크포인트에만 남는다 (실제 체크포인트의 변경 목록과 같다)
-      for (const file of deleted) rmSync(path.join(session.workDir, file), { force: true });
-      session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set([...Object.keys(files), ...deleted])] });
+      for (const file of deleted) {
+        rmSync(path.join(session.workDir, file), { force: true });
+        delete committed[file];
+      }
+      const links = taskId ? (fake.linkFiles[taskId] ?? []) : [];
+      session.checkpoints.unshift({
+        sha: runId,
+        shortSha: runId,
+        message: request,
+        createdAt: '',
+        files: [...new Set([...Object.keys(files), ...deleted])],
+        contents: { ...committed },
+        ...(links.length > 0 ? { links } : {}),
+      });
+      // 레인이 끝난 뒤에도 그 칸의 터미널이 살아 있어 작업 폴더의 파일을 바깥을 가리키는 링크로 바꿀 수 있다(이슈 #744)
+      if (taskId && fake.relinkAfterLane[taskId]) {
+        const { file, target } = fake.relinkAfterLane[taskId]!;
+        rmSync(path.join(session.workDir, file), { force: true });
+        symlinkSync(target, path.join(session.workDir, file));
+      }
       finish('done', '완료');
     }
     return { runId };
@@ -305,12 +356,17 @@ vi.mock('./terminal-lane', () => ({
     const files = taskId ? fake.writes[taskId] : undefined;
     const runId = `terminal-${fake.terminalSends.length}`;
     if (files === 'fail' || files === undefined) return { runId, status: 'failed', summary: '검증 게이트를 통과하지 못했습니다', ...fake.run };
+    const committed = (session.files ??= {});
     for (const [file, content] of Object.entries(files)) {
       mkdirSync(path.dirname(path.join(session.workDir, file)), { recursive: true });
       writeFileSync(path.join(session.workDir, file), content);
+      committed[file] = content;
     }
-    for (const file of deleted) rmSync(path.join(session.workDir, file), { force: true });
-    session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set([...Object.keys(files), ...deleted])] });
+    for (const file of deleted) {
+      rmSync(path.join(session.workDir, file), { force: true });
+      delete committed[file];
+    }
+    session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set([...Object.keys(files), ...deleted])], contents: { ...committed } });
     return { runId, status: 'done', summary: '완료', ...fake.run, ...(fake.terminalCostUsd !== undefined ? { costUsd: fake.terminalCostUsd } : {}) };
   },
 }));
@@ -380,6 +436,8 @@ beforeEach(() => {
   fake.terminalAllowed = true;
   fake.terminalSends = [];
   fake.terminalCostUsd = undefined;
+  fake.relinkAfterLane = {};
+  fake.linkFiles = {};
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
   // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
@@ -602,6 +660,37 @@ describe('작업 분해 실행', () => {
     const plan = await run({ projectId: 'orders', request: '범위 밖 변경', modelId: 'model-a', owner: 'kim' });
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('쓰기 범위 밖 파일을 바꿨습니다: web/b/sneaky.md');
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+
+  it('레인이 끝난 뒤 작업 폴더의 파일이 바깥 파일을 가리키는 링크로 바뀌어도 통합은 체크포인트에 커밋된 내용을 쓴다(이슈 #744)', async () => {
+    const secret = path.join(fake.root, 'secret.txt');
+    writeFileSync(secret, 'SECRET-CONTENT');
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    // 레인이 체크포인트를 남긴 직후, 그 칸의 터미널(아직 살아 있다)이 파일을 프로젝트 밖 비밀 파일을 가리키는 링크로 바꾼다
+    fake.relinkAfterLane = { a: { file: 'web/a/one.md', target: secret } };
+
+    const plan = await run({ projectId: 'orders', request: '링크 바꿔치기', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
+    const write = integration.options.scriptedTurns![0]!.toolCalls!.find((call) => call.input.path === 'web/a/one.md')!;
+    // 작업 폴더의 파일이 아니라 체크포인트에 커밋된 내용을 읽는다 — 링크가 가리키는 비밀 값이 실리지 않는다
+    expect(write.input.content).toBe('one');
+    expect(write.input.content).not.toContain('SECRET-CONTENT');
+  });
+
+  it('체크포인트에 링크가 커밋돼 있으면 통합이 멈추고 링크·서브모듈이라고 알린다(이슈 #744)', async () => {
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    // 이 레인의 마지막 체크포인트에는 web/a/one.md가 링크(120000)로 들어 있다
+    fake.linkFiles = { a: ['web/a/one.md'] };
+
+    const plan = await run({ projectId: 'orders', request: '링크 커밋', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('lane-1의 web/a/one.md은 링크·서브모듈이라 통합하지 않습니다');
     expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
   });
 
@@ -1056,6 +1145,60 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     // 통합 샌드박스를 띄우기 전에 멈춰야 한다. 스크립트 턴이 돌면 아무것도 합치지 않았는데 통과한 것처럼 남는다
     expect(fake.counter).toBe(0);
     expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+
+  it('옛 계획(checkpointSha 없음)에서 작업 폴더의 파일이 링크면 통합하지 않고 멈춘다(이슈 #744)', async () => {
+    const laneDir = path.join(fake.root, 'lane-old');
+    mkdirSync(path.join(laneDir, 'web/a'), { recursive: true });
+    const secret = path.join(fake.root, 'secret-old.txt');
+    writeFileSync(secret, 'SECRET');
+    // 레인 뒤 터미널이 남긴 파일을 바깥 비밀 파일을 가리키는 링크로 바꾼 상태. 옛 기록에는 체크포인트 sha가 없다
+    symlinkSync(secret, path.join(laneDir, 'web/a/one.md'));
+    writePlan({
+      id: 'plan-old-link',
+      owner: 'kim',
+      status: 'interrupted',
+      lanes: [laneView('lane-1', 'done', { sessionId: 'session-old', workDir: laneDir, changedFiles: ['web/a/one.md'], paths: ['web/a'] })],
+    });
+
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    resumeTaskPlan('plan-old-link', 'kim');
+
+    const plan = await settled(() => reloaded('plan-old-link', 'kim'));
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('lane-1의 web/a/one.md은 링크·서브모듈이라 통합하지 않습니다');
+    // 링크를 따라가지 않고 멈춰, 통합 샌드박스도 띄우지 않는다
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+  });
+
+  it('옛 계획(checkpointSha 없음)에서 상위 폴더가 바깥을 가리키는 링크면 그 너머를 읽지 않고 멈춘다(이슈 #744)', async () => {
+    const laneDir = path.join(fake.root, 'lane-old-parent');
+    // 링크를 만들 상위 폴더(web)는 실제로 있어야 하고, 그 안의 a 를 바깥 폴더를 가리키는 링크로 바꾼다
+    mkdirSync(path.join(laneDir, 'web'), { recursive: true });
+    const outside = path.join(fake.root, 'outside-dir');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, 'one.md'), 'SECRET-OUTSIDE');
+    // 파일이 아니라 상위 폴더(web/a) 자체를 바깥 폴더를 가리키는 링크로 바꾼다. O_NOFOLLOW는 마지막 요소만 보므로
+    // readRegularFileSync로는 이 너머를 읽었다
+    symlinkSync(outside, path.join(laneDir, 'web/a'));
+    writePlan({
+      id: 'plan-old-parent-link',
+      owner: 'kim',
+      status: 'interrupted',
+      lanes: [laneView('lane-1', 'done', { sessionId: 'session-old-parent', workDir: laneDir, changedFiles: ['web/a/one.md'], paths: ['web/a'] })],
+    });
+
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    resumeTaskPlan('plan-old-parent-link', 'kim');
+
+    const plan = await settled(() => reloaded('plan-old-parent-link', 'kim'));
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('lane-1의 web/a/one.md은 링크·서브모듈이라 통합하지 않습니다');
+    // 바깥 폴더의 내용이 통합에 실리지 않는다(통합 샌드박스도 띄우지 않는다)
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(
+      fake.sends.some((send) => (send.options.scriptedTurns?.[0]?.toolCalls ?? []).some((call) => call.input.content?.includes('SECRET-OUTSIDE'))),
+    ).toBe(false);
   });
 });
 
