@@ -89,10 +89,10 @@ function get(port: number): Promise<{ status: number; headers: http.IncomingHttp
 }
 
 /** upstream이 내보내는 그대로를 pipeMaybeInjected로 돌려주는 중계 서버 */
-async function proxyFor(upstreamPort: number): Promise<number> {
+async function proxyFor(upstreamPort: number, limits?: { rawBytes?: number; decodedBytes?: number }): Promise<number> {
   const server = http.createServer((request, response) => {
     const proxied = http.request({ hostname: '127.0.0.1', port: upstreamPort, path: request.url }, (upstreamResponse) => {
-      pipeMaybeInjected(upstreamResponse, response, { ...upstreamResponse.headers });
+      pipeMaybeInjected(upstreamResponse, response, { ...upstreamResponse.headers }, limits);
     });
     request.pipe(proxied);
   });
@@ -169,5 +169,53 @@ describe('pipeMaybeInjected', () => {
     const result = await get(proxyPort);
     expect(result.status).toBe(304);
     expect(result.body.length).toBe(0);
+  });
+
+  it('content-length가 원문 상한을 넘는 HTML은 건드리지 않고 바이트 그대로 보낸다', async () => {
+    const body = Buffer.from(`<html><head></head><body>${'x'.repeat(500)}</body></html>`);
+    const upstreamPort = await listen(
+      http.createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html', 'content-length': String(body.length) });
+        response.end(body);
+      }),
+    );
+    const proxyPort = await proxyFor(upstreamPort, { rawBytes: 100 });
+    const result = await get(proxyPort);
+    expect(result.body.equals(body)).toBe(true);
+    expect(result.headers['content-length']).toBe(String(body.length));
+  });
+
+  it('content-length 없이 조각을 나눠 보내다 원문 상한을 넘으면 순서대로 바이트 그대로 이어 보낸다', async () => {
+    const part1 = Buffer.from('<html><head></head><body>');
+    const part2 = Buffer.from('y'.repeat(300));
+    const part3 = Buffer.from('</body></html>');
+    const all = Buffer.concat([part1, part2, part3]);
+    const upstreamPort = await listen(
+      http.createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html' });
+        response.write(part1);
+        response.write(part2);
+        response.write(part3);
+        response.end();
+      }),
+    );
+    const proxyPort = await proxyFor(upstreamPort, { rawBytes: 100 });
+    const result = await get(proxyPort);
+    expect(result.body.equals(all)).toBe(true);
+    expect(result.body.toString('utf8')).not.toContain('b-studio:location');
+  });
+
+  it('푼 크기가 상한을 넘는 압축 폭탄은 압축된 원문 그대로 돌려준다', async () => {
+    const gz = zlib.gzipSync(Buffer.from(`<html><head></head><body>${'z'.repeat(5000)}</body></html>`));
+    const upstreamPort = await listen(
+      http.createServer((_request, response) => {
+        response.writeHead(200, { 'content-type': 'text/html', 'content-encoding': 'gzip', 'content-length': String(gz.length) });
+        response.end(gz);
+      }),
+    );
+    const proxyPort = await proxyFor(upstreamPort, { decodedBytes: 100 });
+    const result = await get(proxyPort);
+    expect(result.body.equals(gz)).toBe(true);
+    expect(result.headers['content-encoding']).toBe('gzip');
   });
 });
