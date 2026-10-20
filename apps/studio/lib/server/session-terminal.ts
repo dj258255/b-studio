@@ -98,6 +98,11 @@ export interface TerminalTarget {
   /** CLI의 홈 볼륨을 나누는 단위 */
   projectId: string;
   /**
+   * 세션 프로젝트가 선언한 평가 자산(studio.yaml workflow.evaluationAssets). 컨테이너 방식이면 작업 복사본 위에 읽기 전용으로 덮는다.
+   * 이 컴퓨터 방식은 마운트가 없어 게이트의 지문 견줌에만 기댄다
+   */
+  evaluationAssets?: readonly string[];
+  /**
    * 세션이 아직 살아 있는가. 세션을 멈추는 일과 터미널을 여는 일이 겹칠 수 있다: 멈추는 쪽이 컨테이너를 지운 뒤에
    * 여는 쪽이 컨테이너를 띄우면, 멈춘 세션의 작업 복사본을 붙인 컨테이너가 남는다. 띄운 뒤에 한 번 더 물어 지운다
    */
@@ -146,7 +151,12 @@ export async function removeContainerAndConfig(
 }
 
 const DOCKER_BACKEND: TerminalBackend = {
-  prepare: async (target, gateway) => ensureAgentContainer(target.sandboxId, target.root, { projectId: target.projectId, ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}) }),
+  prepare: async (target, gateway) =>
+    ensureAgentContainer(target.sandboxId, target.root, {
+      projectId: target.projectId,
+      ...(target.evaluationAssets ? { evaluationAssets: target.evaluationAssets } : {}),
+      ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}),
+    }),
   open: (place, options) => openAgentTerminal(place, options),
   remove: (sandboxId) => removeContainerAndConfig(sandboxId),
   reachable: (place) => probeAgentGateway(place),

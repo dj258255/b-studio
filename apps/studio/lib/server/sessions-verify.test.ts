@@ -15,6 +15,10 @@ const fake = vi.hoisted(() => ({
   restarts: 0,
   /** 이 낱말이 든 명령은 종료 코드 1로 끝난다(선언한 테스트를 실패시킬 때 쓴다) */
   failCommands: [] as string[],
+  /** syncEvaluationAssets가 받은 평가 자산(복사본 내용이 마지막 체크포인트의 판인지 본다) */
+  evaluationSyncs: [] as Array<Array<{ path: string; kind: string; files: Array<{ path: string; content: string; executable: boolean }> }>>,
+  /** provider.create가 받은 평가 자산의 첫 내용(자리 종류를 체크포인트 판으로 정하는지 본다) */
+  creates: [] as Array<Array<{ path: string; kind: string }>>,
 }));
 
 // 샌드박스(Docker)를 띄우지 않는다. providerFromEnv만 가짜로 바꾸고 나머지는 그대로 쓴다
@@ -43,6 +47,15 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     },
     async stats() {
       return [];
+    },
+    async syncEvaluationAssets(assets: ReadonlyArray<{ path: string; kind: string; files: ReadonlyArray<{ path: string; content: Buffer; executable: boolean }> }>) {
+      fake.evaluationSyncs.push(
+        assets.map((asset) => ({
+          path: asset.path,
+          kind: asset.kind,
+          files: asset.files.map((file) => ({ path: file.path, content: file.content.toString('base64'), executable: file.executable })),
+        })),
+      );
     },
     async *logs() {},
     async exec(_service: string, command: string[]) {
@@ -77,7 +90,14 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
   }
   return {
     ...actual,
-    providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }),
+    providerFromEnv: () => ({
+      name: 'fake',
+      isolation: undefined,
+      create: async (_project: unknown, options?: { evaluationAssets?: ReadonlyArray<{ path: string; kind: string }> }) => {
+        fake.creates.push((options?.evaluationAssets ?? []).map((asset) => ({ path: asset.path, kind: asset.kind })));
+        return sandbox;
+      },
+    }),
     DockerDeployer: FakeDeployer,
     defaultDeployRoot: () => `${fake.root}-deploys`,
     resolveSecrets: async () => ({}),
@@ -122,6 +142,8 @@ workflow:
   fake.root = path.join(root, 'project');
   fake.execCalls = [];
   fake.failCommands = [];
+  fake.evaluationSyncs = [];
+  fake.creates = [];
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
   process.env.B_STUDIO_SESSIONS_DIR = path.join(root, 'sessions');
@@ -487,6 +509,48 @@ workflow:
       });
     });
     expect(fake.execCalls).toEqual([['./gradlew', 'check']]);
+
+    await stopSession(created).catch(() => {});
+  });
+});
+
+// #745: 컨테이너에 붙는 평가 자산은 작업 복사본이 아니라 b-studio가 가진 복사본이고, 그 내용은 마지막 체크포인트의 판이어야 한다
+describe('평가 자산 복사본(#745)', () => {
+  async function declareAssets(): Promise<void> {
+    const specPath = path.join(root, 'project', 'studio.yaml');
+    const spec = await readFile(specPath, 'utf8');
+    await writeFile(specPath, spec.replace('workflow:\n', 'workflow:\n  evaluationAssets: [tests/acceptance, expected.json]\n'));
+    await mkdir(path.join(root, 'project', 'tests', 'acceptance'), { recursive: true });
+    await writeFile(path.join(root, 'project', 'tests', 'acceptance', 'case.json'), '{"case":1}\n');
+    await writeFile(path.join(root, 'project', 'expected.json'), '{"expected":true}\n');
+  }
+
+  it('샌드박스가 준비될 때와 실행을 시작할 때 마지막 체크포인트의 자산을 syncEvaluationAssets로 넘긴다', async () => {
+    await declareAssets();
+    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(created)).toBe('ready');
+
+    // boot가 마지막 체크포인트에서 꺼낸 폴더·파일 자산을 그대로 넘겼다
+    expect(fake.evaluationSyncs.length).toBeGreaterThan(0);
+    const boot = fake.evaluationSyncs.at(-1)!;
+    expect(boot.map((asset) => [asset.path, asset.kind])).toEqual([
+      ['tests/acceptance', 'directory'],
+      ['expected.json', 'file'],
+    ]);
+    expect(boot[0]!.files).toEqual([{ path: 'tests/acceptance/case.json', content: Buffer.from('{"case":1}\n').toString('base64'), executable: false }]);
+    expect(boot[1]!.files).toEqual([{ path: 'expected.json', content: Buffer.from('{"expected":true}\n').toString('base64'), executable: false }]);
+
+    // 샌드박스를 만들 때도 마지막 체크포인트의 판을 넘겨 자리 종류와 첫 내용을 정한다(작업 복사본의 지금 모습이 아니다)
+    expect(fake.creates.at(-1)).toEqual([
+      { path: 'tests/acceptance', kind: 'directory' },
+      { path: 'expected.json', kind: 'file' },
+    ]);
+
+    // 실행을 시작할 때도 같은 판을 넘긴다(작업 복사본의 지금 상태가 아니다)
+    fake.evaluationSyncs = [];
+    await runWrite(created, 'light');
+    expect(fake.evaluationSyncs.length).toBeGreaterThan(0);
+    expect(fake.evaluationSyncs.at(-1)).toEqual(boot);
 
     await stopSession(created).catch(() => {});
   });

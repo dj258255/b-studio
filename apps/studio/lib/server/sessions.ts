@@ -259,6 +259,7 @@ import {
   SandboxError,
   type DeployLog,
   type DeployResult,
+  type EvaluationAssetContent,
   type FileChange,
   type Sandbox,
   type ServiceStatusEvent,
@@ -884,7 +885,15 @@ async function startSession({
   const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, projectId);
   // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
   const provider = providerFromEnv();
-  const sandbox = await provider.create(project, { secrets: await resolveSecrets(project) });
+  // 샌드박스를 만들 때 평가 자산 자리의 종류와 첫 내용을 마지막 체크포인트의 판으로 정한다(#745). 작업 복사본의 지금 모습을 보면
+  // 에이전트가 종류를 바꿔 컨테이너가 붙잡은 자리와 b-studio가 쓰는 자리가 갈린다. 꺼내지 못하면 세션을 만들지 않는다
+  let initialAssets: EvaluationAssetContent[] = [];
+  try {
+    initialAssets = await evaluationAssetContents(checkpoints, project.spec.workflow?.evaluationAssets ?? [], firstCheckpoint.sha);
+  } catch (error) {
+    throw new StudioError(500, `평가 자산을 준비하지 못해 세션을 만들지 않았습니다: ${describe(error)}`);
+  }
+  const sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
 
   const session = newSession({
     snapshot: {
@@ -1417,7 +1426,14 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
     const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
-    const sandbox = await provider.create(project, { secrets });
+    // 이어서 작업할 때도 샌드박스의 평가 자산 자리 종류·첫 내용은 마지막 체크포인트의 판으로 정한다(#745). 꺼내지 못하면 세션을 만들지 않는다
+    let initialAssets: EvaluationAssetContent[] = [];
+    try {
+      initialAssets = await evaluationAssetContents(checkpoints, project.spec.workflow?.evaluationAssets ?? [], head.sha);
+    } catch (error) {
+      throw new StudioError(500, `평가 자산을 준비하지 못해 세션을 만들지 않았습니다: ${describe(error)}`);
+    }
+    const sandbox = await provider.create(project, { secrets, ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
 
     const session = newSession({
       snapshot: {
@@ -2047,6 +2063,8 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
         emit(session, { type: 'boot_network', at: new Date().toISOString(), network });
       },
     });
+    // 샌드박스가 준비되면 평가 자산의 복사본도 마지막 체크포인트의 판으로 맞춘다(#745). 실패하면 세션을 ready로 두지 않는다
+    await syncEvaluationAssetsFromCheckpoint(session);
     const head = session.snapshot.checkpoints[0]!;
     if (!resumed) {
       // 서비스가 마이그레이션까지 마친 상태를 세션 시작 체크포인트의 데이터베이스 상태로 남긴다
@@ -2661,12 +2679,52 @@ async function ensureReadySessionInfra(session: Session, signal: AbortSignal): P
   return { ok: true };
 }
 
+/**
+ * 마지막 체크포인트(ref)에 커밋된 평가 자산을 꺼낸다(#745). 커밋된 판을 읽으므로 실행 전에 백그라운드나 사람이 작업 복사본에서
+ * 바꿔 둔 내용은 들어가지 않는다. 링크·서브모듈은 넣지 않는다(일반 파일 100644·100755만). 자산의 종류도 이 판이 정한다 —
+ * 작업 복사본의 지금 모습(파일·링크·없음)을 보지 않는다. 폴더 자산은 커밋된 일반 파일만 꺼내고 링크는 빈 폴더가 된다
+ */
+async function evaluationAssetContents(checkpoints: CheckpointStore, declared: readonly string[], ref: string): Promise<EvaluationAssetContent[]> {
+  const assets: EvaluationAssetContent[] = [];
+  for (const assetPath of declared) {
+    const blob = await checkpoints.blobAt(assetPath, ref);
+    if (blob.kind === 'file') {
+      assets.push({ path: assetPath, kind: 'file', files: [{ path: assetPath, content: blob.content, executable: blob.executable }] });
+      continue;
+    }
+    const files = await checkpoints.listBlobs(ref, assetPath);
+    assets.push({ path: assetPath, kind: 'directory', files: files.map((file) => ({ path: file.path, content: file.content, executable: file.executable })) });
+  }
+  return assets;
+}
+
+/**
+ * 평가 자산의 복사본을 마지막 체크포인트에 커밋된 판으로 맞춘다(#745). 컨테이너에는 작업 복사본의 자산이 아니라 이 복사본이
+ * 읽기 전용으로 붙는다. 선언이 없거나 제공자가 복사본을 지원하지 않으면 아무 일도 하지 않는다.
+ * 읽기·쓰기에 실패하면 던진다 — 빈 복사본으로 테스트가 도는 것을 조용히 넘기지 않는다
+ */
+async function syncEvaluationAssetsFromCheckpoint(session: Session): Promise<void> {
+  const declared = session.project.spec.workflow?.evaluationAssets ?? [];
+  const sandbox = session.sandbox;
+  if (declared.length === 0 || !sandbox.syncEvaluationAssets) return;
+  const ref = session.snapshot.checkpoints[0]?.sha;
+  if (!ref) throw new StudioError(502, '평가 자산을 꺼낼 마지막 체크포인트가 없습니다');
+  await sandbox.syncEvaluationAssets(await evaluationAssetContents(session.checkpoints, declared, ref));
+}
+
 /** 샌드박스를 건드리기 전에 인증부터 확인하고, 모드에 맞는 에이전트로 요청을 처리한다 */
 async function runPlan(session: Session, run: ActiveRun, request: string, plan: RunPlan, signal: AbortSignal): Promise<AgentResult | { preflightError: string }> {
   // 세션 상태(ready)만 보고 핵심 컨테이너가 실제로 있다고 가정하지 않는다(도그푸딩 마찰 130). 이 확인은
   // 모델 호출·게이트보다 먼저다 — 실패하면 턴을 하나도 쓰지 않고 바로 알린다
   const infra = await ensureReadySessionInfra(session, signal);
   if (!infra.ok) return { preflightError: infra.reason };
+  // 컨테이너에 붙는 평가 자산은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 실행을 시작하기 전에
+  // 마지막 체크포인트에 커밋된 판으로 맞춘다 — 백그라운드가 작업 복사본에서 바꿔 둔 판이 기준이 되지 않는다
+  try {
+    await syncEvaluationAssetsFromCheckpoint(session);
+  } catch (error) {
+    return { preflightError: `평가 자산을 준비하지 못해 실행을 시작하지 않았습니다: ${describe(error)}` };
+  }
 
   // 이번 요청 전부터 작업 트리에 있던 변경(보관본 되살리기, 사람이 편집기로 바꾼 것 등 출처를 가리지 않는다).
   // 에이전트가 이번 실행에서 파일을 하나도 건드리지 않아도 게이트가 이 변경을 검증 대상으로 보게 한다(ADR-131:
@@ -7441,7 +7499,15 @@ export function sessionTerminalAllowed(): boolean {
  * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
  * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
  */
-export function sessionTerminalTarget(id: string): { sandboxId: string; root: string; projectId: string; alive: () => boolean; onViolation: (reason: string) => void; gateway: () => Promise<AgentGatewayAddress> } {
+export function sessionTerminalTarget(id: string): {
+  sandboxId: string;
+  root: string;
+  projectId: string;
+  evaluationAssets?: readonly string[];
+  alive: () => boolean;
+  onViolation: (reason: string) => void;
+  gateway: () => Promise<AgentGatewayAddress>;
+} {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
@@ -7452,6 +7518,7 @@ export function sessionTerminalTarget(id: string): { sandboxId: string; root: st
     sandboxId: session.sandbox.id,
     root: session.project.root,
     projectId: session.snapshot.projectId,
+    evaluationAssets: session.project.spec.workflow?.evaluationAssets,
     alive,
     // 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 세션 쪽에서 처리한다
     onViolation: (reason: string) => terminalViolation(id, reason),
@@ -8173,6 +8240,8 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     await ensureBooted(session);
     const infra = await ensureReadySessionInfra(session, signal);
     if (!infra.ok) throw new Error(infra.reason);
+    // 게이트를 만들기 전에 평가 자산의 복사본을 마지막 체크포인트의 판으로 맞춘다(#745). 실패하면 이 실행은 시작하지 않는다
+    await syncEvaluationAssetsFromCheckpoint(session);
     // 기준은 서버가 아는 마지막 체크포인트의 문서다(runPlan과 같은 이유, ADR-157)
     const lastCheckpointSha = session.snapshot.checkpoints[0]?.sha;
     const requirementsBaseline = (lastCheckpointSha ? await session.checkpoints.fileAt(REQUIREMENTS_FILE, lastCheckpointSha) : undefined) ?? null;

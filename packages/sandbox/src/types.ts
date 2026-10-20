@@ -251,10 +251,30 @@ export interface ExecFileOptions {
   raw?: boolean;
 }
 
+/** 평가 자산 하나의 내용. 폴더 자산이면 files는 그 안의 일반 파일들이고, 파일 자산이면 그 파일 하나다 */
+export interface EvaluationAssetContent {
+  /** 프로젝트 폴더 기준 선언 경로 */
+  path: string;
+  kind: 'file' | 'directory';
+  files: ReadonlyArray<{
+    /** 프로젝트 폴더 기준 경로 */
+    path: string;
+    content: Buffer;
+    /** 실행 비트(100755). 파일 자산에도 그대로 쓴다 */
+    executable: boolean;
+  }>;
+}
+
 /** 프로젝트 하나를 실행하는 격리된 환경 */
 export interface Sandbox {
   readonly id: string;
   readonly project: LoadedProject;
+  /**
+   * 평가 자산(studio.yaml workflow.evaluationAssets)의 복사본을 b-studio가 가진 자리에 채운다. 컨테이너에는 작업 복사본의
+   * 경로가 아니라 이 복사본이 읽기 전용으로 붙는다(#745). `path`는 선언 경로, `files[].path`는 프로젝트 기준 경로다.
+   * 선언에 없는 `path`나 선언 경로 밖의 파일은 거절한다. 구현하지 않는 제공자는 undefined로 둔다(호출자가 건너뛴다)
+   */
+  syncEvaluationAssets?(assets: readonly EvaluationAssetContent[]): Promise<void>;
   /** 모든 managed 서비스를 띄우고 준비될 때까지 기다린다 */
   start(options?: StartOptions): Promise<ServiceEndpoint[]>;
   /** 코드가 바뀐 서비스 하나만 다시 빌드해서 띄운다 */
@@ -365,4 +385,11 @@ export interface CleanupCommand {
 export interface CreateSandboxOptions {
   /** studio.yaml에 선언한 시크릿의 값 (이름 → 값). resolveSecrets()로 준비한다 */
   secrets?: Record<string, string>;
+  /**
+   * 선언한 평가 자산의 **마지막 체크포인트 판**(#745). 자리의 종류와 첫 내용을 여기서 정하고, 컨테이너를 띄우기 전에 채운다.
+   * 작업 복사본의 지금 모습(있는 파일·링크·없는 것)을 보지 않는다 — 에이전트가 종류를 바꾸면 컨테이너가 붙잡은 자리와
+   * b-studio가 쓰는 자리가 갈린다. 선언했는데 여기 없는 자산은 빈 폴더 자리로 만든다.
+   * 스튜디오는 세션을 만들 때 마지막 체크포인트에서 꺼낸 판을 넘긴다. 구현하지 않는 제공자는 무시한다
+   */
+  evaluationAssets?: readonly EvaluationAssetContent[];
 }

@@ -5,7 +5,8 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { EDGE_IMAGE } from '../edge-config';
 import { SandboxError } from '../errors';
-import { computeGitMask, findMissingMasks, type InspectedMount, type MaskVolume } from './git-mask';
+import { defaultEvaluationAssetRoot, evaluationAssetCopies } from './evaluation-assets';
+import { computeGitMask, findMissingMasks, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
 import { assertSandboxId } from '../sandbox-id';
 
 const execFileAsync = promisify(execFile);
@@ -463,6 +464,15 @@ export interface AgentContainerOptions {
   projectId: string;
   /** 관문 설정을 둔 호스트 폴더. 주면 CLI의 관리 설정 자리에 붙이고, 붙었는지를 띄운 뒤에 확인한다 */
   gatewayDir?: string;
+  /**
+   * 세션 프로젝트가 선언한 평가 자산(studio.yaml workflow.evaluationAssets). 작업 복사본이 아니라 b-studio가 가진 복사본(#745)을
+   * 작업 복사본 위에 읽기 전용으로 덮는다. 선언이 바뀌면 다음에 컨테이너를 만들 때부터 반영된다 — 떠 있는 컨테이너의 마운트가
+   * 선언과 다르면 지우고 새로 띄운다. 게이트의 지문 견줌은 그대로 남는다(이 컴퓨터 방식의 호스트 셸은 컨테이너 밖이라
+   * 이 마운트로 막지 못한다 — 지문 견줌이 맡는다)
+   */
+  evaluationAssets?: readonly string[];
+  /** 복사본을 두는 호스트 폴더(샌드박스 제공자와 같아야 한다). 기본 ~/.cache/b-studio/evaluation-assets */
+  evaluationAssetRoot?: string;
   dockerBin?: string;
   image?: string;
 }
@@ -472,25 +482,34 @@ export interface AgentContainerOptions {
  * 띄운 뒤에는 설정이 아니라 결과를 본다: 실제 마운트에서 `.git`이 읽기 전용으로 덮였는지 확인하고, 아니면 지우고 던진다.
  * 확인하기 전에는 누구도 이 컨테이너에서 명령을 돌리지 않는다(이름을 돌려주지 않는다)
  */
-export async function ensureAgentContainer(sandboxId: string, projectRoot: string, { projectId, gatewayDir, dockerBin = 'docker', image }: AgentContainerOptions): Promise<string> {
+export async function ensureAgentContainer(
+  sandboxId: string,
+  projectRoot: string,
+  { projectId, gatewayDir, evaluationAssets, evaluationAssetRoot, dockerBin = 'docker', image }: AgentContainerOptions,
+): Promise<string> {
   const name = agentContainerName(sandboxId);
   const docker = (args: string[]) => execFileAsync(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
   const root = await realpath(projectRoot);
+  // 서비스 컨테이너와 같은 복사본 자리를 본다(#745). 여기서는 만들지 않는다 — 샌드박스를 만들 때 이미 만들어 두었다
+  const copies = evaluationAssetCopies(evaluationAssets ?? [], evaluationAssetRoot ?? defaultEvaluationAssetRoot(), sandboxId);
+  const masks = (await computeGitMask(root, { services: { [AGENT_SERVICE]: { volumes: [{ type: 'bind', source: root, target: AGENT_WORKSPACE }] } } }, { evaluationAssets: copies }))[AGENT_SERVICE] ?? [];
+  // 사후 확인의 기대는 계획(마스크에 적은 target·원본)에서 가져온다 — 실제 마운트에서 계산하지 않는다
+  const evaluationAssetPlan = { [AGENT_SERVICE]: await selectEvaluationAssetVolumes(masks, copies) };
 
   // 설정이 다른 컨테이너(관문 없이 띄운 것, 다른 판의 설정을 붙인 것)는 다시 쓰지 않고 새로 띄운다
-  const ready = async (mounts: readonly InspectedMount[]): Promise<boolean> => (await masksInPlace(root, mounts)) && gatewayInPlace(gatewayDir, mounts);
+  const ready = async ({ mounts, tmpfs }: InspectedContainer): Promise<boolean> =>
+    (await masksInPlace(root, mounts, tmpfs, evaluationAssetPlan)) && gatewayInPlace(gatewayDir, mounts);
   const existing = await inspect(dockerBin, name);
-  if (existing?.running && (await ready(existing.mounts))) return name;
+  if (existing?.running && (await ready(existing))) return name;
   if (existing) await docker(['rm', '--force', name]).catch(() => {});
 
-  const masks = (await computeGitMask(root, { services: { [AGENT_SERVICE]: { volumes: [{ type: 'bind', source: root, target: AGENT_WORKSPACE }] } } }))[AGENT_SERVICE] ?? [];
   try {
     await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId), gatewayDir, image }));
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 띄우지 못했습니다', describe(error), { platform: true });
   }
   const started = await inspect(dockerBin, name);
-  if (!started?.running || !(await ready(started.mounts))) {
+  if (!started?.running || !(await ready(started))) {
     await docker(['rm', '--force', name]).catch(() => {});
     throw new SandboxError('에이전트 컨테이너의 .git 보호와 관문 설정을 확인하지 못해 컨테이너를 지웠습니다', started ? `마운트 ${started.mounts.length}개` : '컨테이너가 뜨지 않았습니다', { platform: true });
   }
@@ -524,8 +543,19 @@ export async function removeAgentContainer(sandboxId: string, { dockerBin = 'doc
   await execFileAsync(dockerBin, ['rm', '--force', agentContainerName(sandboxId)], { cwd: tmpdir() }).catch(() => {});
 }
 
-async function masksInPlace(projectRoot: string, mounts: readonly InspectedMount[]): Promise<boolean> {
-  return (await findMissingMasks(projectRoot, mounts, {})).length === 0;
+interface InspectedContainer {
+  running: boolean;
+  mounts: InspectedMount[];
+  tmpfs: Record<string, string>;
+}
+
+async function masksInPlace(
+  projectRoot: string,
+  mounts: readonly InspectedMount[],
+  tmpfs: Readonly<Record<string, string>>,
+  evaluationAssetPlan: Readonly<Record<string, readonly MaskVolume[]>>,
+): Promise<boolean> {
+  return (await findMissingMasks(projectRoot, mounts, {}, { evaluationAssetPlan, service: AGENT_SERVICE, tmpfs })).length === 0;
 }
 
 /** 관문 설정이 정한 대로 붙어 있는가: 주었으면 그 폴더가 읽기 전용으로, 주지 않았으면 그 자리에 아무것도 없어야 한다 */
@@ -538,11 +568,11 @@ function gatewayInPlace(gatewayDir: string | undefined, mounts: readonly Inspect
   return mounted.length === 1 && (source === gatewayDir || source.endsWith(gatewayDir)) && mounted[0]!.RW === false;
 }
 
-async function inspect(dockerBin: string, name: string): Promise<{ running: boolean; mounts: InspectedMount[] } | undefined> {
+async function inspect(dockerBin: string, name: string): Promise<InspectedContainer | undefined> {
   try {
     const { stdout } = await execFileAsync(dockerBin, ['inspect', '--type', 'container', name], { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
-    const [container] = JSON.parse(stdout) as Array<{ State?: { Running?: boolean }; Mounts?: InspectedMount[] }>;
-    return container ? { running: container.State?.Running === true, mounts: container.Mounts ?? [] } : undefined;
+    const [container] = JSON.parse(stdout) as Array<{ State?: { Running?: boolean }; Mounts?: InspectedMount[]; HostConfig?: { Tmpfs?: Record<string, string> | null } }>;
+    return container ? { running: container.State?.Running === true, mounts: container.Mounts ?? [], tmpfs: container.HostConfig?.Tmpfs ?? {} } : undefined;
   } catch {
     return undefined;
   }

@@ -21,6 +21,7 @@ import type {
   ContainerState,
   CreateSandboxOptions,
   EgressDenial,
+  EvaluationAssetContent,
   ExecResult,
   ExternalCallRequest,
   ExternalCallResult,
@@ -60,8 +61,16 @@ import {
 } from './format';
 import { externalCallScript } from './external-call';
 import { awaitedCondition, loadDependsOn, startWaves } from './compose-deps';
+import {
+  defaultEvaluationAssetRoot,
+  evaluationAssetSandboxDir,
+  prepareEvaluationAssetCopies,
+  removeEvaluationAssets,
+  syncEvaluationAssetCopies,
+  type EvaluationAssetSlot,
+} from './evaluation-assets';
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
-import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
+import { findMissingMasks, loadGitMask, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
@@ -164,6 +173,11 @@ export interface LocalDockerProviderOptions {
   statsTimeoutMs?: number;
   /** 의존 서비스가 준비됐는지 다시 확인하기까지의 간격(ms). 기본 500ms. 테스트에서 짧게 준다 */
   dependencyPollMs?: number;
+  /**
+   * 평가 자산 복사본을 두는 호스트 폴더(#745). 기본 ~/.cache/b-studio/evaluation-assets.
+   * colima가 기본으로 홈만 VM에 공유하므로 tmpdir가 아니라 홈 아래에 둔다(테스트는 임시 폴더)
+   */
+  evaluationAssetRoot?: string;
 }
 
 /**
@@ -196,17 +210,21 @@ export class LocalDockerProvider implements SandboxProvider {
 
   async cleanup(sandboxId: string): Promise<void> {
     const { command, args } = this.cleanupCommand(sandboxId);
+    let failure: unknown;
     // 작업 디렉터리의 compose 파일을 읽지 않도록 임시 디렉터리에서 실행한다
     try {
       await execFileAsync(command, args, { cwd: tmpdir() });
       // 컨테이너가 이미 없으면 --rmi local이 이미지를 찾지 못한다. 이름으로 한 번 더 지운다
       await removeSandboxImages(command, sandboxId);
     } catch (error) {
-      throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, error instanceof Error ? error.message : String(error));
+      failure = error;
     }
+    // 평가 자산 복사본은 샌드박스와 함께 지운다. 그 샌드박스 id의 폴더만, 링크를 따라가지 않고 지운다
+    await removeEvaluationAssets(this.#evaluationAssetRoot(), sandboxId).catch((error: unknown) => (failure ??= error));
+    if (failure) throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, failure instanceof Error ? failure.message : String(failure));
   }
 
-  async create(project: LoadedProject, { secrets = {} }: CreateSandboxOptions = {}): Promise<Sandbox> {
+  async create(project: LoadedProject, { secrets = {}, evaluationAssets: initialAssets = [] }: CreateSandboxOptions = {}): Promise<Sandbox> {
     // 런타임이 없으면 compose up 도중이 아니라 샌드박스를 만들기 전에 알린다
     if (this.#options.runtime) await assertRuntime(this.#options.dockerBin ?? 'docker', this.#options.runtime);
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
@@ -214,9 +232,30 @@ export class LocalDockerProvider implements SandboxProvider {
     const overridePath = path.join(workDir, 'compose.override.yaml');
     const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
     const hostPorts = await preallocatePublicUrlPorts(project);
-    const gitMask = await loadGitMask(project, { dockerBin: this.#options.dockerBin, env: composeEnvironment(secrets), projectName: id, redact: (text) => new Redactor(secrets).redact(text) });
-    await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
-    return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts);
+    const evaluationAssetRoot = this.#evaluationAssetRoot();
+    // 마운트할 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 자리의 종류와 첫 내용은 넘긴 판(마지막 체크포인트)이
+    // 정하고 여기서 채운다 — 컨테이너를 띄우기 전이라 컨테이너가 붙잡는 자리와 b-studio가 쓰는 자리가 처음부터 같다
+    const evaluationAssets = await prepareEvaluationAssetCopies(project.spec.workflow?.evaluationAssets ?? [], evaluationAssetRoot, id, initialAssets);
+    try {
+      const gitMask = await loadGitMask(project, {
+        dockerBin: this.#options.dockerBin,
+        env: composeEnvironment(secrets),
+        projectName: id,
+        evaluationAssets,
+        redact: (text) => new Redactor(secrets).redact(text),
+      });
+      await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
+      return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts, evaluationAssetRoot, evaluationAssets);
+    } catch (error) {
+      // 샌드박스를 돌려주지 못하면 destroy도 불리지 않는다. 그 샌드박스 id의 복사본 폴더를 여기서 지운다.
+      // 지우기 실패가 원래 오류(만들기를 거절한 이유)를 가리지 않게 한다
+      await removeEvaluationAssets(evaluationAssetRoot, id).catch(() => {});
+      throw error;
+    }
+  }
+
+  #evaluationAssetRoot(): string {
+    return this.#options.evaluationAssetRoot ?? defaultEvaluationAssetRoot();
   }
 }
 
@@ -242,6 +281,12 @@ class LocalDockerSandbox implements Sandbox {
   #daemonCpus: Promise<number | undefined> | undefined;
   #hostPorts: Record<string, number>;
   readonly #runtime: string | undefined;
+  /** 평가 자산 복사본을 두는 루트와 이 샌드박스의 자리(#745). 마운트와 sync가 같은 자리를 본다 */
+  readonly #evaluationAssetRoot: string;
+  readonly #evaluationAssetSandboxDir: string;
+  readonly #evaluationAssets: readonly EvaluationAssetSlot[];
+  /** 복사본 sync를 한 번에 하나씩 돌린다(실행 시작과 터미널 검증이 겹칠 수 있다) */
+  #evaluationSync: Promise<unknown> = Promise.resolve();
   #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
 
   constructor(
@@ -254,10 +299,15 @@ class LocalDockerSandbox implements Sandbox {
     edgeScript: string,
     gitMask: Record<string, MaskVolume[]>,
     hostPorts: Record<string, number>,
+    evaluationAssetRoot: string,
+    evaluationAssets: readonly EvaluationAssetSlot[],
   ) {
     this.#edgeScript = edgeScript;
     this.#gitMask = gitMask;
     this.#hostPorts = hostPorts;
+    this.#evaluationAssetRoot = evaluationAssetRoot;
+    this.#evaluationAssetSandboxDir = evaluationAssetSandboxDir(evaluationAssetRoot, id);
+    this.#evaluationAssets = evaluationAssets;
     this.id = id;
     this.project = project;
     this.#workDir = workDir;
@@ -269,6 +319,16 @@ class LocalDockerSandbox implements Sandbox {
     this.#dependencyPollMs = options.dependencyPollMs ?? DEPENDENCY_POLL_MS;
     this.#secrets = secrets;
     this.#redactor = new Redactor(secrets);
+  }
+
+  /**
+   * 평가 자산 복사본의 내용을 바꾼다(#745). 컨테이너에 붙는 것은 작업 복사본이 아니라 이 복사본이므로, 실행을 시작하기 전에
+   * 마지막 체크포인트의 판으로 맞춘다. 폴더 자산은 폴더 자체(inode)를 그대로 두고 안만, 파일 자산은 같은 파일에 덮어쓴다
+   */
+  async syncEvaluationAssets(assets: readonly EvaluationAssetContent[]): Promise<void> {
+    const run = this.#evaluationSync.then(() => syncEvaluationAssetCopies(this.#evaluationAssets, this.#evaluationAssetSandboxDir, assets));
+    this.#evaluationSync = run.catch(() => undefined);
+    return run;
   }
 
   async start(options: StartOptions = {}): Promise<ServiceEndpoint[]> {
@@ -606,7 +666,12 @@ class LocalDockerSandbox implements Sandbox {
       await this.#composeOrThrow(['down', '--volumes', '--remove-orphans', '--rmi', 'local']);
       await removeSandboxImages(this.#dockerBin, this.id);
     } finally {
-      await rm(this.#workDir, { recursive: true, force: true });
+      try {
+        await rm(this.#workDir, { recursive: true, force: true });
+      } finally {
+        // 평가 자산 복사본도 함께 지운다. 이 샌드박스 id의 폴더만 지우고 링크는 따라가지 않는다
+        await removeEvaluationAssets(this.#evaluationAssetRoot, this.id);
+      }
     }
   }
 
@@ -966,11 +1031,22 @@ class LocalDockerSandbox implements Sandbox {
     const failures: string[] = [];
     const violations: string[] = [];
     const remove: string[] = [];
+    // 평가 자산 자리의 기대는 계획(override에 적은 target·원본)에서 가져온다. 실제 마운트에서 거꾸로 계산하지 않는다
+    const evaluationAssetPlan: Record<string, MaskVolume[]> = {};
+    for (const [service, volumes] of Object.entries(this.#gitMask)) {
+      const planned = await selectEvaluationAssetVolumes(volumes, this.#evaluationAssets);
+      if (planned.length > 0) evaluationAssetPlan[service] = planned;
+    }
     for (const container of containers) {
-      const name = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] ?? container.Name ?? container.Id;
+      const service = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL];
+      const name = service ?? container.Name ?? container.Id;
       // compose 파일로 권한·네임스페이스·네트워크·포트·호스트 경로를 바꾼 컨테이너(이슈 #701). 마운트처럼 실제 설정을 본다
       const escalated = findPolicyViolations(container, { projectName: this.id, sandboxNetwork: SANDBOX_NETWORK, egressNetwork: EGRESS_NETWORK, edgeService: EDGE_SERVICE });
-      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions);
+      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions, {
+        evaluationAssetPlan,
+        service,
+        tmpfs: container.HostConfig?.Tmpfs ?? {},
+      });
       if (escalated.length === 0 && missing.length === 0) continue;
       remove.push(container.Id);
       if (escalated.length > 0) violations.push(`${name}: ${escalated.join(', ')}`);
@@ -1063,7 +1139,13 @@ class LocalDockerSandbox implements Sandbox {
 
   /** compose 파일의 마운트를 다시 읽어 마스크가 달라졌으면 override를 새로 쓴다. 읽지 못하면 보호 없이 띄우지 않고 던진다 */
   async #refreshGitMask(): Promise<void> {
-    const mask = await loadGitMask(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
+    const mask = await loadGitMask(this.project, {
+      dockerBin: this.#dockerBin,
+      env: this.#environment(),
+      projectName: this.id,
+      evaluationAssets: this.#evaluationAssets,
+      redact: (text) => this.redact(text),
+    });
     if (JSON.stringify(mask) === JSON.stringify(this.#gitMask)) return;
     this.#gitMask = mask;
     await this.#writeOverride();

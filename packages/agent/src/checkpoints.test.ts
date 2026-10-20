@@ -1005,16 +1005,16 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await writeFile(path.join(root, 'api/src/Binary.bin'), Buffer.from([0x00, 0x01, 0xff, 0x41]));
     const checkpoint = (await store.commit('요청: 파일 종류'))!;
 
-    expect(await store.blobAt('api/src/Order.java', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('class Order {}\n') });
+    expect(await store.blobAt('api/src/Order.java', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('class Order {}\n'), executable: false });
     // 실행 비트(100755)도 일반 파일과 같이 내용을 준다
-    expect(await store.blobAt('api/src/Run.sh', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('#!/bin/sh\necho hi\n') });
+    expect(await store.blobAt('api/src/Run.sh', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('#!/bin/sh\necho hi\n'), executable: true });
     // utf8이 아닌 바이트도 그대로 준다(NUL 포함)
-    expect(await store.blobAt('api/src/Binary.bin', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from([0x00, 0x01, 0xff, 0x41]) });
+    expect(await store.blobAt('api/src/Binary.bin', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from([0x00, 0x01, 0xff, 0x41]), executable: false });
     expect(await store.blobAt('api/src/Nope.java', checkpoint.sha)).toEqual({ kind: 'missing' });
 
     // 작업 트리에서 바뀌어도 커밋된 값을 준다(fileAt과 같은 규칙)
     await write('api/src/Order.java', 'class Order { String memo; }\n');
-    expect(await store.blobAt('api/src/Order.java', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('class Order {}\n') });
+    expect(await store.blobAt('api/src/Order.java', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('class Order {}\n'), executable: false });
   });
 
   it('blobAt은 링크(120000)로 커밋된 경로를 unsupported로 알린다(이슈 #744)', async () => {
@@ -1029,6 +1029,29 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await rm(outside, { force: true });
   });
 
+  it('listBlobs는 커밋된 일반 파일만 꺼내고 링크는 빼며, 작업 트리에서 바꿔도 커밋된 값을 준다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await mkdir(path.join(root, 'tests', 'acceptance', 'nested'), { recursive: true });
+    await writeFile(path.join(root, 'tests', 'acceptance', 'a.txt'), 'a\n');
+    await writeFile(path.join(root, 'tests', 'acceptance', 'nested', 'run.sh'), '#!/bin/sh\n');
+    await chmod(path.join(root, 'tests', 'acceptance', 'nested', 'run.sh'), 0o755);
+    const outside = path.join(root, '..', 'outside-list-secret.txt');
+    await writeFile(outside, 'SECRET\n');
+    await symlink(outside, path.join(root, 'tests', 'acceptance', 'link.txt'));
+    const checkpoint = (await store.commit('요청: 평가 자산'))!;
+
+    const blobs = await store.listBlobs(checkpoint.sha, 'tests/acceptance');
+    expect(blobs.map((blob) => [blob.path, blob.content.toString('utf8'), blob.executable])).toEqual([
+      ['tests/acceptance/a.txt', 'a\n', false],
+      ['tests/acceptance/nested/run.sh', '#!/bin/sh\n', true],
+    ]);
+
+    await writeFile(path.join(root, 'tests', 'acceptance', 'a.txt'), '바뀜\n');
+    expect((await store.listBlobs(checkpoint.sha, 'tests/acceptance')).find((blob) => blob.path.endsWith('a.txt'))?.content.toString('utf8')).toBe('a\n');
+    await rm(outside, { force: true });
+  });
+
   it('blobAt은 하위 폴더 프로젝트에서 프로젝트 폴더 기준 경로를 받는다(fileAt과 같다)', async () => {
     const { source, workDir } = await createSourceRepository();
     const { store, projectRoot } = await CheckpointStore.clone(path.join(source, 'api'), workDir, { branch: BRANCH, allowSubfolder: true });
@@ -1036,7 +1059,7 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     await writeFile(path.join(projectRoot, 'docs/requirements.md'), '# 요구사항\n');
     const checkpoint = (await store.commit('문서: 요구사항'))!;
 
-    expect(await store.blobAt('docs/requirements.md', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('# 요구사항\n') });
+    expect(await store.blobAt('docs/requirements.md', checkpoint.sha)).toEqual({ kind: 'file', content: Buffer.from('# 요구사항\n'), executable: false });
     // 저장소 루트에 있는 파일은 프로젝트 폴더 밖이라 missing이다
     expect(await store.blobAt('README.md', checkpoint.sha)).toEqual({ kind: 'missing' });
   });
