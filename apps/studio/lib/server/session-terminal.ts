@@ -11,11 +11,13 @@ import {
   listProcesses,
   openAgentTerminal,
   openHostTerminal,
+  pauseAgentContainer,
   probeAgentGateway,
   probeHostGateway,
   removeAgentContainer,
   removeAgentGatewayConfig,
   removeHostGatewayConfig,
+  unpauseAgentContainer,
   writeAgentGatewayConfig,
   writeHostGatewayConfig,
   type AgentGatewayAddress,
@@ -134,6 +136,18 @@ export interface TerminalBackend {
    * 관문을 쓰지 않는 백엔드(컨테이너)는 이 메서드를 두지 않는다 — 관리 설정이 읽기 전용 마운트라 필요 없다
    */
   watch?(place: string, terminal: AgentTerminal, target: TerminalTarget, report: (reason: string) => void): () => void;
+  /**
+   * 검사 구간(Stop 훅의 게이트) 동안 그 세션의 에이전트 컨테이너를 멈추고 푼다(이슈 #765).
+   * 멈출 컨테이너가 없는 이 컴퓨터 방식은 두지 않는다 — 그 한계는 sessions.ts의 Stop 훅 게이트에 적었다
+   */
+  pause?(sandboxId: string): Promise<void>;
+  unpause?(sandboxId: string): Promise<void>;
+}
+
+/** 검사 동안 에이전트 컨테이너를 멈추고 푸는 자리. 지금 방식의 백엔드가 두 메서드를 두었을 때만 있다 */
+export interface TerminalPause {
+  pause(sandboxId: string): Promise<void>;
+  unpause(sandboxId: string): Promise<void>;
 }
 
 /** 컨테이너를 지우고, 그것이 실패해도 토큰이 든 관문 설정은 지운다 */
@@ -161,6 +175,8 @@ const DOCKER_BACKEND: TerminalBackend = {
   remove: (sandboxId) => removeContainerAndConfig(sandboxId),
   reachable: (place) => probeAgentGateway(place),
   unreachable: '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다',
+  pause: (sandboxId) => pauseAgentContainer(sandboxId),
+  unpause: (sandboxId) => unpauseAgentContainer(sandboxId),
 };
 
 /** 이 컴퓨터 방식에서 prepare가 쓴 관문. 감시(watch)가 폴더 경로를 열쇠로 꺼내 쓴다 */
@@ -318,6 +334,15 @@ const HOST_BACKEND: TerminalBackend = {
 /** 지금 방식에 맞는 백엔드. 부를 때 정해진다 — 스튜디오를 다른 방식으로 띄우면 그 방식으로 연다 */
 export function terminalBackend(mode: TerminalMode = sessionTerminalMode()): TerminalBackend {
   return mode === 'host' ? HOST_BACKEND : DOCKER_BACKEND;
+}
+
+/**
+ * 검사 동안 에이전트 컨테이너를 멈추고 푸는 자리를 지금 백엔드에서 꺼낸다.
+ * 두 메서드를 두지 않은 방식(이 컴퓨터)은 undefined다 — 멈출 컨테이너가 없다
+ */
+export function terminalPause(mode: TerminalMode = sessionTerminalMode(), backend: TerminalBackend = terminalBackend(mode)): TerminalPause | undefined {
+  if (!backend.pause || !backend.unpause) return undefined;
+  return { pause: (sandboxId) => backend.pause!(sandboxId), unpause: (sandboxId) => backend.unpause!(sandboxId) };
 }
 
 /**

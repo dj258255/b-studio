@@ -500,7 +500,16 @@ export async function ensureAgentContainer(
   const ready = async ({ mounts, tmpfs }: InspectedContainer): Promise<boolean> =>
     (await masksInPlace(root, mounts, tmpfs, evaluationAssetPlan)) && gatewayInPlace(gatewayDir, mounts);
   const existing = await inspect(dockerBin, name);
-  if (existing?.running && (await ready(existing))) return name;
+  // 스튜디오가 검사 도중에 죽었다 다시 뜨면 컨테이너가 멈춘 채(State.Paused) 남아 있다. 그대로 내주면 아무 명령도 돌지 않는다
+  if (existing?.paused) {
+    await docker(['unpause', name]).then(
+      () => {
+        existing.paused = false;
+      },
+      () => {},
+    );
+  }
+  if (existing?.running && !existing.paused && (await ready(existing))) return name;
   if (existing) await docker(['rm', '--force', name]).catch(() => {});
 
   try {
@@ -543,8 +552,32 @@ export async function removeAgentContainer(sandboxId: string, { dockerBin = 'doc
   await execFileAsync(dockerBin, ['rm', '--force', agentContainerName(sandboxId)], { cwd: tmpdir() }).catch(() => {});
 }
 
+/**
+ * 에이전트 컨테이너를 멈춘다(`docker pause`). 검증 게이트가 검사 시작·끝에 작업 복사본의 지문을 견주는 동안(이슈 #765),
+ * 컨테이너 안에서 도는 CLI와 그 백그라운드 셸이 파일을 바꾸지 못하게 한다. Stop 훅은 이 컨테이너 안에서 응답을 기다리므로
+ * 함께 멈춘다. 멈추지 못하면 던진다 — 부르는 쪽이 게이트를 돌리지 않는 쪽으로 판단한다
+ */
+export async function pauseAgentContainer(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<void> {
+  try {
+    await execFileAsync(dockerBin, ['pause', agentContainerName(sandboxId)], { cwd: tmpdir() });
+  } catch (error) {
+    throw new SandboxError('에이전트 컨테이너를 멈추지 못했습니다', describe(error));
+  }
+}
+
+/** 멈춘 에이전트 컨테이너를 다시 움직이게 한다(`docker unpause`). 실패하면 던진다 */
+export async function unpauseAgentContainer(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<void> {
+  try {
+    await execFileAsync(dockerBin, ['unpause', agentContainerName(sandboxId)], { cwd: tmpdir() });
+  } catch (error) {
+    throw new SandboxError('에이전트 컨테이너를 다시 움직이지 못했습니다', describe(error));
+  }
+}
+
 interface InspectedContainer {
   running: boolean;
+  /** 검사 동안 멈춘 채 남았는가(State.Paused). 그대로 쓰면 아무 명령도 돌지 않는다 */
+  paused: boolean;
   mounts: InspectedMount[];
   tmpfs: Record<string, string>;
 }
@@ -571,8 +604,8 @@ function gatewayInPlace(gatewayDir: string | undefined, mounts: readonly Inspect
 async function inspect(dockerBin: string, name: string): Promise<InspectedContainer | undefined> {
   try {
     const { stdout } = await execFileAsync(dockerBin, ['inspect', '--type', 'container', name], { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
-    const [container] = JSON.parse(stdout) as Array<{ State?: { Running?: boolean }; Mounts?: InspectedMount[]; HostConfig?: { Tmpfs?: Record<string, string> | null } }>;
-    return container ? { running: container.State?.Running === true, mounts: container.Mounts ?? [], tmpfs: container.HostConfig?.Tmpfs ?? {} } : undefined;
+    const [container] = JSON.parse(stdout) as Array<{ State?: { Running?: boolean; Paused?: boolean }; Mounts?: InspectedMount[]; HostConfig?: { Tmpfs?: Record<string, string> | null } }>;
+    return container ? { running: container.State?.Running === true, paused: container.State?.Paused === true, mounts: container.Mounts ?? [], tmpfs: container.HostConfig?.Tmpfs ?? {} } : undefined;
   } catch {
     return undefined;
   }
