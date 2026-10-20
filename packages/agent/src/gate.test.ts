@@ -10,6 +10,7 @@ import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, typ
 import type { AgentEvent } from './loop';
 import { signatureFromCheck, signatureKey } from './coordination/signature';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
+import { clearTestReportsCommand } from './test-run';
 import type { WorkflowCheck } from './workflow';
 import { Workspace } from './workspace';
 
@@ -54,8 +55,17 @@ async function setup(
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
   const commands: string[][] = [];
+  // 테스트 전에 보고서 자리를 비우는 명령(#756)은 따로 모아, 테스트 명령만 세는 확인을 흐리지 않게 한다
+  const cleared: string[][] = [];
+  const sequence: string[] = [];
   sandbox.exec = async (_service, command) => {
+    if (isClearReports(command)) {
+      cleared.push(command);
+      sequence.push('clear');
+      return { exitCode: 0, stdout: '', stderr: '' };
+    }
     commands.push(command);
+    sequence.push(command.join(' '));
     return options.exec?.(command) ?? { exitCode: 0, stdout: '', stderr: '' };
   };
   const workspace = new Workspace(target.root);
@@ -75,8 +85,10 @@ async function setup(
     ...(options.browser ? { browserRunner: options.browser } : {}),
     onEvent: (event) => events.push(event),
   });
-  return { gate, workspace, events, commands };
+  return { gate, workspace, events, commands, cleared, sequence };
 }
+
+const isClearReports = (command: string[]) => command[0] === 'sh' && command[2]?.startsWith(clearTestReportsCommand()[2]!.split(' build/')[0]!) === true;
 
 const stages = (events: AgentEvent[]) => events.flatMap((event) => (event.type === 'stage' ? [event.stage] : []));
 
@@ -225,6 +237,27 @@ describe('VerificationGate 워크플로 단계', () => {
     ]);
   });
 
+  it('선언한 테스트를 돌리기 전에 그 서비스의 보고서 자리를 한 번 비운다. 예전 보고서가 이번 게이트의 근거로 모이지 않게 한다 (#756)', async () => {
+    const base = withWorkflow({
+      tests: [
+        { name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 },
+        { name: 'slice', service: 'api', command: ['./gradlew', 'test', '--tests', '*Slice*'], maxAttempts: 1 },
+      ],
+    });
+    const target = {
+      ...base,
+      managed: base.managed.map(([name, spec]) => [name, name === 'api' ? { ...spec, includes: ['shared'] } : spec]),
+    } as LoadedProject;
+    const { gate, workspace, commands, cleared, sequence } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(cleared).toEqual([clearTestReportsCommand(['/workspace/shared'])]);
+    expect(commands.map((command) => command.join(' ')).sort()).toEqual(['./gradlew test', './gradlew test --tests *Slice*']);
+    // 비우기가 테스트보다 먼저다
+    expect(sequence[0]).toBe('clear');
+  });
+
   it('실패한 테스트는 선언한 횟수만큼 다시 돌리고, 출력 끝부분을 모델에게 돌려준다', async () => {
     const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 2 }] });
     const { gate, workspace, commands } = await setup(target, {
@@ -245,7 +278,8 @@ describe('VerificationGate 워크플로 단계', () => {
     const target = withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 2 }] });
     const sandbox = fakeSandbox(target, [true]);
     let execCalls = 0;
-    sandbox.exec = async () => {
+    sandbox.exec = async (_service, command) => {
+      if (isClearReports(command)) return { exitCode: 0, stdout: '', stderr: '' };
       execCalls += 1;
       return execCalls === 1 ? { exitCode: 1, stdout: '', stderr: '' } : { exitCode: 0, stdout: '', stderr: '' };
     };
@@ -2623,7 +2657,7 @@ describe('VerificationGate 부하 확인 (ADR-163)', () => {
     ...over,
   });
 
-  async function loadGate(target: LoadedProject, runLoad: Sandbox['runLoad'] | undefined, extra: { exec?: () => Promise<ExecResult> } = {}) {
+  async function loadGate(target: LoadedProject, runLoad: Sandbox['runLoad'] | undefined, extra: { exec?: Sandbox['exec'] } = {}) {
     const workspace = new Workspace(target.root);
     const sandbox = fakeSandbox(target, [true, true, true]);
     if (runLoad) sandbox.runLoad = runLoad;
@@ -2705,7 +2739,8 @@ describe('VerificationGate 부하 확인 (ADR-163)', () => {
         return measured();
       },
       {
-        exec: async () => {
+        exec: async (_service: string, command: string[]) => {
+          if (isClearReports(command)) return { exitCode: 0, stdout: '', stderr: '' };
           await new Promise((resolve) => setTimeout(resolve, 20));
           sequence.push('test done');
           return { exitCode: 0, stdout: '', stderr: '' };

@@ -102,25 +102,34 @@ export class DatabaseBranches {
           await rm(current, { force: true });
         }
 
-        // DROP DATABASE는 트랜잭션 안에서 실행할 수 없으므로 명령을 나눠 보낸다. WITH (FORCE)가 남은 커넥션을 끊는다
-        const recreate = await this.#sandbox.exec(
-          service,
-          [
-            'psql', '-U', database.user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q',
-            '-c', `DROP DATABASE IF EXISTS "${database.database}" WITH (FORCE)`,
-            '-c', `CREATE DATABASE "${database.database}" OWNER "${database.user}"`,
-          ],
-          { signal },
-        );
-        if (recreate.exitCode !== 0) return { service, action: 'failed', detail: firstLines(recreate.stderr) };
+        // 덤프를 바로 원래 DB에 넣으면, 넣다 실패했을 때 원래 상태도 체크포인트 상태도 아닌 DB가 남는다(#753).
+        // 임시 DB에 한 트랜잭션으로 넣어 보고, 다 들어간 뒤에만 원래 DB와 바꾼다.
+        // DROP·CREATE·ALTER DATABASE는 트랜잭션 안에서 실행할 수 없으므로 명령을 나눠 보낸다. WITH (FORCE)가 남은 커넥션을 끊는다
+        const temp = restoreDatabaseName(database.database);
+        const admin = (...commands: string[]) =>
+          this.#sandbox.exec(
+            service,
+            ['psql', '-U', database.user, '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-q', ...commands.flatMap((command) => ['-c', command])],
+            { signal },
+          );
+        const dropTemp = `DROP DATABASE IF EXISTS "${temp}" WITH (FORCE)`;
+
+        const prepare = await admin(dropTemp, `CREATE DATABASE "${temp}" OWNER "${database.user}"`);
+        if (prepare.exitCode !== 0) return { service, action: 'failed', detail: firstLines(prepare.stderr) };
 
         const load = await this.#sandbox.execFromFile(
           service,
-          ['psql', '-U', database.user, '-d', database.database, '-v', 'ON_ERROR_STOP=1', '-q'],
+          ['psql', '-U', database.user, '-d', temp, '-v', 'ON_ERROR_STOP=1', '-q', '--single-transaction'],
           saved,
           { signal, raw: true },
         );
-        if (load.exitCode !== 0) return { service, action: 'failed', detail: firstLines(load.stderr) };
+        if (load.exitCode !== 0) {
+          await admin(dropTemp);
+          return { service, action: 'failed', detail: firstLines(load.stderr) };
+        }
+
+        const swap = await admin(`DROP DATABASE IF EXISTS "${database.database}" WITH (FORCE)`, `ALTER DATABASE "${temp}" RENAME TO "${database.database}"`);
+        if (swap.exitCode !== 0) return { service, action: 'failed', detail: firstLines(swap.stderr) };
         return { service, action: 'restored', elapsedMs: Date.now() - started };
       }),
     );
@@ -184,6 +193,12 @@ export function describeDatabaseState(state: DatabaseState): string {
     case 'failed':
       return `${state.service} 처리에 실패했습니다: ${state.detail ?? ''}`;
   }
+}
+
+/** 되돌릴 덤프를 먼저 넣어 볼 DB 이름. Postgres 식별자 상한(63자)을 넘지 않게 원래 이름을 줄인다 */
+function restoreDatabaseName(name: string): string {
+  const suffix = '__b_studio_restore';
+  return `${name.slice(0, 63 - suffix.length)}${suffix}`;
 }
 
 function firstLines(text: string): string {

@@ -735,9 +735,12 @@ export {
 } from './test-results';
 export {
   buildTestRunPlan,
+  clearTestReportsCommand,
+  CONTAINER_PROJECT_ROOT,
   detectRunner,
   JEST_LIKE_REPORT_PATH,
   PYTEST_REPORT_PATH,
+  reportRootsForIncludes,
   runnerLabel,
   splitCollectedReports,
   type DetectRunnerInput,
