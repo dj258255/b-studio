@@ -607,6 +607,11 @@ export const WorkflowSchema = z
     requireApprovalFor: z.array(z.string().min(1)).optional(),
     /** 에이전트가 변경할 수 없는 프로젝트 상대 경로 접두사 */
     protectedPaths: z.array(RELATIVE_PATH).optional(),
+    /**
+     * 사람이 고치는 평가 자산(테스트·채점 스크립트·기대값 파일)의 프로젝트 상대 경로. 파일 하나 또는 폴더 접두사이며 protectedPaths와 같은 형식·검사다.
+     * 파일 도구는 protectedPaths와 같게 막고, 게이트는 이 경로들의 지문을 실행 시작과 견주어 바뀌면 test 단계를 실패시킨다(ADR-175)
+     */
+    evaluationAssets: z.array(RELATIVE_PATH).optional(),
     /** 배포할 체크포인트가 통과했어야 하는 단계. checkpoint만 두면(기본) 모든 체크포인트를 배포할 수 있다 */
     releaseRequires: z.array(WorkflowStageSchema).min(1).optional(),
   })
