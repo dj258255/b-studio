@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, open, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -204,21 +204,34 @@ describe('syncEvaluationAssetCopies', () => {
   it('자리를 다른 inode로 바꿔치기했으면 sync는 그 자리를 고치지 않고 멈춘다', async () => {
     const { slots, sandboxDir } = await setup();
     const dirSlot = slots.find((slot) => slot.kind === 'directory')!;
-    await rm(dirSlot.source, { recursive: true, force: true });
-    await mkdir(dirSlot.source);
+    // 실제로는 컨테이너 마운트가 옛 자리를 붙잡고 있어 그 inode 번호가 풀리지 않는다. 열어 두지 않으면 리눅스는 지운 번호를 곧바로
+    // 새 폴더에 다시 써서 같은 자리로 보인다(CI에서 그랬다)
+    const held = await open(dirSlot.source, 'r');
+    try {
+      await rm(dirSlot.source, { recursive: true, force: true });
+      await mkdir(dirSlot.source);
 
-    await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
-    expect(await readdir(dirSlot.source)).toEqual([]);
+      await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
+      expect(await readdir(dirSlot.source)).toEqual([]);
+    } finally {
+      await held.close();
+    }
   });
 
   it('파일 자산 자리를 다른 inode로 바꿔치기했으면 그 내용을 덮어쓰지 않고 멈춘다', async () => {
     const { slots, sandboxDir } = await setup();
     const fileSlot = slots.find((slot) => slot.kind === 'file')!;
-    await rm(fileSlot.source, { force: true });
-    await writeFile(fileSlot.source, '바꿔치기한 내용');
+    // 위와 같은 까닭으로 옛 자리를 열어 둔다(마운트가 붙잡은 것과 같게)
+    const held = await open(fileSlot.source, 'r');
+    try {
+      await rm(fileSlot.source, { force: true });
+      await writeFile(fileSlot.source, '바꿔치기한 내용');
 
-    await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
-    expect(await readFile(fileSlot.source, 'utf8')).toBe('바꿔치기한 내용');
+      await expect(syncEvaluationAssetCopies(slots, sandboxDir, contents)).rejects.toThrow('자리가 바뀌었습니다');
+      expect(await readFile(fileSlot.source, 'utf8')).toBe('바꿔치기한 내용');
+    } finally {
+      await held.close();
+    }
   });
 
   it('넘긴 판의 종류가 자리 종류와 다르면 sync는 자리를 바꾸지 않고 멈춘다', async () => {
