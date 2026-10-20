@@ -151,15 +151,12 @@ exit 0
   });
 
   it('폴링 간격을 주지 않으면 기본 500ms마다 다시 확인한다', async () => {
-    // 상태를 두 번 읽는 쪽은 한 번 더 쉬므로, 한 번에 끝나는 쪽보다 확인 간격만큼 오래 걸린다(오버헤드는 양쪽이 같다)
-    const twice = await fakeDocker('service_completed_successfully', ['{"Status":"running"}', '{"Status":"exited","ExitCode":0}']);
-    const once = await fakeDocker('service_completed_successfully', ['{"Status":"exited","ExitCode":0}']);
-    const elapsed = async (dockerBin: string) => {
-      const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
-      const started = Date.now();
-      await sandbox.ensureInfra!(['api', 'db']);
-      return Date.now() - started;
-    };
-    expect((await elapsed(twice.dockerBin)) - (await elapsed(once.dockerBin))).toBeGreaterThanOrEqual(400);
+    // 상태를 두 번 읽으면 그 사이에 한 번 쉰다. 걸린 시간의 하한만 본다 — setTimeout은 일찍 깨지 않으므로 부하에 흔들리지 않는다
+    // (두 실행의 차이를 재면 부하에서 준비 비용이 양쪽이 달라 흔들렸다, #748)
+    const { dockerBin } = await fakeDocker('service_completed_successfully', ['{"Status":"running"}', '{"Status":"exited","ExitCode":0}']);
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+    const started = Date.now();
+    await sandbox.ensureInfra!(['api', 'db']);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(490);
   });
 });
