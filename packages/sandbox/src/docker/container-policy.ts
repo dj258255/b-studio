@@ -36,6 +36,8 @@ export interface InspectedContainerPolicy {
     CgroupnsMode?: string;
     NetworkMode?: string;
     PortBindings?: Record<string, unknown[] | null> | null;
+    /** tmpfs 마운트(컨테이너 안 경로 → 옵션). 사후 확인이 평가 자산 자리를 덮는지 본다 */
+    Tmpfs?: Record<string, string> | null;
   } | null;
   NetworkSettings?: { Networks?: Record<string, unknown> | null } | null;
   Mounts?: Array<{ Type?: string; Source?: string }> | null;

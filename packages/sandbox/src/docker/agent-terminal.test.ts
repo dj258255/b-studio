@@ -622,6 +622,31 @@ describe('컨테이너를 띄운 뒤의 확인 (관문 설정)', { timeout: 30_0
     }
   });
 
+  it('HostConfig.Tmpfs가 평가 자산 자리를 덮으면 지우고 던진다(커밋 보안 검토)', async () => {
+    const assetRoot = await mkdtemp(path.join(tmpdir(), 'b-studio-agent-assets-'));
+    const copies = evaluationAssetCopies(['tests/acceptance'], assetRoot, 'sb');
+    for (const target of ['/workspace/tests/acceptance', '/workspace/tests/acceptance/check.mjs']) {
+      const docker = await fakeDocker();
+      await writeFile(
+        path.join(docker.dir, 'after-run.json'),
+        JSON.stringify([
+          {
+            State: { Running: true },
+            HostConfig: { Tmpfs: { [target]: '' } },
+            Mounts: [
+              { Type: 'bind', Source: await realpath(docker.root), Destination: '/workspace', RW: true },
+              { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false },
+            ],
+          },
+        ]),
+      );
+      await expect(
+        ensureAgentContainer('sb', docker.root, { projectId: 'p', evaluationAssets: ['tests/acceptance'], evaluationAssetRoot: assetRoot, dockerBin: docker.bin }),
+      ).rejects.toThrow('보호와 관문 설정을 확인하지 못해');
+      expect((await docker.calls()).at(-1)).toBe('rm --force sb-agent');
+    }
+  });
+
   it('띄웠는데 관문 폴더가 없거나, 쓸 수 있게 붙었거나, 다른 폴더가 붙었으면 지우고 던진다', async () => {
     for (const extra of [[], [{ Type: 'bind', Source: gatewayDir, Destination: '/etc/claude-code', RW: true }], [{ Type: 'bind', Source: '/Users/me/.cache/b-studio/agent-gateway/ffffffffffffffff', Destination: '/etc/claude-code', RW: false }]]) {
       const docker = await fakeDocker();

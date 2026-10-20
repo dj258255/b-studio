@@ -70,7 +70,7 @@ import {
   type EvaluationAssetSlot,
 } from './evaluation-assets';
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
-import { findMissingMasks, loadGitMask, type InspectedMount, type MaskVolume } from './git-mask';
+import { findMissingMasks, loadGitMask, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
@@ -1031,11 +1031,22 @@ class LocalDockerSandbox implements Sandbox {
     const failures: string[] = [];
     const violations: string[] = [];
     const remove: string[] = [];
+    // 평가 자산 자리의 기대는 계획(override에 적은 target·원본)에서 가져온다. 실제 마운트에서 거꾸로 계산하지 않는다
+    const evaluationAssetPlan: Record<string, MaskVolume[]> = {};
+    for (const [service, volumes] of Object.entries(this.#gitMask)) {
+      const planned = await selectEvaluationAssetVolumes(volumes, this.#evaluationAssets);
+      if (planned.length > 0) evaluationAssetPlan[service] = planned;
+    }
     for (const container of containers) {
-      const name = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] ?? container.Name ?? container.Id;
+      const service = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL];
+      const name = service ?? container.Name ?? container.Id;
       // compose 파일로 권한·네임스페이스·네트워크·포트·호스트 경로를 바꾼 컨테이너(이슈 #701). 마운트처럼 실제 설정을 본다
       const escalated = findPolicyViolations(container, { projectName: this.id, sandboxNetwork: SANDBOX_NETWORK, egressNetwork: EGRESS_NETWORK, edgeService: EDGE_SERVICE });
-      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions, { evaluationAssets: this.#evaluationAssets });
+      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions, {
+        evaluationAssetPlan,
+        service,
+        tmpfs: container.HostConfig?.Tmpfs ?? {},
+      });
       if (escalated.length === 0 && missing.length === 0) continue;
       remove.push(container.Id);
       if (escalated.length > 0) violations.push(`${name}: ${escalated.join(', ')}`);

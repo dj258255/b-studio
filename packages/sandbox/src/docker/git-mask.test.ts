@@ -238,12 +238,13 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
     await mkdir(outside);
     const copies = [{ path: 'tests/acceptance', source: path.join(base, 'copies', 'dir') }];
     const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/app' }] } } };
+    const planned = { evaluationAssetPlan: planEvaluationAssetMask([{ service: 'api', source: root, target: '/app' }], root, copies), service: 'api' };
 
     // 자산을 지운 뒤에도 같은 자리를 기대한다
     await rm(path.join(root, 'tests', 'acceptance'), { recursive: true });
     const afterDelete = await computeGitMask(root, config, { evaluationAssets: copies });
     expect(afterDelete.api?.find((volume) => volume.target === '/app/tests/acceptance')?.source).toBe(copies[0]!.source);
-    expect(await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }], {}, { evaluationAssets: copies })).toContain('/app/tests/acceptance');
+    expect(await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }], {}, planned)).toContain('/app/tests/acceptance');
 
     // 링크로 바꿔도 기대가 줄지 않고, 마운트 원본은 작업 복사본이 아니다
     await symlink(outside, path.join(root, 'tests', 'acceptance'));
@@ -251,7 +252,39 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
     const volume = afterLink.api?.find((entry) => entry.target === '/app/tests/acceptance');
     expect(volume?.source).toBe(copies[0]!.source);
     expect(volume?.source.startsWith(root)).toBe(false);
-    expect(await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }], {}, { evaluationAssets: copies })).toContain('/app/tests/acceptance');
+    expect(await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }], {}, planned)).toContain('/app/tests/acceptance');
+  });
+
+  it('평가 자산 자리에 tmpfs(같은 자리·안쪽)를 얹으면 종류를 가리지 않고 거절한다(커밋 보안 검토)', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const copies = [{ path: 'tests/acceptance', source: path.join(base, 'copies', 'dir') }];
+    // tmpfs는 docker inspect의 Mounts에도, 호스트 마운트 목록에도 나오지 않는다. 설정에서 봐야 한다
+    for (const tmpfs of [['/workspace/tests/acceptance'], ['/workspace/tests/acceptance/check.mjs'], '/workspace/tests/acceptance']) {
+      const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/workspace' }], tmpfs } } };
+      await expect(computeGitMask(root, config, { evaluationAssets: copies })).rejects.toThrow(/평가 자산 자리/);
+    }
+  });
+
+  it('평가 자산 자리 안쪽에 이름 있는 볼륨을 얹어도 거절한다', async () => {
+    const base = await temp();
+    const root = path.join(base, 'proj');
+    await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
+    const copies = [{ path: 'tests/acceptance', source: path.join(base, 'copies', 'dir') }];
+    for (const target of ['/workspace/tests/acceptance', '/workspace/tests/acceptance/check.mjs']) {
+      const config = {
+        services: {
+          api: {
+            volumes: [
+              { type: 'bind', source: root, target: '/workspace' },
+              { type: 'volume', source: 'evil', target },
+            ],
+          },
+        },
+      };
+      await expect(computeGitMask(root, config, { evaluationAssets: copies })).rejects.toThrow(/평가 자산 자리/);
+    }
   });
 
   it('서비스 여럿이 함께 재시작돼 동시에 불려도 실패하지 않고, 빈 폴더는 비어 있다(도그푸딩 마찰 187)', async () => {
@@ -381,6 +414,12 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
     return root;
   }
 
+  /** 계획(override에 적는 target·원본). 사후 확인은 이 계획을 기대한다 — 실제 마운트에서 거꾸로 계산하지 않는다 */
+  const planned = (root: string, copies: Array<{ path: string; source: string }>) => ({
+    evaluationAssetPlan: planEvaluationAssetMask([{ service: 'api', source: root, target: '/workspace' }], root, copies),
+    service: 'api',
+  });
+
   it('프로젝트 폴더를 쓰기 가능하게 붙였는데 .git 자리가 비어 있으면 그 자리를 돌려준다', async () => {
     const root = await project();
     const missing = await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/workspace', RW: true }], {});
@@ -428,7 +467,7 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
       { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
       { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
     ];
-    const declared = { evaluationAssets: copies };
+    const declared = planned(root, copies);
     expect(await findMissingMasks(root, base, {}, declared)).toEqual(['/workspace/tests/acceptance']);
     expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: true }], {}, declared)).toEqual(['/workspace/tests/acceptance']);
     expect(await findMissingMasks(root, [...base, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
@@ -442,7 +481,7 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
       { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
       { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
     ];
-    const declared = { evaluationAssets: copies };
+    const declared = planned(root, copies);
     const copy = { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false };
 
     // 읽기 전용 마운트가 같은 자리에 있지만 원본이 b-studio의 복사본이 아니다
@@ -455,6 +494,35 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
     expect(await findMissingMasks(root, [...base, copy], {}, declared)).toEqual([]);
   });
 
+  it('계획에 자리가 있는데 HostConfig.Tmpfs가 그 자리나 안쪽을 덮으면 빠진 것으로 본다(커밋 보안 검토)', async () => {
+    const root = await project();
+    const copies = [{ path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' }];
+    const declared = planned(root, copies);
+    const mounts = [
+      { Type: 'bind', Source: root, Destination: '/workspace', RW: true },
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+      { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false },
+    ];
+    // tmpfs는 Mounts에 나오지 않고 HostConfig.Tmpfs에만 있다. 같은 자리든 안쪽이든 우리 마운트 위에 덮인다
+    expect(await findMissingMasks(root, mounts, {}, { ...declared, tmpfs: { '/workspace/tests/acceptance': '' } })).toEqual(['/workspace/tests/acceptance']);
+    expect(await findMissingMasks(root, mounts, {}, { ...declared, tmpfs: { '/workspace/tests/acceptance/check.mjs': 'size=1m' } })).toEqual(['/workspace/tests/acceptance']);
+    // 자리 밖의 tmpfs는 상관없다
+    expect(await findMissingMasks(root, mounts, {}, { ...declared, tmpfs: { '/tmp': '' } })).toEqual([]);
+    expect(await findMissingMasks(root, mounts, {}, declared)).toEqual([]);
+  });
+
+  it('프로젝트 마운트의 원본을 알아보지 못해도 계획에 자리가 있으면 자산 마운트가 있는지 본다(커밋 보안 검토)', async () => {
+    const root = await project();
+    const copies = [{ path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' }];
+    const declared = planned(root, copies);
+    // 실제 마운트의 프로젝트 원본은 알아볼 수 없는 꼴(Docker Desktop 접두어를 프로젝트 마운트에서는 떼지 않는다)이다
+    const projectMount = { Type: 'bind', Source: `/host_mnt${root}`, Destination: '/workspace', RW: true };
+    // 계획에 자리가 있으므로 기대 목록이 비지 않는다. 자산 마운트가 없으면 빠진 것으로 본다
+    expect(await findMissingMasks(root, [projectMount], {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    expect(await findMissingMasks(root, [projectMount, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
+  });
+
   /** Docker Desktop이 Source를 접두어 붙여 알려 주는 상황의 기본 마운트 */
   async function desktop() {
     const root = await project();
@@ -465,7 +533,7 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
       { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
     ];
     const at = (Source: string) => [...base, { Type: 'bind', Source, Destination: '/workspace/tests/acceptance', RW: false }];
-    return { root, copies, declared: { evaluationAssets: copies }, at };
+    return { root, copies, declared: planned(root, copies), at };
   }
 
   it('Docker Desktop의 /host_mnt 접두어를 떼고 복사본과 견준다', async () => {

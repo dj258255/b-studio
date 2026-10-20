@@ -8157,6 +8157,13 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - **더 깊은 마운트로 덮기.** 사후 확인이 평가 자산 자리에 읽기 전용 마운트가 있는지만 봤다. 에이전트가 쓸 수 있는 `compose.yaml`에 `./evil.mjs:/workspace/tests/acceptance/check.mjs`를 더하면 도커는 깊은 마운트를 위에 얹는다. 실측(colima, alpine)에서 복사본의 `check.mjs` 위에 얹은 `process.exit(0)`이 읽혔다. 이제 계획 단계에서 평가 자산 자리 안쪽(같은 자리 포함)의 사용자 마운트를 거절하고, 사후 확인은 그 자리의 마운트가 읽기 전용이며 원본이 우리 복사본이고(`docker inspect`의 `Source`, Docker Desktop의 `/host_mnt`·`/run/desktop/mnt/host` 접두어만 뗀다) 안쪽에 다른 마운트가 없을 때만 통과시킨다.
 - **자리의 종류를 에이전트가 정했다.** 복사본 자리를 파일로 만들지 폴더로 만들지를 작업 복사본의 `lstat`으로 정해, 동기화 때 종류가 다르면 자리를 지우고 다시 만들었다(새 inode, 컨테이너는 옛 빈 자리를 본다). 이제 종류와 첫 내용은 체크포인트 판에서 정하고 컨테이너를 띄우기 전에 채운다. 동기화는 자리의 종류·dev·inode가 만들 때와 같을 때만 안을 바꾸고, 다르면 멈춘다.
 
+세 번째 판에도 경고가 왔다(제목만: fail-open-check, incomplete-mount-validation).
+
+- **tmpfs로 덮기.** compose의 `tmpfs:`는 `docker inspect`의 `Mounts`에 나오지 않고 `HostConfig.Tmpfs`에만 있다. 실측(alpine): 우리 읽기 전용 복사본 자리에 tmpfs를 얹자 `Mounts`에는 우리 마운트만 보였는데 컨테이너 안에서 그 자리에 쓰고 읽을 수 있었다. 계획 단계의 안쪽 마운트 거절도 bind만 봤다. 이제 계획 단계는 종류(bind·volume·tmpfs 등)를 가리지 않고 거절하고, 사후 확인은 `HostConfig.Tmpfs`도 본다.
+- **기대 목록을 실제 마운트에서 거꾸로 계산했다.** 프로젝트 마운트의 원본을 알아보지 못하면(Docker Desktop의 접두어 등) 확인할 자리가 비어 통과했다. 이제 기대 목록은 override에 적은 계획에서 가져온다.
+
+거부 목록(이런 마운트는 안 된다)을 하나씩 더해 온 것이 경고가 거듭된 까닭이다. 지금 규칙은 허용 목록 꼴이다: 평가 자산 자리와 그 안쪽에는 우리 복사본 마운트 하나만 있어야 한다.
+
 복사본을 체크포인트에서 꺼내는 까닭: 작업 복사본에서 뜨면 실행 전에 백그라운드가 바꿔 둔 판이 기준이 된다. 게이트를 통과한 커밋에서는 평가 자산이 바뀌지 않았다. 파일 자산도 붙인다. 복사본은 b-studio가 같은 inode를 유지하며 안을 바꾸므로, 파일 bind 마운트가 inode를 붙잡는 문제(리눅스 네이티브 도커)가 없다.
 
 실측(colima, 실제 도커):
@@ -8172,6 +8179,8 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 | alpine: 복사본의 `check.mjs` 위에 작업 복사본의 `evil.mjs`를 더 깊게 마운트 | 컨테이너가 `process.exit(0)`을 읽었다(두 번째 판의 근거) |
 | `compose.yaml`에 처음부터 평가 자산 안쪽 마운트 | 샌드박스를 만들지 않음: "서비스 api의 마운트 /workspace/tests/acceptance/check.mjs가 평가 자산 자리 … 안쪽에 있습니다" |
 | 시작한 뒤 `compose.yaml`에 안쪽 마운트를 더하고 다시 만듦 | 같은 문구로 거절, 떠 있던 컨테이너는 그대로 `v1-checkpoint` |
+| alpine: 복사본 자리에 `--tmpfs`를 얹음 | `Mounts`에는 우리 읽기 전용 마운트만 보이고, 안에서 쓰기·읽기가 됐다(세 번째 판의 근거) |
+| `compose.yaml`의 `tmpfs:`에 평가 자산 자리 | 샌드박스를 만들지 않음: "서비스 api가 평가 자산 자리 …에 다른 마운트(tmpfs)를 겹쳤습니다" |
 
 대가와 남은 길:
 - 테스트는 체크포인트에 커밋된 평가 자산으로 돈다. 사람이 작업 복사본에서 고친 평가 자산은 체크포인트로 남은 뒤부터 테스트에 쓰인다.

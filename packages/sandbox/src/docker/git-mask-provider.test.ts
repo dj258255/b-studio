@@ -397,6 +397,79 @@ describe('평가 자산 자리를 덮는 사용자 마운트', () => {
     await sandbox.destroy();
   });
 
+  it('평가 자산 자리에 tmpfs(같은 자리·안쪽)를 얹으면 샌드박스를 만들지 않고 던진다(커밋 보안 검토)', async () => {
+    for (const tmpfs of [['/workspace/tests/acceptance'], ['/workspace/tests/acceptance/check.mjs']]) {
+      const fixture = await setup();
+      declare(fixture.project);
+      await writeFile(fixture.configFile, JSON.stringify({ services: { api: { volumes: [{ type: 'bind', source: fixture.root, target: '/workspace' }], tmpfs } } }));
+      await expect(new LocalDockerProvider({ dockerBin: fixture.dockerBin, evaluationAssetRoot: path.join(fixture.dir, 'assets') }).create(fixture.project)).rejects.toThrow(
+        /평가 자산 자리/,
+      );
+      expect(await fixture.log()).not.toContain(' up ');
+    }
+  });
+
+  it('평가 자산 자리 안쪽에 이름 있는 볼륨을 얹어도 만들지 않는다', async () => {
+    const fixture = await setup();
+    declare(fixture.project);
+    await writeFile(
+      fixture.configFile,
+      JSON.stringify({
+        services: {
+          api: {
+            volumes: [
+              { type: 'bind', source: fixture.root, target: '/workspace' },
+              { type: 'volume', source: 'evil', target: '/workspace/tests/acceptance' },
+            ],
+          },
+        },
+      }),
+    );
+    await expect(new LocalDockerProvider({ dockerBin: fixture.dockerBin, evaluationAssetRoot: path.join(fixture.dir, 'assets') }).create(fixture.project)).rejects.toThrow(/평가 자산 자리/);
+    expect(await fixture.log()).not.toContain(' up ');
+  });
+
+  it('만든 컨테이너의 HostConfig.Tmpfs가 평가 자산 자리를 덮으면 시작하지 않고 지운다(커밋 보안 검토)', async () => {
+    /** 평가 자산 복사본이 제대로 붙은 컨테이너. tmpfs는 HostConfig에만 넣는다 */
+    const stage = async (tmpfs?: Record<string, string>) => {
+      const fixture = await setup();
+      declare(fixture.project);
+      const assetRoot = path.join(fixture.dir, 'assets');
+      const sandbox = await new LocalDockerProvider({ dockerBin: fixture.dockerBin, evaluationAssetRoot: assetRoot }).create(fixture.project);
+      const [copy] = evaluationAssetCopies(['tests/acceptance'], assetRoot, sandbox.id);
+      await writeFile(
+        fixture.inspectFile,
+        JSON.stringify([
+          {
+            Id: 'c1',
+            Config: { Labels: { 'com.docker.compose.service': 'api' } },
+            HostConfig: { Tmpfs: tmpfs ?? {} },
+            Mounts: [
+              { Type: 'bind', Source: fixture.root, Destination: '/workspace', RW: true },
+              { Type: 'bind', Source: path.join(fixture.root, '.git'), Destination: '/workspace/.git', RW: false },
+              { Type: 'bind', Source: path.join(fixture.root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+              { Type: 'bind', Source: copy!.source, Destination: '/workspace/tests/acceptance', RW: false },
+            ],
+          },
+        ]),
+      );
+      return { fixture, sandbox };
+    };
+
+    // tmpfs가 없으면 같은 컨테이너가 통과한다(다른 이유로 거절되는 것이 아님)
+    const clean = await stage();
+    await expect(clean.sandbox.setServiceRunning!('api', true)).resolves.toBeUndefined();
+    await clean.sandbox.destroy();
+
+    for (const target of ['/workspace/tests/acceptance', '/workspace/tests/acceptance/check.mjs']) {
+      const { fixture, sandbox } = await stage({ [target]: '' });
+      await expect(sandbox.setServiceRunning!('api', true)).rejects.toThrow(/\.git 읽기 전용 마운트가 빠져 시작하지 않았습니다/);
+      expect(upPhases(await fixture.log())).toEqual(['create']);
+      expect(await fixture.log()).toMatch(/^rm --force c1$/m);
+      await sandbox.destroy();
+    }
+  });
+
   it('자산 폴더 자체를 마운트해 복사본으로 바꾸는 마운트는 거절하지 않는다', async () => {
     const fixture = await setup();
     declare(fixture.project);
