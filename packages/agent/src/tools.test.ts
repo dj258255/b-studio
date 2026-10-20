@@ -499,6 +499,26 @@ describe('도구 결과 예산', () => {
   });
 });
 
+describe('HTML 응답의 시크릿 가림 (#751)', () => {
+  it('엔티티로 인코딩된 시크릿도 푼 뒤에 다시 가려 모델에게 원래 값이 가지 않는다', async () => {
+    const { Redactor } = await import('@b-studio/sandbox');
+    const secret = 'pa<ss&wo"rd-1234';
+    const redactor = new Redactor({ DB_PASSWORD: secret });
+    const sandbox = { ...context.sandbox, redact: (text: string) => redactor.redact(text) } as unknown as Sandbox;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response('<html><body><p>pa&lt;ss&amp;wo&quot;rd-1234</p></body></html>', { status: 200, headers: { 'content-type': 'text/html' } })) as typeof fetch;
+    try {
+      const outcome = await executeTool('http_request', { service: 'api', method: 'GET', path: '/', body: '' }, { ...context, sandbox });
+      expect(outcome.ok).toBe(true);
+      expect(outcome.content).not.toContain(secret);
+      expect(outcome.content).toContain('[DB_PASSWORD 가림]');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+});
+
 describe('같은 결과 반복 대체', () => {
   it('같은 도구·같은 입력의 결과가 같으면 참조로 바꾸고, 쓰기 뒤에는 다시 읽는다', async () => {
     const root = await mkdtemp(path.join(tmpdir(), 'tools-dedupe-'));
