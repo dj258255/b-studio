@@ -484,7 +484,6 @@ function collectRequiredPlaceholders(text: string, names: Set<string>): void {
   }
 }
 const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.java', '.kt', '.py']);
-const YAML_EXTENSIONS = new Set(['.yml', '.yaml', '.properties']);
 const REAL_ENV_FILES = new Set(['.env', '.env.local', '.env.production', '.env.development']);
 
 function collectMatches(text: string, patterns: RegExp[], names: Set<string>): void {
