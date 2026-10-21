@@ -13,6 +13,7 @@ import {
   WORKFLOW_INCOMPLETE_TRAILER,
   WORKFLOW_TRAILER,
   WORKFLOW_VERIFY_TRAILER,
+  type VerifyTrailer,
 } from './workflow';
 
 const execFileAsync = promisify(execFile);
@@ -27,8 +28,11 @@ export interface Checkpoint {
   files: string[];
   /** 커밋 본문의 Workflow-Passed 트레일러. 없으면 검증 게이트를 거쳤다는 기록이 없는 체크포인트다 */
   passedStages?: WorkflowStage[];
-  /** 가볍게 확인(light) 실행이면 'light', 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'. 전체 검증이면 없다 */
-  verify?: 'light' | 'docs';
+  /**
+   * 가볍게 확인(light) 실행이면 'light', 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs', 요청 사이에 쌓인 변경을
+   * 게이트 없이 남긴 직접 수정이면 'unverified'(#772). 전체 검증이면 없다
+   */
+  verify?: VerifyTrailer;
   /** 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트면 'max_turns'(커밋 본문의 Workflow-Incomplete 트레일러). 요청이 끝나지 않았을 수 있다 */
   incomplete?: 'max_turns';
   /**
@@ -84,7 +88,7 @@ export interface SessionCommit {
   passedStages?: WorkflowStage[];
   /** 커밋 본문의 Workflow-Verify 트레일러. 문서만 바꿔 검증 게이트 없이 남긴 체크포인트(ADR-096)면 'docs'.
    * PR 본문(buildPullRequest)이 이 값으로 "필수 단계 기록이 없다"가 아니라 "문서 체크포인트"로 보여준다 */
-  verify?: 'light' | 'docs';
+  verify?: VerifyTrailer;
   /** 커밋 본문의 Workflow-Incomplete 트레일러. 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트면 'max_turns' */
   incomplete?: 'max_turns';
 }

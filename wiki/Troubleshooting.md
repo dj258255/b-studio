@@ -27,4 +27,4 @@ pnpm typecheck
 | 두 세션을 함께 띄울 때 Gradle 실패 | 공유 쓰기 Gradle 홈 대신 세션별 볼륨인지 확인 |
 | 컨테이너형 Studio가 Git을 못 찾음 | 호스트와 컨테이너의 프로젝트·세션 경로가 같은지 확인 |
 
-실제 실행에서 발견한 37개 문제의 현상·원인·해결·검증은 [전체 트러블슈팅 문서](https://github.com/dj258255/b-studio/blob/main/docs/troubleshooting.md)에 있습니다. 해당 문서의 번호를 Issue와 PR에서 함께 사용하면 추적하기 쉽습니다.
+실제 실행에서 발견한 159개 문제의 현상·원인·해결·검증은 [전체 트러블슈팅 문서](https://github.com/dj258255/b-studio/blob/main/docs/troubleshooting.md)에 있습니다. 해당 문서의 번호를 Issue와 PR에서 함께 사용하면 추적하기 쉽습니다.

@@ -109,6 +109,17 @@ describe('project workflow', () => {
     expect(parseWorkflowTrailerValues(['test, review', 'run, deploy'])).toEqual(['run']);
   });
 
+  it('releaseRequires를 적지 않으면 게이트를 거치지 않은 직접 수정 체크포인트(Workflow-Verify: unverified)는 배포하지 않는다(#772)', () => {
+    expect(formatVerifyTrailer('unverified')).toBe(`${WORKFLOW_VERIFY_TRAILER}: unverified`);
+    expect(parseVerifyTrailerValues(['unverified'])).toBe('unverified');
+    expect(releaseBlockers(projectWith(), undefined, 'unverified')).toEqual(['checkpoint']);
+    // 세션 시작·원격 반영처럼 표시가 없는 체크포인트는 지금처럼 배포할 수 있다
+    expect(releaseBlockers(projectWith(), undefined)).toEqual([]);
+    // releaseRequires를 직접 적으면 그 조건만 본다
+    expect(releaseBlockers(projectWith({ releaseRequires: ['checkpoint'] }), undefined, 'unverified')).toEqual([]);
+    expect(releaseBlockers(projectWith({ tests: [unit], releaseRequires: ['test', 'checkpoint'] }), undefined, 'unverified')).toEqual(['test']);
+  });
+
   it('가볍게 확인(Workflow-Verify) 표시를 읽고, 없거나 다른 값이면 전체 검증으로 본다', () => {
     expect(formatVerifyTrailer('light')).toBe(`${WORKFLOW_VERIFY_TRAILER}: light`);
     expect(parseVerifyTrailerValues(['light'])).toBe('light');
