@@ -1214,6 +1214,33 @@ export class CheckpointStore {
    * 지금 디스크의 생성 파일이 마지막 체크포인트(HEAD)의 스냅샷과 다른지 본다. 되돌리지 않고 이름만 돌려준다 —
    * studio 쪽이 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행 뒤에, project를 다시 읽을지 정할 때 쓴다.
    */
+  /**
+   * 체크포인트(sha) 뒤에 생기거나 바뀐 무시된(.gitignore) 파일(#778). 되돌리기(`clean -fd`)는 무시된 파일을 지우지 않아, 실패한
+   * 실행이 만든 테스트 설정 같은 파일이 남아 다음 게이트의 결과를 바꿀 수 있다. 지우지 않고 알리기만 한다. 무시된 파일이 언제
+   * 생겼는지 git은 모르고, 사람이 고친 .env.local 같은 파일도 같은 목록에 들기 때문이다.
+   *  - 폴더째 무시된 것(node_modules/, build/ 등)은 의존성·빌드 출력이라 보지 않는다
+   *  - 생성 파일(excludedFiles)은 스냅샷이 되돌리므로 뺀다
+   *  - 커밋 시각은 초 단위라 수정 시각도 초로 내려 견준다. 체크포인트와 같은 초에 바뀐 파일은 빠진다
+   */
+  async ignoredChangedSince(sha = 'HEAD'): Promise<string[]> {
+    const since = Date.parse((await this.#git(['show', '-s', '--format=%cI', sha])).trim()) / 1000;
+    const out = await this.#git(['status', '--porcelain=v1', '-z', '--ignored=traditional', '--untracked-files=normal', ...(await this.#scope())]);
+    const entries = out
+      .split('\0')
+      .filter((entry) => entry.startsWith('!! '))
+      .map((entry) => entry.slice(3))
+      .filter((file) => !file.endsWith('/'));
+    const projectRoot = await this.projectRoot();
+    const excluded = new Set(this.#excludedFiles ? await this.#excludedFiles(projectRoot) : []);
+    const changed: string[] = [];
+    for (const file of await this.#fromRoot(entries)) {
+      if (excluded.has(file)) continue;
+      const info = await lstat(path.join(projectRoot, file)).catch(() => undefined);
+      if (info?.isFile() && Math.floor(info.mtimeMs / 1000) > since) changed.push(file);
+    }
+    return changed.sort();
+  }
+
   async pendingExcludedFiles(): Promise<string[]> {
     if (!this.#excludedFiles) return [];
     return (await this.#excludedDiff(await this.#headSha())).map((change) => change.file);

@@ -3193,6 +3193,7 @@ async function saveCheckpoint(
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
   await rememberGit(session, checkpoint.sha);
   emit(session, { type: 'checkpoint', runId, checkpoint });
+  await noticeIgnoredChanges(session, head, '이번 실행에서 체크포인트에 들어가지 않는 무시된(.gitignore) 파일이 생기거나 바뀌었습니다. 검사 결과에 영향을 줬을 수 있으니 확인하세요');
   // 에이전트가 이번 실행에서 studio.yaml을 바꿨으면(includes·systemPackages·workflow 등) 다음 요청부터 그 선언을 쓴다(도그푸딩 마찰 121)
   if (specChanged || excludedChanged.includes(SPEC_FILE)) await reloadSessionProject(session);
 }
@@ -3278,6 +3279,7 @@ async function revertRun(
       ? { docsCheckpoint: undefined, files: realigned.files, patch: realigned.patch, backup: realigned.backup, restoredRecords: [] as string[] }
       : await discardWorkingCopy(session.checkpoints, session.project.root, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session));
   if (restoredRecords.length > 0) emit(session, { type: 'notice', text: verificationRestoredNotice(restoredRecords), at: new Date().toISOString() });
+  await noticeIgnoredChanges(session, dbRestorePoint, '되돌렸지만 무시된(.gitignore) 파일은 지우지 않아 남아 있습니다. 다음 검사에 영향을 줄 수 있으니 필요 없으면 지우세요');
   if (docsCheckpoint) {
     session.snapshot.checkpoints = [docsCheckpoint, ...session.snapshot.checkpoints];
     emit(session, { type: 'docs_checkpoint', checkpoint: docsCheckpoint });
@@ -3315,6 +3317,17 @@ async function revertRun(
     backup,
   });
   return files;
+}
+
+/**
+ * 체크포인트(since) 뒤에 생기거나 바뀐 무시된 파일을 대화에 알린다(#778). 지우지 않는다. 무시된 파일은 체크포인트에도
+ * 되돌리기에도 들지 않아, 테스트 설정 같은 파일이 검사 결과를 바꿔도 보이지 않았다. 목록을 못 읽으면 알리지 않는다(알림일 뿐이다)
+ */
+async function noticeIgnoredChanges(session: Session, since: string, text: string): Promise<void> {
+  const files = await session.checkpoints.ignoredChangedSince(since).catch(() => [] as string[]);
+  if (files.length === 0) return;
+  const shown = files.slice(0, 20).join(', ');
+  emit(session, { type: 'notice', text: `${text}: ${shown}${files.length > 20 ? ` 외 ${files.length - 20}개` : ''}`, at: new Date().toISOString() });
 }
 
 /** 요청 전에 로컬 폴더의 수정을 체크포인트로 남기지 못했다 */
