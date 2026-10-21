@@ -74,11 +74,39 @@ describe('buildKubernetesManifests', () => {
       'Service/legacy-users',
     ]);
     expect(find(objects, 'Sandbox', 'web').spec).toMatchObject({ service: true });
-    expect(find(objects, 'NetworkPolicy', 'edge-egress').spec).toEqual({
+    expect(find(objects, 'NetworkPolicy', 'edge-egress').spec).toMatchObject({
       podSelector: { matchLabels: { 'b-studio.service': 'b-studio-edge' } },
       policyTypes: ['Egress'],
-      egress: [{}],
     });
+  });
+
+  it('DNS는 CoreDNS Pod로만 열고, edge 출구는 링크 로컬(클라우드 메타데이터) 주소를 뺀다(#774)', () => {
+    const objects = build();
+    const isolation = find(objects, 'NetworkPolicy', 'sandbox-isolation').spec as { egress: Array<{ to: unknown[]; ports?: unknown[] }> };
+    expect(isolation.egress[1]!.to).toEqual([
+      { namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } },
+    ]);
+    expect((find(objects, 'NetworkPolicy', 'edge-egress').spec as { egress: unknown }).egress).toEqual([
+      {
+        to: [
+          { ipBlock: { cidr: '0.0.0.0/0', except: ['169.254.0.0/16'] } },
+          { ipBlock: { cidr: '::/0', except: ['fe80::/10'] } },
+        ],
+      },
+    ]);
+  });
+
+  it('Pod는 서비스 계정 토큰을 받지 않고 런타임 기본 seccomp로 뜨며, edge는 포트 바인드 권한만 남긴다(#774)', () => {
+    const objects = build();
+    for (const name of ['web', 'api', 'db', 'b-studio-edge']) {
+      expect(podSpec(find(objects, 'Sandbox', name))).toMatchObject({ automountServiceAccountToken: false, securityContext: { seccompProfile: { type: 'RuntimeDefault' } } });
+    }
+    expect(podSpec(find(objects, 'Sandbox', 'b-studio-edge')).containers[0].securityContext).toEqual({
+      allowPrivilegeEscalation: false,
+      capabilities: { drop: ['ALL'], add: ['NET_BIND_SERVICE'] },
+    });
+    // 서비스 컨테이너의 권한은 Docker 경로와 같은 런타임 기본값으로 둔다. postgres처럼 root로 시작해 사용자를 바꾸는 이미지가 있다
+    expect(podSpec(find(objects, 'Sandbox', 'db')).containers[0]).not.toHaveProperty('securityContext');
   });
 
   it('서비스에는 RuntimeClass를 걸고 edge에는 걸지 않는다 (port-forward가 gVisor Pod의 포트를 보지 못함)', () => {

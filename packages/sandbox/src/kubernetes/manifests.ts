@@ -61,7 +61,8 @@ export function buildKubernetesManifests(options: KubernetesManifestOptions): Ku
         egress: [
           { to: [{ podSelector: {} }] },
           {
-            to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } } }],
+            // kube-system 전체가 아니라 CoreDNS Pod로만 연다(kubeadm·kind가 붙이는 라벨). 다른 kube-system Pod의 53번 포트를 출구로 쓰지 못하게 한다
+            to: [{ namespaceSelector: { matchLabels: { 'kubernetes.io/metadata.name': 'kube-system' } }, podSelector: { matchLabels: { 'k8s-app': 'kube-dns' } } }],
             ports: [
               { protocol: 'UDP', port: 53 },
               { protocol: 'TCP', port: 53 },
@@ -71,11 +72,24 @@ export function buildKubernetesManifests(options: KubernetesManifestOptions): Ku
       },
     },
     {
-      // 허용 목록 판단은 edge가 한다. 여기서는 edge만 네임스페이스 밖으로 나갈 수 있게 연다
+      // 허용 목록 판단은 edge가 한다. 여기서는 edge만 네임스페이스 밖으로 나갈 수 있게 연다. 링크 로컬 대역(클라우드 메타데이터
+      // 169.254.169.254 등)은 뺀다. 클러스터 Pod·Service 대역은 클러스터마다 달라 여기서 알 수 없고, 사내 API가 사설 주소에 있을 수
+      // 있어 사설 대역 전체는 막지 않는다. 그 판단은 edge의 허용 목록이 한다(#774)
       apiVersion: 'networking.k8s.io/v1',
       kind: 'NetworkPolicy',
       metadata: { name: 'edge-egress', namespace, labels: labels(EDGE_SERVICE) },
-      spec: { podSelector: { matchLabels: { [SERVICE_LABEL]: EDGE_SERVICE } }, policyTypes: ['Egress'], egress: [{}] },
+      spec: {
+        podSelector: { matchLabels: { [SERVICE_LABEL]: EDGE_SERVICE } },
+        policyTypes: ['Egress'],
+        egress: [
+          {
+            to: [
+              { ipBlock: { cidr: '0.0.0.0/0', except: ['169.254.0.0/16'] } },
+              { ipBlock: { cidr: '::/0', except: ['fe80::/10'] } },
+            ],
+          },
+        ],
+      },
     },
   ];
 
@@ -157,6 +171,8 @@ function edgeSandbox({ project, namespace, edgeScript }: KubernetesManifestOptio
       {
         name: EDGE_SERVICE,
         image: EDGE_IMAGE,
+        // edge는 b-studio가 만든 node 프로세스 하나라 권한이 필요 없다. 80번(사내 API) 포트를 여는 권한만 남긴다
+        securityContext: { allowPrivilegeEscalation: false, capabilities: { drop: ['ALL'], add: ['NET_BIND_SERVICE'] } },
         // compose와 달리 매니페스트 값은 변수 치환을 하지 않으므로 스크립트를 그대로 넣는다
         command: ['node', '--input-type=module', '-e', edgeScript],
         env: [...Object.entries(edgeEnvironment(project, services)).map(([key, value]) => ({ name: key, value })), ...authEnv],
@@ -168,12 +184,20 @@ function edgeSandbox({ project, namespace, edgeScript }: KubernetesManifestOptio
   });
 }
 
+/**
+ * 모든 샌드박스 Pod에 거는 기본값(#774).
+ *  - 서비스 계정 토큰을 마운트하지 않는다. 샌드박스 안 코드가 Kubernetes API를 부를 일이 없다
+ *  - seccomp를 런타임 기본 프로필로 건다. Docker는 기본으로 걸지만 containerd(kind 등)는 Pod에 적지 않으면 걸지 않는다
+ * 컨테이너 권한(capabilities)은 Docker 경로와 같은 런타임 기본값으로 둔다. 모두 빼면 root로 시작해 사용자를 바꾸는 이미지(postgres 등)가 뜨지 않는다
+ */
+const POD_DEFAULTS = { automountServiceAccountToken: false, securityContext: { seccompProfile: { type: 'RuntimeDefault' } } };
+
 function sandbox(name: string, namespace: string, labels: Record<string, string>, podSpec: Record<string, unknown>): KubernetesObject {
   return {
     apiVersion: 'agents.x-k8s.io/v1beta1',
     kind: 'Sandbox',
     metadata: { name, namespace, labels },
-    spec: { service: true, podTemplate: { metadata: { labels }, spec: podSpec } },
+    spec: { service: true, podTemplate: { metadata: { labels }, spec: { ...POD_DEFAULTS, ...podSpec } } },
   };
 }
 
