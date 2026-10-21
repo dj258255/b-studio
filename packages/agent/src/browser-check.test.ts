@@ -408,3 +408,65 @@ describe('createScreencast', () => {
     expect(frames.map((frame) => frame.width)).toEqual([500, 500]);
   });
 });
+
+describe('createScreencast 프레임이 오지 않을 때(#802)', () => {
+  function fakeClient() {
+    let listener: ((params: unknown) => void) | undefined;
+    const shots: number[] = [];
+    const client = {
+      on: (_event: string, handler: (params: unknown) => void) => {
+        listener = handler;
+      },
+      send: async (method: string) => {
+        if (method === 'Page.captureScreenshot') {
+          shots.push(Date.now());
+          return { data: Buffer.from('shot').toString('base64') };
+        }
+        return undefined;
+      },
+    } as unknown as CDPSession;
+    let id = 0;
+    const emit = (width: number, height: number) => listener!({ data: Buffer.from(`f${++id}`).toString('base64'), sessionId: id, metadata: { deviceWidth: width, deviceHeight: height } });
+    return { client, emit, shots };
+  }
+  const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('켠 뒤 중계 프레임이 오지 않으면 지금 화면을 찍어 보낸다(정적인 페이지는 프레임이 하나도 안 올 때가 있다)', async () => {
+    const { client, shots } = fakeClient();
+    const frames: BrowserFrame[] = [];
+    const screencast = createScreencast(client, { width: 400, height: 300 }, (frame) => frames.push(frame));
+    await screencast.start(400);
+    await tick(700);
+    expect(shots).toHaveLength(1);
+    expect(frames.map((frame) => `${frame.data.toString()} ${frame.width}x${frame.height}`)).toEqual(['shot 400x300']);
+  });
+
+  it('껐다 켠 뒤(원격 브라우저의 영역 스크린샷)와 화면을 바꾼 뒤(expectFrame)에도 같다', async () => {
+    const { client, emit, shots } = fakeClient();
+    const frames: BrowserFrame[] = [];
+    const screencast = createScreencast(client, { width: 400, height: 300 }, (frame) => frames.push(frame));
+    await screencast.start(400);
+    emit(400, 300);
+    await screencast.stop();
+    await screencast.start(400);
+    await tick(700);
+    screencast.expectFrame();
+    await tick(700);
+    expect(shots).toHaveLength(2);
+    expect(frames.map((frame) => frame.data.toString())).toEqual(['f1', 'shot', 'shot']);
+  });
+
+  it('중계 프레임이 오면 찍지 않고, 멈춘 채로는 찍지 않는다', async () => {
+    const { client, emit, shots } = fakeClient();
+    const frames: BrowserFrame[] = [];
+    const screencast = createScreencast(client, { width: 400, height: 300 }, (frame) => frames.push(frame));
+    await screencast.start(400);
+    emit(400, 300);
+    await tick(700);
+    await screencast.stop();
+    screencast.expectFrame();
+    await tick(700);
+    expect(shots).toHaveLength(0);
+    expect(frames.map((frame) => frame.data.toString())).toEqual(['f1']);
+  });
+});
