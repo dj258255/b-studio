@@ -305,7 +305,7 @@ export class Workspace {
       result.filesScanned += 1;
       bytes += info.size;
       // 크기를 본 뒤 여는 사이에 이 파일이 링크로 바뀌어도 따라가지 않는다
-      const buffer = await readNoFollow(absolute, absolute, MAX_READ_BYTES).catch(() => undefined);
+      const buffer = await readNoFollowInside(this.root, absolute, absolute, MAX_READ_BYTES).catch(() => undefined);
       if (!buffer || buffer.byteLength > MAX_READ_BYTES || buffer.subarray(0, 1024).includes(0)) return;
       const lines = redact(buffer.toString('utf8')).split(/\r?\n/);
       for (const [index, line] of lines.entries()) {
@@ -353,7 +353,7 @@ export class Workspace {
 
   async #load(file: string): Promise<{ absolute: string; content: string }> {
     const absolute = await this.#resolve(file, { mustExist: true });
-    const buffer = await readNoFollow(absolute, file, MAX_READ_BYTES);
+    const buffer = await readNoFollowInside(this.root, absolute, file, MAX_READ_BYTES);
     return { absolute, content: buffer.toString('utf8') };
   }
 
@@ -361,7 +361,7 @@ export class Workspace {
     const absolute = await this.#resolve(file, { mustExist: false });
     await this.#assertNotStale(absolute);
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeNoFollow(absolute, content);
+    await writeNoFollowInside(this.root, absolute, content);
     this.#record(absolute, content);
   }
 
@@ -372,7 +372,7 @@ export class Workspace {
   async writeBinary(file: string, data: Buffer): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: false });
     await mkdir(path.dirname(absolute), { recursive: true });
-    await writeNoFollow(absolute, data);
+    await writeNoFollowInside(this.root, absolute, data);
     const relative = this.#relative(absolute);
     this.#seen.delete(relative);
     this.#deleted.delete(relative);
@@ -383,7 +383,7 @@ export class Workspace {
   async edit(file: string, oldText: string, newText: string): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: true });
     await this.#assertNotStale(absolute);
-    const current = (await readNoFollow(absolute, file)).toString('utf8');
+    const current = (await readNoFollowInside(this.root, absolute, file)).toString('utf8');
 
     const first = current.indexOf(oldText);
     if (oldText.length === 0 || first === -1) {
@@ -394,7 +394,7 @@ export class Workspace {
     }
 
     const next = current.slice(0, first) + newText + current.slice(first + oldText.length);
-    await writeNoFollow(absolute, next);
+    await writeNoFollowInside(this.root, absolute, next);
     this.#record(absolute, next);
   }
 
@@ -415,7 +415,7 @@ export class Workspace {
     const seen = this.#seen.get(relative);
     if (seen === undefined) return;
 
-    const current = await readNoFollow(absolute, relative).then((buffer) => buffer.toString('utf8'), () => undefined);
+    const current = await readNoFollowInside(this.root, absolute, relative).then((buffer) => buffer.toString('utf8'), () => undefined);
     if (current !== undefined && digest(current) !== seen) {
       throw new WorkspaceError(`${relative}: 마지막으로 읽은 뒤 다른 곳에서 파일이 바뀌었습니다. 다시 읽고 수정하세요`);
     }
@@ -556,15 +556,17 @@ async function nearestExisting(target: string): Promise<string> {
 
 /**
  * 마지막 조각이 링크면 따라가지 않고 실패하게 연다(O_NOFOLLOW). #resolve가 경로를 확인한 뒤 실제로 읽고 쓰기까지의 사이에
- * 그 파일이 링크로 바뀌는 경합을 좁힌다. 상위 폴더가 그 사이에 링크로 바뀌는 것까지는 막지 못한다(남은 한계)
+ * 그 파일이 링크로 바뀌는 경합을 좁힌다.
  *  - 종류와 크기는 연 파일 자체(fstat)로 읽기 전에 본다. 다 읽은 뒤에 보면 수 GB 파일이 서버 메모리를 먼저 차지한다.
  *    FIFO는 쓰는 쪽이 없으면 열기에서 멈추므로 O_NONBLOCK으로 열고 일반 파일이 아니면 거절한다(readRegularFileBytesSync와 같은 규칙)
  *  - maxBytes를 주면 확인한 크기까지만 읽는다. 확인 뒤에 파일이 늘어나도 그 뒤는 읽지 않는다
+ *  - 연 뒤에 그 파일이 프로젝트 안의 것인지 확인한다(assertOpenedInside, #799)
  */
-async function readNoFollow(absolute: string, label: string, maxBytes?: number): Promise<Buffer> {
+export async function readNoFollowInside(root: string, absolute: string, label: string, maxBytes?: number): Promise<Buffer> {
   const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
     const stat = await handle.stat();
+    await assertOpenedInside(root, absolute, label, stat);
     if (!stat.isFile()) throw new WorkspaceError(`${label}: 일반 파일이 아닙니다`);
     if (maxBytes === undefined) return await handle.readFile();
     if (stat.size > maxBytes) throw new WorkspaceError(`${label}: 파일이 너무 큽니다 (${stat.size} bytes)`);
@@ -581,12 +583,32 @@ async function readNoFollow(absolute: string, label: string, maxBytes?: number):
   }
 }
 
-async function writeNoFollow(absolute: string, data: string | Buffer): Promise<void> {
-  const handle = await open(absolute, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW, 0o666);
+/**
+ * 쓰기도 O_NOFOLLOW로 열고, 비우기(O_TRUNC)는 연 파일이 프로젝트 안의 것인지 확인한 뒤에 한다(#799). 열 때 비우면 상위 폴더가
+ * 그 사이에 바깥을 가리키는 링크로 바뀐 경우 바깥 파일이 먼저 비워진다. 남은 한계: 그런 경우 O_CREAT가 바깥에 빈 파일을 만들 수 있다
+ */
+export async function writeNoFollowInside(root: string, absolute: string, data: string | Buffer): Promise<void> {
+  const handle = await open(absolute, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o666);
   try {
+    await assertOpenedInside(root, absolute, path.relative(root, absolute), await handle.stat());
+    await handle.truncate(0);
     await handle.writeFile(data);
   } finally {
     await handle.close();
+  }
+}
+
+/**
+ * 연 파일(opened)이 프로젝트 안에 있는지 연 뒤에 다시 확인한다(#799). #resolve는 경로를 조각마다 확인하지만 그 뒤 열기 전에
+ * 상위 폴더가 링크로 바뀌면 O_NOFOLLOW(마지막 조각만 본다)로는 막지 못한다.
+ *  - 경로를 지금 풀어(realpath) 프로젝트 밖이면 거절한다(바뀐 링크가 아직 남아 있는 경우)
+ *  - 풀린 경로의 파일이 연 파일과 다르면(장치·inode) 거절한다(바꿨다가 되돌린 경우. 연 것은 바깥 파일이다)
+ */
+async function assertOpenedInside(root: string, absolute: string, label: string, opened: { dev: number; ino: number }): Promise<void> {
+  const [realRoot, real] = await Promise.all([realpath(/*turbopackIgnore: true*/ root), realpath(/*turbopackIgnore: true*/ absolute).catch(() => undefined)]);
+  const current = real === undefined ? undefined : await lstat(real).catch(() => undefined);
+  if (real === undefined || !isInside(realRoot, real) || !current || current.dev !== opened.dev || current.ino !== opened.ino) {
+    throw new WorkspaceError(`${label}: 연 파일이 프로젝트 밖에 있습니다(경로를 확인한 뒤 링크로 바뀌었습니다)`);
   }
 }
 

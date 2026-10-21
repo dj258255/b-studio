@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, symlink, truncate, writeFile } from 'node
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { isSecretFile, readProjectFileSync, readRegularFileSync, syncExternalChanges, Workspace, WorkspaceError } from './workspace';
+import { isSecretFile, readNoFollowInside, readProjectFileSync, readRegularFileSync, syncExternalChanges, Workspace, WorkspaceError, writeNoFollowInside } from './workspace';
 
 let root: string;
 let workspace: Workspace;
@@ -358,5 +358,34 @@ describe('Workspace — .env 예시 파일', () => {
     } finally {
       await rm(root, { recursive: true, force: true });
     }
+  });
+});
+
+describe('열기 뒤 확인: 경로를 확인한 뒤 상위 폴더가 링크로 바뀌어도 프로젝트 밖을 읽거나 쓰지 않는다(#799)', () => {
+  /** 경로 확인이 끝난 뒤 상위 폴더가 프로젝트 밖을 가리키는 링크로 바뀐 상태를 만든다(O_NOFOLLOW는 마지막 조각만 본다) */
+  async function swappedParent(): Promise<{ outside: string; target: string }> {
+    const outside = await mkdtemp(path.join(tmpdir(), 'workspace-outside-'));
+    await writeFile(path.join(outside, 'secret.txt'), 'outside secret');
+    await symlink(outside, path.join(root, 'swapped'));
+    return { outside, target: path.join(root, 'swapped', 'secret.txt') };
+  }
+
+  it('읽기: 연 파일이 프로젝트 밖이면 거절한다', async () => {
+    const { target } = await swappedParent();
+    await expect(readNoFollowInside(root, target, 'swapped/secret.txt')).rejects.toThrow(/프로젝트 밖/);
+  });
+
+  it('쓰기: 연 파일이 프로젝트 밖이면 거절하고, 바깥 파일을 비우거나 고치지 않는다', async () => {
+    const { outside, target } = await swappedParent();
+    await expect(writeNoFollowInside(root, target, 'overwritten')).rejects.toThrow(/프로젝트 밖/);
+    expect(await readFile(path.join(outside, 'secret.txt'), 'utf8')).toBe('outside secret');
+  });
+
+  it('프로젝트 안의 보통 파일은 그대로 읽고 쓴다', async () => {
+    await writeNoFollowInside(root, path.join(root, 'api/src/New.java'), 'class New {}\n');
+    expect((await readNoFollowInside(root, path.join(root, 'api/src/New.java'), 'api/src/New.java')).toString('utf8')).toBe('class New {}\n');
+    // 기존 파일을 더 짧게 덮어쓰면 남는 꼬리가 없다(O_TRUNC 대신 확인 뒤에 비운다)
+    await writeNoFollowInside(root, path.join(root, 'api/src/App.java'), 'x');
+    expect(await readFile(path.join(root, 'api/src/App.java'), 'utf8')).toBe('x');
   });
 });
