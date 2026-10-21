@@ -2473,11 +2473,14 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 체크포인트로 남기지 않게 닫힌 쪽으로 판정한다. 스테이징될 변경이 있으면 불일치로 되돌린다.
         // git이 추적하지 않는 생성 파일(studio.yaml 등)은 인덱스에 없으므로 견줄 대상에서 뺀다
         const generated = new Set(await session.checkpoints.pendingExcludedFiles());
-        const expectStaged = new Map(Object.entries(result.verifiedFingerprints ?? {}).filter(([file]) => !generated.has(file)));
+        const verified = Object.entries(result.verifiedFingerprints ?? {});
+        const expectStaged = new Map(verified.filter(([file]) => !generated.has(file)));
+        // 생성 파일은 인덱스 대신 스냅샷(기준선)으로 남는다. 그 내용도 검증한 것과 같을 때만 남긴다(#775)
+        const expectExcluded = new Map(verified.filter(([file]) => generated.has(file)));
         try {
           // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
           // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
-          await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true, expectStaged);
+          await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true, expectStaged, expectExcluded);
         } catch (error) {
           if (!(error instanceof StagedMismatchError)) throw error;
           // 게이트가 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 검증하지 않은 내용을 체크포인트로 남기지 않고 되돌린다
@@ -3153,6 +3156,8 @@ async function saveCheckpoint(
   requestIsAnswer = false,
   /** 검증한 내용의 지문. 주면 스테이징된 내용이 이것과 같을 때만 커밋한다(다르면 StagedMismatchError) */
   expectStaged?: ReadonlyMap<string, string>,
+  /** 검증한 생성 파일(git 추적 밖)의 지문. 주면 생성 파일 기준선도 이것과 같을 때만 남긴다(다르면 StagedMismatchError, #775) */
+  expectExcluded?: ReadonlyMap<string, string>,
 ): Promise<void> {
   const head = session.snapshot.checkpoints[0]!.sha;
   // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
@@ -3172,13 +3177,14 @@ async function saveCheckpoint(
     findSecrets: (text) => session.sandbox.findSecrets(text),
     trailers,
     ...(expectStaged ? { expectStaged } : {}),
+    ...(expectExcluded ? { expectExcluded } : {}),
     expectedHead: expectedHeadFor(session),
   });
   if (!checkpoint) {
     // 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행도, 그 내용을 마지막 체크포인트 곁에 남긴다(그래야 다음
     // 되돌리기가 이번에 바꾼 내용을 "이전 상태"로 잘못 알지 않는다)
     if (excludedChanged.length > 0) {
-      await session.checkpoints.refreshExcludedSnapshot(head);
+      await session.checkpoints.refreshExcludedSnapshot(head, expectExcluded);
       if (excludedChanged.includes(SPEC_FILE)) await reloadSessionProject(session);
     }
     return;
@@ -8640,12 +8646,13 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       // 커밋되는 내용이 방금 검증한 내용과 같아야 한다. git이 추적하지 않는 생성 파일은 인덱스에 없으므로 견줄 대상에서 뺀다
       const generated = new Set(await session.checkpoints.pendingExcludedFiles());
       const expectStaged = new Map([...tracker.tracked].filter(([file]) => !generated.has(file)));
+      const expectExcluded = new Map([...tracker.tracked].filter(([file]) => generated.has(file)));
       const passed = terminalResult(run, verification, 'done', text, 'pass', started);
       // 턴 상한에 닿아 게이트만 통과한 실행은 하다 만 것으로 표시한다(#B5, ADR-131 덧붙임)
       if (state.limitReason === 'max_turns') passed.incomplete = 'max_turns';
       try {
         if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
-        await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged);
+        await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged, expectExcluded);
       } catch (error) {
         if (error instanceof HeadMovedError) {
           // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
