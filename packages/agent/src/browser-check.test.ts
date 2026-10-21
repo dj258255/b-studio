@@ -1,7 +1,8 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { runInBrowser, StepFailedError, type BrowserFrame } from './browser-check';
+import type { CDPSession } from 'playwright-core';
+import { createScreencast, runInBrowser, StepFailedError, type BrowserFrame } from './browser-check';
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const JPEG_SIGNATURE = Buffer.from([0xff, 0xd8]);
@@ -21,7 +22,8 @@ const PAGES: Record<string, string> = {
   // 입력칸에서 Enter를 누르면 폼이 제출되는 페이지
   '/form': `<html><body><form onsubmit="event.preventDefault(); document.getElementById('done').textContent = '제출됨'"><input id="name"></form><p id="done"></p></body></html>`,
   // screencast가 볼 화면 변화를 계속 만드는 페이지
-  '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => clearInterval(timer), 1500);</script></body></html>`,
+  // 1.5초 동안 배경을 바꾼 뒤 #done을 붙인다. 테스트가 #done을 기다려, 부하가 높아도 이동 뒤 프레임을 받을 시간이 있다(#789)
+  '/animation': `<html><body style="margin:0"><script>let i = 0; const timer = setInterval(() => { document.body.style.background = i++ % 2 ? 'red' : 'blue'; }, 50); setTimeout(() => { clearInterval(timer); const done = document.createElement('i'); done.id = 'done'; done.textContent = '끝'; document.body.append(done); }, 1500);</script></body></html>`,
   // 트러블슈팅 83: 상대 경로 미디어 주소가 404여서 재생되지 않는 <video>·<img>
   '/video-404': `<html><body><video id="v" preload="auto" src="/missing.mp4"></video></body></html>`,
   // 안쪽 스크롤 영역에 잘린 줄(도그푸딩 사례): 영역 높이 100px 안에 150px짜리 내용이 있고, 두 번째 줄은 창 안이지만 영역 밖으로 잘린다
@@ -218,10 +220,11 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
 
   it('onFrame으로 JPEG 프레임을 받되 초당 5장 상한을 넘지 않는다', async () => {
     const frames: BrowserFrame[] = [];
-    await runInBrowser(`${base}/animation`, { viewport: { width: 400, height: 300 }, onFrame: (frame) => frames.push(frame) });
+    // 이동 전 빈 페이지(about:blank)의 프레임은 창 크기(실측 500x213)로 와서 보내지 않는다. 이동 뒤 프레임만 받는다(#789)
+    await runInBrowser(`${base}/animation`, { viewport: { width: 400, height: 300 }, steps: [{ waitFor: '#done' }], onFrame: (frame) => frames.push(frame) });
     expect(frames.length).toBeGreaterThan(0);
     expect(frames[0]?.data.subarray(0, 2)).toEqual(JPEG_SIGNATURE);
-    expect(frames[0]?.width).toBe(400);
+    expect(frames.every((frame) => frame.width === 400 && frame.height === 300)).toBe(true);
     // 콜백은 시간 기준으로 걸러지므로 연속한 프레임 간격이 200ms보다 좁을 수 없다
     for (const [index, frame] of frames.slice(1).entries()) expect(frame.at - frames[index]!.at).toBeGreaterThanOrEqual(190);
   });
@@ -343,5 +346,65 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
 
   it('미디어 오류가 없으면 mediaErrors가 빈 배열이다', async () => {
     expect((await runInBrowser(`${base}/ok`, {})).mediaErrors).toEqual([]);
+  });
+});
+
+describe('createScreencast', () => {
+  /** CDP 세션 흉내: screencastFrame 리스너를 받아 두고 테스트가 프레임을 직접 보낸다. ack는 센다 */
+  function fakeClient() {
+    let listener: ((params: unknown) => void) | undefined;
+    const acks: number[] = [];
+    const client = {
+      on: (_event: string, handler: (params: unknown) => void) => {
+        listener = handler;
+      },
+      send: async (method: string, params?: { sessionId?: number }) => {
+        if (method === 'Page.screencastFrameAck') acks.push(params!.sessionId!);
+      },
+    } as unknown as CDPSession;
+    let id = 0;
+    const emit = (width: number, height: number) => listener!({ data: Buffer.from('x').toString('base64'), sessionId: ++id, metadata: { deviceWidth: width, deviceHeight: height } });
+    return { client, emit, acks };
+  }
+  const tick = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('뷰포트와 크기가 다른 프레임(적용 전·크기를 바꾸는 도중)은 보내지 않는다. ack는 보낸다(#789)', async () => {
+    const { client, emit, acks } = fakeClient();
+    const viewport = { width: 400, height: 300 };
+    const frames: BrowserFrame[] = [];
+    createScreencast(client, viewport, (frame) => frames.push(frame));
+
+    // 실측: 뷰포트를 적용하기 전의 첫 프레임이 500x213으로 오는 경우가 있다
+    emit(500, 213);
+    emit(400, 300);
+    await tick(0);
+    expect(frames.map((frame) => `${frame.width}x${frame.height}`)).toEqual(['400x300']);
+    expect(acks).toEqual([1, 2]);
+
+    // 원격 브라우저처럼 크기를 바꾸면 옛 크기의 프레임은 버리고 새 크기만 보낸다
+    viewport.width = 800;
+    viewport.height = 600;
+    await tick(250);
+    emit(400, 300);
+    emit(800, 600);
+    await tick(250);
+    expect(frames.map((frame) => `${frame.width}x${frame.height}`)).toEqual(['400x300', '800x600']);
+  });
+
+  it('다른 크기가 연달아 오면 기대가 틀린 것으로 보고 그대로 보낸다(미리보기가 멈추지 않게)', async () => {
+    const { client, emit } = fakeClient();
+    const frames: BrowserFrame[] = [];
+    createScreencast(client, { width: 400, height: 300 }, (frame) => frames.push(frame));
+    for (let i = 0; i < 4; i++) emit(500, 213);
+    await tick(0);
+    expect(frames).toHaveLength(0);
+    emit(500, 213);
+    await tick(0);
+    expect(frames.map((frame) => frame.width)).toEqual([500]);
+    // 상한을 넘은 뒤에는 맞는 크기가 올 때까지 계속 보낸다(다섯 번에 한 번만 보내 끊기지 않게)
+    await tick(250);
+    emit(500, 213);
+    await tick(0);
+    expect(frames.map((frame) => frame.width)).toEqual([500, 500]);
   });
 });

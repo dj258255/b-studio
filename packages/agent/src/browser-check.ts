@@ -118,6 +118,8 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
 /** screencast 전송량 상한. 프레임은 세션 기록에 남기지 않고 실시간 채널로만 보낸다 */
 export const SCREENCAST_MAX_FPS = 5;
 const SCREENCAST_INTERVAL_MS = 1000 / SCREENCAST_MAX_FPS;
+/** 뷰포트와 크기가 다른 프레임을 몇 번 연달아 버린 뒤에 그대로 보낼지(createScreencast) */
+const SCREENCAST_MISMATCH_LIMIT = 5;
 
 export class BrowserUnavailableError extends Error {}
 
@@ -328,6 +330,8 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   // 초당 상한을 넘는 프레임은 버리지 않고 가장 최근 것 하나를 들고 있다가 간격이 지나면 보낸다(뒤쪽 스로틀).
   // 앞쪽에서 버리기만 하면 변화의 마지막 프레임이 사라져, 페이지가 멈춘 뒤에도 미리보기가 그 전 화면에 머문다
   let last = 0;
+  // 뷰포트와 크기가 다른 프레임이 연달아 온 수. 상한을 넘으면 기대가 틀린 것으로 보고 그대로 보낸다
+  let mismatched = 0;
   let pending: BrowserFrame | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deliver = (frame: BrowserFrame) => {
@@ -342,6 +346,15 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
       height: params.metadata.deviceHeight || viewport.height,
       at: Date.now(),
     };
+    // 뷰포트를 적용하기 전(실측: 첫 프레임이 500x213)이나 크기를 바꾸는 도중의 프레임은 크기가 다르다. 원격 브라우저는 프레임 크기로
+    // 클릭 좌표를 바꾸므로 그런 프레임은 엉뚱한 곳을 누르게 한다(#789). 보내지 않는다. 다만 연달아 다르면 기대가 틀린 것이라
+    // (런타임이 크기를 다르게 보고하는 환경) 미리보기가 멈추지 않게 그대로 보낸다
+    if (frame.width !== viewport.width || frame.height !== viewport.height) {
+      mismatched += 1;
+      if (mismatched < SCREENCAST_MISMATCH_LIMIT) return;
+    } else {
+      mismatched = 0;
+    }
     const wait = last + SCREENCAST_INTERVAL_MS - frame.at;
     if (wait <= 0 && !timer) {
       deliver(frame);
