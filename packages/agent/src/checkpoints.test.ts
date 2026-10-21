@@ -1889,3 +1889,27 @@ describe('b-studio의 git은 필터·속성·환경으로 내용이 바뀌지 �
     expect(await store.sessionDiff()).toContain('String hacked');
   });
 });
+
+describe('CheckpointStore 체크포인트 뒤에 생기거나 바뀐 무시된 파일 (#778)', () => {
+  it('파일 단위로 무시된 것만 고르고, 폴더째 무시된 것·생성 파일·체크포인트 전 파일은 빼며, 되돌린 뒤에도 남는다', async () => {
+    await writeFile(path.join(root, '.gitignore'), '*.local\nconftest.py\nbuild/\n');
+    await write('old.local', 'before\n');
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
+    // 체크포인트 시각(초 단위)보다 확실히 뒤에 쓰도록 1초 넘게 기다린다
+    const start = await store.init();
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await write('studio.yaml', 'version: 1\n');
+    await excludeFromRoot('/studio.yaml');
+    await write('api/conftest.py', 'import pytest\n');
+    await mkdir(path.join(root, 'build'), { recursive: true });
+    await write('build/out.txt', 'x\n');
+    await write('new.local', 'after\n');
+    await write('api/src/Order.java', 'class Order { int broken }\n');
+
+    expect(await store.ignoredChangedSince(start.sha)).toEqual(['api/conftest.py', 'new.local']);
+    // 되돌리기(clean -fd)는 무시된 파일을 지우지 않는다. 그래서 알릴 대상으로 그대로 남는다
+    await store.discard();
+    expect(await read('api/src/Order.java')).toBe('class Order {}\n');
+    expect(await store.ignoredChangedSince()).toEqual(['api/conftest.py', 'new.local']);
+  });
+});

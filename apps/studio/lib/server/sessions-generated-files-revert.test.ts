@@ -250,3 +250,30 @@ describe('생성 파일(studio.yaml 등, ADR-067)도 체크포인트 시점으�
     await stopSession(id).catch(() => {});
   }, 20_000);
 });
+
+describe('무시된 파일은 되돌리지 않고 알린다(#778)', () => {
+  it('실패한 실행 동안 생긴 무시된 파일은 되돌린 뒤에도 남고, 그 사실을 대화에 알린다', async () => {
+    await setupFolderOpenedProject();
+    await writeFile(path.join(fake.root, '.gitignore'), '*.local\n');
+    await git(fake.root, 'add', '.gitignore');
+    await git(fake.root, 'commit', '-q', '-m', 'ignore');
+    const id = (await createSession('genfilesproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    const workDir = getSnapshot(id)!.workDir;
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, (event) => events.push(event));
+
+    // 체크포인트 시각(초 단위)보다 뒤에 쓴다. 실행이 띄운 명령이 남긴 테스트 설정을 흉내 낸다
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    await writeFile(path.join(workDir, 'api/test.local'), 'skip_all = true\n');
+    await sendFailingWrites(id, '테스트 설정 추가', [{ path: 'api/src/Order.java', content: 'class Order { int broken }\n' }], events);
+
+    expect(await readFile(path.join(workDir, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
+    expect(await readFile(path.join(workDir, 'api/test.local'), 'utf8')).toBe('skip_all = true\n');
+    const notice = events.find((event): event is Extract<StudioEvent, { type: 'notice' }> => event.type === 'notice' && event.text.includes('무시된(.gitignore) 파일은 지우지 않아'));
+    expect(notice?.text).toContain('api/test.local');
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+});
