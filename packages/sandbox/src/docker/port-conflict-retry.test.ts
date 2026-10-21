@@ -87,6 +87,14 @@ function countCommandLines(log: string, token: string): number {
     .filter((line) => line.split(' ').includes(token)).length;
 }
 
+/** 재시도 사이의 정리 명령(컨테이너를 멈추고 지우는 rm, 예전에는 down) 줄 */
+function cleanupLines(log: string): string[] {
+  return log.split('\n').filter((line) => {
+    const words = line.split(' ');
+    return words.includes('down') || (words.includes('rm') && words.includes('--stop'));
+  });
+}
+
 describe('isPortBindConflict', () => {
   it('바인드 충돌 stderr 패턴을 알아본다', () => {
     expect(isPortBindConflict(BIND_CONFLICT_STDERR)).toBe(true);
@@ -100,7 +108,7 @@ describe('isPortBindConflict', () => {
 });
 
 describe('compose up 포트 충돌 재시도', () => {
-  it('바인드 충돌로 두 번 실패하면 포트를 다시 뽑아 재시도하고, down이 재시도 사이에 돈다', async () => {
+  it('바인드 충돌로 두 번 실패하면 포트를 다시 뽑아 재시도하고, 재시도 사이에 일부만 뜬 컨테이너를 지운다', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'port-retry-'));
     const { dockerBin, log, snapshotDir } = await fakeDockerWithPortConflict(dir, 2, BIND_CONFLICT_STDERR);
     const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
@@ -109,7 +117,7 @@ describe('compose up 포트 충돌 재시도', () => {
 
     const args = await readFile(log, 'utf8');
     expect(countCommandLines(args, 'start')).toBe(3);
-    expect(countCommandLines(args, 'down')).toBe(2);
+    expect(cleanupLines(args)).toHaveLength(2);
 
     // 재시도마다 override에 새로 쓴 포트가 서로 달라야 한다(세트 전체를 다시 뽑는다)
     const [first, , third] = await Promise.all(
@@ -127,7 +135,21 @@ describe('compose up 포트 충돌 재시도', () => {
 
     const args = await readFile(log, 'utf8');
     expect(countCommandLines(args, 'start')).toBe(3);
-    expect(countCommandLines(args, 'down')).toBe(2);
+    expect(cleanupLines(args)).toHaveLength(2);
+  });
+
+  it('재시도 사이의 정리는 이름 있는 볼륨을 지우지 않는다(스냅숏으로 채운 볼륨과 쌓인 DB 데이터를 남긴다)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'port-retry-'));
+    const { dockerBin, log } = await fakeDockerWithPortConflict(dir, 1, BIND_CONFLICT_STDERR);
+    const sandbox = await new LocalDockerProvider({ dockerBin }).create(project);
+
+    await expect(sandbox.start()).resolves.toEqual([]);
+
+    const cleanup = cleanupLines(await readFile(log, 'utf8'));
+    expect(cleanup).toHaveLength(1);
+    // down --volumes는 이름 있는 볼륨까지 지운다. rm --volumes는 지우는 컨테이너에 붙은 익명 볼륨만 지운다
+    expect(cleanup[0]!.split(' ')).not.toContain('down');
+    expect(cleanup[0]!.split(' ')).toEqual(expect.arrayContaining(['rm', '--stop', '--force', '--volumes']));
   });
 
   it('포트와 무관한 실패는 재시도하지 않고 바로 던진다', async () => {
@@ -139,6 +161,6 @@ describe('compose up 포트 충돌 재시도', () => {
 
     const args = await readFile(log, 'utf8');
     expect(countCommandLines(args, 'start')).toBe(1);
-    expect(countCommandLines(args, 'down')).toBe(0);
+    expect(cleanupLines(args)).toHaveLength(0);
   });
 });
