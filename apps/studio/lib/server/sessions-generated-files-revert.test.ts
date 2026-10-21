@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -245,6 +246,44 @@ describe('생성 파일(studio.yaml 등, ADR-067)도 체크포인트 시점으�
     await sendFailingWrites(id, '컴파일 에러 확인', [{ path: 'api/src/Order.java', content: 'class Order { int broken }\n' }], events);
     expect(await readFile(path.join(workDir, 'api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
     expect(await readFile(path.join(workDir, 'studio.yaml'), 'utf8')).toBe(studioYaml(2));
+
+    unsubscribe();
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+});
+
+describe('생성 파일의 기준선도 게이트가 검증한 내용일 때만 남긴다(#775)', () => {
+  /** 게이트가 통과한 직후(agent done), 체크포인트를 남기기 전에 studio.yaml을 다른 내용으로 바꾸는 구독 */
+  function rewriteSpecAfterGate(workDir: string, events: StudioEvent[]) {
+    return (event: StudioEvent) => {
+      events.push(event);
+      if (event.type === 'agent' && event.event.type === 'done') writeFileSync(path.join(workDir, 'studio.yaml'), studioYaml(3));
+    };
+  }
+
+  it.each([
+    ['추적 파일과 함께 바꾼 실행(체크포인트를 새로 남기는 경로)', true],
+    ['studio.yaml만 바꾼 실행(체크포인트 없이 기준선만 갱신하는 경로)', false],
+  ])('%s: 검증한 뒤에 studio.yaml이 바뀌면 기준선으로 남기지 않고 되돌린다', async (_label, withTracked) => {
+    await setupFolderOpenedProject();
+    const id = (await createSession('genfilesproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    const workDir = getSnapshot(id)!.workDir;
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, rewriteSpecAfterGate(workDir, events));
+
+    const writes = [
+      ...(withTracked ? [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] : []),
+      { name: 'write_file', input: { path: 'studio.yaml', content: studioYaml(2) } },
+    ];
+    sendMessage(id, '워크플로 버전을 올린다', { allowBreaking: false, scriptedTurns: [{ toolCalls: writes }, { text: '완료했습니다.' }] });
+    const finished = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'run_finished' }> => event.type === 'run_finished'));
+
+    expect(finished.status).toBe('error');
+    expect(finished.summary).toContain('검증한 뒤에 바뀐 파일이 있어');
+    expect(getSnapshot(id)!.checkpoints).toHaveLength(1);
+    // 검증하지 않은 version 3도, 검증한 version 2도 기준선이 되지 않았다. 되돌리면 처음 내용이다
+    expect(await readFile(path.join(workDir, 'studio.yaml'), 'utf8')).toBe(studioYaml(1));
 
     unsubscribe();
     await stopSession(id).catch(() => {});
