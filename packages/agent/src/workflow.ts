@@ -117,10 +117,14 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
 /**
  * 가볍게 확인(light)했거나 문서만 바꿔(docs) 검증 게이트를 거치지 않은 체크포인트임을 커밋 본문 끝에 남기는 트레일러.
  * 배포 화면과 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-096).
+ * unverified는 요청 사이에 쌓인 변경을 게이트 없이 남긴 "직접 수정" 체크포인트다. releaseRequires를 적지 않은 기본 설정에서도
+ * 배포하지 않는다(#772)
  */
 export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
 
-export function formatVerifyTrailer(mode: 'light' | 'docs'): string {
+export type VerifyTrailer = 'light' | 'docs' | 'unverified';
+
+export function formatVerifyTrailer(mode: VerifyTrailer): string {
   return `${WORKFLOW_VERIFY_TRAILER}: ${mode}`;
 }
 
@@ -144,13 +148,13 @@ export function parseIncompleteTrailerValues(values: readonly string[]): 'max_tu
   return value === 'max_turns' ? value : undefined;
 }
 
-/** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'·'docs'가 아니면 undefined(전체 검증 실행) */
-export function parseVerifyTrailerValues(values: readonly string[]): 'light' | 'docs' | undefined {
+/** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'·'docs'·'unverified'가 아니면 undefined(전체 검증 실행) */
+export function parseVerifyTrailerValues(values: readonly string[]): VerifyTrailer | undefined {
   const value = values
     .map((entry) => entry.trim().toLowerCase())
     .filter(Boolean)
     .at(-1);
-  return value === 'light' || value === 'docs' ? value : undefined;
+  return value === 'light' || value === 'docs' || value === 'unverified' ? value : undefined;
 }
 
 /**
@@ -180,10 +184,13 @@ export function parseWorkflowTrailerValues(values: readonly string[]): WorkflowS
 
 /**
  * 배포 전에 체크포인트가 releaseRequires를 채웠는지 본다. 빠진 단계를 돌려준다.
- * checkpoint는 체크포인트가 있다는 것 자체로 채워진다. 검증 기록이 없는 체크포인트는 다른 단계를 하나도 채우지 못한다
+ * checkpoint는 체크포인트가 있다는 것 자체로 채워진다. 검증 기록이 없는 체크포인트는 다른 단계를 하나도 채우지 못한다.
+ * 예외: releaseRequires를 적지 않은 기본 설정에서 게이트를 거치지 않은 직접 수정 체크포인트(verify: 'unverified')는 checkpoint도
+ * 채우지 못한다(#772). 기본값 [checkpoint]가 "체크포인트면 무엇이든"이라 게이트 없는 커밋도 배포되던 자리다. 직접 적은 조건은 그대로 따른다
  */
-export function releaseBlockers(project: LoadedProject, passedStages: readonly WorkflowStage[] | undefined): WorkflowStage[] {
+export function releaseBlockers(project: LoadedProject, passedStages: readonly WorkflowStage[] | undefined, verify?: VerifyTrailer): WorkflowStage[] {
   const passed = new Set(passedStages ?? []);
+  if (verify === 'unverified' && project.spec.workflow?.releaseRequires === undefined) return ['checkpoint'];
   return workflowReleaseRequirements(project).filter((stage) => stage !== 'checkpoint' && !passed.has(stage));
 }
 
