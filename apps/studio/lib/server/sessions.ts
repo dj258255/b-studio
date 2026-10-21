@@ -3338,7 +3338,12 @@ async function saveLocalEdits(session: Session): Promise<Checkpoint | undefined>
 async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text: string) => string[], expectedHead?: string): Promise<Checkpoint | undefined> {
   const files = await checkpoints.pendingFiles();
   if (files.length === 0) return undefined;
-  return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', { findSecrets, expectedHead });
+  // 게이트 기록이 없다는 것을 트레일러로 남긴다. 기본 배포 조건이 이 표시로 배포를 막는다(#772)
+  return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', {
+    findSecrets,
+    expectedHead,
+    trailers: [formatVerifyTrailer('unverified')],
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -4538,7 +4543,13 @@ export function deploySession(id: string, { by, sha }: { by?: string; sha?: stri
   // (releaseBasisCheckpoint). 문서 체크포인트의 파일을 꺼내면 게이트를 거치지 않은 문서 내용이 배포에 실린다
   const basis = releaseBasisCheckpoint(session.snapshot.checkpoints, checkpoint);
   // 규칙은 체크포인트 안의 studio.yaml이 아니라 실행 중인 세션의 것을 쓴다. 같은 변경에서 규칙을 느슨하게 고쳐 배포하지 못하게 한다
-  const blockers = releaseBlockers(session.project, basis.passedStages);
+  const blockers = releaseBlockers(session.project, basis.passedStages, basis.verify);
+  if (basis.verify === 'unverified' && blockers.includes('checkpoint')) {
+    throw new StudioError(
+      409,
+      `체크포인트 ${basis.shortSha}는 검증 게이트를 거치지 않은 직접 수정 체크포인트라 배포하지 않습니다. 다음 요청에서 게이트를 통과한 체크포인트를 배포하세요. 직접 수정도 배포하려면 studio.yaml의 workflow.releaseRequires에 조건을 적으세요.`,
+    );
+  }
   if (blockers.length > 0) {
     // 가볍게 확인한 체크포인트는 건너뛴 단계가 통과 기록에 없어 여기서 자연히 막힌다. 이유를 분명히 알려 준다
     const light = basis.verify === 'light' ? ' 가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다.' : '';
