@@ -305,7 +305,7 @@ export class Workspace {
       result.filesScanned += 1;
       bytes += info.size;
       // 크기를 본 뒤 여는 사이에 이 파일이 링크로 바뀌어도 따라가지 않는다
-      const buffer = await readNoFollow(absolute).catch(() => undefined);
+      const buffer = await readNoFollow(absolute, absolute, MAX_READ_BYTES).catch(() => undefined);
       if (!buffer || buffer.byteLength > MAX_READ_BYTES || buffer.subarray(0, 1024).includes(0)) return;
       const lines = redact(buffer.toString('utf8')).split(/\r?\n/);
       for (const [index, line] of lines.entries()) {
@@ -353,10 +353,7 @@ export class Workspace {
 
   async #load(file: string): Promise<{ absolute: string; content: string }> {
     const absolute = await this.#resolve(file, { mustExist: true });
-    const buffer = await readNoFollow(absolute);
-    if (buffer.byteLength > MAX_READ_BYTES) {
-      throw new WorkspaceError(`${file}: 파일이 너무 큽니다 (${buffer.byteLength} bytes)`);
-    }
+    const buffer = await readNoFollow(absolute, file, MAX_READ_BYTES);
     return { absolute, content: buffer.toString('utf8') };
   }
 
@@ -386,7 +383,7 @@ export class Workspace {
   async edit(file: string, oldText: string, newText: string): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: true });
     await this.#assertNotStale(absolute);
-    const current = (await readNoFollow(absolute)).toString('utf8');
+    const current = (await readNoFollow(absolute, file)).toString('utf8');
 
     const first = current.indexOf(oldText);
     if (oldText.length === 0 || first === -1) {
@@ -418,7 +415,7 @@ export class Workspace {
     const seen = this.#seen.get(relative);
     if (seen === undefined) return;
 
-    const current = await readNoFollow(absolute).then((buffer) => buffer.toString('utf8'), () => undefined);
+    const current = await readNoFollow(absolute, relative).then((buffer) => buffer.toString('utf8'), () => undefined);
     if (current !== undefined && digest(current) !== seen) {
       throw new WorkspaceError(`${relative}: 마지막으로 읽은 뒤 다른 곳에서 파일이 바뀌었습니다. 다시 읽고 수정하세요`);
     }
@@ -560,11 +557,25 @@ async function nearestExisting(target: string): Promise<string> {
 /**
  * 마지막 조각이 링크면 따라가지 않고 실패하게 연다(O_NOFOLLOW). #resolve가 경로를 확인한 뒤 실제로 읽고 쓰기까지의 사이에
  * 그 파일이 링크로 바뀌는 경합을 좁힌다. 상위 폴더가 그 사이에 링크로 바뀌는 것까지는 막지 못한다(남은 한계)
+ *  - 종류와 크기는 연 파일 자체(fstat)로 읽기 전에 본다. 다 읽은 뒤에 보면 수 GB 파일이 서버 메모리를 먼저 차지한다.
+ *    FIFO는 쓰는 쪽이 없으면 열기에서 멈추므로 O_NONBLOCK으로 열고 일반 파일이 아니면 거절한다(readRegularFileBytesSync와 같은 규칙)
+ *  - maxBytes를 주면 확인한 크기까지만 읽는다. 확인 뒤에 파일이 늘어나도 그 뒤는 읽지 않는다
  */
-async function readNoFollow(absolute: string): Promise<Buffer> {
-  const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW);
+async function readNoFollow(absolute: string, label: string, maxBytes?: number): Promise<Buffer> {
+  const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   try {
-    return await handle.readFile();
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new WorkspaceError(`${label}: 일반 파일이 아닙니다`);
+    if (maxBytes === undefined) return await handle.readFile();
+    if (stat.size > maxBytes) throw new WorkspaceError(`${label}: 파일이 너무 큽니다 (${stat.size} bytes)`);
+    const buffer = Buffer.alloc(stat.size);
+    let offset = 0;
+    while (offset < stat.size) {
+      const { bytesRead } = await handle.read(buffer, offset, stat.size - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    return buffer.subarray(0, offset);
   } finally {
     await handle.close();
   }
