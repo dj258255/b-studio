@@ -19,7 +19,7 @@ b-studio는 프로젝트별 샌드박스, 자원 한도, edge 프록시, 허용 
 - `network.egress`와 external API 정책은 최소 권한으로 작성하세요.
 - edge는 `;`(`%3b`)나 인코딩된 구분자가 든 경로를 external API 정책과 `network.egress`의 경로 규칙에서 거부합니다. `;jsessionid=`처럼 경로 매개변수를 쓰는 API는 경로 규칙이나 정책으로 다룰 수 없습니다(ADR-026 덧붙임).
 - 세션 기록의 암호화, 보존 기간, 삭제 정책을 별도로 정하세요.
-- Kubernetes에서는 RuntimeClass, NetworkPolicy, RBAC, 볼륨, 이미지 출처를 검증하세요.
+- Kubernetes 제공자는 kind용 시제품입니다. 샌드박스 Pod는 서비스 계정 토큰을 받지 않고 런타임 기본 seccomp로 뜹니다. DNS는 CoreDNS Pod로만 열고, edge 출구에서는 링크 로컬(클라우드 메타데이터) 주소를 뺍니다. 서비스 컨테이너의 권한은 런타임 기본값이고 클러스터 Pod·Service 대역은 막지 않으므로, RuntimeClass, NetworkPolicy 강제 여부, RBAC, 볼륨, 이미지 출처를 조직 정책에 맞게 검증하세요(ADR-028 덧붙임).
 - 배포 롤백은 DB 마이그레이션을 되돌리지 않습니다.
 
 현재 별도 릴리스 버전과 장기 지원 정책이 없습니다. 보안 수정은 기본 브랜치의 최신 상태를 기준으로 관리합니다.
