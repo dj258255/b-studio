@@ -1448,6 +1448,74 @@ describe('CheckpointStore 검증한 내용만 커밋한다 (이슈 #677)', () =>
   });
 });
 
+describe('CheckpointStore 생성 파일도 검증한 내용만 기준선으로 남긴다 (#775)', () => {
+  /** studio.yaml을 추적 밖 생성 파일로 두고 version: 1을 기준선으로 남긴 저장소 */
+  async function storeWithSpec(): Promise<{ store: CheckpointStore; start: string }> {
+    const store = new CheckpointStore(root, { excludedFiles: async () => ['studio.yaml'] });
+    const start = await store.init();
+    await write('studio.yaml', 'version: 1\n');
+    await excludeFromRoot('/studio.yaml');
+    await store.refreshExcludedSnapshot(start.sha);
+    return { store, start: start.sha };
+  }
+
+  it('검증한 뒤에 생성 파일이 바뀌었으면 체크포인트를 남기지 않고, 기준선도 바꾸지 않는다', async () => {
+    const { store, start } = await storeWithSpec();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await write('studio.yaml', 'version: 2\n');
+    const tracked = await store.stagedFingerprints(await store.pendingFiles());
+    const excluded = await store.stagedFingerprints(await store.pendingExcludedFiles());
+    // 게이트가 끝난 뒤, 커밋 전에 생성 파일이 검증하지 않은 내용으로 바뀌었다
+    await write('studio.yaml', 'version: 3-unverified\n');
+
+    const failure = await store.commit('feat: 메모', undefined, { expectStaged: tracked, expectExcluded: excluded }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(StagedMismatchError);
+    expect((failure as StagedMismatchError).files).toEqual(['studio.yaml']);
+    expect((await store.list(5))[0]!.sha).toBe(start);
+    // 기준선은 그대로라 되돌리면 검증 전 내용으로 돌아간다
+    await store.discard();
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+  });
+
+  it('검증에 없던 생성 파일 변경도 다르다고 본다', async () => {
+    const { store } = await storeWithSpec();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    const tracked = await store.stagedFingerprints(await store.pendingFiles());
+    await write('studio.yaml', 'version: 2-sneaked\n');
+
+    const failure = await store.commit('feat: 메모', undefined, { expectStaged: tracked, expectExcluded: new Map() }).catch((error: unknown) => error);
+    expect((failure as StagedMismatchError).files).toEqual(['studio.yaml']);
+  });
+
+  it('검증한 내용 그대로면 체크포인트를 남기고 그 내용을 기준선으로 쓴다', async () => {
+    const { store } = await storeWithSpec();
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await write('studio.yaml', 'version: 2\n');
+    const tracked = await store.stagedFingerprints(await store.pendingFiles());
+    const excluded = await store.stagedFingerprints(await store.pendingExcludedFiles());
+
+    expect(await store.commit('feat: 메모', undefined, { expectStaged: tracked, expectExcluded: excluded })).toBeDefined();
+    await write('studio.yaml', 'version: 3\n');
+    await store.discard();
+    expect(await read('studio.yaml')).toBe('version: 2\n');
+  });
+
+  it('생성 파일만 바뀐 실행의 기준선 갱신도 검증한 지문과 견준다', async () => {
+    const { store, start } = await storeWithSpec();
+    await write('studio.yaml', 'version: 2\n');
+    const excluded = await store.stagedFingerprints(await store.pendingExcludedFiles());
+    await write('studio.yaml', 'version: 3-unverified\n');
+
+    await expect(store.refreshExcludedSnapshot(start, excluded)).rejects.toBeInstanceOf(StagedMismatchError);
+    await store.discard();
+    expect(await read('studio.yaml')).toBe('version: 1\n');
+
+    await write('studio.yaml', 'version: 2\n');
+    await store.refreshExcludedSnapshot(start, excluded);
+    expect(await store.pendingExcludedFiles()).toEqual([]);
+  });
+});
+
 describe('인덱스 잠금 충돌(#682)', () => {
   const lockPath = () => path.join(root, '.git/index.lock');
 
