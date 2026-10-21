@@ -185,12 +185,17 @@ describe('runInBrowser', { timeout: 60_000 }, () => {
   });
 
   it('단계가 없으면 기다림을 더하지 않는다', async () => {
+    // 브라우저 기동 시간은 기계 부하에 따라 4초를 넘기도 한다(#804). 같은 조건에서 기다릴 것이 없는 페이지를 연 시간과 견준다
+    const baselineStarted = Date.now();
+    await runInBrowser(`${base}/ok`, {});
+    const baseline = Date.now() - baselineStarted;
     const started = Date.now();
     const result = await runInBrowser(`${base}/submit-fails`, {});
+    const elapsed = Date.now() - started;
     expect(result.failedRequests).toEqual([]);
     expect(result.steps.map((step) => step.label)).toEqual(['open /submit-fails']);
-    // 여는 데 드는 시간만 든다(브라우저 기동 포함). 상한(5초)까지 기다리지 않는다
-    expect(Date.now() - started).toBeLessThan(4_000);
+    // 기다림을 더했다면 상한(5초)만큼 늘어난다. 여는 데 드는 시간만 들면 차이가 그보다 훨씬 작다
+    expect(elapsed - baseline).toBeLessThan(3_000);
   });
 
   it('capture를 끄면 스크린샷 없이 단계 결과만 남긴다', async () => {
