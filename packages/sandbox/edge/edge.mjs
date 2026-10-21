@@ -81,11 +81,13 @@ export function hasEgressRuleFor(host, port, rules) {
 }
 
 /**
- * 퍼센트 인코딩된 경로 구분자(`%2f`, `%5c`)와 이중 인코딩(`%25`).
+ * 퍼센트 인코딩된 경로 구분자(`%2f`, `%5c`)와 이중 인코딩(`%25`), 경로 매개변수(`;`, `%3b`).
  * edge가 본 경로와 상위 서버가 풀어서 해석할 경로가 달라지므로 경로 규칙 검사가 성립하지 않는다.
- * 상위가 몇 번 푸는지 알 수 없어 세지 않고, CONNECT 터널과 같은 원칙으로 검사할 수 없으면 막는다
+ * 상위가 몇 번 푸는지 알 수 없어 세지 않고, CONNECT 터널과 같은 원칙으로 검사할 수 없으면 막는다.
+ * `;`: URL 해석은 `..;`를 점 구간으로 보지 않아 그대로 남기지만, 경로 매개변수를 떼고 해석하는 서버(일부 서블릿
+ * 컨테이너)에서는 `..`가 되어 위 폴더로 올라간다. 어떤 서버가 떼는지 edge는 모르므로 `;`가 든 경로는 모두 막는다(#773)
  */
-const ENCODED_SEPARATOR = /%(?:2f|5c|25)/i;
+const ENCODED_SEPARATOR = /%(?:2f|5c|25|3b)|;/i;
 
 export function hasEncodedSeparator(pathname) {
   return ENCODED_SEPARATOR.test(String(pathname));
@@ -113,7 +115,7 @@ function checkHttpEgress(host, port, method, pathname, rules) {
   if (candidates.length === 0) return { denied: '허용 목록에 없는 호스트나 포트' };
   if (candidates.some(isHostLevelRule)) return {};
   // 여기서부터는 경로를 견줘야 한다. 인코딩된 구분자가 있으면 견줄 수 없다
-  if (hasEncodedSeparator(pathname)) return { denied: '경로에 인코딩된 구분자가 있어 검사할 수 없음' };
+  if (hasEncodedSeparator(pathname)) return { denied: '경로에 인코딩된 구분자나 ;가 있어 검사할 수 없음' };
   const normalizedMethod = String(method).toUpperCase();
   if (candidates.some((rule) => rule.methods.includes(normalizedMethod) && rule.paths.some((pattern) => matchPath(pattern, pathname)))) return {};
   return { denied: '허용하지 않은 메서드나 경로' };
@@ -495,7 +497,7 @@ export function startApiProxy({ externals, secrets = {}, resolveCaller, port = A
 
     if (!external) return deny(404, '등록하지 않은 API입니다');
     if (!caller) return deny(403, '요청한 서비스를 알 수 없습니다');
-    if (hasEncodedSeparator(target.pathname)) return deny(403, '경로에 인코딩된 구분자가 있어 규칙을 검사할 수 없습니다');
+    if (hasEncodedSeparator(target.pathname)) return deny(403, '경로에 인코딩된 구분자나 ;가 있어 규칙을 검사할 수 없습니다');
     if (!isAllowedCall(external.policy, caller, method, target.pathname)) return deny(403, `${caller} 서비스에 허용하지 않은 호출입니다`);
 
     try {
