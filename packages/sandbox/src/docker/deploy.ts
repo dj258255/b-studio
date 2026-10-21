@@ -74,6 +74,50 @@ export class DeployError extends SandboxError {
   }
 }
 
+/**
+ * 프록시를 거친 확인이 실패한 뒤 이전 릴리스로 되돌리지 못했다(#811). 운영 주소는 확인에 실패한 새 릴리스(routedTo)를
+ * 가리킨 채다. 실패 처리가 그 릴리스를 내리면 운영이 멈추므로 내리지 않는다(keepsFailedReleaseRunning)
+ */
+export class RouteRestoreError extends DeployError {
+  readonly routedTo: string;
+  constructor(message: string, routedTo: string, detail?: string) {
+    super(message, detail);
+    this.name = 'RouteRestoreError';
+    this.routedTo = routedTo;
+  }
+}
+
+/** 실패한 배포를 정리할 때 새 릴리스를 그대로 둘지. 운영 주소가 그 릴리스를 가리키는 채로 끝났으면 둔다 */
+export function keepsFailedReleaseRunning(error: unknown): boolean {
+  return error instanceof RouteRestoreError;
+}
+
+/**
+ * 프록시를 거친 확인이 실패한 뒤 운영 주소를 이전 릴리스(back)로 되돌린다(#811).
+ *  - 취소 신호를 넘기지 않는다. 사용자가 배포를 멈췄어도 운영 주소는 되돌려야 한다
+ *  - 한 번 실패하면 잠깐 뒤 다시 시도한다(프록시 재시작 직후 등 일시적인 실패)
+ *  - 끝내 실패하면 "되돌렸습니다"를 남기지 않고 RouteRestoreError를 던진다. 예전에는 실패를 삼키고 성공으로 기록했다
+ */
+export async function restoreRouteAfterFailedCheck(
+  route: () => Promise<void>,
+  { back, failed, log, attempts = 2, delayMs = 1_000 }: { back: string; failed: string; log: (text: string) => void; attempts?: number; delayMs?: number },
+): Promise<void> {
+  let last: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      await route();
+      log(`프록시를 거친 확인에 실패해 운영 주소를 릴리스 ${back}로 되돌렸습니다`);
+      return;
+    } catch (error) {
+      last = error;
+      if (attempt < attempts) await sleep(delayMs);
+    }
+  }
+  const text = `프록시를 거친 확인에 실패했고 운영 주소를 릴리스 ${back}로 되돌리지 못했습니다(${headline(last)}). 운영 주소는 확인에 실패한 릴리스 ${failed}를 가리킵니다. 릴리스 ${back}로 되돌리기를 다시 시도하세요`;
+  log(text);
+  throw new RouteRestoreError(text, failed);
+}
+
 /** 전환한 뒤 이전 릴리스로 들어온 요청이 끝날 시간을 준다 */
 const DRAIN_MS = 3_000;
 /** 되돌릴 수 있게 이미지를 남기는 이전 릴리스 수 */
@@ -172,7 +216,13 @@ export class DockerDeployer {
       try {
         return await this.#activate(state, release, 'rollback', log, signal);
       } catch (error) {
-        state.history.unshift({ at: new Date().toISOString(), action: 'failed', release: release.id, from: state.active, error: headline(error) });
+        const from = state.active;
+        if (keepsFailedReleaseRunning(error)) {
+          // 운영 주소가 되돌리려던 릴리스를 가리킨 채로 끝났다(#811). 운영 상태를 실제 연결에 맞춘다
+          for (const entry of state.releases) if (entry.id === from) entry.status = 'previous';
+          state.active = release.id;
+        }
+        state.history.unshift({ at: new Date().toISOString(), action: 'failed', release: release.id, from, error: headline(error) });
         await this.#writeState(state);
         throw error;
       }
@@ -251,10 +301,7 @@ export class DockerDeployer {
       for (const [name, spec] of this.project.managed) await this.#verifyThroughProxy(name, ports[name]!, spec.ready?.path ?? '/', spec.ready?.expectStatus ?? 200);
     } catch (error) {
       const back = previous ? state.releases.find((entry) => entry.id === previous) : undefined;
-      if (back) {
-        await this.#routeTo(back, signal).catch(() => {});
-        log('switch', `프록시를 거친 확인에 실패해 운영 주소를 릴리스 ${back.id}로 되돌렸습니다`);
-      }
+      if (back) await restoreRouteAfterFailedCheck(() => this.#routeTo(back), { back: back.id, failed: release.id, log: (text) => log('switch', text) });
       throw error;
     }
 
@@ -395,16 +442,24 @@ export class DockerDeployer {
   }
 
   async #recordFailure(state: DeployState, release: DeployRelease, error: unknown, log: (stage: DeployStage, text: string) => void): Promise<void> {
+    const from = state.active;
     release.status = 'failed';
     release.error = headline(error);
     const detail = (error as { detail?: unknown }).detail;
     if (typeof detail === 'string' && detail.trim()) release.errorDetail = detail.trim().slice(-4_000);
     release.finishedAt = new Date().toISOString();
-    // 운영 주소는 바꾸지 않았으므로 새 릴리스만 치운다
-    await this.#stopRelease(release.id, log).catch(() => {});
-    await this.#removeImages(release, log);
+    if (keepsFailedReleaseRunning(error)) {
+      // 운영 주소가 이 릴리스를 가리킨 채로 끝났다(되돌리기 실패, #811). 내리면 운영이 멈추므로 두고, 운영 상태를 실제 연결에 맞춘다.
+      // 이전 운영 릴리스는 'previous'로 남겨 되돌리기로 돌아갈 수 있게 한다
+      for (const entry of state.releases) if (entry.id === state.active) entry.status = 'previous';
+      state.active = release.id;
+    } else {
+      // 운영 주소는 바꾸지 않았거나 되돌렸으므로 새 릴리스만 치운다
+      await this.#stopRelease(release.id, log).catch(() => {});
+      await this.#removeImages(release, log);
+    }
     state.releases = trimRecords([release, ...state.releases.filter((entry) => entry.id !== release.id)], state.active);
-    state.history = [{ at: release.finishedAt, action: 'failed' as const, release: release.id, ...(state.active ? { from: state.active } : {}), error: release.error }, ...state.history].slice(0, 50);
+    state.history = [{ at: release.finishedAt, action: 'failed' as const, release: release.id, ...(from ? { from } : {}), error: release.error }, ...state.history].slice(0, 50);
     await this.#writeState(state);
   }
 
