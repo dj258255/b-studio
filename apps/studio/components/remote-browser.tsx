@@ -261,6 +261,7 @@ export function RemoteBrowserView({ sessionId, service, frame, blocked }: { sess
       >
         {frame ? (
           <>
+            {/* eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다 */}
             <img
               ref={imgRef}
               src={`data:${frame.mime};base64,${frame.data}`}

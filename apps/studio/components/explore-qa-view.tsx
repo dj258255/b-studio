@@ -244,6 +244,7 @@ export function ExploreQaView({ sessionId, service, frame }: { sessionId: string
         <div ref={containerRef} className="relative flex min-h-0 w-full items-center justify-center overflow-hidden bg-ground">
           {frame ? (
             <>
+              {/* eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다 */}
               <img ref={imgRef} src={`data:${frame.mime};base64,${frame.data}`} alt="" className="max-h-full max-w-full" />
               {imgBox && rect && (
                 <div
@@ -340,6 +341,7 @@ export function ExploreQaView({ sessionId, service, frame }: { sessionId: string
                     {action.detail && <span className="mt-0.5 block text-xs text-fail">{action.detail}</span>}
                     {action.artifact && (
                       <a href={artifactUrl(sessionId, action.artifact)} target="_blank" rel="noreferrer" className="mt-0.5 block">
+                        {/* eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다 */}
                         <img src={artifactUrl(sessionId, action.artifact)} alt={`${action.tool} 스크린샷`} className="mt-1 h-16 rounded-sm border border-line object-cover" />
                       </a>
                     )}

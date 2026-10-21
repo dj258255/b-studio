@@ -394,6 +394,7 @@ export function ChatPanel({ view, mode = "chat" }: { view: SessionView; mode?: "
           <ul className="mb-3 flex flex-wrap gap-2" aria-label="첨부한 요소">
             {selections.map((selection, index) => (
               <li key={index} className="glass-soft flex items-center gap-2 rounded-control px-2 py-1 text-xs">
+                {/* eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다 */}
                 <img src={artifactUrl(snapshot.id, selection.screenshotArtifact)} alt="" className="size-8 rounded object-cover" />
                 <span className="max-w-[12rem] truncate font-mono" title={selection.selector}>
                   {selection.selector}
