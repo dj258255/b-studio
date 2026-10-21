@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -107,6 +107,22 @@ describe('Workspace', () => {
     expect(() => workspace.snapshotRead('/etc/hosts')).toThrow(WorkspaceError);
     expect(() => workspace.snapshotRead('api/../../outside.txt')).toThrow(WorkspaceError);
   });
+
+  it('read·peek은 크기와 종류를 읽기 전에 보고, 큰 파일과 FIFO를 내용을 읽지 않고 거절한다', async () => {
+    // 내용이 없는 희소 파일이라 디스크는 거의 쓰지 않는다. 다 읽은 뒤에 크기를 보면 메모리를 그만큼 쓰거나 Node가 RangeError를 낸다
+    await writeFile(path.join(root, 'huge.log'), '');
+    await truncate(path.join(root, 'huge.log'), 3 * 1024 * 1024 * 1024);
+    await expect(workspace.read('huge.log')).rejects.toThrow(/huge\.log: 파일이 너무 큽니다/);
+    await expect(workspace.peek('huge.log')).rejects.toThrow(WorkspaceError);
+
+    // 쓰는 쪽이 없는 FIFO는 보통 열기에서 멈춘다. 멈추지 않고 일반 파일이 아니라고 거절해야 한다
+    execFileSync('mkfifo', [path.join(root, 'pipe.txt')]);
+    await expect(workspace.read('pipe.txt')).rejects.toThrow(/pipe\.txt: 일반 파일이 아닙니다/);
+
+    // 상한 이하의 보통 파일은 그대로 읽는다
+    await writeFile(path.join(root, 'ok.txt'), 'x'.repeat(1024));
+    expect(await workspace.read('ok.txt')).toHaveLength(1024);
+  }, 10_000);
 
   it('프로젝트 밖, 절대 경로, 거부된 경로를 막는다', async () => {
     await expect(workspace.read('../outside.txt')).rejects.toThrow(WorkspaceError);
