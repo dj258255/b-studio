@@ -19,6 +19,8 @@ const PROJECT = 'planorders';
 type Message = { role?: string; content?: unknown };
 
 async function main(): Promise<void> {
+  // 처음 쓰는 컴퓨터(CI 실행기 등)에는 ~/.cache/b-studio가 없다. mkdtemp는 상위 폴더를 만들지 않는다
+  await mkdir(path.join(homedir(), '.cache/b-studio'), { recursive: true });
   const root = await mkdtemp(path.join(homedir(), '.cache/b-studio/', 'task-plan-e2e-'));
   const provider = await fakeProvider();
   const failures: string[] = [];
