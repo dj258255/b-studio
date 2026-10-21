@@ -1122,8 +1122,9 @@ class LocalDockerSandbox implements Sandbox {
           throw new SandboxError(`${message}\n포트 충돌이 반복돼 ${PORT_RETRY_ATTEMPTS}회 재시도 후 포기했습니다`, undefined, { platform: true });
         }
         await this.#regeneratePorts();
-        // 일부만 뜬 컨테이너를 정리한다. down이 실패해도(예: 이미 아무것도 안 떠 있음) 다음 up은 --remove-orphans로 이어간다
-        await this.#compose(['down', '--volumes', '--remove-orphans'], signal);
+        // 일부만 뜬 컨테이너와 거기 붙은 익명 볼륨만 지운다. down --volumes는 이름 있는 볼륨까지 지워, 방금 스냅숏으로
+        // 채운 볼륨과 다시 여는 세션의 DB 데이터가 사라진다(#777). 정리가 실패해도 다음 up은 --remove-orphans로 이어간다
+        await this.#compose(['rm', '--stop', '--force', '--volumes'], signal);
       }
     }
   }
