@@ -370,8 +370,3 @@ export const PAGE_ASSERTION_GUIDE = `화면에 대한 요구("~가 보여야 한
 export const LOAD_CHECK_GUIDE = `응답 시간에 대한 요구("p95 200ms 이내", "동시 1,000건")를 받으면 studio.yaml의 workflow.loadChecks에 선언하세요. 선언한 것은 플랫폼이 샌드박스 네트워크 안에서 요청마다 직접 잽니다(이번 요청이 아니라 다음 요청부터). 부하 도구 스크립트나 사람이 돌리는 절차 문서로 대신하지 마세요. 사람이 돌려야 하는 절차는 게이트가 확인하지 못하고, 호스트로 공개한 포트는 부하를 실으면 끊깁니다. 요청마다 다른 로그인이 필요해 선언할 수 없는 시나리오는 그렇다고 적으세요.
 예: - { name: orders-p95, service: api, method: GET, path: /orders, concurrent: 100, requests: 1000, expect: { p95Ms: 200 } }
 `;
-
-export function describeWorkflow(workflow: WorkflowSpec | undefined): string {
-  if (!workflow) return DEFAULT_WORKFLOW.join(' → ');
-  return (workflow.required ?? DEFAULT_WORKFLOW).join(' → ');
-}

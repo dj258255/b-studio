@@ -398,7 +398,6 @@ export { DEFAULT_DENIED_COMMANDS, checkToolPolicy, isProtectedPath, isWithinScop
 export {
   COVERAGE_GAP_PREFIX,
   DEFAULT_WORKFLOW,
-  describeWorkflow,
   executionPolicyFor,
   formatCheckedCoverage,
   formatIncompleteTrailer,
@@ -560,7 +559,6 @@ export {
   REQUIREMENT_KINDS,
   REQUIREMENT_MENTION_PATTERN,
   REQUIREMENT_PRIORITIES,
-  REQUIREMENT_STATUSES,
   REQUIREMENTS_FILE,
   REQUIREMENTS_GUIDE_MAX_CHARS,
   requirementContentDrifted,
