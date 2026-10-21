@@ -162,11 +162,21 @@ describe('LocalDockerSandbox.runLoad (ADR-163)', () => {
     const docker = await fakeDocker(`sleep 30; exit 0`);
     const sandbox = await new LocalDockerProvider({ dockerBin: docker.bin }).create(project);
     const controller = new AbortController();
-    setTimeout(() => controller.abort(new Error('사용자가 멈춤')), 300);
+    // 고정 시간 뒤에 멈추면 부하가 높을 때 아직 docker run 전이라 지울 컨테이너가 없다(#806). run이 기록된 뒤에 멈춘다
+    void (async () => {
+      const deadline = Date.now() + 10_000;
+      while (Date.now() < deadline) {
+        const calls = await docker.calls().catch(() => [] as string[]);
+        if (calls.some((call) => call.startsWith('run '))) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      controller.abort(new Error('사용자가 멈춤'));
+    })();
 
     const started = Date.now();
     const error = (await caught(sandbox.runLoad!(request, { signal: controller.signal }))) as unknown as Error;
-    expect(Date.now() - started).toBeLessThan(5_000);
+    // run 뒤에 멈췄으므로 sleep 30을 기다리지 않고 끝나야 한다
+    expect(Date.now() - started).toBeLessThan(15_000);
     expect(error.message).toBe('사용자가 멈춤');
 
     const calls = await docker.calls();
