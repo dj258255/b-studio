@@ -78,6 +78,15 @@ describe('hasEgressRuleFor', () => {
     // 호스트 전체를 연 규칙은 경로를 보지 않으므로 영향이 없다
     expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/..%2Fadmin', ['api.example.com'])).toBe(true);
   });
+
+  it('경로 매개변수(;)가 든 경로도 견줄 수 없어 막는다', () => {
+    const precise = [{ host: 'api.example.com', methods: ['GET'], paths: ['/v1/**'] }];
+
+    // URL 해석은 `..;`를 점 구간으로 보지 않아 `/v1/**`에 맞지만, 경로 매개변수를 떼는 서버에서는 /admin이 된다
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/..;/admin', precise)).toBe(false);
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/..%3Badmin', precise)).toBe(false);
+    expect(isAllowedEgress('api.example.com', 80, 'GET', '/v1/users/7', precise)).toBe(true);
+  });
 });
 
 describe('isAllowedCall', () => {
@@ -89,6 +98,16 @@ describe('isAllowedCall', () => {
     expect(isAllowedCall(policy, 'web', 'GET', '/api/users/..%252Fadmin')).toBe(false);
     // 규칙을 적지 않아 경로를 보지 않는 정책에서도 막는다. 감사 기록의 경로와 실제로 불리는 경로가 달라진다
     expect(isAllowedCall({ mask: [], maskPatterns: [] }, 'web', 'GET', '/api/users%2Fadmin')).toBe(false);
+  });
+
+  it('경로 매개변수(;)가 든 경로는 규칙과 상관없이 막는다', () => {
+    const policy = { mask: [], maskPatterns: [], allow: [{ callers: ['web'], methods: ['GET', 'POST'], paths: ['/api/public/**'] }] };
+
+    expect(isAllowedCall(policy, 'web', 'POST', '/api/public/orders')).toBe(true);
+    expect(isAllowedCall(policy, 'web', 'POST', '/api/public/..;/admin')).toBe(false);
+    expect(isAllowedCall(policy, 'web', 'POST', '/api/public/..%3b/admin')).toBe(false);
+    expect(isAllowedCall(policy, 'web', 'GET', '/api/public/a;jsessionid=1')).toBe(false);
+    expect(isAllowedCall({ mask: [], maskPatterns: [] }, 'web', 'GET', '/api/x/..;/admin')).toBe(false);
   });
 });
 
