@@ -1724,7 +1724,7 @@ const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
 `apps/studio/lib/server/session-store.test.ts`가 같은 파일에 동시에 쓰는 상황을 반복해, 저장이 실패하거나 깨지지 않고 끝에 온전한 스냅샷 하나가 남는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
 
 Node는 단일 스레드라 이 테스트는 "읽고 → 고치고 → 다시 쓰는" 사이에 `await`가 끼는 인터리빙만 잡습니다. 여러 프로세스가 같은 세션 파일을 동시에 고치는 경우는 재현하지 못합니다(그래서 세션 파일에는 `owner.pid`를 남기고, 다른 프로세스가 살아 있으면 복구하지 않습니다).
-`apps/studio/bench/coordination/load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
+`apps/studio/bench/coordination/module-load.test.ts`가 tsx로 fixture를 실행해, CommonJS 경로에서 `@b-studio/agent`를 불러오는지 확인합니다. 이 테스트는 수정 전에 실패하고 수정 뒤에 통과합니다.
 
 ## 45. 실험을 여러 번 돌리자 api 테스트가 설정 캐시 오류로 실패하고, 에이전트가 빌드 파일을 고치다 이미지까지 깨짐
 

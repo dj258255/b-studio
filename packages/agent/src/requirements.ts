@@ -734,7 +734,6 @@ export const REQUIREMENTS_FILE = 'docs/requirements.md';
  * 다시 확인되지 않은 상태다(Doorstop/sphinx-needs류 도구의 "suspect" 링크와 같은 개념).
  */
 export type RequirementStatus = '미착수' | '작업 중' | '검증됨' | '재확인 필요' | '실패';
-export const REQUIREMENT_STATUSES: readonly RequirementStatus[] = ['미착수', '작업 중', '검증됨', '재확인 필요', '실패'];
 
 export const JSON_BLOCK = /<!--\s*b-studio-requirements\s*([\s\S]*?)-->/;
 
