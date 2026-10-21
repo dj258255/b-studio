@@ -50,10 +50,12 @@ export function QaView({ sessionId, frame, check }: { sessionId: string; frame?:
       <div className="grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto] lg:grid-cols-[minmax(0,1fr)_18rem] lg:grid-rows-1">
         <div className="flex min-h-0 w-full items-center justify-center overflow-hidden bg-ground">
           {live && frame ? (
+            // eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다
             <img src={`data:${frame.mime};base64,${frame.data}`} alt="" className="max-h-full max-w-full" />
           ) : check?.compare ? (
             <DesignCompare sessionId={sessionId} compare={check.compare} />
           ) : current ? (
+            // eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다
             <img src={artifactUrl(sessionId, current.artifact)} alt={`${current.label} 화면`} className="max-h-full max-w-full" />
           ) : (
             <p role="status" className="px-4 py-3 text-sm text-muted">
@@ -177,6 +179,7 @@ function DesignCompare({ sessionId, compare }: { sessionId: string; compare: Wor
           >
             <figcaption className="border-b border-line bg-panel px-2 py-1 text-xs font-medium text-muted">{view.label}</figcaption>
             {view.artifact ? (
+              // eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다
               <img src={artifactUrl(sessionId, view.artifact)} alt={`${view.label} 이미지`} className="min-h-0 w-full flex-1 object-contain" />
             ) : (
               <p className="p-2 text-xs text-muted">이미지 없음</p>

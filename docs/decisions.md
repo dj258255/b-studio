@@ -1068,7 +1068,7 @@ kind v0.32.0(Kubernetes v1.36.1, containerd v2.3.1)에 agent-sandbox v1.0.2를 �
 - **세션은 네임스페이스 하나, compose 서비스마다 같은 이름의 `Sandbox`(`service: true`)를 둡니다.** edge도 `b-studio-edge` Sandbox로 둡니다. compose에서처럼 서비스 이름으로 연결하고, 정책 프록시([ADR-026](#adr-026-정책-프록시-사내-api는-edge를-거쳐서만-부른다))도 요청 IP로 호출한 서비스를 그대로 알아봅니다. 등록한 사내 API 이름은 edge를 가리키는 Service로 만듭니다.
 - **compose 해석은 `docker compose config --format json`에 맡깁니다.** 변수 치환, 상대 경로, 짧은 문법을 정규화한 결과만 번역합니다.
 - **격리:** 서비스 Pod에는 운영자가 고른 RuntimeClass를 겁니다. **edge는 기본 런타임으로 둡니다.** port-forward가 gVisor Pod의 포트를 보지 못해 미리보기를 공개할 수 없기 때문입니다. edge에서는 b-studio 코드만 돕니다.
-- **네트워크:** NetworkPolicy `sandbox-isolation`은 네임스페이스 안과 DNS만 허용합니다. `edge-egress`는 edge만 밖으로 나가게 합니다. 어느 호스트를 허용할지는 edge가 판단합니다([ADR-024](#adr-024-네트워크-격리-샌드박스의-출입구를-하나로-만든다)).
+- **네트워크:** NetworkPolicy `sandbox-isolation`은 네임스페이스 안과 DNS(CoreDNS Pod)만 허용합니다. `edge-egress`는 edge만 밖으로 나가게 하고 링크 로컬 대역은 뺍니다(아래 덧붙임). 어느 호스트를 허용할지는 edge가 판단합니다([ADR-024](#adr-024-네트워크-격리-샌드박스의-출입구를-하나로-만든다)).
 - **미리보기와 준비 확인:** edge Pod로 `kubectl port-forward`를 루프백에 열고, 끊기면 다시 엽니다. 서비스를 재시작해도 edge는 그대로라 포트가 유지됩니다.
 - **재시작:** Pod를 지우면 컨트롤러가 다시 만듭니다. 소스는 hostPath로 마운트돼 새 Pod가 바뀐 코드로 뜹니다.
 - **시크릿:** `b-studio-secrets` Secret은 kubectl 표준 입력으로만 만들고 `secretKeyRef`로 넣습니다. 사내 API 인증 시크릿은 edge에만 넣습니다.
@@ -1103,6 +1103,14 @@ kind 클러스터에 gVisor RuntimeClass와 agent-sandbox v1.0.2를 설치했습
 - edge는 gVisor 격리를 받지 않습니다.
 - 리소스 탭에 CPU·메모리 사용량이 나오지 않습니다.
 - compose `depends_on` 순서를 보장하지 않고, 먼저 뜬 서비스가 실패하면 컨테이너 재시작에 맡깁니다.
+
+### 덧붙임(2026-10-21, [#774](https://github.com/dj258255/b-studio/issues/774)): Pod 기본 하드닝과 좁힌 DNS·edge 출구
+- 모든 샌드박스 Pod에 `automountServiceAccountToken: false`와 `seccompProfile: RuntimeDefault`를 겁니다. 샌드박스 안 코드는 Kubernetes API를 부를 일이 없고, containerd(kind 등)는 Pod에 적지 않으면 seccomp를 걸지 않습니다. Docker 경로는 기본으로 겁니다.
+- 서비스 컨테이너의 권한(capabilities)은 Docker 경로와 같은 런타임 기본값으로 둡니다. 모두 빼면 root로 시작해 사용자를 바꾸는 이미지(postgres 등)가 뜨지 않습니다. `runAsNonRoot`도 같은 이유로 걸지 않습니다.
+- edge 컨테이너는 권한을 모두 빼고 80번 포트를 여는 `NET_BIND_SERVICE`만 남기며, 권한 상승을 막습니다.
+- `sandbox-isolation`의 DNS 허용을 kube-system 전체에서 CoreDNS Pod(`k8s-app: kube-dns`)로 좁힙니다. 다른 kube-system Pod의 53번 포트를 출구로 쓰지 못하게 합니다.
+- `edge-egress`는 링크 로컬 대역(169.254.0.0/16, fe80::/10)을 뺍니다. 클라우드 메타데이터 주소에 닿지 않게 합니다. 클러스터 Pod·Service 대역은 클러스터마다 달라 매니페스트에서 알 수 없고, 사내 API가 사설 주소에 있을 수 있어 사설 대역 전체는 막지 않습니다. 그 판단은 edge의 허용 목록이 합니다.
+- 실제 kind 클러스터로 다시 재지 않았습니다. 확인은 매니페스트 단위 테스트까지입니다. CoreDNS 라벨이 다른 배포판에서는 DNS가 막히므로 그때는 라벨을 맞춰야 합니다.
 
 ---
 

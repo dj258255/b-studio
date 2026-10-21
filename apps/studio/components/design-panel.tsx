@@ -165,6 +165,7 @@ export function DesignPanel({ sessionId, design, ready }: { sessionId: string; d
               {visibleFrames.map((frame) => (
                 <li key={frame.id}>
                   <label className={`flex h-full cursor-pointer flex-col overflow-hidden rounded-control border ${selected.has(frame.id) ? "border-ink ring-1 ring-ink" : "border-line"}`}>
+                    {/* eslint-disable-next-line @next/next/no-img-element -- data: 주소나 세션 쿠키가 필요한 산출물 API라 next/image의 서버 최적화를 거치면 받지 못한다 */}
                     <img
                       src={`/api/sessions/${encodeURIComponent(sessionId)}/design/thumbnail?frame=${encodeURIComponent(frame.id)}`}
                       alt=""
