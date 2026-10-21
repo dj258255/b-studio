@@ -111,11 +111,13 @@ export function TestsPanel({ view }: { view: SessionView }) {
   }
 
   async function cancel(service: string) {
-    await fetch(`/api/sessions/${sessionId}/tests/cancel`, {
+    const response = await fetch(`/api/sessions/${sessionId}/tests/cancel`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ service }),
-    }).catch(() => {});
+    }).catch(() => undefined);
+    // 멈추지 못했으면 알린다. 예전에는 실패를 삼켜 멈춘 줄 알고 기다리게 했다(#813)
+    if (!response?.ok) setActionError("테스트를 멈추지 못했습니다");
   }
 
   function toggleSuite(key: string) {

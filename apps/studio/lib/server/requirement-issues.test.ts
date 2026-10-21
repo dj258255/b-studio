@@ -38,6 +38,7 @@ import {
   resolveRequirementConflict,
   syncRequirementIssueStatus,
   type RequirementIssuesContext,
+  issueSyncFailureNotice,
 } from './requirement-issues';
 
 const remote = parseRemote('git@github.com:acme/orders.git', {});
@@ -325,5 +326,12 @@ describe('syncRequirementIssueStatus', () => {
     const evidence = { id: 'R9', kind: 'api', priority: 'must', status: '미착수' as const, checkpoints: [], tests: [], gateChecks: [] };
     const result = await syncRequirementIssueStatus(ctx, [evidence]);
     expect(result).toEqual({ updated: [], errors: [] });
+  });
+});
+
+describe('issueSyncFailureNotice (#813)', () => {
+  it('실패 사유를 세 개까지 적고 나머지는 건수로 알린다', () => {
+    expect(issueSyncFailureNotice(['REQ-1: 401 Bad credentials'])).toBe('요구사항 이슈 상태를 GitHub에 반영하지 못했습니다. 다음 체크포인트 때 다시 시도합니다: REQ-1: 401 Bad credentials');
+    expect(issueSyncFailureNotice(['a', 'b', 'c', 'd', 'e'])).toMatch(/: a; b; c 외 2건$/);
   });
 });
