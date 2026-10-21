@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { createHash, randomUUID } from 'node:crypto';
+import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { WorkflowStage } from '@b-studio/spec';
@@ -346,6 +346,8 @@ const BACKUP_KEEP_MAX = 10;
 const BACKUP_KEEP_BYTES = 200 * 1024 * 1024;
 /** 체크포인트마다 생성 파일(제외됨) 스냅샷을 이 안에 둔다(ADR-141). 체크포인트 sha별 하위 폴더 하나씩이다 */
 const EXCLUDED_DIRNAME = 'b-studio/excluded';
+/** 커밋 전에 읽어 둔 생성 파일을 두는 곳. 정리(#pruneExcludedSnapshots)가 체크포인트 스냅샷으로 보지 않게 따로 둔다 */
+const EXCLUDED_STAGING_DIRNAME = 'b-studio/excluded-staging';
 /** 생성 파일은 작아서(studio.yaml 등 텍스트 몇 개) discard 백업(10개)보다 훨씬 넉넉하게 남겨도 된다 */
 const EXCLUDED_KEEP_MAX = 200;
 
@@ -585,6 +587,7 @@ export class CheckpointStore {
       findSecrets,
       trailers = [],
       expectStaged,
+      expectExcluded,
       expectedHead,
     }: {
       allowEmpty?: boolean;
@@ -598,6 +601,13 @@ export class CheckpointStore {
        * 체크포인트에 들어가지 않게 한다
        */
       expectStaged?: ReadonlyMap<string, string>;
+      /**
+       * 검증한 생성 파일(git 추적 밖, excludedFiles)의 지문(stagedFingerprints가 준 것, #775). 주면 커밋하기 전에 생성 파일을
+       * 읽어 두고 그 내용이 이것과 같은지 본다(refreshExcludedSnapshot의 expected와 같은 규칙). 다르면 StagedMismatchError를
+       * 던지고, 같으면 읽어 둔 내용을 이 체크포인트의 스냅샷으로 남긴다 — 견준 뒤에 디스크가 바뀌어도 검증하지 않은 내용이
+       * 기준선이 되지 않는다
+       */
+      expectExcluded?: ReadonlyMap<string, string>;
       /**
        * b-studio가 마지막으로 남긴 체크포인트(이슈 #706). 주면 지금 HEAD가 이것과 같을 때만 그 위에 커밋하고, 다르면
        * HeadMovedError를 던진다. 주지 않으면 이 함수가 시작할 때의 HEAD를 부모로 삼는다. 어느 쪽이든 HEAD를 바꾸는 순간에
@@ -639,14 +649,22 @@ export class CheckpointStore {
         throw new StagedMismatchError(mismatched);
       }
     }
+    const excluded = expectExcluded
+      ? await this.#stageExcludedSnapshot(expectExcluded).catch(async (error: unknown) => {
+          await this.#git(['reset', '-q', ...(await this.#scope())]).catch(() => {});
+          throw error;
+        })
+      : undefined;
     const text = body?.trim();
     const tree = (await this.#git(['write-tree'])).trim();
     const sha = await this.#commitTree(tree, parent, commitMessage(message, text, trailers), { allowEmpty }).catch(async (error: unknown) => {
       await this.#git(['reset', '-q', ...(await this.#scope())]).catch(() => {});
+      if (excluded) await rm(excluded.dir, { recursive: true, force: true });
       throw error;
     });
     const checkpoint = await this.#checkpoint(sha);
-    await this.refreshExcludedSnapshot(checkpoint.sha);
+    if (excluded) await this.#placeExcludedSnapshot(checkpoint.sha, excluded);
+    else await this.refreshExcludedSnapshot(checkpoint.sha);
     return checkpoint;
   }
 
@@ -1078,28 +1096,102 @@ export class CheckpointStore {
    * "이 체크포인트는 생성 파일을 바꾸지 않았다"는 뜻이면 이 메서드 대신 #carryForwardExcludedSnapshot을 쓴다 —
    * 그렇지 않으면 아직 받아들이지 않은(discard 대상인) 생성 파일 변경을 부모 체크포인트의 스냅샷으로 덮어써,
    * 그 변경이 영영 되돌릴 수 없는 "이미 그런 적 있던 상태"로 둔갑한다.
+   * expected(검증한 생성 파일 지문, #775)를 주면 디스크 내용이 검증과 같을 때만 남기고, 다르면 StagedMismatchError를 던지며
+   * 스냅샷을 바꾸지 않는다. 생성 파일만 바뀐 실행이 게이트를 통과한 뒤 기준선을 갱신할 때 쓴다
    */
-  async refreshExcludedSnapshot(sha = 'HEAD'): Promise<void> {
+  async refreshExcludedSnapshot(sha = 'HEAD', expected?: ReadonlyMap<string, string>): Promise<void> {
     if (!this.#excludedFiles) return;
     const commit = sha === 'HEAD' ? await this.#headSha() : await this.#resolve(sha);
+    await this.#placeExcludedSnapshot(commit, await this.#stageExcludedSnapshot(expected, commit));
+  }
+
+  /**
+   * 지금 디스크의 생성 파일을 임시 폴더로 읽어 둔다(스냅샷 형식 그대로: files/와 manifest). expected를 주면(#775) 읽어 둔
+   * 내용을 게이트가 검증한 지문과 견준다:
+   *  - expected에 있는 파일은 지문이 같아야 한다(없어진 파일은 `missing`, 링크는 `link:<가리키는 곳>`)
+   *  - expected에 없는 파일은 기준 체크포인트(base)의 스냅샷과 같아야 한다. 검증에 없던 변경이다. 기준 스냅샷이 없으면
+   *    그 시점 상태를 모르므로 견주지 않는다(#excludedDiff와 같은 규칙)
+   * 다르면 임시 폴더를 지우고 StagedMismatchError를 던진다. 견준 바이트를 그대로 스냅샷으로 옮기므로(#placeExcludedSnapshot),
+   * 견준 뒤에 디스크가 바뀌어도 검증하지 않은 내용이 기준선이 되지 않는다
+   */
+  async #stageExcludedSnapshot(expected?: ReadonlyMap<string, string>, base?: string): Promise<{ dir: string; manifest: Record<string, boolean> }> {
     const projectRoot = await this.projectRoot();
-    const candidates = await this.#excludedFiles(projectRoot);
-    const ignored = await this.#ignoredAmong(candidates);
-    const dir = this.#excludedSnapshotDir(commit);
-    await rm(dir, { recursive: true, force: true });
-    if (ignored.length === 0) return; // 생성 파일이 없는 체크포인트는 "스냅샷 없음"과 구분하지 않는다(둘 다 "아무것도 없었다"로 읽힌다)
+    const ignored = this.#excludedFiles ? await this.#ignoredAmong(await this.#excludedFiles(projectRoot)) : [];
+    const dir = path.join(this.gitDir, EXCLUDED_STAGING_DIRNAME, randomUUID());
     await mkdir(path.join(dir, 'files'), { recursive: true });
     const manifest: Record<string, boolean> = {};
-    for (const file of ignored) {
-      const content = await readFile(path.join(projectRoot, file)).catch(() => undefined);
-      manifest[file] = content !== undefined;
-      if (content !== undefined) {
-        const to = path.join(dir, 'files', file);
-        await mkdir(path.dirname(to), { recursive: true });
-        await writeFile(to, content);
+    const links = new Map<string, string>();
+    try {
+      for (const file of ignored) {
+        const absolute = path.join(projectRoot, file);
+        const info = await lstat(absolute).catch(() => undefined);
+        if (info?.isSymbolicLink()) links.set(file, `link:${await readlink(absolute).catch(() => '')}`);
+        const content = await readFile(absolute).catch(() => undefined);
+        manifest[file] = content !== undefined;
+        if (content !== undefined) {
+          const to = path.join(dir, 'files', file);
+          await mkdir(path.dirname(to), { recursive: true });
+          await writeFile(to, content);
+        }
       }
+      if (expected) {
+        const mismatched = await this.#excludedMismatch(expected, { dir, manifest, links }, base ?? (await this.#headSha()));
+        if (mismatched.length > 0) throw new StagedMismatchError(mismatched);
+      }
+    } catch (error) {
+      await rm(dir, { recursive: true, force: true });
+      throw error;
     }
-    await writeFile(path.join(dir, 'manifest.json'), JSON.stringify(manifest));
+    return { dir, manifest };
+  }
+
+  /** 읽어 둔 생성 파일 중 검증과 다른 것(#stageExcludedSnapshot의 규칙) */
+  async #excludedMismatch(
+    expected: ReadonlyMap<string, string>,
+    staged: { dir: string; manifest: Record<string, boolean>; links: ReadonlyMap<string, string> },
+    base: string,
+  ): Promise<string[]> {
+    const previous = await this.#readExcludedManifest(base);
+    const subdir = await this.#subdir();
+    const files = new Set([...Object.keys(staged.manifest), ...expected.keys(), ...Object.keys(previous ?? {})]);
+    const mismatched: string[] = [];
+    for (const file of files) {
+      const content = staged.manifest[file] ? await readFile(path.join(staged.dir, 'files', file)) : undefined;
+      const want = expected.get(file);
+      if (want !== undefined) {
+        if ((await this.#excludedPrint(file, content, staged, subdir)) !== want) mismatched.push(file);
+        continue;
+      }
+      if (!previous) continue;
+      const before = previous[file] ? await readFile(path.join(this.#excludedSnapshotDir(base), 'files', file)).catch(() => undefined) : undefined;
+      const same = content === undefined ? before === undefined : before !== undefined && content.equals(before);
+      if (!same) mismatched.push(file);
+    }
+    return mismatched.sort();
+  }
+
+  /** 읽어 둔 생성 파일 하나의 지문. stagedFingerprints와 같은 꼴이다(일반 파일은 그 경로의 git 변환을 거친 blob id) */
+  async #excludedPrint(file: string, content: Buffer | undefined, staged: { dir: string; links: ReadonlyMap<string, string> }, subdir: string): Promise<string> {
+    const link = staged.links.get(file);
+    if (link !== undefined) return link;
+    if (content === undefined) return 'missing';
+    // hash-object도 add처럼 필터를 돈다. 돌기 전에 설정을 본다(이슈 #706). --path로 원래 경로의 속성(줄 끝 변환 등)을 쓴다
+    await this.#assertSafeLocalGit();
+    const id = (await this.#git(['hash-object', `--path=${subdir ? `${subdir}/${file}` : file}`, '--', path.join(staged.dir, 'files', file)])).trim();
+    return `blob:${id}`;
+  }
+
+  /** 읽어 둔 생성 파일을 sha 체크포인트의 스냅샷으로 옮긴다. 생성 파일이 하나도 없으면 스냅샷을 두지 않는다(예전과 같다) */
+  async #placeExcludedSnapshot(sha: string, staged: { dir: string; manifest: Record<string, boolean> }): Promise<void> {
+    const target = this.#excludedSnapshotDir(sha);
+    await rm(target, { recursive: true, force: true });
+    if (Object.keys(staged.manifest).length === 0) {
+      await rm(staged.dir, { recursive: true, force: true });
+      return;
+    }
+    await writeFile(path.join(staged.dir, 'manifest.json'), JSON.stringify(staged.manifest));
+    await mkdir(path.dirname(target), { recursive: true });
+    await rename(staged.dir, target);
     await this.#pruneExcludedSnapshots();
   }
 
