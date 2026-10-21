@@ -120,6 +120,8 @@ export const SCREENCAST_MAX_FPS = 5;
 const SCREENCAST_INTERVAL_MS = 1000 / SCREENCAST_MAX_FPS;
 /** 뷰포트와 크기가 다른 프레임을 몇 번 연달아 버린 뒤에 그대로 보낼지(createScreencast) */
 const SCREENCAST_MISMATCH_LIMIT = 5;
+/** 화면 중계를 다시 켠 뒤 이만큼 새 프레임이 없으면 마지막 프레임을 한 번 더 보낸다(createScreencast) */
+const SCREENCAST_REFRESH_MS = 400;
 
 export class BrowserUnavailableError extends Error {}
 
@@ -334,9 +336,31 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   let mismatched = 0;
   let pending: BrowserFrame | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // 켜거나 화면을 바꾼 뒤 프레임을 보냈는지. 정적인 페이지는 브라우저가 중계 프레임을 하나도 보내지 않을 때가 있어(실측: 원격
+  // 브라우저 테스트에서 프레임이 0개인 실행), 짧게 기다려 없으면 지금 화면을 직접 찍어 보낸다(#802)
+  let running = false;
+  let deliveredSinceMark = false;
+  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   const deliver = (frame: BrowserFrame) => {
     last = Date.now();
+    deliveredSinceMark = true;
     onFrame({ ...frame, at: last });
+  };
+  const expectFrame = () => {
+    deliveredSinceMark = false;
+    if (refreshTimer) clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => {
+      refreshTimer = undefined;
+      if (!running || deliveredSinceMark || timer) return;
+      void client
+        .send('Page.captureScreenshot', { format: 'jpeg', quality: 60 })
+        .then((shot) => {
+          // 찍는 사이에 중계가 프레임을 보냈거나 멈췄으면 보내지 않는다
+          if (!running || deliveredSinceMark) return;
+          deliver({ data: Buffer.from(shot.data, 'base64'), width: viewport.width, height: viewport.height, at: Date.now() });
+        })
+        .catch(() => {});
+    }, SCREENCAST_REFRESH_MS);
   };
   client.on('Page.screencastFrame', (params) => {
     void client.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
@@ -369,10 +393,20 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
     }, Math.max(0, wait));
   });
   return {
-    start: (maxWidth: number) => client.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth, everyNthFrame: 1 }).then(() => {}),
+    start: async (maxWidth: number) => {
+      running = true;
+      await client.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth, everyNthFrame: 1 });
+      // 원격 브라우저는 영역 스크린샷을 찍으려고 중계를 껐다 켠다. 페이지가 그대로면 새 프레임이 오지 않아 미리보기가 잘린 화면에 멈춘다
+      expectFrame();
+    },
+    /** 화면을 바꾼 뒤(이동·새로고침·크기 변경) 부른다. 짧게 기다려 중계 프레임이 없으면 지금 화면을 찍어 보낸다 */
+    expectFrame,
     stop: () => {
+      running = false;
       // 멈춘 뒤에는 들고 있던 프레임도 보내지 않는다(잘린 화면이나 닫힌 브라우저의 프레임이 늦게 도착하지 않게)
       if (timer) clearTimeout(timer);
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = undefined;
       timer = undefined;
       pending = undefined;
       return client.send('Page.stopScreencast').then(() => {}).catch(() => {});

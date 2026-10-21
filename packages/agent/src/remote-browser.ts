@@ -116,6 +116,8 @@ export async function openRemoteBrowser(options: RemoteBrowserOptions): Promise<
     });
     await screencast.start(viewport.width);
     await page.goto(options.url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+    // 정적인 페이지는 이동 뒤에도 중계 프레임이 오지 않을 수 있다. 오지 않으면 지금 화면을 찍어 보낸다(#802)
+    screencast.expectFrame();
 
     let closed = false;
 
@@ -133,9 +135,11 @@ export async function openRemoteBrowser(options: RemoteBrowserOptions): Promise<
     return {
       async navigate(url) {
         await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+        screencast.expectFrame();
       },
       async reload() {
         await page.reload({ waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+        screencast.expectFrame();
       },
       async resize(next) {
         await screencast.stop();
