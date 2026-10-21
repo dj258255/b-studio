@@ -418,6 +418,7 @@ export {
   WORKFLOW_TRAILER,
   WORKFLOW_INCOMPLETE_TRAILER,
   WORKFLOW_VERIFY_TRAILER,
+  type VerifyTrailer,
   workflowContext,
   workflowReleaseRequirements,
   workflowStages,
