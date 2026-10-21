@@ -1,0 +1,64 @@
+name: e2e
+
+# 실제 Docker 샌드박스·게이트·체크포인트를 지나는 e2e 다섯 개. 모델은 스크립트나 로컬 OpenAI 호환 서버라 외부 과금과
+# 시크릿이 없다. 예제(Spring Boot·Next.js)를 실제로 빌드해 오래 걸리므로 PR마다 돌리지 않는다. main에 들어간 뒤, 매일 밤,
+# 손으로, 그리고 샌드박스·e2e·예제·이 파일을 고친 PR에서만 돈다(#795)
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/e2e.yml
+      - packages/sandbox/**
+      - packages/agent/e2e/**
+      - apps/studio/e2e/**
+      - examples/orders/**
+      - templates/**
+  schedule:
+    # 매일 03:30 KST
+    - cron: '30 18 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    name: e2e (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        name: [agent, fleet, deploy-gate, task-plan, two-sessions]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # 기반 이미지를 Docker Hub에서 익명으로 받으면 실행기 IP가 요청 한도에 걸린다(ci.yml의 이미지 빌드와 같은 이유).
+      # compose는 buildx가 아니라 기본 데몬으로 받으므로 데몬에 공개 미러를 둔다. 거기 없으면 Docker Hub로 간다
+      - name: Docker 데몬에 공개 미러 설정
+        run: |
+          echo '{"registry-mirrors":["https://mirror.gcr.io"]}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker info --format '{{.RegistryConfig.Mirrors}}'
+      # 체크포인트가 git 커밋을 만든다. 실행기에는 전역 사용자가 없다
+      - run: |
+          git config --global user.name 'b-studio e2e'
+          git config --global user.email 'e2e@b-studio.local'
+      - run: pnpm e2e:${{ matrix.name }}
+      # 실패하면 남은 컨테이너와 로그를 보여 준다(다음 실행에는 영향이 없다. 실행기는 매번 새것이다)
+      - if: failure()
+        run: |
+          docker ps -a --format '{{.Names}}\t{{.Status}}' | head -50
+          for c in $(docker ps -aq | head -20); do echo "== $c"; docker logs --tail 80 "$c" 2>&1; done
