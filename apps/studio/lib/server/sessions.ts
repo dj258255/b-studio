@@ -353,6 +353,7 @@ import {
   type RequirementPublishResult,
   type RequirementSyncEvidence,
   type RequirementSyncResult,
+  issueSyncFailureNotice,
 } from './requirement-issues';
 import { isSelectableEffort, isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
 import { rememberProjectEffortDefault, rememberProjectModelDefault } from './model-defaults';
@@ -2503,7 +2504,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
         void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, result.checks ?? [], gateTests).catch(() => {});
         // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
-        void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
+        syncRequirementIssuesInBackground(session);
       } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
         // b-studio 쪽(샌드박스·도커) 문제로 검증하지 못한 변경은 되돌리지 않는다. 에이전트가 한 일이 틀린 것이 아니고, 문제를 해결한 뒤
         // 다음 요청의 게이트가 이 변경을 그대로 검증한다(작업 트리에 남은 변경은 externalChanges로 게이트에 들어간다, ADR-131).
@@ -6344,6 +6345,24 @@ export async function resolveSessionRequirementConflict(id: string, requirementI
  * 발행된 하위 이슈마다 상태(고정 댓글·라벨)를 반영한다. 세션의 PR이 이미 병합됐으면(검증됨인 요구사항만) 이슈도 닫는다.
  * 원격·토큰이 없거나 발행된 요구사항이 없으면 조용히 건너뛴다(호출하는 쪽이 매 체크포인트마다 fire-and-forget으로 부른다).
  */
+/**
+ * 체크포인트 뒤 요구사항 이슈 상태를 백그라운드로 반영한다. 실패(이슈별 오류, 토큰 만료·요청 한도 같은 예외)를 버리지 않고
+ * 로그와 대화 알림으로 남긴다(#813). 요청 결과에는 영향을 주지 않는다
+ */
+function syncRequirementIssuesInBackground(session: Session): void {
+  const report = (details: string[]) => {
+    const redacted = details.map((detail) => session.sandbox.redact(detail));
+    console.error('[b-studio] 요구사항 이슈 상태를 반영하지 못했습니다', session.snapshot.id, redacted);
+    emit(session, { type: 'notice', text: issueSyncFailureNotice(redacted), at: new Date().toISOString() });
+  };
+  void syncSessionRequirementIssueStatus(session.snapshot.id).then(
+    (result) => {
+      if (result.errors.length > 0) report(result.errors.map((entry) => `${entry.id}: ${entry.message}`));
+    },
+    (error: unknown) => report([describe(error)]),
+  );
+}
+
 export async function syncSessionRequirementIssueStatus(id: string): Promise<RequirementSyncResult> {
   const session = requireSession(id);
   const ctx = await requirementIssuesContext(session);
@@ -8684,7 +8703,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         if (checkpointed) {
           if (passed.checks) session.lastGateChecks = passed.checks;
           void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests).catch(() => {});
-          void syncSessionRequirementIssueStatus(session.snapshot.id).catch(() => {});
+          syncRequirementIssuesInBackground(session);
           // 대화 창의 에이전트는 터미널에서 일어난 일을 모른다. 다음 요청에서 알린다
           noteForModel(session, `[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 ${saved.shortSha}를 남겼습니다(파일 ${saved.files.length}개: ${saved.files.slice(0, 20).join(', ')}). 이 파일을 다루기 전에 다시 읽으세요.`);
         }

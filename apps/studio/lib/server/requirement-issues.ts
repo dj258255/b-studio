@@ -367,6 +367,16 @@ function evidenceRows(evidence: RequirementSyncEvidence): Array<{ scenario: stri
   return evidence.tests.map((test) => ({ scenario: test.name, test: test.file, result: evidence.status, commit, gate }));
 }
 
+/**
+ * 체크포인트 뒤 백그라운드 이슈 상태 반영이 실패했을 때 대화에 남길 글(#813). 예전에는 오류 목록과 예외를 모두 버려 GitHub
+ * 이슈 상태가 조용히 어긋났다. 실패 사유는 세 개까지 적는다
+ */
+export function issueSyncFailureNotice(details: readonly string[]): string {
+  const shown = details.slice(0, 3).join('; ');
+  const rest = details.length > 3 ? ` 외 ${details.length - 3}건` : '';
+  return `요구사항 이슈 상태를 GitHub에 반영하지 못했습니다. 다음 체크포인트 때 다시 시도합니다: ${shown}${rest}`;
+}
+
 export interface RequirementSyncResult {
   updated: string[];
   errors: Array<{ id: string; message: string }>;

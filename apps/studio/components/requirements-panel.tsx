@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { buildRequirementAskPrefill, requirementToMarkdown } from "@/lib/requirement-chat-prefill";
+import { discardRequirementsDraft, saveRequirementsDraft } from "@/lib/requirements-draft-client";
 import type { SessionView } from "@/lib/session-view";
 import { useChatDraft } from "./chat-draft-context";
 import { DesignPipelinePanel } from "./design-pipeline-panel";
@@ -1905,7 +1906,12 @@ export function ExtractionResultView({
     const body = pendingPatchRef.current;
     pendingPatchRef.current = {};
     if (Object.keys(body).length === 0) return;
-    void fetch(`/api/sessions/${sessionId}/requirements/draft`, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) }).catch(() => {});
+    void saveRequirementsDraft(sessionId, body).then((saved) => {
+      if (saved) return;
+      // 저장하지 못한 편집을 버리지 않는다. 그 뒤의 편집이 덮어쓰도록 앞에 다시 싣고, 다음 저장 때 함께 보낸다(#813)
+      pendingPatchRef.current = { ...body, ...pendingPatchRef.current };
+      setError("초안을 자동 저장하지 못했습니다. 다음 편집 때 다시 저장합니다");
+    });
   }
 
   // 탭을 떠나거나(언마운트) 세션이 바뀌면, 아직 800ms를 다 기다리지 못한 편집도 잃지 않도록 바로 흘려보낸다
@@ -2062,7 +2068,11 @@ export function ExtractionResultView({
 
   async function discard() {
     flushAutosave();
-    await fetch(`/api/sessions/${sessionId}/requirements/draft`, { method: "DELETE" }).catch(() => {});
+    // 서버에서 지우지 못했으면 버렸다고 표시하지 않는다. 표시하면 버린 초안이 다음에 다시 나타난다(#813)
+    if (!(await discardRequirementsDraft(sessionId))) {
+      setError("초안을 버리지 못했습니다");
+      return;
+    }
     onDiscarded();
   }
 
