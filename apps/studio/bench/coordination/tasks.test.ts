@@ -1,4 +1,4 @@
-import { planLanes } from '@b-studio/agent';
+import { buildTools, planLanes } from '@b-studio/agent';
 import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
@@ -96,6 +96,11 @@ describe('missingCoordinationTools', () => {
     const project = await loadProject(path.resolve(import.meta.dirname, '../../../../examples/orders'));
     const strategies: Strategy[] = ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7'];
     expect(strategies.flatMap((strategy) => missingCoordinationTools(strategy, project.spec.workflow?.allowedTools))).toEqual([]);
+  });
+
+  it('벤치가 쓰는 예제 프로젝트에서 에이전트가 요청과 확인의 어긋남을 알리는 도구를 본다(E15 재측정, #849)', async () => {
+    const project = await loadProject(path.resolve(import.meta.dirname, '../../../../examples/orders'));
+    expect(buildTools(project, { mismatch: true, ...(project.spec.workflow?.allowedTools ? { allowedTools: project.spec.workflow.allowedTools } : {}) }).map((tool) => tool.name)).toContain('report_mismatch');
   });
 });
 

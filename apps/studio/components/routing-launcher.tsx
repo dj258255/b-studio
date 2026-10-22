@@ -11,6 +11,7 @@ import {
 } from "@/lib/backend-rules";
 import { taskKindLabel, type KindRecord, type TaskKind } from "@/lib/routing-types";
 import type { SessionMode } from "@/lib/studio-events";
+import { rememberLaunchNotice } from "./launch-notice";
 import { SESSION_BACKEND_LABEL } from "./status";
 
 interface Preview {
@@ -117,7 +118,7 @@ export function RoutingLauncher({ projects, initial, terminalAllowed = false }: 
             : { projectId, route: "rules", request, intent, ...(terminal ? { terminal } : {}) },
         ),
       });
-      const body = (await response.json().catch(() => ({}))) as { error?: string; session?: { id: string }; sendError?: string };
+      const body = (await response.json().catch(() => ({}))) as { error?: string; session?: { id: string }; sendError?: string; terminal?: { pasteError?: string } };
       if (!response.ok || !body.session) {
         setError(body.error ?? "요청을 보내지 못했습니다");
         setSending(false);
@@ -128,6 +129,8 @@ export function RoutingLauncher({ projects, initial, terminalAllowed = false }: 
         setSending(false);
         return;
       }
+      // 터미널은 열었는데 첫 요청을 넣지 못했으면 세션 화면에서 그 까닭을 한 번 보인다(#849). 사람이 그 터미널에서 이어 간다
+      if (body.terminal?.pasteError) rememberLaunchNotice(body.session.id, `터미널은 열었지만 첫 요청을 넣지 못했습니다: ${body.terminal.pasteError}`);
       router.push(`/sessions/${body.session.id}`);
     } catch {
       setError("요청을 보내지 못했습니다");

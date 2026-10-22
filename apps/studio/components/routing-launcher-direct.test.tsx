@@ -8,6 +8,7 @@ import type { BackendRulesView } from "@/lib/backend-rules";
 const router = vi.hoisted(() => ({ push: vi.fn() }));
 vi.mock("next/navigation", () => ({ useRouter: () => router }));
 
+import { readLaunchNotice } from "./launch-notice";
 import { RoutingLauncher } from "./routing-launcher";
 
 const view: BackendRulesView = { rules: { rules: [{ when: {}, backend: "claude-code" }] }, allowed: ["claude-code", "codex"], defaultBackend: "claude-code" };
@@ -102,5 +103,26 @@ describe("RoutingLauncher 직접 고름과 기록", () => {
     });
     expect(calls.find((call) => call.url === "/api/sessions")?.body).toEqual({ projectId: "orders", route: "rules", request: "고쳐 줘", intent: "build", terminal: true });
     expect(router.push).toHaveBeenCalledWith("/sessions/s3");
+    // 붙여 넣지 못한 까닭이 없으면 세션 화면에 넘길 안내도 없다
+    expect(readLaunchNotice("s3")).toBeUndefined();
+  });
+
+  it("터미널로 보냈는데 첫 요청을 넣지 못했으면 그 까닭을 세션 화면으로 넘긴다(#849)", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => Response.json({ session: { id: "s4" }, terminal: { opened: true, pasted: false, pasteError: "20초 안에 터미널의 CLI가 뜨지 않았습니다" } }, { status: 201 })),
+    );
+    const container = document.body.appendChild(document.createElement("div"));
+    const root = createRoot(container);
+    act(() => root.render(<RoutingLauncher projects={[{ id: "orders", name: "주문" }]} initial={view} terminalAllowed />));
+    act(() => container.querySelector<HTMLInputElement>('input[aria-label="터미널로"]')!.click());
+    act(() => setValue(container.querySelector("textarea")!, "고쳐 줘"));
+    await act(async () => {
+      [...container.querySelectorAll("button")].find((button) => button.textContent === "보내기")!.click();
+    });
+    expect(router.push).toHaveBeenCalledWith("/sessions/s4");
+    expect(readLaunchNotice("s4")).toBe("터미널은 열었지만 첫 요청을 넣지 못했습니다: 20초 안에 터미널의 CLI가 뜨지 않았습니다");
+    // 한 번 읽으면 지운다(다시 열 때 또 보이지 않게)
+    expect(readLaunchNotice("s4")).toBeUndefined();
   });
 });

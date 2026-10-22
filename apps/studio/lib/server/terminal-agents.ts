@@ -8,7 +8,7 @@
  *    자식으로 알린 대화만 하위 에이전트이고, 나머지 대화는 메인에 합친다
  *
  * 장부는 화면용이다. 세션 합계·실행 귀속·한도는 지금처럼 sessions.ts가 맡고, 장부에는 세션 합계에 더한 것과 같은 요청만 넣는다
- * (그래서 행의 합 = 그동안 받은 터미널 사용량). 기억에만 두며 스튜디오를 다시 띄우면 비어 있다.
+ * (그래서 행의 합 = 그동안 받은 터미널 사용량). 세션 기록(session.json)에 함께 저장해, 스튜디오를 다시 띄워도 되살린다(#849).
  * 이 파일은 순수 함수만 둔다.
  */
 import type { AgentUsage } from '@b-studio/agent';
@@ -178,6 +178,106 @@ export function noteAgentSignal(ledger: TerminalAgentLedger, signal: AgentSignal
       return;
     }
   }
+}
+
+/** 세션 기록에 싣는 장부(#849). Map을 [키, 값] 배열로 바꾼 꼴이다. 상한이 있어 크기가 커지지 않는다 */
+export interface PersistedAgentLedger {
+  version: 1;
+  main: Bucket;
+  claude: Array<[string, ClaudeAgent]>;
+  conversations: Array<[string, Bucket]>;
+  children: Array<[string, CodexChild]>;
+  pendingNames: Array<[string, string[]]>;
+  other?: Bucket;
+}
+
+export function serializeAgentLedger(ledger: TerminalAgentLedger): PersistedAgentLedger {
+  return {
+    version: 1,
+    main: ledger.main,
+    claude: [...ledger.claude],
+    conversations: [...ledger.conversations],
+    children: [...ledger.children],
+    pendingNames: [...ledger.pendingNames],
+    ...(ledger.other ? { other: ledger.other } : {}),
+  };
+}
+
+const isObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const optionalText = (value: unknown): value is string | undefined => value === undefined || typeof value === 'string';
+
+function restoreUsage(value: unknown): AgentUsage | undefined {
+  if (!isObject(value)) return undefined;
+  const { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens } = value;
+  if (!isCount(inputTokens) || !isCount(outputTokens) || !isCount(cacheReadTokens) || !isCount(cacheWriteTokens)) return undefined;
+  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
+}
+
+function restoreBucket(value: unknown): Bucket | undefined {
+  if (!isObject(value) || !isObject(value.usageByModel) || !isCount(value.calls) || !isCount(value.lastUsageAt)) return undefined;
+  if (value.cliCostUsd !== undefined && !isCount(value.cliCostUsd)) return undefined;
+  const usageByModel: Record<string, AgentUsage> = {};
+  for (const [model, raw] of Object.entries(value.usageByModel)) {
+    const usage = restoreUsage(raw);
+    if (!usage) return undefined;
+    usageByModel[model] = usage;
+  }
+  return { usageByModel, calls: value.calls, lastUsageAt: value.lastUsageAt, ...(value.cliCostUsd !== undefined ? { cliCostUsd: value.cliCostUsd } : {}) };
+}
+
+/** [키, 값] 배열을 상한까지만 되살린다. 한 항목이라도 모양이 틀리면 전체를 버린다 */
+function restoreEntries<T>(value: unknown, limit: number, restore: (raw: unknown) => T | undefined): Map<string, T> | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const map = new Map<string, T>();
+  for (const entry of value) {
+    if (!Array.isArray(entry) || entry.length !== 2 || typeof entry[0] !== 'string') return undefined;
+    const restored = restore(entry[1]);
+    if (restored === undefined) return undefined;
+    if (map.size < limit) map.set(entry[0], restored);
+  }
+  return map;
+}
+
+/**
+ * 세션 기록에서 장부를 되살린다(#849). 기록은 지난 프로세스가 쓴 파일이라 모양을 다시 확인하고, 틀리면 없는 것으로 둔다
+ * (화면용 내역이라 버려도 합계·한도에는 영향이 없다). 상한을 넘는 항목은 버린다
+ */
+export function restoreAgentLedger(value: unknown): TerminalAgentLedger | undefined {
+  if (!isObject(value) || value.version !== 1) return undefined;
+  const main = restoreBucket(value.main);
+  const claude = restoreEntries(value.claude, AGENT_LEDGER_LIMIT, (raw) => {
+    const bucket = restoreBucket(raw);
+    if (!bucket || !isObject(raw)) return undefined;
+    if ((raw.doneAt !== undefined && !isCount(raw.doneAt)) || (raw.toolUses !== undefined && !isCount(raw.toolUses))) return undefined;
+    return { ...bucket, ...(raw.doneAt !== undefined ? { doneAt: raw.doneAt as number } : {}), ...(raw.toolUses !== undefined ? { toolUses: raw.toolUses as number } : {}) };
+  });
+  const conversations = restoreEntries(value.conversations, CONVERSATION_LIMIT, restoreBucket);
+  const children = restoreEntries(value.children, AGENT_LEDGER_LIMIT, (raw): CodexChild | undefined => {
+    if (!isObject(raw) || !isCount(raw.spawnedAt) || typeof raw.parent !== 'string' || !optionalText(raw.name) || !optionalText(raw.task)) return undefined;
+    if (raw.resultAt !== undefined && !isCount(raw.resultAt)) return undefined;
+    let tool: CodexChild['tool'];
+    if (raw.tool !== undefined) {
+      if (!isObject(raw.tool) || typeof raw.tool.name !== 'string' || !isCount(raw.tool.at)) return undefined;
+      tool = { name: raw.tool.name, at: raw.tool.at };
+    }
+    return {
+      spawnedAt: raw.spawnedAt,
+      parent: raw.parent,
+      ...(raw.name !== undefined ? { name: raw.name } : {}),
+      ...(raw.task !== undefined ? { task: raw.task } : {}),
+      ...(tool ? { tool } : {}),
+      ...(raw.resultAt !== undefined ? { resultAt: raw.resultAt as number } : {}),
+    };
+  });
+  const pendingNames = restoreEntries(value.pendingNames, CONVERSATION_LIMIT, (raw) =>
+    Array.isArray(raw) && raw.every((name) => typeof name === 'string') ? (raw as string[]).slice(-AGENT_LEDGER_LIMIT) : undefined,
+  );
+  const other = value.other === undefined ? undefined : restoreBucket(value.other);
+  if (!main || !claude || !conversations || !children || !pendingNames || (value.other !== undefined && !other)) return undefined;
+  // 서브에이전트(Claude 종류 + Codex 자식) 수의 상한은 둘을 합쳐 본다(noteAgentUsage와 같은 규칙)
+  for (const key of [...children.keys()].reverse()) if (claude.size + children.size > AGENT_LEDGER_LIMIT) children.delete(key);
+  return { main, claude, conversations, children, pendingNames, ...(other ? { other } : {}) };
 }
 
 function totalOf(bucket: Bucket | undefined): AgentUsage {
