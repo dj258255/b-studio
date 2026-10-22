@@ -264,6 +264,14 @@ export function classifyRisk(prompt: string): RoutingDecision['risk'] {
   return HIGH_RISK.test(prompt) ? 'high' : 'normal';
 }
 
+/**
+ * 요청의 작업 종류(복잡도 × 위험도). 실행 기록이 AI별 결과를 묶는 열쇠이고(#821), 라우터와 같은 분류를 쓴다.
+ * 요청 글만 보고 정하므로 같은 글은 늘 같은 종류가 된다
+ */
+export function classifyTask(prompt: string): Pick<RoutingDecision, 'complexity' | 'risk'> {
+  return { complexity: classifyComplexity(prompt, estimateTokens(prompt)), risk: classifyRisk(prompt) };
+}
+
 function positive(value: unknown, name: string): asserts value is number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error(`${name}은 0보다 큰 숫자여야 합니다`);
 }

@@ -435,6 +435,7 @@ export {
   aggregateModelStats,
   classifyComplexity,
   classifyRisk,
+  classifyTask,
   estimateCost,
   estimateTokens,
   routeModel,

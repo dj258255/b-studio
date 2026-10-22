@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { aggregateModelStats, estimateCost, routeModel, validateModelProfiles, type ModelProfile } from './model-router';
+import { aggregateModelStats, classifyTask, estimateCost, routeModel, validateModelProfiles, type ModelProfile } from './model-router';
 
 const models: ModelProfile[] = [
   {
@@ -79,5 +79,13 @@ describe('model registry', () => {
 
   it('실제 사용량을 단가로 환산한다', () => {
     expect(estimateCost(models[0]!, { inputTokens: 1_000_000, outputTokens: 100_000 })).toBeCloseTo(1.4);
+  });
+});
+
+describe('classifyTask', () => {
+  it('라우터와 같은 복잡도·위험도 분류를 한 번에 돌려준다', () => {
+    expect(classifyTask('버튼 글자를 바꿔 줘')).toEqual({ complexity: 'simple', risk: 'normal' });
+    expect(classifyTask('결제 완료 화면을 만들어 줘')).toEqual({ complexity: 'simple', risk: 'high' });
+    expect(classifyTask(`주문 서비스를 리팩터링해 줘\n${'- 조건\n'.repeat(12)}`)).toEqual({ complexity: 'complex', risk: 'normal' });
   });
 });

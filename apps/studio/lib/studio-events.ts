@@ -1,6 +1,7 @@
 import type { SandboxLink } from './sandbox-link';
 import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
+import type { TaskKind } from './routing-types';
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
@@ -347,6 +348,12 @@ export type StudioEvent =
       via?: 'terminal';
       /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */
       at?: string;
+      /** 이 실행을 돌린 백엔드(#821). 이 필드가 생기기 전 기록은 세션의 백엔드로 본다 */
+      backend?: string;
+      /** 실행을 시작한 모델. 정하지 않았거나(CLI 기본값) 대본 실행이면 없다 */
+      model?: string;
+      /** 요청 글로 정한 작업 종류(classifyTask). AI별 결과표가 이것으로 묶는다 */
+      taskKind?: TaskKind;
     }
   /** 터미널 실행이 끝나기 전에 사용자가 CLI에 이어서 보낸 말(도중에 끊고 다시 말한 경우). 같은 실행에 속한다 */
   | { type: 'terminal_prompt'; runId: string; text: string; at: string }

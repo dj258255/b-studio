@@ -139,6 +139,7 @@ import {
   higherCliTier,
   nextCliTier,
   routeCliTier,
+  classifyTask,
   tierLabel,
   type CliRouteDecision,
   type CliTier,
@@ -1185,7 +1186,19 @@ export function sendMessage(
   session.snapshot.running = true;
   // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
   session.snapshot.pendingQuestion = undefined;
-  emit(session, { type: 'run_started', runId: run.id, request, by, intent: intent === 'ask' ? 'ask' : undefined, at: new Date().toISOString() });
+  const model = startModelOf(session, plan);
+  emit(session, {
+    type: 'run_started',
+    runId: run.id,
+    request,
+    by,
+    intent: intent === 'ask' ? 'ask' : undefined,
+    at: new Date().toISOString(),
+    // AI별 결과표가 실행을 묶는 값(#821)
+    backend: sessionBackend(session.snapshot),
+    ...(model ? { model } : {}),
+    taskKind: classifyTask(request),
+  });
   void execute(session, run, request, plan);
   return { runId: run.id };
 }
@@ -2142,6 +2155,18 @@ export function planKindForBackend(backend: SessionMode): RunPlan['kind'] | unde
   if (backend === 'opencode') return 'opencode';
   if (backend === 'gemini') return 'gemini';
   return undefined;
+}
+
+/**
+ * 실행을 시작하는 모델(#821). planRun이 고른 값과 같은 우선순위로 읽는다. 사람이 정하지 않아 CLI가 자기 기본값으로 도는 경우와
+ * 대본 실행은 모른다(undefined). 실행 중 승격으로 바뀐 모델은 여기 넣지 않는다
+ */
+function startModelOf(session: Session, plan: RunPlan): string | undefined {
+  if (plan.kind === 'model') return plan.route?.selected.id;
+  if (plan.kind === 'claude-code') {
+    return plan.autoRoute?.tier ?? cliModelOverride(session.snapshot.modelId) ?? plan.executeModel ?? (process.env.B_STUDIO_CLAUDE_CODE_MODEL?.trim() || undefined);
+  }
+  return cliModelOverride(session.snapshot.modelId);
 }
 
 function planRun(session: Session, request: string, allowBreaking: boolean, intent: Intent): RunPlan {
@@ -8149,7 +8174,8 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   session.runsStarted = (session.runsStarted ?? 0) + 1;
   session.snapshot.running = true;
   session.snapshot.pendingQuestion = undefined;
-  emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt });
+  // 터미널에서 도는 것은 세션의 백엔드와 상관없이 Claude Code CLI다(관문 훅이 그 CLI의 것이다, #821)
+  emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt, backend: 'claude-code', taskKind: classifyTask(request) });
   // 정체 감시를 켠다(#B5). 실행이 닫히거나 세션이 멈추면 타이머도 멈춘다
   startTerminalStallWatch(session, stallMs);
   run.cancel.signal.addEventListener(
