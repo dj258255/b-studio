@@ -114,6 +114,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
 });
 
 vi.mock('./projects', () => ({ findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root) }));
+// codex 백엔드 세션(#825)은 만들 때 실제 CLI 로그인을 확인한다. 여기서는 CLI를 부르지 않고 통과시킨다
+vi.mock('@b-studio/agent', async (importOriginal) => ({ ...(await importOriginal<typeof import('@b-studio/agent')>()), preflightCodex: async () => ({ ok: true as const }) }));
 vi.mock('./session-terminal', () => ({
   disposeSessionTerminal: async () => {},
   interruptSessionTerminal: (sessionId: string) => {
@@ -301,9 +303,9 @@ interface Opened {
   ofType<T extends StudioEvent['type']>(type: T): Array<Extract<StudioEvent, { type: T }>>;
 }
 
-async function open({ lazy = false, workspace = 'copy' }: { lazy?: boolean; workspace?: 'copy' | 'local' } = {}): Promise<Opened> {
+async function open({ lazy = false, workspace = 'copy', backend }: { lazy?: boolean; workspace?: 'copy' | 'local'; backend?: 'codex' } = {}): Promise<Opened> {
   // lazy: 사람이 만든 일반 세션처럼 샌드박스를 필요할 때 켠다(개인 PC 모드의 기본)
-  const id = (await createSession('termgw', 'kim', workspace, lazy ? { boot: 'on-demand' } : {})).id;
+  const id = (await createSession('termgw', 'kim', workspace, { ...(lazy ? { boot: 'on-demand' as const } : {}), ...(backend ? { backend } : {}) })).id;
   const started = Date.now();
   while (getSnapshot(id)?.status !== (lazy ? 'idle' : 'ready')) {
     if (Date.now() - started > 10_000) throw new Error(`세션이 준비되지 않았습니다 (${getSnapshot(id)?.status})`);
@@ -2343,6 +2345,74 @@ describe('검사 동안 에이전트 컨테이너를 멈춘다 (이슈 #765)', (
     expect(fake.pauseAttempts).toBe(0);
     expect(fake.pauses).toEqual([]);
     expect(fake.unpauses).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+
+describe('Codex 터미널(#825)', () => {
+  /** codex 세션을 이 컴퓨터 방식으로 연다. 서버가 codex를 허용해야 세션을 만들 수 있다 */
+  async function openCodex(): Promise<Opened> {
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    fake.terminalMode = 'host';
+    return open({ backend: 'codex' });
+  }
+  afterEach(() => {
+    delete process.env.B_STUDIO_BACKENDS;
+  });
+
+  /** codex가 하는 대로: apply_patch의 쓰기 직전 훅을 부르고, 막히지 않았으면 패치의 파일을 쓴다 */
+  async function patch(session: Opened, files: Record<string, string>) {
+    const body = ['*** Begin Patch', ...Object.entries(files).flatMap(([file, content]) => [`*** Add File: ${file}`, `+${content}`]), '*** End Patch', ''].join('\n');
+    const answer = await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input: { command: body } });
+    if (!answer.deny) for (const [file, content] of Object.entries(files)) await edit(session, file, `${content}\n`);
+    return answer;
+  }
+
+  it('세션의 백엔드가 codex면 이 컴퓨터 방식 터미널이 codex를 띄우고, 실행 기록의 백엔드도 codex다', async () => {
+    const session = await openCodex();
+    expect(sessionTerminalTarget(session.id).cli).toBe('codex');
+    await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '주문에 메모 필드 추가' });
+    expect(session.ofType('run_started').at(-1)).toMatchObject({ via: 'terminal', backend: 'codex', taskKind: { complexity: 'simple', risk: 'normal' } });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('컨테이너 방식은 백엔드가 codex여도 claude를 띄운다(컨테이너에는 claude만 깐다)', async () => {
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    const session = await open({ backend: 'codex' });
+    expect(sessionTerminalTarget(session.id).cli).toBe('claude');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('apply_patch가 바꾸는 파일 중 하나라도 카드의 쓰기 범위 밖이면 패치 전체를 막고, 범위 안이면 게이트를 지나 체크포인트가 된다', async () => {
+    const session = await openCodex();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '주문에 메모 필드 추가' });
+
+    const denied = await patch(session, { 'api/src/Memo.java': 'class Memo {}', 'web/other.txt': 'x' });
+    expect(denied.deny).toContain('web/other.txt');
+    await expect(fileOf(session, 'api/src/Memo.java')).rejects.toThrow();
+
+    expect(await patch(session, { 'api/src/Memo.java': 'class Memo {}' })).toEqual({});
+    expect((await session.gateway.stop({ hook_event_name: 'Stop', last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('codex의 읽기 도구는 실행을 열거나 샌드박스를 기다리지 않고 바로 통과한다', async () => {
+    const session = await openCodex();
+    expect(await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'view_image', tool_input: { path: 'a.png' } })).toEqual({});
+    expect(session.ofType('run_started')).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('PermissionRequest 훅은 권한 확인 대기로 보이고, 답을 주지 않는다', async () => {
+    const session = await openCodex();
+    await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '테스트 돌려 줘' });
+    await session.gateway.notification({ hook_event_name: 'PermissionRequest', tool_name: 'exec_command', tool_input: { command: './gradlew test' } });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'exec_command 실행 권한을 묻습니다' });
     await stopSession(session.id);
   }, 30_000);
 });

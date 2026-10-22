@@ -1,7 +1,7 @@
 /**
  * 터미널의 CLI가 보내는 OTLP/HTTP JSON 텔레메트리에서 "모델 요청 한 건"의 사용량만 꺼낸다(#726).
  *
- * CLI는 `claude_code.api_request` 이벤트를 로그로 내보낸다. 이벤트를 알아보는 꼴은 정해지지 않았으므로
+ * claude는 `claude_code.api_request` 이벤트를, codex는 `codex.sse_event`(event.kind = response.completed)를 로그로 내보낸다(#825). 이벤트를 알아보는 꼴은 정해지지 않았으므로
  * 속성(`event.name`)과 본문(`body.stringValue`) 두 자리를 모두 본다. 값은 바깥에서 온 것이라 그대로 믿지 않는다 —
  * 숫자로 바꿀 수 없거나 음수·NaN·너무 큰 값이면 그 항목을 버린다.
  *
@@ -61,6 +61,7 @@ function apiRequestFromRecord(value: unknown, now: number): ApiRequestUsage | un
   const record = asRecord(value);
   if (!record) return undefined;
   const attributes = attributesOf(record);
+  if (isCodexCompleted(attributes)) return codexUsageFromRecord(record, attributes, now);
   if (!isApiRequest(record, attributes)) return undefined;
 
   const model = stringValue(attributes.get('model'));
@@ -89,6 +90,42 @@ function apiRequestFromRecord(value: unknown, now: number): ApiRequestUsage | un
     ...(promptId ? { promptId } : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(cost.seen ? { costUsd: cost.value } : {}),
+    ...(duration.seen ? { durationMs: duration.value } : {}),
+  };
+}
+
+/** codex가 응답 하나를 다 받은 기록인가. 같은 응답에 토큰 수가 없는 기록이 먼저 오므로, 토큰 수가 있는 것만 받는다 */
+function isCodexCompleted(attributes: Map<string, unknown>): boolean {
+  return stringValue(attributes.get('event.name')) === 'codex.sse_event' && stringValue(attributes.get('event.kind')) === 'response.completed' && attributes.has('input_token_count');
+}
+
+/**
+ * codex의 응답 하나(#825). OpenAI의 입력 토큰은 캐시 읽기를 포함하므로 빼서 claude와 같은 뜻(캐시 밖 입력)으로 맞춘다.
+ * 출력 토큰은 추론 토큰을 포함한 그대로 둔다. CLI가 비용을 보내지 않으므로 비용은 단가로 환산한다.
+ * 요청 번호가 없어 대화 번호와 이벤트 시각으로 같은 응답을 가른다
+ */
+function codexUsageFromRecord(record: Record<string, unknown>, attributes: Map<string, unknown>, now: number): ApiRequestUsage | undefined {
+  const model = stringValue(attributes.get('model'));
+  const input = numeric(attributes.get('input_token_count'));
+  const output = numeric(attributes.get('output_token_count'));
+  const cached = numeric(attributes.get('cached_token_count'));
+  const cacheWrite = numeric(attributes.get('cache_write_token_count'));
+  const duration = numeric(attributes.get('duration_ms'));
+  if (!model || !input.seen || !output.seen || !cached.seen) return undefined;
+  if ([input, output, cached, cacheWrite, duration].some((entry) => entry.seen && !entry.ok)) return undefined;
+  // 캐시 읽기가 입력보다 많으면 두 값 중 하나가 틀렸다. 어느 쪽인지 모르니 버린다
+  if (cached.value > input.value) return undefined;
+  const conversation = stringValue(attributes.get('conversation.id'));
+  const at = stringValue(attributes.get('event.timestamp'));
+  return {
+    at: timestamp(record, now),
+    model,
+    inputTokens: input.value - cached.value,
+    outputTokens: output.value,
+    cacheReadTokens: cached.value,
+    cacheWriteTokens: cacheWrite.seen ? cacheWrite.value : 0,
+    ...(conversation && at ? { requestId: `${conversation}:${at}` } : {}),
+    ...(conversation ? { sessionId: conversation } : {}),
     ...(duration.seen ? { durationMs: duration.value } : {}),
   };
 }
@@ -130,10 +167,11 @@ function anyValueToNumber(value: unknown): number | undefined {
   return undefined;
 }
 
-/** 로그 레코드의 시각(밀리초). timeUnixNano → observedTimeUnixNano → 받은 시각 */
+/** 로그 레코드의 시각(밀리초). timeUnixNano → observedTimeUnixNano → 받은 시각. 0은 값이 없다는 뜻이다(codex가 0을 보낸다) */
 function timestamp(record: Record<string, unknown>, now: number): number {
   for (const key of ['timeUnixNano', 'observedTimeUnixNano'] as const) {
     const raw = record[key];
+    if (raw === '0' || raw === 0) continue;
     if (typeof raw === 'string' && /^\d+$/.test(raw)) {
       try {
         return Number(BigInt(raw) / 1_000_000n);
