@@ -2,7 +2,7 @@
  * desk의 키 처리. 상태와 받은 글자로 다음 상태와 할 일(effects)을 돌려주는 순수 함수다 — 네트워크·화면은 desk.ts가 한다.
  *
  * 앞글쇠는 Ctrl-b(tmux·herdr와 같다). 앞글쇠가 없으면 친 글자는 고른 칸의 CLI로 그대로 간다.
- * 앞글쇠 다음: 숫자(칸 고르기), ↑↓(사이드바, 앞글쇠가 이어진다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수), x(칸 비우기), q(나가기),
+ * 앞글쇠 다음: 숫자(칸 고르기), ↑↓(사이드바, 앞글쇠가 이어지고 그동안 Ctrl-b는 새 앞글쇠다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수), x(칸 비우기), q(나가기),
  * Ctrl-b(Ctrl-b를 CLI로). 새 요청 입력 중에는 글자가 입력으로 간다
  */
 import type { PaneLayout } from './screen';
@@ -18,6 +18,8 @@ const DOWN_APP = '\x1bOB';
 const LAYOUTS: readonly PaneLayout[] = [1, 2, 4];
 /** 칸 자리 수(4칸 배치까지) */
 export const SLOT_COUNT = 4;
+/** 사이드바를 고르는 중의 안내 */
+const BROWSING = '사이드바 고르는 중: ↑↓로 옮기고 Enter로 칸에 엽니다. 다른 글쇠는 Ctrl-b 다음과 같습니다';
 
 export interface PromptState {
   step: 'project' | 'request';
@@ -41,6 +43,8 @@ export interface DeskState {
   slots: Array<string | undefined>;
   focus: number;
   prefix: boolean;
+  /** 앞글쇠 뒤 ↑↓로 사이드바를 고르는 중. 이때 다시 누른 Ctrl-b는 칸으로 보내지 않고 새 앞글쇠로 본다(#855) */
+  browsing?: boolean;
   prompt?: PromptState;
   message?: string;
 }
@@ -109,9 +113,11 @@ export function handleInput(start: DeskState, input: string): { state: DeskState
 }
 
 function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState {
-  const done = { ...state, prefix: false };
+  const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
   const sessions = deskSessions(state.items);
   if (key === PREFIX) {
+    // 사이드바를 고르다가 습관대로 다시 누른 Ctrl-b는 새 앞글쇠다. 칸으로 보내면 다음 글자가 CLI 입력이 된다
+    if (state.browsing) return { ...state, prefix: true, browsing: false, message: undefined };
     const id = state.slots[state.focus];
     if (id) effects.push({ type: 'input', id, data: PREFIX });
     return done;
@@ -120,8 +126,8 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     const slot = Number(key) - 1;
     return slot < state.layout ? { ...done, focus: slot } : done;
   }
-  if (key === UP || key === UP_APP) return { ...state, selected: Math.max(0, state.selected - 1) };
-  if (key === DOWN || key === DOWN_APP) return { ...state, selected: Math.max(0, Math.min(sessions.length - 1, state.selected + 1)) };
+  if (key === UP || key === UP_APP) return { ...state, browsing: true, message: BROWSING, selected: Math.max(0, state.selected - 1) };
+  if (key === DOWN || key === DOWN_APP) return { ...state, browsing: true, message: BROWSING, selected: Math.max(0, Math.min(sessions.length - 1, state.selected + 1)) };
   if (key === '\r' || key === '\n') {
     const item = sessions[state.selected];
     if (!item) return done;

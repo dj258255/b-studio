@@ -23,6 +23,21 @@ describe('키 처리', () => {
     expect(effects).toEqual([{ type: 'input', id: 'a', data: '\x02' }]);
   });
 
+  it('사이드바를 ↑↓로 고르는 중에 다시 누른 Ctrl-b는 칸으로 보내지 않고 새 앞글쇠로 본다(#855)', () => {
+    const state = withItems({ layout: 2, slots: ['a', 'b', undefined, undefined] });
+    const { state: next, effects } = handleInput(state, '\x02\x1b[B\x022');
+    expect(effects).toEqual([]);
+    expect(next.focus).toBe(1);
+    expect(next.selected).toBe(1);
+    expect(next.prefix).toBe(false);
+  });
+
+  it('사이드바를 고르는 중에는 아래 줄에 그 사실을 알린다(#855)', () => {
+    const { state: next } = handleInput(withItems(), '\x02\x1b[B');
+    expect(next.prefix).toBe(true);
+    expect(next.message).toContain('사이드바');
+  });
+
   it('Ctrl-b 앞뒤의 글자는 나눠서 보내고, 명령 글쇠는 보내지 않는다', () => {
     const state = withItems({ layout: 2, slots: ['a', 'b', undefined, undefined] });
     const { state: next, effects } = handleInput(state, 'x\x022y');
