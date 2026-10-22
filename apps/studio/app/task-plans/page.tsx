@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import { DashboardTabs } from '@/components/dashboard-tabs';
 import { TaskPlanWorkbench } from '@/components/task-plan-workbench';
 import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
@@ -39,14 +39,12 @@ export default async function TaskPlansPage(props: { searchParams: Promise<{ id?
 
   return (
     <main className="mx-auto max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">
+      <DashboardTabs current="task-plans" experimental={capabilities.experimental} openFolder={capabilities.openFolder} />
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-muted">b-studio / 나눠서 병렬</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">한 요청을 나눠 동시에 실행하고 합친 결과를 다시 검증합니다</h1>
         </div>
-        <Link href="/work" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          작업 목록
-        </Link>
       </header>
       <TaskPlanWorkbench
         projects={publishable}

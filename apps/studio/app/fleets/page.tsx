@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import { DashboardTabs } from '@/components/dashboard-tabs';
 import { FleetWorkbench } from '@/components/fleet-workbench';
 import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
@@ -25,14 +25,12 @@ export default async function FleetsPage(props: { searchParams: Promise<{ id?: s
 
   return (
     <main className="mx-auto max-w-[96rem] px-4 py-6 sm:px-6 lg:px-8">
+      <DashboardTabs current="fleets" experimental={capabilities.experimental} openFolder={capabilities.openFolder} />
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-muted">b-studio / 여러 명 비교</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">같은 요청을 격리된 여러 에이전트에서 비교합니다</h1>
         </div>
-        <Link href="/work" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          작업 목록
-        </Link>
       </header>
       <FleetWorkbench projects={projects} models={models} initialFleets={initial} initialSelectedId={selectedId} fleet={fleet} />
     </main>

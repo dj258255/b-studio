@@ -1,5 +1,5 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
+import { DashboardTabs } from '@/components/dashboard-tabs';
 import { AccountsPanel } from '@/components/accounts-panel';
 import { pageUser } from '@/lib/server/access';
 import { studioCapabilities } from '@/lib/server/capabilities';
@@ -16,14 +16,12 @@ export default async function AccountsPage() {
 
   return (
     <main className="mx-auto max-w-2xl px-4 py-6 sm:px-6 lg:px-8">
+      <DashboardTabs current="accounts" experimental={capabilities.experimental} openFolder={capabilities.openFolder} />
       <header className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-sm font-semibold text-muted">b-studio / 계정 연결</p>
           <h1 className="mt-1 text-3xl font-semibold tracking-tight">구독 CLI 계정 연결</h1>
         </div>
-        <Link href="/" className="glass-soft rounded-control px-4 py-2 text-sm font-medium hover:bg-panel">
-          개발 화면으로
-        </Link>
       </header>
       {capabilities.openFolder ? (
         <AccountsPanel />

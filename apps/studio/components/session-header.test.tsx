@@ -105,3 +105,15 @@ describe("시작에 실패한 세션의 헤더 (#718)", () => {
     expect(render()).not.toContain("다시 시작");
   });
 });
+
+describe("세션 머리에서 작업 화면으로(#848)", () => {
+  it("작업 화면으로 가는 링크와 이 세션이 쓴 토큰 합을 보인다", () => {
+    const html = render([], { ...snapshot, backend: "codex", tokens: { inputTokens: 1000, outputTokens: 200, cacheReadTokens: 34, cacheWriteTokens: 0 } });
+    expect(html).toMatch(/href="\/work"[^>]*>작업 화면</);
+    expect(html).toContain("토큰 1,234");
+  });
+
+  it("아직 토큰을 쓰지 않았으면 토큰 칩을 두지 않는다", () => {
+    expect(render()).not.toContain("토큰 ");
+  });
+});

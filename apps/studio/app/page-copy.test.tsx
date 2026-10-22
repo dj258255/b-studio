@@ -70,21 +70,28 @@ describe("탭 제목", () => {
   });
 });
 
-describe("뒤로 가는 링크", () => {
-  it.each(["app/accounts/page.tsx", "app/work/page.tsx", "app/projects/[id]/tokens/page.tsx"])(
-    "%s는 개발 화면으로 가는 링크를 '개발 화면으로' 한 가지 말로 쓴다",
-    async (file) => {
-      const text = await source(file);
-      expect(text).toContain("개발 화면으로");
-      expect(text).not.toContain("← 개발 화면으로");
-      expect(text).not.toMatch(/>\s*작업 목록\s*</);
-    },
-  );
-
-  // 여러 명 비교·나눠서 병렬은 작업 목록에서 여는 화면이라 작업 목록으로 돌아간다. 말을 맞추려고 목적지를 바꾸지 않는다
-  it.each(["app/fleets/page.tsx", "app/task-plans/page.tsx"])("%s는 작업 목록으로 돌아가는 링크를 둔다", async (file) => {
+describe("대시보드 화면을 잇는 탭(#848)", () => {
+  // 작업·격자·비교·작업 분해·계정은 같은 탭 줄로 오가고, 개발 화면으로 가는 길도 그 줄에 있다. 페이지마다 따로 둔 뒤로 가기 단추는 두지 않는다
+  it.each([
+    ["app/work/page.tsx", "work"],
+    ["app/split/page.tsx", "split"],
+    ["app/fleets/page.tsx", "fleets"],
+    ["app/task-plans/page.tsx", "task-plans"],
+    ["app/accounts/page.tsx", "accounts"],
+  ])("%s는 탭 줄을 두고 자기 화면을 현재로 표시한다", async (file, current) => {
     const text = await source(file);
-    expect(text).toMatch(/href="\/work"[^>]*>\s*작업 목록\s*</);
+    expect(text).toMatch(new RegExp(`<DashboardTabs[^>]*current="${current}"`));
+    expect(text).not.toMatch(/>\s*작업 목록\s*</);
+    expect(text).not.toMatch(/>\s*개발 화면으로\s*</);
+  });
+
+  it("토큰 화면은 탭에 들지 않아 개발 화면으로 가는 링크를 그대로 둔다", async () => {
+    const text = await source("app/projects/[id]/tokens/page.tsx");
+    expect(text).toContain("개발 화면으로");
     expect(text).not.toContain("← 개발 화면으로");
+  });
+
+  it("작업 화면은 터미널을 쓸 수 있을 때만 studio desk 안내를 둔다", async () => {
+    expect(await source("app/work/page.tsx")).toMatch(/sessionTerminalAllowed\(\)\s*&&\s*<DeskHint/);
   });
 });
