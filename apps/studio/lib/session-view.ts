@@ -1,6 +1,6 @@
 import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
 import type { BootNetwork } from '@b-studio/sandbox';
-import type { DeployAction, RemoteCommitView, SessionSnapshot, StudioEvent } from './studio-events';
+import { REVERIFY_LIMIT, type DeployAction, type RemoteCommitView, type SessionSnapshot, type StudioEvent } from './studio-events';
 
 export interface LogEntry {
   service: string;
@@ -350,6 +350,15 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
           },
         ],
       };
+
+    case 'reverify_started':
+      return patchSnapshot(view, { running: true });
+
+    case 'reverify_finished':
+      return patchSnapshot(view, {
+        running: false,
+        reverifications: [event.record, ...(view.snapshot.reverifications ?? []).filter((record) => record.startedAt !== event.record.startedAt)].slice(0, REVERIFY_LIMIT),
+      });
 
     case 'restore_started':
       return { ...patchSnapshot(view, { running: true }), chat: [...view.chat, { kind: 'restore', checkpoint: event.checkpoint }] };
