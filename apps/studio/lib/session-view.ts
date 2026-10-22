@@ -1,4 +1,4 @@
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, RequestMismatch, ServiceCheck, VerificationReport, WorkflowCompare, WorkflowStepCheck } from '@b-studio/agent';
 import type { BootNetwork } from '@b-studio/sandbox';
 import { REVERIFY_LIMIT, type DeployAction, type RemoteCommitView, type SessionSnapshot, type StudioEvent } from './studio-events';
 
@@ -70,6 +70,8 @@ export type ChatItem =
       verify?: 'light';
       /** 턴 상한에 닿았지만 게이트를 통과해 체크포인트로 남긴 요청. 요청이 끝나지 않았을 수 있다 */
       incomplete?: 'max_turns';
+      /** 에이전트가 알린 요청과 확인의 어긋남. 있으면 done이어도 "확인 필요"로 보인다(#666) */
+      mismatches?: RequestMismatch[];
     }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   /** 에이전트의 제안을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘겼다(ADR-068) */
@@ -303,7 +305,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         chat: [
           // 요약 도중에 끝난(취소·오류) 실행의 "요약 중" 줄은 남기지 않는다
           ...markInterrupted(withoutCompacting(view.chat, event.runId), event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}), ...(event.incomplete ? { incomplete: event.incomplete } : {}) },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}), ...(event.incomplete ? { incomplete: event.incomplete } : {}), ...(event.mismatches?.length ? { mismatches: event.mismatches } : {}) },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,
@@ -756,6 +758,8 @@ type OutcomeItem = Extract<ChatItem, { kind: 'outcome' }>;
 export function outcomeText(item: OutcomeItem, hasChanges: boolean): string {
   // 턴 수를 모르는 실행(세션 터미널: 턴은 CLI 안에서 돈다)에는 턴 수를 적지 않는다
   // 턴 상한에서 게이트만 통과한 실행은 "완료"라고 적지 않는다. 모델이 다음 도구를 부르려던 중에 끊겼다(ADR-131 덧붙임)
+  // 에이전트가 요청과 확인의 어긋남을 알렸으면 게이트를 통과했어도 "완료"라고 적지 않는다(#666)
+  if (item.status === 'done' && item.mismatches?.length) return `확인 필요: 요청과 확인이 어긋납니다${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'done' && item.incomplete === 'max_turns') return `턴 상한에서 멈춤${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'done') return `${hasChanges ? '완료' : '답만 했습니다(바꾼 파일 없음)'}${item.turns === undefined ? '' : `, ${item.turns}턴`}`;
   if (item.status === 'awaiting_input') return '답을 기다립니다';

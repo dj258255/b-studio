@@ -1,5 +1,5 @@
 import type { SandboxLink } from './sandbox-link';
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RequestMismatch, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { WorkflowStage } from '@b-studio/spec';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 import type { TaskKind } from './routing-types';
@@ -424,6 +424,11 @@ export type StudioEvent =
       verify?: 'light';
       /** 턴 상한에 닿았지만 게이트를 통과해 체크포인트로 남긴 실행이면 'max_turns'. 요청이 끝나지 않았을 수 있다(ADR-131 덧붙임) */
       incomplete?: 'max_turns';
+      /**
+       * 에이전트가 알린 요청과 확인(테스트)의 어긋남(#666). 있으면 done이어도 화면은 "확인 필요"로 보인다.
+       * 게이트 판정과 체크포인트는 그대로다. 보고가 없으면 필드가 없다
+       */
+      mismatches?: RequestMismatch[];
       /** 가볍게 확인이 건너뛴 검증 단계(프로젝트 토큰 보고서가 이 수를 센다). light가 아니면 없다 */
       skippedStages?: string[];
       sessionTokens?: AgentUsage;

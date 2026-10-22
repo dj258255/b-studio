@@ -641,6 +641,21 @@ describe('작업 분해 실행', () => {
     expect(fake.sessions.size).toBe(0);
   });
 
+  it('레인 작업이 요청과 확인의 어긋남을 알렸으면 작업은 done으로 이어 가고 그 작업에 어긋남을 남긴다 (#666)', async () => {
+    const mismatch = { requestValue: '200자', checkValue: '테스트는 100자', followed: 'check', note: '테스트를 따랐습니다' };
+    const saved = fake.run;
+    fake.run = { ...saved, mismatches: [mismatch] } as typeof saved;
+    try {
+      fake.plan = { tasks: [task('a1', ['web/a'])] };
+      fake.writes = { a1: { 'web/a/one.md': 'one' } };
+      const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
+      expect(plan.status).toBe('done');
+      expect(plan.lanes[0]!.tasks[0]).toMatchObject({ status: 'done', mismatches: [mismatch] });
+    } finally {
+      fake.run = saved;
+    }
+  });
+
   it('레인 하나가 실패하면 뒤 작업은 건너뛰고 통합하지 않는다', async () => {
     fake.plan = { tasks: [task('a1', ['web/a']), task('a2', ['web/a'], ['a1']), task('b', ['web/b'])] };
     fake.writes = { a1: 'fail', b: { 'web/b/one.md': 'b' } };

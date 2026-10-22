@@ -2418,7 +2418,7 @@ async function withPlanBrief(
 
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
-  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs' | 'verify'> | undefined;
+  let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs' | 'verify' | 'mismatches'> | undefined;
   let cancelled = false;
   /** 요청을 시작하지 못했다. 되돌릴 변경이 없고 데모 요청도 쓰지 않았다 */
   let notStarted = false;
@@ -2560,6 +2560,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       durationMs: Math.round(performance.now() - agentStarted),
       ...(result.verify === 'light' ? { verify: 'light' as const } : {}),
       ...(result.status === 'done' && result.incomplete === 'max_turns' ? { incomplete: 'max_turns' as const } : {}),
+      // 에이전트가 알린 요청과 확인의 어긋남(#666). 판정과 체크포인트는 그대로 두고 화면이 "확인 필요"로 보인다
+      ...(result.mismatches?.length ? { mismatches: result.mismatches } : {}),
       // 가볍게 확인이 건너뛴 단계를 함께 남긴다(프로젝트 토큰 보고서가 이 수를 센다)
       ...(result.skippedStages && result.skippedStages.length > 0 ? { skippedStages: [...result.skippedStages] } : {}),
     };

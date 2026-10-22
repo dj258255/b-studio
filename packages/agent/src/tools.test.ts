@@ -258,6 +258,51 @@ describe('되묻기 도구(ask_user)', () => {
   });
 });
 
+describe('어긋남 보고 도구(report_mismatch, #666)', () => {
+  const input = { request_value: '배송비 3,000원', check_value: '테스트는 2,500원을 기대', followed: 'check', note: '테스트를 맞췄고 요청 값과 다릅니다' };
+
+  it('mismatch를 넘길 때만 목록에 넣고, 허용 도구 목록이 있으면 그 목록에 있어야 넣는다', () => {
+    expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('report_mismatch');
+    expect(buildTools(project, { mismatch: true }).map((candidate) => candidate.name)).toContain('report_mismatch');
+    expect(buildTools(project, { mismatch: true, allowedTools: ['read_file'] }).map((candidate) => candidate.name)).not.toContain('report_mismatch');
+    expect(buildTools(project, { mismatch: true, allowedTools: ['report_mismatch'] }).map((candidate) => candidate.name)).toContain('report_mismatch');
+  });
+
+  it('값을 다듬어 onMismatch로 넘기고, 실행을 멈추지 않고 이어 가라고 돌려준다', async () => {
+    const reported: unknown[] = [];
+    const outcome = await executeTool('report_mismatch', { ...input, note: '  테스트를 맞췄고 요청 값과 다릅니다 ' }, { ...context, onMismatch: (mismatch) => reported.push(mismatch) });
+    expect(outcome.ok).toBe(true);
+    expect(outcome.content).toContain('needs review');
+    expect(reported).toEqual([{ requestValue: '배송비 3,000원', checkValue: '테스트는 2,500원을 기대', followed: 'check', note: '테스트를 맞췄고 요청 값과 다릅니다' }]);
+  });
+
+  it('빈 값·긴 값·모르는 followed를 거부한다', async () => {
+    let reported = 0;
+    const reportContext: ToolContext = { ...context, onMismatch: () => (reported += 1) };
+    const invalid = [
+      { ...input, request_value: '' },
+      { ...input, check_value: ' ' },
+      { ...input, followed: 'both' },
+      { ...input, note: 'n'.repeat(301) },
+      { ...input, request_value: 'v'.repeat(301) },
+    ];
+    for (const candidate of invalid) expect((await executeTool('report_mismatch', candidate, reportContext)).ok).toBe(false);
+    expect(reported).toBe(0);
+  });
+
+  it('onMismatch가 없는 실행에서는 거부한다', async () => {
+    const outcome = await executeTool('report_mismatch', input, context);
+    expect(outcome.ok).toBe(false);
+    expect(outcome.content).toContain('cannot report');
+  });
+
+  it('질문 모드에서도 상태를 바꾸지 않으므로 받는다', async () => {
+    const reported: unknown[] = [];
+    expect((await executeTool('report_mismatch', input, { ...context, readOnly: true, onMismatch: (mismatch) => reported.push(mismatch) })).ok).toBe(true);
+    expect(reported).toHaveLength(1);
+  });
+});
+
 describe('방식 제안 도구(propose_mode)', () => {
   it('interactive이고 실험 기능을 켰을 때만 목록에 넣는다 (ADR-166)', () => {
     vi.stubEnv('B_STUDIO_EXPERIMENTAL', '1');
@@ -651,7 +696,7 @@ describe('도구 분류 (샌드박스 필요 여부)', () => {
     } as unknown as LoadedProject;
     // 실험 기능에 묶인 도구(propose_mode)도 켠다
     vi.stubEnv('B_STUDIO_EXPERIMENTAL', '1');
-    const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, design: true, interactive: true }).map((candidate) => candidate.name);
+    const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, design: true, interactive: true, mismatch: true }).map((candidate) => candidate.name);
     vi.unstubAllEnvs();
 
     for (const name of names) {

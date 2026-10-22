@@ -335,7 +335,7 @@ export {
   type TamperedRecord,
   type VerificationRecordDiff,
 } from './requirement-integrity';
-export { buildTools, executeTool, PROPOSAL_OPTIONS, type AskUserQuestion, type BoardAccess, type ModeProposal, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
+export { buildTools, createMismatchLog, executeTool, PROPOSAL_OPTIONS, type AskUserQuestion, type BoardAccess, type ModeProposal, type RequestMismatch, type ToolBuildOptions, type ToolContext, type ToolOutcome } from './tools';
 export {
   Board,
   canRead,

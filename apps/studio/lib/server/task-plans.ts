@@ -32,6 +32,7 @@ import {
   type PlanAsk,
   type PlanBackend,
   type RemoteLocation,
+  type RequestMismatch,
   type RunMetrics,
   type ScriptedTurn,
   type TaskLane,
@@ -990,6 +991,9 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
         ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}),
       };
       task.summary = outcome.summary;
+      // 에이전트가 알린 요청과 확인의 어긋남(#666). 작업은 done으로 이어 가되 계획 화면이 "확인 필요"로 보인다
+      if ('mismatches' in outcome && outcome.mismatches?.length) task.mismatches = outcome.mismatches;
+      else delete task.mismatches;
       if (outcome.status !== 'done') {
         task.status = 'failed';
         for (const rest of lane.tasks.slice(index + 1)) rest.status = 'skipped';
@@ -1479,7 +1483,7 @@ async function runAndWait(
     board?: BoardAccess;
     verify?: VerifyMode;
   },
-): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number }> {
+): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number; mismatches?: RequestMismatch[] }> {
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;
   const unsubscribe = subscribe(sessionId, (event) => {
@@ -1488,7 +1492,14 @@ async function runAndWait(
   try {
     ({ runId } = sendMessage(sessionId, request, { allowBreaking: false, ...options }));
     await waitForEvent(sessionId, () => ({ done: finished?.runId === runId }), RUN_TIMEOUT_MS);
-    return { status: finished!.status, summary: finished!.summary, usage: finished!.usage, metrics: finished!.metrics, durationMs: finished!.durationMs };
+    return {
+      status: finished!.status,
+      summary: finished!.summary,
+      usage: finished!.usage,
+      metrics: finished!.metrics,
+      durationMs: finished!.durationMs,
+      ...(finished!.mismatches?.length ? { mismatches: finished!.mismatches } : {}),
+    };
   } finally {
     unsubscribe();
   }
