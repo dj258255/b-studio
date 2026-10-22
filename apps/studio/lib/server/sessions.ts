@@ -328,7 +328,7 @@ import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
-import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
+import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
 import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, applyPatchPaths, CODEX_READ_TOOLS, isReadOnlyPrompt, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress, type HostCliKind } from '@b-studio/sandbox';
@@ -988,7 +988,8 @@ type NewSession = Pick<
   | 'sourceDirtyFiles'
   | 'lazy'
   | 'serviceSelection'
->;
+> &
+  Partial<Pick<Session, 'agentLedger'>>;
 
 function newSession(fields: NewSession): Session {
   return {
@@ -1447,6 +1448,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     }
     const list = await checkpoints.list();
     const head = list[0]!;
+    const restoredLedger = restoreAgentLedger(data.agentLedger);
     // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
     const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
@@ -1493,6 +1495,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 이 필드가 생기기 전에 저장한 기록에는 없다
       gemini: { sessionId: data.gemini?.sessionId, notes: [...(data.gemini?.notes ?? [])] },
       sourceDirtyFiles: data.sourceDirtyFiles,
+      // 에이전트 내역(#849). 모양이 틀리거나 이 필드가 생기기 전 기록이면 없다
+      ...(restoredLedger ? { agentLedger: restoredLedger } : {}),
       // 이어서 작업하기는 샌드박스를 바로 켠다(지연 기동이 아니다)
       lazy: false,
       serviceSelection,
@@ -7555,6 +7559,7 @@ function toPersisted(session: Session): PersistedSession {
     openCode: session.openCode,
     gemini: session.gemini,
     sourceDirtyFiles: session.sourceDirtyFiles,
+    ...(session.agentLedger ? { agentLedger: serializeAgentLedger(session.agentLedger) } : {}),
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
     git: session.git,
@@ -8145,14 +8150,18 @@ async function terminalTelemetry(id: string, body: unknown): Promise<void> {
     const at = Date.now();
     for (const signal of signals) noteAgentSignal(ledger, signal, at);
   }
+  // 사용량은 기록에 쌓는 이벤트가 아니므로 내역을 세션 기록에 따로 저장한다(#849). 저장은 모아서 한 번에 한다
+  if (requests.length > 0 || signals.length > 0) schedulePersist(session);
 }
 
 /**
  * 터미널 세션의 메인·서브에이전트 내역(#843). 터미널 사용량을 받은 적이 없으면 없다.
- * 행의 합은 이 스튜디오가 켜진 뒤 받은 터미널 사용량의 합이다(세션 합계에 더한 것과 같은 요청만 넣는다)
+ * 행의 합은 받은 터미널 사용량의 합이다(세션 합계에 더한 것과 같은 요청만 넣는다). 내역은 세션 기록에 함께 저장해 다시 띄워도 이어 센다(#849)
  */
 export function sessionTerminalAgents(id: string, pricing: TokenPricing, mainState: TerminalAgentState = 'idle'): TerminalAgentRow[] | undefined {
-  const ledger = store.sessions.get(id)?.agentLedger;
+  // 스튜디오를 다시 띄운 뒤 아직 이어서 열지 않은 세션은 저장된 기록에서 읽는다(#849)
+  const live = store.sessions.get(id);
+  const ledger = live ? live.agentLedger : restoreAgentLedger(archived.get(id)?.data.agentLedger);
   if (!ledger) return undefined;
   const rows = agentRows(ledger, pricing, mainState);
   return rows.length > 0 ? rows : undefined;

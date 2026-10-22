@@ -15,7 +15,7 @@ workflow:
   pageChecks:
     - { service: web, path: /, mode: browser, expectText: To get started, viewport: { width: 390, height: 844 }, noHorizontalScroll: true }
   # post_note·read_notes는 작업 분해에서 조율 전략을 켠 실행에만, ask_user·propose_mode는 사람이 보낸 요청에서만 보인다
-  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract, post_note, read_notes, ask_user, propose_mode]
+  allowedTools: [list_files, read_file, write_file, edit_file, delete_file, run_in_service, restart_service, service_logs, service_stats, http_request, get_contract, post_note, read_notes, ask_user, propose_mode, report_mismatch]
   deniedCommands: [npm publish, git push, terraform apply, terraform destroy]
   requireApprovalFor: [restart_service]
   protectedPaths: [.env, .github/workflows, infra, migrations]

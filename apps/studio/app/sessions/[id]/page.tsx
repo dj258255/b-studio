@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { LaunchNotice } from "@/components/launch-notice";
 import { Workbench } from "@/components/workbench";
 import { canManageSession, pageUser } from "@/lib/server/access";
 import { authConfig } from "@/lib/server/auth";
@@ -23,14 +24,17 @@ export default async function SessionPage(props: PageProps<"/sessions/[id]">) {
   const mode = authConfig().mode;
 
   return (
-    <Workbench
-      initial={snapshot}
-      access={{
-        viewer: mode === "none" ? undefined : viewer,
-        owner: snapshot.owner,
-        canManage: canManageSession(viewer, snapshot.owner),
-        canLogout: mode === "token",
-      }}
-    />
+    <>
+      <LaunchNotice sessionId={snapshot.id} />
+      <Workbench
+        initial={snapshot}
+        access={{
+          viewer: mode === "none" ? undefined : viewer,
+          owner: snapshot.owner,
+          canManage: canManageSession(viewer, snapshot.owner),
+          canLogout: mode === "token",
+        }}
+      />
+    </>
   );
 }

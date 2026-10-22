@@ -144,6 +144,8 @@ vi.mock('./session-terminal', () => ({
       : undefined,
 }));
 
+import { sessionFile, stateDirOf } from './session-store';
+import { agentRows, restoreAgentLedger } from './terminal-agents';
 import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
@@ -1680,6 +1682,23 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     expect(ledgerTotal).toBe(total(after) - total(before));
     expect(sessionCapabilities(session.id)).toMatchObject({ backend: getSnapshot(session.id)!.backend ?? getSnapshot(session.id)!.mode, tools: 'cli-default', permission: 'CLI 권한 확인 + 쓰기 직전 관문 + 턴 끝 게이트' });
     await stopSession(session.id);
+  }, 30_000);
+
+  it('에이전트 내역을 세션 기록에 남겨, 다시 띄운 뒤에도 같은 행으로 되살린다(#849)', async () => {
+    const session = await open();
+    const sub = (inputTokens: number, requestId: string): Record<string, unknown> => {
+      const record = req(inputTokens, 10, requestId);
+      return { ...record, attributes: [...(record.attributes as unknown[]), { key: 'agent.name', value: { stringValue: 'Explore' } }] };
+    };
+    await session.gateway.prompt({ prompt: '주문 목록을 살펴봐 줘' });
+    await session.gateway.telemetry(otlp([req(1000, 100, 'p-1'), sub(200, 'p-2')]));
+    const rows = sessionTerminalAgents(session.id, {})!;
+    const snapshot = getSnapshot(session.id)!;
+    await stopSession(session.id);
+    const saved = JSON.parse(await readFile(sessionFile(stateDirOf(snapshot)), 'utf8')) as { agentLedger?: unknown };
+    expect(saved.agentLedger).toBeDefined();
+    const restored = restoreAgentLedger(saved.agentLedger)!;
+    expect(agentRows(restored, {}).map((row) => [row.id, row.tokens.inputTokens])).toEqual(rows.map((row) => [row.id, row.tokens.inputTokens]));
   }, 30_000);
 
   it('실행 밖에서 온 것(사람이 CLI에서 대화만 한 것)은 활동 기록에 남기지 않는다', async () => {

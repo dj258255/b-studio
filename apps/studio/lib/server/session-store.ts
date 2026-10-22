@@ -51,6 +51,8 @@ export interface PersistedSession {
   /** gemini 모드의 이어받을 세션과 알림. 이 필드가 생기기 전 기록에는 없다 */
   gemini?: { sessionId?: string; notes: string[] };
   sourceDirtyFiles: number;
+  /** 터미널 세션의 메인·서브에이전트 내역(#843·#849). 화면용이라 모양이 틀리면 버린다. 이 필드가 생기기 전 기록에는 없다 */
+  agentLedger?: unknown;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };
   /** 원격 미리보기 주소에 넣는 토큰. 이어서 작업해도 같은 주소를 쓰도록 남긴다 */
