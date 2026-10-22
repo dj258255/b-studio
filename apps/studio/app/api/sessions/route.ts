@@ -37,14 +37,21 @@ export async function POST(request: Request) {
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
     const workspace = body.workspace ?? 'copy';
     if (workspace !== 'copy' && workspace !== 'local') throw new StudioError(400, 'workspace는 copy나 local이어야 합니다');
-    // 내가 정한 규칙으로 AI를 고르고 첫 요청까지 보낸다(#822). 백엔드·모델을 직접 주면 규칙을 쓰지 않으므로 함께 받지 않는다
+    // 내가 정한 규칙으로 AI를 고르고 첫 요청까지 보낸다(#822). 백엔드·모델을 직접 주면 규칙을 쓰지 않으므로 함께 받지 않는다.
+    // route: direct는 같은 흐름에서 규칙 대신 이번 요청만 고른 AI(backend, model?)를 쓴다(#827)
     if (body.route !== undefined) {
-      if (body.route !== 'rules') throw new StudioError(400, 'route는 rules만 받습니다');
-      if (body.backend !== undefined || body.model !== undefined || body.modelId !== undefined) throw new StudioError(400, '규칙으로 고를 때는 backend·model을 함께 보내지 않습니다');
-      if (typeof body.request !== 'string' || !body.request.trim()) throw new StudioError(400, '규칙으로 고를 때는 request(첫 요청)가 필요합니다');
+      if (body.route !== 'rules' && body.route !== 'direct') throw new StudioError(400, 'route는 rules나 direct여야 합니다');
+      if (body.route === 'rules' && (body.backend !== undefined || body.model !== undefined || body.modelId !== undefined)) throw new StudioError(400, '규칙으로 고를 때는 backend·model을 함께 보내지 않습니다');
+      if (body.route === 'direct') {
+        if (typeof body.backend !== 'string' || !body.backend) throw new StudioError(400, '직접 고를 때는 backend가 필요합니다');
+        if (body.model !== undefined && typeof body.model !== 'string') throw new StudioError(400, 'model은 문자열이어야 합니다');
+        if (body.modelId !== undefined) throw new StudioError(400, '직접 고를 때는 modelId 대신 model을 씁니다');
+      }
+      if (typeof body.request !== 'string' || !body.request.trim()) throw new StudioError(400, '규칙이나 직접 고름으로 보낼 때는 request(첫 요청)가 필요합니다');
       const intent = body.intent ?? 'build';
       if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
-      return Response.json(await startRoutedSession({ projectId: body.projectId, user, workspace, request: body.request, intent }), { status: 201 });
+      const direct = body.route === 'direct' ? { backend: body.backend as string, ...(typeof body.model === 'string' ? { model: body.model } : {}) } : undefined;
+      return Response.json(await startRoutedSession({ projectId: body.projectId, user, workspace, request: body.request, intent, ...(direct ? { direct } : {}) }), { status: 201 });
     }
     // 모델 선택은 model(새 이름)이나 modelId(기존 화면) 둘 다 받는다
     const requestedModel = body.model ?? body.modelId;

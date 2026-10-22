@@ -103,6 +103,16 @@ interface RequirementView extends RequirementDraft {
   issue?: number;
   /** "검증됨"을 만든 증거의 종류(ADR-103). 검증됨이 아니면 'none' */
   verifiedBy: "test" | "docs" | "manual" | "none";
+  /** 요구사항 스멜 린트 결과. 옛 서버 응답에는 없다 */
+  lint?: RequirementLintWarning[];
+  ready?: boolean;
+}
+
+interface RequirementLintWarning {
+  code: string;
+  message: string;
+  /** true면 Ready를 막는 고칠 것, false면 권고 */
+  mustFix: boolean;
 }
 
 type RequirementPlanAction = "create" | "update" | "unchanged" | "conflict" | "reverify" | "closed_but_requirement_exists";
@@ -158,6 +168,8 @@ interface RequirementCoverage {
 interface RequirementsSnapshot {
   exists: boolean;
   requirements: RequirementView[];
+  /** 필수 요구사항이 모두 고칠 것 없이 적혔는지. 옛 서버 응답에는 없다 */
+  ready?: boolean;
   coverage?: RequirementCoverage;
   allMustHavesPrefill?: string;
   assumptions: string[];
@@ -519,6 +531,7 @@ export function RequirementsList({
         <div className="glass-soft flex flex-wrap items-center gap-2 rounded-control px-3 py-2 text-sm">
           <span className="font-medium text-ink">{coverage.text}</span>
           {coverage.mustGapText && <span className="font-medium text-fail">{coverage.mustGapText}</span>}
+          <ReadyBadge snapshot={snapshot} />
           {canManage && (
             <div className="ml-auto flex shrink-0 gap-2">
               <button type="button" onClick={() => setPublishOpen((value) => !value)} className="rounded-control border border-line px-2.5 py-1 text-xs font-medium hover:border-ink">
@@ -1105,6 +1118,33 @@ function ManualVerificationForm({ sessionId, requirementId, onDone, onCancel }: 
 
 const VERIFIED_BY_LABEL: Record<"test" | "docs" | "manual", string> = { test: "테스트/게이트", docs: "문서 확인", manual: "사람 확인" };
 
+/** 필수 요구사항에 남은 고칠 것(mustFix)의 수. 린트 값이 없는 옛 응답이면 undefined */
+export function mustFixCount(snapshot: Pick<RequirementsSnapshot, "ready" | "requirements">): number | undefined {
+  if (snapshot.ready === undefined) return undefined;
+  return snapshot.requirements
+    .filter((requirement) => requirement.priority === "must")
+    .reduce((sum, requirement) => sum + (requirement.lint ?? []).filter((warning) => warning.mustFix).length, 0);
+}
+
+/** 요구사항이 바로 작업에 넘길 만큼 적혔는지. 필수 요구사항이 모두 고칠 것 없이 적혀야 켜진다 */
+function ReadyBadge({ snapshot }: { snapshot: RequirementsSnapshot }) {
+  const remaining = mustFixCount(snapshot);
+  if (remaining === undefined) return null;
+  if (snapshot.ready) {
+    return (
+      <span className="rounded-control bg-pass/15 px-2 py-0.5 text-xs font-semibold text-pass" title="필수 요구사항이 모두 약한 표현 없이, 시나리오와 함께 적혀 있습니다">
+        Ready
+      </span>
+    );
+  }
+  if (remaining === 0) return null;
+  return (
+    <span className="rounded-control bg-wait/15 px-2 py-0.5 text-xs font-medium text-wait" title="필수 요구사항 카드의 고칠 것을 모두 고치면 Ready가 켜집니다">
+      Ready까지 고칠 것 {remaining}개
+    </span>
+  );
+}
+
 function RequirementCard({
   sessionId,
   requirement,
@@ -1235,6 +1275,15 @@ function RequirementCard({
         </div>
       </div>
       {clearingError && <p className="mt-1 text-xs text-fail">{clearingError}</p>}
+      {requirement.lint && requirement.lint.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs" aria-label={`${requirement.id} 문장 점검`}>
+          {requirement.lint.map((warning, index) => (
+            <li key={index} className={warning.mustFix ? "text-fail" : "text-muted"}>
+              {warning.mustFix ? "고칠 것" : "권고"}: {warning.message}
+            </li>
+          ))}
+        </ul>
+      )}
       {canManage && verifying && !manualVerification && (
         <ManualVerificationForm
           sessionId={sessionId}

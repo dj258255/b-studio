@@ -35,8 +35,8 @@ export interface RoutingSkip {
 export interface RoutingDecision {
   backend: string;
   model?: string;
-  /** 고른 규칙의 순서(0부터), 기본값(fallback), 서버 기본(default) */
-  rule: RuleCandidate['rule'] | 'default';
+  /** 고른 규칙의 순서(0부터), 기본값(fallback), 서버 기본(default), 사람이 이번 요청만 직접 고름(direct) */
+  rule: RuleCandidate['rule'] | 'default' | 'direct';
   /** 고른 규칙의 조건을 사람이 읽는 말로 */
   matched: string;
   kind: TaskKind;
@@ -100,6 +100,7 @@ function candidatesFor(input: { request: string; intent: RuleIntent }, deps: Rou
 function matchedText(rules: BackendRules, rule: RoutingDecision['rule']): string {
   if (rule === 'fallback') return '기본값';
   if (rule === 'default') return '맞는 규칙 없음';
+  if (rule === 'direct') return '직접 고름';
   return describeWhen(rules.rules[rule]!.when);
 }
 
@@ -139,6 +140,22 @@ export async function chooseBackend(input: { request: string; intent: RuleIntent
     return { backend: candidate.backend, ...(candidate.model ? { model: candidate.model } : {}), rule: candidate.rule, matched: matchedText(rules, candidate.rule), kind, skipped };
   }
   throw new StudioError(409, `규칙에 맞는 AI를 쓸 수 없어 요청을 보내지 않았습니다. ${skipped.map((skip) => `${skip.backend}: ${skip.reason}`).join(' / ')}`);
+}
+
+/**
+ * 이번 요청만 사람이 고른 AI로 보낸다(#827). 규칙은 보지 않는다. 허용과 로그인은 chooseBackend와 같이 확인하지만,
+ * 사람이 고른 것이므로 안 되면 다른 AI로 넘어가지 않고 거절한다(허용 밖 400, 로그인 전 409)
+ */
+export async function chooseDirect(input: { backend: string; model?: string; request: string; intent: RuleIntent; cwd: string }, deps: RoutingDeps = defaultDeps()): Promise<RoutingDecision> {
+  if (!deps.allowed().includes(input.backend)) throw new StudioError(400, `이 스튜디오가 허용하지 않는 백엔드입니다(B_STUDIO_BACKENDS): ${input.backend}`);
+  try {
+    await deps.ready(input.backend, input.cwd);
+  } catch (error) {
+    if (!(error instanceof StudioError)) throw error;
+    throw new StudioError(409, `고른 AI를 쓸 수 없어 요청을 보내지 않았습니다. ${input.backend}: ${error.message}`);
+  }
+  const model = input.model?.trim();
+  return { backend: input.backend, ...(model ? { model } : {}), rule: 'direct', matched: matchedText({ rules: [] }, 'direct'), kind: classifyTask(input.request), skipped: [] };
 }
 
 function defaultDeps(): RoutingDeps {

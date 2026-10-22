@@ -9,7 +9,7 @@ import {
   type BackendRulesView,
   type RuleDraft,
 } from "@/lib/backend-rules";
-import { taskKindLabel, type TaskKind } from "@/lib/routing-types";
+import { taskKindLabel, type KindRecord, type TaskKind } from "@/lib/routing-types";
 import type { SessionMode } from "@/lib/studio-events";
 import { SESSION_BACKEND_LABEL } from "./status";
 
@@ -19,6 +19,8 @@ interface Preview {
   rule: number | "fallback" | "default";
   matched: string;
   kind: TaskKind;
+  /** 같은 작업 종류에서 AI별로 게이트가 판정한 결과(#827). 판정이 몇 번 쌓인 AI만 온다 */
+  records?: KindRecord[];
 }
 
 const PREVIEW_DELAY_MS = 400;
@@ -44,6 +46,18 @@ export function previewLine(preview: Preview): string {
   return `${target}로 보냅니다 · ${why} · 작업 종류 ${taskKindLabel(preview.kind)}`;
 }
 
+/** 같은 작업 종류의 AI별 기록 한 줄(#827). 고르는 데 쓰지 않고 보이기만 한다 */
+export function recordsLine(records: KindRecord[] | undefined): string {
+  if (!records?.length) return "";
+  return `같은 종류의 기록: ${records.map((record) => `${backendLabel(record.backend)} 통과 ${record.passed}/${record.judged}`).join(" · ")}`;
+}
+
+/** 이번만 직접 고른 AI로 보낼 때의 미리보기 한 줄 */
+function directLine(backend: string, model: string, kind: TaskKind | undefined): string {
+  const target = `${backendLabel(backend)}${model.trim() ? ` (${model.trim()})` : ""}`;
+  return `${target}로 보냅니다 · 이번만 직접 고름${kind ? ` · 작업 종류 ${taskKindLabel(kind)}` : ""}`;
+}
+
 const emptyDraft = (backend: string): RuleDraft => ({ intent: "", complexity: [], risk: "", keywords: "", backend, model: "" });
 
 /**
@@ -60,6 +74,9 @@ export function RoutingLauncher({ projects, initial }: { projects: Array<{ id: s
   const [error, setError] = useState<string>();
   const [editing, setEditing] = useState(false);
   const [view, setView] = useState(initial);
+  // 비우면 규칙대로 고른다. 고르면 이번 요청만 그 AI로 보낸다(#827)
+  const [directBackend, setDirectBackend] = useState("");
+  const [directModel, setDirectModel] = useState("");
   const intent = ask ? "ask" : "build";
 
   // 쓰는 동안 잠시 멈추면 어느 AI로 갈지 다시 묻는다. 규칙을 저장하면(view가 바뀌면) 다시 묻는다
@@ -91,7 +108,11 @@ export function RoutingLauncher({ projects, initial }: { projects: Array<{ id: s
       const response = await fetch("/api/sessions", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ projectId, route: "rules", request, intent }),
+        body: JSON.stringify(
+          directBackend
+            ? { projectId, route: "direct", backend: directBackend, ...(directModel.trim() ? { model: directModel.trim() } : {}), request, intent }
+            : { projectId, route: "rules", request, intent },
+        ),
       });
       const body = (await response.json().catch(() => ({}))) as { error?: string; session?: { id: string }; sendError?: string };
       if (!response.ok || !body.session) {
@@ -147,9 +168,30 @@ export function RoutingLauncher({ projects, initial }: { projects: Array<{ id: s
         className="mt-3 w-full rounded-control border border-line bg-panel px-3 py-2 text-sm"
       />
       <div className="mt-2 flex flex-wrap items-center gap-3">
-        <p className="min-w-0 flex-1 text-xs text-muted" aria-live="polite">
-          {request.trim() && preview ? previewLine(preview) : "요청을 쓰면 어느 AI로 갈지 여기 보입니다"}
-        </p>
+        <div className="min-w-0 flex-1 text-xs text-muted" aria-live="polite">
+          <p>
+            {request.trim() && directBackend
+              ? directLine(directBackend, directModel, preview?.kind)
+              : request.trim() && preview
+                ? previewLine(preview)
+                : "요청을 쓰면 어느 AI로 갈지 여기 보입니다"}
+          </p>
+          {request.trim() && recordsLine(preview?.records) && <p className="mt-0.5">{recordsLine(preview?.records)}</p>}
+        </div>
+        <label className="flex items-center gap-1.5 text-sm">
+          <span className="text-muted">보낼 AI</span>
+          <select aria-label="보낼 AI" value={directBackend} onChange={(event) => setDirectBackend(event.target.value)} className="glass-soft rounded-control px-2 py-1">
+            <option value="">규칙대로</option>
+            {view.allowed.map((backend) => (
+              <option key={backend} value={backend}>
+                이번만 {backendLabel(backend)}
+              </option>
+            ))}
+          </select>
+        </label>
+        {directBackend && (
+          <input aria-label="보낼 모델" value={directModel} onChange={(event) => setDirectModel(event.target.value)} placeholder="모델(비우면 기본)" className="w-32 rounded-control border border-line bg-panel px-2 py-1 text-sm" />
+        )}
         <button
           type="button"
           disabled={sending || !request.trim() || !projectId}
