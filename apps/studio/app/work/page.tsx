@@ -1,16 +1,22 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { RoutingLauncher } from '@/components/routing-launcher';
 import { RoutingStatsPanel } from '@/components/routing-stats-panel';
 import { WorkOverview } from '@/components/work-overview';
 import { pageUser } from '@/lib/server/access';
 import { listAgentOverview } from '@/lib/server/agents-overview';
+import { readBackendRules } from '@/lib/server/backend-rules';
+import { listProjects } from '@/lib/server/projects';
 import { routingStats } from '@/lib/server/routing-stats';
+import { allowedBackends, resolveSessionBackend } from '@/lib/server/sessions';
 
 export const metadata: Metadata = { title: '작업' };
 
 export default async function WorkPage() {
   const user = await pageUser();
-  const [initial, stats] = await Promise.all([listAgentOverview(user), routingStats()]);
+  const [initial, stats, projects] = await Promise.all([listAgentOverview(user), routingStats(), listProjects()]);
+  const { rules, error } = readBackendRules();
+  const rulesView = { rules, ...(error ? { error } : {}), allowed: [...allowedBackends()], defaultBackend: resolveSessionBackend(undefined) };
 
   return (
     <main className="mx-auto max-w-[72rem] px-4 py-6 sm:px-6 lg:px-8">
@@ -26,6 +32,9 @@ export default async function WorkPage() {
           개발 화면으로
         </Link>
       </header>
+      <div className="mb-6">
+        <RoutingLauncher projects={projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }))} initial={rulesView} />
+      </div>
       <WorkOverview initial={initial} />
       <div className="mt-6">
         <RoutingStatsPanel stats={stats} />
