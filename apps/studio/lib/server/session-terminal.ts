@@ -489,6 +489,12 @@ export function noteSessionTerminalCli(sessionId: string, alive: boolean): void 
   setCli(state, alive && state.terminal !== undefined);
 }
 
+/** 이 프로세스에서 세션 터미널을 연 적이 있으면 그 CLI가 떠 있는지(studio desk 사이드바, #835). 연 적이 없으면 없다 */
+export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean } | undefined {
+  const state = terminals.get(sessionId);
+  return state ? { cliAlive: state.cli } : undefined;
+}
+
 /** 터미널 안에 에이전트 CLI가 떠 있는가. 열린 적 없는 세션이면 없다(거짓) */
 export function sessionTerminalCliAlive(sessionId: string): boolean {
   return terminals.get(sessionId)?.cli ?? false;
