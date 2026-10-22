@@ -323,7 +323,7 @@ import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCl
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
-import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, isReadOnlyPrompt, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, applyPatchPaths, CODEX_READ_TOOLS, isReadOnlyPrompt, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress, type HostCliKind } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -7581,6 +7581,7 @@ export function sessionTerminalTarget(id: string): {
   alive: () => boolean;
   onViolation: (reason: string) => void;
   gateway: () => Promise<AgentGatewayAddress>;
+  cli: HostCliKind;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
@@ -7598,7 +7599,21 @@ export function sessionTerminalTarget(id: string): {
     onViolation: (reason: string) => terminalViolation(id, reason),
     // 관문은 세션에 하나다. 터미널을 다시 열어도 같은 것을 쓴다
     gateway: () => ensureSessionGateway(id, () => terminalGatewayHandlers(id)),
+    cli: terminalCliKind(session),
   };
+}
+
+/**
+ * 세션 터미널에서 띄울 CLI(#825). 이 컴퓨터 방식에서 세션의 백엔드가 codex면 codex, 그 밖에는 claude다.
+ * 컨테이너 방식은 컨테이너에 claude만 깐다
+ */
+function terminalCliKind(session: Session): HostCliKind {
+  return sessionTerminalMode() === 'host' && sessionBackend(session.snapshot) === 'codex' ? 'codex' : 'claude';
+}
+
+/** 터미널 실행을 실행 기록에 남길 때의 백엔드 이름 */
+function terminalRunBackend(session: Session): SessionMode {
+  return terminalCliKind(session) === 'codex' ? 'codex' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -7749,17 +7764,19 @@ function withDoneTests(workflow: LoadedProject['spec']['workflow'], doneTests: r
 }
 
 /**
- * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 없으면 undefined.
- * 파일을 다루는 내장 도구는 file_path(Write·Edit 등)나 notebook_path(NotebookEdit)를 쓴다
+ * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 없으면 빈 목록.
+ * claude의 파일 도구는 file_path(Write·Edit 등)나 notebook_path(NotebookEdit)를 쓰고,
+ * codex의 apply_patch는 패치 본문(command) 안에 바꾸는 파일을 모두 적는다(#825)
  */
-function terminalToolFilePath(input: unknown): string | undefined {
-  if (typeof input !== 'object' || input === null) return undefined;
+function terminalToolFilePaths(tool: string, input: unknown): string[] {
+  if (typeof input !== 'object' || input === null) return [];
   const record = input as Record<string, unknown>;
+  if (tool === 'apply_patch') return typeof record.command === 'string' ? applyPatchPaths(record.command) : [];
   for (const key of ['file_path', 'notebook_path']) {
     const value = record[key];
-    if (typeof value === 'string' && value.trim() !== '') return value;
+    if (typeof value === 'string' && value.trim() !== '') return [value];
   }
-  return undefined;
+  return [];
 }
 
 /**
@@ -8174,8 +8191,8 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   session.runsStarted = (session.runsStarted ?? 0) + 1;
   session.snapshot.running = true;
   session.snapshot.pendingQuestion = undefined;
-  // 터미널에서 도는 것은 세션의 백엔드와 상관없이 Claude Code CLI다(관문 훅이 그 CLI의 것이다, #821)
-  emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt, backend: 'claude-code', taskKind: classifyTask(request) });
+  // 터미널에서 도는 CLI로 남긴다(#821, #825). 세션의 백엔드가 아니라 실제로 띄운 CLI다
+  emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt, backend: terminalRunBackend(session), taskKind: classifyTask(request) });
   // 정체 감시를 켠다(#B5). 실행이 닫히거나 세션이 멈추면 타이머도 멈춘다
   startTerminalStallWatch(session, stallMs);
   run.cancel.signal.addEventListener(
@@ -8420,7 +8437,7 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   const running = openTerminalRun(session);
   if (running) noteTerminalActivity(session, running);
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
-  if ((AGENT_READ_TOOLS as readonly string[]).includes(tool)) return {};
+  if ((AGENT_READ_TOOLS as readonly string[]).includes(tool) || (CODEX_READ_TOOLS as readonly string[]).includes(tool)) return {};
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다
   const budget = terminalBudgetMessage(session);
   if (budget) return { deny: `[b-studio] ${budget}` };
@@ -8435,8 +8452,8 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   // 읽기 도구는 위에서 이미 통과했다(AGENT_READ_TOOLS). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
   const card = session.terminalTaskContext;
   if (card) {
-    const path0 = terminalToolFilePath(input.tool_input);
-    if (path0 !== undefined) {
+    // 패치 하나가 여러 파일을 바꿀 수 있다. 하나라도 범위 밖이면 도구 전체를 막는다
+    for (const path0 of terminalToolFilePaths(tool, input.tool_input)) {
       const relative = terminalRelativePath(path0, session);
       // 범위 안이어도 작업 복사본 밖을 가리키는 링크를 지나면 막는다(링크는 글자로는 안이지만 실제 파일은 밖이다)
       const confined = relative !== undefined && (await terminalPathConfined(session.snapshot.workDir, relative));
@@ -8855,7 +8872,8 @@ const TERMINAL_ATTENTION_ALWAYS = new Set(['permission_prompt', 'elicitation_dia
  */
 function terminalNotification(id: string, input: HookInput): void {
   const session = terminalSession(id);
-  const kind = typeof input.notification_type === 'string' ? input.notification_type : '';
+  // codex는 Notification 대신 PermissionRequest 훅으로 권한 확인 창을 알린다(#825). 답은 주지 않는다
+  const kind = input.hook_event_name === 'PermissionRequest' ? 'permission_prompt' : typeof input.notification_type === 'string' ? input.notification_type : '';
   if (!kind) return;
   if (kind === 'idle_prompt') {
     if (!openTerminalRun(session)) return;
@@ -8863,7 +8881,13 @@ function terminalNotification(id: string, input: HookInput): void {
     // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
     return;
   }
-  setTerminalAttention(session, kind, typeof input.message === 'string' ? input.message : '');
+  const message =
+    typeof input.message === 'string'
+      ? input.message
+      : input.hook_event_name === 'PermissionRequest' && typeof input.tool_name === 'string'
+        ? `${input.tool_name} 실행 권한을 묻습니다`
+        : '';
+  setTerminalAttention(session, kind, message);
 }
 
 /** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */

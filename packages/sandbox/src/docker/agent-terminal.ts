@@ -220,6 +220,48 @@ request.end(body);
 `;
 
 /**
+ * Codex CLI용 훅 스크립트(#825). AGENT_HOOK_SCRIPT와 같고, 관문 주소 파일을 자기 옆이 아니라 감싸개가 넘긴
+ * `B_STUDIO_GATEWAY_DIR`(세션의 관문 폴더)에서 읽는다. Codex는 훅 명령 글의 해시로 사용자의 신뢰를 기억하므로,
+ * 훅 명령이 세션마다 같은 경로(관문 루트의 이 스크립트)를 가리켜야 세션마다 다시 믿게 하지 않는다.
+ * 넘겨받은 폴더는 이 스크립트가 놓인 폴더(관문 루트)의 바로 아래 폴더일 때만 쓴다(링크를 푼 진짜 경로로 견준다)
+ */
+/** Codex 감싸개가 세션의 관문 폴더를 훅 스크립트에 알리는 환경 변수 */
+export const CODEX_GATEWAY_DIR_ENV = 'B_STUDIO_GATEWAY_DIR';
+/** 관문 루트에 두는 Codex 훅 스크립트의 이름(모든 세션이 같이 쓴다) */
+export const CODEX_HOOK_SCRIPT_NAME = 'b-studio-codex-hook.mjs';
+const BESIDE_ADDRESS_LINE = `  const address = JSON.parse(readFileSync(new URL('./${GATEWAY_FILE_NAME}', import.meta.url), 'utf8'));`;
+export const CODEX_HOOK_SCRIPT = AGENT_HOOK_SCRIPT.replace(
+  "import { readFileSync } from 'node:fs';",
+  "import { readFileSync, realpathSync } from 'node:fs';\nimport path from 'node:path';\nimport { fileURLToPath } from 'node:url';",
+).replace(
+  BESIDE_ADDRESS_LINE,
+  [
+    '  const root = realpathSync(path.dirname(fileURLToPath(import.meta.url)));',
+    `  const dir = realpathSync(process.env.${CODEX_GATEWAY_DIR_ENV} ?? '');`,
+    "  if (path.dirname(dir) !== root) throw new Error('관문 폴더가 관문 루트 아래가 아닙니다');",
+    `  const address = JSON.parse(readFileSync(path.join(dir, '${GATEWAY_FILE_NAME}'), 'utf8'));`,
+  ].join('\n'),
+);
+/**
+ * Codex의 읽기 도구. 쓰기 직전 훅이 기다리지 않고 바로 통과시킨다. Codex의 훅 matcher는 앞보기를 못 쓰는 정규식이라
+ * "읽기 도구가 아닌 모든 것"을 matcher로 걸 수 없다 — 모든 도구에 훅을 걸고 관문이 여기서 거른다. 모르는 도구는 바꾸는 도구로 본다
+ */
+export const CODEX_READ_TOOLS = ['view_image', 'web_search', 'tool_search', 'request_user_input', 'update_plan', 'get_goal', 'create_goal', 'update_goal', 'list_mcp_resources', 'list_mcp_resource_templates', 'read_mcp_resource'] as const;
+
+/**
+ * Codex `apply_patch`의 패치 본문에서 바꾸는 파일 경로를 모두 꺼낸다(추가·고침·지움·옮길 곳). 패치 형식:
+ * `*** Add File: <경로>`, `*** Update File: <경로>`, `*** Delete File: <경로>`, `*** Move to: <경로>`
+ */
+export function applyPatchPaths(patch: string): string[] {
+  const paths: string[] = [];
+  for (const line of patch.split(/\r?\n/)) {
+    const match = /^\*\*\* (?:Add File|Update File|Delete File|Move to): (.+)$/.exec(line);
+    if (match && match[1]!.trim()) paths.push(match[1]!.trim());
+  }
+  return paths;
+}
+
+/**
  * 터미널의 CLI가 모델 요청마다 쓴 양을 관문으로 보내게 하는 환경 변수(#726).
  * 관문의 훅 서버가 받는 자리(`/v1/logs`)로, 훅과 같은 주소·토큰을 쓴다.
  * 요청 글·도구 내용을 싣는 설정(`OTEL_LOG_USER_PROMPTS`, `OTEL_LOG_TOOL_DETAILS` 등)은 켜지 않는다 — 쓰는 양만 본다.

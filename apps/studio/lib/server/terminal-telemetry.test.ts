@@ -105,3 +105,55 @@ describe('apiRequestsFromOtlp (CLI의 OTLP/HTTP JSON 로그, 이슈 #726)', () =
     expect(apiRequestsFromOtlp(otlp(many))).toHaveLength(1000);
   });
 });
+
+describe('apiRequestsFromOtlp — Codex CLI(#825)', () => {
+  /** Codex 0.160.1이 실제로 내보낸 꼴: timeUnixNano는 "0", 사용량은 response.completed의 *_token_count에 문자열로 온다 */
+  const codexCompleted = (over: Array<{ key: string; value: unknown }> = []): unknown => ({
+    timeUnixNano: '0',
+    observedTimeUnixNano: '1792638135399793000',
+    attributes: [
+      attr('event.name', str('codex.sse_event')),
+      attr('event.kind', str('response.completed')),
+      attr('input_token_count', str('100')),
+      attr('output_token_count', str('20')),
+      attr('cached_token_count', str('80')),
+      attr('cache_write_token_count', str('0')),
+      attr('reasoning_token_count', str('5')),
+      attr('event.timestamp', str('2026-10-22T03:02:15.381Z')),
+      attr('conversation.id', str('conv-1')),
+      attr('model', str('gpt-5.5')),
+      ...over,
+    ],
+  });
+
+  it('response.completed의 토큰 수를 꺼내고, 입력에서 캐시 읽기를 빼 Claude와 같은 뜻으로 맞춘다', () => {
+    expect(apiRequestsFromOtlp(otlp([codexCompleted()]))).toEqual([
+      {
+        at: 1792638135399,
+        model: 'gpt-5.5',
+        inputTokens: 20,
+        outputTokens: 20,
+        cacheReadTokens: 80,
+        cacheWriteTokens: 0,
+        requestId: 'conv-1:2026-10-22T03:02:15.381Z',
+        sessionId: 'conv-1',
+      },
+    ]);
+  });
+
+  it('토큰 수가 없는 response.completed(같은 이벤트의 앞 기록)와 다른 종류의 sse_event는 건너뛴다', () => {
+    const bare = { timeUnixNano: '0', attributes: [attr('event.name', str('codex.sse_event')), attr('event.kind', str('response.completed')), attr('model', str('gpt-5.5'))] };
+    const created = codexCompleted([attr('event.kind', str('response.created'))]);
+    expect(apiRequestsFromOtlp(otlp([bare, created]))).toEqual([]);
+  });
+
+  it('캐시 읽기가 입력보다 크거나 값이 이상하면 그 레코드를 버린다', () => {
+    expect(apiRequestsFromOtlp(otlp([codexCompleted([attr('cached_token_count', str('101'))])]))).toEqual([]);
+    expect(apiRequestsFromOtlp(otlp([codexCompleted([attr('output_token_count', str('-1'))])]))).toEqual([]);
+  });
+
+  it('timeUnixNano가 0이면 observedTimeUnixNano를 쓴다(0을 시각으로 쓰면 실행에 잘못 붙는다)', () => {
+    const [claude] = apiRequestsFromOtlp(otlp([record([], { timeUnixNano: '0', observedTimeUnixNano: '1750000000500000000' })]));
+    expect(claude?.at).toBe(1750000000500);
+  });
+});

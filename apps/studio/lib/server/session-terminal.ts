@@ -23,6 +23,7 @@ import {
   type AgentGatewayAddress,
   type AgentTerminal,
   type HostCli,
+  type HostCliKind,
   type ProcessEntry,
   type TerminalSize,
 } from '@b-studio/sandbox';
@@ -114,6 +115,8 @@ export interface TerminalTarget {
    * 컨테이너에서 관문에 닿는 것을 확인한 뒤에야 터미널을 연다. 주지 않으면 관문 없는 터미널이다(테스트와 옛 호출자)
    */
   gateway?: () => Promise<AgentGatewayAddress>;
+  /** 이 컴퓨터 방식에서 띄울 CLI(#825). 없으면 claude다. 컨테이너 방식은 claude만 쓴다 */
+  cli?: HostCliKind;
   /**
    * 감시가 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 찾았을 때 부른다. 세션은 이 실행을 실패로 닫고 되돌린다(이슈 #695)
    */
@@ -193,7 +196,7 @@ const hostGateways = (gatewayStore.__bStudioHostGateways ??= new Map());
 const HOST_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
-    const cli = await findHostCli();
+    const cli = await findHostCli(process.env, target.cli ?? 'claude');
     if (!gateway) return '';
     const root = defaultAgentGatewayRoot();
     const dir = await writeHostGatewayConfig(target.sandboxId, gateway, cli, root);
@@ -201,9 +204,10 @@ const HOST_BACKEND: TerminalBackend = {
     hostGateways.set(dir, { address: gateway, cli, root, expected: expectedHostGatewayFiles(gateway, dir, cli) });
     return dir;
   },
-  open: (place, options) => openHostTerminal({ id: options.id, size: options.size, cwd: options.target.root, gatewayDir: place || undefined }),
+  open: (place, options) =>
+    openHostTerminal({ id: options.id, size: options.size, cwd: options.target.root, gatewayDir: place || undefined, cli: options.target.cli ?? 'claude' }),
   remove: (sandboxId) => removeHostGatewayConfig(sandboxId),
-  reachable: (place) => probeHostGateway(place),
+  reachable: (place) => probeHostGateway(place, process.execPath, hostGateways.get(place)?.cli.kind ?? 'claude'),
   unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다. 스튜디오를 다시 띄운 뒤 터미널을 다시 여세요',
   /**
    * 이 컴퓨터 방식에서는 CLI가 관문 파일을 고칠 수 있고, 셸에서 훅 없이 CLI를 직접 띄울 수 있다.
@@ -268,11 +272,11 @@ const HOST_BACKEND: TerminalBackend = {
         return;
       }
       psFailures = 0;
-      for (const entry of findUnhookedCli(rootPid, processes, { settingsPath, cliPath: cli.claudePath })) {
+      for (const entry of findUnhookedCli(rootPid, processes, { settingsPath, cliPath: cli.cliPath, kind: cli.kind })) {
         // 같은 pid는 한 번만 알린다
         if (warnedPids.has(entry.pid)) continue;
         warnedPids.add(entry.pid);
-        report(`검증이 붙지 않은 CLI가 터미널에서 돌고 있습니다(pid ${entry.pid}). 이 터미널의 claude는 b-studio가 붙여 주는 설정으로 띄워야 합니다`);
+        report(`검증이 붙지 않은 CLI가 터미널에서 돌고 있습니다(pid ${entry.pid}). 이 터미널의 ${cli.kind}는 b-studio가 붙여 주는 설정으로 띄워야 합니다`);
       }
     };
 

@@ -1,14 +1,15 @@
-import { execFileSync } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { AGENT_HOOK_SCRIPT, AGENT_NOTIFICATION_MATCHER, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
+import { AGENT_HOOK_SCRIPT, AGENT_NOTIFICATION_MATCHER, applyPatchPaths, CODEX_HOOK_SCRIPT, CODEX_HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
 import { SandboxError } from './errors';
 import {
   checkHostGatewayConfig,
+  codexGatewayArgs,
   expectedHostGatewayFiles,
   findHostCli,
   findUnhookedCli,
@@ -46,7 +47,7 @@ async function tempDir(prefix: string): Promise<string> {
 }
 
 const address = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
-const cli = { claudePath: '/usr/local/bin/claude', nodePath: '/usr/local/bin/node' };
+const cli = { kind: 'claude' as const, cliPath: '/usr/local/bin/claude', nodePath: '/usr/local/bin/node' };
 const GATEWAY_FILES = ['settings.json', 'mcp.json', HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, path.join('bin', 'claude'), path.join('shell', 'bashrc'), path.join('shell', 'zsh', '.zshenv'), path.join('shell', 'zsh', '.zprofile'), path.join('shell', 'zsh', '.zshrc'), path.join('shell', 'zsh', '.zlogin')];
 
 const exists = (file: string): Promise<boolean> => stat(file).then(() => true, () => false);
@@ -180,7 +181,7 @@ describe('hostGatewaySettings', () => {
     const notification = hooks.Notification![0]!.hooks[0]!.command;
     expect(notification).toContain(`'${path.join('/gateway', HOOK_SCRIPT_NAME)}'`);
     expect(notification).toContain('notification');
-    expect(expectedHostGatewayFiles(address, '/gateway', { claudePath: '/usr/local/bin/claude', nodePath: '/n/bin/node' })['settings.json']!.content).toContain(`"${AGENT_NOTIFICATION_MATCHER}"`);
+    expect(expectedHostGatewayFiles(address, '/gateway', { kind: 'claude', cliPath: '/usr/local/bin/claude', nodePath: '/n/bin/node' })['settings.json']!.content).toContain(`"${AGENT_NOTIFICATION_MATCHER}"`);
     // 텔레메트리 env도 같은 관문 주소·토큰으로 보낸다
     expect(settings.env).toEqual({
       CLAUDE_CODE_ENABLE_TELEMETRY: '1',
@@ -226,7 +227,7 @@ describe('writeHostGatewayConfig', () => {
     expect(wrapper).toContain(`--settings '${files.settings}'`);
     expect(wrapper).toContain(`--mcp-config '${files.mcp}'`);
     expect(wrapper).toContain('"$@"');
-    expect(wrapper).toContain(shellQuote(cli.claudePath));
+    expect(wrapper).toContain(shellQuote(cli.cliPath));
     // .zshrc의 claude 함수(별칭을 지우고 함수로 정의)와 .zlogin의 첫 실행이 감싸개를 가리킨다
     expect(await readFile(path.join(dir, 'shell', 'zsh', '.zshrc'), 'utf8')).toContain(`unalias claude 2>/dev/null\nfunction claude { ${shellQuote(path.join(dir, 'bin', 'claude'))} "$@"; }`);
     expect(await readFile(path.join(dir, 'shell', 'zsh', '.zlogin'), 'utf8')).toContain('BSTUDIO_TERMINAL_STARTED');
@@ -295,7 +296,7 @@ describe('removeHostGatewayConfig', () => {
 describe('findHostCli', () => {
   it('B_STUDIO_CLAUDE_BIN의 절대 경로를 그대로 쓴다', async () => {
     const found = await findHostCli({ B_STUDIO_CLAUDE_BIN: '/opt/tools/claude', PATH: '/nonexistent' });
-    expect(found.claudePath).toBe('/opt/tools/claude');
+    expect(found.cliPath).toBe('/opt/tools/claude');
     expect(found.nodePath).toBe(process.execPath);
   });
 
@@ -304,7 +305,7 @@ describe('findHostCli', () => {
     const claude = path.join(binDir, 'claude');
     await writeFile(claude, '#!/bin/sh\n');
     await chmod(claude, 0o755);
-    expect((await findHostCli({ B_STUDIO_CLAUDE_BIN: 'relative/claude', PATH: binDir })).claudePath).toBe(claude);
+    expect((await findHostCli({ B_STUDIO_CLAUDE_BIN: 'relative/claude', PATH: binDir })).cliPath).toBe(claude);
   });
 
   it('PATH에도 없으면 던진다', async () => {
@@ -587,5 +588,178 @@ describe('관문 폴더 안의 링크를 따라가지 않는다', () => {
     expect(await readFile(path.join(outside, 'claude'), 'utf8')).toBe('건드리지 마라\n');
     // 관문 폴더와 그 링크 자리는 지워졌다
     expect(await exists(dir)).toBe(false);
+  });
+});
+
+
+describe('Codex 터미널(#825)', () => {
+  const codex = { kind: 'codex' as const, cliPath: '/opt/bin/codex', nodePath: '/usr/local/bin/node' };
+
+  it('findHostCli는 B_STUDIO_CODEX_BIN을 쓰고, 없으면 PATH에서 codex를 찾는다', async () => {
+    expect(await findHostCli({ B_STUDIO_CODEX_BIN: '/opt/tools/codex' }, 'codex')).toEqual({ kind: 'codex', cliPath: '/opt/tools/codex', nodePath: process.execPath });
+    const binDir = await tempDir('b-studio-codex-bin-');
+    await writeFile(path.join(binDir, 'codex'), '#!/bin/sh\n');
+    await chmod(path.join(binDir, 'codex'), 0o755);
+    expect((await findHostCli({ PATH: binDir }, 'codex')).cliPath).toBe(path.join(binDir, 'codex'));
+    await expect(findHostCli({ PATH: await tempDir('b-studio-empty-') }, 'codex')).rejects.toThrow('codex CLI를 찾지 못했습니다');
+  });
+
+  it('설정 덮어쓰기: 훅 여섯 개·도구 서버·텔레메트리를 붙이고 훅을 켠다. 토큰은 인자에 넣지 않는다', () => {
+    const args = codexGatewayArgs(address, '/root/gw', '/usr/local/bin/node');
+    expect(args.filter((_, index) => index % 2 === 0).every((flag) => flag === '-c')).toBe(true);
+    const values = args.filter((_, index) => index % 2 === 1);
+    const command = (event: string) => JSON.stringify(`'/usr/local/bin/node' '/root/gw/${CODEX_HOOK_SCRIPT_NAME}' ${event}`);
+    expect(values).toEqual([
+      'features.hooks=true',
+      `hooks.SessionStart=[{hooks=[{type="command",command=${command('session-start')},timeout=15}]}]`,
+      `hooks.UserPromptSubmit=[{hooks=[{type="command",command=${command('prompt')},timeout=60}]}]`,
+      `hooks.PreToolUse=[{hooks=[{type="command",command=${command('pre-tool')},timeout=1800}]}]`,
+      `hooks.Stop=[{hooks=[{type="command",command=${command('stop')},timeout=3600}]}]`,
+      // Codex는 SessionEnd를 3초까지만 기다린다
+      `hooks.SessionEnd=[{hooks=[{type="command",command=${command('session-end')},timeout=3}]}]`,
+      `hooks.PermissionRequest=[{hooks=[{type="command",command=${command('notification')},timeout=15}]}]`,
+      'mcp_servers.b-studio={url="http://127.0.0.1:41235/mcp",bearer_token_env_var="B_STUDIO_MCP_TOKEN"}',
+      'otel.exporter={otlp-http={endpoint="http://127.0.0.1:41234/v1/logs",protocol="json"}}',
+      'otel.log_user_prompt=false',
+    ]);
+    expect(args.join(' ')).not.toContain(address.hookToken);
+    expect(args.join(' ')).not.toContain(address.mcpToken);
+  });
+
+  it('관문 폴더: 환경 파일(600)·감싸개(700)·주소 파일을 쓰고, 훅 스크립트는 관문 루트에 하나다. 세션이 달라도 훅 명령은 같다', async () => {
+    const root = await tempDir('b-studio-codex-gateway-');
+    const one = await writeHostGatewayConfig('studio-orders-abc', address, codex, root);
+    const two = await writeHostGatewayConfig('studio-orders-def', { ...address, hookUrl: 'http://127.0.0.1:50000', mcpUrl: 'http://127.0.0.1:50001/mcp' }, codex, root);
+    const realRoot = path.dirname(one);
+
+    expect(await readFile(path.join(realRoot, CODEX_HOOK_SCRIPT_NAME), 'utf8')).toBe(CODEX_HOOK_SCRIPT);
+    expect(await modeOf(path.join(realRoot, CODEX_HOOK_SCRIPT_NAME))).toBe(0o600);
+    expect(await exists(path.join(one, 'settings.json'))).toBe(false);
+    expect(await exists(path.join(one, HOOK_SCRIPT_NAME))).toBe(false);
+
+    const env = await readFile(path.join(one, 'codex.env'), 'utf8');
+    expect(await modeOf(path.join(one, 'codex.env'))).toBe(0o600);
+    expect(env).toContain(`export B_STUDIO_GATEWAY_DIR=${shellQuote(one)}`);
+    expect(env).toContain("export B_STUDIO_MCP_TOKEN='mcp-token'");
+    expect(env).toContain("export OTEL_EXPORTER_OTLP_LOGS_HEADERS='Authorization=Bearer%20hook-token'");
+    expect(JSON.parse(await readFile(path.join(one, GATEWAY_FILE_NAME), 'utf8'))).toEqual({ url: address.hookUrl, token: address.hookToken });
+
+    const wrapper = await readFile(path.join(one, 'bin', 'codex'), 'utf8');
+    expect(await modeOf(path.join(one, 'bin', 'codex'))).toBe(0o700);
+    expect(wrapper).toContain(`. ${shellQuote(path.join(one, 'codex.env'))}`);
+    expect(wrapper).toContain(`exec '/opt/bin/codex' '-c' 'features.hooks=true'`);
+    expect(wrapper).not.toContain('hook-token');
+
+    // 훅 명령 글은 세션과 상관없이 같다(Codex가 이 글의 해시로 신뢰를 기억한다)
+    const hooksOf = (text: string) => text.match(/hooks\.[A-Za-z]+=\[\{hooks=.*?timeout=\d+\}\]\}\]/g);
+    expect(hooksOf(wrapper)).toEqual(hooksOf(await readFile(path.join(two, 'bin', 'codex'), 'utf8')));
+    expect(hooksOf(wrapper)).toHaveLength(6);
+
+    // 셸 시작 파일은 codex 함수를 정의하고 codex를 띄운다
+    const zshrc = await readFile(path.join(one, 'shell', 'zsh', '.zshrc'), 'utf8');
+    expect(zshrc).toContain(`unalias codex 2>/dev/null\nfunction codex { ${shellQuote(path.join(one, 'bin', 'codex'))} "$@"; }`);
+    expect(await readFile(path.join(one, 'shell', 'zsh', '.zlogin'), 'utf8')).toContain('  codex\n');
+    expect(await readFile(path.join(one, 'shell', 'bashrc'), 'utf8')).toContain('[b-studio] codex에서 나왔습니다');
+
+    // 기대 파일 검사가 갓 쓴 폴더를 통과시키고, 공용 훅 스크립트가 바뀌면 잡는다
+    const expected = expectedHostGatewayFiles(address, one, codex);
+    expect(await checkHostGatewayConfig(one, expected)).toEqual([]);
+    await writeFile(path.join(realRoot, CODEX_HOOK_SCRIPT_NAME), '// 바꿈');
+    expect(await checkHostGatewayConfig(one, expected)).toEqual([path.join('..', CODEX_HOOK_SCRIPT_NAME)]);
+  });
+
+  it('지울 때 그 세션의 파일만 지우고 공용 훅 스크립트는 남긴다', async () => {
+    const root = await tempDir('b-studio-codex-gateway-');
+    const dir = await writeHostGatewayConfig('studio-orders-abc', address, codex, root);
+    await removeHostGatewayConfig('studio-orders-abc', root);
+    expect(await exists(dir)).toBe(false);
+    expect(await exists(path.join(path.dirname(dir), CODEX_HOOK_SCRIPT_NAME))).toBe(true);
+  });
+
+  it('공용 훅 스크립트는 B_STUDIO_GATEWAY_DIR의 주소로 보내고, 관문 루트 밖의 폴더면 보내지 않고 막는다', async () => {
+    const root = await tempDir('b-studio-codex-hook-');
+    await writeFile(path.join(root, CODEX_HOOK_SCRIPT_NAME), CODEX_HOOK_SCRIPT);
+    const received: string[] = [];
+    const server = createServer((request, response) => {
+      const parts: Buffer[] = [];
+      request.on('data', (part: Buffer) => parts.push(part));
+      request.on('end', () => {
+        received.push(`${request.url} ${request.headers.authorization} ${Buffer.concat(parts).toString('utf8')}`);
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ decision: 'block', reason: '되돌려 보냄' }));
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const inside = path.join(root, 'studio-orders-abc');
+    await mkdir(inside);
+    await writeFile(path.join(inside, GATEWAY_FILE_NAME), JSON.stringify({ url: `http://127.0.0.1:${port}`, token: 'token-1' }));
+    // 같은 프로세스의 서버가 답해야 하므로 동기 실행(execFileSync)을 쓰지 않는다
+    const run = (dir: string, event: string) =>
+      new Promise<string>((resolve, reject) => {
+        const child = execFile(process.execPath, [path.join(root, CODEX_HOOK_SCRIPT_NAME), event], { env: { B_STUDIO_GATEWAY_DIR: dir }, encoding: 'utf8', timeout: 20_000 }, (error, stdout) =>
+          error ? reject(error) : resolve(stdout),
+        );
+        child.stdin?.end('{"tool_name":"apply_patch"}');
+      });
+
+    expect(JSON.parse(await run(inside, 'stop'))).toEqual({ decision: 'block', reason: '되돌려 보냄' });
+    expect(received).toEqual(['/stop Bearer token-1 {"tool_name":"apply_patch"}']);
+
+    // 관문 루트 밖에 같은 꼴의 폴더를 만들어 가리키면 보내지 않는다. 쓰기 직전이면 도구를 막는다
+    const outside = await tempDir('b-studio-codex-outside-');
+    await writeFile(path.join(outside, GATEWAY_FILE_NAME), JSON.stringify({ url: `http://127.0.0.1:${port}`, token: 'token-2' }));
+    const denied = JSON.parse(await run(outside, 'pre-tool'));
+    expect(denied.hookSpecificOutput.permissionDecision).toBe('deny');
+    expect(received).toHaveLength(1);
+  });
+
+  it('probeHostGateway: codex 관문 폴더면 관문 루트의 공용 스크립트로 묻는다', async () => {
+    const root = await tempDir('b-studio-codex-probe-');
+    const server = createServer((request, response) => {
+      request.resume();
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end('{}');
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    const dir = await writeHostGatewayConfig('studio-orders-abc', { ...address, hookUrl: `http://127.0.0.1:${port}` }, codex, root);
+    expect(await probeHostGateway(dir, process.execPath, 'codex')).toBe(true);
+    // claude 방식으로 물으면 그 폴더에 claude용 스크립트가 없어 닿지 못한다
+    expect(await probeHostGateway(dir, process.execPath, 'claude')).toBe(false);
+  });
+
+  it('PTY 아래에서 공용 훅 스크립트가 붙은 codex는 통과하고, 붙지 않은 codex는 걸린다', () => {
+    const settingsPath = '/Users/kim/.cache/b-studio/agent-gateway/studio-orders-abc/settings.json';
+    const script = `/Users/kim/.cache/b-studio/agent-gateway/${CODEX_HOOK_SCRIPT_NAME}`;
+    const processes = [
+      { pid: 100, ppid: 1, args: '/bin/zsh -l -i' },
+      { pid: 101, ppid: 100, args: `node /Users/kim/.local/lib/node_modules/@openai/codex/bin/codex.js -c features.hooks=true -c hooks.Stop=[{hooks=[{type="command",command="'/n' '${script}' stop"}]}]` },
+      { pid: 102, ppid: 101, args: `/Users/kim/.local/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/bin/codex -c hooks.Stop=[{hooks=[{type="command",command="'/n' '${script}' stop"}]}]` },
+      { pid: 103, ppid: 100, args: '/opt/bin/codex --resume' },
+      { pid: 104, ppid: 100, args: 'node /Users/kim/.local/lib/node_modules/@openai/codex/bin/codex.js' },
+      // claude 터미널의 표식은 codex를 통과시키지 않는다
+      { pid: 105, ppid: 100, args: `/opt/bin/codex --settings ${settingsPath}` },
+    ];
+    expect(findUnhookedCli(100, processes, { settingsPath, cliPath: '/opt/bin/codex', kind: 'codex' }).map((entry) => entry.pid)).toEqual([103, 104, 105]);
+  });
+
+  it('셸 실행: 관문 없는 터미널과 fish 대체 명령도 codex를 띄운다', () => {
+    expect(hostShellLaunch(undefined, {}, 'codex').args[1]).toContain('\ncodex\n');
+    const fish = hostShellLaunch('/gw/studio-1', { SHELL: '/opt/homebrew/bin/fish' }, 'codex');
+    expect(fish.args[1]).toContain(shellQuote('/gw/studio-1/bin/codex'));
+  });
+});
+
+describe('applyPatchPaths', () => {
+  it('추가·고침·지움·옮길 곳의 경로를 모두 꺼낸다', () => {
+    const patch = ['*** Begin Patch', '*** Add File: src/a.ts', '+x', '*** Update File: src/b.ts', '*** Move to: src/c.ts', '@@', '-y', '+z', '*** Delete File: old/d.ts', '*** End Patch', ''].join('\n');
+    expect(applyPatchPaths(patch)).toEqual(['src/a.ts', 'src/b.ts', 'src/c.ts', 'old/d.ts']);
+  });
+
+  it('패치가 아닌 글이면 빈 목록이다', () => {
+    expect(applyPatchPaths('ls -la')).toEqual([]);
   });
 });
