@@ -95,6 +95,22 @@ describe('POST /api/sessions — 규칙으로 고르기(#822)', () => {
     }
     expect(mocks.startRoutedSession).not.toHaveBeenCalled();
   });
+
+  it('terminal: true를 규칙·직접 고름과 함께 넘기고, true가 아니거나 route 없이 주면 400(#836)', async () => {
+    expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: true })).status).toBe(201);
+    expect(mocks.startRoutedSession).toHaveBeenLastCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', terminal: true });
+    expect((await post({ projectId: 'orders', route: 'direct', backend: 'codex', request: '고쳐 줘', terminal: true })).status).toBe(201);
+    expect(mocks.startRoutedSession).toHaveBeenLastCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', direct: { backend: 'codex' }, terminal: true });
+    mocks.startRoutedSession.mockClear();
+    for (const body of [
+      { projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: 'yes' },
+      { projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: false },
+      { projectId: 'orders', terminal: true },
+    ]) {
+      expect((await post(body)).status).toBe(400);
+    }
+    expect(mocks.startRoutedSession).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/sessions', () => {

@@ -5,6 +5,7 @@ import { agent, BACKENDS, type Backend } from './commands/agent';
 import { authToken } from './commands/auth';
 import { bootProbe } from './commands/boot-probe';
 import { deploy } from './commands/deploy';
+import { desk } from './desk/desk';
 import { launch, LAUNCH_MODES, type LaunchMode } from './commands/launch';
 import { sandboxPrune } from './commands/sandbox';
 import { stop } from './commands/stop';
@@ -18,6 +19,7 @@ const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
   studio launch [--mode local|demo|commandcode|codex] [--port <n>] [--no-open] [--json]
   studio stop [--json]
+  studio desk [--port <n>]
   studio boot-probe <프로젝트 경로> [--json]
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
@@ -41,6 +43,13 @@ launch:
   --no-open   브라우저를 열지 않고 주소만 출력한다
   --json      브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr).
               {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
+
+desk:
+  터미널 하나에서 여러 AI CLI를 나란히 쓴다. 왼쪽 사이드바에 AI마다 상태와 게이트 결과, 오른쪽에 터미널 칸 1·2·4개
+  launch로 띄운 스튜디오에 붙는다(이 컴퓨터 방식 세션 터미널, B_STUDIO_EXPERIMENTAL=1). 나가도 세션과 CLI는 계속 돈다
+  Ctrl-b 다음에  숫자 칸 고르기 · ↑↓ 사이드바 · Enter 고른 세션을 칸에 열기 · n 새 요청(규칙으로 AI를 골라 터미널로)
+                 l 칸 수 1→2→4 · x 칸 비우기 · q 나가기 · Ctrl-b CLI에 Ctrl-b 보내기
+  --port      스튜디오 포트(기본: launch가 남긴 포트, 없으면 3000)
 
 stop:
   launch가 띄운 스튜디오를 멈춘다. PID 파일의 프로세스 그룹에 SIGTERM을 보낸다(로그는 남는다)
@@ -130,6 +139,21 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
     return launch({ mode: mode as LaunchMode, port, open: !values['no-open'], json: values.json });
+  }
+
+  if (command === 'desk') {
+    if (dir !== undefined) {
+      console.error(USAGE);
+      return 2;
+    }
+    const port = values.port === undefined ? undefined : Number(values.port);
+    if (port !== undefined && (!Number.isInteger(port) || port < 1 || port > 65535)) {
+      console.error(`--port는 1~65535 사이의 정수여야 합니다 (지금 값: ${values.port})`);
+      return 2;
+    }
+    const code = await desk(port === undefined ? {} : { port });
+    // 끝난 뒤에도 남은 연결(끊는 중인 통로)이 프로세스를 붙잡지 않게 바로 끝낸다
+    process.exit(code);
   }
 
   if (command === 'stop') {
