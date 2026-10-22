@@ -1,6 +1,6 @@
 /** desk 사이드바: AI마다 두 줄(AI·프로젝트, 상태·게이트·체크포인트·비용). herdr의 "막힘/작업 중/끝남" 줄에 게이트 판정을 붙인다 */
 import { fit } from './screen';
-import type { DeskItem } from './types';
+import type { DeskAgent, DeskItem, DeskUsage } from './types';
 
 export type Tone = 'warn' | 'busy' | 'ok' | 'fail' | 'muted';
 
@@ -14,6 +14,48 @@ export interface SidebarRow {
   /** 고른 항목의 줄이면 true(반전으로 그린다) */
   selected: boolean;
   tones?: Array<{ text: string; tone: Tone }>;
+  /** 이 줄이 속한 항목의 순서(사이드바를 내릴 때 고른 항목의 줄을 모두 보이게 한다). 안내 줄이면 없다 */
+  item?: number;
+}
+
+/** 고른 항목 아래 펼치는 서브에이전트 줄 수의 상한 */
+const SUBAGENT_LINES = 6;
+const AGENT_STATE: Record<DeskAgent['state'], { label: string; tone: Tone }> = {
+  working: { label: '작업 중', tone: 'busy' },
+  done: { label: '끝남', tone: 'ok' },
+  idle: { label: '대기', tone: 'muted' },
+};
+
+function totalTokens(usage: DeskUsage): number {
+  return usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+}
+
+/** 사이드바 한 줄에 맞는 토큰 수: 950, 5.1천, 1.2만, 2.5억 */
+export function compactTokens(value: number): string {
+  const one = (n: number) => (Math.floor(n * 10) / 10).toFixed(1).replace(/\.0$/, '');
+  if (value < 1_000) return String(value);
+  if (value < 10_000) return `${one(value / 1_000)}천`;
+  if (value < 100_000_000) return `${one(value / 10_000)}만`;
+  return `${one(value / 100_000_000)}억`;
+}
+
+/** 고른 항목 아래 펼치는 줄: 서브에이전트마다 한 줄(여섯까지), 그리고 할 수 있는 범위 두 줄(#843) */
+function detailRows(item: DeskItem, index: number, width: number): SidebarRow[] {
+  const rows: SidebarRow[] = [];
+  const subagents = (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
+  for (const agent of subagents.slice(0, SUBAGENT_LINES)) {
+    const state = AGENT_STATE[agent.state];
+    const parts = [`토큰 ${totalTokens(agent.tokens).toLocaleString('ko-KR')}`, ...(agent.activity ? [agent.activity] : [])];
+    rows.push({ text: fit(`   ↳ ${agent.name} ${state.label} · ${parts.join(' · ')}`, width), selected: false, tones: [{ text: state.label, tone: state.tone }], item: index });
+  }
+  if (subagents.length > SUBAGENT_LINES) rows.push({ text: fit(`   ↳ 외 ${subagents.length - SUBAGENT_LINES}개`, width), selected: false, item: index });
+  const capabilities = item.capabilities;
+  if (capabilities) {
+    const tools = capabilities.tools === 'cli-default' ? 'CLI 기본' : capabilities.tools.join(', ');
+    rows.push({ text: fit(`   도구 ${tools} · 쓰기 ${capabilities.writeScope}`, width), selected: false, item: index });
+    rows.push({ text: fit(`   권한 ${capabilities.permission}`, width), selected: false, item: index });
+  }
+  return rows;
 }
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -82,10 +124,12 @@ export function sidebarRows(items: readonly DeskItem[], selected: number, slots:
     const parts = [status.label];
     if (gate) parts.push(gate.label);
     if (item.gate && item.gate.checkpoints > 0) parts.push(`체크포인트 ${item.gate.checkpoints}`);
+    if (item.tokens && totalTokens(item.tokens) > 0) parts.push(`토큰 ${compactTokens(totalTokens(item.tokens))}`);
     if (item.costUsd !== undefined && item.costUsd > 0) parts.push(`$${item.costUsd.toFixed(2)}`);
     const tones = [{ text: status.label, tone: status.tone }, ...(gate ? [{ text: gate.label, tone: gate.tone }] : [])];
-    rows.push({ text: fit(head, width), selected: index === selected });
-    rows.push({ text: fit(`   ${parts.join(' · ')}`, width), selected: false, tones });
+    rows.push({ text: fit(head, width), selected: index === selected, item: index });
+    rows.push({ text: fit(`   ${parts.join(' · ')}`, width), selected: false, tones, item: index });
+    if (index === selected) rows.push(...detailRows(item, index, width));
   });
   return rows;
 }
