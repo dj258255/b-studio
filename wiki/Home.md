@@ -1,8 +1,8 @@
 # b-studio Wiki
 
-b-studio는 여러 코딩 에이전트를 독립 작업 공간에서 실행하고 진행 상태·토큰·미리보기·diff·검증 결과를 한눈에 비교하는 AI 개발 환경(ADE)입니다.
+b-studio는 에이전트의 완료 선언을 믿지 않는 멀티에이전트 개발 런타임입니다. 후보마다 독립 Git 작업 공간과 샌드박스에서 실행하고, 재시작·API 계약·화면·테스트로 검증한 변경만 체크포인트로 남깁니다.
 
-`studio.yaml`로 프로젝트를 정의하면 작업 난도와 위험도에 맞는 모델을 고르고, 후보마다 독립 Git 작업 공간과 Docker 또는 Kubernetes 샌드박스를 만듭니다. 화면은 Plan → Code → Run → Verify 단계와 토큰·비용·로그·실행 결과를 실시간으로 연결합니다. 사용자는 검증을 통과한 후보의 diff와 미리보기를 비교해 하나를 선택합니다.
+`studio.yaml`로 프로젝트를 정의합니다. 요청은 웹 스튜디오의 대화나 세션 터미널(이 컴퓨터의 Claude Code·Codex CLI)로 보내고, 어느 AI로 보낼지는 내가 쓴 규칙표로 고를 수 있습니다. 게이트가 판정한 결과는 AI별로 쌓이고, 토큰·비용·로그·diff·미리보기를 함께 봅니다.
 
 ## 어디서 시작할까요?
 
@@ -36,5 +36,7 @@ flowchart LR
 - 원격 브랜치·PR 흐름과 Agent Fleet
 - 자원 한도, egress 제어, 시크릿 가림, external API 정책 프록시
 - Anthropic·OpenAI 호환 API·Gemini 모델 라우팅과 로컬 Claude Code 실행
+- 세션 터미널(Claude Code·Codex)과 그 관문, 터미널 하나에서 여러 세션을 띄우는 `studio desk`(실험)
+- 요청마다 AI를 고르는 규칙표와 AI별 게이트 결과(실제 모델로는 아직 확인 전)
 
 소스와 최신 상태는 [GitHub 저장소](https://github.com/dj258255/b-studio), 상세 설계는 [ADR](https://github.com/dj258255/b-studio/blob/main/docs/decisions.md)에서 확인할 수 있습니다.

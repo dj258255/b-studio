@@ -26,5 +26,7 @@ pnpm typecheck
 | 로그에 시크릿이 보임 | 즉시 값을 폐기하고 마스킹·인코딩 경로와 시크릿 선언 확인 |
 | 두 세션을 함께 띄울 때 Gradle 실패 | 공유 쓰기 Gradle 홈 대신 세션별 볼륨인지 확인 |
 | 컨테이너형 Studio가 Git을 못 찾음 | 호스트와 컨테이너의 프로젝트·세션 경로가 같은지 확인 |
+| Codex 터미널이 처음 "Hooks need review"를 물음 | b-studio가 붙인 훅입니다. 처음 한 번 **Trust all and continue**를 고르면 다음부터 묻지 않습니다(b-studio가 대신 믿지 않음) |
+| `studio desk`가 "로컬 토큰이 없습니다"로 끝남 | `pnpm studio launch`로 스튜디오를 먼저 띄웠는지, 다른 포트면 `--port`를 줬는지 확인 |
 
 실제 실행에서 발견한 159개 문제의 현상·원인·해결·검증은 [전체 트러블슈팅 문서](https://github.com/dj258255/b-studio/blob/main/docs/troubleshooting.md)에 있습니다. 해당 문서의 번호를 Issue와 PR에서 함께 사용하면 추적하기 쉽습니다.

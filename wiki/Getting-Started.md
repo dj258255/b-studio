@@ -39,6 +39,8 @@ pnpm studio:local
 
 기본 주소 `http://127.0.0.1:3000`에서 프로젝트를 선택하고 세션을 만듭니다. 로컬 로그인 모드는 개인 PC 전용입니다.
 
+`pnpm studio launch`는 스튜디오를 백그라운드로 켜고 브라우저를 엽니다(`pnpm studio stop`으로 끕니다). 세션 터미널을 켠 스튜디오(`B_STUDIO_EXPERIMENTAL=1`)에서는 `pnpm studio desk`로 터미널 하나에 여러 세션을 나란히 띄울 수 있습니다.
+
 ## CLI 에이전트
 
 ```bash
@@ -54,7 +56,7 @@ pnpm studio agent examples/orders \
 
 | 옵션 | 설명 |
 |---|---|
-| `--backend api\|claude-code` | 모델 실행 방식 |
+| `--backend api\|claude-code\|codex\|commandcode\|opencode` | 모델 실행 방식(기본 `api`) |
 | `--model <id>` | 모델 지정 |
 | `--effort <level>` | `low`부터 `max`까지 추론 노력 지정 |
 | `--logs` | 서비스 로그 함께 출력 |
