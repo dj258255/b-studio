@@ -647,7 +647,8 @@ describe('Codex 터미널(#825)', () => {
     const wrapper = await readFile(path.join(one, 'bin', 'codex'), 'utf8');
     expect(await modeOf(path.join(one, 'bin', 'codex'))).toBe(0o700);
     expect(wrapper).toContain(`. ${shellQuote(path.join(one, 'codex.env'))}`);
-    expect(wrapper).toContain(`exec '/opt/bin/codex' '-c' 'features.hooks=true'`);
+    expect(wrapper).toContain(`set -- '-c' 'features.hooks=true'`);
+    expect(wrapper).toContain("exec '/opt/bin/codex' \"$@\"");
     expect(wrapper).not.toContain('hook-token');
 
     // 훅 명령 글은 세션과 상관없이 같다(Codex가 이 글의 해시로 신뢰를 기억한다)
@@ -744,6 +745,49 @@ describe('Codex 터미널(#825)', () => {
       { pid: 105, ppid: 100, args: `/opt/bin/codex --settings ${settingsPath}` },
     ];
     expect(findUnhookedCli(100, processes, { settingsPath, cliPath: '/opt/bin/codex', kind: 'codex' }).map((entry) => entry.pid)).toEqual([103, 104, 105]);
+  });
+
+  it('감싸개는 대화형 codex를 띄우기 직전에 세션 시작을, 끝난 뒤에 세션 끝을 관문에 알리고 CLI의 종료 코드를 돌려준다(#828)', async () => {
+    const root = await tempDir('b-studio-codex-wrapper-');
+    const received: string[] = [];
+    const server = createServer((request, response) => {
+      request.resume();
+      request.on('end', () => {
+        received.push(`${request.url} ${request.headers.authorization}`);
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end('{}');
+      });
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    // 가짜 codex: 뜬 순간을 관문 서버에 찍고(세션 시작 알림보다 뒤여야 한다) 받은 첫 인자를 남긴 뒤 3으로 끝난다
+    const fake = path.join(root, 'fake-codex');
+    await writeFile(
+      fake,
+      `#!/bin/sh\n${shellQuote(process.execPath)} -e "fetch('http://127.0.0.1:${port}/cli-ran',{method:'POST',body:'{}'}).then(()=>{},()=>{})"\nexit 3\n`,
+    );
+    await chmod(fake, 0o755);
+    const dir = await writeHostGatewayConfig('studio-orders-abc', { ...address, hookUrl: `http://127.0.0.1:${port}` }, { ...codex, cliPath: fake, nodePath: process.execPath }, root);
+    const run = (args: string[]) =>
+      new Promise<number>((resolve) => {
+        execFile(path.join(dir, 'bin', 'codex'), args, { env: { PATH: process.env.PATH ?? '' }, timeout: 20_000 }, (error) => resolve(error ? Number((error as { code?: number }).code) : 0));
+      });
+
+    expect(await run([])).toBe(3);
+    expect(received).toEqual(['/session-start Bearer hook-token', '/cli-ran undefined', '/session-end Bearer hook-token']);
+
+    // 이어 하기(resume)와 옵션으로 시작하는 실행도 대화형이다
+    received.length = 0;
+    expect(await run(['resume', '--last'])).toBe(3);
+    expect(received).toEqual(['/session-start Bearer hook-token', '/cli-ran undefined', '/session-end Bearer hook-token']);
+
+    // 대화형이 아닌 하위 명령(exec·login 등)과 첫 요청 글을 인자로 준 실행은 알리지 않는다. 뒤의 것은 CLI가 첫 요청 때 세션 시작 훅을 돌린다
+    for (const args of [['exec', 'hello'], ['login'], ['--version'], ['hello.txt를 만들어 줘']]) {
+      received.length = 0;
+      expect(await run(args)).toBe(3);
+      expect(received).toEqual(['/cli-ran undefined']);
+    }
   });
 
   it('셸 실행: 관문 없는 터미널과 fish 대체 명령도 codex를 띄운다', () => {

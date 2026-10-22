@@ -192,14 +192,35 @@ export function codexEnvFile(address: Pick<AgentGatewayAddress, 'hookToken' | 'm
   ].join('\n');
 }
 
-/** Codex 감싸개. 환경 파일을 읽고 설정 덮어쓰기를 붙여 진짜 codex를 띄운다. 사용자가 준 인자는 그대로 넘긴다 */
+/**
+ * Codex 감싸개. 환경 파일을 읽고 설정 덮어쓰기를 붙여 진짜 codex를 띄운다. 사용자가 준 인자는 그대로 넘긴다.
+ * Codex는 세션 시작 훅을 CLI가 뜰 때가 아니라 첫 요청을 보낼 때 돌린다(0.160.1에서 실측, #828). 그래서 대화형으로 띄울 때는
+ * 감싸개가 띄우기 직전에 세션 시작을, CLI가 끝난 뒤에 세션 끝을 같은 훅 스크립트로 알린다(화면의 "CLI 떠 있음"). 알림은 판정에 쓰이지 않는다.
+ * 대화형으로 보는 것은 인자가 없거나, 옵션으로 시작하거나(도움말·판 보기 빼고), `resume`·`fork`일 때다. 첫 요청 글을 인자로 주면
+ * CLI가 곧바로 그 요청의 세션 시작 훅을 돌리므로 알리지 않는다. `exec` 같은 하위 명령도 알리지 않는다
+ */
 export function hostCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 'mcpUrl'>, dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
   const args = codexGatewayArgs(address, path.dirname(dir), cli.nodePath).map(shellQuote).join(' ');
+  const notify = (event: AgentHookEvent) => `printf '{}' | ${codexHookCommand(path.dirname(dir), cli.nodePath, event)} >/dev/null 2>&1`;
+  const codex = shellQuote(cli.cliPath);
   return [
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
     `. ${shellQuote(path.join(dir, CODEX_ENV_FILE))}`,
-    `exec ${shellQuote(cli.cliPath)} ${args} "$@"`,
+    'interactive=',
+    'case "${1-}" in',
+    '  -h|--help|-V|--version) ;;',
+    "  ''|-*|resume|fork) interactive=1 ;;",
+    'esac',
+    `set -- ${args} "$@"`,
+    `[ -n "$interactive" ] || exec ${codex} "$@"`,
+    '# 끝난 뒤의 알림을 보내도록 신호에 바로 죽지 않는다(빈 처리기라 자식 CLI는 신호를 평소대로 받는다)',
+    "trap ':' INT TERM HUP",
+    notify('session-start'),
+    `${codex} "$@"`,
+    'status=$?',
+    notify('session-end'),
+    'exit $status',
     '',
   ].join('\n');
 }
@@ -473,8 +494,8 @@ const CLI_PACKAGE_MARK: Record<HostCliKind, string> = { claude: '/@anthropic-ai/
 
 /**
  * 이 프로세스가 에이전트 CLI로 보이는가. 첫 낱말의 파일 이름이 CLI 이름(`claude`·`codex`)이거나, 첫 낱말이 cliPath와 같거나,
- * 인자에 CLI 패키지 자리가 들었을 때. 감싸개(`bin/claude`, 셸 스크립트)는 `exec`로 진짜 CLI가 되므로
- * 잠깐 `/bin/sh <감싸개>`로 보일 수 있는데, 첫 낱말이 `/bin/sh`라 이 규칙에 걸리지 않는다
+ * 인자에 CLI 패키지 자리가 들었을 때. 감싸개(`bin/claude`, 셸 스크립트)는 `/bin/sh <감싸개>`로 보인다(대화형 codex 감싸개는
+ * CLI가 끝날 때까지 부모로 남는다). 첫 낱말이 `/bin/sh`라 이 규칙에 걸리지 않고, 그 아래의 진짜 CLI를 본다
  */
 function looksLikeAgentCli(args: string, cliPath: string, kind: HostCliKind): boolean {
   const first = args.trim().split(/\s+/)[0] ?? '';
