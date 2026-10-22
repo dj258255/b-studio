@@ -11,11 +11,15 @@ import {
   checkHostGatewayConfig,
   codexGatewayArgs,
   expectedHostGatewayFiles,
+  FIRST_PROMPT_ENV,
+  firstPromptArg,
   findHostCli,
   findUnhookedCli,
   hostBashRc,
+  hostCliWrapper,
   hostGatewaySettings,
   hostShellLaunch,
+  hostTerminalCommand,
   hostTerminalEnv,
   hostZshFiles,
   HOST_TERMINAL_COMMAND,
@@ -56,7 +60,8 @@ const modeOf = async (file: string): Promise<number> => (await stat(file)).mode 
 /** 감싸개 자리를 채우는 가짜. `WRAPPED <인자>`를 찍는다 */
 async function writeShellGateway(dir: string): Promise<void> {
   await mkdir(path.join(dir, 'bin'), { recursive: true });
-  await writeFile(path.join(dir, 'bin', 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "WRAPPED $*"\n');
+  // 둘째 줄: CLI까지 첫 요청 환경 변수(#836)와 셸 변수가 내려왔는지
+  await writeFile(path.join(dir, 'bin', 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "WRAPPED $*" "CHILD-ENV ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}"\n');
   await chmod(path.join(dir, 'bin', 'claude'), 0o700);
   await mkdir(path.join(dir, 'shell', 'zsh'), { recursive: true });
   for (const [name, content] of Object.entries(hostZshFiles(dir))) await writeFile(path.join(dir, 'shell', 'zsh', name), content);
@@ -67,7 +72,7 @@ async function writeShellGateway(dir: string): Promise<void> {
 async function writeFakeClaude(home: string): Promise<string> {
   const bin = path.join(home, 'fakebin');
   await mkdir(bin, { recursive: true });
-  await writeFile(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "UNWRAPPED $*"\n');
+  await writeFile(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "UNWRAPPED $*" "CHILD-ENV ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}"\n');
   await chmod(path.join(bin, 'claude'), 0o755);
   return bin;
 }
@@ -621,6 +626,7 @@ describe('Codex 터미널(#825)', () => {
       'mcp_servers.b-studio={url="http://127.0.0.1:41235/mcp",bearer_token_env_var="B_STUDIO_MCP_TOKEN"}',
       'otel.exporter={otlp-http={endpoint="http://127.0.0.1:41234/v1/logs",protocol="json"}}',
       'otel.log_user_prompt=false',
+      'check_for_update_on_startup=false',
     ]);
     expect(args.join(' ')).not.toContain(address.hookToken);
     expect(args.join(' ')).not.toContain(address.mcpToken);
@@ -791,7 +797,7 @@ describe('Codex 터미널(#825)', () => {
   });
 
   it('셸 실행: 관문 없는 터미널과 fish 대체 명령도 codex를 띄운다', () => {
-    expect(hostShellLaunch(undefined, {}, 'codex').args[1]).toContain('\ncodex\n');
+    expect(hostShellLaunch(undefined, {}, 'codex').args[1]).toContain('\nelse\n  codex\nfi\n');
     const fish = hostShellLaunch('/gw/studio-1', { SHELL: '/opt/homebrew/bin/fish' }, 'codex');
     expect(fish.args[1]).toContain(shellQuote('/gw/studio-1/bin/codex'));
   });
@@ -807,3 +813,106 @@ describe('applyPatchPaths', () => {
     expect(applyPatchPaths('ls -la')).toEqual([]);
   });
 });
+
+describe('첫 요청을 CLI 실행 인자로(#836)', () => {
+  const prompt = '주문 목록 화면을 고쳐 줘';
+  const count = (text: string, word: string): number => text.split('\n').filter((line) => line.startsWith(word)).length;
+
+  it('firstPromptArg: 옵션이나 하위 명령으로 읽힐 수 있는 글(-로 시작, 빈칸 없음)에는 앞말을 붙이고, 빈 글·NUL은 던진다', () => {
+    expect(FIRST_PROMPT_ENV).toBe('B_STUDIO_FIRST_PROMPT');
+    expect(firstPromptArg(prompt)).toBe(prompt);
+    expect(firstPromptArg('[읽기만] 구조를 설명해 줘')).toBe('[읽기만] 구조를 설명해 줘');
+    expect(firstPromptArg('--dangerously-skip-permissions 고쳐')).toBe('요청: --dangerously-skip-permissions 고쳐');
+    expect(firstPromptArg('update')).toBe('요청: update');
+    expect(() => firstPromptArg('  ')).toThrow(SandboxError);
+    expect(() => firstPromptArg('a\u0000b c')).toThrow(SandboxError);
+  });
+
+  it('openHostTerminal: 첫 요청은 PTY 환경 변수로만 넘기고 셸 인자에 잇지 않는다. 주지 않으면 그 변수가 없다', async () => {
+    const calls: Array<{ file: string; args: string[]; env: Record<string, string> }> = [];
+    const spawnPty = (file: string, args: string[], options: { env: Record<string, string> }): HostPty => {
+      calls.push({ file, args, env: options.env });
+      return { pid: 1, write() {}, resize() {}, kill() {}, onData() {}, onExit() {} };
+    };
+    const env = { SHELL: '/bin/zsh', HOME: '/home/kim', [FIRST_PROMPT_ENV]: '스튜디오 쪽 값은 넘기지 않는다' };
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty, initialPrompt: '-x' });
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty });
+    expect(calls[0]!.env[FIRST_PROMPT_ENV]).toBe('요청: -x');
+    expect(calls[0]!.args.join(' ')).not.toContain('-x');
+    expect(calls[1]!.env[FIRST_PROMPT_ENV]).toBeUndefined();
+  });
+
+  it('bash: 시작 파일보다 먼저 환경에서 지우고, 첫 실행에서만 CLI의 인자로 한 번 쓴다. 사용자 파일과 CLI에 변수가 남지 않는다', async () => {
+    const dir = await tempDir('b-studio-first-bash-');
+    const home = await tempDir('b-studio-first-bash-home-');
+    await writeFile(path.join(home, '.bash_profile'), 'echo "PROFILE-SEES ${B_STUDIO_FIRST_PROMPT-none}"\n');
+    await writeShellGateway(dir);
+    const out = execFileSync('bash', ['--rcfile', path.join(dir, 'shell', 'bashrc'), '-i', '-c', 'claude again; echo "AFTER ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}"'], {
+      env: { ...process.env, HOME: home, B_STUDIO_FIRST_PROMPT: prompt },
+      encoding: 'utf8',
+    });
+    expect(out).toContain(`WRAPPED ${prompt}`);
+    expect(count(out, 'WRAPPED')).toBe(2);
+    expect(out).toContain('WRAPPED again');
+    expect(out).toContain('PROFILE-SEES none');
+    expect(count(out, 'CHILD-ENV none none')).toBe(2);
+    expect(out).toContain('AFTER none none');
+  });
+
+  it.skipIf(!existsSync('/bin/zsh'))('zsh: .zshenv에서 사용자 파일보다 먼저 환경에서 지우고, .zlogin의 첫 실행에서만 인자로 쓴다', async () => {
+    const dir = await tempDir('b-studio-first-zsh-');
+    const home = await tempDir('b-studio-first-zsh-home-');
+    await writeFile(path.join(home, '.zshenv'), 'print -r -- "PROFILE-SEES ${B_STUDIO_FIRST_PROMPT-none}"\n');
+    await writeShellGateway(dir);
+    const out = execFileSync('/bin/zsh', ['-l', '-i', '-c', 'claude again; print -r -- "AFTER ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}"'], {
+      env: { ...process.env, HOME: home, ZDOTDIR: path.join(dir, 'shell', 'zsh'), BSTUDIO_USER_ZDOTDIR: home, B_STUDIO_FIRST_PROMPT: prompt },
+      encoding: 'utf8',
+    });
+    expect(out).toContain('PROFILE-SEES none');
+    expect(count(out, 'WRAPPED')).toBe(2);
+    expect(out).toContain(`WRAPPED ${prompt}`);
+    expect(count(out, 'CHILD-ENV none none')).toBe(2);
+    expect(out).toContain('AFTER none none');
+  });
+
+  it('관문 없는 sh 명령과 대체 명령(fish 등)도 첫 실행에서만 인자로 쓰고 환경에서 지운다. 값이 없으면 인자 없이 띄운다', async () => {
+    const dir = await tempDir('b-studio-first-sh-');
+    const home = await tempDir('b-studio-first-sh-home-');
+    const fakeBin = await writeFakeClaude(home);
+    await writeShellGateway(dir);
+    const run = (command: string, value?: string): string =>
+      execFileSync('/bin/sh', ['-c', command], { env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, SHELL: '/usr/bin/true', ...(value !== undefined ? { B_STUDIO_FIRST_PROMPT: value } : {}) }, encoding: 'utf8' });
+
+    const plain = run(hostTerminalCommand('claude'), prompt);
+    expect(plain).toContain(`UNWRAPPED ${prompt}`);
+    expect(plain).toContain('CHILD-ENV none none');
+    expect(run(hostTerminalCommand('claude'))).toMatch(/^UNWRAPPED $/m);
+
+    const fallback = hostShellLaunch(dir, { SHELL: '/usr/bin/fish', HOME: home }).args[1]!;
+    const wrapped = run(fallback, prompt);
+    expect(wrapped).toContain(`WRAPPED ${prompt}`);
+    expect(wrapped).toContain('CHILD-ENV none none');
+  });
+
+  it('Codex 설정 덮어쓰기는 시작할 때 업데이트를 확인하지 않게 한다(CLI가 스스로 업데이트하지 않게)', () => {
+    const args = codexGatewayArgs(address, '/root', '/usr/local/bin/node');
+    expect(args).toContain('check_for_update_on_startup=false');
+    expect(args[args.indexOf('check_for_update_on_startup=false') - 1]).toBe('-c');
+  });
+
+  it('claude 감싸개: 값을 여러 개 받는 --mcp-config를 사용자 인자 바로 앞에 두지 않는다(첫 요청이 MCP 설정으로 먹히지 않게)', async () => {
+    const dir = await tempDir('b-studio-first-wrapper-');
+    const fake = path.join(dir, 'fake-claude');
+    await writeFile(fake, '#!/bin/sh\nfor a in "$@"; do printf \'%s\\n\' "$a"; done\n');
+    await chmod(fake, 0o755);
+    const wrapper = path.join(dir, 'wrapper');
+    await writeFile(wrapper, hostCliWrapper(dir, fake));
+    await chmod(wrapper, 0o700);
+    const args = execFileSync(wrapper, [prompt], { encoding: 'utf8' }).trimEnd().split('\n');
+    expect(args.at(-1)).toBe(prompt);
+    // commander는 --mcp-config <configs...> 뒤의 낱말을 다음 옵션이 나올 때까지 모두 설정으로 먹는다
+    expect(args.indexOf('--mcp-config')).toBeLessThan(args.indexOf('--settings'));
+    expect(args.at(-3)).toBe('--settings');
+  });
+});
+

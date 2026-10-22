@@ -64,11 +64,13 @@ const emptyDraft = (backend: string): RuleDraft => ({ intent: "", complexity: []
  * 작업 화면 맨 위의 요청 입력(#822). 요청을 쓰면 내가 정한 규칙으로 어느 AI로 갈지 미리 보이고, 보내면 그 AI로 새 세션을 만들어
  * 첫 요청까지 보낸 뒤 그 세션으로 간다. 로그인은 보낼 때 확인하고, 로그인 전이면 다음 후보로 간다.
  */
-export function RoutingLauncher({ projects, initial }: { projects: Array<{ id: string; name: string }>; initial: BackendRulesView }) {
+export function RoutingLauncher({ projects, initial, terminalAllowed = false }: { projects: Array<{ id: string; name: string }>; initial: BackendRulesView; terminalAllowed?: boolean }) {
   const router = useRouter();
   const [projectId, setProjectId] = useState(projects[0]?.id ?? "");
   const [request, setRequest] = useState("");
   const [ask, setAsk] = useState(false);
+  // 터미널로 보내기(#836): 고른 AI의 CLI 터미널을 열고 첫 요청을 붙여 넣는다. 세션 터미널을 쓸 수 있을 때만 보인다
+  const [toTerminal, setToTerminal] = useState(false);
   const [preview, setPreview] = useState<Preview>();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
@@ -104,14 +106,15 @@ export function RoutingLauncher({ projects, initial }: { projects: Array<{ id: s
     if (!projectId || !request.trim()) return;
     setSending(true);
     setError(undefined);
+    const terminal = terminalAllowed && toTerminal ? (true as const) : undefined;
     try {
       const response = await fetch("/api/sessions", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(
           directBackend
-            ? { projectId, route: "direct", backend: directBackend, ...(directModel.trim() ? { model: directModel.trim() } : {}), request, intent }
-            : { projectId, route: "rules", request, intent },
+            ? { projectId, route: "direct", backend: directBackend, ...(directModel.trim() ? { model: directModel.trim() } : {}), request, intent, ...(terminal ? { terminal } : {}) }
+            : { projectId, route: "rules", request, intent, ...(terminal ? { terminal } : {}) },
         ),
       });
       const body = (await response.json().catch(() => ({}))) as { error?: string; session?: { id: string }; sendError?: string };
@@ -156,6 +159,12 @@ export function RoutingLauncher({ projects, initial }: { projects: Array<{ id: s
           <input type="checkbox" checked={ask} onChange={(event) => setAsk(event.target.checked)} className="accent-ink" />
           읽기만(질문)
         </label>
+        {terminalAllowed && (
+          <label className="flex items-center gap-1.5 text-sm text-muted" title="고른 AI의 CLI 터미널을 열고 첫 요청을 넣습니다. 붙여 넣지 못하면 그 세션의 터미널에서 직접 이어 갑니다">
+            <input type="checkbox" aria-label="터미널로" checked={toTerminal} onChange={(event) => setToTerminal(event.target.checked)} className="accent-ink" />
+            터미널로
+          </label>
+        )}
         <button type="button" onClick={() => setEditing((open) => !open)} aria-expanded={editing} className="ml-auto text-sm text-muted underline underline-offset-2 hover:text-ink">
           {editing ? "규칙 닫기" : `규칙 고치기(${view.rules.rules.length}개)`}
         </button>

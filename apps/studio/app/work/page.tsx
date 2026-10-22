@@ -8,7 +8,7 @@ import { listAgentOverview } from '@/lib/server/agents-overview';
 import { readBackendRules } from '@/lib/server/backend-rules';
 import { listProjects } from '@/lib/server/projects';
 import { routingStats } from '@/lib/server/routing-stats';
-import { allowedBackends, resolveSessionBackend } from '@/lib/server/sessions';
+import { allowedBackends, resolveSessionBackend, sessionTerminalAllowed } from '@/lib/server/sessions';
 
 export const metadata: Metadata = { title: '작업' };
 
@@ -33,7 +33,7 @@ export default async function WorkPage() {
         </Link>
       </header>
       <div className="mb-6">
-        <RoutingLauncher projects={projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }))} initial={rulesView} />
+        <RoutingLauncher projects={projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }))} initial={rulesView} terminalAllowed={sessionTerminalAllowed()} />
       </div>
       <WorkOverview initial={initial} />
       <div className="mt-6">

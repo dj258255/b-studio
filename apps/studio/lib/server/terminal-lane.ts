@@ -62,7 +62,9 @@ export interface TerminalTaskDeps {
 
 /** 이 모듈 안 기본 driver. 실행기(task-plans)가 터미널을 열 때도 이것을 쓴다 */
 export const terminalLaneDriver: TerminalLaneDriver = {
-  open: (sessionId) => openSessionTerminal(sessionId, sessionTerminalTarget(sessionId), { cols: 120, rows: 32 }),
+  open: async (sessionId) => {
+    await openSessionTerminal(sessionId, sessionTerminalTarget(sessionId), { cols: 120, rows: 32 });
+  },
   cliAlive: (sessionId) => sessionTerminalCliAlive(sessionId),
   write: (sessionId, data) => writeSessionTerminal(sessionId, data),
 };

@@ -127,7 +127,11 @@ export interface TerminalTarget {
 export interface TerminalBackend {
   /** 터미널이 붙을 자리를 준비하고 그 자리를 가리키는 값을 돌려준다(컨테이너 이름, 또는 관문 설정 폴더) */
   prepare(target: TerminalTarget, gateway?: AgentGatewayAddress): Promise<string>;
-  open(place: string, options: { id: string; size: TerminalSize; target: TerminalTarget }): AgentTerminal | Promise<AgentTerminal>;
+  open(place: string, options: { id: string; size: TerminalSize; target: TerminalTarget; initialPrompt?: string }): AgentTerminal | Promise<AgentTerminal>;
+  /**
+   * 터미널을 열 때 첫 요청을 CLI 실행 인자로 넘길 수 있는가(#836). 이 컴퓨터 방식만 받는다. 받지 않는 백엔드에는 넘기지 않는다
+   */
+  readonly acceptsInitialPrompt?: boolean;
   /** 준비한 것(컨테이너, 관문 설정)을 지운다 */
   remove(sandboxId: string): Promise<void>;
   /** 그 자리에서 관문에 닿는가 */
@@ -205,7 +209,15 @@ const HOST_BACKEND: TerminalBackend = {
     return dir;
   },
   open: (place, options) =>
-    openHostTerminal({ id: options.id, size: options.size, cwd: options.target.root, gatewayDir: place || undefined, cli: options.target.cli ?? 'claude' }),
+    openHostTerminal({
+      id: options.id,
+      size: options.size,
+      cwd: options.target.root,
+      gatewayDir: place || undefined,
+      cli: options.target.cli ?? 'claude',
+      ...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {}),
+    }),
+  acceptsInitialPrompt: true,
   remove: (sandboxId) => removeHostGatewayConfig(sandboxId),
   reachable: (place) => probeHostGateway(place, process.execPath, hostGateways.get(place)?.cli.kind ?? 'claude'),
   unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다. 스튜디오를 다시 띄운 뒤 터미널을 다시 여세요',
@@ -389,9 +401,17 @@ function remember(state: TerminalState, chunk: Buffer): void {
 
 /**
  * 세션의 터미널을 연다. 이미 열려 있으면 크기만 맞추고 그대로 쓴다. 동시에 여러 번 불려도 컨테이너와 터미널은 하나만 만든다.
- * 컨테이너를 띄우거나 `.git` 보호를 확인하지 못하면 던지고, 그 사유를 연결된 화면에도 알린다
+ * 컨테이너를 띄우거나 `.git` 보호를 확인하지 못하면 던지고, 그 사유를 연결된 화면에도 알린다.
+ * initialPrompt(#836)는 이 부름이 터미널을 새로 열고 백엔드가 받을 때만 CLI 실행 인자로 넘긴다. 넘겼는지를 돌려준다
+ * (이미 열려 있었거나, 다른 부름이 여는 중이었거나, 받지 않는 백엔드면 false)
  */
-export async function openSessionTerminal(sessionId: string, target: TerminalTarget, size: { cols?: unknown; rows?: unknown }, backend: TerminalBackend = terminalBackend()): Promise<void> {
+export async function openSessionTerminal(
+  sessionId: string,
+  target: TerminalTarget,
+  size: { cols?: unknown; rows?: unknown },
+  backend: TerminalBackend = terminalBackend(),
+  options: { initialPrompt?: string } = {},
+): Promise<{ initialPromptUsed: boolean }> {
   const wanted = clampTerminalSize(size);
   const state = stateFor(sessionId);
   // 세션을 다시 열어 샌드박스가 바뀌었으면 옛 터미널은 옛 컨테이너의 것이다. 터미널과 컨테이너만 정리하고,
@@ -406,10 +426,15 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
   if (state.terminal) {
     state.size = wanted;
     await state.terminal.resize(wanted);
-    return;
+    return { initialPromptUsed: false };
   }
   const current = state;
-  current.opening ??= (async () => {
+  if (current.opening) {
+    await current.opening;
+    return { initialPromptUsed: false };
+  }
+  const initialPrompt = backend.acceptsInitialPrompt === true ? options.initialPrompt : undefined;
+  current.opening = (async () => {
     emit(current, { kind: 'status', state: 'opening' });
     try {
       if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
@@ -426,7 +451,7 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
       if (gateway && !(await backend.reachable(place))) {
         throw new Error(backend.unreachable);
       }
-      const terminal = await backend.open(place, { id: TERMINAL_ID, size: wanted, target });
+      const terminal = await backend.open(place, { id: TERMINAL_ID, size: wanted, target, ...(initialPrompt !== undefined ? { initialPrompt } : {}) });
       current.terminal = terminal;
       current.size = wanted;
       current.chunks = [];
@@ -460,6 +485,7 @@ export async function openSessionTerminal(sessionId: string, target: TerminalTar
     }
   })();
   await current.opening;
+  return { initialPromptUsed: initialPrompt !== undefined };
 }
 
 /** 구독하면 최근 출력과 지금 상태를 곧바로 받는다. 돌려준 함수로 구독을 푼다 */
