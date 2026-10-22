@@ -550,3 +550,37 @@ describe("evidenceBasisNotice", () => {
     expect(evidenceBasisNotice(undefined)).toBeUndefined();
   });
 });
+
+describe("RequirementsList Ready 배지(#819)", () => {
+  const warned = {
+    ...snapshot.requirements[0]!,
+    lint: [
+      { code: "weak-word" as const, message: '약한 표현 "빠르게"이(가) 있습니다 — 수치·구체적 조건으로 바꿔 주세요', mustFix: true },
+      { code: "not-ears-shaped" as const, message: 'EARS 문장이 "…해야 한다" 형태가 아닙니다', mustFix: false },
+    ],
+    ready: false,
+  };
+  const coverage = { total: 1, verified: 0, mustTotal: 1, mustVerified: 0, text: "1개 중 0개 검증됨" };
+
+  it("필수 요구사항이 모두 흠 없이 적혔으면 Ready를 켠다", () => {
+    const html = renderToStaticMarkup(
+      <RequirementsList sessionId="s1" snapshot={{ ...snapshot, coverage, ready: true, requirements: [{ ...snapshot.requirements[0]!, lint: [], ready: true }] }} canManage isGithub={false} onWork={() => {}} onRefresh={() => {}} />,
+    );
+    expect(html).toContain("Ready");
+    expect(html).not.toContain("고칠 것");
+  });
+
+  it("고칠 것이 남았으면 Ready 대신 남은 수를 보이고, 카드에 고칠 것과 권고를 나눠 보인다", () => {
+    const html = renderToStaticMarkup(
+      <RequirementsList sessionId="s1" snapshot={{ ...snapshot, coverage, ready: false, requirements: [warned] }} canManage isGithub={false} onWork={() => {}} onRefresh={() => {}} />,
+    );
+    expect(html).toContain("Ready까지 고칠 것 1개");
+    expect(html).toContain("고칠 것: 약한 표현");
+    expect(html).toContain("권고: EARS 문장이");
+  });
+
+  it("린트 값이 없는 옛 응답에서는 배지를 그리지 않는다", () => {
+    const html = renderToStaticMarkup(<RequirementsList sessionId="s1" snapshot={{ ...snapshot, coverage }} canManage isGithub={false} onWork={() => {}} onRefresh={() => {}} />);
+    expect(html).not.toContain("Ready");
+  });
+});
