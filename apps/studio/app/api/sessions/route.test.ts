@@ -79,6 +79,22 @@ describe('POST /api/sessions — 규칙으로 고르기(#822)', () => {
     }
     expect(mocks.startRoutedSession).not.toHaveBeenCalled();
   });
+
+  it('route: direct면 고른 AI·모델을 함께 넘기고, backend가 없거나 모델이 문자열이 아니면 400(#827)', async () => {
+    const response = await post({ projectId: 'orders', route: 'direct', backend: 'codex', model: 'gpt-5.5', request: '고쳐 줘' });
+    expect(response.status).toBe(201);
+    expect(mocks.startRoutedSession).toHaveBeenCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', direct: { backend: 'codex', model: 'gpt-5.5' } });
+    mocks.startRoutedSession.mockClear();
+    for (const body of [
+      { projectId: 'orders', route: 'direct', request: '고쳐 줘' },
+      { projectId: 'orders', route: 'direct', backend: 'codex' },
+      { projectId: 'orders', route: 'direct', backend: 'codex', model: 3, request: '고쳐 줘' },
+      { projectId: 'orders', route: 'direct', backend: 'codex', modelId: 'x', request: '고쳐 줘' },
+    ]) {
+      expect((await post(body)).status).toBe(400);
+    }
+    expect(mocks.startRoutedSession).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/sessions', () => {
