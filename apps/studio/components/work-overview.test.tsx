@@ -81,3 +81,15 @@ describe("개입이 필요한 줄(이슈 #720)", () => {
   });
 });
 
+
+describe("WorkOverview의 에이전트 내역(#843)", () => {
+  it("내역이 있는 줄은 접힌 에이전트·범위 칸을 둔다. 없는 줄에는 없다", () => {
+    const usage = { inputTokens: 100, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const html = render([
+      item({ id: "s1", agents: [{ id: "main", name: "메인", kind: "main", state: "idle", tokens: usage }, { id: "claude:Explore", name: "Explore", kind: "subagent", state: "done", tokens: usage }] }),
+      item({ id: "s2" }),
+    ]);
+    expect(html.match(/에이전트·범위/g)).toHaveLength(1);
+    expect(html).toContain("서브에이전트 1");
+  });
+});

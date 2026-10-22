@@ -327,7 +327,9 @@ import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
-import { apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
+import type { TokenPricing } from './token-report';
+import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
+import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
 import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, applyPatchPaths, CODEX_READ_TOOLS, isReadOnlyPrompt, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress, type HostCliKind } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
@@ -529,6 +531,8 @@ interface Session {
    * 별개로 둔다 — 귀속은 붙인 것만 기억하고, 이쪽은 받은 모든 요청 번호를 기억한다
    */
   countedUsageIds?: Set<string>;
+  /** 터미널 CLI의 메인·서브에이전트별 사용량과 상태(#843). 화면용이고 기억에만 둔다 */
+  agentLedger?: TerminalAgentLedger;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -8134,6 +8138,40 @@ async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   if (requests.length > 0) clearTerminalAttention(session);
   // 레코드를 받은 순서대로 처리한다. 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게)
   for (const request of requests) await attributeRunUsage(session, request);
+  // 서브에이전트의 시작·끝·활동(#843). 화면의 에이전트 내역에만 쓴다
+  const signals = agentSignalsFromOtlp(body);
+  if (signals.length > 0) {
+    const ledger = (session.agentLedger ??= newAgentLedger());
+    const at = Date.now();
+    for (const signal of signals) noteAgentSignal(ledger, signal, at);
+  }
+}
+
+/**
+ * 터미널 세션의 메인·서브에이전트 내역(#843). 터미널 사용량을 받은 적이 없으면 없다.
+ * 행의 합은 이 스튜디오가 켜진 뒤 받은 터미널 사용량의 합이다(세션 합계에 더한 것과 같은 요청만 넣는다)
+ */
+export function sessionTerminalAgents(id: string, pricing: TokenPricing, mainState: TerminalAgentState = 'idle'): TerminalAgentRow[] | undefined {
+  const ledger = store.sessions.get(id)?.agentLedger;
+  if (!ledger) return undefined;
+  const rows = agentRows(ledger, pricing, mainState);
+  return rows.length > 0 ? rows : undefined;
+}
+
+/** 세션의 에이전트가 할 수 있는 범위(#843). 기억에 없는 세션(보관된 기록)이면 없다 */
+export function sessionCapabilities(id: string): AgentCapabilities | undefined {
+  const session = store.sessions.get(id);
+  if (!session) return undefined;
+  const snapshot = session.snapshot;
+  const card = session.terminalTaskContext;
+  return capabilitiesOf({
+    backend: sessionBackend(snapshot),
+    ...(snapshot.modelId ? { model: snapshot.modelId } : {}),
+    ...(session.project.spec.workflow?.allowedTools ? { allowedTools: session.project.spec.workflow.allowedTools } : {}),
+    ...(snapshot.workspace ? { workspace: snapshot.workspace } : {}),
+    ...(card ? { cardScope: card.writableScope } : {}),
+    terminal: snapshot.terminal === true,
+  });
 }
 
 /** 한도 계산용 중복 방지. 실행에 붙지 않은 것도 세므로 귀속용(seenUsageIds)과 별개의 기억을 쓴다. 셌으면 참 */
@@ -8164,6 +8202,8 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
   if (countTerminalUsageOnce(session, request.requestId)) {
     sessionTokens = addTokens(session.snapshot.tokens, usage);
     session.snapshot.tokens = sessionTokens;
+    // 에이전트 내역(#843)에도 세션 합계와 같은 요청만 넣는다. 그래서 내역의 합이 받은 터미널 사용량과 맞는다
+    noteAgentUsage((session.agentLedger ??= newAgentLedger()), request);
   }
 
   // 2) 실행 귀속: 열린 실행, 또는 막 닫힌 실행(+5초) 창에 드는 것만 붙인다

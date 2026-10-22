@@ -137,6 +137,7 @@ describe('apiRequestsFromOtlp — Codex CLI(#825)', () => {
         cacheWriteTokens: 0,
         requestId: 'conv-1:2026-10-22T03:02:15.381Z',
         sessionId: 'conv-1',
+        conversationId: 'conv-1',
       },
     ]);
   });

@@ -20,6 +20,38 @@ export interface DeskItem {
   gate?: { state: 'verifying' | 'passed' | 'failed' | 'none'; checkpoints: number };
   /** 세션 누적 비용(달러) */
   costUsd?: number;
+  /** 세션 토큰 합 */
+  tokens?: DeskUsage;
+  /** 터미널 CLI의 메인·서브에이전트별 내역(#843). 옛 서버는 주지 않는다 */
+  agents?: DeskAgent[];
+  /** 이 에이전트가 할 수 있는 범위(#843) */
+  capabilities?: DeskCapabilities;
+}
+
+export interface DeskUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
+/** 에이전트 내역 한 행(스튜디오 terminal-agents.ts의 TerminalAgentRow와 같은 꼴) */
+export interface DeskAgent {
+  id: string;
+  name: string;
+  kind: 'main' | 'subagent';
+  state: 'working' | 'done' | 'idle';
+  activity?: string;
+  tokens: DeskUsage;
+  costUsd?: number;
+}
+
+export interface DeskCapabilities {
+  backend: string;
+  model?: string;
+  tools: string[] | 'cli-default';
+  writeScope: string;
+  permission: string;
 }
 
 export interface DeskOverview {
