@@ -11,7 +11,7 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
-  <img src="docs/images/studio-hero-light.jpg" width="760" alt="개발 화면. 이커머스 백엔드(Spring Boot)와 웹(Next.js), 미디어 서버를 샌드박스에 띄워 둔 상태로, 왼쪽 미리보기에서는 숏폼 피드(/shorts)가 FFmpeg로 변환한 세로 영상을 재생한다. 오른쪽 대화에는 요청이 검증 게이트(브라우저 화면 확인 /, /shorts, 백엔드·웹 테스트, 리뷰)를 통과해 체크포인트로 남은 기록이 보인다">
+  <img src="docs/images/studio-hero-light.jpg" width="760" alt="작업 화면. 맨 위 새 요청 칸에 "주문 목록의 글자 색을 바꿔 줘"를 쓰자 "로컬 ChatGPT Agent (gpt-5.5)로 보냅니다 · 규칙 2(단순)"와 "같은 종류의 기록: 로컬 ChatGPT Agent 통과 3/3 · 로컬 Claude Agent 통과 2/3"이 보인다. 그 아래 개입 필요 목록에 요청과 테스트의 어긋남을 알린 확인 필요 줄과, 게이트를 세 번 통과하지 못한 검증 실패 줄이 있다">
 </picture>
 
 ## 핵심 설계 세 가지
@@ -86,7 +86,7 @@
 | 실행 환경 | 샌드박스 로그·자원, 사용자가 직접 띄운 서비스를 보기만 하는 "내 환경", 설정한 프로젝트의 운영 이미지 배포와 롤백 |
 | 앱 | 웹 스튜디오, CLI, macOS 데스크톱 앱 |
 
-<img src="docs/images/studio-requirements.jpg" width="760" alt="요구사항 탭. 라이브 커머스·숏폼 명세에서 뽑은 요구사항 32개 중 11개가 검증됨으로 표시되고, 요구사항마다 아직 테스트가 없는 시나리오 수가 배지로 보인다">
+<img src="docs/images/studio-requirements.jpg" width="760" alt="요구사항 탭. 요구사항 3개 중 필수 2개가 고칠 것 없이 적혀 Ready 배지가 켜져 있고, 권장 요구사항 R3 아래에는 약한 표현 "빠르게", 시나리오 없음, 측정 지표 없음이 고칠 것으로 보인다">
 
 ## 빠른 시작
 
