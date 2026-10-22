@@ -1,7 +1,9 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
+import { DashboardTabs } from "@/components/dashboard-tabs";
 import { SplitPicker, SplitView, type SplitCardsEditor } from "@/components/split-view";
 import { pageUser } from "@/lib/server/access";
+import { studioCapabilities } from "@/lib/server/capabilities";
 import { StudioError } from "@/lib/server/errors";
 import { listProjects } from "@/lib/server/projects";
 import { getSnapshot, listSessions, recoverSessions, sessionTerminalAllowed } from "@/lib/server/sessions";
@@ -45,6 +47,17 @@ export default async function SplitPage(props: PageProps<"/split">) {
     services: Object.fromEntries(projects.map((project) => [project.id, project.services.map((service) => service.name)])),
   };
 
-  if (!plan && paneIds.length === 0) return <SplitPicker sessions={await listSessions()} cardsEditor={cardsEditor} />;
-  return <SplitView panes={paneIds.map((id) => ({ id, snapshot: getSnapshot(id) }))} plan={plan} cardsEditor={cardsEditor} />;
+  const capabilities = studioCapabilities();
+  if (!plan && paneIds.length === 0) {
+    return <SplitPicker sessions={await listSessions()} cardsEditor={cardsEditor} tabs={<DashboardTabs current="split" experimental={capabilities.experimental} openFolder={capabilities.openFolder} className="mb-2" />} />;
+  }
+  // 격자는 화면 높이를 꽉 채우므로 탭은 격자 머리 안에 작게 그린다
+  return (
+    <SplitView
+      panes={paneIds.map((id) => ({ id, snapshot: getSnapshot(id) }))}
+      plan={plan}
+      cardsEditor={cardsEditor}
+      tabs={<DashboardTabs current="split" experimental={capabilities.experimental} openFolder={capabilities.openFolder} className="mb-0" />}
+    />
+  );
 }

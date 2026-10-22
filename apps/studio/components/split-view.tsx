@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { FleetView } from "@/lib/fleet-types";
 import { createView, type SessionView } from "@/lib/session-view";
 import {
@@ -124,7 +124,7 @@ function attentionRing(summary: Pick<PaneSummary, "tone" | "attention">): string
  * 터미널 출력용 연결은 칸이 몇 개든 하나로 묶고(TerminalStreamProvider), 고른 칸의 결과는 오른쪽 결과 칸에서 본다.
  * ⌘/Ctrl+1~4는 칸을 "고른다"(선택). 선택은 배치를 바꾸지 않는다 — 집중은 칸 머리의 버튼으로만 한다(ADR-071)
  */
-export function SplitView({ panes, plan, cardsEditor }: { panes: SplitPaneInit[]; plan?: TaskPlanView; cardsEditor?: SplitCardsEditor }) {
+export function SplitView({ panes, plan, cardsEditor, tabs }: { panes: SplitPaneInit[]; plan?: TaskPlanView; cardsEditor?: SplitCardsEditor; /** 대시보드 탭 줄(#848). 머리 맨 위에 그린다 */ tabs?: ReactNode }) {
   const router = useRouter();
   const ids = useMemo(() => panes.map((pane) => pane.id), [panes]);
   const idsKey = ids.join(",");
@@ -271,10 +271,13 @@ export function SplitView({ panes, plan, cardsEditor }: { panes: SplitPaneInit[]
     <TerminalStreamProvider ids={terminalIds}>
       <div className="grid h-dvh grid-rows-[auto_minmax(0,1fr)] gap-3 p-3 text-ink">
         <header className="glass flex flex-col gap-2.5 rounded-panel px-5 py-3">
+          {tabs}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <Link href="/" className="font-semibold tracking-tight hover:underline">
-              b-studio
-            </Link>
+            {!tabs && (
+              <Link href="/" className="font-semibold tracking-tight hover:underline">
+                b-studio
+              </Link>
+            )}
             <h1 className="text-lg font-semibold">나란히 보기</h1>
             <p className="text-sm text-muted">{panes.length}개 세션</p>
             <div className="ml-auto flex items-center gap-3 text-sm">
@@ -817,7 +820,7 @@ function useElapsed(running: boolean): string | undefined {
 const STATUS_TONE: Record<SessionStatus, Tone> = { idle: "idle", starting: "wait", ready: "pass", failed: "fail", stopped: "idle" };
 
 /** id가 없는 `/split`에서 세션을 고르는 화면. 목록 위에 작업 카드 편집기를 펼친 채로 둔다 */
-export function SplitPicker({ sessions, cardsEditor }: { sessions: SessionSummary[]; cardsEditor?: SplitCardsEditor }) {
+export function SplitPicker({ sessions, cardsEditor, tabs }: { sessions: SessionSummary[]; cardsEditor?: SplitCardsEditor; /** 대시보드 탭 줄(#848). 있으면 위의 개발 화면 링크 줄 대신 그린다 */ tabs?: ReactNode }) {
   const router = useRouter();
   const [selected, setSelected] = useState<string[]>([]);
 
@@ -827,12 +830,14 @@ export function SplitPicker({ sessions, cardsEditor }: { sessions: SessionSummar
 
   return (
     <main className="mx-auto max-w-3xl px-6 py-16">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <p className="text-sm font-semibold text-muted">b-studio</p>
-        <Link href="/" className="glass-soft rounded-control px-3 py-1.5 text-sm font-medium text-ink hover:bg-panel">
-          개발 화면으로
-        </Link>
-      </div>
+      {tabs ?? (
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <p className="text-sm font-semibold text-muted">b-studio</p>
+          <Link href="/" className="glass-soft rounded-control px-3 py-1.5 text-sm font-medium text-ink hover:bg-panel">
+            개발 화면으로
+          </Link>
+        </div>
+      )}
       <h1 className="mt-2 text-3xl font-semibold tracking-tight">나란히 볼 세션을 고르세요</h1>
       <p className="mt-3 max-w-[60ch] leading-7 text-muted">터미널 세션은 칸마다 터미널로 열립니다. 위의 작업 카드로 일을 나눠 맡길 수도 있습니다.</p>
 

@@ -7,6 +7,7 @@ import { supportingContainers } from "@/lib/header-services";
 import type { SessionSnapshot } from "@/lib/studio-events";
 import { nextSplitIds, readStoredSplitIds, splitHref, storeSplitIds } from "@/lib/split";
 import { endedReason, formatBytes } from "@/lib/usage";
+import { formatTokens, totalTokens } from "@/lib/project-token-types";
 import { AgentsBadge } from "./agents-badge";
 import { FailureDetails } from "./failure-details";
 import { LogoutButton } from "./logout-button";
@@ -122,6 +123,10 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
       </ul>
 
       <div className="ml-auto flex min-w-0 flex-wrap items-center gap-3">
+        {/* 대시보드(작업 화면)로 가는 길(#848). 옆의 작업 목록 단추는 이 화면 옆에 패널로 연다 */}
+        <Link href="/work" className="text-sm font-medium text-muted underline underline-offset-2 hover:text-ink">
+          작업 화면
+        </Link>
         <AgentsBadge />
         {access.viewer && (
           <span className="text-xs text-muted">
@@ -153,6 +158,12 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
         >
           {SESSION_BACKEND_LABEL[snapshot.backend ?? snapshot.mode]}
         </span>
+        {/* 이 세션이 쓴 토큰 합(#848). 자세한 내역은 토큰 화면과 작업 화면의 펼침에 있다 */}
+        {snapshot.tokens && totalTokens(snapshot.tokens) > 0 && (
+          <span className="glass-soft rounded-full px-2.5 py-0.5 text-xs font-medium text-muted" title="이 세션의 요청들이 쓴 모델 토큰 합(입력·출력·캐시)">
+            토큰 {formatTokens(totalTokens(snapshot.tokens))}
+          </span>
+        )}
         {/* 나란히 보기는 여러 세션을 견주는 화면이라 실험 기능이다(ADR-166). 켜지 않았으면 단추를 두지 않는다 */}
         {snapshot.experimental && (
           <button type="button" onClick={addToSplit} className="tap-target glass-soft rounded-control px-4 py-1.5 text-sm font-medium hover:bg-panel">
