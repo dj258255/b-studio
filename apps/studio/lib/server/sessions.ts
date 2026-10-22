@@ -305,6 +305,7 @@ import type {
   ProxyResponse,
   RepositoryView,
   ReviewRoundView,
+  ReverifyRecord,
   ReviewStateView,
   SessionMode,
   SessionSnapshot,
@@ -313,6 +314,7 @@ import type {
   StudioEvent,
   WorkspaceKind,
 } from '@/lib/studio-events';
+import { REVERIFY_LIMIT } from '@/lib/studio-events';
 import { advanceSandboxLink, newSandboxLinkTracker, sameSandboxLink, type SandboxProbe } from '@/lib/sandbox-link';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
@@ -4794,6 +4796,108 @@ export function catchUpBase(id: string): void {
     session.snapshot.running = false;
     if (!session.stop.signal.aborted) emit(session, event);
   })();
+}
+
+/**
+ * 다시 검증(#798, ADR-181). 에이전트 실행 없이 지금 체크포인트의 내용을 같은 게이트로 처음부터 돌린다: 관리 서비스를 모두
+ * 다시 띄우고, 계약과 선언한 확인(테스트·화면 확인 등)을 모두 돈다. 쓰임은 기준 브랜치를 따라잡은 뒤, 선언한 테스트를 바꾼 뒤,
+ * 오래된 체크포인트를 배포하기 전이다.
+ *  - 지금(head) 체크포인트만 확인한다. 작업 복사본이 그 체크포인트와 다르면(체크포인트에 없는 변경) 돌리지 않는다.
+ *    게이트는 디스크에 있는 것을 확인하므로, 다르면 확인한 내용과 기록에 적을 체크포인트가 달라진다
+ *  - 돌리는 동안 작업 복사본이나 head가 바뀌면 통과로 남기지 않는다(앞뒤 지문 대조)
+ *  - 결과는 세션 기록(이벤트와 snapshot.reverifications)에만 남긴다. 새 체크포인트·트레일러를 만들지 않아 배포 조건의 근거가 되지 않는다
+ * 검사는 오래 걸리므로 막는 조건만 확인하고 돌아간다. 결과는 reverify_finished 이벤트로 알린다
+ */
+export async function reverifySession(id: string, by: string, sha?: string): Promise<{ sha: string }> {
+  const session = requireSession(id);
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 다시 검증할 수 있습니다');
+  if (session.run || session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다. 끝난 뒤 다시 검증하세요');
+  const head = session.snapshot.checkpoints[0];
+  if (!head) throw new StudioError(409, '다시 검증할 체크포인트가 없습니다');
+  if (sha !== undefined && sha !== head.sha) throw new StudioError(409, '지금 체크포인트만 다시 검증할 수 있습니다. 앞 체크포인트를 확인하려면 먼저 그 시점으로 되돌리세요');
+
+  // 확인을 마칠 때까지 다른 요청이 끼어들지 못하게 먼저 잡는다
+  session.snapshot.running = true;
+  let before: { head: string; pending: string };
+  try {
+    await session.relaying;
+    before = await reverifyState(session);
+    if (before.head !== head.sha) throw new StudioError(409, '체크포인트 기록이 바뀌었습니다. 화면을 새로 고친 뒤 다시 검증하세요');
+    if (before.pending !== '') throw new StudioError(409, '작업 복사본에 체크포인트에 없는 변경이 있어 다시 검증하지 않습니다. 변경을 요청으로 보내 체크포인트로 남기거나 되돌린 뒤 다시 검증하세요');
+  } catch (error) {
+    session.snapshot.running = false;
+    throw error;
+  }
+
+  const startedAt = new Date().toISOString();
+  emit(session, { type: 'reverify_started', sha: head.sha, shortSha: head.shortSha, by, at: startedAt });
+  void (async () => {
+    const outcome = await runReverify(session, before);
+    const record: ReverifyRecord = { sha: head.sha, shortSha: head.shortSha, by, startedAt, finishedAt: new Date().toISOString(), ...outcome };
+    session.snapshot.reverifications = [record, ...(session.snapshot.reverifications ?? [])].slice(0, REVERIFY_LIMIT);
+    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
+    session.snapshot.running = false;
+    if (!session.stop.signal.aborted) emit(session, { type: 'reverify_finished', record });
+  })();
+  return { sha: head.sha };
+}
+
+/** 다시 검증의 앞뒤 대조값: head 커밋과, 체크포인트 이후 바뀐 파일(추적 밖 생성물 포함)의 지문. 바뀐 것이 없으면 pending은 빈 글이다 */
+async function reverifyState(session: Session): Promise<{ head: string; pending: string }> {
+  // list(n)은 세션 시작 체크포인트를 늘 끝에 붙이므로, 1을 주면 시작 체크포인트만 온다. 2를 줘야 맨 앞이 head다
+  const [latest] = await session.checkpoints.list(2);
+  return { head: latest?.sha ?? '', pending: await session.checkpoints.pendingFingerprint() };
+}
+
+type ReverifyOutcome = Pick<ReverifyRecord, 'ok' | 'summary' | 'passedStages' | 'failed' | 'platformFailure'>;
+
+async function runReverify(session: Session, before: { head: string; pending: string }): Promise<ReverifyOutcome> {
+  const signal = session.stop.signal;
+  const unfinished = (summary: string): ReverifyOutcome => ({ ok: false, summary, passedStages: [], failed: [] });
+  let gate: VerificationGate;
+  let outcome: Awaited<ReturnType<VerificationGate['check']>>;
+  try {
+    await ensureBooted(session);
+    const infra = await ensureReadySessionInfra(session, signal);
+    if (!infra.ok) return unfinished(`검증을 시작하지 못했습니다: ${infra.reason}`);
+    // 평가 자산의 복사본을 지금 체크포인트의 판으로 맞춘다(#745). 에이전트 실행의 게이트와 같은 준비다
+    await syncEvaluationAssetsFromCheckpoint(session);
+    const requirementsBaseline = (await session.checkpoints.fileAt(REQUIREMENTS_FILE, before.head)) ?? null;
+    const workspace = new Workspace(session.project.root);
+    workspace.beginRun(requirementsBaseline);
+    gate = await VerificationGate.create({
+      project: session.project,
+      sandbox: session.sandbox,
+      workspace,
+      allowBreaking: false,
+      // 다시 검증은 고칠 사람이 없다. 한 번 돌고 결과를 남긴다
+      maxVerifyAttempts: 1,
+      recheck: true,
+      fetcher: fetchContract,
+      signal,
+      onServiceStatus: (event) => onServiceStatus(session, event),
+      onEvent: () => {},
+    });
+    outcome = await gate.check();
+  } catch (error) {
+    return unfinished(`검증을 끝내지 못했습니다: ${describe(error)}`);
+  }
+
+  const failed = gate.checks.filter((check) => !check.ok).map((check) => ({ name: check.name, ...(check.detail ? { detail: check.detail.split('\n')[0] } : {}) }));
+  for (const service of gate.report?.restarted ?? []) {
+    if (!service.ready) failed.push({ name: service.service, ...(service.error ? { detail: service.error.split('\n')[0] } : {}) });
+  }
+  const passedStages = [...gate.passedStages];
+  if (gate.platformFailure) return { ok: false, summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다: ${gate.platformFailure}`, passedStages, failed, platformFailure: gate.platformFailure };
+
+  // 검사가 디스크에서 본 내용이 기록할 체크포인트와 같았는지 끝에서 다시 본다. 다르면 무엇을 확인했는지 말할 수 없다
+  const after = await reverifyState(session).catch(() => undefined);
+  if (!after || after.head !== before.head || after.pending !== before.pending) {
+    return { ok: false, summary: '검사하는 동안 작업 복사본이나 체크포인트가 바뀌어 결과를 통과로 남기지 않았습니다. 다시 검증하세요', passedStages, failed };
+  }
+  if (outcome.kind === 'pass') return { ok: true, summary: `같은 게이트를 다시 통과했습니다(${passedStages.join(', ') || '통과한 단계 없음'})`, passedStages, failed };
+  const reason = outcome.kind === 'exhausted' ? outcome.summary : '검증 게이트를 통과하지 못했습니다';
+  return { ok: false, summary: failed.length > 0 ? `${reason}: ${failed.map((check) => check.name).join(', ')}` : reason, passedStages, failed };
 }
 
 /**

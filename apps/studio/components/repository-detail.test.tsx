@@ -1,6 +1,7 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import type { IssueDetail, PullDetail } from "@b-studio/agent";
 import { describe, expect, it } from "vitest";
+import { ReverifyRecords } from "./history-panel";
 import { IssueDetailBody, PullDetailBody } from "./repository-detail";
 
 const issue = (overrides: Partial<IssueDetail> = {}): IssueDetail => ({
@@ -160,6 +161,8 @@ describe("PullDetailBody", () => {
     );
     expect(html).toContain("AI 리뷰");
     expect(html).toContain('href="/sessions/s1"');
+    // 다시 검증은 세션 화면에 있다고 안내한다(#798)
+    expect(html).toContain("변경 기록에서 다시 검증");
   });
 
   it("세션과 무관한 PR이면 AI 리뷰 카드를 두지 않는다", () => {
@@ -167,5 +170,26 @@ describe("PullDetailBody", () => {
       <PullDetailBody pull={pull({ sessionId: undefined })} canManage={true} matchBusy={false} onMatchRequirements={() => {}} onWorkOnBranch={() => {}} />,
     );
     expect(html).not.toContain("AI 리뷰");
+    expect(html).not.toContain("다시 검증");
+  });
+});
+
+describe("ReverifyRecords", () => {
+  const record = { sha: "a".repeat(40), shortSha: "aaaaaaa", by: "lee", startedAt: "2026-10-22T05:00:00.000Z", finishedAt: "2026-10-22T05:01:00.000Z", passedStages: [], platformFailure: undefined };
+
+  it("다시 검증의 통과·실패와 실패한 확인을 보이고, 기록이 없으면 아무것도 그리지 않는다", () => {
+    expect(renderToStaticMarkup(<ReverifyRecords records={[]} />)).toBe("");
+    const html = renderToStaticMarkup(
+      <ReverifyRecords
+        records={[
+          { ...record, startedAt: "2", ok: false, summary: "검증 게이트를 통과하지 못했습니다: api-test", failed: [{ name: "api-test", detail: "FAILED OrderTest" }] },
+          { ...record, ok: true, summary: "같은 게이트를 다시 통과했습니다(run, test)", failed: [] },
+        ]}
+      />,
+    );
+    expect(html).toContain("다시 검증 실패");
+    expect(html).toContain("api-test: FAILED OrderTest");
+    expect(html).toContain("다시 검증 통과");
+    expect(html).toContain("lee");
   });
 });
