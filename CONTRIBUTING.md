@@ -96,6 +96,7 @@ pnpm typecheck
 | `packages/sandbox` | 단위 테스트, 가능하면 실제 Docker 재현 |
 | `packages/agent` | 단위 테스트, 게이트 변경은 `pnpm e2e:agent`. e2e 다섯 개는 main에 들어간 뒤와 매일 밤 `e2e` 워크플로가 돌린다(Actions에서 손으로도 돌릴 수 있다) |
 | `apps/studio` | 타입 검사, lint, production build, 관련 브라우저 흐름 |
+| `apps/cli` | 관련 단위 테스트, `pnpm typecheck`. `desk`처럼 화면을 그리는 명령은 확인용 스튜디오에 붙여 실제 터미널(또는 node-pty)에서 |
 | 템플릿 | 템플릿 자체 빌드와 `examples/orders` 기동 |
 | 문서만 | 링크, 명령, 파일 경로가 현재 저장소와 맞는지 확인 |
 

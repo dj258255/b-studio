@@ -2,7 +2,7 @@
 
 이 문서는 현재 어디까지 왔고, 각 단계의 완료 조건과 예상·실제가 무엇인지 한 곳에 모읍니다. 무엇을 왜 만들기로 했는지는 이슈에서, 무엇이 들어갔는지는 [변경 기록](CHANGELOG.md)에서 봅니다. 이슈 상태가 바뀌거나 PR이 병합되면 이 문서를 갱신합니다.
 
-마지막 갱신: 2026-10-21
+마지막 갱신: 2026-10-22
 
 ## 상태 표기
 
@@ -41,6 +41,8 @@
 | M19 PR 흐름·과제 준비 | PR 뒤 자동 리뷰·main 따라잡기, 저장소 이슈·PR 상세, 명세 → 요구사항 → 검증 추적, 제출 준비 점검표, 반복 작업·AGENTS.md, 계획/실행 모델 분리와 그 실측 | [#226](https://github.com/dj258255/b-studio/issues/226)~[#260](https://github.com/dj258255/b-studio/issues/260) | 완료 | 2~3일 | 약 1.5일, 0.3.0([#227](https://github.com/dj258255/b-studio/pull/227)~[#261](https://github.com/dj258255/b-studio/pull/261)). E8: 계획 분리는 작은 과제에서 +538%, E9: 좁힌 계획으로 9/9·$0.30(Sonnet 단독 $0.23) | 명세·제출 점검표·이슈·PR 상세가 개발 화면에서 동작, E8·E9 사전 등록 가설 판정 |
 | 도그푸딩 마찰 수정 | 실제 프로젝트 둘을 b-studio로 개발하며 나온 마찰을 이슈·PR로 고칩니다 | [#233](https://github.com/dj258255/b-studio/pull/233)~[#598](https://github.com/dj258255/b-studio/pull/598) | 검증 중 | 예상을 적지 않음 | 09-30 ~ 10-10, 병합 182건. 2026-10-21 기준 결정 기록은 178건, 실패 사례는 159건입니다. 이 기간의 이슈는 착수 명세 양식 없이 짧게 열렸고 마일스톤이 없었습니다 | 남은 마찰은 M20에서 다룹니다 |
 | M20 현업 사용 준비 | 10-10 종합 평가에서 나온 일: 플랫폼 실패를 에이전트 실패와 구분, 상태·근거 표시, 속도, 지원 범위 정리, 만들지 않은 사람의 사용 관찰 | 추적 [#611](https://github.com/dj258255/b-studio/issues/611), 하위 [#599](https://github.com/dj258255/b-studio/issues/599)~[#610](https://github.com/dj258255/b-studio/issues/610) | 구현 중 | 하위 이슈 예상의 합 약 35~55시간(결정·사람 일정 제외) | 에이전트 작업 규칙([#609](https://github.com/dj258255/b-studio/issues/609)) 진행 | 하위 이슈가 닫히고, 만들지 않은 사람이 첫 요청부터 체크포인트까지 도움 없이 가는지 관찰한 기록이 있음 |
+| M21 내 AI로 나눠 보내기 | 등록한 AI 중 하나를 요청마다 내가 쓴 규칙표로 고르고, 게이트 판정을 AI·모델·작업 종류별로 쌓아 고를 때 옆에 보입니다. 세션 터미널의 Codex도 같은 관문을 붙입니다 | 추적 [#820](https://github.com/dj258255/b-studio/issues/820), 하위 [#821](https://github.com/dj258255/b-studio/issues/821), [#822](https://github.com/dj258255/b-studio/issues/822), [#825](https://github.com/dj258255/b-studio/issues/825), [#827](https://github.com/dj258255/b-studio/issues/827), [#828](https://github.com/dj258255/b-studio/issues/828) | 검증 중 | 하위 이슈 예상의 합 약 4~6일 | 10-22 하루에 모두 병합([#823](https://github.com/dj258255/b-studio/pull/823), [#824](https://github.com/dj258255/b-studio/pull/824), [#826](https://github.com/dj258255/b-studio/pull/826), [#829](https://github.com/dj258255/b-studio/pull/829), [#832](https://github.com/dj258255/b-studio/pull/832)). Codex 터미널은 진짜 CLI와 가짜 모델로 요청 → 게이트 → 체크포인트까지 확인 | 실제 로그인한 모델로 두 AI 이상을 돌려 기록과 라우팅을 확인 |
+| M22 터미널 작업대 | herdr처럼 터미널 하나에서 여러 AI CLI를 사이드바와 1·2·4칸으로 쓰고, 사이드바에 게이트 결과·체크포인트·비용과 에이전트별 토큰을 보입니다 | 추적 [#834](https://github.com/dj258255/b-studio/issues/834), 하위 [#835](https://github.com/dj258255/b-studio/issues/835), [#836](https://github.com/dj258255/b-studio/issues/836), [#837](https://github.com/dj258255/b-studio/issues/837), [#843](https://github.com/dj258255/b-studio/issues/843) | 검증 중 | 하위 이슈 예상의 합 약 3~4일 | 10-22에 [#838](https://github.com/dj258255/b-studio/pull/838), [#841](https://github.com/dj258255/b-studio/pull/841), [#842](https://github.com/dj258255/b-studio/pull/842), [#844](https://github.com/dj258255/b-studio/pull/844) 병합. 가짜 CLI로 두 칸까지, 서브에이전트 토큰은 진짜 CLI와 가짜 모델로 확인 | 진짜 CLI 두 개를 칸에 띄워 요청이 게이트를 지나고 사이드바에 결과가 뜨는 것을 실측 |
 
 ## 왜 이 순서인가
 

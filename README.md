@@ -77,9 +77,11 @@
 | 작업 보드 | 여러 세션의 계획·도구 호출·로그·미리보기·diff를 함께 본다 |
 | 작업 분해 | 한 요청을 레인으로 나눠 병렬 실행하고 통합 결과를 같은 게이트로 다시 검증한다. 계획은 사람이 승인한다 |
 | Agent Fleet | 같은 요청을 2~4개 후보로 펼쳐 비교한다 |
+| AI 나눠 보내기 | 등록한 AI(Claude Code·Codex·Command Code 등) 중 하나를 요청마다 내가 쓴 규칙표로 골라 보낸다. 게이트가 판정한 결과를 AI·모델·작업 종류별로 모아 보이고, 고를 때 그 기록을 옆에 보인다(자동으로 고르지는 않는다) |
+| 터미널 | 세션 화면의 중심이 이 컴퓨터의 Claude Code·Codex CLI 터미널이고, 터미널의 요청도 같은 게이트를 지나야 체크포인트가 된다. `studio desk`는 터미널 하나에서 여러 세션을 사이드바와 1·2·4칸으로 띄운다(실험) |
 | 모델·런타임 | Anthropic·OpenAI 호환·Gemini API와 구독 CLI(Claude Code·Codex·Command Code·OpenCode·Gemini CLI)를 하나의 도구 계약으로 묶는다. 레인마다 다른 CLI를 붙일 수 있다 |
-| 토큰 | 요청·세션·사용자별 한도, 턴별 문맥 분석, 비용 보고서 |
-| 요구사항 | 명세에서 요구사항(EARS·시나리오)을 뽑아 이슈 발행, 추적 매트릭스, 올리기 전 점검, PR 생성과 자동 리뷰로 잇는다 |
+| 토큰 | 요청·세션·사용자별 한도, 턴별 문맥 분석, 비용 보고서. 터미널 실행은 CLI의 공식 텔레메트리로 세고, 메인 CLI와 그 안의 서브에이전트별 토큰·하는 일·할 수 있는 범위를 작업 화면과 `studio desk`에서 펼쳐 본다 |
+| 요구사항 | 명세에서 요구사항(EARS·시나리오)을 뽑아 이슈 발행, 추적 매트릭스, 올리기 전 점검, PR 생성과 자동 리뷰로 잇는다. 고칠 것이 남은 요구사항 수와 Ready 배지를 보인다 |
 | 저장소 | GitHub·Gitea 이슈·PR을 개발 화면에서 본다 |
 | 실행 환경 | 샌드박스 로그·자원, 사용자가 직접 띄운 서비스를 보기만 하는 "내 환경", 설정한 프로젝트의 운영 이미지 배포와 롤백 |
 | 앱 | 웹 스튜디오, CLI, macOS 데스크톱 앱 |
@@ -132,7 +134,7 @@ flowchart LR
 
 | 경로 | 무엇 | 왜 여기에 |
 |---|---|---|
-| `apps/cli/` | `studio up`·`agent`·`deploy`·`auth` 명령 | 터미널 진입점을 한 곳에 묶는다 |
+| `apps/cli/` | `studio up`·`launch`·`desk`·`agent`·`verify`·`deploy`·`auth` 명령 | 터미널 진입점을 한 곳에 묶는다 |
 | `apps/studio/` | Next.js 웹 스튜디오(세션·미리보기·토큰·저장소 탭)와 `bench/` 실험 하네스 | 화면과 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
 | `apps/desktop/` | 웹 스튜디오를 감싸는 얇은 Electron 껍데기(macOS) | 화면은 서버가 주는 웹 그대로라 빌드 자산만 분리한다([ADR-062](docs/decisions.md#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)) |
 | `packages/spec/` | `studio.yaml` 스키마와 compose 교차 검증 | CLI·웹이 같은 로더를 공유해야 한다 |
@@ -150,7 +152,10 @@ flowchart LR
 | 명령 | 용도 |
 |---|---|
 | `pnpm studio up <path>` | 프로젝트를 샌드박스에서 실행 |
+| `pnpm studio launch` · `pnpm studio stop` | 웹 스튜디오를 백그라운드로 켜고 브라우저를 연다 · 끈다 |
+| `pnpm studio desk` | 띄운 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다(실험) |
 | `pnpm studio agent <path> "<request>"` | 에이전트에게 변경 요청 |
+| `pnpm studio verify <path>` | 편집기로 바꾼 지금 변경을 같은 게이트로 확인(체크포인트는 만들지 않음) |
 | `pnpm studio deploy <path>` | 운영 이미지를 만들고 고정 주소로 전환 |
 | `pnpm studio deploy <path> --status` | 현재 배포와 릴리스 상태 확인 |
 | `pnpm studio deploy <path> --rollback <id>` | 이전 릴리스로 롤백 |
@@ -213,7 +218,8 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 
 ## 한계와 확인하지 못한 것
 
-- 실제 계정으로 확인한 구독 백엔드는 Claude Code·Command Code뿐입니다. Codex는 계정 한도로, OpenCode·Gemini는 로그인 가능한 계정이 없어 실제 모델 호출까지는 확인하지 못했습니다(도구 경계만 주입 프로세스로 확인, [구현 상태](docs/status.md)).
+- 실제 계정으로 확인한 구독 백엔드는 Claude Code·Command Code뿐입니다. Codex는 계정 한도로, OpenCode·Gemini는 로그인 가능한 계정이 없어 실제 모델 호출까지는 확인하지 못했습니다(도구 경계만 주입 프로세스로 확인, [구현 상태](docs/status.md)). 세션 터미널의 Codex도 진짜 CLI와 가짜 모델로만 돌렸습니다.
+- 규칙으로 AI 골라 보내기, 다시 검증, 확인 필요, `studio desk`는 2026-10-22에 넣었고 실제 모델로 돌려 보지 않았습니다([구현 상태](docs/status.md#아직-실제-환경에서-돌리지-않은-새-기능)).
 - `concurrency_check`(동시 요청 확인)는 가짜 요청 함수 단위 테스트로만 확인했고 실제 Docker 샌드박스에서는 아직 돌리지 않았습니다.
 - 실험으로 둔 기능(작업 분해, 여러 명 비교, Codex·OpenCode·Gemini 백엔드, Kubernetes, 운영 배포, 디자인 비교 등)은 도그푸딩에서 쓰지 않았습니다. 테스트는 돌지만 실제 환경에서 확인한 날짜가 오래됐거나 없습니다([구현 상태](docs/status.md#지원-범위)).
 - Kubernetes 검증은 로컬 kind 기준입니다. 관리형 클러스터에서는 아직 확인하지 않았습니다.
