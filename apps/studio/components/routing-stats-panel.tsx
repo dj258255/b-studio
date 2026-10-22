@@ -28,6 +28,8 @@ function detailCell(row: RoutingStatsRow): string {
   if (row.errors > 0) parts.push(`오류 ${row.errors}`);
   if (row.noChange > 0) parts.push(`바꾼 것 없음 ${row.noChange}`);
   if (row.platformFailures > 0) parts.push(`플랫폼 문제 ${row.platformFailures}`);
+  // 게이트는 통과했지만 에이전트가 요청과 확인의 어긋남을 알린 실행. 맞았는지 몰라 통과율에 넣지 않는다
+  if (row.needsReview > 0) parts.push(`확인 필요 ${row.needsReview}`);
   return parts.join(" · ");
 }
 

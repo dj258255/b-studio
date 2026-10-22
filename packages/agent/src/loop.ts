@@ -10,7 +10,7 @@ import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldP
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
 import { loadProjectGuide } from './project-guide';
 import { createToolResultCache, type SelfCheckMode } from './tool-output';
-import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
+import { buildTools, createMismatchLog, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type RequestMismatch, type ToolContext } from './tools';
 import { fetchContract, type ContractFetcher, type VerificationReport } from './verify';
 import { syncExternalChanges, Workspace } from './workspace';
 import type { ExecutionPolicy } from './policy';
@@ -182,6 +182,11 @@ export interface AgentResult {
    * 있다 — 세션이 체크포인트에 표시를 남기고(Workflow-Incomplete), 올리기 전 미리보기가 그것을 알린다
    */
   incomplete?: 'max_turns';
+  /**
+   * 에이전트가 report_mismatch로 알린 요청과 확인의 어긋남(#666, ADR-182). 있으면 호출자는 done이어도 "확인 필요"로 보인다.
+   * 게이트 판정과 체크포인트는 바꾸지 않는다(상태를 낮추기만 한다). 보고가 없으면 필드가 없다
+   */
+  mismatches?: RequestMismatch[];
 }
 
 export type AgentEvent =
@@ -227,6 +232,8 @@ export type AgentEvent =
   | { type: 'policy'; tool: string; decision: 'allow' | 'deny'; reason?: string }
   /** ask_user가 남긴 질문. 실행은 이 턴 뒤에 끝난다 */
   | { type: 'question'; question: string; options: string[]; allowOther: boolean; proposal?: import('./tools').ModeProposal }
+  /** report_mismatch가 남긴 어긋남(#666). 실행은 이어 간다 */
+  | ({ type: 'mismatch' } & RequestMismatch)
   | { type: 'stage'; stage: import('@b-studio/spec').WorkflowStage; source: 'platform' | 'agent' }
   /** 진행 중 지시를 다음 모델 호출 전에 대화에 넣었다 */
   | { type: 'steer_applied'; count: number }
@@ -426,9 +433,12 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   const system = buildSystemPrompt(project, { selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide);
   const policy = options.policy ?? executionPolicyFor(project);
   const tools = buildTools(project, {
-    ...(options.board ? { board: options.board, allowedTools: policy?.allowedTools } : {}),
+    ...(options.board ? { board: options.board } : {}),
+    // 허용 도구 목록은 조율 도구와 어긋남 보고 도구를 넣을지 정할 때만 쓴다
+    ...(policy?.allowedTools ? { allowedTools: policy.allowedTools } : {}),
     design: design !== undefined,
     interactive,
+    mismatch: !ask,
   });
   let stage: import('@b-studio/spec').WorkflowStage = 'plan';
   onEvent({ type: 'stage', stage, source: 'platform' });
@@ -441,6 +451,8 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
   if (guide) metrics.guideChars = guide.charsUsed;
   // 이번 턴에 ask_user가 남긴 질문. 있으면 도구 결과를 넣은 뒤 실행을 끝내고 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
+  // report_mismatch가 남긴 어긋남. 결과에 실어 호출자가 "확인 필요"로 보인다
+  const mismatches = createMismatchLog();
   // 실행 단위 도구 결과 캐시. 한 실행 안에서 같은 도구·같은 입력의 결과가 반복되면 본문 대신 참조를 넣는다
   const toolCache = createToolResultCache();
   // 기본은 끔 — 효과를 재기 전이다. B_STUDIO_CONTEXT_CLEARING=on이면 기본 정책으로 켠다
@@ -476,6 +488,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       usage,
       metrics: { ...metrics },
       ...(failureReason ? { failureReason } : {}),
+      ...(mismatches.list.length > 0 ? { mismatches: [...mismatches.list] } : {}),
     };
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     return result;
@@ -566,6 +579,9 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
           onQuestion: (question) => {
             asked = question;
             onEvent({ type: 'question', ...question });
+          },
+          onMismatch: (mismatch) => {
+            if (mismatches.add(mismatch)) onEvent({ type: 'mismatch', ...mismatch });
           },
           policy,
           approvalToken: options.approvalToken,

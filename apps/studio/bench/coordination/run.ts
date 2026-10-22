@@ -70,7 +70,7 @@ import { evaluateMemoryGuard, memoryGuardMessage, parseDockerMemTotalMb, perRunM
 import { runPlainBaseline, type PlainBaselineResult } from './plain-baseline';
 import { startProxy, type ProxyHandle } from './proxy';
 import { redact } from './redact';
-import { summarize, type BenchEscalation, type BenchHandoffRow, type BenchLaneRow, type BenchRow } from './summary';
+import { laneTaskRow, summarize, type BenchEscalation, type BenchHandoffRow, type BenchLaneRow, type BenchRow } from './summary';
 import { BENCH_TASKS, integrationChecksFor, missingCoordinationTools, planFor, STRATEGY_LABELS, type BenchTask, type LaneBackends, type PlannedPlan, type Strategy } from './tasks';
 import { loadProject } from '@b-studio/spec';
 import { contractAskFromClient, planLanes, planLimitsFromEnv, requestLaneContracts, type ContractAsk, type LaneContractsResult } from '@b-studio/agent';
@@ -536,7 +536,7 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
         model: lane.model,
         bootMs: lane.bootMs,
         error: lane.error,
-        tasks: lane.tasks.map((item) => ({ id: item.id, status: item.status, run: item.run })),
+        tasks: lane.tasks.map(laneTaskRow),
       }),
     ),
     integration: plan.integration

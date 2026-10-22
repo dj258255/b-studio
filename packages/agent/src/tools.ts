@@ -63,6 +63,41 @@ export const PROPOSAL_OPTIONS: Record<ModeProposal['mode'], readonly [string, st
 };
 /** 넘길 요청 길이 상한 */
 const PROPOSAL_REQUEST_MAX = 2_000;
+/** report_mismatch: 값 하나·설명의 길이 상한. 화면의 한 줄 표시가 깨지지 않게 좁게 잡는다 */
+const MISMATCH_TEXT_MAX = 300;
+
+/**
+ * report_mismatch가 남기는 어긋남(#666, ADR-182). 요청이 말한 값과 건네받은 확인(테스트·선언한 검사)이 기대하는 값이 다를 때,
+ * 에이전트가 어느 쪽을 따랐는지 함께 남긴다. 플랫폼은 이것이 있으면 게이트를 통과한 실행도 "확인 필요"로 표시한다.
+ * 상태를 낮추기만 하고 올리지 않는다: 이 값이 있다고 통과가 되거나 실패가 지워지지 않는다
+ */
+export interface RequestMismatch {
+  /** 요청이 말한 값 */
+  requestValue: string;
+  /** 확인(테스트·선언한 검사)이 기대하는 값 */
+  checkValue: string;
+  /** 에이전트가 따른 쪽. neither는 둘 다 따르지 못했다 */
+  followed: 'request' | 'check' | 'neither';
+  /** 한 줄 설명 */
+  note: string;
+}
+const MISMATCH_FOLLOWED = new Set<RequestMismatch['followed']>(['request', 'check', 'neither']);
+/** 한 실행에서 남기는 어긋남 수의 상한. 넘으면 버린다(화면과 기록이 커지지 않게) */
+const MISMATCHES_PER_RUN = 5;
+
+/** 러너가 한 실행의 어긋남을 모으는 곳. 같은 내용은 한 번만 남기고 상한을 넘으면 버린다 */
+export function createMismatchLog(): { list: RequestMismatch[]; add: (mismatch: RequestMismatch) => boolean } {
+  const list: RequestMismatch[] = [];
+  return {
+    list,
+    add(mismatch) {
+      if (list.length >= MISMATCHES_PER_RUN) return false;
+      if (list.some((seen) => seen.requestValue === mismatch.requestValue && seen.checkValue === mismatch.checkValue && seen.followed === mismatch.followed)) return false;
+      list.push(mismatch);
+      return true;
+    },
+  };
+}
 
 /** buildTools 옵션. interactive가 아니면(레인·벤치·CLI) 도구 목록이 지금과 같다 */
 export interface ToolBuildOptions {
@@ -77,6 +112,8 @@ export interface ToolBuildOptions {
   design?: boolean;
   /** 단일 세션의 사용자 요청일 때만 ask_user를 더한다 */
   interactive?: boolean;
+  /** 어긋남을 받아 줄 러너일 때만 report_mismatch를 더한다(#666). 허용 도구 목록이 있으면 그 목록에도 있어야 한다 */
+  mismatch?: boolean;
 }
 
 /**
@@ -120,6 +157,8 @@ export interface ToolContext {
   design?: DesignSource;
   /** ask_user가 남긴 질문. 러너가 이걸 받으면 실행을 끝내고 사용자 답을 기다린다. 없으면 ask_user가 목록에 없다 */
   onQuestion?: (question: AskUserQuestion) => void;
+  /** report_mismatch가 남긴 어긋남. 없으면 그 도구를 거부한다(#666) */
+  onMismatch?: (mismatch: RequestMismatch) => void;
   /** 모델이 호출한 도구를 실행기에서 먼저 검사한다 */
   policy?: ExecutionPolicy;
   /** 승인 흐름에서 발급한 일회성 토큰. 토큰 값은 로그에 기록하지 않는다 */
@@ -178,6 +217,7 @@ export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   'design_frame',
   'ask_user',
   'propose_mode',
+  'report_mismatch',
 ]);
 /** read_lines 한 번에 읽는 줄 수의 상한 */
 const MAX_READ_LINES = 400;
@@ -348,6 +388,21 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
           question: { type: 'string', description: `One short question (max ${ASK_QUESTION_MAX} characters).` },
           options: { type: 'array', items: { type: 'string' }, description: `Two to four short choices (each max ${ASK_OPTION_MAX} characters).` },
           allowOther: { type: 'boolean', description: 'true to also let the user type a free-form answer.' },
+        },
+      ),
+    );
+  }
+  // 요청과 건네받은 확인이 어긋날 때 알리는 도구(#666). 레인에서도 보인다(레인은 멈춰 물을 수 없다). 허용 도구 목록이 있으면 그 목록을 따른다
+  if (options.mismatch && (!options.allowedTools || options.allowedTools.includes('report_mismatch'))) {
+    tools.push(
+      tool(
+        'report_mismatch',
+        'Report that the request and a check you were given (a test, a declared check) expect different values, before you finish. Call it once per conflict, then keep working: pick one side, say which in "followed", and finish as usual. The platform marks the run as needing review instead of done, so the user sees the conflict without reading your summary. Do not call it for ordinary bugs you fixed, or when the request and the checks agree.',
+        {
+          request_value: { type: 'string', description: `What the request asks for, quoted or paraphrased (max ${MISMATCH_TEXT_MAX} characters).` },
+          check_value: { type: 'string', description: `What the test or check expects instead, with the file or check name (max ${MISMATCH_TEXT_MAX} characters).` },
+          followed: { type: 'string', enum: ['request', 'check', 'neither'], description: 'Which side your change follows.' },
+          note: { type: 'string', description: `One short sentence in the user's language (max ${MISMATCH_TEXT_MAX} characters).` },
         },
       ),
     );
@@ -591,6 +646,21 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       if (request.length === 0 || request.length > PROPOSAL_REQUEST_MAX) return failure(`"request" must be 1-${PROPOSAL_REQUEST_MAX} characters`);
       context.onQuestion({ question: reason, options: [...PROPOSAL_OPTIONS[mode]], allowOther: false, proposal: { mode, request } });
       return success('Proposal sent to the user. End this run now and wait for their choice; do not call any more tools.');
+    }
+    case 'report_mismatch': {
+      if (!context.onMismatch) return failure('This run cannot report a mismatch.');
+      const text = (key: string): string | undefined => {
+        const value = string(args, key).trim();
+        return value.length === 0 || value.length > MISMATCH_TEXT_MAX ? undefined : value;
+      };
+      const requestValue = text('request_value');
+      const checkValue = text('check_value');
+      const note = text('note');
+      if (!requestValue || !checkValue || !note) return failure(`"request_value", "check_value" and "note" must be 1-${MISMATCH_TEXT_MAX} characters`);
+      const followed = string(args, 'followed') as RequestMismatch['followed'];
+      if (!MISMATCH_FOLLOWED.has(followed)) return failure('"followed" must be "request", "check" or "neither"');
+      context.onMismatch({ requestValue, checkValue, followed, note });
+      return success('Recorded. The run will be marked as needs review. Keep working and finish as usual; do not call this again for the same conflict.');
     }
     case 'post_note': {
       const board = context.board;

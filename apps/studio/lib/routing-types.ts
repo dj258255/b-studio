@@ -20,7 +20,7 @@ export interface RoutingStatsRow {
   /** 실행을 시작한 모델. 실행 중 승격했어도 시작한 모델로 묶는다 */
   model: string;
   kind: TaskKindKey;
-  /** 끝까지 간 만들기 요청 수(통과·실패·오류·플랫폼 실패·바꾼 것 없음의 합) */
+  /** 끝까지 간 만들기 요청 수(통과·실패·오류·플랫폼 실패·바꾼 것 없음·확인 필요의 합) */
   runs: number;
   /** 게이트를 통과해 체크포인트로 남았다 */
   passed: number;
@@ -32,6 +32,8 @@ export interface RoutingStatsRow {
   platformFailures: number;
   /** 바꾼 파일 없이 끝났다. 판정할 변경이 없어 통과율에 넣지 않는다 */
   noChange: number;
+  /** 게이트는 통과했지만 에이전트가 요청과 확인의 어긋남을 알렸다(#666). 맞았는지 사람이 봐야 해 통과율에 넣지 않는다 */
+  needsReview: number;
   /** 통과 ÷ (통과 + 실패 + 오류). 판정한 실행이 없으면 없다 */
   passRate?: number;
   /** 단가를 찾은 실행의 환산 비용 중앙값 */

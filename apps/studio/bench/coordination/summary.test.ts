@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { TaskPlanMetrics } from '../../lib/task-plan-metrics';
-import { summarize, type BenchRow, type SummaryMeta } from './summary';
+import { laneTaskRow, summarize, type BenchRow, type SummaryMeta } from './summary';
 
 const meta: SummaryMeta = { backend: 'openai', requestedModel: 'test-model' };
 
@@ -495,5 +495,13 @@ describe('전략별 성공 구간과 전략 쌍 비교', () => {
     const markdown = summarize(runs('S1', 4, 9), meta);
     expect(markdown).toContain('## 전략별 성공(과제 합산, Wilson 95% 구간)');
     expect(markdown).not.toContain('## 전략 쌍 비교');
+  });
+});
+
+describe('laneTaskRow (#666)', () => {
+  it('작업이 알린 어긋남을 행에 남기고, 없으면 필드를 두지 않는다', () => {
+    const mismatch = { requestValue: '박철수', checkValue: '테스트는 박철호', followed: 'check' as const, note: '테스트를 따랐습니다' };
+    expect(laneTaskRow({ id: 't1', status: 'done', mismatches: [mismatch] })).toEqual({ id: 't1', status: 'done', mismatches: [mismatch] });
+    expect(laneTaskRow({ id: 't2', status: 'done' })).toEqual({ id: 't2', status: 'done' });
   });
 });

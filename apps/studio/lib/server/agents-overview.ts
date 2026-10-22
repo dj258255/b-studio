@@ -7,9 +7,10 @@
  * 판정 규칙(state·attention)은 순수 함수로 두고 테스트한다. 수집기는 기존 목록 함수가 돌려주는 것만 쓴다 —
  * 권한 규칙을 새로 만들지 않는다(로그인한 사람이 볼 수 있는 것은 그대로).
  */
-import type { AgentEvent, AgentUsage } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, RequestMismatch } from '@b-studio/agent';
 import { stripAnsi } from '@b-studio/sandbox';
 import type { FleetView } from '@/lib/fleet-types';
+import { mismatchLine } from '@/lib/mismatch';
 import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-events';
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
@@ -22,10 +23,10 @@ export type AgentKind = 'session' | 'lane' | 'fleet';
 /** dormant: 샌드박스를 아직 켜지 않은 세션(지연 기동). idle: 켜져 있지만 요청을 처리하지 않는다 */
 export type AgentState = 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'error';
 /** 개입이 필요한 이유. 여러 개면 우선순위가 높은 것 하나만 남긴다 */
-export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'error' | 'budget';
+export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'needs_review' | 'error' | 'budget';
 
 /** 개입 필요 우선순위(앞일수록 먼저) */
-export const ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'error', 'budget'];
+export const ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'needs_review', 'error', 'budget'];
 /** 제목은 요청 앞 이 글자 수로 줄인다 */
 export const TITLE_CHARS = 80;
 /** 개입 사유 한 줄은 이 글자 수로 줄인다 */
@@ -365,7 +366,8 @@ function stateOf(row: AgentRow): AgentState {
 }
 
 /**
- * 개입 사유 하나를 고른다(우선순위: question > approval > gate_failed > error > budget).
+ * 개입 사유 하나를 고른다(우선순위: question > approval > gate_failed > needs_review > error > budget).
+ * needs_review는 마지막 실행이 done이지만 에이전트가 요청과 확인의 어긋남을 알렸다는 뜻이다(#666).
  * question은 스냅샷의 `pendingQuestion`(되묻기 대기, ADR-056)으로 본다.
  */
 function attentionOf(row: AgentRow): AgentAttention | undefined {
@@ -376,6 +378,7 @@ function attentionOf(row: AgentRow): AgentAttention | undefined {
   if (hasPendingQuestion(snapshot)) candidates.push('question');
   if (row.approval) candidates.push('approval');
   if (finished?.status === 'failed') candidates.push('gate_failed');
+  if (finished?.status === 'done' && finished.mismatches?.length) candidates.push('needs_review');
   if (snapshot && (snapshot.status === 'failed' || snapshot.error)) candidates.push('error');
   if (!snapshot && row.fallbackAttention) candidates.push(row.fallbackAttention);
   if (finished?.status === 'cancelled' && cancelledByBudget(recent, finished.runId)) candidates.push('budget');
@@ -390,6 +393,10 @@ function reasonOf(row: AgentRow, attention: AgentAttention): string | undefined 
   if (attention === 'gate_failed') {
     const event = (row.recent ?? []).findLast((candidate) => candidate.type === 'run_finished');
     if (event?.type === 'run_finished' && event.summary) return oneLine(event.summary);
+  }
+  if (attention === 'needs_review') {
+    const mismatch = lastFinishedRun(row.recent ?? [])?.mismatches?.[0];
+    if (mismatch) return oneLine(mismatchLine(mismatch));
   }
   return undefined;
 }
@@ -408,9 +415,9 @@ function hasPendingQuestion(snapshot: SessionSnapshot | undefined): boolean {
   return snapshot?.pendingQuestion !== undefined;
 }
 
-function lastFinishedRun(recent: readonly StudioEvent[]): { runId: string; status: string } | undefined {
+function lastFinishedRun(recent: readonly StudioEvent[]): { runId: string; status: string; mismatches?: RequestMismatch[] } | undefined {
   const event = recent.findLast((candidate) => candidate.type === 'run_finished');
-  return event?.type === 'run_finished' ? { runId: event.runId, status: event.status } : undefined;
+  return event?.type === 'run_finished' ? { runId: event.runId, status: event.status, ...(event.mismatches ? { mismatches: event.mismatches } : {}) } : undefined;
 }
 
 function cancelledByBudget(recent: readonly StudioEvent[], runId: string): boolean {
@@ -474,6 +481,8 @@ function laneState(status: TaskPlanView['lanes'][number]['status']): AgentState 
 
 function laneAttention(lane: TaskPlanView['lanes'][number]): AgentAttention | undefined {
   if (lane.status === 'failed') return lane.error?.includes('게이트') || lane.error?.includes('검증') ? 'gate_failed' : 'error';
+  // 작업 하나라도 요청과 확인의 어긋남을 알렸으면 끝난 레인도 확인이 필요하다(#666)
+  if (lane.tasks.some((task) => task.mismatches?.length)) return 'needs_review';
   return undefined;
 }
 
