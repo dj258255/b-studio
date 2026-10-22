@@ -371,6 +371,7 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 | `B_STUDIO_TASK_PLANS_DIR` | 작업 분해 계획을 저장하는 폴더 | `~/.cache/b-studio/task-plans` |
 | `B_STUDIO_MODEL_OBSERVATIONS_FILE` | API 모드의 모델 라우터가 쓰는 모델별 실측 기록(게이트 통과 여부 등, 최근 5,000건) | `~/.cache/b-studio/model-observations.json` |
 | `B_STUDIO_MODEL_DEFAULTS_FILE` | 프로젝트·백엔드마다 마지막에 고른 모델을 기억하는 파일. 새 세션의 기본 모델이 됩니다 | `~/.cache/b-studio/model-defaults.json` |
+| `B_STUDIO_BACKEND_RULES_FILE` | 작업 화면의 새 요청이 AI를 고를 때 쓰는 규칙 파일. 작업 화면의 "규칙 고치기"가 씁니다(ADR-179) | `~/.cache/b-studio/backend-rules.json` |
 | `B_STUDIO_REPEATED_ACTIONS_DIR` | 되풀이 행동 후보(ADR-077)에서 무시하기로 한 목록을 프로젝트별로 두는 폴더 | `~/.cache/b-studio/repeated-actions` |
 | `B_STUDIO_DESKTOP_CONFIG` | 데스크톱 앱이 읽는 설정 파일 경로(`pnpm desktop:install`이 만드는 파일). 테스트·개발용입니다 | `~/.config/b-studio/desktop.json` |
 

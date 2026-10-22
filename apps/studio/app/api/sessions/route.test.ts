@@ -8,11 +8,13 @@ const mocks = vi.hoisted(() => ({
   requireUser: vi.fn((): string => 'kim'),
   projectModelDefault: vi.fn((): string | undefined => undefined),
   projectEffortDefault: vi.fn((): string | undefined => undefined),
+  startRoutedSession: vi.fn(async (input: Record<string, unknown>) => ({ session: { id: 'session-r' }, routing: { backend: 'codex', rule: 0 }, runId: 'run-1', input })),
 }));
 
 vi.mock('@/lib/server/access', () => ({ requireUser: mocks.requireUser }));
 vi.mock('@/lib/server/commandcode-models', () => ({ validateCommandCodeModelSelection: mocks.validateModel }));
 vi.mock('@/lib/server/opencode-models', () => ({ validateOpenCodeModelSelection: mocks.validateOpenCodeModel }));
+vi.mock('@/lib/server/routed-session', () => ({ startRoutedSession: mocks.startRoutedSession }));
 vi.mock('@/lib/server/model-defaults', () => ({ projectModelDefault: mocks.projectModelDefault, projectEffortDefault: mocks.projectEffortDefault }));
 // createSession·listSessions만 바꿔 끼우고 resolveSessionBackend(허용 목록 검증)는 실제 것을 쓴다
 vi.mock('@/lib/server/sessions', async (importOriginal) => {
@@ -34,6 +36,7 @@ const saved = { mode: process.env.B_STUDIO_MODE, backends: process.env.B_STUDIO_
 
 beforeEach(() => {
   mocks.createSession.mockClear();
+  mocks.startRoutedSession.mockClear();
   mocks.validateModel.mockClear();
   mocks.validateOpenCodeModel.mockClear();
   mocks.listSessions.mockClear();
@@ -52,6 +55,30 @@ afterEach(() => {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+});
+
+describe('POST /api/sessions — 규칙으로 고르기(#822)', () => {
+  it('route: rules면 첫 요청과 함께 규칙 세션 시작에 넘기고 고른 결과를 201로 돌려준다', async () => {
+    const response = await post({ projectId: 'orders', route: 'rules', request: '결제 화면을 고쳐 줘', intent: 'build' });
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ session: { id: 'session-r' }, routing: { backend: 'codex' }, runId: 'run-1' });
+    expect(mocks.startRoutedSession).toHaveBeenCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '결제 화면을 고쳐 줘', intent: 'build' });
+    expect(mocks.createSession).not.toHaveBeenCalled();
+  });
+
+  it('첫 요청이 없거나, backend·model을 함께 주거나, 모르는 route·intent면 400', async () => {
+    for (const body of [
+      { projectId: 'orders', route: 'rules' },
+      { projectId: 'orders', route: 'rules', request: '  ' },
+      { projectId: 'orders', route: 'rules', request: '고쳐 줘', backend: 'codex' },
+      { projectId: 'orders', route: 'rules', request: '고쳐 줘', model: 'opus' },
+      { projectId: 'orders', route: 'auto', request: '고쳐 줘' },
+      { projectId: 'orders', route: 'rules', request: '고쳐 줘', intent: 'chat' },
+    ]) {
+      expect((await post(body)).status).toBe(400);
+    }
+    expect(mocks.startRoutedSession).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/sessions', () => {
