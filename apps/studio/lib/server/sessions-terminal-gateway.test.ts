@@ -144,7 +144,7 @@ vi.mock('./session-terminal', () => ({
       : undefined,
 }));
 
-import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionHistory, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -1653,6 +1653,32 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     await session.gateway.prompt({ prompt: '요청' });
     await session.gateway.telemetry(otlp([req(100, 10, 'req-1')]));
     expect(session.ofType('run_usage')).toHaveLength(1);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('메인과 서브에이전트의 사용량을 갈라 모으고, 내역의 합은 세션 합계에 더한 것과 같다(같은 요청 번호는 한 번만, #843)', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.tokens;
+    const sub = (inputTokens: number, requestId: string): Record<string, unknown> => {
+      const record = req(inputTokens, 10, requestId);
+      return { ...record, attributes: [...(record.attributes as unknown[]), { key: 'agent.name', value: { stringValue: 'Explore' } }, { key: 'query_source', value: { stringValue: 'agent:builtin:Explore' } }] };
+    };
+    await session.gateway.prompt({ prompt: '주문 목록을 살펴봐 줘' });
+    await session.gateway.telemetry(otlp([req(1000, 100, 'm-1'), sub(200, 's-1')]));
+    await session.gateway.telemetry(otlp([sub(200, 's-1'), sub(300, 's-2'), { attributes: [{ key: 'event.name', value: { stringValue: 'subagent_completed' } }, { key: 'agent_type', value: { stringValue: 'Explore' } }, { key: 'total_tool_uses', value: { stringValue: '3' } }] }]));
+
+    const rows = sessionTerminalAgents(session.id, {})!;
+    expect(rows.map((row) => [row.id, row.tokens.inputTokens])).toEqual([
+      ['main', 1000],
+      ['claude:Explore', 500],
+    ]);
+    expect(rows[1]).toMatchObject({ state: 'done', activity: '끝남 · 도구 3회' });
+    const after = getSnapshot(session.id)!.tokens!;
+    const total = (usage: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number } | undefined) =>
+      (usage?.inputTokens ?? 0) + (usage?.outputTokens ?? 0) + (usage?.cacheReadTokens ?? 0) + (usage?.cacheWriteTokens ?? 0);
+    const ledgerTotal = rows.reduce((sum, row) => sum + total(row.tokens), 0);
+    expect(ledgerTotal).toBe(total(after) - total(before));
+    expect(sessionCapabilities(session.id)).toMatchObject({ backend: getSnapshot(session.id)!.backend ?? getSnapshot(session.id)!.mode, tools: 'cli-default', permission: 'CLI 권한 확인 + 쓰기 직전 관문 + 턴 끝 게이트' });
     await stopSession(session.id);
   }, 30_000);
 

@@ -22,22 +22,55 @@ export interface ApiRequestUsage {
   cacheWriteTokens: number;
   costUsd?: number;
   durationMs?: number;
+  /** 이 요청을 낸 서브에이전트의 종류(#843). Claude만 싣는다(`agent.name`, 없으면 `query_source`의 `agent:<출처>:<이름>`). 메인 요청이면 없다 */
+  agent?: string;
+  /** Codex의 대화 id(`conversation.id`, #843). 하위 에이전트는 자기 대화 id를 갖는다 */
+  conversationId?: string;
 }
+
+/**
+ * 서브에이전트의 시작·끝·활동 신호(#843). 사용량과 달리 실행 귀속·한도에는 쓰지 않고 화면의 에이전트 내역에만 쓴다.
+ *  - subagent-done: Claude의 `subagent_completed`. 그 종류의 서브에이전트 하나가 끝났다(개별 id는 없다)
+ *  - spawn·result: Codex의 `codex.agent_communication`. 부모 대화가 자식 대화를 띄웠다·자식이 결과를 돌려줬다
+ *  - spawned-name: Codex `spawn_agent`의 결과에 적힌 자식의 이름(task_name)
+ *  - tool: Codex의 `codex.tool_result`. 그 대화가 도구를 썼다
+ */
+export type AgentSignal =
+  | { kind: 'subagent-done'; agent: string; toolUses?: number }
+  | { kind: 'spawn'; parent: string; child: string; task?: string }
+  | { kind: 'result'; child: string }
+  | { kind: 'spawned-name'; parent: string; name: string }
+  | { kind: 'tool'; conversation: string; tool: string };
 
 /** 한 본문에서 꺼내는 항목의 상한. 텔레메트리 묶음 하나가 세션 기록을 채우지 않게 한다 */
 const MAX_REQUESTS = 1_000;
 /** 값의 상한. 이보다 큰 숫자는 바깥에서 온 잘못된 값으로 본다(토큰·시간·비용 어느 것도 10억을 넘지 않는다) */
 const MAX_ATTRIBUTE = 1_000_000_000;
+/** 이름·도구·대화 id 같은 짧은 글의 상한. 바깥에서 온 값이 화면과 기억을 키우지 않게 한다 */
+const MAX_LABEL = 120;
 /** 이벤트를 알아보는 이름들. CLI가 보내는 꼴을 확신할 수 없어 둘 다 받는다 */
 const API_REQUEST_EVENTS = new Set(['api_request', 'claude_code.api_request']);
 
 /** OTLP/HTTP JSON 로그 본문에서 claude_code.api_request 이벤트만 꺼낸다. 모양이 틀린 항목은 건너뛴다 */
 export function apiRequestsFromOtlp(body: unknown): ApiRequestUsage[] {
-  const found: ApiRequestUsage[] = [];
+  const now = Date.now();
+  return collectRecords(body, (record) => apiRequestFromRecord(record, now));
+}
+
+/** OTLP/HTTP JSON 로그 본문에서 서브에이전트 신호를 꺼낸다(#843). 모양이 틀리거나 값이 빈 항목은 건너뛴다 */
+export function agentSignalsFromOtlp(body: unknown): AgentSignal[] {
+  return collectRecords(body, (record) => {
+    const fields = asRecord(record);
+    return fields ? agentSignalFromRecord(attributesOf(fields)) : undefined;
+  });
+}
+
+/** 본문의 로그 레코드를 차례로 꺼내 pick이 돌려준 것만 모은다. 한 본문에서 MAX_REQUESTS개까지 */
+function collectRecords<T>(body: unknown, pick: (record: unknown) => T | undefined): T[] {
+  const found: T[] = [];
   if (!isRecord(body)) return found;
   const resourceLogs = body.resourceLogs;
   if (!Array.isArray(resourceLogs)) return found;
-  const now = Date.now();
   for (const resourceLog of resourceLogs) {
     if (found.length >= MAX_REQUESTS) break;
     const scopeLogs = asRecord(resourceLog)?.scopeLogs;
@@ -48,12 +81,82 @@ export function apiRequestsFromOtlp(body: unknown): ApiRequestUsage[] {
       if (!Array.isArray(logRecords)) continue;
       for (const record of logRecords) {
         if (found.length >= MAX_REQUESTS) break;
-        const usage = apiRequestFromRecord(record, now);
-        if (usage) found.push(usage);
+        const value = pick(record);
+        if (value !== undefined) found.push(value);
       }
     }
   }
   return found;
+}
+
+/** 서브에이전트 신호 하나. 알아보는 이벤트가 아니거나 필요한 값이 비면 없다 */
+function agentSignalFromRecord(attributes: Map<string, unknown>): AgentSignal | undefined {
+  const name = stringValue(attributes.get('event.name'));
+  if (name === 'subagent_completed' || name === 'claude_code.subagent_completed') {
+    const agent = label(attributes.get('agent_type'));
+    if (!agent) return undefined;
+    const toolUses = numeric(attributes.get('total_tool_uses'));
+    return { kind: 'subagent-done', agent, ...(toolUses.seen && toolUses.ok ? { toolUses: toolUses.value } : {}) };
+  }
+  if (name === 'codex.agent_communication') {
+    const kind = stringValue(attributes.get('kind'));
+    const sender = label(attributes.get('sender_thread_id'));
+    const receiver = label(attributes.get('receiver_thread_id'));
+    if (!sender || !receiver) return undefined;
+    if (kind === 'spawn') {
+      const task = firstLine(stringValue(attributes.get('content')));
+      return { kind: 'spawn', parent: sender, child: receiver, ...(task ? { task } : {}) };
+    }
+    if (kind === 'result') return { kind: 'result', child: sender };
+    return undefined;
+  }
+  if (name === 'codex.tool_result') {
+    const tool = label(attributes.get('tool_name'));
+    const conversation = label(attributes.get('conversation.id'));
+    if (!tool || !conversation) return undefined;
+    if (tool === 'spawn_agent') {
+      const spawned = spawnedName(stringValue(attributes.get('output')));
+      return spawned ? { kind: 'spawned-name', parent: conversation, name: spawned } : undefined;
+    }
+    return { kind: 'tool', conversation, tool };
+  }
+  return undefined;
+}
+
+/** spawn_agent 결과(`{"task_name":"/root/x"}`)에서 이름을 꺼낸다 */
+function spawnedName(output: string | undefined): string | undefined {
+  if (!output) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(output);
+    const taskName = asRecord(parsed)?.task_name;
+    return typeof taskName === 'string' ? shortLabel(taskName) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** 짧은 글 속성. 비었으면 없다. 길면 자른다 */
+function label(value: unknown): string | undefined {
+  return shortLabel(stringValue(value));
+}
+
+function shortLabel(text: string | undefined): string | undefined {
+  const trimmed = text?.trim();
+  return trimmed ? trimmed.slice(0, MAX_LABEL) : undefined;
+}
+
+/** 맡긴 글의 첫 줄만. 화면 한 줄에 맞게 자른다 */
+function firstLine(text: string | undefined): string | undefined {
+  return shortLabel(text?.split('\n').find((line) => line.trim()));
+}
+
+/** Claude 요청을 낸 서브에이전트 종류. `agent.name`이 먼저, 없으면 `query_source`의 `agent:<출처>:<이름>` */
+function claudeAgentOf(attributes: Map<string, unknown>): string | undefined {
+  const named = label(attributes.get('agent.name'));
+  if (named) return named;
+  const source = stringValue(attributes.get('query_source'));
+  if (!source?.startsWith('agent:')) return undefined;
+  return shortLabel(source.split(':').slice(2).join(':'));
 }
 
 /** 로그 레코드 하나에서 사용량을 꺼낸다. api_request가 아니거나 값이 이상하면 없다 */
@@ -78,6 +181,7 @@ function apiRequestFromRecord(value: unknown, now: number): ApiRequestUsage | un
   const requestId = stringValue(attributes.get('request_id'));
   const promptId = stringValue(attributes.get('prompt.id'));
   const sessionId = stringValue(attributes.get('session.id'));
+  const agent = claudeAgentOf(attributes);
 
   return {
     at: timestamp(record, now),
@@ -91,6 +195,7 @@ function apiRequestFromRecord(value: unknown, now: number): ApiRequestUsage | un
     ...(sessionId ? { sessionId } : {}),
     ...(cost.seen ? { costUsd: cost.value } : {}),
     ...(duration.seen ? { durationMs: duration.value } : {}),
+    ...(agent ? { agent } : {}),
   };
 }
 
@@ -125,7 +230,7 @@ function codexUsageFromRecord(record: Record<string, unknown>, attributes: Map<s
     cacheReadTokens: cached.value,
     cacheWriteTokens: cacheWrite.seen ? cacheWrite.value : 0,
     ...(conversation && at ? { requestId: `${conversation}:${at}` } : {}),
-    ...(conversation ? { sessionId: conversation } : {}),
+    ...(conversation ? { sessionId: conversation, conversationId: shortLabel(conversation) } : {}),
     ...(duration.seen ? { durationMs: duration.value } : {}),
   };
 }
