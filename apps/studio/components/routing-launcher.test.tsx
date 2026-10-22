@@ -4,7 +4,7 @@ import type { BackendRulesView } from "@/lib/backend-rules";
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: () => {} }) }));
 
-import { previewLine, RoutingLauncher } from "./routing-launcher";
+import { previewLine, recordsLine, RoutingLauncher } from "./routing-launcher";
 
 const view: BackendRulesView = {
   rules: { rules: [{ when: { risk: "high" }, backend: "claude-code", model: "opus" }], fallback: { backend: "codex" } },
@@ -39,5 +39,13 @@ describe("previewLine", () => {
     expect(previewLine({ backend: "claude-code", model: "opus", rule: 0, matched: "위험", kind: { complexity: "simple", risk: "high" } })).toBe("로컬 Claude Agent (opus)로 보냅니다 · 규칙 1(위험) · 작업 종류 단순 · 위험");
     expect(previewLine({ backend: "codex", rule: "fallback", matched: "기본값", kind: { complexity: "normal", risk: "normal" } })).toBe("로컬 ChatGPT Agent로 보냅니다 · 맞는 규칙이 없어 기본값 · 작업 종류 보통");
     expect(previewLine({ backend: "claude-code", rule: "default", matched: "맞는 규칙 없음", kind: { complexity: "simple", risk: "normal" } })).toContain("서버 기본 AI");
+  });
+});
+
+describe("recordsLine(#827)", () => {
+  it("같은 작업 종류에서 AI별 통과 횟수를 짧게 적고, 기록이 없으면 비운다", () => {
+    expect(recordsLine([{ backend: "codex", passed: 4, judged: 5 }, { backend: "claude-code", passed: 2, judged: 3 }])).toBe("같은 종류의 기록: 로컬 ChatGPT Agent 통과 4/5 · 로컬 Claude Agent 통과 2/3");
+    expect(recordsLine([])).toBe("");
+    expect(recordsLine(undefined)).toBe("");
   });
 });

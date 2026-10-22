@@ -51,3 +51,35 @@ export function taskKindLabel(kind: TaskKindKey): string {
   if (kind === UNKNOWN_KIND) return '모름';
   return kind.risk === 'high' ? `${COMPLEXITY_LABEL[kind.complexity]} · 위험` : COMPLEXITY_LABEL[kind.complexity];
 }
+
+/** 미리보기 옆에 보일 만큼 판정이 난 실행 수. 이보다 적으면 우연과 구별되지 않아 보이지 않는다(#827) */
+export const MIN_JUDGED_FOR_HINT = 3;
+
+/** 한 작업 종류에서 한 AI(백엔드)가 낸 결과. judged는 통과 + 실패 + 오류다 */
+export interface KindRecord {
+  backend: string;
+  passed: number;
+  judged: number;
+}
+
+function sameKind(a: TaskKindKey, b: TaskKind): boolean {
+  return a !== UNKNOWN_KIND && a.complexity === b.complexity && a.risk === b.risk;
+}
+
+/**
+ * 같은 작업 종류의 결과를 AI(백엔드)별로 모은다(#827). 모델이 달라도 같은 AI로 묶는다. 판정 난 실행이
+ * MIN_JUDGED_FOR_HINT 이상인 AI만, 통과율이 높은 순(같으면 판정 수가 많은 순)으로 돌려준다. 고르는 데 쓰지 않고 보이기만 한다
+ */
+export function kindRecords(rows: readonly RoutingStatsRow[], kind: TaskKind, minJudged = MIN_JUDGED_FOR_HINT): KindRecord[] {
+  const byBackend = new Map<string, KindRecord>();
+  for (const row of rows) {
+    if (!sameKind(row.kind, kind)) continue;
+    const record = byBackend.get(row.backend) ?? { backend: row.backend, passed: 0, judged: 0 };
+    record.passed += row.passed;
+    record.judged += row.passed + row.failed + row.errors;
+    byBackend.set(row.backend, record);
+  }
+  return [...byBackend.values()]
+    .filter((record) => record.judged >= minJudged)
+    .sort((a, b) => b.passed / b.judged - a.passed / a.judged || b.judged - a.judged || a.backend.localeCompare(b.backend));
+}
