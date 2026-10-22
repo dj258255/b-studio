@@ -101,6 +101,17 @@ describe('startRoutedSession', () => {
     expect(fake.sent).toEqual([]);
   });
 
+  it('직접 고른 AI로 만들고 첫 요청을 보낸다. 그 AI가 로그인 전이면 세션을 만들지 않는다', async () => {
+    saveBackendRules({ rules: [{ when: {}, backend: 'claude-code' }] });
+    const result = await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '결제 화면 고쳐 줘', intent: 'build', direct: { backend: 'codex', model: 'gpt-5.5' } });
+    expect(fake.created[0]?.options).toMatchObject({ backend: 'codex', modelId: 'gpt-5.5' });
+    expect(result).toMatchObject({ runId: 'r-s1', routing: { backend: 'codex', rule: 'direct' } });
+
+    fake.notReady = { codex: 'Codex 로그인 필요' };
+    await expect(startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', direct: { backend: 'codex' } })).rejects.toMatchObject({ status: 409 });
+    expect(fake.created).toHaveLength(1);
+  });
+
   it('질문은 설계 승인을 보지 않고 보낸다', async () => {
     fake.designError = '막힘';
     const result = await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '구조를 설명해 줘', intent: 'ask' });

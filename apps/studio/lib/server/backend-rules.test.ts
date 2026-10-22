@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { StudioError } from './errors';
-import { chooseBackend, previewBackend, readBackendRules, resetBackendRulesCache, saveBackendRules, type RoutingDeps } from './backend-rules';
+import { chooseBackend, chooseDirect, previewBackend, readBackendRules, resetBackendRulesCache, saveBackendRules, type RoutingDeps } from './backend-rules';
 
 /**
  * 규칙 저장과 고르기(#822). 로그인 확인은 가짜(deps.ready)로 바꾼다 — 실제 CLI를 띄우지 않는다.
@@ -107,5 +107,22 @@ describe('previewBackend', () => {
     expect(previewBackend({ request: 'README 고쳐 줘', intent: 'build' }, fake)).toMatchObject({ backend: 'commandcode', rule: 0, matched: '"README" 포함', kind: { complexity: 'simple', risk: 'normal' } });
     expect(previewBackend({ request: '버튼', intent: 'build' }, fake)).toMatchObject({ backend: 'claude-code', rule: 'default', matched: '맞는 규칙 없음' });
     expect(fake.checked).toEqual([]);
+  });
+});
+
+describe('chooseDirect', () => {
+  it('규칙을 보지 않고 고른 AI와 모델을 쓰며, 직접 고름으로 남긴다', async () => {
+    saveBackendRules({ rules: [{ when: {}, backend: 'codex' }] }, deps());
+    const fake = deps();
+    const decision = await chooseDirect({ backend: 'commandcode', model: 'm1', request: '결제 화면 고쳐 줘', intent: 'build', cwd: '/p' }, fake);
+    expect(decision).toEqual({ backend: 'commandcode', model: 'm1', rule: 'direct', matched: '직접 고름', kind: { complexity: 'simple', risk: 'high' }, skipped: [] });
+    expect(fake.checked).toEqual(['commandcode']);
+  });
+
+  it('허용하지 않는 AI는 400, 로그인 전이면 다음 후보로 넘어가지 않고 409', async () => {
+    await expect(chooseDirect({ backend: 'gemini', request: '고쳐 줘', intent: 'build', cwd: '/p' }, deps())).rejects.toMatchObject({ status: 400 });
+    const fake = deps({ codex: 'Codex 로그인 필요' });
+    await expect(chooseDirect({ backend: 'codex', request: '고쳐 줘', intent: 'build', cwd: '/p' }, fake)).rejects.toMatchObject({ status: 409, message: expect.stringContaining('Codex 로그인 필요') });
+    expect(fake.checked).toEqual(['codex']);
   });
 });

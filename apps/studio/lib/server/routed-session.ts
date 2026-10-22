@@ -4,7 +4,7 @@
  */
 import type { RuleIntent } from '../backend-rules';
 import type { SessionMode, SessionSnapshot } from '../studio-events';
-import { chooseBackend, type RoutingDecision } from './backend-rules';
+import { chooseBackend, chooseDirect, type RoutingDecision } from './backend-rules';
 import { assertDesignApprovedForRequest } from './design-pipeline';
 import { StudioError } from './errors';
 import { newSessionModel } from './new-session';
@@ -19,12 +19,15 @@ export interface RoutedSession {
   sendError?: string;
 }
 
-export async function startRoutedSession(input: { projectId: string; user: string; workspace: 'copy' | 'local'; request: string; intent: RuleIntent }): Promise<RoutedSession> {
+export async function startRoutedSession(input: { projectId: string; user: string; workspace: 'copy' | 'local'; request: string; intent: RuleIntent; direct?: { backend: string; model?: string } }): Promise<RoutedSession> {
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
-  const routing = await chooseBackend({ request, intent: input.intent, cwd: project.root });
+  // 직접 고른 AI(#827)는 규칙을 건너뛴다. 그 AI를 쓸 수 없으면 세션을 만들기 전에 거절한다
+  const routing = input.direct
+    ? await chooseDirect({ ...input.direct, request, intent: input.intent, cwd: project.root })
+    : await chooseBackend({ request, intent: input.intent, cwd: project.root });
   const backend = routing.backend as SessionMode;
   const { modelId, effort } = await newSessionModel(input.projectId, backend, routing.model);
   const session = await createSession(input.projectId, input.user, input.workspace, { modelId, effort, backend, boot: 'on-demand' });
