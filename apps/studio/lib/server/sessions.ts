@@ -249,6 +249,10 @@ import {
   type TraceabilityMatrix,
   type VerifyMode,
   type WorkflowCheck,
+  lintRequirement,
+  requirementIsReady,
+  requirementsReadyBadge,
+  type RequirementLintWarning,
 } from '@b-studio/agent';
 import {
   defaultDeployRoot,
@@ -5054,12 +5058,18 @@ export interface RequirementView extends Requirement {
   issue?: number;
   /** "검증됨"을 만든 증거의 종류(ADR-103). 검증됨이 아니면 'none' */
   verifiedBy: 'test' | 'docs' | 'manual' | 'none';
+  /** 요구사항 스멜 린트 결과(고칠 것과 권고). 화면이 카드에 그대로 보인다(#819) */
+  lint: RequirementLintWarning[];
+  /** 고칠 것(mustFix)이 하나도 없으면 true */
+  ready: boolean;
 }
 
 export interface RequirementsSnapshot {
   /** docs/requirements.md가 세션 작업 복사본에 있는지. 없으면 requirements는 항상 빈 배열이다 */
   exists: boolean;
   requirements: RequirementView[];
+  /** 필수(must) 요구사항이 있고 모두 고칠 것 없이 적혔으면 true. 요구사항이 없으면 없다 */
+  ready?: boolean;
   coverage?: RequirementCoverage;
   /** "전체 계획 세우기" 버튼이 채운다. must 요구사항이 하나도 없으면 없다 */
   allMustHavesPrefill?: string;
@@ -5621,6 +5631,8 @@ export function evaluateRequirement(
     evidence,
     workPrefill,
     verifiedBy: requirementVerificationSource(evidence, requirement),
+    lint: lintRequirement(requirement),
+    ready: requirementIsReady(requirement),
     ...(issueNumber !== undefined ? { issue: issueNumber } : {}),
   };
 }
@@ -5810,6 +5822,7 @@ export async function getSessionRequirements(id: string, { strict = false }: { s
   return {
     exists: true,
     requirements: views,
+    ready: requirementsReadyBadge(requirements),
     coverage: summarizeCoverage(requirements, statusById),
     ...(mustHaves.length > 0 ? { allMustHavesPrefill: annotateAllMustHavesPrefill(buildAllMustHavesPrefill(requirements), requirements, issueNumbers) } : {}),
     assumptions,
