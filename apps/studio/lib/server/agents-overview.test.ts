@@ -84,6 +84,30 @@ describe('attention 판정', () => {
     expect(errored.items[0]!.attention).toBe('error');
   });
 
+  it('마지막 실행이 done이어도 어긋남을 보고했으면 needs_review이고, 까닭에 두 값을 적는다 (#666)', () => {
+    const mismatch = { requestValue: '배송비 3,000원', checkValue: 'OrderTest는 2,500원', followed: 'check' as const, note: '테스트를 따랐습니다' };
+    const reported = overview({ sessions: [source({ snapshot: snapshot(), recent: [{ ...finished('r1', 'done'), mismatches: [mismatch] } as StudioEvent] })] });
+    expect(reported.items[0]).toMatchObject({ attention: 'needs_review' });
+    expect(reported.items[0]!.reason).toContain('배송비 3,000원');
+    expect(reported.items[0]!.reason).toContain('OrderTest는 2,500원');
+    expect(reported.totals.attention).toBe(1);
+
+    // 보고가 없는 done은 개입 필요가 아니다
+    expect(overview({ sessions: [source({ snapshot: snapshot(), recent: [finished('r1', 'done')] })] }).items[0]!.attention).toBeUndefined();
+    // 실패가 이긴다(검증 실패 > 확인 필요)
+    const failed = overview({ sessions: [source({ snapshot: snapshot(), recent: [{ ...finished('r1', 'failed'), mismatches: [mismatch] } as StudioEvent] })] });
+    expect(failed.items[0]!.attention).toBe('gate_failed');
+  });
+
+  it('레인 작업이 어긋남을 보고했으면 끝난 레인도 needs_review다 (#666)', () => {
+    const mismatch = { requestValue: 'a', checkValue: 'b', followed: 'request' as const, note: 'n' };
+    const lanes = plan({
+      status: 'done',
+      lanes: [{ id: 'a', paths: ['web'], status: 'done', sessionId: 'gone', tasks: [{ id: 't1', title: 't', request: 'r', paths: ['web'], dependsOn: [], status: 'done', mismatches: [mismatch] }] }],
+    });
+    expect(overview({ plans: [lanes] }).items[0]).toMatchObject({ kind: 'lane', attention: 'needs_review' });
+  });
+
   it('토큰 한도로 취소된 마지막 실행은 budget', () => {
     const budget = overview({ sessions: [source({ snapshot: snapshot(), recent: [cancelling('r1', 'budget'), finished('r1', 'cancelled')] })] });
     expect(budget.items[0]!.attention).toBe('budget');

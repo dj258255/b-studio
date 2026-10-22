@@ -25,6 +25,19 @@ function fold(events: StudioEvent[], start: SessionView = createView(snapshot)):
 }
 
 describe('reduceSession', () => {
+  it('다시 검증(#798)은 도는 동안 실행 중으로 두고, 끝나면 기록을 맨 앞에 쌓는다(같은 회차는 한 번만)', () => {
+    const record = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', by: 'lee', startedAt: '2026-10-22T05:00:00.000Z', finishedAt: '2026-10-22T05:01:00.000Z', ok: true, summary: '통과', passedStages: ['run' as const], failed: [] };
+    const started = fold([{ type: 'reverify_started', sha: record.sha, shortSha: record.shortSha, by: 'lee', at: record.startedAt }]);
+    expect(started.snapshot.running).toBe(true);
+
+    const finished = fold([{ type: 'reverify_finished', record }, { type: 'reverify_finished', record }], started);
+    expect(finished.snapshot.running).toBe(false);
+    expect(finished.snapshot.reverifications).toEqual([record]);
+    // 체크포인트와 대화는 건드리지 않는다
+    expect(finished.snapshot.checkpoints).toEqual([]);
+    expect(finished.chat).toEqual([]);
+  });
+
   it('러너 경고(warning)를 대화에 안내 한 줄로 남긴다', () => {
     const view = fold([
       { type: 'run_started', runId: 'r1', request: '이어서 해줘' },
@@ -698,6 +711,19 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
     ]);
     expect(runHasChanges(answered.chat, 'r2')).toBe(false);
     expect(runsWithChanges(answered.chat).size).toBe(0);
+  });
+
+  it('어긋남을 보고한 done은 완료라고 적지 않고 확인 필요로 알린다. 기록의 어긋남을 결과 줄에 싣는다 (#666)', () => {
+    const mismatch = { requestValue: '배송비 3,000원', checkValue: 'OrderTest는 2,500원', followed: 'check' as const, note: '테스트를 따랐습니다' };
+    expect(outcomeText(outcome({ mismatches: [mismatch] }), true)).toBe('확인 필요: 요청과 확인이 어긋납니다, 1턴');
+    // 실패한 실행의 문구는 그대로다(상태를 낮추기만 한다)
+    expect(outcomeText(outcome({ status: 'failed', summary: '테스트 실패', mismatches: [mismatch] }), true)).toBe('완료하지 못함: 테스트 실패');
+
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '배송비를 3,000원으로' },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '고쳤습니다', turns: 2, mismatches: [mismatch] },
+    ]);
+    expect(view.chat.find((item) => item.kind === 'outcome')).toMatchObject({ status: 'done', mismatches: [mismatch] });
   });
 
   it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {

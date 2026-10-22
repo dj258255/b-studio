@@ -558,6 +558,23 @@ describe('runClaudeCodeAgent', () => {
     expect(events.some((event) => event.type === 'verify_start')).toBe(false);
   });
 
+  it('report_mismatch로 알린 어긋남을 결과에 싣는다. 레인처럼 interactive가 아니어도 허용 목록에 있다 (#666)', async () => {
+    const { sdk, state } = fakeClaudeCode({
+      turns: [
+        [
+          { tool: 'report_mismatch', input: { request_value: '배송비 3,000원', check_value: 'OrderTest는 2,500원', followed: 'check', note: '테스트를 따랐습니다' } },
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } },
+          { text: '고쳤습니다.' },
+        ],
+      ],
+    });
+    const result = await runClaudeCodeAgent({ request: '배송비를 3,000원으로', project, sandbox: fakeSandbox(project, [true]), sdk, fetcher: async () => contract });
+
+    expect(result).toMatchObject({ status: 'done', gateOutcome: 'pass' });
+    expect(result.mismatches).toEqual([{ requestValue: '배송비 3,000원', checkValue: 'OrderTest는 2,500원', followed: 'check', note: '테스트를 따랐습니다' }]);
+    expect(state.options?.allowedTools).toContain('mcp__b-studio__report_mismatch');
+  });
+
   it('interactive가 아니면 허용 목록에 ask_user가 없다(레인·벤치·CLI)', async () => {
     const { sdk, state } = fakeClaudeCode({ turns: [[{ text: '주문 API입니다.' }]] });
     const result = await runClaudeCodeAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract });

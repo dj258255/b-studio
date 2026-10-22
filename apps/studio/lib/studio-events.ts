@@ -1,7 +1,31 @@
 import type { SandboxLink } from './sandbox-link';
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RequestMismatch, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { WorkflowStage } from '@b-studio/spec';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 import type { TaskKind } from './routing-types';
+
+/** 세션에 남기는 다시 검증 기록 수 */
+export const REVERIFY_LIMIT = 20;
+
+/** 다시 검증(#798) 한 번의 결과. 에이전트 실행 없이 지금 체크포인트의 내용을 같은 게이트로 처음부터 돌렸다 */
+export interface ReverifyRecord {
+  /** 확인한 체크포인트. 돌리는 동안 작업 복사본이 이 체크포인트와 같았는지는 앞뒤로 견줬다 */
+  sha: string;
+  shortSha: string;
+  /** 누른 사람 */
+  by: string;
+  startedAt: string;
+  finishedAt: string;
+  ok: boolean;
+  /** 사람이 읽을 한 줄 */
+  summary: string;
+  /** 통과한 검증 단계 */
+  passedStages: WorkflowStage[];
+  /** 실패한 확인(이름과 사유 첫 줄) */
+  failed: Array<{ name: string; detail?: string }>;
+  /** 샌드박스·도커 쪽 문제로 끝내지 못했으면 그 사유. 코드의 문제가 아니다 */
+  platformFailure?: string;
+}
 
 /** 브라우저와 서버가 주고받는 형태. 서버 전용 객체(샌드박스, 프로세스)는 담지 않는다 */
 
@@ -133,6 +157,11 @@ export interface SessionSnapshot {
   nextDemoQuestion?: string;
   /** 게이트를 통과해 남긴 체크포인트. 최신이 먼저 온다 */
   checkpoints: Checkpoint[];
+  /**
+   * "다시 검증"(#798, ADR-181)의 기록. 최신이 먼저 오고 REVERIFY_LIMIT개까지 둔다. 체크포인트를 새로 만들거나 트레일러를
+   * 바꾸지 않으므로 배포 조건(releaseRequires)의 근거가 되지 않는다. 지금 그 체크포인트가 같은 게이트를 지나는지 보는 기록일 뿐이다
+   */
+  reverifications?: ReverifyRecord[];
   /** 원본 프로젝트가 Git 저장소일 때만 있다 */
   repository?: RepositoryView;
   /** 가장 최근에 잰 컨테이너별 자원 사용량 */
@@ -395,6 +424,11 @@ export type StudioEvent =
       verify?: 'light';
       /** 턴 상한에 닿았지만 게이트를 통과해 체크포인트로 남긴 실행이면 'max_turns'. 요청이 끝나지 않았을 수 있다(ADR-131 덧붙임) */
       incomplete?: 'max_turns';
+      /**
+       * 에이전트가 알린 요청과 확인(테스트)의 어긋남(#666). 있으면 done이어도 화면은 "확인 필요"로 보인다.
+       * 게이트 판정과 체크포인트는 그대로다. 보고가 없으면 필드가 없다
+       */
+      mismatches?: RequestMismatch[];
       /** 가볍게 확인이 건너뛴 검증 단계(프로젝트 토큰 보고서가 이 수를 센다). light가 아니면 없다 */
       skippedStages?: string[];
       sessionTokens?: AgentUsage;
@@ -484,6 +518,10 @@ export type StudioEvent =
       /** 되돌리기 전에 아직 체크포인트로 남기지 않은 변경이 있었으면 되살릴 수 있게 남긴 백업(ADR-099) */
       backup?: DiscardBackup;
     }
+  /** 다시 검증(#798)을 시작했다. 끝날 때까지 snapshot.running이 켜져 있다 */
+  | { type: 'reverify_started'; sha: string; shortSha: string; by: string; at: string }
+  /** 다시 검증이 끝났다(통과·실패·검증하지 못함 모두) */
+  | { type: 'reverify_finished'; record: ReverifyRecord }
   /** main 따라잡기(ADR-076)를 시작했다 */
   | { type: 'base_sync_started' }
   | {

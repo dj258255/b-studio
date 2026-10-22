@@ -626,6 +626,7 @@ export function TaskPlanProgress({
                   {taskUsageLine(task.run) && <span className="text-xs text-muted">{taskUsageLine(task.run)}</span>}
                   {task.checkpoint && <span className="font-mono text-xs text-muted">체크포인트 {task.checkpoint.shortSha}</span>}
                   {task.status === 'failed' && task.summary && <span className="text-xs text-fail">{task.summary.split('\n')[0]}</span>}
+                  {task.status === 'done' && task.mismatches?.length ? <span className="text-xs text-wait">확인 필요: 요청과 확인이 어긋난다고 알렸습니다</span> : null}
                 </button>
               </li>
             ))}

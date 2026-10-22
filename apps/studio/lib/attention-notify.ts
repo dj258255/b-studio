@@ -11,6 +11,7 @@ export const ATTENTION_LABEL: Record<AgentAttention, string> = {
   question: '답을 기다립니다',
   approval: '계획 승인을 기다립니다',
   gate_failed: '검증 실패',
+  needs_review: '확인 필요',
   error: '오류',
   budget: '토큰 한도',
 };

@@ -19,7 +19,7 @@ import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentRe
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection, withLanguageReminder } from './prompts';
 import { createToolResultCache } from './tool-output';
-import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
+import { buildTools, createMismatchLog, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
@@ -234,6 +234,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   // 프로젝트 루트(세션 작업 복사본)의 AGENTS.md를 실행마다 새로 읽는다(ADR-077). 승격으로 runQuery를 다시 열어도
   // 같은 실행 안이므로 다시 읽지 않고 이 값을 그대로 재사용한다(아래 클로저가 캡처한다)
   const guide = await loadProjectGuide(project);
+  // report_mismatch가 남긴 어긋남. 결과에 실어 호출자가 "확인 필요"로 보인다(#666)
+  const mismatches = createMismatchLog();
   const context: ToolContext = {
     project,
     selfCheck: options.selfCheck,
@@ -248,6 +250,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       asked = question;
       onEvent({ type: 'question', ...question });
     },
+    onMismatch: (mismatch) => {
+      if (mismatches.add(mismatch)) onEvent({ type: 'mismatch', ...mismatch });
+    },
     // 직접 만든 루프와 같은 기본값. 없으면 studio.yaml의 워크플로 정책이 이 경로에만 빠진다
     policy: options.policy ?? executionPolicyFor(project),
     approvalToken: options.approvalToken,
@@ -261,9 +266,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     ...(options.ensureSandbox ? { ensureSandbox: options.ensureSandbox } : {}),
   };
   const specs = buildTools(project, {
-    ...(options.board ? { board: options.board, allowedTools: context.policy?.allowedTools } : {}),
+    ...(options.board ? { board: options.board } : {}),
+    // 허용 도구 목록은 조율 도구와 어긋남 보고 도구를 넣을지 정할 때만 쓴다
+    ...(context.policy?.allowedTools ? { allowedTools: context.policy.allowedTools } : {}),
     design: options.design !== undefined,
     interactive,
+    mismatch: !ask,
   });
   const toolName = (name: string) => `mcp__${SERVER}__${name}`;
 
@@ -361,6 +369,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       metrics: { ...metrics },
       sessionId,
       ...(failureReason ? { failureReason } : {}),
+      ...(mismatches.list.length > 0 ? { mismatches: [...mismatches.list] } : {}),
     };
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다

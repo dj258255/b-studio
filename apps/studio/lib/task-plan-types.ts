@@ -1,4 +1,4 @@
-import type { AgentUsage, BoardStats, Effort, NoteKind, PlanBackend, RunMetrics, Topology } from '@b-studio/agent';
+import type { AgentUsage, BoardStats, Effort, NoteKind, PlanBackend, RequestMismatch, RunMetrics, Topology } from '@b-studio/agent';
 import type { TaskPlanMetrics } from './task-plan-metrics';
 
 /** 로컬 CLI 계획의 기록용 모델 id 접두어(task-plans.ts와 같은 값). 여기 둬 화면 쪽도 서버 파일을 몰라도 쓸 수 있게 한다 */
@@ -98,6 +98,8 @@ export interface TaskPlanTaskView {
   checkpoint?: TaskPlanCheckpointView;
   /** 이 작업 실행의 지표 (실패한 작업도 기록한다) */
   run?: TaskPlanRunMetricsView;
+  /** 에이전트가 알린 요청과 확인의 어긋남(#666). 있으면 done이어도 계획 화면이 "확인 필요"로 보인다 */
+  mismatches?: RequestMismatch[];
 }
 
 export interface TaskPlanLaneView {

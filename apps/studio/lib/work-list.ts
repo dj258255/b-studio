@@ -13,7 +13,7 @@ export type WorkMode = 'single' | 'fleet' | 'split';
 export const WORK_MODE_LABEL: Record<WorkMode, string> = { single: '한 명', fleet: '여러 명 비교', split: '나눠서 병렬' };
 
 /** 개입 사유 우선순위. 서버(agents-overview의 ATTENTION_PRIORITY)와 같은 순서여야 한다(테스트로 묶는다) */
-export const WORK_ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'error', 'budget'];
+export const WORK_ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'needs_review', 'error', 'budget'];
 
 /** 묶은 줄의 대표 상태. 움직이는 것을 먼저 보여 준다 */
 const STATE_PRIORITY: readonly AgentState[] = ['working', 'booting', 'error', 'idle', 'dormant', 'stopped'];

@@ -127,4 +127,6 @@
 ## 이후 진행
 
 - 레인의 마지막 보고에 적힌 어긋남을 판정에 올리는 방법을 정하고 T2를 다시 잽니다([#666](https://github.com/dj258255/b-studio/issues/666)).
+  - 2026-10-22: 선택지 1(어긋남을 알리는 도구)을 구현했습니다(ADR-182). 에이전트가 `report_mismatch`를 부르면 그 레인 작업은 `done`으로 이어 가되 계획 화면에 "확인 필요"가 붙고, 벤치의 레인 작업 행에 `mismatches`가 남습니다. **재측정 대기**: 실제 모델이 필요해 아직 돌리지 않았습니다.
+  - 재측정 방법: 위 "조건"과 같은 환경(로컬 Claude Code `sonnet`, 검증 full)에서 `pnpm bench:coordination --strategies S0 --tasks orders-list,order-detail,order-summary --repeats 3 --handoff-tests conflict`를 돌립니다. 결과 `results.jsonl`에서 인수 검사가 실패한 행 가운데 `lanes[].tasks[].mismatches`가 비어 있는 행 수가 "완료로 닫힌 틀린 결과"입니다. 완료 조건(#666)은 9회 중 0회이거나, 닫힌 행마다 `mismatches`가 있는 것입니다. 거짓 경보를 보려면 `--handoff-tests correct`도 9회 돌려 `mismatches`가 있는 행을 셉니다.
 - 건넨 테스트를 쓸 때는 요청에서 따로 뽑은 확인(화면 확인의 기대 문구 등)을 함께 둡니다. 테스트와 그 확인이 어긋나면 게이트가 실패합니다.

@@ -2,8 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { kindRecords, type RoutingStatsRow } from './routing-types';
 
 /** 미리보기 옆의 같은 작업 종류 기록(#827). 표의 줄(백엔드 × 모델 × 종류)을 백엔드별로 모은다 */
-function row(backend: string, model: string, kind: RoutingStatsRow['kind'], counts: Partial<Pick<RoutingStatsRow, 'passed' | 'failed' | 'errors' | 'platformFailures' | 'noChange'>>): RoutingStatsRow {
-  const filled = { passed: 0, failed: 0, errors: 0, platformFailures: 0, noChange: 0, ...counts };
+function row(backend: string, model: string, kind: RoutingStatsRow['kind'], counts: Partial<Pick<RoutingStatsRow, 'passed' | 'failed' | 'errors' | 'platformFailures' | 'noChange' | 'needsReview'>>): RoutingStatsRow {
+  const filled = { passed: 0, failed: 0, errors: 0, platformFailures: 0, noChange: 0, needsReview: 0, ...counts };
   return { backend, model, kind, runs: Object.values(filled).reduce((a, b) => a + b, 0), ...filled };
 }
 

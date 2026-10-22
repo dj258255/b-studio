@@ -440,6 +440,33 @@ describe('runAgent', () => {
     expect(withAsk.requests[0]!.tools.map((tool) => tool.name)).toContain('ask_user');
   });
 
+  it('어긋남을 보고하면 게이트를 통과해도 결과에 실어 확인 필요로 넘긴다. 실행은 멈추지 않는다 (#666)', async () => {
+    const client = new ScriptedModelClient([
+      { toolCalls: [{ name: 'report_mismatch', input: { request_value: '배송비 3,000원', check_value: '테스트는 2,500원', followed: 'check', note: '테스트를 따랐습니다' } }] },
+      { toolCalls: [{ name: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }] },
+      { text: '만들었습니다.' },
+    ]);
+    const events: AgentEvent[] = [];
+    const result = await runAgent({ request: '배송비를 3,000원으로', project, sandbox: fakeSandbox(project, [true]), client, fetcher: async () => contract, onEvent: collect(events) });
+
+    expect(result).toMatchObject({ status: 'done', gateOutcome: 'pass', changedFiles: ['api/src/New.java'] });
+    expect(result.mismatches).toEqual([{ requestValue: '배송비 3,000원', checkValue: '테스트는 2,500원', followed: 'check', note: '테스트를 따랐습니다' }]);
+    // 레인·벤치처럼 interactive가 아닌 실행에도 도구가 보인다(레인에서는 멈춰 물을 수 없다)
+    expect(client.requests[0]!.tools.map((tool) => tool.name)).toContain('report_mismatch');
+    expect(events.some((event) => event.type === 'mismatch')).toBe(true);
+  });
+
+  it('어긋남을 보고하지 않은 실행은 결과에 mismatches가 없고, 질문 모드에는 도구가 없다 (#666)', async () => {
+    const plain = new ScriptedModelClient([{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/New.java', content: 'class New {}' } }] }, { text: '끝' }]);
+    const result = await runAgent({ request: '새 클래스', project, sandbox: fakeSandbox(project, [true]), client: plain, fetcher: async () => contract });
+    expect(result.status).toBe('done');
+    expect(result).not.toHaveProperty('mismatches');
+
+    const ask = new ScriptedModelClient([{ text: '주문 API입니다.' }]);
+    await runAgent({ request: '설명해줘', project, sandbox: fakeSandbox(project, []), client: ask, intent: 'ask', fetcher: async () => contract });
+    expect(ask.requests[0]!.tools.map((tool) => tool.name)).not.toContain('report_mismatch');
+  });
+
   it('실행 중 지시는 다음 모델 호출 직전에 도구 결과 뒤에 붙는다(도구 호출 도중에 끼어들지 않는다)', async () => {
     const queue = fakeSteering();
     const events: AgentEvent[] = [];

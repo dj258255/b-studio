@@ -15,6 +15,7 @@ import {
   type PlanGraphTone,
 } from '@/lib/plan-graph';
 import { describeTokens, hasTokens } from '@/lib/usage';
+import { MismatchNotice } from './mismatch-notice';
 
 const TONE_FILL: Record<PlanGraphTone, string> = { pass: 'fill-pass', fail: 'fill-fail', wait: 'fill-wait', idle: 'fill-muted' };
 
@@ -283,6 +284,7 @@ function NodeDetail({ plan, node }: { plan: TaskPlanView; node: PlanGraphNode })
               </p>
               {task.run.usage && hasTokens(task.run.usage) && <p className="mt-0.5 text-xs text-muted">{describeTokens(task.run.usage)}</p>}
               {task.summary && <p className="mt-1 text-xs leading-5 whitespace-pre-wrap text-muted">{task.summary}</p>}
+              {task.status === 'done' && <MismatchNotice mismatches={task.mismatches} />}
             </>
           ) : (
             <p className="text-sm text-muted">아직 실행 기록이 없습니다.</p>
