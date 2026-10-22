@@ -258,7 +258,8 @@ function FileEntry({ file }: { file: PullFile }) {
 /**
  * PR 상세 내용(데이터를 이미 받은 뒤). 렌더링만 하는 순수 컴포넌트라 서버 렌더 테스트로 확인할 수 있다.
  * "확인" 액션: 요구 사항 대조(연결된 이슈의 체크리스트를 모아 대화 요청으로 채운다)와 PR 브랜치로 작업(둘 다 채우기만 하고 보내지 않는다).
- * "세션에서 다시 검증"은 세션에 그 기능(게이트를 처음부터 다시 돌리는 진입점)이 아직 없어 넣지 않았다.
+ * 게이트를 처음부터 다시 돌리는 "다시 검증"(#798)은 이 PR을 만든 세션의 코드 > 변경 기록 탭에 있다. 여기서는 그곳을 안내만 한다
+ * (세션 화면이 체크포인트와 작업 복사본이 같은지 보고 돌리기 때문이다).
  */
 export function PullDetailBody({
   pull,
@@ -453,6 +454,7 @@ export function PullDetailBody({
             </button>
           </div>
           {matchError && <p className="text-sm text-fail">{matchError}</p>}
+          {pull.sessionId && <p className="text-xs leading-5 text-muted">지금 체크포인트를 같은 검증 게이트로 다시 확인하려면 이 PR을 만든 세션의 코드 &gt; 변경 기록에서 다시 검증을 누르세요.</p>}
         </div>
       )}
     </div>

@@ -5,8 +5,8 @@ import { RoutingStatsPanel } from "./routing-stats-panel";
 
 const stats: RoutingStats = {
   rows: [
-    { backend: "claude-code", model: "sonnet", kind: { complexity: "simple", risk: "normal" }, runs: 3, passed: 2, failed: 1, errors: 0, platformFailures: 1, noChange: 0, passRate: 2 / 3, medianCostUsd: 0.0123, medianDurationMs: 61_000 },
-    { backend: "codex", model: "(모름)", kind: "unknown", runs: 1, passed: 0, failed: 0, errors: 0, platformFailures: 0, noChange: 1 },
+    { backend: "claude-code", model: "sonnet", kind: { complexity: "simple", risk: "normal" }, runs: 3, passed: 2, failed: 1, errors: 0, platformFailures: 1, noChange: 0, needsReview: 1, passRate: 2 / 3, medianCostUsd: 0.0123, medianDurationMs: 61_000 },
+    { backend: "codex", model: "(모름)", kind: "unknown", runs: 1, passed: 0, failed: 0, errors: 0, platformFailures: 0, noChange: 1, needsReview: 0 },
   ],
   excluded: { asks: 4, unfinished: 2 },
 };
@@ -23,6 +23,8 @@ describe("RoutingStatsPanel(#821)", () => {
     expect(html).toContain("1분 1초");
     // 플랫폼 실패는 성적과 따로 적는다
     expect(html).toContain("플랫폼 문제 1");
+    // 어긋남을 알린 통과는 통과율 밖에 따로 적는다(#666)
+    expect(html).toContain("확인 필요 1");
   });
 
   it("판정할 실행이 없는 줄은 통과율 대신 까닭을 적는다", () => {

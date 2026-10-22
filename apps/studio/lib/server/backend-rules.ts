@@ -113,7 +113,13 @@ export function previewBackend(input: { request: string; intent: RuleIntent }, d
 }
 
 /** 요청을 보낼 때. 허용하고 로그인된 첫 후보를 고른다. 모두 쓸 수 없으면 409로 각 까닭을 알린다 */
-export async function chooseBackend(input: { request: string; intent: RuleIntent; cwd: string }, deps: RoutingDeps = defaultDeps()): Promise<RoutingDecision> {
+/**
+ * 고르는 쪽이 따로 거르는 조건(#836). 그 백엔드를 이번 요청에 쓸 수 없으면 까닭을, 쓸 수 있으면 undefined를 돌려준다.
+ * 터미널로 보낼 때 터미널에서 띄울 수 없는 AI를 거른다
+ */
+export type BackendFilter = (backend: string) => string | undefined;
+
+export async function chooseBackend(input: { request: string; intent: RuleIntent; cwd: string; only?: BackendFilter }, deps: RoutingDeps = defaultDeps()): Promise<RoutingDecision> {
   const { kind, rules, candidates } = candidatesFor(input, deps);
   const allowed = new Set(deps.allowed());
   const skipped: RoutingSkip[] = [];
@@ -121,6 +127,11 @@ export async function chooseBackend(input: { request: string; intent: RuleIntent
   for (const candidate of candidates) {
     if (!allowed.has(candidate.backend)) {
       skipped.push({ rule: candidate.rule, backend: candidate.backend, reason: `이 스튜디오가 허용하지 않는 백엔드입니다(B_STUDIO_BACKENDS)` });
+      continue;
+    }
+    const unusable = input.only?.(candidate.backend);
+    if (unusable !== undefined) {
+      skipped.push({ rule: candidate.rule, backend: candidate.backend, reason: unusable });
       continue;
     }
     let reason = failed.get(candidate.backend);
@@ -146,8 +157,10 @@ export async function chooseBackend(input: { request: string; intent: RuleIntent
  * 이번 요청만 사람이 고른 AI로 보낸다(#827). 규칙은 보지 않는다. 허용과 로그인은 chooseBackend와 같이 확인하지만,
  * 사람이 고른 것이므로 안 되면 다른 AI로 넘어가지 않고 거절한다(허용 밖 400, 로그인 전 409)
  */
-export async function chooseDirect(input: { backend: string; model?: string; request: string; intent: RuleIntent; cwd: string }, deps: RoutingDeps = defaultDeps()): Promise<RoutingDecision> {
+export async function chooseDirect(input: { backend: string; model?: string; request: string; intent: RuleIntent; cwd: string; only?: BackendFilter }, deps: RoutingDeps = defaultDeps()): Promise<RoutingDecision> {
   if (!deps.allowed().includes(input.backend)) throw new StudioError(400, `이 스튜디오가 허용하지 않는 백엔드입니다(B_STUDIO_BACKENDS): ${input.backend}`);
+  const unusable = input.only?.(input.backend);
+  if (unusable !== undefined) throw new StudioError(400, `${input.backend}: ${unusable}`);
   try {
     await deps.ready(input.backend, input.cwd);
   } catch (error) {

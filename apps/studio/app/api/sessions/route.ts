@@ -33,6 +33,7 @@ export async function POST(request: Request) {
       route?: unknown;
       request?: unknown;
       intent?: unknown;
+      terminal?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
     const workspace = body.workspace ?? 'copy';
@@ -50,9 +51,15 @@ export async function POST(request: Request) {
       if (typeof body.request !== 'string' || !body.request.trim()) throw new StudioError(400, '규칙이나 직접 고름으로 보낼 때는 request(첫 요청)가 필요합니다');
       const intent = body.intent ?? 'build';
       if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
+      // terminal: true면 대화 러너 대신 고른 AI의 CLI 터미널을 열고 첫 요청을 붙여 넣는다(#836)
+      if (body.terminal !== undefined && body.terminal !== true) throw new StudioError(400, 'terminal은 true만 받습니다');
       const direct = body.route === 'direct' ? { backend: body.backend as string, ...(typeof body.model === 'string' ? { model: body.model } : {}) } : undefined;
-      return Response.json(await startRoutedSession({ projectId: body.projectId, user, workspace, request: body.request, intent, ...(direct ? { direct } : {}) }), { status: 201 });
+      return Response.json(
+        await startRoutedSession({ projectId: body.projectId, user, workspace, request: body.request, intent, ...(direct ? { direct } : {}), ...(body.terminal === true ? { terminal: true as const } : {}) }),
+        { status: 201 },
+      );
     }
+    if (body.terminal !== undefined) throw new StudioError(400, 'terminal은 route(rules·direct)와 함께만 받습니다');
     // 모델 선택은 model(새 이름)이나 modelId(기존 화면) 둘 다 받는다
     const requestedModel = body.model ?? body.modelId;
     if (requestedModel !== undefined && typeof requestedModel !== 'string') throw new StudioError(400, 'model은 문자열이어야 합니다');

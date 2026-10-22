@@ -42,6 +42,7 @@ const ATTENTION_TONE: Record<AgentAttention, string> = {
   question: "text-wait",
   approval: "text-wait",
   gate_failed: "text-fail",
+  needs_review: "text-wait",
   error: "text-fail",
   budget: "text-wait",
 };

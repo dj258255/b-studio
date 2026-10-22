@@ -24,7 +24,7 @@ const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:410
 const CONTAINER_UNREACHABLE = '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다';
 
 function fakeBackend(options: { failPrepare?: string; unreachable?: boolean } = {}) {
-  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[], targets: [] as TerminalTarget[] };
+  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[], targets: [] as TerminalTarget[], prompts: [] as Array<string | undefined> };
   const backend: TerminalBackend = {
     async prepare(target, gateway) {
       record.ensured.push(target.sandboxId);
@@ -33,8 +33,9 @@ function fakeBackend(options: { failPrepare?: string; unreachable?: boolean } = 
       if (options.failPrepare) throw new Error(options.failPrepare);
       return `${target.sandboxId}-agent`;
     },
-    open(place, { id, size, target }) {
+    open(place, { id, size, target, initialPrompt }) {
       record.targets.push(target);
+      record.prompts.push(initialPrompt);
       const terminal = new FakeTerminal(place, id, size);
       record.terminals.push(terminal);
       return terminal;
@@ -378,6 +379,26 @@ describe('세션 터미널 (이슈 #673)', () => {
     subscribeSessionTerminal(id, (message) => messages.push(message));
     await expect(openSessionTerminal(id, { ...target, gateway: async () => address }, {}, host)).rejects.toThrow('이 컴퓨터에서 b-studio의 관문에 닿지 못합니다');
     expect(messages.at(-1)).toMatchObject({ kind: 'status', state: 'closed', message: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다' });
+  });
+
+  it('첫 요청(#836): 받는 백엔드면 새로 열 때만 넘기고 넘겼다고 알린다. 이미 열렸거나 남이 여는 중이거나 받지 않는 백엔드면 넘기지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    const accepting: TerminalBackend = { ...backend, acceptsInitialPrompt: true };
+    const [first, second] = await Promise.all([
+      openSessionTerminal(id, target, {}, accepting, { initialPrompt: '주문 화면 고쳐 줘' }),
+      openSessionTerminal(id, target, {}, accepting, { initialPrompt: '다른 요청' }),
+    ]);
+    expect(first).toEqual({ initialPromptUsed: true });
+    expect(second).toEqual({ initialPromptUsed: false });
+    expect(record.prompts).toEqual(['주문 화면 고쳐 줘']);
+    expect(await openSessionTerminal(id, target, {}, accepting, { initialPrompt: '또' })).toEqual({ initialPromptUsed: false });
+    expect(record.prompts).toHaveLength(1);
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+
+    const other = `${id}-container`;
+    expect(await openSessionTerminal(other, target, {}, backend, { initialPrompt: '주문 화면 고쳐 줘' })).toEqual({ initialPromptUsed: false });
+    expect(record.prompts.at(-1)).toBeUndefined();
+    await disposeSessionTerminal(other, target.sandboxId, backend);
   });
 
   it('open이 Promise를 돌려줘도 열리고, open에 target이 그대로 넘어온다', async () => {

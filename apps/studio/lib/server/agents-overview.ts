@@ -7,23 +7,26 @@
  * 판정 규칙(state·attention)은 순수 함수로 두고 테스트한다. 수집기는 기존 목록 함수가 돌려주는 것만 쓴다 —
  * 권한 규칙을 새로 만들지 않는다(로그인한 사람이 볼 수 있는 것은 그대로).
  */
-import type { AgentEvent, AgentUsage } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, RequestMismatch } from '@b-studio/agent';
 import { stripAnsi } from '@b-studio/sandbox';
 import type { FleetView } from '@/lib/fleet-types';
+import { mismatchLine } from '@/lib/mismatch';
 import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-events';
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
-import { overviewSessions, sessionBackend } from './sessions';
+import { sessionTerminalPresence } from './session-terminal';
+import { overviewSessions, sessionBackend, sessionHistory } from './sessions';
 import { listTaskPlans } from './task-plans';
+import { buildTokenReports, tokenPricing, type TokenPricing } from './token-report';
 
 export type AgentKind = 'session' | 'lane' | 'fleet';
 /** dormant: 샌드박스를 아직 켜지 않은 세션(지연 기동). idle: 켜져 있지만 요청을 처리하지 않는다 */
 export type AgentState = 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'error';
 /** 개입이 필요한 이유. 여러 개면 우선순위가 높은 것 하나만 남긴다 */
-export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'error' | 'budget';
+export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'needs_review' | 'error' | 'budget';
 
 /** 개입 필요 우선순위(앞일수록 먼저) */
-export const ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'error', 'budget'];
+export const ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'needs_review', 'error', 'budget'];
 /** 제목은 요청 앞 이 글자 수로 줄인다 */
 export const TITLE_CHARS = 80;
 /** 개입 사유 한 줄은 이 글자 수로 줄인다 */
@@ -52,6 +55,26 @@ export interface AgentItem {
   activity?: string;
   /** 여러 명 비교(fleet)·나눠서 병렬(plan)에 속한 항목이면 그 작업. 작업 화면이 이 값으로 한 줄로 묶는다 */
   group?: AgentGroup;
+  /** 세션 터미널을 연 세션일 때만(#835): CLI가 떠 있는지, 권한 확인 창에서 사람을 기다리는지 */
+  terminal?: AgentTerminalStatus;
+  /** 게이트의 지금 상태와 게이트를 통과한 체크포인트 수(#835). 세션 스냅샷이 없으면 없다 */
+  gate?: AgentGateStatus;
+  /** 세션 기록의 실행 비용 합(추정, 가격표 기준). 모르면 없다 */
+  costUsd?: number;
+}
+
+export interface AgentTerminalStatus {
+  cli: 'up' | 'down';
+  waiting?: 'permission';
+}
+
+/**
+ * verifying: 지금 실행에서 검증이 시작됐고 아직 결과가 없다. passed·failed: 지금(또는 마지막) 실행의 마지막 검증 판정.
+ * none: 이번 실행에 판정이 없다(질문, 바꾼 것 없음, 취소, 아직 검증 전)
+ */
+export interface AgentGateStatus {
+  state: 'verifying' | 'passed' | 'failed' | 'none';
+  checkpoints: number;
 }
 
 /** 항목이 속한 작업. href는 그 작업의 화면(비교·병렬 화면에서 그 작업을 연다) */
@@ -79,6 +102,25 @@ export interface SessionOverviewSource {
   runningSince?: string;
   /** 마지막 요청(제목) */
   lastRequest?: string;
+  /** 이 프로세스에서 세션 터미널을 연 적이 있으면 그 CLI가 떠 있는지(withDeskFacts가 붙인다) */
+  terminal?: { cliAlive: boolean };
+  /** 세션 기록 전체에서 계산한 실행 비용 합(withDeskFacts가 붙인다) */
+  costUsd?: number;
+}
+
+/** studio desk 사이드바의 사실을 모으는 곳. 테스트가 바꿔 끼운다 */
+export interface DeskFactDeps {
+  terminal: (sessionId: string) => { cliAlive: boolean } | undefined;
+  costUsd: (sessionId: string) => number | undefined;
+}
+
+/** 수집한 세션에 터미널 CLI 상태와 비용을 붙인다(#835). 모르는 값은 붙이지 않는다 */
+export function withDeskFacts(sessions: readonly SessionOverviewSource[], deps: DeskFactDeps): SessionOverviewSource[] {
+  return sessions.map((source) => {
+    const terminal = deps.terminal(source.snapshot.id);
+    const costUsd = deps.costUsd(source.snapshot.id);
+    return { ...source, ...(terminal ? { terminal } : {}), ...(costUsd !== undefined ? { costUsd } : {}) };
+  });
 }
 
 export interface AgentOverviewInput {
@@ -113,6 +155,8 @@ interface AgentRow {
   /** 스냅샷이 없을 때의 토큰 */
   tokens?: AgentUsage;
   group?: AgentGroup;
+  terminal?: { cliAlive: boolean };
+  costUsd?: number;
 }
 
 function emptyUsage(): AgentUsage {
@@ -159,7 +203,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         projectName: plan.projectId,
         owner: plan.owner,
         ...(source
-          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}) }
+          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...deskFactsOf(source) }
           : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane), ...(lane.error ? { fallbackReason: lane.error } : {}) }),
         // 레인은 그 레인이 고른 백엔드(세션이 있으면 스냅샷)를 보여 준다
         backend: source ? sessionBackend(source.snapshot) : lane.backend,
@@ -181,7 +225,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         projectName: fleet.projectName,
         owner: fleet.owner,
         ...(source
-          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}) }
+          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...deskFactsOf(source) }
           : { updatedAt: member.finishedAt ?? member.startedAt ?? fleet.createdAt, fallbackState: fleetMemberState(member.status), fallbackAttention: fleetMemberAttention(member.status) }),
         backend: source ? sessionBackend(source.snapshot) : undefined,
         tokens: source?.snapshot.tokens ?? member.usage,
@@ -205,11 +249,16 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
       updatedAt: source.updatedAt,
       backend: sessionBackend(source.snapshot),
       ...(source.runningSince ? { runningSince: source.runningSince } : {}),
+      ...deskFactsOf(source),
     });
   }
 
   const items = rows.map((row) => evaluate(row, now)).sort(compareItems);
   return { items, totals: totalsOf(items) };
+}
+
+function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd'> {
+  return { ...(source.terminal ? { terminal: source.terminal } : {}), ...(source.costUsd !== undefined ? { costUsd: source.costUsd } : {}) };
 }
 
 function planGroup(id: string): AgentGroup {
@@ -218,8 +267,28 @@ function planGroup(id: string): AgentGroup {
 
 /** 라우트가 쓰는 수집기. 기존 목록 함수가 돌려주는 것만 모은다(권한 규칙을 새로 만들지 않는다) */
 export async function listAgentOverview(user: string): Promise<{ items: AgentItem[]; totals: AgentTotals }> {
-  const sessions = await overviewSessions();
+  const pricing = tokenPricing(process.env);
+  const sessions = withDeskFacts(await overviewSessions(), {
+    terminal: (id) => sessionTerminalPresence(id),
+    // 기록을 읽지 못한 세션(사라진 보관 기록 등)은 비용을 모르는 것으로 둔다. 목록 전체를 실패시키지 않는다
+    costUsd: (id) => {
+      try {
+        return sessionCostUsd(sessionHistory(id), pricing);
+      } catch {
+        return undefined;
+      }
+    },
+  });
   return buildAgentOverview({ sessions, plans: listTaskPlans(user), fleets: listFleets(user) });
+}
+
+/** 세션 기록의 실행별 추정 비용 합. 비용을 아는 실행이 하나도 없으면 없다 */
+export function sessionCostUsd(events: readonly StudioEvent[], pricing: TokenPricing): number | undefined {
+  let total: number | undefined;
+  for (const report of buildTokenReports(events, pricing)) {
+    if (report.estimatedCostUsd !== undefined) total = (total ?? 0) + report.estimatedCostUsd;
+  }
+  return total;
 }
 
 /** 한 항목의 상태·개입 사유·활동을 판정한다 */
@@ -245,7 +314,44 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(tokens ? { tokens } : {}),
     ...(state === 'working' ? { activity: activityOf(row.recent ?? []) } : {}),
     ...(row.group ? { group: row.group } : {}),
+    ...(row.terminal ? { terminal: terminalStatusOf(row.terminal, row.snapshot) } : {}),
+    ...(row.snapshot ? { gate: gateStatusOf(row.snapshot, row.recent ?? []) } : {}),
+    ...(row.costUsd !== undefined ? { costUsd: row.costUsd } : {}),
   };
+}
+
+/** 권한 확인 창(permission_prompt)만 권한 대기로 본다. 입력 대기·되묻기는 사이드바의 작업 상태가 보인다 */
+export function terminalStatusOf(terminal: { cliAlive: boolean }, snapshot: SessionSnapshot | undefined): AgentTerminalStatus {
+  const waiting = terminal.cliAlive && snapshot?.terminalAttention?.kind === 'permission_prompt';
+  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting: 'permission' as const } : {}) };
+}
+
+/**
+ * 게이트 상태는 마지막 실행(마지막 run_started 뒤의 기록)만 본다 — 앞 실행의 판정을 새 실행에 들고 오지 않는다.
+ * 그 실행의 마지막 검증 이벤트가 결과면 그 결과, 시작이고 실행이 아직 열려 있으면 verifying.
+ * 검증 이벤트가 없으면(최근 기록에서 잘렸거나 결과 없이 끝남) 실행이 failed로 끝났을 때만 failed다.
+ * 체크포인트는 게이트 통과 기록(Workflow-Passed)이 있는 것만 센다(세션 시작·검증 없이 남긴 체크포인트는 빼고)
+ */
+export function gateStatusOf(snapshot: SessionSnapshot, recent: readonly StudioEvent[]): AgentGateStatus {
+  const checkpoints = snapshot.checkpoints.filter((checkpoint) => (checkpoint.passedStages?.length ?? 0) > 0).length;
+  const startIndex = recent.findLastIndex((event) => event.type === 'run_started');
+  const run = startIndex >= 0 ? recent.slice(startIndex + 1) : recent;
+  const finished = run.findLast((event) => event.type === 'run_finished');
+  let lastVerify: Extract<AgentEvent, { type: 'verify_start' | 'verify_result' }> | undefined;
+  for (const event of run) {
+    if (event.type === 'agent' && (event.event.type === 'verify_start' || event.event.type === 'verify_result')) lastVerify = event.event;
+  }
+  const state: AgentGateStatus['state'] =
+    lastVerify?.type === 'verify_result'
+      ? lastVerify.report.ok
+        ? 'passed'
+        : 'failed'
+      : lastVerify?.type === 'verify_start' && !finished && snapshot.running
+        ? 'verifying'
+        : finished?.type === 'run_finished' && finished.status === 'failed'
+          ? 'failed'
+          : 'none';
+  return { state, checkpoints };
 }
 
 function stateOf(row: AgentRow): AgentState {
@@ -260,7 +366,8 @@ function stateOf(row: AgentRow): AgentState {
 }
 
 /**
- * 개입 사유 하나를 고른다(우선순위: question > approval > gate_failed > error > budget).
+ * 개입 사유 하나를 고른다(우선순위: question > approval > gate_failed > needs_review > error > budget).
+ * needs_review는 마지막 실행이 done이지만 에이전트가 요청과 확인의 어긋남을 알렸다는 뜻이다(#666).
  * question은 스냅샷의 `pendingQuestion`(되묻기 대기, ADR-056)으로 본다.
  */
 function attentionOf(row: AgentRow): AgentAttention | undefined {
@@ -271,6 +378,7 @@ function attentionOf(row: AgentRow): AgentAttention | undefined {
   if (hasPendingQuestion(snapshot)) candidates.push('question');
   if (row.approval) candidates.push('approval');
   if (finished?.status === 'failed') candidates.push('gate_failed');
+  if (finished?.status === 'done' && finished.mismatches?.length) candidates.push('needs_review');
   if (snapshot && (snapshot.status === 'failed' || snapshot.error)) candidates.push('error');
   if (!snapshot && row.fallbackAttention) candidates.push(row.fallbackAttention);
   if (finished?.status === 'cancelled' && cancelledByBudget(recent, finished.runId)) candidates.push('budget');
@@ -285,6 +393,10 @@ function reasonOf(row: AgentRow, attention: AgentAttention): string | undefined 
   if (attention === 'gate_failed') {
     const event = (row.recent ?? []).findLast((candidate) => candidate.type === 'run_finished');
     if (event?.type === 'run_finished' && event.summary) return oneLine(event.summary);
+  }
+  if (attention === 'needs_review') {
+    const mismatch = lastFinishedRun(row.recent ?? [])?.mismatches?.[0];
+    if (mismatch) return oneLine(mismatchLine(mismatch));
   }
   return undefined;
 }
@@ -303,9 +415,9 @@ function hasPendingQuestion(snapshot: SessionSnapshot | undefined): boolean {
   return snapshot?.pendingQuestion !== undefined;
 }
 
-function lastFinishedRun(recent: readonly StudioEvent[]): { runId: string; status: string } | undefined {
+function lastFinishedRun(recent: readonly StudioEvent[]): { runId: string; status: string; mismatches?: RequestMismatch[] } | undefined {
   const event = recent.findLast((candidate) => candidate.type === 'run_finished');
-  return event?.type === 'run_finished' ? { runId: event.runId, status: event.status } : undefined;
+  return event?.type === 'run_finished' ? { runId: event.runId, status: event.status, ...(event.mismatches ? { mismatches: event.mismatches } : {}) } : undefined;
 }
 
 function cancelledByBudget(recent: readonly StudioEvent[], runId: string): boolean {
@@ -369,6 +481,8 @@ function laneState(status: TaskPlanView['lanes'][number]['status']): AgentState 
 
 function laneAttention(lane: TaskPlanView['lanes'][number]): AgentAttention | undefined {
   if (lane.status === 'failed') return lane.error?.includes('게이트') || lane.error?.includes('검증') ? 'gate_failed' : 'error';
+  // 작업 하나라도 요청과 확인의 어긋남을 알렸으면 끝난 레인도 확인이 필요하다(#666)
+  if (lane.tasks.some((task) => task.mismatches?.length)) return 'needs_review';
   return undefined;
 }
 

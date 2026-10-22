@@ -22,7 +22,7 @@ export interface RoutingSessionEvents {
   events: readonly StudioEvent[];
 }
 
-type Outcome = 'passed' | 'failed' | 'errors' | 'platformFailures' | 'noChange';
+type Outcome = 'passed' | 'failed' | 'errors' | 'platformFailures' | 'noChange' | 'needsReview';
 
 interface DraftRun {
   backend: string;
@@ -32,6 +32,8 @@ interface DraftRun {
   status?: Extract<StudioEvent, { type: 'run_finished' }>['status'];
   checkpointed: boolean;
   platformFailure: boolean;
+  /** 에이전트가 요청과 확인의 어긋남을 알렸다(#666) */
+  mismatch: boolean;
   durationMs?: number;
   usageByModel?: Record<string, AgentUsage>;
 }
@@ -58,6 +60,7 @@ function collectRuns(session: RoutingSessionEvents): Map<string, DraftRun> {
         ask: event.intent === 'ask',
         checkpointed: false,
         platformFailure: false,
+        mismatch: false,
       });
       continue;
     }
@@ -66,6 +69,7 @@ function collectRuns(session: RoutingSessionEvents): Map<string, DraftRun> {
     if (!run) continue;
     if (event.type === 'run_finished') {
       run.status = event.status;
+      run.mismatch = Boolean(event.mismatches?.length);
       if (event.durationMs !== undefined) run.durationMs = event.durationMs;
       if (event.metrics?.usageByModel) run.usageByModel = event.metrics.usageByModel;
     } else if (event.type === 'checkpoint') {
@@ -79,7 +83,8 @@ function collectRuns(session: RoutingSessionEvents): Map<string, DraftRun> {
 }
 
 function outcomeOf(run: DraftRun): Outcome | undefined {
-  if (run.status === 'done') return run.checkpointed ? 'passed' : 'noChange';
+  // 어긋남을 알린 통과는 맞았는지 사람이 봐야 한다. 통과로 세면 틀린 쪽을 고른 실행이 그 AI의 통과율을 올린다(ADR-182)
+  if (run.status === 'done') return run.checkpointed ? (run.mismatch ? 'needsReview' : 'passed') : 'noChange';
   if (run.status === 'failed') return run.platformFailure ? 'platformFailures' : 'failed';
   if (run.status === 'error') return 'errors';
   return undefined;
@@ -117,7 +122,7 @@ export function buildRoutingStats(input: { sessions: readonly RoutingSessionEven
       const key = `${run.backend}\u0000${model}\u0000${kindKey(run.kind)}`;
       let row = rows.get(key);
       if (!row) {
-        row = { backend: run.backend, model, kind: run.kind, runs: 0, passed: 0, failed: 0, errors: 0, platformFailures: 0, noChange: 0, costs: [], durations: [] };
+        row = { backend: run.backend, model, kind: run.kind, runs: 0, passed: 0, failed: 0, errors: 0, platformFailures: 0, noChange: 0, needsReview: 0, costs: [], durations: [] };
         rows.set(key, row);
       }
       row.runs += 1;

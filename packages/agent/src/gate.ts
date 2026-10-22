@@ -191,6 +191,13 @@ export interface GateOptions {
     pendingFiles: () => Promise<readonly string[]>;
     fingerprint?: Fingerprinter;
   };
+  /**
+   * 에이전트 실행 없이 지금 작업 복사본을 처음부터 다시 확인한다(세션의 "다시 검증", #798·ADR-181). 바뀐 파일이 없어도
+   * 검증을 건너뛰지 않고, studio.yaml이 바뀐 것처럼 관리 서비스를 모두 다시 띄운 뒤 선언한 확인을 모두 돌린다.
+   * 변경 리뷰(보호 경로·변경 크기)는 이번에 바뀐 파일이 없으므로 빈 목록으로 돈다. 호출자는 작업 복사본이 확인할
+   * 체크포인트와 같은지 앞뒤로 견줘야 한다 — 게이트는 디스크에 있는 것을 확인할 뿐이다
+   */
+  recheck?: true;
 }
 
 /**
@@ -427,7 +434,8 @@ export class VerificationGate {
         ? [{ stage: 'review' as const, name: 'outside-tool-changes', ok: false, attempts: 1, detail: rejectedChangeFeedback(rejectedOutside) }]
         : []),
     ];
-    if (workspace.changedFiles().length === 0) {
+    const recheck = this.#options.recheck === true;
+    if (!recheck && workspace.changedFiles().length === 0) {
       if (recordChecks.every((check) => check.ok)) return { kind: 'pass' };
       // 바뀐 파일로 추적되지 않은 경로(서비스 안 명령 등)로 검증 기록만 고쳤다: 다른 단계는 돌릴 것이 없다
       this.checks = recordChecks;
@@ -435,7 +443,8 @@ export class VerificationGate {
       return this.#failure('', recordChecks.filter((check) => !check.ok));
     }
 
-    const files = this.#filesToVerify();
+    // 다시 확인은 studio.yaml을 바뀐 파일로 넘겨 관리 서비스를 모두 다시 띄우고 선언을 다시 읽게 한다(servicesForFiles)
+    const files = recheck ? [SPEC_FILE] : this.#filesToVerify();
     this.#stage('run');
     onEvent({ type: 'verify_start', files });
     this.#verifiedVersion = workspace.version;
@@ -507,7 +516,7 @@ export class VerificationGate {
           return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${this.#loadPlatformFailure}` };
         }
         this.#stage('review');
-        checks.push(...reviewChanges(project, workspace.changedFiles()), ...recordChecks);
+        checks.push(...reviewChanges(project, recheck ? [] : workspace.changedFiles()), ...recordChecks);
         this.checks = checks;
         for (const check of checks) onEvent({ type: 'workflow_check', check });
         for (const stage of ['browser_check', 'test', 'concurrency_check', 'load_check', 'review'] as const) {

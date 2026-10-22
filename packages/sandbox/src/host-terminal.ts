@@ -136,7 +136,9 @@ export function hostCliWrapper(dir: string, claudePath: string): string {
   return [
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
-    `exec ${shellQuote(claudePath)} --settings ${shellQuote(path.join(dir, SETTINGS_FILE))} --mcp-config ${shellQuote(path.join(dir, MCP_FILE))} "$@"`,
+    // --mcp-config는 값을 여러 개 받는다(`<configs...>`). 사용자 인자 바로 앞에 두면 첫 낱말(요청 글)을 설정 파일로 먹으므로,
+    // 값을 하나만 받는 --settings를 뒤에 둔다(#836)
+    `exec ${shellQuote(claudePath)} --mcp-config ${shellQuote(path.join(dir, MCP_FILE))} --settings ${shellQuote(path.join(dir, SETTINGS_FILE))} "$@"`,
     '',
   ].join('\n');
 }
@@ -176,6 +178,8 @@ export function codexGatewayArgs(address: Pick<AgentGatewayAddress, 'hookUrl' | 
     `mcp_servers.b-studio={url=${tomlString(address.mcpUrl)},bearer_token_env_var=${tomlString(CODEX_MCP_TOKEN_ENV)}}`,
     `otel.exporter={otlp-http={endpoint=${tomlString(`${address.hookUrl}/v1/logs`)},protocol="json"}}`,
     'otel.log_user_prompt=false',
+    // b-studio 터미널의 CLI가 시작할 때 업데이트를 묻거나 스스로 깔지 않게 한다(#836). 그 창이 뜨면 터미널에 보낸 글과 Enter가 답이 될 수 있다
+    'check_for_update_on_startup=false',
   ];
   return overrides.flatMap((value) => ['-c', value]);
 }
@@ -231,6 +235,49 @@ function wrapperPath(dir: string, kind: HostCliKind): string {
 }
 
 /**
+ * 첫 요청(#836). 터미널을 열 때 받은 첫 요청 글을 CLI의 실행 인자로 넘긴다. 키 입력(붙여 넣기 + Enter)으로 넣지 않는다:
+ * CLI가 시작하며 묻는 창(폴더 신뢰, 훅 신뢰, 업데이트)이 뜨면 그 글과 Enter가 사람 대신 그 창의 답이 된다.
+ * 글은 PTY의 환경 변수로만 받고(셸 글에 잇지 않는다), 셸이 시작 파일을 읽기 전에 셸 변수로 옮기고 환경에서 지운다.
+ * 셸 변수는 내보내지 않으므로 사용자의 시작 파일이 띄우는 프로그램과 CLI에 내려가지 않는다. 첫 실행에서 한 번 쓰고 지운다
+ */
+export const FIRST_PROMPT_ENV = 'B_STUDIO_FIRST_PROMPT';
+const FIRST_PROMPT_VAR = 'BSTUDIO_FIRST_PROMPT_VALUE';
+/** 첫 요청 글의 길이 상한. 화면의 붙여 넣기 상한(8천 자)에 앞말이 붙어도 넘지 않게 잡는다 */
+const FIRST_PROMPT_MAX = 10_000;
+
+/**
+ * CLI 실행 인자로 넘길 첫 요청 글. 옵션(`-`로 시작)이나 하위 명령(`update`처럼 빈칸 없는 한 낱말)으로 읽히지 않게 앞에 "요청: "을 붙인다.
+ * `--`로 옵션을 끝내는 길은 쓰지 않는다: claude(commander)는 `--` 뒤의 첫 낱말도 하위 명령으로 맞춰 본다
+ */
+export function firstPromptArg(text: string): string {
+  const body = text.trim();
+  if (!body) throw new SandboxError('첫 요청 글이 비어 있습니다', '빈 글은 CLI에 넘기지 않습니다');
+  if (body.includes('\0')) throw new SandboxError('첫 요청 글에 NUL 문자가 있습니다', '환경 변수로 넘길 수 없습니다');
+  if (body.length > FIRST_PROMPT_MAX) throw new SandboxError('첫 요청 글이 너무 깁니다', `${FIRST_PROMPT_MAX}자까지 넘깁니다`);
+  return body.startsWith('-') || !/\s/.test(body) ? `요청: ${body}` : body;
+}
+
+/** 받은 첫 요청을 셸 변수로 옮기고 환경에서 지운다. 사용자의 시작 파일보다 먼저 돈다 */
+const FIRST_PROMPT_CAPTURE = [
+  `if [ -n "\${${FIRST_PROMPT_ENV}+x}" ]; then`,
+  `  ${FIRST_PROMPT_VAR}="$${FIRST_PROMPT_ENV}"`,
+  `  unset ${FIRST_PROMPT_ENV}`,
+  'fi',
+];
+
+/** CLI를 처음 띄우는 자리. 첫 요청이 있으면 인자로 한 번 넘기고 지운다. 없으면 지금처럼 인자 없이 띄운다 */
+function firstLaunch(command: string, indent = ''): string[] {
+  return [
+    `if [ -n "\${${FIRST_PROMPT_VAR}+x}" ]; then`,
+    `  ${command} "$${FIRST_PROMPT_VAR}"`,
+    `  unset ${FIRST_PROMPT_VAR}`,
+    'else',
+    `  ${command}`,
+    'fi',
+  ].map((line) => indent + line);
+}
+
+/**
  * zsh 시작 파일 하나의 틀. ZDOTDIR을 사용자의 것으로 두고 사용자의 파일을 그대로 읽은 뒤, b-studio의 몇 줄을 더한다.
  * 그래야 사용자 설정(플러그인·별칭·프롬프트)이 평소 터미널과 같고, 우리 파일은 ZDOTDIR을 우리 폴더로 되돌려 다음 파일도 우리가 읽는다
  */
@@ -254,7 +301,8 @@ function zshStartFile(name: string, extra: { before?: readonly string[]; after?:
 export function hostZshFiles(dir: string, kind: HostCliKind = 'claude'): Record<(typeof ZSH_START_FILES)[number], string> {
   const wrapper = shellQuote(wrapperPath(dir, kind));
   return {
-    '.zshenv': zshStartFile('.zshenv'),
+    // 첫 요청은 사용자의 .zshenv보다 먼저 환경에서 지운다(#836)
+    '.zshenv': zshStartFile('.zshenv', { before: FIRST_PROMPT_CAPTURE }),
     '.zprofile': zshStartFile('.zprofile'),
     '.zshrc': zshStartFile('.zshrc', {
       // macOS의 /etc/zshrc가 HISTFILE을 $ZDOTDIR 아래로 잡는다. 그대로 두면 명령 기록이 관문 폴더에 쌓였다가 지워진다
@@ -267,7 +315,7 @@ export function hostZshFiles(dir: string, kind: HostCliKind = 'claude'): Record<
       after: [
         `if [[ -o interactive && -z "$${SHELL_STARTED_VAR}" ]]; then`,
         `  export ${SHELL_STARTED_VAR}=1`,
-        `  ${kind}`,
+        ...firstLaunch(kind, '  '),
         `  print -r -- ${shellQuote(shellStartedNotice(kind))}`,
         'fi',
       ],
@@ -280,6 +328,8 @@ export function hostBashRc(dir: string, kind: HostCliKind = 'claude'): string {
   const wrapper = shellQuote(wrapperPath(dir, kind));
   return [
     '# b-studio가 만든 파일입니다. 로그인 셸의 순서를 흉내 낸 뒤 b-studio의 몇 줄을 더합니다.',
+    // 첫 요청은 시작 파일보다 먼저 환경에서 지운다(#836)
+    ...FIRST_PROMPT_CAPTURE,
     '[ -r /etc/profile ] && . /etc/profile',
     'if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"',
     'elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"',
@@ -291,7 +341,7 @@ export function hostBashRc(dir: string, kind: HostCliKind = 'claude'): string {
     `function ${kind} { ${wrapper} "$@"; }`,
     `if [ -z "$${SHELL_STARTED_VAR}" ]; then`,
     `  export ${SHELL_STARTED_VAR}=1`,
-    `  ${kind}`,
+    ...firstLaunch(kind, '  '),
     `  printf '%s\\n' ${shellQuote(shellStartedNotice(kind))}`,
     'fi',
     '',
@@ -545,7 +595,8 @@ export function hostTerminalCommand(kind: HostCliKind = 'claude'): string {
   return [
     // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
     'trap : INT',
-    kind,
+    ...FIRST_PROMPT_CAPTURE,
+    ...firstLaunch(kind),
     `printf "%s\\n" ${JSON.stringify(shellStartedNotice(kind))}`,
     'exec "${SHELL:-/bin/sh}"',
   ].join('\n');
@@ -600,7 +651,8 @@ function hostFallbackCommand(dir: string, kind: HostCliKind): string {
   return [
     // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
     'trap : INT',
-    shellQuote(wrapperPath(dir, kind)),
+    ...FIRST_PROMPT_CAPTURE,
+    ...firstLaunch(shellQuote(wrapperPath(dir, kind))),
     `printf "%s\\n" ${shellQuote(shellStartedNotice(kind))}`,
     `printf "%s\\n" ${shellQuote(safe)}`,
     'exec "${SHELL:-/bin/sh}"',
@@ -656,6 +708,7 @@ export async function openHostTerminal({
   cwd,
   gatewayDir,
   cli = 'claude',
+  initialPrompt,
   env = process.env,
   spawnPty = spawnWithNodePty,
 }: {
@@ -667,14 +720,17 @@ export async function openHostTerminal({
   gatewayDir?: string;
   /** 띄울 CLI(#825). 관문 폴더의 감싸개도 같은 CLI로 써 둬야 한다 */
   cli?: HostCliKind;
+  /** CLI를 처음 띄울 때 실행 인자로 넘길 첫 요청(#836). PTY 환경 변수로만 넘기고, 셸이 한 번 쓰고 지운다 */
+  initialPrompt?: string;
   env?: Record<string, string | undefined>;
   spawnPty?: SpawnHostPty;
 }): Promise<AgentTerminal & { pid: number }> {
   const { cols, rows } = clampTerminalSize(size);
   const launch = hostShellLaunch(gatewayDir, env, cli);
+  const first: Record<string, string> = initialPrompt !== undefined ? { [FIRST_PROMPT_ENV]: firstPromptArg(initialPrompt) } : {};
   let pty: HostPty;
   try {
-    pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...launch.env } });
+    pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...launch.env, ...first } });
   } catch (error) {
     throw new SandboxError('이 컴퓨터에서 터미널을 열지 못했습니다', error instanceof Error ? error.message : String(error), { platform: true });
   }

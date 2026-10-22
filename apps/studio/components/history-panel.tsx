@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import type { SessionView } from "@/lib/session-view";
+import type { ReverifyRecord } from "@/lib/studio-events";
 import { DiffView } from "./diff-view";
 import { RepositoryBar } from "./repository-bar";
 import { useSessionAccess } from "./session-access";
@@ -35,6 +36,13 @@ export function HistoryPanel({ view }: { view: SessionView }) {
       cancelled = true;
     };
   }, [snapshot.id, activeSha]);
+
+  async function reverify() {
+    if (!active) return;
+    setError(undefined);
+    const response = await fetch(`/api/sessions/${snapshot.id}/checkpoints/${active.sha}/reverify`, { method: "POST" });
+    if (!response.ok) setError((await response.json().catch(() => ({}))).error ?? "다시 검증을 시작하지 못했습니다");
+  }
 
   async function restore() {
     if (!active) return;
@@ -167,21 +175,33 @@ export function HistoryPanel({ view }: { view: SessionView }) {
                 </button>
               )
             ) : (
-              // 지금(head) 체크포인트는 파일을 움직일 게 없다. 실행 실패·중단이 되돌리지 못한 데이터베이스만
-              // 이 체크포인트 상태로 다시 맞춘다(파일·체크포인트 기록은 그대로다) — 되돌릴 데이터베이스가 없는
-              // 프로젝트에서는 서버가 거부하고(canRestore가 running·권한만 본다) 오류로 안내한다
-              <button
-                type="button"
-                onClick={() => void restore()}
-                disabled={snapshot.status !== "ready" || snapshot.running || !access.canManage}
-                title="되돌릴 파일 변경은 없지만, 실행이 중간에 멈춰 데이터베이스가 이 체크포인트와 어긋났을 수 있습니다"
-                className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
-              >
-                데이터베이스 다시 맞추기
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void reverify()}
+                  disabled={snapshot.status !== "ready" || snapshot.running || !access.canManage}
+                  title="에이전트를 돌리지 않고 이 체크포인트를 같은 검증 게이트로 처음부터 다시 확인합니다. 결과는 기록으로만 남고 새 체크포인트는 만들지 않습니다"
+                  className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+                >
+                  다시 검증
+                </button>
+                {/* 지금(head) 체크포인트는 파일을 움직일 게 없다. 실행 실패·중단이 되돌리지 못한 데이터베이스만
+                    이 체크포인트 상태로 다시 맞춘다(파일·체크포인트 기록은 그대로다) — 되돌릴 데이터베이스가 없는
+                    프로젝트에서는 서버가 거부하고(canRestore가 running·권한만 본다) 오류로 안내한다 */}
+                <button
+                  type="button"
+                  onClick={() => void restore()}
+                  disabled={snapshot.status !== "ready" || snapshot.running || !access.canManage}
+                  title="되돌릴 파일 변경은 없지만, 실행이 중간에 멈춰 데이터베이스가 이 체크포인트와 어긋났을 수 있습니다"
+                  className="rounded-control border border-line px-3.5 py-1.5 text-sm font-medium hover:border-ink disabled:opacity-50"
+                >
+                  데이터베이스 다시 맞추기
+                </button>
+              </div>
             )}
           </div>
           {error && <p className="mt-2 text-sm text-fail">{error}</p>}
+          <ReverifyRecords records={(snapshot.reverifications ?? []).filter((record) => record.sha === active.sha)} />
 
           <div className="mt-4 min-h-0">
             {patch?.sha !== active.sha ? (
@@ -195,5 +215,37 @@ export function HistoryPanel({ view }: { view: SessionView }) {
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * 이 체크포인트를 다시 검증한 기록(#798). 최근 세 번까지 보인다. 체크포인트의 통과 기록(배포 조건)과는 따로다 —
+ * "지금 다시 돌려도 통과하는가"를 본 것일 뿐이라 배포 조건을 채우지 않는다
+ */
+export function ReverifyRecords({ records }: { records: readonly ReverifyRecord[] }) {
+  if (records.length === 0) return null;
+  return (
+    <ul className="mt-3 flex flex-col gap-1 text-sm" aria-label="다시 검증 기록">
+      {records.slice(0, 3).map((record) => (
+        <li key={record.startedAt} className={`rounded-md border px-3 py-1.5 ${record.ok ? "border-pass/40 bg-pass/10" : "border-fail/40 bg-fail/10"}`}>
+          <span className={`font-medium ${record.ok ? "text-pass" : "text-fail"}`}>{record.ok ? "다시 검증 통과" : record.platformFailure ? "다시 검증 못 함" : "다시 검증 실패"}</span>
+          <span className="text-muted">
+            {" "}
+            · {new Date(record.finishedAt).toLocaleString("ko-KR", { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} · {record.by}
+          </span>
+          <span className="block text-xs text-muted">{record.summary}</span>
+          {record.failed.length > 0 && (
+            <ul className="mt-0.5 text-xs text-fail">
+              {record.failed.slice(0, 5).map((check) => (
+                <li key={check.name}>
+                  {check.name}
+                  {check.detail ? `: ${check.detail}` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </li>
+      ))}
+    </ul>
   );
 }

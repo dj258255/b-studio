@@ -4,9 +4,9 @@
  * 반복이 적어 비율을 쓰지 않고 건수로 적는다. 중앙값은 값이 있는 실행만으로 계산하고, 값이 하나도 없으면 '—'로 둔다.
  */
 import type { TaskPlanCoordinationMetrics, TaskPlanMetrics } from '../../lib/task-plan-metrics';
-import type { TaskPlanRunMetricsView } from '../../lib/task-plan-types';
+import type { TaskPlanRunMetricsView, TaskPlanTaskView } from '../../lib/task-plan-types';
 import type { AcceptanceResult } from './acceptance';
-import type { SelfCheckMode } from '@b-studio/agent';
+import type { RequestMismatch, SelfCheckMode } from '@b-studio/agent';
 import type { BenchVerify } from './backends';
 import type { FailureCategory } from './classify';
 import type { Strategy } from './tasks';
@@ -26,7 +26,19 @@ export interface BenchLaneRow {
   status: string;
   bootMs?: number;
   error?: string;
-  tasks: Array<{ id: string; status: string; run?: TaskPlanRunMetricsView }>;
+  tasks: BenchLaneTaskRow[];
+}
+
+/** 레인 작업 한 줄. mismatches는 에이전트가 알린 요청과 확인의 어긋남(#666). E15 T2를 다시 잴 때 "확인 필요로 닫힌 실행"을 센다 */
+export interface BenchLaneTaskRow {
+  id: string;
+  status: string;
+  run?: TaskPlanRunMetricsView;
+  mismatches?: RequestMismatch[];
+}
+
+export function laneTaskRow(task: Pick<TaskPlanTaskView, 'id' | 'status' | 'run' | 'mismatches'>): BenchLaneTaskRow {
+  return { id: task.id, status: task.status, ...(task.run ? { run: task.run } : {}), ...(task.mismatches?.length ? { mismatches: task.mismatches } : {}) };
 }
 
 export interface BenchIntegrationRow {

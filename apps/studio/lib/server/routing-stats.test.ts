@@ -116,6 +116,28 @@ describe('buildRoutingStats', () => {
     expect(stats.rows[0]?.passRate).toBeUndefined();
   });
 
+  it('어긋남을 보고한 통과는 통과로 세지 않고 확인 필요로 따로 센다. 통과율에서도 뺀다 (#666)', () => {
+    const mismatch = { requestValue: '3,000원', checkValue: '2,500원', followed: 'check' as const, note: 'n' };
+    const stats = buildRoutingStats({
+      sessions: [
+        {
+          sessionId: 's1',
+          backend: 'claude-code',
+          events: [
+            started('a', { backend: 'claude-code', model: 'sonnet', taskKind: simple }),
+            checkpoint('a'),
+            { ...finished('a', 'done'), mismatches: [mismatch] } as StudioEvent,
+            started('b', { backend: 'claude-code', model: 'sonnet', taskKind: simple }),
+            checkpoint('b'),
+            finished('b', 'done'),
+          ],
+        },
+      ],
+    });
+    expect(stats.rows[0]).toMatchObject({ runs: 2, passed: 1, needsReview: 1 });
+    expect(stats.rows[0]?.passRate).toBe(1);
+  });
+
   it('새 필드가 없는 옛 기록은 세션의 백엔드로 채우고, 모델은 사용량의 가장 큰 모델로, 종류는 모름으로 센다', () => {
     const stats = buildRoutingStats({
       sessions: [
