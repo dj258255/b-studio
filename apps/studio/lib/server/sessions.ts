@@ -3049,9 +3049,11 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
 }
 
 /** PR 리뷰어가 요청마다 무엇을 확인했는지 볼 수 있도록 검증 결과와 에이전트 요약을 커밋 본문에 남긴다 */
-function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
+function checkpointBody(result: AgentResult, allowBreaking: boolean, { unguardedWrites = false }: { unguardedWrites?: boolean } = {}): string {
   const sections: string[] = [];
   if (result.report) sections.push(formatVerificationReport(result.report, { allowBreaking }));
+  // 이 컴퓨터 방식 터미널은 검사 동안 멈출 컨테이너가 없다(#850). 무엇을 막지 않았는지 기록에 남긴다
+  if (unguardedWrites) sections.push(UNGUARDED_WRITES_NOTE);
   const coverage = formatCheckedCoverage(result.checks);
   if (coverage) sections.push(coverage);
   if (result.verifyAttempts > 0) sections.push(`검증 게이트 재시도: ${result.verifyAttempts}회`);
@@ -3059,6 +3061,9 @@ function checkpointBody(result: AgentResult, allowBreaking: boolean): string {
   if (summary) sections.push(`에이전트 요약:\n${summary.split('\n').slice(0, 30).join('\n')}`);
   return sections.join('\n\n');
 }
+
+/** 이 컴퓨터 방식 터미널 실행의 체크포인트 본문에 남기는 한 줄(#850). 판정과는 상관없다 */
+const UNGUARDED_WRITES_NOTE = '검사 동안 다른 프로세스의 쓰기를 막지 않았습니다(이 컴퓨터 방식 터미널. 컨테이너 방식은 검사 동안 에이전트 컨테이너를 멈춥니다)';
 
 /** 배포할 때 releaseRequires와 대조하는 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
 function checkpointTrailers(result: AgentResult): string[] {
@@ -8422,14 +8427,14 @@ async function abandonTerminalRun(
 }
 
 /** 통과했거나 바꾼 것 없이 끝난 실행을 닫는다 */
-function settleTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete'>): void {
+function settleTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete' | 'unguardedWrites'>): void {
   if (run.terminal.settled) return;
   run.terminal.settled = true;
   announceTerminalRun(session, run, finished);
 }
 
 /** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
-function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete'>): void {
+function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete' | 'unguardedWrites'>): void {
   if (session.run === run) session.run = undefined;
   // 실행이 닫혔으면 사람을 기다릴 일도 없다(B7). 실행이 닫힌 뒤의 대기는 사람이 볼 일이 아니다
   clearTerminalAttention(session);
@@ -8884,7 +8889,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       if (state.limitReason === 'max_turns') passed.incomplete = 'max_turns';
       try {
         if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
-        await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false), checkpointTrailers(passed), text, false, expectStaged, expectExcluded);
+        await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false, { unguardedWrites: pause === undefined }), checkpointTrailers(passed), text, false, expectStaged, expectExcluded);
       } catch (error) {
         if (error instanceof HeadMovedError) {
           // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
@@ -8914,6 +8919,8 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
           status: 'done',
           summary: text || (checkpointed ? '검증을 통과해 체크포인트를 남겼습니다.' : '바꾼 파일 없이 끝났습니다.'),
           ...(passed.incomplete ? { incomplete: passed.incomplete } : {}),
+          // 이 컴퓨터 방식은 검사 동안 멈출 컨테이너가 없었다(#850). 바꾼 파일이 없어 검사를 돌지 않은 실행에는 붙이지 않는다
+          ...(pause === undefined && gate.verified ? { unguardedWrites: true as const } : {}),
         });
         return { message: checkpointed ? `[b-studio] 검증 통과 — 체크포인트 ${saved.shortSha}` : '[b-studio] 검증 통과 — 남길 변경이 없어 체크포인트는 만들지 않았습니다' };
       }

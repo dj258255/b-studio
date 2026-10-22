@@ -1101,6 +1101,7 @@ function ChatEntry({ item, changedRuns, sessionId, canManage }: { item: ChatItem
           )}
           {needsReview && <MismatchNotice mismatches={item.mismatches} />}
           {item.verify === "light" && <p className="mt-0.5 text-xs text-muted">가볍게 확인: 테스트·화면 확인·리뷰를 건너뛰었습니다</p>}
+          {item.unguardedWrites && <p className="mt-0.5 text-xs text-muted">이 컴퓨터 방식이라 검사 동안 다른 프로세스의 쓰기는 막지 않았습니다(컨테이너 방식은 검사 동안 에이전트를 멈춥니다)</p>}
           {hasTokens(item.usage) && <p className="mt-0.5 text-xs text-muted">{describeTokens(item.usage)}</p>}
         </div>
       );

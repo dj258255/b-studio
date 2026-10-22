@@ -726,6 +726,14 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
     expect(view.chat.find((item) => item.kind === 'outcome')).toMatchObject({ status: 'done', mismatches: [mismatch] });
   });
 
+  it('이 컴퓨터 방식 실행의 "쓰기를 막지 않았다" 표시를 결과 줄에 싣는다 (#850)', () => {
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '고쳐줘' },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '고쳤습니다', unguardedWrites: true },
+    ]);
+    expect(view.chat.find((item) => item.kind === 'outcome')).toMatchObject({ status: 'done', unguardedWrites: true });
+  });
+
   it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {
     expect(outcomeText(outcome(), true)).toBe('완료, 1턴');
     expect(outcomeText(outcome({ turns: 3 }), false)).toBe('답만 했습니다(바꾼 파일 없음), 3턴');

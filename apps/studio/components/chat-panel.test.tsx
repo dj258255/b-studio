@@ -203,6 +203,19 @@ describe("ChatPanel 결과 표시", () => {
     expect(html).not.toContain("답만 했습니다");
   });
 
+  it("이 컴퓨터 방식 터미널 실행은 검사 동안 다른 프로세스의 쓰기를 막지 않았다고 한 줄 덧붙인다(#850)", () => {
+    const events = (extra: Record<string, unknown>) =>
+      view([
+        { type: "run_started", runId: "r1", request: "필터를 추가해 줘" },
+        { type: "agent", runId: "r1", event: { type: "verify_start", files: ["web/app/page.tsx"] } },
+        { type: "run_finished", runId: "r1", status: "done", summary: "추가했습니다", ...extra } as never,
+      ]);
+    const html = render(events({ unguardedWrites: true }));
+    expect(html).toContain("완료");
+    expect(html).toContain("검사 동안 다른 프로세스의 쓰기는 막지 않았습니다");
+    expect(render(events({}))).not.toContain("다른 프로세스의 쓰기");
+  });
+
   it("'이대로 만들기'는 읽기만(질문) 실행의 답에만 붙는다", () => {
     const askedHtml = render(view([{ type: "run_started", runId: "r1", request: "어떻게 만들까?", intent: "ask" }, ...asked.slice(1)]));
     expect(askedHtml).toContain("이대로 만들기");

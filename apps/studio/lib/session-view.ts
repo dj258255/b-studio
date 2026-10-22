@@ -72,6 +72,8 @@ export type ChatItem =
       incomplete?: 'max_turns';
       /** 에이전트가 알린 요청과 확인의 어긋남. 있으면 done이어도 "확인 필요"로 보인다(#666) */
       mismatches?: RequestMismatch[];
+      /** 이 컴퓨터 방식 터미널 실행: 검사 동안 다른 프로세스의 쓰기를 막지 않았다(#850) */
+      unguardedWrites?: true;
     }
   | { kind: 'checkpoint'; runId: string; checkpoint: Checkpoint }
   /** 에이전트의 제안을 받아 이 요청을 나눠서 병렬·여러 명 비교로 넘겼다(ADR-068) */
@@ -305,7 +307,7 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
         chat: [
           // 요약 도중에 끝난(취소·오류) 실행의 "요약 중" 줄은 남기지 않는다
           ...markInterrupted(withoutCompacting(view.chat, event.runId), event.runId),
-          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}), ...(event.incomplete ? { incomplete: event.incomplete } : {}), ...(event.mismatches?.length ? { mismatches: event.mismatches } : {}) },
+          { kind: 'outcome', runId: event.runId, status: event.status, summary: event.summary, turns: event.turns, usage: event.usage, intent, verify: event.verify, ...(event.durationMs !== undefined ? { durationMs: event.durationMs } : {}), ...(event.incomplete ? { incomplete: event.incomplete } : {}), ...(event.mismatches?.length ? { mismatches: event.mismatches } : {}), ...(event.unguardedWrites ? { unguardedWrites: true as const } : {}) },
         ],
         completedRuns: view.completedRuns + 1,
         runTokens: undefined,

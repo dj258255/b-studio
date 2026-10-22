@@ -2284,6 +2284,29 @@ describe('검사 동안 에이전트 컨테이너를 멈춘다 (이슈 #765)', (
   /** 가짜 샌드박스의 id. 멈추고 푸는 대상이다 */
   const containerId = 'studio-termgw-fake';
 
+  it('이 컴퓨터 방식은 멈출 컨테이너가 없어, 통과한 실행과 체크포인트에 다른 프로세스의 쓰기를 막지 않았다고 남긴다(#850)', async () => {
+    fake.terminalMode = 'host';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    // 판정은 그대로다: 통과한다
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(fake.pauses).toEqual([]);
+    expect(session.ofType('run_finished').at(-1)!).toMatchObject({ status: 'done', unguardedWrites: true });
+    expect(await git(session, 'log', '-1', '--format=%b')).toContain('검사 동안 다른 프로세스의 쓰기를 막지 않았습니다');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('컨테이너 방식은 검사 동안 멈추므로 그 표시를 남기지 않는다(#850)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    expect(session.ofType('run_finished').at(-1)!).not.toHaveProperty('unguardedWrites');
+    expect(await git(session, 'log', '-1', '--format=%b')).not.toContain('다른 프로세스의 쓰기');
+    await stopSession(session.id);
+  }, 30_000);
+
   it('게이트를 도는 동안 멈추고, 통과하면 다시 움직인다. 끝나기 전에 서비스 안 명령이 돌지 않는다', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });

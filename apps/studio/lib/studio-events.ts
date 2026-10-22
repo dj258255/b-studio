@@ -429,6 +429,11 @@ export type StudioEvent =
        * 게이트 판정과 체크포인트는 그대로다. 보고가 없으면 필드가 없다
        */
       mismatches?: RequestMismatch[];
+      /**
+       * 이 컴퓨터 방식 터미널 실행이 게이트를 통과했다(#850). 그 방식에는 멈출 에이전트 컨테이너가 없어, 검사 동안 다른 프로세스가
+       * 파일을 바꿨다 되돌리는 것을 막지 않았다(컨테이너 방식은 검사 동안 멈춘다, #765). 판정과는 상관없는 표시다
+       */
+      unguardedWrites?: true;
       /** 가볍게 확인이 건너뛴 검증 단계(프로젝트 토큰 보고서가 이 수를 센다). light가 아니면 없다 */
       skippedStages?: string[];
       sessionTokens?: AgentUsage;
