@@ -700,6 +700,19 @@ describe('실행 결과 표시 (입력이 하나로 합쳐진 뒤)', () => {
     expect(runsWithChanges(answered.chat).size).toBe(0);
   });
 
+  it('어긋남을 보고한 done은 완료라고 적지 않고 확인 필요로 알린다. 기록의 어긋남을 결과 줄에 싣는다 (#666)', () => {
+    const mismatch = { requestValue: '배송비 3,000원', checkValue: 'OrderTest는 2,500원', followed: 'check' as const, note: '테스트를 따랐습니다' };
+    expect(outcomeText(outcome({ mismatches: [mismatch] }), true)).toBe('확인 필요: 요청과 확인이 어긋납니다, 1턴');
+    // 실패한 실행의 문구는 그대로다(상태를 낮추기만 한다)
+    expect(outcomeText(outcome({ status: 'failed', summary: '테스트 실패', mismatches: [mismatch] }), true)).toBe('완료하지 못함: 테스트 실패');
+
+    const view = fold([
+      { type: 'run_started', runId: 'r1', request: '배송비를 3,000원으로' },
+      { type: 'run_finished', runId: 'r1', status: 'done', summary: '고쳤습니다', turns: 2, mismatches: [mismatch] },
+    ]);
+    expect(view.chat.find((item) => item.kind === 'outcome')).toMatchObject({ status: 'done', mismatches: [mismatch] });
+  });
+
   it('결과 한 줄은 바꾼 파일이 없으면 "답만 했습니다"로 알린다', () => {
     expect(outcomeText(outcome(), true)).toBe('완료, 1턴');
     expect(outcomeText(outcome({ turns: 3 }), false)).toBe('답만 했습니다(바꾼 파일 없음), 3턴');

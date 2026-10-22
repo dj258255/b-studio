@@ -11,6 +11,7 @@ import { describeTokens, hasTokens } from '@/lib/usage';
 import { CapabilityReason } from './capability-reason';
 import { EFFORT_LABEL, ModelPicker } from './chat-panel';
 import { Markdown } from './markdown';
+import { MismatchNotice } from './mismatch-notice';
 import { PlanGraphView } from './plan-graph';
 import { SESSION_BACKEND_LABEL } from './status';
 
@@ -811,6 +812,7 @@ function PlanResult({
                         </div>
                       )}
                       {task.checkpoint && <p className="mt-1 text-xs text-muted">체크포인트 <span className="font-mono text-ink">{task.checkpoint.shortSha}</span></p>}
+                      {task.status === 'done' && <MismatchNotice mismatches={task.mismatches} />}
                     </li>
                   ))}
                 </ol>
