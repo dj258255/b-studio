@@ -60,6 +60,7 @@ pnpm bench:coordination --backend claude-code --model sonnet --strategies S0 --t
 ```
 
 - `--handoff-tests none|correct|conflict`(기본 `none`): `none`이면 계획·동작·행이 옵션이 없던 때와 같고 `handoff` 필드도 없습니다.
+- 에이전트가 요청과 건넨 테스트의 어긋남을 `report_mismatch`로 알리면(ADR-182) 결과 행의 `lanes[].tasks[].mismatches`에 남습니다. 이 도구는 프로젝트의 `workflow.allowedTools`에 이름이 있어야 보이는데, 2026-10-22 현재 `examples/orders/studio.yaml`의 목록에는 없습니다. 이 값으로 E15를 다시 재려면 먼저 목록에 넣어야 합니다.
 - `--protect-handoff`(기본 꺼짐): 복사본 `studio.yaml`의 `workflow.protectedPaths`에 건넨 테스트 경로를 **더합니다**(`.env` 같은 기존 값은 그대로). 더한 뒤 파일을 다시 읽어 기존 값과 새 경로가 모두 있는지 확인하고, 아니면 그 실행을 시작하지 않습니다.
 - **시작 전에 거부하는 조합**: `--protect-handoff`만 준 경우, P0(`--strategies`에 P0가 있으면 `--dry`에서도), 과제 `independent`(건넬 테스트가 없습니다). `--tasks`를 생략하면 모든 과제가 돌아 `independent`가 끼므로 `--tasks`로 `orders-list,order-detail,order-summary` 중에서 고르세요. 레인을 나누는 전략(S1 이상)은 막지 않고 경고만 합니다. web 레인의 게이트도 `api-unit`을 돌려 건넨 테스트에 걸릴 수 있어 S0 밖의 결과는 S0와 같은 뜻으로 읽을 수 없습니다.
 

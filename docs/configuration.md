@@ -309,6 +309,7 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 <img src="images/studio-terminal-usage.png" width="760" alt="세션 화면의 활동 줄에 '토큰 5.1천 · 캐시 90% · 14.0초 · $0.0053'이 보인다">
 
 - **여러 세션을 나란히**: 세션 화면 머리의 "나란히 보기에 추가" 또는 `/split?ids=<id>,<id>`로 최대 4칸을 엽니다. 터미널 세션의 칸은 터미널과 사용량 줄이고, 오른쪽에 선택한 칸의 결과(바뀐 파일, 미리보기)가 보입니다. 머리의 `+ 새 터미널`이 같은 프로젝트로 칸을 하나 더 엽니다. 숫자키 ⌘/Ctrl+1~4는 칸을 고르고, 크게 보려면 칸 머리의 집중 버튼을 누릅니다(ADR-177).
+- **브라우저 없이 터미널에서**: `pnpm studio desk`가 같은 세션 터미널을 터미널 하나에 사이드바와 1·2·4칸으로 띄웁니다(ADR-183). 키와 화면은 [시작하기의 터미널 작업대](getting-started.md#터미널-작업대studio-desk)에 있습니다.
 
 <img src="images/studio-terminal-grid.png" width="760" alt="나란히 보기의 터미널 격자와 오른쪽 결과 칸">
 
@@ -331,6 +332,8 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - 터미널의 환경에는 정해 둔 이름(`HOME`, `SHELL`, 로캘, `SSH_AUTH_SOCK` 등)만 넘기고, 나머지는 셸의 시작 파일이 평소처럼 만듭니다. 스튜디오를 띄운 환경에만 있는 값을 넘기려면 `B_STUDIO_TERMINAL_ENV`에 이름을 쉼표로 적습니다(예: `HTTPS_PROXY,AWS_PROFILE`).
 - `claude`가 PATH에 없으면 `B_STUDIO_CLAUDE_BIN`에 절대 경로를 적습니다(없으면 터미널을 열지 않고, 컨테이너 방식으로 띄우는 길을 함께 알립니다).
 - 세션의 AI가 Codex(`codex` 백엔드)면 `claude` 대신 `codex`를 띄웁니다(ADR-180). 훅·b-studio 도구·사용량 텔레메트리는 `codex`를 부를 때 설정 덮어쓰기(`-c`)로 붙고, 토큰은 실행 인자가 아니라 관문 폴더의 환경 파일로 넘깁니다. 처음 열면 Codex가 "Hooks need review"를 묻습니다. **Trust all and continue**를 고르면 그 뒤 세션에서는 다시 묻지 않습니다(b-studio가 대신 믿지 않습니다). `codex`가 PATH에 없으면 `B_STUDIO_CODEX_BIN`에 절대 경로를 적습니다. 컨테이너 방식은 claude만 씁니다.
+- b-studio가 띄운 `codex`는 시작할 때 스스로 업데이트를 확인하지 않습니다(`check_for_update_on_startup=false`). 업데이트는 평소 터미널에서 직접 합니다. 화면의 "CLI 떠 있음"은 첫 요청 전이라도 `codex`가 뜨면 켜집니다.
+- 작업 화면의 새 요청을 **터미널로** 보내면(또는 `studio desk`의 새 요청) 첫 요청은 CLI 실행 인자(`claude "<요청>"`, `codex "<요청>"`)로 넘어갑니다. 키 입력으로 넣지 않습니다. CLI가 폴더 신뢰 같은 것을 먼저 물으면 사람이 그 칸에서 답하고, 답한 뒤 요청이 이어집니다.
 - **격리가 없습니다.** CLI는 이 컴퓨터의 다른 파일에도 닿습니다. 평소 터미널에서 CLI를 쓰는 것과 같은 신뢰 수준입니다. 작업 복사본의 `.git`도 읽기 전용이 아닙니다(CLI에는 커밋하지 말라고 알립니다. 체크포인트는 b-studio가 남깁니다).
 - 관문 설정 파일은 같은 사용자의 것이라 에이전트가 고칠 수 있습니다. 그래서 터미널이 열려 있는 동안 그 파일이 쓴 그대로인지 계속 보고(다르면 되돌리고 알립니다), 훅 없이 뜬 CLI도 찾아 알립니다(이슈 #695). 작정한 우회는 막지 못합니다 — 그 경우의 답은 컨테이너 방식입니다.
 
@@ -451,7 +454,7 @@ workflow:
 | `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
 | `loadChecks` | `load_check` 단계에서 같은 요청을 동시에 많이 보내 **응답 시간**을 잽니다(최대 5개). 호스트가 아니라 샌드박스 네트워크 안의 일회용 컨테이너에서 보냅니다. 아래 [부하 확인](#부하-확인-loadchecks)에 따로 적었습니다 |
 | `autoPageChecks` | **이번 실행에서 바뀐 Next.js 페이지(와 바뀐 컴포넌트·유틸을 쓰는 페이지)를 게이트가 스스로 찾아 열어 봅니다**(선택, 기본 없음). `service`는 `source: managed`이면서 템플릿이 `nextjs`여야 합니다. 아래 '바뀐 페이지 자동 확인' |
-| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
+| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 요청과 확인의 어긋남 알림 `report_mismatch`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `evaluationAssets` | **에이전트가 고치면 안 되는 평가 자산**(인수 테스트, 기대값 파일, 판정 스크립트)의 경로. 게이트가 실행 시작 때 그 파일들의 지문을 떠 두고 검사 때 디스크를 직접 견줘, 하나라도 더해지거나·바뀌거나·지워졌으면 실패합니다(`tests`가 있으면 `test` 단계, 없으면 `review` 단계). 파일 도구뿐 아니라 셸 명령·`run_in_service`로 고친 것도 잡습니다. 파일 도구의 쓰기는 `protectedPaths`처럼 미리 막습니다. 에이전트가 같은 실행에서 이 선언을 지워도 그 실행에는 시작 때 선언이 쓰입니다. 링크·특수 파일이 있거나 파일이 2000개를 넘으면 실패합니다(선언을 좁히세요). 평가 자산은 사람이 고칩니다 — 스튜디오 밖에서 고친 것은 다음 요청부터 기준이 됩니다. 서비스 컨테이너와 터미널 에이전트 컨테이너에는 **마지막 체크포인트에 커밋된 판**이 읽기 전용으로 붙어, 컨테이너 안 명령은 테스트 중이든 아니든 쓸 수 없고 테스트는 그 판으로 돕니다. 작업 복사본에서 고친 평가 자산은 체크포인트로 남은 뒤부터 테스트에 쓰입니다. 선언을 바꾸면 샌드박스를 새로 만들 때부터 반영됩니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |

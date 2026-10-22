@@ -4,8 +4,8 @@
 
 | 구성 요소 | 역할 |
 |---|---|
-| `apps/cli` | 기동, 단일 에이전트 요청, 배포, 인증 토큰 |
-| `apps/studio` | 세션·대화·미리보기·API·로그 UI와 Agent Fleet |
+| `apps/cli` | 기동, 스튜디오 켜고 끄기, 단일 에이전트 요청, 지금 변경 검증, 터미널 작업대(`desk`), 배포, 인증 토큰 |
+| `apps/studio` | 세션·대화·미리보기·API·로그 UI와 Agent Fleet, 세션 터미널과 그 관문, AI 규칙표와 AI별 결과 |
 | `packages/spec` | `studio.yaml` 스키마와 compose 교차 검증 |
 | `packages/sandbox` | Docker/Kubernetes, 준비 판정, 네트워크·시크릿·DB |
 | `packages/agent` | 모델 도구 루프, 검증 게이트, Git 체크포인트와 원격 연동 |
