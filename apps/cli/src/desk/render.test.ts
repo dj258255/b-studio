@@ -44,6 +44,23 @@ describe('화면 그리기', () => {
     expect(plain[3]!.pane).toContain('hi');
   });
 
+  it('고른 항목이 아래쪽이어도 그 아래 펼친 에이전트 내역까지 사이드바에 보인다(#843)', () => {
+    const usage = { inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    const items = Array.from({ length: 12 }, (_, index) => item(`s${index}`));
+    items[11] = item('s11', {
+      agents: [
+        { id: 'main', name: '메인', kind: 'main', state: 'idle', tokens: usage },
+        { id: 'claude:Explore', name: 'Explore', kind: 'subagent', state: 'working', activity: '모델 요청 1회', tokens: usage },
+      ],
+      capabilities: { backend: 'claude-code', tools: 'cli-default', writeScope: '세션 작업 복사본 전체', permission: 'CLI 권한 확인' },
+    });
+    const plain = renderScreen(state({ items, selected: 11 }), size, []).lines.map(stripAnsi);
+    const side = plain.slice(1, size.rows - 1).map((line) => line.slice(0, line.indexOf('│')));
+    expect(side.some((line) => line.includes('요청 s11'))).toBe(true);
+    expect(side.some((line) => line.includes('↳ Explore'))).toBe(true);
+    expect(side.some((line) => line.includes('권한 CLI 권한 확인'))).toBe(true);
+  });
+
   it('고른 칸의 머리는 반전으로, 고른 사이드바 줄도 반전으로 그린다', () => {
     const { lines } = renderScreen(state({ layout: 2, slots: ['a', 'b', undefined, undefined], focus: 1 }), size, [{ lines: [] }, { lines: [] }]);
     const header = lines[1]!;

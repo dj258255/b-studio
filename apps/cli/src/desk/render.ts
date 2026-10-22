@@ -81,7 +81,10 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
 
   // 사이드바: 고른 항목이 보이게 내린다
   const side = sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w);
-  const offset = Math.max(0, Math.min(side.length - layout.sidebar.h, state.selected * 2 - (layout.sidebar.h - 2)));
+  // 고른 항목의 줄(머리·상태·펼친 내역)이 모두 보이게 내린다. 높이보다 길면 머리부터 보인다
+  const first = side.findIndex((row) => row.item === state.selected);
+  const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), -1);
+  const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - layout.sidebar.h, last + 1 - layout.sidebar.h));
   const sideLine = (row: number): string => {
     const entry = side[offset + row];
     if (!entry) return ' '.repeat(layout.sidebar.w);

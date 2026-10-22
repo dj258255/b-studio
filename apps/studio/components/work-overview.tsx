@@ -23,6 +23,7 @@ import {
   type WorkItem,
   type WorkTab,
 } from "@/lib/work-list";
+import { AgentBreakdown } from "./agent-breakdown";
 import { Dot, TONE_TEXT, type Tone } from "./status";
 
 /** 작업 화면이 다시 읽는 간격. 보이는 탭일 때만 읽는다 */
@@ -323,6 +324,8 @@ function WorkRow({ work, checked, onToggle, onDeleted }: { work: WorkItem; check
             )}
           </span>
         </div>
+        {/* 메인·서브에이전트별 토큰과 할 수 있는 범위(#843). 접어 두고 펼쳐 본다 */}
+        <AgentBreakdown members={work.members} />
         {work.mode !== "single" && work.sessionIds.length > 0 && (
           <ul className="mt-2 flex flex-wrap gap-1.5" aria-label={work.mode === "fleet" ? "참가자" : "레인"}>
             {work.members

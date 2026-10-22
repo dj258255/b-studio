@@ -15,7 +15,8 @@ import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-eve
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
 import { sessionTerminalPresence } from './session-terminal';
-import { overviewSessions, sessionBackend, sessionHistory } from './sessions';
+import type { AgentCapabilities, TerminalAgentRow } from './terminal-agents';
+import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalAgents } from './sessions';
 import { listTaskPlans } from './task-plans';
 import { buildTokenReports, tokenPricing, type TokenPricing } from './token-report';
 
@@ -61,7 +62,15 @@ export interface AgentItem {
   gate?: AgentGateStatus;
   /** 세션 기록의 실행 비용 합(추정, 가격표 기준). 모르면 없다 */
   costUsd?: number;
+  /** 터미널 CLI의 메인·서브에이전트별 토큰·상태·하는 일(#843). 터미널 사용량을 받은 적이 없으면 없다 */
+  agents?: AgentDetail[];
+  /** 이 에이전트가 할 수 있는 범위(#843). 기억에 없는 세션이면 없다 */
+  capabilities?: AgentCapabilities;
 }
+
+/** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
+export type AgentDetail = TerminalAgentRow;
+export type { AgentCapabilities };
 
 export interface AgentTerminalStatus {
   cli: 'up' | 'down';
@@ -106,12 +115,20 @@ export interface SessionOverviewSource {
   terminal?: { cliAlive: boolean };
   /** 세션 기록 전체에서 계산한 실행 비용 합(withDeskFacts가 붙인다) */
   costUsd?: number;
+  /** 에이전트 내역(withDeskFacts가 붙인다, #843) */
+  agents?: readonly TerminalAgentRow[];
+  /** 할 수 있는 범위(withDeskFacts가 붙인다, #843) */
+  capabilities?: AgentCapabilities;
 }
 
 /** studio desk 사이드바의 사실을 모으는 곳. 테스트가 바꿔 끼운다 */
 export interface DeskFactDeps {
   terminal: (sessionId: string) => { cliAlive: boolean } | undefined;
   costUsd: (sessionId: string) => number | undefined;
+  /** 에이전트 내역(#843). 주지 않으면 붙이지 않는다 */
+  agents?: (sessionId: string) => readonly TerminalAgentRow[] | undefined;
+  /** 할 수 있는 범위(#843). 주지 않으면 붙이지 않는다 */
+  capabilities?: (sessionId: string) => AgentCapabilities | undefined;
 }
 
 /** 수집한 세션에 터미널 CLI 상태와 비용을 붙인다(#835). 모르는 값은 붙이지 않는다 */
@@ -119,7 +136,15 @@ export function withDeskFacts(sessions: readonly SessionOverviewSource[], deps: 
   return sessions.map((source) => {
     const terminal = deps.terminal(source.snapshot.id);
     const costUsd = deps.costUsd(source.snapshot.id);
-    return { ...source, ...(terminal ? { terminal } : {}), ...(costUsd !== undefined ? { costUsd } : {}) };
+    const agents = deps.agents?.(source.snapshot.id);
+    const capabilities = deps.capabilities?.(source.snapshot.id);
+    return {
+      ...source,
+      ...(terminal ? { terminal } : {}),
+      ...(costUsd !== undefined ? { costUsd } : {}),
+      ...(agents && agents.length > 0 ? { agents } : {}),
+      ...(capabilities ? { capabilities } : {}),
+    };
   });
 }
 
@@ -157,6 +182,8 @@ interface AgentRow {
   group?: AgentGroup;
   terminal?: { cliAlive: boolean };
   costUsd?: number;
+  agents?: readonly TerminalAgentRow[];
+  capabilities?: AgentCapabilities;
 }
 
 function emptyUsage(): AgentUsage {
@@ -257,8 +284,13 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
   return { items, totals: totalsOf(items) };
 }
 
-function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd'> {
-  return { ...(source.terminal ? { terminal: source.terminal } : {}), ...(source.costUsd !== undefined ? { costUsd: source.costUsd } : {}) };
+function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities'> {
+  return {
+    ...(source.terminal ? { terminal: source.terminal } : {}),
+    ...(source.costUsd !== undefined ? { costUsd: source.costUsd } : {}),
+    ...(source.agents ? { agents: source.agents } : {}),
+    ...(source.capabilities ? { capabilities: source.capabilities } : {}),
+  };
 }
 
 function planGroup(id: string): AgentGroup {
@@ -278,6 +310,8 @@ export async function listAgentOverview(user: string): Promise<{ items: AgentIte
         return undefined;
       }
     },
+    agents: (id) => sessionTerminalAgents(id, pricing),
+    capabilities: (id) => sessionCapabilities(id),
   });
   return buildAgentOverview({ sessions, plans: listTaskPlans(user), fleets: listFleets(user) });
 }
@@ -317,6 +351,9 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.terminal ? { terminal: terminalStatusOf(row.terminal, row.snapshot) } : {}),
     ...(row.snapshot ? { gate: gateStatusOf(row.snapshot, row.recent ?? []) } : {}),
     ...(row.costUsd !== undefined ? { costUsd: row.costUsd } : {}),
+    // 메인 행의 상태는 이 항목의 실행 상태다. 장부는 실행 상태를 모른다
+    ...(row.agents ? { agents: row.agents.map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent)) } : {}),
+    ...(row.capabilities ? { capabilities: row.capabilities } : {}),
   };
 }
 
