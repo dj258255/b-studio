@@ -1,0 +1,57 @@
+/**
+ * `studio desk`가 스튜디오 API에서 받는 값의 꼴. 스튜디오 코드(apps/studio)를 가져오지 않고 필요한 필드만 적는다 —
+ * desk는 스튜디오의 얇은 손님이고, 옛 서버가 주지 않는 필드(terminal·gate·costUsd)는 없을 수 있다
+ */
+
+/** `/api/agents` 항목(AgentItem)에서 desk가 쓰는 것 */
+export interface DeskItem {
+  kind: 'session' | 'lane' | 'fleet';
+  /** 세션 id. 계획 승인 대기는 `plan:<id>`라 세션이 아니다 */
+  id: string;
+  title: string;
+  projectName: string;
+  state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'error';
+  attention?: string;
+  backend?: string;
+  lastActivityAt: string;
+  /** 터미널 세션일 때: CLI가 떠 있는가, 권한을 묻고 있는가 */
+  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' };
+  /** 게이트: 지금 검증 중인가, 마지막 판정, 체크포인트 수 */
+  gate?: { state: 'verifying' | 'passed' | 'failed' | 'none'; checkpoints: number };
+  /** 세션 누적 비용(달러) */
+  costUsd?: number;
+}
+
+export interface DeskOverview {
+  items: DeskItem[];
+}
+
+export interface DeskProject {
+  id: string;
+  name: string;
+  error?: string;
+}
+
+/** 세션 터미널 통로의 메시지(session-terminal.ts의 TerminalMessage와 같은 꼴) */
+export type DeskTerminalMessage =
+  | { kind: 'data'; data: string }
+  | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string }
+  | { kind: 'exit'; code: number | null }
+  | { kind: 'cli'; alive: boolean }
+  | { kind: 'warning'; message: string };
+
+/** 새 요청을 터미널로 보낸 결과(#836) */
+export interface DeskStartResult {
+  session: { id: string };
+  routing?: { backend?: string; model?: string; matched?: string };
+  terminal?: { opened: boolean; pasted: boolean; pasteError?: string };
+}
+
+/** 미리보기(`/api/routing/preview`) */
+export interface DeskPreview {
+  backend: string;
+  model?: string;
+  rule: number | 'fallback' | 'default' | 'direct';
+  matched: string;
+  records?: Array<{ backend: string; passed: number; judged: number }>;
+}
