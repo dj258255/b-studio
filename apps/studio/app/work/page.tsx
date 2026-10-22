@@ -1,14 +1,16 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { RoutingStatsPanel } from '@/components/routing-stats-panel';
 import { WorkOverview } from '@/components/work-overview';
 import { pageUser } from '@/lib/server/access';
 import { listAgentOverview } from '@/lib/server/agents-overview';
+import { routingStats } from '@/lib/server/routing-stats';
 
 export const metadata: Metadata = { title: '작업' };
 
 export default async function WorkPage() {
   const user = await pageUser();
-  const initial = await listAgentOverview(user);
+  const [initial, stats] = await Promise.all([listAgentOverview(user), routingStats()]);
 
   return (
     <main className="mx-auto max-w-[72rem] px-4 py-6 sm:px-6 lg:px-8">
@@ -25,6 +27,9 @@ export default async function WorkPage() {
         </Link>
       </header>
       <WorkOverview initial={initial} />
+      <div className="mt-6">
+        <RoutingStatsPanel stats={stats} />
+      </div>
     </main>
   );
 }
