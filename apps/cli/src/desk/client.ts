@@ -14,6 +14,15 @@ const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
 export const INPUT_CHUNK = 64 * 1024;
 
+/** 스튜디오가 오류로 답했다. status로 까닭을 나눈다(409: 멈춘 세션 등) */
+export class StudioRequestError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export interface StudioConnection {
   origin: string;
   token: string;
@@ -79,7 +88,7 @@ export class StudioClient {
     return this.#connection.origin;
   }
 
-  async #request<T>(method: 'GET' | 'POST', pathname: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  async #request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', pathname: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${this.#connection.origin}${pathname}`, {
       method,
       headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
@@ -95,7 +104,7 @@ export class StudioClient {
     }
     if (!response.ok) {
       const message = (parsed as { error?: unknown }).error;
-      throw new Error(typeof message === 'string' ? message : `스튜디오가 ${response.status}로 답했습니다 (${pathname})`);
+      throw new StudioRequestError(typeof message === 'string' ? message : `스튜디오가 ${response.status}로 답했습니다 (${pathname})`, response.status);
     }
     return parsed as T;
   }
@@ -120,6 +129,21 @@ export class StudioClient {
   start(input: StartInput): Promise<DeskStartResult> {
     const route = input.choice === 'rules' ? { route: 'rules' } : { route: 'direct', backend: input.choice };
     return this.#request('POST', '/api/sessions', { projectId: input.projectId, ...route, request: input.request, intent: 'build', terminal: true });
+  }
+
+  /** 세션을 멈춘다(샌드박스·터미널을 내린다. 기록과 작업 복사본은 남는다) */
+  async stop(id: string): Promise<void> {
+    await this.#request('DELETE', `/api/sessions/${encodeURIComponent(id)}`);
+  }
+
+  /** 멈춘 세션을 같은 작업 복사본으로 다시 띄운다. 켜지는 것은 기다리지 않는다 */
+  async resume(id: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/resume`);
+  }
+
+  /** 세션 이름을 바꾼다. 빈 이름은 이름을 지운다(#864) */
+  async rename(id: string, label: string): Promise<void> {
+    await this.#request('PATCH', `/api/sessions/${encodeURIComponent(id)}`, { label });
   }
 
   async open(id: string, cols: number, rows: number): Promise<void> {

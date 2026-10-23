@@ -1919,6 +1919,25 @@ export async function setSessionModel(id: string, modelId: string | undefined, e
   return listSelectableModels(backend, session.snapshot.modelId, session.snapshot.effort);
 }
 
+/** 세션 이름의 최대 길이(글자 수) */
+export const SESSION_LABEL_MAX = 60;
+
+/**
+ * 세션에 사람이 붙이는 이름(#864). 목록·studio desk 사이드바의 제목이 마지막 요청 대신 이 이름이 된다.
+ * 제어 글자는 빼고(터미널 사이드바에 그대로 그려진다) 앞뒤 빈칸을 떼며, 빈 이름은 이름을 지운다.
+ * 이어서 작업해도 남도록 스냅샷에 두고 바로 저장을 예약한다
+ */
+export async function setSessionLabel(id: string, label: string): Promise<SessionSnapshot> {
+  const session = requireSession(id);
+  const clean = label.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+  if ([...clean].length > SESSION_LABEL_MAX) throw new StudioError(400, `세션 이름은 ${SESSION_LABEL_MAX}자까지입니다`);
+  if (clean) session.snapshot.label = clean;
+  else delete session.snapshot.label;
+  session.updatedAt = new Date().toISOString();
+  schedulePersist(session);
+  return session.snapshot;
+}
+
 /** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
 export async function sessionDesignFrames(id: string): Promise<{ design?: DesignView; frames: DesignFrameInfo[] }> {
   const session = requireSession(id);
