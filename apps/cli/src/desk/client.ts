@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
 import type { RecordsReport, RecordsStats } from './records';
 import type { DetailExportPreview, DetailExportResult, DetailSnapshot } from './session-detail';
 
@@ -198,6 +198,48 @@ export class StudioClient {
   /** 멈춘 세션을 같은 작업 복사본으로 다시 띄운다. 켜지는 것은 기다리지 않는다 */
   async resume(id: string): Promise<void> {
     await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/resume`);
+  }
+
+  // ─── 요구사항·문서(#894). 웹 세션 화면의 요구사항 묶음(명세·테스트·문서·현황)이 쓰는 API 그대로 ───
+
+  requirements(id: string): Promise<DeskRequirements> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/requirements`);
+  }
+
+  tests(id: string): Promise<DeskTests> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/tests`);
+  }
+
+  async docs(id: string): Promise<DeskDocEntry[]> {
+    return (await this.#request<{ docs: DeskDocEntry[] }>('GET', `/api/sessions/${encodeURIComponent(id)}/docs`)).docs;
+  }
+
+  /** 문서 하나. docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 된다(스튜디오가 거른다) */
+  async doc(id: string, file: string): Promise<string> {
+    return (await this.#request<{ content: string }>('GET', `/api/sessions/${encodeURIComponent(id)}/docs/content?${new URLSearchParams({ path: file })}`)).content;
+  }
+
+  /** 문서를 작업 복사본에 쓴다(다음 체크포인트·PR에 실린다). 요청을 처리하는 동안 요구사항 문서는 스튜디오가 받지 않는다 */
+  async saveDoc(id: string, file: string, content: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/docs/content`, { path: file, content });
+  }
+
+  projectStatus(id: string): Promise<DeskProjectStatus> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/status`);
+  }
+
+  /** 사람이 확인했다고 남긴다(무엇을 어떻게 확인했는지 note에 적는다) */
+  verifyRequirement(id: string, requirementId: string, note: string): Promise<DeskRequirements> {
+    return this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/requirements/verify`, { requirementId, note });
+  }
+
+  clearVerification(id: string, requirementId: string): Promise<DeskRequirements> {
+    return this.#request('DELETE', `/api/sessions/${encodeURIComponent(id)}/requirements/verify`, { requirementId });
+  }
+
+  /** 추출 결과를 docs/requirements.md로 저장한다(웹의 "docs/requirements.md로 저장") */
+  applyRequirements(id: string, draft: Pick<DeskRequirementsDraft, 'requirements' | 'assumptions' | 'manualSteps'>): Promise<DeskRequirements> {
+    return this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/requirements/apply`, { requirements: draft.requirements, assumptions: draft.assumptions ?? [], manualSteps: draft.manualSteps ?? [] });
   }
 
   /** AI별 결과표(#891). 서버가 계정별 묶음과 최근 실패를 함께 준다(옛 서버는 주지 않는다) */
