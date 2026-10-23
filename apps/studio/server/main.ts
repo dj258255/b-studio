@@ -1,5 +1,5 @@
 /**
- * 스튜디오 서버의 시작점(Next 없이 node:http로 돈다). `pnpm studio`(launch)가 tsx로 띄운다:
+ * 스튜디오 서버의 시작점(node:http, ADR-188). `pnpm studio`(launch)가 tsx로 띄운다:
  *   tsx --tsconfig apps/studio/tsconfig.json apps/studio/server/main.ts --port 3000 --hostname 127.0.0.1
  * 포트·주소는 인자 → PORT·HOSTNAME 환경 변수 → 3000·127.0.0.1 차례다. 준비되면 주소 한 줄을 찍는다(launch는 /api/health로 따로 본다)
  */
@@ -23,11 +23,11 @@ export function serverAddress(args: readonly string[], env: Record<string, strin
 }
 
 async function main(): Promise<void> {
-  // 서버 코드는 Next와 같이 apps/studio를 작업 폴더로 여긴다(예제 폴더·저장소 루트를 여기서 찾는다)
+  // 서버 코드는 apps/studio를 작업 폴더로 여긴다(예제 폴더·저장소 루트를 여기서 찾는다)
   process.chdir(path.resolve(import.meta.dirname, '..'));
   const { port, hostname } = serverAddress(process.argv.slice(2), process.env);
 
-  // Next의 instrumentation.ts가 하던 일: 시작할 때 로컬 토큰을 만들어 둔다(첫 요청을 기다리지 않는다)
+  // 시작할 때 로컬 토큰을 만들어 둔다(첫 요청을 기다리지 않는다)
   try {
     const { localToken } = await import('@/lib/server/local-token');
     localToken();

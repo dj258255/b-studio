@@ -54,7 +54,7 @@ function homeOf(env: Env): string {
 
 export function accountsFile(env: Env = process.env): string {
   const base = env.XDG_CONFIG_HOME?.trim() || path.join(homeOf(env), '.config');
-  return path.join(/* turbopackIgnore: true */ base, 'b-studio', 'accounts.json');
+  return path.join(base, 'b-studio', 'accounts.json');
 }
 
 function builtinAccount(backend: CliAccountBackend): AiAccount {

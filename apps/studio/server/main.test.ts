@@ -5,7 +5,7 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 /**
- * 실제로 tsx로 서버를 띄워 몇 개를 부른다. 경로 별칭(@/), 라우트 지연 불러오기, 시작 때 로컬 토큰, SSE가 Next 없이 도는지 본다
+ * 실제로 tsx로 서버를 띄워 몇 개를 부른다. 경로 별칭(@/), 라우트 지연 불러오기, 시작 때 로컬 토큰, SSE가 도는지 본다
  */
 const repoRoot = path.resolve(import.meta.dirname, '../../..');
 let child: ChildProcess | undefined;

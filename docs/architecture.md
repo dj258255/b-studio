@@ -39,7 +39,7 @@ flowchart TB
 |---|---|
 | `apps/cli` | 프로젝트 기동, 스튜디오 켜고 끄기(`launch`·`stop`), 단일 에이전트 요청, 지금 변경 검증(`verify`), 터미널 작업대(`desk`, 스튜디오 API의 손님), 배포, 인증 토큰 생성 |
 | `apps/studio` | 세션·대화·미리보기·API·로그 UI, 복구, Fleet 비교, 세션 터미널과 그 관문(훅·b-studio 도구·텔레메트리), 요청마다 AI를 고르는 규칙표와 AI별 결과 |
-| `apps/studio/server` | Next 없이 도는 스튜디오 서버(node:http, tsx로 바로 실행). `app/**/route.ts` 라우트 표(코드젠, 처음 불릴 때 불러옴), 인증 판단(`proxy.ts`와 같은 `decideRequest`), Node 요청·응답과 Web 표준 Request·Response 잇기(스트림·SSE·끊김). `pnpm studio`가 기본으로 띄운다(ADR-188) |
+| `apps/studio/server` | 스튜디오 서버(node:http, tsx로 바로 실행, Next를 쓰지 않음). `app/**/route.ts` 라우트 표(코드젠, 처음 불릴 때 불러옴), 인증 판단(`lib/server/auth.ts`의 `decideRequest`), Node 요청·응답과 Web 표준 Request·Response 잇기(스트림·SSE·끊김). `pnpm studio`가 기본으로 띄운다(ADR-188) |
 | `packages/spec` | `studio.yaml` 스키마와 compose 교차 검증 |
 | `packages/sandbox` | Docker/Kubernetes 제공자, 준비 판정, 네트워크·시크릿·DB·배포 |
 | `packages/agent` | 모델 클라이언트, 제한된 도구, 워크플로 정책, 검증 게이트, Git 체크포인트와 원격 연동 |

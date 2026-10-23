@@ -1,5 +1,5 @@
 /**
- * 쿠키 읽기·쓰기. 라우트가 Next의 `cookies()` 없이 표준 Request·Response만으로 쿠키를 다루게 한다(스튜디오 서버가 Next 없이 돌 수 있게)
+ * 쿠키 읽기·쓰기. 라우트가 표준 Request·Response만으로 쿠키를 다루게 한다
  */
 
 /** Cookie 헤더에서 이름 하나의 값을 꺼낸다 */

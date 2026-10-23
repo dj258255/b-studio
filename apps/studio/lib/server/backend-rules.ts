@@ -51,7 +51,7 @@ export interface RoutingDecision {
 let cache: { rules: BackendRules; error?: string } | undefined;
 
 function filePath(): string {
-  return path.resolve(/* turbopackIgnore: true */ process.env.B_STUDIO_BACKEND_RULES_FILE ?? path.join(homedir(), '.cache', 'b-studio', 'backend-rules.json'));
+  return path.resolve(process.env.B_STUDIO_BACKEND_RULES_FILE ?? path.join(homedir(), '.cache', 'b-studio', 'backend-rules.json'));
 }
 
 /**
@@ -62,7 +62,7 @@ export function readBackendRules(deps: RoutingDeps = defaultDeps()): { rules: Ba
   if (cache) return cache;
   let raw: string;
   try {
-    raw = readFileSync(/* turbopackIgnore: true */ filePath(), 'utf8');
+    raw = readFileSync(filePath(), 'utf8');
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return (cache = { rules: { rules: [] } });
     return { rules: { rules: [] }, error: `규칙 파일을 읽지 못했습니다: ${(error as Error).message}` };

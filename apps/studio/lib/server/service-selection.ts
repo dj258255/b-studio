@@ -32,7 +32,7 @@ export interface ServiceSelectionFile {
 }
 
 export function serviceSelectionStateDir(env: Record<string, string | undefined> = process.env): string {
-  return path.resolve(/*turbopackIgnore: true*/ env.B_STUDIO_PROJECTS_STATE_DIR ?? path.join(homedir(), '.cache/b-studio/projects'));
+  return path.resolve(env.B_STUDIO_PROJECTS_STATE_DIR ?? path.join(homedir(), '.cache/b-studio/projects'));
 }
 
 function fileFor(projectId: string, dir: string): string {
