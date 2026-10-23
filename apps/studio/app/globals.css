@@ -2,12 +2,16 @@
 /* 수식(KaTeX) 스타일과 글꼴은 패키지에서 함께 묶는다. 샌드박스는 밖으로 나가지 못하므로 CDN에서 받지 않는다 */
 @import "katex/dist/katex.min.css";
 
-/* 세션 터미널의 한글 대체 글꼴(lib/terminal.ts의 TERMINAL_HANGUL_FONT, #865). 시스템 한글 글꼴을 한글 범위에서만 키워 2칸에 가깝게 맞춘다 */
+/*
+ * 세션 터미널 글꼴(lib/terminal.ts의 TERMINAL_FONT, #867). D2Coding 1.4.0에서 영문·한글·상자 그리기만 남긴 것으로, 한글이 영문의 정확히 2배 폭이다.
+ * 영문과 한글을 한 글꼴로 그려야 xterm이 잰 칸 폭에 한글이 꼭 맞는다. 만드는 법과 라이선스는 app/fonts/README.md
+ */
 @font-face {
-  font-family: "b-studio-hangul";
-  src: local("Apple SD Gothic Neo"), local("AppleSDGothicNeo-Regular"), local("Malgun Gothic"), local("Noto Sans CJK KR"), local("Noto Sans KR"), local("NanumGothic");
-  unicode-range: U+1100-11FF, U+3130-318F, U+A960-A97F, U+AC00-D7A3, U+D7B0-D7FF;
-  size-adjust: 118%;
+  font-family: "b-studio-terminal";
+  src: url("./fonts/terminal-mono.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
 }
 
 /*

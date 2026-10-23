@@ -271,7 +271,8 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
       kind: 'session',
       id: source.snapshot.id,
       href: `/sessions/${source.snapshot.id}`,
-      title: source.lastRequest?.trim() || source.snapshot.projectName,
+      // 사람이 붙인 이름이 있으면 그것이 제목이다(#864)
+      title: source.snapshot.label?.trim() || source.lastRequest?.trim() || source.snapshot.projectName,
       projectName: source.snapshot.projectName,
       owner: source.snapshot.owner,
       snapshot: source.snapshot,

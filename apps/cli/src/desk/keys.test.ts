@@ -349,3 +349,68 @@ describe('복사 모드·확대·사이드바·도움말 키(#863)', () => {
     expect(closed.effects).toEqual([]);
   });
 });
+
+describe('세션 조작: 멈추기·이어서 작업·이름 바꾸기(#864)', () => {
+  const stopped = (id: string): DeskItem => ({ ...item(id), state: 'stopped' });
+  const opened = (patch: Partial<DeskState> = {}): DeskState => withItems({ slots: ['a', undefined, undefined, undefined], ...patch });
+
+  it('Ctrl-b p는 사이드바에서 고른 세션을 멈출지 묻고, y면 멈춘다', () => {
+    const asked = handleInput(opened({ selected: 1 }), '\x02p');
+    expect(asked.state.confirm).toEqual({ action: 'stop', id: 'b', title: 'b' });
+    expect(asked.effects).toEqual([]);
+    const done = handleInput(asked.state, 'y');
+    expect(done.effects).toEqual([{ type: 'session', action: 'stop', id: 'b' }]);
+    expect(done.state.confirm).toBeUndefined();
+  });
+
+  it('묻는 동안 다른 키를 누르면 그만두고, 그 키는 CLI로 가지 않는다', () => {
+    const asked = handleInput(opened(), '\x02p').state;
+    const cancelled = handleInput(asked, 'n');
+    expect(cancelled.effects).toEqual([]);
+    expect(cancelled.state.confirm).toBeUndefined();
+    expect(cancelled.state.message).toContain('그만');
+  });
+
+  it('이미 멈춘 세션은 멈추지 않는다', () => {
+    const { state, effects } = handleInput(withItems({ items: [stopped('a')] }), '\x02p');
+    expect(state.confirm).toBeUndefined();
+    expect(effects).toEqual([]);
+    expect(state.message).toContain('이미 멈춘');
+  });
+
+  it('Ctrl-b r은 멈춘 세션만 이어서 작업할지 묻고, Enter로도 고른다', () => {
+    const running = handleInput(withItems(), '\x02r');
+    expect(running.state.confirm).toBeUndefined();
+    expect(running.state.message).toContain('멈춘 세션만');
+    const asked = handleInput(withItems({ items: [stopped('a')] }), '\x02r');
+    expect(asked.state.confirm).toEqual({ action: 'resume', id: 'a', title: 'a' });
+    expect(handleInput(asked.state, '\r').effects).toEqual([{ type: 'session', action: 'resume', id: 'a' }]);
+  });
+
+  it('Ctrl-b ,는 이름 입력 줄을 열고, 친 글자는 CLI로 가지 않으며 Enter로 이름을 바꾼다', () => {
+    const naming = handleInput(opened({ selected: 2 }), '\x02,');
+    expect(naming.state.rename).toEqual({ id: 'c', text: '' });
+    const typed = handleInput(naming.state, '결제 화면x\x7f');
+    expect(typed.effects).toEqual([]);
+    expect(typed.state.rename?.text).toBe('결제 화면');
+    const done = handleInput(typed.state, '\r');
+    expect(done.effects).toEqual([{ type: 'rename', id: 'c', label: '결제 화면' }]);
+    expect(done.state.rename).toBeUndefined();
+  });
+
+  it('이름 입력 중 Esc는 그만두고, 붙여 넣은 줄바꿈은 빈칸이 된다', () => {
+    const naming = handleInput(opened(), '\x02,').state;
+    const pasted = handleInput(naming, '\x1b[200~줄\n바꿈\x1b[201~');
+    expect(pasted.state.rename?.text).toBe('줄 바꿈');
+    expect(pasted.effects).toEqual([]);
+    const cancelled = handleInput(pasted.state, '\x1b', true);
+    expect(cancelled.state.rename).toBeUndefined();
+    expect(cancelled.effects).toEqual([]);
+  });
+
+  it('세션이 없으면 조작할 것이 없다고 알린다', () => {
+    const { state } = handleInput({ ...initialState() }, '\x02p');
+    expect(state.confirm).toBeUndefined();
+    expect(state.message).toContain('세션');
+  });
+});
