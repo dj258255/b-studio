@@ -199,3 +199,18 @@ describe("터미널 패널 — 다시 보낸 출력의 자동 응답을 입력�
     expect(inputs(calls)).toEqual([]);
   });
 });
+
+describe("터미널 패널 — 멈춘 세션 안내(#868)", () => {
+  it("멈춘 세션은 기본으로 이어서 작업 안내를, 끝난 레인처럼 까닭을 아는 곳은 그 안내를 보인다", async () => {
+    stubFetch();
+    mount(<TerminalPanel sessionId="s1" ready={false} />);
+    await flushMicro();
+    expect(document.body.textContent).toContain("멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다");
+
+    document.body.innerHTML = "";
+    mount(<TerminalPanel sessionId="s2" ready={false} stoppedLabel="레인이 끝났습니다" />);
+    await flushMicro();
+    expect(document.body.textContent).toContain("레인이 끝났습니다");
+    expect(document.body.textContent).not.toContain("이어서 작업을 누르면");
+  });
+});

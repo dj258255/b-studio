@@ -159,6 +159,24 @@ describe('목록·합계·정렬', () => {
     expect(totals.tokens).toEqual({ inputTokens: 10, outputTokens: 1, cacheReadTokens: 2, cacheWriteTokens: 0 });
   });
 
+  it('계획이 끝나 자원을 돌려주려고 멈춘 레인 세션은 중지가 아니라 끝남(done)이다(#868)', () => {
+    const lane = plan({ status: 'done', lanes: [{ id: 'a', paths: ['web'], status: 'done', tasks: [], sessionId: 's1' }] });
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ id: 's1', status: 'stopped' }) })], plans: [lane] });
+    expect(items[0]).toMatchObject({ kind: 'lane', id: 's1', state: 'done' });
+    expect(items[0]!.attention).toBeUndefined();
+  });
+
+  it('끝난 레인의 세션 기록이 없어도 끝남이다(#868)', () => {
+    const lane = plan({ status: 'done', lanes: [{ id: 'a', paths: ['web'], status: 'done', tasks: [], sessionId: 'gone' }] });
+    expect(overview({ plans: [lane] }).items[0]).toMatchObject({ kind: 'lane', state: 'done' });
+  });
+
+  it('아직 도는 계획의 레인 세션을 사람이 멈췄으면 그대로 중지다(#868)', () => {
+    const lane = plan({ status: 'running', lanes: [{ id: 'a', paths: ['web'], status: 'running', tasks: [], sessionId: 's1' }] });
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ id: 's1', status: 'stopped' }) })], plans: [lane] });
+    expect(items[0]).toMatchObject({ kind: 'lane', state: 'stopped' });
+  });
+
   it('플릿 구성원은 fleet 종류로 올린다', () => {
     const fleet = fleetView({
       members: [{ sessionId: 's1', backend: 'api', modelId: 'm', label: 'M', provider: 'openai', status: 'running', usage: { inputTokens: 3, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 } }],

@@ -28,6 +28,8 @@ import {
   splitSelectionReducer,
   type PaneSummary,
   type SplitLine,
+  FINISHED_LANE_TERMINAL,
+  finishedLaneIds,
 } from "@/lib/split";
 import { answerRequest } from "@/lib/question-answer";
 import { chatRequestBody, intentFor } from "@/lib/chat-request";
@@ -138,6 +140,9 @@ export function SplitView({ panes, plan, cardsEditor, tabs }: { panes: SplitPane
   // 고른 칸의 결과 칸이 쓰려고, 칸이 받은 최신 화면 상태를 여기서도 들고 있는다(칸마다 하나)
   const [views, setViews] = useState<Record<string, SessionView>>({});
   const [fleet, setFleet] = useState<FleetView>();
+  // 계획 진행이 알려 온 최신 계획. 끝난 레인 칸의 터미널 안내에 쓴다(#868)
+  const [latestPlan, setLatestPlan] = useState<TaskPlanView | undefined>(plan);
+  const finishedLanes = useMemo(() => finishedLaneIds(latestPlan), [latestPlan]);
   const [broadcast, setBroadcast] = useState<Broadcast>();
   const [broadcastText, setBroadcastText] = useState("");
   const [adding, setAdding] = useState(false);
@@ -157,6 +162,7 @@ export function SplitView({ panes, plan, cardsEditor, tabs }: { panes: SplitPane
   const refreshedSignature = useRef<string | undefined>(undefined);
   const handlePlan = useCallback(
     (next: TaskPlanView) => {
+      setLatestPlan(next);
       const known = idsKey ? idsKey.split(",") : [];
       const laneIds = next.lanes.map((lane) => lane.sessionId).filter((id): id is string => Boolean(id));
       const signature = laneRefreshSignature(known, laneIds, refreshedSignature.current);
@@ -390,6 +396,7 @@ export function SplitView({ panes, plan, cardsEditor, tabs }: { panes: SplitPane
                       onView={reportView}
                       broadcast={broadcast}
                       fleet={fleet}
+                      finishedLane={finishedLanes.has(pane.id)}
                       onWinnerChosen={(sessionId) => setFleet((prev) => (prev ? { ...prev, winnerSessionId: sessionId } : prev))}
                     />
                   </div>
@@ -416,6 +423,7 @@ function SplitPane({
   onView,
   broadcast,
   fleet,
+  finishedLane,
   onWinnerChosen,
 }: {
   id: string;
@@ -428,11 +436,13 @@ function SplitPane({
   onView: (id: string, view: SessionView) => void;
   broadcast?: Broadcast;
   fleet?: FleetView;
+  /** 끝난 레인의 칸이다(통합이 세션을 멈춰 터미널이 비어 있다, #868) */
+  finishedLane?: boolean;
   onWinnerChosen: (sessionId: string) => void;
 }) {
   if (!snapshot) return <MissingPane id={id} onClose={onClose} />;
   return (
-    <SessionPane snapshot={snapshot} selected={selected} onSelect={onSelect} onClose={onClose} onFocus={onFocus} onReport={onReport} onView={onView} broadcast={broadcast} fleet={fleet} onWinnerChosen={onWinnerChosen} />
+    <SessionPane snapshot={snapshot} selected={selected} onSelect={onSelect} onClose={onClose} onFocus={onFocus} onReport={onReport} onView={onView} broadcast={broadcast} fleet={fleet} finishedLane={finishedLane} onWinnerChosen={onWinnerChosen} />
   );
 }
 
@@ -472,6 +482,7 @@ function SessionPane({
   onView,
   broadcast,
   fleet,
+  finishedLane,
   onWinnerChosen,
 }: {
   snapshot: SessionSnapshot;
@@ -483,6 +494,7 @@ function SessionPane({
   onView: (id: string, view: SessionView) => void;
   broadcast?: Broadcast;
   fleet?: FleetView;
+  finishedLane?: boolean;
   onWinnerChosen: (sessionId: string) => void;
 }) {
   const view = useSession(snapshot);
@@ -645,7 +657,7 @@ function SessionPane({
         // 터미널 세션: 터미널과 활동 줄만. 대화 탭·입력창은 두지 않는다(요청은 터미널로만 보낸다)
         <>
           <div className="grid min-h-0 flex-1">
-            <TerminalPanel sessionId={snapshot.id} mode={view.snapshot.terminalMode} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} />
+            <TerminalPanel sessionId={snapshot.id} mode={view.snapshot.terminalMode} ready={view.snapshot.status !== "stopped" && view.snapshot.status !== "failed"} {...(finishedLane ? { stoppedLabel: FINISHED_LANE_TERMINAL } : {})} />
           </div>
           <ActivityStrip view={view} open={false} />
         </>
