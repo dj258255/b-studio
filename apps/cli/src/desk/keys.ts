@@ -16,6 +16,7 @@
  */
 import type { KittyImages } from './kitty';
 import type { PaneLayout } from './screen';
+import { openRuntime, runtimeKey, runtimePaste, type RuntimeEffect, type RuntimeState } from './runtime';
 import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type SettingsState } from './settings';
 import { deskSessions, deskSpaces } from './sidebar';
 import type { Sprite } from './sprite';
@@ -141,6 +142,8 @@ export interface DeskState {
   kitty?: KittyImages;
   /** 설정 화면(#890). 있으면 본문 전체가 설정 화면이다 */
   settings?: SettingsState;
+  /** 고른 세션의 실행·배포·미리보기·저장소 화면(#895). 있으면 본문 전체가 이 화면이다 */
+  runtime?: RuntimeState;
 }
 
 export interface UsageState {
@@ -183,7 +186,11 @@ export type Effect =
   /** 설정 화면을 연다(#890). 계정·규칙은 desk가 받아 채운다 */
   | { type: 'settings-open' }
   /** 설정 화면이 낸 할 일 */
-  | { type: 'settings'; effect: SettingsEffect };
+  | { type: 'settings'; effect: SettingsEffect }
+  /** 실행 화면을 열었다(#895). desk가 그 세션의 이벤트를 받기 시작한다 */
+  | { type: 'runtime-open'; id: string }
+  /** 실행 화면이 낸 할 일 */
+  | { type: 'runtime'; effect: RuntimeEffect };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -250,7 +257,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.runtime) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -275,6 +282,14 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       const result = settingsKey(settings, key);
       state = { ...state, settings: result.state };
       for (const effect of result.effects) effects.push({ type: 'settings', effect });
+      continue;
+    }
+    if (state.runtime) {
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = runtimeKey(state.runtime, key);
+      state = { ...state, runtime: result.state };
+      for (const effect of result.effects) effects.push({ type: 'runtime', effect });
       continue;
     }
     if (state.help) {
@@ -358,6 +373,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
   // 설정 화면이 열려 있으면 그 입력 칸에 넣는다(#890)
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
+  // 실행 화면(#895)은 로그에서 찾는 글을 쓰는 중일 때만 받는다
+  if (state.runtime) return { ...next, runtime: runtimePaste(state.runtime, content) };
   // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스·사용량 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
   if (state.copy || state.help || state.confirm || (state.view !== undefined && !state.rename && !state.prompt)) return next;
   if (state.rename) {
@@ -449,6 +466,14 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     effects.push({ type: 'settings-open' });
     return { ...done, settings: openSettings({ config: {}, sprites: [] }), prompt: undefined };
   }
+  if (key === 'v') {
+    // 칸 화면이면 고른 칸의 세션, 아니면(스페이스 화면·사이드바) 고른 세션
+    const slot = state.view === undefined ? state.slots[state.focus] : undefined;
+    const target = (slot && !isShellId(slot) ? sessions.find((entry) => entry.id === slot) : undefined) ?? sessions[state.selected];
+    if (!target) return { ...done, message: '실행 화면을 열 세션이 없습니다' };
+    effects.push({ type: 'runtime-open', id: target.id });
+    return { ...done, runtime: openRuntime(target.id, target.title), prompt: undefined };
+  }
   if (key === '[') {
     const id = state.slots[state.focus];
     if (!id) return { ...done, message: '빈 칸에는 복사 모드가 없습니다' };
@@ -532,7 +557,7 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
-  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g') return commandKey(base, key, effects);
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'v') return commandKey(base, key, effects);
   return base;
 }
 

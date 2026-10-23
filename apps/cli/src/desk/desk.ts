@@ -17,6 +17,7 @@ import { placePanes, terminalSize } from './screen';
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
+import { applyRuntimeEvent, type RuntimeEffect, type RuntimeState } from './runtime';
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
 import type { ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
@@ -155,6 +156,16 @@ export interface SettingsHost {
   openUrl(url: string): void;
 }
 
+/** 실행·배포·미리보기·저장소 화면이 부르는 스튜디오 API(#895) */
+export type RuntimeClient = Pick<StudioClient, 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository'>;
+
+/** 실행 화면이 쓰는 바깥(#895): 스튜디오 API와 브라우저. 테스트에서는 가짜를 넣는다 */
+export interface RuntimeHost {
+  client: RuntimeClient;
+  /** 주소를 이 컴퓨터의 브라우저로 연다(http·https만 넘긴다) */
+  openUrl(url: string): void;
+}
+
 /** 이 컴퓨터의 브라우저로 연다. 셸을 거치지 않고 주소를 인자 하나로 넘긴다 */
 function openInBrowser(url: string): void {
   const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
@@ -248,6 +259,8 @@ export interface DeskAppOptions {
   settings?: SettingsHost;
   /** AI 계정(#885). 계정에 고른 그림을 그 계정 세션의 카드에 쓴다 */
   accounts?: DeskAccount[];
+  /** 실행 화면(#895). 없으면 Ctrl-b v가 열 수 없다고 알린다 */
+  runtime?: RuntimeHost;
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
@@ -344,8 +357,10 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     },
     openUrl: openInBrowser,
   };
+  const runtime: RuntimeHost = { client, openUrl: openInBrowser };
   const app = new DeskApp(client, first, processIo(), {
     settings,
+    runtime,
     accounts,
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
@@ -421,6 +436,9 @@ export class DeskApp {
   readonly #shellEnv: Record<string, string | undefined>;
   readonly #shellCwd: string;
   readonly #settingsHost: SettingsHost | undefined;
+  readonly #runtimeHost: RuntimeHost | undefined;
+  /** 실행 화면이 받는 세션 이벤트 통로 */
+  #runtimeStream: AbortController | undefined;
   /** AI 계정(#885). 계정에 고른 그림을 찾는 데 쓴다 */
   #accounts: DeskAccount[];
   /** 그림 폴더·계정 그림에서 단 카드 그림의 세션. 계정이 바뀌면 지우고 다시 단다 */
@@ -441,6 +459,7 @@ export class DeskApp {
     this.#catalog = options.spriteCatalog;
     this.#animate = options.animate !== false;
     this.#settingsHost = options.settings;
+    this.#runtimeHost = options.runtime;
     this.#accounts = options.accounts ?? [];
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
@@ -645,6 +664,143 @@ export class DeskApp {
       case 'settings':
         void this.#settingsEffect(effect.effect);
         return;
+      case 'runtime-open':
+        this.#openRuntime(effect.id);
+        return;
+      case 'runtime':
+        void this.#runtimeEffect(effect.effect);
+        return;
+    }
+  }
+
+  // ─── 실행·배포·미리보기·저장소 화면(#895) ───
+
+  /** 실행 화면을 바꾼다. 그사이 닫혔거나 다른 세션의 화면이면 아무것도 하지 않는다 */
+  #patchRuntime(id: string, change: (runtime: RuntimeState) => RuntimeState): void {
+    const runtime = this.#state.runtime;
+    if (!runtime || runtime.id !== id) return;
+    this.#state = { ...this.#state, runtime: change(runtime) };
+    this.#scheduleRender();
+  }
+
+  /** 키 처리가 연 실행 화면에 그 세션의 이벤트를 흘린다. 닫으면(close) 통로를 끊는다 */
+  #openRuntime(id: string): void {
+    const host = this.#runtimeHost;
+    this.#runtimeStream?.abort();
+    this.#runtimeStream = undefined;
+    if (!host) {
+      this.#state = { ...this.#state, runtime: undefined };
+      this.#say('이 desk는 실행 화면을 열 수 없습니다. pnpm studio로 다시 여세요');
+      return;
+    }
+    this.#state = { ...this.#state, help: false, message: undefined };
+    const controller = new AbortController();
+    this.#runtimeStream = controller;
+    host.client
+      .sessionEvents(
+        id,
+        (event) => {
+          if (controller.signal.aborted) return;
+          this.#patchRuntime(id, (runtime) => applyRuntimeEvent(runtime, event));
+          // 배포가 끝나면 릴리스 목록이 바뀌었다. 배포 탭을 본 적이 있으면 다시 받는다
+          if ((event.type === 'deploy_finished' || event.type === 'deploy_failed') && this.#state.runtime?.deploy.status) void this.#loadDeploys(host, id);
+        },
+        controller.signal,
+      )
+      .then(
+        () => {
+          if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: '스튜디오가 세션 이벤트를 끊었습니다. Esc로 닫고 다시 여세요' }));
+        },
+        (error: unknown) => {
+          if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: `세션 이벤트를 받지 못했습니다: ${messageOf(error)}` }));
+        },
+      );
+  }
+
+  async #loadDeploys(host: RuntimeHost, id: string): Promise<void> {
+    try {
+      const status = await host.client.deploys(id);
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, status, loading: false, error: undefined } }));
+    } catch (error) {
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, loading: false, error: `배포 상태를 받지 못했습니다: ${messageOf(error)}` } }));
+    }
+  }
+
+  #openUrl(host: RuntimeHost, id: string, url: string): void {
+    if (!browsable(url)) {
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, note: `열 수 없는 주소입니다: ${url}` }));
+      return;
+    }
+    host.openUrl(url);
+    this.#patchRuntime(id, (runtime) => ({ ...runtime, note: `브라우저로 열었습니다: ${url}` }));
+  }
+
+  async #runtimeEffect(effect: RuntimeEffect): Promise<void> {
+    const host = this.#runtimeHost;
+    const id = this.#state.runtime?.id;
+    if (effect.type === 'close') {
+      this.#runtimeStream?.abort();
+      this.#runtimeStream = undefined;
+      return;
+    }
+    if (!host || !id) return;
+    const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
+    try {
+      switch (effect.type) {
+        case 'load-deploys':
+          await this.#loadDeploys(host, id);
+          return;
+        case 'deploy':
+          await host.client.deploy(id, effect.sha);
+          note('배포를 시작했습니다. 진행은 이 화면에 나옵니다');
+          return;
+        case 'rollback':
+          await host.client.rollback(id, effect.releaseId);
+          note('되돌리기를 시작했습니다. 진행은 이 화면에 나옵니다');
+          return;
+        case 'service':
+          await host.client.setService(id, effect.service, effect.on);
+          note(effect.on ? `${effect.service}를 켜는 중입니다` : `${effect.service}를 껐습니다`);
+          return;
+        case 'boot':
+          await host.client.boot(id);
+          return;
+        case 'open-url':
+          this.#openUrl(host, id, effect.url);
+          return;
+        case 'preview': {
+          const service = this.#state.runtime?.snapshot?.services.find((entry) => entry.name === effect.service);
+          if (!service) return;
+          this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { loading: true } } }));
+          try {
+            const url = await host.client.previewUrl(id, service);
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { url } } }));
+            if (effect.open) this.#openUrl(host, id, url);
+          } catch (error) {
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { error: `주소를 받지 못했습니다: ${messageOf(error)}` } } }));
+          }
+          return;
+        }
+        case 'load-repo': {
+          const projectId = this.#state.runtime?.snapshot?.projectId;
+          if (effect.view === 'presubmit') {
+            const submission = await host.client.submission(id);
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, submission, loading: false, error: undefined } }));
+            return;
+          }
+          if (!projectId) {
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, loading: false, error: '세션 정보를 아직 받지 못했습니다. 잠시 뒤 r로 다시 받으세요' } }));
+            return;
+          }
+          const list = await host.client.repository(projectId, effect.view, effect.state);
+          this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, [effect.view]: list, loading: false, error: undefined } }));
+          return;
+        }
+      }
+    } catch (error) {
+      const text = messageOf(error);
+      if (effect.type === 'load-repo') this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, loading: false, error: `받지 못했습니다: ${text}` } }));
+      else note(`하지 못했습니다: ${text}`);
     }
   }
 
@@ -1617,7 +1773,7 @@ export class DeskApp {
   /** 스페이스 화면에 움짤이 보이고 창이 포커스를 가졌으면 다음 프레임에 다시 그린다. 아니면 멈춘다(시계도 멈춘다) */
   #scheduleAnimation(): void {
     const state = this.#state;
-    const playing = this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy && !state.settings;
+    const playing = this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy && !state.settings && !state.runtime;
     const shown = !playing ? [] : state.view === 'usage' ? (state.usage?.accounts ?? []).map((account) => accountSprite(account, state.sprites)) : spaceItems(state).map((item) => spriteFor(item, state.sprites));
     const delays = shown.flatMap((sprite) => shortestFrame(sprite) ?? []);
     if (delays.length === 0) {
@@ -1683,6 +1839,7 @@ export class DeskApp {
     clearTimeout(this.#resizeTimer);
     clearTimeout(this.#animTimer);
     this.#stopLoginPoll();
+    this.#runtimeStream?.abort();
     for (const entry of this.#streams.values()) {
       entry.controller.abort();
       clearTimeout(entry.timer);

@@ -201,3 +201,143 @@ export interface DeskAccountLimits {
   error?: string;
   recommended?: boolean;
 }
+
+// ─── 실행·배포·미리보기·저장소 화면(#895, Ctrl-b v) ───
+
+export type DeskServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped' | 'off';
+
+/** 세션 스냅샷의 서비스 한 줄(스튜디오 ServiceView에서 쓰는 것) */
+export interface DeskService {
+  name: string;
+  template: string;
+  preview: 'browser' | 'openapi' | 'logs';
+  state: DeskServiceState;
+  url?: string;
+  /** 원격 미리보기 게이트웨이 주소. 있으면 열 때마다 스튜디오에서 1회용 주소를 받는다 */
+  previewUrl?: string;
+  detail?: string;
+}
+
+/** 컨테이너 하나의 자원 사용량(스튜디오 ServiceUsage에서 쓰는 것) */
+export interface DeskServiceUsage {
+  service: string;
+  containerName?: string;
+  state: string;
+  health?: string;
+  cpuPercent?: number;
+  memoryBytes?: number;
+  memoryLimitBytes?: number;
+  cpuLimit?: number;
+  restartCount?: number;
+  startedAt?: string;
+}
+
+export interface DeskCheckpoint {
+  sha: string;
+  shortSha: string;
+  message: string;
+  createdAt: string;
+}
+
+/** 배포가 도는 중이면 스냅샷에 있다. lines는 최근 진행 줄 */
+export interface DeskDeploying {
+  action: 'deploy' | 'rollback';
+  target: string;
+  startedAt: string;
+  lines: string[];
+}
+
+/** `/api/sessions/:id/events`의 스냅샷에서 이 화면이 쓰는 것 */
+export interface DeskSessionView {
+  id: string;
+  projectId: string;
+  status: string;
+  error?: string;
+  services: DeskService[];
+  usage?: { at: string; services: DeskServiceUsage[] };
+  checkpoints: DeskCheckpoint[];
+  hasDeploy?: boolean;
+  experimental?: boolean;
+  deploying?: DeskDeploying;
+  /** 샌드박스에 닿지 않거나 컨테이너가 사라졌다. 있으면 서비스 상태를 믿을 수 없다 */
+  sandboxLink?: DeskSandboxLink;
+}
+
+export interface DeskSandboxLink {
+  state: 'unreachable' | 'missing';
+  since: string;
+  reason: string;
+}
+
+/** 세션 이벤트 가운데 이 화면이 접는 것. 나머지는 버린다 */
+export type DeskSessionEvent =
+  | { type: 'snapshot'; snapshot: DeskSessionView }
+  | { type: 'status'; status: string; error?: string }
+  | { type: 'service'; service: string; state: DeskServiceState; url?: string; previewUrl?: string; detail?: string }
+  | { type: 'log'; service: string; text: string; at: string }
+  | { type: 'usage'; at: string; services: DeskServiceUsage[] }
+  | { type: 'sandbox_link'; link?: DeskSandboxLink }
+  | { type: 'checkpoint'; checkpoint: DeskCheckpoint }
+  | { type: 'deploy_started'; action: 'deploy' | 'rollback'; target: string; at: string }
+  | { type: 'deploy_log'; line: string }
+  | { type: 'deploy_finished'; action: 'deploy' | 'rollback'; release: string; label: string; urls: Record<string, string> }
+  | { type: 'deploy_failed'; action: 'deploy' | 'rollback'; target: string; error: string; detail?: string }
+  | { type: string };
+
+export interface DeskRelease {
+  id: string;
+  createdAt: string;
+  finishedAt?: string;
+  source: { label: string; sha?: string };
+  by?: string;
+  status: 'active' | 'previous' | 'retired' | 'failed';
+  error?: string;
+}
+
+/** `GET /api/sessions/:id/deploys` */
+export interface DeskDeployStatus {
+  state: { active?: string; releases: DeskRelease[] };
+  urls: Record<string, string>;
+  containers: Array<{ name: string; state: string }>;
+}
+
+export interface DeskChecklistItem {
+  id: string;
+  title: string;
+  status: 'pass' | 'warn' | 'fail' | 'skip';
+  reason: string;
+}
+
+/** `GET /api/sessions/:id/submission`: 올리기 전 점검 */
+export interface DeskSubmission {
+  items: DeskChecklistItem[];
+  score: { passed: number; total: number };
+}
+
+export type DeskRepoReason = 'no_remote' | 'unsupported_host' | 'no_token' | 'rate_limited' | 'error';
+
+export interface DeskIssue {
+  number: number;
+  title: string;
+  author: string;
+  labels: string[];
+  updatedAt: string;
+  url: string;
+  state: 'open' | 'closed';
+}
+
+export interface DeskPull extends DeskIssue {
+  draft: boolean;
+  headBranch: string;
+  checkStatus?: 'success' | 'failure' | 'pending' | 'unknown';
+}
+
+/** `GET /api/projects/:id/repository/{issues,pulls}` */
+export interface DeskRepoList {
+  ok: boolean;
+  remote?: { kind: string; display: string; webUrl?: string };
+  reason?: DeskRepoReason;
+  detail?: string;
+  issues?: DeskIssue[];
+  pulls?: DeskPull[];
+}

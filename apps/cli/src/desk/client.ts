@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { DeskDeployStatus, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
 import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
@@ -265,5 +266,99 @@ export class StudioClient {
     } finally {
       reader.cancel().catch(() => {});
     }
+  }
+
+  // ─── 실행·배포·미리보기·저장소 화면(#895) ───
+
+  /** 세션 이벤트를 받는다. 처음에 스냅샷과 지금까지의 기록이 오고, 그 뒤로 새 이벤트가 온다. signal로 끊으면 끝난다 */
+  async sessionEvents(id: string, onEvent: (event: DeskSessionEvent) => void, signal: AbortSignal): Promise<void> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.#connection.origin}/api/sessions/${encodeURIComponent(id)}/events`, {
+        headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, accept: 'text/event-stream' },
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    }
+    if (!response.ok || !response.body) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new StudioRequestError(body.error ?? `세션 이벤트를 받지 못했습니다 (${response.status})`, response.status);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let rest = '';
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        const parsed = parseSse(rest, decoder.decode(value, { stream: true }));
+        rest = parsed.rest;
+        for (const data of parsed.events) {
+          try {
+            onEvent(JSON.parse(data) as DeskSessionEvent);
+          } catch {
+            // 깨진 조각은 버린다
+          }
+          if (signal.aborted) return;
+        }
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    } finally {
+      reader.cancel().catch(() => {});
+    }
+  }
+
+  deploys(id: string): Promise<DeskDeployStatus> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/deploys`);
+  }
+
+  /** 체크포인트를 운영에 배포한다. 진행은 세션 이벤트(deploy_*)로 온다 */
+  async deploy(id: string, sha: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/deploys`, { sha });
+  }
+
+  async rollback(id: string, releaseId: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/deploys/rollback`, { releaseId });
+  }
+
+  /** 서비스를 켜거나 끈다(서비스 선택). 상태는 세션 이벤트(service)로 온다 */
+  async setService(id: string, service: string, on: boolean): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/services/${encodeURIComponent(service)}/selection`, { on });
+  }
+
+  /** 잠든 세션의 샌드박스를 지금 켠다 */
+  async boot(id: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/boot`);
+  }
+
+  /**
+   * 브라우저로 열 미리보기 주소. 원격 미리보기 게이트웨이가 있으면 스튜디오가 주는 1회용 주소를, 아니면 이 컴퓨터의 로컬 프록시 주소를
+   * 받는다(웹 화면과 같은 길). 로컬 프록시를 받지 못하면 서비스 주소를 그대로 쓴다
+   */
+  async previewUrl(id: string, service: Pick<DeskService, 'name' | 'url' | 'previewUrl'>): Promise<string> {
+    const session = encodeURIComponent(id);
+    if (service.previewUrl) {
+      return (await this.#request<{ url: string }>('POST', `/api/sessions/${session}/preview-access`, { service: service.name, path: '/' })).url;
+    }
+    try {
+      const { url } = await this.#request<{ url?: string }>('POST', `/api/sessions/${session}/services/${encodeURIComponent(service.name)}/preview-proxy`);
+      if (url) return url;
+    } catch (error) {
+      if (!service.url) throw error;
+    }
+    if (!service.url) throw new Error(`${service.name}의 주소가 아직 없습니다`);
+    return service.url;
+  }
+
+  submission(id: string): Promise<DeskSubmission> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/submission`);
+  }
+
+  repository(projectId: string, kind: 'issues' | 'pulls', state: 'open' | 'closed'): Promise<DeskRepoList> {
+    return this.#request('GET', `/api/projects/${encodeURIComponent(projectId)}/repository/${kind}?state=${state}`);
   }
 }
