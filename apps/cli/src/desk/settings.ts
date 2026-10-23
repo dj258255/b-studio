@@ -751,9 +751,9 @@ export function settingsHint(state: SettingsState): string {
   if (state.picker) return ' 글자로 거르기 · ↑↓ PgUp PgDn 고르기 · Enter 이 그림으로 · Esc 그만두기';
   if (state.login) return ' o 브라우저로 열기 · c 로그인 취소 · Esc 창 닫기(로그인은 뒤에서 계속)';
   if (state.loading) return ' 설정 불러오는 중… · Esc 닫기';
-  if (state.tab === 'accounts') return ' Tab 탭 · ↑↓ 고르기 · a 더하기 · Enter 이름 · p 그림 · l 로그인 · r 상태 다시 확인 · x 빼기 · Esc 닫기';
-  if (state.tab === 'rules') return ' Tab 탭 · ↑↓ 고르기 · Enter 고치기 · a 더하기 · x 지우기 · K J 옮기기 · s 저장 · t 미리보기 · R 되돌리기 · Esc 닫기';
-  return ' Tab 탭 · ↑↓ 고르기 · ←→ Enter 값 바꾸기(바로 저장) · Esc 닫기';
+  if (state.tab === 'accounts') return ' Tab 탭 · ↑↓ 고르기 · a 더하기 · Enter 이름 · p 그림 · l 로그인 · r 상태 다시 확인 · x 빼기 · u 사용량 · w 카드 · Esc 닫기';
+  if (state.tab === 'rules') return ' Tab 탭 · ↑↓ 고르기 · Enter 고치기 · a 더하기 · x 지우기 · K J 옮기기 · s 저장 · t 미리보기 · R 되돌리기 · u 사용량 · w 카드 · Esc 닫기';
+  return ' Tab 탭 · ↑↓ 고르기 · ←→ Enter 값 바꾸기(바로 저장) · u 사용량 · w 카드 · Esc 닫기';
 }
 
 interface Pane {

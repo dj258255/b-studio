@@ -9,8 +9,10 @@
  * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다.
  * 앞글쇠는 설정(desk.json)으로 바꿀 수 있고(state.prefixKey), 마우스(SGR 열)는 CLI로 보내지 않고 mouse 할 일로 낸다. 칸·사이드바 자리는 desk.ts가 가린다(#874)
  * 스페이스 화면(#887, 앞글쇠 다음 w)에서는 앞글쇠 없이 방향키로 카드를 고르고 Enter로 고른 칸에 연다. Tab은 다음 스페이스, Esc는 칸 화면이다.
- * 스페이스 화면에서 친 글자는 CLI로 가지 않는다(칸이 보이지 않는다).
- * 설정 화면(#890, 앞글쇠 다음 g)이 열려 있으면 키와 붙여넣기는 모두 설정 화면이 받는다(settings.ts)
+ * 스페이스 화면에서 친 글자는 CLI로 가지 않는다(칸이 보이지 않는다)
+ * 사용량 화면(#889, 앞글쇠 다음 u)에서는 앞글쇠 없이 ↑↓로 계정을 고르고 r로 다시 읽는다. Esc는 연 화면(스페이스·칸)으로 돌아간다.
+ * 설정 화면(#890, 앞글쇠 다음 g, 스페이스·사용량 화면에서는 g만)은 그 화면들 위에 열린다. 열려 있으면 키와 붙여넣기는 모두 설정 화면이 받고(settings.ts),
+ * Esc로 닫으면 아래 화면으로 돌아간다. 입력 칸이나 창이 없을 때의 u·w는 설정을 닫고 사용량 화면·스페이스 화면으로 간다
  */
 import type { KittyImages } from './kitty';
 import type { PaneLayout } from './screen';
@@ -18,7 +20,7 @@ import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type Set
 import { deskSessions, deskSpaces } from './sidebar';
 import type { Sprite } from './sprite';
 import type { Theme } from './theme';
-import type { DeskItem, DeskLimits } from './types';
+import type { DeskAccountLimits, DeskItem, DeskLimits } from './types';
 
 export const PREFIX = '\x02';
 const ESC = '\x1b';
@@ -119,8 +121,14 @@ export interface DeskState {
   /** 설정한 앞글쇠(없으면 Ctrl-b)와 화면에 보일 이름(#874) */
   prefixKey?: string;
   prefixLabel?: string;
-  /** 본문에 칸 대신 스페이스 화면(고른 세션이 든 스페이스의 카드)을 보인다(#887) */
-  view?: 'space';
+  /** 본문에 칸 대신 스페이스 화면(고른 세션이 든 스페이스의 카드, #887)이나 사용량 화면(계정 카드, #889)을 보인다 */
+  view?: 'space' | 'usage';
+  /** 사용량 화면을 닫으면 돌아갈 화면(연 곳) */
+  usageBack?: 'space';
+  /** 사용량 화면에서 고른 계정(usage.accounts 순서) */
+  usageSelected?: number;
+  /** 계정마다의 사용량 한도. desk가 1분마다 받는다. 없으면 아직 받지 않았다 */
+  usage?: UsageState;
   /** 그리는 색(없으면 어두운 팔레트, 24비트 색) */
   theme?: Theme;
   /** 카드 그림: 세션 id, AI 이름(claude-code·codex…), default 차례로 찾는다. 없으면 desk의 기본 그림 */
@@ -133,6 +141,18 @@ export interface DeskState {
   kitty?: KittyImages;
   /** 설정 화면(#890). 있으면 본문 전체가 설정 화면이다 */
   settings?: SettingsState;
+}
+
+export interface UsageState {
+  accounts: DeskAccountLimits[];
+  /** 받은 때(ms) */
+  receivedAt?: number;
+  /** 마지막으로 읽지 못한 까닭(받았던 값은 그대로 둔다) */
+  error?: string;
+  /** 스튜디오가 알린 까닭(계정 목록 파일을 읽지 못함 등) */
+  warning?: string;
+  /** 사용량을 알려 주지 않는 스튜디오(옛 서버) */
+  unsupported?: boolean;
 }
 
 export type Effect =
@@ -156,6 +176,8 @@ export type Effect =
   | { type: 'submit'; projectId: string; request: string; choice: string }
   | { type: 'session'; action: SessionAction; id: string }
   | { type: 'rename'; id: string; label: string }
+  /** 사용량을 읽는다(#889). refresh면 스튜디오에 다시 읽기를 청하고, 아니면 받은 지 오래됐을 때만 묻는다 */
+  | { type: 'usage'; refresh: boolean }
   /** 마우스(#874). x·y는 화면 좌표(0부터), button은 SGR 단추 값(64·65는 휠), release는 뗌 */
   | { type: 'mouse'; button: number; x: number; y: number; release: boolean }
   /** 설정 화면을 연다(#890). 계정·규칙은 desk가 받아 채운다 */
@@ -236,7 +258,21 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
     if (state.settings) {
       const key = nextKey(input, at);
       at += key.length;
-      const result = settingsKey(state.settings, key);
+      const settings = state.settings;
+      const browsing = !settings.form && !settings.picker && !settings.login && !settings.confirm;
+      if (browsing && (key === 'u' || key === 'w')) {
+        // 설정을 닫고 사용량 화면(u)이나 스페이스 화면(w)으로 간다. 저장하지 않은 규칙이 있으면 Esc처럼 먼저 묻는다
+        if (settings.rulesDirty) {
+          state = { ...state, settings: settingsKey(settings, ESC).state };
+          continue;
+        }
+        effects.push({ type: 'settings', effect: { type: 'close' } });
+        state = { ...state, settings: undefined };
+        if (key === 'w') state = { ...state, view: 'space', usageBack: undefined };
+        else if (state.view !== 'usage') state = commandKey({ ...state, prefix: true }, 'u', effects);
+        continue;
+      }
+      const result = settingsKey(settings, key);
       state = { ...state, settings: result.state };
       for (const effect of result.effects) effects.push({ type: 'settings', effect });
       continue;
@@ -283,6 +319,12 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = spaceKey(state, key, effects);
       continue;
     }
+    if (state.view === 'usage' && input[at] !== prefixOf(state)) {
+      const key = nextKey(input, at);
+      at += key.length;
+      state = usageKey(state, key, effects);
+      continue;
+    }
     const char = input[at]!;
     if (char === prefixOf(state)) {
       flush();
@@ -316,8 +358,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
   // 설정 화면이 열려 있으면 그 입력 칸에 넣는다(#890)
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
-  // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
-  if (state.copy || state.help || state.confirm || (state.view === 'space' && !state.rename && !state.prompt)) return next;
+  // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스·사용량 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
+  if (state.copy || state.help || state.confirm || (state.view !== undefined && !state.rename && !state.prompt)) return next;
   if (state.rename) {
     // 이름에는 한 줄로 넣는다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
@@ -374,8 +416,13 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     return done;
   }
   if (key === 'w') return { ...done, view: state.view === 'space' ? undefined : 'space' };
+  if (key === 'u') {
+    if (state.view === 'usage') return closeUsage(done);
+    effects.push({ type: 'usage', refresh: false });
+    return { ...done, view: 'usage', usageBack: state.view === 'space' ? 'space' : undefined };
+  }
   // 칸을 다루는 키는 칸 화면으로 돌아와서 한다
-  if (state.view === 'space' && /^[1-4ozl[xc\r\n]$/.test(key)) return commandKey({ ...state, view: undefined }, key, effects);
+  if (state.view !== undefined && /^[1-4ozl[xc\r\n]$/.test(key)) return commandKey({ ...state, view: undefined }, key, effects);
   if (/^[1-4]$/.test(key)) {
     const slot = Number(key) - 1;
     if (slot >= state.layout) return done;
@@ -486,6 +533,29 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
   if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g') return commandKey(base, key, effects);
+  return base;
+}
+
+/** 사용량 화면을 닫고 연 화면으로 돌아간다 */
+function closeUsage(state: DeskState): DeskState {
+  return { ...state, view: state.usageBack, usageBack: undefined };
+}
+
+/** 사용량 화면의 키(#889): 앞글쇠 없이 계정을 고르고 다시 읽는다. 칸으로 보낼 글자는 없다 */
+function usageKey(state: DeskState, key: string, effects: Effect[]): DeskState {
+  const base: DeskState = state.message ? { ...state, message: undefined } : state;
+  const count = state.usage?.accounts.length ?? 0;
+  const move = (by: number) => ({ ...base, usageSelected: Math.max(0, Math.min(count - 1, (state.usageSelected ?? 0) + by)) });
+  if (key === UP || key === UP_APP || key === LEFT || key === LEFT_APP || key === 'k' || key === 'h') return move(-1);
+  if (key === DOWN || key === DOWN_APP || key === RIGHT || key === RIGHT_APP || key === 'j' || key === 'l') return move(1);
+  if (key === 'r') {
+    effects.push({ type: 'usage', refresh: true });
+    return { ...base, message: '사용량을 다시 읽는 중…' };
+  }
+  if (key === ESC || key === 'q' || key === 'u') return closeUsage(base);
+  if (key === 'w') return { ...base, view: 'space', usageBack: undefined };
+  if (key === '?') return { ...base, help: true };
+  if (key === 'n' || key === 'g') return commandKey(base, key, effects);
   return base;
 }
 

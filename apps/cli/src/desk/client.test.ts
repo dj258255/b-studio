@@ -178,6 +178,17 @@ describe('스튜디오 손님', () => {
     expect(JSON.parse(seen[8]!.body)).toEqual({ rules: [{ when: {}, backend: 'codex' }] });
   });
 
+  it('계정마다의 사용량 한도를 묻고, 다시 읽기는 refresh=1로 청한다(#889)', async () => {
+    const accounts = [{ id: 'codex', backend: 'codex', name: '기본', status: 'ok', windows: [{ kind: 'weekly', usedPercent: 26 }], source: 'codex-app-server' }];
+    handler = (_req, res) => {
+      res.end(JSON.stringify({ accounts, warning: '계정 목록 파일을 읽지 못했습니다' }));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    expect(await client.limits()).toEqual({ accounts, warning: '계정 목록 파일을 읽지 못했습니다' });
+    await client.limits(true);
+    expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/limits', '/api/usage/limits?refresh=1']);
+  });
+
   it('묶음 통로를 열어 세션별 메시지를 넘기고, 끊으면 끝난다', async () => {
     handler = (_req, res) => {
       res.setHeader('content-type', 'text/event-stream');

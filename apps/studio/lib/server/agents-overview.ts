@@ -49,8 +49,6 @@ export interface AgentItem {
   reason?: string;
   /** 이 항목이 실제로 쓰는 백엔드(레인은 그 레인이 고른 backend). 알 수 없으면 없다 */
   backend?: SessionMode;
-  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. studio desk가 계정 그림을 카드에 쓴다(#890) */
-  accountId?: string;
   lastActivityAt: string;
   /** 실행 중일 때 요청 시작부터 지난 시간 */
   runningForMs?: number;
@@ -69,6 +67,8 @@ export interface AgentItem {
   agents?: AgentDetail[];
   /** 이 에이전트가 할 수 있는 범위(#843). 기억에 없는 세션이면 없다 */
   capabilities?: AgentCapabilities;
+  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. desk가 그 계정의 사용량 막대(#889)와 그림(#890)을 잇는다 */
+  accountId?: string;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -349,7 +349,6 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(attention ? { attention } : {}),
     ...(reason ? { reason } : {}),
     ...(row.backend ? { backend: row.backend } : {}),
-    ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
     lastActivityAt: row.updatedAt,
     ...(runningForMs !== undefined ? { runningForMs } : {}),
     ...(tokens ? { tokens } : {}),
@@ -361,6 +360,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     // 메인 행의 상태는 이 항목의 실행 상태다. 장부는 실행 상태를 모른다
     ...(row.agents ? { agents: row.agents.map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent)) } : {}),
     ...(row.capabilities ? { capabilities: row.capabilities } : {}),
+    ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
   };
 }
 

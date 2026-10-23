@@ -304,7 +304,7 @@ describe('계정', () => {
 
   it('그림을 고르면 미리 보고, 바꾸면 그 계정 세션의 카드 그림이 바로 바뀐다', async () => {
     const random = spriteFromRows(['rr', 'rr'], { r: '#ff0000' });
-    const catalog: SpriteCatalog = { pick: () => ({ sprite: random }), read: (file) => (files[file] ? { sprite: files[file] } : { warning: '없음' }) };
+    const catalog: SpriteCatalog = { pick: () => ({ sprite: random }), file: (file) => (files[file] ? { sprite: files[file] } : { warning: '없음' }) };
     const ctx = setup(undefined, { catalog });
     await tick();
     // 계정 그림(pokemon/25.gif)이 그 계정 세션(a)의 카드 그림이고, 계정이 없는 세션(b)은 무작위다
