@@ -74,7 +74,7 @@ describe('스튜디오 핸들러: 라우트 부르기', () => {
   });
 });
 
-describe('스튜디오 핸들러: 인증(proxy.ts가 하던 일)', () => {
+describe('스튜디오 핸들러: 인증', () => {
   it('브라우저가 보낸 사용자·비밀 헤더는 지우고 확인한 사용자만 넣는다', async () => {
     let seen: { user: string | null; secret: string | null } | undefined;
     const GET = (request: Request) => {

@@ -1,8 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { LOCAL_TOKEN_API_PATH, LOCAL_TOKEN_PAGE_PATH } from './local-token';
 
 /**
- * 스튜디오 접근 인증. proxy.ts가 모든 요청 앞에서 쓰므로 무거운 서버 모듈(에이전트, 샌드박스)을 불러오지 않는다.
+ * 스튜디오 접근 인증. 스튜디오 서버(server/app.ts)가 모든 요청 앞에서 쓰므로 무거운 서버 모듈(에이전트, 샌드박스)을 불러오지 않는다.
  * none: 인증 없음(루프백에 띄운 개인 PC용), token: 운영자가 준 접근 토큰으로 로그인, proxy: 사내 SSO 프록시가 넣은 사용자 헤더
  */
 export type AuthMode = 'none' | 'token' | 'proxy';
@@ -43,7 +42,7 @@ export const NO_REVOCATIONS: Revocations = { sessions: {}, users: {} };
 export const SESSION_COOKIE = 'b_studio_session';
 /** 미리보기 게이트웨이가 미리보기 호스트마다 주는 쿠키 */
 export const PREVIEW_COOKIE = 'b_studio_preview';
-/** proxy.ts가 확인한 사용자를 라우트에 넘기는 내부 헤더. 브라우저가 보낸 같은 이름의 헤더는 proxy.ts가 지운다 */
+/** 스튜디오 서버가 확인한 사용자를 라우트에 넘기는 내부 헤더. 밖에서 보낸 같은 이름의 헤더는 서버가 지운다 */
 export const USER_HEADER = 'x-b-studio-user';
 export const PROXY_SECRET_HEADER = 'x-b-studio-proxy-secret';
 export const LOCAL_USER = 'local';
@@ -56,7 +55,7 @@ const SESSION_ID = /^[0-9a-f]{32}$/;
  * 로그인 없이 여는 경로. /api/health는 컨테이너 헬스체크가 부른다. /api/health/routes는 `studio launch`와
  * 데스크톱 셸이 스테일한 라우트 표를 가려내려고 부른다 — 인증을 켠 서버에서 401이 나면 멀쩡한 서버를 스테일로 보고 재시작하게 된다
  */
-const PUBLIC_PATHS = new Set(['/login', '/api/auth/login', '/api/auth/logout', '/api/health', '/api/health/routes']);
+const PUBLIC_PATHS = new Set(['/api/auth/login', '/api/auth/logout', '/api/health', '/api/health/routes']);
 /**
  * 작업 계획 게시판의 MCP 경로(외부 에이전트 연결, task-plans.ts의 resolveBoardToken)는 로그인 쿠키가 아니라
  * 그 요청 자체의 Authorization 헤더(계획마다 내준 토큰)로 인증한다. 여기서 막으면 B_STUDIO_AUTH=token·proxy에서
@@ -346,7 +345,6 @@ export function verifyPreviewGrant(
 export type RequestDecision =
   | { kind: 'pass' }
   | { kind: 'allow'; user: string }
-  | { kind: 'redirect'; location: string }
   | { kind: 'reject'; status: 401 | 403 | 404 | 500; message: string };
 
 export interface IncomingRequest {
@@ -358,7 +356,7 @@ export interface IncomingRequest {
 }
 
 /**
- * proxy.ts가 요청마다 내리는 판단. 화면이 아닌 곳에서 시험할 수 있게 NextRequest에 기대지 않는다.
+ * 스튜디오 서버가 요청마다 내리는 판단. 따로 시험할 수 있게 요청 객체가 아니라 필요한 값만 받는다.
  * 무효화 기록은 token 모드에서 사용자를 확인할 때만 읽고, 읽지 못하면 인증을 건너뛰지 않고 막는다
  */
 export function decideRequest(
@@ -379,13 +377,6 @@ export function decideRequest(
     return { kind: 'reject', status: 403, message: '다른 출처에서 보낸 요청은 받지 않습니다' };
   }
 
-  // 로컬 토큰 교환(개인 PC 모드 전용). 교환 판단 자체는 페이지와 라우트가 한다 — 토큰이 주소의 `#` 뒤에 실려 오고
-  // 본문으로 옮겨 오므로, 여기서는 로그인 모드에서 이 경로들이 아무 일도 하지 않게 404로 막고 개인 PC 모드에서 통과시킨다.
-  // 다른 출처의 쓰기 거부(위의 같은 출처 검사)는 /api 경로에 이미 적용됐다
-  if (request.pathname === LOCAL_TOKEN_PAGE_PATH || request.pathname === LOCAL_TOKEN_API_PATH) {
-    if (config.mode !== 'none') return { kind: 'reject', status: 404, message: '없는 경로입니다' };
-    return { kind: 'pass' };
-  }
   if (PUBLIC_PATHS.has(request.pathname) || BOARD_MCP_PATH.test(request.pathname)) return { kind: 'pass' };
 
   // 인증이 없는 모드에는 요청을 보낸 쪽을 가릴 수단이 Host뿐이다. 다른 사이트가 자기 도메인을 127.0.0.1로 풀리게 하면
@@ -405,7 +396,7 @@ export function decideRequest(
   }
   const user = identify(request.headers, request.cookie, config, now, revocations);
   if (user) return { kind: 'allow', user };
-  if (api) return { kind: 'reject', status: 401, message: '로그인이 필요합니다' };
-  if (config.mode === 'token') return { kind: 'redirect', location: `/login?next=${encodeURIComponent(request.pathname + request.search)}` };
+  // 화면은 없다(ADR-186). 토큰 모드는 /api/auth/login으로 쿠키를 받은 손님만 쓴다
+  if (api || config.mode === 'token') return { kind: 'reject', status: 401, message: '로그인이 필요합니다' };
   return { kind: 'reject', status: 401, message: '사내 SSO 프록시를 거쳐 접속하세요' };
 }

@@ -6,7 +6,7 @@ import { NO_REVOCATIONS, sessionUser, type AuthConfig, type Revocations, type Se
 
 /**
  * 로그인 무효화 기록. 서명 쿠키는 서버에 세션을 두지 않으므로, 로그아웃한 세션 ID와 운영자가 무효화한 사용자만 파일에 남긴다.
- * proxy.ts가 요청마다 읽으므로 가벼운 모듈만 불러오고, 라우트와 메모리를 나눠 쓴다고 가정하지 않는다
+ * 스튜디오 서버의 인증 판단(server/app.ts)이 요청마다 읽으므로 가벼운 모듈만 불러오고, 라우트와 메모리를 나눠 쓴다고 가정하지 않는다
  */
 const FILE = 'revocations.json';
 
@@ -20,22 +20,22 @@ interface Cache {
 const globalState = globalThis as typeof globalThis & { __bStudioRevocations?: Cache; __bStudioRevocationWrites?: Promise<unknown> };
 
 export function authStateDir(): string {
-  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_AUTH_STATE_DIR ?? path.join(homedir(), '.cache/b-studio/auth'));
+  return path.resolve(process.env.B_STUDIO_AUTH_STATE_DIR ?? path.join(homedir(), '.cache/b-studio/auth'));
 }
 
 /** 파일이 바뀌었을 때만 다시 읽는다. 파일이 없으면 무효화한 것이 없다. 읽을 수 없으면 던져 인증을 건너뛰지 않게 한다 */
 export function readRevocations(dir = authStateDir()): Revocations {
-  const file = path.join(/*turbopackIgnore: true*/ dir, FILE);
+  const file = path.join(dir, FILE);
   let stat;
   try {
-    stat = statSync(/*turbopackIgnore: true*/ file);
+    stat = statSync(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return NO_REVOCATIONS;
     throw new Error(`${file}을(를) 읽지 못했습니다: ${(error as Error).message}`);
   }
   const cached = globalState.__bStudioRevocations;
   if (cached && cached.file === file && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.value;
-  const value = parseRevocations(readFileSync(/*turbopackIgnore: true*/ file, 'utf8'), file);
+  const value = parseRevocations(readFileSync(file, 'utf8'), file);
   globalState.__bStudioRevocations = { file, mtimeMs: stat.mtimeMs, size: stat.size, value };
   return value;
 }
@@ -80,11 +80,11 @@ function update(dir: string, now: number, change: (draft: { sessions: Record<str
     // 만료된 쿠키는 어차피 거부되므로 기록에서 뺀다
     const draft = { sessions: Object.fromEntries(Object.entries(current.sessions).filter(([, expiresAt]) => expiresAt > now)), users: { ...current.users } };
     change(draft);
-    await mkdir(/*turbopackIgnore: true*/ dir, { recursive: true, mode: 0o700 });
-    const file = path.join(/*turbopackIgnore: true*/ dir, FILE);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, FILE);
     const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(/*turbopackIgnore: true*/ temp, JSON.stringify({ version: 1, ...draft }, null, 2), { mode: 0o600 });
-    await rename(/*turbopackIgnore: true*/ temp, file);
+    await writeFile(temp, JSON.stringify({ version: 1, ...draft }, null, 2), { mode: 0o600 });
+    await rename(temp, file);
     return draft;
   };
   const result = (globalState.__bStudioRevocationWrites ?? Promise.resolve()).then(run, run);

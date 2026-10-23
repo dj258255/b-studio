@@ -9,21 +9,19 @@
   - → 에이전트가 끝났다고 말하면 플랫폼이 서비스를 다시 띄우고 준비 상태·API 계약·실제 브라우저 화면·테스트로 확인한 뒤에야 변경을 남깁니다.
 - IDE를 대신하려는 도구는 아닙니다. 여러 에이전트의 작업을 운영하는 제어 계층입니다.
 
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/studio-hero-dark.jpg">
-  <img src="docs/images/studio-hero-light.jpg" width="760" alt="작업 화면. 맨 위 새 요청 칸에 "주문 목록의 글자 색을 바꿔 줘"를 쓰자 "로컬 ChatGPT Agent (gpt-5.5)로 보냅니다 · 규칙 2(단순)"와 "같은 종류의 기록: 로컬 ChatGPT Agent 통과 3/3 · 로컬 Claude Agent 통과 2/3"이 보인다. 그 아래 개입 필요 목록에 요청과 테스트의 어긋남을 알린 확인 필요 줄과, 게이트를 세 번 통과하지 못한 검증 실패 줄이 있다">
-</picture>
+<img src="docs/images/desk-space.png" width="760" alt="터미널 작업대의 카드 화면. 왼쪽에 스페이스(프로젝트) shop과 blog가 있고, 오른쪽에 shop의 에이전트 네 개가 카드로 놓였다. 카드마다 픽셀 그림, 이름, Claude·Codex 배지, 상태(작업 중, 권한 대기, 끝남, CLI 대기), 지금 하는 일, 검증 결과·체크포인트·토큰, 그 계정의 5시간·주간 사용량 막대가 있다">
 
-## 두 층: 웹 대시보드와 터미널 작업대
+## 화면은 터미널 하나입니다
 
-같은 스튜디오와 같은 검증 게이트를 두 가지 화면으로 씁니다.
+웹 화면은 없습니다. `pnpm studio` 하나로 스튜디오를 뒤에서 띄우고 터미널 작업대(`studio desk`)를 엽니다. Ghostty·iTerm2 같은 터미널에서 그대로 씁니다.
 
-- 웹 대시보드(`/work`, 위 사진): 요청을 쓰면 내가 정한 규칙표대로 AI(Claude Code·Codex 등)를 골라 보냅니다. 개입이 필요한 세션, AI별 게이트 통과 기록, 에이전트와 서브에이전트별 토큰을 한 화면에서 봅니다.
-- 터미널 작업대(`pnpm studio desk`, 실험): herdr·tmux처럼 터미널 하나에 여러 AI CLI를 1·2·4칸으로 띄웁니다. 왼쪽 사이드바에 세션마다 상태, 게이트 결과(검증 중·통과·실패), 체크포인트 수, 토큰과 비용이 보입니다. 칸의 CLI는 스튜디오가 들고 있어 desk를 나가도 계속 돌고, 스튜디오를 다시 띄우면 지난 대화를 이어 붙입니다. 칸 안 복사 모드(지난 5000줄), 마우스, 세션 멈추기·이어서 작업·이름 바꾸기, 상태가 바뀔 때 벨과 OS 알림, 검증 밖의 그냥 셸 칸이 있고, 키는 `Ctrl-b ?`로 봅니다.
+- 카드 화면: 왼쪽 스페이스(프로젝트)를 고르면 그 프로젝트의 에이전트가 카드로 뜹니다. 카드마다 상태, 지금 하는 일, 서브에이전트, 검증 결과, 토큰, 그 계정의 5시간·주간 사용량이 보입니다. 카드를 고르면 그 AI의 터미널 칸으로 들어갑니다.
+- 칸 화면: 터미널 하나에 여러 AI CLI(Claude Code·Codex)를 1·2·4칸으로 띄웁니다. 칸의 CLI는 스튜디오가 들고 있어 desk를 나가도 계속 돌고, 스튜디오를 다시 띄우면 지난 대화를 이어 붙입니다. 복사 모드, 마우스, 알림, 검증 밖의 그냥 셸 칸이 있습니다.
+- 그 밖의 화면: 사용량(`Ctrl-b u`), 설정(`Ctrl-b g`: 계정·로그인·그림·라우팅 규칙표·테마·키), 기록(`Ctrl-b h`), 세션 자세히(`Ctrl-b i`: 체크포인트·diff·확인·올리기), 요구사항·문서(`Ctrl-b e`), 작업 나누기(`Ctrl-b t`), 여러 AI 비교(`Ctrl-b f`). 키는 `Ctrl-b ?`로 봅니다.
 
-두 화면 모두 터미널의 요청이 게이트를 지나야 체크포인트가 됩니다. 쓰는 방법은 [시작하기 8장](docs/getting-started.md#8-내-ai로-나눠-보내기와-터미널-작업대)에 있습니다.
+터미널의 요청도 게이트를 지나야 체크포인트가 됩니다. 쓰는 방법은 [시작하기 8장](docs/getting-started.md#8-내-ai로-나눠-보내기와-터미널-작업대)에 있습니다.
 
-<img src="docs/images/studio-desk.jpg" width="760" alt="터미널 하나에 띄운 studio desk. 왼쪽 사이드바에 세션 넷이 두 줄씩 있고(확인 필요, 통과 등), 고른 Claude 세션 아래에 서브에이전트의 토큰과 도구·권한 범위가 펼쳐져 있다. 오른쪽 두 칸에 Claude와 Codex 터미널이 있고 각 요청 끝에 검증 통과와 체크포인트가 찍혀 있다">
+<img src="docs/images/desk-panes.png" width="760" alt="칸 화면. 왼쪽 사이드바에 스페이스와 세션이 있고, 오른쪽 두 칸에 Claude Code와 Codex 터미널이 있다. Claude 칸은 주문 모듈 파일을 고치는 중이고, Codex 칸은 pnpm test 실행 권한을 묻고 있다">
 
 ## 핵심 설계 세 가지
 
@@ -85,19 +83,17 @@
 
 | 영역 | 무엇을 하나 |
 |---|---|
-| 작업 보드 | 여러 세션의 계획·도구 호출·로그·미리보기·diff를 함께 본다 |
+| 작업대 | 여러 세션을 카드와 터미널 칸으로 함께 보고, 체크포인트·diff·로그·미리보기 주소를 터미널에서 본다 |
 | 작업 분해 | 한 요청을 레인으로 나눠 병렬 실행하고 통합 결과를 같은 게이트로 다시 검증한다. 계획은 사람이 승인한다 |
 | Agent Fleet | 같은 요청을 2~4개 후보로 펼쳐 비교한다 |
 | AI 나눠 보내기 | 등록한 AI(Claude Code·Codex·Command Code 등) 중 하나를 요청마다 내가 쓴 규칙표로 골라 보낸다. 게이트가 판정한 결과를 AI·모델·작업 종류별로 모아 보이고, 고를 때 그 기록을 옆에 보인다(자동으로 고르지는 않는다) |
-| 터미널(실험) | 실험 기능을 켜면 세션 화면의 중심이 이 컴퓨터의 Claude Code·Codex CLI 터미널이 되고, 터미널의 요청도 같은 게이트를 지나야 체크포인트가 된다. `studio desk`는 터미널 하나에서 여러 세션을 사이드바와 1·2·4칸으로 띄운다 |
+| 터미널(실험) | 세션마다 이 컴퓨터의 Claude Code·Codex CLI 터미널을 띄우고, 터미널의 요청도 같은 게이트를 지나야 체크포인트가 된다. 계정을 여럿 등록해 계정마다 설정 폴더로 띄운다 |
 | 모델·런타임 | Anthropic·OpenAI 호환·Gemini API와 구독 CLI(Claude Code·Codex·Command Code·OpenCode·Gemini CLI)를 하나의 도구 계약으로 묶는다. 레인마다 다른 CLI를 붙일 수 있다 |
-| 토큰 | 요청·세션·사용자별 한도, 턴별 문맥 분석, 비용 보고서. 터미널 실행은 CLI의 공식 텔레메트리로 세고, 메인 CLI와 그 안의 서브에이전트별 토큰·하는 일·할 수 있는 범위를 작업 화면과 `studio desk`에서 펼쳐 본다 |
+| 토큰 | 요청·세션·사용자별 한도, 턴별 문맥 분석, 비용 보고서. 터미널 실행은 CLI의 공식 텔레메트리로 세고, 메인 CLI와 그 안의 서브에이전트별 토큰·하는 일·할 수 있는 범위를 `studio desk`에서 펼쳐 본다. 구독 계정마다 5시간·주간 한도도 본다 |
 | 요구사항 | 명세에서 요구사항(EARS·시나리오)을 뽑아 이슈 발행, 추적 매트릭스, 올리기 전 점검, PR 생성과 자동 리뷰로 잇는다. 고칠 것이 남은 요구사항 수와 Ready 배지를 보인다 |
-| 저장소 | GitHub·Gitea 이슈·PR을 개발 화면에서 본다 |
+| 저장소 | GitHub·Gitea 이슈·PR을 터미널 작업대에서 본다 |
 | 실행 환경 | 샌드박스 로그·자원, 사용자가 직접 띄운 서비스를 보기만 하는 "내 환경", 설정한 프로젝트의 운영 이미지 배포와 롤백 |
-| 앱 | 웹 스튜디오, CLI, macOS 데스크톱 앱 |
-
-<img src="docs/images/studio-requirements.jpg" width="760" alt="요구사항 탭. 요구사항 3개 중 필수 2개가 고칠 것 없이 적혀 Ready 배지가 켜져 있고, 권장 요구사항 R3 아래에는 약한 표현 "빠르게", 시나리오 없음, 측정 지표 없음이 고칠 것으로 보인다">
+| 앱 | 터미널 작업대(`studio desk`)와 CLI. 웹 화면과 데스크톱 앱은 없다 |
 
 ## 빠른 시작
 
@@ -120,15 +116,15 @@ pnpm studio         # Ctrl-b n 새 요청, Ctrl-b q 나가기
 pnpm studio stop    # 뒤에서 도는 스튜디오 끄기
 ```
 
-웹 화면은 `pnpm studio launch --web`으로 엽니다(모델 호출 없이 보려면 `--mode demo`). 브라우저의 `/work`가 작업 화면입니다. CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
+모델 호출 없이 둘러보려면 `pnpm studio --mode demo`로 띄웁니다. CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
 
-데스크톱 앱(macOS), `--json` 출력, 계약을 깨는 요청(`--allow-breaking`), 인증 방식은 [시작하기](docs/getting-started.md)에 정리했습니다.
+계약을 깨는 요청(`--allow-breaking`)과 인증 방식은 [시작하기](docs/getting-started.md)에 정리했습니다.
 
 ## 작동 방식
 
 ```mermaid
 flowchart LR
-  U[사용자] --> UI[웹 스튜디오 / CLI]
+  U[사용자] --> UI[터미널 작업대 / CLI]
   UI --> R[모델 라우터]
   R --> A[에이전트 루프]
   A --> S[격리된 샌드박스]
@@ -152,12 +148,11 @@ flowchart LR
 
 | 경로 | 무엇 | 왜 여기에 |
 |---|---|---|
-| `apps/cli/` | `studio up`·`launch`·`stop`·`desk`·`agent`·`verify`·`workflow`·`deploy`·`boot-probe`·`auth`·`sandbox prune` 명령 | 터미널 진입점을 한 곳에 묶는다 |
-| `apps/studio/` | Next.js 웹 스튜디오(작업 화면 `/work`, 세션 화면의 화면·코드·요구사항·실행·저장소 탭)와 `bench/` 실험 하네스 | 화면과 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
-| `apps/desktop/` | 웹 스튜디오를 감싸는 얇은 Electron 껍데기(macOS) | 화면은 서버가 주는 웹 그대로라 빌드 자산만 분리한다([ADR-062](docs/decisions.md#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)) |
-| `packages/spec/` | `studio.yaml` 스키마와 compose 교차 검증 | CLI·웹이 같은 로더를 공유해야 한다 |
+| `apps/cli/` | 터미널 작업대(`desk`)와 `studio up`·`launch`·`stop`·`agent`·`verify`·`workflow`·`deploy`·`boot-probe`·`auth`·`sandbox prune` 명령 | 화면과 터미널 진입점을 한 곳에 묶는다 |
+| `apps/studio/` | 스튜디오 서버(화면 없는 API. 세션·게이트·체크포인트·계정·사용량)와 `bench/` 실험 하네스 | 서버와 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
+| `packages/spec/` | `studio.yaml` 스키마와 compose 교차 검증 | CLI·서버가 같은 로더를 공유해야 한다 |
 | `packages/sandbox/` | Docker/Kubernetes 샌드박스, edge 프록시, 정책 경계 | 격리 실행이라는 한 책임을 독립 패키지로 둔다 |
-| `packages/agent/` | 에이전트 루프, 도구, 모델 라우터, 검증 게이트, 체크포인트 | 신뢰 장치의 본체. CLI·웹 모두 이 패키지를 부른다([공구함](docs/toolkit.md)) |
+| `packages/agent/` | 에이전트 루프, 도구, 모델 라우터, 검증 게이트, 체크포인트 | 신뢰 장치의 본체. CLI·서버 모두 이 패키지를 부른다([공구함](docs/toolkit.md)) |
 | `templates/` | Next.js·Spring Boot·FastAPI 원본 | managed 서비스를 만들 때 복사하는 뼈대. 워크스페이스 밖에 둬 템플릿 자체 의존성과 섞이지 않는다 |
 | `examples/orders/` | web + api + PostgreSQL 예제 프로젝트 | 모든 실험·E2E·도그푸딩이 쓰는 공통 과제 |
 | `examples/pipeline-lint/` | Argo·Airflow·쿠버네티스·Helm 정의를 `workflow.tests`로 정적 검사하는 예제 | 웹 앱이 아닌 저장소에도 게이트를 쓰는 구성을 보인다 |
@@ -170,8 +165,8 @@ flowchart LR
 | 명령 | 용도 |
 |---|---|
 | `pnpm studio up <path>` | 프로젝트를 샌드박스에서 실행 |
-| `pnpm studio` | 스튜디오를 브라우저 없이 뒤에서 띄우고 바로 터미널 작업대를 연다(실험) |
-| `pnpm studio launch` · `pnpm studio stop` | 스튜디오를 백그라운드로 켠다(`--web`이면 브라우저도 연다) · 끈다 |
+| `pnpm studio` | 스튜디오를 뒤에서 띄우고 바로 터미널 작업대를 연다(실험) |
+| `pnpm studio launch` · `pnpm studio stop` | 스튜디오를 화면 없이 백그라운드로 켠다 · 끈다 |
 | `pnpm studio desk` | 띄워 둔 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다(실험) |
 | `pnpm studio agent <path> "<request>"` | 에이전트에게 변경 요청 |
 | `pnpm studio verify <path>` | 편집기로 바꾼 지금 변경을 같은 게이트로 확인(체크포인트는 만들지 않음) |
@@ -181,10 +176,7 @@ flowchart LR
 | `pnpm studio deploy <path>` | 운영 이미지를 만들고 고정 주소로 전환 |
 | `pnpm studio deploy <path> --status` | 현재 배포와 릴리스 상태 확인 |
 | `pnpm studio deploy <path> --rollback <id>` | 이전 릴리스로 롤백 |
-| `pnpm studio auth token <name>` | 웹 스튜디오 token 모드용 토큰 생성 |
-| `pnpm desktop:install` | 데스크톱 앱을 빌드해 `~/Applications/b-studio.app`에 설치 (macOS) |
-| `pnpm desktop:dev` | 데스크톱 앱을 개발 모드로 실행(서버는 따로 켜 둠) |
-| `pnpm desktop:icon` | 원본 SVG에서 데스크톱 아이콘(`.icns`·창 아이콘)과 스튜디오 favicon을 다시 굽기 (macOS) |
+| `pnpm studio auth token <name>` | 스튜디오 token 모드용 토큰 생성 |
 | `pnpm test` | 단위 테스트 실행 |
 | `pnpm typecheck` | 전체 워크스페이스 타입 검사 |
 

@@ -6,12 +6,12 @@ import { BodyTooLargeError, toWebRequest, writeWebResponse } from './http';
 import { compileRoutes, matchRoute, type RouteEntry, type RouteModule } from './router';
 
 /**
- * 스튜디오 서버의 요청 처리(Next 없이). 순서는 Next가 하던 것과 같다:
- * 1) proxy.ts가 하던 인증 판단(decideRequest)과 사용자 헤더 넣기 → 2) 라우트 맞추기 → 3) 메서드 핸들러에 Request와 { params } 넘기기.
+ * 스튜디오 서버의 요청 처리. 순서:
+ * 1) 인증 판단(decideRequest)과 사용자 헤더 넣기 → 2) 라우트 맞추기 → 3) 메서드 핸들러에 Request와 { params } 넘기기.
  * 화면은 터미널(studio desk)이라 페이지를 그리지 않는다. 첫 화면(`/`)은 b-studio 표지가 든 짧은 안내만 준다
  */
 
-/** Next의 proxy가 본문을 읽을 때 두던 한도와 같은 10MB. 넘으면 413 */
+/** 요청 본문 한도 10MB(예전 Next 앞단과 같은 값). 넘으면 413 */
 export const DEFAULT_MAX_BODY_BYTES = 10 * 1024 * 1024;
 
 const METHODS = ['GET', 'HEAD', 'OPTIONS', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
@@ -73,14 +73,13 @@ export function createStudioHandler(options: StudioHandlerOptions): (req: Incomi
     }
     const url = new URL(request.url);
 
-    // 1. 인증(proxy.ts와 같은 판단)
+    // 1. 인증
     const decision = decideRequest(
       { method: request.method, pathname: url.pathname, search: url.search, headers: request.headers, cookie: cookieValue(request.headers, SESSION_COOKIE) },
       env,
       now(),
       () => readRevocations(),
     );
-    if (decision.kind === 'redirect') return new Response(null, { status: 307, headers: { location: new URL(decision.location, url).toString() } });
     if (decision.kind === 'reject') {
       return url.pathname.startsWith('/api/')
         ? json(decision.status, { error: decision.message })
@@ -106,7 +105,7 @@ export function createStudioHandler(options: StudioHandlerOptions): (req: Incomi
       return json(405, { error: '이 경로는 그 메서드를 받지 않습니다' }, { allow });
     }
 
-    // 3. 핸들러. params는 Next처럼 Promise로 넘긴다
+    // 3. 핸들러. params는 Promise로 넘긴다(라우트의 RouteContext 타입, route-context.d.ts)
     return await handler(request, { params: Promise.resolve(match.params) });
   };
 

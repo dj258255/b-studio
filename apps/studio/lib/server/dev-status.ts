@@ -43,7 +43,7 @@ export function isDevMode(env: Env = process.env): boolean {
 
 /** apps/studio에서 두 단계 위 — 모노레포 루트(.git·pnpm-lock.yaml이 있는 곳). 실행 시점에만 정해지는 경로다 */
 function repoRoot(): string {
-  return path.resolve(/* turbopackIgnore: true */ process.cwd(), '../..');
+  return path.resolve(process.cwd(), '../..');
 }
 
 async function realGitHead(): Promise<string | undefined> {
@@ -57,7 +57,7 @@ async function realGitHead(): Promise<string | undefined> {
 
 async function realLockfileHash(): Promise<string | undefined> {
   try {
-    const content = await readFile(/* turbopackIgnore: true */ path.join(repoRoot(), 'pnpm-lock.yaml'));
+    const content = await readFile(path.join(repoRoot(), 'pnpm-lock.yaml'));
     return createHash('sha256').update(content).digest('hex');
   } catch {
     return undefined;

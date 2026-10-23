@@ -4,7 +4,7 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 
 ## 처음 사용하는 사람
 
-1. [시작하기](getting-started.md) — 요구 사항, 설치, 첫 샌드박스와 첫 에이전트 요청, 작업 화면(`/work`)과 터미널 작업대(`studio desk`)
+1. [시작하기](getting-started.md) — 요구 사항, 설치, 첫 샌드박스와 첫 에이전트 요청, 터미널 작업대(`studio desk`)
 2. [`studio.yaml` 설정](configuration.md) — 서비스, 준비 확인, 계약, 자원, 네트워크, 시크릿
 3. [트러블슈팅](troubleshooting.md) — 실제 실행 중 발견한 증상과 해결 방법
 

@@ -7,7 +7,7 @@ const LIMIT = 5_000;
 
 export function observations(): ModelObservation[] {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(/* turbopackIgnore: true */ filePath(), 'utf8'));
+    const parsed: unknown = JSON.parse(readFileSync(filePath(), 'utf8'));
     if (!Array.isArray(parsed)) return [];
     return parsed.filter(valid).slice(-LIMIT);
   } catch (error) {
@@ -29,7 +29,7 @@ export function recordObservation(observation: ModelObservation): void {
 
 function filePath(): string {
   return path.resolve(
-    /* turbopackIgnore: true */ process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE ?? path.join(homedir(), '.cache', 'b-studio', 'model-observations.json'),
+    process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE ?? path.join(homedir(), '.cache', 'b-studio', 'model-observations.json'),
   );
 }
 

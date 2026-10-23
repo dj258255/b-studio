@@ -50,7 +50,6 @@ export async function runStudio(options: StudioOptions, deps: StudioDeps): Promi
   const code = await deps.launch({
     mode: options.mode,
     port: options.port,
-    open: false,
     serverEnv: { ...STUDIO_SERVER_ENV },
     onWaiting: (elapsedMs) => {
       if (!spinning) return;

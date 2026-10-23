@@ -1600,7 +1600,7 @@ function ensureLoaded(): void {
   if (planStore.loaded) return;
   planStore.loaded = true;
   try {
-    for (const name of readdirSync(/* turbopackIgnore: true */ root())) {
+    for (const name of readdirSync(root())) {
       if (!name.endsWith('.json')) continue;
       try {
         const parsed = JSON.parse(readFileSync(path.join(root(), name), 'utf8')) as TaskPlanView;
@@ -1644,7 +1644,7 @@ function persist(plan: TaskPlanView): void {
 }
 
 function root(): string {
-  return path.resolve(/* turbopackIgnore: true */ process.env.B_STUDIO_TASK_PLANS_DIR ?? path.join(homedir(), '.cache', 'b-studio', 'task-plans'));
+  return path.resolve(process.env.B_STUDIO_TASK_PLANS_DIR ?? path.join(homedir(), '.cache', 'b-studio', 'task-plans'));
 }
 
 function clone(plan: TaskPlanView): TaskPlanView {

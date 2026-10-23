@@ -5,7 +5,7 @@
  * 모듈은 표에서 `() => import(...)`로 두어, 처음 불릴 때 불러온다(시작이 빠르고 쓰지 않는 라우트의 의존성을 불러오지 않는다).
  * 라우트를 더하거나 지우면 다시 만들어야 하고, 테스트(routes-gen.test.ts)가 표와 폴더가 같은지 본다
  */
-import { readdir, writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { routePathOf } from './router';
@@ -44,10 +44,22 @@ export function renderRoutesModule(routes: readonly ScannedRoute[]): string {
   ].join('\n');
 }
 
+/** `--check`면 쓰지 않고, 표가 폴더와 다르면 실패한다(CI의 build 단계) */
 async function main(): Promise<void> {
   const studioDir = path.resolve(import.meta.dirname, '..');
   const routes = await scanRoutes(path.join(studioDir, 'app'));
-  await writeFile(path.join(studioDir, 'server', 'routes.gen.ts'), renderRoutesModule(routes));
+  const target = path.join(studioDir, 'server', 'routes.gen.ts');
+  const rendered = renderRoutesModule(routes);
+  if (process.argv.includes('--check')) {
+    const current = await readFile(target, 'utf8').catch(() => '');
+    if (current !== rendered) {
+      console.error('server/routes.gen.ts가 app 아래 라우트와 다릅니다. pnpm --filter @b-studio/studio routes로 다시 만드세요');
+      process.exit(1);
+    }
+    console.log(`라우트 ${routes.length}개, server/routes.gen.ts가 최신입니다`);
+    return;
+  }
+  await writeFile(target, rendered);
   console.log(`라우트 ${routes.length}개를 server/routes.gen.ts에 적었습니다`);
 }
 

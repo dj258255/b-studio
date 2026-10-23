@@ -32,22 +32,22 @@ interface Cache {
 const globalState = globalThis as typeof globalThis & { __bStudioUsage?: Cache; __bStudioUsageWrites?: Promise<unknown> };
 
 export function usageStateDir(): string {
-  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_USAGE_DIR ?? path.join(homedir(), '.cache/b-studio/usage'));
+  return path.resolve(process.env.B_STUDIO_USAGE_DIR ?? path.join(homedir(), '.cache/b-studio/usage'));
 }
 
 /** 파일이 바뀌었을 때만 다시 읽는다. 파일이 없으면 쓴 사람이 없다. 읽을 수 없으면 던져, 한도가 조용히 사라지지 않게 한다 */
 export function readUsage(dir = usageStateDir()): UsageRecord {
-  const file = path.join(/*turbopackIgnore: true*/ dir, FILE);
+  const file = path.join(dir, FILE);
   let stat;
   try {
-    stat = statSync(/*turbopackIgnore: true*/ file);
+    stat = statSync(file);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return EMPTY;
     throw new Error(`${file}을(를) 읽지 못했습니다: ${(error as Error).message}`);
   }
   const cached = globalState.__bStudioUsage;
   if (cached && cached.file === file && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return cached.value;
-  const value = parseUsage(readFileSync(/*turbopackIgnore: true*/ file, 'utf8'), file);
+  const value = parseUsage(readFileSync(file, 'utf8'), file);
   globalState.__bStudioUsage = { file, mtimeMs: stat.mtimeMs, size: stat.size, value };
   return value;
 }
@@ -93,11 +93,11 @@ export function addUserUsage(user: string, usage: AgentUsage, window: UsageWindo
     const trimmed: UsageRecord['periods'] = {};
     for (const name of kept) trimmed[name] = periods[name]!;
 
-    await mkdir(/*turbopackIgnore: true*/ dir, { recursive: true, mode: 0o700 });
-    const file = path.join(/*turbopackIgnore: true*/ dir, FILE);
+    await mkdir(dir, { recursive: true, mode: 0o700 });
+    const file = path.join(dir, FILE);
     const temp = `${file}.${process.pid}.${Date.now()}.tmp`;
-    await writeFile(/*turbopackIgnore: true*/ temp, JSON.stringify({ version: 1, periods: trimmed }, null, 2), { mode: 0o600 });
-    await rename(/*turbopackIgnore: true*/ temp, file);
+    await writeFile(temp, JSON.stringify({ version: 1, periods: trimmed }, null, 2), { mode: 0o600 });
+    await rename(temp, file);
     return total;
   };
   const result = (globalState.__bStudioUsageWrites ?? Promise.resolve()).then(run, run);

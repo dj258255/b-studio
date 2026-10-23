@@ -18,7 +18,6 @@ import {
   verifyLogin,
   verifyPreviewGrant,
 } from './auth';
-import { LOCAL_TOKEN_API_PATH, LOCAL_TOKEN_PAGE_PATH } from './local-token';
 
 const SECRET = 's'.repeat(40);
 const ALICE = 'a'.repeat(30);
@@ -156,11 +155,11 @@ describe('권한과 출처', () => {
 });
 
 describe('decideRequest', () => {
-  it('token 모드: 로그인하지 않은 화면은 로그인으로 보내고 API는 401, 로그인 경로는 통과시킨다', () => {
-    expect(decideRequest(request('/sessions/abc', { search: '?tab=code' }), TOKEN_ENV, NOW)).toEqual({ kind: 'redirect', location: '/login?next=%2Fsessions%2Fabc%3Ftab%3Dcode' });
+  it('token 모드: 로그인하지 않은 요청은 화면 주소든 API든 401(화면은 없다), 로그인 API는 통과시킨다', () => {
+    expect(decideRequest(request('/sessions/abc', { search: '?tab=code' }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
     expect(decideRequest(request('/api/projects'), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
     expect(decideRequest(request('/api/projects', { headers: { [USER_HEADER]: 'alice' } }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 401 });
-    expect(decideRequest(request('/login'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
+    expect(decideRequest(request('/api/auth/login', { method: 'POST' }), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
     expect(decideRequest(request('/api/health'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
     // 스테일 라우트 확인도 인증 없이 통과해야 한다(401이면 멀쩡한 서버를 재시작한다)
     expect(decideRequest(request('/api/health/routes'), TOKEN_ENV, NOW)).toEqual({ kind: 'pass' });
@@ -176,7 +175,7 @@ describe('decideRequest', () => {
     };
     expect(decideRequest(request('/api/projects', { cookie }), TOKEN_ENV, NOW, broken)).toMatchObject({ kind: 'reject', status: 500, message: expect.stringContaining('revocations.json') });
     // 로그인 경로와 인증을 끈 스튜디오는 기록을 읽지 않는다
-    expect(decideRequest(request('/login'), TOKEN_ENV, NOW, broken)).toEqual({ kind: 'pass' });
+    expect(decideRequest(request('/api/health'), TOKEN_ENV, NOW, broken)).toEqual({ kind: 'pass' });
     expect(decideRequest(request('/api/projects', { headers: LOCAL }), {}, NOW, broken)).toEqual({ kind: 'allow', user: LOCAL_USER });
   });
 
@@ -279,24 +278,5 @@ describe('미리보기 접근 티켓과 쿠키', () => {
     expect(verifyPreviewGrant(cookie, 'cookie', HOST, proxy, NOW)).toEqual(proxyGrant);
     expect(verifyPreviewGrant(cookie, 'cookie', HOST, config, NOW)).toBeUndefined();
     expect(verifyPreviewGrant(cookie, 'cookie', HOST, authConfig({}), NOW)).toBeUndefined();
-  });
-});
-
-describe('로컬 토큰 교환 경로(개인 PC 모드, ADR-173 덧붙임)', () => {
-  it('개인 PC 모드에서는 교환 페이지와 교환 API를 그대로 통과시킨다(토큰 판단은 페이지와 라우트가 한다)', () => {
-    expect(decideRequest(request(LOCAL_TOKEN_PAGE_PATH, { headers: LOCAL }), {}, NOW)).toEqual({ kind: 'pass' });
-    expect(decideRequest(request(LOCAL_TOKEN_API_PATH, { method: 'POST', headers: LOCAL }), {}, NOW)).toEqual({ kind: 'pass' });
-    // 쿼리로 온 토큰도 그대로 통과시킬 뿐, 여기서 쿠키를 심지 않는다(그 경로는 토큰 없는 페이지만 준다)
-    expect(decideRequest(request(LOCAL_TOKEN_PAGE_PATH, { search: '?token=deadbeef', headers: LOCAL }), {}, NOW)).toEqual({ kind: 'pass' });
-  });
-
-  it('다른 출처에서 온 교환 요청은 받지 않는다', () => {
-    expect(decideRequest(request(LOCAL_TOKEN_API_PATH, { method: 'POST', headers: { ...LOCAL, origin: 'https://evil.example' } }), {}, NOW)).toMatchObject({ kind: 'reject', status: 403 });
-  });
-
-  it('인증을 켠 서버(token·proxy)에서는 이 경로들이 아무 일도 하지 않는다(404)', () => {
-    expect(decideRequest(request(LOCAL_TOKEN_PAGE_PATH, { headers: LOCAL }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 404 });
-    expect(decideRequest(request(LOCAL_TOKEN_API_PATH, { method: 'POST', headers: LOCAL, cookie: signSession('alice', SECRET, NOW, 1) }), TOKEN_ENV, NOW)).toMatchObject({ kind: 'reject', status: 404 });
-    expect(decideRequest(request(LOCAL_TOKEN_API_PATH, { method: 'POST', headers: LOCAL }), PROXY_ENV, NOW)).toMatchObject({ kind: 'reject', status: 404 });
   });
 });

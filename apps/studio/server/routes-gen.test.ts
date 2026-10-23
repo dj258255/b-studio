@@ -13,11 +13,12 @@ describe('라우트 표(routes.gen.ts)', () => {
     expect(await readFile(path.join(studioDir, 'server', 'routes.gen.ts'), 'utf8')).toBe(renderRoutesModule(scanned));
   });
 
-  it('API 라우트와 로컬 토큰 교환 페이지를 담는다', () => {
+  it('API 라우트와 첫 주소(/)의 안내를 담고, 지운 로컬 토큰 교환 페이지는 없다', () => {
     const patterns = routes.map((route) => route.pattern);
     expect(patterns).toContain('/api/health');
     expect(patterns).toContain('/api/sessions/[id]/artifacts/[...path]');
-    expect(patterns).toContain('/local-auth');
+    expect(patterns).toContain('/');
+    expect(patterns).not.toContain('/local-auth');
     expect(patterns.length).toBeGreaterThan(100);
   });
 });

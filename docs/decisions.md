@@ -8831,6 +8831,9 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 10. 그림은 저장소에 넣지 않는다. 범수 님이 쓰려는 게임 캐릭터 그림은 남의 저작물이라 함께 배포할 수 없다. desk는 `~/.config/b-studio/sprites/`의 PNG를 읽고, 없거나 읽지 못하면 직접 만든 단순한 기본 그림을 둔다.
 11. 순서: 이 결정 기록, 여러 계정, 사용량 수집, 그리기 기반과 사이드바, `pnpm studio` 한 번에 띄우기, 사용량·설정·기록 화면, fleets·task-plans·요구사항·배포를 터미널로, 웹 화면과 데스크톱 앱 지우기, Next를 걷어낸 가벼운 Node 서버. 웹 화면을 지우기 전까지 Next는 화면 없는 API 서버로 쓴다.
 
+### 이행
+- #896에서 웹 화면(페이지·컴포넌트·화면 전용 lib)과 Electron 데스크톱 앱을 지웠다. 서버는 화면 없는 API 서버로 남고, `/`는 "웹 화면은 없습니다" JSON(404)을, `launch`는 브라우저를 열지 않고 `--web`·`--json`·`--next`를 받지 않으며 Next 없는 Node 서버(ADR-188)만 띄운다. 브라우저로 로컬 토큰을 바꾸는 페이지(`/local-auth`, `/api/local-auth`)도 지웠다(desk는 토큰 파일을 읽는다). 문서 사진은 desk 화면(`docs/images/desk-*.png`)으로 바꿨다.
+
 ### 감수한 트레이드오프
 - `api/oauth/usage`는 문서가 없는 내부 API다. 구독 토큰을 Claude Code 밖에서 쓰는 것이 약관에 맞는지는 회색지대이고, 엔드포인트가 예고 없이 바뀌거나 막힐 수 있다. 개인 도구로 자기 계정의 사용량만 읽는 것으로 범수 님이 감수했다. 끄면 쉬는 계정은 마지막으로 본 값에 머문다.
 - 웹 화면이 없어지면 다른 컴퓨터나 휴대폰 브라우저에서 세션을 볼 길이 없다. 혼자 이 컴퓨터에서 쓰는 도구라 받아들인다.
@@ -8898,7 +8901,7 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 3. 라우트 표 `server/routes.gen.ts`는 `server/gen-routes.ts`가 만든다(`pnpm --filter @b-studio/studio routes`). 모듈은 `() => import(...)`로 두어 처음 불릴 때 불러온다. 표와 폴더가 같은지는 테스트가 본다.
 4. `server/main.ts`는 작업 폴더를 `apps/studio`로 두고(Next와 같다), 시작 때 로컬 토큰을 만들고(instrumentation과 같은 일), SSE가 끊기지 않게 요청 시간 한도를 끈다. SIGTERM·SIGINT를 받으면 남은 연결을 끊고 닫는다.
 5. Next에 기대던 라우트 넷은 표준으로 바꾼다. 쿠키는 `lib/server/cookies.ts`(`cookieValue`, `serializeCookie`, `clearCookie`)로 읽고 쓰고, `NextResponse.json`은 `Response.json`으로 바꾼다. `access.ts`의 `pageUser`(화면 전용)는 Next를 부를 때만 불러온다.
-6. `studio launch`와 `pnpm studio`는 기본으로 이 서버를 띄운다. 브라우저를 열 때(`--web`)와 데스크톱 앱의 `--json`은 화면이 있어야 해서 전처럼 `next dev`를 띄우고, `--next`로 옛 길을 고를 수 있다. 화면을 지우는 #896 뒤에 Next를 걷는다.
+6. `studio launch`와 `pnpm studio`는 기본으로 이 서버를 띄운다. 브라우저를 열 때(`--web`)와 데스크톱 앱의 `--json`은 화면이 있어야 해서 전처럼 `next dev`를 띄우고, `--next`로 옛 길을 고를 수 있다. 화면을 지우는 #896 뒤에 Next를 걷는다. (덧붙임: #896에서 웹 화면을 지우면서 `--web`·`--json`·`--next`와 `next dev` 길을 없앴다. `launch`는 이 서버만 띄운다.)
 
 ### 검증 결과
 - 시작 시간(같은 기계, load average 10~12, 세 번·두 번 잰 값): 새 서버의 첫 헬스 응답 0.84~1.02초, `next dev` 캐시 없음 3.83~5.09초·캐시 있음 2.71초. desk가 처음 부르는 헬스·관제·세션 목록까지 새 서버 3.57초, `next dev`(캐시 없음) 9.83초.
@@ -8908,6 +8911,7 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 ### 남은 일
 - Next 의존(`next`, `react`, `next.config.ts`, typecheck의 `next typegen`, 라우트의 `RouteContext` 전역 타입, Dockerfile의 standalone, CI의 스튜디오 빌드)은 화면을 지우는 #896과 함께 다음 단계에서 걷는다. 지금 걷으면 남은 화면이 깨진다.
 - 운영 이미지(apps/studio/Dockerfile)는 아직 `next build`의 standalone으로 돈다. 다음 단계에서 이 서버로 바꾼다(이미지에 tsx와 소스를 넣거나 한 파일로 묶는다).
+- (덧붙임, #897 마무리) 위 둘을 걷었다. `next`·`react`·`react-dom`·`eslint-config-next`와 `next.config.ts`·`proxy.ts`·`instrumentation.ts`를 지웠고, `RouteContext`는 `apps/studio/route-context.d.ts`가 경로 패턴에서 params 타입을 푼다. lint는 Next 설정이 쓰던 typescript-eslint 권장 규칙을 그대로 쓴다. `build`는 라우트 표가 폴더와 같은지만 본다(`gen-routes.ts --check`). 운영 이미지는 설치한 의존성과 소스를 옮겨 tsx로 서버를 띄운다. 묶지 않아 이미지가 크지만(로컬 빌드 1.84GB) 새 도구가 필요 없다.
 
 ### 감수한 트레이드오프
 - tsx가 처음 불리는 라우트를 그때 변환하므로 경로마다 첫 응답이 수십~수백 ms 늦다. 그래도 `next dev`의 첫 컴파일보다 짧다.

@@ -60,7 +60,7 @@ function load(): Store {
   if (cache) return cache;
   const next: Store = {};
   try {
-    const parsed: unknown = JSON.parse(readFileSync(/* turbopackIgnore: true */ filePath(), 'utf8'));
+    const parsed: unknown = JSON.parse(readFileSync(filePath(), 'utf8'));
     if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
       for (const [storedKey, value] of Object.entries(parsed as Record<string, unknown>)) {
         if (typeof value === 'string') next[storedKey] = value;
@@ -74,7 +74,7 @@ function load(): Store {
 }
 
 function filePath(): string {
-  return path.resolve(/* turbopackIgnore: true */ process.env.B_STUDIO_MODEL_DEFAULTS_FILE ?? path.join(homedir(), '.cache', 'b-studio', 'model-defaults.json'));
+  return path.resolve(process.env.B_STUDIO_MODEL_DEFAULTS_FILE ?? path.join(homedir(), '.cache', 'b-studio', 'model-defaults.json'));
 }
 
 /** 테스트 전용: 캐시를 비워 다음 호출이 파일을 다시 읽게 한다 */

@@ -2,6 +2,7 @@
 import type { RouteEntry } from './router';
 
 export const routes: RouteEntry[] = [
+  { pattern: "/", load: () => import("../app/route") },
   { pattern: "/api/accounts", load: () => import("../app/api/accounts/route") },
   { pattern: "/api/accounts/[backend]/login", load: () => import("../app/api/accounts/[backend]/login/route") },
   { pattern: "/api/accounts/[backend]/refresh", load: () => import("../app/api/accounts/[backend]/refresh/route") },
@@ -23,7 +24,6 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/folders", load: () => import("../app/api/folders/route") },
   { pattern: "/api/health", load: () => import("../app/api/health/route") },
   { pattern: "/api/health/routes", load: () => import("../app/api/health/routes/route") },
-  { pattern: "/api/local-auth", load: () => import("../app/api/local-auth/route") },
   { pattern: "/api/models", load: () => import("../app/api/models/route") },
   { pattern: "/api/opencode/models", load: () => import("../app/api/opencode/models/route") },
   { pattern: "/api/projects", load: () => import("../app/api/projects/route") },
@@ -129,5 +129,4 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/usage", load: () => import("../app/api/usage/route") },
   { pattern: "/api/usage/limits", load: () => import("../app/api/usage/limits/route") },
   { pattern: "/api/workspace", load: () => import("../app/api/workspace/route") },
-  { pattern: "/local-auth", load: () => import("../app/local-auth/route") },
 ];
