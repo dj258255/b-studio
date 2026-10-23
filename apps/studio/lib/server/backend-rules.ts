@@ -14,6 +14,7 @@ import { classifyTask } from '@b-studio/agent';
 import { describeWhen, matchCandidates, parseBackendRules, type BackendRules, type RuleCandidate, type RuleIntent } from '../backend-rules';
 import type { TaskKind } from '../routing-types';
 import type { SessionMode } from '../studio-events';
+import { accountProcessEnv, resolveSessionAccount } from './ai-accounts';
 import { StudioError } from './errors';
 import { allowedBackends, assertBackendReady, resolveSessionBackend } from './sessions';
 
@@ -22,19 +23,22 @@ export interface RoutingDeps {
   allowed(): readonly string[];
   /** 규칙이 없을 때 쓰는 서버의 기본 백엔드 */
   defaultBackend(): string;
-  /** 로그인돼 있지 않으면 StudioError를 던진다 */
-  ready(backend: string, cwd: string): Promise<void>;
+  /** 로그인돼 있지 않으면 StudioError를 던진다. accountId가 있으면 그 계정으로 확인한다(#885) */
+  ready(backend: string, cwd: string, accountId?: string): Promise<void>;
 }
 
 export interface RoutingSkip {
   rule: RuleCandidate['rule'] | 'default';
   backend: string;
+  accountId?: string;
   reason: string;
 }
 
 export interface RoutingDecision {
   backend: string;
   model?: string;
+  /** 고른 계정(#885). 없으면 그 CLI의 기본 계정 */
+  accountId?: string;
   /** 고른 규칙의 순서(0부터), 기본값(fallback), 서버 기본(default), 사람이 이번 요청만 직접 고름(direct) */
   rule: RuleCandidate['rule'] | 'default' | 'direct';
   /** 고른 규칙의 조건을 사람이 읽는 말로 */
@@ -109,7 +113,14 @@ export function previewBackend(input: { request: string; intent: RuleIntent }, d
   const { kind, rules, candidates } = candidatesFor(input, deps);
   const allowed = new Set(deps.allowed());
   const first = candidates.find((candidate) => allowed.has(candidate.backend)) ?? candidates[candidates.length - 1]!;
-  return { backend: first.backend, ...(first.model ? { model: first.model } : {}), rule: first.rule, matched: matchedText(rules, first.rule), kind };
+  return {
+    backend: first.backend,
+    ...(first.model ? { model: first.model } : {}),
+    ...(first.accountId ? { accountId: first.accountId } : {}),
+    rule: first.rule,
+    matched: matchedText(rules, first.rule),
+    kind,
+  };
 }
 
 /** 요청을 보낼 때. 허용하고 로그인된 첫 후보를 고른다. 모두 쓸 수 없으면 409로 각 까닭을 알린다 */
@@ -125,57 +136,72 @@ export async function chooseBackend(input: { request: string; intent: RuleIntent
   const skipped: RoutingSkip[] = [];
   const failed = new Map<string, string>();
   for (const candidate of candidates) {
+    const account = candidate.accountId ? { accountId: candidate.accountId } : {};
     if (!allowed.has(candidate.backend)) {
-      skipped.push({ rule: candidate.rule, backend: candidate.backend, reason: `이 스튜디오가 허용하지 않는 백엔드입니다(B_STUDIO_BACKENDS)` });
+      skipped.push({ rule: candidate.rule, backend: candidate.backend, ...account, reason: `이 스튜디오가 허용하지 않는 백엔드입니다(B_STUDIO_BACKENDS)` });
       continue;
     }
     const unusable = input.only?.(candidate.backend);
     if (unusable !== undefined) {
-      skipped.push({ rule: candidate.rule, backend: candidate.backend, reason: unusable });
+      skipped.push({ rule: candidate.rule, backend: candidate.backend, ...account, reason: unusable });
       continue;
     }
-    let reason = failed.get(candidate.backend);
+    // 로그인은 계정마다 다르다(#885). 같은 CLI·같은 계정은 한 번만 확인한다
+    const key = `${candidate.backend}\u0000${candidate.accountId ?? ''}`;
+    let reason = failed.get(key);
     if (reason === undefined) {
       try {
-        await deps.ready(candidate.backend, input.cwd);
+        await deps.ready(candidate.backend, input.cwd, candidate.accountId);
       } catch (error) {
         if (!(error instanceof StudioError)) throw error;
         reason = error.message;
-        failed.set(candidate.backend, reason);
+        failed.set(key, reason);
       }
     }
     if (reason !== undefined) {
-      skipped.push({ rule: candidate.rule, backend: candidate.backend, reason });
+      skipped.push({ rule: candidate.rule, backend: candidate.backend, ...account, reason });
       continue;
     }
-    return { backend: candidate.backend, ...(candidate.model ? { model: candidate.model } : {}), rule: candidate.rule, matched: matchedText(rules, candidate.rule), kind, skipped };
+    return { backend: candidate.backend, ...(candidate.model ? { model: candidate.model } : {}), ...account, rule: candidate.rule, matched: matchedText(rules, candidate.rule), kind, skipped };
   }
-  throw new StudioError(409, `규칙에 맞는 AI를 쓸 수 없어 요청을 보내지 않았습니다. ${skipped.map((skip) => `${skip.backend}: ${skip.reason}`).join(' / ')}`);
+  throw new StudioError(409, `규칙에 맞는 AI를 쓸 수 없어 요청을 보내지 않았습니다. ${skipped.map((skip) => `${skip.backend}${skip.accountId ? `(${skip.accountId})` : ''}: ${skip.reason}`).join(' / ')}`);
 }
 
 /**
  * 이번 요청만 사람이 고른 AI로 보낸다(#827). 규칙은 보지 않는다. 허용과 로그인은 chooseBackend와 같이 확인하지만,
  * 사람이 고른 것이므로 안 되면 다른 AI로 넘어가지 않고 거절한다(허용 밖 400, 로그인 전 409)
  */
-export async function chooseDirect(input: { backend: string; model?: string; request: string; intent: RuleIntent; cwd: string; only?: BackendFilter }, deps: RoutingDeps = defaultDeps()): Promise<RoutingDecision> {
+export async function chooseDirect(
+  input: { backend: string; model?: string; accountId?: string; request: string; intent: RuleIntent; cwd: string; only?: BackendFilter },
+  deps: RoutingDeps = defaultDeps(),
+): Promise<RoutingDecision> {
   if (!deps.allowed().includes(input.backend)) throw new StudioError(400, `이 스튜디오가 허용하지 않는 백엔드입니다(B_STUDIO_BACKENDS): ${input.backend}`);
   const unusable = input.only?.(input.backend);
   if (unusable !== undefined) throw new StudioError(400, `${input.backend}: ${unusable}`);
   try {
-    await deps.ready(input.backend, input.cwd);
+    await deps.ready(input.backend, input.cwd, input.accountId);
   } catch (error) {
     if (!(error instanceof StudioError)) throw error;
     throw new StudioError(409, `고른 AI를 쓸 수 없어 요청을 보내지 않았습니다. ${input.backend}: ${error.message}`);
   }
   const model = input.model?.trim();
-  return { backend: input.backend, ...(model ? { model } : {}), rule: 'direct', matched: matchedText({ rules: [] }, 'direct'), kind: classifyTask(input.request), skipped: [] };
+  return { backend: input.backend, ...(model ? { model } : {}), ...(input.accountId ? { accountId: input.accountId } : {}), rule: 'direct', matched: matchedText({ rules: [] }, 'direct'), kind: classifyTask(input.request), skipped: [] };
 }
 
 function defaultDeps(): RoutingDeps {
   return {
     allowed: () => [...allowedBackends()],
     defaultBackend: () => resolveSessionBackend(undefined),
-    ready: (backend, cwd) => assertBackendReady(backend as SessionMode, cwd),
+    ready: async (backend, cwd, accountId) => {
+      // 계정이 목록에 없거나 다른 CLI의 것이면 그 후보를 쓰지 않는다(#885). 기본 계정이면 지금처럼 process.env다
+      let account: Awaited<ReturnType<typeof resolveSessionAccount>>;
+      try {
+        account = await resolveSessionAccount(accountId, backend);
+      } catch (error) {
+        throw new StudioError(409, (error as Error).message);
+      }
+      await assertBackendReady(backend as SessionMode, cwd, {}, accountProcessEnv(account));
+    },
   };
 }
 

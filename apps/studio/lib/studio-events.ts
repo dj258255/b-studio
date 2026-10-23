@@ -110,6 +110,10 @@ export interface SessionSnapshot {
    */
   backend?: SessionMode;
   /**
+   * 이 세션이 쓰는 AI 계정(#885, ai-accounts.ts의 id). 없으면 그 CLI의 기본 계정이다. 터미널·러너가 이 계정의 설정 폴더로 CLI를 띄운다
+   */
+  accountId?: string;
+  /**
    * 이 세션에 고정한 모델. 대화 입력창의 모델 선택(#271 다음 요청)으로 바꾼다.
    * api는 모델 레지스트리 id, claude-code·codex는 CLI에 넘기는 모델 이름(별칭), commandcode·opencode·gemini는 그 CLI의 모델 id다.
    * 없으면 api는 요청마다 라우터가 고르고, 나머지는 계정 기본 모델을 쓴다

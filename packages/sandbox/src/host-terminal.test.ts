@@ -1005,3 +1005,82 @@ describe('스튜디오를 다시 띄운 뒤 지난 CLI 대화를 이어 붙인�
     expect(run(hostTerminalCommand('claude'), { FAIL_RESUME: '1' })).not.toContain('지난 대화를 이어 붙이지 못했습니다');
   });
 });
+
+describe('계정마다 설정 폴더를 둔다(#885)', () => {
+  /** 가짜 CLI: 받은 계정 폴더 변수를 찍는다. 변수가 없으면 none */
+  const fakeCli = async (dir: string, name: string): Promise<string> => {
+    const file = path.join(dir, name);
+    await writeFile(file, `#!/bin/sh\nprintf 'CLAUDE_CONFIG_DIR=%s\\n' "\${CLAUDE_CONFIG_DIR-none}"\nprintf 'CODEX_HOME=%s\\n' "\${CODEX_HOME-none}"\n`);
+    await chmod(file, 0o755);
+    return file;
+  };
+
+  it('claude 감싸개는 계정 폴더를 CLAUDE_CONFIG_DIR로 넘긴다. 셸 글자가 든 경로도 그대로 간다', async () => {
+    const dir = await tempDir('b-studio-account-claude-');
+    const fake = await fakeCli(dir, 'fake-claude');
+    const configDir = path.join(dir, "acct 'one' $HOME");
+    const wrapper = path.join(dir, 'wrapper');
+    await writeFile(wrapper, hostCliWrapper(dir, fake, configDir));
+    await chmod(wrapper, 0o700);
+    const out = execFileSync(wrapper, [], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin', CLAUDE_CONFIG_DIR: '/somewhere/else' } });
+    expect(out).toContain(`CLAUDE_CONFIG_DIR=${configDir}\n`);
+    expect(out).toContain('CODEX_HOME=none');
+  });
+
+  it('계정 폴더가 없으면(기본 계정) 감싸개가 변수를 건드리지 않는다', async () => {
+    const dir = await tempDir('b-studio-account-default-');
+    const fake = await fakeCli(dir, 'fake-claude');
+    const wrapper = path.join(dir, 'wrapper');
+    await writeFile(wrapper, hostCliWrapper(dir, fake));
+    await chmod(wrapper, 0o700);
+    expect(execFileSync(wrapper, [], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } })).toContain('CLAUDE_CONFIG_DIR=none');
+    expect(hostCliWrapper(dir, fake)).not.toContain('CLAUDE_CONFIG_DIR');
+  });
+
+  it('codex 감싸개는 계정 폴더를 CODEX_HOME으로 넘긴다(관문 파일에 들어간다)', async () => {
+    const root = await tempDir('b-studio-account-codex-');
+    const fake = await fakeCli(root, 'fake-codex');
+    const configDir = path.join(root, 'codex-acct-2');
+    const dir = await writeHostGatewayConfig('studio-orders-acct', address, { kind: 'codex', cliPath: fake, nodePath: process.execPath, configDir }, root);
+    const out = execFileSync(path.join(dir, 'bin', 'codex'), ['exec', 'hello'], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+    expect(out).toContain(`CODEX_HOME=${configDir}\n`);
+    // 감시가 견주는 기대 파일에도 같은 감싸개가 들어 있다(계정 폴더가 바뀌면 파일이 다르다)
+    const expected = expectedHostGatewayFiles(address, dir, { kind: 'codex', cliPath: fake, nodePath: process.execPath, configDir });
+    expect(expected[path.join('bin', 'codex')]!.content).toContain('CODEX_HOME=');
+    expect(await checkHostGatewayConfig(dir, expected)).toEqual([]);
+  });
+
+  it('claude 관문 파일의 감싸개도 계정 폴더를 넘긴다', async () => {
+    const root = await tempDir('b-studio-account-claude-gw-');
+    const fake = await fakeCli(root, 'fake-claude');
+    const configDir = path.join(root, 'claude-acct-2');
+    const dir = await writeHostGatewayConfig('studio-orders-acct2', address, { ...cli, cliPath: fake, configDir }, root);
+    expect(execFileSync(path.join(dir, 'bin', 'claude'), [], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } })).toContain(`CLAUDE_CONFIG_DIR=${configDir}\n`);
+  });
+
+  it('openHostTerminal은 계정 환경을 PTY 환경에 더한다', async () => {
+    const spawns: Array<Record<string, string>> = [];
+    const pty: HostPty = { pid: 1, write: () => {}, resize: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} };
+    await openHostTerminal({
+      id: 'main',
+      size: { cols: 80, rows: 24 },
+      cwd: '/work',
+      gatewayDir: '/gateway',
+      cli: 'codex',
+      accountEnv: { CODEX_HOME: '/home/kim/.codex-2' },
+      env: { SHELL: '/bin/zsh', HOME: '/home/kim' },
+      spawnPty: (_file, _args, options) => {
+        spawns.push(options.env);
+        return pty;
+      },
+    });
+    expect(spawns[0]!.CODEX_HOME).toBe('/home/kim/.codex-2');
+  });
+
+  it('계정 환경에는 계정 폴더 변수만 받는다', async () => {
+    const pty: HostPty = { pid: 1, write: () => {}, resize: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} };
+    await expect(
+      openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/work', accountEnv: { PATH: '/evil' }, env: { SHELL: '/bin/zsh' }, spawnPty: () => pty }),
+    ).rejects.toThrow('계정 환경');
+  });
+});

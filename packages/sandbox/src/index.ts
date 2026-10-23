@@ -97,6 +97,7 @@ export {
   codexHookCommand,
   expectedHostGatewayFiles,
   findHostCli,
+  ACCOUNT_DIR_ENV,
   findUnhookedCli,
   hostBashRc,
   hostCliWrapper,

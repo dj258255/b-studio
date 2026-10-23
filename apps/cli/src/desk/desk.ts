@@ -6,14 +6,14 @@
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
 import { basename } from 'node:path';
-import { StudioClient, StudioRequestError, findStudio } from './client';
+import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskLayout, type DeskLayout, type DeskPrefix } from './config';
 import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
 import { previewLine, renderScreen, sidebarView, type PaneView } from './render';
 import { placePanes, terminalSize } from './screen';
 import { agentStatus, backendLabel, deskSessions, gateStatus } from './sidebar';
-import type { DeskItem, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskItem, DeskTerminalMessage } from './types';
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
@@ -31,6 +31,28 @@ const ESC_WAIT_MS = 25;
 const RESIZE_SETTLE_MS = 150;
 /** 터미널로 띄울 수 있는 AI. 스튜디오 routed-session.ts의 terminalBackends와 같은 기준이다(desk가 붙는 launch는 이 컴퓨터 방식) */
 const TERMINAL_BACKENDS: readonly string[] = ['claude-code', 'codex'];
+
+/**
+ * 새 요청에서 고를 것(#885). 규칙대로, 그리고 CLI마다 하나씩이다. 한 CLI에 계정이 둘 이상이면 그 CLI 대신 계정마다 하나씩 두고
+ * (`백엔드@계정id`, 기본 계정은 백엔드 이름 그대로), 화면 이름에 계정 이름을 붙인다
+ */
+function promptChoices(backends: readonly string[], accounts: readonly DeskAccount[]): { choices: string[]; labels: Record<string, string> } {
+  const choices = ['rules'];
+  const labels: Record<string, string> = {};
+  for (const backend of backends) {
+    const mine = accounts.filter((account) => account.backend === backend);
+    if (mine.length <= 1) {
+      choices.push(backend);
+      continue;
+    }
+    for (const account of mine) {
+      const choice = account.id === backend ? backend : `${backend}@${account.id}`;
+      choices.push(choice);
+      labels[choice] = `${backendLabel(backend)} · ${account.name}`;
+    }
+  }
+  return { choices, labels };
+}
 /** 사람이 손대야 하는 상태. 이리로 바뀌면 알린다(#864) */
 const WAITING: readonly string[] = ['권한 대기', '답 기다림', '승인 대기'];
 /** 작업 중에서 이리로 바뀌면 끝났다고 알린다 */
@@ -116,7 +138,7 @@ export interface DeskAppOptions {
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
-export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'>;
+export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'>;
 
 /** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
 export interface DeskIo {
@@ -889,7 +911,12 @@ export class DeskApp {
 
   async #openPrompt(): Promise<void> {
     try {
-      const [projects, rules] = await Promise.all([this.#client.projects(), this.#client.rules().catch(() => ({ allowed: [] as string[] }))]);
+      const [projects, rules, accounts] = await Promise.all([
+        this.#client.projects(),
+        this.#client.rules().catch(() => ({ allowed: [] as string[] })),
+        // 계정 목록(#885)을 받지 못하면(옛 스튜디오, 개인 PC 모드 아님) 지금처럼 CLI만 고른다
+        this.#client.accounts().catch((): DeskAccount[] => []),
+      ]);
       const usable = projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }));
       if (usable.length === 0) {
         this.#say('열 수 있는 프로젝트가 없습니다. 웹 화면에서 프로젝트를 먼저 여세요');
@@ -904,7 +931,7 @@ export class DeskApp {
           projectIndex: 0,
           text: '',
           // 터미널로 띄울 수 없는 AI는 고를 수 없다(스튜디오가 거절한다)
-          choices: ['rules', ...rules.allowed.filter((backend) => TERMINAL_BACKENDS.includes(backend))],
+          ...promptChoices(rules.allowed.filter((backend) => TERMINAL_BACKENDS.includes(backend)), accounts),
           choice: 0,
         },
       };
@@ -940,7 +967,7 @@ export class DeskApp {
       // 고른 칸에 셸이 돌고 있으면 덮지 않는다(셸은 x와 나가기로만 끝낸다). 세션은 사이드바에서 연다
       const shellTaken = isShellId(slots[this.#state.focus]);
       if (!shellTaken) slots[this.#state.focus] = result.session.id;
-      const target = backendLabel(result.routing?.backend ?? (choice === 'rules' ? undefined : choice));
+      const target = this.#state.prompt?.labels?.[choice] ?? backendLabel(result.routing?.backend ?? (choice === 'rules' ? undefined : splitChoice(choice).backend));
       const message = result.sendError
         ? `${target} 세션을 만들었지만 요청을 보내지 못했습니다: ${result.sendError}`
         : result.terminal?.pasteError

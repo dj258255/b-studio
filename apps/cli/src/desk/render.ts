@@ -212,9 +212,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const preview = prompt.sending
       ? '보내는 중…'
       : choice !== 'rules'
-        ? `${backendLabel(choice)}로 바로 보냅니다(규칙을 건너뜀)`
+        ? `${prompt.labels?.[choice] ?? backendLabel(choice)}로 바로 보냅니다(규칙을 건너뜀)`
         : (prompt.preview ?? '요청을 쓰면 어느 AI로 갈지 여기 보입니다');
-    lines[rows - 2] = fit(` AI: ${CHOICE_LABEL(choice)} (Tab 바꾸기) · ${preview}`, cols);
+    lines[rows - 2] = fit(` AI: ${prompt.labels?.[choice] ?? CHOICE_LABEL(choice)} (Tab 바꾸기) · ${preview}`, cols);
     if (prompt.step === 'project') {
       lines[rows - 1] = fit(` 새 요청 · 프로젝트: ‹${project?.name ?? '없음'}› (↑↓ 고르기 · Enter 다음 · Esc 닫기)`, cols);
     } else {

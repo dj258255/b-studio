@@ -47,6 +47,9 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
   return { ...actual, providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }) };
 });
 
+// 계정 테스트(#885)가 codex 세션을 만든다. 진짜 codex CLI를 부르지 않게 로그인 확인만 바꾼다
+vi.mock('@b-studio/agent', async (importOriginal) => ({ ...(await importOriginal<typeof import('@b-studio/agent')>()), preflightCodex: async () => ({ ok: true }) }));
+
 vi.mock('./projects', () => ({ findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root) }));
 vi.mock('./session-terminal', () => ({
   disposeSessionTerminal: async (sessionId: string, sandboxId: string) => {
@@ -140,4 +143,44 @@ describe('세션 터미널을 열 수 있는 자리 (이슈 #673)', () => {
     expect(fake.disposed).toEqual([[id, 'studio-terminal-fake']]);
     expect(() => sessionTerminalTarget(id)).toThrow('멈춘 세션에서는 터미널을 열 수 없습니다');
   }, 20_000);
+});
+
+describe('세션의 AI 계정(#885)', () => {
+  it('고른 계정을 세션 기록에 남기고, 터미널은 열 때마다 그 계정의 설정 폴더를 찾는다', async () => {
+    await setup();
+    const { addAiAccount, removeAiAccount } = await import('./ai-accounts');
+    const home = await mkdtemp(path.join(tmpdir(), 'b-studio-session-account-'));
+    const savedEnv = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME, B_STUDIO_BACKENDS: process.env.B_STUDIO_BACKENDS };
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, 'xdg');
+    process.env.B_STUDIO_BACKENDS = 'codex,claude-code';
+    try {
+      const account = await addAiAccount({ name: '마르코', backend: 'codex', configDir: '~/.codex-marco' });
+      // 다른 CLI의 계정이나 목록에 없는 계정은 받지 않는다
+      await expect(createSession('termproj', 'kim', 'copy', { backend: 'claude-code', accountId: account.id })).rejects.toMatchObject({ status: 400 });
+      await expect(createSession('termproj', 'kim', 'copy', { backend: 'codex', accountId: 'acct-00000000' })).rejects.toMatchObject({ status: 400 });
+
+      const id = (await createSession('termproj', 'kim', 'copy', { backend: 'codex', accountId: account.id })).id;
+      await waitFor(id, 'ready');
+      expect(getSnapshot(id)?.accountId).toBe(account.id);
+      expect(await sessionTerminalTarget(id).accountDir()).toBe(path.join(home, '.codex-marco'));
+
+      // 계정을 지우면 다른 계정으로 띄우지 않고 까닭을 알린다
+      await removeAiAccount(account.id);
+      await expect(sessionTerminalTarget(id).accountDir()).rejects.toThrow('계정 목록에 없습니다');
+      await stopSession(id);
+
+      // 기본 계정은 기록에 남기지 않는다(지금과 같다)
+      const plain = (await createSession('termproj', 'kim', 'copy', { backend: 'codex', accountId: 'codex' })).id;
+      await waitFor(plain, 'ready');
+      expect(getSnapshot(plain)?.accountId).toBeUndefined();
+      expect(await sessionTerminalTarget(plain).accountDir()).toBeUndefined();
+      await stopSession(plain);
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });
