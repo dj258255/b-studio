@@ -6,9 +6,10 @@
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
 import { StudioClient, StudioRequestError, findStudio } from './client';
-import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskLayout, type DeskLayout, type DeskPrefix } from './config';
+import { BROWSING, flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
-import { previewLine, renderScreen, type PaneView } from './render';
+import { previewLine, renderScreen, sidebarView, type PaneView } from './render';
 import { placePanes, terminalSize } from './screen';
 import { agentStatus, backendLabel, deskSessions, gateStatus } from './sidebar';
 import type { DeskItem, DeskTerminalMessage } from './types';
@@ -39,19 +40,41 @@ const GATE_NOTICE: Record<string, string> = { 실패: '검증 실패', '확인 �
 const NOT_READY: readonly string[] = ['stopped', 'booting'];
 /** 한 번에 내는 OS 알림의 상한(여럿이 한꺼번에 바뀌어도 알림이 쏟아지지 않게) */
 const MAX_OS_NOTICES = 3;
+/** 휠 한 칸에 옮기는 줄 수 */
+const WHEEL_LINES = 3;
 
 // 밖 터미널의 bracketed paste를 켜서 붙여넣기를 표지로 받는다(붙인 글 안의 Ctrl-b를 명령으로 보지 않게, #860)
 const ENTER_SCREEN = '\x1b[?1049h\x1b[?2004h\x1b[H\x1b[2J';
 const LEAVE_SCREEN = '\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l';
+// 마우스는 누름·뗌·휠(1000)을 SGR 꼴(1006)로 받는다. 끌기(1002)는 받지 않는다(#874)
+const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';
+const MOUSE_OFF = '\x1b[?1006l\x1b[?1000l';
 
 export interface DeskOptions {
   port?: number;
-  /** false면 벨과 OS 알림을 내지 않는다(--no-notify). 사이드바 표시와 아래 줄 알림은 그대로다 */
+  /** false면 벨과 OS 알림을 내지 않는다(--no-notify). 설정 파일보다 앞선다. 사이드바 표시와 아래 줄 알림은 그대로다 */
   notify?: boolean;
+  /** false면 마우스를 받지 않는다(--no-mouse). 설정 파일보다 앞선다 */
+  mouse?: boolean;
+}
+
+/** 배치를 읽고 쓰는 곳(실제로는 desk-state.json, 테스트에서는 메모리) */
+export interface DeskLayoutStore {
+  load(): DeskLayout | undefined;
+  save(layout: DeskLayout): void;
 }
 
 export interface DeskAppOptions {
   notify?: boolean;
+  /** false면 밖 터미널의 마우스를 켜지 않는다 */
+  mouse?: boolean;
+  /** false면 칸의 24비트 색을 256색으로 낮춰 그린다 */
+  truecolor?: boolean;
+  /** 설정한 앞글쇠(없으면 Ctrl-b) */
+  prefix?: DeskPrefix;
+  layoutStore?: DeskLayoutStore;
+  /** 시작할 때 아래 줄에 보일 설정 알림(잘못된 값) */
+  warnings?: string[];
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
@@ -119,7 +142,20 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     console.error('`pnpm studio launch`로 띄운 뒤 다시 실행하세요. 다른 포트면 --port를 주세요');
     return 1;
   }
-  return new DeskApp(client, first, processIo(), { notify: options.notify !== false }).run();
+  const dir = deskConfigDir(env);
+  const { config, warnings } = loadDeskConfig(dir);
+  const app = new DeskApp(client, first, processIo(), {
+    // 명령 인자가 설정 파일보다 앞선다
+    notify: options.notify ?? config.notify ?? true,
+    mouse: options.mouse ?? config.mouse ?? true,
+    truecolor: colorDepth(env, config.color) === 'truecolor',
+    ...(config.prefix ? { prefix: config.prefix } : {}),
+    layoutStore: { load: () => loadDeskLayout(dir), save: (layout) => saveDeskLayout(dir, layout) },
+    warnings,
+  });
+  const code = await app.run();
+  if (app.exitWarning) console.error(app.exitWarning);
+  return code;
 }
 
 export class DeskApp {
@@ -152,13 +188,53 @@ export class DeskApp {
   readonly #bells = new Set<string>();
   #restored = false;
   #finish: (code: number) => void = () => {};
+  readonly #mouseOn: boolean;
+  readonly #truecolor: boolean;
+  readonly #layoutStore: DeskLayoutStore | undefined;
+  /** 배치를 저장하지 못한 것을 이미 알렸다(같은 알림을 되풀이하지 않는다) */
+  #layoutWarned = false;
+  /** 나갈 때 배치를 저장하지 못했으면 화면을 되돌린 뒤 보일 글 */
+  #exitWarning: string | undefined;
 
   constructor(client: DeskClient, items: DeskState['items'], io: DeskIo, options: DeskAppOptions = {}) {
     this.#client = client;
     this.#io = io;
     this.#notify = options.notify !== false;
-    this.#state = { ...initialState(), items };
+    this.#mouseOn = options.mouse !== false;
+    this.#truecolor = options.truecolor !== false;
+    this.#layoutStore = options.layoutStore;
+    const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
+    const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
+    this.#state = { ...initialState(), items, ...prefix, ...warnings, ...this.#restoredLayout(items) };
     for (const item of items) this.#last.set(item.id, statusOf(item));
+  }
+
+  /** 나갈 때 배치를 저장하지 못했으면 그 알림(desk가 화면을 되돌린 뒤 보인다) */
+  get exitWarning(): string | undefined {
+    return this.#exitWarning;
+  }
+
+  /** 저장해 둔 배치. 지금 없는 세션의 자리는 비운다 */
+  #restoredLayout(items: DeskState['items']): Partial<DeskState> {
+    const saved = this.#layoutStore?.load();
+    if (!saved) return {};
+    const known = new Set(deskSessions(items).map((item) => item.id));
+    const slots = saved.slots.map((id, slot) => (id && slot < saved.layout && known.has(id) ? id : undefined));
+    return { layout: saved.layout, slots, focus: Math.min(saved.focus, saved.layout - 1), zoom: saved.zoom, sidebarHidden: saved.sidebarHidden };
+  }
+
+  #saveLayout(): void {
+    if (!this.#layoutStore) return;
+    const { layout, slots, focus, zoom, sidebarHidden } = this.#state;
+    try {
+      this.#layoutStore.save({ layout, slots: slots.map((id, slot) => (slot < layout ? id : undefined)), focus, zoom: zoom === true, sidebarHidden: sidebarHidden === true });
+    } catch (error) {
+      const text = `칸 배치를 저장하지 못했습니다: ${messageOf(error)}`;
+      if (this.#restored) {
+        if (!this.#layoutWarned) this.#exitWarning = text;
+      } else if (!this.#layoutWarned) this.#say(text);
+      this.#layoutWarned = true;
+    }
   }
 
   /** 지금 상태(테스트가 본다) */
@@ -174,7 +250,7 @@ export class DeskApp {
       () => this.#restore(),
       (code) => this.#stop(code),
     );
-    this.#io.write(ENTER_SCREEN);
+    this.#io.write(ENTER_SCREEN + (this.#mouseOn ? MOUSE_ON : ''));
     this.#io.setRaw(true);
     this.#io.onInput((chunk) => this.#onInput(chunk));
     this.#io.onResize(() => {
@@ -186,6 +262,8 @@ export class DeskApp {
       this.#resizeTimer = setTimeout(() => this.#syncPanes(), RESIZE_SETTLE_MS);
     });
     this.#pollTimer = setInterval(() => void this.#poll(), POLL_MS);
+    // 되살린 배치의 칸을 연다
+    if (this.#visible().length > 0) this.#slotsChanged();
     this.#render();
     return done;
   }
@@ -252,6 +330,10 @@ export class DeskApp {
       case 'close':
       case 'layout':
         this.#slotsChanged();
+        this.#saveLayout();
+        return;
+      case 'mouse':
+        this.#mouse(effect);
         return;
       case 'copy':
         this.#copy(effect.id, effect.action, effect.text);
@@ -329,6 +411,82 @@ export class DeskApp {
     let out = '\x07';
     for (const notice of notices.filter((entry) => entry.id !== focused).slice(0, MAX_OS_NOTICES)) out += `\x1b]9;${oscText(`b-studio: ${notice.text}`)}\x07`;
     this.#io.write(out);
+  }
+
+  /**
+   * 마우스(#874). 사이드바를 누르면 그 세션을 고르고(고른 세션을 한 번 더 누르면 연다), 칸을 누르면 그 칸을 고른다.
+   * 휠은 그 칸의 복사 모드로 지난 출력을 올려 본다. 안쪽 CLI가 마우스를 켰으면 고른 칸 안의 마우스는 칸 좌표로 바꿔 CLI에 넘긴다
+   */
+  #mouse(event: Extract<Effect, { type: 'mouse' }>): void {
+    if (!this.#mouseOn) return;
+    const { button, x, y, release } = event;
+    const wheel = (button & 64) !== 0 ? ((button & 1) === 0 ? -1 : 1) : 0;
+    const press = !release && (button & 32) === 0;
+    const size = this.#size();
+    const side = sidebarView(this.#state, size);
+    if (!this.#state.sidebarHidden && x < side.rect.w && y >= side.rect.y && y < side.rect.y + side.rect.h) {
+      if (!press) return;
+      const sessions = deskSessions(this.#state.items);
+      if (wheel) {
+        this.#state = { ...this.#state, selected: Math.max(0, Math.min(sessions.length - 1, this.#state.selected + wheel)) };
+      } else {
+        const row = side.rows[side.offset + (y - side.rect.y)];
+        if (row?.item === undefined) return;
+        if (row.item === this.#state.selected) {
+          // 고른 세션을 한 번 더 누르면 Ctrl-b Enter와 같다
+          this.#take(handleInput({ ...this.#state, prefix: true }, '\r'));
+          return;
+        }
+        // 고르기만 한다. 이어서 Enter를 누르면 연다(Ctrl-b ↑↓로 고를 때와 같다)
+        this.#state = { ...this.#state, selected: row.item, prefix: true, browsing: true, message: BROWSING };
+      }
+      this.#clearSeen();
+      this.#scheduleRender();
+      return;
+    }
+    const placed = placePanes(size.cols, size.rows, this.#state).panes.find(({ rect }) => x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h);
+    if (!placed) return;
+    const { slot, rect } = placed;
+    const id = this.#state.slots[slot];
+    const pane = id ? this.#panes.get(id) : undefined;
+    const modes = pane?.modes();
+    if (id && pane && modes?.mouse && !pane.inCopy && slot === this.#state.focus && y > rect.y) {
+      // 칸 몸의 첫 줄은 칸 머리 다음 줄이다. 좌표는 1부터
+      const column = x - rect.x + 1;
+      const line = y - rect.y;
+      const data = modes.sgrMouse ? `\x1b[<${button};${column};${line}${release ? 'm' : 'M'}` : x10Mouse(release ? 3 : button, column, line);
+      if (data) this.#send(id, data);
+      return;
+    }
+    if (!press) return;
+    if (slot !== this.#state.focus) {
+      // 다른 칸을 고르면 앞 칸의 복사 모드는 닫는다(복사 모드는 고른 칸의 것이다)
+      if (this.#state.copy) this.#endCopy();
+      this.#state = { ...this.#state, focus: slot };
+    }
+    if (wheel && id && pane) this.#wheel(id, pane, wheel);
+    this.#clearSeen();
+    this.#scheduleRender();
+  }
+
+  /** 휠로 지난 출력을 본다: 위로 굴리면 복사 모드로 들어가 올라가고, 맨 아래까지 내리면 나온다 */
+  #wheel(id: string, pane: PaneTerminal, direction: 1 | -1): void {
+    if (!pane.inCopy) {
+      if (direction > 0) return;
+      this.#copy(id, 'enter');
+      this.#state = { ...this.#state, copy: {}, prefix: false, browsing: false };
+    }
+    pane.copyMove(direction * WHEEL_LINES);
+    const status = pane.copyStatus();
+    if (direction > 0 && status.line >= status.total) this.#endCopy();
+    this.#prevFrame = [];
+  }
+
+  #endCopy(): void {
+    const id = this.#focused();
+    if (id) this.#panes.get(id)?.exitCopy();
+    this.#state = { ...this.#state, copy: undefined };
+    this.#prevFrame = [];
   }
 
   /** 복사 모드 조작. 보는 자리와 고른 범위는 칸 해석기가 든다 */
@@ -427,7 +585,7 @@ export class DeskApp {
       let pane = this.#panes.get(id);
       if (!pane) {
         const first = terminalSize(rect ?? base.find((entry) => entry.slot === slot)!.rect);
-        pane = new PaneTerminal(first.cols, first.rows);
+        pane = new PaneTerminal(first.cols, first.rows, { truecolor: this.#truecolor });
         const sessionId = id;
         pane.onResponse((data) => {
           if (Date.now() < (this.#quietUntil.get(sessionId) ?? 0)) return;
@@ -646,6 +804,7 @@ export class DeskApp {
           : `${target} 세션을 만들었습니다(이 스튜디오는 아직 터미널로 첫 요청을 넣지 않습니다)`;
       this.#state = { ...this.#state, prompt: undefined, slots, message };
       this.#slotsChanged();
+      this.#saveLayout();
       void this.#poll();
     } catch (error) {
       const prompt = this.#state.prompt;
@@ -688,6 +847,8 @@ export class DeskApp {
 
   #stop(code: number): void {
     this.#restore();
+    // 다음에 띄울 때 되살릴 배치(바꿀 때마다 저장했지만 고른 칸은 나갈 때 남긴다)
+    this.#saveLayout();
     this.#finish(code);
   }
 
@@ -705,7 +866,7 @@ export class DeskApp {
     }
     for (const pane of this.#panes.values()) pane.dispose();
     this.#io.setRaw(false);
-    this.#io.write(LEAVE_SCREEN);
+    this.#io.write((this.#mouseOn ? MOUSE_OFF : '') + LEAVE_SCREEN);
   }
 }
 
@@ -721,6 +882,12 @@ export function changeOf(before: { status: string; gate?: string }, now: { statu
   if (now.gate && GATE_NOTICE[now.gate] && now.gate !== before.gate) return GATE_NOTICE[now.gate];
   if (before.status === '작업 중' && SETTLED.includes(now.status)) return '끝남';
   return undefined;
+}
+
+/** 옛 꼴(X10) 마우스 열. 좌표가 223을 넘으면 이 꼴로는 보낼 수 없다 */
+function x10Mouse(button: number, column: number, line: number): string | undefined {
+  if (column > 223 || line > 223) return undefined;
+  return `\x1b[M${String.fromCharCode(32 + button, 32 + column, 32 + line)}`;
 }
 
 /** OSC 알림에 넣을 글: 제어 글자(알림을 일찍 끝내거나 다른 명령이 될 수 있다)를 빼고 줄인다 */

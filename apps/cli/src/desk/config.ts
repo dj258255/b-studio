@@ -1,0 +1,124 @@
+/**
+ * desk의 설정 파일(desk.json)과 배치 기억(desk-state.json, #874). 둘 다 `$XDG_CONFIG_HOME/b-studio`(없으면 `~/.config/b-studio`)에 둔다.
+ * 설정의 잘못된 값은 기본값으로 두고 무엇이 틀렸는지 돌려준다(desk가 아래 줄에 알린다). 배치는 깨졌으면 버린다
+ */
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
+import type { PaneLayout } from './screen';
+
+/** 앞글쇠: 받는 글자와 화면에 보일 이름(늘 `Ctrl-x` 꼴이라 안내 글의 폭이 바뀌지 않는다) */
+export interface DeskPrefix {
+  key: string;
+  label: string;
+}
+
+export type ColorSetting = 'auto' | 'truecolor' | '256';
+
+export interface DeskConfig {
+  prefix?: DeskPrefix;
+  notify?: boolean;
+  mouse?: boolean;
+  color?: ColorSetting;
+}
+
+/** 되살릴 배치. slots는 칸 자리마다의 세션 id다 */
+export interface DeskLayout {
+  layout: PaneLayout;
+  slots: Array<string | undefined>;
+  focus: number;
+  zoom: boolean;
+  sidebarHidden: boolean;
+}
+
+const CONFIG_FILE = 'desk.json';
+const LAYOUT_FILE = 'desk-state.json';
+const SLOT_COUNT = 4;
+/** 터미널이 다른 키와 같은 글자로 보내는 Ctrl 글쇠: c(끊기), h(지우기), i(Tab), j(줄바꿈), m(Enter) */
+const RESERVED = new Set(['c', 'h', 'i', 'j', 'm']);
+const COLORS: readonly ColorSetting[] = ['auto', 'truecolor', '256'];
+
+export function deskConfigDir(env: NodeJS.ProcessEnv = process.env): string {
+  const xdg = env.XDG_CONFIG_HOME;
+  // XDG 명세는 상대 경로를 무시하라고 한다
+  const base = xdg && isAbsolute(xdg) ? xdg : join(env.HOME || homedir(), '.config');
+  return join(base, 'b-studio');
+}
+
+/** "C-a", "Ctrl-a", "ctrl+A" 꼴의 앞글쇠. 받지 않는 글쇠면 undefined */
+export function parsePrefix(text: string): DeskPrefix | undefined {
+  const match = /^(?:c|ctrl)[-+]([a-z])$/i.exec(text.trim());
+  if (!match) return undefined;
+  const letter = match[1]!.toLowerCase();
+  if (RESERVED.has(letter)) return undefined;
+  return { key: String.fromCharCode(letter.charCodeAt(0) - 96), label: `Ctrl-${letter}` };
+}
+
+export function loadDeskConfig(dir: string): { config: DeskConfig; warnings: string[] } {
+  let raw: string;
+  try {
+    raw = readFileSync(join(dir, CONFIG_FILE), 'utf8');
+  } catch {
+    return { config: {}, warnings: [] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { config: {}, warnings: [`${CONFIG_FILE}을 JSON으로 읽지 못해 기본 설정을 씁니다`] };
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { config: {}, warnings: [`${CONFIG_FILE}은 객체여야 해서 기본 설정을 씁니다`] };
+  const values = parsed as Record<string, unknown>;
+  const config: DeskConfig = {};
+  const warnings: string[] = [];
+  if (values.prefix !== undefined) {
+    const prefix = typeof values.prefix === 'string' ? parsePrefix(values.prefix) : undefined;
+    if (prefix) config.prefix = prefix;
+    else warnings.push(`prefix는 "C-a" 꼴이어야 합니다(Ctrl-c·h·i·j·m은 쓸 수 없음). Ctrl-b를 씁니다`);
+  }
+  for (const key of ['notify', 'mouse'] as const) {
+    if (values[key] === undefined) continue;
+    if (typeof values[key] === 'boolean') config[key] = values[key];
+    else warnings.push(`${key}는 true나 false여야 합니다. 기본값(켬)을 씁니다`);
+  }
+  if (values.color !== undefined) {
+    if (COLORS.includes(values.color as ColorSetting)) config.color = values.color as ColorSetting;
+    else warnings.push(`color는 "auto", "truecolor", "256" 중 하나여야 합니다. auto를 씁니다`);
+  }
+  return { config, warnings };
+}
+
+/** 밖 터미널이 24비트 색을 그리는가. 설정이 앞서고, auto면 COLORTERM을 본다(truecolor·24bit가 아니면 256색으로 낮춘다) */
+export function colorDepth(env: NodeJS.ProcessEnv, setting: ColorSetting = 'auto'): 'truecolor' | '256' {
+  if (setting !== 'auto') return setting;
+  const colorterm = (env.COLORTERM ?? '').toLowerCase();
+  return colorterm === 'truecolor' || colorterm === '24bit' ? 'truecolor' : '256';
+}
+
+export function loadDeskLayout(dir: string): DeskLayout | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(join(dir, LAYOUT_FILE), 'utf8'));
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== 'object') return undefined;
+  const values = parsed as Record<string, unknown>;
+  const layout: PaneLayout = values.layout === 2 || values.layout === 4 ? values.layout : 1;
+  const saved = Array.isArray(values.slots) ? values.slots : [];
+  const slots = Array.from({ length: SLOT_COUNT }, (_, slot) => {
+    const id = saved[slot];
+    return typeof id === 'string' && id && slot < layout ? id : undefined;
+  });
+  const focus = typeof values.focus === 'number' && Number.isInteger(values.focus) && values.focus >= 0 && values.focus < layout ? values.focus : 0;
+  return { layout, slots, focus, zoom: values.zoom === true, sidebarHidden: values.sidebarHidden === true };
+}
+
+/** 배치를 쓴다. 쓰다 끊겨도 앞 파일이 깨지지 않게 옆 파일에 쓰고 바꿔 단다. 실패하면 던진다 */
+export function saveDeskLayout(dir: string, layout: DeskLayout): void {
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, LAYOUT_FILE);
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify({ ...layout, slots: layout.slots.map((id) => id ?? null) }, null, 2)}\n`);
+  renameSync(temp, file);
+}
