@@ -122,6 +122,8 @@ export interface SessionSnapshot {
   effort?: Effort;
   /** 세션을 만든 사람. 인증을 켜면 만든 사람과 관리자만 세션을 바꿀 수 있다 */
   owner?: string;
+  /** 사람이 붙인 세션 이름(studio desk의 Ctrl-b ,, #864). 없으면 목록 제목은 마지막 요청이다 */
+  label?: string;
   running: boolean;
   /** 처리 중인 요청을 멈추고 변경을 되돌리는 중이다. user: 사용자가 취소함, budget: 세션 토큰 한도에 도달함 */
   cancelling?: 'user' | 'budget';

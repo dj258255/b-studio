@@ -122,6 +122,11 @@ export class PaneTerminal {
     return { bracketedPaste: modes.bracketedPasteMode, appCursor: modes.applicationCursorKeysMode, cursorHidden: this.#cursorHidden };
   }
 
+  /** 칸 안 CLI가 벨(BEL)을 울렸다(#864) */
+  onBell(listener: () => void): void {
+    this.#term.onBell(listener);
+  }
+
   /** 프로그램의 질의(커서 위치·장치 속성)에 터미널이 내는 응답. 실제 터미널처럼 CLI에 돌려줘야 한다 */
   onResponse(listener: (data: string) => void): void {
     this.#term.onData(listener);

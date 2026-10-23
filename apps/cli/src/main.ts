@@ -19,7 +19,7 @@ const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
   studio launch [--mode local|demo|commandcode|codex] [--port <n>] [--no-open] [--json]
   studio stop [--json]
-  studio desk [--port <n>]
+  studio desk [--port <n>] [--no-notify]
   studio boot-probe <프로젝트 경로> [--json]
   studio agent <프로젝트 경로> "<요청>" [옵션]
   studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
@@ -48,8 +48,11 @@ desk:
   터미널 하나에서 여러 AI CLI를 나란히 쓴다. 왼쪽 사이드바에 AI마다 상태와 게이트 결과, 오른쪽에 터미널 칸 1·2·4개
   launch로 띄운 스튜디오에 붙는다(이 컴퓨터 방식 세션 터미널, B_STUDIO_EXPERIMENTAL=1). 나가도 세션과 CLI는 계속 돈다
   Ctrl-b 다음에  숫자 칸 고르기 · ↑↓ 사이드바 · Enter 고른 세션을 칸에 열기 · n 새 요청(규칙으로 AI를 골라 터미널로)
-                 l 칸 수 1→2→4 · x 칸 비우기 · q 나가기 · Ctrl-b CLI에 Ctrl-b 보내기
+                 l 칸 수 1→2→4 · x 칸 비우기 · p 세션 멈추기 · r 이어서 작업 · , 이름 바꾸기 · ? 도움말 · q 나가기
+                 Ctrl-b CLI에 Ctrl-b 보내기
+  세션이 권한·답을 기다리거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림(OSC 9)을 낸다
   --port      스튜디오 포트(기본: launch가 남긴 포트, 없으면 3000)
+  --no-notify 벨과 OS 알림을 내지 않는다(사이드바 표시와 아래 줄 알림은 그대로)
 
 stop:
   launch가 띄운 스튜디오를 멈춘다. PID 파일의 프로세스 그룹에 SIGTERM을 보낸다(로그는 남는다)
@@ -115,6 +118,7 @@ async function main(argv: string[]): Promise<number> {
       mode: { type: 'string' },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
+      'no-notify': { type: 'boolean', default: false },
     },
   });
   const [command, dir, request] = positionals;
@@ -151,7 +155,7 @@ async function main(argv: string[]): Promise<number> {
       console.error(`--port는 1~65535 사이의 정수여야 합니다 (지금 값: ${values.port})`);
       return 2;
     }
-    const code = await desk(port === undefined ? {} : { port });
+    const code = await desk({ ...(port === undefined ? {} : { port }), notify: !values['no-notify'] });
     // 끝난 뒤에도 남은 연결(끊는 중인 통로)이 프로세스를 붙잡지 않게 바로 끝낸다
     process.exit(code);
   }

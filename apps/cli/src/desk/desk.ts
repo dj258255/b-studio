@@ -5,13 +5,13 @@
  * 키 → handleInput → 할 일(입력 보내기, 칸 열기, 새 요청 …) → 스튜디오 API, 터미널 출력 → 칸 해석 → 화면 그리기.
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
-import { StudioClient, findStudio } from './client';
+import { StudioClient, StudioRequestError, findStudio } from './client';
 import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
 import { previewLine, renderScreen, type PaneView } from './render';
 import { placePanes, terminalSize } from './screen';
-import { backendLabel } from './sidebar';
-import type { DeskTerminalMessage } from './types';
+import { agentStatus, backendLabel, deskSessions, gateStatus } from './sidebar';
+import type { DeskItem, DeskTerminalMessage } from './types';
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
@@ -29,6 +29,16 @@ const ESC_WAIT_MS = 25;
 const RESIZE_SETTLE_MS = 150;
 /** 터미널로 띄울 수 있는 AI. 스튜디오 routed-session.ts의 terminalBackends와 같은 기준이다(desk가 붙는 launch는 이 컴퓨터 방식) */
 const TERMINAL_BACKENDS: readonly string[] = ['claude-code', 'codex'];
+/** 사람이 손대야 하는 상태. 이리로 바뀌면 알린다(#864) */
+const WAITING: readonly string[] = ['권한 대기', '답 기다림', '승인 대기'];
+/** 작업 중에서 이리로 바뀌면 끝났다고 알린다 */
+const SETTLED: readonly string[] = ['CLI 대기', '쉼'];
+/** 게이트 판정이 이리로 바뀌면 알린다. 값은 알림 문구 */
+const GATE_NOTICE: Record<string, string> = { 실패: '검증 실패', '확인 필요': '확인 필요', 통과: '검증 통과' };
+/** 이어서 작업한 세션이 아직 켜지지 않은 상태 */
+const NOT_READY: readonly string[] = ['stopped', 'booting'];
+/** 한 번에 내는 OS 알림의 상한(여럿이 한꺼번에 바뀌어도 알림이 쏟아지지 않게) */
+const MAX_OS_NOTICES = 3;
 
 // 밖 터미널의 bracketed paste를 켜서 붙여넣기를 표지로 받는다(붙인 글 안의 Ctrl-b를 명령으로 보지 않게, #860)
 const ENTER_SCREEN = '\x1b[?1049h\x1b[?2004h\x1b[H\x1b[2J';
@@ -36,10 +46,16 @@ const LEAVE_SCREEN = '\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l';
 
 export interface DeskOptions {
   port?: number;
+  /** false면 벨과 OS 알림을 내지 않는다(--no-notify). 사이드바 표시와 아래 줄 알림은 그대로다 */
+  notify?: boolean;
+}
+
+export interface DeskAppOptions {
+  notify?: boolean;
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
-export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream'>;
+export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'>;
 
 /** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
 export interface DeskIo {
@@ -103,7 +119,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     console.error('`pnpm studio launch`로 띄운 뒤 다시 실행하세요. 다른 포트면 --port를 주세요');
     return 1;
   }
-  return new DeskApp(client, first, processIo()).run();
+  return new DeskApp(client, first, processIo(), { notify: options.notify !== false }).run();
 }
 
 export class DeskApp {
@@ -127,13 +143,22 @@ export class DeskApp {
   readonly #streams = new Map<string, { controller: AbortController; timer?: NodeJS.Timeout }>();
   /** 칸마다 최근 출력을 다시 받는 동안(질의 응답을 CLI에 보내지 않는 때)의 끝 */
   readonly #quietUntil = new Map<string, number>();
+  readonly #notify: boolean;
+  /** 세션마다 지난번에 본 상태·게이트(바뀐 것을 알리려고 둔다). 처음 받은 목록은 알리지 않고 여기에 적기만 한다 */
+  readonly #last = new Map<string, { status: string; gate?: string }>();
+  /** 이어서 작업을 보낸 세션. 켜지면 칸을 다시 연다 */
+  readonly #resuming = new Set<string>();
+  /** 칸 안 CLI가 벨을 울린 세션(칸 머리에 보이고, 그 칸을 고르면 지운다) */
+  readonly #bells = new Set<string>();
   #restored = false;
   #finish: (code: number) => void = () => {};
 
-  constructor(client: DeskClient, items: DeskState['items'], io: DeskIo) {
+  constructor(client: DeskClient, items: DeskState['items'], io: DeskIo, options: DeskAppOptions = {}) {
     this.#client = client;
     this.#io = io;
+    this.#notify = options.notify !== false;
     this.#state = { ...initialState(), items };
+    for (const item of items) this.#last.set(item.id, statusOf(item));
   }
 
   /** 지금 상태(테스트가 본다) */
@@ -180,7 +205,27 @@ export class DeskApp {
   #take({ state, effects }: { state: DeskState; effects: Effect[] }): void {
     this.#state = state;
     for (const effect of effects) this.#apply(effect);
+    this.#clearSeen();
     this.#scheduleRender();
+  }
+
+  /** 지금 고른 칸의 세션 */
+  #focused(): string | undefined {
+    return this.#state.focus < this.#state.layout ? this.#state.slots[this.#state.focus] : undefined;
+  }
+
+  /** 사람이 본 세션의 표시를 지운다: 고른 칸의 세션, 사이드바를 고르는 중이면 고른 세션 */
+  #clearSeen(): void {
+    const seen = new Set<string>();
+    const focused = this.#focused();
+    if (focused) seen.add(focused);
+    if (this.#state.browsing) {
+      const selected = deskSessions(this.#state.items)[this.#state.selected]?.id;
+      if (selected) seen.add(selected);
+    }
+    for (const id of seen) this.#bells.delete(id);
+    const flagged = this.#state.flagged?.filter((id) => !seen.has(id));
+    if (flagged && flagged.length !== this.#state.flagged!.length) this.#state = { ...this.#state, flagged };
   }
 
   #send(id: string, data: string): void {
@@ -223,7 +268,67 @@ export class DeskApp {
       case 'submit':
         void this.#submit(effect.projectId, effect.request, effect.choice);
         return;
+      case 'session':
+        void this.#sessionAction(effect.action, effect.id);
+        return;
+      case 'rename':
+        void this.#rename(effect.id, effect.label);
+        return;
     }
+  }
+
+  /** 세션 멈추기·이어서 작업(#864). 이어서 작업한 세션은 켜진 뒤 칸을 다시 연다(#poll) */
+  async #sessionAction(action: 'stop' | 'resume', id: string): Promise<void> {
+    const title = this.#state.items.find((entry) => entry.id === id)?.title ?? id;
+    try {
+      if (action === 'stop') {
+        await this.#client.stop(id);
+        this.#say(`세션을 멈췄습니다: ${title} (Ctrl-b r로 이어서 작업합니다)`);
+      } else {
+        await this.#client.resume(id);
+        this.#resuming.add(id);
+        if (this.#visible().includes(id)) this.#notes.set(id, '이어서 작업하는 중');
+        this.#say(`이어서 작업을 시작했습니다: ${title} · 켜지면 칸을 다시 엽니다`);
+      }
+      void this.#poll();
+    } catch (error) {
+      this.#say(`${action === 'stop' ? '멈추지' : '이어서 작업하지'} 못했습니다: ${messageOf(error)}`);
+    }
+  }
+
+  async #rename(id: string, label: string): Promise<void> {
+    try {
+      await this.#client.rename(id, label);
+      this.#say(label ? `이름을 바꿨습니다: ${label}` : '이름을 지웠습니다(제목은 마지막 요청입니다)');
+      void this.#poll();
+    } catch (error) {
+      this.#say(`이름을 바꾸지 못했습니다: ${messageOf(error)}`);
+    }
+  }
+
+  /**
+   * 목록이 바뀐 것을 알린다(#864): 사람이 손댈 상태(권한·답·승인), 게이트 판정, 작업이 끝남.
+   * 사이드바에 표시를 붙이고(본 뒤 지운다) 아래 줄에 알린다. 알림을 켰으면 벨을 울리고, 보고 있는 칸이 아닌 세션은 OS 알림(OSC 9)도 낸다
+   */
+  #announce(items: readonly DeskItem[]): void {
+    const notices: Array<{ id: string; text: string }> = [];
+    for (const item of items) {
+      const now = statusOf(item);
+      const before = this.#last.get(item.id);
+      this.#last.set(item.id, now);
+      if (!before) continue;
+      const what = changeOf(before, now);
+      if (what) notices.push({ id: item.id, text: `${backendLabel(item.backend)} · ${item.title} · ${what}` });
+    }
+    if (notices.length === 0) return;
+    const focused = this.#focused();
+    const flagged = new Set(this.#state.flagged ?? []);
+    for (const notice of notices) if (notice.id !== focused) flagged.add(notice.id);
+    this.#state = { ...this.#state, flagged: [...flagged], message: `알림: ${notices.map((notice) => notice.text).join(' / ')}` };
+    if (!this.#notify) return;
+    let out = '\x07';
+    for (const notice of notices.filter((entry) => entry.id !== focused).slice(0, MAX_OS_NOTICES)) out += `\x1b]9;${oscText(`b-studio: ${notice.text}`)}\x07`;
+    this.#io.write(out);
   }
 
   /** 복사 모드 조작. 보는 자리와 고른 범위는 칸 해석기가 든다 */
@@ -328,6 +433,13 @@ export class DeskApp {
           if (Date.now() < (this.#quietUntil.get(sessionId) ?? 0)) return;
           this.#client.input(sessionId, data).catch(() => {});
         });
+        // 칸 안 CLI의 벨은 칸 머리에 보이고 밖 터미널 벨로 잇는다. 다시 받는 옛 출력의 벨은 울리지 않는다
+        pane.onBell(() => {
+          if (Date.now() < (this.#quietUntil.get(sessionId) ?? 0)) return;
+          if (sessionId !== this.#focused()) this.#bells.add(sessionId);
+          if (this.#notify) this.#io.write('\x07');
+          this.#scheduleRender();
+        });
         this.#panes.set(id, pane);
       }
       if (!rect) return;
@@ -352,7 +464,9 @@ export class DeskApp {
       const opening = previous === undefined;
       const request = opening ? this.#client.open(id, size.cols, size.rows) : this.#client.resize(id, size.cols, size.rows);
       request.catch((error: unknown) => {
-        this.#notes.set(id, `${messageOf(error)} · Ctrl-b Enter로 다시 엽니다`);
+        // 멈춘 세션이면 스튜디오가 409로 답한다. 이어서 작업하면 켜진 뒤 칸을 다시 연다
+        const stopped = error instanceof StudioRequestError && error.status === 409 && this.#state.items.find((entry) => entry.id === id)?.state === 'stopped';
+        this.#notes.set(id, stopped ? '멈춘 세션입니다 · Ctrl-b r로 이어서 작업합니다' : `${messageOf(error)} · Ctrl-b Enter로 다시 엽니다`);
         if (opening) this.#markClosed(id);
         this.#scheduleRender();
       });
@@ -442,11 +556,32 @@ export class DeskApp {
       const items = (await this.#client.agents()).items;
       // 서버는 손댈 것·작업 중을 위로 올려 순서를 자주 바꾼다. 고르던 세션을 그대로 고른다
       this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items) };
+      this.#announce(items);
+      this.#reopenResumed(items);
+      this.#clearSeen();
       this.#scheduleRender();
     } catch (error) {
       this.#say(`세션 목록을 받지 못했습니다: ${messageOf(error)}`);
     } finally {
       this.#polling = false;
+    }
+  }
+
+  /** 이어서 작업한 세션이 켜졌으면 칸을 다시 연다. 켜지 못했으면 그만 기다린다 */
+  #reopenResumed(items: readonly DeskItem[]): void {
+    for (const id of [...this.#resuming]) {
+      const item = items.find((entry) => entry.id === id);
+      if (item && NOT_READY.includes(item.state)) continue;
+      this.#resuming.delete(id);
+      if (!item || !this.#visible().includes(id)) continue;
+      if (item.state === 'error') {
+        this.#notes.set(id, '이어서 작업하지 못했습니다 · 웹 화면에서 까닭을 보세요');
+        continue;
+      }
+      this.#notes.delete(id);
+      this.#closed.delete(id);
+      this.#sizes.delete(id);
+      this.#syncPanes();
     }
   }
 
@@ -536,7 +671,8 @@ export class DeskApp {
       const cursor = pane && !pane.inCopy && !pane.modes().cursorHidden ? { cursor: pane.cursor() } : {};
       const copy = pane?.inCopy ? pane.copyStatus() : undefined;
       const mode = copy ? { mode: `복사 모드 ${copy.line}/${copy.total}줄` } : {};
-      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...(note ? { note } : {}) };
+      const bell = id && this.#bells.has(id) ? { bell: true } : {};
+      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...bell, ...(note ? { note } : {}) };
     });
     const frame = renderScreen(this.#state, this.#size(), views);
     // 바뀐 줄만 다시 쓴다. 지원하는 터미널에서는 한 장을 한 번에 바꾼다(동기 출력)
@@ -571,6 +707,25 @@ export class DeskApp {
     this.#io.setRaw(false);
     this.#io.write(LEAVE_SCREEN);
   }
+}
+
+/** 알림을 가리는 상태 이름과 게이트 판정 */
+function statusOf(item: DeskItem): { status: string; gate?: string } {
+  const gate = gateStatus(item)?.label;
+  return { status: agentStatus(item).label, ...(gate ? { gate } : {}) };
+}
+
+/** 알릴 만큼 바뀌었으면 그 문구. 손댈 상태가 먼저, 그다음 게이트 판정, 그다음 작업 끝남이다 */
+export function changeOf(before: { status: string; gate?: string }, now: { status: string; gate?: string }): string | undefined {
+  if (WAITING.includes(now.status) && now.status !== before.status) return now.status;
+  if (now.gate && GATE_NOTICE[now.gate] && now.gate !== before.gate) return GATE_NOTICE[now.gate];
+  if (before.status === '작업 중' && SETTLED.includes(now.status)) return '끝남';
+  return undefined;
+}
+
+/** OSC 알림에 넣을 글: 제어 글자(알림을 일찍 끝내거나 다른 명령이 될 수 있다)를 빼고 줄인다 */
+function oscText(text: string): string {
+  return [...text.replace(/[\u0000-\u001f\u007f-\u009f]/g, '')].slice(0, 160).join('');
 }
 
 function messageOf(error: unknown): string {

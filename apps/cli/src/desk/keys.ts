@@ -3,8 +3,9 @@
  *
  * 앞글쇠는 Ctrl-b(tmux·herdr와 같다). 앞글쇠가 없으면 친 글자는 고른 칸의 CLI로 그대로 간다.
  * 앞글쇠 다음: 숫자(칸 고르기), o(다음 칸), ↑↓(사이드바, 앞글쇠가 이어지고 그동안 Ctrl-b는 새 앞글쇠다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수),
- * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로). 새 요청 입력 중에는 글자가 입력으로 간다.
- * 복사 모드와 도움말 중에는 키가 CLI로 가지 않는다(#863).
+ * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로),
+ * p(고른 세션 멈추기), r(멈춘 세션 이어서 작업), ,(고른 세션 이름 바꾸기). 새 요청 입력 중에는 글자가 입력으로 간다.
+ * 복사 모드·도움말·확인·이름 입력 중에는 키가 CLI로 가지 않는다(#863, #864).
  * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다
  */
 import type { PaneLayout } from './screen';
@@ -47,6 +48,15 @@ export interface CopyState {
   search?: string;
 }
 
+/** 세션 조작을 하기 전에 한 번 묻는다(#864). 멈추면 CLI와 샌드박스가 내려가므로 실수로 누른 키로 하지 않게 한다 */
+export interface ConfirmState {
+  action: SessionAction;
+  id: string;
+  title: string;
+}
+
+export type SessionAction = 'stop' | 'resume';
+
 export type CopyAction = 'enter' | 'up' | 'down' | 'pageUp' | 'pageDown' | 'top' | 'bottom' | 'mark' | 'yank' | 'exit' | 'search' | 'next';
 
 export interface DeskState {
@@ -73,6 +83,12 @@ export interface DeskState {
   sidebarHidden?: boolean;
   /** 도움말 화면. 다음 키 하나는 닫기만 한다 */
   help?: boolean;
+  /** 세션 멈추기·이어서 작업을 묻는 중. y나 Enter면 하고, 다른 키면 그만둔다 */
+  confirm?: ConfirmState;
+  /** 세션 이름을 쓰는 중 */
+  rename?: { id: string; text: string };
+  /** 알린 뒤 아직 보지 않은 세션(사이드바에 !로 보인다, #864). desk.ts가 채우고 지운다 */
+  flagged?: string[];
 }
 
 export type Effect =
@@ -89,7 +105,9 @@ export type Effect =
   | { type: 'quit' }
   | { type: 'prompt' }
   | { type: 'preview'; text: string }
-  | { type: 'submit'; projectId: string; request: string; choice: string };
+  | { type: 'submit'; projectId: string; request: string; choice: string }
+  | { type: 'session'; action: SessionAction; id: string }
+  | { type: 'rename'; id: string; label: string };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -158,6 +176,18 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = copyKey(state, key, effects);
       continue;
     }
+    if (state.confirm) {
+      const key = nextKey(input, at);
+      at += key.length;
+      state = confirmKey(state, key, effects);
+      continue;
+    }
+    if (state.rename) {
+      const key = nextKey(input, at);
+      at += key.length;
+      state = renameKey(state, key, effects);
+      continue;
+    }
     if (state.prompt) {
       const key = nextKey(input, at);
       at += key.length;
@@ -201,8 +231,13 @@ function heldTail(text: string, marker: string): number {
 function pasteContent(state: DeskState, content: string, ended: boolean, effects: Effect[]): DeskState {
   const pasting = state.pasting!;
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
-  // 복사 모드나 도움말을 보는 중에 붙여 넣은 글은 CLI로 보내지 않는다
-  if (state.copy || state.help) return next;
+  // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중에 붙여 넣은 글은 CLI로 보내지 않는다
+  if (state.copy || state.help || state.confirm) return next;
+  if (state.rename) {
+    // 이름에는 한 줄로 넣는다
+    const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
+    return { ...next, rename: { ...state.rename, text: state.rename.text + clean } };
+  }
   if (state.prompt) {
     // 요청 글에는 한 줄로 넣는다: 줄바꿈은 빈칸, 다른 제어 글자는 버린다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
@@ -318,8 +353,39 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     effects.push({ type: 'quit' });
     return done;
   }
+  if (key === 'p' || key === 'r' || key === ',') {
+    const item = sessions[state.selected];
+    if (!item) return { ...done, message: '사이드바에 고를 세션이 없습니다' };
+    if (key === ',') return { ...done, rename: { id: item.id, text: '' } };
+    if (key === 'p' && item.state === 'stopped') return { ...done, message: '이미 멈춘 세션입니다(Ctrl-b r로 이어서 작업합니다)' };
+    if (key === 'r' && item.state !== 'stopped') return { ...done, message: '멈춘 세션만 이어서 작업합니다' };
+    return { ...done, confirm: { action: key === 'p' ? 'stop' : 'resume', id: item.id, title: item.title } };
+  }
   if (key === ESC) return done;
   return { ...done, message: 'Ctrl-b 다음 키는 Ctrl-b ? 도움말에 있습니다' };
+}
+
+function confirmKey(state: DeskState, key: string, effects: Effect[]): DeskState {
+  const confirm = state.confirm!;
+  if (key === 'y' || key === 'Y' || key === '\r') {
+    effects.push({ type: 'session', action: confirm.action, id: confirm.id });
+    return { ...state, confirm: undefined, message: undefined };
+  }
+  return { ...state, confirm: undefined, message: '그만두었습니다' };
+}
+
+function renameKey(state: DeskState, key: string, effects: Effect[]): DeskState {
+  const rename = state.rename!;
+  if (key === ESC || key === '\x03') return { ...state, rename: undefined, message: '이름 바꾸기를 그만두었습니다' };
+  if (key === '\r') {
+    effects.push({ type: 'rename', id: rename.id, label: rename.text.trim() });
+    return { ...state, rename: undefined };
+  }
+  if (key === '\x7f' || key === '\b') return { ...state, rename: { ...rename, text: [...rename.text].slice(0, -1).join('') } };
+  if (key.startsWith(ESC)) return state;
+  const char = key === '\n' ? ' ' : key;
+  if (char.codePointAt(0)! < 32) return state;
+  return { ...state, rename: { ...rename, text: rename.text + char } };
 }
 
 function copyKey(state: DeskState, key: string, effects: Effect[]): DeskState {
