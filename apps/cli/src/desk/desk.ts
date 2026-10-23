@@ -14,12 +14,14 @@ import { PaneTerminal } from './pane';
 import type { DeskPlan, LaneChoice, PlansEffect, PlansState } from './plans';
 import { spaceItems, spaceScreen, spriteFor } from './cards';
 import { previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
+import { recordsScrollLimit, type RecordsLoad } from './records';
 import { placePanes, terminalSize, type PaneLayout } from './screen';
+import { parsePatch, type DetailAction, type DetailState } from './session-detail';
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
-import type { ThemeName } from './theme';
+import { DEFAULT_THEME, type ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
 import { accountSprite, sessionLimits, usageScreen, usageSpriteKey } from './usage';
 
@@ -156,16 +158,6 @@ export interface SettingsHost {
   openUrl(url: string): void;
 }
 
-/** 작업 나누기 화면이 부르는 스튜디오 API(#893) */
-export type PlansClient = Pick<StudioClient, 'plans' | 'plan' | 'createPlan' | 'approvePlan' | 'rejectPlan' | 'deletePlan' | 'resumePlan' | 'laneBackends' | 'setLane' | 'projects' | 'accounts'>;
-
-/** 작업 나누기 화면이 쓰는 바깥(#893): 스튜디오 API와 브라우저. 테스트에서는 가짜를 넣는다 */
-export interface PlansHost {
-  client: PlansClient;
-  /** 주소를 이 컴퓨터의 브라우저로 연다(http·https만 넘긴다) */
-  openUrl(url: string): void;
-}
-
 /** 작업 나누기 화면이 열려 있는 동안 계획을 다시 받는 주기 */
 const PLANS_POLL_MS = 2_000;
 
@@ -262,14 +254,35 @@ export interface DeskAppOptions {
   settings?: SettingsHost;
   /** AI 계정(#885). 계정에 고른 그림을 그 계정 세션의 카드에 쓴다 */
   accounts?: DeskAccount[];
-  /** 작업 나누기 화면(#893). 없으면 Ctrl-b t가 열 수 없다고 알린다 */
-  plans?: PlansHost;
+  /** 주소를 이 컴퓨터의 브라우저로 여는 곳(작업 나누기의 추적 이슈, #893). 없으면 열 수 없다고 알린다 */
+  openUrl?: (url: string) => void;
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
 export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'> &
   /** 사용량(#889). 없으면 사용량을 묻지 않는다 */
-  { limits?: StudioClient['limits'] };
+  { limits?: StudioClient['limits'] } &
+  /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RecordsCall>> &
+  /** 작업 나누기(#893). 없으면 Ctrl-b t가 열 수 없다고 알린다 */
+  Partial<Pick<StudioClient, PlansCall>>;
+
+/** 작업 나누기 화면이 부르는 스튜디오 API(#893) */
+type PlansCall = 'plans' | 'plan' | 'createPlan' | 'approvePlan' | 'rejectPlan' | 'deletePlan' | 'resumePlan' | 'laneBackends' | 'setLane';
+
+/** 기록 화면과 세션 자세히가 부르는 스튜디오 API(#891) */
+type RecordsCall =
+  | 'routingStats'
+  | 'tokenReport'
+  | 'session'
+  | 'checkpointPatch'
+  | 'restoreCheckpoint'
+  | 'reverify'
+  | 'deleteSession'
+  | 'exportPreview'
+  | 'exportSession'
+  | 'reviewRound'
+  | 'resolveFinding';
 
 /** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
 export interface DeskIo {
@@ -362,7 +375,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   };
   const app = new DeskApp(client, first, processIo(), {
     settings,
-    plans: { client, openUrl: openInBrowser },
+    openUrl: openInBrowser,
     accounts,
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
@@ -444,7 +457,7 @@ export class DeskApp {
   readonly #assignedSprites = new Set<string>();
   #loginTimer: NodeJS.Timeout | undefined;
   #loginPolling = false;
-  readonly #plansHost: PlansHost | undefined;
+  readonly #openUrl: ((url: string) => void) | undefined;
   #plansTimer: NodeJS.Timeout | undefined;
   /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
   #plansFetching = false;
@@ -462,7 +475,7 @@ export class DeskApp {
     this.#catalog = options.spriteCatalog;
     this.#animate = options.animate !== false;
     this.#settingsHost = options.settings;
-    this.#plansHost = options.plans;
+    this.#openUrl = options.openUrl;
     this.#accounts = options.accounts ?? [];
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
@@ -563,8 +576,18 @@ export class DeskApp {
   #take({ state, effects }: { state: DeskState; effects: Effect[] }): void {
     this.#state = state;
     for (const effect of effects) this.#apply(effect);
+    this.#clampRecords();
     this.#clearSeen();
     this.#scheduleRender();
+  }
+
+  /** 기록 화면을 끝보다 더 굴리지 않는다(끝에서 더 내린 만큼 다시 올려야 하는 일이 없게) */
+  #clampRecords(): void {
+    const records = this.#state.records;
+    if (!records) return;
+    const size = this.#size();
+    const limit = recordsScrollLimit(records, { theme: this.#state.theme ?? DEFAULT_THEME, width: size.cols, height: size.rows - 2, now: Date.now() });
+    if (records.scroll > limit) this.#state = { ...this.#state, records: { ...records, scroll: limit } };
   }
 
   /** 지금 고른 칸의 세션 */
@@ -673,6 +696,161 @@ export class DeskApp {
       case 'plans':
         void this.#plansEffect(effect.effect);
         return;
+      case 'records':
+        if (effect.open) void this.#openRecords();
+        if (effect.load) void this.#loadRecords(effect.load);
+        return;
+      case 'detail':
+        void this.#detailAction(effect.action);
+        return;
+    }
+  }
+
+  /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
+  #call<K extends RecordsCall | PlansCall>(name: K): StudioClient[K] {
+    const method = this.#client[name];
+    if (method) return method.bind(this.#client) as StudioClient[K];
+    return (async () => {
+      throw new Error('이 스튜디오는 이 기능을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
+    }) as unknown as StudioClient[K];
+  }
+
+  /** 기록 화면을 채운다: 프로젝트 목록(토큰 보고서용)과 계정 이름, 그리고 AI별 결과(#891) */
+  async #openRecords(): Promise<void> {
+    const [projects, accounts] = await Promise.all([
+      this.#client.projects().catch(() => [] as Array<{ id: string; name: string; error?: string }>),
+      this.#client.accounts().catch((): DeskAccount[] => []),
+    ]);
+    const records = this.#state.records;
+    if (!records) return;
+    const usable = projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }));
+    const name = deskSessions(this.#state.items)[this.#state.selected]?.projectName;
+    const names = Object.fromEntries(accounts.map((account) => [account.id, account.name]));
+    this.#state = { ...this.#state, records: { ...records, projects: usable, projectIndex: Math.max(0, usable.findIndex((project) => project.name === name)), names } };
+    await this.#loadRecords({ kind: 'stats' });
+  }
+
+  async #loadRecords(load: RecordsLoad): Promise<void> {
+    try {
+      if (load.kind === 'stats') {
+        const stats = await this.#call('routingStats')();
+        if (this.#state.records) this.#state = { ...this.#state, records: { ...this.#state.records, stats, statsError: undefined, loading: false } };
+      } else {
+        const report = await this.#call('tokenReport')(load.projectId, load.from);
+        const records = this.#state.records;
+        // 그사이 다른 프로젝트를 골랐으면 버린다
+        if (records && records.projects[records.projectIndex]?.id === load.projectId) this.#state = { ...this.#state, records: { ...records, report, reportError: undefined, loading: false } };
+      }
+    } catch (error) {
+      const records = this.#state.records;
+      if (records) this.#state = { ...this.#state, records: { ...records, ...(load.kind === 'stats' ? { statsError: messageOf(error) } : { reportError: messageOf(error) }), loading: false } };
+    }
+    this.#scheduleRender();
+  }
+
+  /** 세션 자세히의 일을 서버에 보낸다(#891). 답이 오기 전에 다른 세션의 자세히로 바뀌었으면 버린다 */
+  async #detailAction(action: DetailAction): Promise<void> {
+    const id = this.#state.detail?.id;
+    if (!id) return;
+    const update = (patch: Partial<DetailState>) => {
+      const detail = this.#state.detail;
+      if (detail?.id === id) this.#state = { ...this.#state, detail: { ...detail, ...patch } };
+      this.#scheduleRender();
+    };
+    const fail = (what: string) => (error: unknown) => update({ busy: undefined, message: `${what}: ${messageOf(error)}` });
+    const reload = async () => {
+      try {
+        const snapshot = await this.#call('session')(id);
+        const detail = this.#state.detail;
+        const count = detail?.tab === 'checkpoints' ? snapshot.checkpoints.length : Number.POSITIVE_INFINITY;
+        update({ snapshot, loading: false, error: undefined, ...(detail ? { selected: Math.max(0, Math.min(detail.selected, count - 1)) } : {}) });
+      } catch (error) {
+        update({ loading: false, error: messageOf(error) });
+      }
+    };
+    switch (action.kind) {
+      case 'load':
+        await reload();
+        return;
+      case 'patch':
+        try {
+          const files = parsePatch(await this.#call('checkpointPatch')(id, action.sha));
+          const patch = this.#state.detail?.patch;
+          if (patch?.sha === action.sha) update({ patch: { ...patch, files, loading: false } });
+        } catch (error) {
+          const patch = this.#state.detail?.patch;
+          if (patch?.sha === action.sha) update({ patch: { ...patch, loading: false, error: messageOf(error) } });
+        }
+        return;
+      case 'restore':
+        await this.#call('restoreCheckpoint')(id, action.sha).then(
+          () => update({ busy: undefined, message: '되돌리기를 시작했습니다. 끝나면 체크포인트 목록이 바뀝니다(r로 다시 부릅니다)' }),
+          fail('되돌리지 못했습니다'),
+        );
+        await reload();
+        return;
+      case 'reverify':
+        await this.#call('reverify')(id, action.sha).then(
+          () => update({ busy: undefined, message: '다시 검증을 시작했습니다. 결과는 끝난 뒤 r로 다시 불러 봅니다' }),
+          fail('다시 검증하지 못했습니다'),
+        );
+        return;
+      case 'delete':
+        try {
+          await this.#call('deleteSession')(id);
+          const title = this.#state.detail?.title ?? id;
+          // 지운 세션이 칸에 있으면 비운다
+          const slots = this.#state.slots.map((slot) => (slot === id ? undefined : slot));
+          this.#state = { ...this.#state, detail: undefined, slots, message: `세션을 지웠습니다: ${title}` };
+          this.#slotsChanged();
+          this.#saveLayout();
+          void this.#poll();
+          this.#scheduleRender();
+        } catch (error) {
+          fail('지우지 못했습니다')(error);
+        }
+        return;
+      case 'exportPreview':
+        try {
+          update({ preview: await this.#call('exportPreview')(id), previewError: undefined });
+        } catch (error) {
+          update({ previewError: messageOf(error) });
+        }
+        return;
+      case 'export':
+        try {
+          const result = await this.#call('exportSession')(id, action.pullRequest);
+          const pr = result.pullRequest;
+          const text = pr
+            ? pr.created
+              ? 'PR을 만들었습니다'
+              : pr.updated
+                ? '이미 열린 PR의 본문을 지금 상태로 고쳤습니다'
+                : '이미 열린 PR에 올렸습니다'
+            : result.pullRequestError
+              ? `브랜치를 올렸지만 PR을 만들지 못했습니다: ${result.pullRequestError}`
+              : `브랜치를 올렸습니다(커밋 ${result.commits}개${result.forced ? ', 되돌린 기록으로 맞춤' : ''})`;
+          update({ busy: undefined, result: { text, ...(pr ? { url: pr.url } : {}) } });
+          await reload();
+        } catch (error) {
+          fail('올리지 못했습니다')(error);
+        }
+        return;
+      case 'review':
+        await this.#call('reviewRound')(id, action.restart).then(
+          () => update({ busy: undefined, message: 'AI 리뷰를 시작했습니다. 진행은 r로 다시 불러 봅니다' }),
+          fail('AI 리뷰를 돌리지 못했습니다'),
+        );
+        return;
+      case 'resolve':
+        try {
+          await this.#call('resolveFinding')(id, { round: action.round, findingIndex: action.findingIndex, reason: action.reason });
+          update({ busy: undefined, message: '지적을 오탐으로 닫았습니다' });
+          await reload();
+        } catch (error) {
+          fail('지적을 닫지 못했습니다')(error);
+        }
+        return;
     }
   }
 
@@ -687,13 +865,12 @@ export class DeskApp {
   }
 
   #openPlans(): void {
-    const host = this.#plansHost;
-    if (!host) {
-      this.#state = { ...this.#state, plans: undefined, message: '작업 나누기를 열 수 없습니다(스튜디오에 붙은 desk에서만 됩니다)' };
+    if (!this.#client.plans) {
+      this.#state = { ...this.#state, plans: undefined, message: '이 스튜디오는 작업 나누기를 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다' };
       return;
     }
     this.#patchPlans((plans) => ({ ...plans, accounts: this.#accounts }));
-    void this.#loadPlans(host);
+    void this.#loadPlans();
     clearInterval(this.#plansTimer);
     // 열려 있는 동안 레인 상태가 바뀌므로 다시 받는다. 닫으면 멈춘다
     this.#plansTimer = setInterval(() => {
@@ -702,24 +879,24 @@ export class DeskApp {
         this.#plansTimer = undefined;
         return;
       }
-      void this.#loadPlans(host);
+      void this.#loadPlans();
     }, PLANS_POLL_MS);
     this.#plansTimer.unref?.();
   }
 
   /** 지금 모드에 맞게 목록이나 계획 하나를 받는다. 새 계획을 쓰는 중이면 받지 않는다 */
-  async #loadPlans(host: PlansHost): Promise<void> {
+  async #loadPlans(): Promise<void> {
     const plans = this.#state.plans;
     if (!plans || plans.mode === 'new' || this.#plansFetching) return;
     this.#plansFetching = true;
     try {
       if (plans.mode === 'detail' && plans.detail) {
         const id = plans.detail.id;
-        const plan = await host.client.plan(id);
+        const plan = await this.#call('plan')(id);
         if (this.#restored) return;
         this.#patchPlans((current) => (current.mode === 'detail' && current.detail?.id === id ? { ...current, detail: plan, loading: false, error: undefined } : current));
       } else {
-        const list = await host.client.plans();
+        const list = await this.#call('plans')();
         if (this.#restored) return;
         this.#patchPlans((current) => (current.mode === 'list' ? { ...current, list, loading: false, error: undefined, row: Math.max(0, Math.min(current.row, list.length - 1)) } : current));
       }
@@ -747,29 +924,27 @@ export class DeskApp {
   }
 
   async #plansEffect(effect: PlansEffect): Promise<void> {
-    const host = this.#plansHost;
     if (effect.type === 'close') {
       clearInterval(this.#plansTimer);
       this.#plansTimer = undefined;
       return;
     }
-    if (!host) return;
     const note = (text: string) => this.#patchPlans((plans) => ({ ...plans, note: text }));
     try {
       switch (effect.type) {
         case 'list':
         case 'detail':
-          await this.#loadPlans(host);
+          await this.#loadPlans();
           return;
         case 'projects': {
-          const projects = (await host.client.projects()).filter((project) => !project.error);
+          const projects = (await this.#client.projects()).filter((project) => !project.error);
           this.#patchPlans((plans) => (plans.form ? { ...plans, form: { ...plans.form, projects } } : plans));
           if (projects.length === 0) note('프로젝트가 없습니다');
           return;
         }
         case 'create': {
           try {
-            const plan = await host.client.createPlan(effect.projectId, effect.request);
+            const plan = await this.#call('createPlan')(effect.projectId, effect.request);
             this.#patchPlans((plans) => ({ ...plans, mode: 'detail', form: undefined, detail: plan, lane: 0, list: [plan, ...(plans.list ?? []).filter((entry) => entry.id !== plan.id)] }));
           } catch (error) {
             this.#patchPlans((plans) => ({ ...plans, ...(plans.form ? { form: { ...plans.form, sending: false } } : {}), note: `계획을 만들지 못했습니다: ${messageOf(error)}` }));
@@ -777,21 +952,21 @@ export class DeskApp {
           return;
         }
         case 'approve':
-          this.#showPlan(await host.client.approvePlan(effect.id, effect.publishIssues), effect.publishIssues ? '승인했습니다. 레인이 시작되고 이슈를 올립니다' : '승인했습니다. 레인이 시작됩니다');
+          this.#showPlan(await this.#call('approvePlan')(effect.id, effect.publishIssues), effect.publishIssues ? '승인했습니다. 레인이 시작되고 이슈를 올립니다' : '승인했습니다. 레인이 시작됩니다');
           return;
         case 'reject':
-          this.#showPlan(await host.client.rejectPlan(effect.id), '거부했습니다');
+          this.#showPlan(await this.#call('rejectPlan')(effect.id), '거부했습니다');
           return;
         case 'resume':
-          this.#showPlan(await host.client.resumePlan(effect.id), '통합을 다시 시작했습니다');
+          this.#showPlan(await this.#call('resumePlan')(effect.id), '통합을 다시 시작했습니다');
           return;
         case 'delete':
-          await host.client.deletePlan(effect.id);
+          await this.#call('deletePlan')(effect.id);
           note('계획을 지웠습니다');
-          await this.#loadPlans(host);
+          await this.#loadPlans();
           return;
         case 'lane-choices': {
-          const [backends, accounts] = await Promise.all([host.client.laneBackends(), host.client.accounts().catch((): DeskAccount[] => this.#accounts)]);
+          const [backends, accounts] = await Promise.all([this.#call('laneBackends')(), this.#client.accounts().catch((): DeskAccount[] => this.#accounts)]);
           const choices: LaneChoice[] = [{ backend: '', label: '세션과 같음(계획 기본)' }];
           for (const backend of backends) {
             choices.push({ backend, label: backendLabel(backend) });
@@ -806,7 +981,7 @@ export class DeskApp {
           return;
         }
         case 'lane':
-          this.#showPlan(await host.client.setLane(effect.id, effect.laneId, effect.backend, effect.accountId), '레인 AI·계정을 바꿨습니다');
+          this.#showPlan(await this.#call('setLane')(effect.id, effect.laneId, effect.backend, effect.accountId), '레인 AI·계정을 바꿨습니다');
           return;
         case 'open':
           this.#openFromPlans([effect.sessionId]);
@@ -815,8 +990,9 @@ export class DeskApp {
           this.#openFromPlans(effect.sessionIds);
           return;
         case 'open-url':
-          if (browsable(effect.url)) host.openUrl(effect.url);
-          else note('브라우저로 열 수 없는 주소입니다');
+          if (!browsable(effect.url)) note('브라우저로 열 수 없는 주소입니다');
+          else if (this.#openUrl) this.#openUrl(effect.url);
+          else note(`브라우저를 열 수 없습니다: ${effect.url}`);
           return;
       }
     } catch (error) {
@@ -1833,7 +2009,8 @@ export class DeskApp {
   /** 스페이스 화면에 움짤이 보이고 창이 포커스를 가졌으면 다음 프레임에 다시 그린다. 아니면 멈춘다(시계도 멈춘다) */
   #scheduleAnimation(): void {
     const state = this.#state;
-    const playing = this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy && !state.settings;
+    const playing =
+      this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy && !state.settings && !state.records && !state.detail;
     const shown = !playing ? [] : state.view === 'usage' ? (state.usage?.accounts ?? []).map((account) => accountSprite(account, state.sprites)) : spaceItems(state).map((item) => spriteFor(item, state.sprites));
     const delays = shown.flatMap((sprite) => shortestFrame(sprite) ?? []);
     if (delays.length === 0) {

@@ -7,7 +7,7 @@
  * 여기는 상태와 받은 키로 다음 상태와 할 일(effects)을 돌려주는 순수 함수와 그리기뿐이다. 스튜디오 API는 desk.ts가 부른다
  */
 import type { DeskState } from './keys';
-import { fit, fitAnsi, stringWidth, type Rect } from './screen';
+import { fit, fitAnsi, osc8, stringWidth, type Rect } from './screen';
 import { backendLabel, compactTokens, gateStatus, totalTokens, type StatusBadge } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET, type Theme } from './theme';
 import type { DeskAccount, DeskItem, DeskProject, DeskUsage } from './types';
@@ -486,7 +486,7 @@ function sideBySide(cards: string[][], widths: number[], gap: number): string[] 
 function planHeader(plan: DeskPlan, theme: Theme, now: number): string {
   const muted = fg(theme, 'muted');
   const tokens = plan.metrics?.usage ? totalTokens(plan.metrics.usage) : 0;
-  const facts = [plan.projectId, `레인 ${plan.lanes.length}`, ...(tokens > 0 ? [`토큰 ${compactTokens(tokens)}`] : []), ago(plan.createdAt, now), ...(plan.issues?.tracking ? [`이슈 #${plan.issues.tracking.number}`] : [])].filter(Boolean);
+  const facts = [plan.projectId, `레인 ${plan.lanes.length}`, ...(tokens > 0 ? [`토큰 ${compactTokens(tokens)}`] : []), ago(plan.createdAt, now), ...(plan.issues?.tracking ? [`이슈 ${osc8(plan.issues.tracking.url, `#${plan.issues.tracking.number}`)}`] : [])].filter(Boolean);
   return `  ${statusText(planStatus(plan.status), theme)}  ${BOLD}${fg(theme, 'text')}${oneLine(plan.request)}${RESET}  ${muted}${facts.join(' · ')}${RESET}`;
 }
 

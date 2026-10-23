@@ -199,3 +199,36 @@ describe('buildRoutingStats', () => {
     expect(taskKindLabel(UNKNOWN_KIND)).toBe('모름');
   });
 });
+
+describe('buildRoutingStats 계정별 묶음과 최근 실패(#891)', () => {
+  it('AI × 계정으로 요청 수·통과율·평균 토큰을 모으고, 계정이 없는 세션은 기본 계정으로 묶는다', () => {
+    const stats = buildRoutingStats({
+      sessions: [
+        { sessionId: 's1', backend: 'claude-code', accountId: 'pio', events: [started('a', { backend: 'claude-code', taskKind: simple }), checkpoint('a'), finished('a', 'done')] },
+        { sessionId: 's2', backend: 'claude-code', accountId: 'pio', events: [started('b', { backend: 'claude-code', taskKind: simple }), verifyResult('b', false), finished('b', 'failed')] },
+        { sessionId: 's3', backend: 'claude-code', events: [started('c', { backend: 'claude-code', taskKind: risky }), checkpoint('c'), finished('c', 'done')] },
+        { sessionId: 's4', backend: 'codex', events: [started('d', { backend: 'codex', taskKind: simple, intent: 'ask' }), finished('d', 'done')] },
+      ],
+    });
+
+    expect(stats.byAccount).toEqual([
+      expect.objectContaining({ backend: 'claude-code', accountId: 'pio', runs: 2, passed: 1, failed: 1, errors: 0, passRate: 0.5, averageTokens: 1_100 }),
+      expect.objectContaining({ backend: 'claude-code', runs: 1, passed: 1, passRate: 1, averageTokens: 1_100 }),
+    ]);
+    expect(stats.byAccount?.[1]).not.toHaveProperty('accountId');
+  });
+
+  it('최근 실패를 새것부터 다섯 개까지 요청 글·세션·시각과 함께 남기고, 플랫폼 실패는 넣지 않는다', () => {
+    const events: StudioEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      const runId = `f${i}`;
+      events.push(started(runId, { backend: 'codex', taskKind: simple, at: `2026-10-2${i}T00:00:00.000Z` }), verifyResult(runId, false), finished(runId, i === 6 ? 'error' : 'failed'));
+    }
+    events.push(started('p', { backend: 'codex', taskKind: simple, at: '2026-10-29T00:00:00.000Z' }), verifyResult('p', false, 'docker 없음'), finished('p', 'failed'));
+    const stats = buildRoutingStats({ sessions: [{ sessionId: 's9', backend: 'codex', accountId: 'marco', events }] });
+
+    expect(stats.recentFailures?.map((failure) => failure.request)).toEqual(['요청 f6', '요청 f5', '요청 f4', '요청 f3', '요청 f2']);
+    expect(stats.recentFailures?.[0]).toEqual({ sessionId: 's9', backend: 'codex', accountId: 'marco', request: '요청 f6', at: '2026-10-26T00:00:00.000Z', outcome: 'errors' });
+    expect(stats.recentFailures?.[1]?.outcome).toBe('failed');
+  });
+});

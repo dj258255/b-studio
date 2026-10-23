@@ -10,7 +10,7 @@
  *  - 질문(intent ask)과 취소·되묻기·진행 중인 실행은 표에 넣지 않고 수만 알린다.
  */
 import type { AgentUsage } from '@b-studio/agent';
-import { UNKNOWN_KIND, UNKNOWN_MODEL_LABEL, type RoutingStats, type RoutingStatsRow, type TaskKindKey } from '../routing-types';
+import { UNKNOWN_KIND, UNKNOWN_MODEL_LABEL, type RoutingAccountRow, type RoutingFailure, type RoutingStats, type RoutingStatsRow, type TaskKindKey } from '../routing-types';
 import type { StudioEvent } from '../studio-events';
 import { listSessions, sessionHistory } from './sessions';
 import { buildTokenReports, tokenPricing, type TokenPricing } from './token-report';
@@ -19,6 +19,8 @@ export interface RoutingSessionEvents {
   sessionId: string;
   /** 세션의 백엔드. 실행 기록에 백엔드가 없는 옛 기록은 이 값으로 본다 */
   backend: string;
+  /** 세션이 쓴 AI 계정(#885). 없으면 그 CLI의 기본 계정이다 */
+  accountId?: string;
   events: readonly StudioEvent[];
 }
 
@@ -29,6 +31,9 @@ interface DraftRun {
   model?: string;
   kind: TaskKindKey;
   ask: boolean;
+  request: string;
+  at?: string;
+  tokens?: number;
   status?: Extract<StudioEvent, { type: 'run_finished' }>['status'];
   checkpointed: boolean;
   platformFailure: boolean;
@@ -58,6 +63,8 @@ function collectRuns(session: RoutingSessionEvents): Map<string, DraftRun> {
         ...(event.model ? { model: event.model } : {}),
         kind: event.taskKind ?? UNKNOWN_KIND,
         ask: event.intent === 'ask',
+        request: event.request,
+        ...(event.at ? { at: event.at } : {}),
         checkpointed: false,
         platformFailure: false,
         mismatch: false,
@@ -71,6 +78,7 @@ function collectRuns(session: RoutingSessionEvents): Map<string, DraftRun> {
       run.status = event.status;
       run.mismatch = Boolean(event.mismatches?.length);
       if (event.durationMs !== undefined) run.durationMs = event.durationMs;
+      if (event.usage) run.tokens = event.usage.inputTokens + event.usage.outputTokens + event.usage.cacheReadTokens + event.usage.cacheWriteTokens;
       if (event.metrics?.usageByModel) run.usageByModel = event.metrics.usageByModel;
     } else if (event.type === 'checkpoint') {
       run.checkpointed = true;
@@ -97,6 +105,13 @@ function median(values: number[]): number | undefined {
   return sorted.length % 2 === 1 ? sorted[middle] : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+function average(values: number[]): number {
+  return values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+/** 기록 화면에 보일 최근 실패 수 */
+const RECENT_FAILURES = 5;
+
 function kindKey(kind: TaskKindKey): string {
   return kind === UNKNOWN_KIND ? UNKNOWN_KIND : `${kind.complexity}/${kind.risk}`;
 }
@@ -104,6 +119,8 @@ function kindKey(kind: TaskKindKey): string {
 export function buildRoutingStats(input: { sessions: readonly RoutingSessionEvents[]; pricing?: TokenPricing }): RoutingStats {
   const rows = new Map<string, RoutingStatsRow & { costs: number[]; durations: number[] }>();
   const excluded = { asks: 0, unfinished: 0 };
+  const accounts = new Map<string, RoutingAccountRow & { tokens: number[]; costs: number[] }>();
+  const failures: RoutingFailure[] = [];
 
   for (const session of input.sessions) {
     const runs = collectRuns(session);
@@ -130,6 +147,20 @@ export function buildRoutingStats(input: { sessions: readonly RoutingSessionEven
       const cost = costs.get(runId);
       if (cost !== undefined) row.costs.push(cost);
       if (run.durationMs !== undefined) row.durations.push(run.durationMs);
+
+      const accountKey = `${run.backend}\u0000${session.accountId ?? ''}`;
+      let account = accounts.get(accountKey);
+      if (!account) {
+        account = { backend: run.backend, ...(session.accountId ? { accountId: session.accountId } : {}), runs: 0, passed: 0, failed: 0, errors: 0, tokens: [], costs: [] };
+        accounts.set(accountKey, account);
+      }
+      account.runs += 1;
+      if (outcome === 'passed' || outcome === 'failed' || outcome === 'errors') account[outcome] += 1;
+      if (run.tokens !== undefined) account.tokens.push(run.tokens);
+      if (cost !== undefined) account.costs.push(cost);
+      if (outcome === 'failed' || outcome === 'errors') {
+        failures.push({ sessionId: session.sessionId, backend: run.backend, ...(session.accountId ? { accountId: session.accountId } : {}), request: run.request, ...(run.at ? { at: run.at } : {}), outcome });
+      }
     }
   }
 
@@ -148,6 +179,19 @@ export function buildRoutingStats(input: { sessions: readonly RoutingSessionEven
       })
       .sort((a, b) => b.runs - a.runs || a.backend.localeCompare(b.backend) || a.model.localeCompare(b.model)),
     excluded,
+    byAccount: [...accounts.values()]
+      .map(({ tokens, costs, ...row }): RoutingAccountRow => {
+        const judged = row.passed + row.failed + row.errors;
+        return {
+          ...row,
+          ...(judged > 0 ? { passRate: row.passed / judged } : {}),
+          ...(tokens.length ? { averageTokens: Math.round(average(tokens)) } : {}),
+          ...(costs.length ? { averageCostUsd: average(costs) } : {}),
+        };
+      })
+      .sort((a, b) => b.runs - a.runs || a.backend.localeCompare(b.backend) || (a.accountId ?? '').localeCompare(b.accountId ?? '')),
+    // 시각을 모르는 옛 기록은 뒤로 보낸다
+    recentFailures: failures.sort((a, b) => (b.at ?? '').localeCompare(a.at ?? '')).slice(0, RECENT_FAILURES),
   };
 }
 
@@ -155,7 +199,7 @@ export function buildRoutingStats(input: { sessions: readonly RoutingSessionEven
 export async function routingStats(options: { projectId?: string } = {}): Promise<RoutingStats> {
   const sessions = (await listSessions()).filter((session) => !options.projectId || session.projectId === options.projectId);
   return buildRoutingStats({
-    sessions: sessions.map((session) => ({ sessionId: session.id, backend: session.backend ?? session.mode, events: sessionHistory(session.id) })),
+    sessions: sessions.map((session) => ({ sessionId: session.id, backend: session.backend ?? session.mode, ...(session.accountId ? { accountId: session.accountId } : {}), events: sessionHistory(session.id) })),
     pricing: tokenPricing(process.env),
   });
 }

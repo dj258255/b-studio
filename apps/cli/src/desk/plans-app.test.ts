@@ -3,7 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
-import { DeskApp, type DeskClient, type DeskIo, type PlansHost } from './desk';
+import { DeskApp, type DeskClient, type DeskIo } from './desk';
 import type { DeskPlan } from './plans';
 import { stripAnsi } from './screen';
 import type { DeskAccount, DeskItem } from './types';
@@ -140,8 +140,7 @@ function setup(items: DeskItem[] = [item('a')]) {
   const client = new FakeClient(items);
   const io = new FakeIo();
   const opened: string[] = [];
-  const plans: PlansHost = { client, openUrl: (url) => opened.push(url) };
-  const app = new DeskApp(client, items, io, { plans, accounts: client.accountList });
+  const app = new DeskApp(client, items, io, { openUrl: (url) => opened.push(url), accounts: client.accountList });
   const done = app.run();
   return { client, io, app, done, opened };
 }
@@ -280,8 +279,8 @@ describe('작업 나누기 화면(#893)', () => {
     expect(ctx.app.state.plans?.list).toEqual([]);
   });
 
-  it('작업 나누기를 붙이지 않은 desk면 열 수 없다고 알린다', async () => {
-    const client = new FakeClient([item('a')]);
+  it('작업 나누기 API를 모르는 스튜디오면 열 수 없다고 알린다', async () => {
+    const client: DeskClient = Object.assign(new FakeClient([item('a')]), { plans: undefined });
     const io = new FakeIo();
     const other = new DeskApp(client, [item('a')], io);
     void other.run();
