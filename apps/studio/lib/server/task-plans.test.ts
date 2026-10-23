@@ -6,6 +6,7 @@ import type { BoardAccess } from '@b-studio/agent';
 import type { WorkflowPageCheck } from '@b-studio/spec';
 import type { StudioEvent } from '../studio-events';
 import type { TaskPlanView } from '../task-plan-types';
+import { addAiAccount } from './ai-accounts';
 
 /** 가짜 체크포인트. contents는 그 커밋 시점의 전체 파일 내용(실제 git 트리 대신), links는 그 커밋에 링크로 든 파일 */
 type Checkpoint = { sha: string; shortSha: string; message: string; createdAt: string; files: string[]; contents?: Record<string, string>; links?: string[] };
@@ -56,7 +57,7 @@ const fake = vi.hoisted(() => ({
   project: { spec: { name: 'orders' }, managed: [['web', { template: 'nextjs', path: 'web' }]] } as unknown,
   sessions: new Map<string, Session>(),
   /** createSession에 넘어온 옵션(순서대로). 통합 세션에만 extraPageChecks가 붙는지, 레인에만 backend가 붙는지 확인한다 */
-  sessionOptions: [] as Array<{ modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string }>,
+  sessionOptions: [] as Array<{ modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string; accountId?: string }>,
   /** commitPendingWorkingCopyDocs를 부른 세션 id와 메시지(순서대로). sourceSessionId가 있는 계획만 부른다 */
   docsCommitted: [] as Array<{ sessionId: string; message: string }>,
   /** createSession이 돌려주는 세션의 기동 네트워크. 기동 수신 지표를 확인할 때 채운다 */
@@ -218,7 +219,7 @@ vi.mock('./sessions', () => ({
     projectId: string,
     owner: string,
     _workspace: string,
-    options: { modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string } = {},
+    options: { modelId?: string; effort?: string; backend?: string; extraPageChecks?: readonly WorkflowPageCheck[]; seedFromSessionId?: string; accountId?: string } = {},
   ) => {
     fake.sessionOptions.push(options);
     const id = `session-${++fake.counter}`;
@@ -386,6 +387,7 @@ import {
   resolveBoardToken,
   revokeBoardToken,
   selectableLaneBackends,
+  setLaneAccount,
   setLaneBackend,
 } from './task-plans';
 
@@ -2034,6 +2036,77 @@ describe('레인 백엔드 고르기 (이슈 #398)', () => {
   it('selectableLaneBackends는 이 서버가 허용하는 백엔드에서 데모를 뺀 목록을 돌려준다', () => {
     fake.allowedBackends = new Set(['api', 'claude-code', 'demo']);
     expect(selectableLaneBackends().sort()).toEqual(['api', 'claude-code']);
+  });
+});
+
+describe('레인 계정 고르기 (#893)', () => {
+  const home = mkdtempSync(path.join(tmpdir(), 'b-studio-lane-accounts-'));
+  const env = { HOME: home, XDG_CONFIG_HOME: path.join(home, '.config') };
+  afterAll(() => rmSync(home, { recursive: true, force: true }));
+
+  async function asyncStatus(action: () => Promise<unknown>): Promise<number> {
+    try {
+      await action();
+    } catch (error) {
+      if (error instanceof StudioError) return error.status;
+      throw error;
+    }
+    throw new Error('오류가 나지 않았습니다');
+  }
+
+  it('승인 대기 중에 레인 계정을 고르면 그 레인 세션이 그 계정으로 뜬다. 다른 AI로 바꾸면 계정은 지워진다', async () => {
+    const codex = await addAiAccount({ name: '마르코', backend: 'codex', configDir: path.join(home, '.codex-marco') }, env);
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '레인 계정', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'codex' });
+    const picked = await setLaneAccount(created.id, 'kim', 'lane-1', codex.id, env);
+    expect(picked.lanes[0]!.accountId).toBe(codex.id);
+
+    // 같은 AI를 다시 고르면 계정은 그대로, 다른 AI로 바꾸면 그 계정은 맞지 않아 지운다
+    setLaneBackend(created.id, 'kim', 'lane-2', { backend: 'codex' });
+    expect(setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'codex', model: 'gpt' }).lanes[0]!.accountId).toBe(codex.id);
+    await setLaneAccount(created.id, 'kim', 'lane-2', codex.id, env);
+    expect(setLaneBackend(created.id, 'kim', 'lane-2', { backend: 'claude-code' }).lanes[1]!.accountId).toBeUndefined();
+
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+    expect(plan.status).toBe('done');
+    const lane = fake.sessionOptions.find((options) => options.backend === 'codex');
+    expect(lane?.accountId).toBe(codex.id);
+    // 계정을 고르지 않은 레인과 통합 세션에는 계정이 없다
+    expect(fake.sessionOptions.filter((options) => options.accountId !== undefined)).toHaveLength(1);
+  });
+
+  it('빈 계정은 레인 계정을 지운다', async () => {
+    const codex = await addAiAccount({ name: '피오', backend: 'codex', configDir: path.join(home, '.codex-fio') }, env);
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'codex' });
+    await setLaneAccount(created.id, 'kim', 'lane-1', codex.id, env);
+    const cleared = await setLaneAccount(created.id, 'kim', 'lane-1', '', env);
+    expect(cleared.lanes[0]!.accountId).toBeUndefined();
+  });
+
+  it('목록에 없는 계정, 레인 AI와 다른 CLI의 계정, AI를 고르지 않은 레인, 승인 대기가 아닌 계획은 거절한다', async () => {
+    const claude = await addAiAccount({ name: '에리', backend: 'claude-code', configDir: path.join(home, '.claude-eri') }, env);
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    await awaiting(created.id);
+
+    expect(await asyncStatus(() => setLaneAccount(created.id, 'kim', 'lane-1', claude.id, env))).toBe(400);
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'codex' });
+    expect(await asyncStatus(() => setLaneAccount(created.id, 'kim', 'lane-1', claude.id, env))).toBe(400);
+    expect(await asyncStatus(() => setLaneAccount(created.id, 'kim', 'lane-1', 'nobody', env))).toBe(400);
+    expect(await asyncStatus(() => setLaneAccount(created.id, 'kim', 'lane-9', claude.id, env))).toBe(404);
+    expect(await asyncStatus(() => setLaneAccount(created.id, 'mallory', 'lane-1', claude.id, env))).toBe(403);
+
+    approveTaskPlan(created.id, 'kim');
+    expect(await asyncStatus(() => setLaneAccount(created.id, 'kim', 'lane-1', '', env))).toBe(409);
+    await finished(created.id);
   });
 });
 

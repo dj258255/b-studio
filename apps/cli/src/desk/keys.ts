@@ -13,8 +13,11 @@
  * 사용량 화면(#889, 앞글쇠 다음 u)에서는 앞글쇠 없이 ↑↓로 계정을 고르고 r로 다시 읽는다. Esc는 연 화면(스페이스·칸)으로 돌아간다.
  * 설정 화면(#890, 앞글쇠 다음 g, 스페이스·사용량 화면에서는 g만)은 그 화면들 위에 열린다. 열려 있으면 키와 붙여넣기는 모두 설정 화면이 받고(settings.ts),
  * Esc로 닫으면 아래 화면으로 돌아간다. 입력 칸이나 창이 없을 때의 u·w는 설정을 닫고 사용량 화면·스페이스 화면으로 간다
+ * 작업 나누기 화면(#893, 앞글쇠 다음 t)은 본문 자리에 열린다. 열려 있으면 앞글쇠가 아닌 키와 붙여넣기는 그 화면이 받고(plans.ts),
+ * 앞글쇠 다음 다른 화면 키(w·u·g·숫자 …)는 작업 나누기를 닫고 그 일을 한다
  */
 import type { KittyImages } from './kitty';
+import { openPlans, plansKey, plansPaste, type PlansEffect, type PlansState } from './plans';
 import type { PaneLayout } from './screen';
 import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type SettingsState } from './settings';
 import { deskSessions, deskSpaces } from './sidebar';
@@ -141,6 +144,8 @@ export interface DeskState {
   kitty?: KittyImages;
   /** 설정 화면(#890). 있으면 본문 전체가 설정 화면이다 */
   settings?: SettingsState;
+  /** 작업 나누기 화면(#893). 있으면 본문 자리가 이 화면이다 */
+  plans?: PlansState;
 }
 
 export interface UsageState {
@@ -183,7 +188,11 @@ export type Effect =
   /** 설정 화면을 연다(#890). 계정·규칙은 desk가 받아 채운다 */
   | { type: 'settings-open' }
   /** 설정 화면이 낸 할 일 */
-  | { type: 'settings'; effect: SettingsEffect };
+  | { type: 'settings'; effect: SettingsEffect }
+  /** 작업 나누기 화면을 연다(#893). 목록은 desk가 받아 채운다 */
+  | { type: 'plans-open' }
+  /** 작업 나누기 화면이 낸 할 일 */
+  | { type: 'plans'; effect: PlansEffect };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -250,7 +259,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.plans) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -307,6 +316,14 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = promptKey(state, key, effects);
       continue;
     }
+    if (state.plans && !state.prefix && input[at] !== prefixOf(state)) {
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = plansKey(state.plans, key);
+      state = { ...state, plans: result.state };
+      for (const effect of result.effects) effects.push({ type: 'plans', effect });
+      continue;
+    }
     if (state.prefix) {
       const key = nextKey(input, at);
       at += key.length;
@@ -358,6 +375,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
   // 설정 화면이 열려 있으면 그 입력 칸에 넣는다(#890)
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
+  // 작업 나누기 화면이 열려 있으면 새 계획 요청에 넣는다(#893)
+  if (state.plans) return { ...next, plans: plansPaste(state.plans, content) };
   // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스·사용량 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
   if (state.copy || state.help || state.confirm || (state.view !== undefined && !state.rename && !state.prompt)) return next;
   if (state.rename) {
@@ -405,7 +424,22 @@ export function reselect(before: readonly DeskItem[], selected: number, after: r
   return Math.max(0, Math.min(selected, sessions.length - 1));
 }
 
-function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState {
+function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState {
+  let state = start;
+  if (state.plans && key !== 't' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
+    // 다른 화면이나 칸을 다루는 키는 작업 나누기를 닫고 한다(#893)
+    effects.push({ type: 'plans', effect: { type: 'close' } });
+    state = { ...state, plans: undefined };
+  }
+  if (key === 't') {
+    const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
+    if (state.plans) {
+      effects.push({ type: 'plans', effect: { type: 'close' } });
+      return { ...done, plans: undefined };
+    }
+    effects.push({ type: 'plans-open' });
+    return { ...done, plans: openPlans(), prompt: undefined };
+  }
   const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
   const sessions = deskSessions(state.items);
   if (key === prefixOf(state)) {

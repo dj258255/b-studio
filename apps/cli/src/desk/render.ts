@@ -6,6 +6,7 @@ import { spaceScreen } from './cards';
 import { usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
+import { plansHint, plansScreen } from './plans';
 import { renderSettings, settingsHint } from './settings';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
@@ -53,7 +54,7 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · t 작업 나누기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
 const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · Esc 닫기 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
@@ -69,6 +70,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
   ['g', '설정: 계정(더하기·로그인·그림), 라우팅 규칙, 화면, 키·알림. 스페이스·사용량 화면에서는 g만, Esc로 닫으면 연 화면으로'],
+  ['t', '작업 나누기: 요청 하나를 레인 여럿으로 나눈 계획. 목록·새 계획(n)·계획 보기(단계별 레인 카드), Enter 레인 세션 열기, g 칸에 나란히, 승인 대기면 b AI·계정 · a 승인(i 이슈로 올리기) · x 거부'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
@@ -167,7 +169,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  const view = state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const view = state.plans ? '작업 나누기' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
   const where = sessions[state.selected]?.projectName;
   lines.push(
     onBackground(
@@ -202,7 +204,14 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     return onBackground(relabel(state, entry.text), entry.selected ? bg(theme, 'active') : chrome, layout.sidebar.w);
   };
 
-  const space = state.view === 'space' ? spaceScreen(state, spaceRect(state, size)) : state.view === 'usage' ? usageScreen(state, spaceRect(state, size)) : undefined;
+  // 작업 나누기 화면(#893)은 사이드바를 둔 채 본문 자리에 그린다
+  const space = state.plans
+    ? plansScreen(state, spaceRect(state, size))
+    : state.view === 'space'
+      ? spaceScreen(state, spaceRect(state, size))
+      : state.view === 'usage'
+        ? usageScreen(state, spaceRect(state, size))
+        : undefined;
   const placed = layout.panes;
   for (let y = 1; y < rows - 1; y++) {
     let line = hidden ? '' : sideLine(y - 1) + `${border}│${RESET}`;
@@ -266,7 +275,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       ),
     );
   } else {
-    const hint = state.copy
+    const hint = state.plans && !state.prefix
+      ? plansHint(state.plans)
+      : state.copy
       ? state.copy.search !== undefined
         ? ` 위로 찾기> ${state.copy.search}`
         : state.message
@@ -284,7 +295,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     lines.push(fit(relabel(state, hint), cols));
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
-    if (rect && view?.cursor && state.slots[state.focus]) {
+    if (!state.plans && rect && view?.cursor && state.slots[state.focus]) {
       cursor = { x: rect.x + Math.min(view.cursor.x, rect.w - 1), y: rect.y + 1 + Math.min(view.cursor.y, rect.h - 2) };
     }
   }

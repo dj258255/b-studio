@@ -8,6 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
+import type { DeskPlan } from './plans';
 import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
@@ -175,6 +176,52 @@ export class StudioClient {
 
   preview(request: string): Promise<DeskPreview> {
     return this.#request('POST', '/api/routing/preview', { request, intent: 'build' });
+  }
+
+  // ─── 작업 나누기(#893, /api/task-plans) ───
+
+  plans(): Promise<DeskPlan[]> {
+    return this.#request('GET', '/api/task-plans');
+  }
+
+  plan(id: string): Promise<DeskPlan> {
+    return this.#request('GET', `/api/task-plans/${encodeURIComponent(id)}`);
+  }
+
+  /** 요청으로 새 계획을 만든다. 스튜디오가 레인으로 나누는 동안 계획은 planning이고, 다 나누면 승인 대기다 */
+  createPlan(projectId: string, request: string): Promise<DeskPlan> {
+    return this.#request('POST', '/api/task-plans', { projectId, request });
+  }
+
+  approvePlan(id: string, publishIssues: boolean): Promise<DeskPlan> {
+    return this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/approval`, { approve: true, publishIssues });
+  }
+
+  rejectPlan(id: string): Promise<DeskPlan> {
+    return this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/approval`, { approve: false });
+  }
+
+  async deletePlan(id: string): Promise<void> {
+    await this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/delete`);
+  }
+
+  /** 재시작으로 멈춘 계획의 통합을 다시 시작한다(레인은 다시 돌리지 않는다) */
+  resumePlan(id: string): Promise<DeskPlan> {
+    return this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/resume`);
+  }
+
+  /** 레인에 고를 수 있는 AI(이 스튜디오가 허용한 것) */
+  async laneBackends(): Promise<string[]> {
+    return (await this.#request<{ backends: string[] }>('GET', '/api/task-plans/lane-backends')).backends;
+  }
+
+  /**
+   * 승인 대기 중인 레인의 AI·계정을 바꾼다. 빈 AI는 "세션과 같음"(계획 기본)이다.
+   * 계정은 늘 함께 보낸다: 빈 계정은 그 CLI의 기본 계정이라, 같은 AI의 다른 계정에서 기본 계정으로 돌아갈 때도 지운다
+   */
+  async setLane(id: string, laneId: string, backend: string, accountId?: string): Promise<DeskPlan> {
+    const route = `/api/task-plans/${encodeURIComponent(id)}/lanes/${encodeURIComponent(laneId)}/backend`;
+    return (await this.#request<{ plan: DeskPlan }>('POST', route, { backend, accountId: accountId ?? '' })).plan;
   }
 
   /** 새 요청을 터미널로 보낸다(#836): 규칙(또는 직접 고른 AI)으로 세션을 만들고 터미널을 열어 첫 요청을 CLI에 넣는다 */
