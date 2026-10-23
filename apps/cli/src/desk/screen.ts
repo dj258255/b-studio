@@ -123,3 +123,34 @@ export function placePanes(
 export function terminalSize(rect: Rect): { cols: number; rows: number } {
   return { cols: Math.max(1, rect.w), rows: Math.max(1, rect.h - 1) };
 }
+
+const RESET = '\x1b[0m';
+const SGR = /\x1b\[[0-9;:?]*[A-Za-z]/y;
+
+export function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+}
+
+/** 색이 섞인 줄을 정확히 width칸으로 맞춘다(넘치면 자르고 모자라면 빈칸). 끝에서 색을 되돌린다. fill을 주면 남은 빈칸을 그 색(바탕색)으로 칠한다 */
+export function fitAnsi(line: string, width: number, fill = ''): string {
+  let out = '';
+  let used = 0;
+  let at = 0;
+  while (at < line.length) {
+    SGR.lastIndex = at;
+    const match = SGR.exec(line);
+    if (match) {
+      out += match[0];
+      at += match[0].length;
+      continue;
+    }
+    const char = String.fromCodePoint(line.codePointAt(at)!);
+    const w = charWidth(char.codePointAt(0)!);
+    if (used + w > width) break;
+    out += char;
+    used += w;
+    at += char.length;
+  }
+  const pad = Math.max(0, width - used);
+  return fill && pad ? `${out}${RESET}${fill}${' '.repeat(pad)}${RESET}` : `${out}${RESET}${' '.repeat(pad)}`;
+}

@@ -8,10 +8,14 @@
  * 복사 모드·도움말·확인·이름 입력 중에는 키가 CLI로 가지 않는다(#863, #864).
  * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다.
  * 앞글쇠는 설정(desk.json)으로 바꿀 수 있고(state.prefixKey), 마우스(SGR 열)는 CLI로 보내지 않고 mouse 할 일로 낸다. 칸·사이드바 자리는 desk.ts가 가린다(#874)
+ * 스페이스 화면(#887, 앞글쇠 다음 w)에서는 앞글쇠 없이 방향키로 카드를 고르고 Enter로 고른 칸에 연다. Tab은 다음 스페이스, Esc는 칸 화면이다.
+ * 스페이스 화면에서 친 글자는 CLI로 가지 않는다(칸이 보이지 않는다)
  */
 import type { PaneLayout } from './screen';
-import { deskSessions } from './sidebar';
-import type { DeskItem } from './types';
+import { deskSessions, deskSpaces } from './sidebar';
+import type { Sprite } from './sprite';
+import type { Theme } from './theme';
+import type { DeskItem, DeskLimits } from './types';
 
 export const PREFIX = '\x02';
 const ESC = '\x1b';
@@ -19,6 +23,10 @@ const UP = '\x1b[A';
 const DOWN = '\x1b[B';
 const UP_APP = '\x1bOA';
 const DOWN_APP = '\x1bOB';
+const RIGHT = '\x1b[C';
+const LEFT = '\x1b[D';
+const RIGHT_APP = '\x1bOC';
+const LEFT_APP = '\x1bOD';
 const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
 const PASTE_START = '\x1b[200~';
@@ -108,6 +116,14 @@ export interface DeskState {
   /** 설정한 앞글쇠(없으면 Ctrl-b)와 화면에 보일 이름(#874) */
   prefixKey?: string;
   prefixLabel?: string;
+  /** 본문에 칸 대신 스페이스 화면(고른 세션이 든 스페이스의 카드)을 보인다(#887) */
+  view?: 'space';
+  /** 그리는 색(없으면 어두운 팔레트, 24비트 색) */
+  theme?: Theme;
+  /** 카드 그림: 세션 id, AI 이름(claude-code·codex…), default 차례로 찾는다. 없으면 desk의 기본 그림 */
+  sprites?: Readonly<Record<string, Sprite>>;
+  /** 세션 id마다의 사용량 한도(카드 막대). 없으면 막대를 그리지 않는다 */
+  limits?: Readonly<Record<string, DeskLimits>>;
 }
 
 export type Effect =
@@ -240,6 +256,12 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = commandKey(state, key, effects);
       continue;
     }
+    if (state.view === 'space' && input[at] !== prefixOf(state)) {
+      const key = nextKey(input, at);
+      at += key.length;
+      state = spaceKey(state, key, effects);
+      continue;
+    }
     const char = input[at]!;
     if (char === prefixOf(state)) {
       flush();
@@ -271,8 +293,8 @@ function heldTail(text: string, marker: string): number {
 function pasteContent(state: DeskState, content: string, ended: boolean, effects: Effect[]): DeskState {
   const pasting = state.pasting!;
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
-  // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중에 붙여 넣은 글은 CLI로 보내지 않는다
-  if (state.copy || state.help || state.confirm) return next;
+  // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
+  if (state.copy || state.help || state.confirm || (state.view === 'space' && !state.rename && !state.prompt)) return next;
   if (state.rename) {
     // 이름에는 한 줄로 넣는다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
@@ -328,6 +350,9 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     if (id) effects.push({ type: 'input', id, data: key });
     return done;
   }
+  if (key === 'w') return { ...done, view: state.view === 'space' ? undefined : 'space' };
+  // 칸을 다루는 키는 칸 화면으로 돌아와서 한다
+  if (state.view === 'space' && /^[1-4ozl[xc\r\n]$/.test(key)) return commandKey({ ...state, view: undefined }, key, effects);
   if (/^[1-4]$/.test(key)) {
     const slot = Number(key) - 1;
     if (slot >= state.layout) return done;
@@ -414,6 +439,26 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
   }
   if (key === ESC) return done;
   return { ...done, message: 'Ctrl-b 다음 키는 Ctrl-b ? 도움말에 있습니다' };
+}
+
+/** 스페이스 화면의 키(#887): 앞글쇠 없이 카드를 고르고 연다. 칸으로 보낼 글자는 없다 */
+function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
+  const sessions = deskSessions(state.items);
+  const base: DeskState = state.message ? { ...state, message: undefined } : state;
+  const move = (by: number) => ({ ...base, selected: Math.max(0, Math.min(sessions.length - 1, state.selected + by)) });
+  if (key === UP || key === UP_APP || key === LEFT || key === LEFT_APP || key === 'k' || key === 'h') return move(-1);
+  if (key === DOWN || key === DOWN_APP || key === RIGHT || key === RIGHT_APP || key === 'j' || key === 'l') return move(1);
+  if (key === '\t' || key === '\x1b[Z') {
+    // 다음(Shift-Tab이면 앞) 스페이스의 첫 세션
+    const spaces = deskSpaces(state.items);
+    if (spaces.length === 0) return base;
+    const at = Math.max(0, spaces.findIndex((space) => space.sessions.includes(state.selected)));
+    const next = spaces[(at + (key === '\t' ? 1 : spaces.length - 1)) % spaces.length]!;
+    return { ...base, selected: next.sessions[0]! };
+  }
+  if (key === ESC || key === 'w') return { ...base, view: undefined };
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c') return commandKey(base, key, effects);
+  return base;
 }
 
 function confirmKey(state: DeskState, key: string, effects: Effect[]): DeskState {

@@ -2,10 +2,15 @@
  * desk 화면 그리기. 상태와 칸마다의 터미널 줄을 받아 화면 한 장(줄 배열)과 커서 자리를 돌려주는 순수 함수다.
  * 줄마다 보이는 폭은 정확히 화면 폭이다(색 제어 문자는 폭에 넣지 않는다). 그리는 쪽은 바뀐 줄만 다시 쓴다
  */
+import { spaceScreen } from './cards';
 import { isShellId, type DeskState } from './keys';
-import { charWidth, fit, placePanes, stringWidth, type Rect } from './screen';
-import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow, type Tone } from './sidebar';
+import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
+import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
+import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
 import type { DeskPreview } from './types';
+import { statusMark } from './widgets';
+
+export { fitAnsi, stripAnsi } from './screen';
 
 /** 칸 하나에 그릴 것. lines는 칸의 터미널 크기에 맞춘 줄(색 포함), note는 칸 머리에 붙일 알림(닫힘·오류) */
 export interface PaneView {
@@ -22,39 +27,13 @@ export interface PaneView {
   title?: string;
 }
 
-const RESET = '\x1b[0m';
-const INVERSE = '\x1b[7m';
-const BOLD = '\x1b[1m';
-const TONE: Record<Tone, string> = { warn: '\x1b[33m', busy: '\x1b[36m', ok: '\x1b[32m', fail: '\x1b[31m', muted: '\x1b[2m' };
-const SGR = /\x1b\[[0-9;:?]*[A-Za-z]/y;
-
-export function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+/** 바탕색 위에 그린다: 줄 안의 색 되돌림 뒤에도 바탕색을 다시 걸고, 남은 칸도 그 바탕으로 채운다 */
+function onBackground(text: string, background: string, width: number): string {
+  return fitAnsi(background + text.replaceAll(RESET, RESET + background), width, background);
 }
 
-/** 색이 섞인 줄을 정확히 width칸으로 맞춘다(넘치면 자르고 모자라면 빈칸). 끝에서 색을 되돌린다 */
-export function fitAnsi(line: string, width: number): string {
-  let out = '';
-  let used = 0;
-  let at = 0;
-  while (at < line.length) {
-    SGR.lastIndex = at;
-    const match = SGR.exec(line);
-    if (match) {
-      out += match[0];
-      at += match[0].length;
-      continue;
-    }
-    const char = String.fromCodePoint(line.codePointAt(at)!);
-    const w = charWidth(char.codePointAt(0)!);
-    if (used + w > width) break;
-    out += char;
-    used += w;
-    at += char.length;
-  }
-  return `${out}${RESET}${' '.repeat(Math.max(0, width - used))}`;
-}
-
+/** 사이드바 맨 아래 줄의 키 안내 */
+const SIDEBAR_HINT = ' Ctrl-b w 카드 · n 요청 · ? 키';
 const CHOICE_LABEL = (choice: string): string => (choice === 'rules' ? '규칙대로' : backendLabel(choice));
 
 /** 미리보기 한 줄: 어느 AI로, 왜, 같은 종류의 일에서 AI별로 게이트를 몇 번 통과했나(웹 새 요청 칸과 같은 내용) */
@@ -72,7 +51,8 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
 
@@ -82,6 +62,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['o', '다음 칸'],
   ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
+  ['w', '스페이스 화면(세션 카드) 켜고 끄기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
@@ -99,7 +80,8 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
 /** 마우스로 하는 것(#874) */
 const MOUSE_HELP: ReadonlyArray<readonly [string, string]> = [
   ['칸 누르기', '그 칸 고르기(CLI가 마우스를 켰으면 고른 칸 안의 마우스는 CLI로 갑니다)'],
-  ['사이드바 누르기', '세션 고르기(Enter나 한 번 더 누르면 고른 칸에 엽니다)'],
+  ['사이드바 누르기', '스페이스를 누르면 그 스페이스 화면, 세션을 누르면 고르기(Enter나 한 번 더 누르면 고른 칸에 엽니다)'],
+  ['카드 누르기', '그 세션 고르기(한 번 더 누르면 고른 칸에 엽니다)'],
   ['휠', '그 칸의 지난 출력 올려 보기(맨 아래로 내리면 복사 모드를 나옵니다)'],
   ['Shift + 끌기', '터미널의 글 고르기(desk가 마우스를 받는 동안 대부분의 터미널에서)'],
 ];
@@ -131,25 +113,33 @@ function helpLines(width: number): string[] {
     '',
     ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
     ' 세션이 손댈 상태가 되거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다(studio desk --no-notify로 끕니다).',
-    ' 앞글쇠·알림·마우스·색은 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
+    ' 앞글쇠·알림·마우스·색·팔레트는 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
+    ' 카드 그림은 ~/.config/b-studio/sprites/ 의 claude-code.png · codex.png · default.png를 씁니다(없으면 기본 그림).',
   ].map((line) => fit(line, width));
 }
 
 /**
- * 사이드바에 보이는 줄과 내려간 만큼(offset). 고른 항목의 줄(머리·상태·펼친 내역)이 모두 보이게 내린다. 높이보다 길면 머리부터 보인다.
- * 마우스로 누른 줄을 가릴 때도 같은 셈을 쓴다(#874)
+ * 사이드바에 보이는 줄과 내려간 만큼(offset). 고른 세션이 든 스페이스의 줄부터 고른 세션의 줄까지 보이게 내린다.
+ * 맨 아래 한 줄은 키 안내라 rect에서 뺀다. 마우스로 누른 줄을 가릴 때도 같은 셈을 쓴다(#874)
  */
 export function sidebarView(state: DeskState, size: { cols: number; rows: number }): { rows: SidebarRow[]; offset: number; rect: Rect } {
   const layout = placePanes(size.cols, size.rows, state);
+  const rect = { ...layout.sidebar, h: Math.max(1, layout.sidebar.h - 1) };
   const slotOf = new Map<string, number>();
   state.slots.forEach((id, slot) => {
     if (id && slot < state.layout) slotOf.set(id, slot + 1);
   });
-  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w, new Set(state.flagged ?? []));
-  const first = side.findIndex((row) => row.item === state.selected);
-  const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), -1);
-  const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - layout.sidebar.h, last + 1 - layout.sidebar.h));
-  return { rows: side, offset, rect: layout.sidebar };
+  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, rect.w, new Set(state.flagged ?? []), state.theme ?? DEFAULT_THEME);
+  const space = deskSessions(state.items)[state.selected]?.projectName;
+  const first = side.findIndex((row) => row.space !== undefined && row.space === space);
+  const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), first);
+  const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - rect.h, last + 1 - rect.h));
+  return { rows: side, offset, rect };
+}
+
+/** 스페이스 화면이 놓이는 본문 자리(칸들이 놓이던 곳 전체) */
+export function spaceRect(state: DeskState, size: { cols: number; rows: number }): Rect {
+  return computeLayout(size.cols, size.rows, 1, { sidebar: !state.sidebarHidden }).panes[0]!;
 }
 
 /** 앞글쇠를 바꿨으면 안내 글의 Ctrl-b를 그 이름으로 바꾼다(이름은 늘 Ctrl-x 꼴이라 폭이 같다). 칸 안 CLI의 글에는 쓰지 않는다 */
@@ -164,11 +154,22 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const hidden = state.sidebarHidden === true;
   const sessions = deskSessions(state.items);
 
+  const theme = state.theme ?? DEFAULT_THEME;
+  const chrome = bg(theme, 'chrome');
+  const border = fg(theme, 'border');
   const lines: string[] = [];
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}${shellNote}`, cols)}${RESET}`);
+  const view = state.view === 'space' ? '스페이스 화면' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const where = sessions[state.selected]?.projectName;
+  lines.push(
+    onBackground(
+      ` ${BOLD}${fg(theme, 'accent')}b-studio desk${RESET} ${fg(theme, 'muted')}·${RESET} ${fg(theme, 'text')}${where ? `${where} · ` : ''}${view} · 세션 ${sessions.length}${shellNote}${RESET}`,
+      chrome,
+      cols,
+    ),
+  );
 
   if (state.help) {
     lines.push(...helpLines(cols).map((line) => relabel(state, line)).slice(0, Math.max(0, rows - 2)));
@@ -177,28 +178,31 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     return { lines };
   }
 
-  // 사이드바: 고른 항목이 보이게 내린다
-  const { rows: side, offset } = sidebarView(state, size);
+  // 사이드바: 고른 스페이스와 세션이 보이게 내린다. 맨 아래 줄은 키 안내
+  const { rows: side, offset, rect: sideRect } = sidebarView(state, size);
   const sideLine = (row: number): string => {
-    const entry = side[offset + row];
-    if (!entry) return ' '.repeat(layout.sidebar.w);
-    if (entry.selected) return `${INVERSE}${entry.text}${RESET}`;
-    let text = relabel(state, entry.text);
-    for (const tone of entry.tones ?? []) text = text.replace(tone.text, `${TONE[tone.tone]}${tone.text}${RESET}`);
-    return text;
+    if (row === layout.sidebar.h - 1) return onBackground(`${fg(theme, 'muted')}${relabel(state, SIDEBAR_HINT)}${RESET}`, chrome, layout.sidebar.w);
+    const entry = row < sideRect.h ? side[offset + row] : undefined;
+    if (!entry) return onBackground('', chrome, layout.sidebar.w);
+    return onBackground(relabel(state, entry.text), entry.selected ? bg(theme, 'active') : chrome, layout.sidebar.w);
   };
 
+  const space = state.view === 'space' ? spaceScreen(state, spaceRect(state, size)) : undefined;
   const placed = layout.panes;
   for (let y = 1; y < rows - 1; y++) {
-    let line = hidden ? '' : sideLine(y - 1) + '│';
+    let line = hidden ? '' : sideLine(y - 1) + `${border}│${RESET}`;
+    if (space) {
+      lines.push(line + space.lines[y - 1]!);
+      continue;
+    }
     const covering = placed.filter(({ rect }) => y >= rect.y && y < rect.y + rect.h);
     if (covering.length === 0) {
       // 4칸의 가운데 가로 구분선
       const [left, right] = placed.map((entry) => entry.rect);
-      line += '─'.repeat(left?.w ?? 0) + (right ? `┼${'─'.repeat(right.w)}` : '');
+      line += `${border}${'─'.repeat(left?.w ?? 0)}${right ? `┼${'─'.repeat(right.w)}` : ''}${RESET}`;
     } else {
       covering.sort((a, b) => a.rect.x - b.rect.x);
-      line += covering.map(({ rect, slot }) => paneLine(state, slot, rect, y - rect.y, panes[slot])).join('│');
+      line += covering.map(({ rect, slot }) => paneLine(state, slot, rect, y - rect.y, panes[slot])).join(`${border}│${RESET}`);
     }
     lines.push(line);
   }
@@ -257,7 +261,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
         ? KEY_HINT
         : state.message
           ? ` ${state.message}`
-          : IDLE_HINT;
+          : state.view === 'space'
+            ? SPACE_HINT
+            : IDLE_HINT;
     lines.push(fit(relabel(state, hint), cols));
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
@@ -273,20 +279,22 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
   const id = state.slots[slot];
   const focused = slot === state.focus;
   if (row === 0) {
+    const theme = state.theme ?? DEFAULT_THEME;
     const item = id ? state.items.find((candidate) => candidate.id === id) : undefined;
-    let title = ` ${slot + 1} `;
+    // 고른 칸의 머리는 밝은 바탕에 굵은 글, 다른 칸은 어두운 바탕에 흐린 글. 칸 번호는 고른 칸만 강조색이다
+    const head = focused ? `${bg(theme, 'active')}${fg(theme, 'text')}${BOLD}` : `${bg(theme, 'chrome')}${fg(theme, 'muted')}`;
+    let title = `${focused ? fg(theme, 'accent') : ''} ${slot + 1} ${RESET}${head}`;
     if (!id) title += '(비어 있음)';
     else if (view?.title) title += view.title;
     else if (item) {
       const gate = gateStatus(item);
-      title += [backendLabel(item.backend), item.title, agentStatus(item).label, ...(gate ? [gate.label] : [])].join(' · ');
+      title += `${statusMark(agentStatus(item), theme)}${head} ${[backendLabel(item.backend), item.title, agentStatus(item).label, ...(gate ? [gate.label] : [])].join(' · ')}`;
     } else title += id;
     if (view?.mode) title += ` · ${view.mode}`;
     if (view?.bell) title += ' · 벨';
     // 세션 제목(사람이 쓴 요청)은 그대로 두고 desk가 붙인 안내만 앞글쇠 이름을 바꾼다
     if (view?.note) title += ` · ${relabel(state, view.note)}`;
-    const text = fit(title, rect.w);
-    return focused ? `${INVERSE}${text}${RESET}` : `${BOLD}${text}${RESET}`;
+    return onBackground(title, head, rect.w);
   }
   if (!id) {
     const middle = Math.floor((rect.h - 1) / 2);

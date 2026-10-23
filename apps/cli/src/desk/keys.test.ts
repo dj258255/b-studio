@@ -111,7 +111,7 @@ describe('키 처리', () => {
   });
 
   it('모르는 글쇠는 앞글쇠를 풀고 안내를 남긴다', () => {
-    const { state, effects } = handleInput(withItems(), '\x02w');
+    const { state, effects } = handleInput(withItems(), '\x02y');
     expect(state.prefix).toBe(false);
     expect(state.message).toContain('Ctrl-b');
     expect(effects).toEqual([]);
@@ -508,5 +508,66 @@ describe('셸 칸 키(#873)', () => {
     const { state, effects } = handleInput(asking, 'n');
     expect(effects).toEqual([]);
     expect(state.confirm).toBeUndefined();
+  });
+});
+
+describe('스페이스 화면 키(#887)', () => {
+  const spaced = (patch: Partial<DeskState> = {}): DeskState =>
+    withItems({ items: [item('a'), item('b'), { ...item('c'), projectName: 'blog' }, { ...item('d'), projectName: 'docs' }], view: 'space', ...patch });
+
+  it('Ctrl-b w로 스페이스 화면과 칸 화면을 오간다', () => {
+    const on = handleInput(withItems(), '\x02w').state;
+    expect(on.view).toBe('space');
+    expect(on.prefix).toBe(false);
+    expect(handleInput(on, '\x02w').state.view).toBeUndefined();
+  });
+
+  it('앞글쇠 없이 방향키·hjkl로 카드를 고르고, 친 글자는 칸이 있어도 CLI로 가지 않는다', () => {
+    let state = spaced({ slots: ['a', undefined, undefined, undefined] });
+    let result = handleInput(state, '\x1b[B');
+    expect(result.state.selected).toBe(1);
+    result = handleInput(result.state, 'l');
+    expect(result.state.selected).toBe(2);
+    result = handleInput(result.state, '\x1b[D');
+    expect(result.state.selected).toBe(1);
+    state = result.state;
+    const typed = handleInput(state, 'xyz');
+    expect(typed.effects).toEqual([]);
+    const pasted = handleInput(state, '\x1b[200~hello\x1b[201~');
+    expect(pasted.effects).toEqual([]);
+  });
+
+  it('Enter는 고른 세션을 고른 칸에 열고 칸 화면으로 돌아간다. Esc는 그냥 돌아간다', () => {
+    const { state, effects } = handleInput(spaced({ selected: 1 }), '\r');
+    expect(effects).toEqual([{ type: 'open', slot: 0, id: 'b' }]);
+    expect(state.slots[0]).toBe('b');
+    expect(state.view).toBeUndefined();
+    const escaped = handleInput(spaced(), '\x1b', true).state;
+    expect(escaped.view).toBeUndefined();
+  });
+
+  it('Tab은 다음 스페이스의 첫 세션, Shift-Tab은 앞 스페이스', () => {
+    expect(handleInput(spaced({ selected: 1 }), '\t').state.selected).toBe(2);
+    expect(handleInput(spaced({ selected: 3 }), '\t').state.selected).toBe(0);
+    expect(handleInput(spaced({ selected: 0 }), '\x1b[Z').state.selected).toBe(3);
+  });
+
+  it('새 요청·멈추기·이름·도움말은 앞글쇠 없이도 된다', () => {
+    expect(handleInput(spaced(), 'n').effects).toEqual([{ type: 'prompt' }]);
+    expect(handleInput(spaced({ selected: 1 }), 'p').state.confirm).toEqual({ action: 'stop', id: 'b', title: 'b' });
+    expect(handleInput(spaced(), ',').state.rename).toEqual({ id: 'a', text: '' });
+    expect(handleInput(spaced(), '?').state.help).toBe(true);
+  });
+
+  it('칸을 다루는 앞글쇠 키(숫자·o·z·l·[·x·c)는 칸 화면으로 돌아와서 한다', () => {
+    const state = spaced({ layout: 2, slots: ['a', 'b', undefined, undefined] });
+    const picked = handleInput(state, '\x022').state;
+    expect(picked.focus).toBe(1);
+    expect(picked.view).toBeUndefined();
+    const shell = handleInput(spaced(), '\x02c');
+    expect(shell.effects).toEqual([{ type: 'shell', slot: 0 }]);
+    expect(shell.state.view).toBeUndefined();
+    // 사이드바 고르기(↑↓)는 스페이스 화면에 그대로 있는다
+    expect(handleInput(spaced(), '\x02\x1b[B').state.view).toBe('space');
   });
 });
