@@ -40,6 +40,36 @@ function post(url: string, token: string, body: unknown, host?: string): Promise
   });
 }
 
+describe('CLI 대화 id를 훅 입력에서 받는다(#872)', () => {
+  it('대화의 시작·요청·쓰기 직전·턴의 끝·알림·종료 훅의 session_id를 알린다. 텔레메트리·ping과 id 없는 입력은 알리지 않는다', async () => {
+    const seen: string[] = [];
+    const routes = terminalHookRoutes(handlers({ conversation: (id) => void seen.push(id) }));
+    await routes['/session-start']({ session_id: 'a1' });
+    await routes['/prompt']({ session_id: 'a2', prompt: '고쳐줘' });
+    await routes['/pre-tool']({ session_id: 'a3' });
+    await routes['/stop']({ session_id: 'a4' });
+    await routes['/notification']({ session_id: 'a5' });
+    await routes['/session-end']({ session_id: 'a6' });
+    await routes['/v1/logs']({ session_id: 'x1' });
+    await routes['/ping']({ session_id: 'x2' });
+    await routes['/prompt']({ prompt: '고쳐줘' });
+    await routes['/prompt']({ session_id: 42 });
+    expect(seen).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6']);
+  });
+
+  it('대화 id를 받다가 던져도 훅의 답은 그대로 간다(판정과 상관없는 기록이다)', async () => {
+    const routes = terminalHookRoutes(
+      handlers({
+        conversation: () => {
+          throw new Error('저장 실패');
+        },
+        stop: async () => ({ feedback: '테스트 실패' }),
+      }),
+    );
+    expect(await routes['/stop']({ session_id: 'a1' })).toEqual({ decision: 'block', reason: '테스트 실패' });
+  });
+});
+
 describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () => {
   it('요청을 막을 때만 막는 꼴을 낸다. 알릴 것이 있으면 그 요청의 맥락에 덧붙인다', async () => {
     expect(await terminalHookRoutes(handlers())['/prompt']({ prompt: '고쳐줘' })).toEqual({});

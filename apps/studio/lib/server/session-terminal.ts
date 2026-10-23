@@ -91,6 +91,11 @@ interface TerminalState {
   cli: boolean;
   /** 열려 있는 터미널의 감시를 멈추는 함수(백엔드가 watch를 줄 때만). 터미널이 끝나거나 닫히면 부른다 */
   watchStop?: () => void;
+  /**
+   * 이 스튜디오 프로세스에서 지금 샌드박스의 터미널을 연 적이 있는가(#872). 처음 열 때만 지난 CLI 대화를 이어 붙인다.
+   * 같은 프로세스에서 다시 여는 것은 CLI·셸이 끝났거나 사람이 닫은 뒤라, 일부러 끝낸 대화를 되살리지 않는다
+   */
+  opened?: boolean;
 }
 
 export interface TerminalTarget {
@@ -117,6 +122,8 @@ export interface TerminalTarget {
   gateway?: () => Promise<AgentGatewayAddress>;
   /** 이 컴퓨터 방식에서 띄울 CLI(#825). 없으면 claude다. 컨테이너 방식은 claude만 쓴다 */
   cli?: HostCliKind;
+  /** 이어 붙일 지난 CLI 대화 id(#872). 훅으로 받아 세션 기록에 남긴 것이다. 터미널을 열 때 한 번 묻는다 */
+  resumeConversation?: () => string | undefined;
   /**
    * 감시가 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 찾았을 때 부른다. 세션은 이 실행을 실패로 닫고 되돌린다(이슈 #695)
    */
@@ -127,11 +134,16 @@ export interface TerminalTarget {
 export interface TerminalBackend {
   /** 터미널이 붙을 자리를 준비하고 그 자리를 가리키는 값을 돌려준다(컨테이너 이름, 또는 관문 설정 폴더) */
   prepare(target: TerminalTarget, gateway?: AgentGatewayAddress): Promise<string>;
-  open(place: string, options: { id: string; size: TerminalSize; target: TerminalTarget; initialPrompt?: string }): AgentTerminal | Promise<AgentTerminal>;
+  open(place: string, options: { id: string; size: TerminalSize; target: TerminalTarget; initialPrompt?: string; resumeConversation?: string }): AgentTerminal | Promise<AgentTerminal>;
   /**
    * 터미널을 열 때 첫 요청을 CLI 실행 인자로 넘길 수 있는가(#836). 이 컴퓨터 방식만 받는다. 받지 않는 백엔드에는 넘기지 않는다
    */
   readonly acceptsInitialPrompt?: boolean;
+  /**
+   * 터미널을 열 때 지난 CLI 대화를 이어 붙일 수 있는가(#872). 이 컴퓨터 방식만 받는다.
+   * 컨테이너 방식은 CLI의 대화 기록이 컨테이너의 홈 볼륨에 있어 따로 확인하지 않았다
+   */
+  readonly acceptsResume?: boolean;
   /** 준비한 것(컨테이너, 관문 설정)을 지운다 */
   remove(sandboxId: string): Promise<void>;
   /** 그 자리에서 관문에 닿는가 */
@@ -216,8 +228,10 @@ const HOST_BACKEND: TerminalBackend = {
       gatewayDir: place || undefined,
       cli: options.target.cli ?? 'claude',
       ...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {}),
+      ...(options.resumeConversation !== undefined ? { resumeConversation: options.resumeConversation } : {}),
     }),
   acceptsInitialPrompt: true,
+  acceptsResume: true,
   remove: (sandboxId) => removeHostGatewayConfig(sandboxId),
   reachable: (place) => probeHostGateway(place, process.execPath, hostGateways.get(place)?.cli.kind ?? 'claude'),
   unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다. 스튜디오를 다시 띄운 뒤 터미널을 다시 여세요',
@@ -421,6 +435,7 @@ export async function openSessionTerminal(
     await backend.remove(state.sandboxId).catch(() => {});
     state.chunks = [];
     state.bytes = 0;
+    state.opened = false;
   }
   state.sandboxId = target.sandboxId;
   if (state.terminal) {
@@ -434,6 +449,8 @@ export async function openSessionTerminal(
     return { initialPromptUsed: false };
   }
   const initialPrompt = backend.acceptsInitialPrompt === true ? options.initialPrompt : undefined;
+  // 지난 대화는 이 스튜디오에서 이 샌드박스의 터미널을 처음 열 때만 이어 붙인다(스튜디오를 다시 띄웠거나 이어서 작업한 뒤). 첫 요청이 있으면 새 대화다(#872)
+  const resumeConversation = backend.acceptsResume === true && initialPrompt === undefined && !current.opened ? target.resumeConversation?.() : undefined;
   current.opening = (async () => {
     emit(current, { kind: 'status', state: 'opening' });
     try {
@@ -451,8 +468,15 @@ export async function openSessionTerminal(
       if (gateway && !(await backend.reachable(place))) {
         throw new Error(backend.unreachable);
       }
-      const terminal = await backend.open(place, { id: TERMINAL_ID, size: wanted, target, ...(initialPrompt !== undefined ? { initialPrompt } : {}) });
+      const terminal = await backend.open(place, {
+        id: TERMINAL_ID,
+        size: wanted,
+        target,
+        ...(initialPrompt !== undefined ? { initialPrompt } : {}),
+        ...(resumeConversation !== undefined ? { resumeConversation } : {}),
+      });
       current.terminal = terminal;
+      current.opened = true;
       current.size = wanted;
       current.chunks = [];
       current.bytes = 0;

@@ -146,7 +146,7 @@ vi.mock('./session-terminal', () => ({
 
 import { sessionFile, stateDirOf } from './session-store';
 import { agentRows, restoreAgentLedger } from './terminal-agents';
-import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -1701,6 +1701,30 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     expect(agentRows(restored, {}).map((row) => [row.id, row.tokens.inputTokens])).toEqual(rows.map((row) => [row.id, row.tokens.inputTokens]));
   }, 30_000);
 
+  it('훅으로 온 CLI 대화 id를 세션 기록에 남겨, 멈췄다가 이어서 작업한 뒤에도 터미널이 그 대화를 이어 붙이게 한다(#872)', async () => {
+    const session = await open();
+    const conversation = '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b';
+    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBeUndefined();
+    session.gateway.conversation?.(conversation);
+    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBe(conversation);
+    // 꼴이 아닌 값(옵션처럼 보이는 것, 셸 글자)은 기억하지 않는다. 앞서 기억한 것이 그대로 남는다
+    session.gateway.conversation?.('--dangerously-skip-permissions');
+    session.gateway.conversation?.('a;rm -rf ~');
+    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBe(conversation);
+    const snapshot = getSnapshot(session.id)!;
+    await stopSession(session.id);
+    const saved = JSON.parse(await readFile(sessionFile(stateDirOf(snapshot)), 'utf8')) as { terminalConversation?: unknown };
+    expect(saved.terminalConversation).toEqual({ cli: 'claude', id: conversation });
+    await resumeSession(session.id);
+    const started = Date.now();
+    while (getSnapshot(session.id)?.status !== 'ready') {
+      if (Date.now() - started > 10_000) throw new Error(`세션이 준비되지 않았습니다 (${getSnapshot(session.id)?.status})`);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBe(conversation);
+    await stopSession(session.id);
+  }, 30_000);
+
   it('실행 밖에서 온 것(사람이 CLI에서 대화만 한 것)은 활동 기록에 남기지 않는다', async () => {
     const session = await open();
     await session.gateway.telemetry(otlp([req(100, 10)]));
@@ -2442,6 +2466,17 @@ describe('Codex 터미널(#825)', () => {
     expect(sessionTerminalTarget(session.id).cli).toBe('codex');
     await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '주문에 메모 필드 추가' });
     expect(session.ofType('run_started').at(-1)).toMatchObject({ via: 'terminal', backend: 'codex', taskKind: { complexity: 'simple', risk: 'normal' } });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('기억한 대화가 다른 CLI의 것이면 이어 붙이지 않는다(#872)', async () => {
+    const session = await openCodex();
+    session.gateway.conversation?.('019a2b3c-0000-7000-8000-000000000001');
+    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBe('019a2b3c-0000-7000-8000-000000000001');
+    // 컨테이너 방식으로 바뀌면 claude가 뜬다. codex의 대화를 claude에 넘기지 않는다
+    fake.terminalMode = 'container';
+    expect(sessionTerminalTarget(session.id).cli).toBe('claude');
+    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBeUndefined();
     await stopSession(session.id);
   }, 30_000);
 

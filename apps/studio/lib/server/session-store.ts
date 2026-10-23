@@ -53,6 +53,8 @@ export interface PersistedSession {
   sourceDirtyFiles: number;
   /** 터미널 세션의 메인·서브에이전트 내역(#843·#849). 화면용이라 모양이 틀리면 버린다. 이 필드가 생기기 전 기록에는 없다 */
   agentLedger?: unknown;
+  /** 세션 터미널의 CLI가 훅으로 알려 온 대화 id(#872). 스튜디오를 다시 띄운 뒤 그 대화를 이어 붙인다. 모양이 틀리면 버린다 */
+  terminalConversation?: unknown;
   /** 정리할 때 쓰는 샌드박스 id와 제공자 이름 */
   sandbox: { id: string; provider: string };
   /** 원격 미리보기 주소에 넣는 토큰. 이어서 작업해도 같은 주소를 쓰도록 남긴다 */

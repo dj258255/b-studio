@@ -257,23 +257,58 @@ export function firstPromptArg(text: string): string {
   return body.startsWith('-') || !/\s/.test(body) ? `요청: ${body}` : body;
 }
 
-/** 받은 첫 요청을 셸 변수로 옮기고 환경에서 지운다. 사용자의 시작 파일보다 먼저 돈다 */
+/**
+ * 이어 붙일 CLI 대화 id(#872). 스튜디오를 다시 띄운 뒤 터미널을 열 때, 훅으로 받아 세션 기록에 남긴 지난 대화를 첫 실행에서 이어 붙인다
+ * (claude `--resume <id>`, codex `resume <id>`). 첫 요청과 같이 PTY 환경 변수로만 받고, 시작 파일보다 먼저 셸 변수로 옮겨 환경에서 지운다
+ */
+export const RESUME_CONVERSATION_ENV = 'B_STUDIO_RESUME_ID';
+const RESUME_CONVERSATION_VAR = 'BSTUDIO_RESUME_ID_VALUE';
+/** 대화 id의 꼴. 두 CLI 모두 UUID를 쓰고, 옵션(-로 시작)·빈칸·셸 글자는 받지 않는다 */
+const RESUME_CONVERSATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+/** 이어 붙일 수 있는 꼴의 대화 id인가. 훅으로 온 값을 기억하기 전에 본다 */
+export function isResumableConversation(id: unknown): id is string {
+  return typeof id === 'string' && RESUME_CONVERSATION_PATTERN.test(id);
+}
+
+/** CLI 실행 인자로 넘길 대화 id. 꼴이 맞지 않으면 던진다(훅으로 온 값이라 바깥에서 온 값이다) */
+export function resumeConversationArg(id: string): string {
+  if (!isResumableConversation(id)) throw new SandboxError('이어 붙일 대화 id의 꼴이 맞지 않습니다', '영문·숫자·밑줄·붙임표로 된 128자 이하의 id만 넘깁니다');
+  return id;
+}
+
+/** 받은 첫 요청과 대화 id를 셸 변수로 옮기고 환경에서 지운다. 사용자의 시작 파일보다 먼저 돈다 */
 const FIRST_PROMPT_CAPTURE = [
   `if [ -n "\${${FIRST_PROMPT_ENV}+x}" ]; then`,
   `  ${FIRST_PROMPT_VAR}="$${FIRST_PROMPT_ENV}"`,
   `  unset ${FIRST_PROMPT_ENV}`,
   'fi',
+  `if [ -n "\${${RESUME_CONVERSATION_ENV}+x}" ]; then`,
+  `  ${RESUME_CONVERSATION_VAR}="$${RESUME_CONVERSATION_ENV}"`,
+  `  unset ${RESUME_CONVERSATION_ENV}`,
+  'fi',
 ];
 
-/** CLI를 처음 띄우는 자리. 첫 요청이 있으면 인자로 한 번 넘기고 지운다. 없으면 지금처럼 인자 없이 띄운다 */
-function firstLaunch(command: string, indent = ''): string[] {
+/** 이어 붙이지 못했을 때 터미널에 남기는 안내. CLI를 대신 새로 띄우지 않는다(사람이 일부러 끝낸 것과 가를 수 없다) */
+function resumeFailedNotice(kind: HostCliKind): string {
+  return `[b-studio] 지난 대화를 이어 붙이지 못했습니다. '${kind}'를 치면 새 대화로 시작합니다.`;
+}
+
+/**
+ * CLI를 처음 띄우는 자리. 첫 요청이 있으면 인자로 한 번 넘긴다(새 대화). 없고 대화 id가 있으면 그 대화를 이어 붙인다(#872).
+ * 둘 다 없으면 인자 없이 띄운다. 두 변수 모두 한 번 쓰고 지운다
+ */
+function firstLaunch(command: string, kind: HostCliKind, indent = ''): string[] {
+  const resume = kind === 'codex' ? `${command} resume "$${RESUME_CONVERSATION_VAR}"` : `${command} --resume "$${RESUME_CONVERSATION_VAR}"`;
   return [
     `if [ -n "\${${FIRST_PROMPT_VAR}+x}" ]; then`,
     `  ${command} "$${FIRST_PROMPT_VAR}"`,
-    `  unset ${FIRST_PROMPT_VAR}`,
+    `elif [ -n "\${${RESUME_CONVERSATION_VAR}+x}" ]; then`,
+    `  ${resume} || printf '%s\\n' ${shellQuote(resumeFailedNotice(kind))}`,
     'else',
     `  ${command}`,
     'fi',
+    `unset ${FIRST_PROMPT_VAR} ${RESUME_CONVERSATION_VAR}`,
   ].map((line) => indent + line);
 }
 
@@ -315,7 +350,7 @@ export function hostZshFiles(dir: string, kind: HostCliKind = 'claude'): Record<
       after: [
         `if [[ -o interactive && -z "$${SHELL_STARTED_VAR}" ]]; then`,
         `  export ${SHELL_STARTED_VAR}=1`,
-        ...firstLaunch(kind, '  '),
+        ...firstLaunch(kind, kind, '  '),
         `  print -r -- ${shellQuote(shellStartedNotice(kind))}`,
         'fi',
       ],
@@ -341,7 +376,7 @@ export function hostBashRc(dir: string, kind: HostCliKind = 'claude'): string {
     `function ${kind} { ${wrapper} "$@"; }`,
     `if [ -z "$${SHELL_STARTED_VAR}" ]; then`,
     `  export ${SHELL_STARTED_VAR}=1`,
-    ...firstLaunch(kind, '  '),
+    ...firstLaunch(kind, kind, '  '),
     `  printf '%s\\n' ${shellQuote(shellStartedNotice(kind))}`,
     'fi',
     '',
@@ -596,7 +631,7 @@ export function hostTerminalCommand(kind: HostCliKind = 'claude'): string {
     // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
     'trap : INT',
     ...FIRST_PROMPT_CAPTURE,
-    ...firstLaunch(kind),
+    ...firstLaunch(kind, kind),
     `printf "%s\\n" ${JSON.stringify(shellStartedNotice(kind))}`,
     'exec "${SHELL:-/bin/sh}"',
   ].join('\n');
@@ -652,7 +687,7 @@ function hostFallbackCommand(dir: string, kind: HostCliKind): string {
     // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
     'trap : INT',
     ...FIRST_PROMPT_CAPTURE,
-    ...firstLaunch(shellQuote(wrapperPath(dir, kind))),
+    ...firstLaunch(shellQuote(wrapperPath(dir, kind)), kind),
     `printf "%s\\n" ${shellQuote(shellStartedNotice(kind))}`,
     `printf "%s\\n" ${shellQuote(safe)}`,
     'exec "${SHELL:-/bin/sh}"',
@@ -709,6 +744,7 @@ export async function openHostTerminal({
   gatewayDir,
   cli = 'claude',
   initialPrompt,
+  resumeConversation,
   env = process.env,
   spawnPty = spawnWithNodePty,
 }: {
@@ -722,12 +758,19 @@ export async function openHostTerminal({
   cli?: HostCliKind;
   /** CLI를 처음 띄울 때 실행 인자로 넘길 첫 요청(#836). PTY 환경 변수로만 넘기고, 셸이 한 번 쓰고 지운다 */
   initialPrompt?: string;
+  /** 첫 실행에서 이어 붙일 CLI 대화 id(#872). 첫 요청이 있으면 새 대화라 쓰지 않는다 */
+  resumeConversation?: string;
   env?: Record<string, string | undefined>;
   spawnPty?: SpawnHostPty;
 }): Promise<AgentTerminal & { pid: number }> {
   const { cols, rows } = clampTerminalSize(size);
   const launch = hostShellLaunch(gatewayDir, env, cli);
-  const first: Record<string, string> = initialPrompt !== undefined ? { [FIRST_PROMPT_ENV]: firstPromptArg(initialPrompt) } : {};
+  const first: Record<string, string> =
+    initialPrompt !== undefined
+      ? { [FIRST_PROMPT_ENV]: firstPromptArg(initialPrompt) }
+      : resumeConversation !== undefined
+        ? { [RESUME_CONVERSATION_ENV]: resumeConversationArg(resumeConversation) }
+        : {};
   let pty: HostPty;
   try {
     pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...launch.env, ...first } });
