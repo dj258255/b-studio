@@ -113,14 +113,14 @@ pnpm studio up examples/orders
 
 준비가 끝나면 터미널에 웹 미리보기와 OpenAPI 주소가 표시됩니다. `Ctrl+C`를 누르면 컨테이너와 샌드박스 전용 볼륨을 정리합니다.
 
-웹 스튜디오는 `pnpm studio launch` 한 명령으로 켜고 `pnpm studio stop`으로 끕니다(모델 호출 없이 보려면 `--mode demo`). 브라우저의 `/work`가 작업 화면입니다. CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
-
-터미널 작업대는 실험 기능을 켜고 띄운 스튜디오에 붙습니다(Codex도 쓰려면 `B_STUDIO_BACKENDS=codex`를 더합니다).
+터미널 작업대는 한 명령으로 엽니다. 스튜디오를 브라우저 없이 뒤에서 띄우고(이미 떠 있으면 재사용) 바로 desk가 열립니다.
 
 ```bash
-B_STUDIO_EXPERIMENTAL=1 B_STUDIO_BACKENDS=codex pnpm studio launch
-pnpm studio desk   # 다른 터미널에서. Ctrl-b n 새 요청, Ctrl-b q 나가기
+pnpm studio         # Ctrl-b n 새 요청, Ctrl-b q 나가기
+pnpm studio stop    # 뒤에서 도는 스튜디오 끄기
 ```
+
+웹 화면은 `pnpm studio launch --web`으로 엽니다(모델 호출 없이 보려면 `--mode demo`). 브라우저의 `/work`가 작업 화면입니다. CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
 
 데스크톱 앱(macOS), `--json` 출력, 계약을 깨는 요청(`--allow-breaking`), 인증 방식은 [시작하기](docs/getting-started.md)에 정리했습니다.
 
@@ -170,8 +170,9 @@ flowchart LR
 | 명령 | 용도 |
 |---|---|
 | `pnpm studio up <path>` | 프로젝트를 샌드박스에서 실행 |
-| `pnpm studio launch` · `pnpm studio stop` | 웹 스튜디오를 백그라운드로 켜고 브라우저를 연다 · 끈다 |
-| `pnpm studio desk` | 띄운 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다(실험) |
+| `pnpm studio` | 스튜디오를 브라우저 없이 뒤에서 띄우고 바로 터미널 작업대를 연다(실험) |
+| `pnpm studio launch` · `pnpm studio stop` | 스튜디오를 백그라운드로 켠다(`--web`이면 브라우저도 연다) · 끈다 |
+| `pnpm studio desk` | 띄워 둔 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다(실험) |
 | `pnpm studio agent <path> "<request>"` | 에이전트에게 변경 요청 |
 | `pnpm studio verify <path>` | 편집기로 바꾼 지금 변경을 같은 게이트로 확인(체크포인트는 만들지 않음) |
 | `pnpm studio workflow <path>` | `studio.yaml`이 강제하는 단계·테스트·화면 확인·보호 경로·배포 조건을 보여 준다 |
