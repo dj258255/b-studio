@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import "@xterm/xterm/css/xterm.css";
 import type { TerminalMessage } from "@/lib/server/session-terminal";
-import { decodeTerminalData, TERMINAL_FONT_FAMILY, TERMINAL_HANGUL_FONT, TERMINAL_LINE_HEIGHT, terminalPasteText, terminalStatusLabel, type TerminalGateStatus, type TerminalStatus } from "@/lib/terminal";
+import { decodeTerminalData, TERMINAL_FONT, TERMINAL_FONT_FAMILY, TERMINAL_FONT_SIZE, TERMINAL_LINE_HEIGHT, terminalPasteText, terminalStatusLabel, type TerminalGateStatus, type TerminalStatus } from "@/lib/terminal";
 import { useChatDraft } from "./chat-draft-context";
 import { useSessionAccess } from "./session-access";
 import { useTerminalStream, type TerminalStreamMessage } from "./terminal-stream";
@@ -76,14 +76,14 @@ export function TerminalPanel({
     void (async () => {
       // xterm은 브라우저에서만 불러온다(모듈을 읽는 순간 창을 본다)
       const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
-      // xterm은 넓은 글자의 폭을 처음 그릴 때 재어 둔다. 한글 대체 글꼴을 먼저 읽어 두지 않으면 시스템 글꼴의 폭으로 재어 글자 사이가 벌어진다
-      await document.fonts?.load(`13px "${TERMINAL_HANGUL_FONT}"`, "가").catch(() => undefined);
+      // xterm은 칸 폭과 넓은 글자의 폭을 처음 그릴 때 재어 둔다. 터미널 글꼴을 먼저 읽어 두지 않으면 다른 글꼴의 폭으로 재어 글자 사이가 벌어진다
+      await document.fonts?.load(`${TERMINAL_FONT_SIZE}px "${TERMINAL_FONT}"`, "a가").catch(() => undefined);
       if (disposed) return;
       const terminal = new Terminal({
         cursorBlink: true,
-        // 한글은 영문 글꼴에 없어 대체 글꼴로 그려진다. 고정 폭 한글 글꼴이 깔려 있으면 그것을, 없으면 2칸에 맞춰 키운 시스템 한글 글꼴을 쓴다(#865)
+        // 영문과 한글을 같은 글꼴로 그려 한글이 2칸에 꼭 맞는다(#867)
         fontFamily: TERMINAL_FONT_FAMILY,
-        fontSize: 13,
+        fontSize: TERMINAL_FONT_SIZE,
         lineHeight: TERMINAL_LINE_HEIGHT,
         scrollback: 5000,
         theme: { background: "#0d1117", foreground: "#e6edf3", cursor: "#e6edf3", selectionBackground: "#264f78" },

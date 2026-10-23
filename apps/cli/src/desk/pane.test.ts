@@ -73,15 +73,15 @@ describe('칸 터미널 해석', () => {
 
   it('CLI가 켠 모드(bracketed paste, 응용 커서 키, 커서 숨김)를 알려 준다(#860)', async () => {
     const pane = new PaneTerminal(10, 2);
-    expect(pane.modes()).toEqual({ bracketedPaste: false, appCursor: false, cursorHidden: false });
+    expect(pane.modes()).toEqual({ bracketedPaste: false, appCursor: false, cursorHidden: false, mouse: false, sgrMouse: false });
     await pane.write('\x1b[?2004h\x1b[?1h\x1b[?25l');
-    expect(pane.modes()).toEqual({ bracketedPaste: true, appCursor: true, cursorHidden: true });
+    expect(pane.modes()).toEqual({ bracketedPaste: true, appCursor: true, cursorHidden: true, mouse: false, sgrMouse: false });
     await pane.write('\x1b[?25h');
     expect(pane.modes().cursorHidden).toBe(false);
     await pane.write('\x1b[?25l');
     pane.restart();
     await pane.write('');
-    expect(pane.modes()).toEqual({ bracketedPaste: false, appCursor: false, cursorHidden: false });
+    expect(pane.modes()).toEqual({ bracketedPaste: false, appCursor: false, cursorHidden: false, mouse: false, sgrMouse: false });
     pane.dispose();
   });
 });
@@ -143,6 +143,36 @@ describe('칸 복사 모드(#863)', () => {
     pane.restart();
     await pane.write('fresh');
     expect(pane.lines().map((line) => stripAnsi(line).trimEnd())).toEqual(['fresh', '', '']);
+    pane.dispose();
+  });
+});
+
+describe('256색 터미널(#874)', () => {
+  it('24비트 색을 256색 근사로 낮춰 그린다', async () => {
+    const pane = new PaneTerminal(10, 1, { truecolor: false });
+    await pane.write('\x1b[38;2;255;0;0mR\x1b[48;2;128;128;128mG');
+    const line = pane.lines()[0]!;
+    expect(line).not.toContain('38;2;');
+    expect(line).not.toContain('48;2;');
+    expect(line).toContain('38;5;196');
+    expect(line).toContain('48;5;244');
+    pane.dispose();
+  });
+
+  it('기본은 24비트 색을 그대로 옮긴다', async () => {
+    const pane = new PaneTerminal(10, 1);
+    await pane.write('\x1b[38;2;255;0;0mR');
+    expect(pane.lines()[0]).toContain('38;2;255;0;0');
+    pane.dispose();
+  });
+
+  it('안쪽 CLI가 켠 마우스 모드와 SGR 꼴을 따라간다', async () => {
+    const pane = new PaneTerminal(10, 2);
+    expect(pane.modes().mouse).toBe(false);
+    await pane.write('\x1b[?1000h\x1b[?1006h');
+    expect(pane.modes()).toMatchObject({ mouse: true, sgrMouse: true });
+    await pane.write('\x1b[?1006l\x1b[?1000l');
+    expect(pane.modes()).toMatchObject({ mouse: false, sgrMouse: false });
     pane.dispose();
   });
 });
