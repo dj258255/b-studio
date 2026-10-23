@@ -3,7 +3,9 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
-import { DeskApp, type DeskClient, type DeskIo, type RuntimeHost } from './desk';
+import type { StudioClient } from './client';
+import { DeskApp, type DeskClient, type DeskIo } from './desk';
+import { openFleets } from './fleets';
 import { handleInput, initialState } from './keys';
 import { stripAnsi } from './screen';
 import type { DeskDeployStatus, DeskItem, DeskRepoList, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
@@ -87,9 +89,9 @@ class FakeRuntime {
   signal: AbortSignal | undefined;
   eventsError: Error | undefined;
   deployStatus: DeskDeployStatus = { state: { active: 'r1', releases: [{ id: 'r1', createdAt: '2026-10-22T00:00:00Z', source: { label: '첫 배포' }, status: 'active' }] }, urls: { web: 'http://127.0.0.1:9000' }, containers: [] };
-  host(): RuntimeHost {
+  /** DeskClient에 더할 실행 화면 메서드(#895) */
+  client(): Pick<StudioClient, 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository'> {
     return {
-      client: {
         sessionEvents: (id, onEvent, signal) => {
           this.calls.push(`events ${id}`);
           this.signal = signal;
@@ -125,10 +127,6 @@ class FakeRuntime {
           this.calls.push(`repository ${projectId} ${kind} ${state}`);
           return { ok: true, issues: [{ number: 3, title: '버그', author: 'me', labels: [], updatedAt: '2026-10-22T00:00:00Z', url: 'https://github.com/me/shop/issues/3', state: 'open' }] };
         },
-      },
-      openUrl: (url) => {
-        this.opened.push(url);
-      },
     };
   }
 }
@@ -137,7 +135,9 @@ function setup(options: { runtime?: boolean } = {}) {
   const client = new FakeClient([item('a'), item('b')]);
   const io = new FakeIo();
   const runtime = new FakeRuntime();
-  const app = new DeskApp(client, client.items, io, options.runtime === false ? {} : { runtime: runtime.host() });
+  // 옛 스튜디오(실행 화면 API가 없는 손님)는 그 메서드가 없다
+  if (options.runtime !== false) Object.assign(client, runtime.client());
+  const app = new DeskApp(client, client.items, io, { openUrl: (url) => runtime.opened.push(url) });
   const done = app.run();
   return { client, io, app, done, runtime };
 }
@@ -192,7 +192,7 @@ describe('실행 화면 열고 닫기(#895)', () => {
     none.io.type('\x02v');
     await tick();
     expect(none.app.state.runtime).toBeUndefined();
-    expect(none.app.state.message).toContain('열 수 없습니다');
+    expect(none.app.state.message).toContain('지원하지 않습니다');
 
     const ctx = setup();
     ctx.runtime.eventsError = new StudioRequestError('세션을 찾을 수 없습니다', 404);
@@ -286,5 +286,35 @@ describe('어느 세션의 실행 화면인가(#895)', () => {
     expect(pane.effects).toContainEqual({ type: 'runtime-open', id: 'b' });
     expect(handleInput({ ...base, focus: 1 }, '\x02v').state.runtime?.id).toBe('a');
     expect(handleInput({ ...initialState(), items: [] }, '\x02v').state.message).toContain('세션이 없습니다');
+  });
+});
+
+describe('덮는 화면은 하나만(#895)', () => {
+  const base = () => ({ ...initialState(), items: [item('a'), item('b')] });
+
+  it('앞글쇠 다음 v는 열린 비교·작업 나누기를 닫고 열고, 다시 v는 닫는다', () => {
+    const fleets = handleInput({ ...base(), fleets: openFleets() }, '\x02v');
+    expect(fleets.state.fleets).toBeUndefined();
+    expect(fleets.state.runtime?.id).toBe('a');
+    expect(fleets.effects).toContainEqual({ type: 'fleets', effect: { type: 'close' } });
+    const closed = handleInput(fleets.state, '\x02v');
+    expect(closed.state.runtime).toBeUndefined();
+    expect(closed.effects).toContainEqual({ type: 'runtime', effect: { type: 'close' } });
+  });
+
+  it('화면 안의 글자는 실행 화면이 받고, 앞글쇠 다음 다른 화면 키는 실행 화면을 닫고 그리로 간다', () => {
+    const opened = handleInput(base(), '\x02v').state;
+    // s는 사이드바 숨기기가 아니라 실행 화면의 키(로그 탭이 아니면 아무 일 없음), d는 배포 탭의 키
+    const inside = handleInput(opened, '2s');
+    expect(inside.state.runtime?.tab).toBe('logs');
+    expect(inside.state.sidebarHidden).toBeUndefined();
+    expect(inside.effects.some((effect) => effect.type === 'input')).toBe(false);
+    const away = handleInput(opened, '\x02w');
+    expect(away.state.runtime).toBeUndefined();
+    expect(away.effects).toContainEqual({ type: 'runtime', effect: { type: 'close' } });
+    expect(away.state.view).toBe('space');
+    const plans = handleInput(opened, '\x02t');
+    expect(plans.state.runtime).toBeUndefined();
+    expect(plans.state.plans).toBeDefined();
   });
 });

@@ -49,6 +49,19 @@ describe('POST /api/fleets', () => {
     });
   });
 
+  it('후보의 계정(accountId)도 그대로 넘긴다', async () => {
+    const response = await post({ projectId: 'orders', request: '요청', candidates: [{ backend: 'codex', accountId: 'acct-pio' }, { backend: 'codex' }] });
+
+    expect(response.status).toBe(201);
+    expect(mocks.createFleet).toHaveBeenCalledWith({
+      projectId: 'orders',
+      request: '요청',
+      candidates: [{ backend: 'codex', accountId: 'acct-pio' }, { backend: 'codex' }],
+      owner: 'kim',
+      allowBreaking: false,
+    });
+  });
+
   it('후보를 주지 않으면 서버가 기본 후보를 만들도록 비워 둔다', async () => {
     const response = await post({ projectId: 'orders', request: '요청' });
 
@@ -57,7 +70,7 @@ describe('POST /api/fleets', () => {
   });
 
   it('후보 모양이 틀리면 400을 돌려주고 Fleet을 만들지 않는다', async () => {
-    const wrong = [[{ model: 'model-a' }], [{ backend: 3 }], 'nope', [{ backend: 'api', model: 5 }]];
+    const wrong = [[{ model: 'model-a' }], [{ backend: 3 }], 'nope', [{ backend: 'api', model: 5 }], [{ backend: 'codex', accountId: 7 }]];
 
     for (const candidates of wrong) {
       const response = await post({ projectId: 'orders', request: '요청', candidates });

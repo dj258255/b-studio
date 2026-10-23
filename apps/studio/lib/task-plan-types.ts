@@ -111,6 +111,8 @@ export interface TaskPlanLaneView {
   model?: string;
   /** 이 레인에 고정한 노력(추론 강도) 단계. 사람이 승인 전에 레인마다 고른 값만 있다(#398). 없으면 계획의 effort를 쓴다 */
   effort?: Effort;
+  /** 이 레인 세션을 띄울 AI 계정(#893). 사람이 승인 전에 레인 AI와 함께 고른 값만 있다. 없으면 그 CLI의 기본 계정이다 */
+  accountId?: string;
   /** 레인 세션의 작업 폴더. 세션이 사라진 뒤에도 통합이 결과를 다시 읽을 수 있게 남긴다 */
   workDir?: string;
   /** 레인이 바꾼 파일 (세션 시작 체크포인트를 뺀 체크포인트들의 파일 합집합, 정렬) */

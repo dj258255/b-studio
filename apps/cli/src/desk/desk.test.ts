@@ -6,7 +6,7 @@ import { spaceScreen } from './cards';
 import { spaceRect } from './render';
 import { sidebarRows } from './sidebar';
 import { spriteFromRows, type Sprite } from './sprite';
-import type { DeskAccount, DeskAccountLimits, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskFleet, DeskFleetCandidate, DeskFleetMember, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -56,6 +56,64 @@ class FakeClient implements DeskClient {
   }
   async accounts() {
     return this.accountList;
+  }
+  /** 기록 화면과 세션 자세히(#891)가 부른 것: 이름과 인자 */
+  recordCalls: Array<[string, ...unknown[]]> = [];
+  failNext: Record<string, string> = {};
+  #record(name: string, ...args: unknown[]) {
+    this.recordCalls.push([name, ...args]);
+    const error = this.failNext[name];
+    if (error) {
+      delete this.failNext[name];
+      throw new StudioRequestError(error, 409);
+    }
+  }
+  async routingStats() {
+    this.#record('routingStats');
+    return { rows: [], excluded: { asks: 0, unfinished: 0 }, byAccount: [{ backend: 'claude-code', runs: 4, passed: 3, failed: 1, errors: 0, passRate: 0.75, averageTokens: 20_000 }] };
+  }
+  async tokenReport(projectId: string, from?: string) {
+    this.#record('tokenReport', projectId, from);
+    const usage = { inputTokens: 50_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    return { projectId, projectName: 'shop', generatedAt: '2026-10-23T00:00:00Z', sessions: 1, requests: [{ sessionId: 'a', kind: 'normal' as const, request: 'r', usage, result: 'changed' as const }], totals: usage, usageByModel: { sonnet: usage }, modelCosts: {} };
+  }
+  sessionSnapshot = {
+    id: 'a',
+    status: 'ready',
+    running: false,
+    checkpoints: [{ sha: 'c0ffee11', shortSha: 'c0ffee1', message: '주문 나누기', createdAt: '2026-10-23T00:00:00Z', files: ['a.ts'], passedStages: ['test'] }],
+    repository: { remote: 'r', base: 'main', branch: 'b', canCreatePullRequest: true },
+  };
+  async session(id: string) {
+    this.#record('session', id);
+    return { ...this.sessionSnapshot, id };
+  }
+  async checkpointPatch(id: string, sha: string) {
+    this.#record('checkpointPatch', id, sha);
+    return 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new';
+  }
+  async restoreCheckpoint(id: string, sha: string) {
+    this.#record('restoreCheckpoint', id, sha);
+  }
+  async reverify(id: string, sha: string) {
+    this.#record('reverify', id, sha);
+  }
+  async deleteSession(id: string) {
+    this.#record('deleteSession', id);
+  }
+  async exportPreview(id: string) {
+    this.#record('exportPreview', id);
+    return { title: '주문 나누기', canCreate: true, issues: [], checks: [{ id: 'stages_passed', ok: true, detail: '검증 통과' }] };
+  }
+  async exportSession(id: string, pullRequest: boolean) {
+    this.#record('exportSession', id, pullRequest);
+    return { sha: 'c0ffee11', commits: 1, forced: false, pullRequest: { url: 'https://example.test/pr/7', created: true } };
+  }
+  async reviewRound(id: string, restart: boolean) {
+    this.#record('reviewRound', id, restart);
+  }
+  async resolveFinding(id: string, input: { round: number; findingIndex: number; reason: string }) {
+    this.#record('resolveFinding', id, input);
   }
   /** 사용량을 물은 기록(refresh 값). 답은 부른 뒤에 정해도 된다(한 박자 뒤에 읽는다) */
   limitsCalls: boolean[] = [];
@@ -1066,6 +1124,96 @@ describe('desk 작업대: 카드 움짤(#902)', () => {
   });
 });
 
+describe('desk 작업대: 기록 화면과 세션 자세히(#891)', () => {
+  const plain = (ctx: ReturnType<typeof setup>) => ctx.io.all.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+
+  it('Ctrl-b h로 AI별 결과를 불러와 보이고, Tab으로 고른 세션 프로젝트의 토큰 보고서를 불러온다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02h');
+    await tick();
+    expect(ctx.client.recordCalls.map(([name]) => name)).toEqual(['routingStats']);
+    expect(plain(ctx)).toMatch(/Claude · 기본\s+4/);
+    ctx.io.type('\t');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['tokenReport', 'p1', undefined]);
+    expect(plain(ctx)).toContain('합계 5만 토큰');
+    ctx.io.type('q');
+    await tick();
+    ctx.io.type('x');
+    await tick();
+    // 기록 화면을 닫은 뒤에는 키가 다시 칸으로 간다(빈 칸이라 보낼 곳은 없다)
+    expect(ctx.client.of('input')).toEqual([]);
+  });
+
+  it('세션 자세히에서 체크포인트 diff를 보고, 묻고 나서 되돌리고, 다시 불러온다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02i');
+    await tick();
+    expect(ctx.client.recordCalls).toEqual([['session', 'a']]);
+    expect(plain(ctx)).toContain('주문 나누기');
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['checkpointPatch', 'a', 'c0ffee11']);
+    expect(plain(ctx)).toMatch(/a\.ts\s+\+1 -1/);
+    ctx.io.type('\x1b');
+    await tick(100);
+    ctx.io.type('u');
+    await tick();
+    expect(ctx.client.recordCalls.map(([name]) => name)).not.toContain('restoreCheckpoint');
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.recordCalls.slice(-2)).toEqual([['restoreCheckpoint', 'a', 'c0ffee11'], ['session', 'a']]);
+    expect(plain(ctx)).toContain('되돌리기를 시작했습니다');
+  });
+
+  it('기록 API를 모르는 옛 손님이면 기록 화면에 그 까닭을 보인다', async () => {
+    const ctx = setup();
+    Object.assign(ctx.client, { routingStats: undefined });
+    ctx.io.type('\x02h');
+    await tick();
+    expect(plain(ctx)).toContain('이 스튜디오는 이 기능을 지원하지 않습니다');
+  });
+
+  it('실패하면 그 까닭을 보이고 세션은 그대로 둔다', async () => {
+    const ctx = setup();
+    ctx.client.failNext.reverify = '지금 체크포인트만 다시 검증할 수 있습니다';
+    ctx.io.type('\x02i');
+    await tick();
+    ctx.io.type('v');
+    await tick();
+    expect(plain(ctx)).toContain('다시 검증하지 못했습니다: 지금 체크포인트만 다시 검증할 수 있습니다');
+  });
+
+  it('두 번 물은 뒤 세션을 지우면 자세히를 닫고 목록을 다시 받는다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02i');
+    await tick();
+    const polls = ctx.client.agentsCalls;
+    ctx.io.type('Dy');
+    await tick();
+    expect(ctx.client.recordCalls.map(([name]) => name)).not.toContain('deleteSession');
+    expect(plain(ctx)).toContain('되돌릴 수 없습니다');
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['deleteSession', 'a']);
+    expect(ctx.client.agentsCalls).toBeGreaterThan(polls);
+    expect(plain(ctx)).toContain('세션을 지웠습니다');
+  });
+
+  it('올리기 탭은 점검을 부르고, 묻고 나서 PR을 만들어 주소를 링크로 보인다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02i');
+    await tick();
+    ctx.io.type('\t\t');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['exportPreview', 'a']);
+    ctx.io.type('py');
+    await tick();
+    expect(ctx.client.recordCalls.find(([name]) => name === 'exportSession')).toEqual(['exportSession', 'a', true]);
+    expect(ctx.io.all).toContain('\x1b]8;;https://example.test/pr/7');
+  });
+});
+
 describe('desk 작업대: 사용량(#889)', () => {
   const items = [item('a', { accountId: 'acct-1' }), item('b', { backend: 'codex' })];
   const accounts: DeskAccountLimits[] = [
@@ -1147,5 +1295,150 @@ describe('desk 작업대: 사용량(#889)', () => {
     expect(ctx.app.state.usage?.error).toBe('스튜디오가 500으로 답했습니다');
     expect(ctx.app.state.limits?.a).toBeDefined();
     expect(ctx.io.all).toContain('스튜디오가 500으로 답했습니다');
+  });
+});
+
+describe('desk 작업대: 여러 AI 비교(#892)', () => {
+  const member = (sessionId: string, patch: Partial<DeskFleetMember> = {}): DeskFleetMember => ({ sessionId, backend: 'claude-code', label: '계정 기본', provider: 'claude-code', status: 'done', ...patch });
+  const fleetOf = (patch: Partial<DeskFleet> = {}): DeskFleet => ({
+    id: 'f1',
+    projectId: 'p1',
+    projectName: 'shop',
+    request: '검색을 추가해줘',
+    createdAt: '2026-10-23T00:00:00Z',
+    members: [member('m1'), member('m2', { backend: 'codex', status: 'running' })],
+    ...patch,
+  });
+
+  /** 비교 API까지 있는 가짜 스튜디오 */
+  class FleetClient extends FakeClient {
+    list: DeskFleet[] = [fleetOf()];
+    created: Array<{ projectId: string; request: string; candidates: DeskFleetCandidate[] }> = [];
+    winners: Array<[string, string]> = [];
+    deleted: string[] = [];
+    createError: string | undefined;
+    async fleets() {
+      return this.list;
+    }
+    async fleet(id: string) {
+      const found = this.list.find((entry) => entry.id === id);
+      if (!found) throw new StudioRequestError('Agent Fleet을 찾을 수 없습니다', 404);
+      return found;
+    }
+    async createFleet(input: { projectId: string; request: string; candidates: DeskFleetCandidate[] }) {
+      this.created.push(input);
+      if (this.createError) throw new StudioRequestError(this.createError, 409);
+      const made = fleetOf({ id: 'f2', request: input.request, members: [member('n1'), member('n2')] });
+      this.list = [made, ...this.list];
+      return made;
+    }
+    async chooseFleetWinner(id: string, sessionId: string) {
+      this.winners.push([id, sessionId]);
+      const chosen = { ...(await this.fleet(id)), winnerSessionId: sessionId };
+      this.list = this.list.map((entry) => (entry.id === id ? chosen : entry));
+      return chosen;
+    }
+    async deleteFleet(id: string) {
+      this.deleted.push(id);
+      this.list = this.list.filter((entry) => entry.id !== id);
+    }
+  }
+
+  function fleetSetup(items: DeskItem[] = [item('a'), item('m1'), item('m2', { backend: 'codex' })], options: DeskAppOptions = {}) {
+    const client = new FleetClient(items);
+    const io = new FakeIo();
+    const app = new DeskApp(client, items, io, options);
+    const done = app.run();
+    return { client, io, app, done };
+  }
+
+  it('Ctrl-b f로 목록을 받아 그리고, Enter로 비교를 연 뒤 a로 참가자 둘을 칸 두 개에 나란히 연다', async () => {
+    const ctx = fleetSetup();
+    ctx.io.type('\x02f');
+    await tick();
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'list', loading: false });
+    expect(ctx.io.all).toContain('검색을 추가해줘');
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'detail', detail: 'f1' });
+    ctx.io.type('a');
+    await tick();
+    expect(ctx.app.state.fleets).toBeUndefined();
+    expect(ctx.app.state).toMatchObject({ layout: 2, slots: ['m1', 'm2', undefined, undefined], focus: 0 });
+    expect(ctx.client.of('open').map((call) => call.id).sort()).toEqual(['m1', 'm2']);
+  });
+
+  it('새 비교: 프로젝트와 허용된 AI·계정을 받아 고르고, 보내면 만든 비교를 보기로 연다', async () => {
+    const ctx = fleetSetup();
+    ctx.client.allowed = ['claude-code', 'codex'];
+    ctx.client.accountList = [
+      { id: 'codex', name: 'Codex', backend: 'codex', builtin: true },
+      { id: 'acct-pio', name: '피오', backend: 'codex', configDir: '/home/me/.b-studio/accounts/codex-1' },
+    ];
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('n');
+    await tick();
+    expect(ctx.app.state.fleets?.form).toMatchObject({ loading: false, projects: [{ id: 'p1', name: 'shop' }] });
+    expect(ctx.app.state.fleets?.form?.options.map((option) => option.label)).toEqual(['Claude', 'Codex · Codex', 'Codex · 피오']);
+    // 요청을 쓰고 Claude와 Codex · 피오를 더해 보낸다
+    ctx.io.type('\t검색\t\r\x1b[B\x1b[B\r\t\t\t\r');
+    await tick();
+    expect(ctx.client.created).toEqual([{ projectId: 'p1', request: '검색', candidates: [{ backend: 'claude-code' }, { backend: 'codex', accountId: 'acct-pio' }] }]);
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'detail', detail: 'f2' });
+  });
+
+  it('스튜디오가 비교를 만들지 못하면 입력을 그대로 두고 까닭을 보인다', async () => {
+    const ctx = fleetSetup();
+    ctx.client.createError = '로컬 Codex를 쓸 수 없습니다: 로그인이 필요합니다';
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('n');
+    await tick();
+    ctx.io.type('\t검색\t\r\r\t\t\t\r');
+    await tick();
+    expect(ctx.app.state.fleets?.form).toMatchObject({ sending: false, error: expect.stringContaining('로그인이 필요합니다'), request: '검색' });
+  });
+
+  it('w로 승자를 묻고 y면 고르며, d로 묻고 y면 지운 뒤 목록으로 돌아간다', async () => {
+    const ctx = fleetSetup();
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('\r');
+    await tick();
+    ctx.io.type('wy');
+    await tick();
+    expect(ctx.client.winners).toEqual([['f1', 'm1']]);
+    expect(ctx.app.state.fleets?.fleets[0]?.winnerSessionId).toBe('m1');
+    ctx.io.type('dy');
+    await tick();
+    expect(ctx.client.deleted).toEqual(['f1']);
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'list', fleets: [] });
+  });
+
+  it('진행 중인 참가자가 있으면 보기를 몇 초마다 다시 받고, 닫으면 멈춘다', async () => {
+    const ctx = fleetSetup();
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('\r');
+    await tick();
+    ctx.client.list = [fleetOf({ members: [member('m1'), member('m2', { backend: 'codex', status: 'done', summary: '검증 통과' })] })];
+    await tick(3_100);
+    expect(ctx.app.state.fleets?.fleets[0]?.members[1]?.status).toBe('done');
+    const spy = vi.spyOn(ctx.client, 'fleet');
+    ctx.io.type('\x1b');
+    await tick(30);
+    ctx.io.type('\x1b');
+    await tick(10_000);
+    expect(ctx.app.state.fleets).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('비교 API가 없는 옛 스튜디오면 열지 않고 알린다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02f');
+    await tick();
+    expect(ctx.app.state.fleets).toBeUndefined();
+    expect(ctx.app.state.message).toContain('여러 AI 비교');
   });
 });

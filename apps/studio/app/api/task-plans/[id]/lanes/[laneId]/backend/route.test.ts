@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const spies = vi.hoisted(() => ({ setLaneBackend: vi.fn(), listSelectableModels: vi.fn() }));
+const spies = vi.hoisted(() => ({ setLaneBackend: vi.fn(), setLaneAccount: vi.fn(), listSelectableModels: vi.fn() }));
 
 vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim' }));
-vi.mock('@/lib/server/task-plans', () => ({ setLaneBackend: spies.setLaneBackend }));
+vi.mock('@/lib/server/task-plans', () => ({ setLaneBackend: spies.setLaneBackend, setLaneAccount: spies.setLaneAccount }));
 vi.mock('@/lib/server/model-picker', () => ({ listSelectableModels: spies.listSelectableModels }));
 
 import { StudioError } from '@/lib/server/errors';
@@ -26,6 +26,7 @@ const context = { params: Promise.resolve({ id: 'plan-1', laneId: 'lane-1' }) } 
 describe('레인 백엔드 라우트', () => {
   beforeEach(() => {
     spies.setLaneBackend.mockReset();
+    spies.setLaneAccount.mockReset();
     spies.listSelectableModels.mockReset();
   });
 
@@ -50,6 +51,33 @@ describe('레인 백엔드 라우트', () => {
     expect(response.status).toBe(200);
     expect(spies.listSelectableModels).not.toHaveBeenCalled();
     expect(await response.json()).toEqual({ plan: PLAN_INHERITED });
+  });
+
+  it('accountId를 주면 AI를 고른 뒤 그 레인 계정을 정하고, 계정까지 바뀐 계획을 돌려준다(#893)', async () => {
+    const withAccount = { id: 'plan-1', lanes: [{ id: 'lane-1', backend: 'codex', accountId: 'marco' }] };
+    spies.setLaneBackend.mockReturnValue({ id: 'plan-1', lanes: [{ id: 'lane-1', backend: 'codex' }] });
+    spies.setLaneAccount.mockResolvedValue(withAccount);
+    spies.listSelectableModels.mockResolvedValue(PICKER);
+
+    const response = await POST(request({ backend: 'codex', accountId: 'marco' }), context);
+
+    expect(response.status).toBe(200);
+    expect(spies.setLaneBackend).toHaveBeenCalledWith('plan-1', 'kim', 'lane-1', { backend: 'codex' });
+    expect(spies.setLaneAccount).toHaveBeenCalledWith('plan-1', 'kim', 'lane-1', 'marco');
+    expect((await response.json()).plan).toEqual(withAccount);
+  });
+
+  it('accountId를 주지 않으면 레인 계정을 건드리지 않는다', async () => {
+    spies.setLaneBackend.mockReturnValue(PLAN_WITH_BACKEND);
+    spies.listSelectableModels.mockResolvedValue(PICKER);
+    await POST(request({ backend: 'claude-code' }), context);
+    expect(spies.setLaneAccount).not.toHaveBeenCalled();
+  });
+
+  it('accountId가 문자열이 아니면 400이고 저장하지 않는다', async () => {
+    const response = await POST(request({ backend: 'codex', accountId: 3 }), context);
+    expect(response.status).toBe(400);
+    expect(spies.setLaneBackend).not.toHaveBeenCalled();
   });
 
   it('backend·model·effort가 문자열이 아니면 400이고 저장하지 않는다', async () => {

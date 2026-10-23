@@ -5,21 +5,28 @@
  * 키 → handleInput → 할 일(입력 보내기, 칸 열기, 새 요청 …) → 스튜디오 API, 터미널 출력 → 칸 해석 → 화면 그리기.
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
-import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
+import type { DeskPlan, LaneChoice, PlansEffect, PlansState } from './plans';
 import { spaceItems, spaceScreen, spriteFor } from './cards';
 import { previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
-import { placePanes, terminalSize } from './screen';
+import { recordsScrollLimit, type RecordsLoad } from './records';
+import { placePanes, terminalSize, type PaneLayout } from './screen';
+import { parsePatch, type DetailAction, type DetailState } from './session-detail';
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
-import { applyRuntimeEvent, type RuntimeEffect, type RuntimeState } from './runtime';
+import { applyRuntimeEvent, type RuntimeEffect } from './runtime';
+import { fleetOptions, placeMembers, type FleetsEffect, type FleetsState } from './fleets';
+import { loaded, openRequirements, REQUIREMENTS_FILE, REQUIREMENTS_TEMPLATE, type RequirementsEffect, type RequirementsState, type RequirementsTab } from './requirements';
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
-import type { ThemeName } from './theme';
+import { DEFAULT_THEME, type ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
 import { accountSprite, sessionLimits, usageScreen, usageSpriteKey } from './usage';
 
@@ -37,6 +44,8 @@ const REPLAY_QUIET_MS = 500;
 const RECONNECT_MS = 2_000;
 /** 조각 끝의 Esc가 방향키의 앞인지 기다리는 시간. 지나면 Esc 하나로 본다 */
 const ESC_WAIT_MS = 25;
+/** 작업 글을 넣기 전에 막 뜬 CLI가 붙여넣기 표지를 켜기를 기다리는 시간(#894) */
+const WORK_PASTE_WAIT_MS = 3_000;
 /** 창 크기를 끌어 바꾸는 동안 스튜디오에 알리는 것을 미루는 시간(칸 안 해석기는 바로 맞춘다) */
 const RESIZE_SETTLE_MS = 150;
 /** 터미널로 띄울 수 있는 AI. 스튜디오 routed-session.ts의 terminalBackends와 같은 기준이다(desk가 붙는 launch는 이 컴퓨터 방식) */
@@ -90,6 +99,8 @@ const FOCUS_EVENT = /\x1b\[([IO])/g;
 const SPRITE_CACHE = 64;
 /** 로그인이 끝났는지 묻는 간격(#890) */
 const LOGIN_POLL_MS = 1_500;
+/** 여러 AI 비교에 진행 중인 참가자가 있으면 다시 받는 간격(#892) */
+const FLEET_POLL_MS = 3_000;
 
 /** 카드 그림을 그림 폴더에서 고르는 곳(#902). 테스트에서는 가짜를 넣는다 */
 export interface SpriteCatalog {
@@ -156,14 +167,24 @@ export interface SettingsHost {
   openUrl(url: string): void;
 }
 
-/** 실행·배포·미리보기·저장소 화면이 부르는 스튜디오 API(#895) */
-export type RuntimeClient = Pick<StudioClient, 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository'>;
+/** 작업 나누기 화면이 열려 있는 동안 계획을 다시 받는 주기 */
+const PLANS_POLL_MS = 2_000;
 
-/** 실행 화면이 쓰는 바깥(#895): 스튜디오 API와 브라우저. 테스트에서는 가짜를 넣는다 */
-export interface RuntimeHost {
-  client: RuntimeClient;
-  /** 주소를 이 컴퓨터의 브라우저로 연다(http·https만 넘긴다) */
-  openUrl(url: string): void;
+/** 요구사항·문서 화면이 부르는 스튜디오 API(#894). DeskClient에 없으면(옛 손님) 부를 때 실패로 알린다 */
+type RequirementsCall = 'requirements' | 'tests' | 'docs' | 'doc' | 'saveDoc' | 'projectStatus' | 'verifyRequirement' | 'clearVerification' | 'applyRequirements';
+
+/** 요구사항·문서 화면이 쓰는 편집기(#894). 테스트에서는 가짜를 넣는다 */
+export interface RequirementsHost {
+  /** 파일 하나를 편집기로 열고 끝날 때까지 기다린다. 편집기의 끝 값(0이면 정상)을 돌려준다. 그동안 desk는 화면과 raw 모드를 내려놓는다 */
+  editor(file: string): number;
+  /** 고칠 글을 잠깐 두는 폴더(없으면 시스템 임시 폴더) */
+  tmpDir?: string;
+}
+
+/** $VISUAL, $EDITOR, 없으면 vi(git과 같다)로 연다. 편집기 값에 인자가 있을 수 있어 셸로 띄우고, 파일 이름은 셸 글에 잇지 않고 인자로 넘긴다 */
+function systemEditor(env: NodeJS.ProcessEnv): (file: string) => number {
+  const editor = env.VISUAL?.trim() || env.EDITOR?.trim() || 'vi';
+  return (file) => spawnSync('/bin/sh', ['-c', `${editor} "$1"`, 'sh', file], { stdio: 'inherit' }).status ?? 1;
 }
 
 /** 이 컴퓨터의 브라우저로 연다. 셸을 거치지 않고 주소를 인자 하나로 넘긴다 */
@@ -259,14 +280,49 @@ export interface DeskAppOptions {
   settings?: SettingsHost;
   /** AI 계정(#885). 계정에 고른 그림을 그 계정 세션의 카드에 쓴다 */
   accounts?: DeskAccount[];
-  /** 실행 화면(#895). 없으면 Ctrl-b v가 열 수 없다고 알린다 */
-  runtime?: RuntimeHost;
+  /** 주소를 이 컴퓨터의 브라우저로 여는 곳(작업 나누기의 추적 이슈, #893). 없으면 열 수 없다고 알린다 */
+  openUrl?: (url: string) => void;
+  /** 요구사항·문서 화면의 편집기(#894). 없으면 $VISUAL·$EDITOR·vi */
+  requirements?: RequirementsHost;
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
 export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'> &
   /** 사용량(#889). 없으면 사용량을 묻지 않는다 */
-  { limits?: StudioClient['limits'] };
+  { limits?: StudioClient['limits'] } &
+  /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RecordsCall>> &
+  /** 작업 나누기(#893). 없으면 Ctrl-b t가 열 수 없다고 알린다 */
+  Partial<Pick<StudioClient, PlansCall>> &
+  /** 요구사항·문서 화면(#894). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RequirementsCall>> &
+  /** 여러 AI 비교(#892). 없으면 Ctrl-b f가 열 수 없다고 알린다 */
+  Partial<Pick<StudioClient, FleetsCall>> &
+  /** 실행·배포·미리보기·저장소 화면(#895). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RuntimeCall>>;
+
+/** 실행 화면이 부르는 스튜디오 API(#895) */
+type RuntimeCall = 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository';
+
+/** 여러 AI 비교 화면이 부르는 스튜디오 API(#892) */
+type FleetsCall = 'fleets' | 'fleet' | 'createFleet' | 'chooseFleetWinner' | 'deleteFleet';
+
+/** 작업 나누기 화면이 부르는 스튜디오 API(#893) */
+type PlansCall = 'plans' | 'plan' | 'createPlan' | 'approvePlan' | 'rejectPlan' | 'deletePlan' | 'resumePlan' | 'laneBackends' | 'setLane';
+
+/** 기록 화면과 세션 자세히가 부르는 스튜디오 API(#891) */
+type RecordsCall =
+  | 'routingStats'
+  | 'tokenReport'
+  | 'session'
+  | 'checkpointPatch'
+  | 'restoreCheckpoint'
+  | 'reverify'
+  | 'deleteSession'
+  | 'exportPreview'
+  | 'exportSession'
+  | 'reviewRound'
+  | 'resolveFinding';
 
 /** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
 export interface DeskIo {
@@ -295,7 +351,9 @@ function processIo(): DeskIo {
       } catch {
         // 이미 닫힌 입력
       }
-      if (!on) process.stdin.pause();
+      // 편집기를 띄웠다 돌아오면(#894) 멈춰 둔 입력을 다시 받는다
+      if (on) process.stdin.resume();
+      else process.stdin.pause();
     },
     guard: (restore, stop) => {
       process.once('exit', restore);
@@ -357,10 +415,10 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     },
     openUrl: openInBrowser,
   };
-  const runtime: RuntimeHost = { client, openUrl: openInBrowser };
   const app = new DeskApp(client, first, processIo(), {
     settings,
-    runtime,
+    openUrl: openInBrowser,
+    requirements: { editor: systemEditor(env) },
     accounts,
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
@@ -436,15 +494,25 @@ export class DeskApp {
   readonly #shellEnv: Record<string, string | undefined>;
   readonly #shellCwd: string;
   readonly #settingsHost: SettingsHost | undefined;
-  readonly #runtimeHost: RuntimeHost | undefined;
-  /** 실행 화면이 받는 세션 이벤트 통로 */
-  #runtimeStream: AbortController | undefined;
+  readonly #requirementsHost: RequirementsHost;
+  /** 편집기를 띄운 동안(#894). 그사이 온 키는 편집기가 끝난 뒤의 desk로 가지 않게 버린다 */
+  #editing = false;
+  /** 칸에 처음 여는 중인 터미널. 끝나면 true(열림), false(열지 못함) */
+  readonly #opening = new Map<string, Promise<boolean>>();
   /** AI 계정(#885). 계정에 고른 그림을 찾는 데 쓴다 */
   #accounts: DeskAccount[];
   /** 그림 폴더·계정 그림에서 단 카드 그림의 세션. 계정이 바뀌면 지우고 다시 단다 */
   readonly #assignedSprites = new Set<string>();
   #loginTimer: NodeJS.Timeout | undefined;
   #loginPolling = false;
+  /** 여러 AI 비교를 다시 받는 시계(#892). 진행 중인 참가자가 있을 때만 건다 */
+  #fleetTimer: NodeJS.Timeout | undefined;
+  readonly #openUrl: ((url: string) => void) | undefined;
+  /** 실행 화면(#895)이 받는 세션 이벤트 통로 */
+  #runtimeStream: AbortController | undefined;
+  #plansTimer: NodeJS.Timeout | undefined;
+  /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
+  #plansFetching = false;
 
   constructor(client: DeskClient, items: DeskState['items'], io: DeskIo, options: DeskAppOptions = {}) {
     this.#client = client;
@@ -459,7 +527,8 @@ export class DeskApp {
     this.#catalog = options.spriteCatalog;
     this.#animate = options.animate !== false;
     this.#settingsHost = options.settings;
-    this.#runtimeHost = options.runtime;
+    this.#openUrl = options.openUrl;
+    this.#requirementsHost = options.requirements ?? { editor: systemEditor(process.env) };
     this.#accounts = options.accounts ?? [];
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
@@ -541,6 +610,8 @@ export class DeskApp {
   }
 
   #onInput(raw: string): void {
+    // 편집기를 띄우는 동안 온 글자는 desk의 키가 아니다(#894)
+    if (this.#editing) return;
     let chunk = raw;
     if (this.#animate) {
       // 창 포커스 알림은 키가 아니다. 움짤을 멈추거나 다시 움직이는 데만 쓴다
@@ -560,8 +631,18 @@ export class DeskApp {
   #take({ state, effects }: { state: DeskState; effects: Effect[] }): void {
     this.#state = state;
     for (const effect of effects) this.#apply(effect);
+    this.#clampRecords();
     this.#clearSeen();
     this.#scheduleRender();
+  }
+
+  /** 기록 화면을 끝보다 더 굴리지 않는다(끝에서 더 내린 만큼 다시 올려야 하는 일이 없게) */
+  #clampRecords(): void {
+    const records = this.#state.records;
+    if (!records) return;
+    const size = this.#size();
+    const limit = recordsScrollLimit(records, { theme: this.#state.theme ?? DEFAULT_THEME, width: size.cols, height: size.rows - 2, now: Date.now() });
+    if (records.scroll > limit) this.#state = { ...this.#state, records: { ...records, scroll: limit } };
   }
 
   /** 지금 고른 칸의 세션 */
@@ -664,6 +745,31 @@ export class DeskApp {
       case 'settings':
         void this.#settingsEffect(effect.effect);
         return;
+      case 'plans-open':
+        this.#openPlans();
+        return;
+      case 'plans':
+        void this.#plansEffect(effect.effect);
+        return;
+      case 'requirements-open':
+        this.#openRequirements(effect.id, effect.title);
+        return;
+      case 'requirements':
+        if (effect.effect.type !== 'close') void this.#requirementsEffect(effect.effect);
+        return;
+      case 'records':
+        if (effect.open) void this.#openRecords();
+        if (effect.load) void this.#loadRecords(effect.load);
+        return;
+      case 'detail':
+        void this.#detailAction(effect.action);
+        return;
+      case 'fleets-open':
+        this.#openFleets();
+        return;
+      case 'fleets':
+        void this.#fleetsEffect(effect.effect);
+        return;
       case 'runtime-open':
         this.#openRuntime(effect.id);
         return;
@@ -676,123 +782,123 @@ export class DeskApp {
   // ─── 실행·배포·미리보기·저장소 화면(#895) ───
 
   /** 실행 화면을 바꾼다. 그사이 닫혔거나 다른 세션의 화면이면 아무것도 하지 않는다 */
-  #patchRuntime(id: string, change: (runtime: RuntimeState) => RuntimeState): void {
+  #patchRuntime(id: string, change: (runtime: NonNullable<DeskState['runtime']>) => NonNullable<DeskState['runtime']>): void {
     const runtime = this.#state.runtime;
     if (!runtime || runtime.id !== id) return;
     this.#state = { ...this.#state, runtime: change(runtime) };
     this.#scheduleRender();
   }
 
-  /** 키 처리가 연 실행 화면에 그 세션의 이벤트를 흘린다. 닫으면(close) 통로를 끊는다 */
-  #openRuntime(id: string): void {
-    const host = this.#runtimeHost;
+  #closeRuntimeStream(): void {
     this.#runtimeStream?.abort();
     this.#runtimeStream = undefined;
-    if (!host) {
+  }
+
+  /** 키 처리가 연 실행 화면에 그 세션의 이벤트를 흘린다. 닫으면(close) 통로를 끊는다. 옛 스튜디오면 화면에 까닭을 보인다 */
+  #openRuntime(id: string): void {
+    this.#closeRuntimeStream();
+    if (!this.#client.sessionEvents) {
       this.#state = { ...this.#state, runtime: undefined };
-      this.#say('이 desk는 실행 화면을 열 수 없습니다. pnpm studio로 다시 여세요');
+      this.#say('이 스튜디오는 실행 화면을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
       return;
     }
     this.#state = { ...this.#state, help: false, message: undefined };
     const controller = new AbortController();
     this.#runtimeStream = controller;
-    host.client
-      .sessionEvents(
-        id,
-        (event) => {
-          if (controller.signal.aborted) return;
-          this.#patchRuntime(id, (runtime) => applyRuntimeEvent(runtime, event));
-          // 배포가 끝나면 릴리스 목록이 바뀌었다. 배포 탭을 본 적이 있으면 다시 받는다
-          if ((event.type === 'deploy_finished' || event.type === 'deploy_failed') && this.#state.runtime?.deploy.status) void this.#loadDeploys(host, id);
-        },
-        controller.signal,
-      )
-      .then(
-        () => {
-          if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: '스튜디오가 세션 이벤트를 끊었습니다. Esc로 닫고 다시 여세요' }));
-        },
-        (error: unknown) => {
-          if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: `세션 이벤트를 받지 못했습니다: ${messageOf(error)}` }));
-        },
-      );
+    this.#call('sessionEvents')(
+      id,
+      (event) => {
+        if (controller.signal.aborted) return;
+        this.#patchRuntime(id, (runtime) => applyRuntimeEvent(runtime, event));
+        // 배포가 끝나면 릴리스 목록이 바뀌었다. 배포 탭을 본 적이 있으면 다시 받는다
+        if ((event.type === 'deploy_finished' || event.type === 'deploy_failed') && this.#state.runtime?.deploy.status) void this.#loadDeploys(id);
+      },
+      controller.signal,
+    ).then(
+      () => {
+        if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: '스튜디오가 세션 이벤트를 끊었습니다. Esc로 닫고 다시 여세요' }));
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: `세션 이벤트를 받지 못했습니다: ${messageOf(error)}` }));
+      },
+    );
   }
 
-  async #loadDeploys(host: RuntimeHost, id: string): Promise<void> {
+  async #loadDeploys(id: string): Promise<void> {
     try {
-      const status = await host.client.deploys(id);
+      const status = await this.#call('deploys')(id);
       this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, status, loading: false, error: undefined } }));
     } catch (error) {
       this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, loading: false, error: `배포 상태를 받지 못했습니다: ${messageOf(error)}` } }));
     }
   }
 
-  #openUrl(host: RuntimeHost, id: string, url: string): void {
-    if (!browsable(url)) {
-      this.#patchRuntime(id, (runtime) => ({ ...runtime, note: `열 수 없는 주소입니다: ${url}` }));
-      return;
+  #runtimeOpenUrl(id: string, url: string): void {
+    const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
+    if (!browsable(url)) note(`열 수 없는 주소입니다: ${url}`);
+    else if (!this.#openUrl) note(`브라우저를 열 수 없습니다: ${url}`);
+    else {
+      this.#openUrl(url);
+      note(`브라우저로 열었습니다: ${url}`);
     }
-    host.openUrl(url);
-    this.#patchRuntime(id, (runtime) => ({ ...runtime, note: `브라우저로 열었습니다: ${url}` }));
   }
 
   async #runtimeEffect(effect: RuntimeEffect): Promise<void> {
-    const host = this.#runtimeHost;
-    const id = this.#state.runtime?.id;
     if (effect.type === 'close') {
-      this.#runtimeStream?.abort();
-      this.#runtimeStream = undefined;
+      this.#closeRuntimeStream();
       return;
     }
-    if (!host || !id) return;
+    const id = this.#state.runtime?.id;
+    if (!id) return;
     const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
     try {
       switch (effect.type) {
         case 'load-deploys':
-          await this.#loadDeploys(host, id);
+          await this.#loadDeploys(id);
           return;
         case 'deploy':
-          await host.client.deploy(id, effect.sha);
+          await this.#call('deploy')(id, effect.sha);
           note('배포를 시작했습니다. 진행은 이 화면에 나옵니다');
           return;
         case 'rollback':
-          await host.client.rollback(id, effect.releaseId);
+          await this.#call('rollback')(id, effect.releaseId);
           note('되돌리기를 시작했습니다. 진행은 이 화면에 나옵니다');
           return;
         case 'service':
-          await host.client.setService(id, effect.service, effect.on);
+          await this.#call('setService')(id, effect.service, effect.on);
           note(effect.on ? `${effect.service}를 켜는 중입니다` : `${effect.service}를 껐습니다`);
           return;
         case 'boot':
-          await host.client.boot(id);
+          await this.#call('boot')(id);
           return;
         case 'open-url':
-          this.#openUrl(host, id, effect.url);
+          this.#runtimeOpenUrl(id, effect.url);
           return;
         case 'preview': {
           const service = this.#state.runtime?.snapshot?.services.find((entry) => entry.name === effect.service);
           if (!service) return;
           this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { loading: true } } }));
           try {
-            const url = await host.client.previewUrl(id, service);
+            const url = await this.#call('previewUrl')(id, service);
             this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { url } } }));
-            if (effect.open) this.#openUrl(host, id, url);
+            if (effect.open) this.#runtimeOpenUrl(id, url);
           } catch (error) {
             this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { error: `주소를 받지 못했습니다: ${messageOf(error)}` } } }));
           }
           return;
         }
         case 'load-repo': {
-          const projectId = this.#state.runtime?.snapshot?.projectId;
           if (effect.view === 'presubmit') {
-            const submission = await host.client.submission(id);
+            const submission = await this.#call('submission')(id);
             this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, submission, loading: false, error: undefined } }));
             return;
           }
+          const projectId = this.#state.runtime?.snapshot?.projectId;
           if (!projectId) {
             this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, loading: false, error: '세션 정보를 아직 받지 못했습니다. 잠시 뒤 r로 다시 받으세요' } }));
             return;
           }
-          const list = await host.client.repository(projectId, effect.view, effect.state);
+          const list = await this.#call('repository')(projectId, effect.view, effect.state);
           this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, [effect.view]: list, loading: false, error: undefined } }));
           return;
         }
@@ -802,6 +908,702 @@ export class DeskApp {
       if (effect.type === 'load-repo') this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, loading: false, error: `받지 못했습니다: ${text}` } }));
       else note(`하지 못했습니다: ${text}`);
     }
+  }
+
+  // ─── 여러 AI 비교(#892) ───
+
+  /** 비교 화면을 바꾼다. 그사이 닫혔으면 아무것도 하지 않는다 */
+  #patchFleets(change: (fleets: FleetsState) => FleetsState): void {
+    const fleets = this.#state.fleets;
+    if (!fleets) return;
+    this.#state = { ...this.#state, fleets: change(fleets) };
+    this.#scheduleRender();
+  }
+
+  #openFleets(): void {
+    if (!this.#client.fleets) {
+      this.#state = { ...this.#state, fleets: undefined, message: '이 스튜디오는 여러 AI 비교를 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다' };
+      return;
+    }
+    void this.#loadFleets();
+  }
+
+  /** 목록을 받는다. 고르던 비교는 id로 기억해 그대로 고른다 */
+  async #loadFleets(): Promise<void> {
+    try {
+      const list = await this.#call('fleets')();
+      this.#patchFleets((fleets) => {
+        const id = fleets.fleets[fleets.row]?.id;
+        const row = Math.max(0, list.findIndex((fleet) => fleet.id === id));
+        // 보던 비교는 목록이 다시 받은 것보다 새로울 수 있다(보기는 따로 받는다)
+        const detail = fleets.detail ? fleets.fleets.find((fleet) => fleet.id === fleets.detail) : undefined;
+        const merged = detail && !list.some((fleet) => fleet.id === detail.id) ? [detail, ...list] : list;
+        return { ...fleets, fleets: merged, loading: false, error: undefined, row: Math.min(row, Math.max(0, merged.length - 1)) };
+      });
+    } catch (error) {
+      this.#patchFleets((fleets) => ({ ...fleets, loading: false, error: messageOf(error) }));
+    }
+    this.#scheduleFleetPoll();
+  }
+
+  /** 비교 하나를 다시 받아 목록의 것을 바꾼다 */
+  async #loadFleet(id: string): Promise<void> {
+    try {
+      const fresh = await this.#call('fleet')(id);
+      this.#patchFleets((fleets) => ({ ...fleets, fleets: fleets.fleets.some((fleet) => fleet.id === id) ? fleets.fleets.map((fleet) => (fleet.id === id ? fresh : fleet)) : [fresh, ...fleets.fleets] }));
+    } catch (error) {
+      this.#patchFleets((fleets) => ({ ...fleets, note: `비교를 받지 못했습니다: ${messageOf(error)}` }));
+    }
+    this.#scheduleFleetPoll();
+  }
+
+  /** 보는 비교(보기면 그것, 목록이면 전체)에 진행 중인 참가자가 있으면 조금 뒤 다시 받는다 */
+  #scheduleFleetPoll(): void {
+    clearTimeout(this.#fleetTimer);
+    this.#fleetTimer = undefined;
+    const fleets = this.#state.fleets;
+    if (!fleets || this.#restored || fleets.mode === 'new') return;
+    const shown = fleets.mode === 'detail' ? fleets.fleets.filter((fleet) => fleet.id === fleets.detail) : fleets.fleets;
+    const live = shown.some((fleet) => fleet.members.some((member) => member.status === 'booting' || member.status === 'running'));
+    if (!live) return;
+    this.#fleetTimer = setTimeout(() => {
+      this.#fleetTimer = undefined;
+      const now = this.#state.fleets;
+      if (!now) return;
+      if (now.mode === 'detail' && now.detail) void this.#loadFleet(now.detail);
+      else if (now.mode === 'list') void this.#loadFleets();
+    }, FLEET_POLL_MS);
+    this.#fleetTimer.unref?.();
+  }
+
+  /** 새 비교 입력에 쓸 프로젝트와 고를 AI(스튜디오가 허용한 것, 계정이 둘 이상인 CLI는 계정마다) */
+  async #loadFleetForm(): Promise<void> {
+    try {
+      const [projects, rules, accounts] = await Promise.all([this.#client.projects(), this.#client.rules(), this.#client.accounts().catch((): DeskAccount[] => this.#accounts)]);
+      const usable = projects.filter((project) => !project.error).map(({ id, name }) => ({ id, name }));
+      // 데모는 비교할 후보가 아니다(스튜디오 FLEET_MODES와 같다)
+      const options = fleetOptions(rules.allowed.filter((backend) => backend !== 'demo'), accounts);
+      const at = Math.max(0, usable.findIndex((project) => project.name === deskSessions(this.#state.items)[this.#state.selected]?.projectName));
+      this.#patchFleets((fleets) =>
+        fleets.form ? { ...fleets, form: { ...fleets.form, loading: false, projects: usable, projectIndex: at, options, ...(usable.length === 0 ? { error: '프로젝트가 없습니다' } : {}) } } : fleets,
+      );
+    } catch (error) {
+      this.#patchFleets((fleets) => (fleets.form ? { ...fleets, form: { ...fleets.form, loading: false, error: `목록을 받지 못했습니다: ${messageOf(error)}` } } : fleets));
+    }
+  }
+
+  async #fleetsEffect(effect: FleetsEffect): Promise<void> {
+    const note = (text: string) => this.#patchFleets((fleets) => ({ ...fleets, note: text }));
+    switch (effect.type) {
+      case 'close':
+        clearTimeout(this.#fleetTimer);
+        this.#fleetTimer = undefined;
+        return;
+      case 'reload':
+        await this.#loadFleets();
+        return;
+      case 'detail':
+        await this.#loadFleet(effect.id);
+        return;
+      case 'form':
+        clearTimeout(this.#fleetTimer);
+        await this.#loadFleetForm();
+        return;
+      case 'create': {
+        try {
+          const made = await this.#call('createFleet')({ projectId: effect.projectId, request: effect.request, candidates: effect.candidates });
+          this.#patchFleets((fleets) => ({ ...fleets, mode: 'detail', detail: made.id, member: 0, form: undefined, fleets: [made, ...fleets.fleets.filter((fleet) => fleet.id !== made.id)], note: `참가자 ${made.members.length}명에게 보냈습니다` }));
+          // 참가자 세션이 카드·사이드바에 바로 보이게 목록을 다시 받는다
+          void this.#poll();
+        } catch (error) {
+          this.#patchFleets((fleets) => (fleets.form ? { ...fleets, form: { ...fleets.form, sending: false, error: `만들지 못했습니다: ${messageOf(error)}` } } : fleets));
+        }
+        this.#scheduleFleetPoll();
+        return;
+      }
+      case 'winner': {
+        try {
+          const chosen = await this.#call('chooseFleetWinner')(effect.id, effect.sessionId);
+          this.#patchFleets((fleets) => ({ ...fleets, fleets: fleets.fleets.map((fleet) => (fleet.id === chosen.id ? chosen : fleet)), note: '승자를 골랐습니다' }));
+        } catch (error) {
+          note(`승자를 고르지 못했습니다: ${messageOf(error)}`);
+        }
+        return;
+      }
+      case 'delete': {
+        try {
+          await this.#call('deleteFleet')(effect.id);
+          this.#patchFleets((fleets) => {
+            const rest = fleets.fleets.filter((fleet) => fleet.id !== effect.id);
+            return { ...fleets, fleets: rest, mode: 'list', detail: undefined, member: 0, row: Math.min(fleets.row, Math.max(0, rest.length - 1)), note: '비교와 참가자 세션을 지웠습니다' };
+          });
+          void this.#poll();
+        } catch (error) {
+          note(`지우지 못했습니다: ${messageOf(error)}`);
+        }
+        return;
+      }
+      case 'open': {
+        const placed = placeMembers(this.#state, effect.sessionIds);
+        if ('error' in placed) {
+          note(placed.error);
+          return;
+        }
+        clearTimeout(this.#fleetTimer);
+        this.#fleetTimer = undefined;
+        this.#state = { ...this.#state, ...placed, fleets: undefined, view: undefined, zoom: false, message: `참가자 ${effect.sessionIds.length}명의 작업 복사본을 칸에 열었습니다` };
+        this.#slotsChanged();
+        this.#saveLayout();
+        this.#scheduleRender();
+        return;
+      }
+    }
+  }
+
+  /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
+  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall | RuntimeCall>(name: K): StudioClient[K] {
+    const method = this.#client[name];
+    if (method) return method.bind(this.#client) as StudioClient[K];
+    return (async () => {
+      throw new Error('이 스튜디오는 이 기능을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
+    }) as unknown as StudioClient[K];
+  }
+
+  /** 기록 화면을 채운다: 프로젝트 목록(토큰 보고서용)과 계정 이름, 그리고 AI별 결과(#891) */
+  async #openRecords(): Promise<void> {
+    const [projects, accounts] = await Promise.all([
+      this.#client.projects().catch(() => [] as Array<{ id: string; name: string; error?: string }>),
+      this.#client.accounts().catch((): DeskAccount[] => []),
+    ]);
+    const records = this.#state.records;
+    if (!records) return;
+    const usable = projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }));
+    const name = deskSessions(this.#state.items)[this.#state.selected]?.projectName;
+    const names = Object.fromEntries(accounts.map((account) => [account.id, account.name]));
+    this.#state = { ...this.#state, records: { ...records, projects: usable, projectIndex: Math.max(0, usable.findIndex((project) => project.name === name)), names } };
+    await this.#loadRecords({ kind: 'stats' });
+  }
+
+  async #loadRecords(load: RecordsLoad): Promise<void> {
+    try {
+      if (load.kind === 'stats') {
+        const stats = await this.#call('routingStats')();
+        if (this.#state.records) this.#state = { ...this.#state, records: { ...this.#state.records, stats, statsError: undefined, loading: false } };
+      } else {
+        const report = await this.#call('tokenReport')(load.projectId, load.from);
+        const records = this.#state.records;
+        // 그사이 다른 프로젝트를 골랐으면 버린다
+        if (records && records.projects[records.projectIndex]?.id === load.projectId) this.#state = { ...this.#state, records: { ...records, report, reportError: undefined, loading: false } };
+      }
+    } catch (error) {
+      const records = this.#state.records;
+      if (records) this.#state = { ...this.#state, records: { ...records, ...(load.kind === 'stats' ? { statsError: messageOf(error) } : { reportError: messageOf(error) }), loading: false } };
+    }
+    this.#scheduleRender();
+  }
+
+  /** 세션 자세히의 일을 서버에 보낸다(#891). 답이 오기 전에 다른 세션의 자세히로 바뀌었으면 버린다 */
+  async #detailAction(action: DetailAction): Promise<void> {
+    const id = this.#state.detail?.id;
+    if (!id) return;
+    const update = (patch: Partial<DetailState>) => {
+      const detail = this.#state.detail;
+      if (detail?.id === id) this.#state = { ...this.#state, detail: { ...detail, ...patch } };
+      this.#scheduleRender();
+    };
+    const fail = (what: string) => (error: unknown) => update({ busy: undefined, message: `${what}: ${messageOf(error)}` });
+    const reload = async () => {
+      try {
+        const snapshot = await this.#call('session')(id);
+        const detail = this.#state.detail;
+        const count = detail?.tab === 'checkpoints' ? snapshot.checkpoints.length : Number.POSITIVE_INFINITY;
+        update({ snapshot, loading: false, error: undefined, ...(detail ? { selected: Math.max(0, Math.min(detail.selected, count - 1)) } : {}) });
+      } catch (error) {
+        update({ loading: false, error: messageOf(error) });
+      }
+    };
+    switch (action.kind) {
+      case 'load':
+        await reload();
+        return;
+      case 'patch':
+        try {
+          const files = parsePatch(await this.#call('checkpointPatch')(id, action.sha));
+          const patch = this.#state.detail?.patch;
+          if (patch?.sha === action.sha) update({ patch: { ...patch, files, loading: false } });
+        } catch (error) {
+          const patch = this.#state.detail?.patch;
+          if (patch?.sha === action.sha) update({ patch: { ...patch, loading: false, error: messageOf(error) } });
+        }
+        return;
+      case 'restore':
+        await this.#call('restoreCheckpoint')(id, action.sha).then(
+          () => update({ busy: undefined, message: '되돌리기를 시작했습니다. 끝나면 체크포인트 목록이 바뀝니다(r로 다시 부릅니다)' }),
+          fail('되돌리지 못했습니다'),
+        );
+        await reload();
+        return;
+      case 'reverify':
+        await this.#call('reverify')(id, action.sha).then(
+          () => update({ busy: undefined, message: '다시 검증을 시작했습니다. 결과는 끝난 뒤 r로 다시 불러 봅니다' }),
+          fail('다시 검증하지 못했습니다'),
+        );
+        return;
+      case 'delete':
+        try {
+          await this.#call('deleteSession')(id);
+          const title = this.#state.detail?.title ?? id;
+          // 지운 세션이 칸에 있으면 비운다
+          const slots = this.#state.slots.map((slot) => (slot === id ? undefined : slot));
+          this.#state = { ...this.#state, detail: undefined, slots, message: `세션을 지웠습니다: ${title}` };
+          this.#slotsChanged();
+          this.#saveLayout();
+          void this.#poll();
+          this.#scheduleRender();
+        } catch (error) {
+          fail('지우지 못했습니다')(error);
+        }
+        return;
+      case 'exportPreview':
+        try {
+          update({ preview: await this.#call('exportPreview')(id), previewError: undefined });
+        } catch (error) {
+          update({ previewError: messageOf(error) });
+        }
+        return;
+      case 'export':
+        try {
+          const result = await this.#call('exportSession')(id, action.pullRequest);
+          const pr = result.pullRequest;
+          const text = pr
+            ? pr.created
+              ? 'PR을 만들었습니다'
+              : pr.updated
+                ? '이미 열린 PR의 본문을 지금 상태로 고쳤습니다'
+                : '이미 열린 PR에 올렸습니다'
+            : result.pullRequestError
+              ? `브랜치를 올렸지만 PR을 만들지 못했습니다: ${result.pullRequestError}`
+              : `브랜치를 올렸습니다(커밋 ${result.commits}개${result.forced ? ', 되돌린 기록으로 맞춤' : ''})`;
+          update({ busy: undefined, result: { text, ...(pr ? { url: pr.url } : {}) } });
+          await reload();
+        } catch (error) {
+          fail('올리지 못했습니다')(error);
+        }
+        return;
+      case 'review':
+        await this.#call('reviewRound')(id, action.restart).then(
+          () => update({ busy: undefined, message: 'AI 리뷰를 시작했습니다. 진행은 r로 다시 불러 봅니다' }),
+          fail('AI 리뷰를 돌리지 못했습니다'),
+        );
+        return;
+      case 'resolve':
+        try {
+          await this.#call('resolveFinding')(id, { round: action.round, findingIndex: action.findingIndex, reason: action.reason });
+          update({ busy: undefined, message: '지적을 오탐으로 닫았습니다' });
+          await reload();
+        } catch (error) {
+          fail('지적을 닫지 못했습니다')(error);
+        }
+        return;
+    }
+  }
+
+  // ─── 작업 나누기 화면(#893) ───
+
+  /** 작업 나누기 화면을 바꾼다. 그사이 닫혔으면 아무것도 하지 않는다 */
+  #patchPlans(change: (plans: PlansState) => PlansState): void {
+    const plans = this.#state.plans;
+    if (!plans) return;
+    this.#state = { ...this.#state, plans: change(plans) };
+    this.#scheduleRender();
+  }
+
+  #openPlans(): void {
+    if (!this.#client.plans) {
+      this.#state = { ...this.#state, plans: undefined, message: '이 스튜디오는 작업 나누기를 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다' };
+      return;
+    }
+    this.#patchPlans((plans) => ({ ...plans, accounts: this.#accounts }));
+    void this.#loadPlans();
+    clearInterval(this.#plansTimer);
+    // 열려 있는 동안 레인 상태가 바뀌므로 다시 받는다. 닫으면 멈춘다
+    this.#plansTimer = setInterval(() => {
+      if (!this.#state.plans) {
+        clearInterval(this.#plansTimer);
+        this.#plansTimer = undefined;
+        return;
+      }
+      void this.#loadPlans();
+    }, PLANS_POLL_MS);
+    this.#plansTimer.unref?.();
+  }
+
+  /** 지금 모드에 맞게 목록이나 계획 하나를 받는다. 새 계획을 쓰는 중이면 받지 않는다 */
+  async #loadPlans(): Promise<void> {
+    const plans = this.#state.plans;
+    if (!plans || plans.mode === 'new' || this.#plansFetching) return;
+    this.#plansFetching = true;
+    try {
+      if (plans.mode === 'detail' && plans.detail) {
+        const id = plans.detail.id;
+        const plan = await this.#call('plan')(id);
+        if (this.#restored) return;
+        this.#patchPlans((current) => (current.mode === 'detail' && current.detail?.id === id ? { ...current, detail: plan, loading: false, error: undefined } : current));
+      } else {
+        const list = await this.#call('plans')();
+        if (this.#restored) return;
+        this.#patchPlans((current) => (current.mode === 'list' ? { ...current, list, loading: false, error: undefined, row: Math.max(0, Math.min(current.row, list.length - 1)) } : current));
+      }
+    } catch (error) {
+      if (this.#restored) return;
+      const gone = error instanceof StudioRequestError && error.status === 404;
+      this.#patchPlans((current) =>
+        gone && current.mode === 'detail'
+          ? { ...current, mode: 'list', detail: undefined, note: '계획이 없어졌습니다' }
+          : { ...current, loading: false, error: `계획을 받지 못했습니다: ${messageOf(error)}` },
+      );
+    } finally {
+      this.#plansFetching = false;
+    }
+  }
+
+  /** 받은 계획으로 보는 계획과 목록의 그 줄을 바꾼다 */
+  #showPlan(plan: DeskPlan, note?: string): void {
+    this.#patchPlans((plans) => ({
+      ...plans,
+      ...(plans.mode === 'detail' && plans.detail?.id === plan.id ? { detail: plan } : {}),
+      ...(plans.list ? { list: plans.list.map((entry) => (entry.id === plan.id ? plan : entry)) } : {}),
+      ...(note ? { note } : {}),
+    }));
+  }
+
+  async #plansEffect(effect: PlansEffect): Promise<void> {
+    if (effect.type === 'close') {
+      clearInterval(this.#plansTimer);
+      this.#plansTimer = undefined;
+      return;
+    }
+    const note = (text: string) => this.#patchPlans((plans) => ({ ...plans, note: text }));
+    try {
+      switch (effect.type) {
+        case 'list':
+        case 'detail':
+          await this.#loadPlans();
+          return;
+        case 'projects': {
+          const projects = (await this.#client.projects()).filter((project) => !project.error);
+          this.#patchPlans((plans) => (plans.form ? { ...plans, form: { ...plans.form, projects } } : plans));
+          if (projects.length === 0) note('프로젝트가 없습니다');
+          return;
+        }
+        case 'create': {
+          try {
+            const plan = await this.#call('createPlan')(effect.projectId, effect.request);
+            this.#patchPlans((plans) => ({ ...plans, mode: 'detail', form: undefined, detail: plan, lane: 0, list: [plan, ...(plans.list ?? []).filter((entry) => entry.id !== plan.id)] }));
+          } catch (error) {
+            this.#patchPlans((plans) => ({ ...plans, ...(plans.form ? { form: { ...plans.form, sending: false } } : {}), note: `계획을 만들지 못했습니다: ${messageOf(error)}` }));
+          }
+          return;
+        }
+        case 'approve':
+          this.#showPlan(await this.#call('approvePlan')(effect.id, effect.publishIssues), effect.publishIssues ? '승인했습니다. 레인이 시작되고 이슈를 올립니다' : '승인했습니다. 레인이 시작됩니다');
+          return;
+        case 'reject':
+          this.#showPlan(await this.#call('rejectPlan')(effect.id), '거부했습니다');
+          return;
+        case 'resume':
+          this.#showPlan(await this.#call('resumePlan')(effect.id), '통합을 다시 시작했습니다');
+          return;
+        case 'delete':
+          await this.#call('deletePlan')(effect.id);
+          note('계획을 지웠습니다');
+          await this.#loadPlans();
+          return;
+        case 'lane-choices': {
+          const [backends, accounts] = await Promise.all([this.#call('laneBackends')(), this.#client.accounts().catch((): DeskAccount[] => this.#accounts)]);
+          const choices: LaneChoice[] = [{ backend: '', label: '세션과 같음(계획 기본)' }];
+          for (const backend of backends) {
+            choices.push({ backend, label: backendLabel(backend) });
+            // 기본 계정(id가 CLI 이름)은 위의 AI 줄과 같다
+            for (const account of accounts) if (account.backend === backend && !account.builtin && account.id !== backend) choices.push({ backend, accountId: account.id, label: `${backendLabel(backend)} · ${account.name}` });
+          }
+          this.#patchPlans((plans) => {
+            const lane = plans.detail?.lanes.find((entry) => entry.id === plans.picker?.laneId);
+            const index = lane ? choices.findIndex((choice) => choice.backend === (lane.backend ?? '') && (choice.accountId ?? '') === (lane.accountId ?? '')) : -1;
+            return { ...plans, choices, accounts, ...(plans.picker ? { picker: { ...plans.picker, index: Math.max(0, index) } } : {}) };
+          });
+          return;
+        }
+        case 'lane':
+          this.#showPlan(await this.#call('setLane')(effect.id, effect.laneId, effect.backend, effect.accountId), '레인 AI·계정을 바꿨습니다');
+          return;
+        case 'open':
+          this.#openFromPlans([effect.sessionId]);
+          return;
+        case 'grid':
+          this.#openFromPlans(effect.sessionIds);
+          return;
+        case 'open-url':
+          if (!browsable(effect.url)) note('브라우저로 열 수 없는 주소입니다');
+          else if (this.#openUrl) this.#openUrl(effect.url);
+          else note(`브라우저를 열 수 없습니다: ${effect.url}`);
+          return;
+      }
+    } catch (error) {
+      note(messageOf(error));
+    }
+  }
+
+  /**
+   * 작업 나누기 화면을 닫고 레인 세션을 칸에 연다. 하나면 고른 칸에(이미 칸에 있으면 그 칸으로 간다),
+   * 여럿이면 칸 수를 2·4로 늘려 나란히 연다. 셸 칸은 그대로 두고 남은 칸에 놓는다
+   */
+  #openFromPlans(ids: readonly string[]): void {
+    clearInterval(this.#plansTimer);
+    this.#plansTimer = undefined;
+    const state: DeskState = { ...this.#state, plans: undefined, view: undefined, usageBack: undefined };
+    if (ids.length === 1) {
+      const id = ids[0]!;
+      const already = state.slots.findIndex((slot, index) => slot === id && index < state.layout);
+      if (already >= 0) {
+        this.#state = { ...state, focus: already };
+        this.#apply({ type: 'reopen', id });
+      } else if (isShellId(state.slots[state.focus])) {
+        this.#state = { ...state, message: SHELL_TAKEN };
+      } else {
+        const slots = [...state.slots];
+        slots[state.focus] = id;
+        this.#state = { ...state, slots };
+        this.#apply({ type: 'open', slot: state.focus, id });
+      }
+      this.#scheduleRender();
+      return;
+    }
+    const layout: PaneLayout = ids.length <= 2 ? 2 : 4;
+    const slots = state.slots.map((id, slot) => (slot < layout && isShellId(id) ? id : undefined));
+    let at = 0;
+    for (const id of ids) {
+      while (at < layout && slots[at] !== undefined) at++;
+      if (at >= layout) break;
+      slots[at] = id;
+    }
+    // 가려 둔 셸 칸(배치 밖)은 그대로 둔다
+    for (let slot = layout; slot < state.slots.length; slot++) if (isShellId(state.slots[slot])) slots[slot] = state.slots[slot];
+    this.#state = { ...state, layout, slots, focus: 0, zoom: false };
+    this.#apply({ type: 'layout' });
+    this.#scheduleRender();
+  }
+
+  // ─── 요구사항·문서 화면(#894) ───
+
+  #openRequirements(id: string, title: string): void {
+    if (!this.#client.requirements) {
+      this.#say('이 스튜디오는 요구사항 화면을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
+      return;
+    }
+    const opened = openRequirements({ sessionId: id, title });
+    // 덮는 화면은 하나만 둔다
+    clearInterval(this.#plansTimer);
+    this.#plansTimer = undefined;
+    this.#state = { ...this.#state, requirements: opened.state, records: undefined, detail: undefined, plans: undefined, help: false, message: undefined };
+    for (const effect of opened.effects) void this.#requirementsEffect(effect);
+    this.#scheduleRender();
+  }
+
+  /** 요구사항 화면을 바꾼다. 그사이 닫혔거나 다른 세션의 화면이면 아무것도 하지 않는다 */
+  #patchRequirements(sessionId: string, change: (state: RequirementsState) => RequirementsState): void {
+    const current = this.#state.requirements;
+    if (!current || current.sessionId !== sessionId) return;
+    this.#state = { ...this.#state, requirements: change(current) };
+    this.#scheduleRender();
+  }
+
+  async #loadRequirementsTab(sessionId: string, tab: RequirementsTab): Promise<void> {
+    try {
+      const value =
+        tab === 'spec'
+          ? { spec: await this.#call('requirements')(sessionId) }
+          : tab === 'tests'
+            ? { tests: await this.#call('tests')(sessionId) }
+            : tab === 'docs'
+              ? { docs: await this.#call('docs')(sessionId) }
+              : { status: await this.#call('projectStatus')(sessionId) };
+      this.#patchRequirements(sessionId, (state) => loaded(state, tab, value));
+    } catch (error) {
+      this.#patchRequirements(sessionId, (state) => loaded(state, tab, { error: messageOf(error) }));
+    }
+  }
+
+  async #requirementsEffect(effect: RequirementsEffect): Promise<void> {
+    const current = this.#state.requirements;
+    if (!current) return;
+    const sessionId = current.sessionId;
+    const note = (text: string) => this.#patchRequirements(sessionId, (state) => ({ ...state, note: text }));
+    switch (effect.type) {
+      case 'load':
+        await this.#loadRequirementsTab(sessionId, effect.tab);
+        return;
+      case 'doc':
+        try {
+          const content = await this.#call('doc')(sessionId, effect.path);
+          this.#patchRequirements(sessionId, (state) => (state.reader?.path === effect.path ? { ...state, reader: { ...state.reader, content, error: undefined } } : state));
+        } catch (error) {
+          this.#patchRequirements(sessionId, (state) => (state.reader?.path === effect.path ? { ...state, reader: { ...state.reader, error: messageOf(error) } } : state));
+        }
+        return;
+      case 'work':
+        await this.#work(sessionId, effect.text);
+        return;
+      case 'edit':
+        await this.#edit(this.#requirementsHost, sessionId, effect.path);
+        return;
+      case 'verify':
+      case 'unverify':
+      case 'apply-draft':
+        try {
+          const spec =
+            effect.type === 'verify'
+              ? await this.#call('verifyRequirement')(sessionId, effect.requirementId, effect.note)
+              : effect.type === 'unverify'
+                ? await this.#call('clearVerification')(sessionId, effect.requirementId)
+                : await this.#call('applyRequirements')(sessionId, current.spec?.draft ?? { requirements: [] });
+          const done = effect.type === 'verify' ? `${effect.requirementId}에 사람 확인을 남겼습니다` : effect.type === 'unverify' ? `${effect.requirementId}의 사람 확인을 지웠습니다` : `${REQUIREMENTS_FILE}로 저장했습니다`;
+          this.#patchRequirements(sessionId, (state) => ({ ...loaded(state, 'spec', { spec }), ...(effect.type === 'apply-draft' ? { draft: false, row: 0 } : {}), note: done }));
+        } catch (error) {
+          note(`하지 못했습니다: ${messageOf(error)}`);
+        }
+        return;
+    }
+  }
+
+  /**
+   * "이 요구사항으로 작업"(#894): 화면을 닫고 세션을 칸에 연 뒤(이미 있으면 그 칸) 글을 CLI 입력 칸에 넣는다. 보내기(Enter)는 사람이 한다.
+   * 안쪽 CLI가 붙여넣기 표지를 켜면 여러 줄 그대로 붙여 넣고, 켜지 않으면 줄바꿈을 띄어쓰기로 바꾼다(줄바꿈이 곧 보내기가 되지 않게)
+   */
+  async #work(sessionId: string, text: string): Promise<void> {
+    const state = this.#state;
+    let slot = state.slots.findIndex((id, at) => id === sessionId && at < state.layout);
+    if (slot < 0) {
+      slot = !isShellId(state.slots[state.focus]) ? state.focus : state.slots.findIndex((id, at) => at < state.layout && !isShellId(id));
+      if (slot < 0) {
+        this.#patchRequirements(sessionId, (current) => ({ ...current, note: '모든 칸에 셸이 돌고 있습니다. 칸을 하나 비운 뒤 다시 합니다' }));
+        return;
+      }
+    }
+    const slots = [...state.slots];
+    slots[slot] = sessionId;
+    this.#state = { ...state, requirements: undefined, slots, focus: slot, view: undefined, zoom: state.zoom && slot === state.focus };
+    // 끝났거나 열지 못한 터미널이면 다시 연다
+    if (this.#closed.delete(sessionId)) this.#sizes.delete(sessionId);
+    this.#slotsChanged();
+    this.#saveLayout();
+    this.#render();
+    const opened = await (this.#opening.get(sessionId) ?? Promise.resolve(true));
+    if (!opened || this.#restored) {
+      this.#say('터미널을 열지 못해 작업 글을 넣지 못했습니다');
+      return;
+    }
+    // 막 뜬 CLI는 붙여넣기 표지를 조금 뒤에 켠다. 잠깐 기다려 본다
+    const pane = () => this.#panes.get(sessionId);
+    for (let waited = 0; waited < WORK_PASTE_WAIT_MS && !pane()?.modes().bracketedPaste; waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (this.#restored) return;
+    const bracketed = pane()?.modes().bracketedPaste === true;
+    this.#send(sessionId, bracketed ? `\x1b[200~${text}\x1b[201~` : text.replace(/\r\n?|\n/g, ' '));
+    this.#say('작업 글을 칸에 넣었습니다. 살펴보고 Enter로 보냅니다');
+  }
+
+  /**
+   * 문서를 편집기로 고친다(#894): 스튜디오에서 받은 글을 임시 파일에 두고, 화면과 raw 모드를 내려놓은 채 편집기를 띄운다.
+   * 끝나면 화면을 되돌리고, 바뀌었으면 스튜디오에 쓴다. 쓰지 못하면 고친 글을 그 파일에 남기고 자리를 알린다
+   */
+  async #edit(host: RequirementsHost, sessionId: string, path: string): Promise<void> {
+    if (this.#editing) return;
+    const say = (text: string) => this.#patchRequirements(sessionId, (state) => ({ ...state, note: text }));
+    let original: string;
+    try {
+      original = await this.#call('doc')(sessionId, path);
+    } catch (error) {
+      if (path === REQUIREMENTS_FILE && error instanceof StudioRequestError && error.status === 404) original = REQUIREMENTS_TEMPLATE;
+      else {
+        say(`문서를 받지 못했습니다: ${messageOf(error)}`);
+        return;
+      }
+    }
+    if (this.#restored || this.#state.requirements?.sessionId !== sessionId) return;
+    let dir: string;
+    let file: string;
+    try {
+      dir = mkdtempSync(join(host.tmpDir ?? tmpdir(), 'b-studio-edit-'));
+      file = join(dir, basename(path) || 'doc.md');
+      writeFileSync(file, original, { mode: 0o600 });
+    } catch (error) {
+      say(`임시 파일을 만들지 못했습니다: ${messageOf(error)}`);
+      return;
+    }
+    let code: number;
+    this.#editing = true;
+    this.#suspendScreen();
+    try {
+      code = host.editor(file);
+    } catch (error) {
+      code = -1;
+      say(`편집기를 띄우지 못했습니다: ${messageOf(error)}`);
+    } finally {
+      this.#resumeScreen();
+      this.#editing = false;
+    }
+    let edited: string;
+    try {
+      edited = readFileSync(file, 'utf8');
+    } catch (error) {
+      say(`고친 글을 읽지 못했습니다: ${messageOf(error)}`);
+      return;
+    }
+    const cleanup = () => rmSync(dir, { recursive: true, force: true });
+    if (edited === original) {
+      cleanup();
+      if (code === 0) say('바뀐 것이 없습니다');
+      else if (code !== -1) say(`편집기가 ${code}로 끝났습니다. 저장하지 않았습니다`);
+      return;
+    }
+    if (code !== 0) {
+      say(`편집기가 ${code}로 끝나 저장하지 않았습니다. 고친 글은 ${file}에 남겨 두었습니다`);
+      return;
+    }
+    try {
+      await this.#call('saveDoc')(sessionId, path, edited);
+    } catch (error) {
+      say(`저장하지 못했습니다: ${messageOf(error)} · 고친 글은 ${file}에 남겨 두었습니다`);
+      return;
+    }
+    cleanup();
+    say(`${path}를 저장했습니다`);
+    // 고친 문서를 쓰는 탭을 다시 읽는다
+    const state = this.#state.requirements;
+    if (!state || state.sessionId !== sessionId) return;
+    const reload: RequirementsEffect[] = [];
+    if (path === REQUIREMENTS_FILE) reload.push({ type: 'load', tab: 'spec' });
+    if (state.docs) reload.push({ type: 'load', tab: 'docs' });
+    if (state.reader?.path === path) reload.push({ type: 'doc', path });
+    for (const effect of reload) await this.#requirementsEffect(effect);
+  }
+
+  /**
+   * 편집기 같은 다른 프로그램에 터미널을 넘긴다: Kitty 그림·마우스·포커스 알림을 끄고 대체 화면과 raw 모드를 나간다.
+   * 편집기는 동기로 띄우므로(spawnSync) 그동안 이벤트 루프가 멈춰 움짤 시계·사용량·사이드바 폴링·통로가 화면에 쓰지 않는다.
+   * 그사이 쌓인 일은 되돌린 뒤 처음부터 다시 그린 화면 위에서 이어진다
+   */
+  #suspendScreen(): void {
+    this.#io.write((this.#state.kitty?.clear() ?? '') + (this.#animate ? FOCUS_OFF : '') + (this.#mouseOn ? MOUSE_OFF : '') + LEAVE_SCREEN);
+    this.#io.setRaw(false);
+  }
+
+  /** 넘겼던 터미널을 되찾아 처음부터 다시 그린다 */
+  #resumeScreen(): void {
+    this.#io.setRaw(true);
+    this.#io.write(ENTER_SCREEN + (this.#mouseOn ? MOUSE_ON : '') + (this.#animate ? FOCUS_ON : ''));
+    this.#prevFrame = [];
+    this.#render();
   }
 
   // ─── 설정 화면(#890) ───
@@ -1460,6 +2262,16 @@ export class DeskApp {
       // 처음은 열기(이미 열린 터미널이면 스튜디오가 크기만 맞춘다), 그다음부터는 크기만 알린다
       const opening = previous === undefined;
       const request = opening ? this.#client.open(id, size.cols, size.rows) : this.#client.resize(id, size.cols, size.rows);
+      if (opening) {
+        const settled = request.then(
+          () => true,
+          () => false,
+        );
+        this.#opening.set(id, settled);
+        void settled.then(() => {
+          if (this.#opening.get(id) === settled) this.#opening.delete(id);
+        });
+      }
       request.catch((error: unknown) => {
         // 멈춘 세션이면 스튜디오가 409로 답한다. 이어서 작업하면 켜진 뒤 칸을 다시 연다
         const stopped = error instanceof StudioRequestError && error.status === 409 && this.#state.items.find((entry) => entry.id === id)?.state === 'stopped';
@@ -1714,14 +2526,15 @@ export class DeskApp {
    * 그다음 AI 이름이나 default로 이름 붙인 그림, 그다음 그림 폴더(세션 id 이름의 그림, 무작위)다
    */
   #ensureSprites(): void {
-    if (this.#state.view === 'usage') {
+    if (this.#state.view === 'usage' && !this.#state.fleets) {
       this.#ensureAccountSprites();
       return;
     }
-    if (!this.#catalog || this.#state.view !== 'space') return;
+    const shown = this.#spriteItems();
+    if (!this.#catalog || shown.length === 0) return;
     const sprites = this.#state.sprites ?? {};
     let added: Record<string, Sprite> | undefined;
-    for (const item of spaceItems(this.#state)) {
+    for (const item of shown) {
       if (sprites[item.id] || added?.[item.id]) continue;
       const file = this.#accountSprite(item);
       if (file && this.#catalog.file) {
@@ -1740,6 +2553,16 @@ export class DeskApp {
       this.#assignedSprites.add(item.id);
     }
     if (added) this.#state = { ...this.#state, sprites: { ...sprites, ...added } };
+  }
+
+  /** 그림을 그릴 세션: 여러 AI 비교 보기면 그 참가자들(#892), 스페이스 화면이면 그 스페이스의 세션들 */
+  #spriteItems(): DeskItem[] {
+    const fleets = this.#state.fleets;
+    if (fleets) {
+      const fleet = fleets.mode === 'detail' ? fleets.fleets.find((entry) => entry.id === fleets.detail) : undefined;
+      return (fleet?.members ?? []).map((member) => ({ kind: 'session', id: member.sessionId, title: member.label, projectName: fleet!.projectName, state: 'idle', backend: member.backend, lastActivityAt: fleet!.createdAt, ...(member.accountId ? { accountId: member.accountId } : {}) }));
+    }
+    return this.#state.view === 'space' ? spaceItems(this.#state) : [];
   }
 
   /** 세션의 계정에 고른 그림. 계정이 없는 세션은 그 CLI의 기본 계정(id가 CLI 이름)이다 */
@@ -1773,8 +2596,24 @@ export class DeskApp {
   /** 스페이스 화면에 움짤이 보이고 창이 포커스를 가졌으면 다음 프레임에 다시 그린다. 아니면 멈춘다(시계도 멈춘다) */
   #scheduleAnimation(): void {
     const state = this.#state;
-    const playing = this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy && !state.settings && !state.runtime;
-    const shown = !playing ? [] : state.view === 'usage' ? (state.usage?.accounts ?? []).map((account) => accountSprite(account, state.sprites)) : spaceItems(state).map((item) => spriteFor(item, state.sprites));
+    const playing =
+      this.#animate &&
+      !this.#restored &&
+      this.#windowFocused &&
+      (state.view === 'space' || state.view === 'usage' || state.fleets !== undefined) &&
+      !state.help &&
+      !state.copy &&
+      !state.settings &&
+      !state.records &&
+      !state.detail &&
+      !state.runtime;
+    const shown = !playing
+      ? []
+      : state.fleets
+        ? this.#spriteItems().map((item) => spriteFor(item, state.sprites))
+        : state.view === 'usage'
+          ? (state.usage?.accounts ?? []).map((account) => accountSprite(account, state.sprites))
+          : spaceItems(state).map((item) => spriteFor(item, state.sprites));
     const delays = shown.flatMap((sprite) => shortestFrame(sprite) ?? []);
     if (delays.length === 0) {
       clearTimeout(this.#animTimer);
@@ -1833,11 +2672,13 @@ export class DeskApp {
     this.#restored = true;
     clearInterval(this.#pollTimer);
     clearInterval(this.#usageTimer);
+    clearInterval(this.#plansTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);
     clearTimeout(this.#pendingTimer);
     clearTimeout(this.#resizeTimer);
     clearTimeout(this.#animTimer);
+    clearTimeout(this.#fleetTimer);
     this.#stopLoginPoll();
     this.#runtimeStream?.abort();
     for (const entry of this.#streams.values()) {

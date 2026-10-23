@@ -5,6 +5,7 @@ import path from 'node:path';
 import { estimateCost } from '@b-studio/agent';
 import type { FleetCandidate, FleetMemberView, FleetView } from '@/lib/fleet-types';
 import type { SessionMode, StudioEvent } from '@/lib/studio-events';
+import { accountProcessEnv, resolveSessionAccount, type AiAccount } from './ai-accounts';
 import { StudioError } from './errors';
 import { listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
@@ -49,6 +50,8 @@ interface ValidatedCandidate {
   label: string;
   /** api는 모델 제공자, CLI는 백엔드 이름 */
   provider: string;
+  /** 고른 AI 계정(설정 폴더를 둔 계정). 없으면 그 CLI의 기본 계정 */
+  account?: AiAccount;
 }
 
 export async function createFleet(input: {
@@ -71,15 +74,17 @@ export async function createFleet(input: {
 
   const candidates = candidatesOf(input);
   if (candidates.length < 2 || candidates.length > MAX_MEMBERS) throw new StudioError(400, `비교할 후보를 2~${MAX_MEMBERS}개 고르세요`);
-  const selected: ValidatedCandidate[] = candidates.map((candidate) => validateCandidate(candidate));
+  const selected: ValidatedCandidate[] = [];
+  for (const candidate of candidates) selected.push(await validateCandidate(candidate));
 
   // CLI 백엔드는 멤버를 만들기 전에 로그인을 확인한다. 실패하면 Fleet을 만들지 않고 이유를 알린다
-  // (멤버를 몇 개 만들다 실패하면 절반만 뜬 비교가 남는다)
-  const cliBackends = [...new Set(selected.map((candidate) => candidate.backend).filter((backend) => backend !== 'api'))];
-  if (cliBackends.length > 0) {
+  // (멤버를 몇 개 만들다 실패하면 절반만 뜬 비교가 남는다). 계정을 고른 후보는 그 계정의 설정 폴더로 확인한다(#892)
+  const cli = new Map<string, ValidatedCandidate>();
+  for (const candidate of selected) if (candidate.backend !== 'api') cli.set(`${candidate.backend}@${candidate.account?.id ?? ''}`, candidate);
+  if (cli.size > 0) {
     const project = await findProject(input.projectId);
     if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
-    for (const backend of cliBackends) await assertBackendReady(backend, project.root, input.preflights ?? {});
+    for (const candidate of cli.values()) await assertBackendReady(candidate.backend, project.root, input.preflights ?? {}, accountProcessEnv(candidate.account));
   }
 
   ensureLoaded();
@@ -99,13 +104,17 @@ export async function createFleet(input: {
   for (const candidate of selected) {
     try {
       // 멤버 세션은 레인과 같은 방식으로 backend·model을 싣는다(레인·플릿이 같은 실행 경로를 탄다)
-      const options = candidate.backend === 'api' ? { backend: 'api' as const, ...(candidate.model ? { modelId: candidate.model } : {}) } : { backend: candidate.backend, ...(candidate.model ? { modelId: candidate.model } : {}) };
+      const options =
+        candidate.backend === 'api'
+          ? { backend: 'api' as const, ...(candidate.model ? { modelId: candidate.model } : {}) }
+          : { backend: candidate.backend, ...(candidate.model ? { modelId: candidate.model } : {}), ...(candidate.account ? { accountId: candidate.account.id } : {}) };
       const snapshot = await createSession(input.projectId, input.owner, 'copy', options);
       fleet.projectName = snapshot.projectName;
       const member: FleetMemberView = {
         sessionId: snapshot.id,
         backend: candidate.backend,
         ...(candidate.model ? { modelId: candidate.model } : {}),
+        ...(candidate.account ? { accountId: candidate.account.id } : {}),
         label: candidate.label,
         provider: candidate.provider,
         status: 'booting',
@@ -118,6 +127,7 @@ export async function createFleet(input: {
         sessionId: `failed-${randomUUID().slice(0, 8)}`,
         backend: candidate.backend,
         ...(candidate.model ? { modelId: candidate.model } : {}),
+        ...(candidate.account ? { accountId: candidate.account.id } : {}),
         label: candidate.label,
         provider: candidate.provider,
         status: 'error',
@@ -142,11 +152,12 @@ function candidatesOf(input: { candidates?: readonly FleetCandidate[]; modelIds?
 }
 
 /** 후보의 backend가 이 서버의 허용 목록 안인지 보고, backend마다 다른 확인을 한다 */
-function validateCandidate(candidate: FleetCandidate): ValidatedCandidate {
+async function validateCandidate(candidate: FleetCandidate): Promise<ValidatedCandidate> {
   // 허용 목록 밖 백엔드는 400으로 거부한다(세션 만들기와 같은 규칙)
   const backend = resolveSessionBackend(candidate.backend);
   const model = candidate.model?.trim() || undefined;
   if (backend === 'api') {
+    if (candidate.accountId !== undefined) throw new StudioError(400, 'AI 계정은 CLI 후보에만 고릅니다(api 후보는 모델을 고릅니다)');
     if (!model) {
       // 모델을 고르지 않으면 요청마다 라우터가 고른다
       return { backend, label: '서버 기본 모델', provider: 'router' };
@@ -157,8 +168,11 @@ function validateCandidate(candidate: FleetCandidate): ValidatedCandidate {
     if (!found.capabilities.includes('tools')) throw new StudioError(400, `${found.label}은 Coding Agent 도구 호출을 지원하지 않습니다`);
     return { backend, model, label: found.label, provider: found.provider };
   }
-  // CLI 백엔드는 모델 이름을 그대로 그 CLI에 넘긴다(없으면 그 CLI의 계정 기본)
-  return { backend, ...(model ? { model } : {}), label: model ?? '계정 기본', provider: backend };
+  // CLI 백엔드는 모델 이름을 그대로 그 CLI에 넘긴다(없으면 그 CLI의 계정 기본).
+  // 계정은 목록에 있고 그 CLI의 것이어야 한다(아니면 400). 다른 계정으로 조용히 띄우면 다른 구독의 한도를 쓴다
+  const account = await resolveSessionAccount(candidate.accountId, backend);
+  const label = account ? (model ? `${account.name} · ${model}` : account.name) : (model ?? '계정 기본');
+  return { backend, ...(model ? { model } : {}), label, provider: backend, ...(account ? { account } : {}) };
 }
 
 export function listFleets(owner: string): FleetView[] {
