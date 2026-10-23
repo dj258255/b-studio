@@ -37,6 +37,11 @@ export interface TerminalGatewayHandlers {
    * 판정이 아니라 통로다 — 여기서 던져도 터미널의 CLI는 그대로 돈다(응답은 5xx)
    */
   telemetry(body: unknown): Promise<void>;
+  /**
+   * 훅 입력에 실린 CLI 대화 id(session_id, #872). 스튜디오를 다시 띄운 뒤 터미널을 열 때 그 대화를 이어 붙이려고 기억한다.
+   * 판정에 쓰지 않는다. 던져도 훅의 답은 그대로 간다
+   */
+  conversation?(id: string): void;
   toolSpecs: Exclude<ToolServerOptions['specs'], unknown[]>;
   runTool(name: string, args: unknown): Promise<ToolOutcome>;
 }
@@ -52,6 +57,25 @@ const say = (message: string | undefined): Record<string, unknown> => (message ?
 
 /** 훅 종류 → 처리. 핸들러가 던지면 훅 서버가 5xx로 답하고, 훅 스크립트는 CLI를 막지 않는다(판정은 호스트의 게이트가 한다) */
 export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput) => Promise<Record<string, unknown>>> {
+  const routes = hookRoutes(handlers);
+  // CLI의 훅 입력에는 대화 id(session_id)가 실린다(Claude Code는 모든 훅, Codex도 같은 이름). 텔레메트리와 ping은 훅 입력이 아니다
+  for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end'] as const) {
+    const route = routes[name];
+    routes[name] = async (input) => {
+      if (typeof input.session_id === 'string' && input.session_id) {
+        try {
+          handlers.conversation?.(input.session_id);
+        } catch {
+          // 이어 붙이기용 기록일 뿐이다. 판정과 훅의 답은 그대로 간다
+        }
+      }
+      return route(input);
+    };
+  }
+  return routes;
+}
+
+function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput) => Promise<Record<string, unknown>>> {
   return {
     // CLI의 텔레메트리 로그(OTLP/HTTP JSON). 받아서 실행에 붙이고 빈 답(200)을 준다
     '/v1/logs': async (input) => {

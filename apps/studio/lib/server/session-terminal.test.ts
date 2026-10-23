@@ -24,7 +24,7 @@ const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:410
 const CONTAINER_UNREACHABLE = '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다';
 
 function fakeBackend(options: { failPrepare?: string; unreachable?: boolean } = {}) {
-  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[], targets: [] as TerminalTarget[], prompts: [] as Array<string | undefined> };
+  const record = { ensured: [] as string[], removed: [] as string[], terminals: [] as Array<FakeTerminal>, gateways: [] as Array<AgentGatewayAddress | undefined>, probed: [] as string[], targets: [] as TerminalTarget[], prompts: [] as Array<string | undefined>, resumes: [] as Array<string | undefined> };
   const backend: TerminalBackend = {
     async prepare(target, gateway) {
       record.ensured.push(target.sandboxId);
@@ -33,9 +33,10 @@ function fakeBackend(options: { failPrepare?: string; unreachable?: boolean } = 
       if (options.failPrepare) throw new Error(options.failPrepare);
       return `${target.sandboxId}-agent`;
     },
-    open(place, { id, size, target, initialPrompt }) {
+    open(place, { id, size, target, initialPrompt, resumeConversation }) {
       record.targets.push(target);
       record.prompts.push(initialPrompt);
+      record.resumes.push(resumeConversation);
       const terminal = new FakeTerminal(place, id, size);
       record.terminals.push(terminal);
       return terminal;
@@ -399,6 +400,42 @@ describe('세션 터미널 (이슈 #673)', () => {
     expect(await openSessionTerminal(other, target, {}, backend, { initialPrompt: '주문 화면 고쳐 줘' })).toEqual({ initialPromptUsed: false });
     expect(record.prompts.at(-1)).toBeUndefined();
     await disposeSessionTerminal(other, target.sandboxId, backend);
+  });
+
+  it('지난 대화(#872): 이 스튜디오에서 그 샌드박스의 터미널을 처음 열 때만 이어 붙인다. 첫 요청이 있거나 받지 않는 백엔드면 넘기지 않는다', async () => {
+    const { backend, record } = fakeBackend();
+    const accepting: TerminalBackend = { ...backend, acceptsInitialPrompt: true, acceptsResume: true };
+    const resuming = { ...target, resumeConversation: () => 'c-1' };
+    // 스튜디오를 다시 띄운 뒤 처음 연다: 이어 붙인다
+    await openSessionTerminal(id, resuming, {}, accepting);
+    expect(record.resumes).toEqual(['c-1']);
+    // 같은 스튜디오에서 CLI·셸이 끝나 다시 연다: 사람이 끝낸 것일 수 있어 새로 띄운다
+    record.terminals.at(-1)!.exit(0);
+    await openSessionTerminal(id, resuming, {}, accepting);
+    expect(record.resumes).toEqual(['c-1', undefined]);
+    closeSessionTerminal(id);
+    await openSessionTerminal(id, resuming, {}, accepting);
+    expect(record.resumes.at(-1)).toBeUndefined();
+    // 이어서 작업으로 샌드박스가 바뀌었다: 다시 이어 붙인다
+    await openSessionTerminal(id, { ...resuming, sandboxId: 'studio-orders-def456' }, {}, accepting);
+    expect(record.resumes.at(-1)).toBe('c-1');
+    await disposeSessionTerminal(id, 'studio-orders-def456', backend);
+
+    // 첫 요청이 있으면 새 대화다
+    const withPrompt = `${id}-prompt`;
+    await openSessionTerminal(withPrompt, resuming, {}, accepting, { initialPrompt: '주문 화면 고쳐 줘' });
+    expect(record.resumes.at(-1)).toBeUndefined();
+    await disposeSessionTerminal(withPrompt, target.sandboxId, backend);
+    // 받지 않는 백엔드(컨테이너 방식)에는 넘기지 않는다
+    const container = `${id}-container`;
+    await openSessionTerminal(container, resuming, {}, backend);
+    expect(record.resumes.at(-1)).toBeUndefined();
+    await disposeSessionTerminal(container, target.sandboxId, backend);
+    // 기억한 대화가 없으면 넘기지 않는다
+    const none = `${id}-none`;
+    await openSessionTerminal(none, { ...target, resumeConversation: () => undefined }, {}, accepting);
+    expect(record.resumes.at(-1)).toBeUndefined();
+    await disposeSessionTerminal(none, target.sandboxId, backend);
   });
 
   it('open이 Promise를 돌려줘도 열리고, open에 target이 그대로 넘어온다', async () => {

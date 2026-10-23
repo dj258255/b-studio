@@ -27,6 +27,8 @@ import {
   openHostTerminal,
   probeHostGateway,
   removeHostGatewayConfig,
+  RESUME_CONVERSATION_ENV,
+  resumeConversationArg,
   shellQuote,
   writeHostGatewayConfig,
   type HostPty,
@@ -916,3 +918,90 @@ describe('첫 요청을 CLI 실행 인자로(#836)', () => {
   });
 });
 
+
+describe('스튜디오를 다시 띄운 뒤 지난 CLI 대화를 이어 붙인다(#872)', () => {
+  const id = '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b';
+  const count = (text: string, word: string): number => text.split('\n').filter((line) => line.startsWith(word)).length;
+
+  it('resumeConversationArg: 대화 id는 영문·숫자·밑줄·붙임표만 받고, 옵션처럼 보이거나 빈칸·셸 글자가 있으면 던진다', () => {
+    expect(RESUME_CONVERSATION_ENV).toBe('B_STUDIO_RESUME_ID');
+    expect(resumeConversationArg(id)).toBe(id);
+    expect(resumeConversationArg('019a2b3c_abc')).toBe('019a2b3c_abc');
+    for (const bad of ['', '--dangerously-skip-permissions', '-x', 'a b', 'a;rm -rf ~', '$(id)', 'a\nb', 'x'.repeat(129)]) {
+      expect(() => resumeConversationArg(bad), bad).toThrow(SandboxError);
+    }
+  });
+
+  it('openHostTerminal: 대화 id는 PTY 환경 변수로만 넘긴다. 첫 요청이 있으면 새 대화라 id를 넘기지 않는다', async () => {
+    const calls: Array<{ args: string[]; env: Record<string, string> }> = [];
+    const spawnPty = (_file: string, args: string[], options: { env: Record<string, string> }): HostPty => {
+      calls.push({ args, env: options.env });
+      return { pid: 1, write() {}, resize() {}, kill() {}, onData() {}, onExit() {} };
+    };
+    const env = { SHELL: '/bin/zsh', HOME: '/home/kim', [RESUME_CONVERSATION_ENV]: '스튜디오 쪽 값은 넘기지 않는다' };
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty, resumeConversation: id });
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty, resumeConversation: id, initialPrompt: '새 요청을 보낸다' });
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty });
+    expect(calls[0]!.env[RESUME_CONVERSATION_ENV]).toBe(id);
+    expect(calls[0]!.args.join(' ')).not.toContain(id);
+    expect(calls[1]!.env[RESUME_CONVERSATION_ENV]).toBeUndefined();
+    expect(calls[1]!.env[FIRST_PROMPT_ENV]).toBe('새 요청을 보낸다');
+    expect(calls[2]!.env[RESUME_CONVERSATION_ENV]).toBeUndefined();
+    await expect(openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty, resumeConversation: '-x' })).rejects.toThrow(SandboxError);
+  });
+
+  it('bash: 첫 실행만 claude --resume <id>로 띄우고, 사용자 파일과 CLI에 변수가 남지 않는다', async () => {
+    const dir = await tempDir('b-studio-resume-bash-');
+    const home = await tempDir('b-studio-resume-bash-home-');
+    await writeFile(path.join(home, '.bash_profile'), 'echo "PROFILE-SEES ${B_STUDIO_RESUME_ID-none}"\n');
+    await writeShellGateway(dir);
+    const out = execFileSync('bash', ['--rcfile', path.join(dir, 'shell', 'bashrc'), '-i', '-c', 'claude again; echo "AFTER ${B_STUDIO_RESUME_ID-none} ${BSTUDIO_RESUME_ID_VALUE-none}"'], {
+      env: { ...process.env, HOME: home, B_STUDIO_RESUME_ID: id },
+      encoding: 'utf8',
+    });
+    expect(out).toContain(`WRAPPED --resume ${id}`);
+    expect(out).toContain('WRAPPED again');
+    expect(count(out, 'WRAPPED')).toBe(2);
+    expect(out).toContain('PROFILE-SEES none');
+    expect(out).toContain('AFTER none none');
+  });
+
+  it.skipIf(!existsSync('/bin/zsh'))('zsh: .zshenv에서 먼저 환경에서 지우고, .zlogin의 첫 실행만 --resume으로 띄운다', async () => {
+    const dir = await tempDir('b-studio-resume-zsh-');
+    const home = await tempDir('b-studio-resume-zsh-home-');
+    await writeFile(path.join(home, '.zshenv'), 'print -r -- "PROFILE-SEES ${B_STUDIO_RESUME_ID-none}"\n');
+    await writeShellGateway(dir);
+    const out = execFileSync('/bin/zsh', ['-l', '-i', '-c', 'claude again; print -r -- "AFTER ${B_STUDIO_RESUME_ID-none} ${BSTUDIO_RESUME_ID_VALUE-none}"'], {
+      env: { ...process.env, HOME: home, ZDOTDIR: path.join(dir, 'shell', 'zsh'), BSTUDIO_USER_ZDOTDIR: home, B_STUDIO_RESUME_ID: id },
+      encoding: 'utf8',
+    });
+    expect(out).toContain('PROFILE-SEES none');
+    expect(out).toContain(`WRAPPED --resume ${id}`);
+    expect(count(out, 'WRAPPED')).toBe(2);
+    expect(out).toContain('AFTER none none');
+  });
+
+  it('sh 명령: codex는 resume <id>로 띄우고, 첫 요청이 함께 오면 첫 요청이 이긴다. 이어 붙이기가 실패하면 새로 띄우는 법을 알린다', async () => {
+    const home = await tempDir('b-studio-resume-sh-home-');
+    const bin = path.join(home, 'fakebin');
+    await mkdir(bin, { recursive: true });
+    for (const name of ['claude', 'codex']) {
+      // FAIL_RESUME이 있으면 이어 붙이기가 실패한 것처럼 1로 끝난다
+      await writeFile(path.join(bin, name), `#!/bin/sh\nprintf '%s\\n' "${name.toUpperCase()} $*"\n[ -n "$FAIL_RESUME" ] && exit 1\nexit 0\n`);
+      await chmod(path.join(bin, name), 0o755);
+    }
+    const run = (command: string, extra: Record<string, string>): string =>
+      execFileSync('/bin/sh', ['-c', command], { env: { PATH: `${bin}:/usr/bin:/bin`, HOME: home, SHELL: '/usr/bin/true', ...extra }, encoding: 'utf8' });
+
+    expect(run(hostTerminalCommand('codex'), { B_STUDIO_RESUME_ID: id })).toContain(`CODEX resume ${id}`);
+    expect(run(hostTerminalCommand('claude'), { B_STUDIO_RESUME_ID: id })).toContain(`CLAUDE --resume ${id}`);
+    const both = run(hostTerminalCommand('claude'), { B_STUDIO_RESUME_ID: id, B_STUDIO_FIRST_PROMPT: '주문 목록 화면을 고쳐 줘' });
+    expect(both).toContain('CLAUDE 주문 목록 화면을 고쳐 줘');
+    expect(both).not.toContain('--resume');
+    const failed = run(hostTerminalCommand('claude'), { B_STUDIO_RESUME_ID: id, FAIL_RESUME: '1' });
+    expect(count(failed, 'CLAUDE')).toBe(1);
+    expect(failed).toContain('지난 대화를 이어 붙이지 못했습니다');
+    // 이어 붙이지 않은 실행이 실패해도 그 안내는 내지 않는다
+    expect(run(hostTerminalCommand('claude'), { FAIL_RESUME: '1' })).not.toContain('지난 대화를 이어 붙이지 못했습니다');
+  });
+});
