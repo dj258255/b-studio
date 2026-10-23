@@ -316,7 +316,7 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - **작업 카드**(서버, ADR-178): `POST /api/task-plans`에 `{ projectId, cards: [{ title, request, paths, doneCommand?, doneService? }] }`를 보내면 카드를 레인으로 묶어 레인마다 세션 터미널에서 돌립니다. 쓰기 범위가 겹치는 카드는 한 레인에서 순서대로, 겹치지 않으면 동시에 돕니다(동시 레인은 `B_STUDIO_MAX_LANES`, 기본 3). 카드의 경로 밖 쓰기는 막히고, `doneCommand`는 그 카드 동안만 게이트의 테스트로 돌며 통과해야 끝납니다. 레인마다 CLI가 폴더 신뢰를 처음 한 번 묻습니다 — 그 칸에서 고르세요.
 - 화면에서는 나란히 보기 왼쪽의 "작업 카드"(또는 `/split`의 세션 고르기 화면)에서 카드를 씁니다. 고칠 때마다 레인 묶음을 미리 보여 주고, "실행"을 누르면 레인들이 격자로 열리고 왼쪽 칸이 카드별 진행·비용과 계획 합계가 됩니다. 완료 명령은 고른 서비스 컨테이너의 작업 폴더에서 돕니다.
 
-<img src="images/studio-task-cards.png" width="760" alt="작업 카드 진행과 레인 터미널 격자">
+<img src="images/studio-split-cards.jpg" width="760" alt="작업 카드를 실행한 나란히 보기. 맨 위 탭 줄 아래 왼쪽 칸에 계획 합계(토큰·캐시·비용)와 레인별 카드 진행이 있다. lane-1은 주문 모듈 통과(완료 명령 test -f, 체크포인트)와 주문 모듈 다듬기 도는 중, lane-2는 상태 모듈 통과다. 가운데 두 터미널 칸에 레인마다 CLI가 카드의 파일을 쓰고 검증 통과를 받는 기록이 있고, 한 칸에는 카드의 쓰기 범위 밖 파일(index.html)을 막았다는 안내가 보인다. 오른쪽 결과 칸에 고른 레인의 바뀐 파일과 diff가 있다">
 
 ### 이 컴퓨터의 CLI로 열기 (기본)
 

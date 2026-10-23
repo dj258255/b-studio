@@ -7,7 +7,7 @@
 - 커밋: 057b3ee(#419 병합 직후)에 고정한 별도 워크트리
 - 원자료: `~/.cache/b-studio/bench/e10/{auto,sonnet}-r{1,2,3}/`, 핵심 열은 [`data/2026-10-07-e10-results.csv`](data/2026-10-07-e10-results.csv)
 
-- 관련: [ADR-091 CLI 백엔드 자동 모델 선택](../decisions.md#adr-089-cli-백엔드-자동-모델-선택), [ADR-047](../decisions.md#adr-047-멀티-모델-라우터-공통-도구-계약-위에서-검증된-작업당-비용을-고른다), [E8](2026-09-30-e8-plan-execute-split.md), [E9](2026-10-01-e9-narrow-plan.md)
+- 관련: [ADR-091 CLI 백엔드 자동 모델 선택](../decisions.md#adr-091-cli-백엔드-자동-모델-선택), [ADR-047](../decisions.md#adr-047-멀티-모델-라우터-공통-도구-계약-위에서-검증된-작업당-비용을-고른다), [E8](2026-09-30-e8-plan-execute-split.md), [E9](2026-10-01-e9-narrow-plan.md)
 
 ## 왜 이 실험인가
 
