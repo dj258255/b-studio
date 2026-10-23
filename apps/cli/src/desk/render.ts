@@ -6,6 +6,7 @@ import { spaceScreen } from './cards';
 import { usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
+import { renderRequirements, requirementsHint } from './requirements';
 import { renderSettings, settingsHint } from './settings';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
@@ -53,8 +54,8 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
-const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · e 요구사항 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · e 요구사항 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · Esc 닫기 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
@@ -69,6 +70,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
   ['g', '설정: 계정(더하기·로그인·그림), 라우팅 규칙, 화면, 키·알림. 스페이스·사용량 화면에서는 g만, Esc로 닫으면 연 화면으로'],
+  ['e', '요구사항·문서: 명세(이 요구사항으로 작업, 사람 확인, 편집기로 고치기), 테스트, 문서 읽기, 현황. 고른 칸(카드 화면이면 고른 카드)의 세션, 카드 화면에서는 e만'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
@@ -190,6 +192,15 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
     lines.push(fit(relabel(state, settingsHint(state.settings)), cols));
+    return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
+  }
+
+  if (state.requirements) {
+    // 요구사항·문서 화면(#894)도 사이드바 없이 본문 전체를 쓴다
+    const body = renderRequirements(state.requirements, { w: cols, h: Math.max(0, rows - 2) }, theme);
+    lines.push(...body.lines);
+    while (lines.length < rows - 1) lines.push(' '.repeat(cols));
+    lines.push(fit(requirementsHint(state.requirements), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
