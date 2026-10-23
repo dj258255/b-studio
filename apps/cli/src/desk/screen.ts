@@ -128,6 +128,12 @@ const RESET = '\x1b[0m';
 /** 폭이 없는 제어 열: 색(SGR)과 누를 수 있는 링크 같은 OSC 열(BEL이나 ST로 끝난다, #890) */
 const SGR = /\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/y;
 
+/** 누를 수 있는 링크(OSC 8). 주소의 제어 글자는 지워 열을 일찍 끝내지 못하게 한다. 링크 열은 폭에 넣지 않는다(fitAnsi) */
+export function osc8(url: string, text: string): string {
+  const safe = url.replace(/[\u0000-\u001f\u007f]/g, '');
+  return `\x1b]8;;${safe}\x07${text}\x1b]8;;\x07`;
+}
+
 export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
 }

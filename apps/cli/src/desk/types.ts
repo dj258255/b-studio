@@ -12,6 +12,8 @@ export interface DeskItem {
   projectName: string;
   state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
   attention?: string;
+  /** 개입이 필요한 까닭 한 줄(검증 실패 요약, 확인 필요의 첫 어긋남). 모르면 없다 */
+  reason?: string;
   backend?: string;
   lastActivityAt: string;
   /** 터미널 세션일 때: CLI가 떠 있는가, 권한을 묻고 있는가 */

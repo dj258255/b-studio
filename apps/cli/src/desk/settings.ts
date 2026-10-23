@@ -6,7 +6,7 @@
  * 계정과 규칙은 스튜디오가 검사한다(이름 길이, 설정 폴더가 홈 아래인지, 규칙 꼴). 여기서는 빈 이름처럼 보내 볼 필요가 없는 것만 거른다
  */
 import { parsePrefix, type DeskConfig, type DeskPrefix } from './config';
-import { fit, fitAnsi, stringWidth } from './screen';
+import { fit, fitAnsi, osc8, stringWidth } from './screen';
 import { backendLabel } from './sidebar';
 import { spriteLines, type Sprite } from './sprite';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
@@ -915,9 +915,8 @@ function pickerPane(state: SettingsState, picker: PickerState, width: number, he
 
 /** OSC 8 링크: 누를 수 있는 터미널(Ghostty·iTerm2·kitty …)에서 열린다. 링크 글은 주소 그대로다 */
 function link(url: string): string {
-  // 링크 안에 제어 글자가 섞이면 열이 일찍 끝난다. 주소에서 뺀다
   const safe = url.replace(/[\u0000-\u001f\u007f]/g, '');
-  return `\x1b]8;;${safe}\x07${safe}\x1b]8;;\x07`;
+  return osc8(safe, safe);
 }
 
 function loginPane(login: LoginView, width: number, theme: Theme): Pane {

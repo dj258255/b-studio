@@ -9,6 +9,8 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
+import type { RecordsReport, RecordsStats } from './records';
+import type { DetailExportPreview, DetailExportResult, DetailSnapshot } from './session-detail';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
@@ -79,6 +81,10 @@ export interface StartInput {
 export function splitChoice(choice: string): { backend: string; accountId?: string } {
   const at = choice.indexOf('@');
   return at < 0 ? { backend: choice } : { backend: choice.slice(0, at), accountId: choice.slice(at + 1) };
+}
+
+function sessionPath(id: string): string {
+  return `/api/sessions/${encodeURIComponent(id)}`;
 }
 
 export class StudioClient {
@@ -192,6 +198,62 @@ export class StudioClient {
   /** 멈춘 세션을 같은 작업 복사본으로 다시 띄운다. 켜지는 것은 기다리지 않는다 */
   async resume(id: string): Promise<void> {
     await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/resume`);
+  }
+
+  /** AI별 결과표(#891). 서버가 계정별 묶음과 최근 실패를 함께 준다(옛 서버는 주지 않는다) */
+  routingStats(): Promise<RecordsStats> {
+    return this.#request('GET', '/api/routing/stats');
+  }
+
+  /** 프로젝트 토큰 보고서(#891). from을 주면 그 시각부터 */
+  async tokenReport(projectId: string, from?: string): Promise<RecordsReport> {
+    const query = from ? `?${new URLSearchParams({ from })}` : '';
+    return (await this.#request<{ report: RecordsReport }>('GET', `/api/projects/${encodeURIComponent(projectId)}/token-report${query}`)).report;
+  }
+
+  /** 세션 스냅숏(체크포인트, 다시 검증 기록, AI 리뷰, 저장소) */
+  session(id: string): Promise<DetailSnapshot> {
+    return this.#request('GET', sessionPath(id));
+  }
+
+  /** 체크포인트 하나의 diff(시크릿 값은 서버가 가린다) */
+  async checkpointPatch(id: string, sha: string): Promise<string> {
+    return (await this.#request<{ patch: string }>('GET', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}`)).patch;
+  }
+
+  /** 체크포인트로 되돌린다. 시작만 하고 돌아온다(진행은 세션 이벤트로 온다) */
+  async restoreCheckpoint(id: string, sha: string): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}/restore`);
+  }
+
+  /** 지금 체크포인트를 같은 게이트로 다시 검증한다(에이전트는 돌리지 않는다) */
+  async reverify(id: string, sha: string): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}/reverify`);
+  }
+
+  /** 세션 기록을 지운다. 멈춘 세션만 된다(서버가 409로 막는다) */
+  async deleteSession(id: string): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/delete`);
+  }
+
+  /** 올리기 전 점검. 아무것도 올리지 않는다 */
+  exportPreview(id: string): Promise<DetailExportPreview> {
+    return this.#request('POST', `${sessionPath(id)}/export/preview`, {});
+  }
+
+  /** 브랜치를 올리고, pullRequest면 PR도 만든다 */
+  exportSession(id: string, pullRequest: boolean): Promise<DetailExportResult> {
+    return this.#request('POST', `${sessionPath(id)}/export`, { pullRequest });
+  }
+
+  /** AI 리뷰 라운드를 (다시) 돌린다. 시작만 하고 돌아온다 */
+  async reviewRound(id: string, restart: boolean): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/review`, { restart });
+  }
+
+  /** AI 리뷰의 지적 하나를 오탐으로 닫는다 */
+  async resolveFinding(id: string, input: { round: number; findingIndex: number; reason: string }): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/review/resolve`, input);
   }
 
   /** 세션 이름을 바꾼다. 빈 이름은 이름을 지운다(#864) */

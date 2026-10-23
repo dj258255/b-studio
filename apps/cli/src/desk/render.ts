@@ -3,6 +3,8 @@
  * 줄마다 보이는 폭은 정확히 화면 폭이다(색 제어 문자는 폭에 넣지 않는다). 그리는 쪽은 바뀐 줄만 다시 쓴다
  */
 import { spaceScreen } from './cards';
+import { RECORDS_HINT, recordsLines } from './records';
+import { sessionDetailLines } from './session-detail';
 import { usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
@@ -53,8 +55,8 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
-const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · Esc 닫기 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
@@ -68,6 +70,8 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
+  ['i', '고른 세션 자세히: 체크포인트 diff·되돌리기·다시 검증, 확인 필요와 AI 리뷰 지적, PR 올리기, 세션 지우기(스페이스 화면에서는 앞글쇠 없이 i)'],
+  ['h', '기록: AI·계정별 게이트 통과율과 최근 실패, 프로젝트 토큰 보고서'],
   ['g', '설정: 계정(더하기·로그인·그림), 라우팅 규칙, 화면, 키·알림. 스페이스·사용량 화면에서는 g만, Esc로 닫으면 연 화면으로'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
@@ -176,6 +180,18 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       cols,
     ),
   );
+
+  // 기록 화면과 세션 자세히(#891)는 머리 줄 아래 전체를 쓴다
+  if (state.records) {
+    const titles = Object.fromEntries(state.items.map((entry) => [entry.id, entry.title]));
+    lines.push(...recordsLines(state.records, { theme, width: cols, height: Math.max(0, rows - 2), now: Date.now(), names: state.records.names ?? {}, titles }));
+    lines.push(fit(state.message ? ` ${state.message}` : RECORDS_HINT, cols));
+    return { lines: lines.slice(0, rows) };
+  }
+  if (state.detail) {
+    lines.push(...sessionDetailLines(state.detail, { theme, width: cols, height: Math.max(0, rows - 1), now: Date.now() }));
+    return { lines: lines.slice(0, rows) };
+  }
 
   if (state.help) {
     lines.push(...helpLines(cols).map((line) => relabel(state, line)).slice(0, Math.max(0, rows - 2)));

@@ -572,6 +572,42 @@ describe('스페이스 화면 키(#887)', () => {
   });
 });
 
+describe('기록 화면과 세션 자세히 키(#891)', () => {
+  it('Ctrl-b h는 기록 화면을 연다(desk가 프로젝트와 결과를 불러온다)', () => {
+    const { effects } = handleInput(withItems(), '\x02h');
+    expect(effects).toEqual([{ type: 'records', open: true }]);
+  });
+
+  it('Ctrl-b i와 스페이스 화면의 i는 고른 세션의 자세히를 열고 그 세션을 불러온다', () => {
+    const fromPanes = handleInput(withItems({ selected: 1 }), '\x02i');
+    expect(fromPanes.state.detail).toMatchObject({ id: 'b', tab: 'checkpoints', loading: true });
+    expect(fromPanes.effects).toEqual([{ type: 'detail', action: { kind: 'load' } }]);
+    const fromSpace = handleInput(withItems({ view: 'space', selected: 2 }), 'i');
+    expect(fromSpace.state.detail?.id).toBe('c');
+    expect(handleInput(initialState(), '\x02i').state.message).toContain('고를 세션이 없습니다');
+  });
+
+  it('기록 화면이 열려 있으면 키는 기록 화면으로 가고 칸으로 가지 않는다. Esc로 닫는다', () => {
+    const open = { ...withItems({ slots: ['a', undefined, undefined, undefined] }), records: { tab: 'ai' as const, scroll: 0, projects: [{ id: 'p1', name: 'shop' }], projectIndex: 0, range: 'all' as const } };
+    const tabbed = handleInput(open, '\t');
+    expect(tabbed.effects).toEqual([{ type: 'records', load: { kind: 'report', projectId: 'p1' } }]);
+    expect(tabbed.state.records?.tab).toBe('tokens');
+    const typed = handleInput(open, 'xyz');
+    expect(typed.effects.filter((effect) => effect.type === 'input')).toEqual([]);
+    expect(handleInput(open, '\x1b', true).state.records).toBeUndefined();
+  });
+
+  it('세션 자세히의 동작 키는 detail 할 일로 나가고, 까닭을 쓰는 중에 붙여 넣은 글은 까닭에 들어간다', () => {
+    const detail = { id: 'a', title: 'a', tab: 'checkpoints' as const, selected: 0, scroll: 0, loading: false, snapshot: { id: 'a', status: 'ready', running: false, checkpoints: [{ sha: 's1', shortSha: 's1', message: 'm', createdAt: '2026-10-22T00:00:00Z', files: [] }] } };
+    const reverify = handleInput({ ...withItems(), detail }, 'v');
+    expect(reverify.effects).toEqual([{ type: 'detail', action: { kind: 'reverify', sha: 's1' } }]);
+    const writing = { ...withItems(), detail: { ...detail, tab: 'review' as const, resolving: { round: 1, findingIndex: 0, text: '' } } };
+    const pasted = handleInput(writing, '\x1b[200~오탐\n입니다\x1b[201~');
+    expect(pasted.state.detail?.resolving?.text).toBe('오탐 입니다');
+    expect(pasted.effects).toEqual([]);
+  });
+});
+
 describe('설정 화면 키(#890)', () => {
   const base = (): DeskState => ({ ...initialState(), items: [item('a')], slots: ['a', undefined, undefined, undefined] });
 
