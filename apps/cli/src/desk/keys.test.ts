@@ -464,3 +464,19 @@ describe('마우스와 앞글쇠 설정(#874)', () => {
     expect(handleInput(state, '\x01\x01').effects).toEqual([{ type: 'input', id: 'a', data: '\x01' }]);
   });
 });
+
+describe('셸 칸 키(#873)', () => {
+  it('Ctrl-b c는 고른 칸에 새 셸 칸을 열라고 한다', () => {
+    const { state, effects } = handleInput(withItems(), '\x02c');
+    expect(effects).toEqual([{ type: 'shell', slot: 0 }]);
+    expect(state.prefix).toBe(false);
+  });
+
+  it('셸이 남아 있을 때 나가기를 확인하면 y로 나가고, 다른 키로 그만둔다', () => {
+    const asking = { ...withItems(), confirm: { action: 'quit' as const, id: '', title: '셸 1개' } };
+    expect(handleInput(asking, 'y').effects).toEqual([{ type: 'quit', confirmed: true }]);
+    const { state, effects } = handleInput(asking, 'n');
+    expect(effects).toEqual([]);
+    expect(state.confirm).toBeUndefined();
+  });
+});

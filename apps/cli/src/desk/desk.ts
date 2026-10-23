@@ -5,9 +5,10 @@
  * 키 → handleInput → 할 일(입력 보내기, 칸 열기, 새 요청 …) → 스튜디오 API, 터미널 출력 → 칸 해석 → 화면 그리기.
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
+import { basename } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskLayout, type DeskLayout, type DeskPrefix } from './config';
-import { BROWSING, flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
 import { previewLine, renderScreen, sidebarView, type PaneView } from './render';
 import { placePanes, terminalSize } from './screen';
@@ -58,6 +59,37 @@ export interface DeskOptions {
   mouse?: boolean;
 }
 
+/** 셸 칸의 가상 터미널에서 desk가 쓰는 부분(node-pty와 같은 꼴, #873) */
+export interface ShellPty {
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(signal?: string): void;
+  onData(listener: (data: string) => void): unknown;
+  onExit(listener: (event: { exitCode: number; signal?: number }) => void): unknown;
+}
+/** 셸 칸의 가상 터미널을 띄우는 자리(테스트가 가짜를 끼운다) */
+export type SpawnShell = (file: string, args: string[], options: { name: string; cols: number; rows: number; cwd: string; env: Record<string, string> }) => ShellPty | Promise<ShellPty>;
+
+const spawnWithNodePty: SpawnShell = async (file, args, options) => {
+  // 스튜디오의 세션 터미널(packages/sandbox host-terminal)과 같은 가상 터미널 모듈이다. 셸 칸을 열 때만 읽는다
+  const pty = await import('@lydell/node-pty');
+  return pty.spawn(file, args, options);
+};
+
+/**
+ * 셸 칸에 넘길 환경. desk의 환경에서 B_STUDIO_로 시작하는 것을 모두 뺀다:
+ * 관문·MCP·인증 토큰과 비밀(B_STUDIO_GATE_TOKEN, B_STUDIO_GATEWAY_TOKEN, B_STUDIO_MCP_TOKEN, B_STUDIO_AUTH_*, B_STUDIO_SECRET_* …)이 이 이름 아래 있고,
+ * 셸 칸은 관문 밖이다. desk를 세션 터미널 안에서 띄웠을 때 그 세션의 토큰이 관문 밖 셸로 새지 않게 한다
+ */
+export function shellEnvOf(env: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined || name.startsWith('B_STUDIO_')) continue;
+    out[name] = value;
+  }
+  return { ...out, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
+}
+
 /** 배치를 읽고 쓰는 곳(실제로는 desk-state.json, 테스트에서는 메모리) */
 export interface DeskLayoutStore {
   load(): DeskLayout | undefined;
@@ -75,6 +107,12 @@ export interface DeskAppOptions {
   layoutStore?: DeskLayoutStore;
   /** 시작할 때 아래 줄에 보일 설정 알림(잘못된 값) */
   warnings?: string[];
+  /** 셸 칸을 띄우는 자리(기본은 node-pty, #873) */
+  spawnShell?: SpawnShell;
+  /** 셸 칸에 넘길 환경의 바탕(기본은 desk의 환경. B_STUDIO_로 시작하는 것은 뺀다) */
+  shellEnv?: Record<string, string | undefined>;
+  /** 셸 칸의 폴더(기본은 desk를 띄운 폴더) */
+  shellCwd?: string;
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
@@ -195,6 +233,12 @@ export class DeskApp {
   #layoutWarned = false;
   /** 나갈 때 배치를 저장하지 못했으면 화면을 되돌린 뒤 보일 글 */
   #exitWarning: string | undefined;
+  /** 셸 칸(#873). desk가 직접 든 로컬 셸이라 스튜디오·관문을 거치지 않고, desk를 나가거나 칸을 비우면 끝난다 */
+  readonly #shells = new Map<string, { pty?: ShellPty; ended: boolean; dir: string }>();
+  #shellSeq = 0;
+  readonly #spawnShell: SpawnShell;
+  readonly #shellEnv: Record<string, string | undefined>;
+  readonly #shellCwd: string;
 
   constructor(client: DeskClient, items: DeskState['items'], io: DeskIo, options: DeskAppOptions = {}) {
     this.#client = client;
@@ -203,6 +247,9 @@ export class DeskApp {
     this.#mouseOn = options.mouse !== false;
     this.#truecolor = options.truecolor !== false;
     this.#layoutStore = options.layoutStore;
+    this.#spawnShell = options.spawnShell ?? spawnWithNodePty;
+    this.#shellEnv = options.shellEnv ?? process.env;
+    this.#shellCwd = options.shellCwd ?? process.cwd();
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
     this.#state = { ...initialState(), items, ...prefix, ...warnings, ...this.#restoredLayout(items) };
@@ -227,7 +274,8 @@ export class DeskApp {
     if (!this.#layoutStore) return;
     const { layout, slots, focus, zoom, sidebarHidden } = this.#state;
     try {
-      this.#layoutStore.save({ layout, slots: slots.map((id, slot) => (slot < layout ? id : undefined)), focus, zoom: zoom === true, sidebarHidden: sidebarHidden === true });
+      // 셸 칸은 남기지 않는다: desk를 나가면 셸이 끝나고, 다음에 같은 자리에 새 셸을 띄우면 전과 다른 셸인데 이어진 것처럼 보인다
+      this.#layoutStore.save({ layout, slots: slots.map((id, slot) => (slot < layout && !isShellId(id) ? id : undefined)), focus, zoom: zoom === true, sidebarHidden: sidebarHidden === true });
     } catch (error) {
       const text = `칸 배치를 저장하지 못했습니다: ${messageOf(error)}`;
       if (this.#restored) {
@@ -307,6 +355,11 @@ export class DeskApp {
   }
 
   #send(id: string, data: string): void {
+    if (isShellId(id)) {
+      const shell = this.#shells.get(id);
+      if (shell?.pty && !shell.ended) shell.pty.write(data);
+      return;
+    }
     this.#client.input(id, data).catch((error: unknown) => this.#say(`입력을 보내지 못했습니다: ${messageOf(error)}`));
   }
 
@@ -338,8 +391,18 @@ export class DeskApp {
       case 'copy':
         this.#copy(effect.id, effect.action, effect.text);
         return;
-      case 'quit':
+      case 'quit': {
+        // 셸 칸은 desk와 함께 끝난다. 살아 있는 셸이 있으면 한 번 묻는다
+        const live = [...this.#shells.values()].filter((shell) => !shell.ended).length;
+        if (live > 0 && !effect.confirmed) {
+          this.#state = { ...this.#state, confirm: { action: 'quit', id: '', title: `셸 칸 ${live}개` } };
+          return;
+        }
         this.#stop(0);
+        return;
+      }
+      case 'shell':
+        void this.#openShell(effect.slot);
         return;
       case 'prompt':
         void this.#openPrompt();
@@ -547,6 +610,49 @@ export class DeskApp {
   }
 
   /** 지금 칸에 보이는 세션 */
+  /**
+   * 고른 칸에 그냥 셸을 연다(#873). desk가 직접 띄우는 로그인 셸이라 스튜디오와 관문을 거치지 않는다.
+   * 칸 해석기·복사 모드·마우스·붙여넣기는 세션 칸과 같다
+   */
+  async #openShell(slot: number): Promise<void> {
+    const id = `${SHELL_ID}${++this.#shellSeq}`;
+    const dir = this.#shellCwd;
+    const entry: { pty?: ShellPty; ended: boolean; dir: string } = { ended: false, dir };
+    this.#shells.set(id, entry);
+    const slots = [...this.#state.slots];
+    slots[slot] = id;
+    this.#state = { ...this.#state, slots, message: '그냥 셸을 열었습니다. 이 칸은 검증 밖이고, desk를 나가거나 칸을 비우면 끝납니다' };
+    // 해석기를 먼저 만들어 칸 크기를 안다. 앞서 칸에 있던 셸은 여기서 끝난다
+    this.#slotsChanged();
+    this.#saveLayout();
+    const size = this.#ensurePanes().find((entry) => entry.id === id)?.size ?? { cols: 80, rows: 24 };
+    const env = shellEnvOf(this.#shellEnv);
+    const file = env.SHELL || '/bin/sh';
+    try {
+      const pty = await this.#spawnShell(file, ['-l'], { name: 'xterm-256color', cols: size.cols, rows: size.rows, cwd: dir, env });
+      if (!this.#shells.has(id) || this.#restored) {
+        // 띄우는 동안 칸을 비웠거나 desk를 나갔다
+        pty.kill();
+        return;
+      }
+      entry.pty = pty;
+      this.#sizes.set(id, `${size.cols}x${size.rows}`);
+      pty.onData((data) => {
+        const pane = this.#panes.get(id);
+        if (pane) void pane.write(data).then(() => this.#scheduleRender());
+      });
+      pty.onExit(({ exitCode }) => {
+        entry.ended = true;
+        this.#notes.set(id, `셸이 끝났습니다(${exitCode}) · Ctrl-b x로 칸을 비웁니다`);
+        this.#scheduleRender();
+      });
+    } catch (error) {
+      entry.ended = true;
+      this.#notes.set(id, `셸을 띄우지 못했습니다: ${messageOf(error)}`);
+    }
+    this.#scheduleRender();
+  }
+
   #visible(): string[] {
     return this.#state.slots.slice(0, this.#state.layout).filter((id): id is string => Boolean(id));
   }
@@ -555,6 +661,12 @@ export class DeskApp {
   #slotsChanged(): void {
     const visible = new Set(this.#visible());
     // 칸에서 빠진 세션의 해석기는 버린다(다시 열면 스튜디오가 최근 출력을 다시 보낸다). 세션과 CLI는 계속 돈다
+    for (const [id, shell] of this.#shells) {
+      if (visible.has(id)) continue;
+      // 칸에서 빠진 셸은 끝낸다(셸 칸은 칸에만 있다)
+      if (!shell.ended) shell.pty?.kill();
+      this.#shells.delete(id);
+    }
     for (const [id, pane] of this.#panes) {
       if (visible.has(id)) continue;
       pane.dispose();
@@ -589,7 +701,8 @@ export class DeskApp {
         const sessionId = id;
         pane.onResponse((data) => {
           if (Date.now() < (this.#quietUntil.get(sessionId) ?? 0)) return;
-          this.#client.input(sessionId, data).catch(() => {});
+          if (isShellId(sessionId)) this.#send(sessionId, data);
+          else this.#client.input(sessionId, data).catch(() => {});
         });
         // 칸 안 CLI의 벨은 칸 머리에 보이고 밖 터미널 벨로 잇는다. 다시 받는 옛 출력의 벨은 울리지 않는다
         pane.onBell(() => {
@@ -612,6 +725,14 @@ export class DeskApp {
   #syncPanes(): void {
     clearTimeout(this.#resizeTimer);
     for (const { id, size } of this.#ensurePanes()) {
+      if (isShellId(id)) {
+        const key = `${size.cols}x${size.rows}`;
+        const shell = this.#shells.get(id);
+        if (!shell?.pty || shell.ended || this.#sizes.get(id) === key) continue;
+        this.#sizes.set(id, key);
+        shell.pty.resize(size.cols, size.rows);
+        continue;
+      }
       // 끝난 터미널은 창 크기를 바꿨다고 다시 띄우지 않는다(CLI가 새로 뜬다). 사람이 다시 고르면 연다
       if (this.#closed.has(id)) continue;
       const key = `${size.cols}x${size.rows}`;
@@ -647,7 +768,7 @@ export class DeskApp {
       this.#streams.delete(id);
       this.#quietUntil.delete(id);
     }
-    for (const id of visible) if (!this.#streams.has(id)) this.#openStream(id);
+    for (const id of visible) if (!isShellId(id) && !this.#streams.has(id)) this.#openStream(id);
   }
 
   #openStream(id: string): void {
@@ -831,7 +952,9 @@ export class DeskApp {
       const copy = pane?.inCopy ? pane.copyStatus() : undefined;
       const mode = copy ? { mode: `복사 모드 ${copy.line}/${copy.total}줄` } : {};
       const bell = id && this.#bells.has(id) ? { bell: true } : {};
-      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...bell, ...(note ? { note } : {}) };
+      const shell = id && isShellId(id) ? this.#shells.get(id) : undefined;
+      const title = shell ? { title: `셸 · 검증 밖 · ${basename(shell.dir) || shell.dir}` } : {};
+      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...bell, ...title, ...(note ? { note } : {}) };
     });
     const frame = renderScreen(this.#state, this.#size(), views);
     // 바뀐 줄만 다시 쓴다. 지원하는 터미널에서는 한 장을 한 번에 바꾼다(동기 출력)
@@ -865,6 +988,7 @@ export class DeskApp {
       clearTimeout(entry.timer);
     }
     for (const pane of this.#panes.values()) pane.dispose();
+    for (const shell of this.#shells.values()) if (!shell.ended) shell.pty?.kill();
     this.#io.setRaw(false);
     this.#io.write((this.#mouseOn ? MOUSE_OFF : '') + LEAVE_SCREEN);
   }
