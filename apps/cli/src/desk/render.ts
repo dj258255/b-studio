@@ -2,7 +2,7 @@
  * desk 화면 그리기. 상태와 칸마다의 터미널 줄을 받아 화면 한 장(줄 배열)과 커서 자리를 돌려주는 순수 함수다.
  * 줄마다 보이는 폭은 정확히 화면 폭이다(색 제어 문자는 폭에 넣지 않는다). 그리는 쪽은 바뀐 줄만 다시 쓴다
  */
-import type { DeskState } from './keys';
+import { isShellId, type DeskState } from './keys';
 import { charWidth, fit, placePanes, stringWidth, type Rect } from './screen';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow, type Tone } from './sidebar';
 import type { DeskPreview } from './types';
@@ -18,6 +18,8 @@ export interface PaneView {
   mode?: string;
   /** 칸 안 CLI가 벨을 울렸고 아직 이 칸을 고르지 않았다(#864) */
   bell?: boolean;
+  /** 세션 대신 칸 머리에 쓸 제목(셸 칸, #873) */
+  title?: string;
 }
 
 const RESET = '\x1b[0m';
@@ -70,7 +72,7 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
 
@@ -81,11 +83,12 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
+  ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
   ['s', '사이드바 숨기고 보이기'],
   ['[', '복사 모드: 지난 출력 올려 보기와 복사'],
-  ['x', '칸 비우기(세션과 CLI는 계속 돕니다)'],
+  ['x', '칸 비우기(세션과 CLI는 계속 돕니다. 셸 칸은 한 번 묻고 셸을 끝냅니다)'],
   ['p', '사이드바에서 고른 세션 멈추기(한 번 묻습니다. 기록과 작업 복사본은 남습니다)'],
   ['r', '멈춘 세션 이어서 작업(한 번 묻습니다. 켜지면 칸을 다시 엽니다)'],
   [',', '고른 세션 이름 바꾸기(비우면 이름을 지웁니다)'],
@@ -162,7 +165,10 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const sessions = deskSessions(state.items);
 
   const lines: string[] = [];
-  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}`, cols)}${RESET}`);
+  const shells = state.slots.filter((id) => isShellId(id)).length;
+  const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
+  const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
+  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}${shellNote}`, cols)}${RESET}`);
 
   if (state.help) {
     lines.push(...helpLines(cols).map((line) => relabel(state, line)).slice(0, Math.max(0, rows - 2)));
@@ -230,9 +236,13 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const confirm = state.confirm;
     lines.push(
       fit(
-        confirm.action === 'stop'
-          ? ` ‹${confirm.title}› 세션을 멈출까요? CLI와 샌드박스를 내립니다(기록과 작업 복사본은 남습니다) · y 멈추기 · 다른 키 그만두기`
-          : ` ‹${confirm.title}› 세션을 이어서 작업할까요? 샌드박스를 다시 띄웁니다 · y 이어서 작업 · 다른 키 그만두기`,
+        confirm.action === 'close'
+          ? ` 이 칸의 셸을 끝낼까요? 셸에서 돌던 것도 함께 끝납니다 · y 끝내기 · 다른 키 그만두기`
+          : confirm.action === 'quit'
+          ? ` ${confirm.title}이 desk와 함께 끝납니다(세션 칸의 CLI는 계속 돕니다). 나갈까요? · y 나가기 · 다른 키 그만두기`
+          : confirm.action === 'stop'
+            ? ` ‹${confirm.title}› 세션을 멈출까요? CLI와 샌드박스를 내립니다(기록과 작업 복사본은 남습니다) · y 멈추기 · 다른 키 그만두기`
+            : ` ‹${confirm.title}› 세션을 이어서 작업할까요? 샌드박스를 다시 띄웁니다 · y 이어서 작업 · 다른 키 그만두기`,
         cols,
       ),
     );
@@ -266,6 +276,7 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
     const item = id ? state.items.find((candidate) => candidate.id === id) : undefined;
     let title = ` ${slot + 1} `;
     if (!id) title += '(비어 있음)';
+    else if (view?.title) title += view.title;
     else if (item) {
       const gate = gateStatus(item);
       title += [backendLabel(item.backend), item.title, agentStatus(item).label, ...(gate ? [gate.label] : [])].join(' · ');
@@ -279,7 +290,7 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
   }
   if (!id) {
     const middle = Math.floor((rect.h - 1) / 2);
-    return fit(row === middle ? relabel(state, '  Ctrl-b Enter 로 사이드바에서 고른 세션을 엽니다') : '', rect.w);
+    return fit(row === middle ? relabel(state, '  Ctrl-b Enter 로 사이드바에서 고른 세션을, Ctrl-b c 로 그냥 셸을 엽니다') : '', rect.w);
   }
   const line = view?.lines[row - 1];
   if (line === undefined) return ' '.repeat(rect.w);

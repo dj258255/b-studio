@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
 import type { DeskLayout } from './config';
-import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore } from './desk';
+import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell } from './desk';
 import { sidebarRows } from './sidebar';
 import type { DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
@@ -671,5 +671,210 @@ describe('desk 작업대: 마우스, 배치 기억, 설정(#874)', () => {
     await tick();
     expect(ctx.io.all).toContain('38;5;196');
     expect(ctx.io.all).not.toContain('38;2;255;0;0');
+  });
+});
+
+describe('desk 작업대: 그냥 셸 칸(#873)', () => {
+  class FakeShell implements ShellPty {
+    written: string[] = [];
+    sizes: Array<[number, number]> = [];
+    killed = false;
+    #data: (data: string) => void = () => {};
+    #exit: (event: { exitCode: number }) => void = () => {};
+    write(data: string) {
+      this.written.push(data);
+    }
+    resize(cols: number, rows: number) {
+      this.sizes.push([cols, rows]);
+    }
+    kill() {
+      this.killed = true;
+    }
+    onData(listener: (data: string) => void) {
+      this.#data = listener;
+    }
+    onExit(listener: (event: { exitCode: number }) => void) {
+      this.#exit = listener;
+    }
+    emit(data: string) {
+      this.#data(data);
+    }
+    end(code = 0) {
+      this.#exit({ exitCode: code });
+    }
+  }
+
+  function withShell(env: Record<string, string | undefined> = { SHELL: '/bin/zsh', HOME: '/home/me', PATH: '/usr/bin', B_STUDIO_GATE_TOKEN: 'secret', B_STUDIO_LOCAL_TOKEN_FILE: '/x', B_STUDIO_EXPERIMENTAL: '1' }) {
+    const shells: FakeShell[] = [];
+    const spawns: Array<{ file: string; args: string[]; options: Parameters<SpawnShell>[2] }> = [];
+    const spawnShell: SpawnShell = (file, args, options) => {
+      spawns.push({ file, args, options });
+      const shell = new FakeShell();
+      shells.push(shell);
+      return shell;
+    };
+    const ctx = setup(undefined, { spawnShell, shellEnv: env, shellCwd: '/work/shop' });
+    return { ...ctx, shells, spawns };
+  }
+
+  it('Ctrl-b c는 desk가 직접 띄운 로그인 셸을 고른 칸에 열고, 칸 머리에 검증 밖이라고 보인다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    expect(ctx.spawns).toHaveLength(1);
+    const { file, args, options } = ctx.spawns[0]!;
+    expect(file).toBe('/bin/zsh');
+    expect(args).toEqual(['-l']);
+    expect(options.cwd).toBe('/work/shop');
+    expect(options.env.TERM).toBe('xterm-256color');
+    expect(options.env.COLORTERM).toBe('truecolor');
+    expect(options.env.PATH).toBe('/usr/bin');
+    // b-studio의 토큰·설정은 셸에 넘기지 않는다(관문 밖이다)
+    expect(Object.keys(options.env).filter((name) => name.startsWith('B_STUDIO_'))).toEqual([]);
+    expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
+    expect(ctx.io.all).toContain('셸 · 검증 밖');
+    // 스튜디오에는 열기·통로를 보내지 않는다
+    expect(ctx.client.calls).toEqual([]);
+    expect(ctx.client.streams).toEqual([]);
+  });
+
+  it('SHELL이 없으면 /bin/sh를 띄운다', async () => {
+    const ctx = withShell({ PATH: '/usr/bin' });
+    ctx.io.type('\x02c');
+    await tick();
+    expect(ctx.spawns[0]!.file).toBe('/bin/sh');
+  });
+
+  it('친 글자와 붙여 넣은 글은 셸로 가고, 셸 출력은 칸에 그려지며, 크기는 셸에만 맞춘다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    const shell = ctx.shells[0]!;
+    ctx.io.type('ls\r');
+    ctx.io.type('\x1b[200~a\nb\x1b[201~');
+    await tick();
+    expect(shell.written).toEqual(['ls\r', 'a\nb']);
+    expect(ctx.client.of('input')).toEqual([]);
+    shell.emit('hello-from-shell');
+    await tick();
+    expect(ctx.io.all).toContain('hello-from-shell');
+    ctx.io.resize(100, 24);
+    await tick(300);
+    expect(shell.sizes.length).toBeGreaterThan(0);
+    expect(ctx.client.of('resize')).toEqual([]);
+  });
+
+  it('셸이 끝나면 칸 머리에 끝났다고 보이고, Ctrl-b x는 셸을 끝내고 칸을 비운다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    ctx.shells[0]!.end(0);
+    await tick();
+    expect(ctx.io.all).toContain('셸이 끝났습니다');
+    ctx.io.type('\x02c');
+    await tick();
+    // 끝난 셸 칸은 묻지 않고 비운다
+    expect(ctx.shells).toHaveLength(1);
+    ctx.io.type('\x02x');
+    await tick();
+    expect(ctx.app.state.slots[0]).toBeUndefined();
+    expect(ctx.app.state.confirm).toBeUndefined();
+  });
+
+  it('살아 있는 셸 칸의 x는 한 번 묻고, 그만두면 셸이 그대로이고 y면 끝낸다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    const shell = ctx.shells[0]!;
+    ctx.io.type('\x02x');
+    await tick();
+    expect(ctx.app.state.confirm?.action).toBe('close');
+    ctx.io.type('n');
+    await tick();
+    expect(shell.killed).toBe(false);
+    expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
+    ctx.io.type('\x02x');
+    await tick();
+    ctx.io.type('y');
+    await tick();
+    expect(shell.killed).toBe(true);
+    expect(ctx.app.state.slots[0]).toBeUndefined();
+  });
+
+  it('칸 수를 줄여 가려진 셸 칸은 끝나지 않고 출력을 계속 받으며, 칸 수를 늘리면 그 자리에 다시 보인다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02l');
+    ctx.io.type('\x022');
+    ctx.io.type('\x02c');
+    await tick();
+    const shell = ctx.shells[0]!;
+    expect(ctx.app.state.slots[1]).toMatch(/^shell:/);
+    // 2 → 4 → 1
+    ctx.io.type('\x02l');
+    ctx.io.type('\x02l');
+    await tick();
+    expect(ctx.app.state.layout).toBe(1);
+    expect(shell.killed).toBe(false);
+    expect(ctx.io.all).toContain('가려짐');
+    shell.emit('built-while-hidden');
+    await tick();
+    // 1 → 2: 같은 자리에 다시 보이고, 가려진 동안의 출력도 남아 있다
+    ctx.io.type('\x02l');
+    await tick();
+    expect(ctx.app.state.slots[1]).toMatch(/^shell:/);
+    expect(ctx.io.all).toContain('built-while-hidden');
+  });
+
+  it('크게 보기로 가린 셸 칸도 끝나지 않는다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02l');
+    ctx.io.type('\x022');
+    ctx.io.type('\x02c');
+    await tick();
+    ctx.io.type('\x021\x02z');
+    await tick();
+    expect(ctx.app.state.zoom).toBe(true);
+    expect(ctx.shells[0]!.killed).toBe(false);
+  });
+
+  it('셸 칸을 고른 채 새 요청을 보내면 세션은 만들되 셸 칸을 덮지 않는다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('고쳐 줘\r');
+    await tick(400);
+    expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
+    expect(ctx.shells[0]!.killed).toBe(false);
+    expect(ctx.app.state.message).toContain('셸');
+  });
+
+  it('셸 칸이 살아 있으면 나가기 전에 한 번 묻고, y면 셸을 끝내고 나간다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    ctx.io.type('\x02q');
+    await tick();
+    expect(ctx.app.state.confirm?.action).toBe('quit');
+    ctx.io.type('n');
+    await tick();
+    expect(ctx.app.state.confirm).toBeUndefined();
+    ctx.io.type('\x02q');
+    await tick();
+    ctx.io.type('y');
+    await expect(ctx.done).resolves.toBe(0);
+    expect(ctx.shells[0]!.killed).toBe(true);
+  });
+
+  it('배치를 저장할 때 셸 칸은 남기지 않는다(desk를 나가면 셸은 끝난다)', async () => {
+    const saved: DeskLayout[] = [];
+    const spawnShell: SpawnShell = () => new FakeShell();
+    const ctx = setup(undefined, { spawnShell, shellEnv: {}, shellCwd: '/tmp', layoutStore: { load: () => undefined, save: (layout) => void saved.push(layout) } });
+    ctx.io.type('\x02c');
+    await tick();
+    expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
+    expect(saved.length).toBeGreaterThan(0);
+    expect(saved.at(-1)?.slots[0]).toBeUndefined();
   });
 });

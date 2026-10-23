@@ -4,7 +4,7 @@
  * 앞글쇠는 Ctrl-b(tmux·herdr와 같다). 앞글쇠가 없으면 친 글자는 고른 칸의 CLI로 그대로 간다.
  * 앞글쇠 다음: 숫자(칸 고르기), o(다음 칸), ↑↓(사이드바, 앞글쇠가 이어지고 그동안 Ctrl-b는 새 앞글쇠다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수),
  * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로),
- * p(고른 세션 멈추기), r(멈춘 세션 이어서 작업), ,(고른 세션 이름 바꾸기). 새 요청 입력 중에는 글자가 입력으로 간다.
+ * p(고른 세션 멈추기), r(멈춘 세션 이어서 작업), ,(고른 세션 이름 바꾸기), c(그냥 셸 칸, #873). 새 요청 입력 중에는 글자가 입력으로 간다.
  * 복사 모드·도움말·확인·이름 입력 중에는 키가 CLI로 가지 않는다(#863, #864).
  * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다.
  * 앞글쇠는 설정(desk.json)으로 바꿀 수 있고(state.prefixKey), 마우스(SGR 열)는 CLI로 보내지 않고 mouse 할 일로 낸다. 칸·사이드바 자리는 desk.ts가 가린다(#874)
@@ -30,6 +30,16 @@ const MOUSE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/;
 const LAYOUTS: readonly PaneLayout[] = [1, 2, 4];
 /** 칸 자리 수(4칸 배치까지) */
 export const SLOT_COUNT = 4;
+/** 셸 칸의 id 앞부분. 스튜디오 세션 id와 섞이지 않는다(셸 칸은 desk가 직접 든 로컬 셸이다, #873) */
+export const SHELL_ID = 'shell:';
+
+export function isShellId(id: string | undefined): id is string {
+  return id !== undefined && id.startsWith(SHELL_ID);
+}
+
+/** 셸 칸 자리에 다른 것을 열려고 할 때의 안내. 셸 칸은 x와 desk 나가기로만 끝낸다 */
+export const SHELL_TAKEN = '이 칸에는 셸이 돌고 있습니다. 다른 칸을 고르거나 Ctrl-b x로 셸을 끝낸 뒤 엽니다';
+
 /** 사이드바를 고르는 중의 안내 */
 export const BROWSING = '사이드바 고르는 중: ↑↓로 옮기고 Enter로 칸에 엽니다. 다른 글쇠는 Ctrl-b 다음과 같습니다';
 
@@ -53,7 +63,8 @@ export interface CopyState {
 
 /** 세션 조작을 하기 전에 한 번 묻는다(#864). 멈추면 CLI와 샌드박스가 내려가므로 실수로 누른 키로 하지 않게 한다 */
 export interface ConfirmState {
-  action: SessionAction;
+  /** quit은 셸 칸이 남은 채 나가기, close는 살아 있는 셸 칸 끝내기(#873) */
+  action: SessionAction | 'quit' | 'close';
   id: string;
   title: string;
 }
@@ -104,11 +115,15 @@ export type Effect =
   | { type: 'open'; slot: number; id: string }
   /** 이미 칸에 있는 세션을 다시 골랐다: 터미널이 끝났거나 열지 못했으면 다시 연다 */
   | { type: 'reopen'; id: string }
-  | { type: 'close'; slot: number; id: string }
+  /** 칸 비우기. 셸 칸이면 칸을 비우는 것은 desk가 정한다(살아 있으면 한 번 묻고, confirmed면 끝낸다) */
+  | { type: 'close'; slot: number; id: string; confirmed?: boolean }
   /** 칸 배치가 바뀌었다(칸 수, 크게 보기, 사이드바) */
   | { type: 'layout' }
   | { type: 'copy'; id: string; action: CopyAction; text?: string }
-  | { type: 'quit' }
+  /** confirmed: 셸 칸이 남은 채 나가도 된다고 답했다 */
+  | { type: 'quit'; confirmed?: boolean }
+  /** 고른 칸에 그냥 셸 칸을 연다(#873) */
+  | { type: 'shell'; slot: number }
   | { type: 'prompt' }
   | { type: 'preview'; text: string }
   | { type: 'submit'; projectId: string; request: string; choice: string }
@@ -348,6 +363,7 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
       effects.push({ type: 'reopen', id: item.id });
       return { ...done, focus: already };
     }
+    if (isShellId(state.slots[state.focus])) return { ...done, message: SHELL_TAKEN };
     const slots = [...state.slots];
     slots[state.focus] = item.id;
     effects.push({ type: 'open', slot: state.focus, id: item.id });
@@ -359,14 +375,19 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
   }
   if (key === 'l') {
     const layout = LAYOUTS[(LAYOUTS.indexOf(state.layout) + 1) % LAYOUTS.length]!;
-    // 줄어든 배치 밖의 칸은 비운다(세션은 계속 돈다)
-    const slots = state.slots.map((id, slot) => (slot < layout ? id : undefined));
+    // 줄어든 배치 밖의 세션 칸은 비운다(세션은 계속 돈다). 셸 칸은 가려 두고 셸도 계속 돈다: 칸 수를 다시 늘리면 그 자리에 보인다
+    const slots = state.slots.map((id, slot) => (slot < layout || isShellId(id) ? id : undefined));
     effects.push({ type: 'layout' });
     return { ...done, layout, slots, focus: Math.min(state.focus, layout - 1), zoom: false };
   }
   if (key === 'x') {
     const id = state.slots[state.focus];
     if (!id) return done;
+    // 셸 칸은 비우면 셸이 끝난다. 살아 있는지는 desk가 알아 한 번 묻는다
+    if (isShellId(id)) {
+      effects.push({ type: 'close', slot: state.focus, id });
+      return done;
+    }
     const slots = [...state.slots];
     slots[state.focus] = undefined;
     effects.push({ type: 'close', slot: state.focus, id });
@@ -374,6 +395,11 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
   }
   if (key === 'q') {
     effects.push({ type: 'quit' });
+    return done;
+  }
+  if (key === 'c') {
+    if (isShellId(state.slots[state.focus])) return { ...done, message: SHELL_TAKEN };
+    effects.push({ type: 'shell', slot: state.focus });
     return done;
   }
   if (key === 'p' || key === 'r' || key === ',') {
@@ -391,7 +417,12 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
 function confirmKey(state: DeskState, key: string, effects: Effect[]): DeskState {
   const confirm = state.confirm!;
   if (key === 'y' || key === 'Y' || key === '\r') {
-    effects.push({ type: 'session', action: confirm.action, id: confirm.id });
+    if (confirm.action === 'quit') effects.push({ type: 'quit', confirmed: true });
+    else if (confirm.action === 'close') {
+      const slot = state.slots.indexOf(confirm.id);
+      if (slot >= 0) effects.push({ type: 'close', slot, id: confirm.id, confirmed: true });
+    }
+    else effects.push({ type: 'session', action: confirm.action, id: confirm.id });
     return { ...state, confirm: undefined, message: undefined };
   }
   return { ...state, confirm: undefined, message: '그만두었습니다' };

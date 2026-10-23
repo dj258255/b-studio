@@ -464,3 +464,49 @@ describe('마우스와 앞글쇠 설정(#874)', () => {
     expect(handleInput(state, '\x01\x01').effects).toEqual([{ type: 'input', id: 'a', data: '\x01' }]);
   });
 });
+
+describe('셸 칸 키(#873)', () => {
+  it('Ctrl-b c는 고른 칸에 새 셸 칸을 열라고 한다', () => {
+    const { state, effects } = handleInput(withItems(), '\x02c');
+    expect(effects).toEqual([{ type: 'shell', slot: 0 }]);
+    expect(state.prefix).toBe(false);
+  });
+
+  it('칸 수를 줄여도 셸 칸 id는 가려진 자리에 남기고, 세션 칸만 비운다', () => {
+    const state = withItems({ layout: 4, slots: ['a', 'shell:1', 'b', 'shell:2'], focus: 0 });
+    const { state: next } = handleInput(state, '\x02l');
+    expect(next.layout).toBe(1);
+    expect(next.slots).toEqual(['a', 'shell:1', undefined, 'shell:2']);
+  });
+
+  it('셸 칸의 x는 칸을 비우지 않고 desk에 맡긴다(살아 있는 셸이면 desk가 한 번 묻는다)', () => {
+    const state = withItems({ slots: ['shell:1', undefined, undefined, undefined] });
+    const { state: next, effects } = handleInput(state, '\x02x');
+    expect(effects).toEqual([{ type: 'close', slot: 0, id: 'shell:1' }]);
+    expect(next.slots[0]).toBe('shell:1');
+  });
+
+  it('셸 칸 자리에는 다른 세션이나 새 셸을 덮어 열지 않는다', () => {
+    const state = withItems({ slots: ['shell:1', undefined, undefined, undefined] });
+    for (const keys of ['\x02\r', '\x02c']) {
+      const { state: next, effects } = handleInput(state, keys);
+      expect(effects).toEqual([]);
+      expect(next.slots[0]).toBe('shell:1');
+      expect(next.message).toContain('셸');
+    }
+  });
+
+  it('셸 칸 끝내기를 확인하면 y로 끝내고, 다른 키로 그만둔다', () => {
+    const asking = { ...withItems({ slots: ['shell:1', undefined, undefined, undefined] }), confirm: { action: 'close' as const, id: 'shell:1', title: '셸' } };
+    expect(handleInput(asking, 'y').effects).toEqual([{ type: 'close', slot: 0, id: 'shell:1', confirmed: true }]);
+    expect(handleInput(asking, 'n').effects).toEqual([]);
+  });
+
+  it('셸이 남아 있을 때 나가기를 확인하면 y로 나가고, 다른 키로 그만둔다', () => {
+    const asking = { ...withItems(), confirm: { action: 'quit' as const, id: '', title: '셸 1개' } };
+    expect(handleInput(asking, 'y').effects).toEqual([{ type: 'quit', confirmed: true }]);
+    const { state, effects } = handleInput(asking, 'n');
+    expect(effects).toEqual([]);
+    expect(state.confirm).toBeUndefined();
+  });
+});
