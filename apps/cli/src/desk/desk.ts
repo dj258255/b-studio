@@ -379,8 +379,15 @@ export class DeskApp {
         if (this.#closed.delete(effect.id)) this.#sizes.delete(effect.id);
         this.#syncPanes();
         return;
-      case 'open':
       case 'close':
+        if (isShellId(effect.id)) {
+          this.#closeShell(effect.slot, effect.id, effect.confirmed === true);
+          return;
+        }
+        this.#slotsChanged();
+        this.#saveLayout();
+        return;
+      case 'open':
       case 'layout':
         this.#slotsChanged();
         this.#saveLayout();
@@ -653,6 +660,21 @@ export class DeskApp {
     this.#scheduleRender();
   }
 
+  /** 셸 칸 비우기: 끝난 셸은 바로 비우고, 살아 있는 셸은 한 번 묻는다(셸에서 돌던 빌드·서버도 끝난다) */
+  #closeShell(slot: number, id: string, confirmed: boolean): void {
+    const shell = this.#shells.get(id);
+    if (shell && !shell.ended && !confirmed) {
+      this.#state = { ...this.#state, confirm: { action: 'close', id, title: '셸' } };
+      return;
+    }
+    if (this.#state.slots[slot] !== id) return;
+    const slots = [...this.#state.slots];
+    slots[slot] = undefined;
+    this.#state = { ...this.#state, slots, message: '셸을 끝내고 칸을 비웠습니다' };
+    this.#slotsChanged();
+    this.#saveLayout();
+  }
+
   #visible(): string[] {
     return this.#state.slots.slice(0, this.#state.layout).filter((id): id is string => Boolean(id));
   }
@@ -661,14 +683,15 @@ export class DeskApp {
   #slotsChanged(): void {
     const visible = new Set(this.#visible());
     // 칸에서 빠진 세션의 해석기는 버린다(다시 열면 스튜디오가 최근 출력을 다시 보낸다). 세션과 CLI는 계속 돈다
+    // 셸 칸은 칸 자리에서 사라졌을 때만 끝낸다(x로 비웠을 때). 칸 수를 줄이거나 크게 보기로 가린 셸은 계속 돌고 해석기도 출력을 받는다
+    const held = new Set(this.#state.slots.filter((id): id is string => isShellId(id)));
     for (const [id, shell] of this.#shells) {
-      if (visible.has(id)) continue;
-      // 칸에서 빠진 셸은 끝낸다(셸 칸은 칸에만 있다)
+      if (held.has(id)) continue;
       if (!shell.ended) shell.pty?.kill();
       this.#shells.delete(id);
     }
     for (const [id, pane] of this.#panes) {
-      if (visible.has(id)) continue;
+      if (visible.has(id) || held.has(id)) continue;
       pane.dispose();
       this.#panes.delete(id);
       this.#sizes.delete(id);
@@ -914,7 +937,9 @@ export class DeskApp {
     try {
       const result = await this.#client.start({ projectId, request, choice });
       const slots = [...this.#state.slots];
-      slots[this.#state.focus] = result.session.id;
+      // 고른 칸에 셸이 돌고 있으면 덮지 않는다(셸은 x와 나가기로만 끝낸다). 세션은 사이드바에서 연다
+      const shellTaken = isShellId(slots[this.#state.focus]);
+      if (!shellTaken) slots[this.#state.focus] = result.session.id;
       const target = backendLabel(result.routing?.backend ?? (choice === 'rules' ? undefined : choice));
       const message = result.sendError
         ? `${target} 세션을 만들었지만 요청을 보내지 못했습니다: ${result.sendError}`
@@ -923,7 +948,7 @@ export class DeskApp {
         : result.terminal
           ? `${target}로 보냈습니다`
           : `${target} 세션을 만들었습니다(이 스튜디오는 아직 터미널로 첫 요청을 넣지 않습니다)`;
-      this.#state = { ...this.#state, prompt: undefined, slots, message };
+      this.#state = { ...this.#state, prompt: undefined, slots, message: shellTaken ? `${message} · 고른 칸에 셸이 있어 칸에는 열지 않았습니다(사이드바에서 Ctrl-b Enter로 엽니다)` : message };
       this.#slotsChanged();
       this.#saveLayout();
       void this.#poll();

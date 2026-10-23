@@ -773,11 +773,81 @@ describe('desk 작업대: 그냥 셸 칸(#873)', () => {
     expect(ctx.io.all).toContain('셸이 끝났습니다');
     ctx.io.type('\x02c');
     await tick();
-    const second = ctx.shells[1]!;
+    // 끝난 셸 칸은 묻지 않고 비운다
+    expect(ctx.shells).toHaveLength(1);
     ctx.io.type('\x02x');
     await tick();
-    expect(second.killed).toBe(true);
     expect(ctx.app.state.slots[0]).toBeUndefined();
+    expect(ctx.app.state.confirm).toBeUndefined();
+  });
+
+  it('살아 있는 셸 칸의 x는 한 번 묻고, 그만두면 셸이 그대로이고 y면 끝낸다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    const shell = ctx.shells[0]!;
+    ctx.io.type('\x02x');
+    await tick();
+    expect(ctx.app.state.confirm?.action).toBe('close');
+    ctx.io.type('n');
+    await tick();
+    expect(shell.killed).toBe(false);
+    expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
+    ctx.io.type('\x02x');
+    await tick();
+    ctx.io.type('y');
+    await tick();
+    expect(shell.killed).toBe(true);
+    expect(ctx.app.state.slots[0]).toBeUndefined();
+  });
+
+  it('칸 수를 줄여 가려진 셸 칸은 끝나지 않고 출력을 계속 받으며, 칸 수를 늘리면 그 자리에 다시 보인다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02l');
+    ctx.io.type('\x022');
+    ctx.io.type('\x02c');
+    await tick();
+    const shell = ctx.shells[0]!;
+    expect(ctx.app.state.slots[1]).toMatch(/^shell:/);
+    // 2 → 4 → 1
+    ctx.io.type('\x02l');
+    ctx.io.type('\x02l');
+    await tick();
+    expect(ctx.app.state.layout).toBe(1);
+    expect(shell.killed).toBe(false);
+    expect(ctx.io.all).toContain('가려짐');
+    shell.emit('built-while-hidden');
+    await tick();
+    // 1 → 2: 같은 자리에 다시 보이고, 가려진 동안의 출력도 남아 있다
+    ctx.io.type('\x02l');
+    await tick();
+    expect(ctx.app.state.slots[1]).toMatch(/^shell:/);
+    expect(ctx.io.all).toContain('built-while-hidden');
+  });
+
+  it('크게 보기로 가린 셸 칸도 끝나지 않는다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02l');
+    ctx.io.type('\x022');
+    ctx.io.type('\x02c');
+    await tick();
+    ctx.io.type('\x021\x02z');
+    await tick();
+    expect(ctx.app.state.zoom).toBe(true);
+    expect(ctx.shells[0]!.killed).toBe(false);
+  });
+
+  it('셸 칸을 고른 채 새 요청을 보내면 세션은 만들되 셸 칸을 덮지 않는다', async () => {
+    const ctx = withShell();
+    ctx.io.type('\x02c');
+    await tick();
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('고쳐 줘\r');
+    await tick(400);
+    expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
+    expect(ctx.shells[0]!.killed).toBe(false);
+    expect(ctx.app.state.message).toContain('셸');
   });
 
   it('셸 칸이 살아 있으면 나가기 전에 한 번 묻고, y면 셸을 끝내고 나간다', async () => {

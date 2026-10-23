@@ -83,12 +83,12 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
-  ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. desk를 나가거나 칸을 비우면 끝납니다)'],
+  ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
   ['s', '사이드바 숨기고 보이기'],
   ['[', '복사 모드: 지난 출력 올려 보기와 복사'],
-  ['x', '칸 비우기(세션과 CLI는 계속 돕니다. 셸 칸은 셸을 끝냅니다)'],
+  ['x', '칸 비우기(세션과 CLI는 계속 돕니다. 셸 칸은 한 번 묻고 셸을 끝냅니다)'],
   ['p', '사이드바에서 고른 세션 멈추기(한 번 묻습니다. 기록과 작업 복사본은 남습니다)'],
   ['r', '멈춘 세션 이어서 작업(한 번 묻습니다. 켜지면 칸을 다시 엽니다)'],
   [',', '고른 세션 이름 바꾸기(비우면 이름을 지웁니다)'],
@@ -165,8 +165,10 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const sessions = deskSessions(state.items);
 
   const lines: string[] = [];
-  const shells = state.slots.filter((id, slot) => slot < state.layout && isShellId(id)).length;
-  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}${shells ? ` · 셸 ${shells}(검증 밖)` : ''}`, cols)}${RESET}`);
+  const shells = state.slots.filter((id) => isShellId(id)).length;
+  const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
+  const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
+  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}${shellNote}`, cols)}${RESET}`);
 
   if (state.help) {
     lines.push(...helpLines(cols).map((line) => relabel(state, line)).slice(0, Math.max(0, rows - 2)));
@@ -234,7 +236,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const confirm = state.confirm;
     lines.push(
       fit(
-        confirm.action === 'quit'
+        confirm.action === 'close'
+          ? ` 이 칸의 셸을 끝낼까요? 셸에서 돌던 것도 함께 끝납니다 · y 끝내기 · 다른 키 그만두기`
+          : confirm.action === 'quit'
           ? ` ${confirm.title}이 desk와 함께 끝납니다(세션 칸의 CLI는 계속 돕니다). 나갈까요? · y 나가기 · 다른 키 그만두기`
           : confirm.action === 'stop'
             ? ` ‹${confirm.title}› 세션을 멈출까요? CLI와 샌드박스를 내립니다(기록과 작업 복사본은 남습니다) · y 멈추기 · 다른 키 그만두기`
