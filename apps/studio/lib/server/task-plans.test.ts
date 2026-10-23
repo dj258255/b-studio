@@ -2041,7 +2041,7 @@ describe('레인 백엔드 고르기 (이슈 #398)', () => {
 
 describe('레인 계정 고르기 (#893)', () => {
   const home = mkdtempSync(path.join(tmpdir(), 'b-studio-lane-accounts-'));
-  const env = { HOME: home, XDG_CONFIG_HOME: path.join(home, '.config') };
+  const env = { NODE_ENV: 'test', HOME: home, XDG_CONFIG_HOME: path.join(home, '.config') } as const satisfies NodeJS.ProcessEnv;
   afterAll(() => rmSync(home, { recursive: true, force: true }));
 
   async function asyncStatus(action: () => Promise<unknown>): Promise<number> {
