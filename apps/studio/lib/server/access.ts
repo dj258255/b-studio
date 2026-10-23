@@ -1,5 +1,3 @@
-import { headers } from 'next/headers';
-import { redirect } from 'next/navigation';
 import { authConfig, canManage, LOCAL_USER, USER_HEADER } from './auth';
 import { StudioError } from './errors';
 import { getSnapshot, recoverSessions } from './sessions';
@@ -15,12 +13,16 @@ export function requireUser(requestHeaders: Headers): string {
   return user;
 }
 
-/** 화면(서버 컴포넌트)의 사용자. 확인하지 못하면 로그인으로 보낸다 */
+/**
+ * 화면(서버 컴포넌트)의 사용자. 확인하지 못하면 로그인으로 보낸다.
+ * Next는 화면에서만 부르므로 그때 불러온다 — API 라우트는 Next 없이 도는 스튜디오 서버(server/)에서도 이 파일을 쓴다
+ */
 export async function pageUser(): Promise<string> {
+  const [{ headers }, { redirect }] = await Promise.all([import('next/headers'), import('next/navigation')]);
   try {
     return requireUser(await headers());
   } catch {
-    redirect('/login');
+    return redirect('/login');
   }
 }
 

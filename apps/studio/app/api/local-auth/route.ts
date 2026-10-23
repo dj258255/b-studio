@@ -1,4 +1,3 @@
-import { NextResponse } from 'next/server';
 import { authConfig, isLoopbackHost, isSameOrigin } from '@/lib/server/auth';
 import { errorResponse } from '@/lib/server/errors';
 import { hasLocalToken, LOCAL_TOKEN_COOKIE } from '@/lib/server/local-token';
@@ -11,22 +10,20 @@ import { hasLocalToken, LOCAL_TOKEN_COOKIE } from '@/lib/server/local-token';
  */
 export async function POST(request: Request): Promise<Response> {
   try {
-    if (authConfig().mode !== 'none') return NextResponse.json({ error: '없는 경로입니다' }, { status: 404 });
+    if (authConfig().mode !== 'none') return Response.json({ error: '없는 경로입니다' }, { status: 404 });
     if (!isLoopbackHost(request.headers)) {
-      return NextResponse.json({ error: '터미널 토큰은 이 컴퓨터의 주소(127.0.0.1 · localhost)로만 받습니다' }, { status: 403 });
+      return Response.json({ error: '터미널 토큰은 이 컴퓨터의 주소(127.0.0.1 · localhost)로만 받습니다' }, { status: 403 });
     }
     if (!isSameOrigin(request.headers)) {
-      return NextResponse.json({ error: '다른 출처에서 보낸 요청은 받지 않습니다' }, { status: 403 });
+      return Response.json({ error: '다른 출처에서 보낸 요청은 받지 않습니다' }, { status: 403 });
     }
     const body = (await request.json().catch(() => undefined)) as { token?: unknown } | undefined;
     const token = typeof body?.token === 'string' ? body.token.trim() : '';
     if (!hasLocalToken(token)) {
-      return NextResponse.json({ error: '터미널 토큰이 올바르지 않습니다. `pnpm studio launch`가 찍은 주소로 다시 여세요' }, { status: 403 });
+      return Response.json({ error: '터미널 토큰이 올바르지 않습니다. `pnpm studio launch`가 찍은 주소로 다시 여세요' }, { status: 403 });
     }
-    const response = NextResponse.json({ ok: true });
     // http라 Secure는 붙이지 않는다. 토큰은 hex라 쿠키 값으로 그대로 넣어도 안전하다
-    response.headers.append('set-cookie', `${LOCAL_TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict`);
-    return response;
+    return Response.json({ ok: true }, { headers: { 'set-cookie': `${LOCAL_TOKEN_COOKIE}=${token}; Path=/; HttpOnly; SameSite=Strict` } });
   } catch (error) {
     return errorResponse(error);
   }

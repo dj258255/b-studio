@@ -209,6 +209,7 @@
 - [ADR-185 스튜디오를 다시 띄운 뒤 세션 터미널은 지난 CLI 대화를 이어 붙여 연다](#adr-185-스튜디오를-다시-띄운-뒤-세션-터미널은-지난-cli-대화를-이어-붙여-연다)
 - [ADR-186 웹 화면을 버리고 터미널 하나(studio desk)를 유일한 화면으로 삼는다](#adr-186-웹-화면을-버리고-터미널-하나studio-desk를-유일한-화면으로-삼는다)
 - [ADR-187 계정마다 구독 한도를 읽는다: Codex는 app-server, Claude는 사용량 API를 10분에 한 번](#adr-187-계정마다-구독-한도를-읽는다-codex는-app-server-claude는-사용량-api를-10분에-한-번)
+- [ADR-188 스튜디오 서버는 Next 없이 node:http로 돌고, 라우트 표는 코드젠으로 미리 묶는다](#adr-188-스튜디오-서버는-next-없이-nodehttp로-돌고-라우트-표는-코드젠으로-미리-묶는다)
 
 ---
 
@@ -8863,3 +8864,43 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - Claude 사용량 API는 언제든 바뀌거나 막힐 수 있다. 그러면 카드는 "모름"과 까닭을 보이고 다른 기능은 그대로다.
 - 10분 간격이라 Claude 카드의 값은 최대 10분(물러나면 더) 늦다.
 - macOS에서 Keychain을 읽을 때 처음 한 번 허락을 물을 수 있다.
+
+## ADR-188 스튜디오 서버는 Next 없이 node:http로 돌고, 라우트 표는 코드젠으로 미리 묶는다
+
+상태: 채택
+관련: ADR-186(웹 화면을 버리고 터미널 하나로), ADR-173(이 컴퓨터 방식 세션 터미널과 로컬 토큰), 이슈 [#897](https://github.com/dj258255/b-studio/issues/897), 추적 [#898](https://github.com/dj258255/b-studio/issues/898)
+
+### 맥락
+- ADR-186으로 화면은 터미널 작업대(studio desk) 하나가 됐다. 스튜디오 서버가 할 일은 API뿐인데, `studio launch`는 `next dev`를 띄워 첫 요청마다 라우트를 컴파일했다. 캐시가 없을 때 첫 헬스 응답까지 3.8~5.1초, desk가 처음 부르는 세 경로(헬스·관제·세션 목록)까지 9.8초가 걸렸다(이 PR의 측정, load average 10 안팎).
+- API 라우트 127개(로컬 토큰 교환 페이지 하나 포함)는 거의 다 Web 표준 `Request`·`Response`만 쓴다. Next에 기대던 곳은 넷이다: 인증 판단을 하는 `proxy.ts`, 시작 때 로컬 토큰을 만드는 `instrumentation.ts`, 쿠키를 다루는 `next/headers`(로그인·로그아웃·미리보기 주소), 응답 도우미 `NextResponse`(로컬 토큰 교환).
+- 인증 판단 `decideRequest`는 이미 NextRequest 없이 시험할 수 있게 떼어 둔 순수 함수다. e2e는 이미 `tsx --tsconfig apps/studio/tsconfig.json`으로 `lib/server`를 Next 없이 불러 쓴다.
+
+### 검토한 선택지
+| 방식 | 판단 |
+|---|---|
+| **node:http 서버 + 라우트 표 코드젠 + tsx로 바로 실행** | 채택. 새 의존성이 없다(tsx는 이미 루트 개발 의존성). 라우트 파일은 그대로 두고 감싸는 곳만 새로 만든다 |
+| 시작할 때 `app/`을 훑어 라우트를 찾는다 | 매번 폴더를 훑고, import 경로가 소스에 없어 타입 검사와 번들러가 따라가지 못한다 |
+| Hono·Fastify 같은 서버 틀 | 라우트 127개의 꼴(메서드 이름 내보내기, `{ params }` Promise)을 맞추는 감싸개는 어차피 필요하다. 의존성만 는다 |
+| esbuild로 한 파일로 묶어 node로 실행 | 시작은 조금 빠르지만 빌드 단계가 생긴다. esbuild는 tsx를 통한 간접 의존이라 직접 쓰려면 새 의존성이 된다. 지금은 tsx로 충분하다(첫 헬스 1초 안팎) |
+| `next start`(운영 빌드) | 빌드가 1분 넘게 걸리고, 소스를 고칠 때마다 다시 빌드해야 한다 |
+
+### 결정
+1. `apps/studio/server/`에 서버를 둔다. `router.ts`는 Next App Router와 같은 경로 규칙(`[id]`, `[...path]`, `[[...slug]]`, `(묶음)` 폴더)을 맞추고, 고정 → 동적 → 나머지 세그먼트 차례로 앞세운다. `http.ts`는 Node 요청을 Web `Request`로(본문 한도 10MB, 넘으면 413), Web `Response`를 Node 응답으로(set-cookie 여러 줄, 스트림은 조각마다 바로 쓰고 손님이 끊으면 스트림을 취소) 옮긴다. 손님이 끊으면 `request.signal`이 꺼진다.
+2. `app.ts`는 요청마다 `proxy.ts`와 같은 순서로 `decideRequest`를 부르고, 손님이 보낸 사용자·비밀 헤더를 지운 뒤 확인한 사용자만 넣는다. 그다음 라우트를 맞춰 메서드 핸들러에 `Request`와 `{ params: Promise }`를 넘긴다. HEAD는 GET으로 답하고 본문을 비우며, OPTIONS와 없는 메서드는 `Allow`로 답한다(405). 라우트가 던지면 500 JSON으로 답하고 서버는 계속 돈다. 첫 화면(`/`)은 b-studio 표지가 든 짧은 JSON 안내다.
+3. 라우트 표 `server/routes.gen.ts`는 `server/gen-routes.ts`가 만든다(`pnpm --filter @b-studio/studio routes`). 모듈은 `() => import(...)`로 두어 처음 불릴 때 불러온다. 표와 폴더가 같은지는 테스트가 본다.
+4. `server/main.ts`는 작업 폴더를 `apps/studio`로 두고(Next와 같다), 시작 때 로컬 토큰을 만들고(instrumentation과 같은 일), SSE가 끊기지 않게 요청 시간 한도를 끈다. SIGTERM·SIGINT를 받으면 남은 연결을 끊고 닫는다.
+5. Next에 기대던 라우트 넷은 표준으로 바꾼다. 쿠키는 `lib/server/cookies.ts`(`cookieValue`, `serializeCookie`, `clearCookie`)로 읽고 쓰고, `NextResponse.json`은 `Response.json`으로 바꾼다. `access.ts`의 `pageUser`(화면 전용)는 Next를 부를 때만 불러온다.
+6. `studio launch`와 `pnpm studio`는 기본으로 이 서버를 띄운다. 브라우저를 열 때(`--web`)와 데스크톱 앱의 `--json`은 화면이 있어야 해서 전처럼 `next dev`를 띄우고, `--next`로 옛 길을 고를 수 있다. 화면을 지우는 #896 뒤에 Next를 걷는다.
+
+### 검증 결과
+- 시작 시간(같은 기계, load average 10~12, 세 번·두 번 잰 값): 새 서버의 첫 헬스 응답 0.84~1.02초, `next dev` 캐시 없음 3.83~5.09초·캐시 있음 2.71초. desk가 처음 부르는 헬스·관제·세션 목록까지 새 서버 3.57초, `next dev`(캐시 없음) 9.83초.
+- 실제로 띄운 서버에 라우트 127개를 모두 불렀다. 고정 경로는 GET, 동적 경로는 가짜 id로 GET·POST를 보냈고 5xx 응답과 서버 오류 기록이 없었다.
+- 테스트: 라우터(경로 규칙·순서·인코딩), 변환(본문·한도·set-cookie·스트림·끊김·HEAD), 핸들러(params·404·405·OPTIONS·500·413·인증 헤더·다른 출처·Host·token 모드), 라우트 표 동기화, 실제로 tsx로 띄워 헬스·중첩 라우트·로컬 토큰 파일·관제·SSE 통로, 쿠키 도우미, launch의 서버 고르기.
+
+### 남은 일
+- Next 의존(`next`, `react`, `next.config.ts`, typecheck의 `next typegen`, 라우트의 `RouteContext` 전역 타입, Dockerfile의 standalone, CI의 스튜디오 빌드)은 화면을 지우는 #896과 함께 다음 단계에서 걷는다. 지금 걷으면 남은 화면이 깨진다.
+- 운영 이미지(apps/studio/Dockerfile)는 아직 `next build`의 standalone으로 돈다. 다음 단계에서 이 서버로 바꾼다(이미지에 tsx와 소스를 넣거나 한 파일로 묶는다).
+
+### 감수한 트레이드오프
+- tsx가 처음 불리는 라우트를 그때 변환하므로 경로마다 첫 응답이 수십~수백 ms 늦다. 그래도 `next dev`의 첫 컴파일보다 짧다.
+- 고친 소스를 다시 불러오지 않는다(HMR 없음). 소스를 바꾸면 `pnpm studio stop` 뒤 다시 띄운다. 스튜디오의 "개발 서버가 오래됨" 알림(dev-status)은 그대로 이것을 알린다.

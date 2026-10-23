@@ -1,6 +1,6 @@
-import { cookies } from 'next/headers';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { authConfig, SESSION_COOKIE, signSession, verifyLogin } from '@/lib/server/auth';
+import { serializeCookie } from '@/lib/server/cookies';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { LoginThrottle } from '@/lib/server/login-throttle';
 
@@ -38,16 +38,14 @@ export async function POST(request: Request) {
     throttle.succeed(key);
 
     const secure = new URL(request.url).protocol === 'https:' || request.headers.get('x-forwarded-proto') === 'https';
-    (await cookies()).set({
-      name: SESSION_COOKIE,
-      value: signSession(user, config.secret, now, config.sessionHours),
+    const cookie = serializeCookie(SESSION_COOKIE, signSession(user, config.secret, now, config.sessionHours), {
       httpOnly: true,
       sameSite: 'lax',
       secure,
       path: '/',
       maxAge: Math.round(config.sessionHours * 3600),
     });
-    return Response.json({ user });
+    return Response.json({ user }, { headers: { 'set-cookie': cookie } });
   } catch (error) {
     return errorResponse(error);
   }

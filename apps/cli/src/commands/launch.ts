@@ -112,6 +112,8 @@ export interface LaunchOptions {
   onWaiting?: (elapsedMs: number) => void;
   /** true면 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr). Electron 앱이 이 출력을 읽는다 */
   json?: boolean;
+  /** 띄울 서버. 없으면 브라우저 화면이 필요할 때(open, json)만 next, 아니면 node */
+  server?: StudioServer;
 }
 
 /** `launch --json`이 stdout에 쓰는 한 줄. Electron 앱이 기대는 계약이라 테스트로 고정한다 */
@@ -160,9 +162,16 @@ export function isBStudioHealth(body: string): boolean {
   }
 }
 
-/** 더블클릭 앱·`studio launch`가 부르는 명령 인자. 순수 함수라 테스트로 확인한다 */
-export function launchArgs(port: number): string[] {
-  return ['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', String(port)];
+/**
+ * 띄울 서버. node는 Next 없이 도는 API 서버(apps/studio/server, tsx로 바로 돈다)이고 터미널 작업대에는 이것으로 충분하다.
+ * next는 브라우저 화면이 있는 옛 길(next dev)이라 브라우저를 열 때(--web, --json의 데스크톱 앱)나 --next일 때만 쓴다
+ */
+export type StudioServer = 'node' | 'next';
+
+/** 더블클릭 앱·`studio launch`가 부르는 pnpm 인자(저장소 루트에서 부른다). 순수 함수라 테스트로 확인한다 */
+export function launchArgs(port: number, server: StudioServer = 'node'): string[] {
+  if (server === 'next') return ['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', String(port)];
+  return ['exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--hostname', '127.0.0.1', '--port', String(port)];
 }
 
 /**
@@ -252,7 +261,9 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
   // 4. 띄우기 — 부모가 끝나도 살아 있게 분리하고, 로그·PID를 남긴다
   await mkdir(path.dirname(deps.paths.pid), { recursive: true });
   const env = { ...withDefaults(deps.env, options.serverEnv), B_STUDIO_MODE: envMode };
-  const child = deps.spawn('pnpm', launchArgs(options.port), { cwd: deps.repoRoot, env, logPath: deps.paths.log });
+  // 화면이 있어야 하는 길(브라우저 열기, 데스크톱 앱의 --json)은 next dev, 터미널 작업대만 쓰면 Next 없는 Node 서버
+  const server = options.server ?? (options.open || json ? 'next' : 'node');
+  const child = deps.spawn('pnpm', launchArgs(options.port, server), { cwd: deps.repoRoot, env, logPath: deps.paths.log });
   await writeFile(deps.paths.pid, `${JSON.stringify({ pid: child.pid, port: options.port, mode: options.mode }, null, 2)}\n`, { mode: 0o600 });
   info(`스튜디오를 시작합니다 (모드 ${options.mode}, 포트 ${options.port}, 로그 ${deps.paths.log})`);
 
