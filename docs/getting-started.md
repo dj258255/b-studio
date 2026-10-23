@@ -85,17 +85,17 @@ pnpm studio:local
 
 ### 한 번에 켜기 (`launch`)
 
-위 두 명령 대신 한 명령으로 켜고 끌 수 있습니다. Docker가 꺼져 있으면 colima를 켜고, 준비되면 브라우저를 엽니다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 엽니다.
+위 두 명령 대신 한 명령으로 켜고 끌 수 있습니다. Docker가 꺼져 있으면 colima를 켜고, 서버를 화면 없이 뒤에서 띄웁니다. 이미 떠 있으면 새로 띄우지 않습니다. 브라우저는 `--web`일 때만 엽니다. 터미널 작업대까지 한 번에 열려면 명령 없이 `pnpm studio`를 씁니다([터미널 작업대](#터미널-작업대studio-desk)).
 
 ```bash
-pnpm studio launch              # 이 PC의 Claude Code로 (기본)
-pnpm studio launch --mode demo  # 모델 없이 화면·흐름만
+pnpm studio launch --web        # 이 PC의 Claude Code로 (기본), 준비되면 브라우저
+pnpm studio launch --mode demo --web  # 모델 없이 화면·흐름만
 pnpm studio launch --mode codex --port 3100
 pnpm studio stop
 ```
 
 - `--mode`: `local`(기본, `B_STUDIO_MODE=claude-code`) · `demo` · `commandcode` · `codex`
-- `--port`: 기본 3000 · `--no-open`: 브라우저를 열지 않고 주소만 출력
+- `--port`: 기본 3000 · `--web`(`--open`): 준비되면 브라우저를 연다. 없으면 열지 않고, 토큰이 든 주소도 찍지 않는다
 - `--json`: 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 출력(진행 안내는 stderr). 데스크톱 앱이 이 출력으로 창을 엽니다
 - 로그: `~/.cache/b-studio/launch/studio.log`, PID: `~/.cache/b-studio/launch/studio.pid`
 
@@ -110,7 +110,7 @@ pnpm studio stop --json
 # {"stopped":true}
 ```
 
-`started`는 `launch`가 이번에 새로 띄웠으면 `true`, 이미 떠 있어 브라우저만 열었으면 `false`입니다. 준비에 실패하면 JSON을 쓰지 않고 종료 코드 1로 끝납니다.
+`started`는 `launch`가 이번에 새로 띄웠으면 `true`, 이미 떠 있었으면 `false`입니다. 준비에 실패하면 JSON을 쓰지 않고 종료 코드 1로 끝납니다.
 
 문제가 생기면:
 
@@ -301,7 +301,8 @@ pnpm studio agent examples/orders \
 
 브라우저 대신 터미널 하나에서 여러 AI CLI를 나란히 쓰려면 `pnpm studio desk`를 씁니다(ADR-183). herdr·tmux처럼 왼쪽에 세션 목록, 오른쪽에 터미널 칸이 있고, 칸마다 스튜디오의 관문이 붙어 있어 사이드바에 게이트 결과가 함께 보입니다.
 
-- 먼저 스튜디오를 이 컴퓨터 방식 세션 터미널로 띄웁니다: `B_STUDIO_EXPERIMENTAL=1 B_STUDIO_BACKENDS=codex pnpm studio launch`(Codex를 쓰지 않으면 `B_STUDIO_BACKENDS`는 빼도 됩니다). 실행 방식은 `launch`의 `--mode`(기본 `local`, 이 컴퓨터의 Claude Code)가 정하고, 환경 변수 `B_STUDIO_MODE`는 이 값으로 덮어써집니다. desk는 launch가 남긴 포트와 로컬 토큰으로 붙습니다(다른 포트면 `--port`).
+- `pnpm studio`(명령 없이) 한 번이면 됩니다. 스튜디오를 브라우저 없이 뒤에서 띄우고(이미 떠 있으면 재사용) 바로 desk를 엽니다. 새로 띄울 때 이 컴퓨터 방식 세션 터미널(`B_STUDIO_EXPERIMENTAL=1`)과 Codex(`B_STUDIO_BACKENDS=codex`)를 켜고, 직접 정한 값이 있으면 그것을 씁니다. desk를 나가도 스튜디오는 뒤에서 돌고 `pnpm studio stop`으로 끕니다. 떠 있던 스튜디오가 세션 터미널을 끈 채면 desk를 열지 않고 다시 띄우라고 알립니다.
+- 스튜디오를 따로 띄워 두었으면 `pnpm studio desk`로 붙기만 합니다. 실행 방식은 `--mode`(기본 `local`, 이 컴퓨터의 Claude Code)가 정하고, 환경 변수 `B_STUDIO_MODE`는 이 값으로 덮어써집니다. desk는 launch가 남긴 포트와 로컬 토큰으로 붙습니다(다른 포트면 `--port`).
 - 사이드바는 세션마다 두 줄입니다. AI·프로젝트·제목, 그 아래 상태(권한 대기·작업 중·CLI 대기·쉼 …)·게이트(검증 중·통과·실패·확인 필요)·체크포인트 수·비용입니다.
 - 조작은 Ctrl-b 다음 키로 합니다.
 
