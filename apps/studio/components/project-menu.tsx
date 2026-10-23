@@ -261,7 +261,8 @@ function ProjectMenuPopover({
                 <li key={session.id}>
                   <Link href={`/sessions/${session.id}`} role="menuitem" onClick={onClose} className="block truncate rounded-control px-2 py-1.5 hover:bg-panel">
                     {/* 빈 세션(요청 없음)은 만든 때·짧은 id를 보여 구별한다 — 여러 개면 가장 최근 것만 여기 남아 있다(collapseEmptySessions) */}
-                    {session.lastRequest ?? `빈 세션 · ${relativeTime(session.updatedAt)} · ${shortSessionId(session.id)}`}
+                    {/* 이름을 붙였으면 이름이 먼저다(#875) */}
+                    {session.label ?? session.lastRequest ?? `빈 세션 · ${relativeTime(session.updatedAt)} · ${shortSessionId(session.id)}`}
                   </Link>
                 </li>
               ))}

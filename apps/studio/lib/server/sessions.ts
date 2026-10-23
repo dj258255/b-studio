@@ -316,6 +316,7 @@ import type {
 } from '@/lib/studio-events';
 import { REVERIFY_LIMIT } from '@/lib/studio-events';
 import { advanceSandboxLink, newSandboxLinkTracker, sameSandboxLink, type SandboxProbe } from '@/lib/sandbox-link';
+import { cleanSessionLabel, sessionLabelProblem } from '@/lib/session-label';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
@@ -678,6 +679,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     workspace: snapshot.workspace ?? 'copy',
     checkpoints: snapshot.checkpoints.length,
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
+    ...(snapshot.label ? { label: snapshot.label } : {}),
     updatedAt,
   };
 }
@@ -1919,22 +1921,17 @@ export async function setSessionModel(id: string, modelId: string | undefined, e
   return listSelectableModels(backend, session.snapshot.modelId, session.snapshot.effort);
 }
 
-/** 세션 이름의 최대 길이(글자 수) */
-export const SESSION_LABEL_MAX = 60;
-
-/**
- * 세션에 사람이 붙이는 이름(#864). 목록·studio desk 사이드바의 제목이 마지막 요청 대신 이 이름이 된다.
- * 제어 글자는 빼고(터미널 사이드바에 그대로 그려진다) 앞뒤 빈칸을 떼며, 빈 이름은 이름을 지운다.
- * 이어서 작업해도 남도록 스냅샷에 두고 바로 저장을 예약한다
- */
 export async function setSessionLabel(id: string, label: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
-  const clean = label.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
-  if ([...clean].length > SESSION_LABEL_MAX) throw new StudioError(400, `세션 이름은 ${SESSION_LABEL_MAX}자까지입니다`);
+  const problem = sessionLabelProblem(label);
+  if (problem) throw new StudioError(400, problem);
+  const clean = cleanSessionLabel(label);
   if (clean) session.snapshot.label = clean;
   else delete session.snapshot.label;
   session.updatedAt = new Date().toISOString();
   schedulePersist(session);
+  // 보고 있는 화면(세션 화면 머리, 나란히 보기 칸)이 바로 바뀌게 알린다. 새로 붙는 화면은 스냅샷에서 받으므로 기록에 쌓지 않는다
+  emit(session, clean ? { type: 'label', label: clean } : { type: 'label' });
   return session.snapshot;
 }
 
@@ -7553,7 +7550,8 @@ function followLogs(session: Session, tail: number): void {
 
 function emit(session: Session, event: StudioEvent): void {
   // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient = event.type === 'usage' || event.type === 'sandbox_link' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log';
+  const transient =
+    event.type === 'usage' || event.type === 'sandbox_link' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log' || event.type === 'label';
   if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);

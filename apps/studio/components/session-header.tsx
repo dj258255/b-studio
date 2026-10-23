@@ -12,6 +12,7 @@ import { AgentsBadge } from "./agents-badge";
 import { FailureDetails } from "./failure-details";
 import { LogoutButton } from "./logout-button";
 import { ProjectMenu } from "./project-menu";
+import { SessionLabel } from "./session-label";
 import { useSessionAccess } from "./session-access";
 import { describeSandboxLink } from "@/lib/sandbox-link";
 import { Dot, SERVICE_STATE_LABEL, SESSION_BACKEND_LABEL, SESSION_STATUS_LABEL, TONE_TEXT, toneOfService } from "./status";
@@ -94,6 +95,8 @@ export function SessionHeader({ snapshot }: { snapshot: SessionSnapshot }) {
           <ProjectMenu projectId={snapshot.projectId} projectName={snapshot.projectName} />
         </h1>
         <span className={`text-sm ${TONE_TEXT[statusTone]}`}>{link ? describeSandboxLink(link) : SESSION_STATUS_LABEL[snapshot.status]}</span>
+        {/* 사람이 붙이는 세션 이름(#875). 작업 화면·나란히 보기·studio desk에서도 제목이 된다 */}
+        <SessionLabel sessionId={snapshot.id} label={snapshot.label} stopped={snapshot.status === "stopped"} canManage={access.canManage} />
       </div>
 
       <ul className="flex flex-wrap items-center gap-4 text-sm" aria-label="서비스 상태">

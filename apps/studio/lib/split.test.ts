@@ -16,6 +16,7 @@ import {
   nextSplitIds,
   paneDisplay,
   paneState,
+  paneSummary,
   parseSplitIds,
   parseSplitPlanId,
   readStoredSplitIds,
@@ -332,5 +333,12 @@ describe('finishedLaneIds(#868)', () => {
     expect([...finishedLaneIds({ lanes })]).toEqual(['s1']);
     expect(finishedLaneIds(undefined).size).toBe(0);
     expect(FINISHED_LANE_TERMINAL).toContain('세션 화면');
+  });
+});
+
+describe('paneSummary(#875)', () => {
+  it('칩·칸 머리 이름은 세션 이름이 있으면 그것, 없으면 프로젝트 이름이다', () => {
+    expect(paneSummary({ status: 'ready', running: false, projectName: 'shop', label: '결제 화면' }).name).toBe('결제 화면');
+    expect(paneSummary({ status: 'ready', running: false, projectName: 'shop' }).name).toBe('shop');
   });
 });
