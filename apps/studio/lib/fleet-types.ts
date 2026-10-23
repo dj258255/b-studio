@@ -11,6 +11,8 @@ export type FleetMemberStatus = 'booting' | 'running' | 'done' | 'failed' | 'err
 export interface FleetCandidate {
   backend: SessionMode;
   model?: string;
+  /** CLI 후보의 AI 계정(#885, #892). 없으면 그 CLI의 기본 계정이다. api 후보에는 쓰지 않는다 */
+  accountId?: string;
 }
 
 export interface FleetMemberView {
@@ -19,6 +21,8 @@ export interface FleetMemberView {
   backend: SessionMode;
   /** 후보가 고른 모델. api면 모델 레지스트리 id(비용 계산에 쓴다), CLI면 그 CLI의 모델 이름. 없으면 그 백엔드의 기본 */
   modelId?: string;
+  /** 고른 AI 계정(설정 폴더를 둔 계정만). 없으면 그 CLI의 기본 계정이다 */
+  accountId?: string;
   label: string;
   /** api는 모델 제공자, CLI는 백엔드 이름 */
   provider: string;

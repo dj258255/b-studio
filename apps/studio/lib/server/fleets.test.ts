@@ -9,7 +9,7 @@ const fake = vi.hoisted(() => ({
   /** CLI 로그인 확인에 넘기는 프로젝트 루트 */
   root: '/tmp/orders-project',
   listeners: new Map<string, (event: StudioEvent) => void>(),
-  createSession: vi.fn(async (...args: [string, string, 'copy', { modelId?: string; backend?: string }]) => {
+  createSession: vi.fn(async (...args: [string, string, 'copy', { modelId?: string; backend?: string; accountId?: string }]) => {
     const projectId = args[0];
     return { id: `session-${++fake.counter}`, projectName: projectId === 'orders' ? 'Orders' : projectId, status: 'ready' };
   }),
@@ -72,6 +72,19 @@ vi.mock('./sessions', async (importOriginal) => {
 });
 
 vi.mock('./projects', () => ({ findProject: async () => ({ root: fake.root }) }));
+
+// 계정 목록(#885) 대신: acct-pio는 설정 폴더를 둔 Codex 계정, codex는 기본 계정, 그 밖은 목록에 없다
+vi.mock('./ai-accounts', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./ai-accounts')>();
+  return {
+    ...actual,
+    resolveSessionAccount: async (id: string | undefined, backend: string) => {
+      if (id === undefined || id === backend) return undefined;
+      if (id === 'acct-pio' && backend === 'codex') return { id: 'acct-pio', name: '피오', backend: 'codex', configDir: '/home/me/.b-studio/accounts/codex-1' };
+      throw new StudioError(400, `계정이 목록에 없습니다: ${id}`);
+    },
+  };
+});
 
 import { StudioError } from './errors';
 import { chooseFleetWinner, createFleet, defaultFleetCandidates, deleteFleet, getFleet, listFleets } from './fleets';
@@ -174,6 +187,43 @@ describe('Agent Fleet', () => {
       ['claude-code', 'sonnet', 'sonnet', 'claude-code'],
       ['claude-code', undefined, '계정 기본', 'claude-code'],
     ]);
+  });
+
+  it('CLI 후보에 계정을 고르면 그 계정의 설정 폴더로 로그인을 확인하고 멤버 세션에 계정을 싣는다', async () => {
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    const codex = vi.fn<(options?: { env?: NodeJS.ProcessEnv }) => Promise<{ ok: true }>>(async () => ({ ok: true }));
+
+    const fleet = await createFleet({
+      projectId: 'orders',
+      request: '계정마다 비교해줘',
+      candidates: [{ backend: 'codex', accountId: 'acct-pio' }, { backend: 'codex', accountId: 'acct-pio', model: 'gpt-5' }, { backend: 'codex' }],
+      owner: 'jun',
+      preflights: { codex },
+    });
+
+    // 같은 백엔드·같은 계정은 한 번만, 다른 계정(기본)은 따로 확인한다
+    expect(codex).toHaveBeenCalledTimes(2);
+    expect(codex.mock.calls.map((call) => call[0]?.env?.CODEX_HOME)).toEqual(['/home/me/.b-studio/accounts/codex-1', undefined]);
+    expect(fake.createSession.mock.calls.map((call) => call[3])).toEqual([
+      { backend: 'codex', accountId: 'acct-pio' },
+      { backend: 'codex', modelId: 'gpt-5', accountId: 'acct-pio' },
+      { backend: 'codex' },
+    ]);
+    expect(fleet.members.map((member) => [member.accountId, member.label])).toEqual([
+      ['acct-pio', '피오'],
+      ['acct-pio', '피오 · gpt-5'],
+      [undefined, '계정 기본'],
+    ]);
+  });
+
+  it('목록에 없는 계정이나 api 후보의 계정은 세션을 만들기 전에 거부한다', async () => {
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    const preflights = { codex: async () => ({ ok: true as const }) };
+
+    await expect(createFleet({ projectId: 'orders', request: '요청', candidates: [{ backend: 'codex', accountId: 'acct-none' }, { backend: 'codex' }], owner: 'kyle', preflights })).rejects.toMatchObject({ status: 400 });
+    await expect(createFleet({ projectId: 'orders', request: '요청', candidates: [{ backend: 'api', model: 'model-a', accountId: 'acct-pio' }, { backend: 'codex' }], owner: 'kyle', preflights })).rejects.toMatchObject({ status: 400 });
+    expect(fake.createSession).not.toHaveBeenCalled();
+    expect(listFleets('kyle')).toEqual([]);
   });
 
   it('허용 목록 밖 백엔드 후보는 세션을 만들기 전에 거부한다', async () => {

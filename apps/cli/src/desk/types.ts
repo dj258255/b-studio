@@ -204,6 +204,46 @@ export interface DeskAccountLimits {
   recommended?: boolean;
 }
 
+/** 여러 AI 비교의 참가자 상태(스튜디오 fleet-types.ts의 FleetMemberStatus) */
+export type DeskFleetMemberStatus = 'booting' | 'running' | 'done' | 'failed' | 'error' | 'cancelled' | 'awaiting_input';
+
+/** 여러 AI 비교의 참가자 하나(#892, 스튜디오 FleetMemberView에서 desk가 쓰는 것). 세션을 만들지 못한 참가자는 sessionId가 `failed-`로 시작한다 */
+export interface DeskFleetMember {
+  sessionId: string;
+  backend: string;
+  modelId?: string;
+  /** 고른 AI 계정(설정 폴더를 둔 계정). 없으면 그 CLI의 기본 계정 */
+  accountId?: string;
+  label: string;
+  provider: string;
+  status: DeskFleetMemberStatus;
+  summary?: string;
+  turns?: number;
+  usage?: DeskUsage;
+  costUsd?: number;
+  checkpoint?: { sha: string; shortSha: string; files: string[] };
+  startedAt?: string;
+  finishedAt?: string;
+}
+
+/** 여러 AI 비교 하나(#892, GET /api/fleets·/api/fleets/{id}) */
+export interface DeskFleet {
+  id: string;
+  projectId: string;
+  projectName: string;
+  request: string;
+  createdAt: string;
+  winnerSessionId?: string;
+  members: DeskFleetMember[];
+}
+
+/** 새 비교의 참가자 하나(POST /api/fleets의 candidates). 같은 후보를 두 번 넣으면 독립 시도 둘이다 */
+export interface DeskFleetCandidate {
+  backend: string;
+  model?: string;
+  accountId?: string;
+}
+
 // ─── 요구사항·문서 화면(#894). 스튜디오 sessions.ts의 RequirementsSnapshot·TestsSnapshot·DocsTree와 agent의 ProjectStatusView에서 desk가 쓰는 필드만 ───
 
 export type DeskRequirementStatus = '미착수' | '작업 중' | '검증됨' | '재확인 필요' | '실패';
