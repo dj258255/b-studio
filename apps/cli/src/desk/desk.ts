@@ -5,7 +5,9 @@
  * 키 → handleInput → 할 일(입력 보내기, 칸 열기, 새 요청 …) → 스튜디오 API, 터미널 출력 → 칸 해석 → 화면 그리기.
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
-import { execFile } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
@@ -20,6 +22,7 @@ import { parsePatch, type DetailAction, type DetailState } from './session-detai
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
+import { loaded, openRequirements, REQUIREMENTS_FILE, REQUIREMENTS_TEMPLATE, type RequirementsEffect, type RequirementsState, type RequirementsTab } from './requirements';
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
 import { DEFAULT_THEME, type ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
@@ -39,6 +42,8 @@ const REPLAY_QUIET_MS = 500;
 const RECONNECT_MS = 2_000;
 /** 조각 끝의 Esc가 방향키의 앞인지 기다리는 시간. 지나면 Esc 하나로 본다 */
 const ESC_WAIT_MS = 25;
+/** 작업 글을 넣기 전에 막 뜬 CLI가 붙여넣기 표지를 켜기를 기다리는 시간(#894) */
+const WORK_PASTE_WAIT_MS = 3_000;
 /** 창 크기를 끌어 바꾸는 동안 스튜디오에 알리는 것을 미루는 시간(칸 안 해석기는 바로 맞춘다) */
 const RESIZE_SETTLE_MS = 150;
 /** 터미널로 띄울 수 있는 AI. 스튜디오 routed-session.ts의 terminalBackends와 같은 기준이다(desk가 붙는 launch는 이 컴퓨터 방식) */
@@ -161,6 +166,23 @@ export interface SettingsHost {
 /** 작업 나누기 화면이 열려 있는 동안 계획을 다시 받는 주기 */
 const PLANS_POLL_MS = 2_000;
 
+/** 요구사항·문서 화면이 부르는 스튜디오 API(#894). DeskClient에 없으면(옛 손님) 부를 때 실패로 알린다 */
+type RequirementsCall = 'requirements' | 'tests' | 'docs' | 'doc' | 'saveDoc' | 'projectStatus' | 'verifyRequirement' | 'clearVerification' | 'applyRequirements';
+
+/** 요구사항·문서 화면이 쓰는 편집기(#894). 테스트에서는 가짜를 넣는다 */
+export interface RequirementsHost {
+  /** 파일 하나를 편집기로 열고 끝날 때까지 기다린다. 편집기의 끝 값(0이면 정상)을 돌려준다. 그동안 desk는 화면과 raw 모드를 내려놓는다 */
+  editor(file: string): number;
+  /** 고칠 글을 잠깐 두는 폴더(없으면 시스템 임시 폴더) */
+  tmpDir?: string;
+}
+
+/** $VISUAL, $EDITOR, 없으면 vi(git과 같다)로 연다. 편집기 값에 인자가 있을 수 있어 셸로 띄우고, 파일 이름은 셸 글에 잇지 않고 인자로 넘긴다 */
+function systemEditor(env: NodeJS.ProcessEnv): (file: string) => number {
+  const editor = env.VISUAL?.trim() || env.EDITOR?.trim() || 'vi';
+  return (file) => spawnSync('/bin/sh', ['-c', `${editor} "$1"`, 'sh', file], { stdio: 'inherit' }).status ?? 1;
+}
+
 /** 이 컴퓨터의 브라우저로 연다. 셸을 거치지 않고 주소를 인자 하나로 넘긴다 */
 function openInBrowser(url: string): void {
   const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
@@ -256,6 +278,8 @@ export interface DeskAppOptions {
   accounts?: DeskAccount[];
   /** 주소를 이 컴퓨터의 브라우저로 여는 곳(작업 나누기의 추적 이슈, #893). 없으면 열 수 없다고 알린다 */
   openUrl?: (url: string) => void;
+  /** 요구사항·문서 화면의 편집기(#894). 없으면 $VISUAL·$EDITOR·vi */
+  requirements?: RequirementsHost;
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
@@ -265,7 +289,9 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RecordsCall>> &
   /** 작업 나누기(#893). 없으면 Ctrl-b t가 열 수 없다고 알린다 */
-  Partial<Pick<StudioClient, PlansCall>>;
+  Partial<Pick<StudioClient, PlansCall>> &
+  /** 요구사항·문서 화면(#894). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RequirementsCall>>;
 
 /** 작업 나누기 화면이 부르는 스튜디오 API(#893) */
 type PlansCall = 'plans' | 'plan' | 'createPlan' | 'approvePlan' | 'rejectPlan' | 'deletePlan' | 'resumePlan' | 'laneBackends' | 'setLane';
@@ -311,7 +337,9 @@ function processIo(): DeskIo {
       } catch {
         // 이미 닫힌 입력
       }
-      if (!on) process.stdin.pause();
+      // 편집기를 띄웠다 돌아오면(#894) 멈춰 둔 입력을 다시 받는다
+      if (on) process.stdin.resume();
+      else process.stdin.pause();
     },
     guard: (restore, stop) => {
       process.once('exit', restore);
@@ -376,6 +404,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   const app = new DeskApp(client, first, processIo(), {
     settings,
     openUrl: openInBrowser,
+    requirements: { editor: systemEditor(env) },
     accounts,
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
@@ -451,6 +480,11 @@ export class DeskApp {
   readonly #shellEnv: Record<string, string | undefined>;
   readonly #shellCwd: string;
   readonly #settingsHost: SettingsHost | undefined;
+  readonly #requirementsHost: RequirementsHost;
+  /** 편집기를 띄운 동안(#894). 그사이 온 키는 편집기가 끝난 뒤의 desk로 가지 않게 버린다 */
+  #editing = false;
+  /** 칸에 처음 여는 중인 터미널. 끝나면 true(열림), false(열지 못함) */
+  readonly #opening = new Map<string, Promise<boolean>>();
   /** AI 계정(#885). 계정에 고른 그림을 찾는 데 쓴다 */
   #accounts: DeskAccount[];
   /** 그림 폴더·계정 그림에서 단 카드 그림의 세션. 계정이 바뀌면 지우고 다시 단다 */
@@ -476,6 +510,7 @@ export class DeskApp {
     this.#animate = options.animate !== false;
     this.#settingsHost = options.settings;
     this.#openUrl = options.openUrl;
+    this.#requirementsHost = options.requirements ?? { editor: systemEditor(process.env) };
     this.#accounts = options.accounts ?? [];
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
@@ -557,6 +592,8 @@ export class DeskApp {
   }
 
   #onInput(raw: string): void {
+    // 편집기를 띄우는 동안 온 글자는 desk의 키가 아니다(#894)
+    if (this.#editing) return;
     let chunk = raw;
     if (this.#animate) {
       // 창 포커스 알림은 키가 아니다. 움짤을 멈추거나 다시 움직이는 데만 쓴다
@@ -696,6 +733,12 @@ export class DeskApp {
       case 'plans':
         void this.#plansEffect(effect.effect);
         return;
+      case 'requirements-open':
+        this.#openRequirements(effect.id, effect.title);
+        return;
+      case 'requirements':
+        if (effect.effect.type !== 'close') void this.#requirementsEffect(effect.effect);
+        return;
       case 'records':
         if (effect.open) void this.#openRecords();
         if (effect.load) void this.#loadRecords(effect.load);
@@ -707,7 +750,7 @@ export class DeskApp {
   }
 
   /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
-  #call<K extends RecordsCall | PlansCall>(name: K): StudioClient[K] {
+  #call<K extends RecordsCall | PlansCall | RequirementsCall>(name: K): StudioClient[K] {
     const method = this.#client[name];
     if (method) return method.bind(this.#client) as StudioClient[K];
     return (async () => {
@@ -1038,6 +1081,218 @@ export class DeskApp {
     this.#state = { ...state, layout, slots, focus: 0, zoom: false };
     this.#apply({ type: 'layout' });
     this.#scheduleRender();
+  }
+
+  // ─── 요구사항·문서 화면(#894) ───
+
+  #openRequirements(id: string, title: string): void {
+    if (!this.#client.requirements) {
+      this.#say('이 스튜디오는 요구사항 화면을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
+      return;
+    }
+    const opened = openRequirements({ sessionId: id, title });
+    // 덮는 화면은 하나만 둔다
+    clearInterval(this.#plansTimer);
+    this.#plansTimer = undefined;
+    this.#state = { ...this.#state, requirements: opened.state, records: undefined, detail: undefined, plans: undefined, help: false, message: undefined };
+    for (const effect of opened.effects) void this.#requirementsEffect(effect);
+    this.#scheduleRender();
+  }
+
+  /** 요구사항 화면을 바꾼다. 그사이 닫혔거나 다른 세션의 화면이면 아무것도 하지 않는다 */
+  #patchRequirements(sessionId: string, change: (state: RequirementsState) => RequirementsState): void {
+    const current = this.#state.requirements;
+    if (!current || current.sessionId !== sessionId) return;
+    this.#state = { ...this.#state, requirements: change(current) };
+    this.#scheduleRender();
+  }
+
+  async #loadRequirementsTab(sessionId: string, tab: RequirementsTab): Promise<void> {
+    try {
+      const value =
+        tab === 'spec'
+          ? { spec: await this.#call('requirements')(sessionId) }
+          : tab === 'tests'
+            ? { tests: await this.#call('tests')(sessionId) }
+            : tab === 'docs'
+              ? { docs: await this.#call('docs')(sessionId) }
+              : { status: await this.#call('projectStatus')(sessionId) };
+      this.#patchRequirements(sessionId, (state) => loaded(state, tab, value));
+    } catch (error) {
+      this.#patchRequirements(sessionId, (state) => loaded(state, tab, { error: messageOf(error) }));
+    }
+  }
+
+  async #requirementsEffect(effect: RequirementsEffect): Promise<void> {
+    const current = this.#state.requirements;
+    if (!current) return;
+    const sessionId = current.sessionId;
+    const note = (text: string) => this.#patchRequirements(sessionId, (state) => ({ ...state, note: text }));
+    switch (effect.type) {
+      case 'load':
+        await this.#loadRequirementsTab(sessionId, effect.tab);
+        return;
+      case 'doc':
+        try {
+          const content = await this.#call('doc')(sessionId, effect.path);
+          this.#patchRequirements(sessionId, (state) => (state.reader?.path === effect.path ? { ...state, reader: { ...state.reader, content, error: undefined } } : state));
+        } catch (error) {
+          this.#patchRequirements(sessionId, (state) => (state.reader?.path === effect.path ? { ...state, reader: { ...state.reader, error: messageOf(error) } } : state));
+        }
+        return;
+      case 'work':
+        await this.#work(sessionId, effect.text);
+        return;
+      case 'edit':
+        await this.#edit(this.#requirementsHost, sessionId, effect.path);
+        return;
+      case 'verify':
+      case 'unverify':
+      case 'apply-draft':
+        try {
+          const spec =
+            effect.type === 'verify'
+              ? await this.#call('verifyRequirement')(sessionId, effect.requirementId, effect.note)
+              : effect.type === 'unverify'
+                ? await this.#call('clearVerification')(sessionId, effect.requirementId)
+                : await this.#call('applyRequirements')(sessionId, current.spec?.draft ?? { requirements: [] });
+          const done = effect.type === 'verify' ? `${effect.requirementId}에 사람 확인을 남겼습니다` : effect.type === 'unverify' ? `${effect.requirementId}의 사람 확인을 지웠습니다` : `${REQUIREMENTS_FILE}로 저장했습니다`;
+          this.#patchRequirements(sessionId, (state) => ({ ...loaded(state, 'spec', { spec }), ...(effect.type === 'apply-draft' ? { draft: false, row: 0 } : {}), note: done }));
+        } catch (error) {
+          note(`하지 못했습니다: ${messageOf(error)}`);
+        }
+        return;
+    }
+  }
+
+  /**
+   * "이 요구사항으로 작업"(#894): 화면을 닫고 세션을 칸에 연 뒤(이미 있으면 그 칸) 글을 CLI 입력 칸에 넣는다. 보내기(Enter)는 사람이 한다.
+   * 안쪽 CLI가 붙여넣기 표지를 켜면 여러 줄 그대로 붙여 넣고, 켜지 않으면 줄바꿈을 띄어쓰기로 바꾼다(줄바꿈이 곧 보내기가 되지 않게)
+   */
+  async #work(sessionId: string, text: string): Promise<void> {
+    const state = this.#state;
+    let slot = state.slots.findIndex((id, at) => id === sessionId && at < state.layout);
+    if (slot < 0) {
+      slot = !isShellId(state.slots[state.focus]) ? state.focus : state.slots.findIndex((id, at) => at < state.layout && !isShellId(id));
+      if (slot < 0) {
+        this.#patchRequirements(sessionId, (current) => ({ ...current, note: '모든 칸에 셸이 돌고 있습니다. 칸을 하나 비운 뒤 다시 합니다' }));
+        return;
+      }
+    }
+    const slots = [...state.slots];
+    slots[slot] = sessionId;
+    this.#state = { ...state, requirements: undefined, slots, focus: slot, view: undefined, zoom: state.zoom && slot === state.focus };
+    // 끝났거나 열지 못한 터미널이면 다시 연다
+    if (this.#closed.delete(sessionId)) this.#sizes.delete(sessionId);
+    this.#slotsChanged();
+    this.#saveLayout();
+    this.#render();
+    const opened = await (this.#opening.get(sessionId) ?? Promise.resolve(true));
+    if (!opened || this.#restored) {
+      this.#say('터미널을 열지 못해 작업 글을 넣지 못했습니다');
+      return;
+    }
+    // 막 뜬 CLI는 붙여넣기 표지를 조금 뒤에 켠다. 잠깐 기다려 본다
+    const pane = () => this.#panes.get(sessionId);
+    for (let waited = 0; waited < WORK_PASTE_WAIT_MS && !pane()?.modes().bracketedPaste; waited += 100) await new Promise((resolve) => setTimeout(resolve, 100));
+    if (this.#restored) return;
+    const bracketed = pane()?.modes().bracketedPaste === true;
+    this.#send(sessionId, bracketed ? `\x1b[200~${text}\x1b[201~` : text.replace(/\r\n?|\n/g, ' '));
+    this.#say('작업 글을 칸에 넣었습니다. 살펴보고 Enter로 보냅니다');
+  }
+
+  /**
+   * 문서를 편집기로 고친다(#894): 스튜디오에서 받은 글을 임시 파일에 두고, 화면과 raw 모드를 내려놓은 채 편집기를 띄운다.
+   * 끝나면 화면을 되돌리고, 바뀌었으면 스튜디오에 쓴다. 쓰지 못하면 고친 글을 그 파일에 남기고 자리를 알린다
+   */
+  async #edit(host: RequirementsHost, sessionId: string, path: string): Promise<void> {
+    if (this.#editing) return;
+    const say = (text: string) => this.#patchRequirements(sessionId, (state) => ({ ...state, note: text }));
+    let original: string;
+    try {
+      original = await this.#call('doc')(sessionId, path);
+    } catch (error) {
+      if (path === REQUIREMENTS_FILE && error instanceof StudioRequestError && error.status === 404) original = REQUIREMENTS_TEMPLATE;
+      else {
+        say(`문서를 받지 못했습니다: ${messageOf(error)}`);
+        return;
+      }
+    }
+    if (this.#restored || this.#state.requirements?.sessionId !== sessionId) return;
+    let dir: string;
+    let file: string;
+    try {
+      dir = mkdtempSync(join(host.tmpDir ?? tmpdir(), 'b-studio-edit-'));
+      file = join(dir, basename(path) || 'doc.md');
+      writeFileSync(file, original, { mode: 0o600 });
+    } catch (error) {
+      say(`임시 파일을 만들지 못했습니다: ${messageOf(error)}`);
+      return;
+    }
+    let code: number;
+    this.#editing = true;
+    this.#suspendScreen();
+    try {
+      code = host.editor(file);
+    } catch (error) {
+      code = -1;
+      say(`편집기를 띄우지 못했습니다: ${messageOf(error)}`);
+    } finally {
+      this.#resumeScreen();
+      this.#editing = false;
+    }
+    let edited: string;
+    try {
+      edited = readFileSync(file, 'utf8');
+    } catch (error) {
+      say(`고친 글을 읽지 못했습니다: ${messageOf(error)}`);
+      return;
+    }
+    const cleanup = () => rmSync(dir, { recursive: true, force: true });
+    if (edited === original) {
+      cleanup();
+      if (code === 0) say('바뀐 것이 없습니다');
+      else if (code !== -1) say(`편집기가 ${code}로 끝났습니다. 저장하지 않았습니다`);
+      return;
+    }
+    if (code !== 0) {
+      say(`편집기가 ${code}로 끝나 저장하지 않았습니다. 고친 글은 ${file}에 남겨 두었습니다`);
+      return;
+    }
+    try {
+      await this.#call('saveDoc')(sessionId, path, edited);
+    } catch (error) {
+      say(`저장하지 못했습니다: ${messageOf(error)} · 고친 글은 ${file}에 남겨 두었습니다`);
+      return;
+    }
+    cleanup();
+    say(`${path}를 저장했습니다`);
+    // 고친 문서를 쓰는 탭을 다시 읽는다
+    const state = this.#state.requirements;
+    if (!state || state.sessionId !== sessionId) return;
+    const reload: RequirementsEffect[] = [];
+    if (path === REQUIREMENTS_FILE) reload.push({ type: 'load', tab: 'spec' });
+    if (state.docs) reload.push({ type: 'load', tab: 'docs' });
+    if (state.reader?.path === path) reload.push({ type: 'doc', path });
+    for (const effect of reload) await this.#requirementsEffect(effect);
+  }
+
+  /**
+   * 편집기 같은 다른 프로그램에 터미널을 넘긴다: Kitty 그림·마우스·포커스 알림을 끄고 대체 화면과 raw 모드를 나간다.
+   * 편집기는 동기로 띄우므로(spawnSync) 그동안 이벤트 루프가 멈춰 움짤 시계·사용량·사이드바 폴링·통로가 화면에 쓰지 않는다.
+   * 그사이 쌓인 일은 되돌린 뒤 처음부터 다시 그린 화면 위에서 이어진다
+   */
+  #suspendScreen(): void {
+    this.#io.write((this.#state.kitty?.clear() ?? '') + (this.#animate ? FOCUS_OFF : '') + (this.#mouseOn ? MOUSE_OFF : '') + LEAVE_SCREEN);
+    this.#io.setRaw(false);
+  }
+
+  /** 넘겼던 터미널을 되찾아 처음부터 다시 그린다 */
+  #resumeScreen(): void {
+    this.#io.setRaw(true);
+    this.#io.write(ENTER_SCREEN + (this.#mouseOn ? MOUSE_ON : '') + (this.#animate ? FOCUS_ON : ''));
+    this.#prevFrame = [];
+    this.#render();
   }
 
   // ─── 설정 화면(#890) ───
@@ -1696,6 +1951,16 @@ export class DeskApp {
       // 처음은 열기(이미 열린 터미널이면 스튜디오가 크기만 맞춘다), 그다음부터는 크기만 알린다
       const opening = previous === undefined;
       const request = opening ? this.#client.open(id, size.cols, size.rows) : this.#client.resize(id, size.cols, size.rows);
+      if (opening) {
+        const settled = request.then(
+          () => true,
+          () => false,
+        );
+        this.#opening.set(id, settled);
+        void settled.then(() => {
+          if (this.#opening.get(id) === settled) this.#opening.delete(id);
+        });
+      }
       request.catch((error: unknown) => {
         // 멈춘 세션이면 스튜디오가 409로 답한다. 이어서 작업하면 켜진 뒤 칸을 다시 연다
         const stopped = error instanceof StudioRequestError && error.status === 409 && this.#state.items.find((entry) => entry.id === id)?.state === 'stopped';

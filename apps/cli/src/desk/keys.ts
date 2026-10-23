@@ -15,13 +15,15 @@
  * 설정 화면(#890, 앞글쇠 다음 g, 스페이스·사용량 화면에서는 g만)은 그 화면들 위에 열린다. 열려 있으면 키와 붙여넣기는 모두 설정 화면이 받고(settings.ts),
  * Esc로 닫으면 아래 화면으로 돌아간다. 입력 칸이나 창이 없을 때의 u·w는 설정을 닫고 사용량 화면·스페이스 화면으로 간다
  * 작업 나누기 화면(#893, 앞글쇠 다음 t)은 본문 자리에 열린다. 열려 있으면 앞글쇠가 아닌 키와 붙여넣기는 그 화면이 받고(plans.ts),
- * 앞글쇠 다음 다른 화면 키(w·u·g·숫자 …)는 작업 나누기를 닫고 그 일을 한다
+ * 앞글쇠 다음 다른 화면 키(w·u·g·h·i·e·숫자 …)는 작업 나누기를 닫고 그 일을 한다. 열 때 다른 덮는 화면은 닫는다(덮는 화면은 하나만)
+ * 요구사항·문서 화면(#894, 앞글쇠 다음 e, 스페이스 화면에서는 e만)도 본문 전체를 덮는다. 열려 있으면 키와 붙여넣기는 그 화면이 받고(requirements.ts), Esc로 닫는다
  */
 import type { KittyImages } from './kitty';
 import { openPlans, plansKey, plansPaste, type PlansEffect, type PlansState } from './plans';
 import { openRecords, recordsKey, type RecordsLoad, type RecordsState } from './records';
 import { detailKey, openDetail, type DetailAction, type DetailState } from './session-detail';
 import type { PaneLayout } from './screen';
+import { requirementsKey, requirementsPaste, type RequirementsEffect, type RequirementsState } from './requirements';
 import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type SettingsState } from './settings';
 import { deskSessions, deskSpaces } from './sidebar';
 import type { Sprite } from './sprite';
@@ -153,6 +155,8 @@ export interface DeskState {
   settings?: SettingsState;
   /** 작업 나누기 화면(#893). 있으면 본문 자리가 이 화면이다 */
   plans?: PlansState;
+  /** 요구사항·문서 화면(#894). 있으면 본문 전체가 그 세션의 요구사항 화면이다 */
+  requirements?: RequirementsState;
 }
 
 export interface UsageState {
@@ -203,7 +207,11 @@ export type Effect =
   /** 작업 나누기 화면을 연다(#893). 목록은 desk가 받아 채운다 */
   | { type: 'plans-open' }
   /** 작업 나누기 화면이 낸 할 일 */
-  | { type: 'plans'; effect: PlansEffect };
+  | { type: 'plans'; effect: PlansEffect }
+  /** 요구사항·문서 화면을 연다(#894). 요구사항은 desk가 받아 채운다 */
+  | { type: 'requirements-open'; id: string; title: string }
+  /** 요구사항 화면이 낸 할 일. close는 화면을 닫았다 */
+  | { type: 'requirements'; effect: RequirementsEffect | { type: 'close' } };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -269,8 +277,8 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
     if (mouse) {
       flush();
       at += mouse[0].length;
-      // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정·기록·세션 자세히·작업 나누기)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.records || state.detail || state.plans) continue;
+      // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정·요구사항·기록·세션 자세히·작업 나누기)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -295,6 +303,16 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       const result = settingsKey(settings, key);
       state = { ...state, settings: result.state };
       for (const effect of result.effects) effects.push({ type: 'settings', effect });
+      continue;
+    }
+    if (state.requirements) {
+      // 요구사항 화면(#894)이 열려 있으면 키는 모두 그 화면이 받는다. 칸으로 가지 않는다
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = requirementsKey(state.requirements, key);
+      state = { ...state, requirements: result.state };
+      for (const effect of result.effects) effects.push({ type: 'requirements', effect });
+      if (!result.state) effects.push({ type: 'requirements', effect: { type: 'close' } });
       continue;
     }
     if (state.help) {
@@ -404,13 +422,15 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
   // 작업 나누기 화면이 열려 있으면 새 계획 요청에 넣는다(#893)
   if (state.plans) return { ...next, plans: plansPaste(state.plans, content) };
+  // 요구사항 화면이면 확인 메모 칸에 넣는다(#894)
+  if (state.requirements) return { ...next, requirements: requirementsPaste(state.requirements, content) };
   if (state.detail?.resolving) {
     // 리뷰 지적을 닫을 까닭에는 한 줄로 넣는다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
     return { ...next, detail: { ...state.detail, resolving: { ...state.detail.resolving, text: state.detail.resolving.text + clean } } };
   }
   // 복사 모드나 도움말·기록 화면·세션 자세히를 보는 중, 세션 조작을 묻는 중, 스페이스·사용량 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
-  if (state.copy || state.help || state.confirm || state.records || state.detail || (state.view !== undefined && !state.rename && !state.prompt)) return next;
+  if (state.copy || state.help || state.confirm || state.requirements || state.records || state.detail || (state.view !== undefined && !state.rename && !state.prompt)) return next;
   if (state.rename) {
     // 이름에는 한 줄로 넣는다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
@@ -470,7 +490,8 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
       return { ...done, plans: undefined };
     }
     effects.push({ type: 'plans-open' });
-    return { ...done, plans: openPlans(), prompt: undefined };
+    // 덮는 화면은 하나만 둔다
+    return { ...done, plans: openPlans(), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined };
   }
   const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
   const sessions = deskSessions(state.items);
@@ -525,6 +546,14 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     // 바로 연다(이어서 친 키가 설정 화면으로 가게). 설정 값·계정·규칙은 desk가 채운다
     effects.push({ type: 'settings-open' });
     return { ...done, settings: openSettings({ config: {}, sprites: [] }), prompt: undefined };
+  }
+  if (key === 'e') {
+    // 요구사항·문서(#894): 카드·사용량 화면이면 고른 카드의 세션, 칸 화면이면 고른 칸의 세션(셸·빈 칸이면 사이드바에서 고른 세션)
+    const focused = state.view === undefined ? state.slots[state.focus] : undefined;
+    const item = (focused && !isShellId(focused) ? sessions.find((entry) => entry.id === focused) : undefined) ?? sessions[state.selected];
+    if (!item) return { ...done, message: '요구사항을 볼 세션이 없습니다' };
+    effects.push({ type: 'requirements-open', id: item.id, title: item.title });
+    return done;
   }
   if (key === '[') {
     const id = state.slots[state.focus];
@@ -609,7 +638,7 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
-  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i') return commandKey(base, key, effects);
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i' || key === 'e') return commandKey(base, key, effects);
   return base;
 }
 

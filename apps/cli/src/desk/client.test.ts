@@ -227,6 +227,39 @@ describe('스튜디오 손님', () => {
     expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/limits', '/api/usage/limits?refresh=1']);
   });
 
+  it('요구사항·문서 화면이 세션의 요구사항·테스트·문서·현황 API를 부른다(#894)', async () => {
+    handler = (req, res) => {
+      if (req.url?.includes('/docs/content') && req.method === 'GET') res.end(JSON.stringify({ path: 'docs/a b.md', content: '# 제목' }));
+      else if (req.url?.endsWith('/docs')) res.end(JSON.stringify({ docs: [{ path: 'README.md', title: '쇼핑몰' }] }));
+      else res.end(JSON.stringify({ exists: true, requirements: [], assumptions: [], manualSteps: [] }));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    await client.requirements('s/1');
+    await client.tests('s1');
+    expect(await client.docs('s1')).toEqual([{ path: 'README.md', title: '쇼핑몰' }]);
+    expect(await client.doc('s1', 'docs/a b.md')).toBe('# 제목');
+    await client.saveDoc('s1', 'docs/a.md', '본문');
+    await client.projectStatus('s1');
+    await client.verifyRequirement('s1', 'R1', '손으로 확인');
+    await client.clearVerification('s1', 'R1');
+    await client.applyRequirements('s1', { requirements: [] });
+    expect(seen.map((entry) => `${entry.method} ${entry.url}`)).toEqual([
+      'GET /api/sessions/s%2F1/requirements',
+      'GET /api/sessions/s1/tests',
+      'GET /api/sessions/s1/docs',
+      'GET /api/sessions/s1/docs/content?path=docs%2Fa+b.md',
+      'POST /api/sessions/s1/docs/content',
+      'GET /api/sessions/s1/status',
+      'POST /api/sessions/s1/requirements/verify',
+      'DELETE /api/sessions/s1/requirements/verify',
+      'POST /api/sessions/s1/requirements/apply',
+    ]);
+    expect(JSON.parse(seen[4]!.body)).toEqual({ path: 'docs/a.md', content: '본문' });
+    expect(JSON.parse(seen[6]!.body)).toEqual({ requirementId: 'R1', note: '손으로 확인' });
+    expect(JSON.parse(seen[7]!.body)).toEqual({ requirementId: 'R1' });
+    expect(JSON.parse(seen[8]!.body)).toEqual({ requirements: [], assumptions: [], manualSteps: [] });
+  });
+
   it('묶음 통로를 열어 세션별 메시지를 넘기고, 끊으면 끝난다', async () => {
     handler = (_req, res) => {
       res.setHeader('content-type', 'text/event-stream');

@@ -266,6 +266,16 @@ describe('desk 키와 작업 나누기 화면', () => {
     expect(result.effects).toContainEqual({ type: 'plans', effect: { type: 'close' } });
   });
 
+  it('작업 나누기에서 앞글쇠 다음 e·h는 작업 나누기를 닫고 요구사항·기록 화면을 연다(덮는 화면은 하나만)', () => {
+    const items: DeskItem[] = [{ kind: 'session', id: 's-1', title: '요청', projectName: 'shop', state: 'idle', backend: 'codex', lastActivityAt: '2026-10-23T00:00:00Z' }];
+    const toRequirements = handleInput({ ...initialState(), items, plans: listState() }, '\x02e');
+    expect(toRequirements.state.plans).toBeUndefined();
+    expect(toRequirements.effects).toEqual([{ type: 'plans', effect: { type: 'close' } }, { type: 'requirements-open', id: 's-1', title: '요청' }]);
+    const toRecords = handleInput({ ...initialState(), items, plans: listState() }, '\x02h');
+    expect(toRecords.state.plans).toBeUndefined();
+    expect(toRecords.state.records).toBeDefined();
+  });
+
   it('새 계획 요청을 쓰는 중의 앞글쇠 글자는 입력이 아니라 앞글쇠다', () => {
     const state: DeskState = { ...initialState(), plans: { ...openPlans(), mode: 'new', loading: false, form: { step: 'request', projects: [{ id: 'shop', name: 'shop' }], projectIndex: 0, text: '가' } } };
     const result = handleInput(state, '나');

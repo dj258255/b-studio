@@ -734,3 +734,27 @@ describe('사용량 화면 키(#889)', () => {
     expect(handleInput(usage(), '?').state.help).toBe(true);
   });
 });
+
+describe('요구사항 화면 키(#894)', () => {
+  it('앞글쇠 다음 e는 고른 칸의 세션, 칸이 셸이거나 비었으면 사이드바에서 고른 세션의 요구사항 화면을 연다', () => {
+    const focused = handleInput(withItems({ layout: 2, slots: ['a', 'c', undefined, undefined], focus: 1 }), '\x02e');
+    expect(focused.effects).toEqual([{ type: 'requirements-open', id: 'c', title: 'c' }]);
+    const shell = handleInput(withItems({ slots: ['shell:1', undefined, undefined, undefined], selected: 1 }), '\x02e');
+    expect(shell.effects).toEqual([{ type: 'requirements-open', id: 'b', title: 'b' }]);
+    const space = handleInput(withItems({ view: 'space', slots: ['a', undefined, undefined, undefined], selected: 2 }), 'e');
+    expect(space.effects).toEqual([{ type: 'requirements-open', id: 'c', title: 'c' }]);
+    const none = handleInput({ ...initialState() }, '\x02e');
+    expect(none.effects).toEqual([]);
+    expect(none.state.message).toContain('세션이 없습니다');
+  });
+
+  it('요구사항 화면이 열려 있으면 키·붙여넣기·마우스가 칸으로 가지 않고, Esc로 닫으면 close를 낸다', () => {
+    const state = withItems({ slots: ['a', undefined, undefined, undefined], requirements: { sessionId: 'a', title: 'a', tab: 'spec', row: 0, verify: { requirementId: 'R1', text: '' } } });
+    const typed = handleInput(state, '확인\x1b[200~붙인\n글\x1b[201~\x1b[<0;5;5M');
+    expect(typed.effects.filter((effect) => effect.type === 'input' || effect.type === 'paste' || effect.type === 'mouse')).toEqual([]);
+    expect(typed.state.requirements?.verify?.text).toBe('확인붙인 글');
+    const closed = handleInput({ ...state, requirements: { ...state.requirements!, verify: undefined } }, '\x1b', true);
+    expect(closed.state.requirements).toBeUndefined();
+    expect(closed.effects).toEqual([{ type: 'requirements', effect: { type: 'close' } }]);
+  });
+});
