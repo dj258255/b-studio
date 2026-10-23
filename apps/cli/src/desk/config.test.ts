@@ -102,3 +102,14 @@ describe('색 깊이', () => {
     expect(colorDepth({ COLORTERM: 'truecolor' }, 'auto')).toBe('truecolor');
   });
 });
+
+describe('색 팔레트(#887)', () => {
+  it('theme은 dark·light를 받고, 그 밖은 알리고 기본값으로 둔다', () => {
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ theme: 'light' }));
+    expect(loadDeskConfig(dir)).toEqual({ config: { theme: 'light' }, warnings: [] });
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ theme: 'neon' }));
+    const bad = loadDeskConfig(dir);
+    expect(bad.config).toEqual({});
+    expect(bad.warnings).toEqual([expect.stringContaining('theme')]);
+  });
+});

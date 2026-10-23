@@ -17,6 +17,12 @@ export const MODE_ENV: Record<LaunchMode, string> = { local: 'claude-code', demo
 export const STUDIO_MARKER = 'b-studio';
 
 /**
+ * 떠 있는지·준비됐는지 보는 경로. 응답 본문의 `app`이 b-studio 표지다.
+ * 첫 화면(`/`)은 개발 서버가 첫 요청에서 페이지 전체를 컴파일해 느리고, 화면이 없어져도 이 경로는 남는다
+ */
+export const HEALTH_PATH = '/api/health';
+
+/**
  * 로컬 토큰을 쿠키로 바꾸는 스튜디오의 교환 페이지(apps/studio/lib/server/local-token.ts의 LOCAL_TOKEN_PAGE_PATH와 같아야 한다).
  * 브라우저를 이 주소로 열면 페이지가 주소의 `#` 뒤에서 토큰을 읽어 본문으로 교환하고 쿠키를 받는다.
  * 토큰을 쿼리(`?token=`)에 싣지 않는다 — 개발 서버 로그에 그대로 남는다
@@ -98,8 +104,12 @@ export interface LaunchDeps {
 export interface LaunchOptions {
   mode: LaunchMode;
   port: number;
-  /** 브라우저를 연다. false면 주소만 출력한다 */
+  /** 브라우저를 연다(`--web`). false면 열지 않는다 */
   open: boolean;
+  /** 새로 띄울 때 서버 환경에 채울 값. 사용자가 이미 정한 변수는 덮어쓰지 않는다 */
+  serverEnv?: Record<string, string>;
+  /** 새로 띄운 서버를 기다리는 동안 확인할 때마다 지난 시간(ms)을 알린다(진행 표시용) */
+  onWaiting?: (elapsedMs: number) => void;
   /** true면 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr). Electron 앱이 이 출력을 읽는다 */
   json?: boolean;
 }
@@ -135,9 +145,19 @@ export function studioOrigin(port: number): string {
   return `http://127.0.0.1:${port}`;
 }
 
-/** 응답 본문이 b-studio인지. 아니면 다른 프로그램이 그 포트를 쓰는 것이다 */
+/** 첫 화면 본문이 b-studio인지. 헬스에 표지가 없는 옛 서버를 알아볼 때만 쓴다 */
 export function isBStudio(body: string): boolean {
   return body.includes(STUDIO_MARKER);
+}
+
+/** `/api/health` 본문에 b-studio 표지(`app`)가 있는지 */
+export function isBStudioHealth(body: string): boolean {
+  try {
+    const parsed = JSON.parse(body) as { app?: unknown } | null;
+    return parsed?.app === STUDIO_MARKER;
+  } catch {
+    return false;
+  }
 }
 
 /** 더블클릭 앱·`studio launch`가 부르는 명령 인자. 순수 함수라 테스트로 확인한다 */
@@ -146,8 +166,8 @@ export function launchArgs(port: number): string[] {
 }
 
 /**
- * 스튜디오를 띄운다. 이미 떠 있으면 브라우저만 열고, Docker가 꺼져 있으면 colima를 켠다.
- * 준비되면 브라우저를 열고, 실패하면 로그 끝을 보여 주고 종료 코드 1.
+ * 스튜디오를 화면 없이 뒤에서 띄운다. 이미 떠 있으면 재사용하고, Docker가 꺼져 있으면 colima를 켠다.
+ * 브라우저는 open일 때만 연다. 실패하면 로그 끝을 보여 주고 종료 코드 1.
  */
 export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promise<number> {
   const url = studioUrl(options.port);
@@ -159,10 +179,11 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
   // 진행 안내는 --json일 때 stderr로 보낸다. stdout에는 JSON 한 줄만 남긴다
   const info = (text: string) => (json ? console.error(text) : console.log(text));
 
-  // 1. 이미 떠 있나 — 새로 띄우지 않고 브라우저만 연다. 단, 중첩 라우트 표가 스테일하면(아래) 재시작한다
-  const existing = await deps.probe(url);
+  // 1. 이미 떠 있나 — 새로 띄우지 않고 재사용한다. 단, 중첩 라우트 표가 스테일하면(아래) 재시작한다.
+  // 헬스의 표지로 알아보고, 표지가 없으면(이 표지가 생기기 전의 옛 서버) 첫 화면 본문으로 한 번 더 본다
+  const existing = await deps.probe(`${origin}${HEALTH_PATH}`);
   if (existing.reachable) {
-    if (!isBStudio(existing.body)) {
+    if (!isBStudioHealth(existing.body) && !isBStudio((await deps.probe(url)).body)) {
       console.error(`포트 ${options.port}에 다른 프로그램이 응답합니다. --port로 다른 포트를 지정하세요.`);
       return 1;
     }
@@ -178,8 +199,7 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
         return 0;
       }
       info(`이미 스튜디오가 ${url}에서 실행 중입니다.`);
-      info(openUrl);
-      if (open) await deps.open(openUrl);
+      await finish(deps, open, openUrl, info);
       return 0;
     }
     info(`스튜디오가 떠 있지만 라우트 표가 오래된 것 같아 다시 켭니다 (포트 ${options.port}).`);
@@ -231,7 +251,7 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
 
   // 4. 띄우기 — 부모가 끝나도 살아 있게 분리하고, 로그·PID를 남긴다
   await mkdir(path.dirname(deps.paths.pid), { recursive: true });
-  const env = { ...deps.env, B_STUDIO_MODE: envMode };
+  const env = { ...withDefaults(deps.env, options.serverEnv), B_STUDIO_MODE: envMode };
   const child = deps.spawn('pnpm', launchArgs(options.port), { cwd: deps.repoRoot, env, logPath: deps.paths.log });
   await writeFile(deps.paths.pid, `${JSON.stringify({ pid: child.pid, port: options.port, mode: options.mode }, null, 2)}\n`, { mode: 0o600 });
   info(`스튜디오를 시작합니다 (모드 ${options.mode}, 포트 ${options.port}, 로그 ${deps.paths.log})`);
@@ -239,7 +259,7 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
   // 5. 준비 확인 — 최대 90초, 1초 간격
   const timeoutMs = deps.readyTimeoutMs ?? READY_TIMEOUT_MS;
   const intervalMs = deps.readyIntervalMs ?? READY_INTERVAL_MS;
-  const ready = await waitForReady(deps, url, timeoutMs, intervalMs);
+  const ready = await waitForReady(deps, `${origin}${HEALTH_PATH}`, timeoutMs, intervalMs, options.onWaiting);
   if (!ready) {
     console.error(`스튜디오가 ${Math.round(timeoutMs / 1_000)}초 안에 응답하지 않았습니다. 로그 끝 ${LOG_TAIL_LINES}줄:`);
     for (const line of await tailLog(deps.paths.log, LOG_TAIL_LINES)) console.error(`  ${line}`);
@@ -255,9 +275,29 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
   }
   info(`스튜디오가 떴습니다: ${url}`);
   info(`종료: pnpm studio stop · 로그: ${deps.paths.log}`);
-  info(openUrl);
-  if (open) await deps.open(openUrl);
+  await finish(deps, open, openUrl, info);
   return 0;
+}
+
+/**
+ * 브라우저를 열라고 했으면 토큰 주소를 찍고 연다. 아니면 토큰 주소를 찍지 않고(터미널 기록에 남는다) 터미널 작업대와 브라우저로 여는 법을 알린다
+ */
+async function finish(deps: LaunchDeps, open: boolean, openUrl: string, info: (text: string) => void): Promise<void> {
+  if (open) {
+    info(openUrl);
+    await deps.open(openUrl);
+    return;
+  }
+  info('터미널 작업대: pnpm studio desk · 브라우저로 보기: pnpm studio launch --web');
+}
+
+/** base에 없는(또는 빈) 변수만 defaults로 채운다 */
+function withDefaults(base: NodeJS.ProcessEnv, defaults: Record<string, string> | undefined): NodeJS.ProcessEnv {
+  const env = { ...base };
+  for (const [key, value] of Object.entries(defaults ?? {})) {
+    if (!env[key]?.trim()) env[key] = value;
+  }
+  return env;
 }
 
 /**
@@ -288,10 +328,13 @@ async function readPidFile(file: string, fallbackMode: string): Promise<{ pid: n
   }
 }
 
-async function waitForReady(deps: LaunchDeps, url: string, timeoutMs: number, intervalMs: number): Promise<boolean> {
+/** 헬스가 200을 돌려줄 때까지 기다린다. 응답이 와도 200이 아니면(아직 컴파일 중인 오류 화면 등) 더 기다린다 */
+async function waitForReady(deps: LaunchDeps, url: string, timeoutMs: number, intervalMs: number, onWaiting?: (elapsedMs: number) => void): Promise<boolean> {
   for (let waited = 0; waited <= timeoutMs; waited += intervalMs) {
     if (waited > 0) await deps.sleep(intervalMs);
-    if ((await deps.probe(url)).reachable) return true;
+    onWaiting?.(waited);
+    const result = await deps.probe(url);
+    if (result.reachable && result.status === 200) return true;
   }
   return false;
 }

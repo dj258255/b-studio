@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { PaneLayout } from './screen';
+import { THEMES, type ThemeName } from './theme';
 
 /** 앞글쇠: 받는 글자와 화면에 보일 이름(늘 `Ctrl-x` 꼴이라 안내 글의 폭이 바뀌지 않는다) */
 export interface DeskPrefix {
@@ -20,6 +21,8 @@ export interface DeskConfig {
   notify?: boolean;
   mouse?: boolean;
   color?: ColorSetting;
+  /** 색 팔레트(#887): dark(기본)·light */
+  theme?: ThemeName;
 }
 
 /** 되살릴 배치. slots는 칸 자리마다의 세션 id다 */
@@ -84,6 +87,10 @@ export function loadDeskConfig(dir: string): { config: DeskConfig; warnings: str
   if (values.color !== undefined) {
     if (COLORS.includes(values.color as ColorSetting)) config.color = values.color as ColorSetting;
     else warnings.push(`color는 "auto", "truecolor", "256" 중 하나여야 합니다. auto를 씁니다`);
+  }
+  if (values.theme !== undefined) {
+    if (THEMES.includes(values.theme as ThemeName)) config.theme = values.theme as ThemeName;
+    else warnings.push(`theme은 ${THEMES.map((name) => `"${name}"`).join(', ')} 중 하나여야 합니다. dark를 씁니다`);
   }
   return { config, warnings };
 }

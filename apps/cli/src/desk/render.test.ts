@@ -3,6 +3,7 @@ import { initialState, type DeskState } from './keys';
 import { previewLine, renderScreen, stripAnsi } from './render';
 import { PaneTerminal } from './pane';
 import { computeLayout, stringWidth } from './screen';
+import { bg, fg } from './theme';
 import type { DeskItem } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-22T00:00:00Z', ...patch });
@@ -28,7 +29,7 @@ describe('화면 그리기', () => {
     expect(prefixed[size.rows - 1]).toContain('숫자');
   });
 
-  it('왼쪽에 사이드바, 구분선, 오른쪽에 칸 머리와 터미널 내용이 놓인다', () => {
+  it('왼쪽에 스페이스 사이드바, 구분선, 오른쪽에 칸 머리와 터미널 내용이 놓이고, 사이드바 맨 아래에 키 안내가 있다', () => {
     const { lines } = renderScreen(state({ slots: ['a', undefined, undefined, undefined] }), size, [{ lines: ['$ echo hi', 'hi'] }]);
     // 화면 칸 기준으로 가른다(한글은 한 글자가 두 칸이라 글자 수로 자르면 어긋난다)
     const split = (line: string) => {
@@ -37,39 +38,60 @@ describe('화면 그리기', () => {
     };
     const plain = lines.map(stripAnsi).map(split);
     expect(stringWidth(plain[1]!.side)).toBe(30);
-    expect(plain[1]!.side).toContain('Claude');
-    expect(plain[2]!.side).toContain('통과');
+    expect(plain[1]!.side).toContain('스페이스');
+    expect(plain[2]!.side).toContain('shop');
+    expect(plain[3]!.side).toContain('요청 a');
+    expect(plain[size.rows - 2]!.side).toContain('Ctrl-b w');
     expect(plain[1]!.pane).toMatch(/^ 1 /);
     expect(plain[1]!.pane).toContain('요청 a');
+    expect(plain[1]!.pane).toContain('통과');
     expect(plain[2]!.pane).toContain('$ echo hi');
     expect(plain[3]!.pane).toContain('hi');
   });
 
-  it('고른 항목이 아래쪽이어도 그 아래 펼친 에이전트 내역까지 사이드바에 보인다(#843)', () => {
-    const usage = { inputTokens: 10, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
-    const items = Array.from({ length: 12 }, (_, index) => item(`s${index}`));
-    items[11] = item('s11', {
-      agents: [
-        { id: 'main', name: '메인', kind: 'main', state: 'idle', tokens: usage },
-        { id: 'claude:Explore', name: 'Explore', kind: 'subagent', state: 'working', activity: '모델 요청 1회', tokens: usage },
-      ],
-      capabilities: { backend: 'claude-code', tools: 'cli-default', writeScope: '세션 작업 복사본 전체', permission: 'CLI 권한 확인' },
-    });
-    const plain = renderScreen(state({ items, selected: 11 }), size, []).lines.map(stripAnsi);
-    const side = plain.slice(1, size.rows - 1).map((line) => line.slice(0, line.indexOf('│')));
-    expect(side.some((line) => line.includes('요청 s11'))).toBe(true);
-    expect(side.some((line) => line.includes('↳ Explore'))).toBe(true);
-    expect(side.some((line) => line.includes('권한 CLI 권한 확인'))).toBe(true);
+  it('스페이스가 많아도 고른 세션이 든 스페이스와 그 세션이 사이드바에 보인다', () => {
+    const items = Array.from({ length: 30 }, (_, index) => item(`s${index}`, { projectName: `p${index}` }));
+    const plain = renderScreen(state({ items, selected: 29 }), size, []).lines.map(stripAnsi);
+    const side = plain.slice(1, size.rows - 2).map((line) => line.slice(0, line.indexOf('│')));
+    expect(side.some((line) => line.includes('p29'))).toBe(true);
+    expect(side.some((line) => line.includes('요청 s29'))).toBe(true);
   });
 
-  it('고른 칸의 머리는 반전으로, 고른 사이드바 줄도 반전으로 그린다', () => {
-    const { lines } = renderScreen(state({ layout: 2, slots: ['a', 'b', undefined, undefined], focus: 1 }), size, [{ lines: [] }, { lines: [] }]);
+  it('고른 칸의 머리와 고른 사이드바 줄은 바탕색으로 가른다(반전을 쓰지 않는다)', () => {
+    const theme = { name: 'dark' as const, depth: 'truecolor' as const };
+    const { lines } = renderScreen(state({ layout: 2, slots: ['a', 'b', undefined, undefined], focus: 1, theme }), size, [{ lines: [] }, { lines: [] }]);
     const header = lines[1]!;
-    // 오른쪽 칸(둘째)의 머리에만 반전이 있다
-    const second = header.lastIndexOf('\x1b[7m');
-    expect(second).toBeGreaterThan(header.indexOf('│'));
+    const active = bg(theme, 'active');
+    // 오른쪽 칸(둘째)의 머리만 밝은 바탕에 강조색 칸 번호다
+    const left = header.slice(header.indexOf('│'), header.lastIndexOf('│'));
+    const right = header.slice(header.lastIndexOf('│'));
+    expect(right).toContain(active);
+    expect(right).toContain(`${fg(theme, 'accent')} 2 `);
+    expect(left).not.toContain(active);
+    expect(header).not.toContain('\x1b[7m');
     expect(stripAnsi(header).indexOf('요청 b')).toBeGreaterThan(stripAnsi(header).indexOf('요청 a'));
-    expect(lines[1]!.startsWith('\x1b[7m')).toBe(true);
+    const selectedRow = lines.find((line) => stripAnsi(line).startsWith('   ◐ 요청 a'))!;
+    expect(selectedRow.startsWith(bg(theme, 'active'))).toBe(true);
+  });
+
+  it('256색 팔레트면 24비트 색을 쓰지 않는다', () => {
+    const { lines } = renderScreen(state({ theme: { name: 'light', depth: '256' }, view: 'space' }), size, []);
+    expect(lines.join('')).not.toMatch(/\x1b\[[34]8;2;/);
+    expect(lines.join('')).toMatch(/\x1b\[[34]8;5;/);
+  });
+
+  it('스페이스 화면: 본문에 고른 스페이스의 세션 카드가 놓이고, 모든 줄이 화면 폭과 같다', () => {
+    const items = [item('a', { state: 'working', gate: { state: 'passed', checkpoints: 2 } }), item('b', { backend: 'codex' }), item('c', { projectName: 'blog' })];
+    const { lines } = renderScreen(state({ items, view: 'space' }), { cols: 140, rows: 30 }, []);
+    for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(140);
+    const plain = lines.map(stripAnsi).join('\n');
+    expect(plain).toContain('스페이스 화면');
+    expect(plain).toMatch(/shop +에이전트 2/);
+    expect(plain).toContain('╭');
+    expect(plain).toMatch(/요청 a +Claude +.*◐ 작업 중/);
+    expect(plain).toMatch(/요청 b +Codex/);
+    // 다른 스페이스의 세션은 카드로 놓지 않는다
+    expect(plain).not.toMatch(/요청 c +Claude/);
   });
 
   it('빈 칸에는 여는 법을 적는다', () => {
