@@ -343,6 +343,8 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 Claude Code와 Codex는 CLI마다 계정을 여럿 둘 수 있습니다. 계정은 이름, CLI, 설정 폴더입니다. 설정 폴더는 CLI가 로그인 정보와 대화 기록을 두는 자리로, claude에는 `CLAUDE_CONFIG_DIR`, codex에는 `CODEX_HOME`로 넘깁니다. 개인 PC 모드에서만 씁니다.
 
 - 계정 목록은 `~/.config/b-studio/accounts.json`(`XDG_CONFIG_HOME`이 있으면 그 아래)에 이 사용자만 읽게(0600) 둡니다. 꼴은 `{ "accounts": [{ "id", "name", "backend", "configDir", "sprite"? }] }`입니다. 손으로 고치다 깨지면 b-studio는 그 파일을 덮어쓰지 않고 까닭을 알립니다.
+- 계정을 더하고, 로그인하고, 이름·그림을 바꾸고, 빼는 일은 `studio desk`의 설정 화면(`Ctrl-b g`)에서 합니다([터미널 작업대](getting-started.md#터미널-작업대studio-desk)).
+- `sprite`는 그림 폴더(`~/.config/b-studio/sprites/`) 기준 상대 경로의 PNG·GIF입니다(예: `marco.png`, `pokemon/25.gif`). 하위 폴더는 셋까지이고, 점으로 시작하는 이름(`..`, 숨은 폴더), 빈 이름, 역슬래시, 제어 글자는 받지 않습니다. desk는 그림 폴더에서 찾은 파일 목록(링크와 숨은 파일은 빠집니다)에 있는 파일만 읽습니다. 이 그림은 `studio desk` 사용량 화면의 계정 그림이 되고, `GET /api/agents`의 세션 항목에 실린 `accountId`로 그 계정 세션의 카드 그림도 됩니다.
 - 설정 폴더가 없는 계정은 **기본 계정**입니다. 지금처럼 `~/.claude`·`~/.codex`(또는 셸에서 정한 값)를 씁니다. 기본 계정은 파일에 없어도 목록에 늘 있고, 이름과 그림만 붙일 수 있습니다.
 - 더하는 계정의 설정 폴더는 홈 아래의 다른 폴더여야 합니다(`~/.claude-work` 등). 기본 계정 폴더나 다른 계정이 쓰는 폴더는 받지 않습니다. b-studio는 그 폴더를 만들지도, 지우지도, 안의 파일을 읽지도 않습니다. 계정을 지우면 목록에서만 빠지고 폴더는 남습니다.
 - 로그인은 계정마다 따로 합니다. `POST /api/ai-accounts/{id}/login`이 그 계정의 설정 폴더로 CLI의 로그인 명령을 띄우고, 상태는 `GET /api/ai-accounts/{id}/status`로 봅니다. 터미널에서 직접 할 때는 `CLAUDE_CONFIG_DIR=~/.claude-work claude`처럼 띄운 뒤 `/login`합니다.
@@ -352,6 +354,7 @@ Claude Code와 Codex는 CLI마다 계정을 여럿 둘 수 있습니다. 계정�
 - `studio desk`의 새 요청(`Ctrl-b n`)에서 한 CLI에 계정이 둘 이상이면 Tab 선택지가 계정마다 나뉩니다(예: "Codex · 피오").
 - Codex의 훅 신뢰("Hooks need review")는 설정 폴더마다 따로 기억합니다. 새 계정으로 처음 열면 한 번 묻습니다.
 - 컨테이너 방식 터미널은 기본 계정만 씁니다.
+- 사용량(`GET /api/usage/limits`)은 이 목록의 Claude Code·Codex·Gemini 계정 전부(기본 계정 포함)를 읽고, 계정 이름과 그림을 함께 돌려줍니다. 같은 설정 폴더를 가리키는 계정은 한 번만 읽습니다. 목록 파일이 깨졌으면 기본 계정들만 읽고 그 까닭을 `warning`으로 알립니다.
 - **실측하지 않은 것**: macOS에서 Claude Code는 로그인 정보를 키체인에 둡니다. `CLAUDE_CONFIG_DIR`마다 키체인 항목이 따로 생기는지는 버전에 따라 다르다는 보고가 있고 이 컴퓨터에서 재 보지 않았습니다. 두 계정이 같은 로그인을 보이면 `security dump-keychain | grep "Claude Code"`로 항목을 확인하세요.
 
 ## 관문 방식 (`B_STUDIO_GATEWAY`, 실험)

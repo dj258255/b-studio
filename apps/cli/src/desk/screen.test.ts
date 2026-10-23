@@ -71,16 +71,18 @@ describe('칸 놓기(#863)', () => {
   });
 });
 
-describe('OSC 8 링크(#891)', () => {
-  const link = '\x1b]8;;https://example.test/pr/1\x1b\\PR #1\x1b]8;;\x1b\\';
-  it('링크 표지는 폭에 넣지 않는다', () => {
-    expect(stripAnsi(link)).toBe('PR #1');
-    expect(stringWidth(stripAnsi(fitAnsi(link, 10)))).toBe(10);
-    expect(fitAnsi(link, 10)).toContain('\x1b]8;;https://example.test/pr/1\x1b\\');
+describe('누를 수 있는 링크(OSC 8, #890)', () => {
+  it('링크 열은 폭에 넣지 않고 그대로 두며, 색을 지울 때 함께 지운다', () => {
+    const link = '\x1b]8;;https://example.com/a?b=1\x07열기\x1b]8;;\x07';
+    const out = fitAnsi(`> ${link} 끝`, 12);
+    expect(out).toContain('\x1b]8;;https://example.com/a?b=1\x07');
+    expect(stripAnsi(out)).toBe('> 열기 끝   ');
+    expect(stringWidth(stripAnsi(out))).toBe(12);
   });
-  it('링크 글 한가운데서 잘리면 링크를 닫는다(뒤 글이 링크가 되지 않게)', () => {
-    const cut = fitAnsi(link, 3);
-    expect(stripAnsi(cut)).toBe('PR ');
-    expect(cut).toContain('\x1b]8;;\x1b\\');
+
+  it('링크 가운데서 잘리면 링크를 닫는다', () => {
+    const out = fitAnsi('\x1b]8;;https://example.com\x07아주 긴 링크 글\x1b]8;;\x07', 6);
+    expect(out.endsWith('\x1b]8;;\x07\x1b[0m') || out.includes('\x1b]8;;\x07\x1b[0m')).toBe(true);
+    expect(stringWidth(stripAnsi(out))).toBe(6);
   });
 });

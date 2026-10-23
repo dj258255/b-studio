@@ -5,9 +5,10 @@
  * 키 → handleInput → 할 일(입력 보내기, 칸 열기, 새 요청 …) → 스튜디오 API, 터미널 출력 → 칸 해석 → 화면 그리기.
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
+import { execFile } from 'node:child_process';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
-import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskLayout, type DeskLayout, type DeskPrefix } from './config';
+import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
 import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
 import { spaceItems, spaceScreen, spriteFor } from './cards';
@@ -18,11 +19,15 @@ import { parsePatch, type DetailAction, type DetailState } from './session-detai
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
+import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
 import { DEFAULT_THEME, type ThemeName } from './theme';
-import type { DeskAccount, DeskItem, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
+import { accountSprite, sessionLimits, usageScreen, usageSpriteKey } from './usage';
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
+/** 사용량을 새로 받는 주기(#889). 스튜디오가 계정마다 최소 간격(Claude 10분)을 지키므로 이보다 자주 묻지 않는다 */
+const USAGE_POLL_MS = 60_000;
 /** 화면을 다시 그리는 최소 간격 */
 const FRAME_MS = 30;
 /** 미리보기를 묻기 전에 기다리는 시간(쓰는 동안 매 글자 묻지 않게) */
@@ -84,38 +89,89 @@ const FOCUS_OFF = '\x1b[?1004l';
 const FOCUS_EVENT = /\x1b\[([IO])/g;
 /** 읽어 둔 무작위 그림의 상한(오래된 것부터 버린다) */
 const SPRITE_CACHE = 64;
+/** 로그인이 끝났는지 묻는 간격(#890) */
+const LOGIN_POLL_MS = 1_500;
 
 /** 카드 그림을 그림 폴더에서 고르는 곳(#902). 테스트에서는 가짜를 넣는다 */
 export interface SpriteCatalog {
   /** 세션 id에 맞는 그림: 그 id 이름의 그림, 그다음 random이면 폴더에서 무작위. 없으면 sprite가 없다. 읽지 못했으면 warning */
   pick(id: string): { sprite?: Sprite; warning?: string };
+  /**
+   * 그림 폴더 안의 그 파일(계정에 고른 그림, #889·#890). 폴더 기준 상대 경로이고(하위 폴더 포함), 그림 폴더에서 찾은 파일 목록에 있을 때만 읽는다
+   * (링크·숨은 파일·폴더 밖은 목록에 들지 않는다). 없거나 읽지 못하면 warning
+   */
+  file?(name: string): { sprite?: Sprite; warning?: string };
 }
 
 /** 그림 폴더의 그림 목록. 시작할 때 목록만 읽고, 그림은 처음 보일 때 읽는다 */
 export function folderCatalog(dir: string, options: { random: boolean }): SpriteCatalog {
-  const files = options.random ? scanSprites(dir) : [];
+  // 목록은 늘 읽는다: 계정 그림도 이 목록에 있는 파일만 읽는다(링크·숨은 파일·폴더 밖은 목록에 들지 않는다)
+  let files = scanSprites(dir);
   const cache = new Map<string, Sprite | null>();
   return {
     pick(id) {
       const named = loadSprite(dir, [id]);
       if (named) return { sprite: named };
-      const file = pickSprite(id, files);
-      if (!file) return {};
-      if (cache.has(file)) {
-        const known = cache.get(file);
-        return known ? { sprite: known } : {};
-      }
-      if (cache.size >= SPRITE_CACHE) cache.delete(cache.keys().next().value!);
-      try {
-        const sprite = readSprite(join(dir, file));
-        cache.set(file, sprite);
-        return { sprite };
-      } catch (error) {
-        cache.set(file, null);
-        return { warning: `그림 ${file}를 읽지 못했습니다: ${messageOf(error)}` };
-      }
+      const file = options.random ? pickSprite(id, files) : undefined;
+      return file ? read(file) : {};
+    },
+    file(name) {
+      // desk를 띄운 뒤 넣은 그림일 수 있다. 목록에 없으면 한 번 다시 읽는다
+      if (!files.includes(name)) files = scanSprites(dir);
+      if (!files.includes(name)) return { warning: `계정 그림 ${name}가 그림 폴더에 없습니다` };
+      return read(name);
     },
   };
+
+  function read(file: string): { sprite?: Sprite; warning?: string } {
+    if (cache.has(file)) {
+      const known = cache.get(file);
+      return known ? { sprite: known } : {};
+    }
+    if (cache.size >= SPRITE_CACHE) cache.delete(cache.keys().next().value!);
+    try {
+      const sprite = readSprite(join(dir, file));
+      cache.set(file, sprite);
+      return { sprite };
+    } catch (error) {
+      cache.set(file, null);
+      return { warning: `그림 ${file}를 읽지 못했습니다: ${messageOf(error)}` };
+    }
+  }
+}
+
+/** 설정 화면이 부르는 스튜디오 API(#890) */
+export type SettingsClient = Pick<StudioClient, 'accounts' | 'rules' | 'preview' | 'addAccount' | 'updateAccount' | 'removeAccount' | 'accountStatus' | 'startLogin' | 'loginProgress' | 'cancelLogin' | 'saveRules'>;
+
+/** 설정 화면이 쓰는 바깥(#890): 스튜디오 API, desk.json, 그림 폴더, 브라우저. 테스트에서는 가짜를 넣는다 */
+export interface SettingsHost {
+  client: SettingsClient;
+  loadConfig(): DeskConfig;
+  /** 받은 값만 desk.json에 쓴다. 실패하면 던진다 */
+  saveConfig(patch: DeskConfig): void;
+  /** 그림 폴더의 그림 파일(폴더 기준 상대 경로) */
+  spriteFiles(): string[];
+  /** 그림 폴더의 파일 하나를 읽는다. 목록에 없거나 읽지 못하면 던진다 */
+  readSprite(file: string): Sprite;
+  /** 주소를 이 컴퓨터의 브라우저로 연다(http·https만 넘긴다) */
+  openUrl(url: string): void;
+}
+
+/** 이 컴퓨터의 브라우저로 연다. 셸을 거치지 않고 주소를 인자 하나로 넘긴다 */
+function openInBrowser(url: string): void {
+  const command = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  const child = execFile(command, [url], { timeout: 10_000 }, () => {});
+  child.unref();
+}
+
+/** 브라우저로 열어도 되는 주소: http·https만 */
+export function browsable(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  } catch {
+    return false;
+  }
 }
 
 export interface DeskOptions {
@@ -190,25 +246,21 @@ export interface DeskAppOptions {
   shellEnv?: Record<string, string | undefined>;
   /** 셸 칸의 폴더(기본은 desk를 띄운 폴더) */
   shellCwd?: string;
+  /** 설정 화면(#890). 없으면 Ctrl-b g가 열 수 없다고 알린다 */
+  settings?: SettingsHost;
+  /** AI 계정(#885). 계정에 고른 그림을 그 계정 세션의 카드에 쓴다 */
+  accounts?: DeskAccount[];
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
-export type DeskClient = Pick<
-  StudioClient,
-  | 'agents'
-  | 'projects'
-  | 'accounts'
-  | 'rules'
-  | 'preview'
-  | 'start'
-  | 'open'
-  | 'resize'
-  | 'input'
-  | 'stream'
-  | 'stop'
-  | 'resume'
-  | 'rename'
-  // 기록 화면과 세션 자세히(#891)
+export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'> &
+  /** 사용량(#889). 없으면 사용량을 묻지 않는다 */
+  { limits?: StudioClient['limits'] } &
+  /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RecordsCall>>;
+
+/** 기록 화면과 세션 자세히가 부르는 스튜디오 API(#891) */
+type RecordsCall =
   | 'routingStats'
   | 'tokenReport'
   | 'session'
@@ -219,8 +271,7 @@ export type DeskClient = Pick<
   | 'exportPreview'
   | 'exportSession'
   | 'reviewRound'
-  | 'resolveFinding'
->;
+  | 'resolveFinding';
 
 /** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
 export interface DeskIo {
@@ -295,7 +346,25 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
       if (sprite) sprites[name] = sprite;
     }
   }
+  // 계정 그림(#890)을 카드에 쓰려고 계정 목록을 받는다. 옛 스튜디오면 없다
+  const accounts = await client.accounts().catch((): DeskAccount[] => []);
+  const folder = spriteDir(dir);
+  let knownSprites: string[] = [];
+  const settings: SettingsHost = {
+    client,
+    loadConfig: () => loadDeskConfig(dir).config,
+    saveConfig: (patch) => saveDeskConfig(dir, patch),
+    spriteFiles: () => (knownSprites = scanSprites(folder)),
+    readSprite: (file) => {
+      // 목록(링크·숨은 파일·폴더 밖은 들지 않는다)에 있는 파일만 읽는다
+      if (!knownSprites.includes(file)) throw new Error('그림 폴더에 없는 파일입니다');
+      return readSprite(join(folder, file));
+    },
+    openUrl: openInBrowser,
+  };
   const app = new DeskApp(client, first, processIo(), {
+    settings,
+    accounts,
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
     mouse: options.mouse ?? config.mouse ?? true,
@@ -330,6 +399,9 @@ export class DeskApp {
   #prevFrame: string[] = [];
   #frameTimer: NodeJS.Timeout | undefined;
   #pollTimer: NodeJS.Timeout | undefined;
+  #usageTimer: NodeJS.Timeout | undefined;
+  /** 사용량을 묻는 중(앞 요청이 끝나기 전에 또 묻지 않는다) */
+  #usageFetching = false;
   #previewTimer: NodeJS.Timeout | undefined;
   /** 칸마다 따로 연 터미널 통로. 칸 하나를 열고 닫아도 다른 칸의 통로와 화면은 그대로다(#863) */
   readonly #streams = new Map<string, { controller: AbortController; timer?: NodeJS.Timeout }>();
@@ -366,6 +438,13 @@ export class DeskApp {
   readonly #spriteWarned = new Set<string>();
   readonly #shellEnv: Record<string, string | undefined>;
   readonly #shellCwd: string;
+  readonly #settingsHost: SettingsHost | undefined;
+  /** AI 계정(#885). 계정에 고른 그림을 찾는 데 쓴다 */
+  #accounts: DeskAccount[];
+  /** 그림 폴더·계정 그림에서 단 카드 그림의 세션. 계정이 바뀌면 지우고 다시 단다 */
+  readonly #assignedSprites = new Set<string>();
+  #loginTimer: NodeJS.Timeout | undefined;
+  #loginPolling = false;
 
   constructor(client: DeskClient, items: DeskState['items'], io: DeskIo, options: DeskAppOptions = {}) {
     this.#client = client;
@@ -379,6 +458,8 @@ export class DeskApp {
     this.#shellCwd = options.shellCwd ?? process.cwd();
     this.#catalog = options.spriteCatalog;
     this.#animate = options.animate !== false;
+    this.#settingsHost = options.settings;
+    this.#accounts = options.accounts ?? [];
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
     const theme = { name: options.theme ?? 'dark', depth: this.#truecolor ? 'truecolor' : '256' } as const;
@@ -444,6 +525,9 @@ export class DeskApp {
       this.#resizeTimer = setTimeout(() => this.#syncPanes(), RESIZE_SETTLE_MS);
     });
     this.#pollTimer = setInterval(() => void this.#poll(), POLL_MS);
+    // 사용량(#889): 처음 한 번, 그 뒤 1분마다
+    void this.#fetchUsage({ refresh: false, force: true });
+    if (this.#client.limits) this.#usageTimer = setInterval(() => void this.#fetchUsage({ refresh: false, force: true }), USAGE_POLL_MS);
     // 되살린 배치의 칸을 연다
     if (this.#visible().length > 0) this.#slotsChanged();
     this.#render();
@@ -546,6 +630,9 @@ export class DeskApp {
         this.#slotsChanged();
         this.#saveLayout();
         return;
+      case 'usage':
+        void this.#fetchUsage({ refresh: effect.refresh, force: effect.refresh });
+        return;
       case 'mouse':
         this.#mouse(effect);
         return;
@@ -580,6 +667,12 @@ export class DeskApp {
       case 'rename':
         void this.#rename(effect.id, effect.label);
         return;
+      case 'settings-open':
+        this.#openSettings();
+        return;
+      case 'settings':
+        void this.#settingsEffect(effect.effect);
+        return;
       case 'records':
         if (effect.open) void this.#openRecords();
         if (effect.load) void this.#loadRecords(effect.load);
@@ -588,6 +681,15 @@ export class DeskApp {
         void this.#detailAction(effect.action);
         return;
     }
+  }
+
+  /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
+  #call<K extends RecordsCall>(name: K): StudioClient[K] {
+    const method = this.#client[name];
+    if (method) return method.bind(this.#client) as StudioClient[K];
+    return (async () => {
+      throw new Error('이 스튜디오는 이 기능을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
+    }) as unknown as StudioClient[K];
   }
 
   /** 기록 화면을 채운다: 프로젝트 목록(토큰 보고서용)과 계정 이름, 그리고 AI별 결과(#891) */
@@ -608,10 +710,10 @@ export class DeskApp {
   async #loadRecords(load: RecordsLoad): Promise<void> {
     try {
       if (load.kind === 'stats') {
-        const stats = await this.#client.routingStats();
+        const stats = await this.#call('routingStats')();
         if (this.#state.records) this.#state = { ...this.#state, records: { ...this.#state.records, stats, statsError: undefined, loading: false } };
       } else {
-        const report = await this.#client.tokenReport(load.projectId, load.from);
+        const report = await this.#call('tokenReport')(load.projectId, load.from);
         const records = this.#state.records;
         // 그사이 다른 프로젝트를 골랐으면 버린다
         if (records && records.projects[records.projectIndex]?.id === load.projectId) this.#state = { ...this.#state, records: { ...records, report, reportError: undefined, loading: false } };
@@ -635,7 +737,7 @@ export class DeskApp {
     const fail = (what: string) => (error: unknown) => update({ busy: undefined, message: `${what}: ${messageOf(error)}` });
     const reload = async () => {
       try {
-        const snapshot = await this.#client.session(id);
+        const snapshot = await this.#call('session')(id);
         const detail = this.#state.detail;
         const count = detail?.tab === 'checkpoints' ? snapshot.checkpoints.length : Number.POSITIVE_INFINITY;
         update({ snapshot, loading: false, error: undefined, ...(detail ? { selected: Math.max(0, Math.min(detail.selected, count - 1)) } : {}) });
@@ -649,7 +751,7 @@ export class DeskApp {
         return;
       case 'patch':
         try {
-          const files = parsePatch(await this.#client.checkpointPatch(id, action.sha));
+          const files = parsePatch(await this.#call('checkpointPatch')(id, action.sha));
           const patch = this.#state.detail?.patch;
           if (patch?.sha === action.sha) update({ patch: { ...patch, files, loading: false } });
         } catch (error) {
@@ -658,21 +760,21 @@ export class DeskApp {
         }
         return;
       case 'restore':
-        await this.#client.restoreCheckpoint(id, action.sha).then(
+        await this.#call('restoreCheckpoint')(id, action.sha).then(
           () => update({ busy: undefined, message: '되돌리기를 시작했습니다. 끝나면 체크포인트 목록이 바뀝니다(r로 다시 부릅니다)' }),
           fail('되돌리지 못했습니다'),
         );
         await reload();
         return;
       case 'reverify':
-        await this.#client.reverify(id, action.sha).then(
+        await this.#call('reverify')(id, action.sha).then(
           () => update({ busy: undefined, message: '다시 검증을 시작했습니다. 결과는 끝난 뒤 r로 다시 불러 봅니다' }),
           fail('다시 검증하지 못했습니다'),
         );
         return;
       case 'delete':
         try {
-          await this.#client.deleteSession(id);
+          await this.#call('deleteSession')(id);
           const title = this.#state.detail?.title ?? id;
           // 지운 세션이 칸에 있으면 비운다
           const slots = this.#state.slots.map((slot) => (slot === id ? undefined : slot));
@@ -687,14 +789,14 @@ export class DeskApp {
         return;
       case 'exportPreview':
         try {
-          update({ preview: await this.#client.exportPreview(id), previewError: undefined });
+          update({ preview: await this.#call('exportPreview')(id), previewError: undefined });
         } catch (error) {
           update({ previewError: messageOf(error) });
         }
         return;
       case 'export':
         try {
-          const result = await this.#client.exportSession(id, action.pullRequest);
+          const result = await this.#call('exportSession')(id, action.pullRequest);
           const pr = result.pullRequest;
           const text = pr
             ? pr.created
@@ -712,14 +814,14 @@ export class DeskApp {
         }
         return;
       case 'review':
-        await this.#client.reviewRound(id, action.restart).then(
+        await this.#call('reviewRound')(id, action.restart).then(
           () => update({ busy: undefined, message: 'AI 리뷰를 시작했습니다. 진행은 r로 다시 불러 봅니다' }),
           fail('AI 리뷰를 돌리지 못했습니다'),
         );
         return;
       case 'resolve':
         try {
-          await this.#client.resolveFinding(id, { round: action.round, findingIndex: action.findingIndex, reason: action.reason });
+          await this.#call('resolveFinding')(id, { round: action.round, findingIndex: action.findingIndex, reason: action.reason });
           update({ busy: undefined, message: '지적을 오탐으로 닫았습니다' });
           await reload();
         } catch (error) {
@@ -727,6 +829,287 @@ export class DeskApp {
         }
         return;
     }
+  }
+
+  // ─── 설정 화면(#890) ───
+
+  /** 설정 화면을 바꾼다. 그사이 닫혔으면 아무것도 하지 않는다 */
+  #patchSettings(change: (settings: SettingsState) => SettingsState): void {
+    const settings = this.#state.settings;
+    if (!settings) return;
+    this.#state = { ...this.#state, settings: change(settings) };
+    this.#scheduleRender();
+  }
+
+  /** 키 처리가 연 설정 화면에 desk.json의 값과 그림 목록을 채우고, 계정·규칙을 받는다 */
+  #openSettings(): void {
+    const host = this.#settingsHost;
+    if (!host) {
+      this.#state = { ...this.#state, settings: undefined };
+      this.#say('이 desk는 설정 화면을 열 수 없습니다. pnpm studio로 다시 여세요');
+      return;
+    }
+    let config: DeskConfig = {};
+    let sprites: string[] = [];
+    try {
+      config = host.loadConfig();
+    } catch {
+      // 읽지 못한 설정은 기본값으로 보인다. 바꾸면 새로 쓴다
+    }
+    try {
+      sprites = host.spriteFiles();
+    } catch {
+      // 그림 폴더가 없으면 고를 그림이 없다
+    }
+    // 여는 사이 이미 바꾼 값(같은 입력 조각에서 친 키)이 파일 값보다 앞선다
+    const opened = this.#state.settings ?? openSettings({ config: {}, sprites: [] });
+    this.#state = { ...this.#state, settings: { ...opened, config: { ...config, ...opened.config }, sprites }, help: false, message: undefined };
+    void this.#loadSettings(host);
+  }
+
+  async #loadSettings(host: SettingsHost): Promise<void> {
+    const [accounts, rules] = await Promise.all([
+      host.client.accounts().then(
+        (list) => ({ list }),
+        (error: unknown) => ({ list: [] as DeskAccount[], error: messageOf(error) }),
+      ),
+      host.client.rules().then(
+        (view) => ({ view }),
+        (error: unknown) => ({ view: undefined, error: messageOf(error) }),
+      ),
+    ]);
+    if (!('error' in accounts)) this.#setAccounts(accounts.list);
+    this.#patchSettings((settings) => ({
+      ...settings,
+      loading: false,
+      accounts: accounts.list.map((account): SettingsAccount => ({ ...account, checking: true })),
+      ...('error' in accounts && accounts.error ? { accountsError: accounts.error } : {}),
+      backends: rules.view?.allowed ?? [],
+      ...(rules.view?.rules ? { rules: rules.view.rules } : {}),
+      ...(rules.view?.defaultBackend ? { defaultBackend: rules.view.defaultBackend } : {}),
+      ...('error' in rules && rules.error ? { rulesError: `규칙을 받지 못했습니다: ${rules.error}` } : rules.view?.error ? { rulesError: `저장한 규칙을 쓰지 못합니다: ${rules.view.error}` } : {}),
+    }));
+    // 로그인 상태는 CLI를 띄워 재서 느리다. 계정마다 따로 묻는다
+    for (const account of accounts.list) void this.#checkStatus(host, account.id);
+  }
+
+  async #checkStatus(host: SettingsHost, id: string): Promise<void> {
+    try {
+      const status = await host.client.accountStatus(id);
+      this.#patchSettings((settings) => ({ ...settings, accounts: settings.accounts.map((account) => (account.id === id ? { ...account, status, checking: false, statusError: undefined } : account)) }));
+    } catch (error) {
+      this.#patchSettings((settings) => ({ ...settings, accounts: settings.accounts.map((account) => (account.id === id ? { ...account, checking: false, statusError: messageOf(error) } : account)) }));
+    }
+  }
+
+  /** 계정 목록을 다시 받아 설정 화면과 카드 그림에 쓴다. select를 주면 그 계정을 고른다. 이미 잰 로그인 상태는 남긴다 */
+  async #reloadAccounts(host: SettingsHost, select?: string): Promise<void> {
+    const list = await host.client.accounts();
+    this.#setAccounts(list);
+    this.#patchSettings((settings) => {
+      const known = new Map(settings.accounts.map((account) => [account.id, account]));
+      const accounts = list.map((account): SettingsAccount => {
+        const before = known.get(account.id);
+        return { ...account, ...(before?.status ? { status: before.status } : {}), ...(before?.checking ? { checking: true } : {}) };
+      });
+      const index = select === undefined ? -1 : accounts.findIndex((account) => account.id === select);
+      const row = settings.tab === 'accounts' ? (index >= 0 ? index : Math.min(settings.row, Math.max(0, accounts.length - 1))) : settings.row;
+      return { ...settings, accounts, row, accountsError: undefined };
+    });
+  }
+
+  /** 카드 그림에 쓰는 계정이 바뀌었다: 그림 폴더·계정 그림에서 단 카드 그림을 지워 다시 단다 */
+  #setAccounts(list: DeskAccount[]): void {
+    const changed = JSON.stringify(list.map((account) => [account.id, account.sprite ?? ''])) !== JSON.stringify(this.#accounts.map((account) => [account.id, account.sprite ?? '']));
+    this.#accounts = list;
+    if (!changed) return;
+    // 사용량 화면의 계정 그림(#889)도 새 계정 목록을 따른다(다음 사용량 읽기를 기다리지 않는다)
+    const usage = this.#state.usage;
+    if (usage) {
+      const accounts = usage.accounts.map((entry) => {
+        const account = list.find((candidate) => candidate.id === entry.id);
+        if (!account) return entry;
+        const { sprite: _old, ...rest } = entry;
+        return account.sprite ? { ...rest, sprite: account.sprite } : rest;
+      });
+      this.#state = { ...this.#state, usage: { ...usage, accounts } };
+    }
+    const sprites = { ...(this.#state.sprites ?? {}) };
+    for (const id of this.#assignedSprites) delete sprites[id];
+    this.#assignedSprites.clear();
+    this.#state = { ...this.#state, sprites };
+    this.#scheduleRender();
+  }
+
+  async #settingsEffect(effect: SettingsEffect): Promise<void> {
+    const host = this.#settingsHost;
+    if (!host) return;
+    const note = (text: string) => this.#patchSettings((settings) => ({ ...settings, note: text }));
+    try {
+      switch (effect.type) {
+        case 'close':
+          this.#stopLoginPoll();
+          return;
+        case 'account-add': {
+          const account = await host.client.addAccount({ name: effect.name, backend: effect.backend, configDir: effect.configDir });
+          await this.#reloadAccounts(host, account.id);
+          note(`${account.name} 계정을 더했습니다. l로 로그인합니다`);
+          void this.#checkStatus(host, account.id);
+          return;
+        }
+        case 'account-update': {
+          await host.client.updateAccount(effect.id, { ...(effect.name !== undefined ? { name: effect.name } : {}), ...(effect.sprite !== undefined ? { sprite: effect.sprite } : {}) });
+          await this.#reloadAccounts(host, effect.id);
+          note(effect.name !== undefined ? `이름을 바꿨습니다: ${effect.name}` : effect.sprite ? `그림을 바꿨습니다: ${effect.sprite}` : '그림을 지웠습니다(세션마다 무작위)');
+          return;
+        }
+        case 'account-remove':
+          await host.client.removeAccount(effect.id);
+          await this.#reloadAccounts(host);
+          note('목록에서 뺐습니다(설정 폴더는 그대로입니다)');
+          return;
+        case 'account-status':
+          await this.#checkStatus(host, effect.id);
+          return;
+        case 'login-start': {
+          const started = await host.client.startLogin(effect.id);
+          if (!started.spawnable || !started.progress) {
+            this.#patchSettings((settings) => (settings.login?.accountId === effect.id ? { ...settings, login: { ...settings.login, state: 'manual', ...(started.command ? { command: started.command } : {}), ...(started.note ? { note: started.note } : {}) } } : settings));
+            return;
+          }
+          this.#applyLogin(host, effect.id, started.progress);
+          if (started.progress.state === 'running') this.#startLoginPoll(host, effect.id);
+          return;
+        }
+        case 'login-cancel':
+          this.#applyLogin(host, effect.id, await host.client.cancelLogin(effect.id));
+          return;
+        case 'open-url':
+          if (!browsable(effect.url)) {
+            note('http·https 주소만 브라우저로 엽니다');
+            return;
+          }
+          host.openUrl(effect.url);
+          note('브라우저로 열었습니다');
+          return;
+        case 'rules-save': {
+          const rules = await host.client.saveRules(effect.rules).catch((error: unknown) => {
+            const text = `저장하지 못했습니다: ${messageOf(error)}`;
+            this.#patchSettings((settings) => ({ ...settings, rulesError: text, note: text }));
+            return undefined;
+          });
+          if (rules) this.#patchSettings((settings) => ({ ...settings, rules, rulesDirty: false, rulesError: undefined, note: '규칙을 저장했습니다' }));
+          return;
+        }
+        case 'rules-reload': {
+          const view = await host.client.rules();
+          this.#patchSettings((settings) => ({
+            ...settings,
+            ...(view.rules ? { rules: view.rules } : {}),
+            backends: view.allowed,
+            defaultBackend: view.defaultBackend,
+            rulesDirty: false,
+            rulesError: view.error ? `저장한 규칙을 쓰지 못합니다: ${view.error}` : undefined,
+            note: '저장한 규칙을 다시 읽었습니다',
+          }));
+          return;
+        }
+        case 'preview': {
+          const result = await host.client.preview(effect.text).then(previewLine, (error: unknown) => `묻지 못했습니다: ${messageOf(error)}`);
+          this.#patchSettings((settings) => (settings.preview?.text === effect.text ? { ...settings, preview: { text: effect.text, result } } : settings));
+          return;
+        }
+        case 'config':
+          this.#saveConfig(host, effect.config);
+          return;
+        case 'sprite-preview': {
+          let preview: NonNullable<SettingsState['previewSprite']>;
+          try {
+            preview = { file: effect.file, sprite: host.readSprite(effect.file) };
+          } catch (error) {
+            preview = { file: effect.file, error: messageOf(error) };
+          }
+          this.#patchSettings((settings) => (settings.picker ? { ...settings, previewSprite: preview } : settings));
+          return;
+        }
+      }
+    } catch (error) {
+      note(messageOf(error));
+    }
+  }
+
+  /** desk.json에 쓰고, 바로 적용할 수 있는 것(팔레트·앞글쇠)은 바로 적용한다 */
+  #saveConfig(host: SettingsHost, patch: DeskConfig): void {
+    try {
+      host.saveConfig(patch);
+    } catch (error) {
+      let config: DeskConfig = {};
+      try {
+        config = host.loadConfig();
+      } catch {
+        // 읽지도 못하면 기본값으로 보인다
+      }
+      this.#patchSettings((settings) => ({ ...settings, config, note: `저장하지 못했습니다: ${messageOf(error)}` }));
+      return;
+    }
+    let live = false;
+    if (patch.theme) {
+      this.#state = { ...this.#state, theme: { name: patch.theme, depth: this.#truecolor ? 'truecolor' : '256' } };
+      this.#prevFrame = [];
+      live = true;
+    }
+    if (patch.prefix) {
+      this.#state = { ...this.#state, prefixKey: patch.prefix.key, prefixLabel: patch.prefix.label };
+      live = true;
+    }
+    this.#patchSettings((settings) => ({ ...settings, note: live ? '저장했습니다 · 바로 적용' : '저장했습니다 · desk를 다시 열면 적용됩니다' }));
+  }
+
+  #applyLogin(host: SettingsHost, id: string, progress: DeskLoginProgress): void {
+    this.#patchSettings((settings) => {
+      const login = settings.login?.accountId === id
+        ? {
+            ...settings.login,
+            state: progress.state,
+            lines: progress.lines,
+            ...(progress.url ? { url: progress.url } : {}),
+            ...(progress.code ? { code: progress.code } : {}),
+            ...(progress.error ? { error: progress.error } : {}),
+            ...(progress.status ? { connected: progress.status.connected, ...(progress.status.reason ? { reason: progress.status.reason } : {}) } : {}),
+          }
+        : settings.login;
+      const accounts = progress.status ? settings.accounts.map((account) => (account.id === id ? { ...account, status: progress.status, checking: false } : account)) : settings.accounts;
+      return { ...settings, accounts, ...(login ? { login } : {}) };
+    });
+    if (progress.state !== 'running') {
+      this.#stopLoginPoll();
+      // 끝났는데 다시 잰 상태가 없으면 한 번 묻는다
+      if (!progress.status) void this.#checkStatus(host, id);
+    }
+  }
+
+  #startLoginPoll(host: SettingsHost, id: string): void {
+    this.#stopLoginPoll();
+    this.#loginTimer = setInterval(() => {
+      if (!this.#state.settings || this.#restored) {
+        this.#stopLoginPoll();
+        return;
+      }
+      if (this.#loginPolling) return;
+      this.#loginPolling = true;
+      host.client
+        .loginProgress(id)
+        .then((progress) => this.#applyLogin(host, id, progress))
+        .catch((error: unknown) => this.#patchSettings((settings) => ({ ...settings, note: `로그인 진행을 묻지 못했습니다: ${messageOf(error)}` })))
+        .finally(() => {
+          this.#loginPolling = false;
+        });
+    }, LOGIN_POLL_MS);
+  }
+
+  #stopLoginPoll(): void {
+    clearInterval(this.#loginTimer);
+    this.#loginTimer = undefined;
   }
 
   /** 세션 멈추기·이어서 작업(#864). 이어서 작업한 세션은 켜진 뒤 칸을 다시 연다(#poll) */
@@ -819,6 +1202,19 @@ export class DeskApp {
         this.#state = { ...this.#state, selected: row.item, prefix: true, browsing: true, message: BROWSING };
       }
       this.#clearSeen();
+      this.#scheduleRender();
+      return;
+    }
+    if (this.#state.view === 'usage') {
+      if (!press) return;
+      const count = this.#state.usage?.accounts.length ?? 0;
+      const current = this.#state.usageSelected ?? 0;
+      if (wheel) this.#state = { ...this.#state, usageSelected: Math.max(0, Math.min(count - 1, current + wheel)) };
+      else {
+        const card = usageScreen(this.#state, spaceRect(this.#state, size)).cards.find(({ rect }) => x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h);
+        if (!card) return;
+        this.#state = { ...this.#state, usageSelected: card.index };
+      }
       this.#scheduleRender();
       return;
     }
@@ -1176,6 +1572,47 @@ export class DeskApp {
     this.#scheduleRender();
   }
 
+  /**
+   * 사용량을 받는다(#889). force가 아니면 받은 지 1분이 안 됐을 때 묻지 않는다(사용량 화면을 여닫을 때마다 묻지 않게).
+   * 받으면 세션 카드의 막대(state.limits)도 새로 잇는다. 읽지 못하면 받았던 값은 두고 까닭만 남긴다
+   */
+  async #fetchUsage(options: { refresh: boolean; force: boolean }): Promise<void> {
+    const limits = this.#client.limits;
+    if (!limits) {
+      if (!this.#state.usage) this.#state = { ...this.#state, usage: { accounts: [], unsupported: true } };
+      this.#scheduleRender();
+      return;
+    }
+    const received = this.#state.usage?.receivedAt;
+    if (!options.force && received !== undefined && Date.now() - received < USAGE_POLL_MS) return;
+    if (this.#usageFetching) return;
+    this.#usageFetching = true;
+    const asked = options.refresh ? this.#state.message : undefined;
+    try {
+      const { accounts, warning } = await limits.call(this.#client, options.refresh);
+      if (this.#restored) return;
+      const count = accounts.length;
+      this.#state = {
+        ...this.#state,
+        usage: { accounts, receivedAt: Date.now(), ...(warning ? { warning } : {}) },
+        limits: sessionLimits(this.#state.items, accounts),
+        ...(this.#state.usageSelected !== undefined ? { usageSelected: Math.max(0, Math.min(count - 1, this.#state.usageSelected)) } : {}),
+        ...(asked !== undefined && this.#state.message === asked ? { message: '사용량을 다시 읽었습니다(계정마다 최소 간격은 스튜디오가 지킵니다)' } : {}),
+      };
+    } catch (error) {
+      if (this.#restored) return;
+      const previous = this.#state.usage;
+      this.#state = {
+        ...this.#state,
+        usage: { accounts: previous?.accounts ?? [], ...(previous?.receivedAt !== undefined ? { receivedAt: previous.receivedAt } : {}), error: messageOf(error) },
+        ...(asked !== undefined && this.#state.message === asked ? { message: undefined } : {}),
+      };
+    } finally {
+      this.#usageFetching = false;
+    }
+    this.#scheduleRender();
+  }
+
   async #poll(): Promise<void> {
     // 앞 요청이 끝나기 전에는 새로 묻지 않는다(느린 스튜디오에 요청이 쌓이고 늦게 온 옛 목록이 새 목록을 덮지 않게)
     if (this.#polling) return;
@@ -1183,7 +1620,8 @@ export class DeskApp {
     try {
       const items = (await this.#client.agents()).items;
       // 서버는 손댈 것·작업 중을 위로 올려 순서를 자주 바꾼다. 고르던 세션을 그대로 고른다
-      this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items) };
+      const usage = this.#state.usage;
+      this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items), ...(usage?.accounts.length ? { limits: sessionLimits(items, usage.accounts) } : {}) };
       this.#announce(items);
       this.#reopenResumed(items);
       this.#clearSeen();
@@ -1298,21 +1736,63 @@ export class DeskApp {
     }, FRAME_MS);
   }
 
-  /** 스페이스 화면에 보일 세션 가운데 이름 붙인 그림이 없는 것에 그림 폴더의 그림을 단다(처음 보일 때 한 번) */
+  /**
+   * 스페이스 화면에 보일 세션에 카드 그림을 단다(처음 보일 때 한 번). 계정에 고른 그림(#890)이 먼저이고,
+   * 그다음 AI 이름이나 default로 이름 붙인 그림, 그다음 그림 폴더(세션 id 이름의 그림, 무작위)다
+   */
   #ensureSprites(): void {
+    if (this.#state.view === 'usage') {
+      this.#ensureAccountSprites();
+      return;
+    }
     if (!this.#catalog || this.#state.view !== 'space') return;
     const sprites = this.#state.sprites ?? {};
     let added: Record<string, Sprite> | undefined;
     for (const item of spaceItems(this.#state)) {
       if (sprites[item.id] || added?.[item.id]) continue;
-      // AI 이름이나 default로 이름 붙인 그림이 있으면 그것이 먼저다
+      const file = this.#accountSprite(item);
+      if (file && this.#catalog.file) {
+        const { sprite, warning } = this.#catalog.file(file);
+        this.#warnSprite(warning);
+        if (sprite) {
+          added = { ...added, [item.id]: sprite };
+          this.#assignedSprites.add(item.id);
+          continue;
+        }
+      }
       if ((item.backend && sprites[item.backend]) || sprites.default) continue;
       const { sprite, warning } = this.#catalog.pick(item.id);
-      if (warning && !this.#spriteWarned.has(warning)) {
-        this.#spriteWarned.add(warning);
-        this.#say(warning);
-      }
+      this.#warnSprite(warning);
       added = { ...added, [item.id]: sprite ?? defaultSprite(item.backend) };
+      this.#assignedSprites.add(item.id);
+    }
+    if (added) this.#state = { ...this.#state, sprites: { ...sprites, ...added } };
+  }
+
+  /** 세션의 계정에 고른 그림. 계정이 없는 세션은 그 CLI의 기본 계정(id가 CLI 이름)이다 */
+  #accountSprite(item: DeskItem): string | undefined {
+    const id = item.accountId ?? item.backend;
+    return id ? this.#accounts.find((account) => account.id === id)?.sprite : undefined;
+  }
+
+  #warnSprite(warning: string | undefined): void {
+    if (!warning || this.#spriteWarned.has(warning)) return;
+    this.#spriteWarned.add(warning);
+    this.#say(warning);
+  }
+
+  /** 사용량 화면의 계정 그림(#889): 계정에 적은 그림 파일, 없으면 계정 id로 그림 폴더에서 고른다. 처음 보일 때 한 번 */
+  #ensureAccountSprites(): void {
+    const sprites = this.#state.sprites ?? {};
+    let added: Record<string, Sprite> | undefined;
+    for (const account of this.#state.usage?.accounts ?? []) {
+      const key = usageSpriteKey(account.id);
+      if (sprites[key] || added?.[key]) continue;
+      const found = !this.#catalog ? {} : account.sprite && this.#catalog.file ? this.#catalog.file(account.sprite) : this.#catalog.pick(account.id);
+      this.#warnSprite(found.warning);
+      added = { ...added, [key]: found.sprite ?? sprites[account.backend] ?? sprites.default ?? defaultSprite(account.backend) };
+      // 설정 화면에서 계정 그림을 바꾸면 지우고 다시 단다
+      this.#assignedSprites.add(key);
     }
     if (added) this.#state = { ...this.#state, sprites: { ...sprites, ...added } };
   }
@@ -1320,8 +1800,10 @@ export class DeskApp {
   /** 스페이스 화면에 움짤이 보이고 창이 포커스를 가졌으면 다음 프레임에 다시 그린다. 아니면 멈춘다(시계도 멈춘다) */
   #scheduleAnimation(): void {
     const state = this.#state;
-    const playing = this.#animate && !this.#restored && this.#windowFocused && state.view === 'space' && !state.help && !state.copy && !state.records && !state.detail;
-    const delays = playing ? spaceItems(state).flatMap((item) => shortestFrame(spriteFor(item, state.sprites)) ?? []) : [];
+    const playing =
+      this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy && !state.settings && !state.records && !state.detail;
+    const shown = !playing ? [] : state.view === 'usage' ? (state.usage?.accounts ?? []).map((account) => accountSprite(account, state.sprites)) : spaceItems(state).map((item) => spriteFor(item, state.sprites));
+    const delays = shown.flatMap((sprite) => shortestFrame(sprite) ?? []);
     if (delays.length === 0) {
       clearTimeout(this.#animTimer);
       this.#animTimer = undefined;
@@ -1378,11 +1860,13 @@ export class DeskApp {
     if (this.#restored) return;
     this.#restored = true;
     clearInterval(this.#pollTimer);
+    clearInterval(this.#usageTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);
     clearTimeout(this.#pendingTimer);
     clearTimeout(this.#resizeTimer);
     clearTimeout(this.#animTimer);
+    this.#stopLoginPoll();
     for (const entry of this.#streams.values()) {
       entry.controller.abort();
       clearTimeout(entry.timer);

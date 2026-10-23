@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, parsePrefix, saveDeskLayout } from './config';
+import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, parsePrefix, saveDeskConfig, saveDeskLayout } from './config';
 
 let dir: string;
 
@@ -122,5 +122,23 @@ describe('카드 그림 설정(#902)', () => {
     const { config, warnings } = loadDeskConfig(dir);
     expect(config).toEqual({});
     expect(warnings).toEqual([expect.stringContaining('animate'), expect.stringContaining('sprites'), expect.stringContaining('graphics')]);
+  });
+});
+
+describe('설정 저장(#890)', () => {
+  it('고친 값만 바꾸고 파일에 있던 다른 값은 그대로 둔다. 쓴 것은 다시 읽힌다', () => {
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ notify: false, mine: { keep: true } }));
+    saveDeskConfig(dir, { theme: 'light', prefix: { key: '\x01', label: 'Ctrl-a' } });
+    const raw = JSON.parse(readFileSync(join(dir, 'desk.json'), 'utf8'));
+    expect(raw).toEqual({ notify: false, mine: { keep: true }, theme: 'light', prefix: 'Ctrl-a' });
+    expect(loadDeskConfig(dir).config).toEqual({ notify: false, theme: 'light', prefix: { key: '\x01', label: 'Ctrl-a' } });
+  });
+
+  it('파일이 없거나 JSON이 아니면 새로 쓴다(깨진 파일을 고칠 길)', () => {
+    saveDeskConfig(join(dir, 'new'), { animate: false });
+    expect(JSON.parse(readFileSync(join(dir, 'new', 'desk.json'), 'utf8'))).toEqual({ animate: false });
+    writeFileSync(join(dir, 'desk.json'), '{ 깨짐');
+    saveDeskConfig(dir, { mouse: false });
+    expect(JSON.parse(readFileSync(join(dir, 'desk.json'), 'utf8'))).toEqual({ mouse: false });
   });
 });

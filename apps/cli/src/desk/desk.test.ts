@@ -6,7 +6,7 @@ import { spaceScreen } from './cards';
 import { spaceRect } from './render';
 import { sidebarRows } from './sidebar';
 import { spriteFromRows, type Sprite } from './sprite';
-import type { DeskAccount, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -115,6 +115,16 @@ class FakeClient implements DeskClient {
   async resolveFinding(id: string, input: { round: number; findingIndex: number; reason: string }) {
     this.#record('resolveFinding', id, input);
   }
+  /** 사용량을 물은 기록(refresh 값). 답은 부른 뒤에 정해도 된다(한 박자 뒤에 읽는다) */
+  limitsCalls: boolean[] = [];
+  limitsResult: { accounts: DeskAccountLimits[]; warning?: string } = { accounts: [] };
+  limitsError: Error | undefined;
+  limits: ((refresh?: boolean) => Promise<{ accounts: DeskAccountLimits[]; warning?: string }>) | undefined = async (refresh = false) => {
+    this.limitsCalls.push(refresh);
+    await Promise.resolve();
+    if (this.limitsError) throw this.limitsError;
+    return this.limitsResult;
+  };
   async open(id: string) {
     this.calls.push({ type: 'open', id });
     if (this.openError) throw this.openStatus ? new StudioRequestError(this.openError, this.openStatus) : new Error(this.openError);
@@ -1156,6 +1166,14 @@ describe('desk 작업대: 기록 화면과 세션 자세히(#891)', () => {
     expect(plain(ctx)).toContain('되돌리기를 시작했습니다');
   });
 
+  it('기록 API를 모르는 옛 손님이면 기록 화면에 그 까닭을 보인다', async () => {
+    const ctx = setup();
+    Object.assign(ctx.client, { routingStats: undefined });
+    ctx.io.type('\x02h');
+    await tick();
+    expect(plain(ctx)).toContain('이 스튜디오는 이 기능을 지원하지 않습니다');
+  });
+
   it('실패하면 그 까닭을 보이고 세션은 그대로 둔다', async () => {
     const ctx = setup();
     ctx.client.failNext.reverify = '지금 체크포인트만 다시 검증할 수 있습니다';
@@ -1192,6 +1210,90 @@ describe('desk 작업대: 기록 화면과 세션 자세히(#891)', () => {
     ctx.io.type('py');
     await tick();
     expect(ctx.client.recordCalls.find(([name]) => name === 'exportSession')).toEqual(['exportSession', 'a', true]);
-    expect(ctx.io.all).toContain('\x1b]8;;https://example.test/pr/7\x1b\\');
+    expect(ctx.io.all).toContain('\x1b]8;;https://example.test/pr/7');
+  });
+});
+
+describe('desk 작업대: 사용량(#889)', () => {
+  const items = [item('a', { accountId: 'acct-1' }), item('b', { backend: 'codex' })];
+  const accounts: DeskAccountLimits[] = [
+    { id: 'acct-1', backend: 'claude-code', name: '피오', status: 'warn', windows: [{ kind: 'five_hour', usedPercent: 37 }, { kind: 'weekly', usedPercent: 90 }], source: 'claude-oauth', sprite: 'fio.gif' },
+    { id: 'codex', backend: 'codex', name: '마르코', status: 'ok', windows: [{ kind: 'weekly', usedPercent: 26 }], source: 'codex-app-server' },
+  ];
+
+  it('시작할 때 사용량을 읽어 세션 카드의 막대에 잇고, 1분마다 다시 읽는다', async () => {
+    const ctx = setup(items);
+    ctx.client.limitsResult = { accounts };
+    await tick();
+    expect(ctx.client.limitsCalls).toEqual([false]);
+    expect(ctx.app.state.limits).toEqual({ a: { fiveHour: { usedPercent: 37 }, weekly: { usedPercent: 90 } }, b: { weekly: { usedPercent: 26 } } });
+    expect(ctx.io.all).toContain('90%');
+    await tick(58_000);
+    expect(ctx.client.limitsCalls).toEqual([false]);
+    await tick(2_000);
+    expect(ctx.client.limitsCalls).toEqual([false, false]);
+  });
+
+  it('Ctrl-b u로 사용량 화면을 열고(방금 읽었으면 다시 묻지 않는다), r로 다시 읽기를 청한다', async () => {
+    const ctx = setup(items);
+    ctx.client.limitsResult = { accounts };
+    await tick();
+    ctx.io.type('\x02u');
+    await tick();
+    expect(ctx.app.state.view).toBe('usage');
+    expect(ctx.client.limitsCalls).toEqual([false]);
+    const screen = ctx.io.all;
+    expect(screen).toContain('사용량');
+    expect(screen).toContain('피오');
+    expect(screen).toContain('마르코');
+    ctx.io.type('r');
+    await tick();
+    expect(ctx.client.limitsCalls).toEqual([false, true]);
+    ctx.io.type('\x1b');
+    await tick(50);
+    expect(ctx.app.state.view).toBe('space');
+  });
+
+  it('계정 그림은 계정의 그림 파일, 없으면 계정 id로 그림 폴더에서 고른다', async () => {
+    const blue = spriteFromRows(['b'], { b: '#0000ff' });
+    const picked: string[] = [];
+    const files: string[] = [];
+    const spriteCatalog: SpriteCatalog = { pick: (id) => (picked.push(id), { sprite: blue }), file: (name) => (files.push(name), { sprite: blue }) };
+    const ctx = setup(items, { spriteCatalog });
+    ctx.client.limitsResult = { accounts };
+    await tick();
+    ctx.io.type('\x02u');
+    await tick();
+    expect(files).toEqual(['fio.gif']);
+    expect(picked).toContain('codex');
+    expect(ctx.app.state.sprites?.['acct:acct-1']).toBe(blue);
+    expect(ctx.app.state.sprites?.['acct:codex']).toBe(blue);
+  });
+
+  it('사용량을 알려 주지 않는 스튜디오면 묻지 않고, 사용량 화면에 그렇다고 보인다', async () => {
+    const client = new FakeClient(items);
+    client.limits = undefined;
+    const io = new FakeIo();
+    const app = new DeskApp(client, items, io);
+    void app.run();
+    await tick();
+    io.type('\x02u');
+    await tick();
+    expect(app.state.view).toBe('usage');
+    expect(io.all).toContain('사용량을 알려 주지 않는 스튜디오');
+  });
+
+  it('사용량을 읽지 못하면 사용량 화면에 까닭을 보이고, 카드 막대는 지난 값을 둔다', async () => {
+    const ctx = setup(items);
+    ctx.client.limitsResult = { accounts };
+    await tick();
+    ctx.client.limitsError = new Error('스튜디오가 500으로 답했습니다');
+    ctx.io.type('\x02u');
+    await tick();
+    ctx.io.type('r');
+    await tick();
+    expect(ctx.app.state.usage?.error).toBe('스튜디오가 500으로 답했습니다');
+    expect(ctx.app.state.limits?.a).toBeDefined();
+    expect(ctx.io.all).toContain('스튜디오가 500으로 답했습니다');
   });
 });

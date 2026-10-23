@@ -349,7 +349,30 @@ export function createUsageLimits(deps: UsageLimitDeps) {
   };
 }
 
-/** 여러 계정(#885) 전에는 CLI마다 기본 계정 하나를 본다 */
+/** 한도를 읽는 CLI. 그 밖의 CLI(commandcode·opencode)는 5시간·주간 한도가 없어 사용량 화면에 올리지 않는다 */
+export const LIMIT_BACKENDS = ['claude-code', 'codex', 'gemini'] as const;
+/** CLI의 기본 설정 폴더(홈 기준). 같은 폴더를 가리키는 계정을 하나로 보는 데 쓴다 */
+const DEFAULT_CONFIG_DIR: Record<string, string> = { 'claude-code': '.claude', codex: '.codex', gemini: '.gemini' };
+
+/**
+ * 계정 목록(#885)에서 한도를 읽을 계정을 꺼낸다(#889). 한도가 있는 CLI만 두고, 같은 설정 폴더를 가리키는 계정은 앞의 하나만 둔다 —
+ * 같은 로그인을 두 번 읽으면 Claude 사용량 API를 그만큼 더 부르고, 사용량 화면에 같은 계정이 둘 보인다
+ */
+export function limitAccounts(accounts: ReadonlyArray<{ id: string; backend: string; configDir?: string }>, homeDir: string): UsageAccount[] {
+  const seen = new Set<string>();
+  const result: UsageAccount[] = [];
+  for (const account of accounts) {
+    if (!(LIMIT_BACKENDS as readonly string[]).includes(account.backend)) continue;
+    const dir = path.resolve(account.configDir ?? path.join(homeDir, DEFAULT_CONFIG_DIR[account.backend] ?? `.${account.backend}`));
+    const key = `${account.backend}\0${dir}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ id: account.id, backend: account.backend, ...(account.configDir ? { configDir: account.configDir } : {}) });
+  }
+  return result;
+}
+
+/** 계정 목록을 읽지 못했을 때 보는 CLI마다의 기본 계정 */
 export const DEFAULT_LIMIT_ACCOUNTS: UsageAccount[] = [
   { id: 'claude-code', backend: 'claude-code' },
   { id: 'codex', backend: 'codex' },

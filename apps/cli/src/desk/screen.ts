@@ -125,10 +125,14 @@ export function terminalSize(rect: Rect): { cols: number; rows: number } {
 }
 
 const RESET = '\x1b[0m';
-/** 폭이 없는 제어 열: 색(SGR)과 OSC(링크 OSC 8 등, BEL이나 ST로 끝난다) */
+/** 폭이 없는 제어 열: 색(SGR)과 누를 수 있는 링크 같은 OSC 열(BEL이나 ST로 끝난다, #890) */
 const SGR = /\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/y;
-const LINK_OPEN = /^\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)/;
-const LINK_CLOSE = '\x1b]8;;\x1b\\';
+
+/** 누를 수 있는 링크(OSC 8). 주소의 제어 글자는 지워 열을 일찍 끝내지 못하게 한다. 링크 열은 폭에 넣지 않는다(fitAnsi) */
+export function osc8(url: string, text: string): string {
+  const safe = url.replace(/[\u0000-\u001f\u007f]/g, '');
+  return `\x1b]8;;${safe}\x07${text}\x1b]8;;\x07`;
+}
 
 export function stripAnsi(text: string): string {
   return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
@@ -139,7 +143,7 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
   let out = '';
   let used = 0;
   let at = 0;
-  // 링크(OSC 8) 글 한가운데서 자르면 닫는 표지가 잘려 나가 뒤 글까지 링크가 된다. 열린 채면 끝에서 닫는다(#891)
+  // 잘린 자리에서 링크가 열린 채면 닫는다(색 되돌림은 링크를 닫지 않는다)
   let linkOpen = false;
   while (at < line.length) {
     SGR.lastIndex = at;
@@ -147,8 +151,7 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
     if (match) {
       out += match[0];
       at += match[0].length;
-      const link = LINK_OPEN.exec(match[0]);
-      if (link) linkOpen = link[1] !== '';
+      if (match[0].startsWith('\x1b]8;')) linkOpen = !/^\x1b\]8;[^;]*;(?:\x07|\x1b\\)$/.test(match[0]);
       continue;
     }
     const char = String.fromCodePoint(line.codePointAt(at)!);
@@ -158,7 +161,7 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
     used += w;
     at += char.length;
   }
-  if (linkOpen) out += LINK_CLOSE;
+  if (linkOpen) out += '\x1b]8;;\x07';
   const pad = Math.max(0, width - used);
   return fill && pad ? `${out}${RESET}${fill}${' '.repeat(pad)}${RESET}` : `${out}${RESET}${' '.repeat(pad)}`;
 }

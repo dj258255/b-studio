@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { stripAnsi } from './screen';
-import { detailKey, openDetail, osc8, parsePatch, sessionDetailLines, type DetailSnapshot, type DetailState } from './session-detail';
+import { osc8, stripAnsi } from './screen';
+import { detailKey, openDetail, parsePatch, sessionDetailLines, type DetailSnapshot, type DetailState } from './session-detail';
 import { DEFAULT_THEME } from './theme';
 import type { DeskItem } from './types';
 

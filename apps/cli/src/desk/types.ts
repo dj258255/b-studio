@@ -28,6 +28,8 @@ export interface DeskItem {
   agents?: DeskAgent[];
   /** 이 에이전트가 할 수 있는 범위(#843) */
   capabilities?: DeskCapabilities;
+  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다 — 그 CLI의 기본 계정(id가 CLI 이름)이다 */
+  accountId?: string;
 }
 
 export interface DeskUsage {
@@ -85,6 +87,68 @@ export interface DeskAccount {
   builtin?: boolean;
 }
 
+/** 계정 하나의 로그인 상태(#890, GET /api/ai-accounts/{id}/status). 각 CLI의 상태 확인 명령으로 잰다 */
+export interface DeskAccountStatus {
+  connected: boolean;
+  installed: boolean;
+  /** 아는 계정 종류(예: "Max 구독") */
+  accountKind?: string;
+  /** 연결되지 않았을 때 사람이 할 일 */
+  reason?: string;
+}
+
+/** 로그인 진행(스튜디오 cli-accounts.ts의 LoginProgress에서 desk가 쓰는 것) */
+export interface DeskLoginProgress {
+  state: 'running' | 'exited' | 'cancelled' | 'timeout';
+  lines: string[];
+  url?: string;
+  code?: string;
+  exitCode?: number | null;
+  error?: string;
+  /** 끝난 뒤 다시 잰 상태 */
+  status?: DeskAccountStatus;
+}
+
+/** 로그인 시작의 답. spawnable이 아니면(대화형 CLI) 사람이 칠 명령만 온다 */
+export interface DeskLoginStart {
+  spawnable: boolean;
+  progress?: DeskLoginProgress;
+  command?: string;
+  note?: string;
+}
+
+/** 라우팅 규칙(스튜디오 lib/backend-rules.ts와 같은 꼴, #822·#885) */
+export interface DeskRuleWhen {
+  intent?: 'build' | 'ask';
+  complexity?: Array<'simple' | 'normal' | 'complex'>;
+  risk?: 'high' | 'normal';
+  keywords?: string[];
+}
+
+export interface DeskRuleTarget {
+  backend: string;
+  model?: string;
+  accountId?: string;
+}
+
+export interface DeskRule extends DeskRuleTarget {
+  when: DeskRuleWhen;
+}
+
+export interface DeskRules {
+  rules: DeskRule[];
+  fallback?: DeskRuleTarget;
+}
+
+/** GET /api/routing/rules. 옛 스튜디오는 rules를 주지 않을 수 있다 */
+export interface DeskRulesView {
+  rules?: DeskRules;
+  /** 저장한 규칙을 쓰지 못한 까닭 */
+  error?: string;
+  allowed: string[];
+  defaultBackend: string;
+}
+
 export interface DeskStartResult {
   session: { id: string };
   routing?: { backend?: string; model?: string; matched?: string };
@@ -113,4 +177,29 @@ export interface DeskLimitWindow {
 export interface DeskLimits {
   fiveHour?: DeskLimitWindow;
   weekly?: DeskLimitWindow;
+}
+
+/** 계정의 한도 상태: ok 여유, warn 주의, exhausted 다 씀, idle 쉬는 중, unknown 모름(읽지 못함·꺼 둠), unsupported 해당 없음 */
+export type DeskLimitStatus = 'ok' | 'warn' | 'exhausted' | 'idle' | 'unknown' | 'unsupported';
+
+/** 계정 하나의 사용량 한도(GET /api/usage/limits, #886·#889). 스튜디오 usage-limits.ts의 AccountLimits에 이름·그림을 붙인 꼴 */
+export interface DeskAccountLimits {
+  id: string;
+  backend: string;
+  /** 계정 이름(기본 계정은 "기본"). 옛 서버는 주지 않는다 */
+  name?: string;
+  /** 그림 폴더 안의 그림 파일 이름 */
+  sprite?: string;
+  builtin?: boolean;
+  plan?: string;
+  status: DeskLimitStatus;
+  windows: Array<{ kind: 'five_hour' | 'weekly' | 'other'; usedPercent: number; resetsAt?: string; minutes?: number }>;
+  source: string;
+  /** 마지막으로 읽은 시각(ISO) */
+  fetchedAt?: string;
+  /** 이번에 읽지 못해 지난 값을 보여 주는 중 */
+  stale?: boolean;
+  /** 읽지 못한 까닭 */
+  error?: string;
+  recommended?: boolean;
 }

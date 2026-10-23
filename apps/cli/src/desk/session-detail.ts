@@ -8,7 +8,7 @@
  * D는 세션 기록을 지운다(두 번 묻는다, 되돌릴 수 없다). 키는 순수 함수(detailKey)이고 서버 호출은 desk가 한다(action)
  */
 import { backendLabel } from './sidebar';
-import { fit, fitAnsi } from './screen';
+import { fit, fitAnsi, osc8 } from './screen';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
 import type { DeskItem } from './types';
 
@@ -128,12 +128,6 @@ const DOWN = ['\x1b[B', '\x1bOB', 'j'];
 const PAGE_UP = ['\x1b[5~', 'b'];
 const PAGE_DOWN = ['\x1b[6~', ' ', 'f'];
 const PAGE = 10;
-
-/** 링크(OSC 8). 주소의 제어 글자는 지워 표지를 깨지 못하게 한다 */
-export function osc8(url: string, text: string): string {
-  const clean = url.replace(/[\x00-\x1f\x7f]/g, '');
-  return `\x1b]8;;${clean}\x1b\\${text}\x1b]8;;\x1b\\`;
-}
 
 /** git diff를 파일마다 나눈다: 경로, 더한 줄·뺀 줄 수, 그 파일의 줄 */
 export function parsePatch(text: string): PatchFile[] {
