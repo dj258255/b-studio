@@ -255,7 +255,7 @@ describe('그리기', () => {
           currentWork: { summary: '요청을 처리하는 중입니다', items: [] },
           purpose: { items: [{ id: 'R1', title: '주문' }] },
           eta: { hasEstimate: false, summary: '추정 없음' },
-          deliverables: { checkpoints: [{ shortSha: 'abc1234', message: '주문 API', createdAt: '2026-10-23T00:00:00Z' }] },
+          deliverables: { checkpoints: [{ shortSha: 'abc1234', message: '주문 API', createdAt: '2026-10-23T00:00:00Z' }], pullRequestUrl: 'https://github.com/o/r/pull/7' },
           risks: { items: ['must 1개 미검증'] },
           verification: { summary: '1개 검증됨', byStatus: { 검증됨: 1 } },
           estimateVsActual: [],
@@ -269,6 +269,8 @@ describe('그리기', () => {
     }
     expect(renderRequirements(states[0]!, size, theme).lines.map(stripAnsi).join('\n')).toContain('실패하는 테스트');
     expect(renderRequirements(states[2]!, size, theme).lines.map(stripAnsi).join('\n')).toContain('abc1234');
+    // PR 주소는 누를 수 있는 링크(OSC 8)다
+    expect(renderRequirements(states[2]!, size, theme).lines.join('\n')).toContain('\x1b]8;;https://github.com/o/r/pull/7\x07');
   });
 
   it('아래 줄 안내는 탭과 상태에 맞는다', () => {

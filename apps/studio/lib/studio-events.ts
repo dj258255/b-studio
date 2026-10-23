@@ -340,6 +340,8 @@ export interface SessionSummary {
   mode: SessionMode;
   /** 실제로 쓰는 백엔드. 없으면 mode(레거시) */
   backend?: SessionMode;
+  /** 이 세션이 쓰는 AI 계정(#885). 없으면 그 CLI의 기본 계정이다. AI별 결과표가 계정마다 묶는다(#891) */
+  accountId?: string;
   owner?: string;
   workspace: WorkspaceKind;
   checkpoints: number;

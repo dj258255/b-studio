@@ -6,7 +6,7 @@
  * 고치기·더하기 글 넣기. 문서: 목록과 터미널에 맞춘 마크다운 읽기, 편집기로 고치기. 현황: 지금 하는 일·목적·산출물·위험·검증.
  * 여기는 상태와 받은 키로 다음 상태와 할 일(effects)을 돌려주는 순수 함수와 그리기뿐이다. 스튜디오 API와 편집기는 desk.ts가 다룬다
  */
-import { fit, fitAnsi, stringWidth } from './screen';
+import { fit, fitAnsi, osc8, stringWidth } from './screen';
 import { bg, BOLD, fg, RESET, type ColorToken, type Theme } from './theme';
 import { box } from './widgets';
 import type { DeskDocEntry, DeskProjectStatus, DeskRequirement, DeskRequirements, DeskRequirementStatus, DeskTestRow, DeskTests } from './types';
@@ -662,7 +662,7 @@ function statusLines(status: DeskProjectStatus, width: number, theme: Theme): st
   lines.push(...section('목적'), ...bullets(status.purpose.items.map((item) => `${item.id}. ${item.title}${item.issue ? ` (#${item.issue})` : ''}`), '저장된 must·should 요구사항이 없습니다'));
   lines.push(...section('예상'), ...wrapRuns([{ text: status.eta.summary, style: status.eta.hasEstimate ? '' : muted }], width, '  ', '  '));
   lines.push(...section('산출물'));
-  if (status.deliverables.pullRequestUrl) lines.push(`  PR ${status.deliverables.pullRequestUrl}`);
+  if (status.deliverables.pullRequestUrl) lines.push(`  PR ${osc8(status.deliverables.pullRequestUrl, status.deliverables.pullRequestUrl)}`);
   lines.push(...bullets(status.deliverables.checkpoints.map((checkpoint) => `${checkpoint.shortSha} ${checkpoint.message.split('\n')[0]}`), '체크포인트가 없습니다'));
   lines.push(...section('위험'), ...bullets(status.risks.items, '알려진 위험이 없습니다'));
   const byStatus = Object.entries(status.verification.byStatus).map(([name, count]) => `${name} ${count}`).join(' · ');

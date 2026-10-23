@@ -678,6 +678,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     status: snapshot.status,
     mode: snapshot.mode,
     backend: sessionBackend(snapshot),
+    ...(snapshot.accountId ? { accountId: snapshot.accountId } : {}),
     owner: snapshot.owner,
     workspace: snapshot.workspace ?? 'copy',
     checkpoints: snapshot.checkpoints.length,

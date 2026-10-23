@@ -130,10 +130,9 @@ class FakeClient implements DeskClient {
 }
 
 /** 편집기 자리: 받은 파일을 change로 고치고 code로 끝난다 */
-function editorHost(client: FakeClient, change?: (text: string) => string, code = 0) {
+function editorHost(change?: (text: string) => string, code = 0) {
   const seen: Array<{ file: string; content: string; raw: boolean[] }> = [];
   const host: RequirementsHost & { seen: typeof seen } = {
-    client,
     seen,
     editor: (file) => {
       seen.push({ file, content: readFileSync(file, 'utf8'), raw: [] });
@@ -144,12 +143,14 @@ function editorHost(client: FakeClient, change?: (text: string) => string, code 
   return host;
 }
 
-function setup(options: { change?: (text: string) => string; code?: number; host?: boolean; items?: DeskItem[] } = {}) {
+function setup(options: { change?: (text: string) => string; code?: number; oldStudio?: boolean; items?: DeskItem[] } = {}) {
   const items = options.items ?? [item('a', { title: '주문 모듈' }), item('b')];
   const client = new FakeClient(items);
+  // 옛 손님: 요구사항 API를 모른다
+  if (options.oldStudio) Object.assign(client, { requirements: undefined });
   const io = new FakeIo();
-  const requirements = editorHost(client, options.change, options.code);
-  const app = new DeskApp(client, items, io, options.host === false ? {} : { requirements });
+  const requirements = editorHost(options.change, options.code);
+  const app = new DeskApp(client, items, io, { requirements });
   const done = app.run();
   return { client, io, app, done, requirements };
 }
@@ -195,8 +196,8 @@ describe('요구사항 화면 열기(#894)', () => {
     expect(ctx.app.state.requirements?.sessionId).toBe('b');
   });
 
-  it('요구사항을 다룰 수 없는 desk면 알린다', async () => {
-    const ctx = setup({ host: false });
+  it('요구사항 API를 모르는 옛 스튜디오면 알린다', async () => {
+    const ctx = setup({ oldStudio: true });
     ctx.io.type('\x02e');
     await tick();
     expect(ctx.app.state.requirements).toBeUndefined();
