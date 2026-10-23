@@ -94,6 +94,19 @@ export interface HostCli {
   cliPath: string;
   /** 훅 스크립트를 돌릴 node의 절대 경로(스튜디오가 도는 그 node) */
   nodePath: string;
+  /**
+   * 이 세션이 쓰는 계정의 설정 폴더(#885). 감싸개가 claude는 CLAUDE_CONFIG_DIR, codex는 CODEX_HOME으로 넘긴다.
+   * 없으면 기본 계정이라 아무것도 넘기지 않는다(사용자가 셸에서 정한 값이 그대로 간다)
+   */
+  configDir?: string;
+}
+
+/** CLI마다 계정 설정 폴더를 받는 환경 변수(#885) */
+export const ACCOUNT_DIR_ENV: Record<HostCliKind, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' };
+
+/** 감싸개에서 계정 폴더를 내보내는 줄. 기본 계정이면 없다 */
+function accountExport(kind: HostCliKind, configDir: string | undefined): string[] {
+  return configDir ? [`export ${ACCOUNT_DIR_ENV[kind]}=${shellQuote(configDir)}`] : [];
 }
 
 /**
@@ -132,10 +145,12 @@ export function hostGatewaySettings(address: Pick<AgentGatewayAddress, 'hookUrl'
  * 인자를 붙여 CLI를 부르는 감싸개. 터미널의 PATH 맨 앞에 놓여, 터미널에서 `claude`를 어떻게 띄우든(다시 띄우거나 `--resume`을 주거나)
  * 훅과 b-studio 도구가 붙는다. 사용자가 준 인자는 그대로 넘긴다
  */
-export function hostCliWrapper(dir: string, claudePath: string): string {
+export function hostCliWrapper(dir: string, claudePath: string, configDir?: string): string {
   return [
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
+    // 세션의 계정(#885). 사용자의 시작 파일이 같은 변수를 정해도 이 세션의 CLI는 고른 계정으로 뜬다
+    ...accountExport('claude', configDir),
     // --mcp-config는 값을 여러 개 받는다(`<configs...>`). 사용자 인자 바로 앞에 두면 첫 낱말(요청 글)을 설정 파일로 먹으므로,
     // 값을 하나만 받는 --settings를 뒤에 둔다(#836)
     `exec ${shellQuote(claudePath)} --mcp-config ${shellQuote(path.join(dir, MCP_FILE))} --settings ${shellQuote(path.join(dir, SETTINGS_FILE))} "$@"`,
@@ -203,7 +218,7 @@ export function codexEnvFile(address: Pick<AgentGatewayAddress, 'hookToken' | 'm
  * 대화형으로 보는 것은 인자가 없거나, 옵션으로 시작하거나(도움말·판 보기 빼고), `resume`·`fork`일 때다. 첫 요청 글을 인자로 주면
  * CLI가 곧바로 그 요청의 세션 시작 훅을 돌리므로 알리지 않는다. `exec` 같은 하위 명령도 알리지 않는다
  */
-export function hostCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 'mcpUrl'>, dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
+export function hostCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 'mcpUrl'>, dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath' | 'configDir'>): string {
   const args = codexGatewayArgs(address, path.dirname(dir), cli.nodePath).map(shellQuote).join(' ');
   const notify = (event: AgentHookEvent) => `printf '{}' | ${codexHookCommand(path.dirname(dir), cli.nodePath, event)} >/dev/null 2>&1`;
   const codex = shellQuote(cli.cliPath);
@@ -211,6 +226,8 @@ export function hostCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
     `. ${shellQuote(path.join(dir, CODEX_ENV_FILE))}`,
+    // 세션의 계정(#885). 훅 신뢰도 계정 폴더마다 따로 기억하므로 새 계정에서는 처음 한 번 묻는다
+    ...accountExport('codex', cli.configDir),
     'interactive=',
     'case "${1-}" in',
     '  -h|--help|-V|--version) ;;',
@@ -412,7 +429,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     [MCP_FILE]: file(`${JSON.stringify(agentManagedMcp(address), null, 2)}\n`),
     [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
     [GATEWAY_FILE_NAME]: addressFile,
-    [path.join(WRAPPER_DIR, 'claude')]: { content: hostCliWrapper(dir, cli.cliPath), mode: 0o700 },
+    [path.join(WRAPPER_DIR, 'claude')]: { content: hostCliWrapper(dir, cli.cliPath, cli.configDir), mode: 0o700 },
     ...shell,
   };
 }
@@ -745,6 +762,7 @@ export async function openHostTerminal({
   cli = 'claude',
   initialPrompt,
   resumeConversation,
+  accountEnv = {},
   env = process.env,
   spawnPty = spawnWithNodePty,
 }: {
@@ -760,10 +778,19 @@ export async function openHostTerminal({
   initialPrompt?: string;
   /** 첫 실행에서 이어 붙일 CLI 대화 id(#872). 첫 요청이 있으면 새 대화라 쓰지 않는다 */
   resumeConversation?: string;
+  /**
+   * 세션 계정의 설정 폴더 변수(#885, CLAUDE_CONFIG_DIR·CODEX_HOME). 감싸개도 같은 값을 넘기지만, 셸에서 CLI가 아닌 도구(예: `claude` 하위 명령을
+   * 부르는 스크립트)도 같은 계정을 보게 PTY 환경에도 둔다. 이 두 이름만 받는다
+   */
+  accountEnv?: Record<string, string>;
   env?: Record<string, string | undefined>;
   spawnPty?: SpawnHostPty;
 }): Promise<AgentTerminal & { pid: number }> {
   const { cols, rows } = clampTerminalSize(size);
+  const allowedAccountEnv = new Set(Object.values(ACCOUNT_DIR_ENV));
+  for (const name of Object.keys(accountEnv)) {
+    if (!allowedAccountEnv.has(name)) throw new SandboxError('계정 환경에 쓸 수 없는 이름이 있습니다', `${name} — ${[...allowedAccountEnv].join('·')}만 받습니다`);
+  }
   const launch = hostShellLaunch(gatewayDir, env, cli);
   const first: Record<string, string> =
     initialPrompt !== undefined
@@ -773,7 +800,7 @@ export async function openHostTerminal({
         : {};
   let pty: HostPty;
   try {
-    pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...launch.env, ...first } });
+    pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...accountEnv, ...launch.env, ...first } });
   } catch (error) {
     throw new SandboxError('이 컴퓨터에서 터미널을 열지 못했습니다', error instanceof Error ? error.message : String(error), { platform: true });
   }

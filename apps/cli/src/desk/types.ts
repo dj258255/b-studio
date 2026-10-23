@@ -73,6 +73,16 @@ export type DeskTerminalMessage =
   | { kind: 'warning'; message: string };
 
 /** 새 요청을 터미널로 보낸 결과(#836) */
+/** AI 계정 하나(#885, GET /api/ai-accounts). builtin이면 파일에 없는 처음 기본 계정이다 */
+export interface DeskAccount {
+  id: string;
+  name: string;
+  backend: string;
+  configDir?: string;
+  sprite?: string;
+  builtin?: boolean;
+}
+
 export interface DeskStartResult {
   session: { id: string };
   routing?: { backend?: string; model?: string; matched?: string };

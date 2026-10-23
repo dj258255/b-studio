@@ -91,3 +91,27 @@ describe('규칙 편집기 줄', () => {
     expect(draftToRule({ intent: '', complexity: [], risk: '', keywords: ' 결제 , ,README ', backend: 'codex', model: '  ' })).toEqual({ when: { keywords: ['결제', 'README'] }, backend: 'codex' });
   });
 });
+
+describe('규칙이 계정까지 고른다(#885)', () => {
+  const allowed = ['claude-code', 'codex'];
+
+  it('대상에 계정 id를 적을 수 있고, 적지 않은 옛 규칙도 그대로 읽는다', () => {
+    const rules = parseBackendRules({ rules: [{ when: { risk: 'high' }, backend: 'claude-code', accountId: 'acct-1a2b3c4d' }, { backend: 'codex' }], fallback: { backend: 'codex', accountId: 'codex' } }, allowed);
+    expect(rules.rules[0]).toEqual({ when: { risk: 'high' }, backend: 'claude-code', accountId: 'acct-1a2b3c4d' });
+    expect(rules.rules[1]).toEqual({ when: {}, backend: 'codex' });
+    expect(rules.fallback).toEqual({ backend: 'codex', accountId: 'codex' });
+    expect(matchCandidates(rules, { request: 'x', intent: 'build', kind: { complexity: 'normal', risk: 'high' } as never })[0]).toEqual({ rule: 0, backend: 'claude-code', accountId: 'acct-1a2b3c4d' });
+  });
+
+  it('꼴이 틀린 계정 id는 받지 않는다', () => {
+    expect(() => parseBackendRules({ rules: [{ backend: 'codex', accountId: '../x' }] }, allowed)).toThrow('규칙 1: accountId');
+    expect(() => parseBackendRules({ rules: [{ backend: 'codex', accountId: 7 }] }, allowed)).toThrow('규칙 1');
+  });
+
+  it('편집기 줄은 계정 id를 그대로 오간다', () => {
+    const draft = ruleToDraft({ when: {}, backend: 'codex', accountId: 'acct-1a2b3c4d' });
+    expect(draft.accountId).toBe('acct-1a2b3c4d');
+    expect(draftToRule(draft)).toEqual({ when: {}, backend: 'codex', accountId: 'acct-1a2b3c4d' });
+    expect(draftToRule({ ...draft, accountId: '' })).toEqual({ when: {}, backend: 'codex' });
+  });
+});

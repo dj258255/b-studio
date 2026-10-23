@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskOverview, DeskPreview, DeskProject, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskOverview, DeskPreview, DeskProject, DeskStartResult, DeskTerminalMessage } from './types';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
@@ -71,8 +71,14 @@ export function parseSse(rest: string, chunk: string): { events: string[]; rest:
 export interface StartInput {
   projectId: string;
   request: string;
-  /** 'rules'면 규칙대로, 아니면 그 백엔드로 직접 */
+  /** 'rules'면 규칙대로, 아니면 그 백엔드로 직접. `백엔드@계정id`면 그 계정으로(#885) */
   choice: string;
+}
+
+/** 고른 것을 백엔드와 계정 id로 나눈다. 계정이 없으면 그 CLI의 기본 계정이다 */
+export function splitChoice(choice: string): { backend: string; accountId?: string } {
+  const at = choice.indexOf('@');
+  return at < 0 ? { backend: choice } : { backend: choice.slice(0, at), accountId: choice.slice(at + 1) };
 }
 
 export class StudioClient {
@@ -117,6 +123,11 @@ export class StudioClient {
     return this.#request('GET', '/api/projects');
   }
 
+  /** AI 계정 목록(#885). 개인 PC 모드가 아니거나 옛 스튜디오면 실패한다 — 부르는 쪽이 계정 없이 고른다 */
+  async accounts(): Promise<DeskAccount[]> {
+    return (await this.#request<{ accounts: DeskAccount[] }>('GET', '/api/ai-accounts')).accounts;
+  }
+
   rules(): Promise<{ allowed: string[]; defaultBackend: string }> {
     return this.#request('GET', '/api/routing/rules');
   }
@@ -127,7 +138,8 @@ export class StudioClient {
 
   /** 새 요청을 터미널로 보낸다(#836): 규칙(또는 직접 고른 AI)으로 세션을 만들고 터미널을 열어 첫 요청을 CLI에 넣는다 */
   start(input: StartInput): Promise<DeskStartResult> {
-    const route = input.choice === 'rules' ? { route: 'rules' } : { route: 'direct', backend: input.choice };
+    const picked = splitChoice(input.choice);
+    const route = input.choice === 'rules' ? { route: 'rules' } : { route: 'direct', backend: picked.backend, ...(picked.accountId ? { accountId: picked.accountId } : {}) };
     return this.#request('POST', '/api/sessions', { projectId: input.projectId, ...route, request: input.request, intent: 'build', terminal: true });
   }
 

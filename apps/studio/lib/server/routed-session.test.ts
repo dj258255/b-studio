@@ -119,3 +119,31 @@ describe('startRoutedSession', () => {
     expect(fake.sent[0]?.options).toMatchObject({ intent: 'ask' });
   });
 });
+
+describe('계정까지 골라 세션을 만든다(#885)', () => {
+  it('규칙이나 직접 고른 계정을 세션에 넘기고, 목록에 없는 계정은 건너뛴다', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'b-studio-routed-account-'));
+    const savedEnv = { HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+    process.env.HOME = home;
+    process.env.XDG_CONFIG_HOME = path.join(home, 'xdg');
+    try {
+      const { addAiAccount } = await import('./ai-accounts');
+      const account = await addAiAccount({ name: '마르코', backend: 'codex', configDir: '~/.codex-marco' });
+      saveBackendRules({ rules: [{ when: {}, backend: 'codex', accountId: 'acct-00000000' }, { when: {}, backend: 'codex', accountId: account.id }] });
+      const routed = await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build' });
+      expect(routed.routing).toMatchObject({ backend: 'codex', accountId: account.id, rule: 1, skipped: [{ accountId: 'acct-00000000' }] });
+      expect(fake.created[0]?.options).toMatchObject({ backend: 'codex', accountId: account.id });
+
+      await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', direct: { backend: 'codex', accountId: account.id } });
+      expect(fake.created[1]?.options).toMatchObject({ backend: 'codex', accountId: account.id });
+      // 기본 계정은 넘기지 않는다
+      await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', direct: { backend: 'codex' } });
+      expect(fake.created[2]?.options).not.toHaveProperty('accountId');
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+});

@@ -367,6 +367,7 @@ import {
 } from './requirement-issues';
 import { isSelectableEffort, isSelectableModel, listSelectableModels, type ModelPickerView } from './model-picker';
 import { rememberProjectEffortDefault, rememberProjectModelDefault } from './model-defaults';
+import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-accounts';
 import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
@@ -728,11 +729,14 @@ export async function createSession(
      * (원본 세션이 로컬 폴더이거나 git 저장소가 아니면 조용히 무시하고 지금처럼 프로젝트 원본에서 시작한다)
      */
     seedFromSessionId?: string;
+    /** 이 세션에 쓸 AI 계정(#885). 없거나 기본 계정이면 지금처럼 CLI의 기본 설정 폴더다. 목록에 없거나 다른 CLI의 계정이면 400 */
+    accountId?: string;
   } = {},
 ): Promise<SessionSnapshot> {
   const mode = sessionMode();
   // 요청이 백엔드를 고르면 허용 목록에서만 받는다. 없으면 서버 모드라 지금과 같다
   const backend = resolveSessionBackend(options.backend);
+  const account = await resolveSessionAccount(options.accountId, backend);
   const tokenLimit = sessionTokenLimit();
   const preview = previewConfig();
   if (workspace === 'local') assertLocalFolderAllowed();
@@ -759,6 +763,7 @@ export async function createSession(
       effort: options.effort,
       extraPageChecks: options.extraPageChecks,
       seed,
+      ...(account ? { accountId: account.id } : {}),
     });
   } finally {
     // 세션을 만든 뒤에는 실행 중인 세션 목록이 같은 폴더를 막는다
@@ -806,6 +811,7 @@ async function startSession({
   effort,
   extraPageChecks,
   seed,
+  accountId,
 }: {
   projectId: string;
   owner: string;
@@ -825,6 +831,8 @@ async function startSession({
   extraPageChecks?: readonly WorkflowPageCheck[];
   /** 작업 분해 레인·통합이 다른 세션의 체크포인트에서 시작할 때(ADR-096). resolveSessionSeed가 만든다 */
   seed?: { workDir: string; sha: string };
+  /** 기본이 아닌 AI 계정(#885). createSession이 확인한 것이다 */
+  accountId?: string;
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
   const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
@@ -923,6 +931,7 @@ async function startSession({
       status: lazy ? 'idle' : 'starting',
       mode,
       backend,
+      ...(accountId ? { accountId } : {}),
       modelId,
       effort: effort as Effort | undefined,
       running: false,
@@ -2880,8 +2889,16 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
   // API·데모(model)·CLI(claude-code·codex·commandcode·opencode) 경로가 같은 규칙을 쓴다
   const lazyEnsureSandbox = session.lazy ? () => ensureBooted(session) : undefined;
 
+  // 세션의 AI 계정(#885). 기본 계정이면 비어 있고 지금처럼 process.env로 CLI를 띄운다
+  let account: SessionAccount;
+  try {
+    account = await sessionAccount(session.snapshot);
+  } catch (error) {
+    return { preflightError: describe(error) };
+  }
+
   if (plan.kind === 'claude-code') {
-    const preflight = await preflightClaudeCode({ cwd: session.project.root });
+    const preflight = await preflightClaudeCode({ cwd: session.project.root, ...(account.env ? { env: account.env } : {}) });
     if (!preflight.ok) return { preflightError: preflight.reason };
 
     // 자동 모델 선택(ADR-091). 대화에 한 줄 안내를 남긴다(같은 'route' 이벤트를 api 라우터(ADR-047)와 공유한다 — auto:true만 다르다)
@@ -2907,6 +2924,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const result = await runClaude({
       ...shared,
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
+      ...(account.env ? { env: account.env } : {}),
       request: [...claudeCode.notes, request].join('\n\n'),
       resume: claudeCode.sessionId,
       // 세션(레인)에서 고른 모델 → 자동 선택이 고른 단계 → 계획-실행 분리(ADR-075)의 실행 모델 → 환경 변수(계획 기본). 기록용 id는 무시한다
@@ -2935,7 +2953,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
   }
 
   if (plan.kind === 'codex') {
-    const preflight = await preflightCodex();
+    const preflight = await preflightCodex(account.env ? { env: account.env } : undefined);
     if (!preflight.ok) return { preflightError: preflight.reason };
 
     // 러너가 대화를 이어받지 못하므로 전체 기록 대신 지난 요청의 요약을 짧게 붙인다
@@ -2943,6 +2961,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     const result = await runCodexAgent({
       ...shared,
       ...(lazyEnsureSandbox ? { ensureSandbox: lazyEnsureSandbox } : {}),
+      // 계정의 CODEX_HOME에서 로그인 파일만 빌려 온다(#885)
+      ...(account.configDir ? { authHome: account.configDir } : {}),
       request: [...codex.notes, codexContextBlock(codex.recent), request].filter(Boolean).join('\n\n'),
       // 세션(레인)에서 고른 모델이 있으면 그 값, 없으면 환경 변수를 쓴다. 기록용 id는 무시한다
       model: cliModelOverride(session.snapshot.modelId) ?? (process.env.B_STUDIO_CODEX_MODEL?.trim() || undefined),
@@ -7739,6 +7759,7 @@ export function sessionTerminalTarget(id: string): {
   gateway: () => Promise<AgentGatewayAddress>;
   cli: HostCliKind;
   resumeConversation: () => string | undefined;
+  accountDir: () => Promise<string | undefined>;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
@@ -7765,7 +7786,24 @@ export function sessionTerminalTarget(id: string): {
       if (!live) return undefined;
       return remembered && remembered.cli === terminalCliKind(live) ? remembered.id : undefined;
     },
+    // 세션의 AI 계정의 설정 폴더(#885). 열 때마다 목록에서 다시 찾는다. 계정이 목록에서 빠졌으면 다른 계정으로 띄우지 않고 던진다
+    accountDir: async () => (await sessionAccount(session.snapshot)).configDir,
   };
+}
+
+/** 세션이 쓰는 AI 계정의 설정 폴더와 CLI 환경(#885). 기본 계정이면 둘 다 없다 */
+interface SessionAccount {
+  configDir?: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+async function sessionAccount(snapshot: Pick<SessionSnapshot, 'accountId' | 'mode' | 'backend'>): Promise<SessionAccount> {
+  if (!snapshot.accountId) return {};
+  const account = await findAiAccount(snapshot.accountId);
+  if (!account) throw new StudioError(409, `이 세션의 AI 계정(${snapshot.accountId})이 계정 목록에 없습니다. 지운 계정으로는 다시 띄우지 않습니다. 새 세션을 만드세요`);
+  if (account.backend !== sessionBackend(snapshot)) throw new StudioError(409, `이 세션의 AI 계정(${account.name})이 다른 CLI의 계정입니다`);
+  const env = accountProcessEnv(account);
+  return { ...(account.configDir ? { configDir: account.configDir } : {}), ...(env ? { env } : {}) };
 }
 
 /** 세션 터미널의 CLI 대화(#872) */
@@ -9269,8 +9307,8 @@ export function cliModelOverride(modelId: string | undefined): string | undefine
 }
 
 export interface BackendPreflights {
-  claudeCode?: (input: { cwd: string }) => Promise<{ ok: true } | { ok: false; reason: string }>;
-  codex?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
+  claudeCode?: (input: { cwd: string; env?: NodeJS.ProcessEnv }) => Promise<{ ok: true } | { ok: false; reason: string }>;
+  codex?: (input?: { env?: NodeJS.ProcessEnv }) => Promise<{ ok: true } | { ok: false; reason: string }>;
   commandCode?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   openCode?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   gemini?: () => Promise<{ ok: true } | { ok: false; reason: string }>;
@@ -9280,14 +9318,15 @@ export interface BackendPreflights {
  * CLI 백엔드는 세션을 만들기 전에 로그인을 확인한다. 실패하면 샌드박스를 띄우지 않고 이유를 돌려준다.
  * 확인 함수를 주입할 수 있게 빼 두어(테스트) 실제 CLI를 부르지 않고 검사할 수 있다.
  */
-export async function assertBackendReady(backend: SessionMode, cwd: string, preflights: BackendPreflights = {}): Promise<void> {
+export async function assertBackendReady(backend: SessionMode, cwd: string, preflights: BackendPreflights = {}, env?: NodeJS.ProcessEnv): Promise<void> {
+  // env는 고른 AI 계정의 환경(#885). claude-code·codex만 계정마다 설정 폴더를 둔다
   if (backend === 'claude-code') {
-    const result = await (preflights.claudeCode ?? preflightClaudeCode)({ cwd });
+    const result = await (preflights.claudeCode ?? preflightClaudeCode)({ cwd, ...(env ? { env } : {}) });
     if (!result.ok) throw new StudioError(409, `로컬 Claude Code를 쓸 수 없습니다: ${result.reason}`);
     return;
   }
   if (backend === 'codex') {
-    const result = await (preflights.codex ?? preflightCodex)();
+    const result = await (preflights.codex ?? preflightCodex)(env ? { env } : undefined);
     if (!result.ok) throw new StudioError(409, `로컬 Codex를 쓸 수 없습니다: ${result.reason}`);
     return;
   }
