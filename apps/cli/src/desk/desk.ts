@@ -11,12 +11,13 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
-import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
+import type { DeskPlan, LaneChoice, PlansEffect, PlansState } from './plans';
 import { spaceItems, spaceScreen, spriteFor } from './cards';
 import { previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
 import { recordsScrollLimit, type RecordsLoad } from './records';
-import { placePanes, terminalSize } from './screen';
+import { placePanes, terminalSize, type PaneLayout } from './screen';
 import { parsePatch, type DetailAction, type DetailState } from './session-detail';
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
@@ -162,6 +163,9 @@ export interface SettingsHost {
   openUrl(url: string): void;
 }
 
+/** 작업 나누기 화면이 열려 있는 동안 계획을 다시 받는 주기 */
+const PLANS_POLL_MS = 2_000;
+
 /** 요구사항·문서 화면이 부르는 스튜디오 API(#894). DeskClient에 없으면(옛 손님) 부를 때 실패로 알린다 */
 type RequirementsCall = 'requirements' | 'tests' | 'docs' | 'doc' | 'saveDoc' | 'projectStatus' | 'verifyRequirement' | 'clearVerification' | 'applyRequirements';
 
@@ -272,6 +276,8 @@ export interface DeskAppOptions {
   settings?: SettingsHost;
   /** AI 계정(#885). 계정에 고른 그림을 그 계정 세션의 카드에 쓴다 */
   accounts?: DeskAccount[];
+  /** 주소를 이 컴퓨터의 브라우저로 여는 곳(작업 나누기의 추적 이슈, #893). 없으면 열 수 없다고 알린다 */
+  openUrl?: (url: string) => void;
   /** 요구사항·문서 화면의 편집기(#894). 없으면 $VISUAL·$EDITOR·vi */
   requirements?: RequirementsHost;
 }
@@ -282,8 +288,13 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   { limits?: StudioClient['limits'] } &
   /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RecordsCall>> &
+  /** 작업 나누기(#893). 없으면 Ctrl-b t가 열 수 없다고 알린다 */
+  Partial<Pick<StudioClient, PlansCall>> &
   /** 요구사항·문서 화면(#894). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RequirementsCall>>;
+
+/** 작업 나누기 화면이 부르는 스튜디오 API(#893) */
+type PlansCall = 'plans' | 'plan' | 'createPlan' | 'approvePlan' | 'rejectPlan' | 'deletePlan' | 'resumePlan' | 'laneBackends' | 'setLane';
 
 /** 기록 화면과 세션 자세히가 부르는 스튜디오 API(#891) */
 type RecordsCall =
@@ -392,6 +403,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   };
   const app = new DeskApp(client, first, processIo(), {
     settings,
+    openUrl: openInBrowser,
     requirements: { editor: systemEditor(env) },
     accounts,
     // 명령 인자가 설정 파일보다 앞선다
@@ -479,6 +491,10 @@ export class DeskApp {
   readonly #assignedSprites = new Set<string>();
   #loginTimer: NodeJS.Timeout | undefined;
   #loginPolling = false;
+  readonly #openUrl: ((url: string) => void) | undefined;
+  #plansTimer: NodeJS.Timeout | undefined;
+  /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
+  #plansFetching = false;
 
   constructor(client: DeskClient, items: DeskState['items'], io: DeskIo, options: DeskAppOptions = {}) {
     this.#client = client;
@@ -493,6 +509,7 @@ export class DeskApp {
     this.#catalog = options.spriteCatalog;
     this.#animate = options.animate !== false;
     this.#settingsHost = options.settings;
+    this.#openUrl = options.openUrl;
     this.#requirementsHost = options.requirements ?? { editor: systemEditor(process.env) };
     this.#accounts = options.accounts ?? [];
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
@@ -710,6 +727,12 @@ export class DeskApp {
       case 'settings':
         void this.#settingsEffect(effect.effect);
         return;
+      case 'plans-open':
+        this.#openPlans();
+        return;
+      case 'plans':
+        void this.#plansEffect(effect.effect);
+        return;
       case 'requirements-open':
         this.#openRequirements(effect.id, effect.title);
         return;
@@ -727,7 +750,7 @@ export class DeskApp {
   }
 
   /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
-  #call<K extends RecordsCall | RequirementsCall>(name: K): StudioClient[K] {
+  #call<K extends RecordsCall | PlansCall | RequirementsCall>(name: K): StudioClient[K] {
     const method = this.#client[name];
     if (method) return method.bind(this.#client) as StudioClient[K];
     return (async () => {
@@ -874,6 +897,192 @@ export class DeskApp {
     }
   }
 
+  // ─── 작업 나누기 화면(#893) ───
+
+  /** 작업 나누기 화면을 바꾼다. 그사이 닫혔으면 아무것도 하지 않는다 */
+  #patchPlans(change: (plans: PlansState) => PlansState): void {
+    const plans = this.#state.plans;
+    if (!plans) return;
+    this.#state = { ...this.#state, plans: change(plans) };
+    this.#scheduleRender();
+  }
+
+  #openPlans(): void {
+    if (!this.#client.plans) {
+      this.#state = { ...this.#state, plans: undefined, message: '이 스튜디오는 작업 나누기를 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다' };
+      return;
+    }
+    this.#patchPlans((plans) => ({ ...plans, accounts: this.#accounts }));
+    void this.#loadPlans();
+    clearInterval(this.#plansTimer);
+    // 열려 있는 동안 레인 상태가 바뀌므로 다시 받는다. 닫으면 멈춘다
+    this.#plansTimer = setInterval(() => {
+      if (!this.#state.plans) {
+        clearInterval(this.#plansTimer);
+        this.#plansTimer = undefined;
+        return;
+      }
+      void this.#loadPlans();
+    }, PLANS_POLL_MS);
+    this.#plansTimer.unref?.();
+  }
+
+  /** 지금 모드에 맞게 목록이나 계획 하나를 받는다. 새 계획을 쓰는 중이면 받지 않는다 */
+  async #loadPlans(): Promise<void> {
+    const plans = this.#state.plans;
+    if (!plans || plans.mode === 'new' || this.#plansFetching) return;
+    this.#plansFetching = true;
+    try {
+      if (plans.mode === 'detail' && plans.detail) {
+        const id = plans.detail.id;
+        const plan = await this.#call('plan')(id);
+        if (this.#restored) return;
+        this.#patchPlans((current) => (current.mode === 'detail' && current.detail?.id === id ? { ...current, detail: plan, loading: false, error: undefined } : current));
+      } else {
+        const list = await this.#call('plans')();
+        if (this.#restored) return;
+        this.#patchPlans((current) => (current.mode === 'list' ? { ...current, list, loading: false, error: undefined, row: Math.max(0, Math.min(current.row, list.length - 1)) } : current));
+      }
+    } catch (error) {
+      if (this.#restored) return;
+      const gone = error instanceof StudioRequestError && error.status === 404;
+      this.#patchPlans((current) =>
+        gone && current.mode === 'detail'
+          ? { ...current, mode: 'list', detail: undefined, note: '계획이 없어졌습니다' }
+          : { ...current, loading: false, error: `계획을 받지 못했습니다: ${messageOf(error)}` },
+      );
+    } finally {
+      this.#plansFetching = false;
+    }
+  }
+
+  /** 받은 계획으로 보는 계획과 목록의 그 줄을 바꾼다 */
+  #showPlan(plan: DeskPlan, note?: string): void {
+    this.#patchPlans((plans) => ({
+      ...plans,
+      ...(plans.mode === 'detail' && plans.detail?.id === plan.id ? { detail: plan } : {}),
+      ...(plans.list ? { list: plans.list.map((entry) => (entry.id === plan.id ? plan : entry)) } : {}),
+      ...(note ? { note } : {}),
+    }));
+  }
+
+  async #plansEffect(effect: PlansEffect): Promise<void> {
+    if (effect.type === 'close') {
+      clearInterval(this.#plansTimer);
+      this.#plansTimer = undefined;
+      return;
+    }
+    const note = (text: string) => this.#patchPlans((plans) => ({ ...plans, note: text }));
+    try {
+      switch (effect.type) {
+        case 'list':
+        case 'detail':
+          await this.#loadPlans();
+          return;
+        case 'projects': {
+          const projects = (await this.#client.projects()).filter((project) => !project.error);
+          this.#patchPlans((plans) => (plans.form ? { ...plans, form: { ...plans.form, projects } } : plans));
+          if (projects.length === 0) note('프로젝트가 없습니다');
+          return;
+        }
+        case 'create': {
+          try {
+            const plan = await this.#call('createPlan')(effect.projectId, effect.request);
+            this.#patchPlans((plans) => ({ ...plans, mode: 'detail', form: undefined, detail: plan, lane: 0, list: [plan, ...(plans.list ?? []).filter((entry) => entry.id !== plan.id)] }));
+          } catch (error) {
+            this.#patchPlans((plans) => ({ ...plans, ...(plans.form ? { form: { ...plans.form, sending: false } } : {}), note: `계획을 만들지 못했습니다: ${messageOf(error)}` }));
+          }
+          return;
+        }
+        case 'approve':
+          this.#showPlan(await this.#call('approvePlan')(effect.id, effect.publishIssues), effect.publishIssues ? '승인했습니다. 레인이 시작되고 이슈를 올립니다' : '승인했습니다. 레인이 시작됩니다');
+          return;
+        case 'reject':
+          this.#showPlan(await this.#call('rejectPlan')(effect.id), '거부했습니다');
+          return;
+        case 'resume':
+          this.#showPlan(await this.#call('resumePlan')(effect.id), '통합을 다시 시작했습니다');
+          return;
+        case 'delete':
+          await this.#call('deletePlan')(effect.id);
+          note('계획을 지웠습니다');
+          await this.#loadPlans();
+          return;
+        case 'lane-choices': {
+          const [backends, accounts] = await Promise.all([this.#call('laneBackends')(), this.#client.accounts().catch((): DeskAccount[] => this.#accounts)]);
+          const choices: LaneChoice[] = [{ backend: '', label: '세션과 같음(계획 기본)' }];
+          for (const backend of backends) {
+            choices.push({ backend, label: backendLabel(backend) });
+            // 기본 계정(id가 CLI 이름)은 위의 AI 줄과 같다
+            for (const account of accounts) if (account.backend === backend && !account.builtin && account.id !== backend) choices.push({ backend, accountId: account.id, label: `${backendLabel(backend)} · ${account.name}` });
+          }
+          this.#patchPlans((plans) => {
+            const lane = plans.detail?.lanes.find((entry) => entry.id === plans.picker?.laneId);
+            const index = lane ? choices.findIndex((choice) => choice.backend === (lane.backend ?? '') && (choice.accountId ?? '') === (lane.accountId ?? '')) : -1;
+            return { ...plans, choices, accounts, ...(plans.picker ? { picker: { ...plans.picker, index: Math.max(0, index) } } : {}) };
+          });
+          return;
+        }
+        case 'lane':
+          this.#showPlan(await this.#call('setLane')(effect.id, effect.laneId, effect.backend, effect.accountId), '레인 AI·계정을 바꿨습니다');
+          return;
+        case 'open':
+          this.#openFromPlans([effect.sessionId]);
+          return;
+        case 'grid':
+          this.#openFromPlans(effect.sessionIds);
+          return;
+        case 'open-url':
+          if (!browsable(effect.url)) note('브라우저로 열 수 없는 주소입니다');
+          else if (this.#openUrl) this.#openUrl(effect.url);
+          else note(`브라우저를 열 수 없습니다: ${effect.url}`);
+          return;
+      }
+    } catch (error) {
+      note(messageOf(error));
+    }
+  }
+
+  /**
+   * 작업 나누기 화면을 닫고 레인 세션을 칸에 연다. 하나면 고른 칸에(이미 칸에 있으면 그 칸으로 간다),
+   * 여럿이면 칸 수를 2·4로 늘려 나란히 연다. 셸 칸은 그대로 두고 남은 칸에 놓는다
+   */
+  #openFromPlans(ids: readonly string[]): void {
+    clearInterval(this.#plansTimer);
+    this.#plansTimer = undefined;
+    const state: DeskState = { ...this.#state, plans: undefined, view: undefined, usageBack: undefined };
+    if (ids.length === 1) {
+      const id = ids[0]!;
+      const already = state.slots.findIndex((slot, index) => slot === id && index < state.layout);
+      if (already >= 0) {
+        this.#state = { ...state, focus: already };
+        this.#apply({ type: 'reopen', id });
+      } else if (isShellId(state.slots[state.focus])) {
+        this.#state = { ...state, message: SHELL_TAKEN };
+      } else {
+        const slots = [...state.slots];
+        slots[state.focus] = id;
+        this.#state = { ...state, slots };
+        this.#apply({ type: 'open', slot: state.focus, id });
+      }
+      this.#scheduleRender();
+      return;
+    }
+    const layout: PaneLayout = ids.length <= 2 ? 2 : 4;
+    const slots = state.slots.map((id, slot) => (slot < layout && isShellId(id) ? id : undefined));
+    let at = 0;
+    for (const id of ids) {
+      while (at < layout && slots[at] !== undefined) at++;
+      if (at >= layout) break;
+      slots[at] = id;
+    }
+    // 가려 둔 셸 칸(배치 밖)은 그대로 둔다
+    for (let slot = layout; slot < state.slots.length; slot++) if (isShellId(state.slots[slot])) slots[slot] = state.slots[slot];
+    this.#state = { ...state, layout, slots, focus: 0, zoom: false };
+    this.#apply({ type: 'layout' });
+    this.#scheduleRender();
+  }
+
   // ─── 요구사항·문서 화면(#894) ───
 
   #openRequirements(id: string, title: string): void {
@@ -883,7 +1092,9 @@ export class DeskApp {
     }
     const opened = openRequirements({ sessionId: id, title });
     // 덮는 화면은 하나만 둔다
-    this.#state = { ...this.#state, requirements: opened.state, records: undefined, detail: undefined, help: false, message: undefined };
+    clearInterval(this.#plansTimer);
+    this.#plansTimer = undefined;
+    this.#state = { ...this.#state, requirements: opened.state, records: undefined, detail: undefined, plans: undefined, help: false, message: undefined };
     for (const effect of opened.effects) void this.#requirementsEffect(effect);
     this.#scheduleRender();
   }
@@ -2124,6 +2335,7 @@ export class DeskApp {
     this.#restored = true;
     clearInterval(this.#pollTimer);
     clearInterval(this.#usageTimer);
+    clearInterval(this.#plansTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);
     clearTimeout(this.#pendingTimer);
