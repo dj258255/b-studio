@@ -129,6 +129,18 @@ describe('스튜디오 손님', () => {
     expect(JSON.parse(seen[0]!.body)).toEqual({ projectId: 'p1', route: 'rules', request: '주문 목록', intent: 'build', terminal: true });
     await client.start({ projectId: 'p1', request: 'x', choice: 'codex' });
     expect(JSON.parse(seen[1]!.body)).toEqual({ projectId: 'p1', route: 'direct', backend: 'codex', request: 'x', intent: 'build', terminal: true });
+    // 계정까지 고르면(#885) 그 계정 id를 함께 보낸다
+    await client.start({ projectId: 'p1', request: 'x', choice: 'codex@acct-1a2b3c4d' });
+    expect(JSON.parse(seen[2]!.body)).toEqual({ projectId: 'p1', route: 'direct', backend: 'codex', accountId: 'acct-1a2b3c4d', request: 'x', intent: 'build', terminal: true });
+  });
+
+  it('계정 목록을 읽는다(#885)', async () => {
+    handler = (_req, res) => {
+      res.end(JSON.stringify({ accounts: [{ id: 'codex', name: '기본', backend: 'codex', builtin: true }] }));
+    };
+    const accounts = await new StudioClient({ origin, token: 't' }).accounts();
+    expect(accounts).toEqual([{ id: 'codex', name: '기본', backend: 'codex', builtin: true }]);
+    expect(seen[0]!.url).toBe('/api/ai-accounts');
   });
 
   it('묶음 통로를 열어 세션별 메시지를 넘기고, 끊으면 끝난다', async () => {

@@ -21,6 +21,8 @@ export interface BackendTarget {
   backend: string;
   /** 비우면 그 백엔드에서 이 프로젝트에 마지막으로 고른 모델(없으면 CLI 기본값) */
   model?: string;
+  /** 그 CLI의 어느 계정으로 띄울지(#885, 계정 목록의 id). 비우면 기본 계정 */
+  accountId?: string;
 }
 
 export interface BackendRule extends BackendTarget {
@@ -43,6 +45,8 @@ const COMPLEXITIES: readonly TaskKind['complexity'][] = ['simple', 'normal', 'co
 const COMPLEXITY_LABEL: Record<TaskKind['complexity'], string> = { simple: '단순', normal: '보통', complex: '복잡' };
 const MAX_KEYWORDS = 20;
 const MAX_TEXT = 100;
+/** 계정 id의 꼴(lib/server/ai-accounts.ts와 같다) */
+const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -59,7 +63,9 @@ function parseTarget(value: Record<string, unknown>, allowed: readonly string[],
   if (!backend) throw new Error(`${where}: backend가 필요합니다`);
   if (!allowed.includes(backend)) throw new Error(`${where}: 이 스튜디오가 허용하지 않는 백엔드입니다: ${backend}`);
   const model = text(value.model, 'model', where);
-  return { backend, ...(model ? { model } : {}) };
+  const accountId = text(value.accountId, 'accountId', where);
+  if (accountId !== undefined && !ACCOUNT_ID.test(accountId)) throw new Error(`${where}: accountId는 계정 목록의 id여야 합니다`);
+  return { backend, ...(model ? { model } : {}), ...(accountId ? { accountId } : {}) };
 }
 
 function parseWhen(value: unknown, where: string): RuleWhen {
@@ -120,7 +126,7 @@ function matches(when: RuleWhen, input: { request: string; intent: RuleIntent; k
 export function matchCandidates(rules: BackendRules, input: { request: string; intent: RuleIntent; kind: TaskKind }): RuleCandidate[] {
   const candidates: RuleCandidate[] = [];
   rules.rules.forEach((rule, index) => {
-    if (matches(rule.when, input)) candidates.push({ rule: index, backend: rule.backend, ...(rule.model ? { model: rule.model } : {}) });
+    if (matches(rule.when, input)) candidates.push({ rule: index, backend: rule.backend, ...(rule.model ? { model: rule.model } : {}), ...(rule.accountId ? { accountId: rule.accountId } : {}) });
   });
   if (rules.fallback) candidates.push({ rule: 'fallback', ...rules.fallback });
   return candidates;
@@ -154,6 +160,8 @@ export interface RuleDraft {
   keywords: string;
   backend: string;
   model: string;
+  /** 계정 id(#885). 없거나 빈 글이면 기본 계정 */
+  accountId?: string;
 }
 
 export function ruleToDraft(rule: BackendRule): RuleDraft {
@@ -164,6 +172,7 @@ export function ruleToDraft(rule: BackendRule): RuleDraft {
     keywords: (rule.when.keywords ?? []).join(', '),
     backend: rule.backend,
     model: rule.model ?? '',
+    accountId: rule.accountId ?? '',
   };
 }
 
@@ -179,5 +188,5 @@ export function draftToRule(draft: RuleDraft): BackendRule {
     ...(draft.risk ? { risk: draft.risk } : {}),
     ...(keywords.length > 0 ? { keywords } : {}),
   };
-  return { when, backend: draft.backend, ...(draft.model.trim() ? { model: draft.model.trim() } : {}) };
+  return { when, backend: draft.backend, ...(draft.model.trim() ? { model: draft.model.trim() } : {}), ...(draft.accountId?.trim() ? { accountId: draft.accountId.trim() } : {}) };
 }

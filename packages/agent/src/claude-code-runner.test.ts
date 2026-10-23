@@ -598,6 +598,12 @@ describe('preflightClaudeCode', () => {
     expect(describeAccount({ apiKeySource: 'ANTHROPIC_API_KEY' })).toBe('API 키 (ANTHROPIC_API_KEY)');
   });
 
+  it('넘긴 환경(계정의 CLAUDE_CONFIG_DIR)으로 CLI를 띄운다(#885)', async () => {
+    const { sdk, state } = fakeClaudeCode({ account: { subscriptionType: 'Claude Max', apiProvider: 'firstParty' } });
+    await preflightClaudeCode({ sdk, env: { PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/home/kim/.claude-2' } });
+    expect(state.options?.env).toEqual({ PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/home/kim/.claude-2' });
+  });
+
   it('인증 정보가 하나도 없으면 로그인을 안내한다', async () => {
     const { sdk } = fakeClaudeCode({ account: { apiProvider: 'firstParty' } });
     const preflight = await preflightClaudeCode({ sdk });

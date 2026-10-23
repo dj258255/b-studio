@@ -6,6 +6,7 @@ import {
   defaultAgentGatewayRoot,
   ensureAgentContainer,
   expectedHostGatewayFiles,
+  ACCOUNT_DIR_ENV,
   findHostCli,
   findUnhookedCli,
   listProcesses,
@@ -125,6 +126,11 @@ export interface TerminalTarget {
   /** 이어 붙일 지난 CLI 대화 id(#872). 훅으로 받아 세션 기록에 남긴 것이다. 터미널을 열 때 한 번 묻는다 */
   resumeConversation?: () => string | undefined;
   /**
+   * 세션의 AI 계정의 설정 폴더(#885). 기본 계정이면 undefined다. 계정이 목록에서 빠졌으면 던진다 — 다른 계정으로 띄우지 않는다.
+   * 이 컴퓨터 방식은 감싸개가 CLAUDE_CONFIG_DIR·CODEX_HOME으로 넘긴다. 컨테이너 방식은 기본 계정만 쓴다
+   */
+  accountDir?: () => Promise<string | undefined>;
+  /**
    * 감시가 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 찾았을 때 부른다. 세션은 이 실행을 실패로 닫고 되돌린다(이슈 #695)
    */
   onViolation?: (reason: string) => void;
@@ -184,12 +190,15 @@ export async function removeContainerAndConfig(
 }
 
 const DOCKER_BACKEND: TerminalBackend = {
-  prepare: async (target, gateway) =>
-    ensureAgentContainer(target.sandboxId, target.root, {
+  prepare: async (target, gateway) => {
+    // 컨테이너의 CLI 로그인은 컨테이너 홈 볼륨에 있다. 이 컴퓨터의 계정 폴더를 붙이지 않는다
+    if (await target.accountDir?.()) throw new Error('컨테이너 방식 터미널은 기본 계정만 씁니다. 다른 계정은 이 컴퓨터 방식(B_STUDIO_TERMINAL=host)에서 씁니다');
+    return ensureAgentContainer(target.sandboxId, target.root, {
       projectId: target.projectId,
       ...(target.evaluationAssets ? { evaluationAssets: target.evaluationAssets } : {}),
       ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}),
-    }),
+    });
+  },
   open: (place, options) => openAgentTerminal(place, options),
   remove: (sandboxId) => removeContainerAndConfig(sandboxId),
   reachable: (place) => probeAgentGateway(place),
@@ -209,10 +218,16 @@ interface HostGatewayWatch {
 const gatewayStore = globalThis as typeof globalThis & { __bStudioHostGateways?: Map<string, HostGatewayWatch> };
 const hostGateways = (gatewayStore.__bStudioHostGateways ??= new Map());
 
+/** 관문을 쓸 때 기억한 계정 폴더를 PTY 환경에도 둔다(#885). 감싸개가 같은 값을 CLI에 넘긴다 */
+function hostAccountEnv(cli: HostCli | undefined): Record<string, string> {
+  return cli?.configDir ? { [ACCOUNT_DIR_ENV[cli.kind]]: cli.configDir } : {};
+}
+
 const HOST_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
-    const cli = await findHostCli(process.env, target.cli ?? 'claude');
+    const configDir = await target.accountDir?.();
+    const cli = { ...(await findHostCli(process.env, target.cli ?? 'claude')), ...(configDir ? { configDir } : {}) };
     if (!gateway) return '';
     const root = defaultAgentGatewayRoot();
     const dir = await writeHostGatewayConfig(target.sandboxId, gateway, cli, root);
@@ -227,6 +242,7 @@ const HOST_BACKEND: TerminalBackend = {
       cwd: options.target.root,
       gatewayDir: place || undefined,
       cli: options.target.cli ?? 'claude',
+      accountEnv: hostAccountEnv(hostGateways.get(place)?.cli),
       ...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {}),
       ...(options.resumeConversation !== undefined ? { resumeConversation: options.resumeConversation } : {}),
     }),

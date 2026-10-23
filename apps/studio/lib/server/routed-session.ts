@@ -79,7 +79,7 @@ function terminalBackends(mode: TerminalMode): BackendFilter {
 }
 
 export async function startRoutedSession(
-  input: { projectId: string; user: string; workspace: 'copy' | 'local'; request: string; intent: RuleIntent; direct?: { backend: string; model?: string }; terminal?: true },
+  input: { projectId: string; user: string; workspace: 'copy' | 'local'; request: string; intent: RuleIntent; direct?: { backend: string; model?: string; accountId?: string }; terminal?: true },
   terminalOverrides?: Partial<RoutedTerminalDeps>,
 ): Promise<RoutedSession> {
   const request = input.request.trim();
@@ -95,7 +95,14 @@ export async function startRoutedSession(
     : await chooseBackend({ request, intent: input.intent, cwd: project.root, ...(only ? { only } : {}) });
   const backend = routing.backend as SessionMode;
   const { modelId, effort } = await newSessionModel(input.projectId, backend, routing.model);
-  const session = await createSession(input.projectId, input.user, input.workspace, { modelId, effort, backend, boot: 'on-demand' });
+  // 고른 계정(#885)으로 세션을 만든다. 터미널과 러너가 그 계정의 설정 폴더로 CLI를 띄운다
+  const session = await createSession(input.projectId, input.user, input.workspace, {
+    modelId,
+    effort,
+    backend,
+    boot: 'on-demand',
+    ...(routing.accountId ? { accountId: routing.accountId } : {}),
+  });
   try {
     // 대화 창에서 보낸 요청과 같은 조건이다(messages 라우트). 설계 승인은 만들기 요청만 본다
     if (input.intent === 'build') await assertDesignApprovedForRequest(session.id, request);

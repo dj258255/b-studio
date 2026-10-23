@@ -448,6 +448,23 @@ describe('runCodexAgent', () => {
     expect(await readFile(path.join(originalHome, 'auth.json'), 'utf8')).toBe('{"token":"secret"}\n');
   });
 
+  it('계정의 CODEX_HOME(authHome)을 주면 그 폴더의 로그인 파일을 링크한다(#885)', async () => {
+    const accountHome = await mkdtemp(path.join(tmpdir(), 'b-studio-codex-account-'));
+    await writeFile(path.join(accountHome, 'auth.json'), '{"token":"second"}\n');
+    let linkTarget = '';
+    const { sdk } = fakeCodex([{ steps: [{ text: 'ok' }] }], {
+      onStart: async (env) => {
+        linkTarget = await readlink(path.join(env.CODEX_HOME!, 'auth.json'));
+      },
+    });
+    try {
+      await runCodexAgent({ request: '안녕', intent: 'ask', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract, authHome: accountHome });
+      expect(linkTarget).toBe(path.join(accountHome, 'auth.json'));
+    } finally {
+      await rm(accountHome, { recursive: true, force: true });
+    }
+  });
+
   it('원본 로그인 파일이 없으면 링크를 만들지 않고 예외 없이 진행한다', async () => {
     process.env.CODEX_HOME = path.join(originalHome, '없는폴더');
     let tempHome = '';

@@ -86,6 +86,11 @@ export interface CodexRunOptions extends Omit<RunAgentOptions, 'client' | 'conve
   /** 이 러너는 모델 승격을 지원하지 않는다. 받으면 무시하지 않고 경고 이벤트를 한 번 알린다 */
   escalation?: EscalationPolicy;
   effort?: Effort;
+  /**
+   * 로그인 파일을 빌려 올 계정의 CODEX_HOME(#885). 없으면 지금처럼 `$CODEX_HOME`, 그것도 없으면 `~/.codex`다.
+   * 임시 CODEX_HOME을 쓰는 것은 같다 — 이 폴더에서는 auth.json 링크 하나만 가져온다
+   */
+  authHome?: string;
   sdk?: CodexSdk;
 }
 
@@ -236,7 +241,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   try {
     // 임시 CODEX_HOME. 작업 폴더와 다른 폴더다(Codex가 세션·로그를 여기에 쓰므로 작업 폴더와 섞지 않는다)
     codexHome = await mkdtemp(path.join(tmpdir(), CODEX_HOME_PREFIX));
-    await linkAuthFile(codexHome);
+    await linkAuthFile(codexHome, options.authHome);
     const home = codexHome;
 
     toolServer = await startToolServer({
@@ -417,10 +422,10 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
  * `codex login status`만 부르므로 모델 호출도, 사용량도 쓰지 않는다. 토큰·계정 정보는 읽지 않는다.
  */
 export async function preflightCodex(
-  { command = 'codex', timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {},
+  { command = 'codex', timeoutMs = 60_000, env }: { command?: string; timeoutMs?: number; /** 계정마다 CODEX_HOME을 따로 둘 때 준다(#885). 없으면 process.env */ env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ ok: true } | CliPreflightFailure> {
   try {
-    await run(command, ['login', 'status'], timeoutMs);
+    await run(command, ['login', 'status'], timeoutMs, env);
     return { ok: true };
   } catch (error) {
     return cliPreflightFailure(`Codex CLI에 로그인돼 있지 않습니다. 터미널에서 "codex"를 실행해 "Sign in with ChatGPT"로 로그인하세요.`, error);
@@ -468,8 +473,8 @@ function processEnv(): Record<string, string> {
  * Codex가 토큰을 갱신하면 이 링크를 통해 원본 `~/.codex/auth.json`이 그대로 갱신되므로, 링크가 끊어지지 않는 한 로그인은 유지된다.
  * 파일이 원래 없으면 링크를 만들지 않고 진행한다. 그 실행은 로그인 오류로 끝나고 기존 실패 경로를 탄다.
  */
-async function linkAuthFile(codexHome: string): Promise<void> {
-  const auth = path.join(process.env.CODEX_HOME ?? path.join(homedir(), '.codex'), 'auth.json');
+async function linkAuthFile(codexHome: string, authHome: string | undefined): Promise<void> {
+  const auth = path.join(authHome ?? process.env.CODEX_HOME ?? path.join(homedir(), '.codex'), 'auth.json');
   if (!(await exists(auth))) return;
   await symlink(auth, path.join(codexHome, 'auth.json'));
 }
@@ -481,9 +486,9 @@ async function exists(target: string): Promise<boolean> {
   );
 }
 
-function run(command: string, args: string[], timeoutMs: number): Promise<string> {
+function run(command: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<string> {
   return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: timeoutMs, windowsHide: true }, (error, stdout) => {
+    execFile(command, args, { timeout: timeoutMs, windowsHide: true, ...(env ? { env } : {}) }, (error, stdout) => {
       if (error) reject(error);
       else resolve(stdout);
     });

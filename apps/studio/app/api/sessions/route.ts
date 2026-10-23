@@ -34,15 +34,21 @@ export async function POST(request: Request) {
       request?: unknown;
       intent?: unknown;
       terminal?: unknown;
+      accountId?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
+    // 쓸 AI 계정(#885). 계정 목록의 id다. 목록에 있는지와 CLI가 맞는지는 세션을 만들 때 본다
+    if (body.accountId !== undefined && typeof body.accountId !== 'string') throw new StudioError(400, 'accountId는 문자열이어야 합니다');
+    const accountId = body.accountId as string | undefined;
     const workspace = body.workspace ?? 'copy';
     if (workspace !== 'copy' && workspace !== 'local') throw new StudioError(400, 'workspace는 copy나 local이어야 합니다');
     // 내가 정한 규칙으로 AI를 고르고 첫 요청까지 보낸다(#822). 백엔드·모델을 직접 주면 규칙을 쓰지 않으므로 함께 받지 않는다.
     // route: direct는 같은 흐름에서 규칙 대신 이번 요청만 고른 AI(backend, model?)를 쓴다(#827)
     if (body.route !== undefined) {
       if (body.route !== 'rules' && body.route !== 'direct') throw new StudioError(400, 'route는 rules나 direct여야 합니다');
-      if (body.route === 'rules' && (body.backend !== undefined || body.model !== undefined || body.modelId !== undefined)) throw new StudioError(400, '규칙으로 고를 때는 backend·model을 함께 보내지 않습니다');
+      if (body.route === 'rules' && (body.backend !== undefined || body.model !== undefined || body.modelId !== undefined || accountId !== undefined)) {
+        throw new StudioError(400, '규칙으로 고를 때는 backend·model·accountId를 함께 보내지 않습니다');
+      }
       if (body.route === 'direct') {
         if (typeof body.backend !== 'string' || !body.backend) throw new StudioError(400, '직접 고를 때는 backend가 필요합니다');
         if (body.model !== undefined && typeof body.model !== 'string') throw new StudioError(400, 'model은 문자열이어야 합니다');
@@ -53,7 +59,8 @@ export async function POST(request: Request) {
       if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
       // terminal: true면 대화 러너 대신 고른 AI의 CLI 터미널을 열고 첫 요청을 붙여 넣는다(#836)
       if (body.terminal !== undefined && body.terminal !== true) throw new StudioError(400, 'terminal은 true만 받습니다');
-      const direct = body.route === 'direct' ? { backend: body.backend as string, ...(typeof body.model === 'string' ? { model: body.model } : {}) } : undefined;
+      const direct =
+        body.route === 'direct' ? { backend: body.backend as string, ...(typeof body.model === 'string' ? { model: body.model } : {}), ...(accountId ? { accountId } : {}) } : undefined;
       return Response.json(
         await startRoutedSession({ projectId: body.projectId, user, workspace, request: body.request, intent, ...(direct ? { direct } : {}), ...(body.terminal === true ? { terminal: true as const } : {}) }),
         { status: 201 },
@@ -69,7 +76,7 @@ export async function POST(request: Request) {
     const { modelId, effort } = await newSessionModel(body.projectId, backend, requestedModel);
     // 사람이 만든 일반 세션은 샌드박스를 지연 기동한다(첫 만들기 요청·"지금 켜기" 때 켠다).
     // 레인·플릿·벤치는 createSession을 직접 불러 기본 eager로 켠다
-    return Response.json(await createSession(body.projectId, user, workspace, { modelId, effort, backend, boot: 'on-demand' }), { status: 201 });
+    return Response.json(await createSession(body.projectId, user, workspace, { modelId, effort, backend, boot: 'on-demand', ...(accountId ? { accountId } : {}) }), { status: 201 });
   } catch (error) {
     return errorResponse(error);
   }

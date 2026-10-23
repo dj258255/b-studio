@@ -46,3 +46,14 @@ describe.each([
     expect(result.reason).toContain('✖ Not authenticated');
   });
 });
+
+describe('계정마다 로그인 확인(#885)', () => {
+  it('Codex 로그인 확인은 넘긴 환경(계정의 CODEX_HOME)으로 CLI를 부른다', async () => {
+    const fake = path.join(dir, 'fake-codex-home');
+    // 계정 폴더가 맞을 때만 로그인돼 있다고 답한다
+    await writeFile(fake, '#!/bin/sh\n[ "$CODEX_HOME" = "/home/kim/.codex-2" ] && exit 0\nprintf "Not logged in\\n" >&2\nexit 1\n');
+    await chmod(fake, 0o755);
+    expect(await preflightCodex({ command: fake, timeoutMs: 10_000, env: { ...process.env, CODEX_HOME: '/home/kim/.codex-2' } })).toEqual({ ok: true });
+    expect((await preflightCodex({ command: fake, timeoutMs: 10_000, env: { ...process.env, CODEX_HOME: '/elsewhere' } })).ok).toBe(false);
+  });
+});
