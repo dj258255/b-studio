@@ -5,16 +5,17 @@
  * 키 → handleInput → 할 일(입력 보내기, 칸 열기, 새 요청 …) → 스튜디오 API, 터미널 출력 → 칸 해석 → 화면 그리기.
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskLayout, type DeskLayout, type DeskPrefix } from './config';
 import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
-import { spaceScreen } from './cards';
+import { spaceItems, spaceScreen, spriteFor } from './cards';
 import { previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
 import { placePanes, terminalSize } from './screen';
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
-import { loadSprite, spriteDir, type Sprite } from './sprite';
+import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
+import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
 import type { ThemeName } from './theme';
 import type { DeskItem, DeskTerminalMessage } from './types';
 
@@ -53,6 +54,45 @@ const LEAVE_SCREEN = '\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l';
 // 마우스는 누름·뗌·휠(1000)을 SGR 꼴(1006)로 받는다. 끌기(1002)는 받지 않는다(#874)
 const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';
 const MOUSE_OFF = '\x1b[?1006l\x1b[?1000l';
+// 창이 포커스를 잃고 얻는 것(1004)을 받아 그동안 움짤을 멈춘다(#902)
+const FOCUS_ON = '\x1b[?1004h';
+const FOCUS_OFF = '\x1b[?1004l';
+const FOCUS_EVENT = /\x1b\[([IO])/g;
+/** 읽어 둔 무작위 그림의 상한(오래된 것부터 버린다) */
+const SPRITE_CACHE = 64;
+
+/** 카드 그림을 그림 폴더에서 고르는 곳(#902). 테스트에서는 가짜를 넣는다 */
+export interface SpriteCatalog {
+  /** 세션 id에 맞는 그림: 그 id 이름의 그림, 그다음 random이면 폴더에서 무작위. 없으면 sprite가 없다. 읽지 못했으면 warning */
+  pick(id: string): { sprite?: Sprite; warning?: string };
+}
+
+/** 그림 폴더의 그림 목록. 시작할 때 목록만 읽고, 그림은 처음 보일 때 읽는다 */
+export function folderCatalog(dir: string, options: { random: boolean }): SpriteCatalog {
+  const files = options.random ? scanSprites(dir) : [];
+  const cache = new Map<string, Sprite | null>();
+  return {
+    pick(id) {
+      const named = loadSprite(dir, [id]);
+      if (named) return { sprite: named };
+      const file = pickSprite(id, files);
+      if (!file) return {};
+      if (cache.has(file)) {
+        const known = cache.get(file);
+        return known ? { sprite: known } : {};
+      }
+      if (cache.size >= SPRITE_CACHE) cache.delete(cache.keys().next().value!);
+      try {
+        const sprite = readSprite(join(dir, file));
+        cache.set(file, sprite);
+        return { sprite };
+      } catch (error) {
+        cache.set(file, null);
+        return { warning: `그림 ${file}를 읽지 못했습니다: ${messageOf(error)}` };
+      }
+    },
+  };
+}
 
 export interface DeskOptions {
   port?: number;
@@ -109,6 +149,12 @@ export interface DeskAppOptions {
   theme?: ThemeName;
   /** 카드 그림(세션 id·AI 이름·default 차례로 찾는다). 없으면 desk의 기본 그림 */
   sprites?: Record<string, Sprite>;
+  /** 이름 붙인 그림이 없는 세션의 그림을 고르는 곳(#902). 없으면 기본 그림 */
+  spriteCatalog?: SpriteCatalog;
+  /** false면 움짤을 움직이지 않는다 */
+  animate?: boolean;
+  /** 그림을 그리는 법: kitty(Ghostty·kitty의 그래픽)·blocks(반칸 블록, 기본) */
+  graphics?: GraphicsMode;
   /** 설정한 앞글쇠(없으면 Ctrl-b) */
   prefix?: DeskPrefix;
   layoutStore?: DeskLayoutStore;
@@ -189,11 +235,14 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   }
   const dir = deskConfigDir(env);
   const { config, warnings } = loadDeskConfig(dir);
-  // 카드 그림: 그림 폴더의 AI 이름별 그림과 default.png(#887)
+  // 카드 그림: 그림 폴더의 AI 이름별 그림과 default(#887), 그 밖에는 세션마다 그림 폴더에서 무작위(#902)
+  const spriteSetting = config.sprites ?? 'random';
   const sprites: Record<string, Sprite> = {};
-  for (const name of ['claude-code', 'codex', 'gemini', 'default']) {
-    const sprite = loadSprite(spriteDir(dir), [name], warnings);
-    if (sprite) sprites[name] = sprite;
+  if (spriteSetting !== 'off') {
+    for (const name of ['claude-code', 'codex', 'gemini', 'default']) {
+      const sprite = loadSprite(spriteDir(dir), [name], warnings);
+      if (sprite) sprites[name] = sprite;
+    }
   }
   const app = new DeskApp(client, first, processIo(), {
     // 명령 인자가 설정 파일보다 앞선다
@@ -202,6 +251,9 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     truecolor: colorDepth(env, config.color) === 'truecolor',
     ...(config.theme ? { theme: config.theme } : {}),
     sprites,
+    ...(spriteSetting === 'off' ? {} : { spriteCatalog: folderCatalog(spriteDir(dir), { random: spriteSetting === 'random' }) }),
+    animate: config.animate ?? true,
+    graphics: graphicsMode(env, config.graphics),
     ...(config.prefix ? { prefix: config.prefix } : {}),
     layoutStore: { load: () => loadDeskLayout(dir), save: (layout) => saveDeskLayout(dir, layout) },
     warnings,
@@ -252,6 +304,15 @@ export class DeskApp {
   readonly #shells = new Map<string, { pty?: ShellPty; ended: boolean; dir: string }>();
   #shellSeq = 0;
   readonly #spawnShell: SpawnShell;
+  readonly #catalog: SpriteCatalog | undefined;
+  readonly #animate: boolean;
+  /** 움짤 시계의 시작 */
+  readonly #animStart = Date.now();
+  #animTimer: NodeJS.Timeout | undefined;
+  /** 밖 터미널 창이 포커스를 가졌다(1004로 받는다. 받지 못하면 늘 가진 것으로 본다) */
+  #windowFocused = true;
+  /** 읽지 못한 그림을 이미 알렸다 */
+  readonly #spriteWarned = new Set<string>();
   readonly #shellEnv: Record<string, string | undefined>;
   readonly #shellCwd: string;
 
@@ -265,13 +326,16 @@ export class DeskApp {
     this.#spawnShell = options.spawnShell ?? spawnWithNodePty;
     this.#shellEnv = options.shellEnv ?? process.env;
     this.#shellCwd = options.shellCwd ?? process.cwd();
+    this.#catalog = options.spriteCatalog;
+    this.#animate = options.animate !== false;
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
     const theme = { name: options.theme ?? 'dark', depth: this.#truecolor ? 'truecolor' : '256' } as const;
     const restored = this.#restoredLayout(items);
     // 열린 칸이 없으면 스페이스 화면(카드)부터 보인다(#887)
     const open = (restored.slots ?? []).some((id, slot) => id && slot < (restored.layout ?? 1));
-    this.#state = { ...initialState(), items, theme, sprites: options.sprites ?? {}, ...prefix, ...warnings, ...restored, ...(open ? {} : { view: 'space' as const }) };
+    const kitty = options.graphics === 'kitty' ? { kitty: new KittyImages() } : {};
+    this.#state = { ...initialState(), items, theme, sprites: options.sprites ?? {}, ...kitty, ...prefix, ...warnings, ...restored, ...(open ? {} : { view: 'space' as const }) };
     for (const item of items) this.#last.set(item.id, statusOf(item));
   }
 
@@ -317,7 +381,7 @@ export class DeskApp {
       () => this.#restore(),
       (code) => this.#stop(code),
     );
-    this.#io.write(ENTER_SCREEN + (this.#mouseOn ? MOUSE_ON : ''));
+    this.#io.write(ENTER_SCREEN + (this.#mouseOn ? MOUSE_ON : '') + (this.#animate ? FOCUS_ON : ''));
     this.#io.setRaw(true);
     this.#io.onInput((chunk) => this.#onInput(chunk));
     this.#io.onResize(() => {
@@ -340,7 +404,17 @@ export class DeskApp {
     return { cols: Math.max(20, cols), rows: Math.max(6, rows) };
   }
 
-  #onInput(chunk: string): void {
+  #onInput(raw: string): void {
+    let chunk = raw;
+    if (this.#animate) {
+      // 창 포커스 알림은 키가 아니다. 움짤을 멈추거나 다시 움직이는 데만 쓴다
+      chunk = raw.replace(FOCUS_EVENT, (_, which: string) => {
+        this.#windowFocused = which === 'I';
+        return '';
+      });
+      if (chunk !== raw) this.#scheduleRender();
+      if (!chunk) return;
+    }
     clearTimeout(this.#pendingTimer);
     this.#take(handleInput(this.#state, chunk));
     // 조각 끝에서 끊긴 이스케이프 열은 잠깐 기다린다. 이어지는 조각이 없으면 그대로 처리한다(혼자 누른 Esc)
@@ -1012,8 +1086,50 @@ export class DeskApp {
     }, FRAME_MS);
   }
 
+  /** 스페이스 화면에 보일 세션 가운데 이름 붙인 그림이 없는 것에 그림 폴더의 그림을 단다(처음 보일 때 한 번) */
+  #ensureSprites(): void {
+    if (!this.#catalog || this.#state.view !== 'space') return;
+    const sprites = this.#state.sprites ?? {};
+    let added: Record<string, Sprite> | undefined;
+    for (const item of spaceItems(this.#state)) {
+      if (sprites[item.id] || added?.[item.id]) continue;
+      // AI 이름이나 default로 이름 붙인 그림이 있으면 그것이 먼저다
+      if ((item.backend && sprites[item.backend]) || sprites.default) continue;
+      const { sprite, warning } = this.#catalog.pick(item.id);
+      if (warning && !this.#spriteWarned.has(warning)) {
+        this.#spriteWarned.add(warning);
+        this.#say(warning);
+      }
+      added = { ...added, [item.id]: sprite ?? defaultSprite(item.backend) };
+    }
+    if (added) this.#state = { ...this.#state, sprites: { ...sprites, ...added } };
+  }
+
+  /** 스페이스 화면에 움짤이 보이고 창이 포커스를 가졌으면 다음 프레임에 다시 그린다. 아니면 멈춘다(시계도 멈춘다) */
+  #scheduleAnimation(): void {
+    const state = this.#state;
+    const playing = this.#animate && !this.#restored && this.#windowFocused && state.view === 'space' && !state.help && !state.copy;
+    const delays = playing ? spaceItems(state).flatMap((item) => shortestFrame(spriteFor(item, state.sprites)) ?? []) : [];
+    if (delays.length === 0) {
+      clearTimeout(this.#animTimer);
+      this.#animTimer = undefined;
+      return;
+    }
+    if (this.#animTimer) return;
+    this.#animTimer = setTimeout(
+      () => {
+        this.#animTimer = undefined;
+        this.#state = { ...this.#state, spriteClock: Date.now() - this.#animStart };
+        this.#render();
+      },
+      Math.max(MIN_FRAME_MS, Math.min(...delays)),
+    );
+    this.#animTimer.unref?.();
+  }
+
   #render(): void {
     if (this.#restored) return;
+    this.#ensureSprites();
     const views: PaneView[] = this.#state.slots.map((id) => {
       const pane = id ? this.#panes.get(id) : undefined;
       const note = id ? this.#notes.get(id) : undefined;
@@ -1027,8 +1143,8 @@ export class DeskApp {
       return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...bell, ...title, ...(note ? { note } : {}) };
     });
     const frame = renderScreen(this.#state, this.#size(), views);
-    // 바뀐 줄만 다시 쓴다. 지원하는 터미널에서는 한 장을 한 번에 바꾼다(동기 출력)
-    let out = '\x1b[?2026h\x1b[?25l';
+    // 바뀐 줄만 다시 쓴다. 지원하는 터미널에서는 한 장을 한 번에 바꾼다(동기 출력). 처음 보이는 Kitty 그림은 그 자리 글자보다 먼저 보낸다
+    let out = '\x1b[?2026h\x1b[?25l' + (this.#state.kitty?.drain() ?? '');
     frame.lines.forEach((line, row) => {
       if (this.#prevFrame[row] !== line) out += `\x1b[${row + 1};1H${line}`;
     });
@@ -1036,6 +1152,7 @@ export class DeskApp {
     if (frame.cursor) out += `\x1b[${frame.cursor.y + 1};${frame.cursor.x + 1}H\x1b[?25h`;
     out += '\x1b[?2026l';
     this.#io.write(out);
+    this.#scheduleAnimation();
   }
 
   #stop(code: number): void {
@@ -1053,6 +1170,7 @@ export class DeskApp {
     clearTimeout(this.#previewTimer);
     clearTimeout(this.#pendingTimer);
     clearTimeout(this.#resizeTimer);
+    clearTimeout(this.#animTimer);
     for (const entry of this.#streams.values()) {
       entry.controller.abort();
       clearTimeout(entry.timer);
@@ -1060,7 +1178,8 @@ export class DeskApp {
     for (const pane of this.#panes.values()) pane.dispose();
     for (const shell of this.#shells.values()) if (!shell.ended) shell.pty?.kill();
     this.#io.setRaw(false);
-    this.#io.write((this.#mouseOn ? MOUSE_OFF : '') + LEAVE_SCREEN);
+    // desk가 보낸 Kitty 그림을 지운 뒤 대체 화면을 나간다
+    this.#io.write((this.#state.kitty?.clear() ?? '') + (this.#animate ? FOCUS_OFF : '') + (this.#mouseOn ? MOUSE_OFF : '') + LEAVE_SCREEN);
   }
 }
 

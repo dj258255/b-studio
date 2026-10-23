@@ -1,10 +1,10 @@
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stringWidth, stripAnsi } from './screen';
-import { decodePng, defaultSprite, loadSprite, spriteFromRows, spriteLines, trimSprite } from './sprite';
+import { decodePng, decodeSprite, defaultSprite, encodePng, frameAt, frameDelay, loadSprite, pickSprite, scalePixels, scanSprites, shortestFrame, shrinkPixels, spriteFromRows, spriteLines, trimSprite, type Sprite } from './sprite';
 import { DEFAULT_THEME } from './theme';
 
 function chunk(kind: string, body: Buffer): Buffer {
@@ -145,5 +145,110 @@ describe('그림 폴더', () => {
     expect(sprite && rgba(sprite, 0, 0)).toEqual([1, 2, 3, 255]);
     expect(warnings).toEqual([expect.stringContaining('broken.png')]);
     expect(loadSprite(dir, ['missing'])).toBeUndefined();
+  });
+});
+
+/** 한 프레임 1×1 GIF(색 하나): 머리, 색표 2색, 이미지, 끝 */
+const tinyGif = (r: number, g: number, b: number) =>
+  Buffer.from([...Buffer.from('GIF89a'), 1, 0, 1, 0, 0x80, 0, 0, r, g, b, 0, 0, 0, 0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0, 2, 2, 0x44, 0x01, 0, 0x3b]);
+
+describe('움짤 그림(#902)', () => {
+  const pixel = (hex: string) => spriteFromRows(['a'], { a: hex }).pixels;
+  const frames = [
+    { pixels: pixel('#ff0000'), delay: 100 },
+    { pixels: pixel('#00ff00'), delay: 300 },
+  ];
+  const animated: Sprite = { width: 1, height: 1, pixels: frames[0]!.pixels, frames };
+
+  it('GIF에 적힌 짧은 지연은 100ms로, 그 밖에는 최소 80ms를 지킨다', () => {
+    expect(frameDelay(0)).toBe(100);
+    expect(frameDelay(10)).toBe(100);
+    expect(frameDelay(30)).toBe(80);
+    expect(frameDelay(120)).toBe(120);
+  });
+
+  it('시계로 보일 프레임을 고르고, 한 바퀴를 돌면 처음으로 돌아간다', () => {
+    expect([0, 99, 100, 399, 400, 550].map((clock) => frameAt(animated, clock))).toEqual([0, 0, 1, 1, 0, 1]);
+    expect(frameAt(defaultSprite('codex'), 500)).toBe(0);
+    expect(shortestFrame(animated)).toBe(100);
+    expect(shortestFrame(defaultSprite('codex'))).toBeUndefined();
+  });
+
+  it('모든 프레임을 합친 자리로 투명한 가장자리를 자른다(프레임마다 자르면 흔들린다)', () => {
+    const left = spriteFromRows(['a   ', '    '], { a: '#ffffff' });
+    const right = spriteFromRows(['    ', '   a'], { a: '#ffffff' });
+    const sprite: Sprite = { width: 4, height: 2, pixels: left.pixels, frames: [{ pixels: left.pixels, delay: 100 }, { pixels: right.pixels, delay: 100 }] };
+    const trimmed = trimSprite(sprite);
+    expect([trimmed.width, trimmed.height]).toEqual([4, 2]);
+    expect(trimSprite(sprite)).toBe(trimmed);
+    const padded = spriteFromRows(['   ', ' a ', '   '], { a: '#ffffff' });
+    const both: Sprite = { width: 3, height: 3, pixels: padded.pixels, frames: [{ pixels: padded.pixels, delay: 100 }, { pixels: padded.pixels, delay: 100 }] };
+    expect(trimSprite(both).frames?.map((frame) => frame.pixels.length)).toEqual([4, 4]);
+  });
+
+  it('반칸 블록은 받은 프레임을 그린다', () => {
+    expect(spriteLines(animated, 1, 1, DEFAULT_THEME, 0)[0]).toContain('38;2;255;0;0');
+    expect(spriteLines(animated, 1, 1, DEFAULT_THEME, 1)[0]).toContain('38;2;0;255;0');
+  });
+
+  it('줄일 때 상자 안 불투명한 픽셀의 평균 색을 쓰고, 얇은 테두리를 잃지 않는다', () => {
+    // 4×4에 1픽셀 테두리(검정) + 안쪽 흰색 → 2×2로 줄이면 네 픽셀 모두 불투명이고 회색이 섞인다
+    const framed = spriteFromRows(['kkkk', 'kwwk', 'kwwk', 'kkkk'], { k: '#000000', w: '#ffffff' });
+    const small = shrinkPixels(framed.pixels, 4, 4, 2, 2);
+    expect([...small.subarray(0, 4)]).toEqual([64, 64, 64, 255]);
+    // 가장자리 한 줄만 있는 그림을 줄여도 사라지지 않는다
+    const line = spriteFromRows(['aaa', '   ', '   '], { a: '#ff0000' });
+    expect(shrinkPixels(line.pixels, 3, 3, 1, 1)[3]).toBe(255);
+    const dust = spriteFromRows(['a   ', '    ', '    ', '    '], { a: '#ff0000' });
+    expect(shrinkPixels(dust.pixels, 4, 4, 1, 1)[3]).toBe(0);
+  });
+
+  it('PNG로 다시 쓰면 같은 픽셀로 읽히고, 정수 배로 키운다', () => {
+    const sprite = spriteFromRows(['ab', ' a'], { a: '#102030', b: '#405060' });
+    const round = decodePng(encodePng(2, 2, sprite.pixels));
+    expect(Buffer.from(round.pixels).equals(Buffer.from(sprite.pixels))).toBe(true);
+    const big = scalePixels(sprite.pixels, 2, 2, 3);
+    expect(big.length).toBe(6 * 6 * 4);
+    expect([...big.subarray((5 * 6 + 5) * 4, (5 * 6 + 5) * 4 + 4)]).toEqual([0x10, 0x20, 0x30, 255]);
+  });
+
+  it('머리 바이트로 PNG와 GIF를 가려 읽는다', () => {
+    const fromGif = decodeSprite(tinyGif(9, 8, 7));
+    expect(rgba(fromGif, 0, 0)).toEqual([9, 8, 7, 255]);
+    expect(fromGif.frames).toBeUndefined();
+    expect(() => decodeSprite(Buffer.from('hello'))).toThrow('PNG가 아닙니다');
+  });
+});
+
+describe('그림 폴더에서 무작위로 고르기(#902)', () => {
+  let dir = '';
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+  it('하위 폴더까지 .png·.gif만 모으고, 숨은 것과 링크는 보지 않는다', () => {
+    dir = mkdtempSync(join(tmpdir(), 'desk-sprites-'));
+    mkdirSync(join(dir, 'pokemon'));
+    mkdirSync(join(dir, '.hidden'));
+    writeFileSync(join(dir, 'pokemon', '25.gif'), tinyGif(1, 2, 3));
+    writeFileSync(join(dir, 'pokemon', 'notes.txt'), 'x');
+    writeFileSync(join(dir, '.hidden', 'a.png'), 'x');
+    writeFileSync(join(dir, 'codex.PNG'), 'x');
+    symlinkSync('/etc', join(dir, 'link'));
+    expect(scanSprites(dir)).toEqual(['codex.PNG', join('pokemon', '25.gif')]);
+    expect(scanSprites(join(dir, 'missing'))).toEqual([]);
+  });
+
+  it('세션 id로 고르면 늘 같은 그림이고, 여러 세션은 고르게 흩어진다', () => {
+    const files = Array.from({ length: 50 }, (_, index) => `${index}.gif`);
+    expect(pickSprite('session-1', files)).toBe(pickSprite('session-1', files));
+    expect(pickSprite('x', [])).toBeUndefined();
+    const picked = new Set(Array.from({ length: 200 }, (_, index) => pickSprite(`s${index}`, files)));
+    expect(picked.size).toBeGreaterThan(30);
+  });
+
+  it('이름 붙인 그림은 .gif도 읽는다', () => {
+    dir = mkdtempSync(join(tmpdir(), 'desk-sprites-'));
+    writeFileSync(join(dir, 'codex.gif'), tinyGif(4, 5, 6));
+    const sprite = loadSprite(dir, ['codex']);
+    expect(sprite && rgba(sprite, 0, 0)).toEqual([4, 5, 6, 255]);
   });
 });
