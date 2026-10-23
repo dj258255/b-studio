@@ -10,9 +10,12 @@ import { StudioClient, StudioRequestError, findStudio } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskLayout, type DeskLayout, type DeskPrefix } from './config';
 import { BROWSING, SHELL_ID, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
-import { previewLine, renderScreen, sidebarView, type PaneView } from './render';
+import { spaceScreen } from './cards';
+import { previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
 import { placePanes, terminalSize } from './screen';
-import { agentStatus, backendLabel, deskSessions, gateStatus } from './sidebar';
+import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
+import { loadSprite, spriteDir, type Sprite } from './sprite';
+import type { ThemeName } from './theme';
 import type { DeskItem, DeskTerminalMessage } from './types';
 
 /** 사이드바를 새로 받는 주기 */
@@ -102,6 +105,10 @@ export interface DeskAppOptions {
   mouse?: boolean;
   /** false면 칸의 24비트 색을 256색으로 낮춰 그린다 */
   truecolor?: boolean;
+  /** desk 자신의 색 팔레트(#887). 없으면 dark */
+  theme?: ThemeName;
+  /** 카드 그림(세션 id·AI 이름·default 차례로 찾는다). 없으면 desk의 기본 그림 */
+  sprites?: Record<string, Sprite>;
   /** 설정한 앞글쇠(없으면 Ctrl-b) */
   prefix?: DeskPrefix;
   layoutStore?: DeskLayoutStore;
@@ -182,11 +189,19 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   }
   const dir = deskConfigDir(env);
   const { config, warnings } = loadDeskConfig(dir);
+  // 카드 그림: 그림 폴더의 AI 이름별 그림과 default.png(#887)
+  const sprites: Record<string, Sprite> = {};
+  for (const name of ['claude-code', 'codex', 'gemini', 'default']) {
+    const sprite = loadSprite(spriteDir(dir), [name], warnings);
+    if (sprite) sprites[name] = sprite;
+  }
   const app = new DeskApp(client, first, processIo(), {
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
     mouse: options.mouse ?? config.mouse ?? true,
     truecolor: colorDepth(env, config.color) === 'truecolor',
+    ...(config.theme ? { theme: config.theme } : {}),
+    sprites,
     ...(config.prefix ? { prefix: config.prefix } : {}),
     layoutStore: { load: () => loadDeskLayout(dir), save: (layout) => saveDeskLayout(dir, layout) },
     warnings,
@@ -252,7 +267,11 @@ export class DeskApp {
     this.#shellCwd = options.shellCwd ?? process.cwd();
     const prefix = options.prefix ? { prefixKey: options.prefix.key, prefixLabel: options.prefix.label } : {};
     const warnings = options.warnings?.length ? { message: `설정: ${options.warnings.join(' / ')}` } : {};
-    this.#state = { ...initialState(), items, ...prefix, ...warnings, ...this.#restoredLayout(items) };
+    const theme = { name: options.theme ?? 'dark', depth: this.#truecolor ? 'truecolor' : '256' } as const;
+    const restored = this.#restoredLayout(items);
+    // 열린 칸이 없으면 스페이스 화면(카드)부터 보인다(#887)
+    const open = (restored.slots ?? []).some((id, slot) => id && slot < (restored.layout ?? 1));
+    this.#state = { ...initialState(), items, theme, sprites: options.sprites ?? {}, ...prefix, ...warnings, ...restored, ...(open ? {} : { view: 'space' as const }) };
     for (const item of items) this.#last.set(item.id, statusOf(item));
   }
 
@@ -501,6 +520,14 @@ export class DeskApp {
         this.#state = { ...this.#state, selected: Math.max(0, Math.min(sessions.length - 1, this.#state.selected + wheel)) };
       } else {
         const row = side.rows[side.offset + (y - side.rect.y)];
+        const space = row?.space === undefined ? undefined : deskSpaces(this.#state.items).find((entry) => entry.name === row.space);
+        if (space) {
+          // 스페이스를 누르면 그 스페이스 화면(카드)을 연다
+          this.#state = { ...this.#state, selected: space.sessions.includes(this.#state.selected) ? this.#state.selected : space.sessions[0]!, view: 'space' };
+          this.#clearSeen();
+          this.#scheduleRender();
+          return;
+        }
         if (row?.item === undefined) return;
         if (row.item === this.#state.selected) {
           // 고른 세션을 한 번 더 누르면 Ctrl-b Enter와 같다
@@ -509,6 +536,24 @@ export class DeskApp {
         }
         // 고르기만 한다. 이어서 Enter를 누르면 연다(Ctrl-b ↑↓로 고를 때와 같다)
         this.#state = { ...this.#state, selected: row.item, prefix: true, browsing: true, message: BROWSING };
+      }
+      this.#clearSeen();
+      this.#scheduleRender();
+      return;
+    }
+    if (this.#state.view === 'space') {
+      if (!press) return;
+      const sessions = deskSessions(this.#state.items);
+      if (wheel) this.#state = { ...this.#state, selected: Math.max(0, Math.min(sessions.length - 1, this.#state.selected + wheel)) };
+      else {
+        const card = spaceScreen(this.#state, spaceRect(this.#state, size)).cards.find(({ rect }) => x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h);
+        if (!card) return;
+        // 고른 카드를 한 번 더 누르면 고른 칸에 연다(Enter와 같다)
+        if (card.index === this.#state.selected) {
+          this.#take(handleInput({ ...this.#state, prefix: true }, '\r'));
+          return;
+        }
+        this.#state = { ...this.#state, selected: card.index };
       }
       this.#clearSeen();
       this.#scheduleRender();

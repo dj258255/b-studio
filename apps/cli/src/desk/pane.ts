@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import type { Unicode11Addon as Unicode11AddonType } from '@xterm/addon-unicode11';
 import type { IBufferCell, IBufferLine, Terminal as HeadlessTerminal } from '@xterm/headless';
 import { stringWidth } from './screen';
+import { rgbTo256 } from './theme';
 
 // 패키지가 CommonJS 진입점만 실제로 싣고 있어(module 필드의 파일이 없다) require로 읽는다
 const require = createRequire(import.meta.url);
@@ -24,21 +25,6 @@ interface CellStyle {
   fg: string;
   bg: string;
   flags: string;
-}
-
-/** 6단계 색 정육면체의 값(xterm 256색표) */
-const CUBE = [0, 95, 135, 175, 215, 255];
-
-/** 24비트 색에 가장 가까운 256색 번호: 색 정육면체(16~231)와 회색 띠(232~255) 가운데 거리가 짧은 쪽 */
-export function rgbTo256(r: number, g: number, b: number): number {
-  const nearest = (value: number) => CUBE.reduce((best, level, index) => (Math.abs(level - value) < Math.abs(CUBE[best]! - value) ? index : best), 0);
-  const [ri, gi, bi] = [nearest(r), nearest(g), nearest(b)];
-  const cube = 16 + 36 * ri + 6 * gi + bi;
-  const cubeDistance = (CUBE[ri]! - r) ** 2 + (CUBE[gi]! - g) ** 2 + (CUBE[bi]! - b) ** 2;
-  const grayIndex = Math.max(0, Math.min(23, Math.round(((r + g + b) / 3 - 8) / 10)));
-  const level = 8 + 10 * grayIndex;
-  const grayDistance = (level - r) ** 2 + (level - g) ** 2 + (level - b) ** 2;
-  return grayDistance < cubeDistance ? 232 + grayIndex : cube;
 }
 
 function colorCode(cell: IBufferCell, ground: 'fg' | 'bg', truecolor: boolean): string {
