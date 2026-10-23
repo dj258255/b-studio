@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskAccount, DeskOverview, DeskPreview, DeskProject, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountStatus, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
@@ -94,7 +94,7 @@ export class StudioClient {
     return this.#connection.origin;
   }
 
-  async #request<T>(method: 'GET' | 'POST' | 'PATCH' | 'DELETE', pathname: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  async #request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', pathname: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${this.#connection.origin}${pathname}`, {
       method,
       headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
@@ -128,8 +128,44 @@ export class StudioClient {
     return (await this.#request<{ accounts: DeskAccount[] }>('GET', '/api/ai-accounts')).accounts;
   }
 
-  rules(): Promise<{ allowed: string[]; defaultBackend: string }> {
+  rules(): Promise<DeskRulesView> {
     return this.#request('GET', '/api/routing/rules');
+  }
+
+  /** 규칙 전체를 바꾼다(#890). 서버가 검사하고, 틀리면 몇 번째 규칙인지 적은 400으로 답한다 */
+  async saveRules(rules: DeskRules): Promise<DeskRules> {
+    return (await this.#request<{ rules: DeskRules }>('PUT', '/api/routing/rules', rules)).rules;
+  }
+
+  /** 계정을 더한다(#890). 설정 폴더는 만들지 않는다(로그인할 때 CLI가 만든다) */
+  async addAccount(input: { name: string; backend: string; configDir: string }): Promise<DeskAccount> {
+    return (await this.#request<{ account: DeskAccount }>('POST', '/api/ai-accounts', input)).account;
+  }
+
+  /** 이름·그림을 고친다. 빈 그림('')은 그림을 지운다(세션마다 무작위) */
+  async updateAccount(id: string, patch: { name?: string; sprite?: string }): Promise<DeskAccount> {
+    return (await this.#request<{ account: DeskAccount }>('PATCH', `/api/ai-accounts/${encodeURIComponent(id)}`, patch)).account;
+  }
+
+  /** 목록에서만 뺀다. 설정 폴더는 그대로다 */
+  async removeAccount(id: string): Promise<void> {
+    await this.#request('DELETE', `/api/ai-accounts/${encodeURIComponent(id)}`);
+  }
+
+  async accountStatus(id: string): Promise<DeskAccountStatus> {
+    return (await this.#request<{ status: DeskAccountStatus }>('GET', `/api/ai-accounts/${encodeURIComponent(id)}/status`)).status;
+  }
+
+  startLogin(id: string): Promise<DeskLoginStart> {
+    return this.#request('POST', `/api/ai-accounts/${encodeURIComponent(id)}/login`);
+  }
+
+  async loginProgress(id: string): Promise<DeskLoginProgress> {
+    return (await this.#request<{ progress: DeskLoginProgress }>('GET', `/api/ai-accounts/${encodeURIComponent(id)}/login`)).progress;
+  }
+
+  async cancelLogin(id: string): Promise<DeskLoginProgress> {
+    return (await this.#request<{ progress: DeskLoginProgress }>('DELETE', `/api/ai-accounts/${encodeURIComponent(id)}/login`)).progress;
   }
 
   preview(request: string): Promise<DeskPreview> {

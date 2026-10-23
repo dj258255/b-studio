@@ -114,6 +114,31 @@ export function loadDeskConfig(dir: string): { config: DeskConfig; warnings: str
   return { config, warnings };
 }
 
+/**
+ * 설정 화면(#890)에서 바꾼 값을 desk.json에 쓴다. 받은 값만 바꾸고 파일에 있던 다른 값(모르는 키 포함)은 그대로 둔다.
+ * 파일이 없거나 JSON 객체가 아니면 받은 값으로 새로 쓴다. 쓰다 끊겨도 앞 파일이 깨지지 않게 옆 파일에 쓰고 바꿔 단다. 실패하면 던진다
+ */
+export function saveDeskConfig(dir: string, patch: DeskConfig): void {
+  let current: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(join(dir, CONFIG_FILE), 'utf8'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) current = parsed as Record<string, unknown>;
+  } catch {
+    // 없거나 깨진 파일은 새로 쓴다
+  }
+  const next: Record<string, unknown> = { ...current };
+  for (const [key, value] of Object.entries(patch) as Array<[keyof DeskConfig, DeskConfig[keyof DeskConfig]]>) {
+    if (value === undefined) continue;
+    // 앞글쇠는 사람이 읽고 고치는 꼴(Ctrl-a)로 남긴다. 읽을 때 parsePrefix가 받는다
+    next[key] = key === 'prefix' ? (value as DeskPrefix).label : value;
+  }
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, CONFIG_FILE);
+  const temp = `${file}.${process.pid}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(next, null, 2)}\n`);
+  renameSync(temp, file);
+}
+
 /** 밖 터미널이 24비트 색을 그리는가. 설정이 앞서고, auto면 COLORTERM을 본다(truecolor·24bit가 아니면 256색으로 낮춘다) */
 export function colorDepth(env: NodeJS.ProcessEnv, setting: ColorSetting = 'auto'): 'truecolor' | '256' {
   if (setting !== 'auto') return setting;

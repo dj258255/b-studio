@@ -49,6 +49,8 @@ export interface AgentItem {
   reason?: string;
   /** 이 항목이 실제로 쓰는 백엔드(레인은 그 레인이 고른 backend). 알 수 없으면 없다 */
   backend?: SessionMode;
+  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. studio desk가 계정 그림을 카드에 쓴다(#890) */
+  accountId?: string;
   lastActivityAt: string;
   /** 실행 중일 때 요청 시작부터 지난 시간 */
   runningForMs?: number;
@@ -347,6 +349,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(attention ? { attention } : {}),
     ...(reason ? { reason } : {}),
     ...(row.backend ? { backend: row.backend } : {}),
+    ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
     lastActivityAt: row.updatedAt,
     ...(runningForMs !== undefined ? { runningForMs } : {}),
     ...(tokens ? { tokens } : {}),

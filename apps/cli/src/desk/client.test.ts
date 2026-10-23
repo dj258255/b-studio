@@ -143,6 +143,41 @@ describe('스튜디오 손님', () => {
     expect(seen[0]!.url).toBe('/api/ai-accounts');
   });
 
+  it('설정 화면이 계정·로그인·규칙을 다루는 요청을 보낸다(#890)', async () => {
+    handler = (req, res) => {
+      if (req.url === '/api/ai-accounts' && req.method === 'POST') res.end(JSON.stringify({ account: { id: 'acct-1', name: '피오', backend: 'codex', configDir: '/h/x' } }));
+      else if (req.url?.endsWith('/status')) res.end(JSON.stringify({ status: { connected: true, installed: true } }));
+      else if (req.url?.endsWith('/login') && req.method === 'POST') res.end(JSON.stringify({ spawnable: true, progress: { state: 'running', lines: [] } }));
+      else if (req.url === '/api/routing/rules' && req.method === 'GET') res.end(JSON.stringify({ rules: { rules: [] }, allowed: ['codex'], defaultBackend: 'codex' }));
+      else if (req.url === '/api/routing/rules') res.end(JSON.stringify({ rules: { rules: [{ when: {}, backend: 'codex' }] } }));
+      else res.end(JSON.stringify({ account: { id: 'acct-1', name: '마르코', backend: 'codex' }, progress: { state: 'cancelled', lines: [] }, ok: true }));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    expect(await client.addAccount({ name: '피오', backend: 'codex', configDir: '~/x' })).toMatchObject({ id: 'acct-1' });
+    expect(await client.updateAccount('acct-1', { name: '마르코', sprite: '' })).toMatchObject({ name: '마르코' });
+    await client.removeAccount('acct-1');
+    expect(await client.accountStatus('acct-1')).toEqual({ connected: true, installed: true });
+    expect(await client.startLogin('acct-1')).toEqual({ spawnable: true, progress: { state: 'running', lines: [] } });
+    expect(await client.loginProgress('acct-1')).toMatchObject({ state: 'cancelled' });
+    expect(await client.cancelLogin('acct-1')).toMatchObject({ state: 'cancelled' });
+    expect(await client.rules()).toEqual({ rules: { rules: [] }, allowed: ['codex'], defaultBackend: 'codex' });
+    expect(await client.saveRules({ rules: [{ when: {}, backend: 'codex' }] })).toEqual({ rules: [{ when: {}, backend: 'codex' }] });
+    expect(seen.map((entry) => `${entry.method} ${entry.url}`)).toEqual([
+      'POST /api/ai-accounts',
+      'PATCH /api/ai-accounts/acct-1',
+      'DELETE /api/ai-accounts/acct-1',
+      'GET /api/ai-accounts/acct-1/status',
+      'POST /api/ai-accounts/acct-1/login',
+      'GET /api/ai-accounts/acct-1/login',
+      'DELETE /api/ai-accounts/acct-1/login',
+      'GET /api/routing/rules',
+      'PUT /api/routing/rules',
+    ]);
+    expect(JSON.parse(seen[0]!.body)).toEqual({ name: '피오', backend: 'codex', configDir: '~/x' });
+    expect(JSON.parse(seen[1]!.body)).toEqual({ name: '마르코', sprite: '' });
+    expect(JSON.parse(seen[8]!.body)).toEqual({ rules: [{ when: {}, backend: 'codex' }] });
+  });
+
   it('묶음 통로를 열어 세션별 메시지를 넘기고, 끊으면 끝난다', async () => {
     handler = (_req, res) => {
       res.setHeader('content-type', 'text/event-stream');

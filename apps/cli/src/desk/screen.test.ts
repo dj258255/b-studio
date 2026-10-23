@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeLayout, fit, placePanes, stringWidth } from './screen';
+import { computeLayout, fit, fitAnsi, placePanes, stringWidth, stripAnsi } from './screen';
 
 describe('글자 폭', () => {
   it('한글·전각은 두 칸, 영문은 한 칸으로 센다', () => {
@@ -68,5 +68,21 @@ describe('칸 놓기(#863)', () => {
     expect(placed.panes).toEqual([{ slot: 2, rect: computeLayout(100, 30, 1).panes[0] }]);
     const normal = placePanes(100, 30, { layout: 2, focus: 0 });
     expect(normal.panes.map((pane) => pane.slot)).toEqual([0, 1]);
+  });
+});
+
+describe('누를 수 있는 링크(OSC 8, #890)', () => {
+  it('링크 열은 폭에 넣지 않고 그대로 두며, 색을 지울 때 함께 지운다', () => {
+    const link = '\x1b]8;;https://example.com/a?b=1\x07열기\x1b]8;;\x07';
+    const out = fitAnsi(`> ${link} 끝`, 12);
+    expect(out).toContain('\x1b]8;;https://example.com/a?b=1\x07');
+    expect(stripAnsi(out)).toBe('> 열기 끝   ');
+    expect(stringWidth(stripAnsi(out))).toBe(12);
+  });
+
+  it('링크 가운데서 잘리면 링크를 닫는다', () => {
+    const out = fitAnsi('\x1b]8;;https://example.com\x07아주 긴 링크 글\x1b]8;;\x07', 6);
+    expect(out.endsWith('\x1b]8;;\x07\x1b[0m') || out.includes('\x1b]8;;\x07\x1b[0m')).toBe(true);
+    expect(stringWidth(stripAnsi(out))).toBe(6);
   });
 });

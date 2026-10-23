@@ -571,3 +571,42 @@ describe('스페이스 화면 키(#887)', () => {
     expect(handleInput(spaced(), '\x02\x1b[B').state.view).toBe('space');
   });
 });
+
+describe('설정 화면 키(#890)', () => {
+  const base = (): DeskState => ({ ...initialState(), items: [item('a')], slots: ['a', undefined, undefined, undefined] });
+
+  it('앞글쇠 다음 g는 설정 화면을 바로 열고, 같은 입력에서 이어 친 키는 설정 화면이 받는다(CLI로 가지 않는다)', () => {
+    const { state, effects } = handleInput(base(), '\x02g\t');
+    expect(effects).toEqual([{ type: 'settings-open' }]);
+    expect(state.settings?.tab).toBe('rules');
+    const typed = handleInput(state, 'xyz');
+    expect(typed.effects.filter((effect) => effect.type === 'input')).toEqual([]);
+  });
+
+  it('스페이스 화면에서는 앞글쇠 없이 g로 연다', () => {
+    const { state, effects } = handleInput({ ...base(), view: 'space' }, 'g');
+    expect(effects).toEqual([{ type: 'settings-open' }]);
+    expect(state.settings).toBeDefined();
+  });
+
+  it('Esc로 닫으면 닫기 할 일을 낸다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    const { state, effects } = handleInput(opened, '\x1b', true);
+    expect(state.settings).toBeUndefined();
+    expect(effects).toEqual([{ type: 'settings', effect: { type: 'close' } }]);
+  });
+
+  it('설정 화면의 붙여넣기는 칸으로 가지 않고 입력 칸에 들어간다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    const form = { ...opened.settings!, loading: false, backends: ['codex'] };
+    const adding = handleInput({ ...opened, settings: form }, 'a').state;
+    const { state, effects } = handleInput(adding, '\x1b[200~마르코\x1b[201~');
+    expect(effects).toEqual([]);
+    expect(state.settings?.form?.fields[0]).toMatchObject({ value: '마르코' });
+  });
+
+  it('설정 화면이 열려 있으면 마우스는 버린다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    expect(handleInput(opened, '\x1b[<0;5;5M').effects).toEqual([]);
+  });
+});

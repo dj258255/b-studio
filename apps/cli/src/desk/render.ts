@@ -5,6 +5,7 @@
 import { spaceScreen } from './cards';
 import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
+import { renderSettings, settingsHint } from './settings';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
 import type { DeskPreview } from './types';
@@ -51,8 +52,8 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
-const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · n 새 요청 · g 설정 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
 
@@ -64,6 +65,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
+  ['g', '설정: 계정(더하기·로그인·그림), 라우팅 규칙, 화면, 키·알림'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
@@ -113,8 +115,8 @@ function helpLines(width: number): string[] {
     '',
     ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
     ' 세션이 손댈 상태가 되거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다(studio desk --no-notify로 끕니다).',
-    ' 앞글쇠·알림·마우스·색·팔레트는 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
-    ' 카드 그림은 ~/.config/b-studio/sprites/ 의 claude-code.png · codex.png · default.png를 씁니다(없으면 기본 그림).',
+    ' 앞글쇠·알림·마우스·색·팔레트는 설정 화면(Ctrl-b g)이나 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
+    ' 카드 그림은 계정 그림(설정 화면에서 고름), 그림 폴더(~/.config/b-studio/sprites/)의 claude-code · codex · default 그림, 그 폴더에서 무작위 차례로 씁니다.',
   ].map((line) => fit(line, width));
 }
 
@@ -176,6 +178,15 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
     lines.push(fit(' 아무 키나 누르면 닫습니다', cols));
     return { lines };
+  }
+
+  if (state.settings) {
+    // 설정 화면(#890)은 사이드바 없이 본문 전체를 쓴다
+    const body = renderSettings(state.settings, { w: cols, h: Math.max(0, rows - 2) }, theme);
+    lines.push(...body.lines);
+    while (lines.length < rows - 1) lines.push(' '.repeat(cols));
+    lines.push(fit(relabel(state, settingsHint(state.settings)), cols));
+    return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
   // 사이드바: 고른 스페이스와 세션이 보이게 내린다. 맨 아래 줄은 키 안내

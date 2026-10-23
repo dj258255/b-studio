@@ -148,6 +148,12 @@ describe('활동 한 줄', () => {
 });
 
 describe('목록·합계·정렬', () => {
+  it('세션을 띄운 AI 계정 id를 싣는다(카드 그림, #890). 기본 계정 세션에는 없다', () => {
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ id: 's1', accountId: 'acct-1a2b3c4d' }) }), source({ snapshot: snapshot({ id: 's2' }) })] });
+    expect(items.find((entry) => entry.id === 's1')).toMatchObject({ accountId: 'acct-1a2b3c4d' });
+    expect(items.find((entry) => entry.id === 's2')).not.toHaveProperty('accountId');
+  });
+
   it('레인 세션은 session으로 중복해 올리지 않는다', () => {
     const lane = plan({ status: 'running', lanes: [{ id: 'a', paths: ['web'], status: 'running', tasks: [], sessionId: 's1' }] });
     const { items, totals } = overview({
