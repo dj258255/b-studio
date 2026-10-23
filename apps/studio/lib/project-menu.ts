@@ -29,6 +29,8 @@ export function recentSessionsFor<T extends RecentSessionLike>(sessions: readonl
 
 interface EmptySessionLike {
   lastRequest?: string;
+  /** 사람이 붙인 이름. 이름이 있으면 요청이 없어도 구별되므로 빈 세션으로 치지 않는다(#875) */
+  label?: string;
 }
 
 /**
@@ -40,7 +42,7 @@ interface EmptySessionLike {
 export function collapseEmptySessions<T extends EmptySessionLike>(sessions: readonly T[]): T[] {
   let keptEmpty = false;
   return sessions.filter((session) => {
-    if (session.lastRequest) return true;
+    if (session.lastRequest || session.label) return true;
     if (keptEmpty) return false;
     keptEmpty = true;
     return true;

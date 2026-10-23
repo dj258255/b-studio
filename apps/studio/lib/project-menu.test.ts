@@ -45,6 +45,11 @@ describe('collapseEmptySessions', () => {
     expect(collapseEmptySessions(sessions).map((s) => s.id)).toEqual(['s1']);
   });
 
+  it('요청이 없어도 이름을 붙인 세션은 빈 세션으로 치지 않는다(#875)', () => {
+    const sessions: Array<{ id: string; lastRequest?: string; label?: string }> = [{ id: 's1' }, { id: 's2', label: '결제 화면' }, { id: 's3' }];
+    expect(collapseEmptySessions(sessions).map((s) => s.id)).toEqual(['s1', 's2']);
+  });
+
   it('빈 세션과 요청 있는 세션이 섞여 있으면 빈 세션 중 가장 최근 것만 남기고 순서는 그대로', () => {
     const sessions = [{ id: 's1', lastRequest: '요청' }, { id: 's2' }, { id: 's3' }, { id: 's4', lastRequest: '다른 요청' }];
     expect(collapseEmptySessions(sessions).map((s) => s.id)).toEqual(['s1', 's2', 's4']);
