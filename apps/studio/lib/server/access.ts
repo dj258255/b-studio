@@ -3,8 +3,8 @@ import { StudioError } from './errors';
 import { getSnapshot, recoverSessions } from './sessions';
 
 /**
- * proxy.ts가 확인해 넣은 사용자. 인증을 켰는데 없으면 proxy.ts를 거치지 않은 요청이므로 거부한다.
- * proxy.ts가 앞에서 막더라도 데이터를 다루는 라우트에서 한 번 더 확인한다
+ * 앞단(스튜디오 서버의 인증 판단, Next면 proxy.ts)이 확인해 넣은 사용자. 인증을 켰는데 없으면 앞단을 거치지 않은 요청이므로 거부한다.
+ * 앞단이 막더라도 데이터를 다루는 라우트에서 한 번 더 확인한다
  */
 export function requireUser(requestHeaders: Headers): string {
   if (authConfig().mode === 'none') return LOCAL_USER;

@@ -155,3 +155,22 @@ describe('미리보기 줄', () => {
     expect(plain[size.rows - 2]).not.toContain('Claude로 보냅니다');
   });
 });
+
+describe('여러 AI 비교 화면 그리기(#892)', () => {
+  it('비교 화면은 사이드바 없이 본문 전체에 그리고, 맨 아래 줄은 비교 화면의 안내다', () => {
+    const fleets = { mode: 'list' as const, fleets: [{ id: 'f1', projectId: 'shop', projectName: 'shop', request: '검색을 추가해줘', createdAt: '2026-10-23T00:00:00Z', members: [] }], row: 0, member: 0 };
+    const { lines } = renderScreen(state({ fleets }), size, []);
+    const text = lines.map(stripAnsi);
+    expect(text[0]).toContain('여러 AI 비교');
+    expect(text.join('\n')).toContain('검색을 추가해줘');
+    expect(text.join('\n')).not.toContain('스페이스');
+    expect(text.at(-1)).toContain('n 새 비교');
+    expect(lines).toHaveLength(size.rows);
+    for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(size.cols);
+  });
+
+  it('도움말에 f 키가 있다', () => {
+    const text = renderScreen(state({ help: true }), { cols: 140, rows: 60 }, []).lines.map(stripAnsi).join('\n');
+    expect(text).toMatch(/f\s+여러 AI 비교/);
+  });
+});

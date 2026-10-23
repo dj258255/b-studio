@@ -227,6 +227,23 @@ describe('스튜디오 손님', () => {
     expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/limits', '/api/usage/limits?refresh=1']);
   });
 
+  it('여러 AI 비교의 목록·보기·만들기·승자·지우기를 fleets API로 보낸다(#892)', async () => {
+    handler = (_req, res) => res.end('[]');
+    const client = new StudioClient({ origin, token: 't' });
+    await client.fleets();
+    await client.fleet('f 1');
+    await client.createFleet({ projectId: 'shop', request: '검색', candidates: [{ backend: 'codex', accountId: 'acct-pio' }, { backend: 'claude-code', model: 'sonnet' }] });
+    await client.chooseFleetWinner('f1', 's1');
+    await client.deleteFleet('f1');
+    expect(seen.map((entry) => `${entry.method} ${entry.url} ${entry.body}`)).toEqual([
+      'GET /api/fleets ',
+      'GET /api/fleets/f%201 ',
+      'POST /api/fleets {"projectId":"shop","request":"검색","candidates":[{"backend":"codex","accountId":"acct-pio"},{"backend":"claude-code","model":"sonnet"}]}',
+      'POST /api/fleets/f1/winner {"sessionId":"s1"}',
+      'POST /api/fleets/f1/delete ',
+    ]);
+  });
+
   it('요구사항·문서 화면이 세션의 요구사항·테스트·문서·현황 API를 부른다(#894)', async () => {
     handler = (req, res) => {
       if (req.url?.includes('/docs/content') && req.method === 'GET') res.end(JSON.stringify({ path: 'docs/a b.md', content: '# 제목' }));

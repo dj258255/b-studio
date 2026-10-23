@@ -735,6 +735,61 @@ describe('사용량 화면 키(#889)', () => {
   });
 });
 
+describe('여러 AI 비교 화면 키(#892)', () => {
+  const base = (): DeskState => ({ ...initialState(), items: [item('a')], slots: ['a', undefined, undefined, undefined] });
+
+  it('앞글쇠 다음 f는 비교 화면을 열고 목록을 청한다. 이어 친 키는 비교 화면이 받는다(CLI로 가지 않는다)', () => {
+    const { state, effects } = handleInput(base(), '\x02fxyz');
+    expect(effects).toEqual([{ type: 'fleets-open' }]);
+    expect(state.fleets?.mode).toBe('list');
+  });
+
+  it('스페이스·사용량 화면에서는 앞글쇠 없이 f로 연다', () => {
+    expect(handleInput({ ...base(), view: 'space' }, 'f').effects).toEqual([{ type: 'fleets-open' }]);
+    expect(handleInput({ ...base(), view: 'usage', usage: { accounts: [] } }, 'f').effects).toEqual([{ type: 'fleets-open' }]);
+  });
+
+  it('비교 화면의 할 일은 fleets 할 일로 내고, Esc로 닫는다', () => {
+    const opened = handleInput(base(), '\x02f').state;
+    const loaded = { ...opened, fleets: { ...opened.fleets!, loading: false } };
+    expect(handleInput(loaded, 'n').effects).toEqual([{ type: 'fleets', effect: { type: 'form' } }]);
+    const closed = handleInput(loaded, '\x1b', true);
+    expect(closed.state.fleets).toBeUndefined();
+    expect(closed.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }]);
+  });
+
+  it('덮는 화면은 하나만: 비교 화면 안의 w는 승자 고르기이고, 앞글쇠 다음 w는 비교 화면을 닫고 카드 화면으로 간다', () => {
+    const member = { sessionId: 'a', backend: 'claude-code', label: '계정 기본', provider: 'claude-code', status: 'done' as const };
+    const fleets = { mode: 'detail' as const, fleets: [{ id: 'f1', projectId: 'p', projectName: 'shop', request: '요청', createdAt: '2026-10-23T00:00:00Z', members: [member] }], row: 0, detail: 'f1', member: 0 };
+    const inside = handleInput({ ...base(), fleets }, 'w');
+    expect(inside.state.fleets?.confirm).toMatchObject({ kind: 'winner', sessionId: 'a' });
+    expect(inside.state.view).toBeUndefined();
+    const away = handleInput({ ...base(), fleets }, '\x02w');
+    expect(away.state.fleets).toBeUndefined();
+    expect(away.state.view).toBe('space');
+    expect(away.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }]);
+    // 비교 화면을 열면 작업 나누기를 닫고, 작업 나누기를 열면 비교 화면을 닫는다
+    const plans = handleInput(base(), '\x02t').state;
+    const opened = handleInput(plans, '\x02f');
+    expect(opened.state.plans).toBeUndefined();
+    expect(opened.effects).toEqual([{ type: 'plans', effect: { type: 'close' } }, { type: 'fleets-open' }]);
+    const back = handleInput(opened.state, '\x02t');
+    expect(back.state.fleets).toBeUndefined();
+    expect(back.state.plans).toBeDefined();
+    expect(back.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }, { type: 'plans-open' }]);
+  });
+
+  it('붙여넣기는 새 비교의 요청 칸에 들어가고, 마우스는 버린다', () => {
+    const opened = handleInput(base(), '\x02f').state;
+    const form = handleInput({ ...opened, fleets: { ...opened.fleets!, loading: false } }, 'n').state;
+    const ready = { ...form, fleets: { ...form.fleets!, form: { ...form.fleets!.form!, loading: false, field: 'request' as const } } };
+    const pasted = handleInput(ready, '\x1b[200~검색 추가\x1b[201~');
+    expect(pasted.effects).toEqual([]);
+    expect(pasted.state.fleets?.form?.request).toBe('검색 추가');
+    expect(handleInput(ready, '\x1b[<0;5;5M').effects).toEqual([]);
+  });
+});
+
 describe('요구사항 화면 키(#894)', () => {
   it('앞글쇠 다음 e는 고른 칸의 세션, 칸이 셸이거나 비었으면 사이드바에서 고른 세션의 요구사항 화면을 연다', () => {
     const focused = handleInput(withItems({ layout: 2, slots: ['a', 'c', undefined, undefined], focus: 1 }), '\x02e');

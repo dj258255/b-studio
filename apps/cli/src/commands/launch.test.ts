@@ -97,7 +97,8 @@ describe('launch 유틸', () => {
     expect(MODE_ENV).toEqual({ local: 'claude-code', demo: 'demo', commandcode: 'commandcode', codex: 'codex' });
     expect(studioUrl(3123)).toBe('http://127.0.0.1:3123/');
     expect(studioOrigin(3123)).toBe('http://127.0.0.1:3123');
-    expect(launchArgs(3000)).toEqual(['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', '3000']);
+    // Next 없이 도는 Node 서버(tsx)만 띄운다(화면이 없어 next dev 길은 없다)
+    expect(launchArgs(3000)).toEqual(['exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--hostname', '127.0.0.1', '--port', '3000']);
     expect(HEALTH_PATH).toBe('/api/health');
     expect(isBStudioHealth('{"status":"ok","app":"b-studio"}')).toBe(true);
     expect(isBStudioHealth('{"status":"ok"}')).toBe(false);

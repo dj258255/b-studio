@@ -53,7 +53,7 @@ export interface ExecResult {
 export interface LaunchDeps {
   platform: NodeJS.Platform;
   env: NodeJS.ProcessEnv;
-  /** 저장소 루트. 여기서 next dev를 띄운다 */
+  /** 저장소 루트. 여기서 스튜디오 서버를 띄운다 */
   repoRoot: string;
   /** 로그·PID 파일 경로 */
   paths: { log: string; pid: string };
@@ -111,9 +111,12 @@ export function isBStudioHealth(body: string): boolean {
   }
 }
 
-/** `studio launch`가 부르는 명령 인자. 순수 함수라 테스트로 확인한다 */
+/**
+ * `studio launch`가 부르는 pnpm 인자(저장소 루트에서 부른다). 순수 함수라 테스트로 확인한다.
+ * Next 없이 도는 API 서버(apps/studio/server, tsx로 바로 돈다)만 띄운다. 화면이 없어 next dev 길은 두지 않는다(ADR-186, ADR-188)
+ */
 export function launchArgs(port: number): string[] {
-  return ['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', String(port)];
+  return ['exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--hostname', '127.0.0.1', '--port', String(port)];
 }
 
 /**
