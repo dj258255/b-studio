@@ -26,21 +26,40 @@ interface CellStyle {
   flags: string;
 }
 
-function colorCode(cell: IBufferCell, ground: 'fg' | 'bg'): string {
+/** 6단계 색 정육면체의 값(xterm 256색표) */
+const CUBE = [0, 95, 135, 175, 215, 255];
+
+/** 24비트 색에 가장 가까운 256색 번호: 색 정육면체(16~231)와 회색 띠(232~255) 가운데 거리가 짧은 쪽 */
+export function rgbTo256(r: number, g: number, b: number): number {
+  const nearest = (value: number) => CUBE.reduce((best, level, index) => (Math.abs(level - value) < Math.abs(CUBE[best]! - value) ? index : best), 0);
+  const [ri, gi, bi] = [nearest(r), nearest(g), nearest(b)];
+  const cube = 16 + 36 * ri + 6 * gi + bi;
+  const cubeDistance = (CUBE[ri]! - r) ** 2 + (CUBE[gi]! - g) ** 2 + (CUBE[bi]! - b) ** 2;
+  const grayIndex = Math.max(0, Math.min(23, Math.round(((r + g + b) / 3 - 8) / 10)));
+  const level = 8 + 10 * grayIndex;
+  const grayDistance = (level - r) ** 2 + (level - g) ** 2 + (level - b) ** 2;
+  return grayDistance < cubeDistance ? 232 + grayIndex : cube;
+}
+
+function colorCode(cell: IBufferCell, ground: 'fg' | 'bg', truecolor: boolean): string {
   const base = ground === 'fg' ? 30 : 40;
   if (ground === 'fg' ? cell.isFgDefault() : cell.isBgDefault()) return '';
   const color = ground === 'fg' ? cell.getFgColor() : cell.getBgColor();
-  if (ground === 'fg' ? cell.isFgRGB() : cell.isBgRGB()) return `${base + 8};2;${(color >> 16) & 255};${(color >> 8) & 255};${color & 255}`;
+  if (ground === 'fg' ? cell.isFgRGB() : cell.isBgRGB()) {
+    const [r, g, b] = [(color >> 16) & 255, (color >> 8) & 255, color & 255];
+    // 24비트 색을 알리지 않는 밖 터미널(옛 판 macOS 터미널 등)에는 256색 근사로 낮춘다(#874)
+    return truecolor ? `${base + 8};2;${r};${g};${b}` : `${base + 8};5;${rgbTo256(r, g, b)}`;
+  }
   if (color < 8) return String(base + color);
   if (color < 16) return String(base + 60 + color - 8);
   return `${base + 8};5;${color}`;
 }
 
-function styleOf(cell: IBufferCell): CellStyle {
+function styleOf(cell: IBufferCell, truecolor: boolean): CellStyle {
   const flags = [cell.isBold() ? '1' : '', cell.isDim() ? '2' : '', cell.isItalic() ? '3' : '', cell.isUnderline() ? '4' : '', cell.isInverse() ? '7' : '', cell.isInvisible() ? '8' : '', cell.isStrikethrough() ? '9' : '']
     .filter(Boolean)
     .join(';');
-  return { fg: colorCode(cell, 'fg'), bg: colorCode(cell, 'bg'), flags };
+  return { fg: colorCode(cell, 'fg', truecolor), bg: colorCode(cell, 'bg', truecolor), flags };
 }
 
 function sameStyle(a: CellStyle, b: CellStyle): boolean {
@@ -57,6 +76,10 @@ export interface PaneModes {
   bracketedPaste: boolean;
   appCursor: boolean;
   cursorHidden: boolean;
+  /** CLI가 마우스 알림을 켰다(1000·1002·1003). 켰으면 desk가 칸 안의 마우스를 넘긴다(#874) */
+  mouse: boolean;
+  /** 마우스를 SGR 꼴(1006)로 받는다. 아니면 옛 꼴(X10)로 넘긴다 */
+  sgrMouse: boolean;
 }
 
 /** 복사 모드에서 보는 것. 들어갈 때 화면과 지난 줄을 떠 두어, 새 출력이 와도 보던 자리가 움직이지 않는다 */
@@ -73,21 +96,27 @@ interface CopyView {
 export class PaneTerminal {
   readonly #term: HeadlessTerminal;
   #cursorHidden = false;
+  #sgrMouse = false;
   #copy: CopyView | undefined;
+  readonly #truecolor: boolean;
 
-  constructor(cols: number, rows: number) {
+  constructor(cols: number, rows: number, options: { truecolor?: boolean } = {}) {
+    this.#truecolor = options.truecolor !== false;
     this.#term = new Terminal({ cols, rows, scrollback: SCROLLBACK, allowProposedApi: true });
     this.#term.loadAddon(new Unicode11Addon());
     this.#term.unicode.activeVersion = '11';
     // 커서 숨김(DECTCEM)은 공개 모드에 없어 직접 따라간다. false를 돌려 xterm 기본 처리도 그대로 하게 한다
     const cursorMode = (hidden: boolean) => (params: (number | number[])[]) => {
       if (params.includes(25)) this.#cursorHidden = hidden;
+      // 마우스의 SGR 꼴도 공개 모드에 없어 같이 따라간다
+      if (params.includes(1006)) this.#sgrMouse = !hidden;
       return false;
     };
     this.#term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, cursorMode(false));
     this.#term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, cursorMode(true));
     this.#term.parser.registerEscHandler({ final: 'c' }, () => {
       this.#cursorHidden = false;
+      this.#sgrMouse = false;
       return false;
     });
   }
@@ -119,7 +148,13 @@ export class PaneTerminal {
 
   modes(): PaneModes {
     const modes = this.#term.modes;
-    return { bracketedPaste: modes.bracketedPasteMode, appCursor: modes.applicationCursorKeysMode, cursorHidden: this.#cursorHidden };
+    return {
+      bracketedPaste: modes.bracketedPasteMode,
+      appCursor: modes.applicationCursorKeysMode,
+      cursorHidden: this.#cursorHidden,
+      mouse: modes.mouseTrackingMode !== 'none',
+      sgrMouse: this.#sgrMouse,
+    };
   }
 
   /** 칸 안 CLI가 벨(BEL)을 울렸다(#864) */
@@ -159,7 +194,7 @@ export class PaneTerminal {
         // 두 칸 글자의 뒷칸은 앞칸이 이미 그렸다
         if (width === 0) continue;
         if (used + width > this.#term.cols) break;
-        const style = styleOf(cell);
+        const style = styleOf(cell, this.#truecolor);
         if (!sameStyle(style, current)) {
           text += sgr(style);
           current = style;

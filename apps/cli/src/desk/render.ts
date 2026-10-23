@@ -4,7 +4,7 @@
  */
 import type { DeskState } from './keys';
 import { charWidth, fit, placePanes, stringWidth, type Rect } from './screen';
-import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type Tone } from './sidebar';
+import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow, type Tone } from './sidebar';
 import type { DeskPreview } from './types';
 
 /** 칸 하나에 그릴 것. lines는 칸의 터미널 크기에 맞춘 줄(색 포함), note는 칸 머리에 붙일 알림(닫힘·오류) */
@@ -93,6 +93,13 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['Ctrl-b', 'Ctrl-b 글자를 CLI로 보내기'],
   ['?', '이 도움말'],
 ];
+/** 마우스로 하는 것(#874) */
+const MOUSE_HELP: ReadonlyArray<readonly [string, string]> = [
+  ['칸 누르기', '그 칸 고르기(CLI가 마우스를 켰으면 고른 칸 안의 마우스는 CLI로 갑니다)'],
+  ['사이드바 누르기', '세션 고르기(Enter나 한 번 더 누르면 고른 칸에 엽니다)'],
+  ['휠', '그 칸의 지난 출력 올려 보기(맨 아래로 내리면 복사 모드를 나옵니다)'],
+  ['Shift + 끌기', '터미널의 글 고르기(desk가 마우스를 받는 동안 대부분의 터미널에서)'],
+];
 const COPY_HELP: ReadonlyArray<readonly [string, string]> = [
   ['↑ ↓ · k j', '한 줄 옮기기'],
   ['b f · PgUp PgDn', '한 쪽 옮기기'],
@@ -115,9 +122,37 @@ function helpLines(width: number): string[] {
     '',
     ...COPY_HELP.map(row),
     '',
+    ' 마우스',
+    '',
+    ...MOUSE_HELP.map(row),
+    '',
     ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
     ' 세션이 손댈 상태가 되거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다(studio desk --no-notify로 끕니다).',
+    ' 앞글쇠·알림·마우스·색은 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
   ].map((line) => fit(line, width));
+}
+
+/**
+ * 사이드바에 보이는 줄과 내려간 만큼(offset). 고른 항목의 줄(머리·상태·펼친 내역)이 모두 보이게 내린다. 높이보다 길면 머리부터 보인다.
+ * 마우스로 누른 줄을 가릴 때도 같은 셈을 쓴다(#874)
+ */
+export function sidebarView(state: DeskState, size: { cols: number; rows: number }): { rows: SidebarRow[]; offset: number; rect: Rect } {
+  const layout = placePanes(size.cols, size.rows, state);
+  const slotOf = new Map<string, number>();
+  state.slots.forEach((id, slot) => {
+    if (id && slot < state.layout) slotOf.set(id, slot + 1);
+  });
+  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w, new Set(state.flagged ?? []));
+  const first = side.findIndex((row) => row.item === state.selected);
+  const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), -1);
+  const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - layout.sidebar.h, last + 1 - layout.sidebar.h));
+  return { rows: side, offset, rect: layout.sidebar };
+}
+
+/** 앞글쇠를 바꿨으면 안내 글의 Ctrl-b를 그 이름으로 바꾼다(이름은 늘 Ctrl-x 꼴이라 폭이 같다). 칸 안 CLI의 글에는 쓰지 않는다 */
+function relabel(state: DeskState, text: string): string {
+  const label = state.prefixLabel;
+  return label && label !== 'Ctrl-b' ? text.replaceAll('Ctrl-b', label) : text;
 }
 
 export function renderScreen(state: DeskState, size: { cols: number; rows: number }, panes: readonly PaneView[]): { lines: string[]; cursor?: { x: number; y: number } } {
@@ -125,32 +160,24 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const layout = placePanes(cols, rows, state);
   const hidden = state.sidebarHidden === true;
   const sessions = deskSessions(state.items);
-  const slotOf = new Map<string, number>();
-  state.slots.forEach((id, slot) => {
-    if (id && slot < state.layout) slotOf.set(id, slot + 1);
-  });
 
   const lines: string[] = [];
   lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}`, cols)}${RESET}`);
 
   if (state.help) {
-    lines.push(...helpLines(cols).slice(0, Math.max(0, rows - 2)));
+    lines.push(...helpLines(cols).map((line) => relabel(state, line)).slice(0, Math.max(0, rows - 2)));
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
     lines.push(fit(' 아무 키나 누르면 닫습니다', cols));
     return { lines };
   }
 
   // 사이드바: 고른 항목이 보이게 내린다
-  const side = hidden ? [] : sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w, new Set(state.flagged ?? []));
-  // 고른 항목의 줄(머리·상태·펼친 내역)이 모두 보이게 내린다. 높이보다 길면 머리부터 보인다
-  const first = side.findIndex((row) => row.item === state.selected);
-  const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), -1);
-  const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - layout.sidebar.h, last + 1 - layout.sidebar.h));
+  const { rows: side, offset } = sidebarView(state, size);
   const sideLine = (row: number): string => {
     const entry = side[offset + row];
     if (!entry) return ' '.repeat(layout.sidebar.w);
     if (entry.selected) return `${INVERSE}${entry.text}${RESET}`;
-    let text = entry.text;
+    let text = relabel(state, entry.text);
     for (const tone of entry.tones ?? []) text = text.replace(tone.text, `${TONE[tone.tone]}${tone.text}${RESET}`);
     return text;
   };
@@ -221,7 +248,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
         : state.message
           ? ` ${state.message}`
           : IDLE_HINT;
-    lines.push(fit(hint, cols));
+    lines.push(fit(relabel(state, hint), cols));
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
     if (rect && view?.cursor && state.slots[state.focus]) {
@@ -245,13 +272,14 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
     } else title += id;
     if (view?.mode) title += ` · ${view.mode}`;
     if (view?.bell) title += ' · 벨';
-    if (view?.note) title += ` · ${view.note}`;
+    // 세션 제목(사람이 쓴 요청)은 그대로 두고 desk가 붙인 안내만 앞글쇠 이름을 바꾼다
+    if (view?.note) title += ` · ${relabel(state, view.note)}`;
     const text = fit(title, rect.w);
     return focused ? `${INVERSE}${text}${RESET}` : `${BOLD}${text}${RESET}`;
   }
   if (!id) {
     const middle = Math.floor((rect.h - 1) / 2);
-    return fit(row === middle ? '  Ctrl-b Enter 로 사이드바에서 고른 세션을 엽니다' : '', rect.w);
+    return fit(row === middle ? relabel(state, '  Ctrl-b Enter 로 사이드바에서 고른 세션을 엽니다') : '', rect.w);
   }
   const line = view?.lines[row - 1];
   if (line === undefined) return ' '.repeat(rect.w);
