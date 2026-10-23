@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
 import type { DeskLayout } from './config';
 import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell } from './desk';
+import { spaceScreen } from './cards';
+import { spaceRect } from './render';
 import { sidebarRows } from './sidebar';
+import { spriteFromRows } from './sprite';
 import type { DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
@@ -458,7 +461,7 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     await poll();
     expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 권한 대기']);
     // 사이드바에 손댈 세션 표시가 붙는다
-    expect(plain(ctx.io.all)).toContain('! Claude · shop · 요청 b');
+    expect(plain(ctx.io.all)).toMatch(/● 요청 b +! /);
   });
 
   it('게이트가 실패로 바뀌면 알리고, 작업이 끝나면 끝났다고 알린다', async () => {
@@ -489,7 +492,7 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     expect(notices(ctx.io.all)).toEqual([]);
     expect(ctx.io.all).not.toContain('\x07');
     // 사이드바 표시는 그대로 붙는다
-    expect(plain(ctx.io.all)).toContain('! Claude · shop · 요청 b');
+    expect(plain(ctx.io.all)).toMatch(/● 요청 b +! /);
   });
 
   it('칸 안 CLI의 벨은 밖 터미널 벨과 칸 머리 표시로 잇고, 다시 받는 옛 출력의 벨은 울리지 않는다', async () => {
@@ -876,5 +879,59 @@ describe('desk 작업대: 그냥 셸 칸(#873)', () => {
     expect(ctx.app.state.slots[0]).toMatch(/^shell:/);
     expect(saved.length).toBeGreaterThan(0);
     expect(saved.at(-1)?.slots[0]).toBeUndefined();
+  });
+});
+
+describe('desk 작업대: 스페이스 화면(#887)', () => {
+  const click = (x: number, y: number) => `\x1b[<0;${x + 1};${y + 1}M\x1b[<0;${x + 1};${y + 1}m`;
+  const size = { cols: 120, rows: 30 };
+  const items = [item('a'), item('b', { backend: 'codex' }), item('c', { projectName: 'blog' })];
+
+  it('열린 칸이 없으면 스페이스 화면(카드)부터 보이고, 되살린 칸이 있으면 칸 화면이다', async () => {
+    const fresh = setup(items);
+    expect(fresh.app.state.view).toBe('space');
+    expect(fresh.io.all).toContain('╭');
+    const store: DeskLayoutStore = { load: () => ({ layout: 1, slots: ['a', undefined, undefined, undefined], focus: 0, zoom: false, sidebarHidden: false }), save: () => {} };
+    expect(setup(items, { layoutStore: store }).app.state.view).toBeUndefined();
+  });
+
+  it('카드를 누르면 고르고, 고른 카드를 한 번 더 누르면 고른 칸에 열고 칸 화면으로 간다', async () => {
+    const ctx = setup(items);
+    const cards = spaceScreen(ctx.app.state, spaceRect(ctx.app.state, size)).cards;
+    const second = cards.find((card) => card.index === 1)!;
+    ctx.io.type(click(second.rect.x + 2, second.rect.y + 1));
+    await tick();
+    expect(ctx.app.state.selected).toBe(1);
+    expect(ctx.client.of('open')).toEqual([]);
+    ctx.io.type(click(second.rect.x + 2, second.rect.y + 1));
+    await tick();
+    expect(ctx.app.state.slots[0]).toBe('b');
+    expect(ctx.app.state.view).toBeUndefined();
+    expect(ctx.client.of('open', 'b')).toHaveLength(1);
+  });
+
+  it('사이드바의 스페이스를 누르면 그 스페이스의 스페이스 화면을 연다', async () => {
+    const ctx = setup(items);
+    ctx.io.type('\x1b');
+    await tick();
+    expect(ctx.app.state.view).toBeUndefined();
+    const rows = sidebarRows(ctx.app.state.items, ctx.app.state.selected, new Map(), 32);
+    const blog = rows.findIndex((row) => row.space === 'blog');
+    ctx.io.type(click(3, 1 + blog));
+    await tick();
+    expect(ctx.app.state.view).toBe('space');
+    expect(ctx.app.state.selected).toBe(2);
+  });
+
+  it('카드 그림은 옵션으로 받은 그림을 쓴다', async () => {
+    const red = spriteFromRows(['rr', 'rr'], { r: '#ff0000' });
+    const ctx = setup(items, { sprites: { 'claude-code': red } });
+    expect(ctx.io.all).toContain('\x1b[38;2;255;0;0m\x1b[48;2;255;0;0m▀');
+  });
+
+  it('desk.json의 밝은 팔레트와 256색 낮춤을 따른다', async () => {
+    const ctx = setup(items, { theme: 'light', truecolor: false });
+    expect(ctx.app.state.theme).toEqual({ name: 'light', depth: '256' });
+    expect(ctx.io.all).not.toMatch(/\x1b\[[34]8;2;/);
   });
 });

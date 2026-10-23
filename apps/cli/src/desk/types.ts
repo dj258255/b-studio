@@ -89,3 +89,16 @@ export interface DeskPreview {
   matched: string;
   records?: Array<{ backend: string; passed: number; judged: number }>;
 }
+
+/** 사용량 한도 창 하나(5시간·주간). 카드의 막대로 보인다(#887). 채우는 쪽은 사용량 수집(#886·#889)이다 */
+export interface DeskLimitWindow {
+  /** 쓴 비율(0~100) */
+  usedPercent: number;
+  /** 다시 차는 때(ISO 8601) */
+  resetsAt?: string;
+}
+
+export interface DeskLimits {
+  fiveHour?: DeskLimitWindow;
+  weekly?: DeskLimitWindow;
+}
