@@ -9,7 +9,7 @@ import { StudioClient, findStudio } from './client';
 import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
 import { previewLine, renderScreen, type PaneView } from './render';
-import { computeLayout, terminalSize } from './screen';
+import { placePanes, terminalSize } from './screen';
 import { backendLabel } from './sidebar';
 import type { DeskTerminalMessage } from './types';
 
@@ -19,7 +19,7 @@ const POLL_MS = 1_500;
 const FRAME_MS = 30;
 /** 미리보기를 묻기 전에 기다리는 시간(쓰는 동안 매 글자 묻지 않게) */
 const PREVIEW_DELAY_MS = 300;
-/** 통로를 다시 열면 스튜디오가 최근 출력을 다시 보낸다. 그동안 칸 해석기가 내는 질의 응답은 CLI에 보내지 않는다(ADR-177 4) */
+/** 통로를 다시 열면 스튜디오가 최근 출력을 다시 보낸다. 그동안 그 칸의 해석기가 내는 질의 응답은 CLI에 보내지 않는다(ADR-177 4) */
 const REPLAY_QUIET_MS = 500;
 /** 통로가 끊기면 다시 여는 간격 */
 const RECONNECT_MS = 2_000;
@@ -123,10 +123,10 @@ export class DeskApp {
   #frameTimer: NodeJS.Timeout | undefined;
   #pollTimer: NodeJS.Timeout | undefined;
   #previewTimer: NodeJS.Timeout | undefined;
-  #reconnectTimer: NodeJS.Timeout | undefined;
-  #stream: AbortController | undefined;
-  #streamKey = '';
-  #replayUntil = 0;
+  /** 칸마다 따로 연 터미널 통로. 칸 하나를 열고 닫아도 다른 칸의 통로와 화면은 그대로다(#863) */
+  readonly #streams = new Map<string, { controller: AbortController; timer?: NodeJS.Timeout }>();
+  /** 칸마다 최근 출력을 다시 받는 동안(질의 응답을 CLI에 보내지 않는 때)의 끝 */
+  readonly #quietUntil = new Map<string, number>();
   #restored = false;
   #finish: (code: number) => void = () => {};
 
@@ -208,6 +208,9 @@ export class DeskApp {
       case 'layout':
         this.#slotsChanged();
         return;
+      case 'copy':
+        this.#copy(effect.id, effect.action, effect.text);
+        return;
       case 'quit':
         this.#stop(0);
         return;
@@ -223,6 +226,58 @@ export class DeskApp {
     }
   }
 
+  /** 복사 모드 조작. 보는 자리와 고른 범위는 칸 해석기가 든다 */
+  #copy(id: string, action: Extract<Effect, { type: 'copy' }>['action'], text?: string): void {
+    const pane = this.#panes.get(id);
+    if (!pane) {
+      this.#state = { ...this.#state, copy: undefined, message: '이 칸은 아직 출력을 받지 않았습니다' };
+      return;
+    }
+    switch (action) {
+      case 'enter':
+        pane.enterCopy();
+        break;
+      case 'up':
+        pane.copyMove(-1);
+        break;
+      case 'down':
+        pane.copyMove(1);
+        break;
+      case 'pageUp':
+        pane.copyPage(-1);
+        break;
+      case 'pageDown':
+        pane.copyPage(1);
+        break;
+      case 'top':
+        pane.copyTop();
+        break;
+      case 'bottom':
+        pane.copyBottom();
+        break;
+      case 'mark':
+        pane.copyMark();
+        break;
+      case 'search':
+      case 'next':
+        if (!pane.copySearch(action === 'search' ? text : undefined)) this.#state = { ...this.#state, message: '위쪽에서 찾지 못했습니다' };
+        break;
+      case 'yank': {
+        const copied = pane.copyYank();
+        pane.exitCopy();
+        // 밖 터미널의 클립보드에 넣는다(OSC 52). 받지 않는 터미널도 있어 안내에 적는다
+        this.#io.write(`\x1b]52;c;${Buffer.from(copied).toString('base64')}\x07`);
+        const count = copied ? copied.split('\n').length : 0;
+        this.#state = { ...this.#state, message: `${count}줄을 클립보드로 보냈습니다(터미널이 OSC 52를 받아야 붙여 넣을 수 있습니다)` };
+        break;
+      }
+      case 'exit':
+        pane.exitCopy();
+        break;
+    }
+    this.#prevFrame = [];
+  }
+
   #say(message: string): void {
     this.#state = { ...this.#state, message };
     this.#scheduleRender();
@@ -233,7 +288,7 @@ export class DeskApp {
     return this.#state.slots.slice(0, this.#state.layout).filter((id): id is string => Boolean(id));
   }
 
-  /** 칸 구성이 바뀌었다: 통로를 먼저 열고(늦게 붙은 칸이 출력을 놓치지 않게) 칸 크기에 맞춰 터미널을 연다 */
+  /** 칸 구성이 바뀌었다: 새 칸의 통로를 먼저 열고(늦게 붙은 칸이 출력을 놓치지 않게) 칸 크기에 맞춰 터미널을 연다 */
   #slotsChanged(): void {
     const visible = new Set(this.#visible());
     // 칸에서 빠진 세션의 해석기는 버린다(다시 열면 스튜디오가 최근 출력을 다시 보낸다). 세션과 CLI는 계속 돈다
@@ -248,28 +303,35 @@ export class DeskApp {
     this.#prevFrame = [];
     // 해석기를 먼저 만들어 둔다: 통로가 열리자마자 오는 최근 출력을 받을 자리가 있어야 한다
     this.#ensurePanes();
-    this.#restartStream();
+    this.#syncStreams();
     this.#syncPanes();
   }
 
-  /** 보이는 칸마다 해석기를 만들고 칸 크기에 맞춘다(스튜디오에는 알리지 않는다) */
+  /**
+   * 칸에 있는 세션마다 해석기를 만들고, 화면에 놓인 칸은 그 크기에 맞춘다(스튜디오에는 알리지 않는다).
+   * 크게 보기로 가려진 칸은 크기를 그대로 둔다. 그 세션은 통로로 계속 받고, 크게 보기를 풀면 원래 자리로 돌아온다
+   */
   #ensurePanes(): Array<{ id: string; size: { cols: number; rows: number } }> {
     const { cols, rows } = this.#size();
-    const rects = computeLayout(cols, rows, this.#state.layout).panes;
+    const shown = placePanes(cols, rows, this.#state).panes;
+    const base = placePanes(cols, rows, { ...this.#state, zoom: false }).panes;
     const placed: Array<{ id: string; size: { cols: number; rows: number } }> = [];
     this.#state.slots.forEach((id, slot) => {
       if (!id || slot >= this.#state.layout) return;
-      const size = terminalSize(rects[slot]!);
+      const rect = shown.find((entry) => entry.slot === slot)?.rect;
       let pane = this.#panes.get(id);
       if (!pane) {
-        pane = new PaneTerminal(size.cols, size.rows);
+        const first = terminalSize(rect ?? base.find((entry) => entry.slot === slot)!.rect);
+        pane = new PaneTerminal(first.cols, first.rows);
         const sessionId = id;
         pane.onResponse((data) => {
-          if (Date.now() < this.#replayUntil) return;
+          if (Date.now() < (this.#quietUntil.get(sessionId) ?? 0)) return;
           this.#client.input(sessionId, data).catch(() => {});
         });
         this.#panes.set(id, pane);
       }
+      if (!rect) return;
+      const size = terminalSize(rect);
       pane.resize(size.cols, size.rows);
       placed.push({ id, size });
     });
@@ -303,34 +365,41 @@ export class DeskApp {
     this.#sizes.delete(id);
   }
 
-  #restartStream(): void {
-    const ids = this.#visible();
-    const key = ids.join(',');
-    if (key === this.#streamKey && this.#stream) return;
-    this.#stream?.abort();
-    this.#stream = undefined;
-    clearTimeout(this.#reconnectTimer);
-    this.#streamKey = key;
-    if (ids.length === 0) return;
-    // 통로를 새로 열면 스튜디오가 최근 출력부터 다시 보낸다. 앞 내용을 지우고 그것으로 다시 그린다
-    for (const id of ids) this.#panes.get(id)?.reset();
-    this.#replayUntil = Date.now() + REPLAY_QUIET_MS;
+  /** 칸에 있는 세션마다 통로 하나. 칸에서 빠진 세션의 통로만 닫고, 새로 들어온 세션의 통로만 연다 */
+  #syncStreams(): void {
+    const visible = new Set(this.#visible());
+    for (const [id, entry] of this.#streams) {
+      if (visible.has(id)) continue;
+      entry.controller.abort();
+      clearTimeout(entry.timer);
+      this.#streams.delete(id);
+      this.#quietUntil.delete(id);
+    }
+    for (const id of visible) if (!this.#streams.has(id)) this.#openStream(id);
+  }
+
+  #openStream(id: string): void {
+    // 통로를 새로 열면 스튜디오가 이 세션의 최근 출력부터 다시 보낸다. 앞 내용을 지우고 그것으로 다시 그린다
+    this.#panes.get(id)?.restart();
+    this.#quietUntil.set(id, Date.now() + REPLAY_QUIET_MS);
     const controller = new AbortController();
-    this.#stream = controller;
+    const entry: { controller: AbortController; timer?: NodeJS.Timeout } = { controller };
+    this.#streams.set(id, entry);
     this.#client
-      .stream(ids, (id, message) => this.#onTerminal(id, message), controller.signal)
+      .stream([id], (sessionId, message) => this.#onTerminal(sessionId, message), controller.signal)
       .then(() => {
         if (!controller.signal.aborted) throw new Error('스튜디오가 터미널 통로를 닫았습니다');
       })
       .catch((error: unknown) => {
-        if (controller.signal.aborted || this.#restored) return;
+        if (controller.signal.aborted || this.#restored || this.#streams.get(id) !== entry) return;
         this.#say(`터미널 통로가 끊겼습니다: ${messageOf(error)} — 다시 붙는 중`);
-        this.#stream = undefined;
-        this.#reconnectTimer = setTimeout(() => {
-          this.#streamKey = '';
-          this.#restartStream();
-          // 스튜디오를 다시 띄웠으면 터미널이 없다. 보이는 칸을 다시 연다(열려 있으면 스튜디오가 크기만 맞춘다)
-          for (const id of this.#visible()) if (!this.#closed.has(id)) this.#sizes.delete(id);
+        entry.timer = setTimeout(() => {
+          if (this.#streams.get(id) !== entry) return;
+          this.#streams.delete(id);
+          if (!this.#visible().includes(id)) return;
+          this.#openStream(id);
+          // 스튜디오를 다시 띄웠으면 터미널이 없다. 이 칸을 다시 연다(열려 있으면 스튜디오가 크기만 맞춘다)
+          if (!this.#closed.has(id)) this.#sizes.delete(id);
           this.#syncPanes();
         }, RECONNECT_MS);
       });
@@ -463,9 +532,11 @@ export class DeskApp {
     const views: PaneView[] = this.#state.slots.map((id) => {
       const pane = id ? this.#panes.get(id) : undefined;
       const note = id ? this.#notes.get(id) : undefined;
-      // CLI가 커서를 숨겼으면 desk도 그리지 않는다(제 커서를 그리는 TUI에서 엉뚱한 자리에 보이지 않게)
-      const cursor = pane && !pane.modes().cursorHidden ? { cursor: pane.cursor() } : {};
-      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.cols } : {}), ...cursor, ...(note ? { note } : {}) };
+      // CLI가 커서를 숨겼으면 desk도 그리지 않는다(제 커서를 그리는 TUI에서 엉뚱한 자리에 보이지 않게). 복사 모드에서도 그리지 않는다
+      const cursor = pane && !pane.inCopy && !pane.modes().cursorHidden ? { cursor: pane.cursor() } : {};
+      const copy = pane?.inCopy ? pane.copyStatus() : undefined;
+      const mode = copy ? { mode: `복사 모드 ${copy.line}/${copy.total}줄` } : {};
+      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...(note ? { note } : {}) };
     });
     const frame = renderScreen(this.#state, this.#size(), views);
     // 바뀐 줄만 다시 쓴다. 지원하는 터미널에서는 한 장을 한 번에 바꾼다(동기 출력)
@@ -490,10 +561,12 @@ export class DeskApp {
     clearInterval(this.#pollTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);
-    clearTimeout(this.#reconnectTimer);
     clearTimeout(this.#pendingTimer);
     clearTimeout(this.#resizeTimer);
-    this.#stream?.abort();
+    for (const entry of this.#streams.values()) {
+      entry.controller.abort();
+      clearTimeout(entry.timer);
+    }
     for (const pane of this.#panes.values()) pane.dispose();
     this.#io.setRaw(false);
     this.#io.write(LEAVE_SCREEN);

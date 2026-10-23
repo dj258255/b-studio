@@ -3,7 +3,7 @@
  * 줄마다 보이는 폭은 정확히 화면 폭이다(색 제어 문자는 폭에 넣지 않는다). 그리는 쪽은 바뀐 줄만 다시 쓴다
  */
 import type { DeskState } from './keys';
-import { charWidth, computeLayout, fit, stringWidth, type Rect } from './screen';
+import { charWidth, fit, placePanes, stringWidth, type Rect } from './screen';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type Tone } from './sidebar';
 import type { DeskPreview } from './types';
 
@@ -14,6 +14,8 @@ export interface PaneView {
   cols?: number;
   cursor?: { x: number; y: number };
   note?: string;
+  /** 칸 머리에 붙일 지금 모드(복사 모드의 자리) */
+  mode?: string;
 }
 
 const RESET = '\x1b[0m';
@@ -66,12 +68,56 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · l 칸 수 · x 비우기 · q 나가기 · Ctrl-b 보내기';
-const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · ? 도움말 · q 나가기';
+const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
+export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
+
+/** 도움말 화면(Ctrl-b ?)의 키 표 */
+export const HELP: ReadonlyArray<readonly [string, string]> = [
+  ['1 2 3 4', '그 칸 고르기'],
+  ['o', '다음 칸'],
+  ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
+  ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
+  ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
+  ['l', '칸 수 1 · 2 · 4'],
+  ['z', '고른 칸 크게 보기 켜고 끄기'],
+  ['s', '사이드바 숨기고 보이기'],
+  ['[', '복사 모드: 지난 출력 올려 보기와 복사'],
+  ['x', '칸 비우기(세션과 CLI는 계속 돕니다)'],
+  ['q', 'desk 나가기(세션과 CLI는 계속 돕니다)'],
+  ['Ctrl-b', 'Ctrl-b 글자를 CLI로 보내기'],
+  ['?', '이 도움말'],
+];
+const COPY_HELP: ReadonlyArray<readonly [string, string]> = [
+  ['↑ ↓ · k j', '한 줄 옮기기'],
+  ['b f · PgUp PgDn', '한 쪽 옮기기'],
+  ['g G', '맨 처음, 맨 끝'],
+  ['v', '여기서부터 고르기(다시 누르면 풀기)'],
+  ['y · Enter', '고른 줄을 클립보드에 넣고 나가기(터미널이 OSC 52를 받아야 합니다)'],
+  ['/ · n', '위로 찾기, 같은 글 더 찾기'],
+  ['q · Esc', '나가기'],
+];
+
+/** 도움말 화면의 줄(머리와 아래 줄 사이에 놓는다) */
+function helpLines(width: number): string[] {
+  const row = ([key, text]: readonly [string, string]) => `   ${key}${' '.repeat(Math.max(1, 18 - stringWidth(key)))}${text}`;
+  return [
+    ' desk 도움말: 앞글쇠 Ctrl-b 다음에 누르는 키',
+    '',
+    ...HELP.map(row),
+    '',
+    ' 복사 모드(Ctrl-b [) 안의 키',
+    '',
+    ...COPY_HELP.map(row),
+    '',
+    ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
+  ].map((line) => fit(line, width));
+}
 
 export function renderScreen(state: DeskState, size: { cols: number; rows: number }, panes: readonly PaneView[]): { lines: string[]; cursor?: { x: number; y: number } } {
   const { cols, rows } = size;
-  const layout = computeLayout(cols, rows, state.layout);
+  const layout = placePanes(cols, rows, state);
+  const hidden = state.sidebarHidden === true;
   const sessions = deskSessions(state.items);
   const slotOf = new Map<string, number>();
   state.slots.forEach((id, slot) => {
@@ -79,10 +125,17 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   });
 
   const lines: string[] = [];
-  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout} · 세션 ${sessions.length}`, cols)}${RESET}`);
+  lines.push(`${BOLD}${fit(` b-studio desk · 칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''} · 세션 ${sessions.length}`, cols)}${RESET}`);
+
+  if (state.help) {
+    lines.push(...helpLines(cols).slice(0, Math.max(0, rows - 2)));
+    while (lines.length < rows - 1) lines.push(' '.repeat(cols));
+    lines.push(fit(' 아무 키나 누르면 닫습니다', cols));
+    return { lines };
+  }
 
   // 사이드바: 고른 항목이 보이게 내린다
-  const side = sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w);
+  const side = hidden ? [] : sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w);
   // 고른 항목의 줄(머리·상태·펼친 내역)이 모두 보이게 내린다. 높이보다 길면 머리부터 보인다
   const first = side.findIndex((row) => row.item === state.selected);
   const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), -1);
@@ -96,13 +149,13 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     return text;
   };
 
-  const paneRects = layout.panes.slice(0, state.layout);
+  const placed = layout.panes;
   for (let y = 1; y < rows - 1; y++) {
-    let line = sideLine(y - 1) + '│';
-    const covering = paneRects.map((rect, slot) => ({ rect, slot })).filter(({ rect }) => y >= rect.y && y < rect.y + rect.h);
+    let line = hidden ? '' : sideLine(y - 1) + '│';
+    const covering = placed.filter(({ rect }) => y >= rect.y && y < rect.y + rect.h);
     if (covering.length === 0) {
       // 4칸의 가운데 가로 구분선
-      const [left, right] = paneRects;
+      const [left, right] = placed.map((entry) => entry.rect);
       line += '─'.repeat(left?.w ?? 0) + (right ? `┼${'─'.repeat(right.w)}` : '');
     } else {
       covering.sort((a, b) => a.rect.x - b.rect.x);
@@ -134,8 +187,19 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       cursor = { x: stringWidth(head + text), y: rows - 1 };
     }
   } else {
-    lines.push(fit(state.prefix ? KEY_HINT : (state.message ? ` ${state.message}` : IDLE_HINT), cols));
-    const rect = paneRects[state.focus];
+    const hint = state.copy
+      ? state.copy.search !== undefined
+        ? ` 위로 찾기> ${state.copy.search}`
+        : state.message
+          ? ` ${state.message}`
+          : COPY_HINT
+      : state.prefix
+        ? KEY_HINT
+        : state.message
+          ? ` ${state.message}`
+          : IDLE_HINT;
+    lines.push(fit(hint, cols));
+    const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
     if (rect && view?.cursor && state.slots[state.focus]) {
       cursor = { x: rect.x + Math.min(view.cursor.x, rect.w - 1), y: rect.y + 1 + Math.min(view.cursor.y, rect.h - 2) };
@@ -156,6 +220,7 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
       const gate = gateStatus(item);
       title += [backendLabel(item.backend), item.title, agentStatus(item).label, ...(gate ? [gate.label] : [])].join(' · ');
     } else title += id;
+    if (view?.mode) title += ` · ${view.mode}`;
     if (view?.note) title += ` · ${view.note}`;
     const text = fit(title, rect.w);
     return focused ? `${INVERSE}${text}${RESET}` : `${BOLD}${text}${RESET}`;

@@ -2,8 +2,9 @@
  * desk의 키 처리. 상태와 받은 글자로 다음 상태와 할 일(effects)을 돌려주는 순수 함수다 — 네트워크·화면은 desk.ts가 한다.
  *
  * 앞글쇠는 Ctrl-b(tmux·herdr와 같다). 앞글쇠가 없으면 친 글자는 고른 칸의 CLI로 그대로 간다.
- * 앞글쇠 다음: 숫자(칸 고르기), ↑↓(사이드바, 앞글쇠가 이어지고 그동안 Ctrl-b는 새 앞글쇠다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수), x(칸 비우기), q(나가기),
- * Ctrl-b(Ctrl-b를 CLI로). 새 요청 입력 중에는 글자가 입력으로 간다.
+ * 앞글쇠 다음: 숫자(칸 고르기), o(다음 칸), ↑↓(사이드바, 앞글쇠가 이어지고 그동안 Ctrl-b는 새 앞글쇠다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수),
+ * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로). 새 요청 입력 중에는 글자가 입력으로 간다.
+ * 복사 모드와 도움말 중에는 키가 CLI로 가지 않는다(#863).
  * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다
  */
 import type { PaneLayout } from './screen';
@@ -16,6 +17,8 @@ const UP = '\x1b[A';
 const DOWN = '\x1b[B';
 const UP_APP = '\x1bOA';
 const DOWN_APP = '\x1bOB';
+const PAGE_UP = '\x1b[5~';
+const PAGE_DOWN = '\x1b[6~';
 const PASTE_START = '\x1b[200~';
 const PASTE_END = '\x1b[201~';
 /** 조각 끝에서 아직 끝나지 않은 이스케이프 열(방향키·붙여넣기 표지의 앞부분) */
@@ -39,6 +42,13 @@ export interface PromptState {
   sending?: boolean;
 }
 
+/** 복사 모드. search가 있으면 찾을 글을 쓰는 중이다. 보는 자리와 고른 범위는 칸 해석기(PaneTerminal)가 든다 */
+export interface CopyState {
+  search?: string;
+}
+
+export type CopyAction = 'enter' | 'up' | 'down' | 'pageUp' | 'pageDown' | 'top' | 'bottom' | 'mark' | 'yank' | 'exit' | 'search' | 'next';
+
 export interface DeskState {
   items: DeskItem[];
   /** 사이드바에서 고른 항목(deskSessions 순서) */
@@ -56,6 +66,13 @@ export interface DeskState {
   pasting?: { sent: boolean };
   /** 조각 끝에서 끊겨 다음 조각을 기다리는 글. 오래 오지 않으면 flushPending으로 그대로 처리한다 */
   pending?: string;
+  /** 고른 칸의 복사 모드(#863) */
+  copy?: CopyState;
+  /** 고른 칸 하나만 크게 본다. 다른 칸의 세션과 통로는 그대로다 */
+  zoom?: boolean;
+  sidebarHidden?: boolean;
+  /** 도움말 화면. 다음 키 하나는 닫기만 한다 */
+  help?: boolean;
 }
 
 export type Effect =
@@ -66,7 +83,9 @@ export type Effect =
   /** 이미 칸에 있는 세션을 다시 골랐다: 터미널이 끝났거나 열지 못했으면 다시 연다 */
   | { type: 'reopen'; id: string }
   | { type: 'close'; slot: number; id: string }
+  /** 칸 배치가 바뀌었다(칸 수, 크게 보기, 사이드바) */
   | { type: 'layout' }
+  | { type: 'copy'; id: string; action: CopyAction; text?: string }
   | { type: 'quit' }
   | { type: 'prompt' }
   | { type: 'preview'; text: string }
@@ -127,6 +146,18 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = { ...state, pending: input.slice(at) };
       break;
     }
+    if (state.help) {
+      // 도움말은 아무 키로 닫는다. 그 키는 다른 데로 보내지 않는다
+      at += nextKey(input, at).length;
+      state = { ...state, help: false };
+      continue;
+    }
+    if (state.copy) {
+      const key = nextKey(input, at);
+      at += key.length;
+      state = copyKey(state, key, effects);
+      continue;
+    }
     if (state.prompt) {
       const key = nextKey(input, at);
       at += key.length;
@@ -170,6 +201,8 @@ function heldTail(text: string, marker: string): number {
 function pasteContent(state: DeskState, content: string, ended: boolean, effects: Effect[]): DeskState {
   const pasting = state.pasting!;
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
+  // 복사 모드나 도움말을 보는 중에 붙여 넣은 글은 CLI로 보내지 않는다
+  if (state.copy || state.help) return next;
   if (state.prompt) {
     // 요청 글에는 한 줄로 넣는다: 줄바꿈은 빈칸, 다른 제어 글자는 버린다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
@@ -222,7 +255,30 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
   }
   if (/^[1-4]$/.test(key)) {
     const slot = Number(key) - 1;
-    return slot < state.layout ? { ...done, focus: slot } : done;
+    if (slot >= state.layout) return done;
+    // 크게 보기 중이면 새로 고른 칸을 크게 본다
+    if (state.zoom && slot !== state.focus) effects.push({ type: 'layout' });
+    return { ...done, focus: slot };
+  }
+  if (key === 'o') {
+    if (state.layout < 2) return done;
+    if (state.zoom) effects.push({ type: 'layout' });
+    return { ...done, focus: (state.focus + 1) % state.layout };
+  }
+  if (key === 'z') {
+    effects.push({ type: 'layout' });
+    return { ...done, zoom: !state.zoom };
+  }
+  if (key === 's') {
+    effects.push({ type: 'layout' });
+    return { ...done, sidebarHidden: !state.sidebarHidden };
+  }
+  if (key === '?') return { ...done, help: true };
+  if (key === '[') {
+    const id = state.slots[state.focus];
+    if (!id) return { ...done, message: '빈 칸에는 복사 모드가 없습니다' };
+    effects.push({ type: 'copy', id, action: 'enter' });
+    return { ...done, copy: {} };
   }
   if (key === UP || key === UP_APP) return { ...state, browsing: true, message: BROWSING, selected: Math.max(0, state.selected - 1) };
   if (key === DOWN || key === DOWN_APP) return { ...state, browsing: true, message: BROWSING, selected: Math.max(0, Math.min(sessions.length - 1, state.selected + 1)) };
@@ -248,7 +304,7 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     // 줄어든 배치 밖의 칸은 비운다(세션은 계속 돈다)
     const slots = state.slots.map((id, slot) => (slot < layout ? id : undefined));
     effects.push({ type: 'layout' });
-    return { ...done, layout, slots, focus: Math.min(state.focus, layout - 1) };
+    return { ...done, layout, slots, focus: Math.min(state.focus, layout - 1), zoom: false };
   }
   if (key === 'x') {
     const id = state.slots[state.focus];
@@ -263,7 +319,57 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     return done;
   }
   if (key === ESC) return done;
-  return { ...done, message: 'Ctrl-b 다음에는 숫자 · ↑↓ · Enter · n · l · x · q 를 씁니다' };
+  return { ...done, message: 'Ctrl-b 다음 키는 Ctrl-b ? 도움말에 있습니다' };
+}
+
+function copyKey(state: DeskState, key: string, effects: Effect[]): DeskState {
+  const copy = state.copy!;
+  const id = state.slots[state.focus];
+  if (!id) return { ...state, copy: undefined };
+  const act = (action: CopyAction, text?: string) => effects.push({ type: 'copy', id, action, ...(text === undefined ? {} : { text }) });
+  // 안내는 키를 누를 때마다 지운다(찾지 못함 같은 알림이 남아 있지 않게)
+  const base: DeskState = state.message ? { ...state, message: undefined } : state;
+  if (copy.search !== undefined) {
+    if (key === ESC || key === '\x03') return { ...base, copy: {} };
+    if (key === '\r' || key === '\n') {
+      if (copy.search) act('search', copy.search);
+      return { ...base, copy: {} };
+    }
+    if (key === '\x7f' || key === '\b') return { ...base, copy: { search: [...copy.search].slice(0, -1).join('') } };
+    if (key.startsWith(ESC) || key.codePointAt(0)! < 32) return base;
+    return { ...base, copy: { search: copy.search + key } };
+  }
+  if (key === 'q' || key === ESC || key === '\x03') {
+    act('exit');
+    return { ...base, copy: undefined };
+  }
+  if (key === 'y' || key === '\r') {
+    act('yank');
+    return { ...base, copy: undefined };
+  }
+  const moves: Record<string, CopyAction> = {
+    [UP]: 'up',
+    [UP_APP]: 'up',
+    k: 'up',
+    [DOWN]: 'down',
+    [DOWN_APP]: 'down',
+    j: 'down',
+    [PAGE_UP]: 'pageUp',
+    b: 'pageUp',
+    '\x15': 'pageUp',
+    [PAGE_DOWN]: 'pageDown',
+    f: 'pageDown',
+    '\x04': 'pageDown',
+    ' ': 'pageDown',
+    g: 'top',
+    G: 'bottom',
+    v: 'mark',
+    n: 'next',
+  };
+  const action = moves[key];
+  if (action) act(action);
+  if (key === '/') return { ...base, copy: { search: '' } };
+  return base;
 }
 
 function promptKey(state: DeskState, key: string, effects: Effect[]): DeskState {

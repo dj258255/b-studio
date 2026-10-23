@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeLayout, fit, stringWidth } from './screen';
+import { computeLayout, fit, placePanes, stringWidth } from './screen';
 
 describe('글자 폭', () => {
   it('한글·전각은 두 칸, 영문은 한 칸으로 센다', () => {
@@ -53,5 +53,20 @@ describe('칸 배치', () => {
     expect(stringWidth('한'.normalize('NFD'))).toBe(2);
     expect(stringWidth('🚀')).toBe(2);
     expect(stringWidth('🧪')).toBe(2);
+  });
+});
+
+describe('칸 놓기(#863)', () => {
+  it('사이드바를 숨기면 칸이 화면 왼쪽 끝부터 전체 폭을 쓴다', () => {
+    const layout = computeLayout(100, 30, 1, { sidebar: false });
+    expect(layout.sidebar.w).toBe(0);
+    expect(layout.panes[0]).toEqual({ x: 0, y: 1, w: 100, h: 28 });
+  });
+
+  it('크게 보기면 고른 칸 하나만 1칸 배치의 자리에 놓는다', () => {
+    const placed = placePanes(100, 30, { layout: 4, focus: 2, zoom: true });
+    expect(placed.panes).toEqual([{ slot: 2, rect: computeLayout(100, 30, 1).panes[0] }]);
+    const normal = placePanes(100, 30, { layout: 2, focus: 0 });
+    expect(normal.panes.map((pane) => pane.slot)).toEqual([0, 1]);
   });
 });
