@@ -6,7 +6,8 @@
  * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로),
  * p(고른 세션 멈추기), r(멈춘 세션 이어서 작업), ,(고른 세션 이름 바꾸기). 새 요청 입력 중에는 글자가 입력으로 간다.
  * 복사 모드·도움말·확인·이름 입력 중에는 키가 CLI로 가지 않는다(#863, #864).
- * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다
+ * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다.
+ * 앞글쇠는 설정(desk.json)으로 바꿀 수 있고(state.prefixKey), 마우스(SGR 열)는 CLI로 보내지 않고 mouse 할 일로 낸다. 칸·사이드바 자리는 desk.ts가 가린다(#874)
  */
 import type { PaneLayout } from './screen';
 import { deskSessions } from './sidebar';
@@ -22,13 +23,15 @@ const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
 const PASTE_START = '\x1b[200~';
 const PASTE_END = '\x1b[201~';
-/** 조각 끝에서 아직 끝나지 않은 이스케이프 열(방향키·붙여넣기 표지의 앞부분) */
-const INCOMPLETE_ESCAPE = /^\x1b(\[[0-9;?]*[ -/]*|O)?$/;
+/** 조각 끝에서 아직 끝나지 않은 이스케이프 열(방향키·붙여넣기 표지·마우스 열의 앞부분) */
+const INCOMPLETE_ESCAPE = /^\x1b(\[[0-9;?<=>]*[ -/]*|O)?$/;
+/** SGR 마우스 열: 단추;x;y, 끝 글자 M은 누름(휠·끌기 포함), m은 뗌 */
+const MOUSE = /^\x1b\[<(\d+);(\d+);(\d+)([Mm])/;
 const LAYOUTS: readonly PaneLayout[] = [1, 2, 4];
 /** 칸 자리 수(4칸 배치까지) */
 export const SLOT_COUNT = 4;
 /** 사이드바를 고르는 중의 안내 */
-const BROWSING = '사이드바 고르는 중: ↑↓로 옮기고 Enter로 칸에 엽니다. 다른 글쇠는 Ctrl-b 다음과 같습니다';
+export const BROWSING = '사이드바 고르는 중: ↑↓로 옮기고 Enter로 칸에 엽니다. 다른 글쇠는 Ctrl-b 다음과 같습니다';
 
 export interface PromptState {
   step: 'project' | 'request';
@@ -89,6 +92,9 @@ export interface DeskState {
   rename?: { id: string; text: string };
   /** 알린 뒤 아직 보지 않은 세션(사이드바에 !로 보인다, #864). desk.ts가 채우고 지운다 */
   flagged?: string[];
+  /** 설정한 앞글쇠(없으면 Ctrl-b)와 화면에 보일 이름(#874) */
+  prefixKey?: string;
+  prefixLabel?: string;
 }
 
 export type Effect =
@@ -107,16 +113,23 @@ export type Effect =
   | { type: 'preview'; text: string }
   | { type: 'submit'; projectId: string; request: string; choice: string }
   | { type: 'session'; action: SessionAction; id: string }
-  | { type: 'rename'; id: string; label: string };
+  | { type: 'rename'; id: string; label: string }
+  /** 마우스(#874). x·y는 화면 좌표(0부터), button은 SGR 단추 값(64·65는 휠), release는 뗌 */
+  | { type: 'mouse'; button: number; x: number; y: number; release: boolean };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
 }
 
+/** 지금 앞글쇠 */
+function prefixOf(state: DeskState): string {
+  return state.prefixKey ?? PREFIX;
+}
+
 /** 받은 글자에서 키 하나를 꺼낸다: 방향키 같은 이스케이프 열, 아니면 글자 하나(서로게이트 쌍 포함) */
 function nextKey(input: string, at: number): string {
   if (input[at] === ESC) {
-    const csi = /^\x1b(\[[0-9;?]*[ -/]*[@-~]|O[@-~])/.exec(input.slice(at));
+    const csi = /^\x1b(\[[0-9;?<=>]*[ -/]*[@-~]|O[@-~])/.exec(input.slice(at));
     if (csi) return csi[0];
     return ESC;
   }
@@ -164,6 +177,16 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = { ...state, pending: input.slice(at) };
       break;
     }
+    const mouse = input[at] === ESC ? MOUSE.exec(input.slice(at)) : null;
+    if (mouse) {
+      flush();
+      at += mouse[0].length;
+      // 묻거나 쓰는 중(도움말·확인·이름·새 요청)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
+      if (state.help || state.confirm || state.rename || state.prompt) continue;
+      if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
+      effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
+      continue;
+    }
     if (state.help) {
       // 도움말은 아무 키로 닫는다. 그 키는 다른 데로 보내지 않는다
       at += nextKey(input, at).length;
@@ -201,7 +224,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       continue;
     }
     const char = input[at]!;
-    if (char === PREFIX) {
+    if (char === prefixOf(state)) {
       flush();
       state = { ...state, prefix: true, message: undefined };
       at += 1;
@@ -281,11 +304,11 @@ export function reselect(before: readonly DeskItem[], selected: number, after: r
 function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState {
   const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
   const sessions = deskSessions(state.items);
-  if (key === PREFIX) {
+  if (key === prefixOf(state)) {
     // 사이드바를 고르다가 습관대로 다시 누른 Ctrl-b는 새 앞글쇠다. 칸으로 보내면 다음 글자가 CLI 입력이 된다
     if (state.browsing) return { ...state, prefix: true, browsing: false, message: undefined };
     const id = state.slots[state.focus];
-    if (id) effects.push({ type: 'input', id, data: PREFIX });
+    if (id) effects.push({ type: 'input', id, data: key });
     return done;
   }
   if (/^[1-4]$/.test(key)) {

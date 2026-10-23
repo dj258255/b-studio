@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
-import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions } from './desk';
+import type { DeskLayout } from './config';
+import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore } from './desk';
+import { sidebarRows } from './sidebar';
 import type { DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
@@ -505,5 +507,169 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     await tick();
     expect(ctx.io.all).toContain('\x07');
     expect(ctx.io.all).toContain('벨');
+  });
+});
+
+describe('desk 작업대: 마우스, 배치 기억, 설정(#874)', () => {
+  /** SGR 마우스 열(화면 좌표는 0부터) */
+  const click = (x: number, y: number, button = 0) => `\x1b[<${button};${x + 1};${y + 1}M`;
+  const release = (x: number, y: number) => `\x1b[<0;${x + 1};${y + 1}m`;
+  // 120×30 화면: 사이드바 32칸, 구분선, 칸들은 x=33부터. 2칸이면 왼쪽 43칸, 구분선, 오른쪽은 x=77부터. 맨 위 줄은 머리, 칸 첫 줄은 칸 머리
+  const LEFT_BODY = { x: 40, y: 5 };
+  const RIGHT_BODY = { x: 90, y: 5 };
+
+  class MemoryStore implements DeskLayoutStore {
+    saved: DeskLayout[] = [];
+    fail = false;
+    initial: DeskLayout | undefined;
+    load() {
+      return this.initial;
+    }
+    save(layout: DeskLayout) {
+      if (this.fail) throw new Error('읽기 전용 폴더');
+      this.saved.push(layout);
+    }
+  }
+
+  async function openTwo(ctx: ReturnType<typeof setup>): Promise<void> {
+    ctx.io.type('\x02l');
+    await openFirst(ctx);
+    ctx.io.type('\x022\x02\x1b[B');
+    ctx.io.type('\x1b');
+    await tick();
+    ctx.io.type('\x02\r');
+    await tick();
+  }
+
+  it('밖 터미널의 마우스(SGR)를 켜고 나갈 때 끈다. 끄는 설정이면 켜지 않는다', async () => {
+    const on = setup();
+    expect(on.io.all).toContain('\x1b[?1000h\x1b[?1006h');
+    on.io.type('\x02q');
+    await on.done;
+    expect(on.io.all).toContain('\x1b[?1006l\x1b[?1000l');
+    const off = setup(undefined, { mouse: false });
+    expect(off.io.all).not.toContain('\x1b[?1000h');
+  });
+
+  it('칸을 누르면 그 칸을 고르고, 이어 친 글자는 그 칸의 CLI로 간다', async () => {
+    const ctx = setup();
+    await openTwo(ctx);
+    ctx.io.type(click(LEFT_BODY.x, LEFT_BODY.y) + release(LEFT_BODY.x, LEFT_BODY.y));
+    await tick();
+    expect(ctx.app.state.focus).toBe(0);
+    ctx.io.type('k');
+    await tick();
+    expect(ctx.client.of('input', 'a').map((call) => call.data)).toEqual(['k']);
+    expect(ctx.client.of('input', 'a').some((call) => call.data?.includes('\x1b[<'))).toBe(false);
+  });
+
+  it('휠을 위로 굴리면 그 칸이 복사 모드로 올라가고, 맨 아래까지 내리면 복사 모드를 나온다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.client.data('a', Array.from({ length: 60 }, (_, index) => `line ${index}`).join('\r\n'));
+    await tick();
+    ctx.io.type(click(LEFT_BODY.x, LEFT_BODY.y, 64));
+    await tick();
+    expect(ctx.app.state.copy).toEqual({});
+    expect(ctx.io.all).toContain('복사 모드');
+    ctx.io.type(click(LEFT_BODY.x, LEFT_BODY.y, 65).repeat(5));
+    await tick();
+    expect(ctx.app.state.copy).toBeUndefined();
+    expect(ctx.client.of('input', 'a')).toEqual([]);
+  });
+
+  it('안쪽 CLI가 마우스를 켰으면 고른 칸 안의 마우스를 칸 좌표로 바꿔 넘긴다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.client.data('a', '\x1b[?1000h\x1b[?1006h');
+    await tick();
+    ctx.io.type(click(LEFT_BODY.x, LEFT_BODY.y) + release(LEFT_BODY.x, LEFT_BODY.y));
+    await tick();
+    // 칸은 x=33부터, 터미널 몸은 칸 머리 다음 줄(y=2)부터다
+    expect(ctx.client.of('input', 'a').map((call) => call.data)).toEqual(['\x1b[<0;8;4M', '\x1b[<0;8;4m']);
+  });
+
+  it('안쪽 CLI가 SGR 꼴을 켜지 않았으면 옛 꼴(X10)로 넘긴다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.client.data('a', '\x1b[?1000h');
+    await tick();
+    ctx.io.type(click(LEFT_BODY.x, LEFT_BODY.y));
+    await tick();
+    expect(ctx.client.of('input', 'a').map((call) => call.data)).toEqual([`\x1b[M${String.fromCharCode(32 + 0, 32 + 8, 32 + 4)}`]);
+  });
+
+  it('사이드바를 누르면 그 세션을 고르고, 고른 세션을 한 번 더 누르면 고른 칸에 연다', async () => {
+    const ctx = setup();
+    const rows = sidebarRows(ctx.app.state.items, 0, new Map(), 32);
+    const rowOfB = rows.findIndex((row) => row.item === 1);
+    // 사이드바는 화면 둘째 줄(y=1)부터다
+    ctx.io.type(click(3, 1 + rowOfB) + release(3, 1 + rowOfB));
+    await tick();
+    expect(ctx.app.state.selected).toBe(1);
+    expect(ctx.client.of('open')).toEqual([]);
+    const again = sidebarRows(ctx.app.state.items, 1, new Map(), 32).findIndex((row) => row.item === 1);
+    ctx.io.type(click(3, 1 + again));
+    await tick();
+    expect(ctx.app.state.slots[0]).toBe('b');
+    expect(ctx.client.of('open', 'b')).toHaveLength(1);
+  });
+
+  it('저장해 둔 배치(칸 수·칸의 세션·사이드바 숨김)를 되살리고, 없어진 세션 자리는 비운다', async () => {
+    const store = new MemoryStore();
+    store.initial = { layout: 2, slots: ['b', 'gone', undefined, undefined], focus: 1, zoom: false, sidebarHidden: true };
+    const ctx = setup(undefined, { layoutStore: store });
+    await tick();
+    expect(ctx.app.state).toMatchObject({ layout: 2, slots: ['b', undefined, undefined, undefined], focus: 1, sidebarHidden: true });
+    expect(ctx.client.of('open', 'b')).toHaveLength(1);
+    expect(ctx.client.of('open', 'gone')).toEqual([]);
+  });
+
+  it('칸 구성이 바뀔 때 배치를 저장하고, 저장하지 못하면 아래 줄에 한 번만 알린다', async () => {
+    const store = new MemoryStore();
+    const ctx = setup(undefined, { layoutStore: store });
+    await openFirst(ctx);
+    ctx.io.type('\x02l');
+    await tick();
+    expect(store.saved.at(-1)).toMatchObject({ layout: 2, slots: ['a', undefined, undefined, undefined] });
+    store.fail = true;
+    ctx.io.out = [];
+    ctx.io.type('\x02s');
+    await tick();
+    expect(ctx.app.state.message).toMatch(/배치를 저장하지 못했습니다/);
+    ctx.io.type('\x02s');
+    await tick();
+    expect(ctx.app.state.message ?? '').not.toMatch(/배치를 저장하지 못했습니다/);
+  });
+
+  it('나갈 때도 배치를 저장한다', async () => {
+    const store = new MemoryStore();
+    const ctx = setup(undefined, { layoutStore: store });
+    await openFirst(ctx);
+    ctx.io.type('\x02z');
+    await tick();
+    ctx.io.type('\x02q');
+    await ctx.done;
+    expect(store.saved.at(-1)).toMatchObject({ zoom: true, slots: ['a', undefined, undefined, undefined] });
+  });
+
+  it('설정한 앞글쇠로 조작하고, 안내에도 그 글쇠를 보인다', async () => {
+    const ctx = setup(undefined, { prefix: { key: '\x01', label: 'Ctrl-a' } });
+    ctx.io.type('\x01\r');
+    await tick();
+    expect(ctx.app.state.slots[0]).toBe('a');
+    ctx.io.type('\x01');
+    await tick();
+    expect(ctx.io.all).toContain('Ctrl-a › 숫자');
+    expect(ctx.io.all).not.toContain('Ctrl-b › 숫자');
+  });
+
+  it('256색 터미널이면 칸의 24비트 색을 낮춰 그린다', async () => {
+    const ctx = setup(undefined, { truecolor: false });
+    await openFirst(ctx);
+    ctx.client.data('a', '\x1b[38;2;255;0;0mRED');
+    await tick();
+    expect(ctx.io.all).toContain('38;5;196');
+    expect(ctx.io.all).not.toContain('38;2;255;0;0');
   });
 });

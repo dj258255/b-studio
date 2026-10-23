@@ -414,3 +414,53 @@ describe('세션 조작: 멈추기·이어서 작업·이름 바꾸기(#864)', (
     expect(state.message).toContain('세션');
   });
 });
+
+describe('마우스와 앞글쇠 설정(#874)', () => {
+  const open = (patch: Partial<DeskState> = {}) => withItems({ slots: ['a', undefined, undefined, undefined], ...patch });
+
+  it('SGR 마우스 열을 CLI로 보내지 않고 마우스 할 일로 낸다(누름·뗌·휠)', () => {
+    const { effects } = handleInput(open(), 'x\x1b[<0;10;5My\x1b[<0;10;5m\x1b[<64;3;4M');
+    expect(effects).toEqual([
+      { type: 'input', id: 'a', data: 'x' },
+      { type: 'mouse', button: 0, x: 9, y: 4, release: false },
+      { type: 'input', id: 'a', data: 'y' },
+      { type: 'mouse', button: 0, x: 9, y: 4, release: true },
+      { type: 'mouse', button: 64, x: 2, y: 3, release: false },
+    ]);
+  });
+
+  it('조각 경계에서 나뉜 마우스 열도 기다렸다가 하나로 읽는다', () => {
+    const first = handleInput(open(), '\x1b[<0;1');
+    expect(first.effects).toEqual([]);
+    expect(first.state.pending).toBe('\x1b[<0;1');
+    const second = handleInput(first.state, '2;7M');
+    expect(second.effects).toEqual([{ type: 'mouse', button: 0, x: 11, y: 6, release: false }]);
+  });
+
+  it('붙여넣기 안의 마우스 열 모양 글은 내용이다', () => {
+    const { effects } = handleInput(open(), '\x1b[200~\x1b[<0;1;1M\x1b[201~');
+    expect(effects).toEqual([{ type: 'paste', id: 'a', data: '\x1b[<0;1;1M' }]);
+  });
+
+  it('도움말·확인·이름 입력·새 요청 중의 마우스는 버린다', () => {
+    for (const patch of [{ help: true }, { rename: { id: 'a', text: '' } }] as Partial<DeskState>[]) {
+      const { state, effects } = handleInput(open(patch), '\x1b[<0;1;1M');
+      expect(effects).toEqual([]);
+      expect(state.help ?? false).toBe(patch.help ?? false);
+    }
+  });
+
+  it('앞글쇠를 누른 뒤의 마우스는 앞글쇠를 풀고 마우스로 낸다', () => {
+    const { state, effects } = handleInput(open(), '\x02\x1b[<0;1;1M');
+    expect(state.prefix).toBe(false);
+    expect(effects).toEqual([{ type: 'mouse', button: 0, x: 0, y: 0, release: false }]);
+  });
+
+  it('설정한 앞글쇠(Ctrl-a)로 명령을 받고, Ctrl-b는 그냥 CLI로 간다', () => {
+    const state = open({ prefixKey: '\x01', layout: 2 });
+    expect(handleInput(state, '\x02').effects).toEqual([{ type: 'input', id: 'a', data: '\x02' }]);
+    const { state: next } = handleInput(state, '\x012');
+    expect(next.focus).toBe(1);
+    expect(handleInput(state, '\x01\x01').effects).toEqual([{ type: 'input', id: 'a', data: '\x01' }]);
+  });
+});
