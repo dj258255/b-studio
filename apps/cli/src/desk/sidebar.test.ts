@@ -15,6 +15,8 @@ describe('사이드바 상태', () => {
     expect(agentStatus({ ...base, terminal: { cli: 'up' } }).label).toBe('CLI 대기');
     expect(agentStatus({ ...base, terminal: { cli: 'down' } }).label).toBe('쉼');
     expect(agentStatus({ ...base, state: 'error' })).toEqual({ label: '오류', tone: 'fail' });
+    // 계획이 끝나 자원을 돌려준 레인은 멈춤이 아니라 끝남이다(#868)
+    expect(agentStatus({ ...base, state: 'done' })).toEqual({ label: '끝남', tone: 'ok' });
   });
 
   it('게이트 상태를 싣는 서버면 그것을, 아니면 개입 사유로 실패만 보인다', () => {

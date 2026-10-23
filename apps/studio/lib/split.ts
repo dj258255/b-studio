@@ -1,6 +1,7 @@
 import type { FleetView } from './fleet-types';
 import { outcomeText, runsWithChanges, type ChatItem } from './session-view';
 import type { SessionSnapshot } from './studio-events';
+import type { TaskPlanView } from './task-plan-types';
 
 /** 한 화면에 나란히 볼 수 있는 세션 수 상한 */
 export const MAX_SPLIT = 4;
@@ -319,4 +320,12 @@ export function splitLines(chat: readonly ChatItem[], limit = LINE_LIMIT): Split
     }
   });
   return lines.slice(-limit);
+}
+
+/** 끝난 레인 칸의 터미널 안내. 통합이 레인 세션을 멈춰 자원을 돌려주므로 터미널이 비어 있다(#868) */
+export const FINISHED_LANE_TERMINAL = '이 레인은 끝나 터미널을 닫았습니다. 기록과 체크포인트는 세션 화면에서 봅니다';
+
+/** 계획에서 끝난 레인의 세션 id */
+export function finishedLaneIds(plan: { lanes: readonly Pick<TaskPlanView['lanes'][number], 'status' | 'sessionId'>[] } | undefined): Set<string> {
+  return new Set((plan?.lanes ?? []).filter((lane) => lane.status === 'done' && lane.sessionId).map((lane) => lane.sessionId!));
 }

@@ -35,6 +35,7 @@ const STATE: Record<AgentState, { label: string; tone: Tone }> = {
   idle: { label: "대기", tone: "idle" },
   dormant: { label: "대기(샌드박스 꺼짐)", tone: "idle" },
   stopped: { label: "중지", tone: "idle" },
+  done: { label: "끝남", tone: "pass" },
   error: { label: "오류", tone: "fail" },
 };
 

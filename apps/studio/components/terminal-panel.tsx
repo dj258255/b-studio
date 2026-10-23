@@ -20,9 +20,12 @@ export function TerminalPanel({
   gate,
   acceptDraft = false,
   mode = "container",
+  stoppedLabel,
 }: {
   sessionId: string;
   ready: boolean;
+  /** 멈춘 세션(ready가 false)의 안내. 까닭을 아는 곳(끝난 레인 등)이 넘긴다. 없으면 이어서 작업 안내다(#868) */
+  stoppedLabel?: string;
   /** 터미널에서 보낸 마지막 요청의 검증 상태. 터미널 중심 화면에서는 아래의 활동 줄이 보여 주므로 넘기지 않는다 */
   gate?: TerminalGateStatus;
   /**
@@ -242,7 +245,7 @@ export function TerminalPanel({
     };
   }, [sessionId, ready, access.canManage, post, acceptDraft, draft, stream]);
 
-  const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? "멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다" : terminalStatusLabel(status, mode);
+  const label = !access.canManage ? "이 세션을 바꿀 수 있는 사람만 터미널을 씁니다" : !ready ? (stoppedLabel ?? "멈춘 세션입니다. 이어서 작업을 누르면 다시 열 수 있습니다") : terminalStatusLabel(status, mode);
   const stopped = status.state === "closed" || status.state === "exited";
 
   return (

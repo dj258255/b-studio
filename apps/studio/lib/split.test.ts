@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import type { FleetView } from './fleet-types';
 import type { ChatItem } from './session-view';
 import {
+  FINISHED_LANE_TERMINAL,
+  finishedLaneIds,
   broadcastTarget,
   defaultFocusId,
   effectiveLayoutMode,
@@ -316,5 +318,19 @@ describe('localStorage', () => {
     storeSplitIds(fake, ['a', 'b']);
     expect(store.get(SPLIT_STORAGE_KEY)).toBe('a,b');
     expect(readStoredSplitIds(fake)).toEqual(['a', 'b']);
+  });
+});
+
+describe('finishedLaneIds(#868)', () => {
+  it('끝난 레인의 세션만 모은다. 계획이 없으면 비어 있다', () => {
+    const lanes = [
+      { status: 'done' as const, sessionId: 's1' },
+      { status: 'running' as const, sessionId: 's2' },
+      { status: 'failed' as const, sessionId: 's3' },
+      { status: 'done' as const },
+    ];
+    expect([...finishedLaneIds({ lanes })]).toEqual(['s1']);
+    expect(finishedLaneIds(undefined).size).toBe(0);
+    expect(FINISHED_LANE_TERMINAL).toContain('세션 화면');
   });
 });

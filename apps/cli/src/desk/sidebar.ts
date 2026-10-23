@@ -87,6 +87,8 @@ export function agentStatus(item: DeskItem): StatusBadge {
   if (item.state === 'booting') return { label: '켜는 중', tone: 'busy' };
   if (item.state === 'error') return { label: '오류', tone: 'fail' };
   if (item.state === 'stopped') return { label: '멈춤', tone: 'muted' };
+  // 작업 카드 계획이 끝나 자원을 돌려준 레인(#868)
+  if (item.state === 'done') return { label: '끝남', tone: 'ok' };
   if (item.state === 'dormant') return { label: '꺼짐', tone: 'muted' };
   if (item.terminal?.cli === 'up') return { label: 'CLI 대기', tone: 'ok' };
   return { label: '쉼', tone: 'muted' };
