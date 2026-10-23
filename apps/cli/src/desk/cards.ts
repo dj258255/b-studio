@@ -185,7 +185,13 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
   const blank = ' '.repeat(rect.w);
   const space = deskSpaces(state.items).find((entry) => entry.sessions.includes(state.selected));
   if (!space) {
-    lines.push(fit('', rect.w), fit('  세션이 없습니다. Ctrl-b n 으로 새 요청을 보냅니다', rect.w));
+    lines.push(
+      fit('', rect.w),
+      fit('  세션이 없습니다.', rect.w),
+      fit('', rect.w),
+      fit('  처음이면 a 를 눌러 내 폴더를 프로젝트로 등록합니다(경로를 쓰고 Tab으로 채우고 Enter).', rect.w),
+      fit('  등록한 프로젝트가 있으면 n 으로 새 요청을 보냅니다. AI의 터미널이 칸에 열리고 여기 카드가 생깁니다.', rect.w),
+    );
     while (lines.length < rect.h) lines.push(blank);
     return { lines, cards };
   }

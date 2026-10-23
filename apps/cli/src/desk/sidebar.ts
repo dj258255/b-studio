@@ -23,6 +23,8 @@ export interface SidebarRow {
   item?: number;
   /** 스페이스 줄이면 그 스페이스 이름. 누르면 그 스페이스 화면을 연다 */
   space?: string;
+  /** "+ 폴더 열기" 줄(#916). 누르면 폴더 열기 화면을 연다 */
+  action?: 'folder';
 }
 
 /** 세션 하나의 자세한 줄에 붙일 색(카드가 쓴다) */
@@ -169,10 +171,13 @@ export function sidebarRows(
 ): SidebarRow[] {
   const sessions = deskSessions(items);
   const muted = fg(theme, 'muted');
+  const folder: SidebarRow = { text: fitAnsi(`${fg(theme, 'accent')} + 폴더 열기${RESET}`, width), selected: false, action: 'folder' };
   if (sessions.length === 0) {
     return [
       { text: fit(' 세션이 없습니다', width), selected: false },
       { text: fit(' Ctrl-b n 으로 새 요청', width), selected: false },
+      { text: fit('', width), selected: false },
+      folder,
     ];
   }
   const rows: SidebarRow[] = [{ text: fitAnsi(`${muted} 스페이스${RESET}`, width), selected: false }];
@@ -193,6 +198,7 @@ export function sidebarRows(
       rows.push({ text: spreadPlain(line, marks, marksWidth, width), selected: index === selected, item: index });
     }
   }
+  rows.push(folder);
   return rows;
 }
 

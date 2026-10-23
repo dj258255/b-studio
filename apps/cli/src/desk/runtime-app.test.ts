@@ -318,3 +318,87 @@ describe('덮는 화면은 하나만(#895)', () => {
     expect(plans.state.plans).toBeDefined();
   });
 });
+
+describe('실행 화면의 탐색형 QA(#916)', () => {
+  /** QA API의 가짜. 시작하면 도는 중이고, polls번 받은 뒤 끝난다 */
+  function qaClient(ctx: ReturnType<typeof setup>) {
+    const calls: string[] = [];
+    let run: import('./types').DeskQaRun | null = null;
+    let polls = 0;
+    Object.assign(ctx.client, {
+      exploreQa: async (id: string) => {
+        calls.push(`qa ${id}`);
+        if (run?.status === 'running' && ++polls >= 2) {
+          run = { ...run, status: 'done', finishedAt: run.startedAt + 30_000, result: { status: 'pass', reason: '문제 없음', stoppedBy: 'finish', diagnostics: { consoleErrors: [], pageErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, accessibilityViolations: [] } } };
+        }
+        return run;
+      },
+      startExploreQa: async (id: string, input: { service: string; goal: string; startPath: string }) => {
+        calls.push(`qa-start ${id} ${input.service} ${input.goal} ${input.startPath}`);
+        run = { id: 'q1', service: input.service, goal: { goal: input.goal, startPath: input.startPath }, status: 'running', actions: [{ index: 1, tool: 'qa_screenshot', ok: true, newDiagnosticsCount: 0, artifact: 'q1/1.jpg', url: 'http://x/' }], findings: [], texts: [], startedAt: Date.now() };
+        return run;
+      },
+      stopExploreQa: async (id: string) => {
+        calls.push(`qa-stop ${id}`);
+      },
+      saveExploreQa: async (id: string, service: string) => {
+        calls.push(`qa-save ${id} ${service}`);
+        return { path: 'studio.yaml', skipped: [] };
+      },
+      artifactUrl: (id: string, artifact: string) => `http://127.0.0.1:3000/api/sessions/${id}/artifacts/${artifact}`,
+    });
+    return calls;
+  }
+
+  it('6으로 QA 탭에 들어가 n으로 시작하면 도는 동안 다시 받아 끝난 판정을 보이고, s·y로 화면 확인으로 저장한다', async () => {
+    const ctx = setup();
+    const calls = qaClient(ctx);
+    ctx.io.type('\x02v');
+    await tick();
+    ctx.runtime.emit({ type: 'snapshot', snapshot });
+    await tick();
+    ctx.io.type('6');
+    await tick();
+    expect(calls).toEqual(['qa a']);
+    expect(screenText(ctx.io)).toContain('n으로 시작');
+    ctx.io.type('n상세로 간다\r\r\r');
+    await tick();
+    expect(calls).toContain('qa-start a web 상세로 간다 /');
+    expect(screenText(ctx.io)).toContain('도는 중');
+    await tick(1_300);
+    await tick(1_300);
+    expect(screenText(ctx.io)).toContain('통과');
+    const before = calls.length;
+    await tick(5_000);
+    // 끝나면 더 받지 않는다
+    expect(calls.length).toBe(before);
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.runtime.opened).toEqual(['http://127.0.0.1:3000/api/sessions/a/artifacts/q1/1.jpg']);
+    ctx.io.type('s');
+    await tick();
+    expect(screenText(ctx.io)).toContain('화면 확인');
+    ctx.io.type('y');
+    await tick();
+    expect(calls).toContain('qa-save a web');
+    expect(screenText(ctx.io)).toContain('화면 확인으로 저장했습니다');
+  });
+
+  it('닫으면 도는 QA를 더 받지 않는다', async () => {
+    const ctx = setup();
+    const calls = qaClient(ctx);
+    ctx.io.type('\x02v');
+    await tick();
+    ctx.runtime.emit({ type: 'snapshot', snapshot });
+    await tick();
+    ctx.io.type('6');
+    await tick();
+    ctx.io.type('n목표\r\r\r');
+    await tick();
+    ctx.io.type('\x1b');
+    await tick();
+    const before = calls.length;
+    await tick(5_000);
+    expect(calls.length).toBe(before);
+  });
+});

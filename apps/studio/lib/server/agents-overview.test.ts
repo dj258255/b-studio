@@ -154,6 +154,12 @@ describe('목록·합계·정렬', () => {
     expect(items.find((item) => item.id === 's2')).not.toHaveProperty('accountId');
   });
 
+  it('다음 요청에 확인 선언 변경 허용이 켜진 세션에 표시를 싣는다(#916)', () => {
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ id: 's1', allowCheckChangesNext: true }) }), source({ snapshot: snapshot({ id: 's2' }) })] });
+    expect(items.find((item) => item.id === 's1')).toMatchObject({ checkChangesArmed: true });
+    expect(items.find((item) => item.id === 's2')).not.toHaveProperty('checkChangesArmed');
+  });
+
   it('레인 세션은 session으로 중복해 올리지 않는다', () => {
     const lane = plan({ status: 'running', lanes: [{ id: 'a', paths: ['web'], status: 'running', tasks: [], sessionId: 's1' }] });
     const { items, totals } = overview({

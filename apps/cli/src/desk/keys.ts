@@ -21,8 +21,11 @@
  * 앞글쇠 다음 다른 화면 키는 비교 화면을 닫고 그 일을 한다. 그래서 비교 화면 안의 w(승자)와 앞글쇠 다음 w(카드 화면)는 섞이지 않는다
  * 실행 화면(#895, 앞글쇠 다음 v, 스페이스 화면에서는 v만)도 같은 덮는 화면이다. 앞글쇠가 아닌 키(d 배포, b 되돌리기, l·s·G·o·/ …)와 붙여넣기는 그 화면이 받고(runtime.ts),
  * 앞글쇠 다음 다른 화면 키는 실행 화면을 닫고 그 일을 한다. 앞글쇠 다음 v는 닫는다
+ * 폴더 열기 화면(#916, 앞글쇠 다음 a, 스페이스 화면에서는 a만, 새 요청의 프로젝트 고르기 끝 줄)도 같은 덮는 화면이다. 경로 입력이라 앞글쇠가 아닌 키와 붙여넣기는
+ * 그 화면이 받고(folder.ts), 앞글쇠 다음 다른 화면 키는 폴더 열기를 닫고 그 일을 한다
  */
 import { fleetsKey, fleetsPaste, openFleets, type FleetsEffect, type FleetsState } from './fleets';
+import { folderKey, folderPaste, openFolder, type FolderEffect, type FolderState } from './folder';
 import type { KittyImages } from './kitty';
 import { openPlans, plansKey, plansPaste, type PlansEffect, type PlansState } from './plans';
 import { openRecords, recordsKey, type RecordsLoad, type RecordsState } from './records';
@@ -72,6 +75,7 @@ export const BROWSING = '사이드바 고르는 중: ↑↓로 옮기고 Enter�
 
 export interface PromptState {
   step: 'project' | 'request';
+  /** 고를 프로젝트. 프로젝트 고르기의 끝 줄(projects.length)은 "+ 폴더 열기"다(#916) */
   projects: Array<{ id: string; name: string }>;
   projectIndex: number;
   text: string;
@@ -83,6 +87,8 @@ export interface PromptState {
   /** 미리보기 한 줄 */
   preview?: string;
   sending?: boolean;
+  /** 이 요청의 검증에서 확인 선언의 변경을 받아들인다(#916, ADR-164). Ctrl-t로 켜고 끈다 */
+  allowCheckChanges?: boolean;
 }
 
 /** 복사 모드. search가 있으면 찾을 글을 쓰는 중이다. 보는 자리와 고른 범위는 칸 해석기(PaneTerminal)가 든다 */
@@ -167,6 +173,8 @@ export interface DeskState {
   plans?: PlansState;
   /** 요구사항·문서 화면(#894). 있으면 본문 전체가 그 세션의 요구사항 화면이다 */
   requirements?: RequirementsState;
+  /** 폴더 열기 화면(#916). 있으면 본문 전체가 이 화면이다 */
+  folder?: FolderState;
 }
 
 export interface UsageState {
@@ -199,7 +207,7 @@ export type Effect =
   | { type: 'shell'; slot: number }
   | { type: 'prompt' }
   | { type: 'preview'; text: string }
-  | { type: 'submit'; projectId: string; request: string; choice: string }
+  | { type: 'submit'; projectId: string; request: string; choice: string; allowCheckChanges?: true }
   | { type: 'session'; action: SessionAction; id: string }
   | { type: 'rename'; id: string; label: string }
   /** 사용량을 읽는다(#889). refresh면 스튜디오에 다시 읽기를 청하고, 아니면 받은 지 오래됐을 때만 묻는다 */
@@ -229,7 +237,9 @@ export type Effect =
   /** 요구사항·문서 화면을 연다(#894). 요구사항은 desk가 받아 채운다 */
   | { type: 'requirements-open'; id: string; title: string }
   /** 요구사항 화면이 낸 할 일. close는 화면을 닫았다 */
-  | { type: 'requirements'; effect: RequirementsEffect | { type: 'close' } };
+  | { type: 'requirements'; effect: RequirementsEffect | { type: 'close' } }
+  /** 폴더 열기 화면이 낸 할 일(#916). 처음 열 때도 홈 목록을 받는 list를 낸다 */
+  | { type: 'folder'; effect: FolderEffect };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -296,7 +306,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정·요구사항·기록·세션 자세히·작업 나누기·여러 AI 비교·실행)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans || state.fleets || state.runtime) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans || state.fleets || state.runtime || state.folder) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -377,6 +387,15 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       const key = nextKey(input, at);
       at += key.length;
       state = promptKey(state, key, effects);
+      continue;
+    }
+    if (state.folder && !state.prefix && input[at] !== prefixOf(state)) {
+      // 폴더 열기(#916): 앞글쇠가 아닌 키는 모두 경로 입력이다. 앞글쇠 다음 키는 commandKey가 받는다
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = folderKey(state.folder, key);
+      state = { ...state, folder: result.state };
+      for (const effect of result.effects) effects.push({ type: 'folder', effect });
       continue;
     }
     if (state.runtime && !state.prefix && input[at] !== prefixOf(state)) {
@@ -467,6 +486,12 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
     return { ...next, detail: { ...state.detail, resolving: { ...state.detail.resolving, text: state.detail.resolving.text + clean } } };
   }
+  // 폴더 열기(#916)는 경로 입력 칸에 넣는다
+  if (state.folder) {
+    const result = folderPaste(state.folder, content);
+    for (const effect of result.effects) effects.push({ type: 'folder', effect });
+    return { ...next, folder: result.state };
+  }
   // 실행 화면(#895)은 로그에서 찾는 글을 쓰는 중일 때만 받는다
   if (state.runtime) return { ...next, runtime: runtimePaste(state.runtime, content) };
   // 복사 모드나 도움말·기록 화면·세션 자세히를 보는 중, 세션 조작을 묻는 중, 스페이스·사용량 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
@@ -528,10 +553,20 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     effects.push({ type: 'fleets', effect: { type: 'close' } });
     state = { ...state, fleets: undefined };
   }
+  if (state.folder && key !== 'a' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
+    // 다른 화면이나 칸을 다루는 키는 폴더 열기를 닫고 한다(#916)
+    state = { ...state, folder: undefined };
+  }
   if (state.runtime && key !== 'v' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
     // 다른 화면이나 칸을 다루는 키는 실행 화면을 닫고 한다(#895). 앞글쇠 다음 s·l·o는 실행 화면의 키가 아니라 desk의 키다
     effects.push({ type: 'runtime', effect: { type: 'close' } });
     state = { ...state, runtime: undefined };
+  }
+  if (key === 'a') {
+    const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
+    // 같은 키는 닫는다
+    if (state.folder) return { ...done, folder: undefined };
+    return openFolderScreen(done, effects);
   }
   if (key === 't') {
     const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
@@ -541,7 +576,7 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     }
     effects.push({ type: 'plans-open' });
     // 덮는 화면은 하나만 둔다
-    return { ...done, plans: openPlans(), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, fleets: undefined };
+    return { ...done, plans: openPlans(), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, fleets: undefined, folder: undefined };
   }
   if (key === 'f') {
     const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
@@ -552,7 +587,7 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     if (state.plans) effects.push({ type: 'plans', effect: { type: 'close' } });
     // 바로 연다(이어서 친 키가 비교 화면으로 가게). 목록은 desk가 받아 채운다. 덮는 화면은 하나만 둔다
     effects.push({ type: 'fleets-open' });
-    return { ...done, fleets: openFleets(), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined };
+    return { ...done, fleets: openFleets(), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined, folder: undefined };
   }
   const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
   const sessions = deskSessions(state.items);
@@ -622,7 +657,7 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     if (state.plans) effects.push({ type: 'plans', effect: { type: 'close' } });
     if (state.fleets) effects.push({ type: 'fleets', effect: { type: 'close' } });
     effects.push({ type: 'runtime-open', id: target.id });
-    return { ...done, runtime: openRuntime(target.id, target.title), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined, fleets: undefined };
+    return { ...done, runtime: openRuntime(target.id, target.title), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined, fleets: undefined, folder: undefined };
   }
   if (key === 'e') {
     // 요구사항·문서(#894): 카드·사용량 화면이면 고른 카드의 세션, 칸 화면이면 고른 칸의 세션(셸·빈 칸이면 사이드바에서 고른 세션)
@@ -715,7 +750,7 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
-  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i' || key === 'e' || key === 'f' || key === 'v') return commandKey(base, key, effects);
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i' || key === 'e' || key === 'f' || key === 'v' || key === 'a') return commandKey(base, key, effects);
   return base;
 }
 
@@ -823,9 +858,13 @@ function copyKey(state: DeskState, key: string, effects: Effect[]): DeskState {
 function promptKey(state: DeskState, key: string, effects: Effect[]): DeskState {
   const prompt = state.prompt!;
   if (key === ESC || key === '\x03') return { ...state, prompt: undefined, message: '새 요청을 닫았습니다' };
+  // Ctrl-t: 이 요청의 확인 선언 변경 허용(#916, ADR-164)
+  if (key === '\x14') return { ...state, prompt: { ...prompt, allowCheckChanges: !prompt.allowCheckChanges } };
   if (prompt.step === 'project') {
     if (key === UP || key === UP_APP) return { ...state, prompt: { ...prompt, projectIndex: Math.max(0, prompt.projectIndex - 1) } };
-    if (key === DOWN || key === DOWN_APP) return { ...state, prompt: { ...prompt, projectIndex: Math.min(prompt.projects.length - 1, prompt.projectIndex + 1) } };
+    // 끝 줄(projects.length)은 "+ 폴더 열기"다(#916)
+    if (key === DOWN || key === DOWN_APP) return { ...state, prompt: { ...prompt, projectIndex: Math.min(prompt.projects.length, prompt.projectIndex + 1) } };
+    if (key === '\r' && prompt.projectIndex >= prompt.projects.length) return openFolderScreen({ ...state, prompt: undefined }, effects, 'prompt');
     if (key === '\r' && prompt.projects[prompt.projectIndex]) return { ...state, prompt: { ...prompt, step: 'request' } };
     return state;
   }
@@ -834,7 +873,7 @@ function promptKey(state: DeskState, key: string, effects: Effect[]): DeskState 
     const request = prompt.text.trim();
     const project = prompt.projects[prompt.projectIndex];
     if (!request || !project || prompt.sending) return state;
-    effects.push({ type: 'submit', projectId: project.id, request, choice: prompt.choices[prompt.choice] ?? 'rules' });
+    effects.push({ type: 'submit', projectId: project.id, request, choice: prompt.choices[prompt.choice] ?? 'rules', ...(prompt.allowCheckChanges ? { allowCheckChanges: true as const } : {}) });
     return { ...state, prompt: { ...prompt, sending: true } };
   }
   if (key === '\x7f' || key === '\b') {
@@ -852,4 +891,14 @@ function promptKey(state: DeskState, key: string, effects: Effect[]): DeskState 
   if (last >= 0) effects.splice(last, 1);
   effects.push({ type: 'preview', text });
   return { ...state, prompt: { ...prompt, text } };
+}
+
+/** 폴더 열기 화면을 연다(#916). 덮는 화면은 하나만 둔다. 홈 폴더 목록은 desk가 받아 채운다 */
+export function openFolderScreen(state: DeskState, effects: Effect[], from?: 'prompt'): DeskState {
+  if (state.plans) effects.push({ type: 'plans', effect: { type: 'close' } });
+  if (state.fleets) effects.push({ type: 'fleets', effect: { type: 'close' } });
+  if (state.runtime) effects.push({ type: 'runtime', effect: { type: 'close' } });
+  const opened = openFolder(from);
+  for (const effect of opened.effects) effects.push({ type: 'folder', effect });
+  return { ...state, folder: opened.state, prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined, fleets: undefined, runtime: undefined };
 }

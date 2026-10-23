@@ -11,8 +11,10 @@ import type { StudioEvent } from '@/lib/studio-events';
 const fake = vi.hoisted(() => ({
   notReady: {} as Record<string, string>,
   created: [] as Array<{ projectId: string; options: Record<string, unknown> }>,
-  sent: [] as Array<{ id: string; text: string }>,
+  sent: [] as Array<{ id: string; text: string; allowCheckChanges?: true }>,
   designError: undefined as string | undefined,
+  /** 확인 선언 변경 허용을 켠 세션(#916) */
+  armed: [] as string[],
 }));
 
 vi.mock('./sessions', async () => {
@@ -27,9 +29,13 @@ vi.mock('./sessions', async () => {
       fake.created.push({ projectId, options });
       return { id: `s${fake.created.length}`, projectId, backend: options.backend };
     },
-    sendMessage: (id: string, text: string) => {
-      fake.sent.push({ id, text });
+    sendMessage: (id: string, text: string, options: { allowCheckChanges?: boolean }) => {
+      fake.sent.push({ id, text, ...(options.allowCheckChanges ? { allowCheckChanges: true } : {}) });
       return { runId: `r-${id}` };
+    },
+    setTerminalCheckChanges: (id: string) => {
+      fake.armed.push(id);
+      return true;
     },
   };
 });
@@ -84,6 +90,7 @@ beforeEach(async () => {
   fake.created = [];
   fake.sent = [];
   fake.designError = undefined;
+  fake.armed = [];
 });
 
 afterEach(() => {
@@ -107,6 +114,17 @@ describe('startRoutedSession — 터미널로(#836)', () => {
     expect(result).toMatchObject({ session: { id: 's1' }, routing: { backend: 'codex', rule: 0 }, terminal: { opened: true, pasted: true } });
     expect(result.terminal?.pasteError).toBeUndefined();
     expect(result.runId).toBeUndefined();
+  });
+
+  it('확인 선언 변경 허용(#916)을 실으면 터미널을 열기 전에 그 세션의 다음 요청에 켜 둔다. 싣지 않으면 켜지 않는다', async () => {
+    saveBackendRules({ rules: [{ when: {}, backend: 'codex' }] });
+    await startRoutedSession({ ...base, request: '테스트 선언을 바꿔 줘', allowCheckChanges: true }, terminal({ startAfter: 2 }).deps);
+    expect(fake.armed).toEqual(['s1']);
+    await startRoutedSession({ ...base, request: '주문 화면을 고쳐 줘' }, terminal({ startAfter: 2 }).deps);
+    expect(fake.armed).toEqual(['s1']);
+    // 질문(읽기만)은 게이트를 돌리지 않으므로 켜지 않는다
+    await startRoutedSession({ ...base, intent: 'ask', request: '선언이 뭐야?', allowCheckChanges: true }, terminal({ startAfter: 2 }).deps);
+    expect(fake.armed).toEqual(['s1']);
   });
 
   it('질문은 읽기만 표시를 붙인 글을 넘긴다', async () => {

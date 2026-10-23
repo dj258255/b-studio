@@ -100,7 +100,7 @@ describe('세션 이벤트 접기', () => {
 describe('탭과 닫기', () => {
   it('Tab과 숫자로 탭을 옮기고, Esc로 닫는다', () => {
     expect(press(ready(), '\t').state?.tab).toBe('logs');
-    expect(press(ready(), '\x1b[Z').state?.tab).toBe('repo');
+    expect(press(ready(), '\x1b[Z').state?.tab).toBe('qa');
     expect(press(ready(), '4').state?.tab).toBe('preview');
     const closed = press(ready(), ESC);
     expect(closed.state).toBeUndefined();
@@ -315,5 +315,107 @@ describe('그리기', () => {
       expect(lines).toHaveLength(20);
       for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(72);
     }
+  });
+});
+
+describe('탐색형 QA 탭(#916)', () => {
+  const running = {
+    id: 'q1',
+    service: 'web',
+    goal: { goal: '상품 목록에서 상세로 간다', startPath: '/products' },
+    status: 'running' as const,
+    actions: [
+      { index: 1, tool: 'qa_navigate', ok: true, newDiagnosticsCount: 0, url: 'http://x/products', at: 1 },
+      { index: 2, tool: 'qa_click', ok: false, detail: '버튼을 찾지 못함', newDiagnosticsCount: 1, artifact: 'q1/2.jpg', url: 'http://x/products', at: 2 },
+    ],
+    findings: [{ severity: 'major' as const, summary: '상세 버튼이 눌리지 않는다', where: '상품 카드' }],
+    texts: ['목록을 열었습니다'],
+    startedAt: Date.parse('2026-10-23T05:00:00Z'),
+  };
+  const done = {
+    ...running,
+    status: 'done' as const,
+    finishedAt: Date.parse('2026-10-23T05:01:00Z'),
+    result: {
+      status: 'fail' as const,
+      reason: 'major 문제 1건',
+      stoppedBy: 'finish',
+      diagnostics: { consoleErrors: ['TypeError'], pageErrors: [], failedRequests: ['GET /api/x 500'], blockedRequests: [], horizontalOverflowPx: 0, accessibilityViolations: [] },
+    },
+  };
+
+  /** QA 탭(여섯째)으로 간 상태 */
+  function qaTab(patch: Partial<NonNullable<RuntimeState['qa']>> = {}): RuntimeState {
+    const entered = press(ready(), '6');
+    expect(entered.effects).toEqual([{ type: 'qa-load' }]);
+    return { ...entered.state!, qa: { ...entered.state!.qa, loading: false, ...patch } };
+  }
+
+  it('처음 들어가면 마지막 실행을 받고, 돌린 적이 없으면 시작하는 법을 보인다', () => {
+    const state = qaTab({ run: null });
+    expect(state.tab).toBe('qa');
+    expect(text(state)).toContain('n으로 시작');
+  });
+
+  it('n으로 목표·시작 경로·확인 문구를 쓰고 ←→로 서비스를 고른 뒤 Enter로 시작한다. 목표가 비면 시작하지 않는다', () => {
+    let state = press(qaTab({ run: null }), 'n').state!;
+    expect(state.qa?.form).toMatchObject({ field: 'goal', startPath: '/', service: 0 });
+    const empty = press(state, '\r', '\r', '\r');
+    expect(empty.effects).toEqual([]);
+    state = qaTab({ run: null });
+    const typed = press(state, 'n', ...Array.from('상세로 간다'), '\r', '\x7f', ...Array.from('/products'), '\r', ...Array.from('주문 완료'), '\r');
+    expect(typed.effects).toEqual([{ type: 'qa-start', input: { service: 'web', goal: '상세로 간다', startPath: '/products', confirmText: '주문 완료' } }]);
+    expect(typed.state!.qa?.form).toBeUndefined();
+    expect(typed.state!.qa?.starting).toBe(true);
+  });
+
+  it('폼에서 Esc는 폼만 닫고, 친 글자(q·v 포함)는 화면을 닫지 않고 칸에 들어간다', () => {
+    const state = press(qaTab({ run: null }), 'n', 'q', 'v').state!;
+    expect(state.qa?.form?.goal).toBe('qv');
+    const closed = press(state, ESC);
+    expect(closed.state).toBeDefined();
+    expect(closed.state!.qa?.form).toBeUndefined();
+  });
+
+  it('화면이 있는 서비스가 없으면 시작할 수 없다고 알린다', () => {
+    const base = applyRuntimeEvent(openRuntime('s1', '주문'), { type: 'snapshot', snapshot: view({ services: [{ name: 'api', template: 'spring-boot', preview: 'openapi', state: 'ready' }] }) });
+    const state = { ...press(base, '6').state!, qa: { run: null } };
+    expect(press(state, 'n').state!.note).toContain('화면이 있는 서비스');
+  });
+
+  it('도는 실행은 동작·발견을 보이고 x로 멈춘다. 도는 동안 n은 받지 않는다', () => {
+    const state = qaTab({ run: running });
+    const screen = text(state, 120, 30);
+    expect(screen).toContain('도는 중');
+    expect(screen).toContain('qa_click');
+    expect(screen).toContain('버튼을 찾지 못함');
+    expect(screen).toContain('상세 버튼이 눌리지 않는다');
+    expect(press(state, 'x').effects).toEqual([{ type: 'qa-stop' }]);
+    expect(press(state, 'n').state!.note).toContain('도는 중');
+  });
+
+  it('끝난 실행은 판정·까닭·진단 신호를 보이고, s로 묻고 y면 화면 확인으로 저장한다', () => {
+    const state = qaTab({ run: done });
+    const screen = text(state, 120, 30);
+    expect(screen).toContain('문제 발견');
+    expect(screen).toContain('major 문제 1건');
+    expect(screen).toContain('콘솔 오류 1');
+    expect(screen).toContain('실패한 요청 1');
+    const asked = press(state, 's');
+    expect(asked.effects).toEqual([]);
+    expect(asked.state!.confirm).toEqual({ kind: 'qa-save', service: 'web' });
+    expect(press(asked.state!, 'y').effects).toEqual([{ type: 'qa-save', service: 'web' }]);
+  });
+
+  it('↑↓로 동작을 고르고 Enter면 그 동작의 화면 사진을 연다. 사진이 없으면 알린다', () => {
+    const state = qaTab({ run: done });
+    const second = press(state, DOWN);
+    expect(press(second.state!, '\r').effects).toEqual([{ type: 'qa-artifact', artifact: 'q1/2.jpg' }]);
+    expect(press(state, '\r').state!.note).toContain('사진이 없습니다');
+    expect(press(second.state!, UP).state!.row).toBe(0);
+  });
+
+  it('아래 줄 안내에 QA 키가 있다', () => {
+    expect(runtimeHint(qaTab({ run: done }))).toContain('n 새 QA');
   });
 });

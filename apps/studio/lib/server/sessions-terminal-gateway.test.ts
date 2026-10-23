@@ -146,7 +146,7 @@ vi.mock('./session-terminal', () => ({
 
 import { sessionFile, stateDirOf } from './session-store';
 import { agentRows, restoreAgentLedger } from './terminal-agents';
-import { cancelRun, createSession, getSnapshot, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, setTerminalCheckChanges, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -2516,6 +2516,51 @@ describe('Codex 터미널(#825)', () => {
     await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '테스트 돌려 줘' });
     await session.gateway.notification({ hook_event_name: 'PermissionRequest', tool_name: 'exec_command', tool_input: { command: './gradlew test' } });
     expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'exec_command 실행 권한을 묻습니다' });
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('터미널 세션의 확인 선언 변경 허용(#916, ADR-164): 켜 두면 다음 요청 하나만 바뀐 선언으로 검증한다', () => {
+  const FIXED = studioYaml().replace('command: [./gradlew, test]', 'command: [./gradlew, check]');
+
+  /** 선언을 고치고 코드를 바꾼 뒤 턴을 끝낸다 */
+  async function fixDeclaration(session: Opened): Promise<void> {
+    expect(await write(session, 'studio.yaml', FIXED)).toEqual({});
+    expect(await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).toEqual({});
+  }
+
+  it('켜지 않으면 실행을 시작할 때의 선언으로 돈다(지금과 같다)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '테스트 선언을 ./gradlew check로 바꿔 줘' });
+    await fixDeclaration(session);
+    await session.gateway.stop({ last_assistant_message: '바꿨습니다.' });
+    expect(fake.execCalls).toEqual([['./gradlew', 'test']]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('켜 두면 다음 요청에서 바뀐 선언으로 검증하고, 그 요청이 쓰면 꺼진다. CLI에도 켜졌다고 알린다', async () => {
+    const session = await open();
+    expect(setTerminalCheckChanges(session.id, true)).toBe(true);
+    expect(getSnapshot(session.id)!.allowCheckChangesNext).toBe(true);
+    const answer = await session.gateway.prompt({ prompt: '테스트 선언을 ./gradlew check로 바꿔 줘' });
+    expect(answer.note).toContain("'확인 선언 변경 허용'");
+    // 요청 하나가 가져갔다
+    expect(getSnapshot(session.id)!.allowCheckChangesNext).toBeUndefined();
+    await fixDeclaration(session);
+    await session.gateway.stop({ last_assistant_message: '바꿨습니다.' });
+    expect(fake.execCalls).toEqual([['./gradlew', 'check']]);
+    expect(getSnapshot(session.id)!.checkpoints[0]!.message).toContain('테스트 선언을 ./gradlew check로');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('읽기만 요청은 허용을 가져가지 않는다(게이트를 돌리지 않는다). 끄면 다시 꺼진다', async () => {
+    const session = await open();
+    setTerminalCheckChanges(session.id, true);
+    await session.gateway.prompt({ prompt: '[읽기만] 선언이 뭐였지?' });
+    await session.gateway.stop({ last_assistant_message: './gradlew test입니다.' });
+    expect(getSnapshot(session.id)!.allowCheckChangesNext).toBe(true);
+    expect(setTerminalCheckChanges(session.id, false)).toBe(false);
+    expect(getSnapshot(session.id)!.allowCheckChangesNext).toBeUndefined();
     await stopSession(session.id);
   }, 30_000);
 });

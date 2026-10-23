@@ -96,6 +96,14 @@ describe('POST /api/sessions — 규칙으로 고르기(#822)', () => {
     expect(mocks.startRoutedSession).not.toHaveBeenCalled();
   });
 
+  it('allowCheckChanges(#916)는 true일 때만 넘기고, 참거짓이 아니면 400', async () => {
+    expect((await post({ projectId: 'orders', route: 'rules', request: '선언을 바꿔 줘', terminal: true, allowCheckChanges: true })).status).toBe(201);
+    expect(mocks.startRoutedSession).toHaveBeenLastCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '선언을 바꿔 줘', intent: 'build', terminal: true, allowCheckChanges: true });
+    expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: true, allowCheckChanges: false })).status).toBe(201);
+    expect(mocks.startRoutedSession).toHaveBeenLastCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', terminal: true });
+    expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: true, allowCheckChanges: 'yes' })).status).toBe(400);
+  });
+
   it('terminal: true를 규칙·직접 고름과 함께 넘기고, true가 아니거나 route 없이 주면 400(#836)', async () => {
     expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: true })).status).toBe(201);
     expect(mocks.startRoutedSession).toHaveBeenLastCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', terminal: true });

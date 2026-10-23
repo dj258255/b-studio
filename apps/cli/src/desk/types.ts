@@ -30,6 +30,8 @@ export interface DeskItem {
   capabilities?: DeskCapabilities;
   /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다 — 그 CLI의 기본 계정(id가 CLI 이름)이다 */
   accountId?: string;
+  /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
+  checkChangesArmed?: true;
 }
 
 export interface DeskUsage {
@@ -477,4 +479,61 @@ export interface DeskProjectStatus {
   verification: { summary: string; byStatus: Readonly<Record<string, number>> };
   estimateVsActual: ReadonlyArray<{ id: string; label: string; estimateMinutes?: number; actualMinutes?: number; deltaMinutes?: number; note?: string }>;
   links: { roadmap: string; changelog: string; docsIndex: string };
+}
+
+// ─── 탐색형 QA(#916, `/api/sessions/:id/explore-qa`). 스튜디오의 ExploreQaRun에서 desk가 쓰는 것 ───
+
+export interface DeskQaFinding {
+  severity: 'blocker' | 'major' | 'minor';
+  summary: string;
+  where?: string;
+  evidence?: string;
+  observedAtAction?: number;
+}
+
+export interface DeskQaAction {
+  index: number;
+  tool: string;
+  ok: boolean;
+  detail?: string;
+  newDiagnosticsCount: number;
+  /** 그 동작 직후 찍은 화면의 산출물 식별자(`<runId>/<파일명>`) */
+  artifact?: string;
+  url: string;
+  at?: number;
+}
+
+export interface DeskQaRejection {
+  actionIndex?: number;
+  tool?: string;
+  reason: string;
+  requests: Array<{ status: number; url: string }>;
+}
+
+export interface DeskQaRun {
+  id: string;
+  service: string;
+  goal: { goal: string; startPath: string; confirmText?: string };
+  status: 'running' | 'done';
+  actions: DeskQaAction[];
+  findings: DeskQaFinding[];
+  expectedRejections?: DeskQaRejection[];
+  texts: string[];
+  result?: {
+    status: 'pass' | 'fail' | 'inconclusive';
+    reason: string;
+    stoppedBy: string;
+    unmetRejections?: DeskQaRejection[];
+    diagnostics: { consoleErrors: string[]; pageErrors: string[]; failedRequests: string[]; blockedRequests: string[]; horizontalOverflowPx: number; accessibilityViolations: string[] };
+  };
+  error?: string;
+  startedAt: number;
+  finishedAt?: number;
+}
+
+export interface DeskQaStart {
+  service: string;
+  goal: string;
+  startPath: string;
+  confirmText?: string;
 }
