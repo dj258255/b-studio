@@ -125,10 +125,13 @@ export function terminalSize(rect: Rect): { cols: number; rows: number } {
 }
 
 const RESET = '\x1b[0m';
-const SGR = /\x1b\[[0-9;:?]*[A-Za-z]/y;
+/** 폭이 없는 제어 열: 색(SGR)과 OSC(링크 OSC 8 등, BEL이나 ST로 끝난다) */
+const SGR = /\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/y;
+const LINK_OPEN = /^\x1b\]8;[^;\x07\x1b]*;([^\x07\x1b]*)/;
+const LINK_CLOSE = '\x1b]8;;\x1b\\';
 
 export function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
 }
 
 /** 색이 섞인 줄을 정확히 width칸으로 맞춘다(넘치면 자르고 모자라면 빈칸). 끝에서 색을 되돌린다. fill을 주면 남은 빈칸을 그 색(바탕색)으로 칠한다 */
@@ -136,12 +139,16 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
   let out = '';
   let used = 0;
   let at = 0;
+  // 링크(OSC 8) 글 한가운데서 자르면 닫는 표지가 잘려 나가 뒤 글까지 링크가 된다. 열린 채면 끝에서 닫는다(#891)
+  let linkOpen = false;
   while (at < line.length) {
     SGR.lastIndex = at;
     const match = SGR.exec(line);
     if (match) {
       out += match[0];
       at += match[0].length;
+      const link = LINK_OPEN.exec(match[0]);
+      if (link) linkOpen = link[1] !== '';
       continue;
     }
     const char = String.fromCodePoint(line.codePointAt(at)!);
@@ -151,6 +158,7 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
     used += w;
     at += char.length;
   }
+  if (linkOpen) out += LINK_CLOSE;
   const pad = Math.max(0, width - used);
   return fill && pad ? `${out}${RESET}${fill}${' '.repeat(pad)}${RESET}` : `${out}${RESET}${' '.repeat(pad)}`;
 }

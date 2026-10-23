@@ -10,8 +10,11 @@
  * 앞글쇠는 설정(desk.json)으로 바꿀 수 있고(state.prefixKey), 마우스(SGR 열)는 CLI로 보내지 않고 mouse 할 일로 낸다. 칸·사이드바 자리는 desk.ts가 가린다(#874)
  * 스페이스 화면(#887, 앞글쇠 다음 w)에서는 앞글쇠 없이 방향키로 카드를 고르고 Enter로 고른 칸에 연다. Tab은 다음 스페이스, Esc는 칸 화면이다.
  * 스페이스 화면에서 친 글자는 CLI로 가지 않는다(칸이 보이지 않는다)
+ * 기록 화면(앞글쇠 다음 h)과 세션 자세히(앞글쇠 다음 i, 스페이스 화면의 i)는 화면 전체를 쓰고, 열려 있는 동안 키는 그 화면으로 간다(#891)
  */
 import type { KittyImages } from './kitty';
+import { openRecords, recordsKey, type RecordsLoad, type RecordsState } from './records';
+import { detailKey, openDetail, type DetailAction, type DetailState } from './session-detail';
 import type { PaneLayout } from './screen';
 import { deskSessions, deskSpaces } from './sidebar';
 import type { Sprite } from './sprite';
@@ -129,6 +132,10 @@ export interface DeskState {
   spriteClock?: number;
   /** 있으면 카드 그림을 Kitty 그래픽으로 그린다(Ghostty·kitty). desk가 보낸 이미지를 들고 있다 */
   kitty?: KittyImages;
+  /** 기록 화면(#891): AI별 결과와 토큰 보고서 */
+  records?: RecordsState;
+  /** 세션 자세히(#891): 체크포인트, 확인·리뷰, 올리기, 지우기 */
+  detail?: DetailState;
 }
 
 export type Effect =
@@ -153,7 +160,11 @@ export type Effect =
   | { type: 'session'; action: SessionAction; id: string }
   | { type: 'rename'; id: string; label: string }
   /** 마우스(#874). x·y는 화면 좌표(0부터), button은 SGR 단추 값(64·65는 휠), release는 뗌 */
-  | { type: 'mouse'; button: number; x: number; y: number; release: boolean };
+  | { type: 'mouse'; button: number; x: number; y: number; release: boolean }
+  /** 기록 화면(#891): open이면 프로젝트 목록과 AI별 결과를 불러오고, load면 그것을 불러온다 */
+  | { type: 'records'; open?: true; load?: RecordsLoad }
+  /** 세션 자세히(#891)에서 서버에 보낼 일 */
+  | { type: 'detail'; action: DetailAction };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -220,7 +231,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.records || state.detail) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -229,6 +240,22 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       // 도움말은 아무 키로 닫는다. 그 키는 다른 데로 보내지 않는다
       at += nextKey(input, at).length;
       state = { ...state, help: false };
+      continue;
+    }
+    if (state.records) {
+      const key = nextKey(input, at);
+      at += key.length;
+      const next = recordsKey(state.records, key, Date.now());
+      state = { ...state, records: next.records };
+      if (next.load) effects.push({ type: 'records', load: next.load });
+      continue;
+    }
+    if (state.detail) {
+      const key = nextKey(input, at);
+      at += key.length;
+      const next = detailKey(state.detail, key);
+      state = { ...state, detail: next.detail };
+      if (next.action) effects.push({ type: 'detail', action: next.action });
       continue;
     }
     if (state.copy) {
@@ -298,8 +325,13 @@ function heldTail(text: string, marker: string): number {
 function pasteContent(state: DeskState, content: string, ended: boolean, effects: Effect[]): DeskState {
   const pasting = state.pasting!;
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
-  // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
-  if (state.copy || state.help || state.confirm || (state.view === 'space' && !state.rename && !state.prompt)) return next;
+  if (state.detail?.resolving) {
+    // 리뷰 지적을 닫을 까닭에는 한 줄로 넣는다
+    const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
+    return { ...next, detail: { ...state.detail, resolving: { ...state.detail.resolving, text: state.detail.resolving.text + clean } } };
+  }
+  // 복사 모드나 도움말·기록 화면·세션 자세히를 보는 중, 세션 조작을 묻는 중, 스페이스 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
+  if (state.copy || state.help || state.confirm || state.records || state.detail || (state.view === 'space' && !state.rename && !state.prompt)) return next;
   if (state.rename) {
     // 이름에는 한 줄로 넣는다
     const clean = content.replace(/\r\n?|\n/g, ' ').replace(/[\x00-\x1f\x7f]/g, '');
@@ -379,6 +411,17 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     return { ...done, sidebarHidden: !state.sidebarHidden };
   }
   if (key === '?') return { ...done, help: true };
+  if (key === 'h') {
+    // 프로젝트 목록과 결과는 desk가 불러와 채운다. 그동안도 키는 기록 화면으로 간다
+    effects.push({ type: 'records', open: true });
+    return { ...done, records: openRecords([], sessions[state.selected]?.projectName) };
+  }
+  if (key === 'i') {
+    const item = sessions[state.selected];
+    if (!item) return { ...done, message: '사이드바에 고를 세션이 없습니다' };
+    effects.push({ type: 'detail', action: { kind: 'load' } });
+    return { ...done, detail: openDetail(item) };
+  }
   if (key === '[') {
     const id = state.slots[state.focus];
     if (!id) return { ...done, message: '빈 칸에는 복사 모드가 없습니다' };
@@ -462,7 +505,7 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
-  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c') return commandKey(base, key, effects);
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'i') return commandKey(base, key, effects);
   return base;
 }
 

@@ -57,6 +57,64 @@ class FakeClient implements DeskClient {
   async accounts() {
     return this.accountList;
   }
+  /** 기록 화면과 세션 자세히(#891)가 부른 것: 이름과 인자 */
+  recordCalls: Array<[string, ...unknown[]]> = [];
+  failNext: Record<string, string> = {};
+  #record(name: string, ...args: unknown[]) {
+    this.recordCalls.push([name, ...args]);
+    const error = this.failNext[name];
+    if (error) {
+      delete this.failNext[name];
+      throw new StudioRequestError(error, 409);
+    }
+  }
+  async routingStats() {
+    this.#record('routingStats');
+    return { rows: [], excluded: { asks: 0, unfinished: 0 }, byAccount: [{ backend: 'claude-code', runs: 4, passed: 3, failed: 1, errors: 0, passRate: 0.75, averageTokens: 20_000 }] };
+  }
+  async tokenReport(projectId: string, from?: string) {
+    this.#record('tokenReport', projectId, from);
+    const usage = { inputTokens: 50_000, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+    return { projectId, projectName: 'shop', generatedAt: '2026-10-23T00:00:00Z', sessions: 1, requests: [{ sessionId: 'a', kind: 'normal' as const, request: 'r', usage, result: 'changed' as const }], totals: usage, usageByModel: { sonnet: usage }, modelCosts: {} };
+  }
+  sessionSnapshot = {
+    id: 'a',
+    status: 'ready',
+    running: false,
+    checkpoints: [{ sha: 'c0ffee11', shortSha: 'c0ffee1', message: '주문 나누기', createdAt: '2026-10-23T00:00:00Z', files: ['a.ts'], passedStages: ['test'] }],
+    repository: { remote: 'r', base: 'main', branch: 'b', canCreatePullRequest: true },
+  };
+  async session(id: string) {
+    this.#record('session', id);
+    return { ...this.sessionSnapshot, id };
+  }
+  async checkpointPatch(id: string, sha: string) {
+    this.#record('checkpointPatch', id, sha);
+    return 'diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1 @@\n-old\n+new';
+  }
+  async restoreCheckpoint(id: string, sha: string) {
+    this.#record('restoreCheckpoint', id, sha);
+  }
+  async reverify(id: string, sha: string) {
+    this.#record('reverify', id, sha);
+  }
+  async deleteSession(id: string) {
+    this.#record('deleteSession', id);
+  }
+  async exportPreview(id: string) {
+    this.#record('exportPreview', id);
+    return { title: '주문 나누기', canCreate: true, issues: [], checks: [{ id: 'stages_passed', ok: true, detail: '검증 통과' }] };
+  }
+  async exportSession(id: string, pullRequest: boolean) {
+    this.#record('exportSession', id, pullRequest);
+    return { sha: 'c0ffee11', commits: 1, forced: false, pullRequest: { url: 'https://example.test/pr/7', created: true } };
+  }
+  async reviewRound(id: string, restart: boolean) {
+    this.#record('reviewRound', id, restart);
+  }
+  async resolveFinding(id: string, input: { round: number; findingIndex: number; reason: string }) {
+    this.#record('resolveFinding', id, input);
+  }
   async open(id: string) {
     this.calls.push({ type: 'open', id });
     if (this.openError) throw this.openStatus ? new StudioRequestError(this.openError, this.openStatus) : new Error(this.openError);
@@ -1053,5 +1111,87 @@ describe('desk 작업대: 카드 움짤(#902)', () => {
     const leave = ctx.io.out.at(-1)!;
     expect(leave.match(/\x1b_Ga=d,d=I,i=\d+,q=2\x1b\\/g)).toHaveLength(2);
     expect(leave).toContain('\x1b[?1004l');
+  });
+});
+
+describe('desk 작업대: 기록 화면과 세션 자세히(#891)', () => {
+  const plain = (ctx: ReturnType<typeof setup>) => ctx.io.all.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+
+  it('Ctrl-b h로 AI별 결과를 불러와 보이고, Tab으로 고른 세션 프로젝트의 토큰 보고서를 불러온다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02h');
+    await tick();
+    expect(ctx.client.recordCalls.map(([name]) => name)).toEqual(['routingStats']);
+    expect(plain(ctx)).toMatch(/Claude · 기본\s+4/);
+    ctx.io.type('\t');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['tokenReport', 'p1', undefined]);
+    expect(plain(ctx)).toContain('합계 5만 토큰');
+    ctx.io.type('q');
+    await tick();
+    ctx.io.type('x');
+    await tick();
+    // 기록 화면을 닫은 뒤에는 키가 다시 칸으로 간다(빈 칸이라 보낼 곳은 없다)
+    expect(ctx.client.of('input')).toEqual([]);
+  });
+
+  it('세션 자세히에서 체크포인트 diff를 보고, 묻고 나서 되돌리고, 다시 불러온다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02i');
+    await tick();
+    expect(ctx.client.recordCalls).toEqual([['session', 'a']]);
+    expect(plain(ctx)).toContain('주문 나누기');
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['checkpointPatch', 'a', 'c0ffee11']);
+    expect(plain(ctx)).toMatch(/a\.ts\s+\+1 -1/);
+    ctx.io.type('\x1b');
+    await tick(100);
+    ctx.io.type('u');
+    await tick();
+    expect(ctx.client.recordCalls.map(([name]) => name)).not.toContain('restoreCheckpoint');
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.recordCalls.slice(-2)).toEqual([['restoreCheckpoint', 'a', 'c0ffee11'], ['session', 'a']]);
+    expect(plain(ctx)).toContain('되돌리기를 시작했습니다');
+  });
+
+  it('실패하면 그 까닭을 보이고 세션은 그대로 둔다', async () => {
+    const ctx = setup();
+    ctx.client.failNext.reverify = '지금 체크포인트만 다시 검증할 수 있습니다';
+    ctx.io.type('\x02i');
+    await tick();
+    ctx.io.type('v');
+    await tick();
+    expect(plain(ctx)).toContain('다시 검증하지 못했습니다: 지금 체크포인트만 다시 검증할 수 있습니다');
+  });
+
+  it('두 번 물은 뒤 세션을 지우면 자세히를 닫고 목록을 다시 받는다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02i');
+    await tick();
+    const polls = ctx.client.agentsCalls;
+    ctx.io.type('Dy');
+    await tick();
+    expect(ctx.client.recordCalls.map(([name]) => name)).not.toContain('deleteSession');
+    expect(plain(ctx)).toContain('되돌릴 수 없습니다');
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['deleteSession', 'a']);
+    expect(ctx.client.agentsCalls).toBeGreaterThan(polls);
+    expect(plain(ctx)).toContain('세션을 지웠습니다');
+  });
+
+  it('올리기 탭은 점검을 부르고, 묻고 나서 PR을 만들어 주소를 링크로 보인다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02i');
+    await tick();
+    ctx.io.type('\t\t');
+    await tick();
+    expect(ctx.client.recordCalls.at(-1)).toEqual(['exportPreview', 'a']);
+    ctx.io.type('py');
+    await tick();
+    expect(ctx.client.recordCalls.find(([name]) => name === 'exportSession')).toEqual(['exportSession', 'a', true]);
+    expect(ctx.io.all).toContain('\x1b]8;;https://example.test/pr/7\x1b\\');
   });
 });

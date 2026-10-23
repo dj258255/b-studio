@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { computeLayout, fit, placePanes, stringWidth } from './screen';
+import { computeLayout, fit, fitAnsi, placePanes, stringWidth, stripAnsi } from './screen';
 
 describe('글자 폭', () => {
   it('한글·전각은 두 칸, 영문은 한 칸으로 센다', () => {
@@ -68,5 +68,19 @@ describe('칸 놓기(#863)', () => {
     expect(placed.panes).toEqual([{ slot: 2, rect: computeLayout(100, 30, 1).panes[0] }]);
     const normal = placePanes(100, 30, { layout: 2, focus: 0 });
     expect(normal.panes.map((pane) => pane.slot)).toEqual([0, 1]);
+  });
+});
+
+describe('OSC 8 링크(#891)', () => {
+  const link = '\x1b]8;;https://example.test/pr/1\x1b\\PR #1\x1b]8;;\x1b\\';
+  it('링크 표지는 폭에 넣지 않는다', () => {
+    expect(stripAnsi(link)).toBe('PR #1');
+    expect(stringWidth(stripAnsi(fitAnsi(link, 10)))).toBe(10);
+    expect(fitAnsi(link, 10)).toContain('\x1b]8;;https://example.test/pr/1\x1b\\');
+  });
+  it('링크 글 한가운데서 잘리면 링크를 닫는다(뒤 글이 링크가 되지 않게)', () => {
+    const cut = fitAnsi(link, 3);
+    expect(stripAnsi(cut)).toBe('PR ');
+    expect(cut).toContain('\x1b]8;;\x1b\\');
   });
 });
