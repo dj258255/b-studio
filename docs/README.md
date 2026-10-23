@@ -4,7 +4,7 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 
 ## 처음 사용하는 사람
 
-1. [시작하기](getting-started.md) — 요구 사항, 설치, 첫 샌드박스와 첫 에이전트 요청
+1. [시작하기](getting-started.md) — 요구 사항, 설치, 첫 샌드박스와 첫 에이전트 요청, 작업 화면(`/work`)과 터미널 작업대(`studio desk`)
 2. [`studio.yaml` 설정](configuration.md) — 서비스, 준비 확인, 계약, 자원, 네트워크, 시크릿
 3. [트러블슈팅](troubleshooting.md) — 실제 실행 중 발견한 증상과 해결 방법
 
@@ -25,6 +25,9 @@ README는 프로젝트를 빠르게 파악하고 실행하는 데 필요한 내�
 - [실험 기록](experiments/README.md) — 결정 전에 측정한 결과
 - [문서 양식](templates/adr.md) — ADR과 [실험 보고서](templates/experiment-report.md) 작성 틀
 - [검토 문서](research/2026-09-25-knowledge-sharing-and-model-handoff.md) — 결정 전 아이디어 검토(에이전트 간 지식 공유, 작업 중 모델 교체)
+- [여러 에이전트 관리 도구 조사](research/2026-09-29-multi-agent-management.md) — herdr·Conductor·claude-squad 등 여러 에이전트를 한 곳에서 다루는 도구와 개입 필요 인박스
+- [부하·동시성·테스트 조사](research/2026-09-29-testing-load-concurrency.md) — 빅테크의 테스트 품질·동시성 검사 사례와 b-studio 적용 메모
+- [PR 중심 에이전트 작업 흐름 조사](research/2026-09-30-pr-agent-workflows.md) — 에이전트가 PR을 만들고 리뷰를 받는 흐름의 빅테크 사례
 - [토큰 줄이기 조사](research/2026-09-30-token-reduction-sources.md) — 빅테크 기술 블로그·오픈소스 에이전트 코드가 호출마다 다시 읽히는 문맥을 줄이는 방법, b-studio에 적용할 후보
 - [도메인 범위와 ML·데이터 검증 조사](research/2026-10-16-domain-scope-and-ml-verification.md) — 다른 에이전트 도구의 도메인 범위와 완료 전 검증, ML·데이터 작업의 거짓 성공 사례와 종료 코드로 잡는 검사(ADR-175)
 - [문서 관리 실무 조사](research/2026-10-12-bigtech-doc-management-practice.md) — 빅테크가 사내 문서를 관리하는 규칙(문서를 코드처럼, owner·신선도, 타입 분리), 문서 관련 결정에 참고할 후보

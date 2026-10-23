@@ -14,6 +14,17 @@
   <img src="docs/images/studio-hero-light.jpg" width="760" alt="작업 화면. 맨 위 새 요청 칸에 "주문 목록의 글자 색을 바꿔 줘"를 쓰자 "로컬 ChatGPT Agent (gpt-5.5)로 보냅니다 · 규칙 2(단순)"와 "같은 종류의 기록: 로컬 ChatGPT Agent 통과 3/3 · 로컬 Claude Agent 통과 2/3"이 보인다. 그 아래 개입 필요 목록에 요청과 테스트의 어긋남을 알린 확인 필요 줄과, 게이트를 세 번 통과하지 못한 검증 실패 줄이 있다">
 </picture>
 
+## 두 층: 웹 대시보드와 터미널 작업대
+
+같은 스튜디오와 같은 검증 게이트를 두 가지 화면으로 씁니다.
+
+- 웹 대시보드(`/work`, 위 사진): 요청을 쓰면 내가 정한 규칙표대로 AI(Claude Code·Codex 등)를 골라 보냅니다. 개입이 필요한 세션, AI별 게이트 통과 기록, 에이전트와 서브에이전트별 토큰을 한 화면에서 봅니다.
+- 터미널 작업대(`pnpm studio desk`, 실험): herdr·tmux처럼 터미널 하나에 여러 AI CLI를 1·2·4칸으로 띄웁니다. 왼쪽 사이드바에 세션마다 상태, 게이트 결과(검증 중·통과·실패), 체크포인트 수, 토큰과 비용이 보입니다. 칸의 CLI는 스튜디오가 들고 있어 desk를 나가도 계속 돕니다.
+
+두 화면 모두 터미널의 요청이 게이트를 지나야 체크포인트가 됩니다. 쓰는 방법은 [시작하기 8장](docs/getting-started.md#8-내-ai로-나눠-보내기와-터미널-작업대)에 있습니다.
+
+<img src="docs/images/studio-desk.jpg" width="760" alt="터미널 하나에 띄운 studio desk. 왼쪽 사이드바에 세션 넷이 두 줄씩 있고(확인 필요, 통과 등), 고른 Claude 세션 아래에 서브에이전트의 토큰과 도구·권한 범위가 펼쳐져 있다. 오른쪽 두 칸에 Claude와 Codex 터미널이 있고 각 요청 끝에 검증 통과와 체크포인트가 찍혀 있다">
+
 ## 핵심 설계 세 가지
 
 ### 완료는 플랫폼이 판정합니다
@@ -78,7 +89,7 @@
 | 작업 분해 | 한 요청을 레인으로 나눠 병렬 실행하고 통합 결과를 같은 게이트로 다시 검증한다. 계획은 사람이 승인한다 |
 | Agent Fleet | 같은 요청을 2~4개 후보로 펼쳐 비교한다 |
 | AI 나눠 보내기 | 등록한 AI(Claude Code·Codex·Command Code 등) 중 하나를 요청마다 내가 쓴 규칙표로 골라 보낸다. 게이트가 판정한 결과를 AI·모델·작업 종류별로 모아 보이고, 고를 때 그 기록을 옆에 보인다(자동으로 고르지는 않는다) |
-| 터미널 | 세션 화면의 중심이 이 컴퓨터의 Claude Code·Codex CLI 터미널이고, 터미널의 요청도 같은 게이트를 지나야 체크포인트가 된다. `studio desk`는 터미널 하나에서 여러 세션을 사이드바와 1·2·4칸으로 띄운다(실험) |
+| 터미널(실험) | 실험 기능을 켜면 세션 화면의 중심이 이 컴퓨터의 Claude Code·Codex CLI 터미널이 되고, 터미널의 요청도 같은 게이트를 지나야 체크포인트가 된다. `studio desk`는 터미널 하나에서 여러 세션을 사이드바와 1·2·4칸으로 띄운다 |
 | 모델·런타임 | Anthropic·OpenAI 호환·Gemini API와 구독 CLI(Claude Code·Codex·Command Code·OpenCode·Gemini CLI)를 하나의 도구 계약으로 묶는다. 레인마다 다른 CLI를 붙일 수 있다 |
 | 토큰 | 요청·세션·사용자별 한도, 턴별 문맥 분석, 비용 보고서. 터미널 실행은 CLI의 공식 텔레메트리로 세고, 메인 CLI와 그 안의 서브에이전트별 토큰·하는 일·할 수 있는 범위를 작업 화면과 `studio desk`에서 펼쳐 본다 |
 | 요구사항 | 명세에서 요구사항(EARS·시나리오)을 뽑아 이슈 발행, 추적 매트릭스, 올리기 전 점검, PR 생성과 자동 리뷰로 잇는다. 고칠 것이 남은 요구사항 수와 Ready 배지를 보인다 |
@@ -102,7 +113,14 @@ pnpm studio up examples/orders
 
 준비가 끝나면 터미널에 웹 미리보기와 OpenAPI 주소가 표시됩니다. `Ctrl+C`를 누르면 컨테이너와 샌드박스 전용 볼륨을 정리합니다.
 
-웹 스튜디오는 `pnpm studio launch` 한 명령으로 켜고 끕니다(모델 호출 없이 보려면 `--mode demo`). CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
+웹 스튜디오는 `pnpm studio launch` 한 명령으로 켜고 `pnpm studio stop`으로 끕니다(모델 호출 없이 보려면 `--mode demo`). 브라우저의 `/work`가 작업 화면입니다. CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
+
+터미널 작업대는 실험 기능을 켜고 띄운 스튜디오에 붙습니다(Codex도 쓰려면 `B_STUDIO_BACKENDS=codex`를 더합니다).
+
+```bash
+B_STUDIO_EXPERIMENTAL=1 B_STUDIO_BACKENDS=codex pnpm studio launch
+pnpm studio desk   # 다른 터미널에서. Ctrl-b n 새 요청, Ctrl-b q 나가기
+```
 
 데스크톱 앱(macOS), `--json` 출력, 계약을 깨는 요청(`--allow-breaking`), 인증 방식은 [시작하기](docs/getting-started.md)에 정리했습니다.
 
@@ -134,8 +152,8 @@ flowchart LR
 
 | 경로 | 무엇 | 왜 여기에 |
 |---|---|---|
-| `apps/cli/` | `studio up`·`launch`·`desk`·`agent`·`verify`·`deploy`·`auth` 명령 | 터미널 진입점을 한 곳에 묶는다 |
-| `apps/studio/` | Next.js 웹 스튜디오(세션·미리보기·토큰·저장소 탭)와 `bench/` 실험 하네스 | 화면과 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
+| `apps/cli/` | `studio up`·`launch`·`stop`·`desk`·`agent`·`verify`·`workflow`·`deploy`·`boot-probe`·`auth`·`sandbox prune` 명령 | 터미널 진입점을 한 곳에 묶는다 |
+| `apps/studio/` | Next.js 웹 스튜디오(작업 화면 `/work`, 세션 화면의 화면·코드·요구사항·실행·저장소 탭)와 `bench/` 실험 하네스 | 화면과 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
 | `apps/desktop/` | 웹 스튜디오를 감싸는 얇은 Electron 껍데기(macOS) | 화면은 서버가 주는 웹 그대로라 빌드 자산만 분리한다([ADR-062](docs/decisions.md#adr-062-데스크톱은-얇은-electron-껍데기로-두고-웹-스튜디오를-본체로-남긴다)) |
 | `packages/spec/` | `studio.yaml` 스키마와 compose 교차 검증 | CLI·웹이 같은 로더를 공유해야 한다 |
 | `packages/sandbox/` | Docker/Kubernetes 샌드박스, edge 프록시, 정책 경계 | 격리 실행이라는 한 책임을 독립 패키지로 둔다 |
@@ -156,6 +174,9 @@ flowchart LR
 | `pnpm studio desk` | 띄운 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다(실험) |
 | `pnpm studio agent <path> "<request>"` | 에이전트에게 변경 요청 |
 | `pnpm studio verify <path>` | 편집기로 바꾼 지금 변경을 같은 게이트로 확인(체크포인트는 만들지 않음) |
+| `pnpm studio workflow <path>` | `studio.yaml`이 강제하는 단계·테스트·화면 확인·보호 경로·배포 조건을 보여 준다 |
+| `pnpm studio boot-probe <path>` | 샌드박스를 띄워 기동 시간과 서비스별 전송량을 재고 내린다 |
+| `pnpm studio sandbox prune [--dry-run]` | b-studio가 만들었지만 쓰지 않는 Docker 자원을 찾아 지운다 |
 | `pnpm studio deploy <path>` | 운영 이미지를 만들고 고정 주소로 전환 |
 | `pnpm studio deploy <path> --status` | 현재 배포와 릴리스 상태 확인 |
 | `pnpm studio deploy <path> --rollback <id>` | 이전 릴리스로 롤백 |
@@ -197,7 +218,7 @@ databases:
 
 resources:
   web: { memory: 1g, cpus: 2 }
-  api: { memory: 1536m, cpus: 2 }
+  api: { memory: 2048m, cpus: 2 }
   db: { memory: 256m }
 ```
 

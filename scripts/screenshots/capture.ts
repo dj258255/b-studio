@@ -1,17 +1,27 @@
 /**
- * 문서용 화면 캡처 스크립트. 이미 떠 있는 studio 서버(기본 http://127.0.0.1:3000)에 Playwright로 접속해
- * 읽기 전용 화면만 골라 찍고, 캡처한 원본을 macOS 창 틀로 다시 찍어 docs/images에 내보낸다.
+ * 문서용 화면 캡처 스크립트. 이미 떠 있는 studio 서버에 진짜 Chrome(Playwright의 chrome 채널)으로 접속해
+ * docs/images의 화면 사진을 찍는다. 틀(창 테두리) 없이 화면을 그대로 찍고, sips로 JPEG(600KB 이하)로 바꾼다.
  *
- * 세션은 CI·pnpm test에 쓰지 않는다. b-studio를 실제로 띄워 둔 상태에서만 수동으로 돌린다:
- *   SESSION_ID=<세션 id> PLAN_ID=<작업 분해 id> FRONTEND_TAB="화면 (web)" ONLY=studio-hero-light pnpm docs:screenshots
+ * CI·pnpm test에 쓰지 않는다. 사진용 스튜디오를 띄우고 세션을 만들어 둔 뒤 수동으로 돌린다:
+ *   STUDIO_BASE_URL=http://localhost:3105 SESSION_CLAUDE=<id> SESSION_CODEX=<id> SESSION_FAIL=<id> \
+ *   SESSION_REVIEW=<id> PLAN_ID=<작업 카드 계획 id> ONLY=studio-hero-light pnpm docs:screenshots
  *
- * 상태를 바꾸는 조작(대화 전송, 승인/거절, 발행, 체크포인트 되돌리기 등)은 절대 하지 않는다. 탭 전환·스크롤·
- * 개발 배너 닫기(로컬 state만 바꾼다, DevStatusBanner 참고)·테마 전환(emulateMedia)처럼 읽기만 하는
- * 조작만 한다.
+ * - 사진용 스튜디오는 모델을 부르지 않게 띄운다(임시 HOME, 가짜 CLI를 B_STUDIO_CLAUDE_BIN·B_STUDIO_CODEX_BIN으로).
+ *   3000번 포트의 개발 서버나 실제 계정의 스튜디오를 쓰지 않는다. 사진 속 경로와 이름이 그대로 공개된다.
+ * - 쿠키는 그 스튜디오의 로컬 토큰이다. STUDIO_TOKEN이 없으면 STUDIO_HOME(기본 HOME)의
+ *   ~/.cache/b-studio/launch/local-token을 읽는다.
+ * - 화면 속 홈 폴더 경로(STUDIO_HOME, HOME)는 찍기 전에 ~로 가린다.
+ * - 세션 id가 필요한 사진은 그 값이 없으면 건너뛴다.
+ * - 수동 촬영: 터미널 작업대 사진(studio-desk.jpg)은 브라우저 화면이 아니라서 이 스크립트가 찍지 않는다.
+ *   진짜 터미널에서 `pnpm studio desk`를 띄워 찍는다. ADR·실험 문서의 사진은 그때의 기록이라 다시 찍지 않는다.
+ *
+ * 상태를 바꾸는 조작(요청 보내기, 승인, 되돌리기 등)은 하지 않는다. 입력칸에 글을 쓰고(보내지 않음) 펼치기·탭
+ * 전환처럼 화면만 바꾸는 조작만 한다.
  */
-import { chromium, type Browser, type Page } from "playwright-core";
-import { mkdirSync, readFileSync, writeFileSync, rmSync, statSync } from "node:fs";
+import { chromium, type Browser, type Locator, type Page } from "playwright-core";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,349 +30,218 @@ const repoRoot = path.resolve(here, "..", "..");
 const outDir = path.join(repoRoot, "docs", "images");
 const rawDir = path.join(here, ".raw");
 
-const BASE_URL = process.env.STUDIO_BASE_URL ?? "http://127.0.0.1:3000";
-const SESSION_ID = process.env.SESSION_ID ?? "c55417ad";
-const PLAN_ID = process.env.PLAN_ID ?? "45539ab6";
-/** 미리보기로 찍을 프런트엔드 탭 이름. 탭은 "화면 (<서비스 이름>)"이라 프로젝트마다 다르다 */
-const FRONTEND_TAB = process.env.FRONTEND_TAB ?? "화면 (frontend)";
+const BASE_URL = process.env.STUDIO_BASE_URL ?? "http://localhost:3105";
+const STUDIO_HOME = process.env.STUDIO_HOME ?? os.homedir();
+const SESSIONS = {
+  claude: process.env.SESSION_CLAUDE,
+  codex: process.env.SESSION_CODEX,
+  fail: process.env.SESSION_FAIL,
+  review: process.env.SESSION_REVIEW,
+};
+const PLAN_ID = process.env.PLAN_ID;
 /** 쉼표로 고른 사진만 찍는다(예: ONLY=studio-hero-light,studio-requirements). 비우면 전부 */
-/** 히어로 이미지에서 미리보기로 열 경로. 비우면 앱 첫 화면 그대로 둔다(예: HERO_PREVIEW_PATH=/shorts) */
-const HERO_PREVIEW_PATH = process.env.HERO_PREVIEW_PATH ?? "";
 const ONLY = (process.env.ONLY ?? "").split(",").map((name) => name.trim()).filter(Boolean);
 const MAX_BYTES = 600_000;
 
-type ColorScheme = "light" | "dark";
+type Clip = { x: number; y: number; width: number; height: number };
 
 interface ShotSpec {
   /** 최종 파일 이름(확장자 없이) */
   name: string;
-  path: string;
-  viewport: { width: number; height: number };
-  colorScheme: ColorScheme;
-  /** 액자 창의 표시 너비(CSS px, 1배). 액자 렌더는 deviceScaleFactor 2라 최종 파일은 이 값의 2배 폭이 된다 */
-  frameWidth: number;
-  setup: (page: Page) => Promise<void>;
+  /** 필요한 값이 없으면 undefined를 돌려 건너뛴다 */
+  path: () => string | undefined;
+  viewport?: { width: number; height: number };
+  colorScheme?: "light" | "dark";
+  /** 화면을 준비하고, 일부만 찍을 때는 자를 자리를 돌려준다 */
+  setup?: (page: Page) => Promise<Clip | void>;
 }
 
-/** "불러오는 중" 같은 로딩 문구가 화면에서 사라질 때까지 기다린다(없으면 바로 통과) */
-async function waitLoaded(page: Page, timeoutMs = 8_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const stillLoading = await page.getByText(/불러오는 중/).count();
-    if (stillLoading === 0) return;
-    await page.waitForTimeout(200);
-  }
+function localToken(): string {
+  if (process.env.STUDIO_TOKEN) return process.env.STUDIO_TOKEN;
+  return readFileSync(path.join(STUDIO_HOME, ".cache", "b-studio", "launch", "local-token"), "utf8").trim();
 }
 
-async function clickTab(page: Page, listName: string, tabName: string): Promise<void> {
-  await page.getByRole("tablist", { name: listName }).getByRole("tab", { name: tabName }).click();
+async function clickText(page: Page, text: string): Promise<void> {
+  await page.getByText(text, { exact: true }).first().click({ timeout: 5_000 });
+  await page.waitForTimeout(1200);
 }
 
-/**
- * 개발 서버 코드가 바뀌었다는 배너(DevStatusBanner)를 닫는다. 닫기는 컴포넌트 안의 React state만
- * 바꾸고(dismissedHead) 서버에 아무것도 보내지 않는다 — 읽기 전용 조작이다. 배너가 없으면 그냥 넘어간다
- */
-async function dismissDevBanner(page: Page): Promise<void> {
-  const dismiss = page.getByRole("button", { name: "닫기" });
-  if ((await dismiss.count()) > 0) await dismiss.first().click({ timeout: 2_000 }).catch(() => {});
+/** 대상의 자리에 여백을 더한 자르기 상자 */
+async function boxOf(locator: Locator, pad = 12): Promise<Clip> {
+  const rect = await locator.boundingBox();
+  if (!rect) throw new Error("찍을 자리를 찾지 못했습니다");
+  return { x: Math.max(0, rect.x - pad), y: Math.max(0, rect.y - pad), width: rect.width + pad * 2, height: rect.height + pad * 2 };
 }
 
-/**
- * Next.js 개발 모드 표시(왼쪽 아래 "N" 동그라미, `<nextjs-portal>`)를 숨긴다. b-studio 페이지 자신과
- * 미리보기 iframe(앱 안의 Next.js 앱) 둘 다에 떠서, 지금 열려 있는 모든 프레임에 스타일을 심는다.
- * 페이지 상태는 전혀 안 바꾸는 순수 화면 조작이라 안전하다
- */
-async function hideDevChrome(page: Page): Promise<void> {
-  for (const frame of page.frames()) {
-    await frame.addStyleTag({ content: "nextjs-portal, next-route-announcer { display: none !important; }" }).catch(() => {});
-  }
-}
+const newRequest = (page: Page) => page.getByPlaceholder(/무엇을 만들거나 고칠지/);
 
-/**
- * 대화 목록(`ol[aria-live="polite"]`)은 항상 맨 아래로 스크롤된 채 뜬다(ADR 없이 chat-panel.tsx 자체 동작).
- * 그런데 패널 높이가 메시지 하나보다 작을 때가 많아, 맨 위 줄이 "작업 단계 · 리뷰"처럼 중간에서 반쯤
- * 잘린 채로 찍힌다. 각 li(메시지 묶음) 경계에 맞춰 스크롤을 미세 조정해, 위쪽이 완전한 요소 하나의
- * 시작점에서 끊기게 한다(li 하나를 통째로 더 가리는 대신, 잘린 그림을 없앤다)
- */
-async function snapChatToCleanTop(page: Page): Promise<void> {
-  const list = page.locator('ol[aria-live="polite"]');
-  if ((await list.count()) === 0) return;
-  await list.first().evaluate((el) => {
-    el.scrollTop = el.scrollHeight;
-    const containerTop = el.getBoundingClientRect().top;
-    for (const child of Array.from(el.children)) {
-      const relTop = child.getBoundingClientRect().top - containerTop;
-      if (relTop > -2) {
-        el.scrollTop += relTop;
-        return;
-      }
-    }
-  });
-}
-
-/** HERO_PREVIEW_PATH가 있으면 미리보기 경로 입력칸에 넣고 열어, 영상이 재생될 시간을 기다린다 */
-async function openHeroPreviewPath(page: Page): Promise<void> {
-  if (!HERO_PREVIEW_PATH) return;
-  // "화면 확인 중 QA 보기로 자동 전환"이 앱 미리보기를 다시 QA 보기로 덮을 수 있어, 입력 직전에 한 번 더 고른다
-  await clickTab(page, "화면 하위 탭", "앱 미리보기");
-  await page.locator("#preview-path").waitFor({ state: "visible", timeout: 15_000 });
-  await page.locator("#preview-path").fill(HERO_PREVIEW_PATH);
-  await page.getByRole("button", { name: "열기", exact: true }).click();
-  await page.waitForTimeout(8000);
+function hero(name: string, colorScheme: "light" | "dark"): ShotSpec {
+  return {
+    name,
+    path: () => "/work",
+    viewport: { width: 1440, height: 945 },
+    colorScheme,
+    setup: async (page) => {
+      await newRequest(page).fill("주문 목록의 글자 색을 바꿔 줘");
+      await page.waitForTimeout(2500);
+    },
+  };
 }
 
 const SHOTS: ShotSpec[] = [
+  // README 첫 화면: 작업 화면(새 요청 미리보기와 같은 종류 기록, 개입 필요 목록)
+  hero("studio-hero-light", "light"),
+  hero("studio-hero-dark", "dark"),
   {
-    name: "studio-hero-light",
-    path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
-    colorScheme: "light",
-    frameWidth: 1056,
+    name: "studio-work-rules",
+    path: () => "/work",
+    viewport: { width: 1440, height: 1000 },
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", FRONTEND_TAB);
-      await waitLoaded(page);
+      await newRequest(page).fill("결제 화면의 환불 버튼 문구를 고쳐 줘");
+      await page.waitForTimeout(2000);
+      await page.getByText(/^규칙 고치기/).first().click({ timeout: 5_000 });
       await page.waitForTimeout(1200);
-      // 이 세션엔 저장된 QA 확인 프레임이 있어 "화면 확인 중 QA 보기로 자동 전환"이 앱 미리보기를
-      // 곧장 QA 보기로 덮어쓴다 — 게시판 화면을 보여주려면 앱 미리보기로 다시 돌려놓는다
-      await clickTab(page, "화면 하위 탭", "앱 미리보기");
-      await page.waitForTimeout(2200);
-      await openHeroPreviewPath(page);
+      return boxOf(page.locator('section[aria-labelledby="routing-launcher-title"]').first());
     },
   },
   {
-    name: "studio-hero-dark",
-    path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
-    colorScheme: "dark",
-    frameWidth: 1056,
+    // 메인 CLI와 서브에이전트의 토큰, 할 수 있는 범위. SESSION_CLAUDE 세션의 마지막 요청 글로 줄을 찾는다
+    name: "studio-agent-breakdown",
+    path: () => (SESSIONS.claude ? "/work" : undefined),
+    viewport: { width: 1000, height: 1400 },
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", FRONTEND_TAB);
-      await waitLoaded(page);
+      await page.getByText(/^전체\(\d+\)$/).first().click({ timeout: 5_000 });
       await page.waitForTimeout(1200);
-      await clickTab(page, "화면 하위 탭", "앱 미리보기");
-      await page.waitForTimeout(2200);
-      await openHeroPreviewPath(page);
+      // 줄 안의 세션 링크로 그 세션의 줄을 찾는다
+      const card = page.locator("li.glass").filter({ has: page.locator(`a[href*="/sessions/${SESSIONS.claude}"]`) }).first();
+      await card.getByText("에이전트·범위").first().click();
+      await page.waitForTimeout(1200);
+      return boxOf(card);
     },
   },
   {
     name: "studio-requirements",
-    path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
-    colorScheme: "light",
-    frameWidth: 1056,
+    path: () => (SESSIONS.claude ? `/sessions/${SESSIONS.claude}` : undefined),
+    viewport: { width: 1440, height: 1000 },
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "요구사항");
-      await waitLoaded(page);
-      await page.waitForTimeout(1200);
+      await clickText(page, "요구사항");
+      return { x: 728, y: 84, width: 700, height: 900 };
     },
   },
   {
-    name: "studio-tests",
-    path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
-    colorScheme: "light",
-    frameWidth: 1056,
+    name: "studio-reverify",
+    path: () => (SESSIONS.codex ? `/sessions/${SESSIONS.codex}` : undefined),
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "요구사항");
-      await waitLoaded(page);
-      await clickTab(page, "요구사항 하위 탭", "테스트");
-      await waitLoaded(page);
-      await page.waitForTimeout(1200);
+      await clickText(page, "코드");
+      await clickText(page, "변경 기록");
+      return { x: 728, y: 132, width: 700, height: 500 };
+    },
+  },
+  // 세션 화면 전체(터미널과 오른쪽 탭)
+  { name: "studio-session-terminal", path: () => (SESSIONS.claude ? `/sessions/${SESSIONS.claude}` : undefined) },
+  {
+    name: "studio-tabs-default",
+    path: () => (SESSIONS.claude ? `/sessions/${SESSIONS.claude}` : undefined),
+    setup: async () => ({ x: 720, y: 0, width: 720, height: 420 }),
+  },
+  {
+    name: "studio-session-usage",
+    path: () => (SESSIONS.claude ? `/sessions/${SESSIONS.claude}` : undefined),
+    setup: async () => ({ x: 0, y: 816, width: 720, height: 80 }),
+  },
+  {
+    name: "studio-split-grid",
+    path: () => {
+      const ids = [SESSIONS.claude, SESSIONS.codex, SESSIONS.fail, SESSIONS.review];
+      return ids.every(Boolean) ? `/split?ids=${ids.join(",")}` : undefined;
+    },
+    viewport: { width: 1440, height: 960 },
+    setup: async (page) => {
+      await page.waitForTimeout(2500);
     },
   },
   {
-    name: "studio-repository",
-    path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
-    colorScheme: "light",
-    frameWidth: 1056,
+    // 작업 카드 계획을 돌리는 중에 찍는다(끝난 카드와 도는 카드가 함께 보이게)
+    name: "studio-split-cards",
+    path: () => (PLAN_ID ? `/split?plan=${PLAN_ID}` : undefined),
+    viewport: { width: 1440, height: 960 },
     setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "저장소");
-      await waitLoaded(page);
-      // 기본 "열림" 필터는 이 프로젝트의 이슈가 전부 닫혀 있어 비어 보인다 — "전체"로 바꿔 실제 목록을 보여준다
-      await page.getByRole("group", { name: "상태 필터" }).getByRole("button", { name: "전체" }).click();
-      await waitLoaded(page);
-      await page.waitForTimeout(1200);
+      await page.waitForTimeout(3000);
     },
   },
-  {
-    name: "studio-checkpoints",
-    path: `/sessions/${SESSION_ID}`,
-    viewport: { width: 1440, height: 900 },
-    colorScheme: "light",
-    frameWidth: 1056,
-    setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "코드");
-      await waitLoaded(page);
-      await clickTab(page, "코드 하위 탭", "변경 기록");
-      await waitLoaded(page);
-      await page.waitForTimeout(1200);
-    },
-  },
-  {
-    name: "studio-tokens",
-    path: `/sessions/${SESSION_ID}`,
-    // "반복 작업"이 기본으로 접히고(#421) 탭 전체가 한 스크롤로 바뀌어, 더 이상 이어 붙이지 않고 한 번에
-    // 찍는다. 그래프·표·문맥 급증 카드가 모두 들어가도록 세로로 넉넉한 뷰포트를 쓴다
-    viewport: { width: 1440, height: 1500 },
-    colorScheme: "light",
-    frameWidth: 1056,
-    setup: async (page) => {
-      await clickTab(page, "미리보기 대상", "토큰");
-      await waitLoaded(page);
-      await page.waitForTimeout(600);
-      // 가장 최근 실행(PR #22 리뷰 수정)은 문맥 급증이 없다 — 급증 막대·원인 카드가 있는 실행(R17)을 고른다
-      const runTabs = page.getByRole("tablist", { name: "실행", exact: true }).getByRole("tab");
-      if ((await runTabs.count()) > 1) await runTabs.nth(1).click();
-      await page.waitForTimeout(600);
-    },
-  },
-  {
-    name: "studio-task-plan",
-    path: `/task-plans?id=${PLAN_ID}`,
-    viewport: { width: 1440, height: 1100 },
-    colorScheme: "light",
-    frameWidth: 1056,
-    setup: async (page) => {
-      await waitLoaded(page);
-      const header = page.getByText(`작업 분해 ${PLAN_ID}`);
-      await header.waitFor({ state: "visible", timeout: 10_000 });
-      await header.scrollIntoViewIfNeeded();
-      await page.mouse.wheel(0, -40);
-      await page.waitForTimeout(800);
-    },
-  },
-  {
-    name: "studio-accounts",
-    path: "/accounts",
-    viewport: { width: 760, height: 620 },
-    colorScheme: "light",
-    frameWidth: 620,
-    setup: async (page) => {
-      await waitLoaded(page);
-      await page.waitForTimeout(800);
-    },
-  },
+  { name: "studio-accounts", path: () => "/accounts", viewport: { width: 900, height: 760 } },
 ];
 
-async function captureRaw(browser: Browser, spec: ShotSpec): Promise<string> {
+/** 화면 속 홈 폴더 경로를 ~로 가린다 */
+async function redactHome(page: Page): Promise<void> {
+  const homes = [...new Set([STUDIO_HOME, os.homedir()])];
+  await page.evaluate((prefixes) => {
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      let text = node.nodeValue ?? "";
+      for (const prefix of prefixes) text = text.split(prefix).join("~");
+      if (text !== node.nodeValue) node.nodeValue = text;
+    }
+  }, homes);
+}
+
+async function captureRaw(browser: Browser, spec: ShotSpec, route: string, token: string): Promise<string> {
   const context = await browser.newContext({
-    viewport: spec.viewport,
+    viewport: spec.viewport ?? { width: 1440, height: 900 },
     deviceScaleFactor: 2,
-    colorScheme: spec.colorScheme,
+    colorScheme: spec.colorScheme ?? "light",
+    locale: "ko-KR",
+    timezoneId: "Asia/Seoul",
   });
+  await context.addCookies([{ name: "b_studio_local", value: token, url: BASE_URL }]);
   const page = await context.newPage();
-  // dev 서버는 HMR 웹소켓을 계속 열어 두므로 networkidle을 기다리지 않는다(절대 끝나지 않을 수 있다).
-  // DOM이 뜨면 바로 넘어가고, 실제 데이터가 찼는지는 각 shot의 setup()이 직접 기다린다
-  await page.goto(`${BASE_URL}${spec.path}`, { waitUntil: "domcontentloaded", timeout: 30_000 });
-  // 서버 렌더 HTML은 떠도 React 하이드레이션이 아직 안 끝났을 수 있다 — 지금 바로 탭을 누르면 이벤트
-  // 처리기가 안 붙어 있어 클릭이 씹힌다. 하이드레이션이 끝날 시간을 준 뒤에 조작한다
-  await page.waitForTimeout(900);
-  await dismissDevBanner(page);
-  await spec.setup(page);
-  await snapChatToCleanTop(page);
-  await hideDevChrome(page);
-  await page.waitForTimeout(150);
+  // dev 서버는 HMR 웹소켓을 열어 두어 networkidle이 늦게 오거나 안 올 수 있다. 시간이 넘어도 이어 간다
+  await page.goto(`${BASE_URL}${route}`, { waitUntil: "networkidle", timeout: 30_000 }).catch(() => {});
+  await page.addStyleTag({ content: "nextjs-portal, next-route-announcer { display: none !important; }" });
+  await page.waitForTimeout(2000);
+  const clip = (await spec.setup?.(page)) ?? undefined;
+  await redactHome(page);
+  await page.waitForTimeout(300);
   const rawPath = path.join(rawDir, `${spec.name}.png`);
-  await page.screenshot({ path: rawPath });
+  await page.screenshot({ path: rawPath, ...(clip ? { clip } : {}) });
   await context.close();
   return rawPath;
 }
 
-/** 라이트/다크에 맞는 액자 배경·테두리 색(studio의 app/globals.css 토큰과 맞춘다) */
-function paletteFor(scheme: ColorScheme) {
-  return scheme === "dark"
-    ? {
-        background: "radial-gradient(circle at 30% 20%, #163230 0%, #0a1413 60%)",
-        panel: "#101c1b",
-        titlebar: "#132220",
-        border: "rgba(227,238,235,0.12)",
-        shadow: "0 1px 2px rgba(0,0,0,0.5), 0 50px 90px -30px rgba(0,0,0,0.8)",
-      }
-    : {
-        background: "radial-gradient(circle at 30% 20%, #eef6f3 0%, #dbe8e3 60%)",
-        panel: "#fbfdfc",
-        titlebar: "#eef3f1",
-        border: "rgba(16,42,43,0.12)",
-        shadow: "0 1px 2px rgba(16,42,43,0.08), 0 50px 90px -30px rgba(16,42,43,0.35)",
-      };
-}
-
-async function pngSize(filePath: string): Promise<{ width: number; height: number }> {
-  // PNG 헤더의 IHDR 청크(바이트 16~24)에서 폭·높이를 직접 읽는다(의존성 추가 없이)
-  const buffer = readFileSync(filePath);
-  const width = buffer.readUInt32BE(16);
-  const height = buffer.readUInt32BE(20);
-  return { width, height };
-}
-
-/** 액자(macOS 창 틀)를 deviceScaleFactor 2로 다시 찍어, 원본 캡처가 1배여도 최종 파일은 레티나 해상도가 되게 한다 */
-async function frameShot(browser: Browser, spec: ShotSpec, rawPath: string): Promise<string> {
-  const { width: rawWidth, height: rawHeight } = await pngSize(rawPath);
-  const displayWidth = spec.frameWidth;
-  const displayHeight = Math.round((rawHeight / rawWidth) * displayWidth);
-  const titlebarHeight = 34;
-  const padding = 72;
-  const pageWidth = displayWidth + padding * 2;
-  const pageHeight = displayHeight + titlebarHeight + padding * 2;
-  const palette = paletteFor(spec.colorScheme);
-
-  const template = readFileSync(path.join(here, "frame-template.html"), "utf8");
-  const html = template
-    .replaceAll("__COLOR_SCHEME__", spec.colorScheme)
-    .replaceAll("__PAGE_WIDTH__", String(pageWidth))
-    .replaceAll("__PAGE_HEIGHT__", String(pageHeight))
-    .replaceAll("__BACKGROUND__", palette.background)
-    .replaceAll("__PANEL_COLOR__", palette.panel)
-    .replaceAll("__TITLEBAR_COLOR__", palette.titlebar)
-    .replaceAll("__WINDOW_BORDER__", palette.border)
-    .replaceAll("__WINDOW_SHADOW__", palette.shadow)
-    .replaceAll("__WINDOW_WIDTH__", String(displayWidth))
-    .replaceAll("__IMAGE_PATH__", `file://${rawPath}`);
-
-  const framePagePath = path.join(rawDir, `${spec.name}.frame.html`);
-  writeFileSync(framePagePath, html);
-
-  const context = await browser.newContext({ viewport: { width: pageWidth, height: pageHeight }, deviceScaleFactor: 2 });
-  const page = await context.newPage();
-  await page.goto(`file://${framePagePath}`);
-  await page.waitForTimeout(150);
-  const framedPngPath = path.join(rawDir, `${spec.name}.framed.png`);
-  await page.screenshot({ path: framedPngPath });
-  await context.close();
-  return framedPngPath;
-}
-
 /** sips로 JPEG 변환, MAX_BYTES를 넘으면 품질을 낮춰 가며 다시 인코딩한다 */
-function compressToJpeg(framedPngPath: string, outPath: string): void {
-  const qualities = [82, 75, 68, 60];
-  for (const quality of qualities) {
-    execFileSync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", String(quality), framedPngPath, "--out", outPath], { stdio: "pipe" });
-    const { size } = statSync(outPath);
-    if (size <= MAX_BYTES) return;
+function compressToJpeg(pngPath: string, outPath: string): void {
+  for (const quality of [80, 70, 60, 50]) {
+    execFileSync("sips", ["-s", "format", "jpeg", "-s", "formatOptions", String(quality), pngPath, "--out", outPath], { stdio: "pipe" });
+    if (statSync(outPath).size <= MAX_BYTES) return;
   }
 }
 
 async function main() {
   mkdirSync(outDir, { recursive: true });
   mkdirSync(rawDir, { recursive: true });
-
-  const browser = await chromium.launch();
+  const token = localToken();
+  const browser = await chromium.launch({ channel: "chrome" });
   try {
     for (const spec of SHOTS.filter((shot) => ONLY.length === 0 || ONLY.includes(shot.name))) {
+      const route = spec.path();
+      if (!route) {
+        console.log(`건너뜀: ${spec.name} (세션·계획 id가 없습니다)`);
+        continue;
+      }
       process.stdout.write(`찍는 중: ${spec.name} ... `);
-      const rawPath = await captureRaw(browser, spec);
-      const framedPngPath = await frameShot(browser, spec, rawPath);
-      const outPath = path.join(outDir, `${spec.name}.jpg`);
-      compressToJpeg(framedPngPath, outPath);
-      const { size } = statSync(outPath);
-      const { width, height } = await pngSize(framedPngPath);
-      console.log(`완료 (${Math.round(size / 1024)}KB, ${width}x${height}) -> ${path.relative(repoRoot, outPath)}`);
+      try {
+        const rawPath = await captureRaw(browser, spec, route, token);
+        const outPath = path.join(outDir, `${spec.name}.jpg`);
+        compressToJpeg(rawPath, outPath);
+        console.log(`완료 (${Math.round(statSync(outPath).size / 1024)}KB) -> ${path.relative(repoRoot, outPath)}`);
+      } catch (error) {
+        console.log(`실패: ${(error as Error).message.split("\n")[0]}`);
+        process.exitCode = 1;
+      }
     }
   } finally {
     await browser.close();
   }
-
   rmSync(rawDir, { recursive: true, force: true });
 }
 
