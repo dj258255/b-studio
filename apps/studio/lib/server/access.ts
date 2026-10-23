@@ -1,5 +1,3 @@
-import { headers } from 'next/headers';
-import { redirect } from 'next/navigation';
 import { authConfig, canManage, LOCAL_USER, USER_HEADER } from './auth';
 import { StudioError } from './errors';
 import { getSnapshot, recoverSessions } from './sessions';
@@ -13,15 +11,6 @@ export function requireUser(requestHeaders: Headers): string {
   const user = requestHeaders.get(USER_HEADER);
   if (!user) throw new StudioError(401, '로그인이 필요합니다');
   return user;
-}
-
-/** 화면(서버 컴포넌트)의 사용자. 확인하지 못하면 로그인으로 보낸다 */
-export async function pageUser(): Promise<string> {
-  try {
-    return requireUser(await headers());
-  } catch {
-    redirect('/login');
-  }
 }
 
 /** 세션을 바꾸는 요청. 인증을 켜면 세션을 만든 사람이나 관리자만 할 수 있다 */

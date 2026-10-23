@@ -2,7 +2,7 @@ import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'n
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { hasLocalToken, LOCAL_TOKEN_API_PATH, LOCAL_TOKEN_COOKIE, LOCAL_TOKEN_PAGE_PATH, localToken, localTokenPath } from './local-token';
+import { hasLocalToken, LOCAL_TOKEN_COOKIE, localToken, localTokenPath } from './local-token';
 
 const cache = globalThis as typeof globalThis & { __bStudioLocalToken?: string };
 const tokenFile = (dir: string) => path.join(dir, '.cache', 'b-studio', 'launch', 'local-token');
@@ -22,10 +22,8 @@ afterEach(async () => {
 });
 
 describe('로컬 토큰(ADR-173 덧붙임)', () => {
-  it('쿠키 이름과 교환 경로를 정한다', () => {
+  it('쿠키 이름을 정한다', () => {
     expect(LOCAL_TOKEN_COOKIE).toBe('b_studio_local');
-    expect(LOCAL_TOKEN_PAGE_PATH).toBe('/local-auth');
-    expect(LOCAL_TOKEN_API_PATH).toBe('/api/local-auth');
   });
 
   it('처음 부를 때 만들어 이 사용자만 읽을 수 있는 파일(0600)에 쓰고, 다시 불러도 같은 값을 준다', async () => {

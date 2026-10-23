@@ -3,7 +3,7 @@ import { decideRequest, PROXY_SECRET_HEADER, SESSION_COOKIE, USER_HEADER } from 
 import { readRevocations } from './lib/server/auth-state';
 
 /**
- * 모든 화면과 API 앞에서 사용자를 확인한다. 라우트는 여기서 넣은 사용자 헤더로 한 번 더 확인하고 권한을 따진다.
+ * 모든 API 앞에서 사용자를 확인한다(웹 화면은 없다, ADR-186). 라우트는 여기서 넣은 사용자 헤더로 한 번 더 확인하고 권한을 따진다.
  * 브라우저가 보낸 내부 헤더는 지우고, 확인한 사용자만 넣어 넘긴다.
  * Proxy는 Node.js 런타임에서 돌므로 로그아웃한 세션 기록을 파일에서 읽는다
  */
@@ -22,7 +22,6 @@ export function proxy(request: NextRequest) {
     () => readRevocations(),
   );
 
-  if (decision.kind === 'redirect') return NextResponse.redirect(new URL(decision.location, request.url));
   if (decision.kind === 'reject') {
     return pathname.startsWith('/api/')
       ? NextResponse.json({ error: decision.message }, { status: decision.status })
@@ -38,5 +37,5 @@ export function proxy(request: NextRequest) {
 
 export const config = {
   // 정적 파일과 개발 서버 연결(_next)은 사용자 데이터가 없어 확인하지 않는다
-  matcher: ['/((?!_next/|favicon.ico).*)'],
+  matcher: ['/((?!_next/).*)'],
 };

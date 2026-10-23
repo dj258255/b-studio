@@ -40,8 +40,8 @@ describe('pnpm studio(인자 없이): 서버는 화면 없이 뒤에서, 바로 
 
     expect(await runStudio({ mode: 'local', port: 3100, notify: false }, h.deps)).toBe(0);
     expect(h.launches).toHaveLength(1);
-    expect(h.launches[0]).toMatchObject({ mode: 'local', port: 3100, open: false });
-    expect(h.launches[0]!.json).toBeUndefined();
+    expect(h.launches[0]).toEqual(expect.objectContaining({ mode: 'local', port: 3100 }));
+    expect('open' in h.launches[0]!).toBe(false);
     expect(h.desks).toEqual([{ port: 3100, notify: false }]);
     // desk를 나간 뒤 서버가 뒤에 남는다는 것과 끄는 법을 알린다
     const text = log.mock.calls.flat().join('\n');

@@ -13,23 +13,11 @@ export const LAUNCH_MODES: readonly LaunchMode[] = ['local', 'demo', 'commandcod
 /** 모드 → B_STUDIO_MODE 값. local은 README의 studio:local과 같게 claude-code를 쓴다 */
 export const MODE_ENV: Record<LaunchMode, string> = { local: 'claude-code', demo: 'demo', commandcode: 'commandcode', codex: 'codex' };
 
-/** 이미 떠 있는지 확인할 때 응답 본문에 있어야 하는 b-studio 표지 */
+/** 이미 떠 있는지 확인할 때 `/api/health` 본문의 `app`에 있어야 하는 b-studio 표지 */
 export const STUDIO_MARKER = 'b-studio';
 
-/**
- * 떠 있는지·준비됐는지 보는 경로. 응답 본문의 `app`이 b-studio 표지다.
- * 첫 화면(`/`)은 개발 서버가 첫 요청에서 페이지 전체를 컴파일해 느리고, 화면이 없어져도 이 경로는 남는다
- */
+/** 떠 있는지·준비됐는지 보는 경로. 응답 본문의 `app`이 b-studio 표지다. 스튜디오에는 화면이 없다(ADR-186) */
 export const HEALTH_PATH = '/api/health';
-
-/**
- * 로컬 토큰을 쿠키로 바꾸는 스튜디오의 교환 페이지(apps/studio/lib/server/local-token.ts의 LOCAL_TOKEN_PAGE_PATH와 같아야 한다).
- * 브라우저를 이 주소로 열면 페이지가 주소의 `#` 뒤에서 토큰을 읽어 본문으로 교환하고 쿠키를 받는다.
- * 토큰을 쿼리(`?token=`)에 싣지 않는다 — 개발 서버 로그에 그대로 남는다
- */
-const LOCAL_AUTH_PATH = '/local-auth';
-/** 서버가 시작할 때 만들어 두는 로컬 토큰 파일 이름(studio의 local-token.ts와 같아야 한다) */
-const LOCAL_TOKEN_FILE = 'local-token';
 
 const READY_TIMEOUT_MS = 90_000;
 const READY_INTERVAL_MS = 1_000;
@@ -77,13 +65,6 @@ export interface LaunchDeps {
   exec: (command: string, args: readonly string[]) => Promise<ExecResult>;
   /** 분리된 자식 프로세스를 띄운다(부모가 끝나도 살아 있게). stdout·stderr는 logPath로 보낸다 */
   spawn: (command: string, args: readonly string[], options: { cwd: string; env: NodeJS.ProcessEnv; logPath: string }) => { pid: number | undefined };
-  /** 브라우저 열기 */
-  open: (url: string) => Promise<void>;
-  /**
-   * 스튜디오가 시작할 때 만들어 둔 로컬 토큰을 읽는다. 없으면(옛 서버, 아직 안 뜬 서버) undefined —
-   * 그러면 브라우저를 토큰 없는 주소로 연다
-   */
-  readLocalToken: () => Promise<string | undefined>;
   /** pid가 살아 있는지(스테일한 서버를 죽이기 전에 확인한다) */
   isAlive: (pid: number) => boolean;
   /** 분리해 띄운 프로세스 그룹에 신호를 보낸다(`studio stop`과 같은 방식) */
@@ -104,35 +85,10 @@ export interface LaunchDeps {
 export interface LaunchOptions {
   mode: LaunchMode;
   port: number;
-  /** 브라우저를 연다(`--web`). false면 열지 않는다 */
-  open: boolean;
   /** 새로 띄울 때 서버 환경에 채울 값. 사용자가 이미 정한 변수는 덮어쓰지 않는다 */
   serverEnv?: Record<string, string>;
   /** 새로 띄운 서버를 기다리는 동안 확인할 때마다 지난 시간(ms)을 알린다(진행 표시용) */
   onWaiting?: (elapsedMs: number) => void;
-  /** true면 브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr). Electron 앱이 이 출력을 읽는다 */
-  json?: boolean;
-}
-
-/** `launch --json`이 stdout에 쓰는 한 줄. Electron 앱이 기대는 계약이라 테스트로 고정한다 */
-export interface LaunchResult {
-  url: string;
-  /**
-   * 브라우저가 열 주소(`<origin>/local-auth#<토큰>`). 토큰 파일이 없으면 url과 같다.
-   * 이 주소를 열면 페이지가 `#` 뒤의 토큰을 본문으로 교환해 터미널용 쿠키를 받고 첫 화면으로 온다
-   */
-  openUrl: string;
-  port: number;
-  /** B_STUDIO_MODE 값(예: claude-code) */
-  mode: string;
-  /** 이번에 띄운 프로세스의 PID. 이미 떠 있었고 PID 파일도 없으면 null */
-  pid: number | null;
-  /** 이번에 새로 띄웠으면 true, 이미 떠 있었으면 false */
-  started: boolean;
-}
-
-export function launchResultJson(result: LaunchResult): string {
-  return JSON.stringify(result);
 }
 
 /** 요청에 쓰는 주소(경로 포함) */
@@ -140,14 +96,9 @@ export function studioUrl(port: number): string {
   return `${studioOrigin(port)}/`;
 }
 
-/** `--json`이 내보내는 주소(끝 슬래시 없음). Electron 앱이 기대는 계약이다 */
+/** 스튜디오 주소(끝 슬래시 없음). 터미널 작업대가 붙는 곳이다 */
 export function studioOrigin(port: number): string {
   return `http://127.0.0.1:${port}`;
-}
-
-/** 첫 화면 본문이 b-studio인지. 헬스에 표지가 없는 옛 서버를 알아볼 때만 쓴다 */
-export function isBStudio(body: string): boolean {
-  return body.includes(STUDIO_MARKER);
 }
 
 /** `/api/health` 본문에 b-studio 표지(`app`)가 있는지 */
@@ -160,30 +111,26 @@ export function isBStudioHealth(body: string): boolean {
   }
 }
 
-/** 더블클릭 앱·`studio launch`가 부르는 명령 인자. 순수 함수라 테스트로 확인한다 */
+/** `studio launch`가 부르는 명령 인자. 순수 함수라 테스트로 확인한다 */
 export function launchArgs(port: number): string[] {
   return ['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', String(port)];
 }
 
 /**
  * 스튜디오를 화면 없이 뒤에서 띄운다. 이미 떠 있으면 재사용하고, Docker가 꺼져 있으면 colima를 켠다.
- * 브라우저는 open일 때만 연다. 실패하면 로그 끝을 보여 주고 종료 코드 1.
+ * 브라우저는 열지 않는다(화면은 터미널 작업대뿐, ADR-186). 실패하면 로그 끝을 보여 주고 종료 코드 1.
  */
 export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promise<number> {
   const url = studioUrl(options.port);
   const origin = studioOrigin(options.port);
-  const json = options.json === true;
-  // --json이면 브라우저를 열지 않는다(--no-open 포함)
-  const open = options.open && !json;
   const envMode = MODE_ENV[options.mode];
-  // 진행 안내는 --json일 때 stderr로 보낸다. stdout에는 JSON 한 줄만 남긴다
-  const info = (text: string) => (json ? console.error(text) : console.log(text));
+  const info = (text: string) => console.log(text);
 
   // 1. 이미 떠 있나 — 새로 띄우지 않고 재사용한다. 단, 중첩 라우트 표가 스테일하면(아래) 재시작한다.
-  // 헬스의 표지로 알아보고, 표지가 없으면(이 표지가 생기기 전의 옛 서버) 첫 화면 본문으로 한 번 더 본다
+  // 헬스의 표지로 알아본다(화면이 없으니 첫 화면은 보지 않는다)
   const existing = await deps.probe(`${origin}${HEALTH_PATH}`);
   if (existing.reachable) {
-    if (!isBStudioHealth(existing.body) && !isBStudio((await deps.probe(url)).body)) {
+    if (!isBStudioHealth(existing.body)) {
       console.error(`포트 ${options.port}에 다른 프로그램이 응답합니다. --port로 다른 포트를 지정하세요.`);
       return 1;
     }
@@ -193,13 +140,8 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
     const nested = await deps.probe(`${origin}${NESTED_HEALTH_PATH}`);
     const stale = !nested.reachable || nested.status !== 200;
     if (!stale) {
-      const openUrl = await localOpenUrl(deps, origin, info);
-      if (json) {
-        console.log(launchResultJson({ url: origin, openUrl, port: options.port, mode: stored.mode, pid: stored.pid, started: false }));
-        return 0;
-      }
-      info(`이미 스튜디오가 ${url}에서 실행 중입니다.`);
-      await finish(deps, open, openUrl, info);
+      info(`이미 스튜디오가 ${url}에서 실행 중입니다 (모드 ${stored.mode}).`);
+      finish(info);
       return 0;
     }
     info(`스튜디오가 떠 있지만 라우트 표가 오래된 것 같아 다시 켭니다 (포트 ${options.port}).`);
@@ -267,28 +209,16 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
     return 1;
   }
 
-  // 6. 열기 / JSON 한 줄
-  const openUrl = await localOpenUrl(deps, origin, info);
-  if (json) {
-    console.log(launchResultJson({ url: origin, openUrl, port: options.port, mode: envMode, pid: child.pid ?? null, started: true }));
-    return 0;
-  }
+  // 6. 안내
   info(`스튜디오가 떴습니다: ${url}`);
   info(`종료: pnpm studio stop · 로그: ${deps.paths.log}`);
-  await finish(deps, open, openUrl, info);
+  finish(info);
   return 0;
 }
 
-/**
- * 브라우저를 열라고 했으면 토큰 주소를 찍고 연다. 아니면 토큰 주소를 찍지 않고(터미널 기록에 남는다) 터미널 작업대와 브라우저로 여는 법을 알린다
- */
-async function finish(deps: LaunchDeps, open: boolean, openUrl: string, info: (text: string) => void): Promise<void> {
-  if (open) {
-    info(openUrl);
-    await deps.open(openUrl);
-    return;
-  }
-  info('터미널 작업대: pnpm studio desk · 브라우저로 보기: pnpm studio launch --web');
+/** 다음에 할 일을 알린다. 토큰은 찍지 않는다(터미널 기록에 남는다) */
+function finish(info: (text: string) => void): void {
+  info('터미널 작업대: pnpm studio desk');
 }
 
 /** base에 없는(또는 빈) 변수만 defaults로 채운다 */
@@ -298,20 +228,6 @@ function withDefaults(base: NodeJS.ProcessEnv, defaults: Record<string, string> 
     if (!env[key]?.trim()) env[key] = value;
   }
   return env;
-}
-
-/**
- * 브라우저를 열 주소를 만든다. 서버가 시작할 때 만들어 둔 로컬 토큰을 파일에서 읽어 교환 페이지 주소를 만들고,
- * 파일이 없으면(옛 서버) 토큰 없는 주소를 돌려주면서 사람에게 알린다.
- * 토큰은 주소의 `#` 뒤에 싣는다 — `#` 뒤는 서버로 가지 않아 개발 서버 로그에 남지 않는다(쿼리는 남는다)
- */
-async function localOpenUrl(deps: LaunchDeps, origin: string, info: (text: string) => void): Promise<string> {
-  const token = await deps.readLocalToken();
-  if (!token) {
-    info('터미널을 쓰려면 스튜디오를 다시 띄우세요');
-    return `${origin}/`;
-  }
-  return `${origin}${LOCAL_AUTH_PATH}#${encodeURIComponent(token)}`;
 }
 
 /** PID 파일에서 pid와 CLI 모드를 읽는다. 없거나 깨졌으면 pid=null, mode=요청한 모드의 B_STUDIO_MODE 값 */
@@ -413,24 +329,9 @@ async function realReadInstallMarker(file: string): Promise<string | undefined> 
   return trimmed || undefined;
 }
 
-/** 서버가 시작할 때 만들어 둔 로컬 토큰. 없으면(옛 서버, 아직 안 뜬 서버) undefined */
-async function realReadLocalToken(file: string): Promise<string | undefined> {
-  const raw = await readFile(file, 'utf8').catch(() => undefined);
-  const trimmed = raw?.trim();
-  return trimmed || undefined;
-}
-
 async function realWriteInstallMarker(file: string, hash: string): Promise<void> {
   await mkdir(path.dirname(file), { recursive: true });
   await writeFile(file, `${hash}\n`, { mode: 0o600 });
-}
-
-function realOpen(platform: NodeJS.Platform) {
-  const command = platform === 'darwin' ? 'open' : 'xdg-open';
-  return (url: string): Promise<void> =>
-    new Promise((resolve) => {
-      execFile(command, [url], () => resolve());
-    });
 }
 
 /** 실제 환경에서 도는 launch deps */
@@ -447,8 +348,6 @@ export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform:
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     exec: realExec,
     spawn: realSpawn,
-    open: realOpen(platform),
-    readLocalToken: () => realReadLocalToken(path.join(launchDir, LOCAL_TOKEN_FILE)),
     lockfileHash: () => realLockfileHash(repoRoot),
     readInstallMarker: () => realReadInstallMarker(installMarker),
     writeInstallMarker: (hash) => realWriteInstallMarker(installMarker, hash),

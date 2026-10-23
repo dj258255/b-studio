@@ -6,16 +6,12 @@ import path from 'node:path';
 /**
  * 이 서버의 로컬 토큰(ADR-173 덧붙임). 개인 PC 모드에는 로그인이 없어서, 같은 컴퓨터의 다른 프로세스가 스튜디오 포트로
  * 보내는 요청을 가릴 수단이 없다. 그래서 서버가 시작할 때 추측할 수 없는 토큰을 하나 만들어 이 사용자만 읽을 수 있는
- * 파일에 두고, 그 토큰을 든 주소로 연 창(쿠키)에서만 터미널 통로를 쓴다(Jupyter와 같은 방식).
+ * 파일에 두고, 그 파일을 읽어 쿠키로 싣는 손님(터미널 작업대 desk)만 터미널 통로를 쓴다(ADR-186: 브라우저 교환 페이지는 없다).
  *
  * 서버 프로세스가 살아 있는 동안 같은 값을 쓴다(개발 서버의 HMR에도 유지되게 globalThis에 둔다). 서버를 다시 띄우면 새 값이고 파일도 덮어쓴다.
  */
 
 export const LOCAL_TOKEN_COOKIE = 'b_studio_local';
-/** 토큰 교환 페이지 경로. 토큰은 주소의 `#` 뒤에 실려 온다(서버 로그와 방문 기록에 남지 않는다) */
-export const LOCAL_TOKEN_PAGE_PATH = '/local-auth';
-/** 교환을 받는 API 경로. 페이지가 토큰을 본문으로 옮겨 보낸다 */
-export const LOCAL_TOKEN_API_PATH = '/api/local-auth';
 const TOKEN_BYTES = 32;
 
 const store = globalThis as typeof globalThis & { __bStudioLocalToken?: string };

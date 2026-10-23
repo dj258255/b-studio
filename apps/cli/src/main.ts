@@ -19,7 +19,7 @@ const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 const USAGE = `사용법:
   studio [--mode local|demo|commandcode|codex] [--port <n>] [--no-notify] [--no-mouse]
   studio up <프로젝트 경로> [--keep]
-  studio launch [--mode local|demo|commandcode|codex] [--port <n>] [--web] [--json]
+  studio launch [--mode local|demo|commandcode|codex] [--port <n>]
   studio stop [--json]
   studio desk [--port <n>] [--no-notify] [--no-mouse]
   studio boot-probe <프로젝트 경로> [--json]
@@ -43,13 +43,10 @@ studio (명령 없이):
   desk를 나가도 스튜디오는 뒤에서 돈다. 끄기는 studio stop
 
 launch:
-  스튜디오를 백그라운드로 띄운다. 이미 떠 있으면 새로 띄우지 않는다. 브라우저는 --web일 때만 연다
+  스튜디오를 화면 없이 백그라운드로 띄운다. 이미 떠 있으면 새로 띄우지 않는다. 화면은 desk다
   준비 로그는 ~/.cache/b-studio/launch/studio.log, PID는 studio.pid에 남는다
   --mode      local(기본, 이 PC의 Claude Code) | demo | commandcode | codex
   --port      기본 3000
-  --web       준비되면 브라우저를 연다(--open과 같다)
-  --json      브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr).
-              {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
 
 desk:
   터미널 하나에서 여러 AI CLI를 나란히 쓴다. 왼쪽은 스페이스(프로젝트), 오른쪽은 세션 카드 화면(Ctrl-b w) 또는 터미널 칸 1·2·4개
@@ -146,9 +143,6 @@ async function main(argv: string[]): Promise<number> {
       json: { type: 'boolean', default: false },
       mode: { type: 'string' },
       port: { type: 'string' },
-      'no-open': { type: 'boolean', default: false },
-      web: { type: 'boolean', default: false },
-      open: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
       'no-notify': { type: 'boolean', default: false },
       'no-mouse': { type: 'boolean', default: false },
@@ -184,8 +178,7 @@ async function main(argv: string[]): Promise<number> {
     }
     const parsed = modeAndPort(values.mode, values.port);
     if (typeof parsed === 'number') return parsed;
-    // 브라우저는 --web(또는 --open)일 때만 연다. --no-open은 예전 인자라 받기만 한다
-    return launch({ ...parsed, open: (values.web || values.open) && !values['no-open'], json: values.json });
+    return launch(parsed);
   }
 
   if (command === 'desk') {
