@@ -189,6 +189,23 @@ describe('스튜디오 손님', () => {
     expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/limits', '/api/usage/limits?refresh=1']);
   });
 
+  it('여러 AI 비교의 목록·보기·만들기·승자·지우기를 fleets API로 보낸다(#892)', async () => {
+    handler = (_req, res) => res.end('[]');
+    const client = new StudioClient({ origin, token: 't' });
+    await client.fleets();
+    await client.fleet('f 1');
+    await client.createFleet({ projectId: 'shop', request: '검색', candidates: [{ backend: 'codex', accountId: 'acct-pio' }, { backend: 'claude-code', model: 'sonnet' }] });
+    await client.chooseFleetWinner('f1', 's1');
+    await client.deleteFleet('f1');
+    expect(seen.map((entry) => `${entry.method} ${entry.url} ${entry.body}`)).toEqual([
+      'GET /api/fleets ',
+      'GET /api/fleets/f%201 ',
+      'POST /api/fleets {"projectId":"shop","request":"검색","candidates":[{"backend":"codex","accountId":"acct-pio"},{"backend":"claude-code","model":"sonnet"}]}',
+      'POST /api/fleets/f1/winner {"sessionId":"s1"}',
+      'POST /api/fleets/f1/delete ',
+    ]);
+  });
+
   it('묶음 통로를 열어 세션별 메시지를 넘기고, 끊으면 끝난다', async () => {
     handler = (_req, res) => {
       res.setHeader('content-type', 'text/event-stream');

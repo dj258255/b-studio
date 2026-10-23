@@ -6,7 +6,7 @@ import { spaceScreen } from './cards';
 import { spaceRect } from './render';
 import { sidebarRows } from './sidebar';
 import { spriteFromRows, type Sprite } from './sprite';
-import type { DeskAccount, DeskAccountLimits, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskFleet, DeskFleetCandidate, DeskFleetMember, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -1147,5 +1147,150 @@ describe('desk 작업대: 사용량(#889)', () => {
     expect(ctx.app.state.usage?.error).toBe('스튜디오가 500으로 답했습니다');
     expect(ctx.app.state.limits?.a).toBeDefined();
     expect(ctx.io.all).toContain('스튜디오가 500으로 답했습니다');
+  });
+});
+
+describe('desk 작업대: 여러 AI 비교(#892)', () => {
+  const member = (sessionId: string, patch: Partial<DeskFleetMember> = {}): DeskFleetMember => ({ sessionId, backend: 'claude-code', label: '계정 기본', provider: 'claude-code', status: 'done', ...patch });
+  const fleetOf = (patch: Partial<DeskFleet> = {}): DeskFleet => ({
+    id: 'f1',
+    projectId: 'p1',
+    projectName: 'shop',
+    request: '검색을 추가해줘',
+    createdAt: '2026-10-23T00:00:00Z',
+    members: [member('m1'), member('m2', { backend: 'codex', status: 'running' })],
+    ...patch,
+  });
+
+  /** 비교 API까지 있는 가짜 스튜디오 */
+  class FleetClient extends FakeClient {
+    list: DeskFleet[] = [fleetOf()];
+    created: Array<{ projectId: string; request: string; candidates: DeskFleetCandidate[] }> = [];
+    winners: Array<[string, string]> = [];
+    deleted: string[] = [];
+    createError: string | undefined;
+    async fleets() {
+      return this.list;
+    }
+    async fleet(id: string) {
+      const found = this.list.find((entry) => entry.id === id);
+      if (!found) throw new StudioRequestError('Agent Fleet을 찾을 수 없습니다', 404);
+      return found;
+    }
+    async createFleet(input: { projectId: string; request: string; candidates: DeskFleetCandidate[] }) {
+      this.created.push(input);
+      if (this.createError) throw new StudioRequestError(this.createError, 409);
+      const made = fleetOf({ id: 'f2', request: input.request, members: [member('n1'), member('n2')] });
+      this.list = [made, ...this.list];
+      return made;
+    }
+    async chooseFleetWinner(id: string, sessionId: string) {
+      this.winners.push([id, sessionId]);
+      const chosen = { ...(await this.fleet(id)), winnerSessionId: sessionId };
+      this.list = this.list.map((entry) => (entry.id === id ? chosen : entry));
+      return chosen;
+    }
+    async deleteFleet(id: string) {
+      this.deleted.push(id);
+      this.list = this.list.filter((entry) => entry.id !== id);
+    }
+  }
+
+  function fleetSetup(items: DeskItem[] = [item('a'), item('m1'), item('m2', { backend: 'codex' })], options: DeskAppOptions = {}) {
+    const client = new FleetClient(items);
+    const io = new FakeIo();
+    const app = new DeskApp(client, items, io, options);
+    const done = app.run();
+    return { client, io, app, done };
+  }
+
+  it('Ctrl-b f로 목록을 받아 그리고, Enter로 비교를 연 뒤 a로 참가자 둘을 칸 두 개에 나란히 연다', async () => {
+    const ctx = fleetSetup();
+    ctx.io.type('\x02f');
+    await tick();
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'list', loading: false });
+    expect(ctx.io.all).toContain('검색을 추가해줘');
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'detail', detail: 'f1' });
+    ctx.io.type('a');
+    await tick();
+    expect(ctx.app.state.fleets).toBeUndefined();
+    expect(ctx.app.state).toMatchObject({ layout: 2, slots: ['m1', 'm2', undefined, undefined], focus: 0 });
+    expect(ctx.client.of('open').map((call) => call.id).sort()).toEqual(['m1', 'm2']);
+  });
+
+  it('새 비교: 프로젝트와 허용된 AI·계정을 받아 고르고, 보내면 만든 비교를 보기로 연다', async () => {
+    const ctx = fleetSetup();
+    ctx.client.allowed = ['claude-code', 'codex'];
+    ctx.client.accountList = [
+      { id: 'codex', name: 'Codex', backend: 'codex', builtin: true },
+      { id: 'acct-pio', name: '피오', backend: 'codex', configDir: '/home/me/.b-studio/accounts/codex-1' },
+    ];
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('n');
+    await tick();
+    expect(ctx.app.state.fleets?.form).toMatchObject({ loading: false, projects: [{ id: 'p1', name: 'shop' }] });
+    expect(ctx.app.state.fleets?.form?.options.map((option) => option.label)).toEqual(['Claude', 'Codex · Codex', 'Codex · 피오']);
+    // 요청을 쓰고 Claude와 Codex · 피오를 더해 보낸다
+    ctx.io.type('\t검색\t\r\x1b[B\x1b[B\r\t\t\t\r');
+    await tick();
+    expect(ctx.client.created).toEqual([{ projectId: 'p1', request: '검색', candidates: [{ backend: 'claude-code' }, { backend: 'codex', accountId: 'acct-pio' }] }]);
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'detail', detail: 'f2' });
+  });
+
+  it('스튜디오가 비교를 만들지 못하면 입력을 그대로 두고 까닭을 보인다', async () => {
+    const ctx = fleetSetup();
+    ctx.client.createError = '로컬 Codex를 쓸 수 없습니다: 로그인이 필요합니다';
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('n');
+    await tick();
+    ctx.io.type('\t검색\t\r\r\t\t\t\r');
+    await tick();
+    expect(ctx.app.state.fleets?.form).toMatchObject({ sending: false, error: expect.stringContaining('로그인이 필요합니다'), request: '검색' });
+  });
+
+  it('w로 승자를 묻고 y면 고르며, d로 묻고 y면 지운 뒤 목록으로 돌아간다', async () => {
+    const ctx = fleetSetup();
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('\r');
+    await tick();
+    ctx.io.type('wy');
+    await tick();
+    expect(ctx.client.winners).toEqual([['f1', 'm1']]);
+    expect(ctx.app.state.fleets?.fleets[0]?.winnerSessionId).toBe('m1');
+    ctx.io.type('dy');
+    await tick();
+    expect(ctx.client.deleted).toEqual(['f1']);
+    expect(ctx.app.state.fleets).toMatchObject({ mode: 'list', fleets: [] });
+  });
+
+  it('진행 중인 참가자가 있으면 보기를 몇 초마다 다시 받고, 닫으면 멈춘다', async () => {
+    const ctx = fleetSetup();
+    ctx.io.type('\x02f');
+    await tick();
+    ctx.io.type('\r');
+    await tick();
+    ctx.client.list = [fleetOf({ members: [member('m1'), member('m2', { backend: 'codex', status: 'done', summary: '검증 통과' })] })];
+    await tick(3_100);
+    expect(ctx.app.state.fleets?.fleets[0]?.members[1]?.status).toBe('done');
+    const spy = vi.spyOn(ctx.client, 'fleet');
+    ctx.io.type('\x1b');
+    await tick(30);
+    ctx.io.type('\x1b');
+    await tick(10_000);
+    expect(ctx.app.state.fleets).toBeUndefined();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('비교 API가 없는 옛 스튜디오면 열지 않고 알린다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02f');
+    await tick();
+    expect(ctx.app.state.fleets).toBeUndefined();
+    expect(ctx.app.state.message).toContain('여러 AI 비교');
   });
 });

@@ -6,6 +6,7 @@ import { spaceScreen } from './cards';
 import { usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
+import { fleetsHint, renderFleets } from './fleets';
 import { renderSettings, settingsHint } from './settings';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
@@ -69,6 +70,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
   ['g', '설정: 계정(더하기·로그인·그림), 라우팅 규칙, 화면, 키·알림. 스페이스·사용량 화면에서는 g만, Esc로 닫으면 연 화면으로'],
+  ['f', '여러 AI 비교: 같은 요청을 2~4개 AI(계정·모델)에 보내 카드로 나란히 보고 승자를 고름. 참가자를 칸에 나란히 엶. 스페이스·사용량 화면에서는 f만'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
@@ -167,7 +169,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  const view = state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const view = state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
   const where = sessions[state.selected]?.projectName;
   lines.push(
     onBackground(
@@ -190,6 +192,16 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
     lines.push(fit(relabel(state, settingsHint(state.settings)), cols));
+    return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
+  }
+
+  if (state.fleets) {
+    // 여러 AI 비교 화면(#892)도 설정 화면처럼 사이드바 없이 본문 전체를 쓴다
+    const context = { items: state.items, theme, sprites: state.sprites ?? {}, spriteClock: state.spriteClock ?? 0, ...(state.kitty ? { kitty: state.kitty } : {}) };
+    const body = renderFleets(state.fleets, context, { w: cols, h: Math.max(0, rows - 2) });
+    lines.push(...body.lines);
+    while (lines.length < rows - 1) lines.push(' '.repeat(cols));
+    lines.push(fit(relabel(state, fleetsHint(state.fleets)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 

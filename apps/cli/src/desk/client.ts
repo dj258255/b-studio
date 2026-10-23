@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
@@ -171,6 +171,30 @@ export class StudioClient {
 
   async cancelLogin(id: string): Promise<DeskLoginProgress> {
     return (await this.#request<{ progress: DeskLoginProgress }>('DELETE', `/api/ai-accounts/${encodeURIComponent(id)}/login`)).progress;
+  }
+
+  /** 여러 AI 비교 목록(#892). 최근 것부터 30개 */
+  fleets(): Promise<DeskFleet[]> {
+    return this.#request('GET', '/api/fleets');
+  }
+
+  fleet(id: string): Promise<DeskFleet> {
+    return this.#request('GET', `/api/fleets/${encodeURIComponent(id)}`);
+  }
+
+  /** 같은 요청을 여러 AI에 보낸다. 참가자는 2~4이고, 스튜디오가 CLI 로그인을 먼저 확인한다(실패하면 비교를 만들지 않는다) */
+  createFleet(input: { projectId: string; request: string; candidates: DeskFleetCandidate[] }): Promise<DeskFleet> {
+    return this.#request('POST', '/api/fleets', input);
+  }
+
+  /** 승자를 고른다. 검증을 통과한 참가자만 된다 */
+  chooseFleetWinner(id: string, sessionId: string): Promise<DeskFleet> {
+    return this.#request('POST', `/api/fleets/${encodeURIComponent(id)}/winner`, { sessionId });
+  }
+
+  /** 비교를 지운다. 참가자 세션도 함께 지운다(진행 중인 참가자가 있으면 스튜디오가 409로 막는다) */
+  async deleteFleet(id: string): Promise<void> {
+    await this.#request('POST', `/api/fleets/${encodeURIComponent(id)}/delete`);
   }
 
   preview(request: string): Promise<DeskPreview> {

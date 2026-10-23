@@ -698,3 +698,37 @@ describe('사용량 화면 키(#889)', () => {
     expect(handleInput(usage(), '?').state.help).toBe(true);
   });
 });
+
+describe('여러 AI 비교 화면 키(#892)', () => {
+  const base = (): DeskState => ({ ...initialState(), items: [item('a')], slots: ['a', undefined, undefined, undefined] });
+
+  it('앞글쇠 다음 f는 비교 화면을 열고 목록을 청한다. 이어 친 키는 비교 화면이 받는다(CLI로 가지 않는다)', () => {
+    const { state, effects } = handleInput(base(), '\x02fxyz');
+    expect(effects).toEqual([{ type: 'fleets-open' }]);
+    expect(state.fleets?.mode).toBe('list');
+  });
+
+  it('스페이스·사용량 화면에서는 앞글쇠 없이 f로 연다', () => {
+    expect(handleInput({ ...base(), view: 'space' }, 'f').effects).toEqual([{ type: 'fleets-open' }]);
+    expect(handleInput({ ...base(), view: 'usage', usage: { accounts: [] } }, 'f').effects).toEqual([{ type: 'fleets-open' }]);
+  });
+
+  it('비교 화면의 할 일은 fleets 할 일로 내고, Esc로 닫는다', () => {
+    const opened = handleInput(base(), '\x02f').state;
+    const loaded = { ...opened, fleets: { ...opened.fleets!, loading: false } };
+    expect(handleInput(loaded, 'n').effects).toEqual([{ type: 'fleets', effect: { type: 'form' } }]);
+    const closed = handleInput(loaded, '\x1b', true);
+    expect(closed.state.fleets).toBeUndefined();
+    expect(closed.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }]);
+  });
+
+  it('붙여넣기는 새 비교의 요청 칸에 들어가고, 마우스는 버린다', () => {
+    const opened = handleInput(base(), '\x02f').state;
+    const form = handleInput({ ...opened, fleets: { ...opened.fleets!, loading: false } }, 'n').state;
+    const ready = { ...form, fleets: { ...form.fleets!, form: { ...form.fleets!.form!, loading: false, field: 'request' as const } } };
+    const pasted = handleInput(ready, '\x1b[200~검색 추가\x1b[201~');
+    expect(pasted.effects).toEqual([]);
+    expect(pasted.state.fleets?.form?.request).toBe('검색 추가');
+    expect(handleInput(ready, '\x1b[<0;5;5M').effects).toEqual([]);
+  });
+});

@@ -3,7 +3,7 @@
  *
  * 앞글쇠는 Ctrl-b(tmux·herdr와 같다). 앞글쇠가 없으면 친 글자는 고른 칸의 CLI로 그대로 간다.
  * 앞글쇠 다음: 숫자(칸 고르기), o(다음 칸), ↑↓(사이드바, 앞글쇠가 이어지고 그동안 Ctrl-b는 새 앞글쇠다), Enter(고른 세션을 칸에 열기), n(새 요청), l(칸 수),
- * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), g(설정 화면, #890), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로),
+ * z(고른 칸 크게 보기), s(사이드바 숨기기), [(복사 모드), ?(도움말), g(설정 화면, #890), f(여러 AI 비교, #892), x(칸 비우기), q(나가기), Ctrl-b(Ctrl-b를 CLI로),
  * p(고른 세션 멈추기), r(멈춘 세션 이어서 작업), ,(고른 세션 이름 바꾸기), c(그냥 셸 칸, #873). 새 요청 입력 중에는 글자가 입력으로 간다.
  * 복사 모드·도움말·확인·이름 입력 중에는 키가 CLI로 가지 않는다(#863, #864).
  * 붙여넣기(bracketed paste 표지 사이)는 앞글쇠를 보지 않고 내용 그대로 칸에 간다(#860). 조각 끝에서 끊긴 이스케이프 열은 다음 조각까지 기다린다.
@@ -13,7 +13,9 @@
  * 사용량 화면(#889, 앞글쇠 다음 u)에서는 앞글쇠 없이 ↑↓로 계정을 고르고 r로 다시 읽는다. Esc는 연 화면(스페이스·칸)으로 돌아간다.
  * 설정 화면(#890, 앞글쇠 다음 g, 스페이스·사용량 화면에서는 g만)은 그 화면들 위에 열린다. 열려 있으면 키와 붙여넣기는 모두 설정 화면이 받고(settings.ts),
  * Esc로 닫으면 아래 화면으로 돌아간다. 입력 칸이나 창이 없을 때의 u·w는 설정을 닫고 사용량 화면·스페이스 화면으로 간다
+ * 여러 AI 비교 화면(#892, 앞글쇠 다음 f, 스페이스·사용량 화면에서는 f만)도 그 위에 열린다. 열려 있으면 키와 붙여넣기는 모두 비교 화면이 받는다(fleets.ts)
  */
+import { fleetsKey, fleetsPaste, openFleets, type FleetsEffect, type FleetsState } from './fleets';
 import type { KittyImages } from './kitty';
 import type { PaneLayout } from './screen';
 import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type SettingsState } from './settings';
@@ -141,6 +143,8 @@ export interface DeskState {
   kitty?: KittyImages;
   /** 설정 화면(#890). 있으면 본문 전체가 설정 화면이다 */
   settings?: SettingsState;
+  /** 여러 AI 비교 화면(#892). 있으면 본문 전체가 비교 화면이다 */
+  fleets?: FleetsState;
 }
 
 export interface UsageState {
@@ -183,7 +187,11 @@ export type Effect =
   /** 설정 화면을 연다(#890). 계정·규칙은 desk가 받아 채운다 */
   | { type: 'settings-open' }
   /** 설정 화면이 낸 할 일 */
-  | { type: 'settings'; effect: SettingsEffect };
+  | { type: 'settings'; effect: SettingsEffect }
+  /** 여러 AI 비교 화면을 연다(#892). 목록은 desk가 받아 채운다 */
+  | { type: 'fleets-open' }
+  /** 비교 화면이 낸 할 일 */
+  | { type: 'fleets'; effect: FleetsEffect };
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -250,7 +258,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.fleets) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -275,6 +283,14 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       const result = settingsKey(settings, key);
       state = { ...state, settings: result.state };
       for (const effect of result.effects) effects.push({ type: 'settings', effect });
+      continue;
+    }
+    if (state.fleets) {
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = fleetsKey(state.fleets, key);
+      state = { ...state, fleets: result.state };
+      for (const effect of result.effects) effects.push({ type: 'fleets', effect });
       continue;
     }
     if (state.help) {
@@ -358,6 +374,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
   // 설정 화면이 열려 있으면 그 입력 칸에 넣는다(#890)
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
+  // 비교 화면이 열려 있으면 새 비교의 입력 칸에 넣는다(#892)
+  if (state.fleets) return { ...next, fleets: fleetsPaste(state.fleets, content) };
   // 복사 모드나 도움말을 보는 중, 세션 조작을 묻는 중, 스페이스·사용량 화면에서 붙여 넣은 글은 CLI로 보내지 않는다
   if (state.copy || state.help || state.confirm || (state.view !== undefined && !state.rename && !state.prompt)) return next;
   if (state.rename) {
@@ -449,6 +467,11 @@ function commandKey(state: DeskState, key: string, effects: Effect[]): DeskState
     effects.push({ type: 'settings-open' });
     return { ...done, settings: openSettings({ config: {}, sprites: [] }), prompt: undefined };
   }
+  if (key === 'f') {
+    // 바로 연다(이어서 친 키가 비교 화면으로 가게). 목록은 desk가 받아 채운다
+    effects.push({ type: 'fleets-open' });
+    return { ...done, fleets: openFleets(), prompt: undefined };
+  }
   if (key === '[') {
     const id = state.slots[state.focus];
     if (!id) return { ...done, message: '빈 칸에는 복사 모드가 없습니다' };
@@ -532,7 +555,7 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
-  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g') return commandKey(base, key, effects);
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'f') return commandKey(base, key, effects);
   return base;
 }
 
@@ -555,7 +578,7 @@ function usageKey(state: DeskState, key: string, effects: Effect[]): DeskState {
   if (key === ESC || key === 'q' || key === 'u') return closeUsage(base);
   if (key === 'w') return { ...base, view: 'space', usageBack: undefined };
   if (key === '?') return { ...base, help: true };
-  if (key === 'n' || key === 'g') return commandKey(base, key, effects);
+  if (key === 'n' || key === 'g' || key === 'f') return commandKey(base, key, effects);
   return base;
 }
 
