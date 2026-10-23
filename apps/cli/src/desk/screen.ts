@@ -79,11 +79,13 @@ export function fit(text: string, width: number): string {
  * 화면(cols×rows)을 나눈다: 맨 위 한 줄은 머리, 맨 아래 한 줄은 안내, 그 사이 왼쪽은 사이드바, 구분선 한 칸, 오른쪽은 칸.
  * 칸은 1개, 좌우 2개, 2×2 4개다. 칸 사이에도 구분선 한 줄을 둔다. 칸마다 첫 줄은 칸 머리이고 나머지가 터미널이다
  */
-export function computeLayout(cols: number, rows: number, layout: PaneLayout): { sidebar: Rect; panes: Rect[] } {
+export function computeLayout(cols: number, rows: number, layout: PaneLayout, options: { sidebar?: boolean } = {}): { sidebar: Rect; panes: Rect[] } {
   const top = 1;
   const height = Math.max(1, rows - 2);
-  const sidebarWidth = Math.max(1, Math.min(SIDEBAR_MAX, Math.floor(cols * 0.3)));
-  const x0 = sidebarWidth + 1;
+  // 사이드바를 숨기면 구분선도 없이 칸이 왼쪽 끝부터 쓴다(#863)
+  const showSidebar = options.sidebar !== false;
+  const sidebarWidth = showSidebar ? Math.max(1, Math.min(SIDEBAR_MAX, Math.floor(cols * 0.3))) : 0;
+  const x0 = showSidebar ? sidebarWidth + 1 : 0;
   const main = Math.max(1, cols - x0);
   const sidebar = { x: 0, y: top, w: sidebarWidth, h: height };
   if (layout === 1) return { sidebar, panes: [{ x: x0, y: top, w: main, h: height }] };
@@ -103,6 +105,18 @@ export function computeLayout(cols: number, rows: number, layout: PaneLayout): {
       ...columns.map((column) => ({ ...column, y: top + upper + 1, h: lower })),
     ],
   };
+}
+
+/** 화면에 놓는 칸과 그 자리. 크게 보기(zoom)면 고른 칸 하나만 1칸 배치의 자리에 놓는다. 가려진 칸의 세션은 계속 돈다 */
+export function placePanes(
+  cols: number,
+  rows: number,
+  view: { layout: PaneLayout; focus: number; zoom?: boolean; sidebarHidden?: boolean },
+): { sidebar: Rect; panes: Array<{ slot: number; rect: Rect }> } {
+  const zoomed = view.zoom === true;
+  const layout = computeLayout(cols, rows, zoomed ? 1 : view.layout, { sidebar: !view.sidebarHidden });
+  if (zoomed) return { sidebar: layout.sidebar, panes: [{ slot: view.focus, rect: layout.panes[0]! }] };
+  return { sidebar: layout.sidebar, panes: layout.panes.map((rect, slot) => ({ slot, rect })) };
 }
 
 /** 칸 안의 터미널 크기(머리 한 줄을 뺀다) */
