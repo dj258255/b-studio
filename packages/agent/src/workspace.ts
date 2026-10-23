@@ -457,7 +457,7 @@ export class Workspace {
     // 존재하는 가장 가까운 상위 경로의 실제 위치로 심볼릭 링크 탈출을 막는다(루트 자체가 링크를 거쳐 있는 경우까지 본다)
     const existing = await nearestExisting(absolute);
     if (mustExist && existing !== absolute) throw new WorkspaceError(`${file}: 파일이 없습니다`);
-    const [realRoot, realExisting] = await Promise.all([realpath(/*turbopackIgnore: true*/ this.root), realpath(/*turbopackIgnore: true*/ existing)]);
+    const [realRoot, realExisting] = await Promise.all([realpath(this.root), realpath(existing)]);
     if (!isInside(realRoot, realExisting)) throw new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
 
     // 운영체제가 알려 주는 실제 저장 이름으로 한 번 더 본다. 위의 이름 검사는 우리가 아는 변형(대소문자·정규화)만 맞추므로,
@@ -465,7 +465,7 @@ export class Workspace {
     // (promises의 realpath에는 native가 없어 동기 판본을 쓴다. 경로 하나를 푸는 짧은 호출이다)
     const native = (target: string, fallback: string): string => {
       try {
-        return realpathSync.native(/*turbopackIgnore: true*/ target);
+        return realpathSync.native(target);
       } catch {
         return fallback;
       }
@@ -605,7 +605,7 @@ export async function writeNoFollowInside(root: string, absolute: string, data: 
  *  - 풀린 경로의 파일이 연 파일과 다르면(장치·inode) 거절한다(바꿨다가 되돌린 경우. 연 것은 바깥 파일이다)
  */
 async function assertOpenedInside(root: string, absolute: string, label: string, opened: { dev: number; ino: number }): Promise<void> {
-  const [realRoot, real] = await Promise.all([realpath(/*turbopackIgnore: true*/ root), realpath(/*turbopackIgnore: true*/ absolute).catch(() => undefined)]);
+  const [realRoot, real] = await Promise.all([realpath(root), realpath(absolute).catch(() => undefined)]);
   const current = real === undefined ? undefined : await lstat(real).catch(() => undefined);
   if (real === undefined || !isInside(realRoot, real) || !current || current.dev !== opened.dev || current.ino !== opened.ino) {
     throw new WorkspaceError(`${label}: 연 파일이 프로젝트 밖에 있습니다(경로를 확인한 뒤 링크로 바뀌었습니다)`);

@@ -62,7 +62,7 @@ interface IgnoreFile {
 
 export function repeatedActionsStateDir(): string {
   return path.resolve(
-    /* turbopackIgnore: true */ process.env.B_STUDIO_REPEATED_ACTIONS_DIR ?? path.join(homedir(), '.cache', 'b-studio', 'repeated-actions'),
+    process.env.B_STUDIO_REPEATED_ACTIONS_DIR ?? path.join(homedir(), '.cache', 'b-studio', 'repeated-actions'),
   );
 }
 

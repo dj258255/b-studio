@@ -8903,6 +8903,7 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 ### 남은 일
 - Next 의존(`next`, `react`, `next.config.ts`, typecheck의 `next typegen`, 라우트의 `RouteContext` 전역 타입, Dockerfile의 standalone, CI의 스튜디오 빌드)은 화면을 지우는 #896과 함께 다음 단계에서 걷는다. 지금 걷으면 남은 화면이 깨진다.
 - 운영 이미지(apps/studio/Dockerfile)는 아직 `next build`의 standalone으로 돈다. 다음 단계에서 이 서버로 바꾼다(이미지에 tsx와 소스를 넣거나 한 파일로 묶는다).
+- (덧붙임, #897 마무리) 위 둘을 걷었다. `next`·`react`·`react-dom`·`eslint-config-next`와 `next.config.ts`·`proxy.ts`·`instrumentation.ts`를 지웠고, `RouteContext`는 `apps/studio/route-context.d.ts`가 경로 패턴에서 params 타입을 푼다. lint는 Next 설정이 쓰던 typescript-eslint 권장 규칙을 그대로 쓴다. `build`는 라우트 표가 폴더와 같은지만 본다(`gen-routes.ts --check`). 운영 이미지는 설치한 의존성과 소스를 옮겨 tsx로 서버를 띄운다. 묶지 않아 이미지가 크지만(로컬 빌드 1.84GB) 새 도구가 필요 없다.
 
 ### 감수한 트레이드오프
 - tsx가 처음 불리는 라우트를 그때 변환하므로 경로마다 첫 응답이 수십~수백 ms 늦다. 그래도 `next dev`의 첫 컴파일보다 짧다.

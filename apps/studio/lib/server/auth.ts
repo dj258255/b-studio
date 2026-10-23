@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 
 /**
- * 스튜디오 접근 인증. proxy.ts가 모든 요청 앞에서 쓰므로 무거운 서버 모듈(에이전트, 샌드박스)을 불러오지 않는다.
+ * 스튜디오 접근 인증. 스튜디오 서버(server/app.ts)가 모든 요청 앞에서 쓰므로 무거운 서버 모듈(에이전트, 샌드박스)을 불러오지 않는다.
  * none: 인증 없음(루프백에 띄운 개인 PC용), token: 운영자가 준 접근 토큰으로 로그인, proxy: 사내 SSO 프록시가 넣은 사용자 헤더
  */
 export type AuthMode = 'none' | 'token' | 'proxy';
@@ -42,7 +42,7 @@ export const NO_REVOCATIONS: Revocations = { sessions: {}, users: {} };
 export const SESSION_COOKIE = 'b_studio_session';
 /** 미리보기 게이트웨이가 미리보기 호스트마다 주는 쿠키 */
 export const PREVIEW_COOKIE = 'b_studio_preview';
-/** proxy.ts가 확인한 사용자를 라우트에 넘기는 내부 헤더. 브라우저가 보낸 같은 이름의 헤더는 proxy.ts가 지운다 */
+/** 스튜디오 서버가 확인한 사용자를 라우트에 넘기는 내부 헤더. 밖에서 보낸 같은 이름의 헤더는 서버가 지운다 */
 export const USER_HEADER = 'x-b-studio-user';
 export const PROXY_SECRET_HEADER = 'x-b-studio-proxy-secret';
 export const LOCAL_USER = 'local';
@@ -356,7 +356,7 @@ export interface IncomingRequest {
 }
 
 /**
- * proxy.ts가 요청마다 내리는 판단. 화면이 아닌 곳에서 시험할 수 있게 NextRequest에 기대지 않는다.
+ * 스튜디오 서버가 요청마다 내리는 판단. 따로 시험할 수 있게 요청 객체가 아니라 필요한 값만 받는다.
  * 무효화 기록은 token 모드에서 사용자를 확인할 때만 읽고, 읽지 못하면 인증을 건너뛰지 않고 막는다
  */
 export function decideRequest(

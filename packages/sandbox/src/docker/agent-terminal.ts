@@ -329,7 +329,7 @@ export function agentGatewayFiles(address: AgentGatewayAddress): Record<string, 
 
 /** 관문 설정을 두는 호스트 폴더의 상위 폴더. 기본 ~/.cache/b-studio/agent-gateway */
 export function defaultAgentGatewayRoot(): string {
-  return path.resolve(/*turbopackIgnore: true*/ process.env.B_STUDIO_AGENT_GATEWAY_DIR ?? path.join(homedir(), '.cache/b-studio/agent-gateway'));
+  return path.resolve(process.env.B_STUDIO_AGENT_GATEWAY_DIR ?? path.join(homedir(), '.cache/b-studio/agent-gateway'));
 }
 
 export function gatewayDirFor(sandboxId: string, root: string): string {

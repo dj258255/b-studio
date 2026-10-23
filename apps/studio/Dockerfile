@@ -4,8 +4,7 @@ FROM node:22-bookworm-slim AS build
 
 RUN corepack enable
 WORKDIR /repo
-ENV NEXT_TELEMETRY_DISABLED=1 \
-    COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
+ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     npm_config_update_notifier=false \
     npm_config_store_dir=/pnpm/store
 
@@ -20,6 +19,7 @@ COPY packages/spec/package.json packages/spec/
 RUN --mount=type=cache,id=b-studio-pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter "@b-studio/studio..."
 COPY packages ./packages
 COPY apps/studio ./apps/studio
+# 서버는 빌드 결과물 없이 tsx로 TypeScript를 바로 돌린다(ADR-188). build는 라우트 표가 app 폴더와 같은지만 본다
 RUN pnpm --filter @b-studio/studio build
 
 # 정적 링크된 docker CLI와 compose·buildx 플러그인만 가져온다. 운영 배포 빌드는 BuildKit 캐시 마운트를 쓰므로 buildx가 필요하다
@@ -39,15 +39,18 @@ COPY --from=docker-cli /usr/local/libexec/docker/cli-plugins /usr/local/libexec/
 WORKDIR /app
 # --network host로 띄우므로 기본은 호스트 루프백에만 연다. 다른 PC에 공개할 때는 인증을 켜고 HOSTNAME을 바꾼다
 ENV NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=127.0.0.1 \
     PORT=3000 \
     B_STUDIO_PROJECTS_DIR=/projects
 
-COPY --from=build /repo/apps/studio/.next/standalone ./
-COPY --from=build /repo/apps/studio/.next/static ./apps/studio/.next/static
+# 설치한 의존성(네이티브 모듈 포함)과 서버·워크스페이스 패키지 원본을 그대로 옮긴다
+COPY --from=build /repo/package.json /repo/pnpm-workspace.yaml ./
+COPY --from=build /repo/node_modules ./node_modules
+COPY --from=build /repo/packages ./packages
+COPY --from=build /repo/apps/studio ./apps/studio
 
 EXPOSE 3000
 HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=3 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:' + (process.env.PORT || 3000) + '/api/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-CMD ["node", "apps/studio/server.js"]
+# 포트·주소는 PORT·HOSTNAME 환경 변수로 받는다(server/main.ts)
+CMD ["apps/studio/node_modules/.bin/tsx", "--tsconfig", "apps/studio/tsconfig.json", "apps/studio/server/main.ts"]
