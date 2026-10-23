@@ -47,7 +47,8 @@ launch:
   준비 로그는 ~/.cache/b-studio/launch/studio.log, PID는 studio.pid에 남는다
   --mode      local(기본, 이 PC의 Claude Code) | demo | commandcode | codex
   --port      기본 3000
-  --web       준비되면 브라우저를 연다(--open과 같다)
+  --web       준비되면 브라우저를 연다(--open과 같다). 브라우저 화면이 있는 next dev로 띄운다
+  --next      브라우저를 열지 않아도 next dev로 띄운다(기본은 Next 없이 도는 가벼운 Node 서버)
   --json      브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr).
               {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
 
@@ -149,6 +150,7 @@ async function main(argv: string[]): Promise<number> {
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
       web: { type: 'boolean', default: false },
+      next: { type: 'boolean', default: false },
       open: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
       'no-notify': { type: 'boolean', default: false },
@@ -186,7 +188,7 @@ async function main(argv: string[]): Promise<number> {
     const parsed = modeAndPort(values.mode, values.port);
     if (typeof parsed === 'number') return parsed;
     // 브라우저는 --web(또는 --open)일 때만 연다. --no-open은 예전 인자라 받기만 한다
-    return launch({ ...parsed, open: (values.web || values.open) && !values['no-open'], json: values.json });
+    return launch({ ...parsed, open: (values.web || values.open) && !values['no-open'], json: values.json, ...(values.next ? { server: 'next' as const } : {}) });
   }
 
   if (command === 'desk') {

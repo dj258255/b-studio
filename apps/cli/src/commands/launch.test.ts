@@ -105,7 +105,9 @@ describe('launch 유틸', () => {
     expect(MODE_ENV).toEqual({ local: 'claude-code', demo: 'demo', commandcode: 'commandcode', codex: 'codex' });
     expect(studioUrl(3123)).toBe('http://127.0.0.1:3123/');
     expect(studioOrigin(3123)).toBe('http://127.0.0.1:3123');
-    expect(launchArgs(3000)).toEqual(['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', '3000']);
+    // 기본은 Next 없이 도는 Node 서버(tsx), 브라우저 화면이 필요할 때만 next dev
+    expect(launchArgs(3000)).toEqual(['exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--hostname', '127.0.0.1', '--port', '3000']);
+    expect(launchArgs(3000, 'next')).toEqual(['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', '3000']);
     expect(isBStudio('<title>b-studio</title>')).toBe(true);
     expect(isBStudio('<title>다른 앱</title>')).toBe(false);
     expect(HEALTH_PATH).toBe('/api/health');
@@ -239,7 +241,8 @@ describe('runLaunch', () => {
     expect(h.spawns).toHaveLength(1);
     const spawn = h.spawns[0]!;
     expect(spawn.command).toBe('pnpm');
-    expect(spawn.args).toEqual(launchArgs(3123));
+    // 브라우저를 열면 화면이 있는 next dev로 띄운다
+    expect(spawn.args).toEqual(launchArgs(3123, 'next'));
     expect(spawn.cwd).toBe('/repo');
     expect(spawn.logPath).toBe(path.join(dir, 'studio.log'));
     // 모드는 B_STUDIO_MODE로, 사용자 환경 변수는 그대로 넘긴다
@@ -259,6 +262,16 @@ describe('runLaunch', () => {
     expect(h.spawns[0]!.env.B_STUDIO_MODE).toBe('demo');
     // --no-open이면 브라우저를 열지 않는다
     expect(h.opens).toEqual([]);
+    // 브라우저를 열지 않으면 화면 없는 Node 서버로 띄운다
+    expect(h.spawns[0]!.args).toEqual(launchArgs(3000));
+  });
+
+  it('--next면 브라우저를 열지 않아도 next dev로 띄운다', async () => {
+    const h = harness({ probe: [down, health], exec: [OK] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'demo', port: 3000, open: false, server: 'next' }, h.deps)).toBe(0);
+    expect(h.spawns[0]!.args).toEqual(launchArgs(3000, 'next'));
   });
 
   it('준비되지 않으면 로그 끝을 보여 주고 종료 코드 1', async () => {

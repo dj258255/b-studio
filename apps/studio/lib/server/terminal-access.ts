@@ -1,5 +1,6 @@
 import { requireUser } from './access';
 import { authConfig, isLoopbackHost } from './auth';
+import { cookieValue } from './cookies';
 import { StudioError } from './errors';
 import { hasLocalToken, LOCAL_TOKEN_COOKIE } from './local-token';
 import { recoverSessions } from './sessions';
@@ -41,14 +42,5 @@ export function assertLocalToken(headers: Headers): void {
   }
 }
 
-/** Cookie 헤더에서 이름 하나의 값을 꺼낸다 */
-export function cookieValue(headers: Headers, name: string): string | undefined {
-  const header = headers.get('cookie');
-  if (!header) return undefined;
-  for (const part of header.split(';')) {
-    const eq = part.indexOf('=');
-    if (eq < 0) continue;
-    if (part.slice(0, eq).trim() === name) return part.slice(eq + 1).trim();
-  }
-  return undefined;
-}
+/** Cookie 헤더에서 이름 하나의 값을 꺼낸다(쿠키 도우미로 옮겼고, 옛 import를 위해 다시 내보낸다) */
+export { cookieValue } from './cookies';
