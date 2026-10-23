@@ -22,6 +22,7 @@ import { parsePatch, type DetailAction, type DetailState } from './session-detai
 import { agentStatus, backendLabel, deskSessions, deskSpaces, gateStatus } from './sidebar';
 import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
+import { applyRuntimeEvent, type RuntimeEffect } from './runtime';
 import { fleetOptions, placeMembers, type FleetsEffect, type FleetsState } from './fleets';
 import { loaded, openRequirements, REQUIREMENTS_FILE, REQUIREMENTS_TEMPLATE, type RequirementsEffect, type RequirementsState, type RequirementsTab } from './requirements';
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
@@ -296,7 +297,12 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   /** 요구사항·문서 화면(#894). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RequirementsCall>> &
   /** 여러 AI 비교(#892). 없으면 Ctrl-b f가 열 수 없다고 알린다 */
-  Partial<Pick<StudioClient, FleetsCall>>;
+  Partial<Pick<StudioClient, FleetsCall>> &
+  /** 실행·배포·미리보기·저장소 화면(#895). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, RuntimeCall>>;
+
+/** 실행 화면이 부르는 스튜디오 API(#895) */
+type RuntimeCall = 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository';
 
 /** 여러 AI 비교 화면이 부르는 스튜디오 API(#892) */
 type FleetsCall = 'fleets' | 'fleet' | 'createFleet' | 'chooseFleetWinner' | 'deleteFleet';
@@ -502,6 +508,8 @@ export class DeskApp {
   /** 여러 AI 비교를 다시 받는 시계(#892). 진행 중인 참가자가 있을 때만 건다 */
   #fleetTimer: NodeJS.Timeout | undefined;
   readonly #openUrl: ((url: string) => void) | undefined;
+  /** 실행 화면(#895)이 받는 세션 이벤트 통로 */
+  #runtimeStream: AbortController | undefined;
   #plansTimer: NodeJS.Timeout | undefined;
   /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
   #plansFetching = false;
@@ -762,6 +770,143 @@ export class DeskApp {
       case 'fleets':
         void this.#fleetsEffect(effect.effect);
         return;
+      case 'runtime-open':
+        this.#openRuntime(effect.id);
+        return;
+      case 'runtime':
+        void this.#runtimeEffect(effect.effect);
+        return;
+    }
+  }
+
+  // ─── 실행·배포·미리보기·저장소 화면(#895) ───
+
+  /** 실행 화면을 바꾼다. 그사이 닫혔거나 다른 세션의 화면이면 아무것도 하지 않는다 */
+  #patchRuntime(id: string, change: (runtime: NonNullable<DeskState['runtime']>) => NonNullable<DeskState['runtime']>): void {
+    const runtime = this.#state.runtime;
+    if (!runtime || runtime.id !== id) return;
+    this.#state = { ...this.#state, runtime: change(runtime) };
+    this.#scheduleRender();
+  }
+
+  #closeRuntimeStream(): void {
+    this.#runtimeStream?.abort();
+    this.#runtimeStream = undefined;
+  }
+
+  /** 키 처리가 연 실행 화면에 그 세션의 이벤트를 흘린다. 닫으면(close) 통로를 끊는다. 옛 스튜디오면 화면에 까닭을 보인다 */
+  #openRuntime(id: string): void {
+    this.#closeRuntimeStream();
+    if (!this.#client.sessionEvents) {
+      this.#state = { ...this.#state, runtime: undefined };
+      this.#say('이 스튜디오는 실행 화면을 지원하지 않습니다. 스튜디오를 새로 띄운 뒤 다시 엽니다');
+      return;
+    }
+    this.#state = { ...this.#state, help: false, message: undefined };
+    const controller = new AbortController();
+    this.#runtimeStream = controller;
+    this.#call('sessionEvents')(
+      id,
+      (event) => {
+        if (controller.signal.aborted) return;
+        this.#patchRuntime(id, (runtime) => applyRuntimeEvent(runtime, event));
+        // 배포가 끝나면 릴리스 목록이 바뀌었다. 배포 탭을 본 적이 있으면 다시 받는다
+        if ((event.type === 'deploy_finished' || event.type === 'deploy_failed') && this.#state.runtime?.deploy.status) void this.#loadDeploys(id);
+      },
+      controller.signal,
+    ).then(
+      () => {
+        if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: '스튜디오가 세션 이벤트를 끊었습니다. Esc로 닫고 다시 여세요' }));
+      },
+      (error: unknown) => {
+        if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: `세션 이벤트를 받지 못했습니다: ${messageOf(error)}` }));
+      },
+    );
+  }
+
+  async #loadDeploys(id: string): Promise<void> {
+    try {
+      const status = await this.#call('deploys')(id);
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, status, loading: false, error: undefined } }));
+    } catch (error) {
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, loading: false, error: `배포 상태를 받지 못했습니다: ${messageOf(error)}` } }));
+    }
+  }
+
+  #runtimeOpenUrl(id: string, url: string): void {
+    const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
+    if (!browsable(url)) note(`열 수 없는 주소입니다: ${url}`);
+    else if (!this.#openUrl) note(`브라우저를 열 수 없습니다: ${url}`);
+    else {
+      this.#openUrl(url);
+      note(`브라우저로 열었습니다: ${url}`);
+    }
+  }
+
+  async #runtimeEffect(effect: RuntimeEffect): Promise<void> {
+    if (effect.type === 'close') {
+      this.#closeRuntimeStream();
+      return;
+    }
+    const id = this.#state.runtime?.id;
+    if (!id) return;
+    const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
+    try {
+      switch (effect.type) {
+        case 'load-deploys':
+          await this.#loadDeploys(id);
+          return;
+        case 'deploy':
+          await this.#call('deploy')(id, effect.sha);
+          note('배포를 시작했습니다. 진행은 이 화면에 나옵니다');
+          return;
+        case 'rollback':
+          await this.#call('rollback')(id, effect.releaseId);
+          note('되돌리기를 시작했습니다. 진행은 이 화면에 나옵니다');
+          return;
+        case 'service':
+          await this.#call('setService')(id, effect.service, effect.on);
+          note(effect.on ? `${effect.service}를 켜는 중입니다` : `${effect.service}를 껐습니다`);
+          return;
+        case 'boot':
+          await this.#call('boot')(id);
+          return;
+        case 'open-url':
+          this.#runtimeOpenUrl(id, effect.url);
+          return;
+        case 'preview': {
+          const service = this.#state.runtime?.snapshot?.services.find((entry) => entry.name === effect.service);
+          if (!service) return;
+          this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { loading: true } } }));
+          try {
+            const url = await this.#call('previewUrl')(id, service);
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { url } } }));
+            if (effect.open) this.#runtimeOpenUrl(id, url);
+          } catch (error) {
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { error: `주소를 받지 못했습니다: ${messageOf(error)}` } } }));
+          }
+          return;
+        }
+        case 'load-repo': {
+          if (effect.view === 'presubmit') {
+            const submission = await this.#call('submission')(id);
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, submission, loading: false, error: undefined } }));
+            return;
+          }
+          const projectId = this.#state.runtime?.snapshot?.projectId;
+          if (!projectId) {
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, loading: false, error: '세션 정보를 아직 받지 못했습니다. 잠시 뒤 r로 다시 받으세요' } }));
+            return;
+          }
+          const list = await this.#call('repository')(projectId, effect.view, effect.state);
+          this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, [effect.view]: list, loading: false, error: undefined } }));
+          return;
+        }
+      }
+    } catch (error) {
+      const text = messageOf(error);
+      if (effect.type === 'load-repo') this.#patchRuntime(id, (runtime) => ({ ...runtime, repo: { ...runtime.repo, loading: false, error: `받지 못했습니다: ${text}` } }));
+      else note(`하지 못했습니다: ${text}`);
     }
   }
 
@@ -916,7 +1061,7 @@ export class DeskApp {
   }
 
   /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
-  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall>(name: K): StudioClient[K] {
+  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall | RuntimeCall>(name: K): StudioClient[K] {
     const method = this.#client[name];
     if (method) return method.bind(this.#client) as StudioClient[K];
     return (async () => {
@@ -2460,7 +2605,8 @@ export class DeskApp {
       !state.copy &&
       !state.settings &&
       !state.records &&
-      !state.detail;
+      !state.detail &&
+      !state.runtime;
     const shown = !playing
       ? []
       : state.fleets
@@ -2534,6 +2680,7 @@ export class DeskApp {
     clearTimeout(this.#animTimer);
     clearTimeout(this.#fleetTimer);
     this.#stopLoginPoll();
+    this.#runtimeStream?.abort();
     for (const entry of this.#streams.values()) {
       entry.controller.abort();
       clearTimeout(entry.timer);
