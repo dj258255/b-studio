@@ -143,6 +143,44 @@ describe('스튜디오 손님', () => {
     expect(seen[0]!.url).toBe('/api/ai-accounts');
   });
 
+  it('기록 화면과 세션 자세히가 쓰는 API를 부른다(#891)', async () => {
+    handler = (req, res) => {
+      if (req.url?.includes('/checkpoints/abc') && req.method === 'GET') return res.end(JSON.stringify({ patch: 'diff --git a/x b/x' }));
+      if (req.url?.endsWith('/export') && req.method === 'POST') return res.end(JSON.stringify({ sha: 'abc', commits: 1, forced: false, pullRequest: { url: 'https://example.test/pr/1', created: true } }));
+      res.end(JSON.stringify({ ok: true, rows: [], excluded: { asks: 0, unfinished: 0 }, report: { projectId: 'p1' }, id: 's1', checkpoints: [] }));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    await client.routingStats();
+    await client.tokenReport('p 1', '2026-10-16T00:00:00.000Z');
+    await client.tokenReport('p1');
+    await client.session('s/1');
+    expect(await client.checkpointPatch('s1', 'abc')).toBe('diff --git a/x b/x');
+    await client.restoreCheckpoint('s1', 'abc');
+    await client.reverify('s1', 'abc');
+    await client.deleteSession('s1');
+    await client.exportPreview('s1');
+    expect((await client.exportSession('s1', true)).pullRequest?.url).toBe('https://example.test/pr/1');
+    await client.reviewRound('s1', true);
+    await client.resolveFinding('s1', { round: 2, findingIndex: 0, reason: '오탐' });
+    expect(seen.map((entry) => `${entry.method} ${entry.url}`)).toEqual([
+      'GET /api/routing/stats',
+      'GET /api/projects/p%201/token-report?from=2026-10-16T00%3A00%3A00.000Z',
+      'GET /api/projects/p1/token-report',
+      'GET /api/sessions/s%2F1',
+      'GET /api/sessions/s1/checkpoints/abc',
+      'POST /api/sessions/s1/checkpoints/abc/restore',
+      'POST /api/sessions/s1/checkpoints/abc/reverify',
+      'POST /api/sessions/s1/delete',
+      'POST /api/sessions/s1/export/preview',
+      'POST /api/sessions/s1/export',
+      'POST /api/sessions/s1/review',
+      'POST /api/sessions/s1/review/resolve',
+    ]);
+    expect(JSON.parse(seen[9]!.body)).toEqual({ pullRequest: true });
+    expect(JSON.parse(seen[10]!.body)).toEqual({ restart: true });
+    expect(JSON.parse(seen[11]!.body)).toEqual({ round: 2, findingIndex: 0, reason: '오탐' });
+  });
+
   it('설정 화면이 계정·로그인·규칙을 다루는 요청을 보낸다(#890)', async () => {
     handler = (req, res) => {
       if (req.url === '/api/ai-accounts' && req.method === 'POST') res.end(JSON.stringify({ account: { id: 'acct-1', name: '피오', backend: 'codex', configDir: '/h/x' } }));
@@ -204,6 +242,39 @@ describe('스튜디오 손님', () => {
       'POST /api/fleets/f1/winner {"sessionId":"s1"}',
       'POST /api/fleets/f1/delete ',
     ]);
+  });
+
+  it('요구사항·문서 화면이 세션의 요구사항·테스트·문서·현황 API를 부른다(#894)', async () => {
+    handler = (req, res) => {
+      if (req.url?.includes('/docs/content') && req.method === 'GET') res.end(JSON.stringify({ path: 'docs/a b.md', content: '# 제목' }));
+      else if (req.url?.endsWith('/docs')) res.end(JSON.stringify({ docs: [{ path: 'README.md', title: '쇼핑몰' }] }));
+      else res.end(JSON.stringify({ exists: true, requirements: [], assumptions: [], manualSteps: [] }));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    await client.requirements('s/1');
+    await client.tests('s1');
+    expect(await client.docs('s1')).toEqual([{ path: 'README.md', title: '쇼핑몰' }]);
+    expect(await client.doc('s1', 'docs/a b.md')).toBe('# 제목');
+    await client.saveDoc('s1', 'docs/a.md', '본문');
+    await client.projectStatus('s1');
+    await client.verifyRequirement('s1', 'R1', '손으로 확인');
+    await client.clearVerification('s1', 'R1');
+    await client.applyRequirements('s1', { requirements: [] });
+    expect(seen.map((entry) => `${entry.method} ${entry.url}`)).toEqual([
+      'GET /api/sessions/s%2F1/requirements',
+      'GET /api/sessions/s1/tests',
+      'GET /api/sessions/s1/docs',
+      'GET /api/sessions/s1/docs/content?path=docs%2Fa+b.md',
+      'POST /api/sessions/s1/docs/content',
+      'GET /api/sessions/s1/status',
+      'POST /api/sessions/s1/requirements/verify',
+      'DELETE /api/sessions/s1/requirements/verify',
+      'POST /api/sessions/s1/requirements/apply',
+    ]);
+    expect(JSON.parse(seen[4]!.body)).toEqual({ path: 'docs/a.md', content: '본문' });
+    expect(JSON.parse(seen[6]!.body)).toEqual({ requirementId: 'R1', note: '손으로 확인' });
+    expect(JSON.parse(seen[7]!.body)).toEqual({ requirementId: 'R1' });
+    expect(JSON.parse(seen[8]!.body)).toEqual({ requirements: [], assumptions: [], manualSteps: [] });
   });
 
   it('묶음 통로를 열어 세션별 메시지를 넘기고, 끊으면 끝난다', async () => {

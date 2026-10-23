@@ -41,10 +41,40 @@ export interface RoutingStatsRow {
   medianDurationMs?: number;
 }
 
+/** AI × 계정 한 줄(#891, 터미널 기록 화면). 계정이 없는 세션은 그 CLI의 기본 계정이라 accountId가 없다 */
+export interface RoutingAccountRow {
+  backend: string;
+  accountId?: string;
+  runs: number;
+  passed: number;
+  failed: number;
+  errors: number;
+  /** 통과 ÷ (통과 + 실패 + 오류). 판정한 실행이 없으면 없다 */
+  passRate?: number;
+  /** 토큰을 아는 실행의 평균 토큰(입력·출력·캐시 합) */
+  averageTokens?: number;
+  /** 단가를 찾은 실행의 평균 환산 비용 */
+  averageCostUsd?: number;
+}
+
+/** 게이트가 실패로 판정했거나 오류로 끝난 실행 하나(#891). 플랫폼 실패는 넣지 않는다 */
+export interface RoutingFailure {
+  sessionId: string;
+  backend: string;
+  accountId?: string;
+  request: string;
+  at?: string;
+  outcome: 'failed' | 'errors';
+}
+
 export interface RoutingStats {
   rows: RoutingStatsRow[];
   /** 표에 넣지 않은 실행. asks: 질문, unfinished: 취소·되묻기·진행 중 */
   excluded: { asks: number; unfinished: number };
+  /** AI × 계정별 묶음(#891). 옛 서버는 주지 않는다 */
+  byAccount?: RoutingAccountRow[];
+  /** 최근 실패 다섯 개, 새것부터(#891) */
+  recentFailures?: RoutingFailure[];
 }
 
 const COMPLEXITY_LABEL: Record<TaskKind['complexity'], string> = { simple: '단순', normal: '보통', complex: '복잡' };

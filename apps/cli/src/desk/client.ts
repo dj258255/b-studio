@@ -8,7 +8,10 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskPlan } from './plans';
+import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
+import type { RecordsReport, RecordsStats } from './records';
+import type { DetailExportPreview, DetailExportResult, DetailSnapshot } from './session-detail';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
@@ -79,6 +82,10 @@ export interface StartInput {
 export function splitChoice(choice: string): { backend: string; accountId?: string } {
   const at = choice.indexOf('@');
   return at < 0 ? { backend: choice } : { backend: choice.slice(0, at), accountId: choice.slice(at + 1) };
+}
+
+function sessionPath(id: string): string {
+  return `/api/sessions/${encodeURIComponent(id)}`;
 }
 
 export class StudioClient {
@@ -201,6 +208,52 @@ export class StudioClient {
     return this.#request('POST', '/api/routing/preview', { request, intent: 'build' });
   }
 
+  // ─── 작업 나누기(#893, /api/task-plans) ───
+
+  plans(): Promise<DeskPlan[]> {
+    return this.#request('GET', '/api/task-plans');
+  }
+
+  plan(id: string): Promise<DeskPlan> {
+    return this.#request('GET', `/api/task-plans/${encodeURIComponent(id)}`);
+  }
+
+  /** 요청으로 새 계획을 만든다. 스튜디오가 레인으로 나누는 동안 계획은 planning이고, 다 나누면 승인 대기다 */
+  createPlan(projectId: string, request: string): Promise<DeskPlan> {
+    return this.#request('POST', '/api/task-plans', { projectId, request });
+  }
+
+  approvePlan(id: string, publishIssues: boolean): Promise<DeskPlan> {
+    return this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/approval`, { approve: true, publishIssues });
+  }
+
+  rejectPlan(id: string): Promise<DeskPlan> {
+    return this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/approval`, { approve: false });
+  }
+
+  async deletePlan(id: string): Promise<void> {
+    await this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/delete`);
+  }
+
+  /** 재시작으로 멈춘 계획의 통합을 다시 시작한다(레인은 다시 돌리지 않는다) */
+  resumePlan(id: string): Promise<DeskPlan> {
+    return this.#request('POST', `/api/task-plans/${encodeURIComponent(id)}/resume`);
+  }
+
+  /** 레인에 고를 수 있는 AI(이 스튜디오가 허용한 것) */
+  async laneBackends(): Promise<string[]> {
+    return (await this.#request<{ backends: string[] }>('GET', '/api/task-plans/lane-backends')).backends;
+  }
+
+  /**
+   * 승인 대기 중인 레인의 AI·계정을 바꾼다. 빈 AI는 "세션과 같음"(계획 기본)이다.
+   * 계정은 늘 함께 보낸다: 빈 계정은 그 CLI의 기본 계정이라, 같은 AI의 다른 계정에서 기본 계정으로 돌아갈 때도 지운다
+   */
+  async setLane(id: string, laneId: string, backend: string, accountId?: string): Promise<DeskPlan> {
+    const route = `/api/task-plans/${encodeURIComponent(id)}/lanes/${encodeURIComponent(laneId)}/backend`;
+    return (await this.#request<{ plan: DeskPlan }>('POST', route, { backend, accountId: accountId ?? '' })).plan;
+  }
+
   /** 새 요청을 터미널로 보낸다(#836): 규칙(또는 직접 고른 AI)으로 세션을 만들고 터미널을 열어 첫 요청을 CLI에 넣는다 */
   start(input: StartInput): Promise<DeskStartResult> {
     const picked = splitChoice(input.choice);
@@ -216,6 +269,104 @@ export class StudioClient {
   /** 멈춘 세션을 같은 작업 복사본으로 다시 띄운다. 켜지는 것은 기다리지 않는다 */
   async resume(id: string): Promise<void> {
     await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/resume`);
+  }
+
+  // ─── 요구사항·문서(#894). 웹 세션 화면의 요구사항 묶음(명세·테스트·문서·현황)이 쓰는 API 그대로 ───
+
+  requirements(id: string): Promise<DeskRequirements> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/requirements`);
+  }
+
+  tests(id: string): Promise<DeskTests> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/tests`);
+  }
+
+  async docs(id: string): Promise<DeskDocEntry[]> {
+    return (await this.#request<{ docs: DeskDocEntry[] }>('GET', `/api/sessions/${encodeURIComponent(id)}/docs`)).docs;
+  }
+
+  /** 문서 하나. docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 된다(스튜디오가 거른다) */
+  async doc(id: string, file: string): Promise<string> {
+    return (await this.#request<{ content: string }>('GET', `/api/sessions/${encodeURIComponent(id)}/docs/content?${new URLSearchParams({ path: file })}`)).content;
+  }
+
+  /** 문서를 작업 복사본에 쓴다(다음 체크포인트·PR에 실린다). 요청을 처리하는 동안 요구사항 문서는 스튜디오가 받지 않는다 */
+  async saveDoc(id: string, file: string, content: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/docs/content`, { path: file, content });
+  }
+
+  projectStatus(id: string): Promise<DeskProjectStatus> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/status`);
+  }
+
+  /** 사람이 확인했다고 남긴다(무엇을 어떻게 확인했는지 note에 적는다) */
+  verifyRequirement(id: string, requirementId: string, note: string): Promise<DeskRequirements> {
+    return this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/requirements/verify`, { requirementId, note });
+  }
+
+  clearVerification(id: string, requirementId: string): Promise<DeskRequirements> {
+    return this.#request('DELETE', `/api/sessions/${encodeURIComponent(id)}/requirements/verify`, { requirementId });
+  }
+
+  /** 추출 결과를 docs/requirements.md로 저장한다(웹의 "docs/requirements.md로 저장") */
+  applyRequirements(id: string, draft: Pick<DeskRequirementsDraft, 'requirements' | 'assumptions' | 'manualSteps'>): Promise<DeskRequirements> {
+    return this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/requirements/apply`, { requirements: draft.requirements, assumptions: draft.assumptions ?? [], manualSteps: draft.manualSteps ?? [] });
+  }
+
+  /** AI별 결과표(#891). 서버가 계정별 묶음과 최근 실패를 함께 준다(옛 서버는 주지 않는다) */
+  routingStats(): Promise<RecordsStats> {
+    return this.#request('GET', '/api/routing/stats');
+  }
+
+  /** 프로젝트 토큰 보고서(#891). from을 주면 그 시각부터 */
+  async tokenReport(projectId: string, from?: string): Promise<RecordsReport> {
+    const query = from ? `?${new URLSearchParams({ from })}` : '';
+    return (await this.#request<{ report: RecordsReport }>('GET', `/api/projects/${encodeURIComponent(projectId)}/token-report${query}`)).report;
+  }
+
+  /** 세션 스냅숏(체크포인트, 다시 검증 기록, AI 리뷰, 저장소) */
+  session(id: string): Promise<DetailSnapshot> {
+    return this.#request('GET', sessionPath(id));
+  }
+
+  /** 체크포인트 하나의 diff(시크릿 값은 서버가 가린다) */
+  async checkpointPatch(id: string, sha: string): Promise<string> {
+    return (await this.#request<{ patch: string }>('GET', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}`)).patch;
+  }
+
+  /** 체크포인트로 되돌린다. 시작만 하고 돌아온다(진행은 세션 이벤트로 온다) */
+  async restoreCheckpoint(id: string, sha: string): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}/restore`);
+  }
+
+  /** 지금 체크포인트를 같은 게이트로 다시 검증한다(에이전트는 돌리지 않는다) */
+  async reverify(id: string, sha: string): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}/reverify`);
+  }
+
+  /** 세션 기록을 지운다. 멈춘 세션만 된다(서버가 409로 막는다) */
+  async deleteSession(id: string): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/delete`);
+  }
+
+  /** 올리기 전 점검. 아무것도 올리지 않는다 */
+  exportPreview(id: string): Promise<DetailExportPreview> {
+    return this.#request('POST', `${sessionPath(id)}/export/preview`, {});
+  }
+
+  /** 브랜치를 올리고, pullRequest면 PR도 만든다 */
+  exportSession(id: string, pullRequest: boolean): Promise<DetailExportResult> {
+    return this.#request('POST', `${sessionPath(id)}/export`, { pullRequest });
+  }
+
+  /** AI 리뷰 라운드를 (다시) 돌린다. 시작만 하고 돌아온다 */
+  async reviewRound(id: string, restart: boolean): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/review`, { restart });
+  }
+
+  /** AI 리뷰의 지적 하나를 오탐으로 닫는다 */
+  async resolveFinding(id: string, input: { round: number; findingIndex: number; reason: string }): Promise<void> {
+    await this.#request('POST', `${sessionPath(id)}/review/resolve`, input);
   }
 
   /** 세션 이름을 바꾼다. 빈 이름은 이름을 지운다(#864) */

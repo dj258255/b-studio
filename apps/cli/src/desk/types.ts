@@ -12,6 +12,8 @@ export interface DeskItem {
   projectName: string;
   state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
   attention?: string;
+  /** 개입이 필요한 까닭 한 줄(검증 실패 요약, 확인 필요의 첫 어긋남). 모르면 없다 */
+  reason?: string;
   backend?: string;
   lastActivityAt: string;
   /** 터미널 세션일 때: CLI가 떠 있는가, 권한을 묻고 있는가 */
@@ -240,4 +242,99 @@ export interface DeskFleetCandidate {
   backend: string;
   model?: string;
   accountId?: string;
+}
+
+// ─── 요구사항·문서 화면(#894). 스튜디오 sessions.ts의 RequirementsSnapshot·TestsSnapshot·DocsTree와 agent의 ProjectStatusView에서 desk가 쓰는 필드만 ───
+
+export type DeskRequirementStatus = '미착수' | '작업 중' | '검증됨' | '재확인 필요' | '실패';
+
+/** 요구사항 하나(GET /api/sessions/:id/requirements의 requirements[]) */
+export interface DeskRequirement {
+  id: string;
+  title: string;
+  kind: string;
+  priority: 'must' | 'should' | 'could' | string;
+  acceptance: string[];
+  rev?: number;
+  status: DeskRequirementStatus;
+  /** "이 요구사항 작업"이 CLI에 넣는 글(스튜디오가 만든다) */
+  workPrefill: string;
+  issue?: number;
+  verifiedBy?: 'test' | 'docs' | 'manual' | 'none';
+  lint?: Array<{ code: string; message: string; mustFix: boolean }>;
+  ready?: boolean;
+  scenarios?: Array<{ id: string; given: string; when: string; then: string }>;
+  manualVerification?: { by: string; at: string; sha: string; note: string };
+  evidence?: {
+    tests?: Array<{ file: string; name: string }>;
+    checkpoints?: Array<{ shortSha: string }>;
+    missingScenarios?: string[];
+  };
+}
+
+/** 추출 결과(웹의 "추출 결과" 하위 화면). 저장(apply)하면 docs/requirements.md가 된다 */
+export interface DeskRequirementsDraft {
+  requirements: Array<Omit<DeskRequirement, 'status' | 'workPrefill'>>;
+  questions?: string[];
+  assumptions?: string[];
+  manualSteps?: string[];
+  source?: string;
+  savedAt?: string;
+  appliedAt?: string;
+}
+
+export interface DeskRequirements {
+  exists: boolean;
+  requirements: DeskRequirement[];
+  ready?: boolean;
+  coverage?: { text: string; mustGapText?: string; needsRecheckText?: string };
+  /** "전체 계획 세우기"가 CLI에 넣는 글. must 요구사항이 없으면 없다 */
+  allMustHavesPrefill?: string;
+  assumptions: string[];
+  manualSteps: string[];
+  draft?: DeskRequirementsDraft;
+}
+
+export interface DeskTestRow {
+  file: string;
+  name: string;
+  displayName: string;
+  line: number;
+  requirementIds: string[];
+  status: 'pass' | 'fail' | 'skip' | 'not-run';
+  durationMs?: number;
+  failureMessage?: string;
+  /** 실패한 테스트에서만 있다. "이 테스트 고쳐 줘"가 CLI에 넣는 글 */
+  fixPrefill?: string;
+}
+
+export interface DeskTests {
+  services: Array<{
+    service: string;
+    running: boolean;
+    supported: boolean;
+    runner?: string;
+    counts: { pass: number; fail: number; skip: number; notRun: number };
+    lastRunAt?: string;
+    error?: string;
+    notice?: string;
+    rows: DeskTestRow[];
+  }>;
+  requirementsWithoutTests: Array<{ id: string; title: string; prefill: string }>;
+}
+
+export interface DeskDocEntry {
+  path: string;
+  title: string;
+}
+
+export interface DeskProjectStatus {
+  currentWork: { summary: string; items: readonly string[] };
+  purpose: { items: ReadonlyArray<{ id: string; title: string; issue?: number }> };
+  eta: { hasEstimate: boolean; summary: string };
+  deliverables: { checkpoints: ReadonlyArray<{ shortSha: string; message: string; createdAt: string }>; pullRequestUrl?: string };
+  risks: { items: readonly string[] };
+  verification: { summary: string; byStatus: Readonly<Record<string, number>> };
+  estimateVsActual: ReadonlyArray<{ id: string; label: string; estimateMinutes?: number; actualMinutes?: number; deltaMinutes?: number; note?: string }>;
+  links: { roadmap: string; changelog: string; docsIndex: string };
 }

@@ -71,6 +71,7 @@ import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
 import { allowedBackends, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
+import { findAiAccount } from './ai-accounts';
 
 /**
  * 한 요청을 작업 계획으로 나눠 실행한다.
@@ -724,6 +725,8 @@ export function setLaneBackend(planId: string, owner: string, laneId: string, in
   if (!lane) throw new StudioError(404, '레인을 찾을 수 없습니다');
 
   const backend = input.backend?.trim();
+  // 고른 계정은 그 CLI의 계정이다. AI가 바뀌면(세션과 같음 포함) 맞지 않으니 지운다(#893)
+  if (backend !== lane.backend) lane.accountId = undefined;
   if (!backend) {
     // 세션과 같음으로 되돌린다 — 레인·작업에서 backend·model·effort를 모두 지운다(지금까지의 상속 동작과 같다)
     lane.backend = undefined;
@@ -755,6 +758,33 @@ export function setLaneBackend(planId: string, owner: string, laneId: string, in
     task.backend = backend as PlanBackend;
     task.model = model;
   }
+  persist(plan);
+  return clone(plan);
+}
+
+/**
+ * 승인 대기 중인 계획에서 레인 하나를 띄울 AI 계정을 고른다(#893, 터미널 작업대의 작업 나누기 화면).
+ * 계정은 레인이 고른 AI(backend)의 계정이어야 한다. AI를 고르지 않은 레인("세션과 같음")에는 계정을 고를 수 없다.
+ * 빈 id는 계정을 지운다(그 CLI의 기본 계정). 레인 세션을 만들 때 이 계정의 설정 폴더로 CLI를 띄운다(createSession의 accountId)
+ */
+export async function setLaneAccount(planId: string, owner: string, laneId: string, accountId: string, env: NodeJS.ProcessEnv = process.env): Promise<TaskPlanView> {
+  const plan = findPlan(planId, owner);
+  if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인 대기 중인 계획만 레인 계정을 바꿀 수 있습니다');
+  const lane = plan.lanes.find((candidate) => candidate.id === laneId);
+  if (!lane) throw new StudioError(404, '레인을 찾을 수 없습니다');
+  const id = accountId.trim();
+  if (!id) {
+    lane.accountId = undefined;
+    persist(plan);
+    return clone(plan);
+  }
+  if (!lane.backend) throw new StudioError(400, '레인 AI를 먼저 고르세요. 세션과 같음인 레인에는 계정을 고를 수 없습니다');
+  const account = await findAiAccount(id, env);
+  if (!account) throw new StudioError(400, `계정이 목록에 없습니다: ${id}`);
+  if (account.backend !== lane.backend) throw new StudioError(400, `${account.name} 계정은 ${account.backend}의 계정입니다(레인 AI: ${lane.backend})`);
+  // 기다리는 동안 승인됐을 수 있다
+  if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인 대기 중인 계획만 레인 계정을 바꿀 수 있습니다');
+  lane.accountId = account.id;
   persist(plan);
   return clone(plan);
 }
@@ -1184,9 +1214,16 @@ function sessionModelOption(plan: TaskPlanView): { modelId?: string; effort?: Ef
  * 레인 세션을 만들 때의 옵션. 레인 작업이 backend·model을 실었으면 그것으로 세션을 만든다(레인마다 다른 백엔드).
  * 없으면 기존처럼 계획의 modelId·effort와 서버 모드를 쓴다. 한 레인의 작업은 planLanes가 backend·model이 같도록 보장한다.
  */
-function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string } {
+function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string; accountId?: string } {
+  // 고른 계정은 그 계정의 CLI로 띄운다(#893). 계정은 레인 AI의 계정이라 백엔드도 함께 넘긴다
+  const account = lane.accountId && lane.backend ? { backend: lane.backend, accountId: lane.accountId } : undefined;
   // 터미널 레인은 모델 옵션을 넘기지 않는다(그 레인의 CLI가 모델을 정한다)
-  if (plan.runner === 'terminal') return {};
+  if (plan.runner === 'terminal') return account ?? {};
+  const option = laneModelOption(plan, lane);
+  return account ? { ...option, accountId: account.accountId } : option;
+}
+
+function laneModelOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string } {
   const head = lane.tasks[0];
   const backend = head?.backend;
   if (!backend) return sessionModelOption(plan);

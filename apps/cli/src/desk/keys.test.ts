@@ -572,6 +572,42 @@ describe('스페이스 화면 키(#887)', () => {
   });
 });
 
+describe('기록 화면과 세션 자세히 키(#891)', () => {
+  it('Ctrl-b h는 기록 화면을 연다(desk가 프로젝트와 결과를 불러온다)', () => {
+    const { effects } = handleInput(withItems(), '\x02h');
+    expect(effects).toEqual([{ type: 'records', open: true }]);
+  });
+
+  it('Ctrl-b i와 스페이스 화면의 i는 고른 세션의 자세히를 열고 그 세션을 불러온다', () => {
+    const fromPanes = handleInput(withItems({ selected: 1 }), '\x02i');
+    expect(fromPanes.state.detail).toMatchObject({ id: 'b', tab: 'checkpoints', loading: true });
+    expect(fromPanes.effects).toEqual([{ type: 'detail', action: { kind: 'load' } }]);
+    const fromSpace = handleInput(withItems({ view: 'space', selected: 2 }), 'i');
+    expect(fromSpace.state.detail?.id).toBe('c');
+    expect(handleInput(initialState(), '\x02i').state.message).toContain('고를 세션이 없습니다');
+  });
+
+  it('기록 화면이 열려 있으면 키는 기록 화면으로 가고 칸으로 가지 않는다. Esc로 닫는다', () => {
+    const open = { ...withItems({ slots: ['a', undefined, undefined, undefined] }), records: { tab: 'ai' as const, scroll: 0, projects: [{ id: 'p1', name: 'shop' }], projectIndex: 0, range: 'all' as const } };
+    const tabbed = handleInput(open, '\t');
+    expect(tabbed.effects).toEqual([{ type: 'records', load: { kind: 'report', projectId: 'p1' } }]);
+    expect(tabbed.state.records?.tab).toBe('tokens');
+    const typed = handleInput(open, 'xyz');
+    expect(typed.effects.filter((effect) => effect.type === 'input')).toEqual([]);
+    expect(handleInput(open, '\x1b', true).state.records).toBeUndefined();
+  });
+
+  it('세션 자세히의 동작 키는 detail 할 일로 나가고, 까닭을 쓰는 중에 붙여 넣은 글은 까닭에 들어간다', () => {
+    const detail = { id: 'a', title: 'a', tab: 'checkpoints' as const, selected: 0, scroll: 0, loading: false, snapshot: { id: 'a', status: 'ready', running: false, checkpoints: [{ sha: 's1', shortSha: 's1', message: 'm', createdAt: '2026-10-22T00:00:00Z', files: [] }] } };
+    const reverify = handleInput({ ...withItems(), detail }, 'v');
+    expect(reverify.effects).toEqual([{ type: 'detail', action: { kind: 'reverify', sha: 's1' } }]);
+    const writing = { ...withItems(), detail: { ...detail, tab: 'review' as const, resolving: { round: 1, findingIndex: 0, text: '' } } };
+    const pasted = handleInput(writing, '\x1b[200~오탐\n입니다\x1b[201~');
+    expect(pasted.state.detail?.resolving?.text).toBe('오탐 입니다');
+    expect(pasted.effects).toEqual([]);
+  });
+});
+
 describe('설정 화면 키(#890)', () => {
   const base = (): DeskState => ({ ...initialState(), items: [item('a')], slots: ['a', undefined, undefined, undefined] });
 
@@ -722,6 +758,27 @@ describe('여러 AI 비교 화면 키(#892)', () => {
     expect(closed.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }]);
   });
 
+  it('덮는 화면은 하나만: 비교 화면 안의 w는 승자 고르기이고, 앞글쇠 다음 w는 비교 화면을 닫고 카드 화면으로 간다', () => {
+    const member = { sessionId: 'a', backend: 'claude-code', label: '계정 기본', provider: 'claude-code', status: 'done' as const };
+    const fleets = { mode: 'detail' as const, fleets: [{ id: 'f1', projectId: 'p', projectName: 'shop', request: '요청', createdAt: '2026-10-23T00:00:00Z', members: [member] }], row: 0, detail: 'f1', member: 0 };
+    const inside = handleInput({ ...base(), fleets }, 'w');
+    expect(inside.state.fleets?.confirm).toMatchObject({ kind: 'winner', sessionId: 'a' });
+    expect(inside.state.view).toBeUndefined();
+    const away = handleInput({ ...base(), fleets }, '\x02w');
+    expect(away.state.fleets).toBeUndefined();
+    expect(away.state.view).toBe('space');
+    expect(away.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }]);
+    // 비교 화면을 열면 작업 나누기를 닫고, 작업 나누기를 열면 비교 화면을 닫는다
+    const plans = handleInput(base(), '\x02t').state;
+    const opened = handleInput(plans, '\x02f');
+    expect(opened.state.plans).toBeUndefined();
+    expect(opened.effects).toEqual([{ type: 'plans', effect: { type: 'close' } }, { type: 'fleets-open' }]);
+    const back = handleInput(opened.state, '\x02t');
+    expect(back.state.fleets).toBeUndefined();
+    expect(back.state.plans).toBeDefined();
+    expect(back.effects).toEqual([{ type: 'fleets', effect: { type: 'close' } }, { type: 'plans-open' }]);
+  });
+
   it('붙여넣기는 새 비교의 요청 칸에 들어가고, 마우스는 버린다', () => {
     const opened = handleInput(base(), '\x02f').state;
     const form = handleInput({ ...opened, fleets: { ...opened.fleets!, loading: false } }, 'n').state;
@@ -730,5 +787,29 @@ describe('여러 AI 비교 화면 키(#892)', () => {
     expect(pasted.effects).toEqual([]);
     expect(pasted.state.fleets?.form?.request).toBe('검색 추가');
     expect(handleInput(ready, '\x1b[<0;5;5M').effects).toEqual([]);
+  });
+});
+
+describe('요구사항 화면 키(#894)', () => {
+  it('앞글쇠 다음 e는 고른 칸의 세션, 칸이 셸이거나 비었으면 사이드바에서 고른 세션의 요구사항 화면을 연다', () => {
+    const focused = handleInput(withItems({ layout: 2, slots: ['a', 'c', undefined, undefined], focus: 1 }), '\x02e');
+    expect(focused.effects).toEqual([{ type: 'requirements-open', id: 'c', title: 'c' }]);
+    const shell = handleInput(withItems({ slots: ['shell:1', undefined, undefined, undefined], selected: 1 }), '\x02e');
+    expect(shell.effects).toEqual([{ type: 'requirements-open', id: 'b', title: 'b' }]);
+    const space = handleInput(withItems({ view: 'space', slots: ['a', undefined, undefined, undefined], selected: 2 }), 'e');
+    expect(space.effects).toEqual([{ type: 'requirements-open', id: 'c', title: 'c' }]);
+    const none = handleInput({ ...initialState() }, '\x02e');
+    expect(none.effects).toEqual([]);
+    expect(none.state.message).toContain('세션이 없습니다');
+  });
+
+  it('요구사항 화면이 열려 있으면 키·붙여넣기·마우스가 칸으로 가지 않고, Esc로 닫으면 close를 낸다', () => {
+    const state = withItems({ slots: ['a', undefined, undefined, undefined], requirements: { sessionId: 'a', title: 'a', tab: 'spec', row: 0, verify: { requirementId: 'R1', text: '' } } });
+    const typed = handleInput(state, '확인\x1b[200~붙인\n글\x1b[201~\x1b[<0;5;5M');
+    expect(typed.effects.filter((effect) => effect.type === 'input' || effect.type === 'paste' || effect.type === 'mouse')).toEqual([]);
+    expect(typed.state.requirements?.verify?.text).toBe('확인붙인 글');
+    const closed = handleInput({ ...state, requirements: { ...state.requirements!, verify: undefined } }, '\x1b', true);
+    expect(closed.state.requirements).toBeUndefined();
+    expect(closed.effects).toEqual([{ type: 'requirements', effect: { type: 'close' } }]);
   });
 });
