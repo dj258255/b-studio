@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { handleInput, initialState, type DeskState } from './keys';
+import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import type { DeskItem } from './types';
 
 const item = (id: string): DeskItem => ({ kind: 'session', id, title: id, projectName: 'shop', state: 'idle', lastActivityAt: '2026-10-22T00:00:00Z' });
@@ -74,10 +74,10 @@ describe('키 처리', () => {
     expect(opened.prefix).toBe(false);
   });
 
-  it('이미 다른 칸에 열린 세션을 고르면 새로 열지 않고 그 칸으로 간다', () => {
+  it('이미 다른 칸에 열린 세션을 고르면 새로 열지 않고 그 칸으로 간다(터미널이 끝났으면 다시 열라고만 알린다)', () => {
     const state = withItems({ layout: 2, slots: ['a', 'b', undefined, undefined], selected: 1 });
     const { state: next, effects } = handleInput(state, '\x02\r');
-    expect(effects).toEqual([]);
+    expect(effects).toEqual([{ type: 'reopen', id: 'b' }]);
     expect(next.focus).toBe(1);
   });
 
@@ -161,7 +161,8 @@ describe('새 요청 입력', () => {
   });
 
   it('Esc나 Ctrl-c는 입력을 닫는다', () => {
-    expect(handleInput(prompting(), '\x1b').state.prompt).toBeUndefined();
+    // 혼자 온 Esc는 방향키의 앞일 수 있어 잠깐 기다린다(desk가 곧 flushPending을 부른다)
+    expect(flushPending(handleInput(prompting(), '\x1b').state).state.prompt).toBeUndefined();
     expect(handleInput(prompting(), '\x03').state.prompt).toBeUndefined();
   });
 
@@ -171,5 +172,101 @@ describe('새 요청 입력', () => {
     const { state: next, effects } = handleInput(request, 'a\nb');
     expect(next.prompt!.text).toBe('a b');
     expect(effects.some((effect) => effect.type === 'submit')).toBe(false);
+  });
+});
+
+describe('붙여넣기와 나뉘어 온 키(#860)', () => {
+  const open = (patch: Partial<DeskState> = {}) => withItems({ slots: ['a', undefined, undefined, undefined], ...patch });
+
+  it('붙여넣기 묶음 안의 Ctrl-b는 명령으로 읽지 않고, 묶음은 paste로 칸에 간다', () => {
+    const { state, effects } = handleInput(open(), 'x\x1b[200~line1\rline2\x02x\x1b[201~y');
+    expect(effects).toEqual([
+      { type: 'input', id: 'a', data: 'x' },
+      { type: 'paste', id: 'a', data: 'line1\rline2\x02x' },
+      { type: 'input', id: 'a', data: 'y' },
+    ]);
+    expect(state.slots[0]).toBe('a');
+    expect(state.prefix).toBe(false);
+  });
+
+  it('붙여넣기 표지가 조각 경계에서 나뉘어 와도 같다', () => {
+    let state = open();
+    const effects: unknown[] = [];
+    for (const chunk of ['\x1b[20', '0~ab\x02', 'x\x1b[2', '01~']) {
+      const result = handleInput(state, chunk);
+      state = result.state;
+      effects.push(...result.effects);
+    }
+    // 조각으로 나눠 보내도 이어 붙이면 붙여넣기 하나다
+    const pastes = effects as Array<Extract<Effect, { type: 'paste' }>>;
+    expect(pastes.every((effect) => effect.type === 'paste' && effect.id === 'a')).toBe(true);
+    expect(pastes.map((effect) => pasteFor(effect, true)).join('')).toBe('\x1b[200~ab\x02x\x1b[201~');
+    expect(state.slots[0]).toBe('a');
+    expect(state.pending).toBeUndefined();
+  });
+
+  it('긴 붙여넣기가 여러 조각으로 오면 조각마다 내용을 보낸다', () => {
+    let state = open();
+    const effects: unknown[] = [];
+    for (const chunk of ['\x1b[200~hello ', 'world\x1b[201~']) {
+      const result = handleInput(state, chunk);
+      state = result.state;
+      effects.push(...result.effects);
+    }
+    expect(effects).toEqual([
+      { type: 'paste', id: 'a', data: 'hello ', part: 'start' },
+      { type: 'paste', id: 'a', data: 'world', part: 'end' },
+    ]);
+  });
+
+  it('앞글쇠 뒤 방향키가 조각 경계에서 나뉘어 와도 CLI로 새지 않는다', () => {
+    const first = handleInput(open(), '\x02\x1b');
+    expect(first.effects).toEqual([]);
+    const second = handleInput(first.state, '[B');
+    expect(second.effects).toEqual([]);
+    expect(second.state.selected).toBe(1);
+  });
+
+  it('끝이 Esc 하나로 끝나 기다리던 글은 flushPending이 그대로 보낸다', () => {
+    const first = handleInput(open(), 'q\x1b');
+    expect(first.effects).toEqual([{ type: 'input', id: 'a', data: 'q' }]);
+    expect(first.state.pending).toBe('\x1b');
+    const flushed = flushPending(first.state);
+    expect(flushed.effects).toEqual([{ type: 'input', id: 'a', data: '\x1b' }]);
+    expect(flushed.state.pending).toBeUndefined();
+  });
+
+  it('새 요청 입력 중의 붙여넣기는 줄바꿈을 빈칸으로 바꿔 요청 글에 넣고 보내지 않는다', () => {
+    const state = withItems({ prompt: { step: 'request', projects: [{ id: 'p', name: 'shop' }], projectIndex: 0, text: '', choices: ['rules'], choice: 0 } });
+    const { state: next, effects } = handleInput(state, '\x1b[200~고쳐\r줘\x02\x1b[201~');
+    expect(next.prompt?.text).toBe('고쳐 줘');
+    expect(effects.some((effect) => effect.type === 'submit')).toBe(false);
+  });
+});
+
+describe('안쪽 CLI의 모드 따르기(#860)', () => {
+  it('응용 커서 키 모드면 방향키를 SS3 꼴로 바꾼다', () => {
+    expect(toInnerKeys('\x1b[A\x1b[Bx\x1b[1;5C', { appCursor: true })).toBe('\x1bOA\x1bOBx\x1b[1;5C');
+    expect(toInnerKeys('\x1b[A', { appCursor: false })).toBe('\x1b[A');
+  });
+
+  it('CLI가 bracketed paste를 켰을 때만 표지로 감싸고, 내용 안의 끝 표지는 지운다', () => {
+    expect(pasteFor({ type: 'paste', id: 'a', data: 'a\x1b[201~b' }, true)).toBe('\x1b[200~ab\x1b[201~');
+    expect(pasteFor({ type: 'paste', id: 'a', data: 'a\nb' }, false)).toBe('a\nb');
+    expect(pasteFor({ type: 'paste', id: 'a', data: 'x', part: 'start' }, true)).toBe('\x1b[200~x');
+    expect(pasteFor({ type: 'paste', id: 'a', data: 'y', part: 'end' }, true)).toBe('y\x1b[201~');
+  });
+});
+
+describe('사이드바 선택은 세션으로 기억한다(#860)', () => {
+  it('목록 순서가 바뀌어도 고르던 세션을 그대로 고른다', () => {
+    const before = [item('a'), item('b'), item('c')];
+    const after = [item('c'), item('a'), item('b')];
+    expect(reselect(before, 1, after)).toBe(2);
+  });
+
+  it('고르던 세션이 사라지면 같은 자리(범위 안)를 고른다', () => {
+    expect(reselect([item('a'), item('b'), item('c')], 2, [item('a'), item('b')])).toBe(1);
+    expect(reselect([item('a')], 0, [])).toBe(0);
   });
 });

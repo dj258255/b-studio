@@ -77,6 +77,8 @@ export interface DeskStartResult {
   session: { id: string };
   routing?: { backend?: string; model?: string; matched?: string };
   terminal?: { opened: boolean; pasted: boolean; pasteError?: string };
+  /** 세션은 만들었지만 터미널을 열지 못했거나(CLI 없음 등) 설계 승인 검사에 막혔다 */
+  sendError?: string;
 }
 
 /** 미리보기(`/api/routing/preview`) */

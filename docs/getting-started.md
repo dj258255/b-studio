@@ -57,7 +57,7 @@ pnpm studio:local
 
 개인 PC 모드에서는 `/accounts`에서 구독 CLI별 로그인 상태를 확인하고, 터미널 없이 로그인을 시작할 수 있습니다.
 
-![구독 CLI 계정 연결 화면. Claude·ChatGPT·Command Code·OpenCode·Gemini 로컬 에이전트가 각각 연결 상태로 표시된다](images/studio-accounts.jpg)
+![구독 CLI 계정 연결 화면. 맨 위에 작업·격자·비교·작업 분해·계정 탭 줄이 있고, Claude·ChatGPT·Command Code·OpenCode·Gemini 로컬 에이전트마다 연결됨·로그인 필요·설치 안 됨 같은 상태와 다시 확인 단추, 로그인이 필요하면 로그인 단추와 안내가 보인다](images/studio-accounts.jpg)
 
 - 브라우저에서 `http://127.0.0.1:3000`을 열면 **바로 개발 화면(대화 + 미리보기)** 이 열립니다([ADR-066](decisions.md#adr-066-첫-화면은-마지막-프로젝트의-개발-화면이다)).
 - `claude-code` 모드는 로그인된 개인 PC에서만 사용하세요.
@@ -301,7 +301,7 @@ pnpm studio agent examples/orders \
 
 브라우저 대신 터미널 하나에서 여러 AI CLI를 나란히 쓰려면 `pnpm studio desk`를 씁니다(ADR-183). herdr·tmux처럼 왼쪽에 세션 목록, 오른쪽에 터미널 칸이 있고, 칸마다 스튜디오의 관문이 붙어 있어 사이드바에 게이트 결과가 함께 보입니다.
 
-- 먼저 스튜디오를 이 컴퓨터 방식 세션 터미널로 띄웁니다: `B_STUDIO_EXPERIMENTAL=1 B_STUDIO_MODE=claude-code B_STUDIO_BACKENDS=codex pnpm studio launch`. desk는 launch가 남긴 포트와 로컬 토큰으로 붙습니다(다른 포트면 `--port`).
+- 먼저 스튜디오를 이 컴퓨터 방식 세션 터미널로 띄웁니다: `B_STUDIO_EXPERIMENTAL=1 B_STUDIO_BACKENDS=codex pnpm studio launch`(Codex를 쓰지 않으면 `B_STUDIO_BACKENDS`는 빼도 됩니다). 실행 방식은 `launch`의 `--mode`(기본 `local`, 이 컴퓨터의 Claude Code)가 정하고, 환경 변수 `B_STUDIO_MODE`는 이 값으로 덮어써집니다. desk는 launch가 남긴 포트와 로컬 토큰으로 붙습니다(다른 포트면 `--port`).
 - 사이드바는 세션마다 두 줄입니다. AI·프로젝트·제목, 그 아래 상태(권한 대기·작업 중·CLI 대기·쉼 …)·게이트(검증 중·통과·실패·확인 필요)·체크포인트 수·비용입니다.
 - 조작은 Ctrl-b 다음 키로 합니다.
 
@@ -309,15 +309,16 @@ pnpm studio agent examples/orders \
 |---|---|
 | `Ctrl-b` `1`~`4` | 칸 고르기 |
 | `Ctrl-b` `↑` `↓` | 사이드바에서 세션 고르기(이어서 ↑↓를 더 눌러도 됩니다. 고르는 중에 다시 누른 `Ctrl-b`는 칸으로 가지 않고 새 `Ctrl-b`로 봅니다) |
-| `Ctrl-b` `Enter` | 고른 세션을 고른 칸에 열기 |
+| `Ctrl-b` `Enter` | 고른 세션을 고른 칸에 열기(이미 칸에 있으면 그 칸으로 갑니다. 터미널이 끝났거나 열지 못한 칸이면 다시 엽니다) |
 | `Ctrl-b` `n` | 새 요청: 프로젝트와 요청을 쓰면 어느 AI로 갈지 미리 보이고, `Tab`으로 이번만 다른 AI를 고릅니다. `Enter`로 보내면 그 AI의 터미널이 칸에 열립니다 |
 | `Ctrl-b` `l` | 칸 수 1 → 2 → 4 |
 | `Ctrl-b` `x` | 칸 비우기(세션은 계속 돕니다) |
 | `Ctrl-b` `q` | 나가기(세션과 CLI는 계속 돕니다) |
 | `Ctrl-b` `Ctrl-b` | CLI에 Ctrl-b 보내기 |
 
-- 그 밖의 키는 고른 칸의 CLI로 그대로 갑니다.
-- 칸 안은 글자·색·커서만 옮겨 그립니다. 마우스와 칸 안 스크롤은 없습니다.
+- 그 밖의 키는 고른 칸의 CLI로 그대로 갑니다. 붙여 넣은 글은 안의 `Ctrl-b`까지 내용으로 보고 CLI에 넘깁니다. CLI가 bracketed paste를 켰으면 붙여넣기 표지로 감싸 줄마다 Enter로 처리되지 않습니다.
+- 칸 안은 글자·색·커서만 옮겨 그립니다. 이모지와 풀어쓴 한글도 2칸으로 셉니다. 마우스와 칸 안 스크롤은 없습니다.
+- 스튜디오를 다시 띄우면 desk가 다시 붙으며 보이는 칸의 터미널을 다시 엽니다(CLI는 새로 뜹니다).
 
 <img src="images/studio-desk.jpg" width="760" alt="터미널 하나에 띄운 studio desk. 왼쪽 사이드바에 세션 넷이 두 줄씩 있고(확인 필요, 통과 등), 고른 Claude 세션 아래에 Explore 서브에이전트의 토큰과 도구·권한 범위가 펼쳐져 있다. 오른쪽 두 칸에 Claude와 Codex 터미널이 있고 각 요청 끝에 'Stop says: [b-studio] 검증 통과 — 체크포인트 …'가 찍혀 있다. 사진의 CLI는 모델을 부르지 않는 사진용 가짜 CLI다">
 
