@@ -67,6 +67,8 @@ export interface AgentItem {
   agents?: AgentDetail[];
   /** 이 에이전트가 할 수 있는 범위(#843). 기억에 없는 세션이면 없다 */
   capabilities?: AgentCapabilities;
+  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. desk가 그 계정의 사용량 막대를 잇는다(#889) */
+  accountId?: string;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -358,6 +360,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     // 메인 행의 상태는 이 항목의 실행 상태다. 장부는 실행 상태를 모른다
     ...(row.agents ? { agents: row.agents.map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent)) } : {}),
     ...(row.capabilities ? { capabilities: row.capabilities } : {}),
+    ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
   };
 }
 

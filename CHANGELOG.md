@@ -15,6 +15,7 @@
 
 ### 추가
 
+- (실험) `studio desk`에 사용량 화면(`Ctrl-b u`)을 더했습니다. 계정마다 카드에 그림, 이름·CLI·추천, 상태(여유·주의·다 씀·쉬는 중), 플랜, 5시간·주간 막대와 %, 다시 차는 때를 보이고, 맨 위에 CLI마다 읽은 계정 수·주간 평균·기준 시각을 한 줄로 적습니다. 앞글쇠 없이 `↑` `↓`로 고르고 `r`로 다시 읽습니다. desk는 사용량을 1분마다 받아 스페이스 화면의 세션 카드에 그 세션 계정의 막대를 잇습니다. `GET /api/usage/limits`는 계정 목록의 계정 전부를 읽어 이름·그림을 붙이고(같은 설정 폴더는 한 번), `GET /api/agents`는 세션의 `accountId`를 싣습니다. 계정 그림(`sprite`)에 GIF도 받습니다(#889).
 - (실험) `studio desk` 카드 그림이 움짤이 됩니다. 이름 붙인 그림이 없는 세션은 그림 폴더(`~/.config/b-studio/sprites/`, 하위 폴더 포함)의 PNG·GIF에서 세션마다 무작위로 하나를 골라(같은 세션은 늘 같은 그림) 카드 높이를 채워 그리고, GIF는 스페이스 화면이 보이고 창이 포커스를 가진 동안 움직입니다. Ghostty·kitty에서는 Kitty 그래픽으로 원래 픽셀 그대로, 그 밖에는 반칸 블록으로 그립니다. `desk.json`의 `sprites`·`animate`·`graphics`로 바꿉니다. 그림은 저장소에 넣지 않습니다(#902).
 - 계정마다 구독 한도(5시간·주간 사용률과 리셋 시각), 상태(여유·주의·다 씀·쉬는 중), 추천 계정을 주는 `GET /api/usage/limits`를 더했습니다. Codex는 `codex app-server`에 묻고, Claude는 `/usage`가 부르는 사용량 API를 계정마다 10분에 한 번 부릅니다(문서가 없는 API라 `B_STUDIO_CLAUDE_USAGE_API=0`으로 끕니다). Gemini는 해당 없음입니다. 개인 PC 모드에서만 열립니다(#886).
 - 여러 AI 계정: Claude Code·Codex는 CLI마다 계정을 여럿 둡니다. 계정은 이름, CLI, 설정 폴더(claude의 `CLAUDE_CONFIG_DIR`, codex의 `CODEX_HOME`)이고 `~/.config/b-studio/accounts.json`(0600)에 남습니다. `GET·POST /api/ai-accounts`, `PATCH·DELETE /api/ai-accounts/{id}`, 계정별 `status`·`login`을 더했습니다. 세션을 만들 때 `accountId`를 주면 세션 기록에 남고 세션 터미널·대화 러너·로그인 확인이 그 설정 폴더로 CLI를 띄웁니다. 라우팅 규칙의 대상에 `accountId`를 적어 계정까지 고르고, 로그인 전인 계정은 건너뜁니다. `studio desk`의 새 요청에서 계정을 고릅니다. 계정을 지워도 설정 폴더는 남고, 계정이 빠진 세션은 다른 계정으로 띄우지 않습니다. 계정을 적지 않으면 지금과 같습니다. macOS 키체인이 설정 폴더마다 나뉘는지는 실측하지 않았습니다(#885).

@@ -97,10 +97,12 @@ describe('계정 목록 파일', () => {
     await expect(addAiAccount({ name: '폴더 없음', backend: 'claude-code' }, env)).rejects.toThrow('설정 폴더');
   });
 
-  it('그림은 sprites 폴더 안의 png 파일 이름만 받는다', async () => {
+  it('그림은 sprites 폴더 안의 png·gif 파일 이름만 받는다', async () => {
     const added = await addAiAccount({ name: '트레버', backend: 'claude-code', configDir: '~/.claude-trevor', sprite: 'trevor.png' }, env);
     expect(added.sprite).toBe('trevor.png');
-    for (const sprite of ['../x.png', '/abs/x.png', 'x.gif', '.hidden.png', 'a/b.png']) {
+    // 움짤도 그림이다(#902)
+    expect((await updateAiAccount(added.id, { sprite: 'pikachu.gif' }, env)).sprite).toBe('pikachu.gif');
+    for (const sprite of ['../x.png', '/abs/x.png', 'x.jpg', '.hidden.png', 'a/b.png', 'a/b.gif']) {
       await expect(updateAiAccount(added.id, { sprite }, env)).rejects.toMatchObject({ status: 400 });
     }
     expect(await updateAiAccount(added.id, { sprite: null }, env)).not.toHaveProperty('sprite');

@@ -571,3 +571,56 @@ describe('스페이스 화면 키(#887)', () => {
     expect(handleInput(spaced(), '\x02\x1b[B').state.view).toBe('space');
   });
 });
+
+describe('사용량 화면 키(#889)', () => {
+  const accounts = [
+    { id: 'claude-code', backend: 'claude-code', status: 'ok' as const, windows: [], source: 'claude-oauth' },
+    { id: 'codex', backend: 'codex', status: 'ok' as const, windows: [], source: 'codex-app-server' },
+    { id: 'gemini', backend: 'gemini', status: 'unsupported' as const, windows: [], source: 'none' },
+  ];
+  const usage = (patch: Partial<DeskState> = {}): DeskState => withItems({ view: 'usage', usage: { accounts }, ...patch });
+
+  it('Ctrl-b u로 사용량 화면을 열며 사용량을 읽게 하고, 다시 누르면 닫는다', () => {
+    const { state, effects } = handleInput(withItems(), '\x02u');
+    expect(state.view).toBe('usage');
+    expect(state.prefix).toBe(false);
+    expect(effects).toEqual([{ type: 'usage', refresh: false }]);
+    expect(handleInput(state, '\x02u').state.view).toBeUndefined();
+  });
+
+  it('스페이스 화면에서 열었으면 닫을 때 스페이스 화면으로 돌아간다', () => {
+    const opened = handleInput(withItems({ view: 'space' }), '\x02u').state;
+    expect(opened.view).toBe('usage');
+    expect(handleInput(opened, '\x1b', true).state.view).toBe('space');
+    expect(handleInput(opened, 'q').state.view).toBe('space');
+    // 칸 화면에서 열었으면 칸 화면으로
+    const fromPanes = handleInput(withItems(), '\x02u').state;
+    expect(handleInput(fromPanes, '\x1b', true).state.view).toBeUndefined();
+  });
+
+  it('앞글쇠 없이 ↑↓·jk로 계정을 고르고(범위 안), r로 다시 읽기를 청한다', () => {
+    let state = usage();
+    state = handleInput(state, '\x1b[B').state;
+    state = handleInput(state, 'j').state;
+    expect(state.usageSelected).toBe(2);
+    state = handleInput(state, 'j').state;
+    expect(state.usageSelected).toBe(2);
+    state = handleInput(state, 'k').state;
+    expect(state.usageSelected).toBe(1);
+    expect(handleInput(state, 'r').effects).toEqual([{ type: 'usage', refresh: true }]);
+  });
+
+  it('친 글자와 붙여 넣은 글은 칸이 있어도 CLI로 가지 않는다', () => {
+    const state = usage({ slots: ['a', undefined, undefined, undefined] });
+    expect(handleInput(state, 'xyz').effects).toEqual([]);
+    expect(handleInput(state, '\x1b[200~hello\x1b[201~').effects).toEqual([]);
+  });
+
+  it('w는 스페이스 화면으로, 칸을 다루는 앞글쇠 키는 칸 화면으로 간다', () => {
+    expect(handleInput(usage(), 'w').state.view).toBe('space');
+    const picked = handleInput(usage({ layout: 2, slots: ['a', 'b', undefined, undefined] }), '\x022').state;
+    expect(picked.view).toBeUndefined();
+    expect(picked.focus).toBe(1);
+    expect(handleInput(usage(), '?').state.help).toBe(true);
+  });
+});

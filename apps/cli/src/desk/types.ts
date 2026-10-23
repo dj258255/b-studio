@@ -26,6 +26,8 @@ export interface DeskItem {
   agents?: DeskAgent[];
   /** 이 에이전트가 할 수 있는 범위(#843) */
   capabilities?: DeskCapabilities;
+  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다 — 그 CLI의 기본 계정(id가 CLI 이름)이다 */
+  accountId?: string;
 }
 
 export interface DeskUsage {
@@ -111,4 +113,29 @@ export interface DeskLimitWindow {
 export interface DeskLimits {
   fiveHour?: DeskLimitWindow;
   weekly?: DeskLimitWindow;
+}
+
+/** 계정의 한도 상태: ok 여유, warn 주의, exhausted 다 씀, idle 쉬는 중, unknown 모름(읽지 못함·꺼 둠), unsupported 해당 없음 */
+export type DeskLimitStatus = 'ok' | 'warn' | 'exhausted' | 'idle' | 'unknown' | 'unsupported';
+
+/** 계정 하나의 사용량 한도(GET /api/usage/limits, #886·#889). 스튜디오 usage-limits.ts의 AccountLimits에 이름·그림을 붙인 꼴 */
+export interface DeskAccountLimits {
+  id: string;
+  backend: string;
+  /** 계정 이름(기본 계정은 "기본"). 옛 서버는 주지 않는다 */
+  name?: string;
+  /** 그림 폴더 안의 그림 파일 이름 */
+  sprite?: string;
+  builtin?: boolean;
+  plan?: string;
+  status: DeskLimitStatus;
+  windows: Array<{ kind: 'five_hour' | 'weekly' | 'other'; usedPercent: number; resetsAt?: string; minutes?: number }>;
+  source: string;
+  /** 마지막으로 읽은 시각(ISO) */
+  fetchedAt?: string;
+  /** 이번에 읽지 못해 지난 값을 보여 주는 중 */
+  stale?: boolean;
+  /** 읽지 못한 까닭 */
+  error?: string;
+  recommended?: boolean;
 }

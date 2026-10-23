@@ -18,9 +18,12 @@ import { graphicsMode, KittyImages, type GraphicsMode } from './kitty';
 import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSprites, shortestFrame, spriteDir, type Sprite } from './sprite';
 import type { ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskTerminalMessage } from './types';
+import { accountSprite, sessionLimits, usageScreen, usageSpriteKey } from './usage';
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
+/** 사용량을 새로 받는 주기(#889). 스튜디오가 계정마다 최소 간격(Claude 10분)을 지키므로 이보다 자주 묻지 않는다 */
+const USAGE_POLL_MS = 60_000;
 /** 화면을 다시 그리는 최소 간격 */
 const FRAME_MS = 30;
 /** 미리보기를 묻기 전에 기다리는 시간(쓰는 동안 매 글자 묻지 않게) */
@@ -87,6 +90,8 @@ const SPRITE_CACHE = 64;
 export interface SpriteCatalog {
   /** 세션 id에 맞는 그림: 그 id 이름의 그림, 그다음 random이면 폴더에서 무작위. 없으면 sprite가 없다. 읽지 못했으면 warning */
   pick(id: string): { sprite?: Sprite; warning?: string };
+  /** 그림 폴더 안의 그 파일(계정에 적은 그림, #889). 없거나 읽지 못하면 warning */
+  file?(name: string): { sprite?: Sprite; warning?: string };
 }
 
 /** 그림 폴더의 그림 목록. 시작할 때 목록만 읽고, 그림은 처음 보일 때 읽는다 */
@@ -99,21 +104,30 @@ export function folderCatalog(dir: string, options: { random: boolean }): Sprite
       if (named) return { sprite: named };
       const file = pickSprite(id, files);
       if (!file) return {};
-      if (cache.has(file)) {
-        const known = cache.get(file);
-        return known ? { sprite: known } : {};
-      }
-      if (cache.size >= SPRITE_CACHE) cache.delete(cache.keys().next().value!);
-      try {
-        const sprite = readSprite(join(dir, file));
-        cache.set(file, sprite);
-        return { sprite };
-      } catch (error) {
-        cache.set(file, null);
-        return { warning: `그림 ${file}를 읽지 못했습니다: ${messageOf(error)}` };
-      }
+      return read(file);
+    },
+    file(name) {
+      // 폴더 밖이나 숨은 파일은 읽지 않는다(서버도 같은 꼴만 받는다)
+      if (!/^[^./\\][^/\\]*\.(png|gif)$/i.test(name)) return { warning: `그림 이름 ${name}이 틀렸습니다` };
+      return read(name);
     },
   };
+
+  function read(file: string): { sprite?: Sprite; warning?: string } {
+    if (cache.has(file)) {
+      const known = cache.get(file);
+      return known ? { sprite: known } : {};
+    }
+    if (cache.size >= SPRITE_CACHE) cache.delete(cache.keys().next().value!);
+    try {
+      const sprite = readSprite(join(dir, file));
+      cache.set(file, sprite);
+      return { sprite };
+    } catch (error) {
+      cache.set(file, null);
+      return { warning: `그림 ${file}를 읽지 못했습니다: ${messageOf(error)}` };
+    }
+  }
 }
 
 export interface DeskOptions {
@@ -191,7 +205,9 @@ export interface DeskAppOptions {
 }
 
 /** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
-export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'>;
+export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'> &
+  /** 사용량(#889). 없으면 사용량을 묻지 않는다 */
+  { limits?: StudioClient['limits'] };
 
 /** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
 export interface DeskIo {
@@ -301,6 +317,9 @@ export class DeskApp {
   #prevFrame: string[] = [];
   #frameTimer: NodeJS.Timeout | undefined;
   #pollTimer: NodeJS.Timeout | undefined;
+  #usageTimer: NodeJS.Timeout | undefined;
+  /** 사용량을 묻는 중(앞 요청이 끝나기 전에 또 묻지 않는다) */
+  #usageFetching = false;
   #previewTimer: NodeJS.Timeout | undefined;
   /** 칸마다 따로 연 터미널 통로. 칸 하나를 열고 닫아도 다른 칸의 통로와 화면은 그대로다(#863) */
   readonly #streams = new Map<string, { controller: AbortController; timer?: NodeJS.Timeout }>();
@@ -415,6 +434,9 @@ export class DeskApp {
       this.#resizeTimer = setTimeout(() => this.#syncPanes(), RESIZE_SETTLE_MS);
     });
     this.#pollTimer = setInterval(() => void this.#poll(), POLL_MS);
+    // 사용량(#889): 처음 한 번, 그 뒤 1분마다
+    void this.#fetchUsage({ refresh: false, force: true });
+    if (this.#client.limits) this.#usageTimer = setInterval(() => void this.#fetchUsage({ refresh: false, force: true }), USAGE_POLL_MS);
     // 되살린 배치의 칸을 연다
     if (this.#visible().length > 0) this.#slotsChanged();
     this.#render();
@@ -506,6 +528,9 @@ export class DeskApp {
       case 'layout':
         this.#slotsChanged();
         this.#saveLayout();
+        return;
+      case 'usage':
+        void this.#fetchUsage({ refresh: effect.refresh, force: effect.refresh });
         return;
       case 'mouse':
         this.#mouse(effect);
@@ -634,6 +659,19 @@ export class DeskApp {
         this.#state = { ...this.#state, selected: row.item, prefix: true, browsing: true, message: BROWSING };
       }
       this.#clearSeen();
+      this.#scheduleRender();
+      return;
+    }
+    if (this.#state.view === 'usage') {
+      if (!press) return;
+      const count = this.#state.usage?.accounts.length ?? 0;
+      const current = this.#state.usageSelected ?? 0;
+      if (wheel) this.#state = { ...this.#state, usageSelected: Math.max(0, Math.min(count - 1, current + wheel)) };
+      else {
+        const card = usageScreen(this.#state, spaceRect(this.#state, size)).cards.find(({ rect }) => x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h);
+        if (!card) return;
+        this.#state = { ...this.#state, usageSelected: card.index };
+      }
       this.#scheduleRender();
       return;
     }
@@ -991,6 +1029,47 @@ export class DeskApp {
     this.#scheduleRender();
   }
 
+  /**
+   * 사용량을 받는다(#889). force가 아니면 받은 지 1분이 안 됐을 때 묻지 않는다(사용량 화면을 여닫을 때마다 묻지 않게).
+   * 받으면 세션 카드의 막대(state.limits)도 새로 잇는다. 읽지 못하면 받았던 값은 두고 까닭만 남긴다
+   */
+  async #fetchUsage(options: { refresh: boolean; force: boolean }): Promise<void> {
+    const limits = this.#client.limits;
+    if (!limits) {
+      if (!this.#state.usage) this.#state = { ...this.#state, usage: { accounts: [], unsupported: true } };
+      this.#scheduleRender();
+      return;
+    }
+    const received = this.#state.usage?.receivedAt;
+    if (!options.force && received !== undefined && Date.now() - received < USAGE_POLL_MS) return;
+    if (this.#usageFetching) return;
+    this.#usageFetching = true;
+    const asked = options.refresh ? this.#state.message : undefined;
+    try {
+      const { accounts, warning } = await limits.call(this.#client, options.refresh);
+      if (this.#restored) return;
+      const count = accounts.length;
+      this.#state = {
+        ...this.#state,
+        usage: { accounts, receivedAt: Date.now(), ...(warning ? { warning } : {}) },
+        limits: sessionLimits(this.#state.items, accounts),
+        ...(this.#state.usageSelected !== undefined ? { usageSelected: Math.max(0, Math.min(count - 1, this.#state.usageSelected)) } : {}),
+        ...(asked !== undefined && this.#state.message === asked ? { message: '사용량을 다시 읽었습니다(계정마다 최소 간격은 스튜디오가 지킵니다)' } : {}),
+      };
+    } catch (error) {
+      if (this.#restored) return;
+      const previous = this.#state.usage;
+      this.#state = {
+        ...this.#state,
+        usage: { accounts: previous?.accounts ?? [], ...(previous?.receivedAt !== undefined ? { receivedAt: previous.receivedAt } : {}), error: messageOf(error) },
+        ...(asked !== undefined && this.#state.message === asked ? { message: undefined } : {}),
+      };
+    } finally {
+      this.#usageFetching = false;
+    }
+    this.#scheduleRender();
+  }
+
   async #poll(): Promise<void> {
     // 앞 요청이 끝나기 전에는 새로 묻지 않는다(느린 스튜디오에 요청이 쌓이고 늦게 온 옛 목록이 새 목록을 덮지 않게)
     if (this.#polling) return;
@@ -998,7 +1077,8 @@ export class DeskApp {
     try {
       const items = (await this.#client.agents()).items;
       // 서버는 손댈 것·작업 중을 위로 올려 순서를 자주 바꾼다. 고르던 세션을 그대로 고른다
-      this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items) };
+      const usage = this.#state.usage;
+      this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items), ...(usage?.accounts.length ? { limits: sessionLimits(items, usage.accounts) } : {}) };
       this.#announce(items);
       this.#reopenResumed(items);
       this.#clearSeen();
@@ -1115,6 +1195,10 @@ export class DeskApp {
 
   /** 스페이스 화면에 보일 세션 가운데 이름 붙인 그림이 없는 것에 그림 폴더의 그림을 단다(처음 보일 때 한 번) */
   #ensureSprites(): void {
+    if (this.#state.view === 'usage') {
+      this.#ensureAccountSprites();
+      return;
+    }
     if (!this.#catalog || this.#state.view !== 'space') return;
     const sprites = this.#state.sprites ?? {};
     let added: Record<string, Sprite> | undefined;
@@ -1132,11 +1216,29 @@ export class DeskApp {
     if (added) this.#state = { ...this.#state, sprites: { ...sprites, ...added } };
   }
 
+  /** 사용량 화면의 계정 그림(#889): 계정에 적은 그림 파일, 없으면 계정 id로 그림 폴더에서 고른다. 처음 보일 때 한 번 */
+  #ensureAccountSprites(): void {
+    const sprites = this.#state.sprites ?? {};
+    let added: Record<string, Sprite> | undefined;
+    for (const account of this.#state.usage?.accounts ?? []) {
+      const key = usageSpriteKey(account.id);
+      if (sprites[key] || added?.[key]) continue;
+      const found = !this.#catalog ? {} : account.sprite && this.#catalog.file ? this.#catalog.file(account.sprite) : this.#catalog.pick(account.id);
+      if (found.warning && !this.#spriteWarned.has(found.warning)) {
+        this.#spriteWarned.add(found.warning);
+        this.#say(found.warning);
+      }
+      added = { ...added, [key]: found.sprite ?? sprites[account.backend] ?? sprites.default ?? defaultSprite(account.backend) };
+    }
+    if (added) this.#state = { ...this.#state, sprites: { ...sprites, ...added } };
+  }
+
   /** 스페이스 화면에 움짤이 보이고 창이 포커스를 가졌으면 다음 프레임에 다시 그린다. 아니면 멈춘다(시계도 멈춘다) */
   #scheduleAnimation(): void {
     const state = this.#state;
-    const playing = this.#animate && !this.#restored && this.#windowFocused && state.view === 'space' && !state.help && !state.copy;
-    const delays = playing ? spaceItems(state).flatMap((item) => shortestFrame(spriteFor(item, state.sprites)) ?? []) : [];
+    const playing = this.#animate && !this.#restored && this.#windowFocused && (state.view === 'space' || state.view === 'usage') && !state.help && !state.copy;
+    const shown = !playing ? [] : state.view === 'usage' ? (state.usage?.accounts ?? []).map((account) => accountSprite(account, state.sprites)) : spaceItems(state).map((item) => spriteFor(item, state.sprites));
+    const delays = shown.flatMap((sprite) => shortestFrame(sprite) ?? []);
     if (delays.length === 0) {
       clearTimeout(this.#animTimer);
       this.#animTimer = undefined;
@@ -1193,6 +1295,7 @@ export class DeskApp {
     if (this.#restored) return;
     this.#restored = true;
     clearInterval(this.#pollTimer);
+    clearInterval(this.#usageTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);
     clearTimeout(this.#pendingTimer);

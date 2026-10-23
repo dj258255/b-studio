@@ -23,7 +23,7 @@ export interface AiAccount {
   backend: CliAccountBackend;
   /** CLI의 설정 폴더(절대 경로, 홈 아래). 없으면 기본 계정이다 */
   configDir?: string;
-  /** 캐릭터 그림 파일 이름(`b-studio/sprites/` 안의 png). 화면이 읽는다 */
+  /** 캐릭터 그림 파일 이름(`b-studio/sprites/` 안의 png·gif). 화면이 읽는다 */
   sprite?: string;
   /** 파일에 없는 처음 기본 계정 */
   builtin?: true;
@@ -36,7 +36,7 @@ export const MAX_ACCOUNTS = 32;
 /** 계정 id의 꼴. 기본 계정은 CLI 이름(claude-code 등), 더한 계정은 acct-와 16진수 8자다 */
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
-const SPRITE = /^[^./\\\u0000-\u001f][^/\\\u0000-\u001f]{0,123}\.png$/i;
+const SPRITE = /^[^./\\\u0000-\u001f][^/\\\u0000-\u001f]{0,123}\.(png|gif)$/i;
 
 /** 설정 폴더를 따로 둘 수 있는 CLI와 그 환경 변수 */
 const DIR_ENV: Partial<Record<CliAccountBackend, string>> = { 'claude-code': ACCOUNT_DIR_ENV.claude, codex: ACCOUNT_DIR_ENV.codex };
@@ -152,7 +152,7 @@ function cleanName(value: unknown): string {
 
 function cleanSprite(value: unknown): string | undefined {
   if (value === null || value === undefined || value === '') return undefined;
-  if (typeof value !== 'string' || !SPRITE.test(value)) throw new StudioError(400, '그림은 sprites 폴더 안의 png 파일 이름만 적습니다(예: marco.png)');
+  if (typeof value !== 'string' || !SPRITE.test(value)) throw new StudioError(400, '그림은 sprites 폴더 안의 png·gif 파일 이름만 적습니다(예: marco.png, pikachu.gif)');
   return value;
 }
 
