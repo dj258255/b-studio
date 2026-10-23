@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskAccount, DeskOverview, DeskPreview, DeskProject, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskOverview, DeskPreview, DeskProject, DeskStartResult, DeskTerminalMessage } from './types';
 
 const LOCAL_TOKEN_COOKIE = 'b_studio_local';
 /** 터미널 입력 한 번의 크기. 스튜디오의 상한(256KiB)보다 작게 나눠 보낸다 */
@@ -126,6 +126,11 @@ export class StudioClient {
   /** AI 계정 목록(#885). 개인 PC 모드가 아니거나 옛 스튜디오면 실패한다 — 부르는 쪽이 계정 없이 고른다 */
   async accounts(): Promise<DeskAccount[]> {
     return (await this.#request<{ accounts: DeskAccount[] }>('GET', '/api/ai-accounts')).accounts;
+  }
+
+  /** 계정마다의 사용량 한도(#889). refresh면 다시 읽기를 청한다(스튜디오가 계정마다 최소 간격을 지킨다) */
+  limits(refresh = false): Promise<{ accounts: DeskAccountLimits[]; warning?: string }> {
+    return this.#request('GET', `/api/usage/limits${refresh ? '?refresh=1' : ''}`);
   }
 
   rules(): Promise<{ allowed: string[]; defaultBackend: string }> {

@@ -20,6 +20,8 @@ export type ColorToken =
   | 'yellow'
   | 'red'
   | 'teal'
+  /** 쉬는 계정(사용량 화면, #889) */
+  | 'purple'
   /** 배지 바탕 */
   | 'badge';
 
@@ -41,6 +43,7 @@ const PALETTES: Record<ThemeName, Record<ColorToken, string>> = {
     yellow: '#f9e2af',
     red: '#f38ba8',
     teal: '#94e2d5',
+    purple: '#cba6f7',
     badge: '#45475a',
   },
   light: {
@@ -54,6 +57,7 @@ const PALETTES: Record<ThemeName, Record<ColorToken, string>> = {
     yellow: '#df8e1d',
     red: '#d20f39',
     teal: '#179299',
+    purple: '#8839ef',
     badge: '#bcc0cc',
   },
 };

@@ -8,6 +8,7 @@ import {
   codexPlanLabel,
   createUsageLimits,
   judgeStatus,
+  limitAccounts,
   markRecommended,
   readClaudeLimits,
   readCodexLimits,
@@ -401,5 +402,42 @@ describe('createUsageLimits', () => {
 
     expect(result).toMatchObject({ status: 'unknown', windows: [] });
     expect(result?.error).toContain('로그인');
+  });
+});
+
+describe('limitAccounts', () => {
+  const home = '/home/kim';
+
+  it('계정 목록에서 한도를 읽을 계정(id·CLI·설정 폴더)만 꺼낸다', () => {
+    const list = [
+      { id: 'claude-code', name: '기본', backend: 'claude-code', builtin: true as const },
+      { id: 'acct-1', name: '피오', backend: 'claude-code', configDir: '/home/kim/.claude-fio', sprite: 'fio.gif' },
+      { id: 'codex', name: '마르코', backend: 'codex' },
+      { id: 'gemini', name: '기본', backend: 'gemini', builtin: true as const },
+    ];
+
+    expect(limitAccounts(list, home)).toEqual([
+      { id: 'claude-code', backend: 'claude-code' },
+      { id: 'acct-1', backend: 'claude-code', configDir: '/home/kim/.claude-fio' },
+      { id: 'codex', backend: 'codex' },
+      { id: 'gemini', backend: 'gemini' },
+    ]);
+  });
+
+  it('한도가 없는 CLI(commandcode·opencode)는 뺀다', () => {
+    const list = [{ id: 'opencode', name: '기본', backend: 'opencode' }, { id: 'commandcode', name: '기본', backend: 'commandcode' }];
+    expect(limitAccounts(list, home)).toEqual([]);
+  });
+
+  it('같은 설정 폴더를 가리키는 계정은 앞의 하나만 둔다(기본 계정의 폴더를 손으로 다시 적은 것 포함)', () => {
+    const list = [
+      { id: 'claude-code', name: '기본', backend: 'claude-code' },
+      { id: 'acct-1', name: '다시 적은 기본', backend: 'claude-code', configDir: '/home/kim/.claude/' },
+      { id: 'acct-2', name: '일', backend: 'claude-code', configDir: '/home/kim/.claude-work' },
+      { id: 'acct-3', name: '일 또', backend: 'claude-code', configDir: '/home/kim/./.claude-work' },
+      { id: 'acct-4', name: '코덱스 일', backend: 'codex', configDir: '/home/kim/.claude-work' },
+    ];
+
+    expect(limitAccounts(list, home).map((account) => account.id)).toEqual(['claude-code', 'acct-2', 'acct-4']);
   });
 });
