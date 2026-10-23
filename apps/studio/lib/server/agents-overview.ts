@@ -69,6 +69,8 @@ export interface AgentItem {
   capabilities?: AgentCapabilities;
   /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. desk가 그 계정의 사용량 막대(#889)와 그림(#890)을 잇는다 */
   accountId?: string;
+  /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
+  checkChangesArmed?: true;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -361,6 +363,8 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.agents ? { agents: row.agents.map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent)) } : {}),
     ...(row.capabilities ? { capabilities: row.capabilities } : {}),
     ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
+    // 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916). desk가 카드와 세션 자세히에 보인다
+    ...(row.snapshot?.allowCheckChangesNext ? { checkChangesArmed: true as const } : {}),
   };
 }
 

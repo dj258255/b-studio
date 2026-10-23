@@ -7888,6 +7888,8 @@ interface TerminalVerification {
 interface TerminalRunState {
   /** 체크포인트 제목의 바탕이 되는 첫 요청 */
   request: string;
+  /** 사람이 켜 둔 확인 선언 변경 허용을 이 실행이 가져갔다(#916, ADR-164). 게이트가 바뀐 선언으로 검증한다 */
+  allowCheckChanges?: boolean;
   /**
    * 읽기만 요청이다(요청 글이 AGENT_READ_ONLY_MARK로 시작한다). 이 실행에서는 파일을 바꿀 수 있는 도구를 모두 거절한다.
    * 대화 창의 "읽기만"은 읽기 전용 도구만 주는 강제였다. 터미널에서도 문장으로 부탁하지 않고 훅으로 막는다(이슈 #689).
@@ -8433,9 +8435,13 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
   const stallMs = terminalStallMs();
   const readOnly = isReadOnlyPrompt(request);
+  // 켜 둔 확인 선언 변경 허용은 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 둔다(ADR-164)
+  const allowCheckChanges = !readOnly && session.snapshot.allowCheckChangesNext === true;
+  if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
   const terminal: TerminalRunState = {
     request,
     readOnly,
+    ...(allowCheckChanges ? { allowCheckChanges: true } : {}),
     // 읽기만 실행이 열리는 순간의 작업 복사본 지문을 지금 잡아 둔다. 끝날 때 다시 잡아 이 실행이 파일을 바꿨는지 가린다
     // (사람이 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다)
     ...(readOnly ? { readOnlyFingerprint: await session.checkpoints.pendingFingerprint() } : {}),
@@ -8630,6 +8636,8 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
       allowBreaking: false,
       maxVerifyAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
       ...(declarationBaseline ? { declarationBaseline } : {}),
+      // 사람이 켜 둔 확인 선언 변경 허용(#916, ADR-164). 켜면 게이트가 시도마다 studio.yaml의 선언을 다시 읽는다
+      ...(state.allowCheckChanges ? { allowCheckChanges: true } : {}),
       fetcher: fetchContract,
       signal,
       onServiceStatus: serviceStatus,
@@ -8692,7 +8700,24 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
   const notes = session.terminalNotes?.splice(0) ?? [];
   if (run.terminal.readOnly) notes.push(TERMINAL_READ_ONLY_NOTE);
+  if (run.terminal.allowCheckChanges) notes.push(TERMINAL_CHECK_CHANGES_NOTE);
   return notes.length > 0 ? { note: notes.join('\n') } : {};
+}
+
+/** 확인 선언 변경 허용을 가져간 실행의 CLI에 알리는 글. 모르면 "허용을 켜고 다시 요청해 달라"고 되묻는다(대화 실행의 noteForModel과 같은 뜻) */
+const TERMINAL_CHECK_CHANGES_NOTE = `[b-studio] 사용자가 이 요청에 '확인 선언 변경 허용'을 켰습니다. 이번 실행의 검증은 ${SPEC_FILE}의 지금 확인 선언(tests·pageChecks·concurrencyChecks·loadChecks·autoPageChecks·required)으로 돕니다. 사용자가 요청한 선언만 바꾸고, 바꾼 것은 검증 결과의 declared-checks 줄에 남습니다.`;
+
+/**
+ * 터미널 세션의 다음 요청 하나에서 확인 선언의 변경을 받아들일지 켜고 끈다(#916, ADR-164). 지금 켜져 있는지 돌려준다.
+ * 대화 창의 요청 옵션(allowCheckChanges)과 같은 뜻이다. 터미널의 요청은 CLI가 훅으로 알려 와 요청마다 옵션을 실을 자리가 없어,
+ * 사람이 미리 켜 두고 그 뒤 처음 시작되는 만들기 실행이 가져간다. 켜는 길(API)은 로컬 토큰이 있는 요청만 받는다(에이전트가 켜지 못하게)
+ */
+export function setTerminalCheckChanges(id: string, allow: boolean): boolean {
+  const session = requireSession(id);
+  if (allow) session.snapshot.allowCheckChangesNext = true;
+  else session.snapshot.allowCheckChangesNext = undefined;
+  schedulePersist(session);
+  return session.snapshot.allowCheckChangesNext === true;
 }
 
 /** 읽기만 요청에서 에이전트에게 덧붙이는 말. 도구가 거절되는 까닭을 미리 알려 헛돌지 않게 한다 */

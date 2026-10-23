@@ -11,7 +11,8 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
-import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { applyListing, listingFailed, type FolderEffect, type FolderState } from './folder';
 import { PaneTerminal } from './pane';
 import type { DeskPlan, LaneChoice, PlansEffect, PlansState } from './plans';
 import { spaceItems, spaceScreen, spriteFor } from './cards';
@@ -167,6 +168,9 @@ export interface SettingsHost {
   openUrl(url: string): void;
 }
 
+/** 탐색형 QA가 도는 동안 상태를 다시 받는 주기(웹 화면과 같다, #916) */
+const QA_POLL_MS = 1_200;
+
 /** 작업 나누기 화면이 열려 있는 동안 계획을 다시 받는 주기 */
 const PLANS_POLL_MS = 2_000;
 
@@ -299,10 +303,15 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   /** 여러 AI 비교(#892). 없으면 Ctrl-b f가 열 수 없다고 알린다 */
   Partial<Pick<StudioClient, FleetsCall>> &
   /** 실행·배포·미리보기·저장소 화면(#895). 없으면 그 화면에서 할 수 없다고 알린다 */
-  Partial<Pick<StudioClient, RuntimeCall>>;
+  Partial<Pick<StudioClient, RuntimeCall>> &
+  /** 폴더 열기(#916). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, FolderCall>>;
 
 /** 실행 화면이 부르는 스튜디오 API(#895) */
-type RuntimeCall = 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository';
+/** 폴더 열기가 부르는 스튜디오 API(#916) */
+type FolderCall = 'folders' | 'proposeFolder' | 'registerFolder';
+
+type RuntimeCall = 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository' | 'exploreQa' | 'startExploreQa' | 'stopExploreQa' | 'saveExploreQa' | 'artifactUrl';
 
 /** 여러 AI 비교 화면이 부르는 스튜디오 API(#892) */
 type FleetsCall = 'fleets' | 'fleet' | 'createFleet' | 'chooseFleetWinner' | 'deleteFleet';
@@ -312,6 +321,7 @@ type PlansCall = 'plans' | 'plan' | 'createPlan' | 'approvePlan' | 'rejectPlan' 
 
 /** 기록 화면과 세션 자세히가 부르는 스튜디오 API(#891) */
 type RecordsCall =
+  | 'allowCheckChanges'
   | 'routingStats'
   | 'tokenReport'
   | 'session'
@@ -510,6 +520,8 @@ export class DeskApp {
   readonly #openUrl: ((url: string) => void) | undefined;
   /** 실행 화면(#895)이 받는 세션 이벤트 통로 */
   #runtimeStream: AbortController | undefined;
+  /** 탐색형 QA가 도는 동안 상태를 다시 받는 시계(#916) */
+  #qaTimer: ReturnType<typeof setTimeout> | undefined;
   #plansTimer: NodeJS.Timeout | undefined;
   /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
   #plansFetching = false;
@@ -731,7 +743,7 @@ export class DeskApp {
         this.#schedulePreview(effect.text);
         return;
       case 'submit':
-        void this.#submit(effect.projectId, effect.request, effect.choice);
+        void this.#submit(effect.projectId, effect.request, effect.choice, effect.allowCheckChanges === true);
         return;
       case 'session':
         void this.#sessionAction(effect.action, effect.id);
@@ -776,6 +788,53 @@ export class DeskApp {
       case 'runtime':
         void this.#runtimeEffect(effect.effect);
         return;
+      case 'folder':
+        void this.#folderEffect(effect.effect);
+        return;
+    }
+  }
+
+  // ─── 폴더 열기(#916) ───
+
+  #patchFolder(change: (folder: FolderState) => FolderState): void {
+    const folder = this.#state.folder;
+    if (!folder) return;
+    this.#state = { ...this.#state, folder: change(folder) };
+    this.#scheduleRender();
+  }
+
+  async #folderEffect(effect: FolderEffect): Promise<void> {
+    switch (effect.type) {
+      case 'close':
+        return;
+      case 'list':
+        try {
+          const listing = await this.#call('folders')(effect.path);
+          this.#patchFolder((folder) => applyListing(folder, effect.path, listing));
+        } catch (error) {
+          this.#patchFolder((folder) => listingFailed(folder, effect.path, messageOf(error)));
+        }
+        return;
+      case 'propose':
+        try {
+          const proposal = await this.#call('proposeFolder')(effect.path);
+          this.#patchFolder((folder) => ({ ...folder, sending: false, proposal }));
+        } catch (error) {
+          this.#patchFolder((folder) => ({ ...folder, sending: false, error: `이 폴더를 열 수 없습니다: ${messageOf(error)}` }));
+        }
+        return;
+      case 'register': {
+        try {
+          const result = await this.#call('registerFolder')(effect.path);
+          const name = this.#state.folder?.proposal?.detection.name ?? result.id;
+          this.#state = { ...this.#state, folder: undefined };
+          // 등록한 프로젝트로 바로 새 요청을 연다. 스페이스는 세션이 생기면 사이드바에 나온다
+          await this.#openPrompt(result.id, `‹${name}›을 ${result.created ? '프로젝트로 등록했습니다' : '엽니다(이미 등록한 폴더)'}${result.written.length ? ` · 만든 파일 ${result.written.join(', ')}` : ''}. 첫 요청을 쓰세요`);
+        } catch (error) {
+          this.#patchFolder((folder) => ({ ...folder, sending: false, proposal: undefined, error: `등록하지 못했습니다: ${messageOf(error)}` }));
+        }
+        return;
+      }
     }
   }
 
@@ -792,6 +851,8 @@ export class DeskApp {
   #closeRuntimeStream(): void {
     this.#runtimeStream?.abort();
     this.#runtimeStream = undefined;
+    clearTimeout(this.#qaTimer);
+    this.#qaTimer = undefined;
   }
 
   /** 키 처리가 연 실행 화면에 그 세션의 이벤트를 흘린다. 닫으면(close) 통로를 끊는다. 옛 스튜디오면 화면에 까닭을 보인다 */
@@ -822,6 +883,32 @@ export class DeskApp {
         if (!controller.signal.aborted) this.#patchRuntime(id, (runtime) => ({ ...runtime, error: `세션 이벤트를 받지 못했습니다: ${messageOf(error)}` }));
       },
     );
+  }
+
+  /** 탐색형 QA의 마지막 실행을 받는다. 도는 중이면 조금 뒤 다시 받는다(웹 화면과 같은 1.2초) */
+  async #loadQa(id: string): Promise<void> {
+    try {
+      const run = await this.#call('exploreQa')(id);
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, qa: { ...runtime.qa, run, loading: false, error: undefined } }));
+      if (run?.status === 'running') this.#scheduleQaPoll(id);
+    } catch (error) {
+      this.#patchRuntime(id, (runtime) => ({ ...runtime, qa: { ...runtime.qa, loading: false, error: `탐색형 QA를 받지 못했습니다: ${messageOf(error)}` } }));
+    }
+  }
+
+  #scheduleQaPoll(id: string): void {
+    clearTimeout(this.#qaTimer);
+    this.#qaTimer = setTimeout(() => {
+      this.#qaTimer = undefined;
+      const runtime = this.#state.runtime;
+      // QA 탭을 보고 있을 때만 다시 받는다. 다른 탭으로 가면 들어올 때 다시 받는다
+      if (runtime?.id !== id || runtime.tab !== 'qa') {
+        if (runtime?.id === id) this.#state = { ...this.#state, runtime: { ...runtime, qa: { ...runtime.qa, run: undefined, loading: false } } };
+        return;
+      }
+      void this.#loadQa(id);
+    }, QA_POLL_MS);
+    this.#qaTimer.unref?.();
   }
 
   async #loadDeploys(id: string): Promise<void> {
@@ -885,6 +972,37 @@ export class DeskApp {
           } catch (error) {
             this.#patchRuntime(id, (runtime) => ({ ...runtime, previews: { ...runtime.previews, [effect.service]: { error: `주소를 받지 못했습니다: ${messageOf(error)}` } } }));
           }
+          return;
+        }
+        case 'qa-load':
+          await this.#loadQa(id);
+          return;
+        case 'qa-start':
+          try {
+            const run = await this.#call('startExploreQa')(id, effect.input);
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, qa: { ...runtime.qa, run, starting: false, error: undefined } }));
+            this.#scheduleQaPoll(id);
+          } catch (error) {
+            this.#patchRuntime(id, (runtime) => ({ ...runtime, qa: { ...runtime.qa, starting: false, error: `시작하지 못했습니다: ${messageOf(error)}` } }));
+          }
+          return;
+        case 'qa-stop':
+          await this.#call('stopExploreQa')(id);
+          await this.#loadQa(id);
+          return;
+        case 'qa-save': {
+          const saved = await this.#call('saveExploreQa')(id, effect.service);
+          const skipped = saved.skipped.length ? ` · 저장하지 못한 동작 ${saved.skipped.length}개(${saved.skipped.slice(0, 3).map((entry) => `${entry.index}번 ${entry.reason}`).join(', ')})` : '';
+          note(`화면 확인으로 저장했습니다: ${saved.path}${skipped}`);
+          return;
+        }
+        case 'qa-artifact': {
+          const artifactUrl = this.#client.artifactUrl;
+          if (!artifactUrl) {
+            note('이 스튜디오는 사진 주소를 주지 않습니다');
+            return;
+          }
+          this.#runtimeOpenUrl(id, artifactUrl.call(this.#client, id, effect.artifact));
           return;
         }
         case 'load-repo': {
@@ -1061,7 +1179,7 @@ export class DeskApp {
   }
 
   /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
-  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall | RuntimeCall>(name: K): StudioClient[K] {
+  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall | RuntimeCall | FolderCall>(name: K): StudioClient[K] {
     const method = this.#client[name];
     if (method) return method.bind(this.#client) as StudioClient[K];
     return (async () => {
@@ -1125,6 +1243,18 @@ export class DeskApp {
     switch (action.kind) {
       case 'load':
         await reload();
+        return;
+      case 'checkChanges':
+        // 확인 선언 변경 허용(#916, ADR-164): 터미널 세션의 다음 요청 하나에 켜고 끈다
+        await this.#call('allowCheckChanges')(id, action.allow).then(
+          (armed) =>
+            update({
+              busy: undefined,
+              checkChangesArmed: armed,
+              message: armed ? '켰습니다. 이 세션의 다음 요청 하나가 바뀐 확인 선언으로 검증합니다' : '껐습니다',
+            }),
+          fail(action.allow ? '켜지 못했습니다' : '끄지 못했습니다'),
+        );
         return;
       case 'patch':
         try {
@@ -1959,6 +2089,11 @@ export class DeskApp {
         this.#state = { ...this.#state, selected: Math.max(0, Math.min(sessions.length - 1, this.#state.selected + wheel)) };
       } else {
         const row = side.rows[side.offset + (y - side.rect.y)];
+        if (row?.action === 'folder') {
+          // "+ 폴더 열기" 줄(#916): Ctrl-b a와 같다
+          this.#take(handleInput({ ...this.#state, prefix: true }, 'a'));
+          return;
+        }
         const space = row?.space === undefined ? undefined : deskSpaces(this.#state.items).find((entry) => entry.name === row.space);
         if (space) {
           // 스페이스를 누르면 그 스페이스 화면(카드)을 연다
@@ -2436,7 +2571,8 @@ export class DeskApp {
     }
   }
 
-  async #openPrompt(): Promise<void> {
+  /** 새 요청을 연다. projectId를 주면 그 프로젝트를 골라 요청 쓰기로 바로 간다(폴더를 등록한 뒤, #916) */
+  async #openPrompt(projectId?: string, note?: string): Promise<void> {
     try {
       const [projects, rules, accounts] = await Promise.all([
         this.#client.projects(),
@@ -2446,16 +2582,21 @@ export class DeskApp {
       ]);
       const usable = projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }));
       if (usable.length === 0) {
-        this.#say('열 수 있는 프로젝트가 없습니다. 웹 화면에서 프로젝트를 먼저 여세요');
+        // 처음 쓰는 사람: 내 폴더를 프로젝트로 등록하는 화면을 바로 연다(#916)
+        const effects: Effect[] = [];
+        this.#state = { ...openFolderScreen(this.#state, effects, 'prompt'), message: '열 수 있는 프로젝트가 없습니다. 내 폴더를 프로젝트로 등록합니다' };
+        for (const effect of effects) this.#apply(effect);
+        this.#scheduleRender();
         return;
       }
+      const picked = projectId ? usable.findIndex((project) => project.id === projectId) : -1;
       this.#state = {
         ...this.#state,
-        message: undefined,
+        message: note,
         prompt: {
-          step: usable.length === 1 ? 'request' : 'project',
+          step: usable.length === 1 || picked >= 0 ? 'request' : 'project',
           projects: usable,
-          projectIndex: 0,
+          projectIndex: Math.max(0, picked),
           text: '',
           // 터미널로 띄울 수 없는 AI는 고를 수 없다(스튜디오가 거절한다)
           ...promptChoices(rules.allowed.filter((backend) => TERMINAL_BACKENDS.includes(backend)), accounts),
@@ -2487,9 +2628,9 @@ export class DeskApp {
     }, PREVIEW_DELAY_MS);
   }
 
-  async #submit(projectId: string, request: string, choice: string): Promise<void> {
+  async #submit(projectId: string, request: string, choice: string, allowCheckChanges = false): Promise<void> {
     try {
-      const result = await this.#client.start({ projectId, request, choice });
+      const result = await this.#client.start({ projectId, request, choice, ...(allowCheckChanges ? { allowCheckChanges: true } : {}) });
       const slots = [...this.#state.slots];
       // 고른 칸에 셸이 돌고 있으면 덮지 않는다(셸은 x와 나가기로만 끝낸다). 세션은 사이드바에서 연다
       const shellTaken = isShellId(slots[this.#state.focus]);

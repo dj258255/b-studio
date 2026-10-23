@@ -813,3 +813,60 @@ describe('요구사항 화면 키(#894)', () => {
     expect(closed.effects).toEqual([{ type: 'requirements', effect: { type: 'close' } }]);
   });
 });
+
+describe('새 요청의 폴더 열기와 확인 선언 변경 허용(#916)', () => {
+  const prompt = (projects: Array<{ id: string; name: string }>): DeskState => ({
+    ...initialState(),
+    prompt: { step: 'project', projects, projectIndex: 0, text: '', choices: ['rules'], choice: 0 },
+  });
+
+  it('프로젝트 고르기의 끝 줄은 "+ 폴더 열기"이고, Enter면 새 요청을 닫고 폴더 열기를 연다', () => {
+    let state = prompt([{ id: 'p1', name: 'shop' }]);
+    state = handleInput(state, '\x1b[B').state;
+    expect(state.prompt!.projectIndex).toBe(1);
+    // 더 내려가지 않는다
+    expect(handleInput(state, '\x1b[B').state.prompt!.projectIndex).toBe(1);
+    const result = handleInput(state, '\r');
+    expect(result.state.prompt).toBeUndefined();
+    expect(result.state.folder).toMatchObject({ from: 'prompt', loading: true });
+    expect(result.effects).toEqual([{ type: 'folder', effect: { type: 'list', path: '' } }]);
+  });
+
+  it('Ctrl-b a로 폴더 열기를 열고 다시 누르면 닫는다. 열려 있으면 친 글자는 칸이 아니라 경로로 간다', () => {
+    const opened = handleInput({ ...withItems({ slots: ['a', undefined, undefined, undefined] }) }, '\x02a');
+    expect(opened.state.folder).toBeDefined();
+    const typed = handleInput({ ...opened.state, folder: { ...opened.state.folder!, loading: false, text: '/Users/', listed: '/Users' } }, 'me');
+    expect(typed.effects.some((effect) => effect.type === 'input')).toBe(false);
+    expect(typed.state.folder!.text).toBe('/Users/me');
+    expect(handleInput(typed.state, '\x02a').state.folder).toBeUndefined();
+  });
+
+  it('폴더 열기 위에서 앞글쇠 다음 다른 화면 키는 폴더 열기를 닫고 그리로 간다', () => {
+    const opened = handleInput(withItems(), '\x02a').state;
+    const usage = handleInput(opened, '\x02u');
+    expect(usage.state.folder).toBeUndefined();
+    expect(usage.state.view).toBe('usage');
+  });
+
+  it('스페이스 화면에서는 a만 눌러 연다', () => {
+    expect(handleInput(withItems({ view: 'space' }), 'a').state.folder).toBeDefined();
+  });
+
+  it('붙여 넣은 경로는 폴더 열기의 입력 칸으로 간다', () => {
+    const opened = handleInput(withItems({ slots: ['a', undefined, undefined, undefined] }), '\x02a').state;
+    const pasted = handleInput({ ...opened, folder: { ...opened.folder!, loading: false } }, '\x1b[200~/tmp/shop/\x1b[201~');
+    expect(pasted.state.folder!.text).toBe('/tmp/shop/');
+    expect(pasted.effects).toContainEqual({ type: 'folder', effect: { type: 'list', path: '/tmp/shop' } });
+    expect(pasted.effects.some((effect) => effect.type === 'paste')).toBe(false);
+  });
+
+  it('새 요청에서 Ctrl-t로 이 요청의 확인 선언 변경 허용을 켜고 끄고, 켜면 보낼 때 싣는다', () => {
+    let state: DeskState = { ...initialState(), prompt: { step: 'request', projects: [{ id: 'p1', name: 'shop' }], projectIndex: 0, text: '선언 고쳐 줘', choices: ['rules'], choice: 0 } };
+    state = handleInput(state, '\x14').state;
+    expect(state.prompt!.allowCheckChanges).toBe(true);
+    expect(handleInput(state, '\r').effects).toEqual([{ type: 'submit', projectId: 'p1', request: '선언 고쳐 줘', choice: 'rules', allowCheckChanges: true }]);
+    state = handleInput(state, '\x14').state;
+    expect(state.prompt!.allowCheckChanges).toBe(false);
+    expect(handleInput(state, '\r').effects).toEqual([{ type: 'submit', projectId: 'p1', request: '선언 고쳐 줘', choice: 'rules' }]);
+  });
+});

@@ -8,7 +8,8 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskDeployStatus, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
+import type { DeskDeployStatus, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
+import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
 import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
 import type { RecordsReport, RecordsStats } from './records';
@@ -77,6 +78,8 @@ export interface StartInput {
   request: string;
   /** 'rules'면 규칙대로, 아니면 그 백엔드로 직접. `백엔드@계정id`면 그 계정으로(#885) */
   choice: string;
+  /** 이 요청의 검증에서 확인 선언(studio.yaml의 tests·pageChecks …)의 변경을 받아들인다(#916, ADR-164). 켰을 때만 싣는다 */
+  allowCheckChanges?: boolean;
 }
 
 /** 고른 것을 백엔드와 계정 id로 나눈다. 계정이 없으면 그 CLI의 기본 계정이다 */
@@ -259,7 +262,14 @@ export class StudioClient {
   start(input: StartInput): Promise<DeskStartResult> {
     const picked = splitChoice(input.choice);
     const route = input.choice === 'rules' ? { route: 'rules' } : { route: 'direct', backend: picked.backend, ...(picked.accountId ? { accountId: picked.accountId } : {}) };
-    return this.#request('POST', '/api/sessions', { projectId: input.projectId, ...route, request: input.request, intent: 'build', terminal: true });
+    return this.#request('POST', '/api/sessions', {
+      projectId: input.projectId,
+      ...route,
+      request: input.request,
+      intent: 'build',
+      terminal: true,
+      ...(input.allowCheckChanges ? { allowCheckChanges: true } : {}),
+    });
   }
 
   /** 세션을 멈춘다(샌드박스·터미널을 내린다. 기록과 작업 복사본은 남는다) */
@@ -535,5 +545,55 @@ export class StudioClient {
 
   repository(projectId: string, kind: 'issues' | 'pulls', state: 'open' | 'closed'): Promise<DeskRepoList> {
     return this.#request('GET', `/api/projects/${encodeURIComponent(projectId)}/repository/${kind}?state=${state}`);
+  }
+
+  // ─── 폴더 열기(#916): 웹의 폴더 선택 모달과 폴더 열기 미리보기가 쓰던 API 그대로 ───
+
+  /** 폴더의 하위 폴더. 빈 경로면 홈이다. `~`는 스튜디오가 펼친다 */
+  folders(folder: string): Promise<FolderListingView> {
+    return this.#request('GET', `/api/folders${folder ? `?${new URLSearchParams({ path: folder })}` : ''}`);
+  }
+
+  /** 이 폴더를 열면 무엇을 할지(쓰지 않는다) */
+  proposeFolder(folder: string): Promise<FolderProposalView> {
+    return this.#request('POST', '/api/projects/open', { path: folder });
+  }
+
+  /** 제안한 파일을 쓰고 프로젝트로 등록한다. 같은 폴더면 있던 id를 돌려준다 */
+  registerFolder(folder: string): Promise<{ id: string; created: boolean; written: string[]; excluded: boolean }> {
+    return this.#request('POST', '/api/projects/open', { path: folder, apply: true });
+  }
+
+  // ─── 탐색형 QA(#916): 웹 화면 탭의 QA가 쓰던 API 그대로. 상태는 GET으로 받는다 ───
+
+  /** 지금 도는(또는 마지막으로 끝난) 실행. 없으면 null */
+  exploreQa(id: string): Promise<DeskQaRun | null> {
+    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/explore-qa`);
+  }
+
+  startExploreQa(id: string, input: DeskQaStart): Promise<DeskQaRun> {
+    return this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/explore-qa`, { action: 'start', ...input });
+  }
+
+  async stopExploreQa(id: string): Promise<void> {
+    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/explore-qa`, { action: 'stop' });
+  }
+
+  /** 끝난 실행의 동작을 studio.yaml의 화면 확인(pageChecks)으로 덧붙인다. 저장할 수 없는 동작은 까닭과 함께 돌려준다 */
+  saveExploreQa(id: string, service: string): Promise<{ path: string; skipped: Array<{ index: number; tool: string; reason: string }> }> {
+    return this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/explore-qa`, { action: 'save', service });
+  }
+
+  /** 산출물(QA 화면 사진 등)을 받는 주소 */
+  artifactUrl(id: string, artifact: string): string {
+    const segments = artifact.split('/').filter(Boolean).map(encodeURIComponent);
+    return `${this.origin}/api/sessions/${encodeURIComponent(id)}/artifacts/${segments.join('/')}`;
+  }
+
+  // ─── 확인 선언 변경 허용(#916, ADR-164): 터미널 세션의 다음 요청 하나에만 ───
+
+  /** 이 세션의 다음 요청 하나에서 확인 선언의 변경을 받아들일지 켜고 끈다. 지금 켜져 있는지 돌려준다 */
+  async allowCheckChanges(id: string, allow: boolean): Promise<boolean> {
+    return (await this.#request<{ armed: boolean }>('POST', `/api/sessions/${encodeURIComponent(id)}/check-changes`, { allow })).armed;
   }
 }

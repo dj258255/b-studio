@@ -168,9 +168,11 @@ describe('스페이스 화면', () => {
     expect(plain).toContain('사용량 정보 없음');
   });
 
-  it('세션이 없으면 새 요청 안내', () => {
+  it('세션이 없으면 폴더 등록(a)과 새 요청(n) 안내(#916)', () => {
     const screen = spaceScreen(state({ items: [] }), rect, NOW);
-    expect(screen.lines.map(stripAnsi).join('\n')).toContain('Ctrl-b n');
+    const text = screen.lines.map(stripAnsi).join('\n');
+    expect(text).toContain('a 를 눌러 내 폴더를 프로젝트로 등록');
+    expect(text).toContain('n 으로 새 요청');
     expect(screen.cards).toEqual([]);
   });
 });

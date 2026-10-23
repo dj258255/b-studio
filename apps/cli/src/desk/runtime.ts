@@ -4,13 +4,14 @@
  * 고른 세션 하나의 이벤트(`/api/sessions/:id/events`)를 받아 서비스 상태·로그·자원·배포 진행을 접고(applyRuntimeEvent),
  * 키(runtimeKey)는 화면 상태만 바꾸고 할 일(RuntimeEffect)을 돌려준다. 스튜디오를 부르는 일은 desk.ts가 한다.
  * 브라우저가 있어야 보이는 것(앱 화면, 원격 브라우저, 디자인 비교, 요소 고르기)은 주소만 보이고 시스템 브라우저로 연다
+ * QA 탭(#916)은 탐색형 QA다: 목표 문장을 주면 스튜디오가 AI로 앱 화면을 눌러 보며 문제를 찾는다. 화면 사진은 주소로만 보이고 브라우저로 연다
  */
 import { fit, fitAnsi, stringWidth } from './screen';
 import { bg, BOLD, fg, RESET, type ColorToken, type Theme } from './theme';
 import { bar, box } from './widgets';
-import type { DeskDeployStatus, DeskPull, DeskRepoList, DeskService, DeskServiceState, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
+import type { DeskDeployStatus, DeskPull, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskServiceState, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
 
-export type RuntimeTab = 'services' | 'logs' | 'deploy' | 'preview' | 'repo';
+export type RuntimeTab = 'services' | 'logs' | 'deploy' | 'preview' | 'repo' | 'qa';
 
 export const RUNTIME_TABS: ReadonlyArray<{ tab: RuntimeTab; label: string }> = [
   { tab: 'services', label: '실행' },
@@ -18,6 +19,7 @@ export const RUNTIME_TABS: ReadonlyArray<{ tab: RuntimeTab; label: string }> = [
   { tab: 'deploy', label: '배포' },
   { tab: 'preview', label: '미리보기' },
   { tab: 'repo', label: '저장소' },
+  { tab: 'qa', label: 'QA' },
 ];
 
 /** 쌓아 두는 로그 줄 수. 웹 화면(LOG_LIMIT)과 같다 */
@@ -37,7 +39,21 @@ export type RepoView = 'presubmit' | 'issues' | 'pulls';
 export type RuntimeConfirm =
   | { kind: 'service'; service: string; on: boolean }
   | { kind: 'deploy'; sha: string; shortSha: string; label: string }
-  | { kind: 'rollback'; releaseId: string; label: string };
+  | { kind: 'rollback'; releaseId: string; label: string }
+  /** 끝난 탐색형 QA를 studio.yaml의 화면 확인으로 덧붙일지 */
+  | { kind: 'qa-save'; service: string };
+
+/** 탐색형 QA 탭(#916) */
+export interface RuntimeQa {
+  /** 마지막 실행. null이면 돌린 적이 없고, undefined면 아직 받지 않았다 */
+  run?: DeskQaRun | null;
+  loading?: boolean;
+  error?: string;
+  /** 새 실행의 입력. service는 화면이 있는 서비스(previewServices) 중 몇 번째인지 */
+  form?: { service: number; goal: string; startPath: string; confirmText: string; field: 'goal' | 'path' | 'confirm' };
+  /** 시작을 보내 놓고 답을 기다린다 */
+  starting?: boolean;
+}
 
 export interface RuntimeState {
   /** 세션 id와 머리에 보일 이름 */
@@ -64,6 +80,8 @@ export interface RuntimeState {
   confirm?: RuntimeConfirm;
   /** 아래 줄에 잠깐 보일 알림 */
   note?: string;
+  /** 탐색형 QA 탭(#916). 처음 들어갈 때 마지막 실행을 받는다 */
+  qa?: RuntimeQa;
 }
 
 export type RuntimeEffect =
@@ -76,7 +94,13 @@ export type RuntimeEffect =
   /** 미리보기 주소를 받는다. open이면 받은 뒤 브라우저로 연다 */
   | { type: 'preview'; service: string; open: boolean }
   | { type: 'open-url'; url: string }
-  | { type: 'load-repo'; view: RepoView; state: 'open' | 'closed' };
+  | { type: 'load-repo'; view: RepoView; state: 'open' | 'closed' }
+  /** 탐색형 QA(#916): 마지막 실행 받기, 시작, 멈추기, 화면 확인으로 저장, 그 동작의 화면 사진 열기 */
+  | { type: 'qa-load' }
+  | { type: 'qa-start'; input: DeskQaStart }
+  | { type: 'qa-stop' }
+  | { type: 'qa-save'; service: string }
+  | { type: 'qa-artifact'; artifact: string };
 
 const ESC = '\x1b';
 const UP = ['\x1b[A', '\x1bOA', 'k'];
@@ -86,6 +110,8 @@ const PAGE_UP = '\x1b[5~';
 const PAGE_DOWN = '\x1b[6~';
 const BACKSPACE = ['\x7f', '\b'];
 const ENTER = ['\r', '\n'];
+const LEFT = ['\x1b[D', '\x1bOD'];
+const RIGHT = ['\x1b[C', '\x1bOC'];
 
 export function openRuntime(id: string, title: string): RuntimeState {
   return { id, title, tab: 'services', row: 0, logs: [], scroll: 0, deploy: {}, previews: {}, repo: { view: 'presubmit', state: 'open' } };
@@ -215,6 +241,8 @@ function rowCount(state: RuntimeState): number {
       return previewServices(state).length;
     case 'repo':
       return repoItems(state).length;
+    case 'qa':
+      return state.qa?.run?.actions.length ?? 0;
     default:
       return 0;
   }
@@ -228,6 +256,10 @@ function enterTab(state: RuntimeState, tab: RuntimeTab, effects: RuntimeEffect[]
     return { ...next, deploy: { ...state.deploy, loading: true } };
   }
   if (tab === 'repo') return loadRepoIfNeeded(next, effects);
+  if (tab === 'qa' && state.qa?.run === undefined && !state.qa?.loading) {
+    effects.push({ type: 'qa-load' });
+    return { ...next, qa: { ...state.qa, loading: true } };
+  }
   if (tab === 'preview') {
     for (const service of previewServices(state)) {
       if (service.state === 'ready' && !state.previews[service.name]) effects.push({ type: 'preview', service: service.name, open: false });
@@ -257,6 +289,7 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
     const base = { ...state, confirm: undefined };
     if (key !== 'y' && key !== 'Y' && !ENTER.includes(key)) return { state: base, effects };
     if (confirm.kind === 'service') effects.push({ type: 'service', service: confirm.service, on: confirm.on });
+    else if (confirm.kind === 'qa-save') effects.push({ type: 'qa-save', service: confirm.service });
     else if (confirm.kind === 'deploy') effects.push({ type: 'deploy', sha: confirm.sha });
     else effects.push({ type: 'rollback', releaseId: confirm.releaseId });
     return { state: base, effects };
@@ -271,6 +304,8 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
     return { state: { ...state, search: { text: text + key, editing: true } }, effects };
   }
 
+  if (state.qa?.form) return { state: qaFormKey(state, key, effects), effects };
+
   if (key === ESC || key === 'q' || key === 'v') {
     // 로그에서 찾는 중이면 Esc는 찾기만 지운다
     if (key === ESC && state.tab === 'logs' && state.search) return { state: { ...state, search: undefined, scroll: 0 }, effects };
@@ -282,7 +317,7 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
     const next = RUNTIME_TABS[(at + (key === '\t' ? 1 : RUNTIME_TABS.length - 1)) % RUNTIME_TABS.length]!.tab;
     return { state: enterTab(state, next, effects), effects };
   }
-  if (/^[1-5]$/.test(key)) {
+  if (/^[1-6]$/.test(key)) {
     const next = RUNTIME_TABS[Number(key) - 1]!.tab;
     return { state: next === state.tab ? state : enterTab(state, next, effects), effects };
   }
@@ -302,8 +337,73 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
       return { state: previewKey(state, key, effects), effects };
     case 'repo':
       return { state: repoKey(state, key, effects), effects };
+    case 'qa':
+      return { state: qaKey(state, key, effects), effects };
   }
   return { state, effects };
+}
+
+/** QA 탭의 키(폼 밖): n 새 실행, x 멈추기, s 저장(묻기), r 다시 받기, Enter·o 고른 동작의 화면 사진 */
+function qaKey(state: RuntimeState, key: string, effects: RuntimeEffect[]): RuntimeState {
+  const run = state.qa?.run ?? undefined;
+  if (key === 'r') {
+    effects.push({ type: 'qa-load' });
+    return { ...state, qa: { ...state.qa, loading: true } };
+  }
+  if (key === 'n') {
+    if (run?.status === 'running' || state.qa?.starting) return { ...state, note: '탐색형 QA가 도는 중입니다. x로 멈춘 뒤 새로 시작합니다' };
+    if (previewServices(state).length === 0) return { ...state, note: '화면이 있는 서비스가 없어 탐색형 QA를 돌릴 수 없습니다' };
+    const last = run ? Math.max(0, previewServices(state).findIndex((service) => service.name === run.service)) : 0;
+    return { ...state, qa: { ...state.qa, form: { service: last, goal: run?.goal.goal ?? '', startPath: run?.goal.startPath ?? '/', confirmText: run?.goal.confirmText ?? '', field: 'goal' } } };
+  }
+  if (key === 'x') {
+    if (run?.status !== 'running') return { ...state, note: '도는 탐색형 QA가 없습니다' };
+    effects.push({ type: 'qa-stop' });
+    return { ...state, note: '멈추라고 알렸습니다' };
+  }
+  if (key === 's') {
+    if (!run || run.status !== 'done') return { ...state, note: '끝난 탐색형 QA가 있어야 저장합니다' };
+    if (run.actions.length === 0) return { ...state, note: '저장할 동작이 없습니다' };
+    return { ...state, confirm: { kind: 'qa-save', service: run.service } };
+  }
+  if (key === 'o' || ENTER.includes(key)) {
+    const action = run?.actions[state.row];
+    if (!action) return state;
+    if (!action.artifact) return { ...state, note: `${action.index}번째 동작에는 화면 사진이 없습니다` };
+    effects.push({ type: 'qa-artifact', artifact: action.artifact });
+  }
+  return state;
+}
+
+/** 새 실행의 폼: Enter로 다음 칸(마지막 칸이면 시작), ↑↓로 칸 옮기기, ←→로 서비스, Esc로 그만두기 */
+function qaFormKey(state: RuntimeState, key: string, effects: RuntimeEffect[]): RuntimeState {
+  const qa = state.qa!;
+  const form = qa.form!;
+  const fields = ['goal', 'path', 'confirm'] as const;
+  const at = fields.indexOf(form.field);
+  const services = previewServices(state);
+  const set = (patch: Partial<typeof form>) => ({ ...state, note: undefined, qa: { ...qa, form: { ...form, ...patch } } });
+  if (key === ESC || key === '\x03') return { ...state, qa: { ...qa, form: undefined } };
+  if (UP.slice(0, 2).includes(key)) return set({ field: fields[Math.max(0, at - 1)]! });
+  if (DOWN.slice(0, 2).includes(key)) return set({ field: fields[Math.min(fields.length - 1, at + 1)]! });
+  if (LEFT.includes(key)) return set({ service: (form.service + services.length - 1) % Math.max(1, services.length) });
+  if (RIGHT.includes(key)) return set({ service: (form.service + 1) % Math.max(1, services.length) });
+  if (ENTER.includes(key)) {
+    if (!form.goal.trim()) return { ...set({ field: 'goal' }), note: '무엇을 확인할지 목표를 써야 시작합니다' };
+    if (form.field !== 'confirm') return set({ field: fields[at + 1]! });
+    const service = services[form.service];
+    if (!service) return { ...state, note: '화면이 있는 서비스가 없습니다' };
+    const startPath = form.startPath.trim() || '/';
+    effects.push({
+      type: 'qa-start',
+      input: { service: service.name, goal: form.goal.trim(), startPath: startPath.startsWith('/') ? startPath : `/${startPath}`, ...(form.confirmText.trim() ? { confirmText: form.confirmText.trim() } : {}) },
+    });
+    return { ...state, row: 0, qa: { ...qa, form: undefined, starting: true, error: undefined } };
+  }
+  const name = form.field === 'goal' ? 'goal' : form.field === 'path' ? 'startPath' : 'confirmText';
+  if (BACKSPACE.includes(key)) return set({ [name]: Array.from(form[name]).slice(0, -1).join('') });
+  if (key.startsWith(ESC) || key.length === 0 || /[\u0000-\u001f\u007f]/.test(key)) return state;
+  return set({ [name]: form[name] + key });
 }
 
 const SLEEPING = new Set(['dormant', 'stopped', 'idle_stopped']);
@@ -420,6 +520,13 @@ function repoKey(state: RuntimeState, key: string, effects: RuntimeEffect[]): Ru
 
 /** 붙여 넣은 글: 로그에서 찾는 글을 쓰는 중일 때만 받는다 */
 export function runtimePaste(state: RuntimeState, text: string): RuntimeState {
+  const form = state.qa?.form;
+  if (form) {
+    // QA 폼의 칸에는 한 줄로 넣는다
+    const clean = text.replace(/\r\n?|\n/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '');
+    const name = form.field === 'goal' ? 'goal' : form.field === 'path' ? 'startPath' : 'confirmText';
+    return { ...state, qa: { ...state.qa, form: { ...form, [name]: form[name] + clean } } };
+  }
   if (!state.search?.editing) return state;
   const clean = text.replace(/[\u0000-\u001f\u007f]/g, '');
   return { ...state, search: { text: state.search.text + clean, editing: true } };
@@ -695,6 +802,7 @@ export function renderRuntime(state: RuntimeState, size: { w: number; h: number 
   else if (state.tab === 'logs') pane = logsPane(state, contentWidth, inner.h, theme);
   else if (state.tab === 'deploy') pane = deployPane(state, snapshot, contentWidth, inner.h, theme);
   else if (state.tab === 'preview') pane = previewPane(state, contentWidth, inner.h, theme);
+  else if (state.tab === 'qa') pane = qaPane(state, contentWidth, inner.h, theme, _now);
   else pane = repoPane(state, contentWidth, inner.h, theme);
   if (snapshot && state.error) pane = { ...pane, lines: [`${fg(theme, 'red')}${state.error}${RESET}`, ...pane.lines].slice(0, inner.h) };
 
@@ -721,11 +829,13 @@ export function runtimeHint(state: RuntimeState): string {
   if (confirm) {
     if (confirm.kind === 'service') return ` ${confirm.service}를 끌까요? 다시 켤 때까지 그 서비스는 돌지 않습니다 · y 끄기 · 다른 키 그만두기`;
     if (confirm.kind === 'deploy') return ` 체크포인트 ${confirm.shortSha}(${confirm.label})를 운영에 배포할까요? · y 배포 · 다른 키 그만두기`;
+    if (confirm.kind === 'qa-save') return ` 이 실행의 동작을 studio.yaml의 화면 확인(pageChecks, ${confirm.service})으로 덧붙일까요? 다음 검증부터 게이트가 돌립니다 · y 저장 · 다른 키 그만두기`;
     return ` 운영을 ${confirm.label}(${confirm.releaseId}) 릴리스로 되돌릴까요? · y 되돌리기 · 다른 키 그만두기`;
   }
   if (state.note) return ` ${state.note}`;
   if (state.search?.editing) return ' 찾을 글을 쓰고 Enter · Esc 그만두기';
-  const common = 'Tab·1~5 탭 · Esc 닫기';
+  const common = 'Tab·1~6 탭 · Esc 닫기';
+  if (state.qa?.form) return ' Enter 다음 칸(마지막 칸이면 시작) · ↑↓ 칸 옮기기 · ←→ 서비스 · Esc 그만두기';
   switch (state.tab) {
     case 'services':
       return ` ↑↓ 고르기 · Enter 끄고 켜기 · l 로그 · o 브라우저로 열기 · b 샌드박스 켜기 · ${common}`;
@@ -735,7 +845,109 @@ export function runtimeHint(state: RuntimeState): string {
       return ` d 최신 체크포인트 배포 · ↑↓ 고르고 b 되돌리기 · o 운영 주소 열기 · r 다시 받기 · ${common}`;
     case 'preview':
       return ` ↑↓ 고르기 · Enter·o 브라우저로 열기 · r 주소 다시 받기 · ${common}`;
+    case 'qa':
+      return ` n 새 QA · x 멈추기 · s 화면 확인으로 저장 · ↑↓ 동작 · Enter 그 동작의 화면 사진 · r 다시 받기 · ${common}`;
     default:
       return ` c 점검 · i 이슈 · p PR · x 열린·닫힌 · ↑↓ Enter 브라우저로 열기 · r 다시 받기 · ${common}`;
   }
+}
+
+// ─── 탐색형 QA 탭(#916) ───
+
+const STOP_REASON: Record<string, string> = {
+  finish: '목표 완료 선언',
+  max_actions: '최대 동작 수 도달',
+  max_time: '시간 상한 도달',
+  repeated_screen: '같은 화면에서 같은 조작 반복',
+  no_tool_call: '도구 호출 없이 끝남',
+};
+const VERDICT: Record<string, { label: string; color: ColorToken }> = {
+  pass: { label: '통과', color: 'green' },
+  fail: { label: '문제 발견', color: 'red' },
+  inconclusive: { label: '점검을 마치지 못함', color: 'yellow' },
+};
+const SEVERITY: Record<string, ColorToken> = { blocker: 'red', major: 'red', minor: 'yellow' };
+
+function qaFormPane(state: RuntimeState, width: number, theme: Theme): Pane {
+  const form = state.qa!.form!;
+  const muted = fg(theme, 'muted');
+  const services = previewServices(state);
+  const service = services[form.service]?.name ?? '(없음)';
+  const lines = [`${BOLD}새 탐색형 QA${RESET} ${muted}· AI가 앱 화면을 직접 눌러 보며 목표를 따라가고 문제를 찾습니다(모델 호출에 토큰을 씁니다)${RESET}`, ''];
+  lines.push(`  서비스      ${fg(theme, 'accent')}‹ ${service} ›${RESET} ${muted}(←→)${RESET}`);
+  const field = (key: 'goal' | 'path' | 'confirm', label: string, value: string, hint: string) => {
+    const on = form.field === key;
+    lines.push(`${on ? `${fg(theme, 'accent')}▸${RESET}` : ' '} ${label}${' '.repeat(Math.max(1, 12 - stringWidth(label)))}${value || `${muted}${hint}${RESET}`}`);
+  };
+  field('goal', '목표', form.goal, '예: 상품 목록에서 상세로 가서 댓글을 쓰고 지운다');
+  field('path', '시작 경로', form.startPath, '/');
+  field('confirm', '확인 문구', form.confirmText, '(선택) 끝났을 때 화면에 있어야 할 글');
+  const row = form.field === 'goal' ? 3 : form.field === 'path' ? 4 : 5;
+  const value = form.field === 'goal' ? form.goal : form.field === 'path' ? form.startPath : form.confirmText;
+  return { lines: lines.map((line) => fitAnsi(line, width)), cursor: { x: 14 + stringWidth(value), y: row } };
+}
+
+function qaPane(state: RuntimeState, width: number, height: number, theme: Theme, now: number): Pane {
+  const qa = state.qa;
+  const muted = fg(theme, 'muted');
+  if (qa?.form) return qaFormPane(state, width, theme);
+  const lines: string[] = [];
+  if (qa?.error) lines.push(`${fg(theme, 'red')}${qa.error}${RESET}`);
+  if (qa?.starting) lines.push(`${muted}시작하는 중…${RESET}`);
+  const run = qa?.run;
+  if (run === undefined) return { lines: [...lines, `${muted}${qa?.loading ? '불러오는 중…' : 'r로 마지막 실행을 받습니다'}${RESET}`] };
+  if (run === null) {
+    lines.push(
+      `${muted}탐색형 QA를 돌린 적이 없습니다. n으로 시작합니다.${RESET}`,
+      '',
+      `${muted}목표 문장을 주면 AI가 앱 화면을 직접 눌러 보며 따라가고, 콘솔 오류·실패한 요청·접근성 문제와 눈에 띈 문제를 모읍니다.${RESET}`,
+      `${muted}끝난 실행은 s로 studio.yaml의 화면 확인으로 저장해 다음 검증부터 게이트가 돌리게 합니다.${RESET}`,
+    );
+    return { lines: lines.map((line) => fitAnsi(line, width)) };
+  }
+  const verdict = run.result ? VERDICT[run.result.status] : undefined;
+  const elapsed = Math.max(0, Math.round(((run.finishedAt ?? now) - run.startedAt) / 1000));
+  const status =
+    run.status === 'running'
+      ? `${fg(theme, 'accent')}◐ 도는 중 ${elapsed}초${RESET}`
+      : verdict
+        ? `${fg(theme, verdict.color)}${BOLD}${verdict.label}${RESET}`
+        : `${muted}끝남${RESET}`;
+  lines.push(`${BOLD}${run.service}${RESET} ${muted}·${RESET} ${run.goal.goal} ${muted}· 시작 ${run.goal.startPath}${RESET}  ${status}`);
+  if (run.result) lines.push(`${muted}${run.result.reason} · ${STOP_REASON[run.result.stoppedBy] ?? run.result.stoppedBy} · ${elapsed}초${RESET}`);
+  if (run.error) lines.push(`${fg(theme, 'red')}${run.error}${RESET}`);
+  const diagnostics = run.result?.diagnostics;
+  if (diagnostics) {
+    const parts = [
+      `콘솔 오류 ${diagnostics.consoleErrors.length}`,
+      `페이지 오류 ${diagnostics.pageErrors.length}`,
+      `실패한 요청 ${diagnostics.failedRequests.length}`,
+      `막힌 요청 ${diagnostics.blockedRequests.length}`,
+      `가로 넘침 ${diagnostics.horizontalOverflowPx}px`,
+      `접근성 ${diagnostics.accessibilityViolations.length}`,
+    ];
+    lines.push(`${muted}진단: ${parts.join(' · ')}${RESET}`);
+    for (const line of [...diagnostics.consoleErrors, ...diagnostics.pageErrors, ...diagnostics.failedRequests].slice(0, 3)) lines.push(`  ${fg(theme, 'red')}${line}${RESET}`);
+  }
+  if (run.findings.length > 0) {
+    lines.push('', `${BOLD}모델이 화면에서 본 문제 ${run.findings.length}건${RESET}`);
+    for (const finding of run.findings.slice(0, 6)) {
+      lines.push(`  ${fg(theme, SEVERITY[finding.severity] ?? 'muted')}${finding.severity}${RESET} ${finding.summary}${finding.where ? ` ${muted}· ${finding.where}${RESET}` : ''}`);
+    }
+  }
+  const rejections = run.expectedRejections ?? [];
+  const unmet = run.result?.unmetRejections ?? [];
+  if (rejections.length || unmet.length) lines.push(`${muted}미리 알린 거절 시험 ${rejections.length}건${unmet.length ? ` · 거절 응답이 없던 것 ${unmet.length}건(진짜 문제일 수 있습니다)` : ''}${RESET}`);
+  lines.push('', `${BOLD}동작 ${run.actions.length}${RESET}`);
+  const room = Math.max(1, height - lines.length - 1);
+  const shown = windowed(run.actions, state.row, room);
+  shown.items.forEach((action, index) => {
+    const mark = action.ok ? `${fg(theme, 'green')}✓${RESET}` : `${fg(theme, 'red')}×${RESET}`;
+    const signals = action.newDiagnosticsCount ? ` ${fg(theme, 'yellow')}진단 +${action.newDiagnosticsCount}${RESET}` : '';
+    const photo = action.artifact ? ` ${muted}사진${RESET}` : '';
+    const text = `  ${String(action.index).padStart(2)} ${mark} ${action.tool}${action.detail ? ` ${muted}· ${action.detail}${RESET}` : ''}${signals}${photo}`;
+    lines.push(row(fitAnsi(text, width), shown.offset + index === state.row, width, theme));
+  });
+  if (run.status === 'running' && run.texts.length) lines.push(`${muted}  ${run.texts.at(-1)}${RESET}`);
+  return { lines: lines.map((line) => fitAnsi(line, width)) };
 }

@@ -81,7 +81,9 @@ export type DetailConfirm =
   | { action: 'restore'; sha: string; label: string }
   | { action: 'delete'; step: 1 | 2 }
   | { action: 'review' }
-  | { action: 'export'; pullRequest: boolean };
+  | { action: 'export'; pullRequest: boolean }
+  /** 확인 선언 변경 허용을 켤지(#916). 끌 때는 묻지 않는다 */
+  | { action: 'checkChanges' };
 
 export interface DetailState {
   id: string;
@@ -109,6 +111,8 @@ export interface DetailState {
   /** 서버에 보내 놓고 답을 기다리는 일. 그동안 다른 동작 키는 받지 않는다 */
   busy?: string;
   message?: string;
+  /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
+  checkChangesArmed?: boolean;
 }
 
 export type DetailAction =
@@ -120,7 +124,9 @@ export type DetailAction =
   | { kind: 'exportPreview' }
   | { kind: 'export'; pullRequest: boolean }
   | { kind: 'review'; restart: boolean }
-  | { kind: 'resolve'; round: number; findingIndex: number; reason: string };
+  | { kind: 'resolve'; round: number; findingIndex: number; reason: string }
+  /** 이 세션의 다음 요청 하나에서 확인 선언의 변경을 받아들일지(#916) */
+  | { kind: 'checkChanges'; allow: boolean };
 
 const ESC = '\x1b';
 const UP = ['\x1b[A', '\x1bOA', 'k'];
@@ -159,6 +165,7 @@ export function openDetail(item: DeskItem): DetailState {
     ...(item.backend ? { backend: item.backend } : {}),
     ...(item.reason ? { reason: item.reason } : {}),
     ...(item.attention ? { attention: item.attention } : {}),
+    ...(item.checkChangesArmed ? { checkChangesArmed: true } : {}),
     tab: 'checkpoints',
     selected: 0,
     scroll: 0,
@@ -219,6 +226,8 @@ export function detailKey(state: DetailState, key: string): { detail?: DetailSta
         return { detail: { ...done, busy: 'AI 리뷰를 시작하는 중' }, action: { kind: 'review', restart: Boolean(state.snapshot?.review) } };
       case 'export':
         return { detail: { ...done, busy: '올리는 중', result: undefined }, action: { kind: 'export', pullRequest: confirm.pullRequest } };
+      case 'checkChanges':
+        return { detail: { ...done, busy: '확인 선언 변경 허용을 켜는 중' }, action: { kind: 'checkChanges', allow: true } };
     }
   }
 
@@ -255,10 +264,16 @@ export function detailKey(state: DetailState, key: string): { detail?: DetailSta
   if (DOWN.includes(key)) return { detail: { ...base, selected: Math.max(0, Math.min(rows(state) - 1, state.selected + 1)) } };
 
   // 여기부터는 서버에 무언가를 보내는 키다. 앞서 보낸 것의 답을 기다리는 중이면 받지 않는다
-  const acting = ['\r', '\n', 'u', 'v', 'D', 'x', 'a', 'p', 'b'].includes(key);
+  const acting = ['\r', '\n', 'u', 'v', 'D', 'x', 'a', 'p', 'b', 'c'].includes(key);
   if (acting && state.busy) return { detail: { ...base, message: `${state.busy}입니다. 끝난 뒤 다시 누르세요` } };
   const snapshot = state.snapshot;
   if (acting && !snapshot) return { detail: { ...base, message: '세션을 아직 불러오지 못했습니다(r로 다시 부릅니다)' } };
+
+  if (key === 'c') {
+    // 확인 선언 변경 허용(#916): 켜는 것은 검증 기준을 바꿀 수 있어 묻고, 끄는 것은 바로 한다
+    if (state.checkChangesArmed) return { detail: { ...base, busy: '확인 선언 변경 허용을 끄는 중' }, action: { kind: 'checkChanges', allow: false } };
+    return { detail: { ...base, confirm: { action: 'checkChanges' } } };
+  }
 
   if (key === 'D') {
     if (snapshot!.running) return { detail: { ...base, message: '실행 중인 세션은 지울 수 없습니다. 먼저 멈춘 뒤(Ctrl-b p) 지웁니다' } };
@@ -391,6 +406,13 @@ function reviewBody(state: DetailState, theme: Theme): { lines: string[]; focus:
   } else if (state.attention === 'gate_failed' && state.reason) {
     lines.push(` ${fg(theme, 'red')}검증 실패: ${state.reason}${RESET}`, '');
   }
+  // 확인 선언 변경 허용(#916, ADR-164): 확인이 틀려 실패할 때 그 선언을 고치는 요청에 켠다
+  lines.push(
+    state.checkChangesArmed
+      ? ` ${fg(theme, 'yellow')}확인 선언 변경 허용: 켜짐${RESET} ${muted}· 다음 요청 하나는 studio.yaml의 바뀐 확인 선언으로 검증합니다(c 끄기)${RESET}`
+      : ` ${muted}확인 선언 변경 허용: 꺼짐 · 확인(테스트 선언)이 틀려 실패하면 c로 켜고 그 선언을 고쳐 달라고 요청합니다${RESET}`,
+    '',
+  );
   const review = state.snapshot!.review;
   if (!review) {
     lines.push(` ${muted}AI 리뷰를 돌린 적이 없습니다. PR을 만든 뒤 a로 돌립니다${RESET}`);
@@ -454,7 +476,7 @@ function exportBody(state: DetailState, theme: Theme): string[] {
 
 const HINTS: Record<DetailTab, string> = {
   checkpoints: ' ↑↓ 고르기 · Enter 바뀐 파일 · u 되돌리기 · v 다시 검증 · Tab 다음 탭 · D 세션 지우기 · r 다시 부르기 · Esc 닫기',
-  review: ' ↑↓ 막는 지적 고르기 · x 오탐으로 닫기 · a AI 리뷰 (다시) 돌리기 · Tab 다음 탭 · D 세션 지우기 · Esc 닫기',
+  review: ' ↑↓ 막는 지적 고르기 · x 오탐으로 닫기 · a AI 리뷰 (다시) 돌리기 · c 확인 선언 변경 허용 · Tab 다음 탭 · D 세션 지우기 · Esc 닫기',
   export: ' p PR까지 올리기 · b 브랜치만 올리기 · Tab 다음 탭 · D 세션 지우기 · r 다시 부르기 · Esc 닫기',
 };
 
@@ -472,6 +494,8 @@ function footer(state: DetailState): string {
           : ` 정말 지울까요? 지운 세션은 되돌릴 수 없습니다 · y 지우기 · 다른 키 그만두기`;
       case 'review':
         return ` AI 리뷰를 ${state.snapshot?.review ? '다시 ' : ''}돌릴까요? 리뷰어 호출에 토큰을 씁니다 · y 돌리기 · 다른 키 그만두기`;
+      case 'checkChanges':
+        return ` 다음 요청 하나에서 studio.yaml의 확인 선언(tests·pageChecks …) 변경을 받아들일까요? 그 요청의 검증이 바뀐 선언으로 돕니다(바뀐 것은 기록에 남습니다) · y 켜기 · 다른 키 그만두기`;
       case 'export':
         return confirm.pullRequest ? ` 브랜치를 올리고 PR을 만들까요(이미 있으면 본문을 고칩니다)? · y 올리기 · 다른 키 그만두기` : ` 브랜치만 올릴까요? PR은 만들지 않습니다 · y 올리기 · 다른 키 그만두기`;
     }

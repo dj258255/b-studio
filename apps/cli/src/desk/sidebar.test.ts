@@ -80,14 +80,17 @@ describe('사이드바 줄', () => {
     expect(rows.slice(2, 4).map((row) => row.item)).toEqual([0, 1]);
     expect(texts[4]).toMatch(/○ blog +1 $/);
     // 고르지 않은 스페이스의 세션은 펴지 않는다
-    expect(rows).toHaveLength(5);
+    expect(rows).toHaveLength(6);
+    expect(rows.at(-1)).toMatchObject({ action: 'folder', selected: false });
     for (const text of texts) expect(stringWidth(text)).toBe(40);
   });
 
   it('다른 스페이스의 세션을 고르면 그 스페이스를 편다', () => {
     const texts = sidebarRows(items, 2, new Map(), 40).map((row) => stripAnsi(row.text));
-    expect(texts).toHaveLength(4);
+    // 맨 끝은 "+ 폴더 열기"(#916)
+    expect(texts).toHaveLength(5);
     expect(texts[3]).toContain('글쓰기');
+    expect(texts[4]).toContain('+ 폴더 열기');
   });
 
   it('칸에 열린 세션은 칸 번호를, 알린 뒤 아직 보지 않은 세션은 !를 오른쪽에 붙인다', () => {

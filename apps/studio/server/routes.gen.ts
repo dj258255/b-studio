@@ -46,6 +46,7 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/sessions/[id]/base", load: () => import("../app/api/sessions/[id]/base/route") },
   { pattern: "/api/sessions/[id]/base/resolve", load: () => import("../app/api/sessions/[id]/base/resolve/route") },
   { pattern: "/api/sessions/[id]/boot", load: () => import("../app/api/sessions/[id]/boot/route") },
+  { pattern: "/api/sessions/[id]/check-changes", load: () => import("../app/api/sessions/[id]/check-changes/route") },
   { pattern: "/api/sessions/[id]/checkpoints/[sha]", load: () => import("../app/api/sessions/[id]/checkpoints/[sha]/route") },
   { pattern: "/api/sessions/[id]/checkpoints/[sha]/restore", load: () => import("../app/api/sessions/[id]/checkpoints/[sha]/restore/route") },
   { pattern: "/api/sessions/[id]/checkpoints/[sha]/reverify", load: () => import("../app/api/sessions/[id]/checkpoints/[sha]/reverify/route") },

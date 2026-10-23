@@ -14,7 +14,7 @@ import { StudioError } from './errors';
 import { newSessionModel } from './new-session';
 import { findProject } from './projects';
 import { openSessionTerminal, sessionTerminalMode, type TerminalMode } from './session-terminal';
-import { createSession, sendMessage, sessionTerminalAllowed, sessionTerminalTarget, subscribe } from './sessions';
+import { createSession, sendMessage, sessionTerminalAllowed, sessionTerminalTarget, setTerminalCheckChanges, subscribe } from './sessions';
 
 export interface RoutedTerminal {
   opened: true;
@@ -79,7 +79,17 @@ function terminalBackends(mode: TerminalMode): BackendFilter {
 }
 
 export async function startRoutedSession(
-  input: { projectId: string; user: string; workspace: 'copy' | 'local'; request: string; intent: RuleIntent; direct?: { backend: string; model?: string; accountId?: string }; terminal?: true },
+  input: {
+    projectId: string;
+    user: string;
+    workspace: 'copy' | 'local';
+    request: string;
+    intent: RuleIntent;
+    direct?: { backend: string; model?: string; accountId?: string };
+    terminal?: true;
+    /** 첫 요청의 검증에서 확인 선언의 변경을 받아들인다(#916, ADR-164). 만들기 요청에서만 뜻이 있다 */
+    allowCheckChanges?: boolean;
+  },
   terminalOverrides?: Partial<RoutedTerminalDeps>,
 ): Promise<RoutedSession> {
   const request = input.request.trim();
@@ -106,8 +116,13 @@ export async function startRoutedSession(
   try {
     // 대화 창에서 보낸 요청과 같은 조건이다(messages 라우트). 설계 승인은 만들기 요청만 본다
     if (input.intent === 'build') await assertDesignApprovedForRequest(session.id, request);
-    if (terminalDeps) return { session, routing, terminal: await openWithFirstRequest(session.id, request, input.intent, terminalDeps) };
-    const { runId } = sendMessage(session.id, request, { allowBreaking: false, by: input.user, intent: input.intent, interactive: true, steering: true });
+    const allowCheckChanges = input.allowCheckChanges === true && input.intent === 'build';
+    if (terminalDeps) {
+      // 터미널의 첫 요청은 CLI가 훅으로 알려 온다. 그 실행이 가져가게 터미널을 열기 전에 켜 둔다
+      if (allowCheckChanges) setTerminalCheckChanges(session.id, true);
+      return { session, routing, terminal: await openWithFirstRequest(session.id, request, input.intent, terminalDeps) };
+    }
+    const { runId } = sendMessage(session.id, request, { allowBreaking: false, by: input.user, intent: input.intent, interactive: true, steering: true, ...(allowCheckChanges ? { allowCheckChanges: true } : {}) });
     return { session, routing, runId };
   } catch (error) {
     // 세션은 이미 만들어졌다. 지우지 않고 돌려줘 화면이 그 세션을 열고 까닭을 보이게 한다

@@ -10,6 +10,7 @@ import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
 import { renderRuntime, runtimeHint } from './runtime';
 import { fleetsHint, renderFleets } from './fleets';
+import { folderHint, renderFolder } from './folder';
 import { plansHint, plansScreen } from './plans';
 import { renderRequirements, requirementsHint } from './requirements';
 import { renderSettings, settingsHint } from './settings';
@@ -41,7 +42,7 @@ function onBackground(text: string, background: string, width: number): string {
 }
 
 /** 사이드바 맨 아래 줄의 키 안내 */
-const SIDEBAR_HINT = ' Ctrl-b w 카드 · u 사용량 · ? 키';
+const SIDEBAR_HINT = ' Ctrl-b w 카드 · a 폴더 · ? 키';
 const CHOICE_LABEL = (choice: string): string => (choice === 'rules' ? '규칙대로' : backendLabel(choice));
 
 /** 미리보기 한 줄: 어느 AI로, 왜, 같은 종류의 일에서 AI별로 게이트를 몇 번 통과했나(웹 새 요청 칸과 같은 내용) */
@@ -59,8 +60,8 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
-const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · g 설정 · e 요구사항 · f AI 비교 · v 실행 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · a 폴더 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · a 폴더 열기 · g 설정 · e 요구사항 · f AI 비교 · v 실행 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · f AI 비교 · Esc 닫기 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
@@ -73,7 +74,8 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
-  ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기)'],
+  ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기). 프로젝트 고르기 끝 줄의 "+ 폴더 열기"로 내 폴더를 바로 등록, Ctrl-t로 이 요청의 확인 선언 변경 허용'],
+  ['a', '폴더 열기: 내 폴더를 프로젝트로 등록(경로 쓰기, Tab 채우기, ↑↓ 하위 폴더, Enter 살펴보고 y로 등록). 스페이스 화면에서는 a만'],
   ['i', '고른 세션 자세히: 체크포인트 diff·되돌리기·다시 검증, 확인 필요와 AI 리뷰 지적, PR 올리기, 세션 지우기(스페이스 화면에서는 앞글쇠 없이 i)'],
   ['h', '기록: AI·계정별 게이트 통과율과 최근 실패, 프로젝트 토큰 보고서'],
   ['g', '설정: 계정(더하기·로그인·그림), 라우팅 규칙, 화면, 키·알림. 스페이스·사용량 화면에서는 g만, Esc로 닫으면 연 화면으로'],
@@ -179,7 +181,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  const view = state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const view = state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
   const where = sessions[state.selected]?.projectName;
   lines.push(
     onBackground(
@@ -214,6 +216,15 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
     lines.push(fit(relabel(state, settingsHint(state.settings)), cols));
+    return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
+  }
+
+  if (state.folder) {
+    // 폴더 열기(#916)도 사이드바 없이 본문 전체를 쓴다
+    const body = renderFolder(state.folder, { w: cols, h: Math.max(0, rows - 2) }, theme);
+    lines.push(...body.lines);
+    while (lines.length < rows - 1) lines.push(' '.repeat(cols));
+    lines.push(fit(relabel(state, folderHint(state.folder)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
@@ -292,9 +303,12 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       : choice !== 'rules'
         ? `${prompt.labels?.[choice] ?? backendLabel(choice)}로 바로 보냅니다(규칙을 건너뜀)`
         : (prompt.preview ?? '요청을 쓰면 어느 AI로 갈지 여기 보입니다');
-    lines[rows - 2] = fit(` AI: ${prompt.labels?.[choice] ?? CHOICE_LABEL(choice)} (Tab 바꾸기) · ${preview}`, cols);
+    const checks = prompt.allowCheckChanges ? ' · 확인 선언 변경 허용 켬(Ctrl-t 끄기)' : ' · Ctrl-t 확인 선언 변경 허용';
+    lines[rows - 2] = fit(` AI: ${prompt.labels?.[choice] ?? CHOICE_LABEL(choice)} (Tab 바꾸기)${checks} · ${preview}`, cols);
     if (prompt.step === 'project') {
-      lines[rows - 1] = fit(` 새 요청 · 프로젝트: ‹${project?.name ?? '없음'}› (↑↓ 고르기 · Enter 다음 · Esc 닫기)`, cols);
+      // 끝 줄은 "+ 폴더 열기"다(#916)
+      const picked = project ? `‹${project.name}›` : '‹+ 폴더 열기(내 폴더를 프로젝트로 등록)›';
+      lines[rows - 1] = fit(` 새 요청 · 프로젝트: ${picked} (↑↓ 고르기 · Enter 다음 · Esc 닫기)`, cols);
     } else {
       const head = ` ${project?.name ?? ''} 요청> `;
       // 길면 끝부분을 보인다(커서가 화면 밖으로 나가지 않게)

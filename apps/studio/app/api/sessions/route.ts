@@ -34,6 +34,7 @@ export async function POST(request: Request) {
       request?: unknown;
       intent?: unknown;
       terminal?: unknown;
+      allowCheckChanges?: unknown;
       accountId?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
@@ -59,10 +60,21 @@ export async function POST(request: Request) {
       if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
       // terminal: true면 대화 러너 대신 고른 AI의 CLI 터미널을 열고 첫 요청을 붙여 넣는다(#836)
       if (body.terminal !== undefined && body.terminal !== true) throw new StudioError(400, 'terminal은 true만 받습니다');
+      if (body.allowCheckChanges !== undefined && typeof body.allowCheckChanges !== 'boolean') throw new StudioError(400, 'allowCheckChanges는 true나 false여야 합니다');
       const direct =
         body.route === 'direct' ? { backend: body.backend as string, ...(typeof body.model === 'string' ? { model: body.model } : {}), ...(accountId ? { accountId } : {}) } : undefined;
       return Response.json(
-        await startRoutedSession({ projectId: body.projectId, user, workspace, request: body.request, intent, ...(direct ? { direct } : {}), ...(body.terminal === true ? { terminal: true as const } : {}) }),
+        await startRoutedSession({
+          projectId: body.projectId,
+          user,
+          workspace,
+          request: body.request,
+          intent,
+          ...(direct ? { direct } : {}),
+          ...(body.terminal === true ? { terminal: true as const } : {}),
+          // 확인 선언 변경 허용(#916, ADR-164): 사람이 보낸 첫 요청에서만 켠다
+          ...(body.allowCheckChanges === true ? { allowCheckChanges: true } : {}),
+        }),
         { status: 201 },
       );
     }

@@ -225,3 +225,31 @@ describe('세션 자세히 그리기', () => {
     expect(sessionDetailLines(loaded(), { theme: DEFAULT_THEME, width: 50, height: 9, now: NOW })).toHaveLength(9);
   });
 });
+
+describe('확인 선언 변경 허용(#916, ADR-164)', () => {
+  const loaded = (patch: Partial<DetailState> = {}): DetailState => ({ ...openDetail(item), loading: false, snapshot, tab: 'review', ...patch });
+
+  it('세션 목록이 알린 켜짐을 열 때 받아 오고, 확인·리뷰 탭에 지금 상태를 보인다', () => {
+    const armed = openDetail({ ...item, checkChangesArmed: true });
+    expect(armed.checkChangesArmed).toBe(true);
+    const text = stripAnsi(sessionDetailLines({ ...armed, loading: false, snapshot, tab: 'review' }, { theme: DEFAULT_THEME, width: 160, height: 30, now: NOW }).join('\n'));
+    expect(text).toContain('확인 선언 변경 허용: 켜짐');
+    const off = stripAnsi(sessionDetailLines(loaded(), { theme: DEFAULT_THEME, width: 160, height: 30, now: NOW }).join('\n'));
+    expect(off).toContain('확인 선언 변경 허용: 꺼짐');
+  });
+
+  it('c로 켤 때는 위험을 알리고 묻는다. y면 켜는 일을 보내고, 켜진 것을 끌 때는 묻지 않는다', () => {
+    const asked = detailKey(loaded(), 'c');
+    expect(asked.action).toBeUndefined();
+    expect(asked.detail!.confirm).toEqual({ action: 'checkChanges' });
+    expect(stripAnsi(sessionDetailLines(asked.detail!, { theme: DEFAULT_THEME, width: 200, height: 30, now: NOW }).at(-1)!)).toContain('studio.yaml');
+    expect(detailKey(asked.detail!, 'y').action).toEqual({ kind: 'checkChanges', allow: true });
+    expect(detailKey(asked.detail!, 'n').action).toBeUndefined();
+    expect(detailKey(loaded({ checkChangesArmed: true }), 'c').action).toEqual({ kind: 'checkChanges', allow: false });
+  });
+
+  it('c는 어느 탭에서나 되고, 답을 기다리는 동안에는 받지 않는다', () => {
+    expect(detailKey(loaded({ tab: 'checkpoints' }), 'c').detail!.confirm).toEqual({ action: 'checkChanges' });
+    expect(detailKey(loaded({ busy: '되돌리는 중' }), 'c').action).toBeUndefined();
+  });
+});

@@ -155,6 +155,11 @@ export interface SessionSnapshot {
    * kind는 CLI가 알린 notification_type, message는 그 창이 보여 준 글, at은 건 시각(ISO)이다
    */
   terminalAttention?: { kind: string; message: string; at: string };
+  /**
+   * 터미널 세션의 다음 요청 하나에서 확인 선언(studio.yaml의 tests·pageChecks …)의 변경을 받아들인다(#916, ADR-164).
+   * 사람이 desk에서 켜고(로컬 토큰이 있는 요청만), 그 뒤 처음 시작되는 만들기 실행이 가져가며 꺼진다
+   */
+  allowCheckChangesNext?: true;
   /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
