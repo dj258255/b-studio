@@ -15,7 +15,7 @@ pnpm test
 pnpm typecheck
 ```
 
-웹 스튜디오를 개발할 때는 `pnpm studio:demo`, lint, production build도 확인합니다.
+스튜디오 서버나 터미널 작업대를 고칠 때는 `pnpm studio --mode demo`로 띄워 보고, lint와 production build도 확인합니다.
 
 ## 작업 흐름
 

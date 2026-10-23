@@ -43,8 +43,6 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
       # 기반 이미지를 Docker Hub에서 익명으로 받으면 실행기 IP가 요청 한도에 걸린다(ci.yml의 이미지 빌드와 같은 이유).
       # compose는 buildx가 아니라 기본 데몬으로 받으므로 데몬에 공개 미러를 둔다. 거기 없으면 Docker Hub로 간다
       - name: Docker 데몬에 공개 미러 설정

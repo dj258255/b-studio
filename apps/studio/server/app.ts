@@ -80,7 +80,6 @@ export function createStudioHandler(options: StudioHandlerOptions): (req: Incomi
       now(),
       () => readRevocations(),
     );
-    if (decision.kind === 'redirect') return new Response(null, { status: 307, headers: { location: new URL(decision.location, url).toString() } });
     if (decision.kind === 'reject') {
       return url.pathname.startsWith('/api/')
         ? json(decision.status, { error: decision.message })

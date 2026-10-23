@@ -27,17 +27,17 @@ pnpm studio up examples/orders
 
 준비가 끝나면 web 미리보기와 API 계약 주소가 표시됩니다. 종료할 때 `Ctrl+C`를 누르면 샌드박스 전용 컨테이너와 볼륨을 정리합니다. 문제를 분석하려고 환경을 남길 때만 `--keep`을 사용하세요.
 
-## 웹 스튜디오
+## 터미널 작업대
 
 ```bash
-# 모델을 호출하지 않는 시연 모드
-pnpm studio:demo
+# 스튜디오를 뒤에서 띄우고 터미널 작업대를 연다(개인 PC의 Claude Code 로그인 사용)
+pnpm studio
 
-# 개인 PC의 Claude Code 로그인 사용
-pnpm studio:local
+# 모델을 호출하지 않는 시연 모드
+pnpm studio --mode demo
 ```
 
-기본 주소 `http://127.0.0.1:3000`에서 프로젝트를 선택하고 세션을 만듭니다. 로컬 로그인 모드는 개인 PC 전용입니다.
+웹 화면은 없습니다. `Ctrl-b n`으로 프로젝트를 고르고 새 요청을 보냅니다. 로컬 로그인 모드는 개인 PC 전용입니다.
 
 `pnpm studio launch`는 스튜디오를 백그라운드로 켜고 브라우저를 엽니다(`pnpm studio stop`으로 끕니다). 세션 터미널을 켠 스튜디오(`B_STUDIO_EXPERIMENTAL=1`)에서는 `pnpm studio desk`로 터미널 하나에 여러 세션을 나란히 띄울 수 있습니다.
 

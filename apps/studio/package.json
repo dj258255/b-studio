@@ -17,27 +17,17 @@
     "@b-studio/agent": "workspace:*",
     "@b-studio/sandbox": "workspace:*",
     "@b-studio/spec": "workspace:*",
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0",
-    "katex": "0.18.7",
     "next": "16.3.8",
     "react": "19.2.8",
     "react-dom": "19.2.8",
-    "react-markdown": "10.1.0",
-    "rehype-katex": "7.0.1",
-    "remark-gfm": "4.0.1",
-    "remark-math": "6.0.0",
-    "shiki": "4.4.3",
     "zod": "^4.6.1"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.8",
-    "tailwindcss": "^4",
     "typescript": "^5"
   },
   "packageManager": "pnpm@10.29.3"

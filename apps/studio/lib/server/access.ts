@@ -3,27 +3,14 @@ import { StudioError } from './errors';
 import { getSnapshot, recoverSessions } from './sessions';
 
 /**
- * proxy.ts가 확인해 넣은 사용자. 인증을 켰는데 없으면 proxy.ts를 거치지 않은 요청이므로 거부한다.
- * proxy.ts가 앞에서 막더라도 데이터를 다루는 라우트에서 한 번 더 확인한다
+ * 앞단(스튜디오 서버의 인증 판단, Next면 proxy.ts)이 확인해 넣은 사용자. 인증을 켰는데 없으면 앞단을 거치지 않은 요청이므로 거부한다.
+ * 앞단이 막더라도 데이터를 다루는 라우트에서 한 번 더 확인한다
  */
 export function requireUser(requestHeaders: Headers): string {
   if (authConfig().mode === 'none') return LOCAL_USER;
   const user = requestHeaders.get(USER_HEADER);
   if (!user) throw new StudioError(401, '로그인이 필요합니다');
   return user;
-}
-
-/**
- * 화면(서버 컴포넌트)의 사용자. 확인하지 못하면 로그인으로 보낸다.
- * Next는 화면에서만 부르므로 그때 불러온다 — API 라우트는 Next 없이 도는 스튜디오 서버(server/)에서도 이 파일을 쓴다
- */
-export async function pageUser(): Promise<string> {
-  const [{ headers }, { redirect }] = await Promise.all([import('next/headers'), import('next/navigation')]);
-  try {
-    return requireUser(await headers());
-  } catch {
-    return redirect('/login');
-  }
 }
 
 /** 세션을 바꾸는 요청. 인증을 켜면 세션을 만든 사람이나 관리자만 할 수 있다 */

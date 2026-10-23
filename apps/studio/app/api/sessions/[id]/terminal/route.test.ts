@@ -25,7 +25,6 @@ vi.mock('@/lib/server/session-terminal', () => ({
 }));
 vi.mock('@/lib/server/local-token', () => ({
   LOCAL_TOKEN_COOKIE: 'b_studio_local',
-  LOCAL_TOKEN_EXCHANGE_PATH: '/local-auth',
   hasLocalToken: (cookie: string | undefined) => cookie === mocks.localToken,
   localToken: () => mocks.localToken,
   localTokenPath: () => '/tmp/b-studio-local-token',
