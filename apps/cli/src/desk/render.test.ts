@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { initialState, type DeskState } from './keys';
 import { previewLine, renderScreen, stripAnsi } from './render';
-import { stringWidth } from './screen';
+import { PaneTerminal } from './pane';
+import { computeLayout, stringWidth } from './screen';
 import type { DeskItem } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-22T00:00:00Z', ...patch });
@@ -101,6 +102,20 @@ describe('화면 그리기', () => {
   it('남긴 안내(message)는 아래 줄에 보인다', () => {
     const plain = renderScreen(state({ message: '보냈습니다' }), size, []).lines.map(stripAnsi);
     expect(plain[size.rows - 1]).toContain('보냈습니다');
+  });
+});
+
+describe('칸 줄의 폭(#860)', () => {
+  it('칸 해석기가 낸 줄을 다시 재지 않는다: 이모지·풀어쓴 한글이 있어도 잘리지 않고 구분선이 밀리지 않는다', async () => {
+    const rect = computeLayout(size.cols, size.rows, 2).panes[0]!;
+    const pane = new PaneTerminal(rect.w, rect.h - 1);
+    // 칸을 꽉 채운다: 폭을 잘못 세면 끝의 |가 잘리거나 구분선이 밀린다
+    await pane.write(`a😀b🚀c ${'한글'.normalize('NFD')} 끝${'x'.repeat(rect.w - 16)}|`);
+    const { lines } = renderScreen(state({ layout: 2, slots: ['a', 'b', undefined, undefined] }), size, [{ lines: pane.lines(), cols: pane.cols }, { lines: ['right'], cols: 5 }]);
+    const row = stripAnsi(lines[2]!).normalize('NFC');
+    expect(row).toContain(`a😀b🚀c 한글 끝${'x'.repeat(rect.w - 16)}|│right`);
+    for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(size.cols);
+    pane.dispose();
   });
 });
 

@@ -135,8 +135,12 @@ export class StudioClient {
     const next = previous
       .catch(() => {})
       .then(async () => {
-        for (let at = 0; at < data.length; at += INPUT_CHUNK) {
-          await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/terminal`, { action: 'input', data: data.slice(at, at + INPUT_CHUNK) });
+        for (let at = 0; at < data.length; ) {
+          let end = Math.min(data.length, at + INPUT_CHUNK);
+          // 서로게이트 쌍(이모지 등) 한가운데서 나누지 않는다
+          if (end < data.length && /[\ud800-\udbff]/.test(data[end - 1]!)) end -= 1;
+          await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/terminal`, { action: 'input', data: data.slice(at, end) });
+          at = end;
         }
       });
     this.#inputQueue.set(id, next);

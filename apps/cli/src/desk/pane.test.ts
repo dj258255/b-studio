@@ -60,4 +60,27 @@ describe('칸 터미널 해석', () => {
     expect(answers.join('')).toBe('\x1b[1;3R');
     pane.dispose();
   });
+
+  it('이모지는 2칸, 풀어쓴(NFD) 한글은 모아 2칸으로 센다(#860)', async () => {
+    const pane = new PaneTerminal(20, 2);
+    await pane.write(`a😀b🚀c|\r\n${'한글'.normalize('NFD')}|`);
+    const [first, second] = pane.lines().map(stripAnsi);
+    expect(first!.trimEnd()).toBe('a😀b🚀c|');
+    expect(second!.normalize('NFC').trimEnd()).toBe('한글|');
+    expect(pane.cursor()).toEqual({ x: 5, y: 1 });
+    pane.dispose();
+  });
+
+  it('CLI가 켠 모드(bracketed paste, 응용 커서 키, 커서 숨김)를 알려 준다(#860)', async () => {
+    const pane = new PaneTerminal(10, 2);
+    expect(pane.modes()).toEqual({ bracketedPaste: false, appCursor: false, cursorHidden: false });
+    await pane.write('\x1b[?2004h\x1b[?1h\x1b[?25l');
+    expect(pane.modes()).toEqual({ bracketedPaste: true, appCursor: true, cursorHidden: true });
+    await pane.write('\x1b[?25h');
+    expect(pane.modes().cursorHidden).toBe(false);
+    await pane.write('\x1b[?25l');
+    pane.reset();
+    expect(pane.modes()).toEqual({ bracketedPaste: false, appCursor: false, cursorHidden: false });
+    pane.dispose();
+  });
 });

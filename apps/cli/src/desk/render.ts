@@ -10,6 +10,8 @@ import type { DeskPreview } from './types';
 /** 칸 하나에 그릴 것. lines는 칸의 터미널 크기에 맞춘 줄(색 포함), note는 칸 머리에 붙일 알림(닫힘·오류) */
 export interface PaneView {
   lines: string[];
+  /** lines가 이 폭에 정확히 맞춰져 있다(칸 해석기가 낸 줄). 칸 폭과 같으면 다시 재지 않는다 */
+  cols?: number;
   cursor?: { x: number; y: number };
   note?: string;
 }
@@ -163,5 +165,7 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
     return fit(row === middle ? '  Ctrl-b Enter 로 사이드바에서 고른 세션을 엽니다' : '', rect.w);
   }
   const line = view?.lines[row - 1];
-  return line === undefined ? ' '.repeat(rect.w) : fitAnsi(line, rect.w);
+  if (line === undefined) return ' '.repeat(rect.w);
+  // 칸 해석기가 이미 칸 폭에 맞춘 줄이다. 폭을 다시 재면 해석기와 셈이 달라 줄이 잘리거나 밀린다(#860)
+  return view?.cols === rect.w ? line : fitAnsi(line, rect.w);
 }

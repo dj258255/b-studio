@@ -12,11 +12,21 @@ export type PaneLayout = 1 | 2 | 4;
 /** 사이드바 폭의 상한(칸). 화면 폭의 30%를 넘지 않는다 */
 const SIDEBAR_MAX = 32;
 
-/** 터미널에서 한 글자가 차지하는 칸 수(0·1·2). 결합 문자는 0, 한글·한자·전각·그림 문자는 2 */
+/** 터미널에서 한 글자가 차지하는 칸 수(0·1·2). 결합 문자는 0, 한글·한자·전각·그림 문자는 2. 칸 해석기(유니코드 11 폭)와 어긋나지 않게 맞춘다 */
 export function charWidth(code: number): number {
   if (code === 0) return 0;
   if (code < 32 || (code >= 0x7f && code < 0xa0)) return 0;
-  if ((code >= 0x300 && code <= 0x36f) || (code >= 0x200b && code <= 0x200f) || (code >= 0xfe00 && code <= 0xfe0f)) return 0;
+  // 결합 문자, 풀어쓴(NFD) 한글의 가운뎃소리·끝소리(앞 첫소리와 한 칸에 모인다)
+  if (
+    (code >= 0x300 && code <= 0x36f) ||
+    (code >= 0x1160 && code <= 0x11ff) ||
+    (code >= 0xd7b0 && code <= 0xd7ff) ||
+    (code >= 0x200b && code <= 0x200f) ||
+    (code >= 0x20d0 && code <= 0x20ff) ||
+    (code >= 0xfe00 && code <= 0xfe0f)
+  ) {
+    return 0;
+  }
   if (
     (code >= 0x1100 && code <= 0x115f) ||
     (code >= 0x2e80 && code <= 0x303e) ||
@@ -30,7 +40,9 @@ export function charWidth(code: number): number {
     (code >= 0xff00 && code <= 0xff60) ||
     (code >= 0xffe0 && code <= 0xffe6) ||
     (code >= 0x1f300 && code <= 0x1f64f) ||
+    (code >= 0x1f680 && code <= 0x1f6ff) ||
     (code >= 0x1f900 && code <= 0x1f9ff) ||
+    (code >= 0x1fa70 && code <= 0x1faff) ||
     (code >= 0x20000 && code <= 0x3fffd)
   ) {
     return 2;
