@@ -296,3 +296,90 @@ describe('desk 작업대(#860)', () => {
     expect(ctx.client.of('resize', 'a')).toHaveLength(1);
   });
 });
+
+describe('desk 작업대: 칸마다 통로, 복사 모드, 크게 보기, 도움말(#863)', () => {
+  /** 두 칸 배치로 a를 칸 1, b를 칸 2에 연다 */
+  async function openTwo(ctx: ReturnType<typeof setup>): Promise<void> {
+    ctx.io.type('\x02l');
+    await openFirst(ctx);
+    ctx.io.type('\x022\x02\x1b[B');
+    ctx.io.type('\x1b');
+    await tick();
+    ctx.io.type('\x02\r');
+    await tick();
+  }
+
+  it('칸을 하나 더 열어도 이미 보던 칸의 통로를 끊거나 화면을 지우지 않는다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.client.data('a', 'hello from a');
+    await tick();
+    const first = ctx.client.streams[0]!;
+    expect(first.ids).toEqual(['a']);
+    await openTwo(ctx);
+    expect(first.signal.aborted).toBe(false);
+    expect(ctx.client.streams.map((stream) => stream.ids)).toEqual([['a'], ['b']]);
+    ctx.io.out = [];
+    ctx.client.data('b', 'hi b');
+    await tick();
+    // a의 내용은 그대로 남아 있다(다시 그리면 그대로 보인다)
+    ctx.io.resize(121, 30);
+    await tick();
+    expect(ctx.io.all).toContain('hello from a');
+  });
+
+  it('새로 연 칸이 최근 출력을 다시 받는 동안에도 다른 칸의 질의에는 답한다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    await tick(1_000);
+    await openTwo(ctx);
+    ctx.client.data('a', '\x1b[6n');
+    await tick();
+    expect(ctx.client.of('input', 'a').some((call) => /\x1b\[\d+;\d+R/.test(call.data ?? ''))).toBe(true);
+  });
+
+  it('복사 모드에서 고른 줄을 OSC 52로 밖 터미널 클립보드에 넣고, 그동안 친 키는 CLI로 가지 않는다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.client.data('a', 'first\r\nsecond\r\nthird');
+    await tick();
+    ctx.io.type('\x02[');
+    await tick();
+    expect(ctx.io.all).toContain('복사');
+    ctx.io.type('kvky');
+    await tick();
+    expect(ctx.client.of('input', 'a')).toEqual([]);
+    const osc = /\x1b\]52;c;([A-Za-z0-9+/=]+)\x07/.exec(ctx.io.all);
+    expect(osc).not.toBeNull();
+    expect(Buffer.from(osc![1]!, 'base64').toString()).toBe('first\nsecond');
+    ctx.io.type('z');
+    await tick();
+    expect(ctx.client.of('input', 'a').map((call) => call.data)).toEqual(['z']);
+  });
+
+  it('크게 보기 중에는 고른 칸만 크기를 바꿔 알리고, 다른 칸 세션은 통로를 그대로 둔다', async () => {
+    const ctx = setup();
+    await openTwo(ctx);
+    await tick(300);
+    const before = { a: ctx.client.of('resize', 'a').length, b: ctx.client.of('resize', 'b').length };
+    ctx.io.type('\x02z');
+    await tick(300);
+    expect(ctx.client.of('resize', 'b').length).toBe(before.b + 1);
+    expect(ctx.client.of('resize', 'a').length).toBe(before.a);
+    expect(ctx.client.streams.filter((stream) => !stream.signal.aborted).map((stream) => stream.ids)).toEqual([['a'], ['b']]);
+  });
+
+  it('Ctrl-b ?는 도움말 화면을 보이고, 아무 키나 누르면 닫히며 그 키는 CLI로 가지 않는다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.io.type('\x02?');
+    await tick();
+    expect(ctx.io.all).toContain('도움말');
+    expect(ctx.io.all).toContain('복사 모드');
+    ctx.io.type('x');
+    await tick();
+    expect(ctx.client.of('input', 'a')).toEqual([]);
+    expect(ctx.app.state.help).toBe(false);
+  });
+});
+

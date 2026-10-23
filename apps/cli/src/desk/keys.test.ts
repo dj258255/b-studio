@@ -111,7 +111,7 @@ describe('키 처리', () => {
   });
 
   it('모르는 글쇠는 앞글쇠를 풀고 안내를 남긴다', () => {
-    const { state, effects } = handleInput(withItems(), '\x02z');
+    const { state, effects } = handleInput(withItems(), '\x02w');
     expect(state.prefix).toBe(false);
     expect(state.message).toContain('Ctrl-b');
     expect(effects).toEqual([]);
@@ -268,5 +268,84 @@ describe('사이드바 선택은 세션으로 기억한다(#860)', () => {
   it('고르던 세션이 사라지면 같은 자리(범위 안)를 고른다', () => {
     expect(reselect([item('a'), item('b'), item('c')], 2, [item('a'), item('b')])).toBe(1);
     expect(reselect([item('a')], 0, [])).toBe(0);
+  });
+});
+
+describe('복사 모드·확대·사이드바·도움말 키(#863)', () => {
+  const open = (patch: Partial<DeskState> = {}) => withItems({ slots: ['a', undefined, undefined, undefined], ...patch });
+
+  it('Ctrl-b [는 고른 칸의 복사 모드를 켜고, 그동안 친 키는 CLI로 가지 않고 복사 모드 조작이 된다', () => {
+    const entered = handleInput(open(), '\x02[');
+    expect(entered.state.copy).toEqual({});
+    expect(entered.effects).toEqual([{ type: 'copy', id: 'a', action: 'enter' }]);
+    const moved = handleInput(entered.state, 'kk\x1b[Bbfgv');
+    expect(moved.effects.filter((effect) => effect.type === 'input')).toEqual([]);
+    expect(moved.effects.map((effect) => (effect.type === 'copy' ? effect.action : effect.type))).toEqual(['up', 'up', 'down', 'pageUp', 'pageDown', 'top', 'mark']);
+    const yanked = handleInput(moved.state, 'y');
+    expect(yanked.effects).toEqual([{ type: 'copy', id: 'a', action: 'yank' }]);
+    expect(yanked.state.copy).toBeUndefined();
+  });
+
+  it('복사 모드는 q나 Esc로 나가고, 나간 뒤의 키는 다시 CLI로 간다', () => {
+    const entered = handleInput(open(), '\x02[').state;
+    const quit = handleInput(entered, 'q');
+    expect(quit.state.copy).toBeUndefined();
+    expect(quit.effects).toEqual([{ type: 'copy', id: 'a', action: 'exit' }]);
+    expect(handleInput(quit.state, 'x').effects).toEqual([{ type: 'input', id: 'a', data: 'x' }]);
+    const escaped = handleInput(entered, '\x1b', true);
+    expect(escaped.state.copy).toBeUndefined();
+  });
+
+  it('복사 모드에서 /로 찾을 글을 쓰고 Enter로 찾으며, n은 같은 글을 더 위에서 찾는다', () => {
+    const entered = handleInput(open(), '\x02[').state;
+    const typing = handleInput(entered, '/ab');
+    expect(typing.state.copy).toEqual({ search: 'ab' });
+    expect(typing.effects).toEqual([]);
+    const found = handleInput(typing.state, '\x7fc\r');
+    expect(found.effects).toEqual([{ type: 'copy', id: 'a', action: 'search', text: 'ac' }]);
+    expect(found.state.copy).toEqual({});
+    expect(handleInput(found.state, 'n').effects).toEqual([{ type: 'copy', id: 'a', action: 'next' }]);
+  });
+
+  it('빈 칸에서는 복사 모드를 켜지 않는다', () => {
+    const { state, effects } = handleInput(withItems(), '\x02[');
+    expect(state.copy).toBeUndefined();
+    expect(effects).toEqual([]);
+  });
+
+  it('복사 모드 중에 붙여 넣은 글은 CLI로 보내지 않는다', () => {
+    const entered = handleInput(open(), '\x02[').state;
+    expect(handleInput(entered, '\x1b[200~rm -rf\r\x1b[201~').effects).toEqual([]);
+  });
+
+  it('Ctrl-b z는 고른 칸을 크게 보기를 켜고 끄며, 칸 수를 바꾸면 풀린다', () => {
+    const state = open({ layout: 2, slots: ['a', 'b', undefined, undefined], focus: 1 });
+    const zoomed = handleInput(state, '\x02z');
+    expect(zoomed.state.zoom).toBe(true);
+    expect(zoomed.effects).toEqual([{ type: 'layout' }]);
+    expect(handleInput(zoomed.state, '\x02z').state.zoom).toBe(false);
+    expect(handleInput(zoomed.state, '\x02l').state.zoom).toBe(false);
+  });
+
+  it('Ctrl-b o는 다음 칸으로 가고 끝에서 처음으로 돈다', () => {
+    const state = open({ layout: 2, slots: ['a', 'b', undefined, undefined], focus: 0 });
+    const next = handleInput(state, '\x02o').state;
+    expect(next.focus).toBe(1);
+    expect(handleInput(next, '\x02o').state.focus).toBe(0);
+  });
+
+  it('Ctrl-b s는 사이드바를 숨기고 다시 보인다', () => {
+    const hidden = handleInput(open(), '\x02s');
+    expect(hidden.state.sidebarHidden).toBe(true);
+    expect(hidden.effects).toEqual([{ type: 'layout' }]);
+    expect(handleInput(hidden.state, '\x02s').state.sidebarHidden).toBe(false);
+  });
+
+  it('Ctrl-b ?는 도움말을 열고, 다음 키 하나는 도움말을 닫기만 한다', () => {
+    const help = handleInput(open(), '\x02?');
+    expect(help.state.help).toBe(true);
+    const closed = handleInput(help.state, 'x');
+    expect(closed.state.help).toBe(false);
+    expect(closed.effects).toEqual([]);
   });
 });

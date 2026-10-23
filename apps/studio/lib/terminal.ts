@@ -264,3 +264,14 @@ export function writeRecordOpen(storage: Pick<Storage, 'setItem'> | undefined, o
   }
 }
 
+
+/**
+ * 한글 고정폭 글꼴이 없을 때 한글만 그리는 대체 글꼴(globals.css의 @font-face, #865).
+ * 영문 글꼴에 한글이 없으면 시스템 글꼴의 한글(칸 1.4개 폭)이 2칸 자리에 그려져, xterm이 남는 폭을 글자 사이로 벌려 "주 문 모 듈"처럼 보였다.
+ * 이 글꼴은 시스템 한글 글꼴을 한글 범위에서만 2칸에 가깝게 키운다
+ */
+export const TERMINAL_HANGUL_FONT = 'b-studio-hangul';
+/** 영문은 고정폭 글꼴, 한글은 깔린 한글 고정폭 글꼴(칸에 꼭 맞는다)이 먼저고 없으면 위의 대체 글꼴이다 */
+export const TERMINAL_FONT_FAMILY = `ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", "D2Coding", "Sarasa Mono K", "NanumGothicCoding", "Nanum Gothic Coding", "${TERMINAL_HANGUL_FONT}", monospace`;
+/** 키운 한글이 윗줄에 닿지 않게 둔 줄 높이 */
+export const TERMINAL_LINE_HEIGHT = 1.1;
