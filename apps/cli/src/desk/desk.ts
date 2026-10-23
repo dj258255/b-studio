@@ -6,11 +6,11 @@
  * 터미널을 대체 화면 버퍼로 바꾸고 raw 모드로 두므로, 어떤 길로 끝나든 되돌린다
  */
 import { StudioClient, findStudio } from './client';
-import { handleInput, initialState, type DeskState, type Effect } from './keys';
+import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { PaneTerminal } from './pane';
 import { previewLine, renderScreen, type PaneView } from './render';
 import { computeLayout, terminalSize } from './screen';
-import { backendLabel, deskSessions } from './sidebar';
+import { backendLabel } from './sidebar';
 import type { DeskTerminalMessage } from './types';
 
 /** 사이드바를 새로 받는 주기 */
@@ -23,12 +23,65 @@ const PREVIEW_DELAY_MS = 300;
 const REPLAY_QUIET_MS = 500;
 /** 통로가 끊기면 다시 여는 간격 */
 const RECONNECT_MS = 2_000;
+/** 조각 끝의 Esc가 방향키의 앞인지 기다리는 시간. 지나면 Esc 하나로 본다 */
+const ESC_WAIT_MS = 25;
+/** 창 크기를 끌어 바꾸는 동안 스튜디오에 알리는 것을 미루는 시간(칸 안 해석기는 바로 맞춘다) */
+const RESIZE_SETTLE_MS = 150;
+/** 터미널로 띄울 수 있는 AI. 스튜디오 routed-session.ts의 terminalBackends와 같은 기준이다(desk가 붙는 launch는 이 컴퓨터 방식) */
+const TERMINAL_BACKENDS: readonly string[] = ['claude-code', 'codex'];
 
-const ENTER_SCREEN = '\x1b[?1049h\x1b[H\x1b[2J';
-const LEAVE_SCREEN = '\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?1049l';
+// 밖 터미널의 bracketed paste를 켜서 붙여넣기를 표지로 받는다(붙인 글 안의 Ctrl-b를 명령으로 보지 않게, #860)
+const ENTER_SCREEN = '\x1b[?1049h\x1b[?2004h\x1b[H\x1b[2J';
+const LEAVE_SCREEN = '\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l';
 
 export interface DeskOptions {
   port?: number;
+}
+
+/** desk가 부르는 스튜디오 API(테스트에서는 가짜를 넣는다) */
+export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream'>;
+
+/** desk가 쓰는 터미널 입출력. 실제로는 process.stdin·stdout이다 */
+export interface DeskIo {
+  write(data: string): void;
+  size(): { cols: number; rows: number };
+  onInput(listener: (chunk: string) => void): void;
+  onResize(listener: () => void): void;
+  setRaw(on: boolean): void;
+  /** 신호·처리 못 한 예외에서도 화면을 되돌리게 건다(테스트에서는 없다) */
+  guard?(restore: () => void, stop: (code: number) => void): void;
+}
+
+function processIo(): DeskIo {
+  return {
+    write: (data) => process.stdout.write(data),
+    size: () => ({ cols: process.stdout.columns || 80, rows: process.stdout.rows || 24 }),
+    onInput: (listener) => {
+      process.stdin.setEncoding('utf8');
+      process.stdin.on('data', listener);
+      process.stdin.resume();
+    },
+    onResize: (listener) => process.stdout.on('resize', listener),
+    setRaw: (on) => {
+      try {
+        process.stdin.setRawMode(on);
+      } catch {
+        // 이미 닫힌 입력
+      }
+      if (!on) process.stdin.pause();
+    },
+    guard: (restore, stop) => {
+      process.once('exit', restore);
+      const fatal = (error: unknown) => {
+        restore();
+        console.error(`studio desk가 멈췄습니다: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
+        process.exit(1);
+      };
+      process.on('uncaughtException', fatal);
+      process.on('unhandledRejection', fatal);
+      for (const signal of ['SIGTERM', 'SIGHUP'] as const) process.once(signal, () => stop(0));
+    },
+  };
 }
 
 export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = process.env): Promise<number> {
@@ -50,16 +103,22 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     console.error('`pnpm studio launch`로 띄운 뒤 다시 실행하세요. 다른 포트면 --port를 주세요');
     return 1;
   }
-  return new DeskApp(client, first).run();
+  return new DeskApp(client, first, processIo()).run();
 }
 
-class DeskApp {
-  readonly #client: StudioClient;
+export class DeskApp {
+  readonly #client: DeskClient;
+  readonly #io: DeskIo;
   #state: DeskState;
   readonly #panes = new Map<string, PaneTerminal>();
   readonly #notes = new Map<string, string>();
   /** 칸마다 마지막으로 스튜디오에 알린 터미널 크기 */
   readonly #sizes = new Map<string, string>();
+  /** 터미널이 끝났거나 열지 못한 세션. 사람이 다시 고를 때(Ctrl-b Enter)까지 열기·크기를 보내지 않는다 */
+  readonly #closed = new Set<string>();
+  #pendingTimer: NodeJS.Timeout | undefined;
+  #resizeTimer: NodeJS.Timeout | undefined;
+  #polling = false;
   #prevFrame: string[] = [];
   #frameTimer: NodeJS.Timeout | undefined;
   #pollTimer: NodeJS.Timeout | undefined;
@@ -71,35 +130,35 @@ class DeskApp {
   #restored = false;
   #finish: (code: number) => void = () => {};
 
-  constructor(client: StudioClient, items: DeskState['items']) {
+  constructor(client: DeskClient, items: DeskState['items'], io: DeskIo) {
     this.#client = client;
+    this.#io = io;
     this.#state = { ...initialState(), items };
+  }
+
+  /** 지금 상태(테스트가 본다) */
+  get state(): DeskState {
+    return this.#state;
   }
 
   run(): Promise<number> {
     const done = new Promise<number>((resolve) => {
       this.#finish = resolve;
     });
-    const restore = () => this.#restore();
-    process.once('exit', restore);
-    const fatal = (error: unknown) => {
-      this.#restore();
-      console.error(`studio desk가 멈췄습니다: ${error instanceof Error ? (error.stack ?? error.message) : String(error)}`);
-      process.exit(1);
-    };
-    process.on('uncaughtException', fatal);
-    process.on('unhandledRejection', fatal);
-    for (const signal of ['SIGTERM', 'SIGHUP'] as const) process.once(signal, () => this.#stop(0));
-
-    process.stdout.write(ENTER_SCREEN);
-    process.stdin.setRawMode(true);
-    process.stdin.setEncoding('utf8');
-    process.stdin.on('data', (chunk: string) => this.#onInput(chunk));
-    process.stdin.resume();
-    process.stdout.on('resize', () => {
+    this.#io.guard?.(
+      () => this.#restore(),
+      (code) => this.#stop(code),
+    );
+    this.#io.write(ENTER_SCREEN);
+    this.#io.setRaw(true);
+    this.#io.onInput((chunk) => this.#onInput(chunk));
+    this.#io.onResize(() => {
+      // 칸 해석기와 화면은 바로 맞추고, 스튜디오에는 크기가 멈춘 뒤 한 번만 알린다
       this.#prevFrame = [];
-      this.#syncPanes();
+      this.#ensurePanes();
       this.#render();
+      clearTimeout(this.#resizeTimer);
+      this.#resizeTimer = setTimeout(() => this.#syncPanes(), RESIZE_SETTLE_MS);
     });
     this.#pollTimer = setInterval(() => void this.#poll(), POLL_MS);
     this.#render();
@@ -107,20 +166,42 @@ class DeskApp {
   }
 
   #size(): { cols: number; rows: number } {
-    return { cols: Math.max(20, process.stdout.columns || 80), rows: Math.max(6, process.stdout.rows || 24) };
+    const { cols, rows } = this.#io.size();
+    return { cols: Math.max(20, cols), rows: Math.max(6, rows) };
   }
 
   #onInput(chunk: string): void {
-    const { state, effects } = handleInput(this.#state, chunk);
+    clearTimeout(this.#pendingTimer);
+    this.#take(handleInput(this.#state, chunk));
+    // 조각 끝에서 끊긴 이스케이프 열은 잠깐 기다린다. 이어지는 조각이 없으면 그대로 처리한다(혼자 누른 Esc)
+    if (this.#state.pending) this.#pendingTimer = setTimeout(() => this.#take(flushPending(this.#state)), ESC_WAIT_MS);
+  }
+
+  #take({ state, effects }: { state: DeskState; effects: Effect[] }): void {
     this.#state = state;
     for (const effect of effects) this.#apply(effect);
     this.#scheduleRender();
   }
 
+  #send(id: string, data: string): void {
+    this.#client.input(id, data).catch((error: unknown) => this.#say(`입력을 보내지 못했습니다: ${messageOf(error)}`));
+  }
+
   #apply(effect: Effect): void {
     switch (effect.type) {
-      case 'input':
-        this.#client.input(effect.id, effect.data).catch((error: unknown) => this.#say(`입력을 보내지 못했습니다: ${messageOf(error)}`));
+      case 'input': {
+        // 안쪽 CLI가 응용 커서 키 모드면 방향키를 그 꼴로 바꾼다(밖 터미널은 늘 보통 꼴로 보낸다)
+        const modes = this.#panes.get(effect.id)?.modes();
+        this.#send(effect.id, modes ? toInnerKeys(effect.data, modes) : effect.data);
+        return;
+      }
+      case 'paste':
+        this.#send(effect.id, pasteFor(effect, this.#panes.get(effect.id)?.modes().bracketedPaste ?? false));
+        return;
+      case 'reopen':
+        // 끝났거나 열지 못한 터미널만 다시 연다. 열려 있으면 크기가 같아 아무것도 보내지 않는다
+        if (this.#closed.delete(effect.id)) this.#sizes.delete(effect.id);
+        this.#syncPanes();
         return;
       case 'open':
       case 'close':
@@ -162,6 +243,7 @@ class DeskApp {
       this.#panes.delete(id);
       this.#sizes.delete(id);
       this.#notes.delete(id);
+      this.#closed.delete(id);
     }
     this.#prevFrame = [];
     // 해석기를 먼저 만들어 둔다: 통로가 열리자마자 오는 최근 출력을 받을 자리가 있어야 한다
@@ -196,18 +278,29 @@ class DeskApp {
 
   /** 해석기를 맞추고, 크기가 바뀐 칸만 스튜디오에 알린다(처음은 열기, 그다음은 크기) */
   #syncPanes(): void {
+    clearTimeout(this.#resizeTimer);
     for (const { id, size } of this.#ensurePanes()) {
+      // 끝난 터미널은 창 크기를 바꿨다고 다시 띄우지 않는다(CLI가 새로 뜬다). 사람이 다시 고르면 연다
+      if (this.#closed.has(id)) continue;
       const key = `${size.cols}x${size.rows}`;
       const previous = this.#sizes.get(id);
       if (previous === key) continue;
       this.#sizes.set(id, key);
       // 처음은 열기(이미 열린 터미널이면 스튜디오가 크기만 맞춘다), 그다음부터는 크기만 알린다
-      const request = previous === undefined ? this.#client.open(id, size.cols, size.rows) : this.#client.resize(id, size.cols, size.rows);
+      const opening = previous === undefined;
+      const request = opening ? this.#client.open(id, size.cols, size.rows) : this.#client.resize(id, size.cols, size.rows);
       request.catch((error: unknown) => {
-        this.#notes.set(id, messageOf(error));
+        this.#notes.set(id, `${messageOf(error)} · Ctrl-b Enter로 다시 엽니다`);
+        if (opening) this.#markClosed(id);
         this.#scheduleRender();
       });
     }
+  }
+
+  /** 터미널이 없다: 다음에 열 때는 열기를 보낸다(크기만 보내면 스튜디오가 조용히 무시한다) */
+  #markClosed(id: string): void {
+    this.#closed.add(id);
+    this.#sizes.delete(id);
   }
 
   #restartStream(): void {
@@ -236,6 +329,9 @@ class DeskApp {
         this.#reconnectTimer = setTimeout(() => {
           this.#streamKey = '';
           this.#restartStream();
+          // 스튜디오를 다시 띄웠으면 터미널이 없다. 보이는 칸을 다시 연다(열려 있으면 스튜디오가 크기만 맞춘다)
+          for (const id of this.#visible()) if (!this.#closed.has(id)) this.#sizes.delete(id);
+          this.#syncPanes();
         }, RECONNECT_MS);
       });
   }
@@ -247,11 +343,18 @@ class DeskApp {
         if (pane) void pane.write(Buffer.from(message.data, 'base64')).then(() => this.#scheduleRender());
         return;
       case 'status':
-        if (message.state === 'open') this.#notes.delete(id);
-        else this.#notes.set(id, message.state === 'opening' ? '여는 중' : (message.message ?? '터미널이 닫혔습니다'));
+        if (message.state === 'open') {
+          this.#notes.delete(id);
+          this.#closed.delete(id);
+        } else if (message.state === 'opening') this.#notes.set(id, '여는 중');
+        else {
+          this.#notes.set(id, `${message.message ?? '터미널이 닫혔습니다'} · Ctrl-b Enter로 다시 엽니다`);
+          this.#markClosed(id);
+        }
         break;
       case 'exit':
-        this.#notes.set(id, `터미널이 끝났습니다${message.code === null ? '' : `(${message.code})`}`);
+        this.#notes.set(id, `터미널이 끝났습니다${message.code === null ? '' : `(${message.code})`} · Ctrl-b Enter로 다시 엽니다`);
+        this.#markClosed(id);
         break;
       case 'warning':
         this.#state = { ...this.#state, message: `⚠ ${message.message}` };
@@ -263,13 +366,18 @@ class DeskApp {
   }
 
   async #poll(): Promise<void> {
+    // 앞 요청이 끝나기 전에는 새로 묻지 않는다(느린 스튜디오에 요청이 쌓이고 늦게 온 옛 목록이 새 목록을 덮지 않게)
+    if (this.#polling) return;
+    this.#polling = true;
     try {
       const items = (await this.#client.agents()).items;
-      const count = deskSessions(items).length;
-      this.#state = { ...this.#state, items, selected: Math.max(0, Math.min(this.#state.selected, count - 1)) };
+      // 서버는 손댈 것·작업 중을 위로 올려 순서를 자주 바꾼다. 고르던 세션을 그대로 고른다
+      this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items) };
       this.#scheduleRender();
     } catch (error) {
       this.#say(`세션 목록을 받지 못했습니다: ${messageOf(error)}`);
+    } finally {
+      this.#polling = false;
     }
   }
 
@@ -284,7 +392,15 @@ class DeskApp {
       this.#state = {
         ...this.#state,
         message: undefined,
-        prompt: { step: usable.length === 1 ? 'request' : 'project', projects: usable, projectIndex: 0, text: '', choices: ['rules', ...rules.allowed], choice: 0 },
+        prompt: {
+          step: usable.length === 1 ? 'request' : 'project',
+          projects: usable,
+          projectIndex: 0,
+          text: '',
+          // 터미널로 띄울 수 없는 AI는 고를 수 없다(스튜디오가 거절한다)
+          choices: ['rules', ...rules.allowed.filter((backend) => TERMINAL_BACKENDS.includes(backend))],
+          choice: 0,
+        },
       };
       this.#scheduleRender();
     } catch (error) {
@@ -317,7 +433,9 @@ class DeskApp {
       const slots = [...this.#state.slots];
       slots[this.#state.focus] = result.session.id;
       const target = backendLabel(result.routing?.backend ?? (choice === 'rules' ? undefined : choice));
-      const message = result.terminal?.pasteError
+      const message = result.sendError
+        ? `${target} 세션을 만들었지만 요청을 보내지 못했습니다: ${result.sendError}`
+        : result.terminal?.pasteError
         ? `세션을 열었지만 첫 요청을 넣지 못했습니다: ${result.terminal.pasteError} — 칸에서 직접 치세요`
         : result.terminal
           ? `${target}로 보냈습니다`
@@ -345,7 +463,9 @@ class DeskApp {
     const views: PaneView[] = this.#state.slots.map((id) => {
       const pane = id ? this.#panes.get(id) : undefined;
       const note = id ? this.#notes.get(id) : undefined;
-      return { lines: pane ? pane.lines() : [], ...(pane ? { cursor: pane.cursor() } : {}), ...(note ? { note } : {}) };
+      // CLI가 커서를 숨겼으면 desk도 그리지 않는다(제 커서를 그리는 TUI에서 엉뚱한 자리에 보이지 않게)
+      const cursor = pane && !pane.modes().cursorHidden ? { cursor: pane.cursor() } : {};
+      return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.cols } : {}), ...cursor, ...(note ? { note } : {}) };
     });
     const frame = renderScreen(this.#state, this.#size(), views);
     // 바뀐 줄만 다시 쓴다. 지원하는 터미널에서는 한 장을 한 번에 바꾼다(동기 출력)
@@ -356,7 +476,7 @@ class DeskApp {
     this.#prevFrame = frame.lines;
     if (frame.cursor) out += `\x1b[${frame.cursor.y + 1};${frame.cursor.x + 1}H\x1b[?25h`;
     out += '\x1b[?2026l';
-    process.stdout.write(out);
+    this.#io.write(out);
   }
 
   #stop(code: number): void {
@@ -371,15 +491,12 @@ class DeskApp {
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);
     clearTimeout(this.#reconnectTimer);
+    clearTimeout(this.#pendingTimer);
+    clearTimeout(this.#resizeTimer);
     this.#stream?.abort();
     for (const pane of this.#panes.values()) pane.dispose();
-    try {
-      process.stdin.setRawMode(false);
-    } catch {
-      // 이미 닫힌 입력
-    }
-    process.stdin.pause();
-    process.stdout.write(LEAVE_SCREEN);
+    this.#io.setRaw(false);
+    this.#io.write(LEAVE_SCREEN);
   }
 }
 

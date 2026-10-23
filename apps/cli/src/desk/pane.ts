@@ -3,10 +3,14 @@
  * 그릴 때 화면 줄(색은 SGR로)과 커서 자리를 꺼낸다. 브라우저의 터미널 격자(ADR-177)가 xterm으로 하는 일을 CLI 안에서 한다
  */
 import { createRequire } from 'node:module';
+import type { Unicode11Addon as Unicode11AddonType } from '@xterm/addon-unicode11';
 import type { IBufferCell, Terminal as HeadlessTerminal } from '@xterm/headless';
 
 // 패키지가 CommonJS 진입점만 실제로 싣고 있어(module 필드의 파일이 없다) require로 읽는다
-const { Terminal } = createRequire(import.meta.url)('@xterm/headless') as typeof import('@xterm/headless');
+const require = createRequire(import.meta.url);
+const { Terminal } = require('@xterm/headless') as typeof import('@xterm/headless');
+// 이모지·풀어쓴 한글을 실제 터미널처럼 2칸으로 센다(기본 유니코드 6 폭은 이모지를 1칸으로 본다, #860)
+const { Unicode11Addon } = require('@xterm/addon-unicode11') as { Unicode11Addon: typeof Unicode11AddonType };
 
 const RESET = '\x1b[0m';
 /** 칸 하나가 기억하는 지난 줄 수. 화면만 그리므로 크게 둘 까닭이 없다 */
@@ -44,11 +48,28 @@ function sgr(style: CellStyle): string {
   return parts ? `\x1b[0;${parts}m` : RESET;
 }
 
+/** 칸의 CLI가 켠 모드. desk가 입력을 CLI가 기대하는 꼴로 바꾸고 커서를 그릴지 정하는 데 쓴다 */
+export interface PaneModes {
+  bracketedPaste: boolean;
+  appCursor: boolean;
+  cursorHidden: boolean;
+}
+
 export class PaneTerminal {
   readonly #term: HeadlessTerminal;
+  #cursorHidden = false;
 
   constructor(cols: number, rows: number) {
     this.#term = new Terminal({ cols, rows, scrollback: SCROLLBACK, allowProposedApi: true });
+    this.#term.loadAddon(new Unicode11Addon());
+    this.#term.unicode.activeVersion = '11';
+    // 커서 숨김(DECTCEM)은 공개 모드에 없어 직접 따라간다. false를 돌려 xterm 기본 처리도 그대로 하게 한다
+    const cursorMode = (hidden: boolean) => (params: (number | number[])[]) => {
+      if (params.includes(25)) this.#cursorHidden = hidden;
+      return false;
+    };
+    this.#term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, cursorMode(false));
+    this.#term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, cursorMode(true));
   }
 
   get cols(): number {
@@ -71,6 +92,12 @@ export class PaneTerminal {
   /** 처음부터 다시 받을 때(통로를 다시 열면 스튜디오가 최근 출력을 다시 보낸다) 앞 내용을 지운다 */
   reset(): void {
     this.#term.reset();
+    this.#cursorHidden = false;
+  }
+
+  modes(): PaneModes {
+    const modes = this.#term.modes;
+    return { bracketedPaste: modes.bracketedPasteMode, appCursor: modes.applicationCursorKeysMode, cursorHidden: this.#cursorHidden };
   }
 
   /** 프로그램의 질의(커서 위치·장치 속성)에 터미널이 내는 응답. 실제 터미널처럼 CLI에 돌려줘야 한다 */

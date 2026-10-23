@@ -111,6 +111,13 @@ describe('스튜디오 손님', () => {
     expect(JSON.parse(seen[3]!.body).data).toBe('xxxxx');
   });
 
+  it('나눌 자리가 이모지 한가운데면 이모지를 쪼개지 않고 앞에서 나눈다(#860)', async () => {
+    const client = new StudioClient({ origin, token: 't' });
+    await client.input('s1', `${'x'.repeat(INPUT_CHUNK - 1)}😀y`);
+    const parts = seen.map((request) => JSON.parse(request.body).data as string);
+    expect(parts).toEqual(['x'.repeat(INPUT_CHUNK - 1), '😀y']);
+  });
+
   it('새 요청은 터미널로 보내 달라고(terminal: true) 세션 API에 보낸다', async () => {
     handler = (_req, res) => {
       res.statusCode = 201;

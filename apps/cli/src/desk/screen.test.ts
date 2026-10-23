@@ -48,4 +48,10 @@ describe('칸 배치', () => {
       expect(pane.h).toBeGreaterThanOrEqual(1);
     }
   });
+
+  it('풀어쓴 한글의 가운뎃소리·끝소리는 0칸, 1F680대 그림 문자는 2칸이다(#860)', () => {
+    expect(stringWidth('한'.normalize('NFD'))).toBe(2);
+    expect(stringWidth('🚀')).toBe(2);
+    expect(stringWidth('🧪')).toBe(2);
+  });
 });
