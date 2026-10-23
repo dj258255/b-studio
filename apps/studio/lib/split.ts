@@ -1,5 +1,6 @@
 import type { FleetView } from './fleet-types';
 import { outcomeText, runsWithChanges, type ChatItem } from './session-view';
+import { sessionDisplayName } from './session-label';
 import type { SessionSnapshot } from './studio-events';
 import type { TaskPlanView } from './task-plan-types';
 
@@ -101,11 +102,16 @@ export function lastOutcomeStatus(chat: readonly ChatItem[]): OutcomeStatus | un
 
 export interface PaneSummary extends PaneState {
   projectName: string;
+  /** 칩·칸 머리에 보일 이름: 세션 이름이 있으면 그것, 없으면 프로젝트 이름(#875) */
+  name: string;
 }
 
 /** 칩·머리에 함께 쓰는 요약(상태 + 이름 하나로). 세션을 찾지 못한 칸에는 쓰지 않는다 */
-export function paneSummary(snapshot: Pick<SessionSnapshot, 'status' | 'running' | 'pendingQuestion' | 'terminalAttention' | 'projectName'>, lastOutcome?: OutcomeStatus): PaneSummary {
-  return { projectName: snapshot.projectName, ...paneState(snapshot, lastOutcome) };
+export function paneSummary(
+  snapshot: Pick<SessionSnapshot, 'status' | 'running' | 'pendingQuestion' | 'terminalAttention' | 'projectName' | 'label'>,
+  lastOutcome?: OutcomeStatus,
+): PaneSummary {
+  return { projectName: snapshot.projectName, name: sessionDisplayName(snapshot), ...paneState(snapshot, lastOutcome) };
 }
 
 export type BroadcastAction = 'request' | 'steer' | 'skip';

@@ -340,6 +340,8 @@ export interface SessionSummary {
   workspace: WorkspaceKind;
   checkpoints: number;
   lastRequest?: string;
+  /** 사람이 붙인 세션 이름(#875) */
+  label?: string;
   updatedAt: string;
 }
 
@@ -355,6 +357,8 @@ export type StudioEvent =
   | { type: 'design'; design?: DesignView }
   /** 대화 입력창에서 이 세션이 쓸 모델이나 노력 단계를 바꿨다. 없으면 각각 "기본"(계정·레지스트리 기본)으로 되돌린 것이다 */
   | { type: 'model'; modelId?: string; effort?: Effort }
+  /** 사람이 세션 이름을 바꿨다(#875). label이 없으면 이름을 지웠다 */
+  | { type: 'label'; label?: string }
   /** 에이전트가 만들기 전에 선택지로 되물었다. 실행은 이 질문을 남기고 끝난다. 사용자가 답을 다음 요청으로 보낸다 */
   | { type: 'question'; runId: string; question: string; options: string[]; allowOther: boolean; proposal?: { mode: 'split' | 'fleet'; request: string } }
   /** 사람이 제안을 받아 다른 방식으로 넘겼다. 대화를 이어 가지 않고 질문 카드만 치운다(ADR-068) */

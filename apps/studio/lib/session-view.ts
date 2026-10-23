@@ -231,6 +231,8 @@ export function reduceSession(view: SessionView, event: StudioEvent): SessionVie
       return patchSnapshot(view, { design: event.design });
     case 'model':
       return patchSnapshot(view, { modelId: event.modelId, effort: event.effort });
+    case 'label':
+      return patchSnapshot(view, { label: event.label });
     case 'question':
       // 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답을 보내면(run_started) 지운다.
       // 대화 항목으로는 넣지 않는다 — 답을 보내면 요청 줄에 질문과 답이 함께 남는다

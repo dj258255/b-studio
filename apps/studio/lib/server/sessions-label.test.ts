@@ -72,7 +72,8 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   };
 });
 
-import { createSession, getSnapshot, setSessionLabel, stopSession } from './sessions';
+import { createSession, getSnapshot, listSessions, setSessionLabel, stopSession, subscribe } from './sessions';
+import type { StudioEvent } from '../studio-events';
 import { sessionFile, stateDirOf } from './session-store';
 import { StudioError } from './errors';
 
@@ -139,6 +140,25 @@ describe('setSessionLabel(#864)', () => {
     expect((await setSessionLabel(id, '줄\n바꿈\x1b[31m')).label).toBe('줄바꿈[31m');
     await expect(setSessionLabel(id, '가'.repeat(61))).rejects.toThrow(StudioError);
     expect(getSnapshot(id)?.label).toBe('줄바꿈[31m');
+    await stopSession(id).catch(() => {});
+  });
+
+  it('이름을 바꾸면 보고 있는 화면에 label 이벤트로 알리고, 세션 목록 요약에도 이름이 실린다(#875)', async () => {
+    const { id } = await createSession('labelproj', 'kim', 'copy', { boot: 'on-demand' });
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, (event) => events.push(event));
+    events.length = 0;
+
+    await setSessionLabel(id, '결제 화면');
+    await setSessionLabel(id, '');
+
+    expect(events.filter((event) => event.type === 'label')).toEqual([
+      { type: 'label', label: '결제 화면' },
+      { type: 'label' },
+    ]);
+    await setSessionLabel(id, '목록 정리');
+    expect((await listSessions()).find((session) => session.id === id)?.label).toBe('목록 정리');
+    unsubscribe();
     await stopSession(id).catch(() => {});
   });
 });

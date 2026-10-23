@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { type ReactNode, useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { FleetView } from "@/lib/fleet-types";
 import { createView, type SessionView } from "@/lib/session-view";
+import { sessionDisplayName } from "@/lib/session-label";
 import {
   broadcastTarget,
   defaultFocusId,
@@ -104,12 +105,12 @@ interface Broadcast {
 }
 
 function fallbackSummary(pane: SplitPaneInit): PaneSummary {
-  if (!pane.snapshot) return { projectName: pane.id, tone: "idle", label: "세션을 찾을 수 없습니다", attention: false };
+  if (!pane.snapshot) return { projectName: pane.id, name: pane.id, tone: "idle", label: "세션을 찾을 수 없습니다", attention: false };
   return paneSummary(pane.snapshot);
 }
 
 function samePaneSummary(a: PaneSummary | undefined, b: PaneSummary): boolean {
-  return Boolean(a && a.projectName === b.projectName && a.tone === b.tone && a.label === b.label && a.attention === b.attention);
+  return Boolean(a && a.projectName === b.projectName && a.name === b.name && a.tone === b.tone && a.label === b.label && a.attention === b.attention);
 }
 
 /** 강조(질문·실패)가 필요한 칸은 짙은 강조 테두리, 그 밖의 강조(답 기다림 등)는 옅은 강조 테두리 */
@@ -326,13 +327,13 @@ export function SplitView({ panes, plan, cardsEditor, tabs }: { panes: SplitPane
                   role="tab"
                   aria-selected={active}
                   onClick={() => choose(pane.id)}
-                  title={summary.projectName}
+                  title={summary.name === summary.projectName ? summary.projectName : `${summary.name} · ${summary.projectName}`}
                   className={`flex max-w-[12rem] items-center gap-1.5 rounded-control px-2.5 py-1 text-xs font-medium transition-colors ${
                     active ? "bg-panel ring-1 ring-line" : "glass-soft hover:bg-panel"
                   } ${attentionRing(summary)}`}
                 >
                   <Dot tone={summary.tone} />
-                  <span className="truncate">{summary.projectName}</span>
+                  <span className="truncate">{summary.name}</span>
                 </button>
               );
             })}
@@ -526,7 +527,7 @@ function SessionPane({
     onReport(snapshot.id, summary);
     // summary는 매 렌더 새 객체라 값 자체(칸 이름·상태)로만 다시 알린다
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [snapshot.id, summary.projectName, summary.tone, summary.label, summary.attention]);
+  }, [snapshot.id, summary.projectName, summary.name, summary.tone, summary.label, summary.attention]);
 
   // 고른 칸의 결과 칸이 같은 화면 상태를 쓰도록 올린다
   useEffect(() => {
@@ -600,13 +601,15 @@ function SessionPane({
   return (
     <section
       className={`glass flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel ${attentionRing(summary)} ${selected ? "outline outline-2 -outline-offset-2 outline-ink/70" : ""}`}
-      aria-label={`${view.snapshot.projectName} 세션`}
+      aria-label={`${sessionDisplayName(view.snapshot)} 세션`}
       aria-current={selected ? "true" : undefined}
       onClick={onSelect}
     >
       <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 border-b border-line px-3 py-2" onDoubleClick={onFocus}>
         <Dot tone={summary.tone} />
-        <span className="min-w-0 max-w-[14rem] truncate text-sm font-semibold">{view.snapshot.projectName}</span>
+        <span className="min-w-0 max-w-[14rem] truncate text-sm font-semibold" title={view.snapshot.label ? view.snapshot.projectName : undefined}>
+          {sessionDisplayName(view.snapshot)}
+        </span>
         <span className={`shrink-0 text-xs font-medium ${TONE_TEXT[summary.tone]}`}>{summary.label}</span>
         <span className="shrink-0 text-xs text-muted">{backendLabel}</span>
         {hasTokens(view.snapshot.tokens) && (
@@ -880,7 +883,8 @@ export function SplitPicker({ sessions, cardsEditor, tabs }: { sessions: Session
                 <Dot tone={STATUS_TONE[session.status]} />
                 <span className="min-w-0 flex-1">
                   <span className="flex items-baseline gap-2">
-                    <span className="font-semibold">{session.projectName}</span>
+                    <span className="font-semibold">{sessionDisplayName(session)}</span>
+                    {session.label && <span className="text-sm text-muted">{session.projectName}</span>}
                     <span className={`text-sm ${TONE_TEXT[STATUS_TONE[session.status]]}`}>{SESSION_STATUS_LABEL[session.status]}</span>
                   </span>
                   <span className="mt-1 block truncate text-sm text-muted">

@@ -316,6 +316,7 @@ import type {
 } from '@/lib/studio-events';
 import { REVERIFY_LIMIT } from '@/lib/studio-events';
 import { advanceSandboxLink, newSandboxLinkTracker, sameSandboxLink, type SandboxProbe } from '@/lib/sandbox-link';
+import { cleanSessionLabel, sessionLabelProblem } from '@/lib/session-label';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
 import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
@@ -331,7 +332,7 @@ import type { TokenPricing } from './token-report';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
-import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, applyPatchPaths, CODEX_READ_TOOLS, isReadOnlyPrompt, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress, type HostCliKind } from '@b-studio/sandbox';
+import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, applyPatchPaths, CODEX_READ_TOOLS, isReadOnlyPrompt, isResumableConversation, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress, type HostCliKind } from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -533,6 +534,8 @@ interface Session {
   countedUsageIds?: Set<string>;
   /** 터미널 CLI의 메인·서브에이전트별 사용량과 상태(#843). 화면용이고 기억에만 둔다 */
   agentLedger?: TerminalAgentLedger;
+  /** 세션 터미널의 CLI가 훅으로 알려 온 마지막 대화 id와 그 CLI(#872). 스튜디오를 다시 띄운 뒤 터미널을 열 때 이어 붙인다 */
+  terminalConversation?: TerminalConversation;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -678,6 +681,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     workspace: snapshot.workspace ?? 'copy',
     checkpoints: snapshot.checkpoints.length,
     lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
+    ...(snapshot.label ? { label: snapshot.label } : {}),
     updatedAt,
   };
 }
@@ -989,7 +993,7 @@ type NewSession = Pick<
   | 'lazy'
   | 'serviceSelection'
 > &
-  Partial<Pick<Session, 'agentLedger'>>;
+  Partial<Pick<Session, 'agentLedger' | 'terminalConversation'>>;
 
 function newSession(fields: NewSession): Session {
   return {
@@ -1449,6 +1453,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     const list = await checkpoints.list();
     const head = list[0]!;
     const restoredLedger = restoreAgentLedger(data.agentLedger);
+    const restoredConversation = restoreTerminalConversation(data.terminalConversation);
     // 이어서 작업해도 프로젝트에서 저장한 서비스 선택(ADR-083)을 다시 따른다(세션이 멈춰 있는 동안 화면에서 바꿨을 수 있다)
     const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, data.snapshot.projectId);
     const provider = providerFromEnv();
@@ -1497,6 +1502,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       sourceDirtyFiles: data.sourceDirtyFiles,
       // 에이전트 내역(#849). 모양이 틀리거나 이 필드가 생기기 전 기록이면 없다
       ...(restoredLedger ? { agentLedger: restoredLedger } : {}),
+      // 이어 붙일 CLI 대화(#872). 모양이 틀리거나 이 필드가 생기기 전 기록이면 없다
+      ...(restoredConversation ? { terminalConversation: restoredConversation } : {}),
       // 이어서 작업하기는 샌드박스를 바로 켠다(지연 기동이 아니다)
       lazy: false,
       serviceSelection,
@@ -1919,22 +1926,17 @@ export async function setSessionModel(id: string, modelId: string | undefined, e
   return listSelectableModels(backend, session.snapshot.modelId, session.snapshot.effort);
 }
 
-/** 세션 이름의 최대 길이(글자 수) */
-export const SESSION_LABEL_MAX = 60;
-
-/**
- * 세션에 사람이 붙이는 이름(#864). 목록·studio desk 사이드바의 제목이 마지막 요청 대신 이 이름이 된다.
- * 제어 글자는 빼고(터미널 사이드바에 그대로 그려진다) 앞뒤 빈칸을 떼며, 빈 이름은 이름을 지운다.
- * 이어서 작업해도 남도록 스냅샷에 두고 바로 저장을 예약한다
- */
 export async function setSessionLabel(id: string, label: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
-  const clean = label.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
-  if ([...clean].length > SESSION_LABEL_MAX) throw new StudioError(400, `세션 이름은 ${SESSION_LABEL_MAX}자까지입니다`);
+  const problem = sessionLabelProblem(label);
+  if (problem) throw new StudioError(400, problem);
+  const clean = cleanSessionLabel(label);
   if (clean) session.snapshot.label = clean;
   else delete session.snapshot.label;
   session.updatedAt = new Date().toISOString();
   schedulePersist(session);
+  // 보고 있는 화면(세션 화면 머리, 나란히 보기 칸)이 바로 바뀌게 알린다. 새로 붙는 화면은 스냅샷에서 받으므로 기록에 쌓지 않는다
+  emit(session, clean ? { type: 'label', label: clean } : { type: 'label' });
   return session.snapshot;
 }
 
@@ -7553,7 +7555,8 @@ function followLogs(session: Session, tail: number): void {
 
 function emit(session: Session, event: StudioEvent): void {
   // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient = event.type === 'usage' || event.type === 'sandbox_link' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log';
+  const transient =
+    event.type === 'usage' || event.type === 'sandbox_link' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log' || event.type === 'label';
   if (!transient) {
     const buffer = event.type === 'log' ? session.logs : session.history;
     buffer.push(event);
@@ -7584,6 +7587,7 @@ function toPersisted(session: Session): PersistedSession {
     gemini: session.gemini,
     sourceDirtyFiles: session.sourceDirtyFiles,
     ...(session.agentLedger ? { agentLedger: serializeAgentLedger(session.agentLedger) } : {}),
+    ...(session.terminalConversation ? { terminalConversation: session.terminalConversation } : {}),
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
     git: session.git,
@@ -7734,6 +7738,7 @@ export function sessionTerminalTarget(id: string): {
   onViolation: (reason: string) => void;
   gateway: () => Promise<AgentGatewayAddress>;
   cli: HostCliKind;
+  resumeConversation: () => string | undefined;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
@@ -7752,7 +7757,42 @@ export function sessionTerminalTarget(id: string): {
     // 관문은 세션에 하나다. 터미널을 다시 열어도 같은 것을 쓴다
     gateway: () => ensureSessionGateway(id, () => terminalGatewayHandlers(id)),
     cli: terminalCliKind(session),
+    // 기억한 대화가 지금 띄울 CLI의 것일 때만 이어 붙인다(#872). 열 때마다 새로 묻는다
+    resumeConversation: () => {
+      // 멈춘 세션이어도 던지지 않는다(여는 쪽이 세션 상태를 따로 본다)
+      const live = store.sessions.get(id);
+      const remembered = live?.terminalConversation;
+      if (!live) return undefined;
+      return remembered && remembered.cli === terminalCliKind(live) ? remembered.id : undefined;
+    },
   };
+}
+
+/** 세션 터미널의 CLI 대화(#872) */
+interface TerminalConversation {
+  cli: HostCliKind;
+  id: string;
+}
+
+/** 세션 기록의 대화 id를 되살린다. 모양이 틀리면 없는 것으로 본다(손으로 고친 기록, 옛 판) */
+function restoreTerminalConversation(value: unknown): TerminalConversation | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { cli, id } = value as { cli?: unknown; id?: unknown };
+  if ((cli !== 'claude' && cli !== 'codex') || !isResumableConversation(id)) return undefined;
+  return { cli, id };
+}
+
+/**
+ * 훅 입력에 실린 CLI 대화 id를 기억한다(#872). 꼴이 맞는 것만 받고(옵션처럼 보이는 값, 셸 글자는 버린다),
+ * 바뀌었을 때만 세션 기록에 남긴다. 판정에는 쓰지 않는다
+ */
+function noteTerminalConversation(id: string, conversation: string): void {
+  if (!isResumableConversation(conversation)) return;
+  const session = terminalSession(id);
+  const cli = terminalCliKind(session);
+  if (session.terminalConversation?.id === conversation && session.terminalConversation.cli === cli) return;
+  session.terminalConversation = { cli, id: conversation };
+  schedulePersist(session);
 }
 
 /**
@@ -9110,6 +9150,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     telemetry: async (body) => {
       await terminalTelemetry(id, body);
     },
+    conversation: (conversation) => noteTerminalConversation(id, conversation),
     toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
     runTool: (name, args) => runTerminalTool(id, name, args),
   };

@@ -306,6 +306,11 @@ describe('reduceSession', () => {
     expect(view.chat.at(-1)).toMatchObject({ kind: 'backend', model: 'claude-sonnet-5', effort: 'max' });
   });
 
+  it('label 이벤트는 세션 이름을 스냅샷에 반영하고, 이름이 없으면 지운다(#875)', () => {
+    expect(fold([{ type: 'label', label: '결제 화면' }]).snapshot.label).toBe('결제 화면');
+    expect(fold([{ type: 'label', label: '결제 화면' }, { type: 'label' }]).snapshot.label).toBeUndefined();
+  });
+
   it('model 이벤트는 모델과 노력 단계를 함께 스냅샷에 반영한다', () => {
     const view = fold([{ type: 'model', modelId: 'opus', effort: 'low' }]);
     expect(view.snapshot.modelId).toBe('opus');
