@@ -1,12 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { StudioRequestError } from './client';
+import { StudioRequestError, type StartInput } from './client';
 import type { DeskLayout } from './config';
 import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell, type SpriteCatalog } from './desk';
 import { spaceScreen } from './cards';
 import { spaceRect } from './render';
 import { sidebarRows } from './sidebar';
 import { spriteFromRows, type Sprite } from './sprite';
-import type { DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -27,6 +27,8 @@ class FakeClient implements DeskClient {
   openStatus: number | undefined;
   startResult: DeskStartResult = { session: { id: 'new' }, routing: { backend: 'claude-code' }, terminal: { opened: true, pasted: true } };
   allowed: string[] = ['claude-code'];
+  accountList: DeskAccount[] = [];
+  started: StartInput[] = [];
   streams: Array<{ ids: readonly string[]; onMessage: (id: string, message: DeskTerminalMessage) => void; end: (error?: Error) => void; signal: AbortSignal }> = [];
 
   constructor(items: DeskItem[]) {
@@ -48,8 +50,12 @@ class FakeClient implements DeskClient {
   async preview() {
     return { backend: 'claude-code', rule: 'default' as const, matched: '' };
   }
-  async start() {
+  async start(input: StartInput) {
+    this.started.push(input);
     return this.startResult;
+  }
+  async accounts() {
+    return this.accountList;
   }
   async open(id: string) {
     this.calls.push({ type: 'open', id });
@@ -268,6 +274,36 @@ describe('desk 작업대(#860)', () => {
   it('직접 고르는 AI는 터미널로 띄울 수 있는 것(Claude Code·Codex)만 보인다', async () => {
     const ctx = setup();
     ctx.client.allowed = ['claude-code', 'gemini', 'codex', 'opencode'];
+    ctx.io.type('\x02n');
+    await tick();
+    expect(ctx.app.state.prompt?.choices).toEqual(['rules', 'claude-code', 'codex']);
+  });
+
+  it('같은 CLI의 계정이 둘 이상이면 계정까지 고르고, 그 계정으로 보낸다(#885)', async () => {
+    const ctx = setup();
+    ctx.client.allowed = ['claude-code', 'codex'];
+    ctx.client.accountList = [
+      { id: 'claude-code', name: '기본', backend: 'claude-code', builtin: true },
+      { id: 'codex', name: '마르코', backend: 'codex' },
+      { id: 'acct-1a2b3c4d', name: '피오', backend: 'codex', configDir: '/home/kim/.codex-fio' },
+    ];
+    ctx.io.type('\x02n');
+    await tick();
+    expect(ctx.app.state.prompt?.choices).toEqual(['rules', 'claude-code', 'codex', 'codex@acct-1a2b3c4d']);
+    ctx.io.type('\t\t\t');
+    await tick();
+    expect(ctx.io.all).toContain('피오');
+    ctx.io.type('고쳐 줘\r');
+    await tick();
+    expect(ctx.client.started.at(-1)).toMatchObject({ choice: 'codex@acct-1a2b3c4d' });
+  });
+
+  it('계정 목록을 받지 못하는 스튜디오(옛 판, 개인 PC 모드 아님)면 지금처럼 CLI만 고른다', async () => {
+    const ctx = setup();
+    ctx.client.allowed = ['claude-code', 'codex'];
+    ctx.client.accounts = async () => {
+      throw new Error('404');
+    };
     ctx.io.type('\x02n');
     await tick();
     expect(ctx.app.state.prompt?.choices).toEqual(['rules', 'claude-code', 'codex']);

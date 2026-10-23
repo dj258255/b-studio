@@ -126,3 +126,40 @@ describe('chooseDirect', () => {
     expect(fake.checked).toEqual(['codex']);
   });
 });
+
+describe('계정까지 고르기(#885)', () => {
+  function accountDeps(notReady: Record<string, string> = {}): RoutingDeps & { checked: string[] } {
+    const checked: string[] = [];
+    return {
+      checked,
+      allowed: () => ['claude-code', 'codex'],
+      defaultBackend: () => 'claude-code',
+      async ready(backend, _cwd, accountId) {
+        const key = accountId ? `${backend}:${accountId}` : backend;
+        checked.push(key);
+        if (notReady[key]) throw new StudioError(409, notReady[key]);
+      },
+    };
+  }
+
+  it('규칙의 계정으로 로그인을 확인하고, 그 계정이 안 되면 같은 CLI의 다음 후보로 간다', async () => {
+    const deps = accountDeps({ 'codex:acct-aaaaaaaa': '로그인돼 있지 않습니다' });
+    saveBackendRules({ rules: [{ backend: 'codex', accountId: 'acct-aaaaaaaa' }, { backend: 'codex', accountId: 'acct-bbbbbbbb' }] }, deps);
+    const decision = await chooseBackend({ request: '고쳐 줘', intent: 'build', cwd: '/work' }, deps);
+    expect(decision).toMatchObject({ backend: 'codex', accountId: 'acct-bbbbbbbb', rule: 1 });
+    expect(decision.skipped).toEqual([{ rule: 0, backend: 'codex', accountId: 'acct-aaaaaaaa', reason: '로그인돼 있지 않습니다' }]);
+    expect(deps.checked).toEqual(['codex:acct-aaaaaaaa', 'codex:acct-bbbbbbbb']);
+  });
+
+  it('미리보기도 계정을 돌려준다', () => {
+    const deps = accountDeps();
+    saveBackendRules({ rules: [], fallback: { backend: 'codex', accountId: 'acct-aaaaaaaa' } }, deps);
+    expect(previewBackend({ request: '고쳐 줘', intent: 'build' }, deps)).toMatchObject({ backend: 'codex', accountId: 'acct-aaaaaaaa', rule: 'fallback' });
+  });
+
+  it('직접 고를 때도 계정을 받고, 그 계정으로 로그인을 확인한다', async () => {
+    const deps = accountDeps();
+    expect(await chooseDirect({ backend: 'codex', accountId: 'acct-aaaaaaaa', request: 'x', intent: 'build', cwd: '/work' }, deps)).toMatchObject({ backend: 'codex', accountId: 'acct-aaaaaaaa', rule: 'direct' });
+    expect(deps.checked).toEqual(['codex:acct-aaaaaaaa']);
+  });
+});

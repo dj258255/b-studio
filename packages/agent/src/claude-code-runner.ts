@@ -726,12 +726,23 @@ function attachSteering(steering: Steering | undefined, input: InputQueue, onEve
  * 프롬프트를 보내지 않으므로 사용량을 쓰지 않는다.
  */
 export async function preflightClaudeCode(
-  { sdk = DEFAULT_SDK, cwd = process.cwd(), timeoutMs = 60_000 }: { sdk?: ClaudeCodeSdk; cwd?: string; timeoutMs?: number } = {},
+  {
+    sdk = DEFAULT_SDK,
+    cwd = process.cwd(),
+    timeoutMs = 60_000,
+    env,
+  }: {
+    sdk?: ClaudeCodeSdk;
+    cwd?: string;
+    timeoutMs?: number;
+    /** CLI에 넘길 환경. 계정마다 설정 폴더(CLAUDE_CONFIG_DIR)를 따로 둘 때 준다(#885). 없으면 process.env */
+    env?: NodeJS.ProcessEnv;
+  } = {},
 ): Promise<{ ok: true; account: ClaudeCodeAccount } | { ok: false; reason: string }> {
   const input = new InputQueue();
   const conversation = sdk.query({
     prompt: input,
-    options: { cwd, tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false },
+    options: { cwd, tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false, ...(env ? { env } : {}) },
   });
   let timer: NodeJS.Timeout | undefined;
   try {

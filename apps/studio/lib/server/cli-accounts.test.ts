@@ -320,3 +320,32 @@ describe('startLogin / getLoginProgress / cancelLogin (상태 기계)', () => {
     expect(progress.lines.at(-1)).toBe('줄 249');
   });
 });
+
+describe('계정마다 상태·로그인(#885)', () => {
+  it('상태 확인은 계정의 환경을 preflight에 넘긴다', async () => {
+    const env = { PATH: '/usr/bin', CODEX_HOME: '/home/kim/.codex-2' } as unknown as NodeJS.ProcessEnv;
+    const codex = vi.fn<(input?: { env?: NodeJS.ProcessEnv }) => Promise<{ ok: true }>>(async () => ({ ok: true }));
+    const claudeCode = vi.fn<(input?: { env?: NodeJS.ProcessEnv }) => Promise<{ ok: true; account: { subscriptionType: string } }>>(async () => ({ ok: true, account: { subscriptionType: 'max' } }));
+    await checkAccountStatus('codex', { codex }, { env });
+    expect(codex).toHaveBeenCalledWith({ env });
+    await checkAccountStatus('claude-code', { claudeCode }, { env: { PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/home/kim/.claude-2' } as unknown as NodeJS.ProcessEnv });
+    expect(claudeCode).toHaveBeenCalledWith({ env: { PATH: '/usr/bin', CLAUDE_CONFIG_DIR: '/home/kim/.claude-2' } });
+  });
+
+  it('로그인은 계정마다 따로 돌고, 계정의 환경으로 CLI를 띄운다', () => {
+    const first = fakeChild();
+    const second = fakeChild();
+    const spawn = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const env = { PATH: '/usr/bin', CODEX_HOME: '/home/kim/.codex-2' } as unknown as NodeJS.ProcessEnv;
+    const a = startLogin('codex', { spawn, key: 'codex' });
+    const b = startLogin('codex', { spawn, key: 'acct-12345678', env });
+    expect(a).not.toBe(b);
+    expect(spawn).toHaveBeenNthCalledWith(2, 'codex', ['login', '--device-auth'], expect.objectContaining({ env }));
+    expect(spawn.mock.calls[0]![2]).not.toHaveProperty('env');
+    expect(getLoginProgress('acct-12345678')).toBe(b);
+    cancelLogin('acct-12345678');
+    expect(second.kill).toHaveBeenCalled();
+    expect(first.kill).not.toHaveBeenCalled();
+    expect(getLoginProgress('codex')?.state).toBe('running');
+  });
+});

@@ -338,6 +338,22 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - **격리가 없습니다.** CLI는 이 컴퓨터의 다른 파일에도 닿습니다. 평소 터미널에서 CLI를 쓰는 것과 같은 신뢰 수준입니다. 작업 복사본의 `.git`도 읽기 전용이 아닙니다(CLI에는 커밋하지 말라고 알립니다. 체크포인트는 b-studio가 남깁니다).
 - 관문 설정 파일은 같은 사용자의 것이라 에이전트가 고칠 수 있습니다. 그래서 터미널이 열려 있는 동안 그 파일이 쓴 그대로인지 계속 보고(다르면 되돌리고 알립니다), 훅 없이 뜬 CLI도 찾아 알립니다(이슈 #695). 작정한 우회는 막지 못합니다 — 그 경우의 답은 컨테이너 방식입니다.
 
+### 여러 AI 계정
+
+Claude Code와 Codex는 CLI마다 계정을 여럿 둘 수 있습니다. 계정은 이름, CLI, 설정 폴더입니다. 설정 폴더는 CLI가 로그인 정보와 대화 기록을 두는 자리로, claude에는 `CLAUDE_CONFIG_DIR`, codex에는 `CODEX_HOME`로 넘깁니다. 개인 PC 모드에서만 씁니다.
+
+- 계정 목록은 `~/.config/b-studio/accounts.json`(`XDG_CONFIG_HOME`이 있으면 그 아래)에 이 사용자만 읽게(0600) 둡니다. 꼴은 `{ "accounts": [{ "id", "name", "backend", "configDir", "sprite"? }] }`입니다. 손으로 고치다 깨지면 b-studio는 그 파일을 덮어쓰지 않고 까닭을 알립니다.
+- 설정 폴더가 없는 계정은 **기본 계정**입니다. 지금처럼 `~/.claude`·`~/.codex`(또는 셸에서 정한 값)를 씁니다. 기본 계정은 파일에 없어도 목록에 늘 있고, 이름과 그림만 붙일 수 있습니다.
+- 더하는 계정의 설정 폴더는 홈 아래의 다른 폴더여야 합니다(`~/.claude-work` 등). 기본 계정 폴더나 다른 계정이 쓰는 폴더는 받지 않습니다. b-studio는 그 폴더를 만들지도, 지우지도, 안의 파일을 읽지도 않습니다. 계정을 지우면 목록에서만 빠지고 폴더는 남습니다.
+- 로그인은 계정마다 따로 합니다. `POST /api/ai-accounts/{id}/login`이 그 계정의 설정 폴더로 CLI의 로그인 명령을 띄우고, 상태는 `GET /api/ai-accounts/{id}/status`로 봅니다. 터미널에서 직접 할 때는 `CLAUDE_CONFIG_DIR=~/.claude-work claude`처럼 띄운 뒤 `/login`합니다.
+- 세션을 만들 때 `accountId`를 주면(`POST /api/sessions`의 직접 고름이나 백엔드 고름) 그 계정을 세션 기록에 남기고, 세션 터미널·대화 러너·로그인 확인이 모두 그 설정 폴더로 CLI를 띄웁니다. 터미널에서는 `claude`·`codex` 감싸개가 변수를 정하므로, 셸 시작 파일이 같은 변수를 정해도 세션의 계정이 이깁니다. 스튜디오를 다시 띄우거나 멈췄다가 이어서 작업해도 같은 계정입니다.
+- 라우팅 규칙의 대상과 기본값에 `accountId`를 적으면 규칙이 계정까지 고릅니다. 로그인돼 있지 않은 계정은 건너뛰고 다음 후보로 갑니다. 계정을 적지 않은 옛 규칙은 그대로 기본 계정입니다.
+- 세션의 계정이 목록에서 빠지면 그 세션의 터미널과 요청은 다른 계정으로 대신 띄우지 않고 까닭을 알립니다. 새 세션을 만드세요.
+- `studio desk`의 새 요청(`Ctrl-b n`)에서 한 CLI에 계정이 둘 이상이면 Tab 선택지가 계정마다 나뉩니다(예: "Codex · 피오").
+- Codex의 훅 신뢰("Hooks need review")는 설정 폴더마다 따로 기억합니다. 새 계정으로 처음 열면 한 번 묻습니다.
+- 컨테이너 방식 터미널은 기본 계정만 씁니다.
+- **실측하지 않은 것**: macOS에서 Claude Code는 로그인 정보를 키체인에 둡니다. `CLAUDE_CONFIG_DIR`마다 키체인 항목이 따로 생기는지는 버전에 따라 다르다는 보고가 있고 이 컴퓨터에서 재 보지 않았습니다. 두 계정이 같은 로그인을 보이면 `security dump-keychain | grep "Claude Code"`로 항목을 확인하세요.
+
 ## 관문 방식 (`B_STUDIO_GATEWAY`, 실험)
 
 에이전트를 러너로 돌리는 대신 `claude` CLI를 세션 작업 복사본에서 그대로 띄우고, b-studio는 도구(MCP)와 검증 게이트(멈춤 훅)만 붙이는 경로입니다(ADR-168, [실험 17](experiments/2026-10-11-e17-gateway-runner.md)). **기본은 꺼져 있고, 믿는 요청으로만 쓰세요.**
@@ -376,6 +392,7 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 | `B_STUDIO_TASK_PLANS_DIR` | 작업 분해 계획을 저장하는 폴더 | `~/.cache/b-studio/task-plans` |
 | `B_STUDIO_MODEL_OBSERVATIONS_FILE` | API 모드의 모델 라우터가 쓰는 모델별 실측 기록(게이트 통과 여부 등, 최근 5,000건) | `~/.cache/b-studio/model-observations.json` |
 | `B_STUDIO_MODEL_DEFAULTS_FILE` | 프로젝트·백엔드마다 마지막에 고른 모델을 기억하는 파일. 새 세션의 기본 모델이 됩니다 | `~/.cache/b-studio/model-defaults.json` |
+| `B_STUDIO_CLAUDE_USAGE_API` | `0`이면 쉬는 Claude 계정의 한도를 사용량 API로 묻지 않습니다. 이 API는 Claude Code의 `/usage`가 부르는 것으로 문서가 없고, 구독 토큰을 Claude Code 밖에서 쓰는 것이라 약관상 회색지대입니다. 계정마다 10분에 한 번만 묻고 429면 물러납니다(ADR-187) | 켬 |
 | `B_STUDIO_BACKEND_RULES_FILE` | 작업 화면의 새 요청이 AI를 고를 때 쓰는 규칙 파일. 작업 화면의 "규칙 고치기"가 씁니다(ADR-179) | `~/.cache/b-studio/backend-rules.json` |
 | `B_STUDIO_REPEATED_ACTIONS_DIR` | 되풀이 행동 후보(ADR-077)에서 무시하기로 한 목록을 프로젝트별로 두는 폴더 | `~/.cache/b-studio/repeated-actions` |
 | `B_STUDIO_DESKTOP_CONFIG` | 데스크톱 앱이 읽는 설정 파일 경로(`pnpm desktop:install`이 만드는 파일). 테스트·개발용입니다 | `~/.config/b-studio/desktop.json` |

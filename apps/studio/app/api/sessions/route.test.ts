@@ -113,6 +113,18 @@ describe('POST /api/sessions — 규칙으로 고르기(#822)', () => {
   });
 });
 
+describe('POST /api/sessions — 계정 고르기(#885)', () => {
+  it('직접 고를 때와 백엔드를 고를 때 계정 id를 넘긴다. 규칙으로 고를 때는 받지 않는다(규칙이 고른다)', async () => {
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    expect((await post({ projectId: 'orders', route: 'direct', backend: 'codex', accountId: 'acct-1a2b3c4d', request: '고쳐 줘' })).status).toBe(201);
+    expect(mocks.startRoutedSession).toHaveBeenLastCalledWith(expect.objectContaining({ direct: { backend: 'codex', accountId: 'acct-1a2b3c4d' } }));
+    expect((await post({ projectId: 'orders', backend: 'codex', accountId: 'acct-1a2b3c4d' })).status).toBe(201);
+    expect(mocks.createSession).toHaveBeenLastCalledWith('orders', 'kim', 'copy', expect.objectContaining({ backend: 'codex', accountId: 'acct-1a2b3c4d' }));
+    expect((await post({ projectId: 'orders', route: 'rules', accountId: 'acct-1a2b3c4d', request: '고쳐 줘' })).status).toBe(400);
+    expect((await post({ projectId: 'orders', route: 'direct', backend: 'codex', accountId: 7, request: '고쳐 줘' })).status).toBe(400);
+  });
+});
+
 describe('POST /api/sessions', () => {
   it('backend를 넘기면 허용 목록을 확인해 createSession에 그대로 넘긴다', async () => {
     process.env.B_STUDIO_BACKENDS = 'claude-code,commandcode';

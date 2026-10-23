@@ -57,9 +57,11 @@ export interface PromptState {
   projects: Array<{ id: string; name: string }>;
   projectIndex: number;
   text: string;
-  /** 'rules'(규칙대로) 또는 직접 고를 백엔드 */
+  /** 'rules'(규칙대로), 직접 고를 백엔드, 또는 `백엔드@계정id`(#885) */
   choices: string[];
   choice: number;
+  /** 고를 것의 화면 이름(계정을 고를 때 "Codex · 피오"). 없으면 백엔드 이름이다 */
+  labels?: Record<string, string>;
   /** 미리보기 한 줄 */
   preview?: string;
   sending?: boolean;

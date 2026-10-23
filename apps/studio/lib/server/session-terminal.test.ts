@@ -564,3 +564,46 @@ describe('터미널 감시(백엔드의 watch, 이슈 #695)', () => {
     expect(() => stop()).not.toThrow();
   });
 });
+
+describe('세션의 AI 계정으로 터미널 CLI를 띄운다(#885)', () => {
+  const address: AgentGatewayAddress = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
+
+  it('이 컴퓨터 방식: 감싸개가 계정의 설정 폴더를 CLI에 넘긴다', async () => {
+    const { mkdtemp, readFile, rm, writeFile, chmod } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const path = await import('node:path');
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-account-terminal-'));
+    const saved = { bin: process.env.B_STUDIO_CLAUDE_BIN, gateway: process.env.B_STUDIO_AGENT_GATEWAY_DIR };
+    try {
+      const fake = path.join(root, 'claude');
+      await writeFile(fake, '#!/bin/sh\n');
+      await chmod(fake, 0o755);
+      process.env.B_STUDIO_CLAUDE_BIN = fake;
+      process.env.B_STUDIO_AGENT_GATEWAY_DIR = path.join(root, 'gateway');
+      const backend = terminalBackend('host');
+      const configDir = path.join(root, '.claude-fio');
+      const place = await backend.prepare({ ...target, sandboxId: 'studio-orders-acct', accountDir: async () => configDir }, address);
+      expect(await readFile(path.join(place, 'bin', 'claude'), 'utf8')).toContain(`export CLAUDE_CONFIG_DIR='${configDir}'`);
+      await backend.remove('studio-orders-acct');
+      // 기본 계정이면 감싸개가 변수를 건드리지 않는다
+      const plain = await backend.prepare({ ...target, sandboxId: 'studio-orders-plain', accountDir: async () => undefined }, address);
+      expect(await readFile(path.join(plain, 'bin', 'claude'), 'utf8')).not.toContain('CLAUDE_CONFIG_DIR');
+      await backend.remove('studio-orders-plain');
+    } finally {
+      for (const [key, value] of [['B_STUDIO_CLAUDE_BIN', saved.bin], ['B_STUDIO_AGENT_GATEWAY_DIR', saved.gateway]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('계정을 찾지 못하면 열지 않는다(다른 계정으로 띄우지 않는다)', async () => {
+    const backend = terminalBackend('host');
+    await expect(backend.prepare({ ...target, accountDir: async () => Promise.reject(new Error('이 세션의 AI 계정이 계정 목록에 없습니다')) }, address)).rejects.toThrow('계정 목록에 없습니다');
+  });
+
+  it('컨테이너 방식은 기본 계정만 쓴다', async () => {
+    await expect(terminalBackend('container').prepare({ ...target, accountDir: async () => '/home/kim/.claude-2' }, address)).rejects.toThrow('기본 계정');
+  });
+});

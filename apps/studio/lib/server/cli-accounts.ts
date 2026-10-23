@@ -133,18 +133,25 @@ function notConnected(
   };
 }
 
-/** 백엔드 하나의 지금 상태. 토큰·자격 증명 파일은 읽지 않고 preflight 결과만 옮긴다 */
-export async function checkAccountStatus(backend: CliAccountBackend, preflights: AccountPreflights = {}): Promise<AccountStatus> {
+/**
+ * 백엔드 하나의 지금 상태. 토큰·자격 증명 파일은 읽지 않고 preflight 결과만 옮긴다.
+ * env는 계정마다 설정 폴더를 따로 둘 때(#885, CLAUDE_CONFIG_DIR·CODEX_HOME) 그 계정의 환경이다. 설정 폴더를 받지 않는 CLI는 쓰지 않는다
+ */
+export async function checkAccountStatus(backend: CliAccountBackend, preflights: AccountPreflights = {}, options: { env?: NodeJS.ProcessEnv } = {}): Promise<AccountStatus> {
   const label = BACKEND_LABEL[backend];
+  const withEnv = options.env ? { env: options.env } : undefined;
   if (backend === 'claude-code') {
-    const result = await (preflights.claudeCode ?? preflightClaudeCode)();
+    const result = await (preflights.claudeCode ?? preflightClaudeCode)(withEnv);
     if (result.ok) return { backend, label, connected: true, installed: true, accountKind: describeAccount(result.account) };
     return notConnected(backend, label, result);
   }
+  if (backend === 'codex') {
+    const result = await (preflights.codex ?? preflightCodex)(withEnv);
+    if (result.ok) return { backend, label, connected: true, installed: true };
+    return notConnected(backend, label, result);
+  }
   const preflight =
-    backend === 'codex'
-      ? (preflights.codex ?? preflightCodex)
-      : backend === 'commandcode'
+    backend === 'commandcode'
         ? (preflights.commandCode ?? preflightCommandCode)
         : backend === 'opencode'
           ? (preflights.openCode ?? preflightOpenCode)
@@ -199,7 +206,7 @@ export interface MinimalChildProcess {
   kill(): unknown;
 }
 
-export type SpawnFn = (command: string, args: string[], options: { stdio: ['ignore', 'pipe', 'pipe'] }) => MinimalChildProcess;
+export type SpawnFn = (command: string, args: string[], options: { stdio: ['ignore', 'pipe', 'pipe']; env?: NodeJS.ProcessEnv }) => MinimalChildProcess;
 
 interface LoginSession {
   child: MinimalChildProcess;
@@ -207,8 +214,10 @@ interface LoginSession {
   timer: ReturnType<typeof setTimeout>;
 }
 
-/** 백엔드별 로그인 세션. 한 백엔드에 하나만 돈다(Map이 곧 "진행 중" 여부다) */
-const sessions = new Map<CliAccountBackend, LoginSession>();
+/**
+ * 계정별 로그인 세션. 열쇠는 계정 id다(기본 계정은 백엔드 이름과 같다, #885). 한 계정에 하나만 돈다(Map이 곧 "진행 중" 여부다)
+ */
+const sessions = new Map<string, LoginSession>();
 
 /**
  * 로그 한 줄에서 URL·기기 코드 후보를 뽑는다(순수 함수라 테스트하기 쉽다). URL이 이미 있으면 그 URL 안의 글자를
@@ -237,8 +246,19 @@ function pushLine(progress: LoginProgress, chunk: string): void {
  * 로그인을 시작한다. 이미 돌고 있으면 새로 띄우지 않고 그 진행 상황을 그대로 돌려준다(백엔드당 하나).
  * spawnable이 아닌 CLI(opencode)는 호출한 쪽(route)이 미리 걸러야 한다 — 여기서는 방어적으로만 던진다.
  */
-export function startLogin(backend: CliAccountBackend, options: { spawn?: SpawnFn; timeoutMs?: number } = {}): LoginProgress {
-  const existing = sessions.get(backend);
+export function startLogin(
+  backend: CliAccountBackend,
+  options: {
+    spawn?: SpawnFn;
+    timeoutMs?: number;
+    /** 로그인 세션의 열쇠(계정 id, #885). 없으면 백엔드 이름(기본 계정) */
+    key?: string;
+    /** 계정의 환경(설정 폴더 변수). CLI가 그 폴더에 로그인을 남긴다. 없으면 process.env */
+    env?: NodeJS.ProcessEnv;
+  } = {},
+): LoginProgress {
+  const key = options.key ?? backend;
+  const existing = sessions.get(key);
   if (existing && existing.progress.state === 'running') return existing.progress;
 
   const spec = LOGIN_COMMANDS[backend];
@@ -246,13 +266,13 @@ export function startLogin(backend: CliAccountBackend, options: { spawn?: SpawnF
 
   const spawnFn: SpawnFn = options.spawn ?? nodeSpawn;
   const progress: LoginProgress = { backend, state: 'running', lines: [], startedAt: Date.now() };
-  const child = spawnFn(spec.command, spec.args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawnFn(spec.command, spec.args, { stdio: ['ignore', 'pipe', 'pipe'], ...(options.env ? { env: options.env } : {}) });
 
   child.stdout?.on('data', (chunk: Buffer | string) => pushLine(progress, String(chunk)));
   child.stderr?.on('data', (chunk: Buffer | string) => pushLine(progress, String(chunk)));
 
   const timer = setTimeout(() => {
-    cancelLogin(backend, 'timeout');
+    cancelLogin(key, 'timeout');
   }, options.timeoutMs ?? LOGIN_TIMEOUT_MS);
   // Node 테스트 러너가 이 타이머 때문에 종료를 기다리지 않게 한다
   timer.unref?.();
@@ -268,13 +288,13 @@ export function startLogin(backend: CliAccountBackend, options: { spawn?: SpawnF
     progress.error = error instanceof Error ? error.message : String(error);
   });
 
-  sessions.set(backend, { child, progress, timer });
+  sessions.set(key, { child, progress, timer });
   return progress;
 }
 
 /** 지금 진행(또는 끝난 뒤 남은 마지막) 상황. 없으면(한 번도 시작 안 함) undefined */
-export function getLoginProgress(backend: CliAccountBackend): LoginProgress | undefined {
-  return sessions.get(backend)?.progress;
+export function getLoginProgress(key: string): LoginProgress | undefined {
+  return sessions.get(key)?.progress;
 }
 
 /** 끝난 세션에 재확인한 상태를 한 번만 채워 넣는다(route가 GET마다 부른다. 이미 있으면 다시 부르지 않는다) */
@@ -283,8 +303,8 @@ export function attachStatus(progress: LoginProgress, status: AccountStatus): vo
 }
 
 /** 진행 중인 로그인을 끊는다. 없으면 아무것도 하지 않는다(멱등) */
-export function cancelLogin(backend: CliAccountBackend, reason: Extract<LoginState, 'cancelled' | 'timeout'> = 'cancelled'): LoginProgress | undefined {
-  const session = sessions.get(backend);
+export function cancelLogin(key: string, reason: Extract<LoginState, 'cancelled' | 'timeout'> = 'cancelled'): LoginProgress | undefined {
+  const session = sessions.get(key);
   if (!session) return undefined;
   clearTimeout(session.timer);
   if (session.progress.state === 'running') {

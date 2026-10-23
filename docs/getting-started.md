@@ -57,6 +57,8 @@ pnpm studio:local
 
 개인 PC 모드에서는 `/accounts`에서 구독 CLI별 로그인 상태를 확인하고, 터미널 없이 로그인을 시작할 수 있습니다.
 
+Claude Code·Codex 계정을 여럿 쓰려면 계정마다 설정 폴더를 따로 두고 `~/.config/b-studio/accounts.json`에 적습니다(API `POST /api/ai-accounts`). 세션과 라우팅 규칙이 계정까지 고르고, 그 계정의 설정 폴더로 CLI를 띄웁니다. 자세한 것은 [설정의 여러 AI 계정](configuration.md#여러-ai-계정)에 있습니다.
+
 ![구독 CLI 계정 연결 화면. 맨 위에 작업·격자·비교·작업 분해·계정 탭 줄이 있고, Claude·ChatGPT·Command Code·OpenCode·Gemini 로컬 에이전트마다 연결됨·로그인 필요·설치 안 됨 같은 상태와 다시 확인 단추, 로그인이 필요하면 로그인 단추와 안내가 보인다](images/studio-accounts.jpg)
 
 - 브라우저에서 `http://127.0.0.1:3000`을 열면 **바로 개발 화면(대화 + 미리보기)** 이 열립니다([ADR-066](decisions.md#adr-066-첫-화면은-마지막-프로젝트의-개발-화면이다)).
