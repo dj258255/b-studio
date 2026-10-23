@@ -11,6 +11,7 @@
  * 스페이스 화면(#887, 앞글쇠 다음 w)에서는 앞글쇠 없이 방향키로 카드를 고르고 Enter로 고른 칸에 연다. Tab은 다음 스페이스, Esc는 칸 화면이다.
  * 스페이스 화면에서 친 글자는 CLI로 가지 않는다(칸이 보이지 않는다)
  */
+import type { KittyImages } from './kitty';
 import type { PaneLayout } from './screen';
 import { deskSessions, deskSpaces } from './sidebar';
 import type { Sprite } from './sprite';
@@ -124,6 +125,10 @@ export interface DeskState {
   sprites?: Readonly<Record<string, Sprite>>;
   /** 세션 id마다의 사용량 한도(카드 막대). 없으면 막대를 그리지 않는다 */
   limits?: Readonly<Record<string, DeskLimits>>;
+  /** 움짤 시계(ms, #902). 카드 그림은 이 시각의 프레임을 그린다. 없으면 첫 프레임이다 */
+  spriteClock?: number;
+  /** 있으면 카드 그림을 Kitty 그래픽으로 그린다(Ghostty·kitty). desk가 보낸 이미지를 들고 있다 */
+  kitty?: KittyImages;
 }
 
 export type Effect =

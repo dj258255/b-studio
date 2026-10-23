@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError, type StartInput } from './client';
 import type { DeskLayout } from './config';
-import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell } from './desk';
+import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell, type SpriteCatalog } from './desk';
 import { spaceScreen } from './cards';
 import { spaceRect } from './render';
 import { sidebarRows } from './sidebar';
-import { spriteFromRows } from './sprite';
+import { spriteFromRows, type Sprite } from './sprite';
 import type { DeskAccount, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
@@ -969,5 +969,89 @@ describe('desk 작업대: 스페이스 화면(#887)', () => {
     const ctx = setup(items, { theme: 'light', truecolor: false });
     expect(ctx.app.state.theme).toEqual({ name: 'light', depth: '256' });
     expect(ctx.io.all).not.toMatch(/\x1b\[[34]8;2;/);
+  });
+});
+
+describe('desk 작업대: 카드 움짤(#902)', () => {
+  const items = [item('a'), item('b', { backend: 'codex' })];
+  const red = spriteFromRows(['r'], { r: '#ff0000' }).pixels;
+  const green = spriteFromRows(['g'], { g: '#00ff00' }).pixels;
+  const animated: Sprite = { width: 1, height: 1, pixels: red, frames: [{ pixels: red, delay: 100 }, { pixels: green, delay: 100 }] };
+  const catalog = (sprite: Sprite = animated): SpriteCatalog & { picked: string[] } => {
+    const picked: string[] = [];
+    return { picked, pick: (id) => (picked.push(id), { sprite }) };
+  };
+  /** 마지막으로 쓴 프레임부터 지금까지 쓴 것 */
+  const since = (io: { out: string[] }, from: number) => io.out.slice(from).join('');
+
+  it('이름 붙인 그림이 없는 세션은 그림 폴더에서 고른 그림을 쓰고, AI 이름으로 붙인 그림이 있으면 그것이 먼저다', async () => {
+    const named = spriteFromRows(['b'], { b: '#0000ff' });
+    const spriteCatalog = catalog();
+    const ctx = setup(items, { spriteCatalog, sprites: { codex: named } });
+    await tick();
+    expect(spriteCatalog.picked).toEqual(['a']);
+    expect(ctx.app.state.sprites?.a).toBe(animated);
+    expect(ctx.app.state.sprites?.b).toBeUndefined();
+  });
+
+  it('스페이스 화면에서는 움짤 프레임마다 다시 그리고, 칸 화면·도움말·창 포커스를 잃으면 멈춘다', async () => {
+    const ctx = setup([item('a')], { spriteCatalog: catalog() });
+    await tick();
+    expect(ctx.io.all).toContain('38;2;255;0;0m▄');
+    let mark = ctx.io.out.length;
+    await tick(120);
+    expect(since(ctx.io, mark)).toContain('38;2;0;255;0m▄');
+    // 창이 포커스를 잃으면 멈춘다(포커스 알림은 키로 다루지 않는다)
+    ctx.io.type('\x1b[O');
+    await tick(50);
+    mark = ctx.io.out.length;
+    const clock = ctx.app.state.spriteClock;
+    await tick(500);
+    expect(ctx.app.state.spriteClock).toBe(clock);
+    expect(since(ctx.io, mark)).not.toContain('▄');
+    ctx.io.type('\x1b[I');
+    await tick(150);
+    expect(ctx.app.state.spriteClock).not.toBe(clock);
+    // 도움말에서는 멈춘다
+    ctx.io.type('?');
+    await tick(50);
+    const helpClock = ctx.app.state.spriteClock;
+    await tick(500);
+    expect(ctx.app.state.spriteClock).toBe(helpClock);
+    ctx.io.type('x');
+    await tick(150);
+    // 칸 화면에서는 멈춘다
+    ctx.io.type('\x1b');
+    await tick(50);
+    expect(ctx.app.state.view).toBeUndefined();
+    const paneClock = ctx.app.state.spriteClock;
+    await tick(500);
+    expect(ctx.app.state.spriteClock).toBe(paneClock);
+  });
+
+  it('animate가 꺼져 있으면 움직이지 않고 창 포커스 알림도 켜지 않는다', async () => {
+    const ctx = setup([item('a')], { spriteCatalog: catalog(), animate: false });
+    await tick(500);
+    expect(ctx.app.state.spriteClock).toBeUndefined();
+    expect(ctx.io.all).not.toContain('\x1b[?1004h');
+  });
+
+  it('Kitty 그래픽이면 그림을 그 자리 글자보다 먼저 보내고, 나갈 때 보낸 그림을 지운다', async () => {
+    const ctx = setup([item('a')], { spriteCatalog: catalog(), graphics: 'kitty' });
+    await tick();
+    const all = ctx.io.all;
+    const sent = all.indexOf('\x1b_Ga=T,U=1,f=100,');
+    expect(sent).toBeGreaterThan(-1);
+    expect(all.indexOf('\u{10EEEE}')).toBeGreaterThan(sent);
+    expect(all).not.toContain('▄');
+    // 둘째 프레임은 처음 보일 때 보낸다
+    const mark = ctx.io.out.length;
+    await tick(120);
+    expect(since(ctx.io, mark)).toContain('\x1b_Ga=T,U=1,f=100,');
+    ctx.io.type('\x02q');
+    await expect(ctx.done).resolves.toBe(0);
+    const leave = ctx.io.out.at(-1)!;
+    expect(leave.match(/\x1b_Ga=d,d=I,i=\d+,q=2\x1b\\/g)).toHaveLength(2);
+    expect(leave).toContain('\x1b[?1004l');
   });
 });

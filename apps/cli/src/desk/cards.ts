@@ -6,7 +6,8 @@
 import type { DeskState } from './keys';
 import { fit, fitAnsi, stringWidth, type Rect } from './screen';
 import { agentStatus, backendLabel, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, totalTokens } from './sidebar';
-import { defaultSprite, spriteLines, type Sprite } from './sprite';
+import type { KittyImages } from './kitty';
+import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
 import { BOLD, DEFAULT_THEME, fg, RESET, type Theme } from './theme';
 import type { DeskItem, DeskLimits, DeskLimitWindow } from './types';
 import { badge, bar, box, spread, statusText, TONE_COLOR } from './widgets';
@@ -15,8 +16,15 @@ import { badge, bar, box, spread, statusText, TONE_COLOR } from './widgets';
 const CARD_MIN = 52;
 /** 카드 폭의 상한(넓은 화면에서 한 열일 때 막대와 글이 너무 벌어지지 않게) */
 const CARD_MAX = 84;
-/** 그림 자리의 폭(칸). 높이는 카드 안쪽 기본 줄 수다 */
-export const SPRITE_COLS = 10;
+/** 그림 자리(칸 × 줄). 카드가 넓으면 크게, 좁으면 작게 둔다. 그림은 카드 높이를 채운다(#902) */
+export const ART_WIDE = { cols: 14, rows: 7 } as const;
+export const ART_NARROW = { cols: 12, rows: 5 } as const;
+/** 큰 그림 자리를 쓰는 카드 폭의 하한 */
+const ART_WIDE_MIN = 64;
+
+export function artSize(cardWidth: number): { cols: number; rows: number } {
+  return cardWidth >= ART_WIDE_MIN ? ART_WIDE : ART_NARROW;
+}
 /** 고른 카드에 펼치는 줄의 상한 */
 const DETAIL_MAX = 8;
 const WEEKDAY = ['일', '월', '화', '수', '목', '금', '토'];
@@ -116,34 +124,48 @@ export interface CardInput {
   /** 이 화면의 카드 가운데 하나라도 사용량이 있으면 모든 카드에 사용량 두 줄 자리를 둔다(높이를 맞춘다) */
   withLimits: boolean;
   sprite: Sprite;
+  /** 움짤의 보일 프레임 번호(없으면 첫 프레임) */
+  frame?: number;
+  /** 있으면 그림을 Kitty 그래픽으로 그린다(없으면 반칸 블록) */
+  kitty?: KittyImages;
 }
 
-/** 카드 안쪽의 기본 줄 수(그림의 높이) */
-export function baseRows(withLimits: boolean): number {
-  return withLimits ? 6 : 4;
+/** 카드 안쪽의 줄 수: 글 줄(사용량이 있으면 6, 없으면 4)과 그림 높이 가운데 큰 것 */
+export function baseRows(withLimits: boolean, art: { rows: number } = ART_WIDE): number {
+  return Math.max(withLimits ? 6 : 4, art.rows);
 }
 
 /** 카드 한 장의 줄(테두리 포함). 줄마다 정확히 width칸이다 */
 export function cardLines(card: CardInput, width: number, theme: Theme = DEFAULT_THEME, now = Date.now()): string[] {
   const { item } = card;
-  const rows = baseRows(card.withLimits);
-  const text = Math.max(1, width - 4 - SPRITE_COLS - 2);
+  const art = artSize(width);
+  const rows = baseRows(card.withLimits, art);
+  const text = Math.max(1, width - 4 - art.cols - 2);
   const status = agentStatus(item);
   const statusWidth = stringWidth(status.label) + 2;
   const flag = card.flagged ? ` ${fg(theme, 'yellow')}!${RESET}` : '';
   const title = `${BOLD}${fg(theme, 'text')}${item.title}${RESET} ${badge(backendLabel(item.backend), theme)}${flag}`;
   const body = [spread(title, statusText(status, theme), text, statusWidth), nowLine(item, theme, now), agentsLine(item, theme), factsLine(item, card.slot, theme)];
   if (card.withLimits) body.push(...limitLines(card.limits, text, theme, now));
-  const art = spriteLines(card.sprite, SPRITE_COLS, rows, theme);
-  const inner = body.map((line, row) => `${art[row] ?? ' '.repeat(SPRITE_COLS)}  ${fitAnsi(line, text)}`);
+  while (body.length < rows) body.push('');
+  const frame = card.frame ?? 0;
+  const picture = card.kitty ? card.kitty.art(card.sprite, frame, art.cols, art.rows) : spriteLines(card.sprite, art.cols, art.rows, theme, frame);
+  const inner = body.map((line, row) => `${picture[row] ?? ' '.repeat(art.cols)}  ${fitAnsi(line, text)}`);
   if (card.selected) {
     for (const detail of detailLines(item).slice(0, DETAIL_MAX)) {
       let line = detail.text;
       for (const tone of detail.tones) line = line.replace(tone.text, `${fg(theme, TONE_COLOR[tone.tone])}${tone.text}${RESET}`);
-      inner.push(`${' '.repeat(SPRITE_COLS + 2)}${fitAnsi(line, text)}`);
+      inner.push(`${' '.repeat(art.cols + 2)}${fitAnsi(line, text)}`);
     }
   }
   return box(inner, width, theme, { focused: card.selected });
+}
+
+/** 스페이스 화면에 놓일 세션들(고른 세션이 든 스페이스). 스페이스 화면이 아니어도 돌려준다 */
+export function spaceItems(state: DeskState): DeskItem[] {
+  const sessions = deskSessions(state.items);
+  const space = deskSpaces(state.items).find((entry) => entry.sessions.includes(state.selected));
+  return space ? space.sessions.map((index) => sessions[index]!) : [];
 }
 
 export interface SpaceScreen {
@@ -176,15 +198,17 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
   const flagged = new Set(state.flagged ?? []);
   const withLimits = space.sessions.some((index) => state.limits?.[sessions[index]!.id] !== undefined);
   const columns = rect.w - 2 >= CARD_MIN * 2 + 1 ? 2 : 1;
-  const cardWidth = Math.min(CARD_MAX, Math.max(SPRITE_COLS + 8, Math.floor((rect.w - 2 - (columns - 1)) / columns)));
+  const cardWidth = Math.min(CARD_MAX, Math.max(ART_NARROW.cols + 8, Math.floor((rect.w - 2 - (columns - 1)) / columns)));
   const rendered = space.sessions.map((index) => {
     const item = sessions[index]!;
     const slot = slotOf.get(item.id);
     const limits = state.limits?.[item.id];
+    const sprite = spriteFor(item, state.sprites);
+    const art = { frame: frameAt(sprite, state.spriteClock ?? 0), ...(state.kitty ? { kitty: state.kitty } : {}) };
     return {
       index,
       lines: cardLines(
-        { item, selected: index === state.selected, flagged: flagged.has(item.id), withLimits, sprite: spriteFor(item, state.sprites), ...(slot ? { slot } : {}), ...(limits ? { limits } : {}) },
+        { item, selected: index === state.selected, flagged: flagged.has(item.id), withLimits, sprite, ...art, ...(slot ? { slot } : {}), ...(limits ? { limits } : {}) },
         cardWidth,
         theme,
         now,

@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import type { PaneLayout } from './screen';
+import type { GraphicsSetting } from './kitty';
 import { THEMES, type ThemeName } from './theme';
 
 /** 앞글쇠: 받는 글자와 화면에 보일 이름(늘 `Ctrl-x` 꼴이라 안내 글의 폭이 바뀌지 않는다) */
@@ -23,7 +24,15 @@ export interface DeskConfig {
   color?: ColorSetting;
   /** 색 팔레트(#887): dark(기본)·light */
   theme?: ThemeName;
+  /** 카드 그림을 고르는 법(#902): random(기본, 이름 붙인 그림이 없으면 그림 폴더에서 세션마다 무작위)·named(이름 붙인 그림만)·off(기본 그림만) */
+  sprites?: SpriteSetting;
+  /** 움짤을 움직일지(기본 켬) */
+  animate?: boolean;
+  /** 그림을 그리는 법: auto(기본, Ghostty·kitty면 Kitty 그래픽)·kitty·blocks(반칸 블록) */
+  graphics?: GraphicsSetting;
 }
+
+export type SpriteSetting = 'random' | 'named' | 'off';
 
 /** 되살릴 배치. slots는 칸 자리마다의 세션 id다 */
 export interface DeskLayout {
@@ -40,6 +49,8 @@ const SLOT_COUNT = 4;
 /** 터미널이 다른 키와 같은 글자로 보내는 Ctrl 글쇠: c(끊기), h(지우기), i(Tab), j(줄바꿈), m(Enter) */
 const RESERVED = new Set(['c', 'h', 'i', 'j', 'm']);
 const COLORS: readonly ColorSetting[] = ['auto', 'truecolor', '256'];
+const SPRITE_SETTINGS: readonly SpriteSetting[] = ['random', 'named', 'off'];
+const GRAPHICS: readonly GraphicsSetting[] = ['auto', 'kitty', 'blocks'];
 
 export function deskConfigDir(env: NodeJS.ProcessEnv = process.env): string {
   const xdg = env.XDG_CONFIG_HOME;
@@ -79,10 +90,18 @@ export function loadDeskConfig(dir: string): { config: DeskConfig; warnings: str
     if (prefix) config.prefix = prefix;
     else warnings.push(`prefix는 "C-a" 꼴이어야 합니다(Ctrl-c·h·i·j·m은 쓸 수 없음). Ctrl-b를 씁니다`);
   }
-  for (const key of ['notify', 'mouse'] as const) {
+  for (const key of ['notify', 'mouse', 'animate'] as const) {
     if (values[key] === undefined) continue;
     if (typeof values[key] === 'boolean') config[key] = values[key];
     else warnings.push(`${key}는 true나 false여야 합니다. 기본값(켬)을 씁니다`);
+  }
+  if (values.sprites !== undefined) {
+    if (SPRITE_SETTINGS.includes(values.sprites as SpriteSetting)) config.sprites = values.sprites as SpriteSetting;
+    else warnings.push(`sprites는 "random", "named", "off" 중 하나여야 합니다. random을 씁니다`);
+  }
+  if (values.graphics !== undefined) {
+    if (GRAPHICS.includes(values.graphics as GraphicsSetting)) config.graphics = values.graphics as GraphicsSetting;
+    else warnings.push(`graphics는 "auto", "kitty", "blocks" 중 하나여야 합니다. auto를 씁니다`);
   }
   if (values.color !== undefined) {
     if (COLORS.includes(values.color as ColorSetting)) config.color = values.color as ColorSetting;

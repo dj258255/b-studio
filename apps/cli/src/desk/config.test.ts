@@ -113,3 +113,14 @@ describe('색 팔레트(#887)', () => {
     expect(bad.warnings).toEqual([expect.stringContaining('theme')]);
   });
 });
+
+describe('카드 그림 설정(#902)', () => {
+  it('sprites·animate·graphics를 읽고, 틀린 값은 기본값으로 두고 알린다', () => {
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ sprites: 'named', animate: false, graphics: 'blocks' }));
+    expect(loadDeskConfig(dir)).toEqual({ config: { sprites: 'named', animate: false, graphics: 'blocks' }, warnings: [] });
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ sprites: 'all', animate: 'yes', graphics: 'sixel' }));
+    const { config, warnings } = loadDeskConfig(dir);
+    expect(config).toEqual({});
+    expect(warnings).toEqual([expect.stringContaining('animate'), expect.stringContaining('sprites'), expect.stringContaining('graphics')]);
+  });
+});

@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { cardLines, resetText, spaceScreen, spriteFor, SPRITE_COLS } from './cards';
+import { ART_WIDE, cardLines, resetText, spaceScreen, spriteFor } from './cards';
 import { initialState, type DeskState } from './keys';
 import { stringWidth, stripAnsi } from './screen';
+import { KittyImages } from './kitty';
 import { defaultSprite, spriteFromRows } from './sprite';
 import { DEFAULT_THEME, fg } from './theme';
 import type { DeskItem } from './types';
@@ -23,15 +24,16 @@ const busy = item('a', {
 
 describe('카드 한 장', () => {
   const card = (patch: Partial<Parameters<typeof cardLines>[0]> = {}) =>
-    cardLines({ item: busy, selected: false, flagged: false, withLimits: false, sprite: defaultSprite('claude-code'), ...patch }, 70, DEFAULT_THEME, NOW);
+    cardLines({ item: busy, selected: false, flagged: false, withLimits: false, sprite: defaultSprite('claude-code'), ...patch }, 84, DEFAULT_THEME, NOW);
 
   it('둥근 테두리 안에 그림, 이름·AI 배지·상태, 지금 하는 일, 서브에이전트, 게이트·토큰을 놓는다', () => {
     const lines = card({ slot: 1 });
     const plain = lines.map(stripAnsi);
-    expect(plain).toHaveLength(6);
-    for (const line of plain) expect(stringWidth(line)).toBe(70);
+    // 그림이 카드 높이를 채운다: 넓은 카드는 그림 자리 14칸 × 7줄
+    expect(plain).toHaveLength(ART_WIDE.rows + 2);
+    for (const line of plain) expect(stringWidth(line)).toBe(84);
     expect(plain[0]!.startsWith('╭')).toBe(true);
-    expect(plain[1]).toMatch(/│ .{10} {2}주문 모듈 +Claude +◐ 작업 중 │/);
+    expect(plain[1]).toMatch(/│ .{14} {2}주문 모듈 +Claude +◐ 작업 중 │/);
     expect(plain[2]).toContain('지금 Edit src/order.ts');
     expect(plain[3]).toContain('↳ 서브에이전트 1개 작업 중 · Explore: 모델 요청 2회');
     expect(plain[4]).toContain('검증 통과 · 체크포인트 2 · 토큰 1.2만 · $0.42 · 칸 1');
@@ -60,12 +62,47 @@ describe('카드 한 장', () => {
   it('사용량이 있으면 5시간·주간 막대와 %, 그 아래 다시 차는 때. 없으면 "사용량 정보 없음"', () => {
     const limits = { fiveHour: { usedPercent: 37, resetsAt: new Date(NOW + 110 * 60_000).toISOString() }, weekly: { usedPercent: 90, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() } };
     const plain = card({ withLimits: true, limits }).map(stripAnsi);
-    expect(plain).toHaveLength(8);
+    expect(plain).toHaveLength(ART_WIDE.rows + 2);
     expect(plain[5]).toMatch(/5시간 █+.* 37% +주간 █+.* 90%/);
     expect(plain[6]).toContain('1시간 50분 뒤');
     expect(plain[6]).toMatch(/\d+\/\d+\([일월화수목금토]\) \d\d:\d\d/);
     const none = card({ withLimits: true }).map(stripAnsi);
     expect(none[5]).toContain('사용량 정보 없음');
+  });
+});
+
+describe('카드 그림(#902)', () => {
+  const frames = [
+    { pixels: spriteFromRows(['r'], { r: '#ff0000' }).pixels, delay: 100 },
+    { pixels: spriteFromRows(['g'], { g: '#00ff00' }).pixels, delay: 100 },
+  ];
+  const animated = { width: 1, height: 1, pixels: frames[0]!.pixels, frames };
+  const draw = (patch: Partial<Parameters<typeof cardLines>[0]>, width = 70) =>
+    cardLines({ item: busy, selected: false, flagged: false, withLimits: false, sprite: animated, ...patch }, width, DEFAULT_THEME, NOW);
+
+  it('좁은 카드는 그림 자리를 줄인다(12칸 × 5줄)', () => {
+    const plain = draw({ sprite: defaultSprite('codex') }, 60).map(stripAnsi);
+    expect(plain).toHaveLength(5 + 2);
+    expect(plain[1]).toMatch(/│ .{12} {2}주문 모듈/);
+  });
+
+  it('움짤은 받은 프레임을 그린다', () => {
+    expect(draw({ frame: 0 }).join('')).toContain('38;2;255;0;0');
+    expect(draw({ frame: 1 }).join('')).toContain('38;2;0;255;0');
+  });
+
+  it('Kitty 그래픽이면 그림 자리에 placeholder 글자를 놓고, 처음 보이는 프레임을 보낼 것으로 모은다', () => {
+    const kitty = new KittyImages(0x123456);
+    const lines = draw({ kitty, frame: 1 });
+    for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(70);
+    // 둘째 프레임의 이미지 id(0x123457)가 글자색이다
+    expect(lines[1]).toContain('\x1b[38;2;18;52;87m\u{10EEEE}');
+    const sent = kitty.drain();
+    expect(sent).toContain('a=T,U=1,f=100,i=1193047,c=14,r=7');
+    expect(kitty.drain()).toBe('');
+    // 같은 프레임은 다시 보내지 않는다
+    draw({ kitty, frame: 1 });
+    expect(kitty.drain()).toBe('');
   });
 });
 
@@ -88,7 +125,7 @@ describe('카드 그림 고르기', () => {
     expect(spriteFor(busy, { a: mine, 'claude-code': other })).toBe(mine);
     expect(spriteFor(busy, { 'claude-code': other, default: mine })).toBe(other);
     expect(spriteFor(busy, { default: mine })).toBe(mine);
-    expect(spriteFor(busy, {}).width).toBe(SPRITE_COLS);
+    expect(spriteFor(busy, {}).width).toBe(10);
   });
 });
 
