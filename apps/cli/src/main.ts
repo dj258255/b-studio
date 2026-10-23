@@ -8,6 +8,7 @@ import { deploy } from './commands/deploy';
 import { desk } from './desk/desk';
 import { launch, LAUNCH_MODES, type LaunchMode } from './commands/launch';
 import { sandboxPrune } from './commands/sandbox';
+import { studio } from './commands/start';
 import { stop } from './commands/stop';
 import { up } from './commands/up';
 import { verify } from './commands/verify';
@@ -16,8 +17,9 @@ import { workflow } from './commands/workflow';
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
 const USAGE = `사용법:
+  studio [--mode local|demo|commandcode|codex] [--port <n>] [--no-notify] [--no-mouse]
   studio up <프로젝트 경로> [--keep]
-  studio launch [--mode local|demo|commandcode|codex] [--port <n>] [--no-open] [--json]
+  studio launch [--mode local|demo|commandcode|codex] [--port <n>] [--web] [--json]
   studio stop [--json]
   studio desk [--port <n>] [--no-notify] [--no-mouse]
   studio boot-probe <프로젝트 경로> [--json]
@@ -35,18 +37,23 @@ verify:
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
   --logs             서비스 로그를 함께 출력한다
 
+studio (명령 없이):
+  스튜디오를 브라우저 없이 뒤에서 띄우고(이미 떠 있으면 재사용) 바로 터미널 작업대(desk)를 연다
+  세션 터미널(B_STUDIO_EXPERIMENTAL=1)과 Codex(B_STUDIO_BACKENDS=codex)를 켜서 띄운다. 직접 정한 값이 있으면 그대로 쓴다
+  desk를 나가도 스튜디오는 뒤에서 돈다. 끄기는 studio stop
+
 launch:
-  스튜디오를 백그라운드로 띄우고 준비되면 브라우저를 연다. 이미 떠 있으면 새로 띄우지 않고 브라우저만 연다
+  스튜디오를 백그라운드로 띄운다. 이미 떠 있으면 새로 띄우지 않는다. 브라우저는 --web일 때만 연다
   준비 로그는 ~/.cache/b-studio/launch/studio.log, PID는 studio.pid에 남는다
   --mode      local(기본, 이 PC의 Claude Code) | demo | commandcode | codex
   --port      기본 3000
-  --no-open   브라우저를 열지 않고 주소만 출력한다
+  --web       준비되면 브라우저를 연다(--open과 같다)
   --json      브라우저를 열지 않고, 준비되면 stdout에 한 줄 JSON만 쓴다(진행 안내는 stderr).
               {"url":"http://127.0.0.1:3000","port":3000,"mode":"claude-code","pid":12345,"started":true}
 
 desk:
   터미널 하나에서 여러 AI CLI를 나란히 쓴다. 왼쪽 사이드바에 AI마다 상태와 게이트 결과, 오른쪽에 터미널 칸 1·2·4개
-  launch로 띄운 스튜디오에 붙는다(이 컴퓨터 방식 세션 터미널, B_STUDIO_EXPERIMENTAL=1). 나가도 세션과 CLI는 계속 돈다
+  띄워 둔 스튜디오에 붙는다(이 컴퓨터 방식 세션 터미널, B_STUDIO_EXPERIMENTAL=1). 띄우기까지 한 번에 하려면 studio(명령 없이). 나가도 세션과 CLI는 계속 돈다
   Ctrl-b 다음에  숫자 칸 고르기 · ↑↓ 사이드바 · Enter 고른 세션을 칸에 열기 · n 새 요청(규칙으로 AI를 골라 터미널로)
                  l 칸 수 1→2→4 · x 칸 비우기 · p 세션 멈추기 · r 이어서 작업 · , 이름 바꾸기 · ? 도움말 · q 나가기
                  Ctrl-b CLI에 Ctrl-b 보내기
@@ -99,6 +106,21 @@ agent 옵션:
   --free-only        commandcode·opencode에서 무료 모델만 쓴다. 무료가 아니거나 쓸 수 없는 --model이면 오류
   --logs             서비스 로그를 함께 출력한다`;
 
+/** --mode·--port를 검사한다. 잘못됐으면 안내를 찍고 종료 코드 2 */
+function modeAndPort(modeValue: string | undefined, portValue: string | undefined): { mode: LaunchMode; port: number } | number {
+  const mode = modeValue ?? 'local';
+  if (!LAUNCH_MODES.includes(mode as LaunchMode)) {
+    console.error(`--mode는 ${LAUNCH_MODES.join(', ')} 중 하나여야 합니다 (지금 값: ${modeValue})`);
+    return 2;
+  }
+  const port = portValue === undefined ? 3000 : Number(portValue);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`--port는 1~65535 사이의 정수여야 합니다 (지금 값: ${portValue})`);
+    return 2;
+  }
+  return { mode: mode as LaunchMode, port };
+}
+
 async function main(argv: string[]): Promise<number> {
   const { positionals, values } = parseArgs({
     args: argv,
@@ -121,11 +143,31 @@ async function main(argv: string[]): Promise<number> {
       mode: { type: 'string' },
       port: { type: 'string' },
       'no-open': { type: 'boolean', default: false },
+      web: { type: 'boolean', default: false },
+      open: { type: 'boolean', default: false },
+      help: { type: 'boolean', short: 'h', default: false },
       'no-notify': { type: 'boolean', default: false },
       'no-mouse': { type: 'boolean', default: false },
     },
   });
   const [command, dir, request] = positionals;
+
+  if (values.help) {
+    console.log(USAGE);
+    return 0;
+  }
+
+  if (command === undefined) {
+    const parsed = modeAndPort(values.mode, values.port);
+    if (typeof parsed === 'number') return parsed;
+    const code = await studio({
+      ...parsed,
+      ...(values['no-notify'] ? { notify: false } : {}),
+      ...(values['no-mouse'] ? { mouse: false } : {}),
+    });
+    // desk가 끝난 뒤 남은 연결이 프로세스를 붙잡지 않게 바로 끝낸다(studio desk와 같다)
+    process.exit(code);
+  }
 
   if (command === 'up' && dir) {
     return up(await loadProject(dir), { keep: values.keep });
@@ -136,17 +178,10 @@ async function main(argv: string[]): Promise<number> {
       console.error(USAGE);
       return 2;
     }
-    const mode = values.mode ?? 'local';
-    if (!LAUNCH_MODES.includes(mode as LaunchMode)) {
-      console.error(`--mode는 ${LAUNCH_MODES.join(', ')} 중 하나여야 합니다 (지금 값: ${values.mode})`);
-      return 2;
-    }
-    const port = values.port === undefined ? 3000 : Number(values.port);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) {
-      console.error(`--port는 1~65535 사이의 정수여야 합니다 (지금 값: ${values.port})`);
-      return 2;
-    }
-    return launch({ mode: mode as LaunchMode, port, open: !values['no-open'], json: values.json });
+    const parsed = modeAndPort(values.mode, values.port);
+    if (typeof parsed === 'number') return parsed;
+    // 브라우저는 --web(또는 --open)일 때만 연다. --no-open은 예전 인자라 받기만 한다
+    return launch({ ...parsed, open: (values.web || values.open) && !values['no-open'], json: values.json });
   }
 
   if (command === 'desk') {

@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { isBStudio, LAUNCH_MODES, launchArgs, launchResultJson, MODE_ENV, openLaunchLog, runLaunch, studioOrigin, studioUrl, type ExecResult, type LaunchDeps, type ProbeResult } from './launch';
+import { HEALTH_PATH, isBStudio, isBStudioHealth, LAUNCH_MODES, launchArgs, launchResultJson, MODE_ENV, openLaunchLog, runLaunch, studioOrigin, studioUrl, type ExecResult, type LaunchDeps, type ProbeResult } from './launch';
 
 let dir: string;
 
@@ -89,6 +89,10 @@ function harness(
 const OK: ExecResult = { code: 0, stdout: '', stderr: '' };
 const FAIL: ExecResult = { code: 1, stdout: '', stderr: 'fail' };
 const up: ProbeResult = { reachable: true, status: 200, body: '<title>b-studio</title>' };
+/** 새 서버의 /api/health: b-studio 표지를 싣는다 */
+const health: ProbeResult = { reachable: true, status: 200, body: '{"status":"ok","app":"b-studio","terminal":true}' };
+/** 옛 서버의 /api/health: 표지가 없다 */
+const oldHealth: ProbeResult = { reachable: true, status: 200, body: '{"status":"ok"}' };
 const upOther: ProbeResult = { reachable: true, status: 200, body: '<title>something else</title>' };
 /** 최상위 라우트는 응답하지만(reachable) 중첩 라우트 표가 스테일해 404를 돌려주는 상태 */
 const stale: ProbeResult = { reachable: true, status: 404, body: '<!doctype html>Not Found' };
@@ -104,6 +108,11 @@ describe('launch 유틸', () => {
     expect(launchArgs(3000)).toEqual(['--filter', '@b-studio/studio', 'exec', 'next', 'dev', '--hostname', '127.0.0.1', '-p', '3000']);
     expect(isBStudio('<title>b-studio</title>')).toBe(true);
     expect(isBStudio('<title>다른 앱</title>')).toBe(false);
+    expect(HEALTH_PATH).toBe('/api/health');
+    expect(isBStudioHealth('{"status":"ok","app":"b-studio"}')).toBe(true);
+    expect(isBStudioHealth('{"status":"ok"}')).toBe(false);
+    expect(isBStudioHealth('<title>b-studio</title>')).toBe(false);
+    expect(isBStudioHealth('')).toBe(false);
   });
 
   it('launch JSON 한 줄의 모양을 고정한다 (Electron 앱이 기대는 계약)', () => {
@@ -129,7 +138,7 @@ describe('launch 유틸', () => {
 
 describe('runLaunch --json', () => {
   it('새로 띄우면 브라우저를 열지 않고 stdout에 한 줄 JSON만, 진행 안내는 stderr로', async () => {
-    const h = harness({ probe: [down, up], exec: [OK] });
+    const h = harness({ probe: [down, health], exec: [OK] });
     const out = vi.spyOn(console, 'log').mockImplementation(() => {});
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -143,7 +152,7 @@ describe('runLaunch --json', () => {
 
   it('이미 떠 있으면 started=false와 PID 파일의 pid·모드를 쓴다', async () => {
     await writeFile(path.join(dir, 'studio.pid'), JSON.stringify({ pid: 999, port: 3000, mode: 'demo' }));
-    const h = harness({ probe: [up, nestedOk] });
+    const h = harness({ probe: [health, nestedOk] });
     const out = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -156,7 +165,7 @@ describe('runLaunch --json', () => {
   it('토큰 파일이 있으면 openUrl이 교환 페이지 주소(토큰은 # 뒤)이고, 브라우저를 그 주소로 연다', async () => {
     const token = 'c'.repeat(64);
     const expected = `http://127.0.0.1:3000/local-auth#${token}`;
-    const h = harness({ probe: [up, nestedOk], localToken: token });
+    const h = harness({ probe: [health, nestedOk], localToken: token });
     const out = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
@@ -167,14 +176,14 @@ describe('runLaunch --json', () => {
     expect(openUrl).toContain('#');
     expect(openUrl).not.toContain('?token=');
 
-    const human = harness({ probe: [up, nestedOk], localToken: token });
+    const human = harness({ probe: [health, nestedOk], localToken: token });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     expect(await runLaunch({ mode: 'local', port: 3000, open: true }, human.deps)).toBe(0);
     expect(human.opens).toEqual([expected]);
   });
 
   it('토큰 파일이 없으면(옛 서버) 토큰 없는 주소를 열고, 다시 띄우라고 알린다', async () => {
-    const h = harness({ probe: [up, nestedOk] });
+    const h = harness({ probe: [health, nestedOk] });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: true }, h.deps)).toBe(0);
@@ -194,7 +203,7 @@ describe('runLaunch --json', () => {
 
 describe('runLaunch', () => {
   it('이미 스튜디오가 떠 있으면 새로 띄우지 않고 브라우저만 연다', async () => {
-    const h = harness({ probe: [up, nestedOk] });
+    const h = harness({ probe: [health, nestedOk] });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: true }, h.deps)).toBe(0);
@@ -204,7 +213,7 @@ describe('runLaunch', () => {
   });
 
   it('다른 프로그램이 그 포트에 있으면 다른 포트를 안내하고 종료 코드 1', async () => {
-    const h = harness({ probe: [upOther] });
+    const h = harness({ probe: [upOther, upOther] });
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: true }, h.deps)).toBe(1);
@@ -222,7 +231,7 @@ describe('runLaunch', () => {
   });
 
   it('Docker가 꺼져 있고 colima가 있으면 colima start 후 띄우고, 모드·환경 변수를 넘긴다', async () => {
-    const h = harness({ probe: [down, up], exec: [FAIL, OK, { code: 0, stdout: 'colima started', stderr: '' }] });
+    const h = harness({ probe: [down, health], exec: [FAIL, OK, { code: 0, stdout: 'colima started', stderr: '' }] });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3123, open: true }, h.deps)).toBe(0);
@@ -242,7 +251,7 @@ describe('runLaunch', () => {
   });
 
   it('Docker가 켜져 있으면 colima를 건드리지 않는다', async () => {
-    const h = harness({ probe: [down, up], exec: [OK] });
+    const h = harness({ probe: [down, health], exec: [OK] });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'demo', port: 3000, open: false }, h.deps)).toBe(0);
@@ -269,7 +278,7 @@ describe('runLaunch', () => {
 
 describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm install)', () => {
   it('지금 해시가 마지막 설치 표지와 다르면 pnpm install을 먼저 하고 표지를 갱신한다', async () => {
-    const h = harness({ probe: [down, up], exec: [OK, { code: 0, stdout: 'installed', stderr: '' }], lockHash: 'abc', installMarker: 'old' });
+    const h = harness({ probe: [down, health], exec: [OK, { code: 0, stdout: 'installed', stderr: '' }], lockHash: 'abc', installMarker: 'old' });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
@@ -279,7 +288,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
   });
 
   it('표지에 적힌 적이 없어도(첫 설치) pnpm install을 한다', async () => {
-    const h = harness({ probe: [down, up], exec: [OK, OK], lockHash: 'abc' });
+    const h = harness({ probe: [down, health], exec: [OK, OK], lockHash: 'abc' });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
@@ -288,7 +297,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
   });
 
   it('지금 해시가 표지와 같으면 설치를 건너뛴다', async () => {
-    const h = harness({ probe: [down, up], exec: [OK], lockHash: 'abc', installMarker: 'abc' });
+    const h = harness({ probe: [down, health], exec: [OK], lockHash: 'abc', installMarker: 'abc' });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
@@ -298,7 +307,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
   });
 
   it('pnpm-lock.yaml 해시를 읽지 못하면(테스트의 가짜 저장소 등) 의존성 확인을 건너뛴다', async () => {
-    const h = harness({ probe: [down, up], exec: [OK] });
+    const h = harness({ probe: [down, health], exec: [OK] });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
@@ -321,13 +330,13 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
 describe('runLaunch: 스테일한 중첩 라우트(데스크톱 셸이 오래된 라우트 표를 잡아내는 확인)', () => {
   it('최상위 라우트는 응답하지만 중첩 라우트가 스테일하면 기존 서버를 죽이고 새로 띄운다', async () => {
     await writeFile(path.join(dir, 'studio.pid'), JSON.stringify({ pid: 555, port: 3000, mode: 'demo' }));
-    const h = harness({ probe: [up, stale, up], exec: [OK], alivePids: [555] });
+    const h = harness({ probe: [health, stale, health], exec: [OK], alivePids: [555] });
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
-    // 루트("/")와 중첩 라우트(/api/health/routes)를 둘 다 확인한다
-    expect(h.probes[0]).toBe('http://127.0.0.1:3000/');
+    // 헬스(/api/health)와 중첩 라우트(/api/health/routes)를 둘 다 확인한다
+    expect(h.probes[0]).toBe('http://127.0.0.1:3000/api/health');
     expect(h.probes[1]).toBe('http://127.0.0.1:3000/api/health/routes');
     // 스테일한 기존 프로세스(PID 555)에 SIGTERM을 보내고
     expect(h.killed).toEqual([{ pid: 555, signal: 'SIGTERM' }]);
@@ -340,12 +349,85 @@ describe('runLaunch: 스테일한 중첩 라우트(데스크톱 셸이 오래된
   it('스테일한 서버가 이미 죽어 있으면 죽이지 않고 바로 새로 띄운다', async () => {
     await writeFile(path.join(dir, 'studio.pid'), JSON.stringify({ pid: 555, port: 3000, mode: 'demo' }));
     // alivePids를 주지 않으면 isAlive(555)는 항상 false다
-    const h = harness({ probe: [up, stale, up], exec: [OK] });
+    const h = harness({ probe: [health, stale, health], exec: [OK] });
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
     expect(h.killed).toEqual([]);
     expect(h.spawns).toHaveLength(1);
+  });
+});
+
+describe('runLaunch: 떠 있는지와 준비는 /api/health로 본다', () => {
+  it('헬스에 b-studio 표지가 있으면 첫 화면(/)을 부르지 않고 재사용한다', async () => {
+    const h = harness({ probe: [health, nestedOk] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.probes).toEqual(['http://127.0.0.1:3000/api/health', 'http://127.0.0.1:3000/api/health/routes']);
+    expect(h.spawns).toEqual([]);
+  });
+
+  it('옛 서버(헬스에 표지 없음)는 첫 화면의 표지로 알아보고 재사용한다', async () => {
+    const h = harness({ probe: [oldHealth, up, nestedOk] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.probes).toEqual(['http://127.0.0.1:3000/api/health', 'http://127.0.0.1:3000/', 'http://127.0.0.1:3000/api/health/routes']);
+    expect(h.spawns).toEqual([]);
+  });
+
+  it('헬스에도 첫 화면에도 표지가 없으면 다른 프로그램이다', async () => {
+    const h = harness({ probe: [{ reachable: true, status: 404, body: 'nope' }, upOther] });
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+    expect(error.mock.calls.flat().join('\n')).toContain('다른 프로그램');
+  });
+
+  it('새로 띄우면 헬스가 200일 때 준비로 본다(응답만 오고 200이 아니면 더 기다린다)', async () => {
+    const h = harness({ probe: [down, { reachable: true, status: 500, body: '' }, health], exec: [OK] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    h.deps.readyTimeoutMs = 10;
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.probes.slice(1)).toEqual(['http://127.0.0.1:3000/api/health', 'http://127.0.0.1:3000/api/health']);
+  });
+
+  it('기다리는 동안 지난 시간을 알린다', async () => {
+    const h = harness({ probe: [down, down, down, health], exec: [OK] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    h.deps.readyTimeoutMs = 10;
+    const waited: number[] = [];
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false, onWaiting: (ms) => waited.push(ms) }, h.deps)).toBe(0);
+    expect(waited).toEqual([0, 1, 2]);
+  });
+});
+
+describe('runLaunch: 브라우저는 열라고 할 때만', () => {
+  it('open이 false면 브라우저를 열지 않고 토큰 주소도 찍지 않으며, desk와 --web을 안내한다', async () => {
+    const token = 'd'.repeat(64);
+    const h = harness({ probe: [down, health], exec: [OK], localToken: token });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false }, h.deps)).toBe(0);
+    expect(h.opens).toEqual([]);
+    const text = log.mock.calls.flat().join('\n');
+    expect(text).not.toContain(token);
+    expect(text).toContain('pnpm studio desk');
+    expect(text).toContain('--web');
+  });
+
+  it('serverEnv는 사용자가 정하지 않은 환경 변수만 채운다', async () => {
+    const h = harness({ probe: [down, health], exec: [OK] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000, open: false, serverEnv: { B_STUDIO_EXPERIMENTAL: '1', B_STUDIO_BACKENDS: 'codex' } }, h.deps)).toBe(0);
+    expect(h.spawns[0]!.env.B_STUDIO_EXPERIMENTAL).toBe('1');
+    // harness의 사용자 환경에 B_STUDIO_BACKENDS=kept가 있다
+    expect(h.spawns[0]!.env.B_STUDIO_BACKENDS).toBe('kept');
   });
 });
