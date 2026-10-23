@@ -23,7 +23,7 @@ export interface AiAccount {
   backend: CliAccountBackend;
   /** CLI의 설정 폴더(절대 경로, 홈 아래). 없으면 기본 계정이다 */
   configDir?: string;
-  /** 캐릭터 그림 파일 이름(`b-studio/sprites/` 안의 png·gif). 화면이 읽는다 */
+  /** 캐릭터 그림 파일(`b-studio/sprites/` 기준 상대 경로, png·gif). 화면이 읽는다 */
   sprite?: string;
   /** 파일에 없는 처음 기본 계정 */
   builtin?: true;
@@ -36,7 +36,12 @@ export const MAX_ACCOUNTS = 32;
 /** 계정 id의 꼴. 기본 계정은 CLI 이름(claude-code 등), 더한 계정은 acct-와 16진수 8자다 */
 const ACCOUNT_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
 const CONTROL = /[\u0000-\u001f\u007f-\u009f]/g;
-const SPRITE = /^[^./\\\u0000-\u001f][^/\\\u0000-\u001f]{0,123}\.(png|gif)$/i;
+/**
+ * 그림 파일(#890): sprites 폴더 기준 상대 경로. 하위 폴더는 셋까지, 이름마다 점으로 시작하지 않는다(.., 숨은 폴더를 막는다).
+ * 빈 이름(//), 역슬래시, 제어 글자도 받지 않는다. 화면(desk)은 이 경로를 그림 폴더에서 찾은 파일 목록에 있을 때만 읽는다
+ */
+const SPRITE_PART = '[^./\\\\\\u0000-\\u001f][^/\\\\\\u0000-\\u001f]';
+const SPRITE = new RegExp(`^(?:${SPRITE_PART}{0,63}/){0,3}${SPRITE_PART}{0,123}\\.(?:png|gif)$`, 'i');
 
 /** 설정 폴더를 따로 둘 수 있는 CLI와 그 환경 변수 */
 const DIR_ENV: Partial<Record<CliAccountBackend, string>> = { 'claude-code': ACCOUNT_DIR_ENV.claude, codex: ACCOUNT_DIR_ENV.codex };
@@ -152,7 +157,7 @@ function cleanName(value: unknown): string {
 
 function cleanSprite(value: unknown): string | undefined {
   if (value === null || value === undefined || value === '') return undefined;
-  if (typeof value !== 'string' || !SPRITE.test(value)) throw new StudioError(400, '그림은 sprites 폴더 안의 png·gif 파일 이름만 적습니다(예: marco.png, pikachu.gif)');
+  if (typeof value !== 'string' || !SPRITE.test(value)) throw new StudioError(400, '그림은 sprites 폴더 안의 png·gif 파일만 적습니다(예: marco.png, pokemon/25.gif)');
   return value;
 }
 

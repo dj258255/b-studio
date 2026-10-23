@@ -67,7 +67,7 @@ export interface AgentItem {
   agents?: AgentDetail[];
   /** 이 에이전트가 할 수 있는 범위(#843). 기억에 없는 세션이면 없다 */
   capabilities?: AgentCapabilities;
-  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. desk가 그 계정의 사용량 막대를 잇는다(#889) */
+  /** 세션을 띄운 AI 계정(#885). 기본 계정이면 없다. desk가 그 계정의 사용량 막대(#889)와 그림(#890)을 잇는다 */
   accountId?: string;
 }
 

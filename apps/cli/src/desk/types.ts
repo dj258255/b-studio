@@ -85,6 +85,68 @@ export interface DeskAccount {
   builtin?: boolean;
 }
 
+/** 계정 하나의 로그인 상태(#890, GET /api/ai-accounts/{id}/status). 각 CLI의 상태 확인 명령으로 잰다 */
+export interface DeskAccountStatus {
+  connected: boolean;
+  installed: boolean;
+  /** 아는 계정 종류(예: "Max 구독") */
+  accountKind?: string;
+  /** 연결되지 않았을 때 사람이 할 일 */
+  reason?: string;
+}
+
+/** 로그인 진행(스튜디오 cli-accounts.ts의 LoginProgress에서 desk가 쓰는 것) */
+export interface DeskLoginProgress {
+  state: 'running' | 'exited' | 'cancelled' | 'timeout';
+  lines: string[];
+  url?: string;
+  code?: string;
+  exitCode?: number | null;
+  error?: string;
+  /** 끝난 뒤 다시 잰 상태 */
+  status?: DeskAccountStatus;
+}
+
+/** 로그인 시작의 답. spawnable이 아니면(대화형 CLI) 사람이 칠 명령만 온다 */
+export interface DeskLoginStart {
+  spawnable: boolean;
+  progress?: DeskLoginProgress;
+  command?: string;
+  note?: string;
+}
+
+/** 라우팅 규칙(스튜디오 lib/backend-rules.ts와 같은 꼴, #822·#885) */
+export interface DeskRuleWhen {
+  intent?: 'build' | 'ask';
+  complexity?: Array<'simple' | 'normal' | 'complex'>;
+  risk?: 'high' | 'normal';
+  keywords?: string[];
+}
+
+export interface DeskRuleTarget {
+  backend: string;
+  model?: string;
+  accountId?: string;
+}
+
+export interface DeskRule extends DeskRuleTarget {
+  when: DeskRuleWhen;
+}
+
+export interface DeskRules {
+  rules: DeskRule[];
+  fallback?: DeskRuleTarget;
+}
+
+/** GET /api/routing/rules. 옛 스튜디오는 rules를 주지 않을 수 있다 */
+export interface DeskRulesView {
+  rules?: DeskRules;
+  /** 저장한 규칙을 쓰지 못한 까닭 */
+  error?: string;
+  allowed: string[];
+  defaultBackend: string;
+}
+
 export interface DeskStartResult {
   session: { id: string };
   routing?: { backend?: string; model?: string; matched?: string };

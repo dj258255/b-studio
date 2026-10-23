@@ -572,6 +572,80 @@ describe('스페이스 화면 키(#887)', () => {
   });
 });
 
+describe('설정 화면 키(#890)', () => {
+  const base = (): DeskState => ({ ...initialState(), items: [item('a')], slots: ['a', undefined, undefined, undefined] });
+
+  it('앞글쇠 다음 g는 설정 화면을 바로 열고, 같은 입력에서 이어 친 키는 설정 화면이 받는다(CLI로 가지 않는다)', () => {
+    const { state, effects } = handleInput(base(), '\x02g\t');
+    expect(effects).toEqual([{ type: 'settings-open' }]);
+    expect(state.settings?.tab).toBe('rules');
+    const typed = handleInput(state, 'xyz');
+    expect(typed.effects.filter((effect) => effect.type === 'input')).toEqual([]);
+  });
+
+  it('스페이스 화면에서는 앞글쇠 없이 g로 연다', () => {
+    const { state, effects } = handleInput({ ...base(), view: 'space' }, 'g');
+    expect(effects).toEqual([{ type: 'settings-open' }]);
+    expect(state.settings).toBeDefined();
+  });
+
+  it('Esc로 닫으면 닫기 할 일을 낸다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    const { state, effects } = handleInput(opened, '\x1b', true);
+    expect(state.settings).toBeUndefined();
+    expect(effects).toEqual([{ type: 'settings', effect: { type: 'close' } }]);
+  });
+
+  it('설정 화면의 붙여넣기는 칸으로 가지 않고 입력 칸에 들어간다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    const form = { ...opened.settings!, loading: false, backends: ['codex'] };
+    const adding = handleInput({ ...opened, settings: form }, 'a').state;
+    const { state, effects } = handleInput(adding, '\x1b[200~마르코\x1b[201~');
+    expect(effects).toEqual([]);
+    expect(state.settings?.form?.fields[0]).toMatchObject({ value: '마르코' });
+  });
+
+  it('설정 화면이 열려 있으면 마우스는 버린다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    expect(handleInput(opened, '\x1b[<0;5;5M').effects).toEqual([]);
+  });
+
+  it('사용량 화면에서 g로 설정을 열고, Esc로 닫으면 사용량 화면에 그대로 있다', () => {
+    const accounts = [{ id: 'codex', backend: 'codex', status: 'ok' as const, windows: [], source: 'codex-app-server' }];
+    const opened = handleInput({ ...base(), view: 'usage', usage: { accounts } }, 'g');
+    expect(opened.effects).toEqual([{ type: 'settings-open' }]);
+    expect(opened.state.settings).toBeDefined();
+    const closed = handleInput(opened.state, '\x1b', true).state;
+    expect(closed.settings).toBeUndefined();
+    expect(closed.view).toBe('usage');
+  });
+
+  it('입력 칸이 없을 때의 u·w는 설정을 닫고 사용량·스페이스 화면으로 간다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    const toUsage = handleInput(opened, 'u');
+    expect(toUsage.state.settings).toBeUndefined();
+    expect(toUsage.state.view).toBe('usage');
+    expect(toUsage.effects).toEqual([{ type: 'settings', effect: { type: 'close' } }, { type: 'usage', refresh: false }]);
+    const toSpace = handleInput(opened, 'w').state;
+    expect(toSpace.settings).toBeUndefined();
+    expect(toSpace.view).toBe('space');
+    // 사용량 화면 위에서 연 설정이면 u는 닫기만 한다(사용량 화면을 닫지 않는다)
+    const overUsage = handleInput({ ...base(), view: 'usage' }, 'g').state;
+    expect(handleInput(overUsage, 'u').state.view).toBe('usage');
+  });
+
+  it('입력 칸에서 친 u·w는 글자이고, 저장하지 않은 규칙이 있으면 u·w도 먼저 묻는다', () => {
+    const opened = handleInput(base(), '\x02g').state;
+    const ready = { ...opened, settings: { ...opened.settings!, loading: false, backends: ['codex'] } };
+    const typing = handleInput(ready, 'auw').state;
+    expect(typing.settings?.form?.fields[0]).toMatchObject({ value: 'uw' });
+    const dirty = { ...ready, settings: { ...ready.settings!, tab: 'rules' as const, rules: { rules: [] }, rulesDirty: true } };
+    const asked = handleInput(dirty, 'u').state;
+    expect(asked.settings?.confirm).toEqual({ kind: 'discard-rules' });
+    expect(asked.view).toBeUndefined();
+  });
+});
+
 describe('사용량 화면 키(#889)', () => {
   const accounts = [
     { id: 'claude-code', backend: 'claude-code', status: 'ok' as const, windows: [], source: 'claude-oauth' },

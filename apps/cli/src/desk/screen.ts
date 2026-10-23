@@ -125,10 +125,11 @@ export function terminalSize(rect: Rect): { cols: number; rows: number } {
 }
 
 const RESET = '\x1b[0m';
-const SGR = /\x1b\[[0-9;:?]*[A-Za-z]/y;
+/** 폭이 없는 제어 열: 색(SGR)과 누를 수 있는 링크 같은 OSC 열(BEL이나 ST로 끝난다, #890) */
+const SGR = /\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/y;
 
 export function stripAnsi(text: string): string {
-  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, '');
+  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
 }
 
 /** 색이 섞인 줄을 정확히 width칸으로 맞춘다(넘치면 자르고 모자라면 빈칸). 끝에서 색을 되돌린다. fill을 주면 남은 빈칸을 그 색(바탕색)으로 칠한다 */
@@ -136,12 +137,15 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
   let out = '';
   let used = 0;
   let at = 0;
+  // 잘린 자리에서 링크가 열린 채면 닫는다(색 되돌림은 링크를 닫지 않는다)
+  let linkOpen = false;
   while (at < line.length) {
     SGR.lastIndex = at;
     const match = SGR.exec(line);
     if (match) {
       out += match[0];
       at += match[0].length;
+      if (match[0].startsWith('\x1b]8;')) linkOpen = !/^\x1b\]8;[^;]*;(?:\x07|\x1b\\)$/.test(match[0]);
       continue;
     }
     const char = String.fromCodePoint(line.codePointAt(at)!);
@@ -151,6 +155,7 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
     used += w;
     at += char.length;
   }
+  if (linkOpen) out += '\x1b]8;;\x07';
   const pad = Math.max(0, width - used);
   return fill && pad ? `${out}${RESET}${fill}${' '.repeat(pad)}${RESET}` : `${out}${RESET}${' '.repeat(pad)}`;
 }
