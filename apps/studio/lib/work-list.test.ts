@@ -54,6 +54,15 @@ describe('groupWork', () => {
     expect(works[1]).toMatchObject({ key: 'session:s1', state: 'working' });
   });
 
+  it('레인이 모두 끝난 계획은 끝남이고, 아직 쉬는 레인이 있으면 그쪽을 보인다(#868)', () => {
+    const plan = { kind: 'plan' as const, id: 'p1', href: '/task-plans?id=p1' };
+    const [done] = groupWork([item({ id: 'l1', kind: 'lane', group: plan, state: 'done' }), item({ id: 'l2', kind: 'lane', group: plan, state: 'done' })]);
+    expect(done).toMatchObject({ key: 'plan:p1', state: 'done' });
+
+    const [mixed] = groupWork([item({ id: 'l1', kind: 'lane', group: plan, state: 'done' }), item({ id: 'l2', kind: 'lane', group: plan, state: 'idle' })]);
+    expect(mixed).toMatchObject({ state: 'idle' });
+  });
+
   it('승인 대기 계획은 세션이 없어 나란히 볼 세션이 비어 있다', () => {
     const [work] = groupWork([item({ id: 'plan:p1', kind: 'lane', group: { kind: 'plan', id: 'p1', href: '/task-plans?id=p1' }, attention: 'approval' })]);
 
@@ -147,6 +156,9 @@ describe('deleteBlockReason', () => {
 
     const dormant = groupWork([item({ id: 's2', state: 'dormant' })]);
     expect(deleteBlockReason(dormant[0]!)).toBeUndefined();
+
+    const done = groupWork([item({ id: 's5', state: 'done' })]);
+    expect(deleteBlockReason(done[0]!)).toBeUndefined();
 
     const failed = groupWork([item({ id: 's4', state: 'error' })]);
     expect(deleteBlockReason(failed[0]!)).toBeUndefined();

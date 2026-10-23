@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { DeskApp, type DeskClient, type DeskIo } from './desk';
+import { StudioRequestError } from './client';
+import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions } from './desk';
 import type { DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
 interface Call {
-  type: 'open' | 'resize' | 'input';
+  type: 'open' | 'resize' | 'input' | 'stop' | 'resume' | 'rename';
   id: string;
   data?: string;
 }
@@ -17,6 +18,8 @@ class FakeClient implements DeskClient {
   agentsCalls = 0;
   agentsGate: Promise<void> | undefined;
   openError: string | undefined;
+  /** 열기 실패의 HTTP 상태(없으면 상태 없는 오류) */
+  openStatus: number | undefined;
   startResult: DeskStartResult = { session: { id: 'new' }, routing: { backend: 'claude-code' }, terminal: { opened: true, pasted: true } };
   allowed: string[] = ['claude-code'];
   streams: Array<{ ids: readonly string[]; onMessage: (id: string, message: DeskTerminalMessage) => void; end: (error?: Error) => void; signal: AbortSignal }> = [];
@@ -45,7 +48,16 @@ class FakeClient implements DeskClient {
   }
   async open(id: string) {
     this.calls.push({ type: 'open', id });
-    if (this.openError) throw new Error(this.openError);
+    if (this.openError) throw this.openStatus ? new StudioRequestError(this.openError, this.openStatus) : new Error(this.openError);
+  }
+  async stop(id: string) {
+    this.calls.push({ type: 'stop', id });
+  }
+  async resume(id: string) {
+    this.calls.push({ type: 'resume', id });
+  }
+  async rename(id: string, label: string) {
+    this.calls.push({ type: 'rename', id, data: label });
   }
   async resize(id: string) {
     this.calls.push({ type: 'resize', id });
@@ -113,10 +125,10 @@ async function tick(ms = 50): Promise<void> {
   await vi.advanceTimersByTimeAsync(ms);
 }
 
-function setup(items: DeskItem[] = [item('a'), item('b')]) {
+function setup(items: DeskItem[] = [item('a'), item('b')], options: DeskAppOptions = {}) {
   const client = new FakeClient(items);
   const io = new FakeIo();
-  const app = new DeskApp(client, items, io);
+  const app = new DeskApp(client, items, io, options);
   const done = app.run();
   return { client, io, app, done };
 }
@@ -383,3 +395,115 @@ describe('desk 작업대: 칸마다 통로, 복사 모드, 크게 보기, 도움
   });
 });
 
+
+describe('desk 작업대: 세션 조작과 알림(#864)', () => {
+  const OSC9 = /\x1b\]9;([^\x07]*)\x07/g;
+  const notices = (out: string): string[] => [...out.matchAll(OSC9)].map((match) => match[1]!);
+  /** 색 코드를 뺀 출력 */
+  const plain = (out: string): string => out.replace(/\x1b\[[0-9;]*m/g, '');
+  /** 사이드바를 받아 오는 주기를 한 번 넘긴다 */
+  const poll = () => tick(1_600);
+
+  it('Ctrl-b p 다음 y로 고른 세션을 멈춘다', async () => {
+    const ctx = setup();
+    ctx.io.type('\x02p');
+    await tick();
+    expect(ctx.io.all).toContain('멈출까요');
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.of('stop').map((call) => call.id)).toEqual(['a']);
+    expect(ctx.client.of('input')).toEqual([]);
+  });
+
+  it('멈춘 세션을 열다 409를 받으면 Ctrl-b r을 안내하고, 이어서 작업한 세션이 켜지면 칸을 다시 연다', async () => {
+    const ctx = setup([item('a', { state: 'stopped' })]);
+    ctx.client.openError = '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다';
+    ctx.client.openStatus = 409;
+    await openFirst(ctx);
+    expect(ctx.io.all).toContain('Ctrl-b r');
+    ctx.client.openError = undefined;
+    ctx.io.type('\x02r');
+    await tick();
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.of('resume').map((call) => call.id)).toEqual(['a']);
+    // 켜는 중에는 다시 열지 않는다
+    ctx.client.items = [item('a', { state: 'booting' })];
+    await poll();
+    expect(ctx.client.of('open', 'a')).toHaveLength(1);
+    ctx.client.items = [item('a', { state: 'idle' })];
+    await poll();
+    expect(ctx.client.of('open', 'a')).toHaveLength(2);
+  });
+
+  it('Ctrl-b ,로 고른 세션의 이름을 바꾸고 목록을 새로 받는다', async () => {
+    const ctx = setup();
+    const before = ctx.client.agentsCalls;
+    ctx.io.type('\x02,');
+    await tick();
+    ctx.io.type('결제 화면\r');
+    await tick();
+    expect(ctx.client.of('rename')).toEqual([{ type: 'rename', id: 'a', data: '결제 화면' }]);
+    expect(ctx.client.agentsCalls).toBeGreaterThan(before);
+  });
+
+  it('처음 받은 목록으로는 알리지 않고, 작업 중이던 세션이 권한을 기다리면 벨과 OS 알림을 낸다', async () => {
+    const ctx = setup([item('a', { state: 'working' }), item('b', { state: 'working' })]);
+    await poll();
+    expect(notices(ctx.io.all)).toEqual([]);
+    expect(ctx.io.all).not.toContain('\x07');
+    ctx.client.items = [item('a', { state: 'working' }), item('b', { state: 'idle', terminal: { cli: 'up', waiting: 'permission' } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 권한 대기']);
+    // 사이드바에 손댈 세션 표시가 붙는다
+    expect(plain(ctx.io.all)).toContain('! Claude · shop · 요청 b');
+  });
+
+  it('게이트가 실패로 바뀌면 알리고, 작업이 끝나면 끝났다고 알린다', async () => {
+    const ctx = setup([item('a', { state: 'working', gate: { state: 'verifying', checkpoints: 0 } })]);
+    ctx.client.items = [item('a', { state: 'working', gate: { state: 'failed', checkpoints: 0 } })];
+    await poll();
+    expect(notices(ctx.io.all).at(-1)).toContain('실패');
+    ctx.client.items = [item('a', { state: 'idle', terminal: { cli: 'up' }, gate: { state: 'failed', checkpoints: 0 } })];
+    await poll();
+    expect(notices(ctx.io.all).at(-1)).toContain('끝남');
+  });
+
+  it('고른 칸에서 보고 있는 세션은 OS 알림을 내지 않는다', async () => {
+    const ctx = setup([item('a', { state: 'working' })]);
+    await openFirst(ctx);
+    ctx.client.items = [item('a', { state: 'idle', terminal: { cli: 'up', waiting: 'permission' } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual([]);
+    // 벨과 아래 줄 알림은 낸다
+    expect(ctx.io.all).toContain('\x07');
+    expect(ctx.io.all).toContain('알림: Claude · 요청 a · 권한 대기');
+  });
+
+  it('알림을 끄면 벨과 OS 알림을 내지 않는다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working' })], { notify: false });
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up', waiting: 'permission' } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual([]);
+    expect(ctx.io.all).not.toContain('\x07');
+    // 사이드바 표시는 그대로 붙는다
+    expect(plain(ctx.io.all)).toContain('! Claude · shop · 요청 b');
+  });
+
+  it('칸 안 CLI의 벨은 밖 터미널 벨과 칸 머리 표시로 잇고, 다시 받는 옛 출력의 벨은 울리지 않는다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    ctx.client.data('a', 'old\x07');
+    await tick();
+    expect(ctx.io.all).not.toContain('\x07');
+    await tick(600);
+    // 두 칸으로 늘려 다른 칸을 고른다: a는 보고 있는 칸이 아니다
+    ctx.io.type('\x02l');
+    ctx.io.type('\x022');
+    await tick();
+    ctx.client.data('a', 'ding\x07');
+    await tick();
+    expect(ctx.io.all).toContain('\x07');
+    expect(ctx.io.all).toContain('벨');
+  });
+});

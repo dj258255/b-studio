@@ -22,6 +22,13 @@ const verifyResult = (runId: string, ok: boolean): StudioEvent => ({ type: 'agen
 const finished = (runId: string, status: 'done' | 'failed' | 'error' | 'cancelled'): StudioEvent => ({ type: 'run_finished', runId, status, summary: '' });
 const checkpoint = (sha: string, passed: boolean) => ({ sha, shortSha: sha.slice(0, 7), message: 'm', createdAt: '2026-10-22T10:00:00.000Z', files: [], ...(passed ? { passedStages: ['test' as const] } : {}) });
 
+describe('세션 이름(#864)', () => {
+  it('이름을 붙였으면 제목은 이름이고, 없으면 마지막 요청이다', () => {
+    expect(item(source({ lastRequest: '주문 목록에 필터' })).title).toBe('주문 목록에 필터');
+    expect(item(source({ snapshot: snapshot({ label: '필터 작업' }), lastRequest: '주문 목록에 필터' })).title).toBe('필터 작업');
+  });
+});
+
 describe('터미널 상태', () => {
   it('터미널을 연 적 없는 세션에는 terminal이 없다', () => {
     expect(item(source()).terminal).toBeUndefined();

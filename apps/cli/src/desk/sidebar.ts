@@ -87,6 +87,8 @@ export function agentStatus(item: DeskItem): StatusBadge {
   if (item.state === 'booting') return { label: '켜는 중', tone: 'busy' };
   if (item.state === 'error') return { label: '오류', tone: 'fail' };
   if (item.state === 'stopped') return { label: '멈춤', tone: 'muted' };
+  // 작업 카드 계획이 끝나 자원을 돌려준 레인(#868)
+  if (item.state === 'done') return { label: '끝남', tone: 'ok' };
   if (item.state === 'dormant') return { label: '꺼짐', tone: 'muted' };
   if (item.terminal?.cli === 'up') return { label: 'CLI 대기', tone: 'ok' };
   return { label: '쉼', tone: 'muted' };
@@ -105,8 +107,8 @@ export function gateStatus(item: DeskItem): StatusBadge | undefined {
   return undefined;
 }
 
-/** 사이드바 줄. slots는 세션 id → 열린 칸 번호(1부터) */
-export function sidebarRows(items: readonly DeskItem[], selected: number, slots: ReadonlyMap<string, number>, width: number): SidebarRow[] {
+/** 사이드바 줄. slots는 세션 id → 열린 칸 번호(1부터), flagged는 알린 뒤 아직 보지 않은 세션(!로 보인다, #864) */
+export function sidebarRows(items: readonly DeskItem[], selected: number, slots: ReadonlyMap<string, number>, width: number, flagged: ReadonlySet<string> = new Set()): SidebarRow[] {
   const sessions = deskSessions(items);
   if (sessions.length === 0) {
     return [
@@ -117,7 +119,7 @@ export function sidebarRows(items: readonly DeskItem[], selected: number, slots:
   const rows: SidebarRow[] = [];
   sessions.forEach((item, index) => {
     const slot = slots.get(item.id);
-    const mark = index === selected ? '▸' : ' ';
+    const mark = index === selected ? '▸' : flagged.has(item.id) ? '!' : ' ';
     const head = `${mark}${slot ? `[${slot}]` : ''} ${backendLabel(item.backend)} · ${item.projectName} · ${item.title}`;
     const status = agentStatus(item);
     const gate = gateStatus(item);
@@ -127,7 +129,7 @@ export function sidebarRows(items: readonly DeskItem[], selected: number, slots:
     if (item.tokens && totalTokens(item.tokens) > 0) parts.push(`토큰 ${compactTokens(totalTokens(item.tokens))}`);
     if (item.costUsd !== undefined && item.costUsd > 0) parts.push(`$${item.costUsd.toFixed(2)}`);
     const tones = [{ text: status.label, tone: status.tone }, ...(gate ? [{ text: gate.label, tone: gate.tone }] : [])];
-    rows.push({ text: fit(head, width), selected: index === selected, item: index });
+    rows.push({ text: fit(head, width), selected: index === selected, item: index, ...(mark === '!' ? { tones: [{ text: '!', tone: 'warn' as const }] } : {}) });
     rows.push({ text: fit(`   ${parts.join(' · ')}`, width), selected: false, tones, item: index });
     if (index === selected) rows.push(...detailRows(item, index, width));
   });

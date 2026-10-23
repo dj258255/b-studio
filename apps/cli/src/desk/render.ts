@@ -16,6 +16,8 @@ export interface PaneView {
   note?: string;
   /** 칸 머리에 붙일 지금 모드(복사 모드의 자리) */
   mode?: string;
+  /** 칸 안 CLI가 벨을 울렸고 아직 이 칸을 고르지 않았다(#864) */
+  bell?: boolean;
 }
 
 const RESET = '\x1b[0m';
@@ -68,7 +70,7 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · ? 도움말 · q 나가기';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · n 새 요청 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
 
@@ -84,6 +86,9 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['s', '사이드바 숨기고 보이기'],
   ['[', '복사 모드: 지난 출력 올려 보기와 복사'],
   ['x', '칸 비우기(세션과 CLI는 계속 돕니다)'],
+  ['p', '사이드바에서 고른 세션 멈추기(한 번 묻습니다. 기록과 작업 복사본은 남습니다)'],
+  ['r', '멈춘 세션 이어서 작업(한 번 묻습니다. 켜지면 칸을 다시 엽니다)'],
+  [',', '고른 세션 이름 바꾸기(비우면 이름을 지웁니다)'],
   ['q', 'desk 나가기(세션과 CLI는 계속 돕니다)'],
   ['Ctrl-b', 'Ctrl-b 글자를 CLI로 보내기'],
   ['?', '이 도움말'],
@@ -111,6 +116,7 @@ function helpLines(width: number): string[] {
     ...COPY_HELP.map(row),
     '',
     ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
+    ' 세션이 손댈 상태가 되거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다(studio desk --no-notify로 끕니다).',
   ].map((line) => fit(line, width));
 }
 
@@ -135,7 +141,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   }
 
   // 사이드바: 고른 항목이 보이게 내린다
-  const side = hidden ? [] : sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w);
+  const side = hidden ? [] : sidebarRows(state.items, state.selected, slotOf, layout.sidebar.w, new Set(state.flagged ?? []));
   // 고른 항목의 줄(머리·상태·펼친 내역)이 모두 보이게 내린다. 높이보다 길면 머리부터 보인다
   const first = side.findIndex((row) => row.item === state.selected);
   const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), -1);
@@ -186,6 +192,23 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       lines[rows - 1] = fit(head + text, cols);
       cursor = { x: stringWidth(head + text), y: rows - 1 };
     }
+  } else if (state.rename) {
+    // 이름 입력 줄: 길면 끝부분을 보인다(커서가 화면 밖으로 나가지 않게)
+    const head = ' 세션 이름(Enter 저장 · 비우면 지움 · Esc 그만둠)> ';
+    let text = state.rename.text;
+    while (text && stringWidth(head + text) > cols - 1) text = [...text].slice(1).join('');
+    lines.push(fit(head + text, cols));
+    cursor = { x: stringWidth(head + text), y: rows - 1 };
+  } else if (state.confirm) {
+    const confirm = state.confirm;
+    lines.push(
+      fit(
+        confirm.action === 'stop'
+          ? ` ‹${confirm.title}› 세션을 멈출까요? CLI와 샌드박스를 내립니다(기록과 작업 복사본은 남습니다) · y 멈추기 · 다른 키 그만두기`
+          : ` ‹${confirm.title}› 세션을 이어서 작업할까요? 샌드박스를 다시 띄웁니다 · y 이어서 작업 · 다른 키 그만두기`,
+        cols,
+      ),
+    );
   } else {
     const hint = state.copy
       ? state.copy.search !== undefined
@@ -221,6 +244,7 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
       title += [backendLabel(item.backend), item.title, agentStatus(item).label, ...(gate ? [gate.label] : [])].join(' · ');
     } else title += id;
     if (view?.mode) title += ` · ${view.mode}`;
+    if (view?.bell) title += ' · 벨';
     if (view?.note) title += ` · ${view.note}`;
     const text = fit(title, rect.w);
     return focused ? `${INVERSE}${text}${RESET}` : `${BOLD}${text}${RESET}`;

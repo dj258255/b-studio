@@ -22,7 +22,8 @@ import { buildTokenReports, tokenPricing, type TokenPricing } from './token-repo
 
 export type AgentKind = 'session' | 'lane' | 'fleet';
 /** dormant: 샌드박스를 아직 켜지 않은 세션(지연 기동). idle: 켜져 있지만 요청을 처리하지 않는다 */
-export type AgentState = 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'error';
+/** done: 작업 카드 계획이 끝나 자원을 돌려주려고 멈춘 레인(사람이 멈춘 stopped와 가른다, #868) */
+export type AgentState = 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
 /** 개입이 필요한 이유. 여러 개면 우선순위가 높은 것 하나만 남긴다 */
 export type AgentAttention = 'question' | 'approval' | 'gate_failed' | 'needs_review' | 'error' | 'budget';
 
@@ -175,6 +176,8 @@ interface AgentRow {
   fallbackReason?: string;
   /** 계획 승인 대기(세션 밖 사실) */
   approval?: boolean;
+  /** 끝난 레인이다. 통합이 레인 세션을 멈춰 자원을 돌려주므로, 멈춘 세션을 중지 대신 끝남으로 본다(#868) */
+  finishedLane?: boolean;
   /** 이 항목이 쓰는 백엔드 */
   backend?: SessionMode;
   /** 스냅샷이 없을 때의 토큰 */
@@ -230,7 +233,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         projectName: plan.projectId,
         owner: plan.owner,
         ...(source
-          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...deskFactsOf(source) }
+          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...deskFactsOf(source), ...(lane.status === 'done' ? { finishedLane: true } : {}) }
           : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane), ...(lane.error ? { fallbackReason: lane.error } : {}) }),
         // 레인은 그 레인이 고른 백엔드(세션이 있으면 스냅샷)를 보여 준다
         backend: source ? sessionBackend(source.snapshot) : lane.backend,
@@ -268,7 +271,8 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
       kind: 'session',
       id: source.snapshot.id,
       href: `/sessions/${source.snapshot.id}`,
-      title: source.lastRequest?.trim() || source.snapshot.projectName,
+      // 사람이 붙인 이름이 있으면 그것이 제목이다(#864)
+      title: source.snapshot.label?.trim() || source.lastRequest?.trim() || source.snapshot.projectName,
       projectName: source.snapshot.projectName,
       owner: source.snapshot.owner,
       snapshot: source.snapshot,
@@ -396,7 +400,7 @@ function stateOf(row: AgentRow): AgentState {
   if (!snapshot) return row.fallbackState ?? 'stopped';
   if (snapshot.status === 'failed') return 'error';
   if (snapshot.status === 'starting') return 'booting';
-  if (snapshot.status === 'stopped') return 'stopped';
+  if (snapshot.status === 'stopped') return row.finishedLane ? 'done' : 'stopped';
   // 샌드박스를 아직 켜지 않은 세션(지연 기동)은 "대기(샌드박스 꺼짐)"로 보여 준다
   if (snapshot.status === 'idle') return 'dormant';
   return snapshot.running ? 'working' : 'idle';
@@ -513,6 +517,7 @@ function laneState(status: TaskPlanView['lanes'][number]['status']): AgentState 
   if (status === 'running') return 'working';
   if (status === 'booting') return 'booting';
   if (status === 'failed') return 'error';
+  if (status === 'done') return 'done';
   return 'stopped';
 }
 

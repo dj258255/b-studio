@@ -16,7 +16,7 @@ export const WORK_MODE_LABEL: Record<WorkMode, string> = { single: '한 명', fl
 export const WORK_ATTENTION_PRIORITY: readonly AgentAttention[] = ['question', 'approval', 'gate_failed', 'needs_review', 'error', 'budget'];
 
 /** 묶은 줄의 대표 상태. 움직이는 것을 먼저 보여 준다 */
-const STATE_PRIORITY: readonly AgentState[] = ['working', 'booting', 'error', 'idle', 'dormant', 'stopped'];
+const STATE_PRIORITY: readonly AgentState[] = ['working', 'booting', 'error', 'idle', 'dormant', 'stopped', 'done'];
 
 type Usage = NonNullable<AgentItem['tokens']>;
 
@@ -151,7 +151,7 @@ export function deleteHref(key: string): string {
 export function deleteBlockReason(work: WorkItem): string | undefined {
   if (work.mode === 'single') {
     // 켜지 못한(error) 세션은 서버가 정리하고 지운다
-    return work.state === 'stopped' || work.state === 'dormant' || work.state === 'error' ? undefined : '세션이 아직 실행 중입니다. 먼저 멈춘 뒤 지울 수 있습니다';
+    return work.state === 'stopped' || work.state === 'done' || work.state === 'dormant' || work.state === 'error' ? undefined : '세션이 아직 실행 중입니다. 먼저 멈춘 뒤 지울 수 있습니다';
   }
   const active = work.members.some((member) => member.state === 'working' || member.state === 'booting');
   return active ? '진행 중인 참가자가 있습니다. 끝나거나 멈춘 뒤 지울 수 있습니다' : undefined;

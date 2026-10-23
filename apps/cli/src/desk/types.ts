@@ -10,7 +10,7 @@ export interface DeskItem {
   id: string;
   title: string;
   projectName: string;
-  state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'error';
+  state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
   attention?: string;
   backend?: string;
   lastActivityAt: string;
