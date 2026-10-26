@@ -41,7 +41,11 @@ export interface TerminalAgentRow {
   startedAt?: string;
   /** 서브에이전트의 마지막 소식 시각(ISO, #933) */
   lastAt?: string;
+  /** 서브에이전트가 끝나며 남긴 마지막 답 한 줄(#942) */
+  result?: string;
   tokens: AgentUsage;
+  /** 이 행의 토큰을 모른다(텔레메트리가 아직 없거나 종류 단위로만 알아 첫 인스턴스 행에 실었다, #942). 그때 tokens는 0이다 */
+  tokensUnknown?: boolean;
   /** 추정 비용. 단가도 CLI가 보고한 비용도 없으면 없다 */
   costUsd?: number;
 }

@@ -231,7 +231,7 @@ const HOST_BACKEND: TerminalBackend = {
     const configDir = await target.accountDir?.();
     const found = await findHostCli(process.env, target.cli ?? 'claude');
     // 사용자의 Claude 상태 줄은 b-studio 상태 줄이 이어 부른다(#920). 읽기만 한다
-    const statusLine = found.kind === 'claude' ? await userStatusLineCommand(configDir) : undefined;
+    const statusLine = found.kind === 'claude' ? await userStatusLineCommand(configDir, undefined, target.root) : undefined;
     const cli = { ...found, ...(configDir ? { configDir } : {}), ...(statusLine ? { statusLine } : {}) };
     if (!gateway) return '';
     const root = defaultAgentGatewayRoot();
