@@ -66,7 +66,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { createSession, getSnapshot, liveChanges, stopSession } from './sessions';
+import { commitWorkingCopyDocs, createSession, getSnapshot, liveChanges, stopSession } from './sessions';
 
 let root: string;
 const saved = {
@@ -176,6 +176,22 @@ describe('지금 변경(#924)', () => {
     const big = changes.files.find((file) => file.file === 'big.txt')!;
     expect(big.truncated).toBe(true);
     expect(big.patch!.length).toBeLessThan(120_000);
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('머리의 체크포인트는 세션 시작이 아니라 마지막 체크포인트다(#955)', async () => {
+    await setupRepo();
+    const id = (await createSession('redactproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    const start = (await liveChanges(id)).head;
+    const work = getSnapshot(id)!.workDir;
+    await mkdir(path.join(work, 'docs'), { recursive: true });
+    await writeFile(path.join(work, 'docs/requirements.md'), '# 요구사항\n');
+    const made = await commitWorkingCopyDocs(id, ['docs/requirements.md'], '요구사항 저장');
+    expect(made).toBeDefined();
+    const changes = await liveChanges(id);
+    expect(changes.head).toBe(made!.shortSha);
+    expect(changes.head).not.toBe(start);
     await stopSession(id).catch(() => {});
   }, 20_000);
 

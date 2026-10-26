@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
+import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
 
 // 에이전트가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 훅 입력에서 만든다
 
@@ -293,5 +293,39 @@ describe('권한을 묻는 문구(#942)', () => {
     expect(notificationMessage('Claude needs your permission to use Bash')).toBe('Bash 허락 필요');
     expect(notificationMessage('Claude is waiting for your input')).toBe('입력을 기다립니다');
     expect(notificationMessage('무엇을 할까요?')).toBe('무엇을 할까요?');
+  });
+});
+
+describe('2차 실사용 점검(#955)', () => {
+  it('비동기 훅이 뒤바뀌어 끝(Post)이 시작(Pre)보다 먼저 와도 그 도구를 도는 중으로 남기지 않는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'TodoWrite', tool_use_id: 't1' }, AT);
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'TodoWrite', tool_use_id: 't1', tool_input: { todos: [] } }, AT - 5);
+    expect(activityView(state)?.now?.running).not.toBe(true);
+    // 끝을 받지 않은 다른 도구는 그대로 도는 중이다
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 't2', tool_input: { file_path: 'a.ts' } }, AT + 1);
+    expect(activityView(state)?.now).toMatchObject({ tool: 'Read', running: true });
+  });
+
+  it('요청마다 관문이 거절한 쓰기 수(turnDenied)를 세고, 새 요청에서 다시 센다. 요청이 끝나도 남는다', () => {
+    const state = newTerminalActivity();
+    noteTurnStarted(state, AT);
+    noteToolUse(state, { tool_name: 'Edit', tool_use_id: 'e1', tool_input: { file_path: 'a.ts' } }, AT + 1);
+    noteToolDenied(state, { tool_name: 'Edit', tool_use_id: 'e1' }, '샌드박스를 준비하지 못했습니다', AT + 2);
+    noteToolUse(state, { tool_name: 'Bash', tool_use_id: 'b1', tool_input: { command: 'pnpm test' } }, AT + 3);
+    // 지금 하는 일이 아닌 도구의 거절도 센다
+    noteToolDenied(state, { tool_name: 'Edit', tool_use_id: 'e0' }, '쓰기 범위 밖입니다', AT + 4);
+    expect(activityView(state)?.turnDenied).toBe(2);
+    noteTurnEnded(state, { last_assistant_message: '묶었습니다' }, AT + 5);
+    expect(activityView(state)?.turnDenied).toBe(2);
+    noteTurnStarted(state, AT + 6);
+    expect(activityView(state)?.turnDenied).toBeUndefined();
+  });
+
+  it('모델 요청(텔레메트리)도 CLI의 소식이다: 마지막 소식 시각을 옮긴다', () => {
+    const state = newTerminalActivity();
+    noteTurnStarted(state, AT);
+    noteActivityPing(state, AT + 90_000);
+    expect(activityView(state)?.lastAt).toBe(new Date(AT + 90_000).toISOString());
   });
 });

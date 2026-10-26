@@ -82,6 +82,8 @@ export interface AgentItem {
   lastMessage?: string;
   /** 터미널 CLI가 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만. desk가 "몇 분째"를 센다 */
   workingSince?: string;
+  /** 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 거절이 없었으면 없다 */
+  turnDenied?: number;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -384,8 +386,9 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(attention ? { attention } : {}),
     ...(reason ? { reason } : {}),
     ...(row.backend ? { backend: row.backend } : {}),
-    // 훅의 마지막 소식이 기록보다 늦으면 그것이 마지막 활동이다(#933). 읽기 도구·서브에이전트 훅은 기록에 남지 않는다
-    lastActivityAt: laterOf(row.updatedAt, row.live?.lastAt),
+    // 훅의 마지막 소식이 기록보다 늦으면 그것이 마지막 활동이다(#933). 읽기 도구·서브에이전트 훅은 기록에 남지 않는다.
+    // 작업 중인 터미널 세션은 CLI의 소식(훅·모델 요청)만 센다(#955): 서버가 낸 정체 경고·샌드박스 이벤트도 기록 시각을 옮겨 "소식 없음"을 늦췄다
+    lastActivityAt: state === 'working' && row.live?.lastAt ? row.live.lastAt : laterOf(row.updatedAt, row.live?.lastAt),
     ...(runningForMs !== undefined ? { runningForMs } : {}),
     ...(tokens ? { tokens } : {}),
     ...(state === 'working' ? { activity: activityOf(row.recent ?? []) } : {}),
@@ -405,6 +408,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.context ? { context: row.live.context } : {}),
     ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
     ...(row.live?.workingSince ? { workingSince: row.live.workingSince } : {}),
+    ...(row.live?.turnDenied ? { turnDenied: row.live.turnDenied } : {}),
   };
 }
 

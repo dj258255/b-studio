@@ -331,7 +331,7 @@ import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
-import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
+import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
@@ -5277,7 +5277,8 @@ export async function liveChanges(id: string): Promise<LiveChanges> {
     chars += shown.patch?.length ?? 0;
     files.push({ ...change, ...shown, ...countPatchLines(shown.patch ?? '') });
   }
-  const head = (await session.checkpoints.list(1).catch(() => []))[0]?.shortSha;
+  // list(n)은 최근 n-1개와 세션 시작을 준다. list(1)은 늘 시작이라 마지막 체크포인트가 아니었다(#955)
+  const head = (await session.checkpoints.list(2).catch(() => []))[0]?.shortSha;
   const repository = session.snapshot.repository;
   let base: Partial<Pick<LiveChanges, 'base' | 'behind' | 'ahead'>> = {};
   if (repository && session.git) {
@@ -8260,9 +8261,25 @@ function checkTerminalStall(session: Session, stallMs: number): void {
  * 훅 호출이나 텔레메트리가 왔다: 그 실행의 마지막 활동 시각을 지금으로 옮기고 다음 정체를 다시 알릴 수 있게 한다.
  * 훅이 왔다는 것은 CLI가 다시 움직였다는 뜻이므로, 사람을 기다림 표시(B7)도 함께 푼다
  */
-function noteTerminalActivity(session: Session, run: ActiveRun & { terminal: TerminalRunState }): void {
+function noteTerminalActivity(session: Session, run: ActiveRun & { terminal: TerminalRunState }, { settled = false }: { settled?: boolean } = {}): void {
   run.terminal.lastActivityMs = Date.now();
   run.terminal.stallNotified = false;
+  if (settled) clearSettledTerminalAttention(session);
+  else clearTerminalAttention(session);
+}
+
+/**
+ * 사람을 기다림 표시를 걸고 이만큼(ms)은 도구 훅·텔레메트리로 풀지 않는다(#955). 지켜보기 훅은 따로(async) 돌고 텔레메트리는 모아서 오므로,
+ * 권한 창 앞의 도구 끝·모델 요청이 창이 뜬 뒤에 닿을 수 있다. 그것으로 풀면 대기가 사라지고 뒤에 온 알림이 무엇을 묻는지를 덮는다(2차 실사용 점검).
+ * 사람이 답하는 데는 이보다 오래 걸린다. 새 요청·턴 끝은 그대로 바로 푼다
+ */
+const TERMINAL_ATTENTION_SETTLE_MS = 1_500;
+
+/** 도구 훅·텔레메트리가 왔다: 기다림 표시가 걸린 지 조금 지났을 때만 푼다(#955) */
+function clearSettledTerminalAttention(session: Session): void {
+  const attention = session.snapshot.terminalAttention;
+  if (!attention) return;
+  if (Date.now() - Date.parse(attention.at) < TERMINAL_ATTENTION_SETTLE_MS) return;
   clearTerminalAttention(session);
 }
 
@@ -8344,8 +8361,12 @@ function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: Term
 async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   const session = terminalSession(id);
   const requests = apiRequestsFromOtlp(body);
-  // 모델 요청이 왔다는 것은 CLI가 다시 움직였다는 뜻이다. 사람을 기다림 표시를 푼다(B7)
-  if (requests.length > 0) clearTerminalAttention(session);
+  // 모델 요청이 왔다는 것은 CLI가 다시 움직였다는 뜻이다. 사람을 기다림 표시를 푼다(B7). 모아서 늦게 오므로 걸린 직후에는 풀지 않는다(#955).
+  // 도구 훅이 없는 긴 생각도 CLI의 소식이다 — 화면의 마지막 소식 시각을 옮긴다(#955)
+  if (requests.length > 0) {
+    clearSettledTerminalAttention(session);
+    noteActivityPing((session.terminalActivity ??= newTerminalActivity()), Date.now());
+  }
   // 레코드를 받은 순서대로 처리한다. 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게)
   for (const request of requests) await attributeRunUsage(session, request);
   // 서브에이전트의 시작·끝·활동(#843). 화면의 에이전트 내역에만 쓴다
@@ -8458,7 +8479,7 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
       totals.modelCalls += 1;
       // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
       open.terminal.modelCalls += 1;
-      noteTerminalActivity(session, open);
+      noteTerminalActivity(session, open, { settled: true });
     }
   }
 
@@ -8846,7 +8867,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   // 훅이 왔다는 것은 CLI가 움직인다는 뜻이다. 도구의 종류와 무관하게 정체 감시의 활동을 갱신한다(#B5)
   const running = openTerminalRun(session);
-  if (running) noteTerminalActivity(session, running);
+  if (running) noteTerminalActivity(session, running, { settled: true });
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
   noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
@@ -9324,8 +9345,8 @@ function terminalActivityHook(id: string, input: HookInput): void {
   if (typeof input.agent_id === 'string' && input.agent_id) return;
   if (event !== 'PostToolUse' && event !== 'PostToolUseFailure' && event !== 'PreToolUse') return;
   const run = openTerminalRun(session);
-  if (run) noteTerminalActivity(session, run);
-  else clearTerminalAttention(session);
+  if (run) noteTerminalActivity(session, run, { settled: true });
+  else clearSettledTerminalAttention(session);
 }
 
 /** 화면에 싣는 터미널 CLI의 활동(#920). 기억에 없는 세션이거나 받은 것이 없으면 없다 */
