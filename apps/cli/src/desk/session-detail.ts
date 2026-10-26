@@ -164,7 +164,8 @@ export function openDetail(item: DeskItem): DetailState {
     title: item.title,
     ...(item.backend ? { backend: item.backend } : {}),
     ...(item.reason ? { reason: item.reason } : {}),
-    ...(item.attention ? { attention: item.attention } : {}),
+    // 개입 사유 문자열만 옮긴다. 터미널 CLI의 주의 객체(#926)는 자세히 화면이 쓰지 않는다
+    ...(typeof item.attention === 'string' ? { attention: item.attention } : {}),
     ...(item.checkChangesArmed ? { checkChangesArmed: true } : {}),
     tab: 'checkpoints',
     selected: 0,

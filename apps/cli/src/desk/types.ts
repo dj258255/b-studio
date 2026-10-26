@@ -11,13 +11,14 @@ export interface DeskItem {
   title: string;
   projectName: string;
   state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
-  attention?: string;
+  /** 개입이 필요한 까닭. 옛 서버는 문자열(question·approval·needs_review·gate_failed), 새 서버는 터미널 CLI의 주의를 객체로 준다(#926) */
+  attention?: string | DeskAttention;
   /** 개입이 필요한 까닭 한 줄(검증 실패 요약, 확인 필요의 첫 어긋남). 모르면 없다 */
   reason?: string;
   backend?: string;
   lastActivityAt: string;
   /** 터미널 세션일 때: CLI가 떠 있는가, 권한을 묻고 있는가 */
-  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' };
+  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' | 'question' | 'input' | 'idle' };
   /** 게이트: 지금 검증 중인가, 마지막 판정, 체크포인트 수 */
   gate?: { state: 'verifying' | 'passed' | 'failed' | 'none'; checkpoints: number };
   /** 세션 누적 비용(달러) */
@@ -32,6 +33,13 @@ export interface DeskItem {
   accountId?: string;
   /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
   checkChangesArmed?: true;
+}
+
+/** 터미널 CLI가 사람을 부른 까닭(#926): 권한, 질문, 입력 필요, 쉬는 중(입력을 오래 기다림) */
+export interface DeskAttention {
+  kind: 'permission' | 'question' | 'input' | 'idle';
+  message?: string;
+  at: string;
 }
 
 export interface DeskUsage {

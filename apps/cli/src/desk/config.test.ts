@@ -142,3 +142,20 @@ describe('설정 저장(#890)', () => {
     expect(JSON.parse(readFileSync(join(dir, 'desk.json'), 'utf8'))).toEqual({ mouse: false });
   });
 });
+
+describe('봐야 할 것 먼저(#922)', () => {
+  it('완료 알림과 입력 필요 알림을 따로 끄는 값을 읽는다', () => {
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ notifyDone: false, notifyInput: true }));
+    expect(loadDeskConfig(dir)).toEqual({ config: { notifyDone: false, notifyInput: true }, warnings: [] });
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ notifyDone: 'no' }));
+    expect(loadDeskConfig(dir).warnings.join('\n')).toMatch(/notifyDone/);
+  });
+
+  it('안 본 세션(알림 표시, 끝남)을 배치와 함께 저장하고 읽는다', () => {
+    saveDeskLayout(dir, { layout: 1, slots: [undefined, undefined, undefined, undefined], focus: 0, zoom: false, sidebarHidden: false, flagged: ['a'], unseenDone: ['b', 'c'] });
+    expect(loadDeskLayout(dir)).toMatchObject({ flagged: ['a'], unseenDone: ['b', 'c'] });
+    writeFileSync(join(dir, 'desk-state.json'), JSON.stringify({ layout: 1, flagged: 'x', unseenDone: [1, 'd'] }));
+    expect(loadDeskLayout(dir)).toMatchObject({ unseenDone: ['d'] });
+    expect(loadDeskLayout(dir)!.flagged).toBeUndefined();
+  });
+});

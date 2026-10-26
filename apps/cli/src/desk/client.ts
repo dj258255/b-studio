@@ -9,6 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import type { DeskDeployStatus, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
+import type { LiveChangesView } from './changes';
 import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
 import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskSpend, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
@@ -348,6 +349,11 @@ export class StudioClient {
   /** 체크포인트 하나의 diff(시크릿 값은 서버가 가린다) */
   async checkpointPatch(id: string, sha: string): Promise<string> {
     return (await this.#request<{ patch: string }>('GET', `${sessionPath(id)}/checkpoints/${encodeURIComponent(sha)}`)).patch;
+  }
+
+  /** 마지막 체크포인트 뒤의 지금 변경(#924). 시크릿 값과 비밀 파일은 서버가 가리고 뺀다 */
+  liveChanges(id: string): Promise<LiveChangesView> {
+    return this.#request('GET', `${sessionPath(id)}/changes`);
   }
 
   /** 체크포인트로 되돌린다. 시작만 하고 돌아온다(진행은 세션 이벤트로 온다) */
