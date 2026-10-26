@@ -98,8 +98,8 @@ class FakeClient implements DeskClient {
     this.calls.push(`propose ${folder}`);
     return proposal;
   }
-  async registerFolder(folder: string) {
-    this.calls.push(`register ${folder}`);
+  async registerFolder(folder: string, workspace?: { test: readonly string[] }) {
+    this.calls.push(`register ${folder}${workspace ? ` ${JSON.stringify(workspace.test)}` : ''}`);
     this.projectList = [...this.projectList, { id: 'shop', name: 'shop' }];
     return { id: 'shop', created: true, written: ['studio.yaml'], excluded: true };
   }
@@ -147,6 +147,36 @@ describe('폴더 열기(#916)', () => {
     expect(ctx.app.state.folder).toBeUndefined();
     expect(ctx.app.state.prompt).toMatchObject({ step: 'request', projects: [{ id: 'shop', name: 'shop' }], projectIndex: 0 });
     expect(ctx.app.state.message).toContain('‹shop›을 프로젝트로 등록했습니다');
+  });
+
+  it('코드·테스트만 등록에서 고른 테스트 명령을 스튜디오에 실어 보낸다(#946)', async () => {
+    const client = new FakeClient([item('a')]);
+    client.proposeFolder = async (folder: string) => {
+      client.calls.push(`propose ${folder}`);
+      return {
+        detection: {
+          folder: '/Users/me/shop',
+          name: 'shop',
+          hasSpec: false,
+          services: [],
+          infra: [],
+          defaultInfra: [],
+          warnings: [],
+          workspace: { language: 'Rust', image: 'rust:1-bookworm', candidates: [{ label: 'cargo test', source: 'Cargo.toml', command: ['cargo', 'test'] }] },
+        },
+        files: [],
+      } as never;
+    };
+    const ctx = setup([item('a')], client);
+    ctx.io.type('\x02a');
+    await tick();
+    ctx.io.type('shop\r');
+    await tick();
+    expect(screenText(ctx.io)).toContain('cargo test');
+    ctx.io.type('y');
+    await tick();
+    expect(client.calls).toContain('register /Users/me/shop ["cargo","test"]');
+    expect(ctx.app.state.prompt).toBeDefined();
   });
 
   it('없는 폴더를 쓰면 까닭을 보이고, 고쳐 쓰면 다시 받는다', async () => {
