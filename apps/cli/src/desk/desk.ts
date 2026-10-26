@@ -12,6 +12,8 @@ import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
 import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { changesFailed, changesLoaded, openChanges, type ChangesEffect, type ChangesState, type DeskComment } from './changes';
+import { loadComments, saveComments } from './comments-store';
 import { applyListing, listingFailed, type FolderEffect, type FolderState } from './folder';
 import { PaneTerminal } from './pane';
 import type { DeskPlan, LaneChoice, PlansEffect, PlansState } from './plans';
@@ -249,6 +251,18 @@ export function shellEnvOf(env: Record<string, string | undefined>): Record<stri
   return { ...out, TERM: 'xterm-256color', COLORTERM: 'truecolor' };
 }
 
+/** 지금 변경 화면의 의견을 읽고 쓰는 곳(#924, 실제로는 desk-comments.json, 없으면 desk를 띄운 동안만 메모리에 둔다) */
+export interface DeskCommentStore {
+  load(sessionId: string): DeskComment[];
+  save(sessionId: string, comments: readonly DeskComment[]): void;
+}
+
+/** 파일 없이 desk를 띄운 동안만 의견을 든다(테스트와 설정 폴더가 없는 손님) */
+function memoryComments(): DeskCommentStore {
+  const kept = new Map<string, DeskComment[]>();
+  return { load: (id) => [...(kept.get(id) ?? [])], save: (id, comments) => void kept.set(id, [...comments]) };
+}
+
 /** 배치를 읽고 쓰는 곳(실제로는 desk-state.json, 테스트에서는 메모리) */
 export interface DeskLayoutStore {
   load(): DeskLayout | undefined;
@@ -278,6 +292,8 @@ export interface DeskAppOptions {
   /** 설정한 앞글쇠(없으면 Ctrl-b) */
   prefix?: DeskPrefix;
   layoutStore?: DeskLayoutStore;
+  /** 지금 변경 화면의 의견(#924) */
+  commentStore?: DeskCommentStore;
   /** 시작할 때 아래 줄에 보일 설정 알림(잘못된 값) */
   warnings?: string[];
   /** 셸 칸을 띄우는 자리(기본은 node-pty, #873) */
@@ -311,7 +327,12 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   /** 실행·배포·미리보기·저장소 화면(#895). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RuntimeCall>> &
   /** 폴더 열기(#916). 없으면 그 화면에서 할 수 없다고 알린다 */
-  Partial<Pick<StudioClient, FolderCall>>;
+  Partial<Pick<StudioClient, FolderCall>> &
+  /** 지금 변경(#924). 없으면 그 화면에서 할 수 없다고 알린다 */
+  Partial<Pick<StudioClient, ChangesCall>>;
+
+/** 지금 변경 화면이 부르는 스튜디오 API(#924) */
+type ChangesCall = 'liveChanges';
 
 /** 실행 화면이 부르는 스튜디오 API(#895) */
 /** 폴더 열기가 부르는 스튜디오 API(#916) */
@@ -449,6 +470,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     graphics: graphicsMode(env, config.graphics),
     ...(config.prefix ? { prefix: config.prefix } : {}),
     layoutStore: { load: () => loadDeskLayout(dir), save: (layout) => saveDeskLayout(dir, layout) },
+    commentStore: { load: (id) => loadComments(dir, id), save: (id, comments) => saveComments(dir, id, comments) },
     warnings,
   });
   const code = await app.run();
@@ -497,6 +519,7 @@ export class DeskApp {
   readonly #mouseOn: boolean;
   readonly #truecolor: boolean;
   readonly #layoutStore: DeskLayoutStore | undefined;
+  readonly #commentStore: DeskCommentStore;
   /** 배치를 저장하지 못한 것을 이미 알렸다(같은 알림을 되풀이하지 않는다) */
   #layoutWarned = false;
   /** 나갈 때 배치를 저장하지 못했으면 화면을 되돌린 뒤 보일 글 */
@@ -548,6 +571,7 @@ export class DeskApp {
     this.#mouseOn = options.mouse !== false;
     this.#truecolor = options.truecolor !== false;
     this.#layoutStore = options.layoutStore;
+    this.#commentStore = options.commentStore ?? memoryComments();
     this.#spawnShell = options.spawnShell ?? spawnWithNodePty;
     this.#shellEnv = options.shellEnv ?? process.env;
     this.#shellCwd = options.shellCwd ?? process.cwd();
@@ -843,6 +867,61 @@ export class DeskApp {
         return;
       case 'folder':
         void this.#folderEffect(effect.effect);
+        return;
+      case 'changes-open':
+        this.#openChanges(effect.id, effect.title);
+        return;
+      case 'changes':
+        void this.#changesEffect(effect.effect);
+        return;
+    }
+  }
+
+  // ─── 지금 변경(#924) ───
+
+  #openChanges(id: string, title: string): void {
+    let comments: DeskComment[] = [];
+    try {
+      comments = this.#commentStore.load(id);
+    } catch {
+      // 읽지 못한 의견은 없는 것으로 연다(화면은 변경을 먼저 보인다)
+    }
+    const opened = openChanges(id, title, comments);
+    this.#state = { ...this.#state, changes: opened.state };
+    for (const effect of opened.effects) void this.#changesEffect(effect);
+  }
+
+  #patchChanges(id: string, change: (state: ChangesState) => ChangesState): void {
+    const changes = this.#state.changes;
+    if (!changes || changes.id !== id) return;
+    this.#state = { ...this.#state, changes: change(changes) };
+    this.#scheduleRender();
+  }
+
+  async #changesEffect(effect: ChangesEffect): Promise<void> {
+    switch (effect.type) {
+      case 'close':
+        return;
+      case 'load':
+        try {
+          const data = await this.#call('liveChanges')(effect.id);
+          this.#patchChanges(effect.id, (state) => changesLoaded(state, data));
+        } catch (error) {
+          this.#patchChanges(effect.id, (state) => changesFailed(state, messageOf(error)));
+        }
+        return;
+      case 'save-comments':
+        try {
+          this.#commentStore.save(effect.id, effect.comments);
+        } catch (error) {
+          this.#patchChanges(effect.id, (state) => ({ ...state, note: `의견을 저장하지 못했습니다: ${messageOf(error)}` }));
+        }
+        return;
+      case 'send':
+        await this.#work(effect.id, effect.text, {
+          done: `의견 ${effect.count}개를 칸에 넣었습니다. 살펴보고 Enter로 보냅니다(보낸 의견은 x로 해결 표시할 때까지 다음 묶음에도 들어갑니다)`,
+          blocked: (text) => this.#patchChanges(effect.id, (state) => ({ ...state, note: text })),
+        });
         return;
     }
   }
@@ -1232,7 +1311,7 @@ export class DeskApp {
   }
 
   /** 기록 화면·세션 자세히의 API. 옛 손님이 그 API를 모르면 부를 때 실패로 알린다(화면은 까닭을 보인다) */
-  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall | RuntimeCall | FolderCall>(name: K): StudioClient[K] {
+  #call<K extends RecordsCall | PlansCall | RequirementsCall | FleetsCall | RuntimeCall | FolderCall | ChangesCall>(name: K): StudioClient[K] {
     const method = this.#client[name];
     if (method) return method.bind(this.#client) as StudioClient[K];
     return (async () => {
@@ -1663,19 +1742,27 @@ export class DeskApp {
    * "이 요구사항으로 작업"(#894): 화면을 닫고 세션을 칸에 연 뒤(이미 있으면 그 칸) 글을 CLI 입력 칸에 넣는다. 보내기(Enter)는 사람이 한다.
    * 안쪽 CLI가 붙여넣기 표지를 켜면 여러 줄 그대로 붙여 넣고, 켜지 않으면 줄바꿈을 띄어쓰기로 바꾼다(줄바꿈이 곧 보내기가 되지 않게)
    */
-  async #work(sessionId: string, text: string): Promise<void> {
+  async #work(
+    sessionId: string,
+    text: string,
+    say: { done: string; blocked: (text: string) => void } = {
+      done: '작업 글을 칸에 넣었습니다. 살펴보고 Enter로 보냅니다',
+      blocked: (note) => this.#patchRequirements(sessionId, (current) => ({ ...current, note })),
+    },
+  ): Promise<void> {
     const state = this.#state;
     let slot = state.slots.findIndex((id, at) => id === sessionId && at < state.layout);
     if (slot < 0) {
       slot = !isShellId(state.slots[state.focus]) ? state.focus : state.slots.findIndex((id, at) => at < state.layout && !isShellId(id));
       if (slot < 0) {
-        this.#patchRequirements(sessionId, (current) => ({ ...current, note: '모든 칸에 셸이 돌고 있습니다. 칸을 하나 비운 뒤 다시 합니다' }));
+        say.blocked('모든 칸에 셸이 돌고 있습니다. 칸을 하나 비운 뒤 다시 합니다');
         return;
       }
     }
     const slots = [...state.slots];
     slots[slot] = sessionId;
-    this.#state = { ...state, requirements: undefined, slots, focus: slot, view: undefined, zoom: state.zoom && slot === state.focus };
+    // 요구사항(#894)·지금 변경(#924) 화면을 닫고 그 칸을 보인다
+    this.#state = { ...state, requirements: undefined, changes: undefined, slots, focus: slot, view: undefined, zoom: state.zoom && slot === state.focus };
     // 끝났거나 열지 못한 터미널이면 다시 연다
     if (this.#closed.delete(sessionId)) this.#sizes.delete(sessionId);
     this.#slotsChanged();
@@ -1692,7 +1779,7 @@ export class DeskApp {
     if (this.#restored) return;
     const bracketed = pane()?.modes().bracketedPaste === true;
     this.#send(sessionId, bracketed ? `\x1b[200~${text}\x1b[201~` : text.replace(/\r\n?|\n/g, ' '));
-    this.#say('작업 글을 칸에 넣었습니다. 살펴보고 Enter로 보냅니다');
+    this.#say(say.done);
   }
 
   /**
