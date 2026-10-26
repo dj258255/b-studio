@@ -10,6 +10,7 @@ import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
 import { renderRuntime, runtimeHint } from './runtime';
 import { fleetsHint, renderFleets } from './fleets';
+import { changesHint, renderChanges } from './changes';
 import { folderHint, renderFolder } from './folder';
 import { plansHint, plansScreen } from './plans';
 import { renderRequirements, requirementsHint } from './requirements';
@@ -60,8 +61,8 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · a 폴더 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
-const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · a 폴더 열기 · g 설정 · e 요구사항 · f AI 비교 · v 실행 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · d 지금 변경 · a 폴더 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · a 폴더 열기 · g 설정 · e 요구사항 · f AI 비교 · v 실행 · d 지금 변경 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · f AI 비교 · Esc 닫기 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
 export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
@@ -83,6 +84,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['t', '작업 나누기: 요청 하나를 레인 여럿으로 나눈 계획. 목록·새 계획(n)·계획 보기(단계별 레인 카드), Enter 레인 세션 열기, g 칸에 나란히, 승인 대기면 b AI·계정 · a 승인(i 이슈로 올리기) · x 거부'],
   ['e', '요구사항·문서: 명세(이 요구사항으로 작업, 사람 확인, 편집기로 고치기), 테스트, 문서 읽기, 현황. 고른 칸(카드 화면이면 고른 카드)의 세션, 카드 화면에서는 e만'],
   ['v', '실행 화면: 고른 세션의 서비스·자원, 로그(찾기), 운영 배포·되돌리기, 미리보기 주소(브라우저로 열기), 저장소(점검·이슈·PR). 스페이스 화면에서는 v만'],
+  ['d', '지금 변경: 고른 세션이 마지막 체크포인트 뒤로 바꾼 파일과 diff. 줄에서 c 의견, x 해결 표시, S 해결 안 한 의견을 묶어 그 칸 입력에 넣기(Enter는 직접). 스페이스 화면에서는 d만'],
   ['c', '고른 칸에 그냥 셸 열기(검증 밖입니다. x로 비우거나 desk를 나가면 끝나고, 칸 수를 줄이면 가려 둡니다)'],
   ['l', '칸 수 1 · 2 · 4'],
   ['z', '고른 칸 크게 보기 켜고 끄기'],
@@ -181,7 +183,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  const view = state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const view = state.changes ? '지금 변경' : state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
   const where = sessions[state.selected]?.projectName;
   lines.push(
     onBackground(
@@ -217,6 +219,15 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
     lines.push(fit(relabel(state, settingsHint(state.settings)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
+  }
+
+  if (state.changes) {
+    // 지금 변경(#924)도 사이드바 없이 본문 전체를 쓴다
+    const body = renderChanges(state.changes, { w: cols, h: Math.max(0, rows - 2) }, theme);
+    lines.push(...body.lines);
+    while (lines.length < rows - 1) lines.push(' '.repeat(cols));
+    lines.push(fit(state.message && !state.changes.note ? ` ${state.message}` : changesHint(state.changes), cols));
+    return { lines: lines.slice(0, rows) };
   }
 
   if (state.folder) {
