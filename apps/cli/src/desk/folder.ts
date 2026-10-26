@@ -60,6 +60,8 @@ export interface FolderState {
   sending?: boolean;
   /** 새 요청(Ctrl-b n)의 프로젝트 고르기에서 왔다. 등록하면 그 프로젝트로 새 요청을 이어 연다 */
   from?: 'prompt';
+  /** 처음 연 뒤 아직 아무것도 치지 않았다. 이때만 받은 홈 경로로 입력 칸을 채운다(#945: 비운 칸을 다시 채우지 않는다) */
+  seed?: boolean;
 }
 
 export type FolderEffect =
@@ -78,7 +80,7 @@ const BACKSPACE = ['\x7f', '\b'];
 const ENTER = ['\r', '\n'];
 
 export function openFolder(from?: 'prompt'): { state: FolderState; effects: FolderEffect[] } {
-  return { state: { text: '', listed: '', loading: true, row: -1, ...(from ? { from } : {}) }, effects: [{ type: 'list', path: '' }] };
+  return { state: { text: '', listed: '', loading: true, row: -1, seed: true, ...(from ? { from } : {}) }, effects: [{ type: 'list', path: '' }] };
 }
 
 /** 입력의 폴더 부분: 끝이 /면 그 폴더, 아니면 마지막 / 앞(뿌리는 /). / 가 없으면 빈 경로(홈)다 */
@@ -101,12 +103,12 @@ export function folderMatches(state: FolderState): FolderChildView[] {
   return state.listing.children.filter((child) => child.name.toLowerCase().startsWith(part));
 }
 
-/** 받은 목록을 넣는다. 처음(빈 입력)이면 그 폴더 경로로 입력 칸을 채운다 */
+/** 받은 목록을 넣는다. 처음 연 뒤(아직 치지 않은 빈 입력)에만 그 폴더 경로로 입력 칸을 채운다. 사람이 비운 칸은 그대로 둔다(#945) */
 export function applyListing(state: FolderState, requested: string, listing: FolderListingView): FolderState {
   if (requested !== state.listed) return state;
-  if (state.text === '') {
+  if (state.text === '' && state.seed) {
     const text = listing.path === '/' ? '/' : `${listing.path}/`;
-    return { ...state, text, listing, listed: dirOf(text), loading: false, error: undefined, row: -1 };
+    return { ...state, text, listing, listed: dirOf(text), loading: false, error: undefined, row: -1, seed: undefined };
   }
   return { ...state, listing, loading: false, error: undefined };
 }
@@ -117,9 +119,22 @@ export function listingFailed(state: FolderState, requested: string, error: stri
   return { ...state, listing: undefined, loading: false, error };
 }
 
+/**
+ * 채워진 경로 뒤에 새 경로를 쓰기 시작했으면 새 경로만 남긴다(#945): `…/me//private` → `/private`, `…/me/~/blog` → `~/blog`.
+ * 편집기의 파일 열기 칸과 같다. 맨 앞의 `//`는 그대로 둔다
+ */
+export function restartPath(text: string): string {
+  const tilde = Math.max(text.lastIndexOf('/~/'), text.endsWith('/~') ? text.length - 2 : -1);
+  const slashes = text.lastIndexOf('//');
+  if (tilde > 0 && tilde + 1 > slashes) return text.slice(tilde + 1);
+  if (slashes > 0) return text.slice(slashes + 1);
+  return text;
+}
+
 /** 입력이 바뀌었다: 고른 줄을 풀고, 폴더 부분이 바뀌었으면 그 목록을 청한다 */
-function retype(state: FolderState, text: string, effects: FolderEffect[]): FolderState {
-  const next: FolderState = { ...state, text, row: -1, error: undefined };
+function retype(state: FolderState, typed: string, effects: FolderEffect[]): FolderState {
+  const text = restartPath(typed);
+  const next: FolderState = { ...state, text, row: -1, error: undefined, seed: undefined };
   const dir = dirOf(text);
   if (dir === state.listed) return next;
   effects.push({ type: 'list', path: dir });

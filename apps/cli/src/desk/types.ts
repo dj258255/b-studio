@@ -115,6 +115,8 @@ export interface DeskProject {
   id: string;
   name: string;
   error?: string;
+  /** 등록한 내 폴더(#916). 저장소 예제 프로젝트에는 없다 */
+  folder?: string;
 }
 
 /** 세션 터미널 통로의 메시지(session-terminal.ts의 TerminalMessage와 같은 꼴) */
