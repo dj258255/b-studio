@@ -389,6 +389,6 @@ export function renderChanges(state: ChangesState, size: { w: number; h: number 
 export function changesHint(state: ChangesState): string {
   if (state.note) return ` ${state.note}`;
   if (state.writing) return ' 의견 쓰기 · Enter 남기기 · Ctrl-u 지우기 · Esc 그만두기';
-  if (state.focus === 'files') return ' 지금 변경 · ↑↓ 파일 · Enter·→ diff · S 의견 묶어 칸에 넣기 · r 다시 받기 · Esc 닫기';
-  return ' 지금 변경 · ↑↓ 줄 · c 의견 · x 해결 표시 · D 의견 지우기 · [ ] 앞뒤 파일 · ← 파일 목록 · S 의견 묶어 칸에 넣기 · r 다시 받기 · Esc 닫기';
+  if (state.focus === 'files') return ' 지금 변경 · ↑↓ 파일 · Enter diff · S 의견 묶어 칸에 넣기 · r 다시 받기 · Esc 닫기';
+  return ' 지금 변경 · ↑↓ 줄 · c 의견 · S 의견 묶어 칸에 넣기 · ← 파일 목록 · x 해결 표시 · [ ] 앞뒤 파일 · D 의견 지우기 · r 다시 받기 · Esc 닫기';
 }

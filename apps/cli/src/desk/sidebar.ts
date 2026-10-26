@@ -2,10 +2,10 @@
  * desk 사이드바(#887): 스페이스(프로젝트) 목록이 중심이다. 스페이스마다 소속 세션 가운데 가장 급한 상태를 점 하나로 보이고,
  * 고른 세션이 든 스페이스 아래에만 그 세션들을 한 줄씩 짧게 편다. 세션의 자세한 내용(지금 하는 일, 서브에이전트, 게이트, 토큰)은 스페이스 화면의 카드에 있다
  */
-import { fit, fitAnsi } from './screen';
+import { fit, fitAnsi, stringWidth } from './screen';
 import { fg, RESET, DEFAULT_THEME, type ColorToken, type Theme } from './theme';
 import type { DeskAgent, DeskItem, DeskUsage } from './types';
-import { statusMark } from './widgets';
+import { statusColor, statusMark } from './widgets';
 
 export type Tone = 'warn' | 'busy' | 'ok' | 'fail' | 'muted';
 
@@ -214,6 +214,41 @@ export function gateStatus(item: DeskItem): StatusBadge | undefined {
   return undefined;
 }
 
+/** 지난 시간을 짧게: 42초, 23분, 1시간4분, 2시간(#935) */
+export function shortElapsed(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  if (seconds < 60) return `${seconds}초`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}분`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest ? `${hours}시간${rest}분` : `${hours}시간`;
+}
+
+const TAG_WORD: Record<'permission' | 'question' | 'input' | 'approval', string> = { permission: '권한', question: '질문', input: '입력', approval: '승인' };
+
+/**
+ * 사이드바 세션 줄 오른쪽의 짧은 상태 글(#935). 점 색만으로는 뜻을 모른다.
+ * 급한 순(urgencyRank와 같은 차례)으로 하나만 고른다: 기다림 > 오류 > 검증 실패·확인 필요 > 끝남(안 봄) > 작업 중이면 지난 시간 > 검증 중.
+ * 그냥 쉬면 비운다. 작업 중이어도 요청을 시작한 시각(workingSince)을 모르면 비운다
+ */
+export function sessionTag(item: DeskItem, unseen: boolean, now: number): { text: string; tone: Tone; color?: ColorToken } | undefined {
+  const status = agentStatus(item, { unseen });
+  const kind = attentionKind(item);
+  if (kind && kind !== 'idle') return { text: TAG_WORD[kind], tone: status.tone, ...(status.color ? { color: status.color } : {}) };
+  if (status.tone === 'fail') return { text: '오류', tone: 'fail' };
+  const gate = gateStatus(item);
+  if (gate?.tone === 'fail') return { text: '실패', tone: 'fail' };
+  if (gate?.tone === 'warn') return { text: '확인', tone: 'warn' };
+  if (status.tone === 'ok') return { text: '끝남', tone: 'ok' };
+  if (item.state === 'working') {
+    const since = item.workingSince ? Date.parse(item.workingSince) : NaN;
+    return Number.isFinite(since) ? { text: shortElapsed(now - since), tone: 'busy' } : undefined;
+  }
+  if (gate?.tone === 'busy') return { text: '검증', tone: 'busy' };
+  return undefined;
+}
+
 /**
  * 사이드바 줄. 스페이스마다 한 줄(가장 급한 상태 점, 이름, 세션 수)이고, 고른 세션이 든 스페이스 아래에만 세션을 한 줄씩 편다.
  * slots는 세션 id → 열린 칸 번호(1부터), flagged는 알린 뒤 아직 보지 않은 세션(!로 보인다, #864), unseen은 끝났지만 아직 보지 않은 세션(#922)
@@ -226,6 +261,7 @@ export function sidebarRows(
   flagged: ReadonlySet<string> = new Set(),
   theme: Theme = DEFAULT_THEME,
   unseen: ReadonlySet<string> = new Set(),
+  now: number = Date.now(),
 ): SidebarRow[] {
   const sessions = deskSessions(items);
   const muted = fg(theme, 'muted');
@@ -250,8 +286,11 @@ export function sidebarRows(
       const item = sessions[index]!;
       const slot = slots.get(item.id);
       const flag = flagged.has(item.id) ? `${fg(theme, 'yellow')}!${RESET}` : '';
-      const marks = [flag, slot ? `${muted}${slot}${RESET}` : ''].filter(Boolean).join(' ');
-      const marksWidth = (flag ? 1 : 0) + (slot ? String(slot).length : 0) + (flag && slot ? 1 : 0);
+      const tag = sessionTag(item, unseen.has(item.id), now);
+      const word = tag ? `${fg(theme, statusColor({ label: tag.text, ...tag }))}${tag.text}${RESET}` : '';
+      const parts = [word, flag, slot ? `${muted}${slot}${RESET}` : ''].filter(Boolean);
+      const marks = parts.join(' ');
+      const marksWidth = (tag ? stringWidth(tag.text) : 0) + (flag ? 1 : 0) + (slot ? String(slot).length : 0) + Math.max(0, parts.length - 1);
       const line = `   ${statusMark(agentStatus(item, { unseen: unseen.has(item.id) }), theme)} ${item.title}`;
       rows.push({ text: spreadPlain(line, marks, marksWidth, width), selected: index === selected, item: index });
     }

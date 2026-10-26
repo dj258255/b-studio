@@ -17,6 +17,8 @@ export interface DeskItem {
   reason?: string;
   backend?: string;
   lastActivityAt: string;
+  /** 지금 요청(턴)을 시작한 시각. 작업 중일 때만 있다(#933). 옛 서버는 주지 않는다 */
+  workingSince?: string;
   /**
    * 터미널 세션일 때: CLI가 떠 있는가, 무엇을 기다리는가(권한·질문·입력 필요·쉬며 기다림), 그 까닭 한 줄(#920).
    * 옛 서버는 권한만 준다
@@ -44,8 +46,6 @@ export interface DeskItem {
   context?: DeskContext;
   /** 마지막 답의 앞부분(200자 안, #920) */
   lastMessage?: string;
-  /** 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만. "몇 분째"를 센다 */
-  workingSince?: string;
 }
 
 export interface DeskNow {
