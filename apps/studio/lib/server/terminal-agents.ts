@@ -31,6 +31,12 @@ export interface TerminalAgentRow {
   state: TerminalAgentState;
   /** 하는 일 한 줄 */
   activity?: string;
+  /** 서브에이전트 종류(Explore 등, #920). 훅으로 인스턴스를 알면 인스턴스마다 한 행이다 */
+  type?: string;
+  /** 서브에이전트에게 맡긴 일(#920) */
+  description?: string;
+  /** 서브에이전트가 지금 쓰는 도구(#920) */
+  tool?: string;
   tokens: AgentUsage;
   /** 추정 비용. 단가도 CLI가 보고한 비용도 없으면 없다 */
   costUsd?: number;

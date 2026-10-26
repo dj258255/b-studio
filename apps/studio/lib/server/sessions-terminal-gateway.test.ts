@@ -146,7 +146,7 @@ vi.mock('./session-terminal', () => ({
 
 import { sessionFile, stateDirOf } from './session-store';
 import { agentRows, restoreAgentLedger } from './terminal-agents';
-import { cancelRun, createSession, getSnapshot, setTerminalCheckChanges, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, setTerminalCheckChanges, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -2574,6 +2574,27 @@ describe('터미널 세션의 확인 선언 변경 허용(#916, ADR-164): 켜 �
     expect(getSnapshot(session.id)!.allowCheckChangesNext).toBe(true);
     expect(setTerminalCheckChanges(session.id, false)).toBe(false);
     expect(getSnapshot(session.id)!.allowCheckChangesNext).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('터미널 CLI가 지금 하는 일을 훅으로 모은다(#920)', () => {
+  it('읽기 도구(지켜보는 훅)·쓰기 직전·상태 줄·할 일이 쌓이고, 턴이 끝나면 지금 하는 일을 지우고 마지막 답을 남긴다', async () => {
+    const session = await open();
+    expect(sessionTerminalActivity(session.id)).toBeUndefined();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.activity!({ hook_event_name: 'PreToolUse', tool_name: 'Grep', tool_input: { pattern: 'Order' } });
+    expect(sessionTerminalActivity(session.id)?.now).toMatchObject({ tool: 'Grep', target: 'Order' });
+    await session.gateway.preTool({ tool_name: 'Bash', tool_input: { command: 'ls' } });
+    expect(sessionTerminalActivity(session.id)?.now).toMatchObject({ tool: 'Bash', target: 'ls' });
+    await session.gateway.statusline!({ context_window: { used_percentage: 30 } });
+    expect(sessionTerminalActivity(session.id)?.context).toEqual({ usedPct: 30 });
+    await session.gateway.activity!({ hook_event_name: 'TaskCreated', task_id: '1', task_subject: '메모 필드' });
+    expect(sessionTerminalActivity(session.id)?.todos).toEqual({ done: 0, total: 1 });
+    await session.gateway.stop({ last_assistant_message: '바꾼 것이 없습니다.' });
+    const after = sessionTerminalActivity(session.id)!;
+    expect(after.now).toBeUndefined();
+    expect(after.lastMessage).toBe('바꾼 것이 없습니다.');
     await stopSession(session.id);
   }, 30_000);
 });

@@ -82,6 +82,13 @@ export const AGENT_HOOK_EVENTS = {
   'session-end': 10,
   /** CLI가 사람을 기다릴 때(확인 창·되묻기·입력 대기). 실행이 사람을 기다린다는 표시를 남긴다(B7). 판정을 바꾸지 않는다 */
   notification: 15,
+  /**
+   * 지켜보기만 하는 훅(#920): 읽기 도구의 쓰기 직전, 도구의 끝, 서브에이전트의 시작·끝, 할 일의 생김·끝남.
+   * CLI가 기다리지 않게 따로(async) 돈다. 화면의 "지금 하는 일"에만 쓴다
+   */
+  activity: 5,
+  /** 상태 줄(#920). 문맥 창을 관문에 알리고 사용자의 원래 상태 줄을 이어 부른다. 상태 줄은 짧게 끝나야 한다 */
+  statusline: 3,
 } as const;
 export type AgentHookEvent = keyof typeof AGENT_HOOK_EVENTS;
 /**
@@ -100,6 +107,10 @@ const AGENT_PING_SECONDS = 5;
 export const AGENT_READ_TOOLS = ['Read', 'Glob', 'Grep', 'WebFetch', 'WebSearch', 'TodoWrite', 'ToolSearch', 'AskUserQuestion', 'Agent', 'Task'] as const;
 /** 쓰기 직전의 훅을 거는 도구 이름의 패턴: 읽기 도구가 아닌 모든 것 */
 export const AGENT_WRITE_TOOL_MATCHER = `^(?!(?:${AGENT_READ_TOOLS.join('|')})$).+`;
+/** 읽기 도구에만 거는 패턴(#920). 쓰기 직전의 훅과 겹치지 않는다 — 한 도구에는 둘 중 하나만 걸린다 */
+export const AGENT_READ_TOOL_MATCHER = `^(?:${AGENT_READ_TOOLS.join('|')})$`;
+/** 사용자의 원래 상태 줄 명령을 적어 두는 관문 파일(#920). 이 컴퓨터 방식에서 원래 명령이 있을 때만 둔다 */
+export const STATUSLINE_FILE = 'statusline.json';
 export const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
 export const GATEWAY_FILE_NAME = 'b-studio-gateway.json';
 /** 훅을 돌릴 node. 이름으로 찾지 않는다 — 터미널의 PATH는 홈 폴더의 실행 파일 자리가 앞에 있어, 거기에 같은 이름을 두면 훅이 바뀐다 */
@@ -145,6 +156,7 @@ export function isReadOnlyPrompt(prompt: string): boolean {
 }
 
 export const AGENT_HOOK_SCRIPT = `// b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import http from 'node:http';
 
@@ -192,7 +204,38 @@ try {
 } catch {
   // 아래에서 주소가 없는 것으로 다룬다
 }
-if (typeof base !== 'string' || typeof token !== 'string' || !base || !token) unreachable('관문의 주소를 읽지 못했습니다');
+// 상태 줄(#920): 입력을 관문에 알리고(닿지 못해도 상관없다) 옆 파일에 적힌 사용자의 원래 상태 줄을 같은 입력으로 불러 그 출력을 낸다
+if (event === 'statusline') {
+  await new Promise((resolve) => {
+    if (typeof base !== 'string' || typeof token !== 'string' || !base || !token) return resolve();
+    try {
+      const notice = http.request(new URL(base + '/statusline'), { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': body.length, authorization: 'Bearer ' + token } }, (response) => {
+        response.resume();
+        response.on('end', resolve);
+        response.on('error', resolve);
+      });
+      notice.setTimeout(1000, () => notice.destroy());
+      notice.on('error', resolve);
+      notice.end(body);
+    } catch {
+      resolve();
+    }
+  });
+  let command;
+  try {
+    command = JSON.parse(readFileSync(new URL('./${STATUSLINE_FILE}', import.meta.url), 'utf8')).command;
+  } catch {
+    // 원래 상태 줄이 없다
+  }
+  if (typeof command !== 'string' || !command.trim()) process.exit(0);
+  const line = spawn('/bin/sh', ['-c', command], { stdio: ['pipe', 'inherit', 'inherit'] });
+  line.on('error', () => process.exit(0));
+  line.on('exit', (code) => process.exit(code ?? 0));
+  line.stdin.on('error', () => {});
+  line.stdin.end(body);
+  // 원래 상태 줄이 끝나면(exit) 끝난다. 그때까지 아래의 훅 처리로 내려가지 않는다
+  await new Promise(() => {});
+} else if (typeof base !== 'string' || typeof token !== 'string' || !base || !token) unreachable('관문의 주소를 읽지 못했습니다');
 
 let url;
 try {
@@ -200,6 +243,9 @@ try {
 } catch {
   unreachable('관문의 주소를 읽지 못했습니다');
 }
+if (event !== 'statusline') send();
+
+function send() {
 const request = http.request(url, { method: 'POST', headers: { 'content-type': 'application/json', 'content-length': body.length, authorization: 'Bearer ' + token } }, (response) => {
   const parts = [];
   response.on('data', (part) => parts.push(part));
@@ -217,6 +263,7 @@ const request = http.request(url, { method: 'POST', headers: { 'content-type': '
 request.setTimeout(Math.max(1, TIMEOUT_SECONDS[event] - 3) * 1000, () => request.destroy(new Error('시간 초과')));
 request.on('error', (error) => unreachable(error.code ?? error.message));
 request.end(body);
+}
 `;
 
 /**
@@ -291,6 +338,8 @@ export function agentManagedSettings(address: Pick<AgentGatewayAddress, 'hookUrl
  */
 export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string, address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>): Record<string, unknown> {
   const hook = (event: AgentHookEvent) => ({ type: 'command', command: hookCommand(event), timeout: AGENT_HOOK_EVENTS[event] });
+  // 지켜보기만 하는 훅(#920). CLI는 기다리지 않고 다음 일을 한다(async). 답도 읽지 않는다
+  const observe = (event: AgentHookEvent) => ({ ...hook(event), async: true });
   return {
     // b-studio 도구는 서비스 컨테이너 안에서 돌고 b-studio의 실행 정책을 거친다. 호출마다 묻지 않게 한다
     permissions: { allow: [`mcp__${MCP_SERVER}`] },
@@ -303,12 +352,27 @@ export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string, 
     hooks: {
       SessionStart: [{ hooks: [hook('session-start')] }],
       UserPromptSubmit: [{ hooks: [hook('prompt')] }],
-      PreToolUse: [{ matcher: AGENT_WRITE_TOOL_MATCHER, hooks: [hook('pre-tool')] }],
+      PreToolUse: [
+        { matcher: AGENT_WRITE_TOOL_MATCHER, hooks: [hook('pre-tool')] },
+        // 읽기 도구는 기다리지 않고 지켜보기만 한다(#920). 화면의 "지금 하는 일"과 할 일 목록(TodoWrite)에 쓴다
+        { matcher: AGENT_READ_TOOL_MATCHER, hooks: [observe('activity')] },
+      ],
       Stop: [{ hooks: [hook('stop')] }],
       SessionEnd: [{ hooks: [hook('session-end')] }],
       // 사람을 기다리는 창이 뜨면 알린다(B7). matcher는 입력의 notification_type을 본다
       Notification: [{ matcher: AGENT_NOTIFICATION_MATCHER, hooks: [hook('notification')] }],
+      // 권한 확인 창이 뜨는 그 순간 알린다(#920). Notification의 permission_prompt는 몇 초 늦게 온다. 답은 주지 않는다
+      PermissionRequest: [{ hooks: [observe('notification')] }],
+      // 지켜보기만 하는 훅(#920): 도구의 끝, 서브에이전트, 할 일
+      PostToolUse: [{ hooks: [observe('activity')] }],
+      PostToolUseFailure: [{ hooks: [observe('activity')] }],
+      SubagentStart: [{ hooks: [observe('activity')] }],
+      SubagentStop: [{ hooks: [observe('activity')] }],
+      TaskCreated: [{ hooks: [observe('activity')] }],
+      TaskCompleted: [{ hooks: [observe('activity')] }],
     },
+    // 문맥 창을 아는 곳은 상태 줄의 입력뿐이다(#920). 훅 스크립트가 받아 관문에 알리고, 사용자의 원래 상태 줄이 있으면 이어 부른다
+    statusLine: { type: 'command', command: hookCommand('statusline') },
   };
 }
 

@@ -33,6 +33,13 @@ export interface TerminalGatewayHandlers {
    */
   notification(input: HookInput): Promise<void>;
   /**
+   * 지켜보기만 하는 훅(#920): 읽기 도구의 쓰기 직전, 도구의 끝, 서브에이전트의 시작·끝, 할 일. CLI는 답을 기다리지 않는다.
+   * 화면의 "지금 하는 일"에만 쓴다. 던져도 빈 답이 간다
+   */
+  activity?(input: HookInput): Promise<void>;
+  /** 상태 줄 입력(#920). 문맥 창을 얼마나 썼는지 알 수 있다. 던져도 빈 답이 간다 */
+  statusline?(input: HookInput): Promise<void>;
+  /**
    * CLI가 OTLP/HTTP JSON으로 보낸 텔레메트리 로그 한 묶음(#726). 모델 요청 하나가 끝날 때마다 온다.
    * 판정이 아니라 통로다 — 여기서 던져도 터미널의 CLI는 그대로 돈다(응답은 5xx)
    */
@@ -59,7 +66,7 @@ const say = (message: string | undefined): Record<string, unknown> => (message ?
 export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput) => Promise<Record<string, unknown>>> {
   const routes = hookRoutes(handlers);
   // CLI의 훅 입력에는 대화 id(session_id)가 실린다(Claude Code는 모든 훅, Codex도 같은 이름). 텔레메트리와 ping은 훅 입력이 아니다
-  for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end'] as const) {
+  for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end', '/activity'] as const) {
     const route = routes[name];
     routes[name] = async (input) => {
       if (typeof input.session_id === 'string' && input.session_id) {
@@ -109,6 +116,15 @@ function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEven
     // CLI가 확인 창·되묻기·입력 대기에서 멈췄다(B7). 알리기만 하고 빈 답(200)을 준다 — 결정을 바꾸지 않는다
     '/notification': async (input) => {
       await handlers.notification(input);
+      return {};
+    },
+    // 지켜보기만 한다(#920). 처리가 던져도 빈 답이다 — CLI는 이 답을 읽지 않고, 판정과 상관없다
+    '/activity': async (input) => {
+      await handlers.activity?.(input).catch(() => {});
+      return {};
+    },
+    '/statusline': async (input) => {
+      await handlers.statusline?.(input).catch(() => {});
       return {};
     },
   };

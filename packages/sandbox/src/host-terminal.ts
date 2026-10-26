@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import {
@@ -16,6 +17,7 @@ import {
   gatewayDirFor,
   gatewaySettings,
   HOOK_SCRIPT_NAME,
+  STATUSLINE_FILE,
   type AgentGatewayAddress,
   type AgentHookEvent,
   type AgentTerminal,
@@ -41,6 +43,7 @@ const execFileAsync = promisify(execFile);
 
 /** 이 컴퓨터의 CLI가 b-studio의 훅 서버·도구 서버를 부르는 주소의 호스트 */
 export const HOST_GATEWAY_HOST = '127.0.0.1';
+export { STATUSLINE_FILE };
 const SETTINGS_FILE = 'settings.json';
 const MCP_FILE = 'mcp.json';
 const WRAPPER_DIR = 'bin';
@@ -65,6 +68,7 @@ const GATEWAY_FILE_NAMES = [
   MCP_FILE,
   HOOK_SCRIPT_NAME,
   GATEWAY_FILE_NAME,
+  STATUSLINE_FILE,
   CODEX_ENV_FILE,
   path.join(WRAPPER_DIR, 'claude'),
   path.join(WRAPPER_DIR, 'codex'),
@@ -99,6 +103,28 @@ export interface HostCli {
    * 없으면 기본 계정이라 아무것도 넘기지 않는다(사용자가 셸에서 정한 값이 그대로 간다)
    */
   configDir?: string;
+  /**
+   * 사용자가 쓰던 Claude 상태 줄 명령(#920). b-studio의 상태 줄이 문맥 창을 관문에 알린 뒤 이 명령을 이어 부른다.
+   * 실행 인자의 설정이 사용자 설정의 상태 줄을 덮으므로, 이어 부르지 않으면 사용자의 상태 줄이 사라진다
+   */
+  statusLine?: string;
+}
+
+/**
+ * 사용자의 Claude 상태 줄 명령을 읽기만 한다(#920). 계정 폴더(없으면 ~/.claude)의 settings.json에서 `statusLine.command`.
+ * 없거나 꼴이 틀리거나, b-studio 훅 스크립트를 부르는 명령이면(자기 자신을 다시 부르게 된다) undefined
+ */
+export async function userStatusLineCommand(configDir: string | undefined, home: string = homedir()): Promise<string | undefined> {
+  const file = path.join(configDir ?? path.join(home, '.claude'), 'settings.json');
+  try {
+    const parsed: unknown = JSON.parse(await readFile(file, 'utf8'));
+    const line = typeof parsed === 'object' && parsed !== null ? (parsed as { statusLine?: unknown }).statusLine : undefined;
+    const command = typeof line === 'object' && line !== null ? (line as { command?: unknown }).command : undefined;
+    if (typeof command !== 'string' || !command.trim() || command.includes(HOOK_SCRIPT_NAME)) return undefined;
+    return command;
+  } catch {
+    return undefined;
+  }
 }
 
 /** CLI마다 계정 설정 폴더를 받는 환경 변수(#885) */
@@ -430,6 +456,8 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
     [GATEWAY_FILE_NAME]: addressFile,
     [path.join(WRAPPER_DIR, 'claude')]: { content: hostCliWrapper(dir, cli.cliPath, cli.configDir), mode: 0o700 },
+    // 사용자의 원래 상태 줄(#920). 훅 스크립트가 옆의 이 파일을 읽어 이어 부른다
+    ...(cli.statusLine ? { [STATUSLINE_FILE]: file(`${JSON.stringify({ command: cli.statusLine })}\n`) } : {}),
     ...shell,
   };
 }
@@ -482,7 +510,10 @@ export async function writeHostGatewayConfig(sandboxId: string, address: AgentGa
   // 이미 있던 폴더에는 mkdir의 mode가 적용되지 않는다. 부를 때마다 다시 조인다
   await chmodRealDir(dir, 0o700);
   for (const name of GATEWAY_DIRS) await chmodRealDir(path.join(dir, name), 0o700);
-  for (const [name, { content, mode }] of Object.entries(expectedHostGatewayFiles(address, dir, cli))) {
+  const expected = expectedHostGatewayFiles(address, dir, cli);
+  // 사용자가 상태 줄을 지웠으면 지난번에 적어 둔 원래 명령도 지운다(#920). 링크면 자리만 지운다
+  if (!(STATUSLINE_FILE in expected)) await rm(path.join(dir, STATUSLINE_FILE), { force: true }).catch(() => {});
+  for (const [name, { content, mode }] of Object.entries(expected)) {
     const target = path.join(dir, name);
     // 기대하는 자리가 보통 파일이 아니면(없거나, 심볼릭 링크거나, 폴더면) 다시 쓴다. 링크를 남겨 두면 검사가 매번 위반으로 본다
     const info = await lstat(target).catch(() => undefined);

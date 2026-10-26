@@ -15,8 +15,9 @@ import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-eve
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
 import { sessionTerminalPresence } from './session-terminal';
+import type { ActivityContext, ActivityNow, ActivitySubagent, ActivityTodos, TerminalActivityView } from './terminal-activity';
 import type { AgentCapabilities, TerminalAgentRow } from './terminal-agents';
-import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalAgents } from './sessions';
+import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents } from './sessions';
 import { listTaskPlans } from './task-plans';
 import { buildTokenReports, tokenPricing, type TokenPricing } from './token-report';
 
@@ -71,6 +72,14 @@ export interface AgentItem {
   accountId?: string;
   /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
   checkChangesArmed?: true;
+  /** 터미널 CLI가 지금(또는 방금) 쓰는 도구와 대상(#920). 턴이 끝나면 없다 */
+  now?: ActivityNow;
+  /** 에이전트의 할 일 목록 진행(#920) */
+  todos?: ActivityTodos;
+  /** 문맥 창을 얼마나 썼는가(#920). Claude 상태 줄에서만 온다 */
+  context?: ActivityContext;
+  /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
+  lastMessage?: string;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -79,8 +88,21 @@ export type { AgentCapabilities };
 
 export interface AgentTerminalStatus {
   cli: 'up' | 'down';
-  waiting?: 'permission';
+  /** 사람을 기다리는 까닭(#920): 권한 확인·되묻기·입력 필요·입력 대기. CLI가 떠 있을 때만 */
+  waiting?: AgentWaitingKind;
+  /** 기다리는 까닭 한 줄(CLI가 보인 문구, #920). 없으면 없다 */
+  message?: string;
 }
+
+export type AgentWaitingKind = 'permission' | 'question' | 'input' | 'idle';
+
+/** CLI의 알림 종류 → 화면이 쓰는 기다림의 종류(#920). 모르는 종류는 싣지 않는다 */
+const WAITING_KIND: Readonly<Record<string, AgentWaitingKind>> = {
+  permission_prompt: 'permission',
+  elicitation_dialog: 'question',
+  agent_needs_input: 'input',
+  idle_prompt: 'idle',
+};
 
 /**
  * verifying: 지금 실행에서 검증이 시작됐고 아직 결과가 없다. passed·failed: 지금(또는 마지막) 실행의 마지막 검증 판정.
@@ -124,6 +146,8 @@ export interface SessionOverviewSource {
   agents?: readonly TerminalAgentRow[];
   /** 할 수 있는 범위(withDeskFacts가 붙인다, #843) */
   capabilities?: AgentCapabilities;
+  /** 터미널 CLI의 활동(withDeskFacts가 붙인다, #920) */
+  live?: TerminalActivityView;
 }
 
 /** studio desk 사이드바의 사실을 모으는 곳. 테스트가 바꿔 끼운다 */
@@ -134,6 +158,8 @@ export interface DeskFactDeps {
   agents?: (sessionId: string) => readonly TerminalAgentRow[] | undefined;
   /** 할 수 있는 범위(#843). 주지 않으면 붙이지 않는다 */
   capabilities?: (sessionId: string) => AgentCapabilities | undefined;
+  /** 터미널 CLI의 활동(#920). 주지 않으면 붙이지 않는다 */
+  live?: (sessionId: string) => TerminalActivityView | undefined;
 }
 
 /** 수집한 세션에 터미널 CLI 상태와 비용을 붙인다(#835). 모르는 값은 붙이지 않는다 */
@@ -143,12 +169,14 @@ export function withDeskFacts(sessions: readonly SessionOverviewSource[], deps: 
     const costUsd = deps.costUsd(source.snapshot.id);
     const agents = deps.agents?.(source.snapshot.id);
     const capabilities = deps.capabilities?.(source.snapshot.id);
+    const live = deps.live?.(source.snapshot.id);
     return {
       ...source,
       ...(terminal ? { terminal } : {}),
       ...(costUsd !== undefined ? { costUsd } : {}),
       ...(agents && agents.length > 0 ? { agents } : {}),
       ...(capabilities ? { capabilities } : {}),
+      ...(live ? { live } : {}),
     };
   });
 }
@@ -191,6 +219,7 @@ interface AgentRow {
   costUsd?: number;
   agents?: readonly TerminalAgentRow[];
   capabilities?: AgentCapabilities;
+  live?: TerminalActivityView;
 }
 
 function emptyUsage(): AgentUsage {
@@ -292,8 +321,9 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
   return { items, totals: totalsOf(items) };
 }
 
-function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities'> {
+function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities' | 'live'> {
   return {
+    ...(source.live ? { live: source.live } : {}),
     ...(source.terminal ? { terminal: source.terminal } : {}),
     ...(source.costUsd !== undefined ? { costUsd: source.costUsd } : {}),
     ...(source.agents ? { agents: source.agents } : {}),
@@ -320,6 +350,7 @@ export async function listAgentOverview(user: string): Promise<{ items: AgentIte
     },
     agents: (id) => sessionTerminalAgents(id, pricing),
     capabilities: (id) => sessionCapabilities(id),
+    live: (id) => sessionTerminalActivity(id),
   });
   return buildAgentOverview({ sessions, plans: listTaskPlans(user), fleets: listFleets(user) });
 }
@@ -360,18 +391,64 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.snapshot ? { gate: gateStatusOf(row.snapshot, row.recent ?? []) } : {}),
     ...(row.costUsd !== undefined ? { costUsd: row.costUsd } : {}),
     // 메인 행의 상태는 이 항목의 실행 상태다. 장부는 실행 상태를 모른다
-    ...(row.agents ? { agents: row.agents.map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent)) } : {}),
+    ...agentsOf(row.agents, row.live?.subagents, state),
     ...(row.capabilities ? { capabilities: row.capabilities } : {}),
     ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
     // 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916). desk가 카드와 세션 자세히에 보인다
     ...(row.snapshot?.allowCheckChangesNext ? { checkChangesArmed: true as const } : {}),
+    // 터미널 CLI의 활동(#920). 서버가 훅에서 모은 그대로 싣는다
+    ...(row.live?.now ? { now: row.live.now } : {}),
+    ...(row.live?.todos ? { todos: row.live.todos } : {}),
+    ...(row.live?.context ? { context: row.live.context } : {}),
+    ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
   };
 }
 
-/** 권한 확인 창(permission_prompt)만 권한 대기로 본다. 입력 대기·되묻기는 사이드바의 작업 상태가 보인다 */
+
+const ZERO_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+/**
+ * 에이전트 내역(#843)에 훅으로 안 서브에이전트 인스턴스를 합친다(#920). desk 카드는 agents의 subagent 행을 읽는다.
+ * Claude 텔레메트리는 종류 단위로만 토큰을 알려 주므로, 인스턴스를 아는 종류는 그 종류의 행을 인스턴스 행들로 바꾸고
+ * 종류의 토큰·비용은 그 종류의 첫 인스턴스 행에 싣는다(행의 합은 그대로). 메인 행의 상태는 이 항목의 실행 상태다
+ */
+function agentsOf(ledger: readonly TerminalAgentRow[] | undefined, instances: readonly ActivitySubagent[] | undefined, state: AgentState): { agents?: AgentDetail[] } {
+  const rows: AgentDetail[] = (ledger ?? []).map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent));
+  if (!instances || instances.length === 0) return rows.length > 0 ? { agents: rows } : {};
+  const byType = new Map<string, ActivitySubagent[]>();
+  for (const instance of instances) byType.set(instance.type, [...(byType.get(instance.type) ?? []), instance]);
+  const instanceRow = (instance: ActivitySubagent, carried?: TerminalAgentRow): AgentDetail => ({
+    id: `claude:agent:${instance.id}`,
+    name: instance.description ?? instance.type,
+    kind: 'subagent',
+    state: instance.state,
+    type: instance.type,
+    ...(instance.description ? { description: instance.description } : {}),
+    ...(instance.tool ? { tool: instance.tool } : {}),
+    tokens: carried?.tokens ?? ZERO_USAGE,
+    ...(carried?.costUsd !== undefined ? { costUsd: carried.costUsd } : {}),
+  });
+  const merged: AgentDetail[] = [];
+  for (const agent of rows) {
+    const known = agent.id.startsWith('claude:') ? byType.get(agent.id.slice('claude:'.length)) : undefined;
+    if (!known) {
+      merged.push(agent);
+      continue;
+    }
+    byType.delete(agent.id.slice('claude:'.length));
+    known.forEach((instance, index) => merged.push(instanceRow(instance, index === 0 ? agent : undefined)));
+  }
+  // 아직 토큰을 받지 못한 종류의 인스턴스도 보인다(맡은 일을 알 수 있다)
+  for (const list of byType.values()) for (const instance of list) merged.push(instanceRow(instance));
+  return { agents: merged };
+}
+
+/** CLI가 떠 있고 사람을 기다리면 그 까닭과 문구(#920). 모르는 알림 종류는 기다림으로 보지 않는다 */
 export function terminalStatusOf(terminal: { cliAlive: boolean }, snapshot: SessionSnapshot | undefined): AgentTerminalStatus {
-  const waiting = terminal.cliAlive && snapshot?.terminalAttention?.kind === 'permission_prompt';
-  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting: 'permission' as const } : {}) };
+  const attention = terminal.cliAlive ? snapshot?.terminalAttention : undefined;
+  const waiting = attention ? WAITING_KIND[attention.kind] : undefined;
+  const message = waiting && attention?.message ? oneLine(attention.message) : undefined;
+  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting } : {}), ...(message ? { message } : {}) };
 }
 
 /**

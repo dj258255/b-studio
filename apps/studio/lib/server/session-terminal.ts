@@ -9,6 +9,7 @@ import {
   ACCOUNT_DIR_ENV,
   findHostCli,
   findUnhookedCli,
+  userStatusLineCommand,
   listProcesses,
   openAgentTerminal,
   openHostTerminal,
@@ -228,7 +229,10 @@ const HOST_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
     const configDir = await target.accountDir?.();
-    const cli = { ...(await findHostCli(process.env, target.cli ?? 'claude')), ...(configDir ? { configDir } : {}) };
+    const found = await findHostCli(process.env, target.cli ?? 'claude');
+    // 사용자의 Claude 상태 줄은 b-studio 상태 줄이 이어 부른다(#920). 읽기만 한다
+    const statusLine = found.kind === 'claude' ? await userStatusLineCommand(configDir) : undefined;
+    const cli = { ...found, ...(configDir ? { configDir } : {}), ...(statusLine ? { statusLine } : {}) };
     if (!gateway) return '';
     const root = defaultAgentGatewayRoot();
     const dir = await writeHostGatewayConfig(target.sandboxId, gateway, cli, root);

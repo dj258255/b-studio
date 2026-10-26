@@ -39,11 +39,11 @@ describe('터미널 상태', () => {
     expect(item(source({ terminal: { cliAlive: false } })).terminal).toEqual({ cli: 'down' });
   });
 
-  it('권한 확인 창에서 기다리면 waiting: permission, 입력 대기·되묻기는 권한 대기가 아니다', () => {
+  it('권한 확인 창에서 기다리면 waiting: permission과 그 문구, 입력 대기는 waiting: idle(#920)', () => {
     const asking = snapshot({ terminalAttention: { kind: 'permission_prompt', message: 'Bash 실행 권한을 묻습니다', at: '2026-10-22T11:00:00.000Z' } });
-    expect(item(source({ snapshot: asking, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'permission' });
+    expect(item(source({ snapshot: asking, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'permission', message: 'Bash 실행 권한을 묻습니다' });
     const idle = snapshot({ terminalAttention: { kind: 'idle_prompt', message: '', at: '2026-10-22T11:00:00.000Z' } });
-    expect(item(source({ snapshot: idle, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up' });
+    expect(item(source({ snapshot: idle, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'idle' });
   });
 });
 
@@ -99,5 +99,44 @@ describe('withDeskFacts', () => {
     expect(out[0]).not.toHaveProperty('costUsd');
     expect(out[1]).toMatchObject({ costUsd: 1.5 });
     expect(out[1]).not.toHaveProperty('terminal');
+  });
+});
+
+describe('지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920)', () => {
+  const live = {
+    now: { tool: 'Bash', target: 'pnpm test', at: '2026-10-26T10:00:00.000Z' },
+    todos: { done: 1, total: 3, current: '구현하는 중' },
+    context: { usedPct: 42, used: 84000, size: 200000 },
+    lastMessage: '고쳤습니다.',
+    subagents: [{ id: 'a1', type: 'Explore', description: '훅 찾기', state: 'working' as const, tool: 'Grep' }],
+  };
+
+  it('세션의 활동을 항목에 그대로 싣는다. 없으면 싣지 않는다', () => {
+    const got = item(source({ live }));
+    const { subagents, ...rest } = live;
+    expect(got).toMatchObject(rest);
+    // 서브에이전트 인스턴스는 desk 카드가 읽는 agents의 subagent 행으로 간다
+    expect(got).not.toHaveProperty('subagents');
+    expect(got.agents).toEqual([{ id: 'claude:agent:a1', name: '훅 찾기', kind: 'subagent', state: 'working', type: subagents[0]!.type, description: '훅 찾기', tool: 'Grep', tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }]);
+    const none = item(source());
+    for (const key of ['now', 'todos', 'context', 'lastMessage', 'agents']) expect(none, key).not.toHaveProperty(key);
+  });
+
+  it('withDeskFacts가 활동을 붙인다(모르면 붙이지 않는다)', () => {
+    const [withLive] = withDeskFacts([source()], { terminal: () => undefined, costUsd: () => undefined, live: () => live });
+    expect(withLive!.live).toEqual(live);
+    const [without] = withDeskFacts([source()], { terminal: () => undefined, costUsd: () => undefined, live: () => undefined });
+    expect(without).not.toHaveProperty('live');
+  });
+
+  it('사람을 기다리는 까닭: 권한·되묻기·입력 필요·입력 대기를 terminal.waiting과 문구로 싣는다. CLI가 내려갔거나 모르는 종류면 없다', () => {
+    const at = '2026-10-26T10:00:00.000Z';
+    const terminal = (kind: string, message: string, cliAlive = true) => item(source({ snapshot: snapshot({ terminalAttention: { kind, message, at } }), terminal: { cliAlive } })).terminal;
+    expect(terminal('permission_prompt', 'Bash 실행 권한을 묻습니다')).toEqual({ cli: 'up', waiting: 'permission', message: 'Bash 실행 권한을 묻습니다' });
+    expect(terminal('elicitation_dialog', '어느 쪽?\n둘째 줄')).toEqual({ cli: 'up', waiting: 'question', message: '어느 쪽?' });
+    expect(terminal('agent_needs_input', '')).toEqual({ cli: 'up', waiting: 'input' });
+    expect(terminal('idle_prompt', '입력 대기')).toEqual({ cli: 'up', waiting: 'idle', message: '입력 대기' });
+    expect(terminal('some_future_kind', 'x')).toEqual({ cli: 'up' });
+    expect(terminal('permission_prompt', 'x', false)).toEqual({ cli: 'down' });
   });
 });

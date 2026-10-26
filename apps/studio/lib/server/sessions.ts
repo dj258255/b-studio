@@ -331,6 +331,7 @@ import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
+import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolUse, noteTurnEnded, noteTurnStarted, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
@@ -539,6 +540,8 @@ interface Session {
   countedUsageIds?: Set<string>;
   /** 터미널 CLI의 메인·서브에이전트별 사용량과 상태(#843). 화면용이고 기억에만 둔다 */
   agentLedger?: TerminalAgentLedger;
+  /** 터미널 CLI가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 기억에만 둔다(화면용) */
+  terminalActivity?: TerminalActivity;
   /** 세션 터미널의 CLI가 훅으로 알려 온 마지막 대화 id와 그 CLI(#872). 스튜디오를 다시 띄운 뒤 터미널을 열 때 이어 붙인다 */
   terminalConversation?: TerminalConversation;
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
@@ -8762,6 +8765,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   // 마지막으로 받은 요청 글을 기억해 둔다. 앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙지만,
   // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
   session.terminalLabel = prompt;
+  noteTurnStarted((session.terminalActivity ??= newTerminalActivity()));
   const opened = openTerminalRun(session);
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
@@ -8819,6 +8823,8 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   // 훅이 왔다는 것은 CLI가 움직인다는 뜻이다. 도구의 종류와 무관하게 정체 감시의 활동을 갱신한다(#B5)
   const running = openTerminalRun(session);
   if (running) noteTerminalActivity(session, running);
+  // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
+  noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
   if ((AGENT_READ_TOOLS as readonly string[]).includes(tool) || (CODEX_READ_TOOLS as readonly string[]).includes(tool)) return {};
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다
@@ -8900,6 +8906,8 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
 /** 턴의 끝(Stop 훅). 게이트를 돌려 통과면 체크포인트를 남기고, 실패면 결과를 에이전트에게 돌려준다 */
 async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedback?: string; message?: string }> {
   const session = terminalSession(id);
+  // 화면의 "지금 하는 일"을 지우고 마지막 답을 남긴다(#920). 검증 여부와 상관없다
+  noteTurnEnded((session.terminalActivity ??= newTerminalActivity()), input);
   const run = openTerminalRun(session);
   // 실행이 없으면 이 턴은 아무것도 바꾸지 않았다(바꿨다면 쓰기 직전의 훅이 실행을 열었다)
   if (!run) return {};
@@ -9235,6 +9243,7 @@ async function terminalCliEnded(id: string): Promise<void> {
   const session = terminalSession(id);
   // CLI가 끝났으면 사람을 기다릴 일도 없다(B7)
   clearTerminalAttention(session);
+  if (session.terminalActivity) noteCliEnded(session.terminalActivity);
   const run = openTerminalRun(session);
   if (!run || run.terminal.checking) return;
   const feedback = run.terminal.lastFeedback;
@@ -9275,6 +9284,26 @@ function terminalNotification(id: string, input: HookInput): void {
   setTerminalAttention(session, kind, message);
 }
 
+/**
+ * 지켜보기만 하는 훅이 왔다(#920). 화면의 활동에 넣고, 메인 에이전트의 도구 훅이면 CLI가 움직인다는 뜻이므로
+ * 정체 감시를 갱신하고 사람을 기다림 표시(B7)를 푼다(권한을 허락받아 도구가 끝났다). 서브에이전트의 훅은 메인의 대기를 풀지 않는다
+ */
+function terminalActivityHook(id: string, input: HookInput): void {
+  const session = terminalSession(id);
+  noteActivityHook((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
+  const event = input.hook_event_name;
+  if (typeof input.agent_id === 'string' && input.agent_id) return;
+  if (event !== 'PostToolUse' && event !== 'PostToolUseFailure' && event !== 'PreToolUse') return;
+  const run = openTerminalRun(session);
+  if (run) noteTerminalActivity(session, run);
+  else clearTerminalAttention(session);
+}
+
+/** 화면에 싣는 터미널 CLI의 활동(#920). 기억에 없는 세션이거나 받은 것이 없으면 없다 */
+export function sessionTerminalActivity(id: string): TerminalActivityView | undefined {
+  return activityView(store.sessions.get(id)?.terminalActivity);
+}
+
 /** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */
 function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
   return pulseAfterCalls({
@@ -9297,6 +9326,10 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     notification: async (input) => {
       terminalNotification(id, input);
+    },
+    activity: async (input) => terminalActivityHook(id, input),
+    statusline: async (input) => {
+      noteStatusline((terminalSession(id).terminalActivity ??= newTerminalActivity()), input);
     },
     telemetry: async (body) => {
       await terminalTelemetry(id, body);
