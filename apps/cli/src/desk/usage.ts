@@ -215,6 +215,14 @@ export function byTightness(accounts: readonly DeskAccountLimits[]): DeskAccount
   return [...accounts].sort((a, b) => tightness(b) - tightness(a));
 }
 
+/**
+ * 사용량 표에 둘 계정(#945): 빠듯한 순으로 놓고, 5시간·주간 한도가 없는 CLI(Gemini 등)는 뺀다. 견줄 것이 없는 줄이 늘 자리를 차지했다.
+ * 읽지 못한 계정은 남긴다(로그인 필요 같은 까닭을 보여야 한다)
+ */
+export function usageAccounts(accounts: readonly DeskAccountLimits[]): DeskAccountLimits[] {
+  return byTightness(accounts.filter((account) => account.status !== 'unsupported'));
+}
+
 /** 사이드바 맨 아래 한 줄: " 한도 Claude 5시간 82% · 13:50". 읽은 한도가 없으면 없다 */
 export function tightestLine(accounts: readonly DeskAccountLimits[], width: number, theme: Theme = DEFAULT_THEME, now = Date.now()): string | undefined {
   const account = byTightness(accounts)[0];
@@ -454,7 +462,7 @@ export function usageScreen(state: DeskState, rect: Rect, now = Date.now()): Usa
         ? '사용량을 읽는 중…'
         : usage.error
           ? ''
-          : '사용량을 볼 계정이 없습니다';
+          : '5시간·주간 한도를 알려 주는 계정이 없습니다(Gemini 같은 CLI는 한도가 없습니다)';
     if (empty) lines.push(fit(`  ${empty}`, rect.w));
     while (lines.length < rect.h) lines.push(blank);
     return { lines: lines.slice(0, rect.h), cards };
