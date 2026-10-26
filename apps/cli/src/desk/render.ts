@@ -15,6 +15,7 @@ import { folderHint, renderFolder } from './folder';
 import { plansHint, plansScreen } from './plans';
 import { renderRequirements, requirementsHint } from './requirements';
 import { renderSettings, settingsHint } from './settings';
+import { renderSwitcher, SWITCHER_HINT } from './switcher';
 import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
 import type { DeskPreview } from './types';
@@ -61,7 +62,7 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · d 지금 변경 · a 폴더 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · j 다음 대기 · Space 빠른 전환 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · d 지금 변경 · a 폴더 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
 const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · a 폴더 열기 · g 설정 · e 요구사항 · f AI 비교 · v 실행 · d 지금 변경 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
 const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · f AI 비교 · Esc 닫기 · ? 도움말';
 const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
@@ -73,6 +74,8 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['o', '다음 칸'],
   ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
+  ['j', '다음 대기로: 손댈 것(권한·질문·입력) > 오류 > 안 본 끝남 > 알림 차례로 그 세션 칸을 고르거나 고른 칸에 엶. 다시 누르면 다음 것'],
+  ['Space', '빠른 전환: 모든 세션을 급한 순으로, 글자로 거르고 ↑↓ Enter로 칸에 엶. Esc나 Ctrl-b Space로 닫기'],
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기). 프로젝트 고르기 끝 줄의 "+ 폴더 열기"로 내 폴더를 바로 등록, Ctrl-t로 이 요청의 확인 선언 변경 허용'],
@@ -133,7 +136,8 @@ function helpLines(width: number): string[] {
     ...MOUSE_HELP.map(row),
     '',
     ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
-    ' 세션이 손댈 상태가 되거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다(studio desk --no-notify로 끕니다).',
+    ' 세션이 손댈 상태가 되거나 검증·작업이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다. 지금 보고 있는 칸은 알리지 않습니다(studio desk --no-notify로 모두 끕니다).',
+    ' 끝났지만 아직 안 본 세션은 초록 점 "끝남"으로 남고, 그 칸을 보면 흐린 "CLI 대기"가 됩니다. 사이드바와 카드는 급한 순이고, 고르는 동안은 순서를 지킵니다.',
     ' 앞글쇠·알림·마우스·색·팔레트는 설정 화면(Ctrl-b g)이나 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
     ' 카드 그림은 계정 그림(설정 화면에서 고름), 그림 폴더(~/.config/b-studio/sprites/)의 claude-code · codex · default 그림, 그 폴더에서 무작위 차례로 씁니다.',
     ' 사용량 화면의 계정 그림은 계정에 고른 그림, 없으면 그 폴더에서 계정마다 고른 그림입니다. 설정 화면에서 u·w는 설정을 닫고 사용량·카드 화면으로 갑니다.',
@@ -151,7 +155,7 @@ export function sidebarView(state: DeskState, size: { cols: number; rows: number
   state.slots.forEach((id, slot) => {
     if (id && slot < state.layout) slotOf.set(id, slot + 1);
   });
-  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, rect.w, new Set(state.flagged ?? []), state.theme ?? DEFAULT_THEME);
+  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, rect.w, new Set(state.flagged ?? []), state.theme ?? DEFAULT_THEME, new Set(state.unseenDone ?? []));
   const space = deskSessions(state.items)[state.selected]?.projectName;
   const first = side.findIndex((row) => row.space !== undefined && row.space === space);
   const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), first);
@@ -183,7 +187,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  const view = state.changes ? '지금 변경' : state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const view = state.switcher ? '빠른 전환' : state.changes ? '지금 변경' : state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
   const where = sessions[state.selected]?.projectName;
   lines.push(
     onBackground(
@@ -276,8 +280,12 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     return onBackground(relabel(state, entry.text), entry.selected ? bg(theme, 'active') : chrome, layout.sidebar.w);
   };
 
-  // 작업 나누기 화면(#893)은 사이드바를 둔 채 본문 자리에 그린다
-  const space = state.plans
+  // 빠른 전환(#922)과 작업 나누기 화면(#893)은 사이드바를 둔 채 본문 자리에 그린다
+  const switcherRect = state.switcher ? spaceRect(state, size) : undefined;
+  const switcher = state.switcher && switcherRect ? renderSwitcher(state, switcherRect, theme) : undefined;
+  const space = switcher
+    ? switcher
+    : state.plans
     ? plansScreen(state, spaceRect(state, size))
     : state.view === 'space'
       ? spaceScreen(state, spaceRect(state, size))
@@ -350,7 +358,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       ),
     );
   } else {
-    const hint = state.plans && !state.prefix
+    const hint = state.switcher && !state.prefix
+      ? SWITCHER_HINT
+      : state.plans && !state.prefix
       ? plansHint(state.plans)
       : state.copy
       ? state.copy.search !== undefined
@@ -370,7 +380,8 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     lines.push(fit(relabel(state, hint), cols));
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
-    if (!state.plans && rect && view?.cursor && state.slots[state.focus]) {
+    if (switcher && switcherRect) cursor = { x: switcherRect.x + switcher.cursor.x, y: switcherRect.y + switcher.cursor.y };
+    else if (!state.plans && rect && view?.cursor && state.slots[state.focus]) {
       cursor = { x: rect.x + Math.min(view.cursor.x, rect.w - 1), y: rect.y + 1 + Math.min(view.cursor.y, rect.h - 2) };
     }
   }
