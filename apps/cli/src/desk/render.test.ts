@@ -174,3 +174,28 @@ describe('여러 AI 비교 화면 그리기(#892)', () => {
     expect(text).toMatch(/f\s+여러 AI 비교/);
   });
 });
+
+describe('빠른 전환과 안 본 끝남(#922)', () => {
+  it('빠른 전환 목록을 본문 자리에 급한 순으로 그리고, 커서를 찾기 칸에 둔다', () => {
+    const items = [item('a'), item('b', { terminal: { cli: 'up', waiting: 'permission' } })];
+    const switcher = { query: '요청', index: 0, order: ['b', 'a'] };
+    const { lines, cursor } = renderScreen(state({ items, switcher }), size, []);
+    const plain = lines.map(stripAnsi);
+    expect(lines).toHaveLength(size.rows);
+    for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(size.cols);
+    expect(plain[0]).toContain('빠른 전환');
+    const find = plain.findIndex((line) => line.includes('찾기 › 요청'));
+    expect(find).toBeGreaterThan(0);
+    const urgent = plain.findIndex((line) => /권한 대기\s+요청 b/.test(line));
+    expect(urgent).toBeGreaterThan(find);
+    expect(urgent).toBeLessThan(plain.findIndex((line) => /쉼\s+요청 a/.test(line)));
+    expect(cursor?.y).toBe(find);
+    expect(plain.at(-1)).toContain('빠른 전환');
+  });
+
+  it('도움말에 j와 Space가 있다', () => {
+    const plain = renderScreen(state({ help: true }), { cols: 160, rows: 60 }, []).lines.map(stripAnsi).join('\n');
+    expect(plain).toContain('다음 대기로');
+    expect(plain).toContain('빠른 전환');
+  });
+});

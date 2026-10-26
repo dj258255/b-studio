@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { switcherEntries } from './switcher';
 import type { DeskItem } from './types';
 
 const item = (id: string): DeskItem => ({ kind: 'session', id, title: id, projectName: 'shop', state: 'idle', lastActivityAt: '2026-10-22T00:00:00Z' });
@@ -868,5 +869,88 @@ describe('새 요청의 폴더 열기와 확인 선언 변경 허용(#916)', () 
     state = handleInput(state, '\x14').state;
     expect(state.prompt!.allowCheckChanges).toBe(false);
     expect(handleInput(state, '\r').effects).toEqual([{ type: 'submit', projectId: 'p1', request: '선언 고쳐 줘', choice: 'rules' }]);
+  });
+});
+
+describe('다음 대기와 빠른 전환(#922)', () => {
+  const waiting = (id: string): DeskItem => ({ ...item(id), terminal: { cli: 'up', waiting: 'permission' } });
+
+  it('Ctrl-b j는 손댈 세션이 이미 칸에 있으면 그 칸을 고르고 칸 화면으로 간다', () => {
+    const state = { ...initialState(), items: [item('a'), waiting('b')], layout: 2 as const, slots: ['a', 'b', undefined, undefined], view: 'space' as const };
+    const { state: next, effects } = handleInput(state, '\x02j');
+    expect(next.focus).toBe(1);
+    expect(next.view).toBeUndefined();
+    expect(next.selected).toBe(1);
+    expect(effects).toEqual([{ type: 'reopen', id: 'b' }]);
+  });
+
+  it('Ctrl-b j는 칸에 없는 손댈 세션을 고른 칸에 열고, 다시 누르면 다음 손댈 세션으로 돈다', () => {
+    const state = { ...initialState(), items: [item('a'), waiting('b'), waiting('c')], slots: ['a', undefined, undefined, undefined] };
+    const first = handleInput(state, '\x02j');
+    expect(first.effects).toEqual([{ type: 'open', slot: 0, id: 'b' }]);
+    expect(first.state.slots[0]).toBe('b');
+    const second = handleInput(first.state, '\x02j');
+    expect(second.effects).toEqual([{ type: 'open', slot: 0, id: 'c' }]);
+    const third = handleInput(second.state, '\x02j');
+    expect(third.effects).toEqual([{ type: 'open', slot: 0, id: 'b' }]);
+  });
+
+  it('Ctrl-b j는 손댈 것이 없으면 안 본 끝남·알림 세션으로 가고, 그것도 없으면 알린다', () => {
+    const state = { ...initialState(), items: [item('a'), item('b')], unseenDone: ['b'] };
+    expect(handleInput(state, '\x02j').effects).toEqual([{ type: 'open', slot: 0, id: 'b' }]);
+    const flagged = { ...initialState(), items: [item('a'), item('b')], flagged: ['a'] };
+    expect(handleInput(flagged, '\x02j').effects).toEqual([{ type: 'open', slot: 0, id: 'a' }]);
+    const none = handleInput({ ...initialState(), items: [item('a')] }, '\x02j');
+    expect(none.effects).toEqual([]);
+    expect(none.state.message).toMatch(/기다리는 세션이 없습니다/);
+  });
+
+  it('Ctrl-b j는 고른 칸이 셸이면 열지 않고 알린다', () => {
+    const state = { ...initialState(), items: [waiting('a')], slots: ['shell:1', undefined, undefined, undefined] };
+    const { state: next, effects } = handleInput(state, '\x02j');
+    expect(effects).toEqual([]);
+    expect(next.message).toMatch(/셸/);
+  });
+
+  it('Ctrl-b Space는 빠른 전환 목록을 급한 순으로 열고, 글자로 거른 뒤 Enter로 연다', () => {
+    const state = { ...initialState(), items: [item('alpha'), waiting('beta'), item('gamma')] };
+    const opened = handleInput(state, '\x02 ').state;
+    expect(opened.switcher?.order).toEqual(['beta', 'alpha', 'gamma']);
+    // 친 글자는 칸으로 가지 않고 거르기로 간다
+    const typed = handleInput(opened, 'gam');
+    expect(typed.effects).toEqual([]);
+    expect(switcherEntries(typed.state).map((entry) => entry.id)).toEqual(['gamma']);
+    const chosen = handleInput(typed.state, '\r');
+    expect(chosen.effects).toEqual([{ type: 'open', slot: 0, id: 'gamma' }]);
+    expect(chosen.state.switcher).toBeUndefined();
+  });
+
+  it('빠른 전환 목록에서 ↑↓로 고르고 Esc로 닫는다. 붙여 넣은 글은 거르기로 간다', () => {
+    const state = handleInput({ ...initialState(), items: [item('a'), item('b')], slots: ['a', undefined, undefined, undefined] }, '\x02 ').state;
+    const moved = handleInput(state, '\x1b[B').state;
+    expect(moved.switcher?.index).toBe(1);
+    const pasted = handleInput(moved, '\x1b[200~b\n\x1b[201~');
+    expect(pasted.effects).toEqual([]);
+    expect(pasted.state.switcher?.query).toBe('b ');
+    const closed = handleInput(pasted.state, '\x1b', true);
+    expect(closed.state.switcher).toBeUndefined();
+  });
+
+  it('빠른 전환 목록에서 앞글쇠 다음 다른 화면 키는 목록을 닫고 그 화면으로 간다', () => {
+    const state = handleInput({ ...initialState(), items: [item('a')] }, '\x02 ').state;
+    const next = handleInput(state, '\x02w').state;
+    expect(next.switcher).toBeUndefined();
+    expect(next.view).toBe('space');
+    // 같은 키는 닫는다
+    expect(handleInput(state, '\x02 ').state.switcher).toBeUndefined();
+  });
+
+  it('빠른 전환 목록을 열면 다른 덮는 화면은 닫는다', () => {
+    const state = handleInput({ ...initialState(), items: [item('a')] }, '\x02t').state;
+    expect(state.plans).toBeDefined();
+    const { state: next, effects } = handleInput(state, '\x02 ');
+    expect(next.plans).toBeUndefined();
+    expect(next.switcher).toBeDefined();
+    expect(effects).toContainEqual({ type: 'plans', effect: { type: 'close' } });
   });
 });

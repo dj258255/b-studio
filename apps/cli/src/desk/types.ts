@@ -11,7 +11,8 @@ export interface DeskItem {
   title: string;
   projectName: string;
   state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
-  attention?: string;
+  /** 개입이 필요한 까닭. 옛 서버는 문자열(question·approval·needs_review·gate_failed), 새 서버는 터미널 CLI의 주의를 객체로 준다(#926) */
+  attention?: string | DeskAttention;
   /** 개입이 필요한 까닭 한 줄(검증 실패 요약, 확인 필요의 첫 어긋남). 모르면 없다 */
   reason?: string;
   backend?: string;
@@ -54,6 +55,13 @@ export interface DeskSubagent {
   description?: string;
   state: 'working' | 'done';
   tool?: string;
+}
+
+/** 터미널 CLI가 사람을 부른 까닭(#926): 권한, 질문, 입력 필요, 쉬는 중(입력을 오래 기다림) */
+export interface DeskAttention {
+  kind: 'permission' | 'question' | 'input' | 'idle';
+  message?: string;
+  at: string;
 }
 
 export interface DeskUsage {

@@ -231,6 +231,14 @@ describe('화면과 키', () => {
     expect(animate.effects).toEqual([{ type: 'config', config: { animate: false } }]);
   });
 
+  it('키·알림 탭에서 완료 알림과 입력 필요 알림을 따로 끈다(#922)', () => {
+    const text = renderSettings(loaded({ tab: 'keys' }), { w: 100, h: 24 }, DEFAULT_THEME).lines.map(stripAnsi).join('\n');
+    expect(text).toContain('완료 알림');
+    expect(text).toContain('입력 알림');
+    expect(press(loaded({ tab: 'keys', row: 2 }), '\r').effects).toEqual([{ type: 'config', config: { notifyDone: false } }]);
+    expect(press(loaded({ tab: 'keys', row: 3 }), '\r').effects).toEqual([{ type: 'config', config: { notifyInput: false } }]);
+  });
+
   it('앞글쇠는 Ctrl-c·h·i·j·m을 건너뛴다', () => {
     const { effects } = press(loaded({ tab: 'keys', row: 0 }), LEFT);
     expect(effects).toEqual([{ type: 'config', config: { prefix: { key: '\x01', label: 'Ctrl-a' } } }]);

@@ -20,6 +20,10 @@ export type ColorSetting = 'auto' | 'truecolor' | '256';
 export interface DeskConfig {
   prefix?: DeskPrefix;
   notify?: boolean;
+  /** 작업이 끝났을 때의 벨·OS 알림(#922, 기본 켬). notify가 끄면 이것도 꺼진다 */
+  notifyDone?: boolean;
+  /** 권한·질문·입력 필요일 때의 벨·OS 알림(#922, 기본 켬) */
+  notifyInput?: boolean;
   mouse?: boolean;
   color?: ColorSetting;
   /** 색 팔레트(#887): dark(기본)·light */
@@ -41,6 +45,10 @@ export interface DeskLayout {
   focus: number;
   zoom: boolean;
   sidebarHidden: boolean;
+  /** 알린 뒤 아직 보지 않은 세션(#922). 없으면 없다 */
+  flagged?: string[];
+  /** 끝났지만 아직 보지 않은 세션(#922) */
+  unseenDone?: string[];
 }
 
 const CONFIG_FILE = 'desk.json';
@@ -90,7 +98,7 @@ export function loadDeskConfig(dir: string): { config: DeskConfig; warnings: str
     if (prefix) config.prefix = prefix;
     else warnings.push(`prefix는 "C-a" 꼴이어야 합니다(Ctrl-c·h·i·j·m은 쓸 수 없음). Ctrl-b를 씁니다`);
   }
-  for (const key of ['notify', 'mouse', 'animate'] as const) {
+  for (const key of ['notify', 'notifyDone', 'notifyInput', 'mouse', 'animate'] as const) {
     if (values[key] === undefined) continue;
     if (typeof values[key] === 'boolean') config[key] = values[key];
     else warnings.push(`${key}는 true나 false여야 합니다. 기본값(켬)을 씁니다`);
@@ -162,7 +170,10 @@ export function loadDeskLayout(dir: string): DeskLayout | undefined {
     return typeof id === 'string' && id && slot < layout ? id : undefined;
   });
   const focus = typeof values.focus === 'number' && Number.isInteger(values.focus) && values.focus >= 0 && values.focus < layout ? values.focus : 0;
-  return { layout, slots, focus, zoom: values.zoom === true, sidebarHidden: values.sidebarHidden === true };
+  const ids = (value: unknown): string[] | undefined => (Array.isArray(value) ? value.filter((id): id is string => typeof id === 'string' && id !== '') : undefined);
+  const flagged = ids(values.flagged);
+  const unseenDone = ids(values.unseenDone);
+  return { layout, slots, focus, zoom: values.zoom === true, sidebarHidden: values.sidebarHidden === true, ...(flagged ? { flagged } : {}), ...(unseenDone ? { unseenDone } : {}) };
 }
 
 /** 배치를 쓴다. 쓰다 끊겨도 앞 파일이 깨지지 않게 옆 파일에 쓰고 바꿔 단다. 실패하면 던진다 */

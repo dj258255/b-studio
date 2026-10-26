@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -297,6 +297,8 @@ import {
 } from '@/lib/usage';
 import type {
   CodeFile,
+  LiveChangeFile,
+  LiveChanges,
   CodeSearch,
   CodeTree,
   DesignView,
@@ -5196,6 +5198,84 @@ export async function readCodeFile(id: string, file: string): Promise<CodeFile> 
     change,
     patch: change === 'modified' ? await session.checkpoints.pendingPatch(file, (text) => session.sandbox.redact(text)) : undefined,
   };
+}
+
+/** 지금 변경 화면(#924)이 한 번에 받는 파일 수와 diff 글자 수. 새 파일 하나는 이만큼만 읽는다 */
+const LIVE_CHANGES_MAX_FILES = 300;
+const LIVE_CHANGES_MAX_CHARS = 600_000;
+const LIVE_NEW_FILE_BYTES = 96 * 1024;
+
+/** diff에서 더한 줄과 뺀 줄 수(머리 줄 +++·--- 는 세지 않는다) */
+function countPatchLines(patch: string): { added: number; removed: number } {
+  let added = 0;
+  let removed = 0;
+  for (const line of patch.split('\n')) {
+    if (line.startsWith('+++') || line.startsWith('---')) continue;
+    if (line.startsWith('+')) added++;
+    else if (line.startsWith('-')) removed++;
+  }
+  return { added, removed };
+}
+
+/** 아직 기록에 없는 새 파일을 빈 파일 대비 diff로 만든다. 링크는 따라가지 않고, 앞부분만 읽는다 */
+async function newFilePatch(root: string, file: string, redact: (text: string) => string): Promise<Pick<LiveChangeFile, 'patch' | 'binary' | 'unsupported' | 'truncated'>> {
+  const absolute = path.join(root, file);
+  const info = await lstat(absolute).catch(() => undefined);
+  if (!info || !info.isFile()) return { unsupported: true };
+  const handle = await open(absolute, 'r');
+  let buffer: Buffer;
+  try {
+    const chunk = Buffer.alloc(Math.min(info.size, LIVE_NEW_FILE_BYTES));
+    const { bytesRead } = await handle.read(chunk, 0, chunk.length, 0);
+    buffer = chunk.subarray(0, bytesRead);
+  } finally {
+    await handle.close();
+  }
+  if (buffer.subarray(0, 8_000).includes(0)) return { binary: true };
+  const cut = info.size > buffer.length;
+  // 자른 끝의 깨진 글자와 반쪽 줄은 버린다
+  let text = buffer.toString('utf8');
+  if (cut) text = text.slice(0, Math.max(0, text.lastIndexOf('\n') + 1));
+  const lines = text.split('\n');
+  if (lines[lines.length - 1] === '') lines.pop();
+  const body = lines.map((line) => `+${line}`).join('\n');
+  const patch = redact(`--- /dev/null\n+++ b/${file}\n@@ -0,0 +1,${lines.length} @@\n${body}${body ? '\n' : ''}`);
+  return { patch, ...(cut ? { truncated: true } : {}) };
+}
+
+/**
+ * 마지막 체크포인트 이후의 지금 변경(#924): desk가 체크포인트 전에 에이전트가 무엇을 바꾸는지 보고 줄마다 의견을 단다.
+ * 코드 화면처럼 생성물·비밀 파일은 빼고 시크릿 값을 가린다. 새 파일은 빈 파일 대비 diff로, 바이너리는 내용 없이 표시만 한다.
+ * 원격 저장소가 있으면 기준 브랜치와 갈라진 정도를 함께 준다(확인하지 못하면 뺀다 — 화면은 변경을 먼저 보인다)
+ */
+export async function liveChanges(id: string): Promise<LiveChanges> {
+  const session = requireSession(id);
+  const redact = (text: string) => session.sandbox.redact(text);
+  const pending = (await session.checkpoints.pendingChanges()).filter((change) => !isDeniedPath(change.file));
+  const files: LiveChangeFile[] = [];
+  let chars = 0;
+  let truncated = pending.length > LIVE_CHANGES_MAX_FILES;
+  for (const change of pending.slice(0, LIVE_CHANGES_MAX_FILES)) {
+    if (chars >= LIVE_CHANGES_MAX_CHARS) {
+      truncated = true;
+      files.push({ ...change, added: 0, removed: 0, truncated: true });
+      continue;
+    }
+    const shown: Pick<LiveChangeFile, 'patch' | 'binary' | 'unsupported' | 'truncated'> =
+      change.change === 'added'
+        ? await newFilePatch(session.project.root, change.file, redact).catch(() => ({ unsupported: true as const }))
+        : await session.checkpoints.pendingPatch(change.file, redact).then((patch) => (/^Binary files /m.test(patch) ? { binary: true as const } : { patch, ...(patch.includes('[... 길어서') ? { truncated: true as const } : {}) }));
+    chars += shown.patch?.length ?? 0;
+    files.push({ ...change, ...shown, ...countPatchLines(shown.patch ?? '') });
+  }
+  const head = (await session.checkpoints.list(1).catch(() => []))[0]?.shortSha;
+  const repository = session.snapshot.repository;
+  let base: Partial<Pick<LiveChanges, 'base' | 'behind' | 'ahead'>> = {};
+  if (repository && session.git) {
+    const status = await session.checkpoints.baseStatus(session.git).catch(() => undefined);
+    if (status) base = { base: status.base, behind: status.behind, ...(status.aheadCommits !== undefined ? { ahead: status.aheadCommits } : {}) };
+  }
+  return { files, truncated, ...(head ? { head } : {}), ...(repository ? { branch: repository.branch } : {}), ...base };
 }
 
 export async function checkpointPatch(id: string, sha: string): Promise<string> {
