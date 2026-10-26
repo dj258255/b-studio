@@ -1,16 +1,18 @@
 /**
- * 스페이스 화면(#887): 고른 세션이 든 스페이스(프로젝트)의 세션마다 카드 하나. 카드는 왼쪽에 픽셀 그림, 오른쪽에
- * 이름·AI 배지·상태, 지금 하는 일(도구와 대상, 기다리면 그 까닭), 할 일 진행·문맥 창, 서브에이전트, 마지막 답, 게이트·토큰,
- * (있으면) 5시간·주간 사용량 막대를 놓는다. 고른 카드는 테두리를 강조색으로 그리고 서브에이전트·범위·마지막 답을 펼친다.
- * 화면 폭에 따라 1~2열이고, 높이가 모자라면 마지막 답, 할 일·문맥, 사용량 차례로 줄을 뺀다(#921)
+ * 스페이스 화면(#887, #934). 맨 위에 확인 필요 줄(권한·질문·입력을 기다리거나 검증에 실패한 세션, 스페이스와 상관없이 번호),
+ * 그 아래 고른 세션이 든 스페이스(프로젝트)의 세션마다 카드 하나. 카드는 왼쪽에 픽셀 그림, 오른쪽에 짧은 줄 몇 개다:
+ * 머리(이름·AI·상태·"23분째"), 지금(도구와 대상 · "13초 전", 도는 도구는 "6분째", 조용하면 "⚠ 4분째 소식 없음"),
+ * 할 일 막대와 남은 시간(추정)·문맥 창, 서브에이전트(각자 "4분째"), 마지막 답, 계정 한도가 80%를 넘었을 때만 경고 한 줄.
+ * 고른 카드는 테두리를 강조색으로 그리고 마지막 답·나머지 서브에이전트·검증과 토큰·범위를 펼친다.
+ * 화면 폭에 따라 1~2열이고, 높이가 모자라면 마지막 답, 할 일·문맥, 한도 경고 차례로 줄을 뺀다
  */
 import type { DeskState } from './keys';
 import { fit, fitAnsi, stringWidth, type Rect } from './screen';
-import { agentStatus, backendLabel, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, subagentName, totalTokens } from './sidebar';
+import { agentStatus, attentionKind, backendLabel, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, subagentName, totalTokens, type StatusBadge } from './sidebar';
 import type { KittyImages } from './kitty';
 import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
-import { BOLD, DEFAULT_THEME, fg, RESET, type Theme } from './theme';
-import type { DeskItem, DeskLimits, DeskLimitWindow } from './types';
+import { BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
+import type { DeskAgent, DeskItem, DeskLimits, DeskLimitWindow } from './types';
 import { badge, bar, box, contextColor, spread, statusColor, statusText, TONE_COLOR } from './widgets';
 
 /** 카드 두 열을 놓는 카드 폭의 하한 */
@@ -54,26 +56,39 @@ export function resetText(iso: string | undefined, now: number): string {
   return `${date.getMonth() + 1}/${date.getDate()}(${WEEKDAY[date.getDay()]}) ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-/** 마지막 활동에서 지난 시간: "방금", "3분 전", "2시간 전", "4일 전" */
-function since(iso: string, now: number): string {
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return '';
-  const gone = Math.max(0, now - at);
-  if (gone < 60_000) return '방금';
+/** 지난 때를 "13초 전", "3분 전", "2시간 전", "4일 전"으로 */
+function agoText(iso: string | undefined, now: number): string {
+  const gone = goneMs(iso, now);
+  if (gone === undefined) return '';
+  if (gone < 60_000) return `${Math.floor(gone / 1000)}초 전`;
   if (gone < 3_600_000) return `${Math.floor(gone / 60_000)}분 전`;
   if (gone < 86_400_000) return `${Math.floor(gone / 3_600_000)}시간 전`;
   return `${Math.floor(gone / 86_400_000)}일 전`;
 }
 
-/** 지난 시간을 짧게: "20초", "2분", "1시간" */
-function elapsed(iso: string, now: number): string {
-  const at = Date.parse(iso);
-  if (!Number.isFinite(at)) return '';
-  const gone = Math.max(0, now - at);
-  if (gone < 60_000) return `${Math.floor(gone / 1000)}초`;
-  if (gone < 3_600_000) return `${Math.floor(gone / 60_000)}분`;
-  return `${Math.floor(gone / 3_600_000)}시간`;
+/** 이어진 시간을 "20초째", "23분째", "1시간 4분째"로 */
+function forText(iso: string | undefined, now: number): string {
+  const gone = goneMs(iso, now);
+  if (gone === undefined) return '';
+  return `${spanText(gone)}째`;
 }
+
+function spanText(ms: number): string {
+  if (ms < 60_000) return `${Math.floor(ms / 1000)}초`;
+  if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}분`;
+  const hours = Math.floor(ms / 3_600_000);
+  const minutes = Math.floor((ms % 3_600_000) / 60_000);
+  return minutes ? `${hours}시간 ${minutes}분` : `${hours}시간`;
+}
+
+function goneMs(iso: string | undefined, now: number): number | undefined {
+  if (!iso) return undefined;
+  const at = Date.parse(iso);
+  return Number.isFinite(at) ? Math.max(0, now - at) : undefined;
+}
+
+/** 작업 중인데 이만큼 소식이 없으면 멈춘 듯으로 본다(도구가 도는 동안은 제외) */
+export const STALE_MS = 3 * 60_000;
 
 /** CLI 도구 이름을 우리말로. 모르는 도구(MCP 등)는 그대로 둔다 */
 const TOOL_LABEL: Record<string, string> = {
@@ -102,42 +117,151 @@ export function toolLabel(tool: string): string {
 }
 
 /**
- * 지금 하는 일. 권한·답·입력을 기다리면 그 까닭을 먼저, 아니면 지금 쓰는 도구와 대상(#921),
- * 그것도 없으면 메인 에이전트의 마지막 활동, 그것도 없으면 마지막 활동 때
+ * 넘치는 글을 낱말 사이에서 자르고 …를 붙인다. 보이는 폭(넓은 글자는 두 칸)이 width를 넘지 않는다.
+ * 자를 자리 가까이(뒤쪽 40% 안)에 빈칸이 없으면 글자 단위로 자른다
  */
-function nowLine(item: DeskItem, theme: Theme, now: number): string {
-  const status = agentStatus(item);
-  const waiting = item.terminal?.waiting;
-  if (item.terminal?.message && waiting && waiting !== 'idle') {
-    return `${fg(theme, statusColor(status))}${status.label}${RESET} ${fg(theme, 'muted')}·${RESET} ${item.terminal.message}`;
+export function clipWords(text: string, width: number): string {
+  if (stringWidth(text) <= width) return text;
+  if (width <= 1) return width === 1 ? '…' : '';
+  let cut = '';
+  for (const char of text) {
+    if (stringWidth(cut + char) > width - 1) break;
+    cut += char;
   }
-  const label = `${fg(theme, 'muted')}지금${RESET} `;
+  const space = cut.lastIndexOf(' ');
+  if (space > 0 && stringWidth(cut.slice(0, space)) >= (width - 1) * 0.6) cut = cut.slice(0, space);
+  return `${cut.trimEnd()}…`;
+}
+
+/** 한 줄의 조각. flex인 조각은 넘칠 때 뒤에서부터 낱말 경계로 줄인다 */
+interface Seg {
+  text: string;
+  color?: ColorToken;
+  bold?: boolean;
+  flex?: boolean;
+}
+
+/** 조각을 width칸 한 줄로. 넘치면 flex 조각을 뒤에서부터 줄이고, 그래도 넘치면 끝을 자른다 */
+function compose(segs: readonly Seg[], width: number, theme: Theme): string {
+  const parts = segs.filter((seg) => seg.text).map((seg) => ({ ...seg }));
+  let over = parts.reduce((sum, seg) => sum + stringWidth(seg.text), 0) - width;
+  for (let at = parts.length - 1; at >= 0 && over > 0; at--) {
+    const seg = parts[at]!;
+    if (!seg.flex) continue;
+    const before = stringWidth(seg.text);
+    seg.text = clipWords(seg.text, Math.max(1, before - over));
+    over -= before - stringWidth(seg.text);
+  }
+  const line = parts.map((seg) => `${seg.bold ? BOLD : ''}${seg.color ? fg(theme, seg.color) : ''}${seg.text}${seg.bold || seg.color ? RESET : ''}`).join('');
+  return fitAnsi(line, width);
+}
+
+const SEP: Seg = { text: ' · ', color: 'muted' };
+
+/**
+ * 카드 머리의 상태(#934). 사람이 손댈 것(권한·답·입력) > 오류 > 검증 실패·확인 필요 > 작업 중 > 검증 중 > 그 밖.
+ * 검증 실패를 구석이 아니라 머리에 올려, "CLI 대기"(흐림)와 "실패"(빨강)가 한 카드에 엇갈려 보이지 않게 한다
+ */
+export function headStatus(item: DeskItem, unseen = false): StatusBadge {
+  const status = agentStatus(item, { unseen });
+  if (status.tone === 'warn' || status.tone === 'fail') return status;
+  if (item.gate?.state === 'failed' || item.attention === 'gate_failed') return { label: '검증 실패', tone: 'fail' };
+  if (item.attention === 'needs_review') return { label: '확인 필요', tone: 'warn' };
+  if (item.state === 'working') return status;
+  if (item.gate?.state === 'verifying') return { label: '검증 중', tone: 'busy' };
+  return status;
+}
+
+/** 이 세션이 지금 사람을 기다리거나 실패해 손댈 것인가(확인 필요 줄에 올린다) */
+function needsAttention(item: DeskItem): boolean {
+  const status = headStatus(item);
+  return status.tone === 'warn' || status.tone === 'fail';
+}
+
+/** 마지막 소식 시각: 지금 도구의 때와 마지막 활동 가운데 늦은 것 */
+function lastSignal(item: DeskItem): number | undefined {
+  const times = [item.now?.at, item.lastActivityAt].map((iso) => (iso ? Date.parse(iso) : NaN)).filter(Number.isFinite);
+  return times.length ? Math.max(...times) : undefined;
+}
+
+/**
+ * 지금 줄(#934). 기다리면 그 까닭, 검증에 실패했으면 그 까닭, 도구가 돌면 "실행 pnpm test · 6분째",
+ * 끝난 도구면 "편집 a.ts · 13초 전". 작업 중인데 도구도 돌지 않고 3분 넘게 조용하면 "⚠ 4분째 소식 없음"
+ */
+function nowLine(item: DeskItem, width: number, theme: Theme, now: number): string {
+  const head = headStatus(item);
+  const waiting = item.terminal?.waiting;
+  // 기다림·실패는 머리에 이미 상태가 있으니 여기에는 까닭만 그 색으로 적는다
+  if (head.tone === 'warn' && waiting && waiting !== 'idle') {
+    return compose([{ text: '› ', color: statusColor(head) }, { text: item.terminal?.message ? oneLine(item.terminal.message) : '그 칸에서 답하면 이어서 합니다', color: statusColor(head), flex: true }], width, theme);
+  }
+  if (head.tone === 'fail' || head.label === '확인 필요') {
+    return compose([{ text: '› ', color: statusColor(head) }, { text: item.reason ? oneLine(item.reason) : '세션 자세히(i)에서 까닭을 봅니다', color: statusColor(head), flex: true }], width, theme);
+  }
+  const quiet = lastSignal(item);
+  const stale = item.state === 'working' && !item.now?.running && quiet !== undefined && now - quiet > STALE_MS;
+  const staleSeg: Seg = { text: `⚠ ${spanText(now - (quiet ?? now))}째 소식 없음`, color: 'yellow' };
   if (item.now) {
-    const ago = elapsed(item.now.at, now);
-    return label + `${toolLabel(item.now.tool)}${item.now.target ? ` ${item.now.target}` : ''}${ago ? `${fg(theme, 'muted')} · ${ago}${RESET}` : ''}`;
+    const what: Seg[] = [{ text: toolLabel(item.now.tool) }, ...(item.now.target ? [{ text: ` ${oneLine(item.now.target)}`, flex: true }] : [])];
+    const when: Seg = item.now.running ? { text: forText(item.now.at, now), color: 'accent' } : stale ? staleSeg : { text: agoText(item.now.at, now), color: 'muted' };
+    return compose([...what, SEP, when], width, theme);
   }
   const main = item.agents?.find((agent) => agent.kind === 'main');
-  if (main?.activity) return label + main.activity;
-  const ago = since(item.lastActivityAt, now);
-  return label + `${fg(theme, 'muted')}${ago ? `마지막 활동 ${ago}` : '기록 없음'}${RESET}`;
+  if (main?.activity) return compose([{ text: oneLine(main.activity), flex: true }, ...(stale ? [SEP, staleSeg] : [])], width, theme);
+  if (stale) return compose([staleSeg], width, theme);
+  const since = agoText(item.lastActivityAt, now);
+  return compose([{ text: since ? `마지막 활동 ${since}` : '기록 없음', color: 'muted' }], width, theme);
 }
 
-/** 할 일 진행과 문맥 창 막대를 한 줄에. 문맥은 오른쪽에 붙이고 할 일은 남는 폭에 맞춘다 */
-function progressLine(item: DeskItem, width: number, theme: Theme): string {
-  const muted = fg(theme, 'muted');
-  const todos = item.todos && item.todos.total > 0 ? `${muted}할 일${RESET} ${BOLD}${item.todos.done}/${item.todos.total}${RESET}${item.todos.current ? ` ${item.todos.current}` : ''}` : '';
-  if (!item.context) return todos;
-  const pct = Math.round(Math.max(0, Math.min(100, item.context.usedPct)));
-  const barWidth = width >= 48 ? 10 : 5;
-  const context = `${muted}문맥${RESET} ${bar(pct, barWidth, theme, contextColor)} ${fg(theme, contextColor(pct))}${pct}%${RESET}`;
-  const contextWidth = stringWidth('문맥 ') + barWidth + 1 + String(pct).length + 1;
-  if (!todos) return context;
-  return spread(todos, context, width, contextWidth);
+/** 남은 시간 추정: 끝낸 할 일이 둘 이상이고 요청 시작 시각을 알 때만. 지금까지의 한 항목 평균 × 남은 수 */
+export function remainingText(item: DeskItem, now: number): string {
+  const todos = item.todos;
+  const spent = goneMs(item.workingSince, now);
+  if (!todos || spent === undefined || todos.done < 2 || todos.done >= todos.total) return '';
+  const left = (spent / todos.done) * (todos.total - todos.done);
+  if (left < 60_000) return '1분 안에 끝남(추정)';
+  return `약 ${spanText(Math.round(left / 60_000) * 60_000)} 남음(추정)`;
 }
 
-/** 마지막 답 한 줄 */
-function lastLine(item: DeskItem, theme: Theme): string {
-  return item.lastMessage ? `${fg(theme, 'muted')}답${RESET} ${oneLine(item.lastMessage)}` : '';
+/** 지금 항목을 이보다 좁게만 보일 수 있으면 빼다 */
+const CURRENT_MIN = 8;
+
+/**
+ * 할 일 막대·진행·남은 시간·지금 항목, 오른쪽에 문맥 창. 좁으면 문맥은 막대 없이 %만, 지금 항목은 자리가 남을 때만 둔다.
+ * 남은 시간은 지금 항목보다 먼저 자리를 받는다
+ */
+function progressLine(item: DeskItem, width: number, theme: Theme, now: number): string {
+  let context = '';
+  let contextWidth = 0;
+  if (item.context) {
+    const pct = Math.round(Math.max(0, Math.min(100, item.context.usedPct)));
+    const barWidth = width >= 56 ? 6 : 0;
+    context = `${fg(theme, 'muted')}문맥${RESET} ${barWidth ? `${bar(pct, barWidth, theme, contextColor)} ` : ''}${fg(theme, contextColor(pct))}${pct}%${RESET}`;
+    contextWidth = stringWidth('문맥 ') + (barWidth ? barWidth + 1 : 0) + String(pct).length + 1;
+  }
+  const todos = item.todos && item.todos.total > 0 ? item.todos : undefined;
+  if (!todos) return context ? fitAnsi(' '.repeat(Math.max(0, width - contextWidth)) + context, width) : '';
+  const room = context ? width - contextWidth - 2 : width;
+  const barWidth = room >= 36 ? 8 : 5;
+  const count = `${todos.done}/${todos.total}`;
+  const remain = remainingText(item, now);
+  let left = room - barWidth - 1 - count.length;
+  const segs: Seg[] = [];
+  if (remain && left >= 3 + stringWidth(remain)) {
+    segs.push(SEP, { text: remain, color: 'muted' });
+    left -= 3 + stringWidth(remain);
+  }
+  if (todos.current && left >= CURRENT_MIN + 1) segs.unshift({ text: ` ${oneLine(todos.current)}`, flex: true });
+  const line = `${bar((todos.done / todos.total) * 100, barWidth, theme, () => 'accent')} ${BOLD}${count}${RESET}${compose(segs, Math.max(0, room - barWidth - 1 - count.length), theme)}`;
+  if (!context) return fitAnsi(line, width);
+  return spread(line, context, width, contextWidth);
+}
+
+/** 마지막 답 한 줄. 고른 카드는 다음 줄에 이어 펼치므로 낱말에서 줄이지 않고 폭대로 끊는다 */
+function lastLine(item: DeskItem, width: number, theme: Theme, continued = false): string {
+  if (!item.lastMessage) return '';
+  if (continued) return `${fg(theme, 'muted')}답${RESET}${fitAnsi(chunks(`답 ${oneLine(item.lastMessage)}`, width)[0]!.slice(1), width - 1)}`;
+  return compose([{ text: '답 ', color: 'muted' }, { text: oneLine(item.lastMessage), flex: true }], width, theme);
 }
 
 function oneLine(text: string): string {
@@ -168,49 +292,63 @@ function lastMore(item: DeskItem, width: number): string[] {
   return shown;
 }
 
-/** 서브에이전트 요약: 작업 중인 수와 그 하나의 맡은 일·도구. 없으면 모델 */
-function agentsLine(item: DeskItem, theme: Theme): string {
-  const subagents = (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
-  const muted = fg(theme, 'muted');
-  if (subagents.length === 0) return item.capabilities?.model ? `${muted}모델${RESET} ${item.capabilities.model}` : '';
+/** 카드 몸에 한 줄씩 보이는 작업 중 서브에이전트의 수 */
+const SUBAGENT_SHOWN = 2;
+
+function subagentsOf(item: DeskItem): DeskAgent[] {
+  return (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
+}
+
+/** 서브에이전트 줄: 작업 중인 것을 둘까지 "↳ 종류 맡긴 일 · 도구 · 4분째"(멈춘 듯이면 그것), 나머지는 "외 N개", 다 끝났으면 한 줄 */
+function subagentLines(item: DeskItem, width: number, theme: Theme, now: number): string[] {
+  const subagents = subagentsOf(item);
+  if (subagents.length === 0) return [];
   const working = subagents.filter((agent) => agent.state === 'working');
-  if (working.length === 0) return `${muted}↳ 서브에이전트 ${subagents.length}개 쉼${RESET}`;
-  const first = working[0]!;
-  const doing = first.tool ?? first.activity;
-  return `${fg(theme, 'accent')}↳${RESET} 서브에이전트 ${working.length}개 작업 중 · ${subagentName(first)}${doing ? `: ${doing}` : ''}`;
+  if (working.length === 0) return [compose([{ text: `↳ 서브에이전트 ${subagents.length}개 끝남`, color: 'muted' }], width, theme)];
+  const lines = working.slice(0, SUBAGENT_SHOWN).map((agent) => {
+    const quiet = goneMs(agent.lastAt, now);
+    const when: Seg | undefined =
+      quiet !== undefined && quiet > STALE_MS
+        ? { text: `⚠ ${spanText(quiet)}째 소식 없음`, color: 'yellow' }
+        : agent.startedAt
+          ? { text: forText(agent.startedAt, now), color: 'muted' }
+          : undefined;
+    const doing = agent.tool ?? agent.activity;
+    return compose(
+      [{ text: '↳ ', color: 'accent' }, { text: subagentName(agent), flex: true }, ...(doing ? [SEP, { text: oneLine(doing), flex: true }] : []), ...(when ? [SEP, when] : [])],
+      width,
+      theme,
+    );
+  });
+  if (working.length > SUBAGENT_SHOWN) lines.push(compose([{ text: `↳ 외 ${working.length - SUBAGENT_SHOWN}개 작업 중`, color: 'muted' }], width, theme));
+  return lines;
 }
 
-/** 게이트·체크포인트·토큰·비용·칸 */
-function factsLine(item: DeskItem, slot: number | undefined, theme: Theme): string {
-  const muted = fg(theme, 'muted');
-  const parts: string[] = [];
-  const gate = gateStatus(item);
-  if (gate) parts.push(`${muted}검증${RESET} ${fg(theme, TONE_COLOR[gate.tone])}${gate.label}${RESET}`);
-  if (item.gate && item.gate.checkpoints > 0) parts.push(`${muted}체크포인트${RESET} ${item.gate.checkpoints}`);
-  if (item.tokens && totalTokens(item.tokens) > 0) parts.push(`${muted}토큰${RESET} ${compactTokens(totalTokens(item.tokens))}`);
-  if (item.costUsd !== undefined && item.costUsd > 0) parts.push(`$${item.costUsd.toFixed(2)}`);
-  if (slot) parts.push(`${fg(theme, 'accent')}칸 ${slot}${RESET}`);
-  return parts.length ? parts.join(`${muted} · ${RESET}`) : `${muted}검증 기록 없음${RESET}`;
-}
-
-/** 사용량 두 줄: 5시간·주간 막대와 %, 그 아래 다시 차는 때 */
-function limitLines(limits: DeskLimits | undefined, width: number, theme: Theme, now: number): [string, string] {
-  const muted = fg(theme, 'muted');
+/** 이 계정의 한도가 80%를 넘었을 때만 한 줄 경고(#934). 막대는 사용량 화면에 둔다 */
+function limitWarning(limits: DeskLimits | undefined, width: number, theme: Theme, now: number): string {
   const windows: Array<[string, DeskLimitWindow]> = [];
   if (limits?.fiveHour) windows.push(['5시간', limits.fiveHour]);
   if (limits?.weekly) windows.push(['주간', limits.weekly]);
-  if (windows.length === 0) return [`${muted}사용량 정보 없음${RESET}`, ''];
-  const gap = 2;
-  const half = Math.floor((width - gap * (windows.length - 1)) / windows.length);
-  const tops: string[] = [];
-  const bottoms: string[] = [];
-  for (const [label, window] of windows) {
-    const percent = `${Math.round(Math.max(0, Math.min(100, window.usedPercent)))}%`;
-    const barWidth = Math.max(1, half - stringWidth(label) - percent.length - 2);
-    tops.push(fitAnsi(`${muted}${label}${RESET} ${bar(window.usedPercent, barWidth, theme)} ${BOLD}${percent}${RESET}`, half));
-    bottoms.push(fitAnsi(`${muted}${resetText(window.resetsAt, now)}${RESET}`, half));
-  }
-  return [tops.join(' '.repeat(gap)), bottoms.join(' '.repeat(gap))];
+  const tight = windows.filter(([, window]) => window.usedPercent >= 80).sort((a, b) => b[1].usedPercent - a[1].usedPercent)[0];
+  if (!tight) return '';
+  const [label, window] = tight;
+  const pct = Math.round(Math.min(100, window.usedPercent));
+  const reset = resetText(window.resetsAt, now);
+  return compose([{ text: `⚠ 이 계정 ${label} ${pct}%`, color: pct >= 95 ? 'red' : 'yellow' }, ...(reset ? [SEP, { text: `${reset} 다시 참`, color: 'muted' as const, flex: true }] : [])], width, theme);
+}
+
+/** 고른 카드에 펼치는 사실: 검증·체크포인트·토큰·비용 */
+function factsLine(item: DeskItem, width: number, theme: Theme): string {
+  const parts: Seg[][] = [];
+  const gate = gateStatus(item);
+  if (gate) parts.push([{ text: '검증 ', color: 'muted' }, { text: gate.label, color: TONE_COLOR[gate.tone] }]);
+  if (item.tokens && totalTokens(item.tokens) > 0) parts.push([{ text: `토큰 ${compactTokens(totalTokens(item.tokens))}` }]);
+  if (item.costUsd !== undefined && item.costUsd > 0) parts.push([{ text: `$${item.costUsd.toFixed(2)}` }]);
+  if (item.gate && item.gate.checkpoints > 0) parts.push([{ text: `체크포인트 ${item.gate.checkpoints}` }]);
+  // 넘치면 뒤의 것부터 통째로 뺀다(숫자를 반쯤 자르지 않는다)
+  const width_ = (segs: Seg[][]) => segs.flat().reduce((sum, seg) => sum + stringWidth(seg.text), 0) + 3 * Math.max(0, segs.length - 1);
+  while (parts.length > 1 && width_(parts) > width) parts.pop();
+  return parts.length ? compose(parts.flatMap((segs, at) => (at ? [SEP, ...segs] : segs)), width, theme) : '';
 }
 
 export interface CardInput {
@@ -221,12 +359,14 @@ export interface CardInput {
   unseen?: boolean;
   slot?: number;
   limits?: DeskLimits;
-  /** 이 화면의 카드 가운데 하나라도 사용량이 있으면 모든 카드에 사용량 두 줄 자리를 둔다(높이를 맞춘다) */
+  /** 한도 경고 줄 자리. 이 화면의 카드 하나라도 경고가 있으면 모든 카드에 둔다(#934) */
   withLimits: boolean;
   /** 할 일·문맥 줄 자리. 없으면 이 카드에 그 값이 있을 때만 둔다(#921) */
   withProgress?: boolean;
   /** 마지막 답 줄 자리. 없으면 이 카드에 마지막 답이 있을 때만 둔다 */
   withLast?: boolean;
+  /** 안쪽 줄 수의 하한. 같은 줄(grid row)의 카드 높이를 맞출 때 쓴다 */
+  minRows?: number;
   sprite: Sprite;
   /** 움짤의 보일 프레임 번호(없으면 첫 프레임) */
   frame?: number;
@@ -234,9 +374,9 @@ export interface CardInput {
   kitty?: KittyImages;
 }
 
-/** 카드 안쪽의 줄 수: 글 줄(기본 4, 사용량 2, 할 일·문맥과 마지막 답은 있으면 1씩)과 그림 높이 가운데 큰 것 */
+/** 카드 안쪽의 줄 수: 글 줄(머리·지금 2, 한도 경고·할 일·답은 있으면 1씩, 서브에이전트 줄)과 그림 높이 가운데 큰 것 */
 export function baseRows(withLimits: boolean, art: { rows: number } = ART_WIDE, extra = 0): number {
-  return Math.max((withLimits ? 6 : 4) + extra, art.rows);
+  return Math.max(2 + Number(withLimits) + extra, art.rows);
 }
 
 /** 카드 한 장의 줄(테두리 포함). 줄마다 정확히 width칸이다 */
@@ -245,32 +385,102 @@ export function cardLines(card: CardInput, width: number, theme: Theme = DEFAULT
   const art = artSize(width);
   const withProgress = card.withProgress ?? Boolean((item.todos && item.todos.total > 0) || item.context);
   const withLast = card.withLast ?? Boolean(item.lastMessage);
-  const rows = baseRows(card.withLimits, art, Number(withProgress) + Number(withLast));
   const text = Math.max(1, width - 4 - art.cols - 2);
-  const status = agentStatus(item, { unseen: card.unseen ?? false });
-  const statusWidth = stringWidth(status.label) + 2;
-  const flag = card.flagged ? ` ${fg(theme, 'yellow')}!${RESET}` : '';
-  const title = `${BOLD}${fg(theme, 'text')}${item.title}${RESET} ${badge(backendLabel(item.backend), theme)}${flag}`;
-  const body = [spread(title, statusText(status, theme), text, statusWidth), nowLine(item, theme, now)];
-  if (withProgress) body.push(progressLine(item, text, theme));
-  body.push(agentsLine(item, theme));
-  if (withLast) body.push(lastLine(item, theme));
-  body.push(factsLine(item, card.slot, theme));
-  if (card.withLimits) body.push(...limitLines(card.limits, text, theme, now));
+  const head = headStatus(item, card.unseen ?? false);
+  // 작업 중이고 시작 시각을 알면 "작업 23분째"로 줄여 제목에 자리를 남긴다
+  const running = item.state === 'working' && head.label === '작업 중' ? forText(item.workingSince, now) : '';
+  const status = running ? { ...head, label: `작업 ${running}` } : head;
+  const right = statusText(status, theme);
+  const rightWidth = stringWidth(status.label) + 2;
+  const left = compose(
+    [{ text: item.title, color: 'text', bold: true, flex: true }, { text: ' ' }],
+    Math.max(1, text - rightWidth - 1 - stringWidth(backendLabel(item.backend)) - 2 - (card.slot ? 4 : 0) - (card.flagged ? 2 : 0)),
+    theme,
+  ).trimEnd();
+  const title = `${left} ${badge(backendLabel(item.backend), theme)}${card.slot ? `${fg(theme, 'accent')} 칸${card.slot}${RESET}` : ''}${card.flagged ? ` ${fg(theme, 'yellow')}!${RESET}` : ''}`;
+  const body = [spread(title, right, text, rightWidth), nowLine(item, text, theme, now)];
+  if (withProgress) body.push(progressLine(item, text, theme, now));
+  const subagents = subagentLines(item, text, theme, now);
+  body.push(...subagents);
+  if (card.withLimits) body.push(limitWarning(card.limits, text, theme, now));
+  // 마지막 답은 맨 끝: 고른 카드에서 펼친 답이 바로 이어진다
+  if (withLast) body.push(lastLine(item, text, theme, card.selected));
+  const rows = Math.max(body.length, art.rows, card.minRows ?? 0);
   while (body.length < rows) body.push('');
   const frame = card.frame ?? 0;
   const picture = card.kitty ? card.kitty.art(card.sprite, frame, art.cols, art.rows) : spriteLines(card.sprite, art.cols, art.rows, theme, frame);
   const inner = body.map((line, row) => `${picture[row] ?? ' '.repeat(art.cols)}  ${fitAnsi(line, text)}`);
   if (card.selected) {
     const pad = ' '.repeat(art.cols + 2);
-    if (withLast) for (const more of lastMore(item, text)) inner.push(`${pad}${fitAnsi(more, text)}`);
-    for (const detail of detailLines(item).slice(0, DETAIL_MAX)) {
+    const more: string[] = [];
+    if (withLast) more.push(...lastMore(item, text));
+    // 카드 몸에 이미 보인 서브에이전트(작업 중인 앞의 둘)는 다시 그리지 않는다
+    const shown = new Set(subagentsOf(item).filter((agent) => agent.state === 'working').slice(0, SUBAGENT_SHOWN).map((agent) => agent.id));
+    for (const detail of detailLines({ ...item, agents: (item.agents ?? []).filter((agent) => !shown.has(agent.id)) }).slice(0, DETAIL_MAX)) {
       let line = detail.text;
       for (const tone of detail.tones) line = line.replace(tone.text, `${fg(theme, TONE_COLOR[tone.tone])}${tone.text}${RESET}`);
-      inner.push(`${pad}${fitAnsi(line, text)}`);
+      more.push(line);
     }
+    const facts = factsLine(item, text, theme);
+    if (facts) more.push(facts);
+    for (const line of more) inner.push(`${pad}${fitAnsi(line, text)}`);
   }
   return box(inner, width, theme, { focused: card.selected });
+}
+
+/** 확인 필요 줄에 올리는 세션 하나(#934) */
+export interface NeedsYouEntry {
+  item: DeskItem;
+  /** deskSessions 순서의 자리(state.selected 값) */
+  index: number;
+  status: StatusBadge;
+}
+
+/** 숫자키로 고를 수 있는 확인 필요 항목의 상한 */
+export const NEEDS_YOU_MAX = 9;
+
+/**
+ * 확인 필요(#934): 권한·질문·입력을 기다리거나 오류·검증 실패·확인 필요인 세션을 스페이스와 상관없이 모은다.
+ * 사람을 기다리는 것이 먼저, 같은 정도면 받은 차례다. 스페이스 화면 맨 위에 번호를 달아 보이고 숫자키로 고른다
+ */
+export function needsYou(state: Pick<DeskState, 'items'>): NeedsYouEntry[] {
+  return deskSessions(state.items)
+    .map((item, index) => ({ item, index, status: headStatus(item) }))
+    .filter((entry) => needsAttention(entry.item))
+    .map((entry, order) => ({ entry, order, rank: entry.status.tone === 'warn' && attentionKind(entry.item) ? 0 : 1 }))
+    .sort((a, b) => a.rank - b.rank || a.order - b.order)
+    .map(({ entry }) => entry)
+    .slice(0, NEEDS_YOU_MAX);
+}
+
+/** 확인 필요 줄에 한 번에 보이는 항목 수. 넘치면 "외 N개" */
+const NEEDS_YOU_SHOWN = 3;
+
+/** 스페이스 화면 맨 위의 확인 필요 줄. 없으면 빈 배열 */
+function needsYouLines(state: DeskState, width: number, theme: Theme): string[] {
+  const list = needsYou(state);
+  if (list.length === 0) return [];
+  const lines = [compose([{ text: `  확인 필요 ${list.length}`, color: 'yellow', bold: true }, { text: '  숫자로 고르고 Enter로 그 칸에 열기', color: 'muted' }], width, theme)];
+  for (const [at, entry] of list.slice(0, NEEDS_YOU_SHOWN).entries()) {
+    const picked = entry.index === state.selected;
+    const why = entry.item.terminal?.message ?? entry.item.reason;
+    lines.push(
+      compose(
+        [
+          { text: picked ? ' › ' : '   ', color: 'accent' },
+          { text: `${at + 1}  `, color: 'accent', bold: true },
+          { text: entry.item.title, bold: picked, flex: true },
+          { text: ` · ${entry.item.projectName}  `, color: 'muted' },
+          { text: entry.status.label, color: statusColor(entry.status) },
+          ...(why ? [SEP, { text: oneLine(why), flex: true }] : []),
+        ],
+        width,
+        theme,
+      ),
+    );
+  }
+  if (list.length > NEEDS_YOU_SHOWN) lines.push(compose([{ text: `   외 ${list.length - NEEDS_YOU_SHOWN}개 · 숫자 ${NEEDS_YOU_SHOWN + 1}~${list.length}로 고르기`, color: 'muted' }], width, theme));
+  return lines;
 }
 
 /** 스페이스 화면에 놓일 세션들(고른 세션이 든 스페이스). 스페이스 화면이 아니어도 돌려준다 */
@@ -286,7 +496,7 @@ interface LineSlots {
   progress: boolean;
   last: boolean;
 }
-/** 높이가 모자랄 때 줄을 빼는 차례: 마지막 답, 할 일·문맥, 사용량 */
+/** 높이가 모자랄 때 줄을 빼는 차례: 마지막 답, 할 일·문맥, 한도 경고 */
 const DROP_ORDER: ReadonlyArray<keyof LineSlots> = ['last', 'progress', 'limits'];
 
 export interface SpaceScreen {
@@ -316,6 +526,9 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
     while (lines.length < rect.h) lines.push(blank);
     return { lines, cards };
   }
+  // 확인 필요 줄(#934): 손댈 세션이 있으면 스페이스와 상관없이 맨 위에
+  const needs = needsYouLines(state, rect.w, theme);
+  if (needs.length) lines.push(...needs, blank);
   lines.push(fitAnsi(`  ${BOLD}${fg(theme, 'text')}${space.name}${RESET}  ${muted}에이전트 ${space.sessions.length}${RESET}`, rect.w), blank);
 
   const slotOf = new Map<string, number>();
@@ -329,12 +542,12 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
   const cardWidth = Math.min(CARD_MAX, Math.max(ART_NARROW.cols + 8, Math.floor((rect.w - 2 - (columns - 1)) / columns)));
   // 줄 자리는 스페이스의 카드 하나라도 그 값이 있으면 모든 카드에 둔다(높이를 맞춘다)
   let slots: LineSlots = {
-    limits: spaceSessions.some((item) => state.limits?.[item.id] !== undefined),
+    limits: spaceSessions.some((item) => limitWarning(state.limits?.[item.id], 80, theme, now) !== ''),
     progress: spaceSessions.some((item) => Boolean((item.todos && item.todos.total > 0) || item.context)),
     last: spaceSessions.some((item) => Boolean(item.lastMessage)),
   };
-  const render = (with_: LineSlots) =>
-    space.sessions.map((index) => {
+  const draw = (with_: LineSlots, minRows: (at: number) => number, folded = false) =>
+    space.sessions.map((index, at) => {
       const item = sessions[index]!;
       const slot = slotOf.get(item.id);
       const limits = state.limits?.[item.id];
@@ -345,12 +558,13 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
         lines: cardLines(
           {
             item,
-            selected: index === state.selected,
+            selected: !folded && index === state.selected,
             flagged: flagged.has(item.id),
             unseen: unseen.has(item.id),
             withLimits: with_.limits,
             withProgress: with_.progress,
             withLast: with_.last,
+            minRows: minRows(at),
             sprite,
             ...art,
             ...(slot ? { slot } : {}),
@@ -362,6 +576,13 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
         ),
       };
     });
+  // 같은 줄(grid row)의 카드는 높이를 맞춘다: 서브에이전트 줄 수가 카드마다 다르다
+  const render = (with_: LineSlots) => {
+    // 몸 줄 수는 펼치지 않은 꼴로 잰다(고른 카드의 펼친 줄로 옆 카드를 늘리지 않는다)
+    const natural = draw(with_, () => 0, true).map((card) => card.lines.length - 2);
+    const rowMax = (at: number) => Math.max(...natural.slice(at - (at % columns), at - (at % columns) + columns));
+    return draw(with_, rowMax);
+  };
   // 고른 카드가 든 줄(grid row)의 높이가 남은 자리보다 크면 낮은 순위 줄부터 뺀다. 뺀 뒤에도 높이가 그대로인 줄(그림이 더 높다)은 되살린다
   const room = rect.h - lines.length;
   const rowHeight = (with_: LineSlots) => {

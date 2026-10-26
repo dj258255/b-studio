@@ -26,32 +26,33 @@ describe('카드 한 장', () => {
   const card = (patch: Partial<Parameters<typeof cardLines>[0]> = {}) =>
     cardLines({ item: busy, selected: false, flagged: false, withLimits: false, sprite: defaultSprite('claude-code'), ...patch }, 84, DEFAULT_THEME, NOW);
 
-  it('둥근 테두리 안에 그림, 이름·AI 배지·상태, 지금 하는 일, 서브에이전트, 게이트·토큰을 놓는다', () => {
+  it('둥근 테두리 안에 그림, 이름·AI 배지·칸·상태, 지금 하는 일, 서브에이전트를 놓는다(검증·토큰은 고른 카드에만, #934)', () => {
     const lines = card({ slot: 1 });
     const plain = lines.map(stripAnsi);
     // 그림이 카드 높이를 채운다: 넓은 카드는 그림 자리 14칸 × 7줄
     expect(plain).toHaveLength(ART_WIDE.rows + 2);
     for (const line of plain) expect(stringWidth(line)).toBe(84);
     expect(plain[0]!.startsWith('╭')).toBe(true);
-    expect(plain[1]).toMatch(/│ .{14} {2}주문 모듈 +Claude +◐ 작업 중 │/);
-    expect(plain[2]).toContain('지금 Edit src/order.ts');
-    expect(plain[3]).toContain('↳ 서브에이전트 1개 작업 중 · Explore: 모델 요청 2회');
-    expect(plain[4]).toContain('검증 통과 · 체크포인트 2 · 토큰 1.2만 · $0.42 · 칸 1');
+    expect(plain[1]).toMatch(/│ .{14} {2}주문 모듈 +Claude +칸1 +◐ 작업 중 │/);
+    expect(plain[2]).toContain('Edit src/order.ts');
+    expect(plain[3]).toContain('↳ Explore · 모델 요청 2회');
+    expect(plain.join('\n')).not.toContain('토큰');
+    expect(card({ selected: true }).map(stripAnsi).join('\n')).toContain('검증 통과 · 토큰 1.2만 · $0.42 · 체크포인트 2');
     // 그림 자리에 반칸 블록이 있다
     expect(plain.slice(1, 5).join('')).toMatch(/[▀▄]/);
   });
 
-  it('메인 에이전트 활동이 없으면 마지막 활동 때를, 게이트 기록이 없으면 그렇다고 적는다', () => {
+  it('메인 에이전트 활동이 없으면 마지막 활동 때를 적는다', () => {
     const plain = cardLines({ item: item('b'), selected: false, flagged: false, withLimits: false, sprite: defaultSprite(undefined) }, 60, DEFAULT_THEME, NOW).map(stripAnsi);
-    expect(plain[2]).toContain('지금 마지막 활동 3분 전');
-    expect(plain[4]).toContain('검증 기록 없음');
+    expect(plain[2]).toContain('마지막 활동 3분 전');
   });
 
   it('고른 카드는 강조색 테두리에 서브에이전트·범위를 펼친다', () => {
     const selected = card({ selected: true });
     expect(selected[0]).toContain(fg(DEFAULT_THEME, 'accent'));
     const plain = selected.map(stripAnsi);
-    expect(plain.some((line) => line.includes('↳ Explore 작업 중 · 토큰 2,000 · 모델 요청 2회'))).toBe(true);
+    // 카드 몸에 보인 서브에이전트는 펼친 줄에 다시 넣지 않는다(#934)
+    expect(plain.filter((line) => line.includes('모델 요청 2회')).length).toBe(1);
     expect(plain.length).toBeGreaterThan(card().length);
   });
 
@@ -69,15 +70,14 @@ describe('카드 한 장', () => {
     expect(stripAnsi(card({ flagged: true })[1]!)).toMatch(/Claude +! /);
   });
 
-  it('사용량이 있으면 5시간·주간 막대와 %, 그 아래 다시 차는 때. 없으면 "사용량 정보 없음"', () => {
-    const limits = { fiveHour: { usedPercent: 37, resetsAt: new Date(NOW + 110 * 60_000).toISOString() }, weekly: { usedPercent: 90, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() } };
+  it('계정 한도가 80%를 넘으면 가장 빠듯한 창 하나를 경고 한 줄로, 다시 차는 때와 함께(#934)', () => {
+    const limits = { fiveHour: { usedPercent: 85, resetsAt: new Date(NOW + 110 * 60_000).toISOString() }, weekly: { usedPercent: 90, resetsAt: new Date(NOW + 3 * 86_400_000).toISOString() } };
     const plain = card({ withLimits: true, limits }).map(stripAnsi);
     expect(plain).toHaveLength(ART_WIDE.rows + 2);
-    expect(plain[5]).toMatch(/5시간 █+.* 37% +주간 █+.* 90%/);
-    expect(plain[6]).toContain('1시간 50분 뒤');
-    expect(plain[6]).toMatch(/\d+\/\d+\([일월화수목금토]\) \d\d:\d\d/);
-    const none = card({ withLimits: true }).map(stripAnsi);
-    expect(none[5]).toContain('사용량 정보 없음');
+    const warn = plain.find((line) => line.includes('⚠ 이 계정'))!;
+    expect(warn).toContain('⚠ 이 계정 주간 90%');
+    expect(warn).toMatch(/\d+\/\d+\([일월화수목금토]\) \d\d:\d\d 다시 참/);
+    expect(card({ withLimits: true }).map(stripAnsi).join('\n')).not.toContain('⚠ 이 계정');
   });
 });
 
@@ -94,15 +94,15 @@ describe('카드가 보이는 지금 하는 일·할 일·문맥·마지막 답(
     cardLines({ item: target, selected: false, flagged: false, withLimits: false, sprite: defaultSprite('claude-code'), ...patch }, width, DEFAULT_THEME, NOW).map(stripAnsi);
 
   it('지금 줄은 도구를 우리말로, 대상과 지난 시간을 붙인다', () => {
-    expect(card(rich)[2]).toContain('지금 편집 src/pay.ts · 20초');
-    expect(card(item('x', { now: { tool: 'Bash', target: 'pnpm test', at: '2026-10-23T11:58:00Z' } }))[2]).toContain('지금 실행 pnpm test · 2분');
-    expect(card(item('x', { now: { tool: 'mcp__github__create_pr', at: '2026-10-23T11:59:59Z' } }))[2]).toContain('지금 mcp__github__create_pr');
+    expect(card(rich)[2]).toContain('편집 src/pay.ts · 20초 전');
+    expect(card(item('x', { now: { tool: 'Bash', target: 'pnpm test', at: '2026-10-23T11:58:00Z' } }))[2]).toContain('실행 pnpm test · 2분 전');
+    expect(card(item('x', { now: { tool: 'mcp__github__create_pr', at: '2026-10-23T11:59:59Z' } }))[2]).toContain('mcp__github__create_pr');
   });
 
   it('할 일 진행과 문맥 창 막대를 한 줄에, 마지막 답을 한 줄에 놓는다', () => {
     const plain = card(rich);
-    const progress = plain.find((line) => line.includes('할 일'));
-    expect(progress).toMatch(/할 일 3\/7 결제 테스트 작성/);
+    const progress = plain.find((line) => line.includes('3/7'));
+    expect(progress).toMatch(/3\/7 결제 테스트 작성/);
     expect(progress).toMatch(/문맥 .*62%/);
     expect(plain.some((line) => line.includes('답 결제 모듈에 테스트 세 개를 더했습니다'))).toBe(true);
     for (const line of plain) expect(stringWidth(line)).toBe(84);
@@ -119,8 +119,8 @@ describe('카드가 보이는 지금 하는 일·할 일·문맥·마지막 답(
     const waiting = item('w', { now: rich.now!, terminal: { cli: 'up', waiting: 'permission', message: 'Bash rm -rf dist 실행 허락' } });
     const plain = card(waiting);
     expect(plain[1]).toContain('권한 대기');
-    expect(plain[2]).toContain('권한 대기 · Bash rm -rf dist 실행 허락');
-    expect(card(item('q', { terminal: { cli: 'up', waiting: 'question', message: '어느 결제사를 쓸까요?' } }))[2]).toContain('답 기다림 · 어느 결제사를 쓸까요?');
+    expect(plain[2]).toContain('› Bash rm -rf dist 실행 허락');
+    expect(card(item('q', { terminal: { cli: 'up', waiting: 'question', message: '어느 결제사를 쓸까요?' } }))[2]).toContain('› 어느 결제사를 쓸까요?');
   });
 
   it('서브에이전트 요약은 인스턴스의 설명과 도구를 쓴다', () => {
@@ -129,10 +129,9 @@ describe('카드가 보이는 지금 하는 일·할 일·문맥·마지막 답(
       { id: 'a1', name: 'Explore', type: 'Explore', description: '결제 흐름 찾기', tool: 'Grep order', kind: 'subagent' as const, state: 'working' as const, tokens: usage(10) },
       { id: 'a2', name: 'Explore', type: 'Explore', description: '테스트 찾기', kind: 'subagent' as const, state: 'working' as const, tokens: usage(10) },
     ];
-    expect(card(item('s', { agents }))[3]).toContain('↳ 서브에이전트 2개 작업 중 · Explore 결제 흐름 찾기: Grep order');
-    const detail = cardLines({ item: item('s', { agents }), selected: true, flagged: false, withLimits: false, sprite: defaultSprite(undefined) }, 84, DEFAULT_THEME, NOW).map(stripAnsi);
-    expect(detail.some((line) => line.includes('↳ Explore 결제 흐름 찾기 작업 중 · Grep order · 토큰 10'))).toBe(true);
-    expect(detail.some((line) => line.includes('↳ Explore 테스트 찾기 작업 중 · 토큰 10'))).toBe(true);
+    const plain = card(item('s', { agents }));
+    expect(plain[3]).toContain('↳ Explore 결제 흐름 찾기 · Grep order');
+    expect(plain[4]).toContain('↳ Explore 테스트 찾기');
   });
 
   it('고른 카드는 마지막 답을 두 줄까지 펼친다', () => {
@@ -232,11 +231,14 @@ describe('스페이스 화면', () => {
     expect(screen.cards.map((card) => card.index)).not.toContain(0);
   });
 
-  it('스페이스의 카드 하나라도 사용량이 있으면 모든 카드에 사용량 자리를 둔다', () => {
-    const screen = spaceScreen(state({ limits: { b: { weekly: { usedPercent: 10 } } } }), rect, NOW);
-    const plain = screen.lines.map(stripAnsi).join('\n');
-    expect(plain).toContain('주간');
-    expect(plain).toContain('사용량 정보 없음');
+  it('카드에는 계정 막대를 그리지 않고, 80%를 넘은 계정이 있을 때만 경고 줄 자리를 둔다(#934)', () => {
+    const calm = spaceScreen(state({ limits: { b: { weekly: { usedPercent: 10 } } } }), rect, NOW).lines.map(stripAnsi).join('\n');
+    expect(calm).not.toContain('주간');
+    const tight = spaceScreen(state({ limits: { b: { weekly: { usedPercent: 92 } } } }), rect, NOW);
+    expect(tight.lines.map(stripAnsi).join('\n')).toContain('⚠ 이 계정 주간 92%');
+    // 경고가 없는 카드도 같은 자리를 둔다(높이를 맞춘다). 고른 카드는 펼쳐서 더 크니 고르지 않은 둘을 본다
+    const [, second, third] = tight.cards;
+    expect(second!.rect.h).toBe(third!.rect.h);
   });
 
   it('새 필드가 있는 카드가 있으면 스페이스의 모든 카드에 그 줄 자리를 둔다', () => {
@@ -247,20 +249,21 @@ describe('스페이스 화면', () => {
     expect(screen.lines.map(stripAnsi).join('\n')).toContain('답 끝났습니다');
   });
 
-  it('높이가 모자라면 마지막 답, 할 일·문맥, 사용량 차례로 줄을 뺀다', () => {
-    const rich = item('r', { todos: { done: 1, total: 2 }, context: { usedPct: 40 }, lastMessage: '끝났습니다' });
-    const limits = { r: { weekly: { usedPercent: 10 } } };
-    // 좁은 카드(그림 5줄): 글 줄 8개(제목·지금·할 일·서브에이전트·답·검증·사용량 2)에 테두리 2줄, 머리 2줄
+  it('높이가 모자라면 마지막 답, 할 일·문맥, 한도 경고 차례로 줄을 뺀다', () => {
+    const agents = [1, 2].map((n) => ({ id: `s${n}`, name: 'Explore', type: 'Explore', description: `찾기 ${n}`, kind: 'subagent' as const, state: 'working' as const, tokens: usage(1) }));
+    const rich = item('r', { state: 'working', todos: { done: 1, total: 2 }, context: { usedPct: 40 }, lastMessage: '끝났습니다', agents });
+    const limits = { r: { weekly: { usedPercent: 90 } } };
+    // 좁은 카드(그림 5줄): 글 줄 7개(머리·지금·할 일·서브에이전트 2·답·한도 경고)에 테두리 2줄, 스페이스 머리 2줄
     const text = (h: number) => spaceScreen(state({ items: [rich], limits }), { x: 0, y: 1, w: 60, h }, NOW).lines.map(stripAnsi).join('\n');
-    expect(text(12)).toContain('답 끝났습니다');
-    expect(text(12)).toContain('할 일 1/2');
-    expect(text(12)).toContain('주간');
-    expect(text(11)).not.toContain('답 끝났습니다');
-    expect(text(11)).toContain('할 일 1/2');
-    expect(text(10)).not.toContain('할 일 1/2');
-    expect(text(10)).toContain('주간');
-    expect(text(9)).not.toContain('주간');
-    expect(text(9)).toContain('지금');
+    expect(text(11)).toContain('답 끝났습니다');
+    expect(text(11)).toContain('1/2');
+    expect(text(11)).toContain('⚠ 이 계정');
+    expect(text(10)).not.toContain('답 끝났습니다');
+    expect(text(10)).toContain('1/2');
+    expect(text(9)).not.toContain('1/2');
+    expect(text(9)).toContain('⚠ 이 계정');
+    // 그림(5줄)보다 낮아지지 않으니 그 아래로는 더 빼지 않는다
+    expect(text(8)).toContain('찾기 2');
   });
 
   it('세션이 없으면 폴더 등록(a)과 새 요청(n) 안내(#916)', () => {

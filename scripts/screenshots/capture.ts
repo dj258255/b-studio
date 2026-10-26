@@ -42,13 +42,15 @@ const items: DeskItem[] = [
   {
     kind: 'session', id: 's-order', title: '주문 모듈 리팩터링', projectName: 'shop', state: 'working', backend: 'claude-code', accountId: 'acct-pio', lastActivityAt: at(0),
     terminal: { cli: 'up' }, gate: { state: 'passed', checkpoints: 3 }, tokens: usage(152_000, 30_000), costUsd: 1.37,
-    now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 12_000).toISOString() },
+    workingSince: at(-23),
+    now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 13_000).toISOString() },
     todos: { done: 3, total: 7, current: '주문 상태 전이 테스트' },
     context: { usedPct: 41, used: 82_000, size: 200_000 },
     lastMessage: '주문 상태를 한 곳에서 바꾸게 묶었습니다. 이제 전이 테스트를 씁니다.',
     agents: [
       { id: 'main', name: 'Claude Code', kind: 'main', state: 'working', activity: 'Edit apps/shop/order.ts', tokens: usage(129_000, 25_000) },
-      { id: 'sub-1', name: 'Explore', type: 'Explore', description: '주문 호출부 찾기', tool: 'Grep updateOrder', kind: 'subagent', state: 'working', activity: '파일 12개 읽음', tokens: usage(20_000, 3_000) },
+      { id: 'sub-1', name: 'Explore', type: 'Explore', description: '주문 호출부 찾기', tool: 'Grep updateOrder', kind: 'subagent', state: 'working', activity: '파일 12개 읽음', startedAt: at(-4), lastAt: new Date(now - 5_000).toISOString(), tokens: usage(20_000, 3_000) },
+      { id: 'sub-2', name: 'general-purpose', type: 'general-purpose', description: '결제 이벤트 정리', kind: 'subagent', state: 'working', startedAt: at(-11), lastAt: at(-6), tokens: usage(8_000, 1_000) },
     ],
   },
   {

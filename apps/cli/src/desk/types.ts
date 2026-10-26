@@ -44,6 +44,8 @@ export interface DeskItem {
   context?: DeskContext;
   /** 마지막 답의 앞부분(200자 안, #920) */
   lastMessage?: string;
+  /** 지금 요청(턴)을 시작한 시각. 작업 중일 때만(#933). 카드의 "23분째"와 남은 시간 추정에 쓴다 */
+  workingSince?: string;
 }
 
 export interface DeskNow {
@@ -52,6 +54,8 @@ export interface DeskNow {
   /** Bash는 명령 첫 줄, 파일 도구는 경로, Grep은 패턴, Agent는 설명 */
   target?: string;
   at: string;
+  /** 도구가 시작했고 아직 끝나지 않았다(#933). 긴 명령이 도는 동안은 소식이 없어도 멈춘 것이 아니다 */
+  running?: boolean;
 }
 
 export interface DeskTodos {
@@ -87,6 +91,9 @@ export interface DeskAgent {
   description?: string;
   /** 지금 쓰는 도구와 대상 한 줄 */
   tool?: string;
+  /** 서브에이전트가 시작한 시각과 마지막 소식 시각(#933) */
+  startedAt?: string;
+  lastAt?: string;
   tokens: DeskUsage;
   costUsd?: number;
 }
