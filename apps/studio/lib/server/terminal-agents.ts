@@ -37,6 +37,10 @@ export interface TerminalAgentRow {
   description?: string;
   /** 서브에이전트가 지금 쓰는 도구(#920) */
   tool?: string;
+  /** 서브에이전트가 시작한 시각(ISO, #933). 훅으로 인스턴스를 알 때만 */
+  startedAt?: string;
+  /** 서브에이전트의 마지막 소식 시각(ISO, #933) */
+  lastAt?: string;
   tokens: AgentUsage;
   /** 추정 비용. 단가도 CLI가 보고한 비용도 없으면 없다 */
   costUsd?: number;

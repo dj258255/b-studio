@@ -140,3 +140,22 @@ describe('지금 하는 일·할 일·문맥 창·마지막 답·서브에이전
     expect(terminal('permission_prompt', 'x', false)).toEqual({ cli: 'down' });
   });
 });
+
+describe('시각(#933)', () => {
+  it('workingSince와 서브에이전트 행의 startedAt·lastAt을 싣고, 마지막 활동은 훅의 lastAt이 더 늦으면 그것이다', () => {
+    const live = {
+      workingSince: '2026-10-22T10:40:00.000Z',
+      lastAt: '2026-10-22T11:05:00.000Z',
+      now: { tool: 'Bash', target: 'pnpm test', at: '2026-10-22T11:04:00.000Z', running: true },
+      subagents: [{ id: 'a1', type: 'Explore', state: 'working' as const, startedAt: '2026-10-22T10:50:00.000Z', lastAt: '2026-10-22T11:01:00.000Z' }],
+    };
+    const got = item(source({ live }));
+    expect(got.workingSince).toBe('2026-10-22T10:40:00.000Z');
+    expect(got.now).toEqual(live.now);
+    expect(got.lastActivityAt).toBe('2026-10-22T11:05:00.000Z');
+    expect(got.agents?.[0]).toMatchObject({ startedAt: '2026-10-22T10:50:00.000Z', lastAt: '2026-10-22T11:01:00.000Z' });
+    // 기록의 시각이 더 늦으면 그대로 둔다
+    expect(item(source({ live: { lastAt: '2026-10-22T10:00:00.000Z' } })).lastActivityAt).toBe('2026-10-22T11:00:00.000Z');
+    expect(item(source())).not.toHaveProperty('workingSince');
+  });
+});

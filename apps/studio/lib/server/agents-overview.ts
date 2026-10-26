@@ -80,6 +80,8 @@ export interface AgentItem {
   context?: ActivityContext;
   /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
   lastMessage?: string;
+  /** 터미널 CLI가 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만. desk가 "몇 분째"를 센다 */
+  workingSince?: string;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -382,7 +384,8 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(attention ? { attention } : {}),
     ...(reason ? { reason } : {}),
     ...(row.backend ? { backend: row.backend } : {}),
-    lastActivityAt: row.updatedAt,
+    // 훅의 마지막 소식이 기록보다 늦으면 그것이 마지막 활동이다(#933). 읽기 도구·서브에이전트 훅은 기록에 남지 않는다
+    lastActivityAt: laterOf(row.updatedAt, row.live?.lastAt),
     ...(runningForMs !== undefined ? { runningForMs } : {}),
     ...(tokens ? { tokens } : {}),
     ...(state === 'working' ? { activity: activityOf(row.recent ?? []) } : {}),
@@ -401,7 +404,13 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.todos ? { todos: row.live.todos } : {}),
     ...(row.live?.context ? { context: row.live.context } : {}),
     ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
+    ...(row.live?.workingSince ? { workingSince: row.live.workingSince } : {}),
   };
+}
+
+/** 두 ISO 시각 가운데 늦은 것. 둘째가 없거나 읽을 수 없으면 첫째 */
+function laterOf(first: string, second: string | undefined): string {
+  return second && Date.parse(second) > Date.parse(first) ? second : first;
 }
 
 
@@ -425,6 +434,8 @@ function agentsOf(ledger: readonly TerminalAgentRow[] | undefined, instances: re
     type: instance.type,
     ...(instance.description ? { description: instance.description } : {}),
     ...(instance.tool ? { tool: instance.tool } : {}),
+    ...(instance.startedAt ? { startedAt: instance.startedAt } : {}),
+    ...(instance.lastAt ? { lastAt: instance.lastAt } : {}),
     tokens: carried?.tokens ?? ZERO_USAGE,
     ...(carried?.costUsd !== undefined ? { costUsd: carried.costUsd } : {}),
   });
