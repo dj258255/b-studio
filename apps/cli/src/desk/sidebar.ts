@@ -64,7 +64,14 @@ export function detailLines(item: DeskItem): DetailLine[] {
     const state = AGENT_STATE[agent.state];
     // 텔레메트리가 없으면 토큰은 0으로 온다. 모르는 것을 "토큰 0"으로 적지 않는다(#944)
     const tokens = totalTokens(agent.tokens);
-    const parts = [...(agent.tool ? [agent.tool] : []), ...(tokens > 0 ? [`토큰 ${tokens.toLocaleString('ko-KR')}`] : []), ...(agent.activity ? [agent.activity] : [])];
+    // 서버가 모른다고 한 토큰(tokensUnknown, #953)은 값이 와도 적지 않는다
+    const parts = [
+      ...(agent.tool ? [agent.tool] : []),
+      ...(tokens > 0 && !agent.tokensUnknown ? [`토큰 ${tokens.toLocaleString('ko-KR')}`] : []),
+      ...(agent.activity ? [agent.activity] : []),
+      // 끝난 서브에이전트가 남긴 마지막 답(#953)
+      ...(agent.result ? [`결과 ${agent.result.replace(/\s+/g, ' ').trim()}`] : []),
+    ];
     lines.push({ text: `↳ ${subagentName(agent)} ${state.label}${parts.length ? ` · ${parts.join(' · ')}` : ''}`, tones: [{ text: state.label, tone: state.tone }] });
   }
   if (subagents.length > SUBAGENT_LINES) lines.push({ text: `↳ 외 ${subagents.length - SUBAGENT_LINES}개`, tones: [] });

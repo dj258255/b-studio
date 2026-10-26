@@ -195,6 +195,8 @@ function nowLine(item: DeskItem, width: number, theme: Theme, now: number): stri
   const waiting = item.terminal?.waiting;
   // 기다림·실패는 머리에 이미 상태가 있으니 여기에는 까닭만 그 색으로 적는다
   if (head.tone === 'warn' && waiting && waiting !== 'idle') {
+    // 기다리는 동안 도구가 거절·실패했으면 그것을 먼저 적는다(#953). 묻는 것은 확인 필요 줄에 있다
+    if (item.now?.error) return errorLine(item.now, width, theme);
     return compose([{ text: '› ', color: statusColor(head) }, { text: item.terminal?.message ? oneLine(item.terminal.message) : '그 칸에서 답하면 이어서 합니다', color: statusColor(head), flex: true }], width, theme);
   }
   if (head.tone === 'fail' || head.label === '확인 필요') {
@@ -204,6 +206,8 @@ function nowLine(item: DeskItem, width: number, theme: Theme, now: number): stri
   const quiet = lastSignal(item);
   const stale = item.state === 'working' && !item.now?.running && quiet !== undefined && now - quiet > STALE_MS;
   const staleSeg: Seg = { text: `⚠ ${spanText(now - (quiet ?? now))}째 소식 없음`, color: 'yellow' };
+  // 거절·실패한 도구는 정상 진행처럼 "· 17초 전"을 붙이지 않고 까닭을 빨강으로(#953)
+  if (item.now?.error) return errorLine(item.now, width, theme);
   if (item.now) {
     const what: Seg[] = [{ text: toolLabel(item.now.tool) }, ...(item.now.target ? [{ text: ` ${oneLine(item.now.target)}`, flex: true }] : [])];
     const when: Seg = item.now.running ? { text: forText(item.now.at, now), color: 'accent' } : stale ? staleSeg : { text: agoText(item.now.at, now), color: 'muted' };
@@ -214,6 +218,15 @@ function nowLine(item: DeskItem, width: number, theme: Theme, now: number): stri
   if (stale) return compose([staleSeg], width, theme);
   const since = agoText(item.lastActivityAt, now);
   return compose([{ text: since ? `마지막 활동 ${since}` : '기록 없음', color: 'muted' }], width, theme);
+}
+
+/** 거절·실패한 도구 줄: "실행 pnpm test · 거절됨: …"(까닭은 빨강). 넘치면 까닭보다 대상을 먼저 줄이고, 대상을 다 줄여도 넘치면 대상을 뺀다 */
+function errorLine(now: NonNullable<DeskItem['now']>, width: number, theme: Theme): string {
+  const why: Seg = { text: oneLine(now.error ?? ''), color: 'red', flex: true };
+  const label = toolLabel(now.tool);
+  const room = width - stringWidth(label) - stringWidth(SEP.text) - stringWidth(why.text) - 1;
+  const target: Seg[] = now.target && room >= 6 ? [{ text: ` ${clipWords(oneLine(now.target), room)}` }] : [];
+  return compose([{ text: label }, ...target, SEP, why], width, theme);
 }
 
 /** 남은 시간을 추정하기 전에 지나야 하는 시간. 시작 몇십 초 만의 속도로 셈하면 크게 틀린다(#944) */

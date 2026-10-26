@@ -57,6 +57,8 @@ const items: DeskItem[] = [
     terminal: { cli: 'up', waiting: 'permission', message: 'pnpm test 실행 허락' }, gate: { state: 'verifying', checkpoints: 1 }, tokens: usage(55_000, 9_000),
     todos: { done: 5, total: 6, current: '환불 경계값' },
     context: { usedPct: 83 },
+    // 거절된 도구(#953): 권한 대기 중에도 지금 줄에 까닭이 빨강으로 보인다
+    now: { tool: 'Edit', target: 'infra/deploy.yaml', at: new Date(now - 40_000).toISOString(), running: false, error: '거절됨: 쓰기 범위 밖입니다' },
     agents: [{ id: 'main', name: 'Codex', kind: 'main', state: 'working', activity: 'pnpm test 실행 권한을 묻는 중', tokens: usage(55_000, 9_000) }],
   },
   { kind: 'session', id: 's-readme', title: 'README 사진 다시 찍기', projectName: 'shop', state: 'done', backend: 'claude-code', accountId: 'acct-eri', lastActivityAt: at(-48), terminal: { cli: 'down' }, gate: { state: 'passed', checkpoints: 2 }, tokens: usage(36_000, 5_000), lastMessage: '사진 네 장을 다시 찍어 docs/images에 넣었습니다.' },
