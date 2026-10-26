@@ -113,26 +113,39 @@ export interface Space {
 /** 급한 차례: 사람이 손댈 것 > 오류 > 작업 중 > 괜찮음 > 쉼 */
 const URGENCY: Record<Tone, number> = { warn: 4, fail: 3, busy: 2, ok: 1, muted: 0 };
 
-export function deskSpaces(items: readonly DeskItem[]): Space[] {
+export function deskSpaces(items: readonly DeskItem[], unseen: ReadonlySet<string> = new Set()): Space[] {
   const spaces: Space[] = [];
   deskSessions(items).forEach((item, index) => {
     let space = spaces.at(-1);
     if (space?.name !== item.projectName) {
-      space = { name: item.projectName, sessions: [], status: agentStatus(item) };
+      space = { name: item.projectName, sessions: [], status: agentStatus(item, { unseen: unseen.has(item.id) }) };
       spaces.push(space);
     }
     space.sessions.push(index);
-    const status = agentStatus(item);
+    const status = agentStatus(item, { unseen: unseen.has(item.id) });
     if (URGENCY[status.tone] > URGENCY[space.status.tone]) space.status = status;
   });
   return spaces;
 }
 
-/** 에이전트가 지금 무엇을 하는가. 사람이 손대야 하는 것(권한·답)을 먼저 본다 */
-export function agentStatus(item: DeskItem): StatusBadge {
-  if (item.terminal?.waiting === 'permission') return { label: '권한 대기', tone: 'warn' };
-  if (item.attention === 'question') return { label: '답 기다림', tone: 'warn' };
-  if (item.attention === 'approval') return { label: '승인 대기', tone: 'warn' };
+/** 터미널 CLI가 사람을 부른 까닭. 새 서버의 주의 객체(#926), 옛 서버의 terminal.waiting, 개입 사유 문자열 차례로 본다 */
+export function attentionKind(item: DeskItem): 'permission' | 'question' | 'input' | 'approval' | 'idle' | undefined {
+  if (item.attention && typeof item.attention === 'object') return item.attention.kind;
+  if (item.terminal?.waiting) return item.terminal.waiting;
+  if (item.attention === 'question') return 'question';
+  if (item.attention === 'approval') return 'approval';
+  return undefined;
+}
+
+const ATTENTION: Record<'permission' | 'question' | 'input' | 'approval', string> = { permission: '권한 대기', question: '답 기다림', input: '입력 필요', approval: '승인 대기' };
+
+/**
+ * 에이전트가 지금 무엇을 하는가. 사람이 손대야 하는 것(권한·답·입력)을 먼저 본다.
+ * unseen이면 끝났지만 아직 보지 않은 세션이다(#922): 쉬는 CLI를 "끝남"(초록)으로 보이고, 본 뒤에는 흐린 "CLI 대기"다
+ */
+export function agentStatus(item: DeskItem, options: { unseen?: boolean } = {}): StatusBadge {
+  const kind = attentionKind(item);
+  if (kind && kind !== 'idle') return { label: ATTENTION[kind], tone: 'warn' };
   if (item.state === 'working') return { label: '작업 중', tone: 'busy' };
   if (item.state === 'booting') return { label: '켜는 중', tone: 'busy' };
   if (item.state === 'error') return { label: '오류', tone: 'fail' };
@@ -140,8 +153,37 @@ export function agentStatus(item: DeskItem): StatusBadge {
   // 작업 카드 계획이 끝나 자원을 돌려준 레인(#868)
   if (item.state === 'done') return { label: '끝남', tone: 'ok' };
   if (item.state === 'dormant') return { label: '꺼짐', tone: 'muted' };
-  if (item.terminal?.cli === 'up') return { label: 'CLI 대기', tone: 'ok' };
+  if (options.unseen) return { label: '끝남', tone: 'ok' };
+  if (item.terminal?.cli === 'up') return { label: 'CLI 대기', tone: 'muted' };
   return { label: '쉼', tone: 'muted' };
+}
+
+/** 급한 정도(#922): 권한·질문·입력 4 > 오류·검증 실패·확인 필요 3 > 끝남(안 봄) 2 > 작업 중 1 > 쉼 0 */
+export function urgencyRank(item: DeskItem, unseen: boolean): number {
+  const status = agentStatus(item, { unseen });
+  if (status.tone === 'warn') return 4;
+  const gate = gateStatus(item);
+  if (status.tone === 'fail' || gate?.tone === 'fail' || gate?.tone === 'warn') return 3;
+  if (unseen && status.tone === 'ok') return 2;
+  if (status.tone === 'busy') return 1;
+  return 0;
+}
+
+/** 급한 순으로 놓는다. 같은 정도면 받은 차례다. 스페이스 차례는 deskSessions가 처음 나온 차례로 잡으니 가장 급한 세션이 든 스페이스가 위로 온다 */
+export function byUrgency(items: readonly DeskItem[], unseen: ReadonlySet<string>): DeskItem[] {
+  return items
+    .map((item, index) => ({ item, index, rank: urgencyRank(item, unseen.has(item.id)) }))
+    .sort((a, b) => b.rank - a.rank || a.index - b.index)
+    .map((entry) => entry.item);
+}
+
+/** 앞 목록의 차례를 지킨다(고르는 동안 커서 밑 줄이 움직이지 않게, #922). 내용은 새 목록 것이고 새 항목은 끝에 받은 차례로 둔다 */
+export function keepOrder(before: readonly DeskItem[], after: readonly DeskItem[]): DeskItem[] {
+  const at = new Map(before.map((item, index) => [item.id, index]));
+  return after
+    .map((item, index) => ({ item, index, at: at.get(item.id) ?? before.length + index }))
+    .sort((a, b) => a.at - b.at)
+    .map((entry) => entry.item);
 }
 
 /** 게이트가 마지막으로 무엇을 판정했는가. 서버가 gate를 주지 않으면 개입 사유에서 실패·확인 필요만 읽는다 */
@@ -159,7 +201,7 @@ export function gateStatus(item: DeskItem): StatusBadge | undefined {
 
 /**
  * 사이드바 줄. 스페이스마다 한 줄(가장 급한 상태 점, 이름, 세션 수)이고, 고른 세션이 든 스페이스 아래에만 세션을 한 줄씩 편다.
- * slots는 세션 id → 열린 칸 번호(1부터), flagged는 알린 뒤 아직 보지 않은 세션(!로 보인다, #864)
+ * slots는 세션 id → 열린 칸 번호(1부터), flagged는 알린 뒤 아직 보지 않은 세션(!로 보인다, #864), unseen은 끝났지만 아직 보지 않은 세션(#922)
  */
 export function sidebarRows(
   items: readonly DeskItem[],
@@ -168,6 +210,7 @@ export function sidebarRows(
   width: number,
   flagged: ReadonlySet<string> = new Set(),
   theme: Theme = DEFAULT_THEME,
+  unseen: ReadonlySet<string> = new Set(),
 ): SidebarRow[] {
   const sessions = deskSessions(items);
   const muted = fg(theme, 'muted');
@@ -182,7 +225,7 @@ export function sidebarRows(
   }
   const rows: SidebarRow[] = [{ text: fitAnsi(`${muted} 스페이스${RESET}`, width), selected: false }];
   const current = sessions[selected]?.projectName;
-  for (const space of deskSpaces(items)) {
+  for (const space of deskSpaces(items, unseen)) {
     const open = space.name === current;
     const count = `${muted}${space.sessions.length}${RESET}`;
     const head = `${open ? fg(theme, 'text') : ''} ${statusMark(space.status, theme)} ${open ? '\x1b[1m' : ''}${space.name}${RESET}`;
@@ -194,7 +237,7 @@ export function sidebarRows(
       const flag = flagged.has(item.id) ? `${fg(theme, 'yellow')}!${RESET}` : '';
       const marks = [flag, slot ? `${muted}${slot}${RESET}` : ''].filter(Boolean).join(' ');
       const marksWidth = (flag ? 1 : 0) + (slot ? String(slot).length : 0) + (flag && slot ? 1 : 0);
-      const line = `   ${statusMark(agentStatus(item), theme)} ${item.title}`;
+      const line = `   ${statusMark(agentStatus(item, { unseen: unseen.has(item.id) }), theme)} ${item.title}`;
       rows.push({ text: spreadPlain(line, marks, marksWidth, width), selected: index === selected, item: index });
     }
   }

@@ -317,6 +317,34 @@ export interface CodeFile {
   patch?: string;
 }
 
+/** 지금 변경의 파일 하나(desk의 지금 변경 화면, #924). 경로는 프로젝트 기준이다 */
+export interface LiveChangeFile {
+  file: string;
+  change: 'added' | 'modified' | 'deleted';
+  /** 마지막 체크포인트 대비 diff. 새 파일은 빈 파일 대비 diff로 만든다. 바이너리·링크면 없다(시크릿 값은 가린다) */
+  patch?: string;
+  binary?: true;
+  /** 심볼릭 링크처럼 내용을 보이지 않는 종류 */
+  unsupported?: true;
+  /** 너무 커서 diff를 잘랐다 */
+  truncated?: true;
+  added: number;
+  removed: number;
+}
+
+export interface LiveChanges {
+  files: LiveChangeFile[];
+  /** 파일이 너무 많거나 diff가 너무 길어 일부만 보낸다 */
+  truncated: boolean;
+  /** 마지막 체크포인트(줄인 sha) */
+  head?: string;
+  /** 원격 저장소가 있는 세션의 브랜치와 기준(main 등)과 갈라진 정도. 확인하지 못했으면 없다 */
+  branch?: string;
+  base?: string;
+  behind?: number;
+  ahead?: number;
+}
+
 export interface ProjectSummary {
   id: string;
   name: string;

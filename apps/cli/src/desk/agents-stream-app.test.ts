@@ -156,4 +156,18 @@ describe('목록 통로(#923)', () => {
     expect(client.opens).toHaveLength(0);
     expect(client.agentsCalls).toBeGreaterThanOrEqual(2);
   });
+
+  it('통로로 받은 목록도 안 본 끝남·알림 판정과 급한 순 정렬을 거친다(#922)', async () => {
+    const client = new FakeClient([item('a'), item('b', { state: 'working' })]);
+    const ctx = setup(client);
+    await tick();
+    client.live[0]!.push({ items: [item('a'), item('b', { state: 'working' })] });
+    await tick();
+    client.live[0]!.push({ items: [item('a'), item('b', { state: 'idle', terminal: { cli: 'up' } })] });
+    await tick();
+    expect(ctx.app.state.unseenDone).toEqual(['b']);
+    expect(ctx.app.state.flagged).toEqual(['b']);
+    expect(ctx.app.state.items.map((entry) => entry.id)).toEqual(['b', 'a']);
+    expect(ctx.io.out.join('')).toContain('\x1b]9;b-studio: Claude · 요청 b · 끝남');
+  });
 });

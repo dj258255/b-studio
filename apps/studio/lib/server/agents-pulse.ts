@@ -27,7 +27,7 @@ export function notifyAgentsChanged(): void {
  * 세션 이벤트 없이 바뀌는 사실이 있다)에 쓴다. 결과와 오류는 그대로 돌려준다. `skip`에 적은 이름은 감싸지 않는다
  */
 export function pulseAfterCalls<T extends object>(handlers: T, skip: readonly string[] = ['toolSpecs']): T {
-  const wrapped: Record<string, unknown> = { ...handlers };
+  const wrapped = { ...handlers } as Record<string, unknown>;
   for (const [name, handler] of Object.entries(handlers)) {
     if (typeof handler !== 'function' || skip.includes(name)) continue;
     wrapped[name] = (...args: unknown[]) => {
@@ -43,5 +43,5 @@ export function pulseAfterCalls<T extends object>(handlers: T, skip: readonly st
       return result;
     };
   }
-  return wrapped as T;
+  return wrapped as unknown as T;
 }

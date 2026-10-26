@@ -273,10 +273,32 @@ const KEY_ROWS: readonly OptionRow[] = [
   {
     key: 'notify',
     label: '알림',
-    help: '세션이 손댈 상태가 되거나 검증이 끝나면 벨과 OS 알림을 냅니다. studio desk --no-notify가 이 값보다 앞섭니다',
+    help: '세션이 손댈 상태가 되거나 검증·작업이 끝나면 벨과 OS 알림을 냅니다(보고 있는 칸은 빼고). 끄면 아래 두 줄도 꺼집니다. studio desk --no-notify가 이 값보다 앞섭니다',
     live: false,
     options: [
       { value: true, label: '벨과 OS 알림' },
+      { value: false, label: '끔' },
+    ],
+    fallback: true,
+  },
+  {
+    key: 'notifyDone',
+    label: '완료 알림',
+    help: '보지 않는 칸의 세션이 일을 마치면 벨과 OS 알림을 냅니다. 꺼도 사이드바의 초록 "끝남"과 !는 남습니다',
+    live: true,
+    options: [
+      { value: true, label: '켬' },
+      { value: false, label: '끔' },
+    ],
+    fallback: true,
+  },
+  {
+    key: 'notifyInput',
+    label: '입력 알림',
+    help: '보지 않는 칸의 세션이 권한·답·입력을 기다리면 벨과 OS 알림을 냅니다. 꺼도 사이드바 표시와 Ctrl-b j는 그대로입니다',
+    live: true,
+    options: [
+      { value: true, label: '켬' },
       { value: false, label: '끔' },
     ],
     fallback: true,
