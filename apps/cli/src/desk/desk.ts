@@ -31,7 +31,7 @@ import { loaded, openRequirements, REQUIREMENTS_FILE, REQUIREMENTS_TEMPLATE, typ
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
 import { DEFAULT_THEME, type ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
-import { accountSprite, sessionLimits, usageScreen, usageSpriteKey } from './usage';
+import { accountSprite, byTightness, sessionLimits, usageScreen, usageSpriteKey } from './usage';
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
@@ -316,6 +316,8 @@ export interface DeskAppOptions {
 export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'> &
   /** 사용량(#889). 없으면 사용량을 묻지 않는다 */
   { limits?: StudioClient['limits'] } &
+  /** 오늘·최근 7일 쓴 양(#925). 없으면 묻지 않는다 */
+  { spend?: StudioClient['spend'] } &
   /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RecordsCall>> &
   /** 작업 나누기(#893). 없으면 Ctrl-b t가 열 수 없다고 알린다 */
@@ -2667,14 +2669,23 @@ export class DeskApp {
     this.#usageFetching = true;
     const asked = options.refresh ? this.#state.message : undefined;
     try {
-      const { accounts, warning } = await limits.call(this.#client, options.refresh);
+      // 쓴 양(#925)은 함께 묻되, 읽지 못해도(옛 스튜디오) 한도는 그대로 보인다
+      const spendCall = this.#client.spend;
+      const [read, spend] = await Promise.all([limits.call(this.#client, options.refresh), spendCall ? spendCall.call(this.#client).catch(() => undefined) : undefined]);
       if (this.#restored) return;
+      // 가장 빠듯한 계정이 맨 위다(#925). 고른 카드는 차례가 바뀌어도 같은 계정에 둔다
+      const accounts = byTightness(read.accounts);
+      const warning = read.warning;
       const count = accounts.length;
+      const previous = this.#state.usage;
+      const selectedId = this.#state.usageSelected !== undefined ? previous?.accounts[this.#state.usageSelected]?.id : undefined;
+      const reselected = selectedId !== undefined ? accounts.findIndex((entry) => entry.id === selectedId) : -1;
+      const keptSpend = spend ?? previous?.spend;
       this.#state = {
         ...this.#state,
-        usage: { accounts, receivedAt: Date.now(), ...(warning ? { warning } : {}) },
+        usage: { accounts, receivedAt: Date.now(), ...(warning ? { warning } : {}), ...(keptSpend ? { spend: keptSpend } : {}) },
         limits: sessionLimits(this.#state.items, accounts),
-        ...(this.#state.usageSelected !== undefined ? { usageSelected: Math.max(0, Math.min(count - 1, this.#state.usageSelected)) } : {}),
+        ...(this.#state.usageSelected !== undefined ? { usageSelected: reselected >= 0 ? reselected : Math.max(0, Math.min(count - 1, this.#state.usageSelected)) } : {}),
         ...(asked !== undefined && this.#state.message === asked ? { message: '사용량을 다시 읽었습니다(계정마다 최소 간격은 스튜디오가 지킵니다)' } : {}),
       };
     } catch (error) {
@@ -2682,7 +2693,7 @@ export class DeskApp {
       const previous = this.#state.usage;
       this.#state = {
         ...this.#state,
-        usage: { accounts: previous?.accounts ?? [], ...(previous?.receivedAt !== undefined ? { receivedAt: previous.receivedAt } : {}), error: messageOf(error) },
+        usage: { accounts: previous?.accounts ?? [], ...(previous?.receivedAt !== undefined ? { receivedAt: previous.receivedAt } : {}), ...(previous?.spend ? { spend: previous.spend } : {}), error: messageOf(error) },
         ...(asked !== undefined && this.#state.message === asked ? { message: undefined } : {}),
       };
     } finally {

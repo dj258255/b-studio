@@ -347,6 +347,7 @@ import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
+import { spendStore } from './spend-state';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -8398,6 +8399,8 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
     session.snapshot.tokens = sessionTokens;
     // 에이전트 내역(#843)에도 세션 합계와 같은 요청만 넣는다. 그래서 내역의 합이 받은 터미널 사용량과 맞는다
     noteAgentUsage((session.agentLedger ??= newAgentLedger()), request);
+    // 사용량 화면의 오늘·최근 7일(#925)에도 같은 요청만 더한다
+    spendStore().note({ at: request.at, backend: sessionBackend(session.snapshot), model: request.model, usage, ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}) });
   }
 
   // 2) 실행 귀속: 열린 실행, 또는 막 닫힌 실행(+5초) 창에 드는 것만 붙인다
