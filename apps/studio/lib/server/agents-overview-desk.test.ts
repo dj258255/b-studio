@@ -117,9 +117,21 @@ describe('지금 하는 일·할 일·문맥 창·마지막 답·서브에이전
     expect(got).toMatchObject(rest);
     // 서브에이전트 인스턴스는 desk 카드가 읽는 agents의 subagent 행으로 간다
     expect(got).not.toHaveProperty('subagents');
-    expect(got.agents).toEqual([{ id: 'claude:agent:a1', name: '훅 찾기', kind: 'subagent', state: 'working', type: subagents[0]!.type, description: '훅 찾기', tool: 'Grep', tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }]);
+    expect(got.agents).toEqual([{ id: 'claude:agent:a1', name: '훅 찾기', kind: 'subagent', state: 'working', type: subagents[0]!.type, description: '훅 찾기', tool: 'Grep', tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, tokensUnknown: true }]);
     const none = item(source());
     for (const key of ['now', 'todos', 'context', 'lastMessage', 'agents']) expect(none, key).not.toHaveProperty(key);
+  });
+
+  it('끝난 서브에이전트의 결과 한 줄을 싣고, 텔레메트리로 토큰을 받은 종류의 첫 행은 토큰을 안다(#942)', () => {
+    const got = item(
+      source({
+        live: { subagents: [{ id: 'a1', type: 'Explore', state: 'done' as const, result: '호출부 3곳' }, { id: 'a2', type: 'Explore', state: 'working' as const }] },
+        agents: [{ id: 'claude:Explore', name: 'Explore', kind: 'subagent', state: 'working', tokens: { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 } }],
+      }),
+    );
+    expect(got.agents?.[0]).toMatchObject({ id: 'claude:agent:a1', result: '호출부 3곳', tokens: { inputTokens: 10 } });
+    expect(got.agents?.[0]).not.toHaveProperty('tokensUnknown');
+    expect(got.agents?.[1]).toMatchObject({ id: 'claude:agent:a2', tokensUnknown: true });
   });
 
   it('withDeskFacts가 활동을 붙인다(모르면 붙이지 않는다)', () => {

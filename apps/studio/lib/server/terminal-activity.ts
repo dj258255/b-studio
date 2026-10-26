@@ -37,6 +37,8 @@ export interface ActivityNow {
    * 끝 훅을 보내지 않는 CLI는 도는 중인지 알 수 없다
    */
   running?: boolean;
+  /** 도구가 실패했거나 관문이 거절한 까닭 한 줄(#942). 없으면 실패를 모른다 */
+  error?: string;
 }
 export interface ActivityTodos {
   done: number;
@@ -60,6 +62,8 @@ export interface ActivitySubagent {
   startedAt?: string;
   /** 마지막 소식(시작, 그 안의 도구, 도구 끝, 멈춤)의 시각(ISO, #933) */
   lastAt?: string;
+  /** 끝나며 남긴 마지막 답 한 줄(SubagentStop의 last_assistant_message, #942) */
+  result?: string;
 }
 /** `/api/agents` 항목에 싣는 꼴 */
 export interface TerminalActivityView {
@@ -79,10 +83,14 @@ interface TodoItem {
   id?: string;
   label: string;
   status: TodoStatus;
+  /** 진행 중일 때 보일 말(Task 도구의 activeForm, #942) */
+  active?: string;
 }
 
 export interface TerminalActivity {
   now?: ActivityNow;
+  /** 지금 하는 일의 도구 호출 id(tool_use_id, #942). 도구 끝을 이 id로 맞춘다. 화면에는 싣지 않는다 */
+  nowId?: string;
   todos: TodoItem[];
   context?: ActivityContext;
   lastMessage?: string;
@@ -175,7 +183,33 @@ function noteTodoTool(state: TerminalActivity, tool: string, input: unknown): vo
   } else if (tool === 'update_plan') {
     const list = todoList(input.plan, (item) => text(item.step));
     if (list) state.todos = list;
+  } else if (tool === 'TaskUpdate') {
+    noteTaskUpdate(state, input);
   }
+}
+
+/**
+ * Claude의 Task 도구(TaskUpdate, #942). 할 일은 TaskCreated 훅의 task_id로 알고, 진행 중·끝냄·지움은 이 도구의 입력으로 안다.
+ * 입력 이름은 CLI가 받아 주는 별칭(id·task_id, active_form)도 읽는다. 모르는 id는 무시한다
+ */
+function noteTaskUpdate(state: TerminalActivity, input: Record<string, unknown>): void {
+  const id = text(input.taskId) ?? text(input.task_id) ?? text(input.id);
+  const index = id ? state.todos.findIndex((todo) => todo.id === id) : -1;
+  if (index < 0) return;
+  const todo = state.todos[index]!;
+  const status = input.status;
+  if (status === 'deleted') {
+    state.todos = state.todos.filter((_, at) => at !== index);
+    return;
+  }
+  const subject = clean(text(input.subject), LABEL_CHARS);
+  const active = clean(text(input.activeForm) ?? text(input.active_form), LABEL_CHARS);
+  state.todos[index] = {
+    ...todo,
+    ...(subject ? { label: subject } : {}),
+    ...(active ? { active } : {}),
+    ...(TODO_STATUS.has(status as TodoStatus) ? { status: status as TodoStatus } : {}),
+  };
 }
 
 /** 메인이 도구를 쓰기 시작했다(PreToolUse). 서브에이전트 안의 도구면 그 서브에이전트의 도구로 남긴다 */
@@ -195,13 +229,44 @@ export function noteToolUse(state: TerminalActivity, input: Input, at: number): 
   }
   const target = toolTarget(tool, input.tool_input, text(input.cwd));
   state.now = { tool, ...(target ? { target } : {}), at: iso, running: true };
+  const id = text(input.tool_use_id);
+  if (id) state.nowId = id;
+  else delete state.nowId;
   noteTodoTool(state, tool, input.tool_input);
   if (tool === 'Agent' || tool === 'Task') {
     const args = isObject(input.tool_input) ? input.tool_input : {};
     const type = text(args.subagent_type) ?? 'general-purpose';
     const description = clean(text(args.description), LABEL_CHARS);
-    if (description) state.pending = [...state.pending, { type, description }].slice(-PENDING_LIMIT);
+    if (!description) return;
+    // 지켜보기 훅은 따로(async) 돌아 SubagentStart가 먼저 닿을 수 있다. 설명을 아직 못 받은 같은 종류가 있으면 거기 붙인다(#942)
+    const waiting = [...state.subagents.values()].find((subagent) => subagent.type === type && !subagent.description && subagent.state === 'working');
+    if (waiting) waiting.description = description;
+    else state.pending = [...state.pending, { type, description }].slice(-PENDING_LIMIT);
   }
+}
+
+/** 이 끝 훅이 지금 하는 일의 도구인가: 둘 다 id가 있으면 id로, 아니면 이름으로 맞춘다(#942) */
+function endsNow(state: TerminalActivity, input: Input): boolean {
+  if (!state.now) return false;
+  const id = text(input.tool_use_id);
+  if (id && state.nowId) return id === state.nowId;
+  return state.now.tool === clean(text(input.tool_name), LABEL_CHARS);
+}
+
+/** 오류 글의 비어 있지 않은 첫 줄 */
+function errorLine(value: unknown): string | undefined {
+  return clean(firstLine(text(value)), TARGET_CHARS);
+}
+
+/**
+ * 관문(쓰기 직전의 훅)이 도구를 거절했다(#942). CLI는 거절된 도구의 끝 훅을 보내지 않을 수 있으므로 여기서 도는 중을 끄고 까닭을 남긴다.
+ * 끝 훅을 한 번도 받지 않은 CLI여도 거절은 확실히 아는 것이라 싣는다
+ */
+export function noteToolDenied(state: TerminalActivity, input: Input, reason: string, at: number): void {
+  if (!state.now || !endsNow(state, input)) return;
+  const why = errorLine(reason.replace(/^\[b-studio\]\s*/, ''));
+  state.now = { ...state.now, running: false, ...(why ? { error: `거절됨: ${why}` } : {}) };
+  state.lastAt = new Date(at).toISOString();
 }
 
 /** 지켜보는 훅 하나(도구의 끝, 서브에이전트의 시작·끝, 할 일의 생김·끝남). 모르는 훅은 무시한다 */
@@ -222,7 +287,12 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
         if (subagent) subagent.lastAt = iso;
         return;
       }
-      if (state.now && state.now.tool === clean(text(input.tool_name), LABEL_CHARS)) state.now.running = false;
+      if (!endsNow(state, input)) return;
+      state.now!.running = false;
+      if (input.hook_event_name === 'PostToolUseFailure') {
+        const why = input.is_interrupt === true ? '중단됨' : errorLine(input.error);
+        if (why) state.now!.error = why;
+      }
       return;
     }
     case 'SubagentStart': {
@@ -242,6 +312,8 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
       subagent.lastAt = iso;
       state.lastAt = iso;
       delete subagent.tool;
+      const result = clean(text(input.last_assistant_message), LABEL_CHARS);
+      if (result) subagent.result = result;
       return;
     }
     case 'TaskCreated': {
@@ -279,6 +351,7 @@ export function noteStatusline(state: TerminalActivity, input: Input): void {
 /** 새 요청이 왔다. 지금 하는 일을 지우고, 다 끝낸 할 일 목록과 끝난 서브에이전트를 비운다. 이때부터 몇 분째인지 센다(#933) */
 export function noteTurnStarted(state: TerminalActivity, at: number = Date.now()): void {
   delete state.now;
+  delete state.nowId;
   state.workingSince = new Date(at).toISOString();
   state.lastAt = state.workingSince;
   if (state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')) state.todos = [];
@@ -289,6 +362,7 @@ export function noteTurnStarted(state: TerminalActivity, at: number = Date.now()
 /** 턴이 끝났다(Stop). 지금 하는 일을 지우고 마지막 답을 남긴다 */
 export function noteTurnEnded(state: TerminalActivity, input: Input, at: number = Date.now()): void {
   delete state.now;
+  delete state.nowId;
   delete state.workingSince;
   state.lastAt = new Date(at).toISOString();
   const message = clean(text(input.last_assistant_message), MESSAGE_CHARS);
@@ -298,6 +372,7 @@ export function noteTurnEnded(state: TerminalActivity, input: Input, at: number 
 /** CLI가 끝났다. 지금 하는 일을 지운다(할 일·마지막 답은 남긴다) */
 export function noteCliEnded(state: TerminalActivity): void {
   delete state.now;
+  delete state.nowId;
   delete state.workingSince;
   for (const subagent of state.subagents.values()) subagent.state = 'done';
 }
@@ -322,10 +397,31 @@ export function activityView(state: TerminalActivity | undefined): TerminalActiv
 /** 도구 끝 훅을 받은 적이 없는 CLI에서는 running을 싣지 않는다(#933) */
 function nowView(now: ActivityNow, seesToolEnd: boolean): ActivityNow {
   const { running, ...rest } = now;
-  return seesToolEnd && running !== undefined ? { ...rest, running } : rest;
+  // 거절·실패는 확실히 끝난 것이라 끝 훅을 모르는 CLI에서도 싣는다(#942)
+  return (seesToolEnd || now.error) && running !== undefined ? { ...rest, running } : rest;
 }
 
 function todoSummary(todos: readonly TodoItem[]): ActivityTodos {
-  const current = todos.find((todo) => todo.status === 'in_progress')?.label;
+  const doing = todos.find((todo) => todo.status === 'in_progress');
+  const current = doing?.active ?? doing?.label;
   return { done: todos.filter((todo) => todo.status === 'completed').length, total: todos.length, ...(current ? { current } : {}) };
+}
+
+/**
+ * 권한을 묻는 문구(PermissionRequest, #942): 무엇을 묻는지(도구와 대상)를 적는다. 도구 이름이 없으면 빈 글
+ * 예: "Bash 허락 필요: rm -rf build"
+ */
+export function permissionMessage(input: Input): string {
+  const tool = clean(text(input.tool_name), LABEL_CHARS);
+  if (!tool) return '';
+  const target = toolTarget(tool, input.tool_input, text(input.cwd));
+  return target ? `${tool} 허락 필요: ${target}` : `${tool} 허락 필요`;
+}
+
+/** Claude 알림(Notification)의 알려진 영어 문구를 우리말로(#942). 모르는 문구는 그대로 둔다 */
+export function notificationMessage(message: string): string {
+  const permission = /needs your permission to use (.+?)\.?$/i.exec(message.trim());
+  if (permission?.[1]) return `${permission[1]} 허락 필요`;
+  if (/waiting for your input/i.test(message)) return '입력을 기다립니다';
+  return message;
 }
