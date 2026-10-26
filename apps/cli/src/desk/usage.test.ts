@@ -3,8 +3,8 @@ import { initialState, type DeskState } from './keys';
 import { stringWidth, stripAnsi } from './screen';
 import { defaultSprite } from './sprite';
 import { DEFAULT_THEME, fg } from './theme';
-import type { DeskAccountLimits, DeskItem } from './types';
-import { sessionLimits, usageCardLines, usageScreen, usageSpriteKey, usageSummary } from './usage';
+import type { DeskAccountLimits, DeskItem, DeskSpend } from './types';
+import { byTightness, exhaustAt, sessionLimits, tightestLine, usageCardLines, usageScreen, usageSpriteKey, usageSummary } from './usage';
 
 const NOW = Date.parse('2026-10-23T12:00:00Z');
 const later = (minutes: number) => new Date(NOW + minutes * 60_000).toISOString();
@@ -64,7 +64,7 @@ describe('계정 카드', () => {
     expect(plain[0]!.startsWith('╭')).toBe(true);
     expect(plain[1]).toMatch(/│ .{14} {2}피오 +Claude +▲ 주의 │/);
     expect(plain[2]).toContain('Max 20x');
-    expect(plain[3]).toMatch(/5시간 +37% +주간 +90%/);
+    expect(plain[3]).toMatch(/5시간 +37% +주간 .*90%/);
     expect(plain[4]).toMatch(/[█▏▎▍▌▋▊▉]/);
     expect(plain[5]).toContain('1시간 50분 뒤');
     // 주의(70% 넘음)는 노란 막대다
@@ -136,5 +136,92 @@ describe('사용량 화면', () => {
 
   it('계정 그림은 사용량 화면의 그림 자리(acct:id)에서 찾는다', () => {
     expect(usageSpriteKey('codex')).toBe('acct:codex');
+  });
+});
+
+describe('가장 빠듯한 한도(#925)', () => {
+  it('가장 많이 쓴 창이 큰 계정부터 둔다. 한도가 없거나 읽지 못한 계정은 뒤로 간다(같으면 원래 차례)', () => {
+    const low = account({ id: 'low', windows: [{ kind: 'five_hour', usedPercent: 10 }] });
+    const unknown = account({ id: 'unknown', status: 'unknown', windows: [] });
+    const sorted = byTightness([gemini, low, unknown, marco, account()]);
+    expect(sorted.map((entry) => entry.id)).toEqual(['acct-1', 'codex', 'low', 'gemini', 'unknown']);
+  });
+
+  it('카드의 80%를 넘은 창에 경고 칩을 단다', () => {
+    const plain = usageCardLines({ account: account(), selected: false, sprite: defaultSprite('claude-code') }, 84, DEFAULT_THEME, NOW).map(stripAnsi);
+    expect(plain[3]).toMatch(/주간 +80% 넘음 +90%/);
+    expect(plain[3]).not.toMatch(/5시간 +80% 넘음/);
+  });
+
+  it('다시 차는 때에 시각을 함께 적는다', () => {
+    const plain = usageCardLines({ account: account(), selected: false, sprite: defaultSprite('claude-code') }, 84, DEFAULT_THEME, NOW).map(stripAnsi);
+    expect(plain[5]).toContain(`1시간 50분 뒤(${clock(later(110))})`);
+  });
+
+  it('창이 시작된 뒤의 평균 속도로 다시 차기 전에 바닥나는 때를 추정한다. 표본이 적거나 넉넉하면 내지 않는다', () => {
+    // 5시간 창이 끝나기 110분 전: 시작한 지 190분에 76% → 190/76×24 = 60분 뒤 바닥
+    expect(exhaustAt({ kind: 'five_hour', usedPercent: 76, resetsAt: later(110) }, NOW)).toBe(NOW + 60 * 60_000);
+    // 이 속도면 다시 찰 때까지 다 쓰지 않는다
+    expect(exhaustAt({ kind: 'five_hour', usedPercent: 37, resetsAt: later(110) }, NOW)).toBeUndefined();
+    // 창이 열린 지 10분: 아직 모른다
+    expect(exhaustAt({ kind: 'five_hour', usedPercent: 30, resetsAt: later(290) }, NOW)).toBeUndefined();
+    expect(exhaustAt({ kind: 'five_hour', usedPercent: 100, resetsAt: later(110) }, NOW)).toBeUndefined();
+    expect(exhaustAt({ kind: 'weekly', usedPercent: 90 }, NOW)).toBeUndefined();
+  });
+
+  it('바닥날 것 같으면 카드에 추정이라고 적어 보인다', () => {
+    const hot = account({ windows: [{ kind: 'five_hour', usedPercent: 76, resetsAt: later(110) }, { kind: 'weekly', usedPercent: 40, resetsAt: later(3 * 24 * 60) }] });
+    const text = usageCardLines({ account: hot, selected: false, sprite: defaultSprite('claude-code') }, 84, DEFAULT_THEME, NOW).map(stripAnsi).join('\n');
+    expect(text).toContain(`이 속도면 ${clock(later(60))}에 다 씀(추정)`);
+    const narrow = usageCardLines({ account: hot, selected: false, sprite: defaultSprite('claude-code') }, 56, DEFAULT_THEME, NOW).map(stripAnsi);
+    for (const line of narrow) expect(stringWidth(line)).toBe(56);
+    expect(narrow.join('\n')).toContain('다 씀(추정)');
+  });
+
+  it('사이드바 한 줄: 가장 빠듯한 계정의 창, %, 다시 차는 시각', () => {
+    const line = tightestLine([marco, account(), gemini], 30, DEFAULT_THEME, NOW)!;
+    expect(stringWidth(stripAnsi(line))).toBe(30);
+    expect(stripAnsi(line)).toMatch(/^ 한도 Claude 주간 90% · \d+\/\d+ *$/);
+    expect(stripAnsi(tightestLine([account({ windows: [{ kind: 'five_hour', usedPercent: 85, resetsAt: later(110) }] })], 30, DEFAULT_THEME, NOW)!)).toContain(`5시간 85% · ${clock(later(110))}`);
+    expect(line).toContain(fg(DEFAULT_THEME, 'yellow'));
+    expect(tightestLine([gemini], 30, DEFAULT_THEME, NOW)).toBeUndefined();
+  });
+});
+
+describe('오늘·최근 7일 쓴 양(#925)', () => {
+  const rect = { x: 33, y: 1, w: 87, h: 28 };
+  const totals = (patch: Partial<DeskSpend['today']> = {}): DeskSpend['today'] => ({ tokens: 0, estimated: false, missingPrice: false, rows: [], ...patch });
+  const spend: DeskSpend = {
+    today: totals({
+      tokens: 3_000_000,
+      estimated: true,
+      missingPrice: true,
+      rows: [
+        { backend: 'codex', model: 'gpt-5.5', tokens: 2_000_000, calls: 4, costUsd: 2, estimated: true },
+        { backend: 'claude-code', model: 'claude-opus-5-5', tokens: 1_000_000, calls: 2, costUsd: 3, estimated: false },
+        { backend: 'gemini', model: 'gemini-3-pro', tokens: 10_000, calls: 1, estimated: false },
+      ],
+    }),
+    week: totals({ tokens: 4_000_000, costUsd: 6, estimated: true }),
+  };
+
+  it('요약 아래에 오늘·7일 합계와 오늘 모델별 줄을 보이고, 추정과 단가 없음을 숨기지 않는다', () => {
+    const screen = usageScreen({ ...initialState(), view: 'usage', usage: { accounts: [account()], spend } }, rect, NOW);
+    const plain = screen.lines.map(stripAnsi);
+    for (const line of plain) expect(stringWidth(line)).toBe(rect.w);
+    const text = plain.join('\n');
+    expect(text).toMatch(/오늘 +300만 토큰 · 합계 비용 없음 +7일 +\$6\.00 추정 포함 · 400만 토큰/);
+    expect(text).toMatch(/Codex +gpt-5\.5 +200만 +\$2\.00 추정/);
+    expect(text).toMatch(/Claude +claude-opus-5-5 +100만 +\$3\.00/);
+    expect(text).toMatch(/Gemini +gemini-3-pro +1만 +단가 없음/);
+    expect(text).toContain('B_STUDIO_TOKEN_PRICES_JSON');
+    expect(screen.cards[0]!.rect.y).toBeGreaterThan(rect.y + 2);
+  });
+
+  it('쓴 것이 없으면 합계 한 줄만', () => {
+    const screen = usageScreen({ ...initialState(), view: 'usage', usage: { accounts: [account()], spend: { today: totals(), week: totals() } } }, rect, NOW);
+    const text = screen.lines.map(stripAnsi).join('\n');
+    expect(text).toMatch(/오늘 +0 토큰 +7일 +0 토큰/);
+    expect(text).not.toContain('단가 없음');
   });
 });

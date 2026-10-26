@@ -12,7 +12,7 @@ import type { DeskDeployStatus, DeskQaRun, DeskQaStart, DeskRepoList, DeskServic
 import type { LiveChangesView } from './changes';
 import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
-import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskItem, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskSpend, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
 import type { RecordsReport, RecordsStats } from './records';
 import type { DetailExportPreview, DetailExportResult, DetailSnapshot } from './session-detail';
 
@@ -57,6 +57,24 @@ export async function findStudio(env: Record<string, string | undefined>, option
 }
 
 /** SSE 조각을 이어 붙여 `data:` 값만 꺼낸다. 주석 줄(`: ping`)은 버린다. rest는 다음 조각과 이을 남은 글이다 */
+/** 목록 통로가 흘리는 한 조각(#923, 스튜디오의 agents-stream과 같은 모양) */
+export type AgentsStreamMessage =
+  | { type: 'full'; items: DeskItem[] }
+  | { type: 'delta'; items: DeskItem[]; removed: string[]; order: string[] };
+
+/** 지금 목록에 조각을 합친다. 전체를 아직 받지 못했는데 조각이 오면 없다 */
+export function applyAgentsMessage(items: readonly DeskItem[] | undefined, message: AgentsStreamMessage): DeskItem[] | undefined {
+  if (message.type === 'full') return [...message.items];
+  if (!items) return undefined;
+  const byId = new Map(items.map((entry) => [entry.id, entry]));
+  for (const entry of message.items) byId.set(entry.id, entry);
+  for (const id of message.removed) byId.delete(id);
+  return message.order.flatMap((id) => {
+    const entry = byId.get(id);
+    return entry ? [entry] : [];
+  });
+}
+
 export function parseSse(rest: string, chunk: string): { events: string[]; rest: string } {
   let buffer = rest + chunk;
   const events: string[] = [];
@@ -143,6 +161,11 @@ export class StudioClient {
   /** 계정마다의 사용량 한도(#889). refresh면 다시 읽기를 청한다(스튜디오가 계정마다 최소 간격을 지킨다) */
   limits(refresh = false): Promise<{ accounts: DeskAccountLimits[]; warning?: string }> {
     return this.#request('GET', `/api/usage/limits${refresh ? '?refresh=1' : ''}`);
+  }
+
+  /** 오늘과 최근 7일 CLI·모델별로 쓴 토큰과 비용(#925) */
+  spend(): Promise<DeskSpend> {
+    return this.#request('GET', '/api/usage/spend');
   }
 
   rules(): Promise<DeskRulesView> {
@@ -414,6 +437,58 @@ export class StudioClient {
       });
     this.#inputQueue.set(id, next);
     return next;
+  }
+
+  /**
+   * 에이전트 목록 통로(#923). 처음에 전체를, 그 뒤로 바뀐 조각을 받아 합친 전체 목록을 onUpdate로 넘긴다.
+   * signal로 끊으면 끝난다. 서버가 끊어도 끝난다. 옛 스튜디오(경로 없음)는 상태 404로 실패한다
+   */
+  async agentsStream(onUpdate: (overview: DeskOverview) => void, signal: AbortSignal): Promise<void> {
+    let response: Response;
+    try {
+      response = await fetch(`${this.#connection.origin}/api/agents/stream`, {
+        headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, accept: 'text/event-stream' },
+        signal,
+      });
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    }
+    if (!response.ok || !response.body) {
+      const body = (await response.json().catch(() => ({}))) as { error?: string };
+      throw new StudioRequestError(body.error ?? `목록 통로를 열지 못했습니다 (${response.status})`, response.status);
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let rest = '';
+    let items: DeskItem[] | undefined;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return;
+        const parsed = parseSse(rest, decoder.decode(value, { stream: true }));
+        rest = parsed.rest;
+        for (const data of parsed.events) {
+          let message: AgentsStreamMessage;
+          try {
+            message = JSON.parse(data) as AgentsStreamMessage;
+          } catch {
+            continue;
+          }
+          const next = applyAgentsMessage(items, message);
+          // 전체를 받기 전의 조각은 합칠 바탕이 없으므로 버린다
+          if (!next) continue;
+          items = next;
+          onUpdate({ items });
+          if (signal.aborted) return;
+        }
+      }
+    } catch (error) {
+      if (signal.aborted) return;
+      throw error;
+    } finally {
+      reader.cancel().catch(() => {});
+    }
   }
 
   /** 칸들의 터미널 출력을 묶음 통로 하나로 받는다(ADR-177). signal로 끊으면 끝난다. 서버가 끊어도 끝난다 */

@@ -227,6 +227,16 @@ describe('스튜디오 손님', () => {
     expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/limits', '/api/usage/limits?refresh=1']);
   });
 
+  it('오늘·최근 7일 쓴 양을 묻는다(#925)', async () => {
+    const spend = { today: { tokens: 5, estimated: false, missingPrice: false, rows: [] }, week: { tokens: 5, estimated: false, missingPrice: false, rows: [] } };
+    handler = (_req, res) => {
+      res.end(JSON.stringify(spend));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    expect(await client.spend()).toEqual(spend);
+    expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/spend']);
+  });
+
   it('여러 AI 비교의 목록·보기·만들기·승자·지우기를 fleets API로 보낸다(#892)', async () => {
     handler = (_req, res) => res.end('[]');
     const client = new StudioClient({ origin, token: 't' });
@@ -297,5 +307,42 @@ describe('스튜디오 손님', () => {
       ['s1', 'data'],
       ['s2', 'cli'],
     ]);
+  });
+
+  it('목록 통로(#923): 처음 전체를 받고 바뀐 조각을 합쳐 전체 목록으로 넘긴다', async () => {
+    const base = { kind: 'session', title: 't', projectName: 'p', state: 'idle', lastActivityAt: '2026-10-26T00:00:00Z' };
+    handler = (_req, res) => {
+      res.setHeader('content-type', 'text/event-stream');
+      res.write(`data: ${JSON.stringify({ type: 'full', items: [{ ...base, id: 'a' }, { ...base, id: 'b' }], totals: {} })}\n\n`);
+      res.write(': ping\n\n');
+      res.write(`data: ${JSON.stringify({ type: 'delta', items: [{ ...base, id: 'b', state: 'working' }, { ...base, id: 'c' }], removed: ['a'], order: ['b', 'c'] })}\n\n`);
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    const controller = new AbortController();
+    const got: Array<Array<[string, string]>> = [];
+    await client.agentsStream((overview) => {
+      got.push(overview.items.map((entry) => [entry.id, entry.state]));
+      if (got.length === 2) controller.abort();
+    }, controller.signal);
+    expect(seen[0]!.url).toBe('/api/agents/stream');
+    expect(got).toEqual([
+      [
+        ['a', 'idle'],
+        ['b', 'idle'],
+      ],
+      [
+        ['b', 'working'],
+        ['c', 'idle'],
+      ],
+    ]);
+  });
+
+  it('목록 통로(#923): 옛 스튜디오가 404로 답하면 상태와 함께 실패한다', async () => {
+    handler = (_req, res) => {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: '없는 주소' }));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    await expect(client.agentsStream(() => {}, new AbortController().signal)).rejects.toMatchObject({ status: 404 });
   });
 });

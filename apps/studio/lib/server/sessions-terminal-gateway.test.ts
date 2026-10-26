@@ -1646,6 +1646,19 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     await stopSession(session.id);
   }, 30_000);
 
+  it('세션 합계에 더한 사용량은 날마다의 CLI·모델별 기록에도 한 번씩 더한다(#925)', async () => {
+    const { spendStore, dayKey } = await import('./spend-state');
+    const session = await open();
+    const backend = getSnapshot(session.id)!.backend ?? getSnapshot(session.id)!.mode;
+    const callsOf = () => spendStore().read().days[dayKey(new Date())]?.[backend]?.['claude-sonnet-5']?.calls ?? 0;
+    const before = callsOf();
+    await session.gateway.prompt({ prompt: '요청' });
+    await session.gateway.telemetry(otlp([req(100, 10, 'spend-1')]));
+    await session.gateway.telemetry(otlp([req(100, 10, 'spend-1'), req(50, 5, 'spend-2')]));
+    expect(callsOf() - before).toBe(2);
+    await stopSession(session.id);
+  }, 30_000);
+
   it('실행 밖에서 버린 requestId는 기억하지 않는다(뒤에 맞는 실행 창 안에서 오면 센다)', async () => {
     const session = await open();
     // 실행이 하나도 없을 때 온 것 — 버려진다. 이때 번호를 기억하면 뒤에서 놓친다

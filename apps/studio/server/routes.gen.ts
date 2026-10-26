@@ -7,6 +7,7 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/accounts/[backend]/login", load: () => import("../app/api/accounts/[backend]/login/route") },
   { pattern: "/api/accounts/[backend]/refresh", load: () => import("../app/api/accounts/[backend]/refresh/route") },
   { pattern: "/api/agents", load: () => import("../app/api/agents/route") },
+  { pattern: "/api/agents/stream", load: () => import("../app/api/agents/stream/route") },
   { pattern: "/api/ai-accounts", load: () => import("../app/api/ai-accounts/route") },
   { pattern: "/api/ai-accounts/[id]", load: () => import("../app/api/ai-accounts/[id]/route") },
   { pattern: "/api/ai-accounts/[id]/login", load: () => import("../app/api/ai-accounts/[id]/login/route") },
@@ -129,5 +130,6 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/terminals/stream", load: () => import("../app/api/terminals/stream/route") },
   { pattern: "/api/usage", load: () => import("../app/api/usage/route") },
   { pattern: "/api/usage/limits", load: () => import("../app/api/usage/limits/route") },
+  { pattern: "/api/usage/spend", load: () => import("../app/api/usage/spend/route") },
   { pattern: "/api/workspace", load: () => import("../app/api/workspace/route") },
 ];

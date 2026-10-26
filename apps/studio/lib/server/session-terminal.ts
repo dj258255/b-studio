@@ -29,6 +29,7 @@ import {
   type ProcessEntry,
   type TerminalSize,
 } from '@b-studio/sandbox';
+import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 
 /**
@@ -547,6 +548,8 @@ function setCli(state: TerminalState, alive: boolean): void {
   if (state.cli === alive) return;
   state.cli = alive;
   emit(state, { kind: 'cli', alive });
+  // desk 사이드바의 CLI 표시가 바로 바뀌게 목록 통로(#923)에 알린다
+  notifyAgentsChanged();
 }
 
 /**

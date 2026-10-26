@@ -348,6 +348,7 @@ import { SteeringQueue } from './steering';
 import { searchFiles, walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
+import { spendStore } from './spend-state';
 import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -376,6 +377,7 @@ import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch'
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
 import { applyGeneratedFilesToWorkingCopy, findRegisteredProject, generatedFilePaths, overlayGeneratedFiles } from './project-registry';
+import { notifyAgentsChanged, pulseAfterCalls } from './agents-pulse';
 import { computeOffServices, serviceSelectionFor, serviceSelectionStateDir, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
@@ -1358,6 +1360,7 @@ export async function deleteSession(id: string): Promise<void> {
   if (live) {
     clearTimeout(live.persist.timer);
     store.sessions.delete(id);
+    notifyAgentsChanged();
   }
   if (entry) archived.delete(id);
   // 두 세션이 같은 폴더를 잡지 못하게 막는 표시. 남아 있으면 그 폴더로 새 세션을 영영 시작하지 못한다
@@ -7672,6 +7675,8 @@ function emit(session: Session, event: StudioEvent): void {
     schedulePersist(session);
   }
   for (const listener of session.listeners) listener(event);
+  // desk의 목록 통로(#923)가 다시 계산하게 알린다. 로그 줄은 너무 잦고 목록에 보이지 않으므로 뺀다
+  if (event.type !== 'log' && event.type !== 'deploy_log') notifyAgentsChanged();
 }
 
 function toPersisted(session: Session): PersistedSession {
@@ -8401,6 +8406,8 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
     session.snapshot.tokens = sessionTokens;
     // 에이전트 내역(#843)에도 세션 합계와 같은 요청만 넣는다. 그래서 내역의 합이 받은 터미널 사용량과 맞는다
     noteAgentUsage((session.agentLedger ??= newAgentLedger()), request);
+    // 사용량 화면의 오늘·최근 7일(#925)에도 같은 요청만 더한다
+    spendStore().note({ at: request.at, backend: sessionBackend(session.snapshot), model: request.model, usage, ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}) });
   }
 
   // 2) 실행 귀속: 열린 실행, 또는 막 닫힌 실행(+5초) 창에 드는 것만 붙인다
@@ -9299,7 +9306,7 @@ export function sessionTerminalActivity(id: string): TerminalActivityView | unde
 
 /** 세션의 관문이 부르는 처리들. 세션은 부를 때마다 id로 찾는다(이어서 작업하면 세션 객체가 바뀐다) */
 function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
-  return {
+  return pulseAfterCalls({
     // 세션 시작 훅이 이 안내를 받아 간다. CLI가 떴다는 뜻이기도 하다 — 화면은 그때부터 다른 패널의 글을 터미널에 붙여 넣는다
     note: async () => {
       const note = terminalGatewayNote(terminalSession(id).project, sessionTerminalMode());
@@ -9330,8 +9337,9 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     conversation: (conversation) => noteTerminalConversation(id, conversation),
     toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
     runTool: (name, args) => runTerminalTool(id, name, args),
-  };
+  });
 }
+
 
 /** 테스트가 관문의 서버 없이 처리만 부르는 자리 */
 export function terminalGatewayHandlersForTest(id: string): TerminalGatewayHandlers {
