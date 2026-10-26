@@ -20,6 +20,13 @@ describe('사이드바 상태', () => {
     expect(agentStatus({ ...base, state: 'done' })).toEqual({ label: '끝남', tone: 'ok' });
   });
 
+  it('기다리는 종류마다 다른 글과 색: 권한은 노랑, 답은 보라, 입력 필요는 청록. 쉬며 기다리면 CLI 대기(#921)', () => {
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'question' } })).toEqual({ label: '답 기다림', tone: 'warn', color: 'purple' });
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'input' } })).toEqual({ label: '입력 필요', tone: 'warn', color: 'teal' });
+    expect(agentStatus({ ...base, state: 'working', terminal: { cli: 'up', waiting: 'idle' } }).label).toBe('작업 중');
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'idle' } })).toEqual({ label: 'CLI 대기', tone: 'ok' });
+  });
+
   it('게이트 상태를 싣는 서버면 그것을, 아니면 개입 사유로 실패만 보인다', () => {
     expect(gateStatus({ ...base, gate: { state: 'verifying', checkpoints: 2 } })).toEqual({ label: '검증 중', tone: 'busy' });
     expect(gateStatus({ ...base, gate: { state: 'passed', checkpoints: 2 } })).toEqual({ label: '통과', tone: 'ok' });
