@@ -26,6 +26,7 @@
  * 지금 변경 화면(#924, 앞글쇠 다음 d, 스페이스 화면에서는 d만)도 같은 덮는 화면이다. 앞글쇠가 아닌 키(c 의견, x 해결, S 묶어 넣기 …)와 붙여넣기는
  * 그 화면이 받고(changes.ts), 앞글쇠 다음 다른 화면 키는 지금 변경을 닫고 그 일을 한다. 앞글쇠 다음 d는 닫는다
  */
+import { needsYou } from './cards';
 import { changesKey, changesPaste, type ChangesEffect, type ChangesState } from './changes';
 import { fleetsKey, fleetsPaste, openFleets, type FleetsEffect, type FleetsState } from './fleets';
 import { folderKey, folderPaste, openFolder, type FolderEffect, type FolderState } from './folder';
@@ -860,6 +861,11 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
+  // 확인 필요 줄의 번호(#934): 그 세션을 고른다. 여는 것은 Enter다(CLI에는 아무 키도 보내지 않는다)
+  if (/^[1-9]$/.test(key)) {
+    const entry = needsYou(state)[Number(key) - 1];
+    return entry ? { ...base, selected: entry.index } : base;
+  }
   if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i' || key === 'e' || key === 'f' || key === 'v' || key === 'a' || key === 'd') return commandKey(base, key, effects);
   return base;
 }
