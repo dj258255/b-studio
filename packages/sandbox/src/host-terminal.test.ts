@@ -1100,6 +1100,22 @@ describe('사용자의 상태 줄을 이어 부른다(#920)', () => {
     expect(await userStatusLineCommand(account, home)).toBe('acct-line');
   });
 
+  it('작업 폴더의 .claude/settings.local.json > settings.json > 사용자 차례로 원래 상태 줄을 고른다(Claude의 설정 순서, #942)', async () => {
+    const home = await tempDir('b-studio-statusline-proj-');
+    await mkdir(path.join(home, '.claude'));
+    await writeFile(path.join(home, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'user-line' } }));
+    const project = path.join(home, 'work');
+    await mkdir(path.join(project, '.claude'), { recursive: true });
+    expect(await userStatusLineCommand(undefined, home, project)).toBe('user-line');
+    await writeFile(path.join(project, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'project-line' } }));
+    expect(await userStatusLineCommand(undefined, home, project)).toBe('project-line');
+    await writeFile(path.join(project, '.claude', 'settings.local.json'), JSON.stringify({ statusLine: { type: 'command', command: 'local-line' } }));
+    expect(await userStatusLineCommand(undefined, home, project)).toBe('local-line');
+    // 프로젝트 쪽이 b-studio 훅 스크립트를 부르면 건너뛰고 다음 것을 본다
+    await writeFile(path.join(project, '.claude', 'settings.local.json'), JSON.stringify({ statusLine: { type: 'command', command: `node /x/${HOOK_SCRIPT_NAME} statusline` } }));
+    expect(await userStatusLineCommand(undefined, home, project)).toBe('project-line');
+  });
+
   it('모양이 틀리거나 비었거나 b-studio의 훅 스크립트를 부르는 명령이면 없다(자기 자신을 다시 부르지 않는다)', async () => {
     const home = await tempDir('b-studio-statusline-bad-');
     await mkdir(path.join(home, '.claude'));

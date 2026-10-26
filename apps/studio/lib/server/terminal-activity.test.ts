@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolUse, noteTurnEnded, noteTurnStarted, toolTarget } from './terminal-activity';
+import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
 
 // 에이전트가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 훅 입력에서 만든다
 
@@ -205,5 +205,93 @@ describe('시각(#933): 몇 분째, 도구가 도는 중, 마지막 소식', () 
     expect(activityView(state)?.now).toBeUndefined();
     noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1' }, AT + 8000);
     expect(activityView(state)?.subagents?.[0]).toMatchObject({ state: 'done', lastAt: iso(AT + 8000) });
+  });
+});
+
+// 실사용 점검과 설치된 CLI 번들 대조(#942)에서 나온 것
+describe('도구 끝·거절·권한 문구·서브에이전트·Task 도구(#942)', () => {
+  it('도구 끝은 이름이 아니라 tool_use_id로 맞춘다: 같은 이름 도구가 겹쳐도 앞 도구의 끝이 뒤 도구의 도는 중을 끄지 않는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'pnpm lint' } }, AT);
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'u2', tool_input: { command: 'pnpm test' } }, AT + 1);
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'u1' }, AT + 2);
+    expect(activityView(state)?.now).toMatchObject({ tool: 'Bash', target: 'pnpm test', running: true });
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'u2' }, AT + 3);
+    expect(activityView(state)?.now).toMatchObject({ target: 'pnpm test', running: false });
+  });
+
+  it('id가 없는 CLI는 전처럼 이름으로 맞춘다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: { file_path: 'a' } }, AT);
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Read' }, AT + 1);
+    expect(activityView(state)?.now?.running).toBe(false);
+  });
+
+  it('도구가 실패하면 도는 중을 끄고 까닭 한 줄을 싣는다. 사람이 끊었으면 "중단됨"', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'pnpm test' } }, AT);
+    noteActivityHook(state, { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'u1', error: 'Exit code 1\nFAIL src/a.test.ts' }, AT + 1);
+    expect(activityView(state)?.now).toMatchObject({ running: false, error: 'Exit code 1' });
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 'u2', tool_input: { command: 'sleep 9' } }, AT + 2);
+    expect(activityView(state)?.now?.error).toBeUndefined();
+    noteActivityHook(state, { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'u2', error: 'x', is_interrupt: true }, AT + 3);
+    expect(activityView(state)?.now?.error).toBe('중단됨');
+  });
+
+  it('관문이 거절한 도구는 도는 중이 아니고 거절 까닭을 싣는다(끝 훅이 오지 않아도)', () => {
+    const state = newTerminalActivity();
+    noteToolUse(state, { tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'pnpm test' } }, AT);
+    noteToolDenied(state, { tool_name: 'Bash', tool_use_id: 'u1' }, '[b-studio] 샌드박스를 준비하지 못해 파일을 바꿀 수 있는 도구를 막았습니다: 준비 판정 404\n원인을 고친 뒤 다시 시도하세요.', AT + 1);
+    expect(activityView(state)?.now).toMatchObject({ tool: 'Bash', target: 'pnpm test', running: false, error: '거절됨: 샌드박스를 준비하지 못해 파일을 바꿀 수 있는 도구를 막았습니다: 준비 판정 404' });
+    // 끝 훅을 한 번도 받지 않은 CLI여도 거절은 싣는다
+    const codex = newTerminalActivity();
+    noteToolUse(codex, { tool_name: 'apply_patch', tool_input: {} }, AT);
+    noteToolDenied(codex, { tool_name: 'apply_patch' }, '읽기만 요청입니다', AT + 1);
+    expect(activityView(codex)?.now).toMatchObject({ running: false, error: '거절됨: 읽기만 요청입니다' });
+  });
+
+  it('Agent 도구의 설명은 SubagentStart가 먼저 와도(지켜보기 훅은 순서가 없다) 그 서브에이전트에 붙는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
+    noteActivityHook(state, { hook_event_name: 'PreToolUse', tool_name: 'Agent', tool_use_id: 'u1', tool_input: { subagent_type: 'Explore', description: '주문 호출부 찾기' } }, AT + 1);
+    expect(activityView(state)?.subagents?.[0]).toMatchObject({ id: 'a1', description: '주문 호출부 찾기' });
+    // 다음 같은 종류는 새 설명을 기다린다(앞 설명을 두 번 쓰지 않는다)
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a2', agent_type: 'Explore' }, AT + 2);
+    expect(activityView(state)?.subagents?.[1]?.description).toBeUndefined();
+  });
+
+  it('서브에이전트가 끝나며 남긴 마지막 답을 결과 한 줄로 싣는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
+    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1', agent_type: 'Explore', last_assistant_message: '호출부 3곳:\nsrc/a.ts, src/b.ts' }, AT + 1);
+    expect(activityView(state)?.subagents?.[0]).toMatchObject({ state: 'done', result: '호출부 3곳: src/a.ts, src/b.ts' });
+  });
+
+  it('Task 도구: TaskUpdate의 진행 중이 지금 하는 항목이 되고, 끝냄·지움을 센다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'TaskCreated', task_id: '1', task_subject: '요구 읽기' }, AT);
+    noteActivityHook(state, { hook_event_name: 'TaskCreated', task_id: '2', task_subject: '테스트 쓰기' }, AT);
+    noteActivityHook(state, { hook_event_name: 'TaskCreated', task_id: '3', task_subject: '버릴 일' }, AT);
+    noteToolUse(state, { tool_name: 'TaskUpdate', tool_input: { taskId: '1', status: 'in_progress', activeForm: '요구 읽는 중' } }, AT + 1);
+    expect(activityView(state)?.todos).toEqual({ done: 0, total: 3, current: '요구 읽는 중' });
+    noteToolUse(state, { tool_name: 'TaskUpdate', tool_input: { taskId: '1', status: 'completed' } }, AT + 2);
+    noteToolUse(state, { tool_name: 'TaskUpdate', tool_input: { task_id: '2', status: 'in_progress' } }, AT + 3);
+    noteToolUse(state, { tool_name: 'TaskUpdate', tool_input: { taskId: '3', status: 'deleted' } }, AT + 4);
+    expect(activityView(state)?.todos).toEqual({ done: 1, total: 2, current: '테스트 쓰기' });
+  });
+});
+
+describe('권한을 묻는 문구(#942)', () => {
+  it('PermissionRequest는 무엇을 묻는지(도구와 대상)를 우리말로 적는다', () => {
+    expect(permissionMessage({ tool_name: 'Bash', tool_input: { command: 'rm -rf build' } })).toBe('Bash 허락 필요: rm -rf build');
+    expect(permissionMessage({ tool_name: 'Edit', tool_input: { file_path: '/w/src/a.ts' }, cwd: '/w' })).toBe('Edit 허락 필요: src/a.ts');
+    expect(permissionMessage({ tool_name: 'exec_command', tool_input: {} })).toBe('exec_command 허락 필요');
+    expect(permissionMessage({})).toBe('');
+  });
+
+  it('Claude의 영어 권한 알림 문구는 우리말로 바꾼다. 모르는 문구는 그대로 둔다', () => {
+    expect(notificationMessage('Claude needs your permission to use Bash')).toBe('Bash 허락 필요');
+    expect(notificationMessage('Claude is waiting for your input')).toBe('입력을 기다립니다');
+    expect(notificationMessage('무엇을 할까요?')).toBe('무엇을 할까요?');
   });
 });

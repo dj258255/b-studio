@@ -11,14 +11,14 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
-import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, reselect, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
+import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
 import { changesFailed, changesLoaded, openChanges, type ChangesEffect, type ChangesState, type DeskComment } from './changes';
 import { loadComments, saveComments } from './comments-store';
 import { applyListing, listingFailed, type FolderEffect, type FolderState } from './folder';
 import { PaneTerminal } from './pane';
 import type { DeskPlan, LaneChoice, PlansEffect, PlansState } from './plans';
 import { spaceItems, spaceScreen, spriteFor } from './cards';
-import { previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
+import { helpMaxOffset, previewLine, renderScreen, sidebarView, spaceRect, type PaneView } from './render';
 import { recordsScrollLimit, type RecordsLoad } from './records';
 import { placePanes, terminalSize, type PaneLayout } from './screen';
 import { parsePatch, type DetailAction, type DetailState } from './session-detail';
@@ -31,7 +31,7 @@ import { loaded, openRequirements, REQUIREMENTS_FILE, REQUIREMENTS_TEMPLATE, typ
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
 import { DEFAULT_THEME, type ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
-import { accountSprite, byTightness, sessionLimits, usageScreen, usageSpriteKey } from './usage';
+import { accountSprite, sessionLimits, usageAccounts, usageScreen, usageSpriteKey } from './usage';
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
@@ -713,8 +713,17 @@ export class DeskApp {
     this.#state = state;
     for (const effect of effects) this.#apply(effect);
     this.#clampRecords();
+    this.#clampHelp();
     this.#clearSeen();
     this.#scheduleRender();
+  }
+
+  /** 도움말을 끝보다 더 굴리지 않는다(#945). 끝에서 더 내린 만큼 다시 올려야 하는 일이 없게 */
+  #clampHelp(): void {
+    const offset = this.#state.helpOffset;
+    if (!this.#state.help || offset === undefined) return;
+    const max = helpMaxOffset(this.#size());
+    if (offset > max) this.#state = { ...this.#state, helpOffset: max };
   }
 
   /** 기록 화면을 끝보다 더 굴리지 않는다(끝에서 더 내린 만큼 다시 올려야 하는 일이 없게) */
@@ -973,7 +982,7 @@ export class DeskApp {
         return;
       case 'register': {
         try {
-          const result = await this.#call('registerFolder')(effect.path);
+          const result = await this.#call('registerFolder')(effect.path, effect.workspace);
           const name = this.#state.folder?.proposal?.detection.name ?? result.id;
           this.#state = { ...this.#state, folder: undefined };
           // 등록한 프로젝트로 바로 새 요청을 연다. 스페이스는 세션이 생기면 사이드바에 나온다
@@ -2700,7 +2709,7 @@ export class DeskApp {
       const [read, spend] = await Promise.all([limits.call(this.#client, options.refresh), spendCall ? spendCall.call(this.#client).catch(() => undefined) : undefined]);
       if (this.#restored) return;
       // 가장 빠듯한 계정이 맨 위다(#925). 고른 카드는 차례가 바뀌어도 같은 계정에 둔다
-      const accounts = byTightness(read.accounts);
+      const accounts = usageAccounts(read.accounts);
       const warning = read.warning;
       const count = accounts.length;
       const previous = this.#state.usage;
@@ -2710,7 +2719,7 @@ export class DeskApp {
       this.#state = {
         ...this.#state,
         usage: { accounts, receivedAt: Date.now(), ...(warning ? { warning } : {}), ...(keptSpend ? { spend: keptSpend } : {}) },
-        limits: sessionLimits(this.#state.items, accounts),
+        limits: sessionLimits(this.#state.items, read.accounts),
         ...(this.#state.usageSelected !== undefined ? { usageSelected: reselected >= 0 ? reselected : Math.max(0, Math.min(count - 1, this.#state.usageSelected)) } : {}),
         ...(asked !== undefined && this.#state.message === asked ? { message: '사용량을 다시 읽었습니다(계정마다 최소 간격은 스튜디오가 지킵니다)' } : {}),
       };
@@ -2827,7 +2836,13 @@ export class DeskApp {
         // 계정 목록(#885)을 받지 못하면(옛 스튜디오, 개인 PC 모드 아님) 지금처럼 CLI만 고른다
         this.#client.accounts().catch((): DeskAccount[] => []),
       ]);
-      const usable = projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name }));
+      // 등록한 내 프로젝트를 앞에, 저장소 예제를 뒤에 두고 고른 세션의 프로젝트로 시작한다(#945)
+      const listed = promptProjects(
+        projects.filter((project) => !project.error).map((project) => ({ id: project.id, name: project.name, ...(project.folder ? { folder: project.folder } : {}) })),
+        this.#state.items,
+        this.#state.selected,
+      );
+      const usable = listed.projects.map((project) => ({ id: project.id, name: project.name }));
       if (usable.length === 0) {
         // 처음 쓰는 사람: 내 폴더를 프로젝트로 등록하는 화면을 바로 연다(#916)
         const effects: Effect[] = [];
@@ -2836,14 +2851,14 @@ export class DeskApp {
         this.#scheduleRender();
         return;
       }
-      const picked = projectId ? usable.findIndex((project) => project.id === projectId) : -1;
+      const given = projectId ? usable.findIndex((project) => project.id === projectId) : -1;
       this.#state = {
         ...this.#state,
         message: note,
         prompt: {
-          step: usable.length === 1 || picked >= 0 ? 'request' : 'project',
+          step: usable.length === 1 || given >= 0 ? 'request' : 'project',
           projects: usable,
-          projectIndex: Math.max(0, picked),
+          projectIndex: given >= 0 ? given : listed.index,
           text: '',
           // 터미널로 띄울 수 없는 AI는 고를 수 없다(스튜디오가 거절한다)
           ...promptChoices(rules.allowed.filter((backend) => TERMINAL_BACKENDS.includes(backend)), accounts),

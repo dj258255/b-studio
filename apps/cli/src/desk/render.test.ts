@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { initialState, type DeskState } from './keys';
-import { previewLine, renderScreen, stripAnsi } from './render';
+import { helpMaxOffset, previewLine, renderScreen, stripAnsi } from './render';
 import { PaneTerminal } from './pane';
 import { computeLayout, stringWidth } from './screen';
 import { bg, fg } from './theme';
@@ -226,5 +226,36 @@ describe('아래 키 안내는 한 줄에 몇 개만(#935)', () => {
     const line = footer({ fleets }, 60);
     expect(line).not.toContain('…');
     expect(line).toContain('Esc');
+  });
+});
+
+describe('좁은 도움말과 보내는 중(#945)', () => {
+  const small = { cols: 80, rows: 24 };
+
+  it('80x24 도움말은 긴 설명을 줄을 바꿔 다 보이고(잘리지 않음), 굴려서 끝까지 볼 수 있다', () => {
+    const text = (offset: number) => renderScreen(state({ help: true, helpOffset: offset }), small, []).lines.map(stripAnsi);
+    const max = helpMaxOffset(small);
+    expect(max).toBeGreaterThan(0);
+    const all = new Set<string>();
+    for (let offset = 0; offset <= max; offset++) for (const line of text(offset)) all.add(line.trim());
+    const joined = [...all].join('\n');
+    // 표의 끝 키들(q, Ctrl-b)과 긴 설명의 끝 낱말이 어딘가에 보인다
+    expect(joined).toMatch(/desk 나가기/);
+    expect(joined).toMatch(/Ctrl-b 글자를 CLI로 보내기/);
+    expect(joined).toMatch(/승자를 고름/);
+    // 맨 아래 줄은 굴리는 법을 알린다
+    expect(text(0).at(-1)).toMatch(/↑↓/);
+    // 넘치게 굴려도 마지막 쪽에 머문다
+    expect(text(max + 50)).toEqual(text(max));
+    for (const line of text(0)) expect(stringWidth(line)).toBe(small.cols);
+  });
+
+  it('새 요청을 보내는 동안 요청 줄에도 보내는 중을 보이고 커서를 감춘다', () => {
+    const prompt = { step: 'request' as const, projects: [{ id: 'p1', name: 'shop' }], projectIndex: 0, text: '결제 테스트 보강', choices: ['rules'], choice: 0, sending: true };
+    const frame = renderScreen(state({ prompt }), size, []);
+    const last = stripAnsi(frame.lines.at(-1)!);
+    expect(last).toMatch(/결제 테스트 보강/);
+    expect(last).toMatch(/보내는 중/);
+    expect(frame.cursor).toBeUndefined();
   });
 });

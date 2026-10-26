@@ -56,6 +56,8 @@ export interface DeskNow {
   at: string;
   /** 도구가 아직 끝나지 않았다(#933). 도구 끝 훅을 보내는 CLI에서만 온다. 없으면 모른다 */
   running?: boolean;
+  /** 도구가 실패했거나 관문이 거절한 까닭 한 줄("거절됨: …", "중단됨", #942) */
+  error?: string;
 }
 
 export interface DeskTodos {
@@ -95,7 +97,11 @@ export interface DeskAgent {
   startedAt?: string;
   /** 서브에이전트의 마지막 소식 시각(#933) */
   lastAt?: string;
+  /** 서브에이전트가 끝나며 남긴 마지막 답 한 줄(#942) */
+  result?: string;
   tokens: DeskUsage;
+  /** 이 행의 토큰을 모른다(#942). 그때 tokens는 0이니 "토큰 0"으로 보이지 않는다 */
+  tokensUnknown?: boolean;
   costUsd?: number;
 }
 
@@ -115,6 +121,8 @@ export interface DeskProject {
   id: string;
   name: string;
   error?: string;
+  /** 등록한 내 폴더(#916). 저장소 예제 프로젝트에는 없다 */
+  folder?: string;
 }
 
 /** 세션 터미널 통로의 메시지(session-terminal.ts의 TerminalMessage와 같은 꼴) */

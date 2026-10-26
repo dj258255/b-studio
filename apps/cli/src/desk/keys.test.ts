@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { flushPending, handleInput, initialState, pasteFor, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { flushPending, handleInput, initialState, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
 import { switcherEntries } from './switcher';
 import type { DeskItem } from './types';
 
@@ -959,5 +959,63 @@ describe('다음 대기와 빠른 전환(#922)', () => {
     expect(next.plans).toBeUndefined();
     expect(next.switcher).toBeDefined();
     expect(effects).toContainEqual({ type: 'plans', effect: { type: 'close' } });
+  });
+});
+
+describe('실사용 점검에서 나온 입력·이동(#945)', () => {
+  const waiting = (id: string): DeskItem => ({ ...item(id), terminal: { cli: 'up', waiting: 'permission' } });
+
+  it('Ctrl-b j는 보이는 빈 칸이 있으면 보던 칸을 바꾸지 않고 빈 칸에 열어 그 칸을 고른다', () => {
+    const state = { ...initialState(), items: [item('a'), waiting('b')], layout: 2 as const, slots: ['a', undefined, undefined, undefined], focus: 0 };
+    const { state: next, effects } = handleInput(state, '\x02j');
+    expect(effects).toEqual([{ type: 'open', slot: 1, id: 'b' }]);
+    expect(next.slots).toEqual(['a', 'b', undefined, undefined]);
+    expect(next.focus).toBe(1);
+  });
+
+  it('Ctrl-b j는 고른 칸이 셸이어도 빈 칸이 있으면 거기에 연다', () => {
+    const state = { ...initialState(), items: [waiting('a')], layout: 2 as const, slots: ['shell:1', undefined, undefined, undefined] };
+    const { state: next, effects } = handleInput(state, '\x02j');
+    expect(effects).toEqual([{ type: 'open', slot: 1, id: 'a' }]);
+    expect(next.focus).toBe(1);
+  });
+
+  it('보이지 않는 칸(칸 수 밖)은 빈 칸으로 쓰지 않는다', () => {
+    const state = { ...initialState(), items: [item('a'), waiting('b')], layout: 1 as const, slots: ['a', undefined, undefined, undefined] };
+    expect(handleInput(state, '\x02j').effects).toEqual([{ type: 'open', slot: 0, id: 'b' }]);
+  });
+
+  it('도움말은 ↑↓·j k·PgUp PgDn·Space로 굴리고, 다른 키로 닫는다', () => {
+    let state = handleInput(withItems(), '\x02?').state;
+    expect(state.help).toBe(true);
+    state = handleInput(state, '\x1b[B').state;
+    state = handleInput(state, 'j').state;
+    expect(state.help).toBe(true);
+    expect(state.helpOffset).toBe(2);
+    state = handleInput(state, 'k').state;
+    expect(state.helpOffset).toBe(1);
+    state = handleInput(state, '\x1b[6~').state;
+    expect(state.helpOffset).toBeGreaterThan(1);
+    state = handleInput(state, '\x1b[5~\x1b[5~').state;
+    expect(state.helpOffset).toBe(0);
+    const closed = handleInput(state, 'q').state;
+    expect(closed.help).toBe(false);
+    expect(closed.helpOffset).toBeUndefined();
+  });
+
+  it('새 요청의 프로젝트는 등록한 프로젝트를 앞에, 저장소 예제를 뒤에 두고, 고른 세션의 프로젝트로 시작한다', () => {
+    const projects = [
+      { id: 'orders', name: 'orders' },
+      { id: 'pipeline-lint', name: 'pipeline-lint' },
+      { id: 'r1', name: 'shop', folder: '/Users/me/shop' },
+      { id: 'r2', name: 'blog', folder: '/Users/me/blog' },
+    ];
+    const items = [{ ...item('s1'), projectName: 'blog' }];
+    const picked = promptProjects(projects, items, 0);
+    expect(picked.projects.map((project) => project.name)).toEqual(['shop', 'blog', 'orders', 'pipeline-lint']);
+    expect(picked.projects[picked.index]!.name).toBe('blog');
+    // 고른 세션이 없으면 등록한 첫 프로젝트
+    const none = promptProjects(projects, [], 0);
+    expect(none.projects[none.index]!.name).toBe('shop');
   });
 });

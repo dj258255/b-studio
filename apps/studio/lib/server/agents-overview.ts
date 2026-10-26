@@ -436,7 +436,10 @@ function agentsOf(ledger: readonly TerminalAgentRow[] | undefined, instances: re
     ...(instance.tool ? { tool: instance.tool } : {}),
     ...(instance.startedAt ? { startedAt: instance.startedAt } : {}),
     ...(instance.lastAt ? { lastAt: instance.lastAt } : {}),
+    ...(instance.result ? { result: instance.result } : {}),
+    // 텔레메트리가 이 종류의 토큰을 알리기 전이거나 같은 종류의 둘째 이후 인스턴스면 이 행의 토큰은 모른다(0이 아니다, #942)
     tokens: carried?.tokens ?? ZERO_USAGE,
+    ...(carried ? {} : { tokensUnknown: true }),
     ...(carried?.costUsd !== undefined ? { costUsd: carried.costUsd } : {}),
   });
   const merged: AgentDetail[] = [];

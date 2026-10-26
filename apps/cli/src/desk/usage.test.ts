@@ -4,7 +4,7 @@ import { stringWidth, stripAnsi } from './screen';
 import { defaultSprite } from './sprite';
 import { DEFAULT_THEME, fg } from './theme';
 import type { DeskAccountLimits, DeskItem, DeskSpend } from './types';
-import { byTightness, exhaustAt, sessionLimits, tightestLine, usageCardLines, usageScreen, usageSpriteKey, usageSummary } from './usage';
+import { byTightness, usageAccounts, exhaustAt, sessionLimits, tightestLine, usageCardLines, usageScreen, usageSpriteKey, usageSummary } from './usage';
 
 const NOW = Date.parse('2026-10-23T12:00:00Z');
 const later = (minutes: number) => new Date(NOW + minutes * 60_000).toISOString();
@@ -289,5 +289,14 @@ describe('오늘·최근 7일 쓴 양(#925)', () => {
     const text = screen.lines.map(stripAnsi).join('\n');
     expect(text).toMatch(/오늘 +0 토큰 +7일 +0 토큰/);
     expect(text).not.toContain('단가 없음');
+  });
+});
+
+describe('한도가 없는 CLI는 표에 두지 않는다(#945)', () => {
+  it('usageAccounts는 빠듯한 순으로 놓고 5시간·주간 한도가 없는 계정(Gemini)을 뺀다', () => {
+    expect(usageAccounts([gemini, marco, account()]).map((entry) => entry.id)).toEqual(['acct-1', 'codex']);
+    // 읽지 못한 계정은 남긴다(로그인 필요 같은 까닭을 보여야 한다)
+    const unknown = account({ id: 'unknown', status: 'unknown', windows: [], error: '로그인 필요' });
+    expect(usageAccounts([gemini, unknown]).map((entry) => entry.id)).toEqual(['unknown']);
   });
 });

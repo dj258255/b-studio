@@ -331,7 +331,7 @@ import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
-import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolUse, noteTurnEnded, noteTurnStarted, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
+import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
@@ -8828,8 +8828,20 @@ const TERMINAL_READ_ONLY_NOTE = '[b-studio] 이 요청은 읽기만입니다. �
 /** 읽기만 실행에서 쓰기 도구를 거절하는 말 */
 const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 이 요청이 끝난 뒤 "${AGENT_READ_ONLY_MARK}" 없이 새로 요청하세요.`;
 
-/** 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅) */
+/**
+ * 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅). 거절하면 화면의 "지금 하는 일"에 거절 까닭을 남긴다(#942) —
+ * CLI는 거절된 도구의 끝 훅을 보내지 않을 수 있어, 남기지 않으면 카드가 그 도구를 계속 도는 중으로 보인다
+ */
 async function terminalToolStarting(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
+  const result = await terminalToolDecision(id, input);
+  if (result.deny) {
+    const session = store.sessions.get(id);
+    if (session?.terminalActivity) noteToolDenied(session.terminalActivity, input, result.deny, Date.now());
+  }
+  return result;
+}
+
+async function terminalToolDecision(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
   const session = terminalSession(id);
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
   // 훅이 왔다는 것은 CLI가 움직인다는 뜻이다. 도구의 종류와 무관하게 정체 감시의 활동을 갱신한다(#B5)
@@ -9291,13 +9303,14 @@ function terminalNotification(id: string, input: HookInput): void {
     // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
     return;
   }
-  const message =
-    typeof input.message === 'string'
-      ? input.message
-      : input.hook_event_name === 'PermissionRequest' && typeof input.tool_name === 'string'
-        ? `${input.tool_name} 실행 권한을 묻습니다`
-        : '';
-  setTerminalAttention(session, kind, message);
+  // 무엇을 묻는지는 PermissionRequest가 안다(도구와 대상, #942). 같은 권한 창을 몇 초 뒤 알리는 Notification의 일반 문구로 덮지 않는다
+  if (input.hook_event_name === 'PermissionRequest') {
+    setTerminalAttention(session, kind, permissionMessage(input));
+    return;
+  }
+  const current = session.snapshot.terminalAttention;
+  if (kind === 'permission_prompt' && current?.kind === 'permission_prompt' && current.message) return;
+  setTerminalAttention(session, kind, typeof input.message === 'string' ? notificationMessage(input.message) : '');
 }
 
 /**

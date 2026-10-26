@@ -111,11 +111,24 @@ export interface HostCli {
 }
 
 /**
- * 사용자의 Claude 상태 줄 명령을 읽기만 한다(#920). 계정 폴더(없으면 ~/.claude)의 settings.json에서 `statusLine.command`.
- * 없거나 꼴이 틀리거나, b-studio 훅 스크립트를 부르는 명령이면(자기 자신을 다시 부르게 된다) undefined
+ * 사용자가 쓰던 Claude 상태 줄 명령을 읽기만 한다(#920). Claude의 설정 순서(사용자 < 프로젝트 < 로컬)대로
+ * 작업 폴더의 `.claude/settings.local.json`, `.claude/settings.json`(#942), 계정 폴더(없으면 ~/.claude)의 settings.json에서
+ * 처음 맞는 `statusLine.command`를 고른다. 터미널을 열 때 한 번만 읽는다(세션 중에 작업 폴더의 파일이 바뀌어도 이번 터미널에는 닿지 않는다).
+ * 없거나 꼴이 틀리거나, b-studio 훅 스크립트를 부르는 명령이면(자기 자신을 다시 부르게 된다) 다음 것을 보고, 모두 아니면 undefined
  */
-export async function userStatusLineCommand(configDir: string | undefined, home: string = homedir()): Promise<string | undefined> {
-  const file = path.join(configDir ?? path.join(home, '.claude'), 'settings.json');
+export async function userStatusLineCommand(configDir: string | undefined, home: string = homedir(), projectDir?: string): Promise<string | undefined> {
+  const files = [
+    ...(projectDir ? [path.join(projectDir, '.claude', 'settings.local.json'), path.join(projectDir, '.claude', 'settings.json')] : []),
+    path.join(configDir ?? path.join(home, '.claude'), 'settings.json'),
+  ];
+  for (const file of files) {
+    const command = await statusLineIn(file);
+    if (command) return command;
+  }
+  return undefined;
+}
+
+async function statusLineIn(file: string): Promise<string | undefined> {
   try {
     const parsed: unknown = JSON.parse(await readFile(file, 'utf8'));
     const line = typeof parsed === 'object' && parsed !== null ? (parsed as { statusLine?: unknown }).statusLine : undefined;

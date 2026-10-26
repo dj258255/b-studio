@@ -84,7 +84,8 @@ export function computeLayout(cols: number, rows: number, layout: PaneLayout, op
   const height = Math.max(1, rows - 2);
   // 사이드바를 숨기면 구분선도 없이 칸이 왼쪽 끝부터 쓴다(#863)
   const showSidebar = options.sidebar !== false;
-  const sidebarWidth = showSidebar ? Math.max(1, Math.min(SIDEBAR_MAX, Math.floor(cols * 0.3))) : 0;
+  // 좁은 화면(100열 아래)에서는 사이드바를 1/4로 줄여 본문(카드)에 자리를 준다(#944)
+  const sidebarWidth = showSidebar ? Math.max(1, Math.min(SIDEBAR_MAX, Math.floor(cols * (cols < 100 ? 0.25 : 0.3)))) : 0;
   const x0 = showSidebar ? sidebarWidth + 1 : 0;
   const main = Math.max(1, cols - x0);
   const sidebar = { x: 0, y: top, w: sidebarWidth, h: height };

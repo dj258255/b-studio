@@ -66,7 +66,8 @@ import {
 
 export type { InfraService } from '@b-studio/spec';
 
-export type DetectedTemplate = 'nextjs' | 'vite' | 'spring-boot' | 'fastapi';
+/** workspace: 지원 스택이 아닌 폴더를 코드·테스트만으로 등록할 때의 잠자는 컨테이너(#946). 사람이 고른 테스트 명령만 돌린다 */
+export type DetectedTemplate = 'nextjs' | 'vite' | 'spring-boot' | 'fastapi' | 'workspace';
 
 export interface DetectedService {
   name: string;
@@ -74,8 +75,9 @@ export interface DetectedService {
   /** 프로젝트 폴더 기준. 폴더 바로 아래면 '.' */
   path: string;
   port: number;
-  preview: 'browser' | 'openapi';
-  ready: { path: string; expectStatus?: number };
+  preview: 'browser' | 'openapi' | 'logs';
+  /** 없으면 컨테이너가 뜨면 준비된 것으로 본다(workspace) */
+  ready?: { path: string; expectStatus?: number };
   contract?: string;
   /** Dockerfile 본문 */
   dockerfile: string;
@@ -150,6 +152,35 @@ export interface ProjectDetection {
    * specYaml이 이 값으로 workflow.pageChecks 기본 확인(화면이 백엔드 호출에 실패하면 게이트가 잡는다)을 만든다
    */
   frontendBackendWiring?: { frontendService: string; backendService: string; backendProbePath: string };
+  /**
+   * 지원 스택(Next.js·Vite·Spring Boot·FastAPI)을 찾지 못했을 때만 있다(#946). 코드·테스트만으로 등록하는 제안이다:
+   * 이 폴더의 언어에 맞는 컨테이너 하나를 띄워 두고, 사람이 고른 테스트 명령을 게이트의 test 단계로 돌린다.
+   * 고르기 전에는 아무 파일도 만들지 않는다(generateFiles는 services가 비면 빈 목록이다) — withWorkspace로 고른 뒤에 만든다
+   */
+  workspace?: WorkspaceSuggestion;
+}
+
+/** 코드·테스트만으로 등록할 때 고를 수 있는 테스트 명령 하나 */
+export interface WorkspaceTestCandidate {
+  /** 화면에 보일 짧은 이름(예: npm run test) */
+  label: string;
+  /** 어디서 찾았는지(예: package.json scripts.test) */
+  source: string;
+  /** workflow.tests에 그대로 들어가는 exec 꼴 명령. 의존성 설치가 필요한 언어는 sh -c로 설치를 앞에 붙인다 */
+  command: string[];
+}
+
+export interface WorkspaceSuggestion {
+  /** 사람이 읽을 언어 이름. 모르면 '알 수 없음' */
+  language: string;
+  /** 컨테이너 기본 이미지 */
+  image: string;
+  candidates: WorkspaceTestCandidate[];
+  /** 아래는 파일을 만들 때만 쓴다 */
+  dockerfile: string;
+  volumes: Record<string, string>;
+  environment: Record<string, string>;
+  notes: string[];
 }
 
 export interface GeneratedFile {
@@ -278,8 +309,8 @@ export async function detectProject(folder: string, { ignoreExistingSpec = false
   const services = nameServices(standalone.slice(0, MAX_DETECTED_SERVICES));
   const warnings: string[] = [];
   if (services.length === 0) {
-    warnings.push('Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다. studio.yaml을 직접 쓰거나 지원하는 스택인지 확인하세요');
-    return { folder: root, name, hasSpec: false, services, infra: [], defaultInfra: [], warnings };
+    warnings.push('Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다. 테스트 명령을 하나 골라 코드·테스트만으로 등록하거나 studio.yaml을 직접 쓰세요');
+    return { folder: root, name, hasSpec: false, services, infra: [], defaultInfra: [], warnings, workspace: await suggestWorkspace(root) };
   }
 
   const infra = await detectInfra(root, services, childDirNames);
@@ -290,6 +321,138 @@ export async function detectProject(folder: string, { ignoreExistingSpec = false
   // 아무도 기대지 않는 부가 서비스(예: 가져왔지만 안 쓰는 카프카)는 기본으로 체크하지 않는다
   const defaultInfra = [...dependencyClosure(services.flatMap((service) => service.dependsOn), Object.fromEntries(infra.map((service) => [service.name, service.dependsOn])))];
   return { folder: root, name, hasSpec: false, services, infra, defaultInfra, warnings, ...(frontendBackendWiring ? { frontendBackendWiring } : {}) };
+}
+
+/** workspace 서비스의 이름과 포트. 컨테이너는 아무것도 듣지 않지만 studio.yaml의 managed 서비스는 포트가 있어야 한다 */
+const WORKSPACE_SERVICE = 'workspace';
+const WORKSPACE_PORT = 8080;
+const WORKSPACE_NOTE = '지원 스택이 아니어서 코드·테스트만으로 등록했습니다. 컨테이너는 아무것도 띄우지 않고 기다리며, 게이트는 위 테스트 명령(종료 코드 0이면 통과)으로 완료를 확인합니다. 화면·API·계약 확인은 없습니다';
+
+/**
+ * 지원 스택이 아닌 폴더의 언어를 보고 컨테이너와 테스트 명령 후보를 고른다(#946). 폴더 바로 아래의 알려진 파일만 본다(저장소를 훑지 않는다).
+ * 명령을 실제로 돌려 보지는 않으니 후보는 추측이다 — 사람이 고르고, 틀리면 게이트의 test 단계가 실패로 알린다
+ */
+async function suggestWorkspace(root: string): Promise<WorkspaceSuggestion> {
+  const candidates: WorkspaceTestCandidate[] = [];
+  const notes: string[] = [];
+  let language = '알 수 없음';
+  let image = 'buildpack-deps:bookworm';
+  let setup: string[] = [];
+  const volumes: Record<string, string> = {};
+  const environment: Record<string, string> = {};
+
+  const pkg = await readJson(path.join(root, 'package.json'));
+  const pyproject = await readText(path.join(root, 'pyproject.toml'));
+  const requirements = await readText(path.join(root, 'requirements.txt'));
+  if (pkg) {
+    language = 'Node.js';
+    image = 'node:22-bookworm-slim';
+    setup = ['RUN corepack enable', 'ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 npm_config_update_notifier=false npm_config_store_dir=/cache/pnpm'];
+    const manager = await packageManager(root, pkg);
+    const lockless = manager === 'npm' && !(await exists(path.join(root, 'package-lock.json')));
+    // 잠금 파일이 없으면 npm install이 package-lock.json을 사용자 폴더에 새로 써 "바뀐 파일"이 된다 — 쓰지 않게 한다
+    const install = lockless ? 'npm install --no-package-lock' : { pnpm: 'pnpm install --frozen-lockfile', yarn: 'yarn install --frozen-lockfile', npm: 'npm ci' }[manager];
+    const scripts = (pkg.scripts as Record<string, unknown> | undefined) ?? {};
+    for (const script of ['test', 'test:unit', 'check']) {
+      if (typeof scripts[script] !== 'string') continue;
+      const run = `${manager} run ${script}`;
+      candidates.push({ label: run, source: `package.json scripts.${script}`, command: ['sh', '-c', `${install} && ${run}`] });
+    }
+    // 의존성은 컨테이너 볼륨에 둔다. 사용자 폴더의 node_modules와 섞이지 않는다
+    volumes['node-modules'] = 'node_modules';
+    if (manager === 'pnpm') volumes['pnpm-store'] = '/cache/pnpm';
+  } else if (pyproject !== undefined || requirements !== undefined || (await exists(path.join(root, 'setup.py')))) {
+    language = 'Python';
+    image = 'python:3.12-slim';
+    setup = ['ENV PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1'];
+    const testExtra = /\[project\.optional-dependencies\][^[]*\btest\s*=/.test(pyproject ?? '');
+    const installs: string[] = [];
+    for (const file of ['requirements.txt', 'requirements-dev.txt', 'requirements-test.txt']) {
+      if (await exists(path.join(root, file))) installs.push(`pip install --no-cache-dir -r ${file}`);
+    }
+    if (installs.length === 0 && pyproject !== undefined) installs.push(`pip install --no-cache-dir ${testExtra ? "'.[test]'" : '.'}`);
+    const install = installs.join(' && ') || 'true';
+    const text = `${pyproject ?? ''}\n${requirements ?? ''}\n${(await readText(path.join(root, 'requirements-dev.txt'))) ?? ''}\n${(await readText(path.join(root, 'requirements-test.txt'))) ?? ''}`;
+    if (/\bpytest\b/i.test(text)) candidates.push({ label: 'python -m pytest', source: 'pytest 의존성', command: ['sh', '-c', `${install} && python -m pytest`] });
+    candidates.push({ label: 'python -m unittest', source: '표준 라이브러리', command: ['sh', '-c', `${install} && python -m unittest discover`] });
+  } else if (await exists(path.join(root, 'go.mod'))) {
+    language = 'Go';
+    image = 'golang:1-bookworm';
+    candidates.push({ label: 'go test ./...', source: 'go.mod', command: ['go', 'test', './...'] });
+    volumes['go-mod'] = '/go/pkg/mod';
+  } else if (await exists(path.join(root, 'Cargo.toml'))) {
+    language = 'Rust';
+    image = 'rust:1-bookworm';
+    // 빌드 산출물(target/)을 사용자 폴더 밖 볼륨에 둔다
+    environment.CARGO_TARGET_DIR = '/cache/target';
+    candidates.push({ label: 'cargo test', source: 'Cargo.toml', command: ['cargo', 'test'] });
+    volumes['cargo-registry'] = '/usr/local/cargo/registry';
+    volumes['cargo-target'] = '/cache/target';
+  } else if ((await exists(path.join(root, 'build.gradle'))) || (await exists(path.join(root, 'build.gradle.kts')))) {
+    language = 'Java/Kotlin(Gradle)';
+    const wrapper = await exists(path.join(root, 'gradlew'));
+    image = wrapper ? 'eclipse-temurin:21-jdk' : 'gradle:jdk21';
+    setup = [`ENV GRADLE_USER_HOME=${GRADLE_USER_HOME}`];
+    const gradle = wrapper ? './gradlew' : 'gradle';
+    candidates.push({ label: `${gradle} test`, source: wrapper ? 'gradlew' : 'build.gradle', command: [gradle, 'test', '--no-daemon', '--console=plain'] });
+    volumes['gradle-home'] = GRADLE_USER_HOME;
+  } else if (await exists(path.join(root, 'pom.xml'))) {
+    language = 'Java(Maven)';
+    const wrapper = await exists(path.join(root, 'mvnw'));
+    image = wrapper ? 'eclipse-temurin:21-jdk' : 'maven:3-eclipse-temurin-21';
+    const mvn = wrapper ? './mvnw' : 'mvn';
+    candidates.push({ label: `${mvn} test`, source: wrapper ? 'mvnw' : 'pom.xml', command: [mvn, '-B', 'test'] });
+    volumes['m2'] = '/root/.m2';
+  } else if (await exists(path.join(root, 'Gemfile'))) {
+    language = 'Ruby';
+    image = 'ruby:3-bookworm';
+    const install = 'bundle install';
+    const gemfile = (await readText(path.join(root, 'Gemfile'))) ?? '';
+    if (/\brspec\b/.test(gemfile)) candidates.push({ label: 'bundle exec rspec', source: 'Gemfile', command: ['sh', '-c', `${install} && bundle exec rspec`] });
+    candidates.push({ label: 'bundle exec rake test', source: 'Gemfile', command: ['sh', '-c', `${install} && bundle exec rake test`] });
+    volumes.bundle = '/usr/local/bundle';
+  }
+  // Makefile의 test 목표는 언어와 상관없이 후보에 넣는다
+  if (/^test\s*:/m.test((await readText(path.join(root, 'Makefile'))) ?? '')) candidates.push({ label: 'make test', source: 'Makefile', command: ['make', 'test'] });
+  if (candidates.length === 0) notes.push('테스트 명령을 찾지 못했습니다. 이 폴더에서 테스트를 돌리는 명령을 직접 쓰세요');
+
+  const dockerfile = [
+    '# b-studio가 만든 개발용 이미지. 지원 스택이 아니어서 코드·테스트만 다룬다: 소스는 compose에서 마운트하고, 컨테이너는 아무것도 띄우지 않고 기다린다',
+    `FROM ${image}`,
+    '',
+    `WORKDIR ${CONTAINER_WORKSPACE_ROOT}`,
+    ...setup,
+    '',
+    'CMD ["sleep", "infinity"]',
+    '',
+  ].join('\n');
+  return { language, image, candidates, dockerfile, volumes, environment, notes };
+}
+
+/**
+ * 코드·테스트만 등록을 고른 detection(#946): workspace 서비스 하나와 고른 테스트 명령을 넣는다. 테스트 명령이 비면 만들지 않는다 —
+ * 돌릴 서비스도 테스트도 없으면 게이트가 완료를 확인할 길이 없어 에이전트의 완료 선언을 그대로 믿게 된다.
+ * 지원 스택을 찾은 폴더(workspace 제안이 없다)는 그대로 돌려준다
+ */
+export function withWorkspace(detection: ProjectDetection, test: readonly string[]): ProjectDetection {
+  const suggestion = detection.workspace;
+  if (!suggestion || detection.hasSpec || detection.services.length > 0) return detection;
+  const command = [...test];
+  if (command.length === 0 || command.every((part) => part.trim() === '')) throw new Error('코드·테스트만으로 등록하려면 테스트 명령을 하나 골라야 합니다. 게이트가 그 명령으로 완료를 확인합니다');
+  const service: DetectedService = {
+    name: WORKSPACE_SERVICE,
+    template: 'workspace',
+    path: '.',
+    port: WORKSPACE_PORT,
+    preview: 'logs',
+    dockerfile: suggestion.dockerfile,
+    volumes: suggestion.volumes,
+    environment: suggestion.environment,
+    dependsOn: [],
+    notes: [...suggestion.notes.filter((note) => !note.startsWith('테스트 명령을 찾지 못했습니다')), WORKSPACE_NOTE, TEST_GATE_NOTE],
+    testCommand: { command },
+  };
+  return { ...detection, services: [service], warnings: [] };
 }
 
 /**
@@ -438,6 +601,8 @@ async function wireServiceEnvironments(root: string, services: DetectedService[]
   // environment·command도 함께 넘긴다 — wireAppEnvironment가 실제 POSTGRES_*/MYSQL_* 값과 Kafka 광고 리스너를 읽어야 한다(지어내지 않는다)
   const byEngine: WirableInfraService[] = infra.map((service) => ({ name: service.name, engine: service.engine, environment: service.environment, command: service.command, notes: service.notes }));
   for (const service of services) {
+    // 코드·테스트만 등록(workspace)은 부가 서비스를 붙이지 않는다. 이 함수는 지원 스택을 찾았을 때만 불리지만 타입으로도 막는다
+    if (service.template === 'workspace') continue;
     const configText = await appConfigText(root, service);
     const refs = detectEnvReferences(configText);
     const wiring = wireAppEnvironment(service.template, refs, byEngine);
@@ -641,7 +806,7 @@ async function wireFrontendBackendUrl(
     }
   }
 
-  return { frontendService: frontend.name, backendService: backend.name, backendProbePath: backend.ready.path };
+  return { frontendService: frontend.name, backendService: backend.name, backendProbePath: backend.ready?.path ?? '/' };
 }
 
 async function appConfigText(root: string, service: DetectedService): Promise<string> {
@@ -1125,8 +1290,10 @@ function specYaml(detection: ProjectDetection): string {
   ];
   for (const service of detection.services) {
     lines.push(`  ${service.name}:`, '    source: managed', `    template: ${service.template}`, `    path: ${yamlString(service.path)}`, `    port: ${service.port}`, `    preview: ${service.preview}`);
-    const ready = [`path: ${service.ready.path}`, ...(service.ready.expectStatus ? [`expectStatus: ${service.ready.expectStatus}`] : []), `timeoutSeconds: ${service.template === 'spring-boot' ? 900 : 300}`];
-    lines.push(`    ready: { ${ready.join(', ')} }`);
+    if (service.ready) {
+      const ready = [`path: ${service.ready.path}`, ...(service.ready.expectStatus ? [`expectStatus: ${service.ready.expectStatus}`] : []), `timeoutSeconds: ${service.template === 'spring-boot' ? 900 : 300}`];
+      lines.push(`    ready: { ${ready.join(', ')} }`);
+    }
     if (service.contract) lines.push(`    contract: { extract: ${service.contract} }`);
     // 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로(ADR-139). servicesForFiles가 path와 똑같이 재시작 대상으로 본다
     if (service.includes && service.includes.length > 0) lines.push(`    includes: [${service.includes.map(yamlString).join(', ')}]`);

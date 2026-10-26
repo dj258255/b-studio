@@ -2581,7 +2581,24 @@ describe('Codex 터미널(#825)', () => {
     const session = await openCodex();
     await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '테스트 돌려 줘' });
     await session.gateway.notification({ hook_event_name: 'PermissionRequest', tool_name: 'exec_command', tool_input: { command: './gradlew test' } });
-    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'exec_command 실행 권한을 묻습니다' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'exec_command 허락 필요: ./gradlew test' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('권한 알림(Notification)이 뒤늦게 와도 PermissionRequest의 자세한 문구(무엇을 묻는지)를 덮지 않는다(#942)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '빌드 폴더 지워 줘' });
+    await session.gateway.notification({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } });
+    await session.gateway.notification({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Bash 허락 필요: rm -rf build' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('PermissionRequest 없이 온 영어 권한 알림은 우리말로 싣는다(#942)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '빌드 폴더 지워 줘' });
+    await session.gateway.notification({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Bash 허락 필요' });
     await stopSession(session.id);
   }, 30_000);
 });
@@ -2648,6 +2665,15 @@ describe('터미널 CLI가 지금 하는 일을 훅으로 모은다(#920)', () =
     const after = sessionTerminalActivity(session.id)!;
     expect(after.now).toBeUndefined();
     expect(after.lastMessage).toBe('바꾼 것이 없습니다.');
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('관문이 거절한 도구는 도는 중이 아니고 거절 까닭이 지금 하는 일에 남는다(#942)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '[읽기만] 구조를 설명해줘' });
+    const denied = await session.gateway.preTool({ tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'pnpm test' } });
+    expect(denied.deny).toContain('읽기만 요청');
+    expect(sessionTerminalActivity(session.id)?.now).toMatchObject({ tool: 'Bash', target: 'pnpm test', running: false, error: expect.stringContaining('거절됨: 읽기만 요청') });
     await stopSession(session.id);
   }, 30_000);
 });

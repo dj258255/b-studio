@@ -73,6 +73,33 @@ export function isShellId(id: string | undefined): id is string {
 }
 
 /** 셸 칸 자리에 다른 것을 열려고 할 때의 안내. 셸 칸은 x와 desk 나가기로만 끝낸다 */
+/** 도움말을 굴리는 키와 그만큼(#945). 쪽은 넉넉히 잡고 그리는 쪽이 끝에 맞춘다 */
+const HELP_PAGE = 10;
+const HELP_SCROLL: Record<string, number> = {
+  '\x1b[A': -1,
+  '\x1bOA': -1,
+  k: -1,
+  '\x1b[B': 1,
+  '\x1bOB': 1,
+  j: 1,
+  '\x1b[5~': -HELP_PAGE,
+  b: -HELP_PAGE,
+  '\x1b[6~': HELP_PAGE,
+  ' ': HELP_PAGE,
+  f: HELP_PAGE,
+};
+
+/**
+ * 새 요청의 프로젝트 목록과 처음 고를 줄(#945). 등록한 내 프로젝트(folder가 있다)를 앞에, 저장소 예제를 뒤에 둔다.
+ * 처음 줄은 사이드바에서 고른 세션의 프로젝트, 없으면 등록한 첫 프로젝트다
+ */
+export function promptProjects<T extends { id: string; name: string; folder?: string }>(projects: readonly T[], items: readonly DeskItem[], selected: number): { projects: T[]; index: number } {
+  const ordered = [...projects.filter((project) => project.folder), ...projects.filter((project) => !project.folder)];
+  const current = deskSessions(items)[selected]?.projectName;
+  const byName = current ? ordered.findIndex((project) => project.name === current) : -1;
+  return { projects: ordered, index: Math.max(0, byName) };
+}
+
 export const SHELL_TAKEN = '이 칸에는 셸이 돌고 있습니다. 다른 칸을 고르거나 Ctrl-b x로 셸을 끝낸 뒤 엽니다';
 
 /** 사이드바를 고르는 중의 안내 */
@@ -136,8 +163,10 @@ export interface DeskState {
   /** 고른 칸 하나만 크게 본다. 다른 칸의 세션과 통로는 그대로다 */
   zoom?: boolean;
   sidebarHidden?: boolean;
-  /** 도움말 화면. 다음 키 하나는 닫기만 한다 */
+  /** 도움말 화면. ↑↓·j k·PgUp PgDn·Space는 굴리고, 그 밖의 키 하나는 닫기만 한다 */
   help?: boolean;
+  /** 도움말을 굴린 줄 수(#945). 화면 크기에 맞춘 최댓값은 그리는 쪽(desk.ts)이 맞춘다 */
+  helpOffset?: number;
   /** 세션 멈추기·이어서 작업을 묻는 중. y나 Enter면 하고, 다른 키면 그만둔다 */
   confirm?: ConfirmState;
   /** 세션 이름을 쓰는 중 */
@@ -362,9 +391,15 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       continue;
     }
     if (state.help) {
-      // 도움말은 아무 키로 닫는다. 그 키는 다른 데로 보내지 않는다
-      at += nextKey(input, at).length;
-      state = { ...state, help: false };
+      // 굴리는 키는 굴리고(#945: 좁은 화면에서 끝까지 보게), 그 밖의 키는 닫는다. 그 키는 다른 데로 보내지 않는다
+      const key = nextKey(input, at);
+      at += key.length;
+      const step = HELP_SCROLL[key];
+      if (step !== undefined) {
+        state = { ...state, helpOffset: Math.max(0, (state.helpOffset ?? 0) + step) };
+        continue;
+      }
+      state = { ...state, help: false, helpOffset: undefined };
       continue;
     }
     if (state.records) {
@@ -840,11 +875,14 @@ function jumpTo(start: DeskState, id: string, effects: Effect[]): DeskState {
     effects.push({ type: 'reopen', id });
     return { ...state, focus: already };
   }
-  if (isShellId(state.slots[state.focus])) return { ...state, message: SHELL_TAKEN };
+  // 고른 칸에 무엇이 있고 보이는 빈 칸이 있으면 빈 칸에 연다(#945: 보던 세션을 바꿔 끼우지 않는다). 크게 보는 중이면 고른 칸을 쓴다
+  const empty = state.zoom || state.slots[state.focus] === undefined ? -1 : state.slots.findIndex((slot, at) => slot === undefined && at < state.layout);
+  const target = empty >= 0 ? empty : state.focus;
+  if (isShellId(state.slots[target])) return { ...state, message: SHELL_TAKEN };
   const slots = [...state.slots];
-  slots[state.focus] = id;
-  effects.push({ type: 'open', slot: state.focus, id });
-  return { ...state, slots };
+  slots[target] = id;
+  effects.push({ type: 'open', slot: target, id });
+  return { ...state, slots, focus: target };
 }
 
 /** 스페이스 화면의 키(#887): 앞글쇠 없이 카드를 고르고 연다. 칸으로 보낼 글자는 없다 */
