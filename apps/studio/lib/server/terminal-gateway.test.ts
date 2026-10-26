@@ -50,11 +50,12 @@ describe('CLI 대화 id를 훅 입력에서 받는다(#872)', () => {
     await routes['/stop']({ session_id: 'a4' });
     await routes['/notification']({ session_id: 'a5' });
     await routes['/session-end']({ session_id: 'a6' });
+    await routes['/activity']({ session_id: 'a7' });
     await routes['/v1/logs']({ session_id: 'x1' });
     await routes['/ping']({ session_id: 'x2' });
     await routes['/prompt']({ prompt: '고쳐줘' });
     await routes['/prompt']({ session_id: 42 });
-    expect(seen).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6']);
+    expect(seen).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']);
   });
 
   it('대화 id를 받다가 던져도 훅의 답은 그대로 간다(판정과 상관없는 기록이다)', async () => {
@@ -109,6 +110,22 @@ describe('관문의 훅 답 (CLI의 규약으로 옮긴다, 이슈 #673)', () =>
     expect(seen).toEqual([input]);
     // 처리하지 않아도(빈 처리기) 빈 답이다 — 알림은 판정이 아니다
     expect(await terminalHookRoutes(handlers())['/notification']({ notification_type: 'idle_prompt' })).toEqual({});
+  });
+
+  it('지켜보는 훅(activity)과 상태 줄(statusline)은 처리에 넘기고 언제나 빈 답을 준다. 처리가 던져도 같다(#920)', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const routes = terminalHookRoutes(handlers({ activity: async (input) => void seen.push(['activity', input]), statusline: async (input) => void seen.push(['statusline', input]) }));
+    expect(await routes['/activity']({ hook_event_name: 'PostToolUse', tool_name: 'Read' })).toEqual({});
+    expect(await routes['/statusline']({ context_window: { used_percentage: 3 } })).toEqual({});
+    expect(seen).toEqual([
+      ['activity', { hook_event_name: 'PostToolUse', tool_name: 'Read' }],
+      ['statusline', { context_window: { used_percentage: 3 } }],
+    ]);
+    const throwing = terminalHookRoutes(handlers({ activity: async () => { throw new Error('x'); }, statusline: async () => { throw new Error('y'); } }));
+    expect(await throwing['/activity']({})).toEqual({});
+    expect(await throwing['/statusline']({})).toEqual({});
+    // 처리가 없는 옛 처리기도 빈 답이다
+    expect(await terminalHookRoutes(handlers())['/activity']({})).toEqual({});
   });
 
   it('대화의 시작: 안내 글이 있으면 맥락에 덧붙인다', async () => {

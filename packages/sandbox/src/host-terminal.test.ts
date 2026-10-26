@@ -30,6 +30,8 @@ import {
   RESUME_CONVERSATION_ENV,
   resumeConversationArg,
   shellQuote,
+  STATUSLINE_FILE,
+  userStatusLineCommand,
   writeHostGatewayConfig,
   type HostPty,
 } from './host-terminal';
@@ -1082,5 +1084,40 @@ describe('계정마다 설정 폴더를 둔다(#885)', () => {
     await expect(
       openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/work', accountEnv: { PATH: '/evil' }, env: { SHELL: '/bin/zsh' }, spawnPty: () => pty }),
     ).rejects.toThrow('계정 환경');
+  });
+});
+
+describe('사용자의 상태 줄을 이어 부른다(#920)', () => {
+  it('계정 폴더(없으면 ~/.claude)의 settings.json에서 statusLine 명령을 읽기만 한다', async () => {
+    const home = await tempDir('b-studio-statusline-home-');
+    expect(await userStatusLineCommand(undefined, home)).toBeUndefined();
+    await mkdir(path.join(home, '.claude'));
+    await writeFile(path.join(home, '.claude', 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: '~/bin/my-line' } }));
+    expect(await userStatusLineCommand(undefined, home)).toBe('~/bin/my-line');
+    const account = path.join(home, 'acct');
+    await mkdir(account);
+    await writeFile(path.join(account, 'settings.json'), JSON.stringify({ statusLine: { type: 'command', command: 'acct-line' } }));
+    expect(await userStatusLineCommand(account, home)).toBe('acct-line');
+  });
+
+  it('모양이 틀리거나 비었거나 b-studio의 훅 스크립트를 부르는 명령이면 없다(자기 자신을 다시 부르지 않는다)', async () => {
+    const home = await tempDir('b-studio-statusline-bad-');
+    await mkdir(path.join(home, '.claude'));
+    const file = path.join(home, '.claude', 'settings.json');
+    for (const content of ['{', JSON.stringify({ statusLine: 'x' }), JSON.stringify({ statusLine: { type: 'command', command: ' ' } }), JSON.stringify({ statusLine: { type: 'command', command: `node /x/${HOOK_SCRIPT_NAME} statusline` } })]) {
+      await writeFile(file, content);
+      expect(await userStatusLineCommand(undefined, home), content).toBeUndefined();
+    }
+  });
+
+  it('claude 관문 폴더에는 원래 명령이 있을 때만 statusline.json을 두고, codex에는 두지 않는다. 멈추면 지운다', async () => {
+    expect(expectedHostGatewayFiles(address, '/gateway', cli)[STATUSLINE_FILE]).toBeUndefined();
+    expect(expectedHostGatewayFiles(address, '/gateway', { ...cli, statusLine: 'my-line' })[STATUSLINE_FILE]).toEqual({ content: `${JSON.stringify({ command: 'my-line' })}\n`, mode: 0o600 });
+    expect(expectedHostGatewayFiles(address, '/gateway', { kind: 'codex', cliPath: '/c', nodePath: '/n', statusLine: 'my-line' })[STATUSLINE_FILE]).toBeUndefined();
+    const root = await tempDir('b-studio-statusline-gw-');
+    const dir = await writeHostGatewayConfig('studio-orders-line', address, { ...cli, statusLine: 'my-line' }, root);
+    expect(JSON.parse(await readFile(path.join(dir, STATUSLINE_FILE), 'utf8'))).toEqual({ command: 'my-line' });
+    await removeHostGatewayConfig('studio-orders-line', root);
+    expect(existsSync(dir)).toBe(false);
   });
 });

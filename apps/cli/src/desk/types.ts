@@ -32,6 +32,30 @@ export interface DeskItem {
   accountId?: string;
   /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
   checkChangesArmed?: true;
+  /** 터미널 CLI가 지금(또는 방금) 쓰는 도구와 대상(#920). 턴이 끝나면 없다. 옛 서버는 주지 않는다 */
+  now?: { tool: string; target?: string; at: string };
+  /** 에이전트의 할 일 목록 진행(#920) */
+  todos?: { done: number; total: number; current?: string };
+  /** 문맥 창을 얼마나 썼는가(#920). usedPct는 0~100 */
+  context?: { usedPct: number; used?: number; size?: number };
+  /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
+  lastMessage?: string;
+  /** 서브에이전트 인스턴스마다 한 행(#920). 토큰 내역(agents)과 따로다 */
+  subagents?: DeskSubagent[];
+  /**
+   * 터미널 CLI가 사람을 기다리는 까닭(#920): 권한 확인·되묻기·입력 필요·입력 대기와 CLI가 보인 문구.
+   * 이름이 attention이 아닌 까닭: attention(문자열)은 게이트 실패·오류 같은 개입 사유로 이미 쓰고 있다
+   */
+  waitingFor?: { kind: 'permission' | 'question' | 'input' | 'idle'; message?: string; at: string };
+}
+
+/** 서브에이전트 인스턴스 한 행(스튜디오 terminal-activity.ts의 ActivitySubagent와 같은 꼴) */
+export interface DeskSubagent {
+  id: string;
+  type: string;
+  description?: string;
+  state: 'working' | 'done';
+  tool?: string;
 }
 
 export interface DeskUsage {

@@ -101,3 +101,40 @@ describe('withDeskFacts', () => {
     expect(out[1]).not.toHaveProperty('terminal');
   });
 });
+
+describe('지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920)', () => {
+  const live = {
+    now: { tool: 'Bash', target: 'pnpm test', at: '2026-10-26T10:00:00.000Z' },
+    todos: { done: 1, total: 3, current: '구현하는 중' },
+    context: { usedPct: 42, used: 84000, size: 200000 },
+    lastMessage: '고쳤습니다.',
+    subagents: [{ id: 'a1', type: 'Explore', description: '훅 찾기', state: 'working' as const, tool: 'Grep' }],
+  };
+
+  it('세션의 활동을 항목에 그대로 싣는다. 없으면 싣지 않는다', () => {
+    const got = item(source({ live }));
+    expect(got).toMatchObject(live);
+    const none = item(source());
+    for (const key of ['now', 'todos', 'context', 'lastMessage', 'subagents']) expect(none, key).not.toHaveProperty(key);
+  });
+
+  it('withDeskFacts가 활동을 붙인다(모르면 붙이지 않는다)', () => {
+    const [withLive] = withDeskFacts([source()], { terminal: () => undefined, costUsd: () => undefined, live: () => live });
+    expect(withLive!.live).toEqual(live);
+    const [without] = withDeskFacts([source()], { terminal: () => undefined, costUsd: () => undefined, live: () => undefined });
+    expect(without).not.toHaveProperty('live');
+  });
+
+  it('사람을 기다리는 까닭: 권한·되묻기·입력 필요·입력 대기를 종류와 문구로 싣는다. CLI가 내려갔거나 모르는 종류면 없다', () => {
+    const at = '2026-10-26T10:00:00.000Z';
+    const waiting = (kind: string, message: string, cliAlive = true) => item(source({ snapshot: snapshot({ terminalAttention: { kind, message, at } }), terminal: { cliAlive } })).waitingFor;
+    expect(waiting('permission_prompt', 'Bash 실행 권한을 묻습니다')).toEqual({ kind: 'permission', message: 'Bash 실행 권한을 묻습니다', at });
+    expect(waiting('elicitation_dialog', '어느 쪽?')).toEqual({ kind: 'question', message: '어느 쪽?', at });
+    expect(waiting('agent_needs_input', '')).toEqual({ kind: 'input', at });
+    expect(waiting('idle_prompt', '입력 대기')).toEqual({ kind: 'idle', message: '입력 대기', at });
+    expect(waiting('some_future_kind', 'x')).toBeUndefined();
+    expect(waiting('permission_prompt', 'x', false)).toBeUndefined();
+    // 권한 대기 표시(terminal.waiting)는 지금처럼 그대로 간다
+    expect(item(source({ snapshot: snapshot({ terminalAttention: { kind: 'permission_prompt', message: 'x', at } }), terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'permission' });
+  });
+});

@@ -232,11 +232,25 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
 
   it('관리 설정은 훅 여섯과 b-studio 도구의 허락, 텔레메트리 env를 적는다. 읽기 도구가 아닌 모든 도구에 쓰기 직전의 훅을 건다', () => {
     const settings = agentManagedSettings(address) as { permissions: { allow: string[] }; hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number }> }>> };
-    expect(Object.keys(settings).sort()).toEqual(['disableAllHooks', 'env', 'hooks', 'permissions']);
+    expect(Object.keys(settings).sort()).toEqual(['disableAllHooks', 'env', 'hooks', 'permissions', 'statusLine']);
     // 사용자 설정(에이전트가 쓸 수 있는 홈 폴더)이 훅을 통째로 끄지 못하게 관리 설정에서 값을 정해 둔다
     expect((settings as unknown as { disableAllHooks: boolean }).disableAllHooks).toBe(false);
     expect(settings.permissions.allow).toEqual(['mcp__b-studio']);
-    expect(Object.keys(settings.hooks).sort()).toEqual(['Notification', 'PreToolUse', 'SessionEnd', 'SessionStart', 'Stop', 'UserPromptSubmit']);
+    expect(Object.keys(settings.hooks).sort()).toEqual([
+      'Notification',
+      'PermissionRequest',
+      'PostToolUse',
+      'PostToolUseFailure',
+      'PreToolUse',
+      'SessionEnd',
+      'SessionStart',
+      'Stop',
+      'SubagentStart',
+      'SubagentStop',
+      'TaskCompleted',
+      'TaskCreated',
+      'UserPromptSubmit',
+    ]);
     const command = (name: string) => settings.hooks[name]![0]!.hooks[0]!;
     // node는 이름이 아니라 자리로 부른다. 터미널의 PATH 앞쪽(홈 폴더)에 같은 이름을 두어 훅을 바꿔치기하지 못한다
     expect(command('UserPromptSubmit').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs prompt');
@@ -261,6 +275,32 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     // 게이트 한 번이 수 분 걸린다. 훅이 그보다 먼저 끊기면 결과가 에이전트에게 가지 못한다
     expect(command('Stop').timeout).toBeGreaterThanOrEqual(1800);
     expect(command('PreToolUse').timeout).toBeGreaterThanOrEqual(600);
+  });
+
+  it('지켜보기만 하는 훅(#920)은 따로 돌아 CLI를 기다리게 하지 않는다: 읽기 도구의 쓰기 직전, 도구의 끝, 서브에이전트, 할 일, 권한 확인 창', () => {
+    const settings = agentManagedSettings(address) as { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number; async?: boolean }> }>> };
+    const observe = '/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs activity';
+    for (const name of ['PostToolUse', 'PostToolUseFailure', 'SubagentStart', 'SubagentStop', 'TaskCreated', 'TaskCompleted']) {
+      expect(settings.hooks[name], name).toEqual([{ hooks: [{ type: 'command', command: observe, timeout: AGENT_HOOK_EVENTS.activity, async: true }] }]);
+    }
+    // 쓰기 도구는 지금처럼 기다리는 훅 하나, 읽기 도구는 지켜보는 훅 하나. 한 도구에 둘이 걸리지 않는다
+    expect(settings.hooks.PreToolUse).toHaveLength(2);
+    const [write, read] = settings.hooks.PreToolUse!;
+    expect(write!.hooks[0]!.async).toBeUndefined();
+    expect(read!.hooks).toEqual([{ type: 'command', command: observe, timeout: AGENT_HOOK_EVENTS.activity, async: true }]);
+    for (const tool of AGENT_READ_TOOLS) {
+      expect(new RegExp(read!.matcher!).test(tool), tool).toBe(true);
+      expect(new RegExp(write!.matcher!).test(tool), tool).toBe(false);
+    }
+    for (const tool of ['Bash', 'Write', 'XRead', 'ReadAndWrite']) expect(new RegExp(read!.matcher!).test(tool), tool).toBe(false);
+    // 권한 확인 창은 Notification(몇 초 늦게 온다)보다 먼저 알리는 PermissionRequest로도 받는다. 답은 주지 않는다
+    expect(settings.hooks.PermissionRequest).toEqual([{ hooks: [{ type: 'command', command: '/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification', timeout: AGENT_HOOK_EVENTS.notification, async: true }] }]);
+    expect(AGENT_HOOK_EVENTS.activity).toBeLessThanOrEqual(10);
+  });
+
+  it('상태 줄(statusLine)은 훅 스크립트를 부른다. 문맥 창을 관문에 알리고 사용자의 원래 상태 줄을 이어 부른다(#920)', () => {
+    const settings = agentManagedSettings(address) as { statusLine: { type: string; command: string } };
+    expect(settings.statusLine).toEqual({ type: 'command', command: '/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs statusline' });
   });
 
   it('관리 설정의 env가 CLI의 텔레메트리를 관문으로 보내게 한다(요청 글·도구 내용을 싣는 설정은 켜지 않는다)', () => {
@@ -410,6 +450,30 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(seen).toEqual([{ url: '/notification', authorization: 'Bearer tok', body: input }]);
   });
 
+  it('지켜보는 훅(activity)은 /activity로 보내고, 관문에 닿지 못해도 아무것도 막지 않는다(#920)', async () => {
+    const { url, seen } = await gateway(() => ({ status: 200, body: '{}' }));
+    const input = JSON.stringify({ hook_event_name: 'PostToolUse', tool_name: 'Read' });
+    expect(await run(await script({ url, token: 'tok' }), 'activity', input)).toEqual({ code: 0, stdout: '{}' });
+    expect(seen).toEqual([{ url: '/activity', authorization: 'Bearer tok', body: input }]);
+    expect(await run(await script({ url: 'http://127.0.0.1:1', token: 'tok' }), 'activity', input)).toEqual({ code: 0, stdout: '' });
+  });
+
+  it('상태 줄: 입력을 /statusline으로 알리고, 옆의 statusline.json에 적힌 사용자의 원래 명령을 같은 입력으로 불러 그 출력을 낸다(#920)', async () => {
+    const { url, seen } = await gateway(() => ({ status: 200, body: '{}' }));
+    const file = await script({ url, token: 'tok' });
+    const input = JSON.stringify({ context_window: { used_percentage: 12 } });
+    // 원래 상태 줄이 없으면 아무것도 내지 않는다
+    expect(await run(file, 'statusline', input)).toEqual({ code: 0, stdout: '' });
+    await writeFile(path.join(path.dirname(file), 'statusline.json'), JSON.stringify({ command: `${JSON.stringify(process.execPath)} -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write('mine '+JSON.parse(s).context_window.used_percentage))"` }));
+    expect(await run(file, 'statusline', input)).toEqual({ code: 0, stdout: 'mine 12' });
+    expect(seen.map((request) => request.url)).toEqual(['/statusline', '/statusline']);
+    expect(seen[0]!.body).toBe(input);
+    // 관문에 닿지 못해도 사용자의 상태 줄은 그대로 보인다
+    const away = await script({ url: 'http://127.0.0.1:1', token: 'tok' });
+    await writeFile(path.join(path.dirname(away), 'statusline.json'), JSON.stringify({ command: 'echo hello' }));
+    expect(await run(away, 'statusline', input)).toEqual({ code: 0, stdout: 'hello\n' });
+  });
+
   it('주소는 옆의 파일에서만 읽는다. 환경 변수로 다른 주소를 줘도, 주소를 비워도 따르지 않는다', async () => {
     const real = await gateway(() => ({ status: 200, body: '{}' }));
     const decoy = await gateway(() => ({ status: 200, body: '{}' }));
@@ -522,7 +586,7 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(await run(file, '', '{}')).toEqual({ code: 0, stdout: '' });
     expect(seen).toEqual([]);
     // 훅으로 거는 종류는 설정이 거는 종류와 같다
-    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['notification', 'pre-tool', 'prompt', 'session-end', 'session-start', 'stop']);
+    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['activity', 'notification', 'pre-tool', 'prompt', 'session-end', 'session-start', 'statusline', 'stop']);
   });
 
   it('닿는지 묻는 일(ping)은 닿으면 0, 닿지 못하거나 관문이 오류로 답하면 0이 아닌 값으로 끝난다', async () => {

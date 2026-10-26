@@ -15,8 +15,9 @@ import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-eve
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
 import { sessionTerminalPresence } from './session-terminal';
+import type { ActivityContext, ActivityNow, ActivitySubagent, ActivityTodos, TerminalActivityView } from './terminal-activity';
 import type { AgentCapabilities, TerminalAgentRow } from './terminal-agents';
-import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalAgents } from './sessions';
+import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents } from './sessions';
 import { listTaskPlans } from './task-plans';
 import { buildTokenReports, tokenPricing, type TokenPricing } from './token-report';
 
@@ -71,6 +72,27 @@ export interface AgentItem {
   accountId?: string;
   /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
   checkChangesArmed?: true;
+  /** 터미널 CLI가 지금(또는 방금) 쓰는 도구와 대상(#920). 턴이 끝나면 없다 */
+  now?: ActivityNow;
+  /** 에이전트의 할 일 목록 진행(#920) */
+  todos?: ActivityTodos;
+  /** 문맥 창을 얼마나 썼는가(#920). Claude 상태 줄에서만 온다 */
+  context?: ActivityContext;
+  /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
+  lastMessage?: string;
+  /** 서브에이전트 인스턴스마다 한 행(#920). 토큰 내역(agents)과 따로다 */
+  subagents?: ActivitySubagent[];
+  /**
+   * 터미널 CLI가 사람을 기다리는 까닭(#920): 권한 확인·되묻기·입력 필요·입력 대기와 CLI가 보인 문구.
+   * 개입 사유(attention)와 따로다 — attention은 게이트·오류처럼 세션 기록에서 정하는 것이다
+   */
+  waitingFor?: AgentWaiting;
+}
+
+export interface AgentWaiting {
+  kind: 'permission' | 'question' | 'input' | 'idle';
+  message?: string;
+  at: string;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -124,6 +146,8 @@ export interface SessionOverviewSource {
   agents?: readonly TerminalAgentRow[];
   /** 할 수 있는 범위(withDeskFacts가 붙인다, #843) */
   capabilities?: AgentCapabilities;
+  /** 터미널 CLI의 활동(withDeskFacts가 붙인다, #920) */
+  live?: TerminalActivityView;
 }
 
 /** studio desk 사이드바의 사실을 모으는 곳. 테스트가 바꿔 끼운다 */
@@ -134,6 +158,8 @@ export interface DeskFactDeps {
   agents?: (sessionId: string) => readonly TerminalAgentRow[] | undefined;
   /** 할 수 있는 범위(#843). 주지 않으면 붙이지 않는다 */
   capabilities?: (sessionId: string) => AgentCapabilities | undefined;
+  /** 터미널 CLI의 활동(#920). 주지 않으면 붙이지 않는다 */
+  live?: (sessionId: string) => TerminalActivityView | undefined;
 }
 
 /** 수집한 세션에 터미널 CLI 상태와 비용을 붙인다(#835). 모르는 값은 붙이지 않는다 */
@@ -143,12 +169,14 @@ export function withDeskFacts(sessions: readonly SessionOverviewSource[], deps: 
     const costUsd = deps.costUsd(source.snapshot.id);
     const agents = deps.agents?.(source.snapshot.id);
     const capabilities = deps.capabilities?.(source.snapshot.id);
+    const live = deps.live?.(source.snapshot.id);
     return {
       ...source,
       ...(terminal ? { terminal } : {}),
       ...(costUsd !== undefined ? { costUsd } : {}),
       ...(agents && agents.length > 0 ? { agents } : {}),
       ...(capabilities ? { capabilities } : {}),
+      ...(live ? { live } : {}),
     };
   });
 }
@@ -191,6 +219,7 @@ interface AgentRow {
   costUsd?: number;
   agents?: readonly TerminalAgentRow[];
   capabilities?: AgentCapabilities;
+  live?: TerminalActivityView;
 }
 
 function emptyUsage(): AgentUsage {
@@ -292,8 +321,9 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
   return { items, totals: totalsOf(items) };
 }
 
-function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities'> {
+function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities' | 'live'> {
   return {
+    ...(source.live ? { live: source.live } : {}),
     ...(source.terminal ? { terminal: source.terminal } : {}),
     ...(source.costUsd !== undefined ? { costUsd: source.costUsd } : {}),
     ...(source.agents ? { agents: source.agents } : {}),
@@ -320,6 +350,7 @@ export async function listAgentOverview(user: string): Promise<{ items: AgentIte
     },
     agents: (id) => sessionTerminalAgents(id, pricing),
     capabilities: (id) => sessionCapabilities(id),
+    live: (id) => sessionTerminalActivity(id),
   });
   return buildAgentOverview({ sessions, plans: listTaskPlans(user), fleets: listFleets(user) });
 }
@@ -365,7 +396,32 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
     // 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916). desk가 카드와 세션 자세히에 보인다
     ...(row.snapshot?.allowCheckChangesNext ? { checkChangesArmed: true as const } : {}),
+    // 터미널 CLI의 활동(#920). 서버가 훅에서 모은 그대로 싣는다
+    ...(row.live?.now ? { now: row.live.now } : {}),
+    ...(row.live?.todos ? { todos: row.live.todos } : {}),
+    ...(row.live?.context ? { context: row.live.context } : {}),
+    ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
+    ...(row.live?.subagents ? { subagents: row.live.subagents } : {}),
+    ...waitingForOf(row),
   };
+}
+
+/** CLI의 알림 종류 → 화면이 쓰는 기다림의 종류(#920). 모르는 종류는 싣지 않는다 */
+const WAITING_KIND: Readonly<Record<string, AgentWaiting['kind']>> = {
+  permission_prompt: 'permission',
+  elicitation_dialog: 'question',
+  agent_needs_input: 'input',
+  idle_prompt: 'idle',
+};
+
+/** CLI가 떠 있고 사람을 기다리면 그 까닭(#920). terminalStatusOf처럼 CLI가 내려갔으면 기다리지 않는다 */
+function waitingForOf(row: AgentRow): { waitingFor?: AgentWaiting } {
+  const attention = row.snapshot?.terminalAttention;
+  if (!row.terminal?.cliAlive || !attention) return {};
+  const kind = WAITING_KIND[attention.kind];
+  if (!kind) return {};
+  const message = attention.message ? oneLine(attention.message) : undefined;
+  return { waitingFor: { kind, ...(message ? { message } : {}), at: attention.at } };
 }
 
 /** 권한 확인 창(permission_prompt)만 권한 대기로 본다. 입력 대기·되묻기는 사이드바의 작업 상태가 보인다 */
