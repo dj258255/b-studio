@@ -83,3 +83,42 @@ export function box(inner: readonly string[], width: number, theme: Theme, optio
     `${line}╰${'─'.repeat(span)}╯${RESET}`,
   ];
 }
+
+/**
+ * 글을 width칸 줄로 나눈다. 낱말(빈칸) 사이에서 나누고, 한 낱말이 한 줄보다 길면 글자 단위로 나눈다.
+ * maxLines를 넘으면 마지막 줄 끝을 …로 줄인다(#944: 읽지 못한 까닭이 카드 폭에서 잘려 끝이 안 보이던 것)
+ */
+export function wrapWords(text: string, width: number, maxLines = Infinity): string[] {
+  if (width <= 0) return [];
+  const lines: string[] = [];
+  let line = '';
+  const push = () => {
+    lines.push(line);
+    line = '';
+  };
+  for (const word of text.replace(/\s+/g, ' ').trim().split(' ')) {
+    const next = line ? `${line} ${word}` : word;
+    if (stringWidth(next) <= width) {
+      line = next;
+      continue;
+    }
+    if (stringWidth(word) <= width) {
+      push();
+      line = word;
+      continue;
+    }
+    // 한 줄보다 긴 낱말은 지금 줄의 남은 자리부터 글자 단위로 채운다
+    line = line ? `${line} ` : '';
+    for (const char of word) {
+      if (stringWidth(line + char) > width) push();
+      line += char;
+    }
+  }
+  if (line) push();
+  if (lines.length <= maxLines) return lines;
+  const kept = lines.slice(0, maxLines);
+  const last = kept[maxLines - 1]!;
+  // 자리가 있으면 그대로 …를 붙이고, 없으면 fit이 끝을 자르고 …를 붙인다
+  kept[maxLines - 1] = stringWidth(`${last}…`) <= width ? `${last}…` : fit(last, width).trimEnd();
+  return kept;
+}
