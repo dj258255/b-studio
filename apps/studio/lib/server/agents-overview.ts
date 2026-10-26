@@ -82,17 +82,6 @@ export interface AgentItem {
   lastMessage?: string;
   /** 서브에이전트 인스턴스마다 한 행(#920). 토큰 내역(agents)과 따로다 */
   subagents?: ActivitySubagent[];
-  /**
-   * 터미널 CLI가 사람을 기다리는 까닭(#920): 권한 확인·되묻기·입력 필요·입력 대기와 CLI가 보인 문구.
-   * 개입 사유(attention)와 따로다 — attention은 게이트·오류처럼 세션 기록에서 정하는 것이다
-   */
-  waitingFor?: AgentWaiting;
-}
-
-export interface AgentWaiting {
-  kind: 'permission' | 'question' | 'input' | 'idle';
-  message?: string;
-  at: string;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -101,8 +90,21 @@ export type { AgentCapabilities };
 
 export interface AgentTerminalStatus {
   cli: 'up' | 'down';
-  waiting?: 'permission';
+  /** 사람을 기다리는 까닭(#920): 권한 확인·되묻기·입력 필요·입력 대기. CLI가 떠 있을 때만 */
+  waiting?: AgentWaitingKind;
+  /** 기다리는 까닭 한 줄(CLI가 보인 문구, #920). 없으면 없다 */
+  message?: string;
 }
+
+export type AgentWaitingKind = 'permission' | 'question' | 'input' | 'idle';
+
+/** CLI의 알림 종류 → 화면이 쓰는 기다림의 종류(#920). 모르는 종류는 싣지 않는다 */
+const WAITING_KIND: Readonly<Record<string, AgentWaitingKind>> = {
+  permission_prompt: 'permission',
+  elicitation_dialog: 'question',
+  agent_needs_input: 'input',
+  idle_prompt: 'idle',
+};
 
 /**
  * verifying: 지금 실행에서 검증이 시작됐고 아직 결과가 없다. passed·failed: 지금(또는 마지막) 실행의 마지막 검증 판정.
@@ -402,32 +404,16 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.context ? { context: row.live.context } : {}),
     ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
     ...(row.live?.subagents ? { subagents: row.live.subagents } : {}),
-    ...waitingForOf(row),
   };
 }
 
-/** CLI의 알림 종류 → 화면이 쓰는 기다림의 종류(#920). 모르는 종류는 싣지 않는다 */
-const WAITING_KIND: Readonly<Record<string, AgentWaiting['kind']>> = {
-  permission_prompt: 'permission',
-  elicitation_dialog: 'question',
-  agent_needs_input: 'input',
-  idle_prompt: 'idle',
-};
 
-/** CLI가 떠 있고 사람을 기다리면 그 까닭(#920). terminalStatusOf처럼 CLI가 내려갔으면 기다리지 않는다 */
-function waitingForOf(row: AgentRow): { waitingFor?: AgentWaiting } {
-  const attention = row.snapshot?.terminalAttention;
-  if (!row.terminal?.cliAlive || !attention) return {};
-  const kind = WAITING_KIND[attention.kind];
-  if (!kind) return {};
-  const message = attention.message ? oneLine(attention.message) : undefined;
-  return { waitingFor: { kind, ...(message ? { message } : {}), at: attention.at } };
-}
-
-/** 권한 확인 창(permission_prompt)만 권한 대기로 본다. 입력 대기·되묻기는 사이드바의 작업 상태가 보인다 */
+/** CLI가 떠 있고 사람을 기다리면 그 까닭과 문구(#920). 모르는 알림 종류는 기다림으로 보지 않는다 */
 export function terminalStatusOf(terminal: { cliAlive: boolean }, snapshot: SessionSnapshot | undefined): AgentTerminalStatus {
-  const waiting = terminal.cliAlive && snapshot?.terminalAttention?.kind === 'permission_prompt';
-  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting: 'permission' as const } : {}) };
+  const attention = terminal.cliAlive ? snapshot?.terminalAttention : undefined;
+  const waiting = attention ? WAITING_KIND[attention.kind] : undefined;
+  const message = waiting && attention?.message ? oneLine(attention.message) : undefined;
+  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting } : {}), ...(message ? { message } : {}) };
 }
 
 /**

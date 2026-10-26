@@ -39,11 +39,11 @@ describe('터미널 상태', () => {
     expect(item(source({ terminal: { cliAlive: false } })).terminal).toEqual({ cli: 'down' });
   });
 
-  it('권한 확인 창에서 기다리면 waiting: permission, 입력 대기·되묻기는 권한 대기가 아니다', () => {
+  it('권한 확인 창에서 기다리면 waiting: permission과 그 문구, 입력 대기는 waiting: idle(#920)', () => {
     const asking = snapshot({ terminalAttention: { kind: 'permission_prompt', message: 'Bash 실행 권한을 묻습니다', at: '2026-10-22T11:00:00.000Z' } });
-    expect(item(source({ snapshot: asking, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'permission' });
+    expect(item(source({ snapshot: asking, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'permission', message: 'Bash 실행 권한을 묻습니다' });
     const idle = snapshot({ terminalAttention: { kind: 'idle_prompt', message: '', at: '2026-10-22T11:00:00.000Z' } });
-    expect(item(source({ snapshot: idle, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up' });
+    expect(item(source({ snapshot: idle, terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'idle' });
   });
 });
 
@@ -125,16 +125,14 @@ describe('지금 하는 일·할 일·문맥 창·마지막 답·서브에이전
     expect(without).not.toHaveProperty('live');
   });
 
-  it('사람을 기다리는 까닭: 권한·되묻기·입력 필요·입력 대기를 종류와 문구로 싣는다. CLI가 내려갔거나 모르는 종류면 없다', () => {
+  it('사람을 기다리는 까닭: 권한·되묻기·입력 필요·입력 대기를 terminal.waiting과 문구로 싣는다. CLI가 내려갔거나 모르는 종류면 없다', () => {
     const at = '2026-10-26T10:00:00.000Z';
-    const waiting = (kind: string, message: string, cliAlive = true) => item(source({ snapshot: snapshot({ terminalAttention: { kind, message, at } }), terminal: { cliAlive } })).waitingFor;
-    expect(waiting('permission_prompt', 'Bash 실행 권한을 묻습니다')).toEqual({ kind: 'permission', message: 'Bash 실행 권한을 묻습니다', at });
-    expect(waiting('elicitation_dialog', '어느 쪽?')).toEqual({ kind: 'question', message: '어느 쪽?', at });
-    expect(waiting('agent_needs_input', '')).toEqual({ kind: 'input', at });
-    expect(waiting('idle_prompt', '입력 대기')).toEqual({ kind: 'idle', message: '입력 대기', at });
-    expect(waiting('some_future_kind', 'x')).toBeUndefined();
-    expect(waiting('permission_prompt', 'x', false)).toBeUndefined();
-    // 권한 대기 표시(terminal.waiting)는 지금처럼 그대로 간다
-    expect(item(source({ snapshot: snapshot({ terminalAttention: { kind: 'permission_prompt', message: 'x', at } }), terminal: { cliAlive: true } })).terminal).toEqual({ cli: 'up', waiting: 'permission' });
+    const terminal = (kind: string, message: string, cliAlive = true) => item(source({ snapshot: snapshot({ terminalAttention: { kind, message, at } }), terminal: { cliAlive } })).terminal;
+    expect(terminal('permission_prompt', 'Bash 실행 권한을 묻습니다')).toEqual({ cli: 'up', waiting: 'permission', message: 'Bash 실행 권한을 묻습니다' });
+    expect(terminal('elicitation_dialog', '어느 쪽?\n둘째 줄')).toEqual({ cli: 'up', waiting: 'question', message: '어느 쪽?' });
+    expect(terminal('agent_needs_input', '')).toEqual({ cli: 'up', waiting: 'input' });
+    expect(terminal('idle_prompt', '입력 대기')).toEqual({ cli: 'up', waiting: 'idle', message: '입력 대기' });
+    expect(terminal('some_future_kind', 'x')).toEqual({ cli: 'up' });
+    expect(terminal('permission_prompt', 'x', false)).toEqual({ cli: 'down' });
   });
 });

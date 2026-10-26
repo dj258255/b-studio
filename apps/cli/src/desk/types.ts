@@ -16,8 +16,11 @@ export interface DeskItem {
   reason?: string;
   backend?: string;
   lastActivityAt: string;
-  /** 터미널 세션일 때: CLI가 떠 있는가, 권한을 묻고 있는가 */
-  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' };
+  /**
+   * 터미널 세션일 때: CLI가 떠 있는가, 사람을 기다리는가(권한 확인·되묻기·입력 필요·입력 대기)와 그 문구(#920).
+   * 옛 서버는 waiting에 'permission'만 주고 message는 주지 않는다
+   */
+  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' | 'question' | 'input' | 'idle'; message?: string };
   /** 게이트: 지금 검증 중인가, 마지막 판정, 체크포인트 수 */
   gate?: { state: 'verifying' | 'passed' | 'failed' | 'none'; checkpoints: number };
   /** 세션 누적 비용(달러) */
@@ -42,11 +45,6 @@ export interface DeskItem {
   lastMessage?: string;
   /** 서브에이전트 인스턴스마다 한 행(#920). 토큰 내역(agents)과 따로다 */
   subagents?: DeskSubagent[];
-  /**
-   * 터미널 CLI가 사람을 기다리는 까닭(#920): 권한 확인·되묻기·입력 필요·입력 대기와 CLI가 보인 문구.
-   * 이름이 attention이 아닌 까닭: attention(문자열)은 게이트 실패·오류 같은 개입 사유로 이미 쓰고 있다
-   */
-  waitingFor?: { kind: 'permission' | 'question' | 'input' | 'idle'; message?: string; at: string };
 }
 
 /** 서브에이전트 인스턴스 한 행(스튜디오 terminal-activity.ts의 ActivitySubagent와 같은 꼴) */
