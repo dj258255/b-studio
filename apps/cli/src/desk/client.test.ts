@@ -227,6 +227,16 @@ describe('스튜디오 손님', () => {
     expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/limits', '/api/usage/limits?refresh=1']);
   });
 
+  it('오늘·최근 7일 쓴 양을 묻는다(#925)', async () => {
+    const spend = { today: { tokens: 5, estimated: false, missingPrice: false, rows: [] }, week: { tokens: 5, estimated: false, missingPrice: false, rows: [] } };
+    handler = (_req, res) => {
+      res.end(JSON.stringify(spend));
+    };
+    const client = new StudioClient({ origin, token: 't' });
+    expect(await client.spend()).toEqual(spend);
+    expect(seen.map((entry) => entry.url)).toEqual(['/api/usage/spend']);
+  });
+
   it('여러 AI 비교의 목록·보기·만들기·승자·지우기를 fleets API로 보낸다(#892)', async () => {
     handler = (_req, res) => res.end('[]');
     const client = new StudioClient({ origin, token: 't' });

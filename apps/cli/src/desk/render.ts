@@ -5,7 +5,7 @@
 import { spaceScreen } from './cards';
 import { RECORDS_HINT, recordsLines } from './records';
 import { sessionDetailLines } from './session-detail';
-import { usageScreen } from './usage';
+import { tightestLine, usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
 import { renderRuntime, runtimeHint } from './runtime';
@@ -144,7 +144,9 @@ function helpLines(width: number): string[] {
  */
 export function sidebarView(state: DeskState, size: { cols: number; rows: number }): { rows: SidebarRow[]; offset: number; rect: Rect } {
   const layout = placePanes(size.cols, size.rows, state);
-  const rect = { ...layout.sidebar, h: Math.max(1, layout.sidebar.h - 1) };
+  // 맨 아래 키 안내 위에 가장 빠듯한 한도 한 줄(#925)을 두면 그만큼 더 뺀다
+  const limitRow = sidebarLimitLine(state, layout.sidebar.w) ? 1 : 0;
+  const rect = { ...layout.sidebar, h: Math.max(1, layout.sidebar.h - 1 - limitRow) };
   const slotOf = new Map<string, number>();
   state.slots.forEach((id, slot) => {
     if (id && slot < state.layout) slotOf.set(id, slot + 1);
@@ -155,6 +157,12 @@ export function sidebarView(state: DeskState, size: { cols: number; rows: number
   const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), first);
   const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - rect.h, last + 1 - rect.h));
   return { rows: side, offset, rect };
+}
+
+/** 사이드바 맨 아래(키 안내 위)의 가장 빠듯한 한도 한 줄(#925). 사이드바가 낮거나 읽은 한도가 없으면 없다 */
+function sidebarLimitLine(state: DeskState, width: number): string | undefined {
+  if (state.sidebarHidden || !state.usage?.accounts.length) return undefined;
+  return tightestLine(state.usage.accounts, width, state.theme ?? DEFAULT_THEME);
 }
 
 /** 스페이스 화면이 놓이는 본문 자리(칸들이 놓이던 곳 전체) */
@@ -258,8 +266,10 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
 
   // 사이드바: 고른 스페이스와 세션이 보이게 내린다. 맨 아래 줄은 키 안내
   const { rows: side, offset, rect: sideRect } = sidebarView(state, size);
+  const limitLine = sidebarLimitLine(state, layout.sidebar.w);
   const sideLine = (row: number): string => {
     if (row === layout.sidebar.h - 1) return onBackground(`${fg(theme, 'muted')}${relabel(state, SIDEBAR_HINT)}${RESET}`, chrome, layout.sidebar.w);
+    if (row === layout.sidebar.h - 2 && limitLine) return onBackground(limitLine, chrome, layout.sidebar.w);
     const entry = row < sideRect.h ? side[offset + row] : undefined;
     if (!entry) return onBackground('', chrome, layout.sidebar.w);
     return onBackground(relabel(state, entry.text), entry.selected ? bg(theme, 'active') : chrome, layout.sidebar.w);

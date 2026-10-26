@@ -206,6 +206,36 @@ export interface DeskAccountLimits {
   recommended?: boolean;
 }
 
+/** 한 기간 동안 CLI·모델 하나가 쓴 양(GET /api/usage/spend, #925) */
+export interface DeskSpendRow {
+  backend: string;
+  model: string;
+  tokens: number;
+  calls: number;
+  /** 모르면(단가 없음) 없다 */
+  costUsd?: number;
+  /** 비용이 단가 표로 낸 추정이다 */
+  estimated: boolean;
+}
+
+export interface DeskSpendTotals {
+  tokens: number;
+  costUsd?: number;
+  /** 합에 추정이 섞였다 */
+  estimated: boolean;
+  /** 단가가 없어 비용을 모르는 줄이 있다 */
+  missingPrice: boolean;
+  /** 토큰이 많은 줄부터 */
+  rows: DeskSpendRow[];
+}
+
+/** 오늘과 최근 7일(오늘 포함) 쓴 양. 스튜디오 spend-state.ts의 SpendSummary와 같은 꼴 */
+export interface DeskSpend {
+  today: DeskSpendTotals;
+  week: DeskSpendTotals;
+  priceError?: string;
+}
+
 // ─── 실행·배포·미리보기·저장소 화면(#895, Ctrl-b v) ───
 
 export type DeskServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped' | 'off';

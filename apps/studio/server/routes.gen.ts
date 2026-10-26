@@ -128,5 +128,6 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/terminals/stream", load: () => import("../app/api/terminals/stream/route") },
   { pattern: "/api/usage", load: () => import("../app/api/usage/route") },
   { pattern: "/api/usage/limits", load: () => import("../app/api/usage/limits/route") },
+  { pattern: "/api/usage/spend", load: () => import("../app/api/usage/spend/route") },
   { pattern: "/api/workspace", load: () => import("../app/api/workspace/route") },
 ];

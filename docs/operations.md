@@ -107,7 +107,7 @@ oauth2-proxy 같은 신뢰할 수 있는 인증 프록시 뒤에 둘 때 사용�
 - `B_STUDIO_SESSION_TOKEN_LIMIT`: 세션 하나의 누적 토큰 상한
 - `B_STUDIO_USER_TOKEN_LIMIT`: 사용자별 기간 상한
 - `B_STUDIO_USER_TOKEN_WINDOW`: 사용자 한도 기간
-- `B_STUDIO_USAGE_DIR`: 사용자별 사용량 기록 위치
+- `B_STUDIO_USAGE_DIR`: 사용자별 사용량 기록 위치(같은 폴더의 `spend.json`에 터미널 세션이 날마다 CLI·모델별로 쓴 토큰과 CLI가 알린 비용을 35일까지 남깁니다. `studio desk` 사용량 화면의 오늘·최근 7일이 이것을 읽습니다)
 
 상한을 넘으면 진행 중인 요청을 멈추고 검증 전 변경을 되돌립니다. 모델 공급자 청구 한도도 별도로 설정해야 합니다.
 

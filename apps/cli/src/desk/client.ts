@@ -11,7 +11,7 @@ import path from 'node:path';
 import type { DeskDeployStatus, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
 import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
-import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskSpend, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
 import type { RecordsReport, RecordsStats } from './records';
 import type { DetailExportPreview, DetailExportResult, DetailSnapshot } from './session-detail';
 
@@ -142,6 +142,11 @@ export class StudioClient {
   /** 계정마다의 사용량 한도(#889). refresh면 다시 읽기를 청한다(스튜디오가 계정마다 최소 간격을 지킨다) */
   limits(refresh = false): Promise<{ accounts: DeskAccountLimits[]; warning?: string }> {
     return this.#request('GET', `/api/usage/limits${refresh ? '?refresh=1' : ''}`);
+  }
+
+  /** 오늘과 최근 7일 CLI·모델별로 쓴 토큰과 비용(#925) */
+  spend(): Promise<DeskSpend> {
+    return this.#request('GET', '/api/usage/spend');
   }
 
   rules(): Promise<DeskRulesView> {

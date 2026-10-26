@@ -37,7 +37,7 @@ import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type Set
 import { deskSessions, deskSpaces } from './sidebar';
 import type { Sprite } from './sprite';
 import type { Theme } from './theme';
-import type { DeskAccountLimits, DeskItem, DeskLimits } from './types';
+import type { DeskAccountLimits, DeskItem, DeskLimits, DeskSpend } from './types';
 
 export const PREFIX = '\x02';
 const ESC = '\x1b';
@@ -187,6 +187,8 @@ export interface UsageState {
   warning?: string;
   /** 사용량을 알려 주지 않는 스튜디오(옛 서버) */
   unsupported?: boolean;
+  /** 오늘·최근 7일 쓴 양(#925). 읽지 못했거나 옛 스튜디오면 없다 */
+  spend?: DeskSpend;
 }
 
 export type Effect =

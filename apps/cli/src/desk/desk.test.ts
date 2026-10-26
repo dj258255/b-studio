@@ -4,9 +4,10 @@ import type { DeskLayout } from './config';
 import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell, type SpriteCatalog } from './desk';
 import { spaceScreen } from './cards';
 import { spaceRect } from './render';
+import { stripAnsi } from './screen';
 import { sidebarRows } from './sidebar';
 import { spriteFromRows, type Sprite } from './sprite';
-import type { DeskAccount, DeskAccountLimits, DeskFleet, DeskFleetCandidate, DeskFleetMember, DeskItem, DeskStartResult, DeskTerminalMessage } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskFleet, DeskFleetCandidate, DeskFleetMember, DeskItem, DeskSpend, DeskStartResult, DeskTerminalMessage } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -124,6 +125,15 @@ class FakeClient implements DeskClient {
     await Promise.resolve();
     if (this.limitsError) throw this.limitsError;
     return this.limitsResult;
+  };
+  /** 오늘·최근 7일 쓴 양(#925). undefined면 옛 스튜디오처럼 묻지 않는다 */
+  spendCalls = 0;
+  spendResult: DeskSpend | Error = { today: { tokens: 0, estimated: false, missingPrice: false, rows: [] }, week: { tokens: 0, estimated: false, missingPrice: false, rows: [] } };
+  spend: (() => Promise<DeskSpend>) | undefined = async () => {
+    this.spendCalls += 1;
+    await Promise.resolve();
+    if (this.spendResult instanceof Error) throw this.spendResult;
+    return this.spendResult;
   };
   async open(id: string) {
     this.calls.push({ type: 'open', id });
@@ -1281,6 +1291,31 @@ describe('desk 작업대: 사용량(#889)', () => {
     await tick();
     expect(app.state.view).toBe('usage');
     expect(io.all).toContain('사용량을 알려 주지 않는 스튜디오');
+  });
+
+  it('가장 빠듯한 계정을 맨 위에 두고, 쓴 양도 함께 읽어 사이드바 맨 아래에 가장 빠듯한 한도를 보인다(#925)', async () => {
+    const ctx = setup(items);
+    ctx.client.limitsResult = { accounts: [accounts[1]!, accounts[0]!] };
+    const week = { tokens: 4_000_000, costUsd: 6, estimated: false, missingPrice: false, rows: [] };
+    ctx.client.spendResult = { today: { ...week, tokens: 3_000_000 }, week };
+    await tick();
+    expect(ctx.app.state.usage?.accounts.map((entry) => entry.id)).toEqual(['acct-1', 'codex']);
+    expect(ctx.client.spendCalls).toBe(1);
+    expect(ctx.app.state.usage?.spend?.today.tokens).toBe(3_000_000);
+    expect(stripAnsi(ctx.io.all)).toContain('한도 Claude 주간 90%');
+    ctx.io.type('\x02u');
+    await tick();
+    expect(stripAnsi(ctx.io.all)).toContain('300만 토큰');
+  });
+
+  it('쓴 양을 읽지 못해도(옛 스튜디오) 한도는 그대로 보인다(#925)', async () => {
+    const ctx = setup(items);
+    ctx.client.limitsResult = { accounts };
+    ctx.client.spendResult = new Error('스튜디오가 404로 답했습니다');
+    await tick();
+    expect(ctx.app.state.usage?.accounts).toHaveLength(2);
+    expect(ctx.app.state.usage?.spend).toBeUndefined();
+    expect(ctx.app.state.usage?.error).toBeUndefined();
   });
 
   it('사용량을 읽지 못하면 사용량 화면에 까닭을 보이고, 카드 막대는 지난 값을 둔다', async () => {
