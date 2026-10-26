@@ -226,3 +226,36 @@ describe('폴더 열기 화면(#916)', () => {
     expect(applyListing(state, '/Users/me', home)).toBe(state);
   });
 });
+
+describe('경로 칸 비우기와 새 경로 치기(#945)', () => {
+  it('Ctrl-U로 비운 뒤 홈 목록이 늦게 와도 입력 칸을 다시 채우지 않는다', () => {
+    const cleared = folderKey(opened(), '\x15');
+    expect(cleared.state!.text).toBe('');
+    expect(cleared.effects).toEqual([{ type: 'list', path: '' }]);
+    const after = applyListing(cleared.state!, '', home);
+    expect(after.text).toBe('');
+  });
+
+  it('백스페이스로 다 지운 뒤에도 다시 채우지 않는다', () => {
+    let state: FolderState = { ...opened(), text: '/U', listed: '' };
+    state = folderKey(state, '\x7f').state!;
+    state = folderKey(state, '\x7f').state!;
+    expect(state.text).toBe('');
+    expect(applyListing(state, state.listed, home).text).toBe('');
+  });
+
+  it('처음 열 때만 홈 경로로 채운다', () => {
+    expect(opened().text).toBe('/Users/me/');
+  });
+
+  it('채워진 경로 뒤에 절대 경로를 붙여 넣거나 치면 새 경로로 본다(…/me//private → /private)', () => {
+    const typed = type(opened(), '/private/tmp');
+    expect(typed.state.text).toBe('/private/tmp');
+    const pasted = folderPaste(opened(), '/private/tmp/shop');
+    expect(pasted.state.text).toBe('/private/tmp/shop');
+  });
+
+  it('채워진 경로 뒤에 ~를 치면 홈부터 다시 쓴다', () => {
+    expect(type(opened(), '~/blog').state.text).toBe('~/blog');
+  });
+});

@@ -124,9 +124,50 @@ const COPY_HELP: ReadonlyArray<readonly [string, string]> = [
   ['q · Esc', '나가기'],
 ];
 
-/** 도움말 화면의 줄(머리와 아래 줄 사이에 놓는다) */
+/**
+ * 글을 폭에 맞게 낱말 사이에서 나눈다(#945: 좁은 화면에서 도움말이 잘리지 않게). 이어지는 줄은 indent만큼 들인다.
+ * 낱말 하나가 폭보다 길면 글자 단위로 자른다
+ */
+export function wrapText(text: string, width: number, indent = 0): string[] {
+  if (width <= indent + 1) return [fit(text, width)];
+  const pad = ' '.repeat(indent);
+  const lines: string[] = [];
+  let line = '';
+  const push = () => {
+    lines.push(line.replace(/\s+$/, ''));
+    line = pad;
+  };
+  for (const word of text.split(/(?<= )/)) {
+    if (stringWidth(line + word.trimEnd()) <= width) {
+      line += word;
+      continue;
+    }
+    if (line.trim()) push();
+    let rest = word;
+    while (stringWidth(line + rest.trimEnd()) > width) {
+      let cut = '';
+      for (const char of Array.from(rest)) {
+        if (stringWidth(line + cut + char) > width) break;
+        cut += char;
+      }
+      if (!cut) break;
+      line += cut;
+      rest = rest.slice(cut.length);
+      push();
+    }
+    line += rest;
+  }
+  if (line.trim()) lines.push(line.replace(/\s+$/, ''));
+  return lines.length ? lines : [''];
+}
+
+/** 표의 키 칸 너비(들여쓰기 3칸 + 키 18칸) */
+const HELP_KEY_INDENT = 21;
+
+/** 도움말 화면의 줄(머리와 아래 줄 사이에 놓는다). 긴 줄은 폭에 맞게 나눈다(#945) */
 function helpLines(width: number): string[] {
   const row = ([key, text]: readonly [string, string]) => `   ${key}${' '.repeat(Math.max(1, 18 - stringWidth(key)))}${text}`;
+  const indentOf = (line: string) => (/^   \S/.test(line) ? HELP_KEY_INDENT : 1);
   return [
     ' desk 도움말: 앞글쇠 Ctrl-b 다음에 누르는 키',
     '',
@@ -147,7 +188,12 @@ function helpLines(width: number): string[] {
     ' 앞글쇠·알림·마우스·색·팔레트는 설정 화면(Ctrl-b g)이나 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
     ' 카드 그림은 계정 그림(설정 화면에서 고름), 그림 폴더(~/.config/b-studio/sprites/)의 claude-code · codex · default 그림, 그 폴더에서 무작위 차례로 씁니다.',
     ' 사용량 화면의 계정 그림은 계정에 고른 그림, 없으면 그 폴더에서 계정마다 고른 그림입니다. 설정 화면에서 u·w는 설정을 닫고 사용량·카드 화면으로 갑니다.',
-  ].map((line) => fit(line, width));
+  ].flatMap((line) => wrapText(line, width, indentOf(line)).map((part) => fit(part, width)));
+}
+
+/** 도움말을 이 화면에서 굴릴 수 있는 만큼(#945). 머리줄 하나와 아래 안내 줄 하나를 뺀 자리에 다 들어가면 0 */
+export function helpMaxOffset(size: { cols: number; rows: number }): number {
+  return Math.max(0, helpLines(size.cols).length - Math.max(1, size.rows - 2));
 }
 
 /**
@@ -224,9 +270,14 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   }
 
   if (state.help) {
-    lines.push(...helpLines(cols).map((line) => relabel(state, line)).slice(0, Math.max(0, rows - 2)));
+    const all = helpLines(cols);
+    const room = Math.max(0, rows - 2);
+    const offset = Math.min(state.helpOffset ?? 0, helpMaxOffset({ cols, rows }));
+    lines.push(...all.slice(offset, offset + room).map((line) => relabel(state, line)));
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(' 아무 키나 누르면 닫습니다', cols));
+    const more = all.length > room;
+    const where = more ? ` ${offset + 1}–${Math.min(all.length, offset + room)}/${all.length}줄 · ↑↓ j k 굴리기 · Space PgDn 다음 쪽 ·` : '';
+    lines.push(fit(`${where} 다른 키를 누르면 닫습니다`, cols));
     return { lines };
   }
 
@@ -345,11 +396,14 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       lines[rows - 1] = fit(` 새 요청 · 프로젝트: ${picked} (↑↓ 고르기 · Enter 다음 · Esc 닫기)`, cols);
     } else {
       const head = ` ${project?.name ?? ''} 요청> `;
+      // 보내는 동안은 요청 줄 끝에도 알리고 커서를 감춘다(#945: 보낸 뒤 몇 초 동안 아무 일 없어 보였다)
+      const tail = prompt.sending ? `  ${fg(theme, 'yellow')}… 보내는 중${RESET}` : '';
+      const tailWidth = prompt.sending ? stringWidth('  … 보내는 중') : 0;
       // 길면 끝부분을 보인다(커서가 화면 밖으로 나가지 않게)
       let text = prompt.text;
-      while (text && stringWidth(head + text) > cols - 1) text = [...text].slice(1).join('');
-      lines[rows - 1] = fit(head + text, cols);
-      cursor = { x: stringWidth(head + text), y: rows - 1 };
+      while (text && stringWidth(head + text) + tailWidth > cols - 1) text = [...text].slice(1).join('');
+      lines[rows - 1] = fitAnsi(head + text + tail, cols);
+      if (!prompt.sending) cursor = { x: stringWidth(head + text), y: rows - 1 };
     }
   } else if (state.rename) {
     // 이름 입력 줄: 길면 끝부분을 보인다(커서가 화면 밖으로 나가지 않게)
