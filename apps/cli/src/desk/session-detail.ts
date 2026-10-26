@@ -7,6 +7,7 @@
  *  - 올리기: 올리기 전 점검과 이미 열린 PR. p로 PR까지, b로 브랜치만 올린다(묻는다). 결과 주소는 링크(OSC 8)로 보인다.
  * D는 세션 기록을 지운다(두 번 묻는다, 되돌릴 수 없다). 키는 순수 함수(detailKey)이고 서버 호출은 desk가 한다(action)
  */
+import { fitHint } from './hints';
 import { backendLabel } from './sidebar';
 import { fit, fitAnsi, osc8 } from './screen';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
@@ -476,9 +477,9 @@ function exportBody(state: DetailState, theme: Theme): string[] {
 }
 
 const HINTS: Record<DetailTab, string> = {
-  checkpoints: ' ↑↓ 고르기 · Enter 바뀐 파일 · u 되돌리기 · v 다시 검증 · Tab 다음 탭 · D 세션 지우기 · r 다시 부르기 · Esc 닫기',
-  review: ' ↑↓ 막는 지적 고르기 · x 오탐으로 닫기 · a AI 리뷰 (다시) 돌리기 · c 확인 선언 변경 허용 · Tab 다음 탭 · D 세션 지우기 · Esc 닫기',
-  export: ' p PR까지 올리기 · b 브랜치만 올리기 · Tab 다음 탭 · D 세션 지우기 · r 다시 부르기 · Esc 닫기',
+  checkpoints: ' 체크포인트 · ↑↓ 고르기 · Enter 바뀐 파일 · u 되돌리기 · v 다시 검증 · Tab 다음 탭 · r 다시 부르기 · D 세션 지우기 · Esc 닫기',
+  review: ' 확인·리뷰 · ↑↓ 막는 지적 고르기 · x 오탐으로 닫기 · a AI 리뷰 (다시) 돌리기 · c 확인 선언 변경 허용 · Tab 다음 탭 · D 세션 지우기 · Esc 닫기',
+  export: ' 올리기 · p PR까지 올리기 · b 브랜치만 올리기 · Tab 다음 탭 · r 다시 부르기 · D 세션 지우기 · Esc 닫기',
 };
 
 /** 아래 줄: 묻는 중이면 물음, 쓰는 중이면 입력, 알림이 있으면 알림, 아니면 키 안내 */
@@ -529,6 +530,6 @@ export function sessionDetailLines(state: DetailState, options: { theme: Theme; 
   const lines = [head, ' '.repeat(width), ...body.lines.slice(start, start + room).map((line) => fitAnsi(line, width))];
   while (lines.length < height - 1) lines.push(' '.repeat(width));
   lines.length = Math.max(0, height - 1);
-  if (height > 0) lines.push(fit(footer(state), width));
+  if (height > 0) lines.push(fitHint(footer(state), width));
   return lines;
 }

@@ -335,8 +335,8 @@ export function fleetsHint(state: FleetsState): string {
   }
   if (state.note) return ` ${state.note}`;
   if (state.mode === 'new') return ' 새 비교 · Tab 다음 칸 · ↑↓ 고르기 · AI 칸에서 Enter 참가자 더하기 · 참가자 칸에서 d 빼기 · 보내기에서 Enter · Esc 닫기';
-  if (state.mode === 'detail') return ' 비교 보기 · ←→ 참가자 · Enter 칸에 열기 · a 모두 나란히 · w 승자 고르기 · d 지우기 · r 다시 읽기 · Esc 목록';
-  return ' 여러 AI 비교 · ↑↓ 고르기 · Enter 보기 · n 새 비교 · d 지우기 · r 다시 읽기 · Esc 닫기';
+  if (state.mode === 'detail') return ' 비교 보기 · ←→ 참가자 · Enter 칸에 열기 · a 모두 나란히 · w 승자 고르기 · r 다시 읽기 · d 지우기 · Esc 목록';
+  return ' 여러 AI 비교 · ↑↓ 고르기 · Enter 보기 · n 새 비교 · r 다시 읽기 · d 지우기 · Esc 닫기';
 }
 
 export interface FleetsContext {

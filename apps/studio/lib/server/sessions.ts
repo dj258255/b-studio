@@ -8765,7 +8765,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   // 마지막으로 받은 요청 글을 기억해 둔다. 앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙지만,
   // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
   session.terminalLabel = prompt;
-  noteTurnStarted((session.terminalActivity ??= newTerminalActivity()));
+  noteTurnStarted((session.terminalActivity ??= newTerminalActivity()), Date.now());
   const opened = openTerminalRun(session);
   if (opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
@@ -8907,7 +8907,7 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
 async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedback?: string; message?: string }> {
   const session = terminalSession(id);
   // 화면의 "지금 하는 일"을 지우고 마지막 답을 남긴다(#920). 검증 여부와 상관없다
-  noteTurnEnded((session.terminalActivity ??= newTerminalActivity()), input);
+  noteTurnEnded((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
   const run = openTerminalRun(session);
   // 실행이 없으면 이 턴은 아무것도 바꾸지 않았다(바꿨다면 쓰기 직전의 훅이 실행을 열었다)
   if (!run) return {};

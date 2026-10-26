@@ -20,7 +20,7 @@ import { initialState, type DeskState } from '../../apps/cli/src/desk/keys';
 import { renderScreen, type PaneView } from '../../apps/cli/src/desk/render';
 import { openSettings } from '../../apps/cli/src/desk/settings';
 import type { DeskItem } from '../../apps/cli/src/desk/types';
-import { sessionLimits } from '../../apps/cli/src/desk/usage';
+import { byTightness, sessionLimits } from '../../apps/cli/src/desk/usage';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
@@ -40,9 +40,8 @@ const fetchedAt = at(-2);
 const usage = (input: number, output: number) => ({ inputTokens: input, outputTokens: output, cacheReadTokens: 0, cacheWriteTokens: 0 });
 const items: DeskItem[] = [
   {
-    kind: 'session', id: 's-order', title: '주문 모듈 리팩터링', projectName: 'shop', state: 'working', backend: 'claude-code', accountId: 'acct-pio', lastActivityAt: at(0),
+    kind: 'session', id: 's-order', title: '주문 모듈 리팩터링', projectName: 'shop', state: 'working', backend: 'claude-code', accountId: 'acct-pio', lastActivityAt: at(0), workingSince: at(-23),
     terminal: { cli: 'up' }, gate: { state: 'passed', checkpoints: 3 }, tokens: usage(152_000, 30_000), costUsd: 1.37,
-    workingSince: at(-23),
     now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 13_000).toISOString() },
     todos: { done: 3, total: 7, current: '주문 상태 전이 테스트' },
     context: { usedPct: 41, used: 82_000, size: 200_000 },
@@ -54,7 +53,7 @@ const items: DeskItem[] = [
     ],
   },
   {
-    kind: 'session', id: 's-pay', title: '결제 테스트 보강', projectName: 'shop', state: 'working', backend: 'codex', accountId: 'codex', lastActivityAt: at(-1),
+    kind: 'session', id: 's-pay', title: '결제 테스트 보강', projectName: 'shop', state: 'working', backend: 'codex', accountId: 'codex', lastActivityAt: at(-1), workingSince: at(-9),
     terminal: { cli: 'up', waiting: 'permission', message: 'pnpm test 실행 허락' }, gate: { state: 'verifying', checkpoints: 1 }, tokens: usage(55_000, 9_000),
     todos: { done: 5, total: 6, current: '환불 경계값' },
     context: { usedPct: 83 },
@@ -88,8 +87,33 @@ const accounts = [
   { id: 'gemini', backend: 'gemini', name: '타마', status: 'unsupported', source: 'none', windows: [] },
 ];
 
+/** 오늘·7일 쓴 양(가짜). Codex 비용은 단가 표로 낸 추정이라고 표시한다 */
+const spend = {
+  today: {
+    tokens: 1_840_000,
+    costUsd: 9.42,
+    estimated: true,
+    missingPrice: false,
+    rows: [
+      { backend: 'claude-code', model: 'claude-opus-5-5', tokens: 1_120_000, calls: 41, costUsd: 7.8, estimated: false },
+      { backend: 'codex', model: 'gpt-5.5', tokens: 610_000, calls: 22, costUsd: 1.37, estimated: true },
+      { backend: 'claude-code', model: 'claude-haiku-5-5', tokens: 110_000, calls: 18, costUsd: 0.25, estimated: false },
+    ],
+  },
+  week: {
+    tokens: 9_300_000,
+    costUsd: 48.1,
+    estimated: true,
+    missingPrice: false,
+    rows: [
+      { backend: 'claude-code', model: 'claude-opus-5-5', tokens: 6_400_000, calls: 230, costUsd: 39.2, estimated: false },
+      { backend: 'codex', model: 'gpt-5.5', tokens: 2_900_000, calls: 120, costUsd: 8.9, estimated: true },
+    ],
+  },
+};
+
 const base = (): DeskState =>
-  ({ ...initialState(), items, theme: { name: 'dark', depth: 'truecolor' }, sprites: {}, spriteClock: 0, usage: { accounts, receivedAt: now }, limits: sessionLimits(items, accounts) }) as unknown as DeskState;
+  ({ ...initialState(), items, theme: { name: 'dark', depth: 'truecolor' }, sprites: {}, spriteClock: 0, usage: { accounts: byTightness(accounts as never), receivedAt: now, spend }, limits: sessionLimits(items, accounts) }) as unknown as DeskState;
 
 /** 칸 화면에 넣을 가짜 CLI 출력. 실제 CLI 화면을 흉내만 낸다 */
 const green = (text: string) => `\x1b[32m${text}\x1b[39m`;
@@ -145,7 +169,7 @@ const shots: Shot[] = [
     state: () => ({ ...base(), layout: 2, slots: ['s-order', 's-pay', undefined, undefined], focus: 0 }) as DeskState,
     panes: [claudePane, codexPane],
   },
-  { name: 'desk-usage', cols: 140, rows: 42, state: () => ({ ...base(), view: 'usage', usageSelected: 0 }) as unknown as DeskState },
+  { name: 'desk-usage', cols: 140, rows: 34, state: () => ({ ...base(), view: 'usage', usageSelected: 1 }) as unknown as DeskState },
   {
     name: 'desk-settings',
     cols: 140,

@@ -287,5 +287,5 @@ export function renderFolder(state: FolderState, size: { w: number; h: number },
 
 export function folderHint(state: FolderState): string {
   if (state.proposal) return ' 폴더 열기 · y·Enter 등록 · Esc 돌아가기';
-  return ' 폴더 열기 · 경로 쓰기(~ 됨) · Tab 채우기 · ↑↓ 하위 폴더 · Enter 이 폴더 열기 · Ctrl-u 지우기 · Esc 닫기';
+  return ' 폴더 열기 · 경로 쓰기(~ 됨) · Enter 이 폴더 열기 · Tab 채우기 · ↑↓ 하위 폴더 · Ctrl-u 지우기 · Esc 닫기';
 }

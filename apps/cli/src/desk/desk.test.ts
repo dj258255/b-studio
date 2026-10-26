@@ -575,7 +575,7 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     await poll();
     expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 권한 대기']);
     // 사이드바에 손댈 세션 표시가 붙는다
-    expect(plain(ctx.io.all)).toMatch(/● 요청 b +! /);
+    expect(plain(ctx.io.all)).toMatch(/● 요청 b +권한 ! /);
   });
 
   it('게이트가 실패로 바뀌면 알리고, 작업이 끝나면 끝났다고 알린다', async () => {
@@ -606,7 +606,7 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     expect(notices(ctx.io.all)).toEqual([]);
     expect(ctx.io.all).not.toContain('\x07');
     // 사이드바 표시는 그대로 붙는다
-    expect(plain(ctx.io.all)).toMatch(/● 요청 b +! /);
+    expect(plain(ctx.io.all)).toMatch(/● 요청 b +권한 ! /);
   });
 
   it('칸 안 CLI의 벨은 밖 터미널 벨과 칸 머리 표시로 잇고, 다시 받는 옛 출력의 벨은 울리지 않는다', async () => {

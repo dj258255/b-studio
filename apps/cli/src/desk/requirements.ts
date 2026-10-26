@@ -282,7 +282,7 @@ export function requirementsHint(state: RequirementsState): string {
   const common = 'Tab 탭 · r 다시 읽기 · Esc 닫기';
   if (state.tab === 'spec') {
     if (state.draft) return ` 추출 결과 · ↑↓ 고르기 · s docs/requirements.md로 저장 · d·Esc 목록으로 · ${common}`;
-    return ` Enter 이 요구사항으로 작업 · a 필수 전체 계획 · v 사람 확인 · V 지우기 · e 편집기 · d 추출 결과 · Tab 탭 · Esc 닫기`;
+    return ` 요구사항 · Enter 이 요구사항으로 작업 · v 사람 확인 · e 편집기 · a 필수 전체 계획 · d 추출 결과 · V 확인 지우기 · Tab 탭 · Esc 닫기`;
   }
   if (state.tab === 'tests') return ` ↑↓ 고르기 · Enter 고치기·테스트 더하기 글 넣기 · ${common}`;
   if (state.tab === 'docs') return ` ↑↓ 고르기 · Enter 읽기 · e 편집기로 고치기 · ${common}`;

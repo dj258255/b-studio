@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { stringWidth, stripAnsi } from './screen';
-import { agentStatus, byUrgency, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, keepOrder, sidebarRows, urgencyRank } from './sidebar';
+import { agentStatus, byUrgency, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, keepOrder, sessionTag, shortElapsed, sidebarRows, urgencyRank } from './sidebar';
 import type { DeskItem } from './types';
 
 const base: DeskItem = { kind: 'session', id: 's1', title: '주문 목록', projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-22T00:00:00Z' };
@@ -205,5 +205,53 @@ describe('봐야 할 것 먼저(#922)', () => {
     expect(stripAnsi(session.text)).toContain('주문 목록');
     const seen = sidebarRows([{ ...base, terminal: { cli: 'up' } }], 0, new Map(), 30, new Set()).find((row) => row.item === 0)!;
     expect(session.text).not.toBe(seen.text);
+  });
+});
+
+describe('사이드바 세션 줄의 상태 글(#935)', () => {
+  const now = Date.parse('2026-10-26T10:00:00Z');
+  const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+  const tag = (item: DeskItem, unseen = false) => sessionTag(item, unseen, now)?.text;
+
+  it('사람이 손댈 것은 권한·질문·입력·승인으로 짧게 쓴다', () => {
+    expect(tag({ ...base, terminal: { cli: 'up', waiting: 'permission' } })).toBe('권한');
+    expect(tag({ ...base, terminal: { cli: 'up', waiting: 'question' } })).toBe('질문');
+    expect(tag({ ...base, terminal: { cli: 'up', waiting: 'input' } })).toBe('입력');
+    expect(tag({ ...base, attention: 'approval' })).toBe('승인');
+  });
+
+  it('오류·검증 실패·확인 필요·끝남(안 봄)을 쓰고, 그냥 쉬면 비운다', () => {
+    expect(tag({ ...base, state: 'error' })).toBe('오류');
+    expect(tag({ ...base, gate: { state: 'failed', checkpoints: 1 } })).toBe('실패');
+    expect(tag({ ...base, attention: 'needs_review' })).toBe('확인');
+    expect(tag({ ...base, terminal: { cli: 'up' } }, true)).toBe('끝남');
+    expect(tag({ ...base, terminal: { cli: 'up' } })).toBeUndefined();
+    expect(tag(base)).toBeUndefined();
+  });
+
+  it('작업 중이면 요청을 시작한 뒤 지난 시간을 쓰고, 시작 시각을 모르면 비운다', () => {
+    expect(tag({ ...base, state: 'working', workingSince: ago(23) })).toBe('23분');
+    expect(tag({ ...base, state: 'working' })).toBeUndefined();
+    // 기다림이 작업 중보다 먼저다
+    expect(tag({ ...base, state: 'working', workingSince: ago(5), terminal: { cli: 'up', waiting: 'permission' } })).toBe('권한');
+  });
+
+  it('지난 시간은 초·분·시간으로 짧게 쓴다', () => {
+    expect(shortElapsed(42_000)).toBe('42초');
+    expect(shortElapsed(23 * 60_000 + 10_000)).toBe('23분');
+    expect(shortElapsed(64 * 60_000)).toBe('1시간4분');
+    expect(shortElapsed(120 * 60_000)).toBe('2시간');
+    expect(shortElapsed(-5_000)).toBe('0초');
+  });
+
+  it('세션 줄 오른쪽에 상태 글과 칸 번호를 둔다', () => {
+    const items: DeskItem[] = [
+      { ...base, id: 'a', title: '결제 테스트', terminal: { cli: 'up', waiting: 'permission' } },
+      { ...base, id: 'b', title: '주문 리팩터링', state: 'working', workingSince: ago(23) },
+    ];
+    const rows = sidebarRows(items, 0, new Map([['a', 2]]), 36, new Set(), undefined, new Set(), now).map((row) => stripAnsi(row.text));
+    expect(rows.find((row) => row.includes('결제 테스트'))).toMatch(/결제 테스트\s+권한 2 $/);
+    expect(rows.find((row) => row.includes('주문 리팩터링'))).toMatch(/주문 리팩터링\s+23분 $/);
+    for (const row of rows) expect(stringWidth(row)).toBe(36);
   });
 });
