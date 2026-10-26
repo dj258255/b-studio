@@ -274,7 +274,7 @@ function tabLine(state: RecordsState, theme: Theme, width: number): string {
   return fitAnsi(` ${BOLD}기록${RESET}  ${tab('AI별 결과', state.tab === 'ai')} ${tab('토큰 보고서', state.tab === 'tokens')}${loading}`, width);
 }
 
-export const RECORDS_HINT = ' 기록 · Tab 탭 바꾸기 · ↑↓ 굴리기 · ←→ 프로젝트 · d 기간 · r 다시 부르기 · Esc 닫기';
+export const RECORDS_HINT = ' 기록 · Tab 탭 바꾸기 · ←→ 프로젝트 · d 기간 · ↑↓ 굴리기 · r 다시 부르기 · Esc 닫기';
 
 /**
  * 기록 화면의 줄(정확히 height줄, 줄마다 width칸). 첫 줄은 탭, 둘째 줄은 비우고, 나머지는 굴릴 수 있는 본문이다.

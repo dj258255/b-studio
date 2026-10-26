@@ -40,7 +40,7 @@ const fetchedAt = at(-2);
 const usage = (input: number, output: number) => ({ inputTokens: input, outputTokens: output, cacheReadTokens: 0, cacheWriteTokens: 0 });
 const items: DeskItem[] = [
   {
-    kind: 'session', id: 's-order', title: '주문 모듈 리팩터링', projectName: 'shop', state: 'working', backend: 'claude-code', accountId: 'acct-pio', lastActivityAt: at(0),
+    kind: 'session', id: 's-order', title: '주문 모듈 리팩터링', projectName: 'shop', state: 'working', backend: 'claude-code', accountId: 'acct-pio', lastActivityAt: at(0), workingSince: at(-23),
     terminal: { cli: 'up' }, gate: { state: 'passed', checkpoints: 3 }, tokens: usage(152_000, 30_000), costUsd: 1.37,
     now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 12_000).toISOString() },
     todos: { done: 3, total: 7, current: '주문 상태 전이 테스트' },
@@ -52,7 +52,7 @@ const items: DeskItem[] = [
     ],
   },
   {
-    kind: 'session', id: 's-pay', title: '결제 테스트 보강', projectName: 'shop', state: 'working', backend: 'codex', accountId: 'codex', lastActivityAt: at(-1),
+    kind: 'session', id: 's-pay', title: '결제 테스트 보강', projectName: 'shop', state: 'working', backend: 'codex', accountId: 'codex', lastActivityAt: at(-1), workingSince: at(-9),
     terminal: { cli: 'up', waiting: 'permission', message: 'pnpm test 실행 허락' }, gate: { state: 'verifying', checkpoints: 1 }, tokens: usage(55_000, 9_000),
     todos: { done: 5, total: 6, current: '환불 경계값' },
     context: { usedPct: 83 },

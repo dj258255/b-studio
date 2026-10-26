@@ -29,7 +29,7 @@ describe('화면 그리기', () => {
     expect(prefixed[size.rows - 1]).toContain('숫자');
   });
 
-  it('왼쪽에 스페이스 사이드바, 구분선, 오른쪽에 칸 머리와 터미널 내용이 놓이고, 사이드바 맨 아래에 키 안내가 있다', () => {
+  it('왼쪽에 스페이스 사이드바, 구분선, 오른쪽에 칸 머리와 터미널 내용이 놓이고, 사이드바 맨 아래에는 키 안내를 두지 않는다(#935)', () => {
     const { lines } = renderScreen(state({ slots: ['a', undefined, undefined, undefined] }), size, [{ lines: ['$ echo hi', 'hi'] }]);
     // 화면 칸 기준으로 가른다(한글은 한 글자가 두 칸이라 글자 수로 자르면 어긋난다)
     const split = (line: string) => {
@@ -41,7 +41,8 @@ describe('화면 그리기', () => {
     expect(plain[1]!.side).toContain('스페이스');
     expect(plain[2]!.side).toContain('shop');
     expect(plain[3]!.side).toContain('요청 a');
-    expect(plain[size.rows - 2]!.side).toContain('Ctrl-b w');
+    expect(plain[size.rows - 2]!.side).not.toContain('Ctrl-b w');
+    expect(plain[size.rows - 2]!.side.trim()).not.toMatch(/\? 키$/);
     expect(plain[1]!.pane).toMatch(/^ 1 /);
     expect(plain[1]!.pane).toContain('요청 a');
     expect(plain[1]!.pane).toContain('통과');
@@ -52,7 +53,7 @@ describe('화면 그리기', () => {
   it('스페이스가 많아도 고른 세션이 든 스페이스와 그 세션이 사이드바에 보인다', () => {
     const items = Array.from({ length: 30 }, (_, index) => item(`s${index}`, { projectName: `p${index}` }));
     const plain = renderScreen(state({ items, selected: 29 }), size, []).lines.map(stripAnsi);
-    const side = plain.slice(1, size.rows - 2).map((line) => line.slice(0, line.indexOf('│')));
+    const side = plain.slice(1, size.rows - 1).map((line) => line.slice(0, line.indexOf('│')));
     expect(side.some((line) => line.includes('p29'))).toBe(true);
     expect(side.some((line) => line.includes('요청 s29'))).toBe(true);
   });
@@ -195,7 +196,35 @@ describe('빠른 전환과 안 본 끝남(#922)', () => {
 
   it('도움말에 j와 Space가 있다', () => {
     const plain = renderScreen(state({ help: true }), { cols: 160, rows: 60 }, []).lines.map(stripAnsi).join('\n');
-    expect(plain).toContain('다음 대기로');
+    expect(plain).toContain('다음 확인');
     expect(plain).toContain('빠른 전환');
+  });
+});
+
+describe('아래 키 안내는 한 줄에 몇 개만(#935)', () => {
+  const footer = (patch: Partial<DeskState>, cols = 100) => stripAnsi(renderScreen(state(patch), { cols, rows: 20 }, []).lines.at(-1)!);
+
+  it('칸·앞글쇠·카드·사용량 화면의 안내는 잘린 글자 없이 다섯 개 안팎이고, 끝에 모든 키를 보는 법이 있다', () => {
+    for (const patch of [{}, { prefix: true }, { view: 'space' as const }, { view: 'usage' as const }]) {
+      for (const cols of [100, 72]) {
+        const line = footer(patch, cols);
+        expect(line).not.toContain('…');
+        expect(line).toContain('모든 키');
+        expect(line.trim().split(' · ').length).toBeLessThanOrEqual(7);
+      }
+    }
+  });
+
+  it('카드 화면 안내에는 고르기·열기·닫기가 있다', () => {
+    const line = footer({ view: 'space' });
+    expect(line).toContain('Enter');
+    expect(line).toContain('Esc');
+  });
+
+  it('덮는 화면의 긴 안내도 폭이 모자라면 뒤 항목부터 통째로 빠지고 Esc는 남는다', () => {
+    const fleets = { mode: 'detail' as const, fleets: [], row: 0, member: 0 };
+    const line = footer({ fleets }, 60);
+    expect(line).not.toContain('…');
+    expect(line).toContain('Esc');
   });
 });

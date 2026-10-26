@@ -7,6 +7,7 @@ import { RECORDS_HINT, recordsLines } from './records';
 import { sessionDetailLines } from './session-detail';
 import { tightestLine, usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
+import { fitHint } from './hints';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
 import { renderRuntime, runtimeHint } from './runtime';
 import { fleetsHint, renderFleets } from './fleets';
@@ -43,8 +44,6 @@ function onBackground(text: string, background: string, width: number): string {
   return fitAnsi(background + text.replaceAll(RESET, RESET + background), width, background);
 }
 
-/** 사이드바 맨 아래 줄의 키 안내 */
-const SIDEBAR_HINT = ' Ctrl-b w 카드 · a 폴더 · ? 키';
 const CHOICE_LABEL = (choice: string): string => (choice === 'rules' ? '규칙대로' : backendLabel(choice));
 
 /** 미리보기 한 줄: 어느 AI로, 왜, 같은 종류의 일에서 AI별로 게이트를 몇 번 통과했나(웹 새 요청 칸과 같은 내용) */
@@ -62,11 +61,17 @@ export function previewLine(preview: DeskPreview): string {
   return `${target}로 보냅니다 · ${why}${records}`;
 }
 
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · ↑↓ 고르기 · Enter 열기 · j 다음 대기 · Space 빠른 전환 · w 카드 · u 사용량 · g 설정 · i 자세히 · h 기록 · e 요구사항 · t 작업 나누기 · f AI 비교 · v 실행 · d 지금 변경 · a 폴더 열기 · n 새 요청 · c 셸 · [ 복사 · z 크게 · l 칸 수 · s 사이드바 · x 비우기 · p 멈추기 · r 이어서 · , 이름 · ? 도움말 · q 나가기';
-const SPACE_HINT = ' 스페이스 화면 · ←→ 카드 고르기 · Enter 고른 칸에 열기 · i 자세히 · Tab 다음 스페이스 · Esc 칸 화면 · n 새 요청 · a 폴더 열기 · g 설정 · e 요구사항 · f AI 비교 · v 실행 · d 지금 변경 · p 멈추기 · r 이어서 · , 이름 · ? 도움말';
-const USAGE_HINT = ' 사용량 화면 · ↑↓ 계정 고르기 · r 다시 읽기 · w 카드 화면 · g 설정(계정·그림) · f AI 비교 · Esc 닫기 · ? 도움말';
-const IDLE_HINT = ' Ctrl-b 다음 키로 조작합니다(Ctrl-b n 새 요청 · Ctrl-b Enter 세션 열기 · Ctrl-b ? 도움말 · Ctrl-b q 나가기). 그 밖의 키는 고른 칸으로 갑니다';
-export const COPY_HINT = ' 복사 모드 · ↑↓ k j 옮기기 · b f 쪽 · g G 처음과 끝 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · q 나가기';
+/*
+ * 아래 키 안내(#935): 화면마다 자주 쓰는 키 네다섯 개만 중요한 차례로 두고, 끝에 모든 키를 보는 법을 둔다.
+ * 폭이 모자라면 fitHint가 뒤 항목부터 통째로 뺀다. 나머지 키는 도움말(?)에 있다
+ */
+/** 칸 화면: 그 밖의 키는 고른 칸의 CLI로 간다 */
+const IDLE_HINT = ' Ctrl-b 누르고 › j 다음 확인 · w 카드 · n 새 요청 · Space 빠른 전환 · ? 모든 키';
+/** 앞글쇠를 누른 뒤 */
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · Enter 열기 · j 다음 확인 · w 카드 · u 사용량 · n 새 요청 · ? 모든 키';
+const SPACE_HINT = ' 카드 화면 · ←→ 고르기 · Enter 칸에 열기 · i 자세히 · d 지금 변경 · Esc 칸 화면 · ? 모든 키';
+const USAGE_HINT = ' 사용량 · ↑↓ 계정 고르기 · r 다시 읽기 · g 계정 설정 · Esc 닫기 · ? 모든 키';
+export const COPY_HINT = ' 복사 모드 · ↑↓ 옮기기 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · b f 쪽 · g G 처음과 끝 · q 나가기';
 
 /** 도움말 화면(Ctrl-b ?)의 키 표 */
 export const HELP: ReadonlyArray<readonly [string, string]> = [
@@ -74,7 +79,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['o', '다음 칸'],
   ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
-  ['j', '다음 대기로: 손댈 것(권한·질문·입력) > 오류 > 안 본 끝남 > 알림 차례로 그 세션 칸을 고르거나 고른 칸에 엶. 다시 누르면 다음 것'],
+  ['j', '다음 확인: 손댈 것(권한·질문·입력) > 오류 > 안 본 끝남 > 알림 차례로 그 세션 칸을 고르거나 고른 칸에 엶. 다시 누르면 다음 것'],
   ['Space', '빠른 전환: 모든 세션을 급한 순으로, 글자로 거르고 ↑↓ Enter로 칸에 엶. Esc나 Ctrl-b Space로 닫기'],
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
@@ -138,6 +143,7 @@ function helpLines(width: number): string[] {
     ' 그 밖의 키와 붙여 넣은 글은 고른 칸의 CLI로 갑니다.',
     ' 세션이 손댈 상태가 되거나 검증·작업이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림을 냅니다. 지금 보고 있는 칸은 알리지 않습니다(studio desk --no-notify로 모두 끕니다).',
     ' 끝났지만 아직 안 본 세션은 초록 점 "끝남"으로 남고, 그 칸을 보면 흐린 "CLI 대기"가 됩니다. 사이드바와 카드는 급한 순이고, 고르는 동안은 순서를 지킵니다.',
+    ' 사이드바 세션 줄 오른쪽의 짧은 글이 상태입니다: 권한·질문·입력·승인(손댈 것), 오류·실패·확인, 끝남(안 봄), 작업 중이면 요청을 시작한 뒤 지난 시간(23분).',
     ' 앞글쇠·알림·마우스·색·팔레트는 설정 화면(Ctrl-b g)이나 ~/.config/b-studio/desk.json으로 바꿉니다. 칸 배치는 나갈 때 기억해 다음에 되살립니다.',
     ' 카드 그림은 계정 그림(설정 화면에서 고름), 그림 폴더(~/.config/b-studio/sprites/)의 claude-code · codex · default 그림, 그 폴더에서 무작위 차례로 씁니다.',
     ' 사용량 화면의 계정 그림은 계정에 고른 그림, 없으면 그 폴더에서 계정마다 고른 그림입니다. 설정 화면에서 u·w는 설정을 닫고 사용량·카드 화면으로 갑니다.',
@@ -146,13 +152,13 @@ function helpLines(width: number): string[] {
 
 /**
  * 사이드바에 보이는 줄과 내려간 만큼(offset). 고른 세션이 든 스페이스의 줄부터 고른 세션의 줄까지 보이게 내린다.
- * 맨 아래 한 줄은 키 안내라 rect에서 뺀다. 마우스로 누른 줄을 가릴 때도 같은 셈을 쓴다(#874)
+ * 맨 아래 한도 줄은 rect에서 뺀다. 마우스로 누른 줄을 가릴 때도 같은 셈을 쓴다(#874)
  */
 export function sidebarView(state: DeskState, size: { cols: number; rows: number }): { rows: SidebarRow[]; offset: number; rect: Rect } {
   const layout = placePanes(size.cols, size.rows, state);
-  // 맨 아래 키 안내 위에 가장 빠듯한 한도 한 줄(#925)을 두면 그만큼 더 뺀다
+  // 맨 아래에 가장 빠듯한 한도 한 줄(#925)을 두면 그만큼 뺀다. 키 안내는 화면 맨 아래 한 줄에만 있다(#935)
   const limitRow = sidebarLimitLine(state, layout.sidebar.w) ? 1 : 0;
-  const rect = { ...layout.sidebar, h: Math.max(1, layout.sidebar.h - 1 - limitRow) };
+  const rect = { ...layout.sidebar, h: Math.max(1, layout.sidebar.h - limitRow) };
   const slotOf = new Map<string, number>();
   state.slots.forEach((id, slot) => {
     if (id && slot < state.layout) slotOf.set(id, slot + 1);
@@ -165,7 +171,7 @@ export function sidebarView(state: DeskState, size: { cols: number; rows: number
   return { rows: side, offset, rect };
 }
 
-/** 사이드바 맨 아래(키 안내 위)의 가장 빠듯한 한도 한 줄(#925). 사이드바가 낮거나 읽은 한도가 없으면 없다 */
+/** 사이드바 맨 아래의 가장 빠듯한 한도 한 줄(#925). 사이드바가 낮거나 읽은 한도가 없으면 없다 */
 function sidebarLimitLine(state: DeskState, width: number): string | undefined {
   if (state.sidebarHidden || !state.usage?.accounts.length) return undefined;
   return tightestLine(state.usage.accounts, width, state.theme ?? DEFAULT_THEME);
@@ -209,7 +215,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   if (state.records) {
     const titles = Object.fromEntries(state.items.map((entry) => [entry.id, entry.title]));
     lines.push(...recordsLines(state.records, { theme, width: cols, height: Math.max(0, rows - 2), now: Date.now(), names: state.records.names ?? {}, titles }));
-    lines.push(fit(state.message ? ` ${state.message}` : RECORDS_HINT, cols));
+    lines.push(fitHint(state.message ? ` ${state.message}` : RECORDS_HINT, cols));
     return { lines: lines.slice(0, rows) };
   }
   if (state.detail) {
@@ -229,7 +235,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const body = renderSettings(state.settings, { w: cols, h: Math.max(0, rows - 2) }, theme);
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(relabel(state, settingsHint(state.settings)), cols));
+    lines.push(fitHint(relabel(state, settingsHint(state.settings)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
@@ -238,7 +244,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const body = renderChanges(state.changes, { w: cols, h: Math.max(0, rows - 2) }, theme);
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(state.message && !state.changes.note ? ` ${state.message}` : changesHint(state.changes), cols));
+    lines.push(fitHint(state.message && !state.changes.note ? ` ${state.message}` : changesHint(state.changes), cols));
     return { lines: lines.slice(0, rows) };
   }
 
@@ -247,7 +253,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const body = renderFolder(state.folder, { w: cols, h: Math.max(0, rows - 2) }, theme);
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(relabel(state, folderHint(state.folder)), cols));
+    lines.push(fitHint(relabel(state, folderHint(state.folder)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
@@ -256,7 +262,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const body = renderRuntime(state.runtime, { w: cols, h: Math.max(0, rows - 2) }, theme);
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(relabel(state, runtimeHint(state.runtime)), cols));
+    lines.push(fitHint(relabel(state, runtimeHint(state.runtime)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
@@ -266,7 +272,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const body = renderFleets(state.fleets, context, { w: cols, h: Math.max(0, rows - 2) });
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(relabel(state, fleetsHint(state.fleets)), cols));
+    lines.push(fitHint(relabel(state, fleetsHint(state.fleets)), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
@@ -275,16 +281,15 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const body = renderRequirements(state.requirements, { w: cols, h: Math.max(0, rows - 2) }, theme);
     lines.push(...body.lines);
     while (lines.length < rows - 1) lines.push(' '.repeat(cols));
-    lines.push(fit(requirementsHint(state.requirements), cols));
+    lines.push(fitHint(requirementsHint(state.requirements), cols));
     return { lines: lines.slice(0, rows), ...(body.cursor ? { cursor: { x: body.cursor.x, y: body.cursor.y + 1 } } : {}) };
   }
 
-  // 사이드바: 고른 스페이스와 세션이 보이게 내린다. 맨 아래 줄은 키 안내
+  // 사이드바: 고른 스페이스와 세션이 보이게 내린다
   const { rows: side, offset, rect: sideRect } = sidebarView(state, size);
   const limitLine = sidebarLimitLine(state, layout.sidebar.w);
   const sideLine = (row: number): string => {
-    if (row === layout.sidebar.h - 1) return onBackground(`${fg(theme, 'muted')}${relabel(state, SIDEBAR_HINT)}${RESET}`, chrome, layout.sidebar.w);
-    if (row === layout.sidebar.h - 2 && limitLine) return onBackground(limitLine, chrome, layout.sidebar.w);
+    if (row === layout.sidebar.h - 1 && limitLine) return onBackground(limitLine, chrome, layout.sidebar.w);
     const entry = row < sideRect.h ? side[offset + row] : undefined;
     if (!entry) return onBackground('', chrome, layout.sidebar.w);
     return onBackground(relabel(state, entry.text), entry.selected ? bg(theme, 'active') : chrome, layout.sidebar.w);
@@ -387,7 +392,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
             : state.view === 'usage'
               ? USAGE_HINT
               : IDLE_HINT;
-    lines.push(fit(relabel(state, hint), cols));
+    lines.push(fitHint(relabel(state, hint), cols));
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
     if (switcher && switcherRect) cursor = { x: switcherRect.x + switcher.cursor.x, y: switcherRect.y + switcher.cursor.y };
