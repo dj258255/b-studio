@@ -77,13 +77,20 @@ export function detailLines(item: DeskItem): DetailLine[] {
   if (subagents.length > SUBAGENT_LINES) lines.push({ text: `↳ 외 ${subagents.length - SUBAGENT_LINES}개`, tones: [] });
   const capabilities = item.capabilities;
   if (capabilities) {
-    const tools = capabilities.tools === 'cli-default' ? 'CLI 기본' : capabilities.tools.join(', ');
-    // 무엇을 뜻하는지 말한다(#944): 쓸 수 있는 곳, 무엇이 검사하는지
-    lines.push({ text: `도구 ${tools} · 쓸 곳 ${capabilities.writeScope}`, tones: [] });
-    lines.push({ text: `검사 ${capabilities.permission}`, tones: [] });
+    // 무엇을 뜻하는지 사람이 읽는 말로 적는다(#944, #956): 쓸 수 있는 곳, 쓰는 도구, 무엇이 지키는지
+    // 도구는 CLI 기본이면 적지 않는다(따로 정한 것이 없다는 뜻). 좁은 카드에서 잘리지 않게 짧게 쓴다
+    const tools = capabilities.tools === 'cli-default' ? '' : ` · 도구 ${capabilities.tools.join(', ')}`;
+    lines.push({ text: `쓸 수 있는 곳 ${capabilities.writeScope}${tools}`, tones: [] });
+    lines.push({ text: `지키는 것 ${PERMISSION_WORDS[capabilities.permission] ?? capabilities.permission}`, tones: [] });
   }
   return lines;
 }
+
+/** 서버가 주는 범위 문구를 사람이 읽는 말로(#956). 모르는 문구는 그대로 둔다 */
+const PERMISSION_WORDS: Record<string, string> = {
+  'CLI 권한 확인 + 쓰기 직전 관문 + 턴 끝 게이트': '쓰기 전 검사 · 끝나면 검증',
+  'b-studio 실행 정책 + 게이트': '실행 정책 · 끝나면 검증',
+};
 
 /** 서브에이전트를 부르는 말: 종류와 맡긴 일(#921). 옛 서버는 이름만 준다 */
 export function subagentName(agent: DeskAgent): string {
@@ -178,18 +185,31 @@ export function agentStatus(item: DeskItem, options: { unseen?: boolean } = {}):
   if (item.state === 'stopped') return { label: '멈춤', tone: 'muted' };
   // 작업 카드 계획이 끝나 자원을 돌려준 레인(#868)
   if (item.state === 'done') return { label: '끝남', tone: 'ok' };
-  if (item.state === 'dormant') return { label: '꺼짐', tone: 'muted' };
+  // 샌드박스를 아직 켜지 않았어도(지연 기동) CLI가 떠 있으면 꺼진 것이 아니다(#956). 일을 시작했으면 작업 중이다
+  if (item.state === 'dormant' && item.terminal?.cli !== 'up') return { label: '꺼짐', tone: 'muted' };
+  if (item.state === 'dormant' && item.workingSince) return { label: '작업 중', tone: 'busy' };
   if (options.unseen) return { label: '끝남', tone: 'ok' };
   if (item.terminal?.cli === 'up') return { label: 'CLI 대기', tone: 'muted' };
   return { label: '쉼', tone: 'muted' };
 }
 
-/** 급한 정도(#922): 권한·질문·입력 4 > 오류·검증 실패·확인 필요 3 > 끝남(안 봄) 2 > 작업 중 1 > 쉼 0 */
+/**
+ * 끝난 요청에서 관문이 거절한 쓰기 수(#956). 작업 중이거나 검증을 통과했으면 0이다.
+ * 쓰기가 모두 거절된 요청은 에이전트가 "끝냈습니다"라고 해도 바뀐 것이 없을 수 있다(완료 선언을 믿지 않는다)
+ */
+export function deniedWrites(item: DeskItem): number {
+  const denied = item.turnDenied ?? 0;
+  if (denied <= 0 || item.state === 'working' || item.state === 'booting' || item.gate?.state === 'passed') return 0;
+  if (agentStatus(item).tone === 'busy') return 0;
+  return denied;
+}
+
+/** 급한 정도(#922): 권한·질문·입력 4 > 오류·검증 실패·확인 필요·쓰기 거절 3 > 끝남(안 봄) 2 > 작업 중 1 > 쉼 0 */
 export function urgencyRank(item: DeskItem, unseen: boolean): number {
   const status = agentStatus(item, { unseen });
   if (status.tone === 'warn') return 4;
   const gate = gateStatus(item);
-  if (status.tone === 'fail' || gate?.tone === 'fail' || gate?.tone === 'warn') return 3;
+  if (status.tone === 'fail' || gate?.tone === 'fail' || gate?.tone === 'warn' || deniedWrites(item) > 0) return 3;
   if (unseen && status.tone === 'ok') return 2;
   if (status.tone === 'busy') return 1;
   return 0;
@@ -251,6 +271,7 @@ export function sessionTag(item: DeskItem, unseen: boolean, now: number): { text
   const gate = gateStatus(item);
   if (gate?.tone === 'fail') return { text: '실패', tone: 'fail' };
   if (gate?.tone === 'warn') return { text: '확인', tone: 'warn' };
+  if (deniedWrites(item) > 0) return { text: '거절', tone: 'fail' };
   if (status.tone === 'ok') return { text: '끝남', tone: 'ok' };
   if (item.state === 'working') {
     const since = item.workingSince ? Date.parse(item.workingSince) : NaN;

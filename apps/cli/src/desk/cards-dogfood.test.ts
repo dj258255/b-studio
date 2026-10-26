@@ -45,15 +45,17 @@ describe('고른 카드의 마지막 답: 그림 높이와 상관없이 이어 �
 
 describe('펼친 줄은 낱말 사이에서 자른다', () => {
   it('넘치는 범위·검사 줄은 낱말 중간("턴 끝 게")에서 끊지 않고 …로 끝낸다', () => {
-    const text = draw(done, { selected: true }, 62).map((line) => textOf(line, 12).trimEnd());
+    // 알려진 문구는 짧은 말로 바꾸므로(#956) 넘치게 하려고 모르는 긴 문구를 쓴다(그대로 보인다)
+    const long = { ...done, capabilities: { ...done.capabilities!, permission: 'CLI 권한 확인 + 쓰기 직전 관문 + 턴 끝 게이트 + 사람 확인' } };
+    const text = draw(long, { selected: true }, 62).map((line) => textOf(line, 12).trimEnd());
     for (const line of text) expect(line).not.toMatch(/게$/);
     expect(text.some((line) => line.endsWith('…'))).toBe(true);
   });
 
-  it('펼친 줄의 범위·검사 문구는 무엇인지 말한다(쓸 곳, 검사)', () => {
+  it('펼친 줄의 범위 문구는 무엇인지 말한다(쓸 수 있는 곳, 지키는 것, #956)', () => {
     const text = detailLines(done).map((line) => line.text);
-    expect(text.some((line) => line.includes('쓸 곳 세션 작업 복사본 전체'))).toBe(true);
-    expect(text.some((line) => line.startsWith('검사 '))).toBe(true);
+    expect(text.some((line) => line.includes('쓸 수 있는 곳 세션 작업 복사본 전체'))).toBe(true);
+    expect(text.some((line) => line.startsWith('지키는 것 '))).toBe(true);
   });
 });
 
