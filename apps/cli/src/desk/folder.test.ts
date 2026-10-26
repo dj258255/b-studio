@@ -126,6 +126,69 @@ describe('폴더 열기 화면(#916)', () => {
     expect(stripAnsi(renderFolder(empty, { w: 100, h: 20 }, DEFAULT_THEME).lines.join('\n'))).toContain('등록할 수 없습니다');
   });
 
+  it('알아보지 못한 폴더는 코드·테스트만 등록을 제안하고, 테스트 명령을 골라 y·Enter로 등록한다(#946)', () => {
+    const workspaceProposal = {
+      detection: {
+        folder: '/Users/me/tool',
+        name: 'tool',
+        hasSpec: false,
+        services: [],
+        infra: [],
+        defaultInfra: [],
+        warnings: ['Next.js·Vite·Spring Boot·FastAPI 앱을 찾지 못했습니다'],
+        workspace: {
+          language: 'Go',
+          image: 'golang:1-bookworm',
+          candidates: [
+            { label: 'go test ./...', source: 'go.mod', command: ['go', 'test', './...'] },
+            { label: 'make test', source: 'Makefile', command: ['make', 'test'] },
+          ],
+        },
+      },
+      files: [],
+    };
+    const state: FolderState = { ...opened(), proposal: workspaceProposal };
+    const text = stripAnsi(renderFolder(state, { w: 120, h: 24 }, DEFAULT_THEME).lines.join('\n'));
+    expect(text).toContain('코드·테스트만');
+    expect(text).toContain('Go');
+    expect(text).toContain('go test ./...');
+    expect(text).toContain('make test');
+    expect(text).toContain('직접 쓰기');
+    // 게이트가 이 프로젝트에서 무엇을 확인하는지 적는다
+    expect(text).toContain('게이트');
+    expect(text).toContain('종료 코드 0');
+    expect(text).not.toContain('등록할 수 없습니다');
+
+    // 첫 후보가 골라져 있고 y로 그 명령을 실어 등록한다
+    expect(folderKey(state, 'y').effects).toEqual([{ type: 'register', path: '/Users/me/tool', workspace: { test: ['go', 'test', './...'] } }]);
+    const second = folderKey(state, '\x1b[B').state!;
+    expect(folderKey(second, '\r').effects).toEqual([{ type: 'register', path: '/Users/me/tool', workspace: { test: ['make', 'test'] } }]);
+
+    // 마지막 줄은 직접 쓰기: 친 글자는 명령 칸에 들어가고(y도 글자다), Enter로 sh -c 꼴로 등록한다
+    let custom = folderKey(second, '\x1b[B').state!;
+    for (const key of Array.from('yarn test')) custom = folderKey(custom, key).state!;
+    expect(stripAnsi(renderFolder(custom, { w: 120, h: 24 }, DEFAULT_THEME).lines.join('\n'))).toContain('yarn test');
+    expect(folderKey(custom, '\r').effects).toEqual([{ type: 'register', path: '/Users/me/tool', workspace: { test: ['sh', '-c', 'yarn test'] } }]);
+    // 비어 있으면 등록하지 않는다
+    const blank = folderKey(second, '\x1b[B').state!;
+    expect(folderKey(blank, '\r').effects).toEqual([]);
+    // 붙여 넣은 명령도 직접 쓰기 칸에 들어간다
+    expect(folderPaste(blank, 'npm test\n').state.custom).toBe('npm test');
+  });
+
+  it('후보가 없으면 직접 쓰기 칸부터 고른다(#946)', () => {
+    const state: FolderState = {
+      ...opened(),
+      proposal: {
+        detection: { folder: '/Users/me/notes', name: 'notes', hasSpec: false, services: [], infra: [], defaultInfra: [], warnings: [], workspace: { language: '알 수 없음', image: 'buildpack-deps:bookworm', candidates: [] } },
+        files: [],
+      },
+    };
+    let typed = state;
+    for (const key of Array.from('./check.sh')) typed = folderKey(typed, key).state!;
+    expect(folderKey(typed, '\r').effects).toEqual([{ type: 'register', path: '/Users/me/notes', workspace: { test: ['sh', '-c', './check.sh'] } }]);
+  });
+
   it('이미 등록한 폴더면 그렇다고 보이고 Enter로 그대로 연다', () => {
     const registered: FolderState = {
       ...opened(),
@@ -161,5 +224,38 @@ describe('폴더 열기 화면(#916)', () => {
   it('늦게 온 다른 폴더의 목록은 버린다(지금 쓰는 글의 폴더 목록만 받는다)', () => {
     const state: FolderState = { ...opened(), text: '/Users/me/shop/', listed: '/Users/me/shop', loading: true };
     expect(applyListing(state, '/Users/me', home)).toBe(state);
+  });
+});
+
+describe('경로 칸 비우기와 새 경로 치기(#945)', () => {
+  it('Ctrl-U로 비운 뒤 홈 목록이 늦게 와도 입력 칸을 다시 채우지 않는다', () => {
+    const cleared = folderKey(opened(), '\x15');
+    expect(cleared.state!.text).toBe('');
+    expect(cleared.effects).toEqual([{ type: 'list', path: '' }]);
+    const after = applyListing(cleared.state!, '', home);
+    expect(after.text).toBe('');
+  });
+
+  it('백스페이스로 다 지운 뒤에도 다시 채우지 않는다', () => {
+    let state: FolderState = { ...opened(), text: '/U', listed: '' };
+    state = folderKey(state, '\x7f').state!;
+    state = folderKey(state, '\x7f').state!;
+    expect(state.text).toBe('');
+    expect(applyListing(state, state.listed, home).text).toBe('');
+  });
+
+  it('처음 열 때만 홈 경로로 채운다', () => {
+    expect(opened().text).toBe('/Users/me/');
+  });
+
+  it('채워진 경로 뒤에 절대 경로를 붙여 넣거나 치면 새 경로로 본다(…/me//private → /private)', () => {
+    const typed = type(opened(), '/private/tmp');
+    expect(typed.state.text).toBe('/private/tmp');
+    const pasted = folderPaste(opened(), '/private/tmp/shop');
+    expect(pasted.state.text).toBe('/private/tmp/shop');
+  });
+
+  it('채워진 경로 뒤에 ~를 치면 홈부터 다시 쓴다', () => {
+    expect(type(opened(), '~/blog').state.text).toBe('~/blog');
   });
 });

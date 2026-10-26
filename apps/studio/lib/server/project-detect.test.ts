@@ -4,7 +4,7 @@ import path from 'node:path';
 import { loadProject } from '@b-studio/spec';
 import { CONTAINER_PROJECT_ROOT, workflowStages } from '@b-studio/agent';
 import { afterEach, describe, expect, it } from 'vitest';
-import { CONTAINER_WORKSPACE_ROOT, detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, sanitize } from './project-detect';
+import { CONTAINER_WORKSPACE_ROOT, detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, sanitize, withWorkspace } from './project-detect';
 import { excludeFromGit, projectIdFor, readRegistry, registerFolder, unregisterProject } from './project-registry';
 import { readServiceSelection } from './service-selection';
 
@@ -1277,6 +1277,94 @@ describe('generateFiles: systemPackagesByPath(도그푸딩 마찰 113, ADR-137)'
     const withoutOption = generateFiles(detection);
 
     expect(withOption).toEqual(withoutOption);
+  });
+});
+
+describe('알아보지 못한 폴더: 코드·테스트만으로 등록(#946)', () => {
+  it('지원 스택이 아니면 서비스는 비워 두고, 언어와 테스트 명령 후보를 제안한다(Node.js: package.json scripts)', async () => {
+    const root = await repo({ 'package.json': JSON.stringify({ name: 'lib', scripts: { test: 'node --test', lint: 'eslint .' } }), 'package-lock.json': '{}' });
+    const detection = await detectProject(root);
+
+    expect(detection.services).toEqual([]);
+    expect(generateFiles(detection)).toEqual([]);
+    expect(detection.workspace).toMatchObject({ language: 'Node.js', image: 'node:22-bookworm-slim' });
+    expect(detection.workspace!.candidates[0]).toMatchObject({ label: 'npm run test', command: ['sh', '-c', 'npm ci && npm run test'] });
+    expect(detection.warnings[0]).toContain('코드·테스트만으로 등록');
+  });
+
+  it('언어마다 알려진 테스트 명령을 후보로 낸다(Go·Rust·Python·Makefile)', async () => {
+    const go = await detectProject(await repo({ 'go.mod': 'module example.com/x\n\ngo 1.23\n' }));
+    expect(go.workspace).toMatchObject({ language: 'Go' });
+    expect(go.workspace!.candidates.map((candidate) => candidate.label)).toContain('go test ./...');
+
+    const rust = await detectProject(await repo({ 'Cargo.toml': '[package]\nname = "x"\n' }));
+    expect(rust.workspace).toMatchObject({ language: 'Rust' });
+    expect(rust.workspace!.candidates.map((candidate) => candidate.label)).toContain('cargo test');
+
+    const python = await detectProject(await repo({ 'pyproject.toml': '[project]\nname = "x"\n[project.optional-dependencies]\ntest = ["pytest"]\n' }));
+    expect(python.workspace).toMatchObject({ language: 'Python' });
+    expect(python.workspace!.candidates.map((candidate) => candidate.label)).toContain('python -m pytest');
+
+    const make = await detectProject(await repo({ Makefile: 'build:\n\tcc main.c\n\ntest: build\n\t./run-tests\n' }));
+    expect(make.workspace!.candidates.map((candidate) => candidate.label)).toContain('make test');
+  });
+
+  it('아무 표시도 없는 폴더도 제안은 하되 후보 없이(사람이 테스트 명령을 직접 쓴다)', async () => {
+    const detection = await detectProject(await repo({ 'README.md': '# 아무것도 없음' }));
+    expect(detection.workspace).toBeDefined();
+    expect(detection.workspace!.candidates).toEqual([]);
+  });
+
+  it('studio.yaml이 있거나 지원 스택이면 제안하지 않는다', async () => {
+    expect((await detectProject(await repo({ 'studio.yaml': 'version: 1\n' }))).workspace).toBeUndefined();
+    expect((await detectProject(await repo({ 'package.json': nextPackage }))).workspace).toBeUndefined();
+  });
+
+  it('고른 테스트 명령으로 잠자는 컨테이너 하나와 workflow.tests를 만들고, b-studio가 그대로 읽어 게이트가 test 단계를 돈다', async () => {
+    const root = await repo({ 'go.mod': 'module example.com/x\n\ngo 1.23\n' });
+    const detection = withWorkspace(await detectProject(root), ['go', 'test', './...']);
+    const files = generateFiles(detection);
+
+    const spec = files.find((file) => file.path === 'studio.yaml')!.content;
+    expect(spec).toContain('    template: workspace');
+    expect(spec).toContain('    preview: logs');
+    expect(spec).not.toContain('ready:');
+    expect(spec).toContain('    - { name: workspace-test, service: workspace, command: ["go","test","./..."] }');
+    const dockerfile = files.find((file) => file.path === GENERATED_DOCKERFILE)!.content;
+    expect(dockerfile).toContain('FROM golang:');
+    expect(dockerfile).toContain('CMD ["sleep", "infinity"]');
+    for (const file of files) expect(file.content).not.toMatch(/ADR-\d+/);
+
+    const project = await writeAndLoad(root, files);
+    expect(project.spec.services.workspace).toMatchObject({ source: 'managed', template: 'workspace', path: '.', preview: 'logs' });
+    expect(workflowStages(project)).toContain('test');
+  });
+
+  it('테스트 명령 없이는 만들지 않는다: 게이트가 완료를 확인할 길이 없어진다', async () => {
+    const detection = await detectProject(await repo({ 'README.md': '' }));
+    expect(() => withWorkspace(detection, [])).toThrow('테스트 명령');
+    expect(() => withWorkspace(detection, ['  '])).toThrow('테스트 명령');
+  });
+
+  it('registerFolder: 코드·테스트만 등록을 고르면 등록하고, 고르지 않으면 지금처럼 거절한다', async () => {
+    const root = await repo({ 'Cargo.toml': '[package]\nname = "x"\n', '.git/info/exclude': '' });
+    const registry = path.join(await repo({}), 'projects.json');
+
+    await expect(registerFolder(root, new Set(), registry)).rejects.toThrow('찾지 못했습니다');
+    await expect(registerFolder(root, new Set(), registry, { workspace: { test: [] } })).rejects.toThrow('테스트 명령');
+    expect(await readRegistry(registry)).toEqual([]);
+
+    const result = await registerFolder(root, new Set(), registry, { workspace: { test: ['cargo', 'test'] } });
+    expect(result).toMatchObject({ created: true });
+    expect(result.written.sort()).toEqual([GENERATED_DOCKERFILE, GENERATED_COMPOSE, 'studio.yaml'].sort());
+    expect(await readFile(path.join(root, 'studio.yaml'), 'utf8')).toContain('command: ["cargo","test"]');
+  });
+
+  it('지원 스택 폴더에 코드·테스트만 선택이 와도 무시하고 찾은 서비스로 등록한다', async () => {
+    const root = await repo({ 'package.json': nextPackage });
+    const registry = path.join(await repo({}), 'projects.json');
+    await registerFolder(root, new Set(), registry, { workspace: { test: ['true'] } });
+    expect(await readFile(path.join(root, 'studio.yaml'), 'utf8')).toContain('template: nextjs');
   });
 });
 

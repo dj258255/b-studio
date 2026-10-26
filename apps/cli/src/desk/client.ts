@@ -640,9 +640,9 @@ export class StudioClient {
     return this.#request('POST', '/api/projects/open', { path: folder });
   }
 
-  /** 제안한 파일을 쓰고 프로젝트로 등록한다. 같은 폴더면 있던 id를 돌려준다 */
-  registerFolder(folder: string): Promise<{ id: string; created: boolean; written: string[]; excluded: boolean }> {
-    return this.#request('POST', '/api/projects/open', { path: folder, apply: true });
+  /** 제안한 파일을 쓰고 프로젝트로 등록한다. 같은 폴더면 있던 id를 돌려준다. workspace는 코드·테스트만 등록(#946)의 테스트 명령 */
+  registerFolder(folder: string, workspace?: { test: readonly string[] }): Promise<{ id: string; created: boolean; written: string[]; excluded: boolean }> {
+    return this.#request('POST', '/api/projects/open', { path: folder, apply: true, ...(workspace ? { workspace } : {}) });
   }
 
   // ─── 탐색형 QA(#916): 웹 화면 탭의 QA가 쓰던 API 그대로. 상태는 GET으로 받는다 ───

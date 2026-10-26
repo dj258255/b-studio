@@ -20,7 +20,7 @@ import { initialState, type DeskState } from '../../apps/cli/src/desk/keys';
 import { renderScreen, type PaneView } from '../../apps/cli/src/desk/render';
 import { openSettings } from '../../apps/cli/src/desk/settings';
 import type { DeskItem } from '../../apps/cli/src/desk/types';
-import { byTightness, sessionLimits } from '../../apps/cli/src/desk/usage';
+import { sessionLimits, usageAccounts } from '../../apps/cli/src/desk/usage';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(here, '..', '..');
@@ -113,7 +113,7 @@ const spend = {
 };
 
 const base = (): DeskState =>
-  ({ ...initialState(), items, theme: { name: 'dark', depth: 'truecolor' }, sprites: {}, spriteClock: 0, usage: { accounts: byTightness(accounts as never), receivedAt: now, spend }, limits: sessionLimits(items, accounts) }) as unknown as DeskState;
+  ({ ...initialState(), items, theme: { name: 'dark', depth: 'truecolor' }, sprites: {}, spriteClock: 0, usage: { accounts: usageAccounts(accounts as never), receivedAt: now, spend }, limits: sessionLimits(items, accounts) }) as unknown as DeskState;
 
 /** 칸 화면에 넣을 가짜 CLI 출력. 실제 CLI 화면을 흉내만 낸다 */
 const green = (text: string) => `\x1b[32m${text}\x1b[39m`;
