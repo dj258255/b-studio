@@ -578,14 +578,14 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     expect(notices(ctx.io.all).at(-1)).toContain('끝남');
   });
 
-  it('고른 칸에서 보고 있는 세션은 OS 알림을 내지 않는다', async () => {
+  it('고른 칸에서 보고 있는 세션은 벨도 OS 알림도 내지 않는다(#922)', async () => {
     const ctx = setup([item('a', { state: 'working' })]);
     await openFirst(ctx);
     ctx.client.items = [item('a', { state: 'idle', terminal: { cli: 'up', waiting: 'permission' } })];
     await poll();
     expect(notices(ctx.io.all)).toEqual([]);
-    // 벨과 아래 줄 알림은 낸다
-    expect(ctx.io.all).toContain('\x07');
+    expect(ctx.io.all).not.toContain('\x07');
+    // 아래 줄 알림은 낸다
     expect(ctx.io.all).toContain('알림: Claude · 요청 a · 권한 대기');
   });
 
@@ -1440,5 +1440,92 @@ describe('desk 작업대: 여러 AI 비교(#892)', () => {
     await tick();
     expect(ctx.app.state.fleets).toBeUndefined();
     expect(ctx.app.state.message).toContain('여러 AI 비교');
+  });
+});
+
+describe('desk 작업대: 봐야 할 것 먼저(#922)', () => {
+  const OSC9 = /\x1b\]9;([^\x07]*)\x07/g;
+  const notices = (out: string): string[] => [...out.matchAll(OSC9)].map((match) => match[1]!);
+  const poll = () => tick(1_600);
+  class Store implements DeskLayoutStore {
+    saved: DeskLayout[] = [];
+    initial: DeskLayout | undefined;
+    load() {
+      return this.initial;
+    }
+    save(layout: DeskLayout) {
+      this.saved.push(layout);
+    }
+  }
+
+  it('보고 있는 칸의 CLI가 울린 벨은 밖으로 잇지 않는다', async () => {
+    const ctx = setup();
+    await openFirst(ctx);
+    await tick(600);
+    ctx.io.out = [];
+    ctx.client.data('a', 'ding\x07');
+    await tick();
+    expect(ctx.io.all).not.toContain('\x07');
+  });
+
+  it('완료 알림만 끄면 끝남은 벨·OS 알림 없이 표시만 하고, 손댈 상태는 그대로 알린다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working' }), item('c', { state: 'working' })], { notifyDone: false });
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up' } }), item('c', { state: 'working' })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual([]);
+    expect(ctx.io.all).not.toContain('\x07');
+    expect(ctx.app.state.flagged).toContain('b');
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up' } }), item('c', { state: 'idle', terminal: { cli: 'up', waiting: 'permission' } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 c · 권한 대기']);
+  });
+
+  it('입력 필요 알림만 끄면 손댈 상태는 조용하고 끝남은 알린다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working' }), item('c', { state: 'working' })], { notifyInput: false });
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up', waiting: 'permission' } }), item('c', { state: 'idle', terminal: { cli: 'up' } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 c · 끝남']);
+  });
+
+  it('보지 않은 칸에서 끝난 세션은 "안 본 끝남"으로 남아 저장되고, 그 칸을 보면 지운다', async () => {
+    const store = new Store();
+    const ctx = setup([item('a'), item('b', { state: 'working' })], { layoutStore: store });
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up' } })];
+    await poll();
+    expect(ctx.app.state.unseenDone).toEqual(['b']);
+    expect(store.saved.at(-1)).toMatchObject({ unseenDone: ['b'], flagged: ['b'] });
+    // 안 본 끝남이 쉬는 a보다 위로 온다
+    expect(ctx.app.state.items.map((entry) => entry.id)).toEqual(['b', 'a']);
+    ctx.io.type('\x02j');
+    await tick();
+    expect(ctx.app.state.slots[0]).toBe('b');
+    expect(ctx.app.state.unseenDone).toEqual([]);
+    expect(store.saved.at(-1)).toMatchObject({ unseenDone: [], flagged: [] });
+  });
+
+  it('저장해 둔 안 본 세션을 되살리고, 없어진 세션은 버린다', async () => {
+    const store = new Store();
+    store.initial = { layout: 1, slots: [undefined, undefined, undefined, undefined], focus: 0, zoom: false, sidebarHidden: false, flagged: ['a', 'gone'], unseenDone: ['b', 'gone'] };
+    const ctx = setup(undefined, { layoutStore: store });
+    await tick();
+    expect(ctx.app.state.flagged).toEqual(['a']);
+    expect(ctx.app.state.unseenDone).toEqual(['b']);
+  });
+
+  it('받은 목록을 급한 순으로 놓되, 사이드바를 고르는 동안은 순서를 지킨다', async () => {
+    const ctx = setup([item('a'), item('b')]);
+    ctx.io.type('\x02\x1b[B');
+    await tick();
+    ctx.client.items = [item('a'), item('b', { state: 'error' })];
+    await poll();
+    expect(ctx.app.state.items.map((entry) => entry.id)).toEqual(['a', 'b']);
+    // 고르기를 마치면 급한 순이다. 카드 화면에서는 마지막 키 뒤 5초를 더 기다린다
+    ctx.io.type('\x1b');
+    await tick(600);
+    await poll();
+    expect(ctx.app.state.view).toBe('space');
+    expect(ctx.app.state.items.map((entry) => entry.id)).toEqual(['a', 'b']);
+    await tick(5_000);
+    expect(ctx.app.state.items.map((entry) => entry.id)).toEqual(['b', 'a']);
   });
 });

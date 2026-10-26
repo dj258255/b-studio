@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { stringWidth, stripAnsi } from './screen';
-import { agentStatus, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, sidebarRows } from './sidebar';
+import { agentStatus, byUrgency, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, keepOrder, sidebarRows, urgencyRank } from './sidebar';
 import type { DeskItem } from './types';
 
 const base: DeskItem = { kind: 'session', id: 's1', title: '주문 목록', projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-22T00:00:00Z' };
@@ -150,5 +150,55 @@ describe('에이전트 내역과 범위(#843)', () => {
   it('허용 도구 목록이 있으면 그 목록을 보인다', () => {
     const listed: DeskItem = { ...detailed, agents: undefined, capabilities: { ...detailed.capabilities!, tools: ['Read', 'Edit'] } };
     expect(detailLines(listed)[0]!.text).toContain('도구 Read, Edit');
+  });
+});
+
+describe('봐야 할 것 먼저(#922)', () => {
+  it('끝났지만 아직 안 본 세션은 "끝남", 본 세션은 쉼(흐린 색)이다', () => {
+    const settled = { ...base, terminal: { cli: 'up' as const } };
+    expect(agentStatus(settled, { unseen: true })).toEqual({ label: '끝남', tone: 'ok' });
+    expect(agentStatus(settled)).toEqual({ label: 'CLI 대기', tone: 'muted' });
+    // 안 봤어도 작업 중이면 작업 중이다
+    expect(agentStatus({ ...base, state: 'working' }, { unseen: true }).label).toBe('작업 중');
+  });
+
+  it('주의 종류는 새 꼴(객체)과 옛 꼴(문자열, terminal.waiting)을 모두 읽는다', () => {
+    expect(agentStatus({ ...base, attention: { kind: 'permission', at: '2026-10-26T00:00:00Z' } })).toEqual({ label: '권한 대기', tone: 'warn' });
+    expect(agentStatus({ ...base, attention: { kind: 'question', at: '2026-10-26T00:00:00Z' } }).label).toBe('답 기다림');
+    expect(agentStatus({ ...base, attention: { kind: 'input', at: '2026-10-26T00:00:00Z' } })).toEqual({ label: '입력 필요', tone: 'warn' });
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'input' } }).label).toBe('입력 필요');
+    // 쉬는 중 알림은 손댈 상태가 아니다
+    expect(agentStatus({ ...base, terminal: { cli: 'up' }, attention: { kind: 'idle', at: '2026-10-26T00:00:00Z' } }).tone).toBe('muted');
+  });
+
+  it('급한 순서: 권한·질문 > 오류·검증 실패 > 끝남(안 봄) > 작업 중 > 쉼, 같으면 받은 차례', () => {
+    const items: DeskItem[] = [
+      { ...base, id: 'idle' },
+      { ...base, id: 'work', state: 'working' },
+      { ...base, id: 'done', terminal: { cli: 'up' } },
+      { ...base, id: 'err', state: 'error' },
+      { ...base, id: 'ask', terminal: { cli: 'up', waiting: 'permission' } },
+      { ...base, id: 'work2', state: 'working' },
+      { ...base, id: 'gate', attention: 'gate_failed' },
+    ];
+    expect(byUrgency(items, new Set(['done'])).map((entry) => entry.id)).toEqual(['ask', 'err', 'gate', 'done', 'work', 'work2', 'idle']);
+    expect(urgencyRank(items[0]!, false)).toBe(0);
+  });
+
+  it('고르는 동안은 앞 차례를 지키고 새 세션은 끝에 둔다', () => {
+    const before: DeskItem[] = [{ ...base, id: 'a' }, { ...base, id: 'b' }];
+    const after: DeskItem[] = [{ ...base, id: 'c' }, { ...base, id: 'b', state: 'working' }, { ...base, id: 'a' }];
+    const kept = keepOrder(before, after);
+    expect(kept.map((entry) => entry.id)).toEqual(['a', 'b', 'c']);
+    // 내용은 새 목록 것이다
+    expect(kept[1]!.state).toBe('working');
+  });
+
+  it('사이드바는 안 본 끝남을 초록 점으로 그린다', () => {
+    const rows = sidebarRows([{ ...base, terminal: { cli: 'up' } }], 0, new Map(), 30, new Set(), undefined, new Set(['s1']));
+    const session = rows.find((row) => row.item === 0)!;
+    expect(stripAnsi(session.text)).toContain('주문 목록');
+    const seen = sidebarRows([{ ...base, terminal: { cli: 'up' } }], 0, new Map(), 30, new Set()).find((row) => row.item === 0)!;
+    expect(session.text).not.toBe(seen.text);
   });
 });
