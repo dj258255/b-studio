@@ -1676,3 +1676,31 @@ describe('desk 작업대: 알림 묶기와 새 요청 따라가기(#956)', () =>
     expect(deskSessions(ctx.app.state.items)[ctx.app.state.selected]?.id).toBe('new');
   });
 });
+
+describe('desk 작업대: 끝날 때 알림은 하나(#959)', () => {
+  const OSC9 = /\x1b\]9;([^\x07]*)\x07/g;
+  const notices = (out: string): string[] => [...out.matchAll(OSC9)].map((match) => match[1]!);
+  const poll = () => tick(1_600);
+
+  it('판정이 작업 중에 먼저 오고 그 뒤 쉬어도 "검증 통과" 하나만 알리고, 안 본 끝남은 붙인다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working', terminal: { cli: 'up' } })]);
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'working', terminal: { cli: 'up' }, gate: { state: 'passed', checkpoints: 1 } })];
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up', waiting: 'idle' }, gate: { state: 'passed', checkpoints: 1 } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 검증 통과']);
+    expect(ctx.app.state.unseenDone).toContain('b');
+  });
+
+  it('"끝남"을 먼저 알린 뒤 늦게 온 "검증 통과"는 다시 울리지 않지만, 실패 판정은 알린다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working', terminal: { cli: 'up' } }), item('c', { state: 'working', terminal: { cli: 'up' } })]);
+    await poll();
+    const idle = { state: 'idle' as const, terminal: { cli: 'up' as const, waiting: 'idle' as const } };
+    ctx.client.items = [item('a'), item('b', idle), item('c', idle)];
+    await poll();
+    ctx.client.items = [item('a'), item('b', { ...idle, gate: { state: 'passed', checkpoints: 1 } }), item('c', { ...idle, gate: { state: 'failed', checkpoints: 0 } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 끝남', 'b-studio: Claude · 요청 c · 끝남', 'b-studio: Claude · 요청 c · 검증 실패']);
+  });
+});

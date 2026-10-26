@@ -17,7 +17,7 @@ import { plansHint, plansScreen } from './plans';
 import { renderRequirements, requirementsHint } from './requirements';
 import { renderSettings, settingsHint } from './settings';
 import { renderSwitcher, SWITCHER_HINT } from './switcher';
-import { agentStatus, backendLabel, deskSessions, gateStatus, sidebarRows, type SidebarRow } from './sidebar';
+import { agentStatus, backendLabel, deskSessions, gateStatus, headStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
 import type { DeskPreview } from './types';
 import { statusMark } from './widgets';
@@ -477,13 +477,16 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
     if (!id) title += '(비어 있음)';
     else if (view?.title) title += view.title;
     else if (item) {
-      const gate = gateStatus(item);
+      // 칸 머리는 카드 머리와 같은 판정을 쓴다(#959): 카드는 "쓰기 3번 거절"인데 칸 머리는 "CLI 대기"였다
+      const status = headStatus(item);
+      // 머리 상태가 이미 판정(검증 통과·실패, 쓰기 거절)이면 검증을 한 번 더 적지 않는다
+      const gate = /검증|거절|확인 필요/.test(status.label) ? undefined : gateStatus(item);
       // 좁으면 제목(사람이 쓴 요청)을 …로 줄이고 상태는 남긴다(#944). 그래도 모자라면 검증, 상태 차례로 뺀다
       const front = `${backendLabel(item.backend)} · `;
       const avail = rect.w - stringWidth(` ${slot + 1} `) - 2 - stringWidth(front);
-      const tails = [[agentStatus(item).label, ...(gate ? [gate.label] : [])], [agentStatus(item).label], []].map((parts) => (parts.length ? ` · ${parts.join(' · ')}` : ''));
+      const tails = [[status.label, ...(gate ? [gate.label] : [])], [status.label], []].map((parts) => (parts.length ? ` · ${parts.join(' · ')}` : ''));
       const tail = tails.find((candidate) => avail - stringWidth(candidate) >= Math.min(8, stringWidth(item.title))) ?? '';
-      title += `${statusMark(agentStatus(item), theme)}${head} ${front}${clipWords(item.title, Math.max(1, avail - stringWidth(tail)))}${tail}`;
+      title += `${statusMark(status, theme)}${head} ${front}${clipWords(item.title, Math.max(1, avail - stringWidth(tail)))}${tail}`;
     } else title += id;
     if (view?.mode) title += ` · ${view.mode}`;
     if (view?.bell) title += ' · 벨';
