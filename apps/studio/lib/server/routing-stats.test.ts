@@ -86,6 +86,28 @@ describe('buildRoutingStats', () => {
     expect(stats.rows[0]?.passRate).toBe(1);
   });
 
+  it('실행 끝에 실린 플랫폼 실패(샌드박스를 켜지 못함, #943)는 오류로 세지 않는다', () => {
+    const stats = buildRoutingStats({
+      sessions: [
+        {
+          sessionId: 's1',
+          backend: 'claude-code',
+          events: [
+            started('a', { backend: 'claude-code', model: 'sonnet', taskKind: simple }),
+            { type: 'run_finished', runId: 'a', status: 'error', summary: '', platformFailure: '도커에 닿지 못했습니다' } as StudioEvent,
+            started('b', { backend: 'claude-code', model: 'sonnet', taskKind: simple }),
+            checkpoint('b'),
+            finished('b', 'done'),
+          ],
+        },
+      ],
+    });
+    expect(stats.rows[0]).toMatchObject({ runs: 2, passed: 1, errors: 0, platformFailures: 1 });
+    expect(stats.rows[0]?.passRate).toBe(1);
+    expect(stats.byAccount?.[0]).toMatchObject({ errors: 0, passed: 1 });
+    expect(stats.recentFailures).toEqual([]);
+  });
+
   it('질문, 취소, 되묻기, 끝나지 않은 실행은 세지 않고 따로 알린다', () => {
     const stats = buildRoutingStats({
       sessions: [

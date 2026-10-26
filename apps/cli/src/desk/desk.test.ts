@@ -12,7 +12,7 @@ import type { DeskAccount, DeskAccountLimits, DeskFleet, DeskFleetCandidate, Des
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
 interface Call {
-  type: 'open' | 'resize' | 'input' | 'stop' | 'resume' | 'rename';
+  type: 'open' | 'resize' | 'input' | 'stop' | 'resume' | 'rename' | 'boot';
   id: string;
   data?: string;
 }
@@ -145,6 +145,9 @@ class FakeClient implements DeskClient {
   }
   async resume(id: string) {
     this.calls.push({ type: 'resume', id });
+  }
+  async boot(id: string) {
+    this.calls.push({ type: 'boot', id });
   }
   async rename(id: string, label: string) {
     this.calls.push({ type: 'rename', id, data: label });
@@ -578,6 +581,41 @@ describe('desk 작업대: 세션 조작과 알림(#864)', () => {
     ctx.client.items = [item('a', { state: 'idle' })];
     await poll();
     expect(ctx.client.of('open', 'a')).toHaveLength(2);
+  });
+
+  it('이어서 작업이 켜지지 못하면 웹 화면을 가리키지 않고 까닭과 다시 켜는 키를 칸에 적는다(#943)', async () => {
+    const ctx = setup([item('a', { state: 'stopped' })]);
+    await openFirst(ctx);
+    ctx.io.type('\x02r');
+    await tick();
+    ctx.io.type('y');
+    await tick();
+    ctx.client.items = [item('a', { state: 'error', reason: '도커에 닿지 못했습니다' })];
+    await poll();
+    const out = plain(ctx.io.all);
+    expect(out).not.toContain('웹 화면');
+    // 칸 머리가 좁아 까닭의 끝은 잘릴 수 있다. 키가 까닭보다 앞에 온다
+    expect(out).toContain('Ctrl-b r 다시 켜기 · 도커에 닿지');
+  });
+
+  it('켜지 못한 세션은 Ctrl-b r 다음 y로 샌드박스를 다시 켠다(#943)', async () => {
+    const ctx = setup([item('a', { state: 'error', reason: '도커에 닿지 못했습니다' })]);
+    await tick();
+    ctx.io.type('\x02r');
+    await tick();
+    expect(plain(ctx.io.all)).toContain('다시 켤까요');
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.of('boot').map((call) => call.id)).toEqual(['a']);
+    expect(ctx.client.of('resume')).toEqual([]);
+  });
+
+  it('작업 중이던 세션이 샌드박스를 켜지 못해 오류가 되면 권한 대기와 함께 와도 오류를 알린다(#943)', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working' })]);
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'error', reason: '도커에 닿지 못했습니다', terminal: { cli: 'up', waiting: 'permission' } })];
+    await poll();
+    expect(notices(ctx.io.all).join('\n')).toContain('오류');
   });
 
   it('Ctrl-b ,로 고른 세션의 이름을 바꾸고 목록을 새로 받는다', async () => {

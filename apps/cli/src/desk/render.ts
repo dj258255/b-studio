@@ -102,7 +102,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['[', '복사 모드: 지난 출력 올려 보기와 복사'],
   ['x', '칸 비우기(세션과 CLI는 계속 돕니다. 셸 칸은 한 번 묻고 셸을 끝냅니다)'],
   ['p', '사이드바에서 고른 세션 멈추기(한 번 묻습니다. 기록과 작업 복사본은 남습니다)'],
-  ['r', '멈춘 세션 이어서 작업(한 번 묻습니다. 켜지면 칸을 다시 엽니다)'],
+  ['r', '멈춘 세션 이어서 작업, 켜지 못한(오류) 세션은 샌드박스 다시 켜기(한 번 묻습니다)'],
   [',', '고른 세션 이름 바꾸기(비우면 이름을 지웁니다)'],
   ['q', 'desk 나가기(세션과 CLI는 계속 돕니다)'],
   ['Ctrl-b', 'Ctrl-b 글자를 CLI로 보내기'],
@@ -424,7 +424,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
           ? ` ${confirm.title}이 desk와 함께 끝납니다(세션 칸의 CLI는 계속 돕니다). 나갈까요? · y 나가기 · 다른 키 그만두기`
           : confirm.action === 'stop'
             ? ` ‹${confirm.title}› 세션을 멈출까요? CLI와 샌드박스를 내립니다(기록과 작업 복사본은 남습니다) · y 멈추기 · 다른 키 그만두기`
-            : ` ‹${confirm.title}› 세션을 이어서 작업할까요? 샌드박스를 다시 띄웁니다 · y 이어서 작업 · 다른 키 그만두기`,
+            : confirm.action === 'retry'
+              ? ` ‹${confirm.title}› 샌드박스를 다시 켤까요? 칸의 CLI는 그대로입니다 · y 다시 켜기 · 다른 키 그만두기`
+              : ` ‹${confirm.title}› 세션을 이어서 작업할까요? 샌드박스를 다시 띄웁니다 · y 이어서 작업 · 다른 키 그만두기`,
         cols,
       ),
     );

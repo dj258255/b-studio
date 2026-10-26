@@ -136,7 +136,8 @@ export interface ConfirmState {
   title: string;
 }
 
-export type SessionAction = 'stop' | 'resume';
+/** retry: 샌드박스를 켜지 못한(오류) 세션을 다시 켠다(#943). 칸의 CLI는 그대로다 */
+export type SessionAction = 'stop' | 'resume' | 'retry';
 
 export type CopyAction = 'enter' | 'up' | 'down' | 'pageUp' | 'pageDown' | 'top' | 'bottom' | 'mark' | 'yank' | 'exit' | 'search' | 'next';
 
@@ -842,7 +843,8 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     if (!item) return { ...done, message: '사이드바에 고를 세션이 없습니다' };
     if (key === ',') return { ...done, rename: { id: item.id, text: '' } };
     if (key === 'p' && item.state === 'stopped') return { ...done, message: '이미 멈춘 세션입니다(Ctrl-b r로 이어서 작업합니다)' };
-    if (key === 'r' && item.state !== 'stopped') return { ...done, message: '멈춘 세션만 이어서 작업합니다' };
+    if (key === 'r' && item.state === 'error') return { ...done, confirm: { action: 'retry', id: item.id, title: item.title } };
+    if (key === 'r' && item.state !== 'stopped') return { ...done, message: '멈춘 세션은 이어서 작업하고, 켜지 못한(오류) 세션은 다시 켭니다. 이 세션은 둘 다 아닙니다' };
     return { ...done, confirm: { action: key === 'p' ? 'stop' : 'resume', id: item.id, title: item.title } };
   }
   if (key === ESC) return done;

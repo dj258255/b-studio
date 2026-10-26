@@ -21,8 +21,8 @@ const fake = vi.hoisted(() => ({
   execCalls: [] as string[][],
   /** 이 낱말이 든 명령은 종료 코드 1로 끝난다(선언한 테스트를 실패시킬 때 쓴다) */
   failCommands: [] as string[],
-  /** 켜면 서비스 재시작이 샌드박스 쪽 문제로 실패한다 */
-  startFails: false,
+  /** 켜면 서비스 재시작이 샌드박스 쪽 문제로 실패한다. 'code'는 코드가 원인일 수 있는 실패(서비스가 준비되지 않음, #943) */
+  startFails: false as boolean | 'code',
   starts: 0,
   /** 서비스를 다시 띄운 횟수 */
   restarts: 0,
@@ -61,6 +61,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     name: 'fake',
     async start() {
       fake.starts += 1;
+      if (fake.startFails === 'code') throw new actual.SandboxError('서비스가 준비되지 않았습니다', 'readiness GET /health → 404');
       if (fake.startFails) throw new actual.SandboxError('도커에 닿지 못했습니다', 'Cannot connect to the Docker daemon', { platform: true });
       return [];
     },
@@ -693,6 +694,58 @@ describe('샌드박스를 필요할 때 켜는 세션(개인 PC 모드의 기본
     await session.gateway.prompt({ prompt: '다시 해줘' });
     expect(await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).toEqual({});
     expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('샌드박스를 켜지 못한 세션도 살아 있는 CLI에 답할 수 있다 (#943)', () => {
+  it('켜지 못한(failed) 세션의 터미널은 열린 채로 입력을 받고, 그 사이 위반도 버리지 않는다', async () => {
+    const session = await open({ lazy: true });
+    fake.startFails = true;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeDefined();
+    expect(getSnapshot(session.id)!.status).toBe('failed');
+
+    // CLI는 살아서 사람을 기다린다. 터미널을 막으면 권한 창에 답할 길이 없다
+    const target = sessionTerminalTarget(session.id);
+    expect(target.alive()).toBe(true);
+    // 켜지 못한 세션에서도 관문 위반은 기록한다(멈춘 세션처럼 버리지 않는다)
+    target.onViolation('관문 파일이 바뀌어 되돌렸습니다: settings.json');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(session.ofType('agent').some((event) => event.event.type === 'warning' && JSON.stringify(event.event).includes('settings.json'))).toBe(true);
+    fake.startFails = false;
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('검증하려는데 샌드박스를 켜지 못해 끝난 실행은 플랫폼 실패로 남고 변경은 되돌리지 않는다', async () => {
+    const session = await open({ lazy: true });
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    fake.startFails = true;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    // 훅을 거치지 않은 셸 변경(관문이 막지 못한 것)이 남은 채 턴이 끝난다
+    await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    const finished = session.ofType('run_finished');
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({ platformFailure: expect.stringContaining('도커에 닿지 못했습니다') });
+    // 체크포인트는 남지 않는다(검증하지 못한 변경은 나가지 않는다). 변경은 작업 복사본에 남아 다음 요청의 게이트가 본다
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(await readFile(path.join(session.work, 'api/src/Order.java'), 'utf8')).toContain('memo');
+    fake.startFails = false;
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('코드가 원인일 수 있는 실패(서비스가 준비되지 않음)로 켜지 못했으면 플랫폼 실패로 세지 않는다', async () => {
+    const session = await open({ lazy: true });
+    fake.startFails = 'code';
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    const finished = session.ofType('run_finished');
+    expect(finished).toHaveLength(1);
+    expect(finished[0]).toMatchObject({ status: 'error' });
+    expect(finished[0]).not.toHaveProperty('platformFailure');
+    fake.startFails = false;
     await stopSession(session.id);
   }, 30_000);
 });

@@ -11,7 +11,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
-import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect } from './keys';
+import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
 import { changesFailed, changesLoaded, openChanges, type ChangesEffect, type ChangesState, type DeskComment } from './changes';
 import { loadComments, saveComments } from './comments-store';
 import { applyListing, listingFailed, type FolderEffect, type FolderState } from './folder';
@@ -2191,12 +2191,24 @@ export class DeskApp {
   }
 
   /** 세션 멈추기·이어서 작업(#864). 이어서 작업한 세션은 켜진 뒤 칸을 다시 연다(#poll) */
-  async #sessionAction(action: 'stop' | 'resume', id: string): Promise<void> {
+  async #sessionAction(action: SessionAction, id: string): Promise<void> {
     const title = this.#state.items.find((entry) => entry.id === id)?.title ?? id;
     try {
       if (action === 'stop') {
         await this.#client.stop(id);
         this.#say(`세션을 멈췄습니다: ${title} (Ctrl-b r로 이어서 작업합니다)`);
+      } else if (action === 'retry') {
+        // 켜지 못한 세션을 다시 켠다(#943). 켜는 데 몇 분 걸릴 수 있어 먼저 알리고, 끝나면 결과를 알린다
+        if (this.#visible().includes(id)) this.#notes.set(id, '샌드박스를 다시 켜는 중');
+        this.#say(`샌드박스를 다시 켭니다: ${title} · 칸의 CLI는 그대로입니다`);
+        try {
+          await this.#call('boot')(id);
+          this.#notes.delete(id);
+          this.#say(`샌드박스를 켰습니다: ${title}`);
+        } catch (error) {
+          this.#notes.set(id, `다시 켜지 못했습니다 · Ctrl-b r 다시 켜기 · ${oneLineReason(messageOf(error))}`);
+          throw error;
+        }
       } else {
         await this.#client.resume(id);
         this.#resuming.add(id);
@@ -2205,7 +2217,7 @@ export class DeskApp {
       }
       void this.#poll();
     } catch (error) {
-      this.#say(`${action === 'stop' ? '멈추지' : '이어서 작업하지'} 못했습니다: ${messageOf(error)}`);
+      this.#say(`${action === 'stop' ? '멈추지' : action === 'retry' ? '샌드박스를 다시 켜지' : '이어서 작업하지'} 못했습니다: ${messageOf(error)}`);
     }
   }
 
@@ -2803,7 +2815,9 @@ export class DeskApp {
       this.#resuming.delete(id);
       if (!item || !this.#visible().includes(id)) continue;
       if (item.state === 'error') {
-        this.#notes.set(id, '이어서 작업하지 못했습니다 · 웹 화면에서 까닭을 보세요');
+        // 까닭은 스튜디오가 준 한 줄이다(#943). 웹 화면은 없다 — 여기서 보이고 다시 켜는 키를 적는다
+        // 칸 머리는 좁아 뒤가 잘린다. 할 일(키)을 까닭보다 앞에 둔다
+        this.#notes.set(id, `켜지 못했습니다 · Ctrl-b r 다시 켜기${item.reason ? ` · ${oneLineReason(item.reason)}` : ''}`);
         continue;
       }
       this.#notes.delete(id);
@@ -3086,13 +3100,22 @@ export class DeskApp {
 }
 
 /** 알림을 가리는 상태 이름과 게이트 판정 */
-function statusOf(item: DeskItem): { status: string; gate?: string } {
+function statusOf(item: DeskItem): { status: string; gate?: string; error?: true } {
   const gate = gateStatus(item)?.label;
-  return { status: agentStatus(item).label, ...(gate ? { gate } : {}) };
+  // 오류(샌드박스를 켜지 못함 등, #943)는 권한 대기 같은 기다림에 가려도 따로 알린다
+  return { status: agentStatus(item).label, ...(gate ? { gate } : {}), ...(item.state === 'error' ? { error: true as const } : {}) };
+}
+
+/** 칸 머리에 적을 까닭 한 줄(줄바꿈을 빼고 줄인다) */
+function oneLineReason(text: string): string {
+  const line = text.replace(/\s+/g, ' ').trim();
+  return [...line].length > 120 ? `${[...line].slice(0, 119).join('')}…` : line;
 }
 
 /** 알릴 만큼 바뀌었으면 그 문구. 손댈 상태가 먼저, 그다음 게이트 판정, 그다음 작업 끝남이다 */
-export function changeOf(before: { status: string; gate?: string }, now: { status: string; gate?: string }): string | undefined {
+export function changeOf(before: { status: string; gate?: string; error?: true }, now: { status: string; gate?: string; error?: true }): string | undefined {
+  // 오류가 먼저다(#943): 샌드박스를 켜지 못하면 권한 창에 답해도 도구가 막힌다. 무엇을 해야 하는지가 바뀐다
+  if (now.error && !before.error) return '오류';
   if (WAITING.includes(now.status) && now.status !== before.status) return now.status;
   if (now.gate && GATE_NOTICE[now.gate] && now.gate !== before.gate) return GATE_NOTICE[now.gate];
   if (before.status === '작업 중' && SETTLED.includes(now.status)) return '끝남';

@@ -80,6 +80,10 @@ export interface LaunchDeps {
   writeInstallMarker: (hash: string) => Promise<void>;
   readyTimeoutMs?: number;
   readyIntervalMs?: number;
+  /**
+   * 사람에게 예/아니오를 묻는다(#943). 터미널이 아니면(파이프·CI·에이전트) 없다 — 그때는 묻지 않고 바깥 상태를 바꾸는 일(colima start)을 하지 않는다
+   */
+  ask?: (question: string) => Promise<boolean>;
 }
 
 export interface LaunchOptions {
@@ -120,7 +124,7 @@ export function launchArgs(port: number): string[] {
 }
 
 /**
- * 스튜디오를 화면 없이 뒤에서 띄운다. 이미 떠 있으면 재사용하고, Docker가 꺼져 있으면 colima를 켠다.
+ * 스튜디오를 화면 없이 뒤에서 띄운다. 이미 떠 있으면 재사용하고, Docker가 꺼져 있으면 물어서 colima를 켠다(묻지 못하면 켜는 법만 알린다).
  * 브라우저는 열지 않는다(화면은 터미널 작업대뿐, ADR-186). 실패하면 로그 끝을 보여 주고 종료 코드 1.
  */
 export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promise<number> {
@@ -168,7 +172,14 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
       console.error('Docker를 켤 수 없습니다. Docker Desktop이나 colima를 켜세요(colima가 있으면 `colima start`).');
       return 1;
     }
-    info('Docker가 꺼져 있어 colima를 시작합니다… (colima start)');
+    // colima start는 VM을 켜거나(처음이면) 새로 만든다. 다른 프로젝트와 함께 쓰는 VM이라 묻고 켠다(#943).
+    // 물을 수 없으면(터미널이 아님) 켜지 않고 켜는 법만 알린다 — HOME이 다른 환경에서 새 VM을 만들려 한 적이 있다
+    const agreed = deps.ask ? await deps.ask('Docker가 꺼져 있습니다. colima를 켤까요? (colima start)') : false;
+    if (!agreed) {
+      console.error('Docker가 꺼져 있습니다. `colima start`(또는 Docker Desktop)로 켠 뒤 다시 실행하세요.');
+      return 1;
+    }
+    info('colima를 시작합니다… (colima start)');
     const started = await deps.exec('colima', ['start']);
     if (started.stdout.trim()) info(started.stdout.trimEnd());
     if (started.stderr.trim()) console.error(started.stderr.trimEnd());
@@ -366,7 +377,21 @@ export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform:
     killGroup: (pid, signal) => {
       process.kill(-pid, signal);
     },
+    // 입력과 출력이 모두 터미널일 때만 묻는다(#943)
+    ...(process.stdin.isTTY && process.stderr.isTTY ? { ask: askYesNo } : {}),
   };
+}
+
+/** 터미널에서 예/아니오를 묻는다. 빈 답은 예다 */
+async function askYesNo(question: string): Promise<boolean> {
+  const { createInterface } = await import('node:readline/promises');
+  const prompt = createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const answer = (await prompt.question(`${question} [Y/n] `)).trim().toLowerCase();
+    return answer === '' || answer === 'y' || answer === 'yes' || answer === '예' || answer === 'ㅛ';
+  } finally {
+    prompt.close();
+  }
 }
 
 /** CLI 진입점. 실제 deps로 runLaunch를 부른다 */

@@ -34,6 +34,8 @@ function harness(
     lockHash?: string;
     /** 마지막 설치 표지에 적혀 있던 해시 */
     installMarker?: string;
+    /** 사람에게 묻는 답(#943). 생략하면 묻지 못하는 환경(터미널이 아님)이다 */
+    answer?: boolean;
   } = {},
 ): Harness {
   const probes: string[] = [];
@@ -74,6 +76,7 @@ function harness(
     },
     readyTimeoutMs: 3,
     readyIntervalMs: 1,
+    ...(options.answer === undefined ? {} : { ask: async () => options.answer! }),
   };
   return { deps, probes, execs, spawns, killed, markerWrites };
 }
@@ -148,8 +151,27 @@ describe('runLaunch', () => {
     expect(h.spawns).toEqual([]);
   });
 
-  it('Docker가 꺼져 있고 colima가 있으면 colima start 후 띄우고, 모드·환경 변수를 넘긴다', async () => {
-    const h = harness({ probe: [down, health], exec: [FAIL, OK, { code: 0, stdout: 'colima started', stderr: '' }] });
+  it('Docker가 꺼져 있고 colima가 있어도 묻지 못하는 환경이면 colima를 켜지 않고 켜는 법을 알린다(#943)', async () => {
+    const h = harness({ probe: [down], exec: [FAIL, OK] });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(1);
+    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'colima version']);
+    expect(errors.mock.calls.flat().join('\n')).toContain('colima start');
+    expect(h.spawns).toEqual([]);
+  });
+
+  it('Docker가 꺼져 있고 colima를 켤지 물어 아니라고 하면 켜지 않는다(#943)', async () => {
+    const h = harness({ probe: [down], exec: [FAIL, OK], answer: false });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(1);
+    expect(h.execs.map((entry) => entry.args.join(' '))).not.toContain('start');
+    expect(h.spawns).toEqual([]);
+  });
+
+  it('Docker가 꺼져 있고 colima가 있으면 물어서 그러라고 할 때 colima start 후 띄우고, 모드·환경 변수를 넘긴다', async () => {
+    const h = harness({ probe: [down, health], exec: [FAIL, OK, { code: 0, stdout: 'colima started', stderr: '' }], answer: true });
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3123 }, h.deps)).toBe(0);
