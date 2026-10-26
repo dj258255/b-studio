@@ -3,7 +3,7 @@
  * 고른 세션이 든 스페이스 아래에만 그 세션들을 한 줄씩 짧게 편다. 세션의 자세한 내용(지금 하는 일, 서브에이전트, 게이트, 토큰)은 스페이스 화면의 카드에 있다
  */
 import { fit, fitAnsi } from './screen';
-import { fg, RESET, DEFAULT_THEME, type Theme } from './theme';
+import { fg, RESET, DEFAULT_THEME, type ColorToken, type Theme } from './theme';
 import type { DeskAgent, DeskItem, DeskUsage } from './types';
 import { statusMark } from './widgets';
 
@@ -12,6 +12,8 @@ export type Tone = 'warn' | 'busy' | 'ok' | 'fail' | 'muted';
 export interface StatusBadge {
   label: string;
   tone: Tone;
+  /** 같은 급함 안에서 종류를 가르는 색(답 기다림은 보라, 입력 필요는 청록, #921). 없으면 tone의 색 */
+  color?: ColorToken;
 }
 
 export interface SidebarRow {
@@ -60,8 +62,8 @@ export function detailLines(item: DeskItem): DetailLine[] {
   const subagents = (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
   for (const agent of subagents.slice(0, SUBAGENT_LINES)) {
     const state = AGENT_STATE[agent.state];
-    const parts = [`토큰 ${totalTokens(agent.tokens).toLocaleString('ko-KR')}`, ...(agent.activity ? [agent.activity] : [])];
-    lines.push({ text: `↳ ${agent.name} ${state.label} · ${parts.join(' · ')}`, tones: [{ text: state.label, tone: state.tone }] });
+    const parts = [...(agent.tool ? [agent.tool] : []), `토큰 ${totalTokens(agent.tokens).toLocaleString('ko-KR')}`, ...(agent.activity ? [agent.activity] : [])];
+    lines.push({ text: `↳ ${subagentName(agent)} ${state.label} · ${parts.join(' · ')}`, tones: [{ text: state.label, tone: state.tone }] });
   }
   if (subagents.length > SUBAGENT_LINES) lines.push({ text: `↳ 외 ${subagents.length - SUBAGENT_LINES}개`, tones: [] });
   const capabilities = item.capabilities;
@@ -71,6 +73,11 @@ export function detailLines(item: DeskItem): DetailLine[] {
     lines.push({ text: `권한 ${capabilities.permission}`, tones: [] });
   }
   return lines;
+}
+
+/** 서브에이전트를 부르는 말: 종류와 맡긴 일(#921). 옛 서버는 이름만 준다 */
+export function subagentName(agent: DeskAgent): string {
+  return [agent.type ?? agent.name, agent.description].filter(Boolean).join(' ');
 }
 
 const BACKEND_LABEL: Record<string, string> = {
@@ -128,16 +135,21 @@ export function deskSpaces(items: readonly DeskItem[], unseen: ReadonlySet<strin
   return spaces;
 }
 
-/** 터미널 CLI가 사람을 부른 까닭. 새 서버의 주의 객체(#926), 옛 서버의 terminal.waiting, 개입 사유 문자열 차례로 본다 */
+/** 터미널 CLI가 사람을 부른 까닭. terminal.waiting(#920), 옛 서버의 개입 사유 문자열 차례로 본다 */
 export function attentionKind(item: DeskItem): 'permission' | 'question' | 'input' | 'approval' | 'idle' | undefined {
-  if (item.attention && typeof item.attention === 'object') return item.attention.kind;
   if (item.terminal?.waiting) return item.terminal.waiting;
   if (item.attention === 'question') return 'question';
   if (item.attention === 'approval') return 'approval';
   return undefined;
 }
 
-const ATTENTION: Record<'permission' | 'question' | 'input' | 'approval', string> = { permission: '권한 대기', question: '답 기다림', input: '입력 필요', approval: '승인 대기' };
+/** 기다림의 글과 색: 권한은 노랑(급함의 색), 답은 보라, 입력 필요는 청록(#921) */
+const ATTENTION: Record<'permission' | 'question' | 'input' | 'approval', { label: string; color?: ColorToken }> = {
+  permission: { label: '권한 대기' },
+  question: { label: '답 기다림', color: 'purple' },
+  input: { label: '입력 필요', color: 'teal' },
+  approval: { label: '승인 대기' },
+};
 
 /**
  * 에이전트가 지금 무엇을 하는가. 사람이 손대야 하는 것(권한·답·입력)을 먼저 본다.
@@ -145,7 +157,10 @@ const ATTENTION: Record<'permission' | 'question' | 'input' | 'approval', string
  */
 export function agentStatus(item: DeskItem, options: { unseen?: boolean } = {}): StatusBadge {
   const kind = attentionKind(item);
-  if (kind && kind !== 'idle') return { label: ATTENTION[kind], tone: 'warn' };
+  if (kind && kind !== 'idle') {
+    const { label, color } = ATTENTION[kind];
+    return { label, tone: 'warn', ...(color ? { color } : {}) };
+  }
   if (item.state === 'working') return { label: '작업 중', tone: 'busy' };
   if (item.state === 'booting') return { label: '켜는 중', tone: 'busy' };
   if (item.state === 'error') return { label: '오류', tone: 'fail' };
