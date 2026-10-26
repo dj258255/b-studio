@@ -42,17 +42,23 @@ const items: DeskItem[] = [
   {
     kind: 'session', id: 's-order', title: '주문 모듈 리팩터링', projectName: 'shop', state: 'working', backend: 'claude-code', accountId: 'acct-pio', lastActivityAt: at(0),
     terminal: { cli: 'up' }, gate: { state: 'passed', checkpoints: 3 }, tokens: usage(152_000, 30_000), costUsd: 1.37,
+    now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 12_000).toISOString() },
+    todos: { done: 3, total: 7, current: '주문 상태 전이 테스트' },
+    context: { usedPct: 41, used: 82_000, size: 200_000 },
+    lastMessage: '주문 상태를 한 곳에서 바꾸게 묶었습니다. 이제 전이 테스트를 씁니다.',
     agents: [
       { id: 'main', name: 'Claude Code', kind: 'main', state: 'working', activity: 'Edit apps/shop/order.ts', tokens: usage(129_000, 25_000) },
-      { id: 'sub-1', name: 'Explore', kind: 'subagent', state: 'working', activity: '파일 12개 읽음', tokens: usage(20_000, 3_000) },
+      { id: 'sub-1', name: 'Explore', type: 'Explore', description: '주문 호출부 찾기', tool: 'Grep updateOrder', kind: 'subagent', state: 'working', activity: '파일 12개 읽음', tokens: usage(20_000, 3_000) },
     ],
   },
   {
     kind: 'session', id: 's-pay', title: '결제 테스트 보강', projectName: 'shop', state: 'working', backend: 'codex', accountId: 'codex', lastActivityAt: at(-1),
-    terminal: { cli: 'up', waiting: 'permission' }, gate: { state: 'verifying', checkpoints: 1 }, tokens: usage(55_000, 9_000),
+    terminal: { cli: 'up', waiting: 'permission', message: 'pnpm test 실행 허락' }, gate: { state: 'verifying', checkpoints: 1 }, tokens: usage(55_000, 9_000),
+    todos: { done: 5, total: 6, current: '환불 경계값' },
+    context: { usedPct: 83 },
     agents: [{ id: 'main', name: 'Codex', kind: 'main', state: 'working', activity: 'pnpm test 실행 권한을 묻는 중', tokens: usage(55_000, 9_000) }],
   },
-  { kind: 'session', id: 's-readme', title: 'README 사진 다시 찍기', projectName: 'shop', state: 'done', backend: 'claude-code', accountId: 'acct-eri', lastActivityAt: at(-48), terminal: { cli: 'down' }, gate: { state: 'passed', checkpoints: 2 }, tokens: usage(36_000, 5_000) },
+  { kind: 'session', id: 's-readme', title: 'README 사진 다시 찍기', projectName: 'shop', state: 'done', backend: 'claude-code', accountId: 'acct-eri', lastActivityAt: at(-48), terminal: { cli: 'down' }, gate: { state: 'passed', checkpoints: 2 }, tokens: usage(36_000, 5_000), lastMessage: '사진 네 장을 다시 찍어 docs/images에 넣었습니다.' },
   { kind: 'session', id: 's-login', title: '로그인 오류 고치기', projectName: 'shop', state: 'idle', backend: 'codex', accountId: 'codex', lastActivityAt: at(-7), terminal: { cli: 'up' }, gate: { state: 'failed', checkpoints: 2 }, reason: '로그인 API 계약 테스트 2개 실패', tokens: usage(20_000, 3_000) },
   { kind: 'session', id: 's-blog', title: '글 목록 페이지', projectName: 'blog', state: 'stopped', backend: 'claude-code', lastActivityAt: at(-300) },
 ];
