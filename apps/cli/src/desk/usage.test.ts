@@ -107,31 +107,96 @@ describe('계정 카드', () => {
 describe('사용량 화면', () => {
   const rect = { x: 33, y: 1, w: 87, h: 28 };
   const state = (patch: Partial<DeskState> = {}): DeskState => ({ ...initialState(), view: 'usage', ...patch });
+  const boxes = (plain: string[]) => plain.filter((line) => line.includes('╭')).length;
 
-  it('맨 위에 제목과 요약, 그 아래 계정마다 카드를 놓는다. 줄마다 본문 폭이다', () => {
+  it('맨 위에 제목과 요약, 그 아래 머리줄과 계정마다 한 줄을 놓는다. 줄마다 본문 폭이다', () => {
     const screen = usageScreen(state({ usage: { accounts: [account(), marco, gemini] } }), rect, NOW);
     const plain = screen.lines.map(stripAnsi);
     expect(plain).toHaveLength(rect.h);
     for (const line of plain) expect(stringWidth(line)).toBe(rect.w);
     expect(plain[0]).toMatch(/^ +사용량 +Claude 1\/1 연결 · Codex 1\/1 연결 · Gemini/);
-    expect(plain.join('\n')).toContain('피오');
-    expect(plain.join('\n')).toContain('마르코');
+    expect(plain[2]).toMatch(/계정 +AI +요금제 +5시간 +주간 +다시 참 +상태/);
     expect(screen.cards.map((card) => card.index)).toEqual([0, 1, 2]);
-    expect(screen.cards[0]!.rect.y).toBe(rect.y + 2);
+    expect(screen.cards.map((card) => card.rect.y)).toEqual([rect.y + 3, rect.y + 4, rect.y + 5]);
+    for (const card of screen.cards) expect(card.rect.h).toBe(1);
   });
 
-  it('고른 계정의 카드가 보이게 아래로 내린다', () => {
+  it('계정 줄: 이름·AI·요금제·5시간 %·주간 %·가장 빠듯한 창이 다시 차는 때·상태', () => {
+    const plain = usageScreen(state({ usage: { accounts: [account(), marco, gemini] } }), rect, NOW).lines.map(stripAnsi);
+    expect(plain[3]).toMatch(/피오 +Claude +Max 20x +[█▏▎▍▌▋▊▉ ]+37% +[█▏▎▍▌▋▊▉ ]+90% +3일 뒤.* +▲ 주의/);
+    // 5시간 창이 없는 계정은 그 칸을 비워 두고(─), 한도가 없는 CLI는 해당 없음
+    expect(plain[4]).toMatch(/마르코 +Codex +Pro +─ +.*26% +.*✓ 여유/);
+    expect(plain[5]).toMatch(/기본 +Gemini +─ +─ +· 해당 없음/);
+    // 가장 긴 상태 글도 잘리지 않는다
+    const spent = account({ id: 'spent', name: '에리', status: 'exhausted', windows: [{ kind: 'weekly', usedPercent: 100, resetsAt: later(3 * 24 * 60) }] });
+    expect(usageScreen(state({ usage: { accounts: [spent] } }), rect, NOW).lines.map(stripAnsi)[3]).toContain('× 주간 다 씀');
+  });
+
+  it('고른 계정 하나만 아래에 그림 카드로 자세히 보인다', () => {
+    const first = usageScreen(state({ usage: { accounts: [account(), marco, gemini] }, usageSelected: 0 }), rect, NOW).lines.map(stripAnsi);
+    expect(boxes(first)).toBe(1);
+    const card = first.slice(first.findIndex((line) => line.includes('╭')));
+    expect(card.join('\n')).toContain('피오');
+    expect(card.join('\n')).toContain('1시간 50분 뒤');
+    const second = usageScreen(state({ usage: { accounts: [account(), marco, gemini] }, usageSelected: 1 }), rect, NOW).lines.map(stripAnsi);
+    const other = second.slice(second.findIndex((line) => line.includes('╭')));
+    expect(other.join('\n')).toContain('마르코');
+    expect(other.join('\n')).not.toContain('피오');
+    // 고른 줄은 앞에 표시가 붙는다
+    expect(second[4]).toMatch(/^ *▸ 마르코/);
+    expect(second[3]).not.toContain('▸');
+  });
+
+  it('계정 여덟 개도 한 화면에 모두 들어가고 고른 계정의 카드도 보인다', () => {
     const many = Array.from({ length: 8 }, (_, index) => account({ id: `acct-${index}`, name: `계정${index}` }));
     const screen = usageScreen(state({ usage: { accounts: many }, usageSelected: 7 }), rect, NOW);
-    expect(screen.lines.map(stripAnsi).join('\n')).toContain('계정7');
+    const plain = screen.lines.map(stripAnsi);
+    for (let index = 0; index < 8; index++) expect(plain.some((line) => line.includes(`계정${index} `))).toBe(true);
+    expect(screen.cards.map((card) => card.index)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    expect(boxes(plain)).toBe(1);
+  });
+
+  it('높이가 모자라면 카드를 빼고, 그래도 모자라면 고른 줄이 보이게 내린다', () => {
+    const many = Array.from({ length: 8 }, (_, index) => account({ id: `acct-${index}`, name: `계정${index}` }));
+    const screen = usageScreen(state({ usage: { accounts: many }, usageSelected: 7 }), { ...rect, h: 8 }, NOW);
+    const plain = screen.lines.map(stripAnsi);
+    expect(plain).toHaveLength(8);
+    expect(boxes(plain)).toBe(0);
     expect(screen.cards.some((card) => card.index === 7)).toBe(true);
     expect(screen.cards.some((card) => card.index === 0)).toBe(false);
+  });
+
+  it('좁으면 요금제, 다시 참, 막대, AI 차례로 뺀다. 이름·%·상태는 남는다', () => {
+    const at = (w: number) => usageScreen(state({ usage: { accounts: [account(), marco] } }), { ...rect, w }, NOW).lines.map(stripAnsi);
+    const wide = at(87);
+    expect(wide[2]).toContain('요금제');
+    const mid = at(74);
+    for (const line of mid) expect(stringWidth(line)).toBe(74);
+    expect(mid[2]).not.toContain('요금제');
+    expect(mid[2]).toContain('다시 참');
+    const narrow = at(58);
+    expect(narrow[2]).not.toContain('다시 참');
+    expect(narrow[3]).toMatch(/[█▏▎▍▌▋▊▉]/);
+    const tight = at(46);
+    for (const line of tight) expect(stringWidth(line)).toBe(46);
+    expect(tight[2]).toContain('AI');
+    expect(tight[3]).not.toMatch(/[█▏▎▍▌▋▊▉]/);
+    expect(tight[3]).toMatch(/피오 .*37% +90% +▲ 주의/);
+    const tiny = at(30);
+    expect(tiny[2]).not.toContain('AI');
+    expect(tiny[3]).toMatch(/피오.*37%.*90%/);
   });
 
   it('아직 읽지 않았으면 읽는 중, 읽지 못했으면 그 까닭, 사용량을 모르는 스튜디오면 그렇다고 보인다', () => {
     expect(usageScreen(state(), rect, NOW).lines.map(stripAnsi).join('\n')).toContain('사용량을 읽는 중');
     expect(usageScreen(state({ usage: { accounts: [], error: '스튜디오가 500으로 답했습니다' } }), rect, NOW).lines.map(stripAnsi).join('\n')).toContain('스튜디오가 500으로 답했습니다');
     expect(usageScreen(state({ usage: { accounts: [], unsupported: true } }), rect, NOW).lines.map(stripAnsi).join('\n')).toContain('사용량을 알려 주지 않는 스튜디오');
+  });
+
+  it('읽지 못한 계정은 줄에서 그렇다고 적는다', () => {
+    const failed = account({ id: 'acct-x', name: '실패', status: 'unknown', windows: [], error: '토큰이 만료됐습니다' });
+    const plain = usageScreen(state({ usage: { accounts: [failed] } }), rect, NOW).lines.map(stripAnsi);
+    expect(plain[3]).toMatch(/실패 .*─ +─ +! 읽지 못함/);
   });
 
   it('계정 그림은 사용량 화면의 그림 자리(acct:id)에서 찾는다', () => {
@@ -205,17 +270,18 @@ describe('오늘·최근 7일 쓴 양(#925)', () => {
     week: totals({ tokens: 4_000_000, costUsd: 6, estimated: true }),
   };
 
-  it('요약 아래에 오늘·7일 합계와 오늘 모델별 줄을 보이고, 추정과 단가 없음을 숨기지 않는다', () => {
+  it('요약 아래에 오늘·7일 합계 한 줄, 고른 계정의 카드에 그 CLI의 오늘·7일과 모델 줄을 보이고, 추정과 단가 없음을 숨기지 않는다', () => {
     const screen = usageScreen({ ...initialState(), view: 'usage', usage: { accounts: [account()], spend } }, rect, NOW);
     const plain = screen.lines.map(stripAnsi);
     for (const line of plain) expect(stringWidth(line)).toBe(rect.w);
-    const text = plain.join('\n');
-    expect(text).toMatch(/오늘 +300만 토큰 · 합계 비용 없음 +7일 +\$6\.00 추정 포함 · 400만 토큰/);
-    expect(text).toMatch(/Codex +gpt-5\.5 +200만 +\$2\.00 추정/);
-    expect(text).toMatch(/Claude +claude-opus-5-5 +100만 +\$3\.00/);
-    expect(text).toMatch(/Gemini +gemini-3-pro +1만 +단가 없음/);
-    expect(text).toContain('B_STUDIO_TOKEN_PRICES_JSON');
-    expect(screen.cards[0]!.rect.y).toBeGreaterThan(rect.y + 2);
+    expect(plain[1]).toMatch(/오늘 +300만 토큰 · 합계 비용 없음 +7일 +\$6\.00 추정 포함 · 400만 토큰/);
+    expect(plain.join('\n')).toContain('B_STUDIO_TOKEN_PRICES_JSON');
+    const card = plain.slice(plain.findIndex((line) => line.includes('╭'))).join('\n');
+    expect(card).toMatch(/Claude 전체 +오늘 +\$3\.00 · 100만 토큰/);
+    expect(card).toMatch(/claude-opus-5-5 +100만 +\$3\.00/);
+    // 다른 CLI의 모델 줄은 이 계정의 카드에 넣지 않는다
+    expect(card).not.toContain('gpt-5.5');
+    expect(screen.cards[0]!.rect.y).toBeGreaterThan(rect.y + 3);
   });
 
   it('쓴 것이 없으면 합계 한 줄만', () => {
