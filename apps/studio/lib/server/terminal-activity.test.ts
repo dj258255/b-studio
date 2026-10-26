@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityView, newTerminalActivity, noteActivityHook, noteStatusline, noteToolUse, noteTurnEnded, noteTurnStarted, toolTarget } from './terminal-activity';
+import { activityView, newTerminalActivity, noteActivityHook, noteCliEnded, noteStatusline, noteToolUse, noteTurnEnded, noteTurnStarted, toolTarget } from './terminal-activity';
 
 // 에이전트가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 훅 입력에서 만든다
 
@@ -36,7 +36,7 @@ describe('지금 하는 일(now)', () => {
     noteToolUse(state, { agent_id: 'a1', agent_type: 'Explore', tool_name: 'Grep', tool_input: { pattern: 'x' } }, AT + 1);
     const view = activityView(state)!;
     expect(view.now).toBeUndefined();
-    expect(view.subagents).toEqual([{ id: 'a1', type: 'Explore', state: 'working', tool: 'Grep' }]);
+    expect(view.subagents).toEqual([{ id: 'a1', type: 'Explore', state: 'working', tool: 'Grep', startedAt: '2026-10-26T10:00:00.000Z', lastAt: '2026-10-26T10:00:00.001Z' }]);
   });
 
   it('도구 이름이 없거나 문자열이 아니면 무시한다(바깥에서 온 값)', () => {
@@ -127,8 +127,8 @@ describe('서브에이전트', () => {
     noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a2', agent_type: 'Explore' }, AT);
     noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1', agent_type: 'Explore' }, AT);
     expect(activityView(state)?.subagents).toEqual([
-      { id: 'a1', type: 'Explore', description: '훅 찾기', state: 'done' },
-      { id: 'a2', type: 'Explore', description: '테스트 찾기', state: 'working' },
+      { id: 'a1', type: 'Explore', description: '훅 찾기', state: 'done', startedAt: '2026-10-26T10:00:00.000Z', lastAt: '2026-10-26T10:00:00.000Z' },
+      { id: 'a2', type: 'Explore', description: '테스트 찾기', state: 'working', startedAt: '2026-10-26T10:00:00.000Z', lastAt: '2026-10-26T10:00:00.000Z' },
     ]);
   });
 
@@ -144,5 +144,66 @@ describe('서브에이전트', () => {
     const state = newTerminalActivity();
     for (let i = 0; i < 40; i += 1) noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: `a${i}`, agent_type: 'Explore' }, AT);
     expect(activityView(state)?.subagents).toHaveLength(30);
+  });
+});
+
+describe('시각(#933): 몇 분째, 도구가 도는 중, 마지막 소식', () => {
+  const iso = (ms: number) => new Date(ms).toISOString();
+
+  it('요청이 시작되면 workingSince, 턴이 끝나거나 CLI가 내려가면 지운다', () => {
+    const state = newTerminalActivity();
+    noteTurnStarted(state, AT);
+    expect(activityView(state)?.workingSince).toBe(iso(AT));
+    noteTurnEnded(state, {}, AT + 60_000);
+    expect(activityView(state)?.workingSince).toBeUndefined();
+    noteTurnStarted(state, AT + 120_000);
+    noteCliEnded(state);
+    expect(activityView(state)?.workingSince).toBeUndefined();
+  });
+
+  it('도구 끝 훅(PostToolUse)을 받는 CLI에서는 now.running이 시작에 true, 끝에 false다', () => {
+    const state = newTerminalActivity();
+    // 끝 훅을 한 번도 받지 않은 CLI(Codex 등)는 도는 중인지 모르므로 running을 싣지 않는다
+    noteToolUse(state, { tool_name: 'Bash', tool_input: { command: 'pnpm test' } }, AT);
+    expect(activityView(state)?.now).not.toHaveProperty('running');
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash' }, AT + 1000);
+    expect(activityView(state)?.now).toMatchObject({ tool: 'Bash', running: false });
+    noteToolUse(state, { tool_name: 'Bash', tool_input: { command: 'pnpm build' } }, AT + 2000);
+    expect(activityView(state)?.now).toMatchObject({ target: 'pnpm build', running: true, at: iso(AT + 2000) });
+    noteActivityHook(state, { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash' }, AT + 3000);
+    expect(activityView(state)?.now).toMatchObject({ running: false });
+  });
+
+  it('다른 도구의 끝 훅은 지금 도는 도구를 끝내지 않는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Read' }, AT);
+    noteToolUse(state, { tool_name: 'Bash', tool_input: { command: 'pnpm test' } }, AT + 1000);
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Read' }, AT + 2000);
+    expect(activityView(state)?.now).toMatchObject({ tool: 'Bash', running: true });
+  });
+
+  it('lastAt은 훅마다 갱신되고 상태 줄 갱신은 활동으로 치지 않는다', () => {
+    const state = newTerminalActivity();
+    noteTurnStarted(state, AT);
+    noteToolUse(state, { tool_name: 'Read', tool_input: { file_path: 'a.ts' } }, AT + 5000);
+    expect(activityView(state)?.lastAt).toBe(iso(AT + 5000));
+    noteStatusline(state, { context_window: { used_percentage: 10 } });
+    expect(activityView(state)?.lastAt).toBe(iso(AT + 5000));
+    noteActivityHook(state, { hook_event_name: 'TaskCreated', task_id: 't1', task_subject: '테스트' }, AT + 9000);
+    expect(activityView(state)?.lastAt).toBe(iso(AT + 9000));
+  });
+
+  it('서브에이전트 행의 startedAt·lastAt: 시작, 그 안의 도구, 도구 끝, 멈춤에서 갱신', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
+    expect(activityView(state)?.subagents?.[0]).toMatchObject({ startedAt: iso(AT), lastAt: iso(AT) });
+    noteToolUse(state, { agent_id: 'a1', tool_name: 'Grep', tool_input: { pattern: 'x' } }, AT + 4000);
+    expect(activityView(state)?.subagents?.[0]).toMatchObject({ startedAt: iso(AT), lastAt: iso(AT + 4000), tool: 'Grep' });
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', agent_id: 'a1', tool_name: 'Grep' }, AT + 6000);
+    expect(activityView(state)?.subagents?.[0]).toMatchObject({ lastAt: iso(AT + 6000) });
+    // 서브에이전트 안의 도구 끝은 메인의 지금 하는 일을 건드리지 않는다
+    expect(activityView(state)?.now).toBeUndefined();
+    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1' }, AT + 8000);
+    expect(activityView(state)?.subagents?.[0]).toMatchObject({ state: 'done', lastAt: iso(AT + 8000) });
   });
 });

@@ -54,6 +54,8 @@ export interface DeskNow {
   /** Bash는 명령 첫 줄, 파일 도구는 경로, Grep은 패턴, Agent는 설명 */
   target?: string;
   at: string;
+  /** 도구가 아직 끝나지 않았다(#933). 도구 끝 훅을 보내는 CLI에서만 온다. 없으면 모른다 */
+  running?: boolean;
 }
 
 export interface DeskTodos {
@@ -89,6 +91,10 @@ export interface DeskAgent {
   description?: string;
   /** 지금 쓰는 도구와 대상 한 줄 */
   tool?: string;
+  /** 서브에이전트가 시작한 시각(#933) */
+  startedAt?: string;
+  /** 서브에이전트의 마지막 소식 시각(#933) */
+  lastAt?: string;
   tokens: DeskUsage;
   costUsd?: number;
 }
