@@ -170,4 +170,17 @@ describe('시각(#933)', () => {
     expect(item(source({ live: { lastAt: '2026-10-22T10:00:00.000Z' } })).lastActivityAt).toBe('2026-10-22T11:00:00.000Z');
     expect(item(source())).not.toHaveProperty('workingSince');
   });
+
+  it('작업 중인 터미널 세션의 마지막 활동은 CLI 훅의 시각만 센다: 서버가 낸 경고·자원 이벤트로 당겨지지 않는다(#955)', () => {
+    // 06:07:49 이후 CLI는 조용한데 서버의 정체 경고(06:11:20)가 기록 시각을 당겼다(2차 실사용 점검)
+    const working = snapshot({ running: true });
+    const got = item(source({ snapshot: working, updatedAt: '2026-10-26T06:11:20.000Z', live: { lastAt: '2026-10-26T06:07:49.000Z', workingSince: '2026-10-26T06:05:20.000Z' } }));
+    expect(got.state).toBe('working');
+    expect(got.lastActivityAt).toBe('2026-10-26T06:07:49.000Z');
+  });
+
+  it('턴에서 거절된 쓰기 수(turnDenied)를 싣는다(#955)', () => {
+    expect(item(source({ live: { turnDenied: 3 } })).turnDenied).toBe(3);
+    expect(item(source())).not.toHaveProperty('turnDenied');
+  });
 });

@@ -1309,6 +1309,17 @@ describe('알아보지 못한 폴더: 코드·테스트만으로 등록(#946)', 
     expect(make.workspace!.candidates.map((candidate) => candidate.label)).toContain('make test');
   });
 
+  it('C·C++ 저장소를 알아본다: 맨 위의 소스 파일이나 CMake(#955)', async () => {
+    const make = await detectProject(await repo({ Makefile: 'test:\n\t./run-tests\n', 'main.c': 'int main(void) { return 0; }\n' }));
+    expect(make.workspace).toMatchObject({ language: 'C/C++' });
+    expect(make.workspace!.candidates.map((candidate) => candidate.label)).toContain('make test');
+
+    const cmake = await detectProject(await repo({ 'CMakeLists.txt': 'cmake_minimum_required(VERSION 3.20)\nproject(x CXX)\nenable_testing()\n', 'src/a.cpp': 'int a() { return 1; }\n' }));
+    expect(cmake.workspace).toMatchObject({ language: 'C/C++(CMake)' });
+    expect(cmake.workspace!.candidates.map((candidate) => candidate.label)).toContain('ctest');
+    expect(cmake.workspace!.dockerfile).toContain('cmake');
+  });
+
   it('아무 표시도 없는 폴더도 제안은 하되 후보 없이(사람이 테스트 명령을 직접 쓴다)', async () => {
     const detection = await detectProject(await repo({ 'README.md': '# 아무것도 없음' }));
     expect(detection.workspace).toBeDefined();

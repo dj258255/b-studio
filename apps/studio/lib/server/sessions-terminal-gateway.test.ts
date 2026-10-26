@@ -1354,7 +1354,8 @@ describe('터미널의 사람 기다림을 알린다 (B7)', () => {
     expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Do you want to create api/src/Order.java?' });
     expect(session.ofType('terminal_attention')).toMatchObject([{ kind: 'permission_prompt', message: 'Do you want to create api/src/Order.java?' }]);
 
-    // 사람이 확인하고 CLI가 도구를 쓴다 → 신호가 왔으니 표시가 풀린다
+    // 사람이 확인하고(답하는 데는 잠시 걸린다, #955) CLI가 도구를 쓴다 → 신호가 왔으니 표시가 풀린다
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
     await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
     expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
     const events = session.ofType('terminal_attention');
@@ -1391,7 +1392,12 @@ describe('터미널의 사람 기다림을 알린다 (B7)', () => {
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
     await session.gateway.notification({ notification_type: 'agent_needs_input', message: '무엇을 할까요?' });
     expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'agent_needs_input' });
+    // 걸린 직후에 늦게 온 텔레메트리는 풀지 않는다(#955)
+    await session.gateway.telemetry(otlp([req()]));
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'agent_needs_input' });
 
+    // 사람이 답한 뒤의 모델 요청은 푼다
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
     await session.gateway.telemetry(otlp([req()]));
     expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
     await stopSession(session.id);
@@ -2591,6 +2597,23 @@ describe('Codex 터미널(#825)', () => {
     await session.gateway.notification({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } });
     await session.gateway.notification({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
     expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Bash 허락 필요: rm -rf build' });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('권한 창 직후 늦게 온 앞 도구의 끝 훅(비동기)이 권한 대기를 풀지 않아, 뒤에 온 알림도 자세한 문구를 덮지 않는다(#955)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '빌드 폴더 지워 줘' });
+    await session.gateway.activity!({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_use_id: 'r1', tool_input: { file_path: 'a.ts' } });
+    await session.gateway.notification({ hook_event_name: 'PermissionRequest', tool_name: 'Bash', tool_input: { command: 'rm -rf build' } });
+    // 앞 도구(Read)의 끝 훅이 따로 돌다 늦게 닿았다(2차 실사용 점검: 1ms 뒤 대기가 풀리고 2초 뒤 알림이 문구를 덮었다)
+    await session.gateway.activity!({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_use_id: 'r1' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Bash 허락 필요: rm -rf build' });
+    await session.gateway.notification({ hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Bash' });
+    expect(getSnapshot(session.id)!.terminalAttention).toMatchObject({ kind: 'permission_prompt', message: 'Bash 허락 필요: rm -rf build' });
+    // 사람이 답한 뒤(잠시 뒤) 도구가 움직이면 대기가 풀린다
+    await new Promise((resolve) => setTimeout(resolve, 1_600));
+    await session.gateway.activity!({ hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b1' });
+    expect(getSnapshot(session.id)!.terminalAttention).toBeUndefined();
     await stopSession(session.id);
   }, 30_000);
 

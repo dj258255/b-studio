@@ -328,6 +328,15 @@ const WORKSPACE_SERVICE = 'workspace';
 const WORKSPACE_PORT = 8080;
 const WORKSPACE_NOTE = '지원 스택이 아니어서 코드·테스트만으로 등록했습니다. 컨테이너는 아무것도 띄우지 않고 기다리며, 게이트는 위 테스트 명령(종료 코드 0이면 통과)으로 완료를 확인합니다. 화면·API·계약 확인은 없습니다';
 
+/** C·C++ 소스 파일의 확장자(#955) */
+const C_SOURCE = /\.(c|cc|cpp|cxx|h|hpp)$/i;
+
+/** 폴더 바로 아래에 이 확장자의 파일이 있는가(#955). 하위 폴더는 훑지 않는다 */
+async function hasTopLevelSource(root: string, pattern: RegExp): Promise<boolean> {
+  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
+  return entries.some((entry) => entry.isFile() && pattern.test(entry.name));
+}
+
 /**
  * 지원 스택이 아닌 폴더의 언어를 보고 컨테이너와 테스트 명령 후보를 고른다(#946). 폴더 바로 아래의 알려진 파일만 본다(저장소를 훑지 않는다).
  * 명령을 실제로 돌려 보지는 않으니 후보는 추측이다 — 사람이 고르고, 틀리면 게이트의 test 단계가 실패로 알린다
@@ -411,6 +420,15 @@ async function suggestWorkspace(root: string): Promise<WorkspaceSuggestion> {
     if (/\brspec\b/.test(gemfile)) candidates.push({ label: 'bundle exec rspec', source: 'Gemfile', command: ['sh', '-c', `${install} && bundle exec rspec`] });
     candidates.push({ label: 'bundle exec rake test', source: 'Gemfile', command: ['sh', '-c', `${install} && bundle exec rake test`] });
     volumes.bundle = '/usr/local/bundle';
+  } else if (await exists(path.join(root, 'CMakeLists.txt'))) {
+    // C·C++(CMake, #955). 빌드 폴더는 사용자 폴더 밖 볼륨에 둔다. 기본 이미지에 gcc·make는 있고 cmake는 없어 더 깐다
+    language = 'C/C++(CMake)';
+    setup = ['RUN apt-get update && apt-get install -y --no-install-recommends cmake && rm -rf /var/lib/apt/lists/*'];
+    candidates.push({ label: 'ctest', source: 'CMakeLists.txt', command: ['sh', '-c', 'cmake -S . -B /cache/build && cmake --build /cache/build && ctest --test-dir /cache/build --output-on-failure'] });
+    volumes['cmake-build'] = '/cache/build';
+  } else if (await hasTopLevelSource(root, C_SOURCE)) {
+    // C·C++(#955). 기본 이미지(buildpack-deps)에 gcc·g++·make가 있다. 테스트 명령은 아래 Makefile 후보나 직접 쓰기
+    language = 'C/C++';
   }
   // Makefile의 test 목표는 언어와 상관없이 후보에 넣는다
   if (/^test\s*:/m.test((await readText(path.join(root, 'Makefile'))) ?? '')) candidates.push({ label: 'make test', source: 'Makefile', command: ['make', 'test'] });

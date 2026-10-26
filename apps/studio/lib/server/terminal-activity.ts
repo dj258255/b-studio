@@ -6,6 +6,7 @@
  *  - lastMessage: 턴 끝의 마지막 답 한 줄
  *  - subagents: 서브에이전트 인스턴스마다 한 행(SubagentStart/SubagentStop)
  *  - workingSince·lastAt·now.running·서브에이전트의 startedAt·lastAt(#933): 몇 분째 일하는지, 도구가 도는 중인지, 마지막 소식
+ *  - turnDenied(#955): 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수
  *
  * 문서에 적힌 훅 입력과 상태 줄 입력만 읽는다. 대화 기록 파일(JSONL)처럼 문서에 없는 꼴은 읽지 않는다.
  * 값은 바깥(CLI)에서 온 것이라 꼴을 확인하고 길이를 자른다. 판정에 쓰지 않는다 — 화면용이다.
@@ -26,6 +27,8 @@ const TODO_LIMIT = 100;
 const SUBAGENT_LIMIT = 30;
 /** Agent 도구 호출에서 받아 두는 설명의 상한 */
 const PENDING_LIMIT = 30;
+/** 끝 훅을 먼저 받은 도구 호출 id를 기억하는 수(#955). 비동기 훅은 끝이 시작보다 먼저 닿을 수 있다 */
+const ENDED_LIMIT = 50;
 
 export interface ActivityNow {
   tool: string;
@@ -76,6 +79,8 @@ export interface TerminalActivityView {
   workingSince?: string;
   /** 마지막 훅의 시각(#933). 상태 줄 갱신은 치지 않는다 */
   lastAt?: string;
+  /** 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 없으면 0번 */
+  turnDenied?: number;
 }
 
 type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -101,10 +106,14 @@ export interface TerminalActivity {
   lastAt?: string;
   /** 도구 끝 훅을 받은 적이 있다. 그때부터 now.running을 싣는다(#933) */
   seesToolEnd?: boolean;
+  /** 끝 훅을 받은 메인의 도구 호출 id(#955). 시작 훅이 뒤늦게 와도 그 도구를 도는 중으로 두지 않는다 */
+  ended: string[];
+  /** 이번 요청에서 관문이 거절한 쓰기 수(#955) */
+  turnDenied: number;
 }
 
 export function newTerminalActivity(): TerminalActivity {
-  return { todos: [], subagents: new Map(), pending: [] };
+  return { todos: [], subagents: new Map(), pending: [], ended: [], turnDenied: 0 };
 }
 
 type Input = Readonly<Record<string, unknown>>;
@@ -228,8 +237,10 @@ export function noteToolUse(state: TerminalActivity, input: Input, at: number): 
     return;
   }
   const target = toolTarget(tool, input.tool_input, text(input.cwd));
-  state.now = { tool, ...(target ? { target } : {}), at: iso, running: true };
   const id = text(input.tool_use_id);
+  // 비동기 훅은 끝이 시작보다 먼저 닿을 수 있다(#955). 이미 끝난 도구는 도는 중으로 두지 않는다
+  const over = id !== undefined && (state.ended ?? []).includes(id);
+  state.now = { tool, ...(target ? { target } : {}), at: iso, running: !over };
   if (id) state.nowId = id;
   else delete state.nowId;
   noteTodoTool(state, tool, input.tool_input);
@@ -263,6 +274,9 @@ function errorLine(value: unknown): string | undefined {
  * 끝 훅을 한 번도 받지 않은 CLI여도 거절은 확실히 아는 것이라 싣는다
  */
 export function noteToolDenied(state: TerminalActivity, input: Input, reason: string, at: number): void {
+  // 거절은 지금 하는 일이 아닌 도구여도 이번 요청의 거절로 센다(#955)
+  state.turnDenied = (state.turnDenied ?? 0) + 1;
+  state.lastAt = new Date(at).toISOString();
   if (!state.now || !endsNow(state, input)) return;
   const why = errorLine(reason.replace(/^\[b-studio\]\s*/, ''));
   state.now = { ...state.now, running: false, ...(why ? { error: `거절됨: ${why}` } : {}) };
@@ -287,6 +301,8 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
         if (subagent) subagent.lastAt = iso;
         return;
       }
+      const endedId = text(input.tool_use_id);
+      if (endedId) state.ended = [...(state.ended ?? []), endedId].slice(-ENDED_LIMIT);
       if (!endsNow(state, input)) return;
       state.now!.running = false;
       if (input.hook_event_name === 'PostToolUseFailure') {
@@ -348,12 +364,19 @@ export function noteStatusline(state: TerminalActivity, input: Input): void {
   state.context = { usedPct, ...(used !== undefined ? { used } : {}), ...(size !== undefined ? { size } : {}) };
 }
 
+/** CLI가 모델에 요청했다(텔레메트리, #955). 도구 훅이 없는 긴 생각도 CLI의 소식이다 — 마지막 소식 시각만 옮긴다 */
+export function noteActivityPing(state: TerminalActivity, at: number): void {
+  state.lastAt = new Date(at).toISOString();
+}
+
 /** 새 요청이 왔다. 지금 하는 일을 지우고, 다 끝낸 할 일 목록과 끝난 서브에이전트를 비운다. 이때부터 몇 분째인지 센다(#933) */
 export function noteTurnStarted(state: TerminalActivity, at: number = Date.now()): void {
   delete state.now;
   delete state.nowId;
   state.workingSince = new Date(at).toISOString();
   state.lastAt = state.workingSince;
+  state.turnDenied = 0;
+  state.ended = [];
   if (state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')) state.todos = [];
   for (const [id, subagent] of state.subagents) if (subagent.state === 'done') state.subagents.delete(id);
   state.pending = [];
@@ -390,6 +413,7 @@ export function activityView(state: TerminalActivity | undefined): TerminalActiv
     ...(subagents.length > 0 ? { subagents } : {}),
     ...(state.workingSince ? { workingSince: state.workingSince } : {}),
     ...(state.lastAt ? { lastAt: state.lastAt } : {}),
+    ...(state.turnDenied ? { turnDenied: state.turnDenied } : {}),
   };
   return Object.keys(view).length > 0 ? view : undefined;
 }
