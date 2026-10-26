@@ -2242,7 +2242,7 @@ export class DeskApp {
    * 사이드바에 표시를 붙이고(본 뒤 지운다) 아래 줄에 알린다. 알림을 켰으면 벨을 울리고, 보고 있는 칸이 아닌 세션은 OS 알림(OSC 9)도 낸다
    */
   #announce(items: readonly DeskItem[]): void {
-    const notices: Array<{ id: string; text: string; kind: 'input' | 'gate' | 'done'; settled: boolean }> = [];
+    const notices: Array<{ id: string; text: string; kind: 'input' | 'gate' | 'done'; settled: boolean; quiet?: boolean }> = [];
     const at = Date.now();
     for (const item of items) {
       const now = statusOf(item);
@@ -2256,7 +2256,9 @@ export class DeskApp {
       if (last && last.what === what && at - last.at < NOTICE_REPEAT_MS) continue;
       this.#noticed.set(item.id, { what, at });
       const kind = WAITING.includes(what) ? 'input' : what === '끝남' ? 'done' : 'gate';
-      notices.push({ id: item.id, text: `${backendLabel(item.backend)} · ${item.title} · ${what}`, kind, settled: SETTLED.includes(now.status) });
+      // 끝과 통과를 연달아 알리지 않는다(#959). 표시(안 본 끝남·!)는 붙이고 소리와 알림만 뺀다. 실패 판정은 늘 알린다
+      const quiet = Boolean(last && at - last.at < NOTICE_REPEAT_MS && repeatsEnd(last.what, what));
+      notices.push({ id: item.id, text: `${backendLabel(item.backend)} · ${item.title} · ${what}`, kind, settled: SETTLED.includes(now.status), ...(quiet ? { quiet } : {}) });
     }
     if (notices.length === 0) return;
     // 지금 보고 있는 칸의 세션은 표시도 소리도 내지 않는다(#922). 아래 줄 알림은 낸다
@@ -2268,10 +2270,11 @@ export class DeskApp {
       // 검증 판정으로 끝을 알린 세션(#956: "끝남"을 따로 내지 않는다)도 끝났지만 아직 안 본 세션이다
       if (notice.kind === 'done' || (notice.kind === 'gate' && notice.settled)) unseenDone.add(notice.id);
     }
-    this.#state = { ...this.#state, flagged: [...flagged], unseenDone: [...unseenDone], message: `알림: ${notices.map((notice) => notice.text).join(' / ')}` };
+    const told = notices.filter((notice) => !notice.quiet);
+    this.#state = { ...this.#state, flagged: [...flagged], unseenDone: [...unseenDone], ...(told.length ? { message: `알림: ${told.map((notice) => notice.text).join(' / ')}` } : {}) };
     if (away.length) this.#saveLayout();
     if (!this.#notify) return;
-    const loud = away.filter((notice) => (notice.kind === 'done' ? this.#notifyDone : notice.kind === 'input' ? this.#notifyInput : true));
+    const loud = away.filter((notice) => !notice.quiet && (notice.kind === 'done' ? this.#notifyDone : notice.kind === 'input' ? this.#notifyInput : true));
     if (loud.length === 0) return;
     let out = '\x07';
     for (const notice of loud.slice(0, MAX_OS_NOTICES)) out += `\x1b]9;${oscText(`b-studio: ${notice.text}`)}\x07`;
@@ -3134,6 +3137,14 @@ function statusOf(item: DeskItem): { status: string; gate?: string; error?: true
 function oneLineReason(text: string): string {
   const line = text.replace(/\s+/g, ' ').trim();
   return [...line].length > 120 ? `${[...line].slice(0, 119).join('')}…` : line;
+}
+
+/**
+ * 같은 끝을 두 번 알리는가(#959): "검증 통과" 뒤의 "끝남", "끝남" 뒤의 "검증 통과".
+ * 판정이 CLI가 쉬기 전에 오기도 하고 뒤에 오기도 한다. 실패·확인 필요 판정은 할 일이 바뀌므로 겹쳐도 알린다
+ */
+export function repeatsEnd(before: string, now: string): boolean {
+  return (before === '검증 통과' && now === '끝남') || (before === '끝남' && now === '검증 통과');
 }
 
 /** 알릴 만큼 바뀌었으면 그 문구. 손댈 상태가 먼저, 그다음 게이트 판정, 그다음 작업 끝남이다 */

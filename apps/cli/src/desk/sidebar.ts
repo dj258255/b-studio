@@ -204,6 +204,25 @@ export function deniedWrites(item: DeskItem): number {
   return denied;
 }
 
+/**
+ * 카드 머리의 상태(#934). 사람이 손댈 것(권한·답·입력) > 오류 > 검증 실패·확인 필요 > 작업 중 > 검증 중 > 그 밖.
+ * 검증 실패를 구석이 아니라 머리에 올려, 칸 머리도 같은 판정을 쓴다(#959). "CLI 대기"(흐림)와 "실패"(빨강)가 한 카드에 엇갈려 보이지 않게 한다
+ */
+export function headStatus(item: DeskItem, unseen = false): StatusBadge {
+  const status = agentStatus(item, { unseen });
+  if (status.tone === 'warn' || status.tone === 'fail') return status;
+  if (item.gate?.state === 'failed' || item.attention === 'gate_failed') return { label: '검증 실패', tone: 'fail' };
+  if (item.attention === 'needs_review') return { label: '확인 필요', tone: 'warn' };
+  if (item.state === 'working' || status.tone === 'busy') return status;
+  if (item.gate?.state === 'verifying') return { label: '검증 중', tone: 'busy' };
+  // 쓰기가 거절된 채 끝난 요청은 성공처럼 보이지 않게 한다(#956). "끝냈습니다"라는 답만으로는 바뀐 것이 있는지 모른다
+  const denied = deniedWrites(item);
+  if (denied > 0) return { label: `쓰기 ${denied}번 거절`, tone: 'fail' };
+  // 끝난 세션은 결과를 머리에 올린다(#944). 흐린 "CLI 대기"나 안 본 "끝남"만으로는 통과했는지 모른다(#956)
+  if ((status.tone === 'muted' || status.tone === 'ok') && item.gate?.state === 'passed') return { label: '검증 통과', tone: 'ok' };
+  return status;
+}
+
 /** 급한 정도(#922): 권한·질문·입력 4 > 오류·검증 실패·확인 필요·쓰기 거절 3 > 끝남(안 봄) 2 > 작업 중 1 > 쉼 0 */
 export function urgencyRank(item: DeskItem, unseen: boolean): number {
   const status = agentStatus(item, { unseen });

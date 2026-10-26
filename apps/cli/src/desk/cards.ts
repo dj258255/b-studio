@@ -8,7 +8,7 @@
  */
 import type { DeskState } from './keys';
 import { fit, fitAnsi, stringWidth, type Rect } from './screen';
-import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, subagentName, totalTokens, type StatusBadge } from './sidebar';
+import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, headStatus, subagentName, totalTokens, type StatusBadge } from './sidebar';
 import type { KittyImages } from './kitty';
 import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
 import { BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
@@ -158,28 +158,18 @@ function compose(segs: readonly Seg[], width: number, theme: Theme): string {
 
 const SEP: Seg = { text: ' · ', color: 'muted' };
 
-/**
- * 카드 머리의 상태(#934). 사람이 손댈 것(권한·답·입력) > 오류 > 검증 실패·확인 필요 > 작업 중 > 검증 중 > 그 밖.
- * 검증 실패를 구석이 아니라 머리에 올려, "CLI 대기"(흐림)와 "실패"(빨강)가 한 카드에 엇갈려 보이지 않게 한다
- */
-export function headStatus(item: DeskItem, unseen = false): StatusBadge {
-  const status = agentStatus(item, { unseen });
-  if (status.tone === 'warn' || status.tone === 'fail') return status;
-  if (item.gate?.state === 'failed' || item.attention === 'gate_failed') return { label: '검증 실패', tone: 'fail' };
-  if (item.attention === 'needs_review') return { label: '확인 필요', tone: 'warn' };
-  if (item.state === 'working' || status.tone === 'busy') return status;
-  if (item.gate?.state === 'verifying') return { label: '검증 중', tone: 'busy' };
-  // 쓰기가 거절된 채 끝난 요청은 성공처럼 보이지 않게 한다(#956). "끝냈습니다"라는 답만으로는 바뀐 것이 있는지 모른다
-  const denied = deniedWrites(item);
-  if (denied > 0) return { label: `쓰기 ${denied}번 거절`, tone: 'fail' };
-  // 끝난 세션은 결과를 머리에 올린다(#944). 흐린 "CLI 대기"나 안 본 "끝남"만으로는 통과했는지 모른다(#956)
-  if ((status.tone === 'muted' || status.tone === 'ok') && item.gate?.state === 'passed') return { label: '검증 통과', tone: 'ok' };
-  return status;
-}
+// 카드 머리의 상태는 칸 머리도 같이 쓴다(#959). sidebar.ts의 headStatus
+export { headStatus };
 
 /** 끝난 요청을 게이트가 판정하지 않았다(#956). 마지막 답이 있는데 판정이 없으면 "검증하지 않음"으로 적는다. 옛 서버(gate 없음)는 모른다 */
 function unverified(item: DeskItem): boolean {
   return item.gate?.state === 'none' && Boolean(item.lastMessage) && item.state !== 'working' && agentStatus(item).tone !== 'busy';
+}
+
+/** 사람을 기다리는 동안 이 요청에서 이미 거절된 쓰기(#959). 끝난 요청의 거절은 머리가 보인다(deniedWrites) */
+function waitingDenied(item: DeskItem): Seg[] {
+  const denied = item.turnDenied ?? 0;
+  return denied > 0 && item.terminal?.waiting && item.terminal.waiting !== 'idle' ? [SEP, { text: `쓰기 ${denied}번 거절`, color: 'red' }] : [];
 }
 
 /** 이 세션이 지금 사람을 기다리거나 실패해 손댈 것인가(확인 필요 줄에 올린다) */
@@ -205,7 +195,8 @@ function nowLine(item: DeskItem, width: number, theme: Theme, now: number): stri
   if (head.tone === 'warn' && waiting && waiting !== 'idle') {
     // 기다리는 동안 도구가 거절·실패했으면 그것을 먼저 적는다(#953). 묻는 것은 확인 필요 줄에 있다
     if (item.now?.error) return errorLine(item.now, width, theme);
-    return compose([{ text: '› ', color: statusColor(head) }, { text: item.terminal?.message ? oneLine(item.terminal.message) : '그 칸에서 답하면 이어서 합니다', color: statusColor(head), flex: true }], width, theme);
+    // 이 요청에서 이미 쓰기가 거절됐으면 묻는 것과 함께 적는다(#959). 모르고 허락하면 막힌 쓰기가 또 막힌다
+    return compose([{ text: '› ', color: statusColor(head) }, { text: item.terminal?.message ? oneLine(item.terminal.message) : '그 칸에서 답하면 이어서 합니다', color: statusColor(head), flex: true }, ...waitingDenied(item)], width, theme);
   }
   const noCheck: Seg[] = unverified(item) ? [SEP, { text: '검증하지 않음', color: 'muted' }] : [];
   if (deniedWrites(item) > 0) {
@@ -510,6 +501,7 @@ function needsYouLines(state: DeskState, width: number, theme: Theme): string[] 
           { text: entry.item.title, bold: picked, flex: true },
           { text: ` · ${entry.item.projectName}  `, color: 'muted' },
           { text: entry.status.label, color: statusColor(entry.status) },
+          ...(entry.status.tone === 'warn' ? waitingDenied(entry.item) : []),
           ...(why ? [SEP, { text: oneLine(why), flex: true }] : []),
         ],
         width,
