@@ -12,7 +12,7 @@ import { backendLabel, compactTokens } from './sidebar';
 import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
 import type { DeskAccountLimits, DeskItem, DeskLimits, DeskLimitWindow, DeskSpend, DeskSpendRow, DeskSpendTotals } from './types';
-import { badge, bar, box, spread } from './widgets';
+import { badge, bar, box, spread, wrapWords } from './widgets';
 
 /** 카드 폭의 상한(넓은 화면에서 막대가 너무 길어지지 않게) */
 const CARD_MAX = 96;
@@ -83,6 +83,13 @@ export function usageSummary(accounts: readonly DeskAccountLimits[]): string {
   if (weekly.length) parts.push(`주간 평균 ${Math.round(weekly.reduce((sum, value) => sum + value, 0) / weekly.length)}%`);
   const latest = accounts.map((account) => account.fetchedAt).filter((value): value is string => value !== undefined && Number.isFinite(Date.parse(value))).sort().at(-1);
   if (latest) parts.push(`${hhmm(latest)} 기준`);
+  return parts.join(' · ');
+}
+
+/** " · "로 이은 글을 width칸 안으로: 넘치면 뒤 항목부터 통째로 뺀다 */
+function dropTail(text: string, width: number): string {
+  const parts = text.split(' · ');
+  while (parts.length > 1 && stringWidth(parts.join(' · ')) > width) parts.pop();
   return parts.join(' · ');
 }
 
@@ -178,7 +185,12 @@ function windowLines(account: DeskAccountLimits, width: number, theme: Theme, no
   const muted = fg(theme, 'muted');
   const windows = account.windows.filter((window) => window.kind !== 'other').sort((a, b) => (a.kind === 'five_hour' ? -1 : b.kind === 'five_hour' ? 1 : 0));
   if (account.status === 'unsupported') return [`${muted}5시간·주간 한도가 없는 CLI입니다(해당 없음)${RESET}`];
-  if (windows.length === 0) return [account.error ? `${fg(theme, 'yellow')}읽지 못함${RESET} ${account.error}` : `${muted}아직 읽은 값이 없습니다${RESET}`];
+  if (windows.length === 0) {
+    if (!account.error) return [`${muted}아직 읽은 값이 없습니다${RESET}`];
+    // 까닭이 길면 낱말 사이에서 줄을 나눠 끝까지 보인다(#944). 한 줄로 자르면 "꺼 두"처럼 끝이 잘렸다
+    const [first = '', ...rest] = wrapWords(`읽지 못함 ${account.error}`, width, 4);
+    return [`${fg(theme, 'yellow')}읽지 못함${RESET}${first.slice('읽지 못함'.length)}`, ...rest];
+  }
   const lines: string[] = [];
   if (windows.length === 1 || width >= SIDE_BY_SIDE_MIN) {
     const gap = 3;
@@ -215,6 +227,14 @@ export function byTightness(accounts: readonly DeskAccountLimits[]): DeskAccount
   return [...accounts].sort((a, b) => tightness(b) - tightness(a));
 }
 
+/**
+ * 사용량 표에 둘 계정(#945): 빠듯한 순으로 놓고, 5시간·주간 한도가 없는 CLI(Gemini 등)는 뺀다. 견줄 것이 없는 줄이 늘 자리를 차지했다.
+ * 읽지 못한 계정은 남긴다(로그인 필요 같은 까닭을 보여야 한다)
+ */
+export function usageAccounts(accounts: readonly DeskAccountLimits[]): DeskAccountLimits[] {
+  return byTightness(accounts.filter((account) => account.status !== 'unsupported'));
+}
+
 /** 사이드바 맨 아래 한 줄: " 한도 Claude 5시간 82% · 13:50". 읽은 한도가 없으면 없다 */
 export function tightestLine(accounts: readonly DeskAccountLimits[], width: number, theme: Theme = DEFAULT_THEME, now = Date.now()): string | undefined {
   const account = byTightness(accounts)[0];
@@ -224,7 +244,16 @@ export function tightestLine(accounts: readonly DeskAccountLimits[], width: numb
   const reset = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
   const when = Number.isFinite(reset) && reset > now ? ` · ${reset - now < 86_400_000 ? whenText(reset, now) : `${new Date(reset).getMonth() + 1}/${new Date(reset).getDate()}`}` : '';
   const color = fg(theme, limitStatus(account).color);
-  return fitAnsi(` ${fg(theme, 'muted')}한도${RESET} ${color}${backendLabel(account.backend)} ${label} ${Math.round(window.usedPercent)}%${RESET}${fg(theme, 'muted')}${when}${RESET}`, width);
+  // 좁으면 다시 차는 때, AI 이름, "한도" 차례로 뺀다(#944). "주간 10"처럼 숫자를 반쯤 자르지 않는다
+  const percent = `${label} ${Math.round(window.usedPercent)}%`;
+  const variants: Array<[string, string, string]> = [
+    ['한도 ', `${backendLabel(account.backend)} ${percent}`, when],
+    ['한도 ', `${backendLabel(account.backend)} ${percent}`, ''],
+    ['한도 ', percent, ''],
+    ['', percent, ''],
+  ];
+  const [head, body, tail] = variants.find(([a, b, c]) => stringWidth(` ${a}${b}${c}`) <= width) ?? variants.at(-1)!;
+  return fitAnsi(` ${head ? `${fg(theme, 'muted')}${head}${RESET}` : ''}${color}${body}${RESET}${fg(theme, 'muted')}${tail}${RESET}`, width);
 }
 
 export interface UsageCardInput {
@@ -441,7 +470,8 @@ export function usageScreen(state: DeskState, rect: Rect, now = Date.now()): Usa
   const accounts = usage?.accounts ?? [];
   const lines: string[] = [];
   const cards: UsageScreen['cards'] = [];
-  const summary = accounts.length ? usageSummary(accounts) : '';
+  // 좁으면 요약의 뒤 항목부터 통째로 뺀다(#944). "주간"처럼 반쯤 잘린 낱말을 남기지 않는다
+  const summary = accounts.length ? dropTail(usageSummary(accounts), rect.w - stringWidth('  사용량  ')) : '';
   lines.push(fitAnsi(`  ${BOLD}${fg(theme, 'text')}사용량${RESET}  ${muted}${summary}${RESET}`, rect.w));
   const notes = [usage?.warning, usage?.error].filter((note): note is string => Boolean(note));
   for (const note of notes) lines.push(fitAnsi(`  ${fg(theme, 'yellow')}${note}${RESET}`, rect.w));
@@ -454,7 +484,7 @@ export function usageScreen(state: DeskState, rect: Rect, now = Date.now()): Usa
         ? '사용량을 읽는 중…'
         : usage.error
           ? ''
-          : '사용량을 볼 계정이 없습니다';
+          : '5시간·주간 한도를 알려 주는 계정이 없습니다(Gemini 같은 CLI는 한도가 없습니다)';
     if (empty) lines.push(fit(`  ${empty}`, rect.w));
     while (lines.length < rect.h) lines.push(blank);
     return { lines: lines.slice(0, rect.h), cards };

@@ -42,8 +42,9 @@ class FakeClient implements DeskClient {
     if (this.agentsGate) await this.agentsGate;
     return { items: snapshot };
   }
+  projectList: Array<{ id: string; name: string; folder?: string }> = [{ id: 'p1', name: 'shop' }];
   async projects() {
-    return [{ id: 'p1', name: 'shop' }];
+    return this.projectList;
   }
   async rules() {
     return { allowed: this.allowed, defaultBackend: 'claude-code' };
@@ -349,6 +350,22 @@ describe('desk 작업대(#860)', () => {
     expect(ctx.io.all).not.toContain('아직 터미널로 첫 요청을 넣지 않습니다');
   });
 
+  it('새 요청은 등록한 프로젝트를 예제보다 앞에 두고, 사이드바에서 고른 세션의 프로젝트로 시작한다(#945)', async () => {
+    const ctx = setup();
+    ctx.client.projectList = [
+      { id: 'orders', name: 'orders' },
+      { id: 'r1', name: 'blog', folder: '/Users/me/blog' },
+      { id: 'r2', name: 'shop', folder: '/Users/me/shop' },
+    ];
+    ctx.io.type('\x02n');
+    await tick();
+    const prompt = ctx.app.state.prompt!;
+    expect(prompt.step).toBe('project');
+    expect(prompt.projects.map((project) => project.name)).toEqual(['blog', 'shop', 'orders']);
+    // 가짜 세션들의 프로젝트는 shop이다
+    expect(prompt.projects[prompt.projectIndex]!.name).toBe('shop');
+  });
+
   it('직접 고르는 AI는 터미널로 띄울 수 있는 것(Claude Code·Codex)만 보인다', async () => {
     const ctx = setup();
     ctx.client.allowed = ['claude-code', 'gemini', 'codex', 'opencode'];
@@ -500,13 +517,21 @@ describe('desk 작업대: 칸마다 통로, 복사 모드, 크게 보기, 도움
     expect(ctx.client.streams.filter((stream) => !stream.signal.aborted).map((stream) => stream.ids)).toEqual([['a'], ['b']]);
   });
 
-  it('Ctrl-b ?는 도움말 화면을 보이고, 아무 키나 누르면 닫히며 그 키는 CLI로 가지 않는다', async () => {
+  it('Ctrl-b ?는 도움말 화면을 보이고, 굴리는 키로 끝까지 보며, 다른 키를 누르면 닫히고 그 키는 CLI로 가지 않는다', async () => {
     const ctx = setup();
     await openFirst(ctx);
     ctx.io.type('\x02?');
     await tick();
     expect(ctx.io.all).toContain('도움말');
+    // 화면에 다 들어가지 않으면 굴려서 본다(#945). 끝을 넘겨 굴려도 마지막 쪽에 머문다
+    ctx.io.type('          ');
+    await tick();
     expect(ctx.io.all).toContain('복사 모드');
+    expect(ctx.app.state.help).toBe(true);
+    const end = ctx.app.state.helpOffset!;
+    ctx.io.type(' ');
+    await tick();
+    expect(ctx.app.state.helpOffset).toBe(end);
     ctx.io.type('x');
     await tick();
     expect(ctx.client.of('input', 'a')).toEqual([]);

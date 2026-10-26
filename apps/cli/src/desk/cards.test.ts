@@ -53,7 +53,10 @@ describe('카드 한 장', () => {
     const plain = selected.map(stripAnsi);
     // 카드 몸에 보인 서브에이전트는 펼친 줄에 다시 넣지 않는다(#934)
     expect(plain.filter((line) => line.includes('모델 요청 2회')).length).toBe(1);
-    expect(plain.length).toBeGreaterThan(card().length);
+    // 펼친 줄은 그림 옆 빈 자리부터 채운다(#944). 검증·토큰 줄이 보인다
+    expect(plain.join('\n')).toContain('검증 통과 · 토큰');
+    expect(card().map(stripAnsi).join('\n')).not.toContain('검증 통과 · 토큰');
+    expect(plain.length).toBeGreaterThanOrEqual(card().length);
   });
 
   it('끝났지만 아직 보지 않은 세션은 초록 "끝남", 본 뒤에는 흐린 "CLI 대기"(#922)', () => {

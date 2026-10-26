@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { loadProject, parseSpec } from '@b-studio/spec';
 import { StudioError } from './errors';
-import { detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, SPEC_FILE, type GeneratedFile, type ProjectDetection } from './project-detect';
+import { detectProject, GENERATED_COMPOSE, GENERATED_DOCKERFILE, generateFiles, SPEC_FILE, withWorkspace, type GeneratedFile, type ProjectDetection } from './project-detect';
 import { writeServiceSelection } from './service-selection';
 import { unifiedDiff } from './text-diff';
 
@@ -100,9 +100,15 @@ export interface FolderProposal {
   registeredId?: string;
 }
 
-/** 등록하기 전에 무엇을 할지 보여 준다(쓰지 않는다) */
-export async function proposeFolder(folder: string, file = registryPath()): Promise<FolderProposal> {
-  const detection = await detectProject(folder);
+/** 지원 스택이 아닌 폴더를 코드·테스트만으로 등록하는 선택(#946). test는 workflow.tests에 그대로 들어가는 exec 꼴 명령이다 */
+export interface WorkspaceChoice {
+  test: readonly string[];
+}
+
+/** 등록하기 전에 무엇을 할지 보여 준다(쓰지 않는다). workspace를 주면 그 선택으로 만들 파일까지 보여 준다 */
+export async function proposeFolder(folder: string, file = registryPath(), { workspace }: { workspace?: WorkspaceChoice } = {}): Promise<FolderProposal> {
+  const found = await detectProject(folder);
+  const detection = workspace ? withWorkspace(found, workspace.test) : found;
   const registered = (await readRegistry(file)).find((entry) => entry.path === detection.folder);
   return { detection, files: generateFiles(detection), ...(registered ? { registeredId: registered.id } : {}) };
 }
@@ -112,15 +118,16 @@ export async function proposeFolder(folder: string, file = registryPath()): Prom
  * takenIds는 다른 곳(예제 폴더)의 프로젝트 id. 같은 폴더를 다시 등록하면 기존 id를 돌려준다.
  * selectedInfra를 주면(폴더 열기 미리보기의 체크박스, ADR-083) 그 부가 서비스만 기본으로 띄우도록 서비스 선택을 저장한다.
  * 주지 않으면 detection.defaultInfra(앱이 기대는 부가 서비스의 닫힘)를 쓴다 — 아무도 기대지 않는 부가 서비스는 기본으로 뜨지 않는다.
- * 두 단계 탐색이 찾은, defaultSelected: false가 붙은 서비스(이미 찾은 서비스 하위의 또 다른 빌드)도 같은 식으로 처음부터 꺼 둔다
+ * 두 단계 탐색이 찾은, defaultSelected: false가 붙은 서비스(이미 찾은 서비스 하위의 또 다른 빌드)도 같은 식으로 처음부터 꺼 둔다.
+ * workspace를 주면(#946) 지원 스택이 아닌 폴더를 코드·테스트만으로 등록한다. 테스트 명령이 비면 거절한다
  */
 export async function registerFolder(
   folder: string,
   takenIds: ReadonlySet<string>,
   file = registryPath(),
-  { selectedInfra }: { selectedInfra?: readonly string[] } = {},
+  { selectedInfra, workspace }: { selectedInfra?: readonly string[]; workspace?: WorkspaceChoice } = {},
 ): Promise<{ id: string; created: boolean; written: string[]; excluded: boolean }> {
-  const proposal = await proposeFolder(folder, file);
+  const proposal = await proposeFolder(folder, file, workspace ? { workspace } : {});
   const root = proposal.detection.folder;
   if (!proposal.detection.hasSpec && proposal.files.length === 0) {
     throw new Error(proposal.detection.warnings[0] ?? '이 폴더에서 돌릴 서비스를 찾지 못했습니다');

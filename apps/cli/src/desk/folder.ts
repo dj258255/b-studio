@@ -38,9 +38,18 @@ export interface FolderProposalView {
     infra: Array<{ name: string }>;
     defaultInfra: string[];
     warnings: string[];
+    /** 지원 스택이 아닐 때만 있다(#946): 코드·테스트만으로 등록하는 제안. 옛 스튜디오는 주지 않는다 */
+    workspace?: WorkspaceSuggestionView;
   };
   files: Array<{ path: string }>;
   registeredId?: string;
+}
+
+/** 코드·테스트만 등록 제안(스튜디오의 WorkspaceSuggestion에서 쓰는 것) */
+export interface WorkspaceSuggestionView {
+  language: string;
+  image: string;
+  candidates: Array<{ label: string; source: string; command: string[] }>;
 }
 
 export interface FolderState {
@@ -60,6 +69,12 @@ export interface FolderState {
   sending?: boolean;
   /** 새 요청(Ctrl-b n)의 프로젝트 고르기에서 왔다. 등록하면 그 프로젝트로 새 요청을 이어 연다 */
   from?: 'prompt';
+  /** 코드·테스트만 등록(#946)에서 고른 줄. 후보 수와 같으면 직접 쓰기 줄이다. 없으면 첫 줄(후보가 없으면 직접 쓰기) */
+  pick?: number;
+  /** 직접 쓰기 줄에 친 테스트 명령 */
+  custom?: string;
+  /** 처음 연 뒤 아직 아무것도 치지 않았다. 이때만 받은 홈 경로로 입력 칸을 채운다(#945: 비운 칸을 다시 채우지 않는다) */
+  seed?: boolean;
 }
 
 export type FolderEffect =
@@ -67,8 +82,8 @@ export type FolderEffect =
   | { type: 'list'; path: string }
   /** 이 폴더를 열면 무엇을 할지 묻는다(아직 쓰지 않는다) */
   | { type: 'propose'; path: string }
-  /** 파일을 쓰고 등록한다 */
-  | { type: 'register'; path: string }
+  /** 파일을 쓰고 등록한다. workspace는 코드·테스트만 등록(#946)에서 고른 테스트 명령이다 */
+  | { type: 'register'; path: string; workspace?: { test: string[] } }
   | { type: 'close' };
 
 const ESC = '\x1b';
@@ -78,7 +93,7 @@ const BACKSPACE = ['\x7f', '\b'];
 const ENTER = ['\r', '\n'];
 
 export function openFolder(from?: 'prompt'): { state: FolderState; effects: FolderEffect[] } {
-  return { state: { text: '', listed: '', loading: true, row: -1, ...(from ? { from } : {}) }, effects: [{ type: 'list', path: '' }] };
+  return { state: { text: '', listed: '', loading: true, row: -1, seed: true, ...(from ? { from } : {}) }, effects: [{ type: 'list', path: '' }] };
 }
 
 /** 입력의 폴더 부분: 끝이 /면 그 폴더, 아니면 마지막 / 앞(뿌리는 /). / 가 없으면 빈 경로(홈)다 */
@@ -101,12 +116,12 @@ export function folderMatches(state: FolderState): FolderChildView[] {
   return state.listing.children.filter((child) => child.name.toLowerCase().startsWith(part));
 }
 
-/** 받은 목록을 넣는다. 처음(빈 입력)이면 그 폴더 경로로 입력 칸을 채운다 */
+/** 받은 목록을 넣는다. 처음 연 뒤(아직 치지 않은 빈 입력)에만 그 폴더 경로로 입력 칸을 채운다. 사람이 비운 칸은 그대로 둔다(#945) */
 export function applyListing(state: FolderState, requested: string, listing: FolderListingView): FolderState {
   if (requested !== state.listed) return state;
-  if (state.text === '') {
+  if (state.text === '' && state.seed) {
     const text = listing.path === '/' ? '/' : `${listing.path}/`;
-    return { ...state, text, listing, listed: dirOf(text), loading: false, error: undefined, row: -1 };
+    return { ...state, text, listing, listed: dirOf(text), loading: false, error: undefined, row: -1, seed: undefined };
   }
   return { ...state, listing, loading: false, error: undefined };
 }
@@ -117,9 +132,22 @@ export function listingFailed(state: FolderState, requested: string, error: stri
   return { ...state, listing: undefined, loading: false, error };
 }
 
+/**
+ * 채워진 경로 뒤에 새 경로를 쓰기 시작했으면 새 경로만 남긴다(#945): `…/me//private` → `/private`, `…/me/~/blog` → `~/blog`.
+ * 편집기의 파일 열기 칸과 같다. 맨 앞의 `//`는 그대로 둔다
+ */
+export function restartPath(text: string): string {
+  const tilde = Math.max(text.lastIndexOf('/~/'), text.endsWith('/~') ? text.length - 2 : -1);
+  const slashes = text.lastIndexOf('//');
+  if (tilde > 0 && tilde + 1 > slashes) return text.slice(tilde + 1);
+  if (slashes > 0) return text.slice(slashes + 1);
+  return text;
+}
+
 /** 입력이 바뀌었다: 고른 줄을 풀고, 폴더 부분이 바뀌었으면 그 목록을 청한다 */
-function retype(state: FolderState, text: string, effects: FolderEffect[]): FolderState {
-  const next: FolderState = { ...state, text, row: -1, error: undefined };
+function retype(state: FolderState, typed: string, effects: FolderEffect[]): FolderState {
+  const text = restartPath(typed);
+  const next: FolderState = { ...state, text, row: -1, error: undefined, seed: undefined };
   const dir = dirOf(text);
   if (dir === state.listed) return next;
   effects.push({ type: 'list', path: dir });
@@ -154,6 +182,45 @@ export function registrable(proposal: FolderProposalView): boolean {
   return proposal.registeredId !== undefined || proposal.detection.hasSpec || proposal.files.length > 0;
 }
 
+/** 코드·테스트만 등록을 고를 단계인가(#946): 바로 등록할 수 없고 스튜디오가 제안을 줬다 */
+function workspaceOf(proposal: FolderProposalView): WorkspaceSuggestionView | undefined {
+  return registrable(proposal) ? undefined : proposal.detection.workspace;
+}
+
+/** 고른 줄. 후보가 없으면 직접 쓰기 줄(0)이다 */
+function pickOf(state: FolderState, workspace: WorkspaceSuggestionView): number {
+  return Math.min(state.pick ?? 0, workspace.candidates.length);
+}
+
+/** 고른 테스트 명령. 직접 쓰기 줄이면 sh -c 꼴, 비었으면 없다 */
+function chosenTest(state: FolderState, workspace: WorkspaceSuggestionView): string[] | undefined {
+  const pick = pickOf(state, workspace);
+  const candidate = workspace.candidates[pick];
+  if (candidate) return candidate.command;
+  const text = (state.custom ?? '').trim();
+  return text ? ['sh', '-c', text] : undefined;
+}
+
+/** 코드·테스트만 등록 단계의 키 */
+function workspaceKey(state: FolderState, proposal: FolderProposalView, workspace: WorkspaceSuggestionView, key: string, effects: FolderEffect[]): FolderState {
+  const pick = pickOf(state, workspace);
+  const onCustom = pick === workspace.candidates.length;
+  if (UP.includes(key)) return { ...state, pick: Math.max(0, pick - 1) };
+  if (DOWN.includes(key)) return { ...state, pick: Math.min(workspace.candidates.length, pick + 1) };
+  if (ENTER.includes(key) || (!onCustom && (key === 'y' || key === 'Y'))) {
+    const test = chosenTest(state, workspace);
+    if (!test) return state;
+    effects.push({ type: 'register', path: proposal.detection.folder, workspace: { test } });
+    return { ...state, sending: true };
+  }
+  if (!onCustom) return state;
+  const custom = state.custom ?? '';
+  if (BACKSPACE.includes(key)) return { ...state, custom: Array.from(custom).slice(0, -1).join('') };
+  if (key === '\x15') return { ...state, custom: '' };
+  if (key.startsWith(ESC) || key.length === 0 || /[\u0000-\u001f\u007f]/.test(key)) return state;
+  return { ...state, custom: custom + key };
+}
+
 /** 키 하나. state가 undefined면 화면을 닫았다 */
 export function folderKey(state: FolderState, key: string): { state: FolderState | undefined; effects: FolderEffect[] } {
   const effects: FolderEffect[] = [];
@@ -161,7 +228,9 @@ export function folderKey(state: FolderState, key: string): { state: FolderState
 
   if (state.proposal) {
     const proposal = state.proposal;
-    if (key === ESC) return { state: { ...state, proposal: undefined }, effects };
+    if (key === ESC) return { state: { ...state, proposal: undefined, pick: undefined, custom: undefined }, effects };
+    const workspace = workspaceOf(proposal);
+    if (workspace) return { state: workspaceKey(state, proposal, workspace, key, effects), effects };
     if ((key === 'y' || key === 'Y' || ENTER.includes(key)) && registrable(proposal)) {
       effects.push({ type: 'register', path: proposal.detection.folder });
       return { state: { ...state, sending: true }, effects };
@@ -203,7 +272,14 @@ export function folderKey(state: FolderState, key: string): { state: FolderState
 /** 붙여 넣은 경로: 줄바꿈과 제어 글자는 버리고 한 줄로 잇는다 */
 export function folderPaste(state: FolderState, text: string): { state: FolderState; effects: FolderEffect[] } {
   const effects: FolderEffect[] = [];
-  if (state.sending || state.proposal) return { state, effects };
+  if (state.sending) return { state, effects };
+  const workspace = state.proposal ? workspaceOf(state.proposal) : undefined;
+  if (state.proposal) {
+    // 코드·테스트만 등록의 직접 쓰기 줄이면 붙여 넣은 명령을 한 줄로 넣는다(#946)
+    if (!workspace || pickOf(state, workspace) !== workspace.candidates.length) return { state, effects };
+    const command = text.replace(/[\r\n]+/g, ' ').replace(/[\u0000-\u001f\u007f]/g, '').trim();
+    return { state: { ...state, custom: `${state.custom ?? ''}${command}` }, effects };
+  }
   const clean = text.replace(/[\u0000-\u001f\u007f]/g, '');
   if (!clean) return { state, effects };
   return { state: retype(state, state.text + clean, effects), effects };
@@ -259,11 +335,62 @@ function proposalPane(state: FolderState, proposal: FolderProposalView, width: n
     lines.push(fit(` 부가 서비스: ${detection.infra.map((service) => `${service.name}${on.has(service.name) ? '' : '(기본으로 끔)'}`).join(' · ')}`, width));
   }
   if (proposal.files.length) lines.push(fit(` 만들 파일: ${proposal.files.map((file) => file.path).join(' · ')} (git 추적에서 뺍니다)`, width));
-  for (const warning of detection.warnings) lines.push(fitAnsi(`${fg(theme, 'yellow')} ▲ ${warning}${RESET}`, width));
+  const workspace = workspaceOf(proposal);
+  // 코드·테스트만 등록 단계는 "찾지 못했다"는 경고를 아래 안내가 대신한다
+  if (!workspace) for (const warning of detection.warnings) lines.push(fitAnsi(`${fg(theme, 'yellow')} ▲ ${warning}${RESET}`, width));
+  if (workspace) {
+    lines.push(...workspacePane(state, workspace, width, theme));
+    return lines;
+  }
   lines.push('');
   if (state.sending) lines.push(fitAnsi(`${muted} 등록하는 중…${RESET}`, width));
   else if (registrable(proposal)) lines.push(fitAnsi(`${fg(theme, 'accent')} y · Enter 등록하고 열기${RESET}${muted} · Esc 경로로 돌아가기${RESET}`, width));
   else lines.push(fitAnsi(`${fg(theme, 'red')} 이 폴더는 등록할 수 없습니다(돌릴 서비스도 studio.yaml도 없습니다)${RESET}${muted} · Esc 경로로 돌아가기${RESET}`, width));
+  return lines;
+}
+
+/** 코드·테스트만 등록 단계(#946): 테스트 명령 고르기와 게이트가 확인하는 것 */
+function workspacePane(state: FolderState, workspace: WorkspaceSuggestionView, width: number, theme: Theme): string[] {
+  const muted = fg(theme, 'muted');
+  const accent = fg(theme, 'accent');
+  const pick = pickOf(state, workspace);
+  const lines = [
+    ...wrapWords('Next.js·Vite·Spring Boot·FastAPI 앱이 아니어서 코드·테스트만으로 등록할 수 있습니다', width).map((line) => fitAnsi(`${fg(theme, 'teal')}${line}${RESET}`, width)),
+    fitAnsi(`${muted} 언어 ${workspace.language} · 컨테이너 ${workspace.image}${RESET}`, width),
+    '',
+    fit(' 게이트가 완료를 확인할 테스트 명령을 고르세요', width),
+  ];
+  const labelWidth = Math.max(10, ...workspace.candidates.map((candidate) => stringWidth(candidate.label)));
+  for (const [index, candidate] of workspace.candidates.entries()) {
+    const selected = index === pick;
+    const label = candidate.label + ' '.repeat(Math.max(0, labelWidth - stringWidth(candidate.label)));
+    lines.push(fitAnsi(` ${selected ? `${accent}▸ ${BOLD}` : '  '}${label}${RESET}  ${muted}${candidate.source}${RESET}`, width));
+  }
+  const onCustom = pick === workspace.candidates.length;
+  lines.push(fitAnsi(` ${onCustom ? `${accent}▸ ${BOLD}` : '  '}직접 쓰기>${RESET} ${state.custom ?? ''}${onCustom ? `${accent}▏${RESET}` : ''}`, width));
+  lines.push('');
+  if (state.sending) lines.push(fitAnsi(`${muted} 등록하는 중…${RESET}`, width));
+  else if (chosenTest(state, workspace)) lines.push(fitAnsi(`${accent} ${onCustom ? 'Enter' : 'y·Enter'} 이 명령으로 등록${RESET}${muted} · ↑↓ 고르기 · Esc 돌아가기${RESET}`, width));
+  else lines.push(fitAnsi(`${muted} 테스트 명령을 쓰면 등록할 수 있습니다 · ↑↓ 고르기 · Esc 돌아가기${RESET}`, width));
+  lines.push('');
+  for (const line of wrapWords('게이트가 확인하는 것: 고른 테스트 명령(종료 코드 0이어야 통과)과 시크릿 같은 공통 검사. 띄울 서비스가 없어 화면·API 확인은 하지 않습니다', width)) lines.push(fitAnsi(`${muted}${line}${RESET}`, width));
+  for (const line of wrapWords('만들 파일: studio.yaml · compose.b-studio.yaml · Dockerfile.b-studio (git 추적에서 뺍니다)', width)) lines.push(fitAnsi(`${muted}${line}${RESET}`, width));
+  return lines;
+}
+
+/** 낱말 사이에서 줄을 나눈다. 줄마다 앞에 빈칸 하나를 둔다(다른 줄과 들여쓰기를 맞춘다) */
+function wrapWords(text: string, width: number): string[] {
+  const room = Math.max(10, width - 1);
+  const lines: string[] = [];
+  let line = '';
+  for (const word of text.split(' ')) {
+    const next = line ? `${line} ${word}` : word;
+    if (line && stringWidth(next) > room) {
+      lines.push(` ${line}`);
+      line = word;
+    } else line = next;
+  }
+  if (line) lines.push(` ${line}`);
   return lines;
 }
 
@@ -286,6 +413,7 @@ export function renderFolder(state: FolderState, size: { w: number; h: number },
 }
 
 export function folderHint(state: FolderState): string {
+  if (state.proposal && workspaceOf(state.proposal)) return ' 폴더 열기 · ↑↓ 테스트 명령 고르기 · y·Enter 등록 · Esc 돌아가기';
   if (state.proposal) return ' 폴더 열기 · y·Enter 등록 · Esc 돌아가기';
   return ' 폴더 열기 · 경로 쓰기(~ 됨) · Enter 이 폴더 열기 · Tab 채우기 · ↑↓ 하위 폴더 · Ctrl-u 지우기 · Esc 닫기';
 }
