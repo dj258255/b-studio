@@ -5,6 +5,7 @@
  *  - context: 문맥 창을 얼마나 썼는가(Claude 상태 줄 입력의 context_window)
  *  - lastMessage: 턴 끝의 마지막 답 한 줄
  *  - subagents: 서브에이전트 인스턴스마다 한 행(SubagentStart/SubagentStop)
+ *  - workingSince·lastAt·now.running·서브에이전트의 startedAt·lastAt(#933): 몇 분째 일하는지, 도구가 도는 중인지, 마지막 소식
  *
  * 문서에 적힌 훅 입력과 상태 줄 입력만 읽는다. 대화 기록 파일(JSONL)처럼 문서에 없는 꼴은 읽지 않는다.
  * 값은 바깥(CLI)에서 온 것이라 꼴을 확인하고 길이를 자른다. 판정에 쓰지 않는다 — 화면용이다.
@@ -31,6 +32,11 @@ export interface ActivityNow {
   target?: string;
   /** 도구를 쓰기 시작한 시각(ISO) */
   at: string;
+  /**
+   * 도구가 아직 끝나지 않았다(#933). 도구 끝 훅(PostToolUse)을 한 번이라도 받은 CLI에서만 싣는다 —
+   * 끝 훅을 보내지 않는 CLI는 도는 중인지 알 수 없다
+   */
+  running?: boolean;
 }
 export interface ActivityTodos {
   done: number;
@@ -50,6 +56,10 @@ export interface ActivitySubagent {
   description?: string;
   state: 'working' | 'done';
   tool?: string;
+  /** 시작한 시각(ISO, #933) */
+  startedAt?: string;
+  /** 마지막 소식(시작, 그 안의 도구, 도구 끝, 멈춤)의 시각(ISO, #933) */
+  lastAt?: string;
 }
 /** `/api/agents` 항목에 싣는 꼴 */
 export interface TerminalActivityView {
@@ -58,6 +68,10 @@ export interface TerminalActivityView {
   context?: ActivityContext;
   lastMessage?: string;
   subagents?: ActivitySubagent[];
+  /** 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만 */
+  workingSince?: string;
+  /** 마지막 훅의 시각(#933). 상태 줄 갱신은 치지 않는다 */
+  lastAt?: string;
 }
 
 type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -75,6 +89,10 @@ export interface TerminalActivity {
   subagents: Map<string, ActivitySubagent>;
   /** 메인이 Agent 도구로 띄운 서브에이전트의 설명. SubagentStart가 같은 종류의 것을 앞에서부터 가져간다 */
   pending: Array<{ type: string; description: string }>;
+  workingSince?: string;
+  lastAt?: string;
+  /** 도구 끝 훅을 받은 적이 있다. 그때부터 now.running을 싣는다(#933) */
+  seesToolEnd?: boolean;
 }
 
 export function newTerminalActivity(): TerminalActivity {
@@ -164,14 +182,19 @@ function noteTodoTool(state: TerminalActivity, tool: string, input: unknown): vo
 export function noteToolUse(state: TerminalActivity, input: Input, at: number): void {
   const tool = clean(text(input.tool_name), LABEL_CHARS);
   if (!tool) return;
+  const iso = new Date(at).toISOString();
+  state.lastAt = iso;
   const agentId = text(input.agent_id);
   if (agentId) {
     const subagent = state.subagents.get(agentId);
-    if (subagent) subagent.tool = tool;
+    if (subagent) {
+      subagent.tool = tool;
+      subagent.lastAt = iso;
+    }
     return;
   }
   const target = toolTarget(tool, input.tool_input, text(input.cwd));
-  state.now = { tool, ...(target ? { target } : {}), at: new Date(at).toISOString() };
+  state.now = { tool, ...(target ? { target } : {}), at: iso, running: true };
   noteTodoTool(state, tool, input.tool_input);
   if (tool === 'Agent' || tool === 'Task') {
     const args = isObject(input.tool_input) ? input.tool_input : {};
@@ -183,23 +206,41 @@ export function noteToolUse(state: TerminalActivity, input: Input, at: number): 
 
 /** 지켜보는 훅 하나(도구의 끝, 서브에이전트의 시작·끝, 할 일의 생김·끝남). 모르는 훅은 무시한다 */
 export function noteActivityHook(state: TerminalActivity, input: Input, at: number): void {
+  const iso = new Date(at).toISOString();
   switch (input.hook_event_name) {
     case 'PreToolUse':
       noteToolUse(state, input, at);
       return;
+    case 'PostToolUse':
+    case 'PostToolUseFailure': {
+      // 도구가 끝났다(#933). 서브에이전트 안의 도구면 그 서브에이전트의 소식, 메인이면 지금 도는 같은 도구를 끝낸다
+      state.lastAt = iso;
+      state.seesToolEnd = true;
+      const agentId = text(input.agent_id);
+      if (agentId) {
+        const subagent = state.subagents.get(agentId);
+        if (subagent) subagent.lastAt = iso;
+        return;
+      }
+      if (state.now && state.now.tool === clean(text(input.tool_name), LABEL_CHARS)) state.now.running = false;
+      return;
+    }
     case 'SubagentStart': {
       const id = clean(text(input.agent_id), LABEL_CHARS);
       if (!id || state.subagents.has(id) || state.subagents.size >= SUBAGENT_LIMIT) return;
       const type = clean(text(input.agent_type), LABEL_CHARS) ?? 'subagent';
       const index = state.pending.findIndex((entry) => entry.type === type);
       const description = index >= 0 ? state.pending.splice(index, 1)[0]!.description : undefined;
-      state.subagents.set(id, { id, type, ...(description ? { description } : {}), state: 'working' });
+      state.subagents.set(id, { id, type, ...(description ? { description } : {}), state: 'working', startedAt: iso, lastAt: iso });
+      state.lastAt = iso;
       return;
     }
     case 'SubagentStop': {
       const subagent = state.subagents.get(text(input.agent_id) ?? '');
       if (!subagent) return;
       subagent.state = 'done';
+      subagent.lastAt = iso;
+      state.lastAt = iso;
       delete subagent.tool;
       return;
     }
@@ -207,6 +248,7 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
       const id = text(input.task_id);
       const label = clean(text(input.task_subject), LABEL_CHARS);
       if (!label || state.todos.length >= TODO_LIMIT || (id && state.todos.some((todo) => todo.id === id))) return;
+      state.lastAt = iso;
       state.todos = [...state.todos, { ...(id ? { id } : {}), label, status: 'pending' }];
       return;
     }
@@ -214,6 +256,7 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
       const id = text(input.task_id);
       const todo = id ? state.todos.find((candidate) => candidate.id === id) : undefined;
       if (todo) todo.status = 'completed';
+      state.lastAt = iso;
       return;
     }
     default:
@@ -233,17 +276,21 @@ export function noteStatusline(state: TerminalActivity, input: Input): void {
   state.context = { usedPct, ...(used !== undefined ? { used } : {}), ...(size !== undefined ? { size } : {}) };
 }
 
-/** 새 요청이 왔다. 지금 하는 일을 지우고, 다 끝낸 할 일 목록과 끝난 서브에이전트를 비운다 */
-export function noteTurnStarted(state: TerminalActivity): void {
+/** 새 요청이 왔다. 지금 하는 일을 지우고, 다 끝낸 할 일 목록과 끝난 서브에이전트를 비운다. 이때부터 몇 분째인지 센다(#933) */
+export function noteTurnStarted(state: TerminalActivity, at: number = Date.now()): void {
   delete state.now;
+  state.workingSince = new Date(at).toISOString();
+  state.lastAt = state.workingSince;
   if (state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')) state.todos = [];
   for (const [id, subagent] of state.subagents) if (subagent.state === 'done') state.subagents.delete(id);
   state.pending = [];
 }
 
 /** 턴이 끝났다(Stop). 지금 하는 일을 지우고 마지막 답을 남긴다 */
-export function noteTurnEnded(state: TerminalActivity, input: Input): void {
+export function noteTurnEnded(state: TerminalActivity, input: Input, at: number = Date.now()): void {
   delete state.now;
+  delete state.workingSince;
+  state.lastAt = new Date(at).toISOString();
   const message = clean(text(input.last_assistant_message), MESSAGE_CHARS);
   if (message) state.lastMessage = message;
 }
@@ -251,6 +298,7 @@ export function noteTurnEnded(state: TerminalActivity, input: Input): void {
 /** CLI가 끝났다. 지금 하는 일을 지운다(할 일·마지막 답은 남긴다) */
 export function noteCliEnded(state: TerminalActivity): void {
   delete state.now;
+  delete state.workingSince;
   for (const subagent of state.subagents.values()) subagent.state = 'done';
 }
 
@@ -260,13 +308,21 @@ export function activityView(state: TerminalActivity | undefined): TerminalActiv
   const todos = state.todos.length > 0 ? todoSummary(state.todos) : undefined;
   const subagents = [...state.subagents.values()].map((subagent) => ({ ...subagent }));
   const view: TerminalActivityView = {
-    ...(state.now ? { now: { ...state.now } } : {}),
+    ...(state.now ? { now: nowView(state.now, state.seesToolEnd === true) } : {}),
     ...(todos ? { todos } : {}),
     ...(state.context ? { context: { ...state.context } } : {}),
     ...(state.lastMessage ? { lastMessage: state.lastMessage } : {}),
     ...(subagents.length > 0 ? { subagents } : {}),
+    ...(state.workingSince ? { workingSince: state.workingSince } : {}),
+    ...(state.lastAt ? { lastAt: state.lastAt } : {}),
   };
   return Object.keys(view).length > 0 ? view : undefined;
+}
+
+/** 도구 끝 훅을 받은 적이 없는 CLI에서는 running을 싣지 않는다(#933) */
+function nowView(now: ActivityNow, seesToolEnd: boolean): ActivityNow {
+  const { running, ...rest } = now;
+  return seesToolEnd && running !== undefined ? { ...rest, running } : rest;
 }
 
 function todoSummary(todos: readonly TodoItem[]): ActivityTodos {
