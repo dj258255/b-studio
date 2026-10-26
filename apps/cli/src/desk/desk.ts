@@ -35,6 +35,8 @@ import { accountSprite, byTightness, sessionLimits, usageScreen, usageSpriteKey 
 
 /** 사이드바를 새로 받는 주기 */
 const POLL_MS = 1_500;
+/** 목록이 그대로여도 다시 그리는 주기(마지막 활동 "N분 전"이 낡지 않게) */
+const CLOCK_MS = 30_000;
 /** 사용량을 새로 받는 주기(#889). 스튜디오가 계정마다 최소 간격(Claude 10분)을 지키므로 이보다 자주 묻지 않는다 */
 const USAGE_POLL_MS = 60_000;
 /** 화면을 다시 그리는 최소 간격 */
@@ -331,7 +333,9 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   /** 폴더 열기(#916). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, FolderCall>> &
   /** 지금 변경(#924). 없으면 그 화면에서 할 수 없다고 알린다 */
-  Partial<Pick<StudioClient, ChangesCall>>;
+  Partial<Pick<StudioClient, ChangesCall>> &
+  /** 목록 통로(#923). 없으면 지금처럼 POLL_MS마다 묻는다 */
+  Partial<Pick<StudioClient, 'agentsStream'>>;
 
 /** 지금 변경 화면이 부르는 스튜디오 API(#924) */
 type ChangesCall = 'liveChanges';
@@ -493,6 +497,14 @@ export class DeskApp {
   #pendingTimer: NodeJS.Timeout | undefined;
   #resizeTimer: NodeJS.Timeout | undefined;
   #polling = false;
+  /** 목록 통로(#923)가 목록을 보내 주는 중이다. 그동안은 묻지 않는다 */
+  #agentsLive = false;
+  #agentsAbort: AbortController | undefined;
+  #agentsRetry: NodeJS.Timeout | undefined;
+  /** 마지막으로 받은 목록(같은 목록이면 다시 그리지 않는다) */
+  #itemsKey = '';
+  /** 같은 목록만 와도 "N분 전" 같은 글이 낡지 않게 가끔 다시 그린다 */
+  #clockTimer: NodeJS.Timeout | undefined;
   #prevFrame: string[] = [];
   #frameTimer: NodeJS.Timeout | undefined;
   #pollTimer: NodeJS.Timeout | undefined;
@@ -661,6 +673,8 @@ export class DeskApp {
       this.#resizeTimer = setTimeout(() => this.#syncPanes(), RESIZE_SETTLE_MS);
     });
     this.#pollTimer = setInterval(() => void this.#poll(), POLL_MS);
+    this.#clockTimer = setInterval(() => this.#scheduleRender(), CLOCK_MS);
+    this.#openAgentsStream();
     // 사용량(#889): 처음 한 번, 그 뒤 1분마다
     void this.#fetchUsage({ refresh: false, force: true });
     if (this.#client.limits) this.#usageTimer = setInterval(() => void this.#fetchUsage({ refresh: false, force: true }), USAGE_POLL_MS);
@@ -2704,23 +2718,66 @@ export class DeskApp {
 
   async #poll(): Promise<void> {
     // 앞 요청이 끝나기 전에는 새로 묻지 않는다(느린 스튜디오에 요청이 쌓이고 늦게 온 옛 목록이 새 목록을 덮지 않게)
-    if (this.#polling) return;
+    // 목록 통로(#923)가 살아 있으면 묻지 않는다
+    if (this.#polling || this.#agentsLive) return;
     this.#polling = true;
     try {
       const received = (await this.#client.agents()).items;
-      this.#announce(received);
-      // 급한 순으로 놓는다(#922). 사이드바·빠른 전환·카드를 고르는 동안은 앞 순서를 지킨다. 고르던 세션은 그대로 고른다
-      const items = this.#holdOrder() ? keepOrder(this.#state.items, received) : byUrgency(received, new Set(this.#state.unseenDone ?? []));
-      const usage = this.#state.usage;
-      this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items), ...(usage?.accounts.length ? { limits: sessionLimits(items, usage.accounts) } : {}) };
-      this.#reopenResumed(items);
-      this.#clearSeen();
-      this.#scheduleRender();
+      // 묻는 사이 통로가 붙어 더 새 목록을 받았으면 늦게 온 이 목록으로 덮지 않는다
+      if (!this.#agentsLive) this.#applyItems(received);
     } catch (error) {
       this.#say(`세션 목록을 받지 못했습니다: ${messageOf(error)}`);
     } finally {
       this.#polling = false;
     }
+  }
+
+  /** 받은 목록을 쓴다(묻기와 목록 통로가 같이 쓴다). 지난번과 같으면 아무것도 하지 않는다 */
+  #applyItems(received: DeskItem[]): void {
+    // 고르기가 끝나면 같은 목록이라도 급한 순으로 다시 놓아야 하므로 순서를 지키는 중인지도 비교에 넣는다
+    const hold = this.#holdOrder();
+    const key = `${hold ? 1 : 0}${JSON.stringify(received)}`;
+    if (key === this.#itemsKey) return;
+    this.#itemsKey = key;
+    this.#announce(received);
+    // 급한 순으로 놓는다(#922). 사이드바·빠른 전환·카드를 고르는 동안은 앞 순서를 지킨다. 고르던 세션은 그대로 고른다
+    const items = hold ? keepOrder(this.#state.items, received) : byUrgency(received, new Set(this.#state.unseenDone ?? []));
+    const usage = this.#state.usage;
+    this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items), ...(usage?.accounts.length ? { limits: sessionLimits(items, usage.accounts) } : {}) };
+    this.#reopenResumed(items);
+    this.#clearSeen();
+    this.#scheduleRender();
+  }
+
+  /**
+   * 목록 통로(#923)를 연다. 목록이 오는 동안은 묻기를 쉬고, 끊기면 묻기로 돌아가 RECONNECT_MS 뒤 다시 연다.
+   * 옛 스튜디오(404)면 다시 열지 않는다. 손님에 통로가 없으면 아무것도 하지 않는다
+   */
+  #openAgentsStream(): void {
+    const open = this.#client.agentsStream;
+    if (!open || this.#restored) return;
+    const controller = new AbortController();
+    this.#agentsAbort = controller;
+    const reconnect = (): void => {
+      this.#agentsLive = false;
+      if (this.#restored || controller.signal.aborted) return;
+      this.#agentsRetry = setTimeout(() => this.#openAgentsStream(), RECONNECT_MS);
+    };
+    open
+      .call(
+        this.#client,
+        (overview) => {
+          if (controller.signal.aborted) return;
+          this.#agentsLive = true;
+          this.#applyItems(overview.items);
+        },
+        controller.signal,
+      )
+      .then(reconnect, (error: unknown) => {
+        this.#agentsLive = false;
+        if (error instanceof StudioRequestError && error.status === 404) return;
+        reconnect();
+      });
   }
 
   /** 사람이 목록을 고르는 중이다: 사이드바 고르기, 빠른 전환, 카드 화면에서 방금 키를 누름 */
@@ -2988,6 +3045,9 @@ export class DeskApp {
     if (this.#restored) return;
     this.#restored = true;
     clearInterval(this.#pollTimer);
+    clearInterval(this.#clockTimer);
+    clearTimeout(this.#agentsRetry);
+    this.#agentsAbort?.abort();
     clearInterval(this.#usageTimer);
     clearInterval(this.#plansTimer);
     clearTimeout(this.#frameTimer);
