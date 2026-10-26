@@ -62,15 +62,18 @@ export function detailLines(item: DeskItem): DetailLine[] {
   const subagents = (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
   for (const agent of subagents.slice(0, SUBAGENT_LINES)) {
     const state = AGENT_STATE[agent.state];
-    const parts = [...(agent.tool ? [agent.tool] : []), `토큰 ${totalTokens(agent.tokens).toLocaleString('ko-KR')}`, ...(agent.activity ? [agent.activity] : [])];
-    lines.push({ text: `↳ ${subagentName(agent)} ${state.label} · ${parts.join(' · ')}`, tones: [{ text: state.label, tone: state.tone }] });
+    // 텔레메트리가 없으면 토큰은 0으로 온다. 모르는 것을 "토큰 0"으로 적지 않는다(#944)
+    const tokens = totalTokens(agent.tokens);
+    const parts = [...(agent.tool ? [agent.tool] : []), ...(tokens > 0 ? [`토큰 ${tokens.toLocaleString('ko-KR')}`] : []), ...(agent.activity ? [agent.activity] : [])];
+    lines.push({ text: `↳ ${subagentName(agent)} ${state.label}${parts.length ? ` · ${parts.join(' · ')}` : ''}`, tones: [{ text: state.label, tone: state.tone }] });
   }
   if (subagents.length > SUBAGENT_LINES) lines.push({ text: `↳ 외 ${subagents.length - SUBAGENT_LINES}개`, tones: [] });
   const capabilities = item.capabilities;
   if (capabilities) {
     const tools = capabilities.tools === 'cli-default' ? 'CLI 기본' : capabilities.tools.join(', ');
-    lines.push({ text: `도구 ${tools} · 쓰기 ${capabilities.writeScope}`, tones: [] });
-    lines.push({ text: `권한 ${capabilities.permission}`, tones: [] });
+    // 무엇을 뜻하는지 말한다(#944): 쓸 수 있는 곳, 무엇이 검사하는지
+    lines.push({ text: `도구 ${tools} · 쓸 곳 ${capabilities.writeScope}`, tones: [] });
+    lines.push({ text: `검사 ${capabilities.permission}`, tones: [] });
   }
   return lines;
 }
@@ -162,7 +165,8 @@ export function agentStatus(item: DeskItem, options: { unseen?: boolean } = {}):
     return { label, tone: 'warn', ...(color ? { color } : {}) };
   }
   if (item.state === 'working') return { label: '작업 중', tone: 'busy' };
-  if (item.state === 'booting') return { label: '켜는 중', tone: 'busy' };
+  // 샌드박스와 서비스를 띄우는 중(#944). "켜는 중"은 무엇을 켜는지 몰랐다
+  if (item.state === 'booting') return { label: '준비 중', tone: 'busy' };
   if (item.state === 'error') return { label: '오류', tone: 'fail' };
   if (item.state === 'stopped') return { label: '멈춤', tone: 'muted' };
   // 작업 카드 계획이 끝나 자원을 돌려준 레인(#868)
@@ -291,12 +295,21 @@ export function sidebarRows(
       const parts = [word, flag, slot ? `${muted}${slot}${RESET}` : ''].filter(Boolean);
       const marks = parts.join(' ');
       const marksWidth = (tag ? stringWidth(tag.text) : 0) + (flag ? 1 : 0) + (slot ? String(slot).length : 0) + Math.max(0, parts.length - 1);
-      const line = `   ${statusMark(agentStatus(item, { unseen: unseen.has(item.id) }), theme)} ${item.title}`;
+      // 좁으면 제목 끝에 …를 붙여 잘렸다는 것을 보인다(#944)
+      const room = (marksWidth && marksWidth + 3 < width ? width - marksWidth - 2 : width) - 5;
+      const line = `   ${statusMark(agentStatus(item, { unseen: unseen.has(item.id) }), theme)} ${ellipsize(item.title, room)}`;
       rows.push({ text: spreadPlain(line, marks, marksWidth, width), selected: index === selected, item: index });
     }
   }
   rows.push(folder);
   return rows;
+}
+
+/** 넘치면 …로 줄인다 */
+function ellipsize(text: string, width: number): string {
+  if (width <= 0 || stringWidth(text) <= width) return text;
+  // fit이 넘친 글을 width-1칸에서 자르고 …를 붙인다
+  return fit(text, width).trimEnd();
 }
 
 /** 왼쪽 글과 오른쪽 표시(폭 rightWidth)를 width칸 한 줄에 놓는다. 오른쪽 끝에 한 칸 띄운다 */

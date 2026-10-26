@@ -2,7 +2,7 @@
  * desk 화면 그리기. 상태와 칸마다의 터미널 줄을 받아 화면 한 장(줄 배열)과 커서 자리를 돌려주는 순수 함수다.
  * 줄마다 보이는 폭은 정확히 화면 폭이다(색 제어 문자는 폭에 넣지 않는다). 그리는 쪽은 바뀐 줄만 다시 쓴다
  */
-import { spaceScreen } from './cards';
+import { clipWords, spaceScreen } from './cards';
 import { RECORDS_HINT, recordsLines } from './records';
 import { sessionDetailLines } from './session-detail';
 import { tightestLine, usageScreen } from './usage';
@@ -70,6 +70,8 @@ const IDLE_HINT = ' Ctrl-b 누르고 › j 다음 확인 · w 카드 · n 새 �
 /** 앞글쇠를 누른 뒤 */
 export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · Enter 열기 · j 다음 확인 · w 카드 · u 사용량 · n 새 요청 · ? 모든 키';
 const SPACE_HINT = ' 카드 화면 · ←→ 고르기 · Enter 칸에 열기 · i 자세히 · d 지금 변경 · Esc 칸 화면 · ? 모든 키';
+/** 세션이 하나도 없을 때의 카드 화면: 고를 카드가 없으니 쓸 수 있는 키만(#944) */
+const SPACE_EMPTY_HINT = ' 카드 화면 · a 폴더 열기 · n 새 요청 · g 설정 · Esc 칸 화면 · ? 모든 키';
 const USAGE_HINT = ' 사용량 · ↑↓ 계정 고르기 · r 다시 읽기 · g 계정 설정 · Esc 닫기 · ? 모든 키';
 export const COPY_HINT = ' 복사 모드 · ↑↓ 옮기기 · v 고르기 · y 복사하고 나가기 · / 위로 찾기 · n 다음 · b f 쪽 · g G 처음과 끝 · q 나가기';
 
@@ -388,7 +390,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
         : state.message
           ? ` ${state.message}`
           : state.view === 'space'
-            ? SPACE_HINT
+            ? deskSessions(state.items).length
+              ? SPACE_HINT
+              : SPACE_EMPTY_HINT
             : state.view === 'usage'
               ? USAGE_HINT
               : IDLE_HINT;
@@ -396,7 +400,8 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];
     if (switcher && switcherRect) cursor = { x: switcherRect.x + switcher.cursor.x, y: switcherRect.y + switcher.cursor.y };
-    else if (!state.plans && rect && view?.cursor && state.slots[state.focus]) {
+    // 카드·사용량 화면처럼 본문을 덮은 화면에서는 가려진 칸의 커서를 보이지 않는다(#944)
+    else if (!space && rect && view?.cursor && state.slots[state.focus]) {
       cursor = { x: rect.x + Math.min(view.cursor.x, rect.w - 1), y: rect.y + 1 + Math.min(view.cursor.y, rect.h - 2) };
     }
   }
@@ -417,7 +422,12 @@ function paneLine(state: DeskState, slot: number, rect: Rect, row: number, view:
     else if (view?.title) title += view.title;
     else if (item) {
       const gate = gateStatus(item);
-      title += `${statusMark(agentStatus(item), theme)}${head} ${[backendLabel(item.backend), item.title, agentStatus(item).label, ...(gate ? [gate.label] : [])].join(' · ')}`;
+      // 좁으면 제목(사람이 쓴 요청)을 …로 줄이고 상태는 남긴다(#944). 그래도 모자라면 검증, 상태 차례로 뺀다
+      const front = `${backendLabel(item.backend)} · `;
+      const avail = rect.w - stringWidth(` ${slot + 1} `) - 2 - stringWidth(front);
+      const tails = [[agentStatus(item).label, ...(gate ? [gate.label] : [])], [agentStatus(item).label], []].map((parts) => (parts.length ? ` · ${parts.join(' · ')}` : ''));
+      const tail = tails.find((candidate) => avail - stringWidth(candidate) >= Math.min(8, stringWidth(item.title))) ?? '';
+      title += `${statusMark(agentStatus(item), theme)}${head} ${front}${clipWords(item.title, Math.max(1, avail - stringWidth(tail)))}${tail}`;
     } else title += id;
     if (view?.mode) title += ` · ${view.mode}`;
     if (view?.bell) title += ' · 벨';
