@@ -379,10 +379,17 @@ describe('세션 조작: 멈추기·이어서 작업·이름 바꾸기(#864)', (
     expect(state.message).toContain('이미 멈춘');
   });
 
+  it('Ctrl-b r은 켜지 못한(오류) 세션이면 샌드박스를 다시 켤지 묻는다(#943)', () => {
+    const failed = { ...item('a'), state: 'error' as const, reason: '도커에 닿지 못했습니다' };
+    const asked = handleInput(withItems({ items: [failed] }), '\x02r');
+    expect(asked.state.confirm).toEqual({ action: 'retry', id: 'a', title: 'a' });
+    expect(handleInput(asked.state, 'y').effects).toEqual([{ type: 'session', action: 'retry', id: 'a' }]);
+  });
+
   it('Ctrl-b r은 멈춘 세션만 이어서 작업할지 묻고, Enter로도 고른다', () => {
     const running = handleInput(withItems(), '\x02r');
     expect(running.state.confirm).toBeUndefined();
-    expect(running.state.message).toContain('멈춘 세션만');
+    expect(running.state.message).toContain('멈춘 세션');
     const asked = handleInput(withItems({ items: [stopped('a')] }), '\x02r');
     expect(asked.state.confirm).toEqual({ action: 'resume', id: 'a', title: 'a' });
     expect(handleInput(asked.state, '\r').effects).toEqual([{ type: 'session', action: 'resume', id: 'a' }]);

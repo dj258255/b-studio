@@ -5,7 +5,7 @@
  * 판정은 기록에 남은 사실로만 한다.
  *  - 통과: 실행이 done으로 끝났고 그 실행의 체크포인트가 있다.
  *  - 바꾼 것 없음: done인데 체크포인트가 없다. 판정할 변경이 없으므로 통과율에 넣지 않는다.
- *  - 플랫폼 실패: failed인데 마지막 검증 결과에 platformFailure가 있다(#599). AI의 성적에 넣지 않는다.
+ *  - 플랫폼 실패: failed인데 마지막 검증 결과에 platformFailure가 있다(#599), 또는 실행 끝(run_finished)에 실렸다(#943, 샌드박스를 켜지 못함). AI의 성적에 넣지 않는다.
  *  - 실패: 그 밖의 failed. 오류: error.
  *  - 질문(intent ask)과 취소·되묻기·진행 중인 실행은 표에 넣지 않고 수만 알린다.
  */
@@ -77,6 +77,8 @@ function collectRuns(session: RoutingSessionEvents): Map<string, DraftRun> {
     if (event.type === 'run_finished') {
       run.status = event.status;
       run.mismatch = Boolean(event.mismatches?.length);
+      // 실행 끝에 실린 플랫폼 실패(#943, 검증 전에 샌드박스를 켜지 못함)도 같다
+      if (event.platformFailure) run.platformFailure = true;
       if (event.durationMs !== undefined) run.durationMs = event.durationMs;
       if (event.usage) run.tokens = event.usage.inputTokens + event.usage.outputTokens + event.usage.cacheReadTokens + event.usage.cacheWriteTokens;
       if (event.metrics?.usageByModel) run.usageByModel = event.metrics.usageByModel;
@@ -94,7 +96,7 @@ function outcomeOf(run: DraftRun): Outcome | undefined {
   // 어긋남을 알린 통과는 맞았는지 사람이 봐야 한다. 통과로 세면 틀린 쪽을 고른 실행이 그 AI의 통과율을 올린다(ADR-182)
   if (run.status === 'done') return run.checkpointed ? (run.mismatch ? 'needsReview' : 'passed') : 'noChange';
   if (run.status === 'failed') return run.platformFailure ? 'platformFailures' : 'failed';
-  if (run.status === 'error') return 'errors';
+  if (run.status === 'error') return run.platformFailure ? 'platformFailures' : 'errors';
   return undefined;
 }
 

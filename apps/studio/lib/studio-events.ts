@@ -481,6 +481,8 @@ export type StudioEvent =
       unguardedWrites?: true;
       /** 가볍게 확인이 건너뛴 검증 단계(프로젝트 토큰 보고서가 이 수를 센다). light가 아니면 없다 */
       skippedStages?: string[];
+      /** 샌드박스·도커 쪽 문제로 검증하지 못해 끝났으면 그 사유(#943). 바꾼 코드의 문제가 아니다 — AI의 결과표에 넣지 않는다 */
+      platformFailure?: string;
       sessionTokens?: AgentUsage;
       nextDemoRequest?: string;
       nextDemoQuestion?: string;

@@ -551,6 +551,11 @@ interface Session {
    * 켜는 중에는 bootPromise를 공유해 동시 호출에도 한 번만 켠다
    */
   lazy: boolean;
+  /**
+   * 마지막으로 켜지 못한 까닭이 샌드박스·도커 쪽(SandboxError.platform)인가(#943). 코드가 원인일 수 있는 실패(서비스가 준비되지 않음 등)는 false다.
+   * 검증하려다 켜지 못해 끝난 실행을 플랫폼 실패로 셀지 정한다 — 애매하면 플랫폼 실패로 세지 않는다
+   */
+  bootPlatformFailure?: boolean;
   bootPromise?: Promise<void>;
   usageTimer?: NodeJS.Timeout;
   /** 터미널 실행의 정체를 보는 타이머(#B5). 열린 터미널 실행이 있을 때만 돌고, 실행이 닫히거나 세션이 멈추면 지운다 */
@@ -2153,6 +2158,7 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
     if (signal.aborted) return;
     // 실패를 알리기 전에 컨테이너의 마지막 줄을 실행 탭 로그에 남긴다. 화면이 실패를 보고 그 로그를 가리키기 때문이다
     await captureFailureLogs(session);
+    session.bootPlatformFailure = error instanceof SandboxError && error.platform;
     setStatus(session, 'failed', describe(error));
   }
 }
@@ -7835,8 +7841,8 @@ export function sessionTerminalAllowed(): boolean {
 
 /**
  * 세션 터미널이 붙을 자리: 샌드박스 id(컨테이너 이름과 라벨), 작업 복사본, 프로젝트 id(홈 볼륨).
- * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도 연다.
- * 멈췄거나 켜다 실패한 세션은 정리된 샌드박스의 것이라 열지 않는다
+ * 서비스가 떠 있을 필요는 없다. 터미널의 컨테이너는 작업 복사본만 붙이므로, 샌드박스를 아직 켜지 않은 세션(개인 PC 모드의 지연 기동)에서도,
+ * 켜다 실패한 세션(#943, 다음 필요에 다시 켠다)에서도 연다. 멈춘 세션은 정리된 샌드박스의 것이라 열지 않는다
  */
 export function sessionTerminalTarget(id: string): {
   sandboxId: string;
@@ -7855,7 +7861,7 @@ export function sessionTerminalTarget(id: string): {
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
   // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
   const alive = (): boolean => terminalSessionAlive(session);
-  if (!alive()) throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업을 누른 뒤 다시 여세요');
+  if (!alive()) throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업(Ctrl-b r)한 뒤 다시 여세요');
   return {
     sandboxId: session.sandbox.id,
     root: session.project.root,
@@ -8044,8 +8050,14 @@ function terminalSession(id: string): Session {
 }
 
 /** 세션 터미널 자리가 아직 살아 있는가. sessionTerminalTarget과 위반 처리기가 같은 기준을 쓴다 */
+/**
+ * 터미널이 붙어 있어도 되는 세션인가: 멈추기 시작했거나 멈췄으면 아니다.
+ * 샌드박스를 켜지 못한(failed) 세션은 살아 있다(#943). 다음 필요(쓰기 도구·게이트·지금 켜기)에 다시 켜 보는 상태이고,
+ * 그 사이 CLI는 떠서 사람을 기다린다. 막으면 권한 창에 답할 길이 없다. 쓰기 도구와 게이트는 그대로 샌드박스를 요구하므로
+ * 검증 없이 나가는 변경은 생기지 않는다
+ */
 function terminalSessionAlive(session: Session): boolean {
-  return !session.stop.signal.aborted && session.snapshot.status !== 'stopped' && session.snapshot.status !== 'failed';
+  return !session.stop.signal.aborted && session.snapshot.status !== 'stopped';
 }
 
 /**
@@ -8625,7 +8637,7 @@ async function abandonTerminalRun(
     const outcome = !reverted ? `변경을 되돌리지 못했습니다: ${describe(revertError)}` : reverted.length > 0 ? `바뀐 파일 ${reverted.length}개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다)` : '바뀐 파일은 없었습니다';
     summary = cancelled && !reason ? stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError) : `${summary}\n\n${outcome}.`.trim();
   }
-  announceTerminalRun(session, run, { status, summary });
+  announceTerminalRun(session, run, { status, summary, ...(platformFailure ? { platformFailure } : {}) });
   return summary;
 }
 
@@ -8637,7 +8649,7 @@ function settleTerminalRun(session: Session, run: ActiveRun & { terminal: Termin
 }
 
 /** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
-function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete' | 'unguardedWrites'>): void {
+function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete' | 'unguardedWrites' | 'platformFailure'>): void {
   if (session.run === run) session.run = undefined;
   // 실행이 닫혔으면 사람을 기다릴 일도 없다(B7). 실행이 닫힌 뒤의 대기는 사람이 볼 일이 아니다
   clearTerminalAttention(session);
@@ -9173,7 +9185,11 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
     }
     console.error('[b-studio] 터미널 실행의 검증 실패', error);
-    const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}` });
+    // 샌드박스·도커 쪽 문제로 켜지 못해 검증하지 못했으면 b-studio 쪽 문제다(#943). 바꾼 코드의 탓으로 되돌리거나 AI의 성적에 넣지 않는다.
+    // 체크포인트는 남기지 않으므로 다음 요청의 게이트가 이 변경을 다시 검증한다
+    // 코드가 원인일 수 있는 실패(서비스가 준비되지 않음 등)는 여기 넣지 않는다 — AI의 실패를 플랫폼 탓으로 가리지 않는다
+    const platformFailure = session.snapshot.status === 'failed' && session.bootPlatformFailure ? `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? describe(error)}` : undefined;
+    const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}`, ...(platformFailure ? { platformFailure } : {}) });
     return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
   } finally {
     state.checking = false;
