@@ -87,6 +87,8 @@ const GATE_NOTICE: Record<string, string> = { 실패: '검증 실패', '확인 �
 const NOT_READY: readonly string[] = ['stopped', 'booting'];
 /** 한 번에 내는 OS 알림의 상한(여럿이 한꺼번에 바뀌어도 알림이 쏟아지지 않게) */
 const MAX_OS_NOTICES = 3;
+/** 같은 세션의 같은 알림을 이 안에 다시 내지 않는다(#956: 오류가 켜기를 다시 해 보는 사이 두 번 났다) */
+const NOTICE_REPEAT_MS = 120_000;
 /** 카드 화면에서 키를 누른 뒤 이만큼은 카드 순서를 바꾸지 않는다(#922) */
 const HOLD_ORDER_MS = 5_000;
 /** 휠 한 칸에 옮기는 줄 수 */
@@ -524,6 +526,10 @@ export class DeskApp {
   #lastKeyAt = 0;
   /** 세션마다 지난번에 본 상태·게이트(바뀐 것을 알리려고 둔다). 처음 받은 목록은 알리지 않고 여기에 적기만 한다 */
   readonly #last = new Map<string, { status: string; gate?: string }>();
+  /** 세션마다 마지막으로 낸 알림 문구와 때(#956). 같은 알림이 잇달아 나지 않게 한다 */
+  readonly #noticed = new Map<string, { what: string; at: number }>();
+  /** 방금 새 요청으로 만든 세션(#956). 목록에 나오면 고른다(카드 화면과 머리가 그 스페이스를 따라간다) */
+  #follow: string | undefined;
   /** 이어서 작업을 보낸 세션. 켜지면 칸을 다시 연다 */
   readonly #resuming = new Set<string>();
   /** 칸 안 CLI가 벨을 울린 세션(칸 머리에 보이고, 그 칸을 고르면 지운다) */
@@ -2236,14 +2242,21 @@ export class DeskApp {
    * 사이드바에 표시를 붙이고(본 뒤 지운다) 아래 줄에 알린다. 알림을 켰으면 벨을 울리고, 보고 있는 칸이 아닌 세션은 OS 알림(OSC 9)도 낸다
    */
   #announce(items: readonly DeskItem[]): void {
-    const notices: Array<{ id: string; text: string; kind: 'input' | 'gate' | 'done' }> = [];
+    const notices: Array<{ id: string; text: string; kind: 'input' | 'gate' | 'done'; settled: boolean }> = [];
+    const at = Date.now();
     for (const item of items) {
       const now = statusOf(item);
       const before = this.#last.get(item.id);
       this.#last.set(item.id, now);
       if (!before) continue;
       const what = changeOf(before, now);
-      if (what) notices.push({ id: item.id, text: `${backendLabel(item.backend)} · ${item.title} · ${what}`, kind: WAITING.includes(what) ? 'input' : what === '끝남' ? 'done' : 'gate' });
+      if (!what) continue;
+      // 같은 세션의 같은 알림은 잠시 다시 내지 않는다(#956)
+      const last = this.#noticed.get(item.id);
+      if (last && last.what === what && at - last.at < NOTICE_REPEAT_MS) continue;
+      this.#noticed.set(item.id, { what, at });
+      const kind = WAITING.includes(what) ? 'input' : what === '끝남' ? 'done' : 'gate';
+      notices.push({ id: item.id, text: `${backendLabel(item.backend)} · ${item.title} · ${what}`, kind, settled: SETTLED.includes(now.status) });
     }
     if (notices.length === 0) return;
     // 지금 보고 있는 칸의 세션은 표시도 소리도 내지 않는다(#922). 아래 줄 알림은 낸다
@@ -2252,7 +2265,8 @@ export class DeskApp {
     const unseenDone = new Set(this.#state.unseenDone ?? []);
     for (const notice of away) {
       flagged.add(notice.id);
-      if (notice.kind === 'done') unseenDone.add(notice.id);
+      // 검증 판정으로 끝을 알린 세션(#956: "끝남"을 따로 내지 않는다)도 끝났지만 아직 안 본 세션이다
+      if (notice.kind === 'done' || (notice.kind === 'gate' && notice.settled)) unseenDone.add(notice.id);
     }
     this.#state = { ...this.#state, flagged: [...flagged], unseenDone: [...unseenDone], message: `알림: ${notices.map((notice) => notice.text).join(' / ')}` };
     if (away.length) this.#saveLayout();
@@ -2764,7 +2778,16 @@ export class DeskApp {
     // 급한 순으로 놓는다(#922). 사이드바·빠른 전환·카드를 고르는 동안은 앞 순서를 지킨다. 고르던 세션은 그대로 고른다
     const items = hold ? keepOrder(this.#state.items, received) : byUrgency(received, new Set(this.#state.unseenDone ?? []));
     const usage = this.#state.usage;
-    this.#state = { ...this.#state, items, selected: reselect(this.#state.items, this.#state.selected, items), ...(usage?.accounts.length ? { limits: sessionLimits(items, usage.accounts) } : {}) };
+    let selected = reselect(this.#state.items, this.#state.selected, items);
+    // 새 요청으로 만든 세션이 목록에 나오면 그것을 고른다(#956). 카드 화면과 맨 위 머리가 그 스페이스를 따라간다
+    if (this.#follow) {
+      const at = deskSessions(items).findIndex((entry) => entry.id === this.#follow);
+      if (at >= 0) {
+        selected = at;
+        this.#follow = undefined;
+      }
+    }
+    this.#state = { ...this.#state, items, selected, ...(usage?.accounts.length ? { limits: sessionLimits(items, usage.accounts) } : {}) };
     this.#reopenResumed(items);
     this.#clearSeen();
     this.#scheduleRender();
@@ -2893,6 +2916,7 @@ export class DeskApp {
   async #submit(projectId: string, request: string, choice: string, allowCheckChanges = false): Promise<void> {
     try {
       const result = await this.#client.start({ projectId, request, choice, ...(allowCheckChanges ? { allowCheckChanges: true } : {}) });
+      this.#follow = result.session.id;
       const slots = [...this.#state.slots];
       // 고른 칸에 셸이 돌고 있으면 덮지 않는다(셸은 x와 나가기로만 끝낸다). 세션은 사이드바에서 연다
       const shellTaken = isShellId(slots[this.#state.focus]);
@@ -3118,7 +3142,8 @@ export function changeOf(before: { status: string; gate?: string; error?: true }
   if (now.error && !before.error) return '오류';
   if (WAITING.includes(now.status) && now.status !== before.status) return now.status;
   if (now.gate && GATE_NOTICE[now.gate] && now.gate !== before.gate) return GATE_NOTICE[now.gate];
-  if (before.status === '작업 중' && SETTLED.includes(now.status)) return '끝남';
+  // 끝나고 검증하는 중이면 "끝남"을 내지 않고 판정을 기다린다(#956: "끝남"과 "검증 통과"가 연달아 났다)
+  if (before.status === '작업 중' && SETTLED.includes(now.status) && now.gate !== '검증 중') return '끝남';
   return undefined;
 }
 

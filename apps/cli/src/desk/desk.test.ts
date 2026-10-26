@@ -1627,3 +1627,52 @@ describe('desk 작업대: 봐야 할 것 먼저(#922)', () => {
     expect(ctx.app.state.items.map((entry) => entry.id)).toEqual(['b', 'a']);
   });
 });
+
+describe('desk 작업대: 알림 묶기와 새 요청 따라가기(#956)', () => {
+  const OSC9 = /\x1b\]9;([^\x07]*)\x07/g;
+  const notices = (out: string): string[] => [...out.matchAll(OSC9)].map((match) => match[1]!);
+  const poll = () => tick(1_600);
+
+  it('같은 세션의 같은 알림(오류)이 잇달아 와도 OS 알림은 한 번만 낸다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working' })]);
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'error', reason: '도커에 닿지 못했습니다' })];
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'booting' })];
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'error', reason: '도커에 닿지 못했습니다' })];
+    await poll();
+    expect(notices(ctx.io.all).filter((text) => text.includes('요청 b'))).toEqual(['b-studio: Claude · 요청 b · 오류']);
+  });
+
+  it('작업이 끝나 검증하는 동안은 "끝남"을 내지 않고, 판정이 나오면 그 하나만 알린다', async () => {
+    const ctx = setup([item('a'), item('b', { state: 'working', terminal: { cli: 'up' } })]);
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up', waiting: 'idle' }, gate: { state: 'verifying', checkpoints: 0 } })];
+    await poll();
+    ctx.client.items = [item('a'), item('b', { state: 'idle', terminal: { cli: 'up', waiting: 'idle' }, gate: { state: 'passed', checkpoints: 1 } })];
+    await poll();
+    expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 검증 통과']);
+    // 끝났지만 아직 안 본 세션 표시는 그대로 붙는다
+    expect(ctx.app.state.unseenDone).toContain('b');
+  });
+
+  it('새 요청을 보내면 그 세션이 목록에 나올 때 고른다(카드 화면과 머리가 그 스페이스를 따라간다)', async () => {
+    const ctx = setup([item('a'), item('b')]);
+    ctx.client.projectList = [{ id: 'p1', name: 'shop' }, { id: 'p2', name: 'blog', folder: '/Users/me/blog' }];
+    ctx.client.startResult = { session: { id: 'new' }, routing: { backend: 'claude-code' }, terminal: { opened: true, pasted: true } };
+    ctx.io.type('\x02n');
+    await tick();
+    // 프로젝트가 둘이면 프로젝트부터 고른다(지금 스페이스 shop)
+    expect(ctx.app.state.prompt?.step).toBe('project');
+    ctx.io.type('\r');
+    await tick();
+    ctx.io.type('고쳐 줘\r');
+    await tick();
+    expect(ctx.client.started).toHaveLength(1);
+    ctx.client.items = [item('a'), item('b'), item('new', { projectName: 'blog', state: 'dormant', terminal: { cli: 'up' } })];
+    await poll();
+    const { deskSessions } = await import('./sidebar');
+    expect(deskSessions(ctx.app.state.items)[ctx.app.state.selected]?.id).toBe('new');
+  });
+});

@@ -8,7 +8,7 @@
  */
 import type { DeskState } from './keys';
 import { fit, fitAnsi, stringWidth, type Rect } from './screen';
-import { agentStatus, attentionKind, backendLabel, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, subagentName, totalTokens, type StatusBadge } from './sidebar';
+import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, subagentName, totalTokens, type StatusBadge } from './sidebar';
 import type { KittyImages } from './kitty';
 import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
 import { BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
@@ -167,11 +167,19 @@ export function headStatus(item: DeskItem, unseen = false): StatusBadge {
   if (status.tone === 'warn' || status.tone === 'fail') return status;
   if (item.gate?.state === 'failed' || item.attention === 'gate_failed') return { label: '검증 실패', tone: 'fail' };
   if (item.attention === 'needs_review') return { label: '확인 필요', tone: 'warn' };
-  if (item.state === 'working') return status;
+  if (item.state === 'working' || status.tone === 'busy') return status;
   if (item.gate?.state === 'verifying') return { label: '검증 중', tone: 'busy' };
-  // 끝난 세션은 결과를 머리에 올린다(#944). 흐린 "CLI 대기"만으로는 통과했는지 모른다
-  if (status.tone === 'muted' && item.gate?.state === 'passed') return { label: '검증 통과', tone: 'ok' };
+  // 쓰기가 거절된 채 끝난 요청은 성공처럼 보이지 않게 한다(#956). "끝냈습니다"라는 답만으로는 바뀐 것이 있는지 모른다
+  const denied = deniedWrites(item);
+  if (denied > 0) return { label: `쓰기 ${denied}번 거절`, tone: 'fail' };
+  // 끝난 세션은 결과를 머리에 올린다(#944). 흐린 "CLI 대기"나 안 본 "끝남"만으로는 통과했는지 모른다(#956)
+  if ((status.tone === 'muted' || status.tone === 'ok') && item.gate?.state === 'passed') return { label: '검증 통과', tone: 'ok' };
   return status;
+}
+
+/** 끝난 요청을 게이트가 판정하지 않았다(#956). 마지막 답이 있는데 판정이 없으면 "검증하지 않음"으로 적는다. 옛 서버(gate 없음)는 모른다 */
+function unverified(item: DeskItem): boolean {
+  return item.gate?.state === 'none' && Boolean(item.lastMessage) && item.state !== 'working' && agentStatus(item).tone !== 'busy';
 }
 
 /** 이 세션이 지금 사람을 기다리거나 실패해 손댈 것인가(확인 필요 줄에 올린다) */
@@ -199,25 +207,41 @@ function nowLine(item: DeskItem, width: number, theme: Theme, now: number): stri
     if (item.now?.error) return errorLine(item.now, width, theme);
     return compose([{ text: '› ', color: statusColor(head) }, { text: item.terminal?.message ? oneLine(item.terminal.message) : '그 칸에서 답하면 이어서 합니다', color: statusColor(head), flex: true }], width, theme);
   }
+  const noCheck: Seg[] = unverified(item) ? [SEP, { text: '검증하지 않음', color: 'muted' }] : [];
+  if (deniedWrites(item) > 0) {
+    // 쓰기가 거절된 채 끝났다(#956): 거절 까닭과, 검증하지 않았으면 그 사실
+    const why = item.now?.error ?? item.reason;
+    return compose([{ text: '› ', color: 'red' }, { text: why ? oneLine(why) : '쓰기가 막혀 바뀐 것이 없을 수 있습니다', color: 'red', flex: true }, ...noCheck], width, theme);
+  }
   if (head.tone === 'fail' || head.label === '확인 필요') {
     return compose([{ text: '› ', color: statusColor(head) }, { text: item.reason ? oneLine(item.reason) : '세션 자세히(i)에서 까닭을 봅니다', color: statusColor(head), flex: true }], width, theme);
   }
   if (item.state === 'booting') return compose([{ text: '› 샌드박스와 서비스를 띄우는 중', color: 'muted', flex: true }], width, theme);
   const quiet = lastSignal(item);
-  const stale = item.state === 'working' && !item.now?.running && quiet !== undefined && now - quiet > STALE_MS;
+  const stale = isStale(item, now);
   const staleSeg: Seg = { text: `⚠ ${spanText(now - (quiet ?? now))}째 소식 없음`, color: 'yellow' };
+  // 검증을 통과했어도 거절된 쓰기가 있었으면 남긴다(#956). 끝난 카드의 결과 줄에 붙인다
+  const settled = item.state !== 'working' && agentStatus(item).tone !== 'busy';
+  const deniedSeg: Seg[] = settled && (item.turnDenied ?? 0) > 0 ? [SEP, { text: `쓰기 ${item.turnDenied}번 거절`, color: 'yellow' }] : [];
+  const tail = [...deniedSeg, ...noCheck];
   // 거절·실패한 도구는 정상 진행처럼 "· 17초 전"을 붙이지 않고 까닭을 빨강으로(#953)
   if (item.now?.error) return errorLine(item.now, width, theme);
   if (item.now) {
     const what: Seg[] = [{ text: toolLabel(item.now.tool) }, ...(item.now.target ? [{ text: ` ${oneLine(item.now.target)}`, flex: true }] : [])];
     const when: Seg = item.now.running ? { text: forText(item.now.at, now), color: 'accent' } : stale ? staleSeg : { text: agoText(item.now.at, now), color: 'muted' };
-    return compose([...what, SEP, when], width, theme);
+    return compose([...what, SEP, when, ...tail], width, theme);
   }
   const main = item.agents?.find((agent) => agent.kind === 'main');
-  if (main?.activity) return compose([{ text: oneLine(main.activity), flex: true }, ...(stale ? [SEP, staleSeg] : [])], width, theme);
+  if (main?.activity) return compose([{ text: oneLine(main.activity), flex: true }, ...(stale ? [SEP, staleSeg] : []), ...tail], width, theme);
   if (stale) return compose([staleSeg], width, theme);
   const since = agoText(item.lastActivityAt, now);
-  return compose([{ text: since ? `마지막 활동 ${since}` : '기록 없음', color: 'muted' }], width, theme);
+  return compose([{ text: since ? `마지막 활동 ${since}` : '기록 없음', color: 'muted', flex: true }, ...tail], width, theme);
+}
+
+/** 작업 중인데 도구도 돌지 않고 3분 넘게 소식이 없다(멈춘 듯) */
+function isStale(item: DeskItem, now: number): boolean {
+  const quiet = lastSignal(item);
+  return item.state === 'working' && !item.now?.running && quiet !== undefined && now - quiet > STALE_MS;
 }
 
 /** 거절·실패한 도구 줄: "실행 pnpm test · 거절됨: …"(까닭은 빨강). 넘치면 까닭보다 대상을 먼저 줄이고, 대상을 다 줄여도 넘치면 대상을 뺀다 */
@@ -233,7 +257,7 @@ function errorLine(now: NonNullable<DeskItem['now']>, width: number, theme: Them
 const REMAIN_AFTER_MS = 2 * 60_000;
 
 /**
- * 남은 시간 추정: 작업 중(사람을 기다리거나 오류가 아님)이고, 요청을 시작한 지 2분이 지났고, 끝낸 할 일이 둘 이상일 때만.
+ * 남은 시간 추정: 작업 중(사람을 기다리거나 오류가 아님)이고, 소식이 이어지고, 요청을 시작한 지 2분이 지났고, 끝낸 할 일이 둘 이상일 때만.
  * 지금까지의 한 항목 평균 × 남은 수
  */
 export function remainingText(item: DeskItem, now: number): string {
@@ -241,6 +265,8 @@ export function remainingText(item: DeskItem, now: number): string {
   const spent = goneMs(item.workingSince, now);
   if (!todos || spent === undefined || todos.done < 2 || todos.done >= todos.total) return '';
   if (spent < REMAIN_AFTER_MS || agentStatus(item).label !== '작업 중') return '';
+  // 소식이 끊겼으면 속도를 알 수 없다(#956). 그대로 셈하면 남은 시간이 계속 늘어난다
+  if (isStale(item, now)) return '';
   const left = (spent / todos.done) * (todos.total - todos.done);
   if (left < 60_000) return '1분 안에 끝남(추정)';
   return `약 ${spanText(Math.round(left / 60_000) * 60_000)} 남음(추정)`;
@@ -474,7 +500,8 @@ function needsYouLines(state: DeskState, width: number, theme: Theme): string[] 
   const lines = [compose([{ text: `  확인 필요 ${list.length}`, color: 'yellow', bold: true }, { text: '  숫자로 고르고 Enter로 그 칸에 열기', color: 'muted' }], width, theme)];
   for (const [at, entry] of list.slice(0, NEEDS_YOU_SHOWN).entries()) {
     const picked = entry.index === state.selected;
-    const why = entry.item.terminal?.message ?? entry.item.reason;
+    // 쓰기가 거절된 채 끝난 세션은 거절 까닭을 적는다(#956)
+    const why = entry.item.terminal?.message ?? entry.item.reason ?? (deniedWrites(entry.item) > 0 ? entry.item.now?.error : undefined);
     lines.push(
       compose(
         [

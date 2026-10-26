@@ -48,6 +48,8 @@ export interface DeskItem {
   context?: DeskContext;
   /** 마지막 답의 앞부분(200자 안, #920) */
   lastMessage?: string;
+  /** 지금(또는 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 끝난 카드가 성공처럼 보이지 않게 한다(#956). 옛 서버는 주지 않는다 */
+  turnDenied?: number;
 }
 
 export interface DeskNow {
