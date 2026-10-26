@@ -11,6 +11,7 @@ export interface DeskItem {
   title: string;
   projectName: string;
   state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
+  /** 개입이 필요한 까닭(question·approval·needs_review·gate_failed). 터미널 CLI가 기다리는 것은 terminal.waiting에 있다 */
   attention?: string;
   /** 개입이 필요한 까닭 한 줄(검증 실패 요약, 확인 필요의 첫 어긋남). 모르면 없다 */
   reason?: string;

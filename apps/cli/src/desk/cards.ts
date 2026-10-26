@@ -217,6 +217,8 @@ export interface CardInput {
   item: DeskItem;
   selected: boolean;
   flagged: boolean;
+  /** 끝났지만 아직 보지 않은 세션(#922). 쉬는 CLI를 초록 "끝남"으로 보인다 */
+  unseen?: boolean;
   slot?: number;
   limits?: DeskLimits;
   /** 이 화면의 카드 가운데 하나라도 사용량이 있으면 모든 카드에 사용량 두 줄 자리를 둔다(높이를 맞춘다) */
@@ -245,7 +247,7 @@ export function cardLines(card: CardInput, width: number, theme: Theme = DEFAULT
   const withLast = card.withLast ?? Boolean(item.lastMessage);
   const rows = baseRows(card.withLimits, art, Number(withProgress) + Number(withLast));
   const text = Math.max(1, width - 4 - art.cols - 2);
-  const status = agentStatus(item);
+  const status = agentStatus(item, { unseen: card.unseen ?? false });
   const statusWidth = stringWidth(status.label) + 2;
   const flag = card.flagged ? ` ${fg(theme, 'yellow')}!${RESET}` : '';
   const title = `${BOLD}${fg(theme, 'text')}${item.title}${RESET} ${badge(backendLabel(item.backend), theme)}${flag}`;
@@ -321,6 +323,7 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
     if (id && slot < state.layout) slotOf.set(id, slot + 1);
   });
   const flagged = new Set(state.flagged ?? []);
+  const unseen = new Set(state.unseenDone ?? []);
   const spaceSessions = space.sessions.map((index) => sessions[index]!);
   const columns = rect.w - 2 >= CARD_MIN * 2 + 1 ? 2 : 1;
   const cardWidth = Math.min(CARD_MAX, Math.max(ART_NARROW.cols + 8, Math.floor((rect.w - 2 - (columns - 1)) / columns)));
@@ -344,6 +347,7 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
             item,
             selected: index === state.selected,
             flagged: flagged.has(item.id),
+            unseen: unseen.has(item.id),
             withLimits: with_.limits,
             withProgress: with_.progress,
             withLast: with_.last,

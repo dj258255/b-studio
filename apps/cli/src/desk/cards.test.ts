@@ -55,6 +55,16 @@ describe('카드 한 장', () => {
     expect(plain.length).toBeGreaterThan(card().length);
   });
 
+  it('끝났지만 아직 보지 않은 세션은 초록 "끝남", 본 뒤에는 흐린 "CLI 대기"(#922)', () => {
+    const settled = item('u', { terminal: { cli: 'up' } });
+    const draw = (unseen: boolean) => cardLines({ item: settled, selected: false, flagged: false, withLimits: false, unseen, sprite: defaultSprite(undefined) }, 84, DEFAULT_THEME, NOW);
+    expect(stripAnsi(draw(true)[1]!)).toContain('✓ 끝남');
+    expect(draw(true)[1]).toContain(fg(DEFAULT_THEME, 'green'));
+    expect(stripAnsi(draw(false)[1]!)).toContain('CLI 대기');
+    const screen = spaceScreen({ ...initialState(), items: [settled], view: 'space', unseenDone: ['u'] }, { x: 0, y: 1, w: 120, h: 20 }, NOW);
+    expect(screen.lines.map(stripAnsi).join('\n')).toContain('✓ 끝남');
+  });
+
   it('알린 뒤 보지 않은 세션은 이름 옆에 !', () => {
     expect(stripAnsi(card({ flagged: true })[1]!)).toMatch(/Claude +! /);
   });
