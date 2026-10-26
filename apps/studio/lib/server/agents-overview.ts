@@ -80,8 +80,6 @@ export interface AgentItem {
   context?: ActivityContext;
   /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
   lastMessage?: string;
-  /** 서브에이전트 인스턴스마다 한 행(#920). 토큰 내역(agents)과 따로다 */
-  subagents?: ActivitySubagent[];
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -393,7 +391,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.snapshot ? { gate: gateStatusOf(row.snapshot, row.recent ?? []) } : {}),
     ...(row.costUsd !== undefined ? { costUsd: row.costUsd } : {}),
     // 메인 행의 상태는 이 항목의 실행 상태다. 장부는 실행 상태를 모른다
-    ...(row.agents ? { agents: row.agents.map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent)) } : {}),
+    ...agentsOf(row.agents, row.live?.subagents, state),
     ...(row.capabilities ? { capabilities: row.capabilities } : {}),
     ...(row.snapshot?.accountId ? { accountId: row.snapshot.accountId } : {}),
     // 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916). desk가 카드와 세션 자세히에 보인다
@@ -403,10 +401,47 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.todos ? { todos: row.live.todos } : {}),
     ...(row.live?.context ? { context: row.live.context } : {}),
     ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
-    ...(row.live?.subagents ? { subagents: row.live.subagents } : {}),
   };
 }
 
+
+const ZERO_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+/**
+ * 에이전트 내역(#843)에 훅으로 안 서브에이전트 인스턴스를 합친다(#920). desk 카드는 agents의 subagent 행을 읽는다.
+ * Claude 텔레메트리는 종류 단위로만 토큰을 알려 주므로, 인스턴스를 아는 종류는 그 종류의 행을 인스턴스 행들로 바꾸고
+ * 종류의 토큰·비용은 그 종류의 첫 인스턴스 행에 싣는다(행의 합은 그대로). 메인 행의 상태는 이 항목의 실행 상태다
+ */
+function agentsOf(ledger: readonly TerminalAgentRow[] | undefined, instances: readonly ActivitySubagent[] | undefined, state: AgentState): { agents?: AgentDetail[] } {
+  const rows: AgentDetail[] = (ledger ?? []).map((agent) => (agent.kind === 'main' ? { ...agent, state: state === 'working' ? ('working' as const) : ('idle' as const) } : agent));
+  if (!instances || instances.length === 0) return rows.length > 0 ? { agents: rows } : {};
+  const byType = new Map<string, ActivitySubagent[]>();
+  for (const instance of instances) byType.set(instance.type, [...(byType.get(instance.type) ?? []), instance]);
+  const instanceRow = (instance: ActivitySubagent, carried?: TerminalAgentRow): AgentDetail => ({
+    id: `claude:agent:${instance.id}`,
+    name: instance.description ?? instance.type,
+    kind: 'subagent',
+    state: instance.state,
+    type: instance.type,
+    ...(instance.description ? { description: instance.description } : {}),
+    ...(instance.tool ? { tool: instance.tool } : {}),
+    tokens: carried?.tokens ?? ZERO_USAGE,
+    ...(carried?.costUsd !== undefined ? { costUsd: carried.costUsd } : {}),
+  });
+  const merged: AgentDetail[] = [];
+  for (const agent of rows) {
+    const known = agent.id.startsWith('claude:') ? byType.get(agent.id.slice('claude:'.length)) : undefined;
+    if (!known) {
+      merged.push(agent);
+      continue;
+    }
+    byType.delete(agent.id.slice('claude:'.length));
+    known.forEach((instance, index) => merged.push(instanceRow(instance, index === 0 ? agent : undefined)));
+  }
+  // 아직 토큰을 받지 못한 종류의 인스턴스도 보인다(맡은 일을 알 수 있다)
+  for (const list of byType.values()) for (const instance of list) merged.push(instanceRow(instance));
+  return { agents: merged };
+}
 
 /** CLI가 떠 있고 사람을 기다리면 그 까닭과 문구(#920). 모르는 알림 종류는 기다림으로 보지 않는다 */
 export function terminalStatusOf(terminal: { cliAlive: boolean }, snapshot: SessionSnapshot | undefined): AgentTerminalStatus {

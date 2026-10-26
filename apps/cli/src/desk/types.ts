@@ -11,15 +11,15 @@ export interface DeskItem {
   title: string;
   projectName: string;
   state: 'working' | 'idle' | 'booting' | 'dormant' | 'stopped' | 'done' | 'error';
-  /** 개입이 필요한 까닭. 옛 서버는 문자열(question·approval·needs_review·gate_failed), 새 서버는 터미널 CLI의 주의를 객체로 준다(#926) */
-  attention?: string | DeskAttention;
+  /** 개입이 필요한 까닭(question·approval·needs_review·gate_failed). 터미널 CLI가 기다리는 것은 terminal.waiting에 있다 */
+  attention?: string;
   /** 개입이 필요한 까닭 한 줄(검증 실패 요약, 확인 필요의 첫 어긋남). 모르면 없다 */
   reason?: string;
   backend?: string;
   lastActivityAt: string;
   /**
-   * 터미널 세션일 때: CLI가 떠 있는가, 사람을 기다리는가(권한 확인·되묻기·입력 필요·입력 대기)와 그 문구(#920).
-   * 옛 서버는 waiting에 'permission'만 주고 message는 주지 않는다
+   * 터미널 세션일 때: CLI가 떠 있는가, 무엇을 기다리는가(권한·질문·입력 필요·쉬며 기다림), 그 까닭 한 줄(#920).
+   * 옛 서버는 권한만 준다
    */
   terminal?: { cli: 'up' | 'down'; waiting?: 'permission' | 'question' | 'input' | 'idle'; message?: string };
   /** 게이트: 지금 검증 중인가, 마지막 판정, 체크포인트 수 */
@@ -36,32 +36,35 @@ export interface DeskItem {
   accountId?: string;
   /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
   checkChangesArmed?: true;
-  /** 터미널 CLI가 지금(또는 방금) 쓰는 도구와 대상(#920). 턴이 끝나면 없다. 옛 서버는 주지 않는다 */
-  now?: { tool: string; target?: string; at: string };
+  /** 메인 에이전트가 지금 쓰는 도구와 대상(#920). 옛 서버는 주지 않는다 */
+  now?: DeskNow;
   /** 에이전트의 할 일 목록 진행(#920) */
-  todos?: { done: number; total: number; current?: string };
-  /** 문맥 창을 얼마나 썼는가(#920). usedPct는 0~100 */
-  context?: { usedPct: number; used?: number; size?: number };
-  /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
+  todos?: DeskTodos;
+  /** 문맥 창이 찬 정도(#920) */
+  context?: DeskContext;
+  /** 마지막 답의 앞부분(200자 안, #920) */
   lastMessage?: string;
-  /** 서브에이전트 인스턴스마다 한 행(#920). 토큰 내역(agents)과 따로다 */
-  subagents?: DeskSubagent[];
 }
 
-/** 서브에이전트 인스턴스 한 행(스튜디오 terminal-activity.ts의 ActivitySubagent와 같은 꼴) */
-export interface DeskSubagent {
-  id: string;
-  type: string;
-  description?: string;
-  state: 'working' | 'done';
-  tool?: string;
-}
-
-/** 터미널 CLI가 사람을 부른 까닭(#926): 권한, 질문, 입력 필요, 쉬는 중(입력을 오래 기다림) */
-export interface DeskAttention {
-  kind: 'permission' | 'question' | 'input' | 'idle';
-  message?: string;
+export interface DeskNow {
+  /** CLI의 도구 이름(Edit, Bash, mcp__...) */
+  tool: string;
+  /** Bash는 명령 첫 줄, 파일 도구는 경로, Grep은 패턴, Agent는 설명 */
+  target?: string;
   at: string;
+}
+
+export interface DeskTodos {
+  done: number;
+  total: number;
+  /** 지금 하는 항목 */
+  current?: string;
+}
+
+export interface DeskContext {
+  usedPct: number;
+  used?: number;
+  size?: number;
 }
 
 export interface DeskUsage {
@@ -78,6 +81,12 @@ export interface DeskAgent {
   kind: 'main' | 'subagent';
   state: 'working' | 'done' | 'idle';
   activity?: string;
+  /** 서브에이전트 종류(Explore 등, #920). 인스턴스마다 한 행이다 */
+  type?: string;
+  /** 서브에이전트에게 맡긴 일 */
+  description?: string;
+  /** 지금 쓰는 도구와 대상 한 줄 */
+  tool?: string;
   tokens: DeskUsage;
   costUsd?: number;
 }

@@ -20,6 +20,13 @@ describe('사이드바 상태', () => {
     expect(agentStatus({ ...base, state: 'done' })).toEqual({ label: '끝남', tone: 'ok' });
   });
 
+  it('기다리는 종류마다 다른 글과 색: 권한은 노랑, 답은 보라, 입력 필요는 청록. 쉬며 기다리면 CLI 대기(#921)', () => {
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'question' } })).toEqual({ label: '답 기다림', tone: 'warn', color: 'purple' });
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'input' } })).toEqual({ label: '입력 필요', tone: 'warn', color: 'teal' });
+    expect(agentStatus({ ...base, state: 'working', terminal: { cli: 'up', waiting: 'idle' } }).label).toBe('작업 중');
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'idle' } })).toEqual({ label: 'CLI 대기', tone: 'muted' });
+  });
+
   it('게이트 상태를 싣는 서버면 그것을, 아니면 개입 사유로 실패만 보인다', () => {
     expect(gateStatus({ ...base, gate: { state: 'verifying', checkpoints: 2 } })).toEqual({ label: '검증 중', tone: 'busy' });
     expect(gateStatus({ ...base, gate: { state: 'passed', checkpoints: 2 } })).toEqual({ label: '통과', tone: 'ok' });
@@ -162,13 +169,11 @@ describe('봐야 할 것 먼저(#922)', () => {
     expect(agentStatus({ ...base, state: 'working' }, { unseen: true }).label).toBe('작업 중');
   });
 
-  it('주의 종류는 새 꼴(객체)과 옛 꼴(문자열, terminal.waiting)을 모두 읽는다', () => {
-    expect(agentStatus({ ...base, attention: { kind: 'permission', at: '2026-10-26T00:00:00Z' } })).toEqual({ label: '권한 대기', tone: 'warn' });
-    expect(agentStatus({ ...base, attention: { kind: 'question', at: '2026-10-26T00:00:00Z' } }).label).toBe('답 기다림');
-    expect(agentStatus({ ...base, attention: { kind: 'input', at: '2026-10-26T00:00:00Z' } })).toEqual({ label: '입력 필요', tone: 'warn' });
+  it('주의 종류는 terminal.waiting과 옛 꼴(개입 사유 문자열)을 읽는다', () => {
     expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'input' } }).label).toBe('입력 필요');
+    expect(agentStatus({ ...base, attention: 'approval' }).label).toBe('승인 대기');
     // 쉬는 중 알림은 손댈 상태가 아니다
-    expect(agentStatus({ ...base, terminal: { cli: 'up' }, attention: { kind: 'idle', at: '2026-10-26T00:00:00Z' } }).tone).toBe('muted');
+    expect(agentStatus({ ...base, terminal: { cli: 'up', waiting: 'idle' } }).tone).toBe('muted');
   });
 
   it('급한 순서: 권한·질문 > 오류·검증 실패 > 끝남(안 봄) > 작업 중 > 쉼, 같으면 받은 차례', () => {

@@ -8933,7 +8933,7 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 2. Claude에 지켜보기만 하는 훅을 더한다: 읽기 도구의 PreToolUse, PostToolUse, PostToolUseFailure, SubagentStart, SubagentStop, TaskCreated, TaskCompleted. 모두 `async: true`로 걸어 CLI가 기다리지 않는다. 쓰기 도구의 PreToolUse는 지금처럼 기다리는 훅 하나만 건다(한 도구에 둘이 걸리지 않게 matcher를 나눈다). 권한 확인 창은 Notification보다 먼저 오는 PermissionRequest로도 받고, 답은 주지 않는다.
 3. Codex에는 훅을 더하지 않는다. Codex는 훅 명령 글의 해시로 사람의 신뢰를 기억해, 훅이 바뀌면 다시 묻는다. 이미 모든 도구에 거는 PreToolUse가 지금 하는 일과 할 일(`update_plan`)을 알려 준다.
 4. 문맥 창은 Claude 상태 줄 입력의 `context_window`에서만 얻는다. 세션 설정(`--settings`, 컨테이너는 관리 설정)의 `statusLine`이 b-studio 훅 스크립트를 부른다. 스크립트는 입력을 관문에 알리고(닿지 못해도 막지 않는다), 이 컴퓨터 방식에서는 사용자 설정(계정 폴더 또는 `~/.claude`의 settings.json)에서 읽기만 한 원래 상태 줄 명령을 같은 입력으로 불러 그 출력을 낸다. 사용자 설정 파일은 고치지 않는다. Codex의 문맥 창은 아직 싣지 않는다.
-5. 모은 것은 `/api/agents` 항목의 `now`·`todos`·`context`·`lastMessage`·`subagents`로 싣는다. 사람을 기다리는 까닭은 이미 문자열로 쓰는 개입 사유(`attention`)와 겹치지 않게 `terminal.waiting`(권한 확인·되묻기·입력 필요·입력 대기)을 넓히고 CLI 문구를 `terminal.message`로 싣는다. 기억에만 두고(스튜디오를 다시 띄우면 다음 훅에서 다시 찬다) 판정에 쓰지 않는다. 바깥에서 온 값이라 꼴을 확인하고 색 코드·제어 글자를 지우고 길이를 자른다.
+5. 모은 것은 `/api/agents` 항목의 `now`·`todos`·`context`·`lastMessage`로 싣고, 서브에이전트 인스턴스는 desk 카드가 읽는 `agents`의 subagent 행(종류·맡은 일·도구)으로 싣는다. Claude 텔레메트리는 토큰을 종류 단위로만 알려 주므로 종류의 토큰은 그 종류의 첫 인스턴스 행에 둔다(행의 합은 그대로). 사람을 기다리는 까닭은 이미 문자열로 쓰는 개입 사유(`attention`)와 겹치지 않게 `terminal.waiting`(권한 확인·되묻기·입력 필요·입력 대기)을 넓히고 CLI 문구를 `terminal.message`로 싣는다. 기억에만 두고(스튜디오를 다시 띄우면 다음 훅에서 다시 찬다) 판정에 쓰지 않는다. 바깥에서 온 값이라 꼴을 확인하고 색 코드·제어 글자를 지우고 길이를 자른다.
 
 ### 감수한 트레이드오프
 - 지켜보는 훅도 도구마다 node 프로세스를 하나 띄운다. 기다리지 않으므로 에이전트가 느려지지는 않지만 CPU를 조금 더 쓴다.

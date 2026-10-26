@@ -113,9 +113,13 @@ describe('지금 하는 일·할 일·문맥 창·마지막 답·서브에이전
 
   it('세션의 활동을 항목에 그대로 싣는다. 없으면 싣지 않는다', () => {
     const got = item(source({ live }));
-    expect(got).toMatchObject(live);
+    const { subagents, ...rest } = live;
+    expect(got).toMatchObject(rest);
+    // 서브에이전트 인스턴스는 desk 카드가 읽는 agents의 subagent 행으로 간다
+    expect(got).not.toHaveProperty('subagents');
+    expect(got.agents).toEqual([{ id: 'claude:agent:a1', name: '훅 찾기', kind: 'subagent', state: 'working', type: subagents[0]!.type, description: '훅 찾기', tool: 'Grep', tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } }]);
     const none = item(source());
-    for (const key of ['now', 'todos', 'context', 'lastMessage', 'subagents']) expect(none, key).not.toHaveProperty(key);
+    for (const key of ['now', 'todos', 'context', 'lastMessage', 'agents']) expect(none, key).not.toHaveProperty(key);
   });
 
   it('withDeskFacts가 활동을 붙인다(모르면 붙이지 않는다)', () => {
