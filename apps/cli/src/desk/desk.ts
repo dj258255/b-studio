@@ -973,7 +973,7 @@ export class DeskApp {
         return;
       case 'register': {
         try {
-          const result = await this.#call('registerFolder')(effect.path);
+          const result = await this.#call('registerFolder')(effect.path, effect.workspace);
           const name = this.#state.folder?.proposal?.detection.name ?? result.id;
           this.#state = { ...this.#state, folder: undefined };
           // 등록한 프로젝트로 바로 새 요청을 연다. 스페이스는 세션이 생기면 사이드바에 나온다
