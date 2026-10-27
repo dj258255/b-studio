@@ -4,7 +4,7 @@ import type { DeskLayout } from './config';
 import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell, type SpriteCatalog } from './desk';
 import { spaceScreen } from './cards';
 import { spaceRect } from './render';
-import { stripAnsi } from './screen';
+import { stringWidth, stripAnsi } from './screen';
 import { sidebarRows } from './sidebar';
 import { spriteFromRows, type Sprite } from './sprite';
 import type { DeskAccount, DeskAccountLimits, DeskFleet, DeskFleetCandidate, DeskFleetMember, DeskItem, DeskSpend, DeskStartResult, DeskTerminalMessage } from './types';
@@ -351,6 +351,31 @@ describe('desk 작업대(#860)', () => {
     await tick();
     expect(ctx.io.all).toContain('설계를 먼저 승인하세요');
     expect(ctx.io.all).not.toContain('아직 터미널로 첫 요청을 넣지 않습니다');
+  });
+
+  it('요청은 넘겼는데 CLI가 시작 창에서 멈췄으면 그 칸에서 고르라고 짧게 알린다(#966)', async () => {
+    const ctx = setup();
+    ctx.client.startResult = { session: { id: 'new' }, routing: { backend: 'claude-code' }, terminal: { opened: true, pasted: true, pasteError: '요청을 CLI에 넘겼지만 10초 안에 실행이 시작되지 않았습니다. CLI가 시작할 때 묻는 창(폴더 신뢰 등)이 떠 있으면 그 터미널에서 답하세요. 답하면 요청이 이어집니다' } };
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('고쳐 줘\r');
+    await tick();
+    const message = ctx.app.state.message ?? '';
+    // 넘긴 요청을 "넣지 못했다"고 하지 않는다. 좁은 화면에서도 무엇을 할지가 잘리지 않게 짧게 쓴다
+    expect(message).not.toContain('넣지 못했습니다');
+    expect(message).toContain('폴더 신뢰');
+    expect(message).toContain('그 칸에서');
+    expect(stringWidth(message)).toBeLessThanOrEqual(90);
+  });
+
+  it('첫 요청을 넘기지 못했으면 칸에서 직접 치라고 한다', async () => {
+    const ctx = setup();
+    ctx.client.startResult = { session: { id: 'new' }, routing: { backend: 'claude-code' }, terminal: { opened: true, pasted: false, pasteError: '터미널이 이미 열려 있었습니다' } };
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('고쳐 줘\r');
+    await tick();
+    expect(ctx.app.state.message).toContain('칸에서 직접 치세요');
   });
 
   it('새 요청은 등록한 프로젝트를 예제보다 앞에 두고, 사이드바에서 고른 세션의 프로젝트로 시작한다(#945)', async () => {
