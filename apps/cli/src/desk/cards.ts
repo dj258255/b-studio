@@ -73,6 +73,19 @@ function forText(iso: string | undefined, now: number): string {
   return `${spanText(gone)}째`;
 }
 
+/** 띄우는 중 줄(#961). 처음 띄우면 이미지를 받느라 몇 분 걸려, 멈춘 것이 아님을 알게 경과 시간과 까닭을 적는다 */
+function bootingLine(item: DeskItem, width: number, theme: Theme, now: number): string {
+  const gone = goneMs(item.bootingSince, now);
+  const when: Seg[] = gone === undefined ? [] : [SEP, { text: forText(item.bootingSince, now), color: 'accent' }];
+  const note = '처음이면 이미지를 받느라 몇 분 걸립니다';
+  // 안내는 다 들어갈 때만 붙인다. 잘린 안내는 무슨 말인지 알 수 없다
+  const slow = `› 띄우는 중 · ${forText(item.bootingSince, now)} · ${note}`;
+  if (gone !== undefined && gone >= 60_000 && stringWidth(slow) <= width) {
+    return compose([{ text: '› 띄우는 중', color: 'muted' }, ...when, SEP, { text: note, color: 'muted', flex: true }], width, theme);
+  }
+  return compose([{ text: '› 샌드박스와 서비스를 띄우는 중', color: 'muted', flex: true }, ...when], width, theme);
+}
+
 function spanText(ms: number): string {
   if (ms < 60_000) return `${Math.floor(ms / 1000)}초`;
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}분`;
@@ -207,7 +220,7 @@ function nowLine(item: DeskItem, width: number, theme: Theme, now: number): stri
   if (head.tone === 'fail' || head.label === '확인 필요') {
     return compose([{ text: '› ', color: statusColor(head) }, { text: item.reason ? oneLine(item.reason) : '세션 자세히(i)에서 까닭을 봅니다', color: statusColor(head), flex: true }], width, theme);
   }
-  if (item.state === 'booting') return compose([{ text: '› 샌드박스와 서비스를 띄우는 중', color: 'muted', flex: true }], width, theme);
+  if (item.state === 'booting') return bootingLine(item, width, theme, now);
   const quiet = lastSignal(item);
   const stale = isStale(item, now);
   const staleSeg: Seg = { text: `⚠ ${spanText(now - (quiet ?? now))}째 소식 없음`, color: 'yellow' };

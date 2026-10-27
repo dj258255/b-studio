@@ -19,6 +19,8 @@ export interface DeskItem {
   lastActivityAt: string;
   /** 지금 요청(턴)을 시작한 시각. 작업 중일 때만 있다(#933). 옛 서버는 주지 않는다 */
   workingSince?: string;
+  /** 샌드박스를 띄우기 시작한 시각. 띄우는 중일 때만 있다(#961). 옛 서버는 주지 않는다 */
+  bootingSince?: string;
   /** 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 거절이 없었으면 없다. 옛 서버는 주지 않는다 */
   turnDenied?: number;
   /**

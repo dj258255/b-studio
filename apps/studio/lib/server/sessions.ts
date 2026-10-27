@@ -512,6 +512,8 @@ interface Session {
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
+  /** 샌드박스를 띄우기 시작한 시각(#961). starting을 벗어나면 지운다 */
+  bootingSince?: string;
   /** 터미널의 CLI가 모르는 채 바뀐 사실(실행의 변경을 되돌렸다). 다음 요청의 맥락에 덧붙여 알린다 */
   terminalNotes?: string[];
   /**
@@ -722,6 +724,7 @@ export async function overviewSessions(): Promise<Array<{ snapshot: SessionSnaps
       lastRequest: lastRequestOf(session.history),
       updatedAt: session.updatedAt,
       ...(session.run ? { runningSince: session.run.startedAt } : {}),
+      ...(session.snapshot.status === 'starting' && session.bootingSince ? { bootingSince: session.bootingSince } : {}),
     })),
     ...[...archived.values()].map((entry) => ({ snapshot: entry.snapshot, recent: tail(entry.history), lastRequest: lastRequestOf(entry.history), updatedAt: entry.data.savedAt })),
   ];
@@ -2110,6 +2113,7 @@ export function startBooting(id: string): SessionSnapshot {
  */
 async function boot(session: Session, resumed?: { discarded: string[]; discardBackup?: DiscardBackup; databaseFrom?: string }): Promise<void> {
   const signal = session.stop.signal;
+  session.bootingSince = new Date().toISOString();
   const onStatus = (event: ServiceStatusEvent) => onServiceStatus(session, event);
   try {
     await session.sandbox.start({
@@ -7533,6 +7537,7 @@ function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
 function setStatus(session: Session, status: SessionStatus, error?: string): void {
   session.snapshot.status = status;
   session.snapshot.error = error;
+  if (status !== 'starting') delete session.bootingSince;
   emit(session, { type: 'status', status, error });
   if (status === 'ready') {
     followLogs(session, 100);
