@@ -161,6 +161,15 @@ describe('새 요청 입력', () => {
     expect(handleInput(sending, '\r').effects).toEqual([]);
   });
 
+  it('Ctrl-u는 쓴 요청을 모두 지운다(폴더 열기 칸과 같다, #967)', () => {
+    const state = prompting();
+    const request = { ...state, prompt: { ...state.prompt!, step: 'request' as const, text: '앞에 쓴 글' } };
+    const { state: next, effects } = handleInput(request, '\x15');
+    expect(next.prompt!.text).toBe('');
+    expect(effects).toContainEqual({ type: 'preview', text: '' });
+    expect(handleInput(next, '새 요청').state.prompt!.text).toBe('새 요청');
+  });
+
   it('Esc나 Ctrl-c는 입력을 닫는다', () => {
     // 혼자 온 Esc는 방향키의 앞일 수 있어 잠깐 기다린다(desk가 곧 flushPending을 부른다)
     expect(flushPending(handleInput(prompting(), '\x1b').state).state.prompt).toBeUndefined();

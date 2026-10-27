@@ -2927,6 +2927,9 @@ export class DeskApp {
       const target = this.#state.prompt?.labels?.[choice] ?? backendLabel(result.routing?.backend ?? (choice === 'rules' ? undefined : splitChoice(choice).backend));
       const message = result.sendError
         ? `${target} 세션을 만들었지만 요청을 보내지 못했습니다: ${result.sendError}`
+        : result.terminal?.pasteError && result.terminal.pasted
+        ? // 요청은 CLI에 넘겼고 CLI가 시작 창(폴더 신뢰 등)에서 사람을 기다린다(#966). 카드와 확인 필요 줄에도 "입력 필요"로 남는다
+          `${target}로 보냈습니다. CLI가 폴더 신뢰 같은 것을 물으면 그 칸에서 고르세요`
         : result.terminal?.pasteError
         ? `세션을 열었지만 첫 요청을 넣지 못했습니다: ${result.terminal.pasteError} — 칸에서 직접 치세요`
         : result.terminal

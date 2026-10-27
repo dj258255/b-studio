@@ -92,6 +92,11 @@ interface TerminalState {
   size: TerminalSize;
   /** 에이전트 CLI가 떠 있다고 알려 왔는가. 터미널이 닫히거나 끝나면 거짓으로 돌린다 */
   cli: boolean;
+  /**
+   * 첫 요청을 CLI 실행 인자로 넘겨 연 시각(#966). CLI가 떴다고 알려 오거나 터미널이 닫히면 지운다.
+   * 이 동안 CLI가 뜨지 않으면 시작하며 묻는 창(폴더 신뢰 등)에서 사람을 기다리는 것이다. b-studio는 그 창에 답하지 않는다
+   */
+  startPendingSince?: number;
   /** 열려 있는 터미널의 감시를 멈추는 함수(백엔드가 watch를 줄 때만). 터미널이 끝나거나 닫히면 부른다 */
   watchStop?: () => void;
   /**
@@ -498,6 +503,8 @@ export async function openSessionTerminal(
       });
       current.terminal = terminal;
       current.opened = true;
+      if (initialPrompt !== undefined && !current.cli) current.startPendingSince = Date.now();
+      else delete current.startPendingSince;
       current.size = wanted;
       current.chunks = [];
       current.bytes = 0;
@@ -545,6 +552,8 @@ export function subscribeSessionTerminal(sessionId: string, listener: Listener):
 }
 
 function setCli(state: TerminalState, alive: boolean): void {
+  // 떴거나(답을 받았다) 끝났으면(닫혔다) 더는 시작을 기다리지 않는다
+  delete state.startPendingSince;
   if (state.cli === alive) return;
   state.cli = alive;
   emit(state, { kind: 'cli', alive });
@@ -563,9 +572,9 @@ export function noteSessionTerminalCli(sessionId: string, alive: boolean): void 
 }
 
 /** 이 프로세스에서 세션 터미널을 연 적이 있으면 그 CLI가 떠 있는지(studio desk 사이드바, #835). 연 적이 없으면 없다 */
-export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean } | undefined {
+export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean; startPendingSince?: number } | undefined {
   const state = terminals.get(sessionId);
-  return state ? { cliAlive: state.cli } : undefined;
+  return state ? { cliAlive: state.cli, ...(state.startPendingSince !== undefined ? { startPendingSince: state.startPendingSince } : {}) } : undefined;
 }
 
 /** 터미널 안에 에이전트 CLI가 떠 있는가. 열린 적 없는 세션이면 없다(거짓) */
