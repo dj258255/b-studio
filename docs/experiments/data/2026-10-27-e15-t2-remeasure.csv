@@ -1,0 +1,10 @@
+condition,task,repeat,success,category,planStatus,laneStatuses,mismatches,followed,closedWrong,inputTokens,outputTokens,cacheReadTokens,cacheWriteTokens,totalTokens,modelCalls,endToEndMs,gateMs,costUsd,handoffChanged,writeAttempts,apiUnit,startedAt,finishedAt
+T2R,orders-list,1,0,acceptance,done,done,1,check,0,1281,9078,341563,27092,379014,22,276849,60130,0.2280,false,0,pass,2026-10-27T04:05:10.709Z,2026-10-27T04:09:52.697Z
+T2R,order-detail,1,0,acceptance,done,done,1,check,0,1334,10204,489514,25429,526481,25,264351,54803,0.2648,false,0,pass,2026-10-27T04:09:52.698Z,2026-10-27T04:14:22.943Z
+T2R,order-summary,1,0,acceptance,done,done,1,check,0,1273,7887,397793,21968,428921,23,237096,55181,0.2145,false,0,pass,2026-10-27T04:14:22.944Z,2026-10-27T04:18:24.932Z
+T2R,orders-list,2,0,acceptance,done,done,1,check,0,1287,9272,427836,21496,459891,25,263459,57170,0.2333,false,0,pass,2026-10-27T04:18:24.933Z,2026-10-27T04:22:52.860Z
+T2R,order-detail,2,0,acceptance,done,done,1,check,0,1368,19733,1264094,49619,1334814,42,397437,52564,0.5755,false,0,pass,2026-10-27T04:22:52.861Z,2026-10-27T04:29:35.134Z
+T2R,order-summary,2,0,acceptance,done,done,1,check,0,1269,8178,315096,20937,345480,21,243286,58429,0.1984,false,0,pass,2026-10-27T04:29:35.135Z,2026-10-27T04:33:43.411Z
+T2R,orders-list,3,0,acceptance,done,done,1,check,0,1283,7244,363447,18209,390183,23,239211,55278,0.1919,false,0,pass,2026-10-27T04:33:43.412Z,2026-10-27T04:37:47.348Z
+T2R,order-detail,3,0,acceptance,done,done,1,check,0,1332,9408,439501,23761,474002,24,260430,54583,0.2426,false,0,pass,2026-10-27T04:37:47.349Z,2026-10-27T04:42:13.897Z
+T2R,order-summary,3,0,acceptance,done,done,1,check,0,1271,7574,367953,23246,400044,22,266606,69787,0.2087,false,0,pass,2026-10-27T04:42:13.898Z,2026-10-27T04:46:46.041Z
