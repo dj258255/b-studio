@@ -11,6 +11,7 @@ import {
   resizeSessionTerminal,
   noteSessionTerminalCli,
   sessionTerminalMode,
+  sessionTerminalPresence,
   subscribeSessionTerminal,
   terminalBackend,
   writeSessionTerminal,
@@ -173,6 +174,35 @@ describe('세션 터미널 (이슈 #673)', () => {
     expect(alive(seen).at(-1)).toBe(false);
     // 모르는 세션은 조용히 넘어간다
     expect(() => noteSessionTerminalCli('없는-세션', true)).not.toThrow();
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+  });
+
+  it('첫 요청을 넘겨 연 터미널은 CLI가 떴다고 알려 오기 전까지 시작을 기다린다고 남긴다(#966). 뜨거나 닫히면 지운다', async () => {
+    const { backend } = fakeBackend();
+    const accepting: TerminalBackend = { ...backend, acceptsInitialPrompt: true };
+    const before = Date.now();
+    await openSessionTerminal(id, target, {}, accepting, { initialPrompt: '주문 화면 고쳐 줘' });
+    const pending = sessionTerminalPresence(id);
+    expect(pending?.cliAlive).toBe(false);
+    expect(pending?.startPendingSince).toBeGreaterThanOrEqual(before);
+    // 폴더 신뢰에 답해 CLI가 뜨면 기다림이 아니다
+    noteSessionTerminalCli(id, true);
+    expect(sessionTerminalPresence(id)).toEqual({ cliAlive: true });
+    // CLI가 끝나도 다시 시작을 기다리는 것은 아니다(첫 요청은 이미 넘겼다)
+    noteSessionTerminalCli(id, false);
+    expect(sessionTerminalPresence(id)).toEqual({ cliAlive: false });
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+
+    // 신뢰 창에서 답하지 않고 닫으면 기다림도 지운다
+    await openSessionTerminal(id, target, {}, accepting, { initialPrompt: '주문 화면 고쳐 줘' });
+    expect(sessionTerminalPresence(id)?.startPendingSince).toBeDefined();
+    closeSessionTerminal(id);
+    expect(sessionTerminalPresence(id)?.startPendingSince).toBeUndefined();
+    await disposeSessionTerminal(id, target.sandboxId, backend);
+
+    // 첫 요청 없이 연 터미널은 기다리지 않는다
+    await openSessionTerminal(id, target, {}, accepting);
+    expect(sessionTerminalPresence(id)?.startPendingSince).toBeUndefined();
     await disposeSessionTerminal(id, target.sandboxId, backend);
   });
 

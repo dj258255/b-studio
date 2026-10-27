@@ -1037,6 +1037,11 @@ function promptKey(state: DeskState, key: string, effects: Effect[]): DeskState 
     effects.push({ type: 'preview', text });
     return { ...state, prompt: { ...prompt, text } };
   }
+  // Ctrl-u: 쓴 글을 모두 지운다(#967). 폴더 열기 칸과 같은 키다
+  if (key === '\x15') {
+    effects.push({ type: 'preview', text: '' });
+    return { ...state, prompt: { ...prompt, text: '' } };
+  }
   if (key.startsWith(ESC)) return state;
   // 붙여 넣은 줄바꿈은 보내기가 아니라 빈칸으로 둔다. 다른 제어 글자는 버린다
   const char = key === '\n' ? ' ' : key;
