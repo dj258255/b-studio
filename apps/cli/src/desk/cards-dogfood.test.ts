@@ -206,3 +206,31 @@ describe('말줄임표는 한 번만', () => {
     expect(draw(long, { selected: true }, 84).join('\n')).not.toContain('……');
   });
 });
+
+describe('띄우는 중인 카드의 경과 시간(#961)', () => {
+  it('띄운 지 얼마나 됐는지 적는다', () => {
+    const line = draw(item('b', { state: 'booting', bootingSince: ago(20) }))[2]!;
+    expect(line).toContain('샌드박스');
+    expect(line).toContain('20초째');
+    expect(line).not.toContain('이미지');
+  });
+
+  it('1분이 넘으면 처음 띄울 때는 이미지를 받느라 오래 걸린다고 적는다', () => {
+    const line = draw(item('b', { state: 'booting', bootingSince: ago(150) }), {}, 120)[2]!;
+    expect(line).toContain('2분째');
+    expect(line).toContain('이미지');
+  });
+
+  it('좁아서 안내가 다 들어가지 않으면 잘린 안내 대신 경과 시간만 적는다', () => {
+    const line = draw(item('b', { state: 'booting', bootingSince: ago(150) }), {}, 60)[2]!;
+    expect(line).toContain('2분째');
+    expect(line).not.toContain('이미지');
+    expect(line).not.toMatch(/·\s*│\s*$/);
+  });
+
+  it('시작 시각을 모르면 예전처럼 띄우는 중이라고만 적는다', () => {
+    const line = draw(item('b', { state: 'booting' }))[2]!;
+    expect(line).toContain('샌드박스');
+    expect(line).not.toContain('째');
+  });
+});

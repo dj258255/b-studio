@@ -283,3 +283,16 @@ describe('개입 사유 한 줄(작업 서랍, 이슈 #720)', () => {
   });
 });
 
+
+describe('띄우는 중인 세션의 시작 시각(#961)', () => {
+  it('starting이면 띄우기 시작한 시각을 싣는다', () => {
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ status: 'starting' }), bootingSince: '2026-09-29T11:58:00.000Z' })] });
+    expect(items[0]!.state).toBe('booting');
+    expect(items[0]!.bootingSince).toBe('2026-09-29T11:58:00.000Z');
+  });
+
+  it('띄우기가 끝났으면 시각을 싣지 않는다', () => {
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ status: 'ready' }), bootingSince: '2026-09-29T11:58:00.000Z' })] });
+    expect(items[0]!.bootingSince).toBeUndefined();
+  });
+});

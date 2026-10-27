@@ -82,6 +82,8 @@ export interface AgentItem {
   lastMessage?: string;
   /** 터미널 CLI가 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만. desk가 "몇 분째"를 센다 */
   workingSince?: string;
+  /** 샌드박스를 띄우기 시작한 시각(#961). 띄우는 중일 때만. 처음 이미지를 받으면 몇 분 걸려 desk가 "몇 분째"를 센다 */
+  bootingSince?: string;
   /** 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 거절이 없었으면 없다 */
   turnDenied?: number;
 }
@@ -140,6 +142,8 @@ export interface SessionOverviewSource {
   updatedAt: string;
   /** 실행 중이면 요청 시작 시각 */
   runningSince?: string;
+  /** 샌드박스를 띄우는 중이면 띄우기 시작한 시각(#961) */
+  bootingSince?: string;
   /** 마지막 요청(제목) */
   lastRequest?: string;
   /** 이 프로세스에서 세션 터미널을 연 적이 있으면 그 CLI가 떠 있는지(withDeskFacts가 붙인다) */
@@ -204,6 +208,7 @@ interface AgentRow {
   recent?: readonly StudioEvent[];
   updatedAt: string;
   runningSince?: string;
+  bootingSince?: string;
   /** 스냅샷이 없을 때의 상태(레인·플릿 구성원의 세션이 사라졌을 때) */
   fallbackState?: AgentState;
   /** 스냅샷이 없을 때의 개입 사유 */
@@ -270,7 +275,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         projectName: plan.projectId,
         owner: plan.owner,
         ...(source
-          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...deskFactsOf(source), ...(lane.status === 'done' ? { finishedLane: true } : {}) }
+          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...(source.bootingSince ? { bootingSince: source.bootingSince } : {}), ...deskFactsOf(source), ...(lane.status === 'done' ? { finishedLane: true } : {}) }
           : { updatedAt: lane.finishedAt ?? lane.startedAt ?? plan.createdAt, fallbackState: laneState(lane.status), fallbackAttention: laneAttention(lane), ...(lane.error ? { fallbackReason: lane.error } : {}) }),
         // 레인은 그 레인이 고른 백엔드(세션이 있으면 스냅샷)를 보여 준다
         backend: source ? sessionBackend(source.snapshot) : lane.backend,
@@ -292,7 +297,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
         projectName: fleet.projectName,
         owner: fleet.owner,
         ...(source
-          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...deskFactsOf(source) }
+          ? { snapshot: source.snapshot, recent: source.recent, updatedAt: source.updatedAt, ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...(source.bootingSince ? { bootingSince: source.bootingSince } : {}), ...deskFactsOf(source) }
           : { updatedAt: member.finishedAt ?? member.startedAt ?? fleet.createdAt, fallbackState: fleetMemberState(member.status), fallbackAttention: fleetMemberAttention(member.status) }),
         backend: source ? sessionBackend(source.snapshot) : undefined,
         tokens: source?.snapshot.tokens ?? member.usage,
@@ -316,7 +321,7 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
       recent: source.recent,
       updatedAt: source.updatedAt,
       backend: sessionBackend(source.snapshot),
-      ...(source.runningSince ? { runningSince: source.runningSince } : {}),
+      ...(source.runningSince ? { runningSince: source.runningSince } : {}), ...(source.bootingSince ? { bootingSince: source.bootingSince } : {}),
       ...deskFactsOf(source),
     });
   }
@@ -408,6 +413,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.context ? { context: row.live.context } : {}),
     ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
     ...(row.live?.workingSince ? { workingSince: row.live.workingSince } : {}),
+    ...(state === 'booting' && row.bootingSince ? { bootingSince: row.bootingSince } : {}),
     ...(row.live?.turnDenied ? { turnDenied: row.live.turnDenied } : {}),
   };
 }
