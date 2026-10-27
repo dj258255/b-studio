@@ -91,6 +91,8 @@ export interface VerifyOptions {
   allowBreaking: boolean;
   fetcher?: ContractFetcher;
   start?: StartOptions;
+  /** 바뀐 파일과 무관하게 함께 다시 띄울 서비스(#765, 게이트가 검사 전에 모르는 프로세스를 찾은 서비스) */
+  alsoRestart?: readonly string[];
 }
 
 /**
@@ -100,9 +102,9 @@ export interface VerifyOptions {
  *  2. 계약을 다시 추출해 세션 시작 시점과 비교했을 때 호환을 깨지 않는지
  */
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
-  const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start } = options;
+  const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start, alsoRestart } = options;
   const secretLeaks = await findSecretLeaks(sandbox, project.root, changedFiles);
-  const { sync, restarted, unverifiedFiles, skippedOff, specError, addedAddons, addonError } = await restartServicesFor(sandbox, project, changedFiles, start);
+  const { sync, restarted, unverifiedFiles, skippedOff, specError, addedAddons, addonError } = await restartServicesFor(sandbox, project, changedFiles, start, alsoRestart ? { alsoRestart } : {});
   const platformFailure = platformFailureOf(sync, restarted);
   if ('error' in sync) {
     return { ok: false, sync, restarted, contracts: [], unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError, ...(platformFailure ? { platformFailure } : {}) };

@@ -1,0 +1,113 @@
+[
+  {
+    "round": 1,
+    "idle": [],
+    "idleMs": 218,
+    "found": [
+      {
+        "service": "web",
+        "processes": [
+          {
+            "pid": 128,
+            "command": "sh -c while true; do sleep 1; done"
+          },
+          {
+            "pid": 129,
+            "command": "sleep 1"
+          }
+        ]
+      },
+      {
+        "service": "api",
+        "processes": [
+          {
+            "pid": 199,
+            "command": "sh -c while true; do sleep 1; done"
+          },
+          {
+            "pid": 200,
+            "command": "sleep 1"
+          }
+        ]
+      }
+    ],
+    "foundMs": 275,
+    "restartMs": 125742,
+    "after": [],
+    "api": 200
+  },
+  {
+    "round": 2,
+    "idle": [],
+    "idleMs": 1705,
+    "found": [
+      {
+        "service": "web",
+        "processes": [
+          {
+            "pid": 125,
+            "command": "sh -c while true; do sleep 1; done"
+          },
+          {
+            "pid": 127,
+            "command": "sleep 1"
+          }
+        ]
+      },
+      {
+        "service": "api",
+        "processes": [
+          {
+            "pid": 225,
+            "command": "sh -c while true; do sleep 1; done"
+          },
+          {
+            "pid": 233,
+            "command": "sleep 1"
+          }
+        ]
+      }
+    ],
+    "foundMs": 1685,
+    "restartMs": 37370,
+    "after": [],
+    "api": 200
+  },
+  {
+    "round": 3,
+    "idle": [],
+    "idleMs": 805,
+    "found": [
+      {
+        "service": "web",
+        "processes": [
+          {
+            "pid": 127,
+            "command": "sh -c while true; do sleep 1; done"
+          },
+          {
+            "pid": 128,
+            "command": "sleep 1"
+          }
+        ]
+      },
+      {
+        "service": "api",
+        "processes": [
+          {
+            "pid": 219,
+            "command": "sh -c while true; do sleep 1; done"
+          },
+          {
+            "pid": 220,
+            "command": "sleep 1"
+          }
+        ]
+      }
+    ],
+    "foundMs": 259,
+    "restartMs": 16002,
+    "after": [],
+    "api": 200
+  }
+]

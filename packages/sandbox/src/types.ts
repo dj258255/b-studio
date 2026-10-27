@@ -2,6 +2,11 @@ import type { LoadedProject } from '@b-studio/spec';
 
 export type ContainerState = 'created' | 'running' | 'paused' | 'restarting' | 'removing' | 'exited' | 'dead' | 'unknown';
 
+/** strayProcesses가 돌려주는 서비스 하나의 결과(#765). 명령 줄의 시크릿 값은 가려져 있다 */
+export type StrayProcessReport =
+  | { service: string; processes: ReadonlyArray<{ pid: number; command: string }>; error?: undefined }
+  | { service: string; error: string; processes?: undefined };
+
 export interface ServiceEndpoint {
   service: string;
   containerPort: number;
@@ -279,6 +284,13 @@ export interface Sandbox {
   start(options?: StartOptions): Promise<ServiceEndpoint[]>;
   /** 코드가 바뀐 서비스 하나만 다시 빌드해서 띄운다 */
   restart(service: string, options?: StartOptions): Promise<ServiceEndpoint>;
+  /**
+   * 실행 중인 managed 서비스마다, 서비스가 준비된 뒤에 `docker exec` 등으로 들어와 남은 프로세스를 찾는다(#765).
+   * 검증 게이트가 검사 전에 불러, 찾은 서비스는 다시 띄운다 — 검사하는 동안 그 프로세스가 파일을 바꿨다가 되돌리면 앞뒤 지문으로는 잡지 못한다.
+   * 찾을 것이 없는 서비스는 돌려주지 않는다. 확인하지 못한 서비스(셸이 없는 이미지 등)는 error로 돌려준다.
+   * 구현하지 않는 제공자는 undefined로 둔다(게이트는 지금처럼 바뀐 서비스만 다시 띄운다)
+   */
+  strayProcesses?(options?: { signal?: AbortSignal }): Promise<StrayProcessReport[]>;
   /**
    * 호스트에서 바꾼 프로젝트 파일(루트 기준 경로)이 샌드박스 안에서 현재 내용 그대로 보일 때까지 기다린다.
    * 파일 공유 계층(sshfs 등)의 캐시 때문에 재시작한 서비스가 옛 코드를 빌드하는 것을 막는 동기화 지점이다.
