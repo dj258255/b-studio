@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { FleetView } from '@/lib/fleet-types';
 import type { SessionSnapshot, StudioEvent } from '@/lib/studio-events';
 import type { TaskPlanView } from '@/lib/task-plan-types';
-import { activityOf, buildAgentOverview, TITLE_CHARS, type SessionOverviewSource } from './agents-overview';
+import { activityOf, buildAgentOverview, terminalStatusOf, TITLE_CHARS, type SessionOverviewSource } from './agents-overview';
 
 const NOW = Date.parse('2026-09-29T12:00:00.000Z');
 
@@ -294,5 +294,22 @@ describe('띄우는 중인 세션의 시작 시각(#961)', () => {
   it('띄우기가 끝났으면 시각을 싣지 않는다', () => {
     const { items } = overview({ sessions: [source({ snapshot: snapshot({ status: 'ready' }), bootingSince: '2026-09-29T11:58:00.000Z' })] });
     expect(items[0]!.bootingSince).toBeUndefined();
+  });
+});
+
+describe('CLI가 시작 창에서 멈춘 세션(#966)', () => {
+  it('첫 요청을 넘긴 지 몇 초가 지나도 CLI가 뜨지 않으면 입력을 기다린다고 알린다', () => {
+    const status = terminalStatusOf({ cliAlive: false, startPendingSince: NOW - 10_000 }, snapshot(), NOW);
+    expect(status).toMatchObject({ cli: 'down', waiting: 'input' });
+    expect(status.message).toContain('폴더 신뢰');
+  });
+
+  it('막 열었으면(CLI가 뜨는 중) 기다림으로 보지 않는다', () => {
+    expect(terminalStatusOf({ cliAlive: false, startPendingSince: NOW - 2_000 }, snapshot(), NOW)).toEqual({ cli: 'down' });
+  });
+
+  it('카드 항목에도 실린다', () => {
+    const { items } = overview({ sessions: [source({ snapshot: snapshot({ status: 'idle' }), terminal: { cliAlive: false, startPendingSince: NOW - 30_000 } })] });
+    expect(items[0]!.terminal).toMatchObject({ cli: 'down', waiting: 'input' });
   });
 });

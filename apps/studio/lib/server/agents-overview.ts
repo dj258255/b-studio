@@ -147,7 +147,7 @@ export interface SessionOverviewSource {
   /** 마지막 요청(제목) */
   lastRequest?: string;
   /** 이 프로세스에서 세션 터미널을 연 적이 있으면 그 CLI가 떠 있는지(withDeskFacts가 붙인다) */
-  terminal?: { cliAlive: boolean };
+  terminal?: TerminalPresence;
   /** 세션 기록 전체에서 계산한 실행 비용 합(withDeskFacts가 붙인다) */
   costUsd?: number;
   /** 에이전트 내역(withDeskFacts가 붙인다, #843) */
@@ -160,7 +160,7 @@ export interface SessionOverviewSource {
 
 /** studio desk 사이드바의 사실을 모으는 곳. 테스트가 바꿔 끼운다 */
 export interface DeskFactDeps {
-  terminal: (sessionId: string) => { cliAlive: boolean } | undefined;
+  terminal: (sessionId: string) => TerminalPresence | undefined;
   costUsd: (sessionId: string) => number | undefined;
   /** 에이전트 내역(#843). 주지 않으면 붙이지 않는다 */
   agents?: (sessionId: string) => readonly TerminalAgentRow[] | undefined;
@@ -224,7 +224,7 @@ interface AgentRow {
   /** 스냅샷이 없을 때의 토큰 */
   tokens?: AgentUsage;
   group?: AgentGroup;
-  terminal?: { cliAlive: boolean };
+  terminal?: TerminalPresence;
   costUsd?: number;
   agents?: readonly TerminalAgentRow[];
   capabilities?: AgentCapabilities;
@@ -398,7 +398,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(tokens ? { tokens } : {}),
     ...(state === 'working' ? { activity: activityOf(row.recent ?? []) } : {}),
     ...(row.group ? { group: row.group } : {}),
-    ...(row.terminal ? { terminal: terminalStatusOf(row.terminal, row.snapshot) } : {}),
+    ...(row.terminal ? { terminal: terminalStatusOf(row.terminal, row.snapshot, now) } : {}),
     ...(row.snapshot ? { gate: gateStatusOf(row.snapshot, row.recent ?? []) } : {}),
     ...(row.costUsd !== undefined ? { costUsd: row.costUsd } : {}),
     // 메인 행의 상태는 이 항목의 실행 상태다. 장부는 실행 상태를 모른다
@@ -467,8 +467,23 @@ function agentsOf(ledger: readonly TerminalAgentRow[] | undefined, instances: re
   return { agents: merged };
 }
 
+/** 이 프로세스에서 연 세션 터미널의 사정(session-terminal의 sessionTerminalPresence) */
+export interface TerminalPresence {
+  cliAlive: boolean;
+  /** 첫 요청을 CLI 실행 인자로 넘겨 연 시각(ms, #966). CLI가 뜨면 없다 */
+  startPendingSince?: number;
+}
+
+/** 첫 요청을 넘긴 뒤 이만큼 지나도 CLI가 뜨지 않으면 시작 창에서 멈춘 것으로 본다(#966). 보통은 몇 초 안에 뜬다 */
+const START_PENDING_MS = 8_000;
+const START_PENDING_MESSAGE = '그 칸에서 폴더 신뢰 등 CLI 시작 창에 답하세요';
+
 /** CLI가 떠 있고 사람을 기다리면 그 까닭과 문구(#920). 모르는 알림 종류는 기다림으로 보지 않는다 */
-export function terminalStatusOf(terminal: { cliAlive: boolean }, snapshot: SessionSnapshot | undefined): AgentTerminalStatus {
+export function terminalStatusOf(terminal: TerminalPresence, snapshot: SessionSnapshot | undefined, now: number = Date.now()): AgentTerminalStatus {
+  // 첫 요청을 넘겼는데 CLI가 뜨지 않았다(#966): 시작하며 묻는 창(폴더 신뢰 등)에서 사람을 기다린다. 막 연 터미널은 CLI가 뜨는 중이다
+  if (!terminal.cliAlive && terminal.startPendingSince !== undefined && now - terminal.startPendingSince >= START_PENDING_MS) {
+    return { cli: 'down', waiting: 'input', message: START_PENDING_MESSAGE };
+  }
   const attention = terminal.cliAlive ? snapshot?.terminalAttention : undefined;
   const waiting = attention ? WAITING_KIND[attention.kind] : undefined;
   const message = waiting && attention?.message ? oneLine(attention.message) : undefined;
