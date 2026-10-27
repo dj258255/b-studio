@@ -37,6 +37,7 @@ import type {
   ServiceEndpoint,
   ServiceUsage,
   StartOptions,
+  StrayProcessReport,
   SyncOptions,
   SyncResult,
 } from '../types';
@@ -72,6 +73,7 @@ import {
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
 import { findMissingMasks, loadGitMask, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
+import { foreignProcesses, scanProcesses, type ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
@@ -277,6 +279,8 @@ class LocalDockerSandbox implements Sandbox {
   readonly #dependencyPollMs: number;
   /** up을 한 번에 하나씩 돌리는 줄. 만들기 → 확인 → 시작 사이에 다른 up이 끼어들지 못하게 한다 */
   #upQueue: Promise<unknown> = Promise.resolve();
+  /** 서비스가 준비됐을 때 PID 1과 세션이 다른 프로세스 목록(#765). 그 뒤에 생긴 것만 모르는 프로세스로 본다. 스튜디오를 다시 띄우면 비어 있다 */
+  readonly #processBaseline = new Map<string, ScannedProcess[]>();
   #loadRunner: Promise<string> | undefined;
   #daemonCpus: Promise<number | undefined> | undefined;
   #hostPorts: Record<string, number>;
@@ -379,6 +383,9 @@ class LocalDockerSandbox implements Sandbox {
       ),
     );
 
+    // 준비된 서비스마다 그때 떠 있던 프로세스를 기준선으로 남긴다(#765). 검증 게이트는 그 뒤에 생긴 것만 모르는 프로세스로 본다
+    await Promise.all(startingManaged.map(([name]) => this.#recordProcessBaseline(name)));
+
     // 서비스가 모두 준비된 직후 한 번 stats를 읽어 기동 중 받은 바이트를 알린다
     await this.#reportBootNetwork(options);
 
@@ -464,7 +471,32 @@ class LocalDockerSandbox implements Sandbox {
     options.onStatus?.({ service: name, phase: 'starting' });
     // 소스를 마운트하는 개발 이미지는 이미지가 그대로여도 컨테이너를 새로 만들어야 변경이 반영된다
     await this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], options.signal);
-    return this.#awaitReady(name, options);
+    const endpoint = await this.#awaitReady(name, options);
+    await this.#recordProcessBaseline(name);
+    return endpoint;
+  }
+
+  async strayProcesses({ signal }: { signal?: AbortSignal } = {}): Promise<StrayProcessReport[]> {
+    const off = this.project.offServices;
+    const names = this.project.managed.map(([name]) => name).filter((name) => !off?.has(name));
+    const reports = await Promise.all(
+      names.map(async (service): Promise<StrayProcessReport | undefined> => {
+        // 멈춘 컨테이너에는 프로세스가 없다. 멈춘 서비스를 게이트가 켜 버리지 않게 건너뛴다
+        if ((await this.state(service)) !== 'running') return undefined;
+        const scanned = await scanProcesses((command) => this.exec(service, command, { signal }));
+        if (scanned.error !== undefined) return { service, error: scanned.error };
+        const foreign = foreignProcesses(scanned.processes, this.#processBaseline.get(service));
+        return foreign.length > 0 ? { service, processes: foreign.map(({ pid, command }) => ({ pid, command })) } : undefined;
+      }),
+    );
+    return reports.filter((report): report is StrayProcessReport => report !== undefined);
+  }
+
+  /** 준비된 서비스의 프로세스 목록을 기준선으로 남긴다(#765). 읽지 못하면 기준선을 지워, 다음 검사가 그 서비스를 다시 띄우게 한다 */
+  async #recordProcessBaseline(name: string): Promise<void> {
+    const scanned = await scanProcesses((command) => this.exec(name, command)).catch(() => undefined);
+    if (scanned?.processes) this.#processBaseline.set(name, scanned.processes);
+    else this.#processBaseline.delete(name);
   }
 
   async sync(files: string[], { signal, timeoutMs = 60_000 }: SyncOptions = {}): Promise<SyncResult> {

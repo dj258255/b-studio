@@ -397,6 +397,38 @@ export class VerificationGate {
   }
 
   /**
+   * 서비스가 준비된 뒤 `docker exec`(run_in_service 등)로 들어와 남은 프로세스가 있는 서비스를 찾는다(#765).
+   * 그런 프로세스는 검사하는 동안 파일을 바꿨다가 끝나기 전에 되돌릴 수 있고, 앞뒤 지문이 같아 #recheckOutsideChanges가 잡지 못한다.
+   * 끝내지 않고 그 서비스를 다시 띄운다: 서비스가 스스로 다른 세션으로 띄운 서버(Gradle의 bootRun)를 잘못 끝내지 않고,
+   * 셸이 없는 이미지에서도 같게 동작한다. 확인하지 못한 서비스와 찾기가 실패한 경우는 managed 서비스를 다시 띄운다(모르면 막는 쪽).
+   * 무엇을 찾았는지는 통과로 표시한 review 기록으로 남긴다 — 실패가 아니라 에이전트가 알아야 할 사실이다.
+   * 남은 한계: 이 컴퓨터 방식 터미널의 호스트 셸과, 서비스의 개발 서버가 다시 읽어 들인 코드가 서버 안에서 하는 일은 막지 못한다.
+   */
+  async #strayServices(): Promise<{ services: string[]; note?: WorkflowCheck }> {
+    const { sandbox, signal } = this.#options;
+    if (!sandbox.strayProcesses) return { services: [] };
+    const note = (detail: string): WorkflowCheck => ({ stage: 'review', name: 'background-processes', ok: true, attempts: 1, detail });
+    let reports: Awaited<ReturnType<NonNullable<Sandbox['strayProcesses']>>>;
+    try {
+      reports = await sandbox.strayProcesses({ signal });
+    } catch (error) {
+      signal?.throwIfAborted();
+      const all = this.#project.managed.map(([name]) => name);
+      return { services: all, note: note(`서비스 안의 백그라운드 프로세스를 확인하지 못해 서비스를 모두 다시 띄웠습니다: ${error instanceof Error ? error.message : String(error)}`) };
+    }
+    if (reports.length === 0) return { services: [] };
+    const lines = reports.map((report) =>
+      report.error !== undefined
+        ? `${report.service}: ${report.error}`
+        : `${report.service}: ${report.processes.slice(0, 3).map((process) => process.command || `pid ${process.pid}`).join(', ')}${report.processes.length > 3 ? ` 외 ${report.processes.length - 3}개` : ''}`,
+    );
+    return {
+      services: reports.map((report) => report.service),
+      note: note(`검사 전에 서비스 안에 남은 백그라운드 프로세스가 있어 그 서비스를 다시 띄웠습니다(서비스 안 명령으로 오래 도는 프로세스를 남기지 마세요) — ${lines.join(' / ')}`),
+    };
+  }
+
+  /**
    * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
    * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
    * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
@@ -448,6 +480,10 @@ export class VerificationGate {
     this.#stage('run');
     onEvent({ type: 'verify_start', files });
     this.#verifiedVersion = workspace.version;
+    // 바뀌지 않은 서비스에 b-studio가 모르는 백그라운드 프로세스가 남았으면 그 서비스도 다시 띄운다(#765). 다시 띄운 뒤의 검사는
+    // 그 프로세스 없이 돌고, 그 전에 바뀐 파일은 검사 뒤의 다시 견줌(#recheckOutsideChanges)이 잡는다
+    const strays = await this.#strayServices();
+    if (strays.note) recordChecks.push(strays.note);
     const verify = () =>
       verifyChanges({
         sandbox,
@@ -457,6 +493,7 @@ export class VerificationGate {
         allowBreaking,
         fetcher,
         start: { signal, onStatus: onServiceStatus },
+        ...(strays.services.length > 0 ? { alsoRestart: strays.services } : {}),
       });
     let report = await verify();
     // 샌드박스·도커 쪽 실패는 잠깐의 경합일 수 있다(서비스 둘이 함께 재시작될 때 등). 모델을 거치지 않고 한 번만 그대로 다시 해 본다

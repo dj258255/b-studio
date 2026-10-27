@@ -1,0 +1,117 @@
+{
+  "rounds": [
+    {
+      "round": 1,
+      "webLintMs": 2893,
+      "webLintExit": 0,
+      "apiUnitMs": 21710,
+      "apiUnitExit": 0,
+      "scan-web-ms": 131,
+      "scan-web": [
+        "166 sid=160 sh -c while true; do sleep 1; done ",
+        "167 sid=160 sleep 1"
+      ],
+      "kill-web-ms": 145,
+      "after-kill-web": [
+        "166 sid=160 ",
+        "167 sid=160"
+      ],
+      "scan-api-ms": 124,
+      "scan-api": [
+        "335 sid=329 sh -c while true; do sleep 1; done ",
+        "336 sid=329 sleep 1 ",
+        "38 sid=38 /opt/java/openjdk/bin/java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAME",
+        "95 sid=38 /opt/java/openjdk/bin/java -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.country=US -Duser.language=en -Duser.var"
+      ],
+      "kill-api-ms": 106,
+      "after-kill-api": [
+        "OCI runtime exec failed: exec failed: cannot exec in a stopped container"
+      ],
+      "alive-web": 200,
+      "alive-api": "TypeError: fetch failed",
+      "recreate-web-ms": 7691,
+      "recreate-api-ms": 14736
+    },
+    {
+      "round": 2,
+      "webLintMs": 4107,
+      "webLintExit": 0,
+      "apiUnitMs": 8414,
+      "apiUnitExit": 0,
+      "scan-web-ms": 217,
+      "scan-web": [
+        "109 sid=103 sh -c while true; do sleep 1; done ",
+        "110 sid=103 sleep 1"
+      ],
+      "kill-web-ms": 111,
+      "after-kill-web": [
+        "109 sid=103 ",
+        "110 sid=103"
+      ],
+      "scan-api-ms": 235,
+      "scan-api": [
+        "240 sid=234 sh -c while true; do sleep 1; done ",
+        "241 sid=234 sleep 1 ",
+        "38 sid=38 /opt/java/openjdk/bin/java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAME",
+        "94 sid=38 /opt/java/openjdk/bin/java -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.country=US -Duser.language=en -Duser.var"
+      ],
+      "kill-api-ms": 202,
+      "after-kill-api": [
+        "OCI runtime exec failed: exec failed: cannot exec in a stopped container"
+      ],
+      "alive-web": 200,
+      "alive-api": "TypeError: fetch failed",
+      "recreate-web-ms": 10895,
+      "recreate-api-ms": 11283
+    },
+    {
+      "round": 3,
+      "webLintMs": 2646,
+      "webLintExit": 0,
+      "apiUnitMs": 7699,
+      "apiUnitExit": 0,
+      "scan-web-ms": 101,
+      "scan-web": [
+        "109 sid=103 sh -c while true; do sleep 1; done ",
+        "110 sid=103 sleep 1"
+      ],
+      "kill-web-ms": 115,
+      "after-kill-web": [
+        "109 sid=103 ",
+        "110 sid=103"
+      ],
+      "scan-api-ms": 160,
+      "scan-api": [
+        "235 sid=229 sh -c while true; do sleep 1; done ",
+        "236 sid=229 sleep 1 ",
+        "38 sid=38 /opt/java/openjdk/bin/java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.lang.invoke=ALL-UNNAME",
+        "89 sid=38 /opt/java/openjdk/bin/java -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.country=US -Duser.language=en -Duser.var"
+      ],
+      "kill-api-ms": 114,
+      "after-kill-api": [
+        "OCI runtime exec failed: exec failed: cannot exec in a stopped container"
+      ],
+      "alive-web": 200,
+      "alive-api": "TypeError: fetch failed",
+      "recreate-web-ms": 6470,
+      "recreate-api-ms": 12555
+    }
+  ],
+  "bootMs": 66583,
+  "processes-web-after-boot": [
+    "1 sid=1 node /usr/local/bin/pnpm dev --hostname 0.0.0.0 --port 3000 ",
+    "32 sid=1 sh -c next dev --hostname 0.0.0.0 --port 3000 ",
+    "33 sid=1 node /app/node_modules/.bin/../next/dist/bin/next dev --hostname 0.0.0.0 --port 3000 ",
+    "50 sid=1 next-server (v16.4.3)                                                                               ",
+    "68 sid=1 node /app/.next/dev/build/chunks/pool_entry-[turbopack-node]_transforms_postcss_ts_0tp-k2vy8nj6i._.j",
+    "83 sid=83 sh -c for d in /proc/[0-9]*; do echo \"${d#/proc/} sid=$(sed 's/^.*) //' $d/stat 2>/dev/null | cut -d",
+    ""
+  ],
+  "processes-api-after-boot": [
+    "1 sid=1 /opt/java/openjdk/bin/java -Xmx64m -Xms64m -Dorg.gradle.appname=gradlew -jar /app/gradle/wrapper/gra",
+    "137 sid=137 sh -c for d in /proc/[0-9]*; do echo \"${d#/proc/} sid=$(sed 's/^.*) //' $d/stat 2>/dev/null | cut -d",
+    "38 sid=38 /opt/java/openjdk/bin/java --add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/java.la",
+    "95 sid=38 /opt/java/openjdk/bin/java -XX:TieredStopAtLevel=1 -Dfile.encoding=UTF-8 -Duser.country=US -Duser.la",
+    ""
+  ]
+}

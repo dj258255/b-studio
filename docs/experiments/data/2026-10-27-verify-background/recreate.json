@@ -1,0 +1,32 @@
+[
+  {
+    "round": 1,
+    "warmWeb": 27,
+    "warmApi": 3,
+    "recWeb": 6427,
+    "coldWeb": 34,
+    "recApi": 13498,
+    "coldApi": 126,
+    "recBoth": 12877
+  },
+  {
+    "round": 2,
+    "warmWeb": 140,
+    "warmApi": 107,
+    "recWeb": 6379,
+    "coldWeb": 44,
+    "recApi": 12208,
+    "coldApi": 87,
+    "recBoth": 21771
+  },
+  {
+    "round": 3,
+    "warmWeb": 103,
+    "warmApi": 200,
+    "recWeb": 6384,
+    "coldWeb": 33,
+    "recApi": 14416,
+    "coldApi": 129,
+    "recBoth": 13255
+  }
+]

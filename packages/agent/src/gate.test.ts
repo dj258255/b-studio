@@ -3297,3 +3297,87 @@ describe('VerificationGate 평가 자산 (ADR-175)', () => {
     expect(check?.detail).toContain(ASSET_FILE);
   });
 });
+
+describe('검사 전에 서비스 안의 모르는 백그라운드 프로세스(#765)', () => {
+  /** strays: 샌드박스가 돌려줄 찾기 결과. 'throw'면 찾기 자체가 실패한다 */
+  async function gateWithStrays(strays: Awaited<ReturnType<NonNullable<Sandbox['strayProcesses']>>> | 'throw' | undefined) {
+    // api와 web 두 서비스짜리 프로젝트(가짜 orders 프로젝트는 api 하나다)
+    const web = ['web', { source: 'managed', template: 'nextjs', path: 'web', port: 3000, preview: 'browser' }] as LoadedProject['managed'][number];
+    const base = withWorkflow({ tests: [{ name: 'api-unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }] });
+    const target = { ...base, managed: [...base.managed, web] } as LoadedProject;
+    const sandbox = fakeSandbox(target, [true, true, true, true]);
+    const order: string[] = [];
+    const restart = sandbox.restart.bind(sandbox);
+    sandbox.restart = async (service, options) => {
+      order.push(`restart ${service}`);
+      return restart(service, options);
+    };
+    sandbox.exec = async (_service, command) => {
+      order.push(`exec ${command.join(' ')}`);
+      return { exitCode: 0, stdout: '', stderr: '' };
+    };
+    if (strays !== undefined) {
+      sandbox.strayProcesses = async () => {
+        order.push('scan');
+        if (strays === 'throw') throw new Error('도커가 응답하지 않습니다');
+        return strays;
+      };
+    }
+    const workspace = new Workspace(target.root);
+    const events: AgentEvent[] = [];
+    const gate = await VerificationGate.create({
+      project: target,
+      sandbox,
+      workspace,
+      allowBreaking: false,
+      maxVerifyAttempts: 3,
+      fetcher: async () => ORDERS_CONTRACT,
+      pageFetcher: async () => ({ status: 200, text: '<h1>주문 목록</h1>' }),
+      onEvent: (event) => events.push(event),
+    });
+    // web만 바꿨다. 지금까지는 web만 다시 띄우고 api는 그대로 둔 채 api에서 테스트를 돌렸다
+    await workspace.write('web/app/page.tsx', 'export default function Page() { return <h1>주문 목록</h1>; }\n');
+    return { gate, sandbox, order, events };
+  }
+
+  it('바뀌지 않은 서비스에 모르는 프로세스가 있으면 그 서비스도 테스트 전에 다시 띄우고, 무엇을 찾았는지 남긴다', async () => {
+    const { gate, sandbox, order } = await gateWithStrays([{ service: 'api', processes: [{ pid: 15, command: 'sh -c while true; do cp b a; sleep 1; cp a0 a; done' }] }]);
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect([...sandbox.restarts].sort()).toEqual(['api', 'web']);
+    // 찾기 → 다시 띄우기 → 테스트 순서다. 테스트가 도는 동안 그 프로세스가 파일을 바꿀 수 없다
+    const test = order.findIndex((line) => line.includes('./gradlew test'));
+    expect(order.indexOf('scan')).toBeLessThan(order.indexOf('restart api'));
+    expect(order.indexOf('restart api')).toBeLessThan(test);
+    const note = gate.checks.find((check) => check.name === 'background-processes');
+    expect(note?.ok).toBe(true);
+    expect(note?.detail).toContain('api');
+    expect(note?.detail).toContain('while true');
+  });
+
+  it('찾을 것이 없으면 지금처럼 바뀐 서비스만 다시 띄운다', async () => {
+    const { gate, sandbox } = await gateWithStrays([]);
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(sandbox.restarts).toEqual(['web']);
+    expect(gate.checks.some((check) => check.name === 'background-processes')).toBe(false);
+  });
+
+  it('셸이 없어 확인하지 못한 서비스는 다시 띄운다(모르면 멈추는 쪽)', async () => {
+    const { gate, sandbox } = await gateWithStrays([{ service: 'api', error: 'sh가 없어 서비스 안의 프로세스를 확인하지 못했습니다' }]);
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect([...sandbox.restarts].sort()).toEqual(['api', 'web']);
+    expect(gate.checks.find((check) => check.name === 'background-processes')?.detail).toContain('확인하지 못했습니다');
+  });
+
+  it('찾기가 실패하면 managed 서비스를 모두 다시 띄운다', async () => {
+    const { gate, sandbox } = await gateWithStrays('throw');
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect([...sandbox.restarts].sort()).toEqual(['api', 'web']);
+    expect(gate.checks.find((check) => check.name === 'background-processes')?.detail).toContain('도커가 응답하지 않습니다');
+  });
+
+  it('찾기를 지원하지 않는 샌드박스는 지금처럼 바뀐 서비스만 다시 띄운다', async () => {
+    const { gate, sandbox } = await gateWithStrays(undefined);
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(sandbox.restarts).toEqual(['web']);
+  });
+});
