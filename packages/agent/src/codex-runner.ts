@@ -31,6 +31,117 @@ const WORKDIR_PREFIX = 'b-studio-codex-';
 const CODEX_HOME_PREFIX = 'b-studio-codex-home-';
 
 /**
+ * 관문을 거치지 않고 일하는 Codex 내장 기능(#976). 모두 끈다.
+ * 묶인 CLI 0.157.0에서 실측했다: 셸만 끄면 앱 커넥터(로그인한 ChatGPT 계정의 커넥터), 플러그인, 이미지 생성, 목표,
+ * 브라우저·컴퓨터 사용, 웹 실행과, 그 도구들을 자바스크립트로 부르는 코드 모드(exec)가 남아 도구가 64개였다.
+ * 이것들을 끄면 b-studio 도구와 apply_patch(끄는 설정이 없다, 빈 작업 폴더·읽기 전용으로 둔다), 시계, MCP 자원 읽기만 남는다.
+ * 코드 모드(code_mode_host)는 끄지 않는다(#979): 이 판에서는 MCP 도구가 코드 모드를 거쳐서만 보이고, 코드 모드의 자바스크립트는
+ * 모듈을 불러오지 못하며(unsupported import) fetch·process 같은 전역이 없어 ALL_TOOLS에 있는 도구만 부른다.
+ * 모르는 기능 이름은 Codex가 무시하므로 판이 바뀌어도 실행이 깨지지 않는다. 새 판을 들일 때 `codex features list`로 다시 본다
+ */
+const DISABLED_FEATURES = [
+  'shell_tool',
+  'apps',
+  'plugins',
+  'remote_plugin',
+  'plugin_sharing',
+  'image_generation',
+  'goals',
+  'browser_use',
+  'browser_use_external',
+  'browser_use_full_cdp_access',
+  'computer_use',
+  'in_app_browser',
+  'multi_agent',
+  'sleep_tool',
+  'tool_suggest',
+  'view_image',
+  'skill_search',
+  'skill_mcp_dependency_install',
+  'workspace_dependencies',
+  'worktrees',
+  // 데스크톱 앱·대화형 화면용. 비대화형 실행에서 쓰지 않으니 꺼서 안전 목록을 작게 둔다(#980)
+  'daemon_auto_start',
+  'in_app_chat',
+  'in_app_dictation',
+  'in_app_local_automation',
+  'in_app_updates',
+  'realtime_conversation',
+  'hooks',
+  'shell_snapshot',
+  'mentions_v2',
+] as const;
+
+/**
+ * 끄지 않고 켜 둔 기능과 그 까닭(#980). 닫힌 목록이다: 실행 전에 `codex features list`를 같은 설정으로 읽어,
+ * 여기에 없는 기능이 하나라도 켜져 있으면 모델을 부르지 않는다. 끄라고 넘긴 기능이 켜진 채 보여도 여기에 없으니 막힌다.
+ * 근거는 묶인 0.157.0에서 이 기능들을 켠 채 에이전트가 본 도구 목록(실측, docs/experiments/2026-10-28-codex-real.md)이다:
+ * b-studio 도구, apply_patch, 시계, MCP 자원 읽기 말고는 없었다. 판을 올리면 이 목록을 그 판의 출력으로 다시 정한다
+ */
+const ALLOWED_ENABLED_FEATURES: Readonly<Record<string, string>> = {
+  code_mode_host: 'MCP 도구가 코드 모드로만 보인다(#979). 코드 모드의 자바스크립트는 모듈을 불러오지 못하고 네트워크 전역이 없어 ALL_TOOLS의 도구만 부른다',
+  unified_exec: '끌 수 없다(0.157.0은 -c와 --disable을 무시한다). 셸 도구의 구현 방식이라 shell_tool을 끄면 exec_command가 생기지 않는다(실측 도구 목록에 없음)',
+  unified_exec_tty: 'unified_exec의 터미널 모드. 위와 같다',
+  tool_call_mcp_elicitation: 'MCP 도구 호출 중의 확인 요청 처리. b-studio MCP 서버는 확인을 요청하지 않는다',
+  auth_elicitation: 'MCP 서버 인증 요청 처리. b-studio MCP 서버는 환경 변수의 토큰으로 붙는다',
+  guardian_approval: '승인 검토. 도구를 주지 않는다',
+  guardian_reuse_parent_compaction: '승인 검토의 압축 재사용. 도구를 주지 않는다',
+  'guardianv2.thread_context': '승인 검토의 스레드 문맥. 도구를 주지 않는다',
+  fast_mode: '응답 속도 설정. 도구를 주지 않는다',
+  compaction_image_budget: '대화 압축 때 이미지 예산. 도구를 주지 않는다',
+  content_item_kinds: '메시지 항목 형식. 도구를 주지 않는다',
+  enable_request_compression: '요청 전송 압축. 도구를 주지 않는다',
+  system_proxy_fallback: '시스템 프록시 사용. 도구를 주지 않는다',
+  unbounded_connection_retries: '연결 재시도. 도구를 주지 않는다',
+  // removed 단계: 이 판의 코드가 더는 읽지 않는 이름이다
+  collaboration_modes: 'removed',
+  item_ids: 'removed',
+  resize_all_images: 'removed',
+  sqlite: 'removed',
+  steer: 'removed',
+  terminal_resize_reflow: 'removed',
+  tool_search_always_defer_mcp_tools: 'removed',
+  tui_app_server: 'removed',
+  unified_exec_zsh_fork: 'removed',
+};
+
+/** 스레드와 기능 확인이 함께 쓰는 설정(#976·#980). MCP 서버는 스레드에만 더한다 */
+export function codexFeatureConfig(): CodexConfig {
+  return { features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])), web_search: 'disabled' };
+}
+
+/**
+ * `codex features list` 출력에서 켜진 기능이 모두 안전 목록에 있는지 본다(#980). 한 줄은 "이름  단계  true|false"다.
+ * 한 줄도 읽지 못하면 확인하지 못한 것으로 막는다
+ */
+export function checkCodexFeatures(listed: string): { ok: true } | { ok: false; reason: string } {
+  const rows = listed
+    .split('\n')
+    .flatMap((line) => {
+      const match = /^(\S+)\s+(.+?)\s+(true|false)$/.exec(line.trim());
+      return match ? [{ name: match[1]!, enabled: match[3] === 'true' }] : [];
+    });
+  if (rows.length === 0) return { ok: false, reason: 'Codex 기능 목록을 읽지 못해 실행하지 않았습니다(관문 밖 기능이 켜져 있는지 확인할 수 없습니다)' };
+  const unknown = rows.filter((row) => row.enabled && !Object.hasOwn(ALLOWED_ENABLED_FEATURES, row.name)).map((row) => row.name);
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      reason: `Codex에 b-studio가 확인하지 않은 기능이 켜져 있어 실행하지 않았습니다: ${unknown.join(', ')}. 묶인 Codex 판이 바뀌었으면 그 기능이 관문 밖에서 일하는지 보고 끄는 목록이나 안전 목록에 더해야 합니다`,
+    };
+  }
+  return { ok: true };
+}
+
+/** 설정 트리를 `--config 키=값` 인자로 편다. 문자열은 TOML 문자열로 감싼다 */
+function configArgs(config: CodexConfig, prefix = ''): string[] {
+  return Object.entries(config).flatMap(([key, value]) => {
+    const name = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === 'object' && !Array.isArray(value)) return configArgs(value, name);
+    return ['--config', `${name}=${typeof value === 'string' ? JSON.stringify(value) : String(value)}`];
+  });
+}
+
+/**
  * Codex에 `--config`로 넘길 설정 트리.
  * SDK가 같은 모양(CodexConfigObject)을 쓰지만 타입으로는 내보내지 않아 여기서 같은 모양을 정의한다.
  */
@@ -44,6 +155,8 @@ export interface CodexSdk {
    * `~/.codex/config.toml`은 건드리지 않고 넘긴 값만 `--config`로 덮어쓴다.
    */
   startThread(input: { config: CodexConfig; env: Record<string, string>; options: ThreadOptions }): CodexThread;
+  /** 스레드가 쓰는 것과 같은 Codex로 `codex features list`를 돌려 출력을 돌려준다(#980). 모델을 부르지 않는다 */
+  listFeatures(input: { config: CodexConfig; env: Record<string, string> }): Promise<string>;
 }
 
 /** SDK의 Thread에서 러너가 쓰는 부분만 추린 것 */
@@ -57,7 +170,14 @@ export interface CodexThread {
  * CommonJS로 옮겨지는 경로(예: tsx로 도는 벤치가 `@b-studio/agent`를 require)에서 정적 import가 모듈 해석 오류를 낸다.
  * 동적 import는 두 방식 모두에서 동작하고, codex 모드를 쓰지 않는 실행은 이 패키지를 아예 불러오지 않는다
  */
-const DEFAULT_SDK: CodexSdk = {
+export const DEFAULT_SDK: CodexSdk = {
+  async listFeatures({ config, env }) {
+    const { Codex } = await import('@openai/codex-sdk');
+    // 스레드와 같은 묶인 실행 파일을 쓴다. SDK가 경로를 내보내지 않아 내부 필드를 읽는다(SDK 판을 고정해 둔다). 없으면 확인하지 못한 것으로 막힌다
+    const executable = (new Codex({ env }) as unknown as { exec?: { executablePath?: unknown } }).exec?.executablePath;
+    if (typeof executable !== 'string') throw new Error('묶인 Codex 실행 파일을 찾지 못했습니다');
+    return run(executable, [...configArgs(config), 'features', 'list'], 30_000, env);
+  },
   startThread: ({ config, env, options }) => {
     let thread: Thread | undefined;
     return {
@@ -207,6 +327,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   // 참조로 공유해 갱신을 한 곳에서만 한다. 모델을 고르지 않았으면(계정 기본) 백엔드 이름으로 키를 만든다
   metrics.usageByModel = { [model ?? 'codex:default']: usage };
   let completedTurns = 0;
+  /** 앞 턴의 turn.completed.usage(스레드 누적값, #977). 이번 턴의 값은 이것과의 차이다 */
+  let threadUsage: Usage | undefined;
   let lastText = '';
   let threadId: string | undefined;
   // ask_user가 남긴 질문. 있으면 이 턴이 끝날 때 실행을 끝내고 사용자 답을 기다린다
@@ -244,6 +366,16 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     await linkAuthFile(codexHome, options.authHome);
     const home = codexHome;
 
+    // 모델을 부르기 전에 켜진 기능이 모두 확인한 것인지 본다(#980). 끄는 목록만으로는 새 판이 더한 기능을 막지 못한다
+    const features = await sdk.listFeatures({ config: codexFeatureConfig(), env: { ...processEnv(), CODEX_HOME: home } }).then(checkCodexFeatures, (error: unknown) => ({
+      ok: false as const,
+      reason: `Codex 기능 목록을 읽지 못해 실행하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    if (!features.ok) {
+      finish('failed', features.reason);
+      return result!;
+    }
+
     toolServer = await startToolServer({
       name: SERVER,
       specs,
@@ -268,8 +400,9 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     const thread = sdk.startThread({
       // 설정 덮어쓰기로만 넘긴다. 사용자 config.toml은 바꾸지 않는다
       config: {
-        features: { shell_tool: false },
-        mcp_servers: { [SERVER]: { url: toolServer.url, bearer_token_env_var: TOKEN_ENV } },
+        ...codexFeatureConfig(),
+        // b-studio 도구가 관문이다. Codex 쪽 승인은 미리 허락한다(#979): 0.157은 승인 없음(never)으로 돌면 MCP 도구 호출을 거절한다
+        mcp_servers: { [SERVER]: { url: toolServer.url, bearer_token_env_var: TOKEN_ENV, default_tools_approval_mode: 'approve' } },
       },
       // CODEX_HOME을 임시 폴더로 바꿔 사용자 ~/.codex(등록한 MCP 서버·플러그인·스킬·전역 AGENTS.md)를 읽지 않게 한다
       env: { ...processEnv(), [TOKEN_ENV]: toolServer.token, CODEX_HOME: home },
@@ -318,18 +451,17 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
             // Codex 이벤트는 모델 호출 단위가 아니라 턴 단위라 턴 수로 센다
             completedTurns += 1;
             metrics.modelCalls = completedTurns;
-            addUsage(usage, event.usage);
-            const turnContext = contextTokens(event.usage);
+            const turn = turnUsage(event.usage, threadUsage);
+            threadUsage = event.usage;
+            addUsage(usage, turn);
+            const turnContext = turn.inputTokens + turn.cacheReadTokens + turn.cacheWriteTokens;
             metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
             onEvent({ type: 'tokens', usage: { ...usage } });
             // 턴 하나의 사용량. 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
             onEvent({
               type: 'turn_usage',
               turn: completedTurns,
-              inputTokens: event.usage.input_tokens,
-              outputTokens: event.usage.output_tokens,
-              cacheReadTokens: event.usage.cached_input_tokens ?? 0,
-              cacheWriteTokens: event.usage.cache_write_input_tokens ?? 0,
+              ...turn,
               contextTokens: turnContext,
             });
             break;
@@ -433,26 +565,27 @@ export async function preflightCodex(
 }
 
 /**
- * Codex `turn.completed.usage`를 실행 누적값에 더한다.
- *
- * 근거(약함): SDK 타입 주석이 각 필드를 "used during the turn"으로 설명하고, 턴마다 별도 `codex exec` 프로세스를 띄운다.
- * 실측하지 못했다(0단계에서 계정이 사용 한도에 걸려 모델 호출 불가). 누적으로 밝혀지면 덮어쓰기로 바꿔야 하며,
- * 그러지 않으면 토큰이 두 번 세어진다. 자세한 근거는 `.delegate/codex-probe.md`.
+ * 한 턴의 사용량을 b-studio 규칙(입력은 캐시 제외)으로 옮긴다(#977). 실측(Codex 0.157.0, 2026-10-28):
+ *  - 같은 스레드를 이어 가면(SDK가 턴마다 `codex exec resume`) turn.completed.usage는 스레드 누적값이다.
+ *    첫 턴 input 17,280, 둘째 턴 29,759이고 세션 기록의 둘째 턴 호출은 12,479였다. 그래서 앞 턴 값과의 차이를 쓴다.
+ *  - input_tokens는 캐시 읽기를 포함한다(세션 기록의 total_tokens = input_tokens + output_tokens). 그래서 캐시 몫을 뺀다.
+ *    cache_write_input_tokens도 같은 자리라고 본다(실측에서는 늘 0).
+ * 값이 앞 턴보다 작으면(새 스레드) 이번 값을 그대로 쓴다.
  */
-function addUsage(total: AgentUsage, usage: Usage): void {
-  total.inputTokens += usage.input_tokens;
-  total.outputTokens += usage.output_tokens;
-  total.cacheReadTokens += usage.cached_input_tokens ?? 0;
-  total.cacheWriteTokens += usage.cache_write_input_tokens ?? 0;
+function turnUsage(now: Usage, before: Usage | undefined): AgentUsage {
+  const fields = (u: Usage) => [u.input_tokens, u.cached_input_tokens ?? 0, u.cache_write_input_tokens ?? 0, u.output_tokens] as const;
+  const current = fields(now);
+  const previous = before ? fields(before) : undefined;
+  const fresh = !previous || current.some((value, index) => value < previous[index]!);
+  const [input, cached, written, output] = current.map((value, index) => (fresh ? value : value - previous![index]!));
+  return { inputTokens: Math.max(0, input! - cached! - written!), outputTokens: output!, cacheReadTokens: cached!, cacheWriteTokens: written! };
 }
 
-/**
- * 한 턴의 입력 크기 = input + cache_read + cache_write.
- * Codex의 `input_tokens`가 캐시를 이미 포함하는지는 미확인이라 이중 계산일 수 있다(결과 파일에 남김).
- * 로컬 Claude Agent 러너의 contextTokens와 같은 규칙을 쓴다.
- */
-function contextTokens(usage: Usage): number {
-  return usage.input_tokens + (usage.cached_input_tokens ?? 0) + (usage.cache_write_input_tokens ?? 0);
+function addUsage(total: AgentUsage, turn: AgentUsage): void {
+  total.inputTokens += turn.inputTokens;
+  total.outputTokens += turn.outputTokens;
+  total.cacheReadTokens += turn.cacheReadTokens;
+  total.cacheWriteTokens += turn.cacheWriteTokens;
 }
 
 /** 사용 한도 문구인지 본다. 실패 분류 기준은 이 한 곳에만 둔다 */
