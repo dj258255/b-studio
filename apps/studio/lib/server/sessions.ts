@@ -331,6 +331,7 @@ import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
+import { createCodexRolloutReader } from './codex-rollout-context';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
@@ -8374,6 +8375,8 @@ async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   }
   // 레코드를 받은 순서대로 처리한다. 사람 몫을 저장한 뒤(await) 저장된 값으로 한도를 판정한다(두 번 세지 않게)
   for (const request of requests) await attributeRunUsage(session, request);
+  // Codex는 상태 줄이 없어 응답이 끝날 때마다 그 대화의 기록에서 문맥 숫자만 읽는다(#978)
+  if (requests.length > 0 && terminalCliKind(session) === 'codex') await refreshCodexContext(session, requests);
   // 서브에이전트의 시작·끝·활동(#843). 화면의 에이전트 내역에만 쓴다
   const signals = agentSignalsFromOtlp(body);
   if (signals.length > 0) {
@@ -8383,6 +8386,22 @@ async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   }
   // 사용량은 기록에 쌓는 이벤트가 아니므로 내역을 세션 기록에 따로 저장한다(#849). 저장은 모아서 한 번에 한다
   if (requests.length > 0 || signals.length > 0) schedulePersist(session);
+}
+
+const codexRollouts = createCodexRolloutReader();
+
+/**
+ * Codex 세션 터미널의 문맥(#978). 이 세션 관문으로 들어온 응답 텔레메트리의 대화 id(훅 신뢰 전에도 온다), 없으면 훅이 준 대화 id로
+ * 그 대화의 기록 하나만 찾아 숫자만 읽는다. 대화 id를 모르거나 읽지 못하면 앞 값을 지운다(다른 대화의 문맥을 남기지 않는다)
+ */
+async function refreshCodexContext(session: Session, requests: readonly ApiRequestUsage[]): Promise<void> {
+  const remembered = session.terminalConversation?.cli === 'codex' ? session.terminalConversation.id : undefined;
+  const thread = requests.findLast((request) => request.sessionId)?.sessionId ?? remembered;
+  const activity = (session.terminalActivity ??= newTerminalActivity());
+  const home = (await sessionAccount(session.snapshot).catch(() => undefined))?.configDir ?? process.env.CODEX_HOME ?? path.join(homedir(), '.codex');
+  const context = thread ? await codexRollouts.read(home, thread).catch(() => undefined) : undefined;
+  if (context) activity.context = context;
+  else delete activity.context;
 }
 
 /**

@@ -1,7 +1,7 @@
 # 실측: 로그인한 Codex CLI로 세션 터미널 열기와 문맥 % 원천
 
 - 날짜: 2026-10-28
-- 관련 이슈: [#978](https://github.com/dj258255/b-studio/issues/978)(문맥 % 원천 결정), 앞선 실측 [Claude로 desk 써 보기](2026-10-27-real-claude-desk.md)와 [#966](https://github.com/dj258255/b-studio/issues/966)
+- 관련 이슈: [#978](https://github.com/dj258255/b-studio/issues/978)(문맥 % 원천 결정과 구현), 앞선 실측 [Claude로 desk 써 보기](2026-10-27-real-claude-desk.md)와 [#966](https://github.com/dj258255/b-studio/issues/966)
 - 모델: 이 컴퓨터에 ChatGPT로 로그인한 codex-cli 0.160.1. 가설 없는 관찰이다
 
 ## 방법
@@ -43,9 +43,23 @@
 | `codex app-server`의 `Model`, `Config` | 없음 | `Model`에 없음, `Config.model_context_window`는 사용자가 적었을 때만 | 된다 |
 | 세션 기록 `token_count`(`$CODEX_HOME/sessions/…/rollout-*.jsonl`) | 있음(`last_token_usage`) | 있음(`model_context_window`, 이번 475,000) | 지금 경계로는 안 된다 |
 
-세션 기록 첫 줄(`session_meta`)에 `cwd`가 있어 세션 작업 복사본으로 기록을 찾을 수 있다. 하지만 b-studio는 계정 설정 폴더 안의 파일을 읽지 않는다고 정해 두었고(`ai-accounts.ts`), 그 파일에는 대화 내용이 들어 있다. 그래서 구현하지 않고 [#978](https://github.com/dj258255/b-studio/issues/978)에 선택지를 적었다.
+b-studio는 계정 설정 폴더 안의 파일을 읽지 않는다고 정해 두었고(`ai-accounts.ts`, ADR-189 결정 1), 그 파일에는 대화 내용이 들어 있다. 그래서 [#978](https://github.com/dj258255/b-studio/issues/978)에 선택지를 적고 범수 님께 물었다.
+
+응답 텔레메트리의 `conversation.id`와 세션 기록 파일 이름의 대화 id가 같은지도 봤다. `codex exec` 한 번에서 둘 다 `01a180c4-…-d96ff6ca4375`였다. 텔레메트리는 그 세션 관문의 토큰으로만 들어오므로, 훅을 신뢰하기 전에도 그 세션의 기록 하나를 가리키는 확실한 연결이다.
+
+## 결정과 구현 (2026-10-28)
+
+범수 님이 #978에서 선택지 1(기록에서 숫자만 읽기)을 골랐다. ADR-189에 예외로 덧붙였다.
+
+- 찾기: 이 세션 관문으로 들어온 응답 텔레메트리의 대화 id, 없으면 훅의 `session_id`. 꼴이 UUID가 아니면 아무것도 훑지 않는다. 날짜 폴더를 새것부터 이름만 훑어 `-<대화 id>.jsonl`로 끝나는 파일 하나를 찾고, 찾은 자리는 기억한다. 다른 세션의 파일은 열지 않는다.
+- 읽기: 끝에서부터 64KB씩, 많아야 4MB를 읽는다. `"token_count"`가 든 줄만 해석하고 다른 줄은 해석하지 않고 버린다.
+- 값: 마지막 `token_count`의 `last_token_usage.total_tokens`(없으면 입력 + 출력)를 `model_context_window`로 나눈다. Claude 상태 줄과 같은 `context`(`usedPct`, `used`, `size`)로 실어 desk 카드가 똑같이 그린다. 숫자가 없거나 틀리면 비운다.
+- 때: Codex가 응답 하나를 마칠 때 오는 텔레메트리마다 다시 읽는다.
+- 진짜 기록 4개로 확인한 값(숫자만): 14,186 / 475,000 = 3% 등. 앞서 `token_count`에서 본 값과 같다.
+
+Codex 화면에 보이는 남은 문맥 표시와 같은 식인지는 확인하지 않았다(신뢰 창 너머라 보지 못했다). desk는 Claude와 같은 뜻(쓴 비율)으로 보인다.
 
 ## 남은 것
 
 - 사람이 Codex 칸에서 폴더 신뢰(와 훅 검토)를 고른 뒤: 훅 입력의 session_id와 기록 경로, 도구 시작 훅, 권한 대기 문구, 턴 끝, 카드의 지금 줄
-- 문맥 %: [#978](https://github.com/dj258255/b-studio/issues/978)의 결정
+- 진짜 Codex 세션 터미널에서 카드의 문맥 %: 폴더 신뢰를 고른 뒤 응답이 한 번 끝나면 보인다
