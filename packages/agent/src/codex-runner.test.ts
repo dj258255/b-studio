@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { lstat, mkdtemp, readFile, readdir, readlink, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Board } from './coordination';
-import { runCodexAgent, type CodexConfig, type CodexSdk, type CodexThread } from './codex-runner';
+import { checkCodexFeatures, codexFeatureConfig, DEFAULT_SDK, runCodexAgent, type CodexConfig, type CodexSdk, type CodexThread } from './codex-runner';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 
@@ -43,7 +44,12 @@ interface FakeTurn {
 /** 첫 turn.runStreamed가 시작될 때(임시 CODEX_HOME이 살아 있는 동안) 실행할 확인 훅 */
 interface FakeHooks {
   onStart?: (env: Record<string, string>) => Promise<void>;
+  /** `codex features list`의 출력(#980). 주지 않으면 묶인 0.157.0이 러너 설정에서 낸 출력. Error면 목록을 읽지 못한 것 */
+  features?: string | Error;
 }
+
+/** 묶인 Codex 0.157.0에 러너의 기능 끄기 설정을 넘겨 `codex features list`를 돌린 실제 출력 */
+const FEATURES_0157 = readFileSync(path.join(import.meta.dirname, 'fixtures/codex-0.157.0-features.txt'), 'utf8');
 
 /**
  * Codex CLI를 흉내 내는 가짜 SDK.
@@ -56,10 +62,18 @@ function fakeCodex(turns: FakeTurn[], hooks: FakeHooks = {}) {
     configs: [] as Array<Record<string, any>>,
     envs: [] as Array<Record<string, string>>,
     options: [] as ThreadOptions[],
+    featureConfigs: [] as Array<Record<string, any>>,
+    featureEnvs: [] as Array<Record<string, string>>,
   };
   let id: string | null = null;
 
   const sdk: CodexSdk = {
+    async listFeatures({ config, env }) {
+      state.featureConfigs.push(config);
+      state.featureEnvs.push(env);
+      if (hooks.features instanceof Error) throw hooks.features;
+      return hooks.features ?? FEATURES_0157;
+    },
     startThread({ config, env, options }) {
       state.configs.push(config);
       state.envs.push(env);
@@ -156,7 +170,7 @@ describe('runCodexAgent', () => {
     // 설정 덮어쓰기로만 넘긴다: 관문 밖에서 일하는 내장 기능 끄기 + b-studio MCP 서버. 사용자 config.toml은 건드리지 않는다
     const config = state.configs[0]!;
     // #976: Codex 0.157은 앱 커넥터·웹·코드 모드(exec) 등을 기본으로 켠다. 셸만 끄면 64개 도구가 관문 밖에 남았다(실측)
-    for (const feature of ['shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', 'image_generation', 'goals', 'browser_use', 'computer_use', 'multi_agent']) {
+    for (const feature of ['shell_tool', 'apps', 'plugins', 'remote_plugin', 'image_generation', 'goals', 'browser_use', 'computer_use', 'multi_agent']) {
       expect(config.features[feature], feature).toBe(false);
     }
     expect(Object.values(config.features).every((value) => value === false)).toBe(true);
@@ -539,4 +553,59 @@ describe('runCodexAgent', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]!.message).toContain('승격을 지원하지 않습니다');
   });
+});
+
+describe('켜진 Codex 기능을 닫힌 목록으로 확인한다(#980)', () => {
+  const run = (features: string | Error) => {
+    const { sdk, state } = fakeCodex([{ steps: [{ text: '끝' }] }], { features });
+    const started = () => state.configs.length;
+    return { state, started, result: runCodexAgent({ request: '메모 추가', project, sandbox: fakeSandbox(project, [true]), sdk, fetcher: async () => contract }) };
+  };
+
+  it('묶인 0.157.0의 실제 출력은 거부하지 않는다', () => {
+    expect(checkCodexFeatures(FEATURES_0157)).toEqual({ ok: true });
+  });
+
+  it('안전 목록에도 끄는 목록에도 없는 기능이 켜져 있으면 모델을 부르기 전에 까닭과 함께 실패한다', async () => {
+    const { result, started } = run(`${FEATURES_0157}new_magic_tool                           stable             true\n`);
+    const done = await result;
+    expect(done.status).toBe('failed');
+    expect(done.summary).toContain('new_magic_tool');
+    expect(started()).toBe(0);
+  });
+
+  it('끄라고 넘긴 기능이 켜진 채로 보이면(덮어쓰기가 먹지 않음) 실패한다', async () => {
+    const { result, started } = run(FEATURES_0157.replace(/^(apps\s+\S+\s+)false$/m, '$1true'));
+    const done = await result;
+    expect(done.status).toBe('failed');
+    expect(done.summary).toContain('apps');
+    expect(started()).toBe(0);
+  });
+
+  it('목록을 읽지 못하거나 한 줄도 해석하지 못하면 실패한다(모르면 막는다)', async () => {
+    for (const features of [new Error('codex를 찾지 못했습니다'), '', 'Error: unknown command\n']) {
+      const { result, started } = run(features);
+      const done = await result;
+      expect(done.status, String(features)).toBe('failed');
+      expect(started()).toBe(0);
+    }
+  });
+
+  it('기능 목록은 스레드와 같은 끄기 설정과 임시 CODEX_HOME으로 읽는다', async () => {
+    const { result, state } = run(FEATURES_0157);
+    await result;
+    expect(state.featureConfigs[0]).toEqual(codexFeatureConfig());
+    expect(state.configs[0]!.features).toEqual(codexFeatureConfig().features);
+    expect(state.featureEnvs[0]!.CODEX_HOME).toBe(state.envs[0]!.CODEX_HOME);
+  });
+
+  it('묶인 바이너리로 지금 설정을 읽으면 거부하지 않는다(모델 호출 없음)', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'codex-features-test-'));
+    try {
+      const listed = await DEFAULT_SDK.listFeatures({ config: codexFeatureConfig(), env: { ...process.env, CODEX_HOME: home } as Record<string, string> });
+      expect(checkCodexFeatures(listed)).toEqual({ ok: true });
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

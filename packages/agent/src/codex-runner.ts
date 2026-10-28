@@ -41,7 +41,6 @@ const CODEX_HOME_PREFIX = 'b-studio-codex-home-';
  */
 const DISABLED_FEATURES = [
   'shell_tool',
-  'unified_exec',
   'apps',
   'plugins',
   'remote_plugin',
@@ -61,7 +60,86 @@ const DISABLED_FEATURES = [
   'skill_mcp_dependency_install',
   'workspace_dependencies',
   'worktrees',
+  // 데스크톱 앱·대화형 화면용. 비대화형 실행에서 쓰지 않으니 꺼서 안전 목록을 작게 둔다(#980)
+  'daemon_auto_start',
+  'in_app_chat',
+  'in_app_dictation',
+  'in_app_local_automation',
+  'in_app_updates',
+  'realtime_conversation',
+  'hooks',
+  'shell_snapshot',
+  'mentions_v2',
 ] as const;
+
+/**
+ * 끄지 않고 켜 둔 기능과 그 까닭(#980). 닫힌 목록이다: 실행 전에 `codex features list`를 같은 설정으로 읽어,
+ * 여기에 없는 기능이 하나라도 켜져 있으면 모델을 부르지 않는다. 끄라고 넘긴 기능이 켜진 채 보여도 여기에 없으니 막힌다.
+ * 근거는 묶인 0.157.0에서 이 기능들을 켠 채 에이전트가 본 도구 목록(실측, docs/experiments/2026-10-28-codex-real.md)이다:
+ * b-studio 도구, apply_patch, 시계, MCP 자원 읽기 말고는 없었다. 판을 올리면 이 목록을 그 판의 출력으로 다시 정한다
+ */
+const ALLOWED_ENABLED_FEATURES: Readonly<Record<string, string>> = {
+  code_mode_host: 'MCP 도구가 코드 모드로만 보인다(#979). 코드 모드의 자바스크립트는 모듈을 불러오지 못하고 네트워크 전역이 없어 ALL_TOOLS의 도구만 부른다',
+  unified_exec: '끌 수 없다(0.157.0은 -c와 --disable을 무시한다). 셸 도구의 구현 방식이라 shell_tool을 끄면 exec_command가 생기지 않는다(실측 도구 목록에 없음)',
+  unified_exec_tty: 'unified_exec의 터미널 모드. 위와 같다',
+  tool_call_mcp_elicitation: 'MCP 도구 호출 중의 확인 요청 처리. b-studio MCP 서버는 확인을 요청하지 않는다',
+  auth_elicitation: 'MCP 서버 인증 요청 처리. b-studio MCP 서버는 환경 변수의 토큰으로 붙는다',
+  guardian_approval: '승인 검토. 도구를 주지 않는다',
+  guardian_reuse_parent_compaction: '승인 검토의 압축 재사용. 도구를 주지 않는다',
+  'guardianv2.thread_context': '승인 검토의 스레드 문맥. 도구를 주지 않는다',
+  fast_mode: '응답 속도 설정. 도구를 주지 않는다',
+  compaction_image_budget: '대화 압축 때 이미지 예산. 도구를 주지 않는다',
+  content_item_kinds: '메시지 항목 형식. 도구를 주지 않는다',
+  enable_request_compression: '요청 전송 압축. 도구를 주지 않는다',
+  system_proxy_fallback: '시스템 프록시 사용. 도구를 주지 않는다',
+  unbounded_connection_retries: '연결 재시도. 도구를 주지 않는다',
+  // removed 단계: 이 판의 코드가 더는 읽지 않는 이름이다
+  collaboration_modes: 'removed',
+  item_ids: 'removed',
+  resize_all_images: 'removed',
+  sqlite: 'removed',
+  steer: 'removed',
+  terminal_resize_reflow: 'removed',
+  tool_search_always_defer_mcp_tools: 'removed',
+  tui_app_server: 'removed',
+  unified_exec_zsh_fork: 'removed',
+};
+
+/** 스레드와 기능 확인이 함께 쓰는 설정(#976·#980). MCP 서버는 스레드에만 더한다 */
+export function codexFeatureConfig(): CodexConfig {
+  return { features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])), web_search: 'disabled' };
+}
+
+/**
+ * `codex features list` 출력에서 켜진 기능이 모두 안전 목록에 있는지 본다(#980). 한 줄은 "이름  단계  true|false"다.
+ * 한 줄도 읽지 못하면 확인하지 못한 것으로 막는다
+ */
+export function checkCodexFeatures(listed: string): { ok: true } | { ok: false; reason: string } {
+  const rows = listed
+    .split('\n')
+    .flatMap((line) => {
+      const match = /^(\S+)\s+(.+?)\s+(true|false)$/.exec(line.trim());
+      return match ? [{ name: match[1]!, enabled: match[3] === 'true' }] : [];
+    });
+  if (rows.length === 0) return { ok: false, reason: 'Codex 기능 목록을 읽지 못해 실행하지 않았습니다(관문 밖 기능이 켜져 있는지 확인할 수 없습니다)' };
+  const unknown = rows.filter((row) => row.enabled && !Object.hasOwn(ALLOWED_ENABLED_FEATURES, row.name)).map((row) => row.name);
+  if (unknown.length > 0) {
+    return {
+      ok: false,
+      reason: `Codex에 b-studio가 확인하지 않은 기능이 켜져 있어 실행하지 않았습니다: ${unknown.join(', ')}. 묶인 Codex 판이 바뀌었으면 그 기능이 관문 밖에서 일하는지 보고 끄는 목록이나 안전 목록에 더해야 합니다`,
+    };
+  }
+  return { ok: true };
+}
+
+/** 설정 트리를 `--config 키=값` 인자로 편다. 문자열은 TOML 문자열로 감싼다 */
+function configArgs(config: CodexConfig, prefix = ''): string[] {
+  return Object.entries(config).flatMap(([key, value]) => {
+    const name = prefix ? `${prefix}.${key}` : key;
+    if (value && typeof value === 'object' && !Array.isArray(value)) return configArgs(value, name);
+    return ['--config', `${name}=${typeof value === 'string' ? JSON.stringify(value) : String(value)}`];
+  });
+}
 
 /**
  * Codex에 `--config`로 넘길 설정 트리.
@@ -77,6 +155,8 @@ export interface CodexSdk {
    * `~/.codex/config.toml`은 건드리지 않고 넘긴 값만 `--config`로 덮어쓴다.
    */
   startThread(input: { config: CodexConfig; env: Record<string, string>; options: ThreadOptions }): CodexThread;
+  /** 스레드가 쓰는 것과 같은 Codex로 `codex features list`를 돌려 출력을 돌려준다(#980). 모델을 부르지 않는다 */
+  listFeatures(input: { config: CodexConfig; env: Record<string, string> }): Promise<string>;
 }
 
 /** SDK의 Thread에서 러너가 쓰는 부분만 추린 것 */
@@ -90,7 +170,14 @@ export interface CodexThread {
  * CommonJS로 옮겨지는 경로(예: tsx로 도는 벤치가 `@b-studio/agent`를 require)에서 정적 import가 모듈 해석 오류를 낸다.
  * 동적 import는 두 방식 모두에서 동작하고, codex 모드를 쓰지 않는 실행은 이 패키지를 아예 불러오지 않는다
  */
-const DEFAULT_SDK: CodexSdk = {
+export const DEFAULT_SDK: CodexSdk = {
+  async listFeatures({ config, env }) {
+    const { Codex } = await import('@openai/codex-sdk');
+    // 스레드와 같은 묶인 실행 파일을 쓴다. SDK가 경로를 내보내지 않아 내부 필드를 읽는다(SDK 판을 고정해 둔다). 없으면 확인하지 못한 것으로 막힌다
+    const executable = (new Codex({ env }) as unknown as { exec?: { executablePath?: unknown } }).exec?.executablePath;
+    if (typeof executable !== 'string') throw new Error('묶인 Codex 실행 파일을 찾지 못했습니다');
+    return run(executable, [...configArgs(config), 'features', 'list'], 30_000, env);
+  },
   startThread: ({ config, env, options }) => {
     let thread: Thread | undefined;
     return {
@@ -279,6 +366,16 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     await linkAuthFile(codexHome, options.authHome);
     const home = codexHome;
 
+    // 모델을 부르기 전에 켜진 기능이 모두 확인한 것인지 본다(#980). 끄는 목록만으로는 새 판이 더한 기능을 막지 못한다
+    const features = await sdk.listFeatures({ config: codexFeatureConfig(), env: { ...processEnv(), CODEX_HOME: home } }).then(checkCodexFeatures, (error: unknown) => ({
+      ok: false as const,
+      reason: `Codex 기능 목록을 읽지 못해 실행하지 않았습니다: ${error instanceof Error ? error.message : String(error)}`,
+    }));
+    if (!features.ok) {
+      finish('failed', features.reason);
+      return result!;
+    }
+
     toolServer = await startToolServer({
       name: SERVER,
       specs,
@@ -303,8 +400,7 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     const thread = sdk.startThread({
       // 설정 덮어쓰기로만 넘긴다. 사용자 config.toml은 바꾸지 않는다
       config: {
-        features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])),
-        web_search: 'disabled',
+        ...codexFeatureConfig(),
         // b-studio 도구가 관문이다. Codex 쪽 승인은 미리 허락한다(#979): 0.157은 승인 없음(never)으로 돌면 MCP 도구 호출을 거절한다
         mcp_servers: { [SERVER]: { url: toolServer.url, bearer_token_env_var: TOKEN_ENV, default_tools_approval_mode: 'approve' } },
       },

@@ -24,6 +24,8 @@
    - 코드 모드(`code_mode_host`)는 끄지 않는다. 끄면 b-studio 도구가 사라졌다("b-studio 파일 도구에 접근할 수 없다"). 코드 모드의 자바스크립트는 전역이 `tools`, `ALL_TOOLS`, 타이머, 출력·저장 함수뿐이고 `fetch`·`require`·`process`·`WebSocket`이 없으며, `import`는 `node:fs`·URL·`data:` 모두 "unsupported import in exec"였다. 그래서 다른 기능을 끄면 코드 모드로 닿는 것도 위 도구뿐이다.
 3. **토큰을 겹쳐 셌다([#977](https://github.com/dj258255/b-studio/issues/977)).** 러너는 턴마다 `turn.completed.usage`를 더하고 캐시 읽기를 입력과 따로 더했다. 앞 턴 누적값과의 차이를 그 턴 몫으로 쓰고, 입력에서 캐시 몫을 뺀다. 고친 뒤 두 턴 실행(가짜 샌드박스가 첫 검사를 실패시킴)에서 둘째 턴은 입력 2,469, 캐시 읽기 75,264, 문맥 77,733으로 잡혔다.
 
+4. **끄는 목록만으로는 새 판의 기능을 막지 못한다([#980](https://github.com/dj258255/b-studio/issues/980)).** 실행 전에 같은 끄기 설정으로 `codex features list`를 읽고, 켜진 기능이 확인한 목록(끌 수 없거나 도구를 주지 않는 14개와 removed 9개)에 모두 있을 때만 모델을 부른다. 0.157.0에서는 `unified_exec`가 `-c`와 `--disable`을 무시하고 켜진 채 남았다. 셸 도구의 구현 방식이라 `shell_tool`을 끄면 `exec_command`가 생기지 않아(도구 목록 실측) 확인한 목록에 넣었다. 데스크톱 앱용 기능(`in_app_*`, `daemon_auto_start`, `realtime_conversation`, `hooks` 등)은 꺼져서 끄는 목록에 더했다. 더 끈 뒤에도 실제 Codex가 b-studio 도구로 파일을 고쳤다.
+
 ## 하지 못한 것
 
 - [#55](https://github.com/dj258255/b-studio/issues/55)(E1을 Codex로 재현)와 [#820](https://github.com/dj258255/b-studio/issues/820)의 마지막 항목(Claude와 Codex에 규칙표로 나눠 보내 실행 기록 확인)은 실제 샌드박스가 필요하다. 기본 Docker VM 9.69GiB 가운데 다른 프로젝트의 kind 클러스터가 6.4GiB를 써서, 벤치 메모리 검사(실행당 약 5.5GiB)를 넘지 못한다. 그 클러스터는 건드리지 않았다.

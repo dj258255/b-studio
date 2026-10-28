@@ -5268,6 +5268,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - b-studio MCP 서버에 `default_tools_approval_mode = "approve"`. b-studio 도구가 관문이라 Codex 쪽 승인은 겹친다.
 - 도구를 주는 내장 기능을 모두 끄고 `web_search = "disabled"`. 코드 모드는 남긴다: 모듈을 불러오지 못하고 네트워크 전역이 없어 `ALL_TOOLS`의 도구만 부른다. 끈 뒤 남는 것은 b-studio 도구, `apply_patch`(빈 폴더·읽기 전용), 시계, MCP 자원 읽기다.
 - 앞 턴 누적값과의 차이를 그 턴의 사용량으로 쓰고, 입력에서 캐시 몫을 뺀다.
+- 끄는 목록은 새 판이 더한 기능을 모른다. 실행 전에 묶인 바이너리의 `codex features list`를 같은 설정으로 읽어, 확인한 목록에 없는 기능이 켜져 있거나 목록을 읽지 못하면 모델을 부르지 않는다(#980). 0.157.0의 `unified_exec`처럼 덮어쓰기를 무시하는 기능도 여기서 드러난다.
 - 기록: [실측 문서](experiments/2026-10-28-codex-real.md).
 
 ### 배운 것
