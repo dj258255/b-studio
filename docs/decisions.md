@@ -8948,6 +8948,12 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 새 훅 이름(TaskCreated 등)을 모르는 옛 CLI 판에서는 그 훅이 불리지 않을 뿐이다. 할 일 도구가 꺼진 판(Claude Code 2.1.268 이후의 새 모델)에서는 할 일 목록이 비어 있다.
 - 상태 줄은 새 답이 올 때마다 바뀌므로 쉬는 동안의 문맥 창 값은 마지막 답 때의 값이다.
 
+### 덧붙임: Codex의 문맥 창은 그 세션의 기록에서 숫자만 읽는다 (2026-10-28, [#978](https://github.com/dj258255/b-studio/issues/978))
+- 범수 님이 2026-10-28에 결정 1·4의 예외 하나를 정했다. Codex 세션 터미널의 문맥 창은 Codex가 남기는 세션 기록(`$CODEX_HOME/sessions/YYYY/MM/DD/rollout-<시각>-<대화 id>.jsonl`)의 `token_count` 이벤트에서 읽는다.
+- 까닭: Codex에는 상태 줄이 없고, 문맥 창 크기는 텔레메트리(`codex.sse_event`, `codex.conversation_starts`)에도 `codex app-server`의 모델 정보에도 없다(codex-cli 0.160.1 실측). 그 숫자가 있는 곳은 세션 기록뿐이다.
+- 범위: b-studio가 연 세션의 대화 id(이 세션 관문으로 들어온 응답 텔레메트리의 `conversation.id`, 없으면 훅의 `session_id`)로 이름이 끝나는 파일 하나만 연다. 폴더는 이름만 훑고 다른 세션의 파일은 열지 않는다. 끝에서부터 읽어 `token_count` 줄의 `last_token_usage`와 `model_context_window`만 꺼내고, 다른 줄(대화 내용)은 그 자리에서 버린다. 기억·기록·화면·로그로 내보내는 것은 문맥 %, 쓴 토큰, 창 크기 세 숫자뿐이다.
+- 결정 1이 걱정한 "판이 바뀌면 조용히 틀린다"는 꼴 검사로 줄인다. 숫자가 없거나 틀리거나 파일을 찾지 못하면 문맥을 비운다(틀린 %를 보이지 않는다). Claude의 기록 파일과 다른 꼴은 여전히 읽지 않는다.
+
 ## ADR-190 지원 스택이 아닌 폴더는 코드·테스트만으로 등록하고, 테스트 명령 없이는 등록하지 않는다
 
 상태: 채택

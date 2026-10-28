@@ -2,7 +2,7 @@
  * 터미널 CLI가 지금 하는 일(#920, ADR-189). 훅 입력에서 desk 카드에 보일 것을 모은다:
  *  - now: 지금(또는 방금) 쓴 도구와 그 대상. 턴이 끝나면 지운다
  *  - todos: 에이전트의 할 일 목록(Claude TodoWrite·TaskCreated/TaskCompleted, Codex update_plan)
- *  - context: 문맥 창을 얼마나 썼는가(Claude 상태 줄 입력의 context_window)
+ *  - context: 문맥 창을 얼마나 썼는가(Claude 상태 줄 입력의 context_window, Codex는 codex-rollout-context.ts, #978)
  *  - lastMessage: 턴 끝의 마지막 답 한 줄
  *  - subagents: 서브에이전트 인스턴스마다 한 행(SubagentStart/SubagentStop)
  *  - workingSince·lastAt·now.running·서브에이전트의 startedAt·lastAt(#933): 몇 분째 일하는지, 도구가 도는 중인지, 마지막 소식

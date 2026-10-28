@@ -76,7 +76,7 @@ export interface AgentItem {
   now?: ActivityNow;
   /** 에이전트의 할 일 목록 진행(#920) */
   todos?: ActivityTodos;
-  /** 문맥 창을 얼마나 썼는가(#920). Claude 상태 줄에서만 온다 */
+  /** 문맥 창을 얼마나 썼는가(#920). Claude는 상태 줄, Codex는 그 대화의 세션 기록 숫자(#978)에서 온다 */
   context?: ActivityContext;
   /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
   lastMessage?: string;

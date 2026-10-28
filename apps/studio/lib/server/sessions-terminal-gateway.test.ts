@@ -2541,6 +2541,47 @@ describe('Codex 터미널(#825)', () => {
     await stopSession(session.id);
   }, 30_000);
 
+  it('응답 텔레메트리의 대화 id로 그 세션의 Codex 기록만 찾아 문맥 %를 싣는다(#978)', async () => {
+    const home = await mkdtemp(path.join(tmpdir(), 'codex-home-'));
+    const before = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = home;
+    try {
+      const thread = '01a180c4-6682-7a82-b709-d96ff6ca4375';
+      const day = path.join(home, 'sessions', '2026', '10', '28');
+      await mkdir(day, { recursive: true });
+      const count = (input: number) =>
+        JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: input, output_tokens: 0, total_tokens: input }, model_context_window: 400_000 } } });
+      await writeFile(path.join(day, `rollout-2026-10-28T10-00-00-${thread}.jsonl`), `${JSON.stringify({ type: 'session_meta', payload: { id: thread } })}\n${count(100_000)}\n`);
+      await writeFile(path.join(day, 'rollout-2026-10-28T09-00-00-01a18039-0b6b-7c73-8e06-67e9c5029a41.jsonl'), `${count(390_000)}\n`);
+      const session = await openCodex();
+      const otlp = (records: Array<Record<string, unknown>>): unknown => ({ resourceLogs: [{ scopeLogs: [{ logRecords: records }] }] });
+      const attr = (key: string, value: string | number) => ({ key, value: typeof value === 'number' ? { intValue: String(value) } : { stringValue: value } });
+      await session.gateway.telemetry(
+        otlp([
+          {
+            timeUnixNano: String(Date.now() * 1_000_000),
+            attributes: [
+              attr('event.name', 'codex.sse_event'),
+              attr('event.kind', 'response.completed'),
+              attr('model', 'gpt-6.1-sol'),
+              attr('input_token_count', 100_000),
+              attr('output_token_count', 5),
+              attr('cached_token_count', 90_000),
+              attr('conversation.id', thread),
+              attr('event.timestamp', new Date().toISOString()),
+            ],
+          },
+        ]),
+      );
+      expect(sessionTerminalActivity(session.id)?.context).toEqual({ usedPct: 25, used: 100_000, size: 400_000 });
+      await stopSession(session.id);
+    } finally {
+      if (before === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = before;
+      await rm(home, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it('기억한 대화가 다른 CLI의 것이면 이어 붙이지 않는다(#872)', async () => {
     const session = await openCodex();
     session.gateway.conversation?.('019a2b3c-0000-7000-8000-000000000001');
