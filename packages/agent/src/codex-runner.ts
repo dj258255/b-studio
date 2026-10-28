@@ -31,6 +31,39 @@ const WORKDIR_PREFIX = 'b-studio-codex-';
 const CODEX_HOME_PREFIX = 'b-studio-codex-home-';
 
 /**
+ * 관문을 거치지 않고 일하는 Codex 내장 기능(#976). 모두 끈다.
+ * 묶인 CLI 0.157.0에서 실측했다: 셸만 끄면 앱 커넥터(로그인한 ChatGPT 계정의 커넥터), 플러그인, 이미지 생성, 목표,
+ * 브라우저·컴퓨터 사용, 웹 실행과, 그 도구들을 자바스크립트로 부르는 코드 모드(exec)가 남아 도구가 64개였다.
+ * 이것들을 끄면 b-studio 도구와 apply_patch(끄는 설정이 없다, 빈 작업 폴더·읽기 전용으로 둔다), 시계, MCP 자원 읽기만 남는다.
+ * 코드 모드(code_mode_host)는 끄지 않는다(#979): 이 판에서는 MCP 도구가 코드 모드를 거쳐서만 보이고, 코드 모드의 자바스크립트는
+ * 모듈을 불러오지 못하며(unsupported import) fetch·process 같은 전역이 없어 ALL_TOOLS에 있는 도구만 부른다.
+ * 모르는 기능 이름은 Codex가 무시하므로 판이 바뀌어도 실행이 깨지지 않는다. 새 판을 들일 때 `codex features list`로 다시 본다
+ */
+const DISABLED_FEATURES = [
+  'shell_tool',
+  'unified_exec',
+  'apps',
+  'plugins',
+  'remote_plugin',
+  'plugin_sharing',
+  'image_generation',
+  'goals',
+  'browser_use',
+  'browser_use_external',
+  'browser_use_full_cdp_access',
+  'computer_use',
+  'in_app_browser',
+  'multi_agent',
+  'sleep_tool',
+  'tool_suggest',
+  'view_image',
+  'skill_search',
+  'skill_mcp_dependency_install',
+  'workspace_dependencies',
+  'worktrees',
+] as const;
+
+/**
  * Codex에 `--config`로 넘길 설정 트리.
  * SDK가 같은 모양(CodexConfigObject)을 쓰지만 타입으로는 내보내지 않아 여기서 같은 모양을 정의한다.
  */
@@ -207,6 +240,8 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
   // 참조로 공유해 갱신을 한 곳에서만 한다. 모델을 고르지 않았으면(계정 기본) 백엔드 이름으로 키를 만든다
   metrics.usageByModel = { [model ?? 'codex:default']: usage };
   let completedTurns = 0;
+  /** 앞 턴의 turn.completed.usage(스레드 누적값, #977). 이번 턴의 값은 이것과의 차이다 */
+  let threadUsage: Usage | undefined;
   let lastText = '';
   let threadId: string | undefined;
   // ask_user가 남긴 질문. 있으면 이 턴이 끝날 때 실행을 끝내고 사용자 답을 기다린다
@@ -268,8 +303,10 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
     const thread = sdk.startThread({
       // 설정 덮어쓰기로만 넘긴다. 사용자 config.toml은 바꾸지 않는다
       config: {
-        features: { shell_tool: false },
-        mcp_servers: { [SERVER]: { url: toolServer.url, bearer_token_env_var: TOKEN_ENV } },
+        features: Object.fromEntries(DISABLED_FEATURES.map((name) => [name, false])),
+        web_search: 'disabled',
+        // b-studio 도구가 관문이다. Codex 쪽 승인은 미리 허락한다(#979): 0.157은 승인 없음(never)으로 돌면 MCP 도구 호출을 거절한다
+        mcp_servers: { [SERVER]: { url: toolServer.url, bearer_token_env_var: TOKEN_ENV, default_tools_approval_mode: 'approve' } },
       },
       // CODEX_HOME을 임시 폴더로 바꿔 사용자 ~/.codex(등록한 MCP 서버·플러그인·스킬·전역 AGENTS.md)를 읽지 않게 한다
       env: { ...processEnv(), [TOKEN_ENV]: toolServer.token, CODEX_HOME: home },
@@ -318,18 +355,17 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
             // Codex 이벤트는 모델 호출 단위가 아니라 턴 단위라 턴 수로 센다
             completedTurns += 1;
             metrics.modelCalls = completedTurns;
-            addUsage(usage, event.usage);
-            const turnContext = contextTokens(event.usage);
+            const turn = turnUsage(event.usage, threadUsage);
+            threadUsage = event.usage;
+            addUsage(usage, turn);
+            const turnContext = turn.inputTokens + turn.cacheReadTokens + turn.cacheWriteTokens;
             metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
             onEvent({ type: 'tokens', usage: { ...usage } });
             // 턴 하나의 사용량. 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
             onEvent({
               type: 'turn_usage',
               turn: completedTurns,
-              inputTokens: event.usage.input_tokens,
-              outputTokens: event.usage.output_tokens,
-              cacheReadTokens: event.usage.cached_input_tokens ?? 0,
-              cacheWriteTokens: event.usage.cache_write_input_tokens ?? 0,
+              ...turn,
               contextTokens: turnContext,
             });
             break;
@@ -433,26 +469,27 @@ export async function preflightCodex(
 }
 
 /**
- * Codex `turn.completed.usage`를 실행 누적값에 더한다.
- *
- * 근거(약함): SDK 타입 주석이 각 필드를 "used during the turn"으로 설명하고, 턴마다 별도 `codex exec` 프로세스를 띄운다.
- * 실측하지 못했다(0단계에서 계정이 사용 한도에 걸려 모델 호출 불가). 누적으로 밝혀지면 덮어쓰기로 바꿔야 하며,
- * 그러지 않으면 토큰이 두 번 세어진다. 자세한 근거는 `.delegate/codex-probe.md`.
+ * 한 턴의 사용량을 b-studio 규칙(입력은 캐시 제외)으로 옮긴다(#977). 실측(Codex 0.157.0, 2026-10-28):
+ *  - 같은 스레드를 이어 가면(SDK가 턴마다 `codex exec resume`) turn.completed.usage는 스레드 누적값이다.
+ *    첫 턴 input 17,280, 둘째 턴 29,759이고 세션 기록의 둘째 턴 호출은 12,479였다. 그래서 앞 턴 값과의 차이를 쓴다.
+ *  - input_tokens는 캐시 읽기를 포함한다(세션 기록의 total_tokens = input_tokens + output_tokens). 그래서 캐시 몫을 뺀다.
+ *    cache_write_input_tokens도 같은 자리라고 본다(실측에서는 늘 0).
+ * 값이 앞 턴보다 작으면(새 스레드) 이번 값을 그대로 쓴다.
  */
-function addUsage(total: AgentUsage, usage: Usage): void {
-  total.inputTokens += usage.input_tokens;
-  total.outputTokens += usage.output_tokens;
-  total.cacheReadTokens += usage.cached_input_tokens ?? 0;
-  total.cacheWriteTokens += usage.cache_write_input_tokens ?? 0;
+function turnUsage(now: Usage, before: Usage | undefined): AgentUsage {
+  const fields = (u: Usage) => [u.input_tokens, u.cached_input_tokens ?? 0, u.cache_write_input_tokens ?? 0, u.output_tokens] as const;
+  const current = fields(now);
+  const previous = before ? fields(before) : undefined;
+  const fresh = !previous || current.some((value, index) => value < previous[index]!);
+  const [input, cached, written, output] = current.map((value, index) => (fresh ? value : value - previous![index]!));
+  return { inputTokens: Math.max(0, input! - cached! - written!), outputTokens: output!, cacheReadTokens: cached!, cacheWriteTokens: written! };
 }
 
-/**
- * 한 턴의 입력 크기 = input + cache_read + cache_write.
- * Codex의 `input_tokens`가 캐시를 이미 포함하는지는 미확인이라 이중 계산일 수 있다(결과 파일에 남김).
- * 로컬 Claude Agent 러너의 contextTokens와 같은 규칙을 쓴다.
- */
-function contextTokens(usage: Usage): number {
-  return usage.input_tokens + (usage.cached_input_tokens ?? 0) + (usage.cache_write_input_tokens ?? 0);
+function addUsage(total: AgentUsage, turn: AgentUsage): void {
+  total.inputTokens += turn.inputTokens;
+  total.outputTokens += turn.outputTokens;
+  total.cacheReadTokens += turn.cacheReadTokens;
+  total.cacheWriteTokens += turn.cacheWriteTokens;
 }
 
 /** 사용 한도 문구인지 본다. 실패 분류 기준은 이 한 곳에만 둔다 */

@@ -153,10 +153,19 @@ describe('runCodexAgent', () => {
     expect(result).toMatchObject({ status: 'done', summary: '메모 필드를 추가했습니다.', verifyAttempts: 0, turns: 1, threadId: 'thread-1' });
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
 
-    // 설정 덮어쓰기로만 넘긴다: 셸 도구 끄기 + b-studio MCP 서버. 사용자 config.toml은 건드리지 않는다
+    // 설정 덮어쓰기로만 넘긴다: 관문 밖에서 일하는 내장 기능 끄기 + b-studio MCP 서버. 사용자 config.toml은 건드리지 않는다
     const config = state.configs[0]!;
-    expect(config.features).toEqual({ shell_tool: false });
-    const mcp = config.mcp_servers.b_studio as { url: string; bearer_token_env_var: string };
+    // #976: Codex 0.157은 앱 커넥터·웹·코드 모드(exec) 등을 기본으로 켠다. 셸만 끄면 64개 도구가 관문 밖에 남았다(실측)
+    for (const feature of ['shell_tool', 'unified_exec', 'apps', 'plugins', 'remote_plugin', 'image_generation', 'goals', 'browser_use', 'computer_use', 'multi_agent']) {
+      expect(config.features[feature], feature).toBe(false);
+    }
+    expect(Object.values(config.features).every((value) => value === false)).toBe(true);
+    expect(config.web_search).toBe('disabled');
+    // #979: 0.157은 MCP 도구를 코드 모드로만 보인다. 끄면 b-studio 도구가 사라진다
+    expect(config.features).not.toHaveProperty('code_mode_host');
+    const mcp = config.mcp_servers.b_studio as { url: string; bearer_token_env_var: string; default_tools_approval_mode: string };
+    // #979: 승인 없음(never)이면 0.157은 MCP 도구 호출을 거절한다. b-studio 도구가 관문이라 Codex 쪽 승인은 미리 허락한다
+    expect(mcp.default_tools_approval_mode).toBe('approve');
     expect(mcp.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/mcp$/);
     // 토큰은 값이 아니라 환경 변수 이름으로 넘기고, 그 환경에 실제 토큰이 들어 있다
     expect(mcp.bearer_token_env_var).toBe('B_STUDIO_MCP_TOKEN');
@@ -315,7 +324,8 @@ describe('runCodexAgent', () => {
     expect(result.summary).toBe('stream disconnected before completion');
   });
 
-  it('턴별 usage를 더하고, modelCalls는 완료된 턴 수, maxContextTokens는 턴별 입력(+캐시) 최댓값으로 남긴다', async () => {
+  it('턴마다 스레드 누적 usage와의 차이를 그 턴의 사용량으로 쓰고, input_tokens에 든 캐시 몫은 입력에서 뺀다(#977)', async () => {
+    // 실측(Codex 0.157.0): 같은 스레드를 이어 가면 turn.completed.usage는 스레드 누적값이고, input_tokens는 캐시 읽기를 포함한다
     const { sdk } = fakeCodex([
       {
         steps: [
@@ -329,7 +339,8 @@ describe('runCodexAgent', () => {
           { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' } },
           { text: '고쳤습니다.' },
         ],
-        usage: usage(200, 20, 2, 7),
+        // 누적: 둘째 턴 하나는 input 200(캐시 20, 쓰기 2 포함), output 7
+        usage: usage(300, 30, 3, 12),
       },
     ]);
     const events: AgentEvent[] = [];
@@ -343,17 +354,17 @@ describe('runCodexAgent', () => {
       onEvent: (event) => events.push(event),
     });
 
-    // 턴별 값을 더한다(누적이면 200+20+2가 마지막 값이 된다)
-    expect(result.usage).toEqual({ inputTokens: 300, outputTokens: 12, cacheReadTokens: 30, cacheWriteTokens: 3 });
+    // 입력은 캐시를 뺀 값이다: (100-10-1) + (200-20-2). 누적값을 그대로 더하면 300+100이 되어 겹쳐 센다
+    expect(result.usage).toEqual({ inputTokens: 267, outputTokens: 12, cacheReadTokens: 30, cacheWriteTokens: 3 });
     // 턴을 끝낼 때마다 그때까지의 누적값을 알린다
-    expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([100, 300]);
-    // turn.completed마다 그 턴 하나의 사용량을 남긴다(컨텍스트 = input + cacheRead + cacheWrite)
+    expect(events.flatMap((event) => (event.type === 'tokens' ? [event.usage.inputTokens] : []))).toEqual([89, 267]);
+    // turn_usage는 그 턴 하나의 사용량이다. 컨텍스트는 그 턴의 input_tokens(캐시 포함)다
     expect(events.flatMap((event) => (event.type === 'turn_usage' ? [event] : []))).toEqual([
-      { type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 1, contextTokens: 111 },
-      { type: 'turn_usage', turn: 2, inputTokens: 200, outputTokens: 7, cacheReadTokens: 20, cacheWriteTokens: 2, contextTokens: 222 },
+      { type: 'turn_usage', turn: 1, inputTokens: 89, outputTokens: 5, cacheReadTokens: 10, cacheWriteTokens: 1, contextTokens: 100 },
+      { type: 'turn_usage', turn: 2, inputTokens: 178, outputTokens: 7, cacheReadTokens: 20, cacheWriteTokens: 2, contextTokens: 200 },
     ]);
     expect(result.metrics?.modelCalls).toBe(2);
-    expect(result.metrics?.maxContextTokens).toBe(222);
+    expect(result.metrics?.maxContextTokens).toBe(200);
     // 모델 응답 대기는 SDK 안에서 일어나 이 러너가 관찰하지 못한다. 값이 없는 것이 "재지 않음"이다(0초와 다르다)
     expect(result.metrics).not.toHaveProperty('modelMs');
     for (const ms of [result.metrics!.toolMs, result.metrics!.gateMs]) {
