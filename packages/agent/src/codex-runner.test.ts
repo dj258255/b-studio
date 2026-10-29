@@ -39,6 +39,8 @@ interface FakeTurn {
   usage?: Usage;
   /** 주면 이 턴을 turn.failed로 끝낸다 */
   fail?: string;
+  /** 주면 turn.failed 뒤 이 문구로 예외를 던진다. 실제 SDK는 CLI가 종료 코드 1로 끝나면 이벤트를 다 넘긴 뒤 던진다(#983) */
+  exitError?: string;
 }
 
 /** 첫 turn.runStreamed가 시작될 때(임시 CODEX_HOME이 살아 있는 동안) 실행할 확인 훅 */
@@ -94,10 +96,9 @@ function fakeCodex(turns: FakeTurn[], hooks: FakeHooks = {}) {
             id = 'thread-1';
             yield { type: 'thread.started', thread_id: 'thread-1' };
             yield { type: 'turn.started' };
-            if (turn.fail !== undefined) {
-              yield { type: 'turn.failed', error: { message: turn.fail } };
-              return;
-            }
+            if (turn.fail !== undefined) yield { type: 'turn.failed', error: { message: turn.fail } };
+            if (turn.exitError !== undefined) throw new Error(turn.exitError);
+            if (turn.fail !== undefined) return;
             for (const step of turn.steps) {
               items += 1;
               if ('tool' in step) {
@@ -328,6 +329,23 @@ describe('runCodexAgent', () => {
 
     expect(result).toMatchObject({ status: 'failed', summary: `ChatGPT 구독 사용 한도에 걸렸습니다: ${limit}`, turns: 0 });
     expect(sandbox.restarts).toEqual([]);
+  });
+
+  it('SDK가 turn.failed 뒤 종료 예외를 던져도 이벤트로 받은 한도 문구를 실패 이유로 쓴다(#983)', async () => {
+    const limit = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro), visit https://chatgpt.com/codex/settings/usage to purchase more credits";
+    const { sdk } = fakeCodex([{ steps: [], fail: limit, exitError: 'Codex Exec exited with code 1: Reading prompt from stdin...\n' }]);
+    const sandbox = fakeSandbox(project, []);
+
+    const result = await runCodexAgent({ request: '추가해줘', project, sandbox, sdk, fetcher: async () => contract });
+
+    expect(result).toMatchObject({ status: 'failed', summary: `ChatGPT 구독 사용 한도에 걸렸습니다: ${limit}`, turns: 0 });
+    expect(sandbox.restarts).toEqual([]);
+  });
+
+  it('이벤트로 받은 실패 이유가 없으면 SDK 종료 예외를 그대로 던진다', async () => {
+    const { sdk } = fakeCodex([{ steps: [], exitError: 'Codex Exec exited with code 1: boom' }]);
+
+    await expect(runCodexAgent({ request: '추가해줘', project, sandbox: fakeSandbox(project, []), sdk, fetcher: async () => contract })).rejects.toThrow('boom');
   });
 
   it('한도 문구가 아니면 원문을 그대로 실패 이유로 쓴다', async () => {

@@ -435,53 +435,59 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
 
       let failure: string | undefined;
       let text = '';
-      for await (const event of events) {
-        if (thread.id) threadId = thread.id;
-        switch (event.type) {
-          case 'thread.started':
-            threadId = event.thread_id;
-            // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
-            if (!announced) {
-              announced = true;
-              onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델', effort });
-            }
-            break;
+      try {
+        for await (const event of events) {
+          if (thread.id) threadId = thread.id;
+          switch (event.type) {
+            case 'thread.started':
+              threadId = event.thread_id;
+              // 턴마다 다시 올 수 있으므로 실행마다 한 번만 알린다
+              if (!announced) {
+                announced = true;
+                onEvent({ type: 'session', backend: BACKEND, model: model ?? '계정 기본 모델', effort });
+              }
+              break;
 
-          case 'turn.completed': {
-            // Codex 이벤트는 모델 호출 단위가 아니라 턴 단위라 턴 수로 센다
-            completedTurns += 1;
-            metrics.modelCalls = completedTurns;
-            const turn = turnUsage(event.usage, threadUsage);
-            threadUsage = event.usage;
-            addUsage(usage, turn);
-            const turnContext = turn.inputTokens + turn.cacheReadTokens + turn.cacheWriteTokens;
-            metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
-            onEvent({ type: 'tokens', usage: { ...usage } });
-            // 턴 하나의 사용량. 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
-            onEvent({
-              type: 'turn_usage',
-              turn: completedTurns,
-              ...turn,
-              contextTokens: turnContext,
-            });
-            break;
+            case 'turn.completed': {
+              // Codex 이벤트는 모델 호출 단위가 아니라 턴 단위라 턴 수로 센다
+              completedTurns += 1;
+              metrics.modelCalls = completedTurns;
+              const turn = turnUsage(event.usage, threadUsage);
+              threadUsage = event.usage;
+              addUsage(usage, turn);
+              const turnContext = turn.inputTokens + turn.cacheReadTokens + turn.cacheWriteTokens;
+              metrics.maxContextTokens = Math.max(metrics.maxContextTokens, turnContext);
+              onEvent({ type: 'tokens', usage: { ...usage } });
+              // 턴 하나의 사용량. 누적값(tokens)과 달리 턴별 컨텍스트 증가를 볼 수 있다
+              onEvent({
+                type: 'turn_usage',
+                turn: completedTurns,
+                ...turn,
+                contextTokens: turnContext,
+              });
+              break;
+            }
+
+            case 'turn.failed':
+              failure = classifyFailure(event.error.message);
+              break;
+
+            case 'error':
+              failure = classifyFailure(event.message);
+              break;
+
+            case 'item.completed':
+              if (event.item.type === 'agent_message') {
+                text = event.item.text;
+                onEvent({ type: 'text', text });
+              }
+              break;
           }
-
-          case 'turn.failed':
-            failure = classifyFailure(event.error.message);
-            break;
-
-          case 'error':
-            failure = classifyFailure(event.message);
-            break;
-
-          case 'item.completed':
-            if (event.item.type === 'agent_message') {
-              text = event.item.text;
-              onEvent({ type: 'text', text });
-            }
-            break;
         }
+      } catch (error) {
+        // SDK는 turn.failed·error 이벤트를 넘긴 뒤 CLI가 종료 코드 1로 끝나면 예외를 던진다(#983).
+        // 이벤트로 받은 이유(사용 한도 등)가 있으면 그것을 쓴다. 예외 문구에는 stderr 첫 줄만 남는다
+        if (!failure) throw error;
       }
 
       if (failure) {
