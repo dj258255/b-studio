@@ -1,0 +1,95 @@
+{
+ "startedAt": "2026-10-28T05:27:14.415Z",
+ "sessions": [
+  {
+   "backend": "codex",
+   "expect": "codex",
+   "rule": 0,
+   "matched": "\"api의\" 포함",
+   "kind": {
+    "complexity": "simple",
+    "risk": "normal"
+   },
+   "status": "ready",
+   "checkpoints": 2,
+   "seconds": 86
+  },
+  {
+   "backend": "claude-code",
+   "expect": "claude-code",
+   "rule": "fallback",
+   "matched": "기본값",
+   "kind": {
+    "complexity": "simple",
+    "risk": "normal"
+   },
+   "model": "sonnet",
+   "status": "ready",
+   "checkpoints": 2,
+   "seconds": 67
+  }
+ ],
+ "stats": {
+  "rows": [
+   {
+    "backend": "claude-code",
+    "model": "sonnet",
+    "kind": {
+     "complexity": "simple",
+     "risk": "normal"
+    },
+    "runs": 1,
+    "passed": 1,
+    "failed": 0,
+    "errors": 0,
+    "platformFailures": 0,
+    "noChange": 0,
+    "needsReview": 0,
+    "passRate": 1,
+    "medianDurationMs": 63526
+   },
+   {
+    "backend": "codex",
+    "model": "codex:default",
+    "kind": {
+     "complexity": "simple",
+     "risk": "normal"
+    },
+    "runs": 1,
+    "passed": 1,
+    "failed": 0,
+    "errors": 0,
+    "platformFailures": 0,
+    "noChange": 0,
+    "needsReview": 0,
+    "passRate": 1,
+    "medianDurationMs": 81356
+   }
+  ],
+  "excluded": {
+   "asks": 0,
+   "unfinished": 0
+  },
+  "byAccount": [
+   {
+    "backend": "claude-code",
+    "runs": 1,
+    "passed": 1,
+    "failed": 0,
+    "errors": 0,
+    "passRate": 1,
+    "averageTokens": 44424
+   },
+   {
+    "backend": "codex",
+    "runs": 1,
+    "passed": 1,
+    "failed": 0,
+    "errors": 0,
+    "passRate": 1,
+    "averageTokens": 64516
+   }
+  ],
+  "recentFailures": []
+ }
+}

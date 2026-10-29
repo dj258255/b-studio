@@ -15,7 +15,7 @@
 | `input_tokens`에 캐시가 들어 있는가 | **들어 있다.** 세션 기록에서 `total_tokens = input_tokens + output_tokens`이다(input 13,674, cached 13,440, output 39, total 13,713) |
 | 셸 끔 + 읽기 전용에서 노출 도구 | **64개였다.** 앱 커넥터(로그인한 ChatGPT 계정의 커넥터) 52개, 웹 실행, 이미지 생성, 목표, 플러그인 설치, MCP 자원, `apply_patch`와, 이것들을 자바스크립트로 부르는 코드 모드 `exec`. 사소한 요청 하나의 입력이 81,386토큰이었다 |
 | 도구 밖 파일 변경 | 0건. 바뀐 파일은 b-studio `edit_file`로 고친 `api/src/Order.java` 하나였다 |
-| 사용 한도 오류 모양 | 보지 못했다. 한도에 닿지 않았다 |
+| 사용 한도 오류 모양 | 0단계에서는 닿지 않았다. E1-b에서 닿았고, `turn.failed`로 "You've hit your usage limit…"을 넘긴 뒤 CLI가 종료 코드 1로 끝났다. 러너가 이 문구를 SDK 예외로 덮던 것을 고쳤다([#983](https://github.com/dj258255/b-studio/issues/983), [E1-b](2026-10-28-codex-e1b.md)) |
 
 ## 실측에서 나온 문제와 고친 것
 
@@ -28,6 +28,6 @@
 
 ## 하지 못한 것
 
-- [#55](https://github.com/dj258255/b-studio/issues/55)(E1을 Codex로 재현)와 [#820](https://github.com/dj258255/b-studio/issues/820)의 마지막 항목(Claude와 Codex에 규칙표로 나눠 보내 실행 기록 확인)은 실제 샌드박스가 필요하다. 기본 Docker VM 9.69GiB 가운데 다른 프로젝트의 kind 클러스터가 6.4GiB를 써서, 벤치 메모리 검사(실행당 약 5.5GiB)를 넘지 못한다. 그 클러스터는 건드리지 않았다.
-- 사용 한도 오류의 모양.
+- (뒤에 함, [E1-b](2026-10-28-codex-e1b.md)) [#55](https://github.com/dj258255/b-studio/issues/55)(E1을 Codex로 재현)와 [#820](https://github.com/dj258255/b-studio/issues/820)의 마지막 항목(Claude와 Codex에 규칙표로 나눠 보내 실행 기록 확인)은 실제 샌드박스가 필요하다. 기본 Docker VM 9.69GiB 가운데 다른 프로젝트의 kind 클러스터가 6.4GiB를 써서, 벤치 메모리 검사(실행당 약 5.5GiB)를 넘지 못한다. 그 클러스터는 건드리지 않았다.
+- (뒤에 봄, #983) 사용 한도 오류의 모양.
 - 이 컴퓨터 방식 세션 터미널의 Codex(`codex` 0.160.1, 훅 관문)는 이번 범위가 아니다. 세션 기록의 `token_count`에 `model_context_window`(258,400)와 호출별 `last_token_usage`가 있어, 터미널 Codex의 문맥 %를 이 기록에서 읽을 수 있다(따로 다룬다).
