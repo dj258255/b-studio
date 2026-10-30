@@ -137,6 +137,8 @@ export interface TerminalTarget {
    * 이 컴퓨터 방식은 감싸개가 CLAUDE_CONFIG_DIR·CODEX_HOME으로 넘긴다. 컨테이너 방식은 기본 계정만 쓴다
    */
   accountDir?: () => Promise<string | undefined>;
+  /** CLI를 처음 띄울 때 넘길 모델(#988). 세션에 고른 모델이 있을 때만 있다. 없으면 CLI 기본 모델이다 */
+  model?: string;
   /**
    * 감시가 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 찾았을 때 부른다. 세션은 이 실행을 실패로 닫고 되돌린다(이슈 #695)
    */
@@ -255,6 +257,7 @@ const HOST_BACKEND: TerminalBackend = {
       accountEnv: hostAccountEnv(hostGateways.get(place)?.cli),
       ...(options.initialPrompt !== undefined ? { initialPrompt: options.initialPrompt } : {}),
       ...(options.resumeConversation !== undefined ? { resumeConversation: options.resumeConversation } : {}),
+      ...(options.target.model !== undefined ? { model: options.target.model } : {}),
     }),
   acceptsInitialPrompt: true,
   acceptsResume: true,
