@@ -7862,6 +7862,7 @@ export function sessionTerminalTarget(id: string): {
   cli: HostCliKind;
   resumeConversation: () => string | undefined;
   accountDir: () => Promise<string | undefined>;
+  model?: string;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
   const session = requireSession(id);
@@ -7890,7 +7891,19 @@ export function sessionTerminalTarget(id: string): {
     },
     // 세션의 AI 계정의 설정 폴더(#885). 열 때마다 목록에서 다시 찾는다. 계정이 목록에서 빠졌으면 다른 계정으로 띄우지 않고 던진다
     accountDir: async () => (await sessionAccount(session.snapshot)).configDir,
+    ...terminalModel(session),
   };
+}
+
+/**
+ * 터미널 CLI에 넘길 모델(#988). 라우팅이나 사람이 고른 모델이 세션에 있으면 CLI를 처음 띄울 때 넘긴다.
+ * CLI 백엔드(claude-code·codex) 세션만 넘긴다. API 세션의 모델 id는 API 레지스트리 이름이라 CLI가 모른다
+ */
+function terminalModel(session: Session): { model?: string } {
+  const backend = sessionBackend(session.snapshot);
+  if (backend !== 'claude-code' && backend !== 'codex') return {};
+  const model = cliModelOverride(session.snapshot.modelId);
+  return model ? { model } : {};
 }
 
 /** 세션이 쓰는 AI 계정의 설정 폴더와 CLI 환경(#885). 기본 계정이면 둘 다 없다 */

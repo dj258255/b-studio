@@ -333,6 +333,21 @@ export function resumeConversationArg(id: string): string {
   return id;
 }
 
+/**
+ * 라우팅이 고른 모델(#988). 세션에 모델이 있으면 CLI를 처음 띄울 때 `--model=<id>`로 넘긴다(claude·codex 모두 받는다).
+ * 첫 요청과 같이 PTY 환경 변수로만 받고, 시작 파일보다 먼저 셸 변수로 옮겨 환경에서 지운다. 없으면 CLI 기본 모델이다
+ */
+export const CLI_MODEL_ENV = 'B_STUDIO_CLI_MODEL';
+const CLI_MODEL_VAR = 'BSTUDIO_CLI_MODEL_VALUE';
+/** 모델 id의 꼴. 별칭(sonnet), 문맥 창 꼬리표(`[1m]`), 제공자 접두어(`openai/`)를 받고, 옵션(-로 시작)·빈칸·셸 글자는 받지 않는다 */
+const CLI_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,127}$/;
+
+/** CLI 실행 인자로 넘길 모델 id. 꼴이 맞지 않으면 던진다 */
+export function cliModelArg(model: string): string {
+  if (!CLI_MODEL_PATTERN.test(model)) throw new SandboxError('CLI에 넘길 모델 id의 꼴이 맞지 않습니다', '영문·숫자로 시작하고 . _ : / [ ] - 만 쓴 128자 이하의 id만 넘깁니다');
+  return model;
+}
+
 /** 받은 첫 요청과 대화 id를 셸 변수로 옮기고 환경에서 지운다. 사용자의 시작 파일보다 먼저 돈다 */
 const FIRST_PROMPT_CAPTURE = [
   `if [ -n "\${${FIRST_PROMPT_ENV}+x}" ]; then`,
@@ -342,6 +357,10 @@ const FIRST_PROMPT_CAPTURE = [
   `if [ -n "\${${RESUME_CONVERSATION_ENV}+x}" ]; then`,
   `  ${RESUME_CONVERSATION_VAR}="$${RESUME_CONVERSATION_ENV}"`,
   `  unset ${RESUME_CONVERSATION_ENV}`,
+  'fi',
+  `if [ -n "\${${CLI_MODEL_ENV}+x}" ]; then`,
+  `  ${CLI_MODEL_VAR}="$${CLI_MODEL_ENV}"`,
+  `  unset ${CLI_MODEL_ENV}`,
   'fi',
 ];
 
@@ -355,16 +374,18 @@ function resumeFailedNotice(kind: HostCliKind): string {
  * 둘 다 없으면 인자 없이 띄운다. 두 변수 모두 한 번 쓰고 지운다
  */
 function firstLaunch(command: string, kind: HostCliKind, indent = ''): string[] {
-  const resume = kind === 'codex' ? `${command} resume "$${RESUME_CONVERSATION_VAR}"` : `${command} --resume "$${RESUME_CONVERSATION_VAR}"`;
+  // 모델이 있으면 한 낱말(`--model=<id>`)로, 없으면 낱말 자체가 없어진다. 따옴표 안이라 [ ] 가 파일 이름으로 풀리지 않는다(#988)
+  const model = `\${${CLI_MODEL_VAR}:+"--model=$${CLI_MODEL_VAR}"}`;
+  const resume = kind === 'codex' ? `${command} resume ${model} "$${RESUME_CONVERSATION_VAR}"` : `${command} ${model} --resume "$${RESUME_CONVERSATION_VAR}"`;
   return [
     `if [ -n "\${${FIRST_PROMPT_VAR}+x}" ]; then`,
-    `  ${command} "$${FIRST_PROMPT_VAR}"`,
+    `  ${command} ${model} "$${FIRST_PROMPT_VAR}"`,
     `elif [ -n "\${${RESUME_CONVERSATION_VAR}+x}" ]; then`,
     `  ${resume} || printf '%s\\n' ${shellQuote(resumeFailedNotice(kind))}`,
     'else',
-    `  ${command}`,
+    `  ${command} ${model}`,
     'fi',
-    `unset ${FIRST_PROMPT_VAR} ${RESUME_CONVERSATION_VAR}`,
+    `unset ${FIRST_PROMPT_VAR} ${RESUME_CONVERSATION_VAR} ${CLI_MODEL_VAR}`,
   ].map((line) => indent + line);
 }
 
@@ -806,6 +827,7 @@ export async function openHostTerminal({
   cli = 'claude',
   initialPrompt,
   resumeConversation,
+  model,
   accountEnv = {},
   env = process.env,
   spawnPty = spawnWithNodePty,
@@ -822,6 +844,8 @@ export async function openHostTerminal({
   initialPrompt?: string;
   /** 첫 실행에서 이어 붙일 CLI 대화 id(#872). 첫 요청이 있으면 새 대화라 쓰지 않는다 */
   resumeConversation?: string;
+  /** 라우팅이 고른 모델 id(#988). 첫 실행에 `--model=<id>`로 넘긴다. 없으면 CLI 기본 모델이다 */
+  model?: string;
   /**
    * 세션 계정의 설정 폴더 변수(#885, CLAUDE_CONFIG_DIR·CODEX_HOME). 감싸개도 같은 값을 넘기지만, 셸에서 CLI가 아닌 도구(예: `claude` 하위 명령을
    * 부르는 스크립트)도 같은 계정을 보게 PTY 환경에도 둔다. 이 두 이름만 받는다
@@ -842,6 +866,7 @@ export async function openHostTerminal({
       : resumeConversation !== undefined
         ? { [RESUME_CONVERSATION_ENV]: resumeConversationArg(resumeConversation) }
         : {};
+  if (model !== undefined) first[CLI_MODEL_ENV] = cliModelArg(model);
   let pty: HostPty;
   try {
     pty = await spawnPty(launch.file, launch.args, { name: 'xterm-256color', cols, rows, cwd, env: { ...hostTerminalEnv(gatewayDir, env), ...accountEnv, ...launch.env, ...first } });
