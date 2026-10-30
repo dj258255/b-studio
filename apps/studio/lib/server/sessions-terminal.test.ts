@@ -184,3 +184,31 @@ describe('세션의 AI 계정(#885)', () => {
     }
   });
 });
+
+describe('라우팅이 고른 모델을 터미널 CLI에 넘긴다(#988)', () => {
+  it('CLI 백엔드 세션의 모델을 터미널 대상에 싣고, API 세션의 모델 id나 모델 없음은 싣지 않는다', async () => {
+    await setup();
+    const saved = process.env.B_STUDIO_BACKENDS;
+    process.env.B_STUDIO_BACKENDS = 'codex,claude-code';
+    try {
+      const codex = (await createSession('termproj', 'kim', 'copy', { backend: 'codex', modelId: 'gpt-5.5' })).id;
+      await waitFor(codex, 'ready');
+      expect(sessionTerminalTarget(codex).model).toBe('gpt-5.5');
+      await stopSession(codex);
+
+      const plain = (await createSession('termproj', 'kim', 'copy', { backend: 'codex' })).id;
+      await waitFor(plain, 'ready');
+      expect(sessionTerminalTarget(plain).model).toBeUndefined();
+      await stopSession(plain);
+
+      // API 세션의 터미널은 claude를 띄운다. API 모델 id(레지스트리)는 claude가 모르는 이름이라 넘기지 않는다
+      const api = (await createSession('termproj', 'kim', 'copy', { modelId: 'anthropic-default' })).id;
+      await waitFor(api, 'ready');
+      expect(sessionTerminalTarget(api).model).toBeUndefined();
+      await stopSession(api);
+    } finally {
+      if (saved === undefined) delete process.env.B_STUDIO_BACKENDS;
+      else process.env.B_STUDIO_BACKENDS = saved;
+    }
+  }, 30_000);
+});

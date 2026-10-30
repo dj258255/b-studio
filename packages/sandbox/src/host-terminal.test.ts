@@ -9,6 +9,8 @@ import { AGENT_HOOK_SCRIPT, AGENT_NOTIFICATION_MATCHER, applyPatchPaths, CODEX_H
 import { SandboxError } from './errors';
 import {
   checkHostGatewayConfig,
+  CLI_MODEL_ENV,
+  cliModelArg,
   codexGatewayArgs,
   expectedHostGatewayFiles,
   FIRST_PROMPT_ENV,
@@ -65,7 +67,7 @@ const modeOf = async (file: string): Promise<number> => (await stat(file)).mode 
 async function writeShellGateway(dir: string): Promise<void> {
   await mkdir(path.join(dir, 'bin'), { recursive: true });
   // 둘째 줄: CLI까지 첫 요청 환경 변수(#836)와 셸 변수가 내려왔는지
-  await writeFile(path.join(dir, 'bin', 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "WRAPPED $*" "CHILD-ENV ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}"\n');
+  await writeFile(path.join(dir, 'bin', 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "WRAPPED $*" "CHILD-ENV ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}" "MODEL-ENV ${B_STUDIO_CLI_MODEL-none} ${BSTUDIO_CLI_MODEL_VALUE-none}"\n');
   await chmod(path.join(dir, 'bin', 'claude'), 0o700);
   await mkdir(path.join(dir, 'shell', 'zsh'), { recursive: true });
   for (const [name, content] of Object.entries(hostZshFiles(dir))) await writeFile(path.join(dir, 'shell', 'zsh', name), content);
@@ -76,7 +78,7 @@ async function writeShellGateway(dir: string): Promise<void> {
 async function writeFakeClaude(home: string): Promise<string> {
   const bin = path.join(home, 'fakebin');
   await mkdir(bin, { recursive: true });
-  await writeFile(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "UNWRAPPED $*" "CHILD-ENV ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}"\n');
+  await writeFile(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'%s\\n\' "UNWRAPPED $*" "CHILD-ENV ${B_STUDIO_FIRST_PROMPT-none} ${BSTUDIO_FIRST_PROMPT_VALUE-none}" "MODEL-ENV ${B_STUDIO_CLI_MODEL-none} ${BSTUDIO_CLI_MODEL_VALUE-none}"\n');
   await chmod(path.join(bin, 'claude'), 0o755);
   return bin;
 }
@@ -669,7 +671,7 @@ describe('Codex 터미널(#825)', () => {
     // 셸 시작 파일은 codex 함수를 정의하고 codex를 띄운다
     const zshrc = await readFile(path.join(one, 'shell', 'zsh', '.zshrc'), 'utf8');
     expect(zshrc).toContain(`unalias codex 2>/dev/null\nfunction codex { ${shellQuote(path.join(one, 'bin', 'codex'))} "$@"; }`);
-    expect(await readFile(path.join(one, 'shell', 'zsh', '.zlogin'), 'utf8')).toContain('  codex\n');
+    expect(await readFile(path.join(one, 'shell', 'zsh', '.zlogin'), 'utf8')).toContain('  codex ${BSTUDIO_CLI_MODEL_VALUE:+"--model=$BSTUDIO_CLI_MODEL_VALUE"}\n');
     expect(await readFile(path.join(one, 'shell', 'bashrc'), 'utf8')).toContain('[b-studio] codex에서 나왔습니다');
 
     // 기대 파일 검사가 갓 쓴 폴더를 통과시키고, 공용 훅 스크립트가 바뀌면 잡는다
@@ -801,7 +803,7 @@ describe('Codex 터미널(#825)', () => {
   });
 
   it('셸 실행: 관문 없는 터미널과 fish 대체 명령도 codex를 띄운다', () => {
-    expect(hostShellLaunch(undefined, {}, 'codex').args[1]).toContain('\nelse\n  codex\nfi\n');
+    expect(hostShellLaunch(undefined, {}, 'codex').args[1]).toContain('\nelse\n  codex ${BSTUDIO_CLI_MODEL_VALUE:+"--model=$BSTUDIO_CLI_MODEL_VALUE"}\nfi\n');
     const fish = hostShellLaunch('/gw/studio-1', { SHELL: '/opt/homebrew/bin/fish' }, 'codex');
     expect(fish.args[1]).toContain(shellQuote('/gw/studio-1/bin/codex'));
   });
@@ -920,6 +922,82 @@ describe('첫 요청을 CLI 실행 인자로(#836)', () => {
   });
 });
 
+
+describe('라우팅이 고른 모델을 CLI에 넘긴다(#988)', () => {
+  const prompt = '주문 목록 화면을 고쳐 줘';
+  const id = '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b';
+
+  it('cliModelArg: 모델 id는 영문·숫자로 시작하고 . _ : / [ ] - 만 받는다. 옵션처럼 보이거나 빈칸·셸 글자가 있으면 던진다', () => {
+    expect(CLI_MODEL_ENV).toBe('B_STUDIO_CLI_MODEL');
+    for (const ok of ['sonnet', 'opus', 'claude-sonnet-5[1m]', 'gpt-5.5', 'openai/gpt-5.5', 'model:tag_1']) expect(cliModelArg(ok)).toBe(ok);
+    for (const bad of ['', ' ', '--dangerously-skip-permissions', '-x', 'a b', 'a;rm -rf ~', '$(id)', '`id`', 'a\nb', 'x'.repeat(129)]) {
+      expect(() => cliModelArg(bad), bad).toThrow(SandboxError);
+    }
+  });
+
+  it('openHostTerminal: 모델은 PTY 환경 변수로만 넘기고 셸 인자에 잇지 않는다. 주지 않으면 그 변수가 없다', async () => {
+    const calls: Array<{ args: string[]; env: Record<string, string> }> = [];
+    const spawnPty = (_file: string, args: string[], options: { env: Record<string, string> }): HostPty => {
+      calls.push({ args, env: options.env });
+      return { pid: 1, write() {}, resize() {}, kill() {}, onData() {}, onExit() {} };
+    };
+    const env = { SHELL: '/bin/zsh', HOME: '/home/kim', [CLI_MODEL_ENV]: '스튜디오 쪽 값은 넘기지 않는다' };
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty, model: 'sonnet', initialPrompt: prompt });
+    await openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty });
+    expect(calls[0]!.env[CLI_MODEL_ENV]).toBe('sonnet');
+    expect(calls[0]!.args.join(' ')).not.toContain('sonnet');
+    expect(calls[1]!.env[CLI_MODEL_ENV]).toBeUndefined();
+    await expect(openHostTerminal({ id: 't', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: '/gateway', env, spawnPty, model: '-x' })).rejects.toThrow(SandboxError);
+  });
+
+  it('bash: 첫 실행에만 --model=<id>를 붙인다(첫 요청·이어 붙이기·인자 없음). 사용자 파일과 CLI에 변수가 남지 않는다', async () => {
+    const dir = await tempDir('b-studio-model-bash-');
+    const home = await tempDir('b-studio-model-bash-home-');
+    await writeFile(path.join(home, '.bash_profile'), 'echo "PROFILE-SEES ${B_STUDIO_CLI_MODEL-none}"\n');
+    await writeShellGateway(dir);
+    const run = (extra: Record<string, string>): string =>
+      execFileSync('bash', ['--rcfile', path.join(dir, 'shell', 'bashrc'), '-i', '-c', 'claude again; echo "AFTER ${B_STUDIO_CLI_MODEL-none} ${BSTUDIO_CLI_MODEL_VALUE-none}"'], {
+        env: { ...process.env, HOME: home, B_STUDIO_CLI_MODEL: 'claude-sonnet-5[1m]', ...extra },
+        encoding: 'utf8',
+      });
+    const withPrompt = run({ B_STUDIO_FIRST_PROMPT: prompt });
+    expect(withPrompt).toContain(`WRAPPED --model=claude-sonnet-5[1m] ${prompt}`);
+    expect(withPrompt).toMatch(/^WRAPPED again$/m);
+    expect(withPrompt).toContain('PROFILE-SEES none');
+    expect(withPrompt.split('\n').filter((line) => line === 'MODEL-ENV none none')).toHaveLength(2);
+    expect(withPrompt).toContain('AFTER none none');
+    expect(run({ B_STUDIO_RESUME_ID: id })).toContain(`WRAPPED --model=claude-sonnet-5[1m] --resume ${id}`);
+    expect(run({})).toMatch(/^WRAPPED --model=claude-sonnet-5\[1m\]$/m);
+  });
+
+  it.skipIf(!existsSync('/bin/zsh'))('zsh: .zshenv에서 먼저 환경에서 지우고, .zlogin의 첫 실행에만 --model=<id>를 붙인다', async () => {
+    const dir = await tempDir('b-studio-model-zsh-');
+    const home = await tempDir('b-studio-model-zsh-home-');
+    await writeFile(path.join(home, '.zshenv'), 'print -r -- "PROFILE-SEES ${B_STUDIO_CLI_MODEL-none}"\n');
+    await writeShellGateway(dir);
+    const out = execFileSync('/bin/zsh', ['-l', '-i', '-c', 'claude again; print -r -- "AFTER ${B_STUDIO_CLI_MODEL-none} ${BSTUDIO_CLI_MODEL_VALUE-none}"'], {
+      env: { ...process.env, HOME: home, ZDOTDIR: path.join(dir, 'shell', 'zsh'), BSTUDIO_USER_ZDOTDIR: home, B_STUDIO_CLI_MODEL: 'claude-sonnet-5[1m]', B_STUDIO_FIRST_PROMPT: prompt },
+      encoding: 'utf8',
+    });
+    expect(out).toContain('PROFILE-SEES none');
+    expect(out).toContain(`WRAPPED --model=claude-sonnet-5[1m] ${prompt}`);
+    expect(out).toMatch(/^WRAPPED again$/m);
+    expect(out.split('\n').filter((line) => line === 'MODEL-ENV none none')).toHaveLength(2);
+    expect(out).toContain('AFTER none none');
+  });
+
+  it('모델이 없으면 지금처럼 인자 없이 띄우고, 관문 없는 sh 명령도 첫 실행에 붙인다', async () => {
+    const dir = await tempDir('b-studio-model-sh-');
+    const home = await tempDir('b-studio-model-sh-home-');
+    const fakeBin = await writeFakeClaude(home);
+    await writeShellGateway(dir);
+    const run = (command: string, extra: Record<string, string>): string =>
+      execFileSync('/bin/sh', ['-c', command], { env: { PATH: `${fakeBin}:/usr/bin:/bin`, HOME: home, SHELL: '/usr/bin/true', ...extra }, encoding: 'utf8' });
+    expect(run(hostTerminalCommand('claude'), { B_STUDIO_CLI_MODEL: 'opus', B_STUDIO_FIRST_PROMPT: prompt })).toContain(`UNWRAPPED --model=opus ${prompt}`);
+    expect(run(hostTerminalCommand('claude'), { B_STUDIO_FIRST_PROMPT: prompt })).toMatch(new RegExp(`^UNWRAPPED ${prompt}$`, 'm'));
+    expect(run(hostTerminalCommand('claude'), { B_STUDIO_CLI_MODEL: 'opus' })).toContain('MODEL-ENV none none');
+  });
+});
 
 describe('스튜디오를 다시 띄운 뒤 지난 CLI 대화를 이어 붙인다(#872)', () => {
   const id = '6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b';
