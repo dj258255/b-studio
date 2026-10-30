@@ -502,11 +502,22 @@ export function gateStatusOf(snapshot: SessionSnapshot, recent: readonly StudioE
   const run = startIndex >= 0 ? recent.slice(startIndex + 1) : recent;
   const finished = run.findLast((event) => event.type === 'run_finished');
   let lastVerify: Extract<AgentEvent, { type: 'verify_start' | 'verify_result' }> | undefined;
+  // verify_result는 서비스 재시작·준비 판정·계약까지의 결과다. 그 뒤 선언 검사·리뷰는 workflow_check로 따로 온다(#989).
+  // 마지막 검증 시작 뒤(검증 없이 기록 검사만 돈 경우는 실행 전체)에 실패한 검사가 있으면 통과가 아니다
+  let checkFailed = false;
   for (const event of run) {
-    if (event.type === 'agent' && (event.event.type === 'verify_start' || event.event.type === 'verify_result')) lastVerify = event.event;
+    if (event.type !== 'agent') continue;
+    if (event.event.type === 'verify_start' || event.event.type === 'verify_result') {
+      if (event.event.type === 'verify_start') checkFailed = false;
+      lastVerify = event.event;
+    } else if (event.event.type === 'workflow_check' && !event.event.check.ok) {
+      checkFailed = true;
+    }
   }
   const state: AgentGateStatus['state'] =
-    lastVerify?.type === 'verify_result'
+    checkFailed && lastVerify?.type !== 'verify_start'
+      ? 'failed'
+      : lastVerify?.type === 'verify_result'
       ? lastVerify.report.ok
         ? 'passed'
         : 'failed'
@@ -624,7 +635,8 @@ function describeActivity(event: Exclude<AgentEvent, { type: 'tokens' }>): strin
     case 'verify_start':
       return `검증 준비: 파일 ${event.files.length}개`;
     case 'verify_result':
-      return event.report.ok ? '검증 통과' : '검증 실패';
+      // 서비스·계약까지의 결과다. 선언 검사는 뒤에 따로 돈다(#989)
+      return event.report.ok ? '서비스 확인 통과' : '검증 실패';
     case 'policy':
       return event.decision === 'deny' ? `정책 차단: ${event.tool}` : undefined;
     case 'route':

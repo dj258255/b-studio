@@ -19,6 +19,7 @@ function item(input: SessionOverviewSource) {
 const started = (runId: string): StudioEvent => ({ type: 'run_started', runId, request: '주문 목록에 필터' });
 const verifyStart = (runId: string): StudioEvent => ({ type: 'agent', runId, event: { type: 'verify_start', files: ['a.ts'] } });
 const verifyResult = (runId: string, ok: boolean): StudioEvent => ({ type: 'agent', runId, event: { type: 'verify_result', report: { ok } } } as unknown as StudioEvent);
+const workflowCheck = (runId: string, ok: boolean): StudioEvent => ({ type: 'agent', runId, event: { type: 'workflow_check', check: { stage: 'test', name: 'readme', ok, attempts: 1 } } } as unknown as StudioEvent);
 const finished = (runId: string, status: 'done' | 'failed' | 'error' | 'cancelled'): StudioEvent => ({ type: 'run_finished', runId, status, summary: '' });
 const checkpoint = (sha: string, passed: boolean) => ({ sha, shortSha: sha.slice(0, 7), message: 'm', createdAt: '2026-10-22T10:00:00.000Z', files: [], ...(passed ? { passedStages: ['test' as const] } : {}) });
 
@@ -63,6 +64,14 @@ describe('게이트 상태', () => {
     const running = snapshot({ running: true });
     expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), verifyResult('r1', false)] })).gate?.state).toBe('failed');
     expect(item(source({ recent: [started('r1'), verifyStart('r1'), verifyResult('r1', false), verifyStart('r1'), verifyResult('r1', true), finished('r1', 'done')] })).gate?.state).toBe('passed');
+  });
+
+  it('서비스 확인이 통과해도 그 뒤 선언 검사(test 등)가 실패했으면 failed다(#989, 실제 Claude 실측에서 테스트 실패가 "검증 통과"로 보였다)', () => {
+    expect(item(source({ recent: [started('r1'), verifyStart('r1'), verifyResult('r1', true), workflowCheck('r1', true), workflowCheck('r1', false)] })).gate?.state).toBe('failed');
+    // 고친 뒤 다시 검증해 모두 통과하면 passed
+    expect(item(source({ recent: [started('r1'), verifyStart('r1'), verifyResult('r1', true), workflowCheck('r1', false), verifyStart('r1'), verifyResult('r1', true), workflowCheck('r1', true)] })).gate?.state).toBe('passed');
+    // 바뀐 파일 없이 기록 검사만 다시 돌아 실패한 경우(verify_start 없이 workflow_check만 온다)
+    expect(item(source({ recent: [started('r1'), workflowCheck('r1', false)] })).gate?.state).toBe('failed');
   });
 
   it('끝난 실행의 verify_start는 검증 중으로 남지 않는다(취소·오류로 결과 없이 끝남)', () => {
