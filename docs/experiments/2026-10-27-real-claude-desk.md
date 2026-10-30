@@ -41,9 +41,9 @@
 
 신뢰 창에 답하는 것은 사용자의 보안 판단이라 b-studio도, 이 실측도 대신 답하지 않았다. 창 너머의 것은 모두 보지 못했다.
 
-- async 관찰 훅과 TaskCreated·TaskCompleted 수용, PreToolUse·PostToolUse 짝, 서브에이전트 행
-- 권한 대기 문구, 상태 줄의 문맥 %와 사용자 상태 줄(`~/.claude/statusline.sh`) 이어 부르기
-- 카드의 지금 줄·N분째·남은 시간, 게이트 통과와 체크포인트, 끝 알림, 쓰기 범위 밖 쓰기 거절
-- 라우팅 기록(Claude 쪽). Codex는 이 컴퓨터에 로그인돼 있지 않다
+- (뒤에 봄, [2차](2026-10-30-real-claude-desk-2.md)) PreToolUse·PostToolUse 짝, 서브에이전트 행. async 관찰 훅은 지금 줄로만, TaskCreated·TaskCompleted는 2차에서도 보지 못함
+- (뒤에 봄, [2차](2026-10-30-real-claude-desk-2.md)) 상태 줄의 문맥 %와 사용자 상태 줄(`~/.claude/statusline.sh`) 이어 부르기. 권한 대기 문구는 2차에서도 보지 못함(auto mode)
+- (뒤에 봄, [2차](2026-10-30-real-claude-desk-2.md)) 카드의 지금 줄·N초째, 게이트 통과와 체크포인트, 끝 알림. 남은 시간과 쓰기 범위 밖 쓰기 거절은 2차에서도 보지 못함
+- (뒤에 봄, [2차](2026-10-30-real-claude-desk-2.md)) 라우팅 기록(Claude 쪽)
 
 이어 하려면 사람이 desk에서 새 요청을 보내고, "입력 필요"가 뜬 칸에서 "Yes, I trust this folder"를 고르면 된다. 그 뒤 위 항목을 차례로 본다.
