@@ -142,7 +142,7 @@ function firstLine(value: string | undefined): string | undefined {
 function shortPath(file: string, cwd: string | undefined): string {
   if (cwd && path.isAbsolute(file)) {
     const relative = path.relative(cwd, file);
-    if (relative && !relative.startsWith('..') && !path.isAbsolute(relative)) return relative;
+    if (relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)) return relative;
   }
   return file;
 }

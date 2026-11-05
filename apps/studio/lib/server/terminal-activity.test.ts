@@ -329,3 +329,11 @@ describe('2차 실사용 점검(#955)', () => {
     expect(activityView(state)?.lastAt).toBe(new Date(AT + 90_000).toISOString());
   });
 });
+
+describe('toolTarget 경로 줄이기: ..로 시작하는 이름 (#1004)', () => {
+  it('작업 폴더 안의 ..로 시작하는 이름도 작업 폴더 기준으로 줄이고, 밖의 경로는 그대로 둔다', () => {
+    expect(toolTarget('Edit', { file_path: '/work/..docs/a.md' }, '/work')).toBe('..docs/a.md');
+    expect(toolTarget('Read', { file_path: '/other/a.ts' }, '/work')).toBe('/other/a.ts');
+    expect(toolTarget('Read', { file_path: '/a.ts' }, '/work')).toBe('/a.ts');
+  });
+});

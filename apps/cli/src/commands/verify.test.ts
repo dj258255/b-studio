@@ -43,3 +43,22 @@ describe('changedFiles', () => {
     expect(await changedFiles(path.join(root, 'pkg'))).toEqual(['inside.txt']);
   });
 });
+
+describe('changedFiles: ..로 시작하는 이름 (#1004)', () => {
+  it('..로 시작하는 폴더·파일의 변경도 검사 대상에 넣는다(빠지면 게이트가 보지 않는다)', async () => {
+    await mkdir(path.join(root, '..docs'), { recursive: true });
+    await writeFile(path.join(root, '..docs/a.md'), 'x');
+    await writeFile(path.join(root, '...hidden.ts'), 'y');
+
+    expect(await changedFiles(root)).toEqual(['...hidden.ts', '..docs/a.md']);
+  });
+
+  it('하위 폴더 프로젝트에서는 ..로 시작하는 이름의 형제 폴더를 프로젝트 밖으로 걸러 내고 안의 것은 남긴다', async () => {
+    await mkdir(path.join(root, 'pkg/..in'), { recursive: true });
+    await mkdir(path.join(root, '..out'), { recursive: true });
+    await writeFile(path.join(root, 'pkg/..in/a.txt'), 'x');
+    await writeFile(path.join(root, '..out/b.txt'), 'y');
+
+    expect(await changedFiles(path.join(root, 'pkg'))).toEqual(['..in/a.txt']);
+  });
+});

@@ -8146,7 +8146,7 @@ function terminalRelativePath(file: string, session: Session): string | undefine
   }
   if (path.isAbsolute(value)) {
     const relative = path.relative(session.snapshot.workDir, value);
-    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return relative.split(path.sep).join('/');
+    if (relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) return relative.split(path.sep).join('/');
     return undefined;
   }
   return value;

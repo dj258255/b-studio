@@ -163,5 +163,5 @@ function stageLabel(stage: string): string {
 
 function isInside(root: string, target: string): boolean {
   const relative = path.relative(root, target);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }

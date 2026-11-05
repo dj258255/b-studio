@@ -402,7 +402,7 @@ export class CheckpointStore {
     const toplevel = await inRepo(['rev-parse', '--show-toplevel']).then((out) => resolveReal(out.trim()), () => undefined);
     if (!toplevel) return undefined;
     const subdir = path.relative(toplevel, root).split(path.sep).join('/');
-    if (subdir.startsWith('..') || (subdir !== '' && !allowSubfolder)) return undefined;
+    if (subdir === '..' || subdir.startsWith('../') || (subdir !== '' && !allowSubfolder)) return undefined;
     const hasCommit = await inRepo(['rev-parse', '--verify', '--quiet', 'HEAD^{commit}']).then(() => true, () => false);
     if (!hasCommit) return undefined;
 

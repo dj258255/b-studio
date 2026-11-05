@@ -195,7 +195,7 @@ function isConfinedPattern(pattern: string): boolean {
 function relativeToRoot(file: string, root: string, realRoot: string): string | undefined {
   for (const base of [root, realRoot]) {
     const relative = path.relative(base, file);
-    if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) return relative;
+    if (relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))) return relative;
   }
   return undefined;
 }

@@ -265,3 +265,36 @@ describe('removeEvaluationAssets', () => {
     expect(await readFile(path.join(outside, 'important.txt'), 'utf8')).toBe('그대로');
   });
 });
+
+describe('syncEvaluationAssetCopies: ..로 시작하는 이름 (#1004)', () => {
+  it('..로 시작하는 하위 폴더의 파일도 복사하고, ../로 빠져나가는 파일 경로는 계속 거절한다', async () => {
+    const { root } = await roots();
+    const slots = await prepareEvaluationAssetCopies(['tests/acceptance'], root, 'sb', [{ path: 'tests/acceptance', kind: 'directory', files: [] }]);
+    const sandboxDir = evaluationAssetSandboxDir(root, 'sb');
+
+    await syncEvaluationAssetCopies(slots, sandboxDir, [
+      { path: 'tests/acceptance', kind: 'directory', files: [{ path: 'tests/acceptance/..cases/a.txt', content: Buffer.from('a\n'), executable: false }] },
+    ]);
+    expect(await readFile(path.join(slots[0]!.source, '..cases', 'a.txt'), 'utf8')).toBe('a\n');
+
+    await expect(
+      syncEvaluationAssetCopies(slots, sandboxDir, [
+        { path: 'tests/acceptance', kind: 'directory', files: [{ path: 'tests/acceptance/../x.txt', content: Buffer.from('x'), executable: false }] },
+      ]),
+    ).rejects.toThrow();
+  });
+
+  it('복사본 안의 ..로 시작하는 이름의 링크는 따라가지 않는다(밖에 쓰지 않는다)', async () => {
+    const { root } = await roots();
+    const slots = await prepareEvaluationAssetCopies(['tests/acceptance'], root, 'sb', [{ path: 'tests/acceptance', kind: 'directory', files: [] }]);
+    const sandboxDir = evaluationAssetSandboxDir(root, 'sb');
+    const outside = await temp();
+    await symlink(outside, path.join(slots[0]!.source, '..link'));
+
+    await syncEvaluationAssetCopies(slots, sandboxDir, [
+      { path: 'tests/acceptance', kind: 'directory', files: [{ path: 'tests/acceptance/..link/a.txt', content: Buffer.from('a'), executable: false }] },
+    ]);
+    expect(await readdir(outside)).toEqual([]);
+    expect((await lstat(path.join(slots[0]!.source, '..link'))).isDirectory()).toBe(true);
+  });
+});

@@ -389,3 +389,25 @@ describe('열기 뒤 확인: 경로를 확인한 뒤 상위 폴더가 링크로 
     expect(await readFile(path.join(root, 'api/src/App.java'), 'utf8')).toBe('x');
   });
 });
+
+describe('Workspace: ..로 시작하는 이름 (#1004)', () => {
+  it('..로 시작하는 폴더·파일은 프로젝트 안쪽이다. ../로 빠져나가는 경로와 밖을 가리키는 링크는 계속 거절한다', async () => {
+    await workspace.write('..notes/a.txt', 'hi\n');
+    expect(await readFile(path.join(root, '..notes/a.txt'), 'utf8')).toBe('hi\n');
+    expect(await workspace.read('..notes/a.txt')).toContain('hi');
+    await workspace.write('...dots', 'x\n');
+    expect(await readFile(path.join(root, '...dots'), 'utf8')).toBe('x\n');
+
+    await expect(workspace.write('../escape.txt', 'x')).rejects.toThrow('프로젝트 밖');
+    await expect(workspace.write('..', 'x')).rejects.toThrow(WorkspaceError);
+    const outside = await mkdtemp(path.join(tmpdir(), 'workspace-outside-'));
+    await symlink(outside, path.join(root, '..link'));
+    await expect(workspace.write('..link/a.txt', 'x')).rejects.toThrow(WorkspaceError);
+    await expect(workspace.read('..link/a.txt')).rejects.toThrow(WorkspaceError);
+  });
+
+  it('..로 시작하는 폴더 안의 숨긴 이름(.git·.env)도 그대로 가린다', async () => {
+    await expect(workspace.write('..notes/.git/config', 'x')).rejects.toThrow(WorkspaceError);
+    await expect(workspace.write('..notes/.env', 'x')).rejects.toThrow(WorkspaceError);
+  });
+});

@@ -88,3 +88,19 @@ describe('RELAY_SCRIPT', () => {
     expect((await readdir(dir)).sort()).toEqual(['file.ts', 'new route']);
   });
 });
+
+describe('planRelay: ..로 시작하는 이름 (#1004)', () => {
+  it('..로 시작하는 폴더 안의 변경도 알리고, ../로 빠져나가는 경로는 계속 건너뛴다', () => {
+    const mounts = bindMounts({ api: { volumes: [{ type: 'bind', source: '/Users/dev/orders/..api', target: '/app' }] } }, new Set(['api']));
+    const plan = planRelay(
+      '/Users/dev/orders',
+      [
+        { file: '..api/New.java', kind: 'file' },
+        { file: '../outside.txt', kind: 'file' },
+        { file: '..', kind: 'file' },
+      ],
+      mounts,
+    );
+    expect(Object.fromEntries(plan)).toEqual({ api: [{ action: 'nudge', containerPath: '/app', files: ['..api/New.java'] }] });
+  });
+});

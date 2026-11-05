@@ -45,3 +45,21 @@ describe('Pi 정책 브리지', () => {
     expect(handlers.get('tool_call')!({ toolName: 'bash', input: { command: 'docker rm -f db' } } as never)).toMatchObject({ block: true });
   });
 });
+
+describe('Pi 정책 브리지: ..로 시작하는 이름 (#1004)', () => {
+  const dotted = configFromEnvironment({ BSTUDIO_PROTECTED_PATHS: '..keep' }, '/work/orders');
+
+  it('..로 시작하는 폴더·파일 이름은 프로젝트 안쪽으로 읽고, ../로 빠져나가는 경로와 ..은 계속 밖으로 읽는다', () => {
+    expect(evaluatePiToolCall({ toolName: 'write', input: { path: '..docs/a.md', content: '' } }, dotted)).toBeUndefined();
+    expect(evaluatePiToolCall({ toolName: 'edit', input: { path: '/work/orders/...x/a.md', edits: [] } }, dotted)).toBeUndefined();
+    for (const file of ['../a.md', '..', '../orders/../x', '/work/other/a.md', '/work/orders/../a.md']) {
+      expect(evaluatePiToolCall({ toolName: 'write', input: { path: file, content: '' } }, dotted)?.reason, file).toContain('프로젝트 밖');
+    }
+  });
+
+  it('..로 시작하는 이름의 보호 경로도 막는다(프로젝트 밖이 아니라 보호 경로로)', () => {
+    const decision = evaluatePiToolCall({ toolName: 'write', input: { path: '..keep/a.md', content: '' } }, dotted);
+    expect(decision?.block).toBe(true);
+    expect(decision?.reason).not.toContain('프로젝트 밖');
+  });
+});

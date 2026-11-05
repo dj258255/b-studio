@@ -2381,6 +2381,20 @@ describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린
     await stopSession(session.id);
   }, 30_000);
 
+  it('이 컴퓨터 방식에서 작업 복사본 안의 ..로 시작하는 폴더는 범위 안이다. ../로 나가는 경로는 밖이다 (#1004)', async () => {
+    fake.terminalMode = 'host';
+    const session = await open();
+    setTerminalTaskContext(session.id, { writableScope: ['..docs'], doneTests: [] });
+    await session.gateway.prompt({ prompt: '문서 추가' });
+
+    const toolWrite = (file: string) => session.gateway.preTool({ tool_name: 'Write', tool_input: { file_path: file, content: 'x' } });
+    expect(await toolWrite(path.join(session.work, '..docs/a.md'))).toEqual({});
+    expect((await toolWrite(path.join(session.work, '..other/a.md'))).deny).toContain('범위 밖이라 쓰지 않았습니다');
+    expect((await toolWrite(`${session.work}/../outside.md`)).deny).toContain('범위 밖이라 쓰지 않았습니다');
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
   it('범위 안 경로라도 작업 복사본 밖을 가리키는 링크를 지나면 거절한다 (수정 3)', async () => {
     const session = await open();
     // 범위 안(api)에 있지만 실제로는 작업 복사본 밖을 가리키는 링크
