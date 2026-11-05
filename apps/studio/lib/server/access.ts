@@ -24,7 +24,3 @@ export async function authorizeSession(id: string, user: string): Promise<void> 
     snapshot.owner ? `이 세션은 ${snapshot.owner}님이 만들었습니다. 만든 사람이나 관리자만 바꿀 수 있습니다` : '만든 사람이 기록되지 않은 세션이라 관리자만 바꿀 수 있습니다',
   );
 }
-
-export function canManageSession(user: string, owner: string | undefined): boolean {
-  return canManage(user, owner, authConfig());
-}
