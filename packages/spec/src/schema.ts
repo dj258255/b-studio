@@ -3,6 +3,12 @@ import { z } from 'zod';
 const NAME = /^[a-z][a-z0-9-]*$/;
 /** 컨테이너 안에서 값을 받을 환경 변수 이름 */
 const ENV_NAME = /^[A-Z][A-Z0-9_]*$/;
+/**
+ * 사내 API 인증 시크릿이 쓸 수 없는 이름(#1018). 인증 시크릿은 edge 컨테이너 환경에 이 이름으로 들어가는데, edge는 샌드박스에서
+ * 밖으로 나갈 수 있는 유일한 컨테이너라 그 환경의 이름은 b-studio가 정한 것만 쓰여야 한다. edge 설정(`EDGE_*`, edge.mjs),
+ * Node 런타임(`NODE_*`), 동적 로더(`LD_*`·`DYLD_*`), 프로세스 기본값과 프록시 변수를 막는다. 거부 목록이라 넓게 맞춘다
+ */
+const RESERVED_EDGE_ENV = /^(EDGE_|NODE_|LD_|DYLD_)|^(PATH|HOME|HOSTNAME|SHELL|USER|PWD|TMPDIR|TZ|LANG|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|JAVA_TOOL_OPTIONS)$/;
 /** 정책에서 샌드박스 서비스가 아닌 호출자: 에이전트 도구와 API 탐색기 (스튜디오 서버가 대신 부른다) */
 export const STUDIO_CALLER = 'studio';
 
@@ -137,7 +143,10 @@ export const ExternalPolicySchema = z.object({
   auth: z
     .object({
       header: z.string().regex(/^[A-Za-z0-9-]+$/, 'HTTP 헤더 이름이어야 합니다'),
-      secret: z.string().regex(ENV_NAME),
+      secret: z
+        .string()
+        .regex(ENV_NAME)
+        .refine((name) => !RESERVED_EDGE_ENV.test(name), { error: (issue) => `'${String(issue.input)}'은(는) edge 프록시가 쓰는 환경 변수 이름과 겹칩니다. 다른 이름을 쓰세요` }),
       prefix: z.string().default(''),
     })
     .optional(),
