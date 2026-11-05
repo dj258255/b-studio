@@ -12,14 +12,14 @@ describe('GET /api/health', () => {
 
     const response = GET();
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ status: 'ok', app: 'b-studio', terminal: true });
+    expect(await response.json()).toEqual({ status: 'ok', app: 'b-studio', terminal: true, apiVersion: 1 });
   });
 
   it('실험 기능이 꺼져 있으면 terminal은 false', async () => {
     vi.stubEnv('B_STUDIO_AUTH', 'none');
     vi.stubEnv('B_STUDIO_EXPERIMENTAL', '');
 
-    expect(await GET().json()).toEqual({ status: 'ok', app: 'b-studio', terminal: false });
+    expect(await GET().json()).toEqual({ status: 'ok', app: 'b-studio', terminal: false, apiVersion: 1 });
   });
 
   it('여러 사람이 쓰는 서버(인증 켬)면 terminal은 false', async () => {
