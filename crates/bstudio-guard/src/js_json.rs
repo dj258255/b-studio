@@ -213,6 +213,46 @@ pub fn to_native(value: &JsValue) -> String {
     out
 }
 
+/// `JSON.stringify(값)`(들여쓰기 없음). 유한하지 않은 수는 `null`, `-0`은 `0`, 객체는 JS 순서(정수 꼴 키가 먼저)로 쓴다.
+/// `to_native`와 달리 Node로 건네는 경계 표기가 아니라 결과 문자열 그 자체다(edge 설정처럼 JS가 `JSON.stringify`로 만들던 글자)
+pub fn stringify(value: &JsValue) -> String {
+    let mut out = String::new();
+    write_json(value, &mut out);
+    out
+}
+
+fn write_json(value: &JsValue, out: &mut String) {
+    match value {
+        JsValue::Null => out.push_str("null"),
+        JsValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        JsValue::Num(n) if n.is_finite() => out.push_str(&js::number_to_string(*n)),
+        JsValue::Num(_) => out.push_str("null"),
+        JsValue::Str(s) => out.push_str(&js::json_quote(s)),
+        JsValue::Arr(items) => {
+            out.push('[');
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_json(item, out);
+            }
+            out.push(']');
+        }
+        JsValue::Obj(o) => {
+            out.push('{');
+            for (i, (k, v)) in o.entries_js_order().into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                out.push_str(&js::json_quote(k));
+                out.push(':');
+                write_json(v, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
 fn write(value: &JsValue, out: &mut String) {
     match value {
         JsValue::Null => out.push_str("null"),
@@ -577,5 +617,17 @@ mod tests {
         assert!(js_less(&JsValue::str("a"), &JsValue::str("b")));
         assert!(!js_less(&JsValue::Num(f64::NAN), &JsValue::Num(1.0)));
         assert!(!js_less(&JsValue::str("10"), &JsValue::Num(9.0)));
+    }
+}
+
+#[cfg(test)]
+mod stringify_tests {
+    use super::*;
+
+    #[test]
+    fn json_stringify처럼_쓴다() {
+        let v = parse(r#"{"b":1,"2":[null,true,-0.0,1e21,1e-7,"a\"\\\n/ \u007f"],"1":{}}"#).unwrap();
+        assert_eq!(stringify(&v), "{\"1\":{},\"2\":[null,true,0,1e+21,1e-7,\"a\\\"\\\\\\n/\u{2028}\u{7f}\"],\"b\":1}");
+        assert_eq!(stringify(&JsValue::Arr(vec![JsValue::Num(f64::NAN), JsValue::Num(f64::INFINITY)])), "[null,null]");
     }
 }
