@@ -9029,3 +9029,13 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 변이 확인: Rust 판정의 핵심 줄 9곳을 하나씩 망가뜨려 테스트가 실패하는지 봤다. 처음에는 "정렬 길이를 UTF-16 대신 바이트로" 변이를 잡지 못했다(벡터의 두 값이 겹치지 않아 순서가 결과를 바꾸지 않았다). 겹치는 값(`9가나다라마바사`와 `123456789`)을 더한 뒤 9곳 모두 잡혔다.
 - 네이티브 모듈이 없으면 스튜디오는 판정하지 않고 멈춘다(`native.ts`가 던진다). 개발 환경과 CI는 `pnpm install`의 `postinstall`이 빌드하고, 운영 이미지는 `rust:bookworm` 단계에서 빌드해 넣는다.
 - 아직 재지 않은 것: 서버 자원(목적 3)은 이 단계에서 달라질 것이 거의 없어 재지 않았다. CI 시간이 얼마나 늘었는지는 이 PR의 CI 기록으로 적는다.
+
+### 덧붙임: 2단계 첫 묶음 — git-mask의 판정 (2026-11-05, [#1005](https://github.com/dj258255/b-studio/issues/1005))
+- 옮긴 것: `.git` 마스크 계획(`planGitMask`), 평가 자산 마스크 계획, 평가 자산 자리에 겹친 마운트 검사, 호스트에 묶은 볼륨 해석(`boundDevice`), `volumes_from` 펼치기와 호스트 마운트 모으기, compose 마운트 목록(tmpfs 포함), 마스크 병합, Docker Desktop 접두어 떼기, 호스트·컨테이너 경로의 안쪽 판정. Node `path.posix`의 `resolve`·`relative`·`join`·`dirname`·`normalize`를 같은 알고리즘으로 옮긴 `node_path` 모듈을 쓴다. `path.resolve`가 기대던 프로세스의 현재 폴더는 TS가 `process.cwd()`로 넘긴다.
+- 옮기지 않은 것(2c에서 I/O와 함께): `realpath`·`lstat`으로 읽는 쪽, 상태 폴더를 가릴 빈 폴더 준비(지우는 코드), `docker compose config` 실행, 그리고 그것들과 판정을 잇는 `computeGitMask`·`findMissingMasks`·`detectGitEntries`. 보안 수정이 쌓인 함수라 구조를 바꾸지 않고, 안에서 부르는 판정만 Rust로 바꿨다.
+- 차등 시험: 순수 함수 4종에 무작위 입력 6만 5천 회, 임시 폴더(`.git` 폴더·상태 폴더·worktree 포인터 파일·`[b-studio]` 설정·심볼릭 링크·평가 자산)에서 `computeGitMask`·`findMissingMasks`를 1,500회 돌려 옛 TS와 비교했다. 다른 결과는 아래 의도한 차이뿐이었다.
+- 의도한 차이:
+  1. **`..`로 시작하는 이름을 안쪽으로 본다(고친 구멍).** 옛 TS의 안쪽 판정(`relative.startsWith('..')`)은 `..proj`도 바깥으로 읽어, 모노레포 루트를 마운트하고 프로젝트 폴더 이름이 `..proj`이면 `.git`을 가리지 않았다. 변이 확인에서 "옛 판정으로 되돌리기"가 테스트에 잡히지 않아 따라가다 찾았다. 같은 꼴이 저장소 11곳에 더 있어 #1004로 감사한다.
+  2. 서비스 안 마운트를 UTF-16 순서로 정렬한다(옛 TS는 ICU `localeCompare`). Docker 엔진은 마운트를 경로 깊이 순으로 다시 정렬해 붙이고 같은 깊이의 다른 경로는 겹치지 않아, 무엇이 막히는지는 바뀌지 않는다. 차등 시험에서 정렬 순서만 다른 경우가 1만 5천 회당 130~180번 나왔다.
+  3. compose 설정의 모양을 모르면(`driver_opts.o`가 문자열이 아님 등) `SandboxError`로 멈춘다. 옛 TS는 `TypeError`로 멈췄다. 둘 다 샌드박스를 만들지 않는다.
+- 변이 확인: Rust 쪽 핵심 줄 10곳. 처음에는 셋(상태 폴더 가림이 이기는 규칙, `..이름` 판정, 루트 `/`의 relative)을 기존 테스트가 잡지 못했다. 그 갈래를 지나는 벡터를 더한 뒤 10곳 모두 잡혔다.

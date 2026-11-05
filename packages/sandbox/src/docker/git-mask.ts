@@ -6,6 +6,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { SandboxError } from '../errors';
 import type { EvaluationAssetCopy } from './evaluation-assets';
 import type { BindMount } from './relay';
+import { native } from '../native';
 
 const execFileAsync = promisify(execFile);
 
@@ -53,63 +54,9 @@ const STATE_MASK = 'b-studio-empty';
  * 마운트의 source·target은 `docker compose config --format json`이 정규화한 값(절대 경로)이다
  */
 export function planGitMask(mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[], entries: readonly GitEntry[]): Record<string, MaskVolume[]> {
-  const plan = new Map<string, Map<string, MaskVolume>>();
-  const add = (service: string, volume: MaskVolume) => {
-    const volumes = plan.get(service) ?? new Map<string, MaskVolume>();
-    // 같은 자리를 둘 이상의 규칙이 덮으면 상태 폴더를 가리는 쪽이 남는다
-    if (!volumes.get(volume.target)?.source.endsWith(`/${STATE_MASK}`)) volumes.set(volume.target, volume);
-    plan.set(service, volumes);
-  };
-  const readOnly = (source: string, target: string): MaskVolume => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
-
-  for (const mount of mounts) {
-    const source = path.resolve(mount.source);
-    for (const entry of entries) {
-      const git = path.join(entry.dir, GIT);
-      const state = path.join(git, STATE);
-      if (isInside(source, entry.dir)) {
-        // 이 마운트 안에 `.git`이 보인다
-        const containerGit = path.posix.join(mount.target, toPosix(path.relative(source, git)));
-        add(mount.service, readOnly(git, containerGit));
-        if (entry.kind === 'directory' && entry.hasState) add(mount.service, readOnly(path.join(git, STATE_MASK), path.posix.join(containerGit, STATE)));
-      } else if (isInside(git, source)) {
-        // `.git` 안쪽을 직접 마운트했다. 같은 자리(target)의 마운트를 바꿔 쓴다
-        if (isInside(state, source)) add(mount.service, readOnly(path.join(git, STATE_MASK), mount.target));
-        else add(mount.service, readOnly(source, mount.target));
-      }
-    }
-  }
-  return Object.fromEntries([...plan].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
-}
-
-/** 평가 자산 하나가 덧붙는 자리. target은 컨테이너 안 경로, source는 b-studio 복사본이다 */
-interface EvaluationAssetMaskEntry {
-  service: string;
-  target: string;
-  source: string;
-  /** 이 target을 만든 평가 자산의 작업 복사본 절대 경로(같은 자리를 직접 마운트한 경우를 알아보는 데 쓴다) */
-  asset: string;
-}
-
-function evaluationAssetMaskEntries(
-  mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[],
-  projectRoot: string,
-  assets: readonly EvaluationAssetCopy[],
-): EvaluationAssetMaskEntry[] {
-  const entries: EvaluationAssetMaskEntry[] = [];
-  for (const mount of mounts) {
-    const source = path.resolve(mount.source);
-    for (const asset of assets) {
-      const assetAbs = path.resolve(projectRoot, asset.path);
-      if (isInside(source, assetAbs)) {
-        entries.push({ service: mount.service, target: path.posix.join(mount.target, toPosix(path.relative(source, assetAbs))), source: asset.source, asset: assetAbs });
-      } else if (isInside(assetAbs, source)) {
-        // 자산 폴더나 그 하위를 직접 마운트했다. 같은 자리(target)에 복사본의 같은 하위 경로를 붙인다
-        entries.push({ service: mount.service, target: mount.target, source: path.join(asset.source, path.relative(assetAbs, source)), asset: assetAbs });
-      }
-    }
-  }
-  return entries;
+  // 판정은 Rust(crates/bstudio-guard/src/git_mask.rs)가 한다. 경로 규칙은 Node path.posix와 같다
+  const plain = mounts.map(({ service, source, target }) => ({ service, source, target }));
+  return JSON.parse(native.planGitMask(JSON.stringify(plain), JSON.stringify(entries), process.cwd())) as Record<string, MaskVolume[]>;
 }
 
 /**
@@ -130,13 +77,15 @@ export function planEvaluationAssetMask(
   projectRoot: string,
   assets: readonly EvaluationAssetCopy[],
 ): Record<string, MaskVolume[]> {
-  const plan = new Map<string, Map<string, MaskVolume>>();
-  for (const entry of evaluationAssetMaskEntries(mounts, projectRoot, assets)) {
-    const volumes = plan.get(entry.service) ?? new Map<string, MaskVolume>();
-    volumes.set(entry.target, { type: 'bind', source: entry.source, target: entry.target, read_only: true, bind: { create_host_path: false } });
-    plan.set(entry.service, volumes);
-  }
-  return Object.fromEntries([...plan].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
+  return JSON.parse(native.planEvaluationAssetMask(JSON.stringify(plainMounts(mounts)), projectRoot, JSON.stringify(plainAssets(assets)), process.cwd())) as Record<string, MaskVolume[]>;
+}
+
+function plainMounts(mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[]) {
+  return mounts.map(({ service, source, target }) => ({ service, source, target }));
+}
+
+function plainAssets(assets: readonly EvaluationAssetCopy[]) {
+  return assets.map(({ path: assetPath, source }) => ({ path: assetPath, source }));
 }
 
 /**
@@ -146,22 +95,14 @@ export function planEvaluationAssetMask(
  * 컨테이너는 그 파일을 읽었다). 자산을 직접 마운트한 그 마운트 자신(같은 자리를 복사본으로 바꾸는 경우)만 빼고 **종류를 가리지 않고**
  * 거절한다 — `tmpfs`는 `docker inspect`의 `Mounts`에도, 호스트 마운트 목록에도 나오지 않지만 같은 자리에서 우리 마운트를 덮는다
  */
-function assertNoNestedAssetMounts(mounts: readonly ComposeMount[], entries: readonly EvaluationAssetMaskEntry[]): void {
-  for (const entry of entries) {
-    for (const mount of mounts) {
-      if (mount.service !== entry.service) continue;
-      if (mount.target === entry.target) {
-        // 우리 복사본으로 바꿔 쓰는 자산 자신의 마운트만 예외다. tmpfs와 이름 있는 볼륨은 같은 자리에서도 우리 마운트를 덮는다
-        if (mount.hostSource !== undefined && (isInside(mount.hostSource, entry.asset) || isInside(entry.asset, mount.hostSource))) continue;
-        throw new SandboxError(
-          `서비스 ${mount.service}가 평가 자산 자리 ${entry.target}에 다른 마운트(${mount.hostSource ?? mount.type})를 겹쳤습니다. 평가 자산을 보호할 수 없어 샌드박스를 만들지 않습니다`,
-        );
-      }
-      if (isInsidePosix(entry.target, mount.target)) {
-        throw new SandboxError(`서비스 ${mount.service}의 마운트 ${mount.target}(${mount.type})가 평가 자산 자리 ${entry.target} 안쪽에 있습니다. 평가 자산을 보호할 수 없어 샌드박스를 만들지 않습니다`);
-      }
-    }
-  }
+function assertNoNestedAssetMounts(
+  composeMounts: readonly ComposeMount[],
+  mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[],
+  projectRoot: string,
+  assets: readonly EvaluationAssetCopy[],
+): void {
+  const problem = native.nestedAssetMountError(JSON.stringify(composeMounts), JSON.stringify(plainMounts(mounts)), projectRoot, JSON.stringify(plainAssets(assets)), process.cwd());
+  if (problem != null) throw new SandboxError(problem);
 }
 
 /**
@@ -188,48 +129,27 @@ export interface ComposeMountConfig {
   volumes?: Record<string, { driver?: string; driver_opts?: Record<string, string>; external?: unknown } | null>;
 }
 
-type ComposeVolume = NonNullable<ComposeMountConfig['services'][string]['volumes']>[number];
 
 /** 이름 있는 볼륨이 로컬 드라이버로 호스트 폴더에 묶인 꼴(`driver_opts: { type: none, o: bind, device: <경로> }`)이면 그 호스트 경로 */
 export function boundDevice(volume: { driver?: string; driver_opts?: Record<string, string> } | null | undefined): string | undefined {
-  if (!volume || (volume.driver !== undefined && volume.driver !== 'local')) return undefined;
-  const options = (volume.driver_opts?.o ?? '').split(',').map((option) => option.trim());
-  const device = volume.driver_opts?.device;
-  return device && path.isAbsolute(device) && (options.includes('bind') || options.includes('rbind')) ? device : undefined;
+  return asSandboxError(() => native.boundDevice(JSON.stringify(volume ?? null))) ?? undefined;
+}
+
+/** Rust 판정이 compose 설정의 모양을 알아보지 못해 던지면 샌드박스 오류로 바꾼다(보호를 정할 수 없으니 멈춘다) */
+function asSandboxError<T>(run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    throw new SandboxError(error instanceof Error ? error.message : String(error));
+  }
 }
 
 /**
- * 서비스별 마운트를 `volumes_from`까지 물려받아 펼친다(물려준 서비스의 마운트를 같은 target으로 물려받는다. 전이적이며 순환은 끊는다).
+ * 서비스가 호스트 폴더를 붙이는 모든 꼴을 모은다: bind 마운트, 호스트 폴더에 묶은 이름 있는 볼륨, `volumes_from`으로 물려받은 마운트(전이적, 순환은 끊는다).
  * `volumes_from`이 compose 밖 컨테이너(`container:<이름>`)를 가리키면 무엇이 붙는지 알 수 없으므로 던진다
  */
-function inheritedVolumes(config: ComposeMountConfig): Array<{ service: string; volume: ComposeVolume }> {
-  const effective = (service: string, seen: Set<string>): ComposeVolume[] => {
-    if (seen.has(service)) return [];
-    seen.add(service);
-    const inherited = (config.services[service]?.volumes_from ?? []).flatMap((entry) => {
-      const name = entry.split(':')[0]!;
-      if (name === 'container') throw new SandboxError(`서비스 ${service}의 volumes_from(${entry})이 compose 밖의 컨테이너를 가리켜 무엇이 마운트되는지 알 수 없습니다. .git 보호를 정할 수 없어 멈춥니다`);
-      return effective(name, seen);
-    });
-    return [...(config.services[service]?.volumes ?? []), ...inherited];
-  };
-  return Object.keys(config.services).flatMap((service) => effective(service, new Set()).map((volume) => ({ service, volume })));
-}
-
-/**
- * 서비스가 호스트 폴더를 붙이는 모든 꼴을 모은다: bind 마운트, 호스트 폴더에 묶은 이름 있는 볼륨, `volumes_from`으로 물려받은 마운트
- */
 export function collectHostMounts(config: ComposeMountConfig): Array<Pick<BindMount, 'service' | 'source' | 'target'>> {
-  const mounts: Array<Pick<BindMount, 'service' | 'source' | 'target'>> = [];
-  for (const { service, volume } of inheritedVolumes(config)) {
-    if (!volume.source) continue;
-    if (volume.type === 'bind') mounts.push({ service, source: path.resolve(volume.source), target: volume.target });
-    else if (volume.type === 'volume') {
-      const device = boundDevice(config.volumes?.[volume.source]);
-      if (device) mounts.push({ service, source: path.resolve(device), target: volume.target });
-    }
-  }
-  return mounts;
+  return JSON.parse(asSandboxError(() => native.collectHostMounts(JSON.stringify(config), process.cwd()))) as Array<Pick<BindMount, 'service' | 'source' | 'target'>>;
 }
 
 /** compose 설정의 마운트 한 개. 평가 자산 자리를 덮는지 볼 때는 종류를 가리지 않는다 */
@@ -241,25 +161,16 @@ interface ComposeMount {
   hostSource?: string;
 }
 
-/** compose의 `tmpfs`(문자열 또는 목록)에서 컨테이너 경로만 뽑는다. `경로:옵션` 꼴이면 경로만 */
-function tmpfsTargets(tmpfs: string | readonly string[] | undefined): string[] {
-  const entries = typeof tmpfs === 'string' ? [tmpfs] : (tmpfs ?? []);
-  return entries.map((entry) => entry.split(':')[0]!.trim()).filter((entry) => entry !== '');
-}
-
 /**
  * 서비스의 모든 종류 마운트(bind·volume·tmpfs·npipe 등)를 모은다. `tmpfs`는 `Mounts`에 나오지 않고 서비스 설정에만 있으므로
- * `volumes`와 따로 더한다(tmpfs는 volumes_from으로 물려받지 않는다)
+ * `volumes`와 따로 더한다(tmpfs는 volumes_from으로 물려받지 않는다). 무엇을 모을지는 Rust가 정하고, 호스트 원본의 링크 풀기만 여기서 한다
  */
 async function collectComposeMounts(config: ComposeMountConfig): Promise<ComposeMount[]> {
+  const specs = JSON.parse(asSandboxError(() => native.composeMountSpecs(JSON.stringify(config), process.cwd()))) as Array<{ service: string; type: string; target: string; host?: string }>;
   const mounts: ComposeMount[] = [];
-  for (const [service, spec] of Object.entries(config.services)) {
-    for (const target of tmpfsTargets(spec.tmpfs)) mounts.push({ service, type: 'tmpfs', target });
-  }
-  for (const { service, volume } of inheritedVolumes(config)) {
-    const host = volume.source === undefined ? undefined : volume.type === 'bind' ? volume.source : volume.type === 'volume' ? boundDevice(config.volumes?.[volume.source]) : undefined;
-    const hostSource = host === undefined ? undefined : await real(path.resolve(host));
-    mounts.push({ service, type: volume.type, target: volume.target, ...(hostSource === undefined ? {} : { hostSource }) });
+  for (const { service, type, target, host } of specs) {
+    const hostSource = host === undefined ? undefined : await real(host);
+    mounts.push({ service, type, target, ...(hostSource === undefined ? {} : { hostSource }) });
   }
   return mounts;
 }
@@ -301,7 +212,7 @@ export async function computeGitMask(
   if (evaluationAssets.length === 0) return gitMask;
   // 사용자 compose가 평가 자산 자리 위에 더 깊은 마운트를 얹으면 우리 복사본 위에 그 내용이 덮인다. 만들지 않고 멈춘다.
   // bind뿐 아니라 tmpfs·이름 있는 볼륨까지 본다(그것들은 collectHostMounts에 나오지 않는다)
-  assertNoNestedAssetMounts(await collectComposeMounts(config), evaluationAssetMaskEntries(mounts, root, evaluationAssets));
+  assertNoNestedAssetMounts(await collectComposeMounts(config), mounts, root, evaluationAssets);
   return mergeMasks(planEvaluationAssetMask(mounts, root, evaluationAssets), gitMask);
 }
 
@@ -322,15 +233,7 @@ export async function selectEvaluationAssetVolumes(volumes: readonly MaskVolume[
 
 /** 마스크 계획을 서비스·target으로 합친다. 뒤에 오는 계획이 같은 target에서 이긴다 */
 function mergeMasks(...plans: ReadonlyArray<Record<string, readonly MaskVolume[]>>): Record<string, MaskVolume[]> {
-  const merged = new Map<string, Map<string, MaskVolume>>();
-  for (const plan of plans) {
-    for (const [service, volumes] of Object.entries(plan)) {
-      const byTarget = merged.get(service) ?? new Map<string, MaskVolume>();
-      for (const volume of volumes) byTarget.set(volume.target, volume);
-      merged.set(service, byTarget);
-    }
-  }
-  return Object.fromEntries([...merged].map(([service, volumes]) => [service, [...volumes.values()].sort((a, b) => a.target.localeCompare(b.target))]));
+  return JSON.parse(native.mergeMasks(JSON.stringify(plans))) as Record<string, MaskVolume[]>;
 }
 
 /**
@@ -378,14 +281,7 @@ export interface InspectedMount {
  * 그 밖의 꼴(접미어만 같은 다른 경로 등)은 받지 않는다
  */
 function dockerDesktopHostPath(source: string): string | undefined {
-  for (const prefix of ['/host_mnt/', '/run/desktop/mnt/host/']) {
-    if (!source.startsWith(prefix)) continue;
-    // 접두어의 마지막 `/`는 남긴다 — 뗀 경로가 `/Users/…`처럼 절대 경로여야 한다
-    const stripped = source.slice(prefix.length - 1);
-    if (!path.posix.isAbsolute(stripped) || stripped.split('/').includes('..')) return undefined;
-    return stripped;
-  }
-  return source;
+  return native.dockerDesktopHostPath(source) ?? undefined;
 }
 
 export interface MissingMaskOptions {
@@ -464,19 +360,14 @@ async function real(target: string): Promise<string> {
   return realpath(target).catch(() => path.resolve(target));
 }
 
+/** 호스트 경로 비교(Node path.relative와 같은 규칙, 판정은 Rust) */
 function isInside(parent: string, target: string): boolean {
-  const relative = path.relative(parent, target);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return native.isInsideHostPath(process.cwd(), parent, target);
 }
 
 /** 컨테이너 안 경로(target)를 비교한다. 호스트 경로가 아니라 항상 POSIX 규칙이다 */
 function isInsidePosix(parent: string, target: string): boolean {
-  const relative = path.posix.relative(parent, target);
-  return relative === '' || (!relative.startsWith('..') && !path.posix.isAbsolute(relative));
-}
-
-function toPosix(relative: string): string {
-  return relative.split(path.sep).join('/');
+  return native.isInsidePosix(parent, target);
 }
 
 /**
