@@ -57,6 +57,15 @@ interface NativeGuard {
   parseSyncOutput(stdout: string): string[][];
   parseLogLine(raw: string): string | null | undefined;
   NativeSyncObservations: new () => NativeSyncObservations;
+  // ── compose override와 edge 설정(2단계 2b-2a). 입력·출력은 JSON 문자열. 모양이 어긋난 입력은 던진다
+  edgeConstants(): string;
+  edgePortFor(managedNames: string[], service: string): number;
+  directHosts(services: string[], externals: string[]): string[];
+  proxyEnvironment(direct: string[]): string;
+  edgeEnvironment(inputJson: string): string;
+  buildOverride(inputJson: string): string;
+  composeUpArgs(explicit: string[] | undefined, edgeService: string): string[];
+  resolvePublicUrlPlaceholders(value: string, hostPortsJson: string): string;
 }
 
 export interface NativeSyncObservations {

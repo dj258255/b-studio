@@ -1,27 +1,29 @@
-import { publicUrlPlaceholder, resolvePublicUrlPlaceholders, type LoadedProject } from '@b-studio/spec';
-import { directHosts, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, edgeEnvironment, edgePortFor, proxyEnvironment } from '../edge-config';
+import type { LoadedProject } from '@b-studio/spec';
+import { nativeProject } from '../edge-config';
 import { decodeNative, native } from '../native';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
 import type { MaskVolume } from './git-mask';
 
-export { DEFAULT_EGRESS_ALLOW, EDGE_PROXY_PORT, EDGE_SERVICE, edgePortFor } from '../edge-config';
+export { DEFAULT_EGRESS_ALLOW, EDGE_PROXY_PORT, EDGE_SERVICE, edgePortFor, EGRESS_NETWORK, SANDBOX_NETWORK } from '../edge-config';
 
-/** 외부로 나갈 수 없는 네트워크. 모든 서비스가 여기에만 붙는다 */
-export const SANDBOX_NETWORK = 'b-studio-sandbox';
-/** edge만 붙는 네트워크. 허용한 외부 호스트로 나갈 때 쓴다 */
-export const EGRESS_NETWORK = 'b-studio-egress';
+/** 덧씌울 compose 설정. 키 순서가 YAML 글자를 정한다 */
+export interface ComposeOverride {
+  networks: Record<string, Record<string, unknown>>;
+  services: Record<string, Record<string, unknown>>;
+}
 
 /**
- * 사용자의 compose 파일은 건드리지 않고 덧씌울 설정.
+ * 사용자의 compose 파일은 건드리지 않고 덧씌울 설정. 격리를 정하는 판정이라 Rust(crates/bstudio-guard/src/compose_override.rs)가 만든다(ADR-191).
  *  - 모든 서비스를 외부로 나갈 수 없는 internal 네트워크에만 붙인다 (운영 DB, 사내망, 인터넷 차단)
  *  - internal 네트워크의 컨테이너는 포트를 공개할 수 없으므로 edge가 루프백의 빈 포트로 대신 공개해 넘긴다
  *  - HTTP(S) 도구는 edge 프록시를 거쳐 허용한 호스트로만 나간다
- *  - 다른 서비스의 공개 주소를 참조하는 환경 변수(`project.publicUrlRefs`, fix/frontend-backend-url)가 있으면,
+ *  - 다른 서비스의 공개 주소를 참조하는 환경 변수(`project.publicUrlRefs`)가 있으면,
  *    그 대상 서비스는 `hostPorts`로 미리 정한 호스트 포트를 그대로 공개하고(자동 배정 대신), 참조한 서비스의
- *    environment에 실제 주소(`http://127.0.0.1:<포트>`)로 채운 값을 넣는다. 포트를 `docker compose up` 뒤에야
- *    아는 서비스는(hostPorts에 없으면) 예전처럼 자동 배정한다
+ *    environment에 실제 주소(`http://127.0.0.1:<포트>`)로 채운 값을 넣는다. hostPorts에 없으면 예전처럼 자동 배정한다
  *  - 프로젝트 폴더를 마운트한 서비스는 그 안의 `.git`을 읽기 전용으로, b-studio 상태 폴더(`.git/b-studio`)는 빈 폴더(읽기 전용)로 덮는다
  *    (`gitMask`, ADR-158). 컨테이너 안 명령이 체크포인트 저장소와 테스트 근거를 위조하지 못하게 한다
+ *  - 시크릿 값은 쓰지 않고 자리를 `null`로 비운다. compose가 자기 프로세스 환경에서 채운다
+ * 모양이 어긋난 입력은 던진다(샌드박스를 만들지 않는 쪽)
  */
 export function buildOverride(
   project: LoadedProject,
@@ -32,96 +34,18 @@ export function buildOverride(
     hostPorts = {},
     gitMask = {},
   }: { edgeScript?: string; runtime?: string; hostPorts?: Record<string, number>; gitMask?: Readonly<Record<string, readonly MaskVolume[]>> } = {},
-) {
-  const composeServices = project.composeServices ?? project.managed.map(([name]) => name);
-  const externals = project.external ?? [];
-  // 등록한 사내 API 이름은 edge의 별칭이므로 HTTP 프록시(3128)를 거치지 않고 바로 부른다
-  const environment = proxyEnvironment(directHosts(project, composeServices));
+): ComposeOverride {
+  return JSON.parse(native.buildOverride(JSON.stringify({ ...nativeProject(project), sandboxId, edgeScript, runtime, hostPorts, gitMask }))) as ComposeOverride;
+}
 
-  // 프록시가 듣기 전에 서비스가 뜨면 첫 다운로드(corepack의 pnpm 등)가 연결 거부로 실패하고 컨테이너가 끝난다
-  const waitForEdge = { [EDGE_SERVICE]: { condition: 'service_healthy' } };
-  // gVisor(runsc) 같은 런타임은 에이전트 코드가 도는 서비스와 샌드박스 네트워크에 노출된 edge에 모두 건다
-  const isolation = runtime ? { runtime } : {};
-  const services: Record<string, Record<string, unknown>> = Object.fromEntries(
-    composeServices.map((name) => [name, { networks: [SANDBOX_NETWORK], environment, depends_on: waitForEdge, ...isolation }]),
-  );
-  for (const [name] of project.managed) {
-    services[name] = { ...services[name], labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': name } };
-  }
-
-  // 같은 target의 마운트는 compose가 override 쪽으로 합치므로 사용자의 마운트 위에 `.git` 마운트가 겹친다
-  for (const [name, volumes] of Object.entries(gitMask)) {
-    if (volumes.length > 0) services[name] = { ...services[name], volumes: [...volumes] };
-  }
-
-  // 시크릿 값은 override 파일에 쓰지 않는다. 값 자리를 비워 두면 compose가 자기 프로세스 환경에서 채운다
-  for (const [name, secret] of project.secrets ?? []) {
-    for (const service of secret.services) {
-      const current = services[service] ?? {};
-      services[service] = { ...current, environment: { ...(current.environment as Record<string, unknown> | undefined), [name]: null } };
-    }
-  }
-
-  // 런타임 공개 URL 주입(fix/frontend-backend-url): hostPorts로 미리 정한 포트만 실제 주소로 바꿀 수 있다.
-  // (loadProject가 targetService를 managed 서비스로만 검증해 두어, 여기 없는 이름은 호출자가 hostPorts를 안 채운 경우뿐이다 —
-  // 그런 자리 표시자는 바뀌지 않은 채 남는다. 값 하나에 자리 표시자가 둘 이상이어도 서비스별로 맞는 포트를 찾아 바꾼다)
-  const publicUrlFor = (service: string): string => {
-    const port = hostPorts[service];
-    return port === undefined ? publicUrlPlaceholder(service) : `http://127.0.0.1:${port}`;
-  };
-  for (const ref of project.publicUrlRefs ?? []) {
-    if (!(ref.targetService in hostPorts)) continue;
-    const current = services[ref.service] ?? {};
-    const resolved = resolvePublicUrlPlaceholders(ref.template, publicUrlFor);
-    services[ref.service] = { ...current, environment: { ...(current.environment as Record<string, unknown> | undefined), [ref.envKey]: resolved } };
-  }
-
-  services[EDGE_SERVICE] = {
-    image: EDGE_IMAGE,
-    ...isolation,
-    // compose는 command 안의 $도 변수로 치환하므로 스크립트의 $를 $$로 적는다
-    command: ['node', '--input-type=module', '-e', edgeScript.replaceAll('$', '$$$$')],
-    environment: {
-      // compose는 environment 값의 $도 치환하므로 $$로 적는다
-      ...Object.fromEntries(Object.entries(edgeEnvironment(project, composeServices)).map(([key, value]) => [key, value.replaceAll('$', '$$$$')])),
-      // 사내 API 인증 시크릿은 edge에만 넣는다. 값 자리를 비워 compose 프로세스 환경에서 채운다
-      ...Object.fromEntries(externals.flatMap(([, service]) => (service.policy.auth ? [[service.policy.auth.secret, null]] : []))),
-    },
-    // 등록한 사내 API 이름을 internal 네트워크의 별칭으로 가져, 서비스가 http://<이름>/으로 부르면 edge로 온다
-    networks: { [SANDBOX_NETWORK]: { aliases: externals.map(([name]) => name) }, [EGRESS_NETWORK]: {} },
-    // 사내 API가 Docker 호스트에서 돌 때도 edge가 찾아갈 수 있게 한다
-    ...(externals.length > 0 ? { extra_hosts: ['host.docker.internal:host-gateway'] } : {}),
-    healthcheck: {
-      test: ['CMD', 'node', '-e', `require('node:net').connect(${EDGE_PROXY_PORT}, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))`],
-      interval: '1s',
-      timeout: '2s',
-      retries: 30,
-      start_interval: '200ms',
-      start_period: '10s',
-    },
-    // 루프백의 빈 포트에만 공개해서 같은 네트워크의 다른 PC에서 접근하지 못하게 한다.
-    // hostPorts에 미리 정한 포트가 있는 서비스(다른 서비스가 publicUrl로 참조하는 서비스)는 그 포트를 그대로 공개한다 —
-    // 그래야 `up`보다 먼저 쓴 환경 변수의 주소가 실제로 공개되는 포트와 어긋나지 않는다. 없으면 예전처럼 자동 배정한다
-    ports: project.managed.map(([name]) => {
-      const port = hostPorts[name];
-      return port === undefined ? `127.0.0.1::${edgePortFor(project, name)}` : `127.0.0.1:${port}:${edgePortFor(project, name)}`;
-    }),
-    labels: { 'b-studio.sandbox': sandboxId, 'b-studio.service': EDGE_SERVICE },
-    deploy: { resources: { limits: { memory: '128m', cpus: '0.5' } } },
-  };
-
-  // 서비스 단위 cpus는 compose가 deploy.resources.limits와 섞어 쓰지 못하게 하므로 deploy 형식으로만 건다
-  for (const [name, limit] of Object.entries(project.resources ?? {})) {
-    const limits = {
-      ...(limit.memory ? { memory: limit.memory } : {}),
-      ...(limit.cpus ? { cpus: String(limit.cpus) } : {}),
-    };
-    services[name] = { ...services[name], deploy: { resources: { limits } } };
-  }
-  return {
-    networks: { [SANDBOX_NETWORK]: { internal: true }, [EGRESS_NETWORK]: {} },
-    services,
-  };
+/**
+ * `docker compose up`에 붙일 서비스 인자(ADR-083, 서비스 선택). `explicit`이 없으면(옛 동작과 호환)
+ * 빈 배열을 돌려줘 compose 파일의 모든 서비스를 띄운다. 있으면 그 서비스들과 edge 프록시만 이름 순으로 적고,
+ * `--no-deps`를 붙여 목록에 없는 의존 서비스를 compose가 몰래 따라 띄우지 않게 한다 — 사용자가 의존 서비스를
+ * 명시적으로 뺐을 수 있어서다(뺀 적이 없어 의존 서비스가 이미 목록에 있다면 --no-deps를 붙여도 결과는 같다)
+ */
+export function composeUpArgs(explicit: readonly string[] | undefined, edgeService: string): string[] {
+  return native.composeUpArgs(explicit ? [...explicit] : undefined, edgeService);
 }
 
 /** edge 감사 로그 한 줄: `{"edge":"egress","decision":"deny","host":"example.com","port":443,"reason":"...","at":"..."}` */
@@ -146,17 +70,6 @@ export function egressAuditExcerpt(lines: readonly string[], max = 5): string[] 
 /** `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다 */
 export function parseRuntimes(stdout: string): string[] {
   return native.parseRuntimes(stdout);
-}
-
-/**
- * `docker compose up`에 붙일 서비스 인자(ADR-083, 서비스 선택). `explicit`이 없으면(옛 동작과 호환)
- * 빈 배열을 돌려줘 compose 파일의 모든 서비스를 띄운다. 있으면 그 서비스들과 edge 프록시만 이름 순으로 적고,
- * `--no-deps`를 붙여 목록에 없는 의존 서비스를 compose가 몰래 따라 띄우지 않게 한다 — 사용자가 의존 서비스를
- * 명시적으로 뺐을 수 있어서다(뺀 적이 없어 의존 서비스가 이미 목록에 있다면 --no-deps를 붙여도 결과는 같다)
- */
-export function composeUpArgs(explicit: readonly string[] | undefined, edgeService: string): string[] {
-  if (!explicit) return [];
-  return ['--no-deps', ...[...new Set([...explicit, edgeService])].sort()];
 }
 
 /** `docker compose port <service> <port>` 출력에서 호스트 포트를 읽는다 */
