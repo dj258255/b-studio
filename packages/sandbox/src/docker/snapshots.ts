@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { encodeNative, native } from '../native';
 import type { SnapshotEvent } from '../types';
 
 /** 스냅샷 볼륨에 붙이는 라벨. 정리할 때 이 라벨로 찾는다 */
@@ -21,46 +21,33 @@ export interface SnapshotKeyInput {
  * 프로젝트를 키에 넣어, 한 프로젝트의 설치 결과가 lockfile이 같은 다른 프로젝트로 넘어가지 않게 한다.
  */
 export function snapshotName({ project, service, volume, files }: SnapshotKeyInput): string {
-  const hash = createHash('sha256').update(`b-studio-snapshot-v1\0${project}\0${service}\0${volume}\0`);
-  for (const file of [...files].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))) {
-    // 경로와 길이를 함께 넣어 파일 경계가 달라도 같은 해시가 나오지 않게 한다
-    hash.update(`${file.path}\0${file.content ? file.content.length : 'MISSING'}\0`);
-    if (file.content) hash.update(file.content);
-  }
-  return `b-studio-snapshot-${hash.digest('hex').slice(0, 24)}`;
+  // 해시는 Rust(crates/bstudio-guard/src/snapshots.rs)가 낸다. 같은 알고리즘(SHA-256), 같은 입력 순서, 같은 출력 형식이다
+  return native.snapshotName(
+    project,
+    service,
+    volume,
+    files.map((file) => file.path),
+    files.map((file) => Boolean(file.content)),
+    files.map((file) => file.content ?? Buffer.alloc(0)),
+  );
 }
 
 export function snapshotSlot(project: string, service: string, volume: string): string {
-  return `${project}/${service}/${volume}`;
+  return native.snapshotSlot(project, service, volume);
 }
 
 /** compose가 만드는 이름 있는 볼륨의 실제 이름: <프로젝트 이름>_<볼륨 키> */
 export function composeVolumeName(composeProject: string, volume: string): string {
-  return `${composeProject}_${volume}`;
+  return native.composeVolumeName(composeProject, volume);
 }
 
 /** `docker volume inspect --format '{{.Name}} {{.CreatedAt}}'` 출력에서 오래된 스냅샷을 골라 지울 이름을 돌려준다 */
 export function snapshotsToPrune(inspectOutput: string, keep = SNAPSHOTS_TO_KEEP): string[] {
-  return inspectOutput
-    .split('\n')
-    .map((line) => line.trim().split(/\s+/))
-    .filter((parts): parts is [string, string] => parts.length >= 2 && Boolean(parts[0]))
-    .map(([name, createdAt]) => ({ name, createdAt: Date.parse(createdAt) || 0 }))
-    .sort((a, b) => b.createdAt - a.createdAt)
-    .slice(keep)
-    .map((volume) => volume.name);
+  // 시각은 JS가 읽어야 같은 값이 나오므로 Date.parse를 넘긴다
+  return native.snapshotsToPrune(inspectOutput, keep, (text) => Date.parse(text));
 }
 
 export function describeSnapshotEvent(event: SnapshotEvent): string {
-  const seconds = (ms: number) => `${(ms / 1_000).toFixed(1)}초`;
-  switch (event.action) {
-    case 'seeded':
-      return `${event.volume} 볼륨을 스냅샷에서 채웠습니다 (${seconds(event.elapsedMs)})`;
-    case 'missing':
-      return `${event.volume} 스냅샷이 없어 처음부터 설치합니다`;
-    case 'captured':
-      return `${event.volume} 볼륨을 다음 기동용 스냅샷으로 저장했습니다 (${seconds(event.elapsedMs)})`;
-    case 'failed':
-      return `${event.volume} 스냅샷 ${event.stage === 'seed' ? '복사' : '저장'}에 실패해 스냅샷 없이 진행합니다: ${event.reason}`;
-  }
+  // 알 수 없는 action이면 옛 TS처럼 undefined를 돌려준다(타입은 모든 경우를 덮는다)
+  return (native.describeSnapshotEvent(encodeNative(event)) ?? undefined) as string;
 }

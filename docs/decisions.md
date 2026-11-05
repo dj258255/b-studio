@@ -9039,3 +9039,21 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
   2. 서비스 안 마운트를 UTF-16 순서로 정렬한다(옛 TS는 ICU `localeCompare`). Docker 엔진은 마운트를 경로 깊이 순으로 다시 정렬해 붙이고 같은 깊이의 다른 경로는 겹치지 않아, 무엇이 막히는지는 바뀌지 않는다. 차등 시험에서 정렬 순서만 다른 경우가 1만 5천 회당 130~180번 나왔다.
   3. compose 설정의 모양을 모르면(`driver_opts.o`가 문자열이 아님 등) `SandboxError`로 멈춘다. 옛 TS는 `TypeError`로 멈췄다. 둘 다 샌드박스를 만들지 않는다.
 - 변이 확인: Rust 쪽 핵심 줄 10곳. 처음에는 셋(상태 폴더 가림이 이기는 규칙, `..이름` 판정, 루트 `/`의 relative)을 기존 테스트가 잡지 못했다. 그 갈래를 지나는 벡터를 더한 뒤 10곳 모두 잡혔다.
+
+### 덧붙임: 2단계 2b-1 — 출력 해석 함수 (2026-11-05, [#1007](https://github.com/dj258255/b-studio/issues/1007))
+- 옮긴 것: `usage.ts`(크기 표기·`docker stats`·`docker inspect` 해석, 사용량 병합, 기동 네트워크, 크기 서식, 사용량 서술), `host-containers.ts`(목록 해석, 소유자 분류, 프로젝트 폴더 일치, 사용자 컨테이너 묶기, stats 붙이기), `host-processes.ts`(포워더 판정, `lsof`·`ss`·`ps` 해석, 선언 포트 맞추기, Actuator 응답 분류), `snapshots.ts`(이름 해시, 자리, 정리 대상, 사건 문구), `stray-processes.ts`(찾기 출력 해석, 기준선과 견주기), `format.ts`의 해석 함수(`parseEgressDenial`·`egressAuditExcerpt`·`parseRuntimes`·`parseHostPort`·`parseContainerStates`·`parseContainerState`·`parseSyncOutput`·`parseLogLine`·`SyncObservations`). 상태가 있는 `SyncObservations`는 napi 클래스(`NativeSyncObservations`)다. TS에는 같은 이름·같은 시그니처의 껍데기만 남았다.
+- 옮기지 않은 것: `buildOverride`·`composeUpArgs`(보안 결정을 담은 계획 함수, 2b-2), `probeActuator`의 네트워크 호출, `scanProcesses`의 실행과 셸 스크립트 상수, 이미지 이름 같은 상수, `classifyRole`(`service-role.ts`, Kubernetes 제공자도 쓴다. Rust에 같은 규칙이 `usage`에 한 벌 더 있다). 날짜(`new Date(...)`, `Date.parse`)는 JS가 읽어야 같은 값이 나와서 TS에 두었다: Rust는 시각 문자열을 돌려주거나(`parseEgressDenial`·`parseLogLine`) 읽는 함수를 받는다(`snapshotsToPrune`).
+- JS가 읽는 규칙을 `js`·`js_json` 모듈에 모았다: `Number()`·`parseInt`·`parseFloat`, `Number#toString`(지수 표기)과 `toFixed`(가운데는 큰 쪽, Rust `{:.N}`은 짝수), `Math.round`(가운데는 +무한대 쪽), `trimEnd`, `\s` 분할(BOM은 공백, U+0085는 아님), `slice`의 음수·NaN 시작, 안정 정렬(비교 값 NaN은 0), SameValueZero, `JSON.parse` 문법(범위를 넘는 수는 `Infinity`, 같은 키는 값만 바꾸고 자리는 처음 것), 객체 순서(정수 꼴 키가 먼저), 형 변환(`ToString`·`ToNumber`·진릿값). 정규식 `\s`·`\S`·`.`는 JS 글자 집합으로 풀어 썼고, `/i`는 ASCII만 접는다. SHA-256은 의존성을 늘리지 않으려고 직접 짰다(표준 값과 Node `createHash` 출력으로 확인).
+- 경계: 큰 구조는 JSON 문자열로 주고받고 `NaN`·`Infinity`·`-0`은 NUL로 시작하는 키 하나짜리 객체로 건넨다(`encodeNative`·`decodeNative`). 묶음이 부르는 쪽의 객체를 그대로 끼워야 하는 함수(`discoverUserContainers`·`matchDeclaredPorts`·`foreignProcesses`·`mergeHostContainerStats`)는 인덱스를 돌려준다.
+- 차등 시험: 옛 TS와 새 Rust에 같은 무작위 입력을 34종 함수에 넣었다. 시드 9개(2만 5천 회 4개 + 3만 회 5개), 함수마다 25만 회, 합계 약 850만 번 비교. **다른 결과 0, 키 순서만 다른 경우 0.** 결과 분포는 값·빈 값·오류가 모두 섞였다(시드 15의 3만 회 기준 `parseStatsOutput` 값 1만 6천·빈 6천·오류 7천, `parsePsRow` 값 1,672로 가장 적음, `parseEgressDenial` 값 3,083). 입력에는 JS와 Rust가 다르게 읽는 것(BOM·NBSP·U+0085·U+2028, 켈빈 기호, 지수·16진수, `1e999`, 정수 꼴 키, 값의 종류가 어긋난 필드)을 섞었다. 처음 시도에서 선형 합동 발생기가 입력을 한쪽으로 쏠리게 해(`lsof`·`ss`·`egress` 입력이 전부 빈 결과) mulberry32로 바꾸고 구조를 가진 입력을 따로 만들어 분포를 고쳤다. 같은 시험에서 `describeSnapshotEvent`가 모르는 action에 `undefined` 대신 `null`을 돌려주는 차이를 잡아 고쳤다. 대조 장치는 알려진 차이(NUL 키)로 잡히는 것을 확인했다.
+- 벡터 테스트(`parsers-vectors.test.ts`, 399개): 기대값은 옛 TS가 낸 값이다. 새 테스트를 옛 TS에 돌리면 의도한 차이 테스트 5개만 실패하고 나머지 392개는 통과한다.
+- 의도한 차이(모두 읽지 않거나 대체하는 쪽):
+  1. 키가 NUL로 시작하는 JSON은 읽지 않는다(경계의 표시 객체와 겹치지 않게). 던지거나(`parseStatsOutput` 등), 읽지 못한 값으로 처리한다(`parseEgressDenial`은 `undefined`).
+  2. 중첩이 2,000단계를 넘는 JSON은 읽지 않는다(Rust 호출 스택 보호).
+  3. 짝 없는 서로게이트 이스케이프(`\ud800`)는 U+FFFD로 읽는다.
+  4. 값이 `undefined`인 속성은 결과 객체에 키로 남지 않는다(`toEqual`은 같게 본다).
+  5. JSON 오류는 `SyntaxError`가 아니라 `Error`로, 메시지도 다르게 던진다.
+  6. 비교 함수가 일관되지 않은 정렬(서비스 이름이 없거나 문자열이 아닌 값이 섞임)은 JS도 순서를 정하지 않아 같음을 보장하지 않는다. 실제 입력은 항상 문자열이다.
+  7. `classifyOwnership`은 `in` 대신 `Object.keys`로 라벨 이름을 본다(상속·비열거 속성은 보지 않는다). 경로 규칙은 POSIX다(2a와 같다).
+- 변이 확인: Rust 핵심 줄 38곳을 하나씩 망가뜨렸다. 처음에는 3곳을 벡터가 잡지 못했다: 정수 꼴 키 순서 둘(입력 JSON을 JS 객체로 만들어 순서가 이미 바뀌어 있었다 — 글자 그대로 키 순서를 정한 입력을 더했다)과 호스트 포트 오류 문구(던지는지만 보고 문구는 보지 않았다 — 문구 테스트를 더했다). 더한 뒤 37곳이 잡혔고, 남은 1곳(`slice` 음수 시작의 경계 `< 0`을 `< -1`로)은 Rust의 실수→정수 변환이 음수를 0으로 만들어 결과가 같은 변이(동치)다.
+- 돌리지 않은 것: 실제 `docker`·`lsof`·`ss`·`ps` 출력으로 돌려 본 것(출력 모양을 흉내 낸 입력과 기존 테스트만), Windows 경로, 실험 경로(Kubernetes 제공자는 같은 `format.ts` 함수를 쓰는 만큼 따라오지만 따로 확인하지 않았다).

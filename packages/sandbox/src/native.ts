@@ -22,6 +22,46 @@ interface NativeGuard {
   dockerDesktopHostPath(source: string): string | null | undefined;
   isInsideHostPath(cwd: string, parent: string, target: string): boolean;
   isInsidePosix(parent: string, target: string): boolean;
+  // ── 출력 해석 함수(2단계 2b-1). 큰 구조는 JSON 문자열. NaN·Infinity는 표시 객체로 오간다(encodeNative·decodeNative)
+  parseDockerBytes(text: string): number | null | undefined;
+  parseStatsOutput(stdout: string): string;
+  parseInspectOutput(stdout: string): string;
+  mergeUsage(inspectedJson: string, statsJson: string, managedNames: string[], edgeService: string): string;
+  bootNetworkFromUsage(usageJson: string, exclude: string): string;
+  formatBytes(bytes: number | undefined): string;
+  describeUsage(usageJson: string): string;
+  classifyOwnership(labelKeys: string[]): string;
+  parseHostContainers(stdout: string): string;
+  matchesProjectRoot(workingDir: string | undefined, projectRoot: string, cwd: string): boolean;
+  discoverUserContainers(containersJson: string, projectRoot: string, cwd: string): string;
+  mergeHostContainerStats(namesJson: string, statsStdout: string): string;
+  isForwarderProcess(command: string): boolean;
+  parseLsofListening(output: string): string;
+  parseSsListening(output: string): string;
+  matchDeclaredPorts(pids: number[], commands: string[], ports: number[], declaredPorts: number[], excludePids: number[]): number[];
+  parsePsRow(output: string): string | null | undefined;
+  classifyActuatorProbe(healthOk: boolean, logfileStatus: number | undefined): string;
+  snapshotName(project: string, service: string, volume: string, paths: string[], present: boolean[], contents: Buffer[]): string;
+  snapshotSlot(project: string, service: string, volume: string): string;
+  composeVolumeName(composeProject: string, volume: string): string;
+  snapshotsToPrune(inspectOutput: string, keep: number, parseDate: (text: string) => number): string[];
+  describeSnapshotEvent(eventJson: string): string | null | undefined;
+  parseProcessScan(stdout: string): string;
+  foreignProcesses(nowPids: number[], nowStarts: string[], baselinePids: number[], baselineStarts: string[]): number[];
+  parseEgressDenial(text: string): string | null | undefined;
+  egressAuditExcerpt(lines: string[], max: number): string[];
+  parseRuntimes(stdout: string): string[];
+  parseHostPort(stdout: string): number;
+  parseContainerStates(stdout: string): string[][];
+  parseContainerState(stdout: string): string;
+  parseSyncOutput(stdout: string): string[][];
+  parseLogLine(raw: string): string | null | undefined;
+  NativeSyncObservations: new () => NativeSyncObservations;
+}
+
+export interface NativeSyncObservations {
+  record(file: string, value: string | undefined): void;
+  describeTimeout(pending: string[], expectedMissing: string[], timeoutMs: number): string;
 }
 
 export interface NativeRedactor {
@@ -38,3 +78,19 @@ function load(): NativeGuard {
 }
 
 export const native: NativeGuard = load();
+
+/** `NaN`·`Infinity`·`-0`은 JSON으로 쓸 수 없어(`JSON.stringify`는 `null`·`0`으로 바꾼다) NUL로 시작하는 키 하나짜리 객체로 주고받는다(crates/bstudio-guard/src/js_json.rs) */
+const NONFINITE_KEY = '\u0000nf';
+
+/** Rust로 보낼 JSON. 유한하지 않은 수와 -0은 표시 객체로 쓴다 */
+export function encodeNative(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) => (typeof item === 'number' && (!Number.isFinite(item) || Object.is(item, -0)) ? { [NONFINITE_KEY]: Object.is(item, -0) ? '-0' : String(item) } : item));
+}
+
+/** Rust가 보낸 JSON. 표시 객체를 `NaN`·`Infinity`·`-0`으로 되돌린다 */
+export function decodeNative<T>(text: string): T {
+  return JSON.parse(text, (_key, item: unknown) => {
+    if (item !== null && typeof item === 'object' && !Array.isArray(item) && NONFINITE_KEY in item) return Number((item as Record<string, string>)[NONFINITE_KEY]);
+    return item;
+  }) as T;
+}

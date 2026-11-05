@@ -1,3 +1,4 @@
+import { decodeNative, native } from '../native';
 import type { ExecResult } from '../types';
 
 /**
@@ -35,15 +36,7 @@ export interface ScannedProcess {
 }
 
 export function parseProcessScan(stdout: string): ScannedProcess[] {
-  return stdout
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .filter(Boolean)
-    .flatMap((line) => {
-      const match = /^(\d+) (\d+) ?(.*)$/.exec(line);
-      return match ? [{ pid: Number(match[1]), start: match[2]!, command: match[3]!.trim() }] : [];
-    })
-    .sort((a, b) => a.pid - b.pid);
+  return decodeNative<ScannedProcess[]>(native.parseProcessScan(stdout));
 }
 
 /** 서비스 안에서 찾기를 돌린다. 셸이 없거나 읽지 못하면 그 까닭을 돌려준다(호출자는 확인하지 못한 서비스를 다시 띄운다) */
@@ -58,6 +51,12 @@ export async function scanProcesses(exec: (command: string[]) => Promise<ExecRes
 
 /** 기준선(서비스가 준비됐을 때의 목록)에 없던 프로세스. 기준선이 없으면(스튜디오를 다시 띄운 뒤) 모두 모르는 것으로 본다 */
 export function foreignProcesses(now: readonly ScannedProcess[], baseline: readonly ScannedProcess[] | undefined): ScannedProcess[] {
-  const known = new Set((baseline ?? []).map((p) => `${p.pid}:${p.start}`));
-  return now.filter((p) => !known.has(`${p.pid}:${p.start}`));
+  const known = baseline ?? [];
+  const foreign = native.foreignProcesses(
+    now.map((p) => p.pid),
+    now.map((p) => p.start),
+    known.map((p) => p.pid),
+    known.map((p) => p.start),
+  );
+  return foreign.map((index) => now[index]!);
 }

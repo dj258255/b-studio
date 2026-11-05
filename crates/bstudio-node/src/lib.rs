@@ -151,3 +151,257 @@ pub fn is_inside_host_path(cwd: String, parent: String, target: String) -> bool 
 pub fn is_inside_posix(parent: String, target: String) -> bool {
     git_mask::is_inside_posix(&parent, &target)
 }
+
+// ── 출력 해석 함수(ADR-191 2단계 2b-1). 큰 구조는 JSON 문자열로 주고받는다. `NaN`·`Infinity`는 JSON으로 쓸 수 없어 표시 객체로
+// 오간다(js_json 모듈). TS 껍데기: packages/sandbox/src/docker/{usage,host-containers,host-processes,snapshots,stray-processes,format}.ts
+
+use bstudio_guard::js_json::{self, JsValue};
+use bstudio_guard::{docker_format, host_containers, host_processes, snapshots, stray_processes, usage};
+use napi::bindgen_prelude::{Buffer, Function};
+
+fn out(value: &JsValue) -> String {
+    js_json::to_native(value)
+}
+
+fn input(json: &str, what: &str) -> Result<JsValue> {
+    js_json::parse_native(json).map_err(|e| Error::from_reason(format!("{what}을(를) 읽지 못했습니다: {e}")))
+}
+
+fn fail<T>(result: std::result::Result<T, String>) -> Result<T> {
+    result.map_err(Error::from_reason)
+}
+
+#[napi]
+pub fn parse_docker_bytes(text: String) -> Option<f64> {
+    usage::parse_docker_bytes(&text)
+}
+
+#[napi]
+pub fn parse_stats_output(stdout: String) -> Result<String> {
+    let rows = fail(usage::parse_stats_output(&stdout))?;
+    Ok(out(&JsValue::Arr(rows.iter().map(usage::StatsRow::to_value).collect())))
+}
+
+#[napi]
+pub fn parse_inspect_output(stdout: String) -> Result<String> {
+    Ok(out(&fail(usage::parse_inspect_output(&stdout))?))
+}
+
+#[napi]
+pub fn merge_usage(inspected_json: String, stats_json: String, managed_names: Vec<String>, edge_service: String) -> Result<String> {
+    let (inspected, stats) = (input(&inspected_json, "inspect 행")?, input(&stats_json, "stats 행")?);
+    Ok(out(&fail(usage::merge_usage(&inspected, &stats, &managed_names, &edge_service))?))
+}
+
+#[napi]
+pub fn boot_network_from_usage(usage_json: String, exclude: String) -> Result<String> {
+    Ok(out(&fail(usage::boot_network_from_usage(&input(&usage_json, "사용량")?, &exclude))?))
+}
+
+#[napi]
+pub fn format_bytes(bytes: Option<f64>) -> String {
+    usage::format_bytes(bytes)
+}
+
+#[napi]
+pub fn describe_usage(usage_json: String) -> Result<String> {
+    fail(usage::describe_usage(&input(&usage_json, "사용량")?))
+}
+
+#[napi]
+pub fn classify_ownership(label_keys: Vec<String>) -> String {
+    host_containers::classify_ownership(&label_keys).to_owned()
+}
+
+#[napi]
+pub fn parse_host_containers(stdout: String) -> Result<String> {
+    Ok(out(&fail(host_containers::parse_host_containers(&stdout))?))
+}
+
+#[napi]
+pub fn matches_project_root(working_dir: Option<String>, project_root: String, cwd: String) -> bool {
+    host_containers::matches_project_root(working_dir.as_deref(), &project_root, &cwd)
+}
+
+#[napi]
+pub fn discover_user_containers(containers_json: String, project_root: String, cwd: String) -> Result<String> {
+    Ok(out(&fail(host_containers::discover_user_containers(&input(&containers_json, "컨테이너 목록")?, &project_root, &cwd))?))
+}
+
+#[napi]
+pub fn merge_host_container_stats(names_json: String, stats_stdout: String) -> Result<String> {
+    let JsValue::Arr(names) = input(&names_json, "컨테이너 이름")? else { return Err(Error::from_reason("컨테이너 이름은 배열이어야 합니다")) };
+    Ok(out(&fail(host_containers::merge_host_container_stats(&names, &stats_stdout))?))
+}
+
+#[napi]
+pub fn is_forwarder_process(command: String) -> bool {
+    host_processes::is_forwarder_process(&command)
+}
+
+fn processes(rows: Vec<host_processes::ListeningProcess>) -> String {
+    out(&JsValue::Arr(rows.iter().map(host_processes::ListeningProcess::to_value).collect()))
+}
+
+#[napi]
+pub fn parse_lsof_listening(output: String) -> String {
+    processes(host_processes::parse_lsof_listening(&output))
+}
+
+#[napi]
+pub fn parse_ss_listening(output: String) -> String {
+    processes(host_processes::parse_ss_listening(&output))
+}
+
+/// 남길 행의 인덱스. 행은 `pids[i]`·`commands[i]`·`ports[i]`가 한 쌍이다
+#[napi]
+pub fn match_declared_ports(pids: Vec<f64>, commands: Vec<String>, ports: Vec<f64>, declared_ports: Vec<f64>, exclude_pids: Vec<f64>) -> Result<Vec<u32>> {
+    if pids.len() != commands.len() || pids.len() != ports.len() {
+        return Err(Error::from_reason("pid·명령·포트의 개수가 다릅니다"));
+    }
+    let rows: Vec<_> = pids.into_iter().zip(commands).zip(ports).map(|((pid, command), port)| host_processes::ListeningProcess { pid, command, port }).collect();
+    Ok(host_processes::match_declared_ports(&rows, &declared_ports, &exclude_pids).into_iter().map(|i| i as u32).collect())
+}
+
+#[napi]
+pub fn parse_ps_row(output: String) -> Option<String> {
+    host_processes::parse_ps_row(&output).map(|v| out(&v))
+}
+
+#[napi]
+pub fn classify_actuator_probe(health_ok: bool, logfile_status: Option<f64>) -> String {
+    out(&host_processes::classify_actuator_probe(health_ok, logfile_status))
+}
+
+/// `present[i]`가 거짓이면 파일이 없는 것이다(`contents[i]`는 자리만 채운 빈 버퍼)
+#[napi]
+pub fn snapshot_name(project: String, service: String, volume: String, paths: Vec<String>, present: Vec<bool>, contents: Vec<Buffer>) -> Result<String> {
+    if paths.len() != present.len() || paths.len() != contents.len() {
+        return Err(Error::from_reason("키 파일의 경로·유무·내용 개수가 다릅니다"));
+    }
+    let files: Vec<(String, Option<Vec<u8>>)> = paths.into_iter().zip(present).zip(contents).map(|((path, present), content)| (path, present.then(|| content.to_vec()))).collect();
+    Ok(snapshots::snapshot_name(&project, &service, &volume, &files))
+}
+
+#[napi]
+pub fn snapshot_slot(project: String, service: String, volume: String) -> String {
+    snapshots::snapshot_slot(&project, &service, &volume)
+}
+
+#[napi]
+pub fn compose_volume_name(compose_project: String, volume: String) -> String {
+    snapshots::compose_volume_name(&compose_project, &volume)
+}
+
+/// 시각은 JS `Date.parse`로 읽어야 해서 읽는 함수를 받는다
+#[napi]
+pub fn snapshots_to_prune(inspect_output: String, keep: f64, parse_date: Function<String, f64>) -> Result<Vec<String>> {
+    let failure = std::cell::RefCell::new(None);
+    let names = snapshots::snapshots_to_prune(&inspect_output, keep, &|text| match parse_date.call(text.to_owned()) {
+        Ok(ms) => ms,
+        Err(e) => {
+            failure.borrow_mut().get_or_insert(e);
+            f64::NAN
+        }
+    });
+    match failure.into_inner() {
+        Some(e) => Err(e),
+        None => Ok(names),
+    }
+}
+
+#[napi]
+pub fn describe_snapshot_event(event_json: String) -> Result<Option<String>> {
+    fail(snapshots::describe_snapshot_event(&input(&event_json, "스냅샷 사건")?))
+}
+
+#[napi]
+pub fn parse_process_scan(stdout: String) -> String {
+    out(&JsValue::Arr(stray_processes::parse_process_scan(&stdout).iter().map(stray_processes::ScannedProcess::to_value).collect()))
+}
+
+/// 기준선이 없으면 TS가 빈 목록을 넘긴다(모두 모르는 것이 된다)
+#[napi]
+pub fn foreign_processes(now_pids: Vec<f64>, now_starts: Vec<String>, baseline_pids: Vec<f64>, baseline_starts: Vec<String>) -> Result<Vec<u32>> {
+    if now_pids.len() != now_starts.len() || baseline_pids.len() != baseline_starts.len() {
+        return Err(Error::from_reason("pid와 시작 시각의 개수가 다릅니다"));
+    }
+    let now: Vec<(f64, String)> = now_pids.into_iter().zip(now_starts).collect();
+    let baseline: Vec<(f64, String)> = baseline_pids.into_iter().zip(baseline_starts).collect();
+    Ok(stray_processes::foreign_processes(&now, Some(&baseline)).into_iter().map(|i| i as u32).collect())
+}
+
+#[napi]
+pub fn parse_egress_denial(text: String) -> Option<String> {
+    docker_format::parse_egress_denial(&text).map(|v| out(&v))
+}
+
+#[napi]
+pub fn egress_audit_excerpt(lines: Vec<String>, max: f64) -> Vec<String> {
+    docker_format::egress_audit_excerpt(&lines, max)
+}
+
+#[napi]
+pub fn parse_runtimes(stdout: String) -> Vec<String> {
+    docker_format::parse_runtimes(&stdout)
+}
+
+#[napi]
+pub fn parse_host_port(stdout: String) -> Result<f64> {
+    fail(docker_format::parse_host_port(&stdout))
+}
+
+fn pairs(rows: Vec<(String, String)>) -> Vec<Vec<String>> {
+    rows.into_iter().map(|(a, b)| vec![a, b]).collect()
+}
+
+#[napi]
+pub fn parse_container_states(stdout: String) -> Result<Vec<Vec<String>>> {
+    fail(docker_format::parse_container_states(&stdout)).map(pairs)
+}
+
+#[napi]
+pub fn parse_container_state(stdout: String) -> Result<String> {
+    fail(docker_format::parse_container_state(&stdout))
+}
+
+/// [경로, 값] 쌍
+#[napi]
+pub fn parse_sync_output(stdout: String) -> Vec<Vec<String>> {
+    pairs(docker_format::parse_sync_output(&stdout))
+}
+
+#[napi]
+pub fn parse_log_line(raw: String) -> Option<String> {
+    docker_format::parse_log_line(&raw).map(|v| out(&v))
+}
+
+#[napi]
+pub struct NativeSyncObservations {
+    inner: docker_format::SyncObservations,
+}
+
+#[napi]
+impl NativeSyncObservations {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { inner: docker_format::SyncObservations::new() }
+    }
+
+    #[napi]
+    pub fn record(&mut self, file: String, value: Option<String>) {
+        self.inner.record(&file, value.as_deref());
+    }
+
+    /// `expected_missing`은 기대값이 "MISSING"(지워져야 함)인 파일들
+    #[napi]
+    pub fn describe_timeout(&self, pending: Vec<String>, expected_missing: Vec<String>, timeout_ms: f64) -> String {
+        self.inner.describe_timeout(&pending, &expected_missing, timeout_ms)
+    }
+}
+
+impl Default for NativeSyncObservations {
+    fn default() -> Self {
+        Self::new()
+    }
+}
