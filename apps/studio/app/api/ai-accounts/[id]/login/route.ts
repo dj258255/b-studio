@@ -6,7 +6,7 @@ import { errorResponse, StudioError } from '@/lib/server/errors';
 type Context = RouteContext<'/api/ai-accounts/[id]/login'>;
 
 /**
- * 계정 하나의 로그인을 시작한다(#885). 계정 연결(/api/accounts/{backend}/login)과 같은 흐름이고, 그 계정의 설정 폴더로 CLI를 띄워
+ * 계정 하나의 로그인을 시작한다(#885). 그 계정의 설정 폴더로 CLI를 띄워
  * CLI가 그 폴더에 로그인을 남긴다. 로그인은 계정마다 하나씩 돈다
  */
 export async function POST(request: Request, context: Context) {
