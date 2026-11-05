@@ -4,6 +4,7 @@
 
 - Node.js 22 이상
 - pnpm 10.29.3
+- Rust 툴체인(cargo, [rustup](https://rustup.rs)). `pnpm install`이 Rust로 옮긴 판정 모듈을 빌드합니다
 - Docker Desktop 또는 Colima
 - Git
 - 실제 모델 실행 시 Anthropic API 키 또는 로그인된 Claude Code CLI
@@ -39,7 +40,7 @@ pnpm studio --mode demo
 
 웹 화면은 없습니다. `Ctrl-b n`으로 프로젝트를 고르고 새 요청을 보냅니다. 로컬 로그인 모드는 개인 PC 전용입니다.
 
-`pnpm studio launch`는 스튜디오를 백그라운드로 켜고 브라우저를 엽니다(`pnpm studio stop`으로 끕니다). 세션 터미널을 켠 스튜디오(`B_STUDIO_EXPERIMENTAL=1`)에서는 `pnpm studio desk`로 터미널 하나에 여러 세션을 나란히 띄울 수 있습니다.
+`pnpm studio launch`는 스튜디오 서버만 백그라운드로 켭니다(브라우저는 열지 않고, `pnpm studio stop`으로 끕니다). 이미 떠 있는 스튜디오에 터미널 작업대만 붙이려면 `pnpm studio desk`를 씁니다.
 
 ## CLI 에이전트
 
