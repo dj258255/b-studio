@@ -18,8 +18,9 @@ Docker 관련 변경은 `pnpm studio up examples/orders`, 에이전트 게이트
 - `packages/spec`: 명세와 입력 검증
 - `packages/sandbox`: 실행 환경과 보안 경계
 - `packages/agent`: 모델, 제한된 도구, 검증과 체크포인트
-- `apps/cli`: 명령행 진입점
-- `apps/studio`: 세션 API와 웹 UI
+- `apps/cli`: 명령행 진입점과 터미널 작업대(`studio desk`)
+- `apps/studio`: 세션 API 서버(화면 없음, `node:http`)
+- `crates`: Rust로 옮긴 판정(ADR-191·192)
 - `templates`: 새 서비스 원본
 - `examples/orders`: 전체 통합 예제
 
