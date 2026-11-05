@@ -240,7 +240,7 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 ```
 
 - 세션 터미널(아래)과 터미널 작업대(`pnpm studio`)는 이 값을 켠 개인 PC 모드에서만 됩니다. `pnpm studio`(명령 없이)는 새로 띄울 때 이 값을 켭니다.
-- 켜면 에이전트에게 나눠서 병렬·여러 명 비교로 넘기자고 제안하는 도구(`propose_mode`)가 더해지고, `/api/capabilities`의 `fleet`·`split`이 서버 모드에 따라 켜집니다. 끄면 사유와 함께 이 절로 오는 링크(`docsUrl`)가 붙습니다.
+- 켜면 에이전트에게 나눠서 병렬·여러 명 비교로 넘기자고 제안하는 도구(`propose_mode`)가 더해집니다.
 - **숨기는 것이지 막는 것이 아닙니다.** 여러 AI 비교·작업 분해의 API, 벤치, E2E는 켜지 않아도 그대로 동작합니다.
 - 다른 백엔드(`B_STUDIO_BACKENDS`), Kubernetes 제공자, gVisor 런타임은 각자의 환경 변수로 고르는 것이라 이 값과 무관합니다. 그 값을 직접 넣었다면 이미 고른 것으로 봅니다.
 - 값은 `1`·`true`·`on`입니다. 스튜디오를 다시 띄워야 바뀝니다.
@@ -377,7 +377,6 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 | `B_STUDIO_MODEL_DEFAULTS_FILE` | 프로젝트·백엔드마다 마지막에 고른 모델을 기억하는 파일. 새 세션의 기본 모델이 됩니다 | `~/.cache/b-studio/model-defaults.json` |
 | `B_STUDIO_CLAUDE_USAGE_API` | `0`이면 쉬는 Claude 계정의 한도를 사용량 API로 묻지 않습니다. 이 API는 Claude Code의 `/usage`가 부르는 것으로 문서가 없고, 구독 토큰을 Claude Code 밖에서 쓰는 것이라 약관상 회색지대입니다. 계정마다 10분에 한 번만 묻고 429면 물러납니다(ADR-187) | 켬 |
 | `B_STUDIO_BACKEND_RULES_FILE` | 작업 화면의 새 요청이 AI를 고를 때 쓰는 규칙 파일. 작업 화면의 "규칙 고치기"가 씁니다(ADR-179) | `~/.cache/b-studio/backend-rules.json` |
-| `B_STUDIO_REPEATED_ACTIONS_DIR` | 되풀이 행동 후보(ADR-077)에서 무시하기로 한 목록을 프로젝트별로 두는 폴더 | `~/.cache/b-studio/repeated-actions` |
 
 벤치·부하 시험이 자식 프로세스에 넘기는 값(`B_STUDIO_BENCH_*`)과 터미널·관문이 컨테이너나 훅에 넘기는 값(`B_STUDIO_TTY_*`, `B_STUDIO_TERMINAL_COMMAND`, `B_STUDIO_GATE_TOKEN`, `B_STUDIO_LOAD`)은 b-studio가 스스로 채우므로 설정하지 않습니다.
 
