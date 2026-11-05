@@ -15,19 +15,15 @@ import {
   buildAddTestPrefill,
   buildAllMustHavesPrefill,
   buildFixTestPrefill,
-  buildMatrixCsv,
-  buildMissingReferenceQuestion,
   buildPrReviewExternalContext,
   buildPrReviewResolvedContext,
   buildPullRequest,
-  buildReferencedFilesContext,
   buildRequirementsAddendum,
   buildRequirementWorkPrefill,
   buildReviewRequirementsContext,
   buildReviewResolutionComment,
   buildTestRunPlan,
   reportRootsForIncludes,
-  buildTraceabilityMatrix,
   canCreatePullRequest,
   captureBaselines,
   alignScenarioIds,
@@ -45,15 +41,11 @@ import {
   diffFilePaths,
   discardRevisionIfNeverSaved,
   discoverTestsInFile,
-  draftManagedRequirement,
-  draftRequirementFromIssue,
   estimateCost,
   extractDiffReferencedNames,
   extractImplementsTrailers,
-  extractTrackingSubIssueNumbers,
   extractRequirementIdsWithSuites,
   extractRequirementMentions,
-  extractRequirementsHeuristically,
   findMentionedIds,
   fetchIssue,
   fetchPullRequestDetail,
@@ -71,16 +63,12 @@ import {
   isDocCheckpointPath,
   isInScope,
   isLikelyTestFile,
-  labelRecommendationSource,
   listIssues,
-  managedRequirementToRequirement,
   ManualStepItemSchema,
   MAX_ASSUMPTIONS,
-  MAX_CLARIFYING_QUESTIONS,
   MAX_MANUAL_STEPS,
   MAX_REQUIREMENTS,
   mergeManagedPullRequestBody,
-  mergeReextractedRequirements,
   ORDERS_DEMO_SCENARIOS,
   parseJestLikeJson,
   parseJUnitXml,
@@ -91,12 +79,7 @@ import {
   planAskFromClient,
   postComment,
   PR_REVIEW_EXTERNAL_CONTEXT_MAX_FILES,
-  REFERENCED_FILES_CONTEXT_MAX_CHARS,
-  REQUIREMENT_LABEL,
-  RecommendationSchema,
   requestPlanBrief,
-  requestQuestionRecommendations,
-  requestRequirementsExtraction,
   REQUIREMENTS_FILE,
   describeVerificationTamper,
   diffVerificationRecords,
@@ -106,7 +89,6 @@ import {
   requirementConfidence,
   requirementVerificationSource,
   reviseRequirementIfChanged,
-  resolveReferencedFiles,
   runnerLabel,
   updatePullRequestBody,
   scanTestFilesForRequirementId,
@@ -162,34 +144,10 @@ import {
   type HookInput,
   type ToolContext,
   type ToolOutcome,
-  adrFilePath,
-  appendExperimentEntry,
-  appendRoadmapTradeoffEntry,
-  appendTroubleshootingEntry,
-  appendVerificationEntry,
-  buildAdrTemplate,
-  buildDesignDocTemplate,
   buildDocSummary,
-  buildExperimentEntry,
   buildProjectStatus,
-  buildRoadmapTemplate,
-  buildRoadmapTradeoffEntry,
-  buildTroubleshootingEntry,
-  buildVerificationEntry,
-  designDocFilePath,
   DOCS_README_PATH,
-  EXPERIMENT_LOG_PATH,
-  lintText,
-  nextAdrNumber,
-  nextDesignDocNumber,
-  regenerateDocsReadme,
-  regenerateRoadmapStatus,
   ROADMAP_PATH,
-  ROADMAP_TRADEOFFS_PATH,
-  TROUBLESHOOTING_LOG_PATH,
-  VERIFICATION_LOG_PATH,
-  type DocLintFinding,
-  type DocSummary,
   type ProjectStatusInput,
   type ProjectStatusView,
   type AgentEvent,
@@ -200,11 +158,9 @@ import {
   type BrowserFrame,
   type CheckpointRef,
   type Checkpoint,
-  type ConflictResolution,
   type DatabaseState,
   type DemoScenario,
   type DiscardBackup,
-  type DesignFrameInfo,
   type DesignSource,
   type DocEvidence,
   type Effort,
@@ -212,7 +168,6 @@ import {
   type GateCheckResult,
   type GitAuthor,
   type ImplementedRequirementRef,
-  type IssueSummary,
   type ManualVerification,
   type MatrixTestRunRow,
   type ModelAsk,
@@ -226,9 +181,7 @@ import {
   type Requirement,
   type RequirementCoverage,
   type RequirementDiffEntry,
-  type RequirementEvaluation,
   type RequirementEvidence,
-  type RequirementIssueDraft,
   type RequirementStatus,
   type RepositoryInfo,
   type RoutingDecision,
@@ -246,7 +199,6 @@ import {
   type TestRow,
   type TestRunEvidence,
   type TestTarget,
-  type TraceabilityMatrix,
   type VerifyMode,
   type WorkflowCheck,
   lintRequirement,
@@ -270,7 +222,7 @@ import {
   type ServiceStatusEvent,
   type StartOptions,
 } from '@b-studio/sandbox';
-import { dependentsOf, loadProject, figmaFileKey, SpecError, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
+import { dependentsOf, loadProject, SpecError, SPEC_FILE, type LoadedProject, type WorkflowPageCheck } from '@b-studio/spec';
 import { skipAlreadySeen } from '@/lib/logs';
 import { serviceNotReadyMessage, storedResultNotice } from '@/lib/test-run-state';
 import {
@@ -296,15 +248,11 @@ import {
   type UsageWindow,
 } from '@/lib/usage';
 import type {
-  CodeFile,
   LiveChangeFile,
   LiveChanges,
-  CodeSearch,
-  CodeTree,
   DesignView,
   ExportPreview,
   ExportResult,
-  ProxyResponse,
   RepositoryView,
   ReviewRoundView,
   ReverifyRecord,
@@ -316,7 +264,9 @@ import type {
   StudioEvent,
   WorkspaceKind,
 } from '@/lib/studio-events';
-import { REVERIFY_LIMIT } from '@/lib/studio-events';
+import {
+  REVERIFY_LIMIT,
+} from '@/lib/studio-events';
 import { advanceSandboxLink, newSandboxLinkTracker, sameSandboxLink, type SandboxProbe } from '@/lib/sandbox-link';
 import { cleanSessionLabel, sessionLabelProblem } from '@/lib/session-label';
 import { authConfig, PREVIEW_COOKIE, signPreviewGrant, verifyPreviewGrant } from './auth';
@@ -324,7 +274,6 @@ import { readRevocations } from './auth-state';
 import { resolveArtifact, saveArtifact } from './artifacts';
 import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-evidence';
 import { claudeCodeAsk } from './claude-code-ask';
-import { compareExample, designPathFor, writeDesignPng } from './design-files';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
 import { clearFrames, publish } from './live-frames';
@@ -336,7 +285,19 @@ import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, 
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
-import { AGENT_READ_ONLY_MARK, AGENT_READ_TOOLS, agentCleanupCommand, applyPatchPaths, CODEX_READ_TOOLS, isReadOnlyPrompt, isResumableConversation, unwrapPastedPrompt, SANDBOX_ID, type AgentGatewayAddress, type HostCliKind } from '@b-studio/sandbox';
+import {
+  AGENT_READ_ONLY_MARK,
+  AGENT_READ_TOOLS,
+  agentCleanupCommand,
+  applyPatchPaths,
+  CODEX_READ_TOOLS,
+  isReadOnlyPrompt,
+  isResumableConversation,
+  unwrapPastedPrompt,
+  SANDBOX_ID,
+  type AgentGatewayAddress,
+  type HostCliKind,
+} from '@b-studio/sandbox';
 import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
@@ -346,7 +307,7 @@ import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
-import { searchFiles, walkFiles } from './code-files';
+import { walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { spendStore } from './spend-state';
@@ -354,18 +315,12 @@ import { addUserUsage, userTokens } from './usage-state';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
 import {
-  planRequirementIssuePublish,
   publishedIssueNumbers,
   publishedTrackingIssue,
-  publishRequirementIssues,
   refreshTrackingIssueBody,
   REQUIREMENT_ISSUES_FILE,
-  resolveRequirementConflict,
   syncRequirementIssueStatus,
-  type ConflictResolutionResult,
   type RequirementIssuesContext,
-  type RequirementPlanResult,
-  type RequirementPublishResult,
   type RequirementSyncEvidence,
   type RequirementSyncResult,
   issueSyncFailureNotice,
@@ -377,7 +332,7 @@ import { describe, StudioError } from './errors';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
-import { applyGeneratedFilesToWorkingCopy, findRegisteredProject, generatedFilePaths, overlayGeneratedFiles } from './project-registry';
+import { generatedFilePaths, overlayGeneratedFiles } from './project-registry';
 import { notifyAgentsChanged, pulseAfterCalls } from './agents-pulse';
 import { computeOffServices, serviceSelectionFor, serviceSelectionStateDir, writeServiceSelection } from './service-selection';
 import {
@@ -1104,8 +1059,8 @@ export function subscribe(id: string, listener: Listener): () => void {
 
 function replay(target: Session | ArchivedSession, listener: Listener): void {
   // exported·remote_synced·base_synced·review_round 같은 기록 이벤트는 그 순간 서버가 계산한 값
-  // (예: canCreatePullRequest — gh CLI 토큰을 찾았는지)을 그대로 담고 있다. 기록을 재생하면 reduceSession이
-  // 그 옛 값으로 다시 덮어써, 서버가 그사이 다시 계산해 지금 스냅샷엔 맞게 들어 있는 값을 화면이 놓칠 수 있다.
+  // (예: canCreatePullRequest — gh CLI 토큰을 찾았는지)을 그대로 담고 있다. 기록을 재생하면 받는 쪽이
+  // 그 옛 값으로 다시 덮어써, 서버가 그사이 다시 계산해 지금 스냅샷엔 맞게 들어 있는 값을 놓칠 수 있다.
   // snapshot부터 보낸 뒤 그 값을 기억해 뒀다가, 기록과 로그를 다 보낸 끝에 다시 한번 맞춰 "마지막 기록 이벤트가
   // 이기는" 문제를 없앤다. 체크포인트 수와 리뷰 라운드도 같은 식으로 통째로 덮어써지므로 함께 맞춘다
   const { repository, checkpoints, review } = target.snapshot;
@@ -1653,23 +1608,6 @@ async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
   }
 }
 
-export async function contractFor(id: string, service: string): Promise<unknown> {
-  const session = requireSession(id);
-  const spec = session.project.managed.find(([name]) => name === service)?.[1];
-  if (!spec?.contract) throw new StudioError(404, `${service} 서비스는 API 계약을 제공하지 않습니다`);
-  const endpoint = await session.sandbox.endpoint(service);
-  const response = await fetch(new URL(spec.contract.extract, endpoint.url), { signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new StudioError(502, `계약을 가져오지 못했습니다 (HTTP ${response.status})`);
-  return response.json();
-}
-
-export async function endpointFor(id: string, service: string): Promise<string> {
-  const session = requireSession(id);
-  if (!session.project.managed.some(([name]) => name === service)) throw new StudioError(404, `${service} 서비스가 없습니다`);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
-  return (await session.sandbox.endpoint(service)).url;
-}
-
 /** 헤더의 "+N" 팝오버·서비스 메뉴가 보여 줄 서비스 목록 한 줄 */
 export interface ServiceSelectionView {
   name: string;
@@ -1736,42 +1674,6 @@ export async function setSessionServiceSelection(id: string, service: string, on
   return { selection: listServiceSelection(id), ...(warning ? { warning } : {}) };
 }
 
-/**
- * "이 세션에도 적용"(ADR-101): "생성 파일 다시 만들기"가 프로젝트 원본 폴더에 막 다시 쓴 파일(studio.yaml·
- * compose.b-studio.yaml·Dockerfile.b-studio)을 이미 떠 있는 이 세션에도 반영한다.
- *
- * 내 폴더 세션(workspace: local)은 작업 폴더가 원본 폴더 그 자체라 이미 최신이므로 파일을 복사하지 않는다.
- * 작업 복사본 세션은 overlayGeneratedFiles와 같은 자리(세션 복제 폴더)에 지정한 파일만 덮어쓴다.
- * 그다음 restartServicesFor로 — 에이전트가 파일을 바꿨을 때와 똑같은 경로로 — 영향받은 서비스를 다시 빌드해 띄운다.
- * 새로 만드는 세션은 이미 자동으로 최신 파일을 받으므로(overlayGeneratedFiles가 세션 시작 때 원본에서 그대로 복사한다)
- * 이 함수가 필요한 것은 이미 떠 있는 세션뿐이다.
- */
-export async function applyRegeneratedFilesToSession(id: string, files: readonly string[]): Promise<{ restarted: ServiceCheck[]; skippedOff: string[] }> {
-  const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 적용할 수 있습니다');
-  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
-  if (files.length === 0) return { restarted: [], skippedOff: [] };
-
-  const registered = await findRegisteredProject(session.snapshot.projectId);
-  if (!registered) throw new StudioError(409, '폴더로 연 프로젝트가 아니라 적용할 생성 파일이 없습니다');
-
-  if (session.snapshot.workspace !== 'local') {
-    await applyGeneratedFilesToWorkingCopy(registered.path, session.project.root, session.checkpoints.root, files);
-  }
-  // 바뀐 studio.yaml·compose를 읽어야 새 환경 변수·마운트·pageChecks가 재시작에 반영된다. 못 읽으면(일시적인 디스크 문제 등)
-  // 지금 쓰던 설정을 그대로 두고 재시작만 시도한다 — 세션을 깨뜨리는 대신 다음에 다시 시도할 여지를 남긴다
-  await reloadSessionProject(session);
-
-  session.snapshot.running = true;
-  try {
-    const start: StartOptions = { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) };
-    const result = await restartServicesFor(session.sandbox, session.project, [...files], start);
-    return { restarted: result.restarted, skippedOff: result.skippedOff };
-  } finally {
-    session.snapshot.running = false;
-  }
-}
-
 /** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
 function saveSessionArtifact(session: Session, runId: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
   return saveArtifact(stateDirOf(session.snapshot), runId, input);
@@ -1793,12 +1695,6 @@ export async function saveExploreQaArtifact(id: string, input: { name: string; d
 /** 세션 상태 폴더(작업 복사본의 루트). 탐색형 QA가 끝난 실행을 파일로 남길 자리를 정하는 데 쓴다 */
 export function sessionStateDir(id: string): string {
   return stateDirOf(requireSession(id).snapshot);
-}
-
-/** 요소 선택 스크린샷을 산출물로 저장하고 식별자를 돌려준다 */
-export async function saveElementArtifact(id: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
-  const session = requireSession(id);
-  return saveArtifact(stateDirOf(session.snapshot), 'pick', input);
 }
 
 /**
@@ -1898,23 +1794,6 @@ function figmaClient(): FigmaClient {
   return (store.figma ??= new FigmaClient({ token: process.env.FIGMA_TOKEN, baseUrl: process.env.B_STUDIO_FIGMA_API }));
 }
 
-/** 세션 단위로 Figma URL을 저장한다(studio.yaml은 스튜디오가 고치지 않는다). 빈 값이면 세션 설정을 지운다 */
-export function setSessionDesign(id: string, fileUrl: string): DesignView | undefined {
-  const session = requireSession(id);
-  const trimmed = fileUrl.trim();
-  if (trimmed === '') {
-    session.design = undefined;
-  } else {
-    const fileKey = figmaFileKey(trimmed);
-    if (!fileKey) throw new StudioError(400, 'Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다');
-    session.design = { fileUrl: trimmed, fileKey };
-  }
-  const design = sessionDesignView(session);
-  session.snapshot.design = design;
-  emit(session, { type: 'design', design });
-  return design;
-}
-
 /** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값(모델·노력 단계)을 함께 돌려준다 */
 export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
   const session = requireSession(id);
@@ -1967,62 +1846,6 @@ export async function setSessionLabel(id: string, label: string): Promise<Sessio
   return session.snapshot;
 }
 
-/** 디자인 목록 화면용. 설정·토큰이 없으면 빈 목록을 돌려주고, 있으면 Figma에서 프레임을 읽는다 */
-export async function sessionDesignFrames(id: string): Promise<{ design?: DesignView; frames: DesignFrameInfo[] }> {
-  const session = requireSession(id);
-  const design = effectiveDesign(session);
-  if (!design || !process.env.FIGMA_TOKEN) return { design: sessionDesignView(session), frames: [] };
-  const frames = await figmaClient().listFrames(design.fileKey, session.stop.signal);
-  return { design: sessionDesignView(session), frames: frames.map((frame) => ({ id: frame.id, name: frame.name, page: frame.page, width: frame.width, height: frame.height })) };
-}
-
-/** 디자인 패널의 프레임 썸네일. 비교용이 아니라 목록용이라 작은 배율로 받는다 */
-export async function sessionDesignThumbnail(id: string, frameId: string): Promise<Buffer> {
-  const session = requireSession(id);
-  const design = effectiveDesign(session);
-  if (!design) throw new StudioError(409, '디자인(Figma)이 설정되지 않았습니다');
-  const images = await figmaClient().exportImages(design.fileKey, [frameId], { scale: 0.5 }, session.stop.signal);
-  const png = images.get(frameId);
-  if (!png) throw new StudioError(404, '프레임 이미지를 찾지 못했습니다');
-  return png;
-}
-
-export interface DesignImportResult {
-  files: Array<{ frameId: string; name: string; path: string; width: number; height: number }>;
-  /** pageChecks.compare에 붙여 넣을 예시. scale이 1일 때만 만든다 */
-  examples: string[];
-  note?: string;
-}
-
-/**
- * 고른 프레임을 PNG로 받아 세션 작업 복사본의 `design/`에 저장한다(=세션 변경으로 남아 체크포인트·게이트를 탄다).
- * 시각 비교 기준으로 쓰려면 화면 스크린샷과 픽셀 너비가 같아야 하므로 scale 1을 기본으로 한다
- */
-export async function importDesign(id: string, frameIds: readonly string[], scale: 1 | 2 = 1): Promise<DesignImportResult> {
-  const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 디자인을 가져올 수 있습니다');
-  if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 디자인을 가져올 수 있습니다');
-  const design = effectiveDesign(session);
-  if (!design) throw new StudioError(409, '디자인(Figma)이 설정되지 않았습니다');
-
-  const client = figmaClient();
-  const frames = (await client.listFrames(design.fileKey, session.stop.signal)).filter((frame) => frameIds.includes(frame.id));
-  if (frames.length === 0) throw new StudioError(400, '가져올 프레임을 찾지 못했습니다');
-  const images = await client.exportImages(design.fileKey, frames.map((frame) => frame.id), { scale }, session.stop.signal);
-
-  const files: DesignImportResult['files'] = [];
-  const examples: string[] = [];
-  for (const frame of frames) {
-    const png = images.get(frame.id);
-    if (!png) throw new StudioError(502, `프레임 ${frame.id} 이미지를 내보내지 못했습니다`);
-    const relative = designPathFor(frame);
-    await writeDesignPng(session.project, relative, png);
-    files.push({ frameId: frame.id, name: frame.name, path: relative, width: frame.width, height: frame.height });
-    if (scale === 1) examples.push(compareExample(relative, frame));
-  }
-  return { files, examples, ...(scale !== 1 ? { note: 'scale 2로 저장한 이미지는 시각 비교 기준(compare)에 쓰려면 scale 1로 다시 가져오세요' } : {}) };
-}
-
 /** 디자인 도구가 쓸 자료원. 세션에 디자인이 설정됐을 때만 runPlan이 넘긴다 */
 function designSourceFor(session: Session, runId: string): DesignSource | undefined {
   const design = effectiveDesign(session);
@@ -2033,30 +1856,6 @@ function designSourceFor(session: Session, runId: string): DesignSource | undefi
     frame: (id) => client.summarizeFrame(design.fileKey, id, session.stop.signal),
     // 이미지는 세션 산출물로 저장하고 참조 경로만 모델에 돌려준다(모델에 이미지를 넘기지 않는다)
     saveArtifact: (name, data) => saveArtifact(stateDirOf(session.snapshot), runId, { name, data, contentType: 'image/png' }),
-  };
-}
-
-const MAX_PROXY_BODY = 200_000;
-
-/** API 탐색기에서 등록한 사내 API를 부른다. 샌드박스 서비스와 같은 정책·인증·가림을 거치고 감사 기록은 edge 로그에 남는다 */
-export async function externalRequest(id: string, name: string, input: { method: string; path: string; body: string }): Promise<ProxyResponse> {
-  const session = requireSession(id);
-  if (!(session.project.external ?? []).some(([external]) => external === name)) throw new StudioError(404, `${name} 사내 API가 없습니다`);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비되지 않았습니다');
-
-  const started = performance.now();
-  const result = await session.sandbox.callExternal(
-    name,
-    { method: input.method, path: input.path, body: input.body || undefined },
-    { via: 'explorer', signal: AbortSignal.any([session.stop.signal, AbortSignal.timeout(40_000)]) },
-  );
-  return {
-    status: result.status,
-    contentType: result.contentType ?? null,
-    body: result.body.slice(0, MAX_PROXY_BODY),
-    truncated: result.body.length > MAX_PROXY_BODY,
-    durationMs: Math.round(performance.now() - started),
-    policy: { decision: result.decision, masked: result.masked, ...(result.reason ? { reason: result.reason } : {}) },
   };
 }
 
@@ -2091,20 +1890,6 @@ function startBoot(session: Session): Promise<void> {
 export async function bootSession(id: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
   await ensureBooted(session);
-  return session.snapshot;
-}
-
-/**
- * 첫 화면(바로 개발, ADR-066)이 쓴다. 지연 기동 세션의 샌드박스 켜기를 **시작만** 하고 기다리지 않는다.
- * 켜는 동안 사람은 개발 화면에서 요청을 적는다. 진행과 실패는 이벤트로 화면에 간다(여기서 던지지 않는다)
- */
-export function startBooting(id: string): SessionSnapshot {
-  const session = requireSession(id);
-  if (session.snapshot.status === 'idle') {
-    ensureBooted(session).catch((error: unknown) => {
-      console.error(`[b-studio] 세션 ${id}의 샌드박스를 켜지 못했습니다: ${describe(error)}`);
-    });
-  }
   return session.snapshot;
 }
 
@@ -4459,7 +4244,7 @@ async function reviewRequestFix(session: Session, request: string): Promise<Revi
  * 화면의 "AI 리뷰 돌리기"·"다시 돌리기" 버튼으로 사람이 부른다. 실제 순서(리뷰 → 댓글 → 필요하면 고침 → 다음 라운드)는
  * review-round.ts의 runReviewRounds(순수 상태 기계, vitest로 따로 검증)가 정하고, 여기서는 세션의 diff·댓글·고침 요청·올리기를
  * 함수로 이어 준다. 한 번 부르면 1라운드부터 상한까지(또는 통과·오류까지) 안에서 이어간다. 절대 병합하지 않고, 강제 푸시도 하지 않는다.
- * 리뷰어 호출 토큰은 token-report.ts의 reviewTokenReports가 스냅샷의 review.rounds[].tokens를 그대로 읽어 "review"로 표시한다.
+ * 리뷰어 호출 토큰은 스냅샷의 review.rounds[].tokens에 남는다.
  */
 export async function runReviewRound(id: string, { restart = false, reviewerModelId }: { restart?: boolean; reviewerModelId?: string } = {}): Promise<void> {
   const session = requireSession(id);
@@ -4852,27 +4637,6 @@ export async function baseStatus(id: string, options: { force?: boolean } = {}):
 }
 
 /**
- * 세션 브랜치가 갈라져 나온 기준 브랜치(main 등)를 병합으로 따라잡는다(ADR-076, "main 따라잡기").
- * 원격 세션 브랜치 가져오기(syncRemote)와 같은 흐름이다: 병합 결과도 에이전트의 변경처럼 검증 게이트를 거치고,
- * 통과하지 못하면 파일과 데이터베이스를 병합 전으로 되돌린다. 충돌하면 병합을 시작하기 전 상태 그대로 두고 사람에게
- * 넘긴다(기본 정책). "에이전트에게 충돌 해결 맡기기"는 resolveBaseConflictsWithAgent가 맡는다
- */
-export function catchUpBase(id: string): void {
-  const session = requireSession(id);
-  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 따라잡을 기준 브랜치가 없습니다');
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 따라잡을 수 있습니다');
-  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
-
-  session.snapshot.running = true;
-  emit(session, { type: 'base_sync_started' });
-  void (async () => {
-    const event = await runBaseCatchUp(session);
-    session.snapshot.running = false;
-    if (!session.stop.signal.aborted) emit(session, event);
-  })();
-}
-
-/**
  * 다시 검증(#798, ADR-181). 에이전트 실행 없이 지금 체크포인트의 내용을 같은 게이트로 처음부터 돌린다: 관리 서비스를 모두
  * 다시 띄우고, 계약과 선언한 확인(테스트·화면 확인 등)을 모두 돈다. 쓰임은 기준 브랜치를 따라잡은 뒤, 선언한 테스트를 바꾼 뒤,
  * 오래된 체크포인트를 배포하기 전이다.
@@ -4972,43 +4736,6 @@ async function runReverify(session: Session, before: { head: string; pending: st
   if (outcome.kind === 'pass') return { ok: true, summary: `같은 게이트를 다시 통과했습니다(${passedStages.join(', ') || '통과한 단계 없음'})`, passedStages, failed };
   const reason = outcome.kind === 'exhausted' ? outcome.summary : '검증 게이트를 통과하지 못했습니다';
   return { ok: false, summary: failed.length > 0 ? `${reason}: ${failed.map((check) => check.name).join(', ')}` : reason, passedStages, failed };
-}
-
-/**
- * "에이전트에게 충돌 해결 맡기기"(ADR-076). 병합을 시도해 충돌 없이 따라잡을 수 있으면 catchUpBase와 똑같이 끝낸다.
- * 충돌하면(병합은 이미 시도 전으로 되돌아간 뒤) 자동으로 고치게 보내는 대신, 충돌한 파일과 무엇을 할지 알려 주는
- * 요청 문구를 만들어 돌려준다 — 화면이 이 문구를 대화 입력창에 미리 채워 사람이 보고 다듬어 보내게 한다.
- * 병합 커밋을 충돌 표시(conflict marker)째로 만들어 곧바로 에이전트에게 보내는 방식은 체크포인트 커밋 경계
- * (#checkpoint, MERGE_HEAD 처리)를 크게 건드려야 해서, 더 안전한 이 대안을 택했다(docs/decisions.md ADR-076 참고)
- */
-export async function resolveBaseConflictsWithAgent(id: string): Promise<{ request?: string; conflicts?: string[] }> {
-  const session = requireSession(id);
-  if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 따라잡을 기준 브랜치가 없습니다');
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 따라잡을 수 있습니다');
-  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
-
-  session.snapshot.running = true;
-  emit(session, { type: 'base_sync_started' });
-  const event = await runBaseCatchUp(session);
-  session.snapshot.running = false;
-  if (event.type !== 'base_sync_failed' || !event.conflicts || event.conflicts.length === 0) {
-    if (!session.stop.signal.aborted) emit(session, event);
-    return {};
-  }
-
-  const info = (await session.checkpoints.repository())!;
-  const request = buildBaseConflictRequest(info.base, event.conflicts);
-  if (!session.stop.signal.aborted) emit(session, { ...event, agentRequest: request });
-  return { request, conflicts: event.conflicts };
-}
-
-/** "에이전트에게 충돌 해결 맡기기"가 화면 대화 입력창에 미리 채울 문구. 자동으로 보내지 않고 사람이 보고 다듬어 보낸다 */
-function buildBaseConflictRequest(base: string, conflicts: readonly string[]): string {
-  return (
-    `${base} 브랜치를 병합해 따라잡으려 했지만 다음 파일에서 이 세션의 변경과 충돌했습니다: ${conflicts.join(', ')}. ` +
-    `병합은 시도하기 전으로 되돌려 두었습니다. 각 파일에서 ${base} 브랜치가 그사이 바꾼 내용을 확인하고(예: git show origin/${base}:<파일 경로>), ` +
-    `이 세션의 의도를 지키면서 그 변경을 손으로 반영해 주세요. 자동 병합은 다시 시도하지 말고 코드를 직접 맞춰 주세요.`
-  );
 }
 
 async function runBaseCatchUp(session: Session): Promise<StudioEvent> {
@@ -5150,68 +4877,6 @@ function gitAuthor(): GitAuthor | undefined {
   const name = process.env.B_STUDIO_GIT_AUTHOR_NAME?.trim();
   const email = process.env.B_STUDIO_GIT_AUTHOR_EMAIL?.trim();
   return name && email ? { name, email } : undefined;
-}
-
-/** 한 번에 보내는 파일 수. 더 보기로 이어서 받는다 */
-const CODE_PAGE_SIZE = 500;
-
-/**
- * 코드 화면의 파일 목록과 마지막 체크포인트 이후 바뀐 파일. 생성물과 .env는 빼고, 경로로 좁힌 뒤 쪽 단위로 보낸다.
- * 에이전트 도구의 목록 한도(500개)와 달리 화면은 큰 저장소의 파일도 모두 센다
- */
-export async function listCodeFiles(id: string, { query = '', offset = 0, limit = CODE_PAGE_SIZE }: { query?: string; offset?: number; limit?: number } = {}): Promise<CodeTree> {
-  const session = requireSession(id);
-  const walk = await walkFiles(session.project.root);
-  const needle = query.trim().toLowerCase();
-  const matched = needle ? walk.files.filter((file) => file.toLowerCase().includes(needle)) : walk.files;
-  return {
-    files: matched.slice(offset, offset + limit),
-    offset,
-    total: matched.length,
-    changes: (await session.checkpoints.pendingChanges()).filter((change) => !isDeniedPath(change.file)),
-    truncated: walk.truncated,
-  };
-}
-
-/** 코드 화면의 내용 찾기. 도구 결과와 같게 시크릿 값을 가려서 보내고, 가리면서 자리가 바뀌면 다시 찾는다 */
-export async function searchCodeFiles(id: string, query: string): Promise<CodeSearch> {
-  const session = requireSession(id);
-  const needle = query.trim();
-  if (needle.length < 2) throw new StudioError(400, '내용 찾기는 두 글자 이상으로 합니다');
-  const walk = await walkFiles(session.project.root);
-  const found = await searchFiles(session.project.root, needle, walk.files);
-  return {
-    query: needle,
-    results: found.results.map(({ file, matches }) => ({
-      file,
-      matches: matches.map((match) => {
-        const text = session.sandbox.redact(match.text);
-        if (text === match.text) return match;
-        const start = text.toLowerCase().indexOf(needle.toLowerCase());
-        return start < 0 ? { ...match, text, start: 0, length: 0 } : { ...match, text, start };
-      }),
-    })),
-    truncated: found.truncated || walk.truncated,
-  };
-}
-
-/** 코드 화면에서 연 파일. 에이전트 도구 결과처럼 시크릿 값을 가려서 돌려준다 */
-export async function readCodeFile(id: string, file: string): Promise<CodeFile> {
-  const session = requireSession(id);
-  const change = (await session.checkpoints.pendingChanges()).find((candidate) => candidate.file === file)?.change;
-  if (change === 'deleted') {
-    if (isDeniedPath(file)) throw new StudioError(400, `${file}: 생성물이나 비밀 파일 경로는 볼 수 없습니다`);
-    return { path: file, change, patch: await session.checkpoints.pendingPatch(file, (text) => session.sandbox.redact(text)) };
-  }
-  const content = await new Workspace(session.project.root).read(file);
-  const binary = content.includes('\u0000');
-  return {
-    path: file,
-    content: binary ? undefined : session.sandbox.redact(content),
-    binary: binary || undefined,
-    change,
-    patch: change === 'modified' ? await session.checkpoints.pendingPatch(file, (text) => session.sandbox.redact(text)) : undefined,
-  };
 }
 
 /** 지금 변경 화면(#924)이 한 번에 받는 파일 수와 diff 글자 수. 새 파일 하나는 이만큼만 읽는다 */
@@ -5403,98 +5068,6 @@ async function scanWorkingCopyDocSources(root: string): Promise<DocMatchSource[]
   return sources.filter((source) => source.content.length > 0);
 }
 
-/**
- * 추출 모델을 부르는 방법. 도구 없이 한 번만 묻는 호출 경로가 claude-code(로컬 CLI)·api(모델 레지스트리) 두 모드에만 있어
- * (계획·PR 리뷰 호출과 같은 제약) 그 밖의 백엔드에서는 undefined를 돌려준다 — 호출하는 쪽이 결정론적 대체 파서로 넘어간다.
- */
-function requirementsAsk(session: Session): ModelAsk | undefined {
-  const backend = sessionBackend(session.snapshot);
-  if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
-  if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('요구사항 추출', 'build', session.snapshot.modelId).selected));
-  return undefined;
-}
-
-/**
- * "모호한 점"에 추천 값을 물을 때만 쓰는 호출. claude-code 백엔드에서는 이 호출 하나만 WebSearch·WebFetch를 연다
- * (`claude-code-ask.ts`의 `webTools`, 파일·명령 도구는 절대 열지 않는다) — 실제 업계 관례 출처를 붙이기 위해서다.
- * api 백엔드는 기존 모델 호출 그대로(도구 없음)라 웹 검색이 없고, 호출하는 쪽이 "출처 확인 필요"로 표시한다.
- */
-function requirementsRecommendationAsk(session: Session): { ask: ModelAsk; webSearchAvailable: boolean } | undefined {
-  const backend = sessionBackend(session.snapshot);
-  if (backend === 'claude-code') return { ask: claudeCodeAsk({ cwd: session.project.root, webTools: true }), webSearchAvailable: true };
-  if (backend === 'api') return { ask: planAskFromClient(clientForModel(routingDecision('모호한 점 추천', 'build', session.snapshot.modelId).selected)), webSearchAvailable: false };
-  return undefined;
-}
-
-/** 이 세션의 원격 저장소에서 이슈 목록을 읽을 수 있게 준비한다(원격·토큰 확인까지). repository-panel.ts와 같은 자료원(listIssues)을
- * 쓰지만, 그 모듈은 sessions.ts를 가져오므로 순환을 피해 직접 부른다. 원격이 없거나 지원하지 않거나 토큰이 없으면 던진다 */
-async function remoteIssuesForSession(session: Session): Promise<{ remote: RemoteLocation; token: string; issues: IssueSummary[] }> {
-  const info = await session.checkpoints.repository();
-  if (!info) throw new StudioError(409, '이 프로젝트는 원격 저장소가 없어 이슈를 가져올 수 없습니다');
-  const remote = parseRemote(info.remoteUrl);
-  if (remote.kind !== 'github' && remote.kind !== 'gitea') {
-    throw new StudioError(400, `${remote.display}는 이슈 가져오기를 지원하지 않습니다(GitHub·Gitea만 지원합니다)`);
-  }
-  const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
-  if (!token) throw new StudioError(400, '이슈를 가져올 토큰이 없습니다');
-  const issues = await listIssues(remote, { state: 'all', token });
-  return { remote, token, issues };
-}
-
-/** 저장소 이슈 본문을 가져온다("요구사항 뽑기"가 이슈를 명세 글로 쓸 때) */
-async function fetchIssueBodyForSession(session: Session, issueNumber: number): Promise<string> {
-  const { issues } = await remoteIssuesForSession(session);
-  const issue = issues.find((candidate) => candidate.number === issueNumber);
-  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
-  const body = issue.body?.trim();
-  return body ? `${issue.title}\n\n${body}` : issue.title;
-}
-
-/**
- * "저장소 이슈"로 요구사항을 뽑을 때, 그 이슈(또는 추적 이슈의 하위 이슈)가 b-studio 관리형 영역을 담고 있으면
- * 모델을 부르지 않고 결정론적으로 요구사항을 되읽는다(ADR-097, dogfooding 발견 C — 추적 이슈의 표를 모델에
- * 그대로 넘기면 모델이 인수 조건을 지어냈다). 관리형 영역이 전혀 없으면 undefined를 돌려줘 호출하는 쪽이
- * 평소대로 모델 추출(또는 결정론적 대체 파서)로 넘어가게 한다.
- */
-async function tryImportManagedRequirements(session: Session, issueNumber: number): Promise<Requirement[] | undefined> {
-  const { issues } = await remoteIssuesForSession(session);
-  const issue = issues.find((candidate) => candidate.number === issueNumber);
-  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
-  const body = issue.body ?? '';
-
-  const toRequirement = (draft: ReturnType<typeof draftManagedRequirement>): Requirement | undefined => {
-    if (!draft) return undefined;
-    const parsed = RequirementSchema.safeParse(managedRequirementToRequirement(draft));
-    return parsed.success ? parsed.data : undefined;
-  };
-
-  // 1) 이슈 자신이 관리형 하위 이슈다
-  const own = toRequirement(draftManagedRequirement(issue.title, body));
-  if (own) return [own];
-
-  // 2) 추적 이슈다(b-studio:req 라벨 + 하위 이슈 번호 표) — 하위 이슈를 따라가 하나씩 되읽는다
-  if (!issue.labels.includes(REQUIREMENT_LABEL)) return undefined;
-  const subNumbers = extractTrackingSubIssueNumbers(body);
-  if (subNumbers.length === 0) return undefined;
-  const byNumber = new Map(issues.map((candidate) => [candidate.number, candidate]));
-  const requirements = subNumbers
-    .map((number) => byNumber.get(number))
-    .filter((candidate): candidate is IssueSummary => candidate !== undefined)
-    .map((candidate) => toRequirement(draftManagedRequirement(candidate.title, candidate.body ?? '')))
-    .filter((requirement): requirement is Requirement => requirement !== undefined);
-  return requirements.length > 0 ? requirements : undefined;
-}
-
-/** managed 서비스 템플릿·데이터베이스 엔진을 한 줄로 요약한다("추천 값으로 채우기"가 스택에 맞는 답을 내도록 프롬프트에 붙인다) */
-function buildProjectStackSummary(project: LoadedProject): string {
-  const services = project.managed.map(([name, service]) => `${name}(${service.template})`).join(', ');
-  const databases = project.databases.map(([name, database]) => `${name}(${database.engine})`).join(', ');
-  const parts: string[] = [];
-  if (services) parts.push(`서비스: ${services}`);
-  if (databases) parts.push(`데이터베이스: ${databases}`);
-  return parts.join(' · ');
-}
-
 export interface RequirementsExtractionInput {
   /** 붙여넣은 명세 글 */
   specText?: string;
@@ -5504,25 +5077,6 @@ export interface RequirementsExtractionInput {
   issueNumber?: number;
   /** "스펙을 고치고 다시 뽑기": 지난 추출의 질문과 답을 스펙 끝에 덧붙여 다시 추출한다(Spec Kit의 /clarify 응답 반영과 같은 자리) */
   answers?: Array<{ question: string; answer: string }>;
-}
-
-async function resolveSpecText(session: Session, input: RequirementsExtractionInput): Promise<string> {
-  let text: string;
-  if (input.specText?.trim()) {
-    text = input.specText;
-  } else if (input.filePath) {
-    text = await new Workspace(session.project.root).read(input.filePath);
-  } else if (input.issueNumber !== undefined) {
-    text = await fetchIssueBodyForSession(session, input.issueNumber);
-  } else {
-    throw new StudioError(400, '명세 글, 파일 경로, 이슈 번호 중 하나가 필요합니다');
-  }
-  if (input.answers && input.answers.length > 0) {
-    const answered = input.answers.map((item, index) => `${index + 1}. ${item.question}\n   답: ${item.answer}`).join('\n');
-    text = `${text}\n\n---\n[질문 답변]\n${answered}`;
-  }
-  if (!text.trim()) throw new StudioError(400, '명세 글이 비어 있습니다');
-  return text;
 }
 
 export interface RequirementsExtractionPreview {
@@ -5548,39 +5102,12 @@ export interface RequirementsExtractionPreview {
   diff?: RequirementDiffEntry[];
 }
 
-/** 참조 파일이 없을 때 자동으로 덧붙이는 질문과, 모델이 직접 낸 질문을 합쳐 상한(5개) 안으로 자른다 */
-function mergeQuestionsWithMissingReferences(questions: readonly string[], referencedFiles: readonly ReferencedFile[]): string[] {
-  const missing = referencedFiles.filter((file) => !file.exists).map((file) => buildMissingReferenceQuestion(file.path));
-  const merged: string[] = [];
-  for (const question of [...questions, ...missing]) {
-    if (merged.length >= MAX_CLARIFYING_QUESTIONS) break;
-    if (!merged.includes(question)) merged.push(question);
-  }
-  return merged;
-}
-
 /** 지금 저장된 docs/requirements.md가 있으면 그 요구사항 목록을, 없으면 빈 배열을 읽는다(재추출 병합 기준점) */
 async function readSavedRequirements(session: Session): Promise<Requirement[]> {
   const raw = await readTrustedRequirementsDocument(session);
   if (raw === undefined) return [];
   return parseRequirementsMarkdown(raw).requirements;
 }
-
-/**
- * 재추출로 막 뽑은 요구사항을 이미 저장된 문서가 있으면 제목·EARS 유사도로 병합해 id를 지킨다(mergeReextractedRequirements).
- * 저장된 문서가 없으면(첫 추출) 병합할 대상이 없으므로 그대로 돌려준다.
- */
-async function mergeWithSavedRequirements(session: Session, extracted: readonly Requirement[]): Promise<{ requirements: Requirement[]; diff?: RequirementDiffEntry[] }> {
-  const saved = await readSavedRequirements(session);
-  if (saved.length === 0) return { requirements: [...extracted] };
-  const { merged, diff } = mergeReextractedRequirements(extracted, saved);
-  return { requirements: merged, diff };
-}
-
-/** "요구사항 뽑기"(모델 추출)의 제한 시간. EARS·시나리오까지 뽑는 호출이라 3~6분씩 걸려, 10분을 넘으면 멈추고 분명한 오류로 알린다 */
-const REQUIREMENTS_EXTRACTION_TIMEOUT_MS = 10 * 60_000;
-/** "추천 값으로 채우기"의 제한 시간. 추출보다 짧게 끝나야 정상이라 3분으로 둔다 */
-const REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS = 3 * 60_000;
 
 const REQUIREMENTS_DRAFT_FILE = path.join('.git', 'b-studio', 'requirements-draft.json');
 
@@ -5630,64 +5157,9 @@ async function writeRequirementExtractionDraftFile(session: Session, draft: Pers
   await writeFile(file, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600 });
 }
 
-/** finishExtractionPreview가 draft에 함께 남길 원래 입력(답변은 뺀다). 아무것도 없으면 undefined */
-function sanitizeDraftSourceInput(input: RequirementsExtractionInput): PersistedRequirementsExtractionDraft['sourceInput'] {
-  const { specText, filePath, issueNumber } = input;
-  if (specText === undefined && filePath === undefined && issueNumber === undefined) return undefined;
-  return { ...(specText !== undefined ? { specText } : {}), ...(filePath !== undefined ? { filePath } : {}), ...(issueNumber !== undefined ? { issueNumber } : {}) };
-}
-
-/**
- * 추출 미리보기를 세션 상태 폴더에 남긴다(사이드카 — docs/ 밖이라 git 작업 복사본에도, 커밋에도 안 들어간다).
- * "요구사항 뽑기"가 3~6분 걸리는 동안 개발 서버가 재시작되면 화면은 "뽑는 중"에 멈춰 있어도 서버 쪽 작업은
- * 통째로 사라진다(버그 리포트 A) — 적어도 끝까지 마친 추출 결과는 다시 열었을 때 보이도록 남긴다.
- * 재추출(이 함수를 다시 부르는 것)은 이전 draft를 통째로 대신한다 — answers·recommendations·appliedAt은 새 결과에는
- * 아직 없으므로 비워진다(화면이 재추출 전에 "이전 추출 결과를 새 결과로 바꿉니다"를 확인받는다, ADR-097 개정).
- */
-async function saveRequirementExtractionDraft(
-  session: Session,
-  preview: RequirementsExtractionPreview,
-  sourceInput?: PersistedRequirementsExtractionDraft['sourceInput'],
-): Promise<void> {
-  const now = new Date().toISOString();
-  const draft: PersistedRequirementsExtractionDraft = { ...preview, savedAt: now, updatedAt: now, ...(sourceInput ? { sourceInput } : {}) };
-  await writeRequirementExtractionDraftFile(session, draft);
-}
-
 /** 지금 남아 있는 추출 결과를 돌려준다("추출 결과" 하위 화면이 항상 보여준다). 없으면 undefined */
 export async function getSessionRequirementExtractionDraft(id: string): Promise<PersistedRequirementsExtractionDraft | undefined> {
   return readRequirementExtractionDraftFile(requireSession(id));
-}
-
-/** 추출 결과를 지운다("지우기" 버튼, 확인을 거친 뒤 호출된다 — 확인 자체는 화면이 맡는다) */
-export async function discardSessionRequirementExtractionDraft(id: string): Promise<void> {
-  const session = requireSession(id);
-  await rm(requirementsDraftFile(session), { force: true });
-}
-
-const RequirementExtractionDraftPatchSchema = z.object({
-  requirements: z.array(RequirementSchema).max(MAX_REQUIREMENTS).optional(),
-  assumptions: z.array(AssumptionSchema).max(MAX_ASSUMPTIONS).optional(),
-  manualSteps: z.array(ManualStepItemSchema).max(MAX_MANUAL_STEPS).optional(),
-  answers: z.record(z.string(), z.string().max(2_000)).optional(),
-  recommendations: z.record(z.string(), RecommendationSchema).optional(),
-  recommendationSource: z.enum(['web', 'model']).optional(),
-});
-
-/**
- * 추출 결과를 부분적으로 고쳐 쓴다(자동 저장, ADR-097 개정). "추출 결과" 화면에서 요구사항·가정·사람이 할 일을
- * 고치거나, 질문에 답하거나, 추천 값을 받으면 800ms 정지 뒤 이 함수로 자동 저장한다 — 새로고침·서버 재시작 뒤에도
- * 편집 내용을 잃지 않는다. 저장 안 한 추출 결과가 아예 없으면(이미 지웠거나 한 번도 추출한 적 없음) 404.
- */
-export async function updateSessionRequirementExtractionDraft(id: string, patch: unknown): Promise<PersistedRequirementsExtractionDraft> {
-  const session = requireSession(id);
-  const parsed = RequirementExtractionDraftPatchSchema.safeParse(patch);
-  if (!parsed.success) throw new StudioError(400, `자동 저장할 내용의 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
-  const current = await readRequirementExtractionDraftFile(session);
-  if (!current) throw new StudioError(404, '저장 안 한 추출 결과가 없습니다');
-  const next: PersistedRequirementsExtractionDraft = { ...current, ...parsed.data, updatedAt: new Date().toISOString() };
-  await writeRequirementExtractionDraftFile(session, next);
-  return next;
 }
 
 /**
@@ -5705,144 +5177,6 @@ async function markRequirementExtractionDraftApplied(
     ? { ...current, ...applied, appliedAt: now, updatedAt: now }
     : { ...applied, questions: [], source: 'model', referencedFiles: [], outOfScope: [], savedAt: now, updatedAt: now, appliedAt: now };
   await writeRequirementExtractionDraftFile(session, next);
-}
-
-/** previewSessionRequirementsExtraction의 모든 반환 경로가 거친다: 완료된 결과를 드래프트로 남기고 그대로 돌려준다 */
-async function finishExtractionPreview(
-  session: Session,
-  preview: RequirementsExtractionPreview,
-  sourceInput?: PersistedRequirementsExtractionDraft['sourceInput'],
-): Promise<RequirementsExtractionPreview> {
-  await saveRequirementExtractionDraft(session, preview, sourceInput).catch((error: unknown) => {
-    console.error(`[b-studio] 세션 ${session.snapshot.id}의 요구사항 추출 임시 결과를 남기지 못했습니다`, error);
-  });
-  return preview;
-}
-
-/**
- * 명세 글을 요구사항 미리보기로 바꾼다(아직 파일에 쓰지 않는다 — POST apply가 따로 있다).
- * "저장소 이슈"로 가져올 때는 그 이슈(또는 추적 이슈의 하위 이슈)가 b-studio 관리형 영역을 담고 있으면 모델을
- * 부르지 않고 그대로 되읽는다(ADR-097, 버그 리포트 C — 추적 이슈의 표를 모델에 그대로 넘기면 인수 조건을 지어냈다).
- * 그 밖에는: 명세가 경로처럼 언급한 파일을 먼저 작업 복사본에서 찾아(참조 파일) 존재하는 것은 압축 요약을 추출
- * 모델 문맥에 붙이고(데이터 규모를 지어내지 않고 실제 값으로 "가정"을 쓰게 한다), 없는 것은 질문으로 올린다.
- * 추출 모델을 부를 수 있는 백엔드면 모델에 한 번 묻고, 아니거나 실패하면 결정론적 대체 파서로 넘어가며 이유를 분명히 남긴다
- * (단, 호출하는 쪽이 취소했거나 제한 시간(10분)을 넘겼으면 대체 파서로 넘기지 않고 분명한 오류를 던진다 — 버그 리포트 A).
- * 어느 경로든 "사람이 할 일"(저장소 권한·협업자 추가, 이메일 제출 등)로 보이는 항목은 결정론적 가드로 한 번 더 걸러내고,
- * 이미 저장된 문서가 있으면 제목·EARS 유사도로 병합해 기존 id를 지킨다(재추출해도 같은 요구사항이 같은 id를 유지한다).
- */
-export async function previewSessionRequirementsExtraction(
-  id: string,
-  input: RequirementsExtractionInput,
-  options: { signal?: AbortSignal } = {},
-): Promise<RequirementsExtractionPreview> {
-  const session = requireSession(id);
-
-  if (input.issueNumber !== undefined) {
-    const managed = await tryImportManagedRequirements(session, input.issueNumber).catch(() => undefined);
-    if (managed) {
-      return finishExtractionPreview(session, {
-        requirements: managed,
-        questions: [],
-        source: 'managed',
-        reason: `b-studio가 발행한 이슈에서 그대로 가져왔습니다 (${managed.length}개)`,
-        referencedFiles: [],
-        outOfScope: [],
-        assumptions: [],
-        manualSteps: [],
-      }, { issueNumber: input.issueNumber });
-    }
-  }
-
-  const specText = await resolveSpecText(session, input);
-  const referencedFiles = await resolveReferencedFiles(session.project.root, specText);
-  const referencedFilesContext = buildReferencedFilesContext(referencedFiles, REFERENCED_FILES_CONTEXT_MAX_CHARS);
-  const backend = sessionBackend(session.snapshot);
-  const ask = requirementsAsk(session);
-  if (!ask) {
-    const { requirements: kept, manualSteps } = partitionManualSteps(extractRequirementsHeuristically(specText));
-    const { requirements, diff } = await mergeWithSavedRequirements(session, kept);
-    return finishExtractionPreview(session, {
-      requirements,
-      questions: mergeQuestionsWithMissingReferences([], referencedFiles),
-      source: 'fallback',
-      reason: `이 세션 백엔드(${backend})는 도구 없이 한 번만 묻는 모델 호출을 지원하지 않아, 헤딩·글머리 기호로 요구사항을 나누는 결정론적 방식으로 대신했습니다`,
-      referencedFiles,
-      outOfScope: [],
-      assumptions: [],
-      manualSteps,
-      ...(diff ? { diff } : {}),
-    }, sanitizeDraftSourceInput(input));
-  }
-  const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_EXTRACTION_TIMEOUT_MS);
-  const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
-  try {
-    const result = await requestRequirementsExtraction(ask, specText, signal, referencedFilesContext);
-    const { requirements, diff } = await mergeWithSavedRequirements(session, result.requirements);
-    return finishExtractionPreview(session, {
-      requirements,
-      questions: mergeQuestionsWithMissingReferences(result.questions, referencedFiles),
-      source: 'model',
-      referencedFiles,
-      outOfScope: result.outOfScope,
-      assumptions: result.assumptions,
-      manualSteps: result.manualSteps,
-      ...(diff ? { diff } : {}),
-    }, sanitizeDraftSourceInput(input));
-  } catch (error) {
-    if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
-    if (timeoutSignal.aborted) {
-      throw new StudioError(408, `요구사항 추출이 제한 시간(${Math.round(REQUIREMENTS_EXTRACTION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 명세를 줄이거나 다시 시도해 주세요`);
-    }
-    if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 요구사항 추출을 이어갈 수 없습니다');
-    // 모델 답을 쓸 수 없을 때 헤딩으로 나누는 대체 파서로 몰래 바꾸지 않는다 — 긴 명세에서는 "2. 기술 스택" 같은 목차가
-    // 그대로 요구사항이 되어, 사람이 이유 줄을 놓치면 엉뚱한 목록이 저장·발행됐다(대체 파서는 모델이 없는 백엔드에서만 쓴다)
-    throw new StudioError(502, `추출 모델의 답을 쓸 수 없었습니다: ${describe(error)} — 다시 시도해 주세요`);
-  }
-}
-
-export interface RequirementRecommendationsInput {
-  questions: string[];
-  specText?: string;
-}
-
-export interface RequirementRecommendations {
-  recommendations: Recommendation[];
-  /** 'web'이면 claude-code 백엔드가 이 호출에 한해 WebSearch로 찾은 출처, 'model'이면 도구 없이 모델 지식만으로 답해 "출처 확인 필요" */
-  sourced: 'web' | 'model';
-}
-
-/**
- * "모호한 점" 질문마다 업계 관례에 근거한 추천 답·근거·출처를 한 번에 받는다. claude-code 백엔드만 이 호출에서
- * WebSearch를 열어 실제 링크를 찾고(그 밖의 도구는 열지 않는다), 그 밖의 백엔드는 모델 지식만으로 답해
- * `sourced: 'model'`로 표시한다(화면이 "출처 확인 필요"로 보여 준다). 추천 호출을 지원하지 않는 백엔드는 오류를 던진다.
- * 명세(또는 참조 파일)가 이미 답을 정해 준 질문은 "스펙 먼저" 원칙으로 명세 원문을 인용해 답하고(basis: 'spec',
- * requestQuestionRecommendations가 서버에서 인용문이 실제로 스펙에 있는지 검증한다), 프로젝트 스택(서비스 템플릿·DB
- * 엔진)을 함께 알려줘 스택과 어긋나는 추천(예: Postgres 프로젝트에 MySQL 제안)을 막는다.
- */
-export async function recommendSessionRequirementQuestions(
-  id: string,
-  input: RequirementRecommendationsInput,
-  options: { signal?: AbortSignal } = {},
-): Promise<RequirementRecommendations> {
-  const session = requireSession(id);
-  if (input.questions.length === 0) throw new StudioError(400, '추천을 받을 질문이 없습니다');
-  const resolved = requirementsRecommendationAsk(session);
-  if (!resolved) throw new StudioError(400, `이 세션 백엔드(${sessionBackend(session.snapshot)})는 추천 답 호출을 지원하지 않습니다`);
-  const specText = input.specText?.trim() ?? '';
-  const stackSummary = buildProjectStackSummary(session.project);
-  const timeoutSignal = AbortSignal.timeout(REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS);
-  const signal = AbortSignal.any([session.stop.signal, timeoutSignal, ...(options.signal ? [options.signal] : [])]);
-  try {
-    const result = await requestQuestionRecommendations(resolved.ask, input.questions, specText, resolved.webSearchAvailable, signal, stackSummary);
-    return { recommendations: result.recommendations, sourced: labelRecommendationSource(resolved.webSearchAvailable) };
-  } catch (error) {
-    if (options.signal?.aborted) throw new StudioError(400, '요청을 취소했습니다');
-    if (timeoutSignal.aborted) {
-      throw new StudioError(408, `추천 값 찾기가 제한 시간(${Math.round(REQUIREMENTS_RECOMMENDATION_TIMEOUT_MS / 60_000)}분)을 넘어 자동으로 멈췄습니다. 다시 시도해 주세요`);
-    }
-    if (session.stop.signal.aborted) throw new StudioError(409, '세션이 멈춰 추천 값 찾기를 이어갈 수 없습니다');
-    throw error;
-  }
 }
 
 /**
@@ -6243,38 +5577,6 @@ export async function clearRequirementManualVerification(id: string, requirement
   return getSessionRequirements(id);
 }
 
-/**
- * 추적 매트릭스(ADR-090, 요구사항 행의 증거는 ADR-106): 요구사항·시나리오 행마다 개정·우선순위·이슈·커밋·테스트·게이트·
- * 검증 출처·상태를 모으고, 역방향 목록(주인 없는 테스트, 테스트 없는 필수 요구사항)을 함께 돌려준다. "요구사항" 탭의
- * 추적 매트릭스 하위 화면이 연다. 요구사항 행의 증거·상태는 "명세" 탭 목록과 똑같은 평가 맥락(buildRequirementEvaluationContext
- * · evaluateRequirementWithContext)으로 계산한다 — 그래야 테스트 탭 실행·문서 확인·사람 확인까지 목록과 완전히 같은
- * 값으로 반영된다(매트릭스가 체크포인트·테스트 파일 이름·게이트만 보고 따로 계산해 목록과 다른 상태를 보여주던 문제).
- */
-export async function getSessionRequirementsMatrix(id: string): Promise<TraceabilityMatrix> {
-  const session = requireSession(id);
-  const requirements = await readSavedRequirements(session);
-  const context = await buildRequirementEvaluationContext(session);
-  const evaluationByRequirementId: Record<string, RequirementEvaluation> = {};
-  for (const requirement of requirements) {
-    const view = evaluateRequirementWithContext(requirement, context);
-    evaluationByRequirementId[requirement.id] = { status: view.status, evidence: view.evidence, verifiedBy: view.verifiedBy };
-  }
-  const testRunRows = buildMatrixTestRunRows(context.testServices, context.head, context.pendingFilesCount);
-  return buildTraceabilityMatrix({
-    requirements,
-    checkpoints: context.checkpoints,
-    testFiles: context.testFiles,
-    gateChecks: context.gateChecks,
-    evaluationByRequirementId,
-    testRunRows,
-  });
-}
-
-/** 추적 매트릭스를 CSV로 내려받는다("CSV로 내보내기" 버튼) */
-export async function getSessionRequirementsMatrixCsv(id: string): Promise<string> {
-  return buildMatrixCsv(await getSessionRequirementsMatrix(id));
-}
-
 // ---------------------------------------------------------------------------
 // "문서" 탭(ADR-094): 세션 작업 복사본의 docs/**/*.md·README.md·CHANGELOG.md·CONTRIBUTING.md를 보여 주고,
 // 그 자리에서 고쳐 쓰거나(저장 즉시 작업 복사본에 반영 — 다음 체크포인트·PR에 그대로 실린다) 템플릿으로 새 문서를
@@ -6363,138 +5665,6 @@ async function commitDocTabChange(id: string, file: string, message: string): Pr
   });
 }
 
-export type NewDocKind = 'design' | 'adr' | 'troubleshooting' | 'roadmap' | 'verification' | 'experiment' | 'roadmap-plan';
-
-export interface NewDocInput {
-  kind: NewDocKind;
-  title: string;
-  /** 템플릿 본문 대신 쓸 내용("문서로 저장"이 대화 메시지 내용을 싣는다). 설계 문서·ADR에서만 쓴다 */
-  body?: string;
-}
-
-/** "새 문서" 버튼: 템플릿으로 다음 번호의 설계 문서·ADR을 만들거나, 트러블슈팅·로드맵 항목을 이어 붙인다 */
-export async function createSessionDoc(id: string, input: NewDocInput): Promise<{ path: string; content: string }> {
-  const created = await createSessionDocFile(id, input);
-  await commitDocTabChange(id, created.path, `docs: ${input.title.trim()} 문서를 더한다`);
-  return created;
-}
-
-async function createSessionDocFile(id: string, input: NewDocInput): Promise<{ path: string; content: string }> {
-  const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 만들 수 있습니다');
-  const title = input.title.trim();
-  if (!title) throw new StudioError(400, '제목이 필요합니다');
-  const workspace = new Workspace(session.project.root);
-
-  if (input.kind === 'design') {
-    const existing = await listDocsDirFiles(workspace);
-    const path = designDocFilePath(nextDesignDocNumber(existing), title);
-    const content = input.body?.trim() || buildDesignDocTemplate(nextDesignDocNumber(existing), title);
-    await workspace.write(path, content);
-    return { path, content };
-  }
-  if (input.kind === 'adr') {
-    const existing = await listDocsDirFiles(workspace);
-    const number = nextAdrNumber(existing);
-    const path = adrFilePath(number, title);
-    const content = input.body?.trim() || buildAdrTemplate(number, title);
-    await workspace.write(path, content);
-    return { path, content };
-  }
-  if (input.kind === 'troubleshooting') {
-    const existing = await workspace.read(TROUBLESHOOTING_LOG_PATH).catch(() => undefined);
-    const entry = input.body?.trim() || buildTroubleshootingEntry(title);
-    const content = appendTroubleshootingEntry(existing, entry);
-    await workspace.write(TROUBLESHOOTING_LOG_PATH, content);
-    return { path: TROUBLESHOOTING_LOG_PATH, content };
-  }
-  if (input.kind === 'roadmap') {
-    const existing = await workspace.read(ROADMAP_TRADEOFFS_PATH).catch(() => undefined);
-    const entry = input.body?.trim() || buildRoadmapTradeoffEntry(title);
-    const content = appendRoadmapTradeoffEntry(existing, entry);
-    await workspace.write(ROADMAP_TRADEOFFS_PATH, content);
-    return { path: ROADMAP_TRADEOFFS_PATH, content };
-  }
-  if (input.kind === 'verification') {
-    const existing = await workspace.read(VERIFICATION_LOG_PATH).catch(() => undefined);
-    const entry = input.body?.trim() || buildVerificationEntry(title);
-    const content = appendVerificationEntry(existing, entry);
-    await workspace.write(VERIFICATION_LOG_PATH, content);
-    return { path: VERIFICATION_LOG_PATH, content };
-  }
-  if (input.kind === 'experiment') {
-    const existing = await workspace.read(EXPERIMENT_LOG_PATH).catch(() => undefined);
-    const entry = input.body?.trim() || buildExperimentEntry(title);
-    const content = appendExperimentEntry(existing, entry);
-    await workspace.write(EXPERIMENT_LOG_PATH, content);
-    return { path: EXPERIMENT_LOG_PATH, content };
-  }
-  // 'roadmap-plan': docs/ROADMAP.md 자체는 이미 있으면 손대지 않는다(단계·마일스톤처럼 손으로 쓴 글이 있을 수 있다) — 없을 때만 템플릿으로 만든다
-  const existingRoadmap = await workspace.read(ROADMAP_PATH).catch(() => undefined);
-  if (existingRoadmap !== undefined) return { path: ROADMAP_PATH, content: existingRoadmap };
-  const content = input.body?.trim() || buildRoadmapTemplate();
-  await workspace.write(ROADMAP_PATH, content);
-  return { path: ROADMAP_PATH, content };
-}
-
-/** "색인 갱신": docs/README.md의 관리 구간만 다시 만든다(문서마다 첫 H1·첫 문단을 읽어 표를 채운다) */
-export async function regenerateSessionDocsIndex(id: string): Promise<{ path: string; content: string }> {
-  const regenerated = await regenerateSessionDocsIndexFile(id);
-  await commitDocTabChange(id, regenerated.path, 'docs: 문서 색인을 갱신한다');
-  return regenerated;
-}
-
-async function regenerateSessionDocsIndexFile(id: string): Promise<{ path: string; content: string }> {
-  const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 갱신할 수 있습니다');
-  const workspace = new Workspace(session.project.root);
-  // 색인 표 자신(docs/README.md)은 표에 넣지 않는다
-  const docsDirFiles = (await listDocsDirFiles(workspace)).filter((docPath) => docPath !== DOCS_README_PATH);
-  const summaries: DocSummary[] = await Promise.all(
-    docsDirFiles.map(async (docPath) => buildDocSummary(docPath, await workspace.read(docPath).catch(() => ''))),
-  );
-  const existingReadme = await workspace.read(DOCS_README_PATH).catch(() => undefined);
-  const content = regenerateDocsReadme(existingReadme, summaries);
-  await workspace.write(DOCS_README_PATH, content);
-  return { path: DOCS_README_PATH, content };
-}
-
-/**
- * "ROADMAP 갱신": `docs/ROADMAP.md`의 "진행 현황" 구간만 저장된 요구사항 상태(상태별 개수, 필수(must)·권장(should)
- * 진행도)로 다시 만든다 — 단계(POC/MVP/Beta/v1)·마일스톤·현재 위치처럼 손으로 쓴 글은 그대로 둔다(색인 갱신과 같은
- * 관리되는 구간 방식, ADR-098). 요구사항이 저장돼 있지 않아도 실패하지 않고 "집계할 수 없다"는 안내로 채운다.
- */
-export async function regenerateSessionRoadmap(id: string): Promise<{ path: string; content: string }> {
-  const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 갱신할 수 있습니다');
-  const snapshot = await getSessionRequirements(id);
-  const byStatus: Record<string, number> = {};
-  for (const requirement of snapshot.requirements) byStatus[requirement.status] = (byStatus[requirement.status] ?? 0) + 1;
-  const mustHaves = snapshot.requirements.filter((requirement) => requirement.priority === 'must');
-  const shouldHaves = snapshot.requirements.filter((requirement) => requirement.priority === 'should');
-  const summary = {
-    byStatus,
-    must: { total: mustHaves.length, done: mustHaves.filter((requirement) => requirement.status === '검증됨').length },
-    should: { total: shouldHaves.length, done: shouldHaves.filter((requirement) => requirement.status === '검증됨').length },
-  };
-  const workspace = new Workspace(session.project.root);
-  const existing = await workspace.read(ROADMAP_PATH).catch(() => undefined);
-  const content = regenerateRoadmapStatus(existing, summary);
-  await workspace.write(ROADMAP_PATH, content);
-  await commitDocTabChange(id, ROADMAP_PATH, 'docs: 로드맵 진행 현황을 갱신한다');
-  return { path: ROADMAP_PATH, content };
-}
-
-/**
- * "문서" 탭의 모호한 표현 린트와 "올리기" 미리보기의 "모호한 표현" 경고가 함께 쓴다(ADR-098) — 세션별 계정 확인만
- * 하고 나머지는 packages/agent의 순수 함수(lintText)에 그대로 맡긴다. 세션을 몰라도 되는 계산이지만, 그 밖의
- * 문서 탭 API와 같은 인가 경계를 쓰려고 세션 id를 받는다.
- */
-export function lintSessionDocText(id: string, text: string): DocLintFinding[] {
-  requireSession(id);
-  return lintText(text);
-}
-
 // ---------------------------------------------------------------------------
 // "현황" 탭(ADR-098): 세션·요구사항·체크포인트를 다시 재지 않고 있는 그대로 재배열한다(읽기 전용 집계).
 // 실제 모양 맞추기는 packages/agent의 순수 함수(buildProjectStatus)가 하고, 여기서는 세션이 들고 있는 조각들을
@@ -6552,26 +5722,6 @@ async function requirementIssuesContext(session: Session): Promise<RequirementIs
   return { root: session.project.root, remote, token, projectName: session.project.spec.name };
 }
 
-function requireRequirementIssuesContext(context: RequirementIssuesContext | undefined): RequirementIssuesContext {
-  if (!context) throw new StudioError(409, '원격 저장소가 없거나, 지원하지 않는 호스트이거나(GitHub·Gitea만 지원합니다), 토큰이 없어 이슈로 발행할 수 없습니다');
-  return context;
-}
-
-/**
- * 발행에 쓸 요구사항 전체(ears·scenarios·nfr·rev·hash·trace까지)와 상태를 모은다. 전에는 snapshot.requirements의
- * id·title·kind·priority·acceptance만 추려 써서(평가용 view 모양) EARS·시나리오·NFR이 몸통에 전혀 안 실렸다
- * (B 버그 — 이슈 본문이 항상 "(정의되지 않음)"/"(없음)"으로 찍혔다). 같은 docs/requirements.md를 다시 읽어
- * (readSavedRequirements) 전체 필드를 들고, 상태만 snapshot의 평가 결과에서 가져온다.
- */
-async function requirementsForIssues(id: string): Promise<{ requirements: Requirement[]; statusById: Record<string, RequirementStatus> }> {
-  const session = requireSession(id);
-  const snapshot = await getSessionRequirements(id);
-  if (!snapshot.exists || snapshot.requirements.length === 0) throw new StudioError(400, '저장된 요구사항이 없습니다. 먼저 "명세" 탭에서 요구사항을 저장하세요');
-  const requirements = await readSavedRequirements(session);
-  const statusById = Object.fromEntries(snapshot.requirements.map((requirement) => [requirement.id, requirement.status]));
-  return { requirements, statusById };
-}
-
 /**
  * PR을 실제로 만들 때(exportSession, pullRequest:true) 추적 이슈 본문의 표를 지금 요구사항 상태로 다시 쓴다
  * (버그 리포트: 발행 때 만든 표가 "주기적으로 갱신"된다는 문구와 달리, 그 표를 다시 쓰는 경로가 실제로는
@@ -6595,47 +5745,6 @@ async function refreshTrackingIssueAfterExport(session: Session): Promise<string
   } catch (error) {
     return `요구사항 추적 이슈 본문을 갱신하지 못했습니다: ${describe(error)}`;
   }
-}
-
-/** "이슈로 발행" 미리보기(dry-run). 원격 이슈를 읽기만 하고 아무것도 쓰지 않는다 */
-export async function previewRequirementIssuePublish(id: string): Promise<RequirementPlanResult> {
-  const session = requireSession(id);
-  const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
-  const { requirements, statusById } = await requirementsForIssues(id);
-  return planRequirementIssuePublish(ctx, requirements, statusById);
-}
-
-/** publishSessionRequirementIssues·resolveSessionRequirementConflict가 사이드카(docs/requirements.issues.json)를 쓴 뒤 공통으로 부른다 */
-async function commitRequirementIssuesSidecar(id: string, message: string): Promise<void> {
-  await commitWorkingCopyDocs(id, [REQUIREMENT_ISSUES_FILE], message).catch((error: unknown) => {
-    console.error(`[b-studio] 세션 ${id}의 이슈 발행 기록 문서 체크포인트를 남기지 못했습니다`, error);
-  });
-}
-
-/** 미리보기를 확인한 뒤 실제로 발행한다(하위 이슈·추적 이슈를 만들거나 갱신한다) */
-export async function publishSessionRequirementIssues(id: string): Promise<RequirementPublishResult> {
-  const session = requireSession(id);
-  const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
-  const { requirements, statusById } = await requirementsForIssues(id);
-  const result = await publishRequirementIssues(ctx, requirements, statusById);
-  // 발행 기록(이슈 번호·발행 해시)도 작업 복사본에만 남으면 레인·통합 세션이 이어받지 못한다. 요구사항 저장과 같은 이유로 바로 체크포인트로 남긴다
-  await commitRequirementIssuesSidecar(id, 'docs: 요구사항을 이슈로 발행한 기록을 남긴다');
-  return result;
-}
-
-/** 발행된 요구사항 하나의 충돌(이슈가 GitHub에서 직접 수정됨)을 가져오기·덮어쓰기·무시 중 하나로 푼다 */
-export async function resolveSessionRequirementConflict(id: string, requirementId: string, resolution: ConflictResolution): Promise<ConflictResolutionResult> {
-  const session = requireSession(id);
-  const ctx = requireRequirementIssuesContext(await requirementIssuesContext(session));
-  const { requirements, statusById } = await requirementsForIssues(id);
-  const requirement = requirements.find((candidate) => candidate.id === requirementId);
-  if (!requirement) throw new StudioError(404, `요구사항 ${requirementId}을 찾지 못했습니다`);
-  const result = await resolveRequirementConflict(ctx, requirement, statusById[requirementId] ?? '미착수', resolution);
-  // overwrite·ignore만 사이드카를 고친다(import는 초안만 돌려주고 쓰지 않는다, requirement-issues.ts 참고)
-  if (result.action === 'overwrite' || result.action === 'ignore') {
-    await commitRequirementIssuesSidecar(id, `docs: ${requirementId} 이슈 충돌을 ${result.action === 'overwrite' ? '덮어써' : '무시해'} 해결한다`);
-  }
-  return result;
 }
 
 /**
@@ -6857,21 +5966,6 @@ export async function sessionRequirementIssueNumbers(id: string, planRequirement
   const commits = await session.checkpoints.sessionCommits();
   const { openIssues } = await verifiedRequirementSummary(session, commits, info, planRequirementIds);
   return [...new Set(openIssues)];
-}
-
-/** 저장소 이슈 하나(제목+본문)를 요구사항 초안으로 가져온다("이슈에서 가져오기" — docs/requirements.md에는 쓰지 않는다, 화면이 "적용"으로 반영한다) */
-export async function importRequirementDraftFromIssue(id: string, issueNumber: number): Promise<RequirementIssueDraft> {
-  const session = requireSession(id);
-  const info = await session.checkpoints.repository();
-  if (!info) throw new StudioError(409, '이 프로젝트는 원격 저장소가 없어 이슈를 가져올 수 없습니다');
-  const remote = parseRemote(info.remoteUrl);
-  if (remote.kind !== 'github' && remote.kind !== 'gitea') throw new StudioError(400, `${remote.display}는 이슈 가져오기를 지원하지 않습니다(GitHub·Gitea만 지원합니다)`);
-  const token = await resolveRepositoryToken(remote.kind, { allowGhCli: localFolderAllowed() });
-  if (!token) throw new StudioError(400, '이슈를 가져올 토큰이 없습니다');
-  const issues = await listIssues(remote, { state: 'all', token });
-  const issue = issues.find((candidate) => candidate.number === issueNumber);
-  if (!issue) throw new StudioError(404, `이슈 #${issueNumber}을 찾지 못했습니다(최근 이슈 목록 안에 없습니다)`);
-  return draftRequirementFromIssue(issue.title, issue.body ?? '');
 }
 
 // ---------------------------------------------------------------------------
@@ -7336,7 +6430,7 @@ async function collectParsedRun(
 /**
  * 서비스 하나의 테스트를 돌린다(서비스당 한 번에 하나만). 좁힐 대상이 없으면 서비스의 테스트 전체를 돌린다.
  * 실행기 자체가 실패해도(컴파일 오류 등) 예외를 던지지 않고 결과에 원인을 담아 돌려준다 — 사람이 "테스트" 탭에서 바로 보게 하려는 것이다.
- * 취소하면(cancelSessionTests) 저장된 결과를 건드리지 않고 그대로 돌아온다.
+ * 취소하면 저장된 결과를 건드리지 않고 그대로 돌아온다.
  */
 export async function runSessionTests(
   id: string,
@@ -7411,14 +6505,6 @@ export async function runSessionTests(
     markTestsChanged(session);
   }
   return getSessionTests(id);
-}
-
-/** 도는 중인 테스트를 취소한다. 실행 중이 아니면 404 */
-export function cancelSessionTests(id: string, service: string): void {
-  const session = requireSession(id);
-  const controller = session.testControllers?.get(service);
-  if (!controller) throw new StudioError(404, '실행 중인 테스트가 없습니다');
-  controller.abort();
 }
 
 /**
@@ -9426,7 +8512,6 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     runTool: (name, args) => runTerminalTool(id, name, args),
   });
 }
-
 
 /** 테스트가 관문의 서버 없이 처리만 부르는 자리 */
 export function terminalGatewayHandlersForTest(id: string): TerminalGatewayHandlers {

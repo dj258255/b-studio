@@ -18,25 +18,12 @@ import {
   DESIGN_APPROVAL_REQUIRED_MESSAGE,
   DESIGN_PIPELINE_DIR,
   DesignDocRecordSchema,
-  designPipelineDocPath,
-  designPipelineSidecarPath,
   extractRequirementIds,
-  isDesignPipelineDocPath,
-  nextDesignPipelineDocNumber,
-  parseDesignBundlesTable,
   Workspace,
   type DesignDocRecord,
 } from '@b-studio/agent';
-import { commitWorkingCopyDocs, getSnapshot, sessionBackend } from './sessions';
+import { getSnapshot } from './sessions';
 import { StudioError } from './errors';
-import { modelFamily } from './model-family';
-
-function requireReadySnapshot(id: string, action: string) {
-  const snapshot = getSnapshot(id);
-  if (!snapshot) throw new StudioError(404, '세션을 찾을 수 없습니다');
-  if (snapshot.status !== 'ready') throw new StudioError(409, `샌드박스가 준비된 뒤에 ${action} 수 있습니다`);
-  return snapshot;
-}
 
 /** docs/design/ 아래 사이드카(.meta.json)를 모두 읽어 유효한 레코드만 돌려준다. 폴더가 없으면 빈 배열 */
 async function listDesignDocSidecars(workDir: string): Promise<DesignDocRecord[]> {
@@ -60,82 +47,6 @@ async function listDesignDocSidecars(workDir: string): Promise<DesignDocRecord[]
   return records.filter((record): record is DesignDocRecord => record !== undefined).sort((a, b) => a.number - b.number);
 }
 
-/** 세션의 모든 설계 파이프라인 문서(초안·승인 모두). "요구사항" 탭의 "파이프라인" 하위 화면이 연다 */
-export async function listSessionDesignDocs(id: string): Promise<DesignDocRecord[]> {
-  const snapshot = getSnapshot(id);
-  if (!snapshot) throw new StudioError(404, '세션을 찾을 수 없습니다');
-  return listDesignDocSidecars(snapshot.workDir);
-}
-
-export interface SaveDesignDocInput {
-  title: string;
-  /** 명시적으로 주면 그대로 쓰고, 없으면 제목+본문에서 R-id를 스스로 뽑는다 */
-  requirementIds?: string[];
-  /** "조사" 모드로 받은 설계 답(또는 사람이 직접 쓴 설계). docs/design/NN-제목.md 본문 그대로 쓴다 */
-  body: string;
-  createdBy: string;
-}
-
-/**
- * 설계 문서를 새로 만든다(항상 "초안" 상태로 시작한다). 본문의 "작업 묶음" 표를 구조화해 사이드카에 남기므로,
- * 표가 없어도 막지 않는다(차단하지 않는다 — 나중에 사람이 고쳐 쓸 수 있다). 바로 문서 체크포인트로 남긴다
- * (요구사항 저장·이슈 발행 사이드카와 같은 이유 — 작업 분해가 이 세션의 최신 체크포인트에서 시작해도 이어받는다).
- */
-export async function saveSessionDesignDoc(id: string, input: SaveDesignDocInput): Promise<DesignDocRecord> {
-  const snapshot = requireReadySnapshot(id, '설계 문서를 만들');
-  const title = input.title.trim();
-  if (!title) throw new StudioError(400, '제목이 필요합니다');
-  const body = input.body.trim();
-  if (!body) throw new StudioError(400, '설계 문서 내용이 필요합니다');
-
-  const workspace = new Workspace(snapshot.workDir);
-  let existing: string[];
-  try {
-    existing = await workspace.list(DESIGN_PIPELINE_DIR, 2);
-  } catch {
-    existing = [];
-  }
-  const number = nextDesignPipelineDocNumber(existing);
-  const docPath = designPipelineDocPath(number, title);
-  const sidecarPath = designPipelineSidecarPath(docPath);
-  const requirementIds = input.requirementIds?.length ? [...new Set(input.requirementIds)] : [...new Set(extractRequirementIds(`${title}\n${body}`))];
-  const bundles = parseDesignBundlesTable(body);
-  const record: DesignDocRecord = {
-    path: docPath,
-    number,
-    title,
-    requirementIds,
-    bundles,
-    status: 'draft',
-    createdAt: new Date().toISOString(),
-    createdBy: input.createdBy,
-  };
-
-  await workspace.write(docPath, body.endsWith('\n') ? body : `${body}\n`);
-  await workspace.write(sidecarPath, JSON.stringify(record, null, 2));
-  await commitWorkingCopyDocs(id, [docPath, sidecarPath], `docs: ${title} 설계 문서를 만든다`);
-  return record;
-}
-
-/**
- * 사람이 설계를 승인한다(초안 → 승인됨). 이미 승인된 설계는 다시 승인하지 않는다(409).
- * 승인 전까지는 이 설계가 다루는 요구사항의 구현을 assertDesignApprovedForRequest가 막는다.
- */
-export async function approveSessionDesignDoc(id: string, docPath: string, owner: string): Promise<DesignDocRecord> {
-  const snapshot = requireReadySnapshot(id, '설계를 승인할');
-  if (!isDesignPipelineDocPath(docPath)) throw new StudioError(400, '설계 파이프라인 문서 경로가 아닙니다');
-  const workspace = new Workspace(snapshot.workDir);
-  const sidecarPath = designPipelineSidecarPath(docPath);
-  const raw = await workspace.read(sidecarPath).catch(() => undefined);
-  if (raw === undefined) throw new StudioError(404, '설계 문서를 찾을 수 없습니다');
-  const record = DesignDocRecordSchema.parse(JSON.parse(raw));
-  if (record.status === 'approved') throw new StudioError(409, '이미 승인된 설계입니다');
-  const approved: DesignDocRecord = { ...record, status: 'approved', approvedBy: owner, approvedAt: new Date().toISOString() };
-  await workspace.write(sidecarPath, JSON.stringify(approved, null, 2));
-  await commitWorkingCopyDocs(id, [sidecarPath], `docs: ${record.title} 설계를 승인한다`);
-  return approved;
-}
-
 /**
  * 요청 글에 언급된 요구사항 id(`R4`, `R4.1` 같은 토큰)가 아직 승인되지 않은 설계 문서의 범위에 걸리면
  * 409(DESIGN_APPROVAL_REQUIRED_MESSAGE)로 막는다. 그 요구사항을 다루는 설계 문서가 하나도 없으면(옵트인) 통과한다.
@@ -149,11 +60,4 @@ export async function assertDesignApprovedForRequest(id: string, request: string
   const designDocs = await listDesignDocSidecars(snapshot.workDir);
   const check = checkDesignApproval(requirementIds, designDocs);
   if (check.blocked) throw new StudioError(409, DESIGN_APPROVAL_REQUIRED_MESSAGE);
-}
-
-/** 이 세션의 백엔드·모델이 속한 모델 계열(구현자 계열). 검토 독립성 판정에 쓴다 */
-export function sessionImplementerFamily(id: string) {
-  const snapshot = getSnapshot(id);
-  if (!snapshot) return 'unknown' as const;
-  return modelFamily(sessionBackend(snapshot), snapshot.modelId);
 }

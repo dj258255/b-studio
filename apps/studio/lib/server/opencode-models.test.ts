@@ -1,6 +1,6 @@
 import type { OpenCodeModel } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
-import { checkOpenCodeModelId, createOpenCodeModelsCache, filterFreeModels, freeOnlyEnabled, hasUsableModel, openCodeMode, toStudioModel } from './opencode-models';
+import { checkOpenCodeModelId, createOpenCodeModelsCache, filterFreeModels, freeOnlyEnabled, toStudioModel } from './opencode-models';
 
 function model(id: string, overrides: Partial<OpenCodeModel> = {}): OpenCodeModel {
   const name = id.slice(id.indexOf('/') + 1);
@@ -17,7 +17,7 @@ const MODELS: OpenCodeModel[] = [
   model('anthropic/claude-sonnet-4-6'),
 ];
 
-describe('freeOnlyEnabled / openCodeMode', () => {
+describe('freeOnlyEnabled', () => {
   it('B_STUDIO_OPENCODE_FREE_ONLY는 1 또는 true일 때만 켠다', () => {
     expect(freeOnlyEnabled({})).toBe(false);
     expect(freeOnlyEnabled({ B_STUDIO_OPENCODE_FREE_ONLY: '' })).toBe(false);
@@ -26,14 +26,9 @@ describe('freeOnlyEnabled / openCodeMode', () => {
     expect(freeOnlyEnabled({ B_STUDIO_OPENCODE_FREE_ONLY: '0' })).toBe(false);
   });
 
-  it('openCodeMode는 B_STUDIO_MODE가 opencode일 때만 참이다', () => {
-    expect(openCodeMode({ B_STUDIO_MODE: 'opencode' })).toBe(true);
-    expect(openCodeMode({ B_STUDIO_MODE: 'api' })).toBe(false);
-    expect(openCodeMode({})).toBe(false);
-  });
 });
 
-describe('toStudioModel / filterFreeModels / hasUsableModel', () => {
+describe('toStudioModel / filterFreeModels', () => {
   it('러너 모델을 화면 모델로 바꾼다(그룹은 제공자, 기본 표시는 없음, usable·reason을 그대로 넘긴다)', () => {
     expect(toStudioModel(model('opencode/mimo-v2.6-flash-free'))).toEqual({
       id: 'opencode/mimo-v2.6-flash-free',
@@ -54,11 +49,6 @@ describe('toStudioModel / filterFreeModels / hasUsableModel', () => {
     expect(filterFreeModels(views, false)).not.toBe(views);
   });
 
-  it('쓸 수 있는 모델이 하나도 없으면 hasUsableModel이 거짓이다', () => {
-    const onlyGated = MODELS.filter((m) => m.id.includes('free')).map(toStudioModel);
-    expect(hasUsableModel(onlyGated)).toBe(false);
-    expect(hasUsableModel(MODELS.map(toStudioModel))).toBe(true);
-  });
 });
 
 describe('checkOpenCodeModelId', () => {

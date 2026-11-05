@@ -10,7 +10,7 @@ const execFileAsync = promisify(execFile);
 
 /**
  * main 따라잡기(ADR-076)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
- * 진짜로 하는 것: 파일 시스템의 git 저장소(로컬 bare 원격), 체크포인트, 검증 게이트, `catchUpBase`·`resolveBaseConflictsWithAgent`·`exportSession`.
+ * 진짜로 하는 것: 파일 시스템의 git 저장소(로컬 bare 원격), 체크포인트, 검증 게이트, `exportSession`.
  * 가짜로 바꾸는 것: 샌드박스(Docker)와 원격 GitHub API(createPullRequest). 실제 네트워크·Docker 호출은 없다.
  */
 const fake = vi.hoisted(() => ({
@@ -74,8 +74,7 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   return { ...actual, createPullRequest: (...args: unknown[]) => (fake.createPullRequest as (...a: unknown[]) => unknown)(...args) };
 });
 
-import { baseStatus, catchUpBase, createSession, exportSession, getSnapshot, resolveBaseConflictsWithAgent, sendMessage, stopSession, subscribe } from './sessions';
-import type { StudioEvent } from '@/lib/studio-events';
+import { baseStatus, createSession, exportSession, getSnapshot, sendMessage, stopSession, subscribe } from './sessions';
 
 let root: string;
 const saved = {
@@ -175,15 +174,6 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   }
 }
 
-async function waitFor(check: () => boolean, timeoutMs = 10_000): Promise<void> {
-  const started = Date.now();
-  for (;;) {
-    if (check()) return;
-    if (Date.now() - started > timeoutMs) throw new Error('시간 안에 끝나지 않았습니다');
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-}
-
 /** 파일을 바꾸고 턴을 끝내는 대본으로 요청을 보내고, 그 실행이 끝나기를 기다린다 */
 async function runWrite(id: string, content: string): Promise<void> {
   const finished = new Promise<void>((resolve) => {
@@ -213,55 +203,6 @@ describe('main 따라잡기(ADR-076)', () => {
     expect(await baseStatus(id)).toMatchObject({ base: 'main', behind: 0 }); // throttle 안이라 아직 못 본다
     expect(await baseStatus(id, { force: true })).toMatchObject({ base: 'main', behind: 1 });
 
-    await stopSession(id).catch(() => {});
-  }, 20_000);
-
-  it('catchUpBase는 병합으로 따라잡아 체크포인트를 남기고, PR이 있으면 바로 다시 올린다', async () => {
-    await setupRepo();
-    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(id)).toBe('ready');
-    await runWrite(id, 'class Order { String memo; }\n');
-    await exportSession(id, { pullRequest: true, review: false });
-    expect(getSnapshot(id)?.repository?.pullRequestUrl).toBe('https://github.com/acme/verifyproj/pull/1');
-
-    await pushToBase('CHANGELOG.md', '# changes\n', 'main 변경');
-
-    catchUpBase(id);
-    await waitFor(() => !getSnapshot(id)?.running);
-
-    const snapshot = getSnapshot(id)!;
-    expect(snapshot.checkpoints[0]).toMatchObject({ message: 'main을 따라잡는다 (1커밋)' });
-    // PR이 있었으므로 병합한 체크포인트를 바로 다시 올렸다
-    expect(snapshot.repository?.pushedSha).toBe(snapshot.checkpoints[0]!.sha);
-
-    await stopSession(id).catch(() => {});
-  }, 20_000);
-
-  it('main과 같은 곳을 고쳐 충돌하면 사람에게 넘기고(요청 문구 없음), 에이전트에게 맡기면 대화에 채울 요청 문구를 만든다', async () => {
-    await setupRepo();
-    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(id)).toBe('ready');
-    await runWrite(id, 'class Order { String mine; }\n');
-
-    await pushToBase('api/src/Order.java', 'class Order { String main; }\n', 'main 변경');
-
-    const events: StudioEvent[] = [];
-    const unsubscribe = subscribe(id, (event) => events.push(event));
-
-    catchUpBase(id);
-    await waitFor(() => !getSnapshot(id)?.running);
-    const failed = events.findLast((event) => event.type === 'base_sync_failed');
-    expect(failed).toMatchObject({ conflicts: ['api/src/Order.java'] });
-    expect(failed && 'agentRequest' in failed ? failed.agentRequest : undefined).toBeUndefined();
-
-    const resolved = await resolveBaseConflictsWithAgent(id);
-    expect(resolved.conflicts).toEqual(['api/src/Order.java']);
-    expect(resolved.request).toContain('main 브랜치를 병합해 따라잡으려 했지만');
-    expect(resolved.request).toContain('api/src/Order.java');
-    // 자동으로 보내지는 않는다 — 대화에 요청이 접수(run_started)되지 않았다
-    expect(getSnapshot(id)!.running).toBe(false);
-
-    unsubscribe();
     await stopSession(id).catch(() => {});
   }, 20_000);
 

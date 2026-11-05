@@ -2,7 +2,6 @@ import type { CommandCodeModel } from '@b-studio/agent';
 import { describe, expect, it } from 'vitest';
 import {
   checkCommandCodeModelId,
-  commandCodeMode,
   createCommandCodeModelsCache,
   filterFreeModels,
   freeOnlyEnabled,
@@ -19,7 +18,7 @@ const MODELS: CommandCodeModel[] = [
   model('stealth/space-bunny-alpha', { group: 'Stealth', description: 'FREE stealth', free: true }),
 ];
 
-describe('freeOnlyEnabled / commandCodeMode', () => {
+describe('freeOnlyEnabled', () => {
   it('B_STUDIO_CMD_FREE_ONLY는 1 또는 true일 때만 켠다', () => {
     expect(freeOnlyEnabled({ B_STUDIO_CMD_FREE_ONLY: '1' })).toBe(true);
     expect(freeOnlyEnabled({ B_STUDIO_CMD_FREE_ONLY: 'TRue' })).toBe(true);
@@ -27,11 +26,6 @@ describe('freeOnlyEnabled / commandCodeMode', () => {
     expect(freeOnlyEnabled({})).toBe(false);
   });
 
-  it('commandCodeMode는 B_STUDIO_MODE가 commandcode일 때만 참이다', () => {
-    expect(commandCodeMode({ B_STUDIO_MODE: 'commandcode' })).toBe(true);
-    expect(commandCodeMode({ B_STUDIO_MODE: 'api' })).toBe(false);
-    expect(commandCodeMode({})).toBe(false);
-  });
 });
 
 describe('filterFreeModels', () => {

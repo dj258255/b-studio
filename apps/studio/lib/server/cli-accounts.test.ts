@@ -10,7 +10,6 @@ import {
   extractLoginHint,
   getLoginProgress,
   isCliAccountBackend,
-  listAccountStatuses,
   LOGIN_TIMEOUT_MS,
   loginCommandFor,
   loginCommandText,
@@ -181,20 +180,6 @@ describe('checkAccountStatus의 이유 문구(이슈 #720)', () => {
 
     expect(status.installed).toBe(false);
     expect(status.reason).toBe('OpenCode CLI를 찾지 못했습니다.');
-  });
-});
-
-describe('listAccountStatuses', () => {
-  it('다섯 백엔드를 모두 확인한다', async () => {
-    const statuses = await listAccountStatuses({
-      claudeCode: async () => ({ ok: true, account: {} }),
-      codex: async () => ({ ok: true }),
-      commandCode: async () => ({ ok: false, reason: '로그인 필요' }),
-      openCode: async () => ({ ok: false, reason: '로그인 필요' }),
-      gemini: async () => ({ ok: false, reason: '로그인 필요' }),
-    });
-    expect(statuses.map((status) => status.backend)).toEqual(['claude-code', 'codex', 'commandcode', 'opencode', 'gemini']);
-    expect(statuses.filter((status) => status.connected)).toHaveLength(2);
   });
 });
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { LoadedProject } from './load';
-import { defaultServiceSelection, dependencyClosure, dependentsOf, missingDependencies, newlyAddedServices } from './service-selection';
+import { defaultServiceSelection, dependencyClosure, dependentsOf, newlyAddedServices } from './service-selection';
 
 describe('dependencyClosure', () => {
   it('뿌리에서 기대는 서비스를 따라가며 닫힘을 모은다', () => {
@@ -26,18 +26,6 @@ describe('defaultServiceSelection', () => {
       dependsOn: { web: ['api'], api: ['db'], db: [], kafka: [] },
     } as unknown as Pick<LoadedProject, 'managed' | 'dependsOn'>;
     expect(defaultServiceSelection(project)).toEqual(['api', 'db', 'web']);
-  });
-});
-
-describe('missingDependencies', () => {
-  it('고른 서비스 중 기대는 서비스가 선택에서 빠진 쌍을 모은다', () => {
-    const graph = { api: ['db'], web: ['api'] };
-    expect(missingDependencies(new Set(['api', 'web']), graph)).toEqual([{ service: 'api', dependsOn: 'db' }]);
-  });
-
-  it('선택에 기대는 서비스도 들어 있으면 빈 배열이다', () => {
-    const graph = { api: ['db'], db: [] };
-    expect(missingDependencies(new Set(['api', 'db']), graph)).toEqual([]);
   });
 });
 

@@ -1,6 +1,6 @@
-import { readdir, readFile, stat } from 'node:fs/promises';
+import { readdir } from 'node:fs/promises';
 import path from 'node:path';
-import { matchLines, type CodeMatch } from '@/lib/code-search';
+import { type CodeMatch } from '@/lib/code-search';
 import { isDeniedPath } from './file-watch';
 
 /**
@@ -60,32 +60,4 @@ export interface SearchResult {
   scanned: number;
   /** 결과 수 상한에 걸려 멈춘 경우 */
   truncated: boolean;
-}
-
-export interface SearchOptions {
-  /** 결과에 넣을 최대 파일 수 */
-  fileLimit?: number;
-  /** 파일마다 보여 줄 최대 줄 수 */
-  matchesPerFile?: number;
-  maxBytes?: number;
-}
-
-/** 파일 내용에서 찾는다. 큰 파일과 바이너리는 건너뛰고, 결과 수를 제한해 큰 저장소에서도 끝난다 */
-export async function searchFiles(root: string, query: string, files: readonly string[], options: SearchOptions = {}): Promise<SearchResult> {
-  const { fileLimit = 50, matchesPerFile = 5, maxBytes = MAX_SEARCH_BYTES } = options;
-  const results: FileMatches[] = [];
-  let scanned = 0;
-
-  for (const file of files) {
-    if (results.length >= fileLimit) return { results, scanned, truncated: true };
-    const absolute = path.join(root, file);
-    const info = await stat(absolute).catch(() => undefined);
-    if (!info?.isFile() || info.size > maxBytes) continue;
-    const content = await readFile(absolute, 'utf8').catch(() => undefined);
-    if (content === undefined) continue;
-    scanned += 1;
-    const matches = matchLines(content, query, { limit: matchesPerFile });
-    if (matches.length > 0) results.push({ file, matches });
-  }
-  return { results, scanned, truncated: false };
 }

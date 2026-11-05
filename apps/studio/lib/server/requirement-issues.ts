@@ -19,19 +19,15 @@ import {
   buildStatusComment,
   buildSubIssueBody,
   buildTrackingIssueBody,
-  contentHash,
   createIssue,
-  draftRequirementFromIssue,
   ensureLabels,
   findPinnedStatusComment,
   findTrackingIssue,
   listIssueComments,
   listIssues,
-  parseManagedRegion,
   planRequirementPublish,
   postComment,
   REQUIREMENT_LABEL,
-  requirementContentHash,
   requirementIdFromIssueTitle,
   requirementLabelSet,
   subIssueTitle,
@@ -40,19 +36,16 @@ import {
   updateComment,
   updateIssue,
   Workspace,
-  type ConflictResolution,
   type GateCheckResult,
   type Requirement,
   type RemoteIssueSnapshot,
   type RemoteLocation,
   type RequirementForIssues,
-  type RequirementIssueDraft,
   type RequirementPlanEntry,
   type RequirementPlanSummary,
   type RequirementStatus,
   type TestMatch,
 } from '@b-studio/agent';
-import { StudioError } from './errors';
 
 export const REQUIREMENT_ISSUES_FILE = 'docs/requirements.issues.json';
 
@@ -125,19 +118,6 @@ async function fetchRemoteRequirementIssues(
   return { snapshots, tracking: findTrackingIssue(issues, ctx.projectName) };
 }
 
-/** 미리보기에 보여줄 저장소 이름(호스트/경로). 자격 증명은 RemoteLocation.display에서 이미 빠져 있다 */
-function repositoryLabel(remote: RemoteLocation): string {
-  return remote.host && remote.path ? `${remote.host}/${remote.path}` : remote.display;
-}
-
-/** 발행 기록에 추적 이슈가 없으면 저장소에서 찾은 것을 쓴다(다른 세션에서 이미 발행한 경우) */
-function resolveTracking(
-  store: { tracking?: { issue: number; url: string } },
-  found: { issue: number; url?: string } | undefined,
-): { issue: number; url?: string } | undefined {
-  return store.tracking ?? found;
-}
-
 export interface RequirementPlanResult {
   plan: RequirementPlanEntry[];
   summary: RequirementPlanSummary;
@@ -145,28 +125,6 @@ export interface RequirementPlanResult {
   repository: string;
   /** 추적 이슈를 새로 만드는지, 이미 있는 것을 갱신하는지 */
   tracking: { action: 'create' } | { action: 'update'; issue: number };
-}
-
-/** 발행 전 미리보기(dry-run). 네트워크로 원격 이슈를 읽기만 하고 아무것도 쓰지 않는다 */
-export async function planRequirementIssuePublish(
-  ctx: RequirementIssuesContext,
-  requirements: readonly Requirement[],
-  statusById: Readonly<Record<string, RequirementStatus>>,
-): Promise<RequirementPlanResult> {
-  const store = await loadStore(ctx.root);
-  const remote = await fetchRemoteRequirementIssues(ctx);
-  const inputs = requirements.map((requirement) => ({
-    requirement: toRequirementForIssues(requirement, store.byId[requirement.id]),
-    status: statusById[requirement.id] ?? '미착수',
-  }));
-  const plan = planRequirementPublish(inputs, remote.snapshots);
-  const tracking = resolveTracking(store, remote.tracking);
-  return {
-    plan,
-    summary: summarizeRequirementPlan(plan),
-    repository: repositoryLabel(ctx.remote),
-    tracking: tracking ? { action: 'update', issue: tracking.issue } : { action: 'create' },
-  };
 }
 
 /** 발행 결과. 미리보기의 계획·요약은 그대로 담고, 추적 이슈는 "무엇을 할지" 대신 실제로 쓴 이슈 번호·주소를 돌려준다 */
@@ -179,7 +137,7 @@ export interface RequirementPublishResult extends Omit<RequirementPlanResult, 't
 /**
  * 계획을 실제로 실행한다: create·update·reverify인 요구사항의 하위 이슈를 만들거나 고치고, 라벨을 보장하고,
  * 추적 이슈(표 + could·docs 체크리스트)를 만들거나 갱신하고, GitHub이면 새로 만든 하위 이슈를 추적 이슈에 연결한다.
- * conflict·unchanged·closed_but_requirement_exists는 쓰지 않는다(충돌은 `resolveRequirementConflict`로 따로 푼다).
+ * conflict·unchanged·closed_but_requirement_exists는 쓰지 않는다.
  */
 export async function publishRequirementIssues(
   ctx: RequirementIssuesContext,
@@ -293,61 +251,6 @@ export async function refreshTrackingIssueBody(
   const trackingBody = buildTrackingIssueBody(ctx.projectName, rows, { updatedAt: new Date().toISOString() });
   await updateIssue(ctx.remote, store.tracking.issue, { body: trackingBody, labels: [REQUIREMENT_LABEL] }, { token: ctx.token });
   return { updated: true, issue: store.tracking.issue };
-}
-
-export interface ConflictResolutionResult {
-  action: ConflictResolution;
-  /** action이 'import'일 때만 있다 — docs/requirements.md에 반영할지는 사람이 검토해 결정한다(자동으로 쓰지 않는다) */
-  draft?: RequirementIssueDraft;
-}
-
-/**
- * 충돌(이슈가 GitHub에서 직접 수정됨) 하나를 해결한다.
- *  - overwrite(덮어쓰기): 로컬 내용으로 이슈 본문을 다시 쓴다
- *  - ignore(무시): 아무것도 쓰지 않고, 원격의 지금 내용을 새 기준선으로 받아들인다(다음 발행부터 다시 비교한다)
- *  - import(가져오기): 이슈 본문을 요구사항 초안으로 파싱해 돌려준다(파일에 쓰지 않는다 — 화면이 "요구사항 적용"으로 반영한다)
- */
-export async function resolveRequirementConflict(
-  ctx: RequirementIssuesContext,
-  requirement: Requirement,
-  status: RequirementStatus,
-  resolution: ConflictResolution,
-): Promise<ConflictResolutionResult> {
-  const store = await loadStore(ctx.root);
-  const record = store.byId[requirement.id];
-  if (!record) throw new StudioError(404, `${requirement.id}은 아직 이슈로 발행되지 않아 충돌을 풀 것이 없습니다`);
-
-  const remoteIssues = (await fetchRemoteRequirementIssues(ctx)).snapshots;
-  const issue = remoteIssues.find((candidate) => candidate.number === record.issue);
-  if (!issue) throw new StudioError(404, `이슈 #${record.issue}를 찾지 못했습니다`);
-  const region = parseManagedRegion(issue.body);
-  const remoteHash = region ? contentHash(region.content) : undefined;
-
-  if (resolution === 'overwrite') {
-    const requirementForIssues = toRequirementForIssues(requirement, record);
-    // 발행과 같은 규칙: 이슈 헤더의 rev=는 파일의 개정 번호를 그대로 쓴다(ADR-106)
-    const rev = requirement.rev ?? 1;
-    const body = buildSubIssueBody(requirementForIssues, rev);
-    await updateIssue(ctx.remote, record.issue, { body, labels: requirementLabelSet(requirement, status) }, { token: ctx.token });
-    store.byId[requirement.id] = { issue: record.issue, rev, publishedHash: requirementContentHash(requirementForIssues), publishedAt: new Date().toISOString() };
-    await saveStore(ctx.root, store);
-    return { action: 'overwrite' };
-  }
-
-  if (resolution === 'ignore') {
-    if (remoteHash !== undefined) {
-      store.byId[requirement.id] = { ...record, publishedHash: remoteHash, rev: region?.rev ?? record.rev };
-      await saveStore(ctx.root, store);
-    }
-    return { action: 'ignore' };
-  }
-
-  const draft = draftRequirementFromIssue(subIssueTitle(requirement), issue.body);
-  if (remoteHash !== undefined) {
-    store.byId[requirement.id] = { ...record, publishedHash: remoteHash, rev: region?.rev ?? record.rev };
-    await saveStore(ctx.root, store);
-  }
-  return { action: 'import', draft };
 }
 
 export interface RequirementSyncEvidence {

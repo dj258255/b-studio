@@ -22,7 +22,7 @@ export const RUNTIME_TABS: ReadonlyArray<{ tab: RuntimeTab; label: string }> = [
   { tab: 'qa', label: 'QA' },
 ];
 
-/** 쌓아 두는 로그 줄 수. 웹 화면(LOG_LIMIT)과 같다 */
+/** 쌓아 두는 로그 줄 수. 서버의 LOG_LIMIT과 같다 */
 export const RUNTIME_LOG_LIMIT = 1000;
 /** 배포 진행 줄 수. 스튜디오의 DEPLOY_LOG_LIMIT와 같다 */
 const DEPLOY_LINES = 200;

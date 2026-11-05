@@ -60,8 +60,3 @@ export function advanceSandboxLink(tracker: SandboxLinkTracker, probe: SandboxPr
 export function sameSandboxLink(a: SandboxLink | undefined, b: SandboxLink | undefined): boolean {
   return a?.state === b?.state && a?.since === b?.since && a?.reason === b?.reason;
 }
-
-/** 헤더에 보일 한 줄 */
-export function describeSandboxLink(link: SandboxLink): string {
-  return link.state === 'unreachable' ? '샌드박스에 닿지 않습니다' : '샌드박스 컨테이너가 없습니다';
-}

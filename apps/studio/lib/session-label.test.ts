@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cleanSessionLabel, SESSION_LABEL_MAX, sessionDisplayName, sessionLabelProblem } from './session-label';
+import { cleanSessionLabel, SESSION_LABEL_MAX, sessionLabelProblem } from './session-label';
 
 describe('세션 이름(#875)', () => {
   it('제어 글자를 빼고 앞뒤 빈칸을 뗀다', () => {
@@ -14,9 +14,4 @@ describe('세션 이름(#875)', () => {
     expect(sessionLabelProblem('가'.repeat(61))).toBe('세션 이름은 60자까지입니다');
   });
 
-  it('이름이 있으면 이름, 없거나 빈칸이면 프로젝트 이름을 보인다', () => {
-    expect(sessionDisplayName({ projectName: 'shop', label: '결제 화면' })).toBe('결제 화면');
-    expect(sessionDisplayName({ projectName: 'shop', label: '  ' })).toBe('shop');
-    expect(sessionDisplayName({ projectName: 'shop' })).toBe('shop');
-  });
 });

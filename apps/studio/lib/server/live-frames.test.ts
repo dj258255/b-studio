@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { clearFrames, publish, publishBlocked, subscribe, type LiveFrame } from './live-frames';
+import { clearFrames, publish, subscribe, type LiveFrame } from './live-frames';
 
 function frame(data: string): LiveFrame {
   return { source: 'qa', check: 'web /', mime: 'image/jpeg', data, width: 375, height: 812, at: 1 };
@@ -51,15 +51,4 @@ describe('live-frames', () => {
     off();
   });
 
-  it('막힌 요청 수를 보내고, 새 구독자에게 마지막 값을 다시 보낸다', () => {
-    publishBlocked('session', 3);
-    const listener = vi.fn();
-    const off = subscribe('session', listener);
-    expect(listener).toHaveBeenCalledTimes(1);
-    expect(listener.mock.calls[0]?.[0]).toMatchObject({ kind: 'blocked', count: 3 });
-
-    publishBlocked('session', 4);
-    expect(listener.mock.calls.at(-1)?.[0]).toMatchObject({ kind: 'blocked', count: 4 });
-    off();
-  });
 });

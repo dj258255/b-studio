@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { taskKindLabel, UNKNOWN_KIND, UNKNOWN_MODEL_LABEL } from '../routing-types';
+import { UNKNOWN_KIND, UNKNOWN_MODEL_LABEL } from '../routing-types';
 import type { StudioEvent } from '../studio-events';
 import { buildRoutingStats } from './routing-stats';
 
@@ -214,12 +214,6 @@ describe('buildRoutingStats', () => {
     expect(stats.rows[0]?.medianCostUsd).toBeCloseTo(0.002);
   });
 
-  it('작업 종류를 사람이 읽는 말로 바꾼다', () => {
-    expect(taskKindLabel(simple)).toBe('단순');
-    expect(taskKindLabel(risky)).toBe('보통 · 위험');
-    expect(taskKindLabel({ complexity: 'complex', risk: 'normal' })).toBe('복잡');
-    expect(taskKindLabel(UNKNOWN_KIND)).toBe('모름');
-  });
 });
 
 describe('buildRoutingStats 계정별 묶음과 최근 실패(#891)', () => {
