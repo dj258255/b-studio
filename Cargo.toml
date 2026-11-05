@@ -1,0 +1,14 @@
+# b-studio의 Rust 코드(ADR-191). 판정은 Node를 모르는 순수 크레이트에 두고, Node와 잇는 층은 따로 둔다
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+
+[profile.release]
+# 판정 코드라 크기보다 빌드 재현성이 중요하다. 기본값을 그대로 쓰고 디버그 정보만 줄인다
+strip = "debuginfo"

@@ -1,0 +1,13 @@
+[package]
+name = "bstudio-guard"
+version = "0.1.0"
+description = "b-studio의 막는 검사 판정(읽기 전용 docker, 컨테이너 정책, 시크릿 가림). Node에 의존하지 않는다"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# JS가 JSON.stringify로 넘긴 객체의 키 순서(Object.keys 순서)를 그대로 지키려고 preserve_order를 켠다
+serde_json = { version = "1", features = ["preserve_order"] }
+regex = "1"

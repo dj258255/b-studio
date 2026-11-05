@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import type { LoadedProject } from '@b-studio/spec';
+import { native, type NativeRedactor } from './native';
 
 /** 이보다 짧은 값은 로그의 평범한 단어와 겹쳐, 가림이 확실하지 않거나 출력을 망가뜨린다 */
 export const MIN_SECRET_LENGTH = 8;
@@ -59,57 +60,33 @@ export async function resolveSecrets(
   return values;
 }
 
-/** `KEY=VALUE` 줄을 읽는다. 빈 줄과 `#` 주석은 건너뛰고, 값을 감싼 따옴표 한 쌍은 벗긴다 */
+/** `KEY=VALUE` 줄을 읽는다. 빈 줄과 `#` 주석은 건너뛰고, 값을 감싼 따옴표 한 쌍은 벗긴다(판정은 Rust: crates/bstudio-guard/src/secrets.rs) */
 export function parseDotenv(text: string): Record<string, string> {
-  const values: Record<string, string> = {};
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    const match = /^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
-    if (!match) continue;
-    const value = match[2]!;
-    values[match[1]!] = /^(["']).*\1$/.test(value) ? value.slice(1, -1) : value;
-  }
-  return values;
+  return Object.fromEntries(native.parseDotenv(text));
 }
 
-/** 샌드박스에서 나오는 텍스트(로그, 명령 출력, HTTP 응답, 파일 내용)에서 시크릿 값을 찾고 가린다 */
+/**
+ * 샌드박스에서 나오는 텍스트(로그, 명령 출력, HTTP 응답, 파일 내용)에서 시크릿 값을 찾고 가린다.
+ * 원래 값, URL 인코딩한 값, base64로 인코딩한 값을 긴 값부터 가린다(판정은 Rust)
+ */
 export class Redactor {
-  readonly #patterns: Array<{ name: string; forms: string[] }>;
+  readonly #native: NativeRedactor;
 
   constructor(secrets: Record<string, string>) {
-    this.#patterns = Object.entries(secrets)
-      // URL 쿼리나 폼 본문에 들어간 값, base64로 인코딩한 출력(`| base64`, Basic 인증 헤더)도 가린다
-      .map(([name, value]) => ({ name, forms: [...new Set([value, encodeURIComponent(value), ...base64Cores(value)])] }))
-      // 한 값이 다른 값을 포함하면 긴 값부터 가려야 가린 자리에 맞는 이름이 남는다
-      .sort((a, b) => b.forms[0]!.length - a.forms[0]!.length);
+    // 같은 길이의 값끼리는 넘긴 순서를 지킨다. JS 객체의 순서(Object.entries)를 그대로 넘긴다
+    const entries = Object.entries(secrets);
+    this.#native = new native.NativeRedactor(
+      entries.map(([name]) => name),
+      entries.map(([, value]) => value),
+    );
   }
 
   redact(text: string): string {
-    let result = text;
-    for (const { name, forms } of this.#patterns) {
-      for (const form of forms) result = result.replaceAll(form, `[${name} 가림]`);
-    }
-    return result;
+    return this.#native.redact(text);
   }
 
   /** 텍스트에 값이 들어 있는 시크릿 이름 */
   find(text: string): string[] {
-    return this.#patterns.filter(({ forms }) => forms.some((form) => text.includes(form))).map(({ name }) => name).sort();
+    return this.#native.find(text);
   }
-}
-
-/**
- * base64는 3바이트씩 묶어 인코딩하므로 같은 값도 앞에 몇 바이트가 붙느냐(0~2)에 따라 다른 문자열이 된다.
- * 각 경우에 앞뒤 바이트와 섞이지 않고 값만으로 정해지는 구간을 돌려준다. 경계의 1~2글자는 남지만 값을 복원할 수 없다
- */
-function base64Cores(value: string): string[] {
-  const bytes = Buffer.from(value, 'utf8');
-  return [0, 1, 2].map((offset) => {
-    const encoded = Buffer.concat([Buffer.alloc(offset), bytes]).toString('base64');
-    // 앞 바이트의 비트가 섞인 글자를 건너뛰고, 뒤에 올 바이트와 섞일 마지막 글자와 패딩은 뺀다
-    const start = [0, 2, 3][offset]!;
-    const end = Math.floor(((offset + bytes.length) * 8) / 6);
-    return encoded.slice(start, end);
-  });
 }

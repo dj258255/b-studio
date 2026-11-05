@@ -1,15 +1,26 @@
 # 스튜디오 서버 이미지. 저장소 루트에서 빌드한다: docker build -f apps/studio/Dockerfile .
 # 샌드박스와 운영 배포는 호스트의 Docker 데몬이 만들므로, 실행할 때 Docker 소켓을 넘기고 세션·배포 폴더를 호스트와 같은 경로로 마운트한다 (README)
+
+# 막는 검사 판정의 Rust 모듈(ADR-191). 런타임 이미지와 같은 bookworm에서 빌드해야 glibc가 맞는다
+FROM rust:1.90-bookworm AS native
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+RUN cargo build --release --locked -p bstudio-node && cp target/release/libbstudio_node.so /bstudio_node.node
+
 FROM node:22-bookworm-slim AS build
 
 RUN corepack enable
 WORKDIR /repo
 ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
     npm_config_update_notifier=false \
-    npm_config_store_dir=/pnpm/store
+    npm_config_store_dir=/pnpm/store \
+    B_STUDIO_SKIP_NATIVE_BUILD=1
 
 # 잠금 파일과 패키지 목록이 같으면 의존성 층을 다시 쓴다
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm install의 postinstall이 부른다. 이 단계에는 cargo가 없어 B_STUDIO_SKIP_NATIVE_BUILD로 건너뛰고 앞 단계의 결과를 넣는다
+COPY scripts/build-native.mjs scripts/
 COPY apps/studio/package.json apps/studio/
 COPY apps/cli/package.json apps/cli/
 COPY packages/agent/package.json packages/agent/
@@ -18,6 +29,7 @@ COPY packages/spec/package.json packages/spec/
 # --filter로 스튜디오에 필요한 것만 설치한다(터미널 작업대 CLI는 이미지에 들어가지 않는다)
 RUN --mount=type=cache,id=b-studio-pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter "@b-studio/studio..."
 COPY packages ./packages
+COPY --from=native /bstudio_node.node packages/sandbox/native/bstudio_node.node
 COPY apps/studio ./apps/studio
 # 서버는 빌드 결과물 없이 tsx로 TypeScript를 바로 돌린다(ADR-188). build는 라우트 표가 app 폴더와 같은지만 본다
 RUN pnpm --filter @b-studio/studio build

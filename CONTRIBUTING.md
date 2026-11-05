@@ -6,6 +6,7 @@ b-studio는 모델이 생성한 코드를 실제 서비스처럼 실행하고 �
 
 - Node.js 22 이상
 - pnpm 10.29.3
+- Rust 툴체인(cargo, [rustup](https://rustup.rs)). `pnpm install`이 막는 검사 판정의 Rust 모듈을 빌드합니다(ADR-191)
 - Docker Desktop 또는 Colima
 
 ```bash

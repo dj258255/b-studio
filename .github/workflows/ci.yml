@@ -26,6 +26,8 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # 막는 검사 판정의 Rust 크레이트(ADR-191). 실행기에 있는 Rust를 쓴다. pnpm install의 postinstall이 네이티브 모듈을 이미 빌드했다
+      - run: cargo test --workspace --locked
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm --filter @b-studio/studio lint

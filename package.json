@@ -24,8 +24,10 @@
     "bench:coordination:tokens": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/breakdown-cli.ts",
     "bench:studio-load": "tsx --tsconfig apps/studio/bench/load/tsconfig.json apps/studio/bench/load/studio-load.ts",
     "docs:screenshots": "tsx scripts/screenshots/capture.ts",
-    "test": "vitest run",
-    "typecheck": "pnpm -r typecheck"
+    "test": "node scripts/build-native.mjs && vitest run",
+    "typecheck": "pnpm -r typecheck",
+    "postinstall": "node scripts/build-native.mjs",
+    "build:native": "node scripts/build-native.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.2",
