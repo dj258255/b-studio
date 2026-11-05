@@ -1,6 +1,6 @@
 import { publicUrlPlaceholder, resolvePublicUrlPlaceholders, type LoadedProject } from '@b-studio/spec';
 import { directHosts, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, edgeEnvironment, edgePortFor, proxyEnvironment } from '../edge-config';
-import { stripAnsi } from '../ansi';
+import { decodeNative, native } from '../native';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
 import type { MaskVolume } from './git-mask';
 
@@ -126,21 +126,11 @@ export function buildOverride(
 
 /** edge 감사 로그 한 줄: `{"edge":"egress","decision":"deny","host":"example.com","port":443,"reason":"...","at":"..."}` */
 export function parseEgressDenial(text: string): EgressDenial | undefined {
-  if (!text.startsWith('{"edge":"egress"')) return undefined;
-  try {
-    const entry = JSON.parse(text) as { decision?: unknown; host?: unknown; port?: unknown; method?: unknown; path?: unknown; reason?: unknown; at?: unknown };
-    if (entry.decision !== 'deny' || typeof entry.host !== 'string' || typeof entry.at !== 'string') return undefined;
-    return {
-      host: entry.host,
-      ...(typeof entry.port === 'number' ? { port: entry.port } : {}),
-      ...(typeof entry.method === 'string' ? { method: entry.method } : {}),
-      ...(typeof entry.path === 'string' ? { path: entry.path } : {}),
-      reason: typeof entry.reason === 'string' ? entry.reason : '',
-      at: new Date(entry.at),
-    };
-  } catch {
-    return undefined;
-  }
+  // 줄을 읽는 규칙은 Rust(crates/bstudio-guard/src/docker_format.rs)가 정하고, 날짜는 JS가 읽도록 문자열로 받는다
+  const found = native.parseEgressDenial(text);
+  if (!found) return undefined;
+  const entry = decodeNative<Omit<EgressDenial, 'at'> & { at: string }>(found);
+  return { ...entry, at: new Date(entry.at) };
 }
 
 /**
@@ -150,29 +140,12 @@ export function parseEgressDenial(text: string): EgressDenial | undefined {
  * "<host>: <이유>" 한 줄로 줄여 오류 메시지에 붙여야 나중에(결과 파일·UI) 원인이 남는다.
  */
 export function egressAuditExcerpt(lines: readonly string[], max = 5): string[] {
-  const picked: string[] = [];
-  for (const line of lines) {
-    if (!line.startsWith('{"edge":"egress"')) continue;
-    let entry: { decision?: unknown; host?: unknown; reason?: unknown };
-    try {
-      entry = JSON.parse(line) as typeof entry;
-    } catch {
-      continue;
-    }
-    if ((entry.decision !== 'deny' && entry.decision !== 'error') || typeof entry.host !== 'string') continue;
-    picked.push(`${entry.host}: ${typeof entry.reason === 'string' ? entry.reason : entry.decision}`);
-  }
-  return picked.slice(-max);
+  return native.egressAuditExcerpt([...lines], max);
 }
 
 /** `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다 */
 export function parseRuntimes(stdout: string): string[] {
-  try {
-    const runtimes = JSON.parse(stdout.trim() || '{}') as unknown;
-    return runtimes && typeof runtimes === 'object' ? Object.keys(runtimes).sort() : [];
-  } catch {
-    return [];
-  }
+  return native.parseRuntimes(stdout);
 }
 
 /**
@@ -188,21 +161,8 @@ export function composeUpArgs(explicit: readonly string[] | undefined, edgeServi
 
 /** `docker compose port <service> <port>` 출력에서 호스트 포트를 읽는다 */
 export function parseHostPort(stdout: string): number {
-  const match = stdout.trim().split('\n').at(-1)?.match(/:(\d+)$/);
-  const port = match ? Number(match[1]) : 0;
-  if (!port) throw new Error(`공개된 호스트 포트를 찾을 수 없습니다: ${JSON.stringify(stdout)}`);
-  return port;
+  return native.parseHostPort(stdout);
 }
-
-const CONTAINER_STATES: ReadonlySet<string> = new Set<ContainerState>([
-  'created',
-  'running',
-  'paused',
-  'restarting',
-  'removing',
-  'exited',
-  'dead',
-]);
 
 /**
  * `docker compose ps --format json <서비스 여럿>` 출력에서 서비스 이름 → 컨테이너 상태를 읽는다.
@@ -210,29 +170,12 @@ const CONTAINER_STATES: ReadonlySet<string> = new Set<ContainerState>([
  * (ensureInfra가 이 둘을 구분하지 않고 "running이 아니면 없는 것"으로 본다)
  */
 export function parseContainerStates(stdout: string): Map<string, ContainerState> {
-  const text = stdout.trim();
-  const states = new Map<string, ContainerState>();
-  if (!text) return states;
-
-  const rows: unknown[] = text.startsWith('[') ? JSON.parse(text) : text.split('\n').filter(Boolean).map((line) => JSON.parse(line));
-  for (const row of rows) {
-    const service = (row as { Service?: unknown } | undefined)?.Service;
-    const state = (row as { State?: unknown } | undefined)?.State;
-    if (typeof service === 'string' && typeof state === 'string' && CONTAINER_STATES.has(state)) {
-      states.set(service, state as ContainerState);
-    }
-  }
-  return states;
+  return new Map(native.parseContainerStates(stdout) as Array<[string, ContainerState]>);
 }
 
 /** `docker compose ps --format json` 출력은 버전에 따라 줄 단위 JSON 또는 배열이다 */
 export function parseContainerState(stdout: string): ContainerState {
-  const text = stdout.trim();
-  if (!text) return 'unknown';
-
-  const rows: unknown[] = text.startsWith('[') ? JSON.parse(text) : text.split('\n').map((line) => JSON.parse(line));
-  const state = (rows[0] as { State?: unknown } | undefined)?.State;
-  return typeof state === 'string' && CONTAINER_STATES.has(state) ? (state as ContainerState) : 'unknown';
+  return native.parseContainerState(stdout) as ContainerState;
 }
 
 /**
@@ -271,12 +214,7 @@ export const SYNC_SCRIPT = [
 ].join('\n');
 
 export function parseSyncOutput(stdout: string): Map<string, string> {
-  const seen = new Map<string, string>();
-  for (const line of stdout.split('\n')) {
-    const space = line.indexOf(' ');
-    if (space > 0) seen.set(line.slice(space + 1), line.slice(0, space));
-  }
-  return seen;
+  return new Map(native.parseSyncOutput(stdout) as Array<[string, string]>);
 }
 
 /**
@@ -285,63 +223,27 @@ export function parseSyncOutput(stdout: string): Map<string, string> {
  * 재시도 세 번을 그대로 썼다. 기다리는 내내 값이 한 번도 바뀌지 않았으면 다시 써도 달라지지 않는다.
  */
 export class SyncObservations {
-  /** 파일 → 기다리는 동안 본 값들("MISSING", 해시, 출력에 없으면 "UNSEEN") */
-  readonly #seen = new Map<string, Set<string>>();
+  readonly #native = new native.NativeSyncObservations();
 
   record(file: string, value: string | undefined): void {
-    const values = this.#seen.get(file) ?? new Set<string>();
-    values.add(value ?? 'UNSEEN');
-    this.#seen.set(file, values);
+    this.#native.record(file, value);
   }
 
   /** 시간 초과 문구. 첫 문장은 전과 같고, 뒤에 파일들이 어떤 상태였는지 덧붙인다. expected는 파일 → 기대하는 값("MISSING"이면 지워져야 함) */
   describeTimeout(pending: readonly string[], expected: ReadonlyMap<string, string>, timeoutMs: number): string {
-    const seconds = Math.round(timeoutMs / 1_000);
-    const groups = { invisible: [] as string[], stale: [] as string[], undeleted: [] as string[], changing: [] as string[] };
-    for (const file of pending) {
-      const values = [...(this.#seen.get(file) ?? [])];
-      const absent = values.every((value) => value === 'MISSING' || value === 'UNSEEN');
-      if (values.length > 1 && !absent) groups.changing.push(file);
-      else if (expected.get(file) === 'MISSING') groups.undeleted.push(file);
-      else if (absent) groups.invisible.push(file);
-      else groups.stale.push(file);
-    }
-    const notes: string[] = [];
-    if (groups.invisible.length > 0) notes.push(`${groups.invisible.join(', ')}: ${seconds}초 내내 컨테이너에서 보이지 않았습니다`);
-    if (groups.stale.length > 0) notes.push(`${groups.stale.join(', ')}: ${seconds}초 내내 이전 내용 그대로였습니다`);
-    if (groups.undeleted.length > 0) notes.push(`${groups.undeleted.join(', ')}: 지운 파일이 ${seconds}초 내내 컨테이너에 남아 있었습니다`);
-    const stuck = groups.invisible.length + groups.stale.length + groups.undeleted.length;
-    if (stuck > 0) notes.push('한 번도 바뀌지 않았으므로 기다리거나 같은 내용을 다시 써도 달라지지 않을 가능성이 큽니다. 파일 이름·경로와 서비스의 소스 마운트를 확인하세요');
-    if (groups.changing.length > 0) notes.push(`${groups.changing.join(', ')}: 반영되는 중이었지만 시간 안에 끝나지 않았습니다(다시 시도하면 될 수 있습니다)`);
-    return `${seconds}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: ${pending.join(', ')}${notes.length > 0 ? ` — ${notes.join('. ')}` : ''}`;
+    const expectedMissing = [...expected].filter(([, value]) => value === 'MISSING').map(([file]) => file);
+    return this.#native.describeTimeout([...pending], expectedMissing, timeoutMs);
   }
 }
-
-const LOG_LINE = /^(?<container>\S+)-\d+\s+\|\s(?<timestamp>\d{4}-\d{2}-\d{2}T\S+)\s?(?<text>.*)$/;
-/** compose가 컨테이너 수명 주기를 알리는 줄: `api-1 exited with code 143`, `web-1 has been recreated` */
-const STATUS_LINE = /^(?<container>[a-z0-9][a-z0-9_.-]*)-\d+\s+(?<text>[^|\s].*)$/;
 
 /**
  * `docker compose logs --timestamps` 한 줄: `api-1  | 2026-09-10T11:48:35.123456789Z 메시지`.
  * 내용이 없는 줄은 undefined를 돌려 건너뛰게 한다.
  */
 export function parseLogLine(raw: string): LogLine | undefined {
-  // --no-color를 줘도 상태 줄 앞에는 줄 지우기(ESC [K) 같은 제어 코드가 붙는다
-  const line = stripAnsi(raw);
-  if (line.trim() === '') return undefined;
-
-  const groups = LOG_LINE.exec(line)?.groups;
-  if (groups?.container && groups.timestamp) {
-    return {
-      service: groups.container,
-      text: groups.text ?? '',
-      // 나노초 정밀도는 Date가 다루지 못하므로 밀리초까지만 남긴다
-      at: new Date(groups.timestamp.replace(/(\.\d{3})\d+/, '$1')),
-    };
-  }
-
-  const status = STATUS_LINE.exec(line)?.groups;
-  if (status?.container && status.text) return { service: status.container, text: status.text, at: new Date() };
-
-  return { service: 'unknown', text: line, at: new Date() };
+  const found = native.parseLogLine(raw);
+  if (!found) return undefined;
+  // 시각이 없는 줄(상태 줄 등)은 지금 시각이다. 날짜는 JS가 읽는다
+  const line = decodeNative<{ service: string; text: string; at: string | null }>(found);
+  return { service: line.service, text: line.text, at: line.at === null ? new Date() : new Date(line.at) };
 }

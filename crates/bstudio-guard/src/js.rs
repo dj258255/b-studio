@@ -79,6 +79,297 @@ pub fn slice_ascii(s: &str, start: usize, end: usize) -> &str {
     }
 }
 
+
+/// `String.prototype.trimEnd`
+pub fn trim_end(s: &str) -> &str {
+    s.trim_end_matches(is_js_whitespace)
+}
+
+/// JS 정규식의 `\s`를 정규식 글자 모임 안에 쓸 꼴(`[` `]` 없이). Rust `regex`의 `\s`는 U+0085를 포함하고 U+FEFF를 빼서 쓰지 않는다
+pub const WS_CLASS: &str = r"\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}";
+/// JS 정규식의 `.`(s 플래그 없음)에 해당하는 글자 모임(`[` `]` 없이 쓰는 부정 모임의 안쪽)
+pub const LINE_TERMINATORS: &str = r"\n\r\x{2028}\x{2029}";
+
+/// `line.trim().split(/\s+/)`. 빈 줄은 `['']`가 된다(JS 그대로)
+pub fn split_ws(line: &str) -> Vec<&str> {
+    let t = trim(line);
+    if t.is_empty() {
+        return vec![""];
+    }
+    t.split(is_js_whitespace).filter(|p| !p.is_empty()).collect()
+}
+
+/// `/:(\d+)$/.exec(s)?.[1]`: 끝이 `:숫자`인 자리의 숫자들. 숫자는 ASCII 0-9뿐이다(JS `\d`)
+pub fn trailing_colon_digits(s: &str) -> Option<&str> {
+    let idx = s.rfind(':')?;
+    let digits = &s[idx + 1..];
+    if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        Some(digits)
+    } else {
+        None
+    }
+}
+
+/// 안정 정렬. `cmp(a, b)`가 양수면 a가 b보다 뒤다(JS 비교 함수의 부호). NaN은 0으로 본다(`Array.prototype.sort`의 SortCompare)
+pub fn stable_sort_by<T: Clone>(items: Vec<T>, cmp: &dyn Fn(&T, &T) -> f64) -> Vec<T> {
+    if items.len() <= 1 {
+        return items;
+    }
+    let mid = items.len() / 2;
+    let right = stable_sort_by(items[mid..].to_vec(), cmp);
+    let left = stable_sort_by(items[..mid].to_vec(), cmp);
+    let mut out = Vec::with_capacity(left.len() + right.len());
+    let (mut i, mut j) = (0, 0);
+    while i < left.len() && j < right.len() {
+        let c = cmp(&left[i], &right[j]);
+        if c > 0.0 {
+            out.push(right[j].clone());
+            j += 1;
+        } else {
+            out.push(left[i].clone());
+            i += 1;
+        }
+    }
+    out.extend_from_slice(&left[i..]);
+    out.extend_from_slice(&right[j..]);
+    out
+}
+
+/// `Array.prototype.slice(start)`의 시작 위치. 음수는 끝에서부터, NaN은 0, 소수는 0쪽으로 버린다
+pub fn relative_start(len: usize, start: f64) -> usize {
+    let n = if start.is_nan() { 0.0 } else { start.trunc() };
+    if n < 0.0 {
+        let from_end = len as f64 + n;
+        if from_end < 0.0 {
+            0
+        } else {
+            from_end as usize
+        }
+    } else if n > len as f64 {
+        len
+    } else {
+        n as usize
+    }
+}
+
+/// JS `Number::toString()`(10진). 가장 짧게 되읽히는 자릿수를 쓰고, 지수가 21 이상이거나 -7 이하이면 `e` 표기
+pub fn number_to_string(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x == 0.0 {
+        return "0".into();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "Infinity" } else { "-Infinity" }.into();
+    }
+    if x < 0.0 {
+        return format!("-{}", number_to_string(-x));
+    }
+    // Rust의 `{:e}`도 가장 짧게 되읽히는 자릿수를 낸다: "1.2345e-7"
+    let sci = format!("{x:e}");
+    let (mantissa, exp) = sci.split_once('e').expect("지수 표기");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let k = digits.len() as i32;
+    let n = exp.parse::<i32>().expect("지수") + 1;
+    if k <= n && n <= 21 {
+        format!("{digits}{}", "0".repeat((n - k) as usize))
+    } else if 0 < n && n <= 21 {
+        format!("{}.{}", &digits[..n as usize], &digits[n as usize..])
+    } else if -6 < n && n <= 0 {
+        format!("0.{}{digits}", "0".repeat((-n) as usize))
+    } else {
+        let e = n - 1;
+        let sign = if e < 0 { '-' } else { '+' };
+        if k == 1 {
+            format!("{digits}e{sign}{}", e.abs())
+        } else {
+            format!("{}.{}e{sign}{}", &digits[..1], &digits[1..], e.abs())
+        }
+    }
+}
+
+/// `Number.prototype.toFixed(f)`. 정확한 값을 반올림하고 가운데는 큰 쪽(0에서 먼 쪽)으로 한다. Rust `{:.N}`은 가운데를 짝수로 보내 다르다
+pub fn to_fixed(x: f64, f: usize) -> String {
+    if x.is_nan() {
+        return "NaN".into();
+    }
+    if x.abs() >= 1e21 {
+        return number_to_string(x);
+    }
+    let neg = x < 0.0;
+    // 이중 정밀도의 정확한 10진 전개는 소수 1074자리 안에 끝난다
+    let exact = format!("{:.1100}", x.abs());
+    let (int_part, frac_part) = exact.split_once('.').expect("소수점");
+    let mut digits: Vec<u8> = int_part.bytes().chain(frac_part.bytes().take(f)).collect();
+    if frac_part.as_bytes().get(f).is_some_and(|d| *d >= b'5') {
+        let mut i = digits.len();
+        loop {
+            if i == 0 {
+                digits.insert(0, b'1');
+                break;
+            }
+            i -= 1;
+            if digits[i] == b'9' {
+                digits[i] = b'0';
+            } else {
+                digits[i] += 1;
+                break;
+            }
+        }
+    }
+    let int_len = digits.len() - f;
+    let mut out = String::new();
+    if neg {
+        out.push('-');
+    }
+    out.push_str(std::str::from_utf8(&digits[..int_len]).expect("ascii"));
+    if f > 0 {
+        out.push('.');
+        out.push_str(std::str::from_utf8(&digits[int_len..]).expect("ascii"));
+    }
+    out
+}
+
+/// `Math.round`: 가운데는 +무한대 쪽으로 간다(Rust `f64::round`는 0에서 먼 쪽이라 음수에서 다르다)
+pub fn math_round(x: f64) -> f64 {
+    if !x.is_finite() {
+        return x;
+    }
+    let floor = x.floor();
+    if x - floor >= 0.5 {
+        floor + 1.0
+    } else {
+        floor
+    }
+}
+
+/// `Number.parseInt(s, 10)`: 앞 공백을 건너뛰고 부호와 10진수 앞부분만 읽는다. 읽을 숫자가 없으면 NaN
+pub fn parse_int(s: &str) -> f64 {
+    let t = s.trim_start_matches(is_js_whitespace);
+    let (neg, rest) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let len = rest.bytes().take_while(u8::is_ascii_digit).count();
+    if len == 0 {
+        return f64::NAN;
+    }
+    let value: f64 = rest[..len].parse().expect("10진 숫자");
+    if neg {
+        -value
+    } else {
+        value
+    }
+}
+
+/// `Number.parseFloat(s)`: 앞 공백을 건너뛰고 10진 실수 표기의 앞부분만 읽는다(`Infinity` 포함, 16진수 아님). 읽을 것이 없으면 NaN
+pub fn parse_float(s: &str) -> f64 {
+    let t = s.trim_start_matches(is_js_whitespace);
+    let (neg, rest) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let signed = |v: f64| if neg { -v } else { v };
+    if rest.starts_with("Infinity") {
+        return signed(f64::INFINITY);
+    }
+    match decimal_prefix_len(rest) {
+        Some(len) => signed(rest[..len].parse().expect("10진 실수")),
+        None => f64::NAN,
+    }
+}
+
+/// 문자열 앞에서 `Digits [. Digits?] | . Digits` 와 선택적 지수를 읽은 바이트 길이
+fn decimal_prefix_len(s: &str) -> Option<usize> {
+    let b = s.as_bytes();
+    let digits = |from: usize| b[from..].iter().take_while(|c| c.is_ascii_digit()).count();
+    let int_len = digits(0);
+    let mut end = int_len;
+    if end < b.len() && b[end] == b'.' {
+        let frac = digits(end + 1);
+        if int_len == 0 && frac == 0 {
+            return None;
+        }
+        end += 1 + frac;
+    } else if int_len == 0 {
+        return None;
+    }
+    if end < b.len() && (b[end] == b'e' || b[end] == b'E') {
+        let mut e = end + 1;
+        if e < b.len() && (b[e] == b'+' || b[e] == b'-') {
+            e += 1;
+        }
+        let exp_digits = digits(e);
+        if exp_digits > 0 {
+            end = e + exp_digits;
+        }
+    }
+    Some(end)
+}
+
+/// `Number(string)`: 앞뒤 공백 무시, 빈 문자열은 0, `0x`·`0o`·`0b`와 `Infinity`와 지수 표기를 받고, 그 밖은 NaN
+pub fn to_number(s: &str) -> f64 {
+    let t = trim(s);
+    if t.is_empty() {
+        return 0.0;
+    }
+    let radix_body = |prefix: &[&str], radix: u32| -> Option<f64> {
+        let rest = prefix.iter().find_map(|p| t.strip_prefix(p))?;
+        if rest.is_empty() || !rest.chars().all(|c| c.is_digit(radix)) {
+            return Some(f64::NAN);
+        }
+        Some(match u128::from_str_radix(rest, radix) {
+            Ok(v) => v as f64,
+            Err(_) => rest.chars().fold(0.0, |acc, c| acc * f64::from(radix) + f64::from(c.to_digit(radix).expect("자리"))),
+        })
+    };
+    if let Some(v) = radix_body(&["0x", "0X"], 16).or_else(|| radix_body(&["0o", "0O"], 8)).or_else(|| radix_body(&["0b", "0B"], 2)) {
+        return v;
+    }
+    let (neg, rest) = match t.as_bytes().first() {
+        Some(b'-') => (true, &t[1..]),
+        Some(b'+') => (false, &t[1..]),
+        _ => (false, t),
+    };
+    let signed = |v: f64| if neg { -v } else { v };
+    if rest == "Infinity" {
+        return signed(f64::INFINITY);
+    }
+    match decimal_prefix_len(rest) {
+        Some(len) if len == rest.len() => signed(rest.parse().expect("10진 실수")),
+        _ => f64::NAN,
+    }
+}
+
+/// `JSON.stringify(문자열)`: 따옴표, 역슬래시, 제어 문자만 이스케이프한다(U+2028·2029는 그대로)
+pub fn json_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// 숫자의 `SameValueZero`(`Set.has`·`Map` 키): NaN끼리 같고 +0과 -0도 같다
+pub fn same_value_zero(a: f64, b: f64) -> bool {
+    a == b || (a.is_nan() && b.is_nan())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -126,5 +417,143 @@ mod tests {
         assert_eq!(slice_ascii("abcdef", 2, 4), "cd");
         assert_eq!(slice_ascii("abc", 2, 10), "c");
         assert_eq!(slice_ascii("abc", 3, 1), "");
+    }
+
+    #[test]
+    fn number_to_string은_js_표기를_따른다() {
+        assert_eq!(number_to_string(0.1 * 3.0), "0.30000000000000004");
+        assert_eq!(number_to_string(1.1 * 100.0), "110.00000000000001");
+        assert_eq!(number_to_string(1e21), "1e+21");
+        assert_eq!(number_to_string(1e20), "100000000000000000000");
+        assert_eq!(number_to_string(1.5e-7), "1.5e-7");
+        assert_eq!(number_to_string(0.000001), "0.000001");
+        assert_eq!(number_to_string(-0.0), "0");
+        assert_eq!(number_to_string(123.456), "123.456");
+        assert_eq!(number_to_string(f64::NAN), "NaN");
+        assert_eq!(number_to_string(f64::NEG_INFINITY), "-Infinity");
+        assert_eq!(number_to_string(2.5e25), "2.5e+25");
+    }
+
+    #[test]
+    fn to_fixed는_가운데를_큰_쪽으로_보낸다() {
+        // Rust format!("{:.2}", 0.125)는 "0.12"(짝수), JS (0.125).toFixed(2)는 "0.13"
+        assert_eq!(to_fixed(0.125, 2), "0.13");
+        assert_eq!(to_fixed(2.5, 0), "3");
+        assert_eq!(to_fixed(-2.5, 0), "-3");
+        assert_eq!(to_fixed(1.005, 2), "1.00"); // 1.005는 실제로 1.00499999...
+        assert_eq!(to_fixed(0.0, 2), "0.00");
+        assert_eq!(to_fixed(-0.001, 2), "-0.00");
+        assert_eq!(to_fixed(9.995, 2), "9.99"); // 실제 값 9.9949999...
+        assert_eq!(to_fixed(99.95, 1), "100.0");
+        assert_eq!(to_fixed(123456.789, 1), "123456.8");
+        assert_eq!(to_fixed(1e21, 2), "1e+21");
+        assert_eq!(to_fixed(f64::INFINITY, 1), "Infinity");
+        assert_eq!(to_fixed(0.05, 1), "0.1"); // 0.05는 실제로 0.05000000000000000277
+        assert_eq!(to_fixed(999.99, 1), "1000.0");
+    }
+
+    #[test]
+    fn math_round는_가운데를_양의_무한대_쪽으로_보낸다() {
+        assert_eq!(math_round(2.5), 3.0);
+        assert_eq!(math_round(-2.5), -2.0);
+        assert_eq!(math_round(-0.5), 0.0);
+        assert_eq!(math_round(0.49999999999999994), 0.0);
+        assert_eq!(math_round(1.5), 2.0);
+        assert!(math_round(f64::NAN).is_nan());
+    }
+
+    #[test]
+    fn parse_int는_앞부분만_읽는다() {
+        assert_eq!(parse_int("  42abc"), 42.0);
+        assert_eq!(parse_int("-7"), -7.0);
+        assert_eq!(parse_int("+3.9"), 3.0);
+        assert_eq!(parse_int("0x10"), 0.0);
+        assert!(parse_int("abc").is_nan());
+        assert!(parse_int("").is_nan());
+        assert!(parse_int("-").is_nan());
+        assert_eq!(parse_int("\u{FEFF}12"), 12.0);
+        assert_eq!(parse_int(&"9".repeat(400)), f64::INFINITY);
+    }
+
+    #[test]
+    fn parse_float는_앞부분만_읽는다() {
+        assert_eq!(parse_float("12.5%"), 12.5);
+        assert_eq!(parse_float(".5x"), 0.5);
+        assert_eq!(parse_float("5."), 5.0);
+        assert_eq!(parse_float("1e3"), 1000.0);
+        assert_eq!(parse_float("1e"), 1.0);
+        assert_eq!(parse_float("1e+"), 1.0);
+        assert_eq!(parse_float("1.2.3"), 1.2);
+        assert_eq!(parse_float("Infinity%"), f64::INFINITY);
+        assert_eq!(parse_float("-Infinityx"), f64::NEG_INFINITY);
+        assert!(parse_float("inf").is_nan());
+        assert!(parse_float("0x10") == 0.0);
+        assert!(parse_float(".").is_nan());
+        assert!(parse_float("--1").is_nan());
+        assert!(parse_float("NaN").is_nan());
+        assert_eq!(parse_float("1_000"), 1.0);
+    }
+
+    #[test]
+    fn to_number는_문자열_전체를_읽는다() {
+        assert_eq!(to_number("  12  "), 12.0);
+        assert_eq!(to_number(""), 0.0);
+        assert_eq!(to_number("   "), 0.0);
+        assert_eq!(to_number("0x1F"), 31.0);
+        assert_eq!(to_number("0b101"), 5.0);
+        assert_eq!(to_number("0o17"), 15.0);
+        assert_eq!(to_number("1e3"), 1000.0);
+        assert_eq!(to_number("-Infinity"), f64::NEG_INFINITY);
+        assert_eq!(to_number(".5"), 0.5);
+        assert_eq!(to_number("5."), 5.0);
+        assert!(to_number("12px").is_nan());
+        assert!(to_number("1 2").is_nan());
+        assert!(to_number("inf").is_nan());
+        assert!(to_number("-0x10").is_nan());
+        assert!(to_number("0x").is_nan());
+        assert!(to_number("1_0").is_nan());
+        assert!(to_number("+").is_nan());
+        assert_eq!(to_number("\u{FEFF}7\u{2028}"), 7.0);
+    }
+
+    #[test]
+    fn json_quote는_js_json_stringify와_같다() {
+        assert_eq!(json_quote("a\"b\\c\n\u{1f}\u{7f}\u{2028}"), "\"a\\\"b\\\\c\\n\\u001f\u{7f}\u{2028}\"");
+    }
+
+    #[test]
+    fn split_ws는_빈_줄에_빈_문자열_하나를_준다() {
+        assert_eq!(split_ws("  a \t b\u{3000}c  "), vec!["a", "b", "c"]);
+        assert_eq!(split_ws("   "), vec![""]);
+        assert_eq!(split_ws("\u{0085}x"), vec!["\u{0085}x"]);
+    }
+
+    #[test]
+    fn 끝의_콜론_숫자는_마지막_콜론만_본다() {
+        assert_eq!(trailing_colon_digits("*:80"), Some("80"));
+        assert_eq!(trailing_colon_digits("[::1]:5432"), Some("5432"));
+        assert_eq!(trailing_colon_digits("*:80:"), None);
+        assert_eq!(trailing_colon_digits("*:8a"), None);
+        assert_eq!(trailing_colon_digits("a:"), None);
+    }
+
+    #[test]
+    fn 안정_정렬은_같은_값의_순서를_지키고_nan은_같다고_본다() {
+        let items = vec![(1, 'a'), (0, 'b'), (1, 'c'), (0, 'd')];
+        let sorted = stable_sort_by(items, &|x, y| f64::from(x.0) - f64::from(y.0));
+        assert_eq!(sorted, vec![(0, 'b'), (0, 'd'), (1, 'a'), (1, 'c')]);
+        let same = stable_sort_by(vec![3, 1, 2], &|_, _| f64::NAN);
+        assert_eq!(same, vec![3, 1, 2]);
+    }
+
+    #[test]
+    fn relative_start는_slice의_시작_규칙이다() {
+        assert_eq!(relative_start(5, 2.0), 2);
+        assert_eq!(relative_start(5, -2.0), 3);
+        assert_eq!(relative_start(5, -9.0), 0);
+        assert_eq!(relative_start(5, f64::NAN), 0);
+        assert_eq!(relative_start(5, f64::INFINITY), 5);
+        assert_eq!(relative_start(5, 2.9), 2);
+        assert_eq!(relative_start(5, -0.0), 0);
     }
 }
