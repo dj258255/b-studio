@@ -4,6 +4,8 @@
 //! 거부 목록에서 더 넓게 막는 쪽으로만 다르다.
 
 pub mod container_policy;
+pub mod git_mask;
 pub mod js;
+pub mod node_path;
 pub mod readonly_docker;
 pub mod secrets;

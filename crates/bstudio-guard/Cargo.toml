@@ -9,5 +9,6 @@ publish.workspace = true
 
 [dependencies]
 # JS가 JSON.stringify로 넘긴 객체의 키 순서(Object.keys 순서)를 그대로 지키려고 preserve_order를 켠다
+serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"

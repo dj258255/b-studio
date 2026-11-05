@@ -12,6 +12,16 @@ interface NativeGuard {
   isSensitiveHostPath(source: string): boolean;
   parseDotenv(text: string): string[][];
   NativeRedactor: new (names: string[], values: string[]) => NativeRedactor;
+  planGitMask(mountsJson: string, entriesJson: string, cwd: string): string;
+  planEvaluationAssetMask(mountsJson: string, projectRoot: string, assetsJson: string, cwd: string): string;
+  nestedAssetMountError(composeMountsJson: string, mountsJson: string, projectRoot: string, assetsJson: string, cwd: string): string | null | undefined;
+  collectHostMounts(configJson: string, cwd: string): string;
+  composeMountSpecs(configJson: string, cwd: string): string;
+  boundDevice(volumeJson: string): string | null | undefined;
+  mergeMasks(plansJson: string): string;
+  dockerDesktopHostPath(source: string): string | null | undefined;
+  isInsideHostPath(cwd: string, parent: string, target: string): boolean;
+  isInsidePosix(parent: string, target: string): boolean;
 }
 
 export interface NativeRedactor {
