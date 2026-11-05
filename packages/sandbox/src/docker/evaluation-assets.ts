@@ -247,7 +247,7 @@ async function pruneDirectory(base: string, relative: string, desired: ReadonlyM
 async function ensureDirectory(base: string, dir: string): Promise<void> {
   const relative = path.relative(base, dir);
   if (relative === '') return;
-  if (relative.startsWith('..') || path.isAbsolute(relative)) throw new SandboxError('평가 자산 복사본 폴더 밖에 쓸 수 없습니다', dir);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new SandboxError('평가 자산 복사본 폴더 밖에 쓸 수 없습니다', dir);
   const realBase = await realpath(base);
   let current = base;
   for (const part of relative.split(path.sep)) {
@@ -261,5 +261,5 @@ async function ensureDirectory(base: string, dir: string): Promise<void> {
 
 function isInside(parent: string, target: string): boolean {
   const relative = path.relative(parent, target);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }

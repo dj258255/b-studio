@@ -170,3 +170,13 @@ describe('계정의 환경 변수', () => {
     await expect(resolveSessionAccount('../x', 'codex', env)).rejects.toMatchObject({ status: 400 });
   });
 });
+
+describe('계정 설정 폴더: ..로 시작하는 이름 (#1004)', () => {
+  it('홈 폴더 아래의 ..로 시작하는 폴더 이름은 받고, 홈 밖·홈 자체로 가는 경로는 계속 거절한다', async () => {
+    const added = await addAiAccount({ name: '점', backend: 'claude-code', configDir: '~/..claude-dots' }, env);
+    expect(added.configDir).toBe(path.join(home, '..claude-dots'));
+    for (const configDir of ['~/../elsewhere', '~', `${home}/..`, path.join(path.dirname(home), 'other')]) {
+      await expect(addAiAccount({ name: '밖', backend: 'claude-code', configDir }, env), configDir).rejects.toThrow('홈 폴더 아래');
+    }
+  });
+});

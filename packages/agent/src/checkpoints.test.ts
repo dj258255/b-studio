@@ -1981,3 +1981,17 @@ describe('CheckpointStore 체크포인트 뒤에 생기거나 바뀐 무시된 �
     expect(await store.ignoredChangedSince()).toEqual(['api/conftest.py', 'new.local']);
   });
 });
+
+describe('CheckpointStore.inspectSource: ..로 시작하는 하위 폴더 이름 (#1004)', () => {
+  it('저장소 안의 ..로 시작하는 이름의 하위 폴더도 모노레포 하위 폴더로 인정한다(저장소 밖은 아니다)', async () => {
+    const { source } = await createSourceRepository();
+    const project = path.join(source, '..api');
+    await mkdir(project, { recursive: true });
+    await writeFile(path.join(project, 'a.txt'), 'x\n');
+    await git(source, 'add', '-A');
+    await git(source, 'commit', '-q', '-m', 'dotdot');
+
+    expect(await CheckpointStore.inspectSource(project)).toBeUndefined();
+    expect(await CheckpointStore.inspectSource(project, { allowSubfolder: true })).toMatchObject({ subdir: '..api' });
+  });
+});

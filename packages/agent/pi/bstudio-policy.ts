@@ -63,7 +63,7 @@ export function evaluatePiToolCall(call: PiToolCall, config: PiPolicyConfig): { 
   if (call.toolName === 'write' || call.toolName === 'edit') {
     const raw = typeof call.input.path === 'string' ? call.input.path : '';
     const relative = path.relative(config.cwd, path.resolve(config.cwd, raw)).replaceAll('\\', '/');
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (relative === '..' || relative.startsWith('../') || path.isAbsolute(relative)) {
       return block(`프로젝트 밖 파일 '${raw}'은 수정할 수 없습니다`);
     }
     const decision = checkToolPolicy('write_file', { path: relative }, policy, undefined);

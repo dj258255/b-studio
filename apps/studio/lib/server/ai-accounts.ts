@@ -174,7 +174,7 @@ async function cleanConfigDir(value: unknown, backend: CliAccountBackend, env: E
   if (!path.isAbsolute(expanded)) throw new StudioError(400, '설정 폴더는 절대 경로나 ~/로 시작하는 경로여야 합니다');
   const dir = path.resolve(expanded);
   const relative = path.relative(home, dir);
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new StudioError(400, '설정 폴더는 홈 폴더 아래여야 합니다(홈 폴더 자체는 안 됩니다)');
+  if (!relative || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new StudioError(400, '설정 폴더는 홈 폴더 아래여야 합니다(홈 폴더 자체는 안 됩니다)');
   const defaultDir = DEFAULT_DIR[backend];
   if (defaultDir && dir === path.join(home, defaultDir)) throw new StudioError(400, `~/${defaultDir}는 기본 계정의 폴더입니다. 기본 계정은 이름만 바꾸세요`);
   const info = await lstat(dir).catch(() => undefined);

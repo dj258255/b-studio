@@ -134,5 +134,5 @@ function subrootScore(mount: BindMount, target: string): number {
 
 function isInside(parent: string, target: string): boolean {
   const relative = path.relative(parent, target);
-  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }

@@ -597,3 +597,17 @@ describe('terminalGatewayNote (세션 터미널의 CLI가 대화를 시작할 �
     expect(note.length).toBeLessThan(3000);
   });
 });
+
+describe('guardBuiltinTool: ..로 시작하는 이름 (#1004)', () => {
+  it('..로 시작하는 폴더 안의 파일은 프로젝트 안쪽으로 읽고, 그 안의 .git·밖으로 나가는 경로는 계속 거절한다', async () => {
+    const project = await createOrdersProject('b-studio-dotdot-');
+    const workspace = new Workspace(project.root);
+    const guard = (tool: string, file_path: string) => guardBuiltinTool(workspace, tool, { file_path });
+
+    expect(await guard('Write', path.join(project.root, '..docs/a.md'))).toBeUndefined();
+    expect(await guard('Read', path.join(project.root, '...x'))).toBeUndefined();
+    expect(await guard('Write', path.join(project.root, '..docs/.git/hooks/pre-commit'))).toContain('생성물이나 비밀 파일');
+    expect(await guard('Read', path.join(path.dirname(project.root), '..sibling.txt'))).toContain('프로젝트 밖');
+    expect(await guard('Read', `${project.root}/../x`)).toContain('정리된 절대 경로만');
+  });
+});
