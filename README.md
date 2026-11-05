@@ -98,7 +98,7 @@
 
 ## 빠른 시작
 
-준비물은 Node.js 22 이상, pnpm 10.29.3, Docker Desktop 또는 Colima입니다. 에이전트를 실행하려면 `ANTHROPIC_API_KEY` 또는 로그인된 Claude Code CLI가 필요합니다.
+준비물은 Node.js 22 이상, pnpm 10.29.3, Rust 툴체인(cargo, [rustup](https://rustup.rs)), Docker Desktop 또는 Colima입니다. `pnpm install`이 막는 검사 판정의 Rust 모듈을 함께 빌드합니다. 에이전트를 실행하려면 `ANTHROPIC_API_KEY` 또는 로그인된 Claude Code CLI가 필요합니다.
 
 ```bash
 git clone https://github.com/dj258255/b-studio.git

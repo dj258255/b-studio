@@ -17,3 +17,6 @@ templates
 apps/cli/*
 !apps/cli/package.json
 **/*.test.ts
+# Rust 빌드 결과(ADR-191). 네이티브 모듈은 이미지 안의 native 단계가 다시 빌드한다
+target
+packages/sandbox/native

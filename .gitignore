@@ -33,3 +33,7 @@ scripts/screenshots/.raw/
 
 # 확인용으로 잠깐 만든 파일(#998)
 .tmp-*
+
+# Rust 빌드 결과와 네이티브 모듈(ADR-191). pnpm install이 다시 만든다
+target/
+packages/sandbox/native/

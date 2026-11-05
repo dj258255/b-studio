@@ -1,0 +1,19 @@
+[package]
+name = "bstudio-node"
+version = "0.1.0"
+description = "bstudio-guard를 Node에 붙이는 napi 층. 형 변환만 한다"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bstudio-guard = { path = "../bstudio-guard" }
+napi = { version = "3", default-features = false, features = ["napi4"] }
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
