@@ -405,3 +405,60 @@ impl Default for NativeSyncObservations {
         Self::new()
     }
 }
+
+// ── compose override와 edge 설정(ADR-191 2단계 2b-2a). 격리를 정하는 판정이다. TS 껍데기: packages/sandbox/src/{edge-config,docker/format}.ts
+// 입력은 JSON 문자열(encodeNative), 출력도 JSON 문자열이다. 모양이 어긋난 입력은 던진다(샌드박스를 만들지 않는 쪽)
+
+use bstudio_guard::{compose_override, edge_config, public_url};
+
+/// 상수(서비스 이름, 프록시 포트, 이미지, 네트워크 이름, 기본 허용 호스트). TS는 따로 적지 않고 이 값을 읽는다
+#[napi]
+pub fn edge_constants() -> String {
+    out(&edge_config::constants())
+}
+
+/// `managed_names`는 managed 서비스 이름을 순서대로. 없는 이름이면 던진다
+#[napi]
+pub fn edge_port_for(managed_names: Vec<String>, service: String) -> Result<u32> {
+    fail(edge_config::edge_port_for(&managed_names, &service))
+}
+
+#[napi]
+pub fn direct_hosts(services: Vec<String>, externals: Vec<String>) -> Vec<String> {
+    edge_config::direct_hosts(&services, &externals)
+}
+
+#[napi]
+pub fn proxy_environment(direct: Vec<String>) -> String {
+    out(&edge_config::pairs_to_object(&edge_config::proxy_environment(&direct)))
+}
+
+/// `input_json`: `{ managed: [[이름, 포트]], services: [...], egress?: [...], external?: [[이름, { baseUrl, policy }]] }`
+#[napi]
+pub fn edge_environment(input_json: String) -> Result<String> {
+    let value = input(&input_json, "edge 설정 입력")?;
+    Ok(out(&fail(compose_override::edge_environment_from(&value))?))
+}
+
+/// `input_json`은 `buildOverride`의 입력(packages/sandbox/src/docker/format.ts가 만든다)
+#[napi]
+pub fn build_override(input_json: String) -> Result<String> {
+    let value = input(&input_json, "override 입력")?;
+    Ok(out(&fail(compose_override::build_override(&value))?))
+}
+
+#[napi]
+pub fn compose_up_args(explicit: Option<Vec<String>>, edge_service: String) -> Vec<String> {
+    compose_override::compose_up_args(explicit.as_deref(), &edge_service)
+}
+
+/// 자리 표시자 채우기(spec의 TS와 같은 규칙인지 차등 시험으로 묶는다). `host_ports_json`은 서비스 이름 → 포트인 객체
+#[napi]
+pub fn resolve_public_url_placeholders(value: String, host_ports_json: String) -> Result<String> {
+    let ports = input(&host_ports_json, "호스트 포트")?;
+    let JsValue::Obj(ports) = ports else { return Err(Error::from_reason("호스트 포트는 객체여야 합니다")) };
+    Ok(public_url::resolve(&value, &mut |svc| match ports.get(svc) {
+        Some(port) => format!("http://127.0.0.1:{}", port.to_js_string()),
+        None => public_url::placeholder(svc),
+    }))
+}
