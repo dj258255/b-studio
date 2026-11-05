@@ -10,9 +10,10 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 /**
- * b-terminal·studio desk가 기대는 계약, 바꾸면 b-terminal에 먼저 알린다(이슈 #1002).
+ * `studio desk`가 기대는 계약(이슈 #1002). 깨는 변경이면 health의 `apiVersion`을 올리고 desk를 함께 고친다.
  *
- * 별도 터미널 앱(b-terminal)과 `studio desk`는 같은 경로·같은 JSON 모양으로 스튜디오를 부른다(apps/cli/src/desk/client.ts).
+ * `studio desk`(b-studio의 터미널 작업대, apps/cli/src/desk/client.ts)는 이 경로·JSON 모양으로 스튜디오를 부른다.
+ * 별도 터미널 앱(b-terminal)은 범용 터미널이라 이 API를 부르지 않는다. desk가 그 안에서 실행될 뿐이다(#1009).
  * 이 파일은 그 계약을 실제 HTTP로 고정한다: 서버(server/app.ts)를 임시 포트에 띄우고, 쿠키 `b_studio_local`·127.0.0.1·Origin 없음으로
  * 부른 응답을 zod 스키마로 확인한다. 스키마는 desk 클라이언트의 타입(apps/cli/src/desk/types.ts)에서 가져왔다.
  * 서버가 더 많은 키를 내도 되고(looseObject), 계약은 "읽는 키가 있고 형이 맞는 것"이다. 선택 키(?)는 선택으로 둔다.
@@ -285,7 +286,7 @@ let server: Server;
 let origin = '';
 let token = '';
 
-/** b-terminal과 같은 연결: 쿠키 b_studio_local, 127.0.0.1, Origin 없음. cookie=false면 쿠키를 싣지 않는다 */
+/** desk와 같은 연결: 쿠키 b_studio_local, 127.0.0.1, Origin 없음. cookie=false면 쿠키를 싣지 않는다 */
 async function call(method: string, pathname: string, body?: unknown, options: { cookie?: boolean } = {}): Promise<{ status: number; json: unknown; headers: Headers }> {
   const response = await fetch(`${origin}${pathname}`, {
     method,
@@ -436,7 +437,7 @@ beforeAll(async () => {
   server = createServer(createStudioHandler({ routes, env: { B_STUDIO_AUTH: 'none' } }));
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  // 토큰 파일은 서버가 처음 토큰을 만들 때 생긴다. b-terminal처럼 그 파일을 읽어 쿠키로 싣는다
+  // 토큰 파일은 서버가 처음 토큰을 만들 때 생긴다. desk처럼 그 파일을 읽어 쿠키로 싣는다
   await call('GET', '/api/health', undefined, { cookie: false });
   const { localToken } = await import('@/lib/server/local-token');
   localToken();

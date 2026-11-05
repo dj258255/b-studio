@@ -6,7 +6,7 @@
 
 ### 추가
 
-- `GET /api/health`가 `apiVersion`(지금 1)을 싣습니다(#1002). `studio desk`와 별도 터미널 앱이 쓰는 API(에이전트 목록·목록 통로, 프로젝트, 세션 만들기·터미널·이름 바꾸기·멈추기·다시 켜기, 터미널 통로, 구독 한도, AI 계정)는 실제 HTTP로 부르는 계약 테스트(`apps/studio/server/contract.test.ts`)로 고정했습니다. 기존 키는 그대로입니다.
+- `GET /api/health`가 `apiVersion`(지금 1)을 싣습니다(#1002). `studio desk`가 쓰는 API(에이전트 목록·목록 통로, 프로젝트, 세션 만들기·터미널·이름 바꾸기·멈추기·다시 켜기, 터미널 통로, 구독 한도, AI 계정)는 실제 HTTP로 부르는 계약 테스트(`apps/studio/server/contract.test.ts`)로 고정했습니다. 기존 키는 그대로입니다.
 
 ### 바뀜
 
