@@ -26,22 +26,6 @@ export function defaultServiceSelection(project: Pick<LoadedProject, 'managed' |
   return [...dependencyClosure(roots, project.dependsOn)].sort();
 }
 
-/** service → dependsOn: 고른 서비스 중 기대는 서비스가 선택에서 빠진 쌍. compose up에 --no-deps가 필요한지, 화면 경고에 쓴다 */
-export interface MissingDependency {
-  service: string;
-  dependsOn: string;
-}
-
-export function missingDependencies(selected: ReadonlySet<string>, graph: Readonly<Record<string, readonly string[]>>): MissingDependency[] {
-  const missing: MissingDependency[] = [];
-  for (const service of [...selected].sort()) {
-    for (const dependency of graph[service] ?? []) {
-      if (!selected.has(dependency)) missing.push({ service, dependsOn: dependency });
-    }
-  }
-  return missing;
-}
-
 /** 이 서비스를 끄면 기댈 곳을 잃는, 지금 선택된 서비스 이름(경고 문구에 쓴다). 이름 순으로 정렬해 돌려준다 */
 export function dependentsOf(name: string, selected: ReadonlySet<string>, graph: Readonly<Record<string, readonly string[]>>): string[] {
   return [...selected].filter((service) => service !== name && (graph[service] ?? []).includes(name)).sort();

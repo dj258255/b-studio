@@ -27,11 +27,6 @@ export function publicUrlPlaceholder(service: string): string {
   return `\${b-studio:services.${service}.publicUrl}`;
 }
 
-/** 값에 자리 표시자가 있으면 true */
-export function hasPublicUrlPlaceholder(value: string): boolean {
-  return pattern().test(value);
-}
-
 /** 값 안의 모든 자리 표시자를 resolve가 돌려주는 주소로 바꾼다. 자리 표시자가 없으면 값을 그대로 돌려준다 */
 export function resolvePublicUrlPlaceholders(value: string, resolve: (service: string) => string): string {
   return value.replace(pattern(), (_match, service: string) => resolve(service));

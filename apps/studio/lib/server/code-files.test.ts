@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { searchFiles, walkFiles } from './code-files';
+import { walkFiles } from './code-files';
 
 const roots: string[] = [];
 
@@ -44,28 +44,5 @@ describe('walkFiles', () => {
     const walk = await walkFiles(root, 5);
     expect(walk.truncated).toBe(true);
     expect(walk.files).toEqual(['src/file-00.ts', 'src/file-01.ts', 'src/file-02.ts', 'src/file-03.ts', 'src/file-04.ts']);
-  });
-});
-
-describe('searchFiles', () => {
-  it('내용에서 찾은 파일과 줄을 돌려주고, 큰 파일은 읽지 않는다', async () => {
-    const root = await project({
-      'a.ts': 'const order = 1;\nconst other = 2;',
-      'b.ts': 'no match here',
-      'big.ts': `const order = 1;\n${'x'.repeat(300)}`,
-    });
-    const { files } = await walkFiles(root);
-    const found = await searchFiles(root, 'order', files, { maxBytes: 100 });
-    expect(found.results).toEqual([{ file: 'a.ts', matches: [{ line: 1, text: 'const order = 1;', start: 6, length: 5 }] }]);
-    expect(found.scanned).toBe(2);
-    expect(found.truncated).toBe(false);
-  });
-
-  it('결과 파일 수 상한에 걸리면 멈춘다', async () => {
-    const root = await project({ 'a.ts': 'order', 'b.ts': 'order', 'c.ts': 'order' });
-    const { files } = await walkFiles(root);
-    const found = await searchFiles(root, 'order', files, { fileLimit: 2 });
-    expect(found.results.map((entry) => entry.file)).toEqual(['a.ts', 'b.ts']);
-    expect(found.truncated).toBe(true);
   });
 });

@@ -77,13 +77,6 @@ export interface RoutingStats {
   recentFailures?: RoutingFailure[];
 }
 
-const COMPLEXITY_LABEL: Record<TaskKind['complexity'], string> = { simple: '단순', normal: '보통', complex: '복잡' };
-
-export function taskKindLabel(kind: TaskKindKey): string {
-  if (kind === UNKNOWN_KIND) return '모름';
-  return kind.risk === 'high' ? `${COMPLEXITY_LABEL[kind.complexity]} · 위험` : COMPLEXITY_LABEL[kind.complexity];
-}
-
 /** 미리보기 옆에 보일 만큼 판정이 난 실행 수. 이보다 적으면 우연과 구별되지 않아 보이지 않는다(#827) */
 export const MIN_JUDGED_FOR_HINT = 3;
 

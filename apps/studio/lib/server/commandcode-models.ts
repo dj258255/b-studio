@@ -28,11 +28,6 @@ export function freeOnlyEnabled(env: Record<string, string | undefined> = proces
   return FREE_ONLY_VALUES.has(env.B_STUDIO_CMD_FREE_ONLY?.trim().toLowerCase() ?? '');
 }
 
-/** 지금 실행 모드가 commandcode인지. 라우트의 사용자 입력 검증에만 쓴다 */
-export function commandCodeMode(env: Record<string, string | undefined> = process.env): boolean {
-  return (env.B_STUDIO_MODE?.trim() || 'api') === 'commandcode';
-}
-
 /** 무료만 모드로 걸러낸다 */
 export function filterFreeModels(models: readonly CommandCodeModel[], freeOnly: boolean): CommandCodeModel[] {
   return freeOnly ? models.filter((model) => model.free) : [...models];

@@ -16,15 +16,3 @@ export function storedResultNotice(state: ServiceState | undefined): string {
   if (state === 'starting' || state === 'probing') return '서비스가 켜지는 중이라 마지막 실행 결과만 보여 줍니다';
   return '서비스가 꺼져 있어 마지막 실행 결과만 보여 줍니다';
 }
-
-/**
- * "전체 실행"을 끌 이유. 돌릴 수 있는 서비스가 하나라도 있으면 undefined(켠다).
- * 모든 서비스가 같은 이유로 못 돌면 그 이유를 그대로 쓰고, 아니면 한 줄로 묶는다.
- */
-export function runAllBlockedReason(services: readonly { service: string; supported: boolean; error?: string }[] | undefined): string | undefined {
-  if (!services) return '테스트 목록을 불러오는 중입니다';
-  if (services.some((service) => service.supported)) return undefined;
-  const reasons = [...new Set(services.map((service) => service.error).filter((error): error is string => Boolean(error)))];
-  if (reasons.length === 1 && services.every((service) => service.error)) return reasons[0];
-  return '테스트를 돌릴 수 있는 서비스가 없습니다';
-}

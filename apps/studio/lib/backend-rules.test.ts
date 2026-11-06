@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { describeWhen, draftToRule, matchCandidates, parseBackendRules, ruleToDraft, type BackendRules } from './backend-rules';
+import { describeWhen, matchCandidates, parseBackendRules, type BackendRules } from './backend-rules';
 
 /**
  * 내가 정한 규칙으로 AI를 고른다(#822). 규칙은 위에서부터 보고, 조건을 모두 만족하는 규칙이 후보가 된다.
@@ -81,17 +81,6 @@ describe('describeWhen', () => {
   });
 });
 
-describe('규칙 편집기 줄', () => {
-  it('저장한 규칙과 편집기 줄을 오가도 같다', () => {
-    const rule = { when: { intent: 'build' as const, complexity: ['complex' as const], risk: 'high' as const, keywords: ['결제', 'PG'] }, backend: 'claude-code', model: 'opus' };
-    expect(draftToRule(ruleToDraft(rule))).toEqual(rule);
-  });
-
-  it('비운 칸은 조건에서 빠지고, 낱말은 쉼표로 나눠 다듬는다', () => {
-    expect(draftToRule({ intent: '', complexity: [], risk: '', keywords: ' 결제 , ,README ', backend: 'codex', model: '  ' })).toEqual({ when: { keywords: ['결제', 'README'] }, backend: 'codex' });
-  });
-});
-
 describe('규칙이 계정까지 고른다(#885)', () => {
   const allowed = ['claude-code', 'codex'];
 
@@ -108,10 +97,4 @@ describe('규칙이 계정까지 고른다(#885)', () => {
     expect(() => parseBackendRules({ rules: [{ backend: 'codex', accountId: 7 }] }, allowed)).toThrow('규칙 1');
   });
 
-  it('편집기 줄은 계정 id를 그대로 오간다', () => {
-    const draft = ruleToDraft({ when: {}, backend: 'codex', accountId: 'acct-1a2b3c4d' });
-    expect(draft.accountId).toBe('acct-1a2b3c4d');
-    expect(draftToRule(draft)).toEqual({ when: {}, backend: 'codex', accountId: 'acct-1a2b3c4d' });
-    expect(draftToRule({ ...draft, accountId: '' })).toEqual({ when: {}, backend: 'codex' });
-  });
 });

@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -11,7 +11,7 @@ const execFileAsync = promisify(execFile);
 /**
  * 추출 결과(요구사항 탭의 "추출 결과" 하위 화면, ADR-097 개정)를 실제 sessions.ts 코드로 끝까지 돌려 본다.
  * 진짜로 하는 것: 파일 시스템의 git 저장소, 추출 결과 사이드카 파일(.git/b-studio/requirements-draft.json), 요구사항 저장(applySessionRequirements).
- * 가짜로 바꾸는 것: 샌드박스(Docker)와 findProject. 추출 모델 호출 자체(previewSessionRequirementsExtraction의 ask 경로)는
+ * 가짜로 바꾸는 것: 샌드박스(Docker)와 findProject. 추출 모델 호출 자체는
  * 돌리지 않는다 — 이미 끝난 추출 결과를 사이드카 파일에 직접 남겨(실제 저장 모양 그대로) 그 뒤의 읽기·자동 저장·apply·지우기만 확인한다.
  */
 const fake = vi.hoisted(() => ({
@@ -65,7 +65,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { applySessionRequirements, createSession, discardSessionRequirementExtractionDraft, getSessionRequirementExtractionDraft, getSnapshot, stopSession, updateSessionRequirementExtractionDraft } from './sessions';
+import { applySessionRequirements, createSession, getSessionRequirementExtractionDraft, getSnapshot, stopSession } from './sessions';
 
 let root: string;
 const saved = {
@@ -139,7 +139,7 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   }
 }
 
-/** 이미 끝난 추출 결과를 사이드카 파일에 직접 남긴다(실제 저장 모양 그대로 — previewSessionRequirementsExtraction의 모델 호출은 돌리지 않는다) */
+/** 이미 끝난 추출 결과를 사이드카 파일에 직접 남긴다(실제 저장 모양 그대로, 모델 호출은 돌리지 않는다) */
 async function seedDraft(workDir: string, overrides: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
   const draft = {
     requirements: [{ id: 'R1', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['a'] }],
@@ -175,51 +175,6 @@ describe('추출 결과 사이드카(요구사항 탭 "추출 결과" 하위 화
     await stopSession(id).catch(() => {});
   }, 20_000);
 
-  it('자동 저장(PATCH)이 답변·추천·편집을 덮어쓰지 않고 합치고 updatedAt을 갱신한다', async () => {
-    await setupRepo();
-    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(id)).toBe('ready');
-    const workDir = getSnapshot(id)!.workDir;
-    await seedDraft(workDir);
-
-    const recommendation = {
-      question: '동시 접속자 규모는?',
-      answer: '100명',
-      rationale: '업계 관례',
-      sources: [{ url: 'https://example.com', title: '참고' }],
-      basis: 'practice' as const,
-    };
-    const updated = await updateSessionRequirementExtractionDraft(id, {
-      answers: { '0': '100명' },
-      recommendations: { '0': recommendation },
-      recommendationSource: 'web',
-      assumptions: ['동시 접속자 100명'],
-    });
-
-    expect(updated.answers).toEqual({ '0': '100명' });
-    expect(updated.recommendations).toEqual({ '0': recommendation });
-    expect(updated.recommendationSource).toBe('web');
-    expect(updated.assumptions).toEqual(['동시 접속자 100명']);
-    // 건드리지 않은 필드는 그대로 남는다
-    expect(updated.questions).toEqual(['동시 접속자 규모는?']);
-    expect(updated.source).toBe('model');
-    expect(updated.sourceInput).toEqual({ specText: '로그인 API를 만든다' });
-    expect(updated.updatedAt).not.toBe('2026-01-01T00:00:00.000Z');
-
-    const reread = await getSessionRequirementExtractionDraft(id);
-    expect(reread).toEqual(updated);
-    await stopSession(id).catch(() => {});
-  }, 20_000);
-
-  it('저장 안 한 추출 결과가 없으면 자동 저장이 404를 던진다', async () => {
-    await setupRepo();
-    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(id)).toBe('ready');
-
-    await expect(updateSessionRequirementExtractionDraft(id, { assumptions: ['a'] })).rejects.toThrow('저장 안 한 추출 결과가 없습니다');
-    await stopSession(id).catch(() => {});
-  }, 20_000);
-
   it('docs/requirements.md로 저장(apply)해도 추출 결과를 지우지 않고 appliedAt만 남긴다', async () => {
     await setupRepo();
     const id = (await createSession('verifyproj', 'kim', 'copy')).id;
@@ -244,20 +199,6 @@ describe('추출 결과 사이드카(요구사항 탭 "추출 결과" 하위 화
     await stopSession(id).catch(() => {});
   }, 20_000);
 
-  it('"지우기"(DELETE)를 부르면 추출 결과가 사라진다(저장한 docs/requirements.md는 건드리지 않는다)', async () => {
-    await setupRepo();
-    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(id)).toBe('ready');
-    const workDir = getSnapshot(id)!.workDir;
-    await seedDraft(workDir);
-    await applySessionRequirements(id, { requirements: [{ id: 'R1', title: '로그인 API', kind: 'api', priority: 'must', acceptance: ['a'] }] });
-
-    await discardSessionRequirementExtractionDraft(id);
-
-    expect(await getSessionRequirementExtractionDraft(id)).toBeUndefined();
-    expect(await readFile(path.join(workDir, 'docs/requirements.md'), 'utf8')).toContain('로그인 API');
-    await stopSession(id).catch(() => {});
-  }, 20_000);
 });
 
 describe('applySessionRequirements — 첫 저장은 개정이 아니다(버그 리포트 33, 통합 세션에서 R3·R4가 즉시 "재확인 필요"로 보이던 문제)', () => {

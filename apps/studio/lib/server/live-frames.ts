@@ -78,12 +78,6 @@ export function publish(sessionId: string, frame: LiveFrame): void {
   emit(channel, frame);
 }
 
-export function publishBlocked(sessionId: string, count: number): void {
-  const channel = channelFor(sessionId);
-  channel.blocked = count;
-  emit(channel, { kind: 'blocked', count });
-}
-
 /** 세션이 멈출 때 마지막 상태를 지운다. 열려 있던 스트림의 구독은 스스로 풀린다 */
 export function clearFrames(sessionId: string): void {
   channels.delete(sessionId);

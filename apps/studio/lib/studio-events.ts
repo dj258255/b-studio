@@ -276,47 +276,6 @@ export interface RepositoryView {
   canCreatePullRequest: boolean;
 }
 
-/** 코드 화면의 파일 목록. 생성물과 .env는 에이전트 작업 공간과 같은 규칙으로 뺀다 */
-export interface CodeTree {
-  /** 이번 쪽의 파일. 찾는 말을 넘기면 경로가 맞는 파일만 담는다 */
-  files: string[];
-  /** files가 시작하는 위치 */
-  offset: number;
-  /** 조건에 맞는 전체 파일 수 */
-  total: number;
-  /** 마지막 체크포인트 이후 바뀐 파일. 삭제한 파일은 files에 없다 */
-  changes: Array<{ file: string; change: 'added' | 'modified' | 'deleted' }>;
-  /** 파일이 아주 많아 전체를 세지 못한 경우 */
-  truncated: boolean;
-}
-
-/** 내용 찾기에서 맞은 한 줄 */
-export interface CodeSearchMatch {
-  line: number;
-  text: string;
-  /** text 안에서 맞은 자리 (가린 값 때문에 자리를 찾지 못하면 0) */
-  start: number;
-  length: number;
-}
-
-export interface CodeSearch {
-  query: string;
-  results: Array<{ file: string; matches: CodeSearchMatch[] }>;
-  /** 결과나 파일 수 상한에 걸려 멈춘 경우 */
-  truncated: boolean;
-}
-
-/** 코드 화면에서 연 파일. 내용과 diff의 시크릿 값은 가려서 보낸다 */
-export interface CodeFile {
-  path: string;
-  /** 삭제한 파일이거나 바이너리면 없다 */
-  content?: string;
-  binary?: boolean;
-  change?: 'added' | 'modified' | 'deleted';
-  /** 마지막 체크포인트 대비 변경 내용 (수정·삭제한 파일) */
-  patch?: string;
-}
-
 /** 지금 변경의 파일 하나(desk의 지금 변경 화면, #924). 경로는 프로젝트 기준이다 */
 export interface LiveChangeFile {
   file: string;
@@ -673,14 +632,4 @@ export interface ExportPreview {
   }>;
   /** PR 자동 리뷰 라운드(ADR-074)의 studio.yaml 기본값. 화면 체크박스·라운드 수 입력의 기본값으로 쓴다 */
   review: { auto: boolean; maxRounds: number };
-}
-
-export interface ProxyResponse {
-  status: number;
-  contentType: string | null;
-  body: string;
-  truncated: boolean;
-  durationMs: number;
-  /** 등록한 사내 API를 부른 경우의 정책 결과 */
-  policy?: { decision: 'allow' | 'deny'; masked: number; reason?: string };
 }

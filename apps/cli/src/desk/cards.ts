@@ -416,11 +416,6 @@ export interface CardInput {
   kitty?: KittyImages;
 }
 
-/** 카드 안쪽의 줄 수: 글 줄(머리·지금 2, 한도 경고·할 일·답은 있으면 1씩, 서브에이전트 줄)과 그림 높이 가운데 큰 것 */
-export function baseRows(withLimits: boolean, art: { rows: number } = ART_WIDE, extra = 0): number {
-  return Math.max(2 + Number(withLimits) + extra, art.rows);
-}
-
 /** 카드 한 장의 줄(테두리 포함). 줄마다 정확히 width칸이다 */
 export function cardLines(card: CardInput, width: number, theme: Theme = DEFAULT_THEME, now = Date.now()): string[] {
   const { item } = card;
