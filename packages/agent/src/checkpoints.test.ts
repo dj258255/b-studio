@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { CheckpointError, CheckpointStore, isIndexLockFailure, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
+import { CheckpointError, CheckpointStore, findNestedGitRepos, isIndexLockFailure, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
 import { formatIncompleteTrailer, formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
 
 // 이 파일의 테스트는 실제 git 하위 프로세스를 여러 번 띄운다(clone·commit·push·fetch). 전체 테스트가 함께 도는 부하에서는
@@ -1995,3 +1995,59 @@ describe('CheckpointStore.inspectSource: ..로 시작하는 하위 폴더 이름
     expect(await CheckpointStore.inspectSource(project, { allowSubfolder: true })).toMatchObject({ subdir: '..api' });
   });
 });
+
+describe('중첩 git 저장소 거부', () => {
+  const mkRepo = async (dir: string) => {
+    await mkdir(path.join(root, dir), { recursive: true });
+    await mkdir(path.join(root, dir, '.git'), { recursive: true });
+    await writeFile(path.join(root, dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  };
+
+  it('findNestedGitRepos는 최상위 .git을 빼고 중첩 저장소(디렉터리·파일)를 찾는다', async () => {
+    await mkdir(path.join(root, '.git'), { recursive: true });
+    await mkRepo('vendor/lib');
+    // worktree·submodule 포인터는 .git 파일이다
+    await mkdir(path.join(root, 'sub'), { recursive: true });
+    await writeFile(path.join(root, 'sub/.git'), 'gitdir: /somewhere\n');
+    const found = await findNestedGitRepos(root, path.resolve(root, '.git'));
+    expect(found.sort()).toEqual(['sub/.git', 'vendor/lib/.git']);
+  });
+
+  it('최상위 저장소만 있으면 빈 목록이다', async () => {
+    await mkdir(path.join(root, '.git'), { recursive: true });
+    expect(await findNestedGitRepos(root, path.resolve(root, '.git'))).toEqual([]);
+  });
+
+  it('git이 무시하는 생성물 폴더(node_modules)는 걷지 않는다', async () => {
+    await mkRepo('node_modules/dep');
+    await mkRepo('.next/cache/dep');
+    expect(await findNestedGitRepos(root, path.resolve(root, '.git'))).toEqual([]);
+  });
+
+  it('심볼릭 링크는 따라가지 않는다(링크 너머는 작업 폴더 밖일 수 있다)', async () => {
+    const external = await mkdtemp(path.join(tmpdir(), 'checkpoints-external-'));
+    await mkdir(path.join(external, '.git'), { recursive: true });
+    await symlink(external, path.join(root, 'linked'));
+    try {
+      expect(await findNestedGitRepos(root, path.resolve(root, '.git'))).toEqual([]);
+    } finally {
+      await rm(external, { recursive: true, force: true });
+    }
+  });
+
+  it('init은 작업 폴더 안 중첩 저장소를 거부한다', async () => {
+    await mkRepo('vendor/lib');
+    const store = new CheckpointStore(root);
+    await expect(store.init()).rejects.toThrow(/다른 git 저장소/);
+  });
+
+  it('commit과 pendingFiles는 나중에 생긴 중첩 저장소를 거부한다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await mkRepo('vendor/lib');
+    await write('api/src/Order.java', 'class Order { int id; }\n');
+    await expect(store.pendingFiles()).rejects.toThrow(/다른 git 저장소/);
+    await expect(store.commit('요청: 수정')).rejects.toThrow(/다른 git 저장소/);
+  });
+});
+
