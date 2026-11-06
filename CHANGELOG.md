@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 무중단 배포 계획(`planBaseCompose`·`planReleaseCompose`·`buildArgsFor`·`summarizeBuildOutput`·`buildCaddyfile`·`releasesToRetire`·`trimRecords`·`newReleaseId`·`deployNames`·`proxyListenPort`·`emptyDeployState`)을 Rust로 옮겼습니다(ADR-191 2단계 2b-2b 셋째 묶음, #1036). 옛 판정과 무작위 입력 20만 번 비교(compose 내용은 `JSON.stringify` 글자, 키 순서 포함)에서 결과가 모두 같았습니다. 다른 곳은 던지는 쪽과 자기 속성만 보는 쪽뿐입니다: 모양이 어긋난 compose·프로젝트, `constructor` 같은 서비스 이름을 운영 이미지·자원 정의가 있다고 읽던 것. 빌드·`compose up`·전환·정리는 TS에 남겼습니다.
 - 서비스 준비 판정(`decideReadiness`·`isTransientBootError`·`shouldRetryTransientCrash`·`crashLogExcerpt`)을 Rust로 옮겼습니다(ADR-191 2단계 2b-2b 둘째 묶음, #1034). 옛 판정과 무작위 입력 20만 번 비교에서 결과가 모두 같았습니다. HTTP 확인과 타이머는 TS에 남겼습니다.
 - 파일 변경을 서비스 컨테이너의 파일 감시기에 알리는 계획(`bindMounts`·`planRelay`)을 Rust로 옮겼습니다(ADR-191 2단계 2b-2b 첫 묶음, #1026). 옛 판정과 무작위 입력 20만 번 비교에서 무엇을 어디에 알리는지가 모두 같았습니다. 다른 곳은 알림의 나열 순서(UTF-16 순서), 모양이 어긋난 compose 설정에서 던지는 것, `constructor` 같은 서비스 이름에서 던지지 않는 것입니다.
 - 인증 모듈에서 부르는 곳이 없던 함수 셋(`canManageSession`, `activeSessionUser`, `safeNextPath`)을 지웠습니다(#1024). 웹 화면 시절 로그인 화면과 서버 컴포넌트가 쓰던 것입니다. 살아 있는 인증 판단은 바뀌지 않습니다.

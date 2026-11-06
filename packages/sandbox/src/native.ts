@@ -74,6 +74,22 @@ interface NativeGuard {
   buildOverride(inputJson: string): string;
   composeUpArgs(explicit: string[] | undefined, edgeService: string): string[];
   resolvePublicUrlPlaceholders(value: string, hostPortsJson: string): string;
+  // ── 무중단 배포 계획(2단계 2b-2b 셋째 묶음, #1036). 입력·출력은 JSON 문자열. 모양이 어긋난 입력은 던진다
+  emptyDeployState(project: string): string;
+  deployBaseName(project: string): string;
+  deployReleaseName(project: string, id: string): string;
+  deployProxyName(project: string): string;
+  deployImageName(project: string, service: string, id: string): string;
+  deployContainerName(composeProject: string, service: string): string;
+  newReleaseId(nowMs: number): string;
+  proxyListenPort(index: number): number;
+  planBaseCompose(configJson: string, projectJson: string): string;
+  planReleaseCompose(configJson: string, projectJson: string, releaseId: string, imagesJson: string): string;
+  buildArgsFor(dockerfile: string, buildJson: string, environmentJson: string): string;
+  summarizeBuildOutput(output: string, maxLines: number): string;
+  buildCaddyfile(routesJson: string): string;
+  releasesToRetire(statusesJson: string, keepPrevious: number): number[];
+  trimRecords(idsJson: string, active: string | undefined): number[];
 }
 
 export interface NativeSyncObservations {
