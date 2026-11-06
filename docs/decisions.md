@@ -9088,6 +9088,15 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 변이 확인: Rust 22곳(프로젝트 밖·프로젝트 자체 받기, 마운트를 감싸는 폴더 옮기기, 옮긴·지운 폴더 안 경로 알리기, nudge 대상, 마운트 밖 대상, managed·subroot·좁은 마운트 우선, 묶기, 정렬, 같은 경로의 마지막 종류, 끝의 빗금, bind 아닌 마운트, 빈 source, cwd 풀기, subroot `.`, `servicePaths`의 뒤 값, managed 표시, containerPath)을 하나씩 망가뜨렸다. 21곳은 테스트가 잡았고, subroot `.` 특례를 빼는 1곳은 결과가 같은 동치 변이다(`path.resolve(source, '.')`는 이미 풀린 source와 같다). 처음 뽑은 벡터에 상대 경로가 섞여 기대값이 실행 위치에 따라 달라졌고(Linux CI에서 실패), 절대 경로만으로 다시 뽑았다. `servicePaths`의 뒤 값은 TS가 `Object.entries`로 넘겨 같은 키가 오지 않으므로 Rust 테스트로 고정했다.
 - 돌리지 않은 것: 실제 컨테이너에서 알림을 받는 것(기존 `relay.test.ts`가 `RELAY_SCRIPT`를 임시 폴더의 셸로 돌리는 시험은 그대로 통과한다), Kubernetes 제공자(relay를 쓰지 않는다).
 
+
+### 덧붙임: 2단계 2b-2b 둘째 묶음 — 서비스 준비 판정 (2026-11-06, [#1034](https://github.com/dj258255/b-studio/issues/1034))
+- 옮긴 것: `readiness.ts`의 `decideReadiness`(확인 기록 → 준비·대기·실패), `isTransientBootError`, `shouldRetryTransientCrash`, `crashLogExcerpt`. HTTP 확인·타이머(`waitForReady`·`probeOnce`)는 TS에 남겼다.
+- 정규식은 같은 뜻으로 옮겼다: `TRANSIENT_BOOT_ERROR`(`\bETXTBSY\b|\bEBUSY\b`), `CRASH_SIGNAL`(대소문자 무시 `(?i)`), `STACK_FRAME`. `crashLogExcerpt`의 300자 자르기는 JS `slice`와 같게 UTF-16 코드 단위 기준(`js::truncate_utf16`, 서로게이트 쌍을 자르면 U+FFFD — Node 경계와 같다).
+- 차등 시험: 옛 TS와 새 Rust에 같은 무작위 입력(확인 기록·정책·경과 시간, 로그 줄)을 넣어 시드 2개 × 10만 번 = **`decideReadiness`·`crashLogExcerpt`·`isTransientBootError`·`shouldRetryTransientCrash` 모두 20만 번 결과가 같았다**(다른 데 0건). 분포: decide ready/waiting/failed 모두 나왔고, 일시 오류 참 38%, 준비 15%.
+- 벡터 테스트(`readiness-vectors.test.ts`, 28개): 옛 TS가 낸 값(decide 20 + crash 8). 의도한 차이는 없다.
+- 변이: Rust 18곳을 하나씩 망가뜨려 17곳을 테스트가 잡았다(죽은 컨테이너 즉시 실패, dead, 연속 성공, 문턱·타임아웃 비교, error 우선, status 없을 때 표기, STACK_FRAME 제외, CRASH_SIGNAL 필터, 자르기·300자·빈 줄·끝 공백, EBUSY 경계, 대소문자 무시, 재시도 attempt). 초를 반올림 대신 버림으로 바꾸는 1곳은 동치 변이다(`timeoutMs`가 항상 정수라 `round`와 `floor`가 같다).
+- 돌리지 않은 것: 실제 컨테이너 기동(기존 `readiness.test.ts`가 판정 입력을 직접 넣어 확인한다), Kubernetes 제공자(readiness를 쓰지 않는다).
+
 ## ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다
 
 상태: 채택(계획)

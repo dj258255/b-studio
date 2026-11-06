@@ -13,7 +13,9 @@
 //! 모양이 어긋난 입력(문자열이 아닌 서비스 이름, 정수가 아닌 호스트 포트 등)은 JS처럼 이어 붙이지 않고 오류로 멈춘다.
 //! 오류는 샌드박스를 만들지 않는 쪽이다. `hostPorts`의 키는 자기 속성만 본다(JS의 `in`은 `constructor` 같은 상속된 이름도 있다고 읽었다).
 
-use crate::edge_config::{self, External, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, EGRESS_NETWORK, SANDBOX_NETWORK};
+use crate::edge_config::{
+    self, External, EDGE_IMAGE, EDGE_PROXY_PORT, EDGE_SERVICE, EGRESS_NETWORK, SANDBOX_NETWORK,
+};
 use crate::js;
 use crate::js_json::{JsObject, JsValue};
 use crate::public_url;
@@ -22,15 +24,23 @@ use crate::public_url;
 /// 있으면 `--no-deps`와, 그 서비스들과 edge를 이름 순(UTF-16 코드 단위 순서)으로 중복 없이 적는다.
 /// `--no-deps`는 목록에 없는 의존 서비스를 compose가 몰래 따라 띄우지 않게 한다 — 사용자가 의존 서비스를 명시적으로 뺐을 수 있다
 pub fn compose_up_args(explicit: Option<&[String]>, edge_service: &str) -> Vec<String> {
-    let Some(explicit) = explicit else { return Vec::new() };
+    let Some(explicit) = explicit else {
+        return Vec::new();
+    };
     let mut names: Vec<String> = Vec::new();
-    for name in explicit.iter().map(String::as_str).chain(std::iter::once(edge_service)) {
+    for name in explicit
+        .iter()
+        .map(String::as_str)
+        .chain(std::iter::once(edge_service))
+    {
         if !names.iter().any(|n| n == name) {
             names.push(name.to_owned());
         }
     }
     names.sort_by(|a, b| js::cmp_utf16(a, b));
-    std::iter::once("--no-deps".to_owned()).chain(names).collect()
+    std::iter::once("--no-deps".to_owned())
+        .chain(names)
+        .collect()
 }
 
 fn str_of(v: Option<&JsValue>, what: &str) -> Result<String, String> {
@@ -53,7 +63,10 @@ fn optional(v: Option<&JsValue>) -> Option<&JsValue> {
 }
 
 fn strs_of(v: Option<&JsValue>, what: &str) -> Result<Vec<String>, String> {
-    arr_of(v, what)?.iter().map(|item| str_of(Some(item), what)).collect()
+    arr_of(v, what)?
+        .iter()
+        .map(|item| str_of(Some(item), what))
+        .collect()
 }
 
 fn obj_of<'a>(v: Option<&'a JsValue>, what: &str) -> Result<&'a JsObject, String> {
@@ -108,7 +121,9 @@ fn escape_dollar(text: &str) -> String {
 /// 호스트 포트는 0~65535의 정수만 받는다(JS는 `${port}`로 아무 수나 이어 붙였다)
 fn port_text(v: &JsValue, what: &str) -> Result<String, String> {
     match v {
-        JsValue::Num(n) if n.fract() == 0.0 && (0.0..=65535.0).contains(n) => Ok(js::number_to_string(*n)),
+        JsValue::Num(n) if n.fract() == 0.0 && (0.0..=65535.0).contains(n) => {
+            Ok(js::number_to_string(*n))
+        }
         _ => Err(format!("{what}은(는) 0~65535의 정수여야 합니다")),
     }
 }
@@ -144,7 +159,10 @@ fn parse_project(input: &JsValue) -> Result<Parsed, String> {
     if let Some(list) = optional(input.prop("secrets")) {
         for item in arr_of(Some(list), "secrets")? {
             let pair = arr_of(Some(item), "secrets 항목")?;
-            secrets.push((str_of(pair.first(), "시크릿 이름")?, strs_of(pair.get(1), "시크릿을 받을 서비스 목록")?));
+            secrets.push((
+                str_of(pair.first(), "시크릿 이름")?,
+                strs_of(pair.get(1), "시크릿을 받을 서비스 목록")?,
+            ));
         }
     }
     let mut externals = Vec::new();
@@ -156,18 +174,33 @@ fn parse_project(input: &JsValue) -> Result<Parsed, String> {
             let service = obj_of(pair.get(1), "사내 API 설정")?;
             let policy = obj_of(service.get("policy"), "사내 API 정책")?;
             let auth = match policy.get("auth") {
-                Some(a) if a.truthy() => Some(str_of(obj_of(Some(a), "사내 API 인증 설정")?.get("secret"), "사내 API 인증 시크릿 이름")?),
+                Some(a) if a.truthy() => Some(str_of(
+                    obj_of(Some(a), "사내 API 인증 설정")?.get("secret"),
+                    "사내 API 인증 시크릿 이름",
+                )?),
                 _ => None,
             };
             external_auth.push(auth);
-            externals.push(External { name, base_url: service.get("baseUrl").cloned(), policy: service.get("policy").cloned() });
+            externals.push(External {
+                name,
+                base_url: service.get("baseUrl").cloned(),
+                policy: service.get("policy").cloned(),
+            });
         }
     }
     let egress = match optional(input.prop("egress")) {
         Some(v) => arr_of(Some(v), "egress")?.to_vec(),
         None => Vec::new(),
     };
-    Ok(Parsed { managed, managed_names, compose_services, secrets, externals, external_auth, egress })
+    Ok(Parsed {
+        managed,
+        managed_names,
+        compose_services,
+        secrets,
+        externals,
+        external_auth,
+        egress,
+    })
 }
 
 /// `edgeEnvironment(project, services)`의 입력을 읽어 만든다. `services`는 `composeServices`
@@ -177,7 +210,9 @@ pub fn edge_environment_from(input: &JsValue) -> Result<JsValue, String> {
         Some(v) => strs_of(Some(v), "services")?,
         None => p.compose_services.clone(),
     };
-    Ok(edge_config::pairs_to_object(&edge_config::edge_environment(&p.managed, &services, &p.egress, &p.externals)))
+    Ok(edge_config::pairs_to_object(
+        &edge_config::edge_environment(&p.managed, &services, &p.egress, &p.externals),
+    ))
 }
 
 pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
@@ -211,7 +246,10 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
     let environment = edge_config::pairs_to_object(&edge_config::proxy_environment(&direct));
 
     // 프록시가 듣기 전에 서비스가 뜨면 첫 다운로드가 연결 거부로 실패하고 컨테이너가 끝난다
-    let wait_for_edge = JsValue::Obj(object(vec![(EDGE_SERVICE, JsValue::Obj(object(vec![("condition", JsValue::str("service_healthy"))])))]));
+    let wait_for_edge = JsValue::Obj(object(vec![(
+        EDGE_SERVICE,
+        JsValue::Obj(object(vec![("condition", JsValue::str("service_healthy"))])),
+    )]));
     let isolate = |o: &mut JsObject| {
         // gVisor(runsc) 같은 런타임은 에이전트 코드가 도는 서비스와 샌드박스 네트워크에 노출된 edge에 모두 건다
         if let Some(rt) = &runtime {
@@ -230,7 +268,10 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
         services.set(name, JsValue::Obj(service));
     }
     for (name, _) in &p.managed {
-        let labels = JsValue::Obj(object(vec![("b-studio.sandbox", JsValue::str(sandbox_id.clone())), ("b-studio.service", JsValue::str(name.clone()))]));
+        let labels = JsValue::Obj(object(vec![
+            ("b-studio.sandbox", JsValue::str(sandbox_id.clone())),
+            ("b-studio.service", JsValue::str(name.clone())),
+        ]));
         let next = spread_set(services.get(name), "labels", labels);
         services.set(name, next);
     }
@@ -239,7 +280,11 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
     for (name, volumes) in git_mask.entries_js_order() {
         let volumes = arr_of(Some(volumes), &format!("gitMask.{name}"))?;
         if !volumes.is_empty() {
-            let next = spread_set(services.get(name), "volumes", JsValue::Arr(volumes.to_vec()));
+            let next = spread_set(
+                services.get(name),
+                "volumes",
+                JsValue::Arr(volumes.to_vec()),
+            );
             services.set(name, next);
         }
     }
@@ -248,7 +293,15 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
     for (name, receivers) in &p.secrets {
         for service in receivers {
             let current = services.get(service);
-            let next = spread_set(current, "environment", spread_set(current.and_then(|c| c.prop("environment")), name, JsValue::Null));
+            let next = spread_set(
+                current,
+                "environment",
+                spread_set(
+                    current.and_then(|c| c.prop("environment")),
+                    name,
+                    JsValue::Null,
+                ),
+            );
             services.set(service, next);
         }
     }
@@ -265,44 +318,73 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
             }
             let resolved = public_url::resolve(&template, &mut |svc| match host_ports.get(svc) {
                 // 위에서 모든 값이 정수인 것을 확인했다
-                Some(port) => format!("http://127.0.0.1:{}", port_text(port, "hostPorts").expect("검사한 포트")),
+                Some(port) => format!(
+                    "http://127.0.0.1:{}",
+                    port_text(port, "hostPorts").expect("검사한 포트")
+                ),
                 None => public_url::placeholder(svc),
             });
             let current = services.get(&service);
-            let next = spread_set(current, "environment", spread_set(current.and_then(|c| c.prop("environment")), &env_key, JsValue::str(resolved)));
+            let next = spread_set(
+                current,
+                "environment",
+                spread_set(
+                    current.and_then(|c| c.prop("environment")),
+                    &env_key,
+                    JsValue::str(resolved),
+                ),
+            );
             services.set(&service, next);
         }
     }
 
     // edge. 사내 API 인증 시크릿은 edge에만 넣는다(값 자리를 비워 compose 프로세스 환경에서 채운다)
     let mut edge_env = JsObject::new();
-    for (key, value) in edge_config::edge_environment(&p.managed, &p.compose_services, &p.egress, &p.externals) {
+    for (key, value) in
+        edge_config::edge_environment(&p.managed, &p.compose_services, &p.egress, &p.externals)
+    {
         edge_env.set(&key, JsValue::str(escape_dollar(&value)));
     }
     for secret in p.external_auth.iter().flatten() {
         // edge가 이미 쓰는 이름이면 그 설정을 null로 비우게 되고 compose가 시크릿 값으로 채운다. 목록을 따로 두지 않고
         // 방금 만든 edge 환경과 견준다(이름 규칙은 spec 스키마가 먼저 막는다, #1018)
         if edge_env.contains_key(secret) {
-            return Err(format!("사내 API 인증 시크릿 이름 '{secret}'이 edge 설정 이름과 겹칩니다"));
+            return Err(format!(
+                "사내 API 인증 시크릿 이름 '{secret}'이 edge 설정 이름과 겹칩니다"
+            ));
         }
         edge_env.set(secret, JsValue::Null);
     }
     let mut edge = JsObject::new();
     edge.set("image", JsValue::str(EDGE_IMAGE));
     isolate(&mut edge);
-    edge.set("command", strs_value(&["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), escape_dollar(&edge_script)]));
+    edge.set(
+        "command",
+        strs_value(&[
+            "node".to_owned(),
+            "--input-type=module".to_owned(),
+            "-e".to_owned(),
+            escape_dollar(&edge_script),
+        ]),
+    );
     edge.set("environment", JsValue::Obj(edge_env));
     // 등록한 사내 API 이름을 internal 네트워크의 별칭으로 가져, 서비스가 http://<이름>/으로 부르면 edge로 온다
     edge.set(
         "networks",
         JsValue::Obj(object(vec![
-            (SANDBOX_NETWORK, JsValue::Obj(object(vec![("aliases", strs_value(&external_names))]))),
+            (
+                SANDBOX_NETWORK,
+                JsValue::Obj(object(vec![("aliases", strs_value(&external_names))])),
+            ),
             (EGRESS_NETWORK, JsValue::Obj(JsObject::new())),
         ])),
     );
     // 사내 API가 Docker 호스트에서 돌 때도 edge가 찾아갈 수 있게 한다
     if !p.externals.is_empty() {
-        edge.set("extra_hosts", strs_value(&["host.docker.internal:host-gateway".to_owned()]));
+        edge.set(
+            "extra_hosts",
+            strs_value(&["host.docker.internal:host-gateway".to_owned()]),
+        );
     }
     edge.set(
         "healthcheck",
@@ -330,16 +412,31 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
         let edge_port = edge_config::edge_port_for(&p.managed_names, name)?;
         ports.push(match host_ports.get(name) {
             None => format!("127.0.0.1::{edge_port}"),
-            Some(port) => format!("127.0.0.1:{}:{edge_port}", port_text(port, "hostPorts").expect("검사한 포트")),
+            Some(port) => format!(
+                "127.0.0.1:{}:{edge_port}",
+                port_text(port, "hostPorts").expect("검사한 포트")
+            ),
         });
     }
     edge.set("ports", strs_value(&ports));
-    edge.set("labels", JsValue::Obj(object(vec![("b-studio.sandbox", JsValue::str(sandbox_id)), ("b-studio.service", JsValue::str(EDGE_SERVICE))])));
+    edge.set(
+        "labels",
+        JsValue::Obj(object(vec![
+            ("b-studio.sandbox", JsValue::str(sandbox_id)),
+            ("b-studio.service", JsValue::str(EDGE_SERVICE)),
+        ])),
+    );
     edge.set(
         "deploy",
         JsValue::Obj(object(vec![(
             "resources",
-            JsValue::Obj(object(vec![("limits", JsValue::Obj(object(vec![("memory", JsValue::str("128m")), ("cpus", JsValue::str("0.5"))])))])),
+            JsValue::Obj(object(vec![(
+                "limits",
+                JsValue::Obj(object(vec![
+                    ("memory", JsValue::str("128m")),
+                    ("cpus", JsValue::str("0.5")),
+                ])),
+            )])),
         )])),
     );
     services.set(EDGE_SERVICE, JsValue::Obj(edge));
@@ -350,7 +447,10 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
             let limit = obj_of(Some(limit), &format!("resources.{name}"))?;
             let mut limits = JsObject::new();
             if let Some(memory) = limit.get("memory").filter(|m| m.truthy()) {
-                limits.set("memory", JsValue::str(str_of(Some(memory), "resources memory")?));
+                limits.set(
+                    "memory",
+                    JsValue::str(str_of(Some(memory), "resources memory")?),
+                );
             }
             if let Some(cpus) = limit.get("cpus").filter(|c| c.truthy()) {
                 match cpus {
@@ -358,18 +458,27 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
                     _ => return Err("resources cpus는 수여야 합니다".to_owned()),
                 }
             }
-            let deploy = JsValue::Obj(object(vec![("resources", JsValue::Obj(object(vec![("limits", JsValue::Obj(limits))])))]));
+            let deploy = JsValue::Obj(object(vec![(
+                "resources",
+                JsValue::Obj(object(vec![("limits", JsValue::Obj(limits))])),
+            )]));
             let next = spread_set(services.get(name), "deploy", deploy);
             services.set(name, next);
         }
     }
 
     let networks = JsValue::Obj(object(vec![
-        (SANDBOX_NETWORK, JsValue::Obj(object(vec![("internal", JsValue::Bool(true))]))),
+        (
+            SANDBOX_NETWORK,
+            JsValue::Obj(object(vec![("internal", JsValue::Bool(true))])),
+        ),
         (EGRESS_NETWORK, JsValue::Obj(JsObject::new())),
     ]));
     // 객체를 JS의 순서로 바꾸고 내보낸다
-    Ok(js_ordered(&JsValue::Obj(object(vec![("networks", networks), ("services", JsValue::Obj(services))]))))
+    Ok(js_ordered(&JsValue::Obj(object(vec![
+        ("networks", networks),
+        ("services", JsValue::Obj(services)),
+    ]))))
 }
 
 #[cfg(test)]
@@ -390,29 +499,59 @@ mod tests {
     #[test]
     fn 인증_시크릿_이름이_edge가_이미_쓰는_환경_이름과_겹치면_만들지_않는다() {
         // 겹치면 edge의 그 설정(송신 허용 목록 등)이 null로 비워져 compose가 시크릿 값으로 채운다(#1018)
-        for name in ["EDGE_EGRESS", "EDGE_MAIN", "EDGE_EXTERNALS", "EDGE_FORWARDS", "EDGE_CALLERS"] {
+        for name in [
+            "EDGE_EGRESS",
+            "EDGE_MAIN",
+            "EDGE_EXTERNALS",
+            "EDGE_FORWARDS",
+            "EDGE_CALLERS",
+        ] {
             let input = format!(
                 r#"{{"managed":[["web",3000]],"composeServices":["web"],"sandboxId":"s1","external":[["users",{{"baseUrl":"https://u.example.com","policy":{{"auth":{{"header":"X","secret":"{name}"}}}}}}]]}}"#
             );
             let err = build(&input).expect_err(name);
-            assert!(err.contains(name) && err.contains("겹칩니다"), "{name}: {err}");
+            assert!(
+                err.contains(name) && err.contains("겹칩니다"),
+                "{name}: {err}"
+            );
         }
         let ok = r#"{"managed":[["web",3000]],"composeServices":["web"],"sandboxId":"s1","external":[["users",{"baseUrl":"https://u.example.com","policy":{"auth":{"header":"X","secret":"USERS_TOKEN"}}}]]}"#;
         let out = build(ok).unwrap();
-        assert!(matches!(out.prop("services").unwrap().prop("b-studio-edge").unwrap().prop("environment").unwrap().prop("USERS_TOKEN"), Some(JsValue::Null)));
+        assert!(matches!(
+            out.prop("services")
+                .unwrap()
+                .prop("b-studio-edge")
+                .unwrap()
+                .prop("environment")
+                .unwrap()
+                .prop("USERS_TOKEN"),
+            Some(JsValue::Null)
+        ));
     }
 
     #[test]
     fn 모든_서비스는_internal_네트워크에만_붙고_포트는_edge가_루프백으로만_공개한다() {
         let out = build(MIN).unwrap();
-        assert_eq!(text(out.prop("networks").unwrap()), r#"{"b-studio-sandbox":{"internal":true},"b-studio-egress":{}}"#);
+        assert_eq!(
+            text(out.prop("networks").unwrap()),
+            r#"{"b-studio-sandbox":{"internal":true},"b-studio-egress":{}}"#
+        );
         let services = out.prop("services").unwrap();
         for name in ["web", "api", "db"] {
             let s = services.prop(name).unwrap();
             assert_eq!(text(s.prop("networks").unwrap()), r#"["b-studio-sandbox"]"#);
             assert!(s.prop("ports").is_none());
         }
-        assert_eq!(text(services.prop("b-studio-edge").unwrap().prop("ports").unwrap()), r#"["127.0.0.1::20000","127.0.0.1::20001"]"#);
+        assert_eq!(
+            text(
+                services
+                    .prop("b-studio-edge")
+                    .unwrap()
+                    .prop("ports")
+                    .unwrap()
+            ),
+            r#"["127.0.0.1::20000","127.0.0.1::20001"]"#
+        );
     }
 
     #[test]
@@ -420,10 +559,30 @@ mod tests {
         let json = r#"{"managed":[["web",3000],["api",8080]],"composeServices":["web","api"],"sandboxId":"s1","secrets":[["K",["api"]]],"hostPorts":{"api":54321},"edgeScript":"a $ b"}"#;
         let out = build(json).unwrap();
         let services = out.prop("services").unwrap();
-        assert_eq!(text(services.prop("api").unwrap().prop("environment").unwrap().prop("K").unwrap()), "null");
-        assert!(services.prop("web").unwrap().prop("environment").unwrap().prop("K").is_none());
+        assert_eq!(
+            text(
+                services
+                    .prop("api")
+                    .unwrap()
+                    .prop("environment")
+                    .unwrap()
+                    .prop("K")
+                    .unwrap()
+            ),
+            "null"
+        );
+        assert!(services
+            .prop("web")
+            .unwrap()
+            .prop("environment")
+            .unwrap()
+            .prop("K")
+            .is_none());
         let edge = services.prop("b-studio-edge").unwrap();
-        assert_eq!(text(edge.prop("ports").unwrap()), r#"["127.0.0.1::20000","127.0.0.1:54321:20001"]"#);
+        assert_eq!(
+            text(edge.prop("ports").unwrap()),
+            r#"["127.0.0.1::20000","127.0.0.1:54321:20001"]"#
+        );
         assert!(text(edge.prop("command").unwrap()).ends_with(r#""a $$ b"]"#));
     }
 
@@ -452,7 +611,13 @@ mod tests {
         let s = |v: &[&str]| v.iter().map(|x| (*x).to_owned()).collect::<Vec<_>>();
         assert!(compose_up_args(None, "e").is_empty());
         assert_eq!(compose_up_args(Some(&[]), "e"), ["--no-deps", "e"]);
-        assert_eq!(compose_up_args(Some(&s(&["web", "db", "web", "e"])), "e"), ["--no-deps", "db", "e", "web"]);
-        assert_eq!(compose_up_args(Some(&s(&["😀", "\u{ffff}", "B", "a"])), "z"), ["--no-deps", "B", "a", "z", "😀", "\u{ffff}"]);
+        assert_eq!(
+            compose_up_args(Some(&s(&["web", "db", "web", "e"])), "e"),
+            ["--no-deps", "db", "e", "web"]
+        );
+        assert_eq!(
+            compose_up_args(Some(&s(&["😀", "\u{ffff}", "B", "a"])), "z"),
+            ["--no-deps", "B", "a", "z", "😀", "\u{ffff}"]
+        );
     }
 }

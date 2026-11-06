@@ -483,3 +483,29 @@ pub fn plan_relay(project_root: String, changes_json: String, mounts_json: Strin
     let mounts: Vec<relay::BindMount> = parse(&mounts_json, "마운트 목록")?;
     serde_json::to_string(&relay::plan_relay(&cwd, &project_root, &changes, &mounts)).map_err(|e| Error::from_reason(e.to_string()))
 }
+
+// ── readiness(ADR-191 2단계 2b-2b, #1034). TS 껍데기: packages/sandbox/src/readiness.ts
+
+use bstudio_guard::readiness;
+
+#[napi]
+pub fn decide_readiness(history_json: String, policy_json: String, elapsed_ms: f64) -> Result<String> {
+    let history: Vec<readiness::Probe> = parse(&history_json, "확인 기록")?;
+    let policy: readiness::ReadinessPolicy = parse(&policy_json, "준비 정책")?;
+    serde_json::to_string(&readiness::decide_readiness(&history, &policy, elapsed_ms)).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+#[napi]
+pub fn is_transient_boot_error(lines: Vec<String>) -> bool {
+    readiness::is_transient_boot_error(&lines)
+}
+
+#[napi]
+pub fn should_retry_transient_crash(attempt: i64, excerpt: Vec<String>) -> bool {
+    readiness::should_retry_transient_crash(attempt, &excerpt)
+}
+
+#[napi]
+pub fn crash_log_excerpt(lines: Vec<String>, max: u32) -> Vec<String> {
+    readiness::crash_log_excerpt(&lines, max as usize)
+}

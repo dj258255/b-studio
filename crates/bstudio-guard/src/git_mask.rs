@@ -62,7 +62,15 @@ pub struct MaskVolume {
 }
 
 fn read_only(source: String, target: String) -> MaskVolume {
-    MaskVolume { kind: "bind".to_owned(), source, target, read_only: true, bind: BindOptions { create_host_path: false } }
+    MaskVolume {
+        kind: "bind".to_owned(),
+        source,
+        target,
+        read_only: true,
+        bind: BindOptions {
+            create_host_path: false,
+        },
+    }
 }
 
 /// 서비스 이름 → target → 마운트. 서비스는 처음 나온 순서를 지키고(JS `Map`), 같은 target은 자리를 지킨 채 값만 바뀐다
@@ -104,17 +112,24 @@ impl Plan {
 pub fn record_to_json(record: &[(String, Vec<MaskVolume>)]) -> Value {
     let mut map = Map::new();
     for (service, volumes) in record {
-        map.insert(service.clone(), serde_json::to_value(volumes).expect("직렬화"));
+        map.insert(
+            service.clone(),
+            serde_json::to_value(volumes).expect("직렬화"),
+        );
     }
     Value::Object(map)
 }
 
 /// JS 객체(서비스 → 마운트 목록)를 읽는다
 pub fn record_from_json(value: &Value) -> Result<Vec<(String, Vec<MaskVolume>)>, String> {
-    let Value::Object(map) = value else { return Err("마스크 계획의 형식이 다릅니다".to_owned()) };
+    let Value::Object(map) = value else {
+        return Err("마스크 계획의 형식이 다릅니다".to_owned());
+    };
     map.iter()
         .map(|(service, volumes)| {
-            serde_json::from_value::<Vec<MaskVolume>>(volumes.clone()).map(|v| (service.clone(), v)).map_err(|e| format!("마스크 계획을 읽지 못했습니다: {e}"))
+            serde_json::from_value::<Vec<MaskVolume>>(volumes.clone())
+                .map(|v| (service.clone(), v))
+                .map_err(|e| format!("마스크 계획을 읽지 못했습니다: {e}"))
         })
         .collect()
 }
@@ -123,11 +138,18 @@ pub fn record_from_json(value: &Value) -> Result<Vec<(String, Vec<MaskVolume>)>,
 ///  - 서비스가 `.git`이 든 폴더(또는 그 상위)를 마운트하면 그 안의 `.git`을 읽기 전용으로, 상태 폴더는 빈 폴더(읽기 전용)로 덮는다
 ///  - 서비스가 `.git` 안쪽을 직접 마운트하면 같은 자리에서 읽기 전용(상태 폴더는 빈 폴더)으로 바꾼다
 ///  - 같은 자리를 둘 이상의 규칙이 덮으면 상태 폴더를 가리는 쪽이 남는다
-pub fn plan_git_mask(cwd: &str, mounts: &[Mount], entries: &[GitEntry]) -> Vec<(String, Vec<MaskVolume>)> {
+pub fn plan_git_mask(
+    cwd: &str,
+    mounts: &[Mount],
+    entries: &[GitEntry],
+) -> Vec<(String, Vec<MaskVolume>)> {
     let mut plan = Plan::default();
     let mask_suffix = format!("/{STATE_MASK}");
     let add = |plan: &mut Plan, service: &str, volume: MaskVolume| {
-        let keep_existing = plan.volumes(service).iter().any(|v| v.target == volume.target && v.source.ends_with(&mask_suffix));
+        let keep_existing = plan
+            .volumes(service)
+            .iter()
+            .any(|v| v.target == volume.target && v.source.ends_with(&mask_suffix));
         if !keep_existing {
             plan.set(service, volume);
         }
@@ -138,16 +160,36 @@ pub fn plan_git_mask(cwd: &str, mounts: &[Mount], entries: &[GitEntry]) -> Vec<(
             let git = node_path::join(&[&entry.dir, GIT]);
             let state = node_path::join(&[&git, STATE]);
             if node_path::is_inside(cwd, &source, &entry.dir) {
-                let container_git = node_path::join(&[&mount.target, &node_path::relative(cwd, &source, &git)]);
-                add(&mut plan, &mount.service, read_only(git.clone(), container_git.clone()));
+                let container_git =
+                    node_path::join(&[&mount.target, &node_path::relative(cwd, &source, &git)]);
+                add(
+                    &mut plan,
+                    &mount.service,
+                    read_only(git.clone(), container_git.clone()),
+                );
                 if entry.kind == "directory" && entry.has_state {
-                    add(&mut plan, &mount.service, read_only(node_path::join(&[&git, STATE_MASK]), node_path::join(&[&container_git, STATE])));
+                    add(
+                        &mut plan,
+                        &mount.service,
+                        read_only(
+                            node_path::join(&[&git, STATE_MASK]),
+                            node_path::join(&[&container_git, STATE]),
+                        ),
+                    );
                 }
             } else if node_path::is_inside(cwd, &git, &source) {
                 if node_path::is_inside(cwd, &state, &source) {
-                    add(&mut plan, &mount.service, read_only(node_path::join(&[&git, STATE_MASK]), mount.target.clone()));
+                    add(
+                        &mut plan,
+                        &mount.service,
+                        read_only(node_path::join(&[&git, STATE_MASK]), mount.target.clone()),
+                    );
                 } else {
-                    add(&mut plan, &mount.service, read_only(source.clone(), mount.target.clone()));
+                    add(
+                        &mut plan,
+                        &mount.service,
+                        read_only(source.clone(), mount.target.clone()),
+                    );
                 }
             }
         }
@@ -165,7 +207,12 @@ struct AssetMaskEntry {
     asset: String,
 }
 
-fn asset_mask_entries(cwd: &str, mounts: &[Mount], project_root: &str, assets: &[AssetCopy]) -> Vec<AssetMaskEntry> {
+fn asset_mask_entries(
+    cwd: &str,
+    mounts: &[Mount],
+    project_root: &str,
+    assets: &[AssetCopy],
+) -> Vec<AssetMaskEntry> {
     let mut entries = Vec::new();
     for mount in mounts {
         let source = node_path::resolve(cwd, &[&mount.source]);
@@ -174,7 +221,10 @@ fn asset_mask_entries(cwd: &str, mounts: &[Mount], project_root: &str, assets: &
             if node_path::is_inside(cwd, &source, &asset_abs) {
                 entries.push(AssetMaskEntry {
                     service: mount.service.clone(),
-                    target: node_path::join(&[&mount.target, &node_path::relative(cwd, &source, &asset_abs)]),
+                    target: node_path::join(&[
+                        &mount.target,
+                        &node_path::relative(cwd, &source, &asset_abs),
+                    ]),
                     source: asset.source.clone(),
                     asset: asset_abs,
                 });
@@ -183,7 +233,10 @@ fn asset_mask_entries(cwd: &str, mounts: &[Mount], project_root: &str, assets: &
                 entries.push(AssetMaskEntry {
                     service: mount.service.clone(),
                     target: mount.target.clone(),
-                    source: node_path::join(&[&asset.source, &node_path::relative(cwd, &asset_abs, &source)]),
+                    source: node_path::join(&[
+                        &asset.source,
+                        &node_path::relative(cwd, &asset_abs, &source),
+                    ]),
                     asset: asset_abs,
                 });
             }
@@ -193,7 +246,12 @@ fn asset_mask_entries(cwd: &str, mounts: &[Mount], project_root: &str, assets: &
 }
 
 /// 선언된 평가 자산을 서비스 컨테이너에 읽기 전용으로 덧붙이는 마운트 계획. 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다
-pub fn plan_evaluation_asset_mask(cwd: &str, mounts: &[Mount], project_root: &str, assets: &[AssetCopy]) -> Vec<(String, Vec<MaskVolume>)> {
+pub fn plan_evaluation_asset_mask(
+    cwd: &str,
+    mounts: &[Mount],
+    project_root: &str,
+    assets: &[AssetCopy],
+) -> Vec<(String, Vec<MaskVolume>)> {
     let mut plan = Plan::default();
     for entry in asset_mask_entries(cwd, mounts, project_root, assets) {
         plan.set(&entry.service, read_only(entry.source, entry.target));
@@ -214,7 +272,13 @@ pub struct ComposeMount {
 
 /// 사용자 compose의 마운트 가운데 평가 자산 자리 안쪽(같은 자리 포함)에 있는 것이 있으면 그 이유. 자산을 직접 마운트한 그 마운트 자신만 뺀다.
 /// tmpfs·이름 있는 볼륨도 같은 자리에서 우리 마운트를 덮으므로 종류를 가리지 않는다
-pub fn nested_asset_mount_error(cwd: &str, compose_mounts: &[ComposeMount], mounts: &[Mount], project_root: &str, assets: &[AssetCopy]) -> Option<String> {
+pub fn nested_asset_mount_error(
+    cwd: &str,
+    compose_mounts: &[ComposeMount],
+    mounts: &[Mount],
+    project_root: &str,
+    assets: &[AssetCopy],
+) -> Option<String> {
     for entry in asset_mask_entries(cwd, mounts, project_root, assets) {
         for mount in compose_mounts {
             if mount.service != entry.service {
@@ -222,7 +286,9 @@ pub fn nested_asset_mount_error(cwd: &str, compose_mounts: &[ComposeMount], moun
             }
             if mount.target == entry.target {
                 if let Some(host) = &mount.host_source {
-                    if node_path::is_inside(cwd, host, &entry.asset) || node_path::is_inside(cwd, &entry.asset, host) {
+                    if node_path::is_inside(cwd, host, &entry.asset)
+                        || node_path::is_inside(cwd, &entry.asset, host)
+                    {
                         continue;
                     }
                 }
@@ -282,7 +348,10 @@ pub fn bound_device(volume: Option<&Value>) -> Result<Option<String>, String> {
         Some(Value::String(s)) => Some(s.clone()),
         Some(_) => return Err(unknown("volumes.driver_opts.device")),
     };
-    let binds = o.split(',').map(js::trim).any(|option| option == "bind" || option == "rbind");
+    let binds = o
+        .split(',')
+        .map(js::trim)
+        .any(|option| option == "bind" || option == "rbind");
     Ok(device.filter(|d| !d.is_empty() && node_path::is_absolute(d) && binds))
 }
 
@@ -303,7 +372,9 @@ fn services(config: &Value) -> Result<&Map<String, Value>, String> {
 }
 
 fn service_volumes(spec: Option<&Value>) -> Result<Vec<ComposeVolume>, String> {
-    let Some(spec) = spec else { return Ok(Vec::new()) };
+    let Some(spec) = spec else {
+        return Ok(Vec::new());
+    };
     let volumes = match spec.get("volumes") {
         None | Some(Value::Null) => return Ok(Vec::new()),
         Some(Value::Array(items)) => items,
@@ -312,14 +383,24 @@ fn service_volumes(spec: Option<&Value>) -> Result<Vec<ComposeVolume>, String> {
     volumes
         .iter()
         .map(|item| {
-            let kind = item.get("type").and_then(Value::as_str).ok_or_else(|| unknown("services.volumes.type"))?;
-            let target = item.get("target").and_then(Value::as_str).ok_or_else(|| unknown("services.volumes.target"))?;
+            let kind = item
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| unknown("services.volumes.type"))?;
+            let target = item
+                .get("target")
+                .and_then(Value::as_str)
+                .ok_or_else(|| unknown("services.volumes.target"))?;
             let source = match item.get("source") {
                 None | Some(Value::Null) => None,
                 Some(Value::String(s)) => Some(s.clone()),
                 Some(_) => return Err(unknown("services.volumes.source")),
             };
-            Ok(ComposeVolume { kind: kind.to_owned(), source, target: target.to_owned() })
+            Ok(ComposeVolume {
+                kind: kind.to_owned(),
+                source,
+                target: target.to_owned(),
+            })
         })
         .collect()
 }
@@ -327,7 +408,14 @@ fn service_volumes(spec: Option<&Value>) -> Result<Vec<ComposeVolume>, String> {
 fn volumes_from(spec: Option<&Value>) -> Result<Vec<String>, String> {
     match spec.and_then(|s| s.get("volumes_from")) {
         None | Some(Value::Null) => Ok(Vec::new()),
-        Some(Value::Array(items)) => items.iter().map(|i| i.as_str().map(str::to_owned).ok_or_else(|| unknown("services.volumes_from"))).collect(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|i| {
+                i.as_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| unknown("services.volumes_from"))
+            })
+            .collect(),
         Some(_) => Err(unknown("services.volumes_from")),
     }
 }
@@ -336,7 +424,11 @@ fn volumes_from(spec: Option<&Value>) -> Result<Vec<String>, String> {
 /// `volumes_from`이 compose 밖 컨테이너(`container:<이름>`)를 가리키면 무엇이 붙는지 알 수 없으므로 오류다
 fn inherited_volumes(config: &Value) -> Result<Vec<(String, ComposeVolume)>, String> {
     let services = services(config)?;
-    fn effective(services: &Map<String, Value>, service: &str, seen: &mut Vec<String>) -> Result<Vec<ComposeVolume>, String> {
+    fn effective(
+        services: &Map<String, Value>,
+        service: &str,
+        seen: &mut Vec<String>,
+    ) -> Result<Vec<ComposeVolume>, String> {
         if seen.iter().any(|s| s == service) {
             return Ok(Vec::new());
         }
@@ -376,12 +468,22 @@ fn named_volume<'a>(config: &'a Value, name: &str) -> Result<Option<&'a Value>, 
 pub fn collect_host_mounts(cwd: &str, config: &Value) -> Result<Vec<Mount>, String> {
     let mut mounts = Vec::new();
     for (service, volume) in inherited_volumes(config)? {
-        let Some(source) = volume.source.filter(|s| !s.is_empty()) else { continue };
+        let Some(source) = volume.source.filter(|s| !s.is_empty()) else {
+            continue;
+        };
         if volume.kind == "bind" {
-            mounts.push(Mount { service, source: node_path::resolve(cwd, &[&source]), target: volume.target });
+            mounts.push(Mount {
+                service,
+                source: node_path::resolve(cwd, &[&source]),
+                target: volume.target,
+            });
         } else if volume.kind == "volume" {
             if let Some(device) = bound_device(named_volume(config, &source)?)? {
-                mounts.push(Mount { service, source: node_path::resolve(cwd, &[&device]), target: volume.target });
+                mounts.push(Mount {
+                    service,
+                    source: node_path::resolve(cwd, &[&device]),
+                    target: volume.target,
+                });
             }
         }
     }
@@ -393,10 +495,17 @@ fn tmpfs_targets(tmpfs: Option<&Value>) -> Result<Vec<String>, String> {
     let entries: Vec<&str> = match tmpfs {
         None | Some(Value::Null) => Vec::new(),
         Some(Value::String(s)) => vec![s.as_str()],
-        Some(Value::Array(items)) => items.iter().map(|i| i.as_str().ok_or_else(|| unknown("services.tmpfs"))).collect::<Result<_, _>>()?,
+        Some(Value::Array(items)) => items
+            .iter()
+            .map(|i| i.as_str().ok_or_else(|| unknown("services.tmpfs")))
+            .collect::<Result<_, _>>()?,
         Some(_) => return Err(unknown("services.tmpfs")),
     };
-    Ok(entries.into_iter().map(|e| js::trim(e.split(':').next().unwrap_or("")).to_owned()).filter(|e| !e.is_empty()).collect())
+    Ok(entries
+        .into_iter()
+        .map(|e| js::trim(e.split(':').next().unwrap_or("")).to_owned())
+        .filter(|e| !e.is_empty())
+        .collect())
 }
 
 /// 서비스의 모든 종류 마운트(bind·volume·tmpfs 등). `host`는 호스트 경로인 원본을 `resolve`한 값이고, TS가 `realpath`로 풀어 `hostSource`로 넘긴다.
@@ -415,7 +524,12 @@ pub fn compose_mount_specs(cwd: &str, config: &Value) -> Result<Vec<ComposeMount
     let mut specs = Vec::new();
     for (service, spec) in services(config)? {
         for target in tmpfs_targets(spec.get("tmpfs"))? {
-            specs.push(ComposeMountSpec { service: service.clone(), kind: "tmpfs".to_owned(), target, host: None });
+            specs.push(ComposeMountSpec {
+                service: service.clone(),
+                kind: "tmpfs".to_owned(),
+                target,
+                host: None,
+            });
         }
     }
     for (service, volume) in inherited_volumes(config)? {
@@ -425,7 +539,12 @@ pub fn compose_mount_specs(cwd: &str, config: &Value) -> Result<Vec<ComposeMount
             Some(source) if volume.kind == "volume" => bound_device(named_volume(config, source)?)?,
             Some(_) => None,
         };
-        specs.push(ComposeMountSpec { service, kind: volume.kind, target: volume.target, host: host.map(|h| node_path::resolve(cwd, &[&h])) });
+        specs.push(ComposeMountSpec {
+            service,
+            kind: volume.kind,
+            target: volume.target,
+            host: host.map(|h| node_path::resolve(cwd, &[&h])),
+        });
     }
     Ok(specs)
 }
@@ -448,7 +567,9 @@ pub fn merge_masks(plans: Vec<Vec<(String, Vec<MaskVolume>)>>) -> Vec<(String, V
 /// 맨 앞이 **정확히** 그 접두어이고, 뗀 나머지가 절대 경로이며 `..` 요소가 없을 때만 그 경로로 본다. 그 밖의 꼴은 받지 않는다(`None`)
 pub fn docker_desktop_host_path(source: &str) -> Option<String> {
     for prefix in ["/host_mnt/", "/run/desktop/mnt/host/"] {
-        let Some(rest) = source.strip_prefix(prefix) else { continue };
+        let Some(rest) = source.strip_prefix(prefix) else {
+            continue;
+        };
         // 접두어의 마지막 `/`는 남긴다 — 뗀 경로가 `/Users/…`처럼 절대 경로여야 한다
         let stripped = format!("/{rest}");
         if stripped.split('/').any(|part| part == "..") {
@@ -467,30 +588,64 @@ mod tests {
     const CWD: &str = "/cwd";
 
     fn mount(service: &str, source: &str, target: &str) -> Mount {
-        Mount { service: service.into(), source: source.into(), target: target.into() }
+        Mount {
+            service: service.into(),
+            source: source.into(),
+            target: target.into(),
+        }
     }
 
     fn entry(dir: &str, has_state: bool) -> GitEntry {
-        GitEntry { dir: dir.into(), kind: "directory".into(), has_state }
+        GitEntry {
+            dir: dir.into(),
+            kind: "directory".into(),
+            has_state,
+        }
     }
 
     #[test]
     fn 프로젝트를_마운트하면_git과_상태_폴더를_덮는다() {
         let plan = plan_git_mask(CWD, &[mount("api", "/p", "/app")], &[entry("/p", true)]);
-        let targets: Vec<_> = plan[0].1.iter().map(|v| (v.source.as_str(), v.target.as_str())).collect();
-        assert_eq!(targets, vec![("/p/.git", "/app/.git"), ("/p/.git/b-studio-empty", "/app/.git/b-studio")]);
+        let targets: Vec<_> = plan[0]
+            .1
+            .iter()
+            .map(|v| (v.source.as_str(), v.target.as_str()))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                ("/p/.git", "/app/.git"),
+                ("/p/.git/b-studio-empty", "/app/.git/b-studio")
+            ]
+        );
     }
 
     #[test]
     fn git_안쪽을_직접_마운트하면_같은_자리를_바꾼다() {
-        let plan = plan_git_mask(CWD, &[mount("a", "/p/.git/b-studio/x", "/s"), mount("a", "/p/.git/objects", "/o")], &[entry("/p", true)]);
-        let targets: Vec<_> = plan[0].1.iter().map(|v| (v.source.as_str(), v.target.as_str())).collect();
-        assert_eq!(targets, vec![("/p/.git/objects", "/o"), ("/p/.git/b-studio-empty", "/s")]);
+        let plan = plan_git_mask(
+            CWD,
+            &[
+                mount("a", "/p/.git/b-studio/x", "/s"),
+                mount("a", "/p/.git/objects", "/o"),
+            ],
+            &[entry("/p", true)],
+        );
+        let targets: Vec<_> = plan[0]
+            .1
+            .iter()
+            .map(|v| (v.source.as_str(), v.target.as_str()))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![("/p/.git/objects", "/o"), ("/p/.git/b-studio-empty", "/s")]
+        );
     }
 
     #[test]
     fn 하위_폴더만_마운트하면_아무것도_하지_않는다() {
-        assert!(plan_git_mask(CWD, &[mount("a", "/p/web", "/app")], &[entry("/p", true)]).is_empty());
+        assert!(
+            plan_git_mask(CWD, &[mount("a", "/p/web", "/app")], &[entry("/p", true)]).is_empty()
+        );
     }
 
     #[test]
@@ -501,35 +656,93 @@ mod tests {
             "c": { "volumes_from": ["b"] }
         }});
         let mounts = collect_host_mounts(CWD, &config).unwrap();
-        assert_eq!(mounts.iter().map(|m| m.service.as_str()).collect::<Vec<_>>(), vec!["a", "b", "c"]);
+        assert_eq!(
+            mounts
+                .iter()
+                .map(|m| m.service.as_str())
+                .collect::<Vec<_>>(),
+            vec!["a", "b", "c"]
+        );
         let bad = json!({ "services": { "a": { "volumes_from": ["container:x"] } } });
-        assert!(collect_host_mounts(CWD, &bad).unwrap_err().contains("compose 밖의 컨테이너"));
+        assert!(collect_host_mounts(CWD, &bad)
+            .unwrap_err()
+            .contains("compose 밖의 컨테이너"));
     }
 
     #[test]
     fn 호스트에_묶은_볼륨만_호스트_마운트로_본다() {
-        assert_eq!(bound_device(Some(&json!({ "driver_opts": { "o": "bind", "device": "/h" } }))).unwrap(), Some("/h".into()));
-        assert_eq!(bound_device(Some(&json!({ "driver": "local", "driver_opts": { "o": "rw, rbind", "device": "/h" } }))).unwrap(), Some("/h".into()));
-        assert_eq!(bound_device(Some(&json!({ "driver": "nfs", "driver_opts": { "o": "bind", "device": "/h" } }))).unwrap(), None);
-        assert_eq!(bound_device(Some(&json!({ "driver_opts": { "o": "bind", "device": "rel" } }))).unwrap(), None);
+        assert_eq!(
+            bound_device(Some(
+                &json!({ "driver_opts": { "o": "bind", "device": "/h" } })
+            ))
+            .unwrap(),
+            Some("/h".into())
+        );
+        assert_eq!(
+            bound_device(Some(
+                &json!({ "driver": "local", "driver_opts": { "o": "rw, rbind", "device": "/h" } })
+            ))
+            .unwrap(),
+            Some("/h".into())
+        );
+        assert_eq!(
+            bound_device(Some(
+                &json!({ "driver": "nfs", "driver_opts": { "o": "bind", "device": "/h" } })
+            ))
+            .unwrap(),
+            None
+        );
+        assert_eq!(
+            bound_device(Some(
+                &json!({ "driver_opts": { "o": "bind", "device": "rel" } })
+            ))
+            .unwrap(),
+            None
+        );
         assert!(bound_device(Some(&json!({ "driver_opts": { "o": 1, "device": "/h" } }))).is_err());
     }
 
     #[test]
     fn docker_desktop_접두어만_뗀다() {
-        assert_eq!(docker_desktop_host_path("/host_mnt/Users/a"), Some("/Users/a".into()));
-        assert_eq!(docker_desktop_host_path("/run/desktop/mnt/host/c/x"), Some("/c/x".into()));
+        assert_eq!(
+            docker_desktop_host_path("/host_mnt/Users/a"),
+            Some("/Users/a".into())
+        );
+        assert_eq!(
+            docker_desktop_host_path("/run/desktop/mnt/host/c/x"),
+            Some("/c/x".into())
+        );
         assert_eq!(docker_desktop_host_path("/host_mnt/../etc"), None);
-        assert_eq!(docker_desktop_host_path("/x/host_mnt/a"), Some("/x/host_mnt/a".into()));
+        assert_eq!(
+            docker_desktop_host_path("/x/host_mnt/a"),
+            Some("/x/host_mnt/a".into())
+        );
     }
 
     #[test]
     fn 평가_자산_자리에_겹친_마운트는_오류다() {
         let mounts = [mount("api", "/p", "/app")];
-        let assets = [AssetCopy { path: "tests/check.mjs".into(), source: "/cache/a/check.mjs".into() }];
-        let tmpfs = [ComposeMount { service: "api".into(), kind: "tmpfs".into(), target: "/app/tests".into(), host_source: None }];
+        let assets = [AssetCopy {
+            path: "tests/check.mjs".into(),
+            source: "/cache/a/check.mjs".into(),
+        }];
+        let tmpfs = [ComposeMount {
+            service: "api".into(),
+            kind: "tmpfs".into(),
+            target: "/app/tests".into(),
+            host_source: None,
+        }];
         assert!(nested_asset_mount_error(CWD, &tmpfs, &mounts, "/p", &assets).is_none());
-        let deeper = [ComposeMount { service: "api".into(), kind: "tmpfs".into(), target: "/app/tests/check.mjs".into(), host_source: None }];
-        assert!(nested_asset_mount_error(CWD, &deeper, &mounts, "/p", &assets).unwrap().contains("다른 마운트(tmpfs)"));
+        let deeper = [ComposeMount {
+            service: "api".into(),
+            kind: "tmpfs".into(),
+            target: "/app/tests/check.mjs".into(),
+            host_source: None,
+        }];
+        assert!(
+            nested_asset_mount_error(CWD, &deeper, &mounts, "/p", &assets)
+                .unwrap()
+                .contains("다른 마운트(tmpfs)")
+        );
     }
 }

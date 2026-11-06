@@ -96,7 +96,11 @@ pub fn normalize(path: &str) -> String {
         if absolute {
             return "/".to_owned();
         }
-        return if trailing { "./".to_owned() } else { ".".to_owned() };
+        return if trailing {
+            "./".to_owned()
+        } else {
+            ".".to_owned()
+        };
     }
     if trailing {
         out.push('/');
@@ -128,7 +132,11 @@ pub fn resolve(cwd: &str, parts: &[&str]) -> String {
         if part.is_empty() {
             continue;
         }
-        resolved = if resolved.is_empty() { part.to_owned() } else { format!("{part}/{resolved}") };
+        resolved = if resolved.is_empty() {
+            part.to_owned()
+        } else {
+            format!("{part}/{resolved}")
+        };
         absolute = is_absolute(part);
     }
     let normalized = normalize_string(&resolved, !absolute);
@@ -220,7 +228,11 @@ pub fn dirname(path: &str) -> String {
         i -= 1;
     }
     if end == -1 {
-        return if has_root { "/".to_owned() } else { ".".to_owned() };
+        return if has_root {
+            "/".to_owned()
+        } else {
+            ".".to_owned()
+        };
     }
     if has_root && end == 1 {
         return "//".to_owned();
@@ -300,7 +312,17 @@ mod tests {
 
     #[test]
     fn dirname은_node와_같다() {
-        for (input, expected) in [("", "."), ("/", "/"), ("//", "/"), ("/a", "/"), ("/a/b/", "/a"), ("a", "."), ("a/b", "a"), ("//a", "//"), ("/a//b", "/a/")] {
+        for (input, expected) in [
+            ("", "."),
+            ("/", "/"),
+            ("//", "/"),
+            ("/a", "/"),
+            ("/a/b/", "/a"),
+            ("a", "."),
+            ("a/b", "a"),
+            ("//a", "//"),
+            ("/a//b", "/a/"),
+        ] {
             assert_eq!(dirname(input), expected, "{input:?}");
         }
     }
