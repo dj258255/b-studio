@@ -15,6 +15,7 @@ pub mod js_json;
 pub mod node_path;
 pub mod public_url;
 pub mod readonly_docker;
+pub mod relay;
 pub mod secrets;
 pub mod snapshots;
 pub mod stray_processes;
