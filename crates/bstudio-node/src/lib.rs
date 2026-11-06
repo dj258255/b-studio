@@ -509,3 +509,101 @@ pub fn should_retry_transient_crash(attempt: i64, excerpt: Vec<String>) -> bool 
 pub fn crash_log_excerpt(lines: Vec<String>, max: u32) -> Vec<String> {
     readiness::crash_log_excerpt(&lines, max as usize)
 }
+
+// ── 무중단 배포 계획(ADR-191 2단계 2b-2b 셋째 묶음, #1036). TS 껍데기: packages/sandbox/src/docker/deploy-plan.ts
+// 입력은 JSON 문자열(encodeNative), 출력도 JSON 문자열이다. 객체를 돌려주는 `releasesToRetire`·`trimRecords`는 목록 안 위치를 낸다
+// (TS가 같은 객체를 돌려주도록). 모양이 어긋난 입력은 던진다
+
+use bstudio_guard::deploy_plan;
+
+#[napi]
+pub fn empty_deploy_state(project: String) -> String {
+    out(&deploy_plan::empty_deploy_state(&project))
+}
+
+#[napi]
+pub fn deploy_base_name(project: String) -> String {
+    deploy_plan::base_name(&project)
+}
+
+#[napi]
+pub fn deploy_release_name(project: String, id: String) -> String {
+    deploy_plan::release_name(&project, &id)
+}
+
+#[napi]
+pub fn deploy_proxy_name(project: String) -> String {
+    deploy_plan::proxy_name(&project)
+}
+
+#[napi]
+pub fn deploy_image_name(project: String, service: String, id: String) -> String {
+    deploy_plan::image_name(&project, &service, &id)
+}
+
+#[napi]
+pub fn deploy_container_name(compose_project: String, service: String) -> String {
+    deploy_plan::container_name(&compose_project, &service)
+}
+
+/// `now_ms`는 `Date.getTime()`
+#[napi]
+pub fn new_release_id(now_ms: f64) -> String {
+    deploy_plan::new_release_id(now_ms)
+}
+
+#[napi]
+pub fn proxy_listen_port(index: f64) -> f64 {
+    deploy_plan::proxy_listen_port(index)
+}
+
+/// 부가 서비스가 없으면 `"null"`
+#[napi]
+pub fn plan_base_compose(config_json: String, project_json: String) -> Result<String> {
+    let config = input(&config_json, "compose 설정")?;
+    let project = input(&project_json, "프로젝트")?;
+    Ok(match fail(deploy_plan::plan_base_compose(&config, &project))? {
+        Some(plan) => out(&plan),
+        None => "null".to_owned(),
+    })
+}
+
+#[napi]
+pub fn plan_release_compose(config_json: String, project_json: String, release_id: String, images_json: String) -> Result<String> {
+    let config = input(&config_json, "compose 설정")?;
+    let project = input(&project_json, "프로젝트")?;
+    let images = input(&images_json, "운영 이미지")?;
+    Ok(out(&fail(deploy_plan::plan_release_compose(&config, &project, &release_id, &images))?))
+}
+
+/// `build_json`·`environment_json`은 없으면 `"null"`
+#[napi]
+pub fn build_args_for(dockerfile: String, build_json: String, environment_json: String) -> Result<String> {
+    let build = input(&build_json, "build")?;
+    let environment = input(&environment_json, "environment")?;
+    Ok(out(&fail(deploy_plan::build_args_for(&dockerfile, Some(&build), Some(&environment)))?))
+}
+
+#[napi]
+pub fn summarize_build_output(output: String, max_lines: f64) -> String {
+    deploy_plan::summarize_build_output(&output, max_lines)
+}
+
+#[napi]
+pub fn build_caddyfile(routes_json: String) -> Result<String> {
+    fail(deploy_plan::build_caddyfile(&input(&routes_json, "프록시 경로")?))
+}
+
+/// `statuses_json`은 릴리스의 `status` 목록. 정리할 릴리스의 위치를 돌려준다
+#[napi]
+pub fn releases_to_retire(statuses_json: String, keep_previous: f64) -> Result<Vec<u32>> {
+    let JsValue::Arr(statuses) = input(&statuses_json, "릴리스 상태 목록")? else { return Err(Error::from_reason("릴리스 상태 목록은 배열이어야 합니다")) };
+    Ok(deploy_plan::releases_to_retire(&statuses, keep_previous).into_iter().map(|i| i as u32).collect())
+}
+
+/// `ids_json`은 릴리스의 `id` 목록. 남길 릴리스의 위치를 돌려준다
+#[napi]
+pub fn trim_records(ids_json: String, active: Option<String>) -> Result<Vec<u32>> {
+    let JsValue::Arr(ids) = input(&ids_json, "릴리스 id 목록")? else { return Err(Error::from_reason("릴리스 id 목록은 배열이어야 합니다")) };
+    Ok(deploy_plan::trim_records(&ids, active.as_deref()).into_iter().map(|i| i as u32).collect())
+}
