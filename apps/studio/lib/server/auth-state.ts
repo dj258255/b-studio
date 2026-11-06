@@ -2,7 +2,7 @@ import { readFileSync, statSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { NO_REVOCATIONS, sessionUser, type AuthConfig, type Revocations, type SessionClaims } from './auth';
+import { NO_REVOCATIONS, type Revocations, type SessionClaims } from './auth';
 
 /**
  * 로그인 무효화 기록. 서명 쿠키는 서버에 세션을 두지 않으므로, 로그아웃한 세션 ID와 운영자가 무효화한 사용자만 파일에 남긴다.
@@ -52,11 +52,6 @@ function parseRevocations(text: string, file: string): Revocations {
   const { sessions, users } = (data ?? {}) as { sessions?: unknown; users?: unknown };
   if (!isRecord(sessions) || !isRecord(users)) throw new Error(`${file}을(를) 읽지 못했습니다: sessions와 users가 숫자 값을 가진 객체여야 합니다`);
   return { sessions, users };
-}
-
-/** 지금 시각과 무효화 기록으로 확인한 쿠키의 사용자. 화면(서버 컴포넌트)이 렌더링 중에 시각을 직접 읽지 않게 여기서 읽는다 */
-export function activeSessionUser(cookie: string | undefined, config: AuthConfig): string | undefined {
-  return sessionUser(cookie, config, Date.now(), readRevocations());
 }
 
 /** 로그아웃한 세션을 쿠키 만료 시각까지 거부한다 */

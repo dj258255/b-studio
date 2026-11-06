@@ -274,12 +274,6 @@ export function isTrustedHost(headers: Headers, env: Env = process.env): boolean
   return isLoopbackHost(headers) || allowedHosts(env).has(requestHostName(headers));
 }
 
-/** 로그인 뒤 돌아갈 경로. 다른 사이트로 보내는 주소("//evil", "https://…")는 첫 화면으로 바꾼다 */
-export function safeNextPath(value: string | undefined): string {
-  if (!value || !value.startsWith('/') || value.startsWith('//') || value.startsWith('/\\')) return '/';
-  return value;
-}
-
 /** 미리보기 게이트웨이에서 쓰는 값의 종류. 티켓을 쿠키로, 쿠키를 티켓으로 바꿔 쓰지 못하게 서명 내용에 넣는다 */
 export type PreviewGrantKind = 'ticket' | 'cookie';
 
