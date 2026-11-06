@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
+import type { Dirent } from 'node:fs';
 import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -338,6 +339,15 @@ const PASSED_GIT_ENV = new Set([
 ]);
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
 const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts', '*.b-studio-relay-*'];
+/**
+ * 폴더나 파일 이름이 git이 보는 `.git`인지. 파일 시스템은 이름을 문자열과 다르게 읽으므로(대소문자 구분 없는 볼륨), 거부·감지 쪽은
+ * 넓게 맞춘다. 대소문자는 무시한다(macOS·Windows 기본 볼륨에서 `.GIT`은 같은 자리다). git의 `is_hfs_dotgit`·`is_ntfs_dotgit`가
+ * 보는 무시 가능한 유니코드 코드 포인트와 NTFS 짧은 이름(`git~1`)까지 맞추는 것은 구조 수정(#1033)에서 다룬다 — 지원 범위가
+ * macOS라 대소문자가 핵심이다
+ */
+function isDotGit(name: string): boolean {
+  return name.toLowerCase() === '.git';
+}
 /** discard()·restore() 백업을 이 안에 둔다(ADR-099). 작업 복사본이 아니라 체크포인트 저장소 쪽이라 커밋·게이트에 걸리지 않는다 */
 const BACKUP_DIRNAME = 'b-studio/discarded';
 /** 백업은 이 개수를 넘으면 오래된 것부터 지운다. 방금 만든 백업은 이 한도를 넘어도 지우지 않는다 */
@@ -498,6 +508,7 @@ export class CheckpointStore {
     }
 
     await this.#configure();
+    await this.#assertNoNestedRepos();
     await this.#git(['add', '-A']);
     await this.#git(['commit', '-q', '--allow-empty', '-m', oneLine(message)]);
     const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
@@ -509,6 +520,7 @@ export class CheckpointStore {
 
   /** 마지막 체크포인트 이후 바뀐 파일 (새 파일과 삭제 포함) */
   async pendingFiles(): Promise<string[]> {
+    await this.#assertNoNestedRepos();
     const entries = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(await this.#scope())])).split('\0').filter(Boolean);
     const files: string[] = [];
     for (let i = 0; i < entries.length; i++) {
@@ -541,6 +553,7 @@ export class CheckpointStore {
 
   /** 마지막 체크포인트 이후 바뀐 파일과 바뀐 종류. 코드 화면이 추가·수정·삭제를 구분해 보여 줄 때 쓴다 */
   async pendingChanges(): Promise<PendingChange[]> {
+    await this.#assertNoNestedRepos();
     const subdir = await this.#subdir();
     const entries = (await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(await this.#scope())])).split('\0').filter(Boolean);
     const changes = new Map<string, PendingChange['change']>();
@@ -569,6 +582,7 @@ export class CheckpointStore {
    * redact는 자르기 전에 적용한다. 자른 뒤에 가리면 경계에 걸친 시크릿의 앞부분이 남는다(#751)
    */
   async pendingPatch(file: string, redact: (text: string) => string = (text) => text): Promise<string> {
+    await this.#assertNoNestedRepos();
     const subdir = await this.#subdir();
     const target = subdir ? `${subdir}/${file}` : file;
     return capText(redact(await this.#git(['diff', '--no-color', ...(await this.#relative()), 'HEAD', '--', target])), MAX_PATCH_CHARS);
@@ -616,7 +630,7 @@ export class CheckpointStore {
       expectedHead?: string;
     } = {},
   ): Promise<Checkpoint | undefined> {
-    const pending = await this.pendingFiles();
+    const pending = await this.pendingFiles(); // pendingFiles가 중첩 저장소 검사를 겸한다
     if (!allowEmpty && pending.length === 0) return undefined;
     // 부모는 스테이징하기 전에 정한다. 그 뒤에 끼어든 커밋은 HEAD를 옮길 때 걸린다
     const parent = await this.#expectHead(expectedHead);
@@ -1991,6 +2005,57 @@ export class CheckpointStore {
     await appendFile(file, `${separator}# b-studio 샌드박스 생성물\n${missing.join('\n')}\n`);
   }
 
+  /**
+   * 작업 폴더 안에 최상위 체크포인트 저장소가 아닌 다른 git 저장소(중첩된 `.git` 디렉터리나 파일)가, 그것도 호스트 git이
+   * 무시하지 않는 자리에 있으면 던진다. 호스트 git은 작업 폴더를 다룰 때 그런 저장소를 스캔하며 그 저장소의 설정을 적용할 수
+   * 있는데, 호스트 git 하드닝과 설정 검사는 최상위 저장소에만 적용된다. 그래서 체크포인트를 만들기 전에 막는다.
+   *
+   * 무시 여부는 이름이 아니라 `git check-ignore`로 걷는 중에 판단한다(화면·커밋이 쓰는 것과 같은 규칙 — 사용자의 `.gitignore`
+   * 예외(negation)까지). 무시되는 자리(node_modules 등)의 저장소는 호스트 git이 어차피 스캔하지 않으므로 세지 않는다. 그래서
+   * {@link findNestedGitRepos}가 돌려주는 것은 모두 위험한 것이고, 한도에 닿아 목록이 잘렸으면(길이가 한도와 같으면) 통과가 아니라
+   * "확인하지 못함"으로 던진다(fail-closed).
+   *
+   * 완전한 방어는 아니다: 이 검사와 다음 git 작업 사이에 생긴 저장소는 잡지 못하고(시점 차이), 생성 파일 스냅샷처럼 무시되는
+   * 경로를 따로 읽는 다른 경로(#775)는 덮지 않는다. 근본적인 구조 수정은 #1033에서 다룬다
+   */
+  async #assertNoNestedRepos(): Promise<void> {
+    const limit = 100;
+    const dangerous = await findNestedGitRepos(this.root, path.resolve(this.root, '.git'), (dirs) => this.#ignoredDirs(dirs), limit);
+    if (dangerous.length >= limit) {
+      throw new CheckpointError(`작업 폴더 안에 추적되는 git 저장소가 너무 많아(${limit}개 이상) 안전을 확인하지 못했습니다. 중첩된 git 저장소를 지우거나 작업 폴더 밖으로 옮기세요`);
+    }
+    if (dangerous.length === 0) return;
+    const sample = dangerous.slice(0, 3).join(', ') + (dangerous.length > 3 ? ' 등' : '');
+    throw new CheckpointError(
+      `작업 폴더 안에 다른 git 저장소가 있습니다(${sample}). 체크포인트는 작업 폴더 전체를 하나의 저장소로 다루므로, ` +
+        `중첩된 git 저장소를 지우거나 작업 폴더 밖으로 옮긴 뒤 다시 시도하세요`,
+    );
+  }
+
+  /**
+   * 주어진 프로젝트 기준 디렉터리 경로 중 git이 무시하는 집합을 돌려준다. `git check-ignore`는 ignore 규칙만 평가하고 작업 트리
+   * 내용이나 clean/smudge 필터를 건드리지 않는다. 무시되는 경로가 하나도 없으면 1로 끝나는데 그것은 정상이다
+   */
+  async #ignoredDirs(paths: readonly string[]): Promise<Set<string>> {
+    if (paths.length === 0) return new Set();
+    const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
+    // 경로는 stdin으로 NUL 구분해 넘긴다(-z는 --stdin과만 쓸 수 있고, 인자에 개행·특수문자가 섞여도 안전하다)
+    const child = spawn(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'check-ignore', '-z', '--stdin'], { env: gitEnv() });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stdout.on('data', (chunk: string) => (stdout += chunk));
+    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    child.stdin.end(paths.join('\0'));
+    const code = await new Promise<number | null>((resolve, reject) => {
+      child.on('error', reject);
+      child.on('close', resolve);
+    });
+    // 무시되는 경로가 하나도 없으면 1로 끝나는데 정상이다. 그 밖의 코드는 확인하지 못한 것이므로 던진다(fail-closed)
+    if (code !== 0 && code !== 1) throw new CheckpointError(`중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore ${code}): ${stderr.trim()}`);
+    return new Set(stdout.split('\0').filter(Boolean));
+  }
+
   async #git(args: string[], options?: { timeout?: number; env?: Record<string, string> }): Promise<string> {
     const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
     // diff·show의 출력은 리뷰·화면·보관본으로 간다. 저장소 설정의 외부 diff와 textconv가 내용을 바꾸지 못하게 한다(이슈 #706)
@@ -2007,6 +2072,53 @@ export class CheckpointStore {
     const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
     return runGitBuffer(this.#gitBin, ['-C', this.root, ...location, ...args], options);
   }
+}
+
+/**
+ * 작업 폴더(`root`)에서 최상위 저장소(`top`, 보통 `root/.git`)가 아니고 git이 무시하지도 않는 중첩 git 저장소를 찾아 프로젝트
+ * 기준 경로로 돌려준다. `.git`은 디렉터리(일반 저장소)일 수도 파일(worktree·submodule의 gitdir 포인터)일 수도 있어
+ * 이름({@link isDotGit})으로 센다. 심볼릭 링크는 따라가지 않는다(링크 너머는 작업 폴더 밖일 수 있다).
+ *
+ * 무시 여부는 `partitionIgnored`(디렉터리 경로들 중 git이 무시하는 집합)로 **걷는 중에** 판단해, 무시되는 디렉터리에는 들어가지
+ * 않는다. 이렇게 하면 (1) 무시되는 저장소는 애초에 세지 않아 `limit`가 열린 채로 우회되지 않고(발견하는 것은 모두 호스트 git이
+ * 실제로 스캔하는 위험한 것이다), (2) 큰 생성물 폴더(node_modules 등, 보통 무시됨)를 걷지 않아 빠르다. 판단 규칙은 화면·커밋이
+ * 쓰는 것과 같은 `.gitignore`다(사용자의 예외(negation)까지). `limit`에 닿으면 멈추는데, 그때 호출자는 "확인하지 못함"으로
+ * 다뤄야 한다(fail-closed) — 돌려준 목록이 잘렸는지는 길이가 `limit`인지로 안다
+ */
+export async function findNestedGitRepos(
+  root: string,
+  top: string | undefined,
+  partitionIgnored: (relDirs: string[]) => Promise<Set<string>>,
+  limit = 100,
+): Promise<string[]> {
+  const found: string[] = [];
+  const walk = async (dir: string): Promise<void> => {
+    if (found.length >= limit) return;
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // 읽을 수 없는 폴더는 건너뛴다(권한 등)
+    }
+    const subdirs: string[] = [];
+    for (const entry of entries) {
+      const full = path.join(dir, entry.name);
+      if (isDotGit(entry.name)) {
+        if (top === undefined || path.resolve(full) !== top) found.push(path.relative(root, full));
+        continue; // .git 안으로는 들어가지 않는다
+      }
+      if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+      subdirs.push(full);
+    }
+    if (found.length >= limit || subdirs.length === 0) return;
+    const ignored = await partitionIgnored(subdirs.map((sub) => path.relative(root, sub)));
+    for (const sub of subdirs) {
+      if (found.length >= limit) return;
+      if (!ignored.has(path.relative(root, sub))) await walk(sub);
+    }
+  };
+  await walk(root);
+  return found;
 }
 
 /**
