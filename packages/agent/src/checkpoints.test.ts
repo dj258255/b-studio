@@ -1997,10 +1997,9 @@ describe('CheckpointStore.inspectSource: ..로 시작하는 하위 폴더 이름
 });
 
 describe('중첩 git 저장소 거부', () => {
-  const mkRepo = async (dir: string) => {
-    await mkdir(path.join(root, dir), { recursive: true });
-    await mkdir(path.join(root, dir, '.git'), { recursive: true });
-    await writeFile(path.join(root, dir, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  const mkRepo = async (dir: string, name = '.git') => {
+    await mkdir(path.join(root, dir, name), { recursive: true });
+    await writeFile(path.join(root, dir, name, 'HEAD'), 'ref: refs/heads/main\n');
   };
 
   it('findNestedGitRepos는 최상위 .git을 빼고 중첩 저장소(디렉터리·파일)를 찾는다', async () => {
@@ -2013,15 +2012,10 @@ describe('중첩 git 저장소 거부', () => {
     expect(found.sort()).toEqual(['sub/.git', 'vendor/lib/.git']);
   });
 
-  it('최상위 저장소만 있으면 빈 목록이다', async () => {
-    await mkdir(path.join(root, '.git'), { recursive: true });
-    expect(await findNestedGitRepos(root, path.resolve(root, '.git'))).toEqual([]);
-  });
-
-  it('git이 무시하는 생성물 폴더(node_modules)는 걷지 않는다', async () => {
+  it('이름을 대소문자 없이 보고, 거르기는 하지 않아 생성물 폴더 안도 찾는다(걸러 내는 것은 check-ignore가 한다)', async () => {
+    await mkRepo('A', '.GIT');
     await mkRepo('node_modules/dep');
-    await mkRepo('.next/cache/dep');
-    expect(await findNestedGitRepos(root, path.resolve(root, '.git'))).toEqual([]);
+    expect((await findNestedGitRepos(root, undefined)).sort()).toEqual(['A/.GIT', 'node_modules/dep/.git']);
   });
 
   it('심볼릭 링크는 따라가지 않는다(링크 너머는 작업 폴더 밖일 수 있다)', async () => {
@@ -2035,19 +2029,29 @@ describe('중첩 git 저장소 거부', () => {
     }
   });
 
-  it('init은 작업 폴더 안 중첩 저장소를 거부한다', async () => {
-    await mkRepo('vendor/lib');
-    const store = new CheckpointStore(root);
-    await expect(store.init()).rejects.toThrow(/다른 git 저장소/);
+  it('init은 작업 폴더 안 중첩 저장소를 거부한다(.git 대소문자 무시)', async () => {
+    await mkRepo('vendor/lib', '.GIT');
+    await expect(new CheckpointStore(root).init()).rejects.toThrow(/다른 git 저장소/);
   });
 
-  it('commit과 pendingFiles는 나중에 생긴 중첩 저장소를 거부한다', async () => {
+  it('commit은 나중에 생긴 중첩 저장소를 거부한다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
     await mkRepo('vendor/lib');
     await write('api/src/Order.java', 'class Order { int id; }\n');
-    await expect(store.pendingFiles()).rejects.toThrow(/다른 git 저장소/);
     await expect(store.commit('요청: 수정')).rejects.toThrow(/다른 git 저장소/);
+  });
+
+  it('git이 무시하는 폴더(.gitignore) 안 저장소는 거부하지 않는다', async () => {
+    await writeFile(path.join(root, '.gitignore'), 'vendor/\n');
+    await mkRepo('vendor/lib');
+    await expect(new CheckpointStore(root).init()).resolves.toBeDefined();
+  });
+
+  it('.gitignore 예외(negation)로 다시 포함된 자리의 저장소는 거부한다', async () => {
+    await writeFile(path.join(root, '.gitignore'), 'secret/*\n!secret/repo\n');
+    await mkRepo('secret/repo');
+    await expect(new CheckpointStore(root).init()).rejects.toThrow(/다른 git 저장소/);
   });
 });
 
