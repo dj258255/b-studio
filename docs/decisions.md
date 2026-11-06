@@ -9085,7 +9085,7 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
   1. 바뀐 경로의 정렬이 `localeCompare`(ICU)에서 UTF-16 코드 단위 순서가 됐다. 알림의 나열 순서만 바뀐다.
   2. `servicePaths`는 자기 키만 본다. 옛 TS는 서비스 이름이 `constructor`·`toString`이면 프로토타입의 함수를 읽고 `path.resolve`에서 던졌다(차등 시험의 "옛 TS만 던짐" 7,859건이 모두 이것).
   3. 문자열이 아닌 bind 마운트의 source·target, 객체가 아닌 서비스, 배열이 아닌 volumes는 던진다(차등 시험의 "새 Rust만 던짐" 714건).
-- 변이 확인: Rust 22곳(프로젝트 밖·프로젝트 자체 받기, 마운트를 감싸는 폴더 옮기기, 옮긴·지운 폴더 안 경로 알리기, nudge 대상, 마운트 밖 대상, managed·subroot·좁은 마운트 우선, 묶기, 정렬, 같은 경로의 마지막 종류, 끝의 빗금, bind 아닌 마운트, 빈 source, cwd 풀기, subroot `.`, `servicePaths`의 뒤 값, managed 표시, containerPath)을 하나씩 망가뜨려 22곳 모두 테스트가 잡았다.
+- 변이 확인: Rust 22곳(프로젝트 밖·프로젝트 자체 받기, 마운트를 감싸는 폴더 옮기기, 옮긴·지운 폴더 안 경로 알리기, nudge 대상, 마운트 밖 대상, managed·subroot·좁은 마운트 우선, 묶기, 정렬, 같은 경로의 마지막 종류, 끝의 빗금, bind 아닌 마운트, 빈 source, cwd 풀기, subroot `.`, `servicePaths`의 뒤 값, managed 표시, containerPath)을 하나씩 망가뜨렸다. 21곳은 테스트가 잡았고, subroot `.` 특례를 빼는 1곳은 결과가 같은 동치 변이다(`path.resolve(source, '.')`는 이미 풀린 source와 같다). 처음 뽑은 벡터에 상대 경로가 섞여 기대값이 실행 위치에 따라 달라졌고(Linux CI에서 실패), 절대 경로만으로 다시 뽑았다. `servicePaths`의 뒤 값은 TS가 `Object.entries`로 넘겨 같은 키가 오지 않으므로 Rust 테스트로 고정했다.
 - 돌리지 않은 것: 실제 컨테이너에서 알림을 받는 것(기존 `relay.test.ts`가 `RELAY_SCRIPT`를 임시 폴더의 셸로 돌리는 시험은 그대로 통과한다), Kubernetes 제공자(relay를 쓰지 않는다).
 
 ## ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다

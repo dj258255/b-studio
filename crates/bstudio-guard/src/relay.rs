@@ -223,6 +223,14 @@ mod tests {
     }
 
     #[test]
+    fn service_paths에_같은_이름이_다시_오면_뒤의_값을_쓴다() {
+        // Object.fromEntries와 같다. TS는 Object.entries로 넘겨 같은 키가 오지 않지만, Rust를 바로 부를 때도 같은 규칙을 지킨다
+        let services = vec![("web".to_owned(), json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/app" }] }))];
+        let mounts = bind_mounts(CWD, &services, &[], &[("web".into(), "a".into()), ("web".into(), "b".into())]).unwrap();
+        assert_eq!(mounts[0].subroot.as_deref(), Some("/p/b"));
+    }
+
+    #[test]
     fn 모양이_어긋난_compose_설정은_던진다() {
         for spec in [json!(null), json!({ "volumes": "x" }), json!({ "volumes": [null] }), json!({ "volumes": [{ "type": "bind", "source": 5, "target": "/a" }] }), json!({ "volumes": [{ "type": "bind", "source": "/a" }] })] {
             assert!(bind_mounts(CWD, &[("web".into(), spec.clone())], &[], &[]).is_err(), "{spec}");
