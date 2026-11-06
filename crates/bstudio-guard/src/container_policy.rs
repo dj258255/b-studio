@@ -19,36 +19,17 @@ use serde_json::{Map, Value};
 const COMPOSE_SERVICE_LABEL: &str = "com.docker.compose.service";
 
 /// 마운트하면 컨테이너가 호스트(또는 Docker VM)를 다룰 수 있게 되는 폴더. 이 폴더 자신과 그 아래가 걸린다
-const SYSTEM_DIRS: [&str; 9] = [
-    "/etc",
-    "/proc",
-    "/sys",
-    "/dev",
-    "/run",
-    "/var/run",
-    "/var/lib/docker",
-    "/var/lib/containerd",
-    "/boot",
-];
+const SYSTEM_DIRS: [&str; 9] = ["/etc", "/proc", "/sys", "/dev", "/run", "/var/run", "/var/lib/docker", "/var/lib/containerd", "/boot"];
 
 /// `(?i)`는 Unicode 단순 대소문자 접기라 옛 JS(비유니코드 `/i`)보다 넓다(`ſ`→`s`, 켈빈 기호→`k`). 거부 목록이라 넓으면 더 막을 뿐이고,
 /// macOS의 대소문자 무시 볼륨도 이렇게 접는다(의도한 차이)
-static SOCKET_NAME: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(^|[/\\])(docker|containerd|podman|buildkitd|colima)[^/\\]*\.sock$")
-        .expect("정규식")
-});
+static SOCKET_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(^|[/\\])(docker|containerd|podman|buildkitd|colima)[^/\\]*\.sock$").expect("정규식"));
 static SECURITY_OPT: LazyLock<[Regex; 3]> = LazyLock::new(|| {
-    [
-        r"(?i)unconfined",
-        r"(?i)^label[=:]disable$",
-        r"(?i)^no-new-privileges[=:]false$",
-    ]
-    .map(|p| Regex::new(p).expect("정규식"))
+    [r"(?i)unconfined", r"(?i)^label[=:]disable$", r"(?i)^no-new-privileges[=:]false$"].map(|p| Regex::new(p).expect("정규식"))
 });
-static WINDOWS_DRIVE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[A-Za-z]:[\\/]").expect("정규식"));
-static DESKTOP_HOST: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^/(run/desktop/mnt/host|host_mnt)/[^/]").expect("정규식"));
+static WINDOWS_DRIVE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[A-Za-z]:[\\/]").expect("정규식"));
+static DESKTOP_HOST: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/(run/desktop/mnt/host|host_mnt)/[^/]").expect("정규식"));
 
 pub struct PolicyOptions<'a> {
     pub project_name: &'a str,
@@ -95,11 +76,7 @@ fn strings(value: Option<&Value>) -> Field<Vec<&str>> {
     match array(value) {
         Field::Missing => Field::Missing,
         Field::Wrong => Field::Wrong,
-        Field::Present(items) => items
-            .iter()
-            .map(Value::as_str)
-            .collect::<Option<Vec<_>>>()
-            .map_or(Field::Wrong, Field::Present),
+        Field::Present(items) => items.iter().map(Value::as_str).collect::<Option<Vec<_>>>().map_or(Field::Wrong, Field::Present),
     }
 }
 
@@ -108,12 +85,8 @@ fn unknown(path: &str) -> String {
 }
 
 /// JS가 `JSON.stringify`로 넘긴 `docker inspect` 한 항목을 읽어 판정한다. 읽지 못하면 오류(부르는 쪽이 시작하지 않는다)
-pub fn find_violations_json(
-    container_json: &str,
-    options: &PolicyOptions,
-) -> Result<Vec<String>, String> {
-    let container: Value = serde_json::from_str(container_json)
-        .map_err(|e| format!("컨테이너 설정을 읽지 못했습니다: {e}"))?;
+pub fn find_violations_json(container_json: &str, options: &PolicyOptions) -> Result<Vec<String>, String> {
+    let container: Value = serde_json::from_str(container_json).map_err(|e| format!("컨테이너 설정을 읽지 못했습니다: {e}"))?;
     Ok(find_violations(&container, options))
 }
 
@@ -156,10 +129,7 @@ pub fn find_violations(container: &Value, options: &PolicyOptions) -> Vec<String
     let is_edge = service == Some(options.edge_service);
 
     if service == Some(options.studio_caller) {
-        problems.push(format!(
-            "서비스 이름 '{}'는 쓸 수 없습니다(edge가 studio의 호출로 봅니다)",
-            options.studio_caller
-        ));
+        problems.push(format!("서비스 이름 '{}'는 쓸 수 없습니다(edge가 studio의 호출로 봅니다)", options.studio_caller));
     }
     match host.get("Privileged") {
         None | Some(Value::Null) | Some(Value::Bool(false)) => {}
@@ -167,16 +137,11 @@ pub fn find_violations(container: &Value, options: &PolicyOptions) -> Vec<String
         Some(_) => problems.push(unknown("HostConfig.Privileged")),
     }
     match strings(host.get("CapAdd")) {
-        Field::Present(caps) if !caps.is_empty() => {
-            problems.push(format!("cap_add: {}", caps.join(", ")))
-        }
+        Field::Present(caps) if !caps.is_empty() => problems.push(format!("cap_add: {}", caps.join(", "))),
         Field::Wrong => problems.push(unknown("HostConfig.CapAdd")),
         _ => {}
     }
-    for (key, label) in [
-        ("Devices", "devices"),
-        ("DeviceRequests", "device_requests(gpus)"),
-    ] {
+    for (key, label) in [("Devices", "devices"), ("DeviceRequests", "device_requests(gpus)")] {
         match array(host.get(key)) {
             Field::Present(items) if !items.is_empty() => problems.push(label.to_owned()),
             Field::Wrong => problems.push(unknown(&format!("HostConfig.{key}"))),
@@ -194,33 +159,20 @@ pub fn find_violations(container: &Value, options: &PolicyOptions) -> Vec<String
         Field::Wrong => problems.push(unknown("HostConfig.SecurityOpt")),
         Field::Missing => {}
     }
-    for (name, key) in [
-        ("pid", "PidMode"),
-        ("ipc", "IpcMode"),
-        ("uts", "UTSMode"),
-        ("userns_mode", "UsernsMode"),
-        ("cgroup", "CgroupnsMode"),
-        ("network_mode", "NetworkMode"),
-    ] {
+    for (name, key) in
+        [("pid", "PidMode"), ("ipc", "IpcMode"), ("uts", "UTSMode"), ("userns_mode", "UsernsMode"), ("cgroup", "CgroupnsMode"), ("network_mode", "NetworkMode")]
+    {
         match string(host.get(key)) {
-            Field::Present(mode) if mode == "host" || mode.starts_with("container:") => {
-                problems.push(format!("{name}: {mode}"))
-            }
+            Field::Present(mode) if mode == "host" || mode.starts_with("container:") => problems.push(format!("{name}: {mode}")),
             Field::Wrong => problems.push(unknown(&format!("HostConfig.{key}"))),
             _ => {}
         }
     }
 
     // compose는 네트워크 이름 앞에 프로젝트 이름을 붙인다
-    let mut allowed = vec![format!(
-        "{}_{}",
-        options.project_name, options.sandbox_network
-    )];
+    let mut allowed = vec![format!("{}_{}", options.project_name, options.sandbox_network)];
     if is_edge {
-        allowed.push(format!(
-            "{}_{}",
-            options.project_name, options.egress_network
-        ));
+        allowed.push(format!("{}_{}", options.project_name, options.egress_network));
     }
     let networks = match object(container.get("NetworkSettings")) {
         Field::Present(settings) => object(settings.get("Networks")),
@@ -229,11 +181,7 @@ pub fn find_violations(container: &Value, options: &PolicyOptions) -> Vec<String
     };
     match networks {
         Field::Present(networks) => {
-            let extra: Vec<&str> = networks
-                .keys()
-                .map(String::as_str)
-                .filter(|n| !allowed.iter().any(|a| a == n))
-                .collect();
+            let extra: Vec<&str> = networks.keys().map(String::as_str).filter(|n| !allowed.iter().any(|a| a == n)).collect();
             if !extra.is_empty() {
                 problems.push(format!("networks: {}", extra.join(", ")));
             }
@@ -249,9 +197,7 @@ pub fn find_violations(container: &Value, options: &PolicyOptions) -> Vec<String
                 for (port, binding) in bindings {
                     match array(Some(binding)) {
                         Field::Present(items) if !items.is_empty() => published.push(port.as_str()),
-                        Field::Wrong => {
-                            problems.push(unknown(&format!("HostConfig.PortBindings.{port}")))
-                        }
+                        Field::Wrong => problems.push(unknown(&format!("HostConfig.PortBindings.{port}"))),
                         _ => {}
                     }
                 }
@@ -312,12 +258,7 @@ pub fn is_sensitive_host_path(source: &str) -> bool {
     if normalized == "/" {
         return true;
     }
-    SYSTEM_DIRS.iter().any(|dir| {
-        normalized == *dir
-            || normalized
-                .strip_prefix(dir)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
+    SYSTEM_DIRS.iter().any(|dir| normalized == *dir || normalized.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/')))
 }
 
 /// 절대 POSIX 경로에 `path.posix.normalize`를 하고 끝의 `/`를 뗀다(비면 `/`).
@@ -371,8 +312,7 @@ mod tests {
         c["HostConfig"]["CapAdd"] = json!(["CAP_SYS_ADMIN"]);
         c["HostConfig"]["SecurityOpt"] = json!(["seccomp=UNCONFINED", "label:disable"]);
         c["HostConfig"]["PidMode"] = json!("host");
-        c["NetworkSettings"]["Networks"] =
-            json!({ "sb1_b-studio-sandbox": {}, "sb1_default": {}, "a": {} });
+        c["NetworkSettings"]["Networks"] = json!({ "sb1_b-studio-sandbox": {}, "sb1_default": {}, "a": {} });
         c["HostConfig"]["PortBindings"] = json!({ "80/tcp": [{}], "81/tcp": null });
         assert_eq!(
             find_violations(&c, &OPTIONS),
@@ -405,44 +345,19 @@ mod tests {
                 "알 수 없는 형식: Mounts"
             ]
         );
-        assert_eq!(
-            find_violations(&json!([]), &OPTIONS),
-            vec!["알 수 없는 형식: container"]
-        );
+        assert_eq!(find_violations(&json!([]), &OPTIONS), vec!["알 수 없는 형식: container"]);
     }
 
     #[test]
     fn 시스템_폴더와_소켓과_모르는_경로는_걸린다() {
-        for source in [
-            "/",
-            "/proc",
-            "/sys/fs",
-            "/etc/../etc/passwd",
-            "//etc",
-            "/etc/./",
-            "relative/path",
-            "",
-            "/tmp/x/podman.sock",
-            "/home/x/DOCKER.sock",
-            "/x/a\\docker.sock",
-            "/run/desktop/mnt/host/../../../etc",
-            "/host_mnt/../etc",
-        ] {
+        for source in ["/", "/proc", "/sys/fs", "/etc/../etc/passwd", "//etc", "/etc/./", "relative/path", "", "/tmp/x/podman.sock", "/home/x/DOCKER.sock", "/x/a\\docker.sock", "/run/desktop/mnt/host/../../../etc", "/host_mnt/../etc"] {
             assert!(is_sensitive_host_path(source), "{source:?}");
         }
     }
 
     #[test]
     fn 프로젝트_폴더와_docker_desktop_자리는_걸리지_않는다() {
-        for source in [
-            "/Users/me/shop",
-            "/etcetera",
-            "/run/desktop/mnt/host/c/Users",
-            "/host_mnt/Users/me",
-            "C:\\Users\\me",
-            "/etc\\x",
-            "/home/a/../b",
-        ] {
+        for source in ["/Users/me/shop", "/etcetera", "/run/desktop/mnt/host/c/Users", "/host_mnt/Users/me", "C:\\Users\\me", "/etc\\x", "/home/a/../b"] {
             assert!(!is_sensitive_host_path(source), "{source:?}");
         }
     }

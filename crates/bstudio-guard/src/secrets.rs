@@ -20,9 +20,7 @@ pub fn parse_dotenv(text: &str) -> Vec<(String, String)> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let Some((key, value)) = match_line(line) else {
-            continue;
-        };
+        let Some((key, value)) = match_line(line) else { continue };
         values.push((key.to_owned(), unquote(value).to_owned()));
     }
     values
@@ -45,20 +43,12 @@ fn match_line(line: &str) -> Option<(&str, &str)> {
 /// `.`은 줄 끝 글자(`\n \r    `)와 맞지 않아, 값에 그 글자가 있으면 줄 전체가 맞지 않는다
 fn match_assignment(s: &str) -> Option<(&str, &str)> {
     let bytes = s.as_bytes();
-    if !bytes
-        .first()
-        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
-    {
+    if !bytes.first().is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_') {
         return None;
     }
-    let key_len = bytes
-        .iter()
-        .take_while(|b| b.is_ascii_alphanumeric() || **b == b'_')
-        .count();
+    let key_len = bytes.iter().take_while(|b| b.is_ascii_alphanumeric() || **b == b'_').count();
     let (key, rest) = s.split_at(key_len);
-    let rest = rest
-        .trim_start_matches(js::is_js_whitespace)
-        .strip_prefix('=')?;
+    let rest = rest.trim_start_matches(js::is_js_whitespace).strip_prefix('=')?;
     let value = rest.trim_start_matches(js::is_js_whitespace);
     if value.chars().any(js::is_js_line_terminator) {
         return None;
@@ -95,21 +85,14 @@ impl Redactor {
             .map(|(name, value)| {
                 // URL 쿼리·폼 본문에 들어간 값, base64로 인코딩한 출력(`| base64`, Basic 인증 헤더)도 가린다
                 let mut forms: Vec<String> = Vec::new();
-                for form in [value.clone(), js::encode_uri_component(&value)]
-                    .into_iter()
-                    .chain(base64_cores(&value))
-                {
+                for form in [value.clone(), js::encode_uri_component(&value)].into_iter().chain(base64_cores(&value)) {
                     // 빈 문자열은 패턴에서 뺀다. 옛 TS는 `replaceAll('', …)`로 글자 사이마다 끼워 넣었다(의도한 차이).
                     // 시크릿 값은 resolveSecrets가 8자 미만을 거절하므로 실제로는 생기지 않는다
                     if !form.is_empty() && !forms.contains(&form) {
                         forms.push(form);
                     }
                 }
-                Pattern {
-                    order: js::utf16_len(&value),
-                    name,
-                    forms,
-                }
+                Pattern { order: js::utf16_len(&value), name, forms }
             })
             .collect();
         // 한 값이 다른 값을 포함하면 긴 값부터 가려야 가린 자리에 맞는 이름이 남는다. 길이는 JS와 같게 UTF-16 기준, 안정 정렬
@@ -132,12 +115,8 @@ impl Redactor {
 
     /// 텍스트에 값이 들어 있는 시크릿 이름(JS 기본 정렬과 같은 UTF-16 순서)
     pub fn find(&self, text: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .patterns
-            .iter()
-            .filter(|p| p.forms.iter().any(|form| text.contains(form.as_str())))
-            .map(|p| p.name.clone())
-            .collect();
+        let mut names: Vec<String> =
+            self.patterns.iter().filter(|p| p.forms.iter().any(|form| text.contains(form.as_str()))).map(|p| p.name.clone()).collect();
         names.sort_by(|a, b| js::cmp_utf16(a, b));
         names
     }
@@ -163,24 +142,13 @@ mod tests {
     use super::*;
 
     fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
-        list.iter()
-            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-            .collect()
+        list.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
     }
 
     #[test]
     fn 주석과_빈_줄을_건너뛰고_따옴표_한_쌍만_벗긴다() {
-        let parsed =
-            parse_dotenv("\n# c\nA=1\nB = \"two words\"\nC='x=y'\nD=\"unterminated\nnot a line\n");
-        assert_eq!(
-            parsed,
-            pairs(&[
-                ("A", "1"),
-                ("B", "two words"),
-                ("C", "x=y"),
-                ("D", "\"unterminated")
-            ])
-        );
+        let parsed = parse_dotenv("\n# c\nA=1\nB = \"two words\"\nC='x=y'\nD=\"unterminated\nnot a line\n");
+        assert_eq!(parsed, pairs(&[("A", "1"), ("B", "two words"), ("C", "x=y"), ("D", "\"unterminated")]));
     }
 
     #[test]
@@ -199,10 +167,7 @@ mod tests {
         assert_eq!(parse_dotenv("\u{FEFF}A=1"), pairs(&[("A", "1")]));
         // \r만 있는 줄 끝은 나누지 않고, 값의 \r은 `.`과 맞지 않아 줄 전체가 버려진다
         assert_eq!(parse_dotenv("A=1\rB=2"), pairs(&[]));
-        assert_eq!(
-            parse_dotenv("A=1\r\nB=2\r\n"),
-            pairs(&[("A", "1"), ("B", "2")])
-        );
+        assert_eq!(parse_dotenv("A=1\r\nB=2\r\n"), pairs(&[("A", "1"), ("B", "2")]));
         assert_eq!(parse_dotenv("A=x\u{2028}y"), pairs(&[]));
         // U+0085는 JS 공백이 아니다
         assert_eq!(parse_dotenv("A=\u{0085}x"), pairs(&[("A", "\u{0085}x")]));
@@ -215,47 +180,29 @@ mod tests {
 
     #[test]
     fn 원래_값과_url_인코딩된_값을_이름으로_가린다() {
-        let r = Redactor::new(pairs(&[
-            ("PAYMENT_API_KEY", "sk_test/abc+123"),
-            ("DB_PASSWORD", "correct horse battery"),
-        ]));
+        let r = Redactor::new(pairs(&[("PAYMENT_API_KEY", "sk_test/abc+123"), ("DB_PASSWORD", "correct horse battery")]));
         assert_eq!(
             r.redact("key=sk_test/abc+123 url=/pay?key=sk_test%2Fabc%2B123"),
             "key=[PAYMENT_API_KEY 가림] url=/pay?key=[PAYMENT_API_KEY 가림]"
         );
-        assert_eq!(
-            r.find("password: correct horse battery"),
-            vec!["DB_PASSWORD"]
-        );
+        assert_eq!(r.find("password: correct horse battery"), vec!["DB_PASSWORD"]);
         assert!(r.find("nothing here").is_empty());
     }
 
     #[test]
     fn base64_출력도_가린다() {
         let r = Redactor::new(pairs(&[("PAYMENT_API_KEY", "sk_test_b_studio_4f9a2c71")]));
-        assert_eq!(
-            r.redact("c2tfdGVzdF9iX3N0dWRpb180ZjlhMmM3MQo="),
-            "[PAYMENT_API_KEY 가림]Qo="
-        );
+        assert_eq!(r.redact("c2tfdGVzdF9iX3N0dWRpb180ZjlhMmM3MQo="), "[PAYMENT_API_KEY 가림]Qo=");
     }
 
     #[test]
     fn 긴_값부터_utf16_길이로_가린다() {
-        let r = Redactor::new(pairs(&[
-            ("SHORT_TOKEN", "abcdefgh"),
-            ("LONG_TOKEN", "abcdefgh-12345678"),
-        ]));
-        assert_eq!(
-            r.redact("abcdefgh-12345678 / abcdefgh"),
-            "[LONG_TOKEN 가림] / [SHORT_TOKEN 가림]"
-        );
+        let r = Redactor::new(pairs(&[("SHORT_TOKEN", "abcdefgh"), ("LONG_TOKEN", "abcdefgh-12345678")]));
+        assert_eq!(r.redact("abcdefgh-12345678 / abcdefgh"), "[LONG_TOKEN 가림] / [SHORT_TOKEN 가림]");
         // "가나다라마바사아"는 UTF-16으로 8, 바이트로 24다. 9글자 ASCII 값이 먼저 와야 한다
         // 두 값이 `9`에서 겹친다. 바이트 길이(K 22 > A 9)로 정렬하면 K가 먼저 가려져 결과가 달라진다
         let r = Redactor::new(pairs(&[("K", "9가나다라마바사"), ("A", "123456789")]));
-        assert_eq!(
-            r.redact("123456789가나다라마바사"),
-            "[A 가림]가나다라마바사"
-        );
+        assert_eq!(r.redact("123456789가나다라마바사"), "[A 가림]가나다라마바사");
     }
 
     #[test]

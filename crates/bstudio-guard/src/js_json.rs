@@ -72,21 +72,14 @@ impl JsObject {
             }
         }
         ints.sort_by_key(|(i, _, _)| *i);
-        ints.into_iter()
-            .map(|(_, k, v)| (k, v))
-            .chain(rest)
-            .collect()
+        ints.into_iter().map(|(_, k, v)| (k, v)).chain(rest).collect()
     }
 }
 
 /// 배열 인덱스 꼴(정규 10진, 0..=2^32-2)이면 그 값
 fn array_index(key: &str) -> Option<u32> {
     let b = key.as_bytes();
-    if b.is_empty()
-        || b.len() > 10
-        || !b.iter().all(u8::is_ascii_digit)
-        || (b[0] == b'0' && b.len() > 1)
-    {
+    if b.is_empty() || b.len() > 10 || !b.iter().all(u8::is_ascii_digit) || (b[0] == b'0' && b.len() > 1) {
         return None;
     }
     let n: u64 = key.parse().ok()?;
@@ -146,17 +139,7 @@ impl JsValue {
             JsValue::Bool(b) => b.to_string(),
             JsValue::Num(n) => js::number_to_string(*n),
             JsValue::Str(s) => s.clone(),
-            JsValue::Arr(items) => items
-                .iter()
-                .map(|v| {
-                    if matches!(v, JsValue::Null) {
-                        String::new()
-                    } else {
-                        v.to_js_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(","),
+            JsValue::Arr(items) => items.iter().map(|v| if matches!(v, JsValue::Null) { String::new() } else { v.to_js_string() }).collect::<Vec<_>>().join(","),
             JsValue::Obj(_) => "[object Object]".into(),
         }
     }
@@ -213,23 +196,13 @@ pub fn js_less(a: &JsValue, b: &JsValue) -> bool {
 
 /// `JSON.parse`. 문법 밖이면 이유를 돌려준다
 pub fn parse(text: &str) -> Result<JsValue, String> {
-    let mut p = Parser {
-        s: text.as_bytes(),
-        text,
-        i: 0,
-        native: false,
-    };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false };
     p.document()
 }
 
 /// Node와 주고받은 값(`encode`한 것)을 읽는다. `parse`와 같되 `NaN`·`Infinity` 표시 객체를 수로 바꾼다
 pub fn parse_native(text: &str) -> Result<JsValue, String> {
-    let mut p = Parser {
-        s: text.as_bytes(),
-        text,
-        i: 0,
-        native: true,
-    };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: true };
     p.document()
 }
 
@@ -284,16 +257,10 @@ fn write(value: &JsValue, out: &mut String) {
     match value {
         JsValue::Null => out.push_str("null"),
         JsValue::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        JsValue::Num(n) if n.is_finite() && !(*n == 0.0 && n.is_sign_negative()) => {
-            out.push_str(&js::number_to_string(*n))
-        }
+        JsValue::Num(n) if n.is_finite() && !(*n == 0.0 && n.is_sign_negative()) => out.push_str(&js::number_to_string(*n)),
         JsValue::Num(n) => {
             // NaN·Infinity와 -0은 JSON 수로 쓸 수 없다(`JSON.stringify(-0)`은 "0")
-            let text = if *n == 0.0 {
-                "-0".to_owned()
-            } else {
-                js::number_to_string(*n)
-            };
+            let text = if *n == 0.0 { "-0".to_owned() } else { js::number_to_string(*n) };
             out.push('{');
             out.push_str(&js::json_quote(NONFINITE_KEY));
             out.push(':');
@@ -406,9 +373,7 @@ impl Parser<'_> {
             }
             self.digits();
         }
-        let n: f64 = self.text[start..self.i]
-            .parse()
-            .map_err(|_| "숫자를 읽지 못했습니다".to_owned())?;
+        let n: f64 = self.text[start..self.i].parse().map_err(|_| "숫자를 읽지 못했습니다".to_owned())?;
         Ok(JsValue::Num(n))
     }
 
@@ -419,16 +384,10 @@ impl Parser<'_> {
     }
 
     fn hex4(&mut self) -> Result<u32, String> {
-        let slice = self
-            .s
-            .get(self.i..self.i + 4)
-            .ok_or("\\u 이스케이프가 짧습니다")?;
+        let slice = self.s.get(self.i..self.i + 4).ok_or("\\u 이스케이프가 짧습니다")?;
         let mut n = 0;
         for &b in slice {
-            n = n * 16
-                + (b as char)
-                    .to_digit(16)
-                    .ok_or("\\u 이스케이프가 올바르지 않습니다")?;
+            n = n * 16 + (b as char).to_digit(16).ok_or("\\u 이스케이프가 올바르지 않습니다")?;
         }
         self.i += 4;
         Ok(n)
@@ -467,9 +426,7 @@ impl Parser<'_> {
                         b't' => out.push('\t'),
                         b'u' => {
                             let first = self.hex4()?;
-                            if (0xD800..0xDC00).contains(&first)
-                                && self.s[self.i..].starts_with(b"\\u")
-                            {
+                            if (0xD800..0xDC00).contains(&first) && self.s[self.i..].starts_with(b"\\u") {
                                 let save = self.i;
                                 self.i += 2;
                                 let second = self.hex4()?;
@@ -583,42 +540,10 @@ mod tests {
 
     #[test]
     fn js_json_문법만_받는다() {
-        for bad in [
-            "",
-            " ",
-            "{,}",
-            "[1,]",
-            "{\"a\":1,}",
-            "01",
-            "1.",
-            ".5",
-            "+1",
-            "'a'",
-            "[1 2]",
-            "{\"a\" 1}",
-            "nul",
-            "\"\t\"",
-            "\u{a0}1",
-            "\u{feff}1",
-            "1 2",
-            "{\"a\":1}x",
-            "NaN",
-            "Infinity",
-            "\"\\x41\"",
-            "\"\\u12\"",
-        ] {
+        for bad in ["", " ", "{,}", "[1,]", "{\"a\":1,}", "01", "1.", ".5", "+1", "'a'", "[1 2]", "{\"a\" 1}", "nul", "\"\t\"", "\u{a0}1", "\u{feff}1", "1 2", "{\"a\":1}x", "NaN", "Infinity", "\"\\x41\"", "\"\\u12\""] {
             assert!(parse(bad).is_err(), "{bad:?}");
         }
-        for good in [
-            " 1 ",
-            "\t[ ]\n",
-            "{\"a\" : [ 1 , 2 ] }",
-            "\"\\u0041\\/\"",
-            "true",
-            "null",
-            "-1.5e+3",
-            "0e0",
-        ] {
+        for good in [" 1 ", "\t[ ]\n", "{\"a\" : [ 1 , 2 ] }", "\"\\u0041\\/\"", "true", "null", "-1.5e+3", "0e0"] {
             assert!(parse(good).is_ok(), "{good:?}");
         }
     }
@@ -627,10 +552,7 @@ mod tests {
     fn 짝_없는_서로게이트는_대체_문자로_읽는다() {
         assert_eq!(parse("\"\\ud800\"").unwrap(), JsValue::str("\u{FFFD}"));
         assert_eq!(parse("\"\\ud83d\\ude00\"").unwrap(), JsValue::str("😀"));
-        assert_eq!(
-            parse("\"\\ud800\\u0041\"").unwrap(),
-            JsValue::str("\u{FFFD}A")
-        );
+        assert_eq!(parse("\"\\ud800\\u0041\"").unwrap(), JsValue::str("\u{FFFD}A"));
         assert_eq!(parse("\"\\udc00\"").unwrap(), JsValue::str("\u{FFFD}"));
     }
 
@@ -638,25 +560,15 @@ mod tests {
     fn 같은_키가_다시_나오면_값만_바꾸고_자리를_지킨다() {
         let v = parse(r#"{"a":1,"b":2,"a":3}"#).unwrap();
         let JsValue::Obj(o) = v else { panic!() };
-        assert_eq!(
-            o.entries()
-                .iter()
-                .map(|(k, v)| (k.as_str(), v.clone()))
-                .collect::<Vec<_>>(),
-            vec![("a", JsValue::Num(3.0)), ("b", JsValue::Num(2.0))]
-        );
+        assert_eq!(o.entries().iter().map(|(k, v)| (k.as_str(), v.clone())).collect::<Vec<_>>(), vec![("a", JsValue::Num(3.0)), ("b", JsValue::Num(2.0))]);
     }
 
     #[test]
     fn 객체_순서는_정수_꼴_키가_먼저다() {
-        let v =
-            parse(r#"{"b":1,"10":2,"2":3,"a":4,"01":5,"4294967295":6,"4294967294":7}"#).unwrap();
+        let v = parse(r#"{"b":1,"10":2,"2":3,"a":4,"01":5,"4294967295":6,"4294967294":7}"#).unwrap();
         let JsValue::Obj(o) = v else { panic!() };
         let keys: Vec<&str> = o.entries_js_order().into_iter().map(|(k, _)| k).collect();
-        assert_eq!(
-            keys,
-            vec!["2", "10", "4294967294", "b", "a", "01", "4294967295"]
-        );
+        assert_eq!(keys, vec!["2", "10", "4294967294", "b", "a", "01", "4294967295"]);
     }
 
     #[test]
@@ -675,14 +587,7 @@ mod tests {
 
     #[test]
     fn 유한하지_않은_수는_표시_객체로_오간다() {
-        let v = JsValue::Arr(vec![
-            JsValue::Num(f64::NAN),
-            JsValue::Num(f64::INFINITY),
-            JsValue::Num(-f64::INFINITY),
-            JsValue::Num(1.5e300),
-            JsValue::Num(-0.0),
-            JsValue::Num(0.0),
-        ]);
+        let v = JsValue::Arr(vec![JsValue::Num(f64::NAN), JsValue::Num(f64::INFINITY), JsValue::Num(-f64::INFINITY), JsValue::Num(1.5e300), JsValue::Num(-0.0), JsValue::Num(0.0)]);
         let text = to_native(&v);
         assert_eq!(text, "[{\"\\u0000nf\":\"NaN\"},{\"\\u0000nf\":\"Infinity\"},{\"\\u0000nf\":\"-Infinity\"},1.5e+300,{\"\\u0000nf\":\"-0\"},0]");
         match parse_native(&text).unwrap() {
@@ -721,18 +626,8 @@ mod stringify_tests {
 
     #[test]
     fn json_stringify처럼_쓴다() {
-        let v =
-            parse(r#"{"b":1,"2":[null,true,-0.0,1e21,1e-7,"a\"\\\n/ \u007f"],"1":{}}"#).unwrap();
-        assert_eq!(
-            stringify(&v),
-            "{\"1\":{},\"2\":[null,true,0,1e+21,1e-7,\"a\\\"\\\\\\n/\u{2028}\u{7f}\"],\"b\":1}"
-        );
-        assert_eq!(
-            stringify(&JsValue::Arr(vec![
-                JsValue::Num(f64::NAN),
-                JsValue::Num(f64::INFINITY)
-            ])),
-            "[null,null]"
-        );
+        let v = parse(r#"{"b":1,"2":[null,true,-0.0,1e21,1e-7,"a\"\\\n/ \u007f"],"1":{}}"#).unwrap();
+        assert_eq!(stringify(&v), "{\"1\":{},\"2\":[null,true,0,1e+21,1e-7,\"a\\\"\\\\\\n/\u{2028}\u{7f}\"],\"b\":1}");
+        assert_eq!(stringify(&JsValue::Arr(vec![JsValue::Num(f64::NAN), JsValue::Num(f64::INFINITY)])), "[null,null]");
     }
 }

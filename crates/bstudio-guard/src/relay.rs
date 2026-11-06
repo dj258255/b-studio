@@ -61,35 +61,20 @@ fn truthy(value: &Value) -> bool {
 
 /// `docker compose config --format json`의 서비스들(JS `Object.entries` 순서의 [이름, 서비스] 목록)에서 바인드 마운트만 모은다.
 /// `service_paths`(서비스 이름 → 프로젝트 루트 기준 상대 경로, `Object.entries` 순서)를 주면 subroot를 함께 계산한다
-pub fn bind_mounts(
-    cwd: &str,
-    services: &[(String, Value)],
-    managed: &[String],
-    service_paths: &[(String, String)],
-) -> Result<Vec<BindMount>, String> {
+pub fn bind_mounts(cwd: &str, services: &[(String, Value)], managed: &[String], service_paths: &[(String, String)]) -> Result<Vec<BindMount>, String> {
     let mut mounts = Vec::new();
     for (service, spec) in services {
         let Value::Object(spec) = spec else {
-            return Err(format!(
-                "compose 설정의 서비스 '{service}'가 객체가 아닙니다"
-            ));
+            return Err(format!("compose 설정의 서비스 '{service}'가 객체가 아닙니다"));
         };
         let volumes = match spec.get("volumes") {
             None | Some(Value::Null) => continue,
             Some(Value::Array(volumes)) => volumes,
-            Some(_) => {
-                return Err(format!(
-                    "compose 설정의 서비스 '{service}'의 volumes가 배열이 아닙니다"
-                ))
-            }
+            Some(_) => return Err(format!("compose 설정의 서비스 '{service}'의 volumes가 배열이 아닙니다")),
         };
         for volume in volumes {
             let volume = match volume {
-                Value::Null => {
-                    return Err(format!(
-                        "compose 설정의 서비스 '{service}'에 null 마운트가 있습니다"
-                    ))
-                }
+                Value::Null => return Err(format!("compose 설정의 서비스 '{service}'에 null 마운트가 있습니다")),
                 // 객체가 아닌 값은 type이 없으므로 bind가 아니다(옛 TS와 같다)
                 Value::Object(volume) => volume,
                 _ => continue,
@@ -101,9 +86,7 @@ pub fn bind_mounts(
                 Some(value) if truthy(value) => value,
                 _ => continue,
             };
-            let (Value::String(source), Some(Value::String(target))) =
-                (source, volume.get("target"))
-            else {
+            let (Value::String(source), Some(Value::String(target))) = (source, volume.get("target")) else {
                 return Err(format!("compose 설정의 서비스 '{service}'의 bind 마운트에 source·target 문자열이 없습니다"));
             };
             let source = node_path::resolve(cwd, &[source]);
@@ -112,20 +95,8 @@ pub fn bind_mounts(
                 .iter()
                 .rev()
                 .find(|(name, _)| name == service)
-                .map(|(_, path)| {
-                    if path == "." {
-                        source.clone()
-                    } else {
-                        node_path::resolve(cwd, &[&source, path])
-                    }
-                });
-            mounts.push(BindMount {
-                service: service.clone(),
-                managed: managed.contains(service),
-                source,
-                target: target.clone(),
-                subroot,
-            });
+                .map(|(_, path)| if path == "." { source.clone() } else { node_path::resolve(cwd, &[&source, path]) });
+            mounts.push(BindMount { service: service.clone(), managed: managed.contains(service), source, target: target.clone(), subroot });
         }
     }
     Ok(mounts)
@@ -140,9 +111,7 @@ struct Entry {
 /// subroot가 target을 실제로 감싸면 그 길이(더 좁을수록 큰 점수), 아니면 -1
 fn subroot_score(cwd: &str, mount: &BindMount, target: &str) -> i64 {
     match &mount.subroot {
-        Some(subroot) if node_path::is_inside(cwd, subroot, target) => {
-            js::utf16_len(subroot) as i64
-        }
+        Some(subroot) if node_path::is_inside(cwd, subroot, target) => js::utf16_len(subroot) as i64,
         _ => -1,
     }
 }
@@ -153,12 +122,7 @@ fn subroot_score(cwd: &str, mount: &BindMount, target: &str) -> i64 {
 /// - 새 파일과 지운 경로는 부모 폴더 하나에 한 번만 알린다
 /// - 여러 서비스가 마운트하면 managed 서비스, 그다음 subroot가 더 좁은 서비스, 그다음 더 좁게 마운트한 서비스의 컨테이너에서 알린다
 /// - 프로젝트 폴더 밖이나 프로젝트 폴더 자체를 가리키는 경로, 어느 마운트에도 들지 않는 경로는 알리지 않는다
-pub fn plan_relay(
-    cwd: &str,
-    project_root: &str,
-    changes: &[FileChange],
-    mounts: &[BindMount],
-) -> Vec<(String, Vec<RelayTarget>)> {
+pub fn plan_relay(cwd: &str, project_root: &str, changes: &[FileChange], mounts: &[BindMount]) -> Vec<(String, Vec<RelayTarget>)> {
     let root = node_path::resolve(cwd, &[project_root]);
     // 같은 경로가 여러 번 오면 마지막 종류를 쓰고, 자리는 처음 것을 지킨다(JS Map)
     let mut latest: Vec<(String, String)> = Vec::new();
@@ -176,11 +140,7 @@ pub fn plan_relay(
         .into_iter()
         .map(|(file, kind)| {
             let absolute = node_path::resolve(cwd, &[&root, &file]);
-            Entry {
-                file,
-                kind,
-                absolute,
-            }
+            Entry { file, kind, absolute }
         })
         .filter(|entry| node_path::is_inside(cwd, &root, &entry.absolute) && entry.absolute != root)
         .collect();
@@ -188,43 +148,22 @@ pub fn plan_relay(
     entries.sort_by(|a, b| js::cmp_utf16(&a.file, &b.file));
 
     let moved: Vec<usize> = (0..entries.len())
-        .filter(|&i| {
-            entries[i].kind == "directory"
-                && !mounts
-                    .iter()
-                    .any(|mount| node_path::is_inside(cwd, &entries[i].absolute, &mount.source))
-        })
+        .filter(|&i| entries[i].kind == "directory" && !mounts.iter().any(|mount| node_path::is_inside(cwd, &entries[i].absolute, &mount.source)))
         .collect();
-    let deleted: Vec<usize> = (0..entries.len())
-        .filter(|&i| entries[i].kind == "deleted")
-        .collect();
+    let deleted: Vec<usize> = (0..entries.len()).filter(|&i| entries[i].kind == "deleted").collect();
 
     let mut plan: Vec<(String, Vec<RelayTarget>)> = Vec::new();
     for (i, entry) in entries.iter().enumerate() {
-        if moved
-            .iter()
-            .any(|&j| j != i && node_path::is_inside(cwd, &entries[j].absolute, &entry.absolute))
-        {
+        if moved.iter().any(|&j| j != i && node_path::is_inside(cwd, &entries[j].absolute, &entry.absolute)) {
             continue;
         }
-        if entry.kind == "deleted"
-            && deleted.iter().any(|&j| {
-                j != i && node_path::is_inside(cwd, &entries[j].absolute, &entry.absolute)
-            })
-        {
+        if entry.kind == "deleted" && deleted.iter().any(|&j| j != i && node_path::is_inside(cwd, &entries[j].absolute, &entry.absolute)) {
             continue;
         }
 
         let action = if moved.contains(&i) { "move" } else { "nudge" };
-        let target = if action == "move" {
-            entry.absolute.clone()
-        } else {
-            node_path::dirname(&entry.absolute)
-        };
-        let mut candidates: Vec<&BindMount> = mounts
-            .iter()
-            .filter(|mount| node_path::is_inside(cwd, &mount.source, &target))
-            .collect();
+        let target = if action == "move" { entry.absolute.clone() } else { node_path::dirname(&entry.absolute) };
+        let mut candidates: Vec<&BindMount> = mounts.iter().filter(|mount| node_path::is_inside(cwd, &mount.source, &target)).collect();
         // 옛 TS의 비교 함수와 같은 순서(Array.prototype.sort도 Vec::sort_by도 안정 정렬이다)
         candidates.sort_by(|a, b| {
             b.managed
@@ -236,14 +175,8 @@ pub fn plan_relay(
             continue;
         };
 
-        let container_path = node_path::join(&[
-            &mount.target,
-            &node_path::relative(cwd, &mount.source, &target),
-        ]);
-        let index = match plan
-            .iter()
-            .position(|(service, _)| service == &mount.service)
-        {
+        let container_path = node_path::join(&[&mount.target, &node_path::relative(cwd, &mount.source, &target)]);
+        let index = match plan.iter().position(|(service, _)| service == &mount.service) {
             Some(index) => index,
             None => {
                 plan.push((mount.service.clone(), Vec::new()));
@@ -251,15 +184,9 @@ pub fn plan_relay(
             }
         };
         let targets = &mut plan[index].1;
-        match targets.iter_mut().find(|candidate| {
-            candidate.action == action && candidate.container_path == container_path
-        }) {
+        match targets.iter_mut().find(|candidate| candidate.action == action && candidate.container_path == container_path) {
             Some(existing) => existing.files.push(entry.file.clone()),
-            None => targets.push(RelayTarget {
-                action,
-                container_path,
-                files: vec![entry.file.clone()],
-            }),
+            None => targets.push(RelayTarget { action, container_path, files: vec![entry.file.clone()] }),
         }
     }
     plan
@@ -272,27 +199,12 @@ mod tests {
 
     const CWD: &str = "/work";
 
-    fn mount(
-        service: &str,
-        managed: bool,
-        source: &str,
-        target: &str,
-        subroot: Option<&str>,
-    ) -> BindMount {
-        BindMount {
-            service: service.into(),
-            managed,
-            source: source.into(),
-            target: target.into(),
-            subroot: subroot.map(Into::into),
-        }
+    fn mount(service: &str, managed: bool, source: &str, target: &str, subroot: Option<&str>) -> BindMount {
+        BindMount { service: service.into(), managed, source: source.into(), target: target.into(), subroot: subroot.map(Into::into) }
     }
 
     fn change(file: &str, kind: &str) -> FileChange {
-        FileChange {
-            file: file.into(),
-            kind: kind.into(),
-        }
+        FileChange { file: file.into(), kind: kind.into() }
     }
 
     fn plan_json(changes: &[FileChange], mounts: &[BindMount]) -> Value {
@@ -302,145 +214,63 @@ mod tests {
     #[test]
     fn 바인드_마운트만_모으고_상대_경로는_cwd로_푼다() {
         let services = vec![
-            (
-                "web".to_owned(),
-                json!({ "volumes": [{ "type": "bind", "source": "./p", "target": "/app" }, { "type": "volume", "source": "cache", "target": "/c" }, { "type": "bind", "source": "", "target": "/x" }, 5] }),
-            ),
+            ("web".to_owned(), json!({ "volumes": [{ "type": "bind", "source": "./p", "target": "/app" }, { "type": "volume", "source": "cache", "target": "/c" }, { "type": "bind", "source": "", "target": "/x" }, 5] })),
             ("db".to_owned(), json!({})),
-            (
-                "api".to_owned(),
-                json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/srv" }] }),
-            ),
+            ("api".to_owned(), json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/srv" }] })),
         ];
-        let mounts = bind_mounts(
-            CWD,
-            &services,
-            &["web".into()],
-            &[("web".into(), ".".into()), ("api".into(), "api".into())],
-        )
-        .unwrap();
-        assert_eq!(
-            mounts,
-            vec![
-                mount("web", true, "/work/p", "/app", Some("/work/p")),
-                mount("api", false, "/p", "/srv", Some("/p/api"))
-            ]
-        );
+        let mounts = bind_mounts(CWD, &services, &["web".into()], &[("web".into(), ".".into()), ("api".into(), "api".into())]).unwrap();
+        assert_eq!(mounts, vec![mount("web", true, "/work/p", "/app", Some("/work/p")), mount("api", false, "/p", "/srv", Some("/p/api"))]);
     }
 
     #[test]
     fn service_paths에_같은_이름이_다시_오면_뒤의_값을_쓴다() {
         // Object.fromEntries와 같다. TS는 Object.entries로 넘겨 같은 키가 오지 않지만, Rust를 바로 부를 때도 같은 규칙을 지킨다
-        let services = vec![(
-            "web".to_owned(),
-            json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/app" }] }),
-        )];
-        let mounts = bind_mounts(
-            CWD,
-            &services,
-            &[],
-            &[("web".into(), "a".into()), ("web".into(), "b".into())],
-        )
-        .unwrap();
+        let services = vec![("web".to_owned(), json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/app" }] }))];
+        let mounts = bind_mounts(CWD, &services, &[], &[("web".into(), "a".into()), ("web".into(), "b".into())]).unwrap();
         assert_eq!(mounts[0].subroot.as_deref(), Some("/p/b"));
     }
 
     #[test]
     fn 모양이_어긋난_compose_설정은_던진다() {
-        for spec in [
-            json!(null),
-            json!({ "volumes": "x" }),
-            json!({ "volumes": [null] }),
-            json!({ "volumes": [{ "type": "bind", "source": 5, "target": "/a" }] }),
-            json!({ "volumes": [{ "type": "bind", "source": "/a" }] }),
-        ] {
-            assert!(
-                bind_mounts(CWD, &[("web".into(), spec.clone())], &[], &[]).is_err(),
-                "{spec}"
-            );
+        for spec in [json!(null), json!({ "volumes": "x" }), json!({ "volumes": [null] }), json!({ "volumes": [{ "type": "bind", "source": 5, "target": "/a" }] }), json!({ "volumes": [{ "type": "bind", "source": "/a" }] })] {
+            assert!(bind_mounts(CWD, &[("web".into(), spec.clone())], &[], &[]).is_err(), "{spec}");
         }
     }
 
     #[test]
     fn service_paths는_자기_키만_본다() {
         // 옛 TS는 servicePaths['constructor']로 프로토타입의 함수를 읽고 path.resolve에서 던졌다(의도한 차이)
-        let services = vec![(
-            "constructor".to_owned(),
-            json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/app" }] }),
-        )];
-        assert_eq!(
-            bind_mounts(CWD, &services, &[], &[]).unwrap(),
-            vec![mount("constructor", false, "/p", "/app", None)]
-        );
+        let services = vec![("constructor".to_owned(), json!({ "volumes": [{ "type": "bind", "source": "/p", "target": "/app" }] }))];
+        assert_eq!(bind_mounts(CWD, &services, &[], &[]).unwrap(), vec![mount("constructor", false, "/p", "/app", None)]);
     }
 
     #[test]
     fn 새_폴더는_옮기고_안의_경로는_따로_알리지_않는다() {
         let mounts = [mount("web", true, "/p", "/app", None)];
-        let got = plan_json(
-            &[
-                change("src/new", "directory"),
-                change("src/new/a.ts", "file"),
-                change("src/b.ts", "file"),
-            ],
-            &mounts,
-        );
-        assert_eq!(
-            got,
-            json!([["web", [{ "action": "nudge", "containerPath": "/app/src", "files": ["src/b.ts"] }, { "action": "move", "containerPath": "/app/src/new", "files": ["src/new"] }]]])
-        );
+        let got = plan_json(&[change("src/new", "directory"), change("src/new/a.ts", "file"), change("src/b.ts", "file")], &mounts);
+        assert_eq!(got, json!([["web", [{ "action": "nudge", "containerPath": "/app/src", "files": ["src/b.ts"] }, { "action": "move", "containerPath": "/app/src/new", "files": ["src/new"] }]]]));
     }
 
     #[test]
     fn 마운트_폴더나_그_상위는_옮기지_않고_부모만_다시_읽게_한다() {
-        let mounts = [
-            mount("web", true, "/p/web", "/app", None),
-            mount("root", false, "/p", "/r", None),
-        ];
+        let mounts = [mount("web", true, "/p/web", "/app", None), mount("root", false, "/p", "/r", None)];
         let got = plan_json(&[change("web", "directory")], &mounts);
-        assert_eq!(
-            got,
-            json!([["root", [{ "action": "nudge", "containerPath": "/r", "files": ["web"] }]]])
-        );
+        assert_eq!(got, json!([["root", [{ "action": "nudge", "containerPath": "/r", "files": ["web"] }]]]));
     }
 
     #[test]
     fn 지운_폴더_안의_경로는_한_번만_알린다() {
         let mounts = [mount("web", true, "/p", "/app", None)];
-        let got = plan_json(
-            &[
-                change("old", "deleted"),
-                change("old/a", "deleted"),
-                change("x/y", "deleted"),
-            ],
-            &mounts,
-        );
-        assert_eq!(
-            got,
-            json!([["web", [{ "action": "nudge", "containerPath": "/app", "files": ["old"] }, { "action": "nudge", "containerPath": "/app/x", "files": ["x/y"] }]]])
-        );
+        let got = plan_json(&[change("old", "deleted"), change("old/a", "deleted"), change("x/y", "deleted")], &mounts);
+        assert_eq!(got, json!([["web", [{ "action": "nudge", "containerPath": "/app", "files": ["old"] }, { "action": "nudge", "containerPath": "/app/x", "files": ["x/y"] }]]]));
     }
 
     #[test]
     fn 프로젝트_밖이나_프로젝트_자체는_알리지_않는다() {
         let mounts = [mount("web", true, "/", "/host", None)];
-        assert_eq!(
-            plan_json(
-                &[
-                    change("../etc/passwd", "file"),
-                    change(".", "directory"),
-                    change("/etc/x", "file"),
-                    change("///", "file")
-                ],
-                &mounts
-            ),
-            json!([])
-        );
+        assert_eq!(plan_json(&[change("../etc/passwd", "file"), change(".", "directory"), change("/etc/x", "file"), change("///", "file")], &mounts), json!([]));
         // `..`로 시작하는 이름은 프로젝트 안이다
-        assert_eq!(
-            plan_json(&[change("..proj/a", "file")], &mounts),
-            json!([["web", [{ "action": "nudge", "containerPath": "/host/p/..proj", "files": ["..proj/a"] }]]])
-        );
+        assert_eq!(plan_json(&[change("..proj/a", "file")], &mounts), json!([["web", [{ "action": "nudge", "containerPath": "/host/p/..proj", "files": ["..proj/a"] }]]]));
     }
 
     #[test]
@@ -450,14 +280,7 @@ mod tests {
             mount("web", true, "/p", "/app", Some("/p/web")),
             mount("api", true, "/p", "/app", Some("/p/api")),
         ];
-        let got = plan_json(
-            &[
-                change("api/data/x", "file"),
-                change("web/a", "file"),
-                change("docs/r.md", "file"),
-            ],
-            &mounts,
-        );
+        let got = plan_json(&[change("api/data/x", "file"), change("web/a", "file"), change("docs/r.md", "file")], &mounts);
         assert_eq!(
             got,
             json!([
@@ -470,14 +293,8 @@ mod tests {
     #[test]
     fn 같은_경로는_마지막_종류를_쓰고_끝의_빗금은_뗀다() {
         let mounts = [mount("web", true, "/p", "/app", None)];
-        let got = plan_json(
-            &[change("n/", "file"), change("n///", "directory")],
-            &mounts,
-        );
-        assert_eq!(
-            got,
-            json!([["web", [{ "action": "move", "containerPath": "/app/n", "files": ["n"] }]]])
-        );
+        let got = plan_json(&[change("n/", "file"), change("n///", "directory")], &mounts);
+        assert_eq!(got, json!([["web", [{ "action": "move", "containerPath": "/app/n", "files": ["n"] }]]]));
     }
 
     #[test]

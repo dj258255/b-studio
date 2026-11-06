@@ -11,9 +11,7 @@ pub const SUBCOMMANDS: [&str; 5] = ["ps", "inspect", "logs", "stats", "events"];
 pub fn violation<S: AsRef<str>>(args: &[S]) -> Option<String> {
     let sub = args.first().map(AsRef::as_ref).unwrap_or("");
     if sub.is_empty() || !SUBCOMMANDS.contains(&sub) {
-        return Some(format!(
-            "읽기 전용 docker 래퍼는 '{sub}' 명령을 허용하지 않습니다"
-        ));
+        return Some(format!("읽기 전용 docker 래퍼는 '{sub}' 명령을 허용하지 않습니다"));
     }
     if sub == "stats" && !args.iter().any(|arg| arg.as_ref() == "--no-stream") {
         return Some("'docker stats'는 --no-stream과 함께만 허용합니다".to_owned());
@@ -30,22 +28,10 @@ mod tests {
         assert_eq!(violation(&["ps", "-a"]), None);
         assert_eq!(violation(&["inspect", "x"]), None);
         assert_eq!(violation(&["stats", "--no-stream"]), None);
-        assert_eq!(
-            violation(&["rm", "-f", "x"]).unwrap(),
-            "읽기 전용 docker 래퍼는 'rm' 명령을 허용하지 않습니다"
-        );
-        assert_eq!(
-            violation::<&str>(&[]).unwrap(),
-            "읽기 전용 docker 래퍼는 '' 명령을 허용하지 않습니다"
-        );
-        assert_eq!(
-            violation(&[""]).unwrap(),
-            "읽기 전용 docker 래퍼는 '' 명령을 허용하지 않습니다"
-        );
-        assert_eq!(
-            violation(&["stats"]).unwrap(),
-            "'docker stats'는 --no-stream과 함께만 허용합니다"
-        );
+        assert_eq!(violation(&["rm", "-f", "x"]).unwrap(), "읽기 전용 docker 래퍼는 'rm' 명령을 허용하지 않습니다");
+        assert_eq!(violation::<&str>(&[]).unwrap(), "읽기 전용 docker 래퍼는 '' 명령을 허용하지 않습니다");
+        assert_eq!(violation(&[""]).unwrap(), "읽기 전용 docker 래퍼는 '' 명령을 허용하지 않습니다");
+        assert_eq!(violation(&["stats"]).unwrap(), "'docker stats'는 --no-stream과 함께만 허용합니다");
     }
 
     #[test]

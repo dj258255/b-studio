@@ -38,11 +38,7 @@ pub fn parse_process_scan(stdout: &str) -> Vec<ScannedProcess> {
         .filter(|line| !line.is_empty())
         .filter_map(|line| {
             let caps = SCAN_LINE.captures(line)?;
-            Some(ScannedProcess {
-                pid: to_number(&caps[1]),
-                start: caps[2].to_owned(),
-                command: js::trim(&caps[3]).to_owned(),
-            })
+            Some(ScannedProcess { pid: to_number(&caps[1]), start: caps[2].to_owned(), command: js::trim(&caps[3]).to_owned() })
         })
         .collect();
     js::stable_sort_by(rows, &|a, b| a.pid - b.pid)
@@ -51,16 +47,8 @@ pub fn parse_process_scan(stdout: &str) -> Vec<ScannedProcess> {
 /// 기준선(서비스가 준비됐을 때의 목록)에 없던 프로세스의 인덱스. 기준선이 없으면 모두 모르는 것으로 본다
 pub fn foreign_processes(now: &[(f64, String)], baseline: Option<&[(f64, String)]>) -> Vec<usize> {
     let key = |pid: f64, start: &str| format!("{}:{start}", number_to_string(pid));
-    let known: Vec<String> = baseline
-        .unwrap_or(&[])
-        .iter()
-        .map(|(pid, start)| key(*pid, start))
-        .collect();
-    now.iter()
-        .enumerate()
-        .filter(|(_, (pid, start))| !known.contains(&key(*pid, start)))
-        .map(|(i, _)| i)
-        .collect()
+    let known: Vec<String> = baseline.unwrap_or(&[]).iter().map(|(pid, start)| key(*pid, start)).collect();
+    now.iter().enumerate().filter(|(_, (pid, start))| !known.contains(&key(*pid, start))).map(|(i, _)| i).collect()
 }
 
 #[cfg(test)]
@@ -71,10 +59,7 @@ mod tests {
     fn 찾기_출력을_pid_순서로_읽는다() {
         let out = "20 500 sleep 100  \n3 40\n  7 1 x\nnoise\n9 8 a\rb\n5 6 \n";
         let rows = parse_process_scan(out);
-        assert_eq!(
-            rows.iter().map(|r| r.pid).collect::<Vec<_>>(),
-            vec![3.0, 5.0, 20.0]
-        );
+        assert_eq!(rows.iter().map(|r| r.pid).collect::<Vec<_>>(), vec![3.0, 5.0, 20.0]);
         assert_eq!(rows[2].command, "sleep 100");
         assert_eq!(rows[0].command, "");
         // 줄 가운데의 \r은 `.`이 받지 못해 그 줄은 버려진다
@@ -83,11 +68,7 @@ mod tests {
 
     #[test]
     fn 같은_pid라도_시작_시각이_다르면_모르는_프로세스다() {
-        let now = vec![
-            (1.0, "10".to_owned()),
-            (2.0, "20".to_owned()),
-            (2.0, "21".to_owned()),
-        ];
+        let now = vec![(1.0, "10".to_owned()), (2.0, "20".to_owned()), (2.0, "21".to_owned())];
         let base = vec![(1.0, "10".to_owned()), (2.0, "20".to_owned())];
         assert_eq!(foreign_processes(&now, Some(&base)), vec![2]);
         assert_eq!(foreign_processes(&now, None), vec![0, 1, 2]);

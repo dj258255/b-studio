@@ -30,33 +30,16 @@ pub fn parse_egress_denial(text: &str) -> Option<JsValue> {
     let entry = js_json::parse(text).ok()?;
     let is = |k: &str, want: &str| matches!(entry.prop(k), Some(JsValue::Str(s)) if s == want);
     let (host, at) = (entry.prop("host"), entry.prop("at"));
-    if !is("decision", "deny")
-        || !matches!(host, Some(JsValue::Str(_)))
-        || !matches!(at, Some(JsValue::Str(_)))
-    {
+    if !is("decision", "deny") || !matches!(host, Some(JsValue::Str(_))) || !matches!(at, Some(JsValue::Str(_))) {
         return None;
     }
-    let string = |k: &str| {
-        entry
-            .prop(k)
-            .filter(|v| matches!(v, JsValue::Str(_)))
-            .cloned()
-    };
+    let string = |k: &str| entry.prop(k).filter(|v| matches!(v, JsValue::Str(_))).cloned();
     Some(object(vec![
         ("host", host.cloned()),
-        (
-            "port",
-            entry
-                .prop("port")
-                .filter(|v| matches!(v, JsValue::Num(_)))
-                .cloned(),
-        ),
+        ("port", entry.prop("port").filter(|v| matches!(v, JsValue::Num(_))).cloned()),
         ("method", string("method")),
         ("path", string("path")),
-        (
-            "reason",
-            Some(string("reason").unwrap_or_else(|| JsValue::str(""))),
-        ),
+        ("reason", Some(string("reason").unwrap_or_else(|| JsValue::str("")))),
         ("at", at.cloned()),
     ]))
 }
@@ -68,16 +51,12 @@ pub fn egress_audit_excerpt(lines: &[String], max: f64) -> Vec<String> {
         if !line.starts_with(EGRESS_PREFIX) {
             continue;
         }
-        let Ok(entry) = js_json::parse(line) else {
-            continue;
-        };
+        let Ok(entry) = js_json::parse(line) else { continue };
         let decision = match entry.prop("decision") {
             Some(JsValue::Str(s)) if s == "deny" || s == "error" => s.clone(),
             _ => continue,
         };
-        let Some(JsValue::Str(host)) = entry.prop("host") else {
-            continue;
-        };
+        let Some(JsValue::Str(host)) = entry.prop("host") else { continue };
         let reason = match entry.prop("reason") {
             Some(JsValue::Str(r)) => r.clone(),
             _ => decision,
@@ -92,9 +71,7 @@ pub fn egress_audit_excerpt(lines: &[String], max: f64) -> Vec<String> {
 /// `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다
 pub fn parse_runtimes(stdout: &str) -> Vec<String> {
     let text = js::trim(stdout);
-    let Ok(runtimes) = js_json::parse(if text.is_empty() { "{}" } else { text }) else {
-        return Vec::new();
-    };
+    let Ok(runtimes) = js_json::parse(if text.is_empty() { "{}" } else { text }) else { return Vec::new() };
     let mut keys: Vec<String> = match &runtimes {
         JsValue::Obj(o) => o.entries().iter().map(|(k, _)| k.clone()).collect(),
         JsValue::Arr(items) => (0..items.len()).map(|i| i.to_string()).collect(),
@@ -109,21 +86,14 @@ pub fn parse_host_port(stdout: &str) -> Result<f64, String> {
     let last = js::trim(stdout).split('\n').next_back().unwrap_or("");
     let port = js::trailing_colon_digits(last).map_or(0.0, to_number);
     if port == 0.0 || port.is_nan() {
-        return Err(format!(
-            "공개된 호스트 포트를 찾을 수 없습니다: {}",
-            js::json_quote(stdout)
-        ));
+        return Err(format!("공개된 호스트 포트를 찾을 수 없습니다: {}", js::json_quote(stdout)));
     }
     Ok(port)
 }
 
 fn valid_state(row: &JsValue) -> Option<(String, String)> {
     match (row.prop("Service"), row.prop("State")) {
-        (Some(JsValue::Str(service)), Some(JsValue::Str(state)))
-            if CONTAINER_STATES.contains(&state.as_str()) =>
-        {
-            Some((service.clone(), state.clone()))
-        }
+        (Some(JsValue::Str(service)), Some(JsValue::Str(state))) if CONTAINER_STATES.contains(&state.as_str()) => Some((service.clone(), state.clone())),
         _ => None,
     }
 }
@@ -135,10 +105,7 @@ fn container_rows(text: &str, skip_blank: bool) -> Result<Vec<JsValue>, String> 
             _ => unreachable!("[로 시작하는 JSON은 배열이다"),
         };
     }
-    text.split('\n')
-        .filter(|line| !(skip_blank && line.is_empty()))
-        .map(js_json::parse)
-        .collect()
+    text.split('\n').filter(|line| !(skip_blank && line.is_empty())).map(js_json::parse).collect()
 }
 
 /// `docker compose ps --format json <서비스 여럿>` 출력에서 서비스 이름 → 컨테이너 상태를 읽는다. 처음 나온 순서를 지키고 같은 이름은 나중 값이 이긴다
@@ -178,9 +145,7 @@ pub fn parse_container_state(stdout: &str) -> Result<String, String> {
 pub fn parse_sync_output(stdout: &str) -> Vec<(String, String)> {
     let mut seen: Vec<(String, String)> = Vec::new();
     for line in stdout.split('\n') {
-        let Some(space) = line.find(' ').filter(|s| *s > 0) else {
-            continue;
-        };
+        let Some(space) = line.find(' ').filter(|s| *s > 0) else { continue };
         let (hash, path) = (&line[..space], &line[space + 1..]);
         match seen.iter_mut().find(|(p, _)| p == path) {
             Some(slot) => slot.1 = hash.to_owned(),
@@ -217,21 +182,11 @@ impl SyncObservations {
     }
 
     /// 시간 초과 문구. `expected_missing`은 지워져야 하는(기대값이 "MISSING"인) 파일이다
-    pub fn describe_timeout(
-        &self,
-        pending: &[String],
-        expected_missing: &[String],
-        timeout_ms: f64,
-    ) -> String {
+    pub fn describe_timeout(&self, pending: &[String], expected_missing: &[String], timeout_ms: f64) -> String {
         let seconds = number_to_string(js::math_round(timeout_ms / 1_000.0));
-        let (mut invisible, mut stale, mut undeleted, mut changing) =
-            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let (mut invisible, mut stale, mut undeleted, mut changing) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         for file in pending {
-            let values: &[String] = self
-                .seen
-                .iter()
-                .find(|(f, _)| f == file)
-                .map_or(&[], |(_, v)| v);
+            let values: &[String] = self.seen.iter().find(|(f, _)| f == file).map_or(&[], |(_, v)| v);
             let absent = values.iter().all(|v| v == "MISSING" || v == "UNSEEN");
             if values.len() > 1 && !absent {
                 changing.push(file.as_str());
@@ -245,41 +200,22 @@ impl SyncObservations {
         }
         let mut notes: Vec<String> = Vec::new();
         if !invisible.is_empty() {
-            notes.push(format!(
-                "{}: {seconds}초 내내 컨테이너에서 보이지 않았습니다",
-                invisible.join(", ")
-            ));
+            notes.push(format!("{}: {seconds}초 내내 컨테이너에서 보이지 않았습니다", invisible.join(", ")));
         }
         if !stale.is_empty() {
-            notes.push(format!(
-                "{}: {seconds}초 내내 이전 내용 그대로였습니다",
-                stale.join(", ")
-            ));
+            notes.push(format!("{}: {seconds}초 내내 이전 내용 그대로였습니다", stale.join(", ")));
         }
         if !undeleted.is_empty() {
-            notes.push(format!(
-                "{}: 지운 파일이 {seconds}초 내내 컨테이너에 남아 있었습니다",
-                undeleted.join(", ")
-            ));
+            notes.push(format!("{}: 지운 파일이 {seconds}초 내내 컨테이너에 남아 있었습니다", undeleted.join(", ")));
         }
         if invisible.len() + stale.len() + undeleted.len() > 0 {
             notes.push("한 번도 바뀌지 않았으므로 기다리거나 같은 내용을 다시 써도 달라지지 않을 가능성이 큽니다. 파일 이름·경로와 서비스의 소스 마운트를 확인하세요".into());
         }
         if !changing.is_empty() {
-            notes.push(format!(
-                "{}: 반영되는 중이었지만 시간 안에 끝나지 않았습니다(다시 시도하면 될 수 있습니다)",
-                changing.join(", ")
-            ));
+            notes.push(format!("{}: 반영되는 중이었지만 시간 안에 끝나지 않았습니다(다시 시도하면 될 수 있습니다)", changing.join(", ")));
         }
-        let tail = if notes.is_empty() {
-            String::new()
-        } else {
-            format!(" — {}", notes.join(". "))
-        };
-        format!(
-            "{seconds}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: {}{tail}",
-            pending.join(", ")
-        )
+        let tail = if notes.is_empty() { String::new() } else { format!(" — {}", notes.join(". ")) };
+        format!("{seconds}초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: {}{tail}", pending.join(", "))
     }
 }
 
@@ -290,13 +226,9 @@ static LOG_LINE: LazyLock<Regex> = LazyLock::new(|| {
 });
 static STATUS_LINE: LazyLock<Regex> = LazyLock::new(|| {
     let (ws, dot) = (js::WS_CLASS, js::LINE_TERMINATORS);
-    Regex::new(&format!(
-        r"^([a-z0-9][a-z0-9_.-]*)-[0-9]+[{ws}]+([^|{ws}][^{dot}]*)$"
-    ))
-    .expect("상태 줄 정규식")
+    Regex::new(&format!(r"^([a-z0-9][a-z0-9_.-]*)-[0-9]+[{ws}]+([^|{ws}][^{dot}]*)$")).expect("상태 줄 정규식")
 });
-static NANOS: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(\.[0-9]{3})[0-9]+").expect("나노초 정규식"));
+static NANOS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(\.[0-9]{3})[0-9]+").expect("나노초 정규식"));
 
 /// `docker compose logs --timestamps` 한 줄: `api-1  | 2026-09-10T11:48:35.123456789Z 메시지`.
 /// 내용이 없는 줄은 `None`. `at`은 시각 문자열(밀리초까지)이거나, 상태 줄처럼 시각이 없으면 `null`(지금)
@@ -309,24 +241,12 @@ pub fn parse_log_line(raw: &str) -> Option<JsValue> {
     if let Some(caps) = LOG_LINE.captures(&line) {
         // 나노초 정밀도는 Date가 다루지 못하므로 밀리초까지만 남긴다
         let at = NANOS.replace(&caps[2], "$1").into_owned();
-        return Some(object(vec![
-            ("service", Some(JsValue::str(&caps[1]))),
-            ("text", Some(JsValue::str(&caps[3]))),
-            ("at", Some(JsValue::Str(at))),
-        ]));
+        return Some(object(vec![("service", Some(JsValue::str(&caps[1]))), ("text", Some(JsValue::str(&caps[3]))), ("at", Some(JsValue::Str(at)))]));
     }
     if let Some(caps) = STATUS_LINE.captures(&line) {
-        return Some(object(vec![
-            ("service", Some(JsValue::str(&caps[1]))),
-            ("text", Some(JsValue::str(&caps[2]))),
-            ("at", Some(JsValue::Null)),
-        ]));
+        return Some(object(vec![("service", Some(JsValue::str(&caps[1]))), ("text", Some(JsValue::str(&caps[2]))), ("at", Some(JsValue::Null))]));
     }
-    Some(object(vec![
-        ("service", Some(JsValue::str("unknown"))),
-        ("text", Some(JsValue::Str(line))),
-        ("at", Some(JsValue::Null)),
-    ]))
+    Some(object(vec![("service", Some(JsValue::str("unknown"))), ("text", Some(JsValue::Str(line))), ("at", Some(JsValue::Null))]))
 }
 
 #[cfg(test)]
@@ -345,50 +265,30 @@ mod tests {
         let v = parse_egress_denial(line).unwrap();
         assert_eq!(v.prop("port"), Some(&JsValue::Num(443.0)));
         assert_eq!(v.prop("at"), Some(&JsValue::str("2026-01-01T00:00:00Z")));
-        assert!(
-            parse_egress_denial(r#"{"edge":"egress","decision":"allow","host":"x","at":"y"}"#)
-                .is_none()
-        );
+        assert!(parse_egress_denial(r#"{"edge":"egress","decision":"allow","host":"x","at":"y"}"#).is_none());
         assert!(parse_egress_denial(r#"{"edge":"egress","decision":"deny","host":"x"}"#).is_none());
-        assert!(
-            parse_egress_denial(r#"{"edge":"egress","decision":"deny","host":"x","at":"y""#)
-                .is_none()
-        );
-        assert!(
-            parse_egress_denial(r#"{"edge": "egress","decision":"deny","host":"x","at":"y"}"#)
-                .is_none()
-        );
-        let no_reason = parse_egress_denial(
-            r#"{"edge":"egress","decision":"deny","host":"x","at":"y","reason":5}"#,
-        )
-        .unwrap();
+        assert!(parse_egress_denial(r#"{"edge":"egress","decision":"deny","host":"x","at":"y""#).is_none());
+        assert!(parse_egress_denial(r#"{"edge": "egress","decision":"deny","host":"x","at":"y"}"#).is_none());
+        let no_reason = parse_egress_denial(r#"{"edge":"egress","decision":"deny","host":"x","at":"y","reason":5}"#).unwrap();
         assert_eq!(no_reason.prop("reason"), Some(&JsValue::str("")));
     }
 
     #[test]
     fn 감사_줄_발췌는_뒤에서_max개다() {
-        let lines: Vec<String> = (0..8)
-            .map(|i| format!(r#"{{"edge":"egress","decision":"deny","host":"h{i}","reason":"r"}}"#))
-            .collect();
+        let lines: Vec<String> = (0..8).map(|i| format!(r#"{{"edge":"egress","decision":"deny","host":"h{i}","reason":"r"}}"#)).collect();
         assert_eq!(egress_audit_excerpt(&lines, 5.0).len(), 5);
         assert_eq!(egress_audit_excerpt(&lines, 5.0)[0], "h3: r");
         // slice(-0)은 slice(0)이라 전부다
         assert_eq!(egress_audit_excerpt(&lines, 0.0).len(), 8);
         assert_eq!(egress_audit_excerpt(&lines, f64::NAN).len(), 8);
         assert_eq!(egress_audit_excerpt(&lines, -2.0).len(), 6);
-        let errs = vec![
-            r#"{"edge":"egress","decision":"error","host":"h"}"#.to_owned(),
-            r#"{"edge":"egress","decision":"allow","host":"h"}"#.to_owned(),
-        ];
+        let errs = vec![r#"{"edge":"egress","decision":"error","host":"h"}"#.to_owned(), r#"{"edge":"egress","decision":"allow","host":"h"}"#.to_owned()];
         assert_eq!(egress_audit_excerpt(&errs, 5.0), vec!["h: error"]);
     }
 
     #[test]
     fn 런타임_이름은_utf16_순서로_정렬한다() {
-        assert_eq!(
-            parse_runtimes(r#"{"runsc":{},"runc":{},"～":{},"😀":{}}"#),
-            vec!["runc", "runsc", "😀", "\u{ff5e}"]
-        );
+        assert_eq!(parse_runtimes(r#"{"runsc":{},"runc":{},"～":{},"😀":{}}"#), vec!["runc", "runsc", "😀", "\u{ff5e}"]);
         assert_eq!(parse_runtimes("[1,2]"), vec!["0", "1"]);
         assert!(parse_runtimes("null").is_empty());
         assert!(parse_runtimes("{").is_empty());
@@ -398,42 +298,25 @@ mod tests {
 
     #[test]
     fn 호스트_포트는_마지막_줄_끝의_숫자다() {
-        assert_eq!(
-            parse_host_port("0.0.0.0:3000\n[::]:3001\n").unwrap(),
-            3001.0
-        );
+        assert_eq!(parse_host_port("0.0.0.0:3000\n[::]:3001\n").unwrap(), 3001.0);
         assert!(parse_host_port("nothing").is_err());
         assert!(parse_host_port("0.0.0.0:0").is_err());
         assert!(parse_host_port("0.0.0.0:000").is_err());
         assert_eq!(parse_host_port("x:007").unwrap(), 7.0);
         assert_eq!(parse_host_port("x:80\r\nx:81").unwrap(), 81.0);
-        assert_eq!(
-            parse_host_port("a\u{0}b").unwrap_err(),
-            "공개된 호스트 포트를 찾을 수 없습니다: \"a\\u0000b\""
-        );
+        assert_eq!(parse_host_port("a\u{0}b").unwrap_err(), "공개된 호스트 포트를 찾을 수 없습니다: \"a\\u0000b\"");
     }
 
     #[test]
     fn compose_ps는_배열도_줄_단위도_읽는다() {
         let lines = "{\"Service\":\"a\",\"State\":\"running\"}\n\n{\"Service\":\"b\",\"State\":\"weird\"}\n{\"Service\":\"a\",\"State\":\"exited\"}\r\nnull";
-        assert_eq!(
-            parse_container_states(lines).unwrap(),
-            vec![("a".to_owned(), "exited".to_owned())]
-        );
-        assert_eq!(
-            parse_container_states("[{\"Service\":\"a\",\"State\":\"dead\"}, 5]")
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(parse_container_states(lines).unwrap(), vec![("a".to_owned(), "exited".to_owned())]);
+        assert_eq!(parse_container_states("[{\"Service\":\"a\",\"State\":\"dead\"}, 5]").unwrap().len(), 1);
         assert!(parse_container_states("{bad").is_err());
         assert!(parse_container_states("").unwrap().is_empty());
         // 단일 상태는 가운데 빈 줄도 파싱을 시도해 던진다
         assert!(parse_container_state("{\"State\":\"running\"}\n\n{\"State\":\"x\"}").is_err());
-        assert_eq!(
-            parse_container_state("{\"State\":\"running\"}\n{\"State\":\"x\"}").unwrap(),
-            "running"
-        );
+        assert_eq!(parse_container_state("{\"State\":\"running\"}\n{\"State\":\"x\"}").unwrap(), "running");
         assert_eq!(parse_container_state("[]").unwrap(), "unknown");
         assert_eq!(parse_container_state("").unwrap(), "unknown");
     }
@@ -441,14 +324,7 @@ mod tests {
     #[test]
     fn 동기화_출력은_첫_공백에서만_나눈다() {
         let out = "abc dir/a b.txt\nMISSING x\n bad\nnospace\nabc dir/a b.txt2\nUNREADABLE x";
-        assert_eq!(
-            parse_sync_output(out),
-            vec![
-                ("dir/a b.txt".to_owned(), "abc".to_owned()),
-                ("x".to_owned(), "UNREADABLE".to_owned()),
-                ("dir/a b.txt2".to_owned(), "abc".to_owned())
-            ]
-        );
+        assert_eq!(parse_sync_output(out), vec![("dir/a b.txt".to_owned(), "abc".to_owned()), ("x".to_owned(), "UNREADABLE".to_owned()), ("dir/a b.txt2".to_owned(), "abc".to_owned())]);
     }
 
     #[test]
@@ -460,17 +336,9 @@ mod tests {
         obs.record("c", Some("h1"));
         obs.record("c", Some("h2"));
         obs.record("d", Some("h9"));
-        let pending: Vec<String> = ["a", "b", "c", "d", "e"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect();
+        let pending: Vec<String> = ["a", "b", "c", "d", "e"].iter().map(|s| (*s).to_owned()).collect();
         let text = obs.describe_timeout(&pending, &["d".to_owned()], 60_000.0);
-        assert!(
-            text.starts_with(
-                "60초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: a, b, c, d, e — "
-            ),
-            "{text}"
-        );
+        assert!(text.starts_with("60초 안에 샌드박스에 파일 변경이 반영되지 않았습니다: a, b, c, d, e — "), "{text}");
         assert!(text.contains("a, e: 60초 내내 컨테이너에서 보이지 않았습니다"));
         assert!(text.contains("b: 60초 내내 이전 내용 그대로였습니다"));
         assert!(text.contains("d: 지운 파일이 60초 내내"));
@@ -482,10 +350,7 @@ mod tests {
         let l = parse_log_line("api-1  | 2026-09-10T11:48:35.123456789Z 메시지 하나").unwrap();
         assert_eq!(l.prop("service"), Some(&JsValue::str("api")));
         assert_eq!(l.prop("text"), Some(&JsValue::str("메시지 하나")));
-        assert_eq!(
-            l.prop("at"),
-            Some(&JsValue::str("2026-09-10T11:48:35.123Z"))
-        );
+        assert_eq!(l.prop("at"), Some(&JsValue::str("2026-09-10T11:48:35.123Z")));
         let s = parse_log_line("\u{1b}[Kweb-1 exited with code 143").unwrap();
         assert_eq!(s.prop("service"), Some(&JsValue::str("web")));
         assert_eq!(s.prop("text"), Some(&JsValue::str("exited with code 143")));

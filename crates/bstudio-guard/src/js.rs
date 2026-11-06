@@ -10,8 +10,7 @@ pub fn is_js_whitespace(c: char) -> bool {
     matches!(
         c,
         '\u{0009}' | '\u{000B}' | '\u{000C}' | '\u{0020}' | '\u{00A0}' | '\u{FEFF}' // WhiteSpace(Zs 밖)
-            | '\u{1680}' | '\u{2000}'
-            ..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' // Zs
+            | '\u{1680}' | '\u{2000}'..='\u{200A}' | '\u{202F}' | '\u{205F}' | '\u{3000}' // Zs
             | '\u{000A}' | '\u{000D}' | '\u{2028}' | '\u{2029}' // LineTerminator
     )
 }
@@ -41,11 +40,7 @@ pub fn encode_uri_component(s: &str) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
     let mut out = String::with_capacity(s.len());
     for &byte in s.as_bytes() {
-        let unreserved = byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')'
-            );
+        let unreserved = byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'!' | b'~' | b'*' | b'\'' | b'(' | b')');
         if unreserved {
             out.push(byte as char);
         } else {
@@ -62,24 +57,12 @@ pub fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
         let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
         out.push(ALPHABET[(n >> 18) as usize & 63] as char);
         out.push(ALPHABET[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHABET[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHABET[n as usize & 63] as char
-        } else {
-            '='
-        });
+        out.push(if chunk.len() > 1 { ALPHABET[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { ALPHABET[n as usize & 63] as char } else { '=' });
     }
     out
 }
@@ -104,6 +87,7 @@ pub fn truncate_utf16(s: &str, n: usize) -> String {
     String::from_utf16_lossy(&s.encode_utf16().take(n).collect::<Vec<u16>>())
 }
 
+
 /// `String.prototype.trimEnd`
 pub fn trim_end(s: &str) -> &str {
     s.trim_end_matches(is_js_whitespace)
@@ -120,9 +104,7 @@ pub fn split_ws(line: &str) -> Vec<&str> {
     if t.is_empty() {
         return vec![""];
     }
-    t.split(is_js_whitespace)
-        .filter(|p| !p.is_empty())
-        .collect()
+    t.split(is_js_whitespace).filter(|p| !p.is_empty()).collect()
 }
 
 /// `/:(\d+)$/.exec(s)?.[1]`: 끝이 `:숫자`인 자리의 숫자들. 숫자는 ASCII 0-9뿐이다(JS `\d`)
@@ -349,15 +331,10 @@ pub fn to_number(s: &str) -> f64 {
         }
         Some(match u128::from_str_radix(rest, radix) {
             Ok(v) => v as f64,
-            Err(_) => rest.chars().fold(0.0, |acc, c| {
-                acc * f64::from(radix) + f64::from(c.to_digit(radix).expect("자리"))
-            }),
+            Err(_) => rest.chars().fold(0.0, |acc, c| acc * f64::from(radix) + f64::from(c.to_digit(radix).expect("자리"))),
         })
     };
-    if let Some(v) = radix_body(&["0x", "0X"], 16)
-        .or_else(|| radix_body(&["0o", "0O"], 8))
-        .or_else(|| radix_body(&["0b", "0B"], 2))
-    {
+    if let Some(v) = radix_body(&["0x", "0X"], 16).or_else(|| radix_body(&["0o", "0O"], 8)).or_else(|| radix_body(&["0b", "0B"], 2)) {
         return v;
     }
     let (neg, rest) = match t.as_bytes().first() {
@@ -429,14 +406,8 @@ mod tests {
     #[test]
     fn encode_uri_component는_js와_같다() {
         assert_eq!(encode_uri_component("A-z_0.!~*'()"), "A-z_0.!~*'()");
-        assert_eq!(
-            encode_uri_component("sk_test/abc+123"),
-            "sk_test%2Fabc%2B123"
-        );
-        assert_eq!(
-            encode_uri_component(" #$&+,/:;=?@[]"),
-            "%20%23%24%26%2B%2C%2F%3A%3B%3D%3F%40%5B%5D"
-        );
+        assert_eq!(encode_uri_component("sk_test/abc+123"), "sk_test%2Fabc%2B123");
+        assert_eq!(encode_uri_component(" #$&+,/:;=?@[]"), "%20%23%24%26%2B%2C%2F%3A%3B%3D%3F%40%5B%5D");
         assert_eq!(encode_uri_component("가😀"), "%EA%B0%80%F0%9F%98%80");
     }
 
@@ -555,10 +526,7 @@ mod tests {
 
     #[test]
     fn json_quote는_js_json_stringify와_같다() {
-        assert_eq!(
-            json_quote("a\"b\\c\n\u{1f}\u{7f}\u{2028}"),
-            "\"a\\\"b\\\\c\\n\\u001f\u{7f}\u{2028}\""
-        );
+        assert_eq!(json_quote("a\"b\\c\n\u{1f}\u{7f}\u{2028}"), "\"a\\\"b\\\\c\\n\\u001f\u{7f}\u{2028}\"");
     }
 
     #[test]

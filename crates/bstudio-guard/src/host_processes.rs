@@ -11,9 +11,7 @@ use crate::js_json::{object, JsValue};
 /// ASCII 글자의 대소문자만 가리므로(JS `/i`는 비ASCII 글자를 ASCII로 접지 않는다) ASCII 소문자로 바꿔 찾는다
 pub fn is_forwarder_process(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
-    ["lima", "ssh", "vpnkit", "com.docker"]
-        .iter()
-        .any(|word| lower.contains(word))
+    ["lima", "ssh", "vpnkit", "com.docker"].iter().any(|word| lower.contains(word))
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -25,11 +23,7 @@ pub struct ListeningProcess {
 
 impl ListeningProcess {
     pub fn to_value(&self) -> JsValue {
-        object(vec![
-            ("pid", Some(JsValue::Num(self.pid))),
-            ("command", Some(JsValue::str(self.command.clone()))),
-            ("port", Some(JsValue::Num(self.port))),
-        ])
+        object(vec![("pid", Some(JsValue::Num(self.pid))), ("command", Some(JsValue::str(self.command.clone()))), ("port", Some(JsValue::Num(self.port)))])
     }
 }
 
@@ -46,20 +40,12 @@ pub fn parse_lsof_listening(output: &str) -> Vec<ListeningProcess> {
             continue;
         }
         let last = parts[parts.len() - 1];
-        let name_field = if last == "(LISTEN)" {
-            parts.len().checked_sub(2).map(|i| parts[i])
-        } else {
-            Some(last)
-        };
+        let name_field = if last == "(LISTEN)" { parts.len().checked_sub(2).map(|i| parts[i]) } else { Some(last) };
         let port = parse_int(name_field.and_then(trailing_colon_digits).unwrap_or(""));
         if !port.is_finite() {
             continue;
         }
-        rows.push(ListeningProcess {
-            pid,
-            command: parts[0].to_owned(),
-            port,
-        });
+        rows.push(ListeningProcess { pid, command: parts[0].to_owned(), port });
     }
     rows
 }
@@ -116,20 +102,12 @@ pub fn parse_ss_listening(output: &str) -> Vec<ListeningProcess> {
 }
 
 /// 선언한 포트에서 듣는 프로세스만 남긴다(포워더·스튜디오 자신은 뺀다). 같은 포트는 먼저 나온 것만. 남길 행의 인덱스를 돌려준다
-pub fn match_declared_ports(
-    listening: &[ListeningProcess],
-    declared_ports: &[f64],
-    exclude_pids: &[f64],
-) -> Vec<usize> {
+pub fn match_declared_ports(listening: &[ListeningProcess], declared_ports: &[f64], exclude_pids: &[f64]) -> Vec<usize> {
     let has = |set: &[f64], x: f64| set.iter().any(|v| js::same_value_zero(*v, x));
     let mut seen: Vec<f64> = Vec::new();
     let mut result = Vec::new();
     for (i, row) in listening.iter().enumerate() {
-        if !has(declared_ports, row.port)
-            || has(exclude_pids, row.pid)
-            || is_forwarder_process(&row.command)
-            || has(&seen, row.port)
-        {
+        if !has(declared_ports, row.port) || has(exclude_pids, row.pid) || is_forwarder_process(&row.command) || has(&seen, row.port) {
             continue;
         }
         seen.push(row.port);
@@ -140,10 +118,7 @@ pub fn match_declared_ports(
 
 static PS_ROW: LazyLock<Regex> = LazyLock::new(|| {
     let (ws, dot) = (js::WS_CLASS, js::LINE_TERMINATORS);
-    Regex::new(&format!(
-        r"^[{ws}]*([0-9]+)[{ws}]+([0-9.]+)[{ws}]+([0-9]+)[{ws}]+([^{dot}]*)$"
-    ))
-    .expect("ps 정규식")
+    Regex::new(&format!(r"^[{ws}]*([0-9]+)[{ws}]+([0-9.]+)[{ws}]+([0-9]+)[{ws}]+([^{dot}]*)$")).expect("ps 정규식")
 });
 
 /// `ps -o pid,pcpu,rss,command= -p <pid>` 한 줄 출력을 읽는다(명령줄에 공백이 있어도 마지막 그룹으로 통째로 받는다)
@@ -175,14 +150,7 @@ pub fn classify_actuator_probe(health_ok: bool, logfile_status: Option<f64>) -> 
     object(vec![
         ("connected", Some(JsValue::Bool(true))),
         ("logfileAvailable", Some(JsValue::Bool(available))),
-        (
-            "guidance",
-            if available {
-                None
-            } else {
-                Some(JsValue::str(LOGFILE_GUIDANCE))
-            },
-        ),
+        ("guidance", if available { None } else { Some(JsValue::str(LOGFILE_GUIDANCE)) }),
     ])
 }
 
@@ -198,30 +166,17 @@ mod tests {
         assert!(!is_forwarder_process("com_docker"));
         // 긴 s(ſ)와 켈빈 기호(K)는 JS /i에서 ASCII와 같지 않다
         assert!(!is_forwarder_process("\u{17F}\u{17F}h"));
-        assert!(!is_forwarder_process(
-            "lima".replace('l', "\u{FF2C}").as_str()
-        ));
+        assert!(!is_forwarder_process("lima".replace('l', "\u{FF2C}").as_str()));
     }
 
     #[test]
     fn lsof_줄에서_pid와_포트를_읽는다() {
         let out = "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\nnode 123 me 20u IPv6 0x1 0t0 TCP *:3000 (LISTEN)\nnode 124 me 20u IPv4 0x1 0t0 TCP 127.0.0.1:8080\nbad x me 20u IPv4 0x1 0t0 TCP *:80 (LISTEN)\nshort\n\nnode 9 me TCP *:abc (LISTEN)\n(LISTEN)\nsolo (LISTEN)\n";
         let rows = parse_lsof_listening(out);
-        assert_eq!(
-            rows,
-            vec![
-                ListeningProcess {
-                    pid: 123.0,
-                    command: "node".into(),
-                    port: 3000.0
-                },
-                ListeningProcess {
-                    pid: 124.0,
-                    command: "node".into(),
-                    port: 8080.0
-                },
-            ]
-        );
+        assert_eq!(rows, vec![
+            ListeningProcess { pid: 123.0, command: "node".into(), port: 3000.0 },
+            ListeningProcess { pid: 124.0, command: "node".into(), port: 8080.0 },
+        ]);
     }
 
     #[test]
@@ -229,14 +184,7 @@ mod tests {
         let out = "State Recv-Q Send-Q Local Peer Process\nLISTEN 0 128 0.0.0.0:3000 0.0.0.0:* users:((\"node\",pid=77,fd=19))\nLISTEN 0 128 [::]:80 [::]:* users:((\"x\",pid=pid=,fd=1),(\"y\",pid=5,fd=2))\nLISTEN 0 128 *:81 *:*\nLISTEN 0 128 *:82 *:* ((\"unterminated\n";
         let rows = parse_ss_listening(out);
         assert_eq!(rows.len(), 2);
-        assert_eq!(
-            rows[0],
-            ListeningProcess {
-                pid: 77.0,
-                command: "node".into(),
-                port: 3000.0
-            }
-        );
+        assert_eq!(rows[0], ListeningProcess { pid: 77.0, command: "node".into(), port: 3000.0 });
         assert_eq!(rows[1].pid, 5.0);
         assert_eq!(rows[1].command, "x");
     }
@@ -244,37 +192,14 @@ mod tests {
     #[test]
     fn 선언한_포트만_남기고_같은_포트는_먼저_나온_것만() {
         let rows = vec![
-            ListeningProcess {
-                pid: 1.0,
-                command: "ssh".into(),
-                port: 80.0,
-            },
-            ListeningProcess {
-                pid: 2.0,
-                command: "node".into(),
-                port: 80.0,
-            },
-            ListeningProcess {
-                pid: 3.0,
-                command: "node".into(),
-                port: 80.0,
-            },
-            ListeningProcess {
-                pid: 4.0,
-                command: "node".into(),
-                port: 81.0,
-            },
-            ListeningProcess {
-                pid: 5.0,
-                command: "node".into(),
-                port: 82.0,
-            },
+            ListeningProcess { pid: 1.0, command: "ssh".into(), port: 80.0 },
+            ListeningProcess { pid: 2.0, command: "node".into(), port: 80.0 },
+            ListeningProcess { pid: 3.0, command: "node".into(), port: 80.0 },
+            ListeningProcess { pid: 4.0, command: "node".into(), port: 81.0 },
+            ListeningProcess { pid: 5.0, command: "node".into(), port: 82.0 },
         ];
         assert_eq!(match_declared_ports(&rows, &[80.0, 82.0], &[]), vec![1, 4]);
-        assert_eq!(
-            match_declared_ports(&rows, &[80.0, 82.0], &[2.0]),
-            vec![2, 4]
-        );
+        assert_eq!(match_declared_ports(&rows, &[80.0, 82.0], &[2.0]), vec![2, 4]);
     }
 
     #[test]
@@ -282,17 +207,11 @@ mod tests {
         let row = parse_ps_row("\n  12  3.5  400 /usr/bin/node  server.js  \n").unwrap();
         assert_eq!(row.prop("pid"), Some(&JsValue::Num(12.0)));
         assert_eq!(row.prop("cpuPercent"), Some(&JsValue::Num(3.5)));
-        assert_eq!(
-            row.prop("command"),
-            Some(&JsValue::str("/usr/bin/node  server.js"))
-        );
+        assert_eq!(row.prop("command"), Some(&JsValue::str("/usr/bin/node  server.js")));
         // 명령 안의 \r은 `.`이 받지 못해 줄 전체가 맞지 않는다
         assert!(parse_ps_row("1 2 3 cmd\rmore").is_none());
         // 끝의 \r은 공백(\s+)이 먹고 명령은 빈 문자열이 된다
-        assert_eq!(
-            parse_ps_row("1 2 3 \r").unwrap().prop("command"),
-            Some(&JsValue::str(""))
-        );
+        assert_eq!(parse_ps_row("1 2 3 \r").unwrap().prop("command"), Some(&JsValue::str("")));
         assert!(parse_ps_row("1 2 3 cmd\r").is_none());
         assert!(parse_ps_row("   \n\n").is_none());
         assert!(parse_ps_row("x 2 3 c").is_none());

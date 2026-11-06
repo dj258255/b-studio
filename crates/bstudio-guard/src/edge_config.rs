@@ -48,12 +48,7 @@ pub fn edge_port_for(managed: &[String], service: &str) -> Result<u32, String> {
 
 /// 프록시를 거치지 않고 부를 이름: 로컬, 샌드박스 서비스, edge가 받는 등록한 사내 API
 pub fn direct_hosts(services: &[String], externals: &[String]) -> Vec<String> {
-    ["localhost", "127.0.0.1"]
-        .iter()
-        .map(|s| (*s).to_owned())
-        .chain(services.iter().cloned())
-        .chain(externals.iter().cloned())
-        .collect()
+    ["localhost", "127.0.0.1"].iter().map(|s| (*s).to_owned()).chain(services.iter().cloned()).chain(externals.iter().cloned()).collect()
 }
 
 /// 서비스가 밖으로 나가는 HTTP(S)를 edge 프록시로 보내게 하는 환경 변수. 키 순서가 YAML 글자를 정한다
@@ -98,20 +93,9 @@ pub struct External {
 
 /// edge 프로세스 설정. 값을 그대로 담는다(compose override는 `$`를 따로 적는다).
 /// `managed`는 (이름, 컨테이너 포트) 목록, `egress`는 studio.yaml의 허용 규칙(문자열이나 객체)
-pub fn edge_environment(
-    managed: &[(String, JsValue)],
-    services: &[String],
-    egress: &[JsValue],
-    externals: &[External],
-) -> Vec<(String, String)> {
+pub fn edge_environment(managed: &[(String, JsValue)], services: &[String], egress: &[JsValue], externals: &[External]) -> Vec<(String, String)> {
     let names: Vec<String> = managed.iter().map(|(name, _)| name.clone()).collect();
-    let rules = JsValue::Arr(
-        DEFAULT_EGRESS_ALLOW
-            .iter()
-            .map(|s| JsValue::str(*s))
-            .chain(egress.iter().cloned())
-            .collect(),
-    );
+    let rules = JsValue::Arr(DEFAULT_EGRESS_ALLOW.iter().map(|s| JsValue::str(*s)).chain(egress.iter().cloned()).collect());
     let forwards = managed
         .iter()
         .map(|(name, port)| {
@@ -123,13 +107,7 @@ pub fn edge_environment(
     let ext = JsValue::Arr(
         externals
             .iter()
-            .map(|e| {
-                js_json::object(vec![
-                    ("name", Some(JsValue::str(e.name.clone()))),
-                    ("baseUrl", e.base_url.clone()),
-                    ("policy", e.policy.clone()),
-                ])
-            })
+            .map(|e| js_json::object(vec![("name", Some(JsValue::str(e.name.clone()))), ("baseUrl", e.base_url.clone()), ("policy", e.policy.clone())]))
             .collect(),
     );
     vec![
@@ -154,22 +132,11 @@ pub fn pairs_to_object(pairs: &[(String, String)]) -> JsValue {
 pub fn constants() -> JsValue {
     js_json::object(vec![
         ("edgeService", Some(JsValue::str(EDGE_SERVICE))),
-        (
-            "edgeProxyPort",
-            Some(JsValue::Num(f64::from(EDGE_PROXY_PORT))),
-        ),
+        ("edgeProxyPort", Some(JsValue::Num(f64::from(EDGE_PROXY_PORT)))),
         ("edgeImage", Some(JsValue::str(EDGE_IMAGE))),
         ("sandboxNetwork", Some(JsValue::str(SANDBOX_NETWORK))),
         ("egressNetwork", Some(JsValue::str(EGRESS_NETWORK))),
-        (
-            "defaultEgressAllow",
-            Some(JsValue::Arr(
-                DEFAULT_EGRESS_ALLOW
-                    .iter()
-                    .map(|s| JsValue::str(*s))
-                    .collect(),
-            )),
-        ),
+        ("defaultEgressAllow", Some(JsValue::Arr(DEFAULT_EGRESS_ALLOW.iter().map(|s| JsValue::str(*s)).collect()))),
     ])
 }
 
@@ -186,54 +153,24 @@ mod tests {
         let names = s(&["a", "b", "a"]);
         assert_eq!(edge_port_for(&names, "a"), Ok(20000));
         assert_eq!(edge_port_for(&names, "b"), Ok(20001));
-        assert_eq!(
-            edge_port_for(&names, "c"),
-            Err("'c'은(는) managed 서비스가 아닙니다".to_owned())
-        );
+        assert_eq!(edge_port_for(&names, "c"), Err("'c'은(는) managed 서비스가 아닙니다".to_owned()));
     }
 
     #[test]
     fn 프록시_환경은_키_순서와_직접_부를_이름을_지킨다() {
         let env = proxy_environment(&s(&["localhost", "web"]));
         let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(
-            keys,
-            [
-                "HTTP_PROXY",
-                "HTTPS_PROXY",
-                "ALL_PROXY",
-                "http_proxy",
-                "https_proxy",
-                "all_proxy",
-                "NO_PROXY",
-                "no_proxy",
-                "NODE_USE_ENV_PROXY",
-                "JAVA_TOOL_OPTIONS"
-            ]
-        );
+        assert_eq!(keys, ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy", "NO_PROXY", "no_proxy", "NODE_USE_ENV_PROXY", "JAVA_TOOL_OPTIONS"]);
         assert_eq!(env[6].1, "localhost,web");
         assert!(env[9].1.ends_with("-Dhttp.nonProxyHosts=localhost|web"));
-        assert_eq!(
-            direct_hosts(&s(&["web"]), &s(&["x"])),
-            ["localhost", "127.0.0.1", "web", "x"]
-        );
+        assert_eq!(direct_hosts(&s(&["web"]), &s(&["x"])), ["localhost", "127.0.0.1", "web", "x"]);
     }
 
     #[test]
     fn edge_환경은_기본_허용_호스트_뒤에_규칙을_잇는다() {
-        let env = edge_environment(
-            &[("web".into(), JsValue::Num(3000.0))],
-            &s(&["web"]),
-            &[JsValue::str("a.com")],
-            &[],
-        );
-        assert_eq!(
-            env[1],
-            ("EDGE_FORWARDS".to_owned(), "20000=web:3000".to_owned())
-        );
-        assert!(
-            env[2].1.starts_with("[\"registry.npmjs.org\"") && env[2].1.ends_with(",\"a.com\"]")
-        );
+        let env = edge_environment(&[("web".into(), JsValue::Num(3000.0))], &s(&["web"]), &[JsValue::str("a.com")], &[]);
+        assert_eq!(env[1], ("EDGE_FORWARDS".to_owned(), "20000=web:3000".to_owned()));
+        assert!(env[2].1.starts_with("[\"registry.npmjs.org\"") && env[2].1.ends_with(",\"a.com\"]"));
         assert_eq!(env[4].1, "[]");
     }
 }
