@@ -1,4 +1,5 @@
-import path from 'node:path';
+import { SandboxError } from '../errors';
+import { native } from '../native';
 import type { FileChange } from '../types';
 
 /** 알림을 만들려고 잠깐 쓰는 이름의 접두사. 파일 감시와 체크포인트에서 뺀다 */
@@ -57,31 +58,28 @@ export interface RelayTarget {
   files: string[];
 }
 
+/** Rust 판정이 compose 설정의 모양을 알아보지 못해 던지면 샌드박스 오류로 바꾼다 */
+function asSandboxError<T>(run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    throw new SandboxError(error instanceof Error ? error.message : String(error));
+  }
+}
+
 /**
  * `docker compose config --format json` 결과에서 바인드 마운트만 모은다.
  * `servicePaths`(서비스 이름 → 프로젝트 루트 기준 상대 경로)를 주면, ADR-088처럼 여러 서비스가 같은 루트를
- * 통째로 마운트해도 각 서비스의 subroot(실제 작업 폴더)를 함께 계산해 둔다
+ * 통째로 마운트해도 각 서비스의 subroot(실제 작업 폴더)를 함께 계산해 둔다. 판정은 Rust(`crates/bstudio-guard/src/relay.rs`)에 있다
  */
 export function bindMounts(
   services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }>,
   managed: ReadonlySet<string>,
   servicePaths: Readonly<Record<string, string>> = {},
 ): BindMount[] {
-  return Object.entries(services).flatMap(([service, spec]) =>
-    (spec.volumes ?? [])
-      .filter((volume) => volume.type === 'bind' && volume.source)
-      .map((volume) => {
-        const source = path.resolve(volume.source!);
-        const servicePath = servicePaths[service];
-        return {
-          service,
-          managed: managed.has(service),
-          source,
-          target: volume.target,
-          ...(servicePath !== undefined ? { subroot: servicePath === '.' ? source : path.resolve(source, servicePath) } : {}),
-        };
-      }),
-  );
+  return JSON.parse(
+    asSandboxError(() => native.bindMounts(JSON.stringify(Object.entries(services)), [...managed], JSON.stringify(Object.entries(servicePaths)), process.cwd())),
+  ) as BindMount[];
 }
 
 /**
@@ -92,47 +90,8 @@ export function bindMounts(
  * - 여러 서비스가 마운트하면 managed 서비스, 그다음 더 좁게 마운트한 서비스의 컨테이너에서 알린다
  */
 export function planRelay(projectRoot: string, changes: readonly FileChange[], mounts: readonly BindMount[]): Map<string, RelayTarget[]> {
-  const root = path.resolve(projectRoot);
-  const latest = new Map<string, FileChange['kind']>();
-  for (const change of changes) {
-    const file = change.file.replace(/\/+$/, '');
-    if (file) latest.set(file, change.kind);
-  }
-  const entries = [...latest]
-    .map(([file, kind]) => ({ file, kind, absolute: path.resolve(root, file) }))
-    .filter(({ absolute }) => isInside(root, absolute) && absolute !== root)
-    .sort((a, b) => a.file.localeCompare(b.file));
-  const moved = entries.filter(({ kind, absolute }) => kind === 'directory' && !mounts.some((mount) => isInside(absolute, mount.source)));
-  const deleted = entries.filter(({ kind }) => kind === 'deleted');
-
-  const plan = new Map<string, RelayTarget[]>();
-  for (const entry of entries) {
-    if (moved.some((dir) => dir !== entry && isInside(dir.absolute, entry.absolute))) continue;
-    if (entry.kind === 'deleted' && deleted.some((dir) => dir !== entry && isInside(dir.absolute, entry.absolute))) continue;
-
-    const action = moved.includes(entry) ? 'move' : 'nudge';
-    const target = action === 'move' ? entry.absolute : path.dirname(entry.absolute);
-    const mount = mounts
-      .filter((candidate) => isInside(candidate.source, target))
-      .sort((a, b) => Number(b.managed) - Number(a.managed) || subrootScore(b, target) - subrootScore(a, target) || b.source.length - a.source.length)[0];
-    if (!mount) continue;
-
-    const containerPath = path.posix.join(mount.target, path.relative(mount.source, target).split(path.sep).join('/'));
-    const targets = plan.get(mount.service) ?? [];
-    const existing = targets.find((candidate) => candidate.action === action && candidate.containerPath === containerPath);
-    if (existing) existing.files.push(entry.file);
-    else targets.push({ action, containerPath, files: [entry.file] });
-    plan.set(mount.service, targets);
-  }
-  return plan;
-}
-
-/** subroot가 target을 실제로 감싸면 그 길이를(더 좁을수록 큰 점수), 아니면(subroot가 없거나 target 밖이면) -1을 돌려준다 */
-function subrootScore(mount: BindMount, target: string): number {
-  return mount.subroot && isInside(mount.subroot, target) ? mount.subroot.length : -1;
-}
-
-function isInside(parent: string, target: string): boolean {
-  const relative = path.relative(parent, target);
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  const plainChanges = changes.map(({ file, kind }) => ({ file, kind }));
+  const plainMounts = mounts.map(({ service, managed, source, target, subroot }) => ({ service, managed, source, target, ...(subroot !== undefined ? { subroot } : {}) }));
+  const plan = JSON.parse(asSandboxError(() => native.planRelay(projectRoot, JSON.stringify(plainChanges), JSON.stringify(plainMounts), process.cwd()))) as Array<[string, RelayTarget[]]>;
+  return new Map(plan);
 }

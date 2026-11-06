@@ -9075,6 +9075,19 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 옛 코드에서 본 것(고치지 않고 따로 다룬다): (1) 위 2번. (2) `external.policy.auth.secret`이나 `resources` 키가 `EDGE_EGRESS`·`EDGE_MAIN`·`b-studio-edge`처럼 edge가 쓰는 이름과 겹쳐도 거르지 않는다. 시크릿은 edge 환경 변수의 값을 `null`로 비우고(compose가 호스트 환경에서 채운다), `resources`는 edge의 128m 한도를 덮어쓴다. 스키마(`ENV_NAME`)가 막지 않는 것으로 읽었고 실제 `loadProject`로는 시험하지 않았다. 옛 코드와 같게 옮겼다.
 - 돌리지 않은 것: 실제 `docker compose`로 만든 YAML을 띄워 본 것(docker를 쓰지 않았다. YAML 글자는 `yaml` 패키지로 옛 결과와 견주었다), Kubernetes 제공자(`manifests.ts`가 같은 함수를 부르는 만큼 따라오고 기존 매니페스트 테스트와 타입 검사로만 확인했다), 커밋 보안 검토 결과(막는 검사를 옮긴 PR이므로 결과가 온 뒤 병합한다).
 
+
+### 덧붙임: 2단계 2b-2b 첫 묶음 — 파일 변경 알림 계획 (2026-11-06, [#1026](https://github.com/dj258255/b-studio/issues/1026))
+- 옮긴 것: `relay.ts`의 `bindMounts`(compose 설정에서 바인드 마운트와 서비스 작업 폴더 모으기)와 `planRelay`(바뀐 경로를 어느 서비스 컨테이너의 어느 경로에서 옮기거나 목록을 다시 읽게 할지). 경로 규칙은 `node_path`(Node `path.posix`)를 쓴다. 컨테이너 안 스크립트(`RELAY_SCRIPT`)와 실행은 TS에 남겼다(서버를 옮길 때 함께 옮긴다).
+- 경계: 객체의 순서는 TS가 `Object.entries`로 정해 [이름, 값] 목록으로 넘긴다(정수 꼴 서비스 이름이 앞에 오는 JS 순서를 Rust가 다시 만들지 않는다). 결과는 서비스가 처음 나온 순서의 목록이고 TS가 `Map`으로 바꾼다.
+- 차등 시험: 옛 TS와 새 Rust에 같은 무작위 compose 서비스(정수 꼴·`constructor`·`__proto__` 이름, 상대·절대·빈 source, 모양이 어긋난 설정 3%)·`servicePaths`·변경 목록(`..`, `.`, `..proj`, 끝의 빗금, 절대 경로, 결합 문자)을 넣었다. 시드 2개 × 10만 번 = 20만 번. **`planRelay`는 정렬만 UTF-16으로 바꾼 옛 TS와 20만 번 모두 글자까지 같았다.** `localeCompare`를 쓰는 옛 TS와는 2,859건(시드마다)에서 순서만 달랐고 무엇을 어디에 알리는지는 모두 같았다. 결과 분포(시드 11): 알림 있음 13,579, move 있음 10,719, 한 알림에 파일 여럿 2,856, subroot 있는 마운트 11,427.
+- 벡터 테스트(`relay-vectors.test.ts`, 30개): 기대값은 옛 TS가 낸 값이다. 옛 TS에 돌리면 의도한 차이 5개(순서 3, 아래 2·3번)만 실패한다.
+- 의도한 차이:
+  1. 바뀐 경로의 정렬이 `localeCompare`(ICU)에서 UTF-16 코드 단위 순서가 됐다. 알림의 나열 순서만 바뀐다.
+  2. `servicePaths`는 자기 키만 본다. 옛 TS는 서비스 이름이 `constructor`·`toString`이면 프로토타입의 함수를 읽고 `path.resolve`에서 던졌다(차등 시험의 "옛 TS만 던짐" 7,859건이 모두 이것).
+  3. 문자열이 아닌 bind 마운트의 source·target, 객체가 아닌 서비스, 배열이 아닌 volumes는 던진다(차등 시험의 "새 Rust만 던짐" 714건).
+- 변이 확인: Rust 22곳(프로젝트 밖·프로젝트 자체 받기, 마운트를 감싸는 폴더 옮기기, 옮긴·지운 폴더 안 경로 알리기, nudge 대상, 마운트 밖 대상, managed·subroot·좁은 마운트 우선, 묶기, 정렬, 같은 경로의 마지막 종류, 끝의 빗금, bind 아닌 마운트, 빈 source, cwd 풀기, subroot `.`, `servicePaths`의 뒤 값, managed 표시, containerPath)을 하나씩 망가뜨려 22곳 모두 테스트가 잡았다.
+- 돌리지 않은 것: 실제 컨테이너에서 알림을 받는 것(기존 `relay.test.ts`가 `RELAY_SCRIPT`를 임시 폴더의 셸로 돌리는 시험은 그대로 통과한다), Kubernetes 제공자(relay를 쓰지 않는다).
+
 ## ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다
 
 상태: 채택(계획)

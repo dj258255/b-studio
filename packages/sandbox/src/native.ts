@@ -28,6 +28,9 @@ interface NativeGuard {
   parseInspectOutput(stdout: string): string;
   mergeUsage(inspectedJson: string, statsJson: string, managedNames: string[], edgeService: string): string;
   bootNetworkFromUsage(usageJson: string, exclude: string): string;
+  // ── 파일 변경 알림 계획(2단계 2b-2b 첫 묶음). 객체는 Object.entries로 순서를 정해 넘긴다
+  bindMounts(servicesJson: string, managed: string[], servicePathsJson: string, cwd: string): string;
+  planRelay(projectRoot: string, changesJson: string, mountsJson: string, cwd: string): string;
   formatBytes(bytes: number | undefined): string;
   describeUsage(usageJson: string): string;
   classifyOwnership(labelKeys: string[]): string;

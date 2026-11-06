@@ -462,3 +462,24 @@ pub fn resolve_public_url_placeholders(value: String, host_ports_json: String) -
         None => public_url::placeholder(svc),
     }))
 }
+
+// ── relay(ADR-191 2단계 2b-2b 첫 묶음, #1026). TS 껍데기: packages/sandbox/src/docker/relay.ts
+
+use bstudio_guard::relay;
+
+/// `services_json`은 `Object.entries(services)`, `service_paths_json`은 `Object.entries(servicePaths)`(JS 순서를 TS가 정한다)
+#[napi]
+pub fn bind_mounts(services_json: String, managed: Vec<String>, service_paths_json: String, cwd: String) -> Result<String> {
+    let services: Vec<(String, serde_json::Value)> = parse(&services_json, "compose 서비스 목록")?;
+    let service_paths: Vec<(String, String)> = parse(&service_paths_json, "서비스 경로 목록")?;
+    let mounts = relay::bind_mounts(&cwd, &services, &managed, &service_paths).map_err(Error::from_reason)?;
+    serde_json::to_string(&mounts).map_err(|e| Error::from_reason(e.to_string()))
+}
+
+/// 결과는 서비스가 처음 나온 순서의 `[서비스, 알림 목록][]`(TS가 Map으로 바꾼다)
+#[napi]
+pub fn plan_relay(project_root: String, changes_json: String, mounts_json: String, cwd: String) -> Result<String> {
+    let changes: Vec<relay::FileChange> = parse(&changes_json, "변경 목록")?;
+    let mounts: Vec<relay::BindMount> = parse(&mounts_json, "마운트 목록")?;
+    serde_json::to_string(&relay::plan_relay(&cwd, &project_root, &changes, &mounts)).map_err(|e| Error::from_reason(e.to_string()))
+}
