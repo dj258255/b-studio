@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import type { ExecResult } from './types';
 
 /**
  * Rust로 옮긴 막는 검사 판정(crates/bstudio-node, ADR-191). 저장소 루트의 `pnpm install`·`pnpm build:native`가 만든다.
@@ -90,6 +91,10 @@ interface NativeGuard {
   buildCaddyfile(routesJson: string): string;
   releasesToRetire(statusesJson: string, keepPrevious: number): number[];
   trimRecords(idsJson: string, active: string | undefined): number[];
+  // ── I/O 조율: stream-exec(2단계 2c-1, #1041). 자식 프로세스 출력을 파일로 흘리거나 파일을 입력으로 넣는다.
+  // env를 주면 상속 없이 통째로 바꾼다(Node spawn과 같음). signal로 취소하면 자식을 죽인다
+  runCommandToFile(bin: string, args: string[], outputFile: string, env: Record<string, string> | undefined | null, signal: AbortSignal | undefined | null): Promise<ExecResult>;
+  runCommandFromFile(bin: string, args: string[], inputFile: string, env: Record<string, string> | undefined | null, signal: AbortSignal | undefined | null): Promise<ExecResult>;
 }
 
 export interface NativeSyncObservations {

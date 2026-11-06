@@ -607,3 +607,86 @@ pub fn trim_records(ids_json: String, active: Option<String>) -> Result<Vec<u32>
     let JsValue::Arr(ids) = input(&ids_json, "릴리스 id 목록")? else { return Err(Error::from_reason("릴리스 id 목록은 배열이어야 합니다")) };
     Ok(deploy_plan::trim_records(&ids, active.as_deref()).into_iter().map(|i| i as u32).collect())
 }
+
+// ── I/O 조율: stream-exec(2단계 2c-1, #1041). 자식 프로세스 출력을 파일로 흘리거나 파일을 입력으로 넣는다.
+// 판정은 하지 않는다 — bstudio-io가 syscall을 하고, 여기는 JS 값을 바꾸고 AbortSignal을 취소에 잇는다(ADR-193).
+// 동기 함수로 둔다: !Send인 AbortSignal을 JS 스레드에서 받아 Send한 Notify로 바꾸면, 작업 future는 Notify만 들어 Send다.
+use bstudio_io::stream_exec;
+use napi::bindgen_prelude::{AbortSignal, AsyncBlock, AsyncBlockBuilder};
+use napi::Env;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Notify;
+
+/// TS `ExecResult`와 같은 모양. napi가 `{ exitCode, stdout, stderr }`로 바꾼다
+#[napi(object)]
+pub struct ExecResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+impl From<stream_exec::ExecOutput> for ExecResult {
+    fn from(output: stream_exec::ExecOutput) -> Self {
+        Self { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr }
+    }
+}
+
+fn env_pairs(env: Option<HashMap<String, String>>) -> Option<Vec<(String, String)>> {
+    env.map(|map| map.into_iter().collect())
+}
+
+/// abort되면 Notify를 깨워 작업 future를 떨어뜨리고, 자식은 kill_on_drop으로 죽는다.
+/// 콜백은 JS 객체 수명 동안 살아(from_napi_value가 Rc를 공유한다) abort 때 불린다. abort가 먼저 와도 Notify가 permit을 쥔다.
+fn abort_notify(signal: Option<AbortSignal>) -> Arc<Notify> {
+    let notify = Arc::new(Notify::new());
+    if let Some(signal) = signal {
+        let on_abort = notify.clone();
+        signal.on_abort(move || on_abort.notify_one());
+    }
+    notify
+}
+
+/// stdout을 `output_file`로 흘리고 stderr만 잡는다. `signal`로 취소하면 자식을 죽인다
+#[napi]
+pub fn run_command_to_file(
+    env: Env,
+    bin: String,
+    args: Vec<String>,
+    output_file: String,
+    env_vars: Option<HashMap<String, String>>,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<ExecResult>> {
+    let pairs = env_pairs(env_vars);
+    let cancel = abort_notify(signal);
+    let future = async move {
+        let work = stream_exec::run_command_to_file(&bin, &args, &output_file, pairs.as_deref());
+        tokio::select! {
+            result = work => result.map(ExecResult::from).map_err(|error| Error::from_reason(error.to_string())),
+            _ = cancel.notified() => Err(Error::from_reason("취소되었습니다")),
+        }
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}
+
+/// `input_file`을 stdin으로 넣고 stdout·stderr를 잡는다. `signal`로 취소하면 자식을 죽인다
+#[napi]
+pub fn run_command_from_file(
+    env: Env,
+    bin: String,
+    args: Vec<String>,
+    input_file: String,
+    env_vars: Option<HashMap<String, String>>,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<ExecResult>> {
+    let pairs = env_pairs(env_vars);
+    let cancel = abort_notify(signal);
+    let future = async move {
+        let work = stream_exec::run_command_from_file(&bin, &args, &input_file, pairs.as_deref());
+        tokio::select! {
+            result = work => result.map(ExecResult::from).map_err(|error| Error::from_reason(error.to_string())),
+            _ = cancel.notified() => Err(Error::from_reason("취소되었습니다")),
+        }
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}

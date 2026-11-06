@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 자식 프로세스의 출력을 파일로 흘리거나 파일을 입력으로 넣는 실행(`runCommandToFile`·`runCommandFromFile`, `docker`/`kubectl exec`가 파일을 주고받을 때 씁니다)을 Rust로 옮겼습니다(ADR-191·193 2단계 2c-1, #1041). 출력 잡기(1MiB·UTF-16 코드 단위 상한과 자르기 표시), `env` 통째 치환, 취소 시 자식 종료를 옛 동작과 같게 맞췄습니다. 새 크레이트 `bstudio-io`(tokio-async)에 I/O를 두고, napi 층에 비동기(Promise)·취소(`AbortSignal`→자식 kill) 경계를 처음 들였습니다. 취소하면 Promise가 거절합니다.
 - 무중단 배포 계획(`planBaseCompose`·`planReleaseCompose`·`buildArgsFor`·`summarizeBuildOutput`·`buildCaddyfile`·`releasesToRetire`·`trimRecords`·`newReleaseId`·`deployNames`·`proxyListenPort`·`emptyDeployState`)을 Rust로 옮겼습니다(ADR-191 2단계 2b-2b 셋째 묶음, #1036). 옛 판정과 무작위 입력 20만 번 비교(compose 내용은 `JSON.stringify` 글자, 키 순서 포함)에서 결과가 모두 같았습니다. 다른 곳은 던지는 쪽과 자기 속성만 보는 쪽뿐입니다: 모양이 어긋난 compose·프로젝트, `constructor` 같은 서비스 이름을 운영 이미지·자원 정의가 있다고 읽던 것. 빌드·`compose up`·전환·정리는 TS에 남겼습니다.
 - 서비스 준비 판정(`decideReadiness`·`isTransientBootError`·`shouldRetryTransientCrash`·`crashLogExcerpt`)을 Rust로 옮겼습니다(ADR-191 2단계 2b-2b 둘째 묶음, #1034). 옛 판정과 무작위 입력 20만 번 비교에서 결과가 모두 같았습니다. HTTP 확인과 타이머는 TS에 남겼습니다.
 - 파일 변경을 서비스 컨테이너의 파일 감시기에 알리는 계획(`bindMounts`·`planRelay`)을 Rust로 옮겼습니다(ADR-191 2단계 2b-2b 첫 묶음, #1026). 옛 판정과 무작위 입력 20만 번 비교에서 무엇을 어디에 알리는지가 모두 같았습니다. 다른 곳은 알림의 나열 순서(UTF-16 순서), 모양이 어긋난 compose 설정에서 던지는 것, `constructor` 같은 서비스 이름에서 던지지 않는 것입니다.

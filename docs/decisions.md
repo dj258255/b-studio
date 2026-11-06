@@ -9193,3 +9193,11 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - `.node`가 tokio·pty로 임시로 커진다. 이 단계에서 자원 절감은 재지 않는다.
 - 검증이 무작위 대량 차등에서 "손으로 고른 경계 시나리오 + 변이 + 기존 vitest"로 바뀌어, 입력 공간을 2a/2b만큼 넓게 못 쓸어본다. 안전 경계는 변이와 커밋 보안 검토로 메운다.
 - 두 구현이 한 PR 안에서 잠깐 함께 있는 구간(옛 TS 대조 테스트)은 그 PR 안에서만 두고 머지 전에 옛 구현을 지운다.
+
+### 덧붙임: 2c-1 결과 — stream-exec와 비동기·취소 경계 (2026-11-06, [#1041](https://github.com/dj258255/b-studio/issues/1041))
+- 옮긴 것: `stream-exec.ts`의 `runCommandToFile`·`runCommandFromFile`(자식 프로세스 출력을 파일로 흘리거나 파일을 stdin으로 넣기). syscall은 새 크레이트 `crates/bstudio-io`(tokio-async)에, napi 접착은 `bstudio-node`에, TS에는 같은 시그니처 껍데기만 남았다. `compose-provider`·`kubernetes-provider`의 `execToFile`·`execFromFile`가 부른다.
+- 경계(처음 선 것): napi 층에 비동기(Promise)와 취소를 들였다. `#[napi]` 함수는 **동기**로 두고 `AsyncBlock<ExecResult>`(→ JS `Promise<ExecResult>`)를 돌려준다. `async fn`으로 두면 napi가 future를 tokio에 올릴 때 `Send`를 요구하는데 JS `AbortSignal`이 `Send`가 아니라 거부된다(실측: `has type Option<AbortSignal> which is not Send`). 그래서 동기 함수에서 AbortSignal을 받아(JS 스레드) `tokio::sync::Notify`(Send)로 바꾸고, 작업 future는 Notify만 들어 Send가 된다. abort가 오면 `select!`가 Notify 가지를 타 작업 future를 떨어뜨리고, 자식은 `kill_on_drop(true)`으로 죽는다. abort 콜백은 JS 객체 수명 동안 산다(napi `from_napi_value`가 콜백 `Vec`을 `Rc`로 공유해, 받은 AbortSignal을 버려도 abort 때 불린다).
+- 옛 동작과 같게 맞춘 것: 잡는 출력 1MiB(UTF-16 코드 단위) 상한과 `\n... output truncated ...` 표시(`bstudio_guard::js`의 utf16 헬퍼), 종료 코드 `?? 1`(신호로 죽으면 1), `env`를 주면 상속 없이 치환, 출력 파이프가 깨졌는데 0으로 끝났으면 던지고 0이 아니면 던지지 않음.
+- 검증: cargo 단위 시험 7개(`bstudio-io`: stdout/stderr, 0 아닌 종료, stdin 넣기, env 치환, spawn 오류, 상한 넘김·상한 정각). TS 경계 시험 5개(`stream-exec.test.ts`: 임시 폴더·호스트 `sh`/`tr`로 전체 TS→napi→Rust 경로, **중간 취소로 거절하고 자식이 죽어 뒤 명령이 실행되지 않음**, env 치환). `pnpm typecheck`(패키지 6개)와 sandbox 테스트 통과.
+- 옛 동작과 다른 것: (1) 취소하면 DOMException `AbortError`가 아니라 `Error`(메시지 `취소되었습니다`)로 거절한다. 부르는 쪽(`execToFile` 등)은 거절을 그대로 올린다. (2) 출력을 잡을 때 상한을 넘겨도 끝까지 읽는다(파이프가 막히지 않게). 결과 글자는 옛 TS와 같다.
+- 돌리지 않은 것: 실제 `docker`·`kubectl exec`로 파일을 주고받는 것(호스트 `sh`로 같은 경로를 돌렸다. compose-provider·kubernetes-provider 통합 시험이 이 함수를 쓴다), Kubernetes 제공자(같은 함수를 부르는 만큼 따라오고 타입 검사로만 확인했다, 지원 범위 밖). 자원 절감은 이 단계에서 재지 않았다(4단계에서 잰다).
