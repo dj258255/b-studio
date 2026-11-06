@@ -1,0 +1,15 @@
+[package]
+name = "bstudio-io"
+version = "0.1.0"
+description = "b-studio의 I/O(프로세스·파일·소켓·PTY)를 Rust로. 판정은 bstudio-guard가 하고 여기는 syscall만 한다(ADR-193). napi를 모른다 — 4단계 Rust 서버가 직접 쓴다"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bstudio-guard = { path = "../bstudio-guard" }
+tokio = { version = "1", features = ["process", "fs", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+[dev-dependencies]
+tempfile = "3"
