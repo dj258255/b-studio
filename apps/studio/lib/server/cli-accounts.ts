@@ -161,10 +161,6 @@ export async function checkAccountStatus(backend: CliAccountBackend, preflights:
   return notConnected(backend, label, result);
 }
 
-export async function listAccountStatuses(preflights: AccountPreflights = {}): Promise<AccountStatus[]> {
-  return Promise.all(CLI_ACCOUNT_BACKENDS.map((backend) => checkAccountStatus(backend, preflights)));
-}
-
 // ---------------------------------------------------------------------------
 // 로그인 시작·진행·취소
 

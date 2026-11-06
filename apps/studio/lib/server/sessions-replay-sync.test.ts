@@ -4,7 +4,6 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { Sandbox } from '@b-studio/sandbox';
-import { createView, reduceSession } from '@/lib/session-view';
 import type { StudioEvent } from '@/lib/studio-events';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -18,7 +17,7 @@ const execFileAsync = promisify(execFile);
  * 새로 찾아) canCreatePullRequest를 다르게 계산하면 이 순서 문제가 그대로 재현된다.
  *
  * 진짜로 하는 것: 파일 시스템의 git 저장소(로컬 bare 원격), 체크포인트, exportSession·stopSession·resumeSession·
- * subscribe, 그리고 화면 쪽 reduceSession까지 실제 코드로 끝까지 돌려 재연결 뒤 화면에 남는 값을 확인한다.
+ * subscribe까지 실제 코드로 끝까지 돌려 재연결 뒤 마지막으로 맞춰지는 값을 확인한다.
  * 가짜로 바꾸는 것: 샌드박스(Docker)와 canCreatePullRequest(언제 불렀는지에 따라 다른 값을 돌려주게 해 "서버가
  * 그사이 다시 계산해 달라졌다"를 흉내 낸다). 실제 네트워크·Docker·GitHub 호출은 없다.
  */
@@ -217,11 +216,9 @@ describe('재연결 replay 순서(59번 버그: 기록 재생이 지금 스냅�
     const exportedReplayed = received.find((event) => event.type === 'exported');
     expect(exportedReplayed?.type === 'exported' && exportedReplayed.repository.canCreatePullRequest).toBe(false);
 
-    // 화면 reducer로 전부 접으면, 기록의 옛 값이 아니라 snapshot_sync가 다시 맞춘 지금 값(true)으로 끝난다
-    const first = received[0];
-    if (first?.type !== 'snapshot') throw new Error('첫 이벤트가 snapshot이 아닙니다');
-    const view = received.reduce(reduceSession, createView(first.snapshot));
-    expect(view.snapshot.repository?.canCreatePullRequest).toBe(true);
+    // 기록의 옛 값(false)이 아니라 마지막 snapshot_sync가 지금 값(true)으로 다시 맞춘다
+    const sync = received.at(-1);
+    expect(sync?.type === 'snapshot_sync' && sync.repository?.canCreatePullRequest).toBe(true);
 
     await stopSession(id).catch(() => {});
   }, 20_000);

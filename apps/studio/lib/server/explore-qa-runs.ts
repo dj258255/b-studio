@@ -169,10 +169,6 @@ export function stopExploreQa(sessionId: string): void {
   if (entry?.run.status === 'running') entry.abort.abort();
 }
 
-export function clearExploreQaRun(sessionId: string): void {
-  store.delete(sessionId);
-}
-
 export interface SaveExploreQaInput {
   service: string;
 }

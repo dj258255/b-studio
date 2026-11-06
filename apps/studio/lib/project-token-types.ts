@@ -131,11 +131,6 @@ export function formatUtcStamp(iso: string): string {
   return `${iso.slice(0, 16).replace('T', ' ')} UTC`;
 }
 
-/** 사람이 보는 시각(브라우저·서버의 지역 시간) */
-export function formatLocalStamp(iso: string): string {
-  return new Intl.DateTimeFormat('ko-KR', { dateStyle: 'short', timeStyle: 'short' }).format(new Date(iso));
-}
-
 /** 보고서 머리에 붙는 기간 문구. 기간을 주지 않았으면 "전체 기간" */
 export function rangeText(range: { from?: string; to?: string } | undefined): string {
   if (!range) return '전체 기간';

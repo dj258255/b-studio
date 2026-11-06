@@ -36,7 +36,7 @@ vi.mock('./sessions', () => ({
 }));
 
 import { RepositoryRateLimitError } from '@b-studio/agent';
-import { createRepositoryListCache, projectRepositoryIssue, projectRepositoryIssues, projectRepositoryPull, projectRepositoryPulls, resolveRepositoryToken } from './repository-panel';
+import { createRepositoryListCache, projectRepositoryIssues, projectRepositoryPulls, resolveRepositoryToken } from './repository-panel';
 
 const project = { root: '/tmp/orders', spec: { name: 'orders' } };
 
@@ -197,80 +197,5 @@ describe('projectRepositoryPulls', () => {
     expect(result.ok).toBe(true);
     expect(result.pulls?.[0]?.sessionId).toBe('s1');
     delete process.env.B_STUDIO_GITHUB_TOKEN;
-  });
-});
-
-describe('projectRepositoryIssue', () => {
-  it('원격 저장소가 없으면 no_remote 이유로 돌려주고 상세 API는 부르지 않는다', async () => {
-    spies.inspectSource.mockResolvedValue({ base: 'main', dirtyFiles: 0, subdir: '' });
-    const result = await projectRepositoryIssue('orders-no-remote', 57);
-
-    expect(result).toMatchObject({ ok: false, reason: 'no_remote' });
-    expect(spies.fetchIssueDetail).not.toHaveBeenCalled();
-  });
-
-  it('토큰이 있으면 상세를 받아 그대로 돌려준다', async () => {
-    process.env.B_STUDIO_GITHUB_TOKEN = 'ghp_test';
-    const issue = { number: 57, title: '주문 목록이 느립니다', author: 'yuna', labels: [], updatedAt: '2026-09-20T00:00:00Z', url: 'https://github.com/acme/orders/issues/57', state: 'open' as const, assignees: [], comments: [], totalComments: 0, commentsTruncated: false, taskList: { total: 0, checked: 0, items: [] }, linkedPulls: [] };
-    spies.fetchIssueDetail.mockResolvedValue(issue);
-
-    const result = await projectRepositoryIssue('orders-ok', 57);
-
-    expect(result).toEqual({ ok: true, remote: { kind: 'github', display: 'github.com/acme/orders', webUrl: 'https://github.com/acme/orders' }, issue });
-    expect(spies.fetchIssueDetail).toHaveBeenCalledWith(expect.anything(), 57, expect.objectContaining({ token: 'ghp_test' }));
-    delete process.env.B_STUDIO_GITHUB_TOKEN;
-  });
-
-  it('상세 조회가 실패하면 이유를 담아 돌려준다', async () => {
-    process.env.B_STUDIO_GITHUB_TOKEN = 'ghp_test';
-    spies.fetchIssueDetail.mockRejectedValue(new RepositoryRateLimitError('GitHub API 사용량 한도에 걸렸습니다'));
-
-    const result = await projectRepositoryIssue('orders-limited', 57);
-
-    expect(result).toMatchObject({ ok: false, reason: 'rate_limited' });
-    delete process.env.B_STUDIO_GITHUB_TOKEN;
-  });
-});
-
-describe('projectRepositoryPull', () => {
-  it('헤드 브랜치가 이 프로젝트의 b-studio 세션 브랜치면 세션 id를 채운다', async () => {
-    process.env.B_STUDIO_GITHUB_TOKEN = 'ghp_test';
-    spies.fetchPullRequestDetail.mockImplementation((async (_remote: unknown, _number: unknown, options: { branchSessionId?: (branch: string) => string | undefined }) => ({
-      number: 5,
-      title: '주문 목록',
-      author: 'yuna',
-      labels: [],
-      updatedAt: '2026-09-01T00:00:00Z',
-      url: 'https://github.com/acme/orders/pull/5',
-      state: 'open',
-      draft: false,
-      headBranch: 'b-studio/orders-ok-s1',
-      headSha: 'abc',
-      sessionId: options.branchSessionId?.('b-studio/orders-ok-s1'),
-      baseBranch: 'main',
-      files: [],
-      filesSupported: true,
-      filesTruncated: false,
-      checkRuns: [],
-      checksSupported: true,
-      reviews: [],
-      reviewComments: [],
-      reviewCommentsSupported: true,
-      linkedIssues: [],
-    })) as unknown as (...args: unknown[]) => Promise<unknown>);
-
-    const result = await projectRepositoryPull('orders-ok', 5);
-
-    expect(result.ok).toBe(true);
-    expect(result.pull?.sessionId).toBe('s1');
-    delete process.env.B_STUDIO_GITHUB_TOKEN;
-  });
-
-  it('원격 저장소가 없으면 no_remote 이유로 돌려주고 상세 API는 부르지 않는다', async () => {
-    spies.inspectSource.mockResolvedValue({ base: 'main', dirtyFiles: 0, subdir: '' });
-    const result = await projectRepositoryPull('orders-no-remote', 5);
-
-    expect(result).toMatchObject({ ok: false, reason: 'no_remote' });
-    expect(spies.fetchPullRequestDetail).not.toHaveBeenCalled();
   });
 });

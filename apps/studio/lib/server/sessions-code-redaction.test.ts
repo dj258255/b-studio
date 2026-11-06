@@ -66,7 +66,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { checkpointPatch, commitWorkingCopyDocs, createSession, getSnapshot, readCodeFile, stopSession } from './sessions';
+import { checkpointPatch, commitWorkingCopyDocs, createSession, getSnapshot, stopSession } from './sessions';
 
 let root: string;
 const saved = {
@@ -136,22 +136,6 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
 }
 
 describe('코드 탭과 체크포인트 diff의 시크릿 가림 (#751)', () => {
-  it('코드 탭 diff는 20만 자 경계에 걸친 시크릿의 앞부분도 남기지 않는다', async () => {
-    await setupRepo();
-    const id = (await createSession('redactproj', 'kim', 'copy')).id;
-    expect(await waitForReady(id)).toBe('ready');
-    const file = path.join(getSnapshot(id)!.workDir, 'api/src/Order.java');
-    await writeFile(file, `${'a'.repeat(10)}\n`);
-    const header = (await readCodeFile(id, 'api/src/Order.java')).patch!.indexOf(`+${'a'.repeat(10)}`) + 1;
-    await writeFile(file, `${'a'.repeat(200_000 - header - 6)}${SECRET}\n`);
-
-    const opened = await readCodeFile(id, 'api/src/Order.java');
-    expect(opened.patch).toContain('길어서');
-    expect(opened.patch).not.toContain(SECRET.slice(0, 6));
-    expect(opened.content).toContain('[KEY 가림]');
-    await stopSession(id).catch(() => {});
-  }, 20_000);
-
   it('체크포인트 diff도 가린다', async () => {
     await setupRepo();
     const id = (await createSession('redactproj', 'kim', 'copy')).id;

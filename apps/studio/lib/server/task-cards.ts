@@ -2,17 +2,6 @@ import { isProtectedPath } from '@b-studio/agent';
 import { z } from 'zod';
 import { StudioError } from './errors';
 
-/** 사람이 쓴 작업 카드 하나. b-studio가 레인으로 묶어 터미널 레인에서 돌린다 */
-export interface TaskCardInput {
-  title: string;
-  request: string;
-  paths: string[];
-  /** 이 카드의 완료 조건 명령(선택). 있으면 그 카드의 실행 동안 게이트의 test 단계에 더한다 */
-  doneCommand?: string;
-  /** 완료 조건을 돌릴 서비스(선택). 없으면 이 프로젝트의 첫 관리형 서비스를 쓴다 */
-  doneService?: string;
-}
-
 /** 카드 하나의 완료 검사. gate의 workflow.tests에 넣을 test 하나의 꼴 */
 export interface TaskCardDone {
   name: string;

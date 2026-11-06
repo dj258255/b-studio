@@ -9,17 +9,13 @@
  */
 import {
   CheckpointStore,
-  fetchIssueDetail,
-  fetchPullRequestDetail,
   listIssues,
   listPullRequests,
   parseRemote,
   PullRequestError,
   RepositoryRateLimitError,
   type GitHostKind,
-  type IssueDetail,
   type IssueSummary,
-  type PullDetail,
   type PullRequestSummary,
   type RepositoryListState,
 } from '@b-studio/agent';
@@ -29,9 +25,6 @@ import { localFolderAllowed, sessionIdFromBranch } from './sessions';
 
 /** 목록을 다시 불러오기까지의 간격. API 사용량 한도(GitHub는 시간당 5,000회)에 여유를 둔다 */
 export const REPOSITORY_LIST_TTL_MS = 30_000;
-/** 상세(이슈·PR 하나)를 다시 불러오기까지의 간격. 목록보다 호출이 더 들어(파일·체크·리뷰) 조금 더 짧게 둔다 */
-export const REPOSITORY_DETAIL_TTL_MS = 20_000;
-
 export type RepositoryQueryReason = 'no_remote' | 'unsupported_host' | 'no_token' | 'rate_limited' | 'error';
 
 interface RemoteSummary {
@@ -54,22 +47,6 @@ export interface RepositoryPullsResult {
   reason?: RepositoryQueryReason;
   detail?: string;
   pulls?: PullRequestSummary[];
-}
-
-export interface RepositoryIssueDetailResult {
-  ok: boolean;
-  remote?: RemoteSummary;
-  reason?: RepositoryQueryReason;
-  detail?: string;
-  issue?: IssueDetail;
-}
-
-export interface RepositoryPullDetailResult {
-  ok: boolean;
-  remote?: RemoteSummary;
-  reason?: RepositoryQueryReason;
-  detail?: string;
-  pull?: PullDetail;
 }
 
 /**
@@ -148,9 +125,6 @@ export function createRepositoryListCache<T>(options: { now?: () => number; ttlM
 
 const issuesCache = createRepositoryListCache<RepositoryIssuesResult>();
 const pullsCache = createRepositoryListCache<RepositoryPullsResult>();
-const issueDetailCache = createRepositoryListCache<RepositoryIssueDetailResult>({ ttlMs: REPOSITORY_DETAIL_TTL_MS });
-const pullDetailCache = createRepositoryListCache<RepositoryPullDetailResult>({ ttlMs: REPOSITORY_DETAIL_TTL_MS });
-
 /** 저장소 화면 이슈 탭. 프로젝트에 원격 저장소가 없거나 지원하지 않는 호스트, 토큰 없음, 사용량 한도는 실패 이유로 돌려주고 던지지 않는다 */
 export async function projectRepositoryIssues(projectId: string, state: RepositoryListState = 'open'): Promise<RepositoryIssuesResult> {
   return issuesCache.load(`issues:${projectId}:${state}`, async () => {
@@ -180,41 +154,6 @@ export async function projectRepositoryPulls(projectId: string, state: Repositor
         branchSessionId: (branch) => sessionIdFromBranch(projectId, branch),
       });
       return { ok: true, remote: summary, pulls };
-    } catch (error) {
-      const { reason, detail } = queryError(error);
-      return { ok: false, reason, detail, remote: summary };
-    }
-  });
-}
-
-/** 저장소 화면 이슈 상세(ADR-081). 본문·라벨·담당자·최근 댓글·체크리스트 진행도·이 이슈를 가리키는 PR을 담는다 */
-export async function projectRepositoryIssue(projectId: string, number: number): Promise<RepositoryIssueDetailResult> {
-  return issueDetailCache.load(`issue:${projectId}:${number}`, async () => {
-    const context = await repositoryContext(projectId);
-    if (!context.ok) return { ok: false, reason: context.reason, detail: context.detail, remote: context.remote };
-    const summary: RemoteSummary = { kind: context.remote.kind, display: context.remote.display, webUrl: context.remote.webUrl };
-    try {
-      const issue = await fetchIssueDetail(context.remote, number, { token: context.token });
-      return { ok: true, remote: summary, issue };
-    } catch (error) {
-      const { reason, detail } = queryError(error);
-      return { ok: false, reason, detail, remote: summary };
-    }
-  });
-}
-
-/** 저장소 화면 PR 상세(ADR-081). 파일·CI 체크·리뷰·리뷰 댓글을 담고, b-studio 세션 브랜치면 세션 id를 채운다 */
-export async function projectRepositoryPull(projectId: string, number: number): Promise<RepositoryPullDetailResult> {
-  return pullDetailCache.load(`pull:${projectId}:${number}`, async () => {
-    const context = await repositoryContext(projectId);
-    if (!context.ok) return { ok: false, reason: context.reason, detail: context.detail, remote: context.remote };
-    const summary: RemoteSummary = { kind: context.remote.kind, display: context.remote.display, webUrl: context.remote.webUrl };
-    try {
-      const pull = await fetchPullRequestDetail(context.remote, number, {
-        token: context.token,
-        branchSessionId: (branch) => sessionIdFromBranch(projectId, branch),
-      });
-      return { ok: true, remote: summary, pull };
     } catch (error) {
       const { reason, detail } = queryError(error);
       return { ok: false, reason, detail, remote: summary };

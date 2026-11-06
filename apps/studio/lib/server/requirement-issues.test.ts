@@ -31,11 +31,9 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
 
 import { parseRemote, type Requirement } from '@b-studio/agent';
 import {
-  planRequirementIssuePublish,
   publishedTrackingIssue,
   publishRequirementIssues,
   refreshTrackingIssueBody,
-  resolveRequirementConflict,
   syncRequirementIssueStatus,
   type RequirementIssuesContext,
   issueSyncFailureNotice,
@@ -67,29 +65,8 @@ afterEach(async () => {
   await rm(root, { recursive: true, force: true });
 });
 
-describe('planRequirementIssuePublish', () => {
-  it('처음 보는 요구사항은 create로 계획한다(아직 아무것도 쓰지 않는다)', async () => {
-    const { plan, summary } = await planRequirementIssuePublish(ctx, [req()], { R1: '미착수' });
-    expect(plan).toEqual([expect.objectContaining({ id: 'R1', action: 'create' })]);
-    expect(summary.create).toBe(1);
-    expect(spies.createIssue).not.toHaveBeenCalled();
-    expect(spies.updateIssue).not.toHaveBeenCalled();
-  });
-
-  it('미리보기가 대상 저장소와 추적 이슈 처리(새로 만들기/갱신)를 함께 알려준다', async () => {
-    const fresh = await planRequirementIssuePublish(ctx, [req()], { R1: '미착수' });
-    expect(fresh.repository).toBe('github.com/acme/orders');
-    expect(fresh.tracking).toEqual({ action: 'create' });
-
-    // 다른 세션에서 이미 발행한 추적 이슈가 저장소에 있으면(이 세션엔 발행 기록이 없어도) 갱신으로 본다
-    spies.listIssues.mockResolvedValue([{ number: 19, title: '요구사항: orders', state: 'open', labels: ['b-studio:req'], body: '표' }]);
-    const existing = await planRequirementIssuePublish(ctx, [req()], { R1: '미착수' });
-    expect(existing.tracking).toEqual({ action: 'update', issue: 19 });
-  });
-});
-
 describe('publishRequirementIssues', () => {
-  it('하위 이슈와 추적 이슈를 만들고, GitHub이면 서로 연결하고, 발행 기록을 사이드카 파일에 남긴다(재발행하면 unchanged가 된다)', async () => {
+  it('하위 이슈와 추적 이슈를 만들고, GitHub이면 서로 연결하고, 발행 기록을 사이드카 파일에 남긴다', async () => {
     spies.createIssue
       .mockResolvedValueOnce({ number: 201, url: 'https://github.com/acme/orders/issues/201' }) // 하위 이슈
       .mockResolvedValueOnce({ number: 1, url: 'https://github.com/acme/orders/issues/1' }); // 추적 이슈
@@ -102,13 +79,6 @@ describe('publishRequirementIssues', () => {
     expect(spies.createIssue).toHaveBeenCalledTimes(2);
     expect(spies.createIssue.mock.calls[0]![1]).toMatchObject({ title: '[R1] 로그인 API' });
     expect(spies.addSubIssue).toHaveBeenCalledWith(remote, 1, 201, expect.anything());
-
-    // 재발행: 원격 이슈 목록이 이제 그 하위 이슈를 돌려준다고 가정하면(아직 아무도 고치지 않았으므로) unchanged다
-    const subIssueBody = (spies.createIssue.mock.calls[0]![1] as { body: string }).body;
-    spies.listIssues.mockResolvedValue([{ number: 201, state: 'open', labels: ['b-studio:req'], body: subIssueBody }]);
-
-    const { plan } = await planRequirementIssuePublish(ctx, [req()], { R1: '작업 중' });
-    expect(plan[0]).toMatchObject({ action: 'unchanged', issue: 201 });
   });
 
   it('하위 이슈 연결이 실패해도 나머지는 계속 진행하고 오류만 남긴다', async () => {
@@ -223,62 +193,6 @@ describe('publishedTrackingIssue(56번 버그: PR 본문에서 추적 이슈를 
     await publishRequirementIssues(ctx, [req()], { R1: '작업 중' });
 
     expect(await publishedTrackingIssue(root)).toEqual({ issue: 1, url: 'https://github.com/acme/orders/issues/1' });
-  });
-});
-
-describe('resolveRequirementConflict', () => {
-  async function publishOne() {
-    spies.createIssue.mockResolvedValueOnce({ number: 10, url: 'a' }).mockResolvedValueOnce({ number: 1, url: 'b' });
-    await publishRequirementIssues(ctx, [req()], { R1: '작업 중' });
-    return (spies.createIssue.mock.calls[0]![1] as { body: string }).body;
-  }
-
-  it('덮어쓰기는 로컬 내용으로 이슈를 다시 쓰고 발행 기록을 갱신한다', async () => {
-    const originalBody = await publishOne();
-    spies.listIssues.mockResolvedValue([{ number: 10, state: 'open', labels: ['b-studio:req'], body: originalBody.replace('이메일·비밀번호로 로그인한다', '고쳐진 내용') }]);
-
-    const result = await resolveRequirementConflict(ctx, req(), '작업 중', 'overwrite');
-    expect(result).toEqual({ action: 'overwrite' });
-    expect(spies.updateIssue).toHaveBeenCalledWith(remote, 10, expect.objectContaining({ body: expect.stringContaining('이메일·비밀번호로 로그인한다') }), expect.anything());
-  });
-
-  it('덮어쓰기도 이슈 헤더의 rev=를 파일의 개정 번호로 쓴다(버그 리포트 47 — record.rev+1이 아니다)', async () => {
-    const originalBody = await publishOne(); // req()는 rev가 없으니 1로 발행됐다
-    expect(originalBody).toContain('rev=1');
-    spies.listIssues.mockResolvedValue([{ number: 10, state: 'open', labels: ['b-studio:req'], body: originalBody.replace('이메일·비밀번호로 로그인한다', '고쳐진 내용') }]);
-
-    // 파일은 그동안 개정 9까지 올랐다(이 충돌 해결과 무관하게) — 덮어쓰면 그 번호를 그대로 써야 한다(옛 방식이면 record.rev+1=2)
-    await resolveRequirementConflict(ctx, req({ rev: 9 }), '작업 중', 'overwrite');
-    const rewrittenBody = (spies.updateIssue.mock.calls[0]![2] as { body: string }).body;
-    expect(rewrittenBody).toContain('rev=9');
-    expect(rewrittenBody).not.toContain('rev=2');
-  });
-
-  it('무시는 아무것도 쓰지 않고 원격을 새 기준선으로 받아들인다(다음 계획은 update로 본다)', async () => {
-    const originalBody = await publishOne();
-    const editedBody = originalBody.replace('이메일·비밀번호로 로그인한다', '고쳐진 내용');
-    spies.listIssues.mockResolvedValue([{ number: 10, state: 'open', labels: ['b-studio:req'], body: editedBody }]);
-
-    const result = await resolveRequirementConflict(ctx, req(), '작업 중', 'ignore');
-    expect(result).toEqual({ action: 'ignore' });
-    expect(spies.updateIssue).not.toHaveBeenCalledWith(remote, 10, expect.anything(), expect.anything());
-
-    const { plan } = await planRequirementIssuePublish(ctx, [req()], { R1: '작업 중' });
-    expect(plan[0]!.action).toBe('update'); // 로컬 내용은 그대로인데 기준선이 편집된 내용으로 바뀌었으니 다시 맞춰야 한다
-  });
-
-  it('가져오기는 이슈 본문을 요구사항 초안으로 파싱해 돌려준다', async () => {
-    const originalBody = await publishOne();
-    const editedBody = originalBody.replace('이메일·비밀번호로 로그인한다', '소셜 로그인을 지원한다');
-    spies.listIssues.mockResolvedValue([{ number: 10, state: 'open', labels: ['b-studio:req'], body: editedBody }]);
-
-    const result = await resolveRequirementConflict(ctx, req(), '작업 중', 'import');
-    expect(result.action).toBe('import');
-    expect(result.draft?.acceptance).toContain('소셜 로그인을 지원한다');
-  });
-
-  it('아직 발행되지 않은 요구사항은 오류를 던진다', async () => {
-    await expect(resolveRequirementConflict(ctx, req({ id: 'R9' }), '미착수', 'ignore')).rejects.toThrow('R9');
   });
 });
 

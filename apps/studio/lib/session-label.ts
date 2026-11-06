@@ -15,8 +15,3 @@ export function cleanSessionLabel(label: string): string {
 export function sessionLabelProblem(label: string): string | undefined {
   return [...cleanSessionLabel(label)].length > SESSION_LABEL_MAX ? `세션 이름은 ${SESSION_LABEL_MAX}자까지입니다` : undefined;
 }
-
-/** 목록·칸 머리에 쓰는 이름: 붙인 이름이 있으면 그것, 없으면 프로젝트 이름 */
-export function sessionDisplayName(session: { projectName: string; label?: string }): string {
-  return session.label?.trim() || session.projectName;
-}

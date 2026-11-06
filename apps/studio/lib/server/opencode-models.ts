@@ -50,11 +50,6 @@ export function freeOnlyEnabled(env: Record<string, string | undefined> = proces
   return FREE_ONLY_ON.has(env.B_STUDIO_OPENCODE_FREE_ONLY?.trim().toLowerCase() ?? '');
 }
 
-/** 지금 실행 모드가 opencode인지. 라우트의 사용자 입력 검증에만 쓴다 */
-export function openCodeMode(env: Record<string, string | undefined> = process.env): boolean {
-  return (env.B_STUDIO_MODE?.trim() || 'api') === 'opencode';
-}
-
 /** 러너 모델을 화면 모델로 바꾼다. opencode에는 기본 표시가 없어 isDefault는 항상 false다 */
 export function toStudioModel(model: OpenCodeModel): OpenCodeModelView {
   return { id: model.id, description: model.name, group: model.provider, free: model.free, isDefault: false, usable: model.usable, ...(model.reason ? { reason: model.reason } : {}) };
@@ -63,11 +58,6 @@ export function toStudioModel(model: OpenCodeModel): OpenCodeModelView {
 /** 무료만 모드로 걸러낸다 */
 export function filterFreeModels(models: readonly OpenCodeModelView[], freeOnly: boolean): OpenCodeModelView[] {
   return freeOnly ? models.filter((model) => model.free) : [...models];
-}
-
-/** 쓸 수 있는 모델이 하나도 없는지. 화면이 로그인 안내를 보여줄지 정한다 */
-export function hasUsableModel(models: readonly OpenCodeModelView[]): boolean {
-  return models.some((model) => model.usable);
 }
 
 /**
