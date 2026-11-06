@@ -1,6 +1,6 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { nativeProject } from '../edge-config';
-import { decodeNative, native } from '../native';
+import { decodeNative, encodeNative, native } from '../native';
 import type { ContainerState, EgressDenial, LogLine } from '../types';
 import type { MaskVolume } from './git-mask';
 
@@ -35,7 +35,7 @@ export function buildOverride(
     gitMask = {},
   }: { edgeScript?: string; runtime?: string; hostPorts?: Record<string, number>; gitMask?: Readonly<Record<string, readonly MaskVolume[]>> } = {},
 ): ComposeOverride {
-  return JSON.parse(native.buildOverride(JSON.stringify({ ...nativeProject(project), sandboxId, edgeScript, runtime, hostPorts, gitMask }))) as ComposeOverride;
+  return JSON.parse(native.buildOverride(encodeNative({ ...nativeProject(project), sandboxId, edgeScript, runtime, hostPorts, gitMask }))) as ComposeOverride;
 }
 
 /**

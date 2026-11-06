@@ -1,5 +1,5 @@
 import type { LoadedProject } from '@b-studio/spec';
-import { native } from './native';
+import { encodeNative, native } from './native';
 
 /**
  * 샌드박스 네트워크의 유일한 출입구(packages/sandbox/edge/edge.mjs)의 설정. Docker와 Kubernetes 제공자가 같은 설정을 쓴다.
@@ -62,5 +62,5 @@ export function proxyEnvironment(direct: readonly string[]): Record<string, stri
 /** edge 프로세스 설정. 값을 그대로 담는다 (compose override는 $를 따로 적는다) */
 export function edgeEnvironment(project: LoadedProject, services: readonly string[]): Record<string, string> {
   const { managed, egress, external } = nativeProject(project);
-  return JSON.parse(native.edgeEnvironment(JSON.stringify({ managed, services, egress, external }))) as Record<string, string>;
+  return JSON.parse(native.edgeEnvironment(encodeNative({ managed, services, egress, external }))) as Record<string, string>;
 }

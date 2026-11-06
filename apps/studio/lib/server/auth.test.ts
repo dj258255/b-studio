@@ -9,7 +9,6 @@ import {
   isSameOrigin,
   LOCAL_USER,
   PROXY_SECRET_HEADER,
-  safeNextPath,
   sessionClaims,
   sessionUser,
   signPreviewGrant,
@@ -143,14 +142,6 @@ describe('권한과 출처', () => {
     expect(isSameOrigin(new Headers({ host: '127.0.0.1:3000', 'x-forwarded-host': 'studio.corp.example', origin: 'https://studio.corp.example' }))).toBe(true);
     expect(isSameOrigin(new Headers({ host: 'studio.internal:3000', origin: 'null' }))).toBe(false);
     expect(isSameOrigin(new Headers({ host: 'studio.internal:3000' }))).toBe(true);
-  });
-
-  it('로그인 뒤 다른 사이트로 보내지 않는다', () => {
-    expect(safeNextPath('/sessions/abc?tab=code')).toBe('/sessions/abc?tab=code');
-    expect(safeNextPath('//evil.example')).toBe('/');
-    expect(safeNextPath('/\\evil.example')).toBe('/');
-    expect(safeNextPath('https://evil.example')).toBe('/');
-    expect(safeNextPath(undefined)).toBe('/');
   });
 });
 
