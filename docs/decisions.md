@@ -214,6 +214,7 @@
 - [ADR-190 지원 스택이 아닌 폴더는 코드·테스트만으로 등록하고, 테스트 명령 없이는 등록하지 않는다](#adr-190-지원-스택이-아닌-폴더는-코드테스트만으로-등록하고-테스트-명령-없이는-등록하지-않는다)
 - [ADR-191 백엔드는 Rust로 단계적으로 옮긴다: 순수 Rust 크레이트를 napi로 붙이고, 옮긴 PR에서 TS 구현을 지운다](#adr-191-백엔드는-rust로-단계적으로-옮긴다-순수-rust-크레이트를-napi로-붙이고-옮긴-pr에서-ts-구현을-지운다)
 - [ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다](#adr-192-범위를-전부로-넓힌다-cli와-desk도-rust로-옮겨-b-studio-실행-파일-하나로-끝낸다)
+- [ADR-193 sandbox I/O를 Rust로 옮긴다: tokio-async 크레이트와 napi 스트리밍 접착, 검증은 행동 등가로](#adr-193-sandbox-io를-rust로-옮긴다-tokio-async-크레이트와-napi-스트리밍-접착-검증은-행동-등가로)
 
 ---
 
@@ -9141,3 +9142,54 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 ### 감수한 트레이드오프
 - 5단계 동안 desk는 화면이 조금씩 달라질 수 있다(글꼴이 아니라 레이아웃 계산이 바뀜). 골든 테스트와 실제 터미널 기록으로 막지만 글자 단위 같음은 보장하지 않는다.
 - 전체 이전 기간은 여전히 추정하지 않는다. 지금까지 1단계, 2a, 2b-1을 하루에 마쳤지만 desk(상태와 입력이 많은 TUI)는 성격이 다르다.
+
+## ADR-193 sandbox I/O를 Rust로 옮긴다: tokio-async 크레이트와 napi 스트리밍 접착, 검증은 행동 등가로
+
+상태: 채택(계획 — 코드는 2c-1부터)
+관련: ADR-191(1~3단계 napi 경계), ADR-192(범위 전부·4~6단계), ADR-166(지원 범위), ADR-088(relay subroot), ADR-169·170·186(세션 터미널·PTY), 이슈 [#1038](https://github.com/dj258255/b-studio/issues/1038), 추적 [#997](https://github.com/dj258255/b-studio/issues/997)
+
+### 맥락
+- 2단계의 순수 판정은 다 옮겼다(`origin/main` 60c2010): 1단계 막는 검사 네 곳, 2a git-mask 판정, 2b-1 출력 해석, 2b-2a compose override·edge, 2b-2b relay·readiness·deploy-plan. 부르는 TS도 모두 `native.*`로 배선됐다.
+- 남은 2c는 **I/O 그 자체**다. `compose-provider.ts`의 docker CLI 실행(`#docker`=`execFile`)과 `logs()`(`spawn`+`readline`으로 만드는 `AsyncIterable`), `deploy.ts`의 빌드 스트림(`spawn`+onLine 콜백)·`verifyThroughProxy`의 `fetch` 폴링·파일 락, `host-terminal.ts`의 `@lydell/node-pty`, `docker/agent-terminal.ts`의 `docker exec`+`script`로 만든 PTY 대용, `git-mask.ts`·`evaluation-assets.ts`의 링크 안전 빈 폴더 준비(`lstat`/`realpath`/`rm`/`mkdir`).
+- ADR-191은 napi 경계를 "Node를 모르는 순수 판정 크레이트, 형 변환만"으로 정하고 I/O는 4단계(서버 Rust화)로 미뤘다. 범수 님이 2026-11-06에 이를 바꿔 **"2c를 4단계로 미루지 말고 지금 napi로"**를 골랐다(4단계에서 napi 스트리밍 접착이 버려지는 것을 받아들임). 그래서 경계가 바뀐다: I/O는 순수 판정이 아니고(syscall·프로세스·소켓), napi는 형 변환만으로 안 된다(비동기·스트림·취소).
+- 2a/2b의 검증 3종(무작위 대량 차등 + 옛 값 벡터 + 변이)은 **순수 함수라서** 가능했다. I/O는 외부 상태(파일·프로세스·시간·플랫폼 FS)가 섞여 "같은 입력에 같은 출력"을 수백만 번 비교할 수 없다. 검증 모델도 바뀐다.
+
+### 검토한 선택지
+**1. I/O를 어느 크레이트에 두나**
+
+| 선택지 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| A. `bstudio-guard`에 I/O를 더함 | 크레이트 하나 | 순수 원칙(의존성 `serde`뿐, Node·OS 모름)이 깨짐. 판정 크레이트가 tokio·pty를 끌어온다 |
+| **B. 새 크레이트 `bstudio-io`(채택)** | 판정은 순수로 유지. 4단계 Rust 서버가 `bstudio-io`를 직접 쓴다(의존 방향 io→guard) | 크레이트가 하나 는다 |
+
+**2. 비동기 런타임**
+
+| 선택지 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| **A. napi `tokio_rt` + `async fn`(채택)** | `async fn`을 그대로 노출. I/O 크레이트가 tokio-async → 4단계 서버(거의 확실히 tokio)가 재사용 | napi `.node`에 tokio 임베드(임시 비대) |
+| B. `AsyncTask`(libuv 스레드풀)+전용 스레드, tokio 없음 | 의존성 가벼움 | I/O 크레이트가 동기 → 4단계에서 `spawn_blocking`으로 감싸거나 고쳐 써야 함(재사용 약함, 버림이 늘어남) |
+
+**3. 스트리밍 세 모양을 어떻게 넘기나.** `logs()`는 `AsyncIterable<LogLine>`, `deploy`는 onLine 콜백, 터미널은 onData/onExit 콜백 — 전부 "Rust가 줄·조각을 만들 때마다 JS로 역류"다. napi의 역류 수단은 `ThreadsafeFunction` 하나로 통일한다. `AsyncIterable`은 TS에서 그 콜백을 큐·백프레셔로 감싸 복원한다(소비자가 늦으면 Rust 읽기를 멈춘다).
+
+**4. HTTP.** `verifyThroughProxy`·`waitForReady`는 로컬 컨테이너(프록시·앱) 확인뿐이라 TLS가 없다. `reqwest`(TLS 스택·의존성 큼) 대신 tokio `TcpStream`으로 최소 HTTP/1.1을 직접 보낸다.
+
+**5. PTY.** `host-terminal`의 `@lydell/node-pty`는 Node 네이티브 애드온이다. Rust는 `portable-pty`(wezterm)로 옮긴다. `agent-terminal`은 node-pty를 안 쓰고 `docker exec`+`script`라 자식 프로세스로 충분하다(ADR-186의 "호스트에 node-pty를 두지 않는다"는 그대로).
+
+### 결정
+1. **새 크레이트 `crates/bstudio-io`(tokio-async).** `bstudio-guard`는 순수 유지. `bstudio-io`는 `bstudio-guard`의 판정을 부른다(의존 방향 io→guard, 역은 금지).
+2. **napi 층(`bstudio-node`)에 `tokio_rt` + `ThreadsafeFunction`을 들인다.** `async fn`을 노출한다. 이 접착이 4단계에서 버려지는 부분이고, I/O 본문(`bstudio-io`)은 재사용된다.
+3. **스트리밍은 `ThreadsafeFunction`으로 통일,** `AsyncIterable`은 TS 큐로 복원, 취소는 `AbortSignal`→Rust `CancellationToken`/프로세스 kill로 전파한다. 로그 구독 종료의 `AbortError`는 지금처럼 정상 흐름으로 삼킨다.
+4. **의존성은 tokio(process·fs·net·rt·sync), `portable-pty`, HTTP는 직접(TLS 없음).** `.node`의 임시 비대는 감수한다 — 최종 6단계 바이너리에 tokio·pty는 어차피 들어가고, "설치를 가볍게"(목적 1)는 Node 런타임 제거(6단계 완료)의 뜻이지 중간 `.node` 크기가 아니다. 자원 절감(목적 3)은 4단계 전엔 재지 않는다.
+5. **검증 모델(2c용, 2a/2b와 다름).**
+   - 기존 vitest 행동 테스트를 그대로 통과한다(임시 폴더·`busybox:1.37`만, 포트 3000·실제 GitHub·실제 모델 안 씀).
+   - 옛 TS와 새 Rust의 **관측 가능한 행동**(파일 내용·권한·inode/dev, exit code, 스트림이 낸 줄과 순서, 가린 결과, 던지는 조건과 종류)을 같은 시나리오로 대조한다. 무작위 대량 대신 **경계 시나리오를 손으로 고른다**(링크·끝의 점·대소문자·동시 호출·중간 취소·컨테이너 재시작).
+   - 안전 경계(링크를 안 따라감, 시크릿 가림, abort 전파, 빈 폴더 준비가 링크 너머를 안 지움)는 명시적 시험 + Rust 변이로 확인한다. 순수 판정이 아닌 부분은 변이가 "행동"을 바꾸는지로 본다.
+   - 테스트 기대값을 내 기기 FS로 적지 않는다(대소문자·정규화·링크는 플랫폼마다 다르다, AGENTS.md). 가능하면 대상을 가리키는 값(inode/dev, 실제 저장 이름)으로 확인한다.
+6. **같은 PR에서 옛 TS I/O를 지운다**(ADR-191 원칙). 지우는 코드(빈 폴더 준비)는 경로가 링크·파일일 때 무엇이 지워지는지부터 보고, 준비 단계는 여러 번·동시에 불려도 같은 결과가 되게 쓴다(AGENTS.md).
+7. **슬라이스 순서**(#1038): 2c-1 링크 안전 fs + `stream-exec`(async 경계) → 2c-2 one-shot 프로세스(`#docker`·`exec`·`stats`·`sync`, 취소 전파) → 2c-3 스트리밍(`logs`·deploy onLine, `ThreadsafeFunction`) → 2c-4 PTY(`agent-terminal`·`host-terminal`) → 2c-5 배포 실행(`deploy.ts`) → 2c-6 compose up 흐름·`relayChanges`·`computeGitMask` 조율. 각 슬라이스는 앞 슬라이스가 세운 경계 위에 쌓는다.
+
+### 감수한 트레이드오프
+- napi의 스트리밍 접착은 4단계에서 버려진다(범수 님이 받아들인 절충). 설계로 버림을 접착으로 한정했다 — I/O 본문은 `bstudio-io`에 모아 4단계 서버가 그대로 쓴다.
+- `.node`가 tokio·pty로 임시로 커진다. 이 단계에서 자원 절감은 재지 않는다.
+- 검증이 무작위 대량 차등에서 "손으로 고른 경계 시나리오 + 변이 + 기존 vitest"로 바뀌어, 입력 공간을 2a/2b만큼 넓게 못 쓸어본다. 안전 경계는 변이와 커밋 보안 검토로 메운다.
+- 두 구현이 한 PR 안에서 잠깐 함께 있는 구간(옛 TS 대조 테스트)은 그 PR 안에서만 두고 머지 전에 옛 구현을 지운다.
