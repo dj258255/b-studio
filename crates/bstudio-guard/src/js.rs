@@ -79,6 +79,14 @@ pub fn slice_ascii(s: &str, start: usize, end: usize) -> &str {
     }
 }
 
+/// JS `s.slice(0, n)`: 앞에서 UTF-16 코드 단위 `n`개. 서로게이트 쌍을 자르면 U+FFFD가 된다(Node 경계 규칙과 같다, js_json 참고)
+pub fn truncate_utf16(s: &str, n: usize) -> String {
+    if utf16_len(s) <= n {
+        return s.to_owned();
+    }
+    String::from_utf16_lossy(&s.encode_utf16().take(n).collect::<Vec<u16>>())
+}
+
 
 /// `String.prototype.trimEnd`
 pub fn trim_end(s: &str) -> &str {

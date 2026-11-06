@@ -1,5 +1,6 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { SandboxError } from './errors';
+import { native } from './native';
 import type { ContainerState, ProbeResult } from './types';
 
 export interface ReadinessPolicy {
@@ -26,36 +27,9 @@ export type ReadinessDecision = { kind: 'ready' } | { kind: 'waiting' } | { kind
  * @param policy 서비스별 준비 정책
  * @param elapsedMs 기동을 시작한 뒤 지난 시간
  */
-export function decideReadiness(
-  history: readonly ProbeResult[],
-  policy: ReadinessPolicy,
-  elapsedMs: number,
-): ReadinessDecision {
-  const latest = history.at(-1);
-  if (!latest) return { kind: 'waiting' };
-
-  // 프로세스가 죽었으면 타임아웃까지 기다릴 이유가 없다. 에이전트가 몇 초 만에 에러를 받아 고칠 수 있게 한다
-  if (latest.containerState === 'exited' || latest.containerState === 'dead') {
-    return { kind: 'failed', reason: `앱이 켜지다가 종료됐습니다 (컨테이너 ${latest.containerState})` };
-  }
-
-  // 기동 직후 잠깐 성공했다가 흔들리는 경우를 걸러내기 위해 연속 성공만 센다
-  let streak = 0;
-  for (let i = history.length - 1; i >= 0 && history[i]?.ok; i--) streak++;
-  if (streak >= policy.successThreshold) return { kind: 'ready' };
-
-  // 연결 거부나 503은 기동 중에 흔한 상태라 타임아웃 전까지는 기다린다
-  if (elapsedMs >= policy.timeoutMs) {
-    const seconds = Math.round(policy.timeoutMs / 1_000);
-    return { kind: 'failed', reason: `${seconds}초 안에 준비되지 않았습니다 (마지막 확인: ${describeProbe(latest)})` };
-  }
-
-  return { kind: 'waiting' };
-}
-
-function describeProbe(probe: ProbeResult): string {
-  const http = probe.error ?? `HTTP ${probe.status}`;
-  return `${http}, 컨테이너 ${probe.containerState}`;
+/** 확인 기록을 보고 준비 여부를 판단한다. 판정은 Rust(`crates/bstudio-guard/src/readiness.rs`)에 있다 */
+export function decideReadiness(history: readonly ProbeResult[], policy: ReadinessPolicy, elapsedMs: number): ReadinessDecision {
+  return JSON.parse(native.decideReadiness(JSON.stringify(history), JSON.stringify(policy), elapsedMs)) as ReadinessDecision;
 }
 
 export class ReadinessError extends SandboxError {
@@ -123,40 +97,26 @@ function describeFetchError(error: unknown): string {
   return typeof code === 'string' ? code : error.message;
 }
 
-/** 오류를 알려 주는 줄. 스택 프레임(`at …`)과 평범한 INFO 줄은 빼고 원인이 적힌 줄을 고른다 */
-const CRASH_SIGNAL = /exception|error|fail|fatal|denied|forbidden|refused|not found|no such|cannot|unable|panic|traceback|killed|out of memory|\b[45]\d\d\b/i;
-const STACK_FRAME = /^\s*(at |\.\.\. \d+ more|File ".*", line \d+)/;
-
 /**
- * 설치 스크립트가 막 쓴 실행 파일을 거의 동시에 실행하다 생기는 일시 오류(트러블슈팅 #90).
- * colima(virtiofs) 공유 폴더처럼 쓰기 반영이 느린 파일시스템에서 esbuild 같은 네이티브 바이너리의 설치 후
- * 자기 검증(postinstall이 방금 쓴 바이너리를 바로 실행)이 걸리기 쉽다. 보통 같은 컨테이너를 다시 띄우면
- * 사라지므로(파일이 이미 끝까지 쓰였다) 한 번은 다시 시도해 볼 만하다고 본다
+ * 죽은 컨테이너의 마지막 로그 줄(보통 {@link crashLogExcerpt}의 결과)에 알려진 일시 오류(ETXTBSY·EBUSY, 트러블슈팅 #90)가
+ * 있는지 본다. colima(virtiofs) 공유 폴더에서 설치 직후 바이너리를 바로 실행하다 생기는 일시 오류다 — 판정은 Rust에 있다
  */
-const TRANSIENT_BOOT_ERROR = /\bETXTBSY\b|\bEBUSY\b/;
-
-/** 죽은 컨테이너의 마지막 로그 줄(보통 {@link crashLogExcerpt}의 결과)에 알려진 일시 오류가 있는지 본다 */
 export function isTransientBootError(lines: readonly string[]): boolean {
-  return lines.some((line) => TRANSIENT_BOOT_ERROR.test(line));
+  return native.isTransientBootError([...lines]);
 }
 
 /**
- * 이번 기동 시도에서 컨테이너를 한 번 더 띄워 볼지 정한다(판정 로직만 떼어 두어 도커 없이 테스트한다).
- * attempt는 1부터 시작한다 — 1번째 시도가 일시 오류로 죽었을 때만 재시도하고, 재시도(2번째 시도)도 또 죽으면
- * 더는 재시도하지 않는다(무한 재시도 금지, 트러블슈팅 #90)
+ * 이번 기동 시도에서 컨테이너를 한 번 더 띄워 볼지 정한다. attempt는 1부터 시작하고, 1번째 시도가 일시 오류로 죽었을 때만
+ * 재시도한다(무한 재시도 금지, 트러블슈팅 #90)
  */
 export function shouldRetryTransientCrash(attempt: number, excerpt: readonly string[]): boolean {
-  return attempt === 1 && isTransientBootError(excerpt);
+  return native.shouldRetryTransientCrash(attempt, [...excerpt]);
 }
 
 /**
- * 죽은 컨테이너의 마지막 로그에서 원인을 보여 줄 줄을 고른다(최대 `max`줄, 오래된 것부터).
+ * 죽은 컨테이너의 마지막 로그에서 원인을 보여 줄 줄을 고른다(최대 `max`줄, 오래된 것부터). 판정은 Rust에 있다.
  * 오류다운 줄이 없으면 마지막 몇 줄을 그대로 쓴다. "UND_ERR_SOCKET" 같은 연결 오류 대신 앱이 왜 죽었는지 보이려는 것이다
- * (Gradle 래퍼가 프록시 403으로 죽었는데 화면에는 소켓 오류만 보였다)
  */
 export function crashLogExcerpt(lines: readonly string[], max = 6): string[] {
-  const cleaned = lines.map((line) => line.replace(/\s+$/, '')).filter((line) => line.trim() !== '');
-  const signals = cleaned.filter((line) => !STACK_FRAME.test(line) && CRASH_SIGNAL.test(line));
-  const picked = (signals.length > 0 ? signals : cleaned).slice(-max);
-  return picked.map((line) => (line.length > 300 ? `${line.slice(0, 300)}…` : line));
+  return native.crashLogExcerpt([...lines], max);
 }
