@@ -2001,6 +2001,7 @@ describe('중첩 git 저장소 거부', () => {
     await mkdir(path.join(root, dir, name), { recursive: true });
     await writeFile(path.join(root, dir, name, 'HEAD'), 'ref: refs/heads/main\n');
   };
+  const nothingIgnored = async (): Promise<Set<string>> => new Set();
 
   it('findNestedGitRepos는 최상위 .git을 빼고 중첩 저장소(디렉터리·파일)를 찾는다', async () => {
     await mkdir(path.join(root, '.git'), { recursive: true });
@@ -2008,14 +2009,21 @@ describe('중첩 git 저장소 거부', () => {
     // worktree·submodule 포인터는 .git 파일이다
     await mkdir(path.join(root, 'sub'), { recursive: true });
     await writeFile(path.join(root, 'sub/.git'), 'gitdir: /somewhere\n');
-    const found = await findNestedGitRepos(root, path.resolve(root, '.git'));
+    const found = await findNestedGitRepos(root, path.resolve(root, '.git'), nothingIgnored);
     expect(found.sort()).toEqual(['sub/.git', 'vendor/lib/.git']);
   });
 
-  it('이름을 대소문자 없이 보고, 거르기는 하지 않아 생성물 폴더 안도 찾는다(걸러 내는 것은 check-ignore가 한다)', async () => {
+  it('무시되는 디렉터리에는 들어가지 않고, .git 이름은 대소문자 없이 본다', async () => {
     await mkRepo('A', '.GIT');
     await mkRepo('node_modules/dep');
-    expect((await findNestedGitRepos(root, undefined)).sort()).toEqual(['A/.GIT', 'node_modules/dep/.git']);
+    const found = await findNestedGitRepos(root, undefined, async (dirs) => new Set(dirs.filter((dir) => dir === 'node_modules')));
+    expect(found).toEqual(['A/.GIT']);
+  });
+
+  it('한도에 닿으면 멈춘다(호출자가 길이로 fail-closed를 판단한다)', async () => {
+    for (const dir of ['a', 'b', 'c']) await mkRepo(dir);
+    const found = await findNestedGitRepos(root, path.resolve(root, '.git'), nothingIgnored, 2);
+    expect(found).toHaveLength(2);
   });
 
   it('심볼릭 링크는 따라가지 않는다(링크 너머는 작업 폴더 밖일 수 있다)', async () => {
@@ -2023,7 +2031,7 @@ describe('중첩 git 저장소 거부', () => {
     await mkdir(path.join(external, '.git'), { recursive: true });
     await symlink(external, path.join(root, 'linked'));
     try {
-      expect(await findNestedGitRepos(root, path.resolve(root, '.git'))).toEqual([]);
+      expect(await findNestedGitRepos(root, path.resolve(root, '.git'), nothingIgnored)).toEqual([]);
     } finally {
       await rm(external, { recursive: true, force: true });
     }
