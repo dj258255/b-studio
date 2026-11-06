@@ -280,6 +280,11 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
         edge_env.set(&key, JsValue::str(escape_dollar(&value)));
     }
     for secret in p.external_auth.iter().flatten() {
+        // edge가 이미 쓰는 이름이면 그 설정을 null로 비우게 되고 compose가 시크릿 값으로 채운다. 목록을 따로 두지 않고
+        // 방금 만든 edge 환경과 견준다(이름 규칙은 spec 스키마가 먼저 막는다, #1018)
+        if edge_env.contains_key(secret) {
+            return Err(format!("사내 API 인증 시크릿 이름 '{secret}'이 edge 설정 이름과 겹칩니다"));
+        }
         edge_env.set(secret, JsValue::Null);
     }
     let mut edge = JsObject::new();
@@ -381,6 +386,21 @@ mod tests {
     }
 
     const MIN: &str = r#"{"managed":[["web",3000],["api",8080]],"composeServices":["web","api","db"],"sandboxId":"s1"}"#;
+
+    #[test]
+    fn 인증_시크릿_이름이_edge가_이미_쓰는_환경_이름과_겹치면_만들지_않는다() {
+        // 겹치면 edge의 그 설정(송신 허용 목록 등)이 null로 비워져 compose가 시크릿 값으로 채운다(#1018)
+        for name in ["EDGE_EGRESS", "EDGE_MAIN", "EDGE_EXTERNALS", "EDGE_FORWARDS", "EDGE_CALLERS"] {
+            let input = format!(
+                r#"{{"managed":[["web",3000]],"composeServices":["web"],"sandboxId":"s1","external":[["users",{{"baseUrl":"https://u.example.com","policy":{{"auth":{{"header":"X","secret":"{name}"}}}}}}]]}}"#
+            );
+            let err = build(&input).expect_err(name);
+            assert!(err.contains(name) && err.contains("겹칩니다"), "{name}: {err}");
+        }
+        let ok = r#"{"managed":[["web",3000]],"composeServices":["web"],"sandboxId":"s1","external":[["users",{"baseUrl":"https://u.example.com","policy":{"auth":{"header":"X","secret":"USERS_TOKEN"}}}]]}"#;
+        let out = build(ok).unwrap();
+        assert!(matches!(out.prop("services").unwrap().prop("b-studio-edge").unwrap().prop("environment").unwrap().prop("USERS_TOKEN"), Some(JsValue::Null)));
+    }
 
     #[test]
     fn 모든_서비스는_internal_네트워크에만_붙고_포트는_edge가_루프백으로만_공개한다() {

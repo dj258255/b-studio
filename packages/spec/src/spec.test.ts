@@ -904,6 +904,16 @@ secrets:
     expect(parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "https://users.example.com" }\n').services.users).toMatchObject({
       policy: { mask: [], maskPatterns: [] },
     });
+    // 인증 시크릿은 edge 컨테이너 환경에 그 이름으로 들어간다. edge 설정·Node·로더가 읽는 이름과 겹치면 그 값을 시크릿이 덮는다(#1018)
+    for (const name of ['EDGE_EGRESS', 'EDGE_SOMETHING_NEW', 'NODE_OPTIONS', 'LD_PRELOAD', 'PATH', 'HTTPS_PROXY']) {
+      const reserved = captureError(() =>
+        parseSpec(`version: 1\nname: x\nservices:\n  users:\n    source: external\n    baseUrl: "https://users.example.com"\n    policy:\n      auth: { header: X-Api-Key, secret: ${name} }\n`),
+      );
+      expect(reserved.issues, name).toEqual([`services.users.policy.auth.secret: '${name}'은(는) edge 프록시가 쓰는 환경 변수 이름과 겹칩니다. 다른 이름을 쓰세요`]);
+    }
+    expect(
+      parseSpec('version: 1\nname: x\nservices:\n  users:\n    source: external\n    baseUrl: "https://users.example.com"\n    policy:\n      auth: { header: X-Api-Key, secret: NODEJS_TOKEN }\n').services.users,
+    ).toMatchObject({ policy: { auth: { secret: 'NODEJS_TOKEN' } } });
     const ftp = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "ftp://users.example.com" }\n'));
     expect(ftp.issues[0]).toMatch(/^services\.users\.baseUrl/);
     const credentials = captureError(() => parseSpec('version: 1\nname: x\nservices:\n  users: { source: external, baseUrl: "https://svc:pw@users.example.com" }\n'));
