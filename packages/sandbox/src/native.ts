@@ -91,9 +91,19 @@ export const native: NativeGuard = load();
 /** `NaN`·`Infinity`·`-0`은 JSON으로 쓸 수 없어(`JSON.stringify`는 `null`·`0`으로 바꾼다) NUL로 시작하는 키 하나짜리 객체로 주고받는다(crates/bstudio-guard/src/js_json.rs) */
 const NONFINITE_KEY = '\u0000nf';
 
-/** Rust로 보낼 JSON. 유한하지 않은 수와 -0은 표시 객체로 쓴다 */
+/**
+ * Rust로 보낼 JSON. 유한하지 않은 수와 -0은 표시 객체로 쓴다.
+ * 데이터의 객체가 NUL로 시작하는 키를 가지면 던진다. 그대로 보내면 표시 객체를 흉내 내 수로 읽힐 수 있다(#1029)
+ */
 export function encodeNative(value: unknown): string {
-  return JSON.stringify(value, (_key, item: unknown) => (typeof item === 'number' && (!Number.isFinite(item) || Object.is(item, -0)) ? { [NONFINITE_KEY]: Object.is(item, -0) ? '-0' : String(item) } : item));
+  // replacer가 돌려준 표시 객체에는 replacer가 다시 불리지 않으므로(안의 속성에만 불린다) 아래 확인은 데이터의 객체만 본다
+  return JSON.stringify(value, (_key, item: unknown) => {
+    if (typeof item === 'number' && (!Number.isFinite(item) || Object.is(item, -0))) return { [NONFINITE_KEY]: Object.is(item, -0) ? '-0' : String(item) };
+    if (item !== null && typeof item === 'object' && !Array.isArray(item) && Object.keys(item).some((key) => key.startsWith('\u0000'))) {
+      throw new Error('NUL로 시작하는 키는 Rust 판정으로 보낼 수 없습니다');
+    }
+    return item;
+  });
 }
 
 /** Rust가 보낸 JSON. 표시 객체를 `NaN`·`Infinity`·`-0`으로 되돌린다 */
