@@ -812,3 +812,77 @@ impl AsyncGenerator for LogStream {
         async move { Ok(None) }
     }
 }
+
+// === 호스트 PTY(ADR-193, 2c-4a): node-pty를 portable-pty로 대체한다 ===
+// 양방향이다: write/resize/kill은 동기 메서드, 출력(on_data)·종료(on_exit)는 ThreadsafeFunction으로 역류한다(2c-3a 밀어내기 경계 재사용).
+// PTY는 blocking I/O라 bstudio-io가 std::thread로 격리한다 — 여기선 TSFN을 감싼 콜백만 주입한다.
+use napi::bindgen_prelude::Buffer as NapiBuffer;
+
+/// 호스트에 연 가상 터미널. TS host-terminal.ts의 `HostPty`(node-pty)를 대신한다.
+#[napi]
+pub struct HostPty {
+    inner: Arc<bstudio_io::pty::HostPty>,
+}
+
+#[napi]
+impl HostPty {
+    /// `file args`로 PTY를 열고 띄운다. `on_data`는 출력(Buffer)마다, `on_exit`는 종료 코드로 한 번 불린다.
+    /// `cols`/`rows`는 u32로 받아 u16으로 좁힌다(napi가 u16을 직접 받지 않는다). `env`는 상속 없이 통째 치환한다.
+    #[napi(constructor)]
+    pub fn new(
+        file: String,
+        args: Vec<String>,
+        name: String,
+        cols: u32,
+        rows: u32,
+        cwd: String,
+        env_vars: HashMap<String, String>,
+        on_data: ThreadsafeFunction<NapiBuffer, (), NapiBuffer, Status, false>,
+        on_exit: ThreadsafeFunction<i32, (), i32, Status, false>,
+    ) -> Result<Self> {
+        let data_cb: bstudio_io::pty::OnData = Arc::new(move |bytes: Vec<u8>| {
+            on_data.call(bytes.into(), ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let exit_cb: bstudio_io::pty::OnExit = Arc::new(move |code: i32| {
+            on_exit.call(code, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let pairs = env_pairs(Some(env_vars)).unwrap_or_default();
+        let pty = bstudio_io::pty::open_host_pty(
+            &file,
+            &args,
+            &name,
+            cols as u16,
+            rows as u16,
+            &cwd,
+            &pairs,
+            data_cb,
+            exit_cb,
+        )
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+        Ok(Self { inner: Arc::new(pty) })
+    }
+
+    /// 자식 pid(감시가 이 아래의 CLI를 찾는 데 쓴다). 플랫폼이 못 주면 undefined.
+    #[napi(getter)]
+    pub fn pid(&self) -> Option<u32> {
+        self.inner.pid()
+    }
+
+    /// PTY에 입력을 쓴다.
+    #[napi]
+    pub fn write(&self, data: NapiBuffer) -> Result<()> {
+        self.inner.write(&data).map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// 터미널 크기를 바꾼다(SIGWINCH).
+    #[napi]
+    pub fn resize(&self, cols: u32, rows: u32) -> Result<()> {
+        self.inner.resize(cols as u16, rows as u16).map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// 자식을 죽인다(셸과 그 안의 CLI가 함께 끝난다).
+    #[napi]
+    pub fn kill(&self) -> Result<()> {
+        self.inner.kill().map_err(|error| Error::from_reason(error.to_string()))
+    }
+}
