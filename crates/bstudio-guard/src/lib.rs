@@ -16,6 +16,7 @@ pub mod declared_checks;
 pub mod deploy_plan;
 pub mod doc_lint;
 pub mod docker_format;
+pub mod docs;
 pub mod edge_config;
 pub mod escalation;
 pub mod git_mask;
