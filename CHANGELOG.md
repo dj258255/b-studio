@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 게이트 리뷰 판정 네 가지(확인 선언이 바뀌었는지·약해졌는지, 부하 확인 통과 판정, 두 OpenAPI 문서의 계약 비교, 통과한 확인의 근거 줄)를 Rust로 옮겼습니다(ADR-191 3단계 3e, #1066). 옛 구현과 같은 입력에 같은 결과를 내고, 달라지는 곳은 모두 던지는 쪽입니다: 모양이 어긋난 선언·결과·문서와 짝 없는 서로게이트가 든 이름은 판정하지 않고 실패로 알립니다.
 - 테스트 탭의 실행·결과 단계(`packages/agent/src/test-run.ts`: 실행기 판별, 테스트 명령과 보고서 수거·삭제 명령, 수거 출력 나누기, `test-results.ts`: JUnit XML·Vitest/Jest JSON 읽기, 발견한 행과 결과 잇기, 개수 세기, 입력창 채우는 글)을 Rust로 옮겼습니다(ADR-191 3단계 3d, #1065). TS에는 같은 이름·시그니처의 껍데기만 남았고 상수(`JEST_LIKE_REPORT_PATH`·`PYTEST_REPORT_PATH`·`CONTAINER_PROJECT_ROOT`)는 Rust가 정한 값을 읽습니다. 명령 글자는 그대로입니다. 알 수 없는 실행기 이름은 `undefined` 대신 던지고, 짝 없는 서로게이트는 U+FFFD로 바뀌며, 보고서 엔티티 `&constructor;`는 더는 함수 글자로 바뀌지 않습니다.
 - 게이트의 자동 화면 확인이 쓰는 import 그래프(소스 읽기·별칭 해석·역추적)의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3b, #1062). 파일을 읽는 순서와 상한은 그대로이고, 같은 거리의 page를 여는 순서만 `localeCompare`에서 UTF-16 코드 단위 순서로 바뀝니다.
 - 요구사항을 GitHub 이슈로 발행하는 문안·판정(관리 영역 본문, 해시, 추적 이슈 표, 발행 계획, 상태 댓글, 이슈 폼 읽기)을 Rust로 옮겼습니다(ADR-191 3단계 3c, #1063). 글자와 판정은 같고, 옛 TS와 같은 무작위 입력 각 9만 번이 모두 같았습니다. `ALLOWED_REQUIREMENT_ENDPOINTS` 정규식 목록은 내보내지 않고 `assertAllowedRequirementEndpoint`만 남겼습니다.

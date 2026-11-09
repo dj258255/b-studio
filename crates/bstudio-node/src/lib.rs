@@ -1552,3 +1552,113 @@ pub fn build_fix_test_prefill(row_json: String) -> Result<String> {
 pub fn build_add_test_prefill(requirement_json: String) -> Result<String> {
     fail(test_results::build_add_test_prefill(&requirement_json))
 }
+
+// ── 게이트 리뷰 판정(ADR-191 3단계 3e). 확인 선언 변경(declared-checks), 근거 줄(check-evidence), 부하 판정(load-check), 계약 비교(contract-diff).
+// 입력·출력은 JSON 문자열이다(`NaN`·`Infinity`·`-0`은 표시 객체, js_json 모듈). 판정 입력은 짝 없는 서로게이트가 있으면 던진다(review_input).
+// 모양이 어긋난 입력은 던진다. TS 껍데기: packages/agent/src/{declared-checks,check-evidence,load-check,contract-diff}.ts
+use bstudio_guard::{check_evidence, contract_diff, declared_checks, load_check, review_input};
+
+/// 판정에 쓸 JSON. 짝 없는 서로게이트가 있으면 던진다
+fn review_json(json: &str, what: &str) -> Result<JsValue> {
+    fail(review_input::parse_checked(json, what))
+}
+
+fn change_of(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> declared_checks::DeclaredCheckChange {
+    declared_checks::DeclaredCheckChange { added, removed, changed }
+}
+
+#[napi]
+pub fn diff_declared_checks(started_json: String, latest_json: String) -> Result<String> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    Ok(out(&fail(declared_checks::diff_declared_checks(Some(&started), Some(&latest)))?.to_value()))
+}
+
+#[napi]
+pub fn weakened_declarations(started_json: String, latest_json: String) -> Result<Vec<String>> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    fail(declared_checks::weakened_declarations(Some(&started), Some(&latest)))
+}
+
+#[napi]
+pub fn has_declared_check_change(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> bool {
+    declared_checks::has_declared_check_change(&change_of(added, removed, changed))
+}
+
+#[napi]
+pub fn describe_declared_check_change(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> String {
+    declared_checks::describe_declared_check_change(&change_of(added, removed, changed))
+}
+
+/// 남은 선언이 없으면 null
+#[napi]
+pub fn with_declared_checks(started_json: String, latest_json: String) -> Result<Option<String>> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    Ok(fail(declared_checks::with_declared_checks(Some(&started), Some(&latest)))?.map(|merged| out(&merged)))
+}
+
+#[napi]
+pub fn load_request_for(check_json: String) -> Result<String> {
+    Ok(out(&fail(load_check::load_request_for(&review_json(&check_json, "부하 확인 선언")?))?))
+}
+
+#[napi]
+pub fn describe_load_expect(expect_json: String) -> Result<String> {
+    fail(load_check::describe_load_expect(&review_json(&expect_json, "응답 시간 기준")?))
+}
+
+#[napi]
+pub fn judge_load(check_json: String, result_json: String) -> Result<String> {
+    let (check, result) = (review_json(&check_json, "부하 확인 선언")?, review_json(&result_json, "부하 결과")?);
+    Ok(out(&fail(load_check::judge_load(&check, &result))?.to_value()))
+}
+
+/// 시크릿을 가리는 JS 함수를 부른다. 던지면 그 이유를 돌려준다
+fn redactor<'a, 'f>(redact: &'a Function<'f, String, String>) -> impl Fn(&str) -> std::result::Result<String, String> + 'a {
+    move |text| redact.call(text.to_owned()).map_err(|e| e.reason.clone())
+}
+
+/// 근거 줄에 쓰는 JSON. 판정이 아니라 설명이라 짝 없는 서로게이트는 U+FFFD로 읽는다
+fn evidence_json(json: &str, what: &str) -> Result<JsValue> {
+    input(json, what)
+}
+
+#[napi]
+pub fn finish_evidence(lines: Vec<String>, redact: Function<String, String>) -> Result<Vec<String>> {
+    fail(check_evidence::finish_evidence(&lines, &redactor(&redact)))
+}
+
+#[napi]
+pub fn browser_page_evidence(page_json: String, result_json: String, context_json: String, redact: Function<String, String>) -> Result<Vec<String>> {
+    let (page, result, context) = (evidence_json(&page_json, "화면 확인 선언")?, evidence_json(&result_json, "화면 확인 결과")?, evidence_json(&context_json, "근거 맥락")?);
+    fail(check_evidence::browser_page_evidence(&page, &result, Some(&context), &redactor(&redact)))
+}
+
+#[napi]
+pub fn http_page_evidence(page_json: String, response_json: String, context_json: String, redact: Function<String, String>) -> Result<Vec<String>> {
+    let (page, response, context) = (evidence_json(&page_json, "화면 확인 선언")?, evidence_json(&response_json, "HTTP 응답")?, evidence_json(&context_json, "근거 맥락")?);
+    fail(check_evidence::http_page_evidence(&page, &response, Some(&context), &redactor(&redact)))
+}
+
+#[napi]
+pub fn test_evidence(service: String, command: Vec<String>, elapsed_ms: f64) -> Vec<String> {
+    check_evidence::test_evidence(&service, &command, elapsed_ms)
+}
+
+/// before가 `null`이면 이전 문서가 없다
+#[napi]
+pub fn diff_contracts(before_json: String, after_json: String) -> Result<String> {
+    let (before, after) = (review_json(&before_json, "이전 계약")?, review_json(&after_json, "지금 계약")?);
+    let changes = fail(contract_diff::diff_contracts(Some(&before), &after))?;
+    Ok(out(&JsValue::Arr(changes.iter().map(contract_diff::ContractChange::to_value).collect())))
+}
+
+#[napi]
+pub fn summarize_contract(document_json: String) -> Result<String> {
+    fail(contract_diff::summarize_contract(&review_json(&document_json, "계약")?))
+}
+
+#[napi]
+pub fn format_contract_changes(changes_json: String) -> Result<String> {
+    // 변경 목록은 비교 결과를 글자로 옮길 뿐이라 짝 없는 서로게이트는 U+FFFD로 읽는다(근거 줄과 같다)
+    fail(contract_diff::format_contract_changes(&input(&changes_json, "계약 변경 목록")?))
+}
