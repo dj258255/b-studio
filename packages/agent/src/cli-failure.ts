@@ -1,4 +1,4 @@
-import { stripAnsi } from '@b-studio/sandbox';
+import { native } from '@b-studio/sandbox';
 
 /**
  * 로컬 CLI 확인 명령(`codex login status`·`cmd status` 등)이 실패했을 때의 결과.
@@ -17,11 +17,12 @@ export interface CliPreflightFailure {
 
 /** CLI 실행 오류를 화면에 옮길 수 있는 글로 바꾼다. 색·커서 같은 터미널 제어 코드를 지운다 */
 export function describeCliError(error: unknown): string {
+  // 오류 값을 글자로 만드는 일(instanceof·String)은 JS 객체 판정이라 여기 남기고, 제어 코드 지우기·자르기는 Rust가 한다(ADR-191 3l)
   const raw = error instanceof Error ? error.message : String(error);
-  return stripAnsi(raw).trim();
+  return native.describeCliText(raw);
 }
 
 export function cliPreflightFailure(summary: string, error: unknown): CliPreflightFailure {
   const detail = describeCliError(error);
-  return { ok: false, reason: detail ? `${summary} (${detail})` : summary, summary, detail };
+  return { ok: false, reason: native.cliFailureReason(summary, detail), summary, detail };
 }
