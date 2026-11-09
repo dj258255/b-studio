@@ -1106,3 +1106,92 @@ pub async fn probe_http_status(port: u32, path: String, timeout_ms: u32) -> Resu
         Err(error) => HttpProbe { status: None, error: Some(error) },
     })
 }
+
+// ── 테스트 실행·결과(ADR-191 3d). 결과 객체는 JSON 문자열이다(`NaN`·`Infinity`가 나올 수 있는 결과는 표시 객체로, js_json 참고).
+// TS 껍데기: packages/agent/src/{test-run,test-results}.ts
+
+use bstudio_guard::{test_results, test_run};
+
+/// 상수는 Rust가 정한 값을 TS가 읽어 쓴다(한 곳이 정한다)
+#[napi]
+pub fn test_run_constants() -> String {
+    format!(
+        "{{\"jestLikeReportPath\":{},\"pytestReportPath\":{},\"containerProjectRoot\":{}}}",
+        bstudio_guard::js::json_quote(test_run::JEST_LIKE_REPORT_PATH),
+        bstudio_guard::js::json_quote(test_run::PYTEST_REPORT_PATH),
+        bstudio_guard::js::json_quote(test_run::CONTAINER_PROJECT_ROOT),
+    )
+}
+
+/// 알 수 없는 실행기는 던진다
+#[napi]
+pub fn build_test_run_plan(
+    runner: String,
+    file: Option<String>,
+    class_name: Option<String>,
+    test_name: Option<String>,
+    wrapper: Option<bool>,
+    extra_report_roots: Vec<String>,
+) -> Result<String> {
+    fail(test_run::build_test_run_plan(&runner, file.as_deref(), class_name.as_deref(), test_name.as_deref(), wrapper, &extra_report_roots)).map(|plan| plan.to_json())
+}
+
+#[napi]
+pub fn clear_test_reports_command(extra_report_roots: Vec<String>) -> Vec<String> {
+    test_run::clear_test_reports_command(&extra_report_roots)
+}
+
+#[napi]
+pub fn report_roots_for_includes(includes: Vec<String>, root: String) -> Vec<String> {
+    test_run::report_roots_for_includes(&includes, &root)
+}
+
+#[napi]
+pub fn split_collected_reports(stdout: String, single_file_label: String) -> String {
+    test_run::reports_to_json(&test_run::split_collected_reports(&stdout, &single_file_label))
+}
+
+/// `package_json`은 부르는 쪽의 `package.json` 값(없으면 undefined·null)
+#[napi]
+pub fn detect_runner(template: String, has_pom_xml: Option<bool>, package_json: Option<String>) -> Result<Option<String>> {
+    let package_json = package_json.map(|text| input(&text, "package.json")).transpose()?;
+    Ok(test_run::detect_runner(&template, has_pom_xml == Some(true), package_json.as_ref()).map(str::to_owned))
+}
+
+#[napi]
+pub fn runner_label(runner: String) -> Result<String> {
+    fail(test_run::runner_label(&runner)).map(str::to_owned)
+}
+
+/// 범위 밖 엔티티(`&#x110000;`)는 던진다
+#[napi]
+pub fn parse_j_unit_xml(xml: String) -> Result<String> {
+    fail(test_results::parse_junit_xml(&xml)).map(|run| out(&run))
+}
+
+/// JSON이 아니면 빈 결과, JSON `null`이면 던진다
+#[napi]
+pub fn parse_jest_like_json(json: String) -> Result<String> {
+    fail(test_results::parse_jest_like_json(&json)).map(|run| out(&run))
+}
+
+/// 행마다 짝지은 케이스의 위치(없으면 -1). 행·케이스는 판정에 쓰는 필드만 담은 JSON, `ids`는 같은 객체면 같은 값
+#[napi]
+pub fn attach_results(rows_json: String, cases_json: String, ids: Vec<u32>) -> Result<Vec<i64>> {
+    fail(test_results::attach_results(&rows_json, &cases_json, &ids))
+}
+
+#[napi]
+pub fn count_by_status(statuses_json: String) -> Result<String> {
+    fail(test_results::count_by_status(&statuses_json))
+}
+
+#[napi]
+pub fn build_fix_test_prefill(row_json: String) -> Result<String> {
+    fail(test_results::build_fix_test_prefill(&row_json))
+}
+
+#[napi]
+pub fn build_add_test_prefill(requirement_json: String) -> Result<String> {
+    fail(test_results::build_add_test_prefill(&requirement_json))
+}

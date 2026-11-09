@@ -21,4 +21,6 @@ pub mod relay;
 pub mod secrets;
 pub mod snapshots;
 pub mod stray_processes;
+pub mod test_results;
+pub mod test_run;
 pub mod usage;
