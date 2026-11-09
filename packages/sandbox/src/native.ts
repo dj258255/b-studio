@@ -212,6 +212,21 @@ interface NativeGuard {
   importGraphResolveImport(specifier: string, fromFile: string, files: string[], aliasJson: string): string | null | undefined;
   importGraphBuildReverse(sourceFiles: string[], sourceTexts: string[], files: string[], aliasJson: string): string;
   importGraphTracePages(changed: string[], reverseJson: string, files: string[], maxDepth: number): string;
+  // ── agent: test-run·test-results(3단계 3d). 결과 객체는 JSON 문자열(NaN·Infinity가 나올 수 있는 보고서 해석은 encodeNative·decodeNative 표시 객체).
+  // 알 수 없는 실행기·범위 밖 엔티티·모양이 어긋난 입력은 던진다. attachResults는 행마다 짝지은 케이스의 위치(없으면 -1)를 돌려준다
+  testRunConstants(): string;
+  buildTestRunPlan(runner: string, file: string | undefined | null, className: string | undefined | null, testName: string | undefined | null, wrapper: boolean | undefined | null, extraReportRoots: string[]): string;
+  clearTestReportsCommand(extraReportRoots: string[]): string[];
+  reportRootsForIncludes(includes: string[], root: string): string[];
+  splitCollectedReports(stdout: string, singleFileLabel: string): string;
+  detectRunner(template: string, hasPomXml: boolean | undefined | null, packageJson: string | undefined | null): string | null | undefined;
+  runnerLabel(runner: string): string;
+  parseJUnitXml(xml: string): string;
+  parseJestLikeJson(json: string): string;
+  attachResults(rowsJson: string, casesJson: string, ids: number[]): number[];
+  countByStatus(statusesJson: string): string;
+  buildFixTestPrefill(rowJson: string): string;
+  buildAddTestPrefill(requirementJson: string): string;
 }
 
 export interface NativeHostPty {

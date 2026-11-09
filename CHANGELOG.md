@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 테스트 탭의 실행·결과 단계(`packages/agent/src/test-run.ts`: 실행기 판별, 테스트 명령과 보고서 수거·삭제 명령, 수거 출력 나누기, `test-results.ts`: JUnit XML·Vitest/Jest JSON 읽기, 발견한 행과 결과 잇기, 개수 세기, 입력창 채우는 글)을 Rust로 옮겼습니다(ADR-191 3단계 3d, #1065). TS에는 같은 이름·시그니처의 껍데기만 남았고 상수(`JEST_LIKE_REPORT_PATH`·`PYTEST_REPORT_PATH`·`CONTAINER_PROJECT_ROOT`)는 Rust가 정한 값을 읽습니다. 명령 글자는 그대로입니다. 알 수 없는 실행기 이름은 `undefined` 대신 던지고, 짝 없는 서로게이트는 U+FFFD로 바뀌며, 보고서 엔티티 `&constructor;`는 더는 함수 글자로 바뀌지 않습니다.
 - 게이트의 자동 화면 확인이 쓰는 import 그래프(소스 읽기·별칭 해석·역추적)의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3b, #1062). 파일을 읽는 순서와 상한은 그대로이고, 같은 거리의 page를 여는 순서만 `localeCompare`에서 UTF-16 코드 단위 순서로 바뀝니다.
 - 요구사항을 GitHub 이슈로 발행하는 문안·판정(관리 영역 본문, 해시, 추적 이슈 표, 발행 계획, 상태 댓글, 이슈 폼 읽기)을 Rust로 옮겼습니다(ADR-191 3단계 3c, #1063). 글자와 판정은 같고, 옛 TS와 같은 무작위 입력 각 9만 번이 모두 같았습니다. `ALLOWED_REQUIREMENT_ENDPOINTS` 정규식 목록은 내보내지 않고 `assertAllowedRequirementEndpoint`만 남겼습니다.
 - 테스트 발견(`packages/agent/src/test-discovery.ts`: JUnit·Vitest/Jest/Playwright·pytest의 스위트·테스트 읽기, 요구사항 id 찾기, 평탄화)을 Rust로 옮겼습니다(ADR-191 3단계 3a, #1061). TS에는 같은 이름·시그니처의 껍데기만 남았고, 쓰이는 곳이 없던 정규식 상수 `JUNIT_FILE_PATTERN`·`JS_TEST_FILE_PATTERN`·`PYTEST_FILE_PATTERN` export는 지웠습니다. 짝 없는 서로게이트는 U+FFFD로 바뀌고, 스위트가 약 60단계를 넘게 중첩된 결과는 평탄화하지 않고 던집니다.
