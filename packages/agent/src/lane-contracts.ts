@@ -17,6 +17,7 @@
  *
  * 프롬프트의 예시는 벤치 과제(주문)와 무관한 영역(책)으로 둡니다. 예시가 과제의 필드 이름을 담으면 모델 계약이 답을 베낀 셈이 됩니다.
  */
+import { encodeNative, native } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { z } from 'zod';
 import type { AgentUsage, ModelClient } from './loop';
@@ -48,35 +49,15 @@ const ZERO_USAGE: AgentUsage = { inputTokens: 0, outputTokens: 0, cacheReadToken
  * 고정 계획 JSON을 돌려주기 때문입니다(proxy.ts의 isPlannerRequest). 그 접두사와 겹치면 계약 호출이 계획 응답을 받습니다.
  */
 export function buildContractSystem(project: LoadedProject): string {
-  const services = project.managed.map(([name, service]) => `- ${name}: ${service.template}, 폴더 ${service.path}`).join('\n');
-  return `You write the interface contracts between parallel coding agents for project "${project.spec.name}".
-Services:
-${services}
-
-The agents run at the same time in separate workspaces and cannot see each other's code. Write down ONLY the interfaces where two agents must agree: an endpoint one agent serves and another calls, the shape of that response, a field name both sides use.
-Reply with ONLY a JSON object: {"contracts":[{"body":"...","refs":["..."]}]}
-Rules:
-- Each body is one interface, in exactly this shape: "GET /api/books/{id} → 200 JSON, 404 if missing. Fields: id(number), title(string), authors(array of {name(string)}), note(string|null)"
-- Name every field exactly, with its type (string, number, boolean, array, object, null) and say whether a value is a list or a map (for example "countsByGenre(object map: genre→count)").
-- Include the request (method, path, query or body fields) and the response status codes.
-- Do not write anything only one agent uses: private helpers, internal state, styling, refactors.
-- refs are the paths this interface belongs to (the api path, or a file both sides touch).
-- If no two agents share an interface, reply {"contracts":[]}.
-- At most ${MAX_LANE_CONTRACTS} contracts. Do not invent interfaces the request does not imply.`;
+  const summary = { name: project.spec.name, managed: project.managed.map(([name, service]) => [name, { template: service.template, path: service.path }]) };
+  return native.buildContractSystem(encodeNative(summary), MAX_LANE_CONTRACTS);
 }
 
 /** 레인별 작업 요청과 쓰기 경로를 계약 판단에 필요한 만큼만 요약한다 */
 export function buildContractUser(request: string, lanes: readonly TaskLane[]): string {
-  const laneText = lanes
-    .map((lane) => {
-      const tasks = lane.tasks.map((task) => `  · ${task.id} (${task.title}): ${task.request}`).join('\n');
-      return `- ${lane.id} · 쓰기 경로: ${lane.paths.join(', ')}\n${tasks}`;
-    })
-    .join('\n');
-  return `전체 요청: ${request}
-
-레인 (동시에 실행되고 서로의 코드를 보지 못합니다):
-${laneText}`;
+  // 읽는 필드(레인 id·paths, 작업 id·title·request)만 넘긴다
+  const summary = lanes.map((lane) => ({ id: lane.id, paths: lane.paths, tasks: lane.tasks.map((task) => ({ id: task.id, title: task.title, request: task.request })) }));
+  return native.buildContractUser(request, encodeNative(summary));
 }
 
 /** ModelClient로 계약을 받는다. tools를 주지 않고(계획 호출과 같은 방식) usage 매핑도 requestTaskPlan과 같다 */
