@@ -160,6 +160,39 @@ pub fn relative_start(len: usize, start: f64) -> usize {
     }
 }
 
+/// 양의 유한한 수의 가장 짧게 되읽히는 10진 자릿수와 첫 자리의 10의 지수(`1.2345e-7` → ("12345", -7)).
+/// 같은 길이의 후보가 둘이고 x가 정확히 그 가운데이면 ECMAScript는 끝자리가 짝수인 쪽을 고른다(Rust `{:e}`는 위쪽을 고를 때가 있다:
+/// 623525043763220.25는 JS가 `…220.2`, Rust 표준 출력은 `…220.3`)
+pub fn shortest_digits(x: f64) -> (String, i32) {
+    let sci = format!("{x:e}");
+    let (mantissa, exp) = sci.split_once('e').expect("지수 표기");
+    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let exp = exp.parse::<i32>().expect("지수");
+    // 가운데가 되려면 정확한 값이 k+1자리여야 하고, 같은 길이 후보가 둘 다 되읽히는 것은 k가 16 이상일 때뿐이다
+    let k = digits.len();
+    if k >= 16 {
+        let exact = format!("{x:.1100}");
+        let (int_part, frac_part) = exact.split_once('.').expect("소수점");
+        let all = format!("{int_part}{}", frac_part.trim_end_matches('0'));
+        let sig = all.trim_start_matches('0');
+        if sig.len() == k + 1 && sig.ends_with('5') {
+            // 정확한 값은 `F(k자리) + 5`: 후보는 F와 F+1이고, ECMAScript는 끝자리가 짝수인 쪽을 고른다
+            let mut chosen = sig.as_bytes()[..k].to_vec();
+            if (chosen[k - 1] - b'0') % 2 == 1 && chosen[k - 1] < b'9' {
+                chosen[k - 1] += 1;
+            }
+            if (chosen[k - 1] - b'0') % 2 == 0 {
+                let text = String::from_utf8(chosen).expect("ascii");
+                // 2의 거듭제곱 바로 위아래는 간격이 비대칭이라 한쪽 후보는 되읽히지 않을 수 있다: 되읽히는 후보만 쓴다
+                if format!("{}.{}e{exp}", &text[..1], &text[1..]).parse::<f64>() == Ok(x) {
+                    return (text, exp);
+                }
+            }
+        }
+    }
+    (digits, exp)
+}
+
 /// JS `Number::toString()`(10진). 가장 짧게 되읽히는 자릿수를 쓰고, 지수가 21 이상이거나 -7 이하이면 `e` 표기
 pub fn number_to_string(x: f64) -> String {
     if x.is_nan() {
@@ -174,12 +207,9 @@ pub fn number_to_string(x: f64) -> String {
     if x < 0.0 {
         return format!("-{}", number_to_string(-x));
     }
-    // Rust의 `{:e}`도 가장 짧게 되읽히는 자릿수를 낸다: "1.2345e-7"
-    let sci = format!("{x:e}");
-    let (mantissa, exp) = sci.split_once('e').expect("지수 표기");
-    let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
+    let (digits, exp) = shortest_digits(x);
     let k = digits.len() as i32;
-    let n = exp.parse::<i32>().expect("지수") + 1;
+    let n = exp + 1;
     if k <= n && n <= 21 {
         format!("{digits}{}", "0".repeat((n - k) as usize))
     } else if 0 < n && n <= 21 {
@@ -563,5 +593,20 @@ mod tests {
         assert_eq!(relative_start(5, f64::INFINITY), 5);
         assert_eq!(relative_start(5, 2.9), 2);
         assert_eq!(relative_start(5, -0.0), 0);
+    }
+}
+
+#[cfg(test)]
+mod shortest_tests {
+    use super::*;
+
+    #[test]
+    fn 같은_거리의_후보가_둘이면_끝자리가_짝수인_쪽을_쓴다() {
+        // Node: String(623525043763220.25) === "623525043763220.2"
+        assert_eq!(number_to_string(623_525_043_763_220.25), "623525043763220.2");
+        assert_eq!(number_to_string(0.1 + 0.2), "0.30000000000000004");
+        assert_eq!(number_to_string(5e-324), "5e-324");
+        assert_eq!(number_to_string(1.7976931348623157e308), "1.7976931348623157e+308");
+        assert_eq!(number_to_string(123_456_789.123_456_79), "123456789.12345679");
     }
 }

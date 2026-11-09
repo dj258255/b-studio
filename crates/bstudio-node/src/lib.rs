@@ -1159,6 +1159,510 @@ pub fn flatten_discovered_file(file_json: String) -> Result<String> {
     fail(test_discovery::flatten_discovered_file(&file_json))
 }
 
+// ── agent: requirement-issues(3단계 3c). 객체는 JSON 문자열로 받고, 문장은 그대로 주고받는다
+use bstudio_guard::requirement_issues as ri;
+
+#[napi]
+pub fn req_issue_label() -> String {
+    ri::REQUIREMENT_LABEL.to_owned()
+}
+
+#[napi]
+pub fn req_issue_content_hash(text: String) -> String {
+    ri::content_hash(&text)
+}
+
+#[napi]
+pub fn req_issue_build_region_content(requirement_json: String) -> Result<String> {
+    fail(ri::build_region_content(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_issue_requirement_content_hash(requirement_json: String) -> Result<String> {
+    fail(ri::requirement_content_hash(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_issue_build_managed_region(requirement_json: String, rev: f64) -> Result<String> {
+    fail(ri::build_managed_region(&input(&requirement_json, "요구사항")?, rev))
+}
+
+/// 관리형 영역이 없으면 null
+#[napi]
+pub fn req_issue_parse_managed_region(body: String) -> Option<String> {
+    ri::parse_managed_region(&body).map(|r| out(&ri::managed_region_value(&r)))
+}
+
+#[napi]
+pub fn req_issue_sub_issue_title(requirement_json: String) -> Result<String> {
+    Ok(ri::sub_issue_title(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_issue_id_from_title(title: String) -> Option<String> {
+    ri::requirement_id_from_issue_title(&title)
+}
+
+#[napi]
+pub fn req_issue_tracking_title(project: String) -> String {
+    ri::tracking_issue_title(&project)
+}
+
+#[napi]
+pub fn req_issue_find_tracking_issue(issues_json: String, project_name: String) -> Result<Option<String>> {
+    Ok(fail(ri::find_tracking_issue(&input(&issues_json, "이슈 목록")?, &project_name))?.map(|v| out(&v)))
+}
+
+#[napi]
+pub fn req_issue_label_set(requirement_json: String, status: String) -> Result<Vec<String>> {
+    Ok(ri::requirement_label_set(&input(&requirement_json, "요구사항")?, &status))
+}
+
+#[napi]
+pub fn req_issue_build_tracking_body(project_name: String, rows_json: String, updated_at: Option<String>) -> Result<String> {
+    fail(ri::build_tracking_issue_body(&project_name, &input(&rows_json, "추적 표")?, updated_at.as_deref()))
+}
+
+/// 찾은 자리(없으면 -1)
+#[napi]
+pub fn req_issue_find_existing_remote(requirement_json: String, remote_json: String) -> Result<i32> {
+    let requirement = input(&requirement_json, "요구사항")?;
+    let JsValue::Arr(remote) = input(&remote_json, "원격 이슈")? else { return Err(Error::from_reason("원격 이슈는 배열이어야 합니다")) };
+    Ok(ri::find_existing_remote_issue(&requirement, &remote).map_or(-1, |i| i as i32))
+}
+
+#[napi]
+pub fn req_issue_plan(inputs_json: String, remote_json: String) -> Result<String> {
+    Ok(out(&fail(ri::plan_requirement_publish(&input(&inputs_json, "발행 입력")?, &input(&remote_json, "원격 이슈")?))?))
+}
+
+#[napi]
+pub fn req_issue_summarize_plan(entries_json: String) -> Result<String> {
+    Ok(out(&fail(ri::summarize_requirement_plan(&input(&entries_json, "계획")?))?))
+}
+
+#[napi]
+pub fn req_issue_build_status_comment(requirement_id: String, status: String, rows_json: String) -> Result<String> {
+    fail(ri::build_status_comment(&requirement_id, &status, &input(&rows_json, "근거 표")?))
+}
+
+#[napi]
+pub fn req_issue_is_status_comment(body: String, requirement_id: Option<String>) -> bool {
+    ri::is_status_comment(&body, requirement_id.as_deref())
+}
+
+/// 처음 맞는 댓글의 자리(없으면 -1)
+#[napi]
+pub fn req_issue_find_pinned_status_comment(bodies: Vec<String>, requirement_id: String) -> i32 {
+    ri::find_pinned_status_comment(&bodies, &requirement_id)
+}
+
+#[napi]
+pub fn req_issue_implements_trailer(ref_json: String) -> Result<String> {
+    Ok(ri::implements_trailer(&input(&ref_json, "구현 참조")?))
+}
+
+#[napi]
+pub fn req_issue_extract_mentions(texts: Vec<String>) -> Vec<String> {
+    ri::extract_requirement_mentions(&texts)
+}
+
+#[napi]
+pub fn req_issue_build_addendum(refs_json: String, include_closes: bool) -> Result<String> {
+    fail(ri::build_requirements_addendum(&input(&refs_json, "구현 참조")?, include_closes))
+}
+
+#[napi]
+pub fn req_issue_build_review_context(entries_json: String) -> Result<String> {
+    fail(ri::build_review_requirements_context(&input(&entries_json, "요구사항 목록")?))
+}
+
+#[napi]
+pub fn req_issue_form_yaml() -> String {
+    ri::build_requirement_issue_form_yaml()
+}
+
+#[napi]
+pub fn req_issue_parse_issue_form(title: String, body: String) -> Option<String> {
+    ri::parse_requirement_issue_form(&title, &body).map(|v| out(&v))
+}
+
+#[napi]
+pub fn req_issue_draft_from_issue(title: String, body: String) -> String {
+    out(&ri::draft_requirement_from_issue(&title, &body))
+}
+
+#[napi]
+pub fn req_issue_draft_managed(title: String, body: String) -> Option<String> {
+    ri::draft_managed_requirement(&title, &body).map(|v| out(&v))
+}
+
+#[napi]
+pub fn req_issue_extract_tracking_numbers(body: String) -> String {
+    out(&JsValue::Arr(ri::extract_tracking_sub_issue_numbers(&body).into_iter().map(JsValue::Num).collect()))
+}
+
+#[napi]
+pub fn req_issue_managed_to_requirement(draft_json: String) -> Result<String> {
+    Ok(out(&ri::managed_requirement_to_requirement(&input(&draft_json, "초안")?)))
+}
+
+#[napi]
+pub fn req_issue_is_allowed_endpoint(pathname: String) -> bool {
+    ri::is_allowed_requirement_endpoint(&pathname)
+}
+
+// ── agent: import-graph(ADR-191 3단계 3b). `packages/agent/src/import-graph.ts`의 순수 코어. 큰 구조는 JSON 문자열(encodeNative·decodeNative),
+// 문자열 목록은 그대로 주고받는다. 별칭 설정은 `{ baseUrl?, paths: [{ pattern, targets }] }`, 역방향 그래프는 `[[파일, [import하는 파일…]], …]`(넣은 순서)다.
+use bstudio_guard::import_graph::{self, AliasConfig, AliasPath, Token};
+use std::collections::HashSet;
+
+fn alias_to_value(alias: &AliasConfig, base_url_first: bool) -> JsValue {
+    let base_url = alias.base_url.as_ref().map(|b| JsValue::str(b.clone()));
+    let paths = JsValue::Arr(
+        alias
+            .paths
+            .iter()
+            .map(|p| js_json::object(vec![("pattern", Some(JsValue::str(p.pattern.clone()))), ("targets", Some(JsValue::Arr(p.targets.iter().map(|t| JsValue::str(t.clone())).collect())))]))
+            .collect(),
+    );
+    // 옛 TS가 만든 객체의 키 순서: base에 baseUrl이 있었으면 baseUrl이 먼저, 아니면 paths가 먼저
+    if base_url_first {
+        js_json::object(vec![("baseUrl", base_url), ("paths", Some(paths))])
+    } else {
+        js_json::object(vec![("paths", Some(paths)), ("baseUrl", base_url)])
+    }
+}
+
+fn alias_from_json(json: &str) -> Result<AliasConfig> {
+    let value = input(json, "별칭 설정")?;
+    let base_url = value.prop("baseUrl").and_then(JsValue::as_str).map(str::to_owned);
+    let mut paths = Vec::new();
+    if let Some(JsValue::Arr(items)) = value.prop("paths") {
+        for item in items {
+            let pattern = item.prop("pattern").and_then(JsValue::as_str).ok_or_else(|| Error::from_reason("별칭 paths 항목에 pattern이 없습니다"))?.to_owned();
+            let targets = match item.prop("targets") {
+                Some(JsValue::Arr(t)) => t.iter().filter_map(JsValue::as_str).map(str::to_owned).collect(),
+                _ => return Err(Error::from_reason("별칭 paths 항목에 targets가 없습니다")),
+            };
+            paths.push(AliasPath { pattern, targets });
+        }
+    }
+    Ok(AliasConfig { base_url, paths })
+}
+
+#[napi]
+pub fn import_graph_is_page_file(relative: String) -> bool {
+    import_graph::is_page_file_in_service(&relative)
+}
+
+#[napi]
+pub fn import_graph_route_wrapper_folder(relative: String) -> Option<String> {
+    import_graph::route_wrapper_folder(&relative)
+}
+
+#[napi]
+pub fn import_graph_is_source_file(relative: String) -> bool {
+    import_graph::is_graph_source_file(&relative)
+}
+
+/// 토큰 목록(JSON). `["s", 값, 템플릿 여부]`, `["w", 단어]`, `["p", UTF-16 코드 단위(수)]`, `["r"]`(정규식 리터럴)
+#[napi]
+pub fn import_graph_tokenize(source: String) -> String {
+    let tokens = import_graph::tokenize(&source)
+        .into_iter()
+        .map(|t| match t {
+            Token::Str { value, template } => JsValue::Arr(vec![JsValue::str("s"), JsValue::Str(value), JsValue::Bool(template)]),
+            Token::Word(w) => JsValue::Arr(vec![JsValue::str("w"), JsValue::Str(w)]),
+            Token::P(unit) => JsValue::Arr(vec![JsValue::str("p"), JsValue::Num(f64::from(unit))]),
+            Token::Re => JsValue::Arr(vec![JsValue::str("r")]),
+        })
+        .collect();
+    out(&JsValue::Arr(tokens))
+}
+
+#[napi]
+pub fn import_graph_extract_specifiers(source: String) -> Vec<String> {
+    import_graph::extract_import_specifiers(&source)
+}
+
+#[napi]
+pub fn import_graph_normalize_path(value: String) -> Option<String> {
+    import_graph::normalize_service_path(&value)
+}
+
+#[napi]
+pub fn import_graph_dir_of(file: String) -> String {
+    import_graph::dir_of(&file)
+}
+
+#[napi]
+pub fn import_graph_strip_jsonc(text: String) -> String {
+    import_graph::strip_jsonc(&text)
+}
+
+#[napi]
+pub fn import_graph_extends_path(text: String, config_dir: String) -> Option<String> {
+    import_graph::tsconfig_extends_path(&text, &config_dir)
+}
+
+/// `baseJson`은 extends로 물려받은 별칭 설정(없으면 null). 결과는 별칭 설정 JSON
+#[napi]
+pub fn import_graph_parse_alias_config(text: String, config_dir: String, base_json: Option<String>) -> Result<String> {
+    let base = base_json.map(|json| alias_from_json(&json)).transpose()?;
+    let (alias, base_url_first) = import_graph::parse_alias_config(&text, &config_dir, base.as_ref());
+    Ok(out(&alias_to_value(&alias, base_url_first)))
+}
+
+#[napi]
+pub fn import_graph_resolve_import(specifier: String, from_file: String, files: Vec<String>, alias_json: String) -> Result<Option<String>> {
+    let alias = alias_from_json(&alias_json)?;
+    let files: HashSet<String> = files.into_iter().collect();
+    Ok(import_graph::resolve_import(&specifier, &from_file, &files, &alias))
+}
+
+/// `sourceFiles[i]`의 내용이 `sourceTexts[i]`다(넣은 순서). 결과는 `[[파일, [import하는 파일…]], …]`
+#[napi]
+pub fn import_graph_build_reverse(source_files: Vec<String>, source_texts: Vec<String>, files: Vec<String>, alias_json: String) -> Result<String> {
+    if source_files.len() != source_texts.len() {
+        return Err(Error::from_reason("소스 파일 이름과 내용의 개수가 다릅니다"));
+    }
+    let alias = alias_from_json(&alias_json)?;
+    let files: HashSet<String> = files.into_iter().collect();
+    let sources: Vec<(String, String)> = source_files.into_iter().zip(source_texts).collect();
+    let reverse = import_graph::build_reverse_graph(&sources, &files, &alias);
+    Ok(out(&JsValue::Arr(
+        reverse.into_iter().map(|(target, importers)| JsValue::Arr(vec![JsValue::Str(target), JsValue::Arr(importers.into_iter().map(JsValue::Str).collect())])).collect(),
+    )))
+}
+
+/// `reverseJson`은 `[[파일, [import하는 파일…]], …]`. 결과는 `{ candidates: [{ page, cause, distance, tie }], truncated: [{ cause, stoppedAt }] }`
+#[napi]
+pub fn import_graph_trace_pages(changed: Vec<String>, reverse_json: String, files: Vec<String>, max_depth: f64) -> Result<String> {
+    let value = input(&reverse_json, "역방향 그래프")?;
+    let JsValue::Arr(rows) = value else { return Err(Error::from_reason("역방향 그래프가 배열이 아닙니다")) };
+    let mut reverse: import_graph::ReverseGraph = Vec::new();
+    for row in &rows {
+        let JsValue::Arr(pair) = row else { return Err(Error::from_reason("역방향 그래프 항목이 배열이 아닙니다")) };
+        let (Some(JsValue::Str(target)), Some(JsValue::Arr(list))) = (pair.first(), pair.get(1)) else { return Err(Error::from_reason("역방향 그래프 항목의 모양이 맞지 않습니다")) };
+        reverse.push((target.clone(), list.iter().filter_map(JsValue::as_str).map(str::to_owned).collect()));
+    }
+    let result = import_graph::trace_pages(&changed, &reverse, &files, max_depth);
+    let candidates = result
+        .candidates
+        .into_iter()
+        .map(|c| {
+            js_json::object(vec![
+                ("page", Some(JsValue::Str(c.page))),
+                ("cause", Some(JsValue::Str(c.cause))),
+                ("distance", Some(JsValue::Num(f64::from(c.distance)))),
+                ("tie", Some(JsValue::Num(f64::from(c.tie)))),
+            ])
+        })
+        .collect();
+    let truncated = result.truncated.into_iter().map(|t| js_json::object(vec![("cause", Some(JsValue::Str(t.cause))), ("stoppedAt", Some(JsValue::Str(t.stopped_at)))])).collect();
+    Ok(out(&js_json::object(vec![("candidates", Some(JsValue::Arr(candidates))), ("truncated", Some(JsValue::Arr(truncated)))])))
+}
+
+// ── 테스트 실행·결과(ADR-191 3d). 결과 객체는 JSON 문자열이다(`NaN`·`Infinity`가 나올 수 있는 결과는 표시 객체로, js_json 참고).
+// TS 껍데기: packages/agent/src/{test-run,test-results}.ts
+
+use bstudio_guard::{test_results, test_run};
+
+/// 상수는 Rust가 정한 값을 TS가 읽어 쓴다(한 곳이 정한다)
+#[napi]
+pub fn test_run_constants() -> String {
+    format!(
+        "{{\"jestLikeReportPath\":{},\"pytestReportPath\":{},\"containerProjectRoot\":{}}}",
+        bstudio_guard::js::json_quote(test_run::JEST_LIKE_REPORT_PATH),
+        bstudio_guard::js::json_quote(test_run::PYTEST_REPORT_PATH),
+        bstudio_guard::js::json_quote(test_run::CONTAINER_PROJECT_ROOT),
+    )
+}
+
+/// 알 수 없는 실행기는 던진다
+#[napi]
+pub fn build_test_run_plan(
+    runner: String,
+    file: Option<String>,
+    class_name: Option<String>,
+    test_name: Option<String>,
+    wrapper: Option<bool>,
+    extra_report_roots: Vec<String>,
+) -> Result<String> {
+    fail(test_run::build_test_run_plan(&runner, file.as_deref(), class_name.as_deref(), test_name.as_deref(), wrapper, &extra_report_roots)).map(|plan| plan.to_json())
+}
+
+#[napi]
+pub fn clear_test_reports_command(extra_report_roots: Vec<String>) -> Vec<String> {
+    test_run::clear_test_reports_command(&extra_report_roots)
+}
+
+#[napi]
+pub fn report_roots_for_includes(includes: Vec<String>, root: String) -> Vec<String> {
+    test_run::report_roots_for_includes(&includes, &root)
+}
+
+#[napi]
+pub fn split_collected_reports(stdout: String, single_file_label: String) -> String {
+    test_run::reports_to_json(&test_run::split_collected_reports(&stdout, &single_file_label))
+}
+
+/// `package_json`은 부르는 쪽의 `package.json` 값(없으면 undefined·null)
+#[napi]
+pub fn detect_runner(template: String, has_pom_xml: Option<bool>, package_json: Option<String>) -> Result<Option<String>> {
+    let package_json = package_json.map(|text| input(&text, "package.json")).transpose()?;
+    Ok(test_run::detect_runner(&template, has_pom_xml == Some(true), package_json.as_ref()).map(str::to_owned))
+}
+
+#[napi]
+pub fn runner_label(runner: String) -> Result<String> {
+    fail(test_run::runner_label(&runner)).map(str::to_owned)
+}
+
+/// 범위 밖 엔티티(`&#x110000;`)는 던진다
+#[napi]
+pub fn parse_j_unit_xml(xml: String) -> Result<String> {
+    fail(test_results::parse_junit_xml(&xml)).map(|run| out(&run))
+}
+
+/// JSON이 아니면 빈 결과, JSON `null`이면 던진다
+#[napi]
+pub fn parse_jest_like_json(json: String) -> Result<String> {
+    fail(test_results::parse_jest_like_json(&json)).map(|run| out(&run))
+}
+
+/// 행마다 짝지은 케이스의 위치(없으면 -1). 행·케이스는 판정에 쓰는 필드만 담은 JSON, `ids`는 같은 객체면 같은 값
+#[napi]
+pub fn attach_results(rows_json: String, cases_json: String, ids: Vec<u32>) -> Result<Vec<i64>> {
+    fail(test_results::attach_results(&rows_json, &cases_json, &ids))
+}
+
+#[napi]
+pub fn count_by_status(statuses_json: String) -> Result<String> {
+    fail(test_results::count_by_status(&statuses_json))
+}
+
+#[napi]
+pub fn build_fix_test_prefill(row_json: String) -> Result<String> {
+    fail(test_results::build_fix_test_prefill(&row_json))
+}
+
+#[napi]
+pub fn build_add_test_prefill(requirement_json: String) -> Result<String> {
+    fail(test_results::build_add_test_prefill(&requirement_json))
+}
+
+// ── 게이트 리뷰 판정(ADR-191 3단계 3e). 확인 선언 변경(declared-checks), 근거 줄(check-evidence), 부하 판정(load-check), 계약 비교(contract-diff).
+// 입력·출력은 JSON 문자열이다(`NaN`·`Infinity`·`-0`은 표시 객체, js_json 모듈). 판정 입력은 짝 없는 서로게이트가 있으면 던진다(review_input).
+// 모양이 어긋난 입력은 던진다. TS 껍데기: packages/agent/src/{declared-checks,check-evidence,load-check,contract-diff}.ts
+use bstudio_guard::{check_evidence, contract_diff, declared_checks, load_check, review_input};
+
+/// 판정에 쓸 JSON. 짝 없는 서로게이트가 있으면 던진다
+fn review_json(json: &str, what: &str) -> Result<JsValue> {
+    fail(review_input::parse_checked(json, what))
+}
+
+fn change_of(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> declared_checks::DeclaredCheckChange {
+    declared_checks::DeclaredCheckChange { added, removed, changed }
+}
+
+#[napi]
+pub fn diff_declared_checks(started_json: String, latest_json: String) -> Result<String> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    Ok(out(&fail(declared_checks::diff_declared_checks(Some(&started), Some(&latest)))?.to_value()))
+}
+
+#[napi]
+pub fn weakened_declarations(started_json: String, latest_json: String) -> Result<Vec<String>> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    fail(declared_checks::weakened_declarations(Some(&started), Some(&latest)))
+}
+
+#[napi]
+pub fn has_declared_check_change(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> bool {
+    declared_checks::has_declared_check_change(&change_of(added, removed, changed))
+}
+
+#[napi]
+pub fn describe_declared_check_change(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> String {
+    declared_checks::describe_declared_check_change(&change_of(added, removed, changed))
+}
+
+/// 남은 선언이 없으면 null
+#[napi]
+pub fn with_declared_checks(started_json: String, latest_json: String) -> Result<Option<String>> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    Ok(fail(declared_checks::with_declared_checks(Some(&started), Some(&latest)))?.map(|merged| out(&merged)))
+}
+
+#[napi]
+pub fn load_request_for(check_json: String) -> Result<String> {
+    Ok(out(&fail(load_check::load_request_for(&review_json(&check_json, "부하 확인 선언")?))?))
+}
+
+#[napi]
+pub fn describe_load_expect(expect_json: String) -> Result<String> {
+    fail(load_check::describe_load_expect(&review_json(&expect_json, "응답 시간 기준")?))
+}
+
+#[napi]
+pub fn judge_load(check_json: String, result_json: String) -> Result<String> {
+    let (check, result) = (review_json(&check_json, "부하 확인 선언")?, review_json(&result_json, "부하 결과")?);
+    Ok(out(&fail(load_check::judge_load(&check, &result))?.to_value()))
+}
+
+/// 시크릿을 가리는 JS 함수를 부른다. 던지면 그 이유를 돌려준다
+fn redactor<'a, 'f>(redact: &'a Function<'f, String, String>) -> impl Fn(&str) -> std::result::Result<String, String> + 'a {
+    move |text| redact.call(text.to_owned()).map_err(|e| e.reason.clone())
+}
+
+/// 근거 줄에 쓰는 JSON. 판정이 아니라 설명이라 짝 없는 서로게이트는 U+FFFD로 읽는다
+fn evidence_json(json: &str, what: &str) -> Result<JsValue> {
+    input(json, what)
+}
+
+#[napi]
+pub fn finish_evidence(lines: Vec<String>, redact: Function<String, String>) -> Result<Vec<String>> {
+    fail(check_evidence::finish_evidence(&lines, &redactor(&redact)))
+}
+
+#[napi]
+pub fn browser_page_evidence(page_json: String, result_json: String, context_json: String, redact: Function<String, String>) -> Result<Vec<String>> {
+    let (page, result, context) = (evidence_json(&page_json, "화면 확인 선언")?, evidence_json(&result_json, "화면 확인 결과")?, evidence_json(&context_json, "근거 맥락")?);
+    fail(check_evidence::browser_page_evidence(&page, &result, Some(&context), &redactor(&redact)))
+}
+
+#[napi]
+pub fn http_page_evidence(page_json: String, response_json: String, context_json: String, redact: Function<String, String>) -> Result<Vec<String>> {
+    let (page, response, context) = (evidence_json(&page_json, "화면 확인 선언")?, evidence_json(&response_json, "HTTP 응답")?, evidence_json(&context_json, "근거 맥락")?);
+    fail(check_evidence::http_page_evidence(&page, &response, Some(&context), &redactor(&redact)))
+}
+
+#[napi]
+pub fn test_evidence(service: String, command: Vec<String>, elapsed_ms: f64) -> Vec<String> {
+    check_evidence::test_evidence(&service, &command, elapsed_ms)
+}
+
+/// before가 `null`이면 이전 문서가 없다
+#[napi]
+pub fn diff_contracts(before_json: String, after_json: String) -> Result<String> {
+    let (before, after) = (review_json(&before_json, "이전 계약")?, review_json(&after_json, "지금 계약")?);
+    let changes = fail(contract_diff::diff_contracts(Some(&before), &after))?;
+    Ok(out(&JsValue::Arr(changes.iter().map(contract_diff::ContractChange::to_value).collect())))
+}
+
+#[napi]
+pub fn summarize_contract(document_json: String) -> Result<String> {
+    fail(contract_diff::summarize_contract(&review_json(&document_json, "계약")?))
+}
+
+#[napi]
+pub fn format_contract_changes(changes_json: String) -> Result<String> {
+    // 변경 목록은 비교 결과를 글자로 옮길 뿐이라 짝 없는 서로게이트는 U+FFFD로 읽는다(근거 줄과 같다)
+    fail(contract_diff::format_contract_changes(&input(&changes_json, "계약 변경 목록")?))
+}
+
 // ── 토큰 예산·모델 선택(ADR-191 3f). 큰 구조는 JSON 문자열(NaN·Infinity는 표시 객체). TS 껍데기: packages/agent/src/{tool-output,context-clearing,model-router,cli-router}.ts
 
 use bstudio_guard::{cli_router, context_clearing, model_router, tool_output};

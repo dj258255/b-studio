@@ -2,7 +2,11 @@
  * 테스트 탭(ADR-084)의 실행 단계 — 템플릿·실행기에 맞는 테스트 명령을 만들고, 컨테이너 안에 남긴 보고서를
  * 모아오는 명령도 함께 만든다. 순수 함수만 둔다(샌드박스 호출 없음) — studio의 서버 쪽 코드가
  * `sandbox.exec(service, plan.command)`로 실행하고 `sandbox.exec(service, plan.collect)`로 보고서를 모은다.
+ *
+ * 판정은 Rust(crates/bstudio-guard/src/test_run.rs, ADR-191 3단계 3d)가 한다. 이 파일은 같은 이름·시그니처의 껍데기와 타입 선언이다.
  */
+
+import { encodeNative, native } from '@b-studio/sandbox';
 
 export type Runner = 'gradle' | 'maven' | 'vitest' | 'jest' | 'pytest';
 
@@ -25,38 +29,10 @@ export interface TestRunPlan {
   format: 'junit-xml' | 'jest-json';
 }
 
-/** 컨테이너 안 임시 보고서 경로. 서비스 소스 트리 밖(/tmp)이라 다른 파일과 부딪히지 않는다 */
-export const JEST_LIKE_REPORT_PATH = '/tmp/b-studio-test-report.json';
-export const PYTEST_REPORT_PATH = '/tmp/b-studio-test-report.xml';
-/** Gradle/Maven은 출력 경로를 정할 수 없어(관례 경로에 남긴다) 찾아서 모은다 */
-const GRADLE_REPORT_GLOB = 'build/test-results/test/*.xml';
-const MAVEN_REPORT_GLOB = 'target/surefire-reports/*.xml';
-/** 여러 보고서 파일을 한 번의 exec로 모아올 때 경계로 쓰는 표지. 실제 보고서 내용에 나타날 일이 없는 문자열이다 */
-const REPORT_BOUNDARY = '@@@b-studio-test-report@@@';
-
-/** glob 여러 개를 한 번의 exec로 모두 모은다(호출마다 왕복하지 않으려고 한 셸 명령에 합친다) */
-function collectGlobCommand(globExprs: readonly string[]): string[] {
-  const body = globExprs.map((glob) => `for f in ${glob}; do [ -f "$f" ] && { echo '${REPORT_BOUNDARY}'"$f"; cat "$f"; echo; }; done`).join('; ');
-  return ['sh', '-c', body];
-}
-
-/**
- * extraReportRoots(studio.yaml의 includes, ADR-139)는 세션 중 에이전트(모델 출력)가 studio.yaml을 직접 고쳐
- * 바꿀 수 있는 값이라, `sh -c` 문자열에 따옴표 없이 그대로 넣으면 `includes: ["media; <임의 명령>"]` 같은 값이
- * 서비스 컨테이너에서 임의 명령을 실행하는 통로가 된다(보안 검토, 다그푸딩 마찰 135). `@b-studio/spec`의
- * PROJECT_RELATIVE_PATH 스키마가 이미 영문·숫자·.·_·-·/만 허용하지만, 이 함수는 그 스키마를 거치지 않고도
- * 안전해야 하므로(순수 함수가 호출자의 검증을 신뢰하지 않는다) 여기서도 같은 문자 집합만 받고, 통과한 경로는
- * 작은따옴표로 감싸 셸 메타문자 해석을 막는다(허용 문자 집합 자체에 `'`가 없어 따옴표를 깨고 나올 수 없다).
- * 글로빙이 필요한 `*.xml` 부분만 따옴표 밖에 남겨 셸이 그 부분만 확장하게 한다. 집합에 없는 문자가 섞인 값은
- * (스키마를 우회해 여기까지 왔다는 뜻이므로) 조용히 버린다 — 떨어뜨리는 쪽이 임의 명령 실행보다 항상 안전하다.
- */
-const SAFE_REPORT_ROOT = /^[A-Za-z0-9._/-]+$/;
-
-/** pattern(상수 glob, 사용자 입력이 아니다)과, 있으면 extraReportRoots 각각을 작은따옴표로 감싼 glob 식 목록을 만든다 */
-function reportGlobExprs(pattern: string, extraReportRoots: readonly string[]): string[] {
-  const roots = extraReportRoots.filter((root) => SAFE_REPORT_ROOT.test(root));
-  return [pattern, ...roots.map((root) => `'${root}'/${pattern}`)];
-}
+/** 상수는 Rust가 정한 값을 읽는다(crates/bstudio-guard/src/test_run.rs). 컨테이너 안 임시 보고서 경로는 서비스 소스 트리 밖(/tmp)이라 다른 파일과 부딪히지 않는다 */
+const CONSTANTS = JSON.parse(native.testRunConstants()) as { jestLikeReportPath: string; pytestReportPath: string; containerProjectRoot: string };
+export const JEST_LIKE_REPORT_PATH: string = CONSTANTS.jestLikeReportPath;
+export const PYTEST_REPORT_PATH: string = CONSTANTS.pytestReportPath;
 
 /**
  * runner·대상에 맞는 테스트 실행 명령과 보고서 수거 명령을 만든다.
@@ -72,46 +48,15 @@ export function buildTestRunPlan(
   target?: TestTarget,
   { wrapper, extraReportRoots = [] }: { wrapper?: boolean; extraReportRoots?: readonly string[] } = {},
 ): TestRunPlan {
-  switch (runner) {
-    case 'gradle': {
-      const command = [wrapper === false ? 'gradle' : './gradlew', 'test', '--no-daemon', '--console=plain'];
-      if (target?.className) command.push('--tests', target.testName ? `${target.className}.${target.testName}` : target.className);
-      return { command, collect: collectGlobCommand(reportGlobExprs(GRADLE_REPORT_GLOB, extraReportRoots)), format: 'junit-xml' };
-    }
-    case 'maven': {
-      const command = [wrapper === true ? './mvnw' : 'mvn', '-q', 'test'];
-      if (target?.className) command.push(`-Dtest=${target.testName ? `${target.className}#${target.testName}` : target.className}`);
-      return { command, collect: collectGlobCommand(reportGlobExprs(MAVEN_REPORT_GLOB, extraReportRoots)), format: 'junit-xml' };
-    }
-    case 'vitest': {
-      const command = ['npx', 'vitest', 'run', '--reporter=json', `--outputFile=${JEST_LIKE_REPORT_PATH}`];
-      if (target?.file) command.push(target.file);
-      if (target?.testName) command.push('-t', target.testName);
-      return { command, collect: ['cat', JEST_LIKE_REPORT_PATH], format: 'jest-json' };
-    }
-    case 'jest': {
-      const command = ['npx', 'jest', '--json', `--outputFile=${JEST_LIKE_REPORT_PATH}`];
-      if (target?.file) command.push(target.file);
-      if (target?.testName) command.push('-t', target.testName);
-      return { command, collect: ['cat', JEST_LIKE_REPORT_PATH], format: 'jest-json' };
-    }
-    case 'pytest': {
-      const command = ['pytest', `--junitxml=${PYTEST_REPORT_PATH}`];
-      if (target?.file) {
-        const node = target.testName ? `${target.file}::${target.className ? `${target.className}::` : ''}${target.testName}` : target.file;
-        command.push(node);
-      }
-      return { command, collect: ['cat', PYTEST_REPORT_PATH], format: 'junit-xml' };
-    }
-  }
+  return JSON.parse(native.buildTestRunPlan(runner, target?.file, target?.className, target?.testName, wrapper, [...extraReportRoots])) as TestRunPlan;
 }
 
 /** 서비스 컨테이너 안에서 프로젝트 루트를 마운트한 자리. studio의 CONTAINER_WORKSPACE_ROOT(ADR-088)와 같아야 한다 */
-export const CONTAINER_PROJECT_ROOT = '/workspace';
+export const CONTAINER_PROJECT_ROOT: string = CONSTANTS.containerProjectRoot;
 
 /** 서비스의 `includes`(ADR-139)를 컨테이너 안 보고서 경로의 뿌리로 바꾼다. 보고서를 모으는 쪽(studio)과 비우는 쪽(게이트)이 같은 경로를 보게 한 곳에 둔다 */
 export function reportRootsForIncludes(includes: readonly string[] = [], root: string = CONTAINER_PROJECT_ROOT): string[] {
-  return includes.map((include) => `${root}/${include}`);
+  return native.reportRootsForIncludes([...includes], root);
 }
 
 /**
@@ -121,25 +66,12 @@ export function reportRootsForIncludes(includes: readonly string[] = [], root: s
  * `extraReportRoots`는 수거와 같은 규칙(reportGlobExprs)으로 걸러 감싼다
  */
 export function clearTestReportsCommand(extraReportRoots: readonly string[] = []): string[] {
-  const globs = [GRADLE_REPORT_GLOB, MAVEN_REPORT_GLOB].flatMap((pattern) => reportGlobExprs(pattern, extraReportRoots));
-  return ['sh', '-c', `rm -f ${[JEST_LIKE_REPORT_PATH, PYTEST_REPORT_PATH, ...globs].join(' ')}`];
+  return native.clearTestReportsCommand([...extraReportRoots]);
 }
 
 /** collectGlobCommand의 stdout을 파일별로 나눈다. 경계 표지가 없으면(단일 cat 결과) 파일 하나로 본다 */
 export function splitCollectedReports(stdout: string, singleFileLabel = 'report'): Array<{ file: string; content: string }> {
-  if (!stdout.includes(REPORT_BOUNDARY)) {
-    const trimmed = stdout.trim();
-    return trimmed ? [{ file: singleFileLabel, content: trimmed }] : [];
-  }
-  const parts: Array<{ file: string; content: string }> = [];
-  const marker = new RegExp(`${REPORT_BOUNDARY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(.*)\\n`, 'g');
-  const matches = [...stdout.matchAll(marker)];
-  for (let i = 0; i < matches.length; i++) {
-    const start = matches[i]!.index! + matches[i]![0].length;
-    const end = i + 1 < matches.length ? matches[i + 1]!.index! : stdout.length;
-    parts.push({ file: matches[i]![1]!.trim(), content: stdout.slice(start, end).trim() });
-  }
-  return parts;
+  return JSON.parse(native.splitCollectedReports(stdout, singleFileLabel)) as Array<{ file: string; content: string }>;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,32 +95,10 @@ export interface DetectRunnerInput {
 
 /** studio.yaml의 template과 서비스 폴더 힌트(package.json, pom.xml 유무)로 실행기를 고른다. 판별 못 하면 undefined */
 export function detectRunner(input: DetectRunnerInput): Runner | undefined {
-  const template = input.template.toLowerCase();
-  if (template.includes('spring')) return input.hasPomXml ? 'maven' : 'gradle';
-  if (template.includes('fastapi') || template.includes('python') || template.includes('django') || template.includes('flask')) return 'pytest';
-  if (template.includes('next') || template.includes('vite') || template.includes('react') || template.includes('node')) {
-    const deps = { ...(input.packageJson?.dependencies ?? {}), ...(input.packageJson?.devDependencies ?? {}) };
-    if (deps.vitest) return 'vitest';
-    if (deps.jest) return 'jest';
-    const testScript = input.packageJson?.scripts?.test ?? '';
-    if (/\bvitest\b/.test(testScript)) return 'vitest';
-    if (/\bjest\b/.test(testScript)) return 'jest';
-    return undefined;
-  }
-  return undefined;
+  const packageJson = input.packageJson === undefined ? undefined : encodeNative(input.packageJson);
+  return (native.detectRunner(input.template, input.hasPomXml, packageJson) ?? undefined) as Runner | undefined;
 }
 
 export function runnerLabel(runner: Runner): string {
-  switch (runner) {
-    case 'gradle':
-      return 'Gradle (JUnit)';
-    case 'maven':
-      return 'Maven (JUnit)';
-    case 'vitest':
-      return 'Vitest';
-    case 'jest':
-      return 'Jest';
-    case 'pytest':
-      return 'pytest';
-  }
+  return native.runnerLabel(runner);
 }

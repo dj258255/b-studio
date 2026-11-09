@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest';
 import {
-  ALLOWED_REQUIREMENT_ENDPOINTS,
   assertAllowedRequirementEndpoint,
   buildManagedRegion,
   findTrackingIssue,
@@ -400,7 +399,7 @@ describe('API 경로 화이트리스트', () => {
   });
 
   it('화이트리스트 패턴 자체가 owner/repo 밖으로 새지 않는다(슬래시가 더 있으면 거부)', () => {
-    expect(ALLOWED_REQUIREMENT_ENDPOINTS.some((pattern) => pattern.test('/repos/acme/orders/issues/42/comments/extra'))).toBe(false);
+    expect(() => assertAllowedRequirementEndpoint('/repos/acme/orders/issues/42/comments/extra')).toThrow(RequirementEndpointError);
   });
 });
 
