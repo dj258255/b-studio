@@ -1981,3 +1981,38 @@ pub fn build_pr_review_fix_request(findings_json: String) -> Result<String> {
 pub fn extract_pr_review_fix_titles(request: String) -> Option<Vec<String>> {
     pr_review::extract_pr_review_fix_titles(&request)
 }
+
+// ── 계획 요약·레인 계약(ADR-191 3m). project·lanes는 읽는 필드만 담은 JSON 문자열. TS 껍데기: packages/agent/src/{plan-brief,lane-contracts}.ts
+use bstudio_guard::plan_brief;
+
+#[napi]
+pub fn should_plan_brief(request: String) -> bool {
+    plan_brief::should_plan_brief(&request)
+}
+
+#[napi]
+pub fn plan_word_limit(request: String, short: f64, long: f64) -> f64 {
+    plan_brief::plan_word_limit(&request, short, long)
+}
+
+/// project: `{ name, managed: [[이름, { template, path }]] }`
+#[napi]
+pub fn build_plan_brief_system(project_json: String, request: String, short: f64, long: f64) -> Result<String> {
+    fail(plan_brief::build_plan_brief_system(&input(&project_json, "프로젝트 요약")?, &request, short, long))
+}
+
+#[napi]
+pub fn append_plan_to_request(request: String, plan: String, max_chars: f64) -> String {
+    plan_brief::append_plan_to_request(&request, &plan, max_chars)
+}
+
+#[napi]
+pub fn build_contract_system(project_json: String, max_contracts: f64) -> Result<String> {
+    fail(plan_brief::build_contract_system(&input(&project_json, "프로젝트 요약")?, max_contracts))
+}
+
+/// lanes: `[{ id, paths, tasks: [{ id, title, request }] }]`
+#[napi]
+pub fn build_contract_user(request: String, lanes_json: String) -> Result<String> {
+    fail(plan_brief::build_contract_user(&request, &input(&lanes_json, "레인 목록")?))
+}

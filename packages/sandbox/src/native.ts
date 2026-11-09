@@ -306,6 +306,14 @@ interface NativeGuard {
   buildReviewResolutionComment(inputJson: string): string;
   buildPrReviewFixRequest(findingsJson: string): string;
   extractPrReviewFixTitles(request: string): string[] | null | undefined;
+  // ── agent: 계획 요약·레인 계약(3단계 3m). project는 { name, managed: [[이름, { template, path }]] }, lanes는 [{ id, paths, tasks: [{ id, title, request }] }]를 encodeNative한 JSON 문자열.
+  // short·long·maxChars·maxContracts는 TS가 가진 상수를 그대로 넘긴다. 모양이 어긋난 입력은 던진다
+  shouldPlanBrief(request: string): boolean;
+  planWordLimit(request: string, short: number, long: number): number;
+  buildPlanBriefSystem(projectJson: string, request: string, short: number, long: number): string;
+  appendPlanToRequest(request: string, plan: string, maxChars: number): string;
+  buildContractSystem(projectJson: string, maxContracts: number): string;
+  buildContractUser(request: string, lanesJson: string): string;
 }
 
 export interface NativeHostPty {

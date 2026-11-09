@@ -26,6 +26,7 @@ pub mod js_locale;
 pub mod load_check;
 pub mod model_router;
 pub mod node_path;
+pub mod plan_brief;
 pub mod pr_review;
 pub mod public_url;
 pub mod readiness;
