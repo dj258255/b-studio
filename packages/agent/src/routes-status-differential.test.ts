@@ -23,9 +23,10 @@ import { detectStuckLoading, type StuckLoadingEvidence } from './stuck-loading';
  * 같은 무작위 입력을 옛 구현과 새 껍데기에 넣어 결과를 JSON.stringify 글자(키 순서 포함)로 견준다.
  * `legacy*`는 옮기기 전 본문이다(`export`만 뗐다). 지우지 않는다 — 이 시험이 기준으로 삼는다.
  *
- * `next-routes`의 정렬(`localeCompare`)만 의도한 차이다(Rust는 UTF-16 코드 단위 순서). 그래서 옛 구현을 두 벌로 만든다:
- *  - `legacyLocale`: 옛 그대로(`localeCompare`). 새 결과와 달라지는 경우를 세는 데 쓴다((a) 글자, (b) 열어 볼 경로 집합, (c) 건너뜀 집합).
- *  - `legacyU16`: 비교만 UTF-16 코드 단위 순서로 바꾼 것. 새 껍데기와 **글자까지 같아야** 한다.
+ * `next-routes`의 정렬(`localeCompare`)만 의도한 차이다(Rust는 `js_locale::locale_compare`: ASCII는 ICU와 같고 비ASCII는 코드 포인트 순서). 그래서 입력을 둘로 가른다:
+ *  - 정렬에 쓰이는 글자가 모두 ASCII인 입력: 옛 `legacyLocale`(localeCompare 그대로)과 **글자까지 같아야** 한다((a)(b)(c)가 모두 0).
+ *  - 비ASCII가 섞인 입력: 옛과 달라지는 경우를 (a) 글자, (b) 열어 볼 경로 집합, (c) 건너뜀 집합으로 센다.
+ * `legacyU16`(비교만 UTF-16 순서)은 상한을 푼 기준 `legacyAll`을 만드는 데만 쓴다.
  * 상한을 넘은 페이지가 routes에도 skipped(상한 사유)에도 없이 사라지는 경우(조용히 사라짐)는 옛 것과 새 것 모두 0이어야 한다.
  *
  * 크기는 환경 변수로 바꾼다: ROUTES_STATUS_DIFF_SEEDS(쉼표 목록), ROUTES_STATUS_DIFF_ITERATIONS, ROUTES_STATUS_DIFF_REPORT=1(분포 출력)
@@ -417,9 +418,17 @@ const NAMES = [
 const EXTENSIONS = ['tsx', 'tsx', 'tsx', 'ts', 'jsx', 'js', 'mdx'];
 const PREFIXES = ['', '.', 'apps/web', './apps//web/', 'apps\\web', 'web', 'a b', 'é', 'apps/web/'];
 
+/** 입력마다 절반은 ASCII 이름만 쓴다(옛 localeCompare와 글자까지 같아야 하는 쪽을 충분히 센다) */
+const ASCII_NAMES = NAMES.filter((name) => /^[\u0000-\u007f]*$/.test(name));
+let pool: readonly string[] = NAMES;
+function choosePool(rng: Rng): void {
+  pool = chance(rng, 0.5) ? ASCII_NAMES : NAMES;
+}
+const prefixOfPool = (rng: Rng): string => pick(rng, pool === NAMES ? PREFIXES : PREFIXES.filter((p) => /^[\u0000-\u007f]*$/.test(p)));
+
 function segments(rng: Rng): string {
   const depth = chance(rng, 0.12) ? 0 : between(rng, 1, 3);
-  return Array.from({ length: depth }, () => pick(rng, NAMES)).join(pick(rng, ['/', '/', '/', '/', '//', '\\']));
+  return Array.from({ length: depth }, () => pick(rng, pool)).join(pick(rng, ['/', '/', '/', '/', '//', '\\']));
 }
 
 function prefixOf(servicePath: string): string {
@@ -445,7 +454,8 @@ function maxPagesOf(rng: Rng): number | undefined {
 }
 
 function changedFilesInput(rng: Rng) {
-  const servicePath = pick(rng, PREFIXES);
+  choosePool(rng);
+  const servicePath = prefixOfPool(rng);
   const prefix = prefixOf(servicePath);
   const count = chance(rng, 0.05) ? 0 : between(rng, 1, 26);
   const files: string[] = [];
@@ -461,7 +471,8 @@ function changedFilesInput(rng: Rng) {
 }
 
 function candidatesInput(rng: Rng) {
-  const servicePath = pick(rng, PREFIXES);
+  choosePool(rng);
+  const servicePath = prefixOfPool(rng);
   const count = chance(rng, 0.05) ? 0 : between(rng, 1, 32);
   const sharedCause = pick(rng, ['components/Button.tsx', 'lib/db.ts', 'app/layout.tsx', 'a\\b.ts']);
   const candidates: RouteCandidate[] = [];
@@ -503,6 +514,16 @@ function accounted(result: NextRoutes): number {
 const pathSet = (result: NextRoutes): string => JSON.stringify(result.routes.map((route: NextRoute) => route.path).sort());
 const skippedSet = (result: NextRoutes): string => JSON.stringify(result.skipped.map((entry) => JSON.stringify(entry)).sort());
 
+interface Split {
+  runs: number;
+  strictDiff: number;
+  textDiff: number;
+  pathSetDiff: number;
+  skippedDiff: number;
+  capped: number;
+}
+const newSplit = (): Split => ({ runs: 0, strictDiff: 0, textDiff: 0, pathSetDiff: 0, skippedDiff: 0, capped: 0 });
+
 interface RoutesTally {
   runs: number;
   strictDiff: number;
@@ -516,6 +537,8 @@ interface RoutesTally {
   limitNaN: number;
   nonFiniteDistance: number;
   nonFiniteStrictDiff: number;
+  ascii: Split;
+  nonAscii: Split;
   routesHist: Map<string, number>;
   skippedHist: Map<string, number>;
   first: string[];
@@ -524,7 +547,7 @@ interface RoutesTally {
 function newRoutesTally(): RoutesTally {
   return {
     runs: 0, strictDiff: 0, threw: 0, textDiff: 0, pathSetDiff: 0, skippedDiff: 0, vanishOld: 0, vanishNew: 0, capped: 0, limitNaN: 0,
-    nonFiniteDistance: 0, nonFiniteStrictDiff: 0, routesHist: new Map(), skippedHist: new Map(), first: [],
+    nonFiniteDistance: 0, nonFiniteStrictDiff: 0, ascii: newSplit(), nonAscii: newSplit(), routesHist: new Map(), skippedHist: new Map(), first: [],
   };
 }
 
@@ -532,25 +555,32 @@ function bucket(n: number): string {
   return n === 0 ? '0' : n <= 2 ? '1-2' : n <= 5 ? '3-5' : n <= 10 ? '6-10' : '11+';
 }
 
+/** 정렬에 쓰이는 글자(파일·page·서비스 경로)가 모두 ASCII인지. sampleParams·fallback 값은 인코딩되어 경로에는 ASCII로 들어간다 */
+const isAscii = (...texts: string[]): boolean => texts.every((text) => /^[\u0000-\u007f]*$/.test(text));
+
 function compareRoutes(
   tally: RoutesTally,
   label: string,
   input: unknown,
   oldLocale: () => NextRoutes,
-  oldU16: () => NextRoutes,
   all: () => NextRoutes,
   actual: () => NextRoutes,
   maxPages: number | undefined,
   weird: boolean,
+  ascii: boolean,
 ): void {
   tally.runs++;
-  const expected = outcome(oldU16);
+  const split = ascii ? tally.ascii : tally.nonAscii;
+  split.runs++;
+  const expected = outcome(oldLocale);
   const got = outcome(actual);
   if (expected === 'THROW' || got === 'THROW') tally.threw++;
-  if (expected !== got) {
+  // ASCII 이름만 든 입력은 옛 TS(localeCompare)와 글자까지 같아야 한다
+  if (ascii && expected !== got) {
     tally.strictDiff++;
+    split.strictDiff++;
     if (weird) tally.nonFiniteStrictDiff++;
-    if (tally.first.length < 3) tally.first.push(`${label} ${JSON.stringify(input)}\n  옛(UTF-16)=${expected}\n  새=${got}`);
+    if (tally.first.length < 3) tally.first.push(`${label} ${JSON.stringify(input)}\n  옛=${expected}\n  새=${got}`);
     return;
   }
   if (weird) tally.nonFiniteDistance++;
@@ -561,12 +591,22 @@ function compareRoutes(
   if (accounted(locale) !== universe) tally.vanishOld++;
   if (JSON.stringify(locale) !== got) {
     tally.textDiff++;
-    if (pathSet(locale) !== pathSet(newResult)) tally.pathSetDiff++;
-    if (skippedSet(locale) !== skippedSet(newResult)) tally.skippedDiff++;
+    split.textDiff++;
+    if (pathSet(locale) !== pathSet(newResult)) {
+      tally.pathSetDiff++;
+      split.pathSetDiff++;
+    }
+    if (skippedSet(locale) !== skippedSet(newResult)) {
+      tally.skippedDiff++;
+      split.skippedDiff++;
+    }
   }
   const limit = Math.max(1, Math.min(Math.floor(maxPages ?? AUTO_PAGE_DEFAULT), AUTO_PAGE_MAX));
   if (Number.isNaN(limit)) tally.limitNaN++;
-  else if (universe > limit) tally.capped++;
+  else if (universe > limit) {
+    tally.capped++;
+    split.capped++;
+  }
   hist(tally.routesHist, bucket(newResult.routes.length));
   hist(tally.skippedHist, bucket(newResult.skipped.length));
 }
@@ -578,6 +618,7 @@ function runRoutes(name: string, make: (rng: Rng, tally: RoutesTally) => void): 
     const tally = newRoutesTally();
     for (let n = 0; n < ITERATIONS; n++) make(rng, tally);
     for (const key of ['runs', 'strictDiff', 'threw', 'textDiff', 'pathSetDiff', 'skippedDiff', 'vanishOld', 'vanishNew', 'capped', 'limitNaN', 'nonFiniteDistance', 'nonFiniteStrictDiff'] as const) total[key] += tally[key];
+    for (const part of ['ascii', 'nonAscii'] as const) for (const key of ['runs', 'strictDiff', 'textDiff', 'pathSetDiff', 'skippedDiff', 'capped'] as const) total[part][key] += tally[part][key];
     for (const [k, v] of tally.routesHist) total.routesHist.set(k, (total.routesHist.get(k) ?? 0) + v);
     for (const [k, v] of tally.skippedHist) total.skippedHist.set(k, (total.skippedHist.get(k) ?? 0) + v);
     total.first.push(...tally.first);
@@ -585,6 +626,12 @@ function runRoutes(name: string, make: (rng: Rng, tally: RoutesTally) => void): 
       console.log(
         `[차등] ${name} 시드 ${seed}: 비교 ${tally.runs}, 새≠옛(UTF-16) ${tally.strictDiff}, 옛(localeCompare)≠새 글자 ${tally.textDiff}, 경로집합 ${tally.pathSetDiff}, 건너뜀집합 ${tally.skippedDiff}, 사라짐 옛 ${tally.vanishOld}·새 ${tally.vanishNew}, 상한에 걸림 ${tally.capped}, 상한 NaN ${tally.limitNaN}`,
       );
+    }
+  }
+  if (REPORT) {
+    for (const part of ['ascii', 'nonAscii'] as const) {
+      const x = total[part];
+      console.log(`[분리] ${name} ${part === 'ascii' ? 'ASCII 입력' : '비ASCII 입력'}: 비교 ${x.runs}, (a) 글자 ${x.textDiff}, (b) 경로집합 ${x.pathSetDiff}, (c) 건너뜀집합 ${x.skippedDiff}, 상한에 걸림 ${x.capped}`);
     }
   }
   if (REPORT) console.log(`[분포] ${name} routes 개수 ${show(total.routesHist)} | skipped 개수 ${show(total.skippedHist)} | 상한에 걸림 ${((total.capped / total.runs) * 100).toFixed(1)}% | 비정상 distance 입력 ${total.nonFiniteDistance}`);
@@ -622,16 +669,19 @@ describe('차등 시험(3h): 옛 TS 구현과 Rust 껍데기는 같은 입력에
       const call = (impl: { routesFromChangedFiles: typeof legacyU16.routesFromChangedFiles }) => (): NextRoutes =>
         impl.routesFromChangedFiles(i.files, i.servicePath, i.sampleParams, i.maxPages, i.fallbackValue);
       compareRoutes(
-        tally, 'changed', i, call(legacyLocale), call(legacyU16), () => legacyAll.routesFromChangedFiles(i.files, i.servicePath, i.sampleParams, 1e9, i.fallbackValue),
-        () => routesFromChangedFiles(i.files, i.servicePath, i.sampleParams, i.maxPages, i.fallbackValue), i.maxPages, false,
+        tally, 'changed', i, call(legacyLocale), () => legacyAll.routesFromChangedFiles(i.files, i.servicePath, i.sampleParams, 1e9, i.fallbackValue),
+        () => routesFromChangedFiles(i.files, i.servicePath, i.sampleParams, i.maxPages, i.fallbackValue), i.maxPages, false, isAscii(i.servicePath, ...i.files),
       );
     });
     expect(total.first.join('\n---\n')).toBe('');
     expect(total.strictDiff).toBe(0);
     expect(total.vanishOld).toBe(0);
     expect(total.vanishNew).toBe(0);
-    // 대소문자·악센트가 섞인 이름은 localeCompare와 UTF-16 순서가 실제로 다르게 정렬한다
-    expect(total.textDiff).toBeGreaterThan(total.runs * 0.005);
+    expect(total.ascii.runs).toBeGreaterThan(total.runs * 0.4);
+    expect(total.nonAscii.runs).toBeGreaterThan(total.runs * 0.2);
+    expect(total.ascii.textDiff + total.ascii.pathSetDiff + total.ascii.skippedDiff).toBe(0);
+    // 비ASCII가 섞이면 localeCompare와 달라지는 입력이 실제로 있다
+    expect(total.nonAscii.textDiff).toBeGreaterThan(0);
     expect(total.capped).toBeGreaterThan(total.runs * 0.15);
     expect(total.limitNaN).toBeGreaterThan(0);
   });
@@ -647,14 +697,16 @@ describe('차등 시험(3h): 옛 TS 구현과 Rust 껍데기는 같은 입력에
       const call = (impl: { routesFromCandidates: typeof legacyU16.routesFromCandidates }) => (): NextRoutes =>
         impl.routesFromCandidates(i.candidates, i.servicePath, i.sampleParams, i.maxPages, i.fallbackValue);
       compareRoutes(
-        tally, 'candidates', i, call(legacyLocale), call(legacyU16), () => legacyAll.routesFromCandidates(i.candidates, i.servicePath, i.sampleParams, 1e9, i.fallbackValue),
-        () => routesFromCandidates(i.candidates, i.servicePath, i.sampleParams, i.maxPages, i.fallbackValue), i.maxPages, weird,
+        tally, 'candidates', i, call(legacyLocale), () => legacyAll.routesFromCandidates(i.candidates, i.servicePath, i.sampleParams, 1e9, i.fallbackValue),
+        () => routesFromCandidates(i.candidates, i.servicePath, i.sampleParams, i.maxPages, i.fallbackValue), i.maxPages, weird, isAscii(...i.candidates.map((c) => c.page)),
       );
     });
     expect(total.first.join('\n---\n')).toBe('');
     expect(total.strictDiff).toBe(0);
     expect(total.vanishOld).toBe(0);
     expect(total.vanishNew).toBe(0);
+    expect(total.ascii.runs).toBeGreaterThan(total.runs * 0.3);
+    expect(total.ascii.textDiff + total.ascii.pathSetDiff + total.ascii.skippedDiff).toBe(0);
     expect(total.capped).toBeGreaterThan(total.runs * 0.15);
     expect(total.limitNaN).toBeGreaterThan(0);
   });

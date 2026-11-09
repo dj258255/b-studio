@@ -11,12 +11,13 @@
 //!
 //! 의도한 차이:
 //! 1. 경로 이름 정렬(`routesFromChangedFiles`의 `a.path.localeCompare(b.path)`, `routesFromCandidates` 마지막 비교의 `a.page.localeCompare(b.page)`)은
-//!    UTF-16 코드 단위 순서(`js::cmp_utf16`)다. `localeCompare`는 실행 환경의 ICU 순서(대소문자·악센트·로캘에 따라 달라진다)라 같은
-//!    입력이 기계마다 다르게 정렬될 수 있었다. 상한(`maxPages`) 안에 드는 페이지가 정렬 순서에 달려 있으므로 결정적인 순서로 고정한다.
+//!    `js_locale::locale_compare`다. ASCII 글자만 있는 이름은 ICU 기본 정렬과 같고(대소문자·`_`·`-` 순서 포함), 비ASCII 글자(한글·é 등)는 코드 포인트 순서로
+//!    뒤에 둔다. 상한(`maxPages`) 안에 드는 페이지가 정렬 순서에 달려 있으므로 ASCII 이름의 선택은 옛 동작을 지킨다.
 //! 2. `sampleParams`는 자기 속성만 읽는다. 옛 TS는 `sampleParams['constructor']`처럼 `Object.prototype`의 속성도 읽어 `[constructor]`
 //!    폴더가 함수 원문 글자로 채워졌다.
 
 use crate::js::{self, is_js_line_terminator};
+use crate::js_locale;
 use crate::js_json::{self, JsObject, JsValue};
 use std::collections::{HashMap, HashSet};
 
@@ -349,8 +350,8 @@ pub fn routes_from_changed_files(files: &[String], service_path: &str, sample_pa
         }
     }
 
-    // 의도한 차이 1: localeCompare 대신 UTF-16 코드 단위 순서
-    routes.sort_by(|a, b| js::cmp_utf16(&a.path, &b.path));
+    // 의도한 차이 1: localeCompare는 ASCII 범위만 같고 나머지는 코드 포인트 순서(`js_locale::locale_compare`)
+    routes.sort_by(|a, b| js_locale::locale_compare(&a.path, &b.path).partial_cmp(&0.0).unwrap_or(std::cmp::Ordering::Equal));
     let start = js::relative_start(routes.len(), limit);
     for route in routes.iter().skip(start) {
         skipped.push(SkippedNextRoute { file: route.file.clone(), reason: over_limit_reason(limit) });
@@ -380,12 +381,8 @@ pub fn routes_from_candidates(candidates: &[RouteCandidate], service_path: &str,
         if truthy(t) {
             return t;
         }
-        // 의도한 차이 1
-        match js::cmp_utf16(&a.page, &b.page) {
-            std::cmp::Ordering::Less => -1.0,
-            std::cmp::Ordering::Equal => 0.0,
-            std::cmp::Ordering::Greater => 1.0,
-        }
+        // 의도한 차이 1(`localeCompare`)
+        js_locale::locale_compare(&a.page, &b.page)
     });
 
     let mut routes: Vec<NextRoute> = Vec::new();
