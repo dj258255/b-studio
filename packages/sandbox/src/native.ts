@@ -112,6 +112,28 @@ interface NativeGuard {
     cwd: string | undefined | null,
     signal: AbortSignal | undefined | null,
   ) => AsyncIterableIterator<string>;
+  // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
+  // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
+  // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
+  HostPty: new (
+    file: string,
+    args: string[],
+    name: string,
+    cols: number,
+    rows: number,
+    cwd: string,
+    env: Record<string, string>,
+    onData: (data: Buffer) => void,
+    onExit: (code: number) => void,
+  ) => NativeHostPty;
+}
+
+export interface NativeHostPty {
+  /** 자식 pid. 플랫폼이 못 주면 null */
+  readonly pid: number | null;
+  write(data: Buffer): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
 }
 
 export interface NativeSyncObservations {

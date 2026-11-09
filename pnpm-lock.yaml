@@ -133,9 +133,6 @@ importers:
       '@b-studio/spec':
         specifier: workspace:*
         version: link:../spec
-      '@lydell/node-pty':
-        specifier: 1.1.0
-        version: 1.1.0
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
