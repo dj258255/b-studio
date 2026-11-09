@@ -157,6 +157,76 @@ interface NativeGuard {
   writeTextFileAtomic(path: string, content: string): Promise<void>;
   // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
   probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
+  // ── agent: test-discovery(3단계 3a). 결과 객체는 JSON 문자열(옛 TS의 JSON.stringify와 같은 글자). 모양이 어긋난 평탄화 입력은 던진다.
+  // framework가 undefined·null이면 내용으로 짐작한다
+  extractRequirementIds(text: string): string[];
+  extractRequirementIdsWithSuites(suitePath: string[] | undefined | null, title: string): string[];
+  discoverJunitFile(filePath: string, content: string): string;
+  detectJsFramework(content: string): string;
+  discoverJsFile(filePath: string, content: string, framework: string | undefined | null): string;
+  discoverPytestFile(filePath: string, content: string): string;
+  isTestFilePath(filePath: string): boolean;
+  discoverTestsInFile(filePath: string, content: string): string | null | undefined;
+  flattenDiscoveredFile(fileJson: string): string;
+  // ── agent: requirement-issues(3단계 3c). 객체는 JSON 문자열(encodeNative·decodeNative). 모양이 어긋난 입력은 던진다
+  reqIssueLabel(): string;
+  reqIssueContentHash(text: string): string;
+  reqIssueBuildRegionContent(requirementJson: string): string;
+  reqIssueRequirementContentHash(requirementJson: string): string;
+  reqIssueBuildManagedRegion(requirementJson: string, rev: number): string;
+  reqIssueParseManagedRegion(body: string): string | null | undefined;
+  reqIssueSubIssueTitle(requirementJson: string): string;
+  reqIssueIdFromTitle(title: string): string | null | undefined;
+  reqIssueTrackingTitle(project: string): string;
+  reqIssueFindTrackingIssue(issuesJson: string, projectName: string): string | null | undefined;
+  reqIssueLabelSet(requirementJson: string, status: string): string[];
+  reqIssueBuildTrackingBody(projectName: string, rowsJson: string, updatedAt?: string | null): string;
+  reqIssueFindExistingRemote(requirementJson: string, remoteJson: string): number;
+  reqIssuePlan(inputsJson: string, remoteJson: string): string;
+  reqIssueSummarizePlan(entriesJson: string): string;
+  reqIssueBuildStatusComment(requirementId: string, status: string, rowsJson: string): string;
+  reqIssueIsStatusComment(body: string, requirementId?: string | null): boolean;
+  reqIssueFindPinnedStatusComment(bodies: string[], requirementId: string): number;
+  reqIssueImplementsTrailer(refJson: string): string;
+  reqIssueExtractMentions(texts: string[]): string[];
+  reqIssueBuildAddendum(refsJson: string, includeCloses: boolean): string;
+  reqIssueBuildReviewContext(entriesJson: string): string;
+  reqIssueFormYaml(): string;
+  reqIssueParseIssueForm(title: string, body: string): string | null | undefined;
+  reqIssueDraftFromIssue(title: string, body: string): string;
+  reqIssueDraftManaged(title: string, body: string): string | null | undefined;
+  reqIssueExtractTrackingNumbers(body: string): string;
+  reqIssueManagedToRequirement(draftJson: string): string;
+  reqIssueIsAllowedEndpoint(pathname: string): boolean;
+  // ── agent: import-graph(3단계 3b). 별칭 설정은 `{ baseUrl?, paths: [{ pattern, targets }] }` JSON, 역방향 그래프는 `[[파일, [import하는 파일…]], …]` JSON
+  importGraphIsPageFile(relative: string): boolean;
+  importGraphRouteWrapperFolder(relative: string): string | null | undefined;
+  importGraphIsSourceFile(relative: string): boolean;
+  importGraphTokenize(source: string): string;
+  importGraphExtractSpecifiers(source: string): string[];
+  importGraphNormalizePath(value: string): string | null | undefined;
+  importGraphDirOf(file: string): string;
+  importGraphStripJsonc(text: string): string;
+  importGraphExtendsPath(text: string, configDir: string): string | null | undefined;
+  importGraphParseAliasConfig(text: string, configDir: string, baseJson: string | null | undefined): string;
+  importGraphResolveImport(specifier: string, fromFile: string, files: string[], aliasJson: string): string | null | undefined;
+  importGraphBuildReverse(sourceFiles: string[], sourceTexts: string[], files: string[], aliasJson: string): string;
+  importGraphTracePages(changed: string[], reverseJson: string, files: string[], maxDepth: number): string;
+  // ── agent: test-run·test-results(3단계 3d). 결과 객체는 JSON 문자열(NaN·Infinity가 나올 수 있는 보고서 해석은 encodeNative·decodeNative 표시 객체).
+  // 알 수 없는 실행기·범위 밖 엔티티·모양이 어긋난 입력은 던진다. attachResults는 행마다 짝지은 케이스의 위치(없으면 -1)를 돌려준다
+  testRunConstants(): string;
+  buildTestRunPlan(runner: string, file: string | undefined | null, className: string | undefined | null, testName: string | undefined | null, wrapper: boolean | undefined | null, extraReportRoots: string[]): string;
+  clearTestReportsCommand(extraReportRoots: string[]): string[];
+  reportRootsForIncludes(includes: string[], root: string): string[];
+  splitCollectedReports(stdout: string, singleFileLabel: string): string;
+  detectRunner(template: string, hasPomXml: boolean | undefined | null, packageJson: string | undefined | null): string | null | undefined;
+  runnerLabel(runner: string): string;
+  parseJUnitXml(xml: string): string;
+  parseJestLikeJson(json: string): string;
+  attachResults(rowsJson: string, casesJson: string, ids: number[]): number[];
+  countByStatus(statusesJson: string): string;
+  buildFixTestPrefill(rowJson: string): string;
+  buildAddTestPrefill(requirementJson: string): string;
   // ── agent: 게이트 리뷰 판정(3단계 3e). 입력·출력은 JSON 문자열(encodeNative·decodeNative). 판정 입력은 짝 없는 서로게이트가 있거나 모양이 어긋나면 던진다
   diffDeclaredChecks(startedJson: string, latestJson: string): string;
   weakenedDeclarations(startedJson: string, latestJson: string): string[];
