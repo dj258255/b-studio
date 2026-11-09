@@ -7,7 +7,11 @@
  *
  * 여기서는 규칙만 정의하고 실제 적용은 loop.ts가 한다(테스트가 쉽도록 순수 함수로 둔다).
  * Claude Code·Codex 러너는 대화를 직접 다루지 않는다(각 CLI가 자체 압축을 한다). 이번 범위 밖이다.
+ *
+ * 무엇을 비울지의 판정은 Rust(crates/bstudio-guard/src/context_clearing.rs, ADR-191 3단계 3f)가 하고, 이 파일은 그 계획을 원본 객체 위에 적용하는
+ * 껍데기다(메시지 배열은 Rust로 읽어서만 보내고, 바꾸는 일은 여기서 해서 모르는 필드와 바꾸지 않은 메시지의 참조가 그대로 남는다).
  */
+import { native } from '@b-studio/sandbox';
 import type Anthropic from '@anthropic-ai/sdk';
 
 type BetaMessageParam = Anthropic.Beta.BetaMessageParam;
@@ -24,17 +28,17 @@ export interface ContextClearingPolicy {
 /** 기본 정책. 임계치는 작은 모델 컨텍스트의 20% 남짓(60k)으로 잡았다 */
 export const DEFAULT_CONTEXT_CLEARING: ContextClearingPolicy = { triggerTokens: 60_000, keepRecent: 4, clearAtLeastChars: 20_000 };
 
-/** 비운 자리에 남기는 표시의 접두어. 이 문구로 시작하면 이미 비운 것으로 본다 */
-export const CLEARED_TOOL_RESULT_PREFIX = '[이전 도구 결과 생략: ';
+/** 비운 자리에 남기는 표시의 접두어. 이 문구로 시작하면 이미 비운 것으로 본다. 문구는 Rust가 정한다 */
+export const CLEARED_TOOL_RESULT_PREFIX: string = native.clearedToolResultPrefix();
 
 /** 비운 자리에 남기는 문구 */
 export function clearedToolResultNote(chars: number): string {
-  return `${CLEARED_TOOL_RESULT_PREFIX}${chars.toLocaleString('ko-KR')}자. 필요하면 같은 도구를 다시 부르세요]`;
+  return native.clearedToolResultNote(chars);
 }
 
 /** 이미 비운 자리인지 */
 export function isClearedToolResult(text: string): boolean {
-  return text.startsWith(CLEARED_TOOL_RESULT_PREFIX);
+  return native.isClearedToolResult(text);
 }
 
 export interface ClearToolResults {
@@ -53,47 +57,28 @@ export interface ClearToolResults {
  * - 원본 배열·메시지·블록은 바꾸지 않는다.
  */
 export function clearOldToolResults(messages: readonly BetaMessageParam[], policy: ContextClearingPolicy = DEFAULT_CONTEXT_CLEARING): ClearToolResults {
-  const targets: Array<{ message: number; block: number; chars: number }> = [];
-  messages.forEach((message, messageIndex) => {
-    if (message.role !== 'user' || !Array.isArray(message.content)) return;
-    message.content.forEach((block, blockIndex) => {
-      if (block.type !== 'tool_result') return;
-      const chars = contentChars(block.content);
-      // 이미 비운 자리는 후보에서도 최근 N개에도 넣지 않는다
-      if (typeof block.content === 'string' && isClearedToolResult(block.content)) return;
-      targets.push({ message: messageIndex, block: blockIndex, chars });
-    });
-  });
+  const plan = JSON.parse(native.planClearOldToolResults(JSON.stringify(messages), Number(policy.keepRecent), Number(policy.clearAtLeastChars))) as {
+    clearedCount: number;
+    clearedChars: number;
+    edits: Array<{ message: number; block: number; note: string }>;
+  };
+  if (plan.edits.length === 0) return { messages: [...messages], clearedCount: 0, clearedChars: 0 };
 
-  const candidates = targets.slice(0, Math.max(0, targets.length - policy.keepRecent));
-  const clearedChars = candidates.reduce((sum, target) => sum + target.chars, 0);
-  if (candidates.length === 0 || clearedChars < policy.clearAtLeastChars) {
-    return { messages: [...messages], clearedCount: 0, clearedChars: 0 };
-  }
-
-  const cleared = new Set(candidates.map((target) => `${target.message}:${target.block}`));
+  const notes = new Map(plan.edits.map((edit) => [`${edit.message}:${edit.block}`, edit.note]));
   const next = messages.map((message, messageIndex) => {
     if (!Array.isArray(message.content)) return message;
     let changed = false;
     const content = message.content.map((block, blockIndex) => {
-      if (block.type !== 'tool_result' || !cleared.has(`${messageIndex}:${blockIndex}`)) return block;
+      const note = notes.get(`${messageIndex}:${blockIndex}`);
+      if (note === undefined) return block;
       changed = true;
       // tool_use_id·is_error 등 나머지 필드는 그대로 둔다
-      return { ...block, content: clearedToolResultNote(contentChars(block.content)) };
+      return { ...block, content: note };
     });
     return changed ? ({ ...message, content } as BetaMessageParam) : message;
   });
 
-  return { messages: next, clearedCount: candidates.length, clearedChars };
-}
-
-/** 도구 결과 본문의 글자 수. 문자열이거나 텍스트 블록 배열일 수 있다 */
-function contentChars(content: unknown): number {
-  if (typeof content === 'string') return content.length;
-  if (Array.isArray(content)) {
-    return content.reduce<number>((sum, block) => sum + (typeof (block as { text?: unknown }).text === 'string' ? (block as { text: string }).text.length : 0), 0);
-  }
-  return 0;
+  return { messages: next, clearedCount: plan.clearedCount, clearedChars: plan.clearedChars };
 }
 
 /**
@@ -101,7 +86,7 @@ function contentChars(content: unknown): number {
  * 스튜디오 API 모드와 벤치가 이 값을 읽어 러너에 넘긴다.
  */
 export function contextClearingFromEnv(env: Record<string, string | undefined>): ContextClearingPolicy | undefined {
-  return env.B_STUDIO_CONTEXT_CLEARING?.trim().toLowerCase() === 'on' ? DEFAULT_CONTEXT_CLEARING : undefined;
+  return native.isContextClearingOn(env.B_STUDIO_CONTEXT_CLEARING) ? DEFAULT_CONTEXT_CLEARING : undefined;
 }
 
 /** 옵션과 환경 변수를 합쳐 실제 정책을 정한다. `false`는 환경 변수보다 우선한다(명시적으로 끔) */

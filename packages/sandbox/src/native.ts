@@ -243,6 +243,75 @@ interface NativeGuard {
   diffContracts(beforeJson: string, afterJson: string): string;
   summarizeContract(documentJson: string): string;
   formatContractChanges(changesJson: string): string;
+  // ── agent: 토큰 예산·모델 선택(3단계 3f). 큰 구조는 JSON 문자열(encodeNative·decodeNative)
+  clipCommandOutput(text: string, budget: number): string;
+  clipText(text: string, budget: number, hint?: string | null): string;
+  visibleHtml(html: string): string;
+  isHtmlContent(contentType: string | null | undefined, text: string): boolean;
+  repeatNotePrefix(): string;
+  repeatNote(call: number): string;
+  isRepeatNote(text: string): boolean;
+  clearedToolResultPrefix(): string;
+  clearedToolResultNote(chars: number): string;
+  isClearedToolResult(text: string): boolean;
+  planClearOldToolResults(messagesJson: string, keepRecent: number, clearAtLeastChars: number): string;
+  isContextClearingOn(value: string | null | undefined): boolean;
+  estimateTokens(text: string): number;
+  classifyComplexity(prompt: string, inputTokens: number): string;
+  classifyRisk(prompt: string): string;
+  classifyTask(prompt: string): string;
+  estimateCost(pricingJson: string, usageJson: string): number | null | undefined;
+  routeModel(profilesJson: string, requestJson: string, statsJson: string): string;
+  aggregateModelStats(observationsJson: string): string;
+  validateModelProfiles(inputJson: string, urlFactsJson: string): string;
+  cliTiers(): string[];
+  tierLabel(tier: string): string | null | undefined;
+  nextCliTier(tier: string): string | null | undefined;
+  higherCliTier(a: string | null | undefined, b: string): string;
+  routeCliTier(prompt: string, intent: string, stickyTier?: string | null): string;
+  // ── agent: coordination·escalation(3단계 3i). 객체는 JSON 문자열(encodeNative·decodeNative). 선언한 모양이 어긋난 입력은 던진다
+  coordNormalizeMessage(text: string): string;
+  coordSignatureKey(signatureJson: string): string;
+  coordSignaturesFromReport(reportJson: string): string;
+  coordSignatureFromCheck(checkJson: string): string;
+  coordFailureNotesFromReport(reportJson: string, checksJson: string): string;
+  coordFailureNotesFromEvents(eventsJson: string): string;
+  coordNoteBytes(body: string): number;
+  coordCanRead(topology: string, readerLane: string, readerGroup: string | undefined | null, noteBy: string, noteLane: string, noteGroup: string | undefined | null, hub: string): boolean;
+  // reportJson이 undefined면 보고서 없이 확인 목록만 본다. 기본값(sameSignatureTimes·retryBudget)은 호출하는 TS가 정해 넘긴다
+  escalationSignatureSetKey(reportJson: string | undefined | null, checksJson: string): string;
+  escalationShouldEscalate(history: string[], times: number): boolean;
+  escalationShouldPromote(sameSignatureTimes: number | undefined | null, defaultTimes: number, afterFailures: number | undefined | null, history: string[]): boolean;
+  escalationRetryBudgetFor(retryBudget: number | undefined | null, defaultBudget: number): number;
+  escalationPrompt(summary: string, lastFeedback: string | undefined | null): string;
+  // ── agent: commit-message·pr-review(3단계 3g). 지적·입력 객체는 encodeNative한 JSON 문자열, 결과 객체는 JSON 문자열. 어긋난 입력은 던진다
+  // files·kinds는 PendingChange의 file·change를 같은 순서로 나눈 배열이다. maxChars·round는 아무 수나 받는다
+  classifyCommit(request: string, files: string[], kinds: string[]): string;
+  generateCommitSubject(request: string, files: string[], kinds: string[], agentSummary: string | undefined | null, requestIsAnswer: boolean): string;
+  summarizeCommitText(text: string, maxChars: number): string;
+  toCommitMood(text: string): string;
+  prReviewFixMarker(): string;
+  isBlockingSeverity(severity: string): boolean;
+  hasBlockingFindings(severities: string[]): boolean;
+  prReviewSeverityCounts(severities: string[]): number[];
+  nextPrReviewStep(severities: string[], round: number, maxRounds: number): string;
+  truncateDiff(diff: string, maxChars: number): string;
+  diffFilePaths(diff: string): string[];
+  extractDiffReferencedNames(diff: string): string[];
+  buildPrReviewExternalContext(paths: string[], excerpts: string[], maxChars: number): string;
+  buildPrReviewUserPrompt(inputJson: string): string;
+  prReviewMarker(round: number): string;
+  buildPrReviewComment(inputJson: string): string;
+  buildPrReviewResolvedContext(resolvedJson: string): string;
+  buildReviewResolutionComment(inputJson: string): string;
+  buildPrReviewFixRequest(findingsJson: string): string;
+  extractPrReviewFixTitles(request: string): string[] | null | undefined;
+  // ── agent: next-routes·project-status·stuck-loading(3단계 3h). 객체는 JSON 문자열(encodeNative·decodeNative). maxPages는 NaN·Infinity도 그대로 받는다. 모양이 어긋난 입력은 던진다
+  nextRoutesIsIdLikeSegment(name: string): boolean;
+  nextRoutesFromChangedFiles(files: string[], servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
+  nextRoutesFromCandidates(candidatesJson: string, servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
+  projectStatusBuild(inputJson: string): string;
+  stuckLoadingDetect(text: string, evidenceJson?: string | null): string | null | undefined;
   // ── agent: requirements(3단계 3j). 객체는 JSON 문자열(encodeNative·decodeNative). 모양이 어긋난 입력은 던진다. 인덱스를 돌려주는 함수는 껍데기가 원래 객체를 골라 담는다
   reqCoreRequirementsFile(): string;
   reqCoreMergeThresholds(): number[];

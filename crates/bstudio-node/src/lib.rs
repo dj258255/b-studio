@@ -1663,6 +1663,384 @@ pub fn format_contract_changes(changes_json: String) -> Result<String> {
     fail(contract_diff::format_contract_changes(&input(&changes_json, "계약 변경 목록")?))
 }
 
+// ── 토큰 예산·모델 선택(ADR-191 3f). 큰 구조는 JSON 문자열(NaN·Infinity는 표시 객체). TS 껍데기: packages/agent/src/{tool-output,context-clearing,model-router,cli-router}.ts
+
+use bstudio_guard::{cli_router, context_clearing, model_router, tool_output};
+
+#[napi]
+pub fn clip_command_output(text: String, budget: f64) -> String {
+    tool_output::clip_command_output(&text, budget)
+}
+
+#[napi]
+pub fn clip_text(text: String, budget: f64, hint: Option<String>) -> String {
+    tool_output::clip_text(&text, budget, hint.as_deref())
+}
+
+#[napi]
+pub fn visible_html(html: String) -> String {
+    tool_output::visible_html(&html)
+}
+
+#[napi]
+pub fn is_html_content(content_type: Option<String>, text: String) -> bool {
+    tool_output::is_html_content(content_type.as_deref(), &text)
+}
+
+#[napi]
+pub fn repeat_note_prefix() -> String {
+    tool_output::REPEAT_NOTE_PREFIX.to_owned()
+}
+
+#[napi]
+pub fn repeat_note(call: f64) -> String {
+    tool_output::repeat_note(call)
+}
+
+#[napi]
+pub fn is_repeat_note(text: String) -> bool {
+    tool_output::is_repeat_note(&text)
+}
+
+#[napi]
+pub fn cleared_tool_result_prefix() -> String {
+    context_clearing::CLEARED_TOOL_RESULT_PREFIX.to_owned()
+}
+
+#[napi]
+pub fn cleared_tool_result_note(chars: f64) -> String {
+    context_clearing::cleared_tool_result_note(chars)
+}
+
+#[napi]
+pub fn is_cleared_tool_result(text: String) -> bool {
+    context_clearing::is_cleared_tool_result(&text)
+}
+
+/// 비울 자리의 계획(JSON). 메시지는 읽기만 한다
+#[napi]
+pub fn plan_clear_old_tool_results(messages_json: String, keep_recent: f64, clear_at_least_chars: f64) -> Result<String> {
+    fail(context_clearing::plan_clear_old_tool_results(&messages_json, keep_recent, clear_at_least_chars))
+}
+
+#[napi]
+pub fn is_context_clearing_on(value: Option<String>) -> bool {
+    context_clearing::is_context_clearing_on(value.as_deref())
+}
+
+#[napi]
+pub fn estimate_tokens(text: String) -> f64 {
+    model_router::estimate_tokens(&text)
+}
+
+#[napi]
+pub fn classify_complexity(prompt: String, input_tokens: f64) -> String {
+    model_router::classify_complexity(&prompt, input_tokens).to_owned()
+}
+
+#[napi]
+pub fn classify_risk(prompt: String) -> String {
+    model_router::classify_risk(&prompt).to_owned()
+}
+
+#[napi]
+pub fn classify_task(prompt: String) -> String {
+    model_router::classify_task(&prompt)
+}
+
+#[napi]
+pub fn estimate_cost(pricing_json: String, usage_json: String) -> Result<Option<f64>> {
+    fail(model_router::estimate_cost(&pricing_json, &usage_json))
+}
+
+#[napi]
+pub fn route_model(profiles_json: String, request_json: String, stats_json: String) -> Result<String> {
+    fail(model_router::route_model(&profiles_json, &request_json, &stats_json))
+}
+
+#[napi]
+pub fn aggregate_model_stats(observations_json: String) -> Result<String> {
+    fail(model_router::aggregate_model_stats(&observations_json))
+}
+
+#[napi]
+pub fn validate_model_profiles(input_json: String, url_facts_json: String) -> Result<String> {
+    fail(model_router::validate_model_profiles(&input_json, &url_facts_json))
+}
+
+#[napi]
+pub fn cli_tiers() -> Vec<String> {
+    cli_router::CLI_TIERS.iter().map(|t| (*t).to_owned()).collect()
+}
+
+#[napi]
+pub fn tier_label(tier: String) -> Option<String> {
+    cli_router::tier_label(&tier).map(str::to_owned)
+}
+
+#[napi]
+pub fn next_cli_tier(tier: String) -> Option<String> {
+    cli_router::next_cli_tier(&tier).map(str::to_owned)
+}
+
+#[napi]
+pub fn higher_cli_tier(a: Option<String>, b: String) -> String {
+    cli_router::higher_cli_tier(a.as_deref(), &b).to_owned()
+}
+
+#[napi]
+pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String>) -> Result<String> {
+    fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
+}
+
+// ── agent: coordination·escalation(3단계 3i). 객체는 JSON 문자열(encodeNative·decodeNative). 선언한 모양이 어긋난 입력은 던진다
+use bstudio_guard::{coordination, escalation};
+
+#[napi]
+pub fn coord_normalize_message(text: String) -> String {
+    coordination::normalize_message(&text)
+}
+
+#[napi]
+pub fn coord_signature_key(signature_json: String) -> Result<String> {
+    fail(coordination::signature_key(&input(&signature_json, "실패 서명")?))
+}
+
+#[napi]
+pub fn coord_signatures_from_report(report_json: String) -> Result<String> {
+    Ok(out(&JsValue::Arr(fail(coordination::signatures_from_report(&input(&report_json, "검증 보고서")?))?)))
+}
+
+#[napi]
+pub fn coord_signature_from_check(check_json: String) -> Result<String> {
+    Ok(out(&fail(coordination::signature_from_check(&input(&check_json, "워크플로 확인")?))?))
+}
+
+#[napi]
+pub fn coord_failure_notes_from_report(report_json: String, checks_json: String) -> Result<String> {
+    let notes = coordination::failure_notes_from_report(&input(&report_json, "검증 보고서")?, &input(&checks_json, "워크플로 확인 목록")?);
+    Ok(out(&JsValue::Arr(fail(notes)?)))
+}
+
+#[napi]
+pub fn coord_failure_notes_from_events(events_json: String) -> Result<String> {
+    Ok(out(&JsValue::Arr(fail(coordination::failure_notes_from_events(&input(&events_json, "세션 이벤트")?))?)))
+}
+
+#[napi]
+pub fn coord_note_bytes(body: String) -> f64 {
+    coordination::note_bytes(&body) as f64
+}
+
+#[napi]
+pub fn coord_can_read(topology: String, reader_lane: String, reader_group: Option<String>, note_by: String, note_lane: String, note_group: Option<String>, hub: String) -> bool {
+    coordination::can_read(&topology, &reader_lane, reader_group.as_deref(), &note_by, &note_lane, note_group.as_deref(), &hub)
+}
+
+/// `reportJson`이 없으면(undefined) 보고서 없이 확인 목록만 본다
+#[napi]
+pub fn escalation_signature_set_key(report_json: Option<String>, checks_json: String) -> Result<String> {
+    let report = match report_json {
+        Some(text) => Some(input(&text, "검증 보고서")?),
+        None => None,
+    };
+    fail(escalation::signature_set_key(report.as_ref(), &input(&checks_json, "워크플로 확인 목록")?))
+}
+
+#[napi]
+pub fn escalation_should_escalate(history: Vec<String>, times: f64) -> bool {
+    escalation::should_escalate(&history, times)
+}
+
+#[napi]
+pub fn escalation_should_promote(same_signature_times: Option<f64>, default_times: f64, after_failures: Option<f64>, history: Vec<String>) -> bool {
+    escalation::should_promote(same_signature_times, default_times, after_failures, &history)
+}
+
+#[napi]
+pub fn escalation_retry_budget_for(retry_budget: Option<f64>, default_budget: f64) -> f64 {
+    escalation::retry_budget_for(retry_budget, default_budget)
+}
+
+#[napi]
+pub fn escalation_prompt(summary: String, last_feedback: Option<String>) -> String {
+    escalation::escalation_prompt(&summary, last_feedback.as_deref())
+}
+
+// ── 커밋 메시지 만들기·PR 리뷰의 순수 판정(ADR-191 3g). TS 껍데기: packages/agent/src/commit-message.ts, pr-review.ts
+// 지적·입력 객체는 encodeNative한 JSON 문자열로 받는다. 결과 객체는 JSON 문자열이다(옛 TS의 JSON.stringify와 같은 글자)
+
+use bstudio_guard::{commit_message, pr_review};
+
+fn commit_changes<'a>(files: &'a [String], kinds: &'a [String]) -> Vec<commit_message::Change<'a>> {
+    files.iter().zip(kinds).map(|(file, change)| commit_message::Change { file, change }).collect()
+}
+
+#[napi]
+pub fn classify_commit(request: String, files: Vec<String>, kinds: Vec<String>) -> String {
+    commit_message::classify_commit(&request, &commit_changes(&files, &kinds)).to_owned()
+}
+
+#[napi]
+pub fn generate_commit_subject(request: String, files: Vec<String>, kinds: Vec<String>, agent_summary: Option<String>, request_is_answer: bool) -> String {
+    commit_message::generate_commit_subject(&request, &commit_changes(&files, &kinds), agent_summary.as_deref(), request_is_answer)
+}
+
+#[napi]
+pub fn summarize_commit_text(text: String, max_chars: f64) -> String {
+    commit_message::summarize(&text, max_chars)
+}
+
+#[napi]
+pub fn to_commit_mood(text: String) -> String {
+    commit_message::to_commit_mood(&text)
+}
+
+#[napi]
+pub fn pr_review_fix_marker() -> String {
+    pr_review::FIX_MARKER.to_owned()
+}
+
+#[napi]
+pub fn is_blocking_severity(severity: String) -> bool {
+    pr_review::is_blocking_severity(&severity)
+}
+
+#[napi]
+pub fn has_blocking_findings(severities: Vec<String>) -> bool {
+    pr_review::has_blocking_findings(&severities)
+}
+
+/// `[blocker, major, minor, nit]`
+#[napi]
+pub fn pr_review_severity_counts(severities: Vec<String>) -> Vec<u32> {
+    pr_review::severity_counts(&severities).to_vec()
+}
+
+#[napi]
+pub fn next_pr_review_step(severities: Vec<String>, round: f64, max_rounds: f64) -> String {
+    pr_review::next_pr_review_step(&severities, round, max_rounds).to_owned()
+}
+
+/// `{ diff, truncated, omittedFiles }` JSON. 상한이 정수가 아니면 던진다(구분이 없는 diff를 자를 때만)
+#[napi]
+pub fn truncate_diff(diff: String, max_chars: f64) -> Result<String> {
+    Ok(fail(pr_review::truncate_diff(&diff, max_chars))?.to_json())
+}
+
+#[napi]
+pub fn diff_file_paths(diff: String) -> Vec<String> {
+    pr_review::diff_file_paths(&diff)
+}
+
+#[napi]
+pub fn extract_diff_referenced_names(diff: String) -> Vec<String> {
+    pr_review::extract_diff_referenced_names(&diff)
+}
+
+#[napi]
+pub fn build_pr_review_external_context(paths: Vec<String>, excerpts: Vec<String>, max_chars: f64) -> String {
+    pr_review::build_pr_review_external_context(&paths, &excerpts, max_chars)
+}
+
+#[napi]
+pub fn build_pr_review_user_prompt(input_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_user_prompt(&input(&input_json, "리뷰 요청")?))
+}
+
+#[napi]
+pub fn pr_review_marker(round: f64) -> String {
+    pr_review::pr_review_marker(round)
+}
+
+#[napi]
+pub fn build_pr_review_comment(input_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_comment(&input(&input_json, "리뷰 코멘트 입력")?))
+}
+
+#[napi]
+pub fn build_pr_review_resolved_context(resolved_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_resolved_context(&input(&resolved_json, "닫은 지적 목록")?))
+}
+
+/// `{ finding, reason? }` JSON
+#[napi]
+pub fn build_review_resolution_comment(input_json: String) -> Result<String> {
+    let value = input(&input_json, "닫은 지적")?;
+    let finding = value.prop("finding").ok_or_else(|| Error::from_reason("finding이 없습니다"))?;
+    fail(pr_review::build_review_resolution_comment(finding, value.prop("reason")))
+}
+
+#[napi]
+pub fn build_pr_review_fix_request(findings_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_fix_request(&input(&findings_json, "지적 목록")?))
+}
+
+/// 고침 요청이 아니거나 제목이 없으면 null
+#[napi]
+pub fn extract_pr_review_fix_titles(request: String) -> Option<Vec<String>> {
+    pr_review::extract_pr_review_fix_titles(&request)
+}
+
+// ── agent: next-routes·project-status·stuck-loading(ADR-191 3단계 3h). TS 껍데기: packages/agent/src/{next-routes,project-status,stuck-loading}.ts
+
+use bstudio_guard::{next_routes as nr, project_status as ps, stuck_loading as sl};
+
+fn sample_params(json: &str) -> Result<js_json::JsObject> {
+    match input(json, "sampleParams")? {
+        JsValue::Obj(o) => Ok(o),
+        _ => Err(Error::from_reason("sampleParams가 객체가 아닙니다")),
+    }
+}
+
+#[napi]
+pub fn next_routes_is_id_like_segment(name: String) -> bool {
+    nr::is_id_like_segment(&name)
+}
+
+/// `max_pages`는 `Math.floor` 전의 값 그대로(`NaN`·`Infinity` 포함), `max_pages_cap`은 spec의 `AUTO_PAGE_MAX`
+#[napi]
+pub fn next_routes_from_changed_files(
+    files: Vec<String>,
+    service_path: String,
+    sample_params_json: String,
+    max_pages: f64,
+    max_pages_cap: f64,
+    fallback_value: Option<String>,
+) -> Result<String> {
+    let params = sample_params(&sample_params_json)?;
+    Ok(out(&nr::routes_from_changed_files(&files, &service_path, &params, max_pages, max_pages_cap, fallback_value.as_deref()).to_value()))
+}
+
+#[napi]
+pub fn next_routes_from_candidates(
+    candidates_json: String,
+    service_path: String,
+    sample_params_json: String,
+    max_pages: f64,
+    max_pages_cap: f64,
+    fallback_value: Option<String>,
+) -> Result<String> {
+    let params = sample_params(&sample_params_json)?;
+    let candidates = fail(nr::parse_candidates(&input(&candidates_json, "후보 목록")?))?;
+    Ok(out(&nr::routes_from_candidates(&candidates, &service_path, &params, max_pages, max_pages_cap, fallback_value.as_deref()).to_value()))
+}
+
+#[napi]
+pub fn project_status_build(input_json: String) -> Result<String> {
+    Ok(out(&fail(ps::build_project_status(&input(&input_json, "현황 입력")?))?))
+}
+
+/// `evidence_json`이 null이면 증거를 모르는 것(HTTP 모드)
+#[napi]
+pub fn stuck_loading_detect(text: String, evidence_json: Option<String>) -> Result<Option<String>> {
+    let evidence = match evidence_json {
+        Some(json) => Some(input(&json, "증거")?),
+        None => None,
+    };
+    Ok(sl::detect_stuck_loading(&text, evidence.as_ref()))
+}
+
 // ── 요구사항 순수 코어(ADR-191 3단계 3j). 객체는 JSON 문자열(NaN·Infinity는 표시 객체, js_json 모듈). 모양이 어긋난 입력은 던진다.
 // 짝 없는 서로게이트는 U+FFFD로 읽는다. TS 껍데기: packages/agent/src/requirements.ts, doc-lint.ts
 use bstudio_guard::{doc_lint, requirements as rq};
