@@ -198,6 +198,77 @@ interface NativeGuard {
   reqIssueExtractTrackingNumbers(body: string): string;
   reqIssueManagedToRequirement(draftJson: string): string;
   reqIssueIsAllowedEndpoint(pathname: string): boolean;
+  // ── agent: import-graph(3단계 3b). 별칭 설정은 `{ baseUrl?, paths: [{ pattern, targets }] }` JSON, 역방향 그래프는 `[[파일, [import하는 파일…]], …]` JSON
+  importGraphIsPageFile(relative: string): boolean;
+  importGraphRouteWrapperFolder(relative: string): string | null | undefined;
+  importGraphIsSourceFile(relative: string): boolean;
+  importGraphTokenize(source: string): string;
+  importGraphExtractSpecifiers(source: string): string[];
+  importGraphNormalizePath(value: string): string | null | undefined;
+  importGraphDirOf(file: string): string;
+  importGraphStripJsonc(text: string): string;
+  importGraphExtendsPath(text: string, configDir: string): string | null | undefined;
+  importGraphParseAliasConfig(text: string, configDir: string, baseJson: string | null | undefined): string;
+  importGraphResolveImport(specifier: string, fromFile: string, files: string[], aliasJson: string): string | null | undefined;
+  importGraphBuildReverse(sourceFiles: string[], sourceTexts: string[], files: string[], aliasJson: string): string;
+  importGraphTracePages(changed: string[], reverseJson: string, files: string[], maxDepth: number): string;
+  // ── agent: test-run·test-results(3단계 3d). 결과 객체는 JSON 문자열(NaN·Infinity가 나올 수 있는 보고서 해석은 encodeNative·decodeNative 표시 객체).
+  // 알 수 없는 실행기·범위 밖 엔티티·모양이 어긋난 입력은 던진다. attachResults는 행마다 짝지은 케이스의 위치(없으면 -1)를 돌려준다
+  testRunConstants(): string;
+  buildTestRunPlan(runner: string, file: string | undefined | null, className: string | undefined | null, testName: string | undefined | null, wrapper: boolean | undefined | null, extraReportRoots: string[]): string;
+  clearTestReportsCommand(extraReportRoots: string[]): string[];
+  reportRootsForIncludes(includes: string[], root: string): string[];
+  splitCollectedReports(stdout: string, singleFileLabel: string): string;
+  detectRunner(template: string, hasPomXml: boolean | undefined | null, packageJson: string | undefined | null): string | null | undefined;
+  runnerLabel(runner: string): string;
+  parseJUnitXml(xml: string): string;
+  parseJestLikeJson(json: string): string;
+  attachResults(rowsJson: string, casesJson: string, ids: number[]): number[];
+  countByStatus(statusesJson: string): string;
+  buildFixTestPrefill(rowJson: string): string;
+  buildAddTestPrefill(requirementJson: string): string;
+  // ── agent: 게이트 리뷰 판정(3단계 3e). 입력·출력은 JSON 문자열(encodeNative·decodeNative). 판정 입력은 짝 없는 서로게이트가 있거나 모양이 어긋나면 던진다
+  diffDeclaredChecks(startedJson: string, latestJson: string): string;
+  weakenedDeclarations(startedJson: string, latestJson: string): string[];
+  hasDeclaredCheckChange(added: string[], removed: string[], changed: string[]): boolean;
+  describeDeclaredCheckChange(added: string[], removed: string[], changed: string[]): string;
+  withDeclaredChecks(startedJson: string, latestJson: string): string | null | undefined;
+  loadRequestFor(checkJson: string): string;
+  describeLoadExpect(expectJson: string): string;
+  judgeLoad(checkJson: string, resultJson: string): string;
+  finishEvidence(lines: string[], redact: (text: string) => string): string[];
+  browserPageEvidence(pageJson: string, resultJson: string, contextJson: string, redact: (text: string) => string): string[];
+  httpPageEvidence(pageJson: string, responseJson: string, contextJson: string, redact: (text: string) => string): string[];
+  testEvidence(service: string, command: string[], elapsedMs: number): string[];
+  diffContracts(beforeJson: string, afterJson: string): string;
+  summarizeContract(documentJson: string): string;
+  formatContractChanges(changesJson: string): string;
+  // ── agent: 토큰 예산·모델 선택(3단계 3f). 큰 구조는 JSON 문자열(encodeNative·decodeNative)
+  clipCommandOutput(text: string, budget: number): string;
+  clipText(text: string, budget: number, hint?: string | null): string;
+  visibleHtml(html: string): string;
+  isHtmlContent(contentType: string | null | undefined, text: string): boolean;
+  repeatNotePrefix(): string;
+  repeatNote(call: number): string;
+  isRepeatNote(text: string): boolean;
+  clearedToolResultPrefix(): string;
+  clearedToolResultNote(chars: number): string;
+  isClearedToolResult(text: string): boolean;
+  planClearOldToolResults(messagesJson: string, keepRecent: number, clearAtLeastChars: number): string;
+  isContextClearingOn(value: string | null | undefined): boolean;
+  estimateTokens(text: string): number;
+  classifyComplexity(prompt: string, inputTokens: number): string;
+  classifyRisk(prompt: string): string;
+  classifyTask(prompt: string): string;
+  estimateCost(pricingJson: string, usageJson: string): number | null | undefined;
+  routeModel(profilesJson: string, requestJson: string, statsJson: string): string;
+  aggregateModelStats(observationsJson: string): string;
+  validateModelProfiles(inputJson: string, urlFactsJson: string): string;
+  cliTiers(): string[];
+  tierLabel(tier: string): string | null | undefined;
+  nextCliTier(tier: string): string | null | undefined;
+  higherCliTier(a: string | null | undefined, b: string): string;
+  routeCliTier(prompt: string, intent: string, stickyTier?: string | null): string;
   // ── agent: next-routes·project-status·stuck-loading(3단계 3h). 객체는 JSON 문자열(encodeNative·decodeNative). maxPages는 NaN·Infinity도 그대로 받는다. 모양이 어긋난 입력은 던진다
   nextRoutesIsIdLikeSegment(name: string): boolean;
   nextRoutesFromChangedFiles(files: string[], servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
