@@ -9211,3 +9211,13 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - maxBuffer: 각 스트림 256MB 상한(Node `maxBuffer`와 같다). 넘기면 overflow `Notify`로 자식을 kill하고 잘린 출력·`exitCode: 1`을 돌려준다. 상한을 인자로 빼 작은 값으로 kill 경로를 시험한다(256MB를 실제로 내지 않는다).
 - 검증: cargo 10개(`process`: stdout/stderr, 0 아닌 종료, stdin, stdin 자동 닫기, env 치환, spawn 실패도 결과, 취소 부분 출력, 취소 전 aborted 메시지, 상한 아래 온전, 상한 넘김 kill). vitest 6개(`run-command.test.ts`: 전체 TS→napi→Rust 경로, **취소 시 거절하지 않고 부분 출력·exitCode 1·자식 죽음**, 없는 바이너리도 결과, env 치환). `stats-unreachable` 포함 통과. `pnpm typecheck`(패키지 6개)·studio lint 통과.
 - 하지 않은 것: `#docker`가 아닌 나머지 `execFileAsync` 5곳(`cleanupSandboxImages`·runtime 조회·볼륨 캐시 생성)은 `cwd`를 쓰거나 `try`/`catch` 없이 `await`해 **실패 시 던지는 계약**이라, 던지지 않는 `run_command`와 시맨틱이 달라 별도 조각으로 남겼다. Kubernetes 제공자는 타입 검사로만 확인했다(지원 범위 밖). 자원 절감은 4단계에서 잰다.
+
+### 덧붙임: 2c-3a 결과 — deploy #docker와 ThreadsafeFunction 역류 경계 (2026-11-09, [#1045](https://github.com/dj258255/b-studio/issues/1045))
+
+- 옮긴 것: `deploy.ts`의 자체 `#docker`(`spawn` + `data` 이벤트). 한 번 실행하되 `onLine`을 주면 출력을 **줄 단위로 역류**시키고(빌드 진행 로그) 결과도 돌려준다. `bstudio-io`의 `run_command_streaming`으로 옮겼다. compose-provider의 `#docker`(2c-2)와 별개 메서드다.
+- 경계(처음 선 것): napi에 **`ThreadsafeFunction`(Rust→JS 역류)**을 들였다. `on_line`을 `ThreadsafeFunction<String, (), String, Status, false>`로 받는다(`CalleeHandled=false`라 JS 콜백이 `(line)` 한 인자로 불린다 — 기본 `true`면 Node 콜백 규약처럼 `(err, line)`이 된다). `bstudio-io`는 napi를 모르므로 `on_line`을 추상 콜백(`Arc<dyn Fn(String) + Send + Sync>`)으로 받고, napi 층이 `move |line| tsfn.call(line, NonBlocking)` 클로저를 넣는다. 이 접착이 4단계에서 버려지고 `run_command_streaming` 본문은 재사용된다.
+- 옛 동작과 같게 맞춘 것: `onLine`은 stdout·stderr 양쪽을 개행으로 나눠 `trim`이 비지 않은 완성된 줄마다 부르고, 끝 조각도 한 번 부른다(TS `lines.pop()` + `close` flush). 결과의 stdout·stderr는 **뒤쪽 200K(UTF-16 코드 단위)**만 유지한다(TS `slice(-OUTPUT_LIMIT)`). 2c-2의 앞쪽 바이트 cap과 반대다 — 빌드 로그는 최근이 중요하다. `cwd`를 받고(`tmpdir()`로 부르는 자리가 있다), 취소 시 던지지 않고 부분 결과를 준다(2c-2와 같이 리더 task를 `abort`로 중단).
+- 백프레셔는 두지 않았다: deploy의 `onLine`은 빠른 로그 출력이라 `ThreadsafeFunction` non-blocking push로 충분하다. 소비자가 늦을 때 Rust 읽기를 멈추는 백프레셔는 logs의 `AsyncIterable`에서 필요하므로 2c-3b로 뺐다.
+- 검증: cargo 6개(`streaming`: 완성 줄+끝 조각, 빈 줄 건너뜀·결과 보존, stderr 역류, cwd+stdin, 취소 부분 반환, 뒤쪽 자르기). vitest 5개(`run-command-streaming.test.ts`: 전체 TS→napi(TSFN)→Rust, onLine 역류·stderr·cwd+stdin·**취소 시 부분 결과·자식 죽음**). `deploy.test.ts` 4개 통과. `pnpm typecheck`(6개)·studio lint 통과.
+- 옛 동작과 다른 것(사소): 취소 시 리더 task를 중단하므로 끝 조각(개행 없이 남은 부분)은 flush하지 않는다(취소면 `build`가 따로 던져 잔여 로그 한 줄은 중요치 않다). 뒤쪽 자르기는 문자 경계에서 한다(surrogate pair 중간을 가르지 않음 — 빌드 로그는 ASCII 위주라 차이가 없다).
+- 하지 않은 것: logs() `AsyncIterable` + 백프레셔(2c-3b), PTY(2c-4), deploy.ts의 나머지 실행(`verifyThroughProxy`·파일 락·build 조율, 2c-5). 실제 docker build의 줄 역류는 CI e2e(deploy-gate)가 본다. 자원 절감은 4단계에서 잰다.

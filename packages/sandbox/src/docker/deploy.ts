@@ -1,4 +1,3 @@
-import { spawn } from 'node:child_process';
 import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
@@ -10,6 +9,7 @@ import { SandboxError } from '../errors';
 import { loadComposeModel, type ComposeModel } from '../kubernetes/compose-model';
 import { DEFAULT_READINESS, waitForReady } from '../readiness';
 import { Redactor } from '../secrets';
+import { runCommandStreaming } from '../stream-exec';
 import type { ContainerState } from '../types';
 import {
   buildArgsFor,
@@ -122,7 +122,6 @@ export async function restoreRouteAfterFailedCheck(
 const DRAIN_MS = 3_000;
 /** 되돌릴 수 있게 이미지를 남기는 이전 릴리스 수 */
 const KEEP_PREVIOUS = 2;
-const OUTPUT_LIMIT = 200_000;
 
 export function defaultDeployRoot(): string {
   return path.resolve(process.env.B_STUDIO_DEPLOYS_DIR ?? path.join(homedir(), '.cache/b-studio/deploys'));
@@ -543,31 +542,13 @@ export class DockerDeployer {
   }
 
   /** 인자 배열로 실행하고 출력을 줄 단위로 넘긴다. 빌드 출력이 길어 끝부분만 모은다 */
+  // 인자 배열로 실행하고 출력을 줄 단위로 넘긴다. 실행·줄 역류·뒤쪽 200K(UTF-16) 모으기는 Rust(crates/bstudio-io)가 한다(2c-3a, #1045).
+  // 옛 spawn + data 이벤트를 대신한다. onLine을 주면 완성된 줄마다(비지 않으면) 부르고 끝 조각도 한 번 부른다. 취소 시 던지지 않고 부분 결과를 준다.
   #docker(
     args: string[],
     { signal, onLine, input, cwd = this.project.root }: { signal?: AbortSignal; onLine?: (line: string) => void; input?: string; cwd?: string } = {},
   ): Promise<{ exitCode: number; stdout: string; stderr: string }> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(this.#dockerBin, args, { cwd, env: this.#environment(), signal, stdio: ['pipe', 'pipe', 'pipe'] });
-      const output = { stdout: '', stderr: '' };
-      const pending = { stdout: '', stderr: '' };
-      const collect = (stream: 'stdout' | 'stderr') => (chunk: Buffer) => {
-        const text = chunk.toString('utf8');
-        output[stream] = (output[stream] + text).slice(-OUTPUT_LIMIT);
-        if (!onLine) return;
-        const lines = (pending[stream] + text).split('\n');
-        pending[stream] = lines.pop() ?? '';
-        for (const line of lines) if (line.trim()) onLine(line);
-      };
-      child.stdout.on('data', collect('stdout'));
-      child.stderr.on('data', collect('stderr'));
-      child.on('error', reject);
-      child.on('close', (code) => {
-        if (onLine) for (const rest of [pending.stdout, pending.stderr]) if (rest.trim()) onLine(rest);
-        resolve({ exitCode: code ?? 1, ...output });
-      });
-      child.stdin.end(input);
-    });
+    return runCommandStreaming(this.#dockerBin, args, { signal, env: this.#environment(), input, cwd, onLine });
   }
 }
 

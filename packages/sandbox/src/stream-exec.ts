@@ -39,3 +39,18 @@ export function runCommandFromFile(bin: string, args: string[], inputFile: strin
 export function runCommand(bin: string, args: string[], { signal, env, input }: StreamExecOptions & { input?: string } = {}): Promise<ExecResult> {
   return native.runCommand(bin, args, input ?? null, definedEnv(env), signal);
 }
+
+const NOOP_LINE = (): void => {};
+
+/**
+ * `bin args`를 돌리되 출력을 줄 단위로 `onLine`에 흘리고 뒤쪽 200K를 모아 돌려준다(2c-3a, #1045). deploy의 `#docker`가 쓴다.
+ * `onLine`은 완성된 줄마다(`trim`이 비지 않으면) 불리고, 끝의 조각도 한 번 불린다. 없으면 모으기만 한다.
+ * `cwd`를 받는다. `runCommand`와 같이 던지지 않는다 — 취소 시 부분 출력과 `exitCode: 1`을 돌려준다.
+ */
+export function runCommandStreaming(
+  bin: string,
+  args: string[],
+  { signal, env, input, cwd, onLine }: StreamExecOptions & { input?: string; cwd?: string; onLine?: (line: string) => void } = {},
+): Promise<ExecResult> {
+  return native.runCommandStreaming(bin, args, input ?? null, definedEnv(env), cwd ?? null, onLine ?? NOOP_LINE, signal);
+}

@@ -613,7 +613,8 @@ pub fn trim_records(ids_json: String, active: Option<String>) -> Result<Vec<u32>
 // 동기 함수로 둔다: !Send인 AbortSignal을 JS 스레드에서 받아 Send한 Notify로 바꾸면, 작업 future는 Notify만 들어 Send다.
 use bstudio_io::stream_exec;
 use napi::bindgen_prelude::{AbortSignal, AsyncBlock, AsyncBlockBuilder};
-use napi::Env;
+use napi::threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::{Env, Status};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Notify;
@@ -711,6 +712,41 @@ pub fn run_command(
             &args,
             input.as_deref(),
             pairs.as_deref(),
+            cancel.notified(),
+        )
+        .await;
+        Ok(ExecResult::from(output))
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}
+
+/// `bin args`를 실행하되 출력을 줄 단위로 `on_line`에 역류시키고 뒤쪽 200K를 모아 돌려준다(TS deploy `#docker`).
+/// `on_line`은 `ThreadsafeFunction`으로 JS 콜백을 Rust 작업 스레드에서 부른다(CalleeHandled=false라 `(line)` 한 인자).
+/// deploy의 onLine은 빠른 로그 출력이라 non-blocking push로 충분하다(백프레셔는 2c-3b의 logs에서 다룬다, #1045).
+#[napi]
+pub fn run_command_streaming(
+    env: Env,
+    bin: String,
+    args: Vec<String>,
+    input: Option<String>,
+    env_vars: Option<HashMap<String, String>>,
+    cwd: Option<String>,
+    on_line: ThreadsafeFunction<String, (), String, Status, false>,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<ExecResult>> {
+    let pairs = env_pairs(env_vars);
+    let cancel = abort_notify(signal);
+    let callback: bstudio_io::streaming::OnLine = Arc::new(move |line: String| {
+        on_line.call(line, ThreadsafeFunctionCallMode::NonBlocking);
+    });
+    let future = async move {
+        let output = bstudio_io::streaming::run_command_streaming(
+            &bin,
+            &args,
+            input.as_deref(),
+            pairs.as_deref(),
+            cwd.as_deref(),
+            callback,
             cancel.notified(),
         )
         .await;
