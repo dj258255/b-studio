@@ -43,6 +43,7 @@ name = "bstudio-io"
 version = "0.1.0"
 dependencies = [
  "bstudio-guard",
+ "libc",
  "portable-pty",
  "tempfile",
  "tokio",

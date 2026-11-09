@@ -886,3 +886,66 @@ impl HostPty {
         self.inner.kill().map_err(|error| Error::from_reason(error.to_string()))
     }
 }
+
+// === 양방향 exec 세션(ADR-193, 2c-4b): docker exec -i 터미널 ===
+// TS `agent-terminal.ts`의 `openAgentTerminal`이 쓰는 `spawn`을 옮긴 것. 출력·종료는 **하나의** ThreadsafeFunction으로 밀어
+// 보낸다 — TSFN은 함수마다 큐가 따로라, 데이터용과 종료용을 나누면 종료가 마지막 출력보다 먼저 JS에 닿을 수 있다.
+// write·close·kill은 동기다(채널에 넣거나 Notify를 깨우기만 한다).
+use bstudio_io::exec_stream;
+
+/// JS로 가는 사건 하나. `exited`가 false면 `data`가 있고, true면 `code`가 종료 코드다(시그널로 죽었으면 null).
+#[napi(object)]
+pub struct ExecEvent {
+    pub data: Option<Buffer>,
+    pub exited: bool,
+    pub code: Option<i32>,
+}
+
+#[napi]
+pub struct ExecSession {
+    handle: exec_stream::ExecHandle,
+}
+
+#[napi]
+impl ExecSession {
+    /// `bin args`를 띄운다. `on_event`는 Rust 작업 스레드에서 `(event)` 한 인자로 불린다. 띄우기 실패도 `exited`(코드 -2)로 온다.
+    #[napi(constructor)]
+    pub fn new(
+        bin: String,
+        args: Vec<String>,
+        env_vars: Option<HashMap<String, String>>,
+        cwd: Option<String>,
+        on_event: ThreadsafeFunction<ExecEvent, (), ExecEvent, Status, false>,
+    ) -> Self {
+        let pairs = env_pairs(env_vars);
+        let callback: exec_stream::OnEvent = Arc::new(move |event| {
+            let event = match event {
+                exec_stream::ExecEvent::Data(data) => ExecEvent { data: Some(Buffer::from(data)), exited: false, code: None },
+                exec_stream::ExecEvent::Exit(code) => ExecEvent { data: None, exited: true, code },
+            };
+            on_event.call(event, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let (handle, pump) = exec_stream::spawn_exec(&bin, &args, pairs.as_deref(), cwd.as_deref(), callback);
+        // JS 메인 스레드라 tokio::spawn은 "no reactor"로 패닉한다 — LogStream과 같이 global 런타임에 올린다
+        napi::bindgen_prelude::spawn(pump);
+        Self { handle }
+    }
+
+    /// stdin에 쓴다. 닫힌 뒤의 쓰기는 조용히 버리고 false를 준다
+    #[napi]
+    pub fn write(&self, data: Buffer) -> bool {
+        self.handle.write(data.to_vec())
+    }
+
+    /// stdin을 닫는다(EOF)
+    #[napi]
+    pub fn end(&self) {
+        self.handle.end_stdin();
+    }
+
+    /// 자식에게 SIGTERM을 보낸다
+    #[napi]
+    pub fn terminate(&self) {
+        self.handle.terminate();
+    }
+}

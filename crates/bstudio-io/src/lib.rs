@@ -4,6 +4,7 @@
 //! 실제로 하는 syscall만 담는다: 자식 프로세스, 파일, 소켓, PTY. napi를 모른다 — napi 층(`bstudio-node`)이
 //! 이 크레이트를 붙이고, 4단계(ADR-191·192)에서 Rust HTTP 서버가 같은 크레이트를 직접 쓴다.
 
+pub mod exec_stream;
 pub mod log_stream;
 pub mod process;
 pub mod pty;
