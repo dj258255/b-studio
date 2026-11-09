@@ -8,7 +8,7 @@
  * 포맷이 흔들려도(들여쓰기, 줄바꿈 위치) 최대한 잡아내되, 완벽한 파서가 아니므로 못 잡는 형태는 조용히 건너뛴다.
  */
 
-import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
+import { native } from '@b-studio/sandbox';
 
 export type TestFramework = 'junit' | 'vitest' | 'jest' | 'playwright' | 'pytest';
 
