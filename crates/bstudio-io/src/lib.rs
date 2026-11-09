@@ -6,3 +6,4 @@
 
 pub mod process;
 pub mod stream_exec;
+pub mod streaming;
