@@ -1793,6 +1793,540 @@ pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String
     fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
 }
 
+// ── agent: coordination·escalation(3단계 3i). 객체는 JSON 문자열(encodeNative·decodeNative). 선언한 모양이 어긋난 입력은 던진다
+use bstudio_guard::{coordination, escalation};
+
+#[napi]
+pub fn coord_normalize_message(text: String) -> String {
+    coordination::normalize_message(&text)
+}
+
+#[napi]
+pub fn coord_signature_key(signature_json: String) -> Result<String> {
+    fail(coordination::signature_key(&input(&signature_json, "실패 서명")?))
+}
+
+#[napi]
+pub fn coord_signatures_from_report(report_json: String) -> Result<String> {
+    Ok(out(&JsValue::Arr(fail(coordination::signatures_from_report(&input(&report_json, "검증 보고서")?))?)))
+}
+
+#[napi]
+pub fn coord_signature_from_check(check_json: String) -> Result<String> {
+    Ok(out(&fail(coordination::signature_from_check(&input(&check_json, "워크플로 확인")?))?))
+}
+
+#[napi]
+pub fn coord_failure_notes_from_report(report_json: String, checks_json: String) -> Result<String> {
+    let notes = coordination::failure_notes_from_report(&input(&report_json, "검증 보고서")?, &input(&checks_json, "워크플로 확인 목록")?);
+    Ok(out(&JsValue::Arr(fail(notes)?)))
+}
+
+#[napi]
+pub fn coord_failure_notes_from_events(events_json: String) -> Result<String> {
+    Ok(out(&JsValue::Arr(fail(coordination::failure_notes_from_events(&input(&events_json, "세션 이벤트")?))?)))
+}
+
+#[napi]
+pub fn coord_note_bytes(body: String) -> f64 {
+    coordination::note_bytes(&body) as f64
+}
+
+#[napi]
+pub fn coord_can_read(topology: String, reader_lane: String, reader_group: Option<String>, note_by: String, note_lane: String, note_group: Option<String>, hub: String) -> bool {
+    coordination::can_read(&topology, &reader_lane, reader_group.as_deref(), &note_by, &note_lane, note_group.as_deref(), &hub)
+}
+
+/// `reportJson`이 없으면(undefined) 보고서 없이 확인 목록만 본다
+#[napi]
+pub fn escalation_signature_set_key(report_json: Option<String>, checks_json: String) -> Result<String> {
+    let report = match report_json {
+        Some(text) => Some(input(&text, "검증 보고서")?),
+        None => None,
+    };
+    fail(escalation::signature_set_key(report.as_ref(), &input(&checks_json, "워크플로 확인 목록")?))
+}
+
+#[napi]
+pub fn escalation_should_escalate(history: Vec<String>, times: f64) -> bool {
+    escalation::should_escalate(&history, times)
+}
+
+#[napi]
+pub fn escalation_should_promote(same_signature_times: Option<f64>, default_times: f64, after_failures: Option<f64>, history: Vec<String>) -> bool {
+    escalation::should_promote(same_signature_times, default_times, after_failures, &history)
+}
+
+#[napi]
+pub fn escalation_retry_budget_for(retry_budget: Option<f64>, default_budget: f64) -> f64 {
+    escalation::retry_budget_for(retry_budget, default_budget)
+}
+
+#[napi]
+pub fn escalation_prompt(summary: String, last_feedback: Option<String>) -> String {
+    escalation::escalation_prompt(&summary, last_feedback.as_deref())
+}
+
+// ── 커밋 메시지 만들기·PR 리뷰의 순수 판정(ADR-191 3g). TS 껍데기: packages/agent/src/commit-message.ts, pr-review.ts
+// 지적·입력 객체는 encodeNative한 JSON 문자열로 받는다. 결과 객체는 JSON 문자열이다(옛 TS의 JSON.stringify와 같은 글자)
+
+use bstudio_guard::{commit_message, pr_review};
+
+fn commit_changes<'a>(files: &'a [String], kinds: &'a [String]) -> Vec<commit_message::Change<'a>> {
+    files.iter().zip(kinds).map(|(file, change)| commit_message::Change { file, change }).collect()
+}
+
+#[napi]
+pub fn classify_commit(request: String, files: Vec<String>, kinds: Vec<String>) -> String {
+    commit_message::classify_commit(&request, &commit_changes(&files, &kinds)).to_owned()
+}
+
+#[napi]
+pub fn generate_commit_subject(request: String, files: Vec<String>, kinds: Vec<String>, agent_summary: Option<String>, request_is_answer: bool) -> String {
+    commit_message::generate_commit_subject(&request, &commit_changes(&files, &kinds), agent_summary.as_deref(), request_is_answer)
+}
+
+#[napi]
+pub fn summarize_commit_text(text: String, max_chars: f64) -> String {
+    commit_message::summarize(&text, max_chars)
+}
+
+#[napi]
+pub fn to_commit_mood(text: String) -> String {
+    commit_message::to_commit_mood(&text)
+}
+
+#[napi]
+pub fn pr_review_fix_marker() -> String {
+    pr_review::FIX_MARKER.to_owned()
+}
+
+#[napi]
+pub fn is_blocking_severity(severity: String) -> bool {
+    pr_review::is_blocking_severity(&severity)
+}
+
+#[napi]
+pub fn has_blocking_findings(severities: Vec<String>) -> bool {
+    pr_review::has_blocking_findings(&severities)
+}
+
+/// `[blocker, major, minor, nit]`
+#[napi]
+pub fn pr_review_severity_counts(severities: Vec<String>) -> Vec<u32> {
+    pr_review::severity_counts(&severities).to_vec()
+}
+
+#[napi]
+pub fn next_pr_review_step(severities: Vec<String>, round: f64, max_rounds: f64) -> String {
+    pr_review::next_pr_review_step(&severities, round, max_rounds).to_owned()
+}
+
+/// `{ diff, truncated, omittedFiles }` JSON. 상한이 정수가 아니면 던진다(구분이 없는 diff를 자를 때만)
+#[napi]
+pub fn truncate_diff(diff: String, max_chars: f64) -> Result<String> {
+    Ok(fail(pr_review::truncate_diff(&diff, max_chars))?.to_json())
+}
+
+#[napi]
+pub fn diff_file_paths(diff: String) -> Vec<String> {
+    pr_review::diff_file_paths(&diff)
+}
+
+#[napi]
+pub fn extract_diff_referenced_names(diff: String) -> Vec<String> {
+    pr_review::extract_diff_referenced_names(&diff)
+}
+
+#[napi]
+pub fn build_pr_review_external_context(paths: Vec<String>, excerpts: Vec<String>, max_chars: f64) -> String {
+    pr_review::build_pr_review_external_context(&paths, &excerpts, max_chars)
+}
+
+#[napi]
+pub fn build_pr_review_user_prompt(input_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_user_prompt(&input(&input_json, "리뷰 요청")?))
+}
+
+#[napi]
+pub fn pr_review_marker(round: f64) -> String {
+    pr_review::pr_review_marker(round)
+}
+
+#[napi]
+pub fn build_pr_review_comment(input_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_comment(&input(&input_json, "리뷰 코멘트 입력")?))
+}
+
+#[napi]
+pub fn build_pr_review_resolved_context(resolved_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_resolved_context(&input(&resolved_json, "닫은 지적 목록")?))
+}
+
+/// `{ finding, reason? }` JSON
+#[napi]
+pub fn build_review_resolution_comment(input_json: String) -> Result<String> {
+    let value = input(&input_json, "닫은 지적")?;
+    let finding = value.prop("finding").ok_or_else(|| Error::from_reason("finding이 없습니다"))?;
+    fail(pr_review::build_review_resolution_comment(finding, value.prop("reason")))
+}
+
+#[napi]
+pub fn build_pr_review_fix_request(findings_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_fix_request(&input(&findings_json, "지적 목록")?))
+}
+
+/// 고침 요청이 아니거나 제목이 없으면 null
+#[napi]
+pub fn extract_pr_review_fix_titles(request: String) -> Option<Vec<String>> {
+    pr_review::extract_pr_review_fix_titles(&request)
+}
+
+// ── agent: next-routes·project-status·stuck-loading(ADR-191 3단계 3h). TS 껍데기: packages/agent/src/{next-routes,project-status,stuck-loading}.ts
+
+use bstudio_guard::{next_routes as nr, project_status as ps, stuck_loading as sl};
+
+fn sample_params(json: &str) -> Result<js_json::JsObject> {
+    match input(json, "sampleParams")? {
+        JsValue::Obj(o) => Ok(o),
+        _ => Err(Error::from_reason("sampleParams가 객체가 아닙니다")),
+    }
+}
+
+#[napi]
+pub fn next_routes_is_id_like_segment(name: String) -> bool {
+    nr::is_id_like_segment(&name)
+}
+
+/// `max_pages`는 `Math.floor` 전의 값 그대로(`NaN`·`Infinity` 포함), `max_pages_cap`은 spec의 `AUTO_PAGE_MAX`
+#[napi]
+pub fn next_routes_from_changed_files(
+    files: Vec<String>,
+    service_path: String,
+    sample_params_json: String,
+    max_pages: f64,
+    max_pages_cap: f64,
+    fallback_value: Option<String>,
+) -> Result<String> {
+    let params = sample_params(&sample_params_json)?;
+    Ok(out(&nr::routes_from_changed_files(&files, &service_path, &params, max_pages, max_pages_cap, fallback_value.as_deref()).to_value()))
+}
+
+#[napi]
+pub fn next_routes_from_candidates(
+    candidates_json: String,
+    service_path: String,
+    sample_params_json: String,
+    max_pages: f64,
+    max_pages_cap: f64,
+    fallback_value: Option<String>,
+) -> Result<String> {
+    let params = sample_params(&sample_params_json)?;
+    let candidates = fail(nr::parse_candidates(&input(&candidates_json, "후보 목록")?))?;
+    Ok(out(&nr::routes_from_candidates(&candidates, &service_path, &params, max_pages, max_pages_cap, fallback_value.as_deref()).to_value()))
+}
+
+#[napi]
+pub fn project_status_build(input_json: String) -> Result<String> {
+    Ok(out(&fail(ps::build_project_status(&input(&input_json, "현황 입력")?))?))
+}
+
+/// `evidence_json`이 null이면 증거를 모르는 것(HTTP 모드)
+#[napi]
+pub fn stuck_loading_detect(text: String, evidence_json: Option<String>) -> Result<Option<String>> {
+    let evidence = match evidence_json {
+        Some(json) => Some(input(&json, "증거")?),
+        None => None,
+    };
+    Ok(sl::detect_stuck_loading(&text, evidence.as_ref()))
+}
+
+use bstudio_guard::{cli_failure, services};
+
+#[napi]
+pub fn services_for_files(input_json: String) -> Result<String> {
+    fail(services::services_for_files_json(&input_json))
+}
+
+#[napi]
+pub fn owns_file(path: String, includes: Vec<String>, file: String) -> bool {
+    services::owns_file(&path, &includes, &file)
+}
+
+#[napi]
+pub fn is_compose_file(root: String, compose_path: String, cwd: String, file: String) -> bool {
+    services::is_compose_file(&root, &compose_path, &cwd, &file)
+}
+
+#[napi]
+pub fn describe_cli_text(raw: String) -> String {
+    cli_failure::describe_cli_text(&raw)
+}
+
+#[napi]
+pub fn cli_failure_reason(summary: String, detail: String) -> String {
+    cli_failure::failure_reason(&summary, &detail)
+}
+
+// ── 요구사항 순수 코어(ADR-191 3단계 3j). 객체는 JSON 문자열(NaN·Infinity는 표시 객체, js_json 모듈). 모양이 어긋난 입력은 던진다.
+// 짝 없는 서로게이트는 U+FFFD로 읽는다. TS 껍데기: packages/agent/src/requirements.ts, doc-lint.ts
+use bstudio_guard::{doc_lint, requirements as rq};
+
+/// 값이 없으면 `null`·`undefined`를 받는다(`requirement?`)
+fn optional_input(json: Option<&str>, what: &str) -> Result<Option<JsValue>> {
+    json.map(|text| input(text, what)).transpose()
+}
+
+fn positions(indexes: Vec<usize>) -> Vec<u32> {
+    indexes.into_iter().map(|i| i as u32).collect()
+}
+
+#[napi]
+pub fn req_core_requirements_file() -> String {
+    rq::REQUIREMENTS_FILE.to_owned()
+}
+
+/// `[재추출 병합의 짝짓기 문턱, 분할 힌트 문턱]`
+#[napi]
+pub fn req_core_merge_thresholds() -> Vec<f64> {
+    vec![rq::MERGE_MATCH_THRESHOLD, rq::MERGE_SPLIT_HINT_THRESHOLD]
+}
+
+#[napi]
+pub fn req_core_weak_words_ko() -> Vec<String> {
+    rq::WEAK_WORDS_KO.iter().map(|w| (*w).to_owned()).collect()
+}
+
+#[napi]
+pub fn req_core_weak_words_en() -> Vec<String> {
+    rq::WEAK_WORDS_EN.iter().map(|w| (*w).to_owned()).collect()
+}
+
+#[napi]
+pub fn req_core_find_mentioned_ids(text: String) -> Vec<String> {
+    rq::find_mentioned_ids(&text)
+}
+
+#[napi]
+pub fn req_core_mentions_requirement_id(text: String, id: String) -> bool {
+    rq::mentions_requirement_id(&text, &id)
+}
+
+/// `[{ id, rev? }]`
+#[napi]
+pub fn req_core_implements_trailers(text: String) -> String {
+    let items = rq::extract_implements_trailers(&text)
+        .into_iter()
+        .map(|(id, rev)| js_json::object(vec![("id", Some(JsValue::Str(id))), ("rev", rev.map(JsValue::Num))]))
+        .collect();
+    out(&JsValue::Arr(items))
+}
+
+#[napi]
+pub fn req_core_checkpoint_mention_indexes(messages: Vec<String>, id: String) -> Vec<u32> {
+    positions(rq::find_checkpoint_mention_indexes(&messages, &id))
+}
+
+#[napi]
+pub fn req_core_gate_check_mention_indexes(names: Vec<String>, id: String) -> Vec<u32> {
+    positions(rq::find_gate_check_mention_indexes(&names, &id))
+}
+
+#[napi]
+pub fn req_core_is_likely_test_file(path: String) -> bool {
+    rq::is_likely_test_file(&path)
+}
+
+/// 바꿀 것이 없으면 null
+#[napi]
+pub fn req_core_aligned_scenario_ids(requirement_id: String, scenario_ids: Vec<String>) -> Result<Option<Vec<String>>> {
+    fail(rq::aligned_scenario_ids(&requirement_id, &scenario_ids))
+}
+
+#[napi]
+pub fn req_core_requirement_hash(requirement_json: String) -> Result<String> {
+    fail(rq::compute_requirement_hash(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_core_content_drifted(requirement_json: String) -> Result<bool> {
+    fail(rq::requirement_content_drifted(&input(&requirement_json, "요구사항")?))
+}
+
+/// 바뀐 것이 없으면 null
+#[napi]
+pub fn req_core_revise(requirement_json: String, now: String) -> Result<Option<String>> {
+    Ok(fail(rq::revise_requirement_if_changed(&input(&requirement_json, "요구사항")?, &now))?.map(|r| out(&r)))
+}
+
+#[napi]
+pub fn req_core_carry_forward(next_json: String, previous_json: String) -> Result<String> {
+    Ok(out(&fail(rq::carry_forward_requirement_revision(&input(&next_json, "요구사항")?, &input(&previous_json, "이전 요구사항")?))?))
+}
+
+#[napi]
+pub fn req_core_discard_revision(requirement_json: String) -> Result<String> {
+    Ok(out(&fail(rq::discard_revision(&input(&requirement_json, "요구사항")?))?))
+}
+
+#[napi]
+pub fn req_core_status(evidence_json: String, requirement_json: Option<String>) -> Result<String> {
+    let evidence = input(&evidence_json, "증거")?;
+    let requirement = optional_input(requirement_json.as_deref(), "요구사항")?;
+    Ok(fail(rq::compute_requirement_status(&evidence, requirement.as_ref()))?.to_owned())
+}
+
+#[napi]
+pub fn req_core_verification_source(evidence_json: String, requirement_json: Option<String>) -> Result<String> {
+    let evidence = input(&evidence_json, "증거")?;
+    let requirement = optional_input(requirement_json.as_deref(), "요구사항")?;
+    Ok(fail(rq::requirement_verification_source(&evidence, requirement.as_ref()))?.to_owned())
+}
+
+#[napi]
+pub fn req_core_verification_badge(status: String, evidence_json: String, requirement_json: Option<String>) -> Result<String> {
+    let evidence = input(&evidence_json, "증거")?;
+    let requirement = optional_input(requirement_json.as_deref(), "요구사항")?;
+    Ok(fail(rq::matrix_verification_badge(&status, &evidence, requirement.as_ref()))?.to_owned())
+}
+
+#[napi]
+pub fn req_core_confidence(status: String) -> String {
+    rq::requirement_confidence(&status).to_owned()
+}
+
+#[napi]
+pub fn req_core_summarize_coverage(requirements_json: String, status_json: String) -> Result<String> {
+    Ok(out(&fail(rq::summarize_coverage(&input(&requirements_json, "요구사항 목록")?, &input(&status_json, "상태 표")?))?))
+}
+
+#[napi]
+pub fn req_core_lint_requirement(requirement_json: String) -> Result<String> {
+    let warnings = fail(rq::lint_requirement(&input(&requirement_json, "요구사항")?))?;
+    Ok(out(&JsValue::Arr(warnings.iter().map(rq::LintWarning::to_value).collect())))
+}
+
+#[napi]
+pub fn req_core_requirement_is_ready(requirement_json: String) -> Result<bool> {
+    fail(rq::requirement_is_ready(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_core_ready_badge(requirements_json: String) -> Result<bool> {
+    fail(rq::requirements_ready_badge(&input(&requirements_json, "요구사항 목록")?))
+}
+
+#[napi]
+pub fn req_core_is_manual_step_text(text: String) -> bool {
+    rq::is_manual_step_text(&text)
+}
+
+/// `{ movedIndexes, manualSteps }`
+#[napi]
+pub fn req_core_partition_manual_steps(requirements_json: String, manual_steps: Vec<String>) -> Result<String> {
+    let (moved, steps) = fail(rq::partition_manual_steps(&input(&requirements_json, "요구사항 목록")?, &manual_steps))?;
+    Ok(out(&js_json::object(vec![
+        ("movedIndexes", Some(JsValue::Arr(moved.into_iter().map(|i| JsValue::Num(i as f64)).collect()))),
+        ("manualSteps", Some(JsValue::Arr(steps.into_iter().map(JsValue::Str).collect()))),
+    ])))
+}
+
+#[napi]
+pub fn req_core_extract_heuristically(spec_text: String) -> String {
+    out(&rq::extract_requirements_heuristically(&spec_text))
+}
+
+#[napi]
+pub fn req_core_extract_path_references(spec_text: String) -> Vec<String> {
+    rq::extract_path_references(&spec_text)
+}
+
+#[napi]
+pub fn req_core_missing_reference_question(path: String) -> String {
+    rq::build_missing_reference_question(&path)
+}
+
+#[napi]
+pub fn req_core_referenced_files_context(files_json: String, max_chars: f64) -> Result<String> {
+    fail(rq::build_referenced_files_context(&input(&files_json, "참조 파일 목록")?, max_chars))
+}
+
+#[napi]
+pub fn req_core_verify_spec_quote(spec_quote: String, spec_text: String) -> bool {
+    rq::verify_spec_quote(&spec_quote, &spec_text)
+}
+
+#[napi]
+pub fn req_core_extraction_user_prompt(spec_text: String, referenced_files_context: Option<String>) -> String {
+    rq::build_extraction_user_prompt(&spec_text, referenced_files_context.as_deref())
+}
+
+#[napi]
+pub fn req_core_recommendation_user_prompt(questions: Vec<String>, spec_text: String, stack_summary: Option<String>) -> String {
+    rq::build_recommendation_user_prompt(&questions, &spec_text, stack_summary.as_deref())
+}
+
+#[napi]
+pub fn req_core_extraction_retry_note(reason: String) -> String {
+    rq::build_extraction_retry_note(&reason)
+}
+
+#[napi]
+pub fn req_core_summarize_requirements_for_guide(requirements_json: String, max_chars: f64) -> Result<String> {
+    fail(rq::summarize_requirements_for_guide(&input(&requirements_json, "요구사항 목록")?, max_chars))
+}
+
+#[napi]
+pub fn req_core_summarize_manual_steps_for_guide(manual_steps: Vec<String>, max_chars: f64) -> String {
+    rq::summarize_manual_steps_for_guide(&manual_steps, max_chars)
+}
+
+#[napi]
+pub fn req_core_work_prefill(requirement_json: String) -> Result<String> {
+    fail(rq::build_requirement_work_prefill(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_core_all_must_prefill(requirements_json: String) -> Result<String> {
+    fail(rq::build_all_must_haves_prefill(&input(&requirements_json, "요구사항 목록")?))
+}
+
+#[napi]
+pub fn req_core_text_similarity(a: String, b: String) -> f64 {
+    rq::text_similarity(&a, &b)
+}
+
+#[napi]
+pub fn req_core_api_signature(title: String) -> Option<String> {
+    rq::api_signature(&title)
+}
+
+#[napi]
+pub fn req_core_requirement_similarity(a_json: String, b_json: String) -> Result<f64> {
+    fail(rq::requirement_similarity(&input(&a_json, "요구사항")?, &input(&b_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_core_merge(incoming_json: String, existing_json: String, now: String) -> Result<String> {
+    Ok(out(&fail(rq::merge_reextracted_requirements(&input(&incoming_json, "새 요구사항 목록")?, &input(&existing_json, "기존 요구사항 목록")?, &now))?))
+}
+
+#[napi]
+pub fn req_core_unexecuted_tests(requirement_id: String, rows_json: String) -> Result<String> {
+    Ok(out(&fail(rq::find_unexecuted_tests(&requirement_id, &input(&rows_json, "테스트 실행 행")?))?))
+}
+
+#[napi]
+pub fn req_core_matrix_csv(matrix_json: String) -> Result<String> {
+    fail(rq::build_matrix_csv(&input(&matrix_json, "추적 매트릭스")?))
+}
+
+/// `[{ line, code, message }]`
+#[napi]
+pub fn doc_lint_text(text: String) -> String {
+    out(&JsValue::Arr(doc_lint::lint_text(&text).iter().map(doc_lint::Finding::to_value).collect()))
+}
+
 // ── agent: "문서" 탭(3단계 3k)
 
 #[napi]
