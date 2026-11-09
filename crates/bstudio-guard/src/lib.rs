@@ -5,6 +5,7 @@
 
 pub mod check_evidence;
 pub mod cli_router;
+pub mod commit_message;
 pub mod compose_override;
 pub mod container_policy;
 pub mod context_clearing;
@@ -25,6 +26,7 @@ pub mod js_locale;
 pub mod load_check;
 pub mod model_router;
 pub mod node_path;
+pub mod pr_review;
 pub mod public_url;
 pub mod readiness;
 pub mod readonly_docker;

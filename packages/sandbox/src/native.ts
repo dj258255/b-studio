@@ -284,6 +284,28 @@ interface NativeGuard {
   escalationShouldPromote(sameSignatureTimes: number | undefined | null, defaultTimes: number, afterFailures: number | undefined | null, history: string[]): boolean;
   escalationRetryBudgetFor(retryBudget: number | undefined | null, defaultBudget: number): number;
   escalationPrompt(summary: string, lastFeedback: string | undefined | null): string;
+  // ── agent: commit-message·pr-review(3단계 3g). 지적·입력 객체는 encodeNative한 JSON 문자열, 결과 객체는 JSON 문자열. 어긋난 입력은 던진다
+  // files·kinds는 PendingChange의 file·change를 같은 순서로 나눈 배열이다. maxChars·round는 아무 수나 받는다
+  classifyCommit(request: string, files: string[], kinds: string[]): string;
+  generateCommitSubject(request: string, files: string[], kinds: string[], agentSummary: string | undefined | null, requestIsAnswer: boolean): string;
+  summarizeCommitText(text: string, maxChars: number): string;
+  toCommitMood(text: string): string;
+  prReviewFixMarker(): string;
+  isBlockingSeverity(severity: string): boolean;
+  hasBlockingFindings(severities: string[]): boolean;
+  prReviewSeverityCounts(severities: string[]): number[];
+  nextPrReviewStep(severities: string[], round: number, maxRounds: number): string;
+  truncateDiff(diff: string, maxChars: number): string;
+  diffFilePaths(diff: string): string[];
+  extractDiffReferencedNames(diff: string): string[];
+  buildPrReviewExternalContext(paths: string[], excerpts: string[], maxChars: number): string;
+  buildPrReviewUserPrompt(inputJson: string): string;
+  prReviewMarker(round: number): string;
+  buildPrReviewComment(inputJson: string): string;
+  buildPrReviewResolvedContext(resolvedJson: string): string;
+  buildReviewResolutionComment(inputJson: string): string;
+  buildPrReviewFixRequest(findingsJson: string): string;
+  extractPrReviewFixTitles(request: string): string[] | null | undefined;
 }
 
 export interface NativeHostPty {
