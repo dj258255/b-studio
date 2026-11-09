@@ -272,7 +272,6 @@ export {
   type TaskListProgress,
 } from './repository';
 export {
-  ALLOWED_REQUIREMENT_ENDPOINTS,
   assertAllowedRequirementEndpoint,
   buildManagedRegion,
   buildRegionContent,
@@ -710,9 +709,6 @@ export {
   extractRequirementIdsWithSuites,
   flattenDiscoveredFile,
   isTestFilePath,
-  JS_TEST_FILE_PATTERN,
-  JUNIT_FILE_PATTERN,
-  PYTEST_FILE_PATTERN,
   type DiscoveredFile,
   type DiscoveredSuite,
   type DiscoveredTestCase,
