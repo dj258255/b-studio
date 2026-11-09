@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 게이트의 자동 화면 확인이 열어 볼 페이지 고르기(`next-routes`), 현황 탭 집계(`project-status`), 로딩 멈춤 판정(`stuck-loading`)을 Rust로 옮겼습니다(ADR-191 3단계 3h, #1071). 판정은 옛 TS와 같고(무작위 입력 각 6만~24만 번 같음), 경로 이름 정렬만 환경에 따라 달랐던 `localeCompare` 대신 UTF-16 코드 단위 순서로 고정했습니다. 대소문자·한글·기호가 섞인 이름은 상한(`maxPages`) 안에 드는 페이지가 전과 달라질 수 있습니다.
 - 요구사항을 GitHub 이슈로 발행하는 문안·판정(관리 영역 본문, 해시, 추적 이슈 표, 발행 계획, 상태 댓글, 이슈 폼 읽기)을 Rust로 옮겼습니다(ADR-191 3단계 3c, #1063). 글자와 판정은 같고, 옛 TS와 같은 무작위 입력 각 9만 번이 모두 같았습니다. `ALLOWED_REQUIREMENT_ENDPOINTS` 정규식 목록은 내보내지 않고 `assertAllowedRequirementEndpoint`만 남겼습니다.
 - 테스트 발견(`packages/agent/src/test-discovery.ts`: JUnit·Vitest/Jest/Playwright·pytest의 스위트·테스트 읽기, 요구사항 id 찾기, 평탄화)을 Rust로 옮겼습니다(ADR-191 3단계 3a, #1061). TS에는 같은 이름·시그니처의 껍데기만 남았고, 쓰이는 곳이 없던 정규식 상수 `JUNIT_FILE_PATTERN`·`JS_TEST_FILE_PATTERN`·`PYTEST_FILE_PATTERN` export는 지웠습니다. 짝 없는 서로게이트는 U+FFFD로 바뀌고, 스위트가 약 60단계를 넘게 중첩된 결과는 평탄화하지 않고 던집니다.
 - 평가 자산 복사본 자리 준비와 샌드박스 복사본 폴더 지우기를 Rust로 옮겼습니다(ADR-191·193 2단계 2c-1b, #1059). 링크는 링크만 지우고 따라가지 않으며, 파일 자리에 내용이 든 폴더가 있으면 재귀로 지우지 않고 멈춥니다(전에는 통째로 지웠습니다).
