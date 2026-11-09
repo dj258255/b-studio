@@ -243,6 +243,52 @@ interface NativeGuard {
   diffContracts(beforeJson: string, afterJson: string): string;
   summarizeContract(documentJson: string): string;
   formatContractChanges(changesJson: string): string;
+  // ── agent: requirements(3단계 3j). 객체는 JSON 문자열(encodeNative·decodeNative). 모양이 어긋난 입력은 던진다. 인덱스를 돌려주는 함수는 껍데기가 원래 객체를 골라 담는다
+  reqCoreRequirementsFile(): string;
+  reqCoreMergeThresholds(): number[];
+  reqCoreWeakWordsKo(): string[];
+  reqCoreWeakWordsEn(): string[];
+  reqCoreFindMentionedIds(text: string): string[];
+  reqCoreMentionsRequirementId(text: string, id: string): boolean;
+  reqCoreImplementsTrailers(text: string): string;
+  reqCoreCheckpointMentionIndexes(messages: string[], id: string): number[];
+  reqCoreGateCheckMentionIndexes(names: string[], id: string): number[];
+  reqCoreIsLikelyTestFile(path: string): boolean;
+  reqCoreAlignedScenarioIds(requirementId: string, scenarioIds: string[]): string[] | null | undefined;
+  reqCoreRequirementHash(requirementJson: string): string;
+  reqCoreContentDrifted(requirementJson: string): boolean;
+  reqCoreRevise(requirementJson: string, now: string): string | null | undefined;
+  reqCoreCarryForward(nextJson: string, previousJson: string): string;
+  reqCoreDiscardRevision(requirementJson: string): string;
+  reqCoreStatus(evidenceJson: string, requirementJson?: string | null): string;
+  reqCoreVerificationSource(evidenceJson: string, requirementJson?: string | null): string;
+  reqCoreVerificationBadge(status: string, evidenceJson: string, requirementJson?: string | null): string;
+  reqCoreConfidence(status: string): string;
+  reqCoreSummarizeCoverage(requirementsJson: string, statusJson: string): string;
+  reqCoreLintRequirement(requirementJson: string): string;
+  reqCoreRequirementIsReady(requirementJson: string): boolean;
+  reqCoreReadyBadge(requirementsJson: string): boolean;
+  reqCoreIsManualStepText(text: string): boolean;
+  reqCorePartitionManualSteps(requirementsJson: string, manualSteps: string[]): string;
+  reqCoreExtractHeuristically(specText: string): string;
+  reqCoreExtractPathReferences(specText: string): string[];
+  reqCoreMissingReferenceQuestion(path: string): string;
+  reqCoreReferencedFilesContext(filesJson: string, maxChars: number): string;
+  reqCoreVerifySpecQuote(specQuote: string, specText: string): boolean;
+  reqCoreExtractionUserPrompt(specText: string, referencedFilesContext?: string | null): string;
+  reqCoreRecommendationUserPrompt(questions: string[], specText: string, stackSummary?: string | null): string;
+  reqCoreExtractionRetryNote(reason: string): string;
+  reqCoreSummarizeRequirementsForGuide(requirementsJson: string, maxChars: number): string;
+  reqCoreSummarizeManualStepsForGuide(manualSteps: string[], maxChars: number): string;
+  reqCoreWorkPrefill(requirementJson: string): string;
+  reqCoreAllMustPrefill(requirementsJson: string): string;
+  reqCoreTextSimilarity(a: string, b: string): number;
+  reqCoreApiSignature(title: string): string | null | undefined;
+  reqCoreRequirementSimilarity(aJson: string, bJson: string): number;
+  reqCoreMerge(incomingJson: string, existingJson: string, now: string): string;
+  reqCoreUnexecutedTests(requirementId: string, rowsJson: string): string;
+  reqCoreMatrixCsv(matrixJson: string): string;
+  docLintText(text: string): string;
 }
 
 export interface NativeHostPty {
