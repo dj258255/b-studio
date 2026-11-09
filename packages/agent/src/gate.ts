@@ -444,6 +444,8 @@ export class VerificationGate {
    * 멈추기 전에 한 번 돌리는 검증)에서도 "마지막 검증이 통과했는가"를 나중에 물을 수 있어야 한다
    */
   async check(): Promise<GateOutcome> {
+    // 검증이 도중에 던지면 앞 검증의 결과가 남아 "마지막 검증이 통과했다"로 읽히지 않게 먼저 비운다(열린 쪽으로 틀리지 않게)
+    this.lastOutcome = undefined;
     const outcome = await this.#check();
     this.lastOutcome = outcome.kind;
     return outcome;
@@ -635,11 +637,27 @@ export class VerificationGate {
       }
       return [{ stage: 'review', name: DECLARED_CHECKS_CHECK, ok: false, attempts: 1, detail: `${SPEC_FILE}을(를) 다시 읽지 못해 바뀐 확인 선언으로 검증하지 못했습니다${latest.error}` }];
     }
-    const change = diffDeclaredChecks(baseline, latest.workflow);
-    const weakened = weakenedDeclarations(baseline, latest.workflow);
-    const changed = hasDeclaredCheckChange(change);
-    if (!changed && weakened.length === 0) return [];
-    const summary = this.#options.sandbox.redact(describeDeclaredCheckChange(change));
+    // 견주는 판정은 네이티브(ADR-191 3e)라 견줄 수 없는 선언(짝 없는 서로게이트 등)에서 던진다. 던지면 게이트 전체가 거절되고
+    // 앞 검증의 결과가 남을 수 있으니, 견주지 못한 것 자체를 이번 검증의 실패로 남긴다(모르면 통과가 아니다)
+    let change: ReturnType<typeof diffDeclaredChecks>;
+    let weakened: string[];
+    let changed: boolean;
+    let summary: string;
+    let merged: ReturnType<typeof withDeclaredChecks> | undefined;
+    try {
+      change = diffDeclaredChecks(baseline, latest.workflow);
+      weakened = weakenedDeclarations(baseline, latest.workflow);
+      changed = hasDeclaredCheckChange(change);
+      if (!changed && weakened.length === 0) return [];
+      summary = this.#options.sandbox.redact(describeDeclaredCheckChange(change));
+      if (allowed) merged = withDeclaredChecks(started.spec.workflow, latest.workflow);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const detail = this.#options.sandbox.redact(
+        `${SPEC_FILE}의 확인 선언을 시작할 때의 선언과 견주지 못했습니다(${reason}). 견줄 수 없는 선언으로는 검증을 통과시키지 않습니다 — 되돌리세요.`,
+      );
+      return [{ stage: 'review', name: allowed ? DECLARED_CHECKS_CHECK : 'weakened-declarations', ok: false, attempts: 1, detail }];
+    }
     if (!allowed) {
       // 확인 선언이 바뀐 사실은 지금처럼 실패 안내에 싣는다. 약하게 바꾼 것은 그 자체로 이번 검증을 통과시키지 않는다
       if (changed) this.#unadoptedChange = summary;
@@ -651,7 +669,7 @@ export class VerificationGate {
       }
       return [];
     }
-    this.#project = { ...started, spec: { ...started.spec, workflow: withDeclaredChecks(started.spec.workflow, latest.workflow) } } as LoadedProject;
+    this.#project = { ...started, spec: { ...started.spec, workflow: merged } } as LoadedProject;
     // 확인 선언의 삭제·변경은 위 요약에 이미 들어 있다. 여기서는 그 밖에 약해진 실행 정책을 함께 적는다
     const declared = new Set([...change.removed.map((name) => `삭제: ${name}`), ...change.changed.map((name) => `변경: ${name}`)]);
     const policy = weakened.filter((item) => !declared.has(item));

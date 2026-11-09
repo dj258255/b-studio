@@ -3116,6 +3116,37 @@ workflow:
     expect(check?.detail).toContain('읽을 수 없게 바꿨습니다');
     expect(check?.detail).toContain('되돌리세요');
   });
+
+  it('선언을 견주지 못하면(비교가 던짐) 게이트를 거절하지 않고 리뷰 단계 실패로 남기며, 앞의 통과가 남지 않는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.lastOutcome).toBe('pass');
+
+    // 짝 없는 서로게이트가 든 선언은 네이티브 경계에서 견줄 수 없다(같은 글자로 합쳐져 바뀐 선언이 사라지지 않게 거부한다)
+    await workspace.write('api/src/Order.java', 'class Order { String memo; int n; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [{ ...unit, command: ['./gradlew', 'test\uD800'] }] }));
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.name === 'weakened-declarations');
+    expect(check).toMatchObject({ stage: 'review', ok: false, attempts: 1 });
+    expect(check?.detail).toContain('견주지 못했습니다');
+    expect(gate.lastOutcome).toBe('retry');
+  });
+
+  it('검증 도중 던지면 앞 검증의 통과(lastOutcome)가 남지 않는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+
+    workspace.changedFiles = () => {
+      throw new Error('작업 공간을 읽지 못함');
+    };
+    await expect(gate.check()).rejects.toThrow('작업 공간을 읽지 못함');
+    expect(gate.lastOutcome).toBeUndefined();
+  });
 });
 
 describe('VerificationGate 평가 자산 (ADR-175)', () => {
