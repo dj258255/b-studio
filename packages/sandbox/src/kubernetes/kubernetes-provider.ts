@@ -1,10 +1,9 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { externalCallScript } from '../docker/external-call';
 import { parseEgressDenial, parseSyncOutput, SYNC_SCRIPT, SyncObservations } from '../docker/format';
@@ -13,7 +12,7 @@ import { SandboxError } from '../errors';
 import { DEFAULT_READINESS, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
-import { runCommandFromFile, runCommandToFile } from '../stream-exec';
+import { runCommand, runCommandFromFile, runCommandToFile } from '../stream-exec';
 import { withRemovedDirectories } from '../sync-paths';
 import type {
   CleanupCommand,
@@ -37,7 +36,6 @@ import { loadComposeModel, type ComposeModel } from './compose-model';
 import { isPortForwardBroken, parseKubectlLogLine, parsePortForwardLine, podReady, podState, podUsage, type PodJson } from './format';
 import { buildKubernetesManifests, SANDBOX_LABEL, SECRET_NAME, SERVICE_LABEL, type KubernetesObject } from './manifests';
 
-const execFileAsync = promisify(execFile);
 const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 const POD_READY_TIMEOUT_MS = 300_000;
 
@@ -495,17 +493,10 @@ class KubernetesSandbox implements Sandbox {
   }
 }
 
-async function execCommand(bin: string, args: string[], { signal, input }: { signal?: AbortSignal; input?: string } = {}): Promise<ExecResult> {
-  try {
-    const running = execFileAsync(bin, args, { signal, maxBuffer: 256 * 1024 * 1024 });
-    running.child.stdin?.end(input);
-    const { stdout, stderr } = await running;
-    return { exitCode: 0, stdout, stderr };
-  } catch (error) {
-    if (!(error instanceof Error) || !('stdout' in error)) throw error;
-    const failure = error as Error & { code?: number | string; stdout?: string; stderr?: string };
-    return { exitCode: typeof failure.code === 'number' ? failure.code : 1, stdout: failure.stdout ?? '', stderr: failure.stderr || failure.message };
-  }
+// kubectl을 한 번 돌려 stdout·stderr를 모은다. 실행·취소는 Rust(crates/bstudio-io)가 한다(2c-2, #1043).
+// #docker와 같이 던지지 않는다 — 비0 종료·취소·spawn 실패·maxBuffer 초과 모두 결과로 돌려준다. env는 주지 않아 상속한다.
+function execCommand(bin: string, args: string[], { signal, input }: { signal?: AbortSignal; input?: string } = {}): Promise<ExecResult> {
+  return runCommand(bin, args, { signal, input });
 }
 
 async function hashOrMissing(file: string): Promise<string> {

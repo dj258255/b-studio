@@ -690,3 +690,31 @@ pub fn run_command_from_file(
     };
     AsyncBlockBuilder::new(future).build(&env)
 }
+
+/// `bin args`를 한 번 실행하고 stdout·stderr를 모은다(TS `#docker`). `signal`로 취소하면
+/// 2c-1과 달리 거절하지 않고 그때까지의 부분 출력과 exitCode 1을 돌려준다(#1043).
+/// 취소를 거절로 올리지 않으려면 select를 napi가 아니라 작업 안에서 해야 하므로, 취소 future를 넘긴다.
+#[napi]
+pub fn run_command(
+    env: Env,
+    bin: String,
+    args: Vec<String>,
+    input: Option<String>,
+    env_vars: Option<HashMap<String, String>>,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<ExecResult>> {
+    let pairs = env_pairs(env_vars);
+    let cancel = abort_notify(signal);
+    let future = async move {
+        let output = bstudio_io::process::run_command(
+            &bin,
+            &args,
+            input.as_deref(),
+            pairs.as_deref(),
+            cancel.notified(),
+        )
+        .await;
+        Ok(ExecResult::from(output))
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}
