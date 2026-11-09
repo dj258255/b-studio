@@ -1981,3 +1981,62 @@ pub fn build_pr_review_fix_request(findings_json: String) -> Result<String> {
 pub fn extract_pr_review_fix_titles(request: String) -> Option<Vec<String>> {
     pr_review::extract_pr_review_fix_titles(&request)
 }
+
+// ── agent: next-routes·project-status·stuck-loading(ADR-191 3단계 3h). TS 껍데기: packages/agent/src/{next-routes,project-status,stuck-loading}.ts
+
+use bstudio_guard::{next_routes as nr, project_status as ps, stuck_loading as sl};
+
+fn sample_params(json: &str) -> Result<js_json::JsObject> {
+    match input(json, "sampleParams")? {
+        JsValue::Obj(o) => Ok(o),
+        _ => Err(Error::from_reason("sampleParams가 객체가 아닙니다")),
+    }
+}
+
+#[napi]
+pub fn next_routes_is_id_like_segment(name: String) -> bool {
+    nr::is_id_like_segment(&name)
+}
+
+/// `max_pages`는 `Math.floor` 전의 값 그대로(`NaN`·`Infinity` 포함), `max_pages_cap`은 spec의 `AUTO_PAGE_MAX`
+#[napi]
+pub fn next_routes_from_changed_files(
+    files: Vec<String>,
+    service_path: String,
+    sample_params_json: String,
+    max_pages: f64,
+    max_pages_cap: f64,
+    fallback_value: Option<String>,
+) -> Result<String> {
+    let params = sample_params(&sample_params_json)?;
+    Ok(out(&nr::routes_from_changed_files(&files, &service_path, &params, max_pages, max_pages_cap, fallback_value.as_deref()).to_value()))
+}
+
+#[napi]
+pub fn next_routes_from_candidates(
+    candidates_json: String,
+    service_path: String,
+    sample_params_json: String,
+    max_pages: f64,
+    max_pages_cap: f64,
+    fallback_value: Option<String>,
+) -> Result<String> {
+    let params = sample_params(&sample_params_json)?;
+    let candidates = fail(nr::parse_candidates(&input(&candidates_json, "후보 목록")?))?;
+    Ok(out(&nr::routes_from_candidates(&candidates, &service_path, &params, max_pages, max_pages_cap, fallback_value.as_deref()).to_value()))
+}
+
+#[napi]
+pub fn project_status_build(input_json: String) -> Result<String> {
+    Ok(out(&fail(ps::build_project_status(&input(&input_json, "현황 입력")?))?))
+}
+
+/// `evidence_json`이 null이면 증거를 모르는 것(HTTP 모드)
+#[napi]
+pub fn stuck_loading_detect(text: String, evidence_json: Option<String>) -> Result<Option<String>> {
+    let evidence = match evidence_json {
+        Some(json) => Some(input(&json, "증거")?),
+        None => None,
+    };
+    Ok(sl::detect_stuck_loading(&text, evidence.as_ref()))
+}

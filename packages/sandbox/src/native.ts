@@ -306,6 +306,12 @@ interface NativeGuard {
   buildReviewResolutionComment(inputJson: string): string;
   buildPrReviewFixRequest(findingsJson: string): string;
   extractPrReviewFixTitles(request: string): string[] | null | undefined;
+  // ── agent: next-routes·project-status·stuck-loading(3단계 3h). 객체는 JSON 문자열(encodeNative·decodeNative). maxPages는 NaN·Infinity도 그대로 받는다. 모양이 어긋난 입력은 던진다
+  nextRoutesIsIdLikeSegment(name: string): boolean;
+  nextRoutesFromChangedFiles(files: string[], servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
+  nextRoutesFromCandidates(candidatesJson: string, servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
+  projectStatusBuild(inputJson: string): string;
+  stuckLoadingDetect(text: string, evidenceJson?: string | null): string | null | undefined;
 }
 
 export interface NativeHostPty {
