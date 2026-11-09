@@ -272,7 +272,6 @@ export {
   type TaskListProgress,
 } from './repository';
 export {
-  ALLOWED_REQUIREMENT_ENDPOINTS,
   assertAllowedRequirementEndpoint,
   buildManagedRegion,
   buildRegionContent,

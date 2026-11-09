@@ -1158,3 +1158,156 @@ pub fn discover_tests_in_file(file_path: String, content: String) -> Option<Stri
 pub fn flatten_discovered_file(file_json: String) -> Result<String> {
     fail(test_discovery::flatten_discovered_file(&file_json))
 }
+
+// ── agent: requirement-issues(3단계 3c). 객체는 JSON 문자열로 받고, 문장은 그대로 주고받는다
+use bstudio_guard::requirement_issues as ri;
+
+#[napi]
+pub fn req_issue_label() -> String {
+    ri::REQUIREMENT_LABEL.to_owned()
+}
+
+#[napi]
+pub fn req_issue_content_hash(text: String) -> String {
+    ri::content_hash(&text)
+}
+
+#[napi]
+pub fn req_issue_build_region_content(requirement_json: String) -> Result<String> {
+    fail(ri::build_region_content(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_issue_requirement_content_hash(requirement_json: String) -> Result<String> {
+    fail(ri::requirement_content_hash(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_issue_build_managed_region(requirement_json: String, rev: f64) -> Result<String> {
+    fail(ri::build_managed_region(&input(&requirement_json, "요구사항")?, rev))
+}
+
+/// 관리형 영역이 없으면 null
+#[napi]
+pub fn req_issue_parse_managed_region(body: String) -> Option<String> {
+    ri::parse_managed_region(&body).map(|r| out(&ri::managed_region_value(&r)))
+}
+
+#[napi]
+pub fn req_issue_sub_issue_title(requirement_json: String) -> Result<String> {
+    Ok(ri::sub_issue_title(&input(&requirement_json, "요구사항")?))
+}
+
+#[napi]
+pub fn req_issue_id_from_title(title: String) -> Option<String> {
+    ri::requirement_id_from_issue_title(&title)
+}
+
+#[napi]
+pub fn req_issue_tracking_title(project: String) -> String {
+    ri::tracking_issue_title(&project)
+}
+
+#[napi]
+pub fn req_issue_find_tracking_issue(issues_json: String, project_name: String) -> Result<Option<String>> {
+    Ok(fail(ri::find_tracking_issue(&input(&issues_json, "이슈 목록")?, &project_name))?.map(|v| out(&v)))
+}
+
+#[napi]
+pub fn req_issue_label_set(requirement_json: String, status: String) -> Result<Vec<String>> {
+    Ok(ri::requirement_label_set(&input(&requirement_json, "요구사항")?, &status))
+}
+
+#[napi]
+pub fn req_issue_build_tracking_body(project_name: String, rows_json: String, updated_at: Option<String>) -> Result<String> {
+    fail(ri::build_tracking_issue_body(&project_name, &input(&rows_json, "추적 표")?, updated_at.as_deref()))
+}
+
+/// 찾은 자리(없으면 -1)
+#[napi]
+pub fn req_issue_find_existing_remote(requirement_json: String, remote_json: String) -> Result<i32> {
+    let requirement = input(&requirement_json, "요구사항")?;
+    let JsValue::Arr(remote) = input(&remote_json, "원격 이슈")? else { return Err(Error::from_reason("원격 이슈는 배열이어야 합니다")) };
+    Ok(ri::find_existing_remote_issue(&requirement, &remote).map_or(-1, |i| i as i32))
+}
+
+#[napi]
+pub fn req_issue_plan(inputs_json: String, remote_json: String) -> Result<String> {
+    Ok(out(&fail(ri::plan_requirement_publish(&input(&inputs_json, "발행 입력")?, &input(&remote_json, "원격 이슈")?))?))
+}
+
+#[napi]
+pub fn req_issue_summarize_plan(entries_json: String) -> Result<String> {
+    Ok(out(&fail(ri::summarize_requirement_plan(&input(&entries_json, "계획")?))?))
+}
+
+#[napi]
+pub fn req_issue_build_status_comment(requirement_id: String, status: String, rows_json: String) -> Result<String> {
+    fail(ri::build_status_comment(&requirement_id, &status, &input(&rows_json, "근거 표")?))
+}
+
+#[napi]
+pub fn req_issue_is_status_comment(body: String, requirement_id: Option<String>) -> bool {
+    ri::is_status_comment(&body, requirement_id.as_deref())
+}
+
+/// 처음 맞는 댓글의 자리(없으면 -1)
+#[napi]
+pub fn req_issue_find_pinned_status_comment(bodies: Vec<String>, requirement_id: String) -> i32 {
+    ri::find_pinned_status_comment(&bodies, &requirement_id)
+}
+
+#[napi]
+pub fn req_issue_implements_trailer(ref_json: String) -> Result<String> {
+    Ok(ri::implements_trailer(&input(&ref_json, "구현 참조")?))
+}
+
+#[napi]
+pub fn req_issue_extract_mentions(texts: Vec<String>) -> Vec<String> {
+    ri::extract_requirement_mentions(&texts)
+}
+
+#[napi]
+pub fn req_issue_build_addendum(refs_json: String, include_closes: bool) -> Result<String> {
+    fail(ri::build_requirements_addendum(&input(&refs_json, "구현 참조")?, include_closes))
+}
+
+#[napi]
+pub fn req_issue_build_review_context(entries_json: String) -> Result<String> {
+    fail(ri::build_review_requirements_context(&input(&entries_json, "요구사항 목록")?))
+}
+
+#[napi]
+pub fn req_issue_form_yaml() -> String {
+    ri::build_requirement_issue_form_yaml()
+}
+
+#[napi]
+pub fn req_issue_parse_issue_form(title: String, body: String) -> Option<String> {
+    ri::parse_requirement_issue_form(&title, &body).map(|v| out(&v))
+}
+
+#[napi]
+pub fn req_issue_draft_from_issue(title: String, body: String) -> String {
+    out(&ri::draft_requirement_from_issue(&title, &body))
+}
+
+#[napi]
+pub fn req_issue_draft_managed(title: String, body: String) -> Option<String> {
+    ri::draft_managed_requirement(&title, &body).map(|v| out(&v))
+}
+
+#[napi]
+pub fn req_issue_extract_tracking_numbers(body: String) -> String {
+    out(&JsValue::Arr(ri::extract_tracking_sub_issue_numbers(&body).into_iter().map(JsValue::Num).collect()))
+}
+
+#[napi]
+pub fn req_issue_managed_to_requirement(draft_json: String) -> Result<String> {
+    Ok(out(&ri::managed_requirement_to_requirement(&input(&draft_json, "초안")?)))
+}
+
+#[napi]
+pub fn req_issue_is_allowed_endpoint(pathname: String) -> bool {
+    ri::is_allowed_requirement_endpoint(&pathname)
+}
