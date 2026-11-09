@@ -269,6 +269,29 @@ interface NativeGuard {
   nextCliTier(tier: string): string | null | undefined;
   higherCliTier(a: string | null | undefined, b: string): string;
   routeCliTier(prompt: string, intent: string, stickyTier?: string | null): string;
+  // ── agent: "문서" 탭(3단계 3k). 색인 요약 목록은 JSON 문자열(encodeNative), 모양이 어긋나면 던진다. 기록 종류는 껍데기가 고정된 글자만 넘긴다(알 수 없으면 던진다)
+  docsSlugifyTitle(title: string): string;
+  docsNextDesignDocNumber(existing: string[]): number;
+  docsNextAdrNumber(existing: string[]): number;
+  docsDesignDocFilePath(number: number, title: string): string;
+  docsAdrFilePath(number: number, title: string): string;
+  docsBuildDesignDocTemplate(number: number, title: string): string;
+  docsBuildAdrTemplate(number: number, title: string, date: string, related: string[]): string;
+  docsBuildEntry(kind: string, title: string, fields: string[]): string;
+  docsAppendEntry(kind: string, existing: string | null | undefined, entry: string): string;
+  docsBuildRoadmapTemplate(): string;
+  docsRegenerateRoadmapStatus(
+    existing: string | null | undefined,
+    statuses: string[],
+    counts: number[],
+    mustTotal: number,
+    mustDone: number,
+    shouldTotal: number,
+    shouldDone: number,
+  ): string;
+  docsExtractDocSummary(markdown: string): string;
+  docsBuildDocSummary(path: string, markdown: string): string;
+  docsRegenerateDocsReadme(existing: string | null | undefined, docsJson: string): string;
 }
 
 export interface NativeHostPty {

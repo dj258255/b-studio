@@ -12,6 +12,7 @@ pub mod contract_diff;
 pub mod declared_checks;
 pub mod deploy_plan;
 pub mod docker_format;
+pub mod docs;
 pub mod edge_config;
 pub mod git_mask;
 pub mod host_containers;

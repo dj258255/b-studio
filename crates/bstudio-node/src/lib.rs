@@ -1,7 +1,7 @@
 //! bstudio-guard를 Node에 붙이는 napi 층. 형 변환만 하고 판정은 하지 않는다.
 //! TS 쪽 껍데기는 `packages/sandbox/src/native.ts`다.
 
-use bstudio_guard::{container_policy, readonly_docker, secrets};
+use bstudio_guard::{container_policy, docs, js, readonly_docker, secrets};
 use napi::{Error, Result};
 use napi_derive::napi;
 
@@ -1791,4 +1791,92 @@ pub fn higher_cli_tier(a: Option<String>, b: String) -> String {
 #[napi]
 pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String>) -> Result<String> {
     fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
+}
+
+// ── agent: "문서" 탭(3단계 3k)
+
+#[napi]
+pub fn docs_slugify_title(title: String) -> String {
+    docs::slugify_title(&title)
+}
+
+#[napi]
+pub fn docs_next_design_doc_number(existing: Vec<String>) -> f64 {
+    docs::next_design_doc_number(&existing)
+}
+
+#[napi]
+pub fn docs_next_adr_number(existing: Vec<String>) -> f64 {
+    docs::next_adr_number(&existing)
+}
+
+#[napi]
+pub fn docs_design_doc_file_path(number: f64, title: String) -> String {
+    docs::design_doc_file_path(number, &title)
+}
+
+#[napi]
+pub fn docs_adr_file_path(number: f64, title: String) -> String {
+    docs::adr_file_path(number, &title)
+}
+
+#[napi]
+pub fn docs_build_design_doc_template(number: f64, title: String) -> String {
+    docs::build_design_doc_template(number, &title)
+}
+
+#[napi]
+pub fn docs_build_adr_template(number: f64, title: String, date: String, related: Vec<String>) -> String {
+    docs::build_adr_template(number, &title, &date, &related)
+}
+
+/// 알 수 없는 종류는 던진다(껍데기는 고정된 종류만 넘긴다)
+#[napi]
+pub fn docs_build_entry(kind: String, title: String, fields: Vec<String>) -> Result<String> {
+    fail(docs::build_entry(&kind, &title, &fields))
+}
+
+/// 알 수 없는 종류는 던진다(껍데기는 고정된 종류만 넘긴다)
+#[napi]
+pub fn docs_append_entry(kind: String, existing: Option<String>, entry: String) -> Result<String> {
+    fail(docs::append_entry(&kind, existing.as_deref(), &entry))
+}
+
+#[napi]
+pub fn docs_build_roadmap_template() -> String {
+    docs::build_roadmap_template()
+}
+
+#[napi]
+#[allow(clippy::too_many_arguments)]
+pub fn docs_regenerate_roadmap_status(
+    existing: Option<String>,
+    statuses: Vec<String>,
+    counts: Vec<f64>,
+    must_total: f64,
+    must_done: f64,
+    should_total: f64,
+    should_done: f64,
+) -> String {
+    docs::regenerate_roadmap_status(existing.as_deref(), &statuses, &counts, (must_total, must_done), (should_total, should_done))
+}
+
+/// `{title, paragraph}` JSON
+#[napi]
+pub fn docs_extract_doc_summary(markdown: String) -> String {
+    let (title, paragraph) = docs::extract_doc_summary(&markdown);
+    format!(r#"{{"title":{},"paragraph":{}}}"#, js::json_quote(&title), js::json_quote(&paragraph))
+}
+
+/// `{path, title, paragraph}` JSON
+#[napi]
+pub fn docs_build_doc_summary(path: String, markdown: String) -> String {
+    let (path, title, paragraph) = docs::build_doc_summary(&path, &markdown);
+    format!(r#"{{"path":{},"title":{},"paragraph":{}}}"#, js::json_quote(&path), js::json_quote(&title), js::json_quote(&paragraph))
+}
+
+/// 모양이 어긋난 요약 목록은 던진다
+#[napi]
+pub fn docs_regenerate_docs_readme(existing: Option<String>, docs_json: String) -> Result<String> {
+    fail(docs::regenerate_docs_readme(existing.as_deref(), &docs_json))
 }
