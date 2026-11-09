@@ -168,6 +168,32 @@ interface NativeGuard {
   isTestFilePath(filePath: string): boolean;
   discoverTestsInFile(filePath: string, content: string): string | null | undefined;
   flattenDiscoveredFile(fileJson: string): string;
+  // ── agent: 토큰 예산·모델 선택(3단계 3f). 큰 구조는 JSON 문자열(encodeNative·decodeNative)
+  clipCommandOutput(text: string, budget: number): string;
+  clipText(text: string, budget: number, hint?: string | null): string;
+  visibleHtml(html: string): string;
+  isHtmlContent(contentType: string | null | undefined, text: string): boolean;
+  repeatNotePrefix(): string;
+  repeatNote(call: number): string;
+  isRepeatNote(text: string): boolean;
+  clearedToolResultPrefix(): string;
+  clearedToolResultNote(chars: number): string;
+  isClearedToolResult(text: string): boolean;
+  planClearOldToolResults(messagesJson: string, keepRecent: number, clearAtLeastChars: number): string;
+  isContextClearingOn(value: string | null | undefined): boolean;
+  estimateTokens(text: string): number;
+  classifyComplexity(prompt: string, inputTokens: number): string;
+  classifyRisk(prompt: string): string;
+  classifyTask(prompt: string): string;
+  estimateCost(pricingJson: string, usageJson: string): number | null | undefined;
+  routeModel(profilesJson: string, requestJson: string, statsJson: string): string;
+  aggregateModelStats(observationsJson: string): string;
+  validateModelProfiles(inputJson: string, urlFactsJson: string): string;
+  cliTiers(): string[];
+  tierLabel(tier: string): string | null | undefined;
+  nextCliTier(tier: string): string | null | undefined;
+  higherCliTier(a: string | null | undefined, b: string): string;
+  routeCliTier(prompt: string, intent: string, stickyTier?: string | null): string;
 }
 
 export interface NativeHostPty {
