@@ -306,6 +306,87 @@ interface NativeGuard {
   buildReviewResolutionComment(inputJson: string): string;
   buildPrReviewFixRequest(findingsJson: string): string;
   extractPrReviewFixTitles(request: string): string[] | null | undefined;
+  // ── agent: next-routes·project-status·stuck-loading(3단계 3h). 객체는 JSON 문자열(encodeNative·decodeNative). maxPages는 NaN·Infinity도 그대로 받는다. 모양이 어긋난 입력은 던진다
+  nextRoutesIsIdLikeSegment(name: string): boolean;
+  nextRoutesFromChangedFiles(files: string[], servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
+  nextRoutesFromCandidates(candidatesJson: string, servicePath: string, sampleParamsJson: string, maxPages: number, maxPagesCap: number, fallbackValue?: string | null): string;
+  projectStatusBuild(inputJson: string): string;
+  stuckLoadingDetect(text: string, evidenceJson?: string | null): string | null | undefined;
+  // ── agent: 서비스 소유 판정·CLI 실패 설명(3단계 3l). servicesForFiles는 서비스·파일을 입력 배열의 위치로 돌려준다(JSON `{services:number[],unmatched:number[]}`). 모양이 어긋난 입력은 던진다
+  servicesForFiles(inputJson: string): string;
+  ownsFile(path: string, includes: string[], file: string): boolean;
+  isComposeFile(root: string, composePath: string, cwd: string, file: string): boolean;
+  describeCliText(raw: string): string;
+  cliFailureReason(summary: string, detail: string): string;
+  // ── agent: requirements(3단계 3j). 객체는 JSON 문자열(encodeNative·decodeNative). 모양이 어긋난 입력은 던진다. 인덱스를 돌려주는 함수는 껍데기가 원래 객체를 골라 담는다
+  reqCoreRequirementsFile(): string;
+  reqCoreMergeThresholds(): number[];
+  reqCoreWeakWordsKo(): string[];
+  reqCoreWeakWordsEn(): string[];
+  reqCoreFindMentionedIds(text: string): string[];
+  reqCoreMentionsRequirementId(text: string, id: string): boolean;
+  reqCoreImplementsTrailers(text: string): string;
+  reqCoreCheckpointMentionIndexes(messages: string[], id: string): number[];
+  reqCoreGateCheckMentionIndexes(names: string[], id: string): number[];
+  reqCoreIsLikelyTestFile(path: string): boolean;
+  reqCoreAlignedScenarioIds(requirementId: string, scenarioIds: string[]): string[] | null | undefined;
+  reqCoreRequirementHash(requirementJson: string): string;
+  reqCoreContentDrifted(requirementJson: string): boolean;
+  reqCoreRevise(requirementJson: string, now: string): string | null | undefined;
+  reqCoreCarryForward(nextJson: string, previousJson: string): string;
+  reqCoreDiscardRevision(requirementJson: string): string;
+  reqCoreStatus(evidenceJson: string, requirementJson?: string | null): string;
+  reqCoreVerificationSource(evidenceJson: string, requirementJson?: string | null): string;
+  reqCoreVerificationBadge(status: string, evidenceJson: string, requirementJson?: string | null): string;
+  reqCoreConfidence(status: string): string;
+  reqCoreSummarizeCoverage(requirementsJson: string, statusJson: string): string;
+  reqCoreLintRequirement(requirementJson: string): string;
+  reqCoreRequirementIsReady(requirementJson: string): boolean;
+  reqCoreReadyBadge(requirementsJson: string): boolean;
+  reqCoreIsManualStepText(text: string): boolean;
+  reqCorePartitionManualSteps(requirementsJson: string, manualSteps: string[]): string;
+  reqCoreExtractHeuristically(specText: string): string;
+  reqCoreExtractPathReferences(specText: string): string[];
+  reqCoreMissingReferenceQuestion(path: string): string;
+  reqCoreReferencedFilesContext(filesJson: string, maxChars: number): string;
+  reqCoreVerifySpecQuote(specQuote: string, specText: string): boolean;
+  reqCoreExtractionUserPrompt(specText: string, referencedFilesContext?: string | null): string;
+  reqCoreRecommendationUserPrompt(questions: string[], specText: string, stackSummary?: string | null): string;
+  reqCoreExtractionRetryNote(reason: string): string;
+  reqCoreSummarizeRequirementsForGuide(requirementsJson: string, maxChars: number): string;
+  reqCoreSummarizeManualStepsForGuide(manualSteps: string[], maxChars: number): string;
+  reqCoreWorkPrefill(requirementJson: string): string;
+  reqCoreAllMustPrefill(requirementsJson: string): string;
+  reqCoreTextSimilarity(a: string, b: string): number;
+  reqCoreApiSignature(title: string): string | null | undefined;
+  reqCoreRequirementSimilarity(aJson: string, bJson: string): number;
+  reqCoreMerge(incomingJson: string, existingJson: string, now: string): string;
+  reqCoreUnexecutedTests(requirementId: string, rowsJson: string): string;
+  reqCoreMatrixCsv(matrixJson: string): string;
+  docLintText(text: string): string;
+  // ── agent: "문서" 탭(3단계 3k). 색인 요약 목록은 JSON 문자열(encodeNative), 모양이 어긋나면 던진다. 기록 종류는 껍데기가 고정된 글자만 넘긴다(알 수 없으면 던진다)
+  docsSlugifyTitle(title: string): string;
+  docsNextDesignDocNumber(existing: string[]): number;
+  docsNextAdrNumber(existing: string[]): number;
+  docsDesignDocFilePath(number: number, title: string): string;
+  docsAdrFilePath(number: number, title: string): string;
+  docsBuildDesignDocTemplate(number: number, title: string): string;
+  docsBuildAdrTemplate(number: number, title: string, date: string, related: string[]): string;
+  docsBuildEntry(kind: string, title: string, fields: string[]): string;
+  docsAppendEntry(kind: string, existing: string | null | undefined, entry: string): string;
+  docsBuildRoadmapTemplate(): string;
+  docsRegenerateRoadmapStatus(
+    existing: string | null | undefined,
+    statuses: string[],
+    counts: number[],
+    mustTotal: number,
+    mustDone: number,
+    shouldTotal: number,
+    shouldDone: number,
+  ): string;
+  docsExtractDocSummary(markdown: string): string;
+  docsBuildDocSummary(path: string, markdown: string): string;
+  docsRegenerateDocsReadme(existing: string | null | undefined, docsJson: string): string;
   // ── agent: 계획 요약·레인 계약(3단계 3m). project는 { name, managed: [[이름, { template, path }]] }, lanes는 [{ id, paths, tasks: [{ id, title, request }] }]를 encodeNative한 JSON 문자열.
   // short·long·maxChars·maxContracts는 TS가 가진 상수를 그대로 넘긴다. 모양이 어긋난 입력은 던진다
   shouldPlanBrief(request: string): boolean;

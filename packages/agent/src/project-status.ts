@@ -6,7 +6,10 @@
  *
  * 범수 님이 쓴 평가 기준의 "지금 어디까지 왔는가" 항목을 그대로 따른다: 지금 하는 일, 목적(요구사항·이슈),
  * 예상 완료(예상이 없으면 없다고 말한다 — 지어내지 않는다), 결과물, 위험·불확실성, 검증 기록, 예상 vs 실제.
+ *
+ * 집계는 Rust(`crates/bstudio-guard/src/project_status.rs`, ADR-191 3단계 3h)가 한다. 여기에는 타입과, 같은 이름·시그니처로 네이티브 모듈을 부르는 얇은 껍데기만 남았다.
  */
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 
 export interface ProjectStatusRequirementRef {
   id: string;
@@ -76,78 +79,7 @@ export interface ProjectStatusView {
   links: { roadmap: string; changelog: string; docsIndex: string };
 }
 
-function buildCurrentWork(input: ProjectStatusInput): ProjectStatusView['currentWork'] {
-  const items = (input.lanes ?? []).map((lane) => `레인 ${lane.id}(${lane.label}): ${lane.status}`);
-  if (input.running) return { summary: input.currentRequestSummary?.trim() || '요청을 처리하는 중입니다', items };
-  if (items.length > 0) return { summary: '작업 분해 레인이 진행 중입니다', items };
-  return { summary: '지금 처리 중인 요청이 없습니다', items };
-}
-
-function buildPurpose(requirements: readonly ProjectStatusRequirementRef[]): ProjectStatusView['purpose'] {
-  const items = requirements
-    .filter((requirement) => requirement.priority === 'must' || requirement.priority === 'should')
-    .map((requirement) => ({ id: requirement.id, title: requirement.title, ...(requirement.issue !== undefined ? { issue: requirement.issue } : {}) }));
-  return { items };
-}
-
-function buildEta(estimates: readonly ProjectStatusEstimate[] | undefined): ProjectStatusView['eta'] {
-  const withEstimate = (estimates ?? []).filter((estimate) => estimate.estimateMinutes !== undefined);
-  if (withEstimate.length === 0) return { hasEstimate: false, summary: '추정 없음 — 작업마다 예상 시간을 적어 주세요' };
-  const totalEstimate = withEstimate.reduce((sum, estimate) => sum + (estimate.estimateMinutes ?? 0), 0);
-  return { hasEstimate: true, summary: `작업 ${withEstimate.length}개에 예상 시간이 있습니다. 합계 ${totalEstimate}분` };
-}
-
-/** 상태별 개수. 요구사항이 없으면 빈 객체 */
-function tallyByStatus(requirements: readonly ProjectStatusRequirementRef[]): Record<string, number> {
-  const byStatus: Record<string, number> = {};
-  for (const requirement of requirements) byStatus[requirement.status] = (byStatus[requirement.status] ?? 0) + 1;
-  return byStatus;
-}
-
-function buildVerification(requirements: readonly ProjectStatusRequirementRef[]): ProjectStatusView['verification'] {
-  const byStatus = tallyByStatus(requirements);
-  if (requirements.length === 0) return { summary: '저장된 요구사항이 없어 검증 기록을 집계할 수 없습니다', byStatus };
-  const verified = byStatus['검증됨'] ?? 0;
-  return { summary: `${requirements.length}개 중 ${verified}개 검증됨`, byStatus };
-}
-
-function buildRisks(input: ProjectStatusInput): string[] {
-  const risks: string[] = [];
-  if (input.openQuestion) risks.push(`되묻는 질문이 멈춰 있습니다: ${input.openQuestion}`);
-  const needsRecheck = input.requirements.filter((requirement) => requirement.status === '재확인 필요');
-  if (needsRecheck.length > 0) risks.push(`재확인 필요 ${needsRecheck.length}개: ${needsRecheck.map((requirement) => `[${requirement.id}] ${requirement.title}`).join(', ')}`);
-  const failed = input.requirements.filter((requirement) => requirement.status === '실패');
-  if (failed.length > 0) risks.push(`실패 ${failed.length}개: ${failed.map((requirement) => `[${requirement.id}] ${requirement.title}`).join(', ')}`);
-  if (input.manualSteps.length > 0) risks.push(`사람이 할 일이 ${input.manualSteps.length}개 남아 있습니다(에이전트가 하지 않습니다)`);
-  if (input.failedServices.length > 0) risks.push(`서비스 실패: ${input.failedServices.join(', ')}`);
-  if (input.reviewState?.state === 'stopped') risks.push('PR 자동 리뷰가 멈췄습니다 — 확인이 필요합니다');
-  if (input.reviewState?.state === 'capped') risks.push(`PR 자동 리뷰가 라운드 상한(${input.reviewState.rounds})에 도달했습니다`);
-  return risks;
-}
-
-function buildEstimateVsActual(estimates: readonly ProjectStatusEstimate[] | undefined): ProjectStatusView['estimateVsActual'] {
-  return (estimates ?? []).map((estimate) => ({
-    id: estimate.id,
-    label: estimate.label,
-    ...(estimate.estimateMinutes !== undefined ? { estimateMinutes: estimate.estimateMinutes } : {}),
-    ...(estimate.actualMinutes !== undefined ? { actualMinutes: estimate.actualMinutes } : {}),
-    ...(estimate.estimateMinutes !== undefined && estimate.actualMinutes !== undefined
-      ? { deltaMinutes: estimate.actualMinutes - estimate.estimateMinutes }
-      : {}),
-    ...(estimate.note ? { note: estimate.note } : {}),
-  }));
-}
-
 /** 세션·요구사항·체크포인트·레인 데이터를 "현황" 화면 모양으로 모은다. 모두 이미 있는 데이터를 재배열할 뿐, 새로 재지 않는다 */
 export function buildProjectStatus(input: ProjectStatusInput): ProjectStatusView {
-  return {
-    currentWork: buildCurrentWork(input),
-    purpose: buildPurpose(input.requirements),
-    eta: buildEta(input.estimates),
-    deliverables: { checkpoints: input.checkpoints, ...(input.pullRequestUrl ? { pullRequestUrl: input.pullRequestUrl } : {}) },
-    risks: { items: buildRisks(input) },
-    verification: buildVerification(input.requirements),
-    estimateVsActual: buildEstimateVsActual(input.estimates),
-    links: input.links,
-  };
+  return decodeNative<ProjectStatusView>(native.projectStatusBuild(encodeNative(input)));
 }
