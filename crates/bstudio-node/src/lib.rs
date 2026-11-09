@@ -1662,3 +1662,133 @@ pub fn format_contract_changes(changes_json: String) -> Result<String> {
     // 변경 목록은 비교 결과를 글자로 옮길 뿐이라 짝 없는 서로게이트는 U+FFFD로 읽는다(근거 줄과 같다)
     fail(contract_diff::format_contract_changes(&input(&changes_json, "계약 변경 목록")?))
 }
+
+// ── 토큰 예산·모델 선택(ADR-191 3f). 큰 구조는 JSON 문자열(NaN·Infinity는 표시 객체). TS 껍데기: packages/agent/src/{tool-output,context-clearing,model-router,cli-router}.ts
+
+use bstudio_guard::{cli_router, context_clearing, model_router, tool_output};
+
+#[napi]
+pub fn clip_command_output(text: String, budget: f64) -> String {
+    tool_output::clip_command_output(&text, budget)
+}
+
+#[napi]
+pub fn clip_text(text: String, budget: f64, hint: Option<String>) -> String {
+    tool_output::clip_text(&text, budget, hint.as_deref())
+}
+
+#[napi]
+pub fn visible_html(html: String) -> String {
+    tool_output::visible_html(&html)
+}
+
+#[napi]
+pub fn is_html_content(content_type: Option<String>, text: String) -> bool {
+    tool_output::is_html_content(content_type.as_deref(), &text)
+}
+
+#[napi]
+pub fn repeat_note_prefix() -> String {
+    tool_output::REPEAT_NOTE_PREFIX.to_owned()
+}
+
+#[napi]
+pub fn repeat_note(call: f64) -> String {
+    tool_output::repeat_note(call)
+}
+
+#[napi]
+pub fn is_repeat_note(text: String) -> bool {
+    tool_output::is_repeat_note(&text)
+}
+
+#[napi]
+pub fn cleared_tool_result_prefix() -> String {
+    context_clearing::CLEARED_TOOL_RESULT_PREFIX.to_owned()
+}
+
+#[napi]
+pub fn cleared_tool_result_note(chars: f64) -> String {
+    context_clearing::cleared_tool_result_note(chars)
+}
+
+#[napi]
+pub fn is_cleared_tool_result(text: String) -> bool {
+    context_clearing::is_cleared_tool_result(&text)
+}
+
+/// 비울 자리의 계획(JSON). 메시지는 읽기만 한다
+#[napi]
+pub fn plan_clear_old_tool_results(messages_json: String, keep_recent: f64, clear_at_least_chars: f64) -> Result<String> {
+    fail(context_clearing::plan_clear_old_tool_results(&messages_json, keep_recent, clear_at_least_chars))
+}
+
+#[napi]
+pub fn is_context_clearing_on(value: Option<String>) -> bool {
+    context_clearing::is_context_clearing_on(value.as_deref())
+}
+
+#[napi]
+pub fn estimate_tokens(text: String) -> f64 {
+    model_router::estimate_tokens(&text)
+}
+
+#[napi]
+pub fn classify_complexity(prompt: String, input_tokens: f64) -> String {
+    model_router::classify_complexity(&prompt, input_tokens).to_owned()
+}
+
+#[napi]
+pub fn classify_risk(prompt: String) -> String {
+    model_router::classify_risk(&prompt).to_owned()
+}
+
+#[napi]
+pub fn classify_task(prompt: String) -> String {
+    model_router::classify_task(&prompt)
+}
+
+#[napi]
+pub fn estimate_cost(pricing_json: String, usage_json: String) -> Result<Option<f64>> {
+    fail(model_router::estimate_cost(&pricing_json, &usage_json))
+}
+
+#[napi]
+pub fn route_model(profiles_json: String, request_json: String, stats_json: String) -> Result<String> {
+    fail(model_router::route_model(&profiles_json, &request_json, &stats_json))
+}
+
+#[napi]
+pub fn aggregate_model_stats(observations_json: String) -> Result<String> {
+    fail(model_router::aggregate_model_stats(&observations_json))
+}
+
+#[napi]
+pub fn validate_model_profiles(input_json: String, url_facts_json: String) -> Result<String> {
+    fail(model_router::validate_model_profiles(&input_json, &url_facts_json))
+}
+
+#[napi]
+pub fn cli_tiers() -> Vec<String> {
+    cli_router::CLI_TIERS.iter().map(|t| (*t).to_owned()).collect()
+}
+
+#[napi]
+pub fn tier_label(tier: String) -> Option<String> {
+    cli_router::tier_label(&tier).map(str::to_owned)
+}
+
+#[napi]
+pub fn next_cli_tier(tier: String) -> Option<String> {
+    cli_router::next_cli_tier(&tier).map(str::to_owned)
+}
+
+#[napi]
+pub fn higher_cli_tier(a: Option<String>, b: String) -> String {
+    cli_router::higher_cli_tier(a.as_deref(), &b).to_owned()
+}
+
+#[napi]
+pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String>) -> Result<String> {
+    fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
+}

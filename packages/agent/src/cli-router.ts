@@ -12,33 +12,29 @@
  * (E8-split은 단일 모델보다 성공 1건당 비용이 538% 많았다). 이 라우터는 그 결과를 반영해 매 요청 다시 계산하지 않고
  * "그대로 두는 쪽"에 기운다 — 세션 안에서 어떤 단계가 검증 게이트를 통과했으면, 읽기 전용 질문이 아닌 한
  * 뒤이은 만들기 요청에서 그 단계 아래로 내리지 않는다(stickiness).
+ *
+ * 단계 선택의 판정은 Rust(crates/bstudio-guard/src/cli_router.rs, ADR-191 3단계 3f)가 한다. 이 파일은 타입과 같은 이름·시그니처의 껍데기다.
  */
-import { classifyComplexity, classifyRisk, estimateTokens, type RouteIntent, type RoutingDecision } from './model-router';
+import { native } from '@b-studio/sandbox';
+import type { RouteIntent, RoutingDecision } from './model-router';
 
 /** 자동 선택이 고를 수 있는 단계. 낮은 인덱스가 더 싸고 빠르다. fable은 단가를 몰라 여기 없다(명시적으로 고를 때만 쓴다) */
 export const CLI_TIERS = ['haiku', 'sonnet', 'opus'] as const;
 export type CliTier = (typeof CLI_TIERS)[number];
 
-/** 사람이 읽는 단계 이름(대화 이벤트·화면 문구용) */
-const TIER_LABELS: Record<CliTier, string> = { haiku: 'Haiku', sonnet: 'Sonnet 5', opus: 'Opus' };
-
+/** 사람이 읽는 단계 이름(대화 이벤트·화면 문구용). 이름은 Rust가 정한다 */
 export function tierLabel(tier: CliTier): string {
-  return TIER_LABELS[tier];
-}
-
-function tierIndex(tier: CliTier): number {
-  return CLI_TIERS.indexOf(tier);
+  return (native.tierLabel(tier) ?? undefined) as string;
 }
 
 /** tier보다 한 단계 위. 이미 최고 단계(opus)면 더 올릴 곳이 없어 undefined(승격 대상 없음) */
 export function nextCliTier(tier: CliTier): CliTier | undefined {
-  return CLI_TIERS[tierIndex(tier) + 1];
+  return (native.nextCliTier(tier) ?? undefined) as CliTier | undefined;
 }
 
 /** 두 단계 중 더 높은(더 비싼) 쪽. undefined는 "아직 쓴 적 없음"을 뜻해 있는 쪽을 그대로 돌려준다 */
 export function higherCliTier(a: CliTier | undefined, b: CliTier): CliTier {
-  if (!a) return b;
-  return tierIndex(a) >= tierIndex(b) ? a : b;
+  return native.higherCliTier(a, b) as CliTier;
 }
 
 export interface CliRouteRequest {
@@ -70,29 +66,5 @@ export interface CliRouteDecision {
  *    (모델을 바꾸면 프롬프트 캐시가 새로 생겨 비용이 뛴다 — E8/E9).
  */
 export function routeCliTier(request: CliRouteRequest): CliRouteDecision {
-  const prompt = request.prompt.trim();
-  if (!prompt) throw new Error('라우팅할 요청을 입력하세요');
-  const inputTokens = estimateTokens(prompt);
-  const complexity = classifyComplexity(prompt, inputTokens);
-  const risk = classifyRisk(prompt);
-
-  if (request.intent === 'ask') {
-    return { tier: 'haiku', reason: '읽기만 하는 질문이라 가장 가벼운 모델로 답합니다', complexity, risk, stuckTo: false };
-  }
-
-  const escalated = risk === 'high' || complexity === 'complex';
-  const natural: CliTier = escalated ? 'opus' : 'sonnet';
-  const naturalReason = risk === 'high' ? '인증·결제·마이그레이션 등 위험 신호가 있어' : complexity === 'complex' ? '요청이 복잡해' : '단순한 만들기 요청이라';
-
-  if (request.stickyTier && tierIndex(request.stickyTier) > tierIndex(natural)) {
-    return {
-      tier: request.stickyTier,
-      reason: `이 세션에서 이미 ${tierLabel(request.stickyTier)}로 성공했어 그대로 유지합니다(모델을 바꾸면 캐시가 새로 생겨 비용이 늘어납니다)`,
-      complexity,
-      risk,
-      stuckTo: true,
-    };
-  }
-
-  return { tier: natural, reason: `${naturalReason} ${tierLabel(natural)}을 선택합니다`, complexity, risk, stuckTo: false };
+  return JSON.parse(native.routeCliTier(request.prompt, request.intent, request.stickyTier)) as CliRouteDecision;
 }
