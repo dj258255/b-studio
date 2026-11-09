@@ -1,14 +1,9 @@
-import { execFile } from 'node:child_process';
-import { lstat, mkdir, readdir, readFile, realpath, rm } from 'node:fs/promises';
-import path from 'node:path';
-import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
 import { SandboxError } from '../errors';
 import type { EvaluationAssetCopy } from './evaluation-assets';
 import type { BindMount } from './relay';
 import { native } from '../native';
-
-const execFileAsync = promisify(execFile);
+import { runCommand } from '../stream-exec';
 
 /**
  * 서비스 컨테이너가 프로젝트 폴더의 `.git`을 쓰지 못하게 하는 마운트 계획(ADR-158).
@@ -110,17 +105,8 @@ function assertNoNestedAssetMounts(
  * 마운트) 가장 위의 그 마운트 소스까지, 없으면 프로젝트 폴더 자신만 본다. 경로는 심볼릭 링크를 풀어 비교한다(macOS의 /tmp → /private/tmp)
  */
 export async function detectGitEntries(projectRoot: string, mountSources: readonly string[]): Promise<GitEntry[]> {
-  const root = await real(projectRoot);
-  const above = (await Promise.all(mountSources.map(real))).filter((source) => isInside(source, root));
-  const stop = above.sort((a, b) => a.length - b.length)[0] ?? root;
-
-  const entries: GitEntry[] = [];
-  for (let dir = root; ; dir = path.dirname(dir)) {
-    const entry = await inspectGit(dir);
-    if (entry) entries.push(entry);
-    if (dir === stop || dir === path.dirname(dir)) break;
-  }
-  return entries;
+  // 링크 풀기·lstat·위로 올라가기는 Rust(bstudio-io::git_mask_fs)가 한다(2c-6)
+  return native.detectGitEntries(projectRoot, [...mountSources], process.cwd());
 }
 
 /** `docker compose config --format json` 중 마운트를 읽는 데 쓰는 부분 */
@@ -190,23 +176,14 @@ export async function computeGitMask(
   const entries = await detectGitEntries(root, mounts.map((mount) => mount.source));
   // b-studio가 만든 체크포인트 저장소(저장소 설정에 `[b-studio]` 절이 있다)인데 상태 폴더가 아직 없으면 미리 빈 폴더로 만들어 둔다.
   // 마운트 지점이 있어야 하고(읽기 전용 `.git` 아래에서는 만들 수 없다), 없다고 건너뛰면 나중에 b-studio가 만든 폴더가 컨테이너에
-  // 그대로 보인다. 사용자 자신의 저장소(내 폴더 모드)에는 흔적을 남기지 않는다. 만들지 못하면 멈춘다
-  for (const entry of entries) {
-    if (entry.kind !== 'directory') continue;
-    if (!entry.hasState && !(await isBStudioRepository(entry.dir))) continue;
-    const state = path.join(entry.dir, GIT, STATE);
-    const empty = path.join(entry.dir, GIT, STATE_MASK);
-    try {
-      await mkdir(state, { recursive: true });
-      // 상태 폴더 자리에 얹을 빈 폴더. 없으면 만들고 있으면 그대로 둔다: 서비스 여럿이 함께 재시작되면 이 함수가 동시에 불리는데,
-      // "지우고 다시 만들기"는 서로 엇갈려 EEXIST로 실패했다(도그푸딩 마찰 187). 내용이 들어 있으면 지우지 않고 멈춘다
-      // (가린다는 약속이 깨지지 않게, 그리고 이 코드가 호스트의 무엇도 재귀적으로 지우지 않게 — prepareEmptyDirectory)
-      await prepareEmptyDirectory(path.join(entry.dir, GIT), STATE_MASK);
-    } catch (error) {
-      throw new SandboxError(`${state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, error instanceof Error ? error.message : String(error), { platform: true });
-    }
-    entry.hasState = true;
+  // 그대로 보인다. 사용자 자신의 저장소(내 폴더 모드)에는 흔적을 남기지 않는다. 만들지 못하면 멈춘다.
+  // 빈 폴더 준비는 Rust가 한다: 없으면 만들고 있으면 그대로 두며(서비스 여럿이 함께 재시작돼 동시에 불려도 엇갈리지 않게, 마찰 187),
+  // 링크·파일이면 그 항목 하나만 지우고(링크를 따라가지 않는다), 내용이 들어 있으면 지우지 않고 멈춘다(재귀 삭제 없음)
+  const prepared = await native.prepareStateMasks(entries);
+  if (prepared.failure) {
+    throw new SandboxError(`${prepared.failure.state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, prepared.failure.detail, { platform: true });
   }
+  entries.splice(0, entries.length, ...prepared.entries);
   const gitMask = planGitMask(mounts, entries);
   // 목록은 선언에서만 정한다(작업 복사본의 지금 상태를 보지 않는다). 그래야 자산이 지워지거나 링크로 바뀌어도 기대가 줄지 않는다
   if (evaluationAssets.length === 0) return gitMask;
@@ -234,36 +211,6 @@ export async function selectEvaluationAssetVolumes(volumes: readonly MaskVolume[
 /** 마스크 계획을 서비스·target으로 합친다. 뒤에 오는 계획이 같은 target에서 이긴다 */
 function mergeMasks(...plans: ReadonlyArray<Record<string, readonly MaskVolume[]>>): Record<string, MaskVolume[]> {
   return JSON.parse(native.mergeMasks(JSON.stringify(plans))) as Record<string, MaskVolume[]>;
-}
-
-/**
- * parent 바로 아래에 name이라는 **진짜 빈 폴더**가 있게 한다. 이 함수는 아무것도 재귀적으로 지우지 않는다.
- *  - 없으면 만든다. 이미 폴더면 그대로 둔다(동시에 불려도 엇갈리지 않게, 트러블슈팅 115).
- *  - 그 자리에 링크나 파일이 있으면 그 항목 하나만 지우고 폴더를 만든다. 링크를 따라가지 않는다(링크가 가리키는 호스트 폴더를 비우거나,
- *    상태 폴더를 가리키는 링크를 "빈 폴더"로 마운트하지 않게).
- *  - 폴더에 내용이 있으면 **지우지 않고 멈춘다.** 이 폴더는 컨테이너에 읽기 전용으로만 마운트되므로 내용이 생길 일이 없다.
- *    비워 주려고 지우기 시작하면, 확인과 삭제 사이에 그 자리가 링크로 바뀌었을 때 엉뚱한 곳을 지우는 길이 생긴다.
- *  - 마지막에 실제 위치가 parent 바로 아래인지 확인한다.
- */
-async function prepareEmptyDirectory(parent: string, name: string): Promise<void> {
-  const target = path.join(parent, name);
-  const before = await lstat(target).catch(() => undefined);
-  // 재귀 옵션 없이 지운다: 그 사이에 내용이 든 폴더로 바뀌었으면 실패하고 멈춘다
-  if (before && !before.isDirectory()) await rm(target, { force: true });
-  await mkdir(target, { recursive: true });
-  const after = await lstat(target);
-  if (!after.isDirectory() || (await realpath(target)) !== path.join(await realpath(parent), name)) {
-    throw new Error(`${target}이(가) 폴더가 아니거나 다른 곳을 가리킵니다`);
-  }
-  const children = await readdir(target);
-  if (children.length > 0) {
-    const shown = children.slice(0, 5).join(', ');
-    throw new Error(`${target} 폴더가 비어 있지 않습니다(${shown}${children.length > 5 ? ` 외 ${children.length - 5}개` : ''}). 이 폴더는 상태 폴더를 가리는 데 쓰는 빈 폴더입니다. 안의 항목을 확인해 직접 지운 뒤 다시 시도하세요`);
-  }
-}
-
-async function isBStudioRepository(dir: string): Promise<boolean> {
-  return readFile(path.join(dir, GIT, 'config'), 'utf8').then((text) => /^\[b-studio\]/m.test(text), () => false);
 }
 
 /** `docker inspect`의 Mounts 한 항목 */
@@ -348,16 +295,8 @@ export async function findMissingMasks(
   return missing;
 }
 
-async function inspectGit(dir: string): Promise<GitEntry | undefined> {
-  const stat = await lstat(path.join(dir, GIT)).catch(() => undefined);
-  if (!stat) return undefined;
-  if (stat.isDirectory()) return { dir, kind: 'directory', hasState: await lstat(path.join(dir, GIT, STATE)).then((s) => s.isDirectory(), () => false) };
-  // 파일은 worktree·submodule의 gitdir 포인터다. 심볼릭 링크 `.git`은 마운트 지점으로 쓸 수 없어 건너뛴다(남긴 한계, ADR-158)
-  return stat.isFile() ? { dir, kind: 'file', hasState: false } : undefined;
-}
-
-async function real(target: string): Promise<string> {
-  return realpath(target).catch(() => path.resolve(target));
+function real(target: string): Promise<string> {
+  return native.realPath(target, process.cwd());
 }
 
 /** 호스트 경로 비교(Node path.relative와 같은 규칙, 판정은 Rust) */
@@ -389,13 +328,12 @@ export async function loadGitMask(
   }: { dockerBin?: string; env?: NodeJS.ProcessEnv; projectName?: string; evaluationAssets?: readonly EvaluationAssetCopy[]; redact?: (text: string) => string } = {},
 ): Promise<Record<string, MaskVolume[]>> {
   const args = ['compose', ...(projectName ? ['--project-name', projectName] : []), '--profile', '*', '--project-directory', project.root, '--file', project.composePath, 'config', '--format', 'json'];
-  let stdout: string;
-  try {
-    ({ stdout } = await execFileAsync(dockerBin, args, { env, maxBuffer: 64 * 1024 * 1024 }));
-  } catch (error) {
-    const stderr = (error as { stderr?: unknown }).stderr;
-    throw new SandboxError('compose 설정을 읽지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다', redact(typeof stderr === 'string' && stderr.trim() ? stderr : 'docker 실행 실패'));
+  // 실행은 Rust(run_command)가 한다. 던지지 않고 결과를 주므로 비0 종료·spawn 실패·출력 상한 초과를 여기서 같은 오류로 바꾼다
+  const result = await runCommand(dockerBin, args, { env });
+  if (result.exitCode !== 0) {
+    throw new SandboxError('compose 설정을 읽지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다', redact(result.stderr.trim() ? result.stderr : 'docker 실행 실패'));
   }
+  const stdout = result.stdout;
   let config: ComposeMountConfig;
   try {
     const parsed = JSON.parse(stdout) as Partial<ComposeMountConfig>;

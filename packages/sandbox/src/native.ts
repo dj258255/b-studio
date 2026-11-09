@@ -112,6 +112,17 @@ interface NativeGuard {
     cwd: string | undefined | null,
     signal: AbortSignal | undefined | null,
   ) => AsyncIterableIterator<string>;
+  // ── I/O 조율: git-mask의 파일 시스템 I/O(2단계 2c-6). 판정은 위의 planGitMask 등이 하고 여기는 사실을 읽고 가림 자리를 준비한다.
+  // realPath는 링크를 풀고 못 풀면 path.resolve와 같다. prepareStateMasks는 던지지 않고 failure로 돌려준다
+  realPath(target: string, cwd: string): Promise<string>;
+  detectGitEntries(projectRoot: string, mountSources: string[], cwd: string): Promise<NativeGitEntry[]>;
+  prepareStateMasks(entries: NativeGitEntry[]): Promise<{ entries: NativeGitEntry[]; failure?: { state: string; detail: string } | null }>;
+}
+
+export interface NativeGitEntry {
+  dir: string;
+  kind: 'directory' | 'file';
+  hasState: boolean;
 }
 
 export interface NativeSyncObservations {

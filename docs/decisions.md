@@ -9233,3 +9233,12 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - Rust는 raw 줄만 흘린다: `parseLogLine`(시각 분리, 이미 Rust 동기 호출)·`redact`(가림)·`Date` 변환은 TS가 그대로 한다. stdout만 읽고 stderr는 버린다(옛 `stdio: ['ignore', 'pipe', 'ignore']`).
 - 검증: cargo 6개(`log_stream`: 순서 당기기+종료, stderr 버림, cancel kill, 소비자 drop kill, cwd+env, spawn 실패 빈 스트림). vitest 7개(`run-command-log-stream.test.ts`: 전체 TS→napi(async_iterator)→Rust, 순서·stderr·env·**break kill**·**signal kill**·spawn 실패·**백프레셔 400줄 느린 소비**). `pnpm typecheck`(6개)·studio lint·`@b-studio/spec` 140 통과. compose-provider에서 `spawn` 호출 0.
 - 하지 않은 것: 실제 `docker compose logs`의 줄 역류는 로컬에서 안 돌렸다(호스트 sh로 같은 경로를 확인). 운영 로그 스트리밍은 CI 통합이 본다. 공유 colima의 docker churn으로 전체 sandbox 직렬 실행은 docker 통합 timeout flaky라(2c-1·2c-2·2c-3a와 같은 목록, 단독 통과) 전용 docker CI를 판정 기준으로 삼는다. kubernetes-provider의 `logs()`는 실험 경로(지원 범위 밖, ADR-166)라 자체 구현을 그대로 두고 타입 검사로만 확인했다. PTY(2c-4)·deploy 나머지 실행(2c-5)은 다음. 자원 절감은 4단계에서 잰다.
+
+### 덧붙임: 2c-6 결과 — git-mask 파일 I/O, 그리고 relayChanges에는 옮길 파일 I/O가 없었다 (2026-11-09)
+
+- **전제 정정.** 슬라이스 이름의 `relayChanges`는 호스트 파일을 복사·동기화하지 않는다. 판정(`bindMounts`·`planRelay`)은 2b-2b에서 Rust로 갔고, 실행은 `docker compose exec`로 컨테이너 안의 `RELAY_SCRIPT`(sh)를 도는 것뿐인데 그 호출은 `#compose` → `#docker` → 2c-2의 `run_command`다. 나머지(`compose config` 결과를 세션 동안 한 번만 읽어 캐시하고 서비스별로 순서대로 부르는 반복)는 호출 조율이지 syscall이 아니라 TS에 둔다. 새로 옮길 I/O가 없다.
+- 옮긴 것: `git-mask.ts`의 호스트 파일 I/O 전부. `bstudio-io::git_mask_fs`에 `real_path`(링크 풀기, 못 풀면 `path.resolve`), `detect_git_entries`(`.git`을 위로 올라가며 `lstat`로 찾기), `is_bstudio_repository`, `prepare_empty_directory`, `prepare_state_masks`. napi는 `realPath`·`detectGitEntries`·`prepareStateMasks`(AsyncBlock). `loadGitMask`의 `execFile`은 `runCommand`로 바꿨다(비0 종료·spawn 실패·상한 초과가 모두 같은 `SandboxError`).
+- **지우는 코드(`prepare_empty_directory`).** 옛 TS와 같은 규칙을 Rust 테스트로 고정했다: 그 자리가 링크·파일이면 그 항목 하나만 `remove_file`(링크를 따라가지 않는다), 폴더면 그대로 두고, 내용이 있으면 지우지 않고 멈춘다. 재귀 삭제가 없다. 동시 24회 호출이 모두 성공한다(`create_dir_all`이 동시 생성을 오류로 보지 않는다). 변이(링크·파일 지우기를 끔)로 두 시험이 실패함을 확인했다.
+- 판정 쪽(`planGitMask` 등)은 그대로 TS→napi 동기 호출이고, 호출 순서(실제 경로 → 항목 찾기 → 상태 폴더 준비 → 계획)도 같다. 준비 실패는 던지지 않고 `failure` 값으로 돌려 TS가 같은 `SandboxError`(플랫폼 실패 표시)로 바꾼다.
+- 옛 동작과 다른 것: `read_dir` 순서는 운영체제가 정하므로 "비어 있지 않습니다" 문구의 항목 이름을 정렬해 보인다. io 오류 문구(`EEXIST: ...` 등)는 Rust의 것으로 바뀐다(소비자는 `detail`을 사람에게만 보인다).
+- 남긴 것: `evaluation-assets.ts`의 복사본 준비·`removeEvaluationAssets`(별도 조각), `snapshots`·`sync` 등 `execFileAsync` 나머지, 판정 함수의 동기 napi 호출. 자원 절감은 4단계에서 잰다.
