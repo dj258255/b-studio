@@ -61,6 +61,24 @@ describe('HostPty (Rust 경계, 양방향 PTY)', () => {
     expect(typeof code).toBe('number');
   });
 
+  it('없는 cwd는 생성에서 던진다 (fail-closed)', () => {
+    // portable-pty는 없는 cwd를 조용히 부모 디렉터리에서 띄우므로 Rust가 사전에 막는다(세션 작업 복사본 계약).
+    expect(
+      () =>
+        new native.HostPty(
+          'sh',
+          ['-c', 'echo hi'],
+          'xterm-256color',
+          24,
+          80,
+          '/no/such/directory/xyz-does-not-exist',
+          PATH_ENV,
+          () => {},
+          () => {},
+        ),
+    ).toThrow();
+  });
+
   it('없는 바이너리는 생성에서 던진다', () => {
     expect(
       () =>

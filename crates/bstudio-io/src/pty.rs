@@ -7,7 +7,7 @@
 //!
 //! napi를 모른다 — `on_data`·`on_exit`는 추상 콜백이고, napi 층이 `ThreadsafeFunction`을 감싼다(2c-3a와 같은 방식).
 
-use std::io::{Error, Read, Write};
+use std::io::{Error, ErrorKind, Read, Write};
 use std::sync::{Arc, Mutex};
 
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
@@ -67,6 +67,13 @@ pub fn open_host_pty(
     on_data: OnData,
     on_exit: OnExit,
 ) -> std::io::Result<HostPty> {
+    // cwd가 실제 디렉터리가 아니면 거절한다(fail-closed). portable-pty도 node-pty도(둘 다 실측) 없는 cwd를 조용히 무시하고
+    // 부모 프로세스의 디렉터리에서 자식을 띄우는데, 그러면 "세션의 작업 복사본에서 연다"는 계약이 깨진다.
+    // metadata는 링크를 따라가므로(stat) cwd가 링크면 그 대상이 디렉터리인지 본다.
+    if !std::fs::metadata(cwd).map(|meta| meta.is_dir()).unwrap_or(false) {
+        return Err(Error::new(ErrorKind::NotFound, format!("작업 폴더가 없거나 폴더가 아닙니다: {cwd}")));
+    }
+
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
@@ -237,5 +244,23 @@ mod tests {
         let pty = open_host_pty("sh", &args(&["-c", "sleep 30"]), "xterm-256color", 24, 80, "/", &env_with_path(&[]), on_data, on_exit).unwrap();
         pty.kill().expect("kill이 되어야 한다");
         rx.recv_timeout(Duration::from_secs(5)).expect("kill 뒤 종료해야 한다");
+    }
+
+    #[test]
+    fn missing_cwd_is_rejected() {
+        // 없는 cwd면 생성이 실패해야 한다(fail-closed). portable-pty는 조용히 부모 디렉터리에서 띄우므로 사전에 막는다.
+        let (on_data, on_exit, _data, _rx) = sinks();
+        let result = open_host_pty(
+            "sh",
+            &args(&["-c", "echo hi"]),
+            "xterm-256color",
+            24,
+            80,
+            "/no/such/directory/xyz-does-not-exist",
+            &env_with_path(&[]),
+            on_data,
+            on_exit,
+        );
+        assert!(result.is_err(), "없는 cwd는 거절해야 한다");
     }
 }
