@@ -1158,3 +1158,118 @@ pub fn discover_tests_in_file(file_path: String, content: String) -> Option<Stri
 pub fn flatten_discovered_file(file_json: String) -> Result<String> {
     fail(test_discovery::flatten_discovered_file(&file_json))
 }
+
+// ── 커밋 메시지 만들기·PR 리뷰의 순수 판정(ADR-191 3g). TS 껍데기: packages/agent/src/commit-message.ts, pr-review.ts
+// 지적·입력 객체는 encodeNative한 JSON 문자열로 받는다. 결과 객체는 JSON 문자열이다(옛 TS의 JSON.stringify와 같은 글자)
+
+use bstudio_guard::{commit_message, pr_review};
+
+fn commit_changes<'a>(files: &'a [String], kinds: &'a [String]) -> Vec<commit_message::Change<'a>> {
+    files.iter().zip(kinds).map(|(file, change)| commit_message::Change { file, change }).collect()
+}
+
+#[napi]
+pub fn classify_commit(request: String, files: Vec<String>, kinds: Vec<String>) -> String {
+    commit_message::classify_commit(&request, &commit_changes(&files, &kinds)).to_owned()
+}
+
+#[napi]
+pub fn generate_commit_subject(request: String, files: Vec<String>, kinds: Vec<String>, agent_summary: Option<String>, request_is_answer: bool) -> String {
+    commit_message::generate_commit_subject(&request, &commit_changes(&files, &kinds), agent_summary.as_deref(), request_is_answer)
+}
+
+#[napi]
+pub fn summarize_commit_text(text: String, max_chars: f64) -> String {
+    commit_message::summarize(&text, max_chars)
+}
+
+#[napi]
+pub fn to_commit_mood(text: String) -> String {
+    commit_message::to_commit_mood(&text)
+}
+
+#[napi]
+pub fn pr_review_fix_marker() -> String {
+    pr_review::FIX_MARKER.to_owned()
+}
+
+#[napi]
+pub fn is_blocking_severity(severity: String) -> bool {
+    pr_review::is_blocking_severity(&severity)
+}
+
+#[napi]
+pub fn has_blocking_findings(severities: Vec<String>) -> bool {
+    pr_review::has_blocking_findings(&severities)
+}
+
+/// `[blocker, major, minor, nit]`
+#[napi]
+pub fn pr_review_severity_counts(severities: Vec<String>) -> Vec<u32> {
+    pr_review::severity_counts(&severities).to_vec()
+}
+
+#[napi]
+pub fn next_pr_review_step(severities: Vec<String>, round: f64, max_rounds: f64) -> String {
+    pr_review::next_pr_review_step(&severities, round, max_rounds).to_owned()
+}
+
+/// `{ diff, truncated, omittedFiles }` JSON. 상한이 정수가 아니면 던진다(구분이 없는 diff를 자를 때만)
+#[napi]
+pub fn truncate_diff(diff: String, max_chars: f64) -> Result<String> {
+    Ok(fail(pr_review::truncate_diff(&diff, max_chars))?.to_json())
+}
+
+#[napi]
+pub fn diff_file_paths(diff: String) -> Vec<String> {
+    pr_review::diff_file_paths(&diff)
+}
+
+#[napi]
+pub fn extract_diff_referenced_names(diff: String) -> Vec<String> {
+    pr_review::extract_diff_referenced_names(&diff)
+}
+
+#[napi]
+pub fn build_pr_review_external_context(paths: Vec<String>, excerpts: Vec<String>, max_chars: f64) -> String {
+    pr_review::build_pr_review_external_context(&paths, &excerpts, max_chars)
+}
+
+#[napi]
+pub fn build_pr_review_user_prompt(input_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_user_prompt(&input(&input_json, "리뷰 요청")?))
+}
+
+#[napi]
+pub fn pr_review_marker(round: f64) -> String {
+    pr_review::pr_review_marker(round)
+}
+
+#[napi]
+pub fn build_pr_review_comment(input_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_comment(&input(&input_json, "리뷰 코멘트 입력")?))
+}
+
+#[napi]
+pub fn build_pr_review_resolved_context(resolved_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_resolved_context(&input(&resolved_json, "닫은 지적 목록")?))
+}
+
+/// `{ finding, reason? }` JSON
+#[napi]
+pub fn build_review_resolution_comment(input_json: String) -> Result<String> {
+    let value = input(&input_json, "닫은 지적")?;
+    let finding = value.prop("finding").ok_or_else(|| Error::from_reason("finding이 없습니다"))?;
+    fail(pr_review::build_review_resolution_comment(finding, value.prop("reason")))
+}
+
+#[napi]
+pub fn build_pr_review_fix_request(findings_json: String) -> Result<String> {
+    fail(pr_review::build_pr_review_fix_request(&input(&findings_json, "지적 목록")?))
+}
+
+/// 고침 요청이 아니거나 제목이 없으면 null
+#[napi]
+pub fn extract_pr_review_fix_titles(request: String) -> Option<Vec<String>> {
+    pr_review::extract_pr_review_fix_titles(&request)
+}
