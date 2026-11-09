@@ -112,6 +112,11 @@ interface NativeGuard {
     cwd: string | undefined | null,
     signal: AbortSignal | undefined | null,
   ) => AsyncIterableIterator<string>;
+  // ── I/O 조율: git-mask의 파일 시스템 I/O(2단계 2c-6). 판정은 위의 planGitMask 등이 하고 여기는 사실을 읽고 가림 자리를 준비한다.
+  // realPath는 링크를 풀고 못 풀면 path.resolve와 같다. prepareStateMasks는 던지지 않고 failure로 돌려준다
+  realPath(target: string, cwd: string): Promise<string>;
+  detectGitEntries(projectRoot: string, mountSources: string[], cwd: string): Promise<NativeGitEntry[]>;
+  prepareStateMasks(entries: NativeGitEntry[]): Promise<{ entries: NativeGitEntry[]; failure?: { state: string; detail: string } | null }>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -168,6 +173,12 @@ export interface NativeExecSession {
   write(data: Buffer): boolean;
   end(): void;
   terminate(): void;
+}
+
+export interface NativeGitEntry {
+  dir: string;
+  kind: 'directory' | 'file';
+  hasState: boolean;
 }
 
 export interface NativeSyncObservations {

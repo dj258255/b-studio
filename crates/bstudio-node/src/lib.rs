@@ -813,6 +813,63 @@ impl AsyncGenerator for LogStream {
     }
 }
 
+// ── git-mask의 파일 시스템 I/O(2c-6). 판정은 bstudio-guard, syscall은 bstudio-io::git_mask_fs ──
+
+/// TS `GitEntry`와 같은 모양
+#[napi(object)]
+pub struct GitEntryJs {
+    pub dir: String,
+    pub kind: String,
+    pub has_state: bool,
+}
+
+impl From<bstudio_io::git_mask_fs::GitEntry> for GitEntryJs {
+    fn from(entry: bstudio_io::git_mask_fs::GitEntry) -> Self {
+        Self { dir: entry.dir, kind: entry.kind, has_state: entry.has_state }
+    }
+}
+
+/// 상태 폴더 준비가 실패한 자리. 던지지 않고 값으로 돌려 TS가 `SandboxError`로 바꾼다
+#[napi(object)]
+pub struct MaskFailureJs {
+    pub state: String,
+    pub detail: String,
+}
+
+#[napi(object)]
+pub struct PreparedMasks {
+    pub entries: Vec<GitEntryJs>,
+    pub failure: Option<MaskFailureJs>,
+}
+
+/// 링크를 푼 실제 경로. 풀지 못하면 `path.resolve`와 같이 `cwd` 기준 절대 경로
+#[napi]
+pub fn real_path(env: Env, target: String, cwd: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(bstudio_io::git_mask_fs::real_path(&target, &cwd).await) }).build(&env)
+}
+
+/// 프로젝트 폴더에서 위로 올라가며 `.git`이 든 폴더를 찾는다
+#[napi]
+pub fn detect_git_entries(env: Env, project_root: String, mount_sources: Vec<String>, cwd: String) -> Result<AsyncBlock<Vec<GitEntryJs>>> {
+    AsyncBlockBuilder::new(async move {
+        let entries = bstudio_io::git_mask_fs::detect_git_entries(&project_root, &mount_sources, &cwd).await;
+        Ok(entries.into_iter().map(GitEntryJs::from).collect())
+    })
+    .build(&env)
+}
+
+/// b-studio 저장소의 상태 폴더와 그 위에 얹을 빈 폴더를 미리 만든다. 실패하면 거기서 멈추고 `failure`를 채운다
+#[napi]
+pub fn prepare_state_masks(env: Env, entries: Vec<GitEntryJs>) -> Result<AsyncBlock<PreparedMasks>> {
+    AsyncBlockBuilder::new(async move {
+        let mut inner: Vec<bstudio_io::git_mask_fs::GitEntry> =
+            entries.into_iter().map(|e| bstudio_io::git_mask_fs::GitEntry { dir: e.dir, kind: e.kind, has_state: e.has_state }).collect();
+        let failure = bstudio_io::git_mask_fs::prepare_state_masks(&mut inner).await.err().map(|f| MaskFailureJs { state: f.state, detail: f.detail });
+        Ok(PreparedMasks { entries: inner.into_iter().map(GitEntryJs::from).collect(), failure })
+    })
+    .build(&env)
+}
+
 // === 호스트 PTY(ADR-193, 2c-4a): node-pty를 portable-pty로 대체한다 ===
 // 양방향이다: write/resize/kill은 동기 메서드, 출력(on_data)·종료(on_exit)는 ThreadsafeFunction으로 역류한다(2c-3a 밀어내기 경계 재사용).
 // PTY는 blocking I/O라 bstudio-io가 std::thread로 격리한다 — 여기선 TSFN을 감싼 콜백만 주입한다.

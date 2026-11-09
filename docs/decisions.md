@@ -9260,3 +9260,12 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 옛 동작과 다른 것: (1) `fetch`가 해 주던 경로 정규화 중 **`..` 해석은 하지 않는다**. 공백·제어·비ASCII 등은 퍼센트 인코딩하고 `#` 뒤는 버려 요청 줄에 개행이 끼어들 수 없다(시험). 호스트가 고정이라 요청이 다른 곳으로 나가지 않는다. (2) 실패 문구가 Node의 "fetch failed" 대신 Rust가 만든 문장이다(마지막 결과 표시에만 쓰인다). (3) 잠금의 pid 확인이 Windows에서는 "살아 있음"으로 처리된다(잠금을 가로채지 않는 쪽으로 틀린다; Windows는 지원 범위 밖).
 - 검증: cargo 12개(`deploy_io`: 빈 포트 재바인드, 잠금 잡기·보유 pid·풀기, 죽은 소유자 넘겨받기, 읽을 수 없는 내용(빈 값·글자·0·음수) 넘겨받기, 부모 폴더 생성과 폴더가 파일일 때 오류, 읽기 None, 쓰기, 원자적 쓰기가 임시 파일을 남기지 않음·실패 시 정리, GET 상태·리다이렉트 비추종, 경로 인코딩, 비HTTP·닫힌 포트·멈춘 서버). 소유자 생존 확인을 끈 변이는 잠금 시험이 실패하는 것으로 확인했다. vitest 14개(`deploy-io.test.ts`: TS→napi→Rust 전체 경로, 임시 폴더와 127.0.0.1 임시 포트만 사용). `deploy.test.ts` 포함 deploy 시험 통과.
 - 하지 않은 것: 실제 docker 배포 종단(CI deploy-gate가 본다). 서로 다른 프로세스가 동시에 잠금을 다투는 시험(한 프로세스의 pid만 시험). 전체 sandbox 직렬 실행은 공유 colima 부하로 docker 통합 시험이 시간 초과를 내(단독 통과, 2c-1~3b와 같은 목록) 전용 CI를 기준으로 삼는다. 자원 절감은 4단계에서 잰다.
+
+### 덧붙임: 2c-6 결과 — git-mask 파일 I/O, 그리고 relayChanges에는 옮길 파일 I/O가 없었다 (2026-11-09, [#1057](https://github.com/dj258255/b-studio/issues/1057))
+
+- **전제 정정.** 슬라이스 이름의 `relayChanges`는 호스트 파일을 복사·동기화하지 않는다. 판정(`bindMounts`·`planRelay`)은 2b-2b에서 Rust로 갔고, 실행은 `docker compose exec`로 컨테이너 안의 `RELAY_SCRIPT`(sh)를 도는 것뿐인데 그 호출은 `#compose` → `#docker` → 2c-2의 `run_command`다. 나머지(`compose config` 결과를 세션 동안 한 번만 읽어 캐시하고 서비스별로 순서대로 부르는 반복)는 호출 조율이지 syscall이 아니라 TS에 둔다. 새로 옮길 I/O가 없다.
+- 옮긴 것: `git-mask.ts`의 호스트 파일 I/O 전부. `bstudio-io::git_mask_fs`에 `real_path`(링크 풀기, 못 풀면 `path.resolve`), `detect_git_entries`(`.git`을 위로 올라가며 `lstat`로 찾기), `is_bstudio_repository`, `prepare_empty_directory`, `prepare_state_masks`. napi는 `realPath`·`detectGitEntries`·`prepareStateMasks`(AsyncBlock). `loadGitMask`의 `execFile`은 `runCommand`로 바꿨다(비0 종료·spawn 실패·상한 초과가 모두 같은 `SandboxError`).
+- **지우는 코드(`prepare_empty_directory`).** 옛 TS와 같은 규칙을 Rust 테스트로 고정했다: 그 자리가 링크·파일이면 그 항목 하나만 `remove_file`(링크를 따라가지 않는다), 폴더면 그대로 두고, 내용이 있으면 지우지 않고 멈춘다. 재귀 삭제가 없다. 동시 24회 호출이 모두 성공한다(`create_dir_all`이 동시 생성을 오류로 보지 않는다). 변이(링크·파일 지우기를 끔)로 두 시험이 실패함을 확인했다.
+- 판정 쪽(`planGitMask` 등)은 그대로 TS→napi 동기 호출이고, 호출 순서(실제 경로 → 항목 찾기 → 상태 폴더 준비 → 계획)도 같다. 준비 실패는 던지지 않고 `failure` 값으로 돌려 TS가 같은 `SandboxError`(플랫폼 실패 표시)로 바꾼다.
+- 옛 동작과 다른 것: `read_dir` 순서는 운영체제가 정하므로 "비어 있지 않습니다" 문구의 항목 이름을 정렬해 보인다. io 오류 문구(`EEXIST: ...` 등)는 Rust의 것으로 바뀐다(소비자는 `detail`을 사람에게만 보인다).
+- 남긴 것: `evaluation-assets.ts`의 복사본 준비·`removeEvaluationAssets`(별도 조각), `snapshots`·`sync` 등 `execFileAsync` 나머지, 판정 함수의 동기 napi 호출. 자원 절감은 4단계에서 잰다.

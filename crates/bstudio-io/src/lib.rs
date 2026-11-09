@@ -6,6 +6,7 @@
 
 pub mod deploy_io;
 pub mod exec_stream;
+pub mod git_mask_fs;
 pub mod log_stream;
 pub mod process;
 pub mod pty;
