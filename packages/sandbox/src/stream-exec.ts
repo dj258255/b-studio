@@ -67,3 +67,35 @@ export function runCommandLogStream(
 ): AsyncIterableIterator<string> {
   return new native.LogStream(bin, args, definedEnv(env), cwd ?? null, signal);
 }
+
+/** 양방향 exec 세션 하나(2c-4b). 출력은 바이트 그대로, 종료는 마지막 출력 뒤에 한 번 온다 */
+export interface ExecSession {
+  /** stdin에 쓴다. 닫힌 뒤의 쓰기는 조용히 버리고 false */
+  write(data: Buffer | string): boolean;
+  /** stdin을 닫는다(EOF) */
+  end(): void;
+  /** SIGTERM을 보낸다 */
+  terminate(): void;
+}
+
+/**
+ * `bin args`를 띄워 stdin·stdout·stderr를 양방향으로 잇는다(2c-4b). agent-terminal의 `docker exec -i`가 쓴다.
+ * `onData`는 stdout·stderr의 바이트가 오는 대로, `onExit`는 두 출력이 끝난 뒤 한 번(종료 코드, 시그널로 죽었으면 null) 불린다.
+ * 띄우기 실패는 던지지 않고 `onExit(-2)`로 온다(Node `close`의 ENOENT와 같다).
+ * 콜백은 ThreadsafeFunction이라 호출한 틱이 끝난 뒤에야 온다 — 같은 틱에서 콜백을 붙이는 쪽은 사건을 놓치지 않는다.
+ */
+export function openExecSession(
+  bin: string,
+  args: string[],
+  { env, cwd, onData, onExit }: { env?: NodeJS.ProcessEnv; cwd?: string; onData: (chunk: Buffer) => void; onExit: (code: number | null) => void },
+): ExecSession {
+  const session = new native.ExecSession(bin, args, definedEnv(env), cwd ?? null, (event) => {
+    if (event.exited) onExit(event.code ?? null);
+    else if (event.data) onData(event.data);
+  });
+  return {
+    write: (data) => session.write(typeof data === 'string' ? Buffer.from(data, 'utf8') : data),
+    end: () => session.end(),
+    terminate: () => session.terminate(),
+  };
+}

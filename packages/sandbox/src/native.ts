@@ -126,6 +126,16 @@ interface NativeGuard {
     onData: (data: Buffer) => void,
     onExit: (code: number) => void,
   ) => NativeHostPty;
+  // ── I/O 조율: 양방향 exec 세션(2단계 2c-4b). agent-terminal의 `docker exec -i`가 쓴다. 출력·종료는 하나의 onEvent로
+  // 순서대로 밀려 온다(data: stdout·stderr 바이트. exited면 code가 종료 코드이고 시그널로 죽었으면 null/undefined).
+  // 띄우기 실패는 exited, code -2. write·end·terminate는 동기다. 닫힌 뒤의 write는 버리고 false
+  ExecSession: new (
+    bin: string,
+    args: string[],
+    env: Record<string, string> | undefined | null,
+    cwd: string | undefined | null,
+    onEvent: (event: NativeExecEvent) => void,
+  ) => NativeExecSession;
 }
 
 export interface NativeHostPty {
@@ -134,6 +144,18 @@ export interface NativeHostPty {
   write(data: Buffer): void;
   resize(cols: number, rows: number): void;
   kill(): void;
+}
+
+export interface NativeExecEvent {
+  data?: Buffer | null;
+  exited: boolean;
+  code?: number | null;
+}
+
+export interface NativeExecSession {
+  write(data: Buffer): boolean;
+  end(): void;
+  terminate(): void;
 }
 
 export interface NativeSyncObservations {
