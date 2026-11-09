@@ -269,6 +269,12 @@ interface NativeGuard {
   nextCliTier(tier: string): string | null | undefined;
   higherCliTier(a: string | null | undefined, b: string): string;
   routeCliTier(prompt: string, intent: string, stickyTier?: string | null): string;
+  // ── agent: 서비스 소유 판정·CLI 실패 설명(3단계 3l). servicesForFiles는 서비스·파일을 입력 배열의 위치로 돌려준다(JSON `{services:number[],unmatched:number[]}`). 모양이 어긋난 입력은 던진다
+  servicesForFiles(inputJson: string): string;
+  ownsFile(path: string, includes: string[], file: string): boolean;
+  isComposeFile(root: string, composePath: string, cwd: string, file: string): boolean;
+  describeCliText(raw: string): string;
+  cliFailureReason(summary: string, detail: string): string;
 }
 
 export interface NativeHostPty {

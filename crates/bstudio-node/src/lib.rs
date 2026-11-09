@@ -1792,3 +1792,30 @@ pub fn higher_cli_tier(a: Option<String>, b: String) -> String {
 pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String>) -> Result<String> {
     fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
 }
+
+use bstudio_guard::{cli_failure, services};
+
+#[napi]
+pub fn services_for_files(input_json: String) -> Result<String> {
+    fail(services::services_for_files_json(&input_json))
+}
+
+#[napi]
+pub fn owns_file(path: String, includes: Vec<String>, file: String) -> bool {
+    services::owns_file(&path, &includes, &file)
+}
+
+#[napi]
+pub fn is_compose_file(root: String, compose_path: String, cwd: String, file: String) -> bool {
+    services::is_compose_file(&root, &compose_path, &cwd, &file)
+}
+
+#[napi]
+pub fn describe_cli_text(raw: String) -> String {
+    cli_failure::describe_cli_text(&raw)
+}
+
+#[napi]
+pub fn cli_failure_reason(summary: String, detail: String) -> String {
+    cli_failure::failure_reason(&summary, &detail)
+}

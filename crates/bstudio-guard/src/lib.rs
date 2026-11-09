@@ -4,6 +4,7 @@
 //! 거부 목록에서 더 넓게 막는 쪽으로만 다르다.
 
 pub mod check_evidence;
+pub mod cli_failure;
 pub mod cli_router;
 pub mod compose_override;
 pub mod container_policy;
@@ -30,6 +31,7 @@ pub mod relay;
 pub mod requirement_issues;
 pub mod review_input;
 pub mod secrets;
+pub mod services;
 pub mod snapshots;
 pub mod stray_processes;
 pub mod test_discovery;
