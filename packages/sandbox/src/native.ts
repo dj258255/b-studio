@@ -157,6 +157,17 @@ interface NativeGuard {
   writeTextFileAtomic(path: string, content: string): Promise<void>;
   // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
   probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
+  // ── agent: test-discovery(3단계 3a). 결과 객체는 JSON 문자열(옛 TS의 JSON.stringify와 같은 글자). 모양이 어긋난 평탄화 입력은 던진다.
+  // framework가 undefined·null이면 내용으로 짐작한다
+  extractRequirementIds(text: string): string[];
+  extractRequirementIdsWithSuites(suitePath: string[] | undefined | null, title: string): string[];
+  discoverJunitFile(filePath: string, content: string): string;
+  detectJsFramework(content: string): string;
+  discoverJsFile(filePath: string, content: string, framework: string | undefined | null): string;
+  discoverPytestFile(filePath: string, content: string): string;
+  isTestFilePath(filePath: string): boolean;
+  discoverTestsInFile(filePath: string, content: string): string | null | undefined;
+  flattenDiscoveredFile(fileJson: string): string;
   // ── agent: requirement-issues(3단계 3c). 객체는 JSON 문자열(encodeNative·decodeNative). 모양이 어긋난 입력은 던진다
   reqIssueLabel(): string;
   reqIssueContentHash(text: string): string;

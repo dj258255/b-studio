@@ -22,4 +22,5 @@ pub mod requirement_issues;
 pub mod secrets;
 pub mod snapshots;
 pub mod stray_processes;
+pub mod test_discovery;
 pub mod usage;
