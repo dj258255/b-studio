@@ -9269,3 +9269,12 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 판정 쪽(`planGitMask` 등)은 그대로 TS→napi 동기 호출이고, 호출 순서(실제 경로 → 항목 찾기 → 상태 폴더 준비 → 계획)도 같다. 준비 실패는 던지지 않고 `failure` 값으로 돌려 TS가 같은 `SandboxError`(플랫폼 실패 표시)로 바꾼다.
 - 옛 동작과 다른 것: `read_dir` 순서는 운영체제가 정하므로 "비어 있지 않습니다" 문구의 항목 이름을 정렬해 보인다. io 오류 문구(`EEXIST: ...` 등)는 Rust의 것으로 바뀐다(소비자는 `detail`을 사람에게만 보인다).
 - 남긴 것: `evaluation-assets.ts`의 복사본 준비·`removeEvaluationAssets`(별도 조각), `snapshots`·`sync` 등 `execFileAsync` 나머지, 판정 함수의 동기 napi 호출. 자원 절감은 4단계에서 잰다.
+
+### 덧붙임: 2c-1b 결과 — 평가 자산 복사본의 링크 안전 자리 준비·지우기 (2026-11-09, [#1059](https://github.com/dj258255/b-studio/issues/1059))
+
+- 옮긴 것: `evaluation-assets.ts`의 `prepareSlot`(복사본 자리 준비)과 샌드박스 복사본 폴더 지우기(`removeEvaluationAssets`)의 호스트 파일 I/O. `bstudio-io::safe_fs`에 `prepare_slot`(`SlotKind` File/Directory)·`truncate_regular_file`·`remove_sandbox_dir`·`remove_tree`·`check_single_name`과 각 `*_async`(spawn_blocking) 래퍼. napi는 `prepareEvaluationAssetSlot`·`removeSandboxDirectory`(async). 어떤 자산을 어디에 두는지의 조율은 TS에 남겼다.
+- **TOCTOU를 좁혔다.** 파일 자리는 `create_new`로 먼저 만들어 선점하고, 이미 있으면 `O_NOFOLLOW`로 연 뒤 `fstat`로 regular file인지 확인하고서야 `set_len(0)`으로 비운다(열기와 확인 사이에 링크로 바뀌어도 따라가지 않는다). 이름 검사(`check_single_name`)는 빈 값·`.`·`..`·슬래시·역슬래시·NUL을 fail-closed로 막는다.
+- **지우는 코드(`remove_sandbox_dir`/`remove_tree`).** 각 항목을 `symlink_metadata`로 보고 **실제 디렉터리만** 재귀한다 — 링크면 링크만 지우고 따라가지 않는다. 파일 자리에 내용이 든 디렉터리가 있으면 재귀로 지우지 않고 멈춘다. 옛 TS는 "통째로 지우고 다시 만들기"라 링크 너머의 폴더를 지울 수 있었는데, 이 슬라이스에서 링크 안전·비재귀로 고쳤다(AGENTS.md "지우는 코드" 규칙). 변이(링크 비추종·재귀 금지를 끔)로 시험이 실패함을 확인했다.
+- 옛 동작과 다른 것: 삭제가 링크 너머를 지우지 않고, 파일 자리의 비어 있지 않은 디렉터리에서 멈춘다(전에는 재귀 삭제). io 오류 문구는 Rust의 것으로 바뀐다. 준비 단계는 여러 번·동시에 불려도 같은 결과다(`create_dir_all`·`create_new`).
+- 검증: cargo 9개(`safe_fs`: 자리 준비, `O_NOFOLLOW`+fstat로 링크 비추종, 재귀 금지·비어 있지 않으면 멈춤, 이름 검사 fail-closed, 동시 호출). vitest 7개(`link-safe-fs.test.ts`: TS→napi→Rust 전체 경로, 임시 폴더만 사용). `pnpm typecheck`(6개)·studio lint 통과. `evaluation-assets.ts`에서 직접 파일 I/O 제거.
+- 하지 않은 것: 실제 평가 실행 종단은 돌리지 않았다(임시 폴더로 같은 경로를 확인). 실험 경로(kubernetes-provider 등)는 타입 검사로만(지원 범위 밖, ADR-166). `snapshots`·`sync`의 `execFileAsync` 나머지는 이 슬라이스 밖(남김). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림). 자원 절감은 4단계에서 잰다.

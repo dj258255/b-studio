@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, readdir, realpath, rm, writeFile } from 'node:fs/p
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { SandboxError } from '../errors';
+import { native } from '../native';
 import type { EvaluationAssetContent } from '../types';
 
 /**
@@ -128,10 +129,8 @@ export async function syncEvaluationAssetCopies(
 
 /** 한 샌드박스의 복사본 폴더를 지운다. 그 폴더 자체가 링크면 링크만 지우고 너머는 건드리지 않는다 */
 export async function removeEvaluationAssets(root: string, sandboxId: string): Promise<void> {
-  const dir = evaluationAssetSandboxDir(root, sandboxId);
-  const info = await lstat(dir).catch(() => undefined);
-  if (!info) return;
-  await rm(dir, { recursive: info.isDirectory(), force: true });
+  // 판정과 syscall은 Rust가 한다(ADR-193, 2c-1b). 링크는 링크만 지우고 안의 링크도 따라가지 않는다
+  await native.removeSandboxDirectory(evaluationAssetSandboxDir(root, sandboxId));
 }
 
 function copyName(declaredPath: string): string {
@@ -152,20 +151,8 @@ async function assertSlotUnchanged(slot: EvaluationAssetSlot, kind: EvaluationAs
 
 async function prepareSlot(source: string, kind: 'file' | 'directory', parent: string): Promise<void> {
   if (path.dirname(source) !== parent) throw new SandboxError('평가 자산 복사본 자리가 복사본 폴더 바로 아래가 아닙니다', source);
-  const current = await lstat(source).catch(() => undefined);
-  if (kind === 'directory') {
-    // 링크·파일이면 그 항목만 지운다. 재귀 지우기는 진짜 폴더일 때만 쓴다(링크 너머를 건드리지 않게)
-    if (current && !current.isDirectory()) await rm(source, { recursive: current.isDirectory(), force: true });
-    if (!current?.isDirectory()) await mkdir(source);
-  } else {
-    if (current && !current.isFile()) await rm(source, { recursive: current.isDirectory(), force: true });
-    // 빈 파일로 시작한다. 같은 inode에 나중에 내용을 덮어쓴다
-    await writeFile(source, '');
-  }
-  const after = await lstat(source);
-  if (kind === 'directory' ? !after.isDirectory() : !after.isFile()) {
-    throw new SandboxError('평가 자산 복사본 자리를 만들지 못했습니다', source);
-  }
+  // 링크·파일이면 그 항목만 지우고, 파일 자리의 폴더는 비어 있을 때만 지운다(재귀로 지우지 않는다). 링크를 따라가며 쓰지 않는다
+  await native.prepareEvaluationAssetSlot(source, kind, parent);
 }
 
 async function checkSandboxDir(root: string, dir: string): Promise<string> {
