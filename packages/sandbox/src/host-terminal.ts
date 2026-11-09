@@ -4,6 +4,7 @@ import { chmod, lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile }
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { native } from './native';
 import {
   AGENT_HOOK_EVENTS,
   AGENT_HOOK_SCRIPT,
@@ -799,23 +800,48 @@ export function hostShellLaunch(
   return { file: '/bin/sh', args: ['-c', hostFallbackCommand(gatewayDir, kind)], env: {} };
 }
 
-/** node-pty가 주는 가상 터미널에서 이 모듈이 쓰는 부분 */
+/** 가상 터미널(portable-pty, 또는 테스트의 가짜)에서 이 모듈이 쓰는 부분 */
 export interface HostPty {
   /** 이 가상 터미널의 pid. 감시가 이 아래에서 훅 없이 뜬 CLI를 찾는 데 쓴다 */
   readonly pid: number;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
-  onData(listener: (data: string) => void): unknown;
+  // 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립한다). node-pty 시절의 string에서 Buffer로 바꿨다(2c-4a)
+  onData(listener: (data: Buffer) => void): unknown;
   onExit(listener: (event: { exitCode: number; signal?: number }) => void): unknown;
 }
 /** 가상 터미널을 띄우는 자리(테스트가 가짜를 끼운다) */
 export type SpawnHostPty = (file: string, args: string[], options: { name: string; cols: number; rows: number; cwd: string; env: Record<string, string> }) => HostPty | Promise<HostPty>;
 
-const spawnWithNodePty: SpawnHostPty = async (file, args, options) => {
-  // 네이티브 모듈은 터미널을 열 때만 읽는다. 이 컴퓨터용 터미널을 쓰지 않는 환경(서버 모드, 컨테이너 방식)에서는 읽지 않는다
-  const pty = await import('@lydell/node-pty');
-  return pty.spawn(file, args, options);
+/** Rust(portable-pty)로 가상 터미널을 연다(2c-4a, #1049). 출력·종료는 Rust 스레드에서 역류하므로 리스너 배열로 중계한다. */
+const spawnWithPortablePty: SpawnHostPty = (file, args, options) => {
+  const dataListeners: Array<(data: Buffer) => void> = [];
+  const exitListeners: Array<(event: { exitCode: number; signal?: number }) => void> = [];
+  const pty = new native.HostPty(
+    file,
+    args,
+    options.name,
+    options.cols,
+    options.rows,
+    options.cwd,
+    options.env,
+    (data) => {
+      for (const listener of dataListeners) listener(data);
+    },
+    (code) => {
+      for (const listener of exitListeners) listener({ exitCode: code });
+    },
+  );
+  return {
+    pid: pty.pid ?? 0,
+    write: (data) => pty.write(Buffer.from(data, 'utf8')),
+    resize: (cols, rows) => pty.resize(cols, rows),
+    // portable-pty의 kill은 신호를 받지 않고 자식을 끝낸다(셸과 CLI가 함께 끝나는 목적엔 충분)
+    kill: () => pty.kill(),
+    onData: (listener) => void dataListeners.push(listener),
+    onExit: (listener) => void exitListeners.push(listener),
+  };
 };
 
 /** 세션의 작업 복사본에서 가상 터미널을 열고 기본 명령(CLI)을 띄운다 */
@@ -830,7 +856,7 @@ export async function openHostTerminal({
   model,
   accountEnv = {},
   env = process.env,
-  spawnPty = spawnWithNodePty,
+  spawnPty = spawnWithPortablePty,
 }: {
   id: string;
   size: TerminalSize;
@@ -890,7 +916,7 @@ export async function openHostTerminal({
       }
     },
     onData(listener) {
-      pty.onData((data) => listener(Buffer.from(data, 'utf8')));
+      pty.onData((data) => listener(data));
     },
     onExit(listener) {
       pty.onExit(({ exitCode }) => {

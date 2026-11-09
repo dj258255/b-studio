@@ -117,6 +117,62 @@ interface NativeGuard {
   realPath(target: string, cwd: string): Promise<string>;
   detectGitEntries(projectRoot: string, mountSources: string[], cwd: string): Promise<NativeGitEntry[]>;
   prepareStateMasks(entries: NativeGitEntry[]): Promise<{ entries: NativeGitEntry[]; failure?: { state: string; detail: string } | null }>;
+  // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
+  // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
+  // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
+  HostPty: new (
+    file: string,
+    args: string[],
+    name: string,
+    cols: number,
+    rows: number,
+    cwd: string,
+    env: Record<string, string>,
+    onData: (data: Buffer) => void,
+    onExit: (code: number) => void,
+  ) => NativeHostPty;
+  // ── I/O 조율: 양방향 exec 세션(2단계 2c-4b). agent-terminal의 `docker exec -i`가 쓴다. 출력·종료는 하나의 onEvent로
+  // 순서대로 밀려 온다(data: stdout·stderr 바이트. exited면 code가 종료 코드이고 시그널로 죽었으면 null/undefined).
+  // 띄우기 실패는 exited, code -2. write·end·terminate는 동기다. 닫힌 뒤의 write는 버리고 false
+  ExecSession: new (
+    bin: string,
+    args: string[],
+    env: Record<string, string> | undefined | null,
+    cwd: string | undefined | null,
+    onEvent: (event: NativeExecEvent) => void,
+  ) => NativeExecSession;
+  // ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts가 쓴다. 모두 JS 스레드 밖(spawn_blocking)에서 돈다.
+  freePort(): Promise<number>;
+  // 잠금을 잡으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid. 그 밖의 I/O 오류는 거절한다. 죽은 프로세스의 잠금은 지우고 한 번 다시 시도한다
+  acquireDeployLock(lock: string): Promise<number>;
+  releaseDeployLock(lock: string): Promise<void>;
+  // 없거나 읽지 못하면 null
+  readTextFile(path: string): Promise<string | null>;
+  // 부모 폴더를 만들고 쓴다. atomic은 임시 파일에 쓴 뒤 rename한다
+  writeTextFile(path: string, content: string): Promise<void>;
+  writeTextFileAtomic(path: string, content: string): Promise<void>;
+  // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
+  probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
+}
+
+export interface NativeHostPty {
+  /** 자식 pid. 플랫폼이 못 주면 null */
+  readonly pid: number | null;
+  write(data: Buffer): void;
+  resize(cols: number, rows: number): void;
+  kill(): void;
+}
+
+export interface NativeExecEvent {
+  data?: Buffer | null;
+  exited: boolean;
+  code?: number | null;
+}
+
+export interface NativeExecSession {
+  write(data: Buffer): boolean;
+  end(): void;
+  terminate(): void;
 }
 
 export interface NativeGitEntry {

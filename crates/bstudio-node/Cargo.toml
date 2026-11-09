@@ -19,7 +19,7 @@ serde_json = "1"
 napi = { version = "3", default-features = false, features = ["napi4", "tokio_rt"] }
 napi-derive = "3"
 # abort되면 Notify로 작업 future를 깨워 떨어뜨린다(select!). bstudio-io와 같은 tokio를 쓴다
-tokio = { version = "1", features = ["sync", "macros"] }
+tokio = { version = "1", features = ["sync", "macros", "rt"] }
 
 [build-dependencies]
 napi-build = "2"
