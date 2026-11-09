@@ -1,5 +1,3 @@
-import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:net';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -7,6 +5,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
 import { loadComposeModel, type ComposeModel } from '../kubernetes/compose-model';
+import { native } from '../native';
 import { DEFAULT_READINESS, waitForReady } from '../readiness';
 import { Redactor } from '../secrets';
 import { runCommandStreaming } from '../stream-exec';
@@ -342,9 +341,10 @@ export class DockerDeployer {
     const context = source?.build?.context;
     if (!context) throw new DeployError(`${name}: compose에 build.context가 없어 운영 이미지를 만들 수 없습니다`);
     const dockerfile = path.join(context, this.project.deploy[name]?.dockerfile ?? 'Dockerfile');
-    const text = await readFile(dockerfile, 'utf8').catch(() => {
+    const text = await native.readTextFile(dockerfile);
+    if (text === null) {
       throw new DeployError(`${name}: 운영용 ${path.relative(this.project.root, dockerfile)}이(가) 없습니다. 템플릿의 Dockerfile을 참고해 만드세요`);
-    });
+    }
     const tag = this.#names.image(name, releaseId);
     const args = Object.entries(buildArgsFor(text, source.build, source.environment)).flatMap(([key, value]) => ['--build-arg', `${key}=${value}`]);
     log('build', `${name} 운영 이미지를 빌드합니다 (${path.relative(this.project.root, dockerfile)})`, name);
@@ -368,7 +368,7 @@ export class DockerDeployer {
   async #assignPorts(state: DeployState): Promise<Record<string, number>> {
     const ports: Record<string, number> = {};
     for (const [name] of this.project.managed) {
-      ports[name] = this.project.deploy[name]?.port ?? state.ports[name] ?? (await freePort());
+      ports[name] = this.project.deploy[name]?.port ?? state.ports[name] ?? (await native.freePort());
     }
     state.ports = ports;
     return ports;
@@ -407,13 +407,9 @@ export class DockerDeployer {
   async #verifyThroughProxy(service: string, port: number, probePath: string, expectStatus: number): Promise<void> {
     let last = '';
     for (let attempt = 0; attempt < 20; attempt++) {
-      const status = await fetch(`http://127.0.0.1:${port}${probePath}`, { redirect: 'manual', signal: AbortSignal.timeout(5_000) }).then(
-        async (response) => {
-          await response.body?.cancel();
-          return response.status;
-        },
-        (error: unknown) => describe(error),
-      );
+      // 한 번의 GET(리다이렉트 안 따름, 본문 안 읽음)은 Rust가 한다(2c-5). 반복·대기는 여기서 한다
+      const probe = await native.probeHttpStatus(port, probePath, 5_000);
+      const status = probe.status ?? probe.error ?? 'unknown';
       if (status === expectStatus) return;
       last = String(status);
       await sleep(500);
@@ -478,30 +474,19 @@ export class DockerDeployer {
 
   /** 같은 프로젝트를 두 곳에서 동시에 배포하지 않게 한다. 잠근 프로세스가 끝났으면 잠금을 넘겨받는다 */
   async #locked<T>(task: () => Promise<T>): Promise<T> {
-    await mkdir(this.#stateDir, { recursive: true });
     const lock = path.join(this.#stateDir, 'deploy.lock');
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const handle = await open(lock, 'wx');
-        await handle.writeFile(String(process.pid));
-        await handle.close();
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || attempt > 0) throw error;
-        const owner = Number(await readFile(lock, 'utf8').catch(() => ''));
-        if (Number.isInteger(owner) && owner > 0 && isAlive(owner)) throw new DeployError(`${this.project.spec.name}을(를) 다른 프로세스(${owner})가 배포하고 있습니다`);
-        await unlink(lock).catch(() => {});
-      }
-    }
+    // 잠금 파일 만들기·죽은 소유자 넘겨받기는 Rust가 한다(2c-5). 0이면 잡았고, 아니면 쥐고 있는 살아 있는 프로세스의 pid다
+    const owner = await native.acquireDeployLock(lock);
+    if (owner !== 0) throw new DeployError(`${this.project.spec.name}을(를) 다른 프로세스(${owner})가 배포하고 있습니다`);
     try {
       return await task();
     } finally {
-      await unlink(lock).catch(() => {});
+      await native.releaseDeployLock(lock);
     }
   }
 
   async #readState(): Promise<DeployState> {
-    const text = await readFile(path.join(this.#stateDir, 'state.json'), 'utf8').catch(() => undefined);
+    const text = await native.readTextFile(path.join(this.#stateDir, 'state.json'));
     if (!text) return emptyDeployState(this.project.spec.name);
     const state = JSON.parse(text) as DeployState;
     if (state.version !== 1) throw new DeployError(`배포 상태 파일의 형식을 알 수 없습니다 (version ${String(state.version)})`);
@@ -509,18 +494,12 @@ export class DockerDeployer {
   }
 
   async #writeState(state: DeployState): Promise<void> {
-    await mkdir(this.#stateDir, { recursive: true });
-    const file = path.join(this.#stateDir, 'state.json');
-    const temp = `${file}.${process.pid}.tmp`;
-    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`);
-    await rename(temp, file);
+    await native.writeTextFileAtomic(path.join(this.#stateDir, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
   }
 
   async #writeCompose(name: string, content: unknown): Promise<string> {
-    const dir = path.join(this.#stateDir, 'compose');
-    await mkdir(dir, { recursive: true });
-    const file = path.join(dir, name);
-    await writeFile(file, stringify(content));
+    const file = path.join(this.#stateDir, 'compose', name);
+    await native.writeTextFile(file, stringify(content));
     return file;
   }
 
@@ -558,26 +537,6 @@ export class DockerDeployer {
  */
 export function dockerFailureDetail(stderr: string, redact: (text: string) => string): string {
   return redact(stderr).slice(-4_000);
-}
-
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const server = createServer();
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      const address = server.address();
-      server.close(() => (typeof address === 'object' && address ? resolve(address.port) : reject(new Error('빈 포트를 찾지 못했습니다'))));
-    });
-  });
-}
-
-function isAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === 'EPERM';
-  }
 }
 
 function describe(error: unknown): string {

@@ -136,6 +136,18 @@ interface NativeGuard {
     cwd: string | undefined | null,
     onEvent: (event: NativeExecEvent) => void,
   ) => NativeExecSession;
+  // ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts가 쓴다. 모두 JS 스레드 밖(spawn_blocking)에서 돈다.
+  freePort(): Promise<number>;
+  // 잠금을 잡으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid. 그 밖의 I/O 오류는 거절한다. 죽은 프로세스의 잠금은 지우고 한 번 다시 시도한다
+  acquireDeployLock(lock: string): Promise<number>;
+  releaseDeployLock(lock: string): Promise<void>;
+  // 없거나 읽지 못하면 null
+  readTextFile(path: string): Promise<string | null>;
+  // 부모 폴더를 만들고 쓴다. atomic은 임시 파일에 쓴 뒤 rename한다
+  writeTextFile(path: string, content: string): Promise<void>;
+  writeTextFileAtomic(path: string, content: string): Promise<void>;
+  // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
+  probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
 }
 
 export interface NativeHostPty {
