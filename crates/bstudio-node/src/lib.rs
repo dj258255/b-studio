@@ -754,3 +754,61 @@ pub fn run_command_streaming(
     };
     AsyncBlockBuilder::new(future).build(&env)
 }
+
+// === 로그 스트림(ADR-193, 2c-3b): docker compose logs를 AsyncIterator로 당긴다 ===
+// TS `compose-provider.ts`의 `logs()`(`spawn` + `readline`)를 옮긴 것. 당기기(pull) 모델이라 소비가 느리면
+// bstudio-io 채널이 차서 docker 읽기가 막힌다(백프레셔). `parseLogLine`·`redact`·`Date` 변환은 TS가 한다.
+use bstudio_io::log_stream;
+use napi::bindgen_prelude::AsyncGenerator;
+use tokio::sync::Mutex as AsyncMutex;
+
+/// `docker compose logs`의 stdout을 줄 단위로 당겨 주는 async iterator. `next()`는 채널의 `recv().await`다.
+#[napi(async_iterator)]
+pub struct LogStream {
+    inner: Arc<AsyncMutex<log_stream::LogStream>>,
+    cancel: Arc<Notify>,
+}
+
+#[napi]
+impl LogStream {
+    /// `bin args`(= `docker compose logs ...`)를 띄운다. `signal`이 깨면 구독을 끊고 자식을 kill한다.
+    #[napi(constructor)]
+    pub fn new(
+        bin: String,
+        args: Vec<String>,
+        env_vars: Option<HashMap<String, String>>,
+        cwd: Option<String>,
+        signal: Option<AbortSignal>,
+    ) -> Self {
+        let pairs = env_pairs(env_vars);
+        let (stream, pump) = log_stream::run_command_log_stream(&bin, &args, pairs.as_deref(), cwd.as_deref());
+        let cancel = stream.cancel_handle();
+        // pump(docker를 끝까지 읽는 루프)를 napi의 global 런타임에 올린다.
+        // JS 메인 스레드라 `tokio::spawn`은 "no reactor"로 패닉한다 — `bindgen_prelude::spawn`이 global RT.spawn이다.
+        napi::bindgen_prelude::spawn(pump);
+        if let Some(signal) = signal {
+            let on_abort = cancel.clone();
+            signal.on_abort(move || on_abort.notify_one());
+        }
+        Self { inner: Arc::new(AsyncMutex::new(stream)), cancel }
+    }
+}
+
+#[napi]
+impl AsyncGenerator for LogStream {
+    type Yield = String;
+    type Next = ();
+    type Return = ();
+
+    // future가 Send+'static이라 self를 빌릴 수 없다 → Arc<Mutex<Receiver>>를 clone해 넘긴다.
+    fn next(&mut self, _value: Option<()>) -> impl std::future::Future<Output = Result<Option<String>>> + Send + 'static {
+        let inner = self.inner.clone();
+        async move { Ok(inner.lock().await.next_line().await) }
+    }
+
+    // JS가 `break`/`return`하면 불린다 → 구독을 끊고 자식을 kill한다(소비자 drop도 bstudio-io가 잡지만 명시한다).
+    fn complete(&mut self, _value: Option<()>) -> impl std::future::Future<Output = Result<Option<String>>> + Send + 'static {
+        self.cancel.notify_one();
+        async move { Ok(None) }
+    }
+}
