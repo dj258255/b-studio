@@ -1,9 +1,8 @@
-import { execFile, spawn } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
@@ -41,7 +40,7 @@ import type {
   SyncOptions,
   SyncResult,
 } from '../types';
-import { runCommand, runCommandFromFile, runCommandToFile } from '../stream-exec';
+import { runCommand, runCommandFromFile, runCommandLogStream, runCommandToFile } from '../stream-exec';
 import { findFreeHostPort } from './free-port';
 import {
   buildOverride,
@@ -572,17 +571,12 @@ class LocalDockerSandbox implements Sandbox {
       String(tail),
       ...services,
     ]);
-    const child = spawn(this.#dockerBin, args, { signal, stdio: ['ignore', 'pipe', 'ignore'], env: this.#environment() });
-    // signal로 중단하면 AbortError가 발생하는데, 로그 구독 종료는 정상 흐름이다
-    child.on('error', () => {});
-
-    try {
-      for await (const raw of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
-        const line = parseLogLine(raw);
-        if (line) yield { ...line, text: this.#redactor.redact(line.text) };
-      }
-    } finally {
-      child.kill();
+    // Rust(LogStream)가 docker를 띄워 stdout을 줄 단위로 당겨 준다(2c-3b, #1047). 당기기 모델이라 소비가 느려도 안 샌다.
+    // parseLogLine(시각 분리)·redact(가림)·Date 변환은 여기 남는다 — Rust는 raw 줄만 흘린다.
+    // for await가 끝나거나(EOF) 호출부가 break하거나 signal이 깨면 LogStream이 자식을 kill한다(옛 finally의 child.kill()).
+    for await (const raw of runCommandLogStream(this.#dockerBin, args, { signal, env: this.#environment() })) {
+      const line = parseLogLine(raw);
+      if (line) yield { ...line, text: this.#redactor.redact(line.text) };
     }
   }
 

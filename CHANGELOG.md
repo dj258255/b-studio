@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 서비스 로그 구독(`logs()`, `docker compose logs`의 출력을 줄 단위로 흘리던 `AsyncIterable`)을 Rust로 옮겼습니다(ADR-191·193 2단계 2c-3b, #1047). napi `AsyncGenerator`로 **당기기(pull)** 스트림을 노출해, 소비가 느려도 Rust가 docker 읽기를 멈춰 메모리가 새지 않습니다(`--follow`로 끝없이 흘러도 안전). 시각 분리·가림은 그대로 TS가 합니다. 구독을 끊거나 취소하면 자식 프로세스를 종료합니다.
 - 운영 이미지 빌드 실행(`deploy`의 `#docker`)을 Rust로 옮겼습니다(ADR-191·193 2단계 2c-3a, #1045). 빌드 출력을 줄 단위로 진행 로그에 흘리고(`onLine`) 뒤쪽 200K만 모으던 동작을 그대로 맞췄습니다. napi 층에 Rust→JS 역류 수단(`ThreadsafeFunction`) 경계를 처음 들였습니다. 취소하면 거절하지 않고 부분 출력을 돌려줍니다.
 - `docker`/`docker compose`·`kubectl`을 한 번 실행해 출력을 모으는 경로(`#docker`·`execCommand`, sandbox의 거의 모든 docker 호출이 지납니다)를 Rust로 옮겼습니다(ADR-191·193 2단계 2c-2, #1043). 비0 종료·취소·실행 실패·출력 상한(256MB) 초과 모두 던지지 않고 결과(`{exitCode, stdout, stderr}`)로 돌려주던 옛 동작을 그대로 맞췄습니다. 2c-1과 달리 **취소하면 거절하지 않고 그때까지의 부분 출력과 `exitCode: 1`을 돌려줍니다**(사용량 조회가 도커 응답 상한에서 끊고 그 사실을 알리는 길을 지킵니다). 비0 종료·취소·실행 실패·출력 상한(256MB) 초과 모두 던지지 않고 결과(`{exitCode, stdout, stderr}`)로 돌려주던 옛 동작을 그대로 맞췄습니다. 2c-1과 달리 **취소하면 거절하지 않고 그때까지의 부분 출력과 `exitCode: 1`을 돌려줍니다**(사용량 조회가 도커 응답 상한에서 끊고 그 사실을 알리는 길을 지킵니다).
 - 자식 프로세스의 출력을 파일로 흘리거나 파일을 입력으로 넣는 실행(`runCommandToFile`·`runCommandFromFile`, `docker`/`kubectl exec`가 파일을 주고받을 때 씁니다)을 Rust로 옮겼습니다(ADR-191·193 2단계 2c-1, #1041). 출력 잡기(1MiB·UTF-16 코드 단위 상한과 자르기 표시), `env` 통째 치환, 취소 시 자식 종료를 옛 동작과 같게 맞췄습니다. 새 크레이트 `bstudio-io`(tokio-async)에 I/O를 두고, napi 층에 비동기(Promise)·취소(`AbortSignal`→자식 kill) 경계를 처음 들였습니다. 취소하면 Promise가 거절합니다.

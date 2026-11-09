@@ -54,3 +54,16 @@ export function runCommandStreaming(
 ): Promise<ExecResult> {
   return native.runCommandStreaming(bin, args, input ?? null, definedEnv(env), cwd ?? null, onLine ?? NOOP_LINE, signal);
 }
+
+/**
+ * `bin args`(= `docker compose logs ...`)의 stdout을 줄 단위로 당겨 주는 AsyncIterator다(2c-3b, #1047). compose-provider의 `logs()`가 쓴다.
+ * 당기기(pull) 모델이라 소비자가 다음 줄을 받을 때까지 docker 읽기가 막힌다(백프레셔) — `--follow`로 끝없이 흘러도 안 샌다.
+ * raw 줄만 흘린다(개행 제외). stderr는 버린다. `signal`이 깨거나 소비자가 `break`하면 자식을 kill한다.
+ */
+export function runCommandLogStream(
+  bin: string,
+  args: string[],
+  { signal, env, cwd }: StreamExecOptions & { cwd?: string } = {},
+): AsyncIterableIterator<string> {
+  return new native.LogStream(bin, args, definedEnv(env), cwd ?? null, signal);
+}
