@@ -157,6 +157,20 @@ interface NativeGuard {
   writeTextFileAtomic(path: string, content: string): Promise<void>;
   // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
   probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
+  // ── agent: import-graph(3단계 3b). 별칭 설정은 `{ baseUrl?, paths: [{ pattern, targets }] }` JSON, 역방향 그래프는 `[[파일, [import하는 파일…]], …]` JSON
+  importGraphIsPageFile(relative: string): boolean;
+  importGraphRouteWrapperFolder(relative: string): string | null | undefined;
+  importGraphIsSourceFile(relative: string): boolean;
+  importGraphTokenize(source: string): string;
+  importGraphExtractSpecifiers(source: string): string[];
+  importGraphNormalizePath(value: string): string | null | undefined;
+  importGraphDirOf(file: string): string;
+  importGraphStripJsonc(text: string): string;
+  importGraphExtendsPath(text: string, configDir: string): string | null | undefined;
+  importGraphParseAliasConfig(text: string, configDir: string, baseJson: string | null | undefined): string;
+  importGraphResolveImport(specifier: string, fromFile: string, files: string[], aliasJson: string): string | null | undefined;
+  importGraphBuildReverse(sourceFiles: string[], sourceTexts: string[], files: string[], aliasJson: string): string;
+  importGraphTracePages(changed: string[], reverseJson: string, files: string[], maxDepth: number): string;
 }
 
 export interface NativeHostPty {

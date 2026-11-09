@@ -1106,3 +1106,155 @@ pub async fn probe_http_status(port: u32, path: String, timeout_ms: u32) -> Resu
         Err(error) => HttpProbe { status: None, error: Some(error) },
     })
 }
+
+// ── agent: import-graph(ADR-191 3단계 3b). `packages/agent/src/import-graph.ts`의 순수 코어. 큰 구조는 JSON 문자열(encodeNative·decodeNative),
+// 문자열 목록은 그대로 주고받는다. 별칭 설정은 `{ baseUrl?, paths: [{ pattern, targets }] }`, 역방향 그래프는 `[[파일, [import하는 파일…]], …]`(넣은 순서)다.
+use bstudio_guard::import_graph::{self, AliasConfig, AliasPath, Token};
+use std::collections::HashSet;
+
+fn alias_to_value(alias: &AliasConfig, base_url_first: bool) -> JsValue {
+    let base_url = alias.base_url.as_ref().map(|b| JsValue::str(b.clone()));
+    let paths = JsValue::Arr(
+        alias
+            .paths
+            .iter()
+            .map(|p| js_json::object(vec![("pattern", Some(JsValue::str(p.pattern.clone()))), ("targets", Some(JsValue::Arr(p.targets.iter().map(|t| JsValue::str(t.clone())).collect())))]))
+            .collect(),
+    );
+    // 옛 TS가 만든 객체의 키 순서: base에 baseUrl이 있었으면 baseUrl이 먼저, 아니면 paths가 먼저
+    if base_url_first {
+        js_json::object(vec![("baseUrl", base_url), ("paths", Some(paths))])
+    } else {
+        js_json::object(vec![("paths", Some(paths)), ("baseUrl", base_url)])
+    }
+}
+
+fn alias_from_json(json: &str) -> Result<AliasConfig> {
+    let value = input(json, "별칭 설정")?;
+    let base_url = value.prop("baseUrl").and_then(JsValue::as_str).map(str::to_owned);
+    let mut paths = Vec::new();
+    if let Some(JsValue::Arr(items)) = value.prop("paths") {
+        for item in items {
+            let pattern = item.prop("pattern").and_then(JsValue::as_str).ok_or_else(|| Error::from_reason("별칭 paths 항목에 pattern이 없습니다"))?.to_owned();
+            let targets = match item.prop("targets") {
+                Some(JsValue::Arr(t)) => t.iter().filter_map(JsValue::as_str).map(str::to_owned).collect(),
+                _ => return Err(Error::from_reason("별칭 paths 항목에 targets가 없습니다")),
+            };
+            paths.push(AliasPath { pattern, targets });
+        }
+    }
+    Ok(AliasConfig { base_url, paths })
+}
+
+#[napi]
+pub fn import_graph_is_page_file(relative: String) -> bool {
+    import_graph::is_page_file_in_service(&relative)
+}
+
+#[napi]
+pub fn import_graph_route_wrapper_folder(relative: String) -> Option<String> {
+    import_graph::route_wrapper_folder(&relative)
+}
+
+#[napi]
+pub fn import_graph_is_source_file(relative: String) -> bool {
+    import_graph::is_graph_source_file(&relative)
+}
+
+/// 토큰 목록(JSON). `["s", 값, 템플릿 여부]`, `["w", 단어]`, `["p", UTF-16 코드 단위(수)]`, `["r"]`(정규식 리터럴)
+#[napi]
+pub fn import_graph_tokenize(source: String) -> String {
+    let tokens = import_graph::tokenize(&source)
+        .into_iter()
+        .map(|t| match t {
+            Token::Str { value, template } => JsValue::Arr(vec![JsValue::str("s"), JsValue::Str(value), JsValue::Bool(template)]),
+            Token::Word(w) => JsValue::Arr(vec![JsValue::str("w"), JsValue::Str(w)]),
+            Token::P(unit) => JsValue::Arr(vec![JsValue::str("p"), JsValue::Num(f64::from(unit))]),
+            Token::Re => JsValue::Arr(vec![JsValue::str("r")]),
+        })
+        .collect();
+    out(&JsValue::Arr(tokens))
+}
+
+#[napi]
+pub fn import_graph_extract_specifiers(source: String) -> Vec<String> {
+    import_graph::extract_import_specifiers(&source)
+}
+
+#[napi]
+pub fn import_graph_normalize_path(value: String) -> Option<String> {
+    import_graph::normalize_service_path(&value)
+}
+
+#[napi]
+pub fn import_graph_dir_of(file: String) -> String {
+    import_graph::dir_of(&file)
+}
+
+#[napi]
+pub fn import_graph_strip_jsonc(text: String) -> String {
+    import_graph::strip_jsonc(&text)
+}
+
+#[napi]
+pub fn import_graph_extends_path(text: String, config_dir: String) -> Option<String> {
+    import_graph::tsconfig_extends_path(&text, &config_dir)
+}
+
+/// `baseJson`은 extends로 물려받은 별칭 설정(없으면 null). 결과는 별칭 설정 JSON
+#[napi]
+pub fn import_graph_parse_alias_config(text: String, config_dir: String, base_json: Option<String>) -> Result<String> {
+    let base = base_json.map(|json| alias_from_json(&json)).transpose()?;
+    let (alias, base_url_first) = import_graph::parse_alias_config(&text, &config_dir, base.as_ref());
+    Ok(out(&alias_to_value(&alias, base_url_first)))
+}
+
+#[napi]
+pub fn import_graph_resolve_import(specifier: String, from_file: String, files: Vec<String>, alias_json: String) -> Result<Option<String>> {
+    let alias = alias_from_json(&alias_json)?;
+    let files: HashSet<String> = files.into_iter().collect();
+    Ok(import_graph::resolve_import(&specifier, &from_file, &files, &alias))
+}
+
+/// `sourceFiles[i]`의 내용이 `sourceTexts[i]`다(넣은 순서). 결과는 `[[파일, [import하는 파일…]], …]`
+#[napi]
+pub fn import_graph_build_reverse(source_files: Vec<String>, source_texts: Vec<String>, files: Vec<String>, alias_json: String) -> Result<String> {
+    if source_files.len() != source_texts.len() {
+        return Err(Error::from_reason("소스 파일 이름과 내용의 개수가 다릅니다"));
+    }
+    let alias = alias_from_json(&alias_json)?;
+    let files: HashSet<String> = files.into_iter().collect();
+    let sources: Vec<(String, String)> = source_files.into_iter().zip(source_texts).collect();
+    let reverse = import_graph::build_reverse_graph(&sources, &files, &alias);
+    Ok(out(&JsValue::Arr(
+        reverse.into_iter().map(|(target, importers)| JsValue::Arr(vec![JsValue::Str(target), JsValue::Arr(importers.into_iter().map(JsValue::Str).collect())])).collect(),
+    )))
+}
+
+/// `reverseJson`은 `[[파일, [import하는 파일…]], …]`. 결과는 `{ candidates: [{ page, cause, distance, tie }], truncated: [{ cause, stoppedAt }] }`
+#[napi]
+pub fn import_graph_trace_pages(changed: Vec<String>, reverse_json: String, files: Vec<String>, max_depth: f64) -> Result<String> {
+    let value = input(&reverse_json, "역방향 그래프")?;
+    let JsValue::Arr(rows) = value else { return Err(Error::from_reason("역방향 그래프가 배열이 아닙니다")) };
+    let mut reverse: import_graph::ReverseGraph = Vec::new();
+    for row in &rows {
+        let JsValue::Arr(pair) = row else { return Err(Error::from_reason("역방향 그래프 항목이 배열이 아닙니다")) };
+        let (Some(JsValue::Str(target)), Some(JsValue::Arr(list))) = (pair.first(), pair.get(1)) else { return Err(Error::from_reason("역방향 그래프 항목의 모양이 맞지 않습니다")) };
+        reverse.push((target.clone(), list.iter().filter_map(JsValue::as_str).map(str::to_owned).collect()));
+    }
+    let result = import_graph::trace_pages(&changed, &reverse, &files, max_depth);
+    let candidates = result
+        .candidates
+        .into_iter()
+        .map(|c| {
+            js_json::object(vec![
+                ("page", Some(JsValue::Str(c.page))),
+                ("cause", Some(JsValue::Str(c.cause))),
+                ("distance", Some(JsValue::Num(f64::from(c.distance)))),
+                ("tie", Some(JsValue::Num(f64::from(c.tie)))),
+            ])
+        })
+        .collect();
+    let truncated = result.truncated.into_iter().map(|t| js_json::object(vec![("cause", Some(JsValue::Str(t.cause))), ("stoppedAt", Some(JsValue::Str(t.stopped_at)))])).collect();
+    Ok(out(&js_json::object(vec![("candidates", Some(JsValue::Arr(candidates))), ("truncated", Some(JsValue::Arr(truncated)))])))
+}
