@@ -5326,3 +5326,27 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 ### 배운 것
 - **"안쪽인가"는 접두사가 아니라 첫 요소로 읽는다.** 파일 시스템에서 `..x`는 `..`이 아니다.
 - **같은 버릇이 허용 쪽에서는 안전하고 보호 쪽에서는 구멍이다.** 자리를 가려 고치되 이름을 읽는 규칙은 하나로 맞춘다.
+
+## 164. PTY의 on_exit가 마지막 on_data를 앞질러 CI에서 출력이 유실됐음 — 종료 스레드가 reader를 join한 뒤 알린다
+
+**구분:** 2026-11-09 Rust 이전 2단계 2c-5 PR(#1054)의 CI에서 2c-4a의 flaky로 드러남 → 이슈 #1055 → 테스트(반복 실행)로 확인 → 수정
+
+### 겪은 것
+- `host-pty.test.ts`의 "cwd와 env를 적용한다"가 CI에서 가끔 `expected '' to contain 'from-env'`로 실패했다(로컬 5회·CI 대부분은 통과). 자식이 환경 변수를 `echo`로 내보내고 바로 끝나는데, 그 출력(마지막 `on_data`)이 통째로 유실돼 빈 문자열이 모였다.
+- 2c-5(deploy I/O)와 무관한 2c-4a(PTY)의 결함이었다. 2c-4a를 쓰는 뒤 PR이 모두 이 flaky에 걸릴 수 있어 별도 수정으로 떼어 고쳤다.
+
+### 원인
+- `open_host_pty`가 **출력 읽기 스레드**(reader: `read` 루프 → `on_data`)와 **종료 대기 스레드**(`child.wait()` → `on_exit`)를 서로 독립으로 띄웠다. 둘 사이에 순서 보장이 없다.
+- slave를 drop했으므로 자식이 끝나면 reader는 EOF를 받지만, 종료가 빠른 자식에서는 `wait`가 먼저 깨어 `on_exit`가 reader의 **마지막 `on_data`보다 앞설 수 있다**. 소비 쪽(napi→TS)은 `on_exit`에서 수집을 끝내므로, 그 뒤 도착한 출력은 버려진다. macOS에선 reader가 거의 항상 먼저 스케줄돼 창이 안 열렸고, CI(리눅스·부하)에서만 뒤집혔다.
+
+### 고친 것
+- 종료 대기 스레드가 `on_exit`를 보내기 **전에** reader 스레드를 `join`한다(`let _ = reader_thread.join();`). reader가 EOF로 끝났다는 것은 마지막 `on_data`까지 방출을 마쳤다는 뜻이라, `on_exit`가 항상 뒤에 온다(happens-before).
+- node-pty의 'exit' after 'data' 계약, 2c-4b `exec_stream`의 "stdout/stderr EOF 둘 다 끝난 뒤 exit" 불변식과 같은 규칙이다.
+
+### 재현
+- 로컬 macOS에서는 재현되지 않는다(스케줄링상 창이 안 열림). `join`을 빼는 변이 + CPU 4코어 부하 + `runs_in_cwd_with_env` 30회에도 음성이었다. CI(리눅스·부하)에서만 드러난다.
+- 구조적 근거로 고치고 CI로 최종 확인한다. cargo `pty::tests` 7개, `host-pty.test.ts` 6개는 그대로 통과한다.
+
+### 배운 것
+- **독립 스레드 둘의 콜백은 순서가 없다.** 한쪽의 완료를 다른 쪽의 사건 앞에 두려면 `join`으로 happens-before를 못박는다.
+- **환경마다 레이스 창이 다르게 열린다.** 로컬에서 변이가 음성이어도 "수정 불필요"가 아니다. 재현 못 하는 타이밍 레이스는 구조로 판정하고 재현 불가를 그대로 적는다.
