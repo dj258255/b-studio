@@ -11,5 +11,9 @@ publish.workspace = true
 bstudio-guard = { path = "../bstudio-guard" }
 tokio = { version = "1", features = ["process", "fs", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
 
+# O_NOFOLLOW로 링크를 따라가지 않고 파일을 연다(safe_fs)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3"

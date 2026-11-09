@@ -6,5 +6,6 @@
 
 pub mod log_stream;
 pub mod process;
+pub mod safe_fs;
 pub mod stream_exec;
 pub mod streaming;

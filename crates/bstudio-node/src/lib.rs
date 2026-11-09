@@ -812,3 +812,30 @@ impl AsyncGenerator for LogStream {
         async move { Ok(None) }
     }
 }
+
+// === 링크 안전 파일 시스템 준비(ADR-193, 2c-1b) ===
+// TS `evaluation-assets.ts`의 `prepareSlot`·`removeEvaluationAssets`.
+// 판정과 syscall은 bstudio-io의 safe_fs가 한다. 여기는 형 변환만 한다. 오류는 메시지 그대로 JS Error가 된다.
+use bstudio_io::safe_fs;
+use std::path::PathBuf;
+
+fn fs_error(error: std::io::Error) -> Error {
+    Error::from_reason(error.to_string())
+}
+
+/// 평가 자산 복사본 자리를 준비한다. `kind`는 `"file"`·`"directory"`, 그 밖의 값은 거부한다
+#[napi]
+pub async fn prepare_evaluation_asset_slot(source: String, kind: String, parent: String) -> Result<()> {
+    let kind = match kind.as_str() {
+        "file" => safe_fs::SlotKind::File,
+        "directory" => safe_fs::SlotKind::Directory,
+        other => return Err(Error::from_reason(format!("알 수 없는 자리 종류입니다: {other}"))),
+    };
+    safe_fs::prepare_slot_async(PathBuf::from(source), kind, PathBuf::from(parent)).await.map_err(fs_error)
+}
+
+/// 한 샌드박스의 복사본 폴더를 지운다. 그 폴더가 링크면 링크만, 안의 링크도 따라가지 않는다
+#[napi]
+pub async fn remove_sandbox_directory(dir: String) -> Result<()> {
+    safe_fs::remove_sandbox_dir_async(PathBuf::from(dir)).await.map_err(fs_error)
+}
