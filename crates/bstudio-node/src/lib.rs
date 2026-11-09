@@ -1106,3 +1106,55 @@ pub async fn probe_http_status(port: u32, path: String, timeout_ms: u32) -> Resu
         Err(error) => HttpProbe { status: None, error: Some(error) },
     })
 }
+
+// ── 테스트 발견(ADR-191 3a). 결과는 JSON 문자열이다(옛 TS의 JSON.stringify와 같은 글자). TS 껍데기: packages/agent/src/test-discovery.ts
+
+use bstudio_guard::test_discovery;
+
+#[napi]
+pub fn extract_requirement_ids(text: String) -> Vec<String> {
+    test_discovery::extract_requirement_ids(&text)
+}
+
+#[napi]
+pub fn extract_requirement_ids_with_suites(suite_path: Option<Vec<String>>, title: String) -> Vec<String> {
+    test_discovery::extract_requirement_ids_with_suites(&suite_path.unwrap_or_default(), &title)
+}
+
+#[napi]
+pub fn discover_junit_file(file_path: String, content: String) -> String {
+    test_discovery::discover_junit_file(&file_path, &content).to_json()
+}
+
+#[napi]
+pub fn detect_js_framework(content: String) -> String {
+    test_discovery::detect_js_framework(&content).to_owned()
+}
+
+/// `framework`가 없으면(undefined·null) 내용으로 짐작한다
+#[napi]
+pub fn discover_js_file(file_path: String, content: String, framework: Option<String>) -> String {
+    test_discovery::discover_js_file(&file_path, &content, framework.as_deref()).to_json()
+}
+
+#[napi]
+pub fn discover_pytest_file(file_path: String, content: String) -> String {
+    test_discovery::discover_pytest_file(&file_path, &content).to_json()
+}
+
+#[napi]
+pub fn is_test_file_path(file_path: String) -> bool {
+    test_discovery::is_test_file_path(&file_path)
+}
+
+/// 테스트 파일로 보이지 않으면 null
+#[napi]
+pub fn discover_tests_in_file(file_path: String, content: String) -> Option<String> {
+    test_discovery::discover_tests_in_file(&file_path, &content).map(|file| file.to_json())
+}
+
+/// 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn flatten_discovered_file(file_json: String) -> Result<String> {
+    fail(test_discovery::flatten_discovered_file(&file_json))
+}
