@@ -839,3 +839,270 @@ pub async fn prepare_evaluation_asset_slot(source: String, kind: String, parent:
 pub async fn remove_sandbox_directory(dir: String) -> Result<()> {
     safe_fs::remove_sandbox_dir_async(PathBuf::from(dir)).await.map_err(fs_error)
 }
+
+// ── git-mask의 파일 시스템 I/O(2c-6). 판정은 bstudio-guard, syscall은 bstudio-io::git_mask_fs ──
+
+/// TS `GitEntry`와 같은 모양
+#[napi(object)]
+pub struct GitEntryJs {
+    pub dir: String,
+    pub kind: String,
+    pub has_state: bool,
+}
+
+impl From<bstudio_io::git_mask_fs::GitEntry> for GitEntryJs {
+    fn from(entry: bstudio_io::git_mask_fs::GitEntry) -> Self {
+        Self { dir: entry.dir, kind: entry.kind, has_state: entry.has_state }
+    }
+}
+
+/// 상태 폴더 준비가 실패한 자리. 던지지 않고 값으로 돌려 TS가 `SandboxError`로 바꾼다
+#[napi(object)]
+pub struct MaskFailureJs {
+    pub state: String,
+    pub detail: String,
+}
+
+#[napi(object)]
+pub struct PreparedMasks {
+    pub entries: Vec<GitEntryJs>,
+    pub failure: Option<MaskFailureJs>,
+}
+
+/// 링크를 푼 실제 경로. 풀지 못하면 `path.resolve`와 같이 `cwd` 기준 절대 경로
+#[napi]
+pub fn real_path(env: Env, target: String, cwd: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(bstudio_io::git_mask_fs::real_path(&target, &cwd).await) }).build(&env)
+}
+
+/// 프로젝트 폴더에서 위로 올라가며 `.git`이 든 폴더를 찾는다
+#[napi]
+pub fn detect_git_entries(env: Env, project_root: String, mount_sources: Vec<String>, cwd: String) -> Result<AsyncBlock<Vec<GitEntryJs>>> {
+    AsyncBlockBuilder::new(async move {
+        let entries = bstudio_io::git_mask_fs::detect_git_entries(&project_root, &mount_sources, &cwd).await;
+        Ok(entries.into_iter().map(GitEntryJs::from).collect())
+    })
+    .build(&env)
+}
+
+/// b-studio 저장소의 상태 폴더와 그 위에 얹을 빈 폴더를 미리 만든다. 실패하면 거기서 멈추고 `failure`를 채운다
+#[napi]
+pub fn prepare_state_masks(env: Env, entries: Vec<GitEntryJs>) -> Result<AsyncBlock<PreparedMasks>> {
+    AsyncBlockBuilder::new(async move {
+        let mut inner: Vec<bstudio_io::git_mask_fs::GitEntry> =
+            entries.into_iter().map(|e| bstudio_io::git_mask_fs::GitEntry { dir: e.dir, kind: e.kind, has_state: e.has_state }).collect();
+        let failure = bstudio_io::git_mask_fs::prepare_state_masks(&mut inner).await.err().map(|f| MaskFailureJs { state: f.state, detail: f.detail });
+        Ok(PreparedMasks { entries: inner.into_iter().map(GitEntryJs::from).collect(), failure })
+    })
+    .build(&env)
+}
+
+// === 호스트 PTY(ADR-193, 2c-4a): node-pty를 portable-pty로 대체한다 ===
+// 양방향이다: write/resize/kill은 동기 메서드, 출력(on_data)·종료(on_exit)는 ThreadsafeFunction으로 역류한다(2c-3a 밀어내기 경계 재사용).
+// PTY는 blocking I/O라 bstudio-io가 std::thread로 격리한다 — 여기선 TSFN을 감싼 콜백만 주입한다.
+use napi::bindgen_prelude::Buffer as NapiBuffer;
+
+/// 호스트에 연 가상 터미널. TS host-terminal.ts의 `HostPty`(node-pty)를 대신한다.
+#[napi]
+pub struct HostPty {
+    inner: Arc<bstudio_io::pty::HostPty>,
+}
+
+#[napi]
+impl HostPty {
+    /// `file args`로 PTY를 열고 띄운다. `on_data`는 출력(Buffer)마다, `on_exit`는 종료 코드로 한 번 불린다.
+    /// `cols`/`rows`는 u32로 받아 u16으로 좁힌다(napi가 u16을 직접 받지 않는다). `env`는 상속 없이 통째 치환한다.
+    #[napi(constructor)]
+    pub fn new(
+        file: String,
+        args: Vec<String>,
+        name: String,
+        cols: u32,
+        rows: u32,
+        cwd: String,
+        env_vars: HashMap<String, String>,
+        on_data: ThreadsafeFunction<NapiBuffer, (), NapiBuffer, Status, false>,
+        on_exit: ThreadsafeFunction<i32, (), i32, Status, false>,
+    ) -> Result<Self> {
+        let data_cb: bstudio_io::pty::OnData = Arc::new(move |bytes: Vec<u8>| {
+            on_data.call(bytes.into(), ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let exit_cb: bstudio_io::pty::OnExit = Arc::new(move |code: i32| {
+            on_exit.call(code, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let pairs = env_pairs(Some(env_vars)).unwrap_or_default();
+        let pty = bstudio_io::pty::open_host_pty(
+            &file,
+            &args,
+            &name,
+            cols as u16,
+            rows as u16,
+            &cwd,
+            &pairs,
+            data_cb,
+            exit_cb,
+        )
+        .map_err(|error| Error::from_reason(error.to_string()))?;
+        Ok(Self { inner: Arc::new(pty) })
+    }
+
+    /// 자식 pid(감시가 이 아래의 CLI를 찾는 데 쓴다). 플랫폼이 못 주면 undefined.
+    #[napi(getter)]
+    pub fn pid(&self) -> Option<u32> {
+        self.inner.pid()
+    }
+
+    /// PTY에 입력을 쓴다.
+    #[napi]
+    pub fn write(&self, data: NapiBuffer) -> Result<()> {
+        self.inner.write(&data).map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// 터미널 크기를 바꾼다(SIGWINCH).
+    #[napi]
+    pub fn resize(&self, cols: u32, rows: u32) -> Result<()> {
+        self.inner.resize(cols as u16, rows as u16).map_err(|error| Error::from_reason(error.to_string()))
+    }
+
+    /// 자식을 죽인다(셸과 그 안의 CLI가 함께 끝난다).
+    #[napi]
+    pub fn kill(&self) -> Result<()> {
+        self.inner.kill().map_err(|error| Error::from_reason(error.to_string()))
+    }
+}
+
+// === 양방향 exec 세션(ADR-193, 2c-4b): docker exec -i 터미널 ===
+// TS `agent-terminal.ts`의 `openAgentTerminal`이 쓰는 `spawn`을 옮긴 것. 출력·종료는 **하나의** ThreadsafeFunction으로 밀어
+// 보낸다 — TSFN은 함수마다 큐가 따로라, 데이터용과 종료용을 나누면 종료가 마지막 출력보다 먼저 JS에 닿을 수 있다.
+// write·close·kill은 동기다(채널에 넣거나 Notify를 깨우기만 한다).
+use bstudio_io::exec_stream;
+
+/// JS로 가는 사건 하나. `exited`가 false면 `data`가 있고, true면 `code`가 종료 코드다(시그널로 죽었으면 null).
+#[napi(object)]
+pub struct ExecEvent {
+    pub data: Option<Buffer>,
+    pub exited: bool,
+    pub code: Option<i32>,
+}
+
+#[napi]
+pub struct ExecSession {
+    handle: exec_stream::ExecHandle,
+}
+
+#[napi]
+impl ExecSession {
+    /// `bin args`를 띄운다. `on_event`는 Rust 작업 스레드에서 `(event)` 한 인자로 불린다. 띄우기 실패도 `exited`(코드 -2)로 온다.
+    #[napi(constructor)]
+    pub fn new(
+        bin: String,
+        args: Vec<String>,
+        env_vars: Option<HashMap<String, String>>,
+        cwd: Option<String>,
+        on_event: ThreadsafeFunction<ExecEvent, (), ExecEvent, Status, false>,
+    ) -> Self {
+        let pairs = env_pairs(env_vars);
+        let callback: exec_stream::OnEvent = Arc::new(move |event| {
+            let event = match event {
+                exec_stream::ExecEvent::Data(data) => ExecEvent { data: Some(Buffer::from(data)), exited: false, code: None },
+                exec_stream::ExecEvent::Exit(code) => ExecEvent { data: None, exited: true, code },
+            };
+            on_event.call(event, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let (handle, pump) = exec_stream::spawn_exec(&bin, &args, pairs.as_deref(), cwd.as_deref(), callback);
+        // JS 메인 스레드라 tokio::spawn은 "no reactor"로 패닉한다 — LogStream과 같이 global 런타임에 올린다
+        napi::bindgen_prelude::spawn(pump);
+        Self { handle }
+    }
+
+    /// stdin에 쓴다. 닫힌 뒤의 쓰기는 조용히 버리고 false를 준다
+    #[napi]
+    pub fn write(&self, data: Buffer) -> bool {
+        self.handle.write(data.to_vec())
+    }
+
+    /// stdin을 닫는다(EOF)
+    #[napi]
+    pub fn end(&self) {
+        self.handle.end_stdin();
+    }
+
+    /// 자식에게 SIGTERM을 보낸다
+    #[napi]
+    pub fn terminate(&self) {
+        self.handle.terminate();
+    }
+}
+
+// ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts의 잠금·빈 포트·상태/compose 파일·운영 주소 확인 한 번.
+// 파일·소켓 syscall은 blocking이라 spawn_blocking으로 JS 스레드 밖에서 돌린다. 판정은 하지 않는다.
+use bstudio_io::deploy_io;
+use std::path::Path;
+use std::time::Duration;
+
+fn io_error(context: &str, error: std::io::Error) -> Error {
+    Error::from_reason(format!("{context}: {error}"))
+}
+
+async fn blocking<T: Send + 'static>(task: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(task).await.map_err(|e| Error::from_reason(format!("I/O 작업이 중단됐습니다: {e}")))
+}
+
+/// `127.0.0.1`의 빈 포트 하나
+#[napi]
+pub async fn free_port() -> Result<u32> {
+    let port = blocking(deploy_io::free_port).await?.map_err(|e| io_error("빈 포트를 찾지 못했습니다", e))?;
+    Ok(u32::from(port))
+}
+
+/// 배포 잠금을 잡는다. 잡았으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid(0이 아님). 그 밖의 I/O 오류는 거절한다
+#[napi]
+pub async fn acquire_deploy_lock(lock: String) -> Result<u32> {
+    match blocking(move || deploy_io::acquire_lock(Path::new(&lock))).await?.map_err(|e| io_error("배포 잠금을 잡지 못했습니다", e))? {
+        deploy_io::LockOutcome::Acquired => Ok(0),
+        deploy_io::LockOutcome::Held(pid) => Ok(pid),
+    }
+}
+
+/// 배포 잠금 파일을 지운다(없거나 지우지 못해도 알리지 않는다)
+#[napi]
+pub async fn release_deploy_lock(lock: String) -> Result<()> {
+    blocking(move || deploy_io::release_lock(Path::new(&lock))).await
+}
+
+/// 파일을 UTF-8 문자열로 읽는다. 없거나 읽지 못하면 null
+#[napi]
+pub async fn read_text_file(path: String) -> Result<Option<String>> {
+    blocking(move || deploy_io::read_text(Path::new(&path))).await
+}
+
+/// 부모 폴더를 만들고 파일을 쓴다(덮어쓴다)
+#[napi]
+pub async fn write_text_file(path: String, content: String) -> Result<()> {
+    blocking(move || deploy_io::write_text(Path::new(&path), &content)).await?.map_err(|e| io_error("파일을 쓰지 못했습니다", e))
+}
+
+/// 부모 폴더를 만들고 임시 파일에 쓴 뒤 rename으로 바꿔 넣는다
+#[napi]
+pub async fn write_text_file_atomic(path: String, content: String) -> Result<()> {
+    blocking(move || deploy_io::write_text_atomic(Path::new(&path), &content)).await?.map_err(|e| io_error("파일을 쓰지 못했습니다", e))
+}
+
+/// `probe_http_status`의 결과. 상태를 얻으면 `status`, 못 얻으면 `error`(문장)
+#[napi(object)]
+pub struct HttpProbe {
+    pub status: Option<u32>,
+    pub error: Option<String>,
+}
+
+/// `http://127.0.0.1:<port><path>`에 GET 한 번(리다이렉트 안 따름, 본문 안 읽음). 던지지 않는다
+#[napi]
+pub async fn probe_http_status(port: u32, path: String, timeout_ms: u32) -> Result<HttpProbe> {
+    let Ok(port) = u16::try_from(port) else {
+        return Ok(HttpProbe { status: None, error: Some(format!("포트 {port}이(가) 범위를 벗어났습니다")) });
+    };
+    Ok(match deploy_io::probe_http_status(port, &path, Duration::from_millis(u64::from(timeout_ms))).await {
+        Ok(status) => HttpProbe { status: Some(u32::from(status)), error: None },
+        Err(error) => HttpProbe { status: None, error: Some(error) },
+    })
+}

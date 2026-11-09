@@ -9,9 +9,11 @@ publish.workspace = true
 
 [dependencies]
 bstudio-guard = { path = "../bstudio-guard" }
-tokio = { version = "1", features = ["process", "fs", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["process", "fs", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
+# PTY(가상 터미널)는 blocking I/O라 tokio가 아니라 std::thread로 격리한다(ADR-193 2c-4). wezterm의 crate.
+portable-pty = "0.9"
 
-# O_NOFOLLOW로 링크를 따라가지 않고 파일을 연다(safe_fs)
+# close()가 SIGTERM을 보낸다(tokio의 start_kill은 SIGKILL이다). 옛 Node child.kill('SIGTERM')과 같게 맞춘다. deploy_io의 pid 생존 확인(kill(pid,0), 2c-5)과 safe_fs의 O_NOFOLLOW(링크를 따라가지 않고 열기)도 unix에서 libc를 쓴다.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

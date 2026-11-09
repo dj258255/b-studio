@@ -1,4 +1,5 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import { EventEmitter } from 'node:events';
 import { mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
@@ -8,6 +9,7 @@ import { SandboxError } from '../errors';
 import { defaultEvaluationAssetRoot, evaluationAssetCopies } from './evaluation-assets';
 import { computeGitMask, findMissingMasks, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
 import { assertSandboxId } from '../sandbox-id';
+import { openExecSession } from '../stream-exec';
 
 const execFileAsync = promisify(execFile);
 
@@ -730,10 +732,74 @@ export interface AgentTerminal {
 /** 프로세스를 띄우는 자리(테스트가 가짜를 끼운다) */
 export type SpawnTerminal = (command: string, args: string[]) => ChildProcessWithoutNullStreams;
 
+/**
+ * 파이프가 늦게 붙어도 앞서 온 것을 잃지 않는 이미터. 첫 `listenerEvent` 리스너가 붙을 때(마이크로태스크 뒤) 쌓아 둔 것을 쏟는다.
+ * Node의 child.stdout이 'data' 리스너가 붙기 전까지 쌓아 두던 것과 같다.
+ */
+class HeldEmitter extends EventEmitter {
+  private held: unknown[][] = [];
+  private flushing = false;
+  constructor(private readonly listenerEvent: string) {
+    super();
+    this.on('newListener', (event) => {
+      if (event !== this.listenerEvent || this.flushing) return;
+      this.flushing = true;
+      queueMicrotask(() => {
+        const queued = this.held;
+        this.held = [];
+        for (const args of queued) this.emit(this.listenerEvent, ...args);
+      });
+    });
+  }
+  /** 리스너가 있으면 바로, 없으면 쌓아 둔다 */
+  deliver(...args: unknown[]): void {
+    if (this.listenerCount(this.listenerEvent) > 0 && this.held.length === 0) this.emit(this.listenerEvent, ...args);
+    else this.held.push(args);
+  }
+}
+
+/**
+ * 기본 `SpawnTerminal`: Rust 양방향 세션(`bstudio-io`의 `exec_stream`, ADR-193 2c-4b)을 옛 `ChildProcess`의 모양으로 감싼다.
+ * `openAgentTerminal`은 stdin.write/end/writable, stdout·stderr의 'data', 'close', kill만 쓴다 — 그 부분만 흉내 낸다.
+ * Rust는 stdout·stderr를 한 흐름으로 순서대로 주므로 stderr 이미터는 쓰이지 않는다(stdout 이미터가 둘을 합쳐 준다).
+ */
+export const spawnNativeTerminal: SpawnTerminal = (bin, args) => {
+  const stdout = new HeldEmitter('data');
+  const stderr = new EventEmitter();
+  const child = new HeldEmitter('close');
+  const stdin = Object.assign(new EventEmitter(), {
+    writable: true,
+    write(data: string | Buffer): boolean {
+      return session.write(data);
+    },
+    end(): void {
+      stdin.writable = false;
+      session.end();
+    },
+  });
+  const session = openExecSession(bin, args, {
+    cwd: tmpdir(),
+    onData: (chunk) => stdout.deliver(chunk),
+    onExit: (code) => {
+      stdin.writable = false;
+      child.deliver(code);
+    },
+  });
+  return Object.assign(child, {
+    stdin,
+    stdout,
+    stderr,
+    kill(): boolean {
+      session.terminate();
+      return true;
+    },
+  }) as unknown as ChildProcessWithoutNullStreams;
+};
+
 /** 컨테이너 안에 가상 터미널을 열고 기본 명령(CLI)을 띄운다. 컨테이너는 ensureAgentContainer가 확인한 것이어야 한다 */
 export function openAgentTerminal(
   name: string,
-  { id, size, command, dockerBin = 'docker', spawnProcess = (bin, args) => spawn(bin, args, { cwd: tmpdir() }) }: { id: string; size: TerminalSize; command?: string; dockerBin?: string; spawnProcess?: SpawnTerminal },
+  { id, size, command, dockerBin = 'docker', spawnProcess = spawnNativeTerminal }: { id: string; size: TerminalSize; command?: string; dockerBin?: string; spawnProcess?: SpawnTerminal },
 ): AgentTerminal {
   const child = spawnProcess(dockerBin, agentTerminalArgs(name, { id, size, command }));
   // 닫힌 뒤에 들어온 입력으로 프로세스 전체가 죽지 않게 한다
