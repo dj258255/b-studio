@@ -110,7 +110,7 @@ pub fn open_host_pty(
     drop(pair.slave);
 
     // 출력 읽기 스레드(blocking read). EOF(0)나 오류면 끝난다.
-    std::thread::spawn(move || {
+    let reader_thread = std::thread::spawn(move || {
         let mut buf = [0u8; 65536];
         loop {
             match reader.read(&mut buf) {
@@ -122,11 +122,15 @@ pub fn open_host_pty(
     });
 
     // 종료 기다리기 스레드(blocking wait). 종료 코드를 on_exit로 한 번 보낸다.
+    // on_exit는 reader 스레드가 EOF로 끝난 **뒤에** 보낸다 — 자식의 마지막 출력(on_data)이 on_exit보다 먼저 가도록
+    // 보장한다(node-pty의 'exit'가 'data' 뒤에 오는 것과 같다). slave를 drop했으므로 자식이 끝나면 reader는 EOF를 받는다.
+    // 안 그러면 두 스레드가 독립이라 종료가 빠른 자식에서 on_exit가 마지막 on_data를 앞질러 출력이 유실될 수 있다.
     std::thread::spawn(move || {
         let code = match child.wait() {
             Ok(status) => status.exit_code() as i32,
             Err(_) => 1,
         };
+        let _ = reader_thread.join();
         on_exit(code);
     });
 
