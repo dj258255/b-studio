@@ -157,6 +157,36 @@ interface NativeGuard {
   writeTextFileAtomic(path: string, content: string): Promise<void>;
   // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
   probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
+  // ── agent: requirement-issues(3단계 3c). 객체는 JSON 문자열(encodeNative·decodeNative). 모양이 어긋난 입력은 던진다
+  reqIssueLabel(): string;
+  reqIssueContentHash(text: string): string;
+  reqIssueBuildRegionContent(requirementJson: string): string;
+  reqIssueRequirementContentHash(requirementJson: string): string;
+  reqIssueBuildManagedRegion(requirementJson: string, rev: number): string;
+  reqIssueParseManagedRegion(body: string): string | null | undefined;
+  reqIssueSubIssueTitle(requirementJson: string): string;
+  reqIssueIdFromTitle(title: string): string | null | undefined;
+  reqIssueTrackingTitle(project: string): string;
+  reqIssueFindTrackingIssue(issuesJson: string, projectName: string): string | null | undefined;
+  reqIssueLabelSet(requirementJson: string, status: string): string[];
+  reqIssueBuildTrackingBody(projectName: string, rowsJson: string, updatedAt?: string | null): string;
+  reqIssueFindExistingRemote(requirementJson: string, remoteJson: string): number;
+  reqIssuePlan(inputsJson: string, remoteJson: string): string;
+  reqIssueSummarizePlan(entriesJson: string): string;
+  reqIssueBuildStatusComment(requirementId: string, status: string, rowsJson: string): string;
+  reqIssueIsStatusComment(body: string, requirementId?: string | null): boolean;
+  reqIssueFindPinnedStatusComment(bodies: string[], requirementId: string): number;
+  reqIssueImplementsTrailer(refJson: string): string;
+  reqIssueExtractMentions(texts: string[]): string[];
+  reqIssueBuildAddendum(refsJson: string, includeCloses: boolean): string;
+  reqIssueBuildReviewContext(entriesJson: string): string;
+  reqIssueFormYaml(): string;
+  reqIssueParseIssueForm(title: string, body: string): string | null | undefined;
+  reqIssueDraftFromIssue(title: string, body: string): string;
+  reqIssueDraftManaged(title: string, body: string): string | null | undefined;
+  reqIssueExtractTrackingNumbers(body: string): string;
+  reqIssueManagedToRequirement(draftJson: string): string;
+  reqIssueIsAllowedEndpoint(pathname: string): boolean;
 }
 
 export interface NativeHostPty {
