@@ -1792,3 +1792,77 @@ pub fn higher_cli_tier(a: Option<String>, b: String) -> String {
 pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String>) -> Result<String> {
     fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
 }
+
+// ── agent: coordination·escalation(3단계 3i). 객체는 JSON 문자열(encodeNative·decodeNative). 선언한 모양이 어긋난 입력은 던진다
+use bstudio_guard::{coordination, escalation};
+
+#[napi]
+pub fn coord_normalize_message(text: String) -> String {
+    coordination::normalize_message(&text)
+}
+
+#[napi]
+pub fn coord_signature_key(signature_json: String) -> Result<String> {
+    fail(coordination::signature_key(&input(&signature_json, "실패 서명")?))
+}
+
+#[napi]
+pub fn coord_signatures_from_report(report_json: String) -> Result<String> {
+    Ok(out(&JsValue::Arr(fail(coordination::signatures_from_report(&input(&report_json, "검증 보고서")?))?)))
+}
+
+#[napi]
+pub fn coord_signature_from_check(check_json: String) -> Result<String> {
+    Ok(out(&fail(coordination::signature_from_check(&input(&check_json, "워크플로 확인")?))?))
+}
+
+#[napi]
+pub fn coord_failure_notes_from_report(report_json: String, checks_json: String) -> Result<String> {
+    let notes = coordination::failure_notes_from_report(&input(&report_json, "검증 보고서")?, &input(&checks_json, "워크플로 확인 목록")?);
+    Ok(out(&JsValue::Arr(fail(notes)?)))
+}
+
+#[napi]
+pub fn coord_failure_notes_from_events(events_json: String) -> Result<String> {
+    Ok(out(&JsValue::Arr(fail(coordination::failure_notes_from_events(&input(&events_json, "세션 이벤트")?))?)))
+}
+
+#[napi]
+pub fn coord_note_bytes(body: String) -> f64 {
+    coordination::note_bytes(&body) as f64
+}
+
+#[napi]
+pub fn coord_can_read(topology: String, reader_lane: String, reader_group: Option<String>, note_by: String, note_lane: String, note_group: Option<String>, hub: String) -> bool {
+    coordination::can_read(&topology, &reader_lane, reader_group.as_deref(), &note_by, &note_lane, note_group.as_deref(), &hub)
+}
+
+/// `reportJson`이 없으면(undefined) 보고서 없이 확인 목록만 본다
+#[napi]
+pub fn escalation_signature_set_key(report_json: Option<String>, checks_json: String) -> Result<String> {
+    let report = match report_json {
+        Some(text) => Some(input(&text, "검증 보고서")?),
+        None => None,
+    };
+    fail(escalation::signature_set_key(report.as_ref(), &input(&checks_json, "워크플로 확인 목록")?))
+}
+
+#[napi]
+pub fn escalation_should_escalate(history: Vec<String>, times: f64) -> bool {
+    escalation::should_escalate(&history, times)
+}
+
+#[napi]
+pub fn escalation_should_promote(same_signature_times: Option<f64>, default_times: f64, after_failures: Option<f64>, history: Vec<String>) -> bool {
+    escalation::should_promote(same_signature_times, default_times, after_failures, &history)
+}
+
+#[napi]
+pub fn escalation_retry_budget_for(retry_budget: Option<f64>, default_budget: f64) -> f64 {
+    escalation::retry_budget_for(retry_budget, default_budget)
+}
+
+#[napi]
+pub fn escalation_prompt(summary: String, last_feedback: Option<String>) -> String {
+    escalation::escalation_prompt(&summary, last_feedback.as_deref())
+}

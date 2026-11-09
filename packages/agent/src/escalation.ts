@@ -6,8 +6,11 @@
  * - 승격 여부는 모델의 자기 평가가 아니라 게이트의 실패 서명이 정한다.
  * - 기본값은 지금 동작(승격 없음)이다. 옵션을 줄 때만 승격한다.
  * - 효과는 벤치로 잰 뒤에만 주장한다. 여기서는 규칙만 정하고 수치를 말하지 않는다.
+ *
+ * 판정은 Rust(crates/bstudio-guard/src/escalation.rs, ADR-191 3단계)가 한다. 이 파일은 타입·기본값과
+ * 같은 이름·시그니처의 껍데기다(기본값은 여기서 정해 Rust에 넘긴다).
  */
-import { signatureFromCheck, signatureKey, signaturesFromReport } from './coordination/signature';
+import { encodeNative, native } from '@b-studio/sandbox';
 import type { VerificationReport } from './verify';
 import type { WorkflowCheck } from './workflow';
 
@@ -39,10 +42,7 @@ export interface EscalationPolicy {
  * 키를 정렬·중복 제거해 합친 문자열 하나로 두어, 두 시도의 "실패한 것의 집합"이 같은지를 문자열 비교로 볼 수 있게 한다.
  */
 export function signatureSetKey(report: VerificationReport | undefined, checks: readonly WorkflowCheck[] = []): string {
-  const keys = new Set<string>();
-  if (report) for (const signature of signaturesFromReport(report)) keys.add(signatureKey(signature));
-  for (const check of checks) if (!check.ok) keys.add(signatureKey(signatureFromCheck(check)));
-  return [...keys].sort().join('\n');
+  return native.escalationSignatureSetKey(encodeNative(report), encodeNative(checks));
 }
 
 /**
@@ -51,12 +51,7 @@ export function signatureSetKey(report: VerificationReport | undefined, checks: 
  * "한 번 승격하면 다시 승격하지 않는다"는 규칙은 호출자가 기억한다. 이 함수는 기록만 보고 판단한다.
  */
 export function shouldEscalate(history: readonly string[], times: number): boolean {
-  if (times < 1 || history.length < times) return false;
-  const last = history[history.length - 1];
-  for (let index = history.length - times; index < history.length; index += 1) {
-    if (history[index] !== last) return false;
-  }
-  return true;
+  return native.escalationShouldEscalate([...history], times);
 }
 
 /**
@@ -66,15 +61,12 @@ export function shouldEscalate(history: readonly string[], times: number): boole
  * "한 실행에 한 번만 승격"은 호출자가 기억한다(기존 규칙 그대로).
  */
 export function shouldPromote(policy: EscalationPolicy, history: readonly string[]): boolean {
-  const times = policy.sameSignatureTimes ?? DEFAULT_SAME_SIGNATURE_TIMES;
-  if (shouldEscalate(history, times)) return true;
-  return policy.afterFailures !== undefined && history.length >= policy.afterFailures;
+  return native.escalationShouldPromote(policy.sameSignatureTimes, DEFAULT_SAME_SIGNATURE_TIMES, policy.afterFailures, [...history]);
 }
 
 /** 승격한 뒤 줄 재시도 횟수. 정책에 없으면 기본값을 쓰고, 0 이하이거나 숫자가 아니면 0(예산 없음) */
 export function retryBudgetFor(policy: EscalationPolicy): number {
-  const budget = policy.retryBudget ?? DEFAULT_ESCALATION_RETRY_BUDGET;
-  return Number.isFinite(budget) && budget > 0 ? Math.floor(budget) : 0;
+  return native.escalationRetryBudgetFor(policy.retryBudget, DEFAULT_ESCALATION_RETRY_BUDGET);
 }
 
 /**
@@ -83,5 +75,5 @@ export function retryBudgetFor(policy: EscalationPolicy): number {
  * 그래야 올라간 모델이 무엇을 고쳐야 하는지 안다
  */
 export function escalationPrompt(summary: string, lastFeedback: string | undefined): string {
-  return lastFeedback ? `${summary}\n\n직전 검증 결과를 다시 보냅니다.\n\n${lastFeedback}` : summary;
+  return native.escalationPrompt(summary, lastFeedback);
 }

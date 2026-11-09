@@ -269,6 +269,21 @@ interface NativeGuard {
   nextCliTier(tier: string): string | null | undefined;
   higherCliTier(a: string | null | undefined, b: string): string;
   routeCliTier(prompt: string, intent: string, stickyTier?: string | null): string;
+  // ── agent: coordination·escalation(3단계 3i). 객체는 JSON 문자열(encodeNative·decodeNative). 선언한 모양이 어긋난 입력은 던진다
+  coordNormalizeMessage(text: string): string;
+  coordSignatureKey(signatureJson: string): string;
+  coordSignaturesFromReport(reportJson: string): string;
+  coordSignatureFromCheck(checkJson: string): string;
+  coordFailureNotesFromReport(reportJson: string, checksJson: string): string;
+  coordFailureNotesFromEvents(eventsJson: string): string;
+  coordNoteBytes(body: string): number;
+  coordCanRead(topology: string, readerLane: string, readerGroup: string | undefined | null, noteBy: string, noteLane: string, noteGroup: string | undefined | null, hub: string): boolean;
+  // reportJson이 undefined면 보고서 없이 확인 목록만 본다. 기본값(sameSignatureTimes·retryBudget)은 호출하는 TS가 정해 넘긴다
+  escalationSignatureSetKey(reportJson: string | undefined | null, checksJson: string): string;
+  escalationShouldEscalate(history: string[], times: number): boolean;
+  escalationShouldPromote(sameSignatureTimes: number | undefined | null, defaultTimes: number, afterFailures: number | undefined | null, history: string[]): boolean;
+  escalationRetryBudgetFor(retryBudget: number | undefined | null, defaultBudget: number): number;
+  escalationPrompt(summary: string, lastFeedback: string | undefined | null): string;
 }
 
 export interface NativeHostPty {

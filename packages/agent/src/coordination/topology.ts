@@ -5,6 +5,7 @@
  * mesh는 모든 레인을 연다. 검증기(플랫폼)가 쓴 메모는 어느 topology에서도 읽힌다 —
  * 실패 서명은 모든 레인에 공통인 사실이기 때문이다.
  */
+import { native } from '@b-studio/sandbox';
 import type { Note } from './notes';
 
 export type Topology = 'star' | 'hierarchical' | 'mesh';
@@ -15,16 +16,6 @@ export interface Reader {
 }
 
 export function canRead(topology: Topology, reader: Reader, note: Note, hub: string): boolean {
-  // 조정자(허브)는 중계(S7)를 위해 모든 메모를 읽는다. 화면용 canLaneRead에는 허브 독자가 없어 규칙이 갈리지 않는다
-  if (reader.lane === hub) return true;
-  // 플랫폼(검증기)이 쓴 메모는 topology와 무관하게 모든 레인이 읽는다
-  if (note.author.by === 'platform') return true;
-  // 자기 메모는 항상 읽는다
-  if (note.author.lane === reader.lane) return true;
-  if (topology === 'mesh') return true;
-  // 허브(계획·통합)가 쓴 메모는 star·hierarchical 모두에서 읽는다
-  if (note.author.lane === hub) return true;
-  if (topology === 'hierarchical') return reader.group !== undefined && note.group === reader.group;
-  // star: 레인끼리 직접 보지 않는다
-  return false;
+  // 판정은 Rust(crates/bstudio-guard/src/coordination.rs, ADR-191 3단계)가 한다
+  return native.coordCanRead(topology, reader.lane, reader.group, note.author.by, note.author.lane, note.group, hub);
 }
