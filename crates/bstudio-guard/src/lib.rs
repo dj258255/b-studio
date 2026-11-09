@@ -5,9 +5,11 @@
 
 pub mod compose_override;
 pub mod container_policy;
+pub mod coordination;
 pub mod deploy_plan;
 pub mod docker_format;
 pub mod edge_config;
+pub mod escalation;
 pub mod git_mask;
 pub mod host_containers;
 pub mod host_processes;

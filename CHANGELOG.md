@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 레인 협업의 실패 서명·메모 크기·읽기 권한(`packages/agent/src/coordination/`의 `signature`·`notes`·`topology`)과 모델 승격 판정(`escalation.ts`)을 Rust로 옮겼습니다(ADR-191 3단계 3i, #1073). 서명 글자와 승격 판정은 같고, 옛 TS와 같은 무작위 입력 각 18만 번(시드 6개)에서 다른 결과가 0이었고 승격 판정이 뒤집힌 것도 0이었습니다. 짝 없는 서로게이트는 U+FFFD로 바뀝니다(메시지 200자 경계가 이모지를 가르는 경우 포함). `coordination/boundary.test.ts`는 Rust 판정 로더 세 이름만 `@b-studio/sandbox`에서 받도록 허용했습니다.
 - 게이트의 자동 화면 확인이 쓰는 import 그래프(소스 읽기·별칭 해석·역추적)의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3b, #1062). 파일을 읽는 순서와 상한은 그대로이고, 같은 거리의 page를 여는 순서만 `localeCompare`에서 UTF-16 코드 단위 순서로 바뀝니다.
 - 요구사항을 GitHub 이슈로 발행하는 문안·판정(관리 영역 본문, 해시, 추적 이슈 표, 발행 계획, 상태 댓글, 이슈 폼 읽기)을 Rust로 옮겼습니다(ADR-191 3단계 3c, #1063). 글자와 판정은 같고, 옛 TS와 같은 무작위 입력 각 9만 번이 모두 같았습니다. `ALLOWED_REQUIREMENT_ENDPOINTS` 정규식 목록은 내보내지 않고 `assertAllowedRequirementEndpoint`만 남겼습니다.
 - 테스트 발견(`packages/agent/src/test-discovery.ts`: JUnit·Vitest/Jest/Playwright·pytest의 스위트·테스트 읽기, 요구사항 id 찾기, 평탄화)을 Rust로 옮겼습니다(ADR-191 3단계 3a, #1061). TS에는 같은 이름·시그니처의 껍데기만 남았고, 쓰이는 곳이 없던 정규식 상수 `JUNIT_FILE_PATTERN`·`JS_TEST_FILE_PATTERN`·`PYTEST_FILE_PATTERN` export는 지웠습니다. 짝 없는 서로게이트는 U+FFFD로 바뀌고, 스위트가 약 60단계를 넘게 중첩된 결과는 평탄화하지 않고 던집니다.
