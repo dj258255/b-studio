@@ -2040,3 +2040,30 @@ pub fn stuck_loading_detect(text: String, evidence_json: Option<String>) -> Resu
     };
     Ok(sl::detect_stuck_loading(&text, evidence.as_ref()))
 }
+
+use bstudio_guard::{cli_failure, services};
+
+#[napi]
+pub fn services_for_files(input_json: String) -> Result<String> {
+    fail(services::services_for_files_json(&input_json))
+}
+
+#[napi]
+pub fn owns_file(path: String, includes: Vec<String>, file: String) -> bool {
+    services::owns_file(&path, &includes, &file)
+}
+
+#[napi]
+pub fn is_compose_file(root: String, compose_path: String, cwd: String, file: String) -> bool {
+    services::is_compose_file(&root, &compose_path, &cwd, &file)
+}
+
+#[napi]
+pub fn describe_cli_text(raw: String) -> String {
+    cli_failure::describe_cli_text(&raw)
+}
+
+#[napi]
+pub fn cli_failure_reason(summary: String, detail: String) -> String {
+    cli_failure::failure_reason(&summary, &detail)
+}

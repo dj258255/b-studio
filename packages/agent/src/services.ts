@@ -1,6 +1,11 @@
-import path from 'node:path';
-import { SPEC_FILE, type LoadedProject, type ManagedServiceSpec } from '@b-studio/spec';
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
+import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 
+/**
+ * 바뀐 파일이 어느 managed 서비스에 속하는지의 판정은 Rust(crates/bstudio-guard/src/services.rs, ADR-191 3단계 3l)가 한다.
+ * 이 파일은 타입과 같은 이름·시그니처의 껍데기다. 판정에 필요한 필드(managed의 이름·path·includes, root, composePath)만 골라 넘기고,
+ * 돌려받은 위치로 원래 문자열을 꺼낸다.
+ */
 export interface FileServiceMapping {
   /** 바뀐 파일이 속한 managed 서비스 (중복 없음, studio.yaml 순서) */
   services: string[];
@@ -19,24 +24,12 @@ export interface FileServiceMapping {
  * (도그푸딩 마찰 119, ADR-139)
  */
 export function servicesForFiles(project: LoadedProject, files: readonly string[]): FileServiceMapping {
-  const hit = new Set<string>();
-  const unmatched: string[] = [];
-  const projectWide = projectWideFiles(project);
-
-  for (const file of files) {
-    if (projectWide.has(normalize(file))) {
-      for (const [name] of project.managed) hit.add(name);
-      if (project.managed.length === 0) unmatched.push(file);
-      continue;
-    }
-    const owners = project.managed.filter(([, service]) => ownsFile(service, file));
-    if (owners.length > 0) owners.forEach(([name]) => hit.add(name));
-    else unmatched.push(file);
-  }
-
+  const managed = project.managed.map(([name, service]) => ({ name, path: service.path, includes: service.includes }));
+  const input = encodeNative({ managed, root: project.root ?? '', composePath: project.composePath ?? '', cwd: process.cwd(), files });
+  const result = decodeNative<{ services: number[]; unmatched: number[] }>(native.servicesForFiles(input));
   return {
-    services: project.managed.map(([name]) => name).filter((name) => hit.has(name)),
-    unmatched,
+    services: result.services.map((index) => managed[index]!.name),
+    unmatched: result.unmatched.map((index) => files[index]!),
   };
 }
 
@@ -46,27 +39,7 @@ export function servicesForFiles(project: LoadedProject, files: readonly string[
  * 두 곳에 따로 있으면 한쪽만 고치고 잊기 쉽다
  */
 export function ownsFile(service: Pick<ManagedServiceSpec, 'path' | 'includes'>, file: string): boolean {
-  return [service.path, ...(service.includes ?? [])].some((root) => isUnderRoot(file, root));
-}
-
-function isUnderRoot(file: string, root: string): boolean {
-  const normalized = normalize(root);
-  return normalized === '' || file === normalized || file.startsWith(`${normalized}/`);
-}
-
-/**
- * studio.yaml과 compose 파일(프로젝트 루트 기준 상대 경로)의 집합.
- * root·composePath가 없는 project(일부 테스트의 최소 fixture)는 compose 쪽을 건너뛴다 — 크래시보다는
- * "예전처럼 매칭 안 함"이 안전하다
- */
-function projectWideFiles(project: LoadedProject): Set<string> {
-  const files = new Set([SPEC_FILE]);
-  if (project.root && project.composePath) files.add(normalize(path.relative(project.root, project.composePath)));
-  return files;
-}
-
-function normalize(servicePath: string): string {
-  return servicePath.replace(/^\.\/?/, '').replace(/\/+$/, '');
+  return native.ownsFile(service.path, service.includes ?? [], file);
 }
 
 /**
@@ -75,6 +48,5 @@ function normalize(servicePath: string): string {
  * 올릴지 판단할 때 따로 본다(도그푸딩 마찰 138, ADR-146). root·composePath가 없는 project(최소 fixture)는 false다
  */
 export function isComposeFile(project: Pick<LoadedProject, 'root' | 'composePath'>, file: string): boolean {
-  if (!project.root || !project.composePath) return false;
-  return normalize(file) === normalize(path.relative(project.root, project.composePath));
+  return native.isComposeFile(project.root ?? '', project.composePath ?? '', process.cwd(), file);
 }
