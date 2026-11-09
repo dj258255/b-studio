@@ -949,3 +949,76 @@ impl ExecSession {
         self.handle.terminate();
     }
 }
+
+// ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts의 잠금·빈 포트·상태/compose 파일·운영 주소 확인 한 번.
+// 파일·소켓 syscall은 blocking이라 spawn_blocking으로 JS 스레드 밖에서 돌린다. 판정은 하지 않는다.
+use bstudio_io::deploy_io;
+use std::path::Path;
+use std::time::Duration;
+
+fn io_error(context: &str, error: std::io::Error) -> Error {
+    Error::from_reason(format!("{context}: {error}"))
+}
+
+async fn blocking<T: Send + 'static>(task: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(task).await.map_err(|e| Error::from_reason(format!("I/O 작업이 중단됐습니다: {e}")))
+}
+
+/// `127.0.0.1`의 빈 포트 하나
+#[napi]
+pub async fn free_port() -> Result<u32> {
+    let port = blocking(deploy_io::free_port).await?.map_err(|e| io_error("빈 포트를 찾지 못했습니다", e))?;
+    Ok(u32::from(port))
+}
+
+/// 배포 잠금을 잡는다. 잡았으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid(0이 아님). 그 밖의 I/O 오류는 거절한다
+#[napi]
+pub async fn acquire_deploy_lock(lock: String) -> Result<u32> {
+    match blocking(move || deploy_io::acquire_lock(Path::new(&lock))).await?.map_err(|e| io_error("배포 잠금을 잡지 못했습니다", e))? {
+        deploy_io::LockOutcome::Acquired => Ok(0),
+        deploy_io::LockOutcome::Held(pid) => Ok(pid),
+    }
+}
+
+/// 배포 잠금 파일을 지운다(없거나 지우지 못해도 알리지 않는다)
+#[napi]
+pub async fn release_deploy_lock(lock: String) -> Result<()> {
+    blocking(move || deploy_io::release_lock(Path::new(&lock))).await
+}
+
+/// 파일을 UTF-8 문자열로 읽는다. 없거나 읽지 못하면 null
+#[napi]
+pub async fn read_text_file(path: String) -> Result<Option<String>> {
+    blocking(move || deploy_io::read_text(Path::new(&path))).await
+}
+
+/// 부모 폴더를 만들고 파일을 쓴다(덮어쓴다)
+#[napi]
+pub async fn write_text_file(path: String, content: String) -> Result<()> {
+    blocking(move || deploy_io::write_text(Path::new(&path), &content)).await?.map_err(|e| io_error("파일을 쓰지 못했습니다", e))
+}
+
+/// 부모 폴더를 만들고 임시 파일에 쓴 뒤 rename으로 바꿔 넣는다
+#[napi]
+pub async fn write_text_file_atomic(path: String, content: String) -> Result<()> {
+    blocking(move || deploy_io::write_text_atomic(Path::new(&path), &content)).await?.map_err(|e| io_error("파일을 쓰지 못했습니다", e))
+}
+
+/// `probe_http_status`의 결과. 상태를 얻으면 `status`, 못 얻으면 `error`(문장)
+#[napi(object)]
+pub struct HttpProbe {
+    pub status: Option<u32>,
+    pub error: Option<String>,
+}
+
+/// `http://127.0.0.1:<port><path>`에 GET 한 번(리다이렉트 안 따름, 본문 안 읽음). 던지지 않는다
+#[napi]
+pub async fn probe_http_status(port: u32, path: String, timeout_ms: u32) -> Result<HttpProbe> {
+    let Ok(port) = u16::try_from(port) else {
+        return Ok(HttpProbe { status: None, error: Some(format!("포트 {port}이(가) 범위를 벗어났습니다")) });
+    };
+    Ok(match deploy_io::probe_http_status(port, &path, Duration::from_millis(u64::from(timeout_ms))).await {
+        Ok(status) => HttpProbe { status: Some(u32::from(status)), error: None },
+        Err(error) => HttpProbe { status: None, error: Some(error) },
+    })
+}
