@@ -5,14 +5,17 @@
 
 pub mod check_evidence;
 pub mod cli_router;
+pub mod commit_message;
 pub mod compose_override;
 pub mod container_policy;
 pub mod context_clearing;
 pub mod contract_diff;
+pub mod coordination;
 pub mod declared_checks;
 pub mod deploy_plan;
 pub mod docker_format;
 pub mod edge_config;
+pub mod escalation;
 pub mod git_mask;
 pub mod host_containers;
 pub mod host_processes;
@@ -24,6 +27,7 @@ pub mod load_check;
 pub mod model_router;
 pub mod next_routes;
 pub mod node_path;
+pub mod pr_review;
 pub mod project_status;
 pub mod public_url;
 pub mod readiness;

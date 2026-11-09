@@ -7,6 +7,7 @@
  *  - failure 메모는 플랫폼(검증기)만 쓴다. 모델의 추측은 실패로 넘기지 않는다
  *  - 조율 모듈은 Git·샌드박스·작업 공간을 모른다(coordination/boundary.test.ts가 강제)
  */
+import { native } from '@b-studio/sandbox';
 
 export type NoteKind = 'contract' | 'failure' | 'fact';
 
@@ -44,5 +45,5 @@ export const NOTE_PRIORITY: Record<NoteKind, number> = { failure: 3, contract: 2
 
 /** 본문 크기는 사람이 읽는 글자 수가 아니라 전송 바이트로 잰다(멀티바이트 문자 포함) */
 export function noteBytes(body: string): number {
-  return Buffer.byteLength(body, 'utf8');
+  return native.coordNoteBytes(body);
 }
