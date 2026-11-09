@@ -30,3 +30,12 @@ export function runCommandToFile(bin: string, args: string[], outputFile: string
 export function runCommandFromFile(bin: string, args: string[], inputFile: string, { signal, env }: StreamExecOptions = {}): Promise<ExecResult> {
   return native.runCommandFromFile(bin, args, inputFile, definedEnv(env), signal);
 }
+
+/**
+ * `bin args`를 한 번 돌려 stdout·stderr를 모은다(2c-2, #1043). `#docker`가 쓴다.
+ * 던지지 않는다 — 비0 종료·취소·spawn 실패·maxBuffer 초과 모두 결과로 돌려준다(옛 `execFileAsync` + `isExecFailure`와 같다).
+ * `signal`로 취소하면 거절하지 않고 그때까지의 부분 출력과 `exitCode: 1`을 돌려준다(`stats`의 timeout-cutoff 보존).
+ */
+export function runCommand(bin: string, args: string[], { signal, env, input }: StreamExecOptions & { input?: string } = {}): Promise<ExecResult> {
+  return native.runCommand(bin, args, input ?? null, definedEnv(env), signal);
+}

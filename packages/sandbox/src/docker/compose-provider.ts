@@ -41,7 +41,7 @@ import type {
   SyncOptions,
   SyncResult,
 } from '../types';
-import { runCommandFromFile, runCommandToFile } from '../stream-exec';
+import { runCommand, runCommandFromFile, runCommandToFile } from '../stream-exec';
 import { findFreeHostPort } from './free-port';
 import {
   buildOverride,
@@ -1106,20 +1106,11 @@ class LocalDockerSandbox implements Sandbox {
     );
   }
 
+  // docker/docker compose를 한 번 돌려 stdout·stderr를 모은다. 실행·취소는 Rust(crates/bstudio-io)가 한다(2c-2, #1043).
+  // 던지지 않는다 — 비0 종료·취소·spawn 실패·maxBuffer 초과 모두 결과로 돌려준다(옛 execFileAsync + isExecFailure와 같다).
+  // 취소하면 거절하지 않고 부분 출력과 exitCode 1을 돌려줘, stats가 signal.aborted로 timeout-cutoff를 판단하는 길을 보존한다.
   async #docker(args: string[], signal?: AbortSignal, input?: string): Promise<ExecResult> {
-    try {
-      const running = execFileAsync(this.#dockerBin, args, { signal, maxBuffer: 256 * 1024 * 1024, env: this.#environment() });
-      running.child.stdin?.end(input);
-      const { stdout, stderr } = await running;
-      return { exitCode: 0, stdout, stderr };
-    } catch (error) {
-      if (!isExecFailure(error)) throw error;
-      return {
-        exitCode: typeof error.code === 'number' ? error.code : 1,
-        stdout: error.stdout ?? '',
-        stderr: error.stderr || error.message,
-      };
-    }
+    return runCommand(this.#dockerBin, args, { signal, env: this.#environment(), input });
   }
 
   async #composeOrThrow(args: string[], signal?: AbortSignal): Promise<ExecResult> {
@@ -1262,8 +1253,4 @@ async function hashOrMissing(file: string): Promise<string> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'MISSING';
     throw error;
   }
-}
-
-function isExecFailure(error: unknown): error is Error & { code?: number | string; stdout?: string; stderr?: string } {
-  return error instanceof Error && 'stdout' in error;
 }
