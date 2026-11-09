@@ -4,7 +4,11 @@
  * E2 실행 8회의 세션 기록에서 도구 결과가 토큰 누수의 대부분이었다(run_in_service 70%·http_request 14%·read_file 11%).
  * 결과는 실행이 끝날 때까지 컨텍스트에 남아 뒤 턴마다 캐시 읽기로 다시 계산되므로, 결과 본문을 줄이는 것이 곧 비용을 줄인다.
  * 여기서는 자르기 규칙만 정의하고, 실제 적용은 tools.ts가 한다(테스트가 쉽도록 순수 함수로 둔다).
+ * 자르기·HTML 벗기기·반복 결과 문구의 판정은 Rust(crates/bstudio-guard/src/tool_output.rs, ADR-191 3단계 3f)가 한다. 이 파일의 함수는 같은 이름·시그니처의 껍데기다.
+ * 예산 상수는 이 파일이 정한다(러너·tools.ts가 읽는다). 결과 캐시(Map)는 JS 객체라 TS에 둔다.
  */
+
+import { native } from '@b-studio/sandbox';
 
 /**
  * 명령 출력(stdout+stderr 합) 예산. 가장 큰 누수원(run_in_service)이라 가장 작게 둔다.
@@ -28,68 +32,37 @@ export type SelfCheckMode = 'full' | 'lean';
 /** lean에서 성공한(종료 코드 0) 명령 출력 예산. 성공 로그는 대개 "통과"만 알면 되므로 끝부분 위주로 짧게 남긴다 */
 export const LEAN_SUCCESS_OUTPUT_BUDGET = 800;
 
-/** 자른 사실을 숨기지 않고 한 줄로 알린다 */
-function clipNote(total: number, omitted: number, hint?: string): string {
-  return `[... 전체 ${total}자 중 ${omitted}자 생략${hint ? `. ${hint}` : ''} ...]`;
-}
-
-/**
- * 명령 출력은 뒤쪽 위주로 남긴다(앞 25%·뒤 75%). 긴 테스트·빌드 로그의 실패 요약이 뒤에 있기 때문이다.
- * gzip처럼 스트림이 이상해도 안전하도록 코드 유닛이 아니라 UTF-16 슬라이스로 자른다(서로게이트 페어가 갈라질 수 있음은 감수).
- */
+/** 명령 출력은 뒤쪽 위주로 남긴다(앞 25%·뒤 75%). 긴 테스트·빌드 로그의 실패 요약이 뒤에 있기 때문이다. UTF-16 단위로 잘라 서로게이트 쌍이 갈라질 수 있다(갈라진 자리는 U+FFFD) */
 export function clipCommandOutput(text: string, budget: number = COMMAND_OUTPUT_BUDGET): string {
-  if (text.length <= budget) return text;
-  const head = Math.floor(budget * 0.25);
-  const tail = budget - head;
-  return `${text.slice(0, head)}\n${clipNote(text.length, text.length - budget, '필요하면 grep·tail로 좁혀 다시 실행')}\n${text.slice(-tail)}`;
+  return native.clipCommandOutput(text, budget);
 }
 
 /** 파일 등 일반 글은 앞쪽 위주로 남긴다(앞 80%·뒤 20%). 처음부터 읽는 경우가 많다 */
 export function clipText(text: string, budget: number, hint?: string): string {
-  if (text.length <= budget) return text;
-  const head = Math.floor(budget * 0.8);
-  const tail = budget - head;
-  return `${text.slice(0, head)}\n${clipNote(text.length, text.length - budget, hint)}\n${text.slice(-tail)}`;
+  return native.clipText(text, budget, hint);
 }
 
-/**
- * HTML에서 보이는 글자만 남긴다. `<script>`·`<style>`·`<noscript>`와 주석을 **먼저 통째로** 지워
- * 스크립트 안의 `<`가 태그로 해석되지 않게 한다(개발 서버 페이지의 스크립트가 13,430자였다).
- * 그다음 나머지 태그를 벗기고, 기본 엔티티를 풀고, 공백을 정리한다. `<title>` 글자는 태그만 벗겨 남는다.
- */
+/** HTML에서 보이는 글자만 남긴다. `<script>`·`<style>`·`<noscript>`와 주석을 먼저 통째로 지우고, 나머지 태그를 벗기고, 기본 엔티티를 풀고, 공백을 정리한다 */
 export function visibleHtml(html: string): string {
-  return html
-    .replace(/<!--[\s\S]*?-->/g, ' ')
-    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, ' ')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/&nbsp;/gi, ' ')
-    .replace(/&lt;/gi, '<')
-    .replace(/&gt;/gi, '>')
-    .replace(/&quot;/gi, '"')
-    .replace(/&#39;|&apos;/gi, "'")
-    // &amp;는 마지막에 푼다. 먼저 풀면 &amp;lt;가 <로 잘못 풀린다
-    .replace(/&amp;/gi, '&')
-    .replace(/\s+/g, ' ')
-    .trim();
+  return native.visibleHtml(html);
 }
 
 /** HTML인지 판별한다. content-type이 우선이고, 없으면 문서 시작으로 본다 */
 export function isHtmlContent(contentType: string | undefined, text: string): boolean {
-  if (contentType && /(text\/html|application\/xhtml\+xml)/i.test(contentType)) return true;
-  return /^\s*(<!doctype html|<html[\s>])/i.test(text);
+  return native.isHtmlContent(contentType, text);
 }
 
-/** 반복 결과 대체 문구의 접두어. token-report가 이 문구로 "같은 결과 반복"을 센다 */
-export const REPEAT_NOTE_PREFIX = '(앞의 ';
+/** 반복 결과 대체 문구의 접두어. token-report가 이 문구로 "같은 결과 반복"을 센다. 문구는 Rust가 정한다 */
+export const REPEAT_NOTE_PREFIX: string = native.repeatNotePrefix();
 
 /** 앞선 같은 호출의 결과와 같을 때 본문 대신 돌려주는 문구 */
 export function repeatNote(call: number): string {
-  return `${REPEAT_NOTE_PREFIX}${call}번째 호출 결과와 같습니다)`;
+  return native.repeatNote(call);
 }
 
 /** 어떤 결과가 반복 대체 문구인지 */
 export function isRepeatNote(text: string): boolean {
-  return text.startsWith(REPEAT_NOTE_PREFIX) && text.endsWith('번째 호출 결과와 같습니다)');
+  return native.isRepeatNote(text);
 }
 
 /**

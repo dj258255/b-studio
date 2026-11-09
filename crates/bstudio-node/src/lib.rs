@@ -1464,6 +1464,335 @@ pub fn import_graph_trace_pages(changed: Vec<String>, reverse_json: String, file
     Ok(out(&js_json::object(vec![("candidates", Some(JsValue::Arr(candidates))), ("truncated", Some(JsValue::Arr(truncated)))])))
 }
 
+// ── 테스트 실행·결과(ADR-191 3d). 결과 객체는 JSON 문자열이다(`NaN`·`Infinity`가 나올 수 있는 결과는 표시 객체로, js_json 참고).
+// TS 껍데기: packages/agent/src/{test-run,test-results}.ts
+
+use bstudio_guard::{test_results, test_run};
+
+/// 상수는 Rust가 정한 값을 TS가 읽어 쓴다(한 곳이 정한다)
+#[napi]
+pub fn test_run_constants() -> String {
+    format!(
+        "{{\"jestLikeReportPath\":{},\"pytestReportPath\":{},\"containerProjectRoot\":{}}}",
+        bstudio_guard::js::json_quote(test_run::JEST_LIKE_REPORT_PATH),
+        bstudio_guard::js::json_quote(test_run::PYTEST_REPORT_PATH),
+        bstudio_guard::js::json_quote(test_run::CONTAINER_PROJECT_ROOT),
+    )
+}
+
+/// 알 수 없는 실행기는 던진다
+#[napi]
+pub fn build_test_run_plan(
+    runner: String,
+    file: Option<String>,
+    class_name: Option<String>,
+    test_name: Option<String>,
+    wrapper: Option<bool>,
+    extra_report_roots: Vec<String>,
+) -> Result<String> {
+    fail(test_run::build_test_run_plan(&runner, file.as_deref(), class_name.as_deref(), test_name.as_deref(), wrapper, &extra_report_roots)).map(|plan| plan.to_json())
+}
+
+#[napi]
+pub fn clear_test_reports_command(extra_report_roots: Vec<String>) -> Vec<String> {
+    test_run::clear_test_reports_command(&extra_report_roots)
+}
+
+#[napi]
+pub fn report_roots_for_includes(includes: Vec<String>, root: String) -> Vec<String> {
+    test_run::report_roots_for_includes(&includes, &root)
+}
+
+#[napi]
+pub fn split_collected_reports(stdout: String, single_file_label: String) -> String {
+    test_run::reports_to_json(&test_run::split_collected_reports(&stdout, &single_file_label))
+}
+
+/// `package_json`은 부르는 쪽의 `package.json` 값(없으면 undefined·null)
+#[napi]
+pub fn detect_runner(template: String, has_pom_xml: Option<bool>, package_json: Option<String>) -> Result<Option<String>> {
+    let package_json = package_json.map(|text| input(&text, "package.json")).transpose()?;
+    Ok(test_run::detect_runner(&template, has_pom_xml == Some(true), package_json.as_ref()).map(str::to_owned))
+}
+
+#[napi]
+pub fn runner_label(runner: String) -> Result<String> {
+    fail(test_run::runner_label(&runner)).map(str::to_owned)
+}
+
+/// 범위 밖 엔티티(`&#x110000;`)는 던진다
+#[napi]
+pub fn parse_j_unit_xml(xml: String) -> Result<String> {
+    fail(test_results::parse_junit_xml(&xml)).map(|run| out(&run))
+}
+
+/// JSON이 아니면 빈 결과, JSON `null`이면 던진다
+#[napi]
+pub fn parse_jest_like_json(json: String) -> Result<String> {
+    fail(test_results::parse_jest_like_json(&json)).map(|run| out(&run))
+}
+
+/// 행마다 짝지은 케이스의 위치(없으면 -1). 행·케이스는 판정에 쓰는 필드만 담은 JSON, `ids`는 같은 객체면 같은 값
+#[napi]
+pub fn attach_results(rows_json: String, cases_json: String, ids: Vec<u32>) -> Result<Vec<i64>> {
+    fail(test_results::attach_results(&rows_json, &cases_json, &ids))
+}
+
+#[napi]
+pub fn count_by_status(statuses_json: String) -> Result<String> {
+    fail(test_results::count_by_status(&statuses_json))
+}
+
+#[napi]
+pub fn build_fix_test_prefill(row_json: String) -> Result<String> {
+    fail(test_results::build_fix_test_prefill(&row_json))
+}
+
+#[napi]
+pub fn build_add_test_prefill(requirement_json: String) -> Result<String> {
+    fail(test_results::build_add_test_prefill(&requirement_json))
+}
+
+// ── 게이트 리뷰 판정(ADR-191 3단계 3e). 확인 선언 변경(declared-checks), 근거 줄(check-evidence), 부하 판정(load-check), 계약 비교(contract-diff).
+// 입력·출력은 JSON 문자열이다(`NaN`·`Infinity`·`-0`은 표시 객체, js_json 모듈). 판정 입력은 짝 없는 서로게이트가 있으면 던진다(review_input).
+// 모양이 어긋난 입력은 던진다. TS 껍데기: packages/agent/src/{declared-checks,check-evidence,load-check,contract-diff}.ts
+use bstudio_guard::{check_evidence, contract_diff, declared_checks, load_check, review_input};
+
+/// 판정에 쓸 JSON. 짝 없는 서로게이트가 있으면 던진다
+fn review_json(json: &str, what: &str) -> Result<JsValue> {
+    fail(review_input::parse_checked(json, what))
+}
+
+fn change_of(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> declared_checks::DeclaredCheckChange {
+    declared_checks::DeclaredCheckChange { added, removed, changed }
+}
+
+#[napi]
+pub fn diff_declared_checks(started_json: String, latest_json: String) -> Result<String> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    Ok(out(&fail(declared_checks::diff_declared_checks(Some(&started), Some(&latest)))?.to_value()))
+}
+
+#[napi]
+pub fn weakened_declarations(started_json: String, latest_json: String) -> Result<Vec<String>> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    fail(declared_checks::weakened_declarations(Some(&started), Some(&latest)))
+}
+
+#[napi]
+pub fn has_declared_check_change(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> bool {
+    declared_checks::has_declared_check_change(&change_of(added, removed, changed))
+}
+
+#[napi]
+pub fn describe_declared_check_change(added: Vec<String>, removed: Vec<String>, changed: Vec<String>) -> String {
+    declared_checks::describe_declared_check_change(&change_of(added, removed, changed))
+}
+
+/// 남은 선언이 없으면 null
+#[napi]
+pub fn with_declared_checks(started_json: String, latest_json: String) -> Result<Option<String>> {
+    let (started, latest) = (review_json(&started_json, "시작할 때의 선언")?, review_json(&latest_json, "지금의 선언")?);
+    Ok(fail(declared_checks::with_declared_checks(Some(&started), Some(&latest)))?.map(|merged| out(&merged)))
+}
+
+#[napi]
+pub fn load_request_for(check_json: String) -> Result<String> {
+    Ok(out(&fail(load_check::load_request_for(&review_json(&check_json, "부하 확인 선언")?))?))
+}
+
+#[napi]
+pub fn describe_load_expect(expect_json: String) -> Result<String> {
+    fail(load_check::describe_load_expect(&review_json(&expect_json, "응답 시간 기준")?))
+}
+
+#[napi]
+pub fn judge_load(check_json: String, result_json: String) -> Result<String> {
+    let (check, result) = (review_json(&check_json, "부하 확인 선언")?, review_json(&result_json, "부하 결과")?);
+    Ok(out(&fail(load_check::judge_load(&check, &result))?.to_value()))
+}
+
+/// 시크릿을 가리는 JS 함수를 부른다. 던지면 그 이유를 돌려준다
+fn redactor<'a, 'f>(redact: &'a Function<'f, String, String>) -> impl Fn(&str) -> std::result::Result<String, String> + 'a {
+    move |text| redact.call(text.to_owned()).map_err(|e| e.reason.clone())
+}
+
+/// 근거 줄에 쓰는 JSON. 판정이 아니라 설명이라 짝 없는 서로게이트는 U+FFFD로 읽는다
+fn evidence_json(json: &str, what: &str) -> Result<JsValue> {
+    input(json, what)
+}
+
+#[napi]
+pub fn finish_evidence(lines: Vec<String>, redact: Function<String, String>) -> Result<Vec<String>> {
+    fail(check_evidence::finish_evidence(&lines, &redactor(&redact)))
+}
+
+#[napi]
+pub fn browser_page_evidence(page_json: String, result_json: String, context_json: String, redact: Function<String, String>) -> Result<Vec<String>> {
+    let (page, result, context) = (evidence_json(&page_json, "화면 확인 선언")?, evidence_json(&result_json, "화면 확인 결과")?, evidence_json(&context_json, "근거 맥락")?);
+    fail(check_evidence::browser_page_evidence(&page, &result, Some(&context), &redactor(&redact)))
+}
+
+#[napi]
+pub fn http_page_evidence(page_json: String, response_json: String, context_json: String, redact: Function<String, String>) -> Result<Vec<String>> {
+    let (page, response, context) = (evidence_json(&page_json, "화면 확인 선언")?, evidence_json(&response_json, "HTTP 응답")?, evidence_json(&context_json, "근거 맥락")?);
+    fail(check_evidence::http_page_evidence(&page, &response, Some(&context), &redactor(&redact)))
+}
+
+#[napi]
+pub fn test_evidence(service: String, command: Vec<String>, elapsed_ms: f64) -> Vec<String> {
+    check_evidence::test_evidence(&service, &command, elapsed_ms)
+}
+
+/// before가 `null`이면 이전 문서가 없다
+#[napi]
+pub fn diff_contracts(before_json: String, after_json: String) -> Result<String> {
+    let (before, after) = (review_json(&before_json, "이전 계약")?, review_json(&after_json, "지금 계약")?);
+    let changes = fail(contract_diff::diff_contracts(Some(&before), &after))?;
+    Ok(out(&JsValue::Arr(changes.iter().map(contract_diff::ContractChange::to_value).collect())))
+}
+
+#[napi]
+pub fn summarize_contract(document_json: String) -> Result<String> {
+    fail(contract_diff::summarize_contract(&review_json(&document_json, "계약")?))
+}
+
+#[napi]
+pub fn format_contract_changes(changes_json: String) -> Result<String> {
+    // 변경 목록은 비교 결과를 글자로 옮길 뿐이라 짝 없는 서로게이트는 U+FFFD로 읽는다(근거 줄과 같다)
+    fail(contract_diff::format_contract_changes(&input(&changes_json, "계약 변경 목록")?))
+}
+
+// ── 토큰 예산·모델 선택(ADR-191 3f). 큰 구조는 JSON 문자열(NaN·Infinity는 표시 객체). TS 껍데기: packages/agent/src/{tool-output,context-clearing,model-router,cli-router}.ts
+
+use bstudio_guard::{cli_router, context_clearing, model_router, tool_output};
+
+#[napi]
+pub fn clip_command_output(text: String, budget: f64) -> String {
+    tool_output::clip_command_output(&text, budget)
+}
+
+#[napi]
+pub fn clip_text(text: String, budget: f64, hint: Option<String>) -> String {
+    tool_output::clip_text(&text, budget, hint.as_deref())
+}
+
+#[napi]
+pub fn visible_html(html: String) -> String {
+    tool_output::visible_html(&html)
+}
+
+#[napi]
+pub fn is_html_content(content_type: Option<String>, text: String) -> bool {
+    tool_output::is_html_content(content_type.as_deref(), &text)
+}
+
+#[napi]
+pub fn repeat_note_prefix() -> String {
+    tool_output::REPEAT_NOTE_PREFIX.to_owned()
+}
+
+#[napi]
+pub fn repeat_note(call: f64) -> String {
+    tool_output::repeat_note(call)
+}
+
+#[napi]
+pub fn is_repeat_note(text: String) -> bool {
+    tool_output::is_repeat_note(&text)
+}
+
+#[napi]
+pub fn cleared_tool_result_prefix() -> String {
+    context_clearing::CLEARED_TOOL_RESULT_PREFIX.to_owned()
+}
+
+#[napi]
+pub fn cleared_tool_result_note(chars: f64) -> String {
+    context_clearing::cleared_tool_result_note(chars)
+}
+
+#[napi]
+pub fn is_cleared_tool_result(text: String) -> bool {
+    context_clearing::is_cleared_tool_result(&text)
+}
+
+/// 비울 자리의 계획(JSON). 메시지는 읽기만 한다
+#[napi]
+pub fn plan_clear_old_tool_results(messages_json: String, keep_recent: f64, clear_at_least_chars: f64) -> Result<String> {
+    fail(context_clearing::plan_clear_old_tool_results(&messages_json, keep_recent, clear_at_least_chars))
+}
+
+#[napi]
+pub fn is_context_clearing_on(value: Option<String>) -> bool {
+    context_clearing::is_context_clearing_on(value.as_deref())
+}
+
+#[napi]
+pub fn estimate_tokens(text: String) -> f64 {
+    model_router::estimate_tokens(&text)
+}
+
+#[napi]
+pub fn classify_complexity(prompt: String, input_tokens: f64) -> String {
+    model_router::classify_complexity(&prompt, input_tokens).to_owned()
+}
+
+#[napi]
+pub fn classify_risk(prompt: String) -> String {
+    model_router::classify_risk(&prompt).to_owned()
+}
+
+#[napi]
+pub fn classify_task(prompt: String) -> String {
+    model_router::classify_task(&prompt)
+}
+
+#[napi]
+pub fn estimate_cost(pricing_json: String, usage_json: String) -> Result<Option<f64>> {
+    fail(model_router::estimate_cost(&pricing_json, &usage_json))
+}
+
+#[napi]
+pub fn route_model(profiles_json: String, request_json: String, stats_json: String) -> Result<String> {
+    fail(model_router::route_model(&profiles_json, &request_json, &stats_json))
+}
+
+#[napi]
+pub fn aggregate_model_stats(observations_json: String) -> Result<String> {
+    fail(model_router::aggregate_model_stats(&observations_json))
+}
+
+#[napi]
+pub fn validate_model_profiles(input_json: String, url_facts_json: String) -> Result<String> {
+    fail(model_router::validate_model_profiles(&input_json, &url_facts_json))
+}
+
+#[napi]
+pub fn cli_tiers() -> Vec<String> {
+    cli_router::CLI_TIERS.iter().map(|t| (*t).to_owned()).collect()
+}
+
+#[napi]
+pub fn tier_label(tier: String) -> Option<String> {
+    cli_router::tier_label(&tier).map(str::to_owned)
+}
+
+#[napi]
+pub fn next_cli_tier(tier: String) -> Option<String> {
+    cli_router::next_cli_tier(&tier).map(str::to_owned)
+}
+
+#[napi]
+pub fn higher_cli_tier(a: Option<String>, b: String) -> String {
+    cli_router::higher_cli_tier(a.as_deref(), &b).to_owned()
+}
+
+#[napi]
+pub fn route_cli_tier(prompt: String, intent: String, sticky_tier: Option<String>) -> Result<String> {
+    fail(cli_router::route_cli_tier(&prompt, &intent, sticky_tier.as_deref()))
+}
+
 // ── agent: coordination·escalation(3단계 3i). 객체는 JSON 문자열(encodeNative·decodeNative). 선언한 모양이 어긋난 입력은 던진다
 use bstudio_guard::{coordination, escalation};
 
