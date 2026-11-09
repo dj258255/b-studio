@@ -128,3 +128,4 @@ export {
   type SpawnHostPty,
 } from './host-terminal';
 export { assertSandboxId, SANDBOX_ID } from './sandbox-id';
+export { native, encodeNative, decodeNative } from './native';

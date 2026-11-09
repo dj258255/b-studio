@@ -157,6 +157,22 @@ interface NativeGuard {
   writeTextFileAtomic(path: string, content: string): Promise<void>;
   // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
   probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
+  // ── agent: 게이트 리뷰 판정(3단계 3e). 입력·출력은 JSON 문자열(encodeNative·decodeNative). 판정 입력은 짝 없는 서로게이트가 있거나 모양이 어긋나면 던진다
+  diffDeclaredChecks(startedJson: string, latestJson: string): string;
+  weakenedDeclarations(startedJson: string, latestJson: string): string[];
+  hasDeclaredCheckChange(added: string[], removed: string[], changed: string[]): boolean;
+  describeDeclaredCheckChange(added: string[], removed: string[], changed: string[]): string;
+  withDeclaredChecks(startedJson: string, latestJson: string): string | null | undefined;
+  loadRequestFor(checkJson: string): string;
+  describeLoadExpect(expectJson: string): string;
+  judgeLoad(checkJson: string, resultJson: string): string;
+  finishEvidence(lines: string[], redact: (text: string) => string): string[];
+  browserPageEvidence(pageJson: string, resultJson: string, contextJson: string, redact: (text: string) => string): string[];
+  httpPageEvidence(pageJson: string, responseJson: string, contextJson: string, redact: (text: string) => string): string[];
+  testEvidence(service: string, command: string[], elapsedMs: number): string[];
+  diffContracts(beforeJson: string, afterJson: string): string;
+  summarizeContract(documentJson: string): string;
+  formatContractChanges(changesJson: string): string;
 }
 
 export interface NativeHostPty {
