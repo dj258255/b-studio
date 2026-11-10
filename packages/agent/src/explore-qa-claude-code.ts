@@ -1,6 +1,6 @@
 import { createSdkMcpServer, query, tool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { BrowserFrame } from './browser-check';
-import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-runner';
+import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-sdk';
 import { ClaudeCodeUsageTracker, zodShape } from './claude-code-runner';
 import {
   buildExploreQaResult,

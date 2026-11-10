@@ -1,7 +1,7 @@
-import type { McpServerConfig, Options, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { DEFAULT_COMPACT_WINDOW, resolveCompactWindow, runClaudeCodeAgent, type ClaudeCodeQuery, type ClaudeCodeSdk } from './claude-code-runner';
+import { DEFAULT_COMPACT_WINDOW, resolveCompactWindow, runClaudeCodeAgent } from './claude-code-runner';
+import { fakeClaudeCli, type FakeInvocation } from './fake-claude-cli';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
@@ -14,55 +14,27 @@ beforeEach(async () => {
 const WINDOW = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
 
 /**
- * 가짜 로컬 CLI 러너. query를 열 때마다 옵션을 기록한다.
- * failFirst면 첫 query는 네트워크 오류로 끝나 재시도가 새 query를 열게 한다. compact면 init 직후 compact_boundary를 낸다.
+ * 가짜 CLI. 프로세스를 띄울 때마다 받은 환경을 기록한다.
+ * failFirst면 첫 프로세스는 네트워크 오류로 끝나 재시도가 새 프로세스를 띄우게 한다. compact면 init 직후 compact_boundary를 낸다.
  */
 function fakeSdk({ failFirst = false, compact, compactingStatus = 0 }: { failFirst?: boolean; compact?: Record<string, unknown>; compactingStatus?: number } = {}) {
-  const opened: Options[] = [];
-  const sdk: ClaudeCodeSdk = {
-    createSdkMcpServer: (config) => ({ type: 'sdk', name: config.name, instance: {} }) as unknown as McpServerConfig,
-    query({ prompt, options }) {
-      opened.push(options);
-      const call = opened.length;
-      async function* run(): AsyncGenerator<SDKMessage> {
-        yield { type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: 's1' } as unknown as SDKMessage;
-        // SDK는 요약을 시작하면 status: 'compacting'을 보낸다(되풀이해 보낼 수 있다)
-        for (let i = 0; i < compactingStatus; i++) yield { type: 'system', subtype: 'status', status: 'compacting', session_id: 's1' } as unknown as SDKMessage;
-        if (compact) yield { type: 'system', subtype: 'compact_boundary', session_id: 's1', compact_metadata: compact } as unknown as SDKMessage;
-        for await (const _user of prompt) {
-          const failed = failFirst && call === 1;
-          yield {
-            type: 'result',
-            subtype: 'success',
-            is_error: failed,
-            result: failed ? 'ENOTFOUND api.anthropic.com' : '끝났습니다.',
-            stop_reason: 'end_turn',
-            errors: [],
-            modelUsage: {},
-            session_id: 's1',
-          } as unknown as SDKMessage;
-          if (failed) return;
-        }
-      }
-      return Object.assign(run(), {
-        accountInfo: async () => ({}),
-        supportedModels: async () => [],
-        interrupt: async () => {},
-        close: () => {},
-      }) as unknown as ClaudeCodeQuery;
-    },
-  };
-  return { sdk, opened };
+  // CLI는 요약을 시작하면 status: 'compacting'을 보낸다(되풀이해 보낼 수 있다)
+  const pre: Array<Record<string, unknown>> = [];
+  for (let i = 0; i < compactingStatus; i++) pre.push({ type: 'system', subtype: 'status', status: 'compacting', session_id: 's1' });
+  if (compact) pre.push({ type: 'system', subtype: 'compact_boundary', session_id: 's1', compact_metadata: compact });
+  const invocations: FakeInvocation[] = failFirst ? [{ pre, failFirst: 'ENOTFOUND api.anthropic.com' }, { pre }] : [{ pre }];
+  const fake = fakeClaudeCli({ turns: [[{ text: '끝났습니다.' }]], invocations });
+  return { cli: fake.cli, opened: fake.logs };
 }
 
-async function run(sdk: ClaudeCodeSdk, env: NodeJS.ProcessEnv, extra: { networkRetry?: boolean } = {}) {
+async function run(cli: ReturnType<typeof fakeSdk>['cli'], env: NodeJS.ProcessEnv, extra: { networkRetry?: boolean } = {}) {
   const events: AgentEvent[] = [];
   await runClaudeCodeAgent({
     request: '아무거나',
     intent: 'ask',
     project,
     sandbox: fakeSandbox(project, []),
-    sdk,
+    ...cli,
     fetcher: async () => contract,
     env,
     onEvent: (event) => events.push(event),
@@ -99,73 +71,74 @@ describe('resolveCompactWindow', () => {
 });
 
 describe('로컬 CLI 러너의 자동 압축 기준 창', () => {
-  it('기본값에서 query env에 200000을 넣는다', async () => {
-    const { sdk, opened } = fakeSdk();
-    const events = await run(sdk, {});
-    expect(opened[0]!.env?.[WINDOW]).toBe('200000');
-    expect(opened[0]!.env?.CLAUDE_AGENT_SDK_CLIENT_APP).toBe('b-studio');
+  it('기본값에서 자식 프로세스 환경에 200000을 넣는다', async () => {
+    const { cli, opened } = fakeSdk();
+    const events = await run(cli, {});
+    expect(opened()[0]!.env.window).toBe('200000');
+    // SDK가 붙이던 CLAUDE_AGENT_SDK_CLIENT_APP은 공식 문서에 없어 넘기지 않는다(ADR-189)
+    expect(opened()[0]!.env.clientApp).toBeNull();
     expect(events.some((event) => event.type === 'warning')).toBe(false);
   });
 
   it('B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW 값을 따른다', async () => {
-    const { sdk, opened } = fakeSdk();
-    await run(sdk, { B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: '350000' });
-    expect(opened[0]!.env?.[WINDOW]).toBe('350000');
+    const { cli, opened } = fakeSdk();
+    await run(cli, { B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: '350000' });
+    expect(opened()[0]!.env.window).toBe('350000');
   });
 
   it('off면 넣지 않는다', async () => {
-    const { sdk, opened } = fakeSdk();
-    await run(sdk, { B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: 'off' });
-    expect(opened[0]!.env).not.toHaveProperty(WINDOW);
+    const { cli, opened } = fakeSdk();
+    await run(cli, { B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: 'off' });
+    expect(opened()[0]!.env.window).toBeNull();
   });
 
   it('사용자가 프로세스 환경에 직접 준 값은 덮어쓰지 않는다', async () => {
-    const { sdk, opened } = fakeSdk();
-    await run(sdk, { [WINDOW]: '123456', B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: '300000' });
-    expect(opened[0]!.env?.[WINDOW]).toBe('123456');
+    const { cli, opened } = fakeSdk();
+    await run(cli, { [WINDOW]: '123456', B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: '300000' });
+    expect(opened()[0]!.env.window).toBe('123456');
   });
 
   it('잘못된 값은 기본값을 쓰고 무시한 값을 한 번 알린다', async () => {
-    const { sdk, opened } = fakeSdk();
-    const events = await run(sdk, { B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: '1000' });
-    expect(opened[0]!.env?.[WINDOW]).toBe('200000');
+    const { cli, opened } = fakeSdk();
+    const events = await run(cli, { B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW: '1000' });
+    expect(opened()[0]!.env.window).toBe('200000');
     const warnings = events.filter((event) => event.type === 'warning');
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toMatchObject({ message: expect.stringContaining('B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW=1000') });
   });
 
   it('compact_boundary를 context_compacted 이벤트로 낸다', async () => {
-    const { sdk } = fakeSdk({ compact: { trigger: 'auto', pre_tokens: 961_058, post_tokens: 270_474, duration_ms: 1200 } });
-    const events = await run(sdk, {});
+    const { cli } = fakeSdk({ compact: { trigger: 'auto', pre_tokens: 961_058, post_tokens: 270_474, duration_ms: 1200 } });
+    const events = await run(cli, {});
     expect(events.filter((event) => event.type === 'context_compacted')).toEqual([
       { type: 'context_compacted', trigger: 'auto', preTokens: 961_058, postTokens: 270_474, durationMs: 1200 },
     ]);
   });
 
   it("요약이 시작되면(status: 'compacting') context_compacting을 한 번만 내고, 그 뒤에 context_compacted가 온다", async () => {
-    const { sdk } = fakeSdk({ compactingStatus: 3, compact: { trigger: 'auto', pre_tokens: 556_068, post_tokens: 9_344, duration_ms: 316_000 } });
-    const events = await run(sdk, {});
+    const { cli } = fakeSdk({ compactingStatus: 3, compact: { trigger: 'auto', pre_tokens: 556_068, post_tokens: 9_344, duration_ms: 316_000 } });
+    const events = await run(cli, {});
     const kinds = events.map((event) => event.type).filter((type) => type === 'context_compacting' || type === 'context_compacted');
     // SDK가 같은 상태를 세 번 보내도 알림은 한 번이다
     expect(kinds).toEqual(['context_compacting', 'context_compacted']);
   });
 
   it('요약 상태가 없으면 context_compacting을 내지 않는다', async () => {
-    const { sdk } = fakeSdk({});
-    const events = await run(sdk, {});
+    const { cli } = fakeSdk({});
+    const events = await run(cli, {});
     expect(events.some((event) => event.type === 'context_compacting')).toBe(false);
   });
 
   it('post_tokens가 없으면 postTokens 없이 낸다', async () => {
-    const { sdk } = fakeSdk({ compact: { trigger: 'manual', pre_tokens: 500_000 } });
-    const events = await run(sdk, {});
+    const { cli } = fakeSdk({ compact: { trigger: 'manual', pre_tokens: 500_000 } });
+    const events = await run(cli, {});
     expect(events.find((event) => event.type === 'context_compacted')).toEqual({ type: 'context_compacted', trigger: 'manual', preTokens: 500_000 });
   });
 
-  it('네트워크 재시도로 연 새 query에도 같은 env가 들어간다', async () => {
-    const { sdk, opened } = fakeSdk({ failFirst: true });
-    await run(sdk, {}, { networkRetry: true });
-    expect(opened).toHaveLength(2);
-    expect(opened.map((options) => options.env?.[WINDOW])).toEqual(['200000', '200000']);
+  it('네트워크 재시도로 띄운 새 프로세스에도 같은 env가 들어간다', async () => {
+    const { cli, opened } = fakeSdk({ failFirst: true });
+    await run(cli, {}, { networkRetry: true });
+    expect(opened()).toHaveLength(2);
+    expect(opened().map((log) => log.env.window)).toEqual(['200000', '200000']);
   });
 });
