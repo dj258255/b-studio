@@ -433,6 +433,21 @@ interface NativeGuard {
   // pageText도 encodeLoneSurrogates한 글자를 보낸다(짝 없는 서로게이트가 경계에서 U+FFFD가 되어 다른 글자가 같아지는 것을 막는다)
   exploreQaJudge(inputJson: string, pageText: string): string;
   exploreQaToPageCheckSteps(actionsJson: string): string;
+  // ── agent: repository(3단계 3n). 객체는 JSON 문자열. repoParseRemote는 스킴 꼴이면 new URL의 조각을 모두 받고(없으면 scp·로컬 경로), 모양이 어긋난 repoBuildPullRequest 입력은 던진다
+  repoRemoteNeedsUrl(trimmed: string): boolean;
+  repoParseRemote(url: string, protocol: string | null | undefined, host: string | null | undefined, hostname: string | null | undefined, pathname: string | null | undefined, provider: string | null | undefined): string;
+  repoCompareUrl(kind: string, webUrl: string | null | undefined, base: string, branch: string): string | null | undefined;
+  repoCanCreatePullRequest(kind: string, token: string | null | undefined, envToken: string | null | undefined): boolean;
+  repoParsePullRequestNumber(url: string): number | null | undefined;
+  repoParseTaskList(body: string | null | undefined): string;
+  repoParseClosingReferences(text: string | null | undefined): number[];
+  repoMapReviewState(raw: string): string;
+  repoCapPatch(patch: string | null | undefined, runningTotal: number): string;
+  repoCombineCheckStatus(completed: boolean[], conclusions: Array<string | null>): string;
+  repoMergeManagedPullRequestBody(existingBody: string | null | undefined, managedBody: string): string;
+  repoManagedBodySqueezedOut(body: string, managedBody: string): boolean;
+  repoCapBody(body: string): string;
+  repoBuildPullRequest(inputJson: string): string;
   // ── agent: 경로 이름·도구 정책(3단계 3q). 막는 검사다. backslashSep은 `path.sep === '\\'`(껍데기가 넘긴다). 꼴을 맞출 수 없으면 null.
   // checkToolPolicy: file은 입력의 path(문자열이 아니면 빈 글자), scopeFile은 그 path를 encodeLoneSurrogates한 글자(쓰기 범위 비교용, writablePaths도 같은 인코딩), command는 입력의 command(문자열 배열이 아니면 빈 배열), policyJson은 정책 필드 다섯 개의 JSON 또는 'null',
   // defaultDenied는 TS가 정한 기본 금지 명령. 결과는 `{"decision","reason"?}` JSON. 정책의 모양이 어긋나면 던진다(부르는 쪽이 거절로 처리한다)
