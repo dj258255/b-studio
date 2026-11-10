@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { WorkflowLoadCheckSchema, WorkflowPageCheckSchema, type LoadedProject, type WorkflowSpec } from '@b-studio/spec';
+import { WorkflowLoadCheckSchema, WorkflowPageCheckSchema, WorkflowSchema, type LoadedProject, type WorkflowSpec } from '@b-studio/spec';
 import { checkToolPolicy } from './policy';
 import {
   COVERAGE_GAP_PREFIX,
@@ -321,6 +321,18 @@ describe('평가 자산 (ADR-175)', () => {
     expect(missingVerificationStages(projectWith({ evaluationAssets: ['tests/acceptance'] }), new Set(['run', 'contract_check', 'review']))).toEqual([]);
     // 테스트를 선언했을 때만 test가 필수로 들어간다
     expect(workflowStages(projectWith({ tests: [unit] }))).toEqual(['plan', 'implement', 'run', 'contract_check', 'test', 'review', 'checkpoint']);
+  });
+
+  it('디자인 비교의 기준 이미지는 선언하지 않아도 파일 도구가 막고 리뷰 검사가 잡는다(#1138)', () => {
+    const workflow = WorkflowSchema.parse({ pageChecks: [{ service: 'web', path: '/', mode: 'browser', compare: { reference: 'design/home.png', maxDiffRatio: 0.1 } }] });
+    const project = projectWith(workflow);
+    const policy = executionPolicyFor(project);
+    expect(policy?.protectedPaths).toEqual(['design/home.png']);
+    expect(checkToolPolicy('write_file', { path: 'design/home.png' }, policy, undefined)).toMatchObject({ decision: 'deny' });
+    // 대소문자를 구분하지 않는 볼륨에서는 같은 파일이다(거부 목록은 넓게 맞춘다)
+    expect(checkToolPolicy('write_file', { path: 'Design/HOME.png' }, policy, undefined)).toMatchObject({ decision: 'deny' });
+    expect(checkToolPolicy('write_file', { path: 'design/other.png' }, policy, undefined)).toMatchObject({ decision: 'allow' });
+    expect(reviewChanges(project, ['design/home.png'])[0]).toMatchObject({ name: 'protected-paths', ok: false });
   });
 
   it('평가 자산을 보호 경로로 합쳐 실행 정책과 리뷰 검사에 쓴다', () => {

@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 디자인 비교(`workflow.pageChecks[].compare`)의 기준 이미지를 따로 적지 않아도 평가 자산으로 다룹니다. 파일 도구가 막고, 컨테이너에는 읽기 전용으로 붙고, 게이트는 실행 중에 바뀌면 실패시킵니다. 전에는 `protectedPaths`·`evaluationAssets`에 적지 않으면 에이전트가 기준 이미지를 바꿔 비교를 통과시킬 수 있었습니다(트러블슈팅 181, #1138).
 - 요구사항·추천 모델 답을 읽는 판정(`parsePlannerReply`의 JSON 꺼내기, `repairExtractionReply`, `enforceSpecQuoteEvidence`, 미리보기 고르기, 참조 파일 상한 문구, 사용량 합)을 Rust(`crates/bstudio-guard/src/requirements_replies.rs`)로 옮겼습니다(ADR-191 3단계 3ad, #1135). zod 검증과 `jsonrepair`는 TS에 남고 Rust가 꺼낸 글자를 그대로 검증합니다. 추천 인용 확인이 낱말을 가운데서 자른 인용(`e`·`연 1`)도 "명세에 있음"으로 읽던 곳을 닫았습니다(트러블슈팅 179). 옛 TS와 같은 결과를 내는지 무작위 입력 수십만 건으로 확인했습니다(다른 결과 0, 근거 없음 → 있음 뒤집힘 0).
 - 체크포인트 DB 덤프 해시·임시 덤프 파일 고르기·작업 그래프 검증·진행 중 지시 판정·JSON 구조 요약의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3af, #1133). 줄 끝 글자(`\r`·`\r\n`·`\n`)나 마지막 개행, 잘못된 바이트만 다른 덤프를 같다고 보던 것을 다르다고 보게 고쳤고, 덤프 임시 파일 정리가 우리가 쓰는 이름 꼴이 아닌 `.tmp` 파일(`notes.tmp`, pid를 못 읽은 이름)을 지우지 않게 했습니다(트러블슈팅 178).
 - 요구사항 문서(`docs/requirements.md`)의 읽기·쓰기 규칙(`packages/agent/src/requirements.ts`의 `parseRequirementsMarkdown`·`serializeRequirementsMarkdown`과 줄·절 읽기, 첫 JSON 블록 찾기, 몸통과 블록 값 합치기)을 Rust(`crates/bstudio-guard/src/requirements_markdown.rs`)로 옮겼습니다(ADR-191 3단계 3ab, #1126). zod 검증은 TS에 남기고 Rust가 찾은 블록 글자를 그대로 검증합니다. 위조 판정(3x)은 읽기와 같은 정규식·줄 나누기·블록 찾기를 쓰고, 읽기가 비요구사항 `## ` 절 아래의 확인 줄을 직전 요구사항의 확인으로 읽는데 위조 판정은 `(요구사항 밖)`으로만 보아 헤딩을 옮겨 옛 기록을 요구사항에 붙이는 것을 놓치던 틈을 닫았습니다(트러블슈팅 177). 옛 TS와 같은 결과를 내는지 무작위 문서 150,000건씩(읽기·쓰기·왕복)으로 확인했습니다(다른 결과 0).

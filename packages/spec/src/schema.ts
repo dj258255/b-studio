@@ -652,6 +652,14 @@ export const WorkflowSchema = z
       if (names.has(check.name)) ctx.addIssue({ code: 'custom', path: ['loadChecks', index, 'name'], message: `부하 확인 이름 '${check.name}'이 중복됩니다` });
       names.add(check.name);
     });
+   })
+  // 디자인 비교의 기준 이미지는 게이트가 통과를 정하는 근거다. 에이전트가 바꿀 수 있으면 바꾼 기준과 비교해 통과가 나온다(#1138).
+  // 따로 적지 않아도 평가 자산에 합쳐, 평가 자산을 읽는 모든 자리(파일 도구 차단, 컨테이너 읽기 전용 덮기, 게이트 지문 비교)가 함께 지키게 한다.
+  // 적은 평가 자산이 앞이고 같은 경로는 한 번만 넣는다. 비교가 없으면 평가 자산을 만들지 않는다
+  .transform((workflow) => {
+    const references = (workflow.pageChecks ?? []).flatMap((check) => (check.compare ? [check.compare.reference] : []));
+    if (references.length === 0) return workflow;
+    return { ...workflow, evaluationAssets: [...new Set([...(workflow.evaluationAssets ?? []), ...references])] };
   });
 
 /** Figma 디자인/파일 URL. `https://www.figma.com/design/<key>/...`과 `/file/<key>/...` 둘 다 받는다 */

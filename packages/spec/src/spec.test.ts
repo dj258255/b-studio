@@ -132,6 +132,22 @@ describe('parseSpec', () => {
     ]);
   });
 
+  it('디자인 비교의 기준 이미지는 따로 적지 않아도 평가 자산이 된다(#1138)', () => {
+    const page = (reference: string) => `    - { service: web, path: /, mode: browser, compare: { reference: ${reference}, maxDiffRatio: 0.1 } }\n`;
+    // 기준 이미지는 게이트가 통과를 정하는 근거라 에이전트가 바꾸면 안 된다: 평가 자산(파일 도구 차단·컨테이너 읽기 전용·지문 비교)에 합친다
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n${page('design/home.png')}${page('design/list.png')}`).workflow?.evaluationAssets).toEqual([
+      'design/home.png',
+      'design/list.png',
+    ]);
+    // 적은 평가 자산이 앞이고, 같은 경로는 한 번만 들어간다
+    expect(
+      parseSpec(`${ORDERS_SPEC}workflow:\n  evaluationAssets: [tests/acceptance, design/home.png]\n  pageChecks:\n${page('design/home.png')}${page('design/home.png')}`).workflow
+        ?.evaluationAssets,
+    ).toEqual(['tests/acceptance', 'design/home.png']);
+    // 비교가 없으면 평가 자산을 만들지 않는다(빈 배열도 아니다)
+    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: / }\n`).workflow?.evaluationAssets).toBeUndefined();
+  });
+
   it('턴 상한(workflow.maxTurns)을 읽고, 생략하면 undefined이며, 범위 밖 값은 거부한다(ADR-131)', () => {
     expect(parseSpec(`${ORDERS_SPEC}`).workflow?.maxTurns).toBeUndefined();
     expect(parseSpec(`${ORDERS_SPEC}workflow:\n  maxTurns: 30\n`).workflow?.maxTurns).toBe(30);
