@@ -57,6 +57,17 @@ add({ name: 'threshold 1은 흰색과 검정도 같다고 본다', actual: dot(B
 add({ name: 'threshold 0.99는 흰색과 검정을 다르다고 본다', actual: dot(BLACK), reference: rgba(12, 12), threshold: 0.99 });
 add({ name: 'threshold 0.05: 회색 차이 13은 같고 14는 다르다(13)', actual: dot(gray(255 - 13)), reference: rgba(12, 12), threshold: 0.05 });
 add({ name: 'threshold 0.05: 회색 차이 14는 다르다', actual: dot(gray(255 - 14)), reference: rgba(12, 12), threshold: 0.05 });
+// 최대 차이 상수(35215)를 못 박는다: 회색 차이 27의 색 차이 D에 대해 35215·t²가 D보다 t²/2 위(같음)와 아래(다름)가 되게 threshold를 고른다.
+// 상수가 한 칸이라도 커지면(여는 쪽) 아래 벡터가, 작아지면 위 벡터가 바뀐다
+const GRAY27_DELTA = (() => {
+  const d = 27;
+  const y = d * 0.29889531 + d * 0.58662247 + d * 0.11448223;
+  const i = d * 0.59597799 - d * 0.2741761 - d * 0.32180189;
+  const q = d * 0.21147017 - d * 0.52261711 + d * 0.31114694;
+  return 0.5053 * y * y + 0.299 * i * i + 0.1957 * q * q;
+})();
+add({ name: '최대 차이 상수 경계: 한계가 차이보다 반 칸 위면 같다', actual: dot(gray(255 - 27)), reference: rgba(12, 12), threshold: Math.sqrt(GRAY27_DELTA / 35214.5) });
+add({ name: '최대 차이 상수 경계: 한계가 차이보다 반 칸 아래면 다르다', actual: dot(gray(255 - 27)), reference: rgba(12, 12), threshold: Math.sqrt(GRAY27_DELTA / 35215.5) });
 add({ name: '색 채널 하나만 큰 차이', actual: dot([255, 255, 0, 255]), reference: rgba(12, 12) });
 add({ name: '알파 254와 255', actual: dot([255, 255, 255, 254]), reference: rgba(12, 12) });
 add({ name: '알파 0과 255(흰색)', actual: dot([255, 255, 255, 0]), reference: rgba(12, 12) });
