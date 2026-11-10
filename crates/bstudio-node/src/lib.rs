@@ -3683,3 +3683,40 @@ pub fn req_reply_add_usage(a: Vec<f64>, b: Vec<f64>) -> Result<Vec<f64>> {
     let [Ok(a), Ok(b)] = [a, b].map(<[f64; 4]>::try_from) else { return Err(Error::from_reason("사용량은 숫자 넷이어야 합니다")) };
     Ok(rrp::add_usage(a, b).to_vec())
 }
+
+use bstudio_guard::visual_compare as vc;
+
+/// 디자인 비교(3단계 3ae)의 결과. `error_kind`가 있으면 실패다: `"compare"`(옛 `VisualCompareError`)·`"decode"`(PNG를 읽지 못함)
+#[napi(object)]
+pub struct VisualCompareOut {
+    pub error_kind: Option<String>,
+    pub message: Option<String>,
+    pub diff_pixels: f64,
+    pub compared_pixels: f64,
+    pub width: u32,
+    pub height: u32,
+    pub diff: Option<Buffer>,
+}
+
+/// `masks`는 `[x, y, width, height, ...]`를 이어 붙인 숫자들(NaN·소수·음수 그대로). 4의 배수가 아니면 남는 숫자는 버린다
+#[napi]
+pub fn visual_compare(actual: Buffer, reference: Buffer, masks: Vec<f64>, threshold: f64) -> VisualCompareOut {
+    let masks: Vec<vc::Mask> = masks.chunks_exact(4).map(|m| vc::Mask { x: m[0], y: m[1], width: m[2], height: m[3] }).collect();
+    let failed = |kind: &str, message: String| VisualCompareOut { error_kind: Some(kind.to_owned()), message: Some(message), diff_pixels: 0.0, compared_pixels: 0.0, width: 0, height: 0, diff: None };
+    // 읽다가 패닉이 나도 통과로 이어지지 않게 읽지 못한 PNG로 돌려준다(닫는 쪽)
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vc::compare(&actual, &reference, &masks, threshold)))
+        .unwrap_or_else(|_| Err(vc::Error::Decode("비교 중 내부 오류가 났습니다".to_owned())));
+    match outcome {
+        Ok(done) => VisualCompareOut {
+            error_kind: None,
+            message: None,
+            diff_pixels: done.diff_pixels as f64,
+            compared_pixels: done.compared_pixels as f64,
+            width: done.width,
+            height: done.height,
+            diff: Some(Buffer::from(done.diff)),
+        },
+        Err(vc::Error::Compare(message)) => failed("compare", message),
+        Err(vc::Error::Decode(message)) => failed("decode", message),
+    }
+}
