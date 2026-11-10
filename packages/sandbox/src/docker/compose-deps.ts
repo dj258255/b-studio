@@ -1,9 +1,6 @@
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
 import { SandboxError } from '../errors';
-
-const execFileAsync = promisify(execFile);
+import { execChecked } from '../exec-checked';
 
 /** 서비스 → (의존 서비스 → 조건). compose가 정규화한 설정의 `depends_on`이다 */
 export type DependsOn = Record<string, Record<string, { condition?: string; required?: boolean }>>;
@@ -20,7 +17,7 @@ export async function loadDependsOn(
   const args = ['compose', ...(projectName ? ['--project-name', projectName] : []), '--profile', '*', '--project-directory', project.root, '--file', project.composePath, 'config', '--format', 'json'];
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(dockerBin, args, { env, maxBuffer: 64 * 1024 * 1024 }));
+    ({ stdout } = await execChecked(dockerBin, args, { env, maxBuffer: 64 * 1024 * 1024 }));
   } catch (error) {
     const stderr = (error as { stderr?: unknown }).stderr;
     throw new SandboxError('compose 설정을 읽지 못해 서비스를 시작할 순서를 정할 수 없습니다', redact(typeof stderr === 'string' && stderr.trim() ? stderr : 'docker 실행 실패'), { platform: true });
