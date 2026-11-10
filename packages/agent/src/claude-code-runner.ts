@@ -772,7 +772,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 }
 
 /** 프로세스가 결과 없이 끝났다는 실패 메시지. 종료 코드와 표준 오류의 끝부분을 담는다 */
-function noResultMessage(exit: { code: number | null; signal: NodeJS.Signals | null; error?: Error; stderr: string } | undefined): string {
+export function noResultMessage(exit: { code: number | null; signal: NodeJS.Signals | null; error?: Error; stderr: string } | undefined): string {
   if (!exit) return 'Claude Code가 결과를 보내지 않고 종료됐습니다';
   const how = exit.error ? `실행하지 못함: ${exit.error.message}` : exit.signal ? `신호 ${exit.signal}` : `종료 코드 ${exit.code ?? '없음'}`;
   const tail = exit.stderr.trim().split('\n').slice(-3).join(' / ');
@@ -780,14 +780,14 @@ function noResultMessage(exit: { code: number | null; signal: NodeJS.Signals | n
 }
 
 /** init이 b-studio 도구 서버를 연결하지 못했다고 알리면 그 설명. 문서에 있는 mcp_servers·mcp_server_errors만 본다 */
-function mcpSetupFailure(message: CliMessage): string | undefined {
-  const errors = (message.mcp_server_errors ?? []).filter((entry) => entry.name === undefined || entry.name === SERVER);
-  const status = message.mcp_servers?.find((server) => server.name === SERVER)?.status;
+export function mcpSetupFailure(message: CliMessage, server: string = SERVER): string | undefined {
+  const errors = (message.mcp_server_errors ?? []).filter((entry) => entry.name === undefined || entry.name === server);
+  const status = message.mcp_servers?.find((entry) => entry.name === server)?.status;
   // connected로 확인한 경우만 통과다. 목록에 없음·needs-auth·pending·disabled·모르는 값은 "모른다"이고 실패로 본다
   // (상태 값: https://code.claude.com/docs/en/agent-sdk/typescript 의 McpServerStatus)
   if (errors.length === 0 && status === 'connected') return undefined;
   const detail = errors[0]?.message ?? errors[0]?.type ?? status ?? '목록에 없음';
-  return `Claude Code가 b-studio 도구 서버에 연결하지 못했습니다${detail ? `: ${detail}` : ''}`;
+  return `Claude Code가 ${server} 도구 서버에 연결하지 못했습니다${detail ? `: ${detail}` : ''}`;
 }
 
 /**

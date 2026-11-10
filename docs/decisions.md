@@ -9533,6 +9533,20 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - `src/repository-differential.test.ts`의 `capPatch` 시험이 전체 실행에서 시간 초과(5초 기본)로 실패한 것은 이 조각 탓이 아니었다: 이 시험의 import 경로에 `task-plan`·`requirement-integrity`는 없고, 이 조각의 napi 바이너리를 쓴 `1884cd6` 작업 폴더와 이 브랜치에서 번갈아 잰 `capPatch`는 4.4~8.4초(1884cd6, 5번)와 4.4~7.7초(이 브랜치, 5번)로 기계 부하(load average 15~30)에 따라 흔들렸다. 한 번 잰 값이고 고치지 않았다.
 - 돌리지 않은 것: 시드를 수백만 회로 늘린 차등 시험, 실제 세션에서 계획을 만들고 게이트가 위조를 잡는 흐름, Windows 실기(Windows 구분자는 Rust 함수에 직접 넘겨 옛 `isWithinScope`의 `sep` 인자와만 견줬다), 실험 경로(다른 러너·Kubernetes 등 이 조각이 따로 확인한 것 없음), `parsePlannerReply`·`usageFromMessage`의 이전.
 
+### 덧붙임: 3단계 3z — 요구사항 추적표와 시험 파일 훑기 (2026-11-10, [#1118](https://github.com/dj258255/b-studio/issues/1118))
+
+- 옮긴 것: `packages/agent/src/requirements.ts`의 추적표 판정(`buildTraceabilityMatrix`·`buildScenarioEvidence`·`findUnverifiedScenarioIds`와 안에서 쓰던 `finalizeMatrixRow`·`mergeTestMatchesWithRunRows`·`fallbackEvidence`)과 시험 파일 훑기(`scanTestFilesForRequirementId`·`scanTestFilesForScenarioId`·`scanTestFilesForOrphans`와 `testFileIndex`·`collectDeclaredTestNames`·`collectSuiteIdsByTestName`·`mentionedIdsOfTest`·`identifierMentionsId`)를 `crates/bstudio-guard/src/requirements_trace.rs`로. 3j가 옮긴 `compute_requirement_status`·`matrix_verification_badge`·`find_*_mention_indexes`·`find_mentioned_ids`와 3a의 `discover_tests_in_file`·`flatten_discovered_file`을 그대로 재사용했다(요구사항 모듈의 읽기 도우미 몇 개를 `pub(crate)`로 열었다).
+- 남긴 것(TS): 파일 읽기, `parseRequirementsMarkdown`·`serializeRequirementsMarkdown`, 모델 호출·프롬프트 글, `findUnexecutedTests`·`buildMatrixCsv`(3j에서 이미 옮김). 껍데기가 파일 객체별 색인 캐시(`WeakMap`)를 든다 — 요구사항마다 같은 파일을 다시 해석하지 않게 하는 트러블슈팅 122의 규칙이고, 파일 해석(`reqTraceFileIndex`)과 id로 견주기는 Rust가 한다. 훑기·추적표는 파일 내용이 아니라 이 색인을 받는다.
+- 호출부별 막는 쪽/여는 쪽: 모두 **여는 쪽**이다(근거가 있으면 검증 상태가 올라간다). (1) 요구사항 id로 시험 이름 찾기(`scan_for_requirement_id`: `mention_matches`의 같음·`id.`로 시작) (2) 메서드 이름으로 찾기(`identifier_mentions_id`) (3) 시나리오 id 같음(`scan_for_scenario_id`) (4) 실행 행의 id 같음(`runs_of`)과 이름 같음(결과 붙이기) (5) 상태 판정(3j의 `compute_requirement_status`). 모르는 입력은 근거 없음으로 처리하거나(id 꼴이 아닌 id는 메서드를 다루지 않는다, U+FFFD가 든 id는 같다고 보지 않는다) 던진다(모양이 어긋난 입력). 닫는 쪽 호출부는 없다.
+- 짝 없는 서로게이트: 시험 이름·파일 경로는 껍데기가 `encodeLoneSurrogates`로 보내(파일 내용 포함) 결과에서 `decodeLoneSurrogates`로 되돌린다. 인코딩 없이 보내면 서로 다른 이름 `x\ud800`·`x\udc00`이 U+FFFD로 합쳐져 실행 결과 pass가 엉뚱한 시험에 붙는다(성질 시험이 이를 재현하고, 껍데기를 거치면 합쳐지지 않음을 확인한다). 요구사항·시나리오 id는 인코딩하지 않고 Rust가 U+FFFD가 든 id끼리를 같다고 보지 않는다(합쳐진 글자는 닫는 쪽으로).
+- 옛 TS가 열린 쪽으로 틀린 자리(트러블슈팅 174): 메서드 이름에서 소문자로 바꿔 `indexOf`만 해 `calculatesOrder2Total`이 R2를, `testServer3`·`checkERROR3`이 R3을 다루는 것으로 읽었고, 빈 id는 id 꼴이 든 모든 메서드를 다루는 것으로 읽었다. Rust는 id가 `R`+숫자 꼴일 때만, 처음 나온 자리가 낱말 시작일 때만(대문자 `R`은 앞이 대문자가 아닐 때, 소문자 `r`은 앞이 알파벳이 아닐 때) 센다. 처음 나온 자리만 보는 것과 뒤에 숫자가 오면 다른 id로 보는 것은 옛 그대로라 근거는 줄기만 한다. 접두 일치(R1과 R10·R12, R1.2와 R1.20)·대소문자(`r1`)·보이지 않는 글자(`R\u200b1`)·전각 숫자·범위 표기(`R1~R3`)는 옛 TS도 막고 있었음을 벡터로 박았다.
+- 차등 시험(`requirements-trace-differential.test.ts`): 입력은 id 꼴·접두·시나리오 언급·범위·보이지 않는 글자·따옴표 종류·이스케이프·닫히지 않은 따옴표·묶음 제목·메서드 이름·짝 없는 서로게이트를 이어 만들고(시험 파일 0~4개, 요구사항 0~4개, 체크포인트·게이트·실행 행·studio 평가 포함), 엄격 시험(옛 TS가 틀린 입력을 뺌: 글자까지 같아야 한다)과 느슨한 시험(틀린 입력도 섞음: 근거가 늘지 않아야 한다)으로 나눠 센다. 이번에 한 번 잰 값: 시드 2개(20261110·20261111) × 두 시험 × 15,000회 = 함수마다 60,000회. 열린 쪽 뒤집힘(옛 "검증 안 됨/근거 없음" → 새 "검증됨/근거 있음": 상태·검증 출처·시험·체크포인트·게이트가 옛보다 늘어난 것·옛에 있던 "테스트 없는 필수"가 사라진 것·남은 시나리오가 줄어든 것) **함수 6개 모두 0**. 한쪽만 던진 수 0. 요구사항 id 훑기 5,237회와 추적표 2,561회는 느슨한 입력에서 새 결과가 옛 결과보다 줄어든 것이다(닫는 쪽만). 대조 장치(결과 한 글자를 바꾼 옛 구현이 모든 시도에서 차이로 잡힘)와 입력이 비지 않았다는 단언(값이 있는 결과)을 둔다. 기본 실행은 시드 2개 × 두 시험 × 600회.
+- 벡터(`requirements-trace-vectors.test.ts`, 83개): 접두·시나리오·대소문자·보이지 않는 글자·전각·낱말에 붙은 id·범위·묶음 제목·같은 이름 합침·메서드 이름 12종·따옴표 처리·시나리오 증거·남은 시나리오·추적표 14종. 옛 TS에 돌리면 의도한 차이 7개만 실패한다(고치기 전 출력은 트러블슈팅 174).
+- 의도한 차이: (1) 위 열린 쪽 결함을 닫음 (2) 짝 없는 서로게이트는 인코딩해 보내므로 글자까지 같다 — 다만 이름에 짝 없는 서로게이트가 있으면 묶음 제목의 id를 받지 않는 옛 동작(옛 TS는 발견기가 U+FFFD로 읽어 이름이 어긋났다)을 그대로 둔다(여는 쪽을 넓히지 않으려고. 파일 내용은 UTF-8이라 실제로는 나타나지 않는다) (3) U+FFFD가 든 id끼리는 같다고 보지 않음 (4) 모양이 어긋난 입력은 이유가 담긴 오류로 던진다(옛 TS는 TypeError 또는 조용히 읽음). 훑기를 부르는 던지면 추적표·상태 계산이 중단되고 값이 만들어지지 않으므로 앞 상태가 남아 "검증됨"으로 읽히는 길은 없다(`sessions.ts` 호출부의 `catch`는 훑기 실패 때 커밋 제목·트레일러 후보만 쓰며 새 근거를 더하지 않는다).
+- 변이: Rust 핵심 41곳을 하나씩 망가뜨려 요약 줄로 37곳이 잡혔다(변이마다 `build-native` 후 추적표 벡터·차등·`requirements`·훑기 한 번 시험 232개). 한 곳(`passed + failed > 0` → `>= 0`)은 빈 목록을 인덱스로 읽어 napi가 비정상 종료해 시험 프로세스가 끊겼고 요약 줄이 불완전해 "판정 못 함"으로 센다(막히기는 했다). 살아남은 셋은 동치: 메서드 정규식의 `[0-9]+`→`[0-9]*`(숫자 없는 메서드는 `identifier_mentions_id`가 R+숫자 id를 못 찾아 걸러낸다), 묶음 밖 시험 줄을 건너뛰지 않기(id 없는 빈 항목이 생길 뿐 결과에 안 보인다), 묶음 id 중복 제거 빼기(중복 id는 `any`·`is_empty`에 보이지 않는다). 넓히는 변이(`mention_matches`를 `starts_with`로, 시나리오 같음·실행 행 id 같음을 `starts_with`로, 낱말 시작 검사 빼기, 첫 자리 `find`→`rfind`, `it|test` 앞 `\b` 빼기, `@DisplayName`의 `(`를 선택으로, U+FFFD 검사 빼기)와 경계(`>=`↔`>`, id 꼴 길이)를 모두 가렸다. 처음 살아남았던 id 꼴 길이(`< 2`→`< 1`)·U+FFFD 검사·`@DisplayName` 괄호 변이는 벡터를 더해 잡은 뒤 그 셋만 다시 돌려 잡힘을 확인했다.
+- 새 던짐 경로: 추적표·시나리오 증거·남은 시나리오 napi 함수와 `reqTraceFileIndex`(발견기가 평탄화 못 하는 너무 깊은 중첩)가 던질 수 있다(옛 TS도 `flattenDiscoveredFile`이 같은 경우에 던졌다). 호출부는 던진 채로 둔다(판정 값을 만들지 않으므로 "검증됨"이 남는 길이 없다).
+- 돌리지 않은 것: 실제 세션의 요구사항 탭에서의 성능 재측정(파일 376개·요구사항 32개 규모). 색인 JSON을 호출마다 napi로 넘기므로 트러블슈팅 122의 수치와 견주어 재야 한다. 시드를 수백만 회로 늘린 차등 시험. 실험 경로(다른 러너, Kubernetes 제공자)는 건드리지 않았다.
+
 ### 덧붙임: 3단계 3aa — 고정 경로 겹침 판정 (2026-11-10, [#1122](https://github.com/dj258255/b-studio/issues/1122))
 
 - 옮긴 것: `packages/agent/src/next-static-shadow.ts`의 `findStaticShadows` 판정(이름 접기, 그룹 `(x)`·슬롯 `@x`·인터셉트 `(.)x` 구분, page 경로 읽기, 서비스 폴더·라우터 루트 경로 정리, 내려갈 폴더 결정, 겹침, 링크·상한·읽기 실패에서 "모름")을 `crates/bstudio-guard/src/static_shadow.rs`로 옮겼다.
@@ -9547,7 +9561,7 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 짝 없는 서로게이트: 이름 견주기는 거부 목록이라 파일 시스템 꼴(U+FFFD)로 넓게 견준다(서로 다른 서로게이트가 합쳐져도 더 막을 뿐). 결과의 `value`는 껍데기가 입력의 원래 글자로 채운다. 인코딩 없이 보내면 합쳐지는 것과 결과가 열린 쪽이 아닌 것을 벡터가 확인한다.
 - 차등 시험(`next-static-shadow-differential.test.ts`, 옛 구현은 `next-static-shadow-legacy.ts`에 복사, 머리말 주석만 다름): 이번에 시드 1·7·42로 잰 보통 이름 입력 600건은 글자(던짐 메시지 포함)까지 같고(다름 0), 넓힌 이름이 섞인 입력 600건은 다름 64건이 모두 더 막는 쪽이며 열린 쪽 뒤집힘(옛이 거부한 이름을 새가 거부하지 않음)은 0이다. 옛 결과 분포는 보통 겹침 60·빈 결과 359·모름 181, 넓힘 겹침 34·빈 376·모름 190. 대조 장치(옛 구현에 상한 +1, 값 뒤에 글자, 확인 이름 하나 빼기)는 모두 차이로 잡혔다. 이 횟수는 한 번 잰 값이다(수십만 회로 늘리지 않았다).
 - 벡터(`next-static-shadow-vectors.test.ts` 245개): 기대값은 옛 TS가 낸 값. 이름 꼴마다 거의 같은 거부 입력(`newer`·`xnew`·`new-`·`n.ew`·`.new`·`%` 깨진 인코딩 등), 그룹·슬롯·인터셉트, 서비스 폴더·라우터 루트, page 확장자, public, 링크, 폴더 상한 경계(±1), 읽기 권한 없는 폴더, 서로게이트 성질. 옛 구현에 그대로 돌리면 의도한 차이 44개가 실패한다(`Tests  44 failed | 201 passed (245)`).
-- 의도한 차이(모두 더 막는 쪽): (1) 줄 끝 글자가 든 그룹 폴더·빈 그룹 `()`를 그룹으로 본다(옛 구현은 그 안의 고정 경로를 놓쳤다, 트러블슈팅 177). (2) 끝 공백·보이지 않는 글자·전각 글자·정규화 형태·짝 없는 서로게이트가 든 이름을 넓은 접기로도 견준다. (3) 서비스 폴더에 `..`·`.`·빈 조각이 있거나 채운 값이 `.`·`..`·`/`를 품으면 던진다(옛 구현은 `path.join`이 줄여 읽었다). (4) 살펴볼 폴더 상한이 NaN이면 기본 2000으로 본다(옛 구현은 상한 없음). (5) `values`는 자기 속성만 본다(`constructor` 같은 이름을 값 없음으로 본다).
+- 의도한 차이(모두 더 막는 쪽): (1) 줄 끝 글자가 든 그룹 폴더·빈 그룹 `()`를 그룹으로 본다(옛 구현은 그 안의 고정 경로를 놓쳤다, 트러블슈팅 175). (2) 끝 공백·보이지 않는 글자·전각 글자·정규화 형태·짝 없는 서로게이트가 든 이름을 넓은 접기로도 견준다. (3) 서비스 폴더에 `..`·`.`·빈 조각이 있거나 채운 값이 `.`·`..`·`/`를 품으면 던진다(옛 구현은 `path.join`이 줄여 읽었다). (4) 살펴볼 폴더 상한이 NaN이면 기본 2000으로 본다(옛 구현은 상한 없음). (5) `values`는 자기 속성만 본다(`constructor` 같은 이름을 값 없음으로 본다).
 - 변이: Rust 핵심 줄 40곳(예산 경계·1씩, 마지막 깊이, 내려가는 깊이, 동적 형제 제외 빼기, 슬롯·인터셉트 점 범위·건너뜀, 앞 `./` 정리, page 확장자 넓히기, 이름 겹침 `||`→`&&`·접두 일치·첫 점→마지막 점, 디코드 경계, 링크 길을 폴더로 보기·모르는 종류를 파일로 보기·링크 검사 빼기, 그룹 넓힘 뒤집기·건너뜀, 채운 값 `..`·`/` 검사 빼기, public 중복 제거·루트별 중단 빼기, 빈 값 허용, 루트가 파일이어도 걷기, 서비스 폴더 조각 검사 빼기, 읽기 실패를 빈 폴더로 읽기, 줄 끝 글자 검사 빼기, 확인 대상 항상 참, 서비스 폴더 `.`, 넓은 접기 두 줄 빼기, 동적 이름 빈 안 허용, `src/` 접두 빼기) 중 37곳이 잡혔다. 처음에 살아남은 8곳(동적 형제 제외, 디코드 첫 바이트 경계, 루트별 중단, 루트가 파일, 서비스 폴더 조각, 읽기 실패를 빈 폴더로, 넓은 접기 두 줄, 동적 이름 빈 안)은 벡터를 더해 잡았다. 남은 3곳은 같은 결과의 변이다: 옛 이름 소문자 제거(넓은 접기가 소문자도 접어 합집합 결과가 같다), 깨진 인코딩에서 원문을 돌려주는 줄(`decoded`가 이미 원문으로 되돌린다), 앞 조각 빈 조각 거르기(빈 조각은 동적 세그먼트가 없는 `app/page.tsx`에서만 생겨 확인 대상이 없다).
 - 새 던짐 경로와 처리: 서비스 폴더 조각·채운 값 검사와 (3) 위 꼴은 `StaticShadowUnknownError`. 호출부(`gate.ts`의 값 받기)는 어떤 오류든 잡아 확인 대상 값을 모두 받지 않는 쪽으로 처리하므로 열린 쪽 틈은 없다. 껍데기는 Rust가 이미 읽은 것을 또 달라고 하면 끝없이 되풀이하지 않고 던진다.
 - 돌리지 않은 것: 차등 시험을 수십만 회로 늘린 실행, Windows·대소문자 구분 없는 볼륨에서의 실측(벡터 기대값은 구분하는 볼륨에서도 맞게 `%6F` 같은 다른 표기로 썼다), 폴더가 매우 많은(상한 2000에 가까운) 프로젝트의 호출 횟수(호출은 읽는 폴더 수만큼이라 그만큼 늘어난다), 미들웨어 rewrite·`next.config` redirects(옛 한계 그대로), 실험 경로(다른 러너 등 이 조각이 확인한 것 없음).
@@ -9798,3 +9812,44 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 ### 돌리지 않은 검증
 - 실제 모델·실제 로그인으로 돈 세션. e2e. 다른 러너 다섯 개와 관문 러너는 타입 검사와 기존 테스트로만 확인했다(공통 함수 `zodShape`·`serialQueue`·`startToolServer`의 위치만 바뀜).
 - 문서 재확인: https://code.claude.com/docs/en/mcp 는 `${VAR}`·`${VAR:-default}` 풀이를 `.mcp.json`의 `command`·`args`·`env`·`url`·`headers`에 대해 적는다. 원격 서버의 `url`·`headers`에서 자격 정보 이름(`ANTHROPIC_API_KEY` 등)은 빈 값으로 읽는다는 예외가 있지만 `B_STUDIO_MCP_TOKEN`은 그 목록에 없다. `--mcp-config` 파일에도 같은 풀이가 된다고 따로 적혀 있지는 않아, 진짜 CLI 2.1.321에서 풀이가 동작하는 것을 실측으로 확인했다(위 검증). 실제 로그인·실제 모델로 돈 세션은 없다.
+
+### 덧붙임: 질문 경로와 탐색형 QA도 공개 CLI 입출력으로 돈다 (이슈 [#1101](https://github.com/dj258255/b-studio/issues/1101), 2026-11-10)
+
+위 "바꾸지 않은 것과 남은 SDK 사용"의 앞 둘(탐색형 QA, 질문 경로)을 옮겼다. 두 파일에서 `@anthropic-ai/claude-agent-sdk` import가 사라졌고 `claude-code-sdk.ts`(SDK를 바꿔 끼우던 타입)는 지웠다. 벤치의 기준선(`plain-baseline.ts`, 훅을 쓰는 SDK 호출)은 이 이슈의 범위가 아니라 그대로라, 스튜디오의 `package.json` 의존성은 남긴다. **`packages/agent/package.json`의 SDK 의존성은 이제 `packages/agent/src`가 쓰지 않는다**(보고만 하고 지우지 않았다).
+
+**쓴 플래그.** 러너가 이미 쓰던 것에서 새로 늘린 것은 하나뿐이다. 근거는 모두 https://code.claude.com/docs/en/cli-reference 와 https://code.claude.com/docs/en/headless 다.
+
+| 자리 | SDK 옵션 → CLI | 비고 |
+|---|---|---|
+| 질문 경로 | `tools: []`(웹 도구 opt-in은 `['WebSearch','WebFetch']`) → `--tools ''`(`WebSearch,WebFetch`) | 러너와 같다. 웹 도구를 열 때만 `--allowedTools WebSearch,WebFetch`를 더한다. 닫을 때는 `--allowedTools`를 아예 싣지 않는다(빈 값 인자의 읽는 방식에 기대지 않는다) |
+| 질문 경로 | `permissionMode: 'dontAsk'`, `settingSources: []`, `mcpServers: {}`+`strictMcpConfig` → `--permission-mode dontAsk`, `--setting-sources ''`, `--strict-mcp-config`(`--mcp-config` 없음) | 러너와 같다 |
+| 질문 경로 | `maxTurns` → `--max-turns 1`(웹 도구는 6), `model`·`effort` → `--model`·`--effort` | 러너와 같다 |
+| 질문 경로 | `persistSession: false` → **`--no-session-persistence`** | 새로 쓴다. cli-reference의 같은 이름 행(print 모드 전용). 설치된 CLI 2.1.321의 `claude --help`에서도 확인했다. 이번에 문서 쪽을 다시 읽지는 못했다 |
+| 질문 경로 | `systemPrompt: 문자열` → `--system-prompt-file <0600 파일>` | 러너와 같다. 질문 글은 인자가 아니라 표준 입력의 사용자 메시지 한 줄이다 |
+| 탐색형 QA | `createSdkMcpServer` → `startToolServer`(루프백 HTTP MCP) + `--mcp-config <0600 파일>` + `--strict-mcp-config`, `--allowedTools mcp__b-studio-qa__qa_*`, `--tools ''` | 러너와 같다. 토큰은 환경 변수 `B_STUDIO_MCP_TOKEN`으로만 간다 |
+| 탐색형 QA | `env: CLAUDE_AGENT_SDK_CLIENT_APP` | 문서에 없어 넘기지 않는다(러너와 같은 결정) |
+
+**도구 서버를 조금 넓혔다.** QA의 스크린샷과 선택 인자 때문이다. `ToolOutcome`에 `images`(base64 + mimeType)를 더해 `startToolServer`가 MCP 이미지 콘텐츠로 내고, `honorRequired`를 주면 스키마의 `required`에 없는 인자를 선택으로 연다(`qa_scroll`의 `ref`). 다른 러너는 둘 다 쓰지 않아 결과가 같다. `mcpSetupFailure`는 서버 이름을 인자로 받게 했다(기본값은 `b-studio`라 러너의 메시지가 그대로다).
+
+**지킨 동작과 바뀐 것.**
+
+| 동작 | 처리 | 시험 |
+|---|---|---|
+| 질문: 도구 없음·읽기 전용(여는 쪽으로 틀리지 않기) | `--tools ''`로 내장 도구를 모두 끄고 허용 목록은 싣지 않는다. 웹 도구를 열어도 파일·명령 도구 이름은 인자 어디에도 없다. 설정·훅·MCP는 싣지 않는다 | `claude-code-ask.test.ts` 첫 3개. 변이: `--tools` 인자를 지우면 4개, 허용 목록에 `Bash,Write`를 넣으면 3개가 실패 |
+| 질문: 취소 | 입력 닫기 + 즉시 SIGTERM, 결과 없음이 아니라 취소 이유를 던진다. 이미 취소된 신호면 CLI를 띄우지 않는다 | 취소 2개 |
+| 질문: 사용량·오류 | `modelUsage`로 usage, 실패 결과는 `모델 호출이 실패했습니다: …`(사용 한도 문구 그대로), 빈 응답은 실패 | usage·실패·빈 응답 |
+| 질문: 시간 제한 | 원래 없었다(취소 신호만). 그대로다 | |
+| QA: 도구 범위 | 내장 도구 전부 끔, 허용 목록은 `mcp__b-studio-qa__qa_*`만, `dontAsk` | `CLI 실행 방식` 첫 시험 |
+| QA: 시간·행동 수·반복 한도 | 기존 규칙 그대로(조작을 닫고 마지막 보고만, 유예 90초). 시간 제한 시험을 새로 더했다 | 기존 시험 + `max_time` 시험 |
+| QA: 끝내기와 사용량 | SDK의 `interrupt()`는 문서에 없어 쓰지 않는다. `qa_finish`·유예 만료 때 표준 입력을 닫아 하던 턴을 마치게 하고(그래야 `result`의 `modelUsage`가 온다) 15초 안에 끝나지 않으면 SIGTERM. `result`가 오지 못하면 assistant 메시지의 사용량을 합친다(기존 대비책) | 사용량 2개 |
+| QA: 취소 | 즉시 SIGTERM, 취소 이유를 던진다 | 취소 시험 |
+
+**동작이 달라진 곳(감수).** (1) `qa_finish` 뒤 CLI가 하던 턴을 마치므로 모델 호출이 한 번 더 있을 수 있다(SDK는 `interrupt()`로 바로 끊었다). 대신 사용량이 정확히 온다. 그 사이의 도구 호출은 거절하고 3번 거절하면 끊는다. (2) 질문 경로는 `result` 없이 끝나면 받은 글이 있어도 실패다("결과를 보내지 않고 종료", 종료 코드·표준 오류 끝 3줄). 옛 코드는 글만 있으면 사용량 0으로 돌려줬다. (3) QA는 init이 `b-studio-qa` 도구 서버 연결을 `connected`로 알리지 않으면 돌리지 않고 던진다(옛 코드는 도구 없이 돌아 "마치지 못함"으로 끝났다). 러너의 결정 8과 같다. (4) QA의 도구 호출은 모델이 낸 순서대로 하나씩 실행한다(러너와 같다).
+
+**검증.**
+- **고치기 전 실패.** 새 질문 경로 시험 11개를 옛 SDK 코드에 돌리면 `command`·`commandArgs`를 무시하고 SDK가 진짜 CLI를 띄워 10개가 시간 초과로 실패했다(`ANTHROPIC_BASE_URL=http://127.0.0.1:1`, 임시 설정 폴더, 가짜 키라 모델은 불리지 않았다. 통과한 1개는 이미 취소된 신호 시험). 남은 자식 프로세스는 PID로 정리했다.
+- **고친 뒤.** 질문 경로 11개·계약(벤치) 4개·탐색형 QA 17개(기존 11 + 새 6)·거절 28개를 가짜 CLI 시나리오로 옮겨 같은 기대값으로 통과시켰다. 가짜 CLI(`fixtures/fake-claude-cli.mjs`)는 서버 이름을 `--mcp-config`에서 읽고, 도구 결과의 글·이미지 개수를 기록하고, `noResult`를 흉내 낸다(러너 시험은 그대로 통과).
+- **변이 확인.** 질문 경로: 위 표. QA: init의 도구 서버 확인을 끄면 1개, "결과 없이 끝나면 던짐"을 끄면 1개가 실패했다.
+- **진짜 CLI 2.1.321 + 가짜 모델 서버**(`~/.cache/b-studio-ship/term/fake-model.mjs`를 임시 포트에 두고, 요청을 기록하는 중계를 앞에 둠. 임시 `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, 가짜 키, 실행 전에 환경에 실제 `ANTHROPIC_API_KEY`가 없음을 확인). `claudeCodeAsk`를 한 번 돌려 한 번 잰 값: 1.6초, 답 `ok`, usage 입력 10·출력 20, 모델 서버가 받은 `/v1/messages` 요청의 `tools`가 **빈 배열**(내장 도구도 MCP도 없음), 시스템 지침에는 우리가 넘긴 글이 있고 CLI 기본 지침은 없음, 사용자 메시지는 표준 입력으로 보낸 글. `webTools: true`로 한 번 더 돌리면 `tools`는 `WebFetch`·`WebSearch`(와 CLI 내부의 `DeferredToolPlaceholder` 하나, 위 검증과 같다)뿐이었다.
+
+**돌리지 않은 검증.** 탐색형 QA를 진짜 CLI로 돌리지 않았다(가짜 모델 서버가 qa_* 도구를 부르지 않는다. 가짜 CLI와 실제 HTTP MCP 서버로만 확인했고, 스크린샷 이미지 콘텐츠가 진짜 CLI에서 모델에 그대로 가는지는 잰 적 없다). 실제 모델·실제 로그인으로 돈 세션, `--no-session-persistence`의 문서 재확인(CLI 도움말로만 확인), 벤치의 기준선과 관문 러너(범위 밖). `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.

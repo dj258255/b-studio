@@ -596,6 +596,16 @@ interface NativeGuard {
     textIds: string[] | null | undefined,
   ): string;
   reqIntegrityReview(before: string | null | undefined, after: string | null | undefined, beforeEffective: string[], afterEffective: string[], afterIds: string[]): string;
+  // ── agent: 요구사항 추적표와 시험 파일 훑기(3단계 3z). 추적표는 검증 상태를 올리는 여는 쪽이라 모양이 어긋난 입력은 던진다.
+  // 시험 이름·파일 경로는 껍데기가 encodeLoneSurrogates해서 보내고 결과에서 되돌린다(짝 없는 서로게이트가 U+FFFD로 합쳐져 서로 다른 시험이 같아지지 않게).
+  // reqTraceFileIndex는 시험 파일 하나에서 뽑은 색인(JSON), 시험 파일이 아니면 null. 훑기는 색인 배열(JSON, 시험 파일이 아닌 자리는 null)을 받아 [[파일 자리, 이름]]을 돌려준다
+  reqTraceFileIndex(path: string, content: string): string | null | undefined;
+  reqTraceScanRequirement(indexesJson: string, id: string): string;
+  reqTraceScanScenario(indexesJson: string, scenarioId: string): string;
+  reqTraceScanOrphans(indexesJson: string): string;
+  reqTraceScenarioEvidence(paramsJson: string): string;
+  reqTraceUnverifiedScenarioIds(paramsJson: string): string;
+  reqTraceMatrix(inputJson: string): string;
   // ── agent: 고정 경로와 겹치는지(3단계 3aa). 막는 판정이고(겹침·모름은 값을 받지 않는다) 이름 견주기는 거부 목록이라 글자는 파일 시스템 꼴(toWellFormed)로 보낸다.
   // 폴더 읽기는 껍데기가 한다: input은 { servicePath, pageFile, values(자기 속성만), check, maxFolders } JSON, known은 지금까지 읽은 { lstat: { 경로: 'missing'|'error'|'link'|'dir'|'other' }, readdir: { 폴더: null | [[이름, 'l'|'d'|'f']] } } JSON(경로는 프로젝트 루트 기준 상대 경로).
   // 결과: { need: { kind: 'lstat'|'readdir', path } }(읽고 known에 더해 다시 부른다) | { shadows: [{ name, where }] } | { unknown: 메시지 }. 모양이 어긋난 입력은 던진다
