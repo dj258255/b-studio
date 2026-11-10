@@ -510,6 +510,21 @@ interface NativeGuard {
   coordMcpPostInputError(argsJson: string): string | null | undefined;
   coordMcpReadInputError(argsJson: string): string | null | undefined;
   coordFormatNote(kind: string, priority: number, lane: string, body: string, refs: string[]): string;
+  // ── agent: 검증 통과 판정·도구 입력 검사(3단계 3u). 막는 검사이고 서비스 허용 목록·origin은 여는 쪽이라 비교하는 두 글자를 encodeLoneSurrogates로 바꿔 보낸다.
+  // verifyFormatReport는 던지지 않는다(읽을 수 없는 보고서는 "검증 실패" 글). toolInputError는 맞으면 null, 아니면 던질 글이고 valueJson은 encodeNative한 값(없으면 undefined)
+  verifyOk(restartedReady: boolean[], contractErrored: boolean[], changeBreaking: boolean[], allowBreaking: boolean, secretLeaks: number, specError: boolean): boolean;
+  verifyPlatformFailure(syncError: string | null | undefined, syncPlatform: boolean, services: string[], ready: boolean[], platform: boolean[], errors: string[]): string | null | undefined;
+  verifyMentionsDeletedFile(logTail: string[], deleted: string[]): boolean;
+  verifyFormatReport(reportJson: string, allowBreaking: boolean, specFile: string): string;
+  toolInputError(kind: string, key: string, valueJson: string | null | undefined): string | null | undefined;
+  toolClamp(value: number, min: number, max: number): number;
+  toolComposeServiceNames(compose: string[] | null | undefined, managed: string[]): string[];
+  toolServiceAllowed(name: string, managed: string[]): boolean;
+  toolServiceOrAddonAllowed(name: string, compose: string[] | null | undefined, managed: string[]): boolean;
+  toolSummarizeApproval(name: string, inputJson: string | null | undefined): string;
+  toolMismatchAddable(max: number, seenRequests: string[], seenChecks: string[], seenFollowed: string[], request: string, check: string, followed: string): boolean;
+  toolHttpPathOk(path: string): boolean;
+  toolSameOrigin(requestOrigin: string, serviceOrigin: string): boolean;
 }
 
 export interface NativeHostPty {

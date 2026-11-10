@@ -9427,6 +9427,35 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 변이 확인: Rust 핵심 줄 98곳(호스트 파싱 7, 호스트 허용 9, 상수 시간 비교 8, 토큰 7, 인증 4, 출처 9, 파비콘 5, 단계 설명 5, 안내 4, 검증 13, 정렬·고르기 12, 입력 검사 12, 글 3)을 하나씩 망가뜨렸다. 넓히는 변이(접두·포함·대소문자 무시·끝 슬래시 무시·공백 무시·`||`/`&&`·내부 스킴 확대)는 모두 잡혔다. 요약 줄 판정으로 잡힌 것 92곳(처음 컴파일 오류였던 배열 길이 변이 3곳은 고쳐 다시 돌려 잡힘, 비정상 종료로 잡힌 1곳 포함), cargo 단위 시험이 잡은 것 2곳(훑는 길이를 `min`으로, 단계 알림 제거), 시험을 더해 잡은 것 1곳(정렬의 id를 UTF-8 순서로: Rust 단위 시험 추가), 동치 3곳: ①비교에서 짧은 쪽 채움 값(길이 차이가 이미 결과에 섞여 있음) ②내부 스킴 비교를 `starts_with`로(`protocol`은 늘 `:`로 끝나 같음과 같다) ③개수 상한 분기에서 잘림 표시 제거(그 분기에 닿으면 이미 `visible.len() > limit`이라 처음 값이 참). 차등 시험 대조 장치에서 `truncated` 처음 값 변이도 같은 이유로 동치다. 이 값은 한 번 잰 값이다.
 - 돌리지 않은 것: 실제 브라우저·MCP 클라이언트로 부른 실행(서버·브라우저 호출은 구조 그대로, 기존 시험으로만 확인), 토큰 비교의 실제 시간 측정(구조로만 확인), 짝 없는 서로게이트가 든 글 출력의 차등(의도). 실험 경로는 따로 확인하지 않았다(`hook-server.ts`·게시판 MCP 라우트는 같은 함수를 껍데기로 그대로 쓴다). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림).
 
+### 덧붙임: 3단계 3u — 검증 통과 판정과 도구 입력 검사 (2026-11-10, [#1100](https://github.com/dj258255/b-studio/issues/1100))
+
+- 옮긴 것: `crates/bstudio-guard/src/verify_judge.rs` — `verifyChanges` 안 `ok` 계산(`verify_ok`), `platformFailureOf`, `mentionsDeletedFile`, `formatVerificationReport`. `crates/bstudio-guard/src/tool_input.rs` — `asRecord`·`string`·`integer`·`boolean`·`stringArray`·`optionalStringArray`(`input_error`), `clamp`, `serviceName`·`serviceOrAddonName`·`composeServiceNames`(`service_allowed`·`service_or_addon_allowed`·`compose_service_names`), `summarizeApproval`, `createMismatchLog`의 판정(`mismatch_addable`), `httpRequest`의 경로·origin 확인(`http_path_ok`·`same_origin`). 래퍼는 `crates/bstudio-node/src/lib.rs` 맨 끝, 타입은 `NativeGuard`의 `// ── agent: 검증 통과 판정·도구 입력 검사(3단계 3u)` 묶음. 옮긴 TS 구현은 같은 커밋에서 지웠다.
+- TS에 남긴 것: 검증·도구 실행 흐름(재시작·계약 추출·샌드박스 호출·`executeTool`), `isPlatformError`(`instanceof SandboxError`라 값 판정이 아니다), `buildTools`의 도구 스키마 글(옮기지 않았다), `formatNote`·`asNoteKind`(3t), URL 해석(`new URL`; 파싱 결과의 origin 글자만 Rust로 넘긴다), `experimentalEnabled()`.
+- **호출부마다 막는 쪽인가 여는 쪽인가**(AGENTS.md):
+
+  | 호출부 | 쪽 | 같음·포함 비교 | 모르는 입력 |
+  | --- | --- | --- | --- |
+  | `verifyChanges`의 `ok`(`verify_ok`) | 통과를 정함(거짓이 닫는 쪽) | 없음(불리언) | 계약 오류는 `error !== undefined`로 넘긴다 |
+  | `platformFailureOf` | 있으면 재시도로 세지 않고 되돌리지 않음(열린 쪽) | 없음 | 없음(코드 실패로 센다) |
+  | `mentionsDeletedFile` | 참이면 실패한 서비스를 한 번 더 띄움(열린 쪽) | 포함: 두 글자를 `encodeLoneSurrogates`로 | 거짓 |
+  | `formatVerificationReport` | 글(통과 글은 `ok`가 JSON `true`일 때만) | 없음 | 읽을 수 없으면 "검증 실패" 글 |
+  | `input_error`(입력 검사 전부) | 막는 쪽(입력 거부) | 없음 | 거부 |
+  | `clamp` | 한계를 정함 | 없음 | JS `Math` 규칙 그대로 |
+  | `service_allowed`·`service_or_addon_allowed` | 여는 쪽(허용 목록) | 같음 `==`: 두 글자를 `encodeLoneSurrogates`로 | 허용 밖 |
+  | `same_origin`(`httpRequest`) | 여는 쪽(같은 호스트만) | 같음: origin 글자를 `encodeLoneSurrogates`로 | 불투명 origin(`"null"`)은 다름 |
+  | `http_path_ok` | 막는 쪽 | 없음 | 거부 |
+  | `mismatch_addable` | 상한은 막는 쪽, 같은 기록은 낮추기만 하는 기록을 버림 | 같음: 세 값을 `encodeLoneSurrogates`로 | 길이가 어긋나면 안 남김 |
+  | `summarizeApproval` | 사람이 보는 표시 | 없음 | 도구 이름만 |
+
+- JS·Rust 차이를 푼 방식: 입력 한 값은 `encodeNative`한 JSON으로 넘기고(`NaN`·`±Infinity`·`-0`은 표시 객체) Rust가 `JsValue`로 읽어 JS의 `typeof`·`Number.isInteger`·`Array.isArray`를 그대로 따른다(정수는 유한하고 소수 부분이 없다: `-0`·2^53 위의 큰 수는 정수, 숫자 꼴 문자열은 정수가 아니다). `clamp`는 `review_input::js_min`·`js_max`(`NaN` 전파, `-0`<`+0`). 검사 전에 값을 `plainCopy`로 평범한 객체·배열만 복사해 `toJSON`·getter·`Date`·클래스 인스턴스·BigInt가 값을 다르게 보이게 하는 길을 막고(검토에서 `{ toJSON: () => 'x' }`가 `string()`을 통과하는 열린 쪽을 차등 시험이 바로 잡았다), `asRecord`는 그 복사본을 돌려줘 이후 검사가 읽는 값과 Rust가 판정한 값이 같은 데이터다. `__proto__` 키는 `defineProperty`로 복사한다. 짝 없는 서로게이트: 열린 쪽 비교 네 곳(서비스 이름, origin, 어긋남 같은 기록, 지운 파일 이름 포함)은 `encodeLoneSurrogates`로 바꿔 보내고, 표시용 글(보고서·승인 요약)은 U+FFFD로 합쳐져도 된다.
+- 차등 시험(`verify-tools-differential.test.ts`, 옛 TS를 `verify-tools-legacy.ts`로 복사 — `git show 0a6d85c`의 `verify.ts`·`tools.ts`와 대조): 한 번에 15만 번(기본 2만, `VERIFY_TOOLS_CASES`). 입력 검사 5종 × 15만 = 73만 건(받음 103,432, 거부 627,220), 서비스 허용 30만 건(허용 92,150, 거부 207,850), origin 11만 건(같음 86,704, 다름 7,441, 불투명 17,008), `ok` 15만 건(통과 24,518, 실패 125,482), `mentionsDeletedFile` 15만 건(참 39,748), 보고서 글 15만 건(통과 글 74,782, 실패 글 75,218), `platformFailureOf`·`summarizeApproval`·`createMismatchLog`·`clamp`·`asRecord`. **열린 쪽 뒤집힘 0**(`ok` 옛 실패 → 새 통과 0, 서비스 허용 0, 입력 검사 0, 지운 파일 0). 대조 장치: 결과 글자 하나를 바꾼 옛 보고서 글이 200건 모두 차이로 잡힌다.
+- 벡터(`verify-tools-vectors.test.ts`, 123개): 정수 경계(`0`·`-0`·2^53·1e21·1e300·0.5·5e-324·`NaN`·`±Infinity`·`'5'`), 빈 배열·`null` 요소, `clamp`의 경계(같음·±1·`NaN`·`-0`), 서비스 이름의 거의 같은 거부(접두·덧붙임·대소문자·공백·`_`↔`-`·`/`·빈 글자·NUL·U+FFFD), 어긋남 상한 5의 경계와 세 값 중 하나만 다른 기록, origin(포트·스킴·호스트·`//host`·`/\host`), 승인 요약의 입력 꼴, 지운 파일 로그(대소문자 접기·탭·공백 두 칸·`ſ`·접두), `ok`의 조건 하나씩, 보고서 글. 기대값은 옛 TS가 낸 값이고 옛 TS에도 같이 돌린다.
+- 의도한 차이(모두 더 막는 쪽, 옛 TS에서 다른 것을 시험이 단언한다): (1) 계약 추출 실패의 이유가 빈 글자이면 옛 `ok`는 통과였고 새 구현은 실패(트러블슈팅 171), 보고서도 적는다(`specError`가 빈 글자일 때 안내 줄이 없던 것도). (2) 보고서 `ok`가 참 같은 값(`1`)이면 옛 구현은 "검증 통과" 글을 냈고 새 구현은 JSON `true`일 때만. (3) 모양이 어긋난 보고서를 옛 구현은 던졌고 새 구현은 "검증 실패" 글. (4) 구멍 난 배열(`[, 'a']`, `new Array(2)`)을 옛 `every`는 통과시켰고 새 구현은 거부. (5) `toJSON`·`Date`·BigInt·NUL 키가 든 값은 새 구현에서 거부(옛 구현은 그 필드를 읽을 때만 검사). (6) 불투명 origin(`"null"`)은 같은 호스트로 보지 않는다.
+- 서로게이트 성질 시험(`verify-tools-surrogates.test.ts`, 6개): 인코딩 없이 보내면 서로 다른 짝 없는 서로게이트가 같은 이름·origin이 된다는 재현, 서비스 이름·어긋남 기록·지운 파일에서 옛 거부 → 새 허용 0(3만 쌍; 지운 파일은 참 10,255, 닫는 쪽 1,060 — B의 짝 없는 서로게이트가 A에서는 짝의 일부일 때뿐).
+- 새 던짐 경로: Rust 래퍼는 던지지 않는다(`input_error`는 오류 글을, `format_verification_report`는 실패 글을 돌려준다). `encodeNative`가 던지는 값은 거부 쪽(`null`)으로 보낸다. 판정을 건너뛰고 앞 상태가 남는 자리는 없다.
+- 변이: Rust 핵심 줄 48곳(`ok`의 다섯 조건 각각과 `any`↔`all`, 시크릿 경계, 플랫폼 실패의 `&&`·`||`·길이 검사, 지운 파일의 `&&`→`||`·정규식 `||`→`&&`·대소문자 접기·`basename`·이름 대소문자 무시, 보고서의 `ok`·`specError`·계약 오류·breaking 안내·`toFixed`·sync 반전, 입력 종류별 완화(정수 `&&`→`||`, 빈 배열, `all`→`any`, 선택 없음, 배열·수 허용), `clamp`의 순서·한쪽 제거, 허용 목록의 `==`→`starts_with`·`contains`·대소문자 무시·부가에 managed 합침·기본값, 어긋남 상한 `>=`→`>`·`&&`→`||`·대소문자·followed 무시, 경로 `contains`, origin의 null 허용·`starts_with`·대소문자 무시, 승인 요약). vitest 요약 줄로 **47곳을 잡았고** 처음 살아남은 3곳 중 origin 둘(`==`→`starts_with`, 대소문자 무시)은 껍데기가 정규화된 origin만 보내 벡터가 못 잡았다 — Rust 함수를 직접 부르는 거의 같은 거부 벡터를 더해 잡았다. 나머지 하나(`platform_failure_of`의 길이 검사 `||`→`&&`)는 껍데기가 항상 같은 길이를 넘겨 vitest로는 도달할 수 없고 Rust 단위 시험(`플랫폼_실패는_첫_줄만_돌려준다`, 길이 어긋난 입력)이 패닉으로 잡는다.
+- 돌리지 않은 것: 실제 세션에서 에이전트가 쓰는 경로로 옛 결과와 견주기, `buildTools`의 도구 스키마 글 옮기기, `isPlatformError`, Kubernetes 제공자·다른 러너(타입 검사로만), Windows(`path.sep`을 쓰는 곳은 3q 몫).
+
 ## ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다
 
 상태: 채택(계획)
