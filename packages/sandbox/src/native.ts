@@ -611,6 +611,28 @@ interface NativeGuard {
   // 폴더 읽기는 껍데기가 한다: input은 { servicePath, pageFile, values(자기 속성만), check, maxFolders } JSON, known은 지금까지 읽은 { lstat: { 경로: 'missing'|'error'|'link'|'dir'|'other' }, readdir: { 폴더: null | [[이름, 'l'|'d'|'f']] } } JSON(경로는 프로젝트 루트 기준 상대 경로).
   // 결과: { need: { kind: 'lstat'|'readdir', path } }(읽고 known에 더해 다시 부른다) | { shadows: [{ name, where }] } | { unknown: 메시지 }. 모양이 어긋난 입력은 던진다
   staticShadowStep(inputJson: string, knownJson: string): string;
+  // ── agent: 로컬 CLI 러너의 실행 파일 고르기·판정·사용량(3단계 3ac). cliResolveCommand는 막는 쪽이다: PATH·프로젝트 루트의 파일 상태를 Rust가 읽고 `{ path }`(그 글자를 그대로 spawn에 쓴다)나 `{ reason }`을 돌려준다(JSON).
+  // 경로·PATH는 글자 그대로 보낸다: 짝 없는 서로게이트는 Node가 fs·spawn에 줄 때도 같은 UTF-8(U+FFFD)이 되므로 확인한 경로와 띄우는 경로의 바이트가 같다.
+  // 판정 입력은 encodeNative한 JSON이다. runnerDescribeResultFailure는 `{subtype,is_error,result,stop_reason,errors}`, runnerMcpSetupFailure는 `{mcp_servers,mcp_server_errors}`. 실패가 아니면(연결됐으면) null.
+  cliResolveCommand(command: string, pathValue: string | undefined | null, forbiddenRoot: string | undefined | null): string;
+  cliChildPath(value: string, forbiddenRoot: string | undefined | null): string;
+  // `{ window: number | null, ignored?: string }`
+  runnerResolveCompactWindow(raw: string | undefined | null): string;
+  runnerIsTransientNetworkFailure(message: string): boolean;
+  runnerDescribeResultFailure(messageJson: string): string | null | undefined;
+  runnerMcpSetupFailure(messageJson: string, server: string): string | null | undefined;
+  runnerNoResultMessage(hasExit: boolean, errorMessage: string | undefined | null, signal: string | undefined | null, code: number | undefined | null, stderr: string): string;
+  // 입력은 result의 modelUsage(없으면 'null'). `{ total, byModel }` JSON. null 항목이 있으면 던진다(옛 TS도 던졌다)
+  runnerUsageOf(modelUsageJson: string): string;
+  runnerMergeUsageByModel(baseJson: string, queryJson: string): string;
+  runnerAddUsage(targetJson: string, sourceJson: string): string;
+  runnerApiDurationOf(valueJson: string): number | null | undefined;
+  // ── agent: 요구사항 문서 읽기·쓰기(3단계 3ab). 글자는 모두 encodeLoneSurrogates한 것이고 결과도 같은 인코딩이다(decodeLoneSurrogates로 푼다). 객체는 encodeNative한 JSON, 결과는 decodeNative로 읽는다.
+  // reqMdParseBody는 던지지 않고 `{drafts, jsonBlock, assumptions, manualSteps}`를 돌려준다(zod 검증 앞의 초안과 첫 JSON 블록의 글자). reqMdMerge(몸통 요구사항, 블록 요구사항)는 합친 목록,
+  // reqMdSerialize `{requirements, statusById, assumptions, manualSteps}`는 마크다운(모양이 어긋나면 던진다)
+  reqMdParseBody(raw: string): string;
+  reqMdMerge(requirementsJson: string, storedJson: string): string;
+  reqMdSerialize(inputJson: string): string;
   // ── agent: 작은 판정 모음(3단계 3af). 이름·글은 껍데기가 encodeLoneSurrogates해서 보내고 결과 글에서 decodeLoneSurrogates로 되돌린다.
   // 덤프 정규화기는 바이트 조각을 먹이면 해시에 넣을 바이트를 낸다(바뀌지 않음을 정하는 판정이라 줄 끝 글자·잘못된 바이트도 해시에 넣는다).
   // agentTempDumpPids는 지우는 코드가 쓴다: 우리가 쓰는 이름 꼴이 아니거나 pid가 양의 i32 정수가 아니면 null(지우지 않는다).
