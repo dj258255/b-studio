@@ -2686,3 +2686,109 @@ pub fn repo_cap_body(body: String) -> String {
 pub fn repo_build_pull_request(input_json: String) -> Result<String> {
     Ok(out(&fail(repo::build_pull_request(&input_json))?))
 }
+
+use bstudio_guard::gate_helpers as gh;
+
+/// 오류 표지 글자. 없으면 null
+#[napi]
+pub fn gate_next_error_marker(text: String, expect_status: f64) -> Option<String> {
+    gh::next_error_marker(&text, expect_status).map(str::to_owned)
+}
+
+/// `{service, mode, expectStatus, viewport?}` JSON → pageChecks 모양 JSON
+#[napi]
+pub fn gate_auto_page_check(config_json: String, route_path: String) -> Result<String> {
+    Ok(out(&gh::auto_page_check(&input(&config_json, "자동 페이지 설정")?, &route_path)))
+}
+
+#[napi]
+pub fn gate_contains_api_text(text: String, value: String) -> bool {
+    gh::contains_api_text(&text, &value)
+}
+
+#[napi]
+pub fn gate_contains_api_number(text: String, value: f64) -> bool {
+    gh::contains_api_number(&text, value)
+}
+
+#[napi]
+pub fn gate_missing_api_value(service: String, json_path: String, value_text: Option<String>, value_number: Option<f64>, page_path: String) -> String {
+    gh::missing_api_value(&service, &json_path, value_text.as_deref(), value_number, &page_path)
+}
+
+/// finding: `{text, visible, problem?}`. 알 수 없는 문제 종류는 던진다
+#[napi]
+pub fn gate_viewport_problem_text(finding_json: String, width: f64, height: f64) -> Result<String> {
+    fail(gh::viewport_problem_text_for(&input(&finding_json, "화면 글자 결과")?, width, height))
+}
+
+/// `{expected:[{key,text}], report: null | {width,height,findings:[{key,text,visible,problem?}]}}` JSON → 문제 문구 목록
+#[napi]
+pub fn gate_viewport_problems(input_json: String) -> Result<Vec<String>> {
+    fail(gh::viewport_problems(&input(&input_json, "첫 화면 글자 판정 입력")?))
+}
+
+#[napi]
+pub fn gate_missing_all_text(values: Vec<String>) -> String {
+    gh::missing_all_text(&values)
+}
+
+#[napi]
+pub fn gate_missing_any_text(values: Vec<String>) -> String {
+    gh::missing_any_text(&values)
+}
+
+#[napi]
+pub fn gate_dynamic_probe_data_hint(probed_id: String) -> String {
+    gh::dynamic_probe_data_hint(&probed_id)
+}
+
+/// 동적 세그먼트인 `split('/')` 조각의 번호
+#[napi]
+pub fn gate_dynamic_segments(page_file: String) -> Vec<f64> {
+    gh::dynamic_segments(&page_file).into_iter().map(|i| i as f64).collect()
+}
+
+/// sampleParams는 `[[키, 값], …]`
+#[napi]
+pub fn gate_accepted_notes(spec_file: String, in_run_keys: Vec<String>, sample_params: Vec<Vec<String>>, in_run_sample_id_from: bool, from_service: Option<String>, from_path: Option<String>) -> Vec<String> {
+    let params = sample_pairs(sample_params);
+    let from = from_service.as_deref().zip(from_path.as_deref());
+    gh::accepted_notes(&spec_file, &in_run_keys, &params, in_run_sample_id_from, from)
+}
+
+#[napi]
+pub fn gate_uses_in_run_value(page_file: String, in_run_keys: Vec<String>, in_run_sample_id_from: bool, used_fallback_count: f64) -> bool {
+    gh::uses_in_run_value(&page_file, &in_run_keys, in_run_sample_id_from, used_fallback_count as usize)
+}
+
+#[napi]
+pub fn gate_sampled_values(page_file: String, sample_params: Vec<Vec<String>>) -> Option<String> {
+    gh::sampled_values(&page_file, &sample_pairs(sample_params))
+}
+
+fn sample_pairs(entries: Vec<Vec<String>>) -> Vec<(String, String)> {
+    entries.into_iter().filter_map(|mut entry| if entry.len() == 2 { let v = entry.pop()?; Some((entry.pop()?, v)) } else { None }).collect()
+}
+
+#[napi]
+pub fn gate_strip_html(html: String) -> String {
+    gh::strip_html(&html)
+}
+
+/// `[{stage, name, attempts, detail?}]` JSON
+#[napi]
+pub fn gate_format_failed_checks(checks_json: String) -> Result<String> {
+    fail(gh::format_failed_checks(&input(&checks_json, "실패한 검사 목록")?))
+}
+
+#[napi]
+pub fn gate_compare_detail(ratio: f64, max: f64, width: f64, height: f64) -> String {
+    gh::compare_detail(ratio, max, width, height)
+}
+
+/// `{successCount?: {exactly?, atMost?}, allStatusIn?: number[]}` JSON
+#[napi]
+pub fn gate_describe_concurrency_expect(expect_json: String) -> Result<String> {
+    fail(gh::describe_concurrency_expect(&input(&expect_json, "동시 요청 기대")?))
+}

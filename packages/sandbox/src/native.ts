@@ -448,6 +448,27 @@ interface NativeGuard {
   repoManagedBodySqueezedOut(body: string, managedBody: string): boolean;
   repoCapBody(body: string): string;
   repoBuildPullRequest(inputJson: string): string;
+  // ── agent: 게이트의 순수 보조 판정(3단계 3r). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다(gateViewportProblemText·gateViewportProblems는 옛 타입 밖의 문제 종류도 던진다).
+  // 통과로 이어지는 같음·포함 두 자리는 견줄 두 글자를 encodeLoneSurrogates해서 보낸다: gateContainsApiText(text, value), gateViewportProblems의 expected·findings의 key.
+  // sampleParams·inRunKeys 같은 사용자 키 맵은 [[키, 값], ...] 쌍으로 보낸다(encodeNative가 NUL로 시작하는 키를 던지지 않게)
+  gateNextErrorMarker(text: string, expectStatus: number): string | null | undefined;
+  gateAutoPageCheck(configJson: string, routePath: string): string;
+  gateContainsApiText(text: string, value: string): boolean;
+  gateContainsApiNumber(text: string, value: number): boolean;
+  gateMissingApiValue(service: string, jsonPath: string, valueText: string | null | undefined, valueNumber: number | null | undefined, pagePath: string): string;
+  gateViewportProblemText(findingJson: string, width: number, height: number): string;
+  gateViewportProblems(inputJson: string): string[];
+  gateMissingAllText(values: string[]): string;
+  gateMissingAnyText(values: string[]): string;
+  gateDynamicProbeDataHint(probedId: string): string;
+  gateDynamicSegments(pageFile: string): number[];
+  gateAcceptedNotes(specFile: string, inRunKeys: string[], sampleParams: string[][], inRunSampleIdFrom: boolean, fromService: string | null | undefined, fromPath: string | null | undefined): string[];
+  gateUsesInRunValue(pageFile: string, inRunKeys: string[], inRunSampleIdFrom: boolean, usedFallbackCount: number): boolean;
+  gateSampledValues(pageFile: string, sampleParams: string[][]): string | null | undefined;
+  gateStripHtml(html: string): string;
+  gateFormatFailedChecks(checksJson: string): string;
+  gateCompareDetail(ratio: number, max: number, width: number, height: number): string;
+  gateDescribeConcurrencyExpect(expectJson: string): string;
 }
 
 export interface NativeHostPty {

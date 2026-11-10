@@ -21,6 +21,7 @@ pub mod docs;
 pub mod edge_config;
 pub mod escalation;
 pub mod explore_qa;
+pub mod gate_helpers;
 pub mod git_mask;
 pub mod host_containers;
 pub mod host_processes;
