@@ -1,8 +1,13 @@
+import path from 'node:path';
+import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
+import { decodeLoneSurrogates } from './lone-surrogates';
 import type { AgentUsage, ModelClient } from './loop';
-import { isProtectedPath, isWithinScope } from './policy';
+
+/** Windows면 역슬래시도 구분자다. 판정은 Rust가 하고 플랫폼 값만 여기서 넘긴다 */
+const BACKSLASH_SEP = path.sep === '\\';
 
 /**
  * 한 요청을 하위 작업으로 나눈 계획.
@@ -28,24 +33,12 @@ export const DEFAULT_PLAN_LIMITS: PlanLimits = { maxLanes: MAX_PLAN_LANES, maxTa
 /**
  * 설정에서 계획 상한을 읽는다. `B_STUDIO_MAX_LANES`(1~8)·`B_STUDIO_MAX_PLAN_TASKS`(1~16), 기본 3·6.
  * 잘못된 값은 기본값으로 돌리고 이유를 경고로 남긴다 — 오타 하나로 계획 기능이 멈추는 것보다 낫다.
+ * 판정은 Rust(crates/bstudio-guard/src/task_plan.rs, ADR-191 3단계 3x)가 하고, 여기서는 경고만 찍는다
  */
 export function planLimitsFromEnv(env: Record<string, string | undefined> = process.env): PlanLimits {
-  return {
-    maxLanes: readPlanLimit(env.B_STUDIO_MAX_LANES, 'B_STUDIO_MAX_LANES', MAX_PLAN_LANES, MAX_PLAN_LANES_CAP),
-    maxTasks: readPlanLimit(env.B_STUDIO_MAX_PLAN_TASKS, 'B_STUDIO_MAX_PLAN_TASKS', MAX_PLAN_TASKS, MAX_PLAN_TASKS_CAP),
-  };
-}
-
-/** 값 하나를 읽는다. 비었으면 기본값, 정수가 아니거나 1~상한 밖이면 경고하고 기본값 */
-function readPlanLimit(raw: string | undefined, name: string, fallback: number, cap: number): number {
-  const value = raw?.trim();
-  if (!value) return fallback;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1 || parsed > cap) {
-    console.warn(`[b-studio] ${name}=${value}을(를) 쓸 수 없습니다. 1~${cap} 사이 정수여야 합니다. 기본값 ${fallback}으로 진행합니다`);
-    return fallback;
-  }
-  return parsed;
+  const decided = JSON.parse(native.taskPlanLimits(env.B_STUDIO_MAX_LANES, env.B_STUDIO_MAX_PLAN_TASKS)) as { maxLanes: number; maxTasks: number; warnings: string[] };
+  for (const warning of decided.warnings) console.warn(warning);
+  return { maxLanes: decided.maxLanes, maxTasks: decided.maxTasks };
 }
 
 const TASK_ID = /^[a-z][a-z0-9-]{0,39}$/;
@@ -119,7 +112,9 @@ export class TaskPlanError extends Error {
 
 /**
  * 계획을 검증하고 레인으로 묶는다. 모델이 만든 계획이라도 이 검사를 통과하지 못하면 실행하지 않는다.
- * 상한(작업 수·레인 수)은 그 실행의 설정값을 따른다 — 기본은 6·3이다
+ * 상한(작업 수·레인 수)은 그 실행의 설정값을 따른다 — 기본은 6·3이다.
+ * 형식(zod)은 여기서 읽고, 그 뒤의 판정(상한·id·의존·레인 나누기·의존 순서·backend/model 일치·병렬 레인의 쓰기 범위 겹침)은 Rust(ADR-191 3단계 3x)가 한다.
+ * 글자는 `encodeLoneSurrogates`해서 보내고 오류 글과 레인 범위는 풀어 읽는다: 통과한 레인 범위가 쓰기 허용 목록이 되므로 짝 없는 서로게이트가 U+FFFD로 합쳐지면 안 된다
  */
 export function planLanes(input: unknown, limits: PlanLimits = DEFAULT_PLAN_LIMITS): TaskLane[] {
   const parsed = TaskPlanSchema.safeParse(input);
@@ -127,78 +122,32 @@ export function planLanes(input: unknown, limits: PlanLimits = DEFAULT_PLAN_LIMI
     throw new TaskPlanError(`작업 계획 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
   }
   const tasks = parsed.data.tasks;
-  if (tasks.length > limits.maxTasks) throw new TaskPlanError(`작업은 ${limits.maxTasks}개까지입니다 (계획: ${tasks.length}개)`);
-  const byId = new Map(tasks.map((task) => [task.id, task]));
-  if (byId.size !== tasks.length) throw new TaskPlanError('작업 id가 중복됩니다');
-  for (const task of tasks) {
-    for (const dependency of task.dependsOn) {
-      if (!byId.has(dependency)) throw new TaskPlanError(`${task.id}: 없는 작업 '${dependency}'에 의존합니다`);
-      if (dependency === task.id) throw new TaskPlanError(`${task.id}: 자기 자신에게 의존할 수 없습니다`);
-    }
-  }
-
-  // 의존 관계로 이어진 작업끼리 한 레인에 묶는다 (방향 없는 연결 요소)
-  const parent = new Map(tasks.map((task) => [task.id, task.id]));
-  const find = (id: string): string => {
-    const root = parent.get(id)!;
-    if (root === id) return id;
-    const top = find(root);
-    parent.set(id, top);
-    return top;
-  };
-  for (const task of tasks) for (const dependency of task.dependsOn) parent.set(find(task.id), find(dependency));
-
-  const groups = new Map<string, PlannedTask[]>();
-  for (const task of tasks) {
-    const root = find(task.id);
-    groups.set(root, [...(groups.get(root) ?? []), task]);
-  }
-
-  const lanes = [...groups.values()].map((group, index) => {
-    const ordered = topologicalOrder(group);
-    // 한 레인의 작업은 한 세션에서 차례로 돈다. 백엔드·모델이 섞이면 세션 하나로 돌릴 수 없으므로 실행 전에 막는다
-    const head = ordered[0]!;
-    for (const task of ordered) {
-      if (task.backend !== head.backend) throw new TaskPlanError(`같은 레인의 작업은 backend가 같아야 합니다: ${head.id}(${head.backend ?? '서버 기본'}) ↔ ${task.id}(${task.backend ?? '서버 기본'})`);
-      if (task.model !== head.model) throw new TaskPlanError(`같은 레인의 작업은 model이 같아야 합니다: ${head.id}(${head.model ?? '기본'}) ↔ ${task.id}(${task.model ?? '기본'})`);
-    }
-    return { id: `lane-${index + 1}`, tasks: ordered, paths: [...new Set(ordered.flatMap((task) => task.paths))].sort() };
-  });
-  if (lanes.length > limits.maxLanes) throw new TaskPlanError(`동시에 돌릴 레인은 ${limits.maxLanes}개까지입니다 (계획: ${lanes.length}개)`);
-
-  // 병렬 레인의 쓰기 범위가 겹치면 합칠 때 어느 쪽 결과가 맞는지 정할 수 없다. 실행 전에 막는다
-  for (let a = 0; a < lanes.length; a++) {
-    for (let b = a + 1; b < lanes.length; b++) {
-      for (const left of lanes[a]!.paths) {
-        const overlap = lanes[b]!.paths.find((right) => isProtectedPath(left, right) || isProtectedPath(right, left));
-        if (overlap) throw new TaskPlanError(`병렬 레인의 쓰기 범위가 겹칩니다: ${lanes[a]!.id} '${left}' ↔ ${lanes[b]!.id} '${overlap}'`);
-      }
-    }
-  }
-  return lanes;
+  const decided = JSON.parse(
+    native.taskPlanLanes(
+      JSON.stringify(
+        tasks.map((task) => ({
+          id: encodeLoneSurrogates(task.id),
+          dependsOn: task.dependsOn.map(encodeLoneSurrogates),
+          backend: task.backend,
+          model: task.model === undefined ? undefined : encodeLoneSurrogates(task.model),
+          paths: task.paths.map(encodeLoneSurrogates),
+        })),
+      ),
+      limits.maxTasks,
+      limits.maxLanes,
+      BACKSLASH_SEP,
+    ),
+  ) as { error: string } | { lanes: Array<{ id: string; tasks: number[]; paths: string[] }> };
+  if ('error' in decided) throw new TaskPlanError(decodeLoneSurrogates(decided.error));
+  return decided.lanes.map((lane) => ({ id: lane.id, tasks: lane.tasks.map((index) => tasks[index]!), paths: lane.paths.map(decodeLoneSurrogates) }));
 }
 
-/** 파일이 그 작업(레인)의 쓰기 범위 안에 있는지. 명령으로 만든 파일처럼 도구 게이트를 거치지 않은 변경을 합치기 전에 다시 본다 */
+/**
+ * 파일이 그 작업(레인)의 쓰기 범위 안에 있는지. 명령으로 만든 파일처럼 도구 게이트를 거치지 않은 변경을 합치기 전에 다시 본다.
+ * 쓰기 범위는 허용 목록이다: 판정은 Rust(path_policy::is_within_scope, 좁게 맞춘다)가 하고, 글자는 단사로 바꿔 보낸다(짝 없는 서로게이트가 U+FFFD로 합쳐져 범위 밖이 범위 안이 되지 않게)
+ */
 export function isInScope(file: string, paths: readonly string[]): boolean {
-  return paths.some((scope) => isWithinScope(file, scope));
-}
-
-function topologicalOrder(tasks: PlannedTask[]): PlannedTask[] {
-  const ids = new Set(tasks.map((task) => task.id));
-  const ordered: PlannedTask[] = [];
-  const state = new Map<string, 'visiting' | 'done'>();
-  const byId = new Map(tasks.map((task) => [task.id, task]));
-  const visit = (task: PlannedTask) => {
-    const current = state.get(task.id);
-    if (current === 'done') return;
-    if (current === 'visiting') throw new TaskPlanError(`순환 의존성이 있습니다: ${task.id}`);
-    state.set(task.id, 'visiting');
-    for (const dependency of task.dependsOn) if (ids.has(dependency)) visit(byId.get(dependency)!);
-    state.set(task.id, 'done');
-    ordered.push(task);
-  };
-  for (const task of tasks) visit(task);
-  return ordered;
+  return native.taskPlanIsInScope(encodeLoneSurrogates(file), paths.map(encodeLoneSurrogates), BACKSLASH_SEP);
 }
 
 /** 작업 계획을 받을 때 쓰는 시스템 프롬프트. 도구 없이 JSON만 받는다. 상한은 그 실행의 설정값을 따른다 */
