@@ -1,5 +1,5 @@
 import { appendFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Board } from './coordination/board';
 import { LegacyBoard } from './coordination/board-legacy';
 import { externalBoardAccess, runBoardMcpTool } from './board-mcp';
@@ -452,13 +452,21 @@ describe('차등 시험: 게시판(validate·read의 고르기)', () => {
       expect(b.post({ kind: 'fact', body: big }, { lane: 'a', by: 'model' }).ok).toBe(a.post({ kind: 'fact', body: big }, { lane: 'a', by: 'model' }).ok);
     }
     const readLimit = { readLimit: Number.NaN } as unknown as { readLimit: number };
-    const a = new LegacyBoard({ topology: 'mesh', limits: readLimit });
-    const b = new Board({ topology: 'mesh', limits: readLimit });
-    for (let i = 0; i < 5; i++) {
-      a.post({ kind: 'fact', body: `n${i}` }, { lane: 'a', by: 'model' });
-      b.post({ kind: 'fact', body: `n${i}` }, { lane: 'a', by: 'model' });
+    // 두 게시판에 같은 시각을 준다. 실제 시각을 쓰면 옛 쪽과 새 쪽 쓰기 사이에 밀리초가 넘어갈 때 `at`이 달라 정렬이 갈린다(CI에서 흔들렸다, 이슈 #1112).
+    // 실제 시각이 흐르는 상황을 가짜 타이머로 매번 만들어, 시계를 넣지 않으면 늘 실패하게 둔다
+    vi.useFakeTimers({ now: Date.UTC(2026, 10, 10, 0, 0, 0, 974) });
+    try {
+      const a = new LegacyBoard({ topology: 'mesh', limits: readLimit, now: newClock() });
+      const b = new Board({ topology: 'mesh', limits: readLimit, now: newClock() });
+      for (let i = 0; i < 5; i++) {
+        a.post({ kind: 'fact', body: `n${i}` }, { lane: 'a', by: 'model' });
+        vi.advanceTimersByTime(1);
+        b.post({ kind: 'fact', body: `n${i}` }, { lane: 'a', by: 'model' });
+      }
+      expect(JSON.stringify(b.read({ lane: 'a' }))).toBe(JSON.stringify(a.read({ lane: 'a' })));
+    } finally {
+      vi.useRealTimers();
     }
-    expect(JSON.stringify(b.read({ lane: 'a' }))).toBe(JSON.stringify(a.read({ lane: 'a' })));
   });
 
   it('대조 장치: 예산 경계(>→>=)·개수 경계·정렬 방향·시각 방향을 바꾼 가짜는 결과가 달라 잡힌다', () => {
