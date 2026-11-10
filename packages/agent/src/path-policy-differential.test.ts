@@ -135,6 +135,19 @@ function hasEmptyRule(policy: legacy.LegacyPolicy | undefined): boolean {
   return Boolean(policy?.protectedPaths?.includes('') || policy?.deniedCommands?.includes(''));
 }
 
+/**
+ * 점·공백만 남는 조각(`...`, ` `, `́.`)이 들었는가: 의도한 닫힌 쪽 차이의 조건. 새 구현은 이런 조각을 빈 꼴로 모은다(옛 구현은 그대로 두었다).
+ * `.`·`..`·빈 조각은 표기 정리가 먼저 없애므로 세지 않는다
+ */
+function hasDotOnlySegment(...texts: Array<string | undefined>): boolean {
+  return texts.some((text) => text !== undefined && text.split(/[\\/]/).some((seg) => seg !== '' && seg !== '.' && seg !== '..' && /^[. ]+$/.test(legacy.foldName(seg))));
+}
+
+/** 옛 꼴의 점·공백만 남은 조각을 빈 조각으로 바꾼 꼴: 새 구현의 꼴과 같아야 한다 */
+function dotOnlyEmptied(value: unknown): unknown {
+  return typeof value === 'string' ? value.split('/').map((seg) => (/^[. ]+$/.test(seg) ? '' : seg)).join('/') : value;
+}
+
 function runSeed(seed: number): void {
   const g = new Gen(seed);
   for (let i = 0; i < ITERATIONS; i++) {
@@ -149,12 +162,16 @@ function runSeed(seed: number): void {
 
     compare('normalizeProjectPath', { file, lenient }, () => legacy.normalizeProjectPath(file, { lenientSeparators: lenient }), () => normalizeProjectPath(file, { lenientSeparators: lenient }), bucketPath);
     compare('normalizeProjectPath(Windows)', { file, lenient }, () => legacy.normalizeProjectPath(file, { lenientSeparators: lenient }, '\\'), () => native.normalizeProjectPath(file, lenient, true) ?? undefined, bucketPath);
-    compare('foldName', name, () => legacy.foldName(name), () => foldName(name), (o) => (o.threw ? '던짐' : (o as { value: unknown }).value === name ? '그대로' : '바뀜'));
-    compare('canonicalProjectPath', { file, lenient }, () => legacy.canonicalProjectPath(file, { lenientSeparators: lenient }), () => canonicalProjectPath(file, { lenientSeparators: lenient }), bucketPath);
-    compare('canonicalProjectPath(Windows)', { file, lenient }, () => legacy.canonicalProjectPath(file, { lenientSeparators: lenient }, '\\'), () => native.canonicalProjectPath(file, lenient, true) ?? undefined, bucketPath);
+    // 접기와 꼴은 값이라 한 입력만으로 방향을 정할 수 없다(옛 분할을 새 분할이 가르는지는 전체 코드 포인트 시험이 본다). 의도한 차이는 점·공백만 남는 조각을 빈 꼴로 모으는 것뿐이다
+    const sameValue = (o: Outcome): unknown => (o.threw ? o : (o as { value: unknown }).value);
+    const foldDirection = { opens: () => false, intended: (a: Outcome, b: Outcome) => !a.threw && !b.threw && /^[. ]+$/.test(String(sameValue(a))) && sameValue(b) === '' };
+    const canonicalDirection = { opens: () => false, intended: (a: Outcome, b: Outcome) => !a.threw && !b.threw && dotOnlyEmptied(sameValue(a)) === sameValue(b) };
+    compare('foldName', name, () => legacy.foldName(name), () => foldName(name), (o) => (o.threw ? '던짐' : (o as { value: unknown }).value === name ? '그대로' : '바뀜'), foldDirection);
+    compare('canonicalProjectPath', { file, lenient }, () => legacy.canonicalProjectPath(file, { lenientSeparators: lenient }), () => canonicalProjectPath(file, { lenientSeparators: lenient }), bucketPath, canonicalDirection);
+    compare('canonicalProjectPath(Windows)', { file, lenient }, () => legacy.canonicalProjectPath(file, { lenientSeparators: lenient }, '\\'), () => native.canonicalProjectPath(file, lenient, true) ?? undefined, bucketPath, canonicalDirection);
 
-    // 거부 목록: 옛 true → 새 false가 열린 쪽
-    const protectedOpens = { opens: (a: unknown, b: unknown) => a === true && b === false, intended: () => false };
+    // 거부 목록: 옛 true → 새 false가 열린 쪽. 옛 false → 새 true는 점·공백만 남는 조각이 들었을 때만 의도한 것이다
+    const protectedOpens = { opens: (a: unknown, b: unknown) => a === true && b === false, intended: (a: Outcome, b: Outcome) => !a.threw && !b.threw && a.value === false && b.value === true && hasDotOnlySegment(file, rule) };
     compare('isProtectedPath', { file, rule }, () => legacy.isProtectedPath(file, rule), () => isProtectedPath(file, rule), bucketBool, protectedOpens);
     compare('isProtectedPath(Windows)', { file, rule, sep }, () => legacy.isProtectedPath(file, rule, sep), () => native.isProtectedPath(file, rule, sepBackslash), bucketBool, protectedOpens);
     // 허용 목록: 옛 false → 새 true가 열린 쪽
@@ -182,11 +199,13 @@ function runSeed(seed: number): void {
       if (v.decision === 'allow') return '허용';
       return `거절: ${v.reason!.split(':')[0]!.slice(0, 34)}`;
     };
-    // 의도한 닫힌 쪽 차이 둘: (1) 옛 구현이 던진 도구 이름(constructor 등)을 새 구현이 거절한다 (2) 빈 규칙이 든 정책에서 옛 구현은 통과(또는 다른 이유로 거절), 새 구현은 빈 규칙으로 거절한다
+    // 의도한 닫힌 쪽 차이 셋: (1) 옛 구현이 던진 도구 이름(constructor 등)을 새 구현이 거절한다 (2) 빈 규칙이 든 정책에서 옛 구현은 통과(또는 다른 이유로 거절), 새 구현은 빈 규칙으로 거절한다
     const closedOk = (a: Outcome, b: Outcome): boolean => {
       if (a.threw) return PROTO_TOOLS.includes(tool) && policy?.allowedTools !== undefined && !b.threw && (b.value as legacy.LegacyDecision).decision === 'deny';
       // 옛 구현이 허용했거나, 뒤의 다른 이유로 거절하던 자리다(빈 규칙을 찾으면 거절 이유가 그 규칙으로 바뀐다)
-      return !b.threw && (b.value as legacy.LegacyDecision).decision === 'deny' && hasEmptyRule(policy);
+      if (b.threw || (b.value as legacy.LegacyDecision).decision !== 'deny') return false;
+      // (3) 점·공백만 남는 조각이 든 파일·보호 경로는 새 구현이 빈 꼴로 모아 더 넓게 보호한다
+      return hasEmptyRule(policy) || hasDotOnlySegment(file, ...(policy?.protectedPaths ?? []));
     };
     const decisionDirection = {
       // 옛 거절 → 새 허용이 열린 쪽

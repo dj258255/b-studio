@@ -13,12 +13,14 @@ import { checkToolPolicy, DEFAULT_DENIED_COMMANDS, hasApprovalToken, isProtected
  *  - 보호 경로(거부 목록, 넓게)와 쓰기 범위(허용 목록, 좁게)를 같은 쌍으로: `src` 대 `srcx/a`·`src/../x`·`SRC/a`·`src\a`, `.env`가 `.env.local`을 덮는 점 접두사 규칙
  *  - 도구 정책: 읽기 도구 함의(`read_lines`→`read_file`), 승인 토큰의 공백 종류, 금지 명령의 셸 감싸기(`sh -c`, `bash -lc`)와 `gradle --stop` 변형
  * Windows 판(`path.sep === '\\'`)은 Rust 함수를 직접 부른다(껍데기는 이 기계의 플랫폼 값을 넘긴다).
- * 옛 TS(`path-policy-legacy.ts`)에 돌리면 의도한 차이(맨 아래 describe)만 실패한다.
+ * 옛 TS(`path-policy-legacy.ts`)에 돌리면 의도한 차이(맨 아래 describe)만 실패한다. 점·공백만 남는 조각을 빈 꼴로 모으는 차이(24개)는 첫 시험에서 따로 센다.
  */
 type Vector = [fn: string, args: unknown[], expected: string];
 // 벡터는 같은 폴더의 `path-policy-vectors.json`(옛 TS가 낸 값)이다. 리터럴로 두면 타입 검사가 감당하지 못한다
 const VECTORS = JSON.parse(readFileSync(new URL('./path-policy-vectors.json', import.meta.url), 'utf8')) as Vector[];
 
+/** 옛 꼴의 점·공백만 남은 조각을 빈 조각으로 바꾼 꼴 */
+const dotOnlyEmptied = (value: unknown): unknown => (typeof value === 'string' ? value.split('/').map((seg) => (/^[. ]+$/.test(seg) ? '' : seg)).join('/') : value);
 const UNDEF = (value: unknown): unknown => (value !== null && typeof value === 'object' && '$undef' in (value as object) ? undefined : value);
 const fromNullable = (value: string | null): string | undefined => value ?? undefined;
 
@@ -63,11 +65,19 @@ function run(fn: string, args: unknown[]): unknown {
 describe('path-names·policy 벡터(옛 TS가 낸 값)', () => {
   it(`${VECTORS.length}개 벡터가 모두 같다`, () => {
     const bad: string[] = [];
+    let dotOnly = 0;
     for (const [fn, args, expected] of VECTORS) {
       const actual = JSON.stringify(run(fn, args) ?? null);
-      if (actual !== expected) bad.push(`${fn} ${JSON.stringify(args)}\n  기대 ${expected}\n  실제 ${actual}`);
+      if (actual === expected) continue;
+      // 의도한 차이: 점·공백만 남는 조각(`...`, ` `)을 빈 꼴로 모은다(ADR-191 3q 덧붙임). 옛 꼴에서 그런 조각만 비운 꼴과 같아야 한다
+      if (['foldName', 'canonical', 'canonicalWin'].includes(fn) && JSON.stringify(dotOnlyEmptied(JSON.parse(expected))) === actual) {
+        dotOnly += 1;
+        continue;
+      }
+      bad.push(`${fn} ${JSON.stringify(args)}\n  기대 ${expected}\n  실제 ${actual}`);
     }
     expect(bad.slice(0, 10)).toEqual([]);
+    expect(dotOnly).toBe(24);
     expect(VECTORS.length).toBeGreaterThan(4000);
   });
 

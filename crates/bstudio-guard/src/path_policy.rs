@@ -7,11 +7,14 @@
 //!
 //! 두 갈래는 같은 "꼴 맞추기" 함수를 함께 쓰지 않는다. 모르는 입력(꼴을 못 맞춘 경로·규칙)은 거부 목록에서는 걸린 것으로, 허용 목록에서는 범위 밖으로 본다.
 //!
-//! 옛 TS와 같은 입력에 같은 결과를 낸다. 다른 곳은 둘뿐이고 모두 더 막는 쪽이다.
-//!  1. `fold_name`의 NFKD·NFKC·`\p{M}\p{Cf}`·대소문자 접기는 Node(ICU 77.1, Unicode 16)와 이 크레이트들의 Unicode 판이 달라, 옛 구현이 안 접던
-//!     Unicode 16 미배정 글자 일부를 새 구현은 접는다(거부 목록이라 더 많이 같은 꼴로 모일 뿐이다. 차이 목록은 `docs/decisions.md` ADR-191 3q).
+//! 옛 TS와 같은 입력에 같은 결과를 낸다. 다른 곳은 셋뿐이고 모두 더 막는 쪽이다.
+//!  1. `fold_name`의 NFKD·NFKC·`\p{M}\p{Cf}`·대소문자 접기는 Node(Unicode 16·17)와 이 크레이트들(std Unicode 17, `unicode-normalization` 18,
+//!     `regex-syntax` 16)의 판이 달라, 옛 구현이 안 접던 그 Node의 미배정 글자 일부를 새 구현은 접는다(거부 목록이라 더 많이 같은 꼴로 모일 뿐이다.
+//!     판별 차이 목록은 `docs/decisions.md` ADR-191 3q). 결합 문자는 두 표의 합집합으로 지워 어느 판의 Node보다도 좁지 않게 한다.
 //!  2. `find(...)`가 찾은 규칙이 빈 글자일 때 옛 구현은 `if (found)`의 거짓으로 보아 통과시켰다(보호 경로 `''`, 금지 명령 `''`).
 //!     새 구현은 찾았으면 거절한다(열린 쪽 틈을 닫는다).
+//!  3. 점·공백만 남는 이름(`...`, ` `, 결합 문자 + `.`)을 옛 구현은 그대로 두었고 새 구현은 빈 꼴로 모은다. 1의 합집합과 짝이다: 새 결합 문자 `u`를
+//!     Unicode 16 Node는 `u`·`u.`을 모으고 Unicode 17 Node는 `u`를 빈 이름과, `u.`을 `.`과 모으므로, 두 판보다 좁지 않으려면 빈 이름과 `.`이 한 꼴이어야 한다.
 //!
 //! 짝 없는 서로게이트는 napi 경계에서 U+FFFD가 된다(Node도 파일 이름에는 그렇게 쓴다).
 
@@ -58,17 +61,21 @@ fn mark_or_format() -> &'static Regex {
 }
 
 /// 이름 한 조각을 거부 목록과 견줄 꼴로 **넓게** 접는다(NFKD → 결합 문자·서식 문자 제거 → 대문자 → 소문자 → NFKC → 끝의 점·공백 제거).
-/// 점과 공백뿐인 이름은 그대로 둔다
+/// 점과 공백만 남는 이름은 빈 이름이 된다. 옛 구현은 그대로 두었지만, 결합 문자를 어느 판의 Node보다도 넓게 지우려면 빈 이름과 `.`을 한 꼴로
+/// 모아야 열린 쪽이 없다(Unicode 16 Node는 새 결합 문자 `u`와 `u.`을 모으고, Unicode 17 Node는 `u`를 빈 이름과, `u.`을 `.`과 모은다).
+/// 빈 꼴은 숨긴 이름·비밀 파일 목록에 없고, 보호 경로 규칙에서 빈 꼴은 전부 보호로 읽혀 더 막는 쪽이다
 pub fn fold_name(segment: &str) -> String {
     let decomposed: String = segment.nfkd().collect();
-    let stripped = mark_or_format().replace_all(&decomposed, "");
+    // 결합 문자는 두 표의 합집합으로 지운다: `regex`의 `\p{M}`(regex-syntax 0.8.11, Unicode 16)과 `unicode-normalization`의
+    // General_Category=Mark(0.1.26, Unicode 18). regex 표만 쓰면 Unicode 17 Node가 지우는 새 결합 문자(U+1ACF 등)를 남겨
+    // `.git`+결합 문자가 숨긴 이름을 비켜 갔다(거부 목록이 Node보다 좁아짐, 트러블슈팅 166 덧붙임). 합집합은 어느 표보다도 좁지 않다
+    let stripped: String = mark_or_format()
+        .replace_all(&decomposed, "")
+        .chars()
+        .filter(|c| !unicode_normalization::char::is_combining_mark(*c))
+        .collect();
     let folded: String = stripped.to_uppercase().to_lowercase().nfkc().collect();
-    let trimmed = folded.trim_end_matches(['.', ' ']);
-    if trimmed.is_empty() {
-        folded
-    } else {
-        trimmed.to_owned()
-    }
+    folded.trim_end_matches(['.', ' ']).to_owned()
 }
 
 /// 거부 목록과 견줄 경로: 표기를 정리하고 조각마다 넓게 접는다. 허용 목록에는 쓰지 않는다
@@ -306,10 +313,17 @@ mod tests {
         assert_eq!(fold_name("workflow\u{17F}"), "workflows");
         assert_eq!(fold_name("\u{212A}afka"), "kafka");
         assert_eq!(fold_name(".g\u{EF}t"), ".git");
-        assert_eq!(fold_name("..."), "...");
+        // 점·공백만 남는 이름은 빈 이름으로 모은다(결합 문자를 Node보다 넓게 지워도 열린 쪽이 없게, ADR-191 3q 덧붙임)
+        for name in ["...", ".", " ", ". .", "\u{0301}.", "\u{1ACF}.", "\u{1ACF}", ""] {
+            assert_eq!(fold_name(name), "", "{name:?}");
+        }
         assert_eq!(fold_name("문서"), "문서");
         // NBSP는 호환 분해로 공백이 되어 끝에서 떨어진다
         assert_eq!(fold_name("a\u{A0}"), "a");
+        // Unicode 17의 새 결합 문자(regex 표에는 없다)도 지운다
+        for mark in ['\u{1ACF}', '\u{1AEB}', '\u{10EFA}', '\u{11B60}', '\u{1E6E3}'] {
+            assert_eq!(fold_name(&format!(".git{mark}")), ".git", "{:X}", mark as u32);
+        }
     }
 
     #[test]

@@ -31,7 +31,9 @@ describe('경로를 비교할 수 있는 꼴로 맞춘다 (트러블슈팅 125)'
     // Windows·SMB는 이름 끝의 점과 공백을 무시한다
     expect(foldName('.git.')).toBe('.git');
     expect(foldName('.env ')).toBe('.env');
-    expect(foldName('...')).toBe('...');
+    // 점·공백만 남는 이름은 빈 꼴로 모은다(결합 문자를 어느 판의 Node보다도 넓게 지워도 열린 쪽이 없게, ADR-191 3q 덧붙임)
+    expect(foldName('...')).toBe('');
+    expect(foldName('\u0301.')).toBe(foldName('\u0301'));
     // 평범한 이름은 소문자가 될 뿐이다
     expect(foldName('LiveViewer.tsx')).toBe('liveviewer.tsx');
   });
