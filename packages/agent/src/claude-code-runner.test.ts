@@ -685,6 +685,24 @@ describe('runClaudeCodeAgent의 CLI 입출력(이슈 #1091, ADR-194)', () => {
     expect(log!.tools).toEqual([]);
   });
 
+  it('도구 서버가 연결됐다고 확인하지 못하면(목록에 없음·needs-auth·pending·disabled·init 없음) 통과로 끝내지 않는다', async () => {
+    const cases: Array<{ label: string; invocation: Record<string, unknown> }> = [
+      { label: '목록이 빔', invocation: { initExtra: { mcp_servers: [] } } },
+      { label: '다른 서버만', invocation: { initExtra: { mcp_servers: [{ name: 'other', status: 'connected' }] } } },
+      { label: 'mcp_servers가 null', invocation: { initExtra: { mcp_servers: null } } },
+      { label: 'needs-auth', invocation: { initExtra: { mcp_servers: [{ name: 'b-studio', status: 'needs-auth' }] } } },
+      { label: 'pending', invocation: { initExtra: { mcp_servers: [{ name: 'b-studio', status: 'pending' }] } } },
+      { label: 'disabled', invocation: { initExtra: { mcp_servers: [{ name: 'b-studio', status: 'disabled' }] } } },
+      { label: 'init 없음', invocation: { noInit: true } },
+    ];
+    for (const { label, invocation } of cases) {
+      const { cli } = fakeClaudeCode({ turns: [[{ text: '도구 없이 끝냈습니다.' }]], invocations: [invocation] });
+      const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), ...cli, fetcher: async () => contract, stop: { termAfterMs: 20, killAfterMs: 20 } });
+      expect(result.status, label).toBe('failed');
+      expect(result.summary, label).toContain('도구 서버');
+    }
+  });
+
   it('ask_user로 되묻고 멈출 때는 입력을 닫아 CLI가 스스로 끝나게 하고, 세션 id를 남긴다', async () => {
     const { cli, state } = fakeClaudeCode({ turns: [[{ tool: 'ask_user', input: { question: '어떤 형태?', options: ['표', '카드'], allowOther: false } }]] });
 

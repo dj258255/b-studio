@@ -124,7 +124,8 @@ async function handleTurn() {
   }
 }
 
-if (!inv.noInit) emit({ type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: sessionId, ...(inv.initExtra ?? {}) });
+// 진짜 CLI처럼 --mcp-config의 서버 상태를 싣는다(https://code.claude.com/docs/en/headless 의 mcp_servers). 시험이 initExtra로 덮어쓴다
+if (!inv.noInit) emit({ type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: sessionId, mcp_servers: [{ name: 'b-studio', status: 'connected' }], ...(inv.initExtra ?? {}) });
 for (const raw of inv.pre ?? []) (typeof raw === 'string' ? process.stdout.write(`${raw}\n`) : emit(raw));
 if (inv.exitWithoutResult !== undefined) {
   if (inv.stderr) process.stderr.write(`${inv.stderr}\n`);

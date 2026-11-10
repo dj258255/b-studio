@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Effort } from './anthropic-client';
-import { spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
+import { resolveCliCommand, spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
@@ -494,6 +494,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
     // 요약 중 상태를 한 번만 알리기 위한 표시(compact_boundary에서 푼다)
     let compacting = false;
+    // 이 프로세스의 init이 b-studio 도구 서버를 connected로 알렸는가. 확인하지 못한 채 결과가 오면 통과시키지 않는다
+    let toolServerConfirmed = false;
     try {
       messages: for await (const message of proc.messages()) {
         if (typeof message.session_id === 'string' && message.session_id) sessionId = message.session_id;
@@ -524,6 +526,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 finish('failed', broken);
                 break;
               }
+              toolServerConfirmed = true;
             }
             // 요약이 시작됐다. CLI는 같은 상태를 되풀이해 보낼 수 있어 요약 한 번에 한 번만 알린다
             if (message.subtype === 'status' && message.status === 'compacting' && !compacting) {
@@ -599,6 +602,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           }
 
           case 'result': {
+            // init으로 도구 서버 연결을 확인하지 못했다(init이 없었다). 도구 없이 돈 턴일 수 있어 결과를 통과로 쓰지 않는다
+            if (!toolServerConfirmed) {
+              finish('failed', 'Claude Code가 b-studio 도구 서버에 연결됐는지 확인하지 못했습니다(시작 정보가 오지 않음)');
+              break;
+            }
             // modelUsage는 이 프로세스의 누적값이다. 끝난 프로세스들의 사용량(base)과 더해 실행 전체를 만든다
             setUsage(queryUsage, message);
             syncUsage();
@@ -775,8 +783,10 @@ function noResultMessage(exit: { code: number | null; signal: NodeJS.Signals | n
 function mcpSetupFailure(message: CliMessage): string | undefined {
   const errors = (message.mcp_server_errors ?? []).filter((entry) => entry.name === undefined || entry.name === SERVER);
   const status = message.mcp_servers?.find((server) => server.name === SERVER)?.status;
-  if (errors.length === 0 && status !== 'failed') return undefined;
-  const detail = errors[0]?.message ?? errors[0]?.type ?? status ?? '';
+  // connected로 확인한 경우만 통과다. 목록에 없음·needs-auth·pending·disabled·모르는 값은 "모른다"이고 실패로 본다
+  // (상태 값: https://code.claude.com/docs/en/agent-sdk/typescript 의 McpServerStatus)
+  if (errors.length === 0 && status === 'connected') return undefined;
+  const detail = errors[0]?.message ?? errors[0]?.type ?? status ?? '목록에 없음';
   return `Claude Code가 b-studio 도구 서버에 연결하지 못했습니다${detail ? `: ${detail}` : ''}`;
 }
 
@@ -855,7 +865,15 @@ export async function preflightClaudeCode(
 /** 짧게 끝나는 명령을 한 번 돌려 출력을 모은다. 제한 시간을 넘기면 끝내고(SIGTERM, 뒤이어 SIGKILL) 실패로 던진다 */
 function runToCompletion(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let resolved: string;
+    try {
+      // 사전 확인은 프로젝트를 정하기 전이라 막을 폴더가 없다. PATH의 빈 항목·상대 항목(cwd 기준)만 건너뛴다
+      resolved = resolveCliCommand(command, options.env);
+    } catch (error) {
+      reject(error as Error);
+      return;
+    }
+    const child = spawn(resolved, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let settled = false;

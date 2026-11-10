@@ -9539,10 +9539,14 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 **6. 사전 확인과 모델 목록.** `preflightClaudeCode`는 `claude auth status`(https://code.claude.com/docs/en/cli-reference 의 CLI commands, JSON, 로그인하지 않았으면 종료 코드 1)를 부른다. 이메일·조직은 남기지 않고 `subscriptionType`·`authMethod`(API 키 방식이면 `apiKeySource`)·`apiProvider`만 쓴다. `fetchClaudeCodeModels`는 SDK의 `supportedModels()`가 쓰던 제어 메시지가 문서에 없고 공개 CLI 입출력에 모델 목록을 묻는 방법이 없어 **항상 `CLAUDE_CODE_MODELS_UNSUPPORTED`로 던진다.** 스튜디오의 모델 선택(`model-picker.ts`)은 이미 있던 알려진 별칭 표(opus·sonnet·haiku·fable)로 되돌아가고, 이 경우에는 "목록을 불러오지 못했다"는 알림을 달지 않는다. 계정이 실제로 푸는 모델 id·설명·노력 단계 지원 여부는 더 이상 실시간으로 반영되지 않는다(감수한 손실, 아래 한계).
 
+**7. 실행 파일은 절대 경로로 찾아 띄운다.** 자식 프로세스는 cwd를 프로젝트 루트로 띄우므로, spawn에 `claude`라는 이름만 넘기면 PATH의 빈 항목·`.`·상대 항목이 프로젝트 폴더(에이전트가 파일을 쓰는 곳)로 풀려, 에이전트가 심어 둔 `claude`가 b-studio의 권한으로 돈다(옛 SDK는 함께 깔린 CLI의 절대 경로를 썼다. 커밋 보안 검토 지적, 트러블슈팅 167). `resolveCliCommand`(`claude-cli-process.ts`)가 PATH의 절대 항목만 차례로 보고, 실행할 수 있는 파일 중 실제 경로(링크를 따라간 경로)가 프로젝트 루트 밖인 첫 후보를 고른다. 경로가 든 명령은 절대 경로만 받는다. 못 찾으면 띄우지 않고 ENOENT로 끝낸다(지금의 "실행 파일 없음" 흐름). 사전 확인(`claude auth status`)은 프로젝트를 정하기 전이라 상대 항목만 건너뛴다.
+
+**8. 도구 서버 연결은 `connected`를 확인해야 통과다.** init의 `mcp_servers`에서 b-studio 서버의 상태가 `connected`가 아니면(목록에 없음·`needs-auth`·`pending`·`disabled`·`failed`, `mcp_server_errors`가 있음) 실패로 끝낸다. init 없이 결과가 오면 연결을 확인하지 못한 것이라 역시 실패다. 도구 없이 돈 턴이 "끝났다"고 하면 변경이 없어 게이트가 통과해 버리기 때문이다(검토에서 처음 구현이 `failed`만 막는 것을 찾았다). 상태 값의 근거는 https://code.claude.com/docs/en/agent-sdk/typescript 의 `McpServerStatus`다. 진짜 CLI 2.1.321 + 가짜 모델 서버 실측에서 b-studio 서버는 `connected`로 와서 실행이 `done`으로 끝났다.
+
 ### 바꾸지 않은 것과 남은 SDK 사용
 - 같은 패키지의 탐색형 QA(`explore-qa-claude-code.ts`, 같은 프로세스 MCP 도구를 쓴다), 스튜디오의 질문 경로(`apps/studio/lib/server/claude-code-ask.ts`, 도구 없는 단발 `query`), 벤치(`apps/studio/bench/coordination/plain-baseline.ts`의 `query`+훅)는 여전히 `@anthropic-ai/claude-agent-sdk`를 쓴다. 이 이슈의 범위는 `runClaudeCodeAgent`와 그 파일의 단발 호출 둘(preflight·모델 목록)이다. 그래서 두 패키지의 `package.json` 의존성은 그대로 두고, 위 세 경로를 옮겨 의존성을 지우는 일은 따로 해야 한다. 아직 SDK 타입을 쓰는 곳을 위해 `ClaudeCodeSdk`·`ClaudeCodeQuery`는 `claude-code-sdk.ts`로 옮겼다(공개 이름은 그대로).
 - 관문 러너(`claude-gateway-runner.ts`)와 다른 러너는 동작을 바꾸지 않았다. `zodShape`·`serialQueue`를 `tool-schema.ts`로 옮겨 순환 참조를 피했고 기존 경로에서 다시 내보낸다(타입 검사·기존 테스트로만 확인).
-- 문서의 `compact_boundary`·`status` 메시지 형식과 `${VAR}` 풀이 문서는 이 세션에서 다시 읽지 못했다(아래). 필드 이름은 SDK 타입에서 옮겨 온 이전 코드와 같고, 진짜 CLI 출력으로 확인한 것은 `system/init`·`assistant`·`result`·`user`다.
+- 메시지 형식은 검토에서 다시 읽어 확인했다(2026-11-10). https://code.claude.com/docs/en/agent-sdk/typescript 의 `SDKStatusMessage`(`status: "compacting" | null`), `SDKCompactBoundaryMessage`(`compact_metadata`의 `trigger`·`pre_tokens`), `SDKSystemMessage`(init의 `session_id`·`model`·`claude_code_version`·`mcp_servers[].status`, `McpServerStatus`의 `failed`), `SDKResultMessage`(`success`와 오류 subtype 넷, `is_error`·`duration_api_ms`·`usage`·`modelUsage`·`errors`), https://code.claude.com/docs/en/headless 의 `mcp_server_errors`("a CI gate can fail on a non-empty array")와 SIGTERM. `compact_metadata`의 `post_tokens`·`duration_ms`는 문서에 없고, 옛 러너처럼 있으면 화면 알림에만 싣는다(판정에 쓰지 않는다).
 
 ### 검증
 - **고치기 전 실패.** 새 가짜 CLI 시험 5개(`공식 문서에 있는 플래그만…`, `MCP 설정은 0600…`, `ask_user로 되묻고 멈출 때…`, `CLI가 결과 없이 끝나면…`, `CLI 실행 파일을 띄우지 못하면…`)를 옛 러너에 돌리면 러너가 `command`를 무시하고 SDK로 실제 CLI를 띄워 5개 모두 30초 제한 시간 초과로 실패했다(`Error: Test timed out in 30000ms.` ×5, 5 failed | 57 skipped). 실제 모델이 불리지 않게 `ANTHROPIC_BASE_URL=http://127.0.0.1:1`로 돌렸고, 남은 SDK 자식 프로세스는 직접 정리했다.
@@ -9558,4 +9562,4 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ### 돌리지 않은 검증
 - 실제 모델·실제 로그인으로 돈 세션. e2e. 다른 러너 다섯 개와 관문 러너는 타입 검사와 기존 테스트로만 확인했다(공통 함수 `zodShape`·`serialQueue`·`startToolServer`의 위치만 바뀜).
-- 문서 재확인: https://code.claude.com/docs/en/mcp 의 `--mcp-config` 환경 변수 풀이와 https://code.claude.com/docs/en/agent-sdk/typescript 의 메시지 타입은 사용 한도로 이 세션에서 다시 읽지 못했다. 진짜 CLI 2.1.321에서 `${B_STUDIO_MCP_TOKEN}` 풀이가 동작하는 것과 위 메시지 필드는 실측으로 확인했다.
+- 문서 재확인: https://code.claude.com/docs/en/mcp 는 `${VAR}`·`${VAR:-default}` 풀이를 `.mcp.json`의 `command`·`args`·`env`·`url`·`headers`에 대해 적는다. 원격 서버의 `url`·`headers`에서 자격 정보 이름(`ANTHROPIC_API_KEY` 등)은 빈 값으로 읽는다는 예외가 있지만 `B_STUDIO_MCP_TOKEN`은 그 목록에 없다. `--mcp-config` 파일에도 같은 풀이가 된다고 따로 적혀 있지는 않아, 진짜 CLI 2.1.321에서 풀이가 동작하는 것을 실측으로 확인했다(위 검증). 실제 로그인·실제 모델로 돈 세션은 없다.
