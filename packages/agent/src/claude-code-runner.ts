@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Effort } from './anthropic-client';
-import { resolveCliCommand, spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
+import { childEnv, resolveCliCommand, spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
@@ -867,13 +867,13 @@ function runToCompletion(command: string, args: string[], options: { cwd: string
   return new Promise((resolve, reject) => {
     let resolved: string;
     try {
-      // 사전 확인은 프로젝트를 정하기 전이라 막을 폴더가 없다. PATH의 빈 항목·상대 항목(cwd 기준)만 건너뛴다
-      resolved = resolveCliCommand(command, options.env);
+      // 사전 확인도 cwd(호출부는 프로젝트 루트를 넘긴다) 안의 실행 파일은 고르지 않는다
+      resolved = resolveCliCommand(command, options.env, options.cwd);
     } catch (error) {
       reject(error as Error);
       return;
     }
-    const child = spawn(resolved, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(resolved, args, { cwd: options.cwd, env: childEnv(options.env, options.cwd), stdio: ['ignore', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     let settled = false;

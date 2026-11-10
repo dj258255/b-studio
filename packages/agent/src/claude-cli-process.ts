@@ -114,8 +114,7 @@ export function resolveCliCommand(command: string, env: NodeJS.ProcessEnv, forbi
     if (forbiddenRoot !== undefined && insideRoot(command, forbiddenRoot)) throw notFound(command, '프로젝트 폴더 안의 실행 파일은 띄우지 않습니다');
     return command;
   }
-  const pathKey = process.platform === 'win32' ? (Object.keys(env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH') : 'PATH';
-  const dirs = (env[pathKey] ?? '').split(path.delimiter).filter((dir) => dir !== '' && path.isAbsolute(dir));
+  const dirs = (env[pathKeyOf(env)] ?? '').split(path.delimiter).filter((dir) => dir !== '' && path.isAbsolute(dir));
   const exts = process.platform === 'win32' ? ['', ...(env.PATHEXT ?? '.COM;.EXE;.BAT;.CMD').split(';').filter(Boolean)] : [''];
   for (const dir of dirs) {
     for (const ext of exts) {
@@ -126,6 +125,26 @@ export function resolveCliCommand(command: string, env: NodeJS.ProcessEnv, forbi
     }
   }
   throw notFound(command, 'PATH의 절대 경로 항목에서 찾지 못했습니다(빈 항목·상대 항목과 프로젝트 폴더 안은 보지 않습니다)');
+}
+
+function pathKeyOf(env: NodeJS.ProcessEnv): string {
+  return process.platform === 'win32' ? (Object.keys(env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH') : 'PATH';
+}
+
+/**
+ * 자식에게 넘길 환경. PATH에서 빈 항목·상대 항목과, `forbiddenRoot`가 있으면 실제 경로가 그 안인 항목(실제 경로를 못 읽은 항목 포함)을 뺀다.
+ * 실행 파일을 절대 경로로 띄워도 `#!/usr/bin/env node` 같은 스크립트는 자식의 PATH에서 인터프리터를 다시 찾는다.
+ * cwd가 프로젝트 루트라 `.`·빈 항목이 남으면 에이전트가 심은 `node`가 돈다(커밋 보안 검토 지적). 나머지 환경 변수는 그대로 둔다.
+ */
+export function childEnv(env: NodeJS.ProcessEnv, forbiddenRoot?: string): NodeJS.ProcessEnv {
+  const key = pathKeyOf(env);
+  const value = env[key];
+  if (value === undefined) return { ...env };
+  const kept = value
+    .split(path.delimiter)
+    .filter((dir) => dir !== '' && path.isAbsolute(dir))
+    .filter((dir) => forbiddenRoot === undefined || !insideRoot(dir, forbiddenRoot));
+  return { ...env, [key]: kept.join(path.delimiter) };
 }
 
 export function spawnClaudeCli(options: { command: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv; stop?: CliStopOptions }): ClaudeCliProcess {
@@ -139,7 +158,8 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
   } catch (error) {
     return failedProcess(error as Error);
   }
-  const child = spawn(resolved, [...options.args], { cwd: options.cwd, env: options.env, stdio: ['pipe', 'pipe', 'pipe'] });
+  // 자식이 PATH로 다시 찾는 인터프리터도 프로젝트 안의 것이 잡히지 않게 PATH를 정리해 넘긴다
+  const child = spawn(resolved, [...options.args], { cwd: options.cwd, env: childEnv(options.env, options.cwd), stdio: ['pipe', 'pipe', 'pipe'] });
   // 입력 쪽이 먼저 닫혀도(CLI가 바로 끝난 경우) 실행 전체가 예외로 죽지 않게 한다. 실패는 결과 없음으로 드러난다
   child.stdin.on('error', () => {});
   let inputClosed = false;

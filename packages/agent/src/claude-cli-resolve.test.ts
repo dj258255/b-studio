@@ -2,7 +2,8 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, wri
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { resolveCliCommand, spawnClaudeCli } from './claude-cli-process';
+import { childEnv, resolveCliCommand, spawnClaudeCli } from './claude-cli-process';
+import { preflightClaudeCode } from './claude-code-runner';
 
 /**
  * CLI 실행 파일을 PATH에서 찾을 때 프로젝트 폴더(에이전트가 파일을 쓰는 곳) 안의 실행 파일이 잡히지 않게 한다.
@@ -78,7 +79,7 @@ describe('resolveCliCommand', () => {
     }
   });
 
-  it('막을 폴더가 없으면(사전 확인) 상대 항목만 건너뛴다', () => {
+  it('막을 폴더를 주지 않으면 상대 항목만 건너뛴다', () => {
     expect(resolveCliCommand(process.execPath, { PATH: '' })).toBe(process.execPath);
     expect(() => resolveCliCommand('./claude', { PATH: '' })).toThrow(/ENOENT/);
   });
@@ -117,5 +118,63 @@ describe('spawnClaudeCli', () => {
     await proc.exited;
     expect(existsSync(marker)).toBe(false);
     expect(existsSync(goodMarker)).toBe(true);
+  });
+
+  posixOnly('자식이 PATH로 다시 찾는 인터프리터(`#!/usr/bin/env node`)도 프로젝트에 심은 것을 쓰지 않는다', async () => {
+    // npm으로 깐 claude는 `#!/usr/bin/env node` 스크립트다. env는 자식의 PATH에서 node를 찾는다
+    plant(project, 'node');
+    const goodMarker = path.join(base, 'good.txt');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, 'claude'), `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(goodMarker)}, 'x')\n`);
+    chmodSync(path.join(outside, 'claude'), 0o755);
+    const nodeDir = path.dirname(process.execPath);
+    for (const PATH of [`.${path.delimiter}${nodeDir}`, `${project}${path.delimiter}${nodeDir}`, `${path.delimiter}${nodeDir}`]) {
+      rmSync(marker, { force: true });
+      rmSync(goodMarker, { force: true });
+      const proc = spawnClaudeCli({ command: path.join(outside, 'claude'), args: [], cwd: project, env: { PATH } });
+      await proc.exited;
+      expect(existsSync(marker), JSON.stringify(PATH)).toBe(false);
+      expect(existsSync(goodMarker), JSON.stringify(PATH)).toBe(true);
+    }
+  });
+});
+
+describe('childEnv', () => {
+  posixOnly('PATH에서 상대 항목·빈 항목·프로젝트 안(링크 포함)을 빼고 나머지 환경은 그대로 둔다', () => {
+    const inner = path.join(project, 'bin');
+    mkdirSync(inner, { recursive: true });
+    mkdirSync(outside, { recursive: true });
+    const link = path.join(base, 'link-into-project');
+    symlinkSync(inner, link);
+    const PATH = ['', '.', 'bin', inner, link, outside, path.join(base, 'missing')].join(path.delimiter);
+    const env = childEnv({ PATH, HOME: '/home/x', CLAUDE_CONFIG_DIR: '/c' }, project);
+    expect(env.PATH).toBe(outside);
+    expect(env.HOME).toBe('/home/x');
+    expect(env.CLAUDE_CONFIG_DIR).toBe('/c');
+  });
+
+  it('PATH가 없으면 만들지 않는다', () => {
+    expect(childEnv({ HOME: '/h' }, project)).toEqual({ HOME: '/h' });
+  });
+});
+
+describe('preflightClaudeCode', () => {
+  posixOnly('사전 확인도 프로젝트 폴더(cwd) 안의 claude를 띄우지 않는다', async () => {
+    plant(project);
+    const result = await preflightClaudeCode({ command: 'claude', cwd: project, env: { PATH: project } });
+    expect(result).toMatchObject({ ok: false, reason: expect.stringContaining('ENOENT') });
+    expect(existsSync(marker)).toBe(false);
+  });
+
+  posixOnly('사전 확인의 자식 PATH도 정리한다(심은 node를 쓰지 않는다)', async () => {
+    plant(project, 'node');
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(path.join(outside, 'claude'), `#!/usr/bin/env node\nconsole.log(JSON.stringify({ loggedIn: true, authMethod: 'claude.ai' }))\n`);
+    chmodSync(path.join(outside, 'claude'), 0o755);
+    for (const first of ['.', project]) {
+      const result = await preflightClaudeCode({ command: 'claude', cwd: project, env: { PATH: [first, outside, path.dirname(process.execPath)].join(path.delimiter) } });
+      expect(existsSync(marker), first).toBe(false);
+      expect(result, first).toMatchObject({ ok: true });
+    }
   });
 });
