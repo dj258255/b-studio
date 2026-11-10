@@ -2450,6 +2450,159 @@ pub fn build_contract_user(request: String, lanes_json: String) -> Result<String
     fail(plan_brief::build_contract_user(&request, &input(&lanes_json, "레인 목록")?))
 }
 
+// ── agent: 설계 파이프라인(3단계 3o)
+use bstudio_guard::design_pipeline;
+
+#[napi]
+pub fn design_pipeline_next_doc_number(existing: Vec<String>) -> f64 {
+    design_pipeline::next_design_pipeline_doc_number(&existing)
+}
+
+#[napi]
+pub fn design_pipeline_doc_path(number: f64, title: String) -> String {
+    design_pipeline::design_pipeline_doc_path(number, &title)
+}
+
+#[napi]
+pub fn design_pipeline_sidecar_path(doc_path: String) -> String {
+    design_pipeline::design_pipeline_sidecar_path(&doc_path)
+}
+
+#[napi]
+pub fn design_pipeline_is_doc_path(file: String) -> bool {
+    design_pipeline::is_design_pipeline_doc_path(&file)
+}
+
+/// 묶음 목록 JSON(`encodeNative` 꼴: 유한하지 않은 수는 표시 객체)
+#[napi]
+pub fn design_pipeline_parse_bundles_table(markdown: String) -> String {
+    design_pipeline::parse_design_bundles_table(&markdown)
+}
+
+#[napi]
+pub fn design_pipeline_build_request_prompt(title: String, requirement_ids: Vec<String>, detail: Option<String>) -> String {
+    design_pipeline::build_design_pipeline_request_prompt(&title, &requirement_ids, detail.as_deref())
+}
+
+#[napi]
+pub fn design_pipeline_build_doc_template(number: f64, title: String, requirement_ids: Vec<String>) -> String {
+    design_pipeline::build_design_pipeline_doc_template(number, &title, &requirement_ids)
+}
+
+/// 막는 기록들의 순번 목록. 모양이 어긋난 기록은 던진다(껍데기는 던지면 구현을 시작하지 않는다)
+#[napi]
+pub fn design_pipeline_check_approval(requirement_ids: Vec<String>, docs_json: String) -> Result<Vec<u32>> {
+    let indexes = fail(design_pipeline::check_design_approval(&requirement_ids, &docs_json))?;
+    Ok(indexes.into_iter().map(|i| i as u32).collect())
+}
+
+#[napi]
+pub fn design_pipeline_review_independence(implementer: String, reviewer: String) -> String {
+    design_pipeline::review_independence(&implementer, &reviewer).to_owned()
+}
+
+/// `{designApproved, completed, succeeded, reasons}` JSON
+#[napi]
+#[allow(clippy::too_many_arguments)]
+pub fn design_pipeline_derive_result(
+    design_status: String,
+    checkpoint_exists: bool,
+    has_review: bool,
+    review_ran: bool,
+    review_passed: bool,
+    independence: String,
+    has_verification: bool,
+    verification_ran: bool,
+    verification_ok: bool,
+    tests_rerun: bool,
+) -> String {
+    let review = design_pipeline::ReviewInput { ran: review_ran, passed: review_passed, independence: &independence };
+    let verification = design_pipeline::VerificationInput { ran: verification_ran, ok: verification_ok, tests_rerun };
+    let result = design_pipeline::derive_design_pipeline_result(
+        &design_status,
+        checkpoint_exists,
+        has_review.then_some(&review),
+        has_verification.then_some(&verification),
+    );
+    let value = js_json::object(vec![
+        ("designApproved", Some(JsValue::Bool(result.design_approved))),
+        ("completed", Some(JsValue::Bool(result.completed))),
+        ("succeeded", Some(JsValue::Bool(result.succeeded))),
+        ("reasons", Some(JsValue::Arr(result.reasons.iter().map(JsValue::str).collect()))),
+    ]);
+    js_json::to_native(&value)
+}
+
+// ── 탐색 QA의 판정·변환·프롬프트(ADR-191 3p). 구조가 있는 입력은 encodeNative한 JSON 문자열. TS 껍데기: packages/agent/src/explore-qa.ts
+use bstudio_guard::explore_qa;
+
+#[napi]
+pub fn explore_qa_diagnostics_count(console_errors: f64, page_errors: f64, failed_requests: f64, accessibility_violations: f64, horizontal_overflow_px: f64) -> f64 {
+    explore_qa::diagnostics_count(console_errors, page_errors, failed_requests, accessibility_violations, horizontal_overflow_px)
+}
+
+#[napi]
+pub fn explore_qa_match_score(name: String, text: String, role: String, test_id: Option<String>, tag: String, needle: String) -> f64 {
+    explore_qa::match_score(&name, &text, &role, test_id.as_deref(), &tag, &needle)
+}
+
+#[napi]
+pub fn explore_qa_describe_scroll_position(y: f64, max: f64, at_bottom: bool, at_top: bool) -> String {
+    explore_qa::describe_scroll_position(y, max, at_bottom, at_top)
+}
+
+/// result: `{ url, title, elements: [{ ref, role, name, testId? }], truncated }`. 모양이 어긋나면 던진다
+#[napi]
+pub fn explore_qa_format_snapshot(result_json: String, max_elements: f64) -> Result<String> {
+    fail(explore_qa::format_snapshot(&input(&result_json, "스냅샷")?, max_elements))
+}
+
+#[napi]
+pub fn explore_qa_normalize_ref(value: String) -> Option<String> {
+    explore_qa::normalize_ref(&value)
+}
+
+#[napi]
+pub fn explore_qa_is_inspection_goal(goal_text: String) -> bool {
+    explore_qa::is_inspection_goal(&goal_text)
+}
+
+#[napi]
+pub fn explore_qa_build_system_prompt(goal_text: Option<String>) -> String {
+    explore_qa::build_qa_system_prompt(goal_text.as_deref())
+}
+
+/// goal: `{ goal, startPath, confirmText? }`
+#[napi]
+pub fn explore_qa_build_user_prompt(goal_json: String) -> Result<String> {
+    Ok(explore_qa::build_qa_user_prompt(&input(&goal_json, "탐색 목표")?))
+}
+
+#[napi]
+pub fn explore_qa_build_wrap_up_prompt(reason: String) -> String {
+    explore_qa::build_wrap_up_prompt(&reason)
+}
+
+/// 입력은 `explore_qa::judge` 문서의 모양. `{status, reason}` JSON. review.findings가 배열이 아니면 던진다
+#[napi]
+pub fn explore_qa_judge(input_json: String, page_text: String) -> Result<String> {
+    let (status, reason) = fail(explore_qa::judge(&input(&input_json, "판정 입력")?, &page_text))?;
+    Ok(format!(r#"{{"status":{},"reason":{}}}"#, js::json_quote(&status), js::json_quote(&reason)))
+}
+
+/// actions: `[{ index, tool, ok, stableSelector?, text?, key?, forText? }]`. `{steps, skipped}` JSON(encodeNative 형식). 배열이 아니면 던진다
+#[napi]
+pub fn explore_qa_to_page_check_steps(actions_json: String) -> Result<String> {
+    let steps = fail(explore_qa::to_page_check_steps(&input(&actions_json, "행동 기록")?))?;
+    Ok(js_json::to_native(&steps))
+}
+
+/// element: `{ ref, role, name, testId? }`
+#[napi]
+pub fn explore_qa_format_element(element_json: String) -> Result<String> {
+    Ok(explore_qa::format_element(&input(&element_json, "요소")?))
+}
+
 // ── 경로 이름·도구 정책(ADR-191 3q). 막는 검사다. TS 껍데기: packages/agent/src/{path-names,policy}.ts
 use bstudio_guard::path_policy;
 

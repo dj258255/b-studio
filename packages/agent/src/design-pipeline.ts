@@ -9,42 +9,37 @@
  * 읽고 쓰는 일은 studio의 sessions.ts가 맡는다. 설계 문서는 `docs/NN-제목.md`(docs.ts, 범용 설계 노트)와 다른
  * 자리인 `docs/design/NN-제목.md`에 둔다 — 요구사항 id·작업 묶음·승인 상태를 사이드카 JSON으로 함께 추적해야
  * 해서(승인 전에는 구현을 막는 서버 판정의 근거), 사람이 자유 형식으로 쓰는 기존 설계 노트와 섞지 않는다.
+ *
+ * 순수 판정(번호·경로, 묶음 표 읽기, 프롬프트·틀, 승인 확인, 검토 독립성, 완료·성공 판정)은 Rust
+ * (`crates/bstudio-guard/src/design_pipeline.rs`, ADR-191 3단계 3o)가 한다. 여기에는 zod 스키마·타입·상수와 같은 이름·시그니처의
+ * 껍데기만 남았다. 옛 구현은 `design-pipeline-differential.test.ts`에 시험용으로만 남아 있다.
  */
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';
-import { slugifyTitle } from './docs';
 
 // ---------------------------------------------------------------------------
 // 파일 이름 · 경로
 // ---------------------------------------------------------------------------
 
 export const DESIGN_PIPELINE_DIR = 'docs/design';
-const DESIGN_PIPELINE_DOC_PATTERN = /^docs\/design\/(\d{2,})-.+\.md$/;
-
-function pad(n: number): string {
-  return n < 10 ? `0${n}` : `${n}`;
-}
 
 /** 기존 설계 파이프라인 문서 경로들에서 다음 번호를 고른다(비어 있으면 1부터) */
 export function nextDesignPipelineDocNumber(existingPaths: readonly string[]): number {
-  const max = existingPaths.reduce((acc, filePath) => {
-    const match = DESIGN_PIPELINE_DOC_PATTERN.exec(filePath);
-    return match ? Math.max(acc, Number(match[1])) : acc;
-  }, 0);
-  return max + 1;
+  return native.designPipelineNextDocNumber([...existingPaths]);
 }
 
 /** `docs/design/NN-제목.md` 경로 */
 export function designPipelineDocPath(number: number, title: string): string {
-  return `${DESIGN_PIPELINE_DIR}/${pad(number)}-${slugifyTitle(title)}.md`;
+  return native.designPipelineDocPath(number, title);
 }
 
 /** 설계 문서 옆에 두는 사이드카(요구사항 id·작업 묶음·승인 상태). 본문은 사람이 읽는 글이고, 이 파일만 서버가 판정에 쓴다 */
 export function designPipelineSidecarPath(docPath: string): string {
-  return docPath.replace(/\.md$/, '.meta.json');
+  return native.designPipelineSidecarPath(docPath);
 }
 
 export function isDesignPipelineDocPath(file: string): boolean {
-  return DESIGN_PIPELINE_DOC_PATTERN.test(file);
+  return native.designPipelineIsDocPath(file);
 }
 
 // ---------------------------------------------------------------------------
@@ -64,56 +59,13 @@ export const DesignBundleSchema = z.object({
 });
 export type DesignBundle = z.infer<typeof DesignBundleSchema>;
 
-const BUNDLE_TABLE_HEADER = /\|\s*묶음\s*\|\s*완료\s*조건\s*\|\s*예상\s*시간[^|]*\|\s*결과물\s*\|\s*쓰기\s*범위\s*\|/;
-
-function splitTableRow(line: string): string[] {
-  return line
-    .trim()
-    .replace(/^\|/, '')
-    .replace(/\|$/, '')
-    .split('|')
-    .map((cell) => cell.trim());
-}
-
-/** "30-60", "30~60", "45" 같은 표기에서 분 단위 [최소, 최대]를 뽑는다. 읽을 수 없으면 [0, 0] */
-function parseEstimateRange(text: string): [number, number] {
-  const range = /(\d+)\s*[-~]\s*(\d+)/.exec(text);
-  if (range) return [Number(range[1]), Number(range[2])];
-  const single = /(\d+)/.exec(text);
-  if (single) return [Number(single[1]), Number(single[1])];
-  return [0, 0];
-}
-
 /**
  * 설계 문서 본문의 "작업 묶음" 표(`| 묶음 | 완료 조건 | 예상 시간(분) | 결과물 | 쓰기 범위 |`)를 구조화된 목록으로 뽑는다.
  * 모델(또는 사람)이 자유 형식으로 쓴 본문에서 서버가 예상 vs 실제 시간을 비교하려면 이 표만은 정해진 모양을
  * 따라야 한다 — buildDesignPipelineRequestPrompt가 이 모양을 지시한다. 표를 찾지 못하면 빈 배열(차단하지 않는다).
  */
 export function parseDesignBundlesTable(markdown: string): DesignBundle[] {
-  const lines = markdown.split(/\r?\n/);
-  const headerIndex = lines.findIndex((line) => BUNDLE_TABLE_HEADER.test(line));
-  if (headerIndex === -1) return [];
-
-  const bundles: DesignBundle[] = [];
-  // headerIndex + 1은 구분선(--- 행)이라 건너뛴다
-  for (let index = headerIndex + 2; index < lines.length; index++) {
-    const line = lines[index]!.trim();
-    if (!line.startsWith('|')) break;
-    const cells = splitTableRow(line);
-    if (cells.length < 5) continue;
-    const [bundleCell, doneCondition, estimateCell, deliverable, scopeCell] = cells as [string, string, string, string, string];
-    if (/^-+$/.test(bundleCell.replaceAll(' ', ''))) continue; // 혹시 구분선이 두 번 들어와도 건너뛴다
-    const idMatch = /^(B\d+)\s*(.*)$/.exec(bundleCell);
-    const id = idMatch?.[1] ?? `B${bundles.length + 1}`;
-    const title = (idMatch?.[2] ?? bundleCell).trim() || id;
-    const [estimateMinMinutes, estimateMaxMinutes] = parseEstimateRange(estimateCell);
-    const writableScope = scopeCell
-      .split(',')
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-    bundles.push({ id, title, doneCondition: doneCondition.trim(), estimateMinMinutes, estimateMaxMinutes, deliverable: deliverable.trim(), writableScope });
-  }
-  return bundles;
+  return decodeNative<DesignBundle[]>(native.designPipelineParseBundlesTable(markdown));
 }
 
 // ---------------------------------------------------------------------------
@@ -126,69 +78,12 @@ export function parseDesignBundlesTable(markdown: string): DesignBundle[] {
  * 구현은 따로"라는 경계). 답은 사람이 검토해 설계 문서로 저장한다.
  */
 export function buildDesignPipelineRequestPrompt(input: { title: string; requirementIds: readonly string[]; detail?: string }): string {
-  const ids = input.requirementIds.length > 0 ? input.requirementIds.join(', ') : '(해당 없음)';
-  const detail = input.detail?.trim() ? `\n\n${input.detail.trim()}` : '';
-  return `"${input.title}" 설계 문서를 써 주세요. 대상 요구사항: ${ids}.${detail}
-
-지금은 파일을 바꾸지 말고 읽기만 하세요. 실제 코드를 확인한 사실만 쓰고, 모르면 "불확실"이라고 적으세요.
-아래 항목을 마크다운으로, 이 순서대로 답하세요:
-
-## 대상 요구사항
-(이 설계가 다루는 요구사항 id와 한 줄 설명)
-
-## 접근
-(전체 구현 방향)
-
-## 데이터·API 계약 변경
-(바뀌는 스키마·엔드포인트·타입. 없으면 "없음")
-
-## 작업 묶음
-
-| 묶음 | 완료 조건 | 예상 시간(분) | 결과물 | 쓰기 범위 |
-| --- | --- | --- | --- | --- |
-| B1 (묶음 제목) | (무엇이 되면 끝인지) | 30-60 | (어떤 파일·화면이 나오는지) | (쓸 경로, 쉼표로 구분) |
-
-표 형식을 그대로 지키세요(다른 열을 추가하거나 빼지 마세요) — 플랫폼이 이 표로 예상 시간을 기록합니다.
-
-## 위험·불확실성
-(불확실한 점, 검증이 필요한 가정)
-
-## 검증 방법
-(각 작업 묶음을 어떻게 확인할지 — 게이트·테스트·화면 확인 등)`;
+  return native.designPipelineBuildRequestPrompt(input.title, [...input.requirementIds], input.detail);
 }
 
 /** 모델에게 묻지 않고 빈 틀로 바로 만들 때 쓰는 기본 틀(docs.ts의 buildDesignDocTemplate과 같은 구조, 다른 자리) */
 export function buildDesignPipelineDocTemplate(number: number, title: string, requirementIds: readonly string[] = []): string {
-  const ids = requirementIds.length > 0 ? requirementIds.join(', ') : '(대상 요구사항을 적습니다)';
-  return `# ${pad(number)}. ${title}
-
-${title}에 관한 설계 문서입니다.
-
-## 대상 요구사항
-
-${ids}
-
-## 접근
-
-(전체 구현 방향을 적습니다)
-
-## 데이터·API 계약 변경
-
-(바뀌는 스키마·엔드포인트·타입을 적습니다. 없으면 "없음")
-
-## 작업 묶음
-
-| 묶음 | 완료 조건 | 예상 시간(분) | 결과물 | 쓰기 범위 |
-| --- | --- | --- | --- | --- |
-
-## 위험·불확실성
-
-(불확실한 점, 검증이 필요한 가정을 적습니다)
-
-## 검증 방법
-
-(각 작업 묶음을 어떻게 확인할지 적습니다)
-`;
+  return native.designPipelineBuildDocTemplate(number, title, [...requirementIds]);
 }
 
 // ---------------------------------------------------------------------------
@@ -228,8 +123,12 @@ export interface DesignApprovalCheck {
  */
 export function checkDesignApproval(requirementIdsInRequest: readonly string[], designDocs: readonly DesignDocRecord[]): DesignApprovalCheck {
   if (requirementIdsInRequest.length === 0) return { blocked: false, blockingDocs: [] };
-  const mentioned = new Set(requirementIdsInRequest);
-  const blockingDocs = designDocs.filter((doc) => doc.status !== 'approved' && doc.requirementIds.some((id) => mentioned.has(id)));
+  // Rust는 막는 기록의 순번만 돌려주고, 원래 기록 객체는 여기서 골라 담는다. 모양이 어긋난 기록은 던진다(구현을 시작하지 않는다)
+  const indexes = native.designPipelineCheckApproval(
+    [...requirementIdsInRequest],
+    encodeNative(designDocs.map((doc) => ({ status: doc.status, requirementIds: doc.requirementIds }))),
+  );
+  const blockingDocs = indexes.map((index) => designDocs[index]!);
   return { blocked: blockingDocs.length > 0, blockingDocs };
 }
 
@@ -246,8 +145,7 @@ export type ReviewIndependence = 'independent' | 'same-family' | 'unknown';
 
 /** 구현·검토가 같은 계열이면 'same-family'(독립성 낮음), 둘 중 하나라도 모르면 'unknown', 다르면 'independent' */
 export function reviewIndependence(implementer: ModelFamily, reviewer: ModelFamily): ReviewIndependence {
-  if (implementer === 'unknown' || reviewer === 'unknown') return 'unknown';
-  return implementer === reviewer ? 'same-family' : 'independent';
+  return native.designPipelineReviewIndependence(implementer, reviewer) as ReviewIndependence;
 }
 
 export const SAME_FAMILY_REVIEW_LABEL = '같은 계열 검토(독립성 낮음)';
@@ -313,33 +211,20 @@ export interface DesignPipelineResult {
  * 검토를 못 돌렸거나(review.ran === false) 같은 계열이었으면 성공으로 세지 않고 이유를 남긴다(침묵 통과 금지).
  */
 export function deriveDesignPipelineResult(input: DesignPipelineInput): DesignPipelineResult {
-  const designApproved = input.design.status === 'approved';
-  const completed = input.implementationCheckpointExists;
-  const reasons: string[] = [];
-  if (!designApproved) reasons.push('설계가 승인되지 않았습니다');
-  if (!completed) reasons.push('구현 체크포인트가 없습니다');
-
   const review = input.review;
-  let reviewOk = false;
-  if (!review || !review.ran) {
-    reasons.push(REVIEW_NOT_RUN_LABEL);
-  } else {
-    if (!review.passed) reasons.push('검토를 통과하지 못했습니다');
-    if (review.independence === 'same-family') reasons.push(SAME_FAMILY_REVIEW_LABEL);
-    else if (review.independence === 'unknown') reasons.push('검토자 계열을 확인할 수 없습니다');
-    reviewOk = review.passed && review.independence === 'independent';
-  }
-
   const verification = input.verification;
-  let verificationOk = false;
-  if (!verification || !verification.ran) {
-    reasons.push('검증을 다시 돌리지 못했습니다');
-  } else {
-    if (!verification.ok) reasons.push('검증이 통과하지 못했습니다');
-    if (!verification.testsRerun) reasons.push('테스트를 다시 돌리지 않았습니다');
-    verificationOk = verification.ok && verification.testsRerun;
-  }
-
-  const succeeded = designApproved && completed && reviewOk && verificationOk;
-  return { designApproved, completed, succeeded, reasons: succeeded ? [] : reasons };
+  return decodeNative<DesignPipelineResult>(
+    native.designPipelineDeriveResult(
+      typeof input.design.status === 'string' ? input.design.status : '',
+      Boolean(input.implementationCheckpointExists),
+      Boolean(review),
+      Boolean(review?.ran),
+      Boolean(review?.passed),
+      typeof review?.independence === 'string' ? review.independence : '',
+      Boolean(verification),
+      Boolean(verification?.ran),
+      Boolean(verification?.ok),
+      Boolean(verification?.testsRerun),
+    ),
+  );
 }
