@@ -1181,7 +1181,8 @@ const REQUIRED_BUCKETS: Record<string, string[]> = {
 
 // ── 실행 ──────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
-describe('토큰 예산·모델 선택: 옛 TS 구현과 Rust 껍데기의 차등 시험', () => {
+// 일부러 무거운 성질·차등 시험이다(전체 코드 포인트, 긴 패치). 기본 5초는 따로 돌려도 부하 23에서 4초대라 전체 실행 때 넘는다
+describe('토큰 예산·모델 선택: 옛 TS 구현과 Rust 껍데기의 차등 시험', { timeout: 120_000 }, () => {
   for (const [name, run] of Object.entries(CASES)) {
     it(`${name}: 같은 입력에 같은 결과(JSON 글자, 키 순서 포함)`, () => {
       const total: Tally = newTally();

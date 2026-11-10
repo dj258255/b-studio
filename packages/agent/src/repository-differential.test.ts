@@ -800,7 +800,8 @@ const cases: Case[] = [
   },
 ];
 
-describe('차등 시험: 옛 TS 구현과 Rust 껍데기는 같은 입력에 같은 글자를 낸다', () => {
+// 일부러 무거운 성질·차등 시험이다(전체 코드 포인트, 긴 패치). 기본 5초는 따로 돌려도 부하 23에서 4초대라 전체 실행 때 넘는다
+describe('차등 시험: 옛 TS 구현과 Rust 껍데기는 같은 입력에 같은 글자를 낸다', { timeout: 120_000 }, () => {
   for (const { name, run, minEmpty, minValued, heavy } of cases) {
     it(name, () => {
       const total = newTally();
