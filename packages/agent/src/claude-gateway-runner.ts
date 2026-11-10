@@ -3,6 +3,7 @@ import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
+import { childEnv, resolveCliCommand } from './claude-cli-process';
 import { ChangeTracker, rejectedChangeFeedback } from './change-tracker';
 import { describeAccount, serialQueue, type ClaudeCodeResult, type ClaudeCodeRunOptions } from './claude-code-runner';
 import { fetchContract } from './verify';
@@ -513,9 +514,12 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
       // 이어받을 대화의 id는 CLI가 준 값만 받는다(UUID 꼴이 아니면 인자에 넣지 않는다)
       ...(resume && SESSION_ID.test(resume) ? ['--resume', resume, '--fork-session'] : []),
     ];
-    const child = spawn(command, args, {
+    // 이름만 넘기면 PATH의 빈 항목·`.`·상대 항목이 프로젝트 폴더(cwd)로 풀려 심어 둔 실행 파일이 돈다(트러블슈팅 167). 절대 경로로 찾고,
+    // 자식이 PATH로 다시 찾는 인터프리터(`#!/usr/bin/env node`)도 프로젝트 안의 것이 잡히지 않게 PATH를 정리해 넘긴다
+    const resolved = resolveCliCommand(command, processEnv, project.root);
+    const child = spawn(resolved, args, {
       cwd: project.root,
-      env: { ...processEnv, [GATE_TOKEN_ENV]: hook.token, [MCP_TOKEN_ENV]: tools.token, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
+      env: { ...childEnv(processEnv, project.root), [GATE_TOKEN_ENV]: hook.token, [MCP_TOKEN_ENV]: tools.token, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     // 입력 쪽이 먼저 닫혀도(CLI가 바로 끝난 경우) 실행 전체가 예외로 죽지 않게 한다. 실패는 종료 코드와 결과 메시지로 드러난다

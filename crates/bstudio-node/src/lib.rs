@@ -3171,6 +3171,192 @@ pub fn workspace_input_problem(file: String, backslash_sep: bool, external: bool
     u32::from(wg::input_problem(&file, backslash_sep, external))
 }
 
+// ── agent: 워크플로 판정(3단계 3v). 트레일러 만들기·읽기, 단계, 배포 막음, 검토, 확인 요약. 형 변환만 한다.
+// TS 껍데기: packages/agent/src/workflow.ts, packages/agent/src/checkpoints.ts
+
+use bstudio_guard::workflow as wf;
+
+#[napi]
+pub fn workflow_format_passed_trailer(stages: Vec<String>) -> String {
+    wf::format_workflow_trailer(&stages)
+}
+
+#[napi]
+pub fn workflow_format_verify_trailer(mode: String) -> String {
+    wf::format_verify_trailer(&mode)
+}
+
+#[napi]
+pub fn workflow_format_incomplete_trailer(reason: String) -> String {
+    wf::format_incomplete_trailer(&reason)
+}
+
+#[napi]
+pub fn workflow_parse_passed_trailer(values: Vec<String>) -> Option<Vec<String>> {
+    wf::parse_workflow_trailer_values(&values)
+}
+
+#[napi]
+pub fn workflow_parse_verify_trailer(values: Vec<String>) -> Option<String> {
+    wf::parse_verify_trailer_values(&values).map(str::to_owned)
+}
+
+#[napi]
+pub fn workflow_parse_incomplete_trailer(values: Vec<String>) -> Option<String> {
+    wf::parse_incomplete_trailer_values(&values).map(str::to_owned)
+}
+
+#[napi]
+pub fn workflow_is_doc_checkpoint_path(file: String) -> bool {
+    wf::is_doc_checkpoint_path(&file)
+}
+
+#[napi]
+pub fn workflow_has_empty_passed_trailer(trailers: Vec<String>) -> bool {
+    wf::has_empty_passed_trailer(&trailers)
+}
+
+#[napi]
+pub fn workflow_has_docs_verify_trailer(trailers: Vec<String>) -> bool {
+    wf::has_docs_verify_trailer(&trailers)
+}
+
+#[napi]
+pub fn workflow_stages(required: Option<Vec<String>>, page_checks: u32, tests: u32, concurrency_checks: u32, load_checks: u32) -> Vec<String> {
+    wf::workflow_stages(required.as_deref(), page_checks as usize, tests as usize, concurrency_checks as usize, load_checks as usize)
+}
+
+#[napi]
+pub fn workflow_release_requirements(release_requires: Option<Vec<String>>) -> Vec<String> {
+    wf::workflow_release_requirements(release_requires.as_deref())
+}
+
+/// 요구 목록에서 빠진 단계의 위치. `-1`은 `checkpoint`(게이트를 거치지 않은 직접 수정 체크포인트). 입력은 `encodeLoneSurrogates`한 꼴
+#[napi]
+pub fn workflow_release_blockers(requires: Option<Vec<String>>, declared: bool, passed: Option<Vec<String>>, verify: Option<String>) -> Vec<i32> {
+    match wf::release_blockers(requires.as_deref(), declared, passed.as_deref(), verify.as_deref()) {
+        wf::Blockers::Checkpoint => vec![-1],
+        wf::Blockers::Missing(indices) => indices.into_iter().map(|index| index as i32).collect(),
+    }
+}
+
+#[napi]
+pub fn workflow_missing_verification_stages(stages: Vec<String>, passed: Vec<String>) -> Vec<u32> {
+    wf::missing_verification_stages(&stages, &passed).into_iter().map(|index| index as u32).collect()
+}
+
+#[napi]
+pub fn workflow_protected_paths(protected: Option<Vec<String>>, evaluation_assets: Option<Vec<String>>) -> Vec<String> {
+    wf::protected_paths_for(protected.as_deref().unwrap_or(&[]), evaluation_assets.as_deref().unwrap_or(&[]))
+}
+
+#[napi]
+pub fn workflow_max_turns(json: String) -> Result<String> {
+    fail(wf::max_turns_json(&json))
+}
+
+#[napi]
+pub fn workflow_review_changes(json: String) -> Result<String> {
+    fail(wf::review_changes_json(&json))
+}
+
+#[napi]
+pub fn workflow_uncovered_change_warnings(json: String) -> Result<String> {
+    fail(wf::uncovered_change_warnings_json(&json))
+}
+
+#[napi]
+pub fn workflow_format_checked_coverage(json: String, declared_check_name: String) -> Result<String> {
+    fail(wf::format_checked_coverage_json(&json, &declared_check_name))
+}
+
+// ── 작업 계획·요구사항 검증 기록 무결성(ADR-191 3단계 3x). 막는 판정이다. TS 껍데기: packages/agent/src/{task-plan,requirement-integrity}.ts
+// 글자는 TS가 `encodeLoneSurrogates`해서 보내고 결과의 글자는 TS가 `decodeLoneSurrogates`로 푼다. 어긋난 모양의 입력은 던진다
+use bstudio_guard::{requirement_integrity as rint, task_plan as tp};
+
+/// `{maxLanes, maxTasks, warnings}` JSON. 값이 없으면 null
+#[napi]
+pub fn task_plan_limits(max_lanes: Option<String>, max_tasks: Option<String>) -> String {
+    let (lanes, tasks, warnings) = tp::plan_limits(max_lanes.as_deref(), max_tasks.as_deref());
+    serde_json::json!({ "maxLanes": lanes, "maxTasks": tasks, "warnings": warnings }).to_string()
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PlanTaskInput {
+    id: String,
+    #[serde(default)]
+    depends_on: Vec<String>,
+    backend: Option<String>,
+    model: Option<String>,
+    paths: Vec<String>,
+}
+
+/// `tasks_json`은 `[{id, dependsOn, backend?, model?, paths}]`(글자는 인코딩한 것). `{error}` 또는 `{lanes: [{id, tasks: [순번], paths}]}` JSON
+#[napi]
+pub fn task_plan_lanes(tasks_json: String, max_tasks: f64, max_lanes: f64, backslash_sep: bool) -> Result<String> {
+    let inputs: Vec<PlanTaskInput> = parse::<Vec<PlanTaskInput>>(&tasks_json, "작업 계획")?;
+    let tasks: Vec<tp::PlanTask> = inputs.into_iter().map(|t| tp::PlanTask { id: t.id, depends_on: t.depends_on, backend: t.backend, model: t.model, paths: t.paths }).collect();
+    Ok(match tp::plan_lanes(&tasks, max_tasks, max_lanes, backslash_sep) {
+        Err(message) => serde_json::json!({ "error": message }),
+        Ok(lanes) => serde_json::json!({ "lanes": lanes.into_iter().map(|l| serde_json::json!({ "id": l.id, "tasks": l.tasks, "paths": l.paths })).collect::<Vec<_>>() }),
+    }
+    .to_string())
+}
+
+/// `file`·`paths`는 TS가 `encodeLoneSurrogates`한 글자
+#[napi]
+pub fn task_plan_is_in_scope(file: String, paths: Vec<String>, backslash_sep: bool) -> bool {
+    tp::is_in_scope(&file, &paths, backslash_sep)
+}
+
+fn diff_json(diff: &rint::Diff) -> String {
+    serde_json::to_string(diff).expect("직렬화")
+}
+
+/// `{forged, removed, tampered}` JSON. `*Effective`·`afterIds`는 TS가 `parseRequirementsMarkdown`으로 읽은 id 목록(인코딩한 글자)
+#[napi]
+pub fn req_integrity_diff(before: Option<String>, after: Option<String>, before_effective: Vec<String>, after_effective: Vec<String>, after_ids: Vec<String>) -> String {
+    diff_json(&rint::diff_verification_records(before.as_deref(), after.as_deref(), &before_effective, &after_effective, &after_ids))
+}
+
+#[napi]
+pub fn req_integrity_has_tamper(diff_json: String) -> Result<bool> {
+    Ok(rint::has_verification_tamper(&parse::<rint::Diff>(&diff_json, "검증 기록 변화")?))
+}
+
+#[napi]
+pub fn req_integrity_describe_tamper(diff_json: String) -> Result<Vec<String>> {
+    Ok(rint::describe_verification_tamper(&parse::<rint::Diff>(&diff_json, "검증 기록 변화")?))
+}
+
+#[napi]
+pub fn req_integrity_describe_removed(diff_json: String) -> Result<Vec<String>> {
+    Ok(rint::describe_removed_verifications(&parse::<rint::Diff>(&diff_json, "검증 기록 변화")?))
+}
+
+#[napi]
+pub fn req_integrity_tampered_ids(diff_json: String) -> Result<Vec<String>> {
+    Ok(rint::tampered_requirement_ids(&parse::<rint::Diff>(&diff_json, "검증 기록 변화")?))
+}
+
+/// `{unchanged: true}` · `{needsIds: 글}`(그 글의 요구사항 id 목록을 `textIds`로 주고 다시 부른다) · `{text}` JSON
+#[napi]
+pub fn req_integrity_restore(before: Option<String>, after: String, before_effective: Vec<String>, after_effective: Vec<String>, after_ids: Vec<String>, text_ids: Option<Vec<String>>) -> String {
+    match rint::restore_verification_records(before.as_deref(), &after, &before_effective, &after_effective, &after_ids, text_ids.as_deref()) {
+        rint::Restore::Unchanged => serde_json::json!({ "unchanged": true }),
+        rint::Restore::NeedsIds(text) => serde_json::json!({ "needsIds": text }),
+        rint::Restore::Text(text) => serde_json::json!({ "text": text }),
+    }
+    .to_string()
+}
+
+/// `[{stage, name, ok, attempts, detail}]` JSON
+#[napi]
+pub fn req_integrity_review(before: Option<String>, after: Option<String>, before_effective: Vec<String>, after_effective: Vec<String>, after_ids: Vec<String>) -> String {
+    serde_json::to_string(&rint::review_requirement_records(before.as_deref(), after.as_deref(), &before_effective, &after_effective, &after_ids)).expect("직렬화")
+}
+
 // ── agent: 요구사항 추적표와 시험 파일 훑기(3단계 3z). TS 껍데기: packages/agent/src/requirements.ts
 use bstudio_guard::requirements_trace as rt;
 

@@ -41,3 +41,17 @@ export function resolveInputProblem(file: string, p: typeof nodePath.posix = nod
 export function externalInputProblem(file: string, p: typeof nodePath.posix = nodePath.posix): number {
   return p.isAbsolute(file) ? 1 : 0;
 }
+
+/**
+ * 조각 3y: `readProjectFileSync`·`snapshotRead`가 받은 상대 경로(`relative`)가 프로젝트 밖인가(참이면 거절). 옛 식 그대로이고 경로 모듈만 인자로 받는다.
+ * 거절하는 쪽이 참이다
+ */
+export function projectPathOutside(relative: string, p: typeof nodePath.posix = nodePath.posix): boolean {
+  const normalized = p.normalize(relative);
+  return p.isAbsolute(relative) || normalized === '..' || normalized.startsWith(`..${p.sep}`);
+}
+
+/** 조각 3y: 실제 저장 이름을 읽다 어긋난 `stored`(`path.relative` 결과)가 루트 밖을 가리키는가(참이면 받은 경로를 그대로 쓴다) */
+export function storedOutside(stored: string, p: typeof nodePath.posix = nodePath.posix): boolean {
+  return stored === '..' || stored.startsWith(`..${p.sep}`) || p.isAbsolute(stored);
+}
