@@ -1,7 +1,7 @@
 // 테스트용 가짜 `claude` CLI. 진짜 CLI의 공개 입출력만 흉내 낸다: 받은 인자·표준 입력 줄·환경을 기록하고,
 // 표준 입력의 사용자 메시지마다 정해 둔 stream-json 줄을 내며, 도구 단계는 --mcp-config의 HTTP MCP 서버를 실제로 부른다.
 // 호출: node fake-claude-cli.mjs <시나리오.json> <기록 접두어> [러너가 붙인 인자...]
-import { appendFileSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, openSync, readFileSync, renameSync, statSync, writeFileSync, writeSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const [scenarioPath, prefix, ...args] = process.argv.slice(2);
@@ -27,7 +27,8 @@ const inv = scenario.invocations?.[call - 1] ?? {};
 const stateFile = `${prefix}.state.json`;
 if (!existsSync(stateFile)) writeFileSync(stateFile, JSON.stringify({ turns: scenario.turns ?? [], modelUsages: scenario.modelUsages ?? [], apiDurations: scenario.apiDurations ?? [] }));
 const readState = () => JSON.parse(readFileSync(stateFile, 'utf8'));
-const writeState = (state) => writeFileSync(stateFile, JSON.stringify(state));
+// 턴 사이 상태도 기록과 같은 방식으로 쓴다(다음 호출이 읽는다). writeRecord는 아래에 있고 턴을 처리할 때 불린다
+const writeState = (state) => writeRecord(stateFile, JSON.stringify(state));
 
 const fileOf = (flag) => {
   const file = valueOf(flag);
@@ -50,7 +51,22 @@ const log = {
   tools: [],
   signals: [],
 };
-const flush = () => writeFileSync(`${prefix}.${call}.json`, JSON.stringify(log));
+// 기록 파일 쓰기. 러너 시험은 SIGTERM 뒤 곧 SIGKILL을 보내므로, 쓰는 도중에 죽어도 읽는 쪽이 잘린 JSON을 보지 않게 임시 파일에 다 쓴 뒤
+// rename으로 바꾼다(POSIX에서 통째로 바뀐다, 이슈 #1106). 시험이 `slowFlushMs`를 주면 반을 쓰고 쉬었다가 나머지를 쓴다(죽는 창을 넓혀 재현한다)
+const writeRecord = (file, text) => {
+  const tmp = `${file}.tmp`;
+  if (!scenario.slowFlushMs) {
+    writeFileSync(tmp, text);
+  } else {
+    const fd = openSync(tmp, 'w');
+    writeSync(fd, text.slice(0, text.length >> 1));
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, scenario.slowFlushMs);
+    writeSync(fd, text.slice(text.length >> 1));
+    closeSync(fd);
+  }
+  renameSync(tmp, file);
+};
+const flush = () => writeRecord(`${prefix}.${call}.json`, JSON.stringify(log));
 flush();
 const emit = (message) => process.stdout.write(`${JSON.stringify(message)}\n`);
 

@@ -1,0 +1,570 @@
+//! 게이트의 순수 보조 판정(ADR-191 3단계 3r). 옛 `packages/agent/src/gate.ts`의 `nextErrorMarker`(`NEXT_ERROR_MARKERS`·`NEXT_NOT_FOUND_MARKER`)·`autoPageCheck`·
+//! `containsApiValue`·`missingApiValue`·`viewportProblemText`·`viewportProblems`·`missingAllText`·`missingAnyText`·`dynamicProbeDataHint`·`dynamicNames`(구간 번호)·
+//! `acceptedNotes`·`usesInRunValue`·`sampledValues`·`stripHtml`·`formatFailedChecks`·`compareDetail`·`describeConcurrencyExpect`.
+//!
+//! 실행 흐름(샌드박스·브라우저 호출), `readJsonPath`(JSON 값을 TS로 돌려줘 비교에 쓰이므로 경계를 지나면 짝 없는 서로게이트가 달라진다), `withoutInRunValues`
+//! (JS 객체의 펼침·`delete`·키 순서로 설정을 다시 만든다)는 TS에 남는다.
+//!
+//! JS와 같게 읽는 곳:
+//! - `containsApiValue`의 숫자: `String(value)`는 `js::number_to_string`, `value.toLocaleString('en-US')`는 `to_locale_string_en_us`(ICU의 en-US 기본값:
+//!   소수 3자리까지 반올림(가운데는 올림), 천 단위 쉼표, 음수 0은 `-0`, `NaN`·`∞`). 반올림은 JS가 아는 가장 짧은 10진 자릿수에서 한다.
+//! - `stripHtml`의 `/gi`는 u 없는 규칙이라 ASCII만 대소문자를 접는다. 게으른 `[\s\S]*?`는 "처음 닫는 글자까지"다.
+//! - `viewportProblemText`의 템플릿 글자: 없는 값은 `undefined`.
+//!
+//! 의도한 차이:
+//! - 짝 없는 서로게이트는 napi 경계에서 U+FFFD가 된다(다른 조각과 같다). 통과로 이어지는 같음·포함 판정 두 곳(`containsApiValue`의 글자 값, `viewportProblems`의
+//!   글자 짝짓기)은 TS 껍데기가 견줄 두 글자를 `encodeLoneSurrogates`로 바꿔 보내 이 차이가 판정을 바꾸지 않는다(트러블슈팅 165). 나머지는 화면에 보이는 문구뿐이다.
+//! - `sampledValues`·`acceptedNotes`는 `sampleParams`의 자기 속성만 읽는다(옛 구현은 `[constructor]`·`[toString]` 같은 이름에서 `Object.prototype`의 함수를 값으로 읽어
+//!   `constructor=function Object() { [native code] }`를 적었다). 문구뿐이고 판정은 같다(`sampled`는 안내 글자에만 쓴다).
+//! - `viewportProblemText`는 `problem.kind`가 옛 타입 밖의 값이면 던진다(옛 구현은 `undefined`를 문제 목록에 넣었다). 어느 쪽이든 문제가 하나 생긴 것이라 실패다.
+
+use crate::js;
+use crate::js_json::JsValue;
+
+/// Next.js가 오류 화면을 대신 그릴 때 나오는 문구
+pub const NEXT_ERROR_MARKERS: [&str; 2] = ["Application error: a server-side exception has occurred", "Unhandled Runtime Error"];
+/// Next.js 기본 404 화면
+pub const NEXT_NOT_FOUND_MARKER: &str = "This page could not be found";
+
+/// 자동으로 연 페이지의 본문에서 찾은 오류 표지. 없으면 `None`. 표지는 모두 ASCII라 본문의 짝 없는 서로게이트가 U+FFFD가 되어도 결과가 같다
+pub fn next_error_marker(text: &str, expect_status: f64) -> Option<&'static str> {
+    if let Some(found) = NEXT_ERROR_MARKERS.iter().find(|marker| text.contains(**marker)) {
+        return Some(found);
+    }
+    if expect_status != 404.0 && text.contains(NEXT_NOT_FOUND_MARKER) {
+        return Some(NEXT_NOT_FOUND_MARKER);
+    }
+    None
+}
+
+/// `{ service, mode, expectStatus, viewport? }` → 선언형 pageChecks와 같은 모양. 설정에 없는 값은 pageChecks의 기본값과 같게 둔다(콘솔 오류·가로 스크롤은 허용하지 않는다)
+pub fn auto_page_check(config: &JsValue, route_path: &str) -> JsValue {
+    let viewport = config.prop("viewport").filter(|v| v.truthy()).cloned();
+    crate::js_json::object(vec![
+        ("service", config.prop("service").cloned()),
+        ("path", Some(JsValue::str(route_path))),
+        ("mode", config.prop("mode").cloned()),
+        ("expectStatus", config.prop("expectStatus").cloned()),
+        ("allowConsoleErrors", Some(JsValue::Bool(false))),
+        ("noHorizontalScroll", Some(JsValue::Bool(false))),
+        ("viewport", viewport),
+    ])
+}
+
+/// api 값(글자)이 화면 글자에 있는지. 부르는 쪽이 두 글자를 `encodeLoneSurrogates`로 바꿔 보낸다
+pub fn contains_api_text(text: &str, value: &str) -> bool {
+    text.contains(value)
+}
+
+/// api 값(숫자)이 화면 글자에 있는지. 원문(`String(value)`)과 천 단위 구분(`toLocaleString('en-US')`) 표기를 둘 다 인정한다
+pub fn contains_api_number(text: &str, value: f64) -> bool {
+    text.contains(&js::number_to_string(value)) || text.contains(&to_locale_string_en_us(value))
+}
+
+/// `Number.prototype.toLocaleString('en-US')`: 소수 최대 3자리(가운데는 0에서 먼 쪽), 천 단위 쉼표
+pub fn to_locale_string_en_us(x: f64) -> String {
+    if x.is_nan() {
+        return "NaN".to_owned();
+    }
+    if x.is_infinite() {
+        return if x > 0.0 { "∞" } else { "-∞" }.to_owned();
+    }
+    let negative = x.is_sign_negative();
+    let a = x.abs();
+    let (mut int, mut frac) = if a == 0.0 {
+        ("0".to_owned(), String::new())
+    } else {
+        let (digits, exp) = js::shortest_digits(a);
+        let k = digits.len() as i64;
+        if exp >= 0 {
+            let n = exp + 1;
+            if k <= i64::from(n) {
+                (format!("{digits}{}", "0".repeat((i64::from(n) - k) as usize)), String::new())
+            } else {
+                (digits[..n as usize].to_owned(), digits[n as usize..].to_owned())
+            }
+        } else {
+            ("0".to_owned(), format!("{}{digits}", "0".repeat((-exp - 1) as usize)))
+        }
+    };
+    if frac.len() > 3 {
+        let round_up = frac.as_bytes()[3] >= b'5';
+        frac.truncate(3);
+        if round_up {
+            let mut all: Vec<u8> = int.bytes().chain(frac.bytes()).collect();
+            let mut i = all.len();
+            loop {
+                if i == 0 {
+                    all.insert(0, b'1');
+                    break;
+                }
+                i -= 1;
+                if all[i] == b'9' {
+                    all[i] = b'0';
+                } else {
+                    all[i] += 1;
+                    break;
+                }
+            }
+            let int_len = all.len() - 3;
+            int = String::from_utf8(all[..int_len].to_vec()).expect("ascii");
+            frac = String::from_utf8(all[int_len..].to_vec()).expect("ascii");
+        }
+    }
+    while frac.ends_with('0') {
+        frac.pop();
+    }
+    let mut grouped = String::new();
+    for (i, c) in int.chars().enumerate() {
+        if i > 0 && (int.len() - i) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(c);
+    }
+    let mut out = String::new();
+    if negative {
+        out.push('-');
+    }
+    out.push_str(&grouped);
+    if !frac.is_empty() {
+        out.push('.');
+        out.push_str(&frac);
+    }
+    out
+}
+
+/// api 값이 화면에 없을 때의 문구. `value_text`는 `String(api.value)`(숫자는 Rust가 만든다: `value_number`)
+pub fn missing_api_value(service: &str, json_path: &str, value_text: Option<&str>, value_number: Option<f64>, page_path: &str) -> String {
+    let value = match (value_text, value_number) {
+        (Some(text), _) => text.to_owned(),
+        (None, Some(n)) => js::number_to_string(n),
+        (None, None) => "undefined".to_owned(),
+    };
+    format!("{service}의 {json_path} 값 '{value}'이 {page_path} 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다")
+}
+
+/// 템플릿 글자 `${value}`: 없으면 `undefined`
+fn show(value: Option<&JsValue>) -> String {
+    value.map_or_else(|| "undefined".to_owned(), JsValue::to_js_string)
+}
+
+/// `Array.prototype.join`에 들어가는 원소: `undefined`·`null`은 빈 글자
+fn join_item(value: &JsValue) -> String {
+    if matches!(value, JsValue::Null) {
+        String::new()
+    } else {
+        value.to_js_string()
+    }
+}
+
+/// expectInViewport 실패 한 건의 문구. `width`·`height`는 `${…}`로 적을 글자
+fn viewport_problem_text(finding: &JsValue, width: &str, height: &str) -> Result<String, String> {
+    let size = format!("(창 {width}x{height})");
+    let problem = finding.prop("problem").filter(|p| p.truthy());
+    let head = format!("'{}'이 첫 화면에 다 보이지 않습니다 — ", show(finding.prop("text")));
+    let Some(problem) = problem else {
+        return Ok(format!("{head}보이지 않는 이유를 알 수 없습니다{size}"));
+    };
+    let kind = match problem.prop("kind") {
+        Some(JsValue::Str(kind)) => kind.as_str(),
+        _ => "",
+    };
+    let by = || show(problem.prop("by"));
+    let px = || show(problem.prop("px"));
+    Ok(match kind {
+        "absent" => format!("{head}화면에 없습니다{size}"),
+        "hidden" => format!("{head}숨겨져 있습니다(display:none·visibility:hidden, 투명하거나 크기가 거의 없음){size}"),
+        "covered" => format!("{head}{}에 덮여 있습니다{size}", by()),
+        "scrolled" => format!("{head}잴 때 창이 {}px 스크롤돼 있어 첫 화면이 아닙니다. 화면을 내리는 steps 없이 재세요{size}", px()),
+        "clipped" => {
+            let side = match problem.prop("side").map(JsValue::to_js_string).as_deref() {
+                Some("bottom") => "아래로",
+                Some("top") => "위로",
+                Some("right") => "오른쪽으로",
+                Some("left") => "왼쪽으로",
+                _ => "undefined",
+            };
+            format!("{head}{} 안에서 {side} {}px 잘렸습니다{size}", by(), px())
+        }
+        "below" => format!("{head}창 아래로 {}px 넘칩니다{size}", px()),
+        "above" => format!("{head}창 위로 {}px 넘칩니다{size}", px()),
+        "right" => format!("{head}창 오른쪽으로 {}px 넘칩니다{size}", px()),
+        "left" => format!("{head}창 왼쪽으로 {}px 넘칩니다{size}", px()),
+        other => return Err(format!("알 수 없는 viewport 문제 종류입니다: {other}")),
+    })
+}
+
+/// `viewportProblemText(finding, width, height)`의 napi용 입구: 창 크기는 수
+pub fn viewport_problem_text_for(finding: &JsValue, width: f64, height: f64) -> Result<String, String> {
+    viewport_problem_text(finding, &js::number_to_string(width), &js::number_to_string(height))
+}
+
+/// expectInViewport 판정. `{ expected: [{ key, text }], report: null | { width, height, findings: [{ key, text, visible, problem? }] } }`.
+/// `key`는 `text`를 `encodeLoneSurrogates`한 글자이고 짝짓기는 `key`로 한다(짝 없는 서로게이트가 U+FFFD로 모두 같아져 다른 글자를 "찾았다"고 읽지 않게).
+/// 러너가 재지 못했거나 일부 글자의 결과가 빠졌으면 통과로 보지 않는다
+pub fn viewport_problems(input: &JsValue) -> Result<Vec<String>, String> {
+    let expected = match input.prop("expected") {
+        Some(JsValue::Arr(items)) => items,
+        _ => return Err("expected는 배열이어야 합니다".to_owned()),
+    };
+    let quoted = |item: &JsValue| format!("'{}'", show(item.prop("text")));
+    let report = match input.prop("report") {
+        None | Some(JsValue::Null) => {
+            let list = expected.iter().map(quoted).collect::<Vec<_>>().join(", ");
+            return Ok(vec![format!("{list}가 첫 화면에 보이는지 재지 못했습니다")]);
+        }
+        Some(report) => report,
+    };
+    let findings = match report.prop("findings") {
+        Some(JsValue::Arr(items)) => items,
+        _ => return Err("report.findings는 배열이어야 합니다".to_owned()),
+    };
+    let (width, height) = (show(report.prop("width")), show(report.prop("height")));
+    let mut problems = Vec::new();
+    for item in expected {
+        let key = item.prop("key");
+        let finding = findings.iter().find(|entry| matches!((entry.prop("key"), key), (Some(a), Some(b)) if a.strict_equals(b)));
+        match finding {
+            None => problems.push(format!("{}이 첫 화면에 보이는지 재지 못했습니다", quoted(item))),
+            Some(finding) if finding.prop("visible").is_some_and(JsValue::truthy) => {}
+            Some(finding) => problems.push(viewport_problem_text(finding, &width, &height)?),
+        }
+    }
+    Ok(problems)
+}
+
+/// expectAllText 실패 문구
+pub fn missing_all_text(values: &[String]) -> String {
+    format!("화면에 {}가 없습니다", values.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", "))
+}
+
+/// expectAnyText 실패 문구
+pub fn missing_any_text(values: &[String]) -> String {
+    format!("화면에 {} 중 어느 것도 없습니다", values.iter().map(|v| format!("'{v}'")).collect::<Vec<_>>().join(", "))
+}
+
+/// 추정한 id로 연 화면이 실패했을 때 붙이는 안내
+pub fn dynamic_probe_data_hint(probed_id: &str) -> String {
+    format!(
+        "이 화면은 추정한 id({probed_id})로 열었습니다 — 그 id의 데이터가 없어서 생긴 실패일 수 있습니다. 실제로 있는 값을 studio.yaml의 autoPageChecks.sampleParams(예: {{ id: \"...\" }})나 sampleIdFrom으로 알려주면 그 값으로 엽니다"
+    )
+}
+
+/// `[이름]` 꼴(폴더 이름 전체가 대괄호 하나, 안에 `[`·`]`가 없는 한 글자 이상) 세그먼트인가. `/^\[([^[\]]+)\]$/`
+fn dynamic_name(segment: &str) -> Option<&str> {
+    let inner = segment.strip_prefix('[')?.strip_suffix(']')?;
+    if inner.is_empty() || inner.contains(['[', ']']) {
+        None
+    } else {
+        Some(inner)
+    }
+}
+
+/// page 파일 경로(`/`로 가른 세그먼트)에서 단순 동적 세그먼트 `[id]`인 것의 번호. 부르는 쪽이 같은 `split('/')`로 이름을 잘라 쓴다(이름의 짝 없는 서로게이트를 지키려고)
+pub fn dynamic_segments(page_file: &str) -> Vec<usize> {
+    page_file.split('/').enumerate().filter(|(_, segment)| dynamic_name(segment).is_some()).map(|(i, _)| i).collect()
+}
+
+/// 자기 속성만 읽는 `sampleParams[key]`
+fn own<'a>(entries: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    entries.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+}
+
+/// 받아들인 값을 알리는 문구. `in_run_keys`는 이번 실행에서 받아들인 sampleParams 키(넣은 순서), `sample_from`은 `(service, path)`
+pub fn accepted_notes(spec_file: &str, in_run_keys: &[String], sample_params: &[(String, String)], in_run_sample_id_from: bool, sample_from: Option<(&str, &str)>) -> Vec<String> {
+    let mut notes = Vec::new();
+    let params: Vec<String> = in_run_keys.iter().map(|key| format!("{key}={}", own(sample_params, key).unwrap_or("undefined"))).collect();
+    if !params.is_empty() {
+        notes.push(format!("{spec_file}의 autoPageChecks.sampleParams({})를 이번 실행에서 바로 반영했습니다", params.join(", ")));
+    }
+    if let (true, Some((service, path))) = (in_run_sample_id_from, sample_from) {
+        notes.push(format!("{spec_file}의 autoPageChecks.sampleIdFrom({service} {path})을 이번 실행에서 바로 반영했습니다"));
+    }
+    notes
+}
+
+/// 이 경로가 실행 중에 받아들인 값으로 채워졌는지: 동적 세그먼트가 그 키를 쓰거나, 추정 id가 실행 중에 들어온 sampleIdFrom에서 왔을 때.
+/// 부르는 쪽이 page 파일과 키를 같이 `encodeLoneSurrogates`해서 보낸다
+pub fn uses_in_run_value(page_file: &str, in_run_keys: &[String], in_run_sample_id_from: bool, used_fallback_count: usize) -> bool {
+    if page_file.split('/').filter_map(dynamic_name).any(|name| in_run_keys.iter().any(|key| key == name)) {
+        return true;
+    }
+    in_run_sample_id_from && used_fallback_count > 0
+}
+
+/// `\[(?:\.\.\.)?([A-Za-z0-9_-]+)\]`로 찾은 이름들(겹치지 않게 왼쪽부터)
+fn bracket_names(page_file: &str) -> Vec<&str> {
+    let bytes = page_file.as_bytes();
+    let mut names = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'[' {
+            i += 1;
+            continue;
+        }
+        let mut start = i + 1;
+        if bytes[start..].starts_with(b"...") {
+            start += 3;
+        }
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_' || bytes[end] == b'-') {
+            end += 1;
+        }
+        if end > start && end < bytes.len() && bytes[end] == b']' {
+            names.push(&page_file[start..end]);
+            i = end + 1;
+        } else {
+            i += 1;
+        }
+    }
+    names
+}
+
+/// sampleParams로 알려 준 값으로 연 화면의 `이름=값` 목록. 쓴 값이 없으면 `None`. 값이 빈 글자면 쓰지 않은 것이다
+pub fn sampled_values(page_file: &str, sample_params: &[(String, String)]) -> Option<String> {
+    let used: Vec<String> = bracket_names(page_file)
+        .into_iter()
+        .filter_map(|name| own(sample_params, name).filter(|value| !value.is_empty()).map(|value| format!("{name}={value}")))
+        .collect();
+    if used.is_empty() {
+        None
+    } else {
+        Some(used.join(", "))
+    }
+}
+
+/// ASCII만 대소문자를 접어 `<open` … `</close>`를 가장 짧게 찾아 한 칸으로 바꾼다. `/<script[\s\S]*?<\/script>/gi`
+fn replace_blocks(text: &str, open: &str, close: &str) -> String {
+    let lower = text.to_ascii_lowercase();
+    let mut out = String::new();
+    let mut at = 0;
+    while let Some(found) = lower[at..].find(open) {
+        let start = at + found;
+        match lower[start + open.len()..].find(close) {
+            Some(end) => {
+                out.push_str(&text[at..start]);
+                out.push(' ');
+                at = start + open.len() + end + close.len();
+            }
+            None => break,
+        }
+    }
+    out.push_str(&text[at..]);
+    out
+}
+
+/// HTTP 확인 응답 본문(HTML)에서 태그를 걷어내 로딩 문구 판정에 쓸 평문을 만든다. 자바스크립트는 실행하지 않는다
+pub fn strip_html(html: &str) -> String {
+    let no_script = replace_blocks(html, "<script", "</script>");
+    let no_style = replace_blocks(&no_script, "<style", "</style>");
+    let mut tagless = String::new();
+    let mut at = 0;
+    while let Some(found) = no_style[at..].find('<') {
+        let start = at + found;
+        match no_style[start + 1..].find('>') {
+            Some(end) => {
+                tagless.push_str(&no_style[at..start]);
+                tagless.push('\n');
+                at = start + 1 + end + 1;
+            }
+            None => break,
+        }
+    }
+    tagless.push_str(&no_style[at..]);
+    let mut collapsed = String::new();
+    let mut in_run = false;
+    for c in tagless.chars() {
+        if c == ' ' || c == '\t' {
+            if !in_run {
+                collapsed.push(' ');
+                in_run = true;
+            }
+        } else {
+            collapsed.push(c);
+            in_run = false;
+        }
+    }
+    js::trim(&collapsed).to_owned()
+}
+
+/// `[{ stage, name, attempts, detail? }]` → 실패한 워크플로 검사 목록 문구. 비면 빈 글자
+pub fn format_failed_checks(checks: &JsValue) -> Result<String, String> {
+    let JsValue::Arr(checks) = checks else {
+        return Err("checks는 배열이어야 합니다".to_owned());
+    };
+    if checks.is_empty() {
+        return Ok(String::new());
+    }
+    let lines: Vec<String> = checks
+        .iter()
+        .map(|check| {
+            let detail = check.prop("detail").filter(|d| d.truthy());
+            format!("- [{}] {} (시도 {}회){}", show(check.prop("stage")), show(check.prop("name")), show(check.prop("attempts")), detail.map_or_else(String::new, |d| format!("\n{}", d.to_js_string())))
+        })
+        .collect();
+    Ok(format!("\n\n워크플로 검사 실패:\n{}", lines.join("\n")))
+}
+
+/// 디자인 비교 실패 문구. 비율과 허용치, 비교한 크기를 함께 적는다
+pub fn compare_detail(ratio: f64, max: f64, width: f64, height: f64) -> String {
+    format!("디자인 차이 {}% (허용 {}%, 비교 {}×{})", js::to_fixed(ratio * 100.0, 1), js::to_fixed(max * 100.0, 1), js::number_to_string(width), js::number_to_string(height))
+}
+
+/// 동시 요청 확인의 기대를 사람이 읽는 한 줄로. `{ successCount?: { exactly?, atMost? }, allStatusIn?: number[] }`
+pub fn describe_concurrency_expect(expect: &JsValue) -> Result<String, String> {
+    let mut parts: Vec<String> = Vec::new();
+    let count = expect.prop("successCount");
+    if let Some(exactly) = count.and_then(|c| c.prop("exactly")) {
+        parts.push(format!("정확히 {}", exactly.to_js_string()));
+    } else if let Some(at_most) = count.and_then(|c| c.prop("atMost")) {
+        parts.push(format!("최대 {}", at_most.to_js_string()));
+    }
+    if let Some(all) = expect.prop("allStatusIn").filter(|v| v.truthy()) {
+        let JsValue::Arr(items) = all else {
+            return Err("allStatusIn은 배열이어야 합니다".to_owned());
+        };
+        parts.push(format!("상태 {}", items.iter().map(join_item).collect::<Vec<_>>().join("/")));
+    }
+    Ok(parts.join(", "))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::js_json::{self, JsObject};
+
+    fn obj(pairs: Vec<(&str, JsValue)>) -> JsValue {
+        let mut o = JsObject::new();
+        for (k, v) in pairs {
+            o.set(k, v);
+        }
+        JsValue::Obj(o)
+    }
+
+    #[test]
+    fn 오류_표지는_상태가_404일_때만_없는_화면을_봐준다() {
+        assert_eq!(next_error_marker("<h1>This page could not be found</h1>", 200.0), Some(NEXT_NOT_FOUND_MARKER));
+        assert_eq!(next_error_marker("<h1>This page could not be found</h1>", 404.0), None);
+        assert_eq!(next_error_marker("Unhandled Runtime Error", 404.0), Some("Unhandled Runtime Error"));
+        assert_eq!(next_error_marker("This page could not be foun", 200.0), None);
+        assert_eq!(next_error_marker("", f64::NAN), None);
+        assert_eq!(next_error_marker("This page could not be found", f64::NAN), Some(NEXT_NOT_FOUND_MARKER));
+    }
+
+    #[test]
+    fn 숫자는_원문과_천_단위_표기를_둘_다_인정한다() {
+        assert!(contains_api_number("합계 12,000원", 12000.0));
+        assert!(contains_api_number("합계 12000원", 12000.0));
+        assert!(!contains_api_number("합계 12 000원", 12000.0));
+        assert!(contains_api_number("1,234.568", 1234.5675));
+        assert!(contains_api_number("-0", -0.0));
+        assert!(!contains_api_number("x", f64::NAN) || "x".contains("NaN"));
+        assert_eq!(to_locale_string_en_us(1e21), "1,000,000,000,000,000,000,000");
+        assert_eq!(to_locale_string_en_us(-0.0001), "-0");
+        assert_eq!(to_locale_string_en_us(0.0), "0");
+        assert_eq!(to_locale_string_en_us(1.0005), "1.001");
+        assert_eq!(to_locale_string_en_us(999.9995), "1,000");
+        assert_eq!(to_locale_string_en_us(f64::NEG_INFINITY), "-∞");
+    }
+
+    #[test]
+    fn 글자_값은_통째로_포함해야_한다() {
+        assert!(contains_api_text("가격 1000원", "1000"));
+        assert!(!contains_api_text("가격 1,000원", "1000"));
+        assert!(!contains_api_text("abc", "ABC"));
+    }
+
+    #[test]
+    fn 값이_없을_때의_문구는_숫자를_js_표기로_적는다() {
+        assert_eq!(missing_api_value("api", "$.price", None, Some(1e21), "/p"), "api의 $.price 값 '1e+21'이 /p 화면에 없습니다 — 화면이 다른 필드 이름을 읽고 있을 수 있습니다");
+        assert!(missing_api_value("api", "$.x", Some("a"), None, "/p").contains("값 'a'이"));
+    }
+
+    #[test]
+    fn 보이지_않는_이유마다_문구가_다르다() {
+        let find = |problem: Option<JsValue>| {
+            let mut pairs = vec![("text", JsValue::str("확인"))];
+            if let Some(p) = problem {
+                pairs.push(("problem", p));
+            }
+            obj(pairs)
+        };
+        let kind = |k: &str| obj(vec![("kind", JsValue::str(k))]);
+        assert!(viewport_problem_text_for(&find(None), 1280.0, 800.0).unwrap().ends_with("보이지 않는 이유를 알 수 없습니다(창 1280x800)"));
+        assert!(viewport_problem_text_for(&find(Some(kind("absent"))), 1.0, 2.0).unwrap().contains("화면에 없습니다(창 1x2)"));
+        let below = obj(vec![("kind", JsValue::str("below")), ("px", JsValue::Num(12.5))]);
+        assert!(viewport_problem_text_for(&find(Some(below)), 1.0, 2.0).unwrap().contains("창 아래로 12.5px 넘칩니다"));
+        assert!(viewport_problem_text_for(&find(Some(kind("nope"))), 1.0, 2.0).is_err());
+    }
+
+    #[test]
+    fn 글자_짝짓기는_key로_한다() {
+        let input = js_json::parse(r#"{"expected":[{"key":"a","text":"A"},{"key":"b","text":"B"},{"key":"c","text":"C"}],"report":{"width":1,"height":2,"findings":[{"key":"a","text":"A","visible":true},{"key":"b","text":"B","visible":false,"problem":{"kind":"hidden"}}]}}"#).unwrap();
+        let out = viewport_problems(&input).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out[0].contains("숨겨져 있습니다"));
+        assert_eq!(out[1], "'C'이 첫 화면에 보이는지 재지 못했습니다");
+        let none = js_json::parse(r#"{"expected":[{"key":"a","text":"A"},{"key":"b","text":"B"}],"report":null}"#).unwrap();
+        assert_eq!(viewport_problems(&none).unwrap(), vec!["'A', 'B'가 첫 화면에 보이는지 재지 못했습니다".to_owned()]);
+    }
+
+    #[test]
+    fn 동적_세그먼트는_폴더_이름_전체가_대괄호_하나일_때만이다() {
+        assert_eq!(dynamic_segments("app/orders/[id]/page.tsx"), vec![2]);
+        assert_eq!(dynamic_segments("app/[a]/[b]/page.tsx"), vec![1, 2]);
+        for not in ["[...slug]x", "[[id]]", "[]", "x[id]", "[id]x", "[a[b]", "[a]]"] {
+            assert!(dynamic_segments(not).is_empty(), "{not}");
+        }
+        assert_eq!(dynamic_segments("[...slug]"), vec![0]);
+    }
+
+    #[test]
+    fn 받아들인_값_문구와_사용_판정() {
+        let params = vec![("id".to_owned(), "7".to_owned())];
+        let keys = vec!["id".to_owned(), "x".to_owned()];
+        let notes = accepted_notes("studio.yaml", &keys, &params, true, Some(("api", "/list")));
+        assert_eq!(notes[0], "studio.yaml의 autoPageChecks.sampleParams(id=7, x=undefined)를 이번 실행에서 바로 반영했습니다");
+        assert_eq!(notes[1], "studio.yaml의 autoPageChecks.sampleIdFrom(api /list)을 이번 실행에서 바로 반영했습니다");
+        assert!(accepted_notes("s", &[], &params, true, None).is_empty());
+        assert!(uses_in_run_value("app/[id]/page.tsx", &["id".to_owned()], false, 0));
+        assert!(!uses_in_run_value("app/[id]/page.tsx", &["ID".to_owned()], false, 0));
+        assert!(uses_in_run_value("app/page.tsx", &[], true, 1));
+        assert!(!uses_in_run_value("app/page.tsx", &[], true, 0));
+    }
+
+    #[test]
+    fn 쓴_값_목록은_이름마다_센다() {
+        let params = vec![("id".to_owned(), "7".to_owned()), ("empty".to_owned(), String::new())];
+        assert_eq!(sampled_values("app/[id]/[...id]/[empty]/page.tsx", &params).as_deref(), Some("id=7, id=7"));
+        assert_eq!(sampled_values("app/[other]/page.tsx", &params), None);
+        assert_eq!(sampled_values("app/[constructor]/page.tsx", &params), None);
+        assert_eq!(sampled_values("app/[[id]]/page.tsx", &params).as_deref(), Some("id=7"));
+    }
+
+    #[test]
+    fn html에서_태그와_스크립트를_걷어낸다() {
+        assert_eq!(strip_html("<div>안녕</div>  <b>x</b>"), "안녕\n \nx");
+        assert_eq!(strip_html("a<SCRIPT>if (a<b) {}</ScRiPt>b"), "a b");
+        assert_eq!(strip_html("a<script>never closed"), "a\nnever closed");
+        assert_eq!(strip_html("a<style>x</style>b<STYLE>y</style >"), "a b\ny");
+        assert_eq!(strip_html("1 < 2"), "1 < 2");
+        assert_eq!(strip_html("\u{FEFF} x \t\t y \u{FEFF}"), "x y");
+    }
+
+    #[test]
+    fn 실패한_검사_목록과_비교_문구() {
+        let checks = js_json::parse(r#"[{"stage":"test","name":"단위","attempts":2,"detail":"실패"},{"stage":"review","name":"리뷰","attempts":1}]"#).unwrap();
+        assert_eq!(format_failed_checks(&checks).unwrap(), "\n\n워크플로 검사 실패:\n- [test] 단위 (시도 2회)\n실패\n- [review] 리뷰 (시도 1회)");
+        assert_eq!(format_failed_checks(&JsValue::Arr(vec![])).unwrap(), "");
+        assert_eq!(compare_detail(0.1234, 0.05, 1280.0, 800.0), "디자인 차이 12.3% (허용 5.0%, 비교 1280×800)");
+    }
+
+    #[test]
+    fn 동시_요청_기대_문구() {
+        let expect = js_json::parse(r#"{"successCount":{"exactly":1},"allStatusIn":[200,409]}"#).unwrap();
+        assert_eq!(describe_concurrency_expect(&expect).unwrap(), "정확히 1, 상태 200/409");
+        let expect = js_json::parse(r#"{"successCount":{"atMost":0},"allStatusIn":[]}"#).unwrap();
+        assert_eq!(describe_concurrency_expect(&expect).unwrap(), "최대 0, 상태 ");
+        assert_eq!(describe_concurrency_expect(&js_json::parse("{}").unwrap()).unwrap(), "");
+    }
+}

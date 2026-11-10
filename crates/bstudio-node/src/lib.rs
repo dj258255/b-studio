@@ -2883,6 +2883,268 @@ pub fn checkpoint_git_env_keep(keys: Vec<String>) -> Vec<bool> {
     cg::git_env_keep(&keys)
 }
 
+// ── agent: 연결·인증·조율 판정(3단계 3t). 호스트·토큰·출처를 견주는 입력은 TS가 encodeLoneSurrogates한 글자를 보낸다.
+// 구조가 있는 입력은 encodeNative한 JSON 문자열이다
+use bstudio_guard::connection_judge;
+
+#[napi]
+pub fn conn_authorize(host: Option<String>, authorization: Option<String>, token: String, allowed_hosts: Vec<String>) -> Option<String> {
+    connection_judge::authorize(host.as_deref(), authorization.as_deref(), &token, &allowed_hosts).map(|denied| out(&connection_judge::denial_value(denied)))
+}
+
+#[napi]
+pub fn conn_host_allowed(host: Option<String>, allowed_hosts: Vec<String>) -> bool {
+    connection_judge::host_allowed(host.as_deref(), &allowed_hosts)
+}
+
+#[napi]
+pub fn conn_hostname_of(host: Option<String>) -> String {
+    connection_judge::hostname_of(host.as_deref())
+}
+
+#[napi]
+pub fn conn_token_matches(authorization: Option<String>, token: String) -> bool {
+    connection_judge::token_matches(authorization.as_deref(), &token)
+}
+
+#[napi]
+pub fn conn_is_allowed_request(protocol: String, origin: String, allowed_origins: Vec<String>) -> bool {
+    connection_judge::is_allowed_request(&protocol, &origin, &allowed_origins)
+}
+
+#[napi]
+pub fn conn_is_automatic_favicon_path(pathname: String) -> bool {
+    connection_judge::is_automatic_favicon_path(&pathname)
+}
+
+#[napi]
+pub fn conn_describe_step(click: Option<String>, fill_selector: Option<String>, press: Option<String>, wait_for: Option<String>) -> String {
+    connection_judge::describe_step(click.as_deref(), fill_selector.as_deref(), press.as_deref(), wait_for.as_deref())
+}
+
+#[napi]
+pub fn conn_rejected_change_feedback(rejected: Vec<String>) -> String {
+    connection_judge::rejected_change_feedback(&rejected)
+}
+
+#[napi]
+pub fn coord_board_validate(model_writes: bool, by: String, kind: String, body: String, refs_len: f64, note_bytes_limit: f64) -> Option<String> {
+    coordination::board_validate(model_writes, &by, &kind, &body, refs_len as usize, note_bytes_limit)
+}
+
+/// 입력 `[{priority, at, id, bytes}]`(읽을 수 있는 메모, 들어온 순서). 결과 `{selected: [위치], truncated, bytes}` JSON. 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn coord_board_pick_notes(notes_json: String, read_limit: f64, budget: f64) -> Result<String> {
+    let value = input(&notes_json, "읽을 메모 목록")?;
+    let JsValue::Arr(items) = &value else { return Err(Error::from_reason("읽을 메모 목록이 배열이 아닙니다")) };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        let number = |key: &str| match item.prop(key) {
+            Some(JsValue::Num(n)) => Ok(*n),
+            _ => Err(Error::from_reason(format!("메모의 {key}이(가) 수가 아닙니다"))),
+        };
+        let text = |key: &str| match item.prop(key) {
+            Some(JsValue::Str(s)) => Ok(s.clone()),
+            _ => Err(Error::from_reason(format!("메모의 {key}이(가) 문자열이 아닙니다"))),
+        };
+        keys.push(coordination::NoteSortKey { priority: number("priority")?, at: text("at")?, id: text("id")?, bytes: number("bytes")? });
+    }
+    let (selected, truncated, bytes) = coordination::board_pick_notes(&keys, read_limit, budget);
+    let selected = JsValue::Arr(selected.into_iter().map(|i| JsValue::Num(i as f64)).collect());
+    Ok(out(&bstudio_guard::js_json::object(vec![("selected", Some(selected)), ("truncated", Some(JsValue::Bool(truncated))), ("bytes", Some(JsValue::Num(bytes)))])))
+}
+
+#[napi]
+pub fn coord_mcp_post_input_error(args_json: String) -> Result<Option<String>> {
+    Ok(coordination::mcp_post_input_error(&input(&args_json, "post_note 입력")?))
+}
+
+#[napi]
+pub fn coord_mcp_read_input_error(args_json: String) -> Result<Option<String>> {
+    Ok(coordination::mcp_read_input_error(&input(&args_json, "read_notes 입력")?))
+}
+
+#[napi]
+pub fn coord_format_note(kind: String, priority: f64, lane: String, body: String, refs: Vec<String>) -> String {
+    coordination::format_note(&kind, priority, &lane, &body, &refs)
+}
+
+// ── 검증 통과 판정·도구 입력 검사(ADR-191 3단계 3u). 막는 검사이고 일부는 여는 쪽(서비스 허용 목록·origin)이다. TS 껍데기: packages/agent/src/{verify,tools}.ts
+use bstudio_guard::{tool_input, verify_judge};
+
+#[napi]
+pub fn verify_ok(restarted_ready: Vec<bool>, contract_errored: Vec<bool>, change_breaking: Vec<bool>, allow_breaking: bool, secret_leaks: u32, spec_error: bool) -> bool {
+    verify_judge::verify_ok(&restarted_ready, &contract_errored, &change_breaking, allow_breaking, secret_leaks as usize, spec_error)
+}
+
+#[napi]
+pub fn verify_platform_failure(sync_error: Option<String>, sync_platform: bool, services: Vec<String>, ready: Vec<bool>, platform: Vec<bool>, errors: Vec<String>) -> Option<String> {
+    verify_judge::platform_failure_of(sync_error.as_deref(), sync_platform, &services, &ready, &platform, &errors)
+}
+
+#[napi]
+pub fn verify_mentions_deleted_file(log_tail: Vec<String>, deleted: Vec<String>) -> bool {
+    verify_judge::mentions_deleted_file(&log_tail, &deleted)
+}
+
+/// 읽을 수 없는 보고서도 던지지 않고 "검증 실패"로 시작하는 글을 돌려준다
+#[napi]
+pub fn verify_format_report(report_json: String, allow_breaking: bool, spec_file: String) -> String {
+    verify_judge::format_verification_report(&report_json, allow_breaking, &spec_file)
+}
+
+/// 맞으면 null, 아니면 던질 오류 글. value_json은 encodeNative한 값(없으면 undefined)
+#[napi]
+pub fn tool_input_error(kind: String, key: String, value_json: Option<String>) -> Option<String> {
+    tool_input::input_error(&kind, &key, value_json.as_deref())
+}
+
+#[napi]
+pub fn tool_clamp(value: f64, min: f64, max: f64) -> f64 {
+    tool_input::clamp(value, min, max)
+}
+
+#[napi]
+pub fn tool_compose_service_names(compose: Option<Vec<String>>, managed: Vec<String>) -> Vec<String> {
+    tool_input::compose_service_names(compose.as_deref(), &managed)
+}
+
+#[napi]
+pub fn tool_service_allowed(name: String, managed: Vec<String>) -> bool {
+    tool_input::service_allowed(&name, &managed)
+}
+
+#[napi]
+pub fn tool_service_or_addon_allowed(name: String, compose: Option<Vec<String>>, managed: Vec<String>) -> bool {
+    tool_input::service_or_addon_allowed(&name, compose.as_deref(), &managed)
+}
+
+#[napi]
+pub fn tool_summarize_approval(name: String, input_json: Option<String>) -> String {
+    tool_input::summarize_approval(&name, input_json.as_deref())
+}
+
+#[napi]
+pub fn tool_mismatch_addable(max: u32, seen_requests: Vec<String>, seen_checks: Vec<String>, seen_followed: Vec<String>, request: String, check: String, followed: String) -> bool {
+    tool_input::mismatch_addable(max as usize, &seen_requests, &seen_checks, &seen_followed, &request, &check, &followed)
+}
+
+#[napi]
+pub fn tool_http_path_ok(path: String) -> bool {
+    tool_input::http_path_ok(&path)
+}
+
+#[napi]
+pub fn tool_same_origin(request_origin: String, service_origin: String) -> bool {
+    tool_input::same_origin(&request_origin, &service_origin)
+}
+
+use bstudio_guard::gate_helpers as gh;
+
+/// 오류 표지 글자. 없으면 null
+#[napi]
+pub fn gate_next_error_marker(text: String, expect_status: f64) -> Option<String> {
+    gh::next_error_marker(&text, expect_status).map(str::to_owned)
+}
+
+/// `{service, mode, expectStatus, viewport?}` JSON → pageChecks 모양 JSON
+#[napi]
+pub fn gate_auto_page_check(config_json: String, route_path: String) -> Result<String> {
+    Ok(out(&gh::auto_page_check(&input(&config_json, "자동 페이지 설정")?, &route_path)))
+}
+
+#[napi]
+pub fn gate_contains_api_text(text: String, value: String) -> bool {
+    gh::contains_api_text(&text, &value)
+}
+
+#[napi]
+pub fn gate_contains_api_number(text: String, value: f64) -> bool {
+    gh::contains_api_number(&text, value)
+}
+
+#[napi]
+pub fn gate_missing_api_value(service: String, json_path: String, value_text: Option<String>, value_number: Option<f64>, page_path: String) -> String {
+    gh::missing_api_value(&service, &json_path, value_text.as_deref(), value_number, &page_path)
+}
+
+/// finding: `{text, visible, problem?}`. 알 수 없는 문제 종류는 던진다
+#[napi]
+pub fn gate_viewport_problem_text(finding_json: String, width: f64, height: f64) -> Result<String> {
+    fail(gh::viewport_problem_text_for(&input(&finding_json, "화면 글자 결과")?, width, height))
+}
+
+/// `{expected:[{key,text}], report: null | {width,height,findings:[{key,text,visible,problem?}]}}` JSON → 문제 문구 목록
+#[napi]
+pub fn gate_viewport_problems(input_json: String) -> Result<Vec<String>> {
+    fail(gh::viewport_problems(&input(&input_json, "첫 화면 글자 판정 입력")?))
+}
+
+#[napi]
+pub fn gate_missing_all_text(values: Vec<String>) -> String {
+    gh::missing_all_text(&values)
+}
+
+#[napi]
+pub fn gate_missing_any_text(values: Vec<String>) -> String {
+    gh::missing_any_text(&values)
+}
+
+#[napi]
+pub fn gate_dynamic_probe_data_hint(probed_id: String) -> String {
+    gh::dynamic_probe_data_hint(&probed_id)
+}
+
+/// 동적 세그먼트인 `split('/')` 조각의 번호
+#[napi]
+pub fn gate_dynamic_segments(page_file: String) -> Vec<f64> {
+    gh::dynamic_segments(&page_file).into_iter().map(|i| i as f64).collect()
+}
+
+/// sampleParams는 `[[키, 값], …]`
+#[napi]
+pub fn gate_accepted_notes(spec_file: String, in_run_keys: Vec<String>, sample_params: Vec<Vec<String>>, in_run_sample_id_from: bool, from_service: Option<String>, from_path: Option<String>) -> Vec<String> {
+    let params = sample_pairs(sample_params);
+    let from = from_service.as_deref().zip(from_path.as_deref());
+    gh::accepted_notes(&spec_file, &in_run_keys, &params, in_run_sample_id_from, from)
+}
+
+#[napi]
+pub fn gate_uses_in_run_value(page_file: String, in_run_keys: Vec<String>, in_run_sample_id_from: bool, used_fallback_count: f64) -> bool {
+    gh::uses_in_run_value(&page_file, &in_run_keys, in_run_sample_id_from, used_fallback_count as usize)
+}
+
+#[napi]
+pub fn gate_sampled_values(page_file: String, sample_params: Vec<Vec<String>>) -> Option<String> {
+    gh::sampled_values(&page_file, &sample_pairs(sample_params))
+}
+
+fn sample_pairs(entries: Vec<Vec<String>>) -> Vec<(String, String)> {
+    entries.into_iter().filter_map(|mut entry| if entry.len() == 2 { let v = entry.pop()?; Some((entry.pop()?, v)) } else { None }).collect()
+}
+
+#[napi]
+pub fn gate_strip_html(html: String) -> String {
+    gh::strip_html(&html)
+}
+
+/// `[{stage, name, attempts, detail?}]` JSON
+#[napi]
+pub fn gate_format_failed_checks(checks_json: String) -> Result<String> {
+    fail(gh::format_failed_checks(&input(&checks_json, "실패한 검사 목록")?))
+}
+
+#[napi]
+pub fn gate_compare_detail(ratio: f64, max: f64, width: f64, height: f64) -> String {
+    gh::compare_detail(ratio, max, width, height)
+}
+
+/// `{successCount?: {exactly?, atMost?}, allStatusIn?: number[]}` JSON
+#[napi]
+pub fn gate_describe_concurrency_expect(expect_json: String) -> Result<String> {
+    fail(gh::describe_concurrency_expect(&input(&expect_json, "동시 요청 기대")?))
+}
+
 // ── agent: 작업 공간의 막는 검사(3단계 3w). TS 껍데기: packages/agent/src/workspace.ts
 use bstudio_guard::workspace_guard as wg;
 
