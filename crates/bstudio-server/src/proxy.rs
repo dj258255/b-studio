@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::header::{HeaderMap, HeaderName, CONTENT_TYPE};
+use axum::http::header::{HeaderMap, CONTENT_TYPE};
 use axum::http::uri::{Parts, PathAndQuery};
 use axum::http::{HeaderValue, StatusCode, Uri, Version};
 use axum::response::Response;
@@ -28,7 +28,7 @@ use tokio::task::JoinHandle;
 /// 헤더를 다 받기까지의 한도. Node(`server.headersTimeout`)와 같다. 요청 시간 한도는 없다(SSE)
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 요청·응답 양쪽에서 빼는 hop-by-hop 헤더(RFC 9110 7.6.1). `Connection`에 이름이 적힌 헤더도 뺀다
+/// 요청·응답 양쪽에서 빼는 hop-by-hop 헤더(RFC 9110 7.6.1의 고정 목록). 메시지 틀(연결·전송 방식)을 앞단과 Node가 각자 정하므로 뺀다
 const HOP_BY_HOP: [&str; 8] = ["connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "proxy-authorization", "proxy-authenticate"];
 
 #[derive(Clone)]
@@ -103,17 +103,10 @@ fn json_string(text: &str) -> String {
     out
 }
 
-/// hop-by-hop을 뺀다: 고정 목록과, `Connection`에 이름이 적힌 헤더
+/// hop-by-hop을 뺀다: 고정 목록만. `Connection`에 이름이 적힌 헤더는 빼지 않는다(RFC 9110 7.6.1과 다르게).
+/// 받는 쪽은 우리 Node이고 Node는 그 이름을 따로 다루지 않으므로, 빼면 직접 붙을 때와 판단이 갈린다.
+/// 손님이 `Connection: origin`을 보내 Origin을 빼면 같은 출처 확인(`isSameOrigin`)이 "Origin 없음"으로 통과한다
 fn strip_hop_by_hop(headers: &mut HeaderMap) {
-    let named: Vec<HeaderName> = headers
-        .get_all("connection")
-        .iter()
-        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
-        .filter_map(|token| HeaderName::from_bytes(token.trim_ascii()).ok())
-        .collect();
-    for name in named {
-        headers.remove(name);
-    }
     for name in HOP_BY_HOP {
         headers.remove(name);
     }

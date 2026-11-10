@@ -54,16 +54,46 @@ async fn 요청을_바꾸지_않고_넘기고_hop_by_hop만_뺀다() {
     assert_eq!(all(&h, "x-forwarded-host"), ["proxy.example"]);
     assert_eq!(all(&h, "x-forwarded-for"), ["1.2.3.4"], "손님이 보낸 값은 그대로, 앞단이 더하지 않는다");
     assert_eq!(all(&h, "x-b-studio-user"), ["alice"]);
-    for gone in ["x-secret-hop", "keep-alive", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "transfer-encoding"] {
+    // Connection에 적힌 이름은 빼지 않는다. 받는 쪽은 우리 Node이고, Node에 직접 붙을 때도 그 헤더를 받았다
+    assert_eq!(all(&h, "x-secret-hop"), ["1"]);
+    for gone in ["keep-alive", "te", "trailer", "upgrade", "proxy-authorization", "proxy-authenticate", "transfer-encoding"] {
         assert!(all(&h, gone).is_empty(), "{gone}은 빠져야 한다: {head}");
     }
     // 앞단이 위에 없던 머리를 만들어 붙이지 않는다
     for (name, _) in &h {
         assert!(
-            ["host", "cookie", "origin", "x-forwarded-host", "x-forwarded-for", "x-b-studio-user", "connection", "content-length"].contains(&name.as_str()),
+            ["host", "cookie", "origin", "x-forwarded-host", "x-forwarded-for", "x-b-studio-user", "x-secret-hop", "connection", "content-length"].contains(&name.as_str()),
             "새로 생긴 머리: {name}"
         );
     }
+}
+
+/// 규칙 2: Connection에 인증이 읽는 헤더 이름을 적어도 빠지지 않는다. 빠지면 Origin이 없는 요청이 같은 출처로 읽히고(isSameOrigin),
+/// Host가 없는 요청이 되어 Node에 직접 붙을 때와 판단이 갈린다
+#[tokio::test]
+async fn connection에_적은_이름으로_인증이_읽는_헤더를_뺄_수_없다() {
+    let dir = short_dir();
+    let sock = dir.path().join("u.sock");
+    let seen = Seen::default();
+    spawn_upstream(&sock, seen.clone(), Reply::Raw(OK_EMPTY.to_vec())).await;
+    let (port, _stop) = spawn_front(sock).await;
+
+    let request = "POST /api/sessions HTTP/1.1\r\n\
+        Host: 127.0.0.1:3000\r\n\
+        Origin: http://evil.example\r\n\
+        Cookie: b_studio_local=tok\r\n\
+        X-Forwarded-Host: proxy.example\r\n\
+        X-B-Studio-Proxy-Secret: s\r\n\
+        Content-Length: 0\r\n\
+        Connection: origin, host, cookie, x-forwarded-host, x-b-studio-proxy-secret\r\n\r\n";
+    raw_request(port, request).await;
+    let head = seen.heads.lock().unwrap()[0].clone();
+    let h = lines(&head);
+    assert_eq!(all(&h, "origin"), ["http://evil.example"], "{head}");
+    assert_eq!(all(&h, "host"), ["127.0.0.1:3000"], "{head}");
+    assert_eq!(all(&h, "cookie"), ["b_studio_local=tok"], "{head}");
+    assert_eq!(all(&h, "x-forwarded-host"), ["proxy.example"], "{head}");
+    assert_eq!(all(&h, "x-b-studio-proxy-secret"), ["s"], "{head}");
 }
 
 /// 규칙 2: 손님이 x-forwarded-*를 안 보냈으면 Node에도 없다(isSameOrigin이 x-forwarded-host를 먼저 본다)
@@ -123,7 +153,8 @@ async fn 응답도_같은_규칙으로_돌려준다() {
     assert_eq!(all(&h, "set-cookie"), ["a=1; Path=/", "b=2; HttpOnly"]);
     assert_eq!(all(&h, "x-b-studio-note"), ["kept"]);
     assert_eq!(all(&h, "content-type"), ["application/json"]);
-    for gone in ["x-hop", "keep-alive", "proxy-authenticate"] {
+    assert_eq!(all(&h, "x-hop"), ["1"], "Node가 보낸 헤더는 Connection에 적혀도 그대로(직접 붙을 때와 같다)");
+    for gone in ["keep-alive", "proxy-authenticate"] {
         assert!(all(&h, gone).is_empty(), "{gone}은 빠져야 한다: {}", response.head);
     }
     assert_eq!(response.body, b"{\"ok\":true}\n");
