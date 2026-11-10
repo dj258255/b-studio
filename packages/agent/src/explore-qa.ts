@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
+import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import type { Browser, Page } from 'playwright-core';
 import { createScreencast, launchBrowser, restrictPageToOrigins, type BrowserFrame, type OriginBlockEvent } from './browser-check';
@@ -1393,6 +1393,8 @@ export function judge(
 ): { status: ExploreQaStatus; reason: string } {
   const input = {
     confirmText: goal.confirmText,
+    // 화면 글자에서 확인 문구를 찾는 부분 문자열 비교용. 짝 없는 서로게이트가 경계에서 모두 U+FFFD가 되어 다른 글자가 같아지지 않도록 단사로 바꿔 보낸다(사유에는 원래 글자를 쓴다)
+    confirmKey: goal.confirmText ? encodeLoneSurrogates(String(goal.confirmText)) : undefined,
     consoleErrors: diagnostics.consoleErrors.length,
     pageErrors: diagnostics.pageErrors.length,
     failedRequests: diagnostics.failedRequests.length,
@@ -1410,7 +1412,7 @@ export function judge(
         }
       : {}),
   };
-  return decodeNative<{ status: ExploreQaStatus; reason: string }>(native.exploreQaJudge(encodeNative(input), pageText));
+  return decodeNative<{ status: ExploreQaStatus; reason: string }>(native.exploreQaJudge(encodeNative(input), encodeLoneSurrogates(pageText)));
 }
 
 // ───────────────────────────── 기록 → pageChecks steps 변환 ─────────────────────────────

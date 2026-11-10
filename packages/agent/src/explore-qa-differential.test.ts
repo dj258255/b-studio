@@ -288,6 +288,23 @@ function countFlip(input: unknown, old: Outcome, next: Outcome): void {
   void rank;
 }
 
+/** 짝 없는 서로게이트·예약 글자(U+E000..U+E01F)가 든 확인 문구·화면 글자의 judge. 이유 글자는 경계에서 U+FFFD가 되어 달라지므로(의도한 차이) 상태만 견준다 */
+const SURROGATE_ALPHABET = ['\ud800', '\udbff', '\udc00', '\udfff', '😀', '\ud83d', '\ude00', '\ue000', '\ue01f', '\ue010', '\ue011', '\ufffd', 'd', '8', '0', 'a'];
+const surrogateFlips = { judged: 0, open: 0, closed: 0 };
+function surrogateJudge(g: Gen): void {
+  const page = g.text(SURROGATE_ALPHABET, g.int(7));
+  const from = g.int(page.length + 1);
+  const confirm = g.chance(0.6) && page.length > 0 ? page.slice(from, from + 1 + g.int(3)) || 'a' : g.text(SURROGATE_ALPHABET, 1 + g.int(3));
+  const diagnostics = diagnosticsOf(g);
+  const review = reviewOf(g);
+  const a = legacy.judge({ confirmText: confirm }, diagnostics, page, review).status;
+  const b = judge({ confirmText: confirm }, diagnostics, page, review).status;
+  surrogateFlips.judged += 1;
+  if (a === b) return;
+  if (rank[b] > rank[a]) surrogateFlips.open += 1;
+  else surrogateFlips.closed += 1;
+}
+
 const WORDS = ['버튼', '목록', 'x', 'Submit', '완료', '완료되었습니다', 'Σ', 'ΑΣ', 'İ', 'ı', 'ß', 'ſ', 'K', 'ǅ', 'Ａ', '😀', 'é', 'é', '', ' '];
 const KEYWORDS = ['점검', '검사', '살펴', '찾아', '문제', '잘리', '잘려', '겹치', '겹쳐', '넘치', '어색', '읽기 어려', '깨지', '이상한', '리뷰', '검토', 'inspect', 'review', 'audit', 'layout'];
 const WS = ['', '', ' ', '\n', '\t', '\u00a0', '\ufeff', '\u0085', '\u2028', '\u3000', '\u180e', '\u200b'];
@@ -374,6 +391,7 @@ function runSeed(seed: number): void {
     countFlip({ goal, diagnostics, pageText, review }, a, b);
     compare('judge', { goal, diagnostics, pageText, review }, () => legacy.judge(goal, diagnostics, pageText, review), () => judge(goal, diagnostics, pageText, review), (o) => (o.threw ? '던짐' : (o.value as { status: string }).status));
 
+    surrogateJudge(g);
     compare('diagnosticsCount', diagnostics, () => legacy.diagnosticsCount(diagnostics), () => diagnosticsCount(diagnostics), (o) => (o.threw ? '던짐' : String((o.value as number) > 0)));
 
     const actions = g.list(0, 6, () => actionOf(g, 0)).map((action, index) => ({ ...action, index: index + 1 }));
@@ -427,6 +445,10 @@ describe('탐색 QA 차등 시험(옛 TS와 Rust 껍데기)', () => {
     expect(flips.inconclusiveToPass).toBe(0);
     expect(flips.closed).toBe(0);
     expect(flips.judged).toBeGreaterThan(0);
+    if (REPORT) appendFileSync(REPORT, `서로게이트 judge: ${JSON.stringify(surrogateFlips)}\n`);
+    // 짝 없는 서로게이트: 열린 쪽(옛 fail·inconclusive가 더 통과 쪽으로) 뒤집힘은 0, 닫는 쪽은 B의 짝 없는 서로게이트가 A의 짝 일부일 때뿐(서로게이트 경계 시험이 원인을 따로 단언한다)
+    expect(surrogateFlips.open).toBe(0);
+    expect(surrogateFlips.judged).toBeGreaterThan(0);
   });
 
   it('결과 분포가 한쪽으로 쏠리지 않았고 입력이 비지 않았다', () => {

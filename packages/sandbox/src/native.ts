@@ -396,7 +396,7 @@ interface NativeGuard {
   buildContractSystem(projectJson: string, maxContracts: number): string;
   buildContractUser(request: string, lanesJson: string): string;
   // ── agent: 탐색 QA의 판정·변환·프롬프트(3단계 3p). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다.
-  // judge 입력: { confirmText?, consoleErrors, pageErrors, failedRequests, accessibilityViolations(건수), horizontalOverflowPx, review?: { findings: [{ severity, summary }], declared?, stoppedBy, expectedRejections?, unmetRejections? } }.
+  // judge 입력: { confirmText?, confirmKey?(확인 문구를 encodeLoneSurrogates한 글자), consoleErrors, pageErrors, failedRequests, accessibilityViolations(건수), horizontalOverflowPx, review?: { findings: [{ severity, summary }], declared?, stoppedBy, expectedRejections?, unmetRejections? } }.
   // toPageCheckSteps 입력: [{ index, tool, ok, stableSelector?, text?, key?, forText? }], 결과는 decodeNative로 읽는다
   exploreQaDiagnosticsCount(consoleErrors: number, pageErrors: number, failedRequests: number, accessibilityViolations: number, horizontalOverflowPx: number): number;
   exploreQaMatchScore(name: string, text: string, role: string, testId: string | undefined, tag: string, needle: string): number;
@@ -408,6 +408,7 @@ interface NativeGuard {
   exploreQaBuildSystemPrompt(goalText: string | undefined): string;
   exploreQaBuildUserPrompt(goalJson: string): string;
   exploreQaBuildWrapUpPrompt(reason: string): string;
+  // pageText도 encodeLoneSurrogates한 글자를 보낸다(짝 없는 서로게이트가 경계에서 U+FFFD가 되어 다른 글자가 같아지는 것을 막는다)
   exploreQaJudge(inputJson: string, pageText: string): string;
   exploreQaToPageCheckSteps(actionsJson: string): string;
 }
@@ -473,6 +474,25 @@ export function encodeNative(value: unknown): string {
       throw new Error('NUL로 시작하는 키는 Rust 판정으로 보낼 수 없습니다');
     }
     return item;
+  });
+}
+
+const LONE_OR_RESERVED = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]|[\ue000-\ue01f]/g;
+const nibble = (n: number) => String.fromCharCode(0xe000 + n);
+
+/**
+ * Rust로 보내 부분 문자열을 견줄 글자를 단사로 바꾼다. 짝 없는 서로게이트는 napi·JSON 경계에서 모두 U+FFFD가 되어 서로 다른 두 글자가 같아지므로
+ * (확인 문구가 화면 글자에서 "찾았다"로 뒤집힌다), 견줄 두 글자 모두에 이 함수를 적용해서 보낸다.
+ * 예약 집합 R = U+E000..U+E01F. 짝 없는 서로게이트 단위 u는 U+E010 + 니블 셋(u>>8·u>>4·u 각 하위 4비트를 U+E000+n으로) 4글자,
+ * 글자 그대로의 R 안 글자 r은 U+E011 + 니블 둘(r-0xE000의 상·하위 4비트) 3글자로 쓴다. R의 글자는 이스케이프 안에서만, U+E010·U+E011은 이스케이프 시작에서만
+ * 나오므로 인코딩한 두 글자의 부분 문자열 관계는 원래 코드 단위의 부분 문자열 관계와 같다.
+ * 예외(닫는 쪽): B에서는 짝 없는 서로게이트인데 A에서는 짝의 일부이면(`'😀'.includes('\ud83d')`) 인코딩한 쪽은 "없다"가 된다
+ */
+export function encodeLoneSurrogates(text: string): string {
+  return text.replace(LONE_OR_RESERVED, (unit) => {
+    const u = unit.charCodeAt(0);
+    if (u >= 0xe000 && u <= 0xe01f) return `\ue011${nibble((u - 0xe000) >> 4)}${nibble((u - 0xe000) & 0xf)}`;
+    return `\ue010${nibble((u >> 8) & 0xf)}${nibble((u >> 4) & 0xf)}${nibble(u & 0xf)}`;
   });
 }
 

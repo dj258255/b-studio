@@ -187,7 +187,7 @@ fn count_of(value: Option<&JsValue>) -> f64 {
 }
 
 /// 플랫폼의 최종 판정. `(status, reason)`.
-/// 입력: `{ confirmText?, consoleErrors, pageErrors, failedRequests, accessibilityViolations (건수), horizontalOverflowPx,
+/// 입력: `{ confirmText?, confirmKey?(비교용), consoleErrors, pageErrors, failedRequests, accessibilityViolations (건수), horizontalOverflowPx,
 /// review?: { findings: [{ severity, summary }], declared?: { success, summary }, stoppedBy, expectedRejections?, unmetRejections? } }`.
 /// review.findings가 배열이 아니면 던진다(옛 구현도 `.filter`에서 던진다)
 pub fn judge(input: &JsValue, page_text: &str) -> Result<(String, String), String> {
@@ -214,7 +214,12 @@ pub fn judge(input: &JsValue, page_text: &str) -> Result<(String, String), Strin
     }
     let confirm = input.prop("confirmText");
     let confirm_text = if truthy(confirm) { Some(show(confirm)) } else { None };
-    let confirm_missing = confirm_text.as_deref().is_some_and(|text| !page_text.contains(text));
+    // 비교용 글자는 부르는 쪽이 짝 없는 서로게이트를 단사로 바꿔 보낸 `confirmKey`(page_text도 같은 규칙으로 바뀌어 온다). 없으면 보여 주는 글자 그대로 견준다
+    let confirm_key = match input.prop("confirmKey") {
+        Some(JsValue::Str(key)) => Some(key.clone()),
+        _ => confirm_text.clone(),
+    };
+    let confirm_missing = confirm_key.as_deref().is_some_and(|key| !page_text.contains(key));
     if confirm_missing {
         problems.push(format!("확인 문구 '{}'를 화면에서 찾지 못했습니다", confirm_text.as_deref().unwrap_or_default()));
     }
