@@ -52,7 +52,7 @@ function run(fn: string, args: unknown[]): unknown {
       return checkToolPolicy(args[0] as string, args[1], args[0] === 'write_file' ? { protectedPaths: ['x'], writablePaths: ['y'] } : undefined, undefined);
     case 'policyWin': {
       const input = args[1] as { path: string };
-      const out = JSON.parse(native.checkToolPolicy(args[0] as string, input.path, [], JSON.stringify(args[2]), undefined, [...DEFAULT_DENIED_COMMANDS], true)) as { decision: string; reason?: string };
+      const out = JSON.parse(native.checkToolPolicy(args[0] as string, input.path, input.path, [], JSON.stringify(args[2]), undefined, [...DEFAULT_DENIED_COMMANDS], true)) as { decision: string; reason?: string };
       return out.reason === undefined ? { tool: args[0], decision: out.decision } : { tool: args[0], decision: out.decision, reason: out.reason };
     }
     default:
@@ -120,8 +120,8 @@ describe('의도한 차이(옛 TS에 돌리면 실패한다, 모두 더 막는 �
   });
 
   it('정책의 모양이 어긋나면 Rust가 던진다(부르는 쪽이 도구 실행을 막는다)', () => {
-    expect(() => native.checkToolPolicy('write_file', 'a', [], '{"protectedPaths":"x"}', undefined, [], false)).toThrow();
-    expect(() => native.checkToolPolicy('write_file', 'a', [], '[1]', undefined, [], false)).toThrow();
-    expect(() => native.checkToolPolicy('write_file', 'a', [], 'not json', undefined, [], false)).toThrow();
+    expect(() => native.checkToolPolicy('write_file', 'a', 'a', [], '{"protectedPaths":"x"}', undefined, [], false)).toThrow();
+    expect(() => native.checkToolPolicy('write_file', 'a', 'a', [], '[1]', undefined, [], false)).toThrow();
+    expect(() => native.checkToolPolicy('write_file', 'a', 'a', [], 'not json', undefined, [], false)).toThrow();
   });
 });

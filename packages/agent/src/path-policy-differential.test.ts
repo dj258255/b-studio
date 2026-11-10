@@ -203,7 +203,7 @@ function runSeed(seed: number): void {
       { tool, file: fileArg, policy },
       () => legacy.checkToolPolicy(tool, input, policy, approval, '\\'),
       () => {
-        const out = JSON.parse(native.checkToolPolicy(tool, fileArg, cmdArg, policy ? JSON.stringify(policy) : 'null', typeof approval === 'string' ? approval : undefined, [...DEFAULT_DENIED_COMMANDS], true)) as {
+        const out = JSON.parse(native.checkToolPolicy(tool, fileArg, fileArg, cmdArg, policy ? JSON.stringify(policy) : 'null', typeof approval === 'string' ? approval : undefined, [...DEFAULT_DENIED_COMMANDS], true)) as {
           decision: 'allow' | 'deny';
           reason?: string;
         };
