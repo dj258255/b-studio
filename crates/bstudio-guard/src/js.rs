@@ -403,6 +403,75 @@ pub fn json_quote(s: &str) -> String {
     out
 }
 
+// ── 짝 없는 서로게이트의 단사 인코딩(`@b-studio/sandbox`의 `encodeLoneSurrogates`)을 읽고 쓰는 도우미 ──
+// 짝 없는 서로게이트 단위 u는 U+E010 + 니블 셋(u>>8·u>>4·u 각 하위 4비트를 U+E000+n으로), 글자 그대로의 예약 글자(U+E000..U+E01F) r은
+// U+E011 + 니블 둘(r-0xE000의 상·하위 4비트)로 쓴다.
+
+fn nibble_char(n: u32) -> char {
+    char::from_u32(0xE000 + n).unwrap_or('\u{FFFD}')
+}
+
+fn nibble_value(c: char) -> Option<u32> {
+    let u = c as u32;
+    (0xE000..=0xE00F).contains(&u).then(|| u - 0xE000)
+}
+
+/// 짝 없는 서로게이트 단위(0xD800..=0xDFFF)의 인코딩
+pub fn encode_lone_unit(unit: u32) -> String {
+    [char::from_u32(0xE010).unwrap_or('\u{FFFD}'), nibble_char((unit >> 8) & 0xF), nibble_char((unit >> 4) & 0xF), nibble_char(unit & 0xF)].iter().collect()
+}
+
+/// 예약 글자(U+E000..=U+E01F) 하나의 인코딩. 예약 글자가 아니면 그대로
+pub fn encode_reserved_char(c: char) -> String {
+    let u = c as u32;
+    if (0xE000..=0xE01F).contains(&u) {
+        let r = u - 0xE000;
+        [char::from_u32(0xE011).unwrap_or('\u{FFFD}'), nibble_char(r >> 4), nibble_char(r & 0xF)].iter().collect()
+    } else {
+        c.to_string()
+    }
+}
+
+/// `chars[at..]`가 인코딩 이스케이프로 시작하면 (풀어 쓴 값, 먹은 글자 수). 짝 없는 서로게이트 단위는 `Err(단위)`, 예약 글자는 `Ok(글자)`
+pub fn read_lone_escape(chars: &[char], at: usize) -> Option<(Result<char, u32>, usize)> {
+    match chars.get(at).copied()? as u32 {
+        0xE010 => {
+            let (a, b, c) = (nibble_value(*chars.get(at + 1)?)?, nibble_value(*chars.get(at + 2)?)?, nibble_value(*chars.get(at + 3)?)?);
+            Some((Err(0xD000 | (a << 8) | (b << 4) | c), 4))
+        }
+        0xE011 => {
+            let (a, b) = (nibble_value(*chars.get(at + 1)?)?, nibble_value(*chars.get(at + 2)?)?);
+            Some((Ok(char::from_u32(0xE000 + ((a << 4) | b))?), 3))
+        }
+        _ => None,
+    }
+}
+
+/// 인코딩한 글자를 `toWellFormed`한 원래 글자로 되돌린다: 짝 없는 서로게이트는 U+FFFD, 예약 글자는 그대로의 글자.
+/// (napi 경계에서 원래 글자가 받았을 꼴이다. 거부 목록 판정이 파일 시스템이 실제로 쓰는 이름으로 견줄 때 쓴다)
+pub fn well_formed_from_encoded(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match read_lone_escape(&chars, i) {
+            Some((Ok(c), used)) => {
+                out.push(c);
+                i += used;
+            }
+            Some((Err(_), used)) => {
+                out.push('\u{FFFD}');
+                i += used;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
 /// 숫자의 `SameValueZero`(`Set.has`·`Map` 키): NaN끼리 같고 +0과 -0도 같다
 pub fn same_value_zero(a: f64, b: f64) -> bool {
     a == b || (a.is_nan() && b.is_nan())
