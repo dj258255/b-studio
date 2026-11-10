@@ -46,6 +46,7 @@ pub mod relay;
 pub mod repository;
 pub mod requirement_issues;
 pub mod requirements;
+pub mod requirements_trace;
 pub mod review_input;
 pub mod secrets;
 pub mod services;

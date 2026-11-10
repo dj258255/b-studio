@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 요구사항 추적표의 판정(`packages/agent/src/requirements.ts`의 `buildTraceabilityMatrix`·`buildScenarioEvidence`·`findUnverifiedScenarioIds`와 시험 파일 훑기 `scanTestFilesFor*`)을 Rust(`crates/bstudio-guard/src/requirements_trace.rs`)로 옮겼습니다(ADR-191 3단계 3z, #1118). 추적표는 검증 상태를 올리는 쪽이라 옛 구현이 열린 쪽으로 틀린 곳을 닫았습니다: JUnit 메서드 이름 가운데의 `r2`(`calculatesOrder2Total`, `testServer3`)가 R2·R3의 시험으로 읽히던 것과, 빈 id가 모든 메서드를 다루던 것(트러블슈팅 175).
 - 에이전트 작업 공간(`packages/agent/src/workspace.ts`)의 막는 검사(숨긴 이름·비밀 파일 판정 `isDenied`·`isDeniedFileName`·`isSecretFile`, 프로젝트 안쪽 판정 `isInside`의 상대 경로 읽기, 들어온 경로의 절대 경로·NUL·POSIX 역슬래시 검사)를 Rust로 옮겼습니다(ADR-191 3단계 3w, #1109). 파일 시스템 접근과 경로 계산은 TS에 남습니다. `.env.` 뒤에 줄 끝 글자(`\n`·`\r`·U+2028·U+2029)가 오는 이름을 옛 정규식이 통과시켰으나 이제 막고, 코드 화면·변경 알림의 숨김 목록(`file-watch.ts`)도 작업 공간과 같은 규칙(대소문자·유니코드 정규화·보이지 않는 문자·끝의 점과 공백)으로 이름을 비교합니다(트러블슈팅 172)
 - 게이트의 순수 보조 판정(`packages/agent/src/gate.ts`의 오류 표지 찾기, 자동 페이지 확인, API 값 포함 판정, 첫 화면 글자 문제, 동적 경로 보조, HTML 글자 꺼내기, 실패 목록·비교·동시 기대 문구)을 Rust(`crates/bstudio-guard`)로 옮겼습니다(#1096, ADR-191 3단계 3r). 찾은 결과가 통과로 이어지는 비교는 짝 없는 서로게이트를 단사로 바꿔 견주고, 판정 결과는 옛 TS와 같습니다(차등 시험 함수마다 50만 번, 통과 쪽 뒤집힘 0).
 - 검증 통과 판정(`verify.ts`의 `ok` 계산·`platformFailureOf`·`mentionsDeletedFile`·`formatVerificationReport`)과 도구 입력 검사·서비스 허용 목록·승인 요약·어긋남 기록·http 경로·origin 확인(`tools.ts`)의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3u, #1100). 계약 추출 실패의 이유가 빈 글자일 때 검증을 통과시키던 틈을 닫았습니다(트러블슈팅 171). 도구 실행과 샌드박스 호출은 TS에 그대로입니다.

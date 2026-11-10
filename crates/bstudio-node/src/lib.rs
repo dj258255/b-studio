@@ -3170,3 +3170,88 @@ pub fn workspace_is_inside(relative: String, backslash_sep: bool) -> bool {
 pub fn workspace_input_problem(file: String, backslash_sep: bool, external: bool) -> u32 {
     u32::from(wg::input_problem(&file, backslash_sep, external))
 }
+
+// ── agent: 요구사항 추적표와 시험 파일 훑기(3단계 3z). TS 껍데기: packages/agent/src/requirements.ts
+use bstudio_guard::requirements_trace as rt;
+
+/// 시험 파일 하나에서 뽑은 것(JSON). 시험 파일이 아니면 null. 이름·경로는 TS가 `encodeLoneSurrogates`해서 보낸다
+#[napi]
+pub fn req_trace_file_index(path: String, content: String) -> Result<Option<String>> {
+    Ok(fail(rt::file_index(&path, &content))?.map(|index| out(&index.to_value())))
+}
+
+fn indexes_input(indexes_json: &str) -> Result<Vec<rt::IndexedFile>> {
+    // `[index | null]`을 `[{ path, index }]`로 읽는다(경로는 결과에서 TS가 자리로 찾으므로 여기서는 쓰지 않는다)
+    let parsed = input(indexes_json, "시험 파일 색인")?;
+    let items = match &parsed {
+        JsValue::Arr(items) => items,
+        _ => return Err(Error::from_reason("시험 파일 색인은 배열이어야 합니다")),
+    };
+    items
+        .iter()
+        .map(|item| match item {
+            JsValue::Null => Ok(rt::IndexedFile { path: String::new(), index: None }),
+            other => fail(rt::FileIndex::from_value(other)).map(|index| rt::IndexedFile { path: String::new(), index: Some(index) }),
+        })
+        .collect()
+}
+
+/// `[[파일 자리, 이름]]`
+#[napi]
+pub fn req_trace_scan_requirement(indexes_json: String, id: String) -> Result<String> {
+    Ok(out(&rt::found_value(&rt::scan_for_requirement_id(&indexes_input(&indexes_json)?, &id))))
+}
+
+#[napi]
+pub fn req_trace_scan_scenario(indexes_json: String, scenario_id: String) -> Result<String> {
+    Ok(out(&rt::found_value(&rt::scan_for_scenario_id(&indexes_input(&indexes_json)?, &scenario_id))))
+}
+
+#[napi]
+pub fn req_trace_scan_orphans(indexes_json: String) -> Result<String> {
+    Ok(out(&rt::found_value(&rt::scan_for_orphans(&indexes_input(&indexes_json)?))))
+}
+
+fn trace_array<'a>(params: &'a JsValue, key: &str) -> Result<&'a [JsValue]> {
+    match params.prop(key) {
+        Some(JsValue::Arr(items)) => Ok(items),
+        _ => Err(Error::from_reason(format!("{key}은(는) 배열이어야 합니다"))),
+    }
+}
+
+fn trace_run_rows(params: &JsValue) -> Result<&[JsValue]> {
+    match params.prop("testRunRows") {
+        None | Some(JsValue::Null) => Ok(&[]),
+        Some(JsValue::Arr(items)) => Ok(items),
+        _ => Err(Error::from_reason("testRunRows는 배열이어야 합니다")),
+    }
+}
+
+/// `{ scenarioId, checkpoints, testFiles: [{ path, index }], gateChecks, testRunRows, parentEvidence? }`
+#[napi]
+pub fn req_trace_scenario_evidence(params_json: String) -> Result<String> {
+    let params = input(&params_json, "시나리오 증거 입력")?;
+    let files = fail(rt::indexed_files(params.prop("testFiles")))?;
+    let scenario_id = match params.prop("scenarioId") {
+        Some(JsValue::Str(id)) => id.as_str(),
+        _ => return Err(Error::from_reason("scenarioId는 문자열이어야 합니다")),
+    };
+    let evidence = fail(rt::build_scenario_evidence(scenario_id, trace_array(&params, "checkpoints")?, &files, trace_array(&params, "gateChecks")?, trace_run_rows(&params)?, params.prop("parentEvidence")))?;
+    Ok(out(&evidence))
+}
+
+/// `{ requirement, checkpoints, testFiles: [{ path, index }], gateChecks, testRunRows, parentEvidence }` → 시나리오 id 목록
+#[napi]
+pub fn req_trace_unverified_scenario_ids(params_json: String) -> Result<String> {
+    let params = input(&params_json, "시나리오 확인 입력")?;
+    let files = fail(rt::indexed_files(params.prop("testFiles")))?;
+    let requirement = params.prop("requirement").ok_or_else(|| Error::from_reason("requirement가 없습니다"))?;
+    let parent = params.prop("parentEvidence").ok_or_else(|| Error::from_reason("parentEvidence가 없습니다"))?;
+    let ids = fail(rt::find_unverified_scenario_ids(requirement, trace_array(&params, "checkpoints")?, &files, trace_array(&params, "gateChecks")?, trace_run_rows(&params)?, parent))?;
+    Ok(out(&JsValue::Arr(ids)))
+}
+
+#[napi]
+pub fn req_trace_matrix(input_json: String) -> Result<String> {
+    Ok(out(&fail(rt::build_traceability_matrix(&input(&input_json, "추적표 입력")?))?))
+}
