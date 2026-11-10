@@ -213,10 +213,14 @@ fn tokens_follow(rest: &str, tokens: &[&str]) -> bool {
 }
 
 /// 도구 호출 전 판정. `file`은 입력의 `path`(문자열이 아니면 빈 글자), `command`는 입력의 `command`(문자열 배열이 아니면 빈 배열),
-/// `default_denied`는 TS가 정한 기본 금지 명령 목록(두 곳에서 따로 정하지 않는다)
+/// `default_denied`는 TS가 정한 기본 금지 명령 목록(두 곳에서 따로 정하지 않는다).
+/// `scope_file`은 쓰기 범위(허용 목록)와 견줄 파일이다. 부르는 쪽이 `file`과 `writable_paths`를 같은 단사 인코딩으로 바꿔 넘긴다(짝 없는 서로게이트가
+/// U+FFFD로 합쳐져 범위 밖이 범위 안이 되지 않게, 트러블슈팅 166). 보호 경로(거부 목록)와 프로젝트 밖 판정은 `file` 그대로(경계에서 U+FFFD,
+/// 파일 시스템이 실제로 쓰는 이름)와 견준다
 pub fn check_tool_policy(
     tool: &str,
     file: &str,
+    scope_file: &str,
     command: &[String],
     policy: Option<&Policy>,
     approval_token: Option<&str>,
@@ -239,7 +243,7 @@ pub fn check_tool_policy(
 
     if path_write {
         if let Some(writable) = &policy_ref.writable_paths {
-            if !writable.iter().any(|candidate| is_within_scope(file, candidate, backslash_sep)) {
+            if !writable.iter().any(|candidate| is_within_scope(scope_file, candidate, backslash_sep)) {
                 return deny(format!("path is outside this task's writable scope: {}", writable.join(", ")));
             }
         }
@@ -289,7 +293,7 @@ mod tests {
 
     fn decide(tool: &str, file: &str, command: &[&str], policy: &str) -> Decision {
         let policy: Option<Policy> = serde_json::from_str(policy).unwrap();
-        check_tool_policy(tool, file, &s(command), policy.as_ref(), None, &defaults(), false)
+        check_tool_policy(tool, file, file, &s(command), policy.as_ref(), None, &defaults(), false)
     }
 
     #[test]

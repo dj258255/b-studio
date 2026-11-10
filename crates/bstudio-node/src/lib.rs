@@ -2648,6 +2648,7 @@ pub fn has_approval_token(token: Option<String>) -> bool {
 pub fn check_tool_policy(
     tool: String,
     file: String,
+    scope_file: String,
     command: Vec<String>,
     policy_json: String,
     approval_token: Option<String>,
@@ -2655,7 +2656,7 @@ pub fn check_tool_policy(
     backslash_sep: bool,
 ) -> Result<String> {
     let policy: Option<path_policy::Policy> = serde_json::from_str(&policy_json).map_err(|e| Error::from_reason(format!("실행 정책의 모양이 어긋났습니다: {e}")))?;
-    let decision = path_policy::check_tool_policy(&tool, &file, &command, policy.as_ref(), approval_token.as_deref(), &default_denied, backslash_sep);
+    let decision = path_policy::check_tool_policy(&tool, &file, &scope_file, &command, policy.as_ref(), approval_token.as_deref(), &default_denied, backslash_sep);
     Ok(match decision.reason {
         Some(reason) => format!(r#"{{"decision":"deny","reason":{}}}"#, js::json_quote(&reason)),
         None => r#"{"decision":"allow"}"#.to_owned(),

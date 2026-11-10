@@ -67,16 +67,23 @@ export function checkToolPolicy(
         allowedTools: policy.allowedTools,
         deniedCommands: policy.deniedCommands,
         requireApprovalFor: policy.requireApprovalFor,
-        // 경로 셋(파일·보호 경로·쓰기 범위)은 같은 규칙으로 단사 인코딩해 보낸다. 짝 없는 서로게이트가 경계에서 모두 U+FFFD가 되면 허용 목록인 쓰기 범위가
-        // 다른 폴더를 범위 안으로 읽는다(트러블슈팅 166). 셋을 함께 바꿔야 보호 경로 비교도 옛 구현과 같다
-        protectedPaths: policy.protectedPaths?.map(encodeLoneSurrogates),
+        // 짝 없는 서로게이트(트러블슈팅 166). 쓰기 범위는 허용 목록이라 파일(scopeFile)과 함께 단사 인코딩해 견준다: U+FFFD로 합쳐지면 범위 밖이 범위 안이 된다.
+        // 보호 경로는 거부 목록이라 파일 시스템이 실제로 쓰는 이름(짝 없는 서로게이트 → U+FFFD)으로 견준다: 파일은 napi 경계에서, 규칙은 wellFormed로 같은 꼴이 된다
+        protectedPaths: policy.protectedPaths?.map(wellFormed),
         writablePaths: policy.writablePaths?.map(encodeLoneSurrogates),
       })
     : 'null';
   const decided = JSON.parse(
-    native.checkToolPolicy(tool, encodeLoneSurrogates(fileInput(input)), commandInput(input), policyJson, typeof approvalToken === 'string' ? approvalToken : undefined, [...DEFAULT_DENIED_COMMANDS], BACKSLASH_SEP),
+    native.checkToolPolicy(tool, fileInput(input), encodeLoneSurrogates(fileInput(input)), commandInput(input), policyJson, typeof approvalToken === 'string' ? approvalToken : undefined, [...DEFAULT_DENIED_COMMANDS], BACKSLASH_SEP),
   ) as { decision: 'allow' | 'deny'; reason?: string };
   return decided.reason === undefined ? { tool, decision: decided.decision } : { tool, decision: decided.decision, reason: decided.reason };
+}
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
+
+/** `String.prototype.toWellFormed`(Node 20+, 이 패키지의 lib 설정에는 없다): 짝 없는 서로게이트를 U+FFFD로. napi 경계·파일 시스템과 같은 꼴이다 */
+function wellFormed(text: string): string {
+  return text.replace(LONE_SURROGATE, '\ufffd');
 }
 
 /** 승인 토큰은 호출자가 별도 흐름에서 발급했다는 사실만 전달한다. 값 자체는 감사 이벤트에 남기지 않는다. */
