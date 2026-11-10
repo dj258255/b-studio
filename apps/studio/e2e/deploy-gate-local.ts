@@ -89,7 +89,16 @@ async function main(): Promise<void> {
     sessionId = created.id;
     const events: Array<{ type: string } & Record<string, unknown>> = [];
     sessions.subscribe(sessionId, (event) => events.push(event as never));
-    await waitFor(() => sessions.getSnapshot(sessionId!)?.status === 'ready', 15 * 60_000, '샌드박스가 준비되지 않았습니다');
+    // 준비에 실패한 세션을 15분 동안 기다리지 않는다. 실패 이유를 그대로 남겨야 CI에서 원인을 볼 수 있다
+    await waitFor(
+      () => {
+        const snapshot = sessions.getSnapshot(sessionId!);
+        if (snapshot?.status === 'failed' || snapshot?.status === 'stopped') throw new Error(`샌드박스가 준비되지 않았습니다(${snapshot.status}): ${snapshot.error ?? '이유 없음'}`);
+        return snapshot?.status === 'ready';
+      },
+      15 * 60_000,
+      '샌드박스가 15분 안에 준비되지 않았습니다',
+    );
     log(`세션 ${sessionId} 준비 (${seconds(started)})`);
 
     const deploy = async (sha: string) => {
