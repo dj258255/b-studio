@@ -52,5 +52,7 @@ pub mod stuck_loading;
 pub mod test_discovery;
 pub mod test_results;
 pub mod test_run;
+pub mod tool_input;
 pub mod tool_output;
 pub mod usage;
+pub mod verify_judge;
