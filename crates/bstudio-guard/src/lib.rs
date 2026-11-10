@@ -14,6 +14,7 @@ pub mod contract_diff;
 pub mod coordination;
 pub mod declared_checks;
 pub mod deploy_plan;
+pub mod design_pipeline;
 pub mod doc_lint;
 pub mod docker_format;
 pub mod docs;

@@ -387,6 +387,28 @@ interface NativeGuard {
   docsExtractDocSummary(markdown: string): string;
   docsBuildDocSummary(path: string, markdown: string): string;
   docsRegenerateDocsReadme(existing: string | null | undefined, docsJson: string): string;
+  // ── agent: 설계 파이프라인(3단계 3o). 묶음 목록·결과는 JSON 문자열(decodeNative). 승인 확인은 막는 기록의 순번을 돌려주고(껍데기가 원래 객체를 골라 담는다), 모양이 어긋난 기록은 던진다
+  designPipelineNextDocNumber(existing: string[]): number;
+  designPipelineDocPath(number: number, title: string): string;
+  designPipelineSidecarPath(docPath: string): string;
+  designPipelineIsDocPath(file: string): boolean;
+  designPipelineParseBundlesTable(markdown: string): string;
+  designPipelineBuildRequestPrompt(title: string, requirementIds: string[], detail?: string | null): string;
+  designPipelineBuildDocTemplate(number: number, title: string, requirementIds: string[]): string;
+  designPipelineCheckApproval(requirementIds: string[], docsJson: string): number[];
+  designPipelineReviewIndependence(implementer: string, reviewer: string): string;
+  designPipelineDeriveResult(
+    designStatus: string,
+    checkpointExists: boolean,
+    hasReview: boolean,
+    reviewRan: boolean,
+    reviewPassed: boolean,
+    independence: string,
+    hasVerification: boolean,
+    verificationRan: boolean,
+    verificationOk: boolean,
+    testsRerun: boolean,
+  ): string;
 }
 
 export interface NativeHostPty {

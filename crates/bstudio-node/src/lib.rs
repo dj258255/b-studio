@@ -2414,3 +2414,86 @@ pub fn docs_build_doc_summary(path: String, markdown: String) -> String {
 pub fn docs_regenerate_docs_readme(existing: Option<String>, docs_json: String) -> Result<String> {
     fail(docs::regenerate_docs_readme(existing.as_deref(), &docs_json))
 }
+
+// ── agent: 설계 파이프라인(3단계 3o)
+use bstudio_guard::design_pipeline;
+
+#[napi]
+pub fn design_pipeline_next_doc_number(existing: Vec<String>) -> f64 {
+    design_pipeline::next_design_pipeline_doc_number(&existing)
+}
+
+#[napi]
+pub fn design_pipeline_doc_path(number: f64, title: String) -> String {
+    design_pipeline::design_pipeline_doc_path(number, &title)
+}
+
+#[napi]
+pub fn design_pipeline_sidecar_path(doc_path: String) -> String {
+    design_pipeline::design_pipeline_sidecar_path(&doc_path)
+}
+
+#[napi]
+pub fn design_pipeline_is_doc_path(file: String) -> bool {
+    design_pipeline::is_design_pipeline_doc_path(&file)
+}
+
+/// 묶음 목록 JSON(`encodeNative` 꼴: 유한하지 않은 수는 표시 객체)
+#[napi]
+pub fn design_pipeline_parse_bundles_table(markdown: String) -> String {
+    design_pipeline::parse_design_bundles_table(&markdown)
+}
+
+#[napi]
+pub fn design_pipeline_build_request_prompt(title: String, requirement_ids: Vec<String>, detail: Option<String>) -> String {
+    design_pipeline::build_design_pipeline_request_prompt(&title, &requirement_ids, detail.as_deref())
+}
+
+#[napi]
+pub fn design_pipeline_build_doc_template(number: f64, title: String, requirement_ids: Vec<String>) -> String {
+    design_pipeline::build_design_pipeline_doc_template(number, &title, &requirement_ids)
+}
+
+/// 막는 기록들의 순번 목록. 모양이 어긋난 기록은 던진다(껍데기는 던지면 구현을 시작하지 않는다)
+#[napi]
+pub fn design_pipeline_check_approval(requirement_ids: Vec<String>, docs_json: String) -> Result<Vec<u32>> {
+    let indexes = fail(design_pipeline::check_design_approval(&requirement_ids, &docs_json))?;
+    Ok(indexes.into_iter().map(|i| i as u32).collect())
+}
+
+#[napi]
+pub fn design_pipeline_review_independence(implementer: String, reviewer: String) -> String {
+    design_pipeline::review_independence(&implementer, &reviewer).to_owned()
+}
+
+/// `{designApproved, completed, succeeded, reasons}` JSON
+#[napi]
+#[allow(clippy::too_many_arguments)]
+pub fn design_pipeline_derive_result(
+    design_status: String,
+    checkpoint_exists: bool,
+    has_review: bool,
+    review_ran: bool,
+    review_passed: bool,
+    independence: String,
+    has_verification: bool,
+    verification_ran: bool,
+    verification_ok: bool,
+    tests_rerun: bool,
+) -> String {
+    let review = design_pipeline::ReviewInput { ran: review_ran, passed: review_passed, independence: &independence };
+    let verification = design_pipeline::VerificationInput { ran: verification_ran, ok: verification_ok, tests_rerun };
+    let result = design_pipeline::derive_design_pipeline_result(
+        &design_status,
+        checkpoint_exists,
+        has_review.then_some(&review),
+        has_verification.then_some(&verification),
+    );
+    let value = js_json::object(vec![
+        ("designApproved", Some(JsValue::Bool(result.design_approved))),
+        ("completed", Some(JsValue::Bool(result.completed))),
+        ("succeeded", Some(JsValue::Bool(result.succeeded))),
+        ("reasons", Some(JsValue::Arr(result.reasons.iter().map(JsValue::str).collect()))),
+    ]);
+    js_json::to_native(&value)
+}
