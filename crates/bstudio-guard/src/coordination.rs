@@ -303,6 +303,127 @@ pub fn can_read(topology: &str, reader_lane: &str, reader_group: Option<&str>, n
     false
 }
 
+/// 게시판이 메모를 받을지 판정한다(`Board.validate`). 거부 이유를 돌려주고, 받으면 `None`이다(막는 쪽).
+/// 순서가 곧 우선순위다: 쓰기 금지 → 모델의 실패 메모 → 빈 본문(JS `trim`) → 바이트 상한 → 계약의 refs.
+/// `note_bytes_limit`은 JS 수 그대로(NaN이면 어떤 크기도 넘지 않는다)다. `refs_len`은 `(refs ?? []).length`
+pub fn board_validate(model_writes: bool, by: &str, kind: &str, body: &str, refs_len: usize, note_bytes_limit: f64) -> Option<String> {
+    if !model_writes && by == "model" {
+        return Some("이 전략에서는 게시판에 쓸 수 없습니다".to_owned());
+    }
+    if kind == "failure" && by == "model" {
+        return Some("실패 메모는 검증기만 씁니다".to_owned());
+    }
+    if js::trim(body).is_empty() {
+        return Some("빈 메모는 쓸 수 없습니다".to_owned());
+    }
+    if note_bytes(body) as f64 > note_bytes_limit {
+        return Some(format!("메모가 너무 큽니다(최대 {}바이트)", js::number_to_string(note_bytes_limit)));
+    }
+    if kind == "contract" && refs_len == 0 {
+        return Some("계약 메모는 refs가 하나 이상 필요합니다".to_owned());
+    }
+    None
+}
+
+/// 읽을 수 있는 메모 하나의 정렬·예산 계산에 필요한 값
+#[derive(Clone, Debug)]
+pub struct NoteSortKey {
+    pub priority: f64,
+    pub at: String,
+    pub id: String,
+    pub bytes: f64,
+}
+
+/// `compareNotes`: 우선순위 내림차순 → 최신순(`at` 내림차순) → id 오름차순. JS 비교 함수의 부호(양수면 a가 뒤)를 돌려준다.
+/// 글자 비교는 UTF-16 코드 단위 순서다
+fn compare_notes(a: &NoteSortKey, b: &NoteSortKey) -> f64 {
+    if a.priority != b.priority {
+        return b.priority - a.priority;
+    }
+    if a.at != b.at {
+        return if js::cmp_utf16(&a.at, &b.at).is_lt() { 1.0 } else { -1.0 };
+    }
+    match js::cmp_utf16(&a.id, &b.id) {
+        std::cmp::Ordering::Less => -1.0,
+        std::cmp::Ordering::Greater => 1.0,
+        std::cmp::Ordering::Equal => 0.0,
+    }
+}
+
+/// 읽기 결과 고르기(`Board.read`의 정렬·개수·예산 부분). `visible`은 읽을 수 있는 메모(들어온 순서)이고, 정렬한 뒤 개수 상한과 바이트 예산 안에서
+/// 앞에서부터 고른다. 고른 메모의 `visible` 안 위치(정렬 순서), 잘렸는지, 고른 바이트 합을 돌려준다.
+/// 상한과 예산은 JS 수 그대로다(NaN이면 그 상한은 걸리지 않는다)
+pub fn board_pick_notes(visible: &[NoteSortKey], read_limit: f64, budget: f64) -> (Vec<usize>, bool, f64) {
+    let order: Vec<usize> = (0..visible.len()).collect();
+    let order = js::stable_sort_by(order, &|a, b| compare_notes(&visible[*a], &visible[*b]));
+    let mut truncated = visible.len() as f64 > read_limit;
+    let mut selected = Vec::new();
+    let mut bytes = 0.0_f64;
+    for index in order {
+        if selected.len() as f64 >= read_limit {
+            truncated = true;
+            break;
+        }
+        let size = visible[index].bytes;
+        if bytes + size > budget {
+            truncated = true;
+            break;
+        }
+        selected.push(index);
+        bytes += size;
+    }
+    (selected, truncated, bytes)
+}
+
+/// 게시판 MCP 입력 모양 검사에서 문자열을 기대한 자리
+fn string_field<'a>(args: &'a JsValue, key: &str) -> Result<&'a str, String> {
+    match args.prop(key) {
+        Some(JsValue::Str(text)) => Ok(text),
+        _ => Err(format!("\"{key}\" must be a string")),
+    }
+}
+
+/// 문자열 배열을 기대한 자리
+fn string_array_field<'a>(args: &'a JsValue, key: &str) -> Result<Vec<&'a str>, String> {
+    if let Some(JsValue::Arr(items)) = args.prop(key) {
+        let strings: Vec<&str> = items.iter().filter_map(JsValue::as_str).collect();
+        if strings.len() == items.len() {
+            return Ok(strings);
+        }
+    }
+    Err(format!("\"{key}\" must be an array of strings"))
+}
+
+/// `post_note` 입력을 거부할 이유(막는 쪽). 순서는 옛 코드와 같다: kind(문자열, 그리고 contract·fact만) → body → refs.
+/// failure는 스키마가 막지만 스키마를 거치지 않은 호출도 여기서 한 번 더 막는다
+pub fn mcp_post_input_error(args: &JsValue) -> Option<String> {
+    let kind = match string_field(args, "kind") {
+        Ok(kind) => kind,
+        Err(message) => return Some(message),
+    };
+    if kind != "contract" && kind != "fact" {
+        return Some(format!("Unknown note kind: {kind}"));
+    }
+    if let Err(message) = string_field(args, "body") {
+        return Some(message);
+    }
+    string_array_field(args, "refs").err()
+}
+
+/// `read_notes` 입력을 거부할 이유(막는 쪽): kinds는 문자열 배열이고 각 항목이 contract·failure·fact 중 하나
+pub fn mcp_read_input_error(args: &JsValue) -> Option<String> {
+    match string_array_field(args, "kinds") {
+        Err(message) => Some(message),
+        Ok(kinds) => kinds.into_iter().find(|kind| !matches!(*kind, "contract" | "failure" | "fact")).map(|kind| format!("Unknown note kind: {kind}")),
+    }
+}
+
+/// 읽은 메모를 짧은 텍스트로: `[kind·priority] 작성 레인: 본문 (refs)`
+pub fn format_note(kind: &str, priority: f64, lane: &str, body: &str, refs: &[String]) -> String {
+    let refs = if refs.is_empty() { String::new() } else { format!(" ({})", refs.join(", ")) };
+    format!("[{}·{}] {}: {}{}", kind, js::number_to_string(priority), lane, body, refs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +445,15 @@ mod tests {
         // 서로게이트 쌍이 경계에 걸리면 U+FFFD(Node 경계 규칙)
         let pair = format!("{}😀", "x".repeat(199));
         assert_eq!(normalize_message(&pair), format!("{}\u{FFFD}", "x".repeat(199)));
+    }
+
+    #[test]
+    fn 정렬의_글자_비교는_utf16_순서다() {
+        // UTF-16에서 😀(D83D)는 U+FF5E보다 앞이고 UTF-8 바이트 순서로는 뒤다
+        let key = |id: &str| NoteSortKey { priority: 1.0, at: "t".to_owned(), id: id.to_owned(), bytes: 1.0 };
+        let visible = vec![key("\u{FF5E}"), key("😀")];
+        let (selected, _, _) = board_pick_notes(&visible, 10.0, 100.0);
+        assert_eq!(selected, vec![1, 0]);
     }
 
     #[test]
