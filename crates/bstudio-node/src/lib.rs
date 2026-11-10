@@ -2747,6 +2747,142 @@ pub fn check_tool_policy(
     })
 }
 
+// ── 체크포인트의 git 출력 판정(ADR-191 3단계 3s). 형 변환만 한다. 문자열 목록·JSON 문자열로 주고받는다.
+// TS 껍데기: packages/agent/src/checkpoints.ts
+
+use bstudio_guard::checkpoint_git as cg;
+
+#[napi]
+pub fn checkpoint_split_nul(output: String) -> Vec<String> {
+    cg::split_nul(&output)
+}
+
+/// 형식을 읽지 못하면 null(부르는 쪽이 던진다)
+#[napi]
+pub fn checkpoint_dangerous_local_config(output: String, separate_git_dir: bool) -> Option<Vec<String>> {
+    cg::dangerous_local_config(&output, separate_git_dir)
+}
+
+#[napi]
+pub fn checkpoint_info_attributes(text: String) -> Vec<String> {
+    cg::info_attributes(&text)
+}
+
+/// 기대 쪽 글자(`expectedKeys`·`expectedValues`)는 TS가 `encodeLoneSurrogates`한 것. 결과의 경로도 그 인코딩이다
+#[napi]
+pub fn checkpoint_staged_mismatch(ls_files: String, staged_names: String, subdir: String, expected_keys: Vec<String>, expected_values: Vec<String>) -> Vec<String> {
+    cg::staged_mismatch(&ls_files, &staged_names, &subdir, &expected_keys, &expected_values)
+}
+
+#[napi]
+pub fn checkpoint_pending_files(output: String, subdir: String) -> Vec<String> {
+    cg::pending_files(&output, &subdir)
+}
+
+/// [경로, 종류] 쌍
+#[napi]
+pub fn checkpoint_pending_changes(output: String, subdir: String) -> Vec<Vec<String>> {
+    cg::pending_changes(&output, &subdir).into_iter().map(|(file, change)| vec![file, change.to_owned()]).collect()
+}
+
+/// [추가, 삭제]
+#[napi]
+pub fn checkpoint_commit_stat(output: String) -> Vec<f64> {
+    let (insertions, deletions) = cg::commit_stat(&output);
+    vec![insertions, deletions]
+}
+
+/// [sha, shortSha, subject, author] 목록
+#[napi]
+pub fn checkpoint_remote_commits(output: String) -> Vec<Vec<String>> {
+    cg::remote_commits(&output).into_iter().map(Vec::from).collect()
+}
+
+/// `ourEmail`은 TS가 `encodeLoneSurrogates`한 글자
+#[napi]
+pub fn checkpoint_author_is_ours(git_email: String, our_email: String) -> bool {
+    cg::author_is_ours(&git_email, &our_email)
+}
+
+/// `[{sha, shortSha, subject, body, ours, trailers, verifyTrailers, incompleteTrailers}]` JSON
+#[napi]
+pub fn checkpoint_session_records(output: String, our_email: String) -> String {
+    out(&cg::session_records(&output, &our_email))
+}
+
+/// `{sha, shortSha, subject, createdAt, ours, trailers, verifyTrailers, incompleteTrailers}` JSON
+#[napi]
+pub fn checkpoint_show_record(output: String, our_email: String) -> String {
+    out(&cg::show_record(&output, &our_email))
+}
+
+#[napi]
+pub fn checkpoint_commit_message(subject: String, body: Option<String>, trailers: Vec<String>) -> String {
+    cg::commit_message(&subject, body.as_deref(), &trailers)
+}
+
+#[napi]
+pub fn checkpoint_strip_space(text: String) -> String {
+    cg::strip_space(&text)
+}
+
+#[napi]
+pub fn checkpoint_one_line(message: String) -> String {
+    cg::one_line(&message)
+}
+
+#[napi]
+pub fn checkpoint_cap_text(text: String, max: u32) -> String {
+    cg::cap_text(&text, max as usize)
+}
+
+#[napi]
+pub fn checkpoint_subcommand(args: Vec<String>) -> Option<String> {
+    cg::subcommand(&args)
+}
+
+#[napi]
+pub fn checkpoint_redact_credentials(text: String) -> String {
+    cg::redact_credentials(&text)
+}
+
+#[napi]
+pub fn checkpoint_is_index_lock_failure(stderr: String) -> bool {
+    cg::is_index_lock_failure(&stderr)
+}
+
+#[napi]
+pub fn checkpoint_with_object_particle(word: String) -> String {
+    cg::with_object_particle(&word)
+}
+
+#[napi]
+pub fn checkpoint_is_dot_git(name: String) -> bool {
+    cg::is_dot_git(&name)
+}
+
+#[napi]
+pub fn checkpoint_is_sha(text: String) -> bool {
+    cg::is_sha(&text)
+}
+
+#[napi]
+pub fn checkpoint_is_backup_id(text: String) -> bool {
+    cg::is_backup_id(&text)
+}
+
+/// `{base, missingBase?}` JSON
+#[napi]
+pub fn checkpoint_pull_request_target(listed: String, base_ref: String, info_base: String) -> String {
+    out(&cg::pull_request_target(&listed, &base_ref, &info_base))
+}
+
+/// 환경 변수 이름과 같은 자리의 남길지(true)·뺄지(false)
+#[napi]
+pub fn checkpoint_git_env_keep(keys: Vec<String>) -> Vec<bool> {
+    cg::git_env_keep(&keys)
+}
+
 use bstudio_guard::gate_helpers as gh;
 
 /// 오류 표지 글자. 없으면 null
