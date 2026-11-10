@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -592,6 +592,25 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
       const marker = path.join(out, 'planted.txt');
       plant(project.root, 'claude', `#!/bin/sh\necho planted > ${JSON.stringify(marker)}\n`);
       for (const PATH of ['.', '', `${path.delimiter}`, project.root]) {
+        const error = await runWithPath(['claude'], PATH);
+        expect(error?.message ?? '', JSON.stringify(PATH)).toMatch(/ENOENT/);
+        expect(existsSync(marker), JSON.stringify(PATH)).toBe(false);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  // ADR-191 3ac, 트러블슈팅 179: `..bin`이라는 이름의 폴더와 프로젝트 안의 링크도 같은 함수가 안으로 본다(관문 러너 전용 수정은 없다)
+  posixOnly('이름이 ..로 시작하는 프로젝트 안 폴더와 프로젝트 안의 링크로 부른 PATH 항목으로도 심은 CLI를 띄우지 않는다', async () => {
+    const out = mkdtempSync(path.join(tmpdir(), 'b-studio-gateway-path-'));
+    try {
+      const marker = path.join(out, 'planted.txt');
+      plant(path.join(project.root, '..bin'), 'claude', `#!/bin/sh\necho planted > ${JSON.stringify(marker)}\n`);
+      const outside = path.join(out, 'outside');
+      plant(outside, 'claude', `#!/bin/sh\necho planted > ${JSON.stringify(marker)}\n`);
+      symlinkSync(outside, path.join(project.root, 'tools'));
+      for (const PATH of [path.join(project.root, '..bin'), path.join(project.root, 'tools')]) {
         const error = await runWithPath(['claude'], PATH);
         expect(error?.message ?? '', JSON.stringify(PATH)).toMatch(/ENOENT/);
         expect(existsSync(marker), JSON.stringify(PATH)).toBe(false);

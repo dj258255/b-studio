@@ -5,6 +5,7 @@
 
 pub mod check_evidence;
 pub mod checkpoint_git;
+pub mod cli_command;
 pub mod cli_failure;
 pub mod cli_router;
 pub mod commit_message;
@@ -49,6 +50,7 @@ pub mod requirement_issues;
 pub mod requirements;
 pub mod requirements_trace;
 pub mod review_input;
+pub mod runner_judge;
 pub mod secrets;
 pub mod services;
 pub mod snapshots;
