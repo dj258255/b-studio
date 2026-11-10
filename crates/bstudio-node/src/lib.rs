@@ -2414,3 +2414,87 @@ pub fn docs_build_doc_summary(path: String, markdown: String) -> String {
 pub fn docs_regenerate_docs_readme(existing: Option<String>, docs_json: String) -> Result<String> {
     fail(docs::regenerate_docs_readme(existing.as_deref(), &docs_json))
 }
+
+// ── 저장소 연동(3단계 3n). 짝 없는 서로게이트는 U+FFFD로 읽는다. TS 껍데기: packages/agent/src/repository.ts
+use bstudio_guard::repository as repo;
+
+#[napi]
+pub fn repo_remote_needs_url(trimmed: String) -> bool {
+    repo::remote_needs_url(&trimmed)
+}
+
+/// `{kind, display, host?, path?, webUrl?}` JSON. 스킴 꼴이면 `new URL`의 조각(`protocol`·`host`·`hostname`·디코드한 `pathname`)을 모두 준다
+#[napi]
+pub fn repo_parse_remote(url: String, protocol: Option<String>, host: Option<String>, hostname: Option<String>, pathname: Option<String>, provider: Option<String>) -> String {
+    let parsed = protocol.as_deref().map(|protocol| repo::ParsedUrl {
+        protocol,
+        host: host.as_deref().unwrap_or(""),
+        hostname: hostname.as_deref().unwrap_or(""),
+        pathname: pathname.as_deref().unwrap_or(""),
+    });
+    out(&repo::parse_remote(&url, parsed.as_ref(), provider.as_deref()).to_value())
+}
+
+#[napi]
+pub fn repo_compare_url(kind: String, web_url: Option<String>, base: String, branch: String) -> Option<String> {
+    repo::compare_url(&kind, web_url.as_deref(), &base, &branch)
+}
+
+#[napi]
+pub fn repo_can_create_pull_request(kind: String, token: Option<String>, env_token: Option<String>) -> bool {
+    repo::can_create_pull_request(&kind, token.as_deref(), env_token.as_deref())
+}
+
+#[napi]
+pub fn repo_parse_pull_request_number(url: String) -> Option<f64> {
+    repo::parse_pull_request_number(&url)
+}
+
+/// `{total, checked, items:[{checked, text}]}` JSON
+#[napi]
+pub fn repo_parse_task_list(body: Option<String>) -> String {
+    out(&repo::parse_task_list(body.as_deref()))
+}
+
+#[napi]
+pub fn repo_parse_closing_references(text: Option<String>) -> Vec<f64> {
+    repo::parse_closing_references(text.as_deref())
+}
+
+#[napi]
+pub fn repo_map_review_state(raw: String) -> String {
+    repo::map_review_state(&raw).to_owned()
+}
+
+/// `{patch?, truncated}` JSON
+#[napi]
+pub fn repo_cap_patch(patch: Option<String>, running_total: f64) -> String {
+    out(&repo::cap_patch(patch.as_deref(), running_total))
+}
+
+#[napi]
+pub fn repo_combine_check_status(completed: Vec<bool>, conclusions: Vec<Option<String>>) -> String {
+    let conclusions: Vec<Option<&str>> = conclusions.iter().map(Option::as_deref).collect();
+    repo::combine_check_status(&completed, &conclusions).to_owned()
+}
+
+#[napi]
+pub fn repo_merge_managed_pull_request_body(existing_body: Option<String>, managed_body: String) -> String {
+    repo::merge_managed_pull_request_body(existing_body.as_deref(), &managed_body)
+}
+
+#[napi]
+pub fn repo_managed_body_squeezed_out(body: String, managed_body: String) -> bool {
+    repo::managed_body_squeezed_out(&body, &managed_body)
+}
+
+#[napi]
+pub fn repo_cap_body(body: String) -> String {
+    repo::cap_body(&body)
+}
+
+/// `{title, body, missing}` JSON. 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn repo_build_pull_request(input_json: String) -> Result<String> {
+    Ok(out(&fail(repo::build_pull_request(&input_json))?))
+}

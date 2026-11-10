@@ -387,6 +387,21 @@ interface NativeGuard {
   docsExtractDocSummary(markdown: string): string;
   docsBuildDocSummary(path: string, markdown: string): string;
   docsRegenerateDocsReadme(existing: string | null | undefined, docsJson: string): string;
+  // ── agent: repository(3단계 3n). 객체는 JSON 문자열. repoParseRemote는 스킴 꼴이면 new URL의 조각을 모두 받고(없으면 scp·로컬 경로), 모양이 어긋난 repoBuildPullRequest 입력은 던진다
+  repoRemoteNeedsUrl(trimmed: string): boolean;
+  repoParseRemote(url: string, protocol: string | null | undefined, host: string | null | undefined, hostname: string | null | undefined, pathname: string | null | undefined, provider: string | null | undefined): string;
+  repoCompareUrl(kind: string, webUrl: string | null | undefined, base: string, branch: string): string | null | undefined;
+  repoCanCreatePullRequest(kind: string, token: string | null | undefined, envToken: string | null | undefined): boolean;
+  repoParsePullRequestNumber(url: string): number | null | undefined;
+  repoParseTaskList(body: string | null | undefined): string;
+  repoParseClosingReferences(text: string | null | undefined): number[];
+  repoMapReviewState(raw: string): string;
+  repoCapPatch(patch: string | null | undefined, runningTotal: number): string;
+  repoCombineCheckStatus(completed: boolean[], conclusions: Array<string | null>): string;
+  repoMergeManagedPullRequestBody(existingBody: string | null | undefined, managedBody: string): string;
+  repoManagedBodySqueezedOut(body: string, managedBody: string): boolean;
+  repoCapBody(body: string): string;
+  repoBuildPullRequest(inputJson: string): string;
 }
 
 export interface NativeHostPty {
