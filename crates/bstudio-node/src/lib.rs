@@ -3557,3 +3557,86 @@ pub fn req_md_merge(requirements_json: String, stored_json: String) -> Result<St
 pub fn req_md_serialize(input_json: String) -> Result<String> {
     fail(rmd::serialize(&input(&input_json, "요구사항 문서 입력")?))
 }
+
+// ── agent: 작은 판정 모음(3단계 3af). 형 변환만 한다. 이름·글은 껍데기가 encodeLoneSurrogates해서 보내고 결과 글에서 되돌린다.
+use bstudio_guard::{database_branches, json_summary, steering, task_graph};
+
+/// 덤프 바이트를 조각으로 먹이면 해시에 넣을 바이트를 돌려준다. `\restrict`·`\unrestrict` 줄을 빼고 줄 끝 글자는 그대로 둔다(줄을 통째로 쥐지 않는다)
+#[napi]
+pub struct NativeDumpNormalizer {
+    inner: database_branches::DumpNormalizer,
+}
+
+#[napi]
+impl NativeDumpNormalizer {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { inner: database_branches::DumpNormalizer::new() }
+    }
+
+    #[napi]
+    pub fn feed(&mut self, chunk: Buffer) -> Buffer {
+        self.inner.feed(&chunk).into()
+    }
+
+    #[napi]
+    pub fn finish(&mut self) -> Buffer {
+        self.inner.finish().into()
+    }
+}
+
+/// 되돌릴 덤프를 먼저 넣어 볼 임시 DB 이름. 입력·결과 모두 인코딩한 글자
+#[napi]
+pub fn agent_restore_database_name(encoded_name: String) -> String {
+    database_branches::restore_database_name(&encoded_name)
+}
+
+/// 임시 덤프 파일 이름 목록 → 같은 길이의 pid(우리가 쓰는 꼴이 아니면 null). 지우는 코드라 모르는 이름은 null(지우지 않는다)
+#[napi]
+pub fn agent_temp_dump_pids(names: Vec<String>) -> Vec<Option<u32>> {
+    names.iter().map(|name| database_branches::stale_temp_pid(name)).collect()
+}
+
+/// `[{ id, dependsOn }]`(id는 인코딩한 글자) → 실행할 수 없는 꼴이면 TaskGraphError 메시지(인코딩한 글자), 아니면 null. 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn agent_task_graph_error(nodes_json: String) -> Result<Option<String>> {
+    let value = input(&nodes_json, "작업 그래프")?;
+    let JsValue::Arr(items) = value else { return Err(Error::from_reason("작업 그래프는 배열이어야 합니다")) };
+    let mut nodes = Vec::with_capacity(items.len());
+    for item in &items {
+        let id = match item.prop("id") {
+            Some(JsValue::Str(id)) => id.clone(),
+            _ => return Err(Error::from_reason("작업 id는 문자열이어야 합니다")),
+        };
+        let depends_on = match item.prop("dependsOn") {
+            None => Vec::new(),
+            Some(JsValue::Arr(deps)) => deps
+                .iter()
+                .map(|dep| match dep {
+                    JsValue::Str(s) => Ok(s.clone()),
+                    _ => Err(Error::from_reason("의존성 id는 문자열이어야 합니다")),
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Some(_) => return Err(Error::from_reason("dependsOn은 배열이어야 합니다")),
+        };
+        nodes.push(task_graph::Node { id, depends_on });
+    }
+    Ok(task_graph::validate(&nodes))
+}
+
+#[napi]
+pub fn agent_format_steering(texts: Vec<String>) -> String {
+    steering::format_steering(&texts)
+}
+
+/// 마지막 메시지에 사용자 글을 넣는 방법: `concat`(글 뒤에 이어 붙임) · `push`(내용 배열에 블록을 더함) · `new`(새 메시지)
+#[napi]
+pub fn agent_append_user_plan(role: Option<String>, content_kind: String) -> String {
+    steering::append_plan(role.as_deref(), &content_kind).as_str().to_owned()
+}
+
+/// JSON 글(인코딩한 글자)의 구조 요약. JSON이 아니거나 너무 깊으면 null
+#[napi]
+pub fn agent_summarize_json_content(content: String) -> Option<String> {
+    json_summary::summarize_json_content(&content)
+}

@@ -1,3 +1,6 @@
+import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
+import { decodeLoneSurrogates } from './lone-surrogates';
+
 /**
  * 여러 에이전트·검증 작업을 의존성 그래프로 실행하는 작은 오케스트레이터.
  * 작업의 실제 실행(에이전트, 테스트, 브라우저 검사)은 호출자가 주입하므로
@@ -34,16 +37,18 @@ export type TaskEvent =
 
 export class TaskGraphError extends Error {}
 
+/**
+ * 그래프가 실행해도 되는 꼴인지 본다(id 중복·없는 의존성·순환). 판정은 Rust(crates/bstudio-guard/src/task_graph.rs, ADR-191 3단계 3af)가 하고,
+ * 실행·이벤트·취소는 이 파일이 한다. 안 되는 꼴이면 `TaskGraphError`를 던진다
+ */
+export function validateTaskGraph<T>(nodes: readonly TaskNode<T>[]): void {
+  const invalid = native.agentTaskGraphError(JSON.stringify(nodes.map((node) => ({ id: encodeLoneSurrogates(node.id), dependsOn: (node.dependsOn ?? []).map(encodeLoneSurrogates) }))));
+  if (invalid !== null) throw new TaskGraphError(decodeLoneSurrogates(invalid));
+}
+
 /** 의존성이 준비된 작업을 최대 concurrency개까지 병렬 실행한다. */
 export async function runTaskGraph<T = unknown>(nodes: readonly TaskNode<T>[], options: TaskGraphOptions = {}): Promise<TaskResult<T>[]> {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  if (byId.size !== nodes.length) throw new TaskGraphError('task id가 중복됩니다');
-  for (const node of nodes) {
-    for (const dependency of node.dependsOn ?? []) {
-      if (!byId.has(dependency)) throw new TaskGraphError(`${node.id}: 없는 의존성 '${dependency}'`);
-    }
-  }
-  assertAcyclic(nodes);
+  validateTaskGraph(nodes);
 
   const limit = Math.max(1, Math.floor(options.concurrency ?? 2));
   const results = new Map<string, TaskResult<T>>();
@@ -103,19 +108,4 @@ async function executeNode<T>(node: TaskNode<T>, signal: AbortSignal, emit: (eve
     }
   }
   throw new TaskGraphError(`${node.id}: 실행 결과가 없습니다`);
-}
-
-function assertAcyclic<T>(nodes: readonly TaskNode<T>[]): void {
-  const byId = new Map(nodes.map((node) => [node.id, node]));
-  const visiting = new Set<string>();
-  const visited = new Set<string>();
-  const visit = (id: string) => {
-    if (visiting.has(id)) throw new TaskGraphError(`순환 의존성이 있습니다: ${id}`);
-    if (visited.has(id)) return;
-    visiting.add(id);
-    for (const dependency of byId.get(id)?.dependsOn ?? []) visit(dependency);
-    visiting.delete(id);
-    visited.add(id);
-  };
-  for (const node of nodes) visit(node.id);
 }

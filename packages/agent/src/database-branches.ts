@@ -2,9 +2,9 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { access, mkdir, readdir, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
-import { createInterface } from 'node:readline';
-import type { Sandbox } from '@b-studio/sandbox';
+import { encodeLoneSurrogates, native, type Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
+import { decodeLoneSurrogates } from './lone-surrogates';
 
 export type DatabaseAction = 'saved' | 'restored' | 'unchanged' | 'missing' | 'failed';
 
@@ -163,20 +163,18 @@ export class DatabaseBranches {
 }
 
 /**
- * 최신 pg_dump는 덤프마다 무작위 키로 `\restrict`, `\unrestrict` 줄을 넣는다.
- * 내용이 같은지 비교할 때는 이 줄을 뺀다. 규칙이 갈라지지 않게 한 곳에만 둔다
+ * 최신 pg_dump는 덤프마다 무작위 키로 `\restrict`, `\unrestrict` 줄을 넣는다. 내용이 같은지 비교할 때는 이 줄을 뺀다.
+ * 줄을 나누고 어느 줄을 뺄지 정하는 판정은 Rust(crates/bstudio-guard/src/database_branches.rs, ADR-191 3단계 3af)가 한다.
+ * 덤프는 크기가 커서 문자열로 올리지 않고, 읽기 스트림의 조각을 정규화기에 먹여 나온 바이트를 해시에 넣는다
+ * (줄 하나도 통째로 쥐지 않는다). 줄 끝 글자(`\r\n`·`\r`·`\n`)와 잘못된 바이트도 해시에 들어가므로, 그것만 다른 덤프는 다른 해시가 된다
  */
-const RESTRICT_LINE = /^\\(un)?restrict\s/;
-
-/** 덤프는 크기가 커서 문자열로 올리지 않고, 줄 단위로 읽어 해시만 비교한다 */
 export async function normalizedDumpHash(file: string): Promise<string> {
   const hash = createHash('sha256');
-  const lines = createInterface({ input: createReadStream(file), crlfDelay: Infinity });
-  for await (const line of lines) {
-    if (RESTRICT_LINE.test(line)) continue;
-    hash.update(line);
-    hash.update('\n');
+  const normalizer = new native.NativeDumpNormalizer();
+  for await (const chunk of createReadStream(file)) {
+    hash.update(normalizer.feed(chunk as Buffer));
   }
+  hash.update(normalizer.finish());
   return hash.digest('hex');
 }
 
@@ -196,9 +194,8 @@ export function describeDatabaseState(state: DatabaseState): string {
 }
 
 /** 되돌릴 덤프를 먼저 넣어 볼 DB 이름. Postgres 식별자 상한(63자)을 넘지 않게 원래 이름을 줄인다 */
-function restoreDatabaseName(name: string): string {
-  const suffix = '__b_studio_restore';
-  return `${name.slice(0, 63 - suffix.length)}${suffix}`;
+export function restoreDatabaseName(name: string): string {
+  return decodeLoneSurrogates(native.agentRestoreDatabaseName(encodeLoneSurrogates(name)));
 }
 
 function firstLines(text: string): string {
@@ -214,21 +211,23 @@ async function exists(file: string): Promise<boolean> {
 
 /**
  * 덤프 중에 프로세스가 죽으면 임시 파일이 남는다. 이름에 만든 프로세스의 pid가 들어 있으므로,
- * 그 프로세스가 이미 없는 파일만 지운다. 지금 돌고 있는 덤프의 임시 파일은 건드리지 않는다.
+ * 그 프로세스가 이미 없는 파일만 지운다. pid를 읽지 못한 이름은 우리 파일이 아닐 수 있어 지우지 않는다. 지금 돌고 있는 덤프의 임시 파일은 건드리지 않는다.
  */
 async function sweepStaleTemp(folder: string): Promise<void> {
   const names = await readdir(folder).catch(() => [] as string[]);
-  await Promise.all(names.filter((name) => name.endsWith('.tmp') && !isRunning(tempPid(name))).map((name) => rm(path.join(folder, name), { force: true })));
+  await Promise.all(pickStaleTemp(names).map((name) => rm(path.join(folder, name), { force: true })));
 }
 
-/** `<체크포인트>.<이유>.<pid>.<시각>.tmp` */
-function tempPid(name: string): number | undefined {
-  const pid = Number(name.split('.').at(-3));
-  return Number.isInteger(pid) && pid > 0 ? pid : undefined;
+/**
+ * 지울 임시 파일 이름을 고른다. 이름 판정은 Rust가 한다: 우리가 쓰는 꼴(`<체크포인트>.<이유>.<pid>.<시각>.tmp`)이고 pid를 읽을 때만 pid가 나온다.
+ * 모르는 이름은 pid가 없어 지우지 않는다. `running`은 시험이 바꿔 끼운다
+ */
+export function pickStaleTemp(names: readonly string[], running: (pid: number) => boolean = isRunning): string[] {
+  const pids = native.agentTempDumpPids(names.map(encodeLoneSurrogates));
+  return names.filter((_, index) => pids[index] != null && !running(pids[index]!));
 }
 
-function isRunning(pid: number | undefined): boolean {
-  if (pid === undefined) return false;
+function isRunning(pid: number): boolean {
   if (pid === process.pid) return true;
   try {
     process.kill(pid, 0);
