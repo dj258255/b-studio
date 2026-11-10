@@ -807,7 +807,8 @@ mod tests {
     fn 원격_주소_종류() {
         let r = parse_remote("https://github.com/o/r.git", Some(&parsed("https:", "github.com", "github.com", "/o/r.git")), None);
         assert_eq!((r.kind, r.display.as_str(), r.web_url.as_deref()), ("github", "github.com/o/r", Some("https://github.com/o/r")));
-        for host in ["github.com.evil.com", "evil.github.com", "github.com.", "GitHub.com"] {
+        // 포트는 `:숫자`만 뗀다(`/:\d+$/`). 숫자 없는 끝 콜론이나 숫자 아닌 꼬리를 떼면 github로 넓어진다 — 실제 입력(new URL·scp 꼴)은 닿지 않지만 규칙을 고정한다
+        for host in ["github.com.evil.com", "evil.github.com", "github.com.", "GitHub.com", "github.com:", "github.com:x", "github.com:1a"] {
             let r = parse_remote("x", Some(&parsed("https:", host, host, "/o/r")), None);
             assert_eq!(r.kind, "other", "{host}");
         }
