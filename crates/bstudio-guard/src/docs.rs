@@ -25,7 +25,7 @@ const TROUBLESHOOTING_LOG_PATH: &str = "docs/TROUBLESHOOTING-LOG.md";
 const ROADMAP_TRADEOFFS_PATH: &str = "docs/ROADMAP-TRADEOFFS.md";
 
 /// 번호를 두 자리 이상으로 0으로 채운다(`n < 10 ? "0"+n : n`). 소수·음수·NaN도 JS 글자 그대로
-fn pad(n: f64) -> String {
+pub(crate) fn pad(n: f64) -> String {
     if n < 10.0 {
         format!("0{}", js::number_to_string(n))
     } else {
@@ -83,7 +83,7 @@ pub fn slugify_title(title: &str) -> String {
 }
 
 /// `^<prefix>(\d{min,})-.+\.md$`의 숫자 묶음. 숫자는 ASCII뿐, `.+`는 줄 끝 글자를 못 먹고, 끝은 `.md`(그 앞에 한 글자 이상)
-fn numbered_path(path: &str, prefix: &str, min_digits: usize) -> Option<f64> {
+pub(crate) fn numbered_path(path: &str, prefix: &str, min_digits: usize) -> Option<f64> {
     let rest = path.strip_prefix(prefix)?;
     let digit_len = rest.bytes().take_while(u8::is_ascii_digit).count();
     if digit_len < min_digits {
@@ -98,7 +98,7 @@ fn numbered_path(path: &str, prefix: &str, min_digits: usize) -> Option<f64> {
     rest[..digit_len].parse::<f64>().ok()
 }
 
-fn next_number(existing: &[String], prefix: &str, min_digits: usize) -> f64 {
+pub(crate) fn next_number(existing: &[String], prefix: &str, min_digits: usize) -> f64 {
     let max = existing.iter().fold(0.0_f64, |acc, path| match numbered_path(path, prefix, min_digits) {
         Some(n) => acc.max(n),
         None => acc,
@@ -349,7 +349,7 @@ fn starts_block(line: &str) -> bool {
 }
 
 /// `markdown.split(/\r?\n/)`
-fn split_lines(markdown: &str) -> Vec<&str> {
+pub(crate) fn split_lines(markdown: &str) -> Vec<&str> {
     let parts: Vec<&str> = markdown.split('\n').collect();
     let last = parts.len() - 1;
     parts.iter().enumerate().map(|(i, p)| if i < last { p.strip_suffix('\r').unwrap_or(p) } else { p }).collect()
