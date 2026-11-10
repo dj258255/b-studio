@@ -644,6 +644,16 @@ interface NativeGuard {
   agentFormatSteering(texts: string[]): string;
   agentAppendUserPlan(role: string | null | undefined, contentKind: string): 'concat' | 'push' | 'new';
   agentSummarizeJsonContent(content: string): string | null;
+  // ── agent: 요구사항 모델 답 읽기(3단계 3ad). 글자는 encodeLoneSurrogates해서 보내고 결과 글자는 decodeLoneSurrogates로 푼다.
+  // reqReplyExtractJson은 [JSON.parse에 건넬 글자, jsonrepair에 건넬 글자]이고 `{`가 없으면 빈 배열. reqReplyRepairExtraction은 글자를 인코딩한 값의 encodeNative JSON이고 시나리오 id 번호를 매길 수 없으면 던진다.
+  // reqReplyEnforceSpecQuote는 강등할 추천의 자리(basis가 'spec'인데 인용이 없거나 명세에서 확인되지 않음). 인용과 명세는 둘 다 encodeLoneSurrogates해서 보낸다
+  reqReplyExtractJson(text: string): string[];
+  reqReplyRepairExtraction(rawJson: string): string;
+  reqReplyEnforceSpecQuote(bases: string[], quotes: Array<string | null>, specText: string): number[];
+  reqReplyFirstLinesPreview(content: string, maxLines: number, maxChars: number): string;
+  reqReplyIsJsonPath(path: string): boolean;
+  reqReplyTooBigBytes(message: string): number | null | undefined;
+  reqReplyAddUsage(a: number[], b: number[]): number[];
   // ── agent: 디자인 비교(3단계 3ae). 게이트는 비율이 허용치를 넘으면 실패시키므로 비율이 작아지는 쪽이 여는 쪽이고, 끝까지 가지 못한 입력(읽지 못한 PNG·너비 불일치·너무 큼·픽셀 0·범위 밖 threshold)은 모두 errorKind로 돌려준다.
   // masks는 [x, y, width, height, ...]를 이어 붙인 숫자(소수·음수·NaN 그대로: 옛 JS 반복문과 같게 칠한다). errorKind는 'compare'(옛 VisualCompareError)·'decode'(PNG를 읽지 못함)
   visualCompare(actual: Buffer, reference: Buffer, masks: number[], threshold: number): NativeVisualCompare;

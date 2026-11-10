@@ -45,6 +45,22 @@ function pairedUnits(text: string): Set<number> {
 }
 
 /** B의 짝 없는 서로게이트 단위가 A에서는 짝의 일부인가 — 단사 인코딩이 닫는 쪽으로만 달라지는 유일한 이유 */
+/**
+ * 옛 `verifySpecQuote`에 "ASCII 낱말 중간을 자른 자리는 세지 않는다"(ADR-191 3ad, 트러블슈팅 179)만 얹은 기준.
+ * 그 규칙으로 닫힌 쌍은 서로게이트와 상관없는 의도한 차이라, 이 기준과 견주어 남는 닫힘이 짝을 가르는 경우뿐인지 본다(`requirements-differential.test.ts`와 같은 기준)
+ */
+function legacyVerifySpecQuoteWithoutWordCuts(quote: string, specText: string): boolean {
+  if (!legacyVerifySpecQuote(quote, specText)) return false;
+  const collapse = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const q = collapse(quote);
+  const t = collapse(specText);
+  const word = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_]/.test(c);
+  for (let at = t.indexOf(q); at !== -1; at = t.indexOf(q, at + 1)) {
+    if (!(word(q[0]) && word(t[at - 1])) && !(word(q[q.length - 1]) && word(t[at + q.length]))) return true;
+  }
+  return false;
+}
+
 function pairSplitReason(a: string, b: string): boolean {
   const paired = pairedUnits(a);
   for (const u of loneUnits(b)) if (paired.has(u)) return true;
@@ -140,7 +156,7 @@ describe('짝 없는 서로게이트·예약 글자의 단사 인코딩과 판�
     let closed = 0;
     for (let i = 0; i < PAIRS; i++) {
       const [spec, quote] = pairOf(g);
-      const old = legacyVerifySpecQuote(quote, spec);
+      const old = legacyVerifySpecQuoteWithoutWordCuts(quote, spec);
       const now = verifySpecQuote(quote, spec);
       if (!old && now) open += 1;
       if (old && !now) {

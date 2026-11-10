@@ -22,6 +22,19 @@ const NOW = '2026-11-10T00:00:00.000Z';
 // 환경 변수로 크게 돌릴 수 있으므로 시간 제한을 풀어 둔다
 vi.setConfig({ testTimeout: 3_600_000 });
 
+/** 옛 `verifySpecQuote`에 "ASCII 낱말 중간을 자른 자리는 세지 않는다"만 얹은 기준(ADR-191 3ad, 트러블슈팅 179) */
+function oldVerifySpecQuoteWithoutWordCuts(quote: string, specText: string): boolean {
+  if (!old.verifySpecQuote(quote, specText)) return false;
+  const collapse = (text: string) => text.replace(/\s+/g, ' ').trim();
+  const q = collapse(quote);
+  const t = collapse(specText);
+  const word = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_]/.test(c);
+  for (let at = t.indexOf(q); at !== -1; at = t.indexOf(q, at + 1)) {
+    if (!(word(q[0]) && word(t[at - 1])) && !(word(q[q.length - 1]) && word(t[at + q.length]))) return true;
+  }
+  return false;
+}
+
 beforeAll(() => {
   vi.useFakeTimers();
   vi.setSystemTime(new Date(NOW));
@@ -355,7 +368,9 @@ describe('요구사항 순수 코어: 옛 TS와 글자까지 같다', () => {
         compare('buildReferencedFilesContext', () => json([files, maxChars]), () => old.buildReferencedFilesContext(files as never, maxChars), () => cur.buildReferencedFilesContext(files as never, maxChars));
         const quote = words(g, 0, 4);
         const specText = g.chance(0.5) ? `${words(g, 0, 3)} ${quote} ${words(g, 0, 3)}` : words(g, 0, 6);
-        compare('verifySpecQuote', () => json([quote, specText]), () => old.verifySpecQuote(quote, specText), () => cur.verifySpecQuote(quote, specText), { flip: (legacy, current) => legacy === false && current === true });
+        // 3ad: 낱말 중간을 자른 ASCII 인용은 새 구현이 거절한다(의도한 차이, 닫는 쪽만 다르다). 기준은 옛 판정에 그 규칙만 얹은 것이고, 옛 "없음" → 새 "있음" 뒤집힘은 따로 막는다
+        if (!old.verifySpecQuote(quote, specText) && cur.verifySpecQuote(quote, specText)) throw new Error(`verifySpecQuote 열린 쪽 뒤집힘: ${json([quote, specText])}`);
+        compare('verifySpecQuote', () => json([quote, specText]), () => oldVerifySpecQuoteWithoutWordCuts(quote, specText), () => cur.verifySpecQuote(quote, specText), { flip: (legacy, current) => legacy === false && current === true });
         const context = g.chance(0.5) ? words(g, 0, 3) : undefined;
         compare('buildExtractionUserPrompt', () => json([specText, context]), () => old.buildExtractionUserPrompt(specText, context), () => cur.buildExtractionUserPrompt(specText, context));
         const questions = g.list(0, 4, () => words(g, 1, 3));
