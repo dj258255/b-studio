@@ -14,9 +14,9 @@
  * 여기 함수들은 입력을 받아 값을 돌려주기만 한다(테스트하기 쉽게, 그리고 studio 밖에서도 재사용할 수 있게).
  *
  * 순수 판정(언급 id 찾기, 내용 해시·개정, 상태·검증 출처, 린트, 재추출 병합, 요약·입력창 글 등)은 Rust
- * (`crates/bstudio-guard/src/requirements.rs`, ADR-191 3단계 3j)가 한다. 여기에는 zod 스키마·타입, 모델·파일을 부르는 함수,
- * 마크다운 읽기·쓰기(zod 검증이 끼어 있다), 테스트 파일 스캔(발견기 캐시), 추적 매트릭스 조립과, 같은 이름·시그니처로
- * 네이티브 모듈을 부르는 얇은 껍데기만 남았다. 옛 구현은 `requirements-legacy.ts`에 시험용으로만 남아 있다.
+ * (`crates/bstudio-guard/src/requirements.rs`, ADR-191 3단계 3j)가 한다. 마크다운 읽기·쓰기 규칙은 `requirements_markdown.rs`(3ab)가 한다.
+ * 여기에는 zod 스키마·타입, 모델·파일을 부르는 함수, 마크다운 읽기의 zod 검증과 갈래(몸통 → JSON 블록), 테스트 파일 스캔(발견기 캐시), 추적 매트릭스 조립과,
+ * 같은 이름·시그니처로 네이티브 모듈을 부르는 얇은 껍데기만 남았다. 옛 구현은 `requirements-legacy.ts`에 시험용으로만 남아 있다.
  */
 import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';
@@ -579,121 +579,48 @@ export const REQUIREMENTS_FILE = native.reqCoreRequirementsFile();
  */
 export type RequirementStatus = '미착수' | '작업 중' | '검증됨' | '재확인 필요' | '실패';
 
-export const JSON_BLOCK = /<!--\s*b-studio-requirements\s*([\s\S]*?)-->/;
-
-function requirementHeading(requirement: Requirement): string {
-  return `## ${requirement.id}. ${requirement.title}`;
-}
-
-const KIND_PRIORITY_LINE = /^-\s*종류:\s*(\S+)\s*·\s*우선순위:\s*(\S+)(?:\s*·\s*개정:\s*(\d+))?\s*$/;
-const EARS_LINE = /^-\s*EARS\((ubiquitous|event|state|unwanted|optional)\):\s*(.+?)\s*$/;
-const SCENARIOS_HEADER = /^-\s*시나리오:\s*$/;
-const SCENARIO_ITEM = /^\s+-\s+(R[1-9][0-9]*\.[1-9][0-9]*):\s*\(Given\)\s*(.+?)\s*\(When\)\s*(.+?)\s*\(Then\)\s*(.+?)\s*$/;
-const ACCEPTANCE_HEADER = /^-\s*인수\s*조건:\s*$/;
-const ACCEPTANCE_ITEM = /^\s+-\s+(.+?)\s*$/;
-const NFR_LINE = /^-\s*NFR:\s*지표\s+(.+?)\s*·\s*임계값\s+(.+?)\s*·\s*조건\s+(.+?)\s*·\s*측정\s+(.+?)\s*$/;
-const TRACE_LINE = /^-\s*추적:\s*(.+?)\s*$/;
-/** "- 확인: 범수 · 2026-10-01 · 체크포인트 c57d72f · 메모 무엇을 어떻게 확인했나" */
-export const MANUAL_VERIFICATION_LINE = /^-\s*확인:\s*(.+?)\s*·\s*(\d{4}-\d{2}-\d{2})\s*·\s*체크포인트\s+(\S+)\s*·\s*메모\s+(.+?)\s*$/;
-export const REQUIREMENT_HEADING = /^##\s+(R[1-9][0-9]*)\.\s*(.+?)\s*$/;
-const ASSUMPTIONS_HEADING = /^##\s*가정\s*$/;
-const ASSUMPTION_ITEM = /^-\s+(.+?)\s*$/;
 /**
- * "사람이 할 일" 절 헤딩. 괄호 안의 문구("에이전트 금지" 등)는 자유다 — 헤딩 첫 낱말만 확인한다.
- * 한글 글자는 JS 정규식의 \w(아스키 전용)에 들지 않아 \b가 한글-한글 경계에서는 전혀 서지 않으므로(둘 다
- * "단어 아님"이라 경계가 생기지 않는다) 끝에 \b를 붙이지 않는다 — "일" 뒤에 공백이 오든 괄호가 오든 그대로 맞는다.
+ * 요구사항 문서의 읽기·쓰기 규칙(줄 읽기, 절 읽기, JSON 블록 찾기, 몸통과 블록 값 합치기, 쓰기)은 Rust
+ * (`crates/bstudio-guard/src/requirements_markdown.rs`, ADR-191 3단계 3ab)가 한다. 여기에는 zod 검증과 그 결과로 가르는 갈래만 남았다.
+ * 글자는 `encodeLoneSurrogates`해서 보내고 결과는 `decodeLoneSurrogates`로 푼다(짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐지지 않게).
+ * 사람 확인 기록을 막는 쪽에서 읽는 3x(`requirement-integrity.ts`)는 같은 Rust 모듈의 정규식·줄 나누기·JSON 블록 찾기를 쓴다.
  */
-const MANUAL_STEPS_HEADING = /^##\s*사람이\s*할\s*일/;
+const LEGACY_JSON_BLOCK = z.array(RequirementSchema);
+const JSON_BLOCK_SHAPE = z.object({
+  requirements: z.array(RequirementSchema),
+  assumptions: z.array(AssumptionSchema).optional(),
+  manualSteps: z.array(ManualStepItemSchema).optional(),
+});
 
-/** "- 추적: 이슈 #12 · 의존 R2, R3 · 대체 R1" 같은 줄의 본문(맨 앞 "- 추적: " 제거분)을 Trace로 되돌린다. 알아볼 조각이 없으면 undefined */
-function parseTraceLine(content: string): Trace | undefined {
-  const trace: Trace = {};
-  const issueMatch = /이슈\s*#(\d+)/.exec(content);
-  if (issueMatch) trace.issue = Number(issueMatch[1]);
-  const dependsMatch = /의존\s+([R0-9.,\s]+?)(?=\s*·|$)/.exec(content);
-  if (dependsMatch) {
-    const ids = dependsMatch[1]!
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-    if (ids.length > 0) trace.dependsOn = ids;
-  }
-  const supersedesMatch = /대체\s+(R[1-9][0-9]*)/.exec(content);
-  if (supersedesMatch) trace.supersedes = supersedesMatch[1];
-  return Object.keys(trace).length > 0 ? trace : undefined;
+/** 값 안의 모든 글자(키 포함)에 `map`을 적용한 복사본 */
+function mapText<T>(value: T, map: (text: string) => string): T {
+  if (typeof value === 'string') return map(value) as T;
+  if (Array.isArray(value)) return value.map((item) => mapText(item, map)) as T;
+  if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [map(key), mapText(item, map)])) as T;
+  return value;
 }
 
-/** "## 가정" 절 바로 아래의 글머리 기호 줄만 모은다. 다음 "##" 헤딩을 만나면 멈춘다(사람이 절을 통째로 지웠으면 빈 배열) */
-function extractAssumptionsSection(lines: readonly string[]): string[] {
-  const assumptions: string[] = [];
-  let collecting = false;
-  for (const line of lines) {
-    if (ASSUMPTIONS_HEADING.test(line)) {
-      collecting = true;
-      continue;
-    }
-    if (!collecting) continue;
-    if (/^##\s+/.test(line)) {
-      collecting = false;
-      continue;
-    }
-    const item = ASSUMPTION_ITEM.exec(line);
-    if (item) assumptions.push(item[1]!);
-  }
-  return assumptions;
+function readBody(raw: string): { drafts: unknown[]; jsonBlock: string | null; assumptions: string[]; manualSteps: string[] } {
+  return mapText(decodeNative<ReturnType<typeof readBody>>(native.reqMdParseBody(encodeLoneSurrogates(raw))), decodeLoneSurrogates);
 }
 
 /**
- * "## 사람이 할 일" 절 바로 아래의 글머리 기호 줄만 모은다(같은 모양, extractAssumptionsSection과 동형).
- * 이 절은 요구사항이 아니다 — parseRequirementsMarkdown의 본문 요구사항 파싱과는 완전히 별개로 읽는다.
+ * 몸통에서 읽지 못하는(또는 몸통에 아예 줄이 없는 옛 문서의) 기술 메타데이터 — hash·revisedAt은 몸통에 절대 쓰지 않으므로
+ * 항상 JSON 블록에서만 채운다. rev·ears·scenarios·nfr·trace는 몸통 값을 우선하고(사람이 손으로 고쳤을 수 있다),
+ * 몸통에 그 줄이 아예 없을 때만 JSON 블록 값으로 메운다(합치는 규칙은 Rust). 블록의 글자는 몸통을 읽은 Rust가 찾은 같은 블록이다.
  */
-function extractManualStepsSection(lines: readonly string[]): string[] {
-  const steps: string[] = [];
-  let collecting = false;
-  for (const line of lines) {
-    if (MANUAL_STEPS_HEADING.test(line)) {
-      collecting = true;
-      continue;
-    }
-    if (!collecting) continue;
-    if (/^##\s+/.test(line)) {
-      collecting = false;
-      continue;
-    }
-    const item = ASSUMPTION_ITEM.exec(line);
-    if (item) steps.push(item[1]!);
+function mergeExtendedFieldsFromJsonBlock(requirements: readonly Requirement[], jsonBlock: string | null): Requirement[] {
+  if (jsonBlock === null) return [...requirements];
+  let stored: Requirement[] = [];
+  try {
+    const shaped = JSON_BLOCK_SHAPE.safeParse(JSON.parse(jsonBlock));
+    if (shaped.success) stored = shaped.data.requirements;
+  } catch {
+    return [...requirements];
   }
-  return steps;
-}
-
-/** 요구사항 하나의 몸통 줄(헤딩·상태 줄 제외)을 만든다. rev·ears·scenarios·nfr·trace는 있을 때만 줄을 더한다(옛 문서와 같은 모양을 유지한다) */
-function requirementBodyLines(requirement: Requirement): string {
-  const acceptance = requirement.acceptance.map((item) => `  - ${item}`).join('\n');
-  const revPart = requirement.rev !== undefined ? ` · 개정: ${requirement.rev}` : '';
-  const lines = [`- 종류: ${requirement.kind} · 우선순위: ${requirement.priority}${revPart}`];
-  if (requirement.ears) lines.push(`- EARS(${requirement.ears.pattern}): ${requirement.ears.statement}`);
-  if (requirement.scenarios && requirement.scenarios.length > 0) {
-    lines.push('- 시나리오:');
-    for (const scenario of requirement.scenarios) {
-      lines.push(`  - ${scenario.id}: (Given) ${scenario.given} (When) ${scenario.when} (Then) ${scenario.then}`);
-    }
-  }
-  lines.push(`- 인수 조건:\n${acceptance}`);
-  if (requirement.nfr) {
-    lines.push(`- NFR: 지표 ${requirement.nfr.metric} · 임계값 ${requirement.nfr.threshold} · 조건 ${requirement.nfr.condition} · 측정 ${requirement.nfr.method}`);
-  }
-  if (requirement.trace) {
-    const bits: string[] = [];
-    if (requirement.trace.issue !== undefined) bits.push(`이슈 #${requirement.trace.issue}`);
-    if (requirement.trace.dependsOn && requirement.trace.dependsOn.length > 0) bits.push(`의존 ${requirement.trace.dependsOn.join(', ')}`);
-    if (requirement.trace.supersedes) bits.push(`대체 ${requirement.trace.supersedes}`);
-    if (bits.length > 0) lines.push(`- 추적: ${bits.join(' · ')}`);
-  }
-  if (requirement.manualVerification) {
-    const { by, at, sha, note } = requirement.manualVerification;
-    lines.push(`- 확인: ${by} · ${at} · 체크포인트 ${sha} · 메모 ${note}`);
-  }
-  return lines.join('\n');
+  if (stored.length === 0) return [...requirements];
+  const merged = native.reqMdMerge(encodeNative(mapText(requirements, encodeLoneSurrogates)), encodeNative(mapText(stored, encodeLoneSurrogates)));
+  return mapText(decodeNative<Requirement[]>(merged), decodeLoneSurrogates);
 }
 
 /**
@@ -709,76 +636,8 @@ export function serializeRequirementsMarkdown(
   assumptions: readonly string[] = [],
   manualSteps: readonly string[] = [],
 ): string {
-  const blocks = requirements.map((requirement) => {
-    const status = statusById[requirement.id] ?? '미착수';
-    return `${requirementHeading(requirement)}\n${requirementBodyLines(requirement)}\n- 상태: ${status}`;
-  });
-  const assumptionsBlock = assumptions.length > 0 ? `\n\n## 가정\n${assumptions.map((item) => `- ${item}`).join('\n')}` : '';
-  const manualStepsBlock =
-    manualSteps.length > 0 ? `\n\n## 사람이 할 일 (에이전트 금지)\n${manualSteps.map((item) => `- ${item}`).join('\n')}` : '';
-  const json = JSON.stringify(
-    {
-      requirements: requirements.map(({ id, title, kind, priority, acceptance, rev, ears, scenarios, nfr, trace, hash, revisedAt, manualVerification }) => ({
-        id,
-        title,
-        kind,
-        priority,
-        acceptance,
-        ...(rev !== undefined ? { rev } : {}),
-        ...(ears ? { ears } : {}),
-        ...(scenarios ? { scenarios } : {}),
-        ...(nfr ? { nfr } : {}),
-        ...(trace ? { trace } : {}),
-        ...(hash !== undefined ? { hash } : {}),
-        ...(revisedAt !== undefined ? { revisedAt } : {}),
-        ...(manualVerification ? { manualVerification } : {}),
-      })),
-      assumptions,
-      manualSteps,
-    },
-    null,
-    2,
-  );
-  return `# 요구사항\n\n${blocks.join('\n\n')}${assumptionsBlock}${manualStepsBlock}\n\n<!-- b-studio-requirements\n${json}\n-->\n`;
-}
-
-const LEGACY_JSON_BLOCK = z.array(RequirementSchema);
-const JSON_BLOCK_SHAPE = z.object({
-  requirements: z.array(RequirementSchema),
-  assumptions: z.array(AssumptionSchema).optional(),
-  manualSteps: z.array(ManualStepItemSchema).optional(),
-});
-
-/**
- * 몸통에서 읽지 못하는(또는 몸통에 아예 줄이 없는 옛 문서의) 기술 메타데이터 — hash·revisedAt은 몸통에 절대 쓰지 않으므로
- * 항상 JSON 블록에서만 채운다. rev·ears·scenarios·nfr·trace는 몸통 값을 우선하고(사람이 손으로 고쳤을 수 있다),
- * 몸통에 그 줄이 아예 없을 때만 JSON 블록 값으로 메운다.
- */
-function mergeExtendedFieldsFromJsonBlock(requirements: readonly Requirement[], raw: string): Requirement[] {
-  const jsonMatch = JSON_BLOCK.exec(raw);
-  if (!jsonMatch) return [...requirements];
-  let byId = new Map<string, Requirement>();
-  try {
-    const shaped = JSON_BLOCK_SHAPE.safeParse(JSON.parse(jsonMatch[1]!));
-    if (shaped.success) byId = new Map(shaped.data.requirements.map((requirement) => [requirement.id, requirement]));
-  } catch {
-    return [...requirements];
-  }
-  return requirements.map((requirement) => {
-    const stored = byId.get(requirement.id);
-    if (!stored) return requirement;
-    return {
-      ...requirement,
-      rev: requirement.rev ?? stored.rev,
-      ears: requirement.ears ?? stored.ears,
-      scenarios: requirement.scenarios ?? stored.scenarios,
-      nfr: requirement.nfr ?? stored.nfr,
-      trace: requirement.trace ?? stored.trace,
-      hash: stored.hash,
-      revisedAt: stored.revisedAt,
-      manualVerification: requirement.manualVerification ?? stored.manualVerification,
-    };
-  });
+  const input = encodeNative(mapText({ requirements, statusById, assumptions, manualSteps }, encodeLoneSurrogates));
+  return decodeLoneSurrogates(native.reqMdSerialize(input));
 }
 
 /**
@@ -790,117 +649,19 @@ function mergeExtendedFieldsFromJsonBlock(requirements: readonly Requirement[], 
  * 둘 다 실패하면 빈 배열을 돌려준다 — 호출하는 쪽이 "명세를 다시 뽑아 주세요"로 안내한다.
  */
 export function parseRequirementsMarkdown(raw: string): { requirements: Requirement[]; assumptions: string[]; manualSteps: string[] } {
-  const withoutJsonBlock = raw.replace(JSON_BLOCK, '');
-  const lines = withoutJsonBlock.split(/\r?\n/);
-  const drafts: Array<{
-    id: string;
-    title: string;
-    kind?: string;
-    priority?: string;
-    acceptance: string[];
-    rev?: number;
-    ears?: Ears;
-    scenarios?: Scenario[];
-    nfr?: Nfr;
-    trace?: Trace;
-    manualVerification?: ManualVerification;
-  }> = [];
-  let current: (typeof drafts)[number] | undefined;
-  let collectingAcceptance = false;
-  let collectingScenarios = false;
-
-  for (const line of lines) {
-    const heading = REQUIREMENT_HEADING.exec(line);
-    if (heading) {
-      if (current) drafts.push(current);
-      current = { id: heading[1]!, title: heading[2]!, acceptance: [] };
-      collectingAcceptance = false;
-      collectingScenarios = false;
-      continue;
-    }
-    if (!current) continue;
-
-    const kindLine = KIND_PRIORITY_LINE.exec(line);
-    if (kindLine) {
-      current.kind = kindLine[1];
-      current.priority = kindLine[2];
-      if (kindLine[3]) current.rev = Number(kindLine[3]);
-      collectingAcceptance = false;
-      collectingScenarios = false;
-      continue;
-    }
-
-    const earsLine = EARS_LINE.exec(line);
-    if (earsLine) {
-      current.ears = { pattern: earsLine[1] as EarsPattern, statement: earsLine[2]! };
-      collectingAcceptance = false;
-      collectingScenarios = false;
-      continue;
-    }
-
-    if (SCENARIOS_HEADER.test(line)) {
-      collectingScenarios = true;
-      collectingAcceptance = false;
-      continue;
-    }
-    if (collectingScenarios) {
-      const item = SCENARIO_ITEM.exec(line);
-      if (item) {
-        current.scenarios ??= [];
-        current.scenarios.push({ id: item[1]!, given: item[2]!, when: item[3]!, then: item[4]! });
-        continue;
-      }
-      collectingScenarios = false;
-      // 시나리오 절 바로 다음 줄(보통 "인수 조건:")도 이어서 검사해야 하므로 여기서 멈추지 않고 아래로 흐른다
-    }
-
-    if (ACCEPTANCE_HEADER.test(line)) {
-      collectingAcceptance = true;
-      continue;
-    }
-    if (collectingAcceptance) {
-      const item = ACCEPTANCE_ITEM.exec(line);
-      if (item) {
-        current.acceptance.push(item[1]!);
-        continue;
-      }
-      collectingAcceptance = false;
-      // 인수 조건 절 바로 다음 줄(NFR·추적)도 이어서 검사해야 하므로 여기서 멈추지 않고 아래로 흐른다
-    }
-
-    const nfrLine = NFR_LINE.exec(line);
-    if (nfrLine) {
-      current.nfr = { metric: nfrLine[1]!, threshold: nfrLine[2]!, condition: nfrLine[3]!, method: nfrLine[4]! };
-      continue;
-    }
-
-    const traceLine = TRACE_LINE.exec(line);
-    if (traceLine) {
-      const trace = parseTraceLine(traceLine[1]!);
-      if (trace) current.trace = trace;
-      continue;
-    }
-
-    const manualVerificationLine = MANUAL_VERIFICATION_LINE.exec(line);
-    if (manualVerificationLine) {
-      current.manualVerification = { by: manualVerificationLine[1]!, at: manualVerificationLine[2]!, sha: manualVerificationLine[3]!, note: manualVerificationLine[4]! };
-    }
-  }
-  if (current) drafts.push(current);
-
-  const parsedFromMarkdown = drafts.map((draft) => RequirementSchema.safeParse(draft));
-  if (drafts.length > 0 && parsedFromMarkdown.every((result) => result.success)) {
+  const body = readBody(raw);
+  const parsedFromMarkdown = body.drafts.map((draft) => RequirementSchema.safeParse(draft));
+  if (body.drafts.length > 0 && parsedFromMarkdown.every((result) => result.success)) {
     const requirements = mergeExtendedFieldsFromJsonBlock(
       parsedFromMarkdown.map((result) => (result as z.ZodSafeParseSuccess<Requirement>).data),
-      raw,
+      body.jsonBlock,
     );
-    return { requirements, assumptions: extractAssumptionsSection(lines), manualSteps: extractManualStepsSection(lines) };
+    return { requirements, assumptions: body.assumptions, manualSteps: body.manualSteps };
   }
 
-  const jsonMatch = JSON_BLOCK.exec(raw);
-  if (jsonMatch) {
+  if (body.jsonBlock !== null) {
     try {
-      const json = JSON.parse(jsonMatch[1]!);
+      const json = JSON.parse(body.jsonBlock);
       const shaped = JSON_BLOCK_SHAPE.safeParse(json);
       if (shaped.success) return { requirements: shaped.data.requirements, assumptions: shaped.data.assumptions ?? [], manualSteps: shaped.data.manualSteps ?? [] };
       const legacy = LEGACY_JSON_BLOCK.safeParse(json);

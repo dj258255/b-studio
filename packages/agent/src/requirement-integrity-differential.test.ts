@@ -223,6 +223,23 @@ function tally(name: string): Tally {
   return t;
 }
 
+type DiffShape = { forged: Array<{ id: string; source: string; kind: string; record: string }>; removed: unknown[]; tampered: unknown[] };
+
+/**
+ * 새 구현만 더 잡은 경우가 "실행 전 문서에 이미 있던 글의 기록이 읽기가 올리는 요구사항만 바뀐 것"뿐인지 독립적으로 확인한다:
+ * 옛 위조 항목은 모두 그대로 남고, 늘어난 항목은 모두 added이며 그 글이 실행 전 문서의 같은 출처 기록에 있고, 삭제·조작은 같다.
+ */
+function readerOnlyDifference(before: string | undefined, oldDiff: DiffShape, newDiff: DiffShape): boolean {
+  if (JSON.stringify(oldDiff.removed) !== JSON.stringify(newDiff.removed) || JSON.stringify(oldDiff.tampered) !== JSON.stringify(newDiff.tampered)) return false;
+  const oldKeys = oldDiff.forged.map((entry) => JSON.stringify(entry));
+  const newKeys = newDiff.forged.map((entry) => JSON.stringify(entry));
+  if (!oldKeys.every((key) => newKeys.includes(key))) return false;
+  const extra = newDiff.forged.filter((entry) => !oldKeys.includes(JSON.stringify(entry)));
+  if (extra.length === 0 || before === undefined) return false;
+  const beforeRecords = old.diffVerificationRecords(undefined, before).forged;
+  return extra.every((entry) => entry.kind === 'added' && entry.source === '본문' && beforeRecords.some((f) => f.source === entry.source && f.record === entry.record));
+}
+
 function tamperOf(diff: unknown): boolean {
   const d = diff as { forged: unknown[]; tampered: unknown[] };
   return d.forged.length > 0 || d.tampered.length > 0;
@@ -260,6 +277,11 @@ function runPair(seed: number, count: number, weak?: (before: string | undefined
 
     const oldDiff = run(() => old.diffVerificationRecords(before, after));
     const newDiff = run(() => next.diffVerificationRecords(before, after));
+    if (oldDiff.ok && newDiff.ok && oldDiff.json !== newDiff.json && readerOnlyDifference(before, JSON.parse(oldDiff.json), JSON.parse(newDiff.json))) {
+      // 의도한 차이(ADR-191 3ab, 트러블슈팅 178): 글이 같아도 요구사항 읽기가 확인을 올리는 요구사항이 달라졌으면 위조로 센다. 옛 TS는 놓쳤다
+      bump(t, '읽기가 올리는 요구사항만 달라 더 잡음(의도한 차이)');
+      continue;
+    }
     const same = compareOne(t, 'diffVerificationRecords', oldDiff, newDiff, doc);
     if (oldDiff.ok) {
       const diff = JSON.parse(oldDiff.json) as ReturnType<typeof old.diffVerificationRecords>;

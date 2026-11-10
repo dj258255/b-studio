@@ -3,8 +3,10 @@
 //! 사람이 남긴 수동 검증 기록(본문의 "- 확인:" 줄, 끝의 JSON 블록의 `manualVerification`)과 재확인 판정에 쓰는 `hash`·`revisedAt`을
 //! 에이전트가 쓰기 도구로 위조·삭제했는지, 실행 전 문서와 지금 문서를 견주어 잡는다.
 //!
-//! 이 모듈이 하지 않는 것: `parseRequirementsMarkdown`(zod 스키마로 읽는 요구사항 목록)은 TS에 남는다. 그 결과가 필요한 자리
-//! (`effectiveVerifications`·`requirementIds`)는 TS가 읽어 id 목록으로 넘긴다.
+//! 이 모듈이 하지 않는 것: `parseRequirementsMarkdown`의 zod 스키마 검증은 TS에 남는다. 그 결과가 필요한 자리
+//! (`effectiveVerifications`·`requirementIds`)는 TS가 읽어 id 목록으로 넘긴다. 문서를 읽는 규칙(정규식·줄 나누기·JSON 블록 찾기)은 읽기와 같은 코드를 쓴다
+//! (`requirements_markdown.rs`, ADR-191 3단계 3ab). 기록의 요구사항 id는 이 모듈이 요구사항 헤딩 구역으로 가르지만 읽기는 요구사항이 아닌 `## ` 절을 만나도 직전 요구사항 헤딩을 놓지 않으므로,
+//! 기록마다 읽기가 올리는 요구사항(`reader`)도 함께 적어 두 곳이 같은 글의 기록을 다르게 붙여도 새 확인으로 잡는다(트러블슈팅 178).
 //!
 //! 막는 쪽/여는 쪽: 전부 막는 판정이다(위조를 찾는다). 찾는 쪽이 놓치면 열린다. 그래서
 //! - 문서 글자는 부르는 쪽이 `encodeLoneSurrogates`한 것을 받는다. 기록의 id·값·hash 같음 비교는 그 단사 인코딩 글자로 한다(짝 없는 서로게이트가 U+FFFD로
@@ -22,6 +24,8 @@ use std::sync::LazyLock;
 
 use crate::js::{self, json_quote};
 use crate::js_json::{self, JsObject, JsValue, LoneParseError};
+use crate::requirements::{compile, S};
+use crate::requirements_markdown::{split_lines, without_json_block, HASH2_SPACE_RE as HASH2_SPACE, HEADING_RE as HEADING, JSON_BLOCK_RE as JSON_BLOCK, MANUAL_LINE_RE as MANUAL_LINE};
 
 pub const OUTSIDE: &str = "(요구사항 밖)";
 pub const MANUAL_VERIFICATION_CHECK: &str = "manual-verification";
@@ -31,23 +35,7 @@ pub const UNREADABLE_JSON_RECORD: &str = "(JSON 블록이 너무 깊어 읽지 �
 /// 배열의 `at`(`Array.prototype.at`)을 `String()`으로 바꾼 글. `manualVerification`이 배열이면 JS는 `entry.at`으로 이 글을 읽는다
 const ARRAY_AT_SOURCE: &str = "function at() { [native code] }";
 
-const S: &str = r"[\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]";
-const NS: &str = r"[^\t\n\x0B\x0C\r \x{A0}\x{1680}\x{2000}-\x{200A}\x{2028}\x{2029}\x{202F}\x{205F}\x{3000}\x{FEFF}]";
-const DOT: &str = r"[^\n\r\x{2028}\x{2029}]";
-
-fn compile(pattern: &str) -> Regex {
-    regex::RegexBuilder::new(pattern).size_limit(1 << 30).build().expect("정규식")
-}
-
-static JSON_BLOCK: LazyLock<Regex> = LazyLock::new(|| compile(&format!(r"<!--{S}*b-studio-requirements{S}*((?s:.)*?)-->")));
-static HEADING: LazyLock<Regex> = LazyLock::new(|| compile(&format!(r"^##{S}+(R[1-9][0-9]*)\.{S}*({DOT}+?){S}*$")));
-static HASH2_SPACE: LazyLock<Regex> = LazyLock::new(|| compile(&format!(r"^##{S}")));
 static STATUS_LINE: LazyLock<Regex> = LazyLock::new(|| compile(&format!(r"^-{S}*상태:")));
-static MANUAL_LINE: LazyLock<Regex> = LazyLock::new(|| {
-    compile(&format!(
-        r"^-{S}*확인:{S}*({DOT}+?){S}*·{S}*([0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}){S}*·{S}*체크포인트{S}+({NS}+){S}*·{S}*메모{S}+({DOT}+?){S}*$"
-    ))
-});
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Source {
@@ -129,30 +117,14 @@ struct Scanned {
     id: String,
     source: Source,
     value: String,
+    /// 요구사항 읽기(`parseRequirementsMarkdown`)가 이 기록을 올리는 요구사항 id. 읽기는 요구사항이 아닌 `## ` 절을 만나도 직전 요구사항 헤딩을 놓지 않으므로,
+    /// 그런 절 아래의 줄은 `id`가 `(요구사항 밖)`이어도 읽기에서는 직전 요구사항의 확인이 된다. 읽기가 읽는 곳을 모르고 기록 글만 견주면
+    /// 헤딩을 옮겨 같은 글의 기록을 다른 요구사항에 붙이는 일을 놓친다(트러블슈팅 178). 첫 헤딩 앞의 줄은 읽기가 버리므로 `(요구사항 밖)`이다. JSON 기록은 자기 id다
+    reader: String,
 }
 
 fn canonical(by: &str, at: &str, sha: &str, note: &str) -> String {
     format!("{by} · {at} · 체크포인트 {sha} · 메모 {note}")
-}
-
-/// `text.split(/\r?\n/)`
-fn split_lines(text: &str) -> Vec<&str> {
-    let mut lines: Vec<&str> = text.split('\n').collect();
-    let last = lines.len() - 1;
-    for line in lines.iter_mut().take(last) {
-        if let Some(stripped) = line.strip_suffix('\r') {
-            *line = stripped;
-        }
-    }
-    lines
-}
-
-/// JSON 블록을 뺀 글(`raw.replace(JSON_BLOCK, '')`, 첫 블록만)
-fn without_json_block(raw: &str) -> String {
-    match JSON_BLOCK.find(raw) {
-        Some(m) => format!("{}{}", &raw[..m.start()], &raw[m.end()..]),
-        None => raw.to_owned(),
-    }
 }
 
 /// JSON 블록의 요구사항 항목들과, 이 읽기로는 읽지 못했는지(너무 깊음)
@@ -215,22 +187,24 @@ fn scan_records(raw: Option<&str>) -> (Vec<Scanned>, bool) {
     };
     let mut records = Vec::new();
     let mut current_id = OUTSIDE.to_owned();
+    let mut reader_id = OUTSIDE.to_owned();
     for line in split_lines(&without_json_block(raw)) {
         if let Some(heading) = HEADING.captures(line) {
             current_id = heading[1].to_owned();
+            reader_id = heading[1].to_owned();
             continue;
         }
         if HASH2_SPACE.is_match(line) {
             current_id = OUTSIDE.to_owned();
         }
         if let Some(m) = MANUAL_LINE.captures(line) {
-            records.push(Scanned { id: current_id.clone(), source: Source::Body, value: canonical(&m[1], &m[2], &m[3], &m[4]) });
+            records.push(Scanned { id: current_id.clone(), source: Source::Body, value: canonical(&m[1], &m[2], &m[3], &m[4]), reader: reader_id.clone() });
         }
     }
     let (items, too_deep) = json_items(raw);
     for item in &items {
         if let Some(value) = json_record(item) {
-            records.push(Scanned { id: item_id(item).to_owned(), source: Source::Json, value });
+            records.push(Scanned { id: item_id(item).to_owned(), source: Source::Json, value, reader: item_id(item).to_owned() });
         }
     }
     (records, too_deep)
@@ -252,11 +226,16 @@ pub fn diff_verification_records(before: Option<&str>, after: Option<&str>, befo
     let (before_records, before_too_deep) = scan_records(before);
     let (after_records, after_too_deep) = scan_records(Some(after));
     for record in &after_records {
-        if before_records.iter().any(|entry| entry.id == record.id && entry.source == record.source && entry.value == record.value) {
+        // 같은 자리·같은 글이어도 읽기가 올리는 요구사항이 다르면 새 확인이다(헤딩을 옮겨 `(요구사항 밖)`의 옛 기록을 요구사항에 붙인 것)
+        let same_text = before_records.iter().any(|entry| entry.id == record.id && entry.source == record.source && entry.value == record.value);
+        // 읽기가 버리는 줄(첫 요구사항 헤딩 앞)은 어느 요구사항에도 올라가지 않으므로 글이 같으면 그대로다
+        if same_text && (record.reader == OUTSIDE || before_records.iter().any(|entry| entry.id == record.id && entry.source == record.source && entry.value == record.value && entry.reader == record.reader)) {
             continue;
         }
         let kind = if before_records.iter().any(|entry| entry.id == record.id && entry.source == record.source) { ForgedKind::Changed } else { ForgedKind::Added };
-        diff.forged.push(Forged { id: record.id.clone(), source: record.source.clone(), kind, record: record.value.clone() });
+        // 글만 같고 읽기가 올리는 요구사항이 달라져 잡힌 기록은 그 요구사항의 것으로 알린다(`(요구사항 밖)`으로 알리면 어느 확인이 올랐는지 알 수 없다)
+        let (id, kind) = if same_text { (record.reader.clone(), ForgedKind::Added) } else { (record.id.clone(), kind) };
+        diff.forged.push(Forged { id, source: record.source.clone(), kind, record: record.value.clone() });
     }
     // 읽지 못한 JSON 블록 안의 기록은 볼 수 없다. 통과로 이어지므로 위조로 센다
     if before_too_deep || after_too_deep {
@@ -390,7 +369,7 @@ fn quote_encoded(text: &str) -> String {
     out
 }
 
-fn pretty(value: &JsValue) -> String {
+pub(crate) fn pretty(value: &JsValue) -> String {
     js_json::stringify_indent(value, 2, &quote_encoded)
 }
 
