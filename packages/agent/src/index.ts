@@ -20,6 +20,7 @@ export {
   describeAccount,
   describeResultFailure,
   fetchClaudeCodeModels,
+  noResultMessage,
   preflightClaudeCode,
   runClaudeCodeAgent,
   type ClaudeCodeAccount,
@@ -27,7 +28,7 @@ export {
   type ClaudeCodeRunOptions,
   type ModelInfo,
 } from './claude-code-runner';
-export type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-sdk';
+export { spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
 export { cliPreflightFailure, describeCliError, type CliPreflightFailure } from './cli-failure';
 export {
   preflightCodex,

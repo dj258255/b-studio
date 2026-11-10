@@ -11,21 +11,10 @@
  *    옵션(도구·설정·MCP·세션 없음)과 실패 처리도 그 함수가 정한다 — 여기서는 이름만 벤치 말로 붙인다
  *  - codex 등: 시작 전에 거부한다(backends.assertContractsBackend). 한 번 호출 경로를 만들지 않았다.
  *
- * 실제 모델 호출·Docker 없이 테스트할 수 있게 SDK를 주입받는다(`ContractsSdk`) — plain-baseline과 같은 방식이다.
+ * 실제 모델 호출·Docker 없이 테스트할 수 있게 실행 파일을 주입받는다(`command`·`commandArgs`, 가짜 CLI). Agent SDK는 쓰지 않는다.
  */
 import type { ContractAsk } from '@b-studio/agent';
-import {
-  claudeCodeAsk,
-  DEFAULT_CLAUDE_CODE_ASK_SDK,
-  type ClaudeCodeAskOptions,
-  type ClaudeCodeAskQuery,
-  type ClaudeCodeAskSdk,
-} from '../../lib/server/claude-code-ask';
-
-/** 실제 SDK와 가짜를 바꿔 끼우는 지점(공용 함수의 SDK 주입 지점과 같다) */
-export type ContractsSdk = ClaudeCodeAskSdk;
-export type ContractsQuery = ClaudeCodeAskQuery;
-export const DEFAULT_CONTRACTS_SDK = DEFAULT_CLAUDE_CODE_ASK_SDK;
+import { claudeCodeAsk, type ClaudeCodeAskOptions } from '../../lib/server/claude-code-ask';
 
 export type ClaudeCodeContractOptions = ClaudeCodeAskOptions;
 

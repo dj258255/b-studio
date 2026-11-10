@@ -24,6 +24,8 @@ export interface ToolServerOptions {
   /** 도구 실행을 러너에 넘긴다. 순서 보장과 이벤트 알림은 부르는 쪽이 맡는다 */
   run: (name: string, args: unknown) => Promise<ToolOutcome>;
   name?: string;
+  /** 스키마의 required에 없는 인자를 선택으로 연다(zodShape의 honorRequired). 선택 인자가 있는 도구(탐색형 QA)가 쓴다 */
+  honorRequired?: boolean;
   /**
    * 루프백 말고도 받을 Host 이름. 컨테이너 안의 CLI는 호스트를 `host.docker.internal`로 부르므로 그 이름을 여기에 넣는다.
    * 넣지 않으면 루프백 이름만 받는다
@@ -36,10 +38,10 @@ export interface ToolServerOptions {
  * Codex CLI는 `-c mcp_servers.<이름>.url=...`로 이 주소를 받고, 토큰은 환경 변수로만 넘긴다(파일에 쓰지 않는다).
  * 127.0.0.1의 임의 포트에만 열고, 실행마다 새 bearer 토큰을 만들어 그 토큰이 맞는 요청만 받는다.
  */
-export async function startToolServer({ specs, run, name = 'b-studio', allowedHosts = [] }: ToolServerOptions): Promise<ToolServer> {
+export async function startToolServer({ specs, run, name = 'b-studio', allowedHosts = [], honorRequired = false }: ToolServerOptions): Promise<ToolServer> {
   const token = randomBytes(24).toString('hex');
   const http = createServer((req, res) => {
-    void handle(req, res, { specs, run, name, token, allowedHosts });
+    void handle(req, res, { specs, run, name, token, allowedHosts, honorRequired });
   });
   http.on('clientError', (_error, socket) => socket.destroy());
 
@@ -76,10 +78,11 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Requir
   for (const spec of typeof options.specs === 'function' ? options.specs() : options.specs) {
     server.registerTool(
       spec.name,
-      { description: spec.description, inputSchema: zodShape(spec.input_schema as { properties?: unknown }) },
+      { description: spec.description, inputSchema: zodShape(spec.input_schema as { properties?: unknown; required?: unknown }, { honorRequired: options.honorRequired }) },
       async (args: unknown) => {
         const outcome = await options.run(spec.name, args);
-        return { content: [{ type: 'text' as const, text: outcome.content }], isError: !outcome.ok };
+        const images = (outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));
+        return { content: [{ type: 'text' as const, text: outcome.content }, ...images], isError: !outcome.ok };
       },
     );
   }

@@ -1,8 +1,7 @@
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { McpServerConfig, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-sdk';
+import { fakeClaudeCli } from './fake-claude-cli';
 import { runClaudeCodeExploreQa } from './explore-qa-claude-code';
 import { buildQaSystemPrompt, buildQaTools, judge, QaBrowser, QaReport, runExploreQa, type QaDiagnostics, type QaFinding } from './explore-qa';
 import { ScriptedModelClient } from './scripted-client';
@@ -385,43 +384,22 @@ describe('judge: 예상된 거절 건수', () => {
 
 type Step = { tool: string; input: Record<string, unknown> };
 
-function fakeSdk(steps: Step[]) {
-  let tools: Array<SdkMcpToolDefinition<any>> = [];
-  const texts: string[] = [];
-  const sdk: ClaudeCodeSdk = {
-    createSdkMcpServer(config) {
-      tools = config.tools ?? [];
-      return { type: 'sdk', name: config.name, instance: {} } as unknown as McpServerConfig;
-    },
-    query({ prompt }) {
-      async function* run(): AsyncGenerator<SDKMessage> {
-        for await (const _user of prompt) {
-          for (const step of steps) {
-            const handler = tools.find((definition) => definition.name === step.tool);
-            if (!handler) throw new Error(`등록되지 않은 도구: ${step.tool}`);
-            const outcome = (await handler.handler(step.input, {})) as { content: Array<{ text?: string }> };
-            texts.push(outcome.content.map((block) => block.text ?? '').join('\n'));
-          }
-          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'm1', content: [], usage: { input_tokens: 1, output_tokens: 1 } } } as unknown as SDKMessage;
-          yield { type: 'result', subtype: 'success', is_error: false, result: '', modelUsage: {} } as unknown as SDKMessage;
-        }
-      }
-      return Object.assign(run(), { accountInfo: async () => ({}), supportedModels: async () => [], interrupt: async () => {}, close: () => {} }) as unknown as ClaudeCodeQuery;
-    },
-  };
-  return { sdk, texts };
+/** 가짜 CLI가 사용자 메시지마다 steps를 MCP 서버로 보낸다. texts는 도구 결과의 글이다 */
+function fakeCli(steps: Step[]) {
+  const fake = fakeClaudeCli({ turns: [steps.map((step) => ({ tool: step.tool, input: step.input }))] });
+  return { cli: { ...fake.cli, stop: { termAfterMs: 50, killAfterMs: 500 } }, texts: () => fake.logs()[0]!.tools.map((entry) => entry.text) };
 }
 
 describe('예상된 거절 (로컬 CLI 백엔드)', { timeout: 60_000 }, () => {
   it('api 백엔드와 같은 규칙을 쓴다: 선언한 조작의 4xx는 목록으로 옮긴다', async () => {
-    const { sdk } = fakeSdk([
+    const { cli } = fakeCli([
       { tool: 'qa_snapshot', input: {} },
       { tool: 'qa_expect_rejection', input: { reason: '로그인 없이 주문' } },
       { tool: 'qa_click', input: { ref: 'e2' } },
       { tool: 'qa_report_issue', input: { severity: 'minor', summary: '여백' } },
       { tool: 'qa_finish', input: { success: true, summary: '끝' } },
     ]);
-    const result = await runClaudeCodeExploreQa({ goal: { goal: '눌러 본다', startPath: '/page' }, startUrl: `${base}/page`, allowedOrigins: [base], cwd: process.cwd(), sdk });
+    const result = await runClaudeCodeExploreQa({ goal: { goal: '눌러 본다', startPath: '/page' }, startUrl: `${base}/page`, allowedOrigins: [base], cwd: process.cwd(), ...cli });
     expect(result.status).toBe('pass');
     expect(result.expectedRejections[0]).toMatchObject({ actionIndex: 2, reason: '로그인 없이 주문', requests: [{ status: 400, url: `${base}/api/order` }] });
     expect(result.reason).toContain('예상된 거절 1건');
@@ -429,7 +407,7 @@ describe('예상된 거절 (로컬 CLI 백엔드)', { timeout: 60_000 }, () => {
   });
 
   it('선언하지 않은 실패는 fail 사유로 남고, 거절이 없으면 도구 결과로 바로 알린다', async () => {
-    const { sdk, texts } = fakeSdk([
+    const { cli, texts } = fakeCli([
       { tool: 'qa_snapshot', input: {} },
       { tool: 'qa_click', input: { ref: 'e1' } },
       { tool: 'qa_wait', input: { ms: 500 } },
@@ -437,9 +415,9 @@ describe('예상된 거절 (로컬 CLI 백엔드)', { timeout: 60_000 }, () => {
       { tool: 'qa_click', input: { ref: 'e4' } },
       { tool: 'qa_finish', input: { success: true, summary: '끝' } },
     ]);
-    const result = await runClaudeCodeExploreQa({ goal: { goal: '눌러 본다', startPath: '/page' }, startUrl: `${base}/page`, allowedOrigins: [base], cwd: process.cwd(), sdk });
+    const result = await runClaudeCodeExploreQa({ goal: { goal: '눌러 본다', startPath: '/page' }, startUrl: `${base}/page`, allowedOrigins: [base], cwd: process.cwd(), ...cli });
     expect(result.unmetRejections).toHaveLength(1);
-    expect(texts.join('\n')).toContain('거절될 것으로 선언한 조작에서 거절 응답이 없었습니다');
+    expect(texts().join('\n')).toContain('거절될 것으로 선언한 조작에서 거절 응답이 없었습니다');
     expect(result.status).toBe('fail');
     expect(result.reason).toContain('실패한 요청 1건');
   });
