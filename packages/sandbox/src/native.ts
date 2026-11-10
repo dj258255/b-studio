@@ -494,6 +494,27 @@ interface NativeGuard {
   checkpointIsBackupId(text: string): boolean;
   checkpointPullRequestTarget(listed: string, baseRef: string, infoBase: string): string;
   checkpointGitEnvKeep(keys: string[]): boolean[];
+  // ── agent: 작업 계획·요구사항 검증 기록 무결성(3단계 3x). 막는 판정이다. 글자는 모두 encodeLoneSurrogates해서 보내고 결과의 글자는 decodeLoneSurrogates로 푼다(짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 글자가 같아지는 것을 막는다).
+  // taskPlanLanes의 tasksJson은 [{ id, dependsOn, backend?, model?, paths }](zod가 읽은 값), 결과는 { error } | { lanes: [{ id, tasks: 입력 순번 목록, paths }] }. 모양이 어긋나면 던진다.
+  // req*: before·after는 문서 글자(없으면 null), *Effective는 그 문서에서 사람 확인이 있는 요구사항 id(읽은 순서), afterIds는 지금 문서의 모든 요구사항 id(둘 다 TS가 parseRequirementsMarkdown으로 읽는다).
+  // reqIntegrityRestore는 { unchanged: true } | { needsIds: 글 }(그 글의 요구사항 id를 textIds로 주고 다시 부른다) | { text }
+  taskPlanLimits(maxLanes: string | null | undefined, maxTasks: string | null | undefined): string;
+  taskPlanLanes(tasksJson: string, maxTasks: number, maxLanes: number, backslashSep: boolean): string;
+  taskPlanIsInScope(file: string, paths: string[], backslashSep: boolean): boolean;
+  reqIntegrityDiff(before: string | null | undefined, after: string | null | undefined, beforeEffective: string[], afterEffective: string[], afterIds: string[]): string;
+  reqIntegrityHasTamper(diffJson: string): boolean;
+  reqIntegrityDescribeTamper(diffJson: string): string[];
+  reqIntegrityDescribeRemoved(diffJson: string): string[];
+  reqIntegrityTamperedIds(diffJson: string): string[];
+  reqIntegrityRestore(
+    before: string | null | undefined,
+    after: string,
+    beforeEffective: string[],
+    afterEffective: string[],
+    afterIds: string[],
+    textIds: string[] | null | undefined,
+  ): string;
+  reqIntegrityReview(before: string | null | undefined, after: string | null | undefined, beforeEffective: string[], afterEffective: string[], afterIds: string[]): string;
 }
 
 export interface NativeHostPty {

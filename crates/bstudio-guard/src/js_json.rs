@@ -52,6 +52,15 @@ impl JsObject {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut JsValue> {
+        self.entries.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    /// `delete obj[key]`
+    pub fn remove(&mut self, key: &str) {
+        self.entries.retain(|(k, _)| k != key);
+    }
+
     pub fn contains_key(&self, key: &str) -> bool {
         self.get(key).is_some()
     }
@@ -196,13 +205,30 @@ pub fn js_less(a: &JsValue, b: &JsValue) -> bool {
 
 /// `JSON.parse`. 문법 밖이면 이유를 돌려준다
 pub fn parse(text: &str) -> Result<JsValue, String> {
-    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, nul_keys: false, encode_lone: false, too_deep: false };
     p.document()
+}
+
+/// 문서 안에 든 JSON 블록을 `JSON.parse`처럼 읽는다(요구사항 검증 기록 무결성, ADR-191 3x). `parse`와 다른 점 셋:
+/// - 글자는 `encodeLoneSurrogates`한 것이고, `\ud800` 같은 짝 없는 서로게이트 이스케이프와 예약 글자(U+E000..U+E01F) 이스케이프도 같은 인코딩으로 푼다(U+FFFD로 합치지 않는다)
+/// - NUL로 시작하는 키도 받는다(JS는 받는다. 거절하면 그 안의 기록을 놓친다)
+/// - 중첩이 `MAX_DEPTH`를 넘어 읽지 못한 것은 `TooDeep`으로 돌려준다(JS는 읽는다: 모른다는 뜻이다)
+pub fn parse_lone_encoded(text: &str) -> Result<JsValue, LoneParseError> {
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, nul_keys: true, encode_lone: true, too_deep: false };
+    p.document().map_err(|_| if p.too_deep { LoneParseError::TooDeep } else { LoneParseError::Invalid })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoneParseError {
+    /// JS도 읽지 못하는 글자
+    Invalid,
+    /// 이 읽기가 지원하는 깊이를 넘었다(JS는 읽는다)
+    TooDeep,
 }
 
 /// Node와 주고받은 값(`encode`한 것)을 읽는다. `parse`와 같되 `NaN`·`Infinity` 표시 객체를 수로 바꾼다
 pub fn parse_native(text: &str) -> Result<JsValue, String> {
-    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: true };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: true, nul_keys: false, encode_lone: false, too_deep: false };
     p.document()
 }
 
@@ -219,6 +245,49 @@ pub fn stringify(value: &JsValue) -> String {
     let mut out = String::new();
     write_json(value, &mut out);
     out
+}
+
+/// `JSON.stringify(값, null, indent)`. `quote`는 문자열(키 포함)을 따옴표까지 쓰는 함수다. 빈 배열·객체는 `[]`·`{}`, 아니면 항목마다 줄을 바꾼다
+pub fn stringify_indent(value: &JsValue, indent: usize, quote: &dyn Fn(&str) -> String) -> String {
+    let mut out = String::new();
+    write_indent(value, indent, 0, quote, &mut out);
+    out
+}
+
+fn write_indent(value: &JsValue, indent: usize, depth: usize, quote: &dyn Fn(&str) -> String, out: &mut String) {
+    let pad = |n: usize| " ".repeat(indent * n);
+    match value {
+        JsValue::Str(s) => out.push_str(&quote(s)),
+        JsValue::Arr(items) if !items.is_empty() => {
+            out.push_str("[\n");
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&pad(depth + 1));
+                write_indent(item, indent, depth + 1, quote, out);
+            }
+            out.push('\n');
+            out.push_str(&pad(depth));
+            out.push(']');
+        }
+        JsValue::Obj(o) if !o.entries().is_empty() => {
+            out.push_str("{\n");
+            for (i, (k, v)) in o.entries_js_order().into_iter().enumerate() {
+                if i > 0 {
+                    out.push_str(",\n");
+                }
+                out.push_str(&pad(depth + 1));
+                out.push_str(&quote(k));
+                out.push_str(": ");
+                write_indent(v, indent, depth + 1, quote, out);
+            }
+            out.push('\n');
+            out.push_str(&pad(depth));
+            out.push('}');
+        }
+        other => write_json(other, out),
+    }
 }
 
 fn write_json(value: &JsValue, out: &mut String) {
@@ -298,6 +367,9 @@ struct Parser<'a> {
     text: &'a str,
     i: usize,
     native: bool,
+    nul_keys: bool,
+    encode_lone: bool,
+    too_deep: bool,
 }
 
 impl Parser<'_> {
@@ -323,6 +395,7 @@ impl Parser<'_> {
 
     fn value(&mut self, depth: usize) -> Result<JsValue, String> {
         if depth > MAX_DEPTH {
+            self.too_deep = true;
             return self.err("너무 깊은 중첩");
         }
         match self.s.get(self.i) {
@@ -434,11 +507,11 @@ impl Parser<'_> {
                                     let cp = 0x10000 + ((first - 0xD800) << 10) + (second - 0xDC00);
                                     out.push(char::from_u32(cp).unwrap_or('\u{FFFD}'));
                                 } else {
-                                    out.push('\u{FFFD}');
+                                    self.push_unit(&mut out, first);
                                     self.i = save;
                                 }
                             } else {
-                                out.push(char::from_u32(first).unwrap_or('\u{FFFD}'));
+                                self.push_unit(&mut out, first);
                             }
                         }
                         _ => return self.err("알 수 없는 이스케이프"),
@@ -447,6 +520,21 @@ impl Parser<'_> {
                 Some(_) => return self.err("문자열 안의 제어 문자"),
             }
         }
+    }
+
+    /// `\u` 이스케이프 하나가 만든 코드 단위를 넣는다. 짝 없는 서로게이트는 U+FFFD(인코딩 읽기에서는 단사 인코딩), 예약 글자도 인코딩 읽기에서는 인코딩한다
+    fn push_unit(&self, out: &mut String, unit: u32) {
+        if self.encode_lone {
+            if (0xD800..0xE000).contains(&unit) {
+                out.push_str(&js::encode_lone_unit(unit));
+                return;
+            }
+            if let Some(c) = char::from_u32(unit) {
+                out.push_str(&js::encode_reserved_char(c));
+                return;
+            }
+        }
+        out.push(char::from_u32(unit).unwrap_or('\u{FFFD}'));
     }
 
     fn array(&mut self, depth: usize) -> Result<JsValue, String> {
@@ -486,7 +574,7 @@ impl Parser<'_> {
                 return self.err("객체의 키");
             }
             let key = self.string()?;
-            if key.starts_with('\u{0}') && !(self.native && key == NONFINITE_KEY) {
+            if key.starts_with('\u{0}') && !self.nul_keys && !(self.native && key == NONFINITE_KEY) {
                 return self.err("NUL로 시작하는 키는 받지 않습니다");
             }
             self.ws();
