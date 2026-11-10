@@ -18,7 +18,7 @@
  * 마크다운 읽기·쓰기(zod 검증이 끼어 있다), 테스트 파일 스캔(발견기 캐시), 추적 매트릭스 조립과, 같은 이름·시그니처로
  * 네이티브 모듈을 부르는 얇은 껍데기만 남았다. 옛 구현은 `requirements-legacy.ts`에 시험용으로만 남아 있다.
  */
-import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
+import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';
 import { summarizeJsonContent, summarizeLargeJsonFile } from './json-summary';
 import type { AgentUsage } from './loop';
@@ -506,12 +506,9 @@ export function buildRecommendationUserPrompt(questions: readonly string[], spec
 
 /** specQuote가 실제로 specText 안에 있는 문장인지(공백 정규화 후 부분 문자열로) 확인한다 — 지어낸 인용을 막는다 */
 export function verifySpecQuote(specQuote: string, specText: string): boolean {
-  // 짝 없는 서로게이트는 Rust 경계에서 모두 U+FFFD가 되어 서로 다른 둘이 같아진다 — 인용이 "있다"로 뒤집히지 않도록 글자마다 다른 표시로 바꿔 보낸다
-  const keep = (text: string) => text.replace(LONE_SURROGATE, (unit) => `\ue000${unit.charCodeAt(0).toString(16)}\ue001`);
-  return native.reqCoreVerifySpecQuote(keep(specQuote), keep(specText));
+  // 짝 없는 서로게이트는 Rust 경계에서 모두 U+FFFD가 되어 서로 다른 둘이 같아진다 — 인용이 "있다"로 뒤집히지 않도록 견줄 두 글자를 단사로 바꿔 보낸다
+  return native.reqCoreVerifySpecQuote(encodeLoneSurrogates(specQuote), encodeLoneSurrogates(specText));
 }
-
-const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g;
 
 /**
  * basis가 'spec'인데 specQuote가 없거나 specText에 실제로 없으면(모델이 지어낸 인용) 'practice'로 강등하고

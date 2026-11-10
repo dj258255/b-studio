@@ -2532,3 +2532,73 @@ pub fn design_pipeline_derive_result(
     ]);
     js_json::to_native(&value)
 }
+
+// ── 탐색 QA의 판정·변환·프롬프트(ADR-191 3p). 구조가 있는 입력은 encodeNative한 JSON 문자열. TS 껍데기: packages/agent/src/explore-qa.ts
+use bstudio_guard::explore_qa;
+
+#[napi]
+pub fn explore_qa_diagnostics_count(console_errors: f64, page_errors: f64, failed_requests: f64, accessibility_violations: f64, horizontal_overflow_px: f64) -> f64 {
+    explore_qa::diagnostics_count(console_errors, page_errors, failed_requests, accessibility_violations, horizontal_overflow_px)
+}
+
+#[napi]
+pub fn explore_qa_match_score(name: String, text: String, role: String, test_id: Option<String>, tag: String, needle: String) -> f64 {
+    explore_qa::match_score(&name, &text, &role, test_id.as_deref(), &tag, &needle)
+}
+
+#[napi]
+pub fn explore_qa_describe_scroll_position(y: f64, max: f64, at_bottom: bool, at_top: bool) -> String {
+    explore_qa::describe_scroll_position(y, max, at_bottom, at_top)
+}
+
+/// result: `{ url, title, elements: [{ ref, role, name, testId? }], truncated }`. 모양이 어긋나면 던진다
+#[napi]
+pub fn explore_qa_format_snapshot(result_json: String, max_elements: f64) -> Result<String> {
+    fail(explore_qa::format_snapshot(&input(&result_json, "스냅샷")?, max_elements))
+}
+
+#[napi]
+pub fn explore_qa_normalize_ref(value: String) -> Option<String> {
+    explore_qa::normalize_ref(&value)
+}
+
+#[napi]
+pub fn explore_qa_is_inspection_goal(goal_text: String) -> bool {
+    explore_qa::is_inspection_goal(&goal_text)
+}
+
+#[napi]
+pub fn explore_qa_build_system_prompt(goal_text: Option<String>) -> String {
+    explore_qa::build_qa_system_prompt(goal_text.as_deref())
+}
+
+/// goal: `{ goal, startPath, confirmText? }`
+#[napi]
+pub fn explore_qa_build_user_prompt(goal_json: String) -> Result<String> {
+    Ok(explore_qa::build_qa_user_prompt(&input(&goal_json, "탐색 목표")?))
+}
+
+#[napi]
+pub fn explore_qa_build_wrap_up_prompt(reason: String) -> String {
+    explore_qa::build_wrap_up_prompt(&reason)
+}
+
+/// 입력은 `explore_qa::judge` 문서의 모양. `{status, reason}` JSON. review.findings가 배열이 아니면 던진다
+#[napi]
+pub fn explore_qa_judge(input_json: String, page_text: String) -> Result<String> {
+    let (status, reason) = fail(explore_qa::judge(&input(&input_json, "판정 입력")?, &page_text))?;
+    Ok(format!(r#"{{"status":{},"reason":{}}}"#, js::json_quote(&status), js::json_quote(&reason)))
+}
+
+/// actions: `[{ index, tool, ok, stableSelector?, text?, key?, forText? }]`. `{steps, skipped}` JSON(encodeNative 형식). 배열이 아니면 던진다
+#[napi]
+pub fn explore_qa_to_page_check_steps(actions_json: String) -> Result<String> {
+    let steps = fail(explore_qa::to_page_check_steps(&input(&actions_json, "행동 기록")?))?;
+    Ok(js_json::to_native(&steps))
+}
+
+/// element: `{ ref, role, name, testId? }`
+#[napi]
+pub fn explore_qa_format_element(element_json: String) -> Result<String> {
+    Ok(explore_qa::format_element(&input(&element_json, "요소")?))
+}
