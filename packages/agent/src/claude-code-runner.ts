@@ -1,28 +1,23 @@
-import {
-  createSdkMcpServer,
-  query,
-  tool,
-  type AccountInfo,
-  type McpServerConfig,
-  type ModelInfo,
-  type Options,
-  type SDKMessage,
-  type SDKResultMessage,
-  type SDKUserMessage,
-  type SdkMcpToolDefinition,
-} from '@anthropic-ai/claude-agent-sdk';
-import { z } from 'zod';
+import { spawn } from 'node:child_process';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { Effort } from './anthropic-client';
+import { childEnv, resolveCliCommand, spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
+import { startToolServer, type ToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection, withLanguageReminder } from './prompts';
+import { serialQueue } from './tool-schema';
 import { createToolResultCache } from './tool-output';
 import { buildTools, createMismatchLog, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuestion, type BoardAccess, type ToolContext } from './tools';
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
+
+export { serialQueue, zodShape } from './tool-schema';
 
 const SERVER = 'b-studio';
 /** 화면 표기. Agent SDK 브랜딩 가이드는 제품 안에서 "Claude Code"라는 이름을 쓰지 않도록 한다 */
@@ -34,17 +29,21 @@ const BACKEND = '로컬 Claude Agent';
  */
 export const DEFAULT_CLAUDE_CODE_EFFORT: Effort = 'high';
 /**
- * 자동 압축 기준 창(토큰). 이어받은 대화가 이 크기에 닿으면 SDK가 앞부분을 요약한다(ADR-151).
- * 200,000은 200K 창 모델의 표준 동작과 같은 수준이다. 1M 창 모델은 SDK 기본이 훨씬 커서 대화가 수십만 토큰까지 자란다.
+ * 자동 압축 기준 창(토큰). 이어받은 대화가 이 크기에 닿으면 CLI가 앞부분을 요약한다(ADR-151).
+ * 200,000은 200K 창 모델의 표준 동작과 같은 수준이다. 1M 창 모델은 CLI 기본이 훨씬 커서 대화가 수십만 토큰까지 자란다.
  */
 export const DEFAULT_COMPACT_WINDOW = 200_000;
 /** 이보다 작은 창은 압축이 너무 자주 일어나 쓸모가 없으므로 무시한다 */
 export const MIN_COMPACT_WINDOW = 50_000;
 export const COMPACT_WINDOW_ENV = 'B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW';
-const SDK_COMPACT_WINDOW_ENV = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
+/** CLI가 읽는 자동 압축 창 환경 변수(https://code.claude.com/docs/en/env-vars) */
+const CLI_COMPACT_WINDOW_ENV = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW';
+/** 이어받을 대화의 id는 CLI가 준 값(UUID)만 받는다. 아니면 인자에 넣지 않는다 */
+const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MCP_TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 
 export interface CompactWindowSetting {
-  /** SDK에 넘길 창 크기. null이면 넘기지 않아 SDK 기본 동작을 쓴다 */
+  /** CLI에 넘길 창 크기. null이면 넘기지 않아 CLI 기본 동작을 쓴다 */
   window: number | null;
   /** 값을 무시하고 기본값을 쓴 경우의 안내 */
   ignored?: string;
@@ -113,21 +112,18 @@ export interface NetworkRetryOptions {
   baseDelayMs?: number;
 }
 
-/** 실제 SDK와 테스트용 가짜를 바꿔 끼우는 지점 */
-export interface ClaudeCodeSdk {
-  query(params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }): ClaudeCodeQuery;
-  createSdkMcpServer(options: { name: string; version?: string; tools?: Array<SdkMcpToolDefinition<any>> }): McpServerConfig;
+/**
+ * `claude -p --output-format stream-json`의 모델 목록 한 항목. 이전에는 Agent SDK의 `supportedModels()`가 주던 꼴이다.
+ * 공개 CLI 입출력에는 모델 목록을 묻는 방법이 없어 지금은 화면의 알려진 표가 같은 꼴을 직접 쓴다.
+ */
+export interface ModelInfo {
+  /** 모델 별칭(`sonnet`)이나 id. 빈 문자열이면 계정의 기본 모델 */
+  value: string;
+  resolvedModel: string;
+  displayName: string;
+  description: string;
+  supportedEffortLevels?: string[];
 }
-
-export interface ClaudeCodeQuery extends AsyncIterable<SDKMessage> {
-  accountInfo(): Promise<AccountInfo>;
-  /** 로그인한 계정이 실제로 쓸 수 있는 모델 목록(별칭이 풀리는 id·설명·노력 단계 지원 여부 포함) */
-  supportedModels(): Promise<ModelInfo[]>;
-  interrupt(): Promise<unknown>;
-  close(): void;
-}
-
-const DEFAULT_SDK: ClaudeCodeSdk = { query, createSdkMcpServer };
 
 export interface ClaudeCodeAccount {
   subscriptionType?: string;
@@ -138,17 +134,22 @@ export interface ClaudeCodeAccount {
 export interface ClaudeCodeRunOptions extends Omit<RunAgentOptions, 'client' | 'conversation' | 'escalation'> {
   /**
    * 게이트 실패 서명이 `sameSignatureTimes`번 반복되면 다음 게이트 재시도부터 `to` 모델로 돈다.
-   * 모델은 query를 열 때 정해지므로, 같은 세션을 이어받는 새 query를 모델만 바꿔 연다.
+   * 모델은 프로세스를 띄울 때 정해지므로, 같은 세션을 이어받는 새 프로세스를 모델만 바꿔 띄운다.
    */
   escalation?: EscalationPolicy;
-  /** 이전 요청을 처리한 Claude Code 세션. 넘기면 그 대화를 이어받는다 */
+  /** 이전 요청을 처리한 Claude Code 세션(CLI가 준 UUID). 넘기면 그 대화를 이어받는다 */
   resume?: string;
   /** 넘기지 않으면 로그인한 계정의 기본 모델을 쓴다 */
   model?: string;
   effort?: Effort;
   /** preflight에서 확인한 인증 정보. 화면에 어떤 계정으로 실행하는지 표시한다 */
   account?: ClaudeCodeAccount;
-  sdk?: ClaudeCodeSdk;
+  /** 실행할 CLI 실행 파일(기본 `claude`). 테스트가 가짜 CLI를 끼우는 자리. 셸을 거치지 않고 인자 배열로 넘긴다 */
+  command?: string;
+  /** 실행 파일 바로 뒤, 이 러너가 붙이는 인자 앞에 오는 인자(가짜 CLI의 스크립트 경로 등) */
+  commandArgs?: readonly string[];
+  /** 자식 프로세스를 끝낼 때 기다리는 시간(테스트 전용 주입점). 기본: 입력을 닫고 10초 뒤 SIGTERM, 5초 뒤 SIGKILL */
+  stop?: CliStopOptions;
   /** 일시적 네트워크 오류(ADR-142)를 재시도할 때의 대기 전략. 넘기지 않으면 기본 상한·실제 대기를 쓴다(테스트 전용 주입점) */
   networkRetry?: NetworkRetryOptions;
   /** 환경 변수. 넘기지 않으면 process.env를 쓴다(테스트 전용 주입점) */
@@ -163,10 +164,11 @@ export interface ClaudeCodeResult extends AgentResult {
 /**
  * 이 PC에 로그인한 Claude Code로 요청을 처리한다. API 키가 없어도 개인 구독으로 돌릴 수 있다.
  *
+ * `claude` CLI를 공개 입출력(`-p --input-format stream-json --output-format stream-json`)으로 띄운다. Agent SDK는 쓰지 않는다(ADR-194).
  * Claude Code의 기본 도구(Bash, Read, Edit …)와 사용자 설정·훅·플러그인은 모두 끄고,
- * b-studio 도구만 MCP 서버로 넘긴다. 모델이 작업 공간 규칙과 샌드박스를 우회해 호스트를 건드리지 못하게 하기 위해서다.
+ * b-studio 도구만 루프백 HTTP MCP 서버로 넘긴다. 모델이 작업 공간 규칙과 샌드박스를 우회해 호스트를 건드리지 못하게 하기 위해서다.
  * 완료 판정은 직접 만든 루프와 같은 검증 게이트가 한다. 모델이 턴을 끝낼 때마다(result 메시지) 게이트를 돌리고,
- * 실패하면 결과를 다음 사용자 메시지로 넣는다.
+ * 실패하면 결과를 다음 사용자 메시지(표준 입력의 한 줄)로 넣는다.
  */
 export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise<ClaudeCodeResult> {
   const {
@@ -188,7 +190,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     model,
     effort = DEFAULT_CLAUDE_CODE_EFFORT,
     account,
-    sdk = DEFAULT_SDK,
+    command = 'claude',
+    commandArgs = [],
+    stop: stopOptions,
     interactive = false,
     intent = 'build',
     research = false,
@@ -197,12 +201,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     env: processEnv = process.env,
   } = options;
   signal?.throwIfAborted();
-  // 자동 압축 기준 창. 사용자가 프로세스 환경에 직접 준 값은 덮어쓰지 않는다. 모든 query(재시도·승격으로 다시 여는 것 포함)가 이 env를 쓴다
-  const compact = processEnv[SDK_COMPACT_WINDOW_ENV]?.trim() ? { window: null } : resolveCompactWindow(processEnv[COMPACT_WINDOW_ENV]);
-  const queryEnv: Record<string, string | undefined> = {
+  // 자동 압축 기준 창. 사용자가 프로세스 환경에 직접 준 값은 덮어쓰지 않는다. 모든 프로세스(재시도·승격으로 다시 띄우는 것 포함)가 이 env를 쓴다.
+  // (SDK가 붙이던 CLAUDE_AGENT_SDK_CLIENT_APP은 공식 환경 변수 문서에 없어 넘기지 않는다 — ADR-189)
+  const compact = processEnv[CLI_COMPACT_WINDOW_ENV]?.trim() ? { window: null } : resolveCompactWindow(processEnv[COMPACT_WINDOW_ENV]);
+  const queryEnv: NodeJS.ProcessEnv = {
     ...processEnv,
-    CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio',
-    ...(compact.window !== null ? { [SDK_COMPACT_WINDOW_ENV]: String(compact.window) } : {}),
+    ...(compact.window !== null ? { [CLI_COMPACT_WINDOW_ENV]: String(compact.window) } : {}),
   };
   if (compact.ignored) onEvent({ type: 'warning', message: compact.ignored });
   const ask = intent === 'ask';
@@ -277,35 +281,36 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
   // Claude Code는 읽기 도구를 동시에 부를 수 있다. 직접 만든 루프처럼 모델이 낸 순서대로 하나씩 실행한다
   const serial = serialQueue();
-  // 실행 지표. 모델 응답 대기는 SDK 안에서 일어나 이 러너가 직접 재지 못한다. SDK가 result에 실어 주는 API 호출 시간 합(duration_api_ms)을
+  // 실행 지표. 모델 응답 대기는 CLI 안에서 일어나 이 러너가 직접 재지 못한다. CLI가 result에 실어 주는 API 호출 시간 합(duration_api_ms)을
   // modelMs로 쓰고, result가 한 번도 오지 않으면 비워 둔다("재지 않음"). 전체 시간에서 도구·게이트 시간을 뺀 추측값은 넣지 않는다
   const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
-  const definitions = specs.map((spec) =>
-    tool(spec.name, spec.description ?? '', zodShape(spec.input_schema), (args) =>
-      serial(async () => {
-        // 취소한 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
-        signal?.throwIfAborted();
-        onEvent({ type: 'tool_call', name: spec.name, input: args });
-        // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
-        if (options.ensureSandbox && (SANDBOX_TOOLS.has(spec.name) || WRITE_TOOLS.has(spec.name))) {
-          await options.ensureSandbox();
-          gate = await gateFor();
-        }
-        const toolStarted = performance.now();
-        const outcome = await executeTool(spec.name, args, context);
-        metrics.toolMs += Math.round(performance.now() - toolStarted);
-        onEvent({ type: 'tool_result', name: spec.name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
-        return { content: [{ type: 'text' as const, text: outcome.content }], isError: !outcome.ok };
-      }),
-    ),
-  );
+  /** 실행이 끝났거나 끝내는 중이면 true. 그 뒤에 도착하는 도구 호출은 파일을 건드리지 않고 거절한다 */
+  let toolsClosed = false;
+  const runTool = (name: string, args: unknown) =>
+    serial(async () => {
+      // 취소하거나 끝낸 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
+      signal?.throwIfAborted();
+      if (toolsClosed) throw new Error('이 실행은 이미 끝나 도구를 쓸 수 없습니다');
+      onEvent({ type: 'tool_call', name, input: args });
+      // 지연 기동 세션: 첫 파일 변경·샌드박스 도구일 때 샌드박스를 켠다. 게이트(계약 기준)는 그 뒤에 만들어진다
+      if (options.ensureSandbox && (SANDBOX_TOOLS.has(name) || WRITE_TOOLS.has(name))) {
+        await options.ensureSandbox();
+        gate = await gateFor();
+      }
+      const toolStarted = performance.now();
+      const outcome = await executeTool(name, args, context);
+      metrics.toolMs += Math.round(performance.now() - toolStarted);
+      onEvent({ type: 'tool_result', name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length });
+      return outcome;
+    });
 
-  const abort = new AbortController();
-  const onAbort = () => abort.abort(signal?.reason);
+  // 지금 떠 있는 CLI 프로세스. 취소하면 입력을 닫고 바로 SIGTERM을 보낸다(진행 중인 턴을 끝까지 기다리지 않는다)
+  let currentProc: ClaudeCliProcess | undefined;
+  const onAbort = () => currentProc?.stop('now');
   signal?.addEventListener('abort', onAbort, { once: true });
 
-  // 승격은 게이트의 실패 서명이 정한다. 같은 집합이 N번 반복되면 다음 게이트 재시도 query를 같은 세션에서
-  // 이어받되 모델만 바꾼다. SDK는 query를 열 때 모델이 정해지므로 대화를 이어받는 새 query가 필요하다
+  // 승격은 게이트의 실패 서명이 정한다. 같은 집합이 N번 반복되면 다음 게이트 재시도 프로세스를 같은 세션에서
+  // 이어받되 모델만 바꾼다. 모델은 프로세스를 띄울 때 정해지므로 대화를 이어받는 새 프로세스가 필요하다
   const escalation = options.escalation;
   const escalationHistory: string[] = [];
   let escalated = false;
@@ -315,18 +320,20 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let resumeForQuery = resume;
   // 요청 글 끝에 언어 알림을 붙인다. 지시문에만 적으면 진행 문장이 영어로 나온다(트러블슈팅 132)
   let pendingPrompt = withLanguageReminder(ask ? buildAskRequest(request, { toolName, ...(researching ? { research: { webToolsAvailable: true } } : {}) }) : request);
-  // 승격으로 다음 query를 열어야 하면 true. 게이트 재시도는 같은 대화에 이어 넣는다
+  // 승격으로 다음 프로세스를 띄워야 하면 true. 게이트 재시도는 같은 대화에 이어 넣는다
   let reopen = false;
+  // 마지막으로 끝난 프로세스의 종료 상태. 결과 없이 끝났을 때 실패 메시지에 쓴다
+  let lastExit: { code: number | null; signal: NodeJS.Signals | null; error?: Error; stderr: string } | undefined;
 
   const usage = emptyUsage();
-  // 승격으로 query를 새로 열면 그 query의 modelUsage에는 승격 뒤 사용량만 온다.
-  // 끝난 query들의 사용량(base)을 따로 쌓아 두고 지금 query의 것과 더해야 승격 전 사용량을 잃지 않는다
+  // 승격으로 프로세스를 새로 띄우면 그 프로세스의 modelUsage에는 승격 뒤 사용량만 온다.
+  // 끝난 프로세스들의 사용량(base)을 따로 쌓아 두고 지금 프로세스의 것과 더해야 승격 전 사용량을 잃지 않는다
   const baseUsage = emptyUsage();
   const queryUsage = emptyUsage();
   let queryByModel: Record<string, AgentUsage> = {};
   const usageByModelBase: Record<string, AgentUsage> = {};
-  // duration_api_ms도 modelUsage처럼 이 query의 누적값이다(한 query에서 result가 두 번 오면 3,333 → 5,997ms로 늘었다).
-  // 끝난 query들의 값(base)에 지금 query의 값을 더한다
+  // duration_api_ms도 modelUsage처럼 이 프로세스의 누적값이다(한 프로세스에서 result가 두 번 오면 3,333 → 5,997ms로 늘었다).
+  // 끝난 프로세스들의 값(base)에 지금 프로세스의 값을 더한다
   let modelMsBase = 0;
   let queryModelMs: number | undefined;
   const syncUsage = (): void => {
@@ -340,10 +347,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   let lastText = '';
   let announced = false;
   let result: ClaudeCodeResult | undefined;
-  // ask_user가 남긴 질문. 있으면 쿼리를 중단하고 awaiting_input으로 끝내 사용자 답을 기다린다
+  // ask_user가 남긴 질문. 있으면 입력을 닫아 CLI를 끝내고 awaiting_input으로 끝내 사용자 답을 기다린다
   let asked: AskUserQuestion | undefined;
-  // 지금 열려 있는 query의 입력 큐. finish와 승격이 이 큐를 닫는다
-  let currentInput: InputQueue | undefined;
 
   const finish = (status: AgentResult['status'], summary: string, question?: AskUserQuestion, failureReason?: AgentResult['failureReason']): void => {
     // 본 대화의 서로 다른 assistant 메시지 수. 이미 있는 messageIds Set의 크기와 같다
@@ -371,14 +376,15 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       ...(failureReason ? { failureReason } : {}),
       ...(mismatches.list.length > 0 ? { mismatches: [...mismatches.list] } : {}),
     };
+    toolsClosed = true;
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
-    // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다
-    currentInput?.close();
+    // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다. 끝나지 않으면 정해진 시간 뒤 SIGTERM, SIGKILL
+    currentProc?.stop('graceful');
   };
 
   /**
    * 일시적 네트워크 오류(ADR-142)에서 재시도할지 정한다. 지수 백오프로 기다린 뒤 true를 돌려주면 호출한 쪽이
-   * 같은 세션을 resume으로 이어받은 새 query를 연다. 상한(횟수·총 대기 시간 중 먼저 걸리는 쪽)을 넘었거나
+   * 같은 세션을 resume으로 이어받은 새 프로세스를 띄운다. 상한(횟수·총 대기 시간 중 먼저 걸리는 쪽)을 넘었거나
    * 아직 세션 id가 없어(첫 호출이 바로 끊긴 경우) 이어받을 대상이 없으면 false를 돌려준다 — 그 경우 호출한 쪽이
    * 원래 보내려던 요청을 그대로 다시 보낸다(resumeForQuery·pendingPrompt를 건드리지 않는다).
    */
@@ -403,55 +409,82 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     return true;
   };
 
+  /** CLI에 넘길 인자. 요청·프로젝트 안내 같은 바깥에서 온 글은 넣지 않는다(표준 입력과 파일로 보낸다) */
+  const cliArgs = (files: { mcp: string; systemPrompt: string }): string[] => {
+    const validResume = resumeForQuery !== undefined && SESSION_ID.test(resumeForQuery);
+    return [
+      ...commandArgs,
+      '-p',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
+      '--verbose',
+      '--mcp-config',
+      files.mcp,
+      '--strict-mcp-config',
+      // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다.
+      // "조사" 모드(researching)만 예외로 내장 WebSearch·WebFetch를 더 연다 — 파일·명령 도구는 절대 열지 않는다
+      // (읽기 전용은 여전히 ToolContext.readOnly=ask가 b-studio 도구 쪽에서 막는다)
+      '--tools',
+      researching ? 'WebSearch,WebFetch' : '',
+      '--allowedTools',
+      (researching ? [...specs.map((spec) => toolName(spec.name)), 'WebSearch', 'WebFetch'] : specs.map((spec) => toolName(spec.name))).join(','),
+      '--permission-mode',
+      'dontAsk',
+      // 사용자 전역·프로젝트 설정(훅, 플러그인, CLAUDE.md)이 에이전트 동작을 바꾸지 않게 한다
+      '--setting-sources',
+      '',
+      // 지시문을 대화에 기록해 두고 이어받을 때 그대로 다시 쓰는 것이 CLI의 기본이다(snapshot). 그러면 이어받은 대화는 처음 만들 때의
+      // 지시문으로만 돈다 — b-studio를 올려도, studio.yaml의 workflow나 프로젝트 안내 파일을 고쳐도 대화가 압축될 때까지 전달되지 않는다
+      // (트러블슈팅 130). 요청마다 대화를 이어받는 구조라 기록을 끄고 매번 지금의 지시문을 보낸다. 지시문이 그대로면 캐시도 그대로고,
+      // 바뀐 요청에서만 대화 캐시를 한 번 새로 쓴다
+      '--system-prompt-file',
+      files.systemPrompt,
+      '--system-prompt-snapshot',
+      'off',
+      ...(modelForQuery ? ['--model', modelForQuery] : []),
+      '--effort',
+      effort,
+      '--max-turns',
+      String(maxTurns),
+      // 실패한 실행이 다음 요청의 대화를 오염시키지 않도록 매번 갈라서 이어받는다
+      ...(validResume ? ['--resume', resumeForQuery!, '--fork-session'] : []),
+    ];
+  };
+
   /**
-   * query 하나를 끝까지 돈다. 승격이면 같은 세션을 이어받은 새 query를 모델만 바꿔 다시 연다.
+   * CLI 프로세스 하나를 끝까지 돈다. 승격이면 같은 세션을 이어받은 새 프로세스를 모델만 바꿔 다시 띄운다.
    * 메시지 처리는 한 곳에만 두어(되묻기·진행 중 지시·도구 결과 캐시·턴별 사용량이 그대로 동작) 두 번 부른다.
    */
-  const runQuery = async (): Promise<void> => {
-    // 이 query의 사용량. result의 modelUsage는 query 누적값이라 result마다 덮어쓴다
+  const runQuery = async (files: { mcp: string; systemPrompt: string }): Promise<void> => {
+    // 이 프로세스의 사용량. result의 modelUsage는 프로세스 누적값이라 result마다 덮어쓴다
     resetUsage(queryUsage);
     queryByModel = {};
-    const input = new InputQueue();
-    currentInput = input;
-    const conversation = sdk.query({
-      prompt: input,
-      options: {
-        cwd: project.root,
-        // 지시문을 대화에 기록해 두고 이어받을 때 그대로 다시 쓰는 것이 SDK의 기본이다(snapshot). 그러면 이어받은 대화는 처음 만들 때의
-        // 지시문으로만 돈다 — b-studio를 올려도, studio.yaml의 workflow나 프로젝트 안내 파일을 고쳐도 대화가 압축될 때까지 전달되지 않는다
-        // (트러블슈팅 130). 요청마다 대화를 이어받는 구조라 기록을 끄고 매번 지금의 지시문을 보낸다. 지시문이 그대로면 캐시도 그대로고,
-        // 바뀐 요청에서만 대화 캐시를 한 번 새로 쓴다
-        systemPrompt: {
-          type: 'custom',
-          prompt: buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide),
-          snapshot: false,
-        },
-        // 기본 도구를 모두 끄고 b-studio 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다.
-        // "조사" 모드(researching)만 예외로 내장 WebSearch·WebFetch를 더 연다 — 파일·명령 도구는 절대 열지 않는다
-        // (읽기 전용은 여전히 ToolContext.readOnly=ask가 b-studio 도구 쪽에서 막는다)
-        tools: researching ? ['WebSearch', 'WebFetch'] : [],
-        mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
-        allowedTools: researching ? [...specs.map((spec) => toolName(spec.name)), 'WebSearch', 'WebFetch'] : specs.map((spec) => toolName(spec.name)),
-        permissionMode: 'dontAsk',
-        strictMcpConfig: true,
-        // 사용자 전역·프로젝트 설정(훅, 플러그인, CLAUDE.md)이 에이전트 동작을 바꾸지 않게 한다
-        settingSources: [],
-        model: modelForQuery,
-        effort,
-        maxTurns,
-        abortController: abort,
-        // 실패한 실행이 다음 요청의 대화를 오염시키지 않도록 매번 갈라서 이어받는다
-        ...(resumeForQuery ? { resume: resumeForQuery, forkSession: true } : {}),
-        env: queryEnv,
-      },
+    if (resumeForQuery !== undefined && !SESSION_ID.test(resumeForQuery)) {
+      onEvent({ type: 'warning', message: '이어받을 대화의 id가 올바르지 않아 새 대화로 시작합니다' });
+      resumeForQuery = undefined;
+    }
+    const proc = spawnClaudeCli({
+      command,
+      args: cliArgs(files),
+      cwd: project.root,
+      // 토큰은 파일에 쓰지 않는다. 자식 프로세스의 환경 변수로만 넘기고, MCP 설정 파일은 그 이름만 적는다
+      env: { ...queryEnv, [MCP_TOKEN_ENV]: toolServer!.token },
+      stop: stopOptions,
     });
+    currentProc = proc;
+    // 준비하는 동안 취소가 먼저 왔으면 리스너가 이 프로세스를 모른다
+    if (signal?.aborted) proc.stop('now');
+    // 입력 쪽은 사용자 메시지 한 줄씩. finish와 승격이 이 입력을 닫는다
+    const input = { push: (text: string) => proc.send(text) };
     input.push(pendingPrompt);
 
-    // 진행 중 지시는 스트리밍 입력 큐에 사용자 메시지로 넣는다. 승격으로 새 query를 열어도 이 연결을 다시 건다.
-    // SDK는 스트리밍 입력에서 큐에 들어온 사용자 메시지를(현재 도구 호출이 끝난 뒤) 다음 모델 호출에서 처리한다.
+    // 진행 중 지시는 표준 입력에 사용자 메시지로 넣는다. 승격으로 새 프로세스를 띄워도 이 연결을 다시 건다.
+    // CLI는 스트리밍 입력에서 들어온 사용자 메시지를(현재 도구 호출이 끝난 뒤) 다음 모델 호출에서 처리한다.
     // 지금 하던 도구 호출을 중간에 끊지 않는 것은 이 방식의 성질이다(근거는 결과 문서에 적음)
     const detachSteering = attachSteering(steering, input, onEvent);
-    // 승격 분기에서 query를 닫기 전에 끊고, finally와 겹쳐도 한 번만 실행되게 감싼다
+    // 승격 분기에서 프로세스를 닫기 전에 끊고, finally와 겹쳐도 한 번만 실행되게 감싼다
     let detached = false;
     const detachSteeringOnce = (): void => {
       if (detached) return;
@@ -461,9 +494,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
     // 요약 중 상태를 한 번만 알리기 위한 표시(compact_boundary에서 푼다)
     let compacting = false;
+    // 이 프로세스의 init이 b-studio 도구 서버를 connected로 알렸는가. 확인하지 못한 채 결과가 오면 통과시키지 않는다
+    let toolServerConfirmed = false;
     try {
-      messages: for await (const message of conversation) {
-        if ('session_id' in message && message.session_id) sessionId = message.session_id;
+      messages: for await (const message of proc.messages()) {
+        if (typeof message.session_id === 'string' && message.session_id) sessionId = message.session_id;
         if (result) {
           result.sessionId = sessionId;
           continue;
@@ -476,18 +511,29 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
               announced = true;
               onEvent({
                 type: 'session',
-                backend: `${BACKEND} (CLI ${message.claude_code_version})`,
-                model: message.model,
+                backend: `${BACKEND} (CLI ${message.claude_code_version ?? '?'})`,
+                model: message.model ?? modelForQuery ?? '기본 모델',
                 auth: account ? describeAccount(account) : undefined,
                 effort,
               });
             }
-            // 요약이 시작됐다. SDK는 같은 상태를 되풀이해 보낼 수 있어 요약 한 번에 한 번만 알린다
+            // b-studio 도구 서버에 붙지 못한 채로 돌면 모델이 도구 없이 "끝났다"고 하고, 변경이 없어 게이트가 통과해 버린다.
+            // 문서에 있는 init의 mcp_servers·mcp_server_errors로 알아채면 통과시키지 않고 실패로 끝낸다
+            if (message.subtype === 'init') {
+              const broken = mcpSetupFailure(message);
+              if (broken) {
+                proc.stop('now');
+                finish('failed', broken);
+                break;
+              }
+              toolServerConfirmed = true;
+            }
+            // 요약이 시작됐다. CLI는 같은 상태를 되풀이해 보낼 수 있어 요약 한 번에 한 번만 알린다
             if (message.subtype === 'status' && message.status === 'compacting' && !compacting) {
               compacting = true;
               onEvent({ type: 'context_compacting' });
             }
-            if (message.subtype === 'compact_boundary') {
+            if (message.subtype === 'compact_boundary' && message.compact_metadata) {
               compacting = false;
               const { trigger, pre_tokens, post_tokens, duration_ms } = message.compact_metadata;
               onEvent({
@@ -502,7 +548,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
           case 'assistant': {
             // 하위 에이전트 메시지는 없어야 하지만, 섞여 와도 본 대화로 세지 않는다
-            if (message.parent_tool_use_id) break;
+            if (message.parent_tool_use_id || !message.message?.id) break;
             // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
             const messageUsage = message.message.usage;
             const turnContext = messageUsage
@@ -528,7 +574,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 });
               }
               if (turn > maxTurns) {
-                await conversation.interrupt().catch(() => {});
+                // 진행 중인 턴을 끝까지 기다리지 않는다: 입력을 닫고 바로 SIGTERM. 이미 보낸 도구 호출이 더 닿아도 파일을 건드리지 않게 닫는다.
+                // (SDK의 interrupt()는 공식 문서에 없는 제어 메시지라 쓰지 않는다 — ADR-194)
+                toolsClosed = true;
+                proc.stop('now');
+                // 하던 도구 호출이 있으면 끝나기를 기다린 뒤 게이트를 본다
+                await serial.idle();
                 // 턴 상한에 걸렸다. 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
                 const gateStarted = performance.now();
                 const recheck = await recheckGateOnMaxTurns(gate, maxTurns, onEvent);
@@ -538,8 +589,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 break;
               }
             }
-            const text = message.message.content
-              .flatMap((block) => (block.type === 'text' ? [block.text] : []))
+            const blocks = Array.isArray(message.message.content) ? (message.message.content as Array<{ type?: string; text?: string }>) : [];
+            const text = blocks
+              .flatMap((block) => (block.type === 'text' && typeof block.text === 'string' ? [block.text] : []))
               .join('\n')
               .trim();
             if (text) {
@@ -550,7 +602,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
           }
 
           case 'result': {
-            // modelUsage는 이 query의 누적값이다. 끝난 query들의 사용량(base)과 더해 실행 전체를 만든다
+            // init으로 도구 서버 연결을 확인하지 못했다(init이 없었다). 도구 없이 돈 턴일 수 있어 결과를 통과로 쓰지 않는다
+            if (!toolServerConfirmed) {
+              finish('failed', 'Claude Code가 b-studio 도구 서버에 연결됐는지 확인하지 못했습니다(시작 정보가 오지 않음)');
+              break;
+            }
+            // modelUsage는 이 프로세스의 누적값이다. 끝난 프로세스들의 사용량(base)과 더해 실행 전체를 만든다
             setUsage(queryUsage, message);
             syncUsage();
             queryByModel = usageByModelOf(message);
@@ -575,11 +632,11 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                 break;
               }
               // 일시적 네트워크 오류(ENOTFOUND 등, ADR-142)면 바로 실패로 끝내지 않고 기다렸다 같은 세션을 이어받는다.
-              // 승격처럼 이 query는 여기서 닫고 새 query를 연다(reopen). 상한을 넘으면 실패로 끝나되 사유를 남긴다
+              // 승격처럼 이 프로세스는 여기서 닫고 새로 띄운다(reopen). 상한을 넘으면 실패로 끝나되 사유를 남긴다
               if (isTransientNetworkFailure(failure)) {
                 detachSteeringOnce();
                 if (await retryAfterNetworkFailure()) {
-                  conversation.close();
+                  proc.stop('graceful');
                   reopen = true;
                   break messages;
                 }
@@ -589,11 +646,12 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
               finish('failed', failure);
               break;
             }
-            // 되묻고 멈추기: ask_user가 질문을 남겼으면 쿼리를 중단하고 실행을 끝낸다.
+            // 되묻고 멈추기: ask_user가 질문을 남겼으면 입력을 닫아 CLI가 끝나게 하고 실행을 끝낸다.
+            // 이미 결과(턴의 끝)를 받았으므로 진행 중인 턴이 없어 신호로 끊을 필요가 없다.
             // 세션 id는 그대로 저장되어 다음 요청이 이 대화를 이어받는다.
             // 질문 전에 파일을 바꿨다면 그 변경도 게이트를 돌린다(변경이 없으면 돌리지 않는다)
             if (asked) {
-              await conversation.interrupt().catch(() => {});
+              proc.closeInput();
               const openGate = gate;
               if (openGate && workspace.changedFiles().length > 0) {
                 const gateStarted = performance.now();
@@ -630,8 +688,8 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                   if (outcome.kind === 'retry' || extended) {
                     escalated = true;
                     metrics.escalatedAt = activeGate.attempts;
-                    // 닫히는 입력 큐로 지시가 들어가 사라지지 않게, close보다 먼저 이 query의 지시 연결을 끊는다.
-                    // 그 뒤 들어온 지시는 큐에 남아 새 query가 연결할 때 flush로 가져간다
+                    // 닫히는 입력으로 지시가 들어가 사라지지 않게, 닫기 전에 이 프로세스의 지시 연결을 끊는다.
+                    // 그 뒤 들어온 지시는 큐에 남아 새 프로세스가 연결할 때 flush로 가져간다
                     detachSteeringOnce();
                     onEvent({
                       type: 'model_escalated',
@@ -645,9 +703,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
                     resumeForQuery = sessionId;
                     // 상한을 새로 받은 경우에는 마지막 실패 안내를 다시 보낸다(올라간 모델이 무엇을 고칠지 알게)
                     pendingPrompt = outcome.kind === 'exhausted' ? escalationPrompt(outcome.summary, lastFeedback) : outcome.feedback;
-                    conversation.close();
+                    proc.stop('graceful');
                     reopen = true;
-                    // 같은 대화를 이어받아 모델만 바꾸려면 새 query를 열어야 한다. 이 query는 여기서 닫는다
+                    // 같은 대화를 이어받아 모델만 바꾸려면 새 프로세스가 필요하다. 이 프로세스는 여기서 닫는다
                     break messages;
                   }
                 }
@@ -663,45 +721,80 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
         }
       }
     } catch (error) {
-      conversation.close();
-      // SDK는 오류 결과(턴 상한 등)를 준 뒤에 같은 사유로 예외도 던진다. 그 결과로 이미 실행을 끝냈으면(result) 그 판정을 지킨다.
+      // 결과 처리 중 난 예외(게이트 등)다. 프로세스를 바로 끝낸다. 이미 결과로 끝낸 실행이면 그 판정을 지킨다.
       // 던지게 두면 호출자가 오류로 보고, 턴 상한에서 게이트를 통과해 남기기로 한 변경까지 되돌린다(ADR-131, 트러블슈팅 131)
+      proc.stop('now');
       if (!result) throw error;
     } finally {
       detachSteeringOnce();
-      input.close();
-      // 이 query의 사용량을 실행 전체 누적에 더한다. 승격이 없으면 여기서 한 번만 더해 결과가 지금과 같다
+      // 어떤 경로로 나왔든 프로세스를 끝낸다(이미 끝났거나 닫는 중이면 무시). 끝나기를 기다려 다음 프로세스와 겹치지 않게 한다
+      proc.stop('graceful');
+      const exit = await proc.exited;
+      if (currentProc === proc) currentProc = undefined;
+      // 이 프로세스의 사용량을 실행 전체 누적에 더한다. 승격이 없으면 여기서 한 번만 더해 결과가 지금과 같다
       addUsageInto(baseUsage, queryUsage);
       for (const [model, usage] of Object.entries(queryByModel)) addUsageInto((usageByModelBase[model] ??= emptyUsage()), usage);
       modelMsBase += queryModelMs ?? 0;
       queryModelMs = undefined;
+      lastExit = { ...exit, stderr: proc.stderrTail() };
     }
   };
 
-  // 승격이 일어나면 같은 세션을 이어받은 새 query를 모델만 바꿔 다시 연다. 그 밖에는 한 query로 끝까지 돈다
+  // 승격이 일어나면 같은 세션을 이어받은 새 프로세스를 모델만 바꿔 다시 띄운다. 그 밖에는 한 프로세스로 끝까지 돈다
+  let toolServer: ToolServer | undefined;
+  const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-claude-code-'));
   try {
+    toolServer = await startToolServer({ specs, name: SERVER, run: runTool });
+    const files = { mcp: path.join(dir, 'mcp.json'), systemPrompt: path.join(dir, 'system-prompt.md') };
+    // 도구 서버는 루프백 HTTP MCP다(codex·commandcode·관문 러너와 같다). 토큰은 파일에 쓰지 않고 환경 변수 이름만 적는다
+    await writeFile(files.mcp, JSON.stringify({ mcpServers: { [SERVER]: { type: 'http', url: toolServer.url, headers: { Authorization: `Bearer \${${MCP_TOKEN_ENV}}` } } } }, null, 2), { mode: 0o600 });
+    await writeFile(files.systemPrompt, buildSystemPrompt(project, { toolName, selfCheck: options.selfCheck }) + workflowContext(project) + projectGuideSection(guide), { mode: 0o600 });
     for (;;) {
       reopen = false;
-      await runQuery();
+      await runQuery(files);
       if (result) break;
-      if (!reopen) throw new Error('Claude Code가 결과를 보내지 않고 종료됐습니다');
+      // 취소했으면 결과 없음이 아니라 취소다
+      signal?.throwIfAborted();
+      if (!reopen) throw new Error(noResultMessage(lastExit));
     }
   } finally {
     signal?.removeEventListener('abort', onAbort);
+    toolsClosed = true;
+    await toolServer?.close().catch(() => {});
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
     await serial.idle();
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 
   signal?.throwIfAborted();
-  if (!result) throw new Error('Claude Code가 결과를 보내지 않고 종료됐습니다');
+  if (!result) throw new Error(noResultMessage(lastExit));
   return result;
 }
 
+/** 프로세스가 결과 없이 끝났다는 실패 메시지. 종료 코드와 표준 오류의 끝부분을 담는다 */
+function noResultMessage(exit: { code: number | null; signal: NodeJS.Signals | null; error?: Error; stderr: string } | undefined): string {
+  if (!exit) return 'Claude Code가 결과를 보내지 않고 종료됐습니다';
+  const how = exit.error ? `실행하지 못함: ${exit.error.message}` : exit.signal ? `신호 ${exit.signal}` : `종료 코드 ${exit.code ?? '없음'}`;
+  const tail = exit.stderr.trim().split('\n').slice(-3).join(' / ');
+  return `Claude Code가 결과를 보내지 않고 종료됐습니다 (${how})${tail ? `: ${tail}` : ''}`;
+}
+
+/** init이 b-studio 도구 서버를 연결하지 못했다고 알리면 그 설명. 문서에 있는 mcp_servers·mcp_server_errors만 본다 */
+function mcpSetupFailure(message: CliMessage): string | undefined {
+  const errors = (message.mcp_server_errors ?? []).filter((entry) => entry.name === undefined || entry.name === SERVER);
+  const status = message.mcp_servers?.find((server) => server.name === SERVER)?.status;
+  // connected로 확인한 경우만 통과다. 목록에 없음·needs-auth·pending·disabled·모르는 값은 "모른다"이고 실패로 본다
+  // (상태 값: https://code.claude.com/docs/en/agent-sdk/typescript 의 McpServerStatus)
+  if (errors.length === 0 && status === 'connected') return undefined;
+  const detail = errors[0]?.message ?? errors[0]?.type ?? status ?? '목록에 없음';
+  return `Claude Code가 b-studio 도구 서버에 연결하지 못했습니다${detail ? `: ${detail}` : ''}`;
+}
+
 /**
- * 진행 중 지시를 스트리밍 입력 큐에 넣는다. 알림(onPush)이 있으면 즉시, 없으면 짧은 주기로 확인한다.
+ * 진행 중 지시를 표준 입력(스트리밍 입력)에 넣는다. 알림(onPush)이 있으면 즉시, 없으면 짧은 주기로 확인한다.
  * 돌려준 함수로 구독이나 주기 확인을 멈춘다.
  */
-function attachSteering(steering: Steering | undefined, input: InputQueue, onEvent: (event: AgentEvent) => void): () => void {
+function attachSteering(steering: Steering | undefined, input: { push(text: string): void }, onEvent: (event: AgentEvent) => void): () => void {
   if (!steering) return () => {};
   const flush = () => {
     const texts = takeSteering(steering);
@@ -716,50 +809,48 @@ function attachSteering(steering: Steering | undefined, input: InputQueue, onEve
     timer.unref();
     detach = () => clearInterval(timer);
   }
-  // 승격으로 새 query를 열 때처럼 연결하기 전에 이미 쌓여 있던 지시를 바로 꺼낸다
+  // 승격으로 새 프로세스를 띄울 때처럼 연결하기 전에 이미 쌓여 있던 지시를 바로 꺼낸다
   flush();
   return detach;
 }
 
 /**
  * 샌드박스를 띄우기 전에 이 PC의 Claude Code가 실행되고 로그인돼 있는지 확인한다.
- * 프롬프트를 보내지 않으므로 사용량을 쓰지 않는다.
+ * `claude auth status`(JSON, 로그인하지 않았으면 종료 코드 1)를 부른다. 프롬프트를 보내지 않으므로 사용량을 쓰지 않는다.
+ * 근거: https://code.claude.com/docs/en/cli-reference (CLI commands의 `claude auth status`)
  */
 export async function preflightClaudeCode(
   {
-    sdk = DEFAULT_SDK,
+    command = 'claude',
+    commandArgs = [],
     cwd = process.cwd(),
     timeoutMs = 60_000,
     env,
   }: {
-    sdk?: ClaudeCodeSdk;
+    command?: string;
+    commandArgs?: readonly string[];
     cwd?: string;
     timeoutMs?: number;
     /** CLI에 넘길 환경. 계정마다 설정 폴더(CLAUDE_CONFIG_DIR)를 따로 둘 때 준다(#885). 없으면 process.env */
     env?: NodeJS.ProcessEnv;
   } = {},
 ): Promise<{ ok: true; account: ClaudeCodeAccount } | { ok: false; reason: string }> {
-  const input = new InputQueue();
-  const conversation = sdk.query({
-    prompt: input,
-    options: { cwd, tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false, ...(env ? { env } : {}) },
-  });
-  let timer: NodeJS.Timeout | undefined;
   try {
-    const info = await Promise.race([
-      conversation.accountInfo(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${timeoutMs / 1000}초 안에 응답하지 않았습니다`)), timeoutMs);
-      }),
-    ]);
+    const output = await runToCompletion(command, [...commandArgs, 'auth', 'status'], { cwd, env: env ?? process.env, timeoutMs });
+    let info: { loggedIn?: unknown; authMethod?: unknown; apiProvider?: unknown; subscriptionType?: unknown };
+    try {
+      info = JSON.parse(output.stdout) as typeof info;
+    } catch {
+      throw new Error(`인증 상태를 읽지 못했습니다${output.stderr.trim() ? `: ${output.stderr.trim().split('\n').slice(-2).join(' / ')}` : ''}`);
+    }
+    if (typeof info !== 'object' || info === null || typeof info.loggedIn !== 'boolean') throw new Error('인증 상태를 읽지 못했습니다');
     // 이메일·조직은 화면과 로그에 남기지 않는다
     const account: ClaudeCodeAccount = {
-      subscriptionType: info.subscriptionType,
-      apiKeySource: info.apiKeySource,
-      apiProvider: info.apiProvider,
+      subscriptionType: typeof info.subscriptionType === 'string' ? info.subscriptionType : undefined,
+      apiKeySource: info.authMethod === 'api_key' || info.authMethod === 'api_key_helper' ? info.authMethod : undefined,
+      apiProvider: typeof info.apiProvider === 'string' ? info.apiProvider : undefined,
     };
-    const firstParty = (info.apiProvider ?? 'firstParty') === 'firstParty';
-    if (firstParty && !info.subscriptionType && !info.apiKeySource && !info.tokenSource) {
+    if (!info.loggedIn) {
       return { ok: false, reason: 'Claude Code에 로그인돼 있지 않습니다. 터미널에서 `claude`를 실행해 /login으로 로그인하세요.' };
     }
     return { ok: true, account };
@@ -768,41 +859,68 @@ export async function preflightClaudeCode(
       ok: false,
       reason: `로컬 Claude Code를 실행하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
     };
-  } finally {
-    clearTimeout(timer);
-    input.close();
-    conversation.close();
   }
 }
 
-/**
- * 로그인한 계정의 Claude Code가 실제로 보고하는 모델 목록. 프롬프트를 보내지 않으므로 사용량을 쓰지 않는다
- * (preflightClaudeCode와 같은 모양: 아무것도 내보내지 않는 프롬프트로 query를 열고 필요한 정보만 받은 뒤 바로 닫는다).
- * 별칭(opus·sonnet·haiku·fable)이 실제로 풀리는 모델 id·공식 설명·노력 단계 지원 여부가 로그인 계정·CLI 버전에 따라 바뀌므로
- * 스튜디오가 미리 표를 외우는 대신 이 목록을 그대로 쓴다(apps/studio/lib/server/claude-code-models.ts가 캐시·대체 표를 맡는다).
- */
-export async function fetchClaudeCodeModels(
-  { sdk = DEFAULT_SDK, cwd = process.cwd(), timeoutMs = 15_000 }: { sdk?: ClaudeCodeSdk; cwd?: string; timeoutMs?: number } = {},
-): Promise<ModelInfo[]> {
-  const input = new InputQueue();
-  const conversation = sdk.query({
-    prompt: input,
-    options: { cwd, tools: [], settingSources: [], strictMcpConfig: true, permissionMode: 'dontAsk', persistSession: false },
+/** 짧게 끝나는 명령을 한 번 돌려 출력을 모은다. 제한 시간을 넘기면 끝내고(SIGTERM, 뒤이어 SIGKILL) 실패로 던진다 */
+function runToCompletion(command: string, args: string[], options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number }): Promise<{ stdout: string; stderr: string; code: number | null }> {
+  return new Promise((resolve, reject) => {
+    let resolved: string;
+    try {
+      // 사전 확인도 cwd(호출부는 프로젝트 루트를 넘긴다) 안의 실행 파일은 고르지 않는다
+      resolved = resolveCliCommand(command, options.env, options.cwd);
+    } catch (error) {
+      reject(error as Error);
+      return;
+    }
+    const child = spawn(resolved, args, { cwd: options.cwd, env: childEnv(options.env, options.cwd), stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    let settled = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      child.kill('SIGTERM');
+      killTimer = setTimeout(() => child.kill('SIGKILL'), 2_000);
+      killTimer.unref();
+      reject(new Error(`${options.timeoutMs / 1000}초 안에 응답하지 않았습니다`));
+    }, options.timeoutMs);
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    // 인증 상태 JSON은 작다. 상한을 넘게 쏟는 프로세스는 읽지 않는다(앞부분만 남긴다)
+    child.stdout.on('data', (chunk: string) => {
+      stdout = (stdout + chunk).slice(0, 64_000);
+    });
+    child.stderr.on('data', (chunk: string) => {
+      stderr = (stderr + chunk).slice(-2_000);
+    });
+    child.once('error', (error) => {
+      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      reject(error);
+    });
+    child.once('close', (code) => {
+      clearTimeout(timer);
+      clearTimeout(killTimer);
+      if (settled) return;
+      settled = true;
+      resolve({ stdout, stderr, code });
+    });
   });
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      conversation.supportedModels(),
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => reject(new Error(`${timeoutMs / 1000}초 안에 응답하지 않았습니다`)), timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-    input.close();
-    await conversation.interrupt().catch(() => {});
-    conversation.close();
-  }
+}
+
+/** fetchClaudeCodeModels가 항상 던지는 사유. 부르는 쪽이 "목록을 못 불러온 오류"와 구분해 알려진 표를 조용히 쓴다 */
+export const CLAUDE_CODE_MODELS_UNSUPPORTED = '공개 CLI 입출력에는 모델 목록을 묻는 방법이 없습니다';
+
+/**
+ * 로그인한 계정의 Claude Code가 보고하는 모델 목록. Agent SDK의 `supportedModels()`는 SDK가 쓰는 제어 메시지(control_request)로 받아 오는데
+ * 공식 문서의 공개 CLI 입출력에는 모델 목록을 묻는 방법이 없다(ADR-189: 문서에 없는 규약은 쓰지 않는다).
+ * 그래서 항상 실패로 알리고, 부르는 쪽(apps/studio/lib/server/claude-code-models.ts → model-picker.ts)이 알려진 별칭 표로 되돌아간다.
+ */
+export async function fetchClaudeCodeModels(_options: { command?: string; commandArgs?: readonly string[]; cwd?: string; timeoutMs?: number } = {}): Promise<ModelInfo[]> {
+  throw new Error(CLAUDE_CODE_MODELS_UNSUPPORTED);
 }
 
 export function describeAccount(account: ClaudeCodeAccount): string {
@@ -812,10 +930,22 @@ export function describeAccount(account: ClaudeCodeAccount): string {
   return '로그인 계정';
 }
 
-export function describeResultFailure(message: SDKResultMessage): string | undefined {
+/** result 메시지에서 이 러너가 읽는 필드. Agent SDK의 SDKResultMessage도 이 꼴을 만족한다(벤치·질문 경로가 그대로 넘긴다) */
+export interface ClaudeResultMessage {
+  /** 없거나 모르는 값이면 실패로 본다 */
+  subtype?: string;
+  is_error?: boolean;
+  result?: string;
+  stop_reason?: string | null;
+  errors?: string[];
+  duration_api_ms?: number;
+  modelUsage?: Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number }>;
+}
+
+export function describeResultFailure(message: ClaudeResultMessage): string | undefined {
   switch (message.subtype) {
     case 'success':
-      if (message.is_error) return `모델 호출이 실패했습니다: ${message.result}`;
+      if (message.is_error) return `모델 호출이 실패했습니다: ${message.result ?? ''}`;
       if (message.stop_reason === 'refusal') return '모델이 요청을 거절했습니다';
       return undefined;
     case 'error_max_turns':
@@ -823,7 +953,7 @@ export function describeResultFailure(message: SDKResultMessage): string | undef
     case 'error_max_budget_usd':
       return 'Claude Code의 비용 한도를 넘었습니다';
     default:
-      return `Claude Code 실행 중 오류가 났습니다${message.errors.length > 0 ? `: ${message.errors.join('; ')}` : ''}`;
+      return `Claude Code 실행 중 오류가 났습니다${message.errors && message.errors.length > 0 ? `: ${message.errors.join('; ')}` : ''}`;
   }
 }
 
@@ -835,17 +965,17 @@ type AssistantTokenUsage = {
 
 /** modelUsage는 query 전체의 누적값이므로 더하지 않고 최신 값으로 바꾼다 */
 /** result가 알려 주는 API 호출 시간 합(ms). 유한한 0 이상의 수가 아니면 재지 않은 것으로 본다 */
-function apiDurationOf(message: SDKResultMessage): number | undefined {
+function apiDurationOf(message: ClaudeResultMessage): number | undefined {
   const value: unknown = message.duration_api_ms;
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
 }
 
-function setUsage(usage: AgentUsage, message: SDKResultMessage): void {
+function setUsage(usage: AgentUsage, message: ClaudeResultMessage): void {
   const models = Object.values(message.modelUsage ?? {});
-  usage.inputTokens = models.reduce((sum, model) => sum + model.inputTokens, 0);
-  usage.outputTokens = models.reduce((sum, model) => sum + model.outputTokens, 0);
-  usage.cacheReadTokens = models.reduce((sum, model) => sum + model.cacheReadInputTokens, 0);
-  usage.cacheWriteTokens = models.reduce((sum, model) => sum + model.cacheCreationInputTokens, 0);
+  usage.inputTokens = models.reduce((sum, model) => sum + (model.inputTokens ?? 0), 0);
+  usage.outputTokens = models.reduce((sum, model) => sum + (model.outputTokens ?? 0), 0);
+  usage.cacheReadTokens = models.reduce((sum, model) => sum + (model.cacheReadInputTokens ?? 0), 0);
+  usage.cacheWriteTokens = models.reduce((sum, model) => sum + (model.cacheCreationInputTokens ?? 0), 0);
 }
 
 /** 사용량을 0으로 되돌린다 */
@@ -865,14 +995,14 @@ function addUsageInto(target: AgentUsage, source: AgentUsage): void {
 }
 
 /** result의 modelUsage(query 하나의 누적값)를 모델 이름별 AgentUsage로 옮긴다 */
-function usageByModelOf(message: SDKResultMessage): Record<string, AgentUsage> {
+function usageByModelOf(message: ClaudeResultMessage): Record<string, AgentUsage> {
   const byModel: Record<string, AgentUsage> = {};
   for (const [model, usage] of Object.entries(message.modelUsage ?? {})) {
     byModel[model] = {
-      inputTokens: usage.inputTokens,
-      outputTokens: usage.outputTokens,
-      cacheReadTokens: usage.cacheReadInputTokens,
-      cacheWriteTokens: usage.cacheCreationInputTokens,
+      inputTokens: usage.inputTokens ?? 0,
+      outputTokens: usage.outputTokens ?? 0,
+      cacheReadTokens: usage.cacheReadInputTokens ?? 0,
+      cacheWriteTokens: usage.cacheCreationInputTokens ?? 0,
     };
   }
   return byModel;
@@ -913,13 +1043,13 @@ export class ClaudeCodeUsageTracker {
   }
 
   /** result의 modelUsage를 반영한다(누적값이므로 최신 값으로 바꾼다) */
-  observeResult(message: SDKResultMessage): void {
+  observeResult(message: ClaudeResultMessage): void {
     this.#usageByModel = usageByModelOf(message);
     const models = Object.values(message.modelUsage ?? {});
-    this.#usage.inputTokens = models.reduce((sum, model) => sum + model.inputTokens, 0);
-    this.#usage.outputTokens = models.reduce((sum, model) => sum + model.outputTokens, 0);
-    this.#usage.cacheReadTokens = models.reduce((sum, model) => sum + model.cacheReadInputTokens, 0);
-    this.#usage.cacheWriteTokens = models.reduce((sum, model) => sum + model.cacheCreationInputTokens, 0);
+    this.#usage.inputTokens = models.reduce((sum, model) => sum + (model.inputTokens ?? 0), 0);
+    this.#usage.outputTokens = models.reduce((sum, model) => sum + (model.outputTokens ?? 0), 0);
+    this.#usage.cacheReadTokens = models.reduce((sum, model) => sum + (model.cacheReadInputTokens ?? 0), 0);
+    this.#usage.cacheWriteTokens = models.reduce((sum, model) => sum + (model.cacheCreationInputTokens ?? 0), 0);
   }
 
   /** 서로 다른 assistant 메시지 수 = 모델 호출 수 */
@@ -940,79 +1070,5 @@ export class ClaudeCodeUsageTracker {
   /** 모델 이름별 토큰(result의 modelUsage 키). 모델마다 단가가 달라 환산 비용에 쓴다 */
   get usageByModel(): Record<string, AgentUsage> {
     return Object.fromEntries(Object.entries(this.#usageByModel).map(([model, usage]) => [model, { ...usage }]));
-  }
-}
-
-type JsonProperty = { type?: string; enum?: unknown[]; items?: { type?: string }; description?: string };
-
-/**
- * 도구 스키마는 buildTools 한 곳에서만 정의하고, MCP 도구가 요구하는 zod 형태로 옮긴다.
- * b-studio 도구가 쓰는 형태(문자열·열거형·정수·문자열 배열)만 지원하고 나머지는 바로 드러낸다.
- * 기본은 모든 인자를 필수로 둔다. honorRequired를 주면 스키마의 required에 없는 인자를 선택으로 연다 — 모델이 선택 인자를
- * 비워 두지 못하고 빈 문자열이라도 채워 넣는 것을 막는다(탐색형 QA의 qa_scroll이 이렇게 실패했다).
- */
-export function zodShape(schema: { properties?: unknown; required?: unknown }, options: { honorRequired?: boolean } = {}): Record<string, z.ZodType> {
-  const required = Array.isArray(schema.required) ? new Set(schema.required.map(String)) : undefined;
-  const shape: Record<string, z.ZodType> = {};
-  for (const [key, value] of Object.entries((schema.properties ?? {}) as Record<string, JsonProperty>)) {
-    let type: z.ZodType;
-    if (value.type === 'string' && value.enum?.length) type = z.enum(value.enum.map(String) as [string, ...string[]]);
-    else if (value.type === 'string') type = z.string();
-    else if (value.type === 'integer') type = z.number().int();
-    else if (value.type === 'boolean') type = z.boolean();
-    else if (value.type === 'array' && value.items?.type === 'string') type = z.array(z.string());
-    else throw new Error(`지원하지 않는 도구 입력 형식입니다: ${key} ${JSON.stringify(value)}`);
-    if (options.honorRequired && required && !required.has(key)) type = type.optional();
-    shape[key] = value.description ? type.describe(value.description) : type;
-  }
-  return shape;
-}
-
-/**
- * 도구 호출을 모델이 낸 순서대로 하나씩 실행한다. 로컬 Claude Code 러너와 Codex 러너가 같이 쓴다.
- * 끝난 뒤 실행 중이던 호출까지 기다릴 수 있게 idle()을 함께 돌려준다.
- */
-export function serialQueue() {
-  let tail: Promise<unknown> = Promise.resolve();
-  const enqueue = <T>(task: () => Promise<T>): Promise<T> => {
-    const next = tail.then(task, task);
-    tail = next.catch(() => {});
-    return next;
-  };
-  return Object.assign(enqueue, { idle: () => tail });
-}
-
-/** 스트리밍 입력. 게이트 결과를 같은 대화에 이어 넣고, 끝나면 닫는다 */
-class InputQueue implements AsyncIterable<SDKUserMessage> {
-  readonly #pending: SDKUserMessage[] = [];
-  readonly #waiting: Array<(result: IteratorResult<SDKUserMessage>) => void> = [];
-  #closed = false;
-
-  push(text: string): void {
-    if (this.#closed) return;
-    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
-    const waiter = this.#waiting.shift();
-    if (waiter) waiter({ value: message, done: false });
-    else this.#pending.push(message);
-  }
-
-  close(): void {
-    this.#closed = true;
-    for (const waiter of this.#waiting.splice(0)) waiter({ value: undefined, done: true });
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    return {
-      next: () => {
-        const message = this.#pending.shift();
-        if (message) return Promise.resolve({ value: message, done: false });
-        if (this.#closed) return Promise.resolve({ value: undefined, done: true });
-        return new Promise((resolve) => this.#waiting.push(resolve));
-      },
-      return: () => {
-        this.close();
-        return Promise.resolve({ value: undefined, done: true });
-      },
-    };
   }
 }

@@ -15,6 +15,7 @@ export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, 
 export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
   ClaudeCodeUsageTracker,
+  CLAUDE_CODE_MODELS_UNSUPPORTED,
   DEFAULT_CLAUDE_CODE_EFFORT,
   describeAccount,
   describeResultFailure,
@@ -22,13 +23,12 @@ export {
   preflightClaudeCode,
   runClaudeCodeAgent,
   type ClaudeCodeAccount,
-  type ClaudeCodeQuery,
   type ClaudeCodeResult,
   type ClaudeCodeRunOptions,
-  type ClaudeCodeSdk,
+  type ModelInfo,
 } from './claude-code-runner';
+export type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-sdk';
 export { cliPreflightFailure, describeCliError, type CliPreflightFailure } from './cli-failure';
-export type { ModelInfo } from '@anthropic-ai/claude-agent-sdk';
 export {
   preflightCodex,
   runCodexAgent,
