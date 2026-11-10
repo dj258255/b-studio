@@ -1,9 +1,9 @@
 /**
  * 스튜디오의 Claude Code(로컬 Claude Agent) 모델 목록.
  *
- * 러너의 `fetchClaudeCodeModels()`(Claude Agent SDK의 `supportedModels()`)를 1시간 캐시해 화면에 내려준다.
- * 로그인한 계정·CLI 버전이 실제로 지원하는 별칭(opus·sonnet·haiku·fable 등)과 새 모델이 생기면 자동으로 반영되고,
- * 목록을 못 불러오면(CLI 없음·로그인 안 됨·타임아웃) model-picker.ts가 들고 있는 알려진 표로 되돌아간다
+ * 러너의 `fetchClaudeCodeModels()`를 1시간 캐시해 화면에 내려준다. 러너가 공개 CLI 입출력으로 도는 지금은 거기에 모델 목록을 묻는
+ * 방법이 없어(ADR-194) 이 함수가 항상 `CLAUDE_CODE_MODELS_UNSUPPORTED`로 던지고, model-picker.ts가 들고 있는 알려진 표를 쓴다.
+ * 목록을 못 불러오면(CLI 없음·로그인 안 됨·타임아웃, 또는 위 사유) 같은 표로 되돌아간다
  * (단가·지원 여부를 지어내지 않기 위해 여기서는 원본 ModelInfo만 그대로 돌려주고, ModelPickerOption으로 옮기는 일은
  * model-picker.ts가 맡는다 — commandcode-models.ts/opencode-models.ts와 같은 나눔이다).
  *
