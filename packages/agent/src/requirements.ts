@@ -23,7 +23,7 @@ import { z } from 'zod';
 import { summarizeJsonContent, summarizeLargeJsonFile } from './json-summary';
 import type { AgentUsage } from './loop';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
-import { discoverTestsInFile, flattenDiscoveredFile } from './test-discovery';
+import { decodeLoneSurrogates } from './lone-surrogates';
 import { Workspace, WorkspaceError } from './workspace';
 
 export const REQUIREMENT_KINDS = ['api', 'ui', 'data', 'nonfunctional', 'docs'] as const;
@@ -1051,14 +1051,6 @@ export function findGateCheckMentions(gateChecks: readonly GateCheckResult[], id
   ).map((index) => gateChecks[index]!);
 }
 
-/** 식별자가 코드 식별자(테스트 메서드 이름 등) 안에 붙어 나오는지. R3 뒤에 바로 숫자가 이어지면(R31 등) 다른 id로 본다 */
-function identifierMentionsId(identifier: string, id: string): boolean {
-  const index = identifier.toLowerCase().indexOf(id.toLowerCase());
-  if (index === -1) return false;
-  const after = identifier[index + id.length];
-  return after === undefined || !/[0-9]/.test(after);
-}
-
 export interface ScannedFile {
   path: string;
   content: string;
@@ -1068,129 +1060,64 @@ export function isLikelyTestFile(filePath: string): boolean {
   return native.reqCoreIsLikelyTestFile(filePath);
 }
 
-const TEST_CALL_PATTERN = /\b(?:it|test)(?:\.\w+)?\s*\(\s*(['"`])((?:\\[\s\S]|(?!\1)[\s\S])*?)\1/g;
-const TEST_DISPLAY_NAME_PATTERN = /@DisplayName\s*\(\s*"((?:\\.|[^"])*)"/g;
-
-/** 파일 하나에서 it/test 호출 문자열과 @DisplayName 문자열을 모두 뽑는다(중복 없이). 요구사항 id·시나리오 id 스캔이 공유하는 1차 추출 */
-function collectDeclaredTestNames(file: ScannedFile): string[] {
-  const seen = new Set<string>();
-  const names: string[] = [];
-  const add = (name: string) => {
-    const trimmed = name.trim();
-    if (trimmed && !seen.has(trimmed)) {
-      seen.add(trimmed);
-      names.push(trimmed);
-    }
-  };
-  for (const match of file.content.matchAll(TEST_CALL_PATTERN)) add(match[2]!);
-  for (const match of file.content.matchAll(TEST_DISPLAY_NAME_PATTERN)) add(match[1]!);
-  return names;
-}
-
 /**
- * 테스트 이름마다 그 테스트를 감싼 묶음(describe·클래스) 제목에 단 id를 모은다. 묶음 제목에 단 id는 그 안의 모든
- * 테스트의 id다(test-discovery.ts의 extractRequirementIdsWithSuites와 같은 규칙) — 실행 근거 쪽과 어긋나면
- * "발견은 되는데 주인 없는 테스트"처럼 보인다. 발견기가 못 읽는 모양이면 빈 맵이다(그 파일은 테스트 자신의 id만 본다).
- * 같은 이름의 테스트가 다른 묶음에 있으면 id를 합친다
+ * 시험 파일 하나에서 Rust가 뽑은 색인(JSON). 시험 이름·경로는 `encodeLoneSurrogates`한 글자다(짝 없는 서로게이트가 U+FFFD로 합쳐져
+ * 서로 다른 시험이 같아지지 않게). 시험 파일이 아니면 null.
+ * 요구사항 탭은 요구사항마다 같은 파일 목록을 다시 훑는데(요구사항 32개 × 테스트 파일 376개에서 요청 한 번에 파일 해석이 약 2만 번,
+ * 4~5초 — 트러블슈팅 122), 파일 내용은 그 사이 바뀌지 않는다. 파일 객체별로 한 번만 만들고(WeakMap) 내용이 달라졌으면 다시 만든다
  */
-function collectSuiteIdsByTestName(file: ScannedFile): Map<string, string[]> {
-  const byName = new Map<string, Set<string>>();
-  const discovered = discoverTestsInFile(file.path, file.content);
-  if (!discovered) return new Map();
-  for (const row of flattenDiscoveredFile(discovered)) {
-    if (row.suitePath.length === 0) continue;
-    const ids = byName.get(row.displayName.trim()) ?? new Set<string>();
-    for (const title of row.suitePath) for (const id of findMentionedIds(title)) ids.add(id);
-    byName.set(row.displayName.trim(), ids);
-  }
-  return new Map([...byName].map(([name, ids]) => [name, [...ids]]));
-}
-
-/** 테스트 이름 하나가 가리키는 id 전부: 자기 이름에 단 것 + 감싼 묶음 제목에 단 것(중복 없이) */
-function mentionedIdsOfTest(name: string, suiteIds: ReadonlyMap<string, string[]>): string[] {
-  return [...new Set([...findMentionedIds(name), ...(suiteIds.get(name) ?? [])])];
-}
-
-/** 테스트 파일 하나에서 뽑아 둔 것. 어느 id를 찾든 같으므로 파일마다 한 번만 만든다 */
-interface TestFileIndex {
+interface CachedTestFileIndex {
   content: string;
-  /** 선언된 테스트 이름과, 그 이름이 가리키는 id 전부(자기 이름에 단 것 + 감싼 묶음 제목에 단 것) */
-  names: Array<{ name: string; ids: string[] }>;
-  /** id처럼 보이는 조각(R3 등)이 든 메서드 이름. 선언 순서대로, 중복 포함 */
-  methods: string[];
+  path: string;
+  json: string | null;
+}
+const TEST_FILE_INDEXES = new WeakMap<ScannedFile, CachedTestFileIndex>();
+
+function testFileIndexJson(file: ScannedFile): string | null {
+  const cached = TEST_FILE_INDEXES.get(file);
+  if (cached && cached.content === file.content && cached.path === file.path) return cached.json;
+  const json = native.reqTraceFileIndex(encodeLoneSurrogates(file.path), encodeLoneSurrogates(file.content)) ?? null;
+  TEST_FILE_INDEXES.set(file, { content: file.content, path: file.path, json });
+  return json;
 }
 
-const METHOD_WITH_ID_PATTERN = /\b(?:void|public|private|protected)\s+[\w<>[\],\s]*?\b(\w*[Rr]\d+\w*)\s*\(/g;
+/** 훑을 파일 목록의 색인 배열(JSON). 시험 파일이 아닌 자리는 null */
+function indexesJson(files: readonly ScannedFile[]): string {
+  return `[${files.map((file) => testFileIndexJson(file) ?? 'null').join(',')}]`;
+}
 
-/**
- * 파일 객체별로 뽑아 둔 결과. 요구사항 탭은 요구사항마다 같은 파일 목록을 다시 훑는데(요구사항 32개 × 테스트 파일 376개에서
- * 요청 한 번에 파일 해석이 약 2만 번, 4~5초 — 트러블슈팅 122), 파일 내용은 그 사이 바뀌지 않는다.
- * 파일 객체가 살아 있는 동안만 남고(WeakMap), 내용이 달라졌으면 다시 만든다
- */
-const TEST_FILE_INDEXES = new WeakMap<ScannedFile, TestFileIndex>();
+/** 추적표·시나리오 입력에 넣는 `testFiles`: `[{ path, index }]`(경로는 인코딩한 글자) */
+function indexedTestFilesJson(files: readonly ScannedFile[]): string {
+  return `[${files.map((file) => `{"path":${JSON.stringify(encodeLoneSurrogates(file.path))},"index":${testFileIndexJson(file) ?? 'null'}}`).join(',')}]`;
+}
 
-function testFileIndex(file: ScannedFile): TestFileIndex {
-  const cached = TEST_FILE_INDEXES.get(file);
-  if (cached && cached.content === file.content) return cached;
-  const suiteIds = collectSuiteIdsByTestName(file);
-  const index: TestFileIndex = {
-    content: file.content,
-    names: collectDeclaredTestNames(file).map((name) => ({ name, ids: mentionedIdsOfTest(name, suiteIds) })),
-    methods: [...file.content.matchAll(METHOD_WITH_ID_PATTERN)].map((match) => match[1]!),
-  };
-  TEST_FILE_INDEXES.set(file, index);
-  return index;
+/** `{ 이름: 값, … }` 꼴 JSON에 이미 만든 `testFiles` 조각을 끼운다. 값이 undefined인 키는 뺀다 */
+function traceInputJson(parts: Record<string, unknown>, files: readonly ScannedFile[]): string {
+  const entries = Object.entries(parts).filter(([, value]) => value !== undefined);
+  return `{${entries.map(([key, value]) => `${JSON.stringify(key)}:${encodeNative(value)}`).join(',')},"testFiles":${indexedTestFilesJson(files)}}`;
+}
+
+function matchesFromFound(files: readonly ScannedFile[], json: string): TestMatch[] {
+  return (JSON.parse(json) as Array<[number, string]>).map(([position, name]) => ({ file: files[position]!.path, name: decodeLoneSurrogates(name) }));
 }
 
 /**
  * 작업 복사본의 테스트 파일에서 id를 언급하는 테스트 이름을 찾는다.
  * Jest/Vitest/Playwright의 it('R3 …')·test('R3 …')와 JUnit의 @DisplayName("R3 …")·메서드 이름(testR3Login 등)을 본다.
+ * 규칙은 Rust(`crates/bstudio-guard/src/requirements_trace.rs`, ADR-191 3단계 3z)에 있다
  */
 export function scanTestFilesForRequirementId(files: readonly ScannedFile[], id: string): TestMatch[] {
-  const matches: TestMatch[] = [];
-  for (const file of files) {
-    if (!isLikelyTestFile(file.path)) continue;
-    const seen = new Set<string>();
-    const add = (name: string) => {
-      if (!seen.has(name)) {
-        seen.add(name);
-        matches.push({ file: file.path, name });
-      }
-    };
-
-    const index = testFileIndex(file);
-    for (const { name, ids } of index.names) {
-      if (ids.some((mention) => mention === id || mention.startsWith(`${id}.`))) add(name);
-    }
-    for (const method of index.methods) {
-      if (identifierMentionsId(method, id)) add(method);
-    }
-  }
-  return matches;
+  return matchesFromFound(files, native.reqTraceScanRequirement(indexesJson(files), encodeLoneSurrogates(id)));
 }
 
 /** 작업 복사본의 테스트 파일에서 시나리오 id(R4.1 등)를 정확히 언급하는 테스트 이름을 찾는다(추적 매트릭스의 시나리오 행이 쓴다) */
 export function scanTestFilesForScenarioId(files: readonly ScannedFile[], scenarioId: string): TestMatch[] {
-  const matches: TestMatch[] = [];
-  for (const file of files) {
-    if (!isLikelyTestFile(file.path)) continue;
-    for (const { name, ids } of testFileIndex(file).names) {
-      if (ids.includes(scenarioId)) matches.push({ file: file.path, name });
-    }
-  }
-  return matches;
+  return matchesFromFound(files, native.reqTraceScanScenario(indexesJson(files), encodeLoneSurrogates(scenarioId)));
 }
 
 /** 어떤 요구사항·시나리오 id도 언급하지 않은 테스트("주인 없는 테스트")를 찾는다. 추적 매트릭스의 역방향 목록이 쓴다 */
 export function scanTestFilesForOrphans(files: readonly ScannedFile[]): TestMatch[] {
-  const matches: TestMatch[] = [];
-  for (const file of files) {
-    if (!isLikelyTestFile(file.path)) continue;
-    for (const { name, ids } of testFileIndex(file).names) {
-      if (ids.length === 0) matches.push({ file: file.path, name });
-    }
-  }
-  return matches;
+  return matchesFromFound(files, native.reqTraceScanOrphans(indexesJson(files)));
 }
 
 /**
@@ -1525,23 +1452,28 @@ export interface BuildTraceabilityMatrixInput {
   testRunRows?: readonly MatrixTestRunRow[];
 }
 
-/** 매트릭스 테스트 열 — 파일을 스캔해 찾은 테스트에, 지금 체크포인트에서 돈 테스트 탭 실행 결과가 있으면 이름으로 맞춰
- * 붙인다. 실행에만 있고 스캔에는 안 걸린 테스트(테스트 탭의 발견 파서가 이 모듈의 가벼운 정규식과 다르게 파싱한 경우
- * 등)도 빠뜸없이 보여준다. skip은 "안 돌림"으로 합쳐 보여준다(매트릭스는 통과·실패·안 돌림 세 가지만 구분한다) */
-function mergeTestMatchesWithRunRows(scanned: readonly TestMatch[], runRows: readonly MatrixTestRunRow[], id: string): MatrixTestMatch[] {
-  const toResult = (status: MatrixTestRunRow['status']): 'pass' | 'fail' | 'not-run' => (status === 'skip' ? 'not-run' : status);
-  const matchedRuns = runRows.filter((row) => row.id === id);
-  const resultByName = new Map(matchedRuns.map((row) => [row.name, toResult(row.status)]));
-  const merged = new Map<string, MatrixTestMatch>();
-  for (const test of scanned) {
-    const result = resultByName.get(test.name);
-    merged.set(test.name, result !== undefined ? { ...test, result } : { ...test });
-  }
-  for (const row of matchedRuns) {
-    if (merged.has(row.name)) continue;
-    merged.set(row.name, { file: row.file, name: row.name, result: toResult(row.status) });
-  }
-  return [...merged.values()];
+/** 테스트 이름·경로를 Rust로 보내는 글자로(짝 없는 서로게이트가 U+FFFD로 합쳐지지 않게). 나머지 필드는 그대로 둔다 */
+function encodeTestLike<T extends { name: string; file: string }>(test: T): T {
+  return { ...test, name: encodeLoneSurrogates(test.name), file: encodeLoneSurrogates(test.file) };
+}
+
+function decodeTestLike<T extends { name: string; file: string }>(test: T): T {
+  return { ...test, name: decodeLoneSurrogates(test.name), file: decodeLoneSurrogates(test.file) };
+}
+
+function encodeRunRows(rows: readonly MatrixTestRunRow[] | undefined): MatrixTestRunRow[] | undefined {
+  return rows?.map(encodeTestLike);
+}
+
+/** studio 평가 안의 evidence.tests 이름·경로를 인코딩한다(매트릭스가 실행 행과 이름으로 맞춘다) */
+function encodeEvaluations(evaluations: Readonly<Record<string, RequirementEvaluation>> | undefined): Record<string, RequirementEvaluation> | undefined {
+  if (!evaluations) return undefined;
+  return Object.fromEntries(
+    Object.entries(evaluations).map(([id, evaluation]) => [
+      id,
+      evaluation?.evidence && Array.isArray(evaluation.evidence.tests) ? { ...evaluation, evidence: { ...evaluation.evidence, tests: evaluation.evidence.tests.map(encodeTestLike) } } : evaluation,
+    ]),
+  );
 }
 
 /** 시나리오 하나의 증거를 만든다. 체크포인트·테스트·게이트는 시나리오 id로만 좁히고(요구사항 전체 증거를 섞지 않는다),
@@ -1551,7 +1483,8 @@ function mergeTestMatchesWithRunRows(scanned: readonly TestMatch[], runRows: rea
  * 조건은 요구사항 전체의 것이다), 부모가 "전부 만족"일 때만 그대로 물려준다 — 일부만 맞은 상태를 물려주면 이 시나리오
  * 자신의 증거가 하나도 없어도 "작업 중"으로 보여 과대평가된다. 사람 확인(manualVerification)·내용 드리프트는 부모
  * 요구사항 객체 자체를 보고 판정하므로(computeRequirementStatus가 requirementForStatus로 받는다) 따로 다루지 않는다
- * — 이 규칙 덕에 시나리오 행의 상태는 "요구사항 목록과 같은 함수로, 증거만 시나리오로 좁혀" 계산된다 */
+ * — 이 규칙 덕에 시나리오 행의 상태는 "요구사항 목록과 같은 함수로, 증거만 시나리오로 좁혀" 계산된다.
+ * 규칙은 Rust(`requirements_trace.rs`, 3단계 3z)가 가진다 */
 export function buildScenarioEvidence(params: {
   scenarioId: string;
   checkpoints: readonly CheckpointRef[];
@@ -1560,27 +1493,21 @@ export function buildScenarioEvidence(params: {
   testRunRows: readonly MatrixTestRunRow[];
   parentEvidence?: RequirementEvidence;
 }): RequirementEvidence {
-  const matchedRuns = params.testRunRows.filter((row) => row.id === params.scenarioId);
-  const passed = matchedRuns.filter((row) => row.status === 'pass').length;
-  const failed = matchedRuns.filter((row) => row.status === 'fail').length;
-  const testRun: TestRunEvidence | undefined =
-    passed + failed > 0
-      ? {
-          at: matchedRuns.reduce((latest, row) => (row.at > latest ? row.at : latest), matchedRuns[0]!.at),
-          sha: matchedRuns[0]!.sha,
-          shortSha: matchedRuns[0]!.shortSha,
-          passed,
-          failed,
-        }
-      : undefined;
-  const docEvidence = params.parentEvidence?.docEvidence?.satisfied ? params.parentEvidence.docEvidence : undefined;
-  return {
-    checkpoints: findCheckpointMentions(params.checkpoints, params.scenarioId),
-    tests: scanTestFilesForScenarioId(params.testFiles, params.scenarioId),
-    gateChecks: findGateCheckMentions(params.gateChecks, params.scenarioId),
-    ...(testRun ? { testRun } : {}),
-    ...(docEvidence ? { docEvidence } : {}),
-  };
+  const evidence = decodeNative<RequirementEvidence>(
+    native.reqTraceScenarioEvidence(
+      traceInputJson(
+        {
+          scenarioId: params.scenarioId,
+          checkpoints: params.checkpoints,
+          gateChecks: params.gateChecks,
+          testRunRows: encodeRunRows(params.testRunRows),
+          parentEvidence: params.parentEvidence,
+        },
+        params.testFiles,
+      ),
+    ),
+  );
+  return { ...evidence, tests: evidence.tests.map(decodeTestLike) };
 }
 
 /**
@@ -1592,6 +1519,7 @@ export function buildScenarioEvidence(params: {
  * 그래서 "자동 근거로 확인됐는가"만 본다: 사람 확인(요구사항 전체에 대한 것)과 문서 확인은 시나리오 상태를 전부
  * 검증됨으로 만들어 버리므로 시나리오 평가에서 뺀다. 시나리오 평가의 증거에는 missingScenarios가 없어
  * computeRequirementStatus의 새 조건이 재귀로 걸리지 않는다(시나리오에는 하위 시나리오가 없다).
+ * 규칙은 Rust(`requirements_trace.rs`, 3단계 3z)가 가진다
  */
 export function findUnverifiedScenarioIds(
   requirement: Requirement,
@@ -1601,20 +1529,9 @@ export function findUnverifiedScenarioIds(
   testRunRows: readonly MatrixTestRunRow[],
   parentEvidence: RequirementEvidence,
 ): string[] {
-  const scenarios = requirement.scenarios ?? [];
-  if (scenarios.length === 0) return [];
-  // "자동 근거(테스트·게이트)로 확인되지 않은 시나리오"를 모은다(ADR-155). 사람 확인·문서 확인은 시나리오마다 따로
-  // 하는 확인이 아니라 요구사항 전체에 대한 것이라 시나리오 상태를 전부 검증됨으로 만들어 버리므로, 여기서는 둘 다 뺀다 —
-  // 그래야 "테스트가 일부만 덮고 나머지는 사람이 확인했다"를 요구사항 상태·출처(verifiedBy)가 구분해 보여줄 수 있다.
-  // 시나리오 평가에는 missingScenarios가 없으니 computeRequirementStatus의 새 조건이 재귀로 걸리지 않는다
-  const { manualVerification: _manual, ...automaticRequirement } = requirement;
-  const { docEvidence: _doc, ...automaticParent } = parentEvidence;
-  return scenarios
-    .filter((scenario) => {
-      const scenarioEvidence = buildScenarioEvidence({ scenarioId: scenario.id, checkpoints, testFiles, gateChecks, testRunRows, parentEvidence: automaticParent });
-      return computeRequirementStatus(scenarioEvidence, automaticRequirement) !== '검증됨';
-    })
-    .map((scenario) => scenario.id);
+  return JSON.parse(
+    native.reqTraceUnverifiedScenarioIds(traceInputJson({ requirement, checkpoints, gateChecks, testRunRows: encodeRunRows(testRunRows), parentEvidence }, testFiles)),
+  ) as string[];
 }
 
 /**
@@ -1630,110 +1547,29 @@ export function findUnexecutedTests(requirementId: string, testRunRows: readonly
   return decodeNative<UnexecutedTestInfo[]>(native.reqCoreUnexecutedTests(requirementId, encodeNative(testRunRows)));
 }
 
-/** 증거·상태가 다 정해진 행 하나를 MatrixRow 모양으로 마무리한다(요구사항 행·시나리오 행이 공통으로 쓴다) */
-function finalizeMatrixRow(params: {
-  kind: 'requirement' | 'scenario';
-  id: string;
-  parentId?: string;
-  title: string;
-  rev: number;
-  priority: RequirementPriority;
-  issue?: number;
-  evidence: RequirementEvidence;
-  status: RequirementStatus;
-  requirementForStatus: Requirement;
-  testRunRows: readonly MatrixTestRunRow[];
-}): MatrixRow {
-  return {
-    kind: params.kind,
-    id: params.id,
-    ...(params.parentId ? { parentId: params.parentId } : {}),
-    title: params.title,
-    rev: params.rev,
-    priority: params.priority,
-    ...(params.issue !== undefined ? { issue: params.issue } : {}),
-    checkpoints: params.evidence.checkpoints,
-    tests: mergeTestMatchesWithRunRows(params.evidence.tests, params.testRunRows, params.id),
-    gateChecks: params.evidence.gateChecks,
-    status: params.status,
-    verifiedBy: matrixVerificationBadge(params.status, params.evidence, params.requirementForStatus),
-  };
-}
-
-/** studio 평가(evaluationByRequirementId) 없이 부를 때의 요구사항 증거 — 목록과 같은 규칙으로 missingScenarios도 채운다 */
-function fallbackEvidence(requirement: Requirement, input: BuildTraceabilityMatrixInput, testRunRows: readonly MatrixTestRunRow[]): RequirementEvidence {
-  const base: RequirementEvidence = {
-    checkpoints: findCheckpointMentions(input.checkpoints, requirement.id),
-    tests: scanTestFilesForRequirementId(input.testFiles, requirement.id),
-    gateChecks: findGateCheckMentions(input.gateChecks, requirement.id),
-  };
-  const missingScenarios = findUnverifiedScenarioIds(requirement, input.checkpoints, input.testFiles, input.gateChecks, testRunRows, base);
-  return missingScenarios.length > 0 ? { ...base, missingScenarios } : base;
-}
-
 /** 요구사항·시나리오마다 추적 행을 만들고, 주인 없는 테스트·테스트 없는 필수 요구사항을 모은다. 요구사항 행의
  * 증거·상태는 evaluationByRequirementId가 있으면 그대로 쓰고(목록과 똑같다), 없으면 체크포인트·테스트·게이트만으로
- * 계산한다(studio 컨텍스트 없이 부르는 이 모듈의 단위 테스트가 이 경로를 쓴다) */
+ * 계산한다(studio 컨텍스트 없이 부르는 이 모듈의 단위 테스트가 이 경로를 쓴다). 규칙은 Rust(`requirements_trace.rs`, 3단계 3z)가 가진다 */
 export function buildTraceabilityMatrix(input: BuildTraceabilityMatrixInput): TraceabilityMatrix {
-  const rows: MatrixRow[] = [];
-  const mustHavesWithoutTests: Requirement[] = [];
-  const mustHavesVerifiedWithoutTests: Requirement[] = [];
-  const testRunRows = input.testRunRows ?? [];
-
-  for (const requirement of input.requirements) {
-    const evaluation = input.evaluationByRequirementId?.[requirement.id];
-    const evidence: RequirementEvidence = evaluation ? evaluation.evidence : fallbackEvidence(requirement, input, testRunRows);
-    const status = evaluation ? evaluation.status : computeRequirementStatus(evidence, requirement);
-    rows.push(
-      finalizeMatrixRow({
-        kind: 'requirement',
-        id: requirement.id,
-        title: requirement.title,
-        rev: requirement.rev ?? 1,
-        priority: requirement.priority,
-        issue: requirement.trace?.issue,
-        evidence,
-        status,
-        requirementForStatus: requirement,
-        testRunRows,
-      }),
-    );
-
-    let scenarioTestCount = 0;
-    for (const scenario of requirement.scenarios ?? []) {
-      const scenarioEvidence = buildScenarioEvidence({
-        scenarioId: scenario.id,
-        checkpoints: input.checkpoints,
-        testFiles: input.testFiles,
-        gateChecks: input.gateChecks,
-        testRunRows,
-        parentEvidence: evidence,
-      });
-      scenarioTestCount += scenarioEvidence.tests.length;
-      rows.push(
-        finalizeMatrixRow({
-          kind: 'scenario',
-          id: scenario.id,
-          parentId: requirement.id,
-          title: `(Given) ${scenario.given} (When) ${scenario.when} (Then) ${scenario.then}`,
-          rev: requirement.rev ?? 1,
-          priority: requirement.priority,
-          issue: requirement.trace?.issue,
-          evidence: scenarioEvidence,
-          status: computeRequirementStatus(scenarioEvidence, requirement),
-          requirementForStatus: requirement,
-          testRunRows,
-        }),
-      );
-    }
-
-    if (requirement.priority === 'must' && evidence.tests.length === 0 && scenarioTestCount === 0) {
-      if (status === '검증됨') mustHavesVerifiedWithoutTests.push(requirement);
-      else mustHavesWithoutTests.push(requirement);
-    }
-  }
-
-  return { rows, orphanTests: scanTestFilesForOrphans(input.testFiles), mustHavesWithoutTests, mustHavesVerifiedWithoutTests };
+  const matrix = decodeNative<TraceabilityMatrix>(
+    native.reqTraceMatrix(
+      traceInputJson(
+        {
+          requirements: input.requirements,
+          checkpoints: input.checkpoints,
+          gateChecks: input.gateChecks,
+          evaluationByRequirementId: encodeEvaluations(input.evaluationByRequirementId),
+          testRunRows: encodeRunRows(input.testRunRows),
+        },
+        input.testFiles,
+      ),
+    ),
+  );
+  return {
+    ...matrix,
+    rows: matrix.rows.map((row) => ({ ...row, tests: row.tests.map(decodeTestLike) })),
+    orphanTests: matrix.orphanTests.map(decodeTestLike),
+  };
 }
 
 /** 추적 매트릭스를 CSV(쉼표 구분, CRLF 줄바꿈)로 만든다. "CSV로 내보내기" 버튼이 그대로 내려받게 한다 */

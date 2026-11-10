@@ -1,12 +1,9 @@
+import { native } from '@b-studio/sandbox';
 import { describe, expect, it, vi } from 'vitest';
-
-vi.mock('./test-discovery', async (original) => {
-  const actual = await original<typeof import('./test-discovery')>();
-  return { ...actual, discoverTestsInFile: vi.fn(actual.discoverTestsInFile) };
-});
-
 import { scanTestFilesForOrphans, scanTestFilesForRequirementId, scanTestFilesForScenarioId, type ScannedFile } from './requirements';
-import { discoverTestsInFile } from './test-discovery';
+
+// 파일 해석은 Rust(reqTraceFileIndex)가 한다. 껍데기가 파일 객체마다 그 결과를 들고 있는지를 부른 횟수로 본다(ADR-191 3z)
+const fileIndexCalls = () => vi.spyOn(native, 'reqTraceFileIndex');
 
 const java = (name: string, body: string): ScannedFile => ({ path: `commerce/src/test/java/${name}Test.java`, content: `class ${name}Test {\n${body}\n}\n` });
 
@@ -15,14 +12,16 @@ describe('요구사항별 테스트 훑기는 파일을 한 번만 해석한다 
     const files = Array.from({ length: 20 }, (_, index) =>
       java(`Order${index}`, `  @Nested\n  @DisplayName("R${index + 1} 주문")\n  class Flow {\n    @Test\n    @DisplayName("R${index + 1}.1 담는다")\n    void addsToCart() {}\n    @Test\n    void plain() {}\n  }\n  @Test\n  void testR${index + 1}Login() {}`),
     );
-    vi.mocked(discoverTestsInFile).mockClear();
+    const spy = fileIndexCalls();
+    spy.mockClear();
 
     for (let id = 1; id <= 30; id++) scanTestFilesForRequirementId(files, `R${id}`);
     scanTestFilesForScenarioId(files, 'R3.1');
     scanTestFilesForOrphans(files);
 
     // 고치기 전에는 훑을 때마다 파일을 다시 해석해 20 × 32 = 640번이었다
-    expect(vi.mocked(discoverTestsInFile)).toHaveBeenCalledTimes(files.length);
+    expect(spy).toHaveBeenCalledTimes(files.length);
+    spy.mockRestore();
   });
 
   it('한 번만 해석해도 결과는 같다: 묶음 제목의 id, 테스트 이름의 id, 메서드 이름의 id', () => {

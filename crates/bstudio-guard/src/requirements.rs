@@ -47,7 +47,7 @@ pub(crate) fn compile(pattern: &str) -> Regex {
 // ---------------------------------------------------------------------------
 
 /// `v.key`: 없거나 null인 값에서 읽으면 TypeError다. 객체가 아닌 값(문자열·수)에서는 `undefined`다
-fn member<'a>(v: Option<&'a JsValue>, key: &str) -> Res<Option<&'a JsValue>> {
+pub(crate) fn member<'a>(v: Option<&'a JsValue>, key: &str) -> Res<Option<&'a JsValue>> {
     match v {
         None | Some(JsValue::Null) => Err(format!("없는 값에서 {key}을(를) 읽을 수 없습니다")),
         Some(JsValue::Obj(o)) => Ok(field(o, key)),
@@ -67,7 +67,7 @@ fn is_undef(v: &JsValue) -> bool {
     matches!(v, JsValue::Obj(o) if o.contains_key(UNDEF_KEY))
 }
 
-fn field<'a>(o: &'a JsObject, key: &str) -> Option<&'a JsValue> {
+pub(crate) fn field<'a>(o: &'a JsObject, key: &str) -> Option<&'a JsValue> {
     o.get(key).filter(|v| !is_undef(v))
 }
 
@@ -89,37 +89,37 @@ pub fn strip_undefined(value: JsValue) -> JsValue {
 }
 
 /// `v?.key`
-fn opt_member<'a>(v: Option<&'a JsValue>, key: &str) -> Option<&'a JsValue> {
+pub(crate) fn opt_member<'a>(v: Option<&'a JsValue>, key: &str) -> Option<&'a JsValue> {
     match v {
         Some(JsValue::Obj(o)) => field(o, key),
         _ => None,
     }
 }
 
-fn array<'a>(v: Option<&'a JsValue>, what: &str) -> Res<&'a [JsValue]> {
+pub(crate) fn array<'a>(v: Option<&'a JsValue>, what: &str) -> Res<&'a [JsValue]> {
     match v {
         Some(JsValue::Arr(items)) => Ok(items),
         _ => Err(format!("{what}은(는) 배열이어야 합니다")),
     }
 }
 
-fn string<'a>(v: Option<&'a JsValue>, what: &str) -> Res<&'a str> {
+pub(crate) fn string<'a>(v: Option<&'a JsValue>, what: &str) -> Res<&'a str> {
     match v {
         Some(JsValue::Str(s)) => Ok(s),
         _ => Err(format!("{what}은(는) 문자열이어야 합니다")),
     }
 }
 
-fn truthy(v: Option<&JsValue>) -> bool {
+pub(crate) fn truthy(v: Option<&JsValue>) -> bool {
     v.is_some_and(JsValue::truthy)
 }
 
-fn is_str(v: Option<&JsValue>, expected: &str) -> bool {
+pub(crate) fn is_str(v: Option<&JsValue>, expected: &str) -> bool {
     matches!(v, Some(JsValue::Str(s)) if s == expected)
 }
 
 /// 템플릿 문자열 `${value}`
-fn tpl(v: Option<&JsValue>) -> String {
+pub(crate) fn tpl(v: Option<&JsValue>) -> String {
     v.map_or_else(|| "undefined".to_owned(), JsValue::to_js_string)
 }
 
@@ -153,7 +153,7 @@ fn collapse_whitespace(text: &str) -> String {
     text.split(js::is_js_whitespace).filter(|piece| !piece.is_empty()).collect::<Vec<_>>().join(" ")
 }
 
-fn without_key(o: &JsObject, key: &str) -> JsObject {
+pub(crate) fn without_key(o: &JsObject, key: &str) -> JsObject {
     let mut out = JsObject::new();
     for (k, v) in o.entries() {
         if k != key {
@@ -180,7 +180,7 @@ fn with_key(value: &JsValue, key: &str, replacement: Option<JsValue>) -> Res<JsV
     })
 }
 
-fn obj_of<'a>(v: &'a JsValue, what: &str) -> Res<&'a JsObject> {
+pub(crate) fn obj_of<'a>(v: &'a JsValue, what: &str) -> Res<&'a JsObject> {
     match v {
         JsValue::Obj(o) => Ok(o),
         _ => Err(format!("{what}은(는) 객체여야 합니다")),
@@ -271,7 +271,7 @@ pub fn find_mentioned_ids(text: &str) -> Vec<String> {
         .collect()
 }
 
-fn mention_matches(mention: &str, id: &str) -> bool {
+pub(crate) fn mention_matches(mention: &str, id: &str) -> bool {
     mention == id || (mention.starts_with(id) && mention[id.len()..].starts_with('.'))
 }
 
