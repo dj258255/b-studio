@@ -3640,3 +3640,46 @@ pub fn agent_append_user_plan(role: Option<String>, content_kind: String) -> Str
 pub fn agent_summarize_json_content(content: String) -> Option<String> {
     json_summary::summarize_json_content(&content)
 }
+
+// ── agent: 요구사항 모델 답 읽기(3단계 3ad). TS 껍데기: packages/agent/src/requirements.ts, task-plan.ts. 글자는 모두 TS가 `encodeLoneSurrogates`한 것이고 결과도 같은 인코딩이다
+use bstudio_guard::requirements_replies as rrp;
+
+/// 답에서 `JSON.parse`에 건넬 글자와 `jsonrepair`에 건넬 글자(둘). `{`가 없으면 빈 배열
+#[napi]
+pub fn req_reply_extract_json(text: String) -> Vec<String> {
+    rrp::extract_reply_json(&text).map_or_else(Vec::new, |(candidate, tail)| vec![candidate, tail])
+}
+
+/// `repairExtractionReply`. 입력·결과는 글자를 인코딩한 값의 `encodeNative` JSON. 시나리오 id 번호를 매길 수 없으면 던진다
+#[napi]
+pub fn req_reply_repair_extraction(raw_json: String) -> Result<String> {
+    Ok(out(&fail(rrp::repair_extraction_reply(&input(&raw_json, "추출 답")?))?))
+}
+
+/// 강등할 추천의 자리(`bases`는 추천마다의 basis, `quotes`는 같은 자리의 specQuote 또는 null)
+#[napi]
+pub fn req_reply_enforce_spec_quote(bases: Vec<String>, quotes: Vec<Option<String>>, spec_text: String) -> Vec<u32> {
+    rrp::enforce_spec_quote_evidence(&bases, &quotes, &spec_text).into_iter().map(|index| index as u32).collect()
+}
+
+#[napi]
+pub fn req_reply_first_lines_preview(content: String, max_lines: u32, max_chars: u32) -> String {
+    rrp::first_lines_preview(&content, max_lines as usize, max_chars as usize)
+}
+
+#[napi]
+pub fn req_reply_is_json_path(path: String) -> bool {
+    rrp::is_json_path(&path)
+}
+
+#[napi]
+pub fn req_reply_too_big_bytes(message: String) -> Option<f64> {
+    rrp::reference_too_big_bytes(&message)
+}
+
+/// 사용량 넷(input·output·cacheRead·cacheWrite)의 합
+#[napi]
+pub fn req_reply_add_usage(a: Vec<f64>, b: Vec<f64>) -> Result<Vec<f64>> {
+    let [Ok(a), Ok(b)] = [a, b].map(<[f64; 4]>::try_from) else { return Err(Error::from_reason("사용량은 숫자 넷이어야 합니다")) };
+    Ok(rrp::add_usage(a, b).to_vec())
+}
