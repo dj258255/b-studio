@@ -1,5 +1,6 @@
 // 차등 시험의 기준: ADR-191 3단계 3x에서 Rust로 옮기기 전의 TS 구현을 그대로 복사한 것이다(requirement-integrity.ts).
 // 고치지 않는다. 시험(requirement-integrity-differential.test.ts)만 불러 쓰고 제품 코드는 불러 쓰지 않는다.
+// (ADR-191 3ab: 요구사항 읽기를 Rust로 옮기면서 아래 import만 옛 읽기 복사본 `requirements-legacy.ts`로 바꿨다. 옛 읽기 + 옛 3x를 새 구현과 견주려는 것이다.)
 /**
  * 요구사항 문서(docs/requirements.md)의 "검증 기록" 무결성(ADR-157).
  *
@@ -12,7 +13,7 @@
  * 저장된 hash와 달라져 요구사항은 저절로 "재확인 필요"가 된다(requirementContentDrifted). 위험한 것은 그 판정을 만드는
  * 기록 자체를 고치는 일이다. 순수 함수만 둔다(파일·git·모델 호출 없음).
  */
-import { JSON_BLOCK, MANUAL_VERIFICATION_LINE, parseRequirementsMarkdown, REQUIREMENT_HEADING } from './requirements';
+import { JSON_BLOCK, MANUAL_VERIFICATION_LINE, parseRequirementsMarkdown, REQUIREMENT_HEADING } from './requirements-legacy';
 import type { WorkflowCheck } from './workflow';
 
 /** 기록이 있던 자리. 파서는 둘 다 읽으므로 둘 다 본다 */

@@ -626,6 +626,12 @@ interface NativeGuard {
   runnerMergeUsageByModel(baseJson: string, queryJson: string): string;
   runnerAddUsage(targetJson: string, sourceJson: string): string;
   runnerApiDurationOf(valueJson: string): number | null | undefined;
+  // ── agent: 요구사항 문서 읽기·쓰기(3단계 3ab). 글자는 모두 encodeLoneSurrogates한 것이고 결과도 같은 인코딩이다(decodeLoneSurrogates로 푼다). 객체는 encodeNative한 JSON, 결과는 decodeNative로 읽는다.
+  // reqMdParseBody는 던지지 않고 `{drafts, jsonBlock, assumptions, manualSteps}`를 돌려준다(zod 검증 앞의 초안과 첫 JSON 블록의 글자). reqMdMerge(몸통 요구사항, 블록 요구사항)는 합친 목록,
+  // reqMdSerialize `{requirements, statusById, assumptions, manualSteps}`는 마크다운(모양이 어긋나면 던진다)
+  reqMdParseBody(raw: string): string;
+  reqMdMerge(requirementsJson: string, storedJson: string): string;
+  reqMdSerialize(inputJson: string): string;
 }
 
 export interface NativeHostPty {

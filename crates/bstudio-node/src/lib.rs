@@ -3534,3 +3534,26 @@ pub fn runner_add_usage(target_json: String, source_json: String) -> Result<Stri
 pub fn runner_api_duration_of(value_json: String) -> Result<Option<f64>> {
     Ok(rj::api_duration_of(Some(&input(&value_json, "API 시간")?)))
 }
+
+// ── agent: 요구사항 문서 읽기·쓰기(3단계 3ab). TS 껍데기: packages/agent/src/requirements.ts. 글자는 모두 TS가 `encodeLoneSurrogates`한 것이고 결과도 같은 인코딩이다
+use bstudio_guard::requirements_markdown as rmd;
+
+/// `{drafts, jsonBlock, assumptions, manualSteps}`(`encodeNative`와 같은 표기의 JSON). zod 검증 앞의 초안과 첫 JSON 블록의 글자. 던지지 않는다
+#[napi]
+pub fn req_md_parse_body(raw: String) -> String {
+    out(&rmd::parse_body(&raw).to_value())
+}
+
+/// `requirements`는 몸통에서 읽어 zod가 검증한 목록, `stored`는 JSON 블록에서 zod가 검증한 요구사항 목록. 합친 목록 JSON
+#[napi]
+pub fn req_md_merge(requirements_json: String, stored_json: String) -> Result<String> {
+    let requirements = input(&requirements_json, "요구사항 목록")?;
+    let stored = input(&stored_json, "JSON 블록의 요구사항 목록")?;
+    Ok(out(&fail(rmd::merge_stored(&requirements, &stored))?))
+}
+
+/// `{requirements, statusById, assumptions, manualSteps}`(encodeNative) → 마크다운. 모양이 어긋나면 던진다
+#[napi]
+pub fn req_md_serialize(input_json: String) -> Result<String> {
+    fail(rmd::serialize(&input(&input_json, "요구사항 문서 입력")?))
+}
