@@ -2686,3 +2686,89 @@ pub fn repo_cap_body(body: String) -> String {
 pub fn repo_build_pull_request(input_json: String) -> Result<String> {
     Ok(out(&fail(repo::build_pull_request(&input_json))?))
 }
+
+// ── agent: 연결·인증·조율 판정(3단계 3t). 호스트·토큰·출처를 견주는 입력은 TS가 encodeLoneSurrogates한 글자를 보낸다.
+// 구조가 있는 입력은 encodeNative한 JSON 문자열이다
+use bstudio_guard::connection_judge;
+
+#[napi]
+pub fn conn_authorize(host: Option<String>, authorization: Option<String>, token: String, allowed_hosts: Vec<String>) -> Option<String> {
+    connection_judge::authorize(host.as_deref(), authorization.as_deref(), &token, &allowed_hosts).map(|denied| out(&connection_judge::denial_value(denied)))
+}
+
+#[napi]
+pub fn conn_host_allowed(host: Option<String>, allowed_hosts: Vec<String>) -> bool {
+    connection_judge::host_allowed(host.as_deref(), &allowed_hosts)
+}
+
+#[napi]
+pub fn conn_hostname_of(host: Option<String>) -> String {
+    connection_judge::hostname_of(host.as_deref())
+}
+
+#[napi]
+pub fn conn_token_matches(authorization: Option<String>, token: String) -> bool {
+    connection_judge::token_matches(authorization.as_deref(), &token)
+}
+
+#[napi]
+pub fn conn_is_allowed_request(protocol: String, origin: String, allowed_origins: Vec<String>) -> bool {
+    connection_judge::is_allowed_request(&protocol, &origin, &allowed_origins)
+}
+
+#[napi]
+pub fn conn_is_automatic_favicon_path(pathname: String) -> bool {
+    connection_judge::is_automatic_favicon_path(&pathname)
+}
+
+#[napi]
+pub fn conn_describe_step(click: Option<String>, fill_selector: Option<String>, press: Option<String>, wait_for: Option<String>) -> String {
+    connection_judge::describe_step(click.as_deref(), fill_selector.as_deref(), press.as_deref(), wait_for.as_deref())
+}
+
+#[napi]
+pub fn conn_rejected_change_feedback(rejected: Vec<String>) -> String {
+    connection_judge::rejected_change_feedback(&rejected)
+}
+
+#[napi]
+pub fn coord_board_validate(model_writes: bool, by: String, kind: String, body: String, refs_len: f64, note_bytes_limit: f64) -> Option<String> {
+    coordination::board_validate(model_writes, &by, &kind, &body, refs_len as usize, note_bytes_limit)
+}
+
+/// 입력 `[{priority, at, id, bytes}]`(읽을 수 있는 메모, 들어온 순서). 결과 `{selected: [위치], truncated, bytes}` JSON. 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn coord_board_pick_notes(notes_json: String, read_limit: f64, budget: f64) -> Result<String> {
+    let value = input(&notes_json, "읽을 메모 목록")?;
+    let JsValue::Arr(items) = &value else { return Err(Error::from_reason("읽을 메모 목록이 배열이 아닙니다")) };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        let number = |key: &str| match item.prop(key) {
+            Some(JsValue::Num(n)) => Ok(*n),
+            _ => Err(Error::from_reason(format!("메모의 {key}이(가) 수가 아닙니다"))),
+        };
+        let text = |key: &str| match item.prop(key) {
+            Some(JsValue::Str(s)) => Ok(s.clone()),
+            _ => Err(Error::from_reason(format!("메모의 {key}이(가) 문자열이 아닙니다"))),
+        };
+        keys.push(coordination::NoteSortKey { priority: number("priority")?, at: text("at")?, id: text("id")?, bytes: number("bytes")? });
+    }
+    let (selected, truncated, bytes) = coordination::board_pick_notes(&keys, read_limit, budget);
+    let selected = JsValue::Arr(selected.into_iter().map(|i| JsValue::Num(i as f64)).collect());
+    Ok(out(&bstudio_guard::js_json::object(vec![("selected", Some(selected)), ("truncated", Some(JsValue::Bool(truncated))), ("bytes", Some(JsValue::Num(bytes)))])))
+}
+
+#[napi]
+pub fn coord_mcp_post_input_error(args_json: String) -> Result<Option<String>> {
+    Ok(coordination::mcp_post_input_error(&input(&args_json, "post_note 입력")?))
+}
+
+#[napi]
+pub fn coord_mcp_read_input_error(args_json: String) -> Result<Option<String>> {
+    Ok(coordination::mcp_read_input_error(&input(&args_json, "read_notes 입력")?))
+}
+
+#[napi]
+pub fn coord_format_note(kind: String, priority: f64, lane: String, body: String, refs: Vec<String>) -> String {
+    coordination::format_note(&kind, priority, &lane, &body, &refs)
+}

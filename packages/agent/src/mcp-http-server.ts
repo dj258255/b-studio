@@ -1,5 +1,6 @@
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { zodShape } from './claude-code-runner';
@@ -29,9 +30,6 @@ export interface ToolServerOptions {
    */
   allowedHosts?: readonly string[];
 }
-
-/** 루프백 밖에서 온 요청을 거부한다. 서버를 127.0.0.1에만 열어 두어도 Host 헤더 위조(DNS 재바인딩)는 따로 막아야 한다 */
-const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1']);
 
 /**
  * b-studio 도구를 로컬 streamable HTTP MCP 서버로 노출한다.
@@ -103,45 +101,28 @@ async function handle(req: IncomingMessage, res: ServerResponse, options: Requir
   }
 }
 
-/** 통과하면 undefined, 막으면 응답할 상태와 이유 */
-function authorize(host: string | undefined, authorization: string | undefined, token: string, allowedHosts: readonly string[]): { status: number; message: string } | undefined {
-  if (!hostAllowed(host, allowedHosts)) return { status: 403, message: 'MCP 서버는 루프백에서만 접근할 수 있습니다' };
-  if (!tokenMatches(authorization, token)) return { status: 401, message: 'unauthorized' };
-  return undefined;
+/** 호스트·토큰은 견주는 값이라(여는 쪽) 짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐지지 않게 단사로 바꿔 보낸다. 없는 값은 그대로 없다 */
+function encodeOptional(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : encodeLoneSurrogates(value);
 }
 
-/** Host 헤더가 루프백 이름이거나 따로 허용한 이름인가. 이름은 대소문자를 가리지 않는다 */
+/** 통과하면 undefined, 막으면 응답할 상태와 이유. 판정은 Rust(crates/bstudio-guard/src/connection_judge.rs) */
+export function authorize(host: string | undefined, authorization: string | undefined, token: string, allowedHosts: readonly string[]): { status: number; message: string } | undefined {
+  const denied = native.connAuthorize(encodeOptional(host), encodeOptional(authorization), encodeLoneSurrogates(token), allowedHosts.map(encodeLoneSurrogates));
+  return denied === null || denied === undefined ? undefined : decodeNative<{ status: number; message: string }>(denied);
+}
+
+/** Host 헤더가 루프백 이름이거나 따로 허용한 이름인가(여는 쪽). 이름은 대소문자를 가리지 않는다 */
 export function hostAllowed(host: string | undefined, allowedHosts: readonly string[] = []): boolean {
-  const name = hostnameOf(host).toLowerCase();
-  return LOOPBACK_HOSTS.has(name) || allowedHosts.some((allowed) => allowed.toLowerCase() === name);
+  return native.connHostAllowed(encodeOptional(host), allowedHosts.map(encodeLoneSurrogates));
 }
 
 /**
- * Host 헤더에서 호스트 이름만 꺼낸다. `[::1]:1234` → `::1`, `127.0.0.1:1234` → `127.0.0.1`, `localhost` → `localhost`.
- * IPv6는 대괄호로 감싸므로 대괄호가 있으면 그 안을 쓰고, 없으면 마지막 콜론 뒤만 포트로 본다.
- */
-function hostnameOf(host: string | undefined): string {
-  const value = (host ?? '').trim();
-  if (value.startsWith('[')) {
-    const end = value.indexOf(']');
-    return end === -1 ? '' : value.slice(1, end);
-  }
-  const colon = value.indexOf(':');
-  // 콜론이 둘 이상이면 포트 없는 IPv6 주소다
-  return colon === -1 || value.includes(':', colon + 1) ? value : value.slice(0, colon);
-}
-
-/**
- * bearer 토큰을 값의 위치에 따라 시간이 달라지지 않게 비교한다.
- * 길이가 다르면 timingSafeEqual이 예외를 던지므로 먼저 거부한다(토큰 길이는 비밀이 아니다).
+ * bearer 토큰을 값의 위치와 길이에 따라 시간이 달라지지 않게 비교한다(Rust, 여는 쪽). 빈 토큰은 맞지 않는다.
  * 게시판 MCP 라우트(board-mcp-server.ts를 부르는 쪽)도 같은 비교가 필요해 밖으로 연다.
  */
 export function tokenMatches(authorization: string | undefined, token: string): boolean {
-  const prefix = 'Bearer ';
-  if (!authorization?.startsWith(prefix)) return false;
-  const provided = Buffer.from(authorization.slice(prefix.length), 'utf8');
-  const expected = Buffer.from(token, 'utf8');
-  return provided.length === expected.length && timingSafeEqual(provided, expected);
+  return native.connTokenMatches(encodeOptional(authorization), encodeLoneSurrogates(token));
 }
 
 function listen(server: Server): Promise<void> {
