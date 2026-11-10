@@ -1053,7 +1053,7 @@ pub fn build_referenced_files_context(files: &JsValue, max_chars: f64) -> Res<St
 
 /// 인용이 명세 안에 실제로 있는 글인지(공백 정규화 후 부분 문자열). 여는 쪽이다("명세에 있음"이 붙는다).
 /// 인용의 앞이나 끝이 ASCII 낱말 글자(`[A-Za-z0-9_]`)인데 명세에서 그 옆도 낱말 글자이면(`연 1`이 `연 10회` 안에서, `e`가 `the` 안에서 맞는 것) 낱말 중간을 자른 것이라 그 자리는 세지 않는다
-/// (옛 TS는 그런 조각도 "있다"로 읽었다. 닫는 쪽으로만 다르다. 트러블슈팅 182).
+/// (옛 TS는 그런 조각도 "있다"로 읽었다. 닫는 쪽으로만 다르다. 트러블슈팅 179).
 pub fn verify_spec_quote(spec_quote: &str, spec_text: &str) -> bool {
     let quote = collapse_whitespace(spec_quote);
     if quote.is_empty() {

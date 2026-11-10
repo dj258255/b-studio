@@ -22,7 +22,7 @@ const NOW = '2026-11-10T00:00:00.000Z';
 // 환경 변수로 크게 돌릴 수 있으므로 시간 제한을 풀어 둔다
 vi.setConfig({ testTimeout: 3_600_000 });
 
-/** 옛 `verifySpecQuote`에 "ASCII 낱말 중간을 자른 자리는 세지 않는다"만 얹은 기준(ADR-191 3ad, 트러블슈팅 182) */
+/** 옛 `verifySpecQuote`에 "ASCII 낱말 중간을 자른 자리는 세지 않는다"만 얹은 기준(ADR-191 3ad, 트러블슈팅 179) */
 function oldVerifySpecQuoteWithoutWordCuts(quote: string, specText: string): boolean {
   if (!old.verifySpecQuote(quote, specText)) return false;
   const collapse = (text: string) => text.replace(/\s+/g, ' ').trim();

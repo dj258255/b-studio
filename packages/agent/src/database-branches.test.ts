@@ -177,6 +177,21 @@ describe('DatabaseBranches', () => {
     expect(existsSync(mine)).toBe(true);
   });
 
+  it('이름에서 pid를 읽지 못한 .tmp 파일(남의 파일일 수 있다)은 지우지 않는다', async () => {
+    const { sandbox } = fakeSandbox([dump('SELECT 1;', 'k1')]);
+    const folder = path.join(dir, 'db');
+    await mkdir(folder, { recursive: true });
+    const strangers = ['notes.tmp', `${SHA_B}.save.0x10.1.tmp`, `${SHA_B}.save.1e3.1.tmp`, `${SHA_B}.save.123.1.TMP`, `${SHA_B}.other.2147483646.1.tmp`];
+    for (const name of strangers) await writeFile(path.join(folder, name), 'x', 'utf8');
+    const orphan = path.join(folder, `${SHA_B}.restore.2147483646.1.tmp`);
+    await writeFile(orphan, 'x', 'utf8');
+
+    await new DatabaseBranches(sandbox, project, dir).save(SHA_A);
+
+    for (const name of strangers) expect(existsSync(path.join(folder, name)), name).toBe(true);
+    expect(existsSync(orphan)).toBe(false);
+  });
+
   it('데이터베이스가 없는 프로젝트는 아무것도 하지 않는다', async () => {
     const { sandbox, calls } = fakeSandbox([]);
     const branches = new DatabaseBranches(sandbox, { databases: [] } as unknown as LoadedProject, dir);
@@ -194,5 +209,19 @@ describe('normalizedDumpHash', () => {
     await writeFile(second, dump('SELECT 1;', 'two'), 'utf8');
 
     expect(await normalizedDumpHash(first)).toBe(await normalizedDumpHash(second));
+  });
+
+  it('줄 끝 글자나 끝 개행만 다른 덤프는 다른 해시이고, restrict 줄을 끼워도 줄 끝이 합쳐지지 않는다', async () => {
+    const hashOf = async (name: string, content: string) => {
+      const file = path.join(dir, name);
+      await writeFile(file, content, 'utf8');
+      return normalizedDumpHash(file);
+    };
+    const lf = await hashOf('lf.sql', 'a\nb\n');
+    expect(await hashOf('crlf.sql', 'a\r\nb\n')).not.toBe(lf);
+    expect(await hashOf('cr.sql', 'a\rb\n')).not.toBe(lf);
+    expect(await hashOf('noeol.sql', 'a\nb')).not.toBe(lf);
+    expect(await hashOf('plain.sql', 'x\r\n')).not.toBe(await hashOf('merge.sql', 'x\r\\restrict k\r\n\n'));
+    expect(await hashOf('restrict.sql', 'a\n\\restrict k\nb\n')).toBe(lf);
   });
 });

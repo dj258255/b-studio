@@ -8,7 +8,7 @@ import { parsePlannerReply } from './task-plan';
 
 /**
  * 모델 답 읽기(ADR-191 3단계 3ad)의 벡터. 기대값은 옮기기 전 TS(`requirements-replies-legacy.ts`)가 낸 JSON 글자다(`requirements-replies-vectors.json`).
- * `VECTORS_AGAINST_LEGACY=1`로 돌리면 같은 벡터를 옛 TS에 넣는다. 그러면 `intended`(의도한 차이: 낱말 중간을 자른 ASCII 인용을 옛 TS는 "명세에 있음"으로 읽는다, 트러블슈팅 182)만 실패해야 한다.
+ * `VECTORS_AGAINST_LEGACY=1`로 돌리면 같은 벡터를 옛 TS에 넣는다. 그러면 `intended`(의도한 차이: 낱말 중간을 자른 ASCII 인용을 옛 TS는 "명세에 있음"으로 읽는다, 트러블슈팅 179)만 실패해야 한다.
  * 인식하는 꼴마다 거의 같은 거부 입력을 넣었다: 펜스(표지 없음·대문자·붙임·하나뿐·네 개·안의 펜스), 목록 상한의 같음·±1(60·5·20·10·20, 시나리오 20), 인용의 대소문자·공백 종류·보이지 않는 글자·앞부분만·일부 낱말만·낱말 중간,
  * 코드 단위 300 경계(두 단위 글자·짝 없는 서로게이트·예약 글자), 상한 문구의 접두·접미·구분자·전각 숫자, JSON 이름의 대소문자·덧붙임·유니코드 접힘 글자.
  */

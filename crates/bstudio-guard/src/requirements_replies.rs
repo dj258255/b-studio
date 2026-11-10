@@ -10,7 +10,7 @@
 //!
 //! 글자는 부르는 쪽이 `encodeLoneSurrogates`한 것을 받고 결과 글자도 같은 인코딩이다(짝 없는 서로게이트가 napi 경계에서 U+FFFD로 합쳐지지 않게).
 //!
-//! 의도한 차이: `verify_spec_quote`가 낱말 중간에서 자른 인용을 받지 않는다(트러블슈팅 182). 나머지는 옛 TS와 같다.
+//! 의도한 차이: `verify_spec_quote`가 낱말 중간에서 자른 인용을 받지 않는다(트러블슈팅 179). 나머지는 옛 TS와 같다.
 
 use crate::js;
 use crate::js_json::{self, JsObject, JsValue};

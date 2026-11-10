@@ -66,6 +66,7 @@ interface NativeGuard {
   parseSyncOutput(stdout: string): string[][];
   parseLogLine(raw: string): string | null | undefined;
   NativeSyncObservations: new () => NativeSyncObservations;
+  NativeDumpNormalizer: new () => NativeDumpNormalizer;
   // ── compose override와 edge 설정(2단계 2b-2a). 입력·출력은 JSON 문자열. 모양이 어긋난 입력은 던진다
   edgeConstants(): string;
   edgePortFor(managedNames: string[], service: string): number;
@@ -632,6 +633,17 @@ interface NativeGuard {
   reqMdParseBody(raw: string): string;
   reqMdMerge(requirementsJson: string, storedJson: string): string;
   reqMdSerialize(inputJson: string): string;
+  // ── agent: 작은 판정 모음(3단계 3af). 이름·글은 껍데기가 encodeLoneSurrogates해서 보내고 결과 글에서 decodeLoneSurrogates로 되돌린다.
+  // 덤프 정규화기는 바이트 조각을 먹이면 해시에 넣을 바이트를 낸다(바뀌지 않음을 정하는 판정이라 줄 끝 글자·잘못된 바이트도 해시에 넣는다).
+  // agentTempDumpPids는 지우는 코드가 쓴다: 우리가 쓰는 이름 꼴이 아니거나 pid가 양의 i32 정수가 아니면 null(지우지 않는다).
+  // agentTaskGraphError는 [{ id, dependsOn }]를 받아 실행할 수 없는 꼴이면 메시지(없으면 null), 모양이 어긋난 입력은 던진다.
+  // agentSummarizeJsonContent는 JSON이 아니거나 너무 깊으면 null(호출하는 쪽이 첫 줄 미리보기로 대신한다)
+  agentRestoreDatabaseName(encodedName: string): string;
+  agentTempDumpPids(names: string[]): Array<number | null>;
+  agentTaskGraphError(nodesJson: string): string | null;
+  agentFormatSteering(texts: string[]): string;
+  agentAppendUserPlan(role: string | null | undefined, contentKind: string): 'concat' | 'push' | 'new';
+  agentSummarizeJsonContent(content: string): string | null;
   // ── agent: 요구사항 모델 답 읽기(3단계 3ad). 글자는 encodeLoneSurrogates해서 보내고 결과 글자는 decodeLoneSurrogates로 푼다.
   // reqReplyExtractJson은 [JSON.parse에 건넬 글자, jsonrepair에 건넬 글자]이고 `{`가 없으면 빈 배열. reqReplyRepairExtraction은 글자를 인코딩한 값의 encodeNative JSON이고 시나리오 id 번호를 매길 수 없으면 던진다.
   // reqReplyEnforceSpecQuote는 강등할 추천의 자리(basis가 'spec'인데 인용이 없거나 명세에서 확인되지 않음). 인용과 명세는 둘 다 encodeLoneSurrogates해서 보낸다
@@ -668,6 +680,13 @@ export interface NativeGitEntry {
   dir: string;
   kind: 'directory' | 'file';
   hasState: boolean;
+}
+
+export interface NativeDumpNormalizer {
+  /** 바이트 조각을 먹이면 해시에 넣을 바이트를 돌려준다 */
+  feed(chunk: Buffer): Buffer;
+  /** 입력이 끝났다. 줄 끝 없이 끝난 마지막 줄을 마무리한다 */
+  finish(): Buffer;
 }
 
 export interface NativeSyncObservations {
