@@ -1,5 +1,5 @@
-import { canonicalProjectPath, normalizeProjectPath } from './path-names';
 import path from 'node:path';
+import { native } from '@b-studio/sandbox';
 
 /** 도구 호출 전에 실행기에서 판단하는 정책. 모델 프롬프트의 지침과 달리 우회할 수 없다. */
 export interface ExecutionPolicy {
@@ -43,29 +43,18 @@ export const DEFAULT_DENIED_COMMANDS = [
   'mongosh',
 ] as const;
 
-/**
- * 서비스 컨테이너 안의 `gradle --stop`·`./gradlew --stop`. bootRun으로 서비스를 돌리는 Gradle 데몬까지 멈춰 서비스가
- * 내려간다(도그푸딩 버그 리포트: 에이전트가 조사하다 `./gradlew --stop`을 돌려 commerce 메인 프로세스가 exit 1로
- * 죽었다). 토큰 접두사 규칙(DEFAULT_DENIED_COMMANDS)은 `./gradlew -p commerce --stop`처럼 사이에 옵션이 낀 꼴을
- * 못 잡아 따로 본다. 명령 구분자(; & |)를 넘어가지는 않아, `./gradlew test; echo --stop` 같은 다른 명령의 인자는 무시한다.
- */
-const GRADLE_STOP = /(?:^|[\s;&|(])(?:\S*\/)?gradlew?(?=\s)[^;&|]*\s--stop(?:\s|$)/;
+/** Windows면 역슬래시도 구분자다. 판정은 Rust가 하고 플랫폼 값만 여기서 넘긴다 */
+const BACKSLASH_SEP = path.sep === '\\';
 
 /**
- * 허용 목록에 직접 적혀 있지 않아도 다른 읽기 도구의 권한으로 쓸 수 있는 도구(트러블슈팅 127).
- * 줄 범위 읽기는 read_file이 읽는 것의 일부이고, 검색은 read_file로 읽을 수 있는 파일을 list_files로 볼 수 있는 범위에서 훑는 것이라
- * 그 도구들이 허용돼 있으면 권한이 늘지 않는다. 이렇게 두지 않으면 allowedTools를 적어 둔 기존 studio.yaml에서는 새 읽기 도구가 모두 막힌다
+ * 도구 호출 전에 실행기에서 판단하는 정책의 판정은 Rust(crates/bstudio-guard/src/path_policy.rs, ADR-191 3단계 3q)가 하고, 아래는 같은 이름·시그니처의 껍데기다.
+ * 판정의 규칙(허용 도구와 읽기 도구 함의, 쓰기 범위와 보호 경로, 금지 명령과 셸 감싸기, `gradle --stop`, 승인)은 그쪽 문서 주석에 있다.
+ * 여기에 남기는 것은 형 변환뿐이다: 알 수 없는 입력(`unknown`)에서 `path`·`command`를 꺼내고, 기본 금지 명령 목록(위 상수)을 넘긴다.
+ * 정책의 모양이 어긋나면 Rust가 던지고, 부르는 쪽(tools.ts)은 던진 것을 실패로 돌려 도구를 실행하지 않는다
  */
-const IMPLIED_BY: Readonly<Record<string, readonly string[]>> = { read_lines: ['read_file'], search_files: ['read_file', 'list_files'] };
-
 export function isToolAllowed(tool: string, allowedTools: readonly string[]): boolean {
-  if (allowedTools.includes(tool)) return true;
-  const implied = IMPLIED_BY[tool];
-  return implied !== undefined && implied.every((required) => allowedTools.includes(required));
+  return native.isToolAllowed(tool, [...allowedTools]);
 }
-
-/** 경로 정책(쓰기 범위·보호 경로)이 걸리는 도구. 파일을 만드는 것과 지우는 것을 같게 본다 */
-const PATH_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'delete_file']);
 
 export function checkToolPolicy(
   tool: string,
@@ -73,62 +62,31 @@ export function checkToolPolicy(
   policy: ExecutionPolicy | undefined,
   approvalToken: string | undefined,
 ): PolicyDecision {
-  if (policy?.allowedTools && !isToolAllowed(tool, policy.allowedTools)) {
-    return { tool, decision: 'deny', reason: `tool '${tool}' is not in the allowed tool list` };
-  }
-
-  // 경로 정책이 있는데 경로가 프로젝트 밖으로 나가면(`../x`, 절대 경로) 범위를 따질 것도 없이 거절한다
-  if (PATH_WRITE_TOOLS.has(tool) && (policy?.writablePaths || policy?.protectedPaths?.length) && normalizeProjectPath(fileInput(input)) === undefined) {
-    return { tool, decision: 'deny', reason: 'path leaves the project' };
-  }
-
-  if (PATH_WRITE_TOOLS.has(tool) && policy?.writablePaths) {
-    const file = fileInput(input);
-    if (!policy.writablePaths.some((candidate) => isWithinScope(file, candidate))) {
-      return { tool, decision: 'deny', reason: `path is outside this task's writable scope: ${policy.writablePaths.join(', ')}` };
-    }
-  }
-
-  if (PATH_WRITE_TOOLS.has(tool) && policy?.protectedPaths?.length) {
-    const file = fileInput(input);
-    const protectedPath = policy.protectedPaths.find((candidate) => isProtectedPath(file, candidate));
-    if (protectedPath) {
-      return { tool, decision: 'deny', reason: `path is protected by execution policy: ${protectedPath}` };
-    }
-  }
-
-  if (tool === 'run_in_service') {
-    const command = commandInput(input);
-    const denied = [...DEFAULT_DENIED_COMMANDS, ...(policy?.deniedCommands ?? [])].find((rule) => {
-      const tokens = splitRule(rule);
-      return startsWithTokens(command, tokens) || (isShellWrapper(command) && containsCommand(command, tokens));
-    });
-    if (denied) return { tool, decision: 'deny', reason: `command is blocked by execution policy: ${denied}` };
-    if (GRADLE_STOP.test(command.join(' '))) {
-      return {
-        tool,
-        decision: 'deny',
-        reason: 'gradle --stop is blocked: it stops the Gradle daemon that runs this service (bootRun) and takes the service down. Use restart_service to restart the service instead',
-      };
-    }
-  }
-
-  if (policy?.requireApprovalFor?.includes(tool) && !hasApprovalToken(approvalToken)) {
-    return { tool, decision: 'deny', reason: 'this tool requires an explicit approval before execution' };
-  }
-
-  return { tool, decision: 'allow' };
+  const policyJson = policy
+    ? JSON.stringify({
+        allowedTools: policy.allowedTools,
+        deniedCommands: policy.deniedCommands,
+        requireApprovalFor: policy.requireApprovalFor,
+        protectedPaths: policy.protectedPaths,
+        writablePaths: policy.writablePaths,
+      })
+    : 'null';
+  const decided = JSON.parse(
+    native.checkToolPolicy(tool, fileInput(input), commandInput(input), policyJson, typeof approvalToken === 'string' ? approvalToken : undefined, [...DEFAULT_DENIED_COMMANDS], BACKSLASH_SEP),
+  ) as { decision: 'allow' | 'deny'; reason?: string };
+  return decided.reason === undefined ? { tool, decision: decided.decision } : { tool, decision: decided.decision, reason: decided.reason };
 }
 
 /** 승인 토큰은 호출자가 별도 흐름에서 발급했다는 사실만 전달한다. 값 자체는 감사 이벤트에 남기지 않는다. */
 export function hasApprovalToken(token: string | undefined): boolean {
-  return typeof token === 'string' && token.trim().length > 0;
+  return native.hasApprovalToken(typeof token === 'string' ? token : undefined);
 }
 
 function commandInput(input: unknown): string[] {
   if (typeof input !== 'object' || input === null) return [];
   const command = (input as Record<string, unknown>).command;
-  return Array.isArray(command) && command.every((value) => typeof value === 'string') ? command : [];
+  // 구멍 난 배열(`every`가 건너뛴다)은 빈 글자로 채운다. JSON으로 보내면 null이 되어 문자열 배열로 읽히지 않는다
+  return Array.isArray(command) && command.every((value) => typeof value === 'string') ? Array.from(command as Array<string | undefined>, (value) => value ?? '') : [];
 }
 
 function fileInput(input: unknown): string {
@@ -138,50 +96,18 @@ function fileInput(input: unknown): string {
   return typeof file === 'string' ? file : '';
 }
 
-/** 도구 호출 전 차단, 리뷰 단계의 사후 확인, Pi 확장이 같은 규칙으로 보호 경로를 판정하도록 공유한다 */
+/**
+ * 도구 호출 전 차단, 리뷰 단계의 사후 확인, Pi 확장이 같은 규칙으로 보호 경로를 판정하도록 공유한다.
+ * 거부 목록이다: 넓게 맞춘다(path-names.ts). 꼴을 맞출 수 없는 경로나 규칙은 보호되는 쪽으로 본다
+ */
 export function isProtectedPath(file: string, candidate: string): boolean {
-  // 거부 목록이다: 넓게 맞춘다(path-names.ts). 받은 문자열을 그대로 접두사로 비교하면 같은 파일의 다른 표기가 지나간다 —
-  // `web/../.github/workflows/x`, `.github//workflows/x`, 대소문자를 구분하지 않는 볼륨의 `.GITHUB/workflows/x`(트러블슈팅 125)
-  const target = canonicalProjectPath(file);
-  const rule = canonicalProjectPath(candidate, { lenientSeparators: true });
-  // 꼴을 맞출 수 없는 경로나 규칙은 보호되는 쪽으로 본다. 거부 목록은 모르면 막는다
-  if (target === undefined || rule === undefined) return true;
-  // 프로젝트 전체를 가리키는 규칙(`.`)은 모든 경로를 덮는다
-  if (rule === '') return true;
-  return target === rule || target.startsWith(`${rule}/`) || (rule.startsWith('.') && target.startsWith(`${rule}.`));
+  return native.isProtectedPath(file, candidate, BACKSLASH_SEP);
 }
 
 /**
  * 파일이 쓰기 범위(허용 목록) 안에 있는지. **좁게 맞춘다**(트러블슈팅 126): 표기만 정리하고 이름은 글자 그대로 비교한다.
- * 보호 경로처럼 이름을 접어서 비교하면 다른 폴더가 범위 안으로 판정된다 — 대소문자를 구분하는 볼륨에서 `WEB/app`은 `web/app`이 아니다.
- * 꼴을 맞출 수 없는 경로나 범위는 범위 밖으로 본다. 허용 목록은 모르면 막는다.
- * `.env`가 `.env.local`을 덮는 점 접두사 규칙도 쓰지 않는다(보호 경로를 위한 규칙이고, 범위에 쓰면 `.github`이 `.github.bak`까지 연다)
+ * 꼴을 맞출 수 없는 경로나 범위는 범위 밖으로 본다. 허용 목록은 모르면 막는다
  */
 export function isWithinScope(file: string, scope: string): boolean {
-  const target = normalizeProjectPath(file);
-  const rule = normalizeProjectPath(scope, { lenientSeparators: true });
-  if (target === undefined || rule === undefined) return false;
-  if (rule === '') return true;
-  return target === rule || target.startsWith(`${rule}/`);
-}
-
-function splitRule(rule: string): string[] {
-  return rule.trim().split(/\s+/).filter(Boolean);
-}
-
-function startsWithTokens(command: readonly string[], rule: readonly string[]): boolean {
-  if (rule.length === 0 || command.length < rule.length || !command[0]) return false;
-  const executable = path.basename(command[0]);
-  const normalized = [executable, ...command.slice(1)];
-  return rule.every((token, index) => normalized[index] === token);
-}
-
-function isShellWrapper(command: readonly string[]): boolean {
-  const executable = command[0] ? path.basename(command[0]) : '';
-  return ['sh', 'bash', 'zsh', 'fish', 'dash', 'env', 'cmd', 'powershell', 'pwsh'].includes(executable);
-}
-
-function containsCommand(command: readonly string[], rule: readonly string[]): boolean {
-  const escaped = rule.map((token) => token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
-  return new RegExp(`(?:^|\\s)${escaped}(?:\\s|$)`).test(command.slice(1).join(' '));
+  return native.isWithinScope(file, scope, BACKSLASH_SEP);
 }

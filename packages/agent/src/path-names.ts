@@ -1,4 +1,8 @@
 import path from 'node:path';
+import { native } from '@b-studio/sandbox';
+
+/** Windows면 역슬래시도 구분자다. 판정은 Rust가 하고 플랫폼 값만 여기서 넘긴다 */
+const BACKSLASH_SEP = path.sep === '\\';
 
 /**
  * 경로 이름을 비교할 때 쓰는 꼴(트러블슈팅 124·125·126). 검사하는 쪽(문자열 비교)과 쓰는 쪽(파일 시스템)이 이름을 다르게 읽으면
@@ -19,18 +23,7 @@ import path from 'node:path';
  * `lenientSeparators`는 설정 파일에 적은 규칙처럼 사람이 쓴 값에만 쓴다(Windows 표기로 적은 규칙을 같은 뜻으로 읽는다)
  */
 export function normalizeProjectPath(file: string, { lenientSeparators = false }: { lenientSeparators?: boolean } = {}): string | undefined {
-  if (file.includes('\0')) return undefined;
-  let slashed = file;
-  if (file.includes('\\')) {
-    if (path.sep !== '\\' && !lenientSeparators) return undefined;
-    slashed = file.replaceAll('\\', '/');
-  }
-  // 절대 경로(`/x`, Windows의 `C:/x`). `a:b.txt`처럼 콜론이 든 평범한 이름은 상대 경로다
-  if (slashed.startsWith('/') || /^[A-Za-z]:\//.test(slashed)) return undefined;
-  const normalized = path.posix.normalize(slashed).replace(/\/$/, '');
-  if (normalized === '.' || normalized === '') return '';
-  if (normalized === '..' || normalized.startsWith('../')) return undefined;
-  return normalized;
+  return native.normalizeProjectPath(file, lenientSeparators, BACKSLASH_SEP) ?? undefined;
 }
 
 /**
@@ -43,15 +36,7 @@ export function normalizeProjectPath(file: string, { lenientSeparators = false }
  * macOS와 Windows의 기본 볼륨은 대소문자를 구분하지 않아 `.GIT`·`.Env`가 `.git`·`.env`와 같은 항목이다
  */
 export function foldName(segment: string): string {
-  const folded = segment
-    .normalize('NFKD')
-    .replace(/[\p{M}\p{Cf}]/gu, '')
-    .toUpperCase()
-    .toLowerCase()
-    .normalize('NFKC');
-  // 점과 공백뿐인 이름은 그대로 둔다(빈 이름으로 만들지 않는다)
-  const trimmed = folded.replace(/[. ]+$/, '');
-  return trimmed === '' ? folded : trimmed;
+  return native.foldName(segment);
 }
 
 /**
@@ -59,7 +44,5 @@ export function foldName(segment: string): string {
  * 허용 목록에는 쓰지 않는다
  */
 export function canonicalProjectPath(file: string, options: { lenientSeparators?: boolean } = {}): string | undefined {
-  const normalized = normalizeProjectPath(file, options);
-  if (normalized === undefined || normalized === '') return normalized;
-  return normalized.split('/').map(foldName).join('/');
+  return native.canonicalProjectPath(file, options.lenientSeparators ?? false, BACKSLASH_SEP) ?? undefined;
 }
