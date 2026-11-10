@@ -395,6 +395,28 @@ interface NativeGuard {
   appendPlanToRequest(request: string, plan: string, maxChars: number): string;
   buildContractSystem(projectJson: string, maxContracts: number): string;
   buildContractUser(request: string, lanesJson: string): string;
+  // ── agent: 설계 파이프라인(3단계 3o). 묶음 목록·결과는 JSON 문자열(decodeNative). 승인 확인은 막는 기록의 순번을 돌려주고(껍데기가 원래 객체를 골라 담는다), 모양이 어긋난 기록은 던진다
+  designPipelineNextDocNumber(existing: string[]): number;
+  designPipelineDocPath(number: number, title: string): string;
+  designPipelineSidecarPath(docPath: string): string;
+  designPipelineIsDocPath(file: string): boolean;
+  designPipelineParseBundlesTable(markdown: string): string;
+  designPipelineBuildRequestPrompt(title: string, requirementIds: string[], detail?: string | null): string;
+  designPipelineBuildDocTemplate(number: number, title: string, requirementIds: string[]): string;
+  designPipelineCheckApproval(requirementIds: string[], docsJson: string): number[];
+  designPipelineReviewIndependence(implementer: string, reviewer: string): string;
+  designPipelineDeriveResult(
+    designStatus: string,
+    checkpointExists: boolean,
+    hasReview: boolean,
+    reviewRan: boolean,
+    reviewPassed: boolean,
+    independence: string,
+    hasVerification: boolean,
+    verificationRan: boolean,
+    verificationOk: boolean,
+    testsRerun: boolean,
+  ): string;
   // ── agent: 탐색 QA의 판정·변환·프롬프트(3단계 3p). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다.
   // judge 입력: { confirmText?, confirmKey?(확인 문구를 encodeLoneSurrogates한 글자), consoleErrors, pageErrors, failedRequests, accessibilityViolations(건수), horizontalOverflowPx, review?: { findings: [{ severity, summary }], declared?, stoppedBy, expectedRejections?, unmetRejections? } }.
   // toPageCheckSteps 입력: [{ index, tool, ok, stableSelector?, text?, key?, forText? }], 결과는 decodeNative로 읽는다
