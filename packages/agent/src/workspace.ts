@@ -2,21 +2,10 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
 import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { foldName } from './path-names';
+import { encodeLoneSurrogates, native as guard } from '@b-studio/sandbox';
 
-/** 에이전트가 읽거나 쓰면 안 되는 디렉터리. 생성물이거나 거대하거나 비밀이 들어 있다 */
-const DENIED_SEGMENTS = new Set(['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__']);
-const DENIED_FILES = [/^\.env(\..*)?$/];
-/**
- * .env 계열이지만 비밀 값이 아니라 형식만 보여 주는 예시 파일. 막으면 에이전트가 ".env.example을 만들어 달라"는
- * 요청을 처리하지 못했다(실사용). 실제 값이 든 .env·.env.local·.env.production 등은 그대로 막는다
- */
-const ENV_TEMPLATE_FILE = /^\.env(\.[\w-]+)*\.(example|sample|template|dist)$/;
-
-function isDeniedFileName(segment: string): boolean {
-  // 숨기는 쪽은 넓게 접은 이름으로 보고, 예외(예시 파일)는 좁게 본다: 예외는 허용 목록이라 닮은 이름까지 열어 주면 안 된다
-  return DENIED_FILES.some((pattern) => pattern.test(foldName(segment))) && !ENV_TEMPLATE_FILE.test(segment.normalize('NFC').toLowerCase());
-}
+/** Windows면 역슬래시도 구분자다. 판정은 Rust가 하고 플랫폼 값만 여기서 넘긴다 */
+const BACKSLASH_SEP = path.sep === '\\';
 
 const MAX_READ_BYTES = 256 * 1024;
 
@@ -429,10 +418,11 @@ export class Workspace {
   }
 
   async #resolve(file: string, { mustExist }: { mustExist: boolean }): Promise<string> {
-    if (path.isAbsolute(file)) throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
-    // POSIX에서 역슬래시는 구분자가 아니라 이름의 한 글자다. 실행 정책은 그런 경로를 받지 않으므로(path-names.ts) 여기서도 받지 않는다.
+    // 들어온 경로의 글자 검사는 Rust가 한다. POSIX에서 역슬래시는 구분자가 아니라 이름의 한 글자다. 실행 정책은 그런 경로를 받지 않으므로(path-names.ts) 여기서도 받지 않는다.
     // 한쪽만 받으면 검사한 경로와 쓰는 경로가 달라진다
-    if (file.includes('\0') || (path.sep !== '\\' && file.includes('\\'))) throw new WorkspaceError(`${file}: 경로에 쓸 수 없는 글자가 있습니다`);
+    const problem = guard.workspaceInputProblem(file, BACKSLASH_SEP, false);
+    if (problem === 1) throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
+    if (problem !== 0) throw new WorkspaceError(`${file}: 경로에 쓸 수 없는 글자가 있습니다`);
 
     const absolute = path.resolve(this.root, file);
     if (!isInside(this.root, absolute)) throw new WorkspaceError(`${file}: 프로젝트 밖 경로입니다`);
@@ -485,7 +475,7 @@ export class Workspace {
 
   /** 바깥에서 온 경로를 루트 기준 상대 경로로 정규화한다. 루트 밖 경로는 거부한다 */
   #normalizeExternal(file: string): string {
-    if (path.isAbsolute(file)) throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
+    if (guard.workspaceInputProblem(file, BACKSLASH_SEP, true) !== 0) throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
 
     const normalized = file.replaceAll('\\', '/').replace(/^\.\//, '');
     const absolute = path.resolve(this.root, normalized);
@@ -523,21 +513,22 @@ export function syncExternalChanges(workspace: Workspace, files: readonly string
   }
 }
 
-/** 경로의 어느 구간이든 .env·.env.* 이면 비밀 파일로 본다(.env.example 같은 예시 파일은 뺀다). Pi 확장도 같은 규칙으로 읽기를 막는다 */
+/** 경로의 어느 구간이든 .env·.env.* 이면 비밀 파일로 본다(.env.example 같은 예시 파일은 뺀다). Pi 확장도 같은 규칙으로 읽기를 막는다. 판정은 Rust(거부 목록) */
 export function isSecretFile(file: string): boolean {
-  return file
-    .replaceAll('\\', '/')
-    .split('/')
-    .some((segment) => isDeniedFileName(segment));
+  return guard.workspaceIsSecretFile(file);
 }
 
+/** 숨긴 이름(생성물 폴더·.env 계열)인가. 거부 목록이라 틀려도 더 막을 뿐이다. 판정은 Rust */
 function isDenied(segment: string): boolean {
-  return DENIED_SEGMENTS.has(foldName(segment)) || isDeniedFileName(segment);
+  return guard.workspaceIsDenied(segment);
 }
 
+/**
+ * target이 root 자신이거나 그 안쪽인가. 허용 목록이라 통과가 곧 안쪽이다. 경로 계산(path.relative)은 Node가 하고 그 결과를 읽는 판정은 Rust가 한다.
+ * 짝 없는 서로게이트는 경계에서 U+FFFD로 합쳐지므로 단사로 바꿔 보낸다(접두를 읽는 판정에는 영향이 없지만 허용 목록의 규칙을 그대로 지킨다)
+ */
 function isInside(root: string, target: string): boolean {
-  const relative = path.relative(root, target);
-  return relative === '' || (relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return guard.workspaceIsInside(encodeLoneSurrogates(path.relative(root, target)), BACKSLASH_SEP);
 }
 
 async function nearestExisting(target: string): Promise<string> {

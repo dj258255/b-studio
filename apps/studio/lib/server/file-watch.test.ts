@@ -32,6 +32,14 @@ describe('isDeniedPath', () => {
     expect(isDeniedPath('web/app/page.tsx')).toBe(false);
     expect(isDeniedPath('api/src/main/resources/application.yaml')).toBe(false);
   });
+
+  it('에이전트 작업 공간이 숨기는 이름의 다른 표기도 뺀다(대소문자·보이지 않는 문자·끝의 점·공백·전각)', () => {
+    for (const file of ['.ENV', 'web/.Env.local', 'web/.env.local.', 'web/.env ', 'web/.env\u200B', 'web/.env.local\n', '.GIT/config', 'web/.gi\u200Bt/x', 'web/Node_Modules/pkg/index.js', 'api/BUILD/x', 'web/.NEXT/cache', '\uFF0Eenv']) {
+      expect(isDeniedPath(file), JSON.stringify(file)).toBe(true);
+    }
+    // 닮았지만 다른 이름은 그대로 둔다
+    for (const file of ['web/.envx', 'web/builds/x', 'web/node_modulesx/x', 'web/.gitignore', 'web/app/env.ts']) expect(isDeniedPath(file), file).toBe(false);
+  });
 });
 
 describe('watchProjectFiles', () => {
