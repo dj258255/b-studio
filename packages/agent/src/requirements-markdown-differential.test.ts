@@ -402,6 +402,6 @@ describe('요구사항 문서 읽기·쓰기 차등 시험', () => {
     if (examples.length > 0) console.log(examples.join('\n---\n'));
     expect(opened).toBeGreaterThan(pairs / 100);
     expect(newMissed).toBe(0);
-    // 옛 TS가 놓친 수(`oldMissed`)는 트러블슈팅 178의 결함이다. 새 구현은 0이어야 하고, 옛 TS의 수는 입력에 따라 0일 수 있다
+    // 옛 TS가 놓친 수(`oldMissed`)는 트러블슈팅 177의 결함이다. 새 구현은 0이어야 하고, 옛 TS의 수는 입력에 따라 0일 수 있다
   });
 });

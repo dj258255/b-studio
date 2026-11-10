@@ -278,7 +278,7 @@ function runPair(seed: number, count: number, weak?: (before: string | undefined
     const oldDiff = run(() => old.diffVerificationRecords(before, after));
     const newDiff = run(() => next.diffVerificationRecords(before, after));
     if (oldDiff.ok && newDiff.ok && oldDiff.json !== newDiff.json && readerOnlyDifference(before, JSON.parse(oldDiff.json), JSON.parse(newDiff.json))) {
-      // 의도한 차이(ADR-191 3ab, 트러블슈팅 178): 글이 같아도 요구사항 읽기가 확인을 올리는 요구사항이 달라졌으면 위조로 센다. 옛 TS는 놓쳤다
+      // 의도한 차이(ADR-191 3ab, 트러블슈팅 177): 글이 같아도 요구사항 읽기가 확인을 올리는 요구사항이 달라졌으면 위조로 센다. 옛 TS는 놓쳤다
       bump(t, '읽기가 올리는 요구사항만 달라 더 잡음(의도한 차이)');
       continue;
     }

@@ -7,6 +7,7 @@ import { childEnv, resolveCliCommand, spawnClaudeCli, type CliMessage, type CliS
 import { DEFAULT_SAME_SIGNATURE_TIMES, escalationPrompt, retryBudgetFor, shouldPromote, signatureSetKey, type EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
 import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics, type Steering } from './loop';
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 import { startToolServer, type ToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection, withLanguageReminder } from './prompts';
@@ -50,19 +51,11 @@ export interface CompactWindowSetting {
 }
 
 /**
- * B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW 값을 해석한다(순수 함수).
+ * B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW 값을 해석한다(순수 함수, 판정은 Rust: crates/bstudio-guard/src/runner_judge.rs).
  * 비어 있으면 기본값, `0`·`off`면 끄기(null), 숫자가 아니거나 MIN_COMPACT_WINDOW 미만이면 기본값을 쓰고 이유를 돌려준다.
  */
 export function resolveCompactWindow(raw: string | undefined): CompactWindowSetting {
-  const text = raw?.trim();
-  if (!text) return { window: DEFAULT_COMPACT_WINDOW };
-  if (text === '0' || text.toLowerCase() === 'off') return { window: null };
-  const value = /^\d+$/.test(text) ? Number(text) : Number.NaN;
-  if (Number.isSafeInteger(value) && value >= MIN_COMPACT_WINDOW) return { window: value };
-  return {
-    window: DEFAULT_COMPACT_WINDOW,
-    ignored: `${COMPACT_WINDOW_ENV}=${text} 값을 무시하고 기본값 ${DEFAULT_COMPACT_WINDOW.toLocaleString('ko-KR')} 토큰을 씁니다 (${MIN_COMPACT_WINDOW.toLocaleString('ko-KR')} 이상의 정수, 끄려면 0 또는 off)`,
-  };
+  return decodeNative<CompactWindowSetting>(native.runnerResolveCompactWindow(raw));
 }
 
 /** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
@@ -84,7 +77,7 @@ const NETWORK_RESUME_PROMPT = '네트워크가 끊겼다가 돌아왔습니다. 
  * 재시도하지 않는다(ADR-142) — 근거가 없는 패턴은 넣지 않는다.
  */
 export function isTransientNetworkFailure(message: string): boolean {
-  return /ENOTFOUND|ECONNRESET|ETIMEDOUT|EAI_AGAIN|Can't reach the API server|overloaded_error|\boverloaded\b/i.test(message);
+  return native.runnerIsTransientNetworkFailure(message);
 }
 
 /** 실제 대기(setTimeout). 중단 신호가 오면 바로 끝낸다 */
@@ -773,21 +766,20 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
 
 /** 프로세스가 결과 없이 끝났다는 실패 메시지. 종료 코드와 표준 오류의 끝부분을 담는다 */
 export function noResultMessage(exit: { code: number | null; signal: NodeJS.Signals | null; error?: Error; stderr: string } | undefined): string {
-  if (!exit) return 'Claude Code가 결과를 보내지 않고 종료됐습니다';
-  const how = exit.error ? `실행하지 못함: ${exit.error.message}` : exit.signal ? `신호 ${exit.signal}` : `종료 코드 ${exit.code ?? '없음'}`;
-  const tail = exit.stderr.trim().split('\n').slice(-3).join(' / ');
-  return `Claude Code가 결과를 보내지 않고 종료됐습니다 (${how})${tail ? `: ${tail}` : ''}`;
+  if (!exit) return native.runnerNoResultMessage(false, undefined, undefined, undefined, '');
+  return native.runnerNoResultMessage(true, exit.error ? String(exit.error.message) : undefined, exit.signal, exit.code, exit.stderr);
 }
 
-/** init이 b-studio 도구 서버를 연결하지 못했다고 알리면 그 설명. 문서에 있는 mcp_servers·mcp_server_errors만 본다 */
+/** init이 b-studio 도구 서버를 연결하지 못했다고 알리면 그 설명(닫는 쪽: connected로 확인한 경우만 undefined). 문서에 있는 mcp_servers·mcp_server_errors만 본다 */
 export function mcpSetupFailure(message: CliMessage, server: string = SERVER): string | undefined {
-  const errors = (message.mcp_server_errors ?? []).filter((entry) => entry.name === undefined || entry.name === server);
-  const status = message.mcp_servers?.find((entry) => entry.name === server)?.status;
-  // connected로 확인한 경우만 통과다. 목록에 없음·needs-auth·pending·disabled·모르는 값은 "모른다"이고 실패로 본다
-  // (상태 값: https://code.claude.com/docs/en/agent-sdk/typescript 의 McpServerStatus)
-  if (errors.length === 0 && status === 'connected') return undefined;
-  const detail = errors[0]?.message ?? errors[0]?.type ?? status ?? '목록에 없음';
-  return `Claude Code가 ${server} 도구 서버에 연결하지 못했습니다${detail ? `: ${detail}` : ''}`;
+  let json: string;
+  try {
+    json = encodeNative({ mcp_servers: message.mcp_servers, mcp_server_errors: message.mcp_server_errors });
+  } catch {
+    // Rust로 보낼 수 없는 모양이면 연결을 확인하지 못한 것이다(실패로 닫는다)
+    return `Claude Code가 ${server} 도구 서버에 연결하지 못했습니다: 도구 서버 목록의 형식을 읽지 못했습니다`;
+  }
+  return native.runnerMcpSetupFailure(json, server) ?? undefined;
 }
 
 /**
@@ -942,19 +934,15 @@ export interface ClaudeResultMessage {
   modelUsage?: Record<string, { inputTokens?: number; outputTokens?: number; cacheReadInputTokens?: number; cacheCreationInputTokens?: number }>;
 }
 
+/** 결과 메시지가 실패이면 그 설명(닫는 쪽: 성공이 확실할 때만 undefined). 판정은 Rust(crates/bstudio-guard/src/runner_judge.rs) */
 export function describeResultFailure(message: ClaudeResultMessage): string | undefined {
-  switch (message.subtype) {
-    case 'success':
-      if (message.is_error) return `모델 호출이 실패했습니다: ${message.result ?? ''}`;
-      if (message.stop_reason === 'refusal') return '모델이 요청을 거절했습니다';
-      return undefined;
-    case 'error_max_turns':
-      return 'Claude Code의 최대 턴 수를 넘었습니다';
-    case 'error_max_budget_usd':
-      return 'Claude Code의 비용 한도를 넘었습니다';
-    default:
-      return `Claude Code 실행 중 오류가 났습니다${message.errors && message.errors.length > 0 ? `: ${message.errors.join('; ')}` : ''}`;
+  let json: string;
+  try {
+    json = encodeNative({ subtype: message.subtype, is_error: message.is_error, result: message.result, stop_reason: message.stop_reason, errors: message.errors });
+  } catch {
+    return 'Claude Code 실행 중 오류가 났습니다';
   }
+  return native.runnerDescribeResultFailure(json) ?? undefined;
 }
 
 type AssistantTokenUsage = {
@@ -963,57 +951,39 @@ type AssistantTokenUsage = {
   cache_creation_input_tokens?: number | null;
 };
 
-/** modelUsage는 query 전체의 누적값이므로 더하지 않고 최신 값으로 바꾼다 */
 /** result가 알려 주는 API 호출 시간 합(ms). 유한한 0 이상의 수가 아니면 재지 않은 것으로 본다 */
 function apiDurationOf(message: ClaudeResultMessage): number | undefined {
-  const value: unknown = message.duration_api_ms;
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? Math.round(value) : undefined;
+  return native.runnerApiDurationOf(encodeNative(message.duration_api_ms ?? null)) ?? undefined;
 }
 
+/** result의 modelUsage(query 하나의 누적값)에서 전체 합과 모델 이름별 사용량을 뽑는다. modelUsage 항목이 null이면 던진다(옛 구현도 던졌다) */
+function usageOfResult(message: ClaudeResultMessage): { total: AgentUsage; byModel: Record<string, AgentUsage> } {
+  return decodeNative<{ total: AgentUsage; byModel: Record<string, AgentUsage> }>(native.runnerUsageOf(encodeNative(message.modelUsage ?? null)));
+}
+
+/** modelUsage는 query 전체의 누적값이므로 더하지 않고 최신 값으로 바꾼다 */
 function setUsage(usage: AgentUsage, message: ClaudeResultMessage): void {
-  const models = Object.values(message.modelUsage ?? {});
-  usage.inputTokens = models.reduce((sum, model) => sum + (model.inputTokens ?? 0), 0);
-  usage.outputTokens = models.reduce((sum, model) => sum + (model.outputTokens ?? 0), 0);
-  usage.cacheReadTokens = models.reduce((sum, model) => sum + (model.cacheReadInputTokens ?? 0), 0);
-  usage.cacheWriteTokens = models.reduce((sum, model) => sum + (model.cacheCreationInputTokens ?? 0), 0);
+  Object.assign(usage, usageOfResult(message).total);
 }
 
 /** 사용량을 0으로 되돌린다 */
 function resetUsage(usage: AgentUsage): void {
-  usage.inputTokens = 0;
-  usage.outputTokens = 0;
-  usage.cacheReadTokens = 0;
-  usage.cacheWriteTokens = 0;
+  Object.assign(usage, emptyUsage());
 }
 
 /** 사용량을 다른 곳에 더한다 */
 function addUsageInto(target: AgentUsage, source: AgentUsage): void {
-  target.inputTokens += source.inputTokens;
-  target.outputTokens += source.outputTokens;
-  target.cacheReadTokens += source.cacheReadTokens;
-  target.cacheWriteTokens += source.cacheWriteTokens;
+  Object.assign(target, decodeNative<AgentUsage>(native.runnerAddUsage(encodeNative(target), encodeNative(source))));
 }
 
 /** result의 modelUsage(query 하나의 누적값)를 모델 이름별 AgentUsage로 옮긴다 */
 function usageByModelOf(message: ClaudeResultMessage): Record<string, AgentUsage> {
-  const byModel: Record<string, AgentUsage> = {};
-  for (const [model, usage] of Object.entries(message.modelUsage ?? {})) {
-    byModel[model] = {
-      inputTokens: usage.inputTokens ?? 0,
-      outputTokens: usage.outputTokens ?? 0,
-      cacheReadTokens: usage.cacheReadInputTokens ?? 0,
-      cacheWriteTokens: usage.cacheCreationInputTokens ?? 0,
-    };
-  }
-  return byModel;
+  return usageOfResult(message).byModel;
 }
 
 /** 끝난 query들의 모델별 사용량(base)과 지금 query의 것(query)을 더해 실행 전체로 만든다 */
 function mergeUsageByModel(base: Record<string, AgentUsage>, query: Record<string, AgentUsage>): Record<string, AgentUsage> {
-  const out: Record<string, AgentUsage> = {};
-  for (const [model, usage] of Object.entries(base)) out[model] = { ...usage };
-  for (const [model, usage] of Object.entries(query)) addUsageInto((out[model] ??= emptyUsage()), usage);
-  return out;
+  return decodeNative<Record<string, AgentUsage>>(native.runnerMergeUsageByModel(encodeNative(base), encodeNative(query)));
 }
 
 /**
@@ -1044,12 +1014,9 @@ export class ClaudeCodeUsageTracker {
 
   /** result의 modelUsage를 반영한다(누적값이므로 최신 값으로 바꾼다) */
   observeResult(message: ClaudeResultMessage): void {
-    this.#usageByModel = usageByModelOf(message);
-    const models = Object.values(message.modelUsage ?? {});
-    this.#usage.inputTokens = models.reduce((sum, model) => sum + (model.inputTokens ?? 0), 0);
-    this.#usage.outputTokens = models.reduce((sum, model) => sum + (model.outputTokens ?? 0), 0);
-    this.#usage.cacheReadTokens = models.reduce((sum, model) => sum + (model.cacheReadInputTokens ?? 0), 0);
-    this.#usage.cacheWriteTokens = models.reduce((sum, model) => sum + (model.cacheCreationInputTokens ?? 0), 0);
+    const { total, byModel } = usageOfResult(message);
+    this.#usageByModel = byModel;
+    Object.assign(this.#usage, total);
   }
 
   /** 서로 다른 assistant 메시지 수 = 모델 호출 수 */
