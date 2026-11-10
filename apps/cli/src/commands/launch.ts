@@ -1,7 +1,7 @@
 import { execFile, spawn as spawnProcess } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, openSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
@@ -56,7 +56,7 @@ export interface LaunchDeps {
   /** 저장소 루트. 여기서 스튜디오 서버를 띄운다 */
   repoRoot: string;
   /** 로그·PID 파일 경로 */
-  paths: { log: string; pid: string };
+  paths: { log: string; pid: string; /** 앞단이 Node와 잇는 소켓을 두는 폴더(권한 0700은 앞단이 만들고 확인한다) */ run: string };
   /** http 확인 */
   probe: (url: string) => Promise<ProbeResult>;
   /** 준비 확인 사이의 지연 */
@@ -74,6 +74,8 @@ export interface LaunchDeps {
    * 그러면 의존성 확인 단계를 건너뛴다 — 실제 저장소에는 항상 pnpm-lock.yaml이 있다
    */
   lockfileHash: () => Promise<string | undefined>;
+  /** 파일이 있는지(앞단 실행 파일 확인) */
+  fileExists: (file: string) => Promise<boolean>;
   /** 마지막으로 `pnpm install`을 성공시킨 시점의 lockfileHash. 적힌 적 없으면 undefined */
   readInstallMarker: () => Promise<string | undefined>;
   /** `pnpm install`이 성공한 뒤 지금 해시를 적어 둔다(다음 launch가 다시 설치하지 않게) */
@@ -115,12 +117,23 @@ export function isBStudioHealth(body: string): boolean {
   }
 }
 
+/** 앞단(Rust, crates/bstudio-server)의 릴리스 실행 파일. `cargo build --release -p bstudio-server`가 만든다 */
+export function frontBinaryPath(repoRoot: string): string {
+  return path.join(repoRoot, 'target', 'release', 'bstudio-server');
+}
+
+/** 앞단을 빌드하는 cargo 인자. 작업 폴더에 기대지 않도록 Cargo.toml 경로를 준다. 바뀐 것이 없으면 cargo가 바로 끝난다 */
+export function frontBuildArgs(repoRoot: string): string[] {
+  return ['build', '--release', '--locked', '--manifest-path', path.join(repoRoot, 'Cargo.toml'), '-p', 'bstudio-server'];
+}
+
 /**
- * `studio launch`가 부르는 pnpm 인자(저장소 루트에서 부른다). 순수 함수라 테스트로 확인한다.
- * Next 없이 도는 API 서버(apps/studio/server, tsx로 바로 돈다)만 띄운다. 화면이 없어 next dev 길은 두지 않는다(ADR-186, ADR-188)
+ * `studio launch`가 앞단 실행 파일에 넘기는 인자(저장소 루트에서 부른다). 순수 함수라 테스트로 확인한다.
+ * 공개 포트는 앞단이 열고, `--` 뒤의 명령(Next 없이 도는 API 서버 apps/studio/server, tsx로 바로 돈다)을 앞단이 유닉스 소켓의 자식으로 띄운다.
+ * 화면이 없어 next dev 길은 두지 않는다(ADR-186, ADR-188, ADR-195)
  */
-export function launchArgs(port: number): string[] {
-  return ['exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--hostname', '127.0.0.1', '--port', String(port)];
+export function launchArgs(port: number, runDir: string): string[] {
+  return ['--hostname', '127.0.0.1', '--port', String(port), '--run-dir', runDir, '--', 'pnpm', 'exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts'];
 }
 
 /**
@@ -205,10 +218,26 @@ export async function runLaunch(options: LaunchOptions, deps: LaunchDeps): Promi
     await deps.writeInstallMarker(lockHash);
   }
 
+  // 3b. 앞단(Rust) — 공개 포트를 여는 실행 파일이다(ADR-195). 바뀐 것이 없으면 cargo가 바로 끝난다.
+  // 빌드하지 못하면 옛 방식(Node가 공개 포트를 직접 여는 것)으로 돌아가지 않고 멈춘다 — 앞단 없이 뜬 서버는 인증 판단의 앞단이 없는 다른 서버다
+  info('앞단(Rust 서버)을 확인합니다… (cargo build --release -p bstudio-server)');
+  const build = await deps.exec('cargo', frontBuildArgs(deps.repoRoot));
+  if (build.code !== 0) {
+    if (build.stdout.trim()) info(build.stdout.trimEnd());
+    if (build.stderr.trim()) console.error(build.stderr.trimEnd());
+    console.error('앞단(Rust 서버)을 빌드하지 못했습니다. 서버를 띄우지 않고 멈춥니다. Rust 툴체인(cargo, https://rustup.rs)을 확인하세요.');
+    return 1;
+  }
+  const frontBinary = frontBinaryPath(deps.repoRoot);
+  if (!(await deps.fileExists(frontBinary))) {
+    console.error(`앞단 실행 파일이 없습니다: ${frontBinary}. \`cargo build --release -p bstudio-server\`가 만드는 파일입니다. 서버를 띄우지 않고 멈춥니다.`);
+    return 1;
+  }
+
   // 4. 띄우기 — 부모가 끝나도 살아 있게 분리하고, 로그·PID를 남긴다
   await mkdir(path.dirname(deps.paths.pid), { recursive: true });
   const env = { ...withDefaults(deps.env, options.serverEnv), B_STUDIO_MODE: envMode };
-  const child = deps.spawn('pnpm', launchArgs(options.port), { cwd: deps.repoRoot, env, logPath: deps.paths.log });
+  const child = deps.spawn(frontBinary, launchArgs(options.port, deps.paths.run), { cwd: deps.repoRoot, env, logPath: deps.paths.log });
   await writeFile(deps.paths.pid, `${JSON.stringify({ pid: child.pid, port: options.port, mode: options.mode }, null, 2)}\n`, { mode: 0o600 });
   info(`스튜디오를 시작합니다 (모드 ${options.mode}, 포트 ${options.port}, 로그 ${deps.paths.log})`);
 
@@ -357,11 +386,12 @@ export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform:
     platform,
     env,
     repoRoot,
-    paths: { log: path.join(launchDir, 'studio.log'), pid: path.join(launchDir, 'studio.pid') },
+    paths: { log: path.join(launchDir, 'studio.log'), pid: path.join(launchDir, 'studio.pid'), run: path.join(launchDir, 'run') },
     probe: realProbe,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     exec: realExec,
     spawn: realSpawn,
+    fileExists: (file) => access(file).then(() => true, () => false),
     lockfileHash: () => realLockfileHash(repoRoot),
     readInstallMarker: () => realReadInstallMarker(installMarker),
     writeInstallMarker: (hash) => realWriteInstallMarker(installMarker, hash),

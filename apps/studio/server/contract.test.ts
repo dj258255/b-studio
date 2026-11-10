@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -187,6 +187,7 @@ vi.mock('@/lib/server/usage-limits', async (importOriginal) => {
 
 import { routes } from './routes.gen';
 import { createStudioHandler } from './app';
+import { buildFront, startFront, type RunningFront } from './front-test-helper';
 
 // ─── 스키마: desk 클라이언트가 기대하는 모양(apps/cli/src/desk/types.ts) ───
 
@@ -284,6 +285,10 @@ const ENV_KEYS = [
 
 let server: Server;
 let origin = '';
+/** B_STUDIO_CONTRACT_VIA=front면 같은 요청을 Rust 앞단(crates/bstudio-server) 너머로 보낸다(contract.front.test.ts, ADR-195 4a). 서버는 그대로 이 프로세스 안에서 유닉스 소켓으로 듣는다 */
+const viaFront = process.env.B_STUDIO_CONTRACT_VIA === 'front';
+let front: RunningFront | undefined;
+let socketDir = '';
 let token = '';
 
 /** desk와 같은 연결: 쿠키 b_studio_local, 127.0.0.1, Origin 없음. cookie=false면 쿠키를 싣지 않는다 */
@@ -395,6 +400,9 @@ async function waitForState(id: string, state: string): Promise<void> {
 }
 
 beforeAll(async () => {
+  // 앞단 빌드는 환경 변수(HOME)를 바꾸기 전에 한다(cargo가 HOME을 쓴다)
+  const frontBinary = viaFront ? await buildFront() : '';
+  const originalPath = process.env.PATH;
   for (const key of ENV_KEYS) saved[key] = process.env[key];
   const root = await mkdtemp(path.join(tmpdir(), 'b-studio-contract-'));
   const projects = path.join(root, 'projects');
@@ -435,17 +443,31 @@ beforeAll(async () => {
   delete process.env.B_STUDIO_TERMINAL;
 
   server = createServer(createStudioHandler({ routes, env: { B_STUDIO_AUTH: 'none' } }));
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  if (viaFront) {
+    // 유닉스 소켓 경로는 길이 상한이 있어 짧은 /tmp 아래에 둔다
+    socketDir = await mkdtemp(path.join('/tmp', 'bs-'));
+    const socketPath = path.join(socketDir, 's.sock');
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, resolve);
+    });
+    front = await startFront(frontBinary, ['--port', '0', '--hostname', '127.0.0.1', '--upstream-socket', socketPath], { PATH: originalPath }, 60_000);
+    origin = front.origin;
+  } else {
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
   // 토큰 파일은 서버가 처음 토큰을 만들 때 생긴다. desk처럼 그 파일을 읽어 쿠키로 싣는다
   await call('GET', '/api/health', undefined, { cookie: false });
   const { localToken } = await import('@/lib/server/local-token');
   localToken();
   token = (await readFile(process.env.B_STUDIO_LOCAL_TOKEN_FILE!, 'utf8')).trim();
-}, 60_000);
+}, viaFront ? 300_000 : 60_000);
 
 afterAll(async () => {
+  await front?.stop();
   await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+  if (socketDir) await rm(socketDir, { recursive: true, force: true });
   for (const key of ENV_KEYS) {
     if (saved[key] === undefined) delete process.env[key];
     else process.env[key] = saved[key];
