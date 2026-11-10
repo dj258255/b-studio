@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -72,5 +73,29 @@ describe('요구사항 검증 기록 무결성: 의도한 차이', () => {
   it('깊이 2000 이하는 읽는다(위조로 세지 않는다)', () => {
     const ok = head + block(`${'['.repeat(1500)}${']'.repeat(1500)}`);
     expect(impl.diffVerificationRecords(undefined, ok).forged).toEqual([]);
+  });
+});
+
+/**
+ * 짝 없는 서로게이트 성질 시험: 메모의 짝 없는 서로게이트만 다른 두 기록은 다른 기록이다. 인코딩 없이 napi로 보내면 둘 다 U+FFFD가 되어 같아 보이고(위조를 놓친다),
+ * 껍데기는 인코딩해 보내므로 바뀐 기록으로 잡는다. 되돌린 글은 글자 그대로다.
+ */
+describe('요구사항 검증 기록: 짝 없는 서로게이트 성질', () => {
+  const doc = (note: string) => `# 요구사항\n\n## R1. 제목\n- 인수 조건:\n  - 조건\n- 확인: 홍길동 · 2026-01-01 · 체크포인트 abc1234 · 메모 ${note}\n- 상태: 미착수\n`;
+  const before = doc('\uD800');
+  const after = doc('\uD801');
+
+  it('인코딩 없이 보내면 합쳐져 위조를 놓친다(성질의 재현)', () => {
+    const raw = JSON.parse(native.reqIntegrityDiff(before, after, [], [], ['R1'])) as { forged: unknown[] };
+    expect(raw.forged).toEqual([]);
+  });
+
+  it('껍데기는 바뀐 기록으로 잡고 글을 그대로 돌려준다', () => {
+    const diff = impl.diffVerificationRecords(before, after);
+    expect(diff.forged.map((f) => f.kind)).toEqual(['changed']);
+    expect(diff.forged[0]?.record.endsWith('메모 \uD801')).toBe(true);
+    expect(impl.hasVerificationTamper(diff)).toBe(true);
+    expect(impl.restoreVerificationRecords(before, after)).toContain('메모 \uD800\n');
+    expect(impl.diffVerificationRecords(before, before).forged).toEqual([]);
   });
 });

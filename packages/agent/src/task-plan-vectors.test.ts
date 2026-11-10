@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { native } from '@b-studio/sandbox';
 import * as legacyPaths from './path-policy-legacy';
 
 /**
@@ -60,5 +61,25 @@ describe('작업 계획 벡터', () => {
     } finally {
       console.warn = original;
     }
+  });
+});
+
+/**
+ * 짝 없는 서로게이트 성질 시험: 인코딩 없이 napi로 보내면 서로 다른 서로게이트가 U+FFFD로 합쳐져 범위 밖이 범위 안이 된다(허용 목록이라 열린 쪽).
+ * 껍데기(isInScope)는 인코딩해 보내므로 그렇게 되지 않는다. 옛 TS와도 같은 답(범위 밖)이어야 한다.
+ */
+describe('짝 없는 서로게이트 성질', () => {
+  const pairs: Array<[string, string]> = [
+    ['web/\uD800', 'web/\uD801'],
+    ['web/app/\uDC00x', 'web/app/\uDFFFx'],
+    ['web/\uD800', 'web/\uFFFD'],
+  ];
+  it.each(pairs)('인코딩 없이 보내면 %j 은 합쳐지고 껍데기는 범위 밖으로 둔다', (file, scope) => {
+    expect(native.taskPlanIsInScope(file, [scope], false)).toBe(true);
+    expect(impl.isInScope(`${file}/a`, [scope])).toBe(false);
+    expect(impl.isInScope(file, [scope])).toBe(false);
+  });
+  it('같은 서로게이트는 범위 안이다', () => {
+    expect(impl.isInScope('web/\uD800/a', ['web/\uD800'])).toBe(true);
   });
 });
