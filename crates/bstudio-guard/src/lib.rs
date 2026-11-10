@@ -9,6 +9,7 @@ pub mod cli_failure;
 pub mod cli_router;
 pub mod commit_message;
 pub mod compose_override;
+pub mod connection_judge;
 pub mod container_policy;
 pub mod context_clearing;
 pub mod contract_diff;

@@ -494,6 +494,22 @@ interface NativeGuard {
   checkpointIsBackupId(text: string): boolean;
   checkpointPullRequestTarget(listed: string, baseRef: string, infoBase: string): string;
   checkpointGitEnvKeep(keys: string[]): boolean[];
+  // ── agent: 연결·인증·조율 판정(3단계 3t). 호스트·토큰·출처·허용 목록은 견주는 두 글자 모두 encodeLoneSurrogates해서 보낸다(짝 없는 서로게이트가 경계에서 U+FFFD가 되어 서로 다른 값이 같아지면 인증·허용이 열린다).
+  // 구조가 있는 입력은 encodeNative한 JSON 문자열. connAuthorize는 통과하면 null, 막으면 `{status,message}` JSON
+  connAuthorize(host: string | undefined | null, authorization: string | undefined | null, token: string, allowedHosts: string[]): string | null | undefined;
+  connHostAllowed(host: string | undefined | null, allowedHosts: string[]): boolean;
+  connHostnameOf(host: string | undefined | null): string;
+  connTokenMatches(authorization: string | undefined | null, token: string): boolean;
+  connIsAllowedRequest(protocol: string, origin: string, allowedOrigins: string[]): boolean;
+  connIsAutomaticFaviconPath(pathname: string): boolean;
+  connDescribeStep(click: string | undefined | null, fillSelector: string | undefined | null, press: string | undefined | null, waitFor: string | undefined | null): string;
+  connRejectedChangeFeedback(rejected: string[]): string;
+  coordBoardValidate(modelWrites: boolean, by: string, kind: string, body: string, refsLen: number, noteBytesLimit: number): string | null | undefined;
+  // 입력 [{ priority, at, id, bytes }](읽을 수 있는 메모, 들어온 순서), 결과 { selected: [위치(정렬 순서)], truncated, bytes }
+  coordBoardPickNotes(notesJson: string, readLimit: number, budget: number): string;
+  coordMcpPostInputError(argsJson: string): string | null | undefined;
+  coordMcpReadInputError(argsJson: string): string | null | undefined;
+  coordFormatNote(kind: string, priority: number, lane: string, body: string, refs: string[]): string;
   // ── agent: 게이트의 순수 보조 판정(3단계 3r). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다(gateViewportProblemText·gateViewportProblems는 옛 타입 밖의 문제 종류도 던진다).
   // 통과로 이어지는 같음·포함 두 자리는 견줄 두 글자를 encodeLoneSurrogates해서 보낸다: gateContainsApiText(text, value), gateViewportProblems의 expected·findings의 key.
   // sampleParams·inRunKeys 같은 사용자 키 맵은 [[키, 값], ...] 쌍으로 보낸다(encodeNative가 NUL로 시작하는 키를 던지지 않게)
