@@ -1,8 +1,9 @@
 import { execFileSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, symlink, truncate, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isSecretFile, readNoFollowInside, readProjectFileSync, readRegularFileSync, syncExternalChanges, Workspace, WorkspaceError, writeNoFollowInside } from './workspace';
 
 let root: string;
@@ -16,6 +17,10 @@ beforeEach(async () => {
   await writeFile(path.join(root, 'web/node_modules/next/index.js'), '');
   await writeFile(path.join(root, '.env'), 'SECRET=1');
   workspace = new Workspace(root);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
 });
 
 describe('Workspace', () => {
@@ -74,6 +79,44 @@ describe('Workspace', () => {
     expect(readProjectFileSync(root, 'elsewhere/requirements.md')).toEqual({ kind: 'text', content: '# 위조한 문서\n' });
     // 고정 읽기도 같은 조건을 쓴다
     expect(workspace.snapshotRead('docs/requirements.md')).toMatchObject({ kind: 'irregular' });
+  });
+
+  it('프로젝트 밖 상대 경로 검사(3y): 정규화해서 밖으로 나가는 경로는 거절하고, `..`로 시작하는 이름과 안쪽에 남는 경로는 읽는다', async () => {
+    await writeFile(path.join(root, '..outside.txt'), 'x');
+    await mkdir(path.join(root, 'sub'), { recursive: true });
+    await writeFile(path.join(root, 'sub/f.md'), 'f');
+    for (const outside of ['..', '../x', 'sub/../..', 'sub/../../x', './..', '/etc/hosts', '//etc/hosts', '/']) {
+      expect(readProjectFileSync(root, outside), outside).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('프로젝트 밖') });
+      expect(() => workspace.snapshotRead(outside), outside).toThrow(WorkspaceError);
+    }
+    for (const inside of ['..outside.txt', 'sub/../sub/f.md', './sub/f.md', 'sub//f.md']) {
+      expect(readProjectFileSync(root, inside), inside).toMatchObject({ kind: 'text' });
+      expect(workspace.snapshotRead(inside), inside).toMatchObject({ kind: 'text' });
+    }
+    // 짝 없는 서로게이트가 든 안쪽 이름은 밖이 아니라 없는 파일이다(U+FFFD로 합쳐져도 `..` 판정이 바뀌지 않는다)
+    expect(readProjectFileSync(root, '..\ud800')).toEqual({ kind: 'missing' });
+    expect(readProjectFileSync(root, '../\ud800')).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('프로젝트 밖') });
+  });
+
+  it('실제 저장 이름(3y): 운영체제가 안쪽 이름을 알려 주면 그 표기로 돌려주고, 루트 밖으로 어긋난 값이면 받은 경로를 그대로 쓴다', async () => {
+    const target = path.join(root, 'api/src/App.java');
+    const real = realpathSync.native.bind(realpathSync);
+    const mock = vi.spyOn(realpathSync, 'native');
+    // 안쪽 이름의 대소문자만 다르게 알려 준다(대소문자를 구분하지 않는 볼륨에서 실제 저장 이름이 다른 경우)
+    mock.mockImplementation(((p: string) => (p === target ? path.join(real(root), 'API/src/App.java') : real(p))) as typeof realpathSync.native);
+    await workspace.write('api/src/App.java', 'class App {}\n');
+    expect(workspace.changedFiles()).toEqual(['API/src/App.java']);
+
+    // 루트 밖을 가리키는 값이 오면(실제 이름을 얻지 못해 어긋난 값) 받은 경로를 쓴다
+    const other = new Workspace(root);
+    mock.mockImplementation(((p: string) => (p === target ? path.join(path.dirname(real(root)), 'elsewhere/App.java') : real(p))) as typeof realpathSync.native);
+    await other.write('api/src/App.java', 'class App { int c; }\n');
+    expect(other.changedFiles()).toEqual(['api/src/App.java']);
+    // `..`로 시작하는 안쪽 이름은 밖이 아니다
+    const dotted = new Workspace(root);
+    mock.mockImplementation(((p: string) => (p === target ? path.join(real(root), '..x/App.java') : real(p))) as typeof realpathSync.native);
+    await dotted.write('api/src/App.java', 'class App { int d; }\n');
+    expect(dotted.changedFiles()).toEqual(['..x/App.java']);
   });
 
   it('beginRun에 기준 문서를 넘기면 디스크가 아니라 그것을 고정한다(없었으면 null)', async () => {

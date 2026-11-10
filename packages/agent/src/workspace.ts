@@ -29,7 +29,7 @@ export type RegularFileBytesRead = { kind: 'missing' } | { kind: 'bytes'; conten
  */
 export function readProjectFileSync(root: string, relative: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
   const normalized = path.normalize(relative);
-  if (path.isAbsolute(relative) || normalized === '..' || normalized.startsWith(`..${path.sep}`)) {
+  if (!isInsideRelative(normalized)) {
     return { kind: 'irregular', reason: '프로젝트 밖 경로입니다' };
   }
   let realRoot: string;
@@ -175,7 +175,7 @@ export class Workspace {
    */
   snapshotRead(file: string): RegularFileRead {
     const normalized = path.normalize(file);
-    if (path.isAbsolute(file) || normalized === '..' || normalized.startsWith(`..${path.sep}`)) {
+    if (!isInsideRelative(normalized)) {
       throw new WorkspaceError(`${file}: 프로젝트 루트 기준 상대 경로를 쓰세요`);
     }
     let snapshot = this.#snapshots.get(normalized);
@@ -469,7 +469,7 @@ export class Workspace {
     // 링크는 위에서 걸렀으므로 실제 이름과 받은 이름의 차이는 대소문자·정규화 꼴뿐이다. 아직 없는 조각은 받은 그대로 둔다
     const stored = path.relative(native(this.root, realRoot), native(existing, realExisting));
     // 실제 이름을 얻지 못해 어긋난 값이 나오면(루트 밖으로 나가는 상대 경로) 받은 경로를 그대로 쓴다. 위의 확인은 이미 지났다
-    if (stored === '..' || stored.startsWith(`..${path.sep}`) || path.isAbsolute(stored)) return absolute;
+    if (!isInsideRelative(stored)) return absolute;
     return path.join(this.root, stored, path.relative(existing, absolute));
   }
 
@@ -528,7 +528,16 @@ function isDenied(segment: string): boolean {
  * 짝 없는 서로게이트는 경계에서 U+FFFD로 합쳐지므로 단사로 바꿔 보낸다(접두를 읽는 판정에는 영향이 없지만 허용 목록의 규칙을 그대로 지킨다)
  */
 function isInside(root: string, target: string): boolean {
-  return guard.workspaceIsInside(encodeLoneSurrogates(path.relative(root, target)), BACKSLASH_SEP);
+  return isInsideRelative(path.relative(root, target));
+}
+
+/**
+ * 상대 경로(`path.relative`의 결과, 또는 받은 경로를 `path.normalize`한 글자)가 루트 자신이거나 안쪽인가(허용 목록: 통과가 곧 안쪽). 모르는 꼴은 바깥이다. 판정은 Rust.
+ * 받은 경로를 읽는 자리(readProjectFileSync·snapshotRead)는 옛 식이 받은 글자의 `path.isAbsolute`도 봤지만, 이 판정이 절대 경로를 바깥으로 보고
+ * `path.normalize`는 상대 경로를 절대 경로로(또는 반대로) 바꾸지 않으므로 같은 답이다(차등 시험이 본다)
+ */
+function isInsideRelative(relative: string): boolean {
+  return guard.workspaceIsInside(encodeLoneSurrogates(relative), BACKSLASH_SEP);
 }
 
 async function nearestExisting(target: string): Promise<string> {
