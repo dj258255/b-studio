@@ -1,7 +1,8 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { Sandbox, StartOptions } from '@b-studio/sandbox';
+import { encodeLoneSurrogates, native, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { Effort } from './anthropic-client';
+import { decodeLoneSurrogates } from './lone-surrogates';
 import type { BrowserRunner } from './browser-check';
 import type { DesignSource } from './design';
 import { clearOldToolResults, resolveContextClearing, type ContextClearingPolicy } from './context-clearing';
@@ -67,7 +68,7 @@ export const STEERING_MARKER = '[진행 중 지시]';
 
 /** 지시 여러 개를 한 사용자 메시지로 만든다. 여러 개면 줄바꿈으로 잇는다 */
 export function formatSteering(texts: readonly string[]): string {
-  return `${STEERING_MARKER} ${texts.join('\n')}`;
+  return decodeLoneSurrogates(native.agentFormatSteering(texts.map((text) => encodeLoneSurrogates(String(text ?? '')))));
 }
 
 /** 지시 큐에서 꺼낸다. 큐 구현이 던져도 실행을 멈추지 않는다 */
@@ -86,17 +87,16 @@ export function takeSteering(steering: Steering | undefined): string[] {
  */
 export function appendUserText(messages: BetaMessageParam[], text: string): void {
   const last = messages.at(-1);
-  if (last?.role === 'user') {
-    if (typeof last.content === 'string') {
-      last.content = `${last.content}\n\n${text}`;
-      return;
-    }
-    if (Array.isArray(last.content)) {
-      last.content.push({ type: 'text', text });
-      return;
-    }
+  // 어떻게 넣을지는 Rust가 정하고(crates/bstudio-guard/src/steering.rs, ADR-191 3단계 3af), 메시지 배열을 바꾸는 일은 여기서 한다
+  const kind = typeof last?.content === 'string' ? 'string' : Array.isArray(last?.content) ? 'array' : 'other';
+  const plan = native.agentAppendUserPlan(last?.role, kind);
+  if (last && plan === 'concat') {
+    last.content = `${last.content as string}\n\n${text}`;
+  } else if (last && plan === 'push') {
+    (last.content as Exclude<typeof last.content, string>).push({ type: 'text', text });
+  } else {
+    messages.push({ role: 'user', content: text });
   }
-  messages.push({ role: 'user', content: text });
 }
 
 export interface AgentUsage {

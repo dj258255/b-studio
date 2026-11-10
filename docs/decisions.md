@@ -9566,6 +9566,19 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 새 던짐 경로와 처리: 서비스 폴더 조각·채운 값 검사와 (3) 위 꼴은 `StaticShadowUnknownError`. 호출부(`gate.ts`의 값 받기)는 어떤 오류든 잡아 확인 대상 값을 모두 받지 않는 쪽으로 처리하므로 열린 쪽 틈은 없다. 껍데기는 Rust가 이미 읽은 것을 또 달라고 하면 끝없이 되풀이하지 않고 던진다.
 - 돌리지 않은 것: 차등 시험을 수십만 회로 늘린 실행, Windows·대소문자 구분 없는 볼륨에서의 실측(벡터 기대값은 구분하는 볼륨에서도 맞게 `%6F` 같은 다른 표기로 썼다), 폴더가 매우 많은(상한 2000에 가까운) 프로젝트의 호출 횟수(호출은 읽는 폴더 수만큼이라 그만큼 늘어난다), 미들웨어 rewrite·`next.config` redirects(옛 한계 그대로), 실험 경로(다른 러너 등 이 조각이 확인한 것 없음).
 
+### 덧붙임: 3단계 3af — 작은 판정 모음(덤프 해시·임시 파일 고르기·작업 그래프·진행 중 지시·JSON 요약) (2026-11-10, [#1133](https://github.com/dj258255/b-studio/issues/1133))
+
+- **옮긴 것**: `database-branches.ts`의 줄 정규화(`\restrict`·`\unrestrict` 줄 빼기, 줄 끝 처리)·임시 DB 이름(`restoreDatabaseName`)·지울 임시 파일 이름 고르기(`tempPid`), `task-graph.ts`의 검증(id 중복·없는 의존성·`assertAcyclic`), `loop.ts`의 `formatSteering`과 `appendUserText`가 넣는 방법, `json-summary.ts`의 `summarizeJsonContent`를 `crates/bstudio-guard`(`database_branches.rs`·`task_graph.rs`·`steering.rs`·`json_summary.rs`)로 옮겼습니다. 옛 TS는 `*-legacy.ts` 복사본으로 두고 차등 시험의 기준으로 씁니다.
+- **남긴 것**: 파일 읽기 스트림·sha256·`process.kill`·`rm`·`readdir`, 작업 실행·이벤트·AbortSignal, 메시지 배열 변경, `takeSteering`(외부 큐 구현을 부르고 던지면 빈 목록: 판정이 없다), `summarizeLargeJsonFile`의 크기 상한 확인(읽기 전에 본다)과 파일 읽기. `summarizeJsonStructure`(파싱한 값을 받는 함수)는 `summarizeJsonContent`만 부르고 있어 없앴고 시험은 글 입력으로 바꿨습니다. `explore-qa.ts`에 따로 있는 `appendUserText`는 범위 밖입니다.
+- **경계**: 덤프는 TS가 읽기 스트림의 조각을 `NativeDumpNormalizer`에 먹이고 나온 바이트를 해시에 넣습니다. Rust는 줄을 통째로 쥐지 않고 앞 16바이트만 모아 줄을 남길지 정합니다. 이름·글은 `encodeLoneSurrogates`로 보내고 결과 글은 `decodeLoneSurrogates`로 되돌립니다(작업 id·임시 DB 이름·JSON 요약 키).
+- **의도한 차이(모두 닫는 쪽)**: (1) 옛 판정은 `readline`이 줄 끝 글자와 마지막 줄의 끝 개행 유무를 버려, 값 안의 `\r`을 `\n`으로 바꾼 덤프나 끝 개행만 뺀 덤프가 같은 해시였고, 잘못된 UTF-8 바이트는 모두 U+FFFD라 서로 다른 덤프가 같았습니다. 새 판정은 줄 끝 종류를 한 가지로만 읽히는 토큰(LF=`\n`, CR=`\r\r`, CRLF=`\r\n`)으로, 바이트는 그대로 해시에 넣습니다. 줄 끝을 글자 그대로 넣으면 `\restrict` 줄을 빼는 자리에서 `\r`과 다음 `\n`이 이어져 빈 줄이 하나 더 있는 다른 덤프가 같아집니다(차등 시험이 처음 구현에서 잡았다). (2) 지울 임시 파일은 우리가 쓰는 꼴(`<체크포인트 7~40자 소문자 16진>.<save|changed|restore>.<pid>.<숫자>.tmp`)이고 pid가 `[1-9][0-9]*`로 양의 i32 범위일 때만 고릅니다. 옛 판정은 `.tmp`로 끝나면 pid를 읽지 못한 이름(`notes.tmp`)과 `Number`가 관대하게 읽은 이름(`0x10`·`1e3`·앞뒤 공백·`+5`·범위 밖)도 지웠습니다(트러블슈팅 181). 새 이유 문자열을 더하면 이 목록도 고쳐야 합니다. (3) 작업 그래프는 옛 재귀 대신 반복이라 의존 사슬이 만 단계가 넘어도 `RangeError` 없이 판정합니다. (4) 중첩이 2000을 넘는 JSON은 요약하지 않고 `undefined`(호출하는 쪽이 첫 줄 미리보기로 대신).
+- **호출부(막는/여는 쪽)**: `normalizedDumpHash`는 "바뀌지 않음"을 정하는 여는 쪽(`changedSince`·`restore`의 건너뛰기)이라 서로 다른 덤프가 같아지는 쪽이 틀린 쪽입니다. `pickStaleTemp`는 지우는 코드라 모르는 이름은 지우지 않습니다. `validateTaskGraph`는 통과시키면 작업이 도는 여는 쪽이고, 어긋난 입력과 Rust 오류는 `runTaskGraph`가 던지는 쪽입니다(작업이 돌지 않는다). 나머지는 표시·구성 판정입니다.
+- **차등 시험**(`small-judges-differential.test.ts`, 기본 시드 4개×1500, `SMALL_JUDGES_DIFF_*`로 늘림): 덤프 줄 6000건 다름 0, 덤프 쌍 6000건 열린 쪽 뒤집힘 0·설명되지 않는 닫는 쪽 차이 0(옛 같음 → 새 다름 707건은 모두 줄 끝·마지막 개행만 다른 쌍), 임시 DB 이름 약 6만 건 글자 그대로 같음(서로게이트 쌍을 가른 807건 포함), 임시 파일 이름 38674건 중 옛 "지우지 않음" → 새 "지움" 0, 우리 꼴 9700건은 옛 판정과 같고 옛 판정이 지우던 7633건은 지우지 않음, 작업 그래프 12000건 메시지까지 같음(거절→통과 0), `formatSteering`·`appendUserText` 각 6000건 같음, JSON 요약 12000건 글자 그대로 같음. 이 수는 한 번 돌린 값입니다.
+- **벡터** `small-judges-vectors.test.ts` 109개. 옛 TS에서 다른 의도한 차이는 덤프 4개, 옛 판정이 지우던 이름 21개, 깊은 JSON 1개, 깊은 그래프(차등 시험) 1개입니다.
+- **변이**: Rust 핵심 줄 56곳(비교 경계, 길이 ±1, 넓히는 변이 포함)을 vitest 요약 줄로 판정해 51곳이 잡혔습니다. 처음 살아남은 것 중 상한 64자와 빈 시각은 벡터를 더해 잡았습니다. 남은 5곳은 동치입니다: 앞부분 14바이트(`\unrestrict`+3바이트 공백이 최대)·짧은 줄 건너뛰기·시작 노드 방문 중 처리(시작점은 방문 중일 수 없다)·빈 pid(`parse`가 실패)·pid 길이 11(`i32` 범위 검사가 이미 막는다).
+- **큰 덤프**: 300MB 덤프(약 300만 줄)를 한 번 재니 새 해시 735ms, 옛 해시 1598ms였고 프로세스 RSS 184MB(시험 도구 포함)였습니다.
+- **돌리지 않은 것**: 실제 `pg_dump` 실행(기존 시험의 가짜 샌드박스만), 도커. `\restrict` 줄 규칙의 한계는 그대로입니다: `--inserts` 덤프의 문자열 안 줄이 `\restrict `로 시작하면 그 줄도 빠집니다(COPY 형식은 `\\`로 이스케이프되어 해당 없음).
+
 ## ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다
 
 상태: 채택(계획)

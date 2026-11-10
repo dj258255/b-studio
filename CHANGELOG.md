@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 체크포인트 DB 덤프 해시·임시 덤프 파일 고르기·작업 그래프 검증·진행 중 지시 판정·JSON 구조 요약의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3af, #1133). 줄 끝 글자(`\r`·`\r\n`·`\n`)나 마지막 개행, 잘못된 바이트만 다른 덤프를 같다고 보던 것을 다르다고 보게 고쳤고, 덤프 임시 파일 정리가 우리가 쓰는 이름 꼴이 아닌 `.tmp` 파일(`notes.tmp`, pid를 못 읽은 이름)을 지우지 않게 했습니다(트러블슈팅 181).
 - 동적 경로에 채운 값이 같은 주소 자리의 고정 경로와 겹치는지의 판정(`packages/agent/src/next-static-shadow.ts`: 이름 접기·그룹·슬롯·인터셉트 구분, page 경로 읽기, 내려갈 폴더 결정, 겹침, 링크·상한·읽기 실패에서 "모름")을 Rust로 옮겼습니다(ADR-191 3단계 3aa, #1122). 폴더 읽기는 껍데기가 하고 Rust가 다음에 읽을 것 하나를 돌려줍니다. 이름을 라우터가 읽는 것보다 좁게 견주던 곳을 막는 쪽으로 고쳤습니다: 줄 끝 글자가 든 그룹 폴더·빈 그룹 `()`·끝 공백·보이지 않는 글자·전각 글자·정규화 형태가 다른 이름도 겹친 것으로 봅니다(트러블슈팅 175). 서비스 폴더에 `..`가 있거나 채운 값이 `.`·`..`·`/`를 품으면 "모름"으로 던집니다.
 - 요구사항 추적표의 판정(`packages/agent/src/requirements.ts`의 `buildTraceabilityMatrix`·`buildScenarioEvidence`·`findUnverifiedScenarioIds`와 시험 파일 훑기 `scanTestFilesFor*`)을 Rust(`crates/bstudio-guard/src/requirements_trace.rs`)로 옮겼습니다(ADR-191 3단계 3z, #1118). 추적표는 검증 상태를 올리는 쪽이라 옛 구현이 열린 쪽으로 틀린 곳을 닫았습니다: JUnit 메서드 이름 가운데의 `r2`(`calculatesOrder2Total`, `testServer3`)가 R2·R3의 시험으로 읽히던 것과, 빈 id가 모든 메서드를 다루던 것(트러블슈팅 174).
 - 질문 경로(`apps/studio/lib/server/claude-code-ask.ts`)와 탐색형 QA(`explore-qa-claude-code.ts`)도 Agent SDK 대신 지원 러너와 같은 공개 CLI 입출력(`spawnClaudeCli` + stream-json)으로 돕니다(#1101, ADR-194 덧붙임). 질문 경로는 `--tools ''`로 내장 도구를 모두 끄고(웹 도구 opt-in만 예외) `--no-session-persistence`를 더했습니다. 탐색형 QA는 `qa_*` 도구를 루프백 HTTP MCP로 내고, 끝낼 때 SDK의 `interrupt()` 대신 표준 입력을 닫아 사용량을 받습니다. 질문 경로는 결과 없이 끝나면 글이 있어도 실패로 봅니다. 진짜 CLI + 가짜 모델 서버로 질문 경로를 한 번 돌려 모델에 도구가 하나도 가지 않는 것을 확인했습니다.
