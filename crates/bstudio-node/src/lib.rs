@@ -3356,3 +3356,21 @@ pub fn req_integrity_restore(before: Option<String>, after: String, before_effec
 pub fn req_integrity_review(before: Option<String>, after: Option<String>, before_effective: Vec<String>, after_effective: Vec<String>, after_ids: Vec<String>) -> String {
     serde_json::to_string(&rint::review_requirement_records(before.as_deref(), after.as_deref(), &before_effective, &after_effective, &after_ids)).expect("직렬화")
 }
+
+use bstudio_guard::static_shadow as ss;
+
+/// 고정 경로와 겹치는지(3단계 3aa)의 한 단계. `input_json`은 `{servicePath, pageFile, values, check, maxFolders}`, `known_json`은 지금까지 읽은
+/// `{lstat: {경로: missing|error|link|dir|other}, readdir: {폴더: null | [[이름, l|d|f]]}}`(경로는 프로젝트 루트 기준 상대 경로).
+/// `{need: {kind: "lstat"|"readdir", path}}`(읽고 다시 부른다) · `{shadows: [{name, where}]}` · `{unknown: 메시지}` JSON
+#[napi]
+pub fn static_shadow_step(input_json: String, known_json: String) -> Result<String> {
+    let input = parse::<ss::Input>(&input_json, "고정 경로 확인 입력")?;
+    let known = parse::<ss::Known>(&known_json, "읽은 폴더 목록")?;
+    Ok(match ss::step(&input, &known) {
+        ss::Step::Need(ss::Need::Lstat(path)) => serde_json::json!({ "need": { "kind": "lstat", "path": path } }),
+        ss::Step::Need(ss::Need::Readdir(path)) => serde_json::json!({ "need": { "kind": "readdir", "path": path } }),
+        ss::Step::Shadows(shadows) => serde_json::json!({ "shadows": shadows.into_iter().map(|s| serde_json::json!({ "name": s.name, "where": s.place })).collect::<Vec<_>>() }),
+        ss::Step::Unknown(message) => serde_json::json!({ "unknown": message }),
+    }
+    .to_string())
+}

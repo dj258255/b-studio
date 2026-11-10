@@ -51,6 +51,7 @@ pub mod review_input;
 pub mod secrets;
 pub mod services;
 pub mod snapshots;
+pub mod static_shadow;
 pub mod stray_processes;
 pub mod stuck_loading;
 pub mod task_plan;
