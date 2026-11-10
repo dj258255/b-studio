@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 질문 경로(`apps/studio/lib/server/claude-code-ask.ts`)와 탐색형 QA(`explore-qa-claude-code.ts`)도 Agent SDK 대신 지원 러너와 같은 공개 CLI 입출력(`spawnClaudeCli` + stream-json)으로 돕니다(#1101, ADR-194 덧붙임). 질문 경로는 `--tools ''`로 내장 도구를 모두 끄고(웹 도구 opt-in만 예외) `--no-session-persistence`를 더했습니다. 탐색형 QA는 `qa_*` 도구를 루프백 HTTP MCP로 내고, 끝낼 때 SDK의 `interrupt()` 대신 표준 입력을 닫아 사용량을 받습니다. 질문 경로는 결과 없이 끝나면 글이 있어도 실패로 봅니다. 진짜 CLI + 가짜 모델 서버로 질문 경로를 한 번 돌려 모델에 도구가 하나도 가지 않는 것을 확인했습니다.
 - 작업 공간(`packages/agent/src/workspace.ts`)에 남아 있던 막는 경로 검사 세 자리(`readProjectFileSync`·`snapshotRead`의 프로젝트 밖 상대 경로, 실제 저장 이름 상대 경로)를 3w의 Rust 안쪽 판정으로 바꿨습니다(ADR-191 3단계 3y, #1115). 옛 식과 같은 답을 내는지 무작위 입력 각 120만 회로 견줘 차이·열린 쪽 뒤집힘 0을 확인했습니다. `json-summary.ts`는 막는 검사가 아니고 JSON 읽기가 어긋나기 쉬워 옮기지 않았습니다.
 - 워크플로 판정(`packages/agent/src/workflow.ts`: 트레일러 만들기·읽기, 배포 막음, 빠진 검증 단계, 검토, 확인 요약, 단계 목록, 그리고 `checkpoints.ts`의 커밋 전 트레일러 확인 둘)을 Rust로 옮겼습니다(ADR-191 3단계 3v, #1108). 트레일러를 git이 읽는 것보다 넓게 읽던 곳을 막는 쪽으로 고쳤습니다: `Workflow-Passed` 값의 NBSP·BOM 같은 공백, 빈 마지막 값을 건너뛰던 것, 첫 줄만 보던 `none` 확인과 아무 줄이나 인정하던 문서 예외(트러블슈팅 173). 프로젝트 불러오기·실행 정책 조립·Pi 환경 변수는 TS에 남았습니다.
 - 에이전트 작업 공간(`packages/agent/src/workspace.ts`)의 막는 검사(숨긴 이름·비밀 파일 판정 `isDenied`·`isDeniedFileName`·`isSecretFile`, 프로젝트 안쪽 판정 `isInside`의 상대 경로 읽기, 들어온 경로의 절대 경로·NUL·POSIX 역슬래시 검사)를 Rust로 옮겼습니다(ADR-191 3단계 3w, #1109). 파일 시스템 접근과 경로 계산은 TS에 남습니다. `.env.` 뒤에 줄 끝 글자(`\n`·`\r`·U+2028·U+2029)가 오는 이름을 옛 정규식이 통과시켰으나 이제 막고, 코드 화면·변경 알림의 숨김 목록(`file-watch.ts`)도 작업 공간과 같은 규칙(대소문자·유니코드 정규화·보이지 않는 문자·끝의 점과 공백)으로 이름을 비교합니다(트러블슈팅 172)

@@ -1,7 +1,9 @@
-import { createSdkMcpServer, query, tool, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import type { BrowserFrame } from './browser-check';
-import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-sdk';
-import { ClaudeCodeUsageTracker, zodShape } from './claude-code-runner';
+import { spawnClaudeCli, type ClaudeCliProcess, type CliStopOptions } from './claude-cli-process';
+import { ClaudeCodeUsageTracker, mcpSetupFailure, noResultMessage } from './claude-code-runner';
 import {
   buildExploreQaResult,
   buildQaSystemPrompt,
@@ -22,10 +24,16 @@ import {
   type RunExploreQaOptions,
 } from './explore-qa';
 import type { AgentUsage } from './loop';
+import { startToolServer, type ToolServer } from './mcp-http-server';
+import { serialQueue } from './tool-schema';
+import type { ToolOutcome } from './tools';
 
 /**
- * 세션 백엔드가 claude-code(로컬 Claude Agent)일 때, 탐색형 QA도 같은 경로 — b-studio 도구를 로컬 MCP 서버로
+ * 세션 백엔드가 claude-code(로컬 Claude Agent)일 때, 탐색형 QA도 같은 경로 — b-studio 도구를 로컬 MCP 서버(루프백 HTTP)로
  * 노출하고 CLI가 그 도구만 쓰게 하는 방식(claude-code-runner.ts의 설계)을 재사용한다.
+ * Agent SDK는 쓰지 않는다. 러너와 같은 층(`spawnClaudeCli`)으로 공개 CLI 입출력만 쓴다(ADR-194): 플래그와 근거는 러너와 같고
+ * (https://code.claude.com/docs/en/cli-reference), 새로 쓰는 것은 없다. SDK의 `interrupt()`는 쓰지 않는다(공식 문서에 없다):
+ * 끝낼 때는 표준 입력을 닫아 하던 턴을 마치게 하고(그래야 result의 사용량이 온다), 끝나지 않으면 SIGTERM으로 끊는다.
  * 다만 탐색형 QA는 파일을 바꾸지 않고 검증 게이트·승격·진행 중 지시도 쓰지 않으므로, 그 복잡도는 들이지 않고
  * "b-studio 도구만 MCP로 연다 → 모델이 그 도구로 목표를 수행한다 → 결과를 플랫폼이 따로 판정한다"는 뼈대만 가져온다.
  */
@@ -41,7 +49,7 @@ const WRAP_UP_REFUSALS = 3;
 /** 끊은 뒤 result(사용량)를 기다리는 시간 */
 const DRAIN_MS = 15_000;
 
-const DEFAULT_SDK: ClaudeCodeSdk = { query, createSdkMcpServer };
+const MCP_TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 
 export interface ClaudeCodeExploreQaOptions {
   goal: ExploreQaGoal;
@@ -55,54 +63,21 @@ export interface ClaudeCodeExploreQaOptions {
   /** 이 PC에 로그인한 Claude Code가 돌 작업 디렉터리(세션 프로젝트 루트) */
   cwd: string;
   model?: string;
-  sdk?: ClaudeCodeSdk;
+  /** 실행할 CLI 실행 파일(기본 `claude`). 테스트가 가짜 CLI를 끼우는 자리. 셸을 거치지 않고 인자 배열로 넘긴다 */
+  command?: string;
+  /** 실행 파일 바로 뒤, 이 함수가 붙이는 인자 앞에 오는 인자(가짜 CLI의 스크립트 경로 등) */
+  commandArgs?: readonly string[];
+  /** 자식 프로세스를 끝낼 때 기다리는 시간(테스트 전용 주입점) */
+  stop?: CliStopOptions;
+  /** 환경 변수. 넘기지 않으면 process.env를 쓴다(테스트 전용 주입점) */
+  env?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }
 
 export type ClaudeCodeExploreQaResult = ExploreQaResult;
 
-/** 사용자 글을 입력으로 보내고 끝까지 열어 두는 스트리밍 입력. interrupt()는 스트리밍 입력에서만 동작해 종료 조건을 강제할 수 있다 */
-class PromptQueue implements AsyncIterable<SDKUserMessage> {
-  #closed = false;
-  readonly #pending: SDKUserMessage[] = [];
-  readonly #waiting: Array<(result: IteratorResult<SDKUserMessage>) => void> = [];
-
-  constructor(first: string) {
-    this.push(first);
-  }
-
-  /** 대화에 사용자 글을 더한다(첫 목표, 마지막 보고 요청) */
-  push(text: string): void {
-    if (this.#closed) return;
-    const message: SDKUserMessage = { type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null };
-    const waiter = this.#waiting.shift();
-    if (waiter) waiter({ value: message, done: false });
-    else this.#pending.push(message);
-  }
-
-  close(): void {
-    this.#closed = true;
-    for (const waiter of this.#waiting.splice(0)) waiter({ value: undefined, done: true });
-  }
-
-  [Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    return {
-      next: (): Promise<IteratorResult<SDKUserMessage>> => {
-        const message = this.#pending.shift();
-        if (message) return Promise.resolve({ value: message, done: false });
-        if (this.#closed) return Promise.resolve({ value: undefined, done: true });
-        return new Promise((resolve) => this.#waiting.push(resolve));
-      },
-      return: (): Promise<IteratorResult<SDKUserMessage>> => {
-        this.close();
-        return Promise.resolve({ value: undefined, done: true });
-      },
-    };
-  }
-}
-
 export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions): Promise<ClaudeCodeExploreQaResult> {
-  const { goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, saveArtifact, cwd, model, sdk = DEFAULT_SDK, signal } = options;
+  const { goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, saveArtifact, cwd, model, command = 'claude', commandArgs = [], stop: stopOptions, env: processEnv = process.env, signal } = options;
   const maxActions = goal.maxActions ?? DEFAULT_MAX_ACTIONS;
   const maxMs = goal.maxMs ?? DEFAULT_MAX_MS;
   const repeatLimit = goal.repeatLimit ?? DEFAULT_REPEAT_LIMIT;
@@ -127,17 +102,20 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
     let stopping = false;
     let refusedDuringWrapUp = 0;
     let followUpSent = false;
-    let conversation: ClaudeCodeQuery | undefined;
+    let proc: ClaudeCliProcess | undefined;
+    /** 대화가 끝났거나 끝내는 중이면 true. 그 뒤에 도착하는 도구 호출은 브라우저를 건드리지 않고 거절한다 */
+    let toolsClosed = false;
     let drainTimer: ReturnType<typeof setTimeout> | undefined;
     let wrapUpTimer: ReturnType<typeof setTimeout> | undefined;
-    const abort = new AbortController();
+    // 모델이 낸 순서대로 하나씩 실행한다(Claude Code는 도구를 동시에 부를 수 있고, 브라우저는 하나다)
+    const serial = serialQueue();
 
     const requestStop = (): void => {
       if (stopping) return;
       stopping = true;
-      void conversation?.interrupt().catch(() => {});
-      // interrupt 뒤에도 result(사용량)가 올 때까지 읽되, 오지 않으면 끊는다
-      drainTimer = setTimeout(() => abort.abort(), DRAIN_MS);
+      // 입력을 닫으면 CLI는 하던 턴을 마치고 result(사용량)를 낸 뒤 스스로 끝난다. 오지 않으면 끊는다
+      proc?.closeInput();
+      drainTimer = setTimeout(() => proc?.stop('now'), DRAIN_MS);
       drainTimer.unref?.();
     };
 
@@ -150,97 +128,140 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
       wrapUpTimer.unref?.();
     };
 
-    const definitions = specs.map((spec) =>
-      tool(spec.name, spec.description ?? '', zodShape(spec.input_schema as { properties?: unknown; required?: unknown }, { honorRequired: true }), async (args: unknown) => {
-        const input = (args ?? {}) as Record<string, unknown>;
-        if (spec.name === 'qa_report_issue') {
-          const added = report.addFinding(input);
-          if (added.finding) onEvent?.({ type: 'finding', finding: added.finding });
-          return { content: [{ type: 'text' as const, text: added.text }], ...(added.ok ? {} : { isError: true }) };
-        }
-        if (spec.name === 'qa_finish') {
-          report.declare(input);
-          if (!wrappingUp) stoppedBy = 'finish';
-          requestStop();
-          return { content: [{ type: 'text' as const, text: 'qa_finish를 받았습니다. 실행을 마칩니다.' }] };
-        }
-        if (wrappingUp || stopping) {
-          refusedDuringWrapUp += 1;
-          if (refusedDuringWrapUp >= WRAP_UP_REFUSALS) requestStop();
-          return { content: [{ type: 'text' as const, text: stopping && !wrappingUp ? '실행이 이미 끝나는 중입니다.' : buildWrapUpPrompt(stoppedBy) }], isError: true };
-        }
+    const runTool = async (name: string, args: unknown): Promise<ToolOutcome> => {
+      const input = (args ?? {}) as Record<string, unknown>;
+      if (toolsClosed) throw new Error('이 실행은 이미 끝나 도구를 쓸 수 없습니다');
+      if (name === 'qa_report_issue') {
+        const added = report.addFinding(input);
+        if (added.finding) onEvent?.({ type: 'finding', finding: added.finding });
+        return { ok: added.ok, content: added.text };
+      }
+      if (name === 'qa_finish') {
+        report.declare(input);
+        if (!wrappingUp) stoppedBy = 'finish';
+        requestStop();
+        return { ok: true, content: 'qa_finish를 받았습니다. 실행을 마칩니다.' };
+      }
+      if (wrappingUp || stopping) {
+        refusedDuringWrapUp += 1;
+        if (refusedDuringWrapUp >= WRAP_UP_REFUSALS) requestStop();
+        return { ok: false, content: stopping && !wrappingUp ? '실행이 이미 끝나는 중입니다.' : buildWrapUpPrompt(stoppedBy) };
+      }
 
-        if (spec.name === 'qa_expect_rejection') {
-          const declared = report.declareRejection(input);
-          return { content: [{ type: 'text' as const, text: declared.text }], ...(declared.ok ? {} : { isError: true }) };
-        }
+      if (name === 'qa_expect_rejection') {
+        const declared = report.declareRejection(input);
+        return { ok: declared.ok, content: declared.text };
+      }
 
-        actionCount += 1;
-        const { outcome, rejection } = await report.runAction(spec.name, input, browser, actionCount);
-        if (rejection) onEvent?.({ type: 'rejection', rejection });
-        const diagnostics = await browser.currentDiagnostics();
-        const total = countDiagnostics(diagnostics);
-        const artifact = await saveActionThumbnail(browser, saveArtifact, actionCount);
-        const record: QaActionRecord = {
-          index: actionCount,
-          tool: spec.name,
-          input,
-          ok: outcome.ok,
-          ...(outcome.ok ? {} : { detail: outcome.text }),
-          ...(outcome.resolvedSelector ? { resolvedSelector: outcome.resolvedSelector } : {}),
-          ...(outcome.stableSelector ? { stableSelector: outcome.stableSelector } : {}),
-          ...(outcome.rect ? { targetRect: outcome.rect } : {}),
-          ...(artifact ? { artifact } : {}),
-          newDiagnosticsCount: Math.max(0, total - previousDiagnosticsCount),
-          url: browser.url,
-          at: Date.now(),
-        };
-        previousDiagnosticsCount = total;
-        actions.push(record);
-        onEvent?.({ type: 'action', record });
+      actionCount += 1;
+      const { outcome, rejection } = await report.runAction(name, input, browser, actionCount);
+      if (rejection) onEvent?.({ type: 'rejection', rejection });
+      const diagnostics = await browser.currentDiagnostics();
+      const total = countDiagnostics(diagnostics);
+      const artifact = await saveActionThumbnail(browser, saveArtifact, actionCount);
+      const record: QaActionRecord = {
+        index: actionCount,
+        tool: name,
+        input,
+        ok: outcome.ok,
+        ...(outcome.ok ? {} : { detail: outcome.text }),
+        ...(outcome.resolvedSelector ? { resolvedSelector: outcome.resolvedSelector } : {}),
+        ...(outcome.stableSelector ? { stableSelector: outcome.stableSelector } : {}),
+        ...(outcome.rect ? { targetRect: outcome.rect } : {}),
+        ...(artifact ? { artifact } : {}),
+        newDiagnosticsCount: Math.max(0, total - previousDiagnosticsCount),
+        url: browser.url,
+        at: Date.now(),
+      };
+      previousDiagnosticsCount = total;
+      actions.push(record);
+      onEvent?.({ type: 'action', record });
 
-        const content: Array<{ type: 'text'; text: string } | { type: 'image'; data: string; mimeType: string }> = [{ type: 'text', text: outcome.text }];
-        if (outcome.image) content.push({ type: 'image', data: outcome.image.data.toString('base64'), mimeType: outcome.image.mediaType });
+      let text = outcome.text;
+      const repeated = await repeats.record(record, () => browser.screenSignature());
+      const limit: ExploreQaStopReason | undefined = repeated ? 'repeated_screen' : actionCount >= maxActions ? 'max_actions' : Date.now() >= deadline ? 'max_time' : undefined;
+      if (limit) {
+        beginWrapUp(limit);
+        text = `${text}\n\n${buildWrapUpPrompt(limit)}`;
+      }
+      return { ok: outcome.ok, content: text, ...(outcome.image ? { images: [{ data: outcome.image.data.toString('base64'), mimeType: outcome.image.mediaType }] } : {}) };
+    };
 
-        const repeated = await repeats.record(record, () => browser.screenSignature());
-        const limit: ExploreQaStopReason | undefined = repeated ? 'repeated_screen' : actionCount >= maxActions ? 'max_actions' : Date.now() >= deadline ? 'max_time' : undefined;
-        if (limit) {
-          beginWrapUp(limit);
-          content.push({ type: 'text', text: buildWrapUpPrompt(limit) });
-        }
-        return { content, isError: !outcome.ok };
-      }),
-    );
-
-    const input = new PromptQueue(buildQaUserPrompt(goal));
-    const onAbort = () => abort.abort(signal?.reason);
+    const onAbort = () => proc?.stop('now');
     signal?.addEventListener('abort', onAbort, { once: true });
     const deadlineTimer = setTimeout(() => beginWrapUp('max_time'), Math.max(0, deadline - Date.now()));
     deadlineTimer.unref?.();
 
+    let toolServer: ToolServer | undefined;
+    const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-qa-cli-'));
     try {
-      conversation = sdk.query({
-        prompt: input,
-        options: {
-          cwd,
-          systemPrompt: buildQaSystemPrompt(goal),
-          tools: [],
-          mcpServers: { [SERVER]: sdk.createSdkMcpServer({ name: SERVER, version: '0.0.0', tools: definitions }) },
-          allowedTools: specs.map((spec) => `mcp__${SERVER}__${spec.name}`),
-          permissionMode: 'dontAsk',
-          strictMcpConfig: true,
-          settingSources: [],
-          ...(model ? { model } : {}),
-          abortController: abort,
-          env: { ...process.env, CLAUDE_AGENT_SDK_CLIENT_APP: 'b-studio' },
-        },
+      signal?.throwIfAborted();
+      toolServer = await startToolServer({
+        specs,
+        name: SERVER,
+        // 선택 인자(qa_scroll의 ref 등)를 비워 둘 수 있게 스키마의 required를 따른다
+        honorRequired: true,
+        run: (name, args) =>
+          serial(async () => {
+            signal?.throwIfAborted();
+            return runTool(name, args);
+          }),
       });
+      const files = { mcp: path.join(dir, 'mcp.json'), systemPrompt: path.join(dir, 'system-prompt.md') };
+      // 토큰은 파일에 쓰지 않고 환경 변수 이름만 적는다(러너와 같다)
+      await writeFile(files.mcp, JSON.stringify({ mcpServers: { [SERVER]: { type: 'http', url: toolServer.url, headers: { Authorization: `Bearer \${${MCP_TOKEN_ENV}}` } } } }, null, 2), { mode: 0o600 });
+      await writeFile(files.systemPrompt, buildQaSystemPrompt(goal), { mode: 0o600 });
+      signal?.throwIfAborted();
+
+      proc = spawnClaudeCli({
+        command,
+        args: [
+          ...commandArgs,
+          '-p',
+          '--input-format',
+          'stream-json',
+          '--output-format',
+          'stream-json',
+          '--verbose',
+          '--mcp-config',
+          files.mcp,
+          '--strict-mcp-config',
+          // 기본 도구를 모두 끄고 qa_* 도구만 허용한다. 허용 목록에 없는 도구는 묻지 않고 거부한다
+          '--tools',
+          '',
+          '--allowedTools',
+          specs.map((spec) => `mcp__${SERVER}__${spec.name}`).join(','),
+          '--permission-mode',
+          'dontAsk',
+          '--setting-sources',
+          '',
+          '--system-prompt-file',
+          files.systemPrompt,
+          ...(model ? ['--model', model] : []),
+        ],
+        cwd,
+        env: { ...processEnv, [MCP_TOKEN_ENV]: toolServer.token },
+        ...(stopOptions ? { stop: stopOptions } : {}),
+      });
+      if (signal?.aborted) proc.stop('now');
+      proc.send(buildQaUserPrompt(goal));
 
       try {
-        for await (const message of conversation) {
+        for await (const message of proc.messages()) {
+          if (message.type === 'system' && message.subtype === 'init') {
+            // 도구 서버에 붙지 못한 채 돌면 모델이 도구 없이 글만 내고 끝난다. 확인하지 못하면 돌리지 않는다
+            const broken = mcpSetupFailure(message, SERVER);
+            if (broken) {
+              toolsClosed = true;
+              proc.stop('now');
+              throw new Error(broken);
+            }
+          }
           if (message.type === 'assistant') {
-            const id = (message.message as { id?: string }).id;
-            const messageUsage = (message.message as { usage?: { input_tokens?: number | null; output_tokens?: number | null; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null } }).usage;
+            // 하위 에이전트 메시지는 본 대화로 세지 않는다
+            if (message.parent_tool_use_id) continue;
+            const id = message.message?.id;
+            const messageUsage = message.message?.usage;
             if (id && messageUsage) {
               assistantUsage.set(id, {
                 inputTokens: messageUsage.input_tokens ?? 0,
@@ -249,38 +270,50 @@ export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions
                 cacheWriteTokens: messageUsage.cache_creation_input_tokens ?? 0,
               });
             }
-            const text = message.message.content
-              .flatMap((block: { type: string; text?: string }) => (block.type === 'text' && block.text ? [block.text] : []))
+            const blocks = Array.isArray(message.message?.content) ? (message.message!.content as Array<{ type?: string; text?: string }>) : [];
+            const text = blocks
+              .flatMap((block) => (block.type === 'text' && block.text ? [block.text] : []))
               .join('\n')
               .trim();
             if (text) onEvent?.({ type: 'text', text });
           }
           if (message.type === 'result') {
-            // modelUsage는 이 query의 누적값이다. claude-code-runner.ts와 같은 규칙으로 읽는다
+            // modelUsage는 이 프로세스의 누적값이다. claude-code-runner.ts와 같은 규칙으로 읽는다
             usageTracker.observeResult(message);
             resultSeen = true;
             // 모델이 qa_finish 없이 차례를 마쳤다(도구 없이 글만 냄, 또는 한도 뒤에도 보고 안 함). 같은 대화에서 한 번 더 묻는다
             if (!report.declared && !stopping && !followUpSent) {
               followUpSent = true;
               if (!wrappingUp) beginWrapUp('no_tool_call');
-              input.push(buildWrapUpPrompt(stoppedBy));
+              proc.send(buildWrapUpPrompt(stoppedBy));
               continue;
             }
             break;
           }
         }
-      } catch (error) {
-        // 끊으려고 abort한 경우의 오류는 정상 종료다. 그 밖의 오류는 그대로 올린다
-        if (!stopping && !abort.signal.aborted) throw error;
-        if (signal?.aborted) throw error;
+      } finally {
+        clearTimeout(deadlineTimer);
+        if (drainTimer) clearTimeout(drainTimer);
+        if (wrapUpTimer) clearTimeout(wrapUpTimer);
+        signal?.removeEventListener('abort', onAbort);
+        toolsClosed = true;
+        // 어떤 경로로 나왔든 프로세스를 끝내고 끝나기를 기다린다(입력을 닫으면 CLI가 스스로 끝난다)
+        proc.stop('graceful');
       }
+      const exit = await proc.exited;
+      // 취소했으면 결과 없음이 아니라 취소다
+      signal?.throwIfAborted();
+      // 우리가 끊은 경우(보고를 받았거나 유예가 끝남)가 아닌데 결과 없이 끝났으면 통과시키지 않는다
+      if (!resultSeen && !stopping) throw new Error(noResultMessage({ ...exit, stderr: proc.stderrTail() }));
     } finally {
       clearTimeout(deadlineTimer);
-      if (drainTimer) clearTimeout(drainTimer);
-      if (wrapUpTimer) clearTimeout(wrapUpTimer);
       signal?.removeEventListener('abort', onAbort);
-      input.close();
-      conversation?.close();
+      toolsClosed = true;
+      proc?.stop('now');
+      await toolServer?.close().catch(() => {});
+      // 이미 시작한 도구 호출은 이어서 돈다. 브라우저를 닫기 전에 끝나기를 기다린다
+      await serial.idle();
+      await rm(dir, { recursive: true, force: true }).catch(() => {});
     }
 
     const usage: AgentUsage = resultSeen ? { ...usageTracker.usage } : sumUsage([...assistantUsage.values()]);
