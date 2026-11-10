@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { native } from '@b-studio/sandbox';
+import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 
 /** 도구 호출 전에 실행기에서 판단하는 정책. 모델 프롬프트의 지침과 달리 우회할 수 없다. */
 export interface ExecutionPolicy {
@@ -67,12 +67,14 @@ export function checkToolPolicy(
         allowedTools: policy.allowedTools,
         deniedCommands: policy.deniedCommands,
         requireApprovalFor: policy.requireApprovalFor,
-        protectedPaths: policy.protectedPaths,
-        writablePaths: policy.writablePaths,
+        // 경로 셋(파일·보호 경로·쓰기 범위)은 같은 규칙으로 단사 인코딩해 보낸다. 짝 없는 서로게이트가 경계에서 모두 U+FFFD가 되면 허용 목록인 쓰기 범위가
+        // 다른 폴더를 범위 안으로 읽는다(트러블슈팅 166). 셋을 함께 바꿔야 보호 경로 비교도 옛 구현과 같다
+        protectedPaths: policy.protectedPaths?.map(encodeLoneSurrogates),
+        writablePaths: policy.writablePaths?.map(encodeLoneSurrogates),
       })
     : 'null';
   const decided = JSON.parse(
-    native.checkToolPolicy(tool, fileInput(input), commandInput(input), policyJson, typeof approvalToken === 'string' ? approvalToken : undefined, [...DEFAULT_DENIED_COMMANDS], BACKSLASH_SEP),
+    native.checkToolPolicy(tool, encodeLoneSurrogates(fileInput(input)), commandInput(input), policyJson, typeof approvalToken === 'string' ? approvalToken : undefined, [...DEFAULT_DENIED_COMMANDS], BACKSLASH_SEP),
   ) as { decision: 'allow' | 'deny'; reason?: string };
   return decided.reason === undefined ? { tool, decision: decided.decision } : { tool, decision: decided.decision, reason: decided.reason };
 }
@@ -109,5 +111,6 @@ export function isProtectedPath(file: string, candidate: string): boolean {
  * 꼴을 맞출 수 없는 경로나 범위는 범위 밖으로 본다. 허용 목록은 모르면 막는다
  */
 export function isWithinScope(file: string, scope: string): boolean {
-  return native.isWithinScope(file, scope, BACKSLASH_SEP);
+  // 허용 목록이라 짝 없는 서로게이트가 U+FFFD로 합쳐지지 않게 단사로 바꿔 보낸다(트러블슈팅 166). 보호 경로는 거부 목록이라 합쳐지면 더 막을 뿐이다
+  return native.isWithinScope(encodeLoneSurrogates(file), encodeLoneSurrogates(scope), BACKSLASH_SEP);
 }
