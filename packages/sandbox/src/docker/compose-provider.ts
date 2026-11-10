@@ -1,13 +1,12 @@
-import { execFile } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { promisify } from 'node:util';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { isDockerUnreachable, SandboxError } from '../errors';
+import { execChecked } from '../exec-checked';
 import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransientCrash, waitForReady, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
@@ -84,8 +83,6 @@ import {
   snapshotsToPrune,
 } from './snapshots';
 
-const execFileAsync = promisify(execFile);
-
 /** compose 파일이 up과 겹쳐 계속 바뀔 때 .git 마스크를 맞춰 다시 올리는 최대 횟수 */
 const GIT_MASK_ATTEMPTS = 3;
 /** 사용량 조회(ps·inspect·stats) 전체의 상한. 평소에는 2~3초 걸린다 */
@@ -101,9 +98,9 @@ const DEPENDENCY_POLL_MS = 500;
  */
 async function removeSandboxImages(dockerBin: string, sandboxId: string): Promise<void> {
   assertSandboxId(sandboxId);
-  const { stdout } = await execFileAsync(dockerBin, ['image', 'ls', '--filter', `reference=${sandboxId}-*`, '--format', '{{.Repository}}:{{.Tag}}'], { cwd: tmpdir() });
+  const { stdout } = await execChecked(dockerBin, ['image', 'ls', '--filter', `reference=${sandboxId}-*`, '--format', '{{.Repository}}:{{.Tag}}'], { cwd: tmpdir() });
   const images = stdout.split('\n').map((line) => line.trim()).filter((line) => line.startsWith(`${sandboxId}-`));
-  if (images.length > 0) await execFileAsync(dockerBin, ['image', 'rm', ...images], { cwd: tmpdir() });
+  if (images.length > 0) await execChecked(dockerBin, ['image', 'rm', ...images], { cwd: tmpdir() });
 }
 
 /** Docker VM 디스크가 가득 찼을 때 원인과 다음 행동을 알려 주는 문구 */
@@ -214,7 +211,7 @@ export class LocalDockerProvider implements SandboxProvider {
     let failure: unknown;
     // 작업 디렉터리의 compose 파일을 읽지 않도록 임시 디렉터리에서 실행한다
     try {
-      await execFileAsync(command, args, { cwd: tmpdir() });
+      await execChecked(command, args, { cwd: tmpdir() });
       // 컨테이너가 이미 없으면 --rmi local이 이미지를 찾지 못한다. 이름으로 한 번 더 지운다
       await removeSandboxImages(command, sandboxId);
     } catch (error) {
@@ -873,7 +870,7 @@ class LocalDockerSandbox implements Sandbox {
   async #ensureSharedVolumes(): Promise<void> {
     await Promise.all(
       this.project.sharedVolumes.map((name) =>
-        execFileAsync(this.#dockerBin, ['volume', 'create', '--label', 'b-studio.cache=true', name]),
+        execChecked(this.#dockerBin, ['volume', 'create', '--label', 'b-studio.cache=true', name]),
       ),
     );
   }
@@ -1230,7 +1227,7 @@ export function sandboxBuildNoCache(env: NodeJS.ProcessEnv = process.env): boole
 async function assertRuntime(dockerBin: string, runtime: string): Promise<void> {
   let stdout: string;
   try {
-    ({ stdout } = await execFileAsync(dockerBin, ['info', '--format', '{{json .Runtimes}}']));
+    ({ stdout } = await execChecked(dockerBin, ['info', '--format', '{{json .Runtimes}}']));
   } catch (error) {
     throw new SandboxError('Docker 데몬 정보를 읽지 못해 컨테이너 런타임을 확인하지 못했습니다', error instanceof Error ? error.message : String(error));
   }

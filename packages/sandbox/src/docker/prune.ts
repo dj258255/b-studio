@@ -1,9 +1,6 @@
-import { execFile } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { promisify } from 'node:util';
+import { execChecked } from '../exec-checked';
 import { SANDBOX_ID } from '../sandbox-id';
-
-const execFileAsync = promisify(execFile);
 
 /** b-studio가 만든 공유 캐시 볼륨에 붙는 라벨. 다음 세션의 기동 속도가 여기에 달려 있어 지우지 않는다 */
 const CACHE_LABEL = 'b-studio.cache';
@@ -77,7 +74,7 @@ function parseLabelled(stdout: string): Array<{ name: string; project: string; l
 
 /** 지금 살아 있는 샌드박스의 compose 프로젝트 이름. 이 프로젝트들의 자원은 건드리지 않는다 */
 async function runningProjects(dockerBin: string): Promise<Set<string>> {
-  const { stdout } = await execFileAsync(dockerBin, ['ps', '--format', '{{.Label "com.docker.compose.project"}}'], { cwd: tmpdir() });
+  const { stdout } = await execChecked(dockerBin, ['ps', '--format', '{{.Label "com.docker.compose.project"}}'], { cwd: tmpdir() });
   return new Set(stdout.split('\n').map((line) => line.trim()).filter(Boolean));
 }
 
@@ -90,10 +87,10 @@ async function runningProjects(dockerBin: string): Promise<Set<string>> {
 async function collectLeftovers(dockerBin: string): Promise<{ found: SandboxLeftovers; skipped: PruneResult['skipped'] }> {
   const [running, containers, images, volumes, networks] = await Promise.all([
     runningProjects(dockerBin),
-    execFileAsync(dockerBin, ['ps', '-a', '--format', '{{.Names}}\t{{.Label "com.docker.compose.project"}}'], { cwd: tmpdir() }).then(({ stdout }) => stdout),
-    execFileAsync(dockerBin, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'], { cwd: tmpdir() }).then(({ stdout }) => stdout),
-    execFileAsync(dockerBin, ['volume', 'ls', '--format', `{{.Name}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "${CACHE_LABEL}"}}`], { cwd: tmpdir() }).then(({ stdout }) => stdout),
-    execFileAsync(dockerBin, ['network', 'ls', '--format', '{{.Name}}\t{{.Label "com.docker.compose.project"}}'], { cwd: tmpdir() }).then(({ stdout }) => stdout),
+    execChecked(dockerBin, ['ps', '-a', '--format', '{{.Names}}\t{{.Label "com.docker.compose.project"}}'], { cwd: tmpdir() }).then(({ stdout }) => stdout),
+    execChecked(dockerBin, ['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'], { cwd: tmpdir() }).then(({ stdout }) => stdout),
+    execChecked(dockerBin, ['volume', 'ls', '--format', `{{.Name}}\t{{.Label "com.docker.compose.project"}}\t{{.Label "${CACHE_LABEL}"}}`], { cwd: tmpdir() }).then(({ stdout }) => stdout),
+    execChecked(dockerBin, ['network', 'ls', '--format', '{{.Name}}\t{{.Label "com.docker.compose.project"}}'], { cwd: tmpdir() }).then(({ stdout }) => stdout),
   ]);
 
   const found = emptyLeftovers();
@@ -160,7 +157,7 @@ export async function pruneSandboxLeftovers(options: PruneOptions = {}): Promise
   for (const { kind, args } of KINDS) {
     for (const name of found[kind]) {
       try {
-        await execFileAsync(dockerBin, [...args, name], { cwd: tmpdir() });
+        await execChecked(dockerBin, [...args, name], { cwd: tmpdir() });
         removed[kind].push(name);
       } catch (error) {
         skipped.push({ resource: name, reason: failureReason(error) });

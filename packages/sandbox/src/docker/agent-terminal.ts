@@ -1,17 +1,16 @@
-import { execFile, type ChildProcessWithoutNullStreams } from 'node:child_process';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { EDGE_IMAGE } from '../edge-config';
 import { SandboxError } from '../errors';
+import { execChecked } from '../exec-checked';
 import { defaultEvaluationAssetRoot, evaluationAssetCopies } from './evaluation-assets';
 import { computeGitMask, findMissingMasks, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
 import { assertSandboxId } from '../sandbox-id';
 import { openExecSession } from '../stream-exec';
 
-const execFileAsync = promisify(execFile);
 
 /**
  * 세션 터미널(이슈 #673): 에이전트 CLI를 호스트가 아니라 컨테이너 안에서 돌리고, 화면의 터미널을 그 CLI에 붙인다.
@@ -596,7 +595,7 @@ export async function ensureAgentContainer(
   { projectId, gatewayDir, evaluationAssets, evaluationAssetRoot, dockerBin = 'docker', image }: AgentContainerOptions,
 ): Promise<string> {
   const name = agentContainerName(sandboxId);
-  const docker = (args: string[]) => execFileAsync(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
+  const docker = (args: string[]) => execChecked(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
   const root = await realpath(projectRoot);
   // 서비스 컨테이너와 같은 복사본 자리를 본다(#745). 여기서는 만들지 않는다 — 샌드박스를 만들 때 이미 만들어 두었다
   const copies = evaluationAssetCopies(evaluationAssets ?? [], evaluationAssetRoot ?? defaultEvaluationAssetRoot(), sandboxId);
@@ -639,7 +638,7 @@ export async function ensureAgentContainer(
  */
 export async function probeAgentGateway(name: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<boolean> {
   const args = ['exec', name, HOOK_NODE, `${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME}`, 'ping'];
-  return execFileAsync(dockerBin, args, { cwd: tmpdir(), timeout: (AGENT_PING_SECONDS + 10) * 1000 }).then(
+  return execChecked(dockerBin, args, { cwd: tmpdir(), timeoutMs: (AGENT_PING_SECONDS + 10) * 1000 }).then(
     () => true,
     () => false,
   );
@@ -657,7 +656,7 @@ export function agentCleanupCommand(sandboxId: string, { dockerBin = 'docker' }:
 
 /** 세션을 정리할 때 부른다. 없으면 아무 일도 하지 않는다 */
 export async function removeAgentContainer(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<void> {
-  await execFileAsync(dockerBin, ['rm', '--force', agentContainerName(sandboxId)], { cwd: tmpdir() }).catch(() => {});
+  await execChecked(dockerBin, ['rm', '--force', agentContainerName(sandboxId)], { cwd: tmpdir() }).catch(() => {});
 }
 
 /**
@@ -667,7 +666,7 @@ export async function removeAgentContainer(sandboxId: string, { dockerBin = 'doc
  */
 export async function pauseAgentContainer(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<void> {
   try {
-    await execFileAsync(dockerBin, ['pause', agentContainerName(sandboxId)], { cwd: tmpdir() });
+    await execChecked(dockerBin, ['pause', agentContainerName(sandboxId)], { cwd: tmpdir() });
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 멈추지 못했습니다', describe(error));
   }
@@ -676,7 +675,7 @@ export async function pauseAgentContainer(sandboxId: string, { dockerBin = 'dock
 /** 멈춘 에이전트 컨테이너를 다시 움직이게 한다(`docker unpause`). 실패하면 던진다 */
 export async function unpauseAgentContainer(sandboxId: string, { dockerBin = 'docker' }: { dockerBin?: string } = {}): Promise<void> {
   try {
-    await execFileAsync(dockerBin, ['unpause', agentContainerName(sandboxId)], { cwd: tmpdir() });
+    await execChecked(dockerBin, ['unpause', agentContainerName(sandboxId)], { cwd: tmpdir() });
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 다시 움직이지 못했습니다', describe(error));
   }
@@ -711,7 +710,7 @@ function gatewayInPlace(gatewayDir: string | undefined, mounts: readonly Inspect
 
 async function inspect(dockerBin: string, name: string): Promise<InspectedContainer | undefined> {
   try {
-    const { stdout } = await execFileAsync(dockerBin, ['inspect', '--type', 'container', name], { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
+    const { stdout } = await execChecked(dockerBin, ['inspect', '--type', 'container', name], { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
     const [container] = JSON.parse(stdout) as Array<{ State?: { Running?: boolean; Paused?: boolean }; Mounts?: InspectedMount[]; HostConfig?: { Tmpfs?: Record<string, string> | null } }>;
     return container ? { running: container.State?.Running === true, paused: container.State?.Paused === true, mounts: container.Mounts ?? [], tmpfs: container.HostConfig?.Tmpfs ?? {} } : undefined;
   } catch {
@@ -810,7 +809,7 @@ export function openAgentTerminal(
       if (child.stdin.writable) child.stdin.write(data);
     },
     async resize(next) {
-      await execFileAsync(dockerBin, agentResizeArgs(name, id, next), { cwd: tmpdir() }).catch(() => {});
+      await execChecked(dockerBin, agentResizeArgs(name, id, next), { cwd: tmpdir() }).catch(() => {});
     },
     onData(listener) {
       child.stdout.on('data', listener);
