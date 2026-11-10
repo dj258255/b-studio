@@ -5,7 +5,7 @@ import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 
 /**
  * 러너 판정·사용량 벡터(ADR-191 3ac). 기대값은 옛 TS(`claude-code-runner-legacy.ts`)가 낸 값이다. 옛 TS에서 다른 것은 `intended`로 표시한 의도한 차이뿐이고,
- * 모두 옛 TS가 던지거나 열린 쪽(실패를 성공으로)으로 틀린 곳이다(트러블슈팅 179).
+ * 모두 옛 TS가 던지거나 열린 쪽(실패를 성공으로)으로 틀린 곳이다(트러블슈팅 176).
  * 결과 메시지는 "성공이 확실할 때만 undefined"이고, 도구 서버는 "connected이고 오류가 없을 때만 undefined"이다. 각 통과 조건마다 거의 같은 거부 입력을 둔다.
  */
 

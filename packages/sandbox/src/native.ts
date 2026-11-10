@@ -606,6 +606,10 @@ interface NativeGuard {
   reqTraceScenarioEvidence(paramsJson: string): string;
   reqTraceUnverifiedScenarioIds(paramsJson: string): string;
   reqTraceMatrix(inputJson: string): string;
+  // ── agent: 고정 경로와 겹치는지(3단계 3aa). 막는 판정이고(겹침·모름은 값을 받지 않는다) 이름 견주기는 거부 목록이라 글자는 파일 시스템 꼴(toWellFormed)로 보낸다.
+  // 폴더 읽기는 껍데기가 한다: input은 { servicePath, pageFile, values(자기 속성만), check, maxFolders } JSON, known은 지금까지 읽은 { lstat: { 경로: 'missing'|'error'|'link'|'dir'|'other' }, readdir: { 폴더: null | [[이름, 'l'|'d'|'f']] } } JSON(경로는 프로젝트 루트 기준 상대 경로).
+  // 결과: { need: { kind: 'lstat'|'readdir', path } }(읽고 known에 더해 다시 부른다) | { shadows: [{ name, where }] } | { unknown: 메시지 }. 모양이 어긋난 입력은 던진다
+  staticShadowStep(inputJson: string, knownJson: string): string;
   // ── agent: 로컬 CLI 러너의 실행 파일 고르기·판정·사용량(3단계 3ac). cliResolveCommand는 막는 쪽이다: PATH·프로젝트 루트의 파일 상태를 Rust가 읽고 `{ path }`(그 글자를 그대로 spawn에 쓴다)나 `{ reason }`을 돌려준다(JSON).
   // 경로·PATH는 글자 그대로 보낸다: 짝 없는 서로게이트는 Node가 fs·spawn에 줄 때도 같은 UTF-8(U+FFFD)이 되므로 확인한 경로와 띄우는 경로의 바이트가 같다.
   // 판정 입력은 encodeNative한 JSON이다. runnerDescribeResultFailure는 `{subtype,is_error,result,stop_reason,errors}`, runnerMcpSetupFailure는 `{mcp_servers,mcp_server_errors}`. 실패가 아니면(연결됐으면) null.

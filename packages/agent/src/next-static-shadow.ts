@@ -1,5 +1,6 @@
 import { lstat, readdir } from 'node:fs/promises';
 import path from 'node:path';
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 
 /**
  * 동적 경로(`app/orders/[id]/page.tsx`)를 어떤 값으로 채워 열 때, 라우터가 그 주소를 **다른 고정 경로**로 먼저 보내는지 본다(ADR-159 결정 11).
@@ -23,6 +24,9 @@ import path from 'node:path';
  *
  * 한계: 폴더 구조에 드러나지 않는 가로채기(미들웨어 rewrite, `next.config`의 redirects·rewrites)는 알 수 없다.
  * 폴더를 읽지 못하거나 살펴볼 폴더가 상한을 넘어도 `StaticShadowUnknownError`를 던진다 — 호출자는 값을 받지 않는 쪽으로 처리한다.
+ *
+ * 판정(이름 접기·그룹 구분·page 경로 읽기·내려갈 폴더 결정·겹침·"모름")은 Rust(crates/bstudio-guard/src/static_shadow.rs, ADR-191 3단계)가 하고,
+ * 이 파일은 폴더 읽기(`readdir`·`lstat`)만 한다. Rust가 다음에 읽을 것 하나를 돌려주면 읽어서 넘기는 것을 끝날 때까지 되풀이한다.
  */
 
 export interface StaticShadow {
@@ -57,155 +61,72 @@ export interface StaticShadowInput {
   maxFolders?: number;
 }
 
-const PAGE_FILE = /^(?:src\/)?app\/(?:(.*)\/)?page\.(?:tsx|jsx|ts|js|mdx)$/;
-/** 주소를 받는 폴더들(서비스 폴더 기준). 프로젝트가 어느 쪽을 쓰는지 가리지 않고 모두 본다 */
-const ROUTER_ROOTS = ['app', 'src/app', 'pages', 'src/pages'];
-const DYNAMIC_FOLDER = /^\[([^[\]]+)\]$/;
-/** 인터셉트 라우트 `(.)x`·`(..)x`는 주소를 직접 열 때 쓰이지 않는다 */
-const INTERCEPT_FOLDER = /^\(\.{1,3}\)/;
-const GROUP_FOLDER = /^\(.+\)$/;
-const MAX_FOLDERS = 2_000;
+const DEFAULT_MAX_FOLDERS = 2_000;
 
-function normalize(value: string): string {
-  return value.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/{2,}/g, '/').replace(/\/$/, '');
+/** 짝 없는 서로게이트를 U+FFFD로(파일 시스템·napi 경계가 읽는 꼴). 이름 견주기는 거부 목록이라 합쳐져도 더 막을 뿐이다 */
+const wellFormed = (text: string): string => text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '\ufffd');
+
+type LstatKind = 'missing' | 'error' | 'link' | 'dir' | 'other';
+interface Known {
+  lstat: Record<string, LstatKind>;
+  readdir: Record<string, Array<[string, 'l' | 'd' | 'f']> | null>;
 }
+type Step = { need: { kind: 'lstat' | 'readdir'; path: string } } | { shadows: Array<{ name: string; where: string }> } | { unknown: string };
 
-/** 주소에 나타나지 않는 폴더: 라우트 그룹과 병렬 라우트 슬롯 */
-function isTransparent(name: string): boolean {
-  return name.startsWith('@') || (GROUP_FOLDER.test(name) && !INTERCEPT_FOLDER.test(name));
+/** 살펴볼 폴더 수 상한. 수가 아니거나 NaN이면 기본값(옛 구현은 NaN이면 상한이 없었다 — 더 막는 쪽으로 바꿨다), 끝없이 큰 값은 아주 큰 유한한 수 */
+function folderLimit(value: number | undefined): number {
+  if (value === undefined || Number.isNaN(value)) return DEFAULT_MAX_FOLDERS;
+  return Math.max(-1, Math.min(value, 1e15));
 }
 
 export async function findStaticShadows(input: StaticShadowInput): Promise<StaticShadow[]> {
-  const prefix = normalize(input.servicePath);
-  const inService = prefix === '' || prefix === '.';
-  const file = normalize(input.pageFile);
-  const relative = inService ? file : file.startsWith(`${prefix}/`) ? file.slice(prefix.length + 1) : undefined;
-  const match = relative === undefined ? null : PAGE_FILE.exec(relative);
-  if (!match) throw new StaticShadowUnknownError(`page 파일 경로를 알아볼 수 없습니다: ${input.pageFile}`);
-  const serviceParts = inService ? [] : prefix.split('/');
-  const toProject = (absolute: string): string => normalize(path.relative(input.root, absolute));
-  const linked = (absolute: string): StaticShadowUnknownError =>
-    new StaticShadowUnknownError(`${toProject(absolute)}이(가) 심볼릭 링크라 그 너머의 경로를 확인할 수 없습니다`);
-
-  // 주소 조각: 그룹·슬롯은 빼고, 동적 세그먼트는 채운 값으로 바꾼다
-  const url: Array<{ text: string; dynamic?: string }> = [];
-  for (const folder of (match[1] ?? '').split('/').filter(Boolean)) {
-    if (isTransparent(folder)) continue;
-    const dynamic = DYNAMIC_FOLDER.exec(folder)?.[1];
-    if (dynamic === undefined) {
-      url.push({ text: folder });
-      continue;
-    }
-    const value = input.values[dynamic];
-    if (value === undefined || value === '') throw new StaticShadowUnknownError(`동적 세그먼트 '${dynamic}'에 채운 값을 알 수 없습니다`);
-    url.push({ text: value, dynamic });
+  const values: Record<string, string> = {};
+  /** Rust가 돌려주는 이름은 파일 시스템 꼴이라, 원래 값은 그 꼴의 이름으로 찾는다(결과의 value는 짝 없는 서로게이트까지 입력 그대로) */
+  const originals = new Map<string, string>();
+  for (const [name, value] of Object.entries(input.values)) {
+    values[wellFormed(name)] = wellFormed(value);
+    originals.set(wellFormed(name), value);
   }
-
-  let budget = input.maxFolders ?? MAX_FOLDERS;
-  /** 견줄 이름: 인코딩을 풀고 첫 점 앞까지만, 소문자로 */
-  const key = (name: string): string => {
-    let decoded = name;
-    try {
-      decoded = decodeURIComponent(name);
-    } catch {
-      // 풀 수 없는 이름은 글자 그대로 견준다
-    }
-    return (decoded.split('.')[0] ?? '').toLowerCase();
-  };
-
-  /**
-   * 프로젝트 루트에서 parts를 따라 내려가 무엇이 있는지 본다. 길에 링크가 있으면 던진다(따라가지 않는다).
-   * 돌려주는 값: 없으면 undefined, 있으면 그 절대 경로와 폴더인지 여부
-   */
-  const locate = async (parts: readonly string[]): Promise<{ absolute: string; directory: boolean } | undefined> => {
-    let absolute = input.root;
-    let directory = true;
-    for (const part of parts) {
-      absolute = path.join(absolute, part);
-      let stat;
-      try {
-        stat = await lstat(absolute);
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code === 'ENOENT' || code === 'ENOTDIR') return undefined;
-        throw new StaticShadowUnknownError(`${toProject(absolute)}을(를) 확인하지 못했습니다`);
-      }
-      if (stat.isSymbolicLink()) throw linked(absolute);
-      directory = stat.isDirectory();
-    }
-    return { absolute, directory };
-  };
-
-  /** dir 아래에서 target 주소(마지막 조각이 확인할 값)와 같은 자리에 오는 고정 이름을 찾는다. depth는 지금까지 맞춘 주소 조각 수 */
-  const walk = async (dir: string, target: readonly string[], depth: number): Promise<string | undefined> => {
-    budget -= 1;
-    if (budget < 0) throw new StaticShadowUnknownError('살펴볼 폴더가 너무 많습니다');
-    let entries;
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      throw new StaticShadowUnknownError(`${toProject(dir)} 폴더를 읽지 못했습니다`);
-    }
-    const last = depth === target.length - 1;
-    const want = key(target[depth]!);
-    for (const entry of entries) {
-      const child = path.join(dir, entry.name);
-      const isLink = entry.isSymbolicLink();
-      if (isTransparent(entry.name)) {
-        // 그룹·슬롯은 주소에 없으니 그 안을 같은 깊이로 본다. 링크면 그 안을 알 수 없다
-        if (isLink) throw linked(child);
-        if (entry.isDirectory()) {
-          const found = await walk(child, target, depth);
-          if (found) return found;
-        }
-        continue;
-      }
-      if (INTERCEPT_FOLDER.test(entry.name)) continue;
-      const dynamic = DYNAMIC_FOLDER.test(entry.name);
-      if (last) {
-        // 같은 자리의 동적 폴더는 이 화면 자신이거나 다른 동적 경로다 — 고정 경로가 아니다
-        if (!dynamic && key(entry.name) === want) return toProject(child);
-        continue;
-      }
-      if (dynamic || key(entry.name) === want) {
-        if (isLink) throw linked(child);
-        if (entry.isDirectory()) {
-          const found = await walk(child, target, depth + 1);
-          if (found) return found;
-        }
-      }
-    }
-    return undefined;
-  };
-
-  const roots: string[] = [];
-  for (const router of ROUTER_ROOTS) {
-    const located = await locate([...serviceParts, ...router.split('/')]);
-    if (located?.directory) roots.push(located.absolute);
-  }
-
-  const shadows: StaticShadow[] = [];
-  const names = url.filter((segment) => segment.dynamic !== undefined && input.check.has(segment.dynamic));
-  for (const [index, segment] of url.entries()) {
-    if (segment.dynamic === undefined || !input.check.has(segment.dynamic)) continue;
-    const target = url.slice(0, index + 1).map((part) => part.text);
-    for (const root of roots) {
-      const where = await walk(root, target, 0);
-      if (where) {
-        shadows.push({ name: segment.dynamic, value: segment.text, where });
-        break;
-      }
+  const request = encodeNative({
+    servicePath: wellFormed(input.servicePath),
+    pageFile: wellFormed(input.pageFile),
+    values,
+    check: [...input.check].map((name) => wellFormed(name)),
+    maxFolders: folderLimit(input.maxFolders),
+  });
+  const known: Known = { lstat: {}, readdir: {} };
+  // 프로젝트 루트 기준 상대 경로(Rust가 만든 것)를 실제 경로로. 읽는 곳과 판정하는 곳이 같은 문자열이다
+  const absolute = (relative: string): string => path.join(input.root, relative);
+  for (;;) {
+    const step = decodeNative<Step>(native.staticShadowStep(request, JSON.stringify(known)));
+    if ('unknown' in step) throw new StaticShadowUnknownError(step.unknown);
+    if ('shadows' in step) return step.shadows.map((shadow) => ({ name: shadow.name, value: originals.get(shadow.name) ?? '', where: shadow.where }));
+    const target = step.need.path;
+    // 이미 읽은 것을 또 달라고 하면 판정이 나아가지 않는다 — 끝없이 되풀이하지 않고 모른다고 던진다
+    if (target in (step.need.kind === 'lstat' ? known.lstat : known.readdir)) throw new StaticShadowUnknownError(`${target}을(를) 읽었지만 판정이 나아가지 않습니다`);
+    if (step.need.kind === 'lstat') {
+      known.lstat[target] = await lstatKind(absolute(target));
+    } else {
+      known.readdir[target] = await listFolder(absolute(target));
     }
   }
+}
 
-  // public의 정적 파일은 채운 주소 전체와 같을 때만 겹친다. 어느 값 때문인지 가릴 수 없으므로 확인 대상 값 모두를 겹친 것으로 본다
-  if (url.length > 0 && names.length > 0) {
-    const asset = await locate([...serviceParts, 'public', ...url.map((part) => part.text)]);
-    if (asset) {
-      for (const segment of names) {
-        if (!shadows.some((shadow) => shadow.name === segment.dynamic)) shadows.push({ name: segment.dynamic!, value: segment.text, where: toProject(asset.absolute) });
-      }
-    }
+async function lstatKind(absolutePath: string): Promise<LstatKind> {
+  try {
+    const stat = await lstat(absolutePath);
+    return stat.isSymbolicLink() ? 'link' : stat.isDirectory() ? 'dir' : 'other';
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'missing' : 'error';
   }
-  return shadows;
+}
+
+async function listFolder(absolutePath: string): Promise<Array<[string, 'l' | 'd' | 'f']> | null> {
+  try {
+    const entries = await readdir(absolutePath, { withFileTypes: true });
+    return entries.map((entry): [string, 'l' | 'd' | 'f'] => [entry.name, entry.isSymbolicLink() ? 'l' : entry.isDirectory() ? 'd' : 'f']);
+  } catch {
+    return null;
+  }
 }

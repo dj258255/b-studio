@@ -7,7 +7,7 @@ import { makeFixture, type Fixture } from './claude-cli-command-fixture';
 
 /**
  * CLI 실행 파일 고르기 벡터(ADR-191 3ac). 막는 쪽이다. 기대값은 옛 TS(`claude-cli-process-legacy.ts`)가 낸 값이고, 옛 TS에서 실패하는 것은 `intended`로 표시한 의도한 차이뿐이다.
- * 의도한 차이는 모두 옛 TS가 열린 쪽으로 틀린 곳을 닫는 것이다(트러블슈팅 179).
+ * 의도한 차이는 모두 옛 TS가 열린 쪽으로 틀린 곳을 닫는 것이다(트러블슈팅 176).
  * 허용·인식 패턴마다 거의 같은 거부 입력을 둔다: 루트 이름의 접두인 형제 폴더, `..`로 시작하는 폴더 이름, 겹친 구분자, `..` 세그먼트, 링크, 대소문자.
  */
 const posixOnly = process.platform === 'win32' ? describe.skip : describe;

@@ -601,7 +601,7 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
     }
   });
 
-  // ADR-191 3ac, 트러블슈팅 179: `..bin`이라는 이름의 폴더와 프로젝트 안의 링크도 같은 함수가 안으로 본다(관문 러너 전용 수정은 없다)
+  // ADR-191 3ac, 트러블슈팅 176: `..bin`이라는 이름의 폴더와 프로젝트 안의 링크도 같은 함수가 안으로 본다(관문 러너 전용 수정은 없다)
   posixOnly('이름이 ..로 시작하는 프로젝트 안 폴더와 프로젝트 안의 링크로 부른 PATH 항목으로도 심은 CLI를 띄우지 않는다', async () => {
     const out = mkdtempSync(path.join(tmpdir(), 'b-studio-gateway-path-'));
     try {
