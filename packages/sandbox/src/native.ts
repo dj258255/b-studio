@@ -553,6 +553,28 @@ interface NativeGuard {
   workspaceIsSecretFile(file: string): boolean;
   workspaceIsInside(relative: string, backslashSep: boolean): boolean;
   workspaceInputProblem(file: string, backslashSep: boolean, external: boolean): number;
+
+  // ── agent: 워크플로 판정(3단계 3v). 트레일러 값은 ASCII 상수와만 견주므로 그대로 보낸다. 통과로 이어지는 같음 비교(배포 막음·빠진 검증 단계·시험이 다루는 서비스·선언한 화면 경로)는
+  // encodeLoneSurrogates한 글자를 보내고 위치로 돌려받는다. 보호 경로는 원래 글자를 보낸다(거부 목록은 U+FFFD 꼴로 견준다)
+  workflowFormatPassedTrailer(stages: string[]): string;
+  workflowFormatVerifyTrailer(mode: string): string;
+  workflowFormatIncompleteTrailer(reason: string): string;
+  workflowParsePassedTrailer(values: string[]): string[] | null | undefined;
+  workflowParseVerifyTrailer(values: string[]): string | null | undefined;
+  workflowParseIncompleteTrailer(values: string[]): string | null | undefined;
+  workflowIsDocCheckpointPath(file: string): boolean;
+  workflowHasEmptyPassedTrailer(trailers: string[]): boolean;
+  workflowHasDocsVerifyTrailer(trailers: string[]): boolean;
+  workflowStages(required: string[] | undefined, pageChecks: number, tests: number, concurrencyChecks: number, loadChecks: number): string[];
+  workflowReleaseRequirements(releaseRequires: string[] | undefined): string[];
+  /** 요구 목록에서 빠진 단계의 위치. -1은 checkpoint(게이트를 거치지 않은 직접 수정 체크포인트) */
+  workflowReleaseBlockers(requires: string[] | undefined, declared: boolean, passed: string[] | undefined, verify: string | undefined): number[];
+  workflowMissingVerificationStages(stages: string[], passed: string[]): number[];
+  workflowProtectedPaths(protectedPaths: string[] | undefined, evaluationAssets: string[] | undefined): string[];
+  workflowMaxTurns(json: string): string;
+  workflowReviewChanges(json: string): string;
+  workflowUncoveredChangeWarnings(json: string): string;
+  workflowFormatCheckedCoverage(json: string, declaredCheckName: string): string;
   // ── agent: 작업 계획·요구사항 검증 기록 무결성(3단계 3x). 막는 판정이다. 글자는 모두 encodeLoneSurrogates해서 보내고 결과의 글자는 decodeLoneSurrogates로 푼다(짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 글자가 같아지는 것을 막는다).
   // taskPlanLanes의 tasksJson은 [{ id, dependsOn, backend?, model?, paths }](zod가 읽은 값), 결과는 { error } | { lanes: [{ id, tasks: 입력 순번 목록, paths }] }. 모양이 어긋나면 던진다.
   // req*: before·after는 문서 글자(없으면 null), *Effective는 그 문서에서 사람 확인이 있는 요구사항 id(읽은 순서), afterIds는 지금 문서의 모든 요구사항 id(둘 다 TS가 parseRequirementsMarkdown으로 읽는다).

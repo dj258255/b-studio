@@ -19,6 +19,12 @@ type Vector = [fn: string, args: unknown[], expected: string];
 const VECTORS = JSON.parse(readFileSync(new URL('./workspace-vectors.json', import.meta.url), 'utf8')) as Vector[];
 const USE_LEGACY = process.env.WORKSPACE_VECTORS_IMPL === 'legacy';
 
+/** workspace.ts의 `!isInsideRelative(path.normalize(받은 경로))`와 같은 호출(3y). 참이 바깥(거절) */
+function projectOutside(relative: string, win: boolean): boolean {
+  const q = win ? nodePath.win32 : nodePath.posix;
+  return !native.workspaceIsInside(encodeLoneSurrogates(q.normalize(relative)), win);
+}
+
 function run(fn: string, args: unknown[]): unknown {
   const text = args[0] as string;
   switch (fn) {
@@ -38,6 +44,14 @@ function run(fn: string, args: unknown[]): unknown {
       return USE_LEGACY ? legacy.externalInputProblem(text, nodePath.posix) : native.workspaceInputProblem(text, false, true);
     case 'externalProblemWin':
       return USE_LEGACY ? legacy.externalInputProblem(text, nodePath.win32) : native.workspaceInputProblem(text, true, true);
+    case 'projectOutsidePosix':
+      return USE_LEGACY ? legacy.projectPathOutside(text, nodePath.posix) : projectOutside(text, false);
+    case 'projectOutsideWin':
+      return USE_LEGACY ? legacy.projectPathOutside(text, nodePath.win32) : projectOutside(text, true);
+    case 'storedOutsidePosix':
+      return USE_LEGACY ? legacy.storedOutside(text, nodePath.posix) : !native.workspaceIsInside(encodeLoneSurrogates(text), false);
+    case 'storedOutsideWin':
+      return USE_LEGACY ? legacy.storedOutside(text, nodePath.win32) : !native.workspaceIsInside(encodeLoneSurrogates(text), true);
     default:
       throw new Error(`알 수 없는 벡터 함수: ${fn}`);
   }
@@ -67,7 +81,7 @@ describe('workspace 막는 검사 벡터(옛 TS가 낸 값)', () => {
   it('벡터가 모든 갈래를 밟는다: 막음·통과, 안쪽·바깥, 입력 문제 0·1·2', () => {
     const seen = new Map<string, Set<string>>();
     for (const [fn, , expected] of VECTORS) seen.set(fn, (seen.get(fn) ?? new Set()).add(expected));
-    for (const fn of ['isDenied', 'isSecretFile', 'isInsidePosix', 'isInsideWin']) expect([...seen.get(fn)!].sort(), fn).toEqual(['false', 'true']);
+    for (const fn of ['isDenied', 'isSecretFile', 'isInsidePosix', 'isInsideWin', 'projectOutsidePosix', 'projectOutsideWin', 'storedOutsidePosix', 'storedOutsideWin']) expect([...seen.get(fn)!].sort(), fn).toEqual(['false', 'true']);
     expect([...seen.get('resolveProblem')!].sort()).toEqual(['0', '1', '2']);
     expect([...seen.get('externalProblem')!].sort()).toEqual(['0', '1']);
   });
@@ -92,6 +106,18 @@ describe('workspace 막는 검사 벡터(옛 TS가 낸 값)', () => {
     expect(native.workspaceIsInside(encodeLoneSurrogates('a\ud800b'), false)).toBe(true);
     expect(native.workspaceIsInside(encodeLoneSurrogates('..\ud800'), false)).toBe(true);
     expect(native.workspaceIsInside(encodeLoneSurrogates('../\ud800'), false)).toBe(false);
+  });
+});
+
+describe('프로젝트 밖 상대 경로(3y): 닮은 입력 쌍', () => {
+  it('바깥은 거절하고 `..`로 시작하는 이름·정규화로 안쪽에 남는 경로는 연다', () => {
+    for (const rel of ['..', '../x', 'a/../..', 'a/../../b', './..', '../..', '..//x', '/x', '/', 'x/../../y']) expect(projectOutside(rel, false), rel).toBe(true);
+    for (const rel of ['', '.', '..x', '...', 'a/..', 'a/../b', '..x/y', 'x..', '..\\x', '../\u200B'.slice(3), '.. ', '\u200B..']) expect(projectOutside(rel, false), rel).toBe(false);
+    for (const rel of ['..\\x', '\\x', 'C:\\x', 'C:/x', '\\\\srv\\x', 'a\\..\\..\\b']) expect(projectOutside(rel, true), rel).toBe(true);
+    for (const rel of ['C:x', 'C:', '..x', 'a\\..']) expect(projectOutside(rel, true), rel).toBe(false);
+    // 짝 없는 서로게이트가 있어도 `..` 판정은 같다
+    expect(projectOutside('..\ud800', false)).toBe(false);
+    expect(projectOutside('../\ud800', false)).toBe(true);
   });
 });
 

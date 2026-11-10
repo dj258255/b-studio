@@ -43,6 +43,17 @@ function pathOf(g: Gen): string {
   return g.pick(['', '', '', '', './', '/', '../', 'C:/', 'C:\\', 'C:', '\\', './/', '\\\\srv\\x']) + out + g.pick(['', '', '', '/', '//', '/.', '\\']);
 }
 
+/** 3y: 받은 상대 경로. `..`·`.`·구분자·드라이브 글자를 섞고, 이름 하나가 `..`로 시작하는 꼴(`..x`)도 넣는다 */
+function relativeOf(g: Gen): string {
+  const parts = g.list(0, 5, () => g.pick(['..', '..', '.', '...', '..x', 'x..', 'a', 'b c', 'C:', '', '..\\x', 'a\\..', '\ud800', '..\ud800', '.\u200B.']));
+  const sep = () => g.pick(['/', '/', '/', '\\', '//', '/./']);
+  let out = '';
+  parts.forEach((part, i) => {
+    out += (i > 0 ? sep() : '') + part;
+  });
+  return g.pick(['', '', '', '', '', '/', '\\', 'C:/', 'C:\\', 'C:', './', '../', '..\\', '\\\\srv\\x']) + out;
+}
+
 const ROOTS = ['/work/proj', '/work/proj/', '/', '/work/..proj', '/work/pro\u200Bj', '/w\ud800'];
 const WIN_ROOTS = ['C:\\work\\proj', 'c:\\Work\\Proj', 'C:\\', '\\\\srv\\share\\proj', 'D:\\proj'];
 
@@ -122,6 +133,30 @@ function runSeed(seed: number): void {
       () => false,
     );
 
+    const rel = relativeOf(g);
+    for (const winRel of [false, true]) {
+      const q = winRel ? nodePath.win32 : nodePath.posix;
+      const label = winRel ? 'win32' : 'posix';
+      // 3y: 첫째는 readProjectFileSync·snapshotRead의 `!isInsideRelative(path.normalize(받은 경로))`, 둘째는 실제 저장 이름 자리의 `!isInsideRelative(stored)`와 같은 호출이다
+      compare(
+        `프로젝트 밖 상대 경로(${label})`,
+        rel,
+        () => legacy.projectPathOutside(rel, q),
+        () => !native.workspaceIsInside(encodeLoneSurrogates(q.normalize(rel)), winRel),
+        true,
+        // 의도한 닫힌 쪽: win32에서 `a/../C:\x`처럼 정규화한 결과가 드라이브 절대 경로가 되는 입력(옛 식은 받은 글자만 절대 경로로 봤다)
+        (input) => typeof input === 'string' && winRel && q.isAbsolute(q.normalize(input)) && !q.isAbsolute(input),
+      );
+      compare(
+        `저장 이름 어긋남(${label})`,
+        rel,
+        () => legacy.storedOutside(rel, q),
+        () => !native.workspaceIsInside(encodeLoneSurrogates(rel), winRel),
+        true,
+        () => false,
+      );
+    }
+
     const input = pathOf(g);
     for (const winInput of [false, true]) {
       const q = winInput ? nodePath.win32 : nodePath.posix;
@@ -168,7 +203,7 @@ describe('workspace 막는 검사 차등 시험(옛 TS 대 Rust)', () => {
     if (REPORT) appendFileSync(REPORT, `${lines.join('\n')}\n열린 쪽 뒤집힘 합 ${open}\n`);
     expect(open).toBe(0);
     expect(unexplained).toBe(0);
-    expect(tallies.size).toBe(8);
+    expect(tallies.size).toBe(12);
   });
 
   it('대조 장치: 한 곳을 어긋나게 한 옛 구현이 차이로 잡힌다', () => {

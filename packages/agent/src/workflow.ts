@@ -1,9 +1,18 @@
+import path from 'node:path';
+import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import { AUTO_PAGE_MAX, type LoadedProject, type WorkflowStage, type WorkflowSpec } from '@b-studio/spec';
-import { routesFromChangedFiles } from './next-routes';
 import { DECLARED_CHECKS_CHECK } from './declared-checks';
 import { describeLoadExpect } from './load-check';
-import { DEFAULT_DENIED_COMMANDS, isProtectedPath, type ExecutionPolicy } from './policy';
-import { ownsFile, servicesForFiles } from './services';
+import { DEFAULT_DENIED_COMMANDS, type ExecutionPolicy } from './policy';
+
+/**
+ * 워크플로 판정(단계, 트레일러 만들기·읽기, 배포 막음, 검토, 확인 요약)은 Rust(crates/bstudio-guard/src/workflow.rs, ADR-191 3단계 3v)가 한다.
+ * 여기에는 타입·상수와 같은 이름·시그니처의 껍데기만 남았다. 프로젝트 불러오기·실행 정책 객체 조립·Pi 환경 변수·모델에 주는 안내문은 옮기지 않았다.
+ * 통과로 이어지는 같음 비교(배포 막음의 통과 단계, 빠진 검증 단계, 시험이 다루는 서비스, 선언한 화면 경로)는 양쪽을 encodeLoneSurrogates로 바꿔 보내고 위치로 돌려받는다(트러블슈팅 166).
+ */
+
+/** Windows면 역슬래시도 구분자다. 보호 경로 판정은 Rust가 하고 플랫폼 값만 여기서 넘긴다 */
+const BACKSLASH_SEP = path.sep === '\\';
 
 /**
  * 모델의 도구 호출이나 턴 종료로 진입을 알 수 있는 진행 단계와 달리, 플랫폼이 직접 실행해 통과 여부를 판정하는 단계.
@@ -54,7 +63,7 @@ export interface WorkflowCheck {
  * 리뷰 단계의 사후 확인에서 보호 경로와 같게 본다 — 그래야 파일 도구로 바로 고치는 길이 막힌다(ADR-175)
  */
 export function protectedPathsFor(workflow: WorkflowSpec | undefined): string[] {
-  return [...(workflow?.protectedPaths ?? []), ...(workflow?.evaluationAssets ?? [])];
+  return native.workflowProtectedPaths(workflow?.protectedPaths, workflow?.evaluationAssets);
 }
 
 /** studio.yaml의 선언을 실행기 정책으로 변환한다. 프롬프트와 별개로 항상 적용된다. */
@@ -84,7 +93,7 @@ export function scopedExecutionPolicy(project: LoadedProject, writablePaths: rea
  * 둘 다 없으면 undefined를 돌려줘 각 실행기가 자신의 기본값(60)을 그대로 쓰게 한다
  */
 export function maxTurnsFor(project: LoadedProject, override?: number): number | undefined {
-  return override ?? project.spec.workflow?.maxTurns;
+  return decodeNative<number | null>(native.workflowMaxTurns(encodeNative({ override, maxTurns: project.spec.workflow?.maxTurns }))) ?? undefined;
 }
 
 /**
@@ -93,25 +102,18 @@ export function maxTurnsFor(project: LoadedProject, override?: number): number |
  */
 export function workflowStages(project: LoadedProject): readonly WorkflowStage[] {
   const workflow = project.spec.workflow;
-  if (workflow?.required) return workflow.required;
-  const stages: WorkflowStage[] = [...DEFAULT_WORKFLOW];
-  const insertBefore = (stage: WorkflowStage, before: WorkflowStage) => stages.splice(stages.indexOf(before), 0, stage);
-  if (workflow?.pageChecks?.length) insertBefore('browser_check', 'contract_check');
-  if (workflow?.tests?.length) insertBefore('test', 'review');
-  if (workflow?.concurrencyChecks?.length) insertBefore('concurrency_check', 'review');
-  if (workflow?.loadChecks?.length) insertBefore('load_check', 'review');
-  return stages;
+  return native.workflowStages(workflow?.required, workflow?.pageChecks?.length ?? 0, workflow?.tests?.length ?? 0, workflow?.concurrencyChecks?.length ?? 0, workflow?.loadChecks?.length ?? 0) as WorkflowStage[];
 }
 
 export function workflowReleaseRequirements(project: LoadedProject): readonly WorkflowStage[] {
-  return project.spec.workflow?.releaseRequires ?? ['checkpoint'];
+  return native.workflowReleaseRequirements(project.spec.workflow?.releaseRequires) as WorkflowStage[];
 }
 
 /** 체크포인트 커밋 본문 끝에 남기는 트레일러. 스튜디오를 다시 켜도 어떤 검증을 통과한 체크포인트인지 Git에서 읽을 수 있다 */
 export const WORKFLOW_TRAILER = 'Workflow-Passed';
 
 export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string {
-  return `${WORKFLOW_TRAILER}: ${stages.length > 0 ? stages.join(', ') : 'none'}`;
+  return native.workflowFormatPassedTrailer([...stages]);
 }
 
 /**
@@ -125,7 +127,7 @@ export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
 export type VerifyTrailer = 'light' | 'docs' | 'unverified';
 
 export function formatVerifyTrailer(mode: VerifyTrailer): string {
-  return `${WORKFLOW_VERIFY_TRAILER}: ${mode}`;
+  return native.workflowFormatVerifyTrailer(mode);
 }
 
 /**
@@ -136,25 +138,17 @@ export function formatVerifyTrailer(mode: VerifyTrailer): string {
 export const WORKFLOW_INCOMPLETE_TRAILER = 'Workflow-Incomplete';
 
 export function formatIncompleteTrailer(reason: 'max_turns'): string {
-  return `${WORKFLOW_INCOMPLETE_TRAILER}: ${reason}`;
+  return native.workflowFormatIncompleteTrailer(reason);
 }
 
 /** git이 트레일러 블록에서 읽은 Workflow-Incomplete 값. 아는 사유('max_turns')가 아니면 undefined */
 export function parseIncompleteTrailerValues(values: readonly string[]): 'max_turns' | undefined {
-  const value = values
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean)
-    .at(-1);
-  return value === 'max_turns' ? value : undefined;
+  return (native.workflowParseIncompleteTrailer([...values]) ?? undefined) as 'max_turns' | undefined;
 }
 
 /** git이 트레일러 블록에서 읽은 Workflow-Verify 값. 'light'·'docs'·'unverified'가 아니면 undefined(전체 검증 실행) */
 export function parseVerifyTrailerValues(values: readonly string[]): VerifyTrailer | undefined {
-  const value = values
-    .map((entry) => entry.trim().toLowerCase())
-    .filter(Boolean)
-    .at(-1);
-  return value === 'light' || value === 'docs' || value === 'unverified' ? value : undefined;
+  return (native.workflowParseVerifyTrailer([...values]) ?? undefined) as VerifyTrailer | undefined;
 }
 
 /**
@@ -163,10 +157,8 @@ export function parseVerifyTrailerValues(values: readonly string[]): VerifyTrail
  * 문서만 건드렸는지 PR 본문에서 다시 확인할 때, ADR-110)가 같은 규칙을 공유한다 — 둘이 따로 베껴 두면 한쪽만
  * 고쳤을 때 "문서 체크포인트"의 뜻이 어긋난다.
  */
-const DOC_CHECKPOINT_PATH = /^(docs\/.+|[^/]+\.md|\.github\/pull_request_template\.md)$/;
-
 export function isDocCheckpointPath(file: string): boolean {
-  return DOC_CHECKPOINT_PATH.test(file);
+  return native.workflowIsDocCheckpointPath(file);
 }
 
 /**
@@ -175,11 +167,7 @@ export function isDocCheckpointPath(file: string): boolean {
  * 여러 개면 마지막 것을 쓴다
  */
 export function parseWorkflowTrailerValues(values: readonly string[]): WorkflowStage[] | undefined {
-  const value = values.map((entry) => entry.trim()).filter(Boolean).at(-1);
-  if (value === undefined) return undefined;
-  if (value === 'none') return [];
-  const known = new Set<string>([...VERIFICATION_STAGES, 'plan', 'implement', 'checkpoint']);
-  return value.split(/\s*,\s*/).filter((stage): stage is WorkflowStage => known.has(stage));
+  return (native.workflowParsePassedTrailer([...values]) ?? undefined) as WorkflowStage[] | undefined;
 }
 
 /**
@@ -189,14 +177,19 @@ export function parseWorkflowTrailerValues(values: readonly string[]): WorkflowS
  * 채우지 못한다(#772). 기본값 [checkpoint]가 "체크포인트면 무엇이든"이라 게이트 없는 커밋도 배포되던 자리다. 직접 적은 조건은 그대로 따른다
  */
 export function releaseBlockers(project: LoadedProject, passedStages: readonly WorkflowStage[] | undefined, verify?: VerifyTrailer): WorkflowStage[] {
-  const passed = new Set(passedStages ?? []);
-  if (verify === 'unverified' && project.spec.workflow?.releaseRequires === undefined) return ['checkpoint'];
-  return workflowReleaseRequirements(project).filter((stage) => stage !== 'checkpoint' && !passed.has(stage));
+  const declared = project.spec.workflow?.releaseRequires;
+  // 통과로 이어지는 같음 비교라 양쪽을 단사 인코딩해 보내고 위치로 돌려받는다. -1은 checkpoint(게이트를 거치지 않은 직접 수정 체크포인트)
+  const positions = native.workflowReleaseBlockers(declared?.map(encodeLoneSurrogates), declared !== undefined, passedStages?.map(encodeLoneSurrogates), verify);
+  // 위치로 원래 글자를 꺼낸다(Rust가 돌려준 글자는 짝 없는 서로게이트가 U+FFFD가 된다)
+  const requirements = declared ?? ['checkpoint'];
+  return positions.map((position) => (position < 0 ? 'checkpoint' : requirements[position]!));
 }
 
 /** 게이트가 통과시킨 단계와 필수 단계를 비교해 빠진 검증 단계를 돌려준다 */
 export function missingVerificationStages(project: LoadedProject, passed: ReadonlySet<WorkflowStage>): WorkflowStage[] {
-  return workflowStages(project).filter((stage) => VERIFICATION_STAGES.includes(stage) && !passed.has(stage));
+  // 위치로 원래 글자를 꺼낸다. required를 적었으면 그 글자를, 아니면 기본 단계에 선언한 확인을 끼운 목록을 쓴다
+  const stages = project.spec.workflow?.required ?? workflowStages(project);
+  return native.workflowMissingVerificationStages(stages.map(encodeLoneSurrogates), [...passed].map(encodeLoneSurrogates)).map((position) => stages[position]!);
 }
 
 /**
@@ -205,36 +198,19 @@ export function missingVerificationStages(project: LoadedProject, passed: Readon
  */
 export function reviewChanges(project: LoadedProject, changedFiles: readonly string[]): WorkflowCheck[] {
   const workflow = project.spec.workflow;
-  const checks: WorkflowCheck[] = [];
-  const touched = protectedPathsFor(workflow).flatMap((rule) =>
-    changedFiles.filter((file) => isProtectedPath(file, rule)).map((file) => `${file} (보호 경로 ${rule})`),
-  );
-  checks.push({
-    stage: 'review',
-    name: 'protected-paths',
-    ok: touched.length === 0,
-    attempts: 1,
-    detail: touched.length ? `보호 경로가 바뀌었습니다. 되돌리거나 사람 승인 흐름으로 요청하세요: ${touched.join(', ')}` : undefined,
-  });
-  if (workflow?.maxChangedFiles !== undefined) {
-    const over = changedFiles.length > workflow.maxChangedFiles;
-    checks.push({
-      stage: 'review',
-      name: 'change-size',
-      ok: !over,
-      attempts: 1,
-      detail: over ? `한 요청에서 파일 ${changedFiles.length}개를 바꿨습니다(상한 ${workflow.maxChangedFiles}). 필요 없는 변경을 되돌리세요` : undefined,
-    });
-  }
-  checks.push(...uncoveredChangeWarnings(project, changedFiles));
-  return checks;
+  const input = {
+    ...coverageInput(project, changedFiles),
+    files: changedFiles,
+    // 보호 경로는 거부 목록이라 원래 글자를 보낸다(파일은 napi·JSON 경계에서, 규칙도 같은 경계에서 U+FFFD 꼴이 된다)
+    protectedPaths: protectedPathsFor(workflow),
+    backslashSep: BACKSLASH_SEP,
+    maxChangedFiles: workflow?.maxChangedFiles,
+  };
+  return decodeNative<WorkflowCheck[]>(native.workflowReviewChanges(encodeNative(input)));
 }
 
 /** coverage-gap 체크 이름에 붙는 접두사. 체크포인트 본문이 이 접두사로 "확인 안 됨" 항목만 따로 묶어 보여준다(ADR-135) */
 export const COVERAGE_GAP_PREFIX = 'coverage-gap';
-
-/** 테스트 파일·테스트 러너 설정으로 보이는 경로. 버그 리포트 108의 lib/shortsFeed.test.ts·vitest.config.ts가 둘 다 걸린다 */
-const TEST_SIGNAL_PATTERN = /\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)(vitest|jest|playwright)\.config\.[cm]?[jt]s$|(^|\/)__tests__\//;
 
 /**
  * 이번 실행이 바꾼 파일을 보고, workflow.tests·workflow.pageChecks(또는 autoPageChecks)가 다루지 않는 서비스에
@@ -246,49 +222,30 @@ const TEST_SIGNAL_PATTERN = /\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)(vitest|jest|pla
  * "이번 실행에서 확인되지 않았다"는 사실만 드러낸다(선택 A, docs/decisions.md ADR-135).
  * 테스트 명령을 studio.yaml에 자동으로 추가하지 않는 이유: ADR-133이 이미 "studio.yaml은 사람 모르게 바뀌지
  * 않는다"는 원칙을 세웠다(explore-qa-save.ts와 같은 원칙) — 여기서도 그 원칙을 지킨다.
+ * 판정(서비스 소유, 테스트 파일 모양, 화면 경로 고르기)은 Rust가 한다
  */
 export function uncoveredChangeWarnings(project: LoadedProject, changedFiles: readonly string[]): WorkflowCheck[] {
-  if (!project.managed?.length) return [];
+  return decodeNative<WorkflowCheck[]>(native.workflowUncoveredChangeWarnings(encodeNative(coverageInput(project, changedFiles))));
+}
+
+/**
+ * 커버리지 틈 판정에 필요한 필드만 골라 단사 인코딩한 꼴로 만든다. 같음 비교(시험이 다루는 서비스, 자동 화면 확인을 맡은 서비스, 선언한 화면 경로)가 통과 쪽으로 읽히기 때문이다.
+ * 서비스·파일 경로를 견주는 규칙도 같은 꼴로 견주도록 경로 전부를 같은 방식으로 바꾼다
+ */
+function coverageInput(project: LoadedProject, changedFiles: readonly string[]) {
   const workflow = project.spec.workflow;
-  const testedServices = new Set((workflow?.tests ?? []).map((test) => test.service));
-  const autoPageService = workflow?.autoPageChecks?.service;
-
-  const { services: touched } = servicesForFiles(project, changedFiles);
-  const warnings: WorkflowCheck[] = [];
-  for (const name of touched) {
-    const entry = project.managed.find(([serviceName]) => serviceName === name);
-    if (!entry) continue;
-    const [, spec] = entry;
-
-    if (!testedServices.has(name) && changedFiles.some((file) => ownsFile(spec, file) && TEST_SIGNAL_PATTERN.test(file))) {
-      warnings.push({
-        stage: 'review',
-        name: `${COVERAGE_GAP_PREFIX}: ${name} 테스트`,
-        ok: true,
-        attempts: 1,
-        detail: `${name}에 테스트 파일·설정이 새로 생겼지만 workflow.tests에 '${name}' 서비스를 다루는 항목이 없어 게이트의 test 단계가 돌리지 않았습니다. 돌려야 한다면 studio.yaml의 workflow.tests에 추가하세요.`,
-      });
-    }
-
-    // autoPageChecks가 이 서비스를 맡으면 새로 생긴 라우트를 스스로 찾아 확인(또는 건너뛴 이유를 기록)하므로 따로 보지 않는다.
-    // 선언한 pageChecks는 서비스가 같아도 **경로가 정확히 같을 때만** 그 라우트를 확인한 것으로 본다 —
-    // 버그 리포트 108에서 web pageChecks가 '/'만 선언해도 '/shorts'는 확인되지 않은 채 트레일러에 통과로 찍혔다
-    if (spec.template === 'nextjs' && autoPageService !== name) {
-      const { routes } = routesFromChangedFiles(changedFiles, spec.path, {}, AUTO_PAGE_MAX);
-      const declaredPaths = new Set((workflow?.pageChecks ?? []).filter((check) => check.service === name).map((check) => check.path));
-      const uncoveredRoutes = routes.filter((route) => !declaredPaths.has(route.path));
-      if (uncoveredRoutes.length > 0) {
-        warnings.push({
-          stage: 'review',
-          name: `${COVERAGE_GAP_PREFIX}: ${name} 화면`,
-          ok: true,
-          attempts: 1,
-          detail: `${name}에 화면 경로가 바뀌었지만(${uncoveredRoutes.map((route) => route.path).join(', ')}) workflow.pageChecks·autoPageChecks가 이 경로를 확인하지 않아 게이트가 열어 보지 않았습니다. studio.yaml에 pageChecks를 추가하거나 autoPageChecks를 켜세요.`,
-        });
-      }
-    }
-  }
-  return warnings;
+  const enc = encodeLoneSurrogates;
+  return {
+    managed: (project.managed ?? []).map(([name, service]) => ({ name: enc(name), path: enc(service.path), includes: (service.includes ?? []).map(enc), template: service.template })),
+    root: enc(project.root ?? ''),
+    composePath: enc(project.composePath ?? ''),
+    cwd: enc(process.cwd()),
+    filesEnc: changedFiles.map(enc),
+    testedServices: (workflow?.tests ?? []).map((test) => enc(test.service)),
+    autoPageService: workflow?.autoPageChecks?.service === undefined ? undefined : enc(workflow.autoPageChecks.service),
+    pageChecks: (workflow?.pageChecks ?? []).map((check) => ({ service: enc(check.service), path: enc(check.path) })),
+    autoPageMax: AUTO_PAGE_MAX,
+  };
 }
 
 /**
@@ -297,20 +254,10 @@ export function uncoveredChangeWarnings(project: LoadedProject, changedFiles: re
  */
 export function formatCheckedCoverage(checks: readonly WorkflowCheck[] | undefined): string {
   if (!checks?.length) return '';
-  const gapPrefix = `${COVERAGE_GAP_PREFIX}:`;
-  const gaps = checks.filter((check) => check.name.startsWith(gapPrefix));
-  const covered = checks.filter((check) => check.stage === 'browser_check' || check.stage === 'test' || check.stage === 'concurrency_check' || check.stage === 'load_check');
-  const lines: string[] = [];
-  if (covered.length > 0) {
-    lines.push(`게이트가 확인함: ${covered.map((check) => `[${check.stage}] ${check.name}(${check.ok ? '통과' : '실패'})`).join(', ')}`);
-  }
-  if (gaps.length > 0) {
-    lines.push(`확인 안 됨:\n${gaps.map((check) => `- ${check.detail ?? check.name}`).join('\n')}`);
-  }
-  // 사용자가 허용해 확인 선언이 바뀐 체크포인트는 그 사실을 본문에 남긴다(ADR-164). 무엇으로 검증했는지가 달라졌기 때문이다
-  const declared = checks.find((check) => check.stage === 'review' && check.name === DECLARED_CHECKS_CHECK && check.ok && check.detail);
-  if (declared) lines.push(`확인 선언 변경: ${declared.detail}`);
-  return lines.join('\n');
+  return native.workflowFormatCheckedCoverage(
+    encodeNative(checks.map((check) => ({ stage: check.stage, name: check.name, ok: check.ok, detail: check.detail }))),
+    DECLARED_CHECKS_CHECK,
+  );
 }
 
 /** Pi 확장(packages/agent/pi/bstudio-policy.ts)이 읽는 환경 변수. 같은 studio.yaml에서 만들어 규칙이 두 곳에서 어긋나지 않게 한다 */
