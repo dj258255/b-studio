@@ -14,3 +14,5 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 # 경로 이름 접기(foldName)의 NFKD·NFKC. Node의 normalize와 Unicode 판이 달라 전체 코드 포인트로 견줬다(#1090)
 unicode-normalization = "0.1.26"
+# 디자인 비교(3ae)의 PNG 읽기·쓰기. pngjs 7.0.0과 같은 RGBA8을 내려고 IDENTITY 변환으로 원본 표본만 받고 팔레트·tRNS·깊이 확대는 직접 한다. 버전은 고정한다
+png = { version = "=0.18.1", default-features = false }

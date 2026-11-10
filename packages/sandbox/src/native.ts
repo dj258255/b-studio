@@ -654,6 +654,19 @@ interface NativeGuard {
   reqReplyIsJsonPath(path: string): boolean;
   reqReplyTooBigBytes(message: string): number | null | undefined;
   reqReplyAddUsage(a: number[], b: number[]): number[];
+  // ── agent: 디자인 비교(3단계 3ae). 게이트는 비율이 허용치를 넘으면 실패시키므로 비율이 작아지는 쪽이 여는 쪽이고, 끝까지 가지 못한 입력(읽지 못한 PNG·너비 불일치·너무 큼·픽셀 0·범위 밖 threshold)은 모두 errorKind로 돌려준다.
+  // masks는 [x, y, width, height, ...]를 이어 붙인 숫자(소수·음수·NaN 그대로: 옛 JS 반복문과 같게 칠한다). errorKind는 'compare'(옛 VisualCompareError)·'decode'(PNG를 읽지 못함)
+  visualCompare(actual: Buffer, reference: Buffer, masks: number[], threshold: number): NativeVisualCompare;
+}
+
+export interface NativeVisualCompare {
+  errorKind?: 'compare' | 'decode' | null;
+  message?: string | null;
+  diffPixels: number;
+  comparedPixels: number;
+  width: number;
+  height: number;
+  diff?: Buffer | null;
 }
 
 export interface NativeHostPty {
