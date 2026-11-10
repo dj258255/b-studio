@@ -11,10 +11,14 @@
  * 오히려 줄었다는 것을 쟀다. 계획 텍스트를 남기지 못해 확신하지는 못했지만, 도구 호출 수로 미루어 계획이 요청보다
  * 큰 설계(파일 분리, 요청에 없는 확인 단계)를 적었다는 추론이었다. 아래 프롬프트는 그 추론을 근거로 계획을
  * "요청이 요구하는 최소 변경"으로 좁힌다 — 새 파일·계층·테스트·리팩터·확인 단계를 금지하고, 계획 길이를 요청 크기에 맞춘다.
+ *
+ * 계획을 할지 판정하는 것(shouldPlanBrief·planWordLimit)과 프롬프트·붙이기 글자(buildPlanBriefSystem·appendPlanToRequest)는
+ * Rust(crates/bstudio-guard/src/plan_brief.rs, ADR-191 3단계 3m)가 만들고, 이 파일은 같은 이름·시그니처의 껍데기다.
+ * 상수(단어·글자 상한)는 여기서 정해 Rust로 넘긴다. 모델 호출(requestPlanBrief)은 여기 남는다.
  */
+import { encodeNative, native } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { AgentUsage } from './loop';
-import { classifyComplexity, estimateTokens } from './model-router';
 import type { ModelAsk } from './task-plan';
 
 /** 짧은 요청(문장 2개 이하)의 계획 글 길이 상한(단어 수) */
@@ -49,9 +53,7 @@ export class PlanBriefError extends Error {
  * ask 의도(질문, 파일을 바꾸지 않음)는 호출하는 쪽(sessions.ts)이 먼저 걸러낸다.
  */
 export function shouldPlanBrief(request: string): boolean {
-  const prompt = request.trim();
-  if (!prompt) return false;
-  return classifyComplexity(prompt, estimateTokens(prompt)) !== 'simple';
+  return native.shouldPlanBrief(request);
 }
 
 /**
@@ -59,30 +61,14 @@ export function shouldPlanBrief(request: string): boolean {
  * (E8의 세 과제가 모두 한두 문장이었다). 그 밖에는 긴 요청 상한을 쓴다.
  */
 export function planWordLimit(request: string): number {
-  const segments = request
-    .trim()
-    .split(/(?<=[.!?])\s+|\n+/)
-    .map((segment) => segment.trim())
-    .filter(Boolean);
-  return segments.length <= 2 ? PLAN_BRIEF_MAX_WORDS_SHORT : PLAN_BRIEF_MAX_WORDS_LONG;
+  return native.planWordLimit(request, PLAN_BRIEF_MAX_WORDS_SHORT, PLAN_BRIEF_MAX_WORDS_LONG);
 }
 
 /** 계획 모델에게 줄 시스템 프롬프트. 프로젝트의 managed 서비스만 짧게 요약해 준다(전체 파일 트리를 싣지 않는다) */
 export function buildPlanBriefSystem(project: LoadedProject, request: string): string {
-  const services = project.managed.map(([name, service]) => `- ${name}: ${service.template}, 폴더 ${service.path}`).join('\n');
-  const wordLimit = planWordLimit(request);
-  const lineLimit = wordLimit === PLAN_BRIEF_MAX_WORDS_SHORT ? 10 : 25;
-  return `You are a senior engineer writing a short reference plan for project "${project.spec.name}" that a smaller, cheaper coding agent will execute right after you.
-Services:
-${services}
-
-Plan the MINIMAL change that satisfies the request — nothing more. Do not add files, layers (service/DTO/repository splits), tests, refactors, or verification/self-check steps the request doesn't explicitly ask for. Prefer editing existing files over creating new ones. Do not restate the request — go straight to the plan.
-
-Write the plan in Korean, as plain text (no JSON, no code fences), at most about ${wordLimit} words (roughly ${lineLimit} lines). It is a list of decisions and pitfalls for the executor, not a step-by-step script. Cover only what applies:
-1. 바꿀 파일(기존 파일 우선) — 새 파일은 요청이 명시적으로 요구할 때만
-2. API·인터페이스 계약, 정확한 경로·이름, 환경 변수 같은 결정 사항(없으면 생략)
-3. 놓치기 쉬운 함정
-Do not write any code. Do not add a verification or testing step — the platform's gate checks the result after the turn ends (lean self-check, ADR-064), so the executor should not repeat that work. The executor will see this plan appended to the original request as reference notes, not as a message back to the user, and must not treat it as a bigger scope than the request.`;
+  // 읽는 필드만 넘긴다(전체 LoadedProject를 보내지 않는다)
+  const summary = { name: project.spec.name, managed: project.managed.map(([name, service]) => [name, { template: service.template, path: service.path }]) };
+  return native.buildPlanBriefSystem(encodeNative(summary), request, PLAN_BRIEF_MAX_WORDS_SHORT, PLAN_BRIEF_MAX_WORDS_LONG);
 }
 
 /**
@@ -111,10 +97,5 @@ export async function requestPlanBrief(ask: ModelAsk, project: LoadedProject, re
  * 계획 모델이 길이 상한(프롬프트 지시)을 어겨도 실행기 문맥이 그대로 부풀지 않도록 PLAN_BRIEF_MAX_CHARS로 한 번 더 자른다.
  */
 export function appendPlanToRequest(request: string, plan: string): string {
-  const trimmed = plan.trim();
-  const body =
-    trimmed.length > PLAN_BRIEF_MAX_CHARS
-      ? `${trimmed.slice(0, PLAN_BRIEF_MAX_CHARS)}\n…(계획이 상한 ${PLAN_BRIEF_MAX_CHARS.toLocaleString('ko-KR')}자를 넘어 여기서 잘랐습니다)`
-      : trimmed;
-  return `${request}\n\n---\n[참고 계획(요청 범위를 넘는 일은 하지 않는다) — 다른(더 큰) 모델이 이 요청을 먼저 훑어봤습니다. 실행 중 알게 된 사실이 실제 코드와 다르면 실제 코드를 따르고, 완료 확인은 게이트가 합니다]\n${body}\n[계획 끝]\n---`;
+  return native.appendPlanToRequest(request, plan, PLAN_BRIEF_MAX_CHARS);
 }

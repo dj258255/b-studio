@@ -2415,6 +2415,124 @@ pub fn docs_regenerate_docs_readme(existing: Option<String>, docs_json: String) 
     fail(docs::regenerate_docs_readme(existing.as_deref(), &docs_json))
 }
 
+// ── 계획 요약·레인 계약(ADR-191 3m). project·lanes는 읽는 필드만 담은 JSON 문자열. TS 껍데기: packages/agent/src/{plan-brief,lane-contracts}.ts
+use bstudio_guard::plan_brief;
+
+#[napi]
+pub fn should_plan_brief(request: String) -> bool {
+    plan_brief::should_plan_brief(&request)
+}
+
+#[napi]
+pub fn plan_word_limit(request: String, short: f64, long: f64) -> f64 {
+    plan_brief::plan_word_limit(&request, short, long)
+}
+
+/// project: `{ name, managed: [[이름, { template, path }]] }`
+#[napi]
+pub fn build_plan_brief_system(project_json: String, request: String, short: f64, long: f64) -> Result<String> {
+    fail(plan_brief::build_plan_brief_system(&input(&project_json, "프로젝트 요약")?, &request, short, long))
+}
+
+#[napi]
+pub fn append_plan_to_request(request: String, plan: String, max_chars: f64) -> String {
+    plan_brief::append_plan_to_request(&request, &plan, max_chars)
+}
+
+#[napi]
+pub fn build_contract_system(project_json: String, max_contracts: f64) -> Result<String> {
+    fail(plan_brief::build_contract_system(&input(&project_json, "프로젝트 요약")?, max_contracts))
+}
+
+/// lanes: `[{ id, paths, tasks: [{ id, title, request }] }]`
+#[napi]
+pub fn build_contract_user(request: String, lanes_json: String) -> Result<String> {
+    fail(plan_brief::build_contract_user(&request, &input(&lanes_json, "레인 목록")?))
+}
+
+// ── agent: 설계 파이프라인(3단계 3o)
+use bstudio_guard::design_pipeline;
+
+#[napi]
+pub fn design_pipeline_next_doc_number(existing: Vec<String>) -> f64 {
+    design_pipeline::next_design_pipeline_doc_number(&existing)
+}
+
+#[napi]
+pub fn design_pipeline_doc_path(number: f64, title: String) -> String {
+    design_pipeline::design_pipeline_doc_path(number, &title)
+}
+
+#[napi]
+pub fn design_pipeline_sidecar_path(doc_path: String) -> String {
+    design_pipeline::design_pipeline_sidecar_path(&doc_path)
+}
+
+#[napi]
+pub fn design_pipeline_is_doc_path(file: String) -> bool {
+    design_pipeline::is_design_pipeline_doc_path(&file)
+}
+
+/// 묶음 목록 JSON(`encodeNative` 꼴: 유한하지 않은 수는 표시 객체)
+#[napi]
+pub fn design_pipeline_parse_bundles_table(markdown: String) -> String {
+    design_pipeline::parse_design_bundles_table(&markdown)
+}
+
+#[napi]
+pub fn design_pipeline_build_request_prompt(title: String, requirement_ids: Vec<String>, detail: Option<String>) -> String {
+    design_pipeline::build_design_pipeline_request_prompt(&title, &requirement_ids, detail.as_deref())
+}
+
+#[napi]
+pub fn design_pipeline_build_doc_template(number: f64, title: String, requirement_ids: Vec<String>) -> String {
+    design_pipeline::build_design_pipeline_doc_template(number, &title, &requirement_ids)
+}
+
+/// 막는 기록들의 순번 목록. 모양이 어긋난 기록은 던진다(껍데기는 던지면 구현을 시작하지 않는다)
+#[napi]
+pub fn design_pipeline_check_approval(requirement_ids: Vec<String>, docs_json: String) -> Result<Vec<u32>> {
+    let indexes = fail(design_pipeline::check_design_approval(&requirement_ids, &docs_json))?;
+    Ok(indexes.into_iter().map(|i| i as u32).collect())
+}
+
+#[napi]
+pub fn design_pipeline_review_independence(implementer: String, reviewer: String) -> String {
+    design_pipeline::review_independence(&implementer, &reviewer).to_owned()
+}
+
+/// `{designApproved, completed, succeeded, reasons}` JSON
+#[napi]
+#[allow(clippy::too_many_arguments)]
+pub fn design_pipeline_derive_result(
+    design_status: String,
+    checkpoint_exists: bool,
+    has_review: bool,
+    review_ran: bool,
+    review_passed: bool,
+    independence: String,
+    has_verification: bool,
+    verification_ran: bool,
+    verification_ok: bool,
+    tests_rerun: bool,
+) -> String {
+    let review = design_pipeline::ReviewInput { ran: review_ran, passed: review_passed, independence: &independence };
+    let verification = design_pipeline::VerificationInput { ran: verification_ran, ok: verification_ok, tests_rerun };
+    let result = design_pipeline::derive_design_pipeline_result(
+        &design_status,
+        checkpoint_exists,
+        has_review.then_some(&review),
+        has_verification.then_some(&verification),
+    );
+    let value = js_json::object(vec![
+        ("designApproved", Some(JsValue::Bool(result.design_approved))),
+        ("completed", Some(JsValue::Bool(result.completed))),
+        ("succeeded", Some(JsValue::Bool(result.succeeded))),
+        ("reasons", Some(JsValue::Arr(result.reasons.iter().map(JsValue::str).collect()))),
+    ]);
+    js_json::to_native(&value)
+}
+
 // ── 저장소 연동(3단계 3n). 짝 없는 서로게이트는 U+FFFD로 읽는다. TS 껍데기: packages/agent/src/repository.ts
 use bstudio_guard::repository as repo;
 
