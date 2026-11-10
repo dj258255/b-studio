@@ -2,7 +2,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { SandboxError } from '../errors';
 import type { EvaluationAssetCopy } from './evaluation-assets';
 import type { BindMount } from './relay';
-import { native } from '../native';
+import { native, type NativeGitEntry } from '../native';
 import { runCommand } from '../stream-exec';
 
 /**
@@ -24,6 +24,11 @@ export interface GitEntry {
   kind: 'directory' | 'file';
   /** `.git/b-studio`(b-studio의 상태 폴더)가 있는지 */
   hasState: boolean;
+  /**
+   * `.git`이 파일일 때 호스트가 같은 파일로 읽는 대소문자 변형 이름(`.GIT` 등, #1028). 대소문자를 구분하지 않는 볼륨을 마운트하면
+   * 컨테이너는 이 이름들로 같은 호스트 파일에 닿으므로 같은 가림을 얹는다. 대소문자를 구분하는 파일 시스템에서는 비어 있다
+   */
+  aliases?: readonly string[];
 }
 
 /** compose의 긴 문법 마운트 한 개(읽기 전용 bind). override의 services.<이름>.volumes에 그대로 적는다 */
@@ -104,7 +109,7 @@ function assertNoNestedAssetMounts(
  * 프로젝트 폴더에서 위로 올라가며 `.git`이 든 폴더를 찾는다. 프로젝트 폴더의 상위를 마운트한 서비스가 있으면(모노레포 저장소 루트를
  * 마운트) 가장 위의 그 마운트 소스까지, 없으면 프로젝트 폴더 자신만 본다. 경로는 심볼릭 링크를 풀어 비교한다(macOS의 /tmp → /private/tmp)
  */
-export async function detectGitEntries(projectRoot: string, mountSources: readonly string[]): Promise<GitEntry[]> {
+export async function detectGitEntries(projectRoot: string, mountSources: readonly string[]): Promise<NativeGitEntry[]> {
   // 링크 풀기·lstat·위로 올라가기는 Rust(bstudio-io::git_mask_fs)가 한다(2c-6)
   return native.detectGitEntries(projectRoot, [...mountSources], process.cwd());
 }

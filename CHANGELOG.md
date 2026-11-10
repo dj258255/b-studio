@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 대소문자를 구분하지 않는 볼륨(macOS 기본)에서 프로젝트의 `.git`이 파일(worktree·submodule)이면, 컨테이너가 `.GIT` 같은 이름으로 그 파일을 바꿀 수 있던 곳을 막았습니다. 호스트가 같은 파일로 읽는 대소문자 변형 이름마다 같은 읽기 전용 가림을 얹습니다(트러블슈팅 182, #1028).
 - 디자인 비교(`workflow.pageChecks[].compare`)의 기준 이미지를 따로 적지 않아도 평가 자산으로 다룹니다. 파일 도구가 막고, 컨테이너에는 읽기 전용으로 붙고, 게이트는 실행 중에 바뀌면 실패시킵니다. 전에는 `protectedPaths`·`evaluationAssets`에 적지 않으면 에이전트가 기준 이미지를 바꿔 비교를 통과시킬 수 있었습니다(트러블슈팅 181, #1138).
 - 요구사항·추천 모델 답을 읽는 판정(`parsePlannerReply`의 JSON 꺼내기, `repairExtractionReply`, `enforceSpecQuoteEvidence`, 미리보기 고르기, 참조 파일 상한 문구, 사용량 합)을 Rust(`crates/bstudio-guard/src/requirements_replies.rs`)로 옮겼습니다(ADR-191 3단계 3ad, #1135). zod 검증과 `jsonrepair`는 TS에 남고 Rust가 꺼낸 글자를 그대로 검증합니다. 추천 인용 확인이 낱말을 가운데서 자른 인용(`e`·`연 1`)도 "명세에 있음"으로 읽던 곳을 닫았습니다(트러블슈팅 179). 옛 TS와 같은 결과를 내는지 무작위 입력 수십만 건으로 확인했습니다(다른 결과 0, 근거 없음 → 있음 뒤집힘 0).
 - 디자인 비교의 판정(`packages/agent/src/visual-compare.ts`: PNG 읽기, 너비 확인, 겹치는 높이 자르기, 가림 칠하기, pixelmatch 알고리즘, 비율)을 Rust(`crates/bstudio-guard/src/visual_compare.rs`, `png` 크레이트 0.18.1)로 옮기고 `pngjs`·`pixelmatch`는 제품 의존성에서 뺐습니다(ADR-191 3단계 3ae, #1131). 옛 코드가 비교를 끝까지 하지 않고 통과를 내던 곳을 던지게 닫았습니다: 너비 0 이미지, NaN·범위 밖 threshold, IDAT가 없거나 잘리거나 adler32가 틀린 PNG, IHDR가 5천만 픽셀을 넘는 이미지(트러블슈팅 180). 규격에 없는 PNG 꼴과 압축 스트림 뒤의 쓰레기 바이트는 pngjs가 받았지만 이제 거절합니다.
