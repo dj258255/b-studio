@@ -395,6 +395,21 @@ interface NativeGuard {
   appendPlanToRequest(request: string, plan: string, maxChars: number): string;
   buildContractSystem(projectJson: string, maxContracts: number): string;
   buildContractUser(request: string, lanesJson: string): string;
+  // ── agent: 탐색 QA의 판정·변환·프롬프트(3단계 3p). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다.
+  // judge 입력: { confirmText?, consoleErrors, pageErrors, failedRequests, accessibilityViolations(건수), horizontalOverflowPx, review?: { findings: [{ severity, summary }], declared?, stoppedBy, expectedRejections?, unmetRejections? } }.
+  // toPageCheckSteps 입력: [{ index, tool, ok, stableSelector?, text?, key?, forText? }], 결과는 decodeNative로 읽는다
+  exploreQaDiagnosticsCount(consoleErrors: number, pageErrors: number, failedRequests: number, accessibilityViolations: number, horizontalOverflowPx: number): number;
+  exploreQaMatchScore(name: string, text: string, role: string, testId: string | undefined, tag: string, needle: string): number;
+  exploreQaDescribeScrollPosition(y: number, max: number, atBottom: boolean, atTop: boolean): string;
+  exploreQaFormatElement(elementJson: string): string;
+  exploreQaFormatSnapshot(resultJson: string, maxElements: number): string;
+  exploreQaNormalizeRef(value: string): string | null | undefined;
+  exploreQaIsInspectionGoal(goalText: string): boolean;
+  exploreQaBuildSystemPrompt(goalText: string | undefined): string;
+  exploreQaBuildUserPrompt(goalJson: string): string;
+  exploreQaBuildWrapUpPrompt(reason: string): string;
+  exploreQaJudge(inputJson: string, pageText: string): string;
+  exploreQaToPageCheckSteps(actionsJson: string): string;
 }
 
 export interface NativeHostPty {
