@@ -468,6 +468,48 @@ interface NativeGuard {
     defaultDenied: string[],
     backslashSep: boolean,
   ): string;
+  // ── agent: checkpoint git 출력 판정(3단계 3s). git 출력은 문자열 그대로 보낸다. 기대 쪽 경로·값과 비교할 이메일은 encodeLoneSurrogates한 글자를 보내고
+  // (짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 경로가 같아지는 것을 막는다), 결과의 경로는 같은 인코딩이라 TS가 되돌린다. 형식을 읽지 못한 설정은 null
+  checkpointSplitNul(output: string): string[];
+  checkpointDangerousLocalConfig(output: string, separateGitDir: boolean): string[] | null | undefined;
+  checkpointInfoAttributes(text: string): string[];
+  checkpointStagedMismatch(lsFiles: string, stagedNames: string, subdir: string, expectedKeys: string[], expectedValues: string[]): string[];
+  checkpointPendingFiles(output: string, subdir: string): string[];
+  checkpointPendingChanges(output: string, subdir: string): string[][];
+  checkpointCommitStat(output: string): number[];
+  checkpointRemoteCommits(output: string): string[][];
+  checkpointAuthorIsOurs(gitEmail: string, ourEmail: string): boolean;
+  checkpointSessionRecords(output: string, ourEmail: string): string;
+  checkpointShowRecord(output: string, ourEmail: string): string;
+  checkpointCommitMessage(subject: string, body: string | null | undefined, trailers: string[]): string;
+  checkpointStripSpace(text: string): string;
+  checkpointOneLine(message: string): string;
+  checkpointCapText(text: string, max: number): string;
+  checkpointSubcommand(args: string[]): string | null | undefined;
+  checkpointRedactCredentials(text: string): string;
+  checkpointIsIndexLockFailure(stderr: string): boolean;
+  checkpointWithObjectParticle(word: string): string;
+  checkpointIsDotGit(name: string): boolean;
+  checkpointIsSha(text: string): boolean;
+  checkpointIsBackupId(text: string): boolean;
+  checkpointPullRequestTarget(listed: string, baseRef: string, infoBase: string): string;
+  checkpointGitEnvKeep(keys: string[]): boolean[];
+  // ── agent: 연결·인증·조율 판정(3단계 3t). 호스트·토큰·출처·허용 목록은 견주는 두 글자 모두 encodeLoneSurrogates해서 보낸다(짝 없는 서로게이트가 경계에서 U+FFFD가 되어 서로 다른 값이 같아지면 인증·허용이 열린다).
+  // 구조가 있는 입력은 encodeNative한 JSON 문자열. connAuthorize는 통과하면 null, 막으면 `{status,message}` JSON
+  connAuthorize(host: string | undefined | null, authorization: string | undefined | null, token: string, allowedHosts: string[]): string | null | undefined;
+  connHostAllowed(host: string | undefined | null, allowedHosts: string[]): boolean;
+  connHostnameOf(host: string | undefined | null): string;
+  connTokenMatches(authorization: string | undefined | null, token: string): boolean;
+  connIsAllowedRequest(protocol: string, origin: string, allowedOrigins: string[]): boolean;
+  connIsAutomaticFaviconPath(pathname: string): boolean;
+  connDescribeStep(click: string | undefined | null, fillSelector: string | undefined | null, press: string | undefined | null, waitFor: string | undefined | null): string;
+  connRejectedChangeFeedback(rejected: string[]): string;
+  coordBoardValidate(modelWrites: boolean, by: string, kind: string, body: string, refsLen: number, noteBytesLimit: number): string | null | undefined;
+  // 입력 [{ priority, at, id, bytes }](읽을 수 있는 메모, 들어온 순서), 결과 { selected: [위치(정렬 순서)], truncated, bytes }
+  coordBoardPickNotes(notesJson: string, readLimit: number, budget: number): string;
+  coordMcpPostInputError(argsJson: string): string | null | undefined;
+  coordMcpReadInputError(argsJson: string): string | null | undefined;
+  coordFormatNote(kind: string, priority: number, lane: string, body: string, refs: string[]): string;
   // ── agent: 검증 통과 판정·도구 입력 검사(3단계 3u). 막는 검사이고 서비스 허용 목록·origin은 여는 쪽이라 비교하는 두 글자를 encodeLoneSurrogates로 바꿔 보낸다.
   // verifyFormatReport는 던지지 않는다(읽을 수 없는 보고서는 "검증 실패" 글). toolInputError는 맞으면 null, 아니면 던질 글이고 valueJson은 encodeNative한 값(없으면 undefined)
   verifyOk(restartedReady: boolean[], contractErrored: boolean[], changeBreaking: boolean[], allowBreaking: boolean, secretLeaks: number, specError: boolean): boolean;

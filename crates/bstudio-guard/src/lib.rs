@@ -4,10 +4,12 @@
 //! 거부 목록에서 더 넓게 막는 쪽으로만 다르다.
 
 pub mod check_evidence;
+pub mod checkpoint_git;
 pub mod cli_failure;
 pub mod cli_router;
 pub mod commit_message;
 pub mod compose_override;
+pub mod connection_judge;
 pub mod container_policy;
 pub mod context_clearing;
 pub mod contract_diff;

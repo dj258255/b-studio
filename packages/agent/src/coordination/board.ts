@@ -5,6 +5,7 @@
  * 실패 메모는 검증기만, 계약은 산출물 참조 필수, 받는 쪽은 필요할 때 읽는다(pull).
  * 저장은 하지 않는다. 상태가 바뀌면 onChange(snapshot)으로 호출자에게 넘겨 호출자가 남긴다.
  */
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 import { DEFAULT_BOARD_LIMITS, NOTE_PRIORITY, noteBytes, type BoardLimits, type Note, type NoteKind } from './notes';
 import { canRead, type Reader, type Topology } from './topology';
 
@@ -125,26 +126,18 @@ export class Board {
     const visible = this.notes
       .filter((note) => canRead(this.topology, reader, note, this.hub))
       .filter((note) => !options.kinds || options.kinds.includes(note.kind))
-      .filter((note) => options.since === undefined || note.at > options.since)
-      .sort(compareNotes);
+      .filter((note) => options.since === undefined || note.at > options.since);
 
-    const budget = this.limits.readBytesPerLane - used;
-    const selected: Note[] = [];
-    let bytes = 0;
-    let truncated = visible.length > this.limits.readLimit;
-    for (const note of visible) {
-      if (selected.length >= this.limits.readLimit) {
-        truncated = true;
-        break;
-      }
-      const size = noteBytes(note.body);
-      if (bytes + size > budget) {
-        truncated = true;
-        break;
-      }
-      selected.push(note);
-      bytes += size;
-    }
+    // 정렬(우선순위 → 최신순 → id)·개수 상한·바이트 예산은 Rust가 정한다(crates/bstudio-guard/src/coordination.rs)
+    const picked = decodeNative<{ selected: number[]; truncated: boolean; bytes: number }>(
+      native.coordBoardPickNotes(
+        encodeNative(visible.map((note) => ({ priority: note.priority, at: note.at, id: note.id, bytes: noteBytes(note.body) }))),
+        this.limits.readLimit,
+        this.limits.readBytesPerLane - used,
+      ),
+    );
+    const selected = picked.selected.map((index) => visible[index]!);
+    const { truncated, bytes } = picked;
     this.readsByLane.set(reader.lane, used + bytes);
     this.counters.bytesRead += bytes;
     return truncated ? { notes: selected, truncated: true, reason: '읽기 예산 또는 개수 상한으로 일부만 돌려줬습니다' } : { notes: selected, truncated: false };
@@ -167,19 +160,16 @@ export class Board {
     return { ...this.counters, byKind: { ...this.counters.byKind } };
   }
 
+  /** 받지 않을 이유(막는 쪽). 판정은 Rust. 종류·작성 주체가 문자열이 아니면 "실패·모델이 아님"으로 읽는다(옛 비교와 같다) */
   private validate(input: PostInput, as: Author): string | undefined {
-    if (!this.modelWrites && as.by === 'model') return '이 전략에서는 게시판에 쓸 수 없습니다';
-    if (input.kind === 'failure' && as.by === 'model') return '실패 메모는 검증기만 씁니다';
-    if (input.body.trim().length === 0) return '빈 메모는 쓸 수 없습니다';
-    if (noteBytes(input.body) > this.limits.noteBytes) return `메모가 너무 큽니다(최대 ${this.limits.noteBytes}바이트)`;
-    if (input.kind === 'contract' && (input.refs ?? []).length === 0) return '계약 메모는 refs가 하나 이상 필요합니다';
-    return undefined;
+    const reason = native.coordBoardValidate(
+      this.modelWrites,
+      as.by === 'model' ? 'model' : 'platform',
+      typeof input.kind === 'string' ? input.kind : '',
+      input.body,
+      (input.refs ?? []).length,
+      Number(this.limits.noteBytes),
+    );
+    return reason ?? undefined;
   }
-}
-
-/** 우선순위 내림차순 → 최신순. 같은 시각이면 id로 안정 정렬한다 */
-function compareNotes(a: Note, b: Note): number {
-  if (a.priority !== b.priority) return b.priority - a.priority;
-  if (a.at !== b.at) return a.at < b.at ? 1 : -1;
-  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 }

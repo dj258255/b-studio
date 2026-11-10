@@ -2747,6 +2747,228 @@ pub fn check_tool_policy(
     })
 }
 
+// ── 체크포인트의 git 출력 판정(ADR-191 3단계 3s). 형 변환만 한다. 문자열 목록·JSON 문자열로 주고받는다.
+// TS 껍데기: packages/agent/src/checkpoints.ts
+
+use bstudio_guard::checkpoint_git as cg;
+
+#[napi]
+pub fn checkpoint_split_nul(output: String) -> Vec<String> {
+    cg::split_nul(&output)
+}
+
+/// 형식을 읽지 못하면 null(부르는 쪽이 던진다)
+#[napi]
+pub fn checkpoint_dangerous_local_config(output: String, separate_git_dir: bool) -> Option<Vec<String>> {
+    cg::dangerous_local_config(&output, separate_git_dir)
+}
+
+#[napi]
+pub fn checkpoint_info_attributes(text: String) -> Vec<String> {
+    cg::info_attributes(&text)
+}
+
+/// 기대 쪽 글자(`expectedKeys`·`expectedValues`)는 TS가 `encodeLoneSurrogates`한 것. 결과의 경로도 그 인코딩이다
+#[napi]
+pub fn checkpoint_staged_mismatch(ls_files: String, staged_names: String, subdir: String, expected_keys: Vec<String>, expected_values: Vec<String>) -> Vec<String> {
+    cg::staged_mismatch(&ls_files, &staged_names, &subdir, &expected_keys, &expected_values)
+}
+
+#[napi]
+pub fn checkpoint_pending_files(output: String, subdir: String) -> Vec<String> {
+    cg::pending_files(&output, &subdir)
+}
+
+/// [경로, 종류] 쌍
+#[napi]
+pub fn checkpoint_pending_changes(output: String, subdir: String) -> Vec<Vec<String>> {
+    cg::pending_changes(&output, &subdir).into_iter().map(|(file, change)| vec![file, change.to_owned()]).collect()
+}
+
+/// [추가, 삭제]
+#[napi]
+pub fn checkpoint_commit_stat(output: String) -> Vec<f64> {
+    let (insertions, deletions) = cg::commit_stat(&output);
+    vec![insertions, deletions]
+}
+
+/// [sha, shortSha, subject, author] 목록
+#[napi]
+pub fn checkpoint_remote_commits(output: String) -> Vec<Vec<String>> {
+    cg::remote_commits(&output).into_iter().map(Vec::from).collect()
+}
+
+/// `ourEmail`은 TS가 `encodeLoneSurrogates`한 글자
+#[napi]
+pub fn checkpoint_author_is_ours(git_email: String, our_email: String) -> bool {
+    cg::author_is_ours(&git_email, &our_email)
+}
+
+/// `[{sha, shortSha, subject, body, ours, trailers, verifyTrailers, incompleteTrailers}]` JSON
+#[napi]
+pub fn checkpoint_session_records(output: String, our_email: String) -> String {
+    out(&cg::session_records(&output, &our_email))
+}
+
+/// `{sha, shortSha, subject, createdAt, ours, trailers, verifyTrailers, incompleteTrailers}` JSON
+#[napi]
+pub fn checkpoint_show_record(output: String, our_email: String) -> String {
+    out(&cg::show_record(&output, &our_email))
+}
+
+#[napi]
+pub fn checkpoint_commit_message(subject: String, body: Option<String>, trailers: Vec<String>) -> String {
+    cg::commit_message(&subject, body.as_deref(), &trailers)
+}
+
+#[napi]
+pub fn checkpoint_strip_space(text: String) -> String {
+    cg::strip_space(&text)
+}
+
+#[napi]
+pub fn checkpoint_one_line(message: String) -> String {
+    cg::one_line(&message)
+}
+
+#[napi]
+pub fn checkpoint_cap_text(text: String, max: u32) -> String {
+    cg::cap_text(&text, max as usize)
+}
+
+#[napi]
+pub fn checkpoint_subcommand(args: Vec<String>) -> Option<String> {
+    cg::subcommand(&args)
+}
+
+#[napi]
+pub fn checkpoint_redact_credentials(text: String) -> String {
+    cg::redact_credentials(&text)
+}
+
+#[napi]
+pub fn checkpoint_is_index_lock_failure(stderr: String) -> bool {
+    cg::is_index_lock_failure(&stderr)
+}
+
+#[napi]
+pub fn checkpoint_with_object_particle(word: String) -> String {
+    cg::with_object_particle(&word)
+}
+
+#[napi]
+pub fn checkpoint_is_dot_git(name: String) -> bool {
+    cg::is_dot_git(&name)
+}
+
+#[napi]
+pub fn checkpoint_is_sha(text: String) -> bool {
+    cg::is_sha(&text)
+}
+
+#[napi]
+pub fn checkpoint_is_backup_id(text: String) -> bool {
+    cg::is_backup_id(&text)
+}
+
+/// `{base, missingBase?}` JSON
+#[napi]
+pub fn checkpoint_pull_request_target(listed: String, base_ref: String, info_base: String) -> String {
+    out(&cg::pull_request_target(&listed, &base_ref, &info_base))
+}
+
+/// 환경 변수 이름과 같은 자리의 남길지(true)·뺄지(false)
+#[napi]
+pub fn checkpoint_git_env_keep(keys: Vec<String>) -> Vec<bool> {
+    cg::git_env_keep(&keys)
+}
+
+// ── agent: 연결·인증·조율 판정(3단계 3t). 호스트·토큰·출처를 견주는 입력은 TS가 encodeLoneSurrogates한 글자를 보낸다.
+// 구조가 있는 입력은 encodeNative한 JSON 문자열이다
+use bstudio_guard::connection_judge;
+
+#[napi]
+pub fn conn_authorize(host: Option<String>, authorization: Option<String>, token: String, allowed_hosts: Vec<String>) -> Option<String> {
+    connection_judge::authorize(host.as_deref(), authorization.as_deref(), &token, &allowed_hosts).map(|denied| out(&connection_judge::denial_value(denied)))
+}
+
+#[napi]
+pub fn conn_host_allowed(host: Option<String>, allowed_hosts: Vec<String>) -> bool {
+    connection_judge::host_allowed(host.as_deref(), &allowed_hosts)
+}
+
+#[napi]
+pub fn conn_hostname_of(host: Option<String>) -> String {
+    connection_judge::hostname_of(host.as_deref())
+}
+
+#[napi]
+pub fn conn_token_matches(authorization: Option<String>, token: String) -> bool {
+    connection_judge::token_matches(authorization.as_deref(), &token)
+}
+
+#[napi]
+pub fn conn_is_allowed_request(protocol: String, origin: String, allowed_origins: Vec<String>) -> bool {
+    connection_judge::is_allowed_request(&protocol, &origin, &allowed_origins)
+}
+
+#[napi]
+pub fn conn_is_automatic_favicon_path(pathname: String) -> bool {
+    connection_judge::is_automatic_favicon_path(&pathname)
+}
+
+#[napi]
+pub fn conn_describe_step(click: Option<String>, fill_selector: Option<String>, press: Option<String>, wait_for: Option<String>) -> String {
+    connection_judge::describe_step(click.as_deref(), fill_selector.as_deref(), press.as_deref(), wait_for.as_deref())
+}
+
+#[napi]
+pub fn conn_rejected_change_feedback(rejected: Vec<String>) -> String {
+    connection_judge::rejected_change_feedback(&rejected)
+}
+
+#[napi]
+pub fn coord_board_validate(model_writes: bool, by: String, kind: String, body: String, refs_len: f64, note_bytes_limit: f64) -> Option<String> {
+    coordination::board_validate(model_writes, &by, &kind, &body, refs_len as usize, note_bytes_limit)
+}
+
+/// 입력 `[{priority, at, id, bytes}]`(읽을 수 있는 메모, 들어온 순서). 결과 `{selected: [위치], truncated, bytes}` JSON. 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn coord_board_pick_notes(notes_json: String, read_limit: f64, budget: f64) -> Result<String> {
+    let value = input(&notes_json, "읽을 메모 목록")?;
+    let JsValue::Arr(items) = &value else { return Err(Error::from_reason("읽을 메모 목록이 배열이 아닙니다")) };
+    let mut keys = Vec::with_capacity(items.len());
+    for item in items {
+        let number = |key: &str| match item.prop(key) {
+            Some(JsValue::Num(n)) => Ok(*n),
+            _ => Err(Error::from_reason(format!("메모의 {key}이(가) 수가 아닙니다"))),
+        };
+        let text = |key: &str| match item.prop(key) {
+            Some(JsValue::Str(s)) => Ok(s.clone()),
+            _ => Err(Error::from_reason(format!("메모의 {key}이(가) 문자열이 아닙니다"))),
+        };
+        keys.push(coordination::NoteSortKey { priority: number("priority")?, at: text("at")?, id: text("id")?, bytes: number("bytes")? });
+    }
+    let (selected, truncated, bytes) = coordination::board_pick_notes(&keys, read_limit, budget);
+    let selected = JsValue::Arr(selected.into_iter().map(|i| JsValue::Num(i as f64)).collect());
+    Ok(out(&bstudio_guard::js_json::object(vec![("selected", Some(selected)), ("truncated", Some(JsValue::Bool(truncated))), ("bytes", Some(JsValue::Num(bytes)))])))
+}
+
+#[napi]
+pub fn coord_mcp_post_input_error(args_json: String) -> Result<Option<String>> {
+    Ok(coordination::mcp_post_input_error(&input(&args_json, "post_note 입력")?))
+}
+
+#[napi]
+pub fn coord_mcp_read_input_error(args_json: String) -> Result<Option<String>> {
+    Ok(coordination::mcp_read_input_error(&input(&args_json, "read_notes 입력")?))
+}
+
+#[napi]
+pub fn coord_format_note(kind: String, priority: f64, lane: String, body: String, refs: Vec<String>) -> String {
+    coordination::format_note(&kind, priority, &lane, &body, &refs)
+}
+
 // ── 검증 통과 판정·도구 입력 검사(ADR-191 3단계 3u). 막는 검사이고 일부는 여는 쪽(서비스 허용 목록·origin)이다. TS 껍데기: packages/agent/src/{verify,tools}.ts
 use bstudio_guard::{tool_input, verify_judge};
 

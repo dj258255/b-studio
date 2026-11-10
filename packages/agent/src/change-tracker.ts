@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { lstat, readFile, readlink } from 'node:fs/promises';
 import path from 'node:path';
+import { native } from '@b-studio/sandbox';
 import { WorkspaceError, type Workspace } from './workspace';
 
 /**
@@ -108,12 +109,7 @@ async function fingerprint(absolute: string): Promise<string> {
   }
 }
 
-/** 게이트가 다룰 수 없는 경로가 바뀌었을 때 에이전트에게 돌려주는 글 */
+/** 게이트가 다룰 수 없는 경로가 바뀌었을 때 에이전트에게 돌려주는 글(Rust) */
 export function rejectedChangeFeedback(rejected: readonly string[]): string {
-  return [
-    '[b-studio 검증 게이트] 게이트가 검증할 수 없는 경로가 이번 실행에서 바뀌어 통과시키지 않았습니다.',
-    ...rejected.slice(0, 20).map((file) => `- ${file}`),
-    ...(rejected.length > 20 ? [`- 외 ${rejected.length - 20}개`] : []),
-    '비밀 파일(.env 등)이나 생성물은 체크포인트에 넣지 않습니다. 필요 없는 파일이면 지우고, 생성물이면 .gitignore에 넣은 뒤 턴을 끝내세요.',
-  ].join('\n');
+  return native.connRejectedChangeFeedback([...rejected]);
 }
