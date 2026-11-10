@@ -242,6 +242,8 @@ export interface ToolOutcome {
   content: string;
   /** 자르기 전 결과 글자 수. 잘랐을 때만 넣는다(안 넣으면 content 길이와 같다). 토큰 탭의 "원래 글자"에 쓴다 */
   rawChars?: number;
+  /** 결과에 붙이는 이미지(base64). MCP 이미지 콘텐츠로 내보낸다. 탐색형 QA의 스크린샷이 쓴다 */
+  images?: Array<{ data: string; mimeType: string }>;
 }
 
 /**

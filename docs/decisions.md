@@ -9793,3 +9793,44 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 ### 돌리지 않은 검증
 - 실제 모델·실제 로그인으로 돈 세션. e2e. 다른 러너 다섯 개와 관문 러너는 타입 검사와 기존 테스트로만 확인했다(공통 함수 `zodShape`·`serialQueue`·`startToolServer`의 위치만 바뀜).
 - 문서 재확인: https://code.claude.com/docs/en/mcp 는 `${VAR}`·`${VAR:-default}` 풀이를 `.mcp.json`의 `command`·`args`·`env`·`url`·`headers`에 대해 적는다. 원격 서버의 `url`·`headers`에서 자격 정보 이름(`ANTHROPIC_API_KEY` 등)은 빈 값으로 읽는다는 예외가 있지만 `B_STUDIO_MCP_TOKEN`은 그 목록에 없다. `--mcp-config` 파일에도 같은 풀이가 된다고 따로 적혀 있지는 않아, 진짜 CLI 2.1.321에서 풀이가 동작하는 것을 실측으로 확인했다(위 검증). 실제 로그인·실제 모델로 돈 세션은 없다.
+
+### 덧붙임: 질문 경로와 탐색형 QA도 공개 CLI 입출력으로 돈다 (이슈 [#1101](https://github.com/dj258255/b-studio/issues/1101), 2026-11-10)
+
+위 "바꾸지 않은 것과 남은 SDK 사용"의 앞 둘(탐색형 QA, 질문 경로)을 옮겼다. 두 파일에서 `@anthropic-ai/claude-agent-sdk` import가 사라졌고 `claude-code-sdk.ts`(SDK를 바꿔 끼우던 타입)는 지웠다. 벤치의 기준선(`plain-baseline.ts`, 훅을 쓰는 SDK 호출)은 이 이슈의 범위가 아니라 그대로라, 스튜디오의 `package.json` 의존성은 남긴다. **`packages/agent/package.json`의 SDK 의존성은 이제 `packages/agent/src`가 쓰지 않는다**(보고만 하고 지우지 않았다).
+
+**쓴 플래그.** 러너가 이미 쓰던 것에서 새로 늘린 것은 하나뿐이다. 근거는 모두 https://code.claude.com/docs/en/cli-reference 와 https://code.claude.com/docs/en/headless 다.
+
+| 자리 | SDK 옵션 → CLI | 비고 |
+|---|---|---|
+| 질문 경로 | `tools: []`(웹 도구 opt-in은 `['WebSearch','WebFetch']`) → `--tools ''`(`WebSearch,WebFetch`) | 러너와 같다. 웹 도구를 열 때만 `--allowedTools WebSearch,WebFetch`를 더한다. 닫을 때는 `--allowedTools`를 아예 싣지 않는다(빈 값 인자의 읽는 방식에 기대지 않는다) |
+| 질문 경로 | `permissionMode: 'dontAsk'`, `settingSources: []`, `mcpServers: {}`+`strictMcpConfig` → `--permission-mode dontAsk`, `--setting-sources ''`, `--strict-mcp-config`(`--mcp-config` 없음) | 러너와 같다 |
+| 질문 경로 | `maxTurns` → `--max-turns 1`(웹 도구는 6), `model`·`effort` → `--model`·`--effort` | 러너와 같다 |
+| 질문 경로 | `persistSession: false` → **`--no-session-persistence`** | 새로 쓴다. cli-reference의 같은 이름 행(print 모드 전용). 설치된 CLI 2.1.321의 `claude --help`에서도 확인했다. 이번에 문서 쪽을 다시 읽지는 못했다 |
+| 질문 경로 | `systemPrompt: 문자열` → `--system-prompt-file <0600 파일>` | 러너와 같다. 질문 글은 인자가 아니라 표준 입력의 사용자 메시지 한 줄이다 |
+| 탐색형 QA | `createSdkMcpServer` → `startToolServer`(루프백 HTTP MCP) + `--mcp-config <0600 파일>` + `--strict-mcp-config`, `--allowedTools mcp__b-studio-qa__qa_*`, `--tools ''` | 러너와 같다. 토큰은 환경 변수 `B_STUDIO_MCP_TOKEN`으로만 간다 |
+| 탐색형 QA | `env: CLAUDE_AGENT_SDK_CLIENT_APP` | 문서에 없어 넘기지 않는다(러너와 같은 결정) |
+
+**도구 서버를 조금 넓혔다.** QA의 스크린샷과 선택 인자 때문이다. `ToolOutcome`에 `images`(base64 + mimeType)를 더해 `startToolServer`가 MCP 이미지 콘텐츠로 내고, `honorRequired`를 주면 스키마의 `required`에 없는 인자를 선택으로 연다(`qa_scroll`의 `ref`). 다른 러너는 둘 다 쓰지 않아 결과가 같다. `mcpSetupFailure`는 서버 이름을 인자로 받게 했다(기본값은 `b-studio`라 러너의 메시지가 그대로다).
+
+**지킨 동작과 바뀐 것.**
+
+| 동작 | 처리 | 시험 |
+|---|---|---|
+| 질문: 도구 없음·읽기 전용(여는 쪽으로 틀리지 않기) | `--tools ''`로 내장 도구를 모두 끄고 허용 목록은 싣지 않는다. 웹 도구를 열어도 파일·명령 도구 이름은 인자 어디에도 없다. 설정·훅·MCP는 싣지 않는다 | `claude-code-ask.test.ts` 첫 3개. 변이: `--tools` 인자를 지우면 4개, 허용 목록에 `Bash,Write`를 넣으면 3개가 실패 |
+| 질문: 취소 | 입력 닫기 + 즉시 SIGTERM, 결과 없음이 아니라 취소 이유를 던진다. 이미 취소된 신호면 CLI를 띄우지 않는다 | 취소 2개 |
+| 질문: 사용량·오류 | `modelUsage`로 usage, 실패 결과는 `모델 호출이 실패했습니다: …`(사용 한도 문구 그대로), 빈 응답은 실패 | usage·실패·빈 응답 |
+| 질문: 시간 제한 | 원래 없었다(취소 신호만). 그대로다 | |
+| QA: 도구 범위 | 내장 도구 전부 끔, 허용 목록은 `mcp__b-studio-qa__qa_*`만, `dontAsk` | `CLI 실행 방식` 첫 시험 |
+| QA: 시간·행동 수·반복 한도 | 기존 규칙 그대로(조작을 닫고 마지막 보고만, 유예 90초). 시간 제한 시험을 새로 더했다 | 기존 시험 + `max_time` 시험 |
+| QA: 끝내기와 사용량 | SDK의 `interrupt()`는 문서에 없어 쓰지 않는다. `qa_finish`·유예 만료 때 표준 입력을 닫아 하던 턴을 마치게 하고(그래야 `result`의 `modelUsage`가 온다) 15초 안에 끝나지 않으면 SIGTERM. `result`가 오지 못하면 assistant 메시지의 사용량을 합친다(기존 대비책) | 사용량 2개 |
+| QA: 취소 | 즉시 SIGTERM, 취소 이유를 던진다 | 취소 시험 |
+
+**동작이 달라진 곳(감수).** (1) `qa_finish` 뒤 CLI가 하던 턴을 마치므로 모델 호출이 한 번 더 있을 수 있다(SDK는 `interrupt()`로 바로 끊었다). 대신 사용량이 정확히 온다. 그 사이의 도구 호출은 거절하고 3번 거절하면 끊는다. (2) 질문 경로는 `result` 없이 끝나면 받은 글이 있어도 실패다("결과를 보내지 않고 종료", 종료 코드·표준 오류 끝 3줄). 옛 코드는 글만 있으면 사용량 0으로 돌려줬다. (3) QA는 init이 `b-studio-qa` 도구 서버 연결을 `connected`로 알리지 않으면 돌리지 않고 던진다(옛 코드는 도구 없이 돌아 "마치지 못함"으로 끝났다). 러너의 결정 8과 같다. (4) QA의 도구 호출은 모델이 낸 순서대로 하나씩 실행한다(러너와 같다).
+
+**검증.**
+- **고치기 전 실패.** 새 질문 경로 시험 11개를 옛 SDK 코드에 돌리면 `command`·`commandArgs`를 무시하고 SDK가 진짜 CLI를 띄워 10개가 시간 초과로 실패했다(`ANTHROPIC_BASE_URL=http://127.0.0.1:1`, 임시 설정 폴더, 가짜 키라 모델은 불리지 않았다. 통과한 1개는 이미 취소된 신호 시험). 남은 자식 프로세스는 PID로 정리했다.
+- **고친 뒤.** 질문 경로 11개·계약(벤치) 4개·탐색형 QA 17개(기존 11 + 새 6)·거절 28개를 가짜 CLI 시나리오로 옮겨 같은 기대값으로 통과시켰다. 가짜 CLI(`fixtures/fake-claude-cli.mjs`)는 서버 이름을 `--mcp-config`에서 읽고, 도구 결과의 글·이미지 개수를 기록하고, `noResult`를 흉내 낸다(러너 시험은 그대로 통과).
+- **변이 확인.** 질문 경로: 위 표. QA: init의 도구 서버 확인을 끄면 1개, "결과 없이 끝나면 던짐"을 끄면 1개가 실패했다.
+- **진짜 CLI 2.1.321 + 가짜 모델 서버**(`~/.cache/b-studio-ship/term/fake-model.mjs`를 임시 포트에 두고, 요청을 기록하는 중계를 앞에 둠. 임시 `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, 가짜 키, 실행 전에 환경에 실제 `ANTHROPIC_API_KEY`가 없음을 확인). `claudeCodeAsk`를 한 번 돌려 한 번 잰 값: 1.6초, 답 `ok`, usage 입력 10·출력 20, 모델 서버가 받은 `/v1/messages` 요청의 `tools`가 **빈 배열**(내장 도구도 MCP도 없음), 시스템 지침에는 우리가 넘긴 글이 있고 CLI 기본 지침은 없음, 사용자 메시지는 표준 입력으로 보낸 글. `webTools: true`로 한 번 더 돌리면 `tools`는 `WebFetch`·`WebSearch`(와 CLI 내부의 `DeferredToolPlaceholder` 하나, 위 검증과 같다)뿐이었다.
+
+**돌리지 않은 검증.** 탐색형 QA를 진짜 CLI로 돌리지 않았다(가짜 모델 서버가 qa_* 도구를 부르지 않는다. 가짜 CLI와 실제 HTTP MCP 서버로만 확인했고, 스크린샷 이미지 콘텐츠가 진짜 CLI에서 모델에 그대로 가는지는 잰 적 없다). 실제 모델·실제 로그인으로 돈 세션, `--no-session-persistence`의 문서 재확인(CLI 도움말로만 확인), 벤치의 기준선과 관문 러너(범위 밖). `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.

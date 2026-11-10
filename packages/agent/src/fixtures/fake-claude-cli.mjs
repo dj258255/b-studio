@@ -78,11 +78,14 @@ for (const signal of ['SIGTERM', 'SIGINT']) {
   });
 }
 
+// --mcp-config에 적힌 서버 이름(없으면 MCP 없이 돈 것이다: 질문 경로). 진짜 CLI는 도구 이름을 mcp__<서버>__<도구>로 낸다
+const serverName = log.mcp ? Object.keys(JSON.parse(log.mcp.text).mcpServers ?? {})[0] : undefined;
+
 const sessionId = inv.sessionId ?? (args.includes('--resume') ? '00000000-0000-4000-8000-000000000002' : '00000000-0000-4000-8000-000000000001');
 
 /** 모델이 부른 도구를 HTTP MCP 서버에 실제로 요청한다(진짜 CLI가 --mcp-config로 하는 일) */
 async function callTool(name, input) {
-  const config = JSON.parse(log.mcp.text).mcpServers['b-studio'];
+  const config = JSON.parse(log.mcp.text).mcpServers[serverName];
   const token = process.env.B_STUDIO_MCP_TOKEN ?? '';
   const headers = Object.fromEntries(Object.entries(config.headers ?? {}).map(([key, value]) => [key, String(value).replaceAll('${B_STUDIO_MCP_TOKEN}', token)]));
   const response = await fetch(config.url, {
@@ -94,7 +97,9 @@ async function callTool(name, input) {
   const data = body.startsWith('event:') || body.includes('\ndata:') ? body.split('\n').filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).at(-1) : body;
   let parsed;
   try { parsed = JSON.parse(data); } catch { parsed = { unparsed: body }; }
-  log.tools.push({ name, input, status: response.status, isError: parsed.result?.isError ?? null, error: parsed.error?.message ?? null });
+  const blocks = Array.isArray(parsed.result?.content) ? parsed.result.content : [];
+  const text = blocks.filter((block) => block.type === 'text').map((block) => block.text ?? '').join('\n');
+  log.tools.push({ name, input, status: response.status, isError: parsed.result?.isError ?? null, error: parsed.error?.message ?? null, text, images: blocks.filter((block) => block.type === 'image').length });
   flush();
 }
 
@@ -121,7 +126,7 @@ async function handleTurn() {
     else if (step.delay && !step.tool) await new Promise((r) => setTimeout(r, step.delay));
     else if (step.tool) {
       if (step.delay) await new Promise((r) => setTimeout(r, step.delay));
-      const content = [{ type: 'tool_use', id: `toolu_${ids}`, name: `mcp__b-studio__${step.tool}`, input: step.input }];
+      const content = [{ type: 'tool_use', id: `toolu_${ids}`, name: `mcp__${serverName}__${step.tool}`, input: step.input }];
       emit({ type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId });
       await callTool(step.tool, step.input);
     } else {
@@ -132,6 +137,8 @@ async function handleTurn() {
   const modelUsage = state.modelUsages.shift() ?? { 'test-model': { inputTokens: 10 * ids, outputTokens: 5, cacheReadInputTokens: 1, cacheCreationInputTokens: 2 } };
   const apiDuration = state.apiDurations.length > 0 ? { duration_api_ms: state.apiDurations.shift() } : {};
   writeState(state);
+  // result를 내지 못하고 끝나는 CLI(시험이 noResult를 준다). 모델은 이미 assistant 메시지를 냈다
+  if (scenario.noResult) process.exit(0);
   emit({ type: 'result', subtype: 'success', is_error: false, result: lastText, stop_reason: 'end_turn', errors: [], modelUsage, session_id: sessionId, ...apiDuration, ...(scenario.result ?? {}) });
   // 진짜 CLI는 오류 결과를 낸 뒤 0이 아닌 종료 코드로 끝날 수 있다
   if (scenario.exitCodeAfterResult !== undefined) {
@@ -141,7 +148,7 @@ async function handleTurn() {
 }
 
 // 진짜 CLI처럼 --mcp-config의 서버 상태를 싣는다(https://code.claude.com/docs/en/headless 의 mcp_servers). 시험이 initExtra로 덮어쓴다
-if (!inv.noInit) emit({ type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: sessionId, mcp_servers: [{ name: 'b-studio', status: 'connected' }], ...(inv.initExtra ?? {}) });
+if (!inv.noInit) emit({ type: 'system', subtype: 'init', claude_code_version: '9.9.9', model: 'test-model', session_id: sessionId, mcp_servers: serverName ? [{ name: serverName, status: 'connected' }] : [], ...(inv.initExtra ?? {}) });
 for (const raw of inv.pre ?? []) (typeof raw === 'string' ? process.stdout.write(`${raw}\n`) : emit(raw));
 if (inv.exitWithoutResult !== undefined) {
   if (inv.stderr) process.stderr.write(`${inv.stderr}\n`);

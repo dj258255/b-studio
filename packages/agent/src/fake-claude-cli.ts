@@ -45,6 +45,8 @@ export interface FakeCliScenario {
   apiDurations?: number[];
   /** 프로세스를 띄운 순서대로 적용하는 개별 설정 */
   invocations?: FakeInvocation[];
+  /** 모델 턴을 마친 뒤 result를 내지 않고 끝난다(result가 오지 못한 CLI) */
+  noResult?: boolean;
   /** 결과를 낸 뒤 이 코드로 끝난다(오류 결과 뒤에 0이 아닌 코드로 끝나는 진짜 CLI) */
   exitCodeAfterResult?: number;
   stderrAfterResult?: string;
@@ -63,7 +65,8 @@ export interface FakeCliLog {
   appendSystemPrompt?: { text: string; mode: number };
   /** 표준 입력으로 받은 줄(JSON) */
   stdin: Array<{ type?: string; message?: { role?: string; content?: unknown }; parent_tool_use_id?: unknown }>;
-  tools: Array<{ name: string; input: unknown; status: number; isError: boolean | null; error: string | null }>;
+  /** text는 도구 결과의 글, images는 이미지 콘텐츠 개수 */
+  tools: Array<{ name: string; input: unknown; status: number; isError: boolean | null; error: string | null; text: string; images: number }>;
   signals: string[];
   stdinClosed?: boolean;
 }
