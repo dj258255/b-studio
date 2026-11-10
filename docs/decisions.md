@@ -216,6 +216,7 @@
 - [ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다](#adr-192-범위를-전부로-넓힌다-cli와-desk도-rust로-옮겨-b-studio-실행-파일-하나로-끝낸다)
 - [ADR-193 sandbox I/O를 Rust로 옮긴다: tokio-async 크레이트와 napi 스트리밍 접착, 검증은 행동 등가로](#adr-193-sandbox-io를-rust로-옮긴다-tokio-async-크레이트와-napi-스트리밍-접착-검증은-행동-등가로)
 - [ADR-194 claude-code 러너는 Agent SDK 대신 공개 CLI 입출력(stream-json)으로 돈다](#adr-194-claude-code-러너는-agent-sdk-대신-공개-cli-입출력stream-json으로-돈다)
+- [ADR-195 4단계: Rust 서버를 앞에 두고 옮기지 않은 경로는 Node로 넘긴다, 인증을 옮기기 전에는 공개 경로만 직접 처리한다](#adr-195-4단계-rust-서버를-앞에-두고-옮기지-않은-경로는-node로-넘긴다-인증을-옮기기-전에는-공개-경로만-직접-처리한다)
 
 ---
 
@@ -9967,3 +9968,48 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **진짜 CLI 2.1.321 + 가짜 모델 서버**(`~/.cache/b-studio-ship/term/fake-model.mjs`를 임시 포트에 두고, 요청을 기록하는 중계를 앞에 둠. 임시 `CLAUDE_CONFIG_DIR`, `ANTHROPIC_BASE_URL`, 가짜 키, 실행 전에 환경에 실제 `ANTHROPIC_API_KEY`가 없음을 확인). `claudeCodeAsk`를 한 번 돌려 한 번 잰 값: 1.6초, 답 `ok`, usage 입력 10·출력 20, 모델 서버가 받은 `/v1/messages` 요청의 `tools`가 **빈 배열**(내장 도구도 MCP도 없음), 시스템 지침에는 우리가 넘긴 글이 있고 CLI 기본 지침은 없음, 사용자 메시지는 표준 입력으로 보낸 글. `webTools: true`로 한 번 더 돌리면 `tools`는 `WebFetch`·`WebSearch`(와 CLI 내부의 `DeferredToolPlaceholder` 하나, 위 검증과 같다)뿐이었다.
 
 **돌리지 않은 검증.** 탐색형 QA를 진짜 CLI로 돌리지 않았다(가짜 모델 서버가 qa_* 도구를 부르지 않는다. 가짜 CLI와 실제 HTTP MCP 서버로만 확인했고, 스크린샷 이미지 콘텐츠가 진짜 CLI에서 모델에 그대로 가는지는 잰 적 없다). 실제 모델·실제 로그인으로 돈 세션, `--no-session-persistence`의 문서 재확인(CLI 도움말로만 확인), 벤치의 기준선과 관문 러너(범위 밖). `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
+
+## ADR-195 4단계: Rust 서버를 앞에 두고 옮기지 않은 경로는 Node로 넘긴다, 인증을 옮기기 전에는 공개 경로만 직접 처리한다
+
+상태: 채택(계획 — 코드는 4a부터)
+관련: ADR-191(napi 경계), ADR-192(범위 전부·4~6단계), ADR-193(sandbox I/O), ADR-188(node:http 서버), 이슈 [#1146](https://github.com/dj258255/b-studio/issues/1146), 추적 [#997](https://github.com/dj258255/b-studio/issues/997)
+
+### 맥락
+- 2단계(sandbox)는 2c-7(#1143)로, 3단계의 판정 이전은 3a~3af로 끝났다. 남은 TS는 studio 서버(`apps/studio/server` 564줄, `apps/studio/lib/server`)와 agent·sandbox의 I/O 조율을 합쳐 약 5만 8천 줄이고(2026-11-11 `wc -l`, 시험 제외), `sessions.ts` 하나가 8천7백 줄이다. 대부분이 서버 메모리의 세션 상태를 쥐고 있다.
+- 지금 서버는 `node:http` 하나가 공개 포트를 열고, 인증(`decideRequest`) → 라우트(`routes.gen.ts`, 75개) → 핸들러 순으로 처리한다. 요청 본문 한도는 10MB, 요청 시간 한도는 없고(SSE), 헤더 시간 한도는 60초다.
+- 인증은 연결 주소가 아니라 **Host 헤더**로 "이 컴퓨터의 주소로 왔는가"를 본다(인증 없이 띄운 서버의 규칙). 같은 출처 확인(`isSameOrigin`)은 `x-forwarded-host`가 있으면 그것을 Host보다 먼저 본다.
+- SSE로 응답하는 경로는 넷이다(`/api/agents/stream`, `/api/terminals/stream`, `/api/sessions/[id]/events`, `/api/sessions/[id]/terminal`). 웹소켓 업그레이드는 없다.
+
+### 검토한 선택지
+
+| 선택지 | 얻는 것 | 잃는 것 |
+|---|---|---|
+| **A. Rust 서버가 앞(공개 포트), 옮기지 않은 경로는 Node로 넘김(채택)** | 경로 단위로 옮기고 매번 HTTP 계약 테스트로 확인. 끝 모양(Rust가 공개 포트)이 처음부터 같다 | Node가 남은 동안 프로세스가 하나 늘고, 프록시가 요청을 바꾸지 않는다는 것을 따로 지켜야 한다 |
+| B. Node가 앞, 옮긴 경로만 Rust로 넘김 | 처음 조각이 작다 | 끝까지 Node가 공개 포트를 쥐어 마지막에 앞단을 한 번 더 바꾼다 |
+| C. 한 번에 다시 쓰기 | 중간 상태가 없다 | 비교할 기준선이 없다 |
+
+프레임워크는 axum 0.8과 hyper-util의 클라이언트로 정한다. 둘 다 tokio 위에 있어 `bstudio-io`와 같은 런타임을 쓰고, axum 저장소의 리버스 프록시 예제가 같은 조합이다. 버전은 정확히 고정한다.
+
+### 결정
+1. **모양.** 새 크레이트 `crates/bstudio-server`(실행 파일)가 공개 포트를 연다. Node 서버(`apps/studio/server/main.ts`)는 그 자식 프로세스로 뜨고 **유닉스 소켓**에서만 듣는다. 소켓은 b-studio 상태 폴더 아래 권한 0700 폴더에 둔다. 루프백 포트로 두면 이 컴퓨터의 다른 사용자가 앞단을 거치지 않고 Node에 닿는다. 소켓 경로가 OS 상한(macOS 104바이트)을 넘으면 띄우지 않고 멈춘다. Node가 끝나면 앞단도 0이 아닌 코드로 끝나고, 앞단이 받은 종료 신호는 Node에 넘긴다. `studio launch`는 앞단을 띄우고 지금처럼 `/api/health`로 준비를 본다.
+2. **넘길 때 바꾸지 않는다.** 메서드, 경로·쿼리(원문 그대로), Host, 쿠키, Origin, 손님이 보낸 `x-forwarded-*`·`x-b-studio-*` 헤더를 모두 그대로 넘긴다. 앞단은 `x-forwarded-*`를 **더하지 않는다**(`isSameOrigin`이 `x-forwarded-host`를 먼저 보므로, 더하면 판단이 바뀐다). 빼는 것은 hop-by-hop 헤더(Connection과 거기 적힌 이름, Keep-Alive, TE, Trailer, Transfer-Encoding, Upgrade, Proxy-Authorization·Proxy-Authenticate)뿐이다. 응답도 같은 규칙으로 돌려준다. 이 목록은 시험으로 고정한다.
+3. **흘린다.** 요청·응답 본문을 모으지 않고 흘린다. 본문 한도(10MB)는 Node가 계속 본다. 응답은 첫 바이트부터 바로 쓴다(SSE). 손님이 끊으면 Node로 가는 요청도 끊어 Node의 취소(`res` close)가 지금처럼 돈다. 헤더 시간 한도 60초, 요청 시간 한도 없음은 Node와 같다. 업그레이드 요청은 지금처럼 받지 않는다.
+4. **Node에 닿지 못하면** 502와 JSON 오류를 준다. 앞단이 판단을 대신하지 않는다.
+5. **옮기는 순서 규칙.**
+   - 인증 판단(`decideRequest`와 그 상태: 세션 쿠키, 폐기 목록, 프록시 비밀)을 Rust로 옮기기 **전에는** 공개 경로(`/api/health`, `/api/health/routes`, 로그인·로그아웃은 제외)만 앞단이 직접 처리한다. 인증이 필요한 경로를 Rust가 직접 처리하면서 인증을 Node에 맡기면 "확인하는 쪽과 실제로 동작하는 쪽"이 갈린다.
+   - 인증을 옮긴 뒤로는 앞단이 모든 요청을 판단하고, Node로 넘기는 요청에도 같은 판단을 거친다. 그때 Node의 판단은 지우지 않고 남긴다(같은 규칙을 두 번 보는 것은 막는 쪽으로만 틀린다). 두 구현은 차등 시험으로 묶는다.
+   - 상태를 쥔 경로는 **상태의 주인과 함께** 옮긴다. 세션 상태(메모리의 세션 맵, 디스크의 세션 기록)는 한 번에 한 프로세스만 쓴다. 디스크 형식은 옮기는 동안 바꾸지 않는다.
+   - 순서: 4a 앞단 세우기(모든 경로를 넘김) → 4b 공개 경로 → 4c 인증 → 4d 상태 없는 경로(폴더 고르기, 라우팅 미리보기, 계정 목록 등) → 4e 프로젝트 → 4f 세션·게이트·러너(가장 큼, 여러 조각) → 4g Node와 napi 제거.
+6. **napi는** Node가 남은 동안 그대로 둔다. Rust 경로는 크레이트를 직접 부른다. 한 napi 함수를 부르는 TS가 모두 사라진 PR에서 그 래퍼를 지운다. 마지막 TS가 사라지면 `bstudio-node`를 지운다.
+7. **검증.**
+   - `apps/studio/server/contract.test.ts`(desk가 쓰는 계약)를 앞단 너머로 돌린다. 4a부터 매 조각이 통과해야 한다.
+   - 옮긴 경로는 옛 Node 핸들러를 기준으로 HTTP 차등 시험을 한다(같은 요청에 상태 코드·본문·헤더 비교).
+   - 막는 쪽 경로(인증, 파일 경로, 시크릿 가림)를 옮긴 조각은 커밋 보안 검토 결과를 본 뒤 머지한다.
+   - 실제 세션(studio desk로 세션 하나 띄워 게이트까지)은 4a, 4c, 4f 조각마다 돌리고 `docs/status.md`에 적는다.
+8. **자원.** Node가 남은 동안에는 프로세스가 하나 늘어 메모리가 오히려 는다. "가벼워졌다"는 4g 뒤에 잰 값으로만 적는다.
+
+### 결과
+- 앞단이 요청을 바꾸지 않는다는 규칙(결정 2)이 인증의 전제다. 프록시 라이브러리가 Host를 다시 쓰거나 `x-forwarded-*`를 더하는 기본 동작이 있으면 끈다. 시험이 이를 잡는다.
+- 유닉스 소켓은 Windows를 지원하지 않는다. 지금 지원 범위는 macOS·리눅스라 받아들인다.
+- 중간 상태(Rust 앞단 + Node)는 4g까지 이어진다. 그동안 장애가 나면 앞단과 Node 로그를 함께 봐야 한다. 앞단의 로그는 Node 로그와 같은 파일에 앞머리를 붙여 쓴다.
+- 4a는 사용자에게 보이는 동작이 바뀌지 않아야 한다. 바뀌면 그것이 결함이다.
