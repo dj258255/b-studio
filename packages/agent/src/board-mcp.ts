@@ -4,6 +4,7 @@
  * 외부 토큰이든 같은 도구로 보인다. 신원(BoardAccess.lane)은 토큰을 내준 쪽이 정하고, 모델도 이 파일도
  * 바꾸지 않는다 — tools.ts의 laneBoard()와 같은 원칙이다.
  */
+import { encodeNative, native } from '@b-studio/sandbox';
 import type { Board, NoteKind } from './coordination';
 import type { BoardAccess, ToolOutcome } from './tools';
 
@@ -45,40 +46,12 @@ export function boardMcpToolSpecs(access: Pick<BoardAccess, 'modelWrites'>): Boa
   return access.modelWrites === false ? [READ_NOTES_SPEC] : [POST_NOTE_SPEC, READ_NOTES_SPEC];
 }
 
-const READ_KINDS: readonly NoteKind[] = ['contract', 'failure', 'fact'];
-const POST_KINDS: readonly NoteKind[] = ['contract', 'fact'];
-
-class BoardMcpInputError extends Error {}
-
-function stringField(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== 'string') throw new BoardMcpInputError(`"${key}" must be a string`);
-  return value;
-}
-
-function stringArrayField(args: Record<string, unknown>, key: string): string[] {
-  const value = args[key];
-  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new BoardMcpInputError(`"${key}" must be an array of strings`);
-  return value;
-}
-
-/** post_note는 failure를 받지 않는다 — 스키마가 이미 막지만, 스키마를 거치지 않고 부른 호출도 여기서 한 번 더 막는다 */
-function asPostKind(value: string): NoteKind {
-  if (!(POST_KINDS as readonly string[]).includes(value)) throw new BoardMcpInputError(`Unknown note kind: ${value}`);
-  return value as NoteKind;
-}
-
-function asReadKinds(values: string[]): NoteKind[] {
-  return values.map((value) => {
-    if (!(READ_KINDS as readonly string[]).includes(value)) throw new BoardMcpInputError(`Unknown note kind: ${value}`);
-    return value as NoteKind;
-  });
-}
-
-/** 읽은 메모를 짧은 텍스트로: `[kind·priority] 작성 레인: 본문 (refs)`. tools.ts의 formatNote와 같은 모양이다 */
+/**
+ * 읽은 메모를 짧은 텍스트로: `[kind·priority] 작성 레인: 본문 (refs)`. tools.ts의 formatNote와 같은 모양이다(Rust).
+ * 짝 없는 서로게이트가 든 글자는 경계에서 U+FFFD가 된다(사람이 읽는 글이라 견주는 값이 아니다)
+ */
 function formatNote(note: { kind: NoteKind; priority: number; author: { lane: string }; body: string; refs: string[] }): string {
-  const refs = note.refs.length > 0 ? ` (${note.refs.join(', ')})` : '';
-  return `[${note.kind}·${note.priority}] ${note.author.lane}: ${note.body}${refs}`;
+  return native.coordFormatNote(note.kind, note.priority, note.author.lane, note.body, note.refs);
 }
 
 function success(content: string): ToolOutcome {
@@ -98,14 +71,16 @@ export async function runBoardMcpTool(name: string, args: Record<string, unknown
     switch (name) {
       case 'post_note': {
         if (access.modelWrites === false) return failure('이 게시판은 외부 에이전트도 읽기만 할 수 있습니다');
-        const kind = asPostKind(stringField(args, 'kind'));
-        const body = stringField(args, 'body');
-        const refs = stringArrayField(args, 'refs');
-        const result = access.post({ kind, body, refs });
+        // 입력 모양 검사는 Rust(막는 쪽): kind는 contract·fact만, body는 문자열, refs는 문자열 배열. 스키마를 거치지 않은 호출도 여기서 한 번 더 막는다
+        const invalid = native.coordMcpPostInputError(encodeNative({ kind: args.kind, body: args.body, refs: args.refs }));
+        if (invalid !== null && invalid !== undefined) return failure(invalid);
+        const result = access.post({ kind: args.kind as NoteKind, body: args.body as string, refs: args.refs as string[] });
         return result.ok ? success(`posted ${result.note.id} (${result.note.kind})`) : failure(result.reason);
       }
       case 'read_notes': {
-        const kinds = asReadKinds(stringArrayField(args, 'kinds'));
+        const invalid = native.coordMcpReadInputError(encodeNative({ kinds: args.kinds }));
+        if (invalid !== null && invalid !== undefined) return failure(invalid);
+        const kinds = args.kinds as NoteKind[];
         const { notes, truncated, reason, notice } = access.read({ kinds: kinds.length > 0 ? kinds : undefined });
         const lines = notes.map(formatNote);
         if (truncated) lines.push(`[... ${reason ?? '읽기 상한으로 일부만 돌려줬습니다'} ...]`);

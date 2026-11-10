@@ -1,4 +1,5 @@
 import type { Browser, CDPSession, Page } from 'playwright-core';
+import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import { trackPendingRequests } from './pending-requests';
 
@@ -139,8 +140,9 @@ export class StepFailedError extends Error {
 /** 선언한 네 동작 중 어느 것도 없는 단계. 단계 실패가 아니라 잘못된 입력이라 따로 구분한다 */
 class StepWithoutActionError extends Error {}
 
-function isAutomaticFavicon(url: string): boolean {
-  return new URL(url).pathname === '/favicon.ico';
+/** 브라우저가 알아서 요청하는 파비콘인가(여는 쪽: 실패로 세지 않는다). 파싱할 수 없는 URL은 던진다. 경로 판정은 Rust */
+export function isAutomaticFavicon(url: string): boolean {
+  return native.connIsAutomaticFaviconPath(new URL(url).pathname);
 }
 
 /** MediaError.code → 이름. 표준에 있는 네 값만 안다(https://developer.mozilla.org/docs/Web/API/MediaError) */
@@ -260,12 +262,10 @@ export const VIEWPORT_MEASURE_SCRIPT = (texts: readonly string[]) => `((texts) =
   return { width: vw, height: vh, findings: findings };
 })(${JSON.stringify(texts)})`;
 
-/** 실패한 단계를 사람이 알아볼 수 있게 무슨 동작을 어디에 하려 했는지 적는다 */
-function describeStep(step: WorkflowPageStep): string {
-  if (step.click !== undefined) return `click ${step.click}`;
-  if (step.fill !== undefined) return `fill ${step.fill.selector}`;
-  if (step.press !== undefined) return `press ${step.press}`;
-  return `waitFor ${step.waitFor}`;
+/** 실패한 단계를 사람이 알아볼 수 있게 무슨 동작을 어디에 하려 했는지 적는다(Rust). `undefined`가 아닌 값은 글자로 바꿔 보낸다 */
+export function describeStep(step: WorkflowPageStep): string {
+  const text = (value: unknown): string | undefined => (value === undefined ? undefined : String(value));
+  return native.connDescribeStep(text(step.click), step.fill === undefined ? undefined : String(step.fill.selector), text(step.press), text(step.waitFor));
 }
 
 /**
@@ -287,10 +287,11 @@ export async function launchBrowser(): Promise<Browser> {
   throw new BrowserUnavailableError(`헤드리스 브라우저를 실행할 수 없습니다: ${failures.join(' / ')}`);
 }
 
-/** 네트워크로 나가지 않는 내부 스킴. 이 셋은 허용 목록과 무관하게 통과시킨다 */
-const INTERNAL_SCHEMES = new Set(['data:', 'blob:', 'about:']);
-
-/** 출처가 허용 목록에 있으면 true. 내부 스킴은 허용하고, 파싱할 수 없으면 거부한다 */
+/**
+ * 출처가 허용 목록에 있으면 true(여는 쪽). 내부 스킴(data:·blob:·about:)은 허용하고, 파싱할 수 없으면 거부한다.
+ * URL 파싱은 WHATWG `new URL`이 하고(Rust로 파서를 다시 짜지 않는다) 판정은 protocol·origin만 받는 Rust가 한다.
+ * 출처와 허용 목록은 견주는 두 글자라 짝 없는 서로게이트가 U+FFFD로 합쳐지지 않게 단사로 바꿔 보낸다
+ */
 export function isAllowedRequest(url: string, allowed: ReadonlySet<string>): boolean {
   let parsed: URL;
   try {
@@ -298,7 +299,7 @@ export function isAllowedRequest(url: string, allowed: ReadonlySet<string>): boo
   } catch {
     return false;
   }
-  return INTERNAL_SCHEMES.has(parsed.protocol) || allowed.has(parsed.origin);
+  return native.connIsAllowedRequest(parsed.protocol, encodeLoneSurrogates(parsed.origin), [...allowed].map(encodeLoneSurrogates));
 }
 
 /** 허용하지 않은 출처로 나가려던 요청을 막을 때의 정보 */
