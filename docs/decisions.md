@@ -215,6 +215,7 @@
 - [ADR-191 백엔드는 Rust로 단계적으로 옮긴다: 순수 Rust 크레이트를 napi로 붙이고, 옮긴 PR에서 TS 구현을 지운다](#adr-191-백엔드는-rust로-단계적으로-옮긴다-순수-rust-크레이트를-napi로-붙이고-옮긴-pr에서-ts-구현을-지운다)
 - [ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다](#adr-192-범위를-전부로-넓힌다-cli와-desk도-rust로-옮겨-b-studio-실행-파일-하나로-끝낸다)
 - [ADR-193 sandbox I/O를 Rust로 옮긴다: tokio-async 크레이트와 napi 스트리밍 접착, 검증은 행동 등가로](#adr-193-sandbox-io를-rust로-옮긴다-tokio-async-크레이트와-napi-스트리밍-접착-검증은-행동-등가로)
+- [ADR-194 claude-code 러너는 Agent SDK 대신 공개 CLI 입출력(stream-json)으로 돈다](#adr-194-claude-code-러너는-agent-sdk-대신-공개-cli-입출력stream-json으로-돈다)
 
 ---
 
@@ -9362,6 +9363,40 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 변이 확인: Rust 핵심 줄 107곳을 하나씩 망가뜨려 105곳이 잡혔다(처음 101곳 중 벡터가 93곳, 차등 시험이 8곳을 잡았다). 넓히는 변이는 호스트 종류(`github.com` 끝 일치·`gitlab.com` 포함·대소문자 무시·접두 일치), 제공자 지정(대소문자 무시·앞뒤 공백 허용), 스킴 모양 글자 클래스, scp 사용자·호스트 클래스, 체크리스트 마커·상자 글자·공백, 닫기 문구의 단어 경계·`_`·숫자 클래스, 폼 인코딩(공백·`~`), 토큰(`||`로 바꾸기·빈 글자 허용·other·local 허용), 본문 표지 순서를 가렸다. 경계는 `>=`↔`>`·`<=`↔`<`(patch 전체 한도와 파일 한도, 본문 한도, 관리 구간 방, 쥐어짬, 상세 빼기 루프, `capBody`), 길이 ±1(`MAX`, 마커 길이, 안내 여백, 하한 2,000). 처음 6곳이 살아남았다. 넷은 벡터를 더해 잡았다: 스킴 첫 글자가 숫자인 주소(`1a://…`, 영숫자로 넓히면 `new URL`이 던진다), 안내 문구가 본문 한가운데에 있는 옛 모양 판정(끝 일치→포함), 여는 표지 없이 닫는 표지가 24번째 자리인 쥐어짬 판정, 상세가 있는 커밋의 본문이 한도와 정확히 같은 경우(루프 `>`→`>=`). 둘은 동치다: ①`strip_port`의 "숫자가 있어야 한다" 검사를 빼면 호스트가 `:`로 끝날 때만 다른데, URL 호스트는 빈 포트를 지우고 scp 호스트 클래스에는 `:`가 없어 그런 호스트가 만들어지지 않는다. ②닫기 문구에서 맞은 뒤 끝이 아니라 한 글자 뒤에서 이어 찾는 변이는, 맞은 구간(키워드·공백·`:`·`#`·숫자) 안에서 키워드가 시작될 수 없어 결과가 같다. 이 값은 한 번 잰 값이다. 변이 시험은 차등 시험을 시드당 600회로 줄여 돌렸다.
 - 돌리지 않은 것: `combineReviewDecision`·`describeApiError`의 이전(위 이유로 남김), 실제 GitHub·GitLab·Gitea REST 호출(실제 저장소를 쓰지 않음), 시드를 수백만 회로 늘린 차등 시험, 짝 없는 서로게이트가 든 입력의 차등 시험(경계에서 바뀌는 것이 의도). 실험 경로: Gitea·GitLab 호스트의 REST 호출은 확인하지 않았다(판정 코드는 호스트 종류와 무관하게 같은 함수를 지나고 벡터가 gitea·gitlab 종류를 밟는다). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림).
 
+### 덧붙임: 3단계 3q — 경로 이름 비교와 도구 정책(막는 검사) (2026-11-10, [#1090](https://github.com/dj258255/b-studio/issues/1090))
+
+- 옮긴 것: `packages/agent/src/path-names.ts`의 `normalizeProjectPath`·`foldName`·`canonicalProjectPath`와 `policy.ts`의 `isToolAllowed`·`checkToolPolicy`·`hasApprovalToken`·`isProtectedPath`·`isWithinScope`, 금지 명령 판정(토큰 접두, 셸 감싸기, `gradle --stop`)을 `crates/bstudio-guard/src/path_policy.rs`로. `node_path.rs`에 `path.posix.basename`을 더했다. TS에는 같은 이름·시그니처의 껍데기와 타입·`DEFAULT_DENIED_COMMANDS`만 남았다.
+- TS에 남긴 것: 타입(`ExecutionPolicy` 등), 기본 금지 명령 목록(Rust로 **인자로 넘긴다**. 두 곳에서 따로 정하지 않는다), `path.sep === '\\'`(플랫폼 값이라 껍데기가 넘긴다), 알 수 없는 입력(`unknown`)에서 `path`·`command`를 꺼내는 일(`fileInput`·`commandInput`; 구멍 난 배열은 빈 글자로 채워 JSON에서 `null`이 되지 않게 한다).
+- **호출부마다 막는 쪽인가 여는 쪽인가**(AGENTS.md):
+
+  | 호출부 | 쪽 | 맞추는 정도 | 모르는 입력 |
+  | --- | --- | --- | --- |
+  | `workspace.ts`의 `foldName`(숨긴 이름·비밀 파일) | 막는 쪽(거부 목록) | 넓게(접기) | 걸린 것으로 |
+  | `isProtectedPath`: `checkToolPolicy`의 보호 경로, `workflow.ts`의 보호 경로 변경 확인, `task-plan.ts`·`task-cards.ts`의 레인 겹침(겹침으로 보면 더 나눈다) | 막는 쪽 | 넓게(`canonicalProjectPath`) | 보호되는 쪽(true) |
+  | `isWithinScope`: `checkToolPolicy`의 쓰기 범위, `task-plan.ts`의 `isInScope` | 여는 쪽(허용 목록) | 좁게(`normalizeProjectPath`만, 이름은 안 접음) | 범위 밖(false) |
+  | `isToolAllowed` | 여는 쪽 | 정확히 같은 이름 + 읽기 도구 함의 두 개 | 모르는 이름은 거절 |
+  | 금지 명령 판정 | 막는 쪽 | 첫 토큰은 `basename`, 셸 감싸기는 낱말 단위 | 규칙이 비어도 찾으면 거절 |
+  | `hasApprovalToken` | 여는 쪽 | JS `trim` 뒤 빈 글자가 아님 | 문자열이 아니면 없음 |
+
+  거부 목록의 접기 함수와 허용 목록의 정리 함수는 계속 따로다. 허용 목록에 접기를 쓰는 변이(`s4`)와 대소문자를 무시하는 변이(`s5`)는 벡터가 잡는다.
+- 이름 접기와 Unicode 판(#1090의 결정): `foldName`의 NFKD·NFKC는 `unicode-normalization = "0.1.26"`(의존은 `tinyvec` 하나, `Cargo.lock` 포함)로, `[\p{M}\p{Cf}]` 제거는 `regex`의 Unicode 표로, `toUpperCase().toLowerCase()`는 `str::to_uppercase().to_lowercase()`(전체 대소문자 매핑, 그리스 시그마 끝 글자 문맥 포함)로, 끝의 `.`·공백 제거는 `trim_end_matches`로 옮겼다. Node 22.17은 ICU 77.1·Unicode 16.0이고 위 크레이트·표준 라이브러리는 Unicode 17 표라 갈릴 수 있어 전체 코드 포인트로 견줬다.
+- **전체 코드 포인트 비교**(`path-policy-codepoints.test.ts`, 약 19초): 0~0x10FFFF(서로게이트 제외) 글자마다 `c`·`a`+`c`·`c`+`a`·`c`+`.` 네 가지, 4,448,256개를 옛 구현과 새 구현에 넣었다. **다른 결과는 97개 글자(388개 입력, 네 문맥 모두)**이고 `path-policy-fold-diffs.json`에 고정했다. 전부 Unicode 16이 배정하지 않은 글자(Unicode 17에서 새로 생긴 `U+0558`·`U+058B`·`U+058C`, `U+209D`~`U+209F`, `U+A7CE`·`U+A7D2`·`U+A7D4`·`U+A7F1`, `U+107BB`~`U+107BF`, `U+16EA0`~`U+16EB8`, `U+1B123`~`U+1B126`, `U+1D6A6`, `U+1DF95`, `U+1DFCD`~`U+1DFFF` 등)라 옛 구현은 접지 않고(`fold(c) === c`) 새 구현은 호환 분해·대소문자 접기로 다른 글자(`w`·`y`·`z`·`s`·`ss`·`こと`·`トキ` 등)로 접는다. (이슈의 69개는 NFKD만 견준 수이고, 이 시험은 대소문자 접기 단계까지 더한 전체 접기라 97개다.)
+- **방향 판정**: 옛 구현이 같은 꼴로 모으던 입력을 새 구현이 가르는(열린 쪽) 경우가 있는지를 "옛 결과가 같으면 새 결과도 같다"로 4,448,256개 전부에서 확인했다. **충돌 0**. 꼴 수는 옛 3,310,014개에서 새 3,309,735개로 279개 줄었다(더 모은다). 규칙 이름 `.git`·`.env`·`node_modules`·`workflows`·`infra`의 글자 하나를 바꾼 이름(접히는 글자 8,623개 × 자리)에서도 옛 구현이 규칙과 같게 보던 1,996개를 새 구현이 모두 같게 보고, 새로 같게 보는 이름은 4개(Unicode 17 글자)뿐이다. 따라서 97개는 모두 **더 막는 쪽**이다(미배정 글자를 쓴 이름이 같은 꼴로 모일 뿐 정상 이름은 막히지 않는다). 반대 방향(옛은 접던 것을 새가 안 접음)은 0이라 NFKD 뒤 추가 매핑은 필요 없었다. 고정 목록 비교는 `process.versions.unicode === '16.0'`일 때만 하고(다른 Node는 목록이 달라질 수 있다), 열린 쪽 검사는 어느 판에서도 한다. 글자 둘 이상의 무작위 문맥(결합 문자·시그마·`ß`·`İ`·`ŉ` 등 풀에서 20만 개, 서로 다른 길이 2~6)도 다른 결과 0.
+- 차등 시험(`path-policy-differential.test.ts`, 옛 TS를 `path-policy-legacy.ts`로 복사, 기본은 시드 4개 × 3천 번, `PATH_POLICY_DIFF_SEEDS`·`PATH_POLICY_DIFF_ITERATIONS`·`PATH_POLICY_DIFF_REPORT`): 시드 8개 × 15만 번 = **함수 13종 각 120만 번**(표기 정리·접기·꼴 맞추기·보호·범위의 Windows 판은 Rust를 직접 불러 옛 구현의 `sep` 인자와 견줌, 입력 모양 변형 11종 포함) 비교했다. **열린 쪽 뒤집힘(보호 경로가 보호 안 됨, 범위 밖이 범위 안, 금지가 허용, 허용 안 된 도구가 허용) 0**. 다른 결과는 의도한 둘뿐이다: `isToolAllowed` 280,526건·`checkToolPolicy` 79,930건(Windows 판 80,265건)이며 아래 의도한 차이에 해당하고, 나머지 함수는 다른 결과 0이다. 분포: 보호 경로 참 975,079·거짓 224,921, 쓰기 범위 참 55,097·거짓 1,144,903, 정책 결정은 허용 800,310과 경로 이탈·범위 밖·보호 경로·금지 명령·`gradle --stop`·도구 목록·승인 거절을 모두 포함. 대조 장치: 쓰기 범위의 `/` 확인을 뺀 옛 구현, 쓰기 범위에 접기를 쓴 옛 구현, 결과 한 글자를 바꾼 값 둘이 차이로 잡힌다.
+- 벡터(`path-policy-vectors.test.ts` + `path-policy-vectors.json`, 5,214개 + 의도한 차이 4개 + 경계 단언): 기대값은 옛 TS가 낸 값이다. `.git`·`.GIT`·`.git.`·`.git `·`.gi\u200Bt`·전각·`ſ`·켈빈 기호·결합 악센트·`ß`·`İ`·`ΑΣ`·`ας`, `../`·`a/../b`·`a//b`·역슬래시(lenient 켜고 끔)·`C:/x`·`a:b.txt`·빈 글자·`.`·NUL, 쓰기 범위 `src` 대 `srcx/a`·`src/../x`·`SRC/a`·`src\a`, 금지 명령의 `sh -c`·`bash -lc`·`env`와 낱말 경계(`git pushx`·`xgit push`·`gitpush`·`git;push`), `gradle --stop`의 구분자(`;&|(`)·공백 종류(U+00A0·U+0085·U+FEFF)·`--stopx`·`gradlew` 접미, 빈 규칙의 공백 분기, `read_lines`→`read_file`·`search_files` 함의, 승인 토큰의 공백 종류. 옛 TS에 돌리면 의도한 차이 4개만 실패한다.
+- 의도한 차이(모두 더 막는 쪽): (1) `find`가 찾은 규칙이 빈 글자(`protectedPaths: ['']`, `deniedCommands: ['']`)면 옛 구현은 `if (found)`의 거짓으로 통과시켰고(뒤의 규칙도 건너뜀) 새 구현은 거절한다. (2) 도구 이름이 `constructor`·`toString`·`__proto__`처럼 `Object.prototype`의 속성이면 옛 구현은 `IMPLIED_BY[tool].every`에서 던졌고(`executeTool`의 `catch`가 실패로 돌려 실행하지 않았다) 새 구현은 거절한다. (3) Unicode 17 글자 97개를 접는다(위). (4) 짝 없는 서로게이트는 napi 경계에서 U+FFFD가 된다(Node도 파일 이름에는 그렇게 쓴다).
+- 검토에서 찾은 열린 쪽 결함과 고침(트러블슈팅 166): 쓰기 범위(허용 목록)가 서로 다른 짝 없는 서로게이트(또는 U+FFFD)를 경계에서 같은 글자로 읽어 `isWithinScope('a\uD800/x', 'a\uDC00')`가 범위 안이 됐다. 차등 시험과 전체 코드 포인트 비교가 서로게이트를 빼고 돌아 놓쳤다. 쓰기 범위(허용 목록)는 파일과 범위를 `encodeLoneSurrogates`(3p)로 같이 바꿔 견주고(`check_tool_policy`의 `scope_file` 인자, `isWithinScope` 껍데기), 보호 경로(거부 목록)는 파일 시스템이 쓰는 꼴(짝 없는 서로게이트 → U+FFFD)로 견준다. 처음 고침은 보호 경로까지 단사로 바꿨다가 커밋 보안 검토의 지적(거부 목록이 파일 시스템보다 좁아진다)으로 나눴다. `path-policy-surrogates.test.ts`가 무작위 2만 쌍에서 쓰기 범위는 옛 구현과 같은 결정, 보호 경로는 옛 구현과 파일 시스템 꼴이 막던 것을 모두 막음을 단언하고, 변이 7개가 모두 잡힌다.
+- 새 던짐 경로와 처리: 정책의 모양이 어긋나면(`protectedPaths`가 문자열 등) Rust가 던진다. 부르는 곳 `executeTool`은 `checkToolPolicy`를 `try` 안에서 불러 던지면 도구를 실행하지 않고 실패로 돌린다. Pi 확장(`bstudio-policy.ts`)은 정책 목록을 환경 변수 문자열 분해로 만들어 항상 문자열 배열이다. 던져서 판정을 건너뛰고 통과하는 자리는 없다.
+- 변이: Rust 핵심 줄 83곳(NUL·역슬래시 조건·드라이브 문자·`..` 접두·끝 `/`·`.`, 접기의 `\p{M}`/`\p{Cf}` 한쪽 빼기·`Mn`만·대문자 단계·NFKD→NFD·NFKC→NFC·끝 점만/공백만·점·공백뿐 예외, 보호 경로의 빈 규칙·모르는 입력·점 접두 규칙·접두 뒤 `/` 제거·`contains`·대소문자 무시, 쓰기 범위의 접두 `/` 제거·모르는 입력 true·접어서 비교·대소문자 무시·점 접두 추가·빈 규칙, 도구 함의의 `all`→`any`·목록 바꾸기·모르는 이름 전부 허용, 승인 `trim`, 경로 도구 목록·이탈 판정·범위 `any`→`all`·보호 `find`→`all`·금지 추가 규칙 무시·셸 감싸기 판정 제거·`gradle` 검사 제거·승인 조건 반전, 토큰 경계·basename·셸 목록, 낱말 경계 제거(앞·뒤·사이), 빈 규칙의 네 분기, `gradle` 정규식의 `(`·`w?`·구분자 넘김·끝 경계·공백, `basename`) 중 78곳이 잡혔다(vitest 요약 줄로 판정). 그중 둘(`t4` 빈 규칙 가드 제거, `k5` 빈 글자 분기 제거)은 패닉으로 워커가 죽어 요약 줄에 `failed` 없이 시험 일부가 실행되지 못한 채 끝났다(잡힘으로 셈). `g1`(`gradle`의 `(` 구분자 제거)은 처음에 살아남아 `echo (gradle --stop)` 등 벡터를 더해 잡았다. 남은 5곳은 동치다: `foldName`의 NFKC→NFC(NFKD 뒤 대소문자 접기가 호환 분해되는 글자를 만들지 않아 전체 코드 포인트와 무작위 문맥에서 결과가 같다), 보호 경로의 `eq_ignore_ascii_case`(양쪽이 이미 소문자로 접힌 꼴), `starts_with_tokens`의 `command[0].is_empty()`(빈 첫 글자의 basename은 빈 글자라 비어 있지 않은 토큰과 같을 수 없다), `split_rule`의 `trim`(뒤의 공백 분할·빈 조각 제거가 이미 같다), `gradle` 경로 접두 `\S*/`→`.*/`(최종 `/` 앞의 마지막 공백이 구분자 역할을 해 맞는 문자열의 집합이 같다).
+- **CI에서 찾은 열린 쪽과 고침(2026-11-10, 트러블슈팅 168)**: PR #1095의 CI(Node 22 최신 = 22.23.4, ICU 78.3, **Unicode 17.0**)에서 전체 코드 포인트 시험이 실패했다. 로컬은 Node 22.17(Unicode 16.0)이라 몰랐다.
+  - 원인: 결합 문자 제거에 쓴 `regex`의 `\p{M}` 표가 Unicode 16(regex-syntax 0.8.11)이다. Unicode 17 Node의 옛 구현은 새 결합 문자 42개(`U+1ACF`~`U+1ADD`, `U+1AE0`~`U+1AEB`, `U+10EFA`·`U+10EFB`, `U+11B60`~`U+11B67`, `U+1E6E3`·`U+1E6E6`·`U+1E6EE`·`U+1E6EF`·`U+1E6F5`)를 지우는데 새 구현은 남겼다. `.git`+`U+1ACF`가 옛 구현에서는 `.git`, 새 구현에서는 다른 이름이 되어 숨긴 이름을 비켜 갔다(거부 목록이 Node보다 좁아짐). 대소문자 매핑과 NFKD·NFKC는 두 판 모두 열린 쪽 차이가 없었다.
+  - 판 사실(이 기계에서 확인): Node 22.17.0 Unicode 16.0, Node 22.23.4 Unicode 17.0·ICU 78.3, regex-syntax 0.8.11 Unicode 16.0.0, unicode-normalization 0.1.26 Unicode 18.0.0(`char::is_combining_mark` = General_Category Mark), Rust std `char::UNICODE_VERSION` 17.0.0.
+  - 고침 1: 결합 문자를 두 표의 **합집합**으로 지운다(`regex`의 `[\p{M}\p{Cf}]` + `unicode_normalization::char::is_combining_mark`). 이미 쓰는 크레이트라 의존은 늘지 않는다. Unicode 17 표 크레이트를 새로 들이는 길(a)은 18이 나오면 또 같은 일이 생기고, 미배정 글자(`\p{Cn}`)까지 지우는 길(b)은 지우기가 대소문자 매핑보다 앞이라 "새 판에서 대문자인 글자 → 옛 판에서 소문자"를 가르는 열린 쪽이 생길 수 있어 고르지 않았다.
+  - 고침 2: **점·공백만 남는 이름은 빈 꼴로 모은다**(옛 구현은 그대로 두었다). 고침 1만 하면 Unicode 16 Node에서 새 열린 쪽이 났다: 새 결합 문자 `u`를 Unicode 16 Node의 옛 구현은 글자로 보아 `u`와 `u.`을 같은 꼴로 모으는데 새 구현은 `""`와 `.`으로 갈랐다. Unicode 17 Node의 옛 구현은 `u`를 빈 이름과, `u.`을 `.`과 모은다. 한 Rust 함수가 두 판 모두보다 좁지 않으려면 빈 이름과 `.`(그리고 `..`·공백)이 한 꼴이어야 해서 다른 길이 없다. 빈 꼴은 숨긴 이름·비밀 파일 목록에 없고, 보호 경로 규칙이 빈 꼴이 되면 전부 보호로 읽혀 모두 더 막는 쪽이다. 점·공백만으로 된 이름은 Windows에서 쓸 수 없는 이름이기도 하다.
+  - 결과(두 판 각각): 고정 목록을 판별로 나눴다(`path-policy-fold-diffs.json`의 `"16.0"` 176개, `"17.0"` 105개, 17.0 목록은 16.0 목록의 부분집합). 그 밖의 차이는 "옛 꼴이 점·공백뿐이고 새 꼴이 빈 글자"인 입력뿐이다(Node 22.17: 글자 하나 문맥 74개·`c.` 문맥 2,747개, Node 22.23.4: 74개·2,789개). **열린 쪽 뒤집힘 0**(4,448,256개 입력 전부, 두 판). 벡터는 24개가 같은 의도한 차이로 바뀌었고 시험이 그 수를 고정한다. 차등 시험(기본 시드 4개 × 3천 번)은 `foldName`·꼴 맞추기·보호 경로·도구 정책의 차이를 모두 이 의도한 차이로 설명하고 열린 쪽은 0이다.
+  - 변이: 합집합 줄을 지우면 Node 22.17에서 1개(고정 목록), Node 22.23.4에서 2개(열린 쪽 포함), Rust 단위 시험 1개가 실패한다. 점·공백 이름을 그대로 두는 옛 규칙으로 되돌리면 두 판 모두 2개(열린 쪽 포함)와 Rust 단위 시험 1개가 실패한다.
+- 돌리지 않은 것: 실제 세션에서 정책을 걸고 에이전트가 쓰는 경로로 옛 결과와 견주기, Windows 실기(Windows 판은 Rust 함수에 `backslash_sep`을 직접 넘겨 옛 구현의 `sep` 인자와만 견줬다), Node 22.17(Unicode 16)·22.23.4(Unicode 17) 밖의 판(고정 목록이 없는 판에서는 고정 목록 비교만 건너뛰고 열린 쪽 검사는 한다), Pi 확장이 실제 Pi 프로세스에서 같은 판정을 내는지, 실험 경로(없음: 판정 코드만 옮겼고 실험 경로만을 위한 확인은 하지 않았다). 막는 검사를 바꾼 PR이므로 커밋 보안 검토 결과를 본 뒤 머지한다. `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림).
+
 ### 덧붙임: 3단계 3t — 연결·인증·조율 판정 (2026-11-10, [#1098](https://github.com/dj258255/b-studio/issues/1098))
 
 - 옮긴 것: `mcp-http-server.ts`의 `authorize`·`hostAllowed`·`hostnameOf`·`tokenMatches`, `browser-check.ts`의 `isAllowedRequest`·`isAutomaticFavicon`·`describeStep`, `change-tracker.ts`의 `rejectedChangeFeedback`을 새 `crates/bstudio-guard/src/connection_judge.rs`로. `coordination/board.ts`의 `Board.validate`, `read`의 고르기(정렬 `compareNotes`·개수·바이트 예산), `board-mcp.ts`의 입력 검사(`stringField`·`stringArrayField`·`asPostKind`·`asReadKinds`)와 `formatNote`를 기존 `coordination.rs`로. 옛 TS 구현은 같은 커밋에서 지웠고, 옛 본문은 시험 기준으로 `connection-legacy.ts`·`coordination/board-legacy.ts`에 둔다(시험 말고는 아무도 import하지 않는다).
@@ -9547,3 +9582,80 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 옛 동작과 다른 것: 삭제가 링크 너머를 지우지 않고, 파일 자리의 비어 있지 않은 디렉터리에서 멈춘다(전에는 재귀 삭제). io 오류 문구는 Rust의 것으로 바뀐다. 준비 단계는 여러 번·동시에 불려도 같은 결과다(`create_dir_all`·`create_new`).
 - 검증: cargo 9개(`safe_fs`: 자리 준비, `O_NOFOLLOW`+fstat로 링크 비추종, 재귀 금지·비어 있지 않으면 멈춤, 이름 검사 fail-closed, 동시 호출). vitest 7개(`link-safe-fs.test.ts`: TS→napi→Rust 전체 경로, 임시 폴더만 사용). `pnpm typecheck`(6개)·studio lint 통과. `evaluation-assets.ts`에서 직접 파일 I/O 제거.
 - 하지 않은 것: 실제 평가 실행 종단은 돌리지 않았다(임시 폴더로 같은 경로를 확인). 실험 경로(kubernetes-provider 등)는 타입 검사로만(지원 범위 밖, ADR-166). `snapshots`·`sync`의 `execFileAsync` 나머지는 이 슬라이스 밖(남김). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림). 자원 절감은 4단계에서 잰다.
+
+## ADR-194 claude-code 러너는 Agent SDK 대신 공개 CLI 입출력(stream-json)으로 돈다
+
+상태: 채택
+관련: ADR-142(네트워크 재시도), ADR-131(턴 상한), ADR-151(자동 압축 창), ADR-189(문서에 없는 꼴은 읽지 않는다), ADR-191·192(결정 5: 러너 선택), ADR-166(지원 범위), 이슈 [#1091](https://github.com/dj258255/b-studio/issues/1091)
+
+### 맥락
+- 지원 경로인 `claude-code` 러너는 TS 전용 `@anthropic-ai/claude-agent-sdk`의 `query()`와 같은 프로세스 안 MCP 서버(`createSdkMcpServer`)를 썼다. Anthropic의 공식 Agent SDK는 TypeScript와 Python뿐이라 "Node 없는 바이너리 하나"(ADR-192)로 갈 수 없었다. ADR-192 결정 5가 정하라고 미룬 일이고, 이슈 #1091이 (b) 공개 CLI 입출력으로 다시 쓰기를 골랐다.
+- SDK는 안쪽에서 `claude` CLI를 자식 프로세스로 띄우고 표준 입출력으로 이야기한다. 러너가 SDK 옵션으로 쓰던 것은 모두 공식 CLI 문서에 플래그로 있다. 없는 것은 SDK가 표준 입력에 흘리는 제어 메시지(`control_request`: `interrupt`, `accountInfo`, `supportedModels`)다.
+
+### 결정
+**1. 러너는 `claude -p --input-format stream-json --output-format stream-json --verbose`를 자식 프로세스로 띄운다.** 실행 파일·인자는 배열로 넘기고(셸을 거치지 않는다), 요청 글·프로젝트 안내(`AGENTS.md`)처럼 바깥에서 온 글은 인자에 넣지 않는다(`--`로 시작하면 옵션으로 읽힌다). 요청은 표준 입력의 사용자 메시지로, 지시문은 0600 파일로 보낸다. 구현은 `packages/agent/src/claude-code-runner.ts`와 얇은 프로세스 층 `claude-cli-process.ts`다.
+
+**2. 쓰는 플래그는 문서에 있는 것만이다.** (모두 2026-11-10에 직접 읽음)
+
+| SDK 옵션 → 플래그 | 근거 |
+|---|---|
+| `-p`, `--input-format stream-json`, `--output-format stream-json`, `--verbose` | https://code.claude.com/docs/en/cli-reference (`--print`·`--input-format`·`--output-format`·`--verbose` 행), https://code.claude.com/docs/en/headless (Stream responses) |
+| `mcpServers` → `--mcp-config <0600 파일>` + `--strict-mcp-config` | cli-reference의 두 행. 도구는 `startToolServer`(`mcp-http-server.ts`)의 루프백 HTTP MCP로 낸다. 토큰은 파일에 쓰지 않고 `Authorization: Bearer ${B_STUDIO_MCP_TOKEN}`의 환경 변수 이름만 적는다(자식 환경으로만 간다). 설정 파일의 `${VAR}` 풀이는 이번에 문서 쪽을 다시 읽지 못했고(아래 "돌리지 않은 것"), 진짜 CLI 2.1.321 실측으로 동작을 확인했다 |
+| `allowedTools` → `--allowedTools a,b,…` | cli-reference. SDK에 넘기던 목록과 같다 |
+| `tools: []`(조사 모드는 `['WebSearch','WebFetch']`) → `--tools ''`(`WebSearch,WebFetch`) | cli-reference의 `--tools` 행("Use `""` to disable all") |
+| `permissionMode: 'dontAsk'` → `--permission-mode dontAsk` | cli-reference, https://code.claude.com/docs/en/headless (Auto-approve tools의 dontAsk) |
+| `settingSources: []` → `--setting-sources ''` | cli-reference. 관문 러너가 이미 쓰는 꼴이고 실측에서 동작했다 |
+| `systemPrompt: {type:'custom', snapshot:false}` → `--system-prompt-file <파일>` + `--system-prompt-snapshot off` | cli-reference의 System prompt flags와 "System prompt flags in resumed conversations"(v2.1.257 이상, 트러블슈팅 130의 "기록하지 않고 매번 지금의 지시문"과 같은 뜻). 대체(custom)라서 append가 아니라 `--system-prompt-file`이다 |
+| `maxTurns` → `--max-turns` | cli-reference |
+| `model` → `--model`, `effort` → `--effort` | cli-reference |
+| `resume`+`forkSession` → `--resume <id> --fork-session` | cli-reference. id는 UUID 꼴만 받는다(아니면 인자에 넣지 않고 "새 대화로 시작" 경고) |
+| `env` → 자식 프로세스 환경(`CLAUDE_CODE_AUTO_COMPACT_WINDOW` 등) | https://code.claude.com/docs/en/env-vars. 같은 조건(사용자가 준 값 우선, `B_STUDIO_CLAUDE_CODE_COMPACT_WINDOW`)이다 |
+
+SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에 없어 넘기지 않는다(관문 러너는 그대로 둔다).
+
+**3. 출력은 문서에 있는 메시지만 읽는다.** `system/init`(`session_id`·`model`·`claude_code_version`, 그리고 headless 문서의 `mcp_servers`·`mcp_server_errors`), `system/status`(`compacting`), `system/compact_boundary`(`compact_metadata`), `assistant`(`message.id`·`usage`·`content`·`parent_tool_use_id`), `result`(`subtype`: `success`·`error_max_turns`·`error_max_budget_usd`·그 밖, `is_error`·`stop_reason`·`errors`·`modelUsage`·`duration_api_ms`)를 지금과 같은 `AgentEvent`로 바꾼다. JSON이 아닌 줄과 모르는 type·필드는 무시한다. **프로세스가 결과 없이 끝나면 통과로 남기지 않고 실패로 던진다**(종료 코드·신호·표준 오류 끝 3줄을 메시지에 담는다. 실행 파일을 띄우지 못한 경우도 같다). 결과를 이미 받은 뒤의 종료 코드는 판정을 바꾸지 않는다(진짜 CLI는 오류 결과 뒤에 0이 아닌 코드로 끝난다, 트러블슈팅 131). init이 b-studio 도구 서버 연결 실패를 알리면(`mcp_server_errors` 또는 상태 `failed`) 도구 없이 돌리지 않고 실패로 끝낸다: 도구가 없으면 모델이 "끝났다"고 하고, 바뀐 파일이 없어 게이트가 통과해 버리기 때문이다.
+
+**4. 입력.** 첫 요청, 게이트 되돌림, 실행 중 지시(steering)는 표준 입력에 `{"type":"user","message":{"role":"user","content":"…"},"parent_tool_use_id":null}` 한 줄씩 보낸다(https://code.claude.com/docs/en/agent-sdk/streaming-vs-single-mode 의 스트리밍 입력 예).
+
+**5. `interrupt()`는 쓰지 않는다.** `control_request`는 공식 문서에 없다. 대신 프로세스를 끝낸다: 표준 입력 닫기 → (정해진 시간 뒤) SIGTERM → (그 뒤) SIGKILL. SIGTERM의 뜻은 headless 문서의 "Stop a run with SIGTERM"(종료 코드 143, 진행 중인 턴은 끝나지 않은 채 남고 결과는 기록하지 않음, 다음에 `--resume`하면 그 턴은 그대로 두고 새 요청이 이어감)이다. 자리별 처리:
+
+| 쓰던 자리 | 새 처리 | 결과·세션 id·사용량 |
+|---|---|---|
+| 턴 상한 넘음(진행 중인 턴, 803줄 근처) | `toolsClosed`로 이후 도구 호출을 거절하고 입력 닫기 + **즉시** SIGTERM, 하던 도구 호출이 끝나기를 기다린 뒤 게이트 재확인(ADR-131) | 같다. 결과 메시지는 오지 않으므로 사용량은 그 전 결과까지의 값이고, 세션 id는 init에서 이미 잡았다(SDK도 interrupt 뒤 메시지를 읽지 않았다) |
+| `error_max_turns` 결과 | 프로세스가 이미 턴을 끝냈다. 게이트 재확인만 | 같다 |
+| ask_user로 되묻고 멈춤 | 결과(턴의 끝)를 받은 뒤라 입력만 닫는다. 끝나지 않으면 10초 뒤 SIGTERM, 5초 뒤 SIGKILL | 같다. 세션 id를 남겨 다음 요청이 `--resume`으로 잇는다 |
+| 취소(abort) | 입력 닫기 + 즉시 SIGTERM, 결과 대신 취소 이유를 던진다(결과가 없으면 "결과 없음"이 아니라 취소다) | 같다(던진다) |
+| 승격·네트워크 재시도 | 입력을 닫고(`graceful`) 끝나기를 기다린 뒤 같은 세션을 `--resume --fork-session`으로 새 프로세스에 잇는다. 사용량·`duration_api_ms`는 프로세스마다 누적값이라 끝난 프로세스의 값에 더한다 | 같다 |
+| 정상 끝(`finish`) | 입력 닫기. 안 끝나면 같은 시간 뒤 SIGTERM·SIGKILL | 같다 |
+| `fetchClaudeCodeModels`의 마지막 `interrupt()` | 이 함수 자체를 아래 6으로 바꿨다 | |
+
+판정이 난 뒤(`finish`)와 턴 상한 처리 중에는 도구 서버가 새 도구 호출을 거절한다. 입력에 대기 중이던 지시가 있으면 CLI는 결과 뒤에 다음 턴을 시작해 이미 낸 판정 뒤에 파일을 바꿀 수 있기 때문이다(가짜 CLI 시험으로 재현, 아래 변이 확인).
+
+문서에는 SIGINT도 있다("To end the turn instead, send SIGINT"). 실측(진짜 CLI 2.1.321, 모델 응답 대기 중): SIGINT는 13ms 뒤 종료 코드 0, `user` 줄 하나만 내고 결과는 없다. SIGTERM은 11ms 뒤 종료 코드 143이고, 두 경우 모두 이어서 `--resume --fork-session`이 성공했다(새 세션 id, `result/success`). 입력만 닫으면 진행 중인 턴을 끝까지 하고(모델이 20초 걸리는 응답으로 16초 뒤) 결과를 낸 뒤 0으로 끝난다. 사실상 같은 결과라 범수 님이 정한 순서(입력 닫기 → SIGTERM → SIGKILL)를 따랐고, SIGINT로 바꿀 수 있는 자리는 `claude-cli-process.ts`의 `stop('now')` 한 곳이다.
+
+**6. 사전 확인과 모델 목록.** `preflightClaudeCode`는 `claude auth status`(https://code.claude.com/docs/en/cli-reference 의 CLI commands, JSON, 로그인하지 않았으면 종료 코드 1)를 부른다. 이메일·조직은 남기지 않고 `subscriptionType`·`authMethod`(API 키 방식이면 `apiKeySource`)·`apiProvider`만 쓴다. `fetchClaudeCodeModels`는 SDK의 `supportedModels()`가 쓰던 제어 메시지가 문서에 없고 공개 CLI 입출력에 모델 목록을 묻는 방법이 없어 **항상 `CLAUDE_CODE_MODELS_UNSUPPORTED`로 던진다.** 스튜디오의 모델 선택(`model-picker.ts`)은 이미 있던 알려진 별칭 표(opus·sonnet·haiku·fable)로 되돌아가고, 이 경우에는 "목록을 불러오지 못했다"는 알림을 달지 않는다. 계정이 실제로 푸는 모델 id·설명·노력 단계 지원 여부는 더 이상 실시간으로 반영되지 않는다(감수한 손실, 아래 한계).
+
+**7. 실행 파일은 절대 경로로 찾아 띄운다.** 자식 프로세스는 cwd를 프로젝트 루트로 띄우므로, spawn에 `claude`라는 이름만 넘기면 PATH의 빈 항목·`.`·상대 항목이 프로젝트 폴더(에이전트가 파일을 쓰는 곳)로 풀려, 에이전트가 심어 둔 `claude`가 b-studio의 권한으로 돈다(옛 SDK는 함께 깔린 CLI의 절대 경로를 썼다. 커밋 보안 검토 지적, 트러블슈팅 167). `resolveCliCommand`(`claude-cli-process.ts`)가 PATH의 절대 항목만 차례로 보고, 실행할 수 있는 파일 중 실제 경로(링크를 따라간 경로)가 프로젝트 루트 밖인 첫 후보를 고른다. 경로가 든 명령은 절대 경로만 받는다. 못 찾으면 띄우지 않고 ENOENT로 끝낸다(지금의 "실행 파일 없음" 흐름). **자식에게 넘기는 PATH도 같은 규칙으로 정리한다**(`childEnv`): 빈 항목·상대 항목과 실제 경로가 프로젝트 안인 항목(실제 경로를 못 읽은 항목 포함)을 뺀다. npm으로 깐 `claude`는 `#!/usr/bin/env node` 스크립트라, 실행 파일을 절대 경로로 띄워도 `env`가 자식의 PATH에서 `node`를 다시 찾기 때문이다(두 번째 커밋 보안 검토 지적). 사전 확인(`claude auth status`)도 cwd를 막을 폴더로 쓴다. 호출부(세션·CLI·벤치)는 모두 프로젝트 루트를 cwd로 넘긴다.
+
+**8. 도구 서버 연결은 `connected`를 확인해야 통과다.** init의 `mcp_servers`에서 b-studio 서버의 상태가 `connected`가 아니면(목록에 없음·`needs-auth`·`pending`·`disabled`·`failed`, `mcp_server_errors`가 있음) 실패로 끝낸다. init 없이 결과가 오면 연결을 확인하지 못한 것이라 역시 실패다. 도구 없이 돈 턴이 "끝났다"고 하면 변경이 없어 게이트가 통과해 버리기 때문이다(검토에서 처음 구현이 `failed`만 막는 것을 찾았다). 상태 값의 근거는 https://code.claude.com/docs/en/agent-sdk/typescript 의 `McpServerStatus`다. 진짜 CLI 2.1.321 + 가짜 모델 서버 실측에서 b-studio 서버는 `connected`로 와서 실행이 `done`으로 끝났다.
+
+### 바꾸지 않은 것과 남은 SDK 사용
+- 같은 패키지의 탐색형 QA(`explore-qa-claude-code.ts`, 같은 프로세스 MCP 도구를 쓴다), 스튜디오의 질문 경로(`apps/studio/lib/server/claude-code-ask.ts`, 도구 없는 단발 `query`), 벤치(`apps/studio/bench/coordination/plain-baseline.ts`의 `query`+훅)는 여전히 `@anthropic-ai/claude-agent-sdk`를 쓴다. 이 이슈의 범위는 `runClaudeCodeAgent`와 그 파일의 단발 호출 둘(preflight·모델 목록)이다. 그래서 두 패키지의 `package.json` 의존성은 그대로 두고, 위 세 경로를 옮겨 의존성을 지우는 일은 따로 해야 한다. 아직 SDK 타입을 쓰는 곳을 위해 `ClaudeCodeSdk`·`ClaudeCodeQuery`는 `claude-code-sdk.ts`로 옮겼다(공개 이름은 그대로).
+- 관문 러너(`claude-gateway-runner.ts`)와 다른 러너는 동작을 바꾸지 않았다. `zodShape`·`serialQueue`를 `tool-schema.ts`로 옮겨 순환 참조를 피했고 기존 경로에서 다시 내보낸다(타입 검사·기존 테스트로만 확인).
+- 메시지 형식은 검토에서 다시 읽어 확인했다(2026-11-10). https://code.claude.com/docs/en/agent-sdk/typescript 의 `SDKStatusMessage`(`status: "compacting" | null`), `SDKCompactBoundaryMessage`(`compact_metadata`의 `trigger`·`pre_tokens`), `SDKSystemMessage`(init의 `session_id`·`model`·`claude_code_version`·`mcp_servers[].status`, `McpServerStatus`의 `failed`), `SDKResultMessage`(`success`와 오류 subtype 넷, `is_error`·`duration_api_ms`·`usage`·`modelUsage`·`errors`), https://code.claude.com/docs/en/headless 의 `mcp_server_errors`("a CI gate can fail on a non-empty array")와 SIGTERM. `compact_metadata`의 `post_tokens`·`duration_ms`는 문서에 없고, 옛 러너처럼 있으면 화면 알림에만 싣는다(판정에 쓰지 않는다).
+
+### 검증
+- **고치기 전 실패.** 새 가짜 CLI 시험 5개(`공식 문서에 있는 플래그만…`, `MCP 설정은 0600…`, `ask_user로 되묻고 멈출 때…`, `CLI가 결과 없이 끝나면…`, `CLI 실행 파일을 띄우지 못하면…`)를 옛 러너에 돌리면 러너가 `command`를 무시하고 SDK로 실제 CLI를 띄워 5개 모두 30초 제한 시간 초과로 실패했다(`Error: Test timed out in 30000ms.` ×5, 5 failed | 57 skipped). 실제 모델이 불리지 않게 `ANTHROPIC_BASE_URL=http://127.0.0.1:1`로 돌렸고, 남은 SDK 자식 프로세스는 직접 정리했다.
+- **가짜 CLI**(`fixtures/fake-claude-cli.mjs`와 `fake-claude-cli.ts`): 받은 인자·표준 입력 줄·환경·MCP 설정 파일과 지시문 파일 내용을 기록하고, 표준 입력의 사용자 메시지마다 정한 stream-json 줄을 내며, 도구 단계는 `--mcp-config`의 HTTP MCP를 실제로 부른다. 기존 러너 시험 시나리오를 모두 옮겨(이어받기, 압축 알림·상태, 되묻기, 실행 중 지시, 턴 상한 재확인, 게이트 재시도·승격·승격 사용량, 네트워크 재시도, 취소, 사용량·모델 시간 집계, 결과 subtype별 처리, 지연 기동, 프로젝트 안내) 같은 기대값으로 통과시켰다. 새로 둔 시험: 인자 꼴·바깥 글 비주입, 0600 파일과 토큰 비노출, 파일 정리, 세션 id 꼴 검사, 조사 모드 `--tools`, 지시의 표준 입력 꼴, JSON 아닌 줄 무시, 비용 한도·기타 오류·거절, 도구 서버 연결 실패, ask_user 입력 닫기, SIGTERM 무시 CLI의 SIGKILL, 턴 상한의 즉시 SIGTERM과 늦은 도구 호출 거절, 판정 뒤 도착하는 도구 호출 거절, 멈춘 CLI의 취소, 결과 없이 끝남(종료 코드·표준 오류), 실행 파일 없음, `auth status` 일곱 갈래.
+- **변이 확인**(고친 줄을 되돌려 새 시험이 다시 실패하는지): 턴 상한 분기의 프로세스 끝내기 제거(2개 실패), 그 분기의 도구 닫기만 제거(1개), `finish`의 도구 닫기 제거(1개), 결과 없이 끝나도 done으로 닫기(3개), 종료 코드·표준 오류를 메시지에서 뺌(3개), 세션 id 꼴 검사 제거(1개 — 같은 검사가 두 곳이라 한 곳만 빼면 다른 곳이 막는다), init의 도구 서버 실패 무시(1개), `--system-prompt-snapshot off` 제거(2개), SIGKILL 단계 제거(1개), 취소 시 프로세스 끝내기 제거(1개). 처음에는 "턴 상한 뒤 도구 닫기"와 "취소"를 되돌려도 통과해 시험이 약했고, 지연 호출·멈춘 CLI 시나리오를 더해 잡히게 했다.
+- **진짜 CLI + 가짜 모델 서버**(실제 모델·로그인 없음, 임시 포트, 임시 설정 폴더, `ANTHROPIC_BASE_URL`·가짜 키): CLI 2.1.321(`claude --version`)로 새 러너가 (a) `--model sonnet --effort low` 요청 → HTTP MCP `write_file` → 게이트 통과 → `done`(세션 id·`usage` 20/40·모델 호출 2회·`modelMs` 38·`init`의 `CLI 2.1.321`), (b) ask_user → `awaiting_input`(입력 닫기만으로 끝남), (c) (b)의 세션을 `--resume --fork-session`으로 이음(새 세션 id), (d) 모델 응답 대기 중 취소(4.0초에 취소 이유를 던짐)를 끝까지 돌렸다. 서버가 받은 요청에는 b-studio MCP 도구만 있었다(내장 Read·Bash 등 없음, CLI 내부의 `DeferredToolPlaceholder` 하나). 프로브는 `~/.cache/b-studio-ship/rust-migration/real-cli-probe-1091.test.ts`와 `fake-model-runner-1091.mjs`에 있다.
+
+### 감수한 트레이드오프와 한계
+- 모델 목록이 실시간이 아니라 알려진 표다(위 6). 계정·CLI 판에 따라 별칭이 푸는 모델이 바뀌어도 표를 고칠 때까지 반영되지 않는다. `ModelInfo`는 이제 러너가 직접 정의한 꼴이다.
+- 프로세스를 띄우고 끝내는 비용이 있다(승격·네트워크 재시도마다 새 프로세스, 이전에도 새 `query`였다). 진행 중인 턴을 끊으면 그 턴은 세션 기록에 미완으로 남는다(SIGTERM 문서와 같다, 실측에서 `--resume`은 성공했다).
+- 진짜 CLI의 `compacting` 상태·`compact_boundary`는 가짜 모델로 만들기 어려워 가짜 CLI 줄로만 확인했다. 실제 모델로 긴 대화를 돌린 기록은 없다.
+- 지원 기능의 "마지막 실제 확인"(`docs/status.md`)은 고치지 않았다. 실제 세션에서 이 러너를 한 번 돌려 확인하는 일은 남아 있다.
+
+### 돌리지 않은 검증
+- 실제 모델·실제 로그인으로 돈 세션. e2e. 다른 러너 다섯 개와 관문 러너는 타입 검사와 기존 테스트로만 확인했다(공통 함수 `zodShape`·`serialQueue`·`startToolServer`의 위치만 바뀜).
+- 문서 재확인: https://code.claude.com/docs/en/mcp 는 `${VAR}`·`${VAR:-default}` 풀이를 `.mcp.json`의 `command`·`args`·`env`·`url`·`headers`에 대해 적는다. 원격 서버의 `url`·`headers`에서 자격 정보 이름(`ANTHROPIC_API_KEY` 등)은 빈 값으로 읽는다는 예외가 있지만 `B_STUDIO_MCP_TOKEN`은 그 목록에 없다. `--mcp-config` 파일에도 같은 풀이가 된다고 따로 적혀 있지는 않아, 진짜 CLI 2.1.321에서 풀이가 동작하는 것을 실측으로 확인했다(위 검증). 실제 로그인·실제 모델로 돈 세션은 없다.

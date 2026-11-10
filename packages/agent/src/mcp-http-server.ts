@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { zodShape } from './claude-code-runner';
+import { zodShape } from './tool-schema';
 import type { buildTools, ToolOutcome } from './tools';
 
 /** 모델이 b-studio 도구만 부르게 하려고 러너가 띄우는 로컬 MCP 서버. 끝나면 반드시 close()를 부른다 */

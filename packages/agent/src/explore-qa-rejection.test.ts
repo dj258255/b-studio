@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import type { McpServerConfig, SDKMessage, SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-runner';
+import type { ClaudeCodeQuery, ClaudeCodeSdk } from './claude-code-sdk';
 import { runClaudeCodeExploreQa } from './explore-qa-claude-code';
 import { buildQaSystemPrompt, buildQaTools, judge, QaBrowser, QaReport, runExploreQa, type QaDiagnostics, type QaFinding } from './explore-qa';
 import { ScriptedModelClient } from './scripted-client';
