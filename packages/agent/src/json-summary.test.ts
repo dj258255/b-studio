@@ -2,11 +2,11 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { MAX_JSON_SUMMARY_BYTES, summarizeJsonContent, summarizeJsonStructure, summarizeLargeJsonFile } from './json-summary';
+import { MAX_JSON_SUMMARY_BYTES, summarizeJsonContent, summarizeLargeJsonFile } from './json-summary';
 
-describe('summarizeJsonStructure', () => {
+describe('구조 요약(summarizeJsonContent)', () => {
   it('배열이면 길이를 담는다', () => {
-    expect(summarizeJsonStructure([1, 2, 3])).toBe('배열, 3개 항목');
+    expect(summarizeJsonContent(JSON.stringify([1, 2, 3]))).toBe('배열, 3개 항목');
   });
 
   it('배열의 첫 항목이 객체면 필드 이름·타입을 함께 담는다', () => {
@@ -14,20 +14,20 @@ describe('summarizeJsonStructure', () => {
       { id: 1, name: '김철수', tags: ['a', 'b'], active: true, deletedAt: null },
       { id: 2, name: '이영희', tags: [], active: false, deletedAt: null },
     ];
-    expect(summarizeJsonStructure(parsed)).toBe('배열, 2개 항목 · 첫 항목 필드: id: number, name: string, tags: 배열(2), active: boolean, deletedAt: null');
+    expect(summarizeJsonContent(JSON.stringify(parsed))).toBe('배열, 2개 항목 · 첫 항목 필드: id: number, name: string, tags: 배열(2), active: boolean, deletedAt: null');
   });
 
   it('배열의 첫 항목이 원시값이면 필드를 덧붙이지 않는다', () => {
-    expect(summarizeJsonStructure(['a', 'b'])).toBe('배열, 2개 항목');
+    expect(summarizeJsonContent(JSON.stringify(['a', 'b']))).toBe('배열, 2개 항목');
   });
 
   it('객체면 키마다(배열 값이면 길이와 함께) 나열한다', () => {
     const parsed = { posts: new Array(42).fill(0), comments: new Array(2076).fill(0), meta: { ok: true } };
-    expect(summarizeJsonStructure(parsed)).toBe('posts 42개, comments 2,076개, meta');
+    expect(summarizeJsonContent(JSON.stringify(parsed))).toBe('posts 42개, comments 2,076개, meta');
   });
 
   it('빈 객체는 "(빈 객체)"', () => {
-    expect(summarizeJsonStructure({})).toBe('(빈 객체)');
+    expect(summarizeJsonContent(JSON.stringify({}))).toBe('(빈 객체)');
   });
 });
 

@@ -3460,6 +3460,187 @@ pub fn static_shadow_step(input_json: String, known_json: String) -> Result<Stri
     .to_string())
 }
 
+// ── agent: 로컬 CLI 러너의 실행 파일 고르기·판정·사용량(ADR-191 3단계 3ac). TS 껍데기: packages/agent/src/claude-cli-process.ts, claude-code-runner.ts
+use bstudio_guard::runner_judge as rj;
+use bstudio_io::cli_command as cli_cmd;
+
+/// 통과하면 `{ path }`(그 글자를 그대로 spawn에 쓴다), 못 찾으면 `{ reason }`. PATH·루트의 파일 상태는 여기서 읽는다(확인한 경로 = 띄울 경로)
+#[napi]
+pub fn cli_resolve_command(command: String, path_value: Option<String>, forbidden_root: Option<String>) -> String {
+    let result = cli_cmd::resolve_cli_command(&command, path_value.as_deref(), forbidden_root.as_deref());
+    out(&match result {
+        Ok(path) => js_json::object(vec![("path", Some(JsValue::str(path)))]),
+        Err(reason) => js_json::object(vec![("reason", Some(JsValue::str(reason)))]),
+    })
+}
+
+#[napi]
+pub fn cli_child_path(value: String, forbidden_root: Option<String>) -> String {
+    cli_cmd::child_path(&value, forbidden_root.as_deref())
+}
+
+/// `{ window: number | null, ignored?: string }`
+#[napi]
+pub fn runner_resolve_compact_window(raw: Option<String>) -> String {
+    let setting = rj::resolve_compact_window(raw.as_deref());
+    out(&js_json::object(vec![
+        ("window", Some(setting.window.map_or(JsValue::Null, |window| JsValue::Num(window as f64)))),
+        ("ignored", setting.ignored.map(JsValue::str)),
+    ]))
+}
+
+#[napi]
+pub fn runner_is_transient_network_failure(message: String) -> bool {
+    rj::is_transient_network_failure(&message)
+}
+
+/// 입력은 result 메시지의 `{ subtype, is_error, result, stop_reason, errors }`(encodeNative한 JSON). 실패가 아니면 null
+#[napi]
+pub fn runner_describe_result_failure(message_json: String) -> Result<Option<String>> {
+    Ok(rj::describe_result_failure(&input(&message_json, "결과 메시지")?))
+}
+
+/// 입력은 init 메시지의 `{ mcp_servers, mcp_server_errors }`(encodeNative한 JSON). 연결됐으면 null
+#[napi]
+pub fn runner_mcp_setup_failure(message_json: String, server: String) -> Result<Option<String>> {
+    Ok(rj::mcp_setup_failure(&input(&message_json, "init 메시지")?, &server))
+}
+
+#[napi]
+pub fn runner_no_result_message(has_exit: bool, error_message: Option<String>, signal: Option<String>, code: Option<f64>, stderr: String) -> String {
+    rj::no_result_message(has_exit, error_message.as_deref(), signal.as_deref(), code, &stderr)
+}
+
+/// 입력은 result의 `modelUsage`(encodeNative한 JSON, 없으면 `null`). 결과 `{ total: AgentUsage, byModel: Record<string, AgentUsage> }`. null 항목이 있으면 던진다(옛 TS도 던졌다)
+#[napi]
+pub fn runner_usage_of(model_usage_json: String) -> Result<String> {
+    let value = input(&model_usage_json, "modelUsage")?;
+    let (total, by_model) = fail(rj::usage_of(Some(&value)))?;
+    Ok(out(&js_json::object(vec![("total", Some(total.to_value())), ("byModel", Some(rj::by_model_value(&by_model)))])))
+}
+
+#[napi]
+pub fn runner_merge_usage_by_model(base_json: String, query_json: String) -> Result<String> {
+    Ok(out(&rj::merge_usage_by_model(&input(&base_json, "기준 사용량")?, &input(&query_json, "이번 사용량")?)))
+}
+
+#[napi]
+pub fn runner_add_usage(target_json: String, source_json: String) -> Result<String> {
+    Ok(out(&rj::Usage::from_agent(&input(&target_json, "사용량")?).add(rj::Usage::from_agent(&input(&source_json, "사용량")?)).to_value()))
+}
+
+/// 입력은 `duration_api_ms`(encodeNative한 JSON, 없으면 `null`)
+#[napi]
+pub fn runner_api_duration_of(value_json: String) -> Result<Option<f64>> {
+    Ok(rj::api_duration_of(Some(&input(&value_json, "API 시간")?)))
+}
+
+// ── agent: 요구사항 문서 읽기·쓰기(3단계 3ab). TS 껍데기: packages/agent/src/requirements.ts. 글자는 모두 TS가 `encodeLoneSurrogates`한 것이고 결과도 같은 인코딩이다
+use bstudio_guard::requirements_markdown as rmd;
+
+/// `{drafts, jsonBlock, assumptions, manualSteps}`(`encodeNative`와 같은 표기의 JSON). zod 검증 앞의 초안과 첫 JSON 블록의 글자. 던지지 않는다
+#[napi]
+pub fn req_md_parse_body(raw: String) -> String {
+    out(&rmd::parse_body(&raw).to_value())
+}
+
+/// `requirements`는 몸통에서 읽어 zod가 검증한 목록, `stored`는 JSON 블록에서 zod가 검증한 요구사항 목록. 합친 목록 JSON
+#[napi]
+pub fn req_md_merge(requirements_json: String, stored_json: String) -> Result<String> {
+    let requirements = input(&requirements_json, "요구사항 목록")?;
+    let stored = input(&stored_json, "JSON 블록의 요구사항 목록")?;
+    Ok(out(&fail(rmd::merge_stored(&requirements, &stored))?))
+}
+
+/// `{requirements, statusById, assumptions, manualSteps}`(encodeNative) → 마크다운. 모양이 어긋나면 던진다
+#[napi]
+pub fn req_md_serialize(input_json: String) -> Result<String> {
+    fail(rmd::serialize(&input(&input_json, "요구사항 문서 입력")?))
+}
+
+// ── agent: 작은 판정 모음(3단계 3af). 형 변환만 한다. 이름·글은 껍데기가 encodeLoneSurrogates해서 보내고 결과 글에서 되돌린다.
+use bstudio_guard::{database_branches, json_summary, steering, task_graph};
+
+/// 덤프 바이트를 조각으로 먹이면 해시에 넣을 바이트를 돌려준다. `\restrict`·`\unrestrict` 줄을 빼고 줄 끝 글자는 그대로 둔다(줄을 통째로 쥐지 않는다)
+#[napi]
+pub struct NativeDumpNormalizer {
+    inner: database_branches::DumpNormalizer,
+}
+
+#[napi]
+impl NativeDumpNormalizer {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { inner: database_branches::DumpNormalizer::new() }
+    }
+
+    #[napi]
+    pub fn feed(&mut self, chunk: Buffer) -> Buffer {
+        self.inner.feed(&chunk).into()
+    }
+
+    #[napi]
+    pub fn finish(&mut self) -> Buffer {
+        self.inner.finish().into()
+    }
+}
+
+/// 되돌릴 덤프를 먼저 넣어 볼 임시 DB 이름. 입력·결과 모두 인코딩한 글자
+#[napi]
+pub fn agent_restore_database_name(encoded_name: String) -> String {
+    database_branches::restore_database_name(&encoded_name)
+}
+
+/// 임시 덤프 파일 이름 목록 → 같은 길이의 pid(우리가 쓰는 꼴이 아니면 null). 지우는 코드라 모르는 이름은 null(지우지 않는다)
+#[napi]
+pub fn agent_temp_dump_pids(names: Vec<String>) -> Vec<Option<u32>> {
+    names.iter().map(|name| database_branches::stale_temp_pid(name)).collect()
+}
+
+/// `[{ id, dependsOn }]`(id는 인코딩한 글자) → 실행할 수 없는 꼴이면 TaskGraphError 메시지(인코딩한 글자), 아니면 null. 모양이 어긋난 입력은 던진다
+#[napi]
+pub fn agent_task_graph_error(nodes_json: String) -> Result<Option<String>> {
+    let value = input(&nodes_json, "작업 그래프")?;
+    let JsValue::Arr(items) = value else { return Err(Error::from_reason("작업 그래프는 배열이어야 합니다")) };
+    let mut nodes = Vec::with_capacity(items.len());
+    for item in &items {
+        let id = match item.prop("id") {
+            Some(JsValue::Str(id)) => id.clone(),
+            _ => return Err(Error::from_reason("작업 id는 문자열이어야 합니다")),
+        };
+        let depends_on = match item.prop("dependsOn") {
+            None => Vec::new(),
+            Some(JsValue::Arr(deps)) => deps
+                .iter()
+                .map(|dep| match dep {
+                    JsValue::Str(s) => Ok(s.clone()),
+                    _ => Err(Error::from_reason("의존성 id는 문자열이어야 합니다")),
+                })
+                .collect::<Result<Vec<_>>>()?,
+            Some(_) => return Err(Error::from_reason("dependsOn은 배열이어야 합니다")),
+        };
+        nodes.push(task_graph::Node { id, depends_on });
+    }
+    Ok(task_graph::validate(&nodes))
+}
+
+#[napi]
+pub fn agent_format_steering(texts: Vec<String>) -> String {
+    steering::format_steering(&texts)
+}
+
+/// 마지막 메시지에 사용자 글을 넣는 방법: `concat`(글 뒤에 이어 붙임) · `push`(내용 배열에 블록을 더함) · `new`(새 메시지)
+#[napi]
+pub fn agent_append_user_plan(role: Option<String>, content_kind: String) -> String {
+    steering::append_plan(role.as_deref(), &content_kind).as_str().to_owned()
+}
+
+/// JSON 글(인코딩한 글자)의 구조 요약. JSON이 아니거나 너무 깊으면 null
+#[napi]
+pub fn agent_summarize_json_content(content: String) -> Option<String> {
+    json_summary::summarize_json_content(&content)
+}
+
 use bstudio_guard::visual_compare as vc;
 
 /// 디자인 비교(3단계 3ae)의 결과. `error_kind`가 있으면 실패다: `"compare"`(옛 `VisualCompareError`)·`"decode"`(PNG를 읽지 못함)
