@@ -12,3 +12,5 @@ publish.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
+# 경로 이름 접기(foldName)의 NFKD·NFKC. Node의 normalize와 Unicode 판이 달라 전체 코드 포인트로 견줬다(#1090)
+unicode-normalization = "0.1.26"

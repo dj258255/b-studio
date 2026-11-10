@@ -33,6 +33,7 @@ pub mod load_check;
 pub mod model_router;
 pub mod next_routes;
 pub mod node_path;
+pub mod path_policy;
 pub mod plan_brief;
 pub mod pr_review;
 pub mod project_status;

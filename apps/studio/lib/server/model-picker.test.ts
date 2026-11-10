@@ -1,4 +1,4 @@
-import type { ModelInfo } from '@b-studio/agent';
+import { CLAUDE_CODE_MODELS_UNSUPPORTED, type ModelInfo } from '@b-studio/agent';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
@@ -117,6 +117,15 @@ describe('listSelectableModels', () => {
       expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'fable', 'opus', 'sonnet', 'haiku']);
       expect(picker.note).toContain('모델 목록을 불러오지 못해');
       expect(picker.note).toContain('60초 안에 응답하지 않았습니다');
+    });
+
+    it('공개 CLI 입출력에는 모델 목록 조회가 없어(CLAUDE_CODE_MODELS_UNSUPPORTED) 알려진 목록을 알림 없이 평소의 목록으로 쓴다', async () => {
+      mocks.loadClaudeCodeModels.mockResolvedValue({ error: CLAUDE_CODE_MODELS_UNSUPPORTED });
+
+      const picker = await listSelectableModels('claude-code', 'sonnet');
+
+      expect(picker.options.map((option) => option.id)).toEqual(['', 'auto', 'fable', 'opus', 'sonnet', 'haiku']);
+      expect(picker.note).toBeUndefined();
     });
 
     it('예전에 저장된 세션 값이 옛 별칭(opus 등)이어도 지금 목록에서 선택된 값으로 바뀐다', async () => {

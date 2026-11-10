@@ -448,6 +448,26 @@ interface NativeGuard {
   repoManagedBodySqueezedOut(body: string, managedBody: string): boolean;
   repoCapBody(body: string): string;
   repoBuildPullRequest(inputJson: string): string;
+  // ── agent: 경로 이름·도구 정책(3단계 3q). 막는 검사다. backslashSep은 `path.sep === '\\'`(껍데기가 넘긴다). 꼴을 맞출 수 없으면 null.
+  // checkToolPolicy: file은 입력의 path(문자열이 아니면 빈 글자), scopeFile은 그 path를 encodeLoneSurrogates한 글자(쓰기 범위 비교용, writablePaths도 같은 인코딩), command는 입력의 command(문자열 배열이 아니면 빈 배열), policyJson은 정책 필드 다섯 개의 JSON 또는 'null',
+  // defaultDenied는 TS가 정한 기본 금지 명령. 결과는 `{"decision","reason"?}` JSON. 정책의 모양이 어긋나면 던진다(부르는 쪽이 거절로 처리한다)
+  normalizeProjectPath(file: string, lenient: boolean, backslashSep: boolean): string | null;
+  foldName(segment: string): string;
+  canonicalProjectPath(file: string, lenient: boolean, backslashSep: boolean): string | null;
+  isProtectedPath(file: string, candidate: string, backslashSep: boolean): boolean;
+  isWithinScope(file: string, scope: string, backslashSep: boolean): boolean;
+  isToolAllowed(tool: string, allowedTools: string[]): boolean;
+  hasApprovalToken(token: string | null | undefined): boolean;
+  checkToolPolicy(
+    tool: string,
+    file: string,
+    scopeFile: string,
+    command: string[],
+    policyJson: string,
+    approvalToken: string | null | undefined,
+    defaultDenied: string[],
+    backslashSep: boolean,
+  ): string;
   // ── agent: 게이트의 순수 보조 판정(3단계 3r). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다(gateViewportProblemText·gateViewportProblems는 옛 타입 밖의 문제 종류도 던진다).
   // 통과로 이어지는 같음·포함 두 자리는 견줄 두 글자를 encodeLoneSurrogates해서 보낸다: gateContainsApiText(text, value), gateViewportProblems의 expected·findings의 key.
   // sampleParams·inRunKeys 같은 사용자 키 맵은 [[키, 값], ...] 쌍으로 보낸다(encodeNative가 NUL로 시작하는 키를 던지지 않게)
