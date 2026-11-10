@@ -39,6 +39,7 @@ pub mod public_url;
 pub mod readiness;
 pub mod readonly_docker;
 pub mod relay;
+pub mod repository;
 pub mod requirement_issues;
 pub mod requirements;
 pub mod review_input;

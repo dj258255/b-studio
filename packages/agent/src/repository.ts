@@ -1,6 +1,6 @@
+import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
 import type { SessionCommit } from './checkpoints';
-import { summarize } from './commit-message';
 import { assertAllowedRequirementEndpoint } from './requirement-issues';
 import { isDocCheckpointPath, VERIFICATION_STAGES } from './workflow';
 
@@ -237,10 +237,6 @@ const GITEA_REVIEW_COMMENTS_UNSUPPORTED = 'Gitea는 리뷰 댓글을 리뷰 하�
 
 /** 이슈 상세에서 보여 줄 댓글 수(가장 최근 것부터) */
 const MAX_ISSUE_COMMENTS = 20;
-/** 파일 하나의 patch 글자 수 한도 */
-const MAX_FILE_PATCH_CHARS = 20_000;
-/** PR 전체 patch 글자 수 한도. 이 한도를 넘으면 그 뒤 파일은 patch를 아예 빼고 truncated만 남긴다 */
-const MAX_TOTAL_PATCH_CHARS = 200_000;
 
 type Env = Record<string, string | undefined>;
 type Fetch = typeof fetch;
@@ -252,8 +248,6 @@ const TOKEN_ENV: Record<(typeof PROVIDERS)[number], string> = {
   gitea: 'B_STUDIO_GITEA_TOKEN',
 };
 const API_TIMEOUT_MS = 30_000;
-/** GitHub PR 본문 한도(65,536자)보다 여유 있게 자른다 */
-const MAX_PULL_REQUEST_BODY = 60_000;
 /** 저장소 화면 한 쪽에 보여 줄 최대 개수. 화면은 열림만 기본으로 보여 더 넘길 일이 드물다 */
 const LIST_PAGE_SIZE = 50;
 /** CI 상태·리뷰 판정은 PR마다 API 호출이 더 들어, 목록 앞쪽 이만큼만 채운다 */
@@ -265,48 +259,18 @@ const MAX_PR_DETAILS = 25;
  */
 export function parseRemote(url: string, env: Env = process.env): RemoteLocation {
   const trimmed = url.trim();
-  let host: string;
-  let repoPath: string;
-  let scheme = 'https';
-
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+  // new URL과 decodeURIComponent는 JS에 둔다(던지는 자리도 옛 그대로). 호스트 종류와 주소 조립은 Rust가 한다
+  if (native.repoRemoteNeedsUrl(trimmed)) {
     const parsed = new URL(trimmed);
-    if (parsed.protocol === 'file:') return { kind: 'local', display: decodeURIComponent(parsed.pathname) };
-    // ssh 포트는 웹 주소의 포트가 아니다
-    host = parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.host : parsed.hostname;
-    repoPath = decodeURIComponent(parsed.pathname);
-    if (parsed.protocol === 'http:') scheme = 'http';
-  } else {
-    const scp = /^(?:[^@/\s]+@)?([^:/\s]+):(?!\/)(.+)$/.exec(trimmed);
-    // "C:\repo" 같은 윈도우 경로는 한 글자 호스트처럼 보인다
-    if (!scp || scp[1]!.length === 1) return { kind: 'local', display: trimmed };
-    host = scp[1]!;
-    repoPath = scp[2]!;
+    const pathname = decodeURIComponent(parsed.pathname);
+    return decodeNative<RemoteLocation>(native.repoParseRemote(trimmed, parsed.protocol, parsed.host, parsed.hostname, pathname, env.B_STUDIO_GIT_PROVIDER));
   }
-
-  const cleanPath = repoPath.replace(/^\/+/, '').replace(/\/+$/, '').replace(/\.git$/, '');
-  const hostname = host.replace(/:\d+$/, '');
-  const override = PROVIDERS.find((provider) => provider === env.B_STUDIO_GIT_PROVIDER);
-  const kind: GitHostKind = override ?? (hostname === 'github.com' ? 'github' : hostname === 'gitlab.com' ? 'gitlab' : 'other');
-  return { kind, display: `${host}/${cleanPath}`, host, path: cleanPath, webUrl: `${scheme}://${host}/${cleanPath}` };
+  return decodeNative<RemoteLocation>(native.repoParseRemote(trimmed, null, null, null, null, env.B_STUDIO_GIT_PROVIDER));
 }
 
 /** 토큰이 없어도 사람이 직접 PR을 만들 수 있게 작성 페이지 주소를 만든다 */
 export function compareUrl(remote: RemoteLocation, base: string, branch: string): string | undefined {
-  if (!remote.webUrl) return undefined;
-  switch (remote.kind) {
-    case 'github':
-      return `${remote.webUrl}/compare/${encodeRef(base)}...${encodeRef(branch)}?expand=1`;
-    case 'gitea':
-      return `${remote.webUrl}/compare/${encodeRef(base)}...${encodeRef(branch)}`;
-    case 'gitlab':
-      return `${remote.webUrl}/-/merge_requests/new?${new URLSearchParams({
-        'merge_request[source_branch]': branch,
-        'merge_request[target_branch]': base,
-      })}`;
-    default:
-      return undefined;
-  }
+  return native.repoCompareUrl(remote.kind, remote.webUrl, base, branch) ?? undefined;
 }
 
 /**
@@ -314,7 +278,8 @@ export function compareUrl(remote: RemoteLocation, base: string, branch: string)
  * 주지 않으면 환경 변수만 본다(사내 서버 등 gh CLI를 쓰지 않는 경계에서는 호출하는 쪽이 token을 생략한다)
  */
 export function canCreatePullRequest(remote: RemoteLocation, env: Env = process.env, token?: string): boolean {
-  return remote.kind !== 'other' && remote.kind !== 'local' && Boolean(token ?? env[TOKEN_ENV[remote.kind]]);
+  const envToken = remote.kind === 'github' || remote.kind === 'gitlab' || remote.kind === 'gitea' ? env[TOKEN_ENV[remote.kind]] : undefined;
+  return native.repoCanCreatePullRequest(remote.kind, token, envToken);
 }
 
 const MANAGED_BODY_NO_ROOM = 'PR 본문이 길이 한도에 가까워 b-studio 영역을 넣지 못했습니다. PR 설명에서 직접 쓴 글을 줄인 뒤 다시 올리세요';
@@ -518,8 +483,7 @@ export async function fetchIssue(
 
 /** PR/MR 주소에서 번호를 뽑는다(github.com/o/r/pull/N, gitea .../pulls/N, gitlab .../-/merge_requests/N). 못 찾으면 undefined */
 export function parsePullRequestNumber(url: string): number | undefined {
-  const match = /\/(?:pull|pulls|merge_requests)\/(\d+)(?:[/?#]|$)/.exec(url);
-  return match ? Number(match[1]) : undefined;
+  return native.repoParsePullRequestNumber(url) ?? undefined;
 }
 
 /**
@@ -595,58 +559,24 @@ function labelNames(labels: Array<RawLabel | string> | undefined): string[] {
   return (labels ?? []).map((label) => (typeof label === 'string' ? label : (label.name ?? ''))).filter(Boolean);
 }
 
-const TASK_ITEM = /^\s*[-*]\s+\[([ xX])\]\s+(.+)$/;
-
 /** 이슈·PR 본문에서 "- [ ] 할 일"·"- [x] 한 일" 체크리스트를 뽑는다. 들여쓴 하위 항목도 하나로 센다(중첩 진행도는 화면에서 필요치 않다) */
 export function parseTaskList(body: string | undefined): TaskListProgress {
-  const items: TaskListItem[] = [];
-  for (const line of (body ?? '').split('\n')) {
-    const match = TASK_ITEM.exec(line);
-    if (!match) continue;
-    items.push({ checked: match[1]!.toLowerCase() === 'x', text: match[2]!.trim() });
-  }
-  return { total: items.length, checked: items.filter((item) => item.checked).length, items };
+  return decodeNative<TaskListProgress>(native.repoParseTaskList(body));
 }
-
-const CLOSING_REFERENCE = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
 
 /** "Closes #12", "fixes #7" 같은 닫기 문구에서 참조한 이슈·PR 번호를 뽑는다(중복 없이, 나온 순서대로) */
 export function parseClosingReferences(text: string | undefined): number[] {
-  const numbers: number[] = [];
-  for (const match of (text ?? '').matchAll(CLOSING_REFERENCE)) {
-    const number = Number(match[1]);
-    if (!numbers.includes(number)) numbers.push(number);
-  }
-  return numbers;
+  return native.repoParseClosingReferences(text);
 }
 
 /** GitHub·Gitea 리뷰 상태 문구를 화면이 쓰는 값으로 바꾼다. 둘 다 대문자 스네이크 케이스를 쓴다 */
-function mapReviewState(raw: string): IndividualReviewState {
-  switch (raw.toUpperCase()) {
-    case 'APPROVED':
-      return 'approved';
-    case 'CHANGES_REQUESTED':
-    case 'REQUEST_CHANGES':
-      return 'changes_requested';
-    case 'COMMENTED':
-    case 'COMMENT':
-      return 'commented';
-    case 'DISMISSED':
-      return 'dismissed';
-    case 'PENDING':
-      return 'pending';
-    default:
-      return 'unknown';
-  }
+export function mapReviewState(raw: string): IndividualReviewState {
+  return native.repoMapReviewState(raw) as IndividualReviewState;
 }
 
 /** patch를 파일·전체 한도에 맞춰 자른다. runningTotal은 지금까지 쓴 글자 수(호출부가 누적해 넘긴다) */
-function capPatch(patch: string | undefined, runningTotal: number): { patch?: string; truncated: boolean } {
-  if (patch === undefined) return { truncated: false };
-  if (runningTotal >= MAX_TOTAL_PATCH_CHARS) return { truncated: true };
-  const budget = Math.min(MAX_FILE_PATCH_CHARS, MAX_TOTAL_PATCH_CHARS - runningTotal);
-  if (patch.length <= budget) return { patch, truncated: false };
-  return { patch: `${patch.slice(0, budget)}\n\n(patch가 길어 뒷부분을 생략했습니다)`, truncated: true };
+export function capPatch(patch: string | undefined, runningTotal: number): { patch?: string; truncated: boolean } {
+  return decodeNative<{ patch?: string; truncated: boolean }>(native.repoCapPatch(patch, runningTotal));
 }
 
 /**
@@ -840,12 +770,12 @@ async function attachChecksAndReviews(
 }
 
 /** 체크가 하나라도 안 끝났으면 pending, 끝났는데 실패·취소·조치 필요가 있으면 failure, 아니면 success */
-function combineCheckStatus(runs: Array<{ status: string; conclusion: string | null }>): CheckStatus {
-  if (runs.length === 0) return 'unknown';
-  if (runs.some((run) => run.status !== 'completed')) return 'pending';
-  const FAILING = new Set(['failure', 'timed_out', 'cancelled', 'action_required']);
-  if (runs.some((run) => run.conclusion && FAILING.has(run.conclusion))) return 'failure';
-  return 'success';
+export function combineCheckStatus(runs: Array<{ status: string; conclusion: string | null }>): CheckStatus {
+  // 글자가 아닌 conclusion은 실패 집합에 들 수 없으므로 없는 것과 같다
+  return native.repoCombineCheckStatus(
+    runs.map((run) => run.status === 'completed'),
+    runs.map((run) => (typeof run.conclusion === 'string' ? run.conclusion : null)),
+  ) as CheckStatus;
 }
 
 /** 리뷰어별 마지막 판정만 센다(코멘트만 남긴 리뷰는 판정에 안 넣는다) */
@@ -1230,30 +1160,6 @@ export async function ensureLabels(
 export const PR_MANAGED_BODY_BEGIN = '<!-- b-studio:begin -->';
 export const PR_MANAGED_BODY_END = '<!-- b-studio:end -->';
 
-/** 한도를 넘는 본문의 끝을 줄였을 때 붙이는 안내. 이 문구로 끝나는 본문은 b-studio가 줄인 것이다 */
-const TRUNCATED_BODY_NOTICE = '(본문이 길어 뒷부분을 생략했습니다)';
-/** 관리 영역을 감싸는 마커 둘과 줄바꿈의 길이 */
-const MANAGED_MARKER_CHARS = PR_MANAGED_BODY_BEGIN.length + PR_MANAGED_BODY_END.length + 2;
-/** 사람이 쓴 글이 한도를 거의 다 채웠을 때, 이보다 작은 자리에는 관리 영역을 넣지 않는다 */
-const MIN_MANAGED_BODY_CHARS = 2_000;
-
-/**
- * buildPullRequest가 만든 옛 본문(마커를 넣기 전)의 신호. 두 절 제목은 buildPullRequest가 내용과 무관하게 항상 넣는다.
- * 한도에서 끝이 잘린 본문은 뒤쪽 절("## 검증")이 없으므로, 앞쪽 절과 줄였다는 안내로 알아본다(이슈 #663 —
- * 잘린 본문을 사람이 쓴 것으로 보고 새 영역을 그 뒤에 붙였고, 합친 것이 다시 잘려 새 영역이 통째로 사라졌다)
- */
-function looksLikeLegacyManagedPullRequestBody(body: string): boolean {
-  if (!body.includes('## 요청')) return false;
-  return body.includes('## 검증') || body.trimEnd().endsWith(TRUNCATED_BODY_NOTICE);
-}
-
-/** 마커 밖의 글(before·after)을 지키면서 관리 영역을 한도 안에 넣는다. 넘치면 관리 영역의 끝만 줄이고 닫는 마커는 남긴다 */
-function wrapManagedBody(before: string, managedBody: string, after: string): string {
-  const room = MAX_PULL_REQUEST_BODY - before.length - after.length - MANAGED_MARKER_CHARS;
-  const managed = managedBody.length <= room ? managedBody : `${managedBody.slice(0, Math.max(0, room - TRUNCATED_BODY_NOTICE.length - 2))}\n\n${TRUNCATED_BODY_NOTICE}`;
-  return `${before}${PR_MANAGED_BODY_BEGIN}\n${managed}\n${PR_MANAGED_BODY_END}${after}`;
-}
-
 /**
  * PR 본문 중 b-studio가 관리하는 영역만 지금 초안(managedBody)으로 바꾼다. 사람이 마커 밖(위·아래)에 적은
  * 내용은 그대로 둔다.
@@ -1270,25 +1176,12 @@ function wrapManagedBody(before: string, managedBody: string, after: string): st
  * 한도가 차서 관리 영역이 들어갈 자리가 없으면 한도를 넘는 글을 그대로 돌려준다. 부르는 쪽이 길이를 보고 거절한다.
  */
 export function mergeManagedPullRequestBody(existingBody: string | undefined | null, managedBody: string): string {
-  const current = existingBody ?? '';
-  const beginIndex = current.indexOf(PR_MANAGED_BODY_BEGIN);
-  const endIndex = current.indexOf(PR_MANAGED_BODY_END);
-  if (beginIndex !== -1) {
-    const before = current.slice(0, beginIndex);
-    const after = endIndex > beginIndex ? current.slice(endIndex + PR_MANAGED_BODY_END.length) : '';
-    return wrapManagedBody(before, managedBody, after);
-  }
-  if (current.trim() === '' || looksLikeLegacyManagedPullRequestBody(current)) return wrapManagedBody('', managedBody, '');
-  return wrapManagedBody(`${current.trimEnd()}\n\n`, managedBody, '');
+  return native.repoMergeManagedPullRequestBody(existingBody, managedBody);
 }
 
 /** 마커 밖의 글이 한도를 거의 채워 관리 영역이 제 구실을 못 할 만큼 줄었는가 */
-function managedBodySqueezedOut(body: string, managedBody: string): boolean {
-  if (body.length > MAX_PULL_REQUEST_BODY) return true;
-  const begin = body.indexOf(PR_MANAGED_BODY_BEGIN);
-  const end = body.indexOf(PR_MANAGED_BODY_END);
-  const kept = end - begin - PR_MANAGED_BODY_BEGIN.length - 2;
-  return kept < Math.min(managedBody.length, MIN_MANAGED_BODY_CHARS);
+export function managedBodySqueezedOut(body: string, managedBody: string): boolean {
+  return native.repoManagedBodySqueezedOut(body, managedBody);
 }
 
 /** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
@@ -1297,49 +1190,6 @@ export interface PullRequestDraft {
   body: string;
   /** requiredStages 중 통과 기록이 없는 단계가 있는 커밋만. 오래된 것부터 */
   missing: Array<{ shortSha: string; subject: string; stages: WorkflowStage[] }>;
-}
-
-const PR_TITLE_PREFIX = '[b-studio] ';
-/** PR 제목의 대략적인 상한(접두어 포함). "~72자 안팎"이라 토큰 하나 넘는 것은 눈감아 준다(ADR-110) */
-const PR_TITLE_MAX = 72;
-
-/** "R2~R23"처럼 요구사항 id들의 수 범위. 숫자 id가 하나도 없으면 undefined */
-function requirementIdRange(ids: readonly string[]): string | undefined {
-  const numbers = ids
-    .map((id) => /^R(\d+)/.exec(id)?.[1])
-    .filter((value): value is string => value !== undefined)
-    .map(Number);
-  if (numbers.length === 0) return undefined;
-  const min = Math.min(...numbers);
-  const max = Math.max(...numbers);
-  return min === max ? `R${min}` : `R${min}~R${max}`;
-}
-
-/** 줄 수(없으면 파일 수) 기준으로 가장 큰 커밋. 요구사항이 안 걸려 있을 때 PR 제목의 기본값으로 쓴다 */
-function mostSignificantCommit(commits: readonly SessionCommit[]): SessionCommit {
-  const weight = (commit: SessionCommit): number => (commit.stat ? commit.stat.insertions + commit.stat.deletions : 0) || commit.files.length;
-  return commits.reduce((best, commit) => (weight(commit) > weight(best) ? commit : best));
-}
-
-/**
- * PR 제목(ADR-110, 버그 리포트: 통합 세션의 PR 제목이 첫 커밋 제목 전체를 그대로 이어 붙이고 120자에서 단어
- * 중간을 잘랐다). 요구사항이 걸려 있으면(검증됨 + 발행된 이슈가 있는 요구사항, sessions.ts가 넘겨준다) 그
- * 수·범위로 요약하고, 아니면 가장 많이 바뀐 커밋 제목을 요약한다(commit-message.ts의 summarize 재사용 —
- * 체크포인트 제목을 만들 때와 같은 단어 경계 규칙을 PR 제목에도 그대로 쓴다).
- */
-function buildPullRequestTitle(projectName: string, commits: readonly SessionCommit[], requirementIds: readonly string[]): string {
-  const budget = PR_TITLE_MAX - PR_TITLE_PREFIX.length;
-  if (requirementIds.length > 0) {
-    // 요구사항이 하나이고 커밋도 하나면(흔한 후속 세션: 요구사항 하나를 커밋 하나로 구현) 그 커밋 제목이 이미
-    // 구체적이다 — "요구사항 1개 구현과 검증 (R17)"처럼 뭉뚱그리지 않고 커밋 제목을 그대로 요약해 쓴다
-    // (버그 리포트 ADR-115: 머지돼 닫힌 이전 요구사항 19개까지 그대로 "N개 구현과 검증"으로 다시 내세웠다)
-    if (requirementIds.length === 1 && commits.length === 1) return `${PR_TITLE_PREFIX}${summarize(requestName(commits[0]!), budget)}`;
-    const range = requirementIdRange(requirementIds);
-    const summary = `feat: 요구사항 ${requirementIds.length}개 구현과 검증${range ? ` (${range})` : ''}`;
-    return `${PR_TITLE_PREFIX}${summarize(summary, budget)}`;
-  }
-  const candidate = commits.length > 0 ? requestName(mostSignificantCommit(commits)) : `${projectName} 세션 변경`;
-  return `${PR_TITLE_PREFIX}${summarize(candidate, budget)}`;
 }
 
 /**
@@ -1376,97 +1226,30 @@ export function buildPullRequest({
   /** 본문 끝에 그대로 붙일 글(요구사항 줄·점검표 등). 길이 예산에 함께 넣어 본문을 줄일 때도 잘리지 않게 한다 */
   appendix?: string;
 }): PullRequestDraft {
-  const requests = commits.map(requestName);
-  const title = buildPullRequestTitle(projectName, commits, requirementIds);
-
-  // 문서 체크포인트(Workflow-Verify: docs, commitWorkingCopyDocs·commitDocTabChange가 남긴다)는 애초에 검증
-  // 게이트를 거치지 않게 만든 체크포인트다(ADR-096) — "필수 단계 기록이 없다"가 아니라 "문서만 바뀜(게이트
-  // 대상 아님)"으로 따로 보여준다. 트레일러만 믿지 않고 실제로 문서 경로만 바꿨는지 다시 확인해, 트레일러가
-  // 잘못 붙은(코드까지 섞인) 커밋이 게이트 없이 빠져나가지 못하게 막는다(버그 리포트)
-  const isDocsExempt = (commit: SessionCommit): boolean => commit.verify === 'docs' && commit.files.length > 0 && commit.files.every(isDocCheckpointPath);
-
-  // 통과 기록은 검증 단계만 남으므로, plan·implement·checkpoint는 없는 것이 정상이다
-  const stages = requiredStages.filter((stage) => VERIFICATION_STAGES.includes(stage));
-  const missing = commits
-    .map((commit, index) => {
-      if (isDocsExempt(commit)) return undefined;
-      const passed = new Set(commit.passedStages ?? []);
-      const unmetStages = stages.filter((stage) => !passed.has(stage));
-      return unmetStages.length > 0 ? { shortSha: commit.shortSha, subject: requests[index]!, stages: unmetStages } : undefined;
-    })
-    .filter((entry): entry is { shortSha: string; subject: string; stages: WorkflowStage[] } => entry !== undefined);
-
-  /** 요청 하나의 절. withDetails가 거짓이면 접어 둔 상세(게이트 결과·에이전트 요약)를 뺀다. 상세는 커밋 본문에도 있다 */
-  const section = (commit: SessionCommit, index: number, withDetails: boolean): string => {
-    const shown = commit.files.slice(0, 10).map((file) => `\`${file}\``);
-    const more = commit.files.length > shown.length ? ` 외 ${commit.files.length - shown.length}개` : '';
-    const lines = [`### ${index + 1}. ${requests[index]}`, '', `커밋 \`${commit.shortSha}\`, 파일 ${commit.files.length}개: ${shown.join(', ')}${more}`];
-    if (commit.body && withDetails) {
-      lines.push('', '<details>', '<summary>검증 게이트 결과와 에이전트 요약</summary>', '', '~~~text', commit.body, '~~~', '', '</details>');
-    }
-    return lines.join('\n');
+  // 문서 체크포인트인가(Workflow-Verify: docs이면서 실제로 문서 경로만 바꿨는가)와 검증 단계만 남긴 필수 단계는 workflow.ts가 알아 껍데기가 미리 계산해 넘긴다
+  // (workflow는 policy의 NFKD에 의존해 옮기지 않는다). 트레일러만 믿지 않고 경로를 다시 확인하는 규칙은 그대로다
+  const input = {
+    projectName,
+    base,
+    missingBase: missingBase ?? null,
+    branch,
+    commits: commits.map((commit) => ({
+      shortSha: commit.shortSha,
+      subject: commit.subject,
+      body: commit.body,
+      files: commit.files,
+      stat: commit.stat ? { insertions: commit.stat.insertions, deletions: commit.stat.deletions } : null,
+      passedStages: commit.passedStages ?? [],
+      docsExempt: commit.verify === 'docs' && commit.files.length > 0 && commit.files.every(isDocCheckpointPath),
+      maxTurns: commit.incomplete === 'max_turns',
+    })),
+    issue: issue ?? null,
+    issues: issues ?? [],
+    requirementIds,
+    requiredStages: requiredStages.filter((stage) => VERIFICATION_STAGES.includes(stage)),
+    appendix,
   };
-
-  const verification = commits.map((commit, index) => {
-    if (isDocsExempt(commit)) return `- \`${commit.shortSha}\` ${requests[index]} — 문서 체크포인트(게이트 대상 아님)`;
-    const passed = commit.passedStages ?? [];
-    // 턴 상한에서 게이트만 통과해 남긴 체크포인트는 통과 단계와 함께 그 사실을 적는다(ADR-131 덧붙임)
-    const incomplete = commit.incomplete === 'max_turns' ? ' · 턴 상한에서 멈춘 실행(요청이 끝나지 않았을 수 있음)' : '';
-    return `- \`${commit.shortSha}\` ${requests[index]} — 통과: ${passed.length > 0 ? passed.join(', ') : '기록 없음'}${incomplete}`;
-  });
-  const docsNotes = commits
-    .map((commit, index) => (isDocsExempt(commit) ? `- \`${commit.shortSha}\` ${requests[index]} — 문서만 바뀜(게이트 대상 아님)` : undefined))
-    .filter((line): line is string => line !== undefined);
-  const missingNotes = missing.map((entry) => `- \`${entry.shortSha}\` ${entry.subject} — 기록 없음: ${entry.stages.join(', ')}`);
-  const unverified = [...docsNotes, ...missingNotes].length > 0 ? [...docsNotes, ...missingNotes] : ['모든 커밋이 필수 단계를 통과했습니다'];
-
-  // Closes는 여기 한 곳에서만 쓴다 — sessions.ts의 요구사항 Implements 절은 같은 이슈 번호를 다시 Closes로
-  // 적지 않는다(버그 리포트: 검증된 요구사항의 이슈가 위아래 두 번 Closes로 나왔다)
-  const linked = [...new Set([...(issue === undefined ? [] : [issue]), ...(issues ?? [])])];
-  /** 앞에서부터 omitted건의 상세를 뺀 본문. 뺀 것이 있으면 "## 요청" 아래에 몇 건인지 적는다 */
-  const render = (omitted: number): string => [
-    ...(linked.length === 0 ? [] : [...linked.map((number) => `Closes #${number}`), '(`Closes #n`은 이 PR이 기본 브랜치로 열릴 때만 이슈를 자동으로 닫습니다.)', '']),
-    `\`${projectName}\` 프로젝트의 b-studio 세션에서 처리한 요청 ${commits.length}건입니다.`,
-    '요청마다 스튜디오가 바뀐 서비스를 재시작하고 준비 상태와 API 계약을 확인했고, **검증 게이트를 통과한 변경만** 커밋했습니다.',
-    '',
-    `- 기준 브랜치: \`${base}\``,
-    ...(missingBase !== undefined && missingBase !== base
-      ? [`  - 세션은 \`${missingBase}\`에서 갈라져 나왔지만 그 브랜치가 원격에 없어 원격의 기본 브랜치를 대상으로 했습니다. \`${missingBase}\`에만 있던 커밋도 이 PR에 들어 있습니다.`]
-      : []),
-    `- 세션 브랜치: \`${branch}\``,
-    '',
-    '## 요청',
-    '',
-    ...(omitted > 0 ? [`본문 길이 한도 때문에 앞의 ${omitted}건은 게이트 결과와 에이전트 요약을 싣지 않았습니다. 각 커밋의 본문에 그대로 있습니다.`, ''] : []),
-    commits.map((commit, index) => section(commit, index, index >= omitted)).join('\n\n'),
-    '',
-    '## 검증',
-    '',
-    verification.join('\n'),
-    '',
-    '## 돌리지 않은 검증',
-    '',
-    unverified.join('\n'),
-  ].join('\n') + appendix;
-
-  // 한도를 넘으면 끝을 자르지 않고 오래된 요청의 상세부터 뺀다(이슈 #663). 끝에는 검증 요약·돌리지 않은 검증·덧붙임
-  // (요구사항 줄, 점검표)이 있어, 끝을 자르면 리뷰어가 먼저 볼 것이 사라진다. 마커로 감쌀 자리도 남긴다.
-  // 상세를 다 빼고도 넘치면(요청이 수백 건) 마지막 수단으로 끝을 자른다
-  const budget = MAX_PULL_REQUEST_BODY - MANAGED_MARKER_CHARS;
-  const withDetails = commits.map((commit) => Boolean(commit.body));
-  let omitted = 0;
-  let body = render(0);
-  while (body.length > budget && omitted < commits.length) {
-    omitted += 1;
-    // 상세가 없는 요청은 빼도 길이가 그대로라 다시 만들지 않는다
-    if (withDetails[omitted - 1]) body = render(omitted);
-  }
-  return { title, body: body.length > budget ? `${body.slice(0, budget - TRUNCATED_BODY_NOTICE.length - 2)}\n\n${TRUNCATED_BODY_NOTICE}` : body, missing };
-}
-
-/** 체크포인트 커밋 제목에서 "요청: " 접두사를 뺀 사람이 읽는 이름 */
-function requestName(commit: SessionCommit): string {
-  return commit.subject.replace(/^요청:\s*/, '');
+  return decodeNative<PullRequestDraft>(native.repoBuildPullRequest(encodeNative(input)));
 }
 
 function originOf(remote: RemoteLocation): string {
@@ -1500,12 +1283,8 @@ function gitHubStyleApi(
   };
 }
 
-function encodeRef(ref: string): string {
-  return ref.split('/').map(encodeURIComponent).join('/');
-}
-
-function capBody(body: string): string {
-  return body.length <= MAX_PULL_REQUEST_BODY ? body : `${body.slice(0, MAX_PULL_REQUEST_BODY)}\n\n${TRUNCATED_BODY_NOTICE}`;
+export function capBody(body: string): string {
+  return native.repoCapBody(body);
 }
 
 async function errorMessage(response: Response): Promise<string> {
