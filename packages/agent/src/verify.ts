@@ -1,7 +1,7 @@
 import { access, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { formatBytes, SandboxError, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { encodeLoneSurrogates, encodeNative, formatBytes, native, SandboxError, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { diffContracts, formatContractChanges, type ContractChange, type OpenApiDocument } from './contract-diff';
 import { isComposeFile, servicesForFiles } from './services';
@@ -127,22 +127,35 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     }),
   );
 
-  const breaking = contracts.some((check) => check.changes.some((change) => change.breaking));
-  const ok =
-    restarted.every((check) => check.ready) &&
-    contracts.every((check) => !check.error) &&
-    (allowBreaking || !breaking) &&
-    secretLeaks.length === 0 &&
-    specError === undefined;
+  // 통과 판정은 Rust(crates/bstudio-guard/src/verify_judge.rs, ADR-191 3단계 3u)가 한다. 여기는 값을 꺼내 넘기는 형 변환뿐이다.
+  // 계약 추출 실패는 이유가 빈 글자여도 실패다(`error !== undefined`, 트러블슈팅 171: 옛 `!check.error`는 빈 글자를 "오류 없음"으로 읽어 통과시켰다)
+  const ok = native.verifyOk(
+    restarted.map((check) => check.ready === true),
+    contracts.map((check) => check.error !== undefined),
+    contracts.flatMap((check) => check.changes.map((change) => Boolean(change.breaking))),
+    allowBreaking,
+    secretLeaks.length,
+    specError !== undefined,
+  );
 
   return { ok, sync, restarted, contracts, unverifiedFiles, secretLeaks, skippedOff, specError, addedAddons, addonError, ...(platformFailure ? { platformFailure } : {}) };
 }
 
-/** 반영 확인이나 재시작이 샌드박스·도커 쪽 문제로 실패했으면 그 사유의 첫 줄을 돌려준다 */
-function platformFailureOf(sync: VerificationReport['sync'], restarted: readonly ServiceCheck[]): string | undefined {
-  if ('error' in sync && sync.platform) return sync.error.split('\n')[0];
-  const failed = restarted.find((check) => !check.ready && check.platform);
-  return failed ? `${failed.service}: ${(failed.error ?? '').split('\n')[0]}` : undefined;
+/**
+ * 반영 확인이나 재시작이 샌드박스·도커 쪽 문제로 실패했으면 그 사유의 첫 줄을 돌려준다. 판정은 Rust(verify_judge.rs, 3단계 3u).
+ * 이 값이 있으면 게이트가 재시도로 세지 않는다(열린 쪽)이라 모르는 입력은 없음으로 본다
+ */
+export function platformFailureOf(sync: VerificationReport['sync'], restarted: readonly ServiceCheck[]): string | undefined {
+  return (
+    native.verifyPlatformFailure(
+      'error' in sync ? sync.error : undefined,
+      'error' in sync && sync.platform === true,
+      restarted.map((check) => check.service),
+      restarted.map((check) => check.ready === true),
+      restarted.map((check) => check.platform === true),
+      restarted.map((check) => check.error ?? ''),
+    ) ?? undefined
+  );
 }
 
 /**
@@ -338,12 +351,12 @@ async function deletedFiles(root: string, files: readonly string[]): Promise<str
   return checks.filter((file): file is string => file !== undefined);
 }
 
-/** 로그에 지운 파일이 "없다"는 오류로 나오는지 */
+/**
+ * 로그에 지운 파일이 "없다"는 오류로 나오는지. 판정은 Rust(verify_judge.rs, 3단계 3u). 참이면 실패한 서비스를 한 번 더 띄우는 쪽(통과 쪽)으로 열리므로
+ * 견주는 두 글자를 encodeLoneSurrogates(단사)로 바꿔 보낸다: 짝 없는 서로게이트가 U+FFFD로 합쳐져 다른 파일 이름이 같아지지 않게
+ */
 export function mentionsDeletedFile(logTail: readonly string[], deleted: readonly string[]): boolean {
-  return deleted.some((file) => {
-    const name = path.posix.basename(file);
-    return logTail.some((line) => line.includes(name) && /NoSuchFile|No such file/i.test(line));
-  });
+  return native.verifyMentionsDeletedFile(logTail.map(encodeLoneSurrogates), deleted.map(encodeLoneSurrogates));
 }
 
 /** 세션 시작 시점의 계약을 저장해 둔다. 실패한 서비스는 비교 기준 없이 진행한다 */
@@ -365,59 +378,17 @@ export async function captureBaselines(
   return baselines;
 }
 
+/**
+ * 검증 보고서 글. 판정과 글은 Rust(verify_judge.rs, 3단계 3u)가 만든다. 보고서를 JSON으로 만들 수 없거나 모양이 어긋나면 "검증 실패"로 시작하는 글이다(통과 글이 나오지 않는다)
+ */
 export function formatVerificationReport(report: VerificationReport, { allowBreaking }: { allowBreaking: boolean }): string {
-  const lines: string[] = [report.ok ? '검증 통과' : '검증 실패'];
-  if (report.platformFailure) {
-    lines.push(`- b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요: ${report.platformFailure}`);
+  let json: string;
+  try {
+    json = encodeNative(report);
+  } catch {
+    return '검증 실패\n- 검증 보고서를 글로 만들 수 없습니다';
   }
-
-  if (report.specError) {
-    lines.push(`- ${SPEC_FILE} 형식이 올바르지 않아 이전 설정으로 재시작했습니다:`, ...report.specError.split('\n').map((line) => `    ${line}`));
-  }
-
-  if ('error' in report.sync) {
-    lines.push(`- 샌드박스 파일 반영 확인 실패: ${report.sync.error}`);
-    return lines.join('\n');
-  }
-  lines.push(`- 샌드박스 파일 반영 확인: ${(report.sync.elapsedMs / 1_000).toFixed(1)}초`);
-
-  if (report.restarted.length === 0) lines.push('- 재시작한 서비스 없음');
-  for (const check of report.restarted) {
-    const retried = check.retried ? ' (지운 파일 반영을 기다려 한 번 더 재시작)' : '';
-    lines.push(check.ready ? `- ${check.service}: 재시작 후 준비 완료${retried}` : `- ${check.service}: 준비 실패${retried} — ${check.error}`);
-    if (check.blockedEgress?.length) {
-      lines.push(`  막힌 외부 접속 (studio.yaml network.egress에 없는 호스트): ${check.blockedEgress.join(', ')}`);
-    }
-    if (check.logTail?.length) lines.push('  마지막 로그:', ...check.logTail.map((line) => `    ${line}`));
-  }
-
-  for (const check of report.contracts) {
-    if (check.error) {
-      lines.push(`- ${check.service} 계약 추출 실패: ${check.error}`);
-      continue;
-    }
-    lines.push(`- ${check.service} 계약:`, ...formatContractChanges(check.changes).split('\n').map((line) => `    ${line}`));
-    if (!allowBreaking && check.changes.some((change) => change.breaking)) {
-      lines.push('    요청에 삭제·변경이 명시되지 않았으므로 호환을 깨는 변경은 허용되지 않습니다.');
-    }
-  }
-
-  if (report.unverifiedFiles.length > 0) {
-    lines.push(`- 재시작으로 확인하지 못한 파일: ${report.unverifiedFiles.join(', ')}`);
-  }
-  if (report.skippedOff.length > 0) {
-    lines.push(`- 꺼 둔 서비스라 확인을 건너뜀(검증에 포함되지 않음): ${report.skippedOff.join(', ')}`);
-  }
-  if (report.addedAddons?.length) {
-    lines.push(`- compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${report.addedAddons.join(', ')}`);
-  }
-  if (report.addonError) {
-    lines.push(`- 새로 생긴 부가 서비스를 올리지 못했습니다: ${report.addonError}`);
-  }
-  for (const leak of report.secretLeaks) {
-    lines.push(`- 시크릿 값이 파일에 들어갔습니다: ${leak.file} (${leak.secrets.join(', ')}). 값은 코드에서 환경 변수로 읽고 파일에 쓰지 마세요`);
-  }
-  return lines.join('\n');
+  return native.verifyFormatReport(json, allowBreaking, SPEC_FILE);
 }
 
 async function recentLogs(sandbox: Sandbox, service: string): Promise<string[]> {

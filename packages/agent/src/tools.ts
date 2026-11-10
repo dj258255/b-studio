@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import { describeUsage, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { decodeNative, describeUsage, encodeLoneSurrogates, encodeNative, native, type InfraCheckResult, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { parseSpec, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
 import type { Note, NoteKind } from './coordination';
@@ -85,14 +85,26 @@ const MISMATCH_FOLLOWED = new Set<RequestMismatch['followed']>(['request', 'chec
 /** 한 실행에서 남기는 어긋남 수의 상한. 넘으면 버린다(화면과 기록이 커지지 않게) */
 const MISMATCHES_PER_RUN = 5;
 
-/** 러너가 한 실행의 어긋남을 모으는 곳. 같은 내용은 한 번만 남기고 상한을 넘으면 버린다 */
+/**
+ * 러너가 한 실행의 어긋남을 모으는 곳. 같은 내용은 한 번만 남기고 상한을 넘으면 버린다.
+ * 남겨도 되는지의 판정은 Rust(crates/bstudio-guard/src/tool_input.rs, 3단계 3u)가 한다: 막는 쪽은 상한이고, 같은 기록 찾기는 낮추기만 하는 기록을 버리는 쪽이다.
+ * 같음 비교의 글자는 encodeLoneSurrogates(단사)로 바꿔 보낸다. U+FFFD로 합쳐지면 서로 다른 어긋남이 같아져 버려진다
+ */
 export function createMismatchLog(): { list: RequestMismatch[]; add: (mismatch: RequestMismatch) => boolean } {
   const list: RequestMismatch[] = [];
   return {
     list,
     add(mismatch) {
-      if (list.length >= MISMATCHES_PER_RUN) return false;
-      if (list.some((seen) => seen.requestValue === mismatch.requestValue && seen.checkValue === mismatch.checkValue && seen.followed === mismatch.followed)) return false;
+      const addable = native.toolMismatchAddable(
+        MISMATCHES_PER_RUN,
+        list.map((seen) => encodeLoneSurrogates(seen.requestValue)),
+        list.map((seen) => encodeLoneSurrogates(seen.checkValue)),
+        list.map((seen) => encodeLoneSurrogates(seen.followed)),
+        encodeLoneSurrogates(mismatch.requestValue),
+        encodeLoneSurrogates(mismatch.checkValue),
+        encodeLoneSurrogates(mismatch.followed),
+      );
+      if (!addable) return false;
       list.push(mismatch);
       return true;
     },
@@ -702,18 +714,22 @@ async function validateSpecWrite(workspace: Workspace, file: string): Promise<st
   }
 }
 
-function summarizeApproval(name: string, input: unknown): string {
-  if (name === 'run_in_service' && typeof input === 'object' && input !== null) {
-    const args = input as Record<string, unknown>;
-    const service = typeof args.service === 'string' ? args.service : 'unknown service';
-    const command = Array.isArray(args.command) ? args.command.filter((value): value is string => typeof value === 'string').join(' ') : '';
-    return `run ${command} in ${service}`;
-  }
-  if ((name === 'write_file' || name === 'edit_file' || name === 'delete_file') && typeof input === 'object' && input !== null) {
-    const file = (input as Record<string, unknown>).path;
-    return `${name} ${typeof file === 'string' ? file : 'a file'}`;
-  }
-  return name;
+/** 승인 요청에 보여 줄 요약. 글은 Rust(tool_input.rs, 3단계 3u)가 만든다. 입력을 JSON으로 만들 수 없으면 도구 이름만 보여 준다 */
+export function summarizeApproval(name: string, input: unknown): string {
+  return native.toolSummarizeApproval(name, encodeValue(input));
+}
+
+/** 막는 쪽: 경로는 `/`로 시작해야 한다. 판정은 Rust(tool_input.rs, 3단계 3u) */
+export function httpPathError(requestPath: string): string | undefined {
+  return native.toolHttpPathOk(requestPath) ? undefined : 'path must start with "/"';
+}
+
+/**
+ * 여는 쪽(같은 호스트만 통과): 판정은 Rust(tool_input.rs). URL 해석은 여기(WHATWG URL)에 두고 origin 글자만 단사로 바꿔 넘긴다.
+ * "//other-host/..." 같은 경로는 URL 해석에서 호스트가 바뀐다. 서비스 밖으로 요청하지 못하게 막는다
+ */
+export function httpOriginError(url: URL, endpointUrl: string): string | undefined {
+  return native.toolSameOrigin(encodeLoneSurrogates(url.origin), encodeLoneSurrogates(new URL(endpointUrl).origin)) ? undefined : 'path must stay on the service host';
 }
 
 async function httpRequest(context: ToolContext, args: Record<string, unknown>): Promise<ToolOutcome> {
@@ -721,13 +737,15 @@ async function httpRequest(context: ToolContext, args: Record<string, unknown>):
   const method = string(args, 'method');
   if (context.readOnly && !READ_METHODS.has(method)) return failure(READ_ONLY_METHOD);
   const requestPath = string(args, 'path');
-  if (!requestPath.startsWith('/')) return failure('path must start with "/"');
+  const pathError = httpPathError(requestPath);
+  if (pathError) return failure(pathError);
   const body = string(args, 'body');
 
   const endpoint = await context.sandbox.endpoint(target);
   const url = new URL(requestPath, endpoint.url);
   // "//other-host/..." 같은 경로는 URL 해석에서 호스트가 바뀐다. 서비스 밖으로 요청하지 못하게 막는다
-  if (url.origin !== new URL(endpoint.url).origin) return failure('path must stay on the service host');
+  const originError = httpOriginError(url, endpoint.url);
+  if (originError) return failure(originError);
   const response = await fetch(url, {
     method,
     headers: body ? { 'content-type': 'application/json' } : undefined,
@@ -758,22 +776,28 @@ async function tailLogs(sandbox: Sandbox, service: string, lines: number): Promi
   return collected.length > 0 ? collected.join('\n') : '(no logs)';
 }
 
-/** managed 서비스만 허용한다. run_in_service·http_request·get_contract는 엔드포인트(포트)나 임의 실행이 걸려 있어 부가 서비스로 넓히지 않는다 */
-function serviceName({ project }: ToolContext, args: Record<string, unknown>): string {
+/**
+ * managed 서비스만 허용한다. run_in_service·http_request·get_contract는 엔드포인트(포트)나 임의 실행이 걸려 있어 부가 서비스로 넓히지 않는다.
+ * 여는 쪽(허용 목록): 판정은 Rust(tool_input.rs, 3단계 3u)가 글자 그대로의 같음으로 하고, 이름은 encodeLoneSurrogates로 바꿔 보낸다
+ */
+export function serviceName({ project }: ToolContext, args: Record<string, unknown>): string {
   const name = string(args, 'service');
-  if (!project.managed.some(([serviceKey]) => serviceKey === name)) throw new ToolInputError(`Unknown service: ${name}`);
+  if (!native.toolServiceAllowed(encodeLoneSurrogates(name), project.managed.map(([serviceKey]) => encodeLoneSurrogates(serviceKey)))) throw new ToolInputError(`Unknown service: ${name}`);
   return name;
 }
 
-/** 이 프로젝트 자신의 compose 서비스 이름 전체(부가 서비스 포함). 테스트 픽스처처럼 없으면 managed만으로 본다(옛 동작과 같다) */
-function composeServiceNames(project: LoadedProject): string[] {
-  return project.composeServices ?? project.managed.map(([name]) => name);
+/** 이 프로젝트 자신의 compose 서비스 이름 전체(부가 서비스 포함). 테스트 픽스처처럼 없으면 managed만으로 본다(옛 동작과 같다). 도구 스키마의 이름 목록(표시용)에 쓴다 */
+export function composeServiceNames(project: LoadedProject): string[] {
+  return native.toolComposeServiceNames(project.composeServices, project.managed.map(([name]) => name));
 }
 
-/** managed 서비스나 이 프로젝트 자신의 부가 서비스만 허용한다(도그푸딩 마찰 143). restart_service·service_logs가 쓴다 */
-function serviceOrAddonName({ project }: ToolContext, args: Record<string, unknown>): string {
+/** managed 서비스나 이 프로젝트 자신의 부가 서비스만 허용한다(도그푸딩 마찰 143). restart_service·service_logs가 쓴다. 여는 쪽(허용 목록)이라 serviceName과 같은 규칙이다 */
+export function serviceOrAddonName({ project }: ToolContext, args: Record<string, unknown>): string {
   const name = string(args, 'service');
-  if (!composeServiceNames(project).includes(name)) throw new ToolInputError(`Unknown service: ${name}`);
+  const compose = project.composeServices?.map(encodeLoneSurrogates);
+  if (!native.toolServiceOrAddonAllowed(encodeLoneSurrogates(name), compose, project.managed.map(([serviceKey]) => encodeLoneSurrogates(serviceKey)))) {
+    throw new ToolInputError(`Unknown service: ${name}`);
+  }
   return name;
 }
 
@@ -800,43 +824,90 @@ async function restartAddonService(context: ToolContext, target: string, signal:
 
 class ToolInputError extends Error {}
 
-function asRecord(input: unknown): Record<string, unknown> {
-  if (typeof input !== 'object' || input === null || Array.isArray(input)) throw new ToolInputError('Tool input must be an object');
-  return input as Record<string, unknown>;
-}
-
-function string(args: Record<string, unknown>, key: string): string {
-  const value = args[key];
-  if (typeof value !== 'string') throw new ToolInputError(`"${key}" must be a string`);
-  return value;
-}
-
-function integer(args: Record<string, unknown>, key: string): number {
-  const value = args[key];
-  if (typeof value !== 'number' || !Number.isInteger(value)) throw new ToolInputError(`"${key}" must be an integer`);
-  return value;
-}
-
-function boolean(args: Record<string, unknown>, key: string): boolean {
-  const value = args[key];
-  if (typeof value !== 'boolean') throw new ToolInputError(`"${key}" must be a boolean`);
-  return value;
-}
-
-function stringArray(args: Record<string, unknown>, key: string): string[] {
-  const value = args[key];
-  if (!Array.isArray(value) || value.length === 0 || !value.every((item) => typeof item === 'string')) {
-    throw new ToolInputError(`"${key}" must be a non-empty array of strings`);
+/**
+ * 입력 검사(막는 쪽: 입력 거부)의 판정은 Rust(tool_input.rs, 3단계 3u)가 한다. 값은 encodeNative한 JSON으로 넘기고, 돌려받은 글을 그대로 던진다.
+ * JSON으로 만들 수 없는 값(BigInt, NUL로 시작하는 키, 순환)은 거부 쪽(`null`)으로 보낸다. 짝 없는 서로게이트는 JSON 이스케이프로 건너가 유형 판정에 영향이 없다
+ */
+function encodeValue(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    return encodeNative(plainCopy(value, 0)) ?? 'null';
+  } catch {
+    return 'null';
   }
-  return value;
+}
+
+/**
+ * JSON 데이터만 복사한다. `toJSON`·getter 같은 코드가 값을 다르게 보이게 하는 길을 막는다: `JSON.stringify`는 `toJSON`이 있으면 그 결과를 쓰므로
+ * (`{ toJSON: () => 'x' }`가 문자열로, `Date`가 문자열로 보인다) 직렬화 전에 평범한 객체·배열로 옮기고, 그 밖의 객체(`Date`·`Map`·클래스 인스턴스)와 BigInt·너무 깊은 중첩은 던져
+ * 거부 쪽으로 보낸다. 구멍 난 배열의 구멍은 `null`이 된다. 객체의 함수·undefined 값은 JSON처럼 빠진다
+ */
+function plainCopy(value: unknown, depth: number): unknown {
+  if (depth > 200) throw new Error('too deep');
+  if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+  if (Array.isArray(value)) {
+    const items: unknown[] = [];
+    for (let index = 0; index < value.length; index++) {
+      const item: unknown = value[index];
+      items.push(item === undefined || typeof item === 'function' || typeof item === 'symbol' ? null : plainCopy(item, depth + 1));
+    }
+    return items;
+  }
+  if (typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) throw new Error('not plain');
+    const copy: Record<string, unknown> = {};
+    for (const key of Object.keys(value)) {
+      const item = (value as Record<string, unknown>)[key];
+      if (item === undefined || typeof item === 'function' || typeof item === 'symbol') continue;
+      // `__proto__`도 그냥 키다(대입하면 프로토타입이 바뀐다)
+      Object.defineProperty(copy, key, { value: plainCopy(item, depth + 1), enumerable: true, writable: true, configurable: true });
+    }
+    return copy;
+  }
+  throw new Error('not json');
+}
+
+function check(kind: string, args: Record<string, unknown>, key: string): void {
+  const error = native.toolInputError(kind, key, encodeValue(args[key]));
+  if (error !== null && error !== undefined) throw new ToolInputError(error);
+}
+
+/**
+ * 도구 입력은 객체여야 한다. 돌려주는 것은 입력의 JSON 복사본이다: 이후 검사가 읽는 값과 Rust가 판정한 값이 같은 데이터가 되고(`toJSON`·getter·구멍 난 배열이 판정과 다르게 읽히지 않는다),
+ * 짝 없는 서로게이트·`-0`·`NaN`은 그대로 남는다
+ */
+export function asRecord(input: unknown): Record<string, unknown> {
+  const json = encodeValue(input);
+  const error = native.toolInputError('record', '', json);
+  if (error !== null && error !== undefined) throw new ToolInputError(error);
+  return decodeNative<Record<string, unknown>>(json!);
+}
+
+export function string(args: Record<string, unknown>, key: string): string {
+  check('string', args, key);
+  return args[key] as string;
+}
+
+export function integer(args: Record<string, unknown>, key: string): number {
+  check('integer', args, key);
+  return args[key] as number;
+}
+
+export function boolean(args: Record<string, unknown>, key: string): boolean {
+  check('boolean', args, key);
+  return args[key] as boolean;
+}
+
+export function stringArray(args: Record<string, unknown>, key: string): string[] {
+  check('stringArray', args, key);
+  return args[key] as string[];
 }
 
 /** 없으면 빈 배열. 조율 도구의 refs·kinds처럼 비어 있을 수 있는 배열에 쓴다 */
-function optionalStringArray(args: Record<string, unknown>, key: string): string[] {
-  const value = args[key];
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) throw new ToolInputError(`"${key}" must be an array of strings`);
-  return value;
+export function optionalStringArray(args: Record<string, unknown>, key: string): string[] {
+  check('optionalStringArray', args, key);
+  return args[key] === undefined ? [] : (args[key] as string[]);
 }
 
 const NOTE_KINDS: readonly NoteKind[] = ['contract', 'failure', 'fact'];
@@ -856,8 +927,9 @@ function formatNote(note: Note): string {
   return `[${note.kind}·${note.priority}] ${note.author.lane}: ${note.body}${refs}`;
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
+/** 판정은 Rust(tool_input.rs). `Math.min(max, Math.max(min, value))`와 같다 */
+export function clamp(value: number, min: number, max: number): number {
+  return native.toolClamp(value, min, max);
 }
 
 function withTimeout(signal: AbortSignal | undefined, ms: number): AbortSignal {

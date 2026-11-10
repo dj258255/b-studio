@@ -2969,6 +2969,76 @@ pub fn coord_format_note(kind: String, priority: f64, lane: String, body: String
     coordination::format_note(&kind, priority, &lane, &body, &refs)
 }
 
+// ── 검증 통과 판정·도구 입력 검사(ADR-191 3단계 3u). 막는 검사이고 일부는 여는 쪽(서비스 허용 목록·origin)이다. TS 껍데기: packages/agent/src/{verify,tools}.ts
+use bstudio_guard::{tool_input, verify_judge};
+
+#[napi]
+pub fn verify_ok(restarted_ready: Vec<bool>, contract_errored: Vec<bool>, change_breaking: Vec<bool>, allow_breaking: bool, secret_leaks: u32, spec_error: bool) -> bool {
+    verify_judge::verify_ok(&restarted_ready, &contract_errored, &change_breaking, allow_breaking, secret_leaks as usize, spec_error)
+}
+
+#[napi]
+pub fn verify_platform_failure(sync_error: Option<String>, sync_platform: bool, services: Vec<String>, ready: Vec<bool>, platform: Vec<bool>, errors: Vec<String>) -> Option<String> {
+    verify_judge::platform_failure_of(sync_error.as_deref(), sync_platform, &services, &ready, &platform, &errors)
+}
+
+#[napi]
+pub fn verify_mentions_deleted_file(log_tail: Vec<String>, deleted: Vec<String>) -> bool {
+    verify_judge::mentions_deleted_file(&log_tail, &deleted)
+}
+
+/// 읽을 수 없는 보고서도 던지지 않고 "검증 실패"로 시작하는 글을 돌려준다
+#[napi]
+pub fn verify_format_report(report_json: String, allow_breaking: bool, spec_file: String) -> String {
+    verify_judge::format_verification_report(&report_json, allow_breaking, &spec_file)
+}
+
+/// 맞으면 null, 아니면 던질 오류 글. value_json은 encodeNative한 값(없으면 undefined)
+#[napi]
+pub fn tool_input_error(kind: String, key: String, value_json: Option<String>) -> Option<String> {
+    tool_input::input_error(&kind, &key, value_json.as_deref())
+}
+
+#[napi]
+pub fn tool_clamp(value: f64, min: f64, max: f64) -> f64 {
+    tool_input::clamp(value, min, max)
+}
+
+#[napi]
+pub fn tool_compose_service_names(compose: Option<Vec<String>>, managed: Vec<String>) -> Vec<String> {
+    tool_input::compose_service_names(compose.as_deref(), &managed)
+}
+
+#[napi]
+pub fn tool_service_allowed(name: String, managed: Vec<String>) -> bool {
+    tool_input::service_allowed(&name, &managed)
+}
+
+#[napi]
+pub fn tool_service_or_addon_allowed(name: String, compose: Option<Vec<String>>, managed: Vec<String>) -> bool {
+    tool_input::service_or_addon_allowed(&name, compose.as_deref(), &managed)
+}
+
+#[napi]
+pub fn tool_summarize_approval(name: String, input_json: Option<String>) -> String {
+    tool_input::summarize_approval(&name, input_json.as_deref())
+}
+
+#[napi]
+pub fn tool_mismatch_addable(max: u32, seen_requests: Vec<String>, seen_checks: Vec<String>, seen_followed: Vec<String>, request: String, check: String, followed: String) -> bool {
+    tool_input::mismatch_addable(max as usize, &seen_requests, &seen_checks, &seen_followed, &request, &check, &followed)
+}
+
+#[napi]
+pub fn tool_http_path_ok(path: String) -> bool {
+    tool_input::http_path_ok(&path)
+}
+
+#[napi]
+pub fn tool_same_origin(request_origin: String, service_origin: String) -> bool {
+    tool_input::same_origin(&request_origin, &service_origin)
+}
+
 use bstudio_guard::gate_helpers as gh;
 
 /// 오류 표지 글자. 없으면 null
