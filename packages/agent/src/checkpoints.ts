@@ -8,7 +8,6 @@ import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
 import { decodeLoneSurrogates } from './lone-surrogates';
 import {
-  formatVerifyTrailer,
   isDocCheckpointPath,
   parseIncompleteTrailerValues,
   parseVerifyTrailerValues,
@@ -2174,16 +2173,18 @@ function capText(text: string, max: number): string {
   return native.checkpointCapText(text, max);
 }
 
-/** commit()에 넘긴 trailers 중 Workflow-Passed 값이 'none'(통과한 단계가 하나도 없다는 뜻)인 줄이 있는지 */
-function hasEmptyPassedTrailer(trailers: readonly string[]): boolean {
-  const prefix = `${WORKFLOW_TRAILER}:`.toLowerCase();
-  const line = trailers.find((entry) => entry.trim().toLowerCase().startsWith(prefix));
-  if (!line) return false;
-  return line.slice(line.indexOf(':') + 1).trim().toLowerCase() === 'none';
+/**
+ * commit()에 넘긴 trailers 중 Workflow-Passed 값이 'none'(통과한 단계가 하나도 없다는 뜻)인 줄이 있는지. 막는 쪽이라 하나라도 있으면 참이다.
+ * 판정은 Rust(crates/bstudio-guard/src/workflow.rs, ADR-191 3단계 3v)가 한다
+ */
+export function hasEmptyPassedTrailer(trailers: readonly string[]): boolean {
+  return native.workflowHasEmptyPassedTrailer([...trailers]);
 }
 
-/** commit()에 넘긴 trailers에 문서 체크포인트 예외(Workflow-Verify: docs, ADR-096)가 있는지 */
-function hasDocsVerifyTrailer(trailers: readonly string[]): boolean {
-  const expected = formatVerifyTrailer('docs').toLowerCase();
-  return trailers.some((entry) => entry.trim().toLowerCase() === expected);
+/**
+ * commit()에 넘긴 trailers에 문서 체크포인트 예외(Workflow-Verify: docs, ADR-096)가 있는지. 여는 쪽이라 마지막 Workflow-Verify 줄이 정확히 docs일 때만 참이다.
+ * 판정은 Rust가 한다
+ */
+export function hasDocsVerifyTrailer(trailers: readonly string[]): boolean {
+  return native.workflowHasDocsVerifyTrailer([...trailers]);
 }

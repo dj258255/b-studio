@@ -494,6 +494,28 @@ interface NativeGuard {
   checkpointIsBackupId(text: string): boolean;
   checkpointPullRequestTarget(listed: string, baseRef: string, infoBase: string): string;
   checkpointGitEnvKeep(keys: string[]): boolean[];
+
+  // ── agent: 워크플로 판정(3단계 3v). 트레일러 값은 ASCII 상수와만 견주므로 그대로 보낸다. 통과로 이어지는 같음 비교(배포 막음·빠진 검증 단계·시험이 다루는 서비스·선언한 화면 경로)는
+  // encodeLoneSurrogates한 글자를 보내고 위치로 돌려받는다. 보호 경로는 원래 글자를 보낸다(거부 목록은 U+FFFD 꼴로 견준다)
+  workflowFormatPassedTrailer(stages: string[]): string;
+  workflowFormatVerifyTrailer(mode: string): string;
+  workflowFormatIncompleteTrailer(reason: string): string;
+  workflowParsePassedTrailer(values: string[]): string[] | null | undefined;
+  workflowParseVerifyTrailer(values: string[]): string | null | undefined;
+  workflowParseIncompleteTrailer(values: string[]): string | null | undefined;
+  workflowIsDocCheckpointPath(file: string): boolean;
+  workflowHasEmptyPassedTrailer(trailers: string[]): boolean;
+  workflowHasDocsVerifyTrailer(trailers: string[]): boolean;
+  workflowStages(required: string[] | undefined, pageChecks: number, tests: number, concurrencyChecks: number, loadChecks: number): string[];
+  workflowReleaseRequirements(releaseRequires: string[] | undefined): string[];
+  /** 요구 목록에서 빠진 단계의 위치. -1은 checkpoint(게이트를 거치지 않은 직접 수정 체크포인트) */
+  workflowReleaseBlockers(requires: string[] | undefined, declared: boolean, passed: string[] | undefined, verify: string | undefined): number[];
+  workflowMissingVerificationStages(stages: string[], passed: string[]): number[];
+  workflowProtectedPaths(protectedPaths: string[] | undefined, evaluationAssets: string[] | undefined): string[];
+  workflowMaxTurns(json: string): string;
+  workflowReviewChanges(json: string): string;
+  workflowUncoveredChangeWarnings(json: string): string;
+  workflowFormatCheckedCoverage(json: string, declaredCheckName: string): string;
 }
 
 export interface NativeHostPty {

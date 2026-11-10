@@ -55,3 +55,4 @@ pub mod test_results;
 pub mod test_run;
 pub mod tool_output;
 pub mod usage;
+pub mod workflow;
