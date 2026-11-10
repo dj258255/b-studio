@@ -59,4 +59,5 @@ pub mod tool_input;
 pub mod tool_output;
 pub mod usage;
 pub mod verify_judge;
+pub mod workflow;
 pub mod workspace_guard;
