@@ -64,3 +64,16 @@ describe('runCommand (Rust 경계, #docker 계약)', () => {
     await expect(readFile(marker, 'utf8')).rejects.toThrow();
   });
 });
+
+describe('runCommand cwd', () => {
+  it('cwd를 주면 그 폴더에서 돌고, 없는 폴더는 던지지 않고 결과로 돌려준다', async () => {
+    const { realpath } = await import('node:fs/promises');
+    const { tmpdir } = await import('node:os');
+    const result = await runCommand('pwd', ['-P'], { cwd: tmpdir() });
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout.trim()).toBe(await realpath(tmpdir()));
+    const missing = await runCommand('pwd', [], { cwd: '/definitely/not/here' });
+    expect(missing.exitCode).toBe(1);
+    expect(missing.stderr).toContain('ENOENT');
+  });
+});

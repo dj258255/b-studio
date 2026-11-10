@@ -1,9 +1,6 @@
-import { execFile, spawn, type ChildProcess } from 'node:child_process';
-import { promisify } from 'node:util';
 import { native } from '../native';
+import { runCommand } from '../stream-exec';
 import type { ExecResult } from '../types';
-
-const execFileAsync = promisify(execFile);
 
 /**
  * "내 환경" 관찰 탭(사용자가 docker compose로 직접 띄운 컨테이너)이 쓸 수 있는 docker 하위 명령 화이트리스트.
@@ -30,36 +27,16 @@ export function assertReadonlyDockerArgs(args: readonly string[]): void {
   if (message != null) throw new ReadonlyDockerViolation(message);
 }
 
-/** ps·inspect·stats처럼 한 번 실행하고 끝나는 읽기 전용 docker 명령. 화이트리스트를 어기면 실행 전에 던진다 */
+/**
+ * ps·inspect·stats처럼 한 번 실행하고 끝나는 읽기 전용 docker 명령. 화이트리스트를 어기면 실행 전에 던진다.
+ * 비0 종료·취소·띄우기 실패·출력 상한 초과는 던지지 않고 결과로 돌려준다(옛 `execFile`의 `isExecFailure` 분기와 같다).
+ * 단 stderr가 비면 옛 오류의 `message` 대신 `runCommand`가 채운 문구가 들어간다
+ */
 export async function execReadonlyDocker(
   dockerBin: string,
   args: readonly string[],
   options: { signal?: AbortSignal; env?: NodeJS.ProcessEnv } = {},
 ): Promise<ExecResult> {
   assertReadonlyDockerArgs(args);
-  try {
-    const { stdout, stderr } = await execFileAsync(dockerBin, [...args], {
-      signal: options.signal,
-      maxBuffer: 64 * 1024 * 1024,
-      env: options.env ?? process.env,
-    });
-    return { exitCode: 0, stdout, stderr };
-  } catch (error) {
-    if (!isExecFailure(error)) throw error;
-    return { exitCode: typeof error.code === 'number' ? error.code : 1, stdout: error.stdout ?? '', stderr: error.stderr || error.message };
-  }
-}
-
-/** logs --follow처럼 스트리밍하는 읽기 전용 docker 명령. 화이트리스트를 어기면 프로세스를 띄우지 않고 던진다 */
-export function spawnReadonlyDocker(
-  dockerBin: string,
-  args: readonly string[],
-  options: { signal?: AbortSignal; env?: NodeJS.ProcessEnv } = {},
-): ChildProcess {
-  assertReadonlyDockerArgs(args);
-  return spawn(dockerBin, [...args], { signal: options.signal, stdio: ['ignore', 'pipe', 'pipe'], env: options.env ?? process.env });
-}
-
-function isExecFailure(error: unknown): error is Error & { code?: number | string; stdout?: string; stderr?: string } {
-  return error instanceof Error && 'stdout' in error;
+  return runCommand(dockerBin, [...args], { signal: options.signal, env: options.env ?? process.env });
 }

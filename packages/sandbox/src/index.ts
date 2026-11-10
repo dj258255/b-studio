@@ -24,7 +24,6 @@ export {
   execReadonlyDocker,
   READONLY_DOCKER_SUBCOMMANDS,
   ReadonlyDockerViolation,
-  spawnReadonlyDocker,
 } from './docker/readonly-exec';
 export {
   classifyOwnership,

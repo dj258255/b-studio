@@ -702,6 +702,7 @@ pub fn run_command(
     args: Vec<String>,
     input: Option<String>,
     env_vars: Option<HashMap<String, String>>,
+    cwd: Option<String>,
     signal: Option<AbortSignal>,
 ) -> Result<AsyncBlock<ExecResult>> {
     let pairs = env_pairs(env_vars);
@@ -712,6 +713,7 @@ pub fn run_command(
             &args,
             input.as_deref(),
             pairs.as_deref(),
+            cwd.as_deref(),
             cancel.notified(),
         )
         .await;

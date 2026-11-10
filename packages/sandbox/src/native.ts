@@ -99,7 +99,7 @@ interface NativeGuard {
   // ── I/O 조율: #docker 일반 실행(2단계 2c-2, #1043). docker/docker compose를 한 번 돌려 stdout·stderr를 모은다.
   // 던지지 않는다 — 비0 종료·취소·spawn 실패·maxBuffer 초과 모두 결과로 돌려준다(execFileAsync + isExecFailure와 같음).
   // signal로 취소하면 거절하지 않고 그때까지의 부분 출력과 exitCode 1을 돌려준다(stats의 timeout-cutoff 보존)
-  runCommand(bin: string, args: string[], input: string | undefined | null, env: Record<string, string> | undefined | null, signal: AbortSignal | undefined | null): Promise<ExecResult>;
+  runCommand(bin: string, args: string[], input: string | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, signal: AbortSignal | undefined | null): Promise<ExecResult>;
   // ── I/O: 링크 안전 파일 시스템 준비(2단계 2c-1b). 아무것도 재귀로 따라가며 지우지 않는다(링크는 링크만).
   // 오류는 메시지를 담은 Error로 거절된다. 이름을 받는 곳은 한 이름이 아니면(`..`·구분자·NUL·빈 이름) 거부한다
   prepareEvaluationAssetSlot(source: string, kind: 'file' | 'directory', parent: string): Promise<void>;
