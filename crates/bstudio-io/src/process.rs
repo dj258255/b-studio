@@ -40,6 +40,20 @@ pub async fn run_command(
     run_command_capped(bin, args, input, env, cwd, cancel, MAX_BUFFER).await
 }
 
+/// `run_command`와 같되 스트림마다 `limit` 바이트에 닿으면 그 자리에서 자식을 kill한다(256MB보다 크게는 받지 않는다).
+/// 상한을 다 읽은 뒤에 재지 않고 읽는 중에 멈춘다(2c-7 검토). 상한을 넘었는지는 호출자가 출력 길이로 판단한다
+pub async fn run_command_with_limit(
+    bin: &str,
+    args: &[String],
+    input: Option<&str>,
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    cancel: impl Future<Output = ()>,
+    limit: usize,
+) -> ExecOutput {
+    run_command_capped(bin, args, input, env, cwd, cancel, limit.min(MAX_BUFFER)).await
+}
+
 /// 상한만 바꿔 부른다. 테스트가 256MB를 내지 않고 상한-넘김 kill 경로를 보기 위한 자리.
 async fn run_command_capped(
     bin: &str,

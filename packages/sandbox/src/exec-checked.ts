@@ -31,12 +31,15 @@ export interface ExecCheckedOptions {
 }
 
 const DEFAULT_MAX_BUFFER = 1024 * 1024;
+/** Rust 쪽이 받는 가장 큰 상한(스트림마다 256MiB). 이보다 큰 maxBuffer는 이 값으로 줄어 그 자리에서 멈춘다 */
+const MAX_NATIVE_BUFFER = 256 * 1024 * 1024;
 
 export async function execChecked(bin: string, args: readonly string[], options: ExecCheckedOptions = {}): Promise<{ stdout: string; stderr: string }> {
   const { cwd, env, signal, timeoutMs, maxBuffer = DEFAULT_MAX_BUFFER, input } = options;
   const signals = [signal, timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs)].filter((item): item is AbortSignal => item !== undefined);
   const combined = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
-  const result = await runCommand(bin, [...args], { signal: combined, env, cwd, input });
+  // 상한은 읽는 중에 본다: Rust가 스트림마다 maxBuffer + 1 바이트에 닿으면 자식을 멈춘다. 한 바이트 더 받아야 "넘었다"를 길이로 안다
+  const result = await runCommand(bin, [...args], { signal: combined, env, cwd, input, maxBuffer: Math.min(maxBuffer, MAX_NATIVE_BUFFER - 1) + 1 });
   const command = [bin, ...args].join(' ');
   // 취소·시간 초과는 부분 출력과 exitCode 1로 돌아온다. 정상 종료와 겹치지 않게 신호를 먼저 본다
   if (combined?.aborted && result.exitCode !== 0) throw new ExecCheckedError(`Command failed: ${command}\n${result.stderr}`, 'ABORT_ERR', result.stdout, result.stderr);

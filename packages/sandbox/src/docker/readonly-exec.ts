@@ -38,5 +38,6 @@ export async function execReadonlyDocker(
   options: { signal?: AbortSignal; env?: NodeJS.ProcessEnv } = {},
 ): Promise<ExecResult> {
   assertReadonlyDockerArgs(args);
-  return runCommand(dockerBin, [...args], { signal: options.signal, env: options.env ?? process.env });
+  // 옛 execFile의 maxBuffer(64MiB)를 읽는 중에 지킨다. 넘으면 그때까지의 출력과 exitCode 1로 돌아온다(옛 동작과 같다)
+  return runCommand(dockerBin, [...args], { signal: options.signal, env: options.env ?? process.env, maxBuffer: 64 * 1024 * 1024 });
 }

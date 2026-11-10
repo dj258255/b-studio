@@ -35,10 +35,15 @@ export function runCommandFromFile(bin: string, args: string[], inputFile: strin
  * `bin args`를 한 번 돌려 stdout·stderr를 모은다(2c-2, #1043). `#docker`가 쓴다.
  * 던지지 않는다 — 비0 종료·취소·spawn 실패·maxBuffer 초과 모두 결과로 돌려준다(옛 `execFileAsync` + `isExecFailure`와 같다).
  * `signal`로 취소하면 거절하지 않고 그때까지의 부분 출력과 `exitCode: 1`을 돌려준다(`stats`의 timeout-cutoff 보존).
- * `cwd`를 주면 그 폴더에서 돈다(2c-7). 던지는 `execFile`이 필요한 자리는 `exec-checked.ts`의 `execChecked`가 이 위에서 던진다.
+ * `cwd`를 주면 그 폴더에서 돈다(2c-7). `maxBuffer`를 주면 읽는 중에 그 상한에서 멈춘다. 던지는 `execFile`이 필요한 자리는 `exec-checked.ts`의 `execChecked`가 이 위에서 던진다.
  */
-export function runCommand(bin: string, args: string[], { signal, env, input, cwd }: StreamExecOptions & { input?: string; cwd?: string } = {}): Promise<ExecResult> {
-  return native.runCommand(bin, args, input ?? null, definedEnv(env), cwd ?? null, signal);
+export function runCommand(
+  bin: string,
+  args: string[],
+  { signal, env, input, cwd, maxBuffer }: StreamExecOptions & { input?: string; cwd?: string; maxBuffer?: number } = {},
+): Promise<ExecResult> {
+  // maxBuffer를 주면 스트림마다 그 바이트에 닿는 순간 Rust가 자식을 멈춘다(주지 않으면 256MB). 다 읽은 뒤에 재지 않는다
+  return native.runCommand(bin, args, input ?? null, definedEnv(env), cwd ?? null, maxBuffer ?? null, signal);
 }
 
 const NOOP_LINE = (): void => {};

@@ -37,6 +37,12 @@ describe('execChecked', () => {
     expect((await execChecked('sh', ['-c', 'head -c 900 /dev/zero | tr "\\0" x'], { maxBuffer: 1000 })).stdout).toHaveLength(900);
   });
 
+  it('maxBuffer를 넘으면 그 자리에서 자식을 멈춰, 상한을 크게 넘는 출력을 모으지 않는다(상한은 읽기 전에 본다)', async () => {
+    const error = await execChecked('sh', ['-c', 'head -c 5000000 /dev/zero | tr "\\0" y'], { maxBuffer: 1000 }).catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
+    expect(Buffer.byteLength((error as ExecCheckedError).stdout)).toBeLessThanOrEqual(1001);
+  });
+
   it('기본 maxBuffer는 execFile처럼 1MiB다', async () => {
     await expect(execChecked('sh', ['-c', 'head -c 1100000 /dev/zero | tr "\\0" x'])).rejects.toMatchObject({ code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER' });
   });

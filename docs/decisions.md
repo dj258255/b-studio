@@ -9840,14 +9840,14 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 ### 덧붙임: 2c-7 결과 — sandbox에 남은 `execFile`·`spawn`을 `runCommand`로 (2026-11-11, [#1143](https://github.com/dj258255/b-studio/issues/1143))
 
 - 옮긴 것: `docker/agent-terminal.ts`(호스트 쪽 docker 호출: 컨테이너 띄우기·inspect·rm·pause·unpause·resize·관문 ping), `docker/compose-deps.ts`(`compose config`), `docker/compose-provider.ts`(이미지 목록·지우기, 볼륨 만들기, `docker info`, 정리 명령), `docker/prune.ts`, `docker/readonly-exec.ts`, `host-terminal.ts`(`command -v`, `ps`, 훅 ping). `git grep node:child_process packages/sandbox/src`에 남는 것은 kubernetes(실험 경로), 시험 파일, agent-terminal의 타입 import 하나와 컨테이너에 넣는 훅 스크립트 문자열 안의 코드뿐이다.
-- Rust: `run_command`에 선택 인자 `cwd`를 더했다(napi `runCommand`의 인자 순서는 `bin, args, input, env, cwd, signal`). 호출자는 `stream-exec.ts` 하나뿐이다.
+- Rust: `run_command`에 선택 인자 `cwd`를 더했다(napi `runCommand`의 인자 순서는 `bin, args, input, env, cwd, maxBuffer, signal`). 호출자는 `stream-exec.ts` 하나뿐이다.
 - **던지는 자리는 `execChecked`(`exec-checked.ts`)가 `runCommand` 위에서 던진다.** 비0 종료, 시간 초과·취소(`AbortSignal.timeout`), 출력이 `maxBuffer`(기본 1MiB, `execFile`과 같다)를 넘음, 띄우기 실패에서 던지고, 오류는 `stdout`·`stderr`·`code`를 가진다. 삼키던 자리는 호출부의 `.catch`가 그대로 삼킨다.
 - 실패 동작은 자리마다 옛 코드와 같다(표는 PR 본문): 지우는 코드의 목록 조회(`prune`의 ps·ps -a·image ls·volume ls·network ls, `removeSandboxImages`의 image ls)는 실패하면 던지고 아무것도 지우지 않는다. `removeAgentContainer`·`resize`·`ensureAgentContainer` 안의 unpause 시도·`rm --force`·`inspect`(없는 것으로 봄)·`probeAgentGateway`·`probeHostGateway`·`findHostCli`의 `command -v`는 삼키고, `pause`·`unpause`·`docker info`·`compose config`·`ps`·`volume create`·이미지 지우기는 던진다. `execReadonlyDocker`는 옛대로 던지지 않고 결과로 돌려준다.
-- **출력 상한 차이.** `runCommand`의 Rust 상한은 스트림마다 256MiB, 옛 `maxBuffer`는 1MiB(기본)·16MiB·64MiB였다. `execChecked`가 받은 뒤 옛 상한으로 다시 재서 넘으면 던진다(256MiB를 넘는 출력은 Rust가 자르고 kill해도 옛 상한보다 크니 마찬가지로 던진다). 다만 던지기 전에 그 출력을 메모리에 모으므로, 상한을 넘는 출력의 최대 메모리가 옛 상한에서 256MiB(스트림당)로 늘었다. `execReadonlyDocker`는 옛 64MiB 상한이 256MiB로 늘었고 넘으면 결과로 돌려주는 것은 같다.
+- **출력 상한은 읽는 중에 본다.** `runCommand`가 선택 인자 `maxBuffer`를 받아 Rust(`run_command_with_limit`)에 넘기고, Rust는 스트림마다 그 바이트에 닿는 순간 자식을 kill한다(주지 않으면 256MiB). `execChecked`는 `maxBuffer + 1`을 넘겨 한 바이트를 더 받고, 길이가 `maxBuffer`를 넘으면 던진다. 처음 커밋은 256MiB까지 다 모은 뒤에 옛 상한으로 쟀는데, 커밋 보안 검토가 "상한을 최대 할당 뒤에 본다"고 지적해 바꿨다(옛 1MiB 상한 자리에서 5MB 출력을 다 모으던 것을 시험으로 확인: 고치기 전 `expected 5000000 to be less than or equal to 1001`). `execReadonlyDocker`도 옛 64MiB를 넘긴다(넘으면 그때까지의 출력과 exitCode 1로, 옛과 같다).
 - 띄우기 실패(없는 실행 파일, 없는 작업 폴더)는 옛 오류의 `code: 'ENOENT'`·빈 `stderr` 대신 `code: 1`·`stderr: "spawn <bin> ENOENT"`다. 삼키는 자리는 같고, 던지는 자리는 메시지에 이 문구가 들어간다.
 - `host-terminal`의 `command -v`는 문자열을 잇지 않고 `['-c', 'command -v -- "$1"', 'sh', kind]`로 인자를 넘긴다.
 - `spawnReadonlyDocker`는 apps·packages 어디에서도 쓰지 않아(시험만) 함수와 export를 지웠다.
-- 검증: 옛 코드에서 먼저 통과한 동작 보존 시험 19개(`host-exec-behavior.test.ts`)가 새 코드에서도 통과한다. 변이로 보호를 확인했다(비0 종료를 던지지 않게 하면 15개 실패, `runningProjects`·이미지 목록·`removeSandboxImages`의 조회 실패를 삼키게 하면 각각 해당 시험이 실패). 새 시험은 `exec-checked.test.ts`(던지는 조건 8가지)와 cargo `runs_in_given_cwd`.
+- 검증: 옛 코드에서 먼저 통과한 동작 보존 시험 19개(`host-exec-behavior.test.ts`)가 새 코드에서도 통과한다. 변이로 보호를 확인했다(비0 종료를 던지지 않게 하면 15개 실패, `runningProjects`·이미지 목록·`removeSandboxImages`의 조회 실패를 삼키게 하면 각각 해당 시험이 실패). 새 시험은 `exec-checked.test.ts`(던지는 조건과 읽는 중 상한)와 cargo `runs_in_given_cwd`.
 - 하지 않은 것: kubernetes 제공자(실험, 타입 검사만), 실제 docker 데몬을 쓰는 실행(가짜 docker 실행 파일로 확인), 시간 초과가 실제 ping 시간(`AGENT_PING_SECONDS + 10`초)에서 나는지(짧은 시간으로 `execChecked`만 확인). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림).
 
 ## ADR-194 claude-code 러너는 Agent SDK 대신 공개 CLI 입출력(stream-json)으로 돈다

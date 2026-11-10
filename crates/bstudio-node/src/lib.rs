@@ -703,20 +703,18 @@ pub fn run_command(
     input: Option<String>,
     env_vars: Option<HashMap<String, String>>,
     cwd: Option<String>,
+    max_buffer: Option<u32>,
     signal: Option<AbortSignal>,
 ) -> Result<AsyncBlock<ExecResult>> {
     let pairs = env_pairs(env_vars);
     let cancel = abort_notify(signal);
     let future = async move {
-        let output = bstudio_io::process::run_command(
-            &bin,
-            &args,
-            input.as_deref(),
-            pairs.as_deref(),
-            cwd.as_deref(),
-            cancel.notified(),
-        )
-        .await;
+        let output = match max_buffer {
+            Some(limit) => {
+                bstudio_io::process::run_command_with_limit(&bin, &args, input.as_deref(), pairs.as_deref(), cwd.as_deref(), cancel.notified(), limit as usize).await
+            }
+            None => bstudio_io::process::run_command(&bin, &args, input.as_deref(), pairs.as_deref(), cwd.as_deref(), cancel.notified()).await,
+        };
         Ok(ExecResult::from(output))
     };
     AsyncBlockBuilder::new(future).build(&env)
