@@ -198,6 +198,15 @@ pub fn relative(cwd: &str, from: &str, to: &str) -> String {
     format!("{out}{}", &to[rest_start..])
 }
 
+/// `path.posix.basename(path)`(확장자 인자 없음): 끝의 `/`를 뗀 뒤 마지막 `/` 다음. `/`뿐이거나 빈 글자면 빈 글자
+pub fn basename(path: &str) -> String {
+    let trimmed = path.trim_end_matches('/');
+    match trimmed.rfind('/') {
+        Some(index) => trimmed[index + 1..].to_owned(),
+        None => trimmed.to_owned(),
+    }
+}
+
 /// `path.posix.dirname`
 pub fn dirname(path: &str) -> String {
     if path.is_empty() {
