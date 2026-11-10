@@ -31,7 +31,7 @@
  *    클라이언트(provider-clients.ts)는 이 옵션을 보내는 자리가 없어 지원하지 않는다고 그대로 알린다.
  *  - demo: 모델을 부르지 않으므로 지원하지 않는다.
  */
-import { DEFAULT_CLAUDE_CODE_EFFORT, type Effort, type ModelInfo, type ModelPricing } from '@b-studio/agent';
+import { CLAUDE_CODE_MODELS_UNSUPPORTED, DEFAULT_CLAUDE_CODE_EFFORT, type Effort, type ModelInfo, type ModelPricing } from '@b-studio/agent';
 import type { SessionMode } from '../studio-events';
 import { loadClaudeCodeModels } from './claude-code-models';
 import { listStudioCommandCodeModels } from './commandcode-models';
@@ -242,15 +242,17 @@ interface ClaudeCodeModelsView {
 const CLAUDE_CODE_FALLBACK_NOTE_PREFIX = '모델 목록을 불러오지 못해 알려진 목록을 보여줍니다';
 
 /**
- * claude-code 옵션 목록. 로그인한 계정의 Claude Code에게 실제로 물어보고(loadClaudeCodeModels, 1시간 캐시),
- * 실패하면(CLI 없음·로그인 안 됨·타임아웃) CLAUDE_CODE_ALIASES로 되돌아가 이유를 note에 남긴다.
+ * claude-code 옵션 목록. 러너의 목록 조회(loadClaudeCodeModels, 1시간 캐시)가 돌려주면 그것을 쓰고,
+ * 실패하면 CLAUDE_CODE_ALIASES로 되돌아가 이유를 note에 남긴다. 지금 러너는 공개 CLI 입출력으로 도는데 거기에는 모델 목록을 묻는 방법이 없어
+ * (CLAUDE_CODE_MODELS_UNSUPPORTED) 이 표가 평소의 목록이고, 그 경우에는 note를 달지 않는다(ADR-194).
  */
 async function getClaudeCodeModelOptions(): Promise<ClaudeCodeModelsView> {
   const { models, error } = await loadClaudeCodeModels();
   if (!models || models.length === 0) {
     return {
       options: [{ id: '', label: DEFAULT_LABEL, hint: '로그인한 계정의 기본 모델을 그대로 씁니다' }, ...CLAUDE_CODE_ALIASES],
-      note: error ? `${CLAUDE_CODE_FALLBACK_NOTE_PREFIX}: ${error}` : CLAUDE_CODE_FALLBACK_NOTE_PREFIX,
+      // 공개 CLI 입출력에는 모델 목록을 묻는 방법이 없어 알려진 표가 평소의 목록이다. 오류가 아니므로 알림을 달지 않는다
+      ...(error === CLAUDE_CODE_MODELS_UNSUPPORTED ? {} : { note: error ? `${CLAUDE_CODE_FALLBACK_NOTE_PREFIX}: ${error}` : CLAUDE_CODE_FALLBACK_NOTE_PREFIX }),
     };
   }
   const options = models.map(mapClaudeCodeModel);

@@ -10,7 +10,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { boardMcpToolSpecs, runBoardMcpTool } from './board-mcp';
-import { zodShape } from './claude-code-runner';
+import { zodShape } from './tool-schema';
 import type { BoardAccess } from './tools';
 
 /**

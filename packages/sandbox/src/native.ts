@@ -448,6 +448,26 @@ interface NativeGuard {
   repoManagedBodySqueezedOut(body: string, managedBody: string): boolean;
   repoCapBody(body: string): string;
   repoBuildPullRequest(inputJson: string): string;
+  // ── agent: 경로 이름·도구 정책(3단계 3q). 막는 검사다. backslashSep은 `path.sep === '\\'`(껍데기가 넘긴다). 꼴을 맞출 수 없으면 null.
+  // checkToolPolicy: file은 입력의 path(문자열이 아니면 빈 글자), scopeFile은 그 path를 encodeLoneSurrogates한 글자(쓰기 범위 비교용, writablePaths도 같은 인코딩), command는 입력의 command(문자열 배열이 아니면 빈 배열), policyJson은 정책 필드 다섯 개의 JSON 또는 'null',
+  // defaultDenied는 TS가 정한 기본 금지 명령. 결과는 `{"decision","reason"?}` JSON. 정책의 모양이 어긋나면 던진다(부르는 쪽이 거절로 처리한다)
+  normalizeProjectPath(file: string, lenient: boolean, backslashSep: boolean): string | null;
+  foldName(segment: string): string;
+  canonicalProjectPath(file: string, lenient: boolean, backslashSep: boolean): string | null;
+  isProtectedPath(file: string, candidate: string, backslashSep: boolean): boolean;
+  isWithinScope(file: string, scope: string, backslashSep: boolean): boolean;
+  isToolAllowed(tool: string, allowedTools: string[]): boolean;
+  hasApprovalToken(token: string | null | undefined): boolean;
+  checkToolPolicy(
+    tool: string,
+    file: string,
+    scopeFile: string,
+    command: string[],
+    policyJson: string,
+    approvalToken: string | null | undefined,
+    defaultDenied: string[],
+    backslashSep: boolean,
+  ): string;
   // ── agent: checkpoint git 출력 판정(3단계 3s). git 출력은 문자열 그대로 보낸다. 기대 쪽 경로·값과 비교할 이메일은 encodeLoneSurrogates한 글자를 보내고
   // (짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 경로가 같아지는 것을 막는다), 결과의 경로는 같은 인코딩이라 TS가 되돌린다. 형식을 읽지 못한 설정은 null
   checkpointSplitNul(output: string): string[];

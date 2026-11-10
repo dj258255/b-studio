@@ -2687,6 +2687,66 @@ pub fn repo_build_pull_request(input_json: String) -> Result<String> {
     Ok(out(&fail(repo::build_pull_request(&input_json))?))
 }
 
+// ── 경로 이름·도구 정책(ADR-191 3q). 막는 검사다. TS 껍데기: packages/agent/src/{path-names,policy}.ts
+use bstudio_guard::path_policy;
+
+/// 꼴을 맞출 수 없으면(프로젝트 밖, 절대 경로, NUL, POSIX 역슬래시) null. `backslash_sep`은 `path.sep === '\\'`
+#[napi]
+pub fn normalize_project_path(file: String, lenient: bool, backslash_sep: bool) -> Option<String> {
+    path_policy::normalize_project_path(&file, lenient, backslash_sep)
+}
+
+#[napi]
+pub fn fold_name(segment: String) -> String {
+    path_policy::fold_name(&segment)
+}
+
+#[napi]
+pub fn canonical_project_path(file: String, lenient: bool, backslash_sep: bool) -> Option<String> {
+    path_policy::canonical_project_path(&file, lenient, backslash_sep)
+}
+
+#[napi]
+pub fn is_protected_path(file: String, candidate: String, backslash_sep: bool) -> bool {
+    path_policy::is_protected_path(&file, &candidate, backslash_sep)
+}
+
+#[napi]
+pub fn is_within_scope(file: String, scope: String, backslash_sep: bool) -> bool {
+    path_policy::is_within_scope(&file, &scope, backslash_sep)
+}
+
+#[napi]
+pub fn is_tool_allowed(tool: String, allowed_tools: Vec<String>) -> bool {
+    path_policy::is_tool_allowed(&tool, &allowed_tools)
+}
+
+#[napi]
+pub fn has_approval_token(token: Option<String>) -> bool {
+    path_policy::has_approval_token(token.as_deref())
+}
+
+/// `{"decision":"allow"|"deny","reason"?}` JSON. policy_json은 `{allowedTools?, deniedCommands?, requireApprovalFor?, protectedPaths?, writablePaths?}` 또는 `null`.
+/// 모양이 어긋난 정책은 던진다(부르는 쪽이 요청을 거부로 처리한다)
+#[napi]
+pub fn check_tool_policy(
+    tool: String,
+    file: String,
+    scope_file: String,
+    command: Vec<String>,
+    policy_json: String,
+    approval_token: Option<String>,
+    default_denied: Vec<String>,
+    backslash_sep: bool,
+) -> Result<String> {
+    let policy: Option<path_policy::Policy> = serde_json::from_str(&policy_json).map_err(|e| Error::from_reason(format!("실행 정책의 모양이 어긋났습니다: {e}")))?;
+    let decision = path_policy::check_tool_policy(&tool, &file, &scope_file, &command, policy.as_ref(), approval_token.as_deref(), &default_denied, backslash_sep);
+    Ok(match decision.reason {
+        Some(reason) => format!(r#"{{"decision":"deny","reason":{}}}"#, js::json_quote(&reason)),
+        None => r#"{"decision":"allow"}"#.to_owned(),
+    })
+}
+
 // ── 체크포인트의 git 출력 판정(ADR-191 3단계 3s). 형 변환만 한다. 문자열 목록·JSON 문자열로 주고받는다.
 // TS 껍데기: packages/agent/src/checkpoints.ts
 
