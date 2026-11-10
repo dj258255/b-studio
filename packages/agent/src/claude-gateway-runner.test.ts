@@ -1,5 +1,7 @@
 import { execFile } from 'node:child_process';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile, realpath, stat, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
@@ -567,6 +569,58 @@ describe('runClaudeGatewayAgent (러너 대신 CLI에 관문만 붙인다, 이�
       runClaudeGatewayAgent({ request: '설명해 줘', project, sandbox: fakeSandbox(project, []), pendingFiles, intent: 'ask', cliCommand: [process.execPath, cliPath] }),
     ).rejects.toThrow('질문 모드');
   });
+  // 이슈 #1102, 트러블슈팅 167: 지원 러너와 같은 길(PATH의 상대·프로젝트 안 항목, 인터프리터 찾기)이 관문 러너에도 열려 있었다
+  const posixOnly = process.platform === 'win32' ? it.skip : it;
+  function plant(dir: string, name: string, body: string): string {
+    mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    writeFileSync(file, body);
+    chmodSync(file, 0o755);
+    return file;
+  }
+  async function runWithPath(cliCommand: string[], PATH: string) {
+    const options = { request: '주문에 메모 필드 추가', project, sandbox: fakeSandbox(project, [true]), pendingFiles, cliCommand, env: { PATH }, fetcher: async () => ORDERS_CONTRACT };
+    return runClaudeGatewayAgent(options).then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+  }
+
+  posixOnly('프로젝트에 심은 CLI를 PATH의 `.`·빈 항목·프로젝트 항목으로 띄우지 않는다', async () => {
+    const out = mkdtempSync(path.join(tmpdir(), 'b-studio-gateway-path-'));
+    try {
+      const marker = path.join(out, 'planted.txt');
+      plant(project.root, 'claude', `#!/bin/sh\necho planted > ${JSON.stringify(marker)}\n`);
+      for (const PATH of ['.', '', `${path.delimiter}`, project.root]) {
+        const error = await runWithPath(['claude'], PATH);
+        expect(error?.message ?? '', JSON.stringify(PATH)).toMatch(/ENOENT/);
+        expect(existsSync(marker), JSON.stringify(PATH)).toBe(false);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
+  posixOnly('자식이 PATH로 다시 찾는 인터프리터(`#!/usr/bin/env node`)도 프로젝트에 심은 것을 쓰지 않는다', async () => {
+    const out = mkdtempSync(path.join(tmpdir(), 'b-studio-gateway-path-'));
+    try {
+      const marker = path.join(out, 'planted.txt');
+      const good = path.join(out, 'good.txt');
+      plant(project.root, 'node', `#!/bin/sh\necho planted > ${JSON.stringify(marker)}\n`);
+      const cli = plant(path.join(out, 'bin'), 'claude', `#!/usr/bin/env node\nrequire('fs').writeFileSync(${JSON.stringify(good)}, 'x')\n`);
+      const nodeDir = path.dirname(process.execPath);
+      for (const PATH of [`.${path.delimiter}${nodeDir}`, `${project.root}${path.delimiter}${nodeDir}`, `${path.delimiter}${nodeDir}`]) {
+        rmSync(marker, { force: true });
+        rmSync(good, { force: true });
+        await runWithPath([cli], PATH);
+        expect(existsSync(marker), JSON.stringify(PATH)).toBe(false);
+        expect(existsSync(good), JSON.stringify(PATH)).toBe(true);
+      }
+    } finally {
+      rmSync(out, { recursive: true, force: true });
+    }
+  });
+
 });
 
 describe('terminalGatewayNote (세션 터미널의 CLI가 대화를 시작할 때 받는 글, 이슈 #673)', () => {
