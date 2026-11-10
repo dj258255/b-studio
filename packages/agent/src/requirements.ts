@@ -246,44 +246,9 @@ export function buildExtractionUserPrompt(specText: string, referencedFilesConte
  */
 export function repairExtractionReply(raw: unknown): unknown {
   if (!raw || typeof raw !== 'object') return raw;
-  const reply = { ...(raw as Record<string, unknown>) };
-  // 최상위 목록도 null이면 빈 목록으로 본다(기본값이 있는 항목들)
-  for (const key of ['questions', 'outOfScope', 'assumptions', 'manualSteps']) {
-    if (reply[key] === null) reply[key] = [];
-  }
-  const cap = (key: string, max: number) => {
-    if (Array.isArray(reply[key]) && (reply[key] as unknown[]).length > max) reply[key] = (reply[key] as unknown[]).slice(0, max);
-  };
-  cap('requirements', MAX_REQUIREMENTS);
-  cap('questions', MAX_CLARIFYING_QUESTIONS);
-  cap('outOfScope', MAX_OUT_OF_SCOPE);
-  cap('assumptions', MAX_ASSUMPTIONS);
-  cap('manualSteps', MAX_MANUAL_STEPS);
-  if (Array.isArray(reply.requirements)) {
-    reply.requirements = (reply.requirements as unknown[]).map((requirement) => {
-      if (!requirement || typeof requirement !== 'object') return requirement;
-      const candidate = { ...(requirement as Record<string, unknown>) };
-      // 모델은 해당 사항이 없는 선택 항목을 빼지 않고 null로 채우곤 한다("nfr": null). 스키마는 "없음"만 받으므로 지운다
-      for (const key of ['ears', 'scenarios', 'nfr', 'trace', 'rev', 'hash', 'revisedAt']) {
-        if (candidate[key] === null) delete candidate[key];
-      }
-      // 문자열 안에 JSON 예시({"items": …})가 이스케이프 없이 들어가면 jsonrepair가 그 부분을 배열 원소(객체)로 떼어 낸다.
-      // 인수 조건 목록에 문자열이 아닌 원소가 섞이면, 떨어진 조각을 원래 문장 하나로 다시 붙인다
-      if (Array.isArray(candidate.acceptance) && candidate.acceptance.some((item) => typeof item !== 'string')) {
-        candidate.acceptance = [candidate.acceptance.map((item) => (typeof item === 'string' ? item : JSON.stringify(item))).join(' ')];
-      }
-      if (Array.isArray(candidate.scenarios)) {
-        if (candidate.scenarios.length > 20) candidate.scenarios = candidate.scenarios.slice(0, 20);
-        const scenarios = candidate.scenarios as unknown[];
-        const wellFormed = scenarios.every((scenario) => scenario && typeof scenario === 'object' && typeof (scenario as { id?: unknown }).id === 'string');
-        if (typeof candidate.id === 'string' && wellFormed) {
-          return alignScenarioIds(candidate as { id: string; scenarios: Array<{ id: string }> });
-        }
-      }
-      return candidate;
-    });
-  }
-  return reply;
+  // 고치는 규칙(null 목록·상한 자르기·null 선택 항목 지우기·떨어진 인수 조건 다시 붙이기·시나리오 id 맞추기)은 Rust(`requirements_replies.rs`, ADR-191 3단계 3ad)가 한다.
+  // 글자는 `encodeLoneSurrogates`해서 보내고 결과는 `decodeLoneSurrogates`로 푼다. 결과는 이어지는 zod 검증이 그대로 읽는다
+  return mapText(decodeNative<unknown>(native.reqReplyRepairExtraction(encodeNative(mapText(raw, encodeLoneSurrogates)))), decodeLoneSurrogates);
 }
 
 export function parseExtractionReply(text: string): ExtractionReply {
@@ -338,12 +303,11 @@ export async function requestRequirementsExtraction(
 
 /** 두 번 부른 호출의 사용량을 합친다(다시 물은 비용도 기록에 남긴다) */
 function addUsage(a: AgentUsage, b: AgentUsage): AgentUsage {
-  return {
-    inputTokens: a.inputTokens + b.inputTokens,
-    outputTokens: a.outputTokens + b.outputTokens,
-    cacheReadTokens: a.cacheReadTokens + b.cacheReadTokens,
-    cacheWriteTokens: a.cacheWriteTokens + b.cacheWriteTokens,
-  };
+  const [inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens] = native.reqReplyAddUsage(
+    [a.inputTokens, a.outputTokens, a.cacheReadTokens, a.cacheWriteTokens],
+    [b.inputTokens, b.outputTokens, b.cacheReadTokens, b.cacheWriteTokens],
+  ) as [number, number, number, number];
+  return { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens };
 }
 
 /** 다시 물을 때 덧붙이는 안내. 첫 답이 왜 거절됐는지와, 깨지기 쉬운 지점(문자열 안 큰따옴표)을 짚는다 */
@@ -385,12 +349,7 @@ export interface ReferencedFile {
 }
 
 function firstLinesPreview(content: string, maxLines = 5, maxChars = 300): string {
-  const joined = content
-    .split(/\r?\n/)
-    .slice(0, maxLines)
-    .join('\n')
-    .trim();
-  return joined.length > maxChars ? `${joined.slice(0, maxChars)}…` : joined;
+  return decodeLoneSurrogates(native.reqReplyFirstLinesPreview(encodeLoneSurrogates(content), maxLines, maxChars));
 }
 
 /** JSON 파일의 최상위 모양을 요약한다(실제 요약은 json-summary.ts가 한다). JSON이 아니면 앞 몇 줄로 대신한다 */
@@ -400,7 +359,7 @@ export function summarizeJsonPreview(content: string): string {
 
 /** 존재하는 참조 파일 하나의 미리보기를 만든다(내용·크기는 호출하는 쪽이 읽어서 준다 — 이 함수는 파일 IO를 하지 않는다) */
 export function buildReferencedFilePreview(path: string, content: string, sizeBytes: number): ReferencedFile {
-  return { path, exists: true, sizeBytes, preview: /\.json$/i.test(path) ? summarizeJsonPreview(content) : firstLinesPreview(content) };
+  return { path, exists: true, sizeBytes, preview: native.reqReplyIsJsonPath(path) ? summarizeJsonPreview(content) : firstLinesPreview(content) };
 }
 
 /** 추출 모델에게 알려줄 게 없는 참조 파일(없음)을 만든다 */
@@ -413,10 +372,8 @@ export function buildMissingReferenceQuestion(path: string): string {
   return native.reqCoreMissingReferenceQuestion(path);
 }
 
-/** 참조 파일 미리보기는 요약이면 충분하다 — 아주 큰 파일(시드 데이터 등)도 존재·크기만 보고하고 앞부분만 읽어 요약한다 */
-const REFERENCE_FILE_TOO_BIG = /너무 큽니다 \((\d+) bytes\)/;
-
 /**
+ * 참조 파일 미리보기는 요약이면 충분하다 — 아주 큰 파일(시드 데이터 등)도 존재·크기만 보고하고 앞부분만 읽어 요약한다(상한 문구를 읽는 것은 Rust, ADR-191 3단계 3ad).
  * 명세 글이 경로처럼 언급한 파일(`extractPathReferences`)을 주어진 루트(세션 작업 복사본)에서 찾는다.
  * `Workspace`를 그대로 써서 프로젝트 밖 경로·.env 같은 비밀 파일은 다른 도구와 똑같이 막는다. 없으면 missing,
  * 있으면 크기·미리보기를 담는다(너무 큰 파일은 크기만 보고하고 미리보기는 만들지 않는다).
@@ -429,9 +386,8 @@ export async function resolveReferencedFiles(root: string, specText: string): Pr
       const content = await workspace.read(path);
       files.push(buildReferencedFilePreview(path, content, Buffer.byteLength(content, 'utf8')));
     } catch (error) {
-      const tooBig = error instanceof WorkspaceError ? REFERENCE_FILE_TOO_BIG.exec(error.message) : null;
-      if (tooBig) {
-        const sizeBytes = Number(tooBig[1]);
+      const sizeBytes = error instanceof WorkspaceError ? native.reqReplyTooBigBytes(error.message) : null;
+      if (sizeBytes !== null && sizeBytes !== undefined) {
         // 256KB 상한에 걸려도 JSON이면 구조만(최상위 키·배열 길이·첫 항목 필드) 요약해 보려 한다(json-summary.ts)
         const summary = await summarizeLargeJsonFile(root, path, sizeBytes);
         files.push({ path, exists: true, sizeBytes, preview: summary ?? '(파일이 커서 미리보기를 만들지 못했습니다)' });
@@ -515,9 +471,16 @@ export function verifySpecQuote(specQuote: string, specText: string): boolean {
  * specQuote를 지운다 — "명세에 있음" 배지는 검증된 인용에만 붙어야 한다.
  */
 function enforceSpecQuoteEvidence(recommendations: readonly Recommendation[], specText: string): Recommendation[] {
-  return recommendations.map((recommendation) => {
-    if (recommendation.basis !== 'spec') return recommendation;
-    if (recommendation.specQuote && verifySpecQuote(recommendation.specQuote, specText)) return recommendation;
+  // 확인은 Rust가 한다. 인용과 명세는 짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 글이 같아지지 않도록 둘 다 단사 인코딩으로 보낸다
+  const demote = new Set(
+    native.reqReplyEnforceSpecQuote(
+      recommendations.map((recommendation) => recommendation.basis),
+      recommendations.map((recommendation) => (recommendation.specQuote === undefined ? null : encodeLoneSurrogates(recommendation.specQuote))),
+      encodeLoneSurrogates(specText),
+    ),
+  );
+  return recommendations.map((recommendation, index) => {
+    if (!demote.has(index)) return recommendation;
     const { specQuote: _drop, ...rest } = recommendation;
     return { ...rest, basis: 'practice' as const };
   });

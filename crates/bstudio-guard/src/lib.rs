@@ -49,6 +49,7 @@ pub mod requirement_integrity;
 pub mod requirement_issues;
 pub mod requirements;
 pub mod requirements_markdown;
+pub mod requirements_replies;
 pub mod requirements_trace;
 pub mod review_input;
 pub mod runner_judge;

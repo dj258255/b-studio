@@ -361,7 +361,7 @@ fn scenario_ids_of(requirement: &JsValue) -> Res<Option<(String, Vec<String>)>> 
 }
 
 /// `alignScenarioIds`(JsValue 판)
-fn align_requirement(requirement: &JsValue) -> Res<JsValue> {
+pub fn align_requirement(requirement: &JsValue) -> Res<JsValue> {
     let Some((id, ids)) = scenario_ids_of(requirement)? else { return Ok(requirement.clone()) };
     let Some(new_ids) = aligned_scenario_ids(&id, &ids)? else { return Ok(requirement.clone()) };
     let scenarios = array(opt_member(Some(requirement), "scenarios"), "scenarios")?;
@@ -1051,12 +1051,30 @@ pub fn build_referenced_files_context(files: &JsValue, max_chars: f64) -> Res<St
 // 추천 인용·프롬프트 글
 // ---------------------------------------------------------------------------
 
+/// 인용이 명세 안에 실제로 있는 글인지(공백 정규화 후 부분 문자열). 여는 쪽이다("명세에 있음"이 붙는다).
+/// 인용의 앞이나 끝이 ASCII 낱말 글자(`[A-Za-z0-9_]`)인데 명세에서 그 옆도 낱말 글자이면(`연 1`이 `연 10회` 안에서, `e`가 `the` 안에서 맞는 것) 낱말 중간을 자른 것이라 그 자리는 세지 않는다
+/// (옛 TS는 그런 조각도 "있다"로 읽었다. 닫는 쪽으로만 다르다. 트러블슈팅 182).
 pub fn verify_spec_quote(spec_quote: &str, spec_text: &str) -> bool {
     let quote = collapse_whitespace(spec_quote);
     if quote.is_empty() {
         return false;
     }
-    collapse_whitespace(spec_text).contains(&quote)
+    let text = collapse_whitespace(spec_text);
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let starts_word = quote.chars().next().is_some_and(is_word);
+    let ends_word = quote.chars().next_back().is_some_and(is_word);
+    let mut from = 0;
+    while let Some(found) = text[from..].find(&quote) {
+        let start = from + found;
+        let end = start + quote.len();
+        let cut_before = starts_word && text[..start].chars().next_back().is_some_and(is_word);
+        let cut_after = ends_word && text[end..].chars().next().is_some_and(is_word);
+        if !cut_before && !cut_after {
+            return true;
+        }
+        from = start + text[start..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
 }
 
 pub fn build_extraction_user_prompt(spec_text: &str, referenced_files_context: Option<&str>) -> String {

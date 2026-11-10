@@ -9605,6 +9605,29 @@ compose CLI 환경은 허용 목록(`PATH`, `HOME`, `USER`, `TMPDIR`, `LANG`, `S
 - 호출부 문서·도구 확인: `grep`으로 `parseRequirementsMarkdown`·`serializeRequirementsMarkdown`·`JSON_BLOCK`·`REQUIREMENT_HEADING`·`MANUAL_VERIFICATION_LINE`의 쓰는 곳을 확인했다. TS의 정규식 상수(`JSON_BLOCK`·`REQUIREMENT_HEADING`·`MANUAL_VERIFICATION_LINE`)는 3x 옛 복사본(`requirement-integrity-legacy.ts`)만 쓰므로 제품 코드에서 지우고 복사본은 `requirements-legacy.ts`의 것을 쓰게 했다.
 - 돌리지 않은 것: 실제 세션의 요구사항 탭에서의 읽기·쓰기 성능 재측정(napi를 세 번 건너는 읽기는 몸통이 유효하고 블록이 있을 때만 `reqMdMerge`를 더 부른다), 시드를 수백만 회로 늘린 차등 시험, 실험 경로(다른 러너, Kubernetes 제공자)는 건드리지 않았다.
 
+### 덧붙임: 3단계 3ad — 모델 답 읽기와 추천 인용 확인 (2026-11-10, [#1135](https://github.com/dj258255/b-studio/issues/1135))
+
+- 옮긴 것: 답에서 JSON 글자 꺼내기(`task-plan.ts`의 `parsePlannerReply` 앞 단계: 코드 펜스는 마지막 펜스까지, 없으면 첫 `{`~마지막 `}`), `repairExtractionReply`(null 목록 → 빈 목록, 상한 넘는 목록 자르기, null 선택 항목 지우기, 떨어진 인수 조건 다시 붙이기, 시나리오 20개 자르기·id 맞추기), `enforceSpecQuoteEvidence`(강등할 추천의 자리), `firstLinesPreview`, 참조 파일 상한 문구(`REFERENCE_FILE_TOO_BIG`) 읽기, JSON 파일 이름 판정, `addUsage`를 `crates/bstudio-guard/src/requirements_replies.rs`로. 모두 napi `reqReply*`다.
+- 남긴 것(TS): zod 스키마 검증(`ExtractionReplySchema`·`RecommendationReplySchema`), 모델 호출, 파일 읽기(`Workspace`), `JSON.parse`와 `jsonrepair`(깨진 JSON 고치기는 JS 라이브러리라 옮기지 않았다), `partitionManualSteps` 호출, JSON 요약(`json-summary.ts`). Rust는 `JSON.parse`·`jsonrepair`에 건넬 글자 둘(`reqReplyExtractJson`)을 돌려주고 TS가 그 글자를 읽어 zod로 검증하므로 꺼낸 글자와 검증한 글자는 같다. 고치기는 `JSON.parse`한 값을 `encodeNative`로 보내고 결과를 `decodeNative`로 받아 그대로 zod에 넣는다.
+- 호출부별 막는 쪽/여는 쪽:
+
+  | 호출부 | 쪽 | 비고 |
+  | --- | --- | --- |
+  | `parseRecommendationReply`의 `enforceSpecQuoteEvidence` → `verifySpecQuote` | 여는 쪽("명세에 있음" 배지) | 인용과 명세를 `encodeLoneSurrogates`로 보내 단사로 견준다. basis가 'spec'이 아닌 값·인용 없음은 강등한다(모르는 입력은 근거 없음) |
+  | `parseExtractionReply`의 `repairExtractionReply` | 판정 아님(읽기) | 결과는 이어지는 zod 검증을 그대로 거친다. 뜻을 바꾸는 수정은 하지 않는다 |
+  | `parsePlannerReply`(작업 계획·레인 계약·추출·추천 공용) | 판정 아님(읽기) | 같음 |
+  | `resolveReferencedFiles`·`buildReferencedFilePreview` | 판정 아님(미리보기 고르기) | 모델에게 가는 요약 글 |
+  | `requestRequirementsExtraction`의 `addUsage` | 기록 | 사용량 합 |
+
+- 짝 없는 서로게이트: 답 글·고칠 값·미리보기 글은 `encodeLoneSurrogates`(고칠 값은 `mapText`로 키까지)해서 보내고 결과는 `decodeLoneSurrogates`로 푼다. 고친 답에서 문자열이 아닌 인수 조건을 `JSON.stringify`로 이을 때 짝 없는 서로게이트는 옛 TS와 같이 `\udXXX`(소문자 16진수)로 쓴다. 미리보기가 두 단위짜리 글자의 가운데서 잘리면 앞 서로게이트만 남긴다(`String.prototype.slice`와 같다). 성질 시험(`requirements-replies-vectors.test.ts`): 인코딩 없이 보내면 서로 다른 짝 없는 서로게이트가 합쳐져 인용이 있다로 뒤집히는 것을 재현하고(`reqCoreVerifySpecQuote('\ud800','x\udc00y')`가 true), 짝 없는 서로게이트만으로 만든 인용·명세 20,000쌍에서 열린 쪽 뒤집힘 0, 인코딩 없이 보낸 판정이 연 것은 한 번 잰 값으로 100건 넘게 있었다.
+- 옛 결함(여는 쪽, 트러블슈팅 182): `verifySpecQuote`(3j)가 부분 문자열이면 통과시켜 낱말을 가운데서 자른 인용(`e`·`연 1`·`ser_id`·`ecr`)도 "명세에 있음"이 되었다. 인용의 앞·끝이 ASCII 낱말 글자이고 명세에서 그 옆도 낱말 글자인 자리는 세지 않게 닫았다. 빈 인용·공백만·대소문자·보이지 않는 글자·일부 낱말만 이은 인용은 옛 TS도 거절했다. 한글 조각은 막지 않는다(남은 한계).
+- 차등 시험(`requirements-replies-differential.test.ts`, 옛 구현은 `requirements-replies-legacy.ts`: `requirements.ts`·`task-plan.ts`의 해당 함수를 복사하고 시나리오 id·인용 확인은 3j 때 복사한 `requirements-legacy.ts`의 순수 TS 판. 고치기는 옮기기 전 main과 `diff`로 같음을 확인): 이번에 한 번 잰 값, 시드 1·7·42·2026 × 20,000. 답 읽기 80,000회(값 27,535·던짐 52,465, 펜스 15,010, `jsonrepair`를 거친 것 14,073)에서 값·오류 문구 다른 결과 0. 고치기 80,000회(바뀐 것 66,342) 글자·`deepStrictEqual`(-0·키 순서·짝 없는 서로게이트) 다른 결과 0. 추천 80,000회(zod 던짐 18,641, 강등 안 된 'spec' 37,999, 둘 다 강등 118,579): **옛 "근거 없음" → 새 "근거 있음" 뒤집힘 0**, 옛 "있음" → 새 "없음" 16,484(모두 낱말 중간 자르기이고 JS로 따로 쓴 같은 규칙과 새 구현이 글자까지 같다). 인용 확인 320,000회(둘 다 참 129,855·둘 다 거짓 134,785·닫힘 55,360, 뒤집힘 0). 미리보기 160,000회(자름 35,475, 여러 줄 63,999), 상한 문구·JSON 이름·사용량 합 각 80,000회 다른 결과 0. 결과를 한 글자 바꾼 옛 구현은 차이로 잡힌다(대조 장치). 3j 차등 시험의 `verifySpecQuote` 기준은 "옛 판정에 이 규칙만 얹은 것"으로 바꾸고 뒤집힘 0을 따로 막는다.
+- 벡터(`requirements-replies-vectors.test.ts`, 260개): 펜스(표지 없음·대문자·붙임·하나뿐·네 개·안의 펜스), 목록 상한 같음·±1(60·5·20·10·20, 시나리오 20), 인용의 대소문자·공백 종류·보이지 않는 글자·앞부분만·일부 낱말만·낱말 중간, 300 코드 단위 경계(두 단위 글자·짝 없는 서로게이트·예약 글자), 상한 문구 접두·접미·전각 숫자, JSON 이름 유니코드 접힘 글자. 기대값은 옛 TS 출력이다. `VECTORS_AGAINST_LEGACY=1`로 옛 TS에 돌리면 의도한 차이(`intended`) 12개만 실패한다(낱말 중간 인용 11개, 3j에 적힌 닫는 쪽 예외 1개).
+- 의도한 차이: (1) 낱말 중간을 자른 ASCII 인용은 새 구현이 거절한다(닫는 쪽). (2) 짝 없는 서로게이트 하나가 명세의 서로게이트 쌍 안에 있으면 인용이 "없다"(3j 때부터 적힌 닫는 쪽 예외).
+- 변이: Rust 45곳을 하나씩 망가뜨려 요약 줄로 39곳이 잡혔다(`build-native` 후 두 시험 파일 14개). 처음 두 곳은 컴파일이 안 되어 컴파일되는 꼴로 다시 만들어 잡았다. 살아남은 6곳은 모두 동치다: 펜스 시작·내용 시작 경계(`>=`→`>`)·`json` 먹는 순서·공백 욕심 순서(그 구간에는 `{`가 없어 꺼낸 글자가 같다), 시나리오 상한 `>`→`>=`(정확히 20개를 20개로 자르는 것은 그대로), 마지막 줄의 CR 떼기(뒤이은 `trim`이 지운다). 넓히는 변이(경계 조건 `&&`→`||`, 낱말 글자를 유니코드로 넓히기, 앞·뒤 경계 검사 제거, 첫 자리만 보고 멈추기, 인용 확인 `&&`→`||`, 인용 없음을 통과로)는 모두 잡혔다.
+- 새 던짐 경로와 호출부 처리: `reqReplyRepairExtraction`은 시나리오 id 번호를 매길 수 없을 때 던지는데(옛 `alignScenarioIds`와 같은 조건, 3j에서 이미 던졌다) 호출부 `parseExtractionReply`는 `RequirementsError`가 아닌 이 오류를 그대로 올려 다시 묻지 않고 실패한다. 판정을 건너뛰고 앞 상태가 남는 길은 없다. 나머지 napi는 던지지 않는다(`reqReplyAddUsage`는 길이가 넷이 아니면 던지지만 껍데기가 넷만 보낸다).
+- 돌리지 않은 것: 시드를 수백만 회로 늘린 차등 시험, 실제 모델 답과 실제 세션에서의 재측정, 한글 조각 인용 막기, 실험 경로(다른 러너, Kubernetes 제공자)는 건드리지 않았다.
+
 ## ADR-192 범위를 전부로 넓힌다: CLI와 desk도 Rust로 옮겨 `b-studio` 실행 파일 하나로 끝낸다
 
 상태: 채택(계획)
