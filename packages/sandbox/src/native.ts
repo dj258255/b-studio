@@ -494,6 +494,65 @@ interface NativeGuard {
   checkpointIsBackupId(text: string): boolean;
   checkpointPullRequestTarget(listed: string, baseRef: string, infoBase: string): string;
   checkpointGitEnvKeep(keys: string[]): boolean[];
+  // ── agent: 연결·인증·조율 판정(3단계 3t). 호스트·토큰·출처·허용 목록은 견주는 두 글자 모두 encodeLoneSurrogates해서 보낸다(짝 없는 서로게이트가 경계에서 U+FFFD가 되어 서로 다른 값이 같아지면 인증·허용이 열린다).
+  // 구조가 있는 입력은 encodeNative한 JSON 문자열. connAuthorize는 통과하면 null, 막으면 `{status,message}` JSON
+  connAuthorize(host: string | undefined | null, authorization: string | undefined | null, token: string, allowedHosts: string[]): string | null | undefined;
+  connHostAllowed(host: string | undefined | null, allowedHosts: string[]): boolean;
+  connHostnameOf(host: string | undefined | null): string;
+  connTokenMatches(authorization: string | undefined | null, token: string): boolean;
+  connIsAllowedRequest(protocol: string, origin: string, allowedOrigins: string[]): boolean;
+  connIsAutomaticFaviconPath(pathname: string): boolean;
+  connDescribeStep(click: string | undefined | null, fillSelector: string | undefined | null, press: string | undefined | null, waitFor: string | undefined | null): string;
+  connRejectedChangeFeedback(rejected: string[]): string;
+  coordBoardValidate(modelWrites: boolean, by: string, kind: string, body: string, refsLen: number, noteBytesLimit: number): string | null | undefined;
+  // 입력 [{ priority, at, id, bytes }](읽을 수 있는 메모, 들어온 순서), 결과 { selected: [위치(정렬 순서)], truncated, bytes }
+  coordBoardPickNotes(notesJson: string, readLimit: number, budget: number): string;
+  coordMcpPostInputError(argsJson: string): string | null | undefined;
+  coordMcpReadInputError(argsJson: string): string | null | undefined;
+  coordFormatNote(kind: string, priority: number, lane: string, body: string, refs: string[]): string;
+  // ── agent: 검증 통과 판정·도구 입력 검사(3단계 3u). 막는 검사이고 서비스 허용 목록·origin은 여는 쪽이라 비교하는 두 글자를 encodeLoneSurrogates로 바꿔 보낸다.
+  // verifyFormatReport는 던지지 않는다(읽을 수 없는 보고서는 "검증 실패" 글). toolInputError는 맞으면 null, 아니면 던질 글이고 valueJson은 encodeNative한 값(없으면 undefined)
+  verifyOk(restartedReady: boolean[], contractErrored: boolean[], changeBreaking: boolean[], allowBreaking: boolean, secretLeaks: number, specError: boolean): boolean;
+  verifyPlatformFailure(syncError: string | null | undefined, syncPlatform: boolean, services: string[], ready: boolean[], platform: boolean[], errors: string[]): string | null | undefined;
+  verifyMentionsDeletedFile(logTail: string[], deleted: string[]): boolean;
+  verifyFormatReport(reportJson: string, allowBreaking: boolean, specFile: string): string;
+  toolInputError(kind: string, key: string, valueJson: string | null | undefined): string | null | undefined;
+  toolClamp(value: number, min: number, max: number): number;
+  toolComposeServiceNames(compose: string[] | null | undefined, managed: string[]): string[];
+  toolServiceAllowed(name: string, managed: string[]): boolean;
+  toolServiceOrAddonAllowed(name: string, compose: string[] | null | undefined, managed: string[]): boolean;
+  toolSummarizeApproval(name: string, inputJson: string | null | undefined): string;
+  toolMismatchAddable(max: number, seenRequests: string[], seenChecks: string[], seenFollowed: string[], request: string, check: string, followed: string): boolean;
+  toolHttpPathOk(path: string): boolean;
+  toolSameOrigin(requestOrigin: string, serviceOrigin: string): boolean;
+  // ── agent: 게이트의 순수 보조 판정(3단계 3r). 구조가 있는 입력은 encodeNative한 JSON 문자열이고 모양이 어긋나면 던진다(gateViewportProblemText·gateViewportProblems는 옛 타입 밖의 문제 종류도 던진다).
+  // 통과로 이어지는 같음·포함 두 자리는 견줄 두 글자를 encodeLoneSurrogates해서 보낸다: gateContainsApiText(text, value), gateViewportProblems의 expected·findings의 key.
+  // sampleParams·inRunKeys 같은 사용자 키 맵은 [[키, 값], ...] 쌍으로 보낸다(encodeNative가 NUL로 시작하는 키를 던지지 않게)
+  gateNextErrorMarker(text: string, expectStatus: number): string | null | undefined;
+  gateAutoPageCheck(configJson: string, routePath: string): string;
+  gateContainsApiText(text: string, value: string): boolean;
+  gateContainsApiNumber(text: string, value: number): boolean;
+  gateMissingApiValue(service: string, jsonPath: string, valueText: string | null | undefined, valueNumber: number | null | undefined, pagePath: string): string;
+  gateViewportProblemText(findingJson: string, width: number, height: number): string;
+  gateViewportProblems(inputJson: string): string[];
+  gateMissingAllText(values: string[]): string;
+  gateMissingAnyText(values: string[]): string;
+  gateDynamicProbeDataHint(probedId: string): string;
+  gateDynamicSegments(pageFile: string): number[];
+  gateAcceptedNotes(specFile: string, inRunKeys: string[], sampleParams: string[][], inRunSampleIdFrom: boolean, fromService: string | null | undefined, fromPath: string | null | undefined): string[];
+  gateUsesInRunValue(pageFile: string, inRunKeys: string[], inRunSampleIdFrom: boolean, usedFallbackCount: number): boolean;
+  gateSampledValues(pageFile: string, sampleParams: string[][]): string | null | undefined;
+  gateStripHtml(html: string): string;
+  gateFormatFailedChecks(checksJson: string): string;
+  gateCompareDetail(ratio: number, max: number, width: number, height: number): string;
+  gateDescribeConcurrencyExpect(expectJson: string): string;
+  // ── agent: 작업 공간의 막는 검사(3단계 3w). workspaceIsDenied·workspaceIsSecretFile은 거부 목록이라 짝 없는 서로게이트가 U+FFFD로 합쳐져도 더 막을 뿐이다.
+  // workspaceIsInside는 path.relative(root, target)의 결과를 encodeLoneSurrogates한 글자로 받는 허용 목록(통과가 곧 안쪽).
+  // workspaceInputProblem은 0 없음·1 절대 경로·2 쓸 수 없는 글자(NUL, POSIX의 역슬래시). external이면 2를 보지 않는다
+  workspaceIsDenied(segment: string): boolean;
+  workspaceIsSecretFile(file: string): boolean;
+  workspaceIsInside(relative: string, backslashSep: boolean): boolean;
+  workspaceInputProblem(file: string, backslashSep: boolean, external: boolean): number;
   // ── agent: 작업 계획·요구사항 검증 기록 무결성(3단계 3x). 막는 판정이다. 글자는 모두 encodeLoneSurrogates해서 보내고 결과의 글자는 decodeLoneSurrogates로 푼다(짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 글자가 같아지는 것을 막는다).
   // taskPlanLanes의 tasksJson은 [{ id, dependsOn, backend?, model?, paths }](zod가 읽은 값), 결과는 { error } | { lanes: [{ id, tasks: 입력 순번 목록, paths }] }. 모양이 어긋나면 던진다.
   // req*: before·after는 문서 글자(없으면 null), *Effective는 그 문서에서 사람 확인이 있는 요구사항 id(읽은 순서), afterIds는 지금 문서의 모든 요구사항 id(둘 다 TS가 parseRequirementsMarkdown으로 읽는다).
