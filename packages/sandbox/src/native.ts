@@ -387,6 +387,14 @@ interface NativeGuard {
   docsExtractDocSummary(markdown: string): string;
   docsBuildDocSummary(path: string, markdown: string): string;
   docsRegenerateDocsReadme(existing: string | null | undefined, docsJson: string): string;
+  // ── agent: 계획 요약·레인 계약(3단계 3m). project는 { name, managed: [[이름, { template, path }]] }, lanes는 [{ id, paths, tasks: [{ id, title, request }] }]를 encodeNative한 JSON 문자열.
+  // short·long·maxChars·maxContracts는 TS가 가진 상수를 그대로 넘긴다. 모양이 어긋난 입력은 던진다
+  shouldPlanBrief(request: string): boolean;
+  planWordLimit(request: string, short: number, long: number): number;
+  buildPlanBriefSystem(projectJson: string, request: string, short: number, long: number): string;
+  appendPlanToRequest(request: string, plan: string, maxChars: number): string;
+  buildContractSystem(projectJson: string, maxContracts: number): string;
+  buildContractUser(request: string, lanesJson: string): string;
   // ── agent: 설계 파이프라인(3단계 3o). 묶음 목록·결과는 JSON 문자열(decodeNative). 승인 확인은 막는 기록의 순번을 돌려주고(껍데기가 원래 객체를 골라 담는다), 모양이 어긋난 기록은 던진다
   designPipelineNextDocNumber(existing: string[]): number;
   designPipelineDocPath(number: number, title: string): string;
