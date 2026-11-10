@@ -1,4 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
+import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import type { Browser, Page } from 'playwright-core';
 import { createScreencast, launchBrowser, restrictPageToOrigins, type BrowserFrame, type OriginBlockEvent } from './browser-check';
@@ -87,14 +88,14 @@ function emptyDiagnostics(): QaDiagnostics {
   return { consoleErrors: [], pageErrors: [], failedRequests: [], blockedRequests: [], horizontalOverflowPx: 0, accessibilityViolations: [] };
 }
 
-/** 진단 신호 개수의 합(판정에 쓴다). 가로 넘침은 1px이라도 있으면 1건으로 센다 */
-function diagnosticsCount(diagnostics: QaDiagnostics): number {
-  return (
-    diagnostics.consoleErrors.length +
-    diagnostics.pageErrors.length +
-    diagnostics.failedRequests.length +
-    diagnostics.accessibilityViolations.length +
-    (diagnostics.horizontalOverflowPx > 1 ? 1 : 0)
+/** 진단 신호 개수의 합(판정에 쓴다). 가로 넘침은 1px을 넘으면 1건으로 센다. 계산은 Rust(explore_qa.rs, ADR-191 3p) */
+export function diagnosticsCount(diagnostics: QaDiagnostics): number {
+  return native.exploreQaDiagnosticsCount(
+    diagnostics.consoleErrors.length,
+    diagnostics.pageErrors.length,
+    diagnostics.failedRequests.length,
+    diagnostics.accessibilityViolations.length,
+    diagnostics.horizontalOverflowPx,
   );
 }
 
@@ -415,7 +416,7 @@ export class QaBrowser {
 }
 
 /** page.evaluate에 그대로 넘기는 요소 묘사. DOM 타입을 쓰지 않으려고 문자열 스크립트가 돌려주는 모양을 여기서 타입으로만 기술한다 */
-interface RawElement {
+export interface RawElement {
   role: string;
   name: string;
   tag: string;
@@ -426,17 +427,8 @@ interface RawElement {
   rect: { x: number; y: number; width: number; height: number };
 }
 
-function matchScore(entry: RawElement, needle: string): number {
-  if (!needle) return 0;
-  const name = entry.name.toLowerCase();
-  const text = entry.text.toLowerCase();
-  const role = entry.role.toLowerCase();
-  const testId = (entry.testId ?? '').toLowerCase();
-  if (name === needle || text === needle || testId === needle) return 100;
-  if (name.startsWith(needle) || text.startsWith(needle)) return 80;
-  if (name.includes(needle) || text.includes(needle) || testId.includes(needle)) return 60;
-  if (role.includes(needle) || entry.tag.toLowerCase() === needle) return 20;
-  return 0;
+export function matchScore(entry: RawElement, needle: string): number {
+  return native.exploreQaMatchScore(entry.name, entry.text, entry.role, entry.testId, entry.tag, needle);
 }
 
 /** remote-browser.ts의 describeElementSnippet·selectorFor와 같은 생각이되, 인터랙티브 요소 전체를 걷고 role+name/텍스트 고유성까지 본다 */
@@ -833,24 +825,17 @@ export async function executeQaTool(name: string, input: Record<string, unknown>
   }
 }
 
-function describeScrollPosition(position: QaScrollPosition): string {
-  if (position.max <= 0) return '문서 자체는 스크롤되지 않습니다(화면 안쪽의 스크롤 영역이 따로 있을 수 있습니다).';
-  const where = `현재 y=${position.y} / 최대 ${position.max}`;
-  if (position.atBottom) return `${where}, 맨 아래에 닿았습니다.`;
-  return `${where}, 맨 아래가 아닙니다${position.atTop ? '(맨 위)' : ''}.`;
+export function describeScrollPosition(position: QaScrollPosition): string {
+  return native.exploreQaDescribeScrollPosition(position.y, position.max, position.atBottom, position.atTop);
 }
 
-function formatElement(element: QaElement): string {
-  const parts = [element.ref, element.role, element.name || '(이름 없음)'];
-  if (element.testId) parts.push(`testid=${element.testId}`);
-  return parts.join('\t');
+export function formatElement(element: QaElement): string {
+  return native.exploreQaFormatElement(encodeNative({ ref: element.ref, role: element.role, name: element.name, testId: element.testId }));
 }
 
-function formatSnapshot(result: { url: string; title: string; elements: QaElement[]; truncated: boolean }): string {
-  const header = `${result.url} — ${result.title}`;
-  const body = result.elements.length > 0 ? result.elements.map(formatElement).join('\n') : '(인터랙티브 요소가 없습니다)';
-  const footer = result.truncated ? `\n(요소가 많아 처음 ${MAX_SNAPSHOT_ELEMENTS}개만 보여줍니다. qa_find로 특정 요소를 찾으세요)` : '';
-  return `${header}\n${body}${footer}`;
+export function formatSnapshot(result: { url: string; title: string; elements: QaElement[]; truncated: boolean }): string {
+  const elements = result.elements.map((element) => ({ ref: element.ref, role: element.role, name: element.name, testId: element.testId }));
+  return native.exploreQaFormatSnapshot(encodeNative({ url: result.url, title: result.title, elements, truncated: result.truncated }), MAX_SNAPSHOT_ELEMENTS);
 }
 
 /**
@@ -859,8 +844,7 @@ function formatSnapshot(result: { url: string; title: string; elements: QaElemen
  */
 export function normalizeRef(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
-  const ref = value.replace(/^[\s"'`]+|[\s"'`]+$/g, '');
-  return ref === '' ? undefined : ref;
+  return native.exploreQaNormalizeRef(value) ?? undefined;
 }
 
 function optionalRef(input: Record<string, unknown>): string | undefined {
@@ -971,50 +955,20 @@ function addMessageUsage(total: AgentUsage, usage: { input_tokens?: number | nul
 
 /** 목표 문장이 "문제를 찾아라"는 점검형인지. 점검형이면 시스템 지시문에 화면 점검 요령을 더한다 */
 export function isInspectionGoal(goalText: string): boolean {
-  return /점검|검사|살펴|찾아|문제|잘리|잘려|겹치|겹쳐|넘치|어색|읽기 어려|깨지|이상한|리뷰|검토|inspect|review|audit|layout/i.test(goalText);
+  return native.exploreQaIsInspectionGoal(goalText);
 }
 
 export function buildQaSystemPrompt(goal?: Pick<ExploreQaGoal, 'goal'>): string {
-  const lines = [
-    '당신은 웹 애플리케이션의 UI/UX를 사람처럼 눈으로 보고 손으로 조작하며 시험하는 QA 에이전트입니다.',
-    '주어진 목표를 화면에서 직접 수행하세요. qa_snapshot으로 화면의 인터랙티브 요소를 관찰하고, 필요한 ref를 골라 행동하세요.',
-    '화면이 어떻게 보이는지는 접근성 트리로 알 수 없습니다. 잘림·겹침·넘침·대비·여백·정렬처럼 눈으로 봐야 하는 것은 qa_screenshot으로 직접 확인하세요(이미지가 돌아옵니다).',
-    '페이지를 내릴 때는 qa_scroll에 ref를 넣지 말고 direction만 주세요. 결과에 맨 아래에 닿았는지가 나옵니다.',
-    '화면에서 문제를 보면 그 자리에서 qa_report_issue로 보고하세요. 본 것만 적고(추측 금지), 어느 요소가 어떻게 잘못됐는지 구체적으로 쓰세요. 문제를 찾았어도 점검을 계속할 수 있습니다.',
-    '목표를 끝까지 수행했거나 더 진행할 수 없으면 qa_finish를 부르세요. 성공을 선언해도 플랫폼이 진단 신호·확인 문구·보고된 문제를 따로 확인하니 솔직하게 판단하세요. 문제가 없으면 없다고 적으면 됩니다.',
-    '일부러 거절될 조작(로그인 없이 주문, 빈 값 제출 등)을 하기 전에는 누를 요소를 먼저 찾아 둔 뒤 조작 바로 앞에서 qa_expect_rejection으로 알리세요(선언과 조작 사이에 다른 도구를 부르면 선언이 사라집니다). 알리지 않은 조작에서 서버가 거절하면 실패한 요청으로 세어 문제로 판정합니다. 화면이 데이터를 읽다 받은 오류와 서버 오류(5xx)는 선언해도 실패입니다.',
-    '화면을 바꾸지 않는 관찰은 필요한 만큼 해도 되지만, 같은 화면에서 같은 조작을 되풀이하지 말고 막히면 다른 요소를 시도하거나 qa_finish(success: false)로 알리세요.',
-  ];
-  if (goal && isInspectionGoal(goal.goal)) {
-    lines.push(
-      '이 목표는 화면을 점검하는 일입니다. 다음 순서로 하세요.',
-      '1) 시작 화면을 qa_screenshot으로 봅니다. 2) qa_scroll로 한 화면씩 내려가며 위치마다 qa_screenshot을 찍어 맨 아래에 닿을 때까지 확인합니다(한 화면만 보고 끝내지 마세요). 3) 각 화면에서 잘리거나 겹치거나 화면 밖으로 나간 요소, 읽기 어려운 글자(크기·대비), 정렬이 어긋나거나 한쪽으로 쏠린 배치, 큰 빈 여백을 찾습니다. 4) 눌러 볼 만한 요소(탭·열기 버튼)가 있으면 눌러 숨은 화면도 봅니다. 5) 본 문제는 모두 qa_report_issue로 보고하고 qa_finish로 마칩니다.',
-    );
-  }
-  return lines.join('\n');
+  return native.exploreQaBuildSystemPrompt(goal ? String(goal.goal) : undefined);
 }
 
 export function buildQaUserPrompt(goal: ExploreQaGoal): string {
-  const lines = [`목표: ${goal.goal}`, `시작 화면: ${goal.startPath}`];
-  if (goal.confirmText) lines.push(`끝났을 때 화면에 '${goal.confirmText}' 문구가 있어야 합니다.`);
-  return lines.join('\n');
+  return native.exploreQaBuildUserPrompt(encodeNative({ goal: goal.goal, startPath: goal.startPath, confirmText: goal.confirmText }));
 }
 
-const STOP_REASON_TEXT: Record<ExploreQaStopReason, string> = {
-  finish: 'qa_finish로 마침',
-  max_actions: '행동 횟수 한도에 도달함',
-  max_time: '시간 한도에 도달함',
-  repeated_screen: '같은 화면에서 같은 조작이 되풀이됨',
-  no_tool_call: '도구를 부르지 않고 글만 냄',
-};
-
-/** 한도·반복·도구 없음으로 끝날 때 모델에게 마지막 보고를 요청하는 문장. 두 백엔드가 같이 쓴다 */
+/** 한도·반복·도구 없음으로 끝날 때 모델에게 마지막 보고를 요청하는 문장. 두 백엔드가 같이 쓴다. 중단 사유 글자(STOP_REASON_TEXT)는 Rust가 갖는다 */
 export function buildWrapUpPrompt(reason: ExploreQaStopReason): string {
-  return [
-    `점검이 곧 끝납니다(${STOP_REASON_TEXT[reason]}). 더 이상 화면을 조작할 수 없습니다.`,
-    '지금까지 본 것으로 마지막 보고를 하세요. 아직 보고하지 않은 문제가 있으면 qa_report_issue로 하나씩 보고하고(이미 보고한 것은 다시 하지 마세요), 마지막으로 qa_finish를 부르세요.',
-    '문제를 보지 못했다면 qa_finish의 summary에 문제를 보지 못했다고 적으세요. 목표나 점검을 끝까지 하지 못했다면 success: false로 알리세요.',
-  ].join('\n');
+  return native.exploreQaBuildWrapUpPrompt(reason);
 }
 
 /**
@@ -1437,46 +1391,28 @@ export function judge(
   pageText: string,
   review?: QaReview,
 ): { status: ExploreQaStatus; reason: string } {
-  const problems: string[] = [];
-  if (diagnostics.consoleErrors.length > 0) problems.push(`console.error ${diagnostics.consoleErrors.length}건`);
-  if (diagnostics.pageErrors.length > 0) problems.push(`스크립트 예외 ${diagnostics.pageErrors.length}건`);
-  if (diagnostics.failedRequests.length > 0) problems.push(`실패한 요청 ${diagnostics.failedRequests.length}건`);
-  if (diagnostics.accessibilityViolations.length > 0) problems.push(`접근성 위반 ${diagnostics.accessibilityViolations.length}건`);
-  if (diagnostics.horizontalOverflowPx > 1) problems.push(`가로로 ${diagnostics.horizontalOverflowPx}px 넘칩니다`);
-  const confirmMissing = Boolean(goal.confirmText) && !pageText.includes(goal.confirmText as string);
-  if (confirmMissing) problems.push(`확인 문구 '${goal.confirmText}'를 화면에서 찾지 못했습니다`);
-
-  let minorCount = 0;
-  if (review) {
-    const serious = review.findings.filter((finding) => finding.severity !== 'minor');
-    minorCount = review.findings.length - serious.length;
-    if (serious.length > 0) {
-      const blockers = serious.filter((finding) => finding.severity === 'blocker').length;
-      const counts = [blockers > 0 ? `blocker ${blockers}건` : '', serious.length - blockers > 0 ? `major ${serious.length - blockers}건` : ''].filter(Boolean).join('·');
-      const shown = serious.slice(0, 3).map((finding) => `[${finding.severity}] ${finding.summary}`);
-      const more = serious.length > shown.length ? ` 외 ${serious.length - shown.length}건` : '';
-      problems.push(`모델이 화면에서 본 문제 ${counts} — ${shown.join(' / ')}${more}`);
-    }
-    if (review.declared && !review.declared.success) {
-      problems.push(`모델이 목표를 끝내지 못했다고 보고했습니다${review.declared.summary ? `: ${review.declared.summary}` : ''}`);
-    }
-  }
-  const rejectionNotes = [
-    review?.expectedRejections ? `예상된 거절 ${review.expectedRejections}건은 목록 참고` : '',
-    review?.unmetRejections ? `거절될 것으로 선언했지만 거절 응답이 없던 조작 ${review.unmetRejections}건은 목록 참고` : '',
-  ].filter(Boolean);
-  if (problems.length > 0) return { status: 'fail', reason: `${problems.join(' / ')}${rejectionNotes.length > 0 ? ` (${rejectionNotes.join(', ')})` : ''}` };
-
-  if (review && !review.declared) {
-    const confirmed = Boolean(goal.confirmText) && !confirmMissing;
-    if (!confirmed) {
-      const minor = minorCount > 0 ? ` 보고된 minor ${minorCount}건은 목록에 있습니다.` : '';
-      const rejections = rejectionNotes.length > 0 ? ` (${rejectionNotes.join(', ')})` : '';
-      return { status: 'inconclusive', reason: `점검을 마치지 못했습니다 — ${STOP_REASON_TEXT[review.stoppedBy]}, 모델의 마지막 보고(qa_finish)도 받지 못했습니다.${minor}${rejections}` };
-    }
-  }
-  const notes = [minorCount > 0 ? `minor ${minorCount}건은 목록 참고` : '', ...rejectionNotes].filter(Boolean);
-  return { status: 'pass', reason: `진단 신호가 없고 확인 조건을 만족합니다${notes.length > 0 ? `(${notes.join(', ')})` : ''}` };
+  const input = {
+    confirmText: goal.confirmText,
+    // 화면 글자에서 확인 문구를 찾는 부분 문자열 비교용. 짝 없는 서로게이트가 경계에서 모두 U+FFFD가 되어 다른 글자가 같아지지 않도록 단사로 바꿔 보낸다(사유에는 원래 글자를 쓴다)
+    confirmKey: goal.confirmText ? encodeLoneSurrogates(String(goal.confirmText)) : undefined,
+    consoleErrors: diagnostics.consoleErrors.length,
+    pageErrors: diagnostics.pageErrors.length,
+    failedRequests: diagnostics.failedRequests.length,
+    accessibilityViolations: diagnostics.accessibilityViolations.length,
+    horizontalOverflowPx: diagnostics.horizontalOverflowPx,
+    ...(review
+      ? {
+          review: {
+            findings: review.findings.map((finding) => ({ severity: finding.severity, summary: finding.summary })),
+            ...(review.declared ? { declared: { success: review.declared.success, summary: review.declared.summary } } : {}),
+            stoppedBy: review.stoppedBy,
+            expectedRejections: review.expectedRejections,
+            unmetRejections: review.unmetRejections,
+          },
+        }
+      : {}),
+  };
+  return decodeNative<{ status: ExploreQaStatus; reason: string }>(native.exploreQaJudge(encodeNative(input), encodeLoneSurrogates(pageText)));
 }
 
 // ───────────────────────────── 기록 → pageChecks steps 변환 ─────────────────────────────
@@ -1494,35 +1430,13 @@ export interface ConvertedSteps {
  * 관찰 도구(qa_snapshot/qa_find/qa_screenshot/qa_hover)는 애초에 화면을 바꾸지 않으므로 변환 대상이 아니다.
  */
 export function toPageCheckSteps(actions: readonly QaActionRecord[]): ConvertedSteps {
-  const steps: WorkflowPageStep[] = [];
-  const skipped: ConvertedSteps['skipped'] = [];
-  for (const action of actions) {
-    if (!action.ok) {
-      skipped.push({ index: action.index, tool: action.tool, reason: '실패한 행동이라 저장하지 않습니다' });
-      continue;
-    }
-    switch (action.tool) {
-      case 'qa_click':
-        if (action.stableSelector) steps.push({ click: action.stableSelector });
-        else skipped.push({ index: action.index, tool: action.tool, reason: '안정적인 선택자(role+name·data-testid·고유 텍스트)가 없어 저장하지 않습니다' });
-        break;
-      case 'qa_fill':
-      case 'qa_type':
-        if (action.stableSelector) steps.push({ fill: { selector: action.stableSelector, text: String(action.input.text ?? '') } });
-        else skipped.push({ index: action.index, tool: action.tool, reason: '안정적인 선택자(role+name·data-testid·고유 텍스트)가 없어 저장하지 않습니다' });
-        break;
-      case 'qa_press':
-        steps.push({ press: String(action.input.key ?? '') });
-        break;
-      case 'qa_wait': {
-        const forText = typeof action.input.forText === 'string' ? action.input.forText : undefined;
-        if (forText) steps.push({ waitFor: `text=${forText}` });
-        else skipped.push({ index: action.index, tool: action.tool, reason: '시간만 기다린 행동은 저장하지 않습니다(화면 신호가 아니라서 재현성이 없습니다)' });
-        break;
-      }
-      default:
-        skipped.push({ index: action.index, tool: action.tool, reason: '이 행동은 click/fill/press/waitFor로 표현할 수 없어 저장하지 않습니다' });
-    }
-  }
-  return { steps, skipped };
+  // text·key는 옛 구현처럼 필요한 행동에서만 String(x ?? '')로 글자로 바꿔 넘긴다(JS의 형 변환 규칙을 그대로 쓰고, 안 쓰는 행동에서는 건드리지 않는다)
+  const records = actions.map((action) => {
+    const record: Record<string, unknown> = { index: action.index, tool: action.tool, ok: action.ok, stableSelector: action.stableSelector };
+    if (action.ok && action.stableSelector && (action.tool === 'qa_fill' || action.tool === 'qa_type')) record.text = String(action.input.text ?? '');
+    if (action.ok && action.tool === 'qa_press') record.key = String(action.input.key ?? '');
+    if (action.ok && action.tool === 'qa_wait' && typeof action.input.forText === 'string') record.forText = action.input.forText;
+    return record;
+  });
+  return decodeNative<ConvertedSteps>(native.exploreQaToPageCheckSteps(encodeNative(records)));
 }
