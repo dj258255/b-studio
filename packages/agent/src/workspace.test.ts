@@ -361,6 +361,33 @@ describe('Workspace — .env 예시 파일', () => {
   });
 });
 
+describe('Workspace — 막는 검사를 Rust가 판정한다(ADR-191 3w)', () => {
+  it('`.env.` 뒤에 줄 끝 글자가 오는 이름도 모든 도구 경로에서 막는다(옛 정규식의 `.`은 줄 끝 글자를 못 맞췄다)', async () => {
+    for (const name of ['.env.local\n', '.env.\u2028x', 'web/.env.prod\r']) {
+      await expect(workspace.write(name, 'SECRET=1'), name).rejects.toThrow('생성물이나 비밀 파일');
+      await expect(workspace.read(name), name).rejects.toThrow('생성물이나 비밀 파일');
+      expect(() => workspace.trackExternalChanges([name]), name).toThrow('생성물이나 비밀 파일');
+      expect(isSecretFile(name), name).toBe(true);
+    }
+  });
+
+  it('들어온 경로의 글자 검사: 절대 경로, NUL, POSIX의 역슬래시를 받지 않고 바깥 변경 알림은 역슬래시를 구분자로 읽는다', async () => {
+    await expect(workspace.read('/etc/passwd')).rejects.toThrow('상대 경로를 쓰세요');
+    await expect(workspace.read('a\0b')).rejects.toThrow('쓸 수 없는 글자');
+    await expect(workspace.read('a\\b')).rejects.toThrow('쓸 수 없는 글자');
+    expect(() => workspace.trackExternalChanges(['/etc/passwd'])).toThrow('상대 경로를 쓰세요');
+    expect(() => workspace.trackExternalChanges(['..\\x'])).toThrow('프로젝트 밖');
+    workspace.trackExternalChanges(['api\\src\\App.java']);
+    expect(workspace.changedFiles()).toEqual(['api/src/App.java']);
+  });
+
+  it('`..`로 시작하는 이름의 폴더는 프로젝트 안쪽이고, 접두만 같은 형제 폴더는 바깥이다', async () => {
+    await workspace.write('..docs/a.txt', 'x');
+    expect(await readFile(path.join(root, '..docs/a.txt'), 'utf8')).toBe('x');
+    await expect(workspace.write(`../${path.basename(root)}-sibling/a.txt`, 'x')).rejects.toThrow('프로젝트 밖');
+  });
+});
+
 describe('열기 뒤 확인: 경로를 확인한 뒤 상위 폴더가 링크로 바뀌어도 프로젝트 밖을 읽거나 쓰지 않는다(#799)', () => {
   /** 경로 확인이 끝난 뒤 상위 폴더가 프로젝트 밖을 가리키는 링크로 바뀐 상태를 만든다(O_NOFOLLOW는 마지막 조각만 본다) */
   async function swappedParent(): Promise<{ outside: string; target: string }> {

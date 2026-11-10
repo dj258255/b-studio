@@ -2882,3 +2882,29 @@ pub fn checkpoint_pull_request_target(listed: String, base_ref: String, info_bas
 pub fn checkpoint_git_env_keep(keys: Vec<String>) -> Vec<bool> {
     cg::git_env_keep(&keys)
 }
+
+// ── agent: 작업 공간의 막는 검사(3단계 3w). TS 껍데기: packages/agent/src/workspace.ts
+use bstudio_guard::workspace_guard as wg;
+
+/// 숨긴 이름(생성물 폴더·`.env` 계열)인가. 거부 목록이라 짝 없는 서로게이트가 U+FFFD로 합쳐져도 더 막을 뿐이다
+#[napi]
+pub fn workspace_is_denied(segment: String) -> bool {
+    wg::is_denied(&segment)
+}
+
+#[napi]
+pub fn workspace_is_secret_file(file: String) -> bool {
+    wg::is_secret_file(&file)
+}
+
+/// `path.relative(root, target)`의 결과가 안쪽인가. 허용 목록이라 TS가 `encodeLoneSurrogates`한 글자를 보낸다
+#[napi]
+pub fn workspace_is_inside(relative: String, backslash_sep: bool) -> bool {
+    wg::is_inside_relative(&relative, backslash_sep)
+}
+
+/// 0 없음, 1 절대 경로, 2 쓸 수 없는 글자
+#[napi]
+pub fn workspace_input_problem(file: String, backslash_sep: bool, external: bool) -> u32 {
+    u32::from(wg::input_problem(&file, backslash_sep, external))
+}

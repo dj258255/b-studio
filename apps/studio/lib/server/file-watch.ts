@@ -1,12 +1,17 @@
 import { watch, type FSWatcher } from 'node:fs';
 import path from 'node:path';
-import { RELAY_PREFIX } from '@b-studio/sandbox';
+import { native, RELAY_PREFIX } from '@b-studio/sandbox';
 
 const GENERATED = new Set(['.git', 'node_modules', '.next', 'build', '.gradle', '.venv', '__pycache__']);
 
-/** 코드 화면에서 빼는 경로. 에이전트 작업 공간과 같은 생성물 폴더와 .env, 생성 알림을 만들려고 잠깐 옮겨 둔 이름 */
+/**
+ * 코드 화면에서 빼는 경로(거부 목록이라 넓게). 에이전트 작업 공간과 같은 생성물 폴더와 .env, 생성 알림을 만들려고 잠깐 옮겨 둔 이름.
+ * 이름은 글자 그대로만이 아니라 작업 공간과 같은 규칙(대소문자·유니코드 정규화·보이지 않는 문자·끝의 점과 공백)으로도 본다.
+ * 글자 그대로만 보면 `.ENV`·`Node_Modules`·`.env\u200B`가 목록에 남아 변경 내용이 화면에 나갔다(트러블슈팅 173).
+ * 예시 파일(.env.example)은 작업 공간에서는 열리지만 이 화면에서는 전과 같이 뺀다
+ */
 export function isDeniedPath(file: string): boolean {
-  return file.split(/[\\/]/).some((segment) => GENERATED.has(segment) || /^\.env(\..*)?$/.test(segment) || segment.includes(RELAY_PREFIX));
+  return file.split(/[\\/]/).some((segment) => GENERATED.has(segment) || /^\.env(\..*)?$/.test(segment) || native.workspaceIsDenied(segment) || segment.includes(RELAY_PREFIX));
 }
 
 export interface FileWatcher {
