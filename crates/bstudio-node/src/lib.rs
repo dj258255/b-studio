@@ -3459,3 +3459,78 @@ pub fn static_shadow_step(input_json: String, known_json: String) -> Result<Stri
     }
     .to_string())
 }
+
+// ── agent: 로컬 CLI 러너의 실행 파일 고르기·판정·사용량(ADR-191 3단계 3ac). TS 껍데기: packages/agent/src/claude-cli-process.ts, claude-code-runner.ts
+use bstudio_guard::runner_judge as rj;
+use bstudio_io::cli_command as cli_cmd;
+
+/// 통과하면 `{ path }`(그 글자를 그대로 spawn에 쓴다), 못 찾으면 `{ reason }`. PATH·루트의 파일 상태는 여기서 읽는다(확인한 경로 = 띄울 경로)
+#[napi]
+pub fn cli_resolve_command(command: String, path_value: Option<String>, forbidden_root: Option<String>) -> String {
+    let result = cli_cmd::resolve_cli_command(&command, path_value.as_deref(), forbidden_root.as_deref());
+    out(&match result {
+        Ok(path) => js_json::object(vec![("path", Some(JsValue::str(path)))]),
+        Err(reason) => js_json::object(vec![("reason", Some(JsValue::str(reason)))]),
+    })
+}
+
+#[napi]
+pub fn cli_child_path(value: String, forbidden_root: Option<String>) -> String {
+    cli_cmd::child_path(&value, forbidden_root.as_deref())
+}
+
+/// `{ window: number | null, ignored?: string }`
+#[napi]
+pub fn runner_resolve_compact_window(raw: Option<String>) -> String {
+    let setting = rj::resolve_compact_window(raw.as_deref());
+    out(&js_json::object(vec![
+        ("window", Some(setting.window.map_or(JsValue::Null, |window| JsValue::Num(window as f64)))),
+        ("ignored", setting.ignored.map(JsValue::str)),
+    ]))
+}
+
+#[napi]
+pub fn runner_is_transient_network_failure(message: String) -> bool {
+    rj::is_transient_network_failure(&message)
+}
+
+/// 입력은 result 메시지의 `{ subtype, is_error, result, stop_reason, errors }`(encodeNative한 JSON). 실패가 아니면 null
+#[napi]
+pub fn runner_describe_result_failure(message_json: String) -> Result<Option<String>> {
+    Ok(rj::describe_result_failure(&input(&message_json, "결과 메시지")?))
+}
+
+/// 입력은 init 메시지의 `{ mcp_servers, mcp_server_errors }`(encodeNative한 JSON). 연결됐으면 null
+#[napi]
+pub fn runner_mcp_setup_failure(message_json: String, server: String) -> Result<Option<String>> {
+    Ok(rj::mcp_setup_failure(&input(&message_json, "init 메시지")?, &server))
+}
+
+#[napi]
+pub fn runner_no_result_message(has_exit: bool, error_message: Option<String>, signal: Option<String>, code: Option<f64>, stderr: String) -> String {
+    rj::no_result_message(has_exit, error_message.as_deref(), signal.as_deref(), code, &stderr)
+}
+
+/// 입력은 result의 `modelUsage`(encodeNative한 JSON, 없으면 `null`). 결과 `{ total: AgentUsage, byModel: Record<string, AgentUsage> }`. null 항목이 있으면 던진다(옛 TS도 던졌다)
+#[napi]
+pub fn runner_usage_of(model_usage_json: String) -> Result<String> {
+    let value = input(&model_usage_json, "modelUsage")?;
+    let (total, by_model) = fail(rj::usage_of(Some(&value)))?;
+    Ok(out(&js_json::object(vec![("total", Some(total.to_value())), ("byModel", Some(rj::by_model_value(&by_model)))])))
+}
+
+#[napi]
+pub fn runner_merge_usage_by_model(base_json: String, query_json: String) -> Result<String> {
+    Ok(out(&rj::merge_usage_by_model(&input(&base_json, "기준 사용량")?, &input(&query_json, "이번 사용량")?)))
+}
+
+#[napi]
+pub fn runner_add_usage(target_json: String, source_json: String) -> Result<String> {
+    Ok(out(&rj::Usage::from_agent(&input(&target_json, "사용량")?).add(rj::Usage::from_agent(&input(&source_json, "사용량")?)).to_value()))
+}
+
+/// 입력은 `duration_api_ms`(encodeNative한 JSON, 없으면 `null`)
+#[napi]
+pub fn runner_api_duration_of(value_json: String) -> Result<Option<f64>> {
+    Ok(rj::api_duration_of(Some(&input(&value_json, "API 시간")?)))
+}

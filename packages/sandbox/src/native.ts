@@ -610,6 +610,22 @@ interface NativeGuard {
   // 폴더 읽기는 껍데기가 한다: input은 { servicePath, pageFile, values(자기 속성만), check, maxFolders } JSON, known은 지금까지 읽은 { lstat: { 경로: 'missing'|'error'|'link'|'dir'|'other' }, readdir: { 폴더: null | [[이름, 'l'|'d'|'f']] } } JSON(경로는 프로젝트 루트 기준 상대 경로).
   // 결과: { need: { kind: 'lstat'|'readdir', path } }(읽고 known에 더해 다시 부른다) | { shadows: [{ name, where }] } | { unknown: 메시지 }. 모양이 어긋난 입력은 던진다
   staticShadowStep(inputJson: string, knownJson: string): string;
+  // ── agent: 로컬 CLI 러너의 실행 파일 고르기·판정·사용량(3단계 3ac). cliResolveCommand는 막는 쪽이다: PATH·프로젝트 루트의 파일 상태를 Rust가 읽고 `{ path }`(그 글자를 그대로 spawn에 쓴다)나 `{ reason }`을 돌려준다(JSON).
+  // 경로·PATH는 글자 그대로 보낸다: 짝 없는 서로게이트는 Node가 fs·spawn에 줄 때도 같은 UTF-8(U+FFFD)이 되므로 확인한 경로와 띄우는 경로의 바이트가 같다.
+  // 판정 입력은 encodeNative한 JSON이다. runnerDescribeResultFailure는 `{subtype,is_error,result,stop_reason,errors}`, runnerMcpSetupFailure는 `{mcp_servers,mcp_server_errors}`. 실패가 아니면(연결됐으면) null.
+  cliResolveCommand(command: string, pathValue: string | undefined | null, forbiddenRoot: string | undefined | null): string;
+  cliChildPath(value: string, forbiddenRoot: string | undefined | null): string;
+  // `{ window: number | null, ignored?: string }`
+  runnerResolveCompactWindow(raw: string | undefined | null): string;
+  runnerIsTransientNetworkFailure(message: string): boolean;
+  runnerDescribeResultFailure(messageJson: string): string | null | undefined;
+  runnerMcpSetupFailure(messageJson: string, server: string): string | null | undefined;
+  runnerNoResultMessage(hasExit: boolean, errorMessage: string | undefined | null, signal: string | undefined | null, code: number | undefined | null, stderr: string): string;
+  // 입력은 result의 modelUsage(없으면 'null'). `{ total, byModel }` JSON. null 항목이 있으면 던진다(옛 TS도 던졌다)
+  runnerUsageOf(modelUsageJson: string): string;
+  runnerMergeUsageByModel(baseJson: string, queryJson: string): string;
+  runnerAddUsage(targetJson: string, sourceJson: string): string;
+  runnerApiDurationOf(valueJson: string): number | null | undefined;
 }
 
 export interface NativeHostPty {
