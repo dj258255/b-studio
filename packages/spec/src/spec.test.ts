@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { loadProject, parseSpec, SpecError } from './load';
 
 const ORDERS_SPEC = `
@@ -598,6 +598,32 @@ services:
 });
 
 describe('loadProject', () => {
+  it('크기 확인 뒤 읽는 사이에 커진 파일도 상한 + 1바이트까지만 읽고 거절한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    const file = path.join(dir, 'studio.yaml');
+    await writeFile(file, `${ORDERS_SPEC}# ${'x'.repeat(4 * 1024 * 1024 + 16)}\n`);
+    // stat은 작다고 답하게 한다(확인 뒤에 파일이 커진 것을 흉내 낸다). 읽는 쪽이 따로 상한을 보지 않으면 통과한다
+    const handle = await open(file, 'r');
+    const proto = Object.getPrototypeOf(handle) as { stat: (...args: unknown[]) => Promise<{ size: number }> };
+    await handle.close();
+    const original = proto.stat;
+    const spy = vi.spyOn(proto, 'stat').mockImplementation(async function (this: unknown, ...args: unknown[]) {
+      const stats = await original.apply(this, args);
+      return Object.assign(stats, { size: 10 });
+    });
+    try {
+      await expect(loadProject(dir)).rejects.toThrow(/파일이 너무 큽니다/);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('상한(4MiB)을 넘는 파일은 읽기 전에 거절한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(path.join(dir, 'studio.yaml'), `${ORDERS_SPEC}# ${'x'.repeat(4 * 1024 * 1024)}\n`);
+    await expect(loadProject(dir)).rejects.toThrow(/파일이 너무 큽니다/);
+  });
+
   it('compose에 없는 managed 서비스와 compose에 있는 external 서비스를 잡아낸다', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
     await writeFile(path.join(dir, 'studio.yaml'), ORDERS_SPEC);
