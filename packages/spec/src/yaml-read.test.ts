@@ -79,6 +79,16 @@ describe('readYaml', () => {
     }
   });
 
+  it('별칭·merge로 펼친 깊이와 글자 크기, 입력 크기에 상한이 있다(프로세스가 죽지 않고 지원하지 않는 꼴로 닫는다)', () => {
+    let deep = 'l0: &l0 {x: 1}\n';
+    for (let i = 1; i < 20_000; i++) deep += `l${i}: &l${i}\n  k:\n    <<: *l${i - 1}\n`;
+    expect(readError(deep, { merge: true }).kind).toBe('unsupported');
+    const big = 'x'.repeat(1 << 20);
+    const wide = `big: &big "${big}"\nsrc: &src {k: *big}\n${Array.from({ length: 400 }, (_, i) => `m${i}:\n  <<: *src\n`).join('')}`;
+    expect(readError(wide, { merge: true }).kind).toBe('unsupported');
+    expect(readError(`a: ${'y'.repeat(5 * 1024 * 1024)}\n`).detail).toMatch(/너무 큽니다/);
+  });
+
   it('흔한 실제 파일 꼴은 읽는다: 첫 줄 ---, CRLF, 따옴표·주석 안의 탭·!, 이어지는 따옴표, 지역 태그', () => {
     for (const source of ['---\na: 1\n', 'a: 1\r\nb: [x, y]\r\n', 'a: "x\ty!"\nb: 1 # 탭\t!|>\n', 'a: "긴 글\n    이어짐"\n', 'cmd: !reset [a]\n', 'a: [\n    1,\n    2\n  ]\n']) {
       expect(readYaml(source), source).toEqual(parse(source));

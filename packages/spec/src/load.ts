@@ -18,6 +18,8 @@ import {
 } from './schema';
 
 export const SPEC_FILE = 'studio.yaml';
+/** 읽는 YAML 파일의 상한(바이트). crates/bstudio-guard/src/yaml.rs의 `MAX_INPUT_BYTES`와 같다 */
+const MAX_YAML_BYTES = 4 * 1024 * 1024;
 
 export class SpecError extends Error {
   readonly issues: string[];
@@ -298,6 +300,8 @@ async function readProjectText(root: string, relative: string): Promise<string> 
   try {
     const opened = await handle.stat();
     if (!opened.isFile()) throw new SpecError(`${relative}: 일반 파일이 아닙니다`);
+    // 읽기 전에 크기를 본다(Rust 읽기의 상한과 같은 값). studio.yaml·compose는 남의 저장소에서 올 수 있다
+    if (opened.size > MAX_YAML_BYTES) throw new SpecError(`${relative}: 파일이 너무 큽니다(${MAX_YAML_BYTES}바이트까지)`);
     const [rootNow, fileNow] = await Promise.all([realpath(root), realpath(file)]);
     const now = await lstat(fileNow);
     if (!isInside(rootNow, fileNow) || now.dev !== opened.dev || now.ino !== opened.ino) throw outside();

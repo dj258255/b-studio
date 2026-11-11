@@ -18,8 +18,14 @@ use std::rc::Rc;
 pub const MAX_DEPTH: usize = 64;
 /// JS `yaml`의 `maxAliasCount`
 const MAX_ALIAS_COUNT: usize = 100;
-/// 별칭이 펼쳐지는 노드 수의 상한(JS의 별칭 개수 규칙으로 걸러지지만, 규칙의 틈이 있어도 메모리가 늘지 않게 하는 안전망)
+/// 별칭·merge를 펼친 값의 노드 수 상한. JS의 별칭 개수 규칙은 merge 자리의 별칭을 세지 않으므로 이 예산이 따로 막는다(merge 자리도 무게대로 센다)
 const MAX_EXPANDED_NODES: usize = 2_000_000;
+/// 읽는 글자의 상한(바이트). spec의 파일 읽기(`readProjectText`)가 같은 값으로 읽기 전에 막는다
+pub const MAX_INPUT_BYTES: usize = 4 * 1024 * 1024;
+/// 펼친 스칼라 글자(키 포함)의 바이트 합 상한: 입력 크기의 32배, 다만 1MiB 이상 32MiB 이하. 큰 스칼라를 별칭·merge로 여러 번 펼쳐 메모리를 쓰게 하는 것을 막는다
+fn expanded_byte_limit(input_len: usize) -> usize {
+    input_len.saturating_mul(32).clamp(1 << 20, 32 << 20)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
@@ -55,15 +61,18 @@ pub fn parse(text: &str, merge: bool) -> Outcome {
 }
 
 fn run(text: &str, merge: bool) -> Result<String, Fail> {
+    if text.len() > MAX_INPUT_BYTES {
+        return unsupported("글이 너무 큽니다", (0, 0));
+    }
     let built = build_events(text, merge)?;
     scan_text(text, &built.block_lines, &built.multiline, &built.quoted_multiline)?;
     let value = match built.docs.len() {
         0 => V::Null,
-        1 => n_to_v(&built.docs[0], merge)?,
+        1 => n_to_v(&built.docs[0], merge, text.len())?,
         _ => return syntax("문서가 둘 이상입니다", built.docs[1].pos),
     };
     let mut out = String::new();
-    emit(&value, &mut out)?;
+    emit(&value, &mut out, 0)?;
     Ok(out)
 }
 
@@ -125,7 +134,11 @@ fn js_num_string(f: f64) -> String {
     format!("{f}")
 }
 
-fn emit(v: &V, out: &mut String) -> Result<(), Fail> {
+fn emit(v: &V, out: &mut String, depth: usize) -> Result<(), Fail> {
+    // 펼친 값의 깊이는 n_to_v가 MAX_DEPTH로 막지만, 여기서도 같은 상한을 보아 재귀가 스택을 넘지 않게 한다
+    if depth > MAX_DEPTH {
+        return unsupported("너무 깊은 중첩", (0, 0));
+    }
     match v {
         V::Null => out.push_str("null"),
         V::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
@@ -137,7 +150,7 @@ fn emit(v: &V, out: &mut String) -> Result<(), Fail> {
                 if i > 0 {
                     out.push(',');
                 }
-                emit(e, out)?;
+                emit(e, out, depth + 1)?;
             }
             out.push(']');
         }
@@ -166,7 +179,7 @@ fn emit(v: &V, out: &mut String) -> Result<(), Fail> {
                 }
                 out.push_str(&serde_json::to_string(k).unwrap_or_else(|_| "\"\"".to_owned()));
                 out.push(':');
-                emit(e, out)?;
+                emit(e, out, depth + 1)?;
             }
             out.push('}');
         }
@@ -179,6 +192,23 @@ fn emit(v: &V, out: &mut String) -> Result<(), Fail> {
 struct N {
     kind: Kind,
     pos: Pos,
+    /// 별칭을 따라 펼쳤을 때의 컬렉션 중첩(글자 위의 중첩이 아니다). 상한을 넘는 노드는 만들지 않는다: 깊은 별칭 사슬은 값으로 바꿀 때뿐 아니라 해제할 때도 재귀가 스택을 넘기기 때문이다
+    depth: usize,
+}
+
+impl N {
+    fn new(kind: Kind, pos: Pos) -> Result<Rc<N>, Fail> {
+        let depth = match &kind {
+            Kind::Scalar(..) => 0,
+            Kind::Alias(t) => t.depth,
+            Kind::Seq(v) => 1 + v.iter().map(|e| e.depth).max().unwrap_or(0),
+            Kind::Map(m) => 1 + m.iter().map(|(k, v)| k.depth.max(v.depth)).max().unwrap_or(0),
+        };
+        if depth > MAX_DEPTH {
+            return unsupported("펼친 값의 중첩이 너무 깊습니다", pos);
+        }
+        Ok(Rc::new(N { kind, pos, depth }))
+    }
 }
 enum Kind {
     Alias(Rc<N>),
@@ -269,7 +299,10 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                 ids.clear();
             }
             Event::DocumentEnd => {
-                let node = root.take().unwrap_or_else(|| Rc::new(N { kind: Kind::Scalar(String::new(), ScalarStyle::Plain), pos }));
+                let node = match root.take() {
+                    Some(n) => n,
+                    None => N::new(Kind::Scalar(String::new(), ScalarStyle::Plain), pos)?,
+                };
                 docs.push(node);
             }
             Event::Alias(id) => {
@@ -300,7 +333,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                         return syntax("별칭이 너무 많이 펼쳐집니다(JS yaml의 maxAliasCount)", pos);
                     }
                 }
-                put(&mut stack, &mut root, Rc::new(N { kind: Kind::Alias(target), pos }))?;
+                put(&mut stack, &mut root, N::new(Kind::Alias(target), pos)?)?;
             }
             Event::Scalar(text, style, anchor, tag) => {
                 // 지역 태그(`!이름`)만 읽는다: JS는 알 수 없는 태그를 경고만 하고 글자 그대로의 문자열로 둔다. `!!str` 같은 core 태그와 `!!binary`·`!!set` 등 JS가 값을 바꾸는 태그, 태그 지시문이 필요한 꼴은 지원하지 않는다
@@ -324,7 +357,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                     block_lines.push((sp.start.line(), last.max(sp.start.line())));
                 }
                 // 태그가 붙은 스칼라는 해석하지 않고 문자열로 둔다
-                let n = Rc::new(N { kind: Kind::Scalar(text.to_string(), if tagged { ScalarStyle::SingleQuoted } else { style }), pos });
+                let n = N::new(Kind::Scalar(text.to_string(), if tagged { ScalarStyle::SingleQuoted } else { style }), pos)?;
                 if anchor > 0 {
                     anchors.insert(anchor, Some(n.clone()));
                     ids.insert(Rc::as_ptr(&n), anchor);
@@ -361,7 +394,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                     if let Some((line, _)) = flow.filter(|(line, _)| *line != sp.start.line()) {
                         multiline.push((line, sp.start.line()));
                     }
-                    let n = Rc::new(N { kind: Kind::Seq(v), pos: start });
+                    let n = N::new(Kind::Seq(v), start)?;
                     if anchor > 0 {
                         anchors.insert(anchor, Some(n.clone()));
                         ids.insert(Rc::as_ptr(&n), anchor);
@@ -378,7 +411,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                     if let Some((line, _)) = flow.filter(|(line, _)| *line != sp.start.line()) {
                         multiline.push((line, sp.start.line()));
                     }
-                    let n = Rc::new(N { kind: Kind::Map(v), pos: start });
+                    let n = N::new(Kind::Map(v), start)?;
                     if anchor > 0 {
                         anchors.insert(anchor, Some(n.clone()));
                         ids.insert(Rc::as_ptr(&n), anchor);
@@ -523,33 +556,48 @@ fn merge_in(out: &mut Vec<(V, V)>, sk: V, sv: V, typed: bool) {
     }
 }
 
-struct Budget(usize);
-
-fn n_to_v(n: &Rc<N>, merge: bool) -> Result<V, Fail> {
-    let mut budget = Budget(0);
-    n_to_v_inner(n, merge, &mut budget)
+struct Budget {
+    nodes: usize,
+    bytes: usize,
+    byte_limit: usize,
 }
 
-fn n_to_v_inner(n: &Rc<N>, merge: bool, budget: &mut Budget) -> Result<V, Fail> {
-    budget.0 += 1;
-    if budget.0 > MAX_EXPANDED_NODES {
+fn n_to_v(n: &Rc<N>, merge: bool, input_len: usize) -> Result<V, Fail> {
+    let mut budget = Budget { nodes: 0, bytes: 0, byte_limit: expanded_byte_limit(input_len) };
+    n_to_v_inner(n, merge, &mut budget, 0)
+}
+
+/// `depth`는 펼친 값의 컬렉션 중첩이다. 별칭이 깊은 노드를 가리키고 그 안에서 다시 별칭을 쓰면 글자의 깊이보다 크게 불어나므로 여기서 막는다
+fn n_to_v_inner(n: &Rc<N>, merge: bool, budget: &mut Budget, depth: usize) -> Result<V, Fail> {
+    budget.nodes += 1;
+    if budget.nodes > MAX_EXPANDED_NODES {
         return unsupported("별칭이 너무 크게 펼쳐집니다", n.pos);
     }
+    if depth > MAX_DEPTH {
+        return unsupported("펼친 값의 중첩이 너무 깊습니다", n.pos);
+    }
     Ok(match &n.kind {
-        Kind::Alias(t) => return n_to_v_inner(t, merge, budget),
+        Kind::Alias(t) => return n_to_v_inner(t, merge, budget, depth),
         Kind::Scalar(s, style) => {
+            budget.bytes = budget.bytes.saturating_add(s.len());
+            if budget.bytes > budget.byte_limit {
+                return unsupported("별칭이 글자를 너무 크게 펼칩니다", n.pos);
+            }
             if *style == ScalarStyle::Plain {
                 resolve_plain(s)
             } else {
                 V::Str(s.clone())
             }
         }
-        Kind::Seq(v) => V::Seq(v.iter().map(|e| n_to_v_inner(e, merge, budget)).collect::<Result<_, _>>()?),
-        Kind::Map(m) => V::Map(map_pairs(m, merge, false, budget)?),
+        Kind::Seq(v) => V::Seq(v.iter().map(|e| n_to_v_inner(e, merge, budget, depth + 1)).collect::<Result<_, _>>()?),
+        Kind::Map(m) => V::Map(map_pairs(m, merge, false, budget, depth + 1)?),
     })
 }
 
-fn map_pairs(m: &[(Rc<N>, Rc<N>)], merge: bool, typed: bool, budget: &mut Budget) -> Result<Vec<(V, V)>, Fail> {
+fn map_pairs(m: &[(Rc<N>, Rc<N>)], merge: bool, typed: bool, budget: &mut Budget, depth: usize) -> Result<Vec<(V, V)>, Fail> {
+    if depth > MAX_DEPTH {
+        return unsupported("펼친 값의 중첩이 너무 깊습니다", m.first().map(|(k, _)| k.pos).unwrap_or((0, 0)));
+    }
     let mut out: Vec<(V, V)> = Vec::new();
     // 중복 키: 해석된 스칼라 값이 같으면 중복(merge 키는 제외, 별칭 키는 검사하지 않는다)
     let mut seen: Vec<V> = Vec::new();
@@ -562,7 +610,7 @@ fn map_pairs(m: &[(Rc<N>, Rc<N>)], merge: bool, typed: bool, budget: &mut Budget
             for s in srcs {
                 match &deref(s).kind {
                     Kind::Map(sm) => {
-                        for (sk, sv) in map_pairs(sm, merge, true, budget)? {
+                        for (sk, sv) in map_pairs(sm, merge, true, budget, depth + 1)? {
                             merge_in(&mut out, sk, sv, typed);
                         }
                     }
@@ -571,14 +619,14 @@ fn map_pairs(m: &[(Rc<N>, Rc<N>)], merge: bool, typed: bool, budget: &mut Budget
             }
             continue;
         }
-        let kv = n_to_v_inner(k, merge, budget)?;
+        let kv = n_to_v_inner(k, merge, budget, depth)?;
         if matches!(&k.kind, Kind::Scalar(..)) {
             if seen.iter().any(|x| same_scalar(x, &kv)) {
                 return syntax("매핑의 키가 중복됩니다", k.pos);
             }
             seen.push(kv.clone());
         }
-        let vv = n_to_v_inner(val, merge, budget)?;
+        let vv = n_to_v_inner(val, merge, budget, depth)?;
         put_pair(&mut out, kv, vv, typed);
     }
     Ok(out)
@@ -953,5 +1001,37 @@ mod tests {
     fn js_object_order_is_left_to_json_parse() {
         // 키 순서(정수 꼴이 앞)는 JSON.parse가 정한다. 같은 키(1과 "1")는 첫 자리에서 값만 바뀐다
         assert_eq!(value("b: 1\n2: x\n1: y\n__proto__: z\n", false), r#"{"b":1,"2":"x","1":"y","__proto__":"z"}"#);
+    }
+
+    /// 믿을 수 없는 입력(studio.yaml은 남의 저장소에서 올 수 있다): 별칭·merge로 펼친 값의 깊이·크기는 상한 안에서 닫는다. 상한이 없으면 스택이 넘쳐 프로세스가 죽거나 메모리를 다 쓴다
+    #[test]
+    fn expansion_is_bounded_in_depth_bytes_and_input_size() {
+        // 깊이: 앵커를 단계마다 별칭으로 겹친다. 글자 위의 중첩은 얕지만 펼친 깊이는 수만이 된다(merge 자리의 별칭은 JS 별칭 개수에 세지 않아 그 규칙이 먼저 막지 못한다)
+        let levels = 20_000;
+        let mut deep = String::from("l0: &l0 {x: 1}\n");
+        for i in 1..levels {
+            deep.push_str(&format!("l{i}: &l{i}\n  k:\n    <<: *l{}\n", i - 1));
+        }
+        match parse(&deep, true) {
+            Outcome::Unsupported { reason, .. } => assert!(reason.contains("깊"), "{reason}"),
+            other => panic!("깊이 상한이 막아야 합니다: {:?}", &format!("{other:?}")[..80]),
+        }
+        // 바이트: 1MB 글자를 merge로 수백 번 펼친다
+        let big = "x".repeat(1 << 20);
+        let mut wide = format!("big: &big \"{big}\"\nsrc: &src {{k: *big}}\n");
+        for i in 0..400 {
+            wide.push_str(&format!("m{i}:\n  <<: *src\n"));
+        }
+        match parse(&wide, true) {
+            Outcome::Unsupported { reason, .. } => assert!(reason.contains("글자"), "{reason}"),
+            other => panic!("펼친 바이트 상한이 막아야 합니다: {:?}", &format!("{other:?}")[..80]),
+        }
+        // 입력 크기: 읽기 전에 막는다
+        match parse(&format!("a: {}\n", "y".repeat(MAX_INPUT_BYTES)), false) {
+            Outcome::Unsupported { reason, .. } => assert!(reason.contains("너무 큽니다")),
+            other => panic!("{:?}", &format!("{other:?}")[..80]),
+        }
+        // 상한 안의 평범한 재사용은 그대로 읽는다
+        assert!(matches!(parse("a: &a {p: 1}\nb:\n  <<: *a\n", true), Outcome::Value(_)));
     }
 }

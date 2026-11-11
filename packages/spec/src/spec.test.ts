@@ -598,6 +598,12 @@ services:
 });
 
 describe('loadProject', () => {
+  it('상한(4MiB)을 넘는 파일은 읽기 전에 거절한다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
+    await writeFile(path.join(dir, 'studio.yaml'), `${ORDERS_SPEC}# ${'x'.repeat(4 * 1024 * 1024)}\n`);
+    await expect(loadProject(dir)).rejects.toThrow(/파일이 너무 큽니다/);
+  });
+
   it('compose에 없는 managed 서비스와 compose에 있는 external 서비스를 잡아낸다', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'spec-test-'));
     await writeFile(path.join(dir, 'studio.yaml'), ORDERS_SPEC);
