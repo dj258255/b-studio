@@ -1,0 +1,1637 @@
+{
+  "http": [
+    {
+      "step": "세션 만들기",
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 201,
+      "body": {
+        "id": "<sid>",
+        "projectId": "demo",
+        "projectName": "demo",
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy",
+        "status": "idle",
+        "mode": "claude-code",
+        "backend": "claude-code",
+        "running": false,
+        "owner": "local",
+        "experimental": true,
+        "terminal": true,
+        "terminalMode": "host",
+        "hasDeploy": false,
+        "services": [
+          {
+            "name": "app",
+            "template": "nextjs",
+            "preview": "browser",
+            "state": "stopped",
+            "hasContract": false
+          }
+        ],
+        "externals": [],
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ],
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        }
+      }
+    },
+    {
+      "step": "터미널 열기",
+      "method": "POST",
+      "path": "/api/sessions/<sid>/terminal",
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    },
+    {
+      "step": "CLI 시작",
+      "method": "HOOK",
+      "path": "/session-start",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "SessionStart",
+          "source": "startup"
+        },
+        "output": {
+          "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "# b-studio\n이 작업 폴더는 b-studio 세션의 작업 복사본이고, 이 CLI는 이 컴퓨터에서 돈다. 프로젝트의 서비스(app)는 각자의 컨테이너에서 돌고, 같은 폴더가 그 안에 연결되어 있다.\n빌드·테스트·서버 명령은 mcp__b-studio__run_in_service로 서비스 컨테이너 안에서 돌린다(검증 게이트가 보는 환경이 그쪽이다). 쓸 수 있는 b-studio 도구: mcp__b-studio__run_in_service, mcp__b-studio__restart_service, mcp__b-studio__service_logs, mcp__b-studio__service_stats, mcp__b-studio__http_request.\n커밋하지 않는다. git commit·git push·git reset·git checkout·git stash로 기록이나 브랜치를 바꾸지 않는다. 체크포인트(커밋)는 턴이 끝난 뒤 b-studio가 검증을 통과시켜 남긴다.\n작업 폴더 밖의 파일을 바꾸지 않는다.\n검증이 실패하면 결과가 \"Stop hook feedback\"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.\n끝내 통과하지 못하면 b-studio가 이번 요청의 변경을 되돌린다(기록에서 되살릴 수 있다).\n사용자에게 보이는 글은 한국어로 쓴다."
+          }
+        }
+      }
+    },
+    {
+      "step": "요청",
+      "method": "HOOK",
+      "path": "/prompt",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "UserPromptSubmit",
+          "prompt": "hello.txt를 고쳐 주세요"
+        },
+        "output": {}
+      }
+    },
+    {
+      "step": "쓰기 직전",
+      "method": "HOOK",
+      "path": "/pre-tool",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Write",
+          "tool_input": {
+            "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+            "content": "틀림1\n"
+          },
+          "tool_use_id": "toolu_1"
+        },
+        "output": {}
+      }
+    },
+    {
+      "step": "턴 끝",
+      "method": "HOOK",
+      "path": "/stop",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "Stop",
+          "stop_hook_active": false,
+          "last_assistant_message": "첫 시도."
+        },
+        "output": {
+          "decision": "block",
+          "reason": "[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n워크플로 검사 실패:\n- [test] app-test (시도 1회)\n종료 코드 1\nFAIL app-test\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료"
+        }
+      }
+    },
+    {
+      "step": "쓰기 직전",
+      "method": "HOOK",
+      "path": "/pre-tool",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Write",
+          "tool_input": {
+            "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+            "content": "틀림2\n"
+          },
+          "tool_use_id": "toolu_2"
+        },
+        "output": {}
+      }
+    },
+    {
+      "step": "턴 끝",
+      "method": "HOOK",
+      "path": "/stop",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "Stop",
+          "stop_hook_active": false,
+          "last_assistant_message": "둘째."
+        },
+        "output": {
+          "decision": "block",
+          "reason": "[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n워크플로 검사 실패:\n- [test] app-test (시도 1회)\n종료 코드 1\nFAIL app-test\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료"
+        }
+      }
+    },
+    {
+      "step": "쓰기 직전",
+      "method": "HOOK",
+      "path": "/pre-tool",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Write",
+          "tool_input": {
+            "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+            "content": "틀림3\n"
+          },
+          "tool_use_id": "toolu_3"
+        },
+        "output": {}
+      }
+    },
+    {
+      "step": "턴 끝",
+      "method": "HOOK",
+      "path": "/stop",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/sessions/demo-<sid>",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "Stop",
+          "stop_hook_active": false,
+          "last_assistant_message": "셋째."
+        },
+        "output": {
+          "systemMessage": "[b-studio] 검증 게이트를 3번 통과하지 못했습니다 바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다)."
+        }
+      }
+    }
+  ],
+  "events": {
+    "run": [
+      {
+        "type": "run_started",
+        "runId": "<run:1>",
+        "request": "hello.txt를 고쳐 주세요",
+        "by": "local",
+        "via": "terminal",
+        "at": "<at>",
+        "backend": "claude-code",
+        "taskKind": {
+          "complexity": "simple",
+          "risk": "normal"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "Write",
+          "input": {
+            "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+            "content": "틀림1\n"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "text",
+          "text": "첫 시도."
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "run",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_start",
+          "files": [
+            "app/hello.txt"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "contract_check",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_result",
+          "report": {
+            "ok": true,
+            "sync": {
+              "elapsedMs": "<elapsedMs>"
+            },
+            "restarted": [
+              {
+                "service": "app",
+                "ready": true
+              }
+            ],
+            "contracts": [],
+            "unverifiedFiles": [],
+            "secretLeaks": [],
+            "skippedOff": []
+          },
+          "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+          "moreChecks": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "test",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "review",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "test",
+            "name": "app-test",
+            "ok": false,
+            "attempts": 1,
+            "detail": "종료 코드 1\nFAIL app-test"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "review",
+            "name": "protected-paths",
+            "ok": true,
+            "attempts": 1
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "gate_done",
+          "ok": false
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "Write",
+          "input": {
+            "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+            "content": "틀림2\n"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "text",
+          "text": "둘째."
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "run",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_start",
+          "files": [
+            "app/hello.txt"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "contract_check",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_result",
+          "report": {
+            "ok": true,
+            "sync": {
+              "elapsedMs": "<elapsedMs>"
+            },
+            "restarted": [
+              {
+                "service": "app",
+                "ready": true
+              }
+            ],
+            "contracts": [],
+            "unverifiedFiles": [],
+            "secretLeaks": [],
+            "skippedOff": []
+          },
+          "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+          "moreChecks": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "test",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "review",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "test",
+            "name": "app-test",
+            "ok": false,
+            "attempts": 1,
+            "detail": "종료 코드 1\nFAIL app-test"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "review",
+            "name": "protected-paths",
+            "ok": true,
+            "attempts": 1
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "gate_done",
+          "ok": false
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "Write",
+          "input": {
+            "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+            "content": "틀림3\n"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "text",
+          "text": "셋째."
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "run",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_start",
+          "files": [
+            "app/hello.txt"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "contract_check",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_result",
+          "report": {
+            "ok": true,
+            "sync": {
+              "elapsedMs": "<elapsedMs>"
+            },
+            "restarted": [
+              {
+                "service": "app",
+                "ready": true
+              }
+            ],
+            "contracts": [],
+            "unverifiedFiles": [],
+            "secretLeaks": [],
+            "skippedOff": []
+          },
+          "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+          "moreChecks": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "test",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "review",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "test",
+            "name": "app-test",
+            "ok": false,
+            "attempts": 1,
+            "detail": "종료 코드 1\nFAIL app-test"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "review",
+            "name": "protected-paths",
+            "ok": true,
+            "attempts": 1
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "gate_done",
+          "ok": false
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "failed",
+          "result": {
+            "status": "failed",
+            "summary": "검증 게이트를 3번 통과하지 못했습니다",
+            "changedFiles": [
+              "app/hello.txt"
+            ],
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "checks": [
+              {
+                "stage": "test",
+                "name": "app-test",
+                "ok": false,
+                "attempts": 1,
+                "detail": "종료 코드 1\nFAIL app-test"
+              },
+              {
+                "stage": "review",
+                "name": "protected-paths",
+                "ok": true,
+                "attempts": 1
+              }
+            ],
+            "gateOutcome": "exhausted",
+            "passedStages": [
+              "run",
+              "contract_check",
+              "review"
+            ],
+            "verifyAttempts": 3,
+            "turns": 0,
+            "usage": {
+              "inputTokens": 0,
+              "outputTokens": 0,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            },
+            "metrics": {
+              "modelCalls": 0,
+              "maxContextTokens": 0,
+              "toolMs": "<toolMs>",
+              "gateMs": "<gateMs>"
+            }
+          }
+        }
+      },
+      {
+        "type": "reverted",
+        "runId": "<run:1>",
+        "files": [
+          "app/hello.txt"
+        ],
+        "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..61a62df 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+틀림3\n",
+        "restarted": [
+          {
+            "service": "app",
+            "ready": true
+          }
+        ],
+        "databases": [],
+        "sync": {
+          "elapsedMs": "<elapsedMs>"
+        },
+        "backup": {
+          "id": "<time>-0001",
+          "files": [
+            "app/hello.txt"
+          ],
+          "createdAt": "<createdAt>"
+        }
+      },
+      {
+        "type": "run_finished",
+        "runId": "<run:1>",
+        "status": "failed",
+        "summary": "검증 게이트를 3번 통과하지 못했습니다\n\n바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다).",
+        "durationMs": "<durationMs>"
+      }
+    ],
+    "platform": [
+      {
+        "type": "snapshot",
+        "snapshot": {
+          "id": "<sid>",
+          "projectId": "demo",
+          "projectName": "demo",
+          "workDir": "<root>/sessions/demo-<sid>",
+          "workspace": "copy",
+          "status": "idle",
+          "mode": "claude-code",
+          "backend": "claude-code",
+          "running": false,
+          "owner": "local",
+          "experimental": true,
+          "terminal": true,
+          "terminalMode": "host",
+          "hasDeploy": false,
+          "services": [
+            {
+              "name": "app",
+              "template": "nextjs",
+              "preview": "browser",
+              "state": "stopped",
+              "hasContract": false
+            }
+          ],
+          "externals": [],
+          "checkpoints": [
+            {
+              "sha": "<sha:1>",
+              "shortSha": "<sha:1>",
+              "message": "세션 시작 (main 브랜치)",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/hello.txt",
+                "app/readme.txt",
+                "compose.yaml",
+                "studio.yaml"
+              ]
+            }
+          ],
+          "repository": {
+            "remote": "<root>/projects/demo",
+            "kind": "local",
+            "base": "main",
+            "branch": "b-studio/demo-<sid>",
+            "sourceDirtyFiles": 0,
+            "canCreatePullRequest": false
+          }
+        }
+      },
+      {
+        "type": "snapshot_sync",
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        },
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "notice",
+        "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+        "at": "<at>"
+      },
+      {
+        "type": "status",
+        "status": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "boot_network",
+        "at": "<at>",
+        "network": [
+          {
+            "service": "app",
+            "rxBytes": 1000,
+            "txBytes": 2000
+          }
+        ]
+      },
+      {
+        "type": "status",
+        "status": "ready"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "url": "http://127.0.0.1:<port>",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "url": "http://127.0.0.1:<port>",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "url": "http://127.0.0.1:<port>",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "url": "http://127.0.0.1:<port>",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      }
+    ],
+    "files": [
+      {
+        "type": "files_changed",
+        "revision": 1
+      },
+      {
+        "type": "files_changed",
+        "revision": 2
+      },
+      {
+        "type": "files_changed",
+        "revision": 3
+      },
+      {
+        "type": "files_changed",
+        "revision": 4
+      }
+    ]
+  },
+  "disk": {
+    "commits": [
+      {
+        "sha": "<sha:1>",
+        "message": "데모 프로젝트"
+      }
+    ],
+    "refs": [
+      {
+        "name": "refs/heads/b-studio/demo-<sid>",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/heads/main",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/HEAD",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/main",
+        "sha": "<sha:1>"
+      }
+    ],
+    "status": [],
+    "files": {
+      "app/hello.txt": "안녕\n"
+    },
+    "sessionJson": {
+      "version": 1,
+      "savedAt": "<savedAt>",
+      "owner": {
+        "pid": "<pid>"
+      },
+      "snapshot": {
+        "id": "<sid>",
+        "projectId": "demo",
+        "projectName": "demo",
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy",
+        "status": "ready",
+        "mode": "claude-code",
+        "backend": "claude-code",
+        "running": false,
+        "owner": "local",
+        "experimental": true,
+        "terminal": true,
+        "terminalMode": "host",
+        "hasDeploy": false,
+        "services": [
+          {
+            "name": "app",
+            "template": "nextjs",
+            "preview": "browser",
+            "state": "ready",
+            "hasContract": false,
+            "url": "http://127.0.0.1:<port>"
+          }
+        ],
+        "externals": [],
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ],
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        },
+        "bootNetwork": [
+          {
+            "service": "app",
+            "rxBytes": 1000,
+            "txBytes": 2000
+          }
+        ],
+        "usage": {
+          "at": "<at>",
+          "services": [
+            {
+              "service": "app",
+              "containerName": "<sandbox>-app-1",
+              "role": "managed",
+              "state": "running",
+              "cpuPercent": 0.5,
+              "memoryBytes": 10485760,
+              "networkRxBytes": 1000,
+              "networkTxBytes": 2000,
+              "oomKilled": false
+            },
+            {
+              "service": "b-studio-edge",
+              "containerName": "<sandbox>-b-studio-edge-1",
+              "role": "platform",
+              "state": "running",
+              "cpuPercent": 0.5,
+              "memoryBytes": 10485760,
+              "networkRxBytes": 1000,
+              "networkTxBytes": 2000,
+              "oomKilled": false
+            }
+          ]
+        },
+        "fileRevision": 4
+      },
+      "history": [
+        {
+          "type": "run_started",
+          "runId": "<run:1>",
+          "request": "hello.txt를 고쳐 주세요",
+          "by": "local",
+          "via": "terminal",
+          "at": "<at>",
+          "backend": "claude-code",
+          "taskKind": {
+            "complexity": "simple",
+            "risk": "normal"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_call",
+            "name": "Write",
+            "input": {
+              "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+              "content": "틀림1\n"
+            }
+          }
+        },
+        {
+          "type": "notice",
+          "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+          "at": "<at>"
+        },
+        {
+          "type": "boot_network",
+          "at": "<at>",
+          "network": [
+            {
+              "service": "app",
+              "rxBytes": 1000,
+              "txBytes": 2000
+            }
+          ]
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "text",
+            "text": "첫 시도."
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "run",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_start",
+            "files": [
+              "app/hello.txt"
+            ]
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "contract_check",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_result",
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+            "moreChecks": true
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "test",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "review",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "test",
+              "name": "app-test",
+              "ok": false,
+              "attempts": 1,
+              "detail": "종료 코드 1\nFAIL app-test"
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "review",
+              "name": "protected-paths",
+              "ok": true,
+              "attempts": 1
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "gate_done",
+            "ok": false
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_call",
+            "name": "Write",
+            "input": {
+              "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+              "content": "틀림2\n"
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "text",
+            "text": "둘째."
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "run",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_start",
+            "files": [
+              "app/hello.txt"
+            ]
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "contract_check",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_result",
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+            "moreChecks": true
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "test",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "review",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "test",
+              "name": "app-test",
+              "ok": false,
+              "attempts": 1,
+              "detail": "종료 코드 1\nFAIL app-test"
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "review",
+              "name": "protected-paths",
+              "ok": true,
+              "attempts": 1
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "gate_done",
+            "ok": false
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_call",
+            "name": "Write",
+            "input": {
+              "file_path": "<root>/sessions/demo-<sid>/app/hello.txt",
+              "content": "틀림3\n"
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "text",
+            "text": "셋째."
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "run",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_start",
+            "files": [
+              "app/hello.txt"
+            ]
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "contract_check",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_result",
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+            "moreChecks": true
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "test",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "review",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "test",
+              "name": "app-test",
+              "ok": false,
+              "attempts": 1,
+              "detail": "종료 코드 1\nFAIL app-test"
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "review",
+              "name": "protected-paths",
+              "ok": true,
+              "attempts": 1
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "gate_done",
+            "ok": false
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "failed",
+            "result": {
+              "status": "failed",
+              "summary": "검증 게이트를 3번 통과하지 못했습니다",
+              "changedFiles": [
+                "app/hello.txt"
+              ],
+              "report": {
+                "ok": true,
+                "sync": {
+                  "elapsedMs": "<elapsedMs>"
+                },
+                "restarted": [
+                  {
+                    "service": "app",
+                    "ready": true
+                  }
+                ],
+                "contracts": [],
+                "unverifiedFiles": [],
+                "secretLeaks": [],
+                "skippedOff": []
+              },
+              "checks": [
+                {
+                  "stage": "test",
+                  "name": "app-test",
+                  "ok": false,
+                  "attempts": 1,
+                  "detail": "종료 코드 1\nFAIL app-test"
+                },
+                {
+                  "stage": "review",
+                  "name": "protected-paths",
+                  "ok": true,
+                  "attempts": 1
+                }
+              ],
+              "gateOutcome": "exhausted",
+              "passedStages": [
+                "run",
+                "contract_check",
+                "review"
+              ],
+              "verifyAttempts": 3,
+              "turns": 0,
+              "usage": {
+                "inputTokens": 0,
+                "outputTokens": 0,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0
+              },
+              "metrics": {
+                "modelCalls": 0,
+                "maxContextTokens": 0,
+                "toolMs": "<toolMs>",
+                "gateMs": "<gateMs>"
+              }
+            }
+          }
+        },
+        {
+          "type": "reverted",
+          "runId": "<run:1>",
+          "files": [
+            "app/hello.txt"
+          ],
+          "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..61a62df 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+틀림3\n",
+          "restarted": [
+            {
+              "service": "app",
+              "ready": true
+            }
+          ],
+          "databases": [],
+          "sync": {
+            "elapsedMs": "<elapsedMs>"
+          },
+          "backup": {
+            "id": "<time>-0001",
+            "files": [
+              "app/hello.txt"
+            ],
+            "createdAt": "<createdAt>"
+          }
+        },
+        {
+          "type": "run_finished",
+          "runId": "<run:1>",
+          "status": "failed",
+          "summary": "검증 게이트를 3번 통과하지 못했습니다\n\n바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다).",
+          "durationMs": "<durationMs>"
+        }
+      ],
+      "conversation": [],
+      "demoIndex": 0,
+      "claudeCode": {
+        "notes": []
+      },
+      "codex": {
+        "notes": [],
+        "recent": []
+      },
+      "commandCode": {
+        "notes": []
+      },
+      "openCode": {
+        "notes": []
+      },
+      "gemini": {
+        "notes": []
+      },
+      "sourceDirtyFiles": 0,
+      "terminalConversation": {
+        "cli": "claude",
+        "id": "conversation-1"
+      },
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "previewToken": "<previewToken>",
+      "git": {
+        "branch": "b-studio/demo-<sid>",
+        "lastCheckpoint": "<sha:1>",
+        "originUrl": "<root>/projects/demo"
+      }
+    }
+  },
+  "docker": {
+    "mutating": [
+      "compose build app",
+      "compose up --no-start --remove-orphans --no-deps app b-studio-edge",
+      "start <container:1> <container:2>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "start <container:1>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c true",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "start <container:1>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c true",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "start <container:1>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c true",
+      "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "start <container:1>",
+      "compose exec -T app sh -c <script:00627bf7>"
+    ],
+    "atShutdown": [
+      "compose down --volumes --remove-orphans --rmi local",
+      "rm --force <sandbox>-agent"
+    ],
+    "readKinds": [
+      "compose config",
+      "compose logs",
+      "compose port b-studio-edge",
+      "compose ps",
+      "inspect",
+      "stats"
+    ],
+    "unknown": []
+  }
+}
