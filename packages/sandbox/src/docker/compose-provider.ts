@@ -1,11 +1,9 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { isDockerUnreachable, SandboxError } from '../errors';
-import { execChecked } from '../exec-checked';
 import { DEFAULT_READINESS, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
@@ -47,26 +45,33 @@ import {
   parseEgressDenial,
   parseHostPort,
   parseLogLine,
-  parseRuntimes,
   SANDBOX_NETWORK,
 } from './format';
-import { externalCallScript } from './external-call';
 import { native } from '../native';
 import {
   defaultEvaluationAssetRoot,
   evaluationAssetSandboxDir,
   prepareEvaluationAssetCopies,
-  removeEvaluationAssets,
   syncEvaluationAssetCopies,
   type EvaluationAssetSlot,
 } from './evaluation-assets';
-import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
 import { loadGitMask, type MaskVolume } from './git-mask';
 import { overrideInputJson, upWithGitMask, writeComposeOverride } from './up-loop';
 import { relayThroughContainers, syncFiles, upWithPortRetry } from './sync-relay';
 import { awaitReady, ensureInfra, readProcessBaseline, strayProcessReports, type ReadyContext } from './ready';
 import type { ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage } from './usage';
+import {
+  abortCreate,
+  assertRuntime,
+  callExternalApi,
+  cleanupSandbox,
+  createWorkDir,
+  destroySandbox,
+  LOAD_LIMIT_MS,
+  runLoadTest,
+  type LoadCache,
+} from './lifecycle-run';
 import { captureSnapshot, ensureSharedVolumes, planSnapshots, readStats, seedSnapshot, type SnapshotContext } from './snapshot-run';
 
 /** 사용량 조회(ps·inspect·stats) 전체의 상한. 평소에는 2~3초 걸린다 */
@@ -74,18 +79,6 @@ const STATS_TIMEOUT_MS = 15_000;
 /** 의존 서비스가 준비될 때까지 기다리는 상한. compose는 healthcheck가 실패로 끝날 때까지 기다리지만, 끝나지 않는 대기는 두지 않는다 */
 const DEPENDENCY_WAIT_MS = 300_000;
 const DEPENDENCY_POLL_MS = 500;
-
-/**
- * compose가 샌드박스용으로 빌드한 이미지(<샌드박스 id>-<서비스>)를 지운다.
- * 이름에 세션 id가 들어가 다른 세션이 다시 쓰지 않으므로 남기면 세션마다 수백 MB씩 쌓여 Docker 디스크를 채운다.
- * 빌드 캐시는 지우지 않으므로 다음 세션의 빌드 속도는 그대로다
- */
-async function removeSandboxImages(dockerBin: string, sandboxId: string): Promise<void> {
-  assertSandboxId(sandboxId);
-  const { stdout } = await execChecked(dockerBin, ['image', 'ls', '--filter', `reference=${sandboxId}-*`, '--format', '{{.Repository}}:{{.Tag}}'], { cwd: tmpdir() });
-  const images = stdout.split('\n').map((line) => line.trim()).filter((line) => line.startsWith(`${sandboxId}-`));
-  if (images.length > 0) await execChecked(dockerBin, ['image', 'rm', ...images], { cwd: tmpdir() });
-}
 
 /** Docker VM 디스크가 가득 찼을 때 원인과 다음 행동을 알려 주는 문구 */
 export const DOCKER_OUT_OF_SPACE = native.dockerOutOfSpace();
@@ -113,8 +106,6 @@ const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 
 /** 부하 확인 러너. edge와 같은 까닭으로 파일을 마운트하지 않고 내용을 표준 입력으로 넘긴다 */
 const LOAD_RUNNER_SCRIPT = new URL('../../load/runner.mjs', import.meta.url);
-/** 러너가 스스로 끝내는 상한(요청 제한 시간 포함) 뒤에도 돌아오지 않으면 도커 쪽이 멈춘 것으로 본다 */
-const LOAD_RUN_GRACE_MS = 30_000;
 
 /**
  * 파일 경로는 셸 문자열에 끼워 넣지 않고 위치 인자로 넘긴다.
@@ -167,35 +158,27 @@ export class LocalDockerProvider implements SandboxProvider {
     };
   }
 
+  /**
+   * `down` → 이 샌드박스가 빌드한 이미지 → 평가 자산 복사본 폴더. 순서와 지우는 대상은 Rust가 정한다(crates/bstudio-io/src/lifecycle_io.rs, ADR-195 4f A4c-3c).
+   * 작업 디렉터리의 compose 파일을 읽지 않도록 임시 디렉터리에서 실행하고, 실패는 모아 던진다. 자세한 것은 `lifecycle-run.ts`
+   */
   async cleanup(sandboxId: string): Promise<void> {
-    const { command, args } = this.cleanupCommand(sandboxId);
-    let failure: unknown;
-    // 작업 디렉터리의 compose 파일을 읽지 않도록 임시 디렉터리에서 실행한다
-    try {
-      await execChecked(command, args, { cwd: tmpdir() });
-      // 컨테이너가 이미 없으면 --rmi local이 이미지를 찾지 못한다. 이름으로 한 번 더 지운다
-      await removeSandboxImages(command, sandboxId);
-    } catch (error) {
-      failure = error;
-    }
-    // 평가 자산 복사본은 샌드박스와 함께 지운다. 그 샌드박스 id의 폴더만, 링크를 따라가지 않고 지운다
-    await removeEvaluationAssets(this.#evaluationAssetRoot(), sandboxId).catch((error: unknown) => (failure ??= error));
-    if (failure) throw new SandboxError(`샌드박스 ${sandboxId}를 정리하지 못했습니다`, failure instanceof Error ? failure.message : String(failure));
+    await cleanupSandbox({ dockerBin: this.#options.dockerBin ?? 'docker', evaluationAssetRoot: this.#evaluationAssetRoot() }, sandboxId);
   }
 
   async create(project: LoadedProject, { secrets = {}, evaluationAssets: initialAssets = [] }: CreateSandboxOptions = {}): Promise<Sandbox> {
     // 런타임이 없으면 compose up 도중이 아니라 샌드박스를 만들기 전에 알린다
     if (this.#options.runtime) await assertRuntime(this.#options.dockerBin ?? 'docker', this.#options.runtime);
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
-    const workDir = await mkdtemp(path.join(tmpdir(), 'b-studio-'));
+    const workDir = await createWorkDir();
     const overridePath = path.join(workDir, 'compose.override.yaml');
-    const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
-    const hostPorts = await preallocatePublicUrlPorts(project);
     const evaluationAssetRoot = this.#evaluationAssetRoot();
-    // 마운트할 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 자리의 종류와 첫 내용은 넘긴 판(마지막 체크포인트)이
-    // 정하고 여기서 채운다 — 컨테이너를 띄우기 전이라 컨테이너가 붙잡는 자리와 b-studio가 쓰는 자리가 처음부터 같다
-    const evaluationAssets = await prepareEvaluationAssetCopies(project.spec.workflow?.evaluationAssets ?? [], evaluationAssetRoot, id, initialAssets);
     try {
+      const edgeScript = await readFile(EDGE_SCRIPT, 'utf8');
+      const hostPorts = await preallocatePublicUrlPorts(project);
+      // 마운트할 원본은 작업 복사본이 아니라 b-studio가 가진 복사본이다(#745). 자리의 종류와 첫 내용은 넘긴 판(마지막 체크포인트)이
+      // 정하고 여기서 채운다 — 컨테이너를 띄우기 전이라 컨테이너가 붙잡는 자리와 b-studio가 쓰는 자리가 처음부터 같다
+      const evaluationAssets = await prepareEvaluationAssetCopies(project.spec.workflow?.evaluationAssets ?? [], evaluationAssetRoot, id, initialAssets);
       const gitMask = await loadGitMask(project, {
         dockerBin: this.#options.dockerBin,
         env: composeEnvironment(secrets),
@@ -207,9 +190,9 @@ export class LocalDockerProvider implements SandboxProvider {
       await writeComposeOverride(overridePath, overrideInputJson(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts }), gitMask);
       return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts, evaluationAssetRoot, evaluationAssets);
     } catch (error) {
-      // 샌드박스를 돌려주지 못하면 destroy도 불리지 않는다. 그 샌드박스 id의 복사본 폴더를 여기서 지운다.
-      // 지우기 실패가 원래 오류(만들기를 거절한 이유)를 가리지 않게 한다
-      await removeEvaluationAssets(evaluationAssetRoot, id).catch(() => {});
+      // 샌드박스를 돌려주지 못하면 destroy도 불리지 않는다. 이 create가 만든 작업 폴더와 그 샌드박스 id의 복사본 폴더를 여기서 지운다
+      // (예전에는 복사본 폴더만 지우고 작업 폴더는 남았다. 트러블슈팅 194). 지우기 실패가 원래 오류(만들기를 거절한 이유)를 가리지 않게 한다
+      await abortCreate(workDir, evaluationAssetRoot, id);
       throw error;
     }
   }
@@ -239,8 +222,8 @@ class LocalDockerSandbox implements Sandbox {
   #upQueue: Promise<unknown> = Promise.resolve();
   /** 서비스가 준비됐을 때 PID 1과 세션이 다른 프로세스 목록(#765). 그 뒤에 생긴 것만 모르는 프로세스로 본다. 스튜디오를 다시 띄우면 비어 있다 */
   readonly #processBaseline = new Map<string, ScannedProcess[]>();
-  #loadRunner: Promise<string> | undefined;
-  #daemonCpus: Promise<number | undefined> | undefined;
+  /** 부하 러너 스크립트 원문과 도커 CPU 수(캐시는 상태라 여기 남는다) */
+  readonly #loadCache: LoadCache = {};
   #hostPorts: Record<string, number>;
   readonly #runtime: string | undefined;
   /** 평가 자산 복사본을 두는 루트와 이 샌드박스의 자리(#745). 마운트와 sync가 같은 자리를 본다 */
@@ -531,62 +514,57 @@ class LocalDockerSandbox implements Sandbox {
     return this.#redactor.find(text);
   }
 
+  /**
+   * 등록한 사내 API인지, 경로가 `/`로 시작하는지 확인한 뒤(docker를 부르기 전) edge 컨테이너 안에서 호출하고 결과 본문을 가린다.
+   * 순서는 Rust 함수 하나가 한다(crates/bstudio-io/src/lifecycle_io.rs, ADR-195 4f A4c-3c). 자세한 것은 `lifecycle-run.ts`
+   */
   async callExternal(name: string, request: ExternalCallRequest, { via, signal }: { via: string; signal?: AbortSignal }): Promise<ExternalCallResult> {
-    if (!(this.project.external ?? []).some(([external]) => external === name)) throw new SandboxError(`'${name}'은(는) 등록한 사내 API가 아닙니다`);
-    if (!request.path.startsWith('/')) throw new SandboxError('경로는 "/"로 시작해야 합니다');
-
-    // edge 컨테이너 안에서 실행해 샌드박스 서비스와 같은 네트워크 위치, 정책, 인증 시크릿으로 부른다.
-    // 스튜디오용 포트를 따로 열면 샌드박스 서비스가 그 포트로 studio를 사칭할 수 있어 docker exec를 쓴다
-    const script = externalCallScript(this.#edgeScript, { name, via, ...request });
-    const result = await this.#docker(this.#composeArgs(['exec', '-T', EDGE_SERVICE, 'node', '--input-type=module', '-']), signal, script);
-    const last = result.stdout.trim().split('\n').at(-1);
-    if (result.exitCode !== 0 || !last) throw new SandboxError('사내 API 호출을 실행하지 못했습니다', this.redact(result.stderr));
-    const parsed = JSON.parse(last) as ExternalCallResult;
-    return { ...parsed, body: this.redact(parsed.body) };
+    return callExternalApi(
+      { ...this.#lifecycleContext(), edgeScript: this.#edgeScript, edgeService: EDGE_SERVICE, external: this.project.external ?? [] },
+      name,
+      request,
+      { via, ...(signal ? { signal } : {}) },
+    );
   }
 
+  /**
+   * 서비스 상태 확인 → 도커 CPU 수 → `docker run` 부하 러너(상한 시간) → 취소·시간 초과면 이 실행이 만든 이름으로만 `rm --force` → 결과 읽기.
+   * 순서는 Rust 함수 하나가 한다(crates/bstudio-io/src/lifecycle_io.rs, ADR-195 4f A4c-3c). 러너 스크립트와 CPU 수 캐시는 상태라 여기 남는다
+   */
   async runLoad(request: LoadRequest, { signal }: { signal?: AbortSignal } = {}): Promise<LoadResult> {
-    const service = this.#managed(request.service);
-    // 꺼 뒀거나 죽은 서비스에 보내면 전부 연결 실패로만 나온다. 보내기 전에 까닭을 알린다
-    const state = await this.state(request.service);
-    if (state !== 'running') throw new SandboxError(`'${request.service}' 서비스가 실행 중이 아니어서 부하 확인을 돌릴 수 없습니다 (상태: ${state})`);
-
-    this.#loadRunner ??= readFile(LOAD_RUNNER_SCRIPT, 'utf8');
-    this.#daemonCpus ??= this.#docker(['info', '--format', '{{.NCPU}}']).then((info) => (info.exitCode === 0 ? Number.parseInt(info.stdout.trim(), 10) || undefined : undefined));
-    const threads = loadThreads(request.concurrent, await this.#daemonCpus);
-    const name = `${this.id}-load-${randomBytes(4).toString('hex')}`;
-    const script = loadScript(await this.#loadRunner, loadConfig(request, { port: service.port, threads }));
-    const limit = AbortSignal.timeout(LOAD_DEADLINE_MS + LOAD_REQUEST_TIMEOUT_MS + LOAD_RUN_GRACE_MS);
-    const args = loadRunArgs({ name, network: `${this.id}_${SANDBOX_NETWORK}`, sandboxId: this.id, threads, ...(this.#runtime ? { runtime: this.#runtime } : {}) });
-    const result = await this.#docker(args, signal ? AbortSignal.any([signal, limit]) : limit, script);
-
-    if (signal?.aborted || limit.aborted) {
-      // 중단하면 docker 클라이언트만 끝나고 컨테이너는 남는다. 이 실행이 만든 이름으로만 지운다
-      await this.#docker(['rm', '--force', name]).catch(() => undefined);
-      signal?.throwIfAborted();
-      throw new SandboxError('부하 러너가 제한 시간 안에 끝나지 않았습니다', undefined, { platform: true });
-    }
-    if (result.exitCode !== 0) {
-      const reason = result.exitCode === 137 ? '러너가 메모리 한도(512MB)를 넘어 종료됐습니다' : this.redact(result.stderr.trim().split('\n').slice(-5).join('\n'));
-      throw new SandboxError(`부하 러너를 실행하지 못했습니다 (종료 코드 ${result.exitCode})`, reason, { platform: true });
-    }
-    const parsed = parseLoadOutput(result.stdout, request);
-    if (!parsed) throw new SandboxError('부하 러너의 결과를 읽지 못했습니다', this.redact(result.stdout.trim().split('\n').slice(-3).join('\n')), { platform: true });
-    return parsed;
+    return runLoadTest(
+      {
+        ...this.#lifecycleContext(),
+        managedPort: (name) => this.#managed(name).port,
+        sandboxNetwork: SANDBOX_NETWORK,
+        runtime: this.#runtime,
+        readRunner: () => readFile(LOAD_RUNNER_SCRIPT, 'utf8'),
+        cache: this.#loadCache,
+        limitMs: LOAD_LIMIT_MS,
+      },
+      request,
+      { ...(signal ? { signal } : {}) },
+    );
   }
 
+  /**
+   * `down` → 이 샌드박스가 빌드한 이미지 → 작업 폴더 → 평가 자산 복사본. 순서와 지우는 대상은 Rust가 정한다(crates/bstudio-io/src/lifecycle_io.rs, ADR-195 4f A4c-3c).
+   * `down`은 `#upQueue`를 타지 않는다(옛 `#composeOrThrow`도 `up`만 줄을 세웠다). 자세한 것은 `lifecycle-run.ts`
+   */
   async destroy(): Promise<void> {
-    try {
-      await this.#composeOrThrow(['down', '--volumes', '--remove-orphans', '--rmi', 'local']);
-      await removeSandboxImages(this.#dockerBin, this.id);
-    } finally {
-      try {
-        await rm(this.#workDir, { recursive: true, force: true });
-      } finally {
-        // 평가 자산 복사본도 함께 지운다. 이 샌드박스 id의 폴더만 지우고 링크는 따라가지 않는다
-        await removeEvaluationAssets(this.#evaluationAssetRoot, this.id);
-      }
-    }
+    await destroySandbox({ ...this.#lifecycleContext(), workDir: this.#workDir, evaluationAssetRoot: this.#evaluationAssetRoot });
+  }
+
+  #lifecycleContext() {
+    return {
+      id: this.id,
+      dockerBin: this.#dockerBin,
+      env: this.#environment(),
+      project: this.project,
+      overridePath: this.#overridePath,
+      redact: (text: string) => this.redact(text),
+      composeFailure: (command: string, result: ExecResult) => this.#composeFailure(command, result),
+    };
   }
 
   /**
@@ -820,17 +798,4 @@ export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | u
  */
 export function sandboxBuildNoCache(env: NodeJS.ProcessEnv = process.env): boolean {
   return native.sandboxBuildNoCache(env.B_STUDIO_SANDBOX_BUILD_NO_CACHE);
-}
-
-async function assertRuntime(dockerBin: string, runtime: string): Promise<void> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execChecked(dockerBin, ['info', '--format', '{{json .Runtimes}}']));
-  } catch (error) {
-    throw new SandboxError('Docker 데몬 정보를 읽지 못해 컨테이너 런타임을 확인하지 못했습니다', error instanceof Error ? error.message : String(error));
-  }
-  const available = parseRuntimes(stdout);
-  if (!available.includes(runtime)) {
-    throw new SandboxError(`컨테이너 런타임 '${runtime}'이 Docker 데몬에 등록되지 않았습니다 (등록된 런타임: ${available.join(', ') || '없음'})`);
-  }
 }
