@@ -4302,13 +4302,11 @@ fn write_problem_result(problem: ul::WriteProblem, mask_json: String) -> UpResul
     }
 }
 
-/// 컨테이너를 만들고(`up --no-start`) 확인하고 확인한 것만 시작한다. 시도마다 compose 파일의 마운트를 다시 읽어 `.git` 마스크를 맞추고 override를 쓴다
-#[napi]
-pub fn up_with_git_mask(env: Env, input: UpInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<UpResultJs>> {
+fn up_input_from(input: UpInputJs) -> Result<ul::UpInput> {
     let override_input = self::input(&input.override_input_json, "override 입력")?;
     let mask = gm::record_from_json(&parse::<serde_json::Value>(&input.mask_json, "마스크 계획")?).map_err(Error::from_reason)?;
     let assets: Vec<gm::AssetCopy> = parse(&input.assets_json, "평가 자산 복사본")?;
-    let up_input = ul::UpInput {
+    Ok(ul::UpInput {
         compose: compose_ref(input.compose),
         cwd: input.cwd,
         override_path: input.override_path,
@@ -4323,34 +4321,49 @@ pub fn up_with_git_mask(env: Env, input: UpInputJs, signal: Option<AbortSignal>)
         service_label: input.service_label,
         poll_ms: u64::from(input.poll_ms),
         wait_ms: u64::from(input.wait_ms),
-    };
+    })
+}
+
+fn abort_cancel(signal: Option<AbortSignal>) -> Arc<cv::Cancel> {
     let cancel = Arc::new(cv::Cancel::default());
     if let Some(signal) = signal {
         let on_abort = cancel.clone();
         signal.on_abort(move || on_abort.cancel());
     }
+    cancel
+}
+
+fn up_outcome_result(outcome: ul::UpOutcome, mask_json: String) -> UpResultJs {
+    match outcome {
+        ul::UpOutcome::Done(output) => UpResultJs { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr, ..up_result("done", mask_json) },
+        ul::UpOutcome::Aborted => up_result("aborted", mask_json),
+        ul::UpOutcome::Load(problem) => load_problem_result(problem, mask_json),
+        ul::UpOutcome::Override(problem) => write_problem_result(problem, mask_json),
+        ul::UpOutcome::Verify { failure, phase } => UpResultJs {
+            stderr: failure.stderr.unwrap_or_default(),
+            detail: failure.detail,
+            platform: failure.kind.platform(),
+            verify_kind: Some(failure.kind.as_str().to_owned()),
+            phase: Some(phase.as_str().to_owned()),
+            removal_failed: failure.removal_failed,
+            ..up_result("verify", mask_json)
+        },
+        ul::UpOutcome::Missing(missing) => UpResultJs { missing, ..up_result("missing", mask_json) },
+        ul::UpOutcome::Deps(ul::DepsProblem::Failed(stderr)) => UpResultJs { stderr, ..up_result("deps-failed", mask_json) },
+        ul::UpOutcome::Deps(ul::DepsProblem::Unparsed) => up_result("deps-unparsed", mask_json),
+        ul::UpOutcome::NotStable => up_result("not-stable", mask_json),
+    }
+}
+
+/// 컨테이너를 만들고(`up --no-start`) 확인하고 확인한 것만 시작한다. 시도마다 compose 파일의 마운트를 다시 읽어 `.git` 마스크를 맞추고 override를 쓴다
+#[napi]
+pub fn up_with_git_mask(env: Env, input: UpInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<UpResultJs>> {
+    let up_input = up_input_from(input)?;
+    let cancel = abort_cancel(signal);
     AsyncBlockBuilder::new(async move {
         let result = ul::up_with_git_mask(&up_input, &cancel).await;
         let mask_json = gm::record_to_json(&result.mask).to_string();
-        Ok(match result.outcome {
-            ul::UpOutcome::Done(output) => UpResultJs { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr, ..up_result("done", mask_json) },
-            ul::UpOutcome::Aborted => up_result("aborted", mask_json),
-            ul::UpOutcome::Load(problem) => load_problem_result(problem, mask_json),
-            ul::UpOutcome::Override(problem) => write_problem_result(problem, mask_json),
-            ul::UpOutcome::Verify { failure, phase } => UpResultJs {
-                stderr: failure.stderr.unwrap_or_default(),
-                detail: failure.detail,
-                platform: failure.kind.platform(),
-                verify_kind: Some(failure.kind.as_str().to_owned()),
-                phase: Some(phase.as_str().to_owned()),
-                removal_failed: failure.removal_failed,
-                ..up_result("verify", mask_json)
-            },
-            ul::UpOutcome::Missing(missing) => UpResultJs { missing, ..up_result("missing", mask_json) },
-            ul::UpOutcome::Deps(ul::DepsProblem::Failed(stderr)) => UpResultJs { stderr, ..up_result("deps-failed", mask_json) },
-            ul::UpOutcome::Deps(ul::DepsProblem::Unparsed) => up_result("deps-unparsed", mask_json),
-            ul::UpOutcome::NotStable => up_result("not-stable", mask_json),
-        })
+        Ok(up_outcome_result(result.outcome, mask_json))
     })
     .build(&env)
 }
@@ -4399,4 +4412,157 @@ pub fn write_compose_override(env: Env, path: String, input_json: String, mask_j
 
 fn up_judge_mask_json(mask: &up_judge::Mask) -> String {
     gm::record_to_json(mask).to_string()
+}
+
+// ── 파일 반영 확인·변경 알림·포트 충돌 재시도(ADR-195 4f A4c-2) ──
+// 판정은 bstudio-guard(sync_relay), 호스트 파일 읽기와 docker를 부르는 순서는 bstudio-io(sync_relay·port_retry)가 한다. TS 껍데기: packages/sandbox/src/docker/sync-relay.ts
+use bstudio_io::port_retry as pr;
+use bstudio_io::sync_relay as sr;
+
+#[napi(object)]
+pub struct SyncInputJs {
+    /// `projectRoot`는 컨테이너의 `/project`로 읽기 전용 마운트하는 폴더다
+    pub compose: ComposeRefJs,
+    pub files: Vec<String>,
+    pub timeout_ms: f64,
+    pub script: String,
+    pub image: String,
+    pub poll_ms: u32,
+}
+
+/// `kind`: `done`(elapsedMs·checks) · `host-read`(file·message) · `docker`(stderr) · `timeout`(message) · `aborted`
+#[napi(object)]
+pub struct SyncResultJs {
+    pub kind: String,
+    pub elapsed_ms: f64,
+    pub checks: u32,
+    pub file: Option<String>,
+    pub message: Option<String>,
+    pub stderr: String,
+}
+
+/// 바뀐 파일(과 함께 사라진 폴더)의 호스트 sha256을 구하고, 컨테이너가 보는 해시가 모두 같아질 때까지 다시 확인한다. 던지지 않고 결과(`kind`)로 돌려준다
+#[napi]
+pub fn sync_files(env: Env, input: SyncInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<SyncResultJs>> {
+    let sync_input = sr::SyncInput { compose: compose_ref(input.compose), files: input.files, timeout_ms: input.timeout_ms, script: input.script, image: input.image, poll_ms: u64::from(input.poll_ms) };
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move {
+        let blank = || SyncResultJs { kind: String::new(), elapsed_ms: 0.0, checks: 0, file: None, message: None, stderr: String::new() };
+        Ok(match sr::sync_files(&sync_input, &cancel).await {
+            sr::SyncOutcome::Done { elapsed_ms, checks } => SyncResultJs { kind: "done".into(), elapsed_ms: elapsed_ms as f64, checks, ..blank() },
+            sr::SyncOutcome::HostRead { file, message } => SyncResultJs { kind: "host-read".into(), file: Some(file), message: Some(message), ..blank() },
+            sr::SyncOutcome::Docker { stderr } => SyncResultJs { kind: "docker".into(), stderr, ..blank() },
+            sr::SyncOutcome::Timeout(message) => SyncResultJs { kind: "timeout".into(), message: Some(message), ..blank() },
+            sr::SyncOutcome::Aborted => SyncResultJs { kind: "aborted".into(), ..blank() },
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct RelayInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    pub cwd: String,
+    /// `compose config --format json`의 stdout 원문
+    pub config_json: String,
+    pub managed_names: Vec<String>,
+    /// `managed_names`와 같은 자리끼리 짝: 프로젝트 루트 기준 서비스 폴더
+    pub managed_paths: Vec<String>,
+    /// `[{ file, kind }]`의 JSON
+    pub changes_json: String,
+    pub script: String,
+}
+
+/// `kind`: `done`(relayedJson: `[[서비스, 파일]]`) · `problem`(message)
+#[napi(object)]
+pub struct RelayResultJs {
+    pub kind: String,
+    pub relayed_json: String,
+    pub message: Option<String>,
+}
+
+/// 바뀐 파일을 서비스 컨테이너의 파일 감시기에 알린다. 컨테이너 스크립트가 **출력으로 알렸다고 한** 경로만 돌려준다
+#[napi]
+pub fn relay_changes(env: Env, input: RelayInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<RelayResultJs>> {
+    if input.managed_names.len() != input.managed_paths.len() {
+        return Err(Error::from_reason("managed 서비스의 이름과 폴더 목록의 길이가 다릅니다"));
+    }
+    let changes: Vec<relay::FileChange> = parse(&input.changes_json, "변경 목록")?;
+    let relay_input = sr::RelayInput {
+        compose: compose_ref(input.compose),
+        override_path: input.override_path,
+        cwd: input.cwd,
+        config_json: input.config_json,
+        managed: input.managed_names.into_iter().zip(input.managed_paths).collect(),
+        changes,
+        script: input.script,
+    };
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move {
+        Ok(match sr::relay_changes(&relay_input, &cancel).await {
+            sr::RelayOutcome::Done(relayed) => RelayResultJs { kind: "done".into(), relayed_json: serde_json::to_string(&relayed).expect("직렬화"), message: None },
+            sr::RelayOutcome::Problem(message) => RelayResultJs { kind: "problem".into(), relayed_json: "[]".into(), message: Some(message) },
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct PortRetryInputJs {
+    /// 첫 시도의 입력. `args`는 `up --detach --remove-orphans …` 전체다
+    pub up: UpInputJs,
+    /// 다시 뽑을 호스트 포트의 대상 서비스(중복 없이 처음 나온 순서)
+    pub public_url_targets: Vec<String>,
+    /// 가릴 시크릿 (이름, 값)을 같은 자리끼리 짝으로
+    pub secret_names: Vec<String>,
+    pub secret_values: Vec<String>,
+    pub attempts: u32,
+}
+
+/// `kind`: `up`(성공이거나 충돌이 아닌 실패. `up`에 결과) · `exhausted`(마지막 시도까지 충돌. `up`에 마지막 결과) · `port-alloc`(message) ·
+/// `regenerate`(`up.kind`가 `override-build`·`override-write`). `hostPortsJson`은 다시 뽑았으면 `{서비스: 포트}`, 아니면 빈 문자열이다
+#[napi(object)]
+pub struct PortRetryResultJs {
+    pub kind: String,
+    pub up: UpResultJs,
+    pub message: Option<String>,
+    pub host_ports_json: String,
+}
+
+/// `compose up`을 돌리되 포트 바인드 충돌이면 미리 고른 포트를 전부 다시 뽑아 override를 다시 쓰고 일부만 뜬 컨테이너를 지운 뒤 다시 한다
+#[napi]
+pub fn up_with_port_retry(env: Env, input: PortRetryInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<PortRetryResultJs>> {
+    if input.secret_names.len() != input.secret_values.len() {
+        return Err(Error::from_reason("시크릿의 이름과 값 목록의 길이가 다릅니다"));
+    }
+    let retry_input = pr::RetryInput {
+        up: up_input_from(input.up)?,
+        public_url_targets: input.public_url_targets,
+        secrets: input.secret_names.into_iter().zip(input.secret_values).collect(),
+        attempts: input.attempts,
+    };
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move {
+        let result = pr::up_with_port_retry(retry_input, &cancel).await;
+        let mask_json = gm::record_to_json(&result.mask).to_string();
+        let host_ports_json = match &result.host_ports {
+            Some(ports) => {
+                let mut object = serde_json::Map::new();
+                for (service, port) in ports {
+                    object.insert(service.clone(), serde_json::Value::from(*port));
+                }
+                serde_json::Value::Object(object).to_string()
+            }
+            None => String::new(),
+        };
+        let (kind, up, message) = match result.outcome {
+            pr::RetryOutcome::Up(outcome) => ("up", up_outcome_result(outcome, mask_json), None),
+            pr::RetryOutcome::Exhausted(outcome) => ("exhausted", up_outcome_result(outcome, mask_json), None),
+            pr::RetryOutcome::PortAlloc(message) => ("port-alloc", up_result("ok", mask_json), Some(message)),
+            pr::RetryOutcome::Regenerate(problem) => ("regenerate", write_problem_result(problem, mask_json), None),
+        };
+        Ok(PortRetryResultJs { kind: kind.to_owned(), up, message, host_ports_json })
+    })
+    .build(&env)
 }

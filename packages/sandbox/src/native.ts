@@ -171,6 +171,10 @@ interface NativeGuard {
   loadGitMask(compose: NativeComposeRef, assetsJson: string, cwd: string): Promise<NativeUpResult>;
   computeGitMask(projectRoot: string, configJson: string, assetsJson: string, cwd: string): Promise<NativeUpResult>;
   writeComposeOverride(path: string, inputJson: string, maskJson: string): Promise<NativeUpResult>;
+  // ── 파일 반영 확인·변경 알림·포트 충돌 재시도(ADR-195 4f A4c-2). 던지지 않고 결과(`kind`)로 돌려준다
+  syncFiles(input: NativeSyncInput, signal: AbortSignal | undefined | null): Promise<NativeSyncResult>;
+  relayChanges(input: NativeRelayInput, signal: AbortSignal | undefined | null): Promise<NativeRelayResult>;
+  upWithPortRetry(input: NativePortRetryInput, signal: AbortSignal | undefined | null): Promise<NativePortRetryResult>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -885,6 +889,66 @@ export interface NativeUpResult {
   phase?: 'created' | 'started' | null;
   removalFailed: boolean;
   missing: string[];
+}
+
+export interface NativeSyncInput {
+  /** `projectRoot`는 컨테이너의 `/project`로 읽기 전용 마운트하는 폴더다 */
+  compose: NativeComposeRef;
+  files: string[];
+  timeoutMs: number;
+  script: string;
+  image: string;
+  pollMs: number;
+}
+
+/** `done`(elapsedMs·checks) · `host-read`(file·message) · `docker`(stderr) · `timeout`(message) · `aborted` */
+export interface NativeSyncResult {
+  kind: 'done' | 'host-read' | 'docker' | 'timeout' | 'aborted';
+  elapsedMs: number;
+  checks: number;
+  file?: string | null;
+  message?: string | null;
+  stderr: string;
+}
+
+export interface NativeRelayInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  cwd: string;
+  /** `compose config --format json`의 stdout 원문 */
+  configJson: string;
+  managedNames: string[];
+  /** `managedNames`와 같은 자리끼리 짝: 프로젝트 루트 기준 서비스 폴더 */
+  managedPaths: string[];
+  /** `[{ file, kind }]`의 JSON */
+  changesJson: string;
+  script: string;
+}
+
+/** `done`(relayedJson: `[[서비스, 파일]]`) · `problem`(message) */
+export interface NativeRelayResult {
+  kind: 'done' | 'problem';
+  relayedJson: string;
+  message?: string | null;
+}
+
+export interface NativePortRetryInput {
+  /** 첫 시도의 입력. `args`는 `up --detach --remove-orphans …` 전체다 */
+  up: NativeUpInput;
+  /** 다시 뽑을 호스트 포트의 대상 서비스(중복 없이 처음 나온 순서) */
+  publicUrlTargets: string[];
+  secretNames: string[];
+  secretValues: string[];
+  attempts: number;
+}
+
+/** `up`(성공이거나 충돌이 아닌 실패) · `exhausted`(마지막 시도까지 충돌) · `port-alloc`(message) · `regenerate`(`up.kind`가 override-build·override-write) */
+export interface NativePortRetryResult {
+  kind: 'up' | 'exhausted' | 'port-alloc' | 'regenerate';
+  up: NativeUpResult;
+  message?: string | null;
+  /** 포트를 다시 뽑았으면 `{서비스: 포트}`의 JSON, 아니면 빈 문자열 */
+  hostPortsJson: string;
 }
 
 export interface NativeGitEntry {

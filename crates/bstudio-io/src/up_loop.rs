@@ -257,7 +257,8 @@ pub struct UpResult {
     pub outcome: UpOutcome,
 }
 
-async fn docker(compose: &ComposeRef, args: &[String], cancel: Option<&Cancel>) -> ExecOutput {
+/// docker를 한 번 돌린다. `cancel`이 깨면 자식을 멈추고 그때까지의 출력을 돌려준다(던지지 않는다)
+pub(crate) async fn docker(compose: &ComposeRef, args: &[String], cancel: Option<&Cancel>) -> ExecOutput {
     let env = compose.env.as_deref();
     match cancel {
         Some(cancel) => run_command(&compose.docker_bin, args, None, env, None, cancel.cancelled()).await,
@@ -265,13 +266,18 @@ async fn docker(compose: &ComposeRef, args: &[String], cancel: Option<&Cancel>) 
     }
 }
 
-fn compose_args(input: &UpInput, rest: &[String]) -> Vec<String> {
-    let mut args: Vec<String> = vec!["compose".to_owned(), "--project-name".to_owned(), input.compose.project_name.clone().unwrap_or_default()];
-    for part in ["--project-directory", &input.compose.project_root, "--file", &input.compose.compose_path, "--file", &input.override_path] {
+/// `docker compose --project-name … --project-directory … --file <compose> --file <override> <rest…>`(옛 TS `#composeArgs`)
+pub(crate) fn compose_command(compose: &ComposeRef, override_path: &str, rest: &[String]) -> Vec<String> {
+    let mut args: Vec<String> = vec!["compose".to_owned(), "--project-name".to_owned(), compose.project_name.clone().unwrap_or_default()];
+    for part in ["--project-directory", &compose.project_root, "--file", &compose.compose_path, "--file", override_path] {
         args.push(part.to_owned());
     }
     args.extend(rest.iter().cloned());
     args
+}
+
+fn compose_args(input: &UpInput, rest: &[String]) -> Vec<String> {
+    compose_command(&input.compose, &input.override_path, rest)
 }
 
 fn strings(parts: &[&str]) -> Vec<String> {
@@ -402,105 +408,22 @@ async fn attempts(input: &UpInput, cancel: &Cancel, mask: &mut Mask) -> UpOutcom
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+    use crate::fake_docker::Fake;
     use serde_json::json;
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
-    /// 가짜 docker. 명령(`config`·`up`·`ps`·`inspect`·`volume`·`rm`·`startid`(docker start)·`start`(compose start)·`down`)마다 `<키>.<호출 번호>.out`(없으면 `<키>.out`)을
-    /// 읽어 흉내 내고, 부른 인자를 `calls`에 남긴다
-    struct Fake {
-        dir: tempfile::TempDir,
+    pub(crate) struct Project {
+        pub(crate) dir: tempfile::TempDir,
+        pub(crate) root: String,
+        pub(crate) copy: String,
+        pub(crate) override_path: String,
     }
 
-    impl Fake {
-        fn new() -> Fake {
-            let dir = tempfile::tempdir().unwrap();
-            let script = format!(
-                r#"#!/bin/sh
-D='{}'
-printf '%s\n' "$*" >> "$D/calls"
-key=other
-case "$1" in
-  inspect) key=inspect; [ "$2" = --format ] && key=state ;;
-  volume) key=volume ;;
-  rm) key=rm ;;
-  start) key=startid ;;
-  compose) for a in "$@"; do case "$a" in config) key=config ;; up) key=up ;; ps) key=ps ;; down) key=down ;; start) key=start ;; esac; done ;;
-esac
-n=$(cat "$D/n.$key" 2>/dev/null || echo 0)
-n=$((n + 1))
-echo "$n" > "$D/n.$key"
-pick() {{ if [ -f "$D/$key.$n.$1" ]; then cat "$D/$key.$n.$1"; elif [ -f "$D/$key.$1" ]; then cat "$D/$key.$1"; fi; }}
-pick out
-pick err >&2
-code=$(pick code)
-exit ${{code:-0}}
-"#,
-                dir.path().display()
-            );
-            let bin = dir.path().join("docker");
-            fs::write(&bin, script).unwrap();
-            fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
-            // 리눅스에서 방금 쓴 파일을 실행하면, 다른 시험 스레드가 그 사이 띄운 자식이 쓰기 fd를 물려받아 exec 전까지 쥐고 있을 때
-            // ETXTBSY로 실패한다(container_verify 시험이 CI에서 겪은 것과 같다). 실행될 때까지 기다린 뒤 그 호출의 흔적을 지운다
-            for _ in 0..500 {
-                match std::process::Command::new(&bin).arg("__probe__").output() {
-                    Err(error) if error.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                    Err(error) => panic!("가짜 docker를 실행하지 못했습니다: {error}"),
-                    Ok(_) => break,
-                }
-            }
-            let _ = fs::remove_file(dir.path().join("calls"));
-            let _ = fs::remove_file(dir.path().join("n.other"));
-            Fake { dir }
-        }
-
-        fn set(&self, key: &str, out: &str) -> &Self {
-            fs::write(self.dir.path().join(format!("{key}.out")), out).unwrap();
-            self
-        }
-
-        fn fail(&self, key: &str, code: i32, err: &str) -> &Self {
-            fs::write(self.dir.path().join(format!("{key}.code")), code.to_string()).unwrap();
-            fs::write(self.dir.path().join(format!("{key}.err")), err).unwrap();
-            self
-        }
-
-        fn bin(&self) -> String {
-            self.dir.path().join("docker").to_string_lossy().into_owned()
-        }
-
-        fn calls(&self) -> Vec<String> {
-            fs::read_to_string(self.dir.path().join("calls")).unwrap_or_default().lines().map(str::to_owned).collect()
-        }
-
-        /// 호출의 첫 단어나 `compose`의 명령 단어만 남긴다(경로 인자를 빼고 순서만 견준다)
-        fn verbs(&self) -> Vec<String> {
-            self.calls()
-                .into_iter()
-                .map(|call| {
-                    let words: Vec<&str> = call.split(' ').collect();
-                    if words[0] == "compose" {
-                        ["config", "up", "ps", "down", "start"].iter().find(|verb| words.contains(verb)).map(|verb| format!("compose {verb}")).unwrap_or_else(|| "compose".to_owned())
-                    } else {
-                        words[0].to_owned()
-                    }
-                })
-                .collect()
-        }
-    }
-
-    struct Project {
-        dir: tempfile::TempDir,
-        root: String,
-        copy: String,
-        override_path: String,
-    }
-
-    fn project() -> Project {
+    pub(crate) fn project() -> Project {
         let dir = tempfile::tempdir().unwrap();
         let base = fs::canonicalize(dir.path()).unwrap();
         let root = base.join("proj");
@@ -514,17 +437,17 @@ exit ${{code:-0}}
         Project { root: root.to_string_lossy().into_owned(), copy: copy.to_string_lossy().into_owned(), override_path: override_path.to_string_lossy().into_owned(), dir }
     }
 
-    fn config_for(project: &Project, target: &str) -> String {
+    pub(crate) fn config_for(project: &Project, target: &str) -> String {
         json!({ "services": { "api": { "volumes": [{ "type": "bind", "source": project.root, "target": target }] } } }).to_string()
     }
 
-    fn container(project: &Project, mounts: Vec<Value>) -> Value {
+    pub(crate) fn container(project: &Project, mounts: Vec<Value>) -> Value {
         let _ = project;
         json!({ "Id": "c1", "Name": "/c1", "Config": { "Labels": { "com.docker.compose.service": "api" } }, "HostConfig": { "NetworkMode": "studio-p_b-studio-sandbox" },
             "NetworkSettings": { "Networks": { "studio-p_b-studio-sandbox": {} } }, "Mounts": mounts })
     }
 
-    fn ok_mounts(project: &Project, target: &str) -> Vec<Value> {
+    pub(crate) fn ok_mounts(project: &Project, target: &str) -> Vec<Value> {
         vec![
             json!({ "Type": "bind", "Source": project.root, "Destination": target, "RW": true }),
             json!({ "Type": "bind", "Source": format!("{}/.git", project.root), "Destination": format!("{target}/.git"), "RW": false }),
@@ -532,11 +455,11 @@ exit ${{code:-0}}
         ]
     }
 
-    fn override_input() -> JsValue {
+    pub(crate) fn override_input() -> JsValue {
         js_json::parse(r#"{"name":"p","managed":[],"services":[],"sandboxId":"studio-p","edgeScript":"","hostPorts":{}}"#).unwrap()
     }
 
-    fn input(fake: &Fake, project: &Project, mask: Mask, assets: Vec<AssetCopy>, args: &[&str]) -> UpInput {
+    pub(crate) fn input(fake: &Fake, project: &Project, mask: Mask, assets: Vec<AssetCopy>, args: &[&str]) -> UpInput {
         UpInput {
             compose: ComposeRef {
                 docker_bin: fake.bin(),
@@ -561,9 +484,9 @@ exit ${{code:-0}}
         }
     }
 
-    const BY_ID: [&str; 4] = ["up", "--detach", "--no-deps", "api"];
+    pub(crate) const BY_ID: [&str; 4] = ["up", "--detach", "--no-deps", "api"];
 
-    fn prepared() -> (Fake, Project) {
+    pub(crate) fn prepared() -> (Fake, Project) {
         let fake = Fake::new();
         let project = project();
         fake.set("config", &config_for(&project, "/app")).set("ps", "c1\n").set("volume", "[]");

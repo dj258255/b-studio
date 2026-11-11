@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,7 +10,6 @@ import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransien
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { composeEnvironment } from './compose-env';
-import { withRemovedDirectories } from '../sync-paths';
 import type {
   BootNetwork,
   CleanupCommand,
@@ -51,8 +50,6 @@ import {
   parseHostPort,
   parseLogLine,
   parseRuntimes,
-  SYNC_SCRIPT,
-  parseSyncOutput, SyncObservations,
   SANDBOX_NETWORK,
 } from './format';
 import { externalCallScript } from './external-call';
@@ -68,7 +65,7 @@ import {
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
 import { loadGitMask, type MaskVolume } from './git-mask';
 import { overrideInputJson, upWithGitMask, writeComposeOverride } from './up-loop';
-import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
+import { relayThroughContainers, SYNC_HELPER_IMAGE, syncFiles, upWithPortRetry } from './sync-relay';
 import { foreignProcesses, scanProcesses, type ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
@@ -109,9 +106,6 @@ export function isPortBindConflict(stderr: string): boolean {
   return native.isPortBindConflict(stderr);
 }
 
-/** compose up 포트 충돌 재시도 한도(최초 시도 포함) */
-const PORT_RETRY_ATTEMPTS = 3;
-
 /**
  * docker 명령이 디스크 부족으로 실패했는지 보고, 그렇다면 안내 문구를 덧붙인다.
  * 그 밖의 오류는 원문을 그대로 돌려준다. 오류를 삼키지 않도록 항상 원래 메시지를 포함한다
@@ -130,9 +124,6 @@ const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 const LOAD_RUNNER_SCRIPT = new URL('../../load/runner.mjs', import.meta.url);
 /** 러너가 스스로 끝내는 상한(요청 제한 시간 포함) 뒤에도 돌아오지 않으면 도커 쪽이 멈춘 것으로 본다 */
 const LOAD_RUN_GRACE_MS = 30_000;
-
-/** 파일 반영 확인에 쓰는 작은 이미지. 서비스 컨테이너가 죽어 있어도 확인할 수 있도록 별도 컨테이너로 돌린다 */
-const SYNC_HELPER_IMAGE = 'busybox:1.37';
 
 /**
  * 파일 경로는 셸 문자열에 끼워 넣지 않고 위치 인자로 넘긴다.
@@ -284,7 +275,8 @@ class LocalDockerSandbox implements Sandbox {
   readonly #evaluationAssets: readonly EvaluationAssetSlot[];
   /** 복사본 sync를 한 번에 하나씩 돌린다(실행 시작과 터미널 검증이 겹칠 수 있다) */
   #evaluationSync: Promise<unknown> = Promise.resolve();
-  #composeConfig: Promise<{ services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> }> | undefined;
+  /** `compose config --format json`의 stdout 원문(세션 동안 한 번 읽는다) */
+  #composeConfig: Promise<string> | undefined;
 
   constructor(
     id: string,
@@ -492,34 +484,13 @@ class LocalDockerSandbox implements Sandbox {
     else this.#processBaseline.delete(name);
   }
 
+  /**
+   * 바뀐 파일(과 함께 사라진 폴더)의 호스트 sha256을 구하고, 컨테이너가 보는 해시가 모두 같아질 때까지 250ms마다 다시 확인한다.
+   * 호스트 해시·docker 호출·반복·판정은 Rust 함수 하나가 한다(crates/bstudio-io/src/sync_relay.rs, ADR-195 4f A4c-2). 검증 게이트가 "파일이
+   * 컨테이너에 반영됐다"를 믿는 근거라서, 줄이 없거나 같은 파일의 줄이 둘이거나 모양을 모르면 통과가 아니다
+   */
   async sync(files: string[], { signal, timeoutMs = 60_000 }: SyncOptions = {}): Promise<SyncResult> {
-    if (files.length === 0) return { elapsedMs: 0, checks: 0 };
-
-    const targets = await withRemovedDirectories(this.project.root, files);
-    const expected = new Map(
-      await Promise.all(targets.map(async (file) => [file, await hashOrMissing(path.join(this.project.root, file))] as const)),
-    );
-    const started = Date.now();
-    const observations = new SyncObservations();
-
-    for (let checks = 1; ; checks++) {
-      const result = await this.#docker(
-        ['run', '--rm', '--network', 'none', '--volume', `${this.project.root}:/project:ro`, SYNC_HELPER_IMAGE, 'sh', '-c', SYNC_SCRIPT, 'sh', ...targets],
-        signal,
-      );
-      if (result.exitCode !== 0) throw new SandboxError('샌드박스 파일 반영 확인에 실패했습니다', result.stderr, { platform: true });
-
-      const seen = parseSyncOutput(result.stdout);
-      const pending = targets.filter((file) => seen.get(file) !== expected.get(file));
-      if (pending.length === 0) return { elapsedMs: Date.now() - started, checks };
-      for (const file of pending) observations.record(file, seen.get(file));
-
-      if (Date.now() - started >= timeoutMs) {
-        // 반영이 끝나지 않은 것은 호스트와 컨테이너 사이의 파일 공유 문제다. 코드를 고쳐서 풀 수 없다
-        throw new SandboxError(observations.describeTimeout(pending, expected, timeoutMs), undefined, { platform: true });
-      }
-      await sleep(250, undefined, { signal });
-    }
+    return syncFiles({ project: this.project, dockerBin: this.#dockerBin, env: this.#environment(), files, signal, timeoutMs });
   }
 
   async endpoint(name: string): Promise<ServiceEndpoint> {
@@ -604,29 +575,18 @@ class LocalDockerSandbox implements Sandbox {
 
   async relayChanges(changes: FileChange[], { signal }: { signal?: AbortSignal } = {}): Promise<RelayedPath[]> {
     if (changes.length === 0) return [];
-    // 바인드 마운트는 세션 동안 바뀌지 않으므로 compose 해석은 한 번만 한다
+    // 바인드 마운트는 세션 동안 바뀌지 않으므로 compose 해석은 한 번만 한다(캐시는 상태라 여기 남는다). 읽거나 해석하지 못하면 캐시를 비운다
     this.#composeConfig ??= this.#compose(['config', '--format', 'json']).then((result) => {
       if (result.exitCode !== 0) throw new SandboxError(`compose 설정을 읽지 못했습니다 (${this.id})`, this.redact(result.stderr));
-      return JSON.parse(result.stdout) as { services: Record<string, { volumes?: Array<{ type: string; source?: string; target: string }> }> };
+      JSON.parse(result.stdout);
+      return result.stdout;
     });
     const config = await this.#composeConfig.catch((error: unknown) => {
       this.#composeConfig = undefined;
       throw error;
     });
-
-    const managed = new Set(this.project.managed.map(([name]) => name));
-    // ADR-088: managed 서비스가 전부 프로젝트 루트를 통째로 마운트하므로, 서비스 폴더(subroot)로 한 번 더 좁혀야
-    // 같은 루트를 마운트한 다른 서비스로 잘못 알리지 않는다
-    const servicePaths = Object.fromEntries(this.project.managed.map(([name, spec]) => [name, spec.path]));
-    const relayed: RelayedPath[] = [];
-    for (const [service, targets] of planRelay(this.project.root, changes, bindMounts(config.services, managed, servicePaths))) {
-      const args = targets.map((target) => `${target.action === 'move' ? 'm' : 'n'}:${target.containerPath}`);
-      const result = await this.#compose(['exec', '-T', service, 'sh', '-c', RELAY_SCRIPT, 'sh', ...args], signal);
-      // 컨테이너가 재시작 중이면 알리지 못한 경로가 생긴다. 다시 뜬 서비스는 파일을 처음부터 읽으므로 알린 경로만 돌려준다
-      const done = new Set(result.stdout.split('\n').filter(Boolean));
-      relayed.push(...targets.filter((_, index) => done.has(args[index]!)).flatMap((target) => target.files.map((file) => ({ service, file }))));
-    }
-    return relayed;
+    // managed 집합·서비스 폴더·바인드 마운트 계획·서비스마다 exec·알린 경로 고르기는 Rust 함수 하나가 한다(ADR-195 4f A4c-2)
+    return relayThroughContainers({ id: this.id, project: this.project, dockerBin: this.#dockerBin, env: this.#environment(), overridePath: this.#overridePath, config, changes, signal });
   }
 
   redact(text: string): string {
@@ -969,12 +929,16 @@ class LocalDockerSandbox implements Sandbox {
 
   async #composeOrThrow(args: string[], signal?: AbortSignal): Promise<ExecResult> {
     const result = await this.#compose(args, signal);
-    if (result.exitCode !== 0) {
-      // 디스크 부족이면 원본 stderr는 그대로 두고 다음에 할 일만 덧붙인다
-      // 빌드 실패처럼 코드가 원인일 수 있는 실패가 섞여 있으므로, 도커에 닿지 못한 것이 분명할 때만 플랫폼 쪽으로 표시한다
-      throw new SandboxError(`docker compose ${args[0]} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)), { platform: isDockerUnreachable(result.stderr) });
-    }
+    if (result.exitCode !== 0) throw this.#composeFailure(args[0]!, result);
     return result;
+  }
+
+  /**
+   * 디스크 부족이면 원본 stderr는 그대로 두고 다음에 할 일만 덧붙인다
+   * 빌드 실패처럼 코드가 원인일 수 있는 실패가 섞여 있으므로, 도커에 닿지 못한 것이 분명할 때만 플랫폼 쪽으로 표시한다
+   */
+  #composeFailure(command: string, result: ExecResult): SandboxError {
+    return new SandboxError(`docker compose ${command} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)), { platform: isDockerUnreachable(result.stderr) });
   }
 
   /**
@@ -986,33 +950,46 @@ class LocalDockerSandbox implements Sandbox {
    * 다음 up이 깨끗한 상태에서 시작하게 한다. 포트 충돌이 아닌 실패(디스크 부족, 빌드 실패 등)는 바로 던진다
    */
   async #composeUpWithPortRetry(upArgs: string[], signal?: AbortSignal): Promise<void> {
-    for (let attempt = 1; attempt <= PORT_RETRY_ATTEMPTS; attempt++) {
-      try {
-        await this.#composeOrThrow(['up', '--detach', '--remove-orphans', ...upArgs], signal);
-        return;
-      } catch (error) {
-        const detail = error instanceof SandboxError ? (error.detail ?? '') : '';
-        const isLastAttempt = attempt === PORT_RETRY_ATTEMPTS;
-        if (!isPortBindConflict(detail)) throw error;
-        if (isLastAttempt) {
-          const message = error instanceof Error ? error.message : String(error);
-          throw new SandboxError(`${message}\n포트 충돌이 반복돼 ${PORT_RETRY_ATTEMPTS}회 재시도 후 포기했습니다`, undefined, { platform: true });
-        }
-        await this.#regeneratePorts();
-        // 일부만 뜬 컨테이너와 거기 붙은 익명 볼륨만 지운다. down --volumes는 이름 있는 볼륨까지 지워, 방금 스냅숏으로
-        // 채운 볼륨과 다시 여는 세션의 DB 데이터가 사라진다(#777). 정리가 실패해도 다음 up은 --remove-orphans로 이어간다
-        await this.#compose(['rm', '--stop', '--force', '--volumes'], signal);
-      }
-    }
+    // 재시도 반복 전체가 `#upQueue`의 한 칸이다(전에는 시도마다 줄을 섰다. 시도 사이에 다른 up이 끼어들지 못한다)
+    const run = this.#upQueue.then(() => this.#portRetryOnce(upArgs, signal));
+    this.#upQueue = run.catch(() => undefined);
+    return run;
   }
 
   /**
-   * 미리 고른 호스트 포트를 전부 다시 뽑아 override 파일을 다시 쓴다. preallocatePublicUrlPorts가 대상 서비스
-   * 집합을 project에서 다시 읽어 매번 새 포트를 배정하므로, 충돌난 포트 하나만이 아니라 세트 전체가 바뀐다
+   * 반복 전체(시도 → 충돌이면 포트 전부 다시 뽑기 → override 다시 쓰기 → 일부만 뜬 컨테이너 지우기 → 다시)는 Rust 함수 하나가 한다
+   * (crates/bstudio-io/src/port_retry.rs, ADR-195 4f A4c-2). 시도마다 `up_with_git_mask`를 직접 부르고, override를 다시 쓸 때 쓰는 마스크는
+   * 직전 시도가 쓴 값이다. Rust가 마지막 마스크와 배정한 포트를 돌려주면 `#gitMask`·`#hostPorts`를 그 값으로 맞춘다(실패해도)
    */
-  async #regeneratePorts(): Promise<void> {
-    this.#hostPorts = await preallocatePublicUrlPorts(this.project);
-    await writeComposeOverride(this.#overridePath, this.#overrideInput(), this.#gitMask);
+  async #portRetryOnce(upArgs: string[], signal?: AbortSignal): Promise<void> {
+    return upWithPortRetry({
+      id: this.id,
+      project: this.project,
+      dockerBin: this.#dockerBin,
+      env: this.#environment(),
+      overridePath: this.#overridePath,
+      overrideInput: this.#overrideInput(),
+      gitMask: this.#gitMask,
+      evaluationAssets: this.#evaluationAssets,
+      args: ['up', '--detach', '--remove-orphans', ...upArgs],
+      sandboxNetwork: SANDBOX_NETWORK,
+      egressNetwork: EGRESS_NETWORK,
+      edgeService: EDGE_SERVICE,
+      serviceLabel: COMPOSE_SERVICE_LABEL,
+      pollMs: this.#dependencyPollMs,
+      waitMs: DEPENDENCY_WAIT_MS,
+      ...(signal ? { signal } : {}),
+      redact: (text) => this.redact(text),
+      onMask: (mask) => {
+        this.#gitMask = mask;
+      },
+      publicUrlTargets: [...new Set((this.project.publicUrlRefs ?? []).map((ref) => ref.targetService))],
+      secrets: this.#secrets,
+      upFailure: (result) => this.#composeFailure('up', result),
+      onHostPorts: (hostPorts) => {
+        this.#hostPorts = hostPorts;
+      },
+    });
   }
 
   /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다. studio 자신의 환경 변수는 넘기지 않는다(compose-env.ts) */
@@ -1068,14 +1045,5 @@ async function assertRuntime(dockerBin: string, runtime: string): Promise<void> 
   const available = parseRuntimes(stdout);
   if (!available.includes(runtime)) {
     throw new SandboxError(`컨테이너 런타임 '${runtime}'이 Docker 데몬에 등록되지 않았습니다 (등록된 런타임: ${available.join(', ') || '없음'})`);
-  }
-}
-
-async function hashOrMissing(file: string): Promise<string> {
-  try {
-    return createHash('sha256').update(await readFile(file)).digest('hex');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 'MISSING';
-    throw error;
   }
 }
