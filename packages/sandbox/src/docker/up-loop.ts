@@ -2,7 +2,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { STUDIO_CALLER } from '@b-studio/spec';
 import { nativeProject } from '../edge-config';
 import { SandboxError } from '../errors';
-import { encodeNative, native, type NativeUpResult } from '../native';
+import { encodeNative, native, type NativeUpInput, type NativeUpResult } from '../native';
 import type { ExecResult } from '../types';
 import type { EvaluationAssetCopy } from './evaluation-assets';
 import { composeRef, loadProblemError, type MaskVolume } from './git-mask';
@@ -28,7 +28,7 @@ function plainAssets(assets: readonly EvaluationAssetCopy[]) {
   return assets.map(({ path: assetPath, source }) => ({ path: assetPath, source }));
 }
 
-function overrideError(result: NativeUpResult): Error {
+export function overrideError(result: NativeUpResult): Error {
   // 만들지 못한 것(입력의 모양)은 예전처럼 `buildOverride`가 던지던 오류 그대로
   if (result.kind === 'override-build') return new Error(result.message ?? 'override를 만들지 못했습니다');
   if (result.kind === 'override-write') return new SandboxError('compose override 파일을 쓰지 못했습니다', result.message ?? undefined, { platform: true });
@@ -65,33 +65,40 @@ export interface UpOptions {
   onMask: (mask: Record<string, MaskVolume[]>) => void;
 }
 
+/** Rust 함수에 넘길 입력. `upWithGitMask`와 포트 충돌 재시도(`upWithPortRetry`)가 같은 모양을 쓴다 */
+export function nativeUpInput(options: UpOptions): NativeUpInput {
+  const envVars = composeRef(options.project, { dockerBin: options.dockerBin, env: options.env, projectName: options.id });
+  return {
+    compose: envVars,
+    cwd: process.cwd(),
+    overridePath: options.overridePath,
+    overrideInputJson: options.overrideInput,
+    maskJson: JSON.stringify(options.gitMask),
+    assetsJson: JSON.stringify(plainAssets(options.evaluationAssets)),
+    args: options.args,
+    sandboxNetwork: options.sandboxNetwork,
+    egressNetwork: options.egressNetwork,
+    edgeService: options.edgeService,
+    studioCaller: STUDIO_CALLER,
+    serviceLabel: options.serviceLabel,
+    pollMs: options.pollMs,
+    waitMs: options.waitMs,
+  };
+}
+
 /** 만들고 확인하고 시작한 결과(또는 compose의 실패 결과). 확인하지 못했거나 위반이 있으면 던진다 */
 export async function upWithGitMask(options: UpOptions): Promise<ExecResult> {
   const { id, redact, signal } = options;
   // 이미 취소됐으면 아무것도 부르지 않는다(Rust 쪽 취소 신호는 등록한 뒤의 취소만 안다)
   signal?.throwIfAborted();
-  const envVars = composeRef(options.project, { dockerBin: options.dockerBin, env: options.env, projectName: id });
-  const result = await native.upWithGitMask(
-    {
-      compose: envVars,
-      cwd: process.cwd(),
-      overridePath: options.overridePath,
-      overrideInputJson: options.overrideInput,
-      maskJson: JSON.stringify(options.gitMask),
-      assetsJson: JSON.stringify(plainAssets(options.evaluationAssets)),
-      args: options.args,
-      sandboxNetwork: options.sandboxNetwork,
-      egressNetwork: options.egressNetwork,
-      edgeService: options.edgeService,
-      studioCaller: STUDIO_CALLER,
-      serviceLabel: options.serviceLabel,
-      pollMs: options.pollMs,
-      waitMs: options.waitMs,
-    },
-    signal ?? null,
-  );
+  const result = await native.upWithGitMask(nativeUpInput(options), signal ?? null);
   // 쓴 마스크는 실패해도 돌려받는다(상태가 파일과 어긋나지 않게)
   options.onMask(JSON.parse(result.maskJson) as Record<string, MaskVolume[]>);
+  return upResultToExec(result, id, redact, signal);
+}
+
+/** Rust가 돌려준 결과를 `ExecResult`로(compose의 실패 결과 포함), 확인하지 못했거나 위반이 있으면 옛 글 그대로의 오류로 던진다 */
+export function upResultToExec(result: NativeUpResult, id: string, redact: (text: string) => string, signal: AbortSignal | undefined): ExecResult {
   switch (result.kind) {
     case 'done':
       return { exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };

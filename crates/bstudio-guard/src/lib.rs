@@ -68,6 +68,7 @@ pub mod static_shadow;
 pub mod steering;
 pub mod stray_processes;
 pub mod stuck_loading;
+pub mod sync_relay;
 pub mod task_graph;
 pub mod task_plan;
 pub mod test_discovery;

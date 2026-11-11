@@ -8,14 +8,18 @@ pub mod cli_command;
 pub mod container_verify;
 pub mod deploy_io;
 pub mod exec_stream;
+#[cfg(test)]
+mod fake_docker;
 pub mod git_mask_fs;
 pub mod host_port;
 pub mod log_stream;
 pub mod process;
 pub mod process_bytes;
+pub mod port_retry;
 pub mod pty;
 pub mod safe_fs;
 pub mod stream_exec;
 pub mod streaming;
+pub mod sync_relay;
 pub mod up_loop;
 pub mod workspace_io;
