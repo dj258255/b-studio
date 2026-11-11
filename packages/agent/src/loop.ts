@@ -247,7 +247,13 @@ export type AgentEvent =
   | { type: 'warning'; message: string }
   | { type: 'workflow_check'; check: WorkflowCheck }
   | { type: 'verify_start'; files: string[] }
-  | { type: 'verify_result'; report: VerificationReport; text: string }
+  /**
+   * 서비스 재시작·준비 판정·계약까지의 결과다. moreChecks면 이 뒤에 선언 검사·리뷰(workflow_check)가 더 돌고 끝에 gate_done이 온다.
+   * moreChecks가 없는 기록(서비스 확인 실패, 이 필드가 생기기 전의 옛 기록)은 이 결과가 곧 게이트의 끝이다
+   */
+  | { type: 'verify_result'; report: VerificationReport; text: string; moreChecks?: boolean }
+  /** moreChecks인 verify_result 뒤의 선언 검사·리뷰까지 끝났다. ok는 게이트 전체의 통과 여부(#1155) */
+  | { type: 'gate_done'; ok: boolean }
   | { type: 'done'; result: AgentResult }
   | { type: 'failed'; result: AgentResult };
 

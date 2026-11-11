@@ -67,6 +67,7 @@ async function setup(
     declarationBaseline?: WorkflowSpec | undefined;
     allowCheckChanges?: boolean;
     outsideChanges?: GateOptions['outsideChanges'];
+    signal?: AbortSignal;
   } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
@@ -97,6 +98,7 @@ async function setup(
     ...(options.declarationBaseline !== undefined ? { declarationBaseline: options.declarationBaseline } : {}),
     ...(options.allowCheckChanges ? { allowCheckChanges: true } : {}),
     ...(options.outsideChanges ? { outsideChanges: options.outsideChanges } : {}),
+    ...(options.signal ? { signal: options.signal } : {}),
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
     ...(options.browser ? { browserRunner: options.browser } : {}),
@@ -3673,5 +3675,96 @@ describe('검사 전에 서비스 안의 모르는 백그라운드 프로세스(
     const { gate, sandbox } = await gateWithStrays(undefined);
     expect(await gate.check()).toEqual({ kind: 'pass' });
     expect(sandbox.restarts).toEqual(['web']);
+  });
+});
+
+describe('게이트가 끝나기 전에는 통과로 보이지 않는다 (이슈 #1155)', () => {
+  const FILE = 'api/src/Order.java';
+  const tests = [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }];
+
+  it('서비스 확인 결과는 뒤에 검사가 더 온다고 알리고, 선언 검사가 도는 동안에는 끝났다는 이벤트가 없다', async () => {
+    const target = withWorkflow({ tests });
+    let seenWhileTesting: AgentEvent[] = [];
+    let eventsRef: AgentEvent[] = [];
+    const { gate, workspace, events } = await setup(target, {
+      exec: () => {
+        seenWhileTesting = [...eventsRef];
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+    });
+    eventsRef = events;
+    await workspace.write('api/src/Payment.java', 'class Payment {}\n');
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+
+    const result = seenWhileTesting.find((event) => event.type === 'verify_result');
+    expect(result).toMatchObject({ type: 'verify_result', moreChecks: true });
+    expect(seenWhileTesting.some((event) => event.type === 'gate_done')).toBe(false);
+    expect(events.at(-1)).toEqual({ type: 'gate_done', ok: true });
+  });
+
+  it('보호 경로 확인이 실패하면 gate_done은 ok: false이고 workflow_check 뒤에 온다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'], tests });
+    const { gate, workspace, events } = await setup(target);
+    await workspace.write(FILE, 'class Order { String memo; }\n');
+    expect((await gate.check()).kind).toBe('retry');
+
+    const done = events.findIndex((event) => event.type === 'gate_done');
+    expect(events[done]).toEqual({ type: 'gate_done', ok: false });
+    expect(events.findLastIndex((event) => event.type === 'workflow_check')).toBeLessThan(done);
+    expect(events.filter((event) => event.type === 'gate_done')).toHaveLength(1);
+  });
+
+  it('가볍게 확인(light)도 같은 모양이다', async () => {
+    const { gate, workspace, events } = await setup(withWorkflow({ tests }), { verify: 'light' });
+    await workspace.write('api/src/Payment.java', 'class Payment {}\n');
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(events.find((event) => event.type === 'verify_result')).toMatchObject({ moreChecks: true });
+    expect(events.at(-1)).toEqual({ type: 'gate_done', ok: true });
+  });
+
+  it('서비스가 뜨지 않은 실패는 기다릴 검사가 없어 moreChecks가 없고 gate_done도 없다', async () => {
+    const { gate, workspace, events } = await setup(withWorkflow({ tests }), { restarts: [false, false, false] });
+    await workspace.write('api/src/Payment.java', 'class Payment {}\n');
+    expect((await gate.check()).kind).toBe('retry');
+    expect(events.find((event) => event.type === 'verify_result')).not.toHaveProperty('moreChecks');
+    expect(events.some((event) => event.type === 'gate_done')).toBe(false);
+  });
+
+  it('검사 도중 중단되면 gate_done이 오지 않는다', async () => {
+    const controller = new AbortController();
+    const target = withWorkflow({ tests });
+    const { gate, workspace, events } = await setup(target, {
+      exec: () => {
+        controller.abort();
+        return { exitCode: 0, stdout: '', stderr: '' };
+      },
+      signal: controller.signal,
+    });
+    await workspace.write('api/src/Payment.java', 'class Payment {}\n');
+    await expect(gate.check()).rejects.toThrow();
+    expect(events.some((event) => event.type === 'gate_done')).toBe(false);
+  });
+
+  it('실패한 게이트의 피드백은 실패한 검사를 앞에 쓰고, 통과한 서비스 확인 결과는 참고로 뒤에 붙인다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write(FILE, 'class Order { String memo; }\n');
+    const outcome = await gate.check();
+
+    expect(outcome.kind).toBe('retry');
+    const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+    const body = feedback.split('\n\n').slice(1).join('\n\n');
+    expect(body.split('\n')[0]).toContain('실패');
+    expect(body.split('\n')[0]).not.toContain('검증 통과');
+    expect(feedback.indexOf('protected-paths')).toBeLessThan(feedback.indexOf('검증 통과'));
+    expect(feedback).toContain('[참고] 서비스 재시작·계약 확인은 통과했습니다');
+  });
+
+  it('서비스 확인이 실패한 피드백은 그 보고서가 앞에 온다(지금과 같다)', async () => {
+    const { gate, workspace } = await setup(withWorkflow({ tests }), { restarts: [false, false, false] });
+    await workspace.write('api/src/Payment.java', 'class Payment {}\n');
+    const outcome = await gate.check();
+    const feedback = outcome.kind === 'retry' ? outcome.feedback : '';
+    expect(feedback).not.toContain('[참고] 서비스 재시작');
   });
 });
