@@ -1,0 +1,1135 @@
+{
+  "http": [
+    {
+      "step": "세션 만들기",
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 201,
+      "body": {
+        "id": "<sid>",
+        "projectId": "demo",
+        "projectName": "demo",
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy",
+        "status": "idle",
+        "mode": "claude-code",
+        "backend": "claude-code",
+        "running": false,
+        "owner": "local",
+        "experimental": false,
+        "terminal": false,
+        "hasDeploy": false,
+        "services": [
+          {
+            "name": "app",
+            "template": "nextjs",
+            "preview": "browser",
+            "state": "stopped",
+            "hasContract": false
+          }
+        ],
+        "externals": [],
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ],
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        }
+      }
+    },
+    {
+      "step": "메시지 보내기",
+      "method": "POST",
+      "path": "/api/sessions/<sid>/messages",
+      "status": 202,
+      "body": {
+        "runId": "<run:1>"
+      }
+    }
+  ],
+  "events": {
+    "run": [
+      {
+        "type": "run_started",
+        "runId": "<run:1>",
+        "request": "hello.txt를 고치고 다음을 물어봐 주세요",
+        "by": "local",
+        "at": "<at>",
+        "backend": "claude-code",
+        "taskKind": {
+          "complexity": "simple",
+          "risk": "normal"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "session",
+          "backend": "로컬 Claude Agent (CLI 9.9.9)",
+          "model": "test-model",
+          "auth": "max 구독",
+          "effort": "high"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "turn",
+          "turn": 1
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "write_file",
+          "input": {
+            "path": "app/hello.txt",
+            "content": "질문 전 수정\n"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "policy",
+          "tool": "write_file",
+          "decision": "allow"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_result",
+          "name": "write_file",
+          "ok": true,
+          "content": "wrote app/hello.txt",
+          "chars": 19,
+          "rawChars": 19
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "turn",
+          "turn": 2
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "ask_user",
+          "input": {
+            "question": "다음은 무엇을 할까요?",
+            "options": [
+              "A",
+              "B"
+            ],
+            "allowOther": false
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "policy",
+          "tool": "ask_user",
+          "decision": "allow"
+        }
+      },
+      {
+        "type": "question",
+        "runId": "<run:1>",
+        "question": "다음은 무엇을 할까요?",
+        "options": [
+          "A",
+          "B"
+        ],
+        "allowOther": false
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_result",
+          "name": "ask_user",
+          "ok": true,
+          "content": "Question sent to the user. End this run now and wait for their answer; do not call any more tools.",
+          "chars": 98,
+          "rawChars": 98
+        }
+      },
+      {
+        "type": "tokens",
+        "runId": "<run:1>",
+        "usage": {
+          "inputTokens": 20,
+          "outputTokens": 5,
+          "cacheReadTokens": 1,
+          "cacheWriteTokens": 2
+        },
+        "sessionTokens": {
+          "inputTokens": 20,
+          "outputTokens": 5,
+          "cacheReadTokens": 1,
+          "cacheWriteTokens": 2
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "run",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_start",
+          "files": [
+            "app/hello.txt"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "contract_check",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_result",
+          "report": {
+            "ok": true,
+            "sync": {
+              "elapsedMs": "<elapsedMs>"
+            },
+            "restarted": [
+              {
+                "service": "app",
+                "ready": true
+              }
+            ],
+            "contracts": [],
+            "unverifiedFiles": [],
+            "secretLeaks": [],
+            "skippedOff": []
+          },
+          "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+          "moreChecks": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "review",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "review",
+            "name": "protected-paths",
+            "ok": true,
+            "attempts": 1
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "gate_done",
+          "ok": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "done",
+          "result": {
+            "status": "awaiting_input",
+            "summary": "다음은 무엇을 할까요?",
+            "changedFiles": [
+              "app/hello.txt"
+            ],
+            "question": {
+              "question": "다음은 무엇을 할까요?",
+              "options": [
+                "A",
+                "B"
+              ],
+              "allowOther": false
+            },
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "checks": [
+              {
+                "stage": "review",
+                "name": "protected-paths",
+                "ok": true,
+                "attempts": 1
+              }
+            ],
+            "gateOutcome": "pass",
+            "passedStages": [
+              "run",
+              "contract_check",
+              "review"
+            ],
+            "verifiedFingerprints": {
+              "app/hello.txt": "blob:<sha:3>"
+            },
+            "verifyAttempts": 0,
+            "turns": 2,
+            "usage": {
+              "inputTokens": 20,
+              "outputTokens": 5,
+              "cacheReadTokens": 1,
+              "cacheWriteTokens": 2
+            },
+            "metrics": {
+              "modelCalls": 2,
+              "maxContextTokens": 0,
+              "toolMs": "<toolMs>",
+              "gateMs": "<gateMs>",
+              "usageByModel": {
+                "test-model": {
+                  "inputTokens": 20,
+                  "outputTokens": 5,
+                  "cacheReadTokens": 1,
+                  "cacheWriteTokens": 2
+                }
+              }
+            },
+            "sessionId": "<uuid:1>"
+          }
+        }
+      },
+      {
+        "type": "checkpoint",
+        "runId": "<run:1>",
+        "checkpoint": {
+          "sha": "<sha:2>",
+          "shortSha": "<sha:2>",
+          "message": "fix: hello를 고친다",
+          "createdAt": "<createdAt>",
+          "files": [
+            "app/hello.txt"
+          ],
+          "passedStages": [
+            "run",
+            "contract_check",
+            "review"
+          ]
+        }
+      },
+      {
+        "type": "run_finished",
+        "runId": "<run:1>",
+        "status": "awaiting_input",
+        "summary": "다음은 무엇을 할까요?",
+        "turns": 2,
+        "metrics": {
+          "modelCalls": 2,
+          "maxContextTokens": 0,
+          "toolMs": "<toolMs>",
+          "gateMs": "<gateMs>",
+          "usageByModel": {
+            "test-model": {
+              "inputTokens": 20,
+              "outputTokens": 5,
+              "cacheReadTokens": 1,
+              "cacheWriteTokens": 2
+            }
+          }
+        },
+        "durationMs": "<durationMs>",
+        "usage": {
+          "inputTokens": 20,
+          "outputTokens": 5,
+          "cacheReadTokens": 1,
+          "cacheWriteTokens": 2
+        },
+        "sessionTokens": {
+          "inputTokens": 20,
+          "outputTokens": 5,
+          "cacheReadTokens": 1,
+          "cacheWriteTokens": 2
+        }
+      }
+    ],
+    "platform": [
+      {
+        "type": "snapshot",
+        "snapshot": {
+          "id": "<sid>",
+          "projectId": "demo",
+          "projectName": "demo",
+          "workDir": "<root>/sessions/demo-<sid>",
+          "workspace": "copy",
+          "status": "idle",
+          "mode": "claude-code",
+          "backend": "claude-code",
+          "running": false,
+          "owner": "local",
+          "experimental": false,
+          "terminal": false,
+          "hasDeploy": false,
+          "services": [
+            {
+              "name": "app",
+              "template": "nextjs",
+              "preview": "browser",
+              "state": "stopped",
+              "hasContract": false
+            }
+          ],
+          "externals": [],
+          "checkpoints": [
+            {
+              "sha": "<sha:1>",
+              "shortSha": "<sha:1>",
+              "message": "세션 시작 (main 브랜치)",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/hello.txt",
+                "app/readme.txt",
+                "compose.yaml",
+                "studio.yaml"
+              ]
+            }
+          ],
+          "repository": {
+            "remote": "<root>/projects/demo",
+            "kind": "local",
+            "base": "main",
+            "branch": "b-studio/demo-<sid>",
+            "sourceDirtyFiles": 0,
+            "canCreatePullRequest": false
+          }
+        }
+      },
+      {
+        "type": "snapshot_sync",
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        },
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "notice",
+        "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+        "at": "<at>"
+      },
+      {
+        "type": "status",
+        "status": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "boot_network",
+        "at": "<at>",
+        "network": [
+          {
+            "service": "app",
+            "rxBytes": 1000,
+            "txBytes": 2000
+          }
+        ]
+      },
+      {
+        "type": "status",
+        "status": "ready"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "url": "http://127.0.0.1:<port>",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      }
+    ],
+    "files": [
+      {
+        "type": "files_changed",
+        "revision": 1
+      }
+    ]
+  },
+  "disk": {
+    "commits": [
+      {
+        "sha": "<sha:1>",
+        "message": "데모 프로젝트"
+      },
+      {
+        "sha": "<sha:2>",
+        "message": "fix: hello를 고친다\n\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료\n\n에이전트 요약:\n다음은 무엇을 할까요?\n\nWorkflow-Passed: run, contract_check, review"
+      }
+    ],
+    "refs": [
+      {
+        "name": "refs/heads/b-studio/demo-<sid>",
+        "sha": "<sha:2>"
+      },
+      {
+        "name": "refs/heads/main",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/HEAD",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/main",
+        "sha": "<sha:1>"
+      }
+    ],
+    "status": [],
+    "files": {
+      "app/hello.txt": "질문 전 수정\n"
+    },
+    "sessionJson": {
+      "version": 1,
+      "savedAt": "<savedAt>",
+      "owner": {
+        "pid": "<pid>"
+      },
+      "snapshot": {
+        "id": "<sid>",
+        "projectId": "demo",
+        "projectName": "demo",
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy",
+        "status": "ready",
+        "mode": "claude-code",
+        "backend": "claude-code",
+        "running": false,
+        "owner": "local",
+        "experimental": false,
+        "terminal": false,
+        "hasDeploy": false,
+        "services": [
+          {
+            "name": "app",
+            "template": "nextjs",
+            "preview": "browser",
+            "state": "ready",
+            "hasContract": false,
+            "url": "http://127.0.0.1:<port>"
+          }
+        ],
+        "externals": [],
+        "checkpoints": [
+          {
+            "sha": "<sha:2>",
+            "shortSha": "<sha:2>",
+            "message": "fix: hello를 고친다",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt"
+            ],
+            "passedStages": [
+              "run",
+              "contract_check",
+              "review"
+            ]
+          },
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ],
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        },
+        "pendingQuestion": {
+          "runId": "<run:1>",
+          "question": "다음은 무엇을 할까요?",
+          "options": [
+            "A",
+            "B"
+          ],
+          "allowOther": false
+        },
+        "bootNetwork": [
+          {
+            "service": "app",
+            "rxBytes": 1000,
+            "txBytes": 2000
+          }
+        ],
+        "tokens": {
+          "inputTokens": 20,
+          "outputTokens": 5,
+          "cacheReadTokens": 1,
+          "cacheWriteTokens": 2
+        },
+        "usage": {
+          "at": "<at>",
+          "services": [
+            {
+              "service": "app",
+              "containerName": "<sandbox>-app-1",
+              "role": "managed",
+              "state": "running",
+              "cpuPercent": 0.5,
+              "memoryBytes": 10485760,
+              "networkRxBytes": 1000,
+              "networkTxBytes": 2000,
+              "oomKilled": false
+            },
+            {
+              "service": "b-studio-edge",
+              "containerName": "<sandbox>-b-studio-edge-1",
+              "role": "platform",
+              "state": "running",
+              "cpuPercent": 0.5,
+              "memoryBytes": 10485760,
+              "networkRxBytes": 1000,
+              "networkTxBytes": 2000,
+              "oomKilled": false
+            }
+          ]
+        },
+        "fileRevision": 1
+      },
+      "history": [
+        {
+          "type": "run_started",
+          "runId": "<run:1>",
+          "request": "hello.txt를 고치고 다음을 물어봐 주세요",
+          "by": "local",
+          "at": "<at>",
+          "backend": "claude-code",
+          "taskKind": {
+            "complexity": "simple",
+            "risk": "normal"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "session",
+            "backend": "로컬 Claude Agent (CLI 9.9.9)",
+            "model": "test-model",
+            "auth": "max 구독",
+            "effort": "high"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "turn",
+            "turn": 1
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_call",
+            "name": "write_file",
+            "input": {
+              "path": "app/hello.txt",
+              "content": "질문 전 수정\n"
+            }
+          }
+        },
+        {
+          "type": "notice",
+          "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+          "at": "<at>"
+        },
+        {
+          "type": "boot_network",
+          "at": "<at>",
+          "network": [
+            {
+              "service": "app",
+              "rxBytes": 1000,
+              "txBytes": 2000
+            }
+          ]
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "policy",
+            "tool": "write_file",
+            "decision": "allow"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_result",
+            "name": "write_file",
+            "ok": true,
+            "content": "wrote app/hello.txt",
+            "chars": 19,
+            "rawChars": 19
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "turn",
+            "turn": 2
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_call",
+            "name": "ask_user",
+            "input": {
+              "question": "다음은 무엇을 할까요?",
+              "options": [
+                "A",
+                "B"
+              ],
+              "allowOther": false
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "policy",
+            "tool": "ask_user",
+            "decision": "allow"
+          }
+        },
+        {
+          "type": "question",
+          "runId": "<run:1>",
+          "question": "다음은 무엇을 할까요?",
+          "options": [
+            "A",
+            "B"
+          ],
+          "allowOther": false
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "tool_result",
+            "name": "ask_user",
+            "ok": true,
+            "content": "Question sent to the user. End this run now and wait for their answer; do not call any more tools.",
+            "chars": 98,
+            "rawChars": 98
+          }
+        },
+        {
+          "type": "tokens",
+          "runId": "<run:1>",
+          "usage": {
+            "inputTokens": 20,
+            "outputTokens": 5,
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2
+          },
+          "sessionTokens": {
+            "inputTokens": 20,
+            "outputTokens": 5,
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "run",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_start",
+            "files": [
+              "app/hello.txt"
+            ]
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "contract_check",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "verify_result",
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+            "moreChecks": true
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "stage",
+            "stage": "review",
+            "source": "platform"
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "workflow_check",
+            "check": {
+              "stage": "review",
+              "name": "protected-paths",
+              "ok": true,
+              "attempts": 1
+            }
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "gate_done",
+            "ok": true
+          }
+        },
+        {
+          "type": "agent",
+          "runId": "<run:1>",
+          "event": {
+            "type": "done",
+            "result": {
+              "status": "awaiting_input",
+              "summary": "다음은 무엇을 할까요?",
+              "changedFiles": [
+                "app/hello.txt"
+              ],
+              "question": {
+                "question": "다음은 무엇을 할까요?",
+                "options": [
+                  "A",
+                  "B"
+                ],
+                "allowOther": false
+              },
+              "report": {
+                "ok": true,
+                "sync": {
+                  "elapsedMs": "<elapsedMs>"
+                },
+                "restarted": [
+                  {
+                    "service": "app",
+                    "ready": true
+                  }
+                ],
+                "contracts": [],
+                "unverifiedFiles": [],
+                "secretLeaks": [],
+                "skippedOff": []
+              },
+              "checks": [
+                {
+                  "stage": "review",
+                  "name": "protected-paths",
+                  "ok": true,
+                  "attempts": 1
+                }
+              ],
+              "gateOutcome": "pass",
+              "passedStages": [
+                "run",
+                "contract_check",
+                "review"
+              ],
+              "verifiedFingerprints": {
+                "app/hello.txt": "blob:<sha:3>"
+              },
+              "verifyAttempts": 0,
+              "turns": 2,
+              "usage": {
+                "inputTokens": 20,
+                "outputTokens": 5,
+                "cacheReadTokens": 1,
+                "cacheWriteTokens": 2
+              },
+              "metrics": {
+                "modelCalls": 2,
+                "maxContextTokens": 0,
+                "toolMs": "<toolMs>",
+                "gateMs": "<gateMs>",
+                "usageByModel": {
+                  "test-model": {
+                    "inputTokens": 20,
+                    "outputTokens": 5,
+                    "cacheReadTokens": 1,
+                    "cacheWriteTokens": 2
+                  }
+                }
+              },
+              "sessionId": "<uuid:1>"
+            }
+          }
+        },
+        {
+          "type": "checkpoint",
+          "runId": "<run:1>",
+          "checkpoint": {
+            "sha": "<sha:2>",
+            "shortSha": "<sha:2>",
+            "message": "fix: hello를 고친다",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt"
+            ],
+            "passedStages": [
+              "run",
+              "contract_check",
+              "review"
+            ]
+          }
+        },
+        {
+          "type": "run_finished",
+          "runId": "<run:1>",
+          "status": "awaiting_input",
+          "summary": "다음은 무엇을 할까요?",
+          "turns": 2,
+          "metrics": {
+            "modelCalls": 2,
+            "maxContextTokens": 0,
+            "toolMs": "<toolMs>",
+            "gateMs": "<gateMs>",
+            "usageByModel": {
+              "test-model": {
+                "inputTokens": 20,
+                "outputTokens": 5,
+                "cacheReadTokens": 1,
+                "cacheWriteTokens": 2
+              }
+            }
+          },
+          "durationMs": "<durationMs>",
+          "usage": {
+            "inputTokens": 20,
+            "outputTokens": 5,
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2
+          },
+          "sessionTokens": {
+            "inputTokens": 20,
+            "outputTokens": 5,
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2
+          }
+        }
+      ],
+      "conversation": [],
+      "demoIndex": 0,
+      "claudeCode": {
+        "notes": [],
+        "sessionId": "<uuid:1>"
+      },
+      "codex": {
+        "notes": [],
+        "recent": []
+      },
+      "commandCode": {
+        "notes": []
+      },
+      "openCode": {
+        "notes": []
+      },
+      "gemini": {
+        "notes": []
+      },
+      "sourceDirtyFiles": 0,
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "previewToken": "<previewToken>",
+      "git": {
+        "branch": "b-studio/demo-<sid>",
+        "lastCheckpoint": "<sha:2>",
+        "originUrl": "<root>/projects/demo"
+      }
+    }
+  },
+  "docker": {
+    "mutating": [
+      "compose build app",
+      "compose up --no-start --remove-orphans --no-deps app b-studio-edge",
+      "start <container:1> <container:2>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "start <container:1>",
+      "compose exec -T app sh -c <script:00627bf7>"
+    ],
+    "atShutdown": [
+      "compose down --volumes --remove-orphans --rmi local"
+    ],
+    "readKinds": [
+      "compose config",
+      "compose logs",
+      "compose port b-studio-edge",
+      "compose ps",
+      "inspect",
+      "stats"
+    ],
+    "unknown": []
+  }
+}

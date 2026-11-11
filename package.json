@@ -25,6 +25,8 @@
     "bench:studio-load": "tsx --tsconfig apps/studio/bench/load/tsconfig.json apps/studio/bench/load/studio-load.ts",
     "docs:screenshots": "tsx scripts/screenshots/capture.ts",
     "test": "node scripts/build-native.mjs && vitest run",
+    "test:baseline": "vitest run apps/studio/server/baseline",
+    "test:baseline:update": "vitest run apps/studio/server/baseline -u",
     "typecheck": "pnpm -r typecheck",
     "postinstall": "node scripts/build-native.mjs",
     "build:native": "node scripts/build-native.mjs",
