@@ -23,6 +23,8 @@ pub struct GitEntry {
     /// "directory" 또는 "file"
     pub kind: String,
     pub has_state: bool,
+    /// `.git`이 파일일 때, 호스트가 같은 파일로 읽는 대소문자 변형 이름(`.GIT` 등). 대소문자를 구분하는 파일 시스템에서는 비어 있다
+    pub aliases: Vec<String>,
 }
 
 /// 링크를 푼 실제 경로. 풀지 못하면(없는 경로 등) `path.resolve`와 같이 `cwd` 기준 절대 경로로 정규화한다.
@@ -68,12 +70,42 @@ async fn inspect_git(dir: &str) -> Option<GitEntry> {
     let meta = tokio::fs::symlink_metadata(Path::new(dir).join(GIT)).await.ok()?;
     if meta.is_dir() {
         let has_state = tokio::fs::symlink_metadata(Path::new(dir).join(GIT).join(STATE)).await.map(|m| m.is_dir()).unwrap_or(false);
-        return Some(GitEntry { dir: dir.to_owned(), kind: "directory".into(), has_state });
+        return Some(GitEntry { dir: dir.to_owned(), kind: "directory".into(), has_state, aliases: Vec::new() });
     }
     if meta.is_file() {
-        return Some(GitEntry { dir: dir.to_owned(), kind: "file".into(), has_state: false });
+        let aliases = case_aliases(dir, &meta).await;
+        return Some(GitEntry { dir: dir.to_owned(), kind: "file".into(), has_state: false, aliases });
     }
     None
+}
+
+/// `.git`의 대소문자 변형 일곱 개(`.Git`…`.GIT`). `.git`은 ASCII 글자 셋이고, 대소문자를 구분하지 않는 볼륨(APFS·NTFS)이
+/// 이 글자들에 맞추는 다른 코드 포인트는 없다(`İ`·`ı`는 `i`로 접히지 않는다). 그래서 이 일곱이 전부다
+fn case_variants() -> impl Iterator<Item = String> {
+    (1u8..8).map(|mask| {
+        let mut name = String::from(".");
+        for (bit, letter) in ['g', 'i', 't'].into_iter().enumerate() {
+            name.push(if mask >> bit & 1 == 1 { letter.to_ascii_uppercase() } else { letter });
+        }
+        name
+    })
+}
+
+/// `.git` 파일을 호스트가 다른 이름으로도 읽는가(#1028). 대소문자를 구분하지 않는 볼륨을 마운트하면 컨테이너 커널은 `.GIT`을
+/// `.git`과 다른 이름으로 찾지만 호스트는 같은 파일을 연다. 파일은 이름마다 따로 잡혀 `.git`에 얹은 읽기 전용 마운트를 비껴간다.
+/// 같은 장치·inode인 변형(하드 링크 포함)을 돌려준다. 확인하지 못한 이름(없음 말고 다른 오류)은 가리는 쪽으로 넣는다(거부 목록)
+async fn case_aliases(dir: &str, git: &std::fs::Metadata) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt;
+    let mut aliases = Vec::new();
+    for variant in case_variants() {
+        match tokio::fs::symlink_metadata(Path::new(dir).join(&variant)).await {
+            Ok(meta) if meta.is_file() && meta.dev() == git.dev() && meta.ino() == git.ino() => aliases.push(variant),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => aliases.push(variant),
+        }
+    }
+    aliases
 }
 
 /// 저장소 설정에 `[b-studio]` 절이 있는가(b-studio가 만든 체크포인트 저장소). JS `/^\[b-studio\]/m`과 같이
@@ -192,18 +224,71 @@ mod tests {
         let base = Path::new(&root);
         tokio::fs::create_dir_all(base.join("a/.git/b-studio")).await.unwrap();
         let a = s(&base.join("a"));
-        assert_eq!(detect_git_entries(&a, &[a.clone()], "/").await, vec![GitEntry { dir: a.clone(), kind: "directory".into(), has_state: true }]);
+        assert_eq!(detect_git_entries(&a, &[a.clone()], "/").await, vec![GitEntry { dir: a.clone(), kind: "directory".into(), has_state: true, aliases: Vec::new() }]);
 
         tokio::fs::create_dir(base.join("b")).await.unwrap();
         let b = s(&base.join("b"));
         assert!(detect_git_entries(&b, &[b.clone()], "/").await.is_empty());
         tokio::fs::write(base.join("b/.git"), "gitdir: x\n").await.unwrap();
-        assert_eq!(detect_git_entries(&b, &[b.clone()], "/").await, vec![GitEntry { dir: b.clone(), kind: "file".into(), has_state: false }]);
+        let found = detect_git_entries(&b, &[b.clone()], "/").await;
+        assert_eq!(found.iter().map(|e| (e.dir.as_str(), e.kind.as_str(), e.has_state)).collect::<Vec<_>>(), vec![(b.as_str(), "file", false)]);
 
         tokio::fs::create_dir_all(base.join("c/real-git")).await.unwrap();
         symlink("real-git", base.join("c/.git")).unwrap();
         let c = s(&base.join("c"));
         assert!(detect_git_entries(&c, &[c.clone()], "/").await.is_empty());
+    }
+
+    /// 이 파일 시스템이 대소문자를 구분하지 않는가. 기대값을 내 기기의 파일 시스템에 묶지 않으려고 시험마다 잰다
+    async fn case_insensitive(dir: &Path) -> bool {
+        tokio::fs::write(dir.join("probe-case"), "").await.unwrap();
+        let folded = tokio::fs::symlink_metadata(dir.join("PROBE-CASE")).await.is_ok();
+        tokio::fs::remove_file(dir.join("probe-case")).await.unwrap();
+        folded
+    }
+
+    const ALL_VARIANTS: [&str; 7] = [".Git", ".gIt", ".GIt", ".giT", ".GiT", ".gIT", ".GIT"];
+
+    #[tokio::test]
+    async fn git_파일의_대소문자_변형은_호스트가_같은_파일로_읽을_때만_돌려준다() {
+        let (_guard, root) = root().await;
+        let base = Path::new(&root);
+        tokio::fs::create_dir(base.join("p")).await.unwrap();
+        tokio::fs::write(base.join("p/.git"), "gitdir: x\n").await.unwrap();
+        let p = s(&base.join("p"));
+        let expected: Vec<String> = if case_insensitive(base).await { ALL_VARIANTS.iter().map(|v| v.to_string()).collect() } else { Vec::new() };
+        let found = detect_git_entries(&p, &[p.clone()], "/").await;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].aliases, expected);
+    }
+
+    #[tokio::test]
+    async fn git_폴더에는_대소문자_변형을_돌려주지_않는다() {
+        // 폴더에 .git 마운트를 한 번 더 얹으면 먼저 얹은 상태 폴더 가림이 그 아래로 묻힌다(#1028)
+        let (_guard, root) = root().await;
+        let base = Path::new(&root);
+        tokio::fs::create_dir_all(base.join("p/.git/b-studio")).await.unwrap();
+        let p = s(&base.join("p"));
+        let found = detect_git_entries(&p, &[p.clone()], "/").await;
+        assert_eq!(found.len(), 1);
+        assert!(found[0].aliases.is_empty());
+    }
+
+    #[tokio::test]
+    async fn 대소문자를_구분하면_따로_있는_변형_파일은_돌려주지_않는다() {
+        let (_guard, root) = root().await;
+        let base = Path::new(&root);
+        if case_insensitive(base).await {
+            eprintln!("대소문자를 구분하지 않는 파일 시스템이라 이 시험은 볼 것이 없다(리눅스 CI에서 돈다)");
+            return;
+        }
+        tokio::fs::create_dir(base.join("p")).await.unwrap();
+        tokio::fs::write(base.join("p/.git"), "gitdir: x\n").await.unwrap();
+        tokio::fs::write(base.join("p/.GIT"), "다른 파일\n").await.unwrap();
+        symlink(".git", base.join("p/.Git")).unwrap();
+        let p = s(&base.join("p"));
+        let found = detect_git_entries(&p, &[p.clone()], "/").await;
+        assert!(found[0].aliases.is_empty());
     }
 
     #[tokio::test]
@@ -214,7 +299,7 @@ mod tests {
         tokio::fs::create_dir(repo.join("api")).await.unwrap();
         let (repo_s, api) = (s(&repo), s(&repo.join("api")));
         assert!(detect_git_entries(&api, &[api.clone()], "/").await.is_empty());
-        assert_eq!(detect_git_entries(&api, &[repo_s.clone()], "/").await, vec![GitEntry { dir: repo_s, kind: "directory".into(), has_state: true }]);
+        assert_eq!(detect_git_entries(&api, &[repo_s.clone()], "/").await, vec![GitEntry { dir: repo_s, kind: "directory".into(), has_state: true, aliases: Vec::new() }]);
     }
 
     #[tokio::test]
@@ -293,9 +378,9 @@ mod tests {
         tokio::fs::create_dir_all(base.join("ours/.git")).await.unwrap();
         tokio::fs::write(base.join("ours/.git/config"), "[b-studio]\n").await.unwrap();
         let mut entries = vec![
-            GitEntry { dir: s(&base.join("mine")), kind: "directory".into(), has_state: false },
-            GitEntry { dir: s(&base.join("ours")), kind: "directory".into(), has_state: false },
-            GitEntry { dir: s(&base.join("file")), kind: "file".into(), has_state: false },
+            GitEntry { dir: s(&base.join("mine")), kind: "directory".into(), has_state: false, aliases: Vec::new() },
+            GitEntry { dir: s(&base.join("ours")), kind: "directory".into(), has_state: false, aliases: Vec::new() },
+            GitEntry { dir: s(&base.join("file")), kind: "file".into(), has_state: false, aliases: Vec::new() },
         ];
         prepare_state_masks(&mut entries).await.unwrap();
         assert!(!entries[0].has_state && entries[1].has_state && !entries[2].has_state);
@@ -309,7 +394,7 @@ mod tests {
         let base = Path::new(&root);
         tokio::fs::create_dir_all(base.join("ours/.git/b-studio-empty")).await.unwrap();
         tokio::fs::write(base.join("ours/.git/b-studio-empty/x"), "x").await.unwrap();
-        let mut entries = vec![GitEntry { dir: s(&base.join("ours")), kind: "directory".into(), has_state: true }];
+        let mut entries = vec![GitEntry { dir: s(&base.join("ours")), kind: "directory".into(), has_state: true, aliases: Vec::new() }];
         let failure = prepare_state_masks(&mut entries).await.unwrap_err();
         assert!(failure.state.ends_with(".git/b-studio") && failure.detail.contains("비어 있지 않습니다"), "{failure:?}");
         assert!(base.join("ours/.git/b-studio-empty/x").exists());

@@ -35,6 +35,9 @@ pub struct GitEntry {
     /// `directory` 또는 `file`(worktree·submodule의 gitdir 포인터)
     pub kind: String,
     pub has_state: bool,
+    /// `.git`이 파일일 때 호스트가 같은 파일로 읽는 대소문자 변형 이름(#1028). 옛 입력에는 없다
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -140,6 +143,14 @@ pub fn plan_git_mask(cwd: &str, mounts: &[Mount], entries: &[GitEntry]) -> Vec<(
             if node_path::is_inside(cwd, &source, &entry.dir) {
                 let container_git = node_path::join(&[&mount.target, &node_path::relative(cwd, &source, &git)]);
                 add(&mut plan, &mount.service, read_only(git.clone(), container_git.clone()));
+                if entry.kind == "file" {
+                    // 대소문자를 구분하지 않는 볼륨에서 같은 파일로 풀리는 이름마다 같은 가림을 얹는다(#1028).
+                    // 폴더에는 얹지 않는다: 같은 자리에 .git을 한 번 더 얹으면 상태 폴더 가림이 그 아래로 묻힌다
+                    let container_dir = node_path::join(&[&mount.target, &node_path::relative(cwd, &source, &entry.dir)]);
+                    for alias in entry.aliases.iter().filter(|alias| is_git_case_variant(alias)) {
+                        add(&mut plan, &mount.service, read_only(git.clone(), node_path::join(&[&container_dir, alias])));
+                    }
+                }
                 if entry.kind == "directory" && entry.has_state {
                     add(&mut plan, &mount.service, read_only(node_path::join(&[&git, STATE_MASK]), node_path::join(&[&container_git, STATE])));
                 }
@@ -153,6 +164,11 @@ pub fn plan_git_mask(cwd: &str, mounts: &[Mount], entries: &[GitEntry]) -> Vec<(
         }
     }
     plan.into_record()
+}
+
+/// `.git`과 대소문자만 다른 이름인가. 그 밖의 이름(구분자, `..`, ASCII가 아닌 글자)은 마운트 자리로 쓰지 않는다
+fn is_git_case_variant(name: &str) -> bool {
+    name.len() == GIT.len() && name.is_ascii() && name != GIT && name.eq_ignore_ascii_case(GIT)
 }
 
 /// 평가 자산 하나가 덧붙는 자리
@@ -471,7 +487,7 @@ mod tests {
     }
 
     fn entry(dir: &str, has_state: bool) -> GitEntry {
-        GitEntry { dir: dir.into(), kind: "directory".into(), has_state }
+        GitEntry { dir: dir.into(), kind: "directory".into(), has_state, aliases: Vec::new() }
     }
 
     #[test]
@@ -486,6 +502,42 @@ mod tests {
         let plan = plan_git_mask(CWD, &[mount("a", "/p/.git/b-studio/x", "/s"), mount("a", "/p/.git/objects", "/o")], &[entry("/p", true)]);
         let targets: Vec<_> = plan[0].1.iter().map(|v| (v.source.as_str(), v.target.as_str())).collect();
         assert_eq!(targets, vec![("/p/.git/objects", "/o"), ("/p/.git/b-studio-empty", "/s")]);
+    }
+
+    fn file_entry(dir: &str, aliases: &[&str]) -> GitEntry {
+        GitEntry { dir: dir.into(), kind: "file".into(), has_state: false, aliases: aliases.iter().map(|a| a.to_string()).collect() }
+    }
+
+    fn pairs(plan: &[(String, Vec<MaskVolume>)]) -> Vec<(String, String)> {
+        plan[0].1.iter().map(|v| (v.source.clone(), v.target.clone())).collect()
+    }
+
+    #[test]
+    fn git_파일의_대소문자_변형마다_같은_파일을_읽기_전용으로_얹는다() {
+        let plan = plan_git_mask(CWD, &[mount("api", "/p", "/app")], &[file_entry("/p", &[".GIT", ".Git"])]);
+        let expected = [("/p/.git", "/app/.GIT"), ("/p/.git", "/app/.Git"), ("/p/.git", "/app/.git")];
+        assert_eq!(pairs(&plan), expected.map(|(a, b)| (a.to_string(), b.to_string())));
+        assert!(plan[0].1.iter().all(|v| v.read_only && !v.bind.create_host_path));
+    }
+
+    #[test]
+    fn 상위_폴더를_마운트하면_변형_자리도_그_아래다() {
+        let plan = plan_git_mask(CWD, &[mount("api", "/repo", "/w")], &[file_entry("/repo/sub", &[".gIt"])]);
+        let expected = [("/repo/sub/.git", "/w/sub/.gIt"), ("/repo/sub/.git", "/w/sub/.git")];
+        assert_eq!(pairs(&plan), expected.map(|(a, b)| (a.to_string(), b.to_string())));
+    }
+
+    #[test]
+    fn git_폴더의_변형이나_git의_변형이_아닌_이름은_얹지_않는다() {
+        // 폴더에 .git을 한 번 더 얹으면 상태 폴더 가림이 묻힌다. 변형이 아닌 이름은 마운트 자리를 프로젝트 밖으로 옮길 수 있다
+        let directory = GitEntry { dir: "/p".into(), kind: "directory".into(), has_state: true, aliases: vec![".GIT".into()] };
+        let plan = plan_git_mask(CWD, &[mount("api", "/p", "/app")], &[directory]);
+        let expected = [("/p/.git", "/app/.git"), ("/p/.git/b-studio-empty", "/app/.git/b-studio")];
+        assert_eq!(pairs(&plan), expected.map(|(a, b)| (a.to_string(), b.to_string())));
+
+        let odd = file_entry("/p", &["../x", ".gits", ".git", "", ".g/t", ".GİT", ".gıt"]);
+        let plan = plan_git_mask(CWD, &[mount("api", "/p", "/app")], &[odd]);
+        assert_eq!(pairs(&plan), vec![("/p/.git".to_string(), "/app/.git".to_string())]);
     }
 
     #[test]

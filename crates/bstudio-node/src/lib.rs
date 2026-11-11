@@ -848,11 +848,12 @@ pub struct GitEntryJs {
     pub dir: String,
     pub kind: String,
     pub has_state: bool,
+    pub aliases: Vec<String>,
 }
 
 impl From<bstudio_io::git_mask_fs::GitEntry> for GitEntryJs {
     fn from(entry: bstudio_io::git_mask_fs::GitEntry) -> Self {
-        Self { dir: entry.dir, kind: entry.kind, has_state: entry.has_state }
+        Self { dir: entry.dir, kind: entry.kind, has_state: entry.has_state, aliases: entry.aliases }
     }
 }
 
@@ -890,7 +891,7 @@ pub fn detect_git_entries(env: Env, project_root: String, mount_sources: Vec<Str
 pub fn prepare_state_masks(env: Env, entries: Vec<GitEntryJs>) -> Result<AsyncBlock<PreparedMasks>> {
     AsyncBlockBuilder::new(async move {
         let mut inner: Vec<bstudio_io::git_mask_fs::GitEntry> =
-            entries.into_iter().map(|e| bstudio_io::git_mask_fs::GitEntry { dir: e.dir, kind: e.kind, has_state: e.has_state }).collect();
+            entries.into_iter().map(|e| bstudio_io::git_mask_fs::GitEntry { dir: e.dir, kind: e.kind, has_state: e.has_state, aliases: e.aliases }).collect();
         let failure = bstudio_io::git_mask_fs::prepare_state_masks(&mut inner).await.err().map(|f| MaskFailureJs { state: f.state, detail: f.detail });
         Ok(PreparedMasks { entries: inner.into_iter().map(GitEntryJs::from).collect(), failure })
     })
