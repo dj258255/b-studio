@@ -117,9 +117,12 @@ pub async fn up_with_port_retry_using(input: RetryInput, cancel: &Cancel, alloca
                 Err(error) => return RetryResult { mask: up.mask, host_ports, outcome: RetryOutcome::PortAlloc(format!("빈 포트를 찾지 못했습니다: {error}")) },
             }
         }
-        if let JsValue::Obj(object) = &mut up.override_input {
-            object.set("hostPorts", host_ports_value(&ports));
-        }
+        // 객체가 아니면 새 포트를 얹지 못한다. 건너뛰고 다시 쓰면 부르는 쪽의 포트와 파일이 어긋나므로 실패한다
+        // (실제로는 첫 시도의 override 만들기가 먼저 실패해 여기까지 오지 않는다)
+        let JsValue::Obj(object) = &mut up.override_input else {
+            return RetryResult { mask: up.mask, host_ports, outcome: RetryOutcome::Regenerate(WriteProblem::Build("override 입력이 객체가 아닙니다".to_owned())) };
+        };
+        object.set("hostPorts", host_ports_value(&ports));
         host_ports = Some(ports);
         if let Err(problem) = crate::up_loop::write_override(&up.override_path, &up.override_input, &up.mask).await {
             return RetryResult { mask: up.mask, host_ports, outcome: RetryOutcome::Regenerate(problem) };
@@ -278,6 +281,19 @@ mod tests {
         assert_eq!(result.outcome, RetryOutcome::PortAlloc("빈 포트를 찾지 못했습니다: no ports".into()));
         assert_eq!(result.host_ports, None);
         assert!(!fake.verbs().iter().any(|verb| verb == "compose rm"));
+    }
+
+    #[tokio::test]
+    async fn override_입력이_객체가_아니면_재시도까지_가지_않고_실패한다() {
+        let (fake, project) = prepared();
+        fake.fail("start.1", 1, CONFLICT);
+        let mut input = retry(&fake, &project, &UP, &["api"], 3);
+        input.up.override_input = js_json::parse("[]").unwrap();
+        let result = run(input, &mut counter()).await;
+        // 첫 시도의 override 만들기가 먼저 실패한다. 만들지도, 포트를 다시 뽑지도, 지우지도 않는다
+        assert!(matches!(result.outcome, RetryOutcome::Up(UpOutcome::Override(WriteProblem::Build(_)))), "{:?}", result.outcome);
+        assert_eq!(result.host_ports, None);
+        assert!(!fake.verbs().iter().any(|verb| verb == "compose rm" || verb == "compose up"), "{:?}", fake.verbs());
     }
 
     #[tokio::test]
