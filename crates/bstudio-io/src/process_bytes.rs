@@ -244,6 +244,25 @@ mod tests {
     const LIMIT: usize = 1024 * 1024;
 
     #[tokio::test]
+    async fn landing_exactly_on_limit_then_one_more_byte_still_overflows() {
+        // #1177: `read_into`를 함께 쓴다. 정확히 상한에 닿은 뒤 더 오는 바이트도 넘침이다
+        let started = std::time::Instant::now();
+        let out = run_command_bytes("sh", &args(&["-c", "printf xxxx; sleep 0.3; printf y; sleep 5"]), None, None, None, never(), 4).await;
+        assert!(out.overflowed);
+        assert_eq!(out.exit_code, None);
+        assert_eq!(out.stdout, b"xxxx");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "넘친 뒤에도 자식을 죽이지 않았다: {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn output_exactly_at_limit_then_eof_is_not_overflow() {
+        let out = run_command_bytes("sh", &args(&["-c", "printf xxxx"]), None, None, None, never(), 4).await;
+        assert!(!out.overflowed);
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(out.stdout, b"xxxx");
+    }
+
+    #[tokio::test]
     async fn keeps_binary_output_and_nul_bytes() {
         let out = run_command_bytes("sh", &args(&["-c", "printf '\\377\\000\\376a'; printf '\\200' 1>&2"]), None, None, None, never(), LIMIT).await;
         assert_eq!(out.exit_code, Some(0));

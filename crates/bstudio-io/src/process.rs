@@ -164,7 +164,7 @@ async fn run_command_capped(
     }
 }
 
-/// 스트림을 끝까지 읽어 공유 버퍼에 쌓는다. 256MB를 넘기면 거기서 잘라 담고 overflow를 한 번 알린다.
+/// 스트림을 끝까지 읽어 공유 버퍼에 쌓는다. 상한을 넘기면 거기서 잘라 담고 overflow를 한 번 알린다.
 /// 넘겨도 계속 읽어(버려) 파이프가 막히지 않게 한다. kill되면 EOF로 끝난다.
 pub(crate) async fn read_into<R: AsyncRead + Unpin>(
     mut reader: R,
@@ -181,11 +181,10 @@ pub(crate) async fn read_into<R: AsyncRead + Unpin>(
             Err(_) => break,
         };
         let mut buffer = buf.lock().expect("읽기 버퍼 잠금");
-        if buffer.len() >= limit {
-            continue; // 이미 상한, 버린다
-        }
-        if buffer.len() + read > limit {
-            let room = limit - buffer.len();
+        // 상한을 1바이트라도 넘으면 넘침이다(Node `maxBuffer`와 같다). 이미 상한까지 찬 뒤에 온 바이트도 넘침으로 알린다 —
+        // 조각이 쌓여 정확히 상한에 닿은 뒤 더 오는 출력을 버리기만 하면 알림 없이 잘린 출력이 성공으로 나간다(#1177)
+        let room = limit.saturating_sub(buffer.len());
+        if read > room {
             buffer.extend_from_slice(&chunk[..room]);
             drop(buffer);
             if !signaled {
@@ -391,5 +390,27 @@ mod tests {
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.stdout.len(), 64);
         assert!(result.stdout.chars().all(|c| c == 'x'));
+    }
+
+    #[tokio::test]
+    async fn landing_exactly_on_limit_then_one_more_byte_still_overflows() {
+        // #1177: 읽은 조각이 쌓여 정확히 상한에 닿은 뒤 1바이트가 더 오면 overflow다(Node `maxBuffer`는 넘으면 실패).
+        // 잠깐 쉬어 `xxxx`와 `y`가 따로 읽히게 한다. 고치기 전에는 `y`를 조용히 버리고 5초 뒤 종료 코드 0을 돌려줬다
+        let started = std::time::Instant::now();
+        let result =
+            run_command_capped("sh", &args(&["-c", "printf xxxx; sleep 0.3; printf y; sleep 5"]), None, None, None, never(), 4)
+                .await;
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.stdout, "xxxx");
+        assert_eq!(result.stderr, "stdout maxBuffer length exceeded");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "넘친 뒤에도 자식을 죽이지 않았다: {:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn output_exactly_at_limit_then_eof_is_not_overflow() {
+        // 상한만큼 내고 끝난 출력은 넘친 것이 아니다(Node와 같다)
+        let result = run_command_capped("sh", &args(&["-c", "printf xxxx"]), None, None, None, never(), 4).await;
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout, "xxxx");
     }
 }
