@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { readYaml, YamlReadError } from './yaml-read';
 import { z } from 'zod';
 import { findPublicUrlRefs, type PublicUrlRef } from './public-url';
 import {
@@ -18,6 +18,8 @@ import {
 } from './schema';
 
 export const SPEC_FILE = 'studio.yaml';
+/** 읽는 YAML 파일의 상한(바이트). crates/bstudio-guard/src/yaml.rs의 `MAX_INPUT_BYTES`와 같다 */
+const MAX_YAML_BYTES = 4 * 1024 * 1024;
 
 export class SpecError extends Error {
   readonly issues: string[];
@@ -298,10 +300,12 @@ async function readProjectText(root: string, relative: string): Promise<string> 
   try {
     const opened = await handle.stat();
     if (!opened.isFile()) throw new SpecError(`${relative}: 일반 파일이 아닙니다`);
+    // 읽기 전에 크기를 본다(Rust 읽기의 상한과 같은 값). studio.yaml·compose는 남의 저장소에서 올 수 있다
+    if (opened.size > MAX_YAML_BYTES) throw new SpecError(`${relative}: 파일이 너무 큽니다(${MAX_YAML_BYTES}바이트까지)`);
     const [rootNow, fileNow] = await Promise.all([realpath(root), realpath(file)]);
     const now = await lstat(fileNow);
     if (!isInside(rootNow, fileNow) || now.dev !== opened.dev || now.ino !== opened.ino) throw outside();
-    return await handle.readFile('utf8');
+    return await readLimited(handle, relative);
   } catch (error) {
     if (error instanceof SpecError) throw error;
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missing();
@@ -309,6 +313,22 @@ async function readProjectText(root: string, relative: string): Promise<string> 
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * 상한 + 1바이트까지만 읽는다. 위의 stat 확인은 빠른 거절일 뿐이고, 확인과 읽기 사이에 파일이 커질 수 있다(컨테이너 안 에이전트가 프로젝트 파일에 쓸 수 있다).
+ * 상한을 넘게 읽히면 던진다. 글자로 바꾸는 규칙은 `readFile('utf8')`와 같다(잘못된 바이트는 U+FFFD)
+ */
+async function readLimited(handle: FileHandle, relative: string): Promise<string> {
+  const buffer = Buffer.allocUnsafe(MAX_YAML_BYTES + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, total, buffer.length - total, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  if (total > MAX_YAML_BYTES) throw new SpecError(`${relative}: 파일이 너무 큽니다(${MAX_YAML_BYTES}바이트까지)`);
+  return buffer.subarray(0, total).toString('utf8');
 }
 
 function isInside(parent: string, target: string): boolean {
@@ -322,10 +342,11 @@ function isInside(parent: string, target: string): boolean {
  */
 function parseYaml(source: string, label: string, options?: { merge?: boolean }): unknown {
   try {
-    return parse(source, options);
+    return readYaml(source, options);
   } catch (error) {
-    const pos = (error as { linePos?: Array<{ line: number; col: number }> }).linePos?.[0];
-    const code = (error as { code?: string }).code;
-    throw new SpecError(`${label}의 YAML 문법이 올바르지 않습니다${pos ? `(${pos.line}번째 줄 ${pos.col}번째 칸)` : ''}${code ? ` [${code}]` : ''}`);
+    if (!(error instanceof YamlReadError)) throw error;
+    // 오류 글에는 문제 글자를 싣지 않는다(읽으면 안 되는 파일의 내용이 새는 길이 된다). Rust 쪽 설명은 고정된 문구다
+    if (error.kind === 'unsupported') throw new SpecError(`${label}: 이 YAML 꼴은 지원하지 않습니다: ${error.detail}${error.where}`);
+    throw new SpecError(`${label}의 YAML 문법이 올바르지 않습니다${error.where}: ${error.detail}`);
   }
 }

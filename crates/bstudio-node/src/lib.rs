@@ -3721,3 +3721,27 @@ pub fn visual_compare(actual: Buffer, reference: Buffer, masks: Vec<f64>, thresh
         Err(vc::Error::Decode(message)) => failed("decode", message),
     }
 }
+
+use bstudio_guard::yaml;
+
+/// spec의 YAML 읽기(ADR-197). `kind`는 `"value"`(`json`이 값, `JSON.parse`+`decodeNative`로 읽는다)·`"syntax"`(문법 오류 또는 JS `yaml`도 실패하는 입력)·`"unsupported"`(지원하지 않는 꼴) 중 하나. 줄·칸은 1부터, 모르면 0
+#[napi(object)]
+pub struct YamlParseOut {
+    pub kind: String,
+    pub json: Option<String>,
+    pub message: Option<String>,
+    pub line: u32,
+    pub col: u32,
+}
+
+#[napi]
+pub fn yaml_parse(text: String, merge: bool) -> YamlParseOut {
+    // 읽다가 패닉이 나도 값으로 이어지지 않게 지원하지 않는 꼴로 돌려준다(닫는 쪽)
+    let outcome = std::panic::catch_unwind(|| yaml::parse(&text, merge))
+        .unwrap_or_else(|_| yaml::Outcome::Unsupported { reason: "읽는 중 내부 오류가 났습니다".to_owned(), line: 0, col: 0 });
+    match outcome {
+        yaml::Outcome::Value(json) => YamlParseOut { kind: "value".to_owned(), json: Some(json), message: None, line: 0, col: 0 },
+        yaml::Outcome::Syntax { message, line, col } => YamlParseOut { kind: "syntax".to_owned(), json: None, message: Some(message), line: line as u32, col: col as u32 },
+        yaml::Outcome::Unsupported { reason, line, col } => YamlParseOut { kind: "unsupported".to_owned(), json: None, message: Some(reason), line: line as u32, col: col as u32 },
+    }
+}
