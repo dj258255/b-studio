@@ -3745,3 +3745,65 @@ pub fn yaml_parse(text: String, merge: bool) -> YamlParseOut {
         yaml::Outcome::Unsupported { reason, line, col } => YamlParseOut { kind: "unsupported".to_owned(), json: None, message: Some(reason), line: line as u32, col: col as u32 },
     }
 }
+
+// ── 체크포인트 실행(ADR-195 4f A1): 바이트 그대로 돌려주는 실행과 `git archive | tar -x`
+use bstudio_io::process_bytes;
+
+/// `run_command`와 같되 stdin·stdout·stderr가 바이트다. 종료 코드는 신호로 죽으면 null, 띄우기 실패는 `spawnError`
+#[napi(object)]
+pub struct BytesResult {
+    pub exit_code: Option<i32>,
+    pub stdout: Buffer,
+    pub stderr: Buffer,
+    pub aborted: bool,
+    pub overflowed: bool,
+    pub spawn_error: Option<String>,
+}
+
+// napi 인자 꼴을 `run_command`와 맞춘다(인자 배열, 환경, cwd, 상한, 신호)
+#[allow(clippy::too_many_arguments)]
+#[napi]
+pub fn run_command_bytes(
+    env: Env,
+    bin: String,
+    args: Vec<String>,
+    input: Option<Buffer>,
+    env_vars: Option<HashMap<String, String>>,
+    cwd: Option<String>,
+    max_buffer: u32,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<BytesResult>> {
+    let pairs = env_pairs(env_vars);
+    let cancel = abort_notify(signal);
+    let future = async move {
+        let output = process_bytes::run_command_bytes(&bin, &args, input.as_deref(), pairs.as_deref(), cwd.as_deref(), cancel.notified(), max_buffer as usize).await;
+        Ok(BytesResult {
+            exit_code: output.exit_code,
+            stdout: Buffer::from(output.stdout),
+            stderr: Buffer::from(output.stderr),
+            aborted: output.aborted,
+            overflowed: output.overflowed,
+            spawn_error: output.spawn_error,
+        })
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}
+
+#[napi(object)]
+pub struct ArchiveExtractResult {
+    pub git_code: Option<i32>,
+    pub tar_code: Option<i32>,
+    pub stderr: Buffer,
+    pub spawn_error: Option<String>,
+}
+
+/// `git_bin git_args | tar -x --no-same-owner -C dest`
+#[napi]
+pub fn run_archive_extract(env: Env, git_bin: String, git_args: Vec<String>, git_env: Option<HashMap<String, String>>, dest: String) -> Result<AsyncBlock<ArchiveExtractResult>> {
+    let pairs = env_pairs(git_env);
+    let future = async move {
+        let output = process_bytes::run_archive_extract(&git_bin, &git_args, pairs.as_deref(), &dest).await;
+        Ok(ArchiveExtractResult { git_code: output.git_code, tar_code: output.tar_code, stderr: Buffer::from(output.stderr), spawn_error: output.spawn_error })
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}

@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 체크포인트(`packages/agent/src/checkpoints.ts`)가 git과 `tar`를 Node `execFile`·`spawn` 대신 Rust 실행 함수(`runCommandBytes`·`runArchiveExtract`)로 부릅니다(ADR-195 4f A1, #1165). 인자·환경·재시도·오류 문구는 그대로이고, 출력은 바이트 그대로 받으며, `git archive | tar -x`는 Rust가 두 프로세스를 파이프로 잇습니다(같은 `tar`를 쓰므로 해제 규칙은 그대로). 더 엄격해진 곳: 입력이 없으면 stdin을 닫고, `check-ignore` 출력에 64MiB 상한이 생겼고, SIGTERM 뒤 5초 안에 안 죽으면 SIGKILL입니다.
 - `packages/spec`의 YAML 읽기(`studio.yaml`·compose)를 Rust(`saphyr-parser` 0.3.3 이벤트 + 직접 만든 core 스키마 해석·merge·중복 키·별칭 개수 규칙)로 옮겼습니다(ADR-197, #1160). 성공한 값은 JS `yaml`과 같고(무작위·merge 집중·실제 파일 차등에서 다른 값 0), JS와 다르게 읽을 수 있는 꼴(`!!` 태그, 구조 자리의 탭, 줄바꿈이 `\r`뿐인 줄, BOM, 문서가 둘 이상 등)은 "이 YAML 꼴은 지원하지 않습니다"로 거절합니다. 오류 글의 줄·칸은 파서의 것으로 바뀌고 옛 `[CODE]`는 없어졌습니다. JS `yaml`로 되돌아가는 길은 없습니다.
 - `GET /api/ai-accounts`(AI 계정 목록)를 Rust 앞단이 직접 답합니다(ADR-195 4d, #1154). 인증 판단이 사용자를 확인한 요청만 직접 답하고, 경로 꼴이 원문 그대로가 아니거나 설정·계정 파일이 Node가 500을 줄 꼴이면 Node로 넘깁니다. 응답은 Node와 같은 바이트입니다. 나머지 후보(라우팅 미리보기·결과표, 쓴 양, 구독 한도, 폴더 목록)는 Node 메모리 상태·외부 호출·ICU 정렬에 기대어 옮기지 않았습니다.
 - 프로젝트 목록·폴더 열기·토큰 보고서·저장소 이슈와 PR 경로는 Rust 앞단으로 옮기지 않기로 했습니다(ADR-195 4e, #1157). 응답에 프로젝트 정의 읽기(YAML·스키마 검증 오류 글)나 Node 메모리의 세션·캐시·외부 호출이 들어가 Node와 같은 응답을 확신할 수 없습니다. 동작은 바뀌지 않았습니다.
