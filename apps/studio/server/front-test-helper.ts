@@ -1,4 +1,5 @@
 import { execFile, spawn, type ChildProcess } from 'node:child_process';
+import net from 'node:net';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { promisify } from 'node:util';
@@ -102,4 +103,53 @@ export async function startNodeDirect(env: NodeJS.ProcessEnv, timeoutMs = 120_00
       await exited;
     },
   };
+}
+
+// ── 날것의 요청으로 응답을 받는 도구(차등 시험이 함께 쓴다) ──
+export const FRAME_HEADERS = new Set(['date', 'connection', 'keep-alive', 'transfer-encoding', 'content-length']);
+
+export interface Reply {
+  status: number;
+  headers: [string, string][];
+  body: string;
+}
+
+function parseChunked(body: Buffer): Buffer {
+  const parts: Buffer[] = [];
+  let at = 0;
+  while (at < body.length) {
+    const lineEnd = body.indexOf('\r\n', at);
+    if (lineEnd < 0) break;
+    const size = parseInt(body.subarray(at, lineEnd).toString('latin1'), 16);
+    if (!Number.isFinite(size) || size === 0) break;
+    parts.push(body.subarray(lineEnd + 2, lineEnd + 2 + size));
+    at = lineEnd + 2 + size + 2;
+  }
+  return Buffer.concat(parts);
+}
+
+/** 요청 줄·머리를 그대로 보내고(`Connection: close`를 더한다) 응답을 읽는다 */
+export function exchange(origin: string, requestLine: string, headers: [string, string][], isHead = false): Promise<Reply> {
+  const url = new URL(origin);
+  const text = [requestLine, ...headers.map(([n, v]) => `${n}: ${v}`), 'Connection: close', '', ''].join('\r\n');
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(Number(url.port), url.hostname, () => socket.write(Buffer.from(text, 'latin1')));
+    const chunks: Buffer[] = [];
+    socket.on('data', (chunk: Buffer) => chunks.push(chunk));
+    socket.on('error', reject);
+    socket.on('close', () => {
+      const raw = Buffer.concat(chunks);
+      const split = raw.indexOf('\r\n\r\n');
+      if (split < 0) return reject(new Error(`응답 머리가 없습니다: ${raw.toString('latin1')}`));
+      const [statusLine, ...lines] = raw.subarray(0, split).toString('latin1').split('\r\n');
+      const parsed = lines.map((line) => {
+        const colon = line.indexOf(':');
+        return [line.slice(0, colon).toLowerCase(), line.slice(colon + 1).trim()] as [string, string];
+      });
+      const chunked = parsed.some(([n, v]) => n === 'transfer-encoding' && v.includes('chunked'));
+      const rest = raw.subarray(split + 4);
+      const body = isHead ? Buffer.alloc(0) : chunked ? parseChunked(rest) : rest;
+      resolve({ status: Number(/^HTTP\/1\.1 (\d{3})/.exec(statusLine!)?.[1]), headers: parsed.filter(([n]) => !FRAME_HEADERS.has(n)), body: body.toString('utf8') });
+    });
+  });
 }
