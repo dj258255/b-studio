@@ -693,6 +693,7 @@ export interface NativeGitEntry {
   dir: string;
   kind: 'directory' | 'file';
   hasState: boolean;
+  aliases: readonly string[];
 }
 
 export interface NativeDumpNormalizer {
