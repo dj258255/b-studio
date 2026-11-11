@@ -42,7 +42,7 @@ export function runCommand(
   args: string[],
   { signal, env, input, cwd, maxBuffer }: StreamExecOptions & { input?: string; cwd?: string; maxBuffer?: number } = {},
 ): Promise<ExecResult> {
-  // maxBuffer를 주면 스트림마다 그 바이트에 닿는 순간 Rust가 자식을 멈춘다(주지 않으면 256MB). 다 읽은 뒤에 재지 않는다
+  // maxBuffer를 주면 스트림마다 그 바이트를 넘는 순간 Rust가 자식을 멈춘다(주지 않으면 256MB. 정확히 그만큼은 넘친 것이 아니다). 다 읽은 뒤에 재지 않는다
   return native.runCommand(bin, args, input ?? null, definedEnv(env), cwd ?? null, maxBuffer ?? null, signal);
 }
 
