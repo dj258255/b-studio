@@ -93,6 +93,22 @@ describe('project workflow', () => {
     expect(reviewChanges(project, ['web/page.tsx']).every((check) => check.ok)).toBe(true);
   });
 
+  it('쓰기 직전 고정값과 같아 되돌린 것으로 확인된 파일만 보호 경로 확인에서 빠지고, 파일 수 상한은 그 파일도 센다 (이슈 #992)', () => {
+    const project = projectWith({ protectedPaths: ['infra'], maxChangedFiles: 1 });
+    const files = ['infra/a', 'infra/b', 'web/page.tsx'];
+    const protectedCheck = (restored: string[]) => reviewChanges(project, files, restored).find((check) => check.name === 'protected-paths')!;
+
+    expect(protectedCheck([])).toMatchObject({ ok: false });
+    const partial = protectedCheck(['infra/a']);
+    expect(partial.ok).toBe(false);
+    expect(partial.detail).toContain('infra/b');
+    expect(partial.detail).not.toContain('infra/a');
+    expect(protectedCheck(['infra/a', 'infra/b'])).toMatchObject({ ok: true });
+    // 바뀐 파일 목록에 없는 이름은 아무것도 빼지 않는다
+    expect(protectedCheck(['infra/c'])).toMatchObject({ ok: false });
+    expect(reviewChanges(project, files, ['infra/a', 'infra/b']).find((check) => check.name === 'change-size')).toMatchObject({ ok: false });
+  });
+
   it('배포 조건은 체크포인트에 남은 통과 기록으로 판정하고, 기록이 없는 체크포인트는 checkpoint 외 조건을 채우지 못한다', () => {
     const strict = projectWith({ tests: [unit], releaseRequires: ['test', 'review', 'checkpoint'] });
     expect(releaseBlockers(strict, ['run', 'contract_check', 'test', 'review'])).toEqual([]);
