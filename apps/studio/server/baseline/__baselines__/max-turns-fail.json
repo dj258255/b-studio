@@ -599,456 +599,6 @@
       "app/hello.txt": "안녕\n"
     },
     "sessionJson": {
-      "version": 1,
-      "savedAt": "<savedAt>",
-      "owner": {
-        "pid": "<pid>"
-      },
-      "snapshot": {
-        "id": "<sid>",
-        "projectId": "demo",
-        "projectName": "demo",
-        "workDir": "<root>/sessions/demo-<sid>",
-        "workspace": "copy",
-        "status": "ready",
-        "mode": "claude-code",
-        "backend": "claude-code",
-        "running": false,
-        "owner": "local",
-        "experimental": false,
-        "terminal": false,
-        "hasDeploy": false,
-        "services": [
-          {
-            "name": "app",
-            "template": "nextjs",
-            "preview": "browser",
-            "state": "ready",
-            "hasContract": false,
-            "url": "http://127.0.0.1:<port>"
-          }
-        ],
-        "externals": [],
-        "checkpoints": [
-          {
-            "sha": "<sha:1>",
-            "shortSha": "<sha:1>",
-            "message": "세션 시작 (main 브랜치)",
-            "createdAt": "<createdAt>",
-            "files": [
-              "app/hello.txt",
-              "app/readme.txt",
-              "compose.yaml",
-              "studio.yaml"
-            ]
-          }
-        ],
-        "repository": {
-          "remote": "<root>/projects/demo",
-          "kind": "local",
-          "base": "main",
-          "branch": "b-studio/demo-<sid>",
-          "sourceDirtyFiles": 0,
-          "canCreatePullRequest": false
-        },
-        "bootNetwork": [
-          {
-            "service": "app",
-            "rxBytes": 1000,
-            "txBytes": 2000
-          }
-        ],
-        "tokens": {
-          "inputTokens": 20,
-          "outputTokens": 5,
-          "cacheReadTokens": 1,
-          "cacheWriteTokens": 2
-        },
-        "usage": {
-          "at": "<at>",
-          "services": [
-            {
-              "service": "app",
-              "containerName": "<sandbox>-app-1",
-              "role": "managed",
-              "state": "running",
-              "cpuPercent": 0.5,
-              "memoryBytes": 10485760,
-              "networkRxBytes": 1000,
-              "networkTxBytes": 2000,
-              "oomKilled": false
-            },
-            {
-              "service": "b-studio-edge",
-              "containerName": "<sandbox>-b-studio-edge-1",
-              "role": "platform",
-              "state": "running",
-              "cpuPercent": 0.5,
-              "memoryBytes": 10485760,
-              "networkRxBytes": 1000,
-              "networkTxBytes": 2000,
-              "oomKilled": false
-            }
-          ]
-        },
-        "fileRevision": 2
-      },
-      "history": [
-        {
-          "type": "run_started",
-          "runId": "<run:1>",
-          "request": "hello.txt를 고쳐 주세요",
-          "by": "local",
-          "at": "<at>",
-          "backend": "claude-code",
-          "taskKind": {
-            "complexity": "simple",
-            "risk": "normal"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "session",
-            "backend": "로컬 Claude Agent (CLI 9.9.9)",
-            "model": "test-model",
-            "auth": "max 구독",
-            "effort": "high"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "turn",
-            "turn": 1
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "tool_call",
-            "name": "write_file",
-            "input": {
-              "path": "app/hello.txt",
-              "content": "상한 전 틀림\n"
-            }
-          }
-        },
-        {
-          "type": "notice",
-          "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
-          "at": "<at>"
-        },
-        {
-          "type": "boot_network",
-          "at": "<at>",
-          "network": [
-            {
-              "service": "app",
-              "rxBytes": 1000,
-              "txBytes": 2000
-            }
-          ]
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "policy",
-            "tool": "write_file",
-            "decision": "allow"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "tool_result",
-            "name": "write_file",
-            "ok": true,
-            "content": "wrote app/hello.txt",
-            "chars": 19,
-            "rawChars": 19
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "turn",
-            "turn": 2
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "text",
-            "text": "여기까지."
-          }
-        },
-        {
-          "type": "tokens",
-          "runId": "<run:1>",
-          "usage": {
-            "inputTokens": 20,
-            "outputTokens": 5,
-            "cacheReadTokens": 1,
-            "cacheWriteTokens": 2
-          },
-          "sessionTokens": {
-            "inputTokens": 20,
-            "outputTokens": 5,
-            "cacheReadTokens": 1,
-            "cacheWriteTokens": 2
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "stage",
-            "stage": "run",
-            "source": "platform"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "verify_start",
-            "files": [
-              "app/hello.txt"
-            ]
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "stage",
-            "stage": "contract_check",
-            "source": "platform"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "verify_result",
-            "report": {
-              "ok": true,
-              "sync": {
-                "elapsedMs": "<elapsedMs>"
-              },
-              "restarted": [
-                {
-                  "service": "app",
-                  "ready": true
-                }
-              ],
-              "contracts": [],
-              "unverifiedFiles": [],
-              "secretLeaks": [],
-              "skippedOff": []
-            },
-            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
-            "moreChecks": true
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "stage",
-            "stage": "test",
-            "source": "platform"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "stage",
-            "stage": "review",
-            "source": "platform"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "workflow_check",
-            "check": {
-              "stage": "test",
-              "name": "app-test",
-              "ok": false,
-              "attempts": 1,
-              "detail": "종료 코드 1\nFAIL app-test"
-            }
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "workflow_check",
-            "check": {
-              "stage": "review",
-              "name": "protected-paths",
-              "ok": true,
-              "attempts": 1
-            }
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "gate_done",
-            "ok": false
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "failed",
-            "result": {
-              "status": "failed",
-              "summary": "최대 턴 수(60)를 넘었습니다",
-              "changedFiles": [
-                "app/hello.txt"
-              ],
-              "report": {
-                "ok": true,
-                "sync": {
-                  "elapsedMs": "<elapsedMs>"
-                },
-                "restarted": [
-                  {
-                    "service": "app",
-                    "ready": true
-                  }
-                ],
-                "contracts": [],
-                "unverifiedFiles": [],
-                "secretLeaks": [],
-                "skippedOff": []
-              },
-              "checks": [
-                {
-                  "stage": "test",
-                  "name": "app-test",
-                  "ok": false,
-                  "attempts": 1,
-                  "detail": "종료 코드 1\nFAIL app-test"
-                },
-                {
-                  "stage": "review",
-                  "name": "protected-paths",
-                  "ok": true,
-                  "attempts": 1
-                }
-              ],
-              "gateOutcome": "retry",
-              "passedStages": [
-                "run",
-                "contract_check",
-                "review"
-              ],
-              "verifyAttempts": 1,
-              "turns": 2,
-              "usage": {
-                "inputTokens": 20,
-                "outputTokens": 5,
-                "cacheReadTokens": 1,
-                "cacheWriteTokens": 2
-              },
-              "metrics": {
-                "modelCalls": 2,
-                "maxContextTokens": 0,
-                "toolMs": "<toolMs>",
-                "gateMs": "<gateMs>",
-                "usageByModel": {
-                  "test-model": {
-                    "inputTokens": 20,
-                    "outputTokens": 5,
-                    "cacheReadTokens": 1,
-                    "cacheWriteTokens": 2
-                  }
-                }
-              },
-              "sessionId": "<uuid:1>",
-              "failureReason": "max_turns"
-            }
-          }
-        },
-        {
-          "type": "reverted",
-          "runId": "<run:1>",
-          "files": [
-            "app/hello.txt"
-          ],
-          "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..d92ab0e 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+상한 전 틀림\n",
-          "restarted": [
-            {
-              "service": "app",
-              "ready": true
-            }
-          ],
-          "databases": [],
-          "sync": {
-            "elapsedMs": "<elapsedMs>"
-          },
-          "backup": {
-            "id": "<time>-0001",
-            "files": [
-              "app/hello.txt"
-            ],
-            "createdAt": "<createdAt>"
-          }
-        },
-        {
-          "type": "run_finished",
-          "runId": "<run:1>",
-          "status": "failed",
-          "summary": "최대 턴 수(60)를 넘었습니다",
-          "turns": 2,
-          "metrics": {
-            "modelCalls": 2,
-            "maxContextTokens": 0,
-            "toolMs": "<toolMs>",
-            "gateMs": "<gateMs>",
-            "usageByModel": {
-              "test-model": {
-                "inputTokens": 20,
-                "outputTokens": 5,
-                "cacheReadTokens": 1,
-                "cacheWriteTokens": 2
-              }
-            }
-          },
-          "durationMs": "<durationMs>",
-          "usage": {
-            "inputTokens": 20,
-            "outputTokens": 5,
-            "cacheReadTokens": 1,
-            "cacheWriteTokens": 2
-          },
-          "sessionTokens": {
-            "inputTokens": 20,
-            "outputTokens": 5,
-            "cacheReadTokens": 1,
-            "cacheWriteTokens": 2
-          }
-        }
-      ],
-      "conversation": [],
-      "demoIndex": 0,
       "claudeCode": {
         "notes": [],
         "sessionId": "<uuid:1>"
@@ -1060,23 +610,473 @@
       "commandCode": {
         "notes": []
       },
-      "openCode": {
-        "notes": []
-      },
+      "conversation": [],
+      "demoIndex": 0,
       "gemini": {
         "notes": []
       },
-      "sourceDirtyFiles": 0,
-      "sandbox": {
-        "id": "<sandbox>",
-        "provider": "local-docker"
-      },
-      "previewToken": "<previewToken>",
       "git": {
         "branch": "b-studio/demo-<sid>",
         "lastCheckpoint": "<sha:1>",
         "originUrl": "<root>/projects/demo"
-      }
+      },
+      "history": [
+        {
+          "at": "<at>",
+          "backend": "claude-code",
+          "by": "local",
+          "request": "hello.txt를 고쳐 주세요",
+          "runId": "<run:1>",
+          "taskKind": {
+            "complexity": "simple",
+            "risk": "normal"
+          },
+          "type": "run_started"
+        },
+        {
+          "event": {
+            "auth": "max 구독",
+            "backend": "로컬 Claude Agent (CLI 9.9.9)",
+            "effort": "high",
+            "model": "test-model",
+            "type": "session"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "turn": 1,
+            "type": "turn"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "input": {
+              "content": "상한 전 틀림\n",
+              "path": "app/hello.txt"
+            },
+            "name": "write_file",
+            "type": "tool_call"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "at": "<at>",
+          "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+          "type": "notice"
+        },
+        {
+          "at": "<at>",
+          "network": [
+            {
+              "rxBytes": 1000,
+              "service": "app",
+              "txBytes": 2000
+            }
+          ],
+          "type": "boot_network"
+        },
+        {
+          "event": {
+            "decision": "allow",
+            "tool": "write_file",
+            "type": "policy"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "chars": 19,
+            "content": "wrote app/hello.txt",
+            "name": "write_file",
+            "ok": true,
+            "rawChars": 19,
+            "type": "tool_result"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "turn": 2,
+            "type": "turn"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "text": "여기까지.",
+            "type": "text"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "runId": "<run:1>",
+          "sessionTokens": {
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2,
+            "inputTokens": 20,
+            "outputTokens": 5
+          },
+          "type": "tokens",
+          "usage": {
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2,
+            "inputTokens": 20,
+            "outputTokens": 5
+          }
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "run",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "files": [
+              "app/hello.txt"
+            ],
+            "type": "verify_start"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "contract_check",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "moreChecks": true,
+            "report": {
+              "contracts": [],
+              "ok": true,
+              "restarted": [
+                {
+                  "ready": true,
+                  "service": "app"
+                }
+              ],
+              "secretLeaks": [],
+              "skippedOff": [],
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "unverifiedFiles": []
+            },
+            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+            "type": "verify_result"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "test",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "review",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "check": {
+              "attempts": 1,
+              "detail": "종료 코드 1\nFAIL app-test",
+              "name": "app-test",
+              "ok": false,
+              "stage": "test"
+            },
+            "type": "workflow_check"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "check": {
+              "attempts": 1,
+              "name": "protected-paths",
+              "ok": true,
+              "stage": "review"
+            },
+            "type": "workflow_check"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "ok": false,
+            "type": "gate_done"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "result": {
+              "changedFiles": [
+                "app/hello.txt"
+              ],
+              "checks": [
+                {
+                  "attempts": 1,
+                  "detail": "종료 코드 1\nFAIL app-test",
+                  "name": "app-test",
+                  "ok": false,
+                  "stage": "test"
+                },
+                {
+                  "attempts": 1,
+                  "name": "protected-paths",
+                  "ok": true,
+                  "stage": "review"
+                }
+              ],
+              "failureReason": "max_turns",
+              "gateOutcome": "retry",
+              "metrics": {
+                "gateMs": "<gateMs>",
+                "maxContextTokens": 0,
+                "modelCalls": 2,
+                "toolMs": "<toolMs>",
+                "usageByModel": {
+                  "test-model": {
+                    "cacheReadTokens": 1,
+                    "cacheWriteTokens": 2,
+                    "inputTokens": 20,
+                    "outputTokens": 5
+                  }
+                }
+              },
+              "passedStages": [
+                "run",
+                "contract_check",
+                "review"
+              ],
+              "report": {
+                "contracts": [],
+                "ok": true,
+                "restarted": [
+                  {
+                    "ready": true,
+                    "service": "app"
+                  }
+                ],
+                "secretLeaks": [],
+                "skippedOff": [],
+                "sync": {
+                  "elapsedMs": "<elapsedMs>"
+                },
+                "unverifiedFiles": []
+              },
+              "sessionId": "<uuid:1>",
+              "status": "failed",
+              "summary": "최대 턴 수(60)를 넘었습니다",
+              "turns": 2,
+              "usage": {
+                "cacheReadTokens": 1,
+                "cacheWriteTokens": 2,
+                "inputTokens": 20,
+                "outputTokens": 5
+              },
+              "verifyAttempts": 1
+            },
+            "type": "failed"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "backup": {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt"
+            ],
+            "id": "<time>-0001"
+          },
+          "databases": [],
+          "files": [
+            "app/hello.txt"
+          ],
+          "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..d92ab0e 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+상한 전 틀림\n",
+          "restarted": [
+            {
+              "ready": true,
+              "service": "app"
+            }
+          ],
+          "runId": "<run:1>",
+          "sync": {
+            "elapsedMs": "<elapsedMs>"
+          },
+          "type": "reverted"
+        },
+        {
+          "durationMs": "<durationMs>",
+          "metrics": {
+            "gateMs": "<gateMs>",
+            "maxContextTokens": 0,
+            "modelCalls": 2,
+            "toolMs": "<toolMs>",
+            "usageByModel": {
+              "test-model": {
+                "cacheReadTokens": 1,
+                "cacheWriteTokens": 2,
+                "inputTokens": 20,
+                "outputTokens": 5
+              }
+            }
+          },
+          "runId": "<run:1>",
+          "sessionTokens": {
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2,
+            "inputTokens": 20,
+            "outputTokens": 5
+          },
+          "status": "failed",
+          "summary": "최대 턴 수(60)를 넘었습니다",
+          "turns": 2,
+          "type": "run_finished",
+          "usage": {
+            "cacheReadTokens": 1,
+            "cacheWriteTokens": 2,
+            "inputTokens": 20,
+            "outputTokens": 5
+          }
+        }
+      ],
+      "openCode": {
+        "notes": []
+      },
+      "owner": {
+        "pid": "<pid>"
+      },
+      "previewToken": "<previewToken>",
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "savedAt": "<savedAt>",
+      "snapshot": {
+        "backend": "claude-code",
+        "bootNetwork": [
+          {
+            "rxBytes": 1000,
+            "service": "app",
+            "txBytes": 2000
+          }
+        ],
+        "checkpoints": [
+          {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ],
+            "message": "세션 시작 (main 브랜치)",
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>"
+          }
+        ],
+        "experimental": false,
+        "externals": [],
+        "fileRevision": 2,
+        "hasDeploy": false,
+        "id": "<sid>",
+        "mode": "claude-code",
+        "owner": "local",
+        "projectId": "demo",
+        "projectName": "demo",
+        "repository": {
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "canCreatePullRequest": false,
+          "kind": "local",
+          "remote": "<root>/projects/demo",
+          "sourceDirtyFiles": 0
+        },
+        "running": false,
+        "services": [
+          {
+            "hasContract": false,
+            "name": "app",
+            "preview": "browser",
+            "state": "ready",
+            "template": "nextjs",
+            "url": "http://127.0.0.1:<port>"
+          }
+        ],
+        "status": "ready",
+        "terminal": false,
+        "tokens": {
+          "cacheReadTokens": 1,
+          "cacheWriteTokens": 2,
+          "inputTokens": 20,
+          "outputTokens": 5
+        },
+        "usage": {
+          "at": "<at>",
+          "services": [
+            {
+              "containerName": "<sandbox>-app-1",
+              "cpuPercent": 0.5,
+              "memoryBytes": 10485760,
+              "networkRxBytes": 1000,
+              "networkTxBytes": 2000,
+              "oomKilled": false,
+              "role": "managed",
+              "service": "app",
+              "state": "running"
+            },
+            {
+              "containerName": "<sandbox>-b-studio-edge-1",
+              "cpuPercent": 0.5,
+              "memoryBytes": 10485760,
+              "networkRxBytes": 1000,
+              "networkTxBytes": 2000,
+              "oomKilled": false,
+              "role": "platform",
+              "service": "b-studio-edge",
+              "state": "running"
+            }
+          ]
+        },
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy"
+      },
+      "sourceDirtyFiles": 0,
+      "version": 1
     }
   },
   "docker": {
