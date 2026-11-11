@@ -1,6 +1,6 @@
 //! 시험용 가짜 docker(셸 스크립트). 명령마다 `<키>.<호출 번호>.out|err|code|sleep`(없으면 `<키>.out|err|code|sleep`)을 읽어 흉내 내고,
 //! 부른 인자를 `calls`에 남긴다. 키: `run`·`inspect`·`volume`·`rm`(docker rm)·`startid`(docker start)·`compose`의 명령 단어
-//! (`config`·`up`·`ps`·`down`·`start`·`composerm`(compose rm)·`exec`). 진짜 docker는 쓰지 않는다.
+//! (`config`·`up`·`ps`·`down`·`start`·`composerm`(compose rm)·`exec`)·`info`·`imagels`(image ls)·`imagerm`(image rm). 진짜 docker는 쓰지 않는다.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -22,6 +22,8 @@ case "$1" in
   inspect) key=inspect; [ "$2" = --format ] && key=state ;;
   volume) key=volume ;;
   rm) key=rm ;;
+  info) key=info ;;
+  image) key=imagels; [ "$2" = rm ] && key=imagerm ;;
   start) key=startid ;;
   compose) for a in "$@"; do case "$a" in config) key=config ;; up) key=up ;; ps) key=ps ;; down) key=down ;; start) key=start ;; rm) key=composerm ;; exec) key=exec ;; esac; done ;;
 esac
