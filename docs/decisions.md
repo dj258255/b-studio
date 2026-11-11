@@ -10019,6 +10019,15 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 중간 상태(Rust 앞단 + Node)는 4g까지 이어진다. 그동안 장애가 나면 앞단과 Node 로그를 함께 봐야 한다. 앞단의 로그는 Node 로그와 같은 파일에 앞머리를 붙여 쓴다.
 - 4a는 사용자에게 보이는 동작이 바뀌지 않아야 한다. 바뀌면 그것이 결함이다.
 
+### 덧붙임: 4a 결과 — 앞단을 세우고 모든 경로를 넘긴다 (2026-11-11, [#1149](https://github.com/dj258255/b-studio/issues/1149))
+- `crates/bstudio-server`(axum =0.8.9, hyper =1.12.0, hyper-util =0.1.21, http-body-util =0.1.5)가 공개 포트를 열고, Node를 `<상태 폴더>/launch/run/studio-<pid>.sock`(권한 0700 폴더)의 자식으로 띄운 뒤 `/api/health`가 200이 되면 듣기 시작한다. `studio launch`는 `cargo build --release --locked -p bstudio-server`를 부르고, 빌드하지 못하면 옛 방식(Node가 공개 포트를 직접 엶)으로 돌아가지 않고 멈춘다.
+- 프록시는 라이브러리 대신 `hyper::client::conn::http1`로 요청마다 소켓을 새로 연다. legacy 클라이언트는 절대 URI와 Host 주입을 전제로 해서 결정 2(Host를 다시 쓰지 않음)를 지키기 어렵다.
+- **결정 2를 좁혔다: `Connection`에 이름이 적힌 헤더는 빼지 않는다(RFC 9110 7.6.1과 다르게).** 받는 쪽은 우리 Node이고 Node는 그 이름을 따로 다루지 않는다. 빼면 직접 붙을 때와 판단이 갈린다. 손님이 `Connection: origin`을 보내면 Origin이 빠져 같은 출처 확인이 "Origin 없음"으로 통과했다(첫 구현을 검토하다 찾았다. 브라우저 스크립트는 Connection을 정할 수 없어 바로 CSRF가 되지는 않는다). 빼는 것은 고정 목록뿐이다.
+- Upgrade 요청은 업그레이드 없이 보통 요청으로 넘긴다. Node 22도 업그레이드 리스너가 없으면 보통 요청으로 답한다(직접 확인).
+- 시험: 프록시 규칙 11개(`tests/proxy.rs`, 날것의 바이트로 Host·쿠키 순서·Origin·`x-forwarded-*`·경로 원문 보존, hop-by-hop, SSE 첫 조각 즉시, 본문 흘림, 손님이 끊으면 Node 연결도 끊김, 헤더 시간 한도, 502), 실행 파일 6개(소켓 폴더 0700, 신호 전달, Node 종료 코드 전달, 준비 한도, 긴 소켓 경로, 0755 폴더 거절), `contract.test.ts` 24개를 앞단 너머로 한 벌 더(`contract.front.test.ts`), 진짜 앞단이 진짜 Node를 띄우는 `front.test.ts`.
+- 실제 세션(2026-11-11, [기록](experiments/2026-11-11-rust-front-session.md)): `pnpm studio launch`로 앞단이 공개 포트를 열고 Node가 0700 폴더의 소켓에서 듣는 것을 `ps`·`lsof`로 확인했고, 실제 Claude Code 세션 하나가 desk에서 게이트 통과·체크포인트 1개까지 갔다. 앞단 로그에 502·오류는 없었다.
+- 남은 것: 운영 이미지와 `apps/studio`의 시작 스크립트는 아직 Node를 직접 띄운다. 앞단이 SIGKILL로 죽으면 Node 자식이 남는다(macOS에 PDEATHSIG가 없다. `studio stop`은 프로세스 그룹에 신호를 보낸다). ASCII가 아닌 바이트가 든 요청 줄은 hyper가 400으로 거절한다(Node는 받았다). 프록시 꼴(absolute-form) 요청 대상은 origin-form으로 바뀐다(Node는 둘 다 같은 경로로 읽는다).
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

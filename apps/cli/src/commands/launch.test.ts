@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HEALTH_PATH, isBStudioHealth, LAUNCH_MODES, launchArgs, MODE_ENV, openLaunchLog, runLaunch, studioOrigin, studioUrl, type ExecResult, type LaunchDeps, type ProbeResult } from './launch';
+import { frontBinaryPath, frontBuildArgs, HEALTH_PATH, isBStudioHealth, LAUNCH_MODES, launchArgs, MODE_ENV, openLaunchLog, runLaunch, studioOrigin, studioUrl, type ExecResult, type LaunchDeps, type ProbeResult } from './launch';
 
 let dir: string;
 
@@ -36,6 +36,8 @@ function harness(
     installMarker?: string;
     /** 사람에게 묻는 답(#943). 생략하면 묻지 못하는 환경(터미널이 아님)이다 */
     answer?: boolean;
+    /** 앞단 실행 파일이 빌드 뒤에도 없는 상태 */
+    frontMissing?: boolean;
   } = {},
 ): Harness {
   const probes: string[] = [];
@@ -50,7 +52,7 @@ function harness(
     platform: options.platform ?? 'darwin',
     env: { PATH: '/usr/bin:/bin', HOME: dir, B_STUDIO_BACKENDS: 'kept' },
     repoRoot: '/repo',
-    paths: { log: path.join(dir, 'studio.log'), pid: path.join(dir, 'studio.pid') },
+    paths: { log: path.join(dir, 'studio.log'), pid: path.join(dir, 'studio.pid'), run: path.join(dir, 'run') },
     probe: async (url) => {
       probes.push(url);
       return probeQueue.shift() ?? { reachable: false, status: 0, body: '' };
@@ -74,6 +76,7 @@ function harness(
     writeInstallMarker: async (hash) => {
       markerWrites.push(hash);
     },
+    fileExists: async () => options.frontMissing !== true,
     readyTimeoutMs: 3,
     readyIntervalMs: 1,
     ...(options.answer === undefined ? {} : { ask: async () => options.answer! }),
@@ -81,6 +84,8 @@ function harness(
   return { deps, probes, execs, spawns, killed, markerWrites };
 }
 
+/** 앞단 빌드 명령(cargo는 바뀐 것이 없으면 바로 끝난다) */
+const CARGO_BUILD = 'cargo build --release --locked --manifest-path /repo/Cargo.toml -p bstudio-server';
 const OK: ExecResult = { code: 0, stdout: '', stderr: '' };
 const FAIL: ExecResult = { code: 1, stdout: '', stderr: 'fail' };
 const up: ProbeResult = { reachable: true, status: 200, body: '<title>b-studio</title>' };
@@ -100,8 +105,10 @@ describe('launch 유틸', () => {
     expect(MODE_ENV).toEqual({ local: 'claude-code', demo: 'demo', commandcode: 'commandcode', codex: 'codex' });
     expect(studioUrl(3123)).toBe('http://127.0.0.1:3123/');
     expect(studioOrigin(3123)).toBe('http://127.0.0.1:3123');
-    // Next 없이 도는 Node 서버(tsx)만 띄운다(화면이 없어 next dev 길은 없다)
-    expect(launchArgs(3000)).toEqual(['exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--hostname', '127.0.0.1', '--port', '3000']);
+    // 공개 포트는 Rust 앞단이 열고, Node 서버(tsx, Next 없음)는 앞단이 소켓의 자식으로 띄운다(ADR-195)
+    expect(launchArgs(3000, '/run')).toEqual(['--hostname', '127.0.0.1', '--port', '3000', '--run-dir', '/run', '--', 'pnpm', 'exec', 'tsx', '--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts']);
+    expect(frontBinaryPath('/repo')).toBe('/repo/target/release/bstudio-server');
+    expect(frontBuildArgs('/repo')).toEqual(['build', '--release', '--locked', '--manifest-path', '/repo/Cargo.toml', '-p', 'bstudio-server']);
     expect(HEALTH_PATH).toBe('/api/health');
     expect(isBStudioHealth('{"status":"ok","app":"b-studio"}')).toBe(true);
     expect(isBStudioHealth('{"status":"ok"}')).toBe(false);
@@ -175,11 +182,11 @@ describe('runLaunch', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3123 }, h.deps)).toBe(0);
-    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'colima version', 'colima start']);
+    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'colima version', 'colima start', CARGO_BUILD]);
     expect(h.spawns).toHaveLength(1);
     const spawn = h.spawns[0]!;
-    expect(spawn.command).toBe('pnpm');
-    expect(spawn.args).toEqual(launchArgs(3123));
+    expect(spawn.command).toBe('/repo/target/release/bstudio-server');
+    expect(spawn.args).toEqual(launchArgs(3123, path.join(dir, 'run')));
     expect(spawn.cwd).toBe('/repo');
     expect(spawn.logPath).toBe(path.join(dir, 'studio.log'));
     // 모드는 B_STUDIO_MODE로, 사용자 환경 변수는 그대로 넘긴다
@@ -194,7 +201,7 @@ describe('runLaunch', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'demo', port: 3000 }, h.deps)).toBe(0);
-    expect(h.execs.map((entry) => entry.command)).toEqual(['docker']);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker', 'cargo']);
     expect(h.spawns[0]!.env.B_STUDIO_MODE).toBe('demo');
   });
 
@@ -218,7 +225,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(0);
-    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'pnpm install --frozen-lockfile --prefer-offline']);
+    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'pnpm install --frozen-lockfile --prefer-offline', CARGO_BUILD]);
     expect(h.markerWrites).toEqual(['abc']);
     expect(h.spawns).toHaveLength(1);
   });
@@ -228,7 +235,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(0);
-    expect(h.execs.map((entry) => entry.command)).toEqual(['docker', 'pnpm']);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker', 'pnpm', 'cargo']);
     expect(h.markerWrites).toEqual(['abc']);
   });
 
@@ -237,7 +244,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(0);
-    expect(h.execs.map((entry) => entry.command)).toEqual(['docker']);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker', 'cargo']);
     expect(h.markerWrites).toEqual([]);
     expect(h.spawns).toHaveLength(1);
   });
@@ -247,7 +254,7 @@ describe('runLaunch: 의존성(pnpm-lock.yaml이 바뀌면 띄우기 전에 pnpm
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(0);
-    expect(h.execs.map((entry) => entry.command)).toEqual(['docker']);
+    expect(h.execs.map((entry) => entry.command)).toEqual(['docker', 'cargo']);
     expect(h.markerWrites).toEqual([]);
   });
 
@@ -359,5 +366,49 @@ describe('runLaunch: 브라우저를 열지 않는다(화면은 터미널 작업
     expect(h.spawns[0]!.env.B_STUDIO_EXPERIMENTAL).toBe('1');
     // harness의 사용자 환경에 B_STUDIO_BACKENDS=kept가 있다
     expect(h.spawns[0]!.env.B_STUDIO_BACKENDS).toBe('kept');
+  });
+});
+
+describe('runLaunch: 앞단(Rust) 빌드와 실행 파일(ADR-195 4a)', () => {
+  it('띄우기 전에 앞단을 빌드하고(Docker 확인 뒤, 의존성 설치 뒤) 빌드한 실행 파일을 띄운다', async () => {
+    const h = harness({ probe: [down, health], exec: [OK, OK], lockHash: 'abc', installMarker: 'old' });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(0);
+    expect(h.execs.map((entry) => `${entry.command} ${entry.args.join(' ')}`)).toEqual(['docker info', 'pnpm install --frozen-lockfile --prefer-offline', CARGO_BUILD]);
+    expect(h.spawns.map((spawn) => spawn.command)).toEqual(['/repo/target/release/bstudio-server']);
+    // pnpm이 아니라 앞단을 직접 띄운다. Node 서버는 앞단이 `--` 뒤의 명령으로 띄운다
+    expect(h.spawns[0]!.args).toContain('--');
+  });
+
+  it('앞단 빌드가 실패하면 서버를 띄우지 않고 이유를 찍고 종료 코드 1(옛 Node 직접 띄우기로 돌아가지 않는다)', async () => {
+    const h = harness({ probe: [down], exec: [OK, { code: 101, stdout: '', stderr: 'error: linker not found' }] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+    const text = error.mock.calls.flat().join('\n');
+    expect(text).toContain('앞단');
+    expect(text).toContain('linker not found');
+    expect(text).toContain('rustup');
+  });
+
+  it('빌드가 끝났는데 실행 파일이 없으면 띄우지 않고 종료 코드 1', async () => {
+    const h = harness({ probe: [down], exec: [OK], frontMissing: true });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(1);
+    expect(h.spawns).toEqual([]);
+    expect(error.mock.calls.flat().join('\n')).toContain('/repo/target/release/bstudio-server');
+  });
+
+  it('이미 떠 있으면 앞단을 빌드하지 않는다', async () => {
+    const h = harness({ probe: [health, nestedOk] });
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    expect(await runLaunch({ mode: 'local', port: 3000 }, h.deps)).toBe(0);
+    expect(h.execs).toEqual([]);
   });
 });

@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -80,4 +81,47 @@ describe('Node 서버(실제로 띄워 보기)', () => {
   it('토큰 없는 터미널 통로는 403', async () => {
     expect((await fetch(`${origin}/api/terminals/stream?ids=`)).status).toBe(403);
   });
+});
+
+describe('Node 서버: --socket(앞단이 붙는 방식, ADR-195)', () => {
+  it('--socket이 있으면 TCP 대신 그 유닉스 소켓에서만 듣는다', async () => {
+    const dir = await mkdtemp(path.join('/tmp', 'bs-'));
+    const socketPath = path.join(dir, 's.sock');
+    const node = spawn(path.join(repoRoot, 'node_modules/.bin/tsx'), ['--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--socket', socketPath, '--port', '0'], {
+      cwd: repoRoot,
+      env: { NODE_ENV: 'test', PATH: process.env.PATH, HOME: dir, B_STUDIO_MODE: 'demo', B_STUDIO_SESSIONS_DIR: path.join(dir, 'sessions'), B_STUDIO_LOCAL_TOKEN_FILE: path.join(dir, 'local-token') },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      let output = '';
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`소켓 서버가 뜨지 않았습니다:\n${output}`)), 60_000);
+        const onData = (chunk: Buffer) => {
+          output += chunk.toString();
+          if (output.includes(socketPath)) {
+            clearTimeout(timer);
+            resolve();
+          }
+        };
+        node.stdout!.on('data', onData);
+        node.stderr!.on('data', (chunk: Buffer) => (output += chunk.toString()));
+        node.once('exit', (code) => reject(new Error(`서버가 끝났습니다(${code}):\n${output}`)));
+      });
+      // TCP 주소는 찍지 않는다(앞단이 그 줄을 찍는다)
+      expect(output).not.toMatch(/http:\/\/127\.0\.0\.1/);
+      const body = await new Promise<string>((resolve, reject) => {
+        http.get({ socketPath, path: '/api/health', headers: { host: '127.0.0.1:3000' } }, (response) => {
+          let text = '';
+          response.on('data', (chunk: Buffer) => (text += chunk.toString()));
+          response.on('end', () => resolve(text));
+        }).on('error', reject);
+      });
+      expect(JSON.parse(body)).toMatchObject({ status: 'ok', app: 'b-studio' });
+    } finally {
+      const exited = new Promise((resolve) => node.once('exit', resolve));
+      node.kill('SIGTERM');
+      await exited;
+      await rm(dir, { recursive: true, force: true });
+    }
+  }, 90_000);
 });

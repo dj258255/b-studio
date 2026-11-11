@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 스튜디오의 공개 포트를 Rust 앞단(`crates/bstudio-server`, 정확한 버전 고정 axum 0.8.9·hyper 1.12.0)이 열고, Node 서버는 앞단이 띄운 자식으로 권한 0700 폴더의 유닉스 소켓에서만 듣습니다(ADR-195 4a). 앞단은 요청을 바꾸지 않고 넘깁니다: 경로·쿼리 원문, Host, 쿠키, Origin, 손님이 보낸 `x-forwarded-*`·`x-b-studio-*`를 그대로 두고 `x-forwarded-*`를 더하지 않으며 hop-by-hop 헤더만 뺍니다. 요청·응답 본문은 모으지 않고 흘리고(SSE 첫 조각 즉시), 손님이 끊으면 Node 쪽 연결도 끊깁니다. Node에 닿지 못하면 502 JSON, Node가 끝나면 앞단도 0이 아닌 코드로 끝납니다. 소켓 경로가 OS 상한(macOS 104바이트)을 넘거나 소켓 폴더가 0700이 아니면 띄우지 않습니다. `pnpm studio`(launch)가 띄우기 전에 `cargo build --release -p bstudio-server`를 돌리므로 Rust 툴체인이 필요하고(`pnpm build:server`로 미리 빌드할 수도 있습니다), 빌드하지 못하면 옛 방식으로 돌아가지 않고 멈춥니다. `--socket`이 없는 `main.ts` 직접 실행(운영 이미지·시험)은 그대로입니다. 사용자에게 보이는 동작은 바뀌지 않습니다.
 - 대소문자를 구분하지 않는 볼륨(macOS 기본)에서 프로젝트의 `.git`이 파일(worktree·submodule)이면, 컨테이너가 `.GIT` 같은 이름으로 그 파일을 바꿀 수 있던 곳을 막았습니다. 호스트가 같은 파일로 읽는 대소문자 변형 이름마다 같은 읽기 전용 가림을 얹습니다(트러블슈팅 182, #1028).
 - 디자인 비교(`workflow.pageChecks[].compare`)의 기준 이미지를 따로 적지 않아도 평가 자산으로 다룹니다. 파일 도구가 막고, 컨테이너에는 읽기 전용으로 붙고, 게이트는 실행 중에 바뀌면 실패시킵니다. 전에는 `protectedPaths`·`evaluationAssets`에 적지 않으면 에이전트가 기준 이미지를 바꿔 비교를 통과시킬 수 있었습니다(트러블슈팅 181, #1138).
 - 요구사항·추천 모델 답을 읽는 판정(`parsePlannerReply`의 JSON 꺼내기, `repairExtractionReply`, `enforceSpecQuoteEvidence`, 미리보기 고르기, 참조 파일 상한 문구, 사용량 합)을 Rust(`crates/bstudio-guard/src/requirements_replies.rs`)로 옮겼습니다(ADR-191 3단계 3ad, #1135). zod 검증과 `jsonrepair`는 TS에 남고 Rust가 꺼낸 글자를 그대로 검증합니다. 추천 인용 확인이 낱말을 가운데서 자른 인용(`e`·`연 1`)도 "명세에 있음"으로 읽던 곳을 닫았습니다(트러블슈팅 179). 옛 TS와 같은 결과를 내는지 무작위 입력 수십만 건으로 확인했습니다(다른 결과 0, 근거 없음 → 있음 뒤집힘 0).
