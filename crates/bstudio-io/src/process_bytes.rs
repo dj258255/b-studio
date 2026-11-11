@@ -53,7 +53,7 @@ fn empty_failure(message: String) -> BytesOutput {
 }
 
 
-/// `bin`이 경로가 아니면(`/`가 없으면) 자식에게 줄 `env`의 `PATH`로 찾아 절대 경로로 바꾼다. `execvp`가 자식 환경의 PATH로 찾는 것과 같다(빈 항목은 현재 폴더).
+/// `bin`이 경로가 아니면(`/`가 없으면) 자식에게 줄 `env`의 `PATH`로 찾아 절대 경로로 바꾼다. `execvp`가 자식 환경의 PATH로 찾는 순서와 같되, 앞에서부터 보다가 절대 경로가 아닌 항목을 만나면 멈추고 이름 그대로 돌려준다.
 /// 왜 하는가: 환경에 PATH를 넣고 경로가 아닌 이름을 주면 Rust 표준 라이브러리는 `posix_spawn`을 쓰지 못하고 `fork`로 되돌아간다.
 /// 큰 Node 서버 프로세스에서 `fork`는 한 번에 17ms(중앙값)·90ms(p90)까지 걸려 git 호출이 많은 체크포인트 흐름이 눈에 띄게 느려졌다(F0 기준 사진의 시각 경쟁이 바뀔 만큼).
 /// 못 찾거나 환경에 PATH가 없으면 그대로 돌려준다(띄우기 실패 문구는 같다).
@@ -72,7 +72,12 @@ fn resolve_in_env_path(bin: &str, env: Option<&[(String, String)]>) -> String {
         return bin.to_owned();
     };
     for dir in path.split(':') {
-        let dir = if dir.is_empty() { "." } else { dir };
+        // 절대 경로가 아닌 항목(빈 항목은 현재 폴더, `.`·`bin` 같은 상대 항목)을 만나면 직접 찾지 않고 이름 그대로 돌려준다.
+        // 우리가 `metadata`로 확인하는 곳은 부모(서버) 프로세스의 작업 폴더인데, 실행되는 곳은 `cwd`를 준 자식의 작업 폴더라 서로 다른 파일을 읽게 된다
+        // (프로젝트에 심은 `git`이 실행될 수 있다). 그러면 표준 라이브러리가 옛 `execvp`처럼 자식 환경·자식 작업 폴더로 찾는다(이때만 fork 경로라 느리다)
+        if !dir.starts_with('/') {
+            return bin.to_owned();
+        }
         let candidate = std::path::Path::new(dir).join(bin);
         if let Ok(meta) = std::fs::metadata(&candidate) {
             if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
@@ -366,5 +371,42 @@ mod tests {
         // 안 실행되는 파일은 건너뛰고 못 찾으면 띄우기 실패다
         let missing = run_command_bytes("not-anywhere-xyz", &args(&[]), None, Some(&env), None, never(), LIMIT).await;
         assert_eq!(missing.spawn_error.as_deref(), Some("spawn not-anywhere-xyz ENOENT"));
+    }
+
+    fn write_script(path: &std::path::Path, text: &str) {
+        std::fs::write(path, text).unwrap();
+        std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn relative_or_empty_path_entry_stops_the_search_and_keeps_the_name() {
+        // 부모 작업 폴더(크레이트 폴더) 안에 실행 파일이 있는 상대 항목: 부모 기준으로 확인한 것을 자식 폴더에서 실행하면 안 된다
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let name = dir.path().file_name().unwrap().to_str().unwrap().to_owned();
+        write_script(&dir.path().join("fakeg"), "#!/bin/sh\n");
+        for path in [format!("{name}:/usr/bin"), format!(":{}", "/usr/bin"), format!(".:/usr/bin")] {
+            let env = vec![("PATH".to_owned(), path.clone())];
+            assert_eq!(resolve_in_env_path("fakeg", Some(&env)), "fakeg", "{path}");
+        }
+        // 상대 항목 뒤의 절대 항목에만 있어도 상대 항목에서 멈춰 이름 그대로 넘긴다
+        let abs = tempfile::tempdir().unwrap();
+        write_script(&abs.path().join("fakeg"), "#!/bin/sh\n");
+        let env = vec![("PATH".to_owned(), format!("{name}:{}", abs.path().display()))];
+        assert_eq!(resolve_in_env_path("fakeg", Some(&env)), "fakeg");
+        // 절대 항목만 있으면 절대 경로를 돌려준다
+        let env = vec![("PATH".to_owned(), format!("{}", abs.path().display()))];
+        assert_eq!(resolve_in_env_path("fakeg", Some(&env)), abs.path().join("fakeg").to_str().unwrap());
+    }
+
+    #[tokio::test]
+    async fn empty_or_dot_path_entry_runs_the_childs_cwd_file_like_execvp() {
+        // 옛 Node execFile과 같은 입력(2026-11-11 확인): 자식 cwd의 파일이 실행된다
+        let child = tempfile::tempdir().unwrap();
+        write_script(&child.path().join("fakeg"), "#!/bin/sh\necho child\n");
+        for path in [":/usr/bin", ".:/usr/bin", "/nonexistent:.:/usr/bin"] {
+            let env = vec![("PATH".to_owned(), path.to_owned())];
+            let out = run_command_bytes("fakeg", &args(&[]), None, Some(&env), child.path().to_str(), never(), LIMIT).await;
+            assert_eq!(out.stdout, b"child\n", "{path}");
+        }
     }
 }
