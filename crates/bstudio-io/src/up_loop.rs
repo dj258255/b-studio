@@ -444,6 +444,17 @@ exit ${{code:-0}}
             let bin = dir.path().join("docker");
             fs::write(&bin, script).unwrap();
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            // 리눅스에서 방금 쓴 파일을 실행하면, 다른 시험 스레드가 그 사이 띄운 자식이 쓰기 fd를 물려받아 exec 전까지 쥐고 있을 때
+            // ETXTBSY로 실패한다(container_verify 시험이 CI에서 겪은 것과 같다). 실행될 때까지 기다린 뒤 그 호출의 흔적을 지운다
+            for _ in 0..500 {
+                match std::process::Command::new(&bin).arg("__probe__").output() {
+                    Err(error) if error.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(error) => panic!("가짜 docker를 실행하지 못했습니다: {error}"),
+                    Ok(_) => break,
+                }
+            }
+            let _ = fs::remove_file(dir.path().join("calls"));
+            let _ = fs::remove_file(dir.path().join("n.other"));
             Fake { dir }
         }
 
