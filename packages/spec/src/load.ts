@@ -305,7 +305,7 @@ async function readProjectText(root: string, relative: string): Promise<string> 
     const [rootNow, fileNow] = await Promise.all([realpath(root), realpath(file)]);
     const now = await lstat(fileNow);
     if (!isInside(rootNow, fileNow) || now.dev !== opened.dev || now.ino !== opened.ino) throw outside();
-    return await handle.readFile('utf8');
+    return await readLimited(handle, relative);
   } catch (error) {
     if (error instanceof SpecError) throw error;
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') throw missing();
@@ -313,6 +313,22 @@ async function readProjectText(root: string, relative: string): Promise<string> 
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * 상한 + 1바이트까지만 읽는다. 위의 stat 확인은 빠른 거절일 뿐이고, 확인과 읽기 사이에 파일이 커질 수 있다(컨테이너 안 에이전트가 프로젝트 파일에 쓸 수 있다).
+ * 상한을 넘게 읽히면 던진다. 글자로 바꾸는 규칙은 `readFile('utf8')`와 같다(잘못된 바이트는 U+FFFD)
+ */
+async function readLimited(handle: FileHandle, relative: string): Promise<string> {
+  const buffer = Buffer.allocUnsafe(MAX_YAML_BYTES + 1);
+  let total = 0;
+  while (total < buffer.length) {
+    const { bytesRead } = await handle.read(buffer, total, buffer.length - total, null);
+    if (bytesRead === 0) break;
+    total += bytesRead;
+  }
+  if (total > MAX_YAML_BYTES) throw new SpecError(`${relative}: 파일이 너무 큽니다(${MAX_YAML_BYTES}바이트까지)`);
+  return buffer.subarray(0, total).toString('utf8');
 }
 
 function isInside(parent: string, target: string): boolean {

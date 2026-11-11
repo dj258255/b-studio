@@ -11,7 +11,7 @@
 
 use crate::js_json::NONFINITE_KEY;
 use saphyr_parser::{Event, Parser, ScalarStyle};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 /// 이벤트 중첩이 이 깊이를 넘으면 지원하지 않는다. JS는 약 700~1000(스택 크기에 따라 다름)에서 실패하고 파서의 한도는 256이라, 어느 쪽이든 겹치지 않게 낮게 잡는다
@@ -236,9 +236,9 @@ fn is_merge_key_node(n: &N) -> bool {
     matches!(&n.kind, Kind::Scalar(s, ScalarStyle::Plain) if s == "<<")
 }
 
-fn alias_weight(n: &Rc<N>, meta: &HashMap<usize, (usize, usize)>, ids: &HashMap<*const N, usize>) -> usize {
+fn alias_weight(n: &Rc<N>, meta: &HashMap<usize, (usize, usize, bool)>, ids: &HashMap<*const N, usize>) -> usize {
     match &n.kind {
-        Kind::Alias(target) => ids.get(&Rc::as_ptr(target)).and_then(|id| meta.get(id)).map(|(c, a)| c * a).unwrap_or(0),
+        Kind::Alias(target) => ids.get(&Rc::as_ptr(target)).and_then(|id| meta.get(id)).map(|(c, a, _)| c * a).unwrap_or(0),
         Kind::Scalar(..) => 1,
         Kind::Seq(v) => v.iter().map(|e| alias_weight(e, meta, ids)).max().unwrap_or(0),
         Kind::Map(m) => m.iter().map(|(k, v)| alias_weight(k, meta, ids).max(alias_weight(v, meta, ids))).max().unwrap_or(0),
@@ -252,7 +252,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
     let mut stack: Vec<Frame> = Vec::new();
     let mut anchors: HashMap<usize, Option<Rc<N>>> = HashMap::new();
     // 별칭 개수 규칙(JS maxAliasCount): 앵커마다 (참조 횟수, 가중치). 앵커 노드의 주소로 앵커를 찾는다
-    let mut meta: HashMap<usize, (usize, usize)> = HashMap::new();
+    let mut meta: HashMap<usize, (usize, usize, bool)> = HashMap::new();
     let mut ids: HashMap<*const N, usize> = HashMap::new();
     let mut root: Option<Rc<N>> = None;
     let mut block_lines: Vec<(usize, usize)> = Vec::new();
@@ -322,13 +322,16 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                 };
                 if !is_merge_ctx {
                     let anchor_id = *ids.get(&Rc::as_ptr(&target)).unwrap_or(&id);
-                    let e = meta.entry(anchor_id).or_insert((1, 0));
+                    let e = meta.entry(anchor_id).or_insert((1, 0, false));
                     e.0 += 1;
-                    if e.1 == 0 {
+                    // 무게가 0이어도 한 번 계산한 값을 쓴다(JS는 0이면 다시 계산하지만 0은 늘지 않는다). 다시 계산하면 별칭마다 대상 전체를 훑는다
+                    if !e.2 {
                         let w = alias_weight(&target, &meta, &ids);
-                        meta.get_mut(&anchor_id).unwrap().1 = w;
+                        let e = meta.get_mut(&anchor_id).unwrap();
+                        e.1 = w;
+                        e.2 = true;
                     }
-                    let (c, a) = meta[&anchor_id];
+                    let (c, a, _) = meta[&anchor_id];
                     if c * a > MAX_ALIAS_COUNT {
                         return syntax("별칭이 너무 많이 펼쳐집니다(JS yaml의 maxAliasCount)", pos);
                     }
@@ -361,7 +364,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                 if anchor > 0 {
                     anchors.insert(anchor, Some(n.clone()));
                     ids.insert(Rc::as_ptr(&n), anchor);
-                    meta.insert(anchor, (1, 0));
+                    meta.insert(anchor, (1, 0, false));
                 }
                 put(&mut stack, &mut root, n)?;
             }
@@ -398,7 +401,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                     if anchor > 0 {
                         anchors.insert(anchor, Some(n.clone()));
                         ids.insert(Rc::as_ptr(&n), anchor);
-                        meta.insert(anchor, (1, 0));
+                        meta.insert(anchor, (1, 0, false));
                     }
                     put(&mut stack, &mut root, n)?;
                 }
@@ -415,7 +418,7 @@ fn build_events(src: &str, merge: bool) -> Result<Built, Fail> {
                     if anchor > 0 {
                         anchors.insert(anchor, Some(n.clone()));
                         ids.insert(Rc::as_ptr(&n), anchor);
-                        meta.insert(anchor, (1, 0));
+                        meta.insert(anchor, (1, 0, false));
                     }
                     put(&mut stack, &mut root, n)?;
                 }
@@ -518,41 +521,66 @@ fn deref(n: &Rc<N>) -> &Rc<N> {
     c
 }
 
-/// JS 객체(대상)와 Map(병합 원본)의 키 규칙(yaml 2.9): 대상은 키를 글자로 바꿔 견주고, 원본은 타입을 지킨다
-fn same_value_zero(a: &V, b: &V) -> bool {
-    match (a, b) {
-        (V::Null, V::Null) => true,
-        (V::Bool(x), V::Bool(y)) => x == y,
-        (V::Num(x), V::Num(y)) => (x.is_nan() && y.is_nan()) || x == y,
-        (V::Str(x), V::Str(y)) => x == y,
-        _ => false,
-    }
+/// 키를 견주는 값. 대상 객체는 키를 글자로 바꿔 견주고(`1`과 `"1"`이 같다), 병합 원본은 타입을 지킨다. 해시로 찾아 한 번 넣는 데 드는 일을 상수로 둔다
+#[derive(PartialEq, Eq, Hash)]
+enum KeyId {
+    Null,
+    Bool(bool),
+    Num(u64),
+    Str(String),
 }
 
-fn put_pair(out: &mut Vec<(V, V)>, k: V, v: V, typed: bool) {
-    let pos = if typed {
-        out.iter().position(|(ek, _)| same_value_zero(ek, &k))
-    } else {
-        key_string(&k).and_then(|ks| out.iter().position(|(ek, _)| key_string(ek).as_deref() == Some(ks.as_str())))
-    };
-    match pos {
-        Some(p) => out[p].1 = v,
-        None => out.push((k, v)),
+fn key_id(v: &V, typed: bool) -> Option<KeyId> {
+    if !typed {
+        return key_string(v).map(KeyId::Str);
     }
+    Some(match v {
+        V::Null => KeyId::Null,
+        V::Bool(b) => KeyId::Bool(*b),
+        // SameValueZero: NaN은 NaN과 같고 0은 -0과 같다
+        V::Num(f) => KeyId::Num(if f.is_nan() { 0x7ff8_0000_0000_0000 } else if *f == 0.0 { 0 } else { f.to_bits() }),
+        V::Str(s) => KeyId::Str(s.clone()),
+        _ => return None,
+    })
 }
 
-fn merge_in(out: &mut Vec<(V, V)>, sk: V, sv: V, typed: bool) {
-    if typed {
-        if !out.iter().any(|(ek, _)| same_value_zero(ek, &sk)) {
-            out.push((sk, sv));
+/// 순서를 지키는 쌍 목록과 그 키 색인
+struct Pairs {
+    typed: bool,
+    list: Vec<(V, V)>,
+    index: HashMap<KeyId, usize>,
+}
+
+impl Pairs {
+    fn new(typed: bool) -> Self {
+        Pairs { typed, list: Vec::new(), index: HashMap::new() }
+    }
+
+    /// JS 객체·Map의 대입: 같은 키가 있으면 첫 자리에서 값만 바뀐다
+    fn put(&mut self, k: V, v: V) {
+        match key_id(&k, self.typed) {
+            Some(id) => match self.index.get(&id) {
+                Some(&p) => self.list[p].1 = v,
+                None => {
+                    self.index.insert(id, self.list.len());
+                    self.list.push((k, v));
+                }
+            },
+            None => self.list.push((k, v)),
         }
-    } else {
+    }
+
+    /// 병합: 이미 있는 키는 건드리지 않는다
+    fn merge_in(&mut self, k: V, v: V) {
         // 대상 객체에 들어갈 때 키가 글자가 된다: null은 "null"(보통의 null 키는 "")
-        let sk = if matches!(sk, V::Null) { V::Str("null".into()) } else { sk };
-        let ks = key_string(&sk);
-        if !out.iter().any(|(ek, _)| key_string(ek) == ks) {
-            out.push((sk, sv));
+        let k = if !self.typed && matches!(k, V::Null) { V::Str("null".into()) } else { k };
+        if let Some(id) = key_id(&k, self.typed) {
+            if self.index.contains_key(&id) {
+                return;
+            }
+            self.index.insert(id, self.list.len());
         }
+        self.list.push((k, v));
     }
 }
 
@@ -562,6 +590,17 @@ struct Budget {
     byte_limit: usize,
 }
 
+impl Budget {
+    /// 방문 하나를 센다. 값을 만들든 합쳐서 버리든 같다
+    fn visit(&mut self, pos: Pos) -> Result<(), Fail> {
+        self.nodes += 1;
+        if self.nodes > MAX_EXPANDED_NODES {
+            return unsupported("별칭·병합이 너무 크게 펼쳐집니다", pos);
+        }
+        Ok(())
+    }
+}
+
 fn n_to_v(n: &Rc<N>, merge: bool, input_len: usize) -> Result<V, Fail> {
     let mut budget = Budget { nodes: 0, bytes: 0, byte_limit: expanded_byte_limit(input_len) };
     n_to_v_inner(n, merge, &mut budget, 0)
@@ -569,10 +608,7 @@ fn n_to_v(n: &Rc<N>, merge: bool, input_len: usize) -> Result<V, Fail> {
 
 /// `depth`는 펼친 값의 컬렉션 중첩이다. 별칭이 깊은 노드를 가리키고 그 안에서 다시 별칭을 쓰면 글자의 깊이보다 크게 불어나므로 여기서 막는다
 fn n_to_v_inner(n: &Rc<N>, merge: bool, budget: &mut Budget, depth: usize) -> Result<V, Fail> {
-    budget.nodes += 1;
-    if budget.nodes > MAX_EXPANDED_NODES {
-        return unsupported("별칭이 너무 크게 펼쳐집니다", n.pos);
-    }
+    budget.visit(n.pos)?;
     if depth > MAX_DEPTH {
         return unsupported("펼친 값의 중첩이 너무 깊습니다", n.pos);
     }
@@ -595,23 +631,29 @@ fn n_to_v_inner(n: &Rc<N>, merge: bool, budget: &mut Budget, depth: usize) -> Re
 }
 
 fn map_pairs(m: &[(Rc<N>, Rc<N>)], merge: bool, typed: bool, budget: &mut Budget, depth: usize) -> Result<Vec<(V, V)>, Fail> {
+    let first = m.first().map(|(k, _)| k.pos).unwrap_or((0, 0));
+    // 방문 수를 센다(결과 크기가 아니다): merge가 앞 단계를 여러 번 겹쳐 병합하면 결과는 작아도 방문이 지수로 늘 수 있다
+    budget.visit(first)?;
     if depth > MAX_DEPTH {
-        return unsupported("펼친 값의 중첩이 너무 깊습니다", m.first().map(|(k, _)| k.pos).unwrap_or((0, 0)));
+        return unsupported("펼친 값의 중첩이 너무 깊습니다", first);
     }
-    let mut out: Vec<(V, V)> = Vec::new();
-    // 중복 키: 해석된 스칼라 값이 같으면 중복(merge 키는 제외, 별칭 키는 검사하지 않는다)
-    let mut seen: Vec<V> = Vec::new();
+    let mut out = Pairs::new(typed);
+    // 중복 키: 해석된 스칼라 값이 같으면 중복(merge 키는 제외, 별칭 키는 검사하지 않는다, NaN은 서로 같지 않다)
+    let mut seen: HashSet<KeyId> = HashSet::new();
     for (k, val) in m {
+        budget.visit(k.pos)?;
         if merge && is_merge_key_node(k) {
             let srcs: Vec<&Rc<N>> = match &deref(val).kind {
                 Kind::Seq(v) => v.iter().collect(),
                 _ => vec![val],
             };
             for s in srcs {
+                budget.visit(s.pos)?;
                 match &deref(s).kind {
                     Kind::Map(sm) => {
                         for (sk, sv) in map_pairs(sm, merge, true, budget, depth + 1)? {
-                            merge_in(&mut out, sk, sv, typed);
+                            budget.visit(s.pos)?;
+                            out.merge_in(sk, sv);
                         }
                     }
                     _ => return syntax("병합(<<)의 원본은 매핑이어야 합니다", s.pos),
@@ -621,23 +663,16 @@ fn map_pairs(m: &[(Rc<N>, Rc<N>)], merge: bool, typed: bool, budget: &mut Budget
         }
         let kv = n_to_v_inner(k, merge, budget, depth)?;
         if matches!(&k.kind, Kind::Scalar(..)) {
-            if seen.iter().any(|x| same_scalar(x, &kv)) {
-                return syntax("매핑의 키가 중복됩니다", k.pos);
+            if let Some(id) = key_id(&kv, true) {
+                if !matches!(&kv, V::Num(f) if f.is_nan()) && !seen.insert(id) {
+                    return syntax("매핑의 키가 중복됩니다", k.pos);
+                }
             }
-            seen.push(kv.clone());
         }
         let vv = n_to_v_inner(val, merge, budget, depth)?;
-        put_pair(&mut out, kv, vv, typed);
+        out.put(kv, vv);
     }
-    Ok(out)
-}
-
-/// JS `a.value === b.value`(NaN은 서로 같지 않고 0과 -0은 같다)
-fn same_scalar(a: &V, b: &V) -> bool {
-    match (a, b) {
-        (V::Num(x), V::Num(y)) => x == y,
-        _ => same_value_zero(a, b),
-    }
+    Ok(out.list)
 }
 
 // ───────────────────────── 글자 단위 거절 규칙 ─────────────────────────
@@ -679,7 +714,21 @@ fn scan_text(text: &str, block_lines: &[(usize, usize)], multiline: &[(usize, us
         }
     }
     check_multiline(text, multiline)?;
-    let in_block = |line: usize| block_lines.iter().any(|&(a, b)| line >= a && line <= b);
+    // 줄마다 범위 목록을 훑으면 줄 수 × 범위 수가 된다(블록 스칼라가 많은 큰 입력). 줄 번호로 바로 찾는 표를 만든다
+    let line_count = text.matches('\n').count() + 2;
+    let mut body_line = vec![false; line_count + 1];
+    for &(a, b) in block_lines {
+        for slot in body_line.iter_mut().take(b.min(line_count) + 1).skip(a) {
+            *slot = true;
+        }
+    }
+    let mut quoted_at: Vec<Option<(usize, usize)>> = vec![None; line_count + 1];
+    for &(a, b, col) in quoted {
+        for slot in quoted_at.iter_mut().take(b.min(line_count) + 1).skip(a) {
+            *slot = Some((a, col));
+        }
+    }
+    let in_block = |line: usize| body_line.get(line).copied().unwrap_or(false);
     let mut seen_content = false;
     let mut seen_start = false;
     let mut ended: Option<usize> = None;
@@ -731,7 +780,7 @@ fn scan_text(text: &str, block_lines: &[(usize, usize)], multiline: &[(usize, us
             seen_content = true;
         }
         // 여러 줄 따옴표 글자: 시작 줄은 따옴표 앞까지만 구조로 보고, 따옴표 안의 줄은 글자 검사만 한다
-        if let Some(&(start, _, col)) = quoted.iter().find(|&&(s, e, _)| line_no >= s && line_no <= e) {
+        if let Some((start, col)) = quoted_at.get(line_no).copied().flatten() {
             if let Some(c) = line.chars().find(|c| is_special(*c)) {
                 let _ = c;
                 return unsupported("제어·특수 문자", (line_no, 1));
@@ -1033,5 +1082,28 @@ mod tests {
         }
         // 상한 안의 평범한 재사용은 그대로 읽는다
         assert!(matches!(parse("a: &a {p: 1}\nb:\n  <<: *a\n", true), Outcome::Value(_)));
+    }
+
+    /// 정해진 시간 안에 끝나는지 본다(끝나지 않으면 시험이 실패한다: 상한이 없으면 CPU를 다 쓰는 입력이다)
+    fn parse_within(text: String, merge: bool, seconds: u64) -> Outcome {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new().stack_size(64 << 20).spawn(move || drop(tx.send(parse(&text, merge)))).unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(seconds)).expect("제한 시간 안에 끝나지 않았습니다")
+    }
+
+    /// 병합이 앞 단계를 여러 번 겹쳐 병합하면 결과는 작아도(여기서는 빈 매핑) 방문이 지수로 늘어난다. 방문 수를 세지 않으면 끝나지 않는다
+    #[test]
+    fn merge_fan_out_is_bounded_by_visits() {
+        let mut text = String::from("p0: &p0 {}\n");
+        for i in 1..=25 {
+            text.push_str(&format!("p{i}: &p{i}\n  <<: [{}]\n", vec![format!("*p{}", i - 1); 10].join(", ")));
+        }
+        match parse_within(text, true, 20) {
+            Outcome::Unsupported { reason, .. } => assert!(reason.contains("병합") || reason.contains("별칭"), "{reason}"),
+            other => panic!("방문 상한이 막아야 합니다: {:?}", &format!("{other:?}")[..80]),
+        }
+        // 큰 매핑도 제곱으로 느려지지 않는다(키 색인)
+        let big: String = (0..150_000).map(|i| format!("k{i}: {i}\n")).collect();
+        assert!(matches!(parse_within(big, false, 20), Outcome::Value(_)));
     }
 }
