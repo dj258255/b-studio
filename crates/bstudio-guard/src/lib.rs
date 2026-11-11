@@ -75,6 +75,7 @@ pub mod test_results;
 pub mod test_run;
 pub mod tool_input;
 pub mod tool_output;
+pub mod up_loop;
 pub mod usage;
 pub mod verify_judge;
 pub mod visual_compare;

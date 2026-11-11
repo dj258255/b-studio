@@ -4211,3 +4211,192 @@ pub fn find_missing_masks(
     let planned: Vec<gm::MaskVolume> = parse(&planned_json, "평가 자산 계획")?;
     AsyncBlockBuilder::new(async move { cv::find_missing_masks(&project_root, &mounts, &volumes, &planned, &tmpfs, &cwd).await.map_err(Error::from_reason) }).build(&env)
 }
+
+// ── 컨테이너 만들기 반복과 .git 마스크 계산·override 쓰기(ADR-195 4f A4c-1) ──
+// 판정은 bstudio-guard(up_loop), docker를 부르는 순서와 파일 쓰기는 bstudio-io(up_loop)가 한다. 여기는 값 변환만 한다.
+// TS 껍데기: packages/sandbox/src/docker/up-loop.ts. 던지지 않고 결과(`kind`)로 돌려준다
+use bstudio_guard::up_loop as up_judge;
+use bstudio_io::up_loop as ul;
+
+#[napi(object)]
+pub struct ComposeRefJs {
+    pub docker_bin: String,
+    pub env_vars: Option<HashMap<String, String>>,
+    pub project_root: String,
+    pub compose_path: String,
+    pub project_name: Option<String>,
+}
+
+fn compose_ref(js: ComposeRefJs) -> ul::ComposeRef {
+    ul::ComposeRef { docker_bin: js.docker_bin, env: env_pairs(js.env_vars), project_root: js.project_root, compose_path: js.compose_path, project_name: js.project_name }
+}
+
+#[napi(object)]
+pub struct UpInputJs {
+    pub compose: ComposeRefJs,
+    pub cwd: String,
+    pub override_path: String,
+    /// `buildOverride`의 입력(`encodeNative`)에서 `gitMask`만 뺀 것
+    pub override_input_json: String,
+    /// 지금 override 파일에 쓰여 있는 마스크(서비스 → `MaskVolume[]`)의 JSON
+    pub mask_json: String,
+    pub assets_json: String,
+    pub args: Vec<String>,
+    pub sandbox_network: String,
+    pub egress_network: String,
+    pub edge_service: String,
+    pub studio_caller: String,
+    pub service_label: String,
+    pub poll_ms: u32,
+    pub wait_ms: u32,
+}
+
+/// `kind`: `done`(exitCode·stdout·stderr) · `aborted` · `config-failed`(stderr) · `config-unparsed` · `mask-error`(message·detail·platform) ·
+/// `override-build`(message) · `override-write`(message) · `verify`(verifyKind·phase·stderr·detail·platform·removalFailed) · `missing`(missing) ·
+/// `deps-failed`(stderr) · `deps-unparsed` · `not-stable` · `ok`(load·compute·write의 성공). `maskJson`은 마지막에 쓴(또는 계산한) 마스크다
+#[napi(object)]
+pub struct UpResultJs {
+    pub kind: String,
+    pub mask_json: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub message: Option<String>,
+    pub detail: Option<String>,
+    pub platform: bool,
+    pub verify_kind: Option<String>,
+    pub phase: Option<String>,
+    pub removal_failed: bool,
+    pub missing: Vec<String>,
+}
+
+fn up_result(kind: &str, mask_json: String) -> UpResultJs {
+    UpResultJs {
+        kind: kind.to_owned(),
+        mask_json,
+        exit_code: 0,
+        stdout: String::new(),
+        stderr: String::new(),
+        message: None,
+        detail: None,
+        platform: false,
+        verify_kind: None,
+        phase: None,
+        removal_failed: false,
+        missing: Vec::new(),
+    }
+}
+
+fn load_problem_result(problem: ul::LoadProblem, mask_json: String) -> UpResultJs {
+    match problem {
+        ul::LoadProblem::ConfigFailed(stderr) => UpResultJs { stderr, ..up_result("config-failed", mask_json) },
+        ul::LoadProblem::ConfigUnparsed => up_result("config-unparsed", mask_json),
+        ul::LoadProblem::Mask(error) => UpResultJs { message: Some(error.message), detail: error.detail, platform: error.platform, ..up_result("mask-error", mask_json) },
+    }
+}
+
+fn write_problem_result(problem: ul::WriteProblem, mask_json: String) -> UpResultJs {
+    match problem {
+        ul::WriteProblem::Build(message) => UpResultJs { message: Some(message), ..up_result("override-build", mask_json) },
+        ul::WriteProblem::Write(message) => UpResultJs { message: Some(message), ..up_result("override-write", mask_json) },
+    }
+}
+
+/// 컨테이너를 만들고(`up --no-start`) 확인하고 확인한 것만 시작한다. 시도마다 compose 파일의 마운트를 다시 읽어 `.git` 마스크를 맞추고 override를 쓴다
+#[napi]
+pub fn up_with_git_mask(env: Env, input: UpInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<UpResultJs>> {
+    let override_input = self::input(&input.override_input_json, "override 입력")?;
+    let mask = gm::record_from_json(&parse::<serde_json::Value>(&input.mask_json, "마스크 계획")?).map_err(Error::from_reason)?;
+    let assets: Vec<gm::AssetCopy> = parse(&input.assets_json, "평가 자산 복사본")?;
+    let up_input = ul::UpInput {
+        compose: compose_ref(input.compose),
+        cwd: input.cwd,
+        override_path: input.override_path,
+        override_input,
+        mask,
+        assets,
+        args: input.args,
+        sandbox_network: input.sandbox_network,
+        egress_network: input.egress_network,
+        edge_service: input.edge_service,
+        studio_caller: input.studio_caller,
+        service_label: input.service_label,
+        poll_ms: u64::from(input.poll_ms),
+        wait_ms: u64::from(input.wait_ms),
+    };
+    let cancel = Arc::new(cv::Cancel::default());
+    if let Some(signal) = signal {
+        let on_abort = cancel.clone();
+        signal.on_abort(move || on_abort.cancel());
+    }
+    AsyncBlockBuilder::new(async move {
+        let result = ul::up_with_git_mask(&up_input, &cancel).await;
+        let mask_json = gm::record_to_json(&result.mask).to_string();
+        Ok(match result.outcome {
+            ul::UpOutcome::Done(output) => UpResultJs { exit_code: output.exit_code, stdout: output.stdout, stderr: output.stderr, ..up_result("done", mask_json) },
+            ul::UpOutcome::Aborted => up_result("aborted", mask_json),
+            ul::UpOutcome::Load(problem) => load_problem_result(problem, mask_json),
+            ul::UpOutcome::Override(problem) => write_problem_result(problem, mask_json),
+            ul::UpOutcome::Verify { failure, phase } => UpResultJs {
+                stderr: failure.stderr.unwrap_or_default(),
+                detail: failure.detail,
+                platform: failure.kind.platform(),
+                verify_kind: Some(failure.kind.as_str().to_owned()),
+                phase: Some(phase.as_str().to_owned()),
+                removal_failed: failure.removal_failed,
+                ..up_result("verify", mask_json)
+            },
+            ul::UpOutcome::Missing(missing) => UpResultJs { missing, ..up_result("missing", mask_json) },
+            ul::UpOutcome::Deps(ul::DepsProblem::Failed(stderr)) => UpResultJs { stderr, ..up_result("deps-failed", mask_json) },
+            ul::UpOutcome::Deps(ul::DepsProblem::Unparsed) => up_result("deps-unparsed", mask_json),
+            ul::UpOutcome::NotStable => up_result("not-stable", mask_json),
+        })
+    })
+    .build(&env)
+}
+
+/// `compose config`를 읽어 서비스별 마스크 마운트를 계산한다(`loadGitMask`). 성공이면 `kind`가 `ok`이고 `maskJson`이 마스크다
+#[napi]
+pub fn load_git_mask(env: Env, compose: ComposeRefJs, assets_json: String, cwd: String) -> Result<AsyncBlock<UpResultJs>> {
+    let assets: Vec<gm::AssetCopy> = parse(&assets_json, "평가 자산 복사본")?;
+    let compose = compose_ref(compose);
+    AsyncBlockBuilder::new(async move {
+        Ok(match ul::load_git_mask(&compose, &assets, &cwd).await {
+            Ok(mask) => up_result("ok", gm::record_to_json(&mask).to_string()),
+            Err(problem) => load_problem_result(problem, String::new()),
+        })
+    })
+    .build(&env)
+}
+
+/// 정규화한 compose 설정(JSON)에서 서비스별 마스크 마운트를 계산한다(`computeGitMask`). 모양을 모르는 설정이면 `mask-error`다
+#[napi]
+pub fn compute_git_mask(env: Env, project_root: String, config_json: String, assets_json: String, cwd: String) -> Result<AsyncBlock<UpResultJs>> {
+    let config: serde_json::Value = parse(&config_json, "compose 설정")?;
+    let assets: Vec<gm::AssetCopy> = parse(&assets_json, "평가 자산 복사본")?;
+    AsyncBlockBuilder::new(async move {
+        Ok(match ul::compute_git_mask(&project_root, &config, &assets, &cwd).await {
+            Ok(mask) => up_result("ok", gm::record_to_json(&mask).to_string()),
+            Err(error) => load_problem_result(ul::LoadProblem::Mask(error), String::new()),
+        })
+    })
+    .build(&env)
+}
+
+/// 마스크를 얹은 override를 JSON으로 임시 파일에 쓰고 rename한다. 만들기·쓰기에 실패하면 `override-build`·`override-write`다
+#[napi]
+pub fn write_compose_override(env: Env, path: String, input_json: String, mask_json: String) -> Result<AsyncBlock<UpResultJs>> {
+    let override_input = self::input(&input_json, "override 입력")?;
+    let mask = gm::record_from_json(&parse::<serde_json::Value>(&mask_json, "마스크 계획")?).map_err(Error::from_reason)?;
+    AsyncBlockBuilder::new(async move {
+        Ok(match ul::write_override(&path, &override_input, &mask).await {
+            Ok(()) => up_result("ok", up_judge_mask_json(&mask)),
+            Err(problem) => write_problem_result(problem, up_judge_mask_json(&mask)),
+        })
+    })
+    .build(&env)
+}
+
+fn up_judge_mask_json(mask: &up_judge::Mask) -> String {
+    gm::record_to_json(mask).to_string()
+}

@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { afterEach, describe, expect, it } from 'vitest';
+import { parse, stringify } from 'yaml';
 import { LocalDockerProvider, splitUpArgs } from './compose-provider';
 import { evaluationAssetCopies } from './evaluation-assets';
 
@@ -99,7 +100,8 @@ exit 0
     configFile,
     inspectFile,
     log: () => readFile(log, 'utf8'),
-    overrideAtUp: () => readFile(snapshot, 'utf8'),
+    // override는 JSON으로 쓰인다(ADR-195 4f A4c-1). 아래 확인은 YAML 글자 꼴이므로 읽어서 같은 값의 YAML로 다시 쓴다
+    overrideAtUp: async () => stringify(parse(await readFile(snapshot, 'utf8'))),
     upCount: () => readFile(path.join(dir, 'ups'), 'utf8').then((text) => text.split('\n').filter(Boolean).length, () => 0),
   };
 }

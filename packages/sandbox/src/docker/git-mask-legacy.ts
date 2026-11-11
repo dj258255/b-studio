@@ -1,9 +1,23 @@
+import type { LoadedProject } from '@b-studio/spec';
+import { SandboxError } from '../errors';
 import { native } from '../native';
+import { runCommand } from '../stream-exec';
 import type { EvaluationAssetCopy } from './evaluation-assets';
-import { boundDevice, detectGitEntries, planGitMask, type InspectedMount, type MaskVolume } from './git-mask';
+import {
+  boundDevice,
+  collectHostMounts,
+  detectGitEntries,
+  planEvaluationAssetMask,
+  planGitMask,
+  type ComposeMountConfig,
+  type InspectedMount,
+  type MaskVolume,
+} from './git-mask';
+import type { BindMount } from './relay';
 
 /**
- * A4b 이전의 TS `findMissingMasks`·`selectEvaluationAssetVolumes`(차등 시험의 기준값). 지금 구현은 Rust(crates/bstudio-io/src/container_verify.rs)다.
+ * A4b 이전의 TS `findMissingMasks`·`selectEvaluationAssetVolumes`와 A4c-1 이전의 TS `computeGitMask`·`loadGitMask`(차등 시험의 기준값).
+ * 지금 구현은 Rust(crates/bstudio-io/src/container_verify.rs, up_loop.rs)다.
  * 이 파일은 견주는 시험만 쓴다. 견주는 TS를 지우는 PR(4g)에서 함께 지운다.
  */
 
@@ -107,4 +121,94 @@ function isInside(parent: string, target: string): boolean {
 /** 컨테이너 안 경로(target)를 비교한다. 호스트 경로가 아니라 항상 POSIX 규칙이다 */
 function isInsidePosix(parent: string, target: string): boolean {
   return native.isInsidePosix(parent, target);
+}
+
+// ── A4c-1 이전의 computeGitMask·loadGitMask ──
+
+type PlainMount = Pick<BindMount, 'service' | 'source' | 'target'>;
+
+function plainMounts(mounts: readonly PlainMount[]) {
+  return mounts.map(({ service, source, target }) => ({ service, source, target }));
+}
+
+function plainAssets(assets: readonly EvaluationAssetCopy[]) {
+  return assets.map(({ path: assetPath, source }) => ({ path: assetPath, source }));
+}
+
+function asSandboxError<T>(run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    throw new SandboxError(error instanceof Error ? error.message : String(error));
+  }
+}
+
+function assertNoNestedAssetMounts(composeMounts: readonly ComposeMount[], mounts: readonly PlainMount[], projectRoot: string, assets: readonly EvaluationAssetCopy[]): void {
+  const problem = native.nestedAssetMountError(JSON.stringify(composeMounts), JSON.stringify(plainMounts(mounts)), projectRoot, JSON.stringify(plainAssets(assets)), process.cwd());
+  if (problem != null) throw new SandboxError(problem);
+}
+
+interface ComposeMount {
+  service: string;
+  type: string;
+  target: string;
+  hostSource?: string;
+}
+
+async function collectComposeMounts(config: ComposeMountConfig): Promise<ComposeMount[]> {
+  const specs = JSON.parse(asSandboxError(() => native.composeMountSpecs(JSON.stringify(config), process.cwd()))) as Array<{ service: string; type: string; target: string; host?: string }>;
+  const mounts: ComposeMount[] = [];
+  for (const { service, type, target, host } of specs) {
+    const hostSource = host === undefined ? undefined : await real(host);
+    mounts.push({ service, type, target, ...(hostSource === undefined ? {} : { hostSource }) });
+  }
+  return mounts;
+}
+
+function mergeMasks(...plans: ReadonlyArray<Record<string, readonly MaskVolume[]>>): Record<string, MaskVolume[]> {
+  return JSON.parse(native.mergeMasks(JSON.stringify(plans))) as Record<string, MaskVolume[]>;
+}
+
+export async function computeGitMaskLegacy(
+  projectRoot: string,
+  config: ComposeMountConfig,
+  { evaluationAssets = [] }: { evaluationAssets?: readonly EvaluationAssetCopy[] } = {},
+): Promise<Record<string, MaskVolume[]>> {
+  const root = await real(projectRoot);
+  const mounts = await Promise.all(collectHostMounts(config).map(async (mount) => ({ ...mount, source: await real(mount.source) })));
+  const entries = await detectGitEntries(root, mounts.map((mount) => mount.source));
+  const prepared = await native.prepareStateMasks(entries);
+  if (prepared.failure) {
+    throw new SandboxError(`${prepared.failure.state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, prepared.failure.detail, { platform: true });
+  }
+  entries.splice(0, entries.length, ...prepared.entries);
+  const gitMask = planGitMask(mounts, entries);
+  if (evaluationAssets.length === 0) return gitMask;
+  assertNoNestedAssetMounts(await collectComposeMounts(config), mounts, root, evaluationAssets);
+  return mergeMasks(planEvaluationAssetMask(mounts, root, evaluationAssets), gitMask);
+}
+
+export async function loadGitMaskLegacy(
+  project: Pick<LoadedProject, 'root' | 'composePath'>,
+  {
+    dockerBin = 'docker',
+    env = process.env,
+    projectName,
+    evaluationAssets = [],
+    redact = (text: string) => text,
+  }: { dockerBin?: string; env?: NodeJS.ProcessEnv; projectName?: string; evaluationAssets?: readonly EvaluationAssetCopy[]; redact?: (text: string) => string } = {},
+): Promise<Record<string, MaskVolume[]>> {
+  const args = ['compose', ...(projectName ? ['--project-name', projectName] : []), '--profile', '*', '--project-directory', project.root, '--file', project.composePath, 'config', '--format', 'json'];
+  const result = await runCommand(dockerBin, args, { env });
+  if (result.exitCode !== 0) {
+    throw new SandboxError('compose 설정을 읽지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다', redact(result.stderr.trim() ? result.stderr : 'docker 실행 실패'));
+  }
+  let config: ComposeMountConfig;
+  try {
+    const parsed = JSON.parse(result.stdout) as Partial<ComposeMountConfig>;
+    config = { services: parsed.services ?? {}, ...(parsed.volumes ? { volumes: parsed.volumes } : {}) };
+  } catch {
+    throw new SandboxError('compose 설정(config --format json)을 해석하지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다');
+  }
+  return computeGitMaskLegacy(project.root, config, { evaluationAssets });
 }
