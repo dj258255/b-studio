@@ -175,6 +175,12 @@ interface NativeGuard {
   syncFiles(input: NativeSyncInput, signal: AbortSignal | undefined | null): Promise<NativeSyncResult>;
   relayChanges(input: NativeRelayInput, signal: AbortSignal | undefined | null): Promise<NativeRelayResult>;
   upWithPortRetry(input: NativePortRetryInput, signal: AbortSignal | undefined | null): Promise<NativePortRetryResult>;
+  // ── 준비 확인·모르는 프로세스 검사·인프라 확인(ADR-195 4f A4c-3a). 던지지 않고 결과(`kind`)로 돌려준다.
+  // awaitReadyOnce의 onProbe는 확인이 끝날 때마다 `ProbeResult`의 JSON을 받고, 계속하면 true를 돌려준다(Rust는 처리가 끝나길 기다린다)
+  awaitReadyOnce(input: NativeAwaitReadyInput, onProbe: (probe: string) => boolean, signal: AbortSignal | undefined | null): Promise<NativeAwaitReadyResult>;
+  scanServiceProcesses(input: NativeScanInput, service: string, signal: AbortSignal | undefined | null): Promise<NativeScanResult>;
+  strayProcesses(input: NativeScanInput, services: string[], baselineJson: string, signal: AbortSignal | undefined | null): Promise<NativeStrayResult>;
+  missingServices(compose: NativeComposeRef, overridePath: string, names: string[], signal: AbortSignal | undefined | null): Promise<string[]>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -949,6 +955,64 @@ export interface NativePortRetryResult {
   message?: string | null;
   /** 포트를 다시 뽑았으면 `{서비스: 포트}`의 JSON, 아니면 빈 문자열 */
   hostPortsJson: string;
+}
+
+export interface NativeAwaitReadyInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  service: string;
+  edgeService: string;
+  /** edge가 이 서비스를 위해 열어 둔 컨테이너 포트(`String(edgePortFor(...))`) */
+  edgePort: string;
+  /** false면 엔드포인트만 읽는다(아래 ready* 필드는 쓰지 않는다) */
+  hasReady: boolean;
+  readyPath: string;
+  expectStatus: number;
+  successThreshold: number;
+  timeoutMs: number;
+  intervalMs: number;
+  attempt: number;
+  secretNames: string[];
+  secretValues: string[];
+  /** 부르는 시점에 이미 취소돼 있었다 */
+  aborted: boolean;
+}
+
+/**
+ * `ready`(port) · `endpoint-docker`(exitCode·stderr) · `endpoint-unparsed`(reason) · `invalid-port` · `failed`(reason·historyJson) ·
+ * `recreate`(reason) · `aborted`(atTop) · `stopped`
+ */
+export interface NativeAwaitReadyResult {
+  kind: 'ready' | 'endpoint-docker' | 'endpoint-unparsed' | 'invalid-port' | 'failed' | 'recreate' | 'aborted' | 'stopped';
+  port: number;
+  reason?: string | null;
+  historyJson: string;
+  exitCode: number;
+  stderr: string;
+  atTop: boolean;
+}
+
+export interface NativeScanInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  /** 컨테이너에서 도는 찾기 스크립트 */
+  script: string;
+  secretNames: string[];
+  secretValues: string[];
+}
+
+/** `processes`(processesJson: `[{pid,start,command}]`) · `error`(message) */
+export interface NativeScanResult {
+  kind: 'processes' | 'error';
+  processesJson: string;
+  message?: string | null;
+}
+
+/** `done`(reportsJson: `[{service, error}|{service, processes:[{pid,command}]}]`) · `error`(message: 컨테이너 상태를 읽지 못했다) */
+export interface NativeStrayResult {
+  kind: 'done' | 'error';
+  reportsJson: string;
+  message?: string | null;
 }
 
 export interface NativeGitEntry {

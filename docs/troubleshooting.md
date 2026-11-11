@@ -213,6 +213,7 @@
 - [189. 컨테이너 확인이 같은 자리의 마운트가 여럿이거나 Docker Desktop 접두어가 붙은 프로젝트 마운트에서 `.git` 가림을 건너뛰고, 모양을 모르는 마운트 정보에서는 지우지 않고 던졌음 — 더 막는 쪽으로 고쳤다](#189-컨테이너-확인이-같은-자리의-마운트가-여럿이거나-docker-desktop-접두어가-붙은-프로젝트-마운트에서-git-가림을-건너뛰고-모양을-모르는-마운트-정보에서는-지우지-않고-던졌음--더-막는-쪽으로-고쳤다)
 - [190. 컨테이너 만들기 반복이 override를 쓰지 못했는데 마스크 상태를 새 값으로 올리고, `compose config`가 객체가 아닌 JSON이면 서비스 없음으로 읽었음 — 더 막는 쪽으로 고쳤다](#190-컨테이너-만들기-반복이-override를-쓰지-못했는데-마스크-상태를-새-값으로-올리고-compose-config가-객체가-아닌-json이면-서비스-없음으로-읽었음--더-막는-쪽으로-고쳤다)
 - [191. 파일 반영 확인이 같은 파일의 줄이 둘이면 나중 줄을 믿고, 모양을 모르는 줄을 건너뛰고 통과시켰음 — 더 막는 쪽으로 고쳤다](#191-파일-반영-확인이-같은-파일의-줄이-둘이면-나중-줄을-믿고-모양을-모르는-줄을-건너뛰고-통과시켰음--더-막는-쪽으로-고쳤다)
+- [192. 준비 확인이 `ready.path`의 역슬래시·탭·줄바꿈을 URL 해석과 다르게 읽어 다른 호스트를 확인했음 — 호스트를 `127.0.0.1`로 고정하고 경로를 요청 줄로만 쓰게 고쳤다](#192-준비-확인이-readypath의-역슬래시탭줄바꿈을-url-해석과-다르게-읽어-다른-호스트를-확인했음--호스트를-127001로-고정하고-경로를-요청-줄로만-쓰게-고쳤다)
 
 ---
 
@@ -6035,3 +6036,33 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 
 ### 배운 것
 - **통과시키는 판정이 출력을 읽는 함수를 재사용할 때는, 그 함수가 "나중 값이 이긴다"거나 "모르는 줄은 건너뛴다"로 읽지 않는지 본다.** 읽기 함수가 관대한 것은 로그를 읽을 때는 맞지만, 근거로 쓸 때는 열리는 방향이다.
+
+## 192. 준비 확인이 `ready.path`의 역슬래시·탭·줄바꿈을 URL 해석과 다르게 읽어 다른 호스트를 확인했음 — 호스트를 `127.0.0.1`로 고정하고 경로를 요청 줄로만 쓰게 고쳤다
+
+**구분:** ADR-195 4f A4c-3a(이슈 [#1185](https://github.com/dj258255/b-studio/issues/1185))에서 `#awaitReady`를 Rust로 옮기며 코드를 읽다가 찾았다. 실제 세션에서 만난 것이 아니라 Node로 직접 재현한 것이다.
+
+### 겪은 것(옛 TS `LocalDockerSandbox.#awaitReady`)
+서비스 준비 확인은 `new URL(service.ready.path, endpoint.url)`로 주소를 만들어 `fetch`로 보냈다. 스펙은 `ready.path`가 "/"로 시작하고 "//"로 시작하지 않는지만 봤다(`SERVICE_PATH`). 그런데 WHATWG URL 해석은 이 정규식과 다르게 읽는 글자가 둘 있다.
+- **`\`는 `/`로 읽힌다.** `/\example.com/`은 검사를 통과한 뒤 `//example.com/`이 되어 `http://example.com/`을 가리킨다.
+- **탭·줄바꿈·캐리지 리턴은 지워진다.** `/<탭>/example.com/`도 `//example.com/`이 되어 같은 곳을 가리킨다(`\n`, `\r`도 같다).
+
+`new URL('/\\example.com/', 'http://127.0.0.1:41234').toString()`은 `http://example.com/`이다(Node에서 직접 확인). 서비스가 떠 있지 않아도 바깥 호스트가 200으로 응답하면 두 번 연속 성공해 "준비됨"이 됐다. 게이트가 "서비스가 요청을 받는다"를 믿는 근거를 바깥 호스트가 채울 수 있었다. 확인하는 쪽(스키마 정규식)과 실제로 쓰는 쪽(URL 해석)이 같은 입력을 다르게 읽는 경우다.
+
+재현(고치기 전 코드, 가짜 docker와 `fetch`를 가로채는 시험): `readiness-hardened.test.ts`의 세 입력(`/\example.com/`, `/<탭>/example.com/`, `/<줄바꿈>/example.com/`)이 모두 `fetch`로 `http://example.com/`을 두 번 보냈고 `restart()`는 준비됨으로 끝났다.
+
+### 고친 것
+- **호스트를 고정한다.** 준비 확인(`crates/bstudio-io/src/readiness_io.rs`의 `probe_http`)은 `compose port`에서 읽은 호스트 포트 하나로 `127.0.0.1:<그 포트>`에 직접 연결하고, `ready.path`는 요청 줄의 대상(origin-form)에만 쓴다. 주소 문자열을 만들어 다시 해석하는 단계가 없으므로 어떤 경로도 다른 호스트로 풀리지 않는다. 확인한 포트와 "준비됨"으로 알리는 엔드포인트의 포트는 같은 값이다.
+- **경로를 요청 줄로 바꾸는 규칙은 `fetch`와 같게 맞추되 둘만 더 막는다.** 앞뒤 공백·제어 문자를 떼고, `#` 뒤를 버리고, `.`·`..` 조각(`%2e` 꼴 포함)을 접고, 경로와 쿼리를 각자의 퍼센트 인코딩 집합으로 인코딩한다(`fetch`가 실제로 서버에 보낸 요청 줄을 ASCII 전 범위에서 직접 받아 적어 맞췄다). 다른 점: 역슬래시는 구분자가 아니라 `%5C`로, 탭·줄바꿈·캐리지 리턴은 지우지 않고 `%09`·`%0A`·`%0D`로 보낸다(HARDENED). 같은 호스트 안에서도 `/a\b`는 옛 쪽이 `/a/b`를, 지금은 `/a%5Cb`를 확인한다.
+- **스펙이 처음부터 받지 않는다.** `ready.path`(`HttpProbeSchema`)는 역슬래시와 제어 문자(탭·줄바꿈 포함)를 거부한다(`READY_PATH`). 저장소의 `examples/`·`templates/`·`project-detect.ts`가 만드는 경로·모든 시험의 `ready` 경로를 찾아 보니 역슬래시나 제어 문자가 든 것이 하나도 없어 기존 프로젝트를 깨지 않는다. 비ASCII·공백은 받는다(퍼센트 인코딩돼 요청 줄에 들어간다). 같은 `SERVICE_PATH`를 쓰는 다른 필드(`contract.extract`, `pageChecks`·`loadChecks`의 경로 등)는 이 확인에 쓰지 않으므로 바꾸지 않았다.
+
+### 같이 확인했으나 바꾸지 않은 것
+- 응답 읽기: 옛 `fetch`(undici)는 리다이렉트를 따르지 않는 `manual`이라 302를 그대로 받았고, 지금도 같다. 응답은 상태 줄과 **헤더까지** 읽는다(상태 줄만 맞고 헤더가 HTTP가 아니면 옛 쪽도 실패였고 지금도 실패다). 오류 이름은 옛 `describeFetchError`가 내던 것과 같다(`ECONNREFUSED`·`ECONNRESET`·`UND_ERR_SOCKET`·`HPE_INVALID_CONSTANT`·`HPE_INVALID_VERSION`·`HPE_INVALID_HEADER_TOKEN`·`UND_ERR_HEADERS_OVERFLOW`·`TIMEOUT`). 시간 제한은 연결부터 응답 머리까지 `max(intervalMs, 2000)`ms로 같다. 요청 머리글도 `fetch`가 보내던 것과 같다(`Connection`만 `close`).
+
+### 시험
+- `packages/sandbox/src/docker/readiness-differential.test.ts`(요청 줄 35개 입력이 옛 `fetch`와 같은 줄·머리글로 가고, `ready.path` HARDENED 입력은 옛 쪽이 `example.com`으로 풀리고 새 쪽은 127.0.0.1의 서버만 받는 것), `readiness-hardened.test.ts`(`LocalDockerProvider.restart` 수준: 서버가 받은 요청 줄·Host 헤더), `crates/bstudio-io/src/readiness_io.rs`(요청 줄 규칙·응답 읽기), `packages/spec/src/spec.test.ts`(`ready.path`는 역슬래시·제어 문자를 거부).
+
+### 같은 종류로 남은 것(이번에 고치지 않았다)
+- 게이트(A5)가 부르는 `new URL(path, endpoint.url)` 가운데 출처를 비교하지 않는 자리가 있다: `packages/agent/src/verify.ts`의 계약 읽기(`service.contract.extract`, 두 곳)와 `packages/agent/src/gate.ts`의 헤드리스 브라우저 대체 확인(`probe.path`, 1241줄 근처). 같은 `SERVICE_PATH`를 쓰므로 `/\example.com/`이 다른 호스트를 가리킬 수 있다(나머지 자리는 `url.origin`을 견준다). A5에서 호스트 고정으로 옮길 때 함께 닫는다.
+
+### 배운 것
+- **스키마가 입력을 거르는 규칙과 그 입력을 쓰는 쪽(URL 해석)의 규칙이 다르면 거름은 아무것도 보장하지 않는다.** 문자열 검사로 "다른 호스트로 안 간다"를 보장하려 하지 말고, 호스트를 처음부터 고정해 경로가 호스트가 될 수 없게 만든다.

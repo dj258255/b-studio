@@ -6,7 +6,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
 import { isDockerUnreachable, SandboxError } from '../errors';
 import { execChecked } from '../exec-checked';
-import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransientCrash, waitForReady, type ReadinessPolicy } from '../readiness';
+import { DEFAULT_READINESS, type ReadinessPolicy } from '../readiness';
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { composeEnvironment } from './compose-env';
@@ -43,9 +43,7 @@ import {
   EDGE_SERVICE,
   edgePortFor,
   EGRESS_NETWORK,
-  egressAuditExcerpt,
   parseContainerState,
-  parseContainerStates,
   parseEgressDenial,
   parseHostPort,
   parseLogLine,
@@ -66,7 +64,8 @@ import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loa
 import { loadGitMask, type MaskVolume } from './git-mask';
 import { overrideInputJson, upWithGitMask, writeComposeOverride } from './up-loop';
 import { relayThroughContainers, SYNC_HELPER_IMAGE, syncFiles, upWithPortRetry } from './sync-relay';
-import { foreignProcesses, scanProcesses, type ScannedProcess } from './stray-processes';
+import { awaitReady, ensureInfra, readProcessBaseline, strayProcessReports, type ReadyContext } from './ready';
+import type { ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
 import {
   composeVolumeName,
@@ -405,33 +404,11 @@ class LocalDockerSandbox implements Sandbox {
    * 다시 빌드하지 않는다(restart()의 --build --force-recreate와 다르다). --no-deps로 넘긴 서비스만 건드린다
    */
   async ensureInfra(services: readonly string[], { signal }: { signal?: AbortSignal } = {}): Promise<InfraCheckResult> {
-    const expected = [...new Set([EDGE_SERVICE, ...services])].sort();
-    const missing = await this.#missingServices(expected, signal);
-    if (missing.length === 0) return { ok: true, recovered: [] };
-
-    const result = await this.#compose(['up', '--detach', '--no-deps', ...missing], signal);
-    if (result.exitCode !== 0) {
-      return { ok: false, recovered: [], missing, reason: describeDockerFailure(this.redact(result.stderr)) };
-    }
-
-    const stillMissing = await this.#missingServices(missing, signal);
-    if (stillMissing.length > 0) {
-      return {
-        ok: false,
-        recovered: missing.filter((name) => !stillMissing.includes(name)),
-        missing: stillMissing,
-        reason: `다시 올렸지만 ${stillMissing.join(', ')} 컨테이너가 여전히 running 상태가 아닙니다`,
-      };
-    }
-    return { ok: true, recovered: missing };
-  }
-
-  /** 넘긴 서비스 이름 중 컨테이너가 running이 아닌(혹은 아예 없는) 것만 돌려준다 */
-  async #missingServices(names: readonly string[], signal?: AbortSignal): Promise<string[]> {
-    if (names.length === 0) return [];
-    const { stdout } = await this.#compose(['ps', '--all', '--format', 'json', ...names], signal);
-    const states = parseContainerStates(stdout);
-    return names.filter((name) => states.get(name) !== 'running');
+    return ensureInfra(
+      { ...this.#readyContext(), compose: (args, composeSignal) => this.#compose(args, composeSignal), describeFailure: (stderr) => describeDockerFailure(this.redact(stderr)) },
+      services,
+      { signal },
+    );
   }
 
   /**
@@ -461,26 +438,21 @@ class LocalDockerSandbox implements Sandbox {
     return endpoint;
   }
 
+  /**
+   * 서비스마다 running인지 보고, running이면 서비스 안에서 PID 1과 세션이 다른 프로세스를 찾아 기준선에 없던 것만 알린다(#765).
+   * "running 확인 → 찾기(exec) → 기준선과 비교"는 Rust 함수 하나가 한다(crates/bstudio-io/src/readiness_io.rs, ADR-195 4f A4c-3a).
+   * 기준선 저장소(`#processBaseline`)는 상태라 여기에 남는다. 멈춘 서비스는 건너뛴다(게이트가 켜 버리지 않게)
+   */
   async strayProcesses({ signal }: { signal?: AbortSignal } = {}): Promise<StrayProcessReport[]> {
     const off = this.project.offServices;
     const names = this.project.managed.map(([name]) => name).filter((name) => !off?.has(name));
-    const reports = await Promise.all(
-      names.map(async (service): Promise<StrayProcessReport | undefined> => {
-        // 멈춘 컨테이너에는 프로세스가 없다. 멈춘 서비스를 게이트가 켜 버리지 않게 건너뛴다
-        if ((await this.state(service)) !== 'running') return undefined;
-        const scanned = await scanProcesses((command) => this.exec(service, command, { signal }));
-        if (scanned.error !== undefined) return { service, error: scanned.error };
-        const foreign = foreignProcesses(scanned.processes, this.#processBaseline.get(service));
-        return foreign.length > 0 ? { service, processes: foreign.map(({ pid, command }) => ({ pid, command })) } : undefined;
-      }),
-    );
-    return reports.filter((report): report is StrayProcessReport => report !== undefined);
+    return strayProcessReports(this.#readyContext(), names, this.#processBaseline, signal);
   }
 
   /** 준비된 서비스의 프로세스 목록을 기준선으로 남긴다(#765). 읽지 못하면 기준선을 지워, 다음 검사가 그 서비스를 다시 띄우게 한다 */
   async #recordProcessBaseline(name: string): Promise<void> {
-    const scanned = await scanProcesses((command) => this.exec(name, command)).catch(() => undefined);
-    if (scanned?.processes) this.#processBaseline.set(name, scanned.processes);
+    const processes = await readProcessBaseline(this.#readyContext(), name);
+    if (processes) this.#processBaseline.set(name, processes);
     else this.#processBaseline.delete(name);
   }
 
@@ -655,66 +627,29 @@ class LocalDockerSandbox implements Sandbox {
     }
   }
 
-  async #awaitReady(name: string, { signal, onStatus, onTransientRetry }: StartOptions, attempt = 1): Promise<ServiceEndpoint> {
-    const service = this.#managed(name);
-    const endpoint = await this.endpoint(name);
+  /**
+   * 준비 확인 한 시도(엔드포인트 읽기 → 확인 반복 → 실패면 이유 만들기)는 Rust 함수 하나가 한다(crates/bstudio-io/src/readiness_io.rs, ADR-195 4f A4c-3a).
+   * 일시 오류로 죽어 다시 만들 때의 `up`은 이 클래스의 `#composeOrThrow`를 지난다(`#upQueue`·`#gitMask`). 자세한 것은 `ready.ts`
+   */
+  async #awaitReady(name: string, { signal, onStatus, onTransientRetry }: StartOptions): Promise<ServiceEndpoint> {
+    return awaitReady(this.#readyContext(), name, { signal, onStatus, onTransientRetry });
+  }
 
-    if (service.ready) {
-      try {
-        await waitForReady({
-          url: new URL(service.ready.path, endpoint.url).toString(),
-          expectStatus: service.ready.expectStatus,
-          policy: this.#policyFor(service),
-          getContainerState: () => this.state(name),
-          signal,
-          onProbe: (probe) => onStatus?.({ service: name, phase: 'probing', probe }),
-        });
-      } catch (error) {
-        let reason = error instanceof Error ? error.message : String(error);
-        // 컨테이너가 죽었으면 앱 로그의 마지막 오류 줄을 이유에 붙인다. 로그를 못 읽어도 원래 이유는 그대로 둔다
-        const crashed = error instanceof ReadinessError && ['exited', 'dead'].includes(error.history.at(-1)?.containerState ?? '');
-        if (crashed) {
-          const lines: string[] = [];
-          try {
-            for await (const line of this.logs({ services: [name], tail: 60, follow: false })) lines.push(line.text);
-          } catch {
-            // 로그를 못 읽어도 실패 이유는 남긴다
-          }
-          const excerpt = crashLogExcerpt(lines);
-
-          // 트러블슈팅 #90: 설치 스크립트가 막 쓴 실행 파일을 실행하다 생기는 일시 오류(ETXTBSY 등)로 죽었으면
-          // 같은 컨테이너를 한 번만 다시 띄워 본다(무한 재시도 금지 — attempt가 1일 때만 재시도한다). 세션
-          // c55417ad에서는 바로 다시 기동하면 정상으로 떴다 — 파일이 이미 끝까지 쓰인 뒤라 같은 경합이 되풀이되지 않는다
-          if (shouldRetryTransientCrash(attempt, excerpt)) {
-            onTransientRetry?.({ service: name, reason: excerpt.join(' / ') || reason });
-            onStatus?.({ service: name, phase: 'starting' });
-            await this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], signal);
-            return this.#awaitReady(name, { signal, onStatus, onTransientRetry }, attempt + 1);
-          }
-
-          if (excerpt.length > 0) reason = `${reason}\n앱 로그 마지막 줄:\n${excerpt.join('\n')}`;
-
-          // edge의 egress 감사 로그도 같이 본다(#411, 실험 E10). 레인이 "허용 목록에 없음"이 아니라
-          // "이름을 풀지 못함"(DNS·네트워크 장애) 때문에 기동에 실패했는지는 edge 컨테이너 로그에만 남고,
-          // 실행이 끝나 컨테이너가 지워지면 사라진다 — 실패 바로 그 순간에 덧붙여야 결과 파일·UI에 남는다
-          const egressLines: string[] = [];
-          try {
-            for await (const line of this.logs({ services: [EDGE_SERVICE], tail: 200, follow: false })) egressLines.push(line.text);
-          } catch {
-            // 로그를 못 읽어도 실패 이유는 남긴다
-          }
-          const egressExcerpt = egressAuditExcerpt(egressLines);
-          if (egressExcerpt.length > 0) reason = `${reason}\negress 최근 기록:\n${egressExcerpt.join('\n')}`;
-
-          if (error instanceof Error) error.message = reason;
-        }
-        onStatus?.({ service: name, phase: 'failed', reason });
-        throw error;
-      }
-    }
-
-    onStatus?.({ service: name, phase: 'ready', endpoint });
-    return endpoint;
+  #readyContext(): ReadyContext {
+    return {
+      id: this.id,
+      project: this.project,
+      dockerBin: this.#dockerBin,
+      env: this.#environment(),
+      overridePath: this.#overridePath,
+      secrets: this.#secrets,
+      edgeService: EDGE_SERVICE,
+      edgePort: (name) => edgePortFor(this.project, name),
+      managed: (name) => this.#managed(name),
+      policyFor: (service) => this.#policyFor(service),
+      recreate: (name, signal) => this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], signal),
+      composeFailure: (command, result) => this.#composeFailure(command, result),
+    };
   }
 
   async #planSnapshots(): Promise<SnapshotPlan[]> {
