@@ -3745,3 +3745,140 @@ pub fn yaml_parse(text: String, merge: bool) -> YamlParseOut {
         yaml::Outcome::Unsupported { reason, line, col } => YamlParseOut { kind: "unsupported".to_owned(), json: None, message: Some(reason), line: line as u32, col: col as u32 },
     }
 }
+
+// ── agent: 작업 공간의 파일 시스템 I/O(ADR-195 4f A3). TS 껍데기: packages/agent/src/workspace.ts·change-tracker.ts.
+// 판정과 syscall은 bstudio-io::workspace_io가 한다. 여기는 형 변환과 스레드 접착만 한다.
+// 실패는 거절된 Error의 message로 온다: `LINK`·`OUTSIDE`·`DENIED`·`MISSING`·`NOT_REGULAR`·`TOO_LARGE:<크기>`·`OS:<오류 이름>`·`OTHER:<글>`
+use bstudio_io::workspace_io as wio;
+
+fn wio_error(failure: wio::Failure) -> Error {
+    Error::from_reason(failure.code())
+}
+
+/// 읽은 결과. `kind`는 `"missing"`·`"bytes"`·`"irregular"`
+#[napi(object)]
+pub struct WorkspaceFileRead {
+    pub kind: String,
+    pub content: Option<Buffer>,
+    pub complete: Option<bool>,
+    pub reason: Option<String>,
+}
+
+fn file_read_js(read: wio::FileRead) -> WorkspaceFileRead {
+    match read {
+        wio::FileRead::Missing => WorkspaceFileRead { kind: "missing".to_owned(), content: None, complete: None, reason: None },
+        wio::FileRead::Bytes { content, complete } => WorkspaceFileRead { kind: "bytes".to_owned(), content: Some(Buffer::from(content)), complete: Some(complete), reason: None },
+        wio::FileRead::Irregular(reason) => WorkspaceFileRead { kind: "irregular".to_owned(), content: None, complete: None, reason: Some(reason) },
+    }
+}
+
+/// 경로로 열되 마지막 조각이 링크면 따라가지 않고, 일반 파일이고 상한 이하일 때만 읽는다(동기)
+#[napi]
+pub fn workspace_read_regular_file(absolute: String, max_bytes: f64) -> WorkspaceFileRead {
+    file_read_js(wio::read_regular_file(std::path::Path::new(&absolute), max_bytes))
+}
+
+/// 루트 기준 경로의 파일을 읽는다. 경로의 어느 조각도 링크를 따라가지 않는다(동기)
+#[napi]
+pub fn workspace_read_project_file(root: String, relative: String, max_bytes: f64) -> WorkspaceFileRead {
+    file_read_js(wio::read_project_file(std::path::Path::new(&root), &relative, max_bytes))
+}
+
+/// 경로가 다룰 수 있는 곳인지 보고 저장된 이름(루트 기준, `/`로 이은 것)을 돌려준다
+#[napi]
+pub async fn workspace_resolve(root: String, relative: String, must_exist: bool) -> Result<String> {
+    blocking(move || wio::resolve(std::path::Path::new(&root), &relative, must_exist)).await?.map_err(wio_error)
+}
+
+#[napi(object)]
+pub struct WorkspaceDirEntry {
+    pub name: String,
+    /// `"file"`·`"dir"`·`"link"`·`"other"`
+    pub kind: String,
+}
+
+#[napi]
+pub async fn workspace_read_dir(root: String, relative: String) -> Result<Vec<WorkspaceDirEntry>> {
+    let entries = blocking(move || wio::read_dir(std::path::Path::new(&root), &relative)).await?.map_err(wio_error)?;
+    Ok(entries.into_iter().map(|entry| WorkspaceDirEntry { name: entry.name, kind: entry.kind.as_str().to_owned() }).collect())
+}
+
+#[napi(object)]
+pub struct WorkspaceStat {
+    pub kind: String,
+    pub size: f64,
+}
+
+#[napi]
+pub async fn workspace_lstat(root: String, relative: String) -> Result<WorkspaceStat> {
+    let stat = blocking(move || wio::lstat(std::path::Path::new(&root), &relative)).await?.map_err(wio_error)?;
+    Ok(WorkspaceStat { kind: stat.kind.as_str().to_owned(), size: stat.size as f64 })
+}
+
+#[napi]
+pub async fn workspace_read_file(root: String, relative: String, max_bytes: Option<f64>) -> Result<Buffer> {
+    let bytes = blocking(move || wio::read_file(std::path::Path::new(&root), &relative, max_bytes)).await?.map_err(wio_error)?;
+    Ok(Buffer::from(bytes))
+}
+
+#[napi]
+pub async fn workspace_write_file(root: String, relative: String, data: Buffer, make_dirs: bool) -> Result<()> {
+    let data = data.to_vec();
+    blocking(move || wio::write_file(std::path::Path::new(&root), &relative, &data, make_dirs)).await?.map_err(wio_error)
+}
+
+#[napi]
+pub async fn workspace_remove_file(root: String, relative: String) -> Result<()> {
+    blocking(move || wio::remove_file(std::path::Path::new(&root), &relative)).await?.map_err(wio_error)
+}
+
+/// 변경 감지용 지문(파일마다 한 개, 넘긴 순서대로)
+#[napi]
+pub async fn workspace_fingerprints(root: String, files: Vec<String>) -> Result<Vec<String>> {
+    blocking(move || files.iter().map(|file| wio::fingerprint(std::path::Path::new(&root), file)).collect()).await
+}
+
+/// 보호 경로 파일의 쓰기 직전 고정값(ADR-196). 고정과 비교가 같은 Rust 읽기를 쓴다
+#[napi]
+pub struct WorkspacePinStore {
+    inner: std::sync::Mutex<wio::PinStore>,
+}
+
+#[napi]
+impl WorkspacePinStore {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { inner: std::sync::Mutex::new(wio::PinStore::new()) }
+    }
+
+    #[napi]
+    pub fn contains(&self, relative: String) -> bool {
+        self.inner.lock().map(|pins| pins.contains(&relative)).unwrap_or(true)
+    }
+
+    #[napi]
+    pub fn pin(&self, root: String, relative: String) {
+        if let Ok(mut pins) = self.inner.lock() {
+            pins.pin(std::path::Path::new(&root), &relative);
+        }
+    }
+
+    #[napi]
+    pub fn pin_unpinned(&self, relative: String, reason: String) {
+        if let Ok(mut pins) = self.inner.lock() {
+            pins.pin_unpinned(&relative, &reason);
+        }
+    }
+
+    /// 고정값이 있고 지금 내용이 바이트까지 같은 파일. 잠금을 얻지 못하면 하나도 같다고 하지 않는다(열린 쪽 판정이라 모르면 아니다)
+    #[napi]
+    pub fn restored(&self, root: String, files: Vec<String>) -> Vec<String> {
+        self.inner.lock().map(|pins| pins.restored(std::path::Path::new(&root), &files)).unwrap_or_default()
+    }
+}
+
+impl Default for WorkspacePinStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}

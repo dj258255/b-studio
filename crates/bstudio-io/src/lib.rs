@@ -14,3 +14,4 @@ pub mod pty;
 pub mod safe_fs;
 pub mod stream_exec;
 pub mod streaming;
+pub mod workspace_io;
