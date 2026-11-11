@@ -152,6 +152,8 @@ case "$1" in
   start) key=startid ;;
   compose) for a in "$@"; do case "$a" in config) key=config ;; up) key=up ;; ps) key=ps ;; down) key=down ;; start) key=start ;; rm) key=composerm ;; exec) key=exec ;; esac; done ;;
 esac
+# 서비스마다 다른 답: \`ps@<서비스>\` 응답이 있으면 마지막 인자(서비스 이름)로 고른다. 동시에 부르는 검사는 호출 순서가 정해지지 않는다
+if [ "$key" = ps ]; then for last in "$@"; do :; done; if [ -f "$D/ps@$last.out" ]; then key="ps@$last"; fi; fi
 n=$(cat "$S/n.$key" 2>/dev/null || echo 0)
 n=$((n + 1))
 echo "$n" > "$S/n.$key"
@@ -613,7 +615,7 @@ const strayScenarios: StrayScenario[] = [
   { name: '오류의 시크릿도 가린다', secrets: { TOKEN: 'SECRETVALUE1' }, script: { ps: { out: RUNNING }, exec: { code: 1, err: 'boom SECRETVALUE1' } } },
   { name: '출력의 모양을 모르는 줄은 건너뛴다', script: { ps: { out: RUNNING }, exec: { out: 'noise\n20 5 b\n3 4 a\n\n' } } },
   { name: '상태를 읽지 못하면(JSON이 아님) 전체가 실패한다', script: { ps: { out: '{not json' }, exec: { out: '' } } },
-  { name: '서비스 둘: 하나는 멈췄고 하나는 모르는 프로세스가 있다', managed: ['api', 'web'], sortCalls: true, script: { ps: [{ out: RUNNING }, { out: EXITED }], exec: { out: '15 200 sh -c loop\n' } } },
+  { name: '서비스 둘: 하나는 멈췄고 하나는 모르는 프로세스가 있다', managed: ['api', 'web'], sortCalls: true, script: { 'ps@api': { out: RUNNING }, 'ps@web': { out: '{"Service":"web","State":"exited"}\n' }, exec: { out: '15 200 sh -c loop\n' } } },
   { name: '이미 취소된 신호는 옛 runCommand처럼 등록 전 취소를 모른다(찾기는 끝까지 읽는다)', abort: true, script: { ps: { out: RUNNING }, exec: { out: '15 200 sh\n' } } },
 ];
 
