@@ -21,35 +21,10 @@ describe('findFreeHostPort', () => {
     expect(a).not.toBe(b);
   });
 
-  it('바인드 확인 함수를 주입하면 40000~59999 대역에서 먼저 시도한다', async () => {
-    const tried: number[] = [];
-    const port = await findFreeHostPort(async (candidate) => {
-      tried.push(candidate);
-      return true;
-    });
-
-    expect(tried).toHaveLength(1);
-    expect(port).toBe(tried[0]);
+  it('보통은 40000~59999 대역에서 돌려준다', async () => {
+    // 대역의 포트 10개가 모두 막혀 있을 때만 OS 배정으로 돌아간다. 그 규칙(10번 시도, 돌아가기)은 Rust 단위 시험이 가짜 바인드로 본다
+    const port = await findFreeHostPort();
     expect(port).toBeGreaterThanOrEqual(40_000);
     expect(port).toBeLessThanOrEqual(59_999);
-  });
-
-  it('대역에서 몇 번 막혀도 비는 포트를 찾을 때까지 계속 시도한다', async () => {
-    let calls = 0;
-    const port = await findFreeHostPort(async () => {
-      calls += 1;
-      return calls >= 3;
-    });
-
-    expect(calls).toBe(3);
-    expect(port).toBeGreaterThanOrEqual(40_000);
-    expect(port).toBeLessThanOrEqual(59_999);
-  });
-
-  it('대역이 전부 막혀 있으면 OS 자동 배정(포트 0)으로 돌아간다', async () => {
-    const port = await findFreeHostPort(async () => false);
-
-    expect(port).toBeGreaterThan(0);
-    expect(port).toBeLessThan(65_536);
   });
 });

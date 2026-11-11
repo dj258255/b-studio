@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { Driver, DockerScenario, WorldOptions } from './harness';
+import type { BaselineSnapshot, DiskState, Driver, DockerScenario, WorldOptions } from './harness';
 
 /**
  * 게이트 판정 표(4f-plan.md "먼저 고정할 판정 표")의 행마다 시나리오 하나. 모두 `/api/sessions/[id]/messages` 경로(stream-json 러너 + 가짜 CLI)로 몬다.
@@ -14,6 +14,11 @@ export interface Scenario {
   /** 사진에 내용을 남길 작업 복사본의 파일 */
   files?: string[];
   run: (ctx: ScenarioContext) => Promise<void>;
+  /**
+   * 사진과 별개로 "옳은 동작"을 말하는 기대. 사진은 지금 값을 고정할 뿐 옳은지는 말하지 않으므로, 결함을 고친 시나리오는 여기에 기대를 적는다.
+   * 어긋난 것을 사람이 읽을 글로 돌려준다(비면 통과)
+   */
+  check?: (snapshot: BaselineSnapshot) => string[];
 }
 
 /**
@@ -369,9 +374,8 @@ export const terminalScenarios: Scenario[] = [
     },
   },
   {
-    name: 'terminal-read-only-bypass-not-reverted-when-sandbox-off',
-    // 이 사진은 고칠 결함(트러블슈팅 185)의 지금 동작을 고정한 것이다: 실패로 닫지만 샌드박스가 꺼져 있어 되돌리지 못하는데 글은 되돌렸다고 말한다. 고치는 PR에서 사진을 갱신한다
-    covers: '터미널 읽기만 요청: 훅을 우회해 파일이 바뀌면 실패로 닫지만, 샌드박스가 꺼져 있으면 되돌리지 못한다(결함 186의 지금 동작)',
+    name: 'terminal-read-only-bypass-reverted-when-sandbox-off',
+    covers: '터미널 읽기만 요청: 훅을 우회해 파일이 바뀌면 실패로 닫고, 샌드박스를 한 번도 켜지 않은 세션이어도 작업 복사본을 되돌린다(트러블슈팅 185)',
     options: terminalOptions(),
     files: ['app/hello.txt'],
     run: async ({ start, cli }) => {
@@ -380,6 +384,17 @@ export const terminalScenarios: Scenario[] = [
       await claude.prompt('[읽기만] hello.txt를 설명해 주세요');
       await claude.writeBypassingHook('app/hello.txt', '우회한 변경\n');
       await claude.stop('설명입니다.');
+    },
+    check: (snapshot) => {
+      const problems: string[] = [];
+      const disk = snapshot.disk as DiskState;
+      if (disk.status.length > 0) problems.push(`작업 복사본에 변경이 남았다: ${disk.status.join(', ')}`);
+      if (disk.files['app/hello.txt'] !== '안녕\n') problems.push(`app/hello.txt가 원래 내용이 아니다: ${JSON.stringify(disk.files['app/hello.txt'])}`);
+      const text = JSON.stringify([snapshot.http, snapshot.events]);
+      // 한 글이 되돌렸다는 말과 되돌리지 못했다는 말을 함께 하지 않는다
+      if (text.includes('되돌렸습니다') && text.includes('되돌리지 못했습니다')) problems.push('글이 되돌렸다는 말과 되돌리지 못했다는 말을 함께 한다');
+      if (text.includes('[b-studio] [b-studio]')) problems.push('알림 글의 앞머리가 두 번 붙었다');
+      return problems;
     },
   },
   {

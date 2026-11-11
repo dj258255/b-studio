@@ -3882,3 +3882,172 @@ impl Default for WorkspacePinStore {
         Self::new()
     }
 }
+
+// ── 체크포인트 실행(ADR-195 4f A1): 바이트 그대로 돌려주는 실행과 `git archive | tar -x`
+use bstudio_io::process_bytes;
+
+/// `run_command`와 같되 stdin·stdout·stderr가 바이트다. 종료 코드는 신호로 죽으면 null, 띄우기 실패는 `spawnError`
+#[napi(object)]
+pub struct BytesResult {
+    pub exit_code: Option<i32>,
+    pub stdout: Buffer,
+    pub stderr: Buffer,
+    pub aborted: bool,
+    pub overflowed: bool,
+    pub spawn_error: Option<String>,
+}
+
+// napi 인자 꼴을 `run_command`와 맞춘다(인자 배열, 환경, cwd, 상한, 신호)
+#[allow(clippy::too_many_arguments)]
+#[napi]
+pub fn run_command_bytes(
+    env: Env,
+    bin: String,
+    args: Vec<String>,
+    input: Option<Buffer>,
+    env_vars: Option<HashMap<String, String>>,
+    cwd: Option<String>,
+    max_buffer: u32,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<BytesResult>> {
+    let pairs = env_pairs(env_vars);
+    let cancel = abort_notify(signal);
+    let future = async move {
+        let output = process_bytes::run_command_bytes(&bin, &args, input.as_deref(), pairs.as_deref(), cwd.as_deref(), cancel.notified(), max_buffer as usize).await;
+        Ok(BytesResult {
+            exit_code: output.exit_code,
+            stdout: Buffer::from(output.stdout),
+            stderr: Buffer::from(output.stderr),
+            aborted: output.aborted,
+            overflowed: output.overflowed,
+            spawn_error: output.spawn_error,
+        })
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}
+
+#[napi(object)]
+pub struct ArchiveExtractResult {
+    pub git_code: Option<i32>,
+    pub tar_code: Option<i32>,
+    pub stderr: Buffer,
+    pub spawn_error: Option<String>,
+}
+
+/// `git_bin git_args | tar -x --no-same-owner -C dest`
+#[napi]
+pub fn run_archive_extract(env: Env, git_bin: String, git_args: Vec<String>, git_env: Option<HashMap<String, String>>, dest: String) -> Result<AsyncBlock<ArchiveExtractResult>> {
+    let pairs = env_pairs(git_env);
+    let future = async move {
+        let output = process_bytes::run_archive_extract(&git_bin, &git_args, pairs.as_deref(), &dest).await;
+        Ok(ArchiveExtractResult { git_code: output.git_code, tar_code: output.tar_code, stderr: Buffer::from(output.stderr), spawn_error: output.spawn_error })
+    };
+    AsyncBlockBuilder::new(future).build(&env)
+}
+
+// ── 샌드박스 조율의 순수 도우미(ADR-195 4f A4a). 큰 구조는 JSON 문자열로 주고받는다(출력 해석 함수와 같은 규칙).
+// TS 껍데기: packages/sandbox/src/docker/{compose-deps,compose-env,external-call,load-runner,free-port,compose-provider}.ts
+
+use bstudio_guard::{compose_deps, compose_env, compose_helpers, external_call, load_runner};
+
+#[napi]
+pub fn parse_depends_on(config_json: String) -> Result<String> {
+    Ok(out(&compose_deps::parse_depends_on(&input(&config_json, "compose 설정")?)))
+}
+
+#[napi]
+pub fn start_waves(services: Vec<String>, depends_on_json: String) -> Result<Vec<Vec<String>>> {
+    Ok(compose_deps::start_waves(&services, &input(&depends_on_json, "depends_on")?))
+}
+
+#[napi]
+pub fn awaited_condition(service: String, later: Vec<String>, depends_on_json: String) -> Result<Option<String>> {
+    Ok(compose_deps::awaited_condition(&service, &later, &input(&depends_on_json, "depends_on")?).map(str::to_owned))
+}
+
+/// 이름과 값은 같은 자리끼리 짝이다. 허용 목록을 거른 뒤 시크릿을 얹은 [이름, 값] 목록을 돌려준다
+#[napi]
+pub fn compose_environment(secret_names: Vec<String>, secret_values: Vec<String>, env_names: Vec<String>, env_values: Vec<String>) -> Result<Vec<Vec<String>>> {
+    if secret_names.len() != secret_values.len() || env_names.len() != env_values.len() {
+        return Err(Error::from_reason("환경 변수의 이름과 값 개수가 다릅니다"));
+    }
+    let secrets: Vec<(String, String)> = secret_names.into_iter().zip(secret_values).collect();
+    let env: Vec<(String, String)> = env_names.into_iter().zip(env_values).collect();
+    Ok(compose_env::compose_environment(&secrets, &env).into_iter().map(|(name, value)| vec![name, value]).collect())
+}
+
+#[napi]
+pub fn external_call_script(edge_script: String, request_json: String) -> String {
+    external_call::external_call_script(&edge_script, &request_json)
+}
+
+#[napi]
+pub fn load_threads(concurrent: f64, daemon_cpus: Option<f64>) -> f64 {
+    load_runner::load_threads(concurrent, daemon_cpus)
+}
+
+#[napi]
+pub fn load_run_args(name: String, network: String, sandbox_id: String, threads: f64, runtime: Option<String>, image: String) -> Vec<String> {
+    load_runner::load_run_args(&load_runner::LoadRunPlan { name: &name, network: &network, sandbox_id: &sandbox_id, threads, runtime: runtime.as_deref(), image: &image })
+}
+
+#[napi]
+pub fn load_config(request_json: String, port: f64, threads: f64) -> Result<String> {
+    Ok(out(&fail(load_runner::load_config(&input(&request_json, "부하 요청")?, port, threads))?))
+}
+
+#[napi]
+pub fn load_script(runner: String, config_json: String) -> String {
+    load_runner::load_script(&runner, &config_json)
+}
+
+#[napi]
+pub fn parse_load_output(stdout: String, requests: f64, concurrent: f64) -> Option<String> {
+    load_runner::parse_load_output(&stdout, requests, concurrent).map(|value| out(&value))
+}
+
+#[napi]
+pub fn is_port_bind_conflict(stderr: String) -> bool {
+    compose_helpers::is_port_bind_conflict(&stderr)
+}
+
+#[napi]
+pub fn docker_out_of_space() -> String {
+    compose_helpers::DOCKER_OUT_OF_SPACE.to_owned()
+}
+
+/// 디스크 부족이면 덧붙일 안내 문구, 아니면 null. 원문은 TS가 그대로 들고 있으므로 돌려주지 않는다(짝 없는 서로게이트가 U+FFFD로 바뀌지 않게)
+#[napi]
+pub fn docker_out_of_space_note(text: String) -> Option<String> {
+    compose_helpers::out_of_space_note(&text).map(str::to_owned)
+}
+
+#[napi(object)]
+pub struct UpArgs {
+    pub create: Vec<String>,
+    pub services: Vec<String>,
+    pub by_id: bool,
+}
+
+#[napi]
+pub fn split_up_args(args: Vec<String>) -> UpArgs {
+    let split = compose_helpers::split_up_args(&args);
+    UpArgs { create: split.create, services: split.services, by_id: split.by_id }
+}
+
+#[napi]
+pub fn runtime_from_env(value: Option<String>) -> Option<String> {
+    compose_helpers::runtime_from_env(value.as_deref())
+}
+
+#[napi]
+pub fn sandbox_build_no_cache(value: Option<String>) -> bool {
+    compose_helpers::sandbox_build_no_cache(value.as_deref())
+}
+
+/// 127.0.0.1에서 비어 있는 호스트 포트 하나. 40000~59999 대역에서 먼저 찾고, 막혀 있으면 OS 배정으로 돌아간다
+#[napi]
+pub async fn find_free_host_port() -> Result<u32> {
+    let port = blocking(bstudio_io::host_port::find_free_host_port).await?.map_err(|e| io_error("빈 포트를 찾지 못했습니다", e))?;
+    Ok(u32::from(port))
+}

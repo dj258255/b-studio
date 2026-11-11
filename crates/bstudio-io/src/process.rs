@@ -166,7 +166,7 @@ async fn run_command_capped(
 
 /// 스트림을 끝까지 읽어 공유 버퍼에 쌓는다. 256MB를 넘기면 거기서 잘라 담고 overflow를 한 번 알린다.
 /// 넘겨도 계속 읽어(버려) 파이프가 막히지 않게 한다. kill되면 EOF로 끝난다.
-async fn read_into<R: AsyncRead + Unpin>(
+pub(crate) async fn read_into<R: AsyncRead + Unpin>(
     mut reader: R,
     buf: Arc<Mutex<Vec<u8>>>,
     overflow: Arc<Notify>,
@@ -198,7 +198,7 @@ async fn read_into<R: AsyncRead + Unpin>(
     }
 }
 
-fn set_env(command: &mut Command, env: Option<&[(String, String)]>) {
+pub(crate) fn set_env(command: &mut Command, env: Option<&[(String, String)]>) {
     if let Some(env) = env {
         command.env_clear();
         for (name, value) in env {

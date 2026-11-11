@@ -126,5 +126,6 @@ export {
   type ProcessEntry,
   type SpawnHostPty,
 } from './host-terminal';
+export { execArchiveExtract, execBytes, ExecBytesError, type ArchiveExtractOutcome, type ExecBytesOptions } from './exec-bytes';
 export { assertSandboxId, SANDBOX_ID } from './sandbox-id';
 export { native, encodeNative, decodeNative, encodeLoneSurrogates } from './native';

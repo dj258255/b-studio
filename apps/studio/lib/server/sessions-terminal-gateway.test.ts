@@ -1231,7 +1231,7 @@ describe('읽기만 실행은 파일이 바뀐 채 끝나면 게이트를 돌리
     await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
     const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
     expect(answer.feedback).toBeUndefined();
-    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌어 되돌렸습니다');
+    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌었습니다');
     expect(fake.execCalls).toEqual([]);
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
     expect(getSnapshot(session.id)!.running).toBe(false);
@@ -1300,6 +1300,48 @@ describe('멈춘 세션에 온 위반은 남지 않는다 (이슈 #695 수정)',
   }, 30_000);
 });
 
+describe('읽기만 실행의 우회 변경은 샌드박스를 켜지 않은 세션에서도 되돌린다 (트러블슈팅 185)', () => {
+  it('한 번도 켜지 않은 세션: 샌드박스를 켜지 않고 작업 복사본만 되돌리며, 글은 되돌렸다고만 말한다', async () => {
+    const session = await open({ lazy: true });
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    await edit(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
+    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌었습니다: api/src/Order.java');
+    expect(answer.message).toContain('되돌렸습니다');
+    expect(answer.message).not.toContain('되돌리지 못했습니다');
+    expect(answer.message).not.toContain('[b-studio] [b-studio]');
+    expect(await fileOf(session)).toBe(ORIGINAL);
+    // 되돌리려고 샌드박스를 켜지 않는다. 띄울 서비스도 복원할 DB도 없다
+    expect(fake.starts).toBe(0);
+    expect(getSnapshot(session.id)!.status).toBe('idle');
+    expect(session.ofType('reverted')).toMatchObject([{ files: ['api/src/Order.java'], restarted: [], databases: [] }]);
+    expect(session.ofType('reverted')[0]!.backup).toBeDefined();
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('켜려다 실패한 세션: 되돌리지 않고, 글은 처음부터 되돌리지 못했다고 하며 파일이 남는다고 알린다', async () => {
+    const session = await open({ lazy: true });
+    fake.startFails = true;
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    // 쓰기 직전 훅이 켜려다 실패한다. 이제 이 세션은 켜려고 한 적이 있다
+    expect((await write(session, 'api/src/Order.java', 'class Order { String memo; }\n')).deny).toBeDefined();
+    await session.gateway.stop({ last_assistant_message: '막혔습니다.' });
+    expect(getSnapshot(session.id)!.status).toBe('failed');
+
+    await session.gateway.prompt({ prompt: '[읽기만] Order가 어디서 쓰이는지 알려줘' });
+    await edit(session, 'api/src/Order.java', 'class Order { String hacked; }\n');
+    const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
+    expect(answer.message).toContain('되돌리지 못했습니다');
+    expect(answer.message).toContain('작업 복사본에 그대로 남아 있습니다');
+    expect(answer.message).not.toContain('되돌렸습니다');
+    expect(await fileOf(session)).toBe('class Order { String hacked; }\n');
+    expect(session.ofType('reverted')).toEqual([]);
+    expect(session.ofType('run_finished').at(-1)).toMatchObject({ status: 'failed' });
+    await stopSession(session.id);
+  }, 30_000);
+});
+
 describe('읽기만 실행은 사람이 미리 고쳐 둔 파일로 오탐하지 않는다 (이슈 #695 수정)', () => {
   it('사람이 고쳐 둔 파일이 있는 채 읽기만 요청이 아무것도 안 바꾸고 끝나면 done이고 그 파일은 그대로다', async () => {
     const session = await open();
@@ -1326,7 +1368,7 @@ describe('읽기만 실행은 사람이 미리 고쳐 둔 파일로 오탐하지
     await edit(session, 'api/src/Order.java', 'class Order { String hacked; }\n');
 
     const answer = await session.gateway.stop({ last_assistant_message: '한 곳에서 씁니다.' });
-    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌어 되돌렸습니다');
+    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌었습니다');
     expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
     await stopSession(session.id);
   }, 30_000);
