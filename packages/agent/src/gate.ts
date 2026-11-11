@@ -19,7 +19,7 @@ import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
-import { missingVerificationStages, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
+import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
@@ -285,6 +285,10 @@ export class VerificationGate {
         })
       : undefined;
     if (outsideTracker) await outsideTracker.sync();
+    // 보호 경로 파일은 이 실행에서 처음 쓰기 직전에 내용을 고정한다(Workspace.pinBeforeWrite, 이슈 #992). 고정하기 직전에 도구 밖 변경을 먼저 옮겨,
+    // 셸이 먼저 고친 파일의 내용을 "실행 시작 때 내용"으로 고정하지 않게 한다. 게이트가 추적기를 갖지 않는 호출부(관문 러너·터미널)는 자기 추적기를 직접 정한다
+    options.workspace.watchProtectedPaths(protectedPathsFor(options.project.spec.workflow));
+    if (outsideTracker) options.workspace.useOutsideSync(() => outsideTracker.sync());
     const [baselines, evaluationAssetBaseline] = await Promise.all([
       captureBaselines(options.sandbox, options.project, options.fetcher),
       fingerprintEvaluationAssets(options.project.root, evaluationAssets),
@@ -547,7 +551,9 @@ export class VerificationGate {
           return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${this.#loadPlatformFailure}` };
         }
         this.#stage('review');
-        checks.push(...reviewChanges(project, recheck ? [] : workspace.changedFiles()), ...recordChecks);
+        // 쓰기 직전 고정값과 바이트까지 같은 보호 경로 파일은 "쓰고 되돌린 것"이라 보호 경로 확인에서 뺀다(이슈 #992). 고정값이 없으면 바뀐 것으로 본다
+        const changed = recheck ? [] : workspace.changedFiles();
+        checks.push(...reviewChanges(project, changed, workspace.restoredProtectedFiles(changed)), ...recordChecks);
         this.checks = checks;
         for (const check of checks) onEvent({ type: 'workflow_check', check });
         for (const stage of ['browser_check', 'test', 'concurrency_check', 'load_check', 'review'] as const) {

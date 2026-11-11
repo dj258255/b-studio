@@ -8,6 +8,8 @@ import { encodeLoneSurrogates, native as guard } from '@b-studio/sandbox';
 const BACKSLASH_SEP = path.sep === '\\';
 
 const MAX_READ_BYTES = 256 * 1024;
+/** 보호 경로 파일의 쓰기 직전 고정값과 지금 내용을 견줄 때 읽는 상한. 넘으면 견주지 못한 것이라 바뀐 것으로 본다(읽기 전에 크기를 본다) */
+const MAX_PIN_BYTES = 1024 * 1024;
 
 /** readRegularFileSync의 결과: 없음, 읽은 글, 또는 읽지 않은 이유(일반 파일이 아님·너무 큼·읽기 실패) */
 export type RegularFileRead = { kind: 'missing' } | { kind: 'text'; content: string } | { kind: 'irregular'; reason: string };
@@ -28,6 +30,12 @@ export type RegularFileBytesRead = { kind: 'missing' } | { kind: 'bytes'; conten
  * 확인과 여는 것 사이에 폴더가 바뀌는 틈까지는 막지 못한다(연 뒤에 확인할 방법이 없다). 그래서 실제 위치로 연다
  */
 export function readProjectFileSync(root: string, relative: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
+  const read = readProjectFileBytesSync(root, relative, maxBytes);
+  return read.kind === 'bytes' ? { kind: 'text', content: read.content.toString('utf8') } : read;
+}
+
+/** readProjectFileSync와 같은 규칙으로 읽되 원본 바이트를 돌려준다(글자로 바꾸면 서로 다른 바이트가 같은 글자가 된다). 상한은 읽기 전에 본다 */
+export function readProjectFileBytesSync(root: string, relative: string, maxBytes: number = MAX_READ_BYTES): RegularFileBytesRead {
   const normalized = path.normalize(relative);
   if (!isInsideRelative(normalized)) {
     return { kind: 'irregular', reason: '프로젝트 밖 경로입니다' };
@@ -50,7 +58,7 @@ export function readProjectFileSync(root: string, relative: string, maxBytes: nu
     }
     if (realParent !== path.join(realRoot, parent)) return { kind: 'irregular', reason: '상위 폴더가 심볼릭 링크입니다' };
   }
-  return readRegularFileSync(path.join(realRoot, normalized), maxBytes);
+  return readRegularFileBytesSync(path.join(realRoot, normalized), maxBytes);
 }
 
 export function readRegularFileSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
@@ -135,6 +143,13 @@ export class Workspace {
   #version = 0;
   /** 파일 → 실행 시작 시점에 읽은 결과. snapshotRead가 처음 부른 때의 값을 고정한다 */
   readonly #snapshots = new Map<string, RegularFileRead>();
+  /**
+   * 보호 경로 파일 → 이 실행에서 **처음 쓰기 직전**의 내용(바이트). 이 작업 공간은 실행 하나에만 산다(러너·게이트가 실행마다 새로 만든다)
+   * 따라서 고정값이 다음 실행이나 다른 세션에 남지 않는다. 고정하지 못한 파일은 'irregular'로 적어, 나중의 쓰기가 이미 바뀐 내용을 고정값으로 삼지 못하게 한다
+   */
+  readonly #writePins = new Map<string, RegularFileBytesRead>();
+  #protectedRules: readonly string[] = [];
+  #outsideSync: (() => Promise<unknown>) | undefined;
 
   constructor(root: string) {
     this.root = path.resolve(root);
@@ -189,6 +204,80 @@ export class Workspace {
   /** 쓰기가 일어날 때마다 1씩 오른다. 검증 게이트가 "지난 검증 이후 바뀐 파일"을 고를 때 쓴다 */
   get version(): number {
     return this.#version;
+  }
+
+  /**
+   * 보호 경로 규칙을 알린다. 이 규칙에 드는 파일만 쓰기 직전에 내용을 고정한다(pinBeforeWrite).
+   * 게이트가 만들어질 때 부른다. 규칙이 비면 아무것도 고정하지 않는다(이전과 같다)
+   */
+  watchProtectedPaths(rules: readonly string[]): void {
+    this.#protectedRules = [...rules];
+  }
+
+  /**
+   * 고정하기 직전에 도구 밖 변경을 먼저 옮기는 함수를 정한다(게이트·러너의 ChangeTracker.sync).
+   * 셸 같은 도구 밖 길로 이미 바뀐 파일은 그 내용을 "실행 시작 때 내용"으로 고정하면 안 된다. 옮기고 나면 그 파일은 바뀐 목록에 들어 있어 고정하지 않는다
+   */
+  useOutsideSync(sync: () => Promise<unknown>): void {
+    this.#outsideSync = sync;
+  }
+
+  /**
+   * 보호 경로 파일의 내용을 이 실행에서 **처음 쓰기 직전에 한 번** 고정한다(이슈 #992). 파일을 쓰기 직전의 관문(파일 도구, CLI의 쓰기 직전 훅)이 부른다.
+   * review는 지금 내용이 이 고정값과 바이트까지 같을 때만 "쓰고 원래대로 되돌린 파일"로 본다(restoredProtectedFiles).
+   * 고정하지 않는 경우(모두 "모르면 바뀐 것으로"): 보호 경로가 아니다, 이미 바뀐 목록에 있다(실행 전에 사람이 고쳤거나 셸이 먼저 고쳤다),
+   * 링크이거나 일반 파일이 아니다, 상한을 넘는다, 읽지 못했다. 경로를 풀지 못해도(링크를 거친다 등) 고정하지 않는다.
+   * 이 함수는 던지지 않는다 — 고정하지 못해도 쓰기는 막지 않고, 그 파일이 바뀐 것으로 남을 뿐이다
+   */
+  async pinBeforeWrite(file: string): Promise<void> {
+    if (this.#protectedRules.length === 0) return;
+    let relative: string;
+    try {
+      relative = this.#relative(await this.#resolve(file, { mustExist: false }));
+    } catch {
+      return;
+    }
+    await this.#pin(relative);
+  }
+
+  async #pin(relative: string): Promise<void> {
+    if (this.#protectedRules.length === 0 || this.#writePins.has(relative)) return;
+    // 거부 목록 쪽 맞춤이다: 넓게 맞아도 읽는 파일이 하나 늘 뿐이고, 고정값은 review가 protected-paths로 보는 파일에만 쓰인다
+    if (!this.#protectedRules.some((rule) => guard.isProtectedPath(relative, rule, BACKSLASH_SEP))) return;
+    const unpinned = (reason: string): void => {
+      this.#writePins.set(relative, { kind: 'irregular', reason });
+    };
+    try {
+      await this.#outsideSync?.();
+    } catch {
+      unpinned('도구 밖 변경을 옮기지 못했습니다');
+      return;
+    }
+    if (this.#changed.has(relative)) {
+      unpinned('이미 바뀐 파일입니다');
+      return;
+    }
+    this.#writePins.set(relative, readProjectFileBytesSync(this.root, relative, MAX_PIN_BYTES));
+  }
+
+  /**
+   * files(바뀐 파일 목록) 중 쓰기 직전 고정값이 있고 지금 내용이 그 고정값과 바이트까지 같은 파일. 없던 파일(고정값이 "없음")은 지금도 없을 때만 같다.
+   * 열린 쪽 판정이다(protected-paths에서 빼 준다). 그래서 고정값이 없거나 읽지 못했거나 링크·일반 파일이 아니거나 상한을 넘었거나
+   * 읽는 동안 바뀌었으면 같다고 하지 않는다. 지금 내용은 링크를 따라가지 않고 읽는다(쓰는 동안 링크로 바뀐 경우도 바뀐 것이다)
+   */
+  restoredProtectedFiles(files: readonly string[]): string[] {
+    const restored: string[] = [];
+    for (const file of files) {
+      const pin = this.#writePins.get(file);
+      if (!pin) continue;
+      const now = readProjectFileBytesSync(this.root, file, MAX_PIN_BYTES);
+      const same =
+        pin.kind === 'missing'
+          ? now.kind === 'missing'
+          : pin.kind === 'bytes' && pin.complete && now.kind === 'bytes' && now.complete && pin.content.equals(now.content);
+      if (same) restored.push(file);
+    }
+    return restored;
   }
 
   /** 에이전트가 이번 실행에서 만들거나 수정한 파일 (루트 기준 경로) */
@@ -349,6 +438,7 @@ export class Workspace {
   async write(file: string, content: string): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: false });
     await this.#assertNotStale(absolute);
+    await this.#pin(this.#relative(absolute));
     await mkdir(path.dirname(absolute), { recursive: true });
     await writeNoFollowInside(this.root, absolute, content);
     this.#record(absolute, content);
@@ -360,6 +450,7 @@ export class Workspace {
    */
   async writeBinary(file: string, data: Buffer): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: false });
+    await this.#pin(this.#relative(absolute));
     await mkdir(path.dirname(absolute), { recursive: true });
     await writeNoFollowInside(this.root, absolute, data);
     const relative = this.#relative(absolute);
@@ -383,6 +474,7 @@ export class Workspace {
     }
 
     const next = current.slice(0, first) + newText + current.slice(first + oldText.length);
+    await this.#pin(this.#relative(absolute));
     await writeNoFollowInside(this.root, absolute, next);
     this.#record(absolute, next);
   }
@@ -391,6 +483,7 @@ export class Workspace {
   async remove(file: string): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: true });
     await this.#assertNotStale(absolute);
+    await this.#pin(this.#relative(absolute));
     await rm(absolute);
 
     const relative = this.#relative(absolute);

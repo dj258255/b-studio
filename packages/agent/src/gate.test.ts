@@ -1,5 +1,5 @@
 import { writeFileSync } from 'node:fs';
-import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
 import { SandboxError, type ExecResult, type LoadRequest, type LoadResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
@@ -176,6 +176,269 @@ describe('샌드박스·도커 쪽 실패는 에이전트의 게이트 실패로
     await gate.check();
     const result = events.find((event) => event.type === 'verify_result');
     expect(result?.type === 'verify_result' ? result.text : '').toContain('바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요');
+  });
+});
+
+describe('보호 경로를 쓰고 실행 시작 때 내용으로 되돌리면 protected-paths를 통과한다 (이슈 #992)', () => {
+  const FILE = 'api/src/Order.java';
+  const ORIGINAL = 'class Order { String customerNam; }\n';
+  const protectedPath = (target: LoadedProject) => path.join(target.root, FILE);
+
+  /** 게이트를 돌려 protected-paths 확인 결과를 돌려준다 */
+  async function protectedCheck(gate: { check(): Promise<unknown>; checks: WorkflowCheck[] }): Promise<WorkflowCheck | undefined> {
+    await gate.check();
+    return gate.checks.find((check) => check.name === 'protected-paths');
+  }
+
+  /** CLI의 쓰기 직전 훅이 하는 일: 고정하고, 도구 밖에서 쓰고, 바뀐 목록에 알린다 */
+  async function writeOutside(workspace: Workspace, target: LoadedProject, content: string | Buffer, file = FILE): Promise<void> {
+    await workspace.pinBeforeWrite(file);
+    await writeFile(path.join(target.root, file), content);
+    workspace.trackExternalChanges([file]);
+  }
+
+  it('파일 도구로 쓴 보호 경로를 원래 내용으로 되돌리면 통과한다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write(FILE, 'class Order { String memo; }\n');
+    await workspace.write(FILE, ORIGINAL);
+
+    expect(await protectedCheck(gate)).toMatchObject({ ok: true });
+  });
+
+  it('CLI의 쓰기 직전 훅으로 고정한 보호 경로를 되돌리면 통과한다(바뀐 목록에는 남아 있다)', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    await writeOutside(workspace, target, 'class Order { String memo; }\n');
+    await writeOutside(workspace, target, ORIGINAL);
+
+    expect(workspace.changedFiles()).toContain(FILE);
+    expect(await protectedCheck(gate)).toMatchObject({ ok: true });
+  });
+
+  it('되돌렸어도 다른 보호 경로 파일이 바뀌어 있으면 그 파일만 실패로 남는다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    await writeFile(path.join(target.root, 'api/src/Other.java'), 'class Other {}\n');
+    const { gate, workspace } = await setup(target);
+    await writeOutside(workspace, target, 'class Order { String memo; }\n');
+    await writeOutside(workspace, target, ORIGINAL);
+    await writeOutside(workspace, target, 'class Other { int x; }\n', 'api/src/Other.java');
+
+    const check = await protectedCheck(gate);
+    expect(check).toMatchObject({ ok: false });
+    expect(check?.detail).toContain('api/src/Other.java');
+    expect(check?.detail).not.toContain('Order.java');
+  });
+
+  it('고쳐 둔 채로 두면 계속 실패한다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    await writeOutside(workspace, target, 'class Order { String memo; }\n');
+
+    expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+  });
+
+  it('한 바이트라도 다르면 실패한다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    await writeOutside(workspace, target, 'class Order { String memo; }\n');
+    await writeOutside(workspace, target, 'class Order { String customerNam; }\n\n');
+
+    expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+  });
+
+  it('글자로는 같아 보이는 다른 바이트(잘못된 UTF-8)도 실패한다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    await writeFile(protectedPath(target), Buffer.from([0x63, 0xff]));
+    const { gate, workspace } = await setup(target);
+    await writeOutside(workspace, target, 'x');
+    // 0xff와 0xfe는 글자로 읽으면 둘 다 U+FFFD다
+    await writeOutside(workspace, target, Buffer.from([0x63, 0xfe]));
+
+    expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+  });
+
+  it('고정값이 없는 파일(관문 밖 변경으로만 알게 된 것)은 내용이 같아도 바뀐 것으로 본다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    // 셸로 쓴 것과 같다: 쓰기 직전의 훅 없이 바뀐 목록에만 알린다
+    await writeFile(protectedPath(target), 'class Order { String memo; }\n');
+    await writeFile(protectedPath(target), ORIGINAL);
+    workspace.trackExternalChanges([FILE]);
+
+    expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+  });
+
+  it('보호 경로가 아닌 파일은 고정하지 않는다(보호 경로 규칙 밖이면 도구가 읽지도 않는다)', async () => {
+    const target = withWorkflow({ protectedPaths: ['infra'] });
+    const { workspace } = await setup(target);
+    await writeOutside(workspace, target, 'class Order { String memo; }\n');
+    await writeOutside(workspace, target, ORIGINAL);
+    expect(workspace.restoredProtectedFiles([FILE])).toEqual([]);
+  });
+
+  it('도구 밖 변경을 옮기지 못하면 그 파일은 고정하지 않는다(모르면 바뀐 것으로)', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { gate, workspace } = await setup(target);
+    workspace.useOutsideSync(async () => {
+      throw new Error('git을 읽지 못했습니다');
+    });
+    await writeOutside(workspace, target, 'class Order { String memo; }\n');
+    await writeOutside(workspace, target, ORIGINAL);
+
+    expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+  });
+
+  describe('새던 경우는 계속 실패한다', () => {
+    it('실행 전에 사람이 체크포인트 밖에서 고쳐 둔 보호 경로를 에이전트가 체크포인트 내용으로 되돌리면 실패한다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      // 체크포인트에는 ORIGINAL이 있고, 사람이 실행 전에 디스크에서 고쳐 두었다(git에는 변경으로 보인다)
+      await writeFile(protectedPath(target), 'class Order { String humanEdit; }\n');
+      const { gate, workspace } = await setup(target, { outsideChanges: { pendingFiles: async () => [FILE] } });
+      // 게이트가 만들어질 때 이 변경이 바뀐 목록에 들어갔다. 에이전트가 쓰기 직전의 훅을 지나 체크포인트 내용으로 되돌린다
+      expect(workspace.changedFiles()).toContain(FILE);
+      await workspace.pinBeforeWrite(FILE);
+      await writeFile(protectedPath(target), ORIGINAL);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('같은 일을 파일 도구로 해도 실패한다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      await writeFile(protectedPath(target), 'class Order { String humanEdit; }\n');
+      const { gate, workspace } = await setup(target, { outsideChanges: { pendingFiles: async () => [FILE] } });
+      await workspace.write(FILE, ORIGINAL);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('쓰기 직전의 훅 앞에서 셸이 먼저 고친 파일은 그 내용을 고정값으로 삼지 않는다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      let pending: string[] = [];
+      const { gate, workspace } = await setup(target, { outsideChanges: { pendingFiles: async () => pending } });
+      // 셸이 먼저 고쳤고(훅 없음), 그 뒤 도구가 쓰고 셸이 고친 내용으로 되돌렸다
+      await writeFile(protectedPath(target), 'class Order { String byShell; }\n');
+      pending = [FILE];
+      await workspace.pinBeforeWrite(FILE);
+      await writeFile(protectedPath(target), 'class Order { String byTool; }\n');
+      await writeFile(protectedPath(target), 'class Order { String byShell; }\n');
+      workspace.trackExternalChanges([FILE]);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('git이 추적하지 않는 보호 경로 파일은 실행 시작 때 내용으로 돌아왔을 때만 통과한다(체크포인트 내용과 견주지 않는다)', async () => {
+      const target = withWorkflow({ protectedPaths: ['keys'] });
+      await mkdir(path.join(target.root, 'keys'), { recursive: true });
+      await writeFile(path.join(target.root, 'keys/local.txt'), 'untracked-original');
+      const { gate, workspace } = await setup(target);
+      await writeOutside(workspace, target, 'tampered', 'keys/local.txt');
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+
+      await writeOutside(workspace, target, 'untracked-original', 'keys/local.txt');
+      expect(await protectedCheck(gate)).toMatchObject({ ok: true });
+    });
+
+    it('없던 보호 경로 파일을 만들고 지우지 않았으면 실패하고, 지웠으면 통과한다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      const { gate, workspace } = await setup(target);
+      const created = 'api/src/New.java';
+      await writeOutside(workspace, target, 'class New {}\n', created);
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+
+      await rm(path.join(target.root, created));
+      expect(await protectedCheck(gate)).toMatchObject({ ok: true });
+    });
+
+    it('원래 있던 보호 경로 파일을 지웠으면 실패하고, 같은 내용으로 다시 만들었으면 통과한다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      const { gate, workspace } = await setup(target);
+      await workspace.pinBeforeWrite(FILE);
+      await rm(protectedPath(target));
+      workspace.trackExternalChanges([FILE]);
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+
+      await writeFile(protectedPath(target), ORIGINAL);
+      expect(await protectedCheck(gate)).toMatchObject({ ok: true });
+    });
+
+    it('쓰는 동안 링크로 바뀐 보호 경로 파일은 내용이 같아도 실패한다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      await writeFile(path.join(target.root, 'elsewhere.txt'), ORIGINAL);
+      const { gate, workspace } = await setup(target);
+      await workspace.pinBeforeWrite(FILE);
+      await rm(protectedPath(target));
+      await symlink(path.join(target.root, 'elsewhere.txt'), protectedPath(target));
+      workspace.trackExternalChanges([FILE]);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('고정할 때 이미 링크였던 보호 경로 파일은 빼 주지 않는다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      await writeFile(path.join(target.root, 'elsewhere.txt'), ORIGINAL);
+      await rm(protectedPath(target));
+      await symlink(path.join(target.root, 'elsewhere.txt'), protectedPath(target));
+      const { gate, workspace } = await setup(target);
+      await writeOutside(workspace, target, ORIGINAL);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('상한을 넘는 보호 경로 파일은 견주지 못해 바뀐 것으로 본다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      const big = Buffer.alloc(2 * 1024 * 1024, 0x61);
+      await writeFile(protectedPath(target), big);
+      const { gate, workspace } = await setup(target);
+      await writeOutside(workspace, target, 'small');
+      await writeOutside(workspace, target, big);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('지금 내용을 읽지 못하면(일반 파일이 아님) 바뀐 것으로 본다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      const { gate, workspace } = await setup(target);
+      await workspace.pinBeforeWrite(FILE);
+      await rm(protectedPath(target));
+      await mkdir(protectedPath(target));
+      workspace.trackExternalChanges([FILE]);
+
+      expect(await protectedCheck(gate)).toMatchObject({ ok: false });
+    });
+
+    it('고정값은 그 실행의 작업 공간에만 있다: 다음 실행의 작업 공간은 앞 실행이 고정한 것을 모른다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'] });
+      const first = await setup(target);
+      await writeOutside(first.workspace, target, 'class Order { String memo; }\n');
+      await writeOutside(first.workspace, target, ORIGINAL);
+      expect(await protectedCheck(first.gate)).toMatchObject({ ok: true });
+
+      // 다음 실행: 쓰기 직전의 훅 없이 바뀐 목록에 알린 같은 파일은 앞 실행의 고정값으로 빠지지 않는다
+      const next = await setup(target);
+      next.workspace.trackExternalChanges([FILE]);
+      expect(next.workspace.restoredProtectedFiles([FILE])).toEqual([]);
+      expect(await protectedCheck(next.gate)).toMatchObject({ ok: false });
+    });
+
+    it('빼는 것은 보호 경로 확인뿐이다: 바뀐 파일 수 상한은 되돌린 파일도 센다', async () => {
+      const target = withWorkflow({ protectedPaths: ['api/src'], maxChangedFiles: 1 });
+      const { gate, workspace } = await setup(target);
+      await writeOutside(workspace, target, 'class Order { String memo; }\n');
+      await writeOutside(workspace, target, ORIGINAL);
+      await workspace.write('web/page.tsx', 'x');
+
+      await gate.check();
+      expect(gate.checks.find((check) => check.name === 'protected-paths')).toMatchObject({ ok: true });
+      expect(gate.checks.find((check) => check.name === 'change-size')).toMatchObject({ ok: false });
+    });
+  });
+
+  it('쓴 파일의 내용은 고정값으로 읽혀도 디스크에서 바뀌지 않는다', async () => {
+    const target = withWorkflow({ protectedPaths: ['api/src'] });
+    const { workspace } = await setup(target);
+    await writeOutside(workspace, target, 'x');
+    expect(await readFile(protectedPath(target), 'utf8')).toBe('x');
   });
 });
 
