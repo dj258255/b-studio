@@ -10,6 +10,7 @@ pub mod exec_stream;
 pub mod git_mask_fs;
 pub mod log_stream;
 pub mod process;
+pub mod process_bytes;
 pub mod pty;
 pub mod safe_fs;
 pub mod stream_exec;

@@ -1,10 +1,8 @@
-import { execFile, spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { promisify } from 'node:util';
-import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
+import { decodeNative, encodeLoneSurrogates, execArchiveExtract, execBytes, ExecBytesError, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
 import { decodeLoneSurrogates } from './lone-surrogates';
 import {
@@ -17,8 +15,6 @@ import {
   WORKFLOW_VERIFY_TRAILER,
   type VerifyTrailer,
 } from './workflow';
-
-const execFileAsync = promisify(execFile);
 
 export interface Checkpoint {
   sha: string;
@@ -1260,31 +1256,19 @@ export class CheckpointStore {
     await this.#assertSafeLocalGit();
     await mkdir(dest, { recursive: true });
     const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
-    await new Promise<void>((resolve, reject) => {
-      const git = spawn(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'archive', '--format=tar', commit], { stdio: ['ignore', 'pipe', 'pipe'], env: gitEnv() });
-      // root로 돌면 GNU tar는 기록된 소유자(uid 0)로 chown하려 해, 호스트 폴더를 마운트한 컨테이너에서 실패한다 (docs/troubleshooting.md 34)
-      const tar = spawn('tar', ['-x', '--no-same-owner', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
-      git.stdout.pipe(tar.stdin);
-      let errors = '';
-      let pending = 2;
-      let failed = false;
-      const collect = (chunk: Buffer) => (errors += chunk.toString('utf8'));
-      git.stderr.on('data', collect);
-      tar.stderr.on('data', collect);
-      const finish = (name: string) => (code: number | null) => {
-        if (code !== 0) {
-          failed = true;
-          errors += `\n${name}이(가) ${code}로 끝났습니다`;
-        }
-        if (--pending > 0) return;
-        if (failed) reject(new CheckpointError(`체크포인트를 꺼내지 못했습니다: ${redactCredentials(errors.trim())}`));
-        else resolve();
-      };
-      git.on('error', reject);
-      tar.on('error', reject);
-      git.on('close', finish('git archive'));
-      tar.on('close', finish('tar'));
-    });
+    // git archive와 tar를 Rust가 파이프로 잇는다(ADR-195 4f A1). root로 돌면 GNU tar는 기록된 소유자(uid 0)로 chown하려 해,
+    // 호스트 폴더를 마운트한 컨테이너에서 실패한다 (docs/troubleshooting.md 34). 그래서 `--no-same-owner`다
+    const outcome = await execArchiveExtract(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'archive', '--format=tar', commit], gitEnv(), dest);
+    if (outcome.spawnError !== null) throw new CheckpointError(`체크포인트를 꺼내지 못했습니다: ${redactCredentials(outcome.spawnError)}`);
+    let errors = outcome.stderr;
+    let failed = false;
+    for (const [name, code] of [['git archive', outcome.gitCode], ['tar', outcome.tarCode]] as const) {
+      if (code !== 0) {
+        failed = true;
+        errors += `\n${name}이(가) ${code}로 끝났습니다`;
+      }
+    }
+    if (failed) throw new CheckpointError(`체크포인트를 꺼내지 못했습니다: ${redactCredentials(errors.trim())}`);
     return path.join(dest, await this.#subdir());
   }
 
@@ -1941,19 +1925,20 @@ export class CheckpointStore {
     if (paths.length === 0) return new Set();
     const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
     // 경로는 stdin으로 NUL 구분해 넘긴다(-z는 --stdin과만 쓸 수 있고, 인자에 개행·특수문자가 섞여도 안전하다)
-    const child = spawn(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'check-ignore', '-z', '--stdin'], { env: gitEnv() });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stdout.on('data', (chunk: string) => (stdout += chunk));
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
-    child.stdin.end(paths.join('\0'));
-    const code = await new Promise<number | null>((resolve, reject) => {
-      child.on('error', reject);
-      child.on('close', resolve);
-    });
-    // 무시되는 경로가 하나도 없으면 1로 끝나는데 정상이다. 그 밖의 코드는 확인하지 못한 것이므로 던진다(fail-closed)
-    if (code !== 0 && code !== 1) throw new CheckpointError(`중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore ${code}): ${stderr.trim()}`);
+    let stdout: string;
+    try {
+      const result = await execBytes(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'check-ignore', '-z', '--stdin'], {
+        env: gitEnv(),
+        input: Buffer.from(paths.join('\0'), 'utf8'),
+        maxBuffer: GIT_MAX_BUFFER,
+      });
+      stdout = result.stdout.toString('utf8');
+    } catch (error) {
+      // 무시되는 경로가 하나도 없으면 1로 끝나는데 정상이다. 그 밖의 종료(다른 코드, 신호, 띄우기 실패, 출력 상한)는 확인하지 못한 것이므로 던진다(fail-closed)
+      if (!(error instanceof ExecBytesError)) throw error;
+      if (error.code !== 1) throw new CheckpointError(`중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore ${error.code}): ${error.stderr.toString('utf8').trim()}`);
+      stdout = error.stdout.toString('utf8');
+    }
     return new Set(stdout.split('\0').filter(Boolean));
   }
 
@@ -2022,6 +2007,9 @@ export async function findNestedGitRepos(
   return found;
 }
 
+/** git 한 번의 stdout·stderr 상한(바이트). 넘으면 멈추고 던진다 */
+const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+
 /**
  * 인덱스 잠금(`.git/index.lock`)을 다른 git이 쥐고 있어 실패했을 때 다시 해 보는 간격(ms). 합쳐서 약 3초.
  * 잠금은 보통 수십 ms 안에 풀린다. 죽은 git이 남긴 잠금은 끝까지 풀리지 않으므로 그때는 원래의 오류를 그대로 낸다(잠금 파일을
@@ -2045,24 +2033,15 @@ export function isIndexLockFailure(stderr: string): boolean {
  */
 async function runGit(gitBin: string, args: string[], { timeout, env }: { timeout?: number; env?: Record<string, string> } = {}): Promise<string> {
   return runGitWithRetry(args, async () => {
-    const { stdout } = await execFileAsync(gitBin, [...GIT_HARDENING, ...args], {
-      maxBuffer: 64 * 1024 * 1024,
-      timeout,
-      env: { ...gitEnv(), ...env },
-    });
-    return stdout;
+    const { stdout } = await execBytes(gitBin, [...GIT_HARDENING, ...args], { maxBuffer: GIT_MAX_BUFFER, timeoutMs: timeout, env: { ...gitEnv(), ...env } });
+    return stdout.toString('utf8');
   });
 }
 
 /** runGit과 같지만 stdout을 Buffer로 받는다(cat-file blob처럼 바이트를 그대로 옮겨야 하는 명령) */
 async function runGitBuffer(gitBin: string, args: string[], { timeout, env }: { timeout?: number; env?: Record<string, string> } = {}): Promise<Buffer> {
   return runGitWithRetry(args, async () => {
-    const { stdout } = await execFileAsync(gitBin, [...GIT_HARDENING, ...args], {
-      maxBuffer: 64 * 1024 * 1024,
-      encoding: 'buffer',
-      timeout,
-      env: { ...gitEnv(), ...env },
-    });
+    const { stdout } = await execBytes(gitBin, [...GIT_HARDENING, ...args], { maxBuffer: GIT_MAX_BUFFER, timeoutMs: timeout, env: { ...gitEnv(), ...env } });
     return stdout;
   });
 }
