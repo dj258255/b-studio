@@ -482,6 +482,17 @@ mod tests {
             let bin = dir.path().join("docker");
             fs::write(&bin, script).unwrap();
             fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).unwrap();
+            // 리눅스에서는 방금 쓴 파일을 실행할 때, 다른 시험 스레드가 그 사이 띄운 자식이 쓰기 fd를 물려받아 exec 전까지 쥐고 있으면
+            // ETXTBSY(Text file busy)로 실패한다. 그러면 첫 docker 호출(목록)이 실패해 시험이 엉뚱한 이유로 어긋난다.
+            // 한 번 실행되면 쓰는 쪽 fd는 더 생기지 않으므로, 실행될 때까지 기다린 뒤 그 호출 기록을 지운다
+            for _ in 0..500 {
+                match std::process::Command::new(&bin).arg("__probe__").output() {
+                    Err(error) if error.raw_os_error() == Some(26) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                    Err(error) => panic!("가짜 docker를 실행하지 못했습니다: {error}"),
+                    Ok(_) => break,
+                }
+            }
+            let _ = fs::remove_file(dir.path().join("calls"));
             Fake { dir }
         }
 
@@ -765,8 +776,8 @@ mod tests {
         put(&fake, vec![weird]);
         let failure = failure(verify_containers(&input(&fake, &project, false)).await);
         // 모양을 모르는 값은 정책 판정도 "알 수 없는 형식"으로 걸러 낸다. 어느 쪽이든 통과하지 못하고 지워진다
-        assert_ne!(failure.kind, FailureKind::NoContainers);
-        assert_eq!(fake.removed(), vec!["rm --force c1"]);
+        assert!(matches!(failure.kind, FailureKind::Mask | FailureKind::Policy), "{failure:?} / 호출: {:?}", fake.calls());
+        assert_eq!(fake.removed(), vec!["rm --force c1"], "{failure:?} / 호출: {:?}", fake.calls());
     }
 
     async fn asset_case(mounts: Value, tmpfs: Option<Value>, project: &Project) -> (VerifyOutcome, Vec<String>) {
