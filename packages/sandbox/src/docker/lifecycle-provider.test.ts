@@ -191,7 +191,7 @@ describe('destroy·cleanup', () => {
     const calls = (await fake.calls()).filter((args) => args.includes('down') || args[0] === 'image');
     expect(calls).toEqual([
       compose(sandbox.id, override, 'down', '--volumes', '--remove-orphans', '--rmi', 'local'),
-      ['image', 'ls', '--filter', `reference=${sandbox.id}-*`, '--format', '{{.Repository}}:{{.Tag}}'],
+      ['image', 'ls', '--filter', `reference=${sandbox.id}-*`, '--filter', `label=com.docker.compose.project=${sandbox.id}`, '--format', '{{.Repository}}:{{.Tag}}'],
       ['image', 'rm', `${sandbox.id}-api:latest`],
     ]);
     expect(existsSync(workDir!)).toBe(false);

@@ -7,7 +7,7 @@
 //!
 //! **지우는 코드다.** 지우는 자리와 대상은 옛 코드와 같고, 이름은 늘 계산한 값(샌드박스 id에서 파생)이나 필터 결과로 정한다. 모든 자리는 `is_sandbox_id`를 먼저 지난다.
 //!  1. `compose --project-name <id> down --volumes --remove-orphans --rmi local`(external 공유 캐시는 지우지 않는다). destroy는 compose 파일을 가리키고, cleanup은 임시 폴더에서 파일 없이 돈다
-//!  2. `image ls --filter reference=<id>-* --format {{.Repository}}:{{.Tag}}` 결과 가운데 `<id>-`로 시작하는 이름만 `image rm`(`--force` 없음)
+//!  2. `image ls --filter reference=<id>-* --filter label=com.docker.compose.project=<id> --format {{.Repository}}:{{.Tag}}` 결과 가운데 `<id>-`로 시작하는 이름만 `image rm`(`--force` 없음)
 //!  3. destroy의 작업 폴더(`b-studio-xxxxxx`): 그 경로가 링크면 링크만, 폴더면 안의 링크도 따라가지 않고 지운다(`safe_fs::remove_sandbox_dir`. 옛 `rm({ recursive, force })`와 같다)
 //!  4. 평가 자산 복사본: `<루트>/<id>` 하나만(`safe_fs::remove_sandbox_dir`)
 //!  5. 부하 러너: 중단·시간 초과가 되면 **이 실행이 만든 이름**(`<id>-load-<랜덤 hex 8자>`)으로만 `rm --force`
@@ -116,12 +116,23 @@ pub enum RemoveImagesError {
 }
 
 /// compose가 샌드박스용으로 빌드한 이미지(`<샌드박스 id>-<서비스>`)를 지운다. 빌드 캐시는 지우지 않는다.
-/// 지울 이름은 `image ls --filter reference=<id>-*`의 결과 가운데 `<id>-`로 시작하는 것이고, `--force`는 쓰지 않는다(쓰는 컨테이너가 있으면 지워지지 않고 실패한다)
+/// 지울 이름은 `image ls --filter reference=<id>-* --filter label=com.docker.compose.project=<id>`의 결과 가운데 `<id>-`로 시작하는 것이고, `--force`는 쓰지 않는다(쓰는 컨테이너가 있으면 지워지지 않고 실패한다)
 pub async fn remove_sandbox_images(docker_bin: &str, id: &str, cwd: Option<&str>) -> Result<(), RemoveImagesError> {
     if !is_sandbox_id(id) {
         return Err(RemoveImagesError::InvalidId);
     }
-    let list = vec!["image".to_owned(), "ls".to_owned(), "--filter".to_owned(), format!("reference={id}-*"), "--format".to_owned(), "{{.Repository}}:{{.Tag}}".to_owned()];
+    // 접두사만으로는 프로젝트 이름이 다른 샌드박스 id의 앞부분과 겹칠 때(`studio-shop-a1b2c3` / `studio-shop-a1b2c3-d4e5f6`) 남의 이미지가 섞인다(트러블슈팅 194).
+    // compose가 빌드한 이미지에 붙이는 프로젝트 라벨로도 거른다(도커는 서로 다른 필터를 AND로 묶는다). 라벨이 없는 이미지는 지우지 않는다(남을 뿐이다)
+    let list = vec![
+        "image".to_owned(),
+        "ls".to_owned(),
+        "--filter".to_owned(),
+        format!("reference={id}-*"),
+        "--filter".to_owned(),
+        format!("label=com.docker.compose.project={id}"),
+        "--format".to_owned(),
+        "{{.Repository}}:{{.Tag}}".to_owned(),
+    ];
     let listed = exec_checked(docker_bin, &list, cwd).await.map_err(RemoveImagesError::Exec)?;
     let prefix = format!("{id}-");
     let images: Vec<String> = listed.stdout.split('\n').map(js::trim).filter(|line| line.starts_with(&prefix)).map(str::to_owned).collect();
@@ -525,7 +536,7 @@ mod tests {
         fake.set("imagels", &format!("{ID}-web:latest\n{ID}-api:latest\n other-image:latest\n{ID}x-web:latest\n<none>:<none>\n  {ID}-db:1\r\n"));
         remove_sandbox_images(&fake.bin(), ID, None).await.unwrap();
         let calls = fake.calls();
-        assert_eq!(calls[0], format!("image ls --filter reference={ID}-* --format {{{{.Repository}}}}:{{{{.Tag}}}}"));
+        assert_eq!(calls[0], format!("image ls --filter reference={ID}-* --filter label=com.docker.compose.project={ID} --format {{{{.Repository}}}}:{{{{.Tag}}}}"));
         assert_eq!(calls[1], format!("image rm {ID}-web:latest {ID}-api:latest {ID}-db:1"));
         assert_eq!(calls.len(), 2);
     }
@@ -549,7 +560,7 @@ mod tests {
         let Err(RemoveImagesError::Exec(failure)) = remove_sandbox_images(&fake.bin(), ID, None).await else { panic!() };
         assert_eq!(failure.code, Some(3));
         assert_eq!(failure.stderr, "boom");
-        assert!(failure.message.starts_with(&format!("Command failed: {} image ls --filter reference={ID}-*", fake.bin())));
+        assert!(failure.message.starts_with(&format!("Command failed: {} image ls --filter reference={ID}-* --filter label=com.docker.compose.project={ID}", fake.bin())));
         assert!(failure.message.ends_with("\nboom"));
         let fake = Fake::new();
         fake.set("imagels", &format!("{ID}-web:latest\n"));
@@ -650,7 +661,7 @@ mod tests {
         assert_eq!(outcome, DestroyOutcome::Done { down: None, images: None, work_dir: None, assets: None });
         let calls = fake.calls();
         assert_eq!(calls[0], format!("compose --project-name {ID} --project-directory /p --file /p/compose.yaml --file /w/compose.override.yaml down --volumes --remove-orphans --rmi local"));
-        assert_eq!(calls[1], format!("image ls --filter reference={ID}-* --format {{{{.Repository}}}}:{{{{.Tag}}}}"));
+        assert_eq!(calls[1], format!("image ls --filter reference={ID}-* --filter label=com.docker.compose.project={ID} --format {{{{.Repository}}}}:{{{{.Tag}}}}"));
         assert_eq!(calls[2], format!("image rm {ID}-web:latest"));
         assert_eq!(calls.len(), 3);
         assert!(!std::path::Path::new(&work).exists());

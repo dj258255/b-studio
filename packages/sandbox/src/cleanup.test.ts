@@ -26,7 +26,7 @@ describe('남은 샌드박스 정리', () => {
     await new LocalDockerProvider({ dockerBin: bin }).cleanup('studio-orders-1a2b3c');
     expect(await calls()).toEqual([
       'compose --project-name studio-orders-1a2b3c down --volumes --remove-orphans --rmi local',
-      'image ls --filter reference=studio-orders-1a2b3c-* --format {{.Repository}}:{{.Tag}}',
+      'image ls --filter reference=studio-orders-1a2b3c-* --filter label=com.docker.compose.project=studio-orders-1a2b3c --format {{.Repository}}:{{.Tag}}',
     ]);
   });
 

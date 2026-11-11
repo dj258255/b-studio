@@ -72,7 +72,7 @@ function checkedError(result: NativeCheckedResult): ExecCheckedError {
   return new ExecCheckedError(result.message, result.code, result.stdout, result.stderr);
 }
 
-/** 이 샌드박스가 빌드한 이미지(`<샌드박스 id>-<서비스>`)를 지운다. 빌드 캐시는 지우지 않는다. 지울 이름은 `image ls --filter reference=<id>-*` 결과 가운데 `<id>-`로 시작하는 것뿐이다 */
+/** 이 샌드박스가 빌드한 이미지(`<샌드박스 id>-<서비스>`)를 지운다. 빌드 캐시는 지우지 않는다. 지울 이름은 `image ls --filter reference=<id>-* --filter label=com.docker.compose.project=<id>` 결과 가운데 `<id>-`로 시작하는 것뿐이다 */
 export async function removeSandboxImages(dockerBin: string, sandboxId: string): Promise<void> {
   const result = await native.removeSandboxImages(dockerBin, sandboxId, tmpdir());
   if (result.kind === 'invalid-id') throw notSandboxId(sandboxId);

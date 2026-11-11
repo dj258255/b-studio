@@ -350,10 +350,22 @@ async function observe(kind: 'legacy' | 'now', setup: Setup, script: Script, run
   return { outcome, calls: callsOf(layout).map((call) => call.map(scrub)), cwds, stdins, files };
 }
 
+/**
+ * HARDENED(트러블슈팅 194): 새 쪽의 이미지 목록은 compose 프로젝트 라벨 필터를 하나 더 건다. 옛 쪽의 `image ls` 호출에
+ * 같은 필터를 끼워 넣은 뒤에 견준다. 이 하나만 고치고 나머지 호출은 한 글자도 바꾸지 않는다
+ */
+function withProjectLabel(call: string[]): string[] {
+  if (call[0] !== 'image' || call[1] !== 'ls' || call[2] !== '--filter' || !call[3]?.startsWith('reference=') || !call[3].endsWith('-*')) return call;
+  const id = call[3].slice('reference='.length, -'-*'.length);
+  return [...call.slice(0, 4), '--filter', `label=com.docker.compose.project=${id}`, ...call.slice(4)];
+}
+
 async function both(script: Script, run: (api: Api, layout: Layout) => Promise<unknown>, setup: Setup = {}) {
   const legacy = await observe('legacy', setup, script, run);
   const now = await observe('now', setup, script, run);
-  return { legacy, now };
+  // 실패 글에는 명령 전체가 들어간다(`Command failed: <bin> image ls …`). 같은 필터를 글에도 끼워 넣는다
+  const outcome = JSON.parse(JSON.stringify(legacy.outcome).replace(/image ls --filter reference=(studio-[a-z0-9-]+)-\* --format/g, 'image ls --filter reference=$1-* --filter label=com.docker.compose.project=$1 --format')) as Observed['outcome'];
+  return { legacy: { ...legacy, outcome, calls: legacy.calls.map(withProjectLabel) }, now };
 }
 
 /** 옛 쪽과 새 쪽이 한 글자도 다르지 않다 */
@@ -376,7 +388,7 @@ describe('removeSandboxImages', () => {
     const out = `${ID}-web:latest\n${ID}-api:latest\nother:latest\n${ID}x-web:latest\n<none>:<none>\n  ${ID}-db:1\r\n`;
     const { now } = await same({ imagels: { out } }, (api) => api.removeImages());
     expect(now.calls).toEqual([
-      ['image', 'ls', '--filter', `reference=${ID}-*`, '--format', '{{.Repository}}:{{.Tag}}'],
+      ['image', 'ls', '--filter', `reference=${ID}-*`, '--filter', `label=com.docker.compose.project=${ID}`, '--format', '{{.Repository}}:{{.Tag}}'],
       ['image', 'rm', `${ID}-web:latest`, `${ID}-api:latest`, `${ID}-db:1`],
     ]);
     expect(now.cwds).toEqual(['<TMP>', '<TMP>']);
@@ -415,11 +427,13 @@ describe('removeSandboxImages', () => {
     });
   });
 
-  it('옛 결함: 이 id를 접두사로 가진 다른 샌드박스의 이미지도 지운다(트러블슈팅 194, 옛 쪽과 같다)', async () => {
-    // 프로젝트 이름이 다른 샌드박스의 id 앞부분과 같으면 `studio-shop-a1b2c3-...`가 두 샌드박스에 겹친다
-    const other = `${ID}-d4e5f6-web:latest`;
-    const { now } = await same({ imagels: { out: `${ID}-web:latest\n${other}\n` } }, (api) => api.removeImages());
-    expect(now.calls[1]).toEqual(['image', 'rm', `${ID}-web:latest`, other]);
+  it('HARDENED: 이 id를 접두사로 가진 다른 샌드박스의 이미지는 프로젝트 라벨 필터로 거른다(트러블슈팅 194)', async () => {
+    // 프로젝트 이름이 다른 샌드박스의 id 앞부분과 같으면 `studio-shop-a1b2c3-...`가 두 샌드박스에 겹친다.
+    // 거르는 것은 도커 데몬(서로 다른 필터는 AND)이라 가짜 docker로는 인자만 본다. 실제 docker에서 겹치는 접두사가 라벨 필터로 빠지는 것은 실측 기록에 있다
+    const raw = await observe('legacy', {}, {}, (api) => api.removeImages());
+    expect(raw.calls[0]).toEqual(['image', 'ls', '--filter', `reference=${ID}-*`, '--format', '{{.Repository}}:{{.Tag}}']);
+    const { now } = await same({}, (api) => api.removeImages());
+    expect(now.calls[0]).toEqual(['image', 'ls', '--filter', `reference=${ID}-*`, '--filter', `label=com.docker.compose.project=${ID}`, '--format', '{{.Repository}}:{{.Tag}}']);
   });
 });
 
@@ -430,7 +444,7 @@ describe('cleanup', () => {
     const { now } = await same({ imagels: { out: `${ID}-web:latest\n` } }, (api) => api.cleanup());
     expect(now.calls).toEqual([
       ['compose', '--project-name', ID, 'down', '--volumes', '--remove-orphans', '--rmi', 'local'],
-      ['image', 'ls', '--filter', `reference=${ID}-*`, '--format', '{{.Repository}}:{{.Tag}}'],
+      ['image', 'ls', '--filter', `reference=${ID}-*`, '--filter', `label=com.docker.compose.project=${ID}`, '--format', '{{.Repository}}:{{.Tag}}'],
       ['image', 'rm', `${ID}-web:latest`],
     ]);
     expect(now.cwds).toEqual(['<TMP>', '<TMP>', '<TMP>']);
@@ -477,7 +491,7 @@ describe('destroy', () => {
     expect(now.calls).toHaveLength(3);
     expect(now.calls[0]!.slice(0, 9)).toEqual(['compose', '--project-name', ID, '--project-directory', '<SIDE>/proj', '--file', '<SIDE>/proj/compose.yaml', '--file', '<SIDE>/w/compose.override.yaml']);
     expect(now.calls[0]!.slice(9)).toEqual(DOWN);
-    expect(now.calls[1]).toEqual(['image', 'ls', '--filter', `reference=${ID}-*`, '--format', '{{.Repository}}:{{.Tag}}']);
+    expect(now.calls[1]).toEqual(['image', 'ls', '--filter', `reference=${ID}-*`, '--filter', `label=com.docker.compose.project=${ID}`, '--format', '{{.Repository}}:{{.Tag}}']);
     expect(now.calls[2]).toEqual(['image', 'rm', `${ID}-web:latest`]);
     expect(now.cwds).toEqual(['<CWD>', '<TMP>', '<TMP>']);
     expect(now.files).not.toContain(`d tmp/${WORK}`);
