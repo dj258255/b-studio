@@ -10140,6 +10140,31 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 시험 순서에 관한 정직한 기록: 껍데기가 아직 옛 구현이던 때의 차등 시험은 자기 자신과 견주는 것이라 통과하므로 "고치기 전 실패 출력"을 만들 수 없다. 그 역할은 위 변이 확인이 한다.
 - 하지 않은 것: `LocalDockerProvider` 조율(A4b·A4c), `prune.ts`, 실험 경로(`agent-terminal.ts`, `kubernetes/`). `kubernetes-provider.ts`가 `externalCallScript`를 부르므로 공통 코드의 수정으로 실험 경로도 따라오지만(타입 검사로만 확인) 그 경로만을 위한 확인은 하지 않았다. 진짜 docker·진짜 compose 출력은 쓰지 않았다(가짜 입력만). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림). 새 ADR·트러블슈팅 번호는 만들지 않았다.
 
+### 덧붙임: A3 결과 — 작업 공간의 파일 I/O를 Rust로 (2026-11-11, [#1169](https://github.com/dj258255/b-studio/issues/1169))
+`Workspace`(`packages/agent/src/workspace.ts`)와 `ChangeTracker`(`change-tracker.ts`)의 파일 시스템 I/O를 `crates/bstudio-io/src/workspace_io.rs`로 옮겼다. 두 TS 파일에는 `node:fs` 직접 사용이 남지 않는다(`node:crypto`·`node:path`만). TS 시그니처는 그대로라 기존 시험이 회귀 시험으로 돌았다. 새 ADR은 쓰지 않았다(ADR-196 결정 5의 "pin과 비교는 같은 구현"을 그대로 따른다).
+
+- **옮긴 I/O**: `realpath`(저장 이름 확인과 루트 밖 확인), `O_NOFOLLOW` 열기·`fstat`·읽기(`readNoFollowInside`, `readProjectFileSync`, `readRegularFileSync` 계열), `lstat`(검색), `readdir`(목록·검색), `mkdir`·열기·쓰기(`write`·`writeBinary`·`edit`), `rm`, 변경 지문(`ChangeTracker`의 `lstat`·`readlink`·읽기·해시), 보호 경로 고정·비교(`pinBeforeWrite`·`restoredProtectedFiles`). napi는 `workspaceResolve`·`workspaceReadDir`·`workspaceLstat`·`workspaceReadFile`·`workspaceWriteFile`·`workspaceRemoveFile`·`workspaceFingerprints`(비동기, `spawn_blocking`), `workspaceReadProjectFile`·`workspaceReadRegularFile`(동기), `WorkspacePinStore`다. 정렬은 JS `localeCompare`라 Rust로 옮기지 않았다: Rust는 폴더 한 겹의 항목을 순서 없이 돌려주고 TS가 정렬·상한·깊이를 맡는다.
+- **확인과 실행이 같은 대상을 쓰게 한 방법**: 옛 구현은 `#resolve`가 경로 문자열로 링크·밖을 확인한 뒤 같은 문자열로 `open`·`mkdir`·`rm`을 다시 불렀고, 그 사이를 열기 뒤의 `realpath`·`dev/ino` 비교로 좁혔다. 지금은 루트의 실제 위치를 폴더 서술자로 열고 그 아래를 조각마다 `openat(O_DIRECTORY|O_NOFOLLOW)`로 내려간다. 읽기·쓰기·지우기는 그렇게 얻은 부모 서술자 위에서 한다(열기는 `openat(부모, 이름, O_NOFOLLOW)`, 지우기는 `unlinkat(부모, 이름, 0)`). 그래서 연 대상은 구성상 루트 안의 것이고, 열고 난 뒤의 되짚는 확인(`assertOpenedInside`)은 필요 없어 지웠다. 만드는 폴더(`mkdirat`)와 파일(`O_CREAT`)도 걸어 내려온 폴더 아래에만 생겨 옛 한계("O_CREAT가 바깥에 빈 파일을 만든다", #799)가 없다. 링크 판정은 플랫폼마다 다른 오류(리눅스 `ENOTDIR`, macOS `ELOOP`)가 아니라 오류가 났을 때 `fstatat(AT_SYMLINK_NOFOLLOW)`로 링크인지 따로 본다. 비우기는 `O_TRUNC` 대신 일반 파일임을 `fstat`으로 본 뒤 `ftruncate`한다. 상한은 연 서술자의 `fstat`으로 읽기 전에 본다(1MiB 상한 포함).
+- **막는 쪽과 여는 쪽(부르는 자리마다)**: 숨긴 이름 판정은 `bstudio-guard`가 하고 여기서는 부르는 자리마다 방향을 적었다. 같은 "꼴 맞추기" 함수를 둘에 함께 쓰지 않았다.
+
+| 자리 | 방향 | 모르는 입력은 |
+|---|---|---|
+| `deny_check`·`read_dir`의 항목 거르기·`stored_segments`의 숨긴 이름(`resolve`·`read_file`·`write_file`·`remove_file`·`lstat`·`read_dir`이 조각마다 다시 건다) | 거부 목록(넓게 접은 이름) | 걸린 것으로(`NUL` 이름도 거절) |
+| `components`(`..`·절대 경로·NUL 거절), `stored_segments`의 루트 밖 확인, `read_project_file`의 `is_inside_relative` | 허용 목록(통과가 곧 안쪽) | 범위 밖으로(거절) |
+| 조각마다 링크 거절(`open_dir_nofollow`·`resolve`의 `fstatat`·열기의 `O_NOFOLLOW`) | 허용 목록(링크 없는 경로만 통과) | 확인하지 못한 오류(`EACCES` 등)는 거절(옛 구현은 계속 진행했다) |
+| 쓰기의 일반 파일 확인(`NotRegular`)·읽기 크기 상한 | 허용 목록 | 읽지 못하면 안 읽음, 큰 것은 읽기 전에 거절 |
+| `PinStore::restored`(보호 경로의 되돌림 인정) | 열린 쪽(protected-paths에서 빼 줌) | 고정값 없음·읽지 못함·링크·상한 초과·읽는 동안 바뀜은 같다고 하지 않음 |
+| `PinStore::pin`의 규칙 맞춤(TS가 `guard.isProtectedPath`로 부름) | 거부 목록(넓게) | 보호되는 쪽(더 읽을 뿐) |
+| `fingerprint`(변경 지문) | 변경 알림 쪽(게이트가 다루는 목록을 정함) | 링크를 거친 경로는 `link:`(게이트가 받지 않음), 읽지 못함은 `missing`(바뀐 것으로 알림이지 통과가 아님) |
+| `read_project_file`(게이트·세션의 문서 읽기) | 숨긴 이름은 걸지 않음(정해진 경로만 읽는다) | 상위가 링크·밖·읽지 못함은 읽지 않음 |
+
+- **고정과 비교**: `PinStore`(Rust) 하나가 고정(`pin`)과 비교(`restored`)를 같은 `read_project_file(상한 1MiB)`로 한다. 고정할 때와 견줄 때 읽는 방법이 갈릴 수 없다. 이미 있는 고정값은 덮어쓰지 않는다(옛 구현은 같은 파일의 동시 쓰기에서 뒤의 호출이 덮었다).
+- **옛 동작에서 찾은 것(트러블슈팅 186, 고치기 전 실패 출력은 거기에 있다)**: 같은 시험 5개가 옛 구현에서 실패한다 — 바뀐 폴더 링크 아래로 쓰면 바깥에 빈 파일이 남음, 안쪽을 가리키는 링크 폴더를 거쳐 열림, 깨진 링크 상위 폴더를 "없는 파일"로 읽음, FIFO 쓰기가 영영 멈춤, 동시 쓰기가 고정값을 덮음. 모두 닫는 쪽으로만 달라졌다. 그 밖의 다른 점: 경로 중간을 확인하지 못하면(`EACCES`) 거절한다(옛 구현은 그 조각을 없는 것으로 보고 진행한 것으로 코드를 읽어 안다. 재지 않았다).
+- **시험**: 먼저 옛 TS로 동작 고정 시험 30개(`workspace-io-behavior.test.ts`: 링크 바꿔치기, 대소문자 변형, NFC/NFD, 끝의 점, 보이지 않는 글자, `..`, 겹친 구분자, 1MiB·256KiB 경계, 링크인 경로 지우기, 지문)를 통과시키고 옮긴 뒤에도 같은 시험이 통과했다. 대소문자·정규화는 실행 중에 이 볼륨이 구분하는지 확인해 두 경우의 기대값을 나눠 적었다(이 PC는 둘 다 구분하지 않는 볼륨이라 리눅스 쪽 분기는 이 PC에서 돌지 않았다. 재지 않았다). 옛 구현에서 실패하는 시험 5개(`workspace-io-stricter.test.ts`). Rust 단위 시험 17개(`workspace_io::tests`): 읽는 동안 줄거나 늘어 `complete`가 거짓이 되는 경우는 `Source` 추상으로 흉내 내고(옛 시험은 `node:fs`를 가로챘으나 그 호출이 없어져 지웠다), 실제 저장 이름 처리(`stored_segments`)도 같은 방식으로 본다.
+- **변이로 확인**: 막는 줄을 하나씩 바꿔 시험이 잡는지 봤다(매번 원복). Rust 27개: 폴더·읽기·쓰기 열기의 `O_NOFOLLOW` 제거, 숨긴 이름 재검사 제거, `..`·절대 경로 거절 제거, 읽기·`read_file` 상한 제거, `resolve`의 링크 거절·`must_exist` 제거, 쓰기의 일반 파일 확인 제거, 고정의 "처음 한 번만"·`pin_unpinned`가 덮음, 비교의 `complete`·바이트 견주기 제거, `unlinkat` 플래그를 `AT_REMOVEDIR`로, 저장 이름의 밖·숨긴 이름 거절 제거, 목록의 숨긴 이름 거르기 제거, 지문의 링크 분기 제거, 완전성의 수정 시각·크기 비교 각각 제거, 고정 상한 2MiB, 읽기의 상위 링크 거절을 "없음"으로, 폴더 열기가 링크를 `ENOTDIR`로 오분류. 처음에 살아남은 셋(쓰기의 일반 파일 확인, 비교의 `complete`, `pin_unpinned`가 덮음)은 시험을 보강해 잡았다. 마지막에 살아남은 둘은 이유가 있다: 저장 이름의 루트 밖 거절은 두 군데(접두 제거 실패, 루트 조각)가 겹쳐 하나만 빼면 다른 쪽이 막고(둘 다 빼면 잡힌다), `resolve`의 `ENOTDIR` 분기는 폴더 서술자 아래에서는 `fstatat`이 `ENOTDIR`을 낼 수 없어 도달하지 않는다(같은 동작의 변이). TS 껍데기 16개: 9개를 잡았고, 살아남은 7개 중 넷은 Rust와 TS가 같은 검사를 두 겹으로 하는 자리(숨긴 이름·밖·읽기 밖 검사)라 한 겹만 빼면 다른 겹이 막는다. 나머지 셋은 오류 글만 바뀌는 변이 하나와 도달하지 않는 방어 둘이다.
+- **돌린 것**: `cargo test -p bstudio-io -p bstudio-node` 105개 통과, `cargo clippy --all-targets`에서 이 조각이 더한 경고 0(기존 경고는 그대로), `pnpm typecheck` 통과, `pnpm --filter @b-studio/studio lint` 통과, F0 시험 25개 통과, 기준 사진(`__baselines__`) 변화 없음.
+- **남긴 한계**: (1) `edit`와 `#assertNotStale`은 상한 없이 읽는다(옛 그대로). 상한을 걸면 `write`로 쓴 큰 파일의 "바뀌었나" 검사가 읽기에 실패해 건너뛰어지는 쪽(열린 쪽)으로 약해져서, 상한 대신 그대로 두고 적는다. (2) 경로 중간 폴더를 여는 이름은 `realpath`로 알아낸 저장 이름이라, 숨긴 폴더의 내용이 숨기지 않은 이름으로 **이름만 바뀌어** 들어오는 경우는 이름으로 알 수 없다(옛 구현도 같다. 트러블슈팅 186). (3) Windows는 지원하지 않고 모든 호출이 실패(닫힌 쪽)로 돌아온다(지원 범위는 macOS·리눅스). (4) `gate.ts`의 평가 자산 지문(`parentsAreReal`·`lstat`·`readdir`)은 A3 범위 밖이라 `node:fs`가 남아 있다(A5). (5) 실제 세션에서 잰 것이 없다. 폴더 한 겹을 읽을 때마다 루트에서 다시 내려가므로 깊은 목록·검색이 옛 구현보다 느릴 수 있으나 재지 않았다. (6) 커밋 보안 검토 결과를 본 뒤 머지한다.
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

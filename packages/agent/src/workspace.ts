@@ -1,6 +1,4 @@
 import { createHash } from 'node:crypto';
-import { closeSync, constants, fstatSync, openSync, readSync, realpathSync } from 'node:fs';
-import { lstat, mkdir, open, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { encodeLoneSurrogates, native as guard } from '@b-studio/sandbox';
 
@@ -8,8 +6,6 @@ import { encodeLoneSurrogates, native as guard } from '@b-studio/sandbox';
 const BACKSLASH_SEP = path.sep === '\\';
 
 const MAX_READ_BYTES = 256 * 1024;
-/** 보호 경로 파일의 쓰기 직전 고정값과 지금 내용을 견줄 때 읽는 상한. 넘으면 견주지 못한 것이라 바뀐 것으로 본다(읽기 전에 크기를 본다) */
-const MAX_PIN_BYTES = 1024 * 1024;
 
 /** readRegularFileSync의 결과: 없음, 읽은 글, 또는 읽지 않은 이유(일반 파일이 아님·너무 큼·읽기 실패) */
 export type RegularFileRead = { kind: 'missing' } | { kind: 'text'; content: string } | { kind: 'irregular'; reason: string };
@@ -40,25 +36,8 @@ export function readProjectFileBytesSync(root: string, relative: string, maxByte
   if (!isInsideRelative(normalized)) {
     return { kind: 'irregular', reason: '프로젝트 밖 경로입니다' };
   }
-  let realRoot: string;
-  try {
-    realRoot = realpathSync(root);
-  } catch {
-    return { kind: 'irregular', reason: '프로젝트 폴더를 열 수 없습니다' };
-  }
-  const parent = path.dirname(normalized);
-  if (parent !== '.') {
-    let realParent: string;
-    try {
-      realParent = realpathSync(path.join(root, parent));
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' };
-      return { kind: 'irregular', reason: `상위 폴더를 열 수 없습니다(${code ?? '알 수 없는 오류'})` };
-    }
-    if (realParent !== path.join(realRoot, parent)) return { kind: 'irregular', reason: '상위 폴더가 심볼릭 링크입니다' };
-  }
-  return readRegularFileBytesSync(path.join(realRoot, normalized), maxBytes);
+  // 루트의 실제 위치를 폴더 서술자로 열고 그 아래를 조각마다 링크 없이 내려간다(Rust). 확인하는 경로와 여는 경로가 같다
+  return fromNativeRead(guard.workspaceReadProjectFile(root, toPosix(normalized), maxBytes));
 }
 
 export function readRegularFileSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileRead {
@@ -67,43 +46,49 @@ export function readRegularFileSync(absolute: string, maxBytes: number = MAX_REA
 }
 
 /**
- * readRegularFileSync와 같은 열기 규칙(O_NOFOLLOW·일반 파일·상한)으로 원본 바이트를 읽는다.
+ * readRegularFileSync와 같은 열기 규칙(O_NOFOLLOW·일반 파일·상한)으로 원본 바이트를 읽는다(Rust).
  * 글자로 바꾸면 서로 다른 바이트가 같은 글자가 되므로(예: 0xff와 0xfe가 모두 U+FFFD '�'), 바이트가 그대로 필요한
  * 지문 비교에 쓴다. 읽는 도중 파일이 줄거나 늘어남(확인한 stat 크기만큼 다 읽지 못했거나, 뒤에 내용이 덧붙어 두 번째 stat이 달라짐)
  * 이면 complete를 false로 알린다 — 어중간하게 읽은 바이트를 지문으로 삼지 않게 하는 것은 부르는 쪽의 몫이다
  * (읽기 자체는 readRegularFileSync와 같이 동작한다)
  */
 export function readRegularFileBytesSync(absolute: string, maxBytes: number = MAX_READ_BYTES): RegularFileBytesRead {
-  let fd: number;
-  try {
-    fd = openSync(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === 'ENOENT' || code === 'ENOTDIR') return { kind: 'missing' };
-    return { kind: 'irregular', reason: code === 'ELOOP' || code === 'EMLINK' ? '심볼릭 링크입니다' : `열 수 없습니다(${code ?? '알 수 없는 오류'})` };
-  }
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) return { kind: 'irregular', reason: '일반 파일이 아닙니다' };
-    if (stat.size > maxBytes) return { kind: 'irregular', reason: `너무 큽니다(${stat.size}바이트, 상한 ${maxBytes}바이트)` };
-    const buffer = Buffer.alloc(stat.size);
-    let offset = 0;
-    while (offset < stat.size) {
-      const read = readSync(fd, buffer, offset, stat.size - offset, offset);
-      if (read === 0) break;
-      offset += read;
-    }
-    // 읽는 동안 파일 뒤에 내용이 덧붙으면 앞부분만 읽고 offset === stat.size가 된다. 같은 fd로 한 번 더 확인해,
-    // 크기·수정 시각이 그대로일 때만 완전한 읽기로 본다(그 사이에 파일이 바뀌었으면 지문으로 삼지 않는다)
-    const after = fstatSync(fd);
-    const complete = offset === stat.size && after.size === stat.size && after.mtimeMs === stat.mtimeMs;
-    return { kind: 'bytes', content: buffer.subarray(0, offset), complete };
-  } catch {
-    return { kind: 'irregular', reason: '읽을 수 없습니다' };
-  } finally {
-    closeSync(fd);
-  }
+  return fromNativeRead(guard.workspaceReadRegularFile(absolute, maxBytes));
 }
+
+/** Rust의 읽기 결과를 옮긴다. 모르는 꼴은 읽지 않은 것으로 본다(닫는 쪽) */
+function fromNativeRead(read: { kind: string; content?: Buffer | null; complete?: boolean | null; reason?: string | null }): RegularFileBytesRead {
+  if (read.kind === 'missing') return { kind: 'missing' };
+  if (read.kind === 'bytes' && read.content) return { kind: 'bytes', content: read.content, complete: read.complete === true };
+  return { kind: 'irregular', reason: read.reason ?? '읽을 수 없습니다' };
+}
+
+/** 경로 구분자를 `/`로 맞춘다(Rust는 `/`로 조각을 나눈다). POSIX에서는 그대로다 */
+function toPosix(relative: string): string {
+  return path.sep === '/' ? relative : relative.split(path.sep).join('/');
+}
+
+/** Rust 쪽 실패 글(`LINK`·`OS:EACCES`…)을 읽는다. 알 수 없는 오류는 그대로 글이 된다 */
+function failureCode(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * #resolve 뒤에 열고 읽고 쓰고 지우는 자리의 실패. 경로를 확인한 뒤에 링크로 바뀐 경우(LINK)도 여기로 온다 — 읽는 쪽이 프로젝트 밖으로 새지 않았다는 뜻이다
+ * (조각마다 링크를 따라가지 않고 내려가므로 연 파일은 프로젝트 안의 것이다)
+ */
+function openFailure(error: unknown, label: string): WorkspaceError {
+  const code = failureCode(error);
+  if (code === 'LINK') return new WorkspaceError(`${label}: 연 파일이 프로젝트 밖에 있습니다(경로를 확인한 뒤 링크로 바뀌었습니다)`);
+  if (code === 'OUTSIDE') return new WorkspaceError(`${label}: 프로젝트 밖 경로입니다`);
+  if (code === 'DENIED') return new WorkspaceError(`${label}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
+  if (code === 'MISSING') return new WorkspaceError(`${label}: 파일이 없습니다`);
+  if (code === 'NOT_REGULAR') return new WorkspaceError(`${label}: 일반 파일이 아닙니다`);
+  if (code.startsWith('TOO_LARGE:')) return new WorkspaceError(`${label}: 파일이 너무 큽니다 (${code.slice('TOO_LARGE:'.length)} bytes)`);
+  if (code.startsWith('OS:')) return new WorkspaceError(`${label}: 열 수 없습니다(${code.slice('OS:'.length)})`);
+  return new WorkspaceError(`${label}: 열 수 없습니다`);
+}
+
 const MAX_LIST_ENTRIES = 500;
 /** 검색 한 번이 훑는 파일 수·폴더 수·읽는 양의 상한. 넘으면 거기까지 찾은 것만 돌려주고 잘렸다고 알린다 */
 const MAX_SEARCH_FILES = 5_000;
@@ -145,9 +130,10 @@ export class Workspace {
   readonly #snapshots = new Map<string, RegularFileRead>();
   /**
    * 보호 경로 파일 → 이 실행에서 **처음 쓰기 직전**의 내용(바이트). 이 작업 공간은 실행 하나에만 산다(러너·게이트가 실행마다 새로 만든다)
-   * 따라서 고정값이 다음 실행이나 다른 세션에 남지 않는다. 고정하지 못한 파일은 'irregular'로 적어, 나중의 쓰기가 이미 바뀐 내용을 고정값으로 삼지 못하게 한다
+   * 따라서 고정값이 다음 실행이나 다른 세션에 남지 않는다. 고정하지 못한 파일은 'irregular'로 적어, 나중의 쓰기가 이미 바뀐 내용을 고정값으로 삼지 못하게 한다.
+   * 고정(pin)과 비교(restored)는 같은 Rust 구현이 같은 읽기로 한다(ADR-195 4f A3, ADR-196 결정 5). 이미 있는 고정값은 다시 쓰지 않는다(처음 한 번만)
    */
-  readonly #writePins = new Map<string, RegularFileBytesRead>();
+  readonly #pins = new guard.WorkspacePinStore();
   #protectedRules: readonly string[] = [];
   #outsideSync: (() => Promise<unknown>) | undefined;
 
@@ -241,11 +227,11 @@ export class Workspace {
   }
 
   async #pin(relative: string): Promise<void> {
-    if (this.#protectedRules.length === 0 || this.#writePins.has(relative)) return;
+    if (this.#protectedRules.length === 0 || this.#pins.contains(relative)) return;
     // 거부 목록 쪽 맞춤이다: 넓게 맞아도 읽는 파일이 하나 늘 뿐이고, 고정값은 review가 protected-paths로 보는 파일에만 쓰인다
     if (!this.#protectedRules.some((rule) => guard.isProtectedPath(relative, rule, BACKSLASH_SEP))) return;
     const unpinned = (reason: string): void => {
-      this.#writePins.set(relative, { kind: 'irregular', reason });
+      this.#pins.pinUnpinned(relative, reason);
     };
     try {
       await this.#outsideSync?.();
@@ -257,7 +243,8 @@ export class Workspace {
       unpinned('이미 바뀐 파일입니다');
       return;
     }
-    this.#writePins.set(relative, readProjectFileBytesSync(this.root, relative, MAX_PIN_BYTES));
+    // 읽기 전에 크기를 보고(1MiB 상한), 링크를 따라가지 않으며, 못 읽으면 그 이유가 고정값이 된다. 모두 Rust 안에서 한다
+    this.#pins.pin(this.root, relative);
   }
 
   /**
@@ -266,18 +253,7 @@ export class Workspace {
    * 읽는 동안 바뀌었으면 같다고 하지 않는다. 지금 내용은 링크를 따라가지 않고 읽는다(쓰는 동안 링크로 바뀐 경우도 바뀐 것이다)
    */
   restoredProtectedFiles(files: readonly string[]): string[] {
-    const restored: string[] = [];
-    for (const file of files) {
-      const pin = this.#writePins.get(file);
-      if (!pin) continue;
-      const now = readProjectFileBytesSync(this.root, file, MAX_PIN_BYTES);
-      const same =
-        pin.kind === 'missing'
-          ? now.kind === 'missing'
-          : pin.kind === 'bytes' && pin.complete && now.kind === 'bytes' && now.complete && pin.content.equals(now.content);
-      if (same) restored.push(file);
-    }
-    return restored;
+    return this.#pins.restored(this.root, [...files]);
   }
 
   /** 에이전트가 이번 실행에서 만들거나 수정한 파일 (루트 기준 경로) */
@@ -320,22 +296,22 @@ export class Workspace {
   }
 
   async list(dir = '.', depth = 3): Promise<string[]> {
-    const start = await this.#resolve(dir, { mustExist: true });
+    const start = this.#relative(await this.#resolve(dir, { mustExist: true }));
     const entries: string[] = [];
 
-    const walk = async (absolute: string, remaining: number): Promise<void> => {
+    const walk = async (relativeDir: string, remaining: number): Promise<void> => {
       if (entries.length >= MAX_LIST_ENTRIES) return;
-      const children = await readdir(absolute, { withFileTypes: true });
+      const children = await this.#readDir(relativeDir);
       children.sort((a, b) => a.name.localeCompare(b.name));
       for (const child of children) {
         if (entries.length >= MAX_LIST_ENTRIES) return;
         if (isDenied(child.name)) continue;
-        const childPath = path.join(absolute, child.name);
-        const relative = this.#relative(childPath);
-        if (child.isDirectory()) {
+        const relative = relativeDir === '' ? child.name : `${relativeDir}/${child.name}`;
+        // 종류는 링크를 따라가지 않은 것이다: 링크는 폴더도 파일도 아니라서 보여 주지 않는다
+        if (child.kind === 'dir') {
           entries.push(`${relative}/`);
-          if (remaining > 1) await walk(childPath, remaining - 1);
-        } else if (child.isFile()) {
+          if (remaining > 1) await walk(relative, remaining - 1);
+        } else if (child.kind === 'file') {
           entries.push(relative);
         }
       }
@@ -367,15 +343,15 @@ export class Workspace {
   ): Promise<SearchResult> {
     const needles = terms.filter((term) => term.length > 0).map((term) => (ignoreCase ? term.toLowerCase() : term));
     if (needles.length === 0) throw new WorkspaceError('검색할 낱말이 없습니다');
-    const start = await this.#resolve(target, { mustExist: true });
+    const start = this.#relative(await this.#resolve(target, { mustExist: true }));
     const result: SearchResult = { matches: [], truncated: false, filesScanned: 0 };
     let directories = 0;
     let bytes = 0;
 
-    const scan = async (absolute: string): Promise<void> => {
+    const scan = async (relative: string): Promise<void> => {
       // 링크는 따라가지 않고, 일반 파일이 아니거나 상한을 넘는 파일은 읽기 전에 건너뛴다
-      const info = await lstat(absolute).catch(() => undefined);
-      if (!info || !info.isFile() || info.size > MAX_READ_BYTES) return;
+      const info = await this.#lstat(relative).catch(() => undefined);
+      if (!info || info.kind !== 'file' || info.size > MAX_READ_BYTES) return;
       if (result.filesScanned >= MAX_SEARCH_FILES || bytes + info.size > MAX_SEARCH_BYTES) {
         result.truncated = true;
         return;
@@ -383,7 +359,7 @@ export class Workspace {
       result.filesScanned += 1;
       bytes += info.size;
       // 크기를 본 뒤 여는 사이에 이 파일이 링크로 바뀌어도 따라가지 않는다
-      const buffer = await readNoFollowInside(this.root, absolute, absolute, MAX_READ_BYTES).catch(() => undefined);
+      const buffer = await readNoFollowInside(this.root, path.join(this.root, relative), relative, MAX_READ_BYTES).catch(() => undefined);
       if (!buffer || buffer.byteLength > MAX_READ_BYTES || buffer.subarray(0, 1024).includes(0)) return;
       const lines = redact(buffer.toString('utf8')).split(/\r?\n/);
       for (const [index, line] of lines.entries()) {
@@ -393,30 +369,32 @@ export class Workspace {
           result.truncated = true;
           return;
         }
-        result.matches.push({ file: this.#relative(absolute), line: index + 1, text: line.length > MAX_SEARCH_LINE_CHARS ? `${line.slice(0, MAX_SEARCH_LINE_CHARS)}…` : line });
+        result.matches.push({ file: relative, line: index + 1, text: line.length > MAX_SEARCH_LINE_CHARS ? `${line.slice(0, MAX_SEARCH_LINE_CHARS)}…` : line });
       }
     };
-    const walk = async (absolute: string): Promise<void> => {
+    const walk = async (relativeDir: string): Promise<void> => {
       if (result.truncated) return;
       directories += 1;
       if (directories > MAX_SEARCH_DIRECTORIES) {
         result.truncated = true;
         return;
       }
-      const children = await readdir(absolute, { withFileTypes: true }).catch(() => []);
+      const children = await this.#readDir(relativeDir).catch(() => []);
       children.sort((a, b) => a.name.localeCompare(b.name));
       for (const child of children) {
         if (result.truncated) return;
         if (isDenied(child.name)) continue;
-        const childPath = path.join(absolute, child.name);
-        // Dirent의 종류는 링크를 따라가지 않은 것이다: 링크는 폴더도 파일도 아니라서 건너뛴다
-        if (child.isDirectory()) await walk(childPath);
-        else if (child.isFile()) await scan(childPath);
+        const relative = relativeDir === '' ? child.name : `${relativeDir}/${child.name}`;
+        // 종류는 링크를 따라가지 않은 것이다: 링크는 폴더도 파일도 아니라서 건너뛴다
+        if (child.kind === 'dir') await walk(relative);
+        else if (child.kind === 'file') await scan(relative);
       }
     };
 
-    const startInfo = await lstat(start);
-    if (startInfo.isDirectory()) await walk(start);
+    const startInfo = await this.#lstat(start).catch((error: unknown) => {
+      throw openFailure(error, target);
+    });
+    if (startInfo.kind === 'dir') await walk(start);
     else await scan(start);
     return result;
   }
@@ -439,8 +417,7 @@ export class Workspace {
     const absolute = await this.#resolve(file, { mustExist: false });
     await this.#assertNotStale(absolute);
     await this.#pin(this.#relative(absolute));
-    await mkdir(path.dirname(absolute), { recursive: true });
-    await writeNoFollowInside(this.root, absolute, content);
+    await writeNoFollowInside(this.root, absolute, content, true);
     this.#record(absolute, content);
   }
 
@@ -451,8 +428,7 @@ export class Workspace {
   async writeBinary(file: string, data: Buffer): Promise<void> {
     const absolute = await this.#resolve(file, { mustExist: false });
     await this.#pin(this.#relative(absolute));
-    await mkdir(path.dirname(absolute), { recursive: true });
-    await writeNoFollowInside(this.root, absolute, data);
+    await writeNoFollowInside(this.root, absolute, data, true);
     const relative = this.#relative(absolute);
     this.#seen.delete(relative);
     this.#deleted.delete(relative);
@@ -484,7 +460,7 @@ export class Workspace {
     const absolute = await this.#resolve(file, { mustExist: true });
     await this.#assertNotStale(absolute);
     await this.#pin(this.#relative(absolute));
-    await rm(absolute);
+    await removeNoFollowInside(this.root, absolute, file);
 
     const relative = this.#relative(absolute);
     this.#seen.delete(relative);
@@ -527,43 +503,19 @@ export class Workspace {
 
     // 파일 도구는 링크를 따라가지 않는다(트러블슈팅 124). 위의 숨김 검사는 이름만 보므로, 프로젝트 안의 링크가 숨긴 경로(.git, .env)를
     // 가리키면 그 이름으로는 지나가고 실제 위치가 프로젝트 안이라 아래의 검사도 지나갔다 — 체크포인트 저장소를 읽고 쓸 수 있었다.
-    // 경로의 조각을 위에서부터 하나씩 보고, 링크가 하나라도 있으면(깨진 링크 포함) 거절한다. 목록(list)이 링크를 보여 주지 않는 것과 같은 규칙이다
-    let current = this.root;
-    for (const segment of relative === '' ? [] : relative.split(path.sep)) {
-      current = path.join(current, segment);
-      const info = await lstat(current).catch(() => undefined);
-      // 여기부터는 아직 없는 경로다(쓰기가 새로 만든다). 없는 것 아래에는 링크도 없다
-      if (!info) break;
-      if (info.isSymbolicLink()) throw new WorkspaceError(`${file}: 링크를 거치는 경로는 다룰 수 없습니다`);
-    }
-
-    // 존재하는 가장 가까운 상위 경로의 실제 위치로 심볼릭 링크 탈출을 막는다(루트 자체가 링크를 거쳐 있는 경우까지 본다)
-    const existing = await nearestExisting(absolute);
-    if (mustExist && existing !== absolute) throw new WorkspaceError(`${file}: 파일이 없습니다`);
-    const [realRoot, realExisting] = await Promise.all([realpath(this.root), realpath(existing)]);
-    if (!isInside(realRoot, realExisting)) throw new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
-
-    // 운영체제가 알려 주는 실제 저장 이름으로 한 번 더 본다. 위의 이름 검사는 우리가 아는 변형(대소문자·정규화)만 맞추므로,
-    // 파일 시스템이 같은 항목으로 보는 다른 이름이 있어도 실제 이름이 숨긴 이름이면 여기서 걸린다
-    // (promises의 realpath에는 native가 없어 동기 판본을 쓴다. 경로 하나를 푸는 짧은 호출이다)
-    const native = (target: string, fallback: string): string => {
-      try {
-        return realpathSync.native(target);
-      } catch {
-        return fallback;
-      }
-    };
-    if (path.relative(native(this.root, realRoot), native(existing, realExisting)).split(path.sep).some(isDenied)) {
-      throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
-    }
-
+    // 경로의 조각을 위에서부터 하나씩 보고, 링크가 하나라도 있으면(깨진 링크 포함) 거절한다. 목록(list)이 링크를 보여 주지 않는 것과 같은 규칙이다.
+    // 이 확인과 아래의 실제 읽기·쓰기·지우기는 같은 방식(루트의 실제 위치에서 조각마다 링크 없이 내려감, Rust)이다. 존재하지 않는 조각부터는 아직 없는 경로다(쓰기가 새로 만든다).
+    // 운영체제가 알려 주는 실제 저장 이름으로도 숨긴 이름을 한 번 더 본다. 위의 이름 검사는 우리가 아는 변형(대소문자·정규화)만 맞추므로,
+    // 파일 시스템이 같은 항목으로 보는 다른 이름이 있어도 실제 이름이 숨긴 이름이면 여기서 걸린다.
     // 실제 저장 이름으로 돌려준다(트러블슈팅 125). 받은 표기 그대로 돌려주면 바뀐 파일 기록이 `WEB/app/page.tsx`처럼 남아,
-    // 뒤의 검사들(보호 경로의 사후 확인, 바뀐 파일 → 다시 올릴 서비스)이 같은 파일을 다른 이름으로 본다.
-    // 링크는 위에서 걸렀으므로 실제 이름과 받은 이름의 차이는 대소문자·정규화 꼴뿐이다. 아직 없는 조각은 받은 그대로 둔다
-    const stored = path.relative(native(this.root, realRoot), native(existing, realExisting));
-    // 실제 이름을 얻지 못해 어긋난 값이 나오면(루트 밖으로 나가는 상대 경로) 받은 경로를 그대로 쓴다. 위의 확인은 이미 지났다
-    if (!isInsideRelative(stored)) return absolute;
-    return path.join(this.root, stored, path.relative(existing, absolute));
+    // 뒤의 검사들(보호 경로의 사후 확인, 바뀐 파일 → 다시 올릴 서비스)이 같은 파일을 다른 이름으로 본다. 아직 없는 조각은 받은 그대로 둔다
+    let stored: string;
+    try {
+      stored = await guard.workspaceResolve(this.root, toPosix(relative), mustExist);
+    } catch (error) {
+      throw resolveFailure(error, file);
+    }
+    return stored === '' ? this.root : path.join(this.root, ...stored.split('/'));
   }
 
   /** 바깥에서 온 경로를 루트 기준 상대 경로로 정규화한다. 루트 밖 경로는 거부한다 */
@@ -580,6 +532,20 @@ export class Workspace {
       throw new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
     }
     return this.#relative(absolute);
+  }
+
+  /** 폴더의 항목(이름·종류). 숨긴 이름과 링크를 따라가는 길은 Rust가 막는다. 순서는 정해져 있지 않다 */
+  async #readDir(relative: string): Promise<Array<{ name: string; kind: string }>> {
+    try {
+      return await guard.workspaceReadDir(this.root, relative);
+    } catch (error) {
+      throw openFailure(error, relative === '' ? '.' : relative);
+    }
+  }
+
+  /** 링크를 따라가지 않는 종류·크기 */
+  async #lstat(relative: string): Promise<{ kind: string; size: number }> {
+    return guard.workspaceLstat(this.root, relative);
   }
 
   #relative(absolute: string): string {
@@ -633,75 +599,59 @@ function isInsideRelative(relative: string): boolean {
   return guard.workspaceIsInside(encodeLoneSurrogates(relative), BACKSLASH_SEP);
 }
 
-async function nearestExisting(target: string): Promise<string> {
-  let current = target;
-  for (;;) {
-    try {
-      await realpath(current);
-      return current;
-    } catch {
-      const parent = path.dirname(current);
-      if (parent === current) return current;
-      current = parent;
-    }
-  }
+/** #resolve 자리의 실패 글. 열기 전의 확인이라 링크는 "링크를 거치는 경로"다 */
+function resolveFailure(error: unknown, file: string): WorkspaceError {
+  const code = failureCode(error);
+  if (code === 'LINK') return new WorkspaceError(`${file}: 링크를 거치는 경로는 다룰 수 없습니다`);
+  if (code === 'MISSING') return new WorkspaceError(`${file}: 파일이 없습니다`);
+  if (code === 'OUTSIDE') return new WorkspaceError(`${file}: 프로젝트 밖을 가리키는 링크입니다`);
+  if (code === 'DENIED') return new WorkspaceError(`${file}: 생성물이나 비밀 파일 경로는 다룰 수 없습니다`);
+  // 확인하지 못했으면 통과가 아니라 거절이다(허용 목록: 모르면 범위 밖)
+  return new WorkspaceError(`${file}: 경로를 확인할 수 없습니다(${code.startsWith('OS:') ? code.slice('OS:'.length) : '알 수 없는 오류'})`);
+}
+
+/** absolute(루트 아래)를 루트 기준 `/` 경로로 바꾼다. 루트 밖이면 거절한다(허용 목록: 모르면 밖) */
+function insideRelative(root: string, absolute: string, label: string): string {
+  const relative = path.relative(root, absolute);
+  if (!isInsideRelative(relative)) throw new WorkspaceError(`${label}: 프로젝트 밖 경로입니다`);
+  return toPosix(relative);
 }
 
 /**
- * 마지막 조각이 링크면 따라가지 않고 실패하게 연다(O_NOFOLLOW). #resolve가 경로를 확인한 뒤 실제로 읽고 쓰기까지의 사이에
- * 그 파일이 링크로 바뀌는 경합을 좁힌다.
- *  - 종류와 크기는 연 파일 자체(fstat)로 읽기 전에 본다. 다 읽은 뒤에 보면 수 GB 파일이 서버 메모리를 먼저 차지한다.
- *    FIFO는 쓰는 쪽이 없으면 열기에서 멈추므로 O_NONBLOCK으로 열고 일반 파일이 아니면 거절한다(readRegularFileBytesSync와 같은 규칙)
+ * 읽기. 루트의 실제 위치에서 조각마다 링크를 따라가지 않고 내려가 열고(O_NOFOLLOW), 연 파일의 종류와 크기를 읽기 전에 본다(Rust). #resolve가 확인한 경로와 같은 방식으로 여는 것이라,
+ * 확인한 뒤 상위 폴더가 링크로 바뀌어도 연 파일은 프로젝트 안의 것이다(#799) — 옛 구현은 연 뒤에 realpath와 dev/ino를 견줬다.
+ *  - FIFO는 쓰는 쪽이 없으면 열기에서 멈추므로 O_NONBLOCK으로 열고 일반 파일이 아니면 거절한다
  *  - maxBytes를 주면 확인한 크기까지만 읽는다. 확인 뒤에 파일이 늘어나도 그 뒤는 읽지 않는다
- *  - 연 뒤에 그 파일이 프로젝트 안의 것인지 확인한다(assertOpenedInside, #799)
  */
 export async function readNoFollowInside(root: string, absolute: string, label: string, maxBytes?: number): Promise<Buffer> {
-  const handle = await open(absolute, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const relative = insideRelative(root, absolute, label);
   try {
-    const stat = await handle.stat();
-    await assertOpenedInside(root, absolute, label, stat);
-    if (!stat.isFile()) throw new WorkspaceError(`${label}: 일반 파일이 아닙니다`);
-    if (maxBytes === undefined) return await handle.readFile();
-    if (stat.size > maxBytes) throw new WorkspaceError(`${label}: 파일이 너무 큽니다 (${stat.size} bytes)`);
-    const buffer = Buffer.alloc(stat.size);
-    let offset = 0;
-    while (offset < stat.size) {
-      const { bytesRead } = await handle.read(buffer, offset, stat.size - offset, offset);
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    return buffer.subarray(0, offset);
-  } finally {
-    await handle.close();
+    return await guard.workspaceReadFile(root, relative, maxBytes ?? null);
+  } catch (error) {
+    throw openFailure(error, label);
   }
 }
 
 /**
- * 쓰기도 O_NOFOLLOW로 열고, 비우기(O_TRUNC)는 연 파일이 프로젝트 안의 것인지 확인한 뒤에 한다(#799). 열 때 비우면 상위 폴더가
- * 그 사이에 바깥을 가리키는 링크로 바뀐 경우 바깥 파일이 먼저 비워진다. 남은 한계: 그런 경우 O_CREAT가 바깥에 빈 파일을 만들 수 있다
+ * 쓰기. 부모 폴더는 링크 없이 내려가며(makeDirs면 없는 폴더를 만들며) 열고, 파일은 그 폴더 서술자 아래에서 O_NOFOLLOW로 연다(Rust).
+ * 일반 파일이 아니면 비우기 전에 거절한다. 만드는 폴더·파일은 걸어 내려온 폴더 아래에만 생기므로 프로젝트 밖에 빈 파일을 남길 수 없다(옛 구현의 한계였다, #799)
  */
-export async function writeNoFollowInside(root: string, absolute: string, data: string | Buffer): Promise<void> {
-  const handle = await open(absolute, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW, 0o666);
+export async function writeNoFollowInside(root: string, absolute: string, data: string | Buffer, makeDirs = false): Promise<void> {
+  const relative = insideRelative(root, absolute, path.relative(root, absolute));
   try {
-    await assertOpenedInside(root, absolute, path.relative(root, absolute), await handle.stat());
-    await handle.truncate(0);
-    await handle.writeFile(data);
-  } finally {
-    await handle.close();
+    await guard.workspaceWriteFile(root, relative, typeof data === 'string' ? Buffer.from(data, 'utf8') : data, makeDirs);
+  } catch (error) {
+    throw openFailure(error, relative);
   }
 }
 
-/**
- * 연 파일(opened)이 프로젝트 안에 있는지 연 뒤에 다시 확인한다(#799). #resolve는 경로를 조각마다 확인하지만 그 뒤 열기 전에
- * 상위 폴더가 링크로 바뀌면 O_NOFOLLOW(마지막 조각만 본다)로는 막지 못한다.
- *  - 경로를 지금 풀어(realpath) 프로젝트 밖이면 거절한다(바뀐 링크가 아직 남아 있는 경우)
- *  - 풀린 경로의 파일이 연 파일과 다르면(장치·inode) 거절한다(바꿨다가 되돌린 경우. 연 것은 바깥 파일이다)
- */
-async function assertOpenedInside(root: string, absolute: string, label: string, opened: { dev: number; ino: number }): Promise<void> {
-  const [realRoot, real] = await Promise.all([realpath(root), realpath(absolute).catch(() => undefined)]);
-  const current = real === undefined ? undefined : await lstat(real).catch(() => undefined);
-  if (real === undefined || !isInside(realRoot, real) || !current || current.dev !== opened.dev || current.ino !== opened.ino) {
-    throw new WorkspaceError(`${label}: 연 파일이 프로젝트 밖에 있습니다(경로를 확인한 뒤 링크로 바뀌었습니다)`);
+/** 지우기. 부모 폴더는 링크 없이 내려가고 그 이름의 항목 하나만 지운다(unlinkat). 링크면 링크만 지우고 너머를 따라가지 않으며 폴더는 지우지 못한다 */
+async function removeNoFollowInside(root: string, absolute: string, label: string): Promise<void> {
+  const relative = insideRelative(root, absolute, label);
+  try {
+    await guard.workspaceRemoveFile(root, relative);
+  } catch (error) {
+    throw openFailure(error, label);
   }
 }
 

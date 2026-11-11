@@ -696,6 +696,32 @@ interface NativeGuard {
   // ── agent: 디자인 비교(3단계 3ae). 게이트는 비율이 허용치를 넘으면 실패시키므로 비율이 작아지는 쪽이 여는 쪽이고, 끝까지 가지 못한 입력(읽지 못한 PNG·너비 불일치·너무 큼·픽셀 0·범위 밖 threshold)은 모두 errorKind로 돌려준다.
   // masks는 [x, y, width, height, ...]를 이어 붙인 숫자(소수·음수·NaN 그대로: 옛 JS 반복문과 같게 칠한다). errorKind는 'compare'(옛 VisualCompareError)·'decode'(PNG를 읽지 못함)
   visualCompare(actual: Buffer, reference: Buffer, masks: number[], threshold: number): NativeVisualCompare;
+  // ── agent: 작업 공간의 파일 시스템 I/O(ADR-195 4f A3). 경로의 어느 조각도 링크를 따라가지 않고 연 서술자로 읽고 쓰고 지운다(bstudio-io::workspace_io).
+  // 비동기 함수의 실패는 거절된 Error의 message로 온다: LINK·OUTSIDE·DENIED·MISSING·NOT_REGULAR·TOO_LARGE:<크기>·OS:<오류 이름>·OTHER:<글>. 숨긴 이름은 여기서도 다시 막는다
+  workspaceReadRegularFile(absolute: string, maxBytes: number): NativeWorkspaceFileRead;
+  workspaceReadProjectFile(root: string, relative: string, maxBytes: number): NativeWorkspaceFileRead;
+  workspaceResolve(root: string, relative: string, mustExist: boolean): Promise<string>;
+  workspaceReadDir(root: string, relative: string): Promise<Array<{ name: string; kind: 'file' | 'dir' | 'link' | 'other' }>>;
+  workspaceLstat(root: string, relative: string): Promise<{ kind: 'file' | 'dir' | 'link' | 'other'; size: number }>;
+  workspaceReadFile(root: string, relative: string, maxBytes?: number | null): Promise<Buffer>;
+  workspaceWriteFile(root: string, relative: string, data: Buffer, makeDirs: boolean): Promise<void>;
+  workspaceRemoveFile(root: string, relative: string): Promise<void>;
+  workspaceFingerprints(root: string, files: string[]): Promise<string[]>;
+  WorkspacePinStore: new () => NativeWorkspacePinStore;
+}
+
+export interface NativeWorkspaceFileRead {
+  kind: 'missing' | 'bytes' | 'irregular';
+  content?: Buffer | null;
+  complete?: boolean | null;
+  reason?: string | null;
+}
+
+export interface NativeWorkspacePinStore {
+  contains(relative: string): boolean;
+  pin(root: string, relative: string): void;
+  pinUnpinned(relative: string, reason: string): void;
+  restored(root: string, files: string[]): string[];
 }
 
 export interface NativeVisualCompare {
