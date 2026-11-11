@@ -10197,6 +10197,40 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 시험 순서에 관한 정직한 기록: 껍데기가 아직 옛 구현이던 때의 차등 시험은 자기 자신과 견주는 것이라 "고치기 전 실패 출력"을 만들 수 없다. 그 역할은 위 변이 확인이 한다(A4a와 같다).
 - 하지 않은 것: 진짜 docker로 정책 위반 compose가 "시작되지 않고 지워진다"는 확인(이슈의 ★ 실측)은 메인 세션이 한다. 진짜 Docker Desktop(접두어)·`inspect` 출력은 쓰지 않았다(가짜 입력만). 실험 경로(`agent-terminal.ts`의 컨테이너 방식 터미널, Kubernetes 제공자)는 확인하지 않았다(타입 검사만). `docs/status.md`의 "마지막 실제 확인"은 그대로 둔다(테스트만 돌림). 새 ADR은 만들지 않았다. 새 번호는 트러블슈팅 189 하나다.
 
+### 덧붙임: A4c-1 결과 — 컨테이너 만들기 반복과 .git 마스크 계산·override 쓰기를 Rust로 (2026-11-12, [#1180](https://github.com/dj258255/b-studio/issues/1180))
+
+- 옮긴 것: `LocalDockerProvider.#upOnce`(시도 반복 전체), `#refreshGitMask`, `#writeOverride`, `git-mask.ts`의 `loadGitMask`·`computeGitMask`(`compose config --format json` 읽기·모양 검사, `collectComposeMounts`, 상태 폴더 준비, `planGitMask`, `assertNoNestedAssetMounts`, `planEvaluationAssetMask`, `mergeMasks` 호출 순서), 서비스가 둘 이상일 때의 `loadDependsOn` 호출. 이미 Rust인 판정(`bstudio-guard`의 `git_mask`·`compose_override`·`container_verify`)은 재사용했다.
+- **반복 전체가 Rust 함수 하나다.** `bstudio-io`의 `up_with_git_mask`가 시도마다 `compose config` → 마스크 계산 → override 쓰기(임시 파일 `<override>.<랜덤 hex>.tmp` + `rename`) → `up --no-start` → 다시 읽기(바뀌었으면 처음부터) → `verify_containers('created')` → 시작(이름을 줬으면 `start_verified`, 아니면 `compose start`) → `verify_containers('started')`, 포기하면 `down --remove-orphans` 후 멈춘다. **쓴 것 = 확인한 것**: 확인에 넘기는 마스크와 override를 쓰는 마스크가 함수 안의 `mask` 한 값이고, 쓰기가 성공한 뒤에만 `mask`를 새 값으로 올린다. 돌려주는 마스크도 그 값이라 TS는 `#gitMask`를 그 값으로 맞춘다(실패해도). 판정은 `bstudio-guard/src/up_loop.rs`(config 모양, 마스크 견주기, override에 마스크 얹기, YAML 안전 JSON).
+- **override는 JSON으로 쓴다.** 파일 이름은 `compose.override.yaml` 그대로다. 생성 때의 첫 쓰기와 `#regeneratePorts`도 같은 Rust 쓰개(`writeComposeOverride`)를 불러 쓰는 쪽이 하나다. YAML이 거부하거나 줄바꿈으로 접는 글자(0x7F·0x80~0x9F·BOM·U+FFFE/FFFF·U+0085·U+2028·U+2029)는 문자열 안에서 `\uXXXX`로 쓴다. compose가 JSON override를 실제로 읽는지는 **재지 않았다**(메인 세션의 ★ 실측).
+- 남긴 것: `#upQueue`(TS), `#composeUpWithPortRetry`·`#regeneratePorts`의 포트 다시 뽑기(A4c-2). `loadGitMask`·`computeGitMask`는 같은 시그니처의 TS 껍데기로 남겼다(실험 경로 `agent-terminal.ts`가 부른다). `verify-containers.ts`의 `verifyContainers`·`startVerifiedContainers` 껍데기는 이제 제품 경로가 부르지 않고 A4b 차등 시험만 쓴다(4g에서 함께 지운다).
+- 취소: A4b의 `Cancel`을 그대로 쓴다. 이미 취소된 신호는 TS가 `throwIfAborted()`로 먼저 던진다(napi `on_abort`는 등록한 뒤의 취소만 안다. 옛 `runCommand`도 등록 전에 취소되면 듣지 못한다).
+
+**호출부별 막는 쪽/여는 쪽**
+
+| 자리 | 쪽 | 모르는 입력 |
+|---|---|---|
+| `up_with_git_mask` 전체 | 막는 쪽 | 읽지 못함·모양을 모름·쓰지 못함·확인하지 못함은 모두 실패(`Done`이 아니면 TS가 던진다) |
+| `compose config` 비0·해석 못함 | 막는 쪽 | 마운트를 모르면 가림을 정할 수 없으니 만들지 않는다 |
+| `config_from_stdout` | 막는 쪽 | 객체가 아닌 최상위(`[]`·`5`·`"x"`·`true`·`null`)는 실패(옛 코드는 객체가 아닌 값을 서비스 없음으로 읽었다). `services` 없음·`null`만 빈 객체 |
+| `compute_git_mask`(마운트 모음·상태 폴더 준비·평가 자산 깊은 마운트) | 막는 쪽 | 모양을 모르면 `collect_host_mounts`가 오류, 준비 실패·깊은 마운트는 실패 |
+| `masks_equal` | **여는 쪽에 가깝다**(같다고 보면 다시 쓰지 않는다) | 서비스 순서만 무시하고 마운트는 순서·내용까지 견준다. 넓게 맞추지 않는다 |
+| `write_override` | 막는 쪽 | 만들기·쓰기·rename 실패는 실패이고 상태를 올리지 않는다. 임시 파일은 `create_new`(있는 파일·링크를 따라가지 않는다), 실패하면 임시 파일을 지운다 |
+| `yaml_safe_json` | 막는 쪽(글자를 더 이스케이프할 뿐) | 모르는 글자는 이스케이프 |
+| 만든 뒤 마스크가 바뀜 | 막는 쪽 | 확인하지 않고 처음부터. `GIT_MASK_ATTEMPTS`(3)번 안에 안정되지 않으면 내리고 실패 |
+| `verify_containers`('created'·'started') | 막는 쪽 | A4b 표와 같다 |
+| 시작(`start_verified`·`compose start`) | 막는 쪽 | 확인한 목록에 없는 서비스는 시작하지 않는다 |
+| `load_depends_on` | 막는 쪽 | 비0·해석 못함은 시작하지 않는다(64MB 상한을 넘으면 비0) |
+
+- **확인하는 쪽과 실제로 쓰는 쪽이 같은 입력을 다르게 읽는가(점검한 것).** ① `compose config`는 override 없이, `up`·`ps`는 override까지 읽는다. 마운트는 사용자 compose가 정하므로 맞다. 같은 파일·프로젝트 이름·프로젝트 폴더·환경으로 읽는다(프로필만 모두 켠다). ② 호스트 경로: 계획은 마운트 원본과 프로젝트 폴더를 `real_path`로 푼 값으로 짜고, 확인(A4b)도 같은 함수로 푼다. Docker Desktop 접두어는 A4b에서 처리했다. ③ 컨테이너 경로(target)는 호스트가 아니라 POSIX 규칙으로 견준다(기존). ④ 대소문자·유니코드 정규화·링크는 `.git` 검색과 평가 자산 계획이 쓰는 기존 Rust 함수가 읽는다(이번에 새로 비교하는 이름은 없다). ⑤ **override의 형식**: 쓰는 쪽(JSON)과 읽는 쪽(compose의 YAML 파서)이 같은 글자를 다르게 읽는 자리가 글자 몇 개 있어 이스케이프했다(위). 시험은 `yaml` 패키지로만 읽었고 compose(go-yaml)로 읽는 것은 재지 않았다. ⑥ **쓴 것과 상태**: 옛 코드는 상태를 먼저 올리고 썼다(트러블슈팅 190). ⑦ 확인에 넘기는 마스크는 방금 쓴 값이다(변이 확인으로 고정). 한 up이 끝난 뒤 다른 곳에서 override 파일이 바뀌는 것은 막지 않는다(파일은 이 함수와 포트 다시 뽑기만 쓴다).
+- 옛 코드의 결함(트러블슈팅 190): override를 쓰지 못해도 마스크를 상태에 올렸다, `compose config`의 객체가 아닌 최상위를 서비스 없음으로 읽었다. 둘 다 더 막는 쪽으로 고쳤다.
+- **차등 시험**(`packages/sandbox/src/docker/up-loop-differential.test.ts`, 58개): 옛 TS는 `up-loop-legacy.ts`·`git-mask-legacy.ts`로 남겼다. 가짜 docker(셸 스크립트, 호출 순서대로 준비한 출력)로 옛·새를 견줘 반환값·오류 글·detail·`platform`·docker 호출 순서·마지막 마스크·`up`/`start` 순간의 override(YAML로 읽은 값)·최종 override가 같음을 본다. 시나리오 45개(정상 7, config 실패 11, 만들기·바뀜 5, 마스크 계산 3, 확인 10, 시작 9, 취소 2)와 무작위 조합 40개, 껍데기(`loadGitMask`·`computeGitMask`) 3개, HARDENED 8개. 다른 값 0(HARDENED 제외).
+- **HARDENED(옛 쪽보다 더 막는 의도한 차이)**: ① override를 쓰지 못하면 상태의 마스크를 올리지 않는다(옛 쪽은 올렸다). 오류 종류도 옛 `fs` 원시 오류에서 `SandboxError`('compose override 파일을 쓰지 못했습니다', `platform: true`)로 바뀐다. ② `compose config`의 최상위가 객체가 아니면 해석 실패(`[]`·`5`·`"x"`·`true` 네 입력으로 시험). ③ `loadDependsOn`이 `execChecked` 대신 `run_command_with_limit`(64MB)를 쓴다(출력 상한 넘김은 둘 다 실패). override의 글자 형식(JSON)은 같은 값으로 읽히므로 차이로 세지 않는다.
+- Rust 단위 시험: `bstudio-guard` `up_loop` 6개, `bstudio-io` `up_loop` 18개(가짜 docker 셸 스크립트·임시 폴더만).
+- **변이 확인**(판정·순서의 줄을 하나씩 망가뜨려 `cargo test … up_loop`이 실패하는지 봤다. 매번 `cp` 백업으로 복원): 시작 뒤 확인 제거 → `시작한_뒤_확인에서_가림이_빠지면_실패한다`; 확인에 처음 마스크 전달 → `확인에는_방금_쓴_마스크를_넘긴다`; 쓰기 전에 마스크를 올림 → `override를_쓰지_못하면_마스크를_올리지_않고_만들지_않는다`; 만든 뒤 마스크 바뀜 무시 → `시도_안에서_마스크가_계속_바뀌면_내리고_멈춘다`; 포기 시 `down` 생략 → 같은 시험; 객체가 아닌 config 통과 → guard `config는_객체만_…`·`해석하지_못하거나_객체가_아니면_모른다`; YAML 안전 치환 생략 → guard `yaml_안전_json은_…`; 시작 전 확인 실패 무시 → `확인에는_방금_쓴_마스크를_넘긴다`; 의존 순서 읽기 실패 무시 → `서비스_둘의_의존_순서를_…`; 취소 검사 제거 → `이미_취소됐으면_…`; 임시 파일을 `create_new` 아닌 `create`로 → `임시_파일_이름이_이미_있으면_덮어쓰지_않는다`(처음에는 살아남아 `create_temporary`로 떼어 고쳤다); 마스크 견주기 항상 같음 → guard `마스크_견주기는_…`; 평가 자산 깊은 마운트 검사 제거 → `평가_자산_위의_깊은_마운트는_멈춘다`; 상태 폴더 준비 실패 무시 → `상태_폴더_자리를_비울_수_없으면_멈춘다`.
+- 기존 `git-mask-provider.test.ts`는 override 글자 꼴(`source: …`)을 확인하던 곳만 "JSON을 읽어 같은 값의 YAML로 다시 쓴" 글로 고쳤다. 나머지 기존 시험은 그대로 통과한다.
+- 실측([기록](experiments/2026-11-12-a4c1-up-loop.md), 한 번): 실제 compose(Colima)가 JSON override로 컨테이너를 만들었고, 같은 내용을 옛 `yaml.stringify`로 쓴 파일과 `compose config` 결과가 바이트까지 같았다. 이스케이프한 글자도 원래 코드 포인트로 읽혔다. 세션 중 compose에 마운트를 더하고 서비스를 다시 켜자 override가 다시 쓰이고 새 자리의 `.git`이 읽기 전용으로 덮였다. **만든 직후와 확인 사이**의 변경(다음 시도로 넘어가는 경로)은 시점을 맞출 수 없어 차등 시험으로만 확인했다.
+- 하지 않은 것: 실험 경로(`agent-terminal.ts`는 `computeGitMask`를 껍데기로만 부른다, Kubernetes 제공자)는 타입 검사로만 확인했다. `docs/status.md`는 건드리지 않았다(실제 확인이 아니다).
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

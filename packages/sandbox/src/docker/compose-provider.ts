@@ -1,10 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { LoadedProject, ManagedServiceSpec } from '@b-studio/spec';
-import { stringify } from 'yaml';
 import { isDockerUnreachable, SandboxError } from '../errors';
 import { execChecked } from '../exec-checked';
 import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransientCrash, waitForReady, type ReadinessPolicy } from '../readiness';
@@ -41,7 +40,6 @@ import type {
 import { runCommand, runCommandFromFile, runCommandLogStream, runCommandToFile } from '../stream-exec';
 import { findFreeHostPort } from './free-port';
 import {
-  buildOverride,
   composeUpArgs,
   EDGE_SERVICE,
   edgePortFor,
@@ -59,7 +57,6 @@ import {
 } from './format';
 import { externalCallScript } from './external-call';
 import { native } from '../native';
-import { loadDependsOn } from './compose-deps';
 import {
   defaultEvaluationAssetRoot,
   evaluationAssetSandboxDir,
@@ -70,7 +67,7 @@ import {
 } from './evaluation-assets';
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
 import { loadGitMask, type MaskVolume } from './git-mask';
-import { startVerifiedContainers, verifyContainers, type VerifiedContainer } from './verify-containers';
+import { overrideInputJson, upWithGitMask, writeComposeOverride } from './up-loop';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { foreignProcesses, scanProcesses, type ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
@@ -84,8 +81,6 @@ import {
   snapshotsToPrune,
 } from './snapshots';
 
-/** compose 파일이 up과 겹쳐 계속 바뀔 때 .git 마스크를 맞춰 다시 올리는 최대 횟수 */
-const GIT_MASK_ATTEMPTS = 3;
 /** 사용량 조회(ps·inspect·stats) 전체의 상한. 평소에는 2~3초 걸린다 */
 const STATS_TIMEOUT_MS = 15_000;
 /** 의존 서비스가 준비될 때까지 기다리는 상한. compose는 healthcheck가 실패로 끝날 때까지 기다리지만, 끝나지 않는 대기는 두지 않는다 */
@@ -243,7 +238,8 @@ export class LocalDockerProvider implements SandboxProvider {
         evaluationAssets,
         redact: (text) => new Redactor(secrets).redact(text),
       });
-      await writeFile(overridePath, stringify(buildOverride(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts, gitMask })));
+      // override는 Rust가 JSON으로 쓴다(임시 파일 + rename). 샌드박스가 다시 쓸 때(#regeneratePorts, up)도 같은 쓰개를 쓴다
+      await writeComposeOverride(overridePath, overrideInputJson(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts }), gitMask);
       return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts, evaluationAssetRoot, evaluationAssets);
     } catch (error) {
       // 샌드박스를 돌려주지 못하면 destroy도 불리지 않는다. 그 샌드박스 id의 복사본 폴더를 여기서 지운다.
@@ -929,71 +925,39 @@ class LocalDockerSandbox implements Sandbox {
     return run;
   }
 
+  /**
+   * 시도 반복 전체(마운트 읽기 → override 쓰기 → 만들기 → 다시 읽기 → 확인 → 시작 → 시작 뒤 확인 → 포기 시 내리기)는 Rust 함수 하나가 한다
+   * (crates/bstudio-io/src/up_loop.rs, ADR-195 4f A4c-1). 확인한 마스크는 override에 쓴 그 값이다. Rust가 마지막에 쓴 마스크를 돌려주면
+   * `#gitMask`를 그 값으로 맞춘다(실패해도). 한 샌드박스의 up은 `#upQueue`가 한 번에 하나만 돌린다
+   */
   async #upOnce(args: string[], signal?: AbortSignal): Promise<ExecResult> {
-    const { create, services, byId } = splitUpArgs(args);
-    for (let attempt = 1; attempt <= GIT_MASK_ATTEMPTS; attempt++) {
-      signal?.throwIfAborted();
-      await this.#refreshGitMask();
-      // 빌드 실패는 여기서 난다(`--build`는 만들기 단계에만 준다)
-      const created = await this.#docker(this.#composeArgs(create), signal);
-      if (created.exitCode !== 0) return created;
-      const before = JSON.stringify(this.#gitMask);
-      await this.#refreshGitMask();
-      if (JSON.stringify(this.#gitMask) !== before) continue;
-      const verified = await this.#verifyMasks('created');
-      // 포트 바인드 충돌은 여기서 난다(바인드는 시작할 때 일어난다)
-      const started = byId ? await this.#startVerified(verified, services, signal) : await this.#docker(this.#composeArgs(['start', ...services]), signal);
-      if (started.exitCode !== 0) return started;
-      await this.#verifyMasks('started');
-      return started;
-    }
-    await this.#docker(this.#composeArgs(['down', '--remove-orphans']), signal);
-    throw new SandboxError(`compose 파일이 계속 바뀌어 .git 보호를 확정하지 못했습니다. 서비스를 내렸습니다 (${this.id})`);
-  }
-
-  /**
-   * 확인한 컨테이너를 id로 시작한다. 서비스가 여럿이면 `up --no-deps a b`가 하던 대로 **목록 안의 의존 순서**를 지키고,
-   * `service_healthy`·`service_completed_successfully` 조건은 그 상태가 될 때까지 기다린 뒤 다음 묶음을 시작한다.
-   * 목록에 없는 의존 서비스는 건드리지 않는다. 실패는 compose의 실패처럼 종료 코드와 stderr로 돌려준다.
-   * 순서와 기다림은 Rust(crates/bstudio-io/src/container_verify.rs)가 한다. 의존 관계를 읽는 `compose config`만 여기서 부른다
-   */
-  async #startVerified(verified: ReadonlyArray<VerifiedContainer>, services: readonly string[], signal?: AbortSignal): Promise<ExecResult> {
-    const dependsOn = services.length === 1 ? undefined : await loadDependsOn(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
-    return startVerifiedContainers({
+    return upWithGitMask({
       id: this.id,
+      project: this.project,
       dockerBin: this.#dockerBin,
       env: this.#environment(),
-      verified,
-      services,
-      dependsOn,
-      pollMs: this.#dependencyPollMs,
-      waitMs: DEPENDENCY_WAIT_MS,
-      ...(signal ? { signal } : {}),
-    });
-  }
-
-  /**
-   * 이 샌드박스의 실제 컨테이너 마운트를 보고, 확인한 컨테이너(id와 서비스 이름)를 돌려준다.
-   * `.git` 보호가 빠진 컨테이너가 있으면 지우고 던진다 — 시작하기 전이면 한 번도 시작되지 않고, 시작한 뒤면 바로 죽인다
-   * (`docker stop`은 종료를 10초까지 기다려 그동안 보호 없이 돈다). 목록·마운트·볼륨 정보를 읽지 못했거나
-   * 컨테이너가 하나도 보이지 않으면 확인하지 못한 것이므로 던진다. 순서·판정·지우기는 Rust 함수 하나가 한다(ADR-195 4f A4b)
-   */
-  async #verifyMasks(phase: 'created' | 'started'): Promise<VerifiedContainer[]> {
-    return verifyContainers({
-      id: this.id,
-      dockerBin: this.#dockerBin,
-      env: this.#environment(),
-      listArgs: this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']),
-      projectRoot: this.project.root,
+      overridePath: this.#overridePath,
+      overrideInput: this.#overrideInput(),
       gitMask: this.#gitMask,
       evaluationAssets: this.#evaluationAssets,
+      args,
       sandboxNetwork: SANDBOX_NETWORK,
       egressNetwork: EGRESS_NETWORK,
       edgeService: EDGE_SERVICE,
       serviceLabel: COMPOSE_SERVICE_LABEL,
-      phase,
+      pollMs: this.#dependencyPollMs,
+      waitMs: DEPENDENCY_WAIT_MS,
+      ...(signal ? { signal } : {}),
       redact: (text) => this.redact(text),
+      onMask: (mask) => {
+        this.#gitMask = mask;
+      },
     });
+  }
+
+  /** override의 입력에서 마스크만 뺀 것. 마스크는 쓰는 쪽(Rust)이 얹는다 */
+  #overrideInput(): string {
+    return overrideInputJson(this.project, this.id, { edgeScript: this.#edgeScript, runtime: this.#runtime, hostPorts: this.#hostPorts });
   }
 
   // docker/docker compose를 한 번 돌려 stdout·stderr를 모은다. 실행·취소는 Rust(crates/bstudio-io)가 한다(2c-2, #1043).
@@ -1048,29 +1012,7 @@ class LocalDockerSandbox implements Sandbox {
    */
   async #regeneratePorts(): Promise<void> {
     this.#hostPorts = await preallocatePublicUrlPorts(this.project);
-    await this.#writeOverride();
-  }
-
-  /** compose 파일의 마운트를 다시 읽어 마스크가 달라졌으면 override를 새로 쓴다. 읽지 못하면 보호 없이 띄우지 않고 던진다 */
-  async #refreshGitMask(): Promise<void> {
-    const mask = await loadGitMask(this.project, {
-      dockerBin: this.#dockerBin,
-      env: this.#environment(),
-      projectName: this.id,
-      evaluationAssets: this.#evaluationAssets,
-      redact: (text) => this.redact(text),
-    });
-    if (JSON.stringify(mask) === JSON.stringify(this.#gitMask)) return;
-    this.#gitMask = mask;
-    await this.#writeOverride();
-  }
-
-  /** 다른 compose 호출이 반쯤 쓰인 파일을 읽지 않도록 임시 파일에 쓴 뒤 바꿔 넣는다 */
-  async #writeOverride(): Promise<void> {
-    const yaml = stringify(buildOverride(this.project, this.id, { edgeScript: this.#edgeScript, runtime: this.#runtime, hostPorts: this.#hostPorts, gitMask: this.#gitMask }));
-    const temporary = `${this.#overridePath}.${randomBytes(4).toString('hex')}.tmp`;
-    await writeFile(temporary, yaml);
-    await rename(temporary, this.#overridePath);
+    await writeComposeOverride(this.#overridePath, this.#overrideInput(), this.#gitMask);
   }
 
   /** compose가 override의 빈 시크릿 자리를 이 환경에서 채운다. studio 자신의 환경 변수는 넘기지 않는다(compose-env.ts) */

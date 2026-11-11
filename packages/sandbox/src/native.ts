@@ -166,6 +166,11 @@ interface NativeGuard {
   startVerifiedContainers(input: NativeStartInput, signal: AbortSignal | undefined | null): Promise<NativeStartResult>;
   selectEvaluationAssetVolumes(volumesJson: string, assetsJson: string, cwd: string): Promise<string>;
   findMissingMasks(projectRoot: string, mountsJson: string, volumeOptionsJson: string, plannedJson: string, tmpfs: string[], cwd: string): Promise<string[]>;
+  // 컨테이너 만들기 반복과 .git 마스크 계산·override 쓰기(ADR-195 4f A4c-1). 모두 던지지 않고 결과(`kind`)로 돌려준다
+  upWithGitMask(input: NativeUpInput, signal: AbortSignal | undefined | null): Promise<NativeUpResult>;
+  loadGitMask(compose: NativeComposeRef, assetsJson: string, cwd: string): Promise<NativeUpResult>;
+  computeGitMask(projectRoot: string, configJson: string, assetsJson: string, cwd: string): Promise<NativeUpResult>;
+  writeComposeOverride(path: string, inputJson: string, maskJson: string): Promise<NativeUpResult>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -822,6 +827,64 @@ export interface NativeStartResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+}
+
+export interface NativeComposeRef {
+  dockerBin: string;
+  envVars?: Record<string, string>;
+  projectRoot: string;
+  composePath: string;
+  projectName?: string;
+}
+
+export interface NativeUpInput {
+  compose: NativeComposeRef;
+  cwd: string;
+  overridePath: string;
+  /** `buildOverride`의 입력(`encodeNative`)에서 `gitMask`만 뺀 것 */
+  overrideInputJson: string;
+  /** 지금 override 파일에 쓰여 있는 마스크(서비스 → `MaskVolume[]`)의 JSON */
+  maskJson: string;
+  assetsJson: string;
+  args: string[];
+  sandboxNetwork: string;
+  egressNetwork: string;
+  edgeService: string;
+  studioCaller: string;
+  serviceLabel: string;
+  pollMs: number;
+  waitMs: number;
+}
+
+export type NativeUpKind =
+  | 'ok'
+  | 'done'
+  | 'aborted'
+  | 'config-failed'
+  | 'config-unparsed'
+  | 'mask-error'
+  | 'override-build'
+  | 'override-write'
+  | 'verify'
+  | 'missing'
+  | 'deps-failed'
+  | 'deps-unparsed'
+  | 'not-stable';
+
+/** `maskJson`은 마지막에 쓴(또는 계산한) 마스크다. 실패해도 채워진다(load·compute의 실패는 빈 문자열) */
+export interface NativeUpResult {
+  kind: NativeUpKind;
+  maskJson: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  message?: string | null;
+  detail?: string | null;
+  platform: boolean;
+  verifyKind?: NativeVerifyKind | null;
+  phase?: 'created' | 'started' | null;
+  removalFailed: boolean;
+  missing: string[];
 }
 
 export interface NativeGitEntry {

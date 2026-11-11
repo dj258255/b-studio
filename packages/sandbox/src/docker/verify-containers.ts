@@ -18,7 +18,7 @@ import type { MaskVolume } from './git-mask';
  */
 
 /** napi의 선택 필드는 `null`이 아니라 빠진 값(undefined)만 받는다 */
-function envVarsOf(env: NodeJS.ProcessEnv): { envVars?: Record<string, string> } {
+export function envVarsOf(env: NodeJS.ProcessEnv): { envVars?: Record<string, string> } {
   const defined = definedEnv(env);
   return defined === undefined ? {} : { envVars: defined };
 }
@@ -70,7 +70,8 @@ export async function verifyContainers(options: VerifyOptions): Promise<Verified
   throw verifyError(result, id, options.phase, redact);
 }
 
-function verifyError(result: NativeVerifyResult, id: string, phase: 'created' | 'started', redact: (text: string) => string): SandboxError {
+/** 확인 실패 결과를 옛 글 그대로의 `SandboxError`로 바꾼다(만들기 반복도 쓴다, ADR-195 4f A4c-1) */
+export function verifyError(result: Pick<NativeVerifyResult, 'kind' | 'stderr' | 'detail' | 'removalFailed'>, id: string, phase: 'created' | 'started', redact: (text: string) => string): SandboxError {
   const stderr = redact(result.stderr ?? '');
   const detail = result.detail ?? undefined;
   switch (result.kind) {

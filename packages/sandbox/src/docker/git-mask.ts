@@ -2,8 +2,8 @@ import type { LoadedProject } from '@b-studio/spec';
 import { SandboxError } from '../errors';
 import type { EvaluationAssetCopy } from './evaluation-assets';
 import type { BindMount } from './relay';
-import { native, type NativeGitEntry } from '../native';
-import { runCommand } from '../stream-exec';
+import { native, type NativeComposeRef, type NativeGitEntry, type NativeUpResult } from '../native';
+import { definedEnv } from '../stream-exec';
 
 /**
  * 서비스 컨테이너가 프로젝트 폴더의 `.git`을 쓰지 못하게 하는 마운트 계획(ADR-158).
@@ -89,23 +89,6 @@ function plainAssets(assets: readonly EvaluationAssetCopy[]) {
 }
 
 /**
- * 사용자 compose의 마운트 가운데 평가 자산 자리 안쪽(같은 자리 포함)에 있는 것이 있는지 본다.
- * Docker는 더 깊은 target의 마운트를 위에 얹으므로, 그런 마운트가 있으면 우리가 붙인 복사본 위에 다른 내용이 덮인다.
- * 게이트의 지문은 작업 복사본의 자산을 보므로 소리 없이 어긋난다(컬라임 실측: 복사본의 check.mjs 위에 다른 파일을 얹자
- * 컨테이너는 그 파일을 읽었다). 자산을 직접 마운트한 그 마운트 자신(같은 자리를 복사본으로 바꾸는 경우)만 빼고 **종류를 가리지 않고**
- * 거절한다 — `tmpfs`는 `docker inspect`의 `Mounts`에도, 호스트 마운트 목록에도 나오지 않지만 같은 자리에서 우리 마운트를 덮는다
- */
-function assertNoNestedAssetMounts(
-  composeMounts: readonly ComposeMount[],
-  mounts: readonly Pick<BindMount, 'service' | 'source' | 'target'>[],
-  projectRoot: string,
-  assets: readonly EvaluationAssetCopy[],
-): void {
-  const problem = native.nestedAssetMountError(JSON.stringify(composeMounts), JSON.stringify(plainMounts(mounts)), projectRoot, JSON.stringify(plainAssets(assets)), process.cwd());
-  if (problem != null) throw new SandboxError(problem);
-}
-
-/**
  * 프로젝트 폴더에서 위로 올라가며 `.git`이 든 폴더를 찾는다. 프로젝트 폴더의 상위를 마운트한 서비스가 있으면(모노레포 저장소 루트를
  * 마운트) 가장 위의 그 마운트 소스까지, 없으면 프로젝트 폴더 자신만 본다. 경로는 심볼릭 링크를 풀어 비교한다(macOS의 /tmp → /private/tmp)
  */
@@ -143,59 +126,40 @@ export function collectHostMounts(config: ComposeMountConfig): Array<Pick<BindMo
   return JSON.parse(asSandboxError(() => native.collectHostMounts(JSON.stringify(config), process.cwd()))) as Array<Pick<BindMount, 'service' | 'source' | 'target'>>;
 }
 
-/** compose 설정의 마운트 한 개. 평가 자산 자리를 덮는지 볼 때는 종류를 가리지 않는다 */
-interface ComposeMount {
-  service: string;
-  type: string;
-  target: string;
-  /** 호스트 경로인 원본(bind, 호스트에 묶인 이름 있는 볼륨). tmpfs와 보통 볼륨에는 없다 */
-  hostSource?: string;
-}
-
-/**
- * 서비스의 모든 종류 마운트(bind·volume·tmpfs·npipe 등)를 모은다. `tmpfs`는 `Mounts`에 나오지 않고 서비스 설정에만 있으므로
- * `volumes`와 따로 더한다(tmpfs는 volumes_from으로 물려받지 않는다). 무엇을 모을지는 Rust가 정하고, 호스트 원본의 링크 풀기만 여기서 한다
- */
-async function collectComposeMounts(config: ComposeMountConfig): Promise<ComposeMount[]> {
-  const specs = JSON.parse(asSandboxError(() => native.composeMountSpecs(JSON.stringify(config), process.cwd()))) as Array<{ service: string; type: string; target: string; host?: string }>;
-  const mounts: ComposeMount[] = [];
-  for (const { service, type, target, host } of specs) {
-    const hostSource = host === undefined ? undefined : await real(host);
-    mounts.push({ service, type, target, ...(hostSource === undefined ? {} : { hostSource }) });
-  }
-  return mounts;
-}
-
 /**
  * `docker compose config --format json` 결과에서 서비스별 마스크 마운트를 계산한다.
  * 마운트 소스는 심볼릭 링크를 풀어 `.git` 위치와 같은 꼴로 맞춘다.
- * `evaluationAssets`를 주면 git 마스크와 평가 자산 마스크를 한 맵으로 합친다. 같은 target이면 git 쪽 규칙이 이긴다(더 막는 쪽)
+ * `evaluationAssets`를 주면 git 마스크와 평가 자산 마스크를 한 맵으로 합친다. 같은 target이면 git 쪽 규칙이 이긴다(더 막는 쪽).
+ * 계산은 Rust(crates/bstudio-io/src/up_loop.rs)가 한다(ADR-195 4f A4c-1). 옛 TS는 `git-mask-legacy.ts`.
+ * 실험 경로인 컨테이너 방식 터미널(`agent-terminal.ts`)이 쓴다
  */
 export async function computeGitMask(
   projectRoot: string,
   config: ComposeMountConfig,
   { evaluationAssets = [] }: { evaluationAssets?: readonly EvaluationAssetCopy[] } = {},
 ): Promise<Record<string, MaskVolume[]>> {
-  const root = await real(projectRoot);
-  const mounts = await Promise.all(collectHostMounts(config).map(async (mount) => ({ ...mount, source: await real(mount.source) })));
-  const entries = await detectGitEntries(root, mounts.map((mount) => mount.source));
-  // b-studio가 만든 체크포인트 저장소(저장소 설정에 `[b-studio]` 절이 있다)인데 상태 폴더가 아직 없으면 미리 빈 폴더로 만들어 둔다.
-  // 마운트 지점이 있어야 하고(읽기 전용 `.git` 아래에서는 만들 수 없다), 없다고 건너뛰면 나중에 b-studio가 만든 폴더가 컨테이너에
-  // 그대로 보인다. 사용자 자신의 저장소(내 폴더 모드)에는 흔적을 남기지 않는다. 만들지 못하면 멈춘다.
-  // 빈 폴더 준비는 Rust가 한다: 없으면 만들고 있으면 그대로 두며(서비스 여럿이 함께 재시작돼 동시에 불려도 엇갈리지 않게, 마찰 187),
-  // 링크·파일이면 그 항목 하나만 지우고(링크를 따라가지 않는다), 내용이 들어 있으면 지우지 않고 멈춘다(재귀 삭제 없음)
-  const prepared = await native.prepareStateMasks(entries);
-  if (prepared.failure) {
-    throw new SandboxError(`${prepared.failure.state} 폴더를 가릴 빈 폴더를 준비하지 못했습니다`, prepared.failure.detail, { platform: true });
+  const result = await native.computeGitMask(projectRoot, JSON.stringify(config), JSON.stringify(plainAssets(evaluationAssets)), process.cwd());
+  return maskOrThrow(result, (text) => text);
+}
+
+/** Rust 결과를 마스크로 바꾸거나, 실패를 옛 글 그대로의 `SandboxError`로 바꾼다 */
+export function maskOrThrow(result: NativeUpResult, redact: (text: string) => string): Record<string, MaskVolume[]> {
+  if (result.kind === 'ok') return JSON.parse(result.maskJson) as Record<string, MaskVolume[]>;
+  throw loadProblemError(result, redact);
+}
+
+/** `compose config`를 읽거나 마스크를 계산하지 못한 결과를 `SandboxError`로 바꾼다. 모르는 결과도 실패다 */
+export function loadProblemError(result: NativeUpResult, redact: (text: string) => string): SandboxError {
+  switch (result.kind) {
+    case 'config-failed':
+      return new SandboxError('compose 설정을 읽지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다', redact(result.stderr.trim() ? result.stderr : 'docker 실행 실패'));
+    case 'config-unparsed':
+      return new SandboxError('compose 설정(config --format json)을 해석하지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다');
+    case 'mask-error':
+      return new SandboxError(result.message ?? '.git 보호를 정하지 못했습니다', result.detail ?? undefined, result.platform ? { platform: true } : {});
+    default:
+      return new SandboxError('서비스 컨테이너의 .git 보호를 정하지 못했습니다', String(result.kind), { platform: true });
   }
-  entries.splice(0, entries.length, ...prepared.entries);
-  const gitMask = planGitMask(mounts, entries);
-  // 목록은 선언에서만 정한다(작업 복사본의 지금 상태를 보지 않는다). 그래야 자산이 지워지거나 링크로 바뀌어도 기대가 줄지 않는다
-  if (evaluationAssets.length === 0) return gitMask;
-  // 사용자 compose가 평가 자산 자리 위에 더 깊은 마운트를 얹으면 우리 복사본 위에 그 내용이 덮인다. 만들지 않고 멈춘다.
-  // bind뿐 아니라 tmpfs·이름 있는 볼륨까지 본다(그것들은 collectHostMounts에 나오지 않는다)
-  assertNoNestedAssetMounts(await collectComposeMounts(config), mounts, root, evaluationAssets);
-  return mergeMasks(planEvaluationAssetMask(mounts, root, evaluationAssets), gitMask);
 }
 
 /**
@@ -206,11 +170,6 @@ export async function computeGitMask(
 export async function selectEvaluationAssetVolumes(volumes: readonly MaskVolume[], assets: readonly EvaluationAssetCopy[]): Promise<MaskVolume[]> {
   // 링크를 풀어 견주는 일은 Rust(crates/bstudio-io/src/container_verify.rs)가 한다(ADR-195 4f A4b)
   return JSON.parse(await native.selectEvaluationAssetVolumes(JSON.stringify(volumes), JSON.stringify(plainAssets(assets)), process.cwd())) as MaskVolume[];
-}
-
-/** 마스크 계획을 서비스·target으로 합친다. 뒤에 오는 계획이 같은 target에서 이긴다 */
-function mergeMasks(...plans: ReadonlyArray<Record<string, readonly MaskVolume[]>>): Record<string, MaskVolume[]> {
-  return JSON.parse(native.mergeMasks(JSON.stringify(plans))) as Record<string, MaskVolume[]>;
 }
 
 /** `docker inspect`의 Mounts 한 항목 */
@@ -255,10 +214,6 @@ export async function findMissingMasks(
   }
 }
 
-function real(target: string): Promise<string> {
-  return native.realPath(target, process.cwd());
-}
-
 /**
  * 사용자의 compose 파일이 정규화된 마운트(`docker compose config --format json`: 짧은 문법·상대 경로·변수 치환을 compose가 푼 결과)를
  * 읽어, 프로젝트 폴더를 마운트한 서비스마다 `.git`을 막는 마운트를 계산한다. 마운트를 읽지 못하면 막을 자리를 알 수 없으므로
@@ -277,19 +232,13 @@ export async function loadGitMask(
     redact = (text: string) => text,
   }: { dockerBin?: string; env?: NodeJS.ProcessEnv; projectName?: string; evaluationAssets?: readonly EvaluationAssetCopy[]; redact?: (text: string) => string } = {},
 ): Promise<Record<string, MaskVolume[]>> {
-  const args = ['compose', ...(projectName ? ['--project-name', projectName] : []), '--profile', '*', '--project-directory', project.root, '--file', project.composePath, 'config', '--format', 'json'];
-  // 실행은 Rust(run_command)가 한다. 던지지 않고 결과를 주므로 비0 종료·spawn 실패·출력 상한 초과를 여기서 같은 오류로 바꾼다
-  const result = await runCommand(dockerBin, args, { env });
-  if (result.exitCode !== 0) {
-    throw new SandboxError('compose 설정을 읽지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다', redact(result.stderr.trim() ? result.stderr : 'docker 실행 실패'));
-  }
-  const stdout = result.stdout;
-  let config: ComposeMountConfig;
-  try {
-    const parsed = JSON.parse(stdout) as Partial<ComposeMountConfig>;
-    config = { services: parsed.services ?? {}, ...(parsed.volumes ? { volumes: parsed.volumes } : {}) };
-  } catch {
-    throw new SandboxError('compose 설정(config --format json)을 해석하지 못해 서비스 컨테이너의 .git 보호를 정할 수 없습니다');
-  }
-  return computeGitMask(project.root, config, { evaluationAssets });
+  // 실행·해석·계산은 Rust(crates/bstudio-io/src/up_loop.rs)가 한다. 던지지 않고 결과를 주므로 여기서 같은 오류로 바꾼다(ADR-195 4f A4c-1)
+  const result = await native.loadGitMask(composeRef(project, { dockerBin, env, projectName }), JSON.stringify(plainAssets(evaluationAssets)), process.cwd());
+  return maskOrThrow(result, redact);
+}
+
+/** Rust가 `compose` 명령을 부를 대상. `up`을 부르는 쪽과 같은 파일·프로젝트 이름·프로젝트 폴더·환경이다 */
+export function composeRef(project: Pick<LoadedProject, 'root' | 'composePath'>, { dockerBin, env, projectName }: { dockerBin: string; env: NodeJS.ProcessEnv; projectName?: string | undefined }): NativeComposeRef {
+  const envVars = definedEnv(env);
+  return { dockerBin, ...(envVars === undefined ? {} : { envVars }), projectRoot: project.root, composePath: project.composePath, ...(projectName ? { projectName } : {}) };
 }
