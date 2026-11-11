@@ -1,6 +1,3 @@
-import { createHash } from 'node:crypto';
-import { lstat, readFile, readlink } from 'node:fs/promises';
-import path from 'node:path';
 import { native } from '@b-studio/sandbox';
 import { WorkspaceError, type Workspace } from './workspace';
 
@@ -87,26 +84,16 @@ export class ChangeTracker {
   }
 }
 
-/** 기본 지문: 파일마다 내용의 해시 */
-async function contentFingerprints(root: string, files: readonly string[]): Promise<Map<string, string>> {
-  const prints = new Map<string, string>();
-  for (const file of files) prints.set(file, await fingerprint(path.resolve(root, file)));
-  return prints;
-}
-
 /**
- * 파일의 지문. 내용의 해시를 쓴다 — 수정 시각과 크기는 컨테이너 안 명령으로 맞춰 놓을 수 있어서, 게이트가 통과시킨 뒤에
- * 내용만 바꾼 파일을 "그대로"라고 보게 된다. 링크는 따라가지 않고 링크라는 사실과 가리키는 곳을 지문으로 삼는다.
+ * 기본 지문: 파일마다 내용의 해시(Rust). 내용의 해시를 쓴다 — 수정 시각과 크기는 컨테이너 안 명령으로 맞춰 놓을 수 있어서, 게이트가 통과시킨 뒤에
+ * 내용만 바꾼 파일을 "그대로"라고 보게 된다. 링크는 따라가지 않고 링크라는 사실과 가리키는 곳을 지문으로 삼는다(`link:`). 읽지 못하면 `missing`.
+ * 경로의 조각마다 링크를 따라가지 않으므로, 링크 폴더를 거친 경로는 링크로 본다(링크는 sync가 받지 않는다)
  */
-async function fingerprint(absolute: string): Promise<string> {
-  try {
-    const info = await lstat(absolute);
-    if (info.isSymbolicLink()) return `link:${await readlink(absolute).catch(() => '')}`;
-    if (!info.isFile()) return `other:${info.mode}`;
-    return `file:${createHash('sha256').update(await readFile(absolute)).digest('hex')}`;
-  } catch {
-    return 'missing';
-  }
+async function contentFingerprints(root: string, files: readonly string[]): Promise<Map<string, string>> {
+  const list = await native.workspaceFingerprints(root, [...files]);
+  // 개수가 어긋나면 어느 파일의 지문인지 모른다. 맞추지 못한 파일은 `missing`으로 두지 않고 던진다(닫는 쪽)
+  if (list.length !== files.length) throw new Error('지문 개수가 파일 개수와 다릅니다');
+  return new Map(files.map((file, index) => [file, list[index] ?? 'missing']));
 }
 
 /** 게이트가 다룰 수 없는 경로가 바뀌었을 때 에이전트에게 돌려주는 글(Rust) */

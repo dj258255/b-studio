@@ -98,26 +98,9 @@ describe('Workspace', () => {
     expect(readProjectFileSync(root, '../\ud800')).toMatchObject({ kind: 'irregular', reason: expect.stringContaining('프로젝트 밖') });
   });
 
-  it('실제 저장 이름(3y): 운영체제가 안쪽 이름을 알려 주면 그 표기로 돌려주고, 루트 밖으로 어긋난 값이면 받은 경로를 그대로 쓴다', async () => {
-    const target = path.join(root, 'api/src/App.java');
-    const real = realpathSync.native.bind(realpathSync);
-    const mock = vi.spyOn(realpathSync, 'native');
-    // 안쪽 이름의 대소문자만 다르게 알려 준다(대소문자를 구분하지 않는 볼륨에서 실제 저장 이름이 다른 경우)
-    mock.mockImplementation(((p: string) => (p === target ? path.join(real(root), 'API/src/App.java') : real(p))) as typeof realpathSync.native);
-    await workspace.write('api/src/App.java', 'class App {}\n');
-    expect(workspace.changedFiles()).toEqual(['API/src/App.java']);
-
-    // 루트 밖을 가리키는 값이 오면(실제 이름을 얻지 못해 어긋난 값) 받은 경로를 쓴다
-    const other = new Workspace(root);
-    mock.mockImplementation(((p: string) => (p === target ? path.join(path.dirname(real(root)), 'elsewhere/App.java') : real(p))) as typeof realpathSync.native);
-    await other.write('api/src/App.java', 'class App { int c; }\n');
-    expect(other.changedFiles()).toEqual(['api/src/App.java']);
-    // `..`로 시작하는 안쪽 이름은 밖이 아니다
-    const dotted = new Workspace(root);
-    mock.mockImplementation(((p: string) => (p === target ? path.join(real(root), '..x/App.java') : real(p))) as typeof realpathSync.native);
-    await dotted.write('api/src/App.java', 'class App { int d; }\n');
-    expect(dotted.changedFiles()).toEqual(['..x/App.java']);
-  });
+  // 실제 저장 이름(3y)의 "운영체제가 알려 주는 이름" 처리(대소문자만 다른 안쪽 이름은 그 표기로, 루트 밖으로 어긋난 값은 거절, `..x` 같은 안쪽 이름은 안쪽,
+  // 풀지 못하면 받은 이름)는 Rust로 옮겨 가 crates/bstudio-io/src/workspace_io.rs의 `stored_segments` 시험이 본다.
+  // 여기서 Node의 realpathSync.native를 가로채던 시험은 그 호출이 없어져 더는 할 수 없다. 대소문자 변형 이름의 실제 동작은 workspace-io-behavior.test.ts가 본다
 
   it('beginRun에 기준 문서를 넘기면 디스크가 아니라 그것을 고정한다(없었으면 null)', async () => {
     await mkdir(path.join(root, 'docs'), { recursive: true });

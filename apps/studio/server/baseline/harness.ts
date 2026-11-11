@@ -377,6 +377,20 @@ export class Driver {
   }
 }
 
+/**
+ * 객체의 키를 이름순으로 다시 쌓는다(배열의 순서는 그대로). session.json의 키 순서는 값이 도착한 순서(사용량 타이머·토큰 이벤트)를 따라
+ * 실행마다 달라질 수 있어(#1175), 그 순서가 사진을 흔들지 않게 한다. JSON 객체의 키 순서에는 뜻이 없다
+ */
+export function sortedKeys(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortedKeys);
+  if (value === null || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.keys(value)
+      .sort()
+      .map((key) => [key, sortedKeys((value as Record<string, unknown>)[key])]),
+  );
+}
+
 /** 작업 복사본의 git 기록과 파일 상태를 읽는다. 내 폴더(local) 방식은 git 저장소가 세션 폴더(stateDir)에 있고 작업 트리는 프로젝트 폴더다 */
 export async function readDisk(session: { workDir: string; stateDir?: string }, files: string[] = []): Promise<DiskState> {
   const gitDir = path.join(session.stateDir ?? session.workDir, '.git');
@@ -384,7 +398,7 @@ export async function readDisk(session: { workDir: string; stateDir?: string }, 
   const log = (await run(['log', '--format=%H%x1f%B%x1e', '--reverse'])).split('\x1e').map((entry) => entry.trim()).filter(Boolean);
   const refs = (await run(['for-each-ref', '--format=%(refname) %(objectname)'])).split('\n').filter(Boolean);
   const status = (await run(['status', '--porcelain', '--untracked-files=all'])).split('\n').filter(Boolean);
-  const sessionJson = JSON.parse(await readFile(path.join(gitDir, 'b-studio', 'session.json'), 'utf8').catch(() => 'null')) as unknown;
+  const sessionJson = sortedKeys(JSON.parse(await readFile(path.join(gitDir, 'b-studio', 'session.json'), 'utf8').catch(() => 'null')) as unknown);
   const contents: Record<string, string | null> = {};
   for (const file of files) contents[file] = await readFile(path.join(session.workDir, file), 'utf8').catch(() => null);
   return {

@@ -1,5 +1,10 @@
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { createWorld, firstDirWith, startFrontTarget, startNodeTarget, type Target, type World } from './harness';
+import { createWorld, firstDirWith, readDisk, startFrontTarget, startNodeTarget, type Target, type World } from './harness';
 import { baselinePath, runScenario } from './run-scenario';
 import { scenarios, terminalScenarios } from './scenarios';
 
@@ -23,6 +28,28 @@ describe('시험 장치', () => {
       expect(world.env.B_STUDIO_SESSIONS_DIR?.startsWith(world.root)).toBe(true);
     } finally {
       await world.cleanup();
+    }
+  });
+
+  it('session.json의 키 순서가 달라도(값이 도착한 순서) 사진은 같다. 배열의 순서는 그대로 둔다 (#1175)', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'baseline-keys-'));
+    try {
+      // 시험 장치의 git과 같이 사용자의 git 설정(전역 훅·서명)을 읽지 않는다
+      const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+      await promisify(execFile)('git', ['init', '-q', dir], { env });
+      await promisify(execFile)('git', ['-C', dir, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', 'commit', '-q', '--allow-empty', '-m', 'init'], { env });
+      await mkdir(path.join(dir, '.git', 'b-studio'), { recursive: true });
+      const write = (json: string) => writeFile(path.join(dir, '.git', 'b-studio', 'session.json'), json);
+      // 사용량 타이머가 먼저 온 경우와 토큰 이벤트가 먼저 온 경우
+      await write('{"version":1,"snapshot":{"id":"s","usage":{"services":[{"service":"b"},{"service":"a"}]},"tokens":{"outputTokens":5,"inputTokens":20}}}');
+      const usageFirst = JSON.stringify((await readDisk({ workDir: dir })).sessionJson);
+      await write('{"snapshot":{"tokens":{"inputTokens":20,"outputTokens":5},"id":"s","usage":{"services":[{"service":"b"},{"service":"a"}]}},"version":1}');
+      const tokensFirst = JSON.stringify((await readDisk({ workDir: dir })).sessionJson);
+      expect(tokensFirst).toBe(usageFirst);
+      // 배열은 순서가 뜻이다(기록, 서비스 목록). 정렬하지 않는다
+      expect(usageFirst).toContain('[{"service":"b"},{"service":"a"}]');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 });
