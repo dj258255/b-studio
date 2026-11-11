@@ -196,11 +196,18 @@ export function missingVerificationStages(project: LoadedProject, passed: Readon
  * review 단계의 플랫폼 검토. 도구 게이트를 거치지 않은 하네스(로컬 CLI, Pi 등)가 바꾼 파일도
  * 체크포인트 직전에 같은 규칙으로 다시 본다.
  */
-export function reviewChanges(project: LoadedProject, changedFiles: readonly string[]): WorkflowCheck[] {
+export function reviewChanges(project: LoadedProject, changedFiles: readonly string[], restoredProtected: readonly string[] = []): WorkflowCheck[] {
   const workflow = project.spec.workflow;
+  // 쓰기 직전 고정값과 바이트까지 같다고 확인된 파일(Workspace.restoredProtectedFiles)은 보호 경로 확인에서만 뺀다. 이름이 아니라 위치로 넘긴다:
+  // 바뀐 파일 목록에 없는 이름은 빼 주지 않는다(이름이 목록과 정확히 같을 때만). 파일 수 상한·덮이지 않은 변경 경고는 이 파일도 센다
+  const restoredPositions = restoredProtected.flatMap((file) => {
+    const position = changedFiles.indexOf(file);
+    return position === -1 ? [] : [position];
+  });
   const input = {
     ...coverageInput(project, changedFiles),
     files: changedFiles,
+    restoredPositions,
     // 보호 경로는 거부 목록이라 원래 글자를 보낸다(파일은 napi·JSON 경계에서, 규칙도 같은 경계에서 U+FFFD 꼴이 된다)
     protectedPaths: protectedPathsFor(workflow),
     backslashSep: BACKSLASH_SEP,
