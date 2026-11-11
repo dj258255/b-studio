@@ -1,9 +1,7 @@
-import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { promisify } from 'node:util';
 import { native } from './native';
 import {
   AGENT_HOOK_EVENTS,
@@ -25,8 +23,8 @@ import {
   type TerminalSize,
 } from './docker/agent-terminal';
 import { SandboxError } from './errors';
+import { execChecked } from './exec-checked';
 
-const execFileAsync = promisify(execFile);
 
 /**
  * 이 컴퓨터에서 도는 세션 터미널(ADR-173). 세션의 작업 복사본에서 이 컴퓨터에 깔린 에이전트 CLI를 그대로 띄운다.
@@ -159,7 +157,8 @@ export async function findHostCli(env: Record<string, string | undefined> = proc
   let cliPath = configured && path.isAbsolute(configured) ? configured : undefined;
   if (!cliPath) {
     // 셸의 내장 명령으로 찾는다. 이름은 고정이라 명령 글에 끼워 넣는 값이 없다
-    const found = await execFileAsync('/bin/sh', ['-c', `command -v ${kind}`], { env: env as NodeJS.ProcessEnv }).then(
+    // 이름은 문자열에 잇지 않고 위치 인자($1)로 넘긴다
+    const found = await execChecked('/bin/sh', ['-c', 'command -v -- "$1"', 'sh', kind], { env: env as NodeJS.ProcessEnv }).then(
       ({ stdout }) => stdout.trim().split('\n')[0] ?? '',
       () => '',
     );
@@ -631,11 +630,11 @@ export async function removeHostGatewayConfig(sandboxId: string, root: string = 
 export async function probeHostGateway(dir: string, nodePath: string = process.execPath, kind: HostCliKind = 'claude'): Promise<boolean> {
   const script = kind === 'codex' ? path.join(path.dirname(dir), CODEX_HOOK_SCRIPT_NAME) : path.join(dir, HOOK_SCRIPT_NAME);
   const env = kind === 'codex' ? { ...process.env, [CODEX_GATEWAY_DIR_ENV]: dir } : process.env;
-  return new Promise<boolean>((resolve) => {
-    // 훅 스크립트는 ping에서도 표준 입력을 다 읽는다. 열어 두면 입력을 기다리다 끝나지 않으므로 닫아 준다
-    const child = execFile(nodePath, [script, 'ping'], { timeout: (HOST_PING_SECONDS + 10) * 1000, env }, (error) => resolve(!error));
-    child.stdin?.end();
-  });
+  // 훅 스크립트는 ping에서도 표준 입력을 다 읽는다. `runCommand`는 입력이 없어도 stdin을 바로 닫아 준다
+  return execChecked(nodePath, [script, 'ping'], { timeoutMs: (HOST_PING_SECONDS + 10) * 1000, env }).then(
+    () => true,
+    () => false,
+  );
 }
 
 /** 이 컴퓨터의 프로세스 하나. `ps`가 준 pid·부모 pid·인자 한 줄 */
@@ -647,7 +646,7 @@ export interface ProcessEntry {
 
 /** `ps -A -o pid=,ppid=,args=`로 이 컴퓨터의 프로세스 목록을 읽는다(macOS와 리눅스 둘 다 된다) */
 export async function listProcesses(): Promise<ProcessEntry[]> {
-  const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid=,args=']);
+  const { stdout } = await execChecked('ps', ['-A', '-o', 'pid=,ppid=,args=']);
   const entries: ProcessEntry[] = [];
   for (const line of stdout.split('\n')) {
     const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);

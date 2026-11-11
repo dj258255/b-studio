@@ -175,6 +175,22 @@ export async function guardBuiltinTool(workspace: Workspace, toolName: unknown, 
   return undefined;
 }
 
+/** 쓰기 도구(내장 Edit·Write)의 대상 경로 필드 */
+const WRITE_TOOLS: ReadonlySet<string> = new Set(['Edit', 'Write']);
+
+/**
+ * 쓰기 직전의 훅이 통과시킨 파일 쓰기 도구의 대상 보호 경로 파일을 고정한다(Workspace.pinBeforeWrite, 이슈 #992).
+ * guardBuiltinTool이 통과시킨 뒤에만 부른다. 고정하지 못해도 쓰기는 막지 않는다(그 파일은 바뀐 것으로 남는다)
+ */
+export async function pinBuiltinWrite(workspace: Workspace, toolName: unknown, toolInput: unknown): Promise<void> {
+  if (typeof toolName !== 'string' || !WRITE_TOOLS.has(toolName)) return;
+  const value = typeof toolInput === 'object' && toolInput !== null ? (toolInput as Record<string, unknown>).file_path : undefined;
+  if (typeof value !== 'string' || !isCanonicalAbsolute(value)) return;
+  const relative = relativeToRoot(value, workspace.root, await realpath(workspace.root).catch(() => workspace.root));
+  if (relative === undefined || relative === '') return;
+  await workspace.pinBeforeWrite(relative);
+}
+
 /** 다르게 풀릴 여지가 없는 절대 경로인가: 절대 경로이고, 정리해도 그대로이고, 끝에 구분자가 없다 */
 function isCanonicalAbsolute(file: string): boolean {
   if (file.includes('\0') || !path.isAbsolute(file)) return false;
@@ -285,6 +301,8 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
   const tracker = new ChangeTracker(workspace, pendingFiles, options.outsideChanges?.fingerprint ? { fingerprint: options.outsideChanges.fingerprint } : {});
   // 실행 전부터 작업 트리에 있던 변경도 검증 대상이다(ADR-131)
   await tracker.sync();
+  // 보호 경로 파일을 처음 쓰기 직전에 고정하기 전에 이 추적기로 도구 밖 변경을 먼저 옮긴다(Workspace.pinBeforeWrite, 이슈 #992)
+  workspace.useOutsideSync(() => tracker.sync());
 
   const gate = await VerificationGate.create({
     project,
@@ -374,7 +392,10 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     '/pre-tool': async (input) => {
       const denied = await guardBuiltinTool(workspace, input.tool_name, input.tool_input);
       // 통과면 아무 결정도 돌려주지 않는다. 허용할지는 CLI의 권한(작업 폴더 가두기)이 한 번 더 정한다
-      if (denied === undefined) return {};
+      if (denied === undefined) {
+        await pinBuiltinWrite(workspace, input.tool_name, input.tool_input);
+        return {};
+      }
       onEvent({ type: 'warning', message: `막은 도구 호출 — ${denied}` });
       return preToolDeny(`[b-studio] ${denied}`);
     },

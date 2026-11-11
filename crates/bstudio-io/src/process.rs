@@ -34,9 +34,24 @@ pub async fn run_command(
     args: &[String],
     input: Option<&str>,
     env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
     cancel: impl Future<Output = ()>,
 ) -> ExecOutput {
-    run_command_capped(bin, args, input, env, cancel, MAX_BUFFER).await
+    run_command_capped(bin, args, input, env, cwd, cancel, MAX_BUFFER).await
+}
+
+/// `run_command`와 같되 스트림마다 `limit` 바이트에 닿으면 그 자리에서 자식을 kill한다(256MB보다 크게는 받지 않는다).
+/// 상한을 다 읽은 뒤에 재지 않고 읽는 중에 멈춘다(2c-7 검토). 상한을 넘었는지는 호출자가 출력 길이로 판단한다
+pub async fn run_command_with_limit(
+    bin: &str,
+    args: &[String],
+    input: Option<&str>,
+    env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
+    cancel: impl Future<Output = ()>,
+    limit: usize,
+) -> ExecOutput {
+    run_command_capped(bin, args, input, env, cwd, cancel, limit.min(MAX_BUFFER)).await
 }
 
 /// 상한만 바꿔 부른다. 테스트가 256MB를 내지 않고 상한-넘김 kill 경로를 보기 위한 자리.
@@ -45,6 +60,7 @@ async fn run_command_capped(
     args: &[String],
     input: Option<&str>,
     env: Option<&[(String, String)]>,
+    cwd: Option<&str>,
     cancel: impl Future<Output = ()>,
     limit: usize,
 ) -> ExecOutput {
@@ -56,6 +72,9 @@ async fn run_command_capped(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     set_env(&mut command, env);
+    if let Some(cwd) = cwd {
+        command.current_dir(cwd);
+    }
 
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -227,6 +246,7 @@ mod tests {
             &args(&["-c", "printf out; printf err 1>&2; exit 0"]),
             None,
             None,
+            None,
             never(),
         )
         .await;
@@ -242,6 +262,7 @@ mod tests {
             &args(&["-c", "printf oops 1>&2; exit 7"]),
             None,
             None,
+            None,
             never(),
         )
         .await;
@@ -252,7 +273,7 @@ mod tests {
 
     #[tokio::test]
     async fn feeds_stdin() {
-        let result = run_command("tr", &args(&["a-z", "A-Z"]), Some("abcABC\n"), None, never()).await;
+        let result = run_command("tr", &args(&["a-z", "A-Z"]), Some("abcABC\n"), None, None, never()).await;
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "ABCABC\n");
     }
@@ -260,7 +281,7 @@ mod tests {
     #[tokio::test]
     async fn closes_stdin_when_no_input() {
         // cat은 stdin EOF를 보면 끝난다. input이 없어도 stdin을 닫아야 멈추지 않는다.
-        let result = run_command("cat", &args(&[]), None, None, never()).await;
+        let result = run_command("cat", &args(&[]), None, None, None, never()).await;
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "");
     }
@@ -277,6 +298,7 @@ mod tests {
             ]),
             None,
             Some(&env),
+            None,
             never(),
         )
         .await;
@@ -288,6 +310,7 @@ mod tests {
         let result = run_command(
             "definitely-not-a-real-binary-xyz",
             &args(&[]),
+            None,
             None,
             None,
             never(),
@@ -309,6 +332,7 @@ mod tests {
             &args(&["-c", "printf early; sleep 30"]),
             None,
             None,
+            None,
             cancel,
         )
         .await;
@@ -321,17 +345,30 @@ mod tests {
         let cancel = async {
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         };
-        let result = run_command("sh", &args(&["-c", "sleep 30"]), None, None, cancel).await;
+        let result = run_command("sh", &args(&["-c", "sleep 30"]), None, None, None, cancel).await;
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.stdout, "");
         assert_eq!(result.stderr, "The operation was aborted");
     }
 
     #[tokio::test]
+    async fn runs_in_given_cwd() {
+        let dir = std::env::temp_dir().join("bstudio-process-cwd-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let real = std::fs::canonicalize(&dir).unwrap();
+        let result = run_command("pwd", &args(&["-P"]), None, None, dir.to_str(), never()).await;
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.stdout.trim(), real.to_str().unwrap());
+        let missing = run_command("pwd", &args(&[]), None, None, Some("/definitely/not/here"), never()).await;
+        assert_eq!(missing.exit_code, 1);
+        assert!(missing.stderr.contains("ENOENT"));
+    }
+
+    #[tokio::test]
     async fn under_limit_is_fully_captured() {
         // 상한(여기선 1KiB) 아래의 출력은 온전히 담기고 정상 종료한다
         let result =
-            run_command_capped("sh", &args(&["-c", "printf abcdef"]), None, None, never(), 1024)
+            run_command_capped("sh", &args(&["-c", "printf abcdef"]), None, None, None, never(), 1024)
                 .await;
         assert_eq!(result.exit_code, 0);
         assert_eq!(result.stdout, "abcdef");
@@ -344,6 +381,7 @@ mod tests {
         let result = run_command_capped(
             "sh",
             &args(&["-c", "while true; do printf xxxxxxxxxxxxxxxx; done"]),
+            None,
             None,
             None,
             never(),

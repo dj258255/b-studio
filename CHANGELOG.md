@@ -47,6 +47,7 @@
 - 게이트의 자동 화면 확인이 쓰는 import 그래프(소스 읽기·별칭 해석·역추적)의 판정을 Rust로 옮겼습니다(ADR-191 3단계 3b, #1062). 파일을 읽는 순서와 상한은 그대로이고, 같은 거리의 page를 여는 순서만 `localeCompare`에서 UTF-16 코드 단위 순서로 바뀝니다.
 - 요구사항을 GitHub 이슈로 발행하는 문안·판정(관리 영역 본문, 해시, 추적 이슈 표, 발행 계획, 상태 댓글, 이슈 폼 읽기)을 Rust로 옮겼습니다(ADR-191 3단계 3c, #1063). 글자와 판정은 같고, 옛 TS와 같은 무작위 입력 각 9만 번이 모두 같았습니다. `ALLOWED_REQUIREMENT_ENDPOINTS` 정규식 목록은 내보내지 않고 `assertAllowedRequirementEndpoint`만 남겼습니다.
 - 테스트 발견(`packages/agent/src/test-discovery.ts`: JUnit·Vitest/Jest/Playwright·pytest의 스위트·테스트 읽기, 요구사항 id 찾기, 평탄화)을 Rust로 옮겼습니다(ADR-191 3단계 3a, #1061). TS에는 같은 이름·시그니처의 껍데기만 남았고, 쓰이는 곳이 없던 정규식 상수 `JUNIT_FILE_PATTERN`·`JS_TEST_FILE_PATTERN`·`PYTEST_FILE_PATTERN` export는 지웠습니다. 짝 없는 서로게이트는 U+FFFD로 바뀌고, 스위트가 약 60단계를 넘게 중첩된 결과는 평탄화하지 않고 던집니다.
+- sandbox에 남은 Node `execFile`·`spawn` 호출(agent-terminal·compose-deps·compose-provider·prune·readonly-exec·host-terminal)을 Rust `runCommand`로 옮기고 작업 폴더 인자를 더했습니다(ADR-193 2c-7, #1143). 던지던 자리는 그대로 던지고 삼키던 자리는 삼키며, 지우기 전 목록 조회가 실패하면 빈 목록으로 읽지 않고 던지는 것도 같습니다. 쓰지 않던 `spawnReadonlyDocker`는 지웠습니다.
 - 평가 자산 복사본 자리 준비와 샌드박스 복사본 폴더 지우기를 Rust로 옮겼습니다(ADR-191·193 2단계 2c-1b, #1059). 링크는 링크만 지우고 따라가지 않으며, 파일 자리에 내용이 든 폴더가 있으면 재귀로 지우지 않고 멈춥니다(전에는 통째로 지웠습니다).
 - 서비스 컨테이너의 `.git` 보호를 준비하는 파일 작업(링크 풀기, `.git` 찾기, 상태 폴더를 가리는 빈 폴더 준비)을 Rust로 옮겼습니다(ADR-191·193 2단계 2c-6, #1057). 동작은 같고, 빈 폴더 준비는 여전히 링크 너머를 지우지 않으며 재귀 삭제가 없습니다.
 - 이 컴퓨터 방식 세션 터미널(기본값)의 가상 터미널을 Rust로 옮겼습니다(ADR-191·193 2단계 2c-4a, #1049). node-pty(네이티브 모듈)를 portable-pty로 바꿔 packages/sandbox에서 그 의존성을 지웠습니다. 입력 쓰기·크기 변경·종료는 그대로이고, 출력은 raw bytes로 역류합니다(터미널이 멀티바이트 글자를 재조립). PTY는 blocking I/O라 스레드로 격리했습니다. 화면·동작은 같습니다.
@@ -69,6 +70,7 @@
 
 ### 수정
 
+- 보호 경로(`workflow.protectedPaths`)를 고쳤다가 이 실행에서 처음 쓰기 직전의 내용으로 바이트까지 똑같이 되돌리면 review의 protected-paths를 통과합니다(#992, ADR-196). 전에는 한 번 쓰면 되돌려도 그 실행 내내 실패해 세 번째 실패 뒤 정상 변경까지 되돌려졌습니다. 실행 전에 사람이 고쳐 둔 보호 경로, git이 추적하지 않는 파일, 쓰기 직전 관문을 거치지 않고(셸) 바뀐 파일, 링크, 읽지 못한 파일은 계속 실패합니다. 실패한 실행을 되돌릴 때 문서 체크포인트로 남긴 파일을 "바뀐 파일은 없었습니다"로 적지 않고 따로 알립니다.
 - 세션 작업 폴더 안에 최상위 체크포인트 저장소가 아닌 다른 git 저장소가 있으면 체크포인트를 거부합니다(#1031). 호스트 git이 작업 폴더를 다룰 때 중첩 저장소의 설정이 호스트 동작에 끼어들 수 있어, 초기화·커밋·상태 읽기 전에 막습니다. `.git`은 대소문자를 구분하지 않고 보며, 무시 여부는 걷는 중에 `git check-ignore`로 판단해(화면·커밋과 같은 규칙) 무시되는 폴더에는 들어가지 않습니다. 심볼릭 링크는 따라가지 않습니다.
 - compose override와 edge 설정이 Rust로 값을 보낼 때 경계 규칙(`encodeNative`)을 거칩니다(#1029). 전에는 평범한 `JSON.stringify`로 보내 `Infinity` 같은 값이 `null`로 바뀌었고, 데이터에 NUL로 시작하는 키 하나짜리 객체가 있으면 Rust가 수로 읽었습니다. `encodeNative`는 이제 NUL로 시작하는 키를 만나면 던집니다.
 - 사내 API 인증 시크릿 이름(`policy.auth.secret`)이 edge 프록시가 쓰는 환경 변수 이름(`EDGE_`·`NODE_`·`LD_`·`DYLD_`로 시작하는 이름, `PATH`·`HOME`·`HTTPS_PROXY` 등)과 겹치면 `studio.yaml`을 거절합니다(#1018). 전에는 받아서 edge의 그 설정이 시크릿 값으로 바뀌었습니다. compose override도 edge가 이미 쓰는 이름과 겹치면 만들지 않습니다.

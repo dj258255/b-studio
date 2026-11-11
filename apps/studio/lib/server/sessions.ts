@@ -281,6 +281,7 @@ import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCl
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
+import { revertedText } from './revert-outcome';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
@@ -2420,20 +2421,26 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     // 취소해 되돌리는 동안 다시 누른 취소는 받아들인다. 오류로 되돌리는 중에는 취소를 받지 않는다
     if (!cancelled) session.run = undefined;
     let reverted: string[] | undefined;
+    let keptDocs: string[] = [];
     let revertError: unknown;
     // 샌드박스가 켜져 있을 때만 되돌린다. 지연 기동 세션이 켜지기 전에 실패하면 되돌릴 샌드박스가 없다
     if (!session.stop.signal.aborted && !ask && session.snapshot.status === 'ready') {
       // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
       const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
-      reverted = await revertRun(session, run.id, { cancelled, alsoRestart: unsettled }).catch((cause: unknown) => {
-        revertError = cause;
-        console.error('[b-studio] 되돌리기 실패', cause);
-        return undefined;
-      });
+      reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled })
+        .then((result) => {
+          keptDocs = result.keptDocs;
+          return result.files;
+        })
+        .catch((cause: unknown) => {
+          revertError = cause;
+          console.error('[b-studio] 되돌리기 실패', cause);
+          return undefined;
+        });
     }
     if (!cancelled) finished = { status: 'error', summary: describe(error) };
     else {
-      const summary = ask ? stoppedQuestionSummary(run, session.snapshot.tokenLimit) : stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError);
+      const summary = ask ? stoppedQuestionSummary(run, session.snapshot.tokenLimit) : stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError, keptDocs);
       finished = { status: 'cancelled', summary };
     }
   } finally {
@@ -2512,14 +2519,14 @@ function limitReason(run: ActiveRun, limit: number | undefined): string {
 }
 
 /** 멈춘 이유와 되돌린 결과. revertError가 있으면 되돌리지 못했다 */
-function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: string[] | undefined, revertError: unknown): string {
+function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: string[] | undefined, revertError: unknown, keptDocs: readonly string[] = []): string {
   if (run.stopReason === 'budget') {
     const reason = `${limitReason(run, limit)} 요청을 멈췄습니다`;
     if (!reverted) return `${reason}. 변경을 되돌리지 못했습니다: ${describe(revertError)}`;
-    return reverted.length > 0 ? `${reason}. 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : `${reason}. 바뀐 파일은 없었습니다`;
+    return `${reason}. ${revertedText(reverted, keptDocs)}`;
   }
   if (!reverted) return `요청을 취소했지만 변경을 되돌리지 못했습니다: ${describe(revertError)}`;
-  return reverted.length > 0 ? `요청을 취소하고 바뀐 파일 ${reverted.length}개를 되돌렸습니다` : '요청을 취소했습니다. 바뀐 파일은 없었습니다';
+  return reverted.length > 0 ? `요청을 취소하고 ${revertedText(reverted, keptDocs)}` : `요청을 취소했습니다. ${revertedText(reverted, keptDocs)}`;
 }
 
 /** 질문은 되돌릴 변경이 없으므로 멈춘 이유만 알린다 */
@@ -3156,11 +3163,16 @@ async function describeSpecRecoveryHint(checkpoints: CheckpointStore, projectRoo
  * Flyway "적용된 마이그레이션 파일이 없다" 오류로 실패한 사고가 있었다(세션 5b640fd3, 체크포인트 57cced6).
  * 그래서 DB 복원 기준점은 discardWorkingCopy를 부르기 **전**의 checkpoints[0](실제로 덤프가 있는 체크포인트)으로 고정한다.
  */
-async function revertRun(
+async function revertRun(session: Session, runId: string, options: { cancelled?: boolean; alsoRestart?: string[] } = {}): Promise<string[]> {
+  return (await revertRunDetailed(session, runId, options)).files;
+}
+
+/** revertRun과 같지만, 되돌리지 않고 문서 체크포인트로 남긴 파일(keptDocs)도 돌려준다. 결과 글이 그 파일을 "바뀐 파일 없음"으로 적지 않게 한다(이슈 #992) */
+async function revertRunDetailed(
   session: Session,
   runId: string,
   { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
-): Promise<string[]> {
+): Promise<{ files: string[]; keptDocs: string[] }> {
   const dbRestorePoint = session.snapshot.checkpoints[0]!.sha;
   // 이 컴퓨터 방식에서 HEAD가 기억과 다르면(실행 도중 끼워 넣은 커밋 등) 그 위에서 되돌리지 않는다. 기억한 체크포인트와 다른
   // 부분을 모두 보관본으로 남기고 그 체크포인트로 되돌린다(이슈 #706). 되돌리지 못하면 던진다(되돌리지 못했다고 알린다)
@@ -3187,7 +3199,8 @@ async function revertRun(
   // 같은 "덤프 없음" 문제를 반복하지 않게 한다(연속 실패 시나리오)
   if (docsCheckpoint) await saveDatabases(session, docsCheckpoint.sha);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
-  if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return files;
+  const keptDocs = docsCheckpoint?.files ?? [];
+  if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return { files, keptDocs };
   // 되돌린 파일에 studio.yaml(생성 파일 포함, 도그푸딩 마찰 127)이 있으면 재시작 전에 project를 다시 읽는다
   if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
 
@@ -3209,7 +3222,7 @@ async function revertRun(
     sync: report.sync,
     backup,
   });
-  return files;
+  return { files, keptDocs };
 }
 
 /**
@@ -7768,18 +7781,24 @@ async function abandonTerminalRun(
     // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
     const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
     let revertError: unknown;
-    const reverted = await revertRun(session, run.id, { cancelled, alsoRestart: unsettled }).catch((cause: unknown) => {
-      revertError = cause;
-      console.error('[b-studio] 되돌리기 실패', cause);
-      return undefined;
-    });
+    let keptDocs: string[] = [];
+    const reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled })
+      .then((result) => {
+        keptDocs = result.keptDocs;
+        return result.files;
+      })
+      .catch((cause: unknown) => {
+        revertError = cause;
+        console.error('[b-studio] 되돌리기 실패', cause);
+        return undefined;
+      });
     if (reverted && reverted.length > 0) {
       (session.terminalNotes ??= []).push(
         `[b-studio] 앞 요청("${clipText(state.request, 200)}")의 변경은 검증을 통과하지 못했거나 닫혀서 마지막 체크포인트로 되돌렸습니다. 되돌린 파일 ${reverted.length}개: ${reverted.slice(0, 20).join(', ')}${reverted.length > 20 ? ' 외' : ''}. 이 파일을 다루기 전에 다시 읽으세요. 보관본은 b-studio 화면에서 되살릴 수 있습니다.`,
       );
     }
-    const outcome = !reverted ? `변경을 되돌리지 못했습니다: ${describe(revertError)}` : reverted.length > 0 ? `바뀐 파일 ${reverted.length}개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다)` : '바뀐 파일은 없었습니다';
-    summary = cancelled && !reason ? stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError) : `${summary}\n\n${outcome}.`.trim();
+    const outcome = !reverted ? `변경을 되돌리지 못했습니다: ${describe(revertError)}` : revertedText(reverted, keptDocs, { restorable: true });
+    summary = cancelled && !reason ? stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError, keptDocs) : `${summary}\n\n${outcome}.`.trim();
   }
   announceTerminalRun(session, run, { status, summary, ...(platformFailure ? { platformFailure } : {}) });
   return summary;
@@ -7869,6 +7888,8 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
     //  - 지문은 git이 스테이징할 때의 것을 쓴다. 통과한 뒤 커밋되는 내용이 검증한 내용과 같은지 그대로 견준다
     const tracker = new ChangeTracker(workspace, () => changesOutsideTools(session), { tolerateExisting: false, fingerprint: (files) => session.checkpoints.stagedFingerprints(files) });
     await tracker.sync();
+    // 보호 경로 파일을 처음 쓰기 직전에 고정하기 전에 이 추적기로 셸 등 도구 밖 변경을 먼저 옮긴다(Workspace.pinBeforeWrite, 이슈 #992)
+    workspace.useOutsideSync(() => tracker.sync());
     const serviceStatus = (event: ServiceStatusEvent): void => onServiceStatus(session, event);
     // 카드 맥락의 완료 검사는 세션 프로젝트에만 덧입혀져 있다. 게이트가 studio.yaml을 다시 읽을 때 디스크의 workflow를
     // 그대로 견주면 완료 검사가 "삭제"로 잡혀 약해진 선언으로 실패한다. 그래서 견주는 시작 값은 덧입히기 전 파일의 workflow를
@@ -8023,7 +8044,13 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
   try {
-    await untilAborted(signal, terminalVerification(session, run));
+    const verification = await untilAborted(signal, terminalVerification(session, run));
+    // 이 도구가 바꿀 파일 중 보호 경로의 내용을 이 실행에서 처음 쓰기 직전에 고정한다(이슈 #992). 경로가 없는 도구(Bash 등)로 바뀐 파일은 고정값이 없어
+    // 지금처럼 바뀐 것으로 남는다. 고정하지 못해도 도구를 막지 않는다(pinBeforeWrite는 던지지 않는다)
+    for (const path0 of terminalToolFilePaths(tool, input.tool_input)) {
+      const relative = terminalRelativePath(path0, session);
+      if (relative !== undefined && relative !== '') await verification.workspace.pinBeforeWrite(relative);
+    }
     return {};
   } catch (error) {
     if (signal.aborted) return { deny: '[b-studio] 요청을 닫아 도구를 쓰지 않았습니다.' };
