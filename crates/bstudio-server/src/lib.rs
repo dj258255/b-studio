@@ -2,4 +2,5 @@
 pub mod auth;
 pub mod cli;
 pub mod proxy;
+pub mod routes;
 pub mod runtime;

@@ -10045,6 +10045,27 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **변이**: `auth.rs`·`proxy.rs`의 핵심 줄 95개(각 거절 조건, 비교와 경계, trim, 헤더 합치기, 넘기는 조건, 응답 모양)를 하나씩 망가뜨려 cargo 시험(`--lib`, `auth_vectors`, `auth_front`)으로 잡혔는지 봤다. 89개 잡힘, 6개 생존은 모두 동등 변이다(비밀이 32자 이상이라 빈 값 비교가 어차피 거짓, 무한대는 720 초과로 이미 거절, 해시 대문자 허용은 이름 목록에 영향 없음, 이름 글자에 `:`는 첫 콜론에서 잘려 들어올 수 없음, 콜론 0번은 이름 검사에서 같은 오류, 숫자 아닌 값 허용은 `as_f64`가 None). 처음 생존했던 Host 없음·상대 경로 상태 폴더·JSON 이스케이프·헤더 이름 목록은 시험을 더해 잡았다.
 - **남은 것·재지 않은 것**: 실제 세션(studio desk로 세션 하나 띄워 게이트까지)은 도커가 꺼져 있어 돌리지 않았다(사람이 따로 한다). `docs/status.md`는 고치지 않았다. 설정 오류 500은 Node가 `/api/health`에서도 500을 주어 앞단이 뜨지 않으므로 HTTP 차등으로 볼 수 없고 벡터와 `auth_front.rs`로만 본다. Ada(Node)와 `url` 크레이트의 호스트 해석 차이는 벡터 안에서는 찾지 못했지만(IDN·IPv4 꼴·IPv6 포함) 모든 입력을 확인한 것은 아니다. 커밋 보안 검토 결과를 본 뒤 머지한다.
 
+### 덧붙임: 4d 결과 — 상태 없는 경로는 계정 목록 하나만 옮긴다 (2026-11-11, [#1154](https://github.com/dj258255/b-studio/issues/1154))
+- **조사 표**(후보 경로가 읽는 상태. 옮기는 조건: Node 메모리 상태에 기대지 않고, 같은 입력(요청·환경·디스크)에서 Rust가 같은 응답을 만든다):
+
+| 경로 | 읽는 상태 | 옮김 | 이유 |
+|---|---|---|---|
+| `GET /api/ai-accounts` | 환경 변수(`HOME`·`XDG_CONFIG_HOME`·`B_STUDIO_MODE`·`B_STUDIO_BACKENDS`·인증 설정), `accounts.json`(임시 파일 + rename으로 쓴다: 반쯤 쓴 파일을 읽지 않는다) | 옮김 | 메모리 캐시 없음, 외부 명령·네트워크 없음 |
+| `POST /api/ai-accounts`, `/api/ai-accounts/[id]` | 같은 파일에 쓴다. Node 메모리의 쓰기 대기열(`exclusive`)로 겹친 쓰기를 한 줄로 세운다 | 안 옮김 | 쓰는 쪽이 둘이 되면 대기열이 서로를 모른다. 상태의 주인과 함께 옮긴다 |
+| `GET /api/routing/stats` | `listSessions()`·`sessionHistory()`: Node 메모리의 세션 맵 | 안 옮김 | 세션 상태(4e·4f) |
+| `POST /api/routing/preview` | 위의 결과표(`records`) + 본문 JSON | 안 옮김 | 같은 이유(메모리의 세션 기록). 본문 한도·JSON 오류 응답도 함께 옮겨야 한다 |
+| `GET /api/usage/spend` | `spendStore()`: 처음 읽은 뒤 메모리에 쌓고 2초 뒤 한 번에 쓴다 | 안 옮김 | 아직 쓰지 않은 사용량이 Node 메모리에만 있어 디스크를 읽으면 응답이 다르다 |
+| `GET /api/usage/limits` | CLI 로그인 정보 읽기, 외부 호출, 계정별 최소 간격 캐시(메모리) | 안 옮김 | 외부 명령·네트워크, 메모리 캐시 |
+| `GET /api/folders` | 디스크(`readdir`·`realpath`·`stat`), 프로젝트 등록 파일(원자적 쓰기) | 안 옮김 | `localeCompare(…, 'ko')`는 ICU 정렬이라 Rust 바이트·유니코드 비교와 다르고, 같은 정렬을 보장할 수 없다. 심볼릭 링크·권한 오류 글도 Node의 fs 오류 글이다 |
+
+- **옮긴 것**: `GET /api/ai-accounts`(`crates/bstudio-server/src/routes/{mod,ai_accounts}.rs`). 응답은 `{"accounts":[…]}`, 항목 키 순서는 id, name, backend, configDir, sprite, builtin(JS `JSON.stringify`와 같은 이스케이프), content-type은 `application/json`(charset 없음).
+- **인증**(`proxy.rs`의 `AuthGate::judge`): `auth::decide`가 `Allow`일 때만 `routes::try_direct`를 부른다. `Reject`는 4c의 거절 응답, `Pass`·`Defer`는 직접 답하지 않고 Node로 넘긴다. 판단을 끈 게이트(`disabled`)는 직접 답하지 않는다. 인증을 켠 모드(token·proxy)에서 확인된 사용자의 요청은 Node와 같게 403(`계정은 개인 PC 모드(로컬 CLI)에서만 씁니다`)을 직접 준다. 사용자 헤더(`x-b-studio-user`)는 이 경로가 값을 쓰지 않으므로 넣지 않는다(Node의 `requireUser`는 있는지만 본다. `Allow`면 Node도 같은 값을 넣는다).
+- **넘기는 조건**: 메서드가 GET이 아니다(HEAD·OPTIONS·405는 Node의 규칙), 본문 신호(Transfer-Encoding, 0이 아닌 Content-Length), 원문 경로가 정확히 `/api/ai-accounts`가 아니다(끝 슬래시·`%61`·`.`·겹친 슬래시·역슬래시·대소문자는 Node가 정규화해 맞추므로 넘긴다. 쿼리는 이 경로가 읽지 않는다), 환경이 읽을 수 없다(`HOME`이 없거나 공백뿐, `HOME`·`XDG_CONFIG_HOME`이 상대 경로: Node는 작업 폴더가 다르다, 인증 설정 오류), `B_STUDIO_MODE`·`B_STUDIO_BACKENDS`가 틀려 Node가 500을 주는 값, 계정 파일을 읽지 못하거나(ENOENT가 아닌 오류, 폴더, UTF-8 아님) 꼴이 틀림(Node가 500, 오류 글에 JS의 JSON 오류 문구가 든다), 파일의 그림 경로에 ASCII가 아닌 글자(UTF-16 단위 길이와 대소문자 접기를 같다고 확신하지 않는다), 짝 없는 서로게이트 이스케이프(`serde_json`이 받지 않는다).
+- **차등 수치**: ① 벡터 6000개(`tests/vectors/accounts-vectors.json`, 생성기 `gen-accounts-vectors.ts`, 씨앗 고정): 옛 TS(`listAiAccounts`)가 만든 응답과 `render`를 견줘 같음 2833, 허용한 넘김 15(비 ASCII 그림 경로·짝 없는 서로게이트), Node 오류를 넘김 3152, **다른 본문 0, Node가 오류인데 Rust가 성공 0, 까닭 없는 넘김 0**. ② HTTP: 진짜 Node 서버를 직접 띄운 것과 앞단 너머로 띄운 것에 같은 날것의 요청 62건(`front-routes.test.ts`: 인증 없음·token·proxy·데모 모드, 파일 없음·정상·꼴이 틀린 파일 열 가지·그림 경로 경계 19개, 경로 꼴·메서드·Host 중복·판단 불가 입력)을 보내 상태·본문·머리(연결 틀 머리 제외)를 견줘 다른 것 0. ③ `tests/routes_front.rs`: 직접 답한 요청이 가짜 upstream에 닿지 않고, 조건이 어긋난 요청 14개와 판단을 끈 게이트·Defer·틀린 설정은 요청이 그대로 닿는다.
+- **의도한 차이**: 없다(오류는 모두 Node가 낸다). Rust가 더 엄격한 곳(비 ASCII 그림 경로, UTF-8이 아닌 파일)은 넘기므로 응답은 같다.
+- **변이**: 새 코드의 핵심 줄 49개(인증 모드별 응답, 허용 백엔드 계산, 파일 경로, 항목 검증 각 줄과 그림 경로의 경계, 목록 순서와 키 순서, 넘기는 조건, 라우터 연결)를 하나씩 망가뜨려 cargo 시험으로 잡혔는지 봤다. 처음 4개가 생존했고(홈의 `.config` 경로, Transfer-Encoding 넘김은 시험을 더해 잡았다) 남은 2개는 동등 변이다: `Allow | Pass`(이 경로는 공개 경로가 아니라 `Pass`가 나오지 않는다), 엄격한 UTF-8 읽기를 손실 변환으로 바꾸기(Node도 같은 변환을 하므로 응답이 같다. 엄격한 쪽이 더 넘길 뿐이다). 컴파일되지 않은 2개는 같은 뜻의 컴파일되는 꼴로 다시 해 잡혔다.
+- **남은 것·재지 않은 것**: 응답 시간은 재지 않았다. 계정 파일을 읽는 Rust와 Node의 `readFile`이 같은 파일을 읽는지는 임시 폴더로만 봤다(심볼릭 링크 홈은 보지 않았다: 둘 다 링크를 따라간다고 읽었을 뿐이다). Node와 Rust가 환경 변수를 읽는 시점이 다르다(앞단은 시작할 때 한 번, Node는 요청마다)지만 Node 코드는 이 값들을 실행 중에 바꾸지 않는다(검색으로 확인, 시험용 E2E 도구 제외). 실제 세션은 돌리지 않았고 `docs/status.md`는 고치지 않았다. 나머지 후보 여섯은 위 이유로 4e·4f(상태의 주인과 함께)나 4g로 미룬다. 막는 경로가 아니라 읽기 경로지만 인증이 `Allow`인 요청만 직접 답하므로 커밋 보안 검토 결과를 본 뒤 머지한다.
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

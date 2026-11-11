@@ -30,7 +30,7 @@ pub const LOCAL_USER: &str = "local";
 const REVOCATIONS_FILE: &str = "revocations.json";
 
 /// 인증 판단이 읽는 환경 변수. 앞단이 시작할 때 한 번 읽는다(Node 자식은 같은 환경을 물려받는다)
-const ENV_KEYS: [&str; 10] = [
+const ENV_KEYS: [&str; 13] = [
     "B_STUDIO_AUTH",
     "B_STUDIO_AUTH_USER_HEADER",
     "B_STUDIO_AUTH_ADMINS",
@@ -41,6 +41,10 @@ const ENV_KEYS: [&str; 10] = [
     "B_STUDIO_ALLOWED_HOSTS",
     "B_STUDIO_AUTH_STATE_DIR",
     "HOME",
+    // 앞단이 직접 답하는 경로(routes/)가 읽는다: 계정 목록 파일 위치, 서버 모드와 허용 백엔드
+    "XDG_CONFIG_HOME",
+    "B_STUDIO_MODE",
+    "B_STUDIO_BACKENDS",
 ];
 
 /// 환경 변수 모음. 시험이 필요한 값만 넣을 수 있다
@@ -65,7 +69,7 @@ impl Env {
         Env { vars: pairs.into_iter().map(|(k, v)| (k.into(), v.into())).collect() }
     }
 
-    fn get(&self, key: &str) -> Option<&str> {
+    pub fn get(&self, key: &str) -> Option<&str> {
         self.vars.get(key).map(String::as_str)
     }
 }
@@ -291,6 +295,11 @@ enum ConfigError {
 
 fn config_error(message: impl Into<String>) -> ConfigError {
     ConfigError::Message(message.into())
+}
+
+/// 인증을 끈 모드(`authConfig().mode === 'none'`, 곧 `localFolderAllowed()`)인가. 설정이 틀렸거나 판단할 수 없으면 None
+pub fn auth_is_none(env: &Env) -> Option<bool> {
+    auth_config(env).ok().map(|config| config.mode == Mode::None)
 }
 
 /// `authConfig(env)`. 설정이 틀리면 인증이 조용히 꺼지지 않도록 오류를 돌려준다

@@ -26,6 +26,7 @@ use tokio::net::{TcpListener, UnixStream};
 use tokio::task::JoinHandle;
 
 use crate::auth::{self, Decision, Env, RequestView};
+use crate::routes;
 
 /// 헤더를 다 받기까지의 한도. Node(`server.headersTimeout`)와 같다. 요청 시간 한도는 없다(SSE)
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
@@ -39,8 +40,8 @@ struct Upstream {
     gate: Arc<AuthGate>,
 }
 
-/// 앞단의 인증 판단(ADR-195 4c). 모든 요청을 넘기기 전에 판단하고, 거절만 앞단이 직접 답한다.
-/// 통과·허용·넘김(`Decision::Defer`)은 요청을 하나도 바꾸지 않고 Node로 넘긴다(앞단은 `x-b-studio-user`를 넣지 않는다. Node가 다시 판단하고 넣는다)
+/// 앞단의 인증 판단(ADR-195 4c). 모든 요청을 넘기기 전에 판단하고, 거절은 앞단이 직접 답한다. 허용된 요청 중 `routes`가 맡는 경로(4d)도 직접 답한다.
+/// 그 밖의 통과·허용·넘김(`Decision::Defer`)은 요청을 하나도 바꾸지 않고 Node로 넘긴다(앞단은 `x-b-studio-user`를 넣지 않는다. Node가 다시 판단하고 넣는다)
 pub struct AuthGate {
     /// None이면 판단하지 않는다(프록시 규칙을 보는 시험용). 판단을 끄는 것은 Node의 판단을 끄는 것이 아니다
     env: Option<Env>,
@@ -60,17 +61,27 @@ impl AuthGate {
         AuthGate { env: None }
     }
 
-    /// 거절해야 하면 앞단이 줄 응답
-    fn judge(&self, method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Response> {
-        let env = self.env.as_ref()?;
+    /// 요청을 어떻게 처리할지 판단한다
+    fn judge(&self, method: &Method, uri: &Uri, headers: &HeaderMap) -> Verdict {
+        let Some(env) = self.env.as_ref() else { return Verdict::Forward };
         let view = request_view(method, uri, headers);
         let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |elapsed| elapsed.as_millis() as f64);
         let mut loader = auth::file_loader(env);
         match auth::decide(&view, env, now_ms, &mut loader) {
-            Decision::Reject { status, message, api } => Some(reject_response(status, &message, api)),
-            Decision::Pass | Decision::Allow { .. } | Decision::Defer(_) => None,
+            Decision::Reject { status, message, api } => Verdict::Answer(reject_response(status, &message, api)),
+            // 직접 답하는 경로(ADR-195 4d)는 사용자를 확인한 요청(Allow)만 받는다. 통과(공개 경로)·넘김(Defer)은 Node가 판단하고 처리한다
+            Decision::Allow { .. } => routes::try_direct(method, uri, headers, env).map_or(Verdict::Forward, Verdict::Answer),
+            Decision::Pass | Decision::Defer(_) => Verdict::Forward,
         }
     }
+}
+
+/// `AuthGate::judge`의 결과
+enum Verdict {
+    /// 앞단이 이 응답으로 직접 답한다(거절 또는 직접 처리하는 경로)
+    Answer(Response),
+    /// 요청을 바꾸지 않고 Node로 넘긴다
+    Forward,
 }
 
 /// 넘길 요청이 Node에서 `req.method`·`req.url`·`req.headers`가 되는 꼴. `forward_inner`가 넘기는 요청 대상과 같은 값을 쓴다
@@ -127,8 +138,8 @@ pub async fn serve_with_header_timeout(listener: TcpListener, router: Router, sh
 }
 
 async fn forward(State(upstream): State<Upstream>, request: Request) -> Response {
-    if let Some(rejection) = upstream.gate.judge(request.method(), request.uri(), request.headers()) {
-        return rejection;
+    if let Verdict::Answer(response) = upstream.gate.judge(request.method(), request.uri(), request.headers()) {
+        return response;
     }
     match forward_inner(&upstream.socket, request).await {
         Ok(response) => response,
