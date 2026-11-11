@@ -6,7 +6,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, guardBuiltinTool, runClaudeGatewayAgent, terminalGatewayNote } from './claude-gateway-runner';
+import { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, guardBuiltinTool, pinBuiltinWrite, runClaudeGatewayAgent, terminalGatewayNote } from './claude-gateway-runner';
 import type { GateOptions } from './gate';
 import type { AgentEvent } from './loop';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
@@ -682,5 +682,33 @@ describe('guardBuiltinTool: ..로 시작하는 이름 (#1004)', () => {
     expect(await guard('Write', path.join(project.root, '..docs/.git/hooks/pre-commit'))).toContain('생성물이나 비밀 파일');
     expect(await guard('Read', path.join(path.dirname(project.root), '..sibling.txt'))).toContain('프로젝트 밖');
     expect(await guard('Read', `${project.root}/../x`)).toContain('정리된 절대 경로만');
+  });
+});
+
+describe('pinBuiltinWrite: 쓰기 직전의 훅이 보호 경로 파일을 고정한다 (이슈 #992)', () => {
+  const ORIGINAL = 'class Order { String customerNam; }\n';
+
+  it('내장 Edit·Write의 대상이 보호 경로면 고정하고, 읽기 도구와 보호 경로 밖은 고정하지 않는다', async () => {
+    const project = await createOrdersProject('b-studio-pin-');
+    const workspace = new Workspace(project.root);
+    workspace.watchProtectedPaths(['api/src']);
+    const order = path.join(project.root, 'api/src/Order.java');
+
+    await pinBuiltinWrite(workspace, 'Read', { file_path: order });
+    await writeFile(order, 'changed\n');
+    // 읽기 도구로는 고정하지 않았으므로 같은 내용으로 돌려놓아도 빠지지 않는다
+    await writeFile(order, ORIGINAL);
+    expect(workspace.restoredProtectedFiles(['api/src/Order.java'])).toEqual([]);
+
+    await pinBuiltinWrite(workspace, 'Write', { file_path: order });
+    await writeFile(order, 'changed\n');
+    await writeFile(order, ORIGINAL);
+    expect(workspace.restoredProtectedFiles(['api/src/Order.java'])).toEqual(['api/src/Order.java']);
+
+    // 정리되지 않은 경로·프로젝트 밖·잘못된 입력은 조용히 건너뛴다(던지지 않는다)
+    await pinBuiltinWrite(workspace, 'Edit', { file_path: `${project.root}/api/../api/src/Order.java` });
+    await pinBuiltinWrite(workspace, 'Edit', { file_path: '/etc/passwd' });
+    await pinBuiltinWrite(workspace, 'Edit', null);
+    await pinBuiltinWrite(workspace, undefined, {});
   });
 });

@@ -329,9 +329,23 @@ pub fn uncovered_change_warnings(input: &CoverInput) -> Vec<Check> {
 
 /// 보호 경로(거부 목록)와 파일은 파일 시스템 꼴(짝 없는 서로게이트는 U+FFFD)로 견준다
 pub fn protected_path_check(files: &[String], rules: &[String], backslash_sep: bool) -> Check {
+    protected_path_check_except(files, rules, backslash_sep, &[])
+}
+
+/// `protected_path_check`에서 `restored`의 자리(`files`의 위치)에 있는 파일만 뺀다. 이슈 #992.
+/// 이 목록은 "쓰기 직전에 고정한 내용과 지금 바이트까지 같다"고 TS가 읽어 확인한 파일의 자리다 — 막는 검사를 **여는** 쪽의 입력이다.
+/// 그래서 이름이 아니라 위치로 받는다(짝 없는 서로게이트가 경계에서 합쳐져 다른 파일이 같은 이름이 되어도 다른 파일이 빠지지 않는다).
+/// 목록 밖의 위치는 무시하지 않고 호출부(`review_changes_json`)가 던진다
+pub fn protected_path_check_except(files: &[String], rules: &[String], backslash_sep: bool, restored: &[usize]) -> Check {
     let touched: Vec<String> = rules
         .iter()
-        .flat_map(|rule| files.iter().filter(move |file| path_policy::is_protected_path(file, rule, backslash_sep)).map(move |file| format!("{file} (보호 경로 {rule})")))
+        .flat_map(|rule| {
+            files
+                .iter()
+                .enumerate()
+                .filter(move |(position, file)| !restored.contains(position) && path_policy::is_protected_path(file, rule, backslash_sep))
+                .map(move |(_, file)| format!("{file} (보호 경로 {rule})"))
+        })
         .collect();
     Check {
         name: "protected-paths".to_owned(),
@@ -473,13 +487,30 @@ pub fn uncovered_change_warnings_json(input_json: &str) -> Result<String, String
     Ok(js_json::to_native(&checks_value(&uncovered_change_warnings(&input))))
 }
 
-/// 입력: 위 입력에 `{files, protectedPaths, backslashSep, maxChangedFiles?}`(`files`·`protectedPaths`는 원래 글자)를 더한 것
+/// 쓰기 직전 고정값과 같아 보호 경로 확인에서 빼 줄 파일의 위치들. 정수이고 `0..len`이어야 한다(열린 쪽 입력이라 어긋나면 받지 않는다)
+fn restored_positions(value: Option<&JsValue>, len: usize) -> Result<Vec<usize>, String> {
+    match value {
+        None | Some(JsValue::Null) => Ok(Vec::new()),
+        Some(JsValue::Arr(items)) => items
+            .iter()
+            .map(|item| match item {
+                JsValue::Num(n) if n.fract() == 0.0 && *n >= 0.0 && *n < len as f64 => Ok(*n as usize),
+                _ => Err("restoredPositions의 항목은 files 안의 위치(정수)여야 합니다".to_owned()),
+            })
+            .collect(),
+        Some(_) => Err("restoredPositions는 배열이어야 합니다".to_owned()),
+    }
+}
+
+/// 입력: 위 입력에 `{files, protectedPaths, backslashSep, maxChangedFiles?, restoredPositions?}`(`files`·`protectedPaths`는 원래 글자)를 더한 것.
+/// `restoredPositions`는 보호 경로 확인에서만 빼 준다(파일 수 상한·덮이지 않은 변경 경고는 모든 파일을 센다)
 pub fn review_changes_json(input_json: &str) -> Result<String, String> {
     let value = parse_input(input_json)?;
     let files = string_list(value.prop("files"), "files")?;
     let rules = string_list(value.prop("protectedPaths"), "protectedPaths")?;
     let backslash_sep = matches!(value.prop("backslashSep"), Some(JsValue::Bool(true)));
-    let mut checks = vec![protected_path_check(&files, &rules, backslash_sep)];
+    let restored = restored_positions(value.prop("restoredPositions"), files.len())?;
+    let mut checks = vec![protected_path_check_except(&files, &rules, backslash_sep, &restored)];
     match value.prop("maxChangedFiles") {
         None => {}
         Some(JsValue::Num(max)) => checks.push(change_size_check(files.len(), *max)),
@@ -686,6 +717,39 @@ mod tests {
         // 파일 이름의 역슬래시: Windows에서는 구분자라 `src\\a`는 `other` 밖이고, POSIX에서는 꼴을 맞출 수 없어 막는다
         assert!(protected_path_check(&v(&["src\\a"]), &v(&["other"]), true).ok);
         assert!(!protected_path_check(&v(&["src\\a"]), &v(&["other"]), false).ok);
+    }
+
+    #[test]
+    fn 되돌린_파일은_위치로만_보호_경로_확인에서_빠진다() {
+        let files = v(&["infra/a", "infra/b", "src/c"]);
+        let rules = v(&["infra"]);
+        // 빼지 않으면 둘 다 걸린다
+        assert_eq!(protected_path_check_except(&files, &rules, false, &[]).detail.unwrap().matches("보호 경로 infra").count(), 2);
+        // 한 곳만 빼면 나머지는 그대로 걸린다
+        let one = protected_path_check_except(&files, &rules, false, &[0]);
+        assert!(!one.ok);
+        assert!(one.detail.as_deref().unwrap().ends_with("infra/b (보호 경로 infra)"));
+        assert!(!one.detail.unwrap().contains("infra/a"));
+        // 걸린 것을 모두 빼면 통과한다
+        assert!(protected_path_check_except(&files, &rules, false, &[0, 1]).ok);
+        // 빼는 위치가 보호 경로가 아닌 파일이어도 다른 파일은 빠지지 않는다
+        assert!(!protected_path_check_except(&files, &rules, false, &[2]).ok);
+    }
+
+    #[test]
+    fn json의_빼는_위치는_파일_수와_함께_다른_검사에_영향을_주지_않는다() {
+        let base = "\"protectedPaths\":[\"infra\"],\"autoPageMax\":10,\"root\":\"\",\"composePath\":\"\",\"cwd\":\"/\"";
+        let with = |files: &str, restored: &str, max: &str| format!("{{\"files\":{files},{base}{restored}{max}}}");
+        // 위치를 주지 않으면 지금과 같다
+        assert!(review_changes_json(&with("[\"infra/a\"]", "", "")).unwrap().contains("\"ok\":false"));
+        // 위치를 주면 보호 경로 확인만 통과하고, 파일 수 상한은 그 파일도 센다
+        let out = review_changes_json(&with("[\"infra/a\",\"x\"]", ",\"restoredPositions\":[0]", ",\"maxChangedFiles\":1")).unwrap();
+        assert!(out.contains("\"name\":\"protected-paths\",\"ok\":true"));
+        assert!(out.contains("\"name\":\"change-size\",\"ok\":false"));
+        // 어긋난 위치는 던진다: 범위 밖, 음수, 소수, 문자열, 배열이 아님
+        for bad in ["[1]", "[-1]", "[0.5]", "[\"0\"]", "0", "{}"] {
+            assert!(review_changes_json(&with("[\"infra/a\"]", &format!(",\"restoredPositions\":{bad}"), "")).is_err(), "{bad}");
+        }
     }
 
     #[test]
