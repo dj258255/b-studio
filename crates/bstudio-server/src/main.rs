@@ -80,7 +80,7 @@ async fn run() -> Result<ExitCode, String> {
     println!("b-studio 서버가 떴습니다: http://{}:{}", config.hostname, port);
 
     let (stop_serving, stopped) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(proxy::serve(listener, proxy::router(socket.clone()), async {
+    let server = tokio::spawn(proxy::serve(listener, proxy::router(socket.clone(), proxy::AuthGate::from_process_env()), async {
         let _ = stopped.await;
     }));
 

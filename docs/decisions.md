@@ -10028,6 +10028,28 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 실제 세션(2026-11-11, [기록](experiments/2026-11-11-rust-front-session.md)): `pnpm studio launch`로 앞단이 공개 포트를 열고 Node가 0700 폴더의 소켓에서 듣는 것을 `ps`·`lsof`로 확인했고, 실제 Claude Code 세션 하나가 desk에서 게이트 통과·체크포인트 1개까지 갔다. 앞단 로그에 502·오류는 없었다.
 - 남은 것: 운영 이미지와 `apps/studio`의 시작 스크립트는 아직 Node를 직접 띄운다. 앞단이 SIGKILL로 죽으면 Node 자식이 남는다(macOS에 PDEATHSIG가 없다. `studio stop`은 프로세스 그룹에 신호를 보낸다). ASCII가 아닌 바이트가 든 요청 줄은 hyper가 400으로 거절한다(Node는 받았다). 프록시 꼴(absolute-form) 요청 대상은 origin-form으로 바뀐다(Node는 둘 다 같은 경로로 읽는다).
 
+### 덧붙임: 4b를 하지 않는다 (2026-11-11, [#1151](https://github.com/dj258255/b-studio/issues/1151))
+- 4b(공개 경로를 앞단이 직접 처리)는 건너뛴다. `/api/health`·`/api/health/routes`는 "일하는 쪽(Node)이 살아 있고 요청을 받는가"를 묻는 경로다. Node가 남은 동안 앞단이 대신 답하면 Node가 멈춰도(이벤트 루프가 막혀도) 건강하다고 답한다.
+- Node의 health 응답은 인증 설정 검증(`authConfig`가 던지면 500)과 `terminal` 값(실험 기능 && none 모드)에 기대므로, 그대로 따라 하려면 설정 검증 전체를 옮겨야 한다. 로그인·로그아웃은 인증 상태를 쓴다.
+- 그래서 health는 4g(Node 제거)에서 옮기고, 로그인·로그아웃은 인증 상태와 함께 옮긴다. 순서는 4a → 4c → 4d …가 된다.
+
+### 덧붙임: 4c 결과 — 인증 판단을 앞단으로 옮기고 Node의 판단은 남긴다 (2026-11-11, [#1151](https://github.com/dj258255/b-studio/issues/1151))
+- **옮긴 것**(`crates/bstudio-server/src/auth.rs`): `decideRequest`(설정 오류 500 → 다른 출처 403 → 공개 경로 통과 → 신뢰하지 않는 Host 403 → 무효화 기록 500 → 사용자 확인 401), `authConfig`(모드·시간·비밀·토큰 목록 검증과 메시지), `identify`, `sessionClaims`·`readSigned`(HMAC-SHA256 base64url, 같은 길이일 때 상수 시간 비교), `isRevoked`, `isSameOrigin`, `isLoopbackHost`·`requestHostName`·`allowedHosts`·`isTrustedHost`, `cookieValue`, 무효화 기록 읽기(`readRevocations`·`parseRevocations`·`authStateDir`). 새 의존: `url`(WHATWG), `hmac`, `sha2`, `base64`, `serde_json`(정확한 버전 고정).
+- **남긴 것**: 로그인·로그아웃(경로가 Node에 있다), 세션 서명 만들기·미리보기 서명(`signSession`·`signPreviewGrant`: 라우트가 쓴다), 무효화 기록 쓰기(`revokeSession`·`revokeUser`), `canManage`. Node의 `decideRequest`는 지우지 않았다. 통과한 요청은 하나도 바꾸지 않고 넘기며(앞단은 `x-b-studio-user`를 넣지 않는다), Node가 다시 판단하고 사용자 헤더를 넣는다.
+- **앞단의 응답**: 거절만 직접 준다(`/api/` 아래는 `{"error":메시지}` JSON, 아니면 text/plain). 환경 변수는 앞단이 시작할 때 한 번 읽고, Node 자식은 같은 환경을 물려받는다.
+- **판단하지 않고 Node에 넘기는 입력**(`Decision::Defer`). 앞단이 통과시키는 것이 아니라 Node가 그대로 판단하므로 열린 쪽 구멍이 아니다:
+  1. Node가 판단 전에 실패하는 입력: Host 없음(400), `new URL(...)`이 실패하는 Host·주소(500), 주소에 사용자 정보가 든 경우(`new Request`가 던짐), TRACE·CONNECT·모르는 메서드.
+  2. 프록시 모드 사용자 헤더 이름이 헤더 이름으로 쓸 수 없는 글자를 가진 경우(`Headers.get`이 던짐).
+  3. 설정 오류 메시지에 짝 없는 서로게이트가 들어가는 경우(Rust 문자열로 담을 수 없다).
+  4. 서명이 맞는 쿠키의 base64·JSON을 풀지 못하는 경우(서명 키를 아는 쪽만 만든다).
+  5. 상대 경로인 `B_STUDIO_AUTH_STATE_DIR`: Node는 시작할 때 작업 폴더를 `apps/studio`로 바꿔 앞단과 기준이 다르다.
+- **Node의 요청 꼴 재현**: 경로는 `new URL(req.url, 'http://'+Host).pathname`과 같게 `url` 크레이트로 계산하고(앞 슬래시·역슬래시가 셋 이상이면 `//`로 줄인다: `url` 크레이트가 받지 못하는 `///x`를 WHATWG가 받는다), 헤더는 Node `IncomingMessage` 규칙(첫 값만 남기는 18개 이름, `cookie`는 "; ", 나머지는 ", ")으로 합친 뒤 `Headers`처럼 앞뒤 HTTP 공백을 떼며 Latin-1로 읽는다. JS `trim`(U+FEFF 뗌, U+0085 안 뗌), UTF-16 길이, `Number(문자열)` 문법도 JS와 같게 했다.
+- **차등 수치(벡터)**: 옛 TS가 진짜 `node:http` 서버 안에서 낸 판단을 기대값으로 7000개(`tests/vectors/auth-vectors.json`, 생성기 `gen-auth-vectors.ts`, 씨앗 고정). Node 파서가 400으로 거절한 695개를 빼고 6305개를 견줘 **앞단이 더 막음 0, 더 엶 0, 그 밖의 다름 0**(통과 939, 허용 1460, 거절 3195은 같고 나머지는 위 넘김). 씨앗만 바꾼 4만 개짜리 두 벌을 따로 돌려도(저장소에 넣지 않음) 같다.
+- **차등 수치(HTTP)**: 같은 환경으로 진짜 Node 서버를 직접 띄운 것과 앞단 너머로 띄운 것에 같은 날것의 요청을 보내 상태·본문·머리(date·connection·keep-alive·transfer-encoding·content-length 제외)를 견주는 시험 67개(`front-auth.test.ts`: 인증 없음·token·proxy, 거절·HEAD 거절·통과, 중복 Host·Cookie·Origin, Node가 500을 주는 입력). 다른 것 0. `tests/auth_front.rs`는 거절이 Node에 닿지 않고, 통과·허용·넘김이 요청을 바꾸지 않음을 본다.
+- **의도한 차이**: ① 파일 읽기 오류 글의 뒷부분은 Node의 fs 오류 글이 아니라 Rust 오류 글이다(`<파일>을(를) 읽지 못했습니다: …`, 본문 읽기 실패에도 같은 앞머리). ② 요청 본문이 10MB를 넘는 요청은 Node가 인증보다 먼저 413을 주지만 앞단은 본문을 읽기 전에 인증으로 거절한다. ③ 무효화 기록에 `1e999`처럼 범위를 넘는 수나 128단계를 넘는 중첩이 있으면 `serde_json`이 JSON 오류로 보지만 JS는 받는다(기록은 우리 코드만 쓰며 `JSON.stringify`는 그런 값을 만들지 않는다). ④ 앞단은 무효화 기록을 요청마다 읽는다(Node는 mtime·크기가 같으면 캐시).
+- **변이**: `auth.rs`·`proxy.rs`의 핵심 줄 95개(각 거절 조건, 비교와 경계, trim, 헤더 합치기, 넘기는 조건, 응답 모양)를 하나씩 망가뜨려 cargo 시험(`--lib`, `auth_vectors`, `auth_front`)으로 잡혔는지 봤다. 89개 잡힘, 6개 생존은 모두 동등 변이다(비밀이 32자 이상이라 빈 값 비교가 어차피 거짓, 무한대는 720 초과로 이미 거절, 해시 대문자 허용은 이름 목록에 영향 없음, 이름 글자에 `:`는 첫 콜론에서 잘려 들어올 수 없음, 콜론 0번은 이름 검사에서 같은 오류, 숫자 아닌 값 허용은 `as_f64`가 None). 처음 생존했던 Host 없음·상대 경로 상태 폴더·JSON 이스케이프·헤더 이름 목록은 시험을 더해 잡았다.
+- **남은 것·재지 않은 것**: 실제 세션(studio desk로 세션 하나 띄워 게이트까지)은 도커가 꺼져 있어 돌리지 않았다(사람이 따로 한다). `docs/status.md`는 고치지 않았다. 설정 오류 500은 Node가 `/api/health`에서도 500을 주어 앞단이 뜨지 않으므로 HTTP 차등으로 볼 수 없고 벡터와 `auth_front.rs`로만 본다. Ada(Node)와 `url` 크레이트의 호스트 해석 차이는 벡터 안에서는 찾지 못했지만(IDN·IPv4 꼴·IPv6 포함) 모든 입력을 확인한 것은 아니다. 커밋 보안 검토 결과를 본 뒤 머지한다.
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

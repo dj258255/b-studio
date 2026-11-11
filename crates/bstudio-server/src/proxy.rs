@@ -8,13 +8,13 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Request, State};
 use axum::http::header::{HeaderMap, CONTENT_TYPE};
 use axum::http::uri::{Parts, PathAndQuery};
-use axum::http::{HeaderValue, StatusCode, Uri, Version};
+use axum::http::{HeaderValue, Method, StatusCode, Uri, Version};
 use axum::response::Response;
 use axum::Router;
 use hyper::body::{Body as HttpBody, Frame, Incoming, SizeHint};
@@ -25,6 +25,8 @@ use hyper_util::service::TowerToHyperService;
 use tokio::net::{TcpListener, UnixStream};
 use tokio::task::JoinHandle;
 
+use crate::auth::{self, Decision, Env, RequestView};
+
 /// 헤더를 다 받기까지의 한도. Node(`server.headersTimeout`)와 같다. 요청 시간 한도는 없다(SSE)
 pub const HEADER_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -34,11 +36,64 @@ const HOP_BY_HOP: [&str; 8] = ["connection", "keep-alive", "te", "trailer", "tra
 #[derive(Clone)]
 struct Upstream {
     socket: Arc<PathBuf>,
+    gate: Arc<AuthGate>,
 }
 
-/// 모든 경로·메서드를 이 소켓의 Node로 넘기는 라우터. 뒤 조각에서 경로를 옮기면 여기에 경로를 더한다(나머지는 fallback으로 계속 넘어간다)
-pub fn router(upstream: impl Into<PathBuf>) -> Router {
-    Router::new().fallback(forward).with_state(Upstream { socket: Arc::new(upstream.into()) })
+/// 앞단의 인증 판단(ADR-195 4c). 모든 요청을 넘기기 전에 판단하고, 거절만 앞단이 직접 답한다.
+/// 통과·허용·넘김(`Decision::Defer`)은 요청을 하나도 바꾸지 않고 Node로 넘긴다(앞단은 `x-b-studio-user`를 넣지 않는다. Node가 다시 판단하고 넣는다)
+pub struct AuthGate {
+    /// None이면 판단하지 않는다(프록시 규칙을 보는 시험용). 판단을 끄는 것은 Node의 판단을 끄는 것이 아니다
+    env: Option<Env>,
+}
+
+impl AuthGate {
+    /// 이 프로세스의 환경으로 판단한다. Node 자식은 같은 환경을 물려받는다(main.rs의 `Command`는 환경을 지우지 않는다)
+    pub fn from_process_env() -> Self {
+        AuthGate { env: Some(Env::from_process()) }
+    }
+
+    pub fn with_env(env: Env) -> Self {
+        AuthGate { env: Some(env) }
+    }
+
+    pub fn disabled() -> Self {
+        AuthGate { env: None }
+    }
+
+    /// 거절해야 하면 앞단이 줄 응답
+    fn judge(&self, method: &Method, uri: &Uri, headers: &HeaderMap) -> Option<Response> {
+        let env = self.env.as_ref()?;
+        let view = request_view(method, uri, headers);
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0.0, |elapsed| elapsed.as_millis() as f64);
+        let mut loader = auth::file_loader(env);
+        match auth::decide(&view, env, now_ms, &mut loader) {
+            Decision::Reject { status, message, api } => Some(reject_response(status, &message, api)),
+            Decision::Pass | Decision::Allow { .. } | Decision::Defer(_) => None,
+        }
+    }
+}
+
+/// 넘길 요청이 Node에서 `req.method`·`req.url`·`req.headers`가 되는 꼴. `forward_inner`가 넘기는 요청 대상과 같은 값을 쓴다
+pub fn request_view(method: &Method, uri: &Uri, headers: &HeaderMap) -> RequestView {
+    RequestView {
+        method: method.as_str().to_string(),
+        target: uri.path_and_query().map_or("/", |target| target.as_str()).to_string(),
+        headers: headers.iter().map(|(name, value)| (name.as_str().to_string(), auth::latin1(value.as_bytes()))).collect(),
+    }
+}
+
+/// Node(`app.ts`)의 거절 응답과 같다: `/api/` 아래는 `{"error":메시지}` JSON, 아니면 text/plain
+fn reject_response(status: u16, message: &str, api: bool) -> Response {
+    let (body, content_type) = if api { (format!("{{\"error\":{}}}", auth::js_json_string(message)), "application/json") } else { (message.to_string(), "text/plain; charset=utf-8") };
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    response.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    response
+}
+
+/// 모든 경로·메서드를 이 소켓의 Node로 넘기는 라우터. 넘기기 전에 인증을 판단한다(`gate`). 뒤 조각에서 경로를 옮기면 여기에 경로를 더한다(나머지는 fallback으로 계속 넘어간다)
+pub fn router(upstream: impl Into<PathBuf>, gate: AuthGate) -> Router {
+    Router::new().fallback(forward).with_state(Upstream { socket: Arc::new(upstream.into()), gate: Arc::new(gate) })
 }
 
 /// 공개 포트에서 듣는다. `shutdown`이 끝나면 새 연결을 받지 않는다
@@ -72,6 +127,9 @@ pub async fn serve_with_header_timeout(listener: TcpListener, router: Router, sh
 }
 
 async fn forward(State(upstream): State<Upstream>, request: Request) -> Response {
+    if let Some(rejection) = upstream.gate.judge(request.method(), request.uri(), request.headers()) {
+        return rejection;
+    }
     match forward_inner(&upstream.socket, request).await {
         Ok(response) => response,
         Err(message) => {

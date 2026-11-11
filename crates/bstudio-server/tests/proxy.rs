@@ -269,7 +269,7 @@ async fn 머리를_끝내지_않는_손님은_한도_뒤에_끊긴다() {
     spawn_upstream(&sock, Seen::default(), Reply::Raw(OK_EMPTY.to_vec())).await;
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    let router = bstudio_server::proxy::router(sock);
+    let router = bstudio_server::proxy::router(sock, bstudio_server::proxy::AuthGate::disabled());
     tokio::spawn(bstudio_server::proxy::serve_with_header_timeout(listener, router, std::future::pending(), Duration::from_millis(500)));
 
     let mut guest = TcpStream::connect(("127.0.0.1", port)).await.unwrap();

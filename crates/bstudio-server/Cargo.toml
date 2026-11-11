@@ -26,6 +26,15 @@ http-body-util = "=0.1.5"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "process", "signal", "time", "io-util", "sync"] }
 # 소유자(uid) 확인과 SIGTERM 전달
 libc = "0.2"
+# 인증 판단(ADR-195 4c)이 Node의 `new URL(...)`과 같은 계산을 하려면 WHATWG URL 구현이 필요하다(경로의 점 구간·%2e·역슬래시, Origin의 host·기본 포트). 정확한 버전 고정
+url = "=2.5.8"
+# 세션 쿠키 서명(HMAC-SHA256)과 접근 토큰 해시(SHA-256)
+hmac = "=0.13.0"
+sha2 = "=0.11.1"
+# 서명(base64url, 패딩 없음)과 쿠키 내용 풀기
+base64 = "=0.23.1"
+# 쿠키 내용·무효화 기록의 JSON. float_roundtrip은 JS의 JSON.parse와 같은 f64로 읽기 위해(만료 시각 비교)
+serde_json = { version = "=1.0.154", features = ["float_roundtrip"] }
 
 [dev-dependencies]
 tempfile = "3"
