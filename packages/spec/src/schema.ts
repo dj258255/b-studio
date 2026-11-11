@@ -18,6 +18,14 @@ export const STUDIO_CALLER = 'studio';
 const SERVICE_PATH = z.string().regex(/^\/(?!\/)/, '"/"로 시작하고 "//"로 시작하지 않는 경로여야 합니다');
 
 /**
+ * `ready.path`: HTTP 확인의 요청 줄에 들어가는 경로. `new URL(path, base)`는 `\`를 `/`로 읽고 탭·줄바꿈을 지워, `/\\example.com/`이나 `/<탭>/example.com/`이
+ * "/"로 시작하고 "//"로 시작하지 않는 검사를 통과한 뒤 다른 호스트로 풀렸다(트러블슈팅 192). 지금의 확인은 호스트를 127.0.0.1로 고정하고 경로를 요청 줄에만 쓰지만,
+ * 쓰는 쪽과 다르게 읽히는 글자는 처음부터 받지 않는다. 역슬래시와 제어 문자(탭·줄바꿈 포함)만 거부한다 — 비ASCII·공백은 퍼센트 인코딩돼 요청 줄에 들어간다.
+ * 다른 SERVICE_PATH 자리(contracts 경로 등)는 이 확인에 쓰지 않으므로 바꾸지 않는다
+ */
+const READY_PATH = SERVICE_PATH.refine((value) => !/[\\\u0000-\u001f\u007f]/.test(value), '역슬래시와 제어 문자(탭·줄바꿈 포함)는 쓸 수 없습니다. 퍼센트 인코딩해서 적으세요');
+
+/**
  * apt(Debian·Ubuntu)·apk(Alpine) 패키지 이름(도그푸딩 마찰 113). 셸을 거치지 않더라도 생성한 Dockerfile의
  * RUN 줄에 그대로 들어가므로 셸 메타문자가 들어갈 수 없게 좁게 허용한다. 영문 소문자·숫자로 시작하고
  * 그 뒤로 영문 소문자·숫자·`.`·`+`·`-`만 받는다(두 계열의 실제 패키지 이름 관례를 함께 만족한다)
@@ -27,7 +35,7 @@ const MAX_SYSTEM_PACKAGES = 20;
 
 /** 서비스가 요청을 받을 준비가 됐는지 HTTP로 확인하는 방법 */
 export const HttpProbeSchema = z.object({
-  path: SERVICE_PATH,
+  path: READY_PATH,
   expectStatus: z.number().int().min(100).max(599).default(200),
   /** 첫 기동은 의존성 다운로드 때문에 오래 걸릴 수 있다 (Gradle 등) */
   timeoutSeconds: z.number().int().positive().optional(),

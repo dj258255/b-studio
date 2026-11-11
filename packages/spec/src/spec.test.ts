@@ -182,6 +182,21 @@ describe('parseSpec', () => {
     ]);
   });
 
+  it('ready.path는 URL 해석이 다르게 읽는 글자(역슬래시·제어 문자)를 거부한다(트러블슈팅 192)', () => {
+    const withReady = (yamlPath: string) => ORDERS_SPEC.replace('ready: { path: / }', `ready: { path: ${yamlPath} }`);
+    // `new URL('/\\example.com/', base)`는 example.com이 된다. YAML 큰따옴표 안의 이스케이프로 실제 글자를 만든다
+    for (const rejected of ['"/\\\\example.com/"', '"/\\t/example.com/"', '"/\\n/example.com/"', '"/\\r/example.com/"', '"/a\\u0000b"', '"/a\\u007fb"', '"/a\\\\b"']) {
+      expect(() => parseSpec(withReady(rejected)), rejected).toThrow(SpecError);
+    }
+    // 이미 거부하던 것과 정상 경로는 그대로다
+    expect(() => parseSpec(withReady('//evil.example.com'))).toThrow(SpecError);
+    for (const accepted of ['/', '/actuator/health/readiness', '"/검색"', '"/a b"', '/a%5Cb', '"/a?x=1#y"']) {
+      expect(parseSpec(withReady(accepted)).services.web, accepted).toMatchObject({ ready: { expectStatus: 200 } });
+    }
+    // 다른 SERVICE_PATH 자리는 이 규칙을 받지 않는다(contracts 경로는 확인에 쓰지 않는다)
+    expect(parseSpec(ORDERS_SPEC.replace('extract: /v3/api-docs', 'extract: "/a\\\\b"')).services.api).toMatchObject({ contract: { extract: '/a\\b' } });
+  });
+
   it('autoPageChecks는 서비스·모드·상한·동적 값 규칙을 검사하고 기본값을 채운다', () => {
     // 기본값: http, 200, 5개
     const parsed = parseSpec(`${ORDERS_SPEC}workflow:\n  autoPageChecks: { service: web }\n`).workflow?.autoPageChecks;

@@ -4566,3 +4566,184 @@ pub fn up_with_port_retry(env: Env, input: PortRetryInputJs, signal: Option<Abor
     })
     .build(&env)
 }
+
+// ── 준비 확인·모르는 프로세스 검사·인프라 확인(ADR-195 4f A4c-3a) ──
+// 판정은 bstudio-guard(readiness·docker_format·stray_processes), docker를 부르는 순서·HTTP·반복은 bstudio-io(readiness_io)가 한다.
+// 컨테이너를 다시 만드는 `up`은 여기서 부르지 않는다(TS의 `#upQueue`·`#gitMask`를 지나야 한다). TS 껍데기: packages/sandbox/src/docker/ready.ts
+use bstudio_io::readiness_io as rio;
+
+#[napi(object)]
+pub struct AwaitReadyInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    pub service: String,
+    pub edge_service: String,
+    /// edge가 이 서비스를 위해 열어 둔 컨테이너 포트(`String(edgePortFor(...))`)
+    pub edge_port: String,
+    /// false면 엔드포인트만 읽는다(아래 ready* 필드는 쓰지 않는다)
+    pub has_ready: bool,
+    pub ready_path: String,
+    pub expect_status: f64,
+    pub success_threshold: f64,
+    pub timeout_ms: f64,
+    pub interval_ms: f64,
+    pub attempt: u32,
+    pub secret_names: Vec<String>,
+    pub secret_values: Vec<String>,
+    /// 부르는 시점에 이미 취소돼 있었다
+    pub aborted: bool,
+}
+
+/// `kind`: `ready`(port) · `endpoint-docker`(exitCode·stderr) · `endpoint-unparsed`(reason) · `invalid-port` · `failed`(reason·historyJson) ·
+/// `recreate`(reason) · `aborted`(atTop) · `stopped`
+#[napi(object)]
+pub struct AwaitReadyResultJs {
+    pub kind: String,
+    pub port: f64,
+    pub reason: Option<String>,
+    pub history_json: String,
+    pub exit_code: i32,
+    pub stderr: String,
+    pub at_top: bool,
+}
+
+fn zip_secrets(names: Vec<String>, values: Vec<String>) -> Result<Vec<(String, String)>> {
+    if names.len() != values.len() {
+        return Err(Error::from_reason("시크릿의 이름과 값 목록의 길이가 다릅니다"));
+    }
+    Ok(names.into_iter().zip(values).collect())
+}
+
+/// 준비 확인 한 시도: 엔드포인트 읽기 → 확인 반복 → 실패면 이유 만들기. 던지지 않고 결과(`kind`)로 돌려준다. `onProbe`는 확인이 끝날 때마다 `ProbeResult`의 JSON을
+/// 받고 계속하면 true를 돌려준다(알림을 처리할 때까지 기다린다)
+#[napi]
+pub fn await_ready_once(
+    env: Env,
+    input: AwaitReadyInputJs,
+    on_probe: ThreadsafeFunction<String, bool, String, Status, false>,
+    signal: Option<AbortSignal>,
+) -> Result<AsyncBlock<AwaitReadyResultJs>> {
+    let secrets = zip_secrets(input.secret_names, input.secret_values)?;
+    let ready_input = rio::ReadyInput {
+        compose: compose_ref(input.compose),
+        override_path: input.override_path,
+        service: input.service,
+        edge_service: input.edge_service,
+        edge_port: input.edge_port,
+        ready: input.has_ready.then_some(rio::ReadyCheck {
+            path: input.ready_path,
+            expect_status: input.expect_status,
+            success_threshold: input.success_threshold,
+            timeout_ms: input.timeout_ms,
+            interval_ms: input.interval_ms,
+        }),
+        attempt: i64::from(input.attempt),
+        secrets,
+        aborted: input.aborted,
+    };
+    let cancel = abort_cancel(signal);
+    let on_probe = Arc::new(on_probe);
+    AsyncBlockBuilder::new(async move {
+        let notify = move |json: String| -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> {
+            let on_probe = on_probe.clone();
+            Box::pin(async move { on_probe.call_async(json).await.unwrap_or(false) })
+        };
+        let blank = |kind: &str| AwaitReadyResultJs { kind: kind.to_owned(), port: 0.0, reason: None, history_json: String::new(), exit_code: 0, stderr: String::new(), at_top: false };
+        Ok(match rio::await_ready_once(&ready_input, &cancel, &notify).await {
+            rio::AwaitOutcome::Ready { port } => AwaitReadyResultJs { port, ..blank("ready") },
+            rio::AwaitOutcome::EndpointDocker { exit_code, stderr } => AwaitReadyResultJs { exit_code, stderr, ..blank("endpoint-docker") },
+            rio::AwaitOutcome::EndpointUnparsed(reason) => AwaitReadyResultJs { reason: Some(reason), ..blank("endpoint-unparsed") },
+            rio::AwaitOutcome::InvalidPort => blank("invalid-port"),
+            rio::AwaitOutcome::Failed { reason, history } => {
+                let history_json = format!("[{}]", history.iter().map(rio::ProbeRecord::to_json).collect::<Vec<_>>().join(","));
+                AwaitReadyResultJs { reason: Some(reason), history_json, ..blank("failed") }
+            }
+            rio::AwaitOutcome::Recreate { reason } => AwaitReadyResultJs { reason: Some(reason), ..blank("recreate") },
+            rio::AwaitOutcome::Aborted { at_top } => AwaitReadyResultJs { at_top, ..blank("aborted") },
+            rio::AwaitOutcome::Stopped => blank("stopped"),
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct ScanInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    /// 컨테이너에서 도는 찾기 스크립트(TS의 `PROCESS_SCAN_SCRIPT`)
+    pub script: String,
+    pub secret_names: Vec<String>,
+    pub secret_values: Vec<String>,
+}
+
+fn scan_input(input: ScanInputJs) -> Result<rio::ScanInput> {
+    Ok(rio::ScanInput { compose: compose_ref(input.compose), override_path: input.override_path, script: input.script, secrets: zip_secrets(input.secret_names, input.secret_values)? })
+}
+
+fn processes_json(processes: &[bstudio_guard::stray_processes::ScannedProcess]) -> String {
+    serde_json::Value::Array(processes.iter().map(|process| serde_json::json!({ "pid": process.pid, "start": process.start, "command": process.command })).collect()).to_string()
+}
+
+/// `kind`: `processes`(processesJson: `[{pid,start,command}]`) · `error`(message)
+#[napi(object)]
+pub struct ScanResultJs {
+    pub kind: String,
+    pub processes_json: String,
+    pub message: Option<String>,
+}
+
+/// 서비스 안에서 PID 1과 세션이 다른 프로세스를 찾는다. 던지지 않고 결과로 돌려준다(읽지 못하면 `error`)
+#[napi]
+pub fn scan_service_processes(env: Env, input: ScanInputJs, service: String, signal: Option<AbortSignal>) -> Result<AsyncBlock<ScanResultJs>> {
+    let scan = scan_input(input)?;
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move {
+        Ok(match rio::scan_processes(&scan, &service, Some(&cancel)).await {
+            rio::ScanOutcome::Processes(processes) => ScanResultJs { kind: "processes".into(), processes_json: processes_json(&processes), message: None },
+            rio::ScanOutcome::Error(message) => ScanResultJs { kind: "error".into(), processes_json: "[]".into(), message: Some(message) },
+        })
+    })
+    .build(&env)
+}
+
+/// `kind`: `done`(reportsJson: `[{service, error}|{service, processes:[{pid,command}]}]`) · `error`(message: 컨테이너 상태를 읽지 못했다)
+#[napi(object)]
+pub struct StrayResultJs {
+    pub kind: String,
+    pub reports_json: String,
+    pub message: Option<String>,
+}
+
+/// 서비스마다 running이면 찾아서 기준선(`[[서비스, [[pid, 시작 시각]]]]`의 JSON)에 없던 프로세스만 알린다
+#[napi]
+pub fn stray_processes(env: Env, input: ScanInputJs, services: Vec<String>, baseline_json: String, signal: Option<AbortSignal>) -> Result<AsyncBlock<StrayResultJs>> {
+    let scan = Arc::new(scan_input(input)?);
+    let baseline: Vec<(String, Vec<(f64, String)>)> = parse(&baseline_json, "프로세스 기준선")?;
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move {
+        Ok(match rio::stray_processes(scan, services, baseline, cancel).await {
+            Ok(reports) => {
+                let value = serde_json::Value::Array(
+                    reports
+                        .iter()
+                        .map(|report| match &report.error {
+                            Some(error) => serde_json::json!({ "service": report.service, "error": error }),
+                            None => serde_json::json!({ "service": report.service, "processes": report.processes.iter().map(|(pid, command)| serde_json::json!({ "pid": pid, "command": command })).collect::<Vec<_>>() }),
+                        })
+                        .collect(),
+                );
+                StrayResultJs { kind: "done".into(), reports_json: value.to_string(), message: None }
+            }
+            Err(message) => StrayResultJs { kind: "error".into(), reports_json: "[]".into(), message: Some(message) },
+        })
+    })
+    .build(&env)
+}
+
+/// 넘긴 서비스 이름 중 컨테이너가 running이 아닌(혹은 없는) 것. `ps` 출력을 해석하지 못하면 모두 running이 아닌 것이다
+#[napi]
+pub fn missing_services(env: Env, compose: ComposeRefJs, override_path: String, names: Vec<String>, signal: Option<AbortSignal>) -> Result<AsyncBlock<Vec<String>>> {
+    let compose = compose_ref(compose);
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move { Ok(rio::missing_services(&compose, &override_path, &names, Some(&cancel)).await) }).build(&env)
+}
