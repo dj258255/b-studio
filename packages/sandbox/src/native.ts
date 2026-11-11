@@ -181,6 +181,14 @@ interface NativeGuard {
   scanServiceProcesses(input: NativeScanInput, service: string, signal: AbortSignal | undefined | null): Promise<NativeScanResult>;
   strayProcesses(input: NativeScanInput, services: string[], baselineJson: string, signal: AbortSignal | undefined | null): Promise<NativeStrayResult>;
   missingServices(compose: NativeComposeRef, overridePath: string, names: string[], signal: AbortSignal | undefined | null): Promise<string[]>;
+  // ── 의존성 스냅샷·공유 볼륨·stats(ADR-195 4f A4c-3b). 던지지 않고 결과(`kind`)로 돌려준다. `up`은 부르지 않고 이벤트도 알리지 않는다(TS가 한다).
+  // prune의 parseDates는 만든 시각 글의 JSON 배열을 받아 같은 길이의 숫자 JSON 배열(읽을 수 없으면 null)을 돌려준다(JS `Date.parse`)
+  planSnapshots(scope: NativeSnapshotScope, root: string, volumes: NativePlanVolume[]): Promise<NativeSnapshotPlan[]>;
+  seedSnapshot(compose: NativeComposeRef, scope: NativeSnapshotScope, plan: NativeSnapshotPlan, image: string, signal: AbortSignal | undefined | null): Promise<NativeSeedResult>;
+  captureSnapshot(compose: NativeComposeRef, scope: NativeSnapshotScope, plan: NativeSnapshotPlan, image: string): Promise<NativeCaptureResult>;
+  pruneSnapshots(compose: NativeComposeRef, scope: NativeSnapshotScope, plan: NativeSnapshotPlan, parseDates: (texts: string) => string): Promise<NativePruneResult>;
+  ensureSharedVolumes(dockerBin: string, names: string[]): Promise<NativeSharedVolumesResult>;
+  readStats(input: NativeStatsInput): Promise<NativeStatsResult>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -1012,6 +1020,75 @@ export interface NativeScanResult {
 export interface NativeStrayResult {
   kind: 'done' | 'error';
   reportsJson: string;
+  message?: string | null;
+}
+
+export interface NativeSnapshotScope {
+  /** studio.yaml의 프로젝트 이름(스냅샷 이름·자리에 든다) */
+  projectName: string;
+  sandboxId: string;
+}
+
+export interface NativePlanVolume {
+  service: string;
+  volume: string;
+  /** 프로젝트 루트 기준 서비스 폴더 */
+  specPath: string;
+  key: string[];
+}
+
+export interface NativeSnapshotPlan {
+  service: string;
+  volume: string;
+  snapshot: string;
+  slot: string;
+  sandboxVolume: string;
+}
+
+/** `missing` · `seeded`(elapsedMs) · `failed`(reason) */
+export interface NativeSeedResult {
+  kind: 'missing' | 'seeded' | 'failed';
+  elapsedMs: number;
+  reason?: string | null;
+}
+
+/** `existing` · `captured`(elapsedMs) · `failed`(message·detail) */
+export interface NativeCaptureResult {
+  kind: 'existing' | 'captured' | 'failed';
+  elapsedMs: number;
+  message?: string | null;
+  detail?: string | null;
+}
+
+/** `done`(removed: `volume rm`을 부른 이름) · `dates-unknown` · `refused` */
+export interface NativePruneResult {
+  kind: 'done' | 'dates-unknown' | 'refused';
+  removed: string[];
+}
+
+/** `failed`가 false면 모두 만들었다. 실패는 먼저 끝난 하나의 명령·종료 코드(출력이 상한을 넘으면 `code`가 없다)·출력이다 */
+export interface NativeSharedVolumesResult {
+  failed: boolean;
+  command: string;
+  code?: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export interface NativeStatsInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  managed: string[];
+  edgeService: string;
+  timeoutMs: number;
+}
+
+/** `done`(json: `ServiceUsage[]`을 `encodeNative`한 글) · `list-failed`·`inspect-failed`(timedOut·stderr) · `timed-out` · `parse`(message) */
+export interface NativeStatsResult {
+  kind: 'done' | 'list-failed' | 'inspect-failed' | 'timed-out' | 'parse';
+  json: string;
+  timedOut: boolean;
+  stderr: string;
   message?: string | null;
 }
 
