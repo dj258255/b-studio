@@ -5,6 +5,7 @@
 //! 이 크레이트를 붙이고, 4단계(ADR-191·192)에서 Rust HTTP 서버가 같은 크레이트를 직접 쓴다.
 
 pub mod cli_command;
+pub mod container_verify;
 pub mod deploy_io;
 pub mod exec_stream;
 pub mod git_mask_fs;

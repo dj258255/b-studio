@@ -127,6 +127,7 @@ dependencies = [
  "bstudio-guard",
  "libc",
  "portable-pty",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

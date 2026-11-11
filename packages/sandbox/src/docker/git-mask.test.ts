@@ -550,11 +550,16 @@ describe('findMissingMasks 실행 중 컨테이너의 마운트 확인', () => {
     const root = await project();
     const copies = [{ path: 'tests/acceptance', source: '/cache/evaluation-assets/sb/asset-1' }];
     const declared = planned(root, copies);
-    // 실제 마운트의 프로젝트 원본은 알아볼 수 없는 꼴(Docker Desktop 접두어를 프로젝트 마운트에서는 떼지 않는다)이다
+    // 실제 마운트의 프로젝트 원본이 접두어가 붙은 꼴이다. 평가 자산 자리는 계획에서 기대하므로 원본을 알아보지 못해도 비지 않는다.
+    // `.git` 자리도 접두어를 뗀 경로로 프로젝트 마운트를 알아봐 함께 요구한다(A4b: 예전에는 접두어가 붙으면 `.git` 확인을 건너뛰었다)
     const projectMount = { Type: 'bind', Source: `/host_mnt${root}`, Destination: '/workspace', RW: true };
-    // 계획에 자리가 있으므로 기대 목록이 비지 않는다. 자산 마운트가 없으면 빠진 것으로 본다
-    expect(await findMissingMasks(root, [projectMount], {}, declared)).toEqual(['/workspace/tests/acceptance']);
-    expect(await findMissingMasks(root, [projectMount, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
+    expect(await findMissingMasks(root, [projectMount], {}, declared)).toEqual(['/workspace/.git', '/workspace/.git/b-studio', '/workspace/tests/acceptance']);
+    const gitMasks = [
+      { Type: 'bind', Source: path.join(root, '.git'), Destination: '/workspace/.git', RW: false },
+      { Type: 'bind', Source: path.join(root, '.git', 'b-studio-empty'), Destination: '/workspace/.git/b-studio', RW: false },
+    ];
+    expect(await findMissingMasks(root, [projectMount, ...gitMasks], {}, declared)).toEqual(['/workspace/tests/acceptance']);
+    expect(await findMissingMasks(root, [projectMount, ...gitMasks, { Type: 'bind', Source: copies[0]!.source, Destination: '/workspace/tests/acceptance', RW: false }], {}, declared)).toEqual([]);
   });
 
   /** Docker Desktop이 Source를 접두어 붙여 알려 주는 상황의 기본 마운트 */

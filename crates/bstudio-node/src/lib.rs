@@ -3914,3 +3914,163 @@ pub async fn find_free_host_port() -> Result<u32> {
     let port = blocking(bstudio_io::host_port::find_free_host_port).await?.map_err(|e| io_error("빈 포트를 찾지 못했습니다", e))?;
     Ok(u32::from(port))
 }
+
+// ── 컨테이너 사후 확인과 확인한 컨테이너 시작(ADR-195 4f A4b) ──
+// 판정은 bstudio-guard(container_verify), docker를 부르는 순서는 bstudio-io(container_verify)가 한다. 여기는 값 변환만 한다.
+use bstudio_guard::container_verify as container_judge;
+use bstudio_guard::git_mask as gm;
+use bstudio_io::container_verify as cv;
+
+#[napi(object)]
+pub struct VerifyInputJs {
+    pub docker_bin: String,
+    pub env_vars: Option<HashMap<String, String>>,
+    pub list_args: Vec<String>,
+    pub project_root: String,
+    pub cwd: String,
+    pub project_name: String,
+    pub sandbox_network: String,
+    pub egress_network: String,
+    pub edge_service: String,
+    pub studio_caller: String,
+    pub service_label: String,
+    /// 서비스 → 마운트 계획(`MaskVolume[]`)의 JSON
+    pub git_mask_json: String,
+    /// 평가 자산 복사본(`{ path, source }[]`)의 JSON
+    pub assets_json: String,
+}
+
+#[napi(object)]
+pub struct VerifiedContainerJs {
+    pub id: String,
+    pub service: Option<String>,
+}
+
+/// `kind`가 `verified`면 `containers`가 확인한 컨테이너다. 그 밖의 값은 실패이고 `containers`는 비어 있다
+#[napi(object)]
+pub struct VerifyResultJs {
+    pub kind: String,
+    pub containers: Vec<VerifiedContainerJs>,
+    /// 실패한 docker 명령의 stderr 원문(가리기 전)
+    pub stderr: Option<String>,
+    pub detail: Option<String>,
+    pub platform: bool,
+    pub removal_failed: bool,
+}
+
+/// 만든 컨테이너를 시작하기 전에 확인한다(목록 → inspect → volume inspect → 판정 → 위반 컨테이너 지우기). 던지지 않고 결과로 돌려준다
+#[napi]
+pub fn verify_containers(env: Env, input: VerifyInputJs) -> Result<AsyncBlock<VerifyResultJs>> {
+    let git_mask = gm::record_from_json(&parse::<serde_json::Value>(&input.git_mask_json, "마스크 계획")?).map_err(Error::from_reason)?;
+    let assets: Vec<gm::AssetCopy> = parse(&input.assets_json, "평가 자산 복사본")?;
+    let verify_input = cv::VerifyInput {
+        docker_bin: input.docker_bin,
+        env: env_pairs(input.env_vars),
+        list_args: input.list_args,
+        project_root: input.project_root,
+        cwd: input.cwd,
+        project_name: input.project_name,
+        sandbox_network: input.sandbox_network,
+        egress_network: input.egress_network,
+        edge_service: input.edge_service,
+        studio_caller: input.studio_caller,
+        service_label: input.service_label,
+        git_mask,
+        assets,
+    };
+    AsyncBlockBuilder::new(async move {
+        Ok(match cv::verify_containers(&verify_input).await {
+            cv::VerifyOutcome::Verified(containers) => VerifyResultJs {
+                kind: "verified".to_owned(),
+                containers: containers.into_iter().map(|c| VerifiedContainerJs { id: c.id, service: c.service }).collect(),
+                stderr: None,
+                detail: None,
+                platform: false,
+                removal_failed: false,
+            },
+            cv::VerifyOutcome::Failed(failure) => VerifyResultJs {
+                kind: failure.kind.as_str().to_owned(),
+                containers: Vec::new(),
+                stderr: failure.stderr,
+                detail: failure.detail,
+                platform: failure.kind.platform(),
+                removal_failed: failure.removal_failed,
+            },
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct StartInputJs {
+    pub docker_bin: String,
+    pub env_vars: Option<HashMap<String, String>>,
+    pub verified: Vec<VerifiedContainerJs>,
+    pub services: Vec<String>,
+    /// 서비스 → (의존 → 조건)의 JSON(`encodeNative`). 서비스가 둘 이상일 때만 쓴다
+    pub depends_on_json: Option<String>,
+    pub poll_ms: u32,
+    pub wait_ms: u32,
+}
+
+#[napi(object)]
+pub struct StartResultJs {
+    pub missing: Vec<String>,
+    pub aborted: bool,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// 확인한 컨테이너만 id로 시작한다. `signal`로 취소하면 기다림을 멈추고 `aborted`를 켠다
+#[napi]
+pub fn start_verified_containers(env: Env, input: StartInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<StartResultJs>> {
+    let depends_on = match &input.depends_on_json {
+        Some(json) => Some(self::input(json, "depends_on")?),
+        None => None,
+    };
+    let start_input = cv::StartInput {
+        docker_bin: input.docker_bin,
+        env: env_pairs(input.env_vars),
+        verified: input.verified.into_iter().map(|c| cv::VerifiedContainer { id: c.id, service: c.service }).collect(),
+        services: input.services,
+        depends_on,
+        poll_ms: u64::from(input.poll_ms),
+        wait_ms: u64::from(input.wait_ms),
+    };
+    let cancel = Arc::new(cv::Cancel::default());
+    if let Some(signal) = signal {
+        let on_abort = cancel.clone();
+        signal.on_abort(move || on_abort.cancel());
+    }
+    AsyncBlockBuilder::new(async move {
+        let outcome = cv::start_verified(&start_input, &cancel).await;
+        Ok(StartResultJs { missing: outcome.missing, aborted: outcome.aborted, exit_code: outcome.result.exit_code, stdout: outcome.result.stdout, stderr: outcome.result.stderr })
+    })
+    .build(&env)
+}
+
+/// 합친 마스크에서 평가 자산 볼륨만 고른다(JSON)
+#[napi]
+pub fn select_evaluation_asset_volumes(env: Env, volumes_json: String, assets_json: String, cwd: String) -> Result<AsyncBlock<String>> {
+    let volumes: Vec<gm::MaskVolume> = parse(&volumes_json, "마스크 볼륨")?;
+    let assets: Vec<gm::AssetCopy> = parse(&assets_json, "평가 자산 복사본")?;
+    AsyncBlockBuilder::new(async move { Ok(serde_json::to_string(&cv::select_evaluation_asset_volumes(&volumes, &assets, &cwd).await).expect("직렬화")) }).build(&env)
+}
+
+/// 컨테이너의 실제 마운트에서 가림이 빠진 자리를 돌려준다. 모양을 몰라 확인하지 못하면 던진다(부르는 쪽이 통과로 읽지 않는다)
+#[napi]
+pub fn find_missing_masks(
+    env: Env,
+    project_root: String,
+    mounts_json: String,
+    volume_options_json: String,
+    planned_json: String,
+    tmpfs: Vec<String>,
+    cwd: String,
+) -> Result<AsyncBlock<Vec<String>>> {
+    let mounts = container_judge::parse_mounts(&serde_json::json!({ "Mounts": parse::<serde_json::Value>(&mounts_json, "마운트 목록")? })).map_err(Error::from_reason)?;
+    let volumes: HashMap<String, serde_json::Value> = parse(&volume_options_json, "볼륨 옵션")?;
+    let planned: Vec<gm::MaskVolume> = parse(&planned_json, "평가 자산 계획")?;
+    AsyncBlockBuilder::new(async move { cv::find_missing_masks(&project_root, &mounts, &volumes, &planned, &tmpfs, &cwd).await.map_err(Error::from_reason) }).build(&env)
+}

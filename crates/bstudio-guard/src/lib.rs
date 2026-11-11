@@ -15,6 +15,7 @@ pub mod compose_helpers;
 pub mod compose_override;
 pub mod connection_judge;
 pub mod container_policy;
+pub mod container_verify;
 pub mod context_clearing;
 pub mod contract_diff;
 pub mod coordination;
