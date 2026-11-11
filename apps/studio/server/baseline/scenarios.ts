@@ -370,7 +370,7 @@ export const terminalScenarios: Scenario[] = [
   },
   {
     name: 'terminal-read-only-bypass-not-reverted-when-sandbox-off',
-    // 이 사진은 고칠 결함(트러블슈팅 186)의 지금 동작을 고정한 것이다: 실패로 닫지만 샌드박스가 꺼져 있어 되돌리지 못하는데 글은 되돌렸다고 말한다. 고치는 PR에서 사진을 갱신한다
+    // 이 사진은 고칠 결함(트러블슈팅 185)의 지금 동작을 고정한 것이다: 실패로 닫지만 샌드박스가 꺼져 있어 되돌리지 못하는데 글은 되돌렸다고 말한다. 고치는 PR에서 사진을 갱신한다
     covers: '터미널 읽기만 요청: 훅을 우회해 파일이 바뀌면 실패로 닫지만, 샌드박스가 꺼져 있으면 되돌리지 못한다(결함 186의 지금 동작)',
     options: terminalOptions(),
     files: ['app/hello.txt'],
