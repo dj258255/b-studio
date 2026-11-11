@@ -259,91 +259,6 @@
       "app/hello.txt": "안녕\n"
     },
     "sessionJson": {
-      "version": 1,
-      "savedAt": "<savedAt>",
-      "owner": {
-        "pid": "<pid>"
-      },
-      "snapshot": {
-        "id": "<sid>",
-        "projectId": "demo",
-        "projectName": "demo",
-        "workDir": "<root>/sessions/demo-<sid>",
-        "workspace": "copy",
-        "status": "idle",
-        "mode": "claude-code",
-        "backend": "claude-code",
-        "running": false,
-        "owner": "local",
-        "experimental": true,
-        "terminal": true,
-        "terminalMode": "host",
-        "hasDeploy": false,
-        "services": [
-          {
-            "name": "app",
-            "template": "nextjs",
-            "preview": "browser",
-            "state": "stopped",
-            "hasContract": false
-          }
-        ],
-        "externals": [],
-        "checkpoints": [
-          {
-            "sha": "<sha:1>",
-            "shortSha": "<sha:1>",
-            "message": "세션 시작 (main 브랜치)",
-            "createdAt": "<createdAt>",
-            "files": [
-              "app/hello.txt",
-              "app/readme.txt",
-              "compose.yaml",
-              "studio.yaml"
-            ]
-          }
-        ],
-        "repository": {
-          "remote": "<root>/projects/demo",
-          "kind": "local",
-          "base": "main",
-          "branch": "b-studio/demo-<sid>",
-          "sourceDirtyFiles": 0,
-          "canCreatePullRequest": false
-        }
-      },
-      "history": [
-        {
-          "type": "run_started",
-          "runId": "<run:1>",
-          "request": "어떤 파일이 있나요?",
-          "by": "local",
-          "via": "terminal",
-          "at": "<at>",
-          "backend": "claude-code",
-          "taskKind": {
-            "complexity": "simple",
-            "risk": "normal"
-          }
-        },
-        {
-          "type": "agent",
-          "runId": "<run:1>",
-          "event": {
-            "type": "text",
-            "text": "app/hello.txt가 있습니다."
-          }
-        },
-        {
-          "type": "run_finished",
-          "runId": "<run:1>",
-          "status": "done",
-          "summary": "app/hello.txt가 있습니다.",
-          "durationMs": "<durationMs>"
-        }
-      ],
-      "conversation": [],
-      "demoIndex": 0,
       "claudeCode": {
         "notes": []
       },
@@ -354,27 +269,112 @@
       "commandCode": {
         "notes": []
       },
+      "conversation": [],
+      "demoIndex": 0,
+      "gemini": {
+        "notes": []
+      },
+      "git": {
+        "branch": "b-studio/demo-<sid>",
+        "lastCheckpoint": "<sha:1>",
+        "originUrl": "<root>/projects/demo"
+      },
+      "history": [
+        {
+          "at": "<at>",
+          "backend": "claude-code",
+          "by": "local",
+          "request": "어떤 파일이 있나요?",
+          "runId": "<run:1>",
+          "taskKind": {
+            "complexity": "simple",
+            "risk": "normal"
+          },
+          "type": "run_started",
+          "via": "terminal"
+        },
+        {
+          "event": {
+            "text": "app/hello.txt가 있습니다.",
+            "type": "text"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "durationMs": "<durationMs>",
+          "runId": "<run:1>",
+          "status": "done",
+          "summary": "app/hello.txt가 있습니다.",
+          "type": "run_finished"
+        }
+      ],
       "openCode": {
         "notes": []
       },
-      "gemini": {
-        "notes": []
+      "owner": {
+        "pid": "<pid>"
+      },
+      "previewToken": "<previewToken>",
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "savedAt": "<savedAt>",
+      "snapshot": {
+        "backend": "claude-code",
+        "checkpoints": [
+          {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ],
+            "message": "세션 시작 (main 브랜치)",
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>"
+          }
+        ],
+        "experimental": true,
+        "externals": [],
+        "hasDeploy": false,
+        "id": "<sid>",
+        "mode": "claude-code",
+        "owner": "local",
+        "projectId": "demo",
+        "projectName": "demo",
+        "repository": {
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "canCreatePullRequest": false,
+          "kind": "local",
+          "remote": "<root>/projects/demo",
+          "sourceDirtyFiles": 0
+        },
+        "running": false,
+        "services": [
+          {
+            "hasContract": false,
+            "name": "app",
+            "preview": "browser",
+            "state": "stopped",
+            "template": "nextjs"
+          }
+        ],
+        "status": "idle",
+        "terminal": true,
+        "terminalMode": "host",
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy"
       },
       "sourceDirtyFiles": 0,
       "terminalConversation": {
         "cli": "claude",
         "id": "conversation-1"
       },
-      "sandbox": {
-        "id": "<sandbox>",
-        "provider": "local-docker"
-      },
-      "previewToken": "<previewToken>",
-      "git": {
-        "branch": "b-studio/demo-<sid>",
-        "lastCheckpoint": "<sha:1>",
-        "originUrl": "<root>/projects/demo"
-      }
+      "version": 1
     }
   },
   "docker": {
