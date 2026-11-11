@@ -1,7 +1,7 @@
 import { constants } from 'node:fs';
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
 import path from 'node:path';
-import { parse } from 'yaml';
+import { readYaml, YamlReadError } from './yaml-read';
 import { z } from 'zod';
 import { findPublicUrlRefs, type PublicUrlRef } from './public-url';
 import {
@@ -322,10 +322,11 @@ function isInside(parent: string, target: string): boolean {
  */
 function parseYaml(source: string, label: string, options?: { merge?: boolean }): unknown {
   try {
-    return parse(source, options);
+    return readYaml(source, options);
   } catch (error) {
-    const pos = (error as { linePos?: Array<{ line: number; col: number }> }).linePos?.[0];
-    const code = (error as { code?: string }).code;
-    throw new SpecError(`${label}의 YAML 문법이 올바르지 않습니다${pos ? `(${pos.line}번째 줄 ${pos.col}번째 칸)` : ''}${code ? ` [${code}]` : ''}`);
+    if (!(error instanceof YamlReadError)) throw error;
+    // 오류 글에는 문제 글자를 싣지 않는다(읽으면 안 되는 파일의 내용이 새는 길이 된다). Rust 쪽 설명은 고정된 문구다
+    if (error.kind === 'unsupported') throw new SpecError(`${label}: 이 YAML 꼴은 지원하지 않습니다: ${error.detail}${error.where}`);
+    throw new SpecError(`${label}의 YAML 문법이 올바르지 않습니다${error.where}: ${error.detail}`);
   }
 }

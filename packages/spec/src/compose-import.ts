@@ -4,7 +4,7 @@
  * 잘 알려진 인프라 이미지를 쓰는 서비스를 읽어 `compose.b-studio.yaml`에 함께 넣을 형태로 정리한다.
  * 순수 함수만 둔다(파일을 찾고 읽는 일은 호출자가 한다) — apps/studio는 `yaml` 패키지를 직접 물고 있지 않고, 이 패키지는 이미 물고 있다.
  */
-import { parse } from 'yaml';
+import { readYaml } from './yaml-read';
 
 export type InfraEngine =
   | 'postgres'
@@ -127,7 +127,7 @@ export interface ComposeImportResult {
 export function importSupportingServices(composeText: string, sourceFile: string): ComposeImportResult {
   let doc: unknown;
   try {
-    doc = parse(composeText);
+    doc = readYaml(composeText);
   } catch {
     return { services: [], skipped: [] };
   }
@@ -669,7 +669,7 @@ export function detectBackendUrlEnvFromAssignments(text: string): (ServerBackend
 export function environmentFromComposeText(composeText: string, serviceName: string): Record<string, string> | undefined {
   let doc: unknown;
   try {
-    doc = parse(composeText);
+    doc = readYaml(composeText);
   } catch {
     return undefined;
   }
@@ -705,7 +705,7 @@ export function originalComposeServiceFor(
 ): { name: string; environment: Record<string, string> } | undefined {
   let doc: unknown;
   try {
-    doc = parse(composeText);
+    doc = readYaml(composeText);
   } catch {
     return undefined;
   }
