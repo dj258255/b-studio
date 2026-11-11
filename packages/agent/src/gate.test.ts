@@ -4,7 +4,8 @@ import path from 'node:path';
 import { PNG } from 'pngjs';
 import { SandboxError, type ExecResult, type LoadRequest, type LoadResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
 import { SpecError, SPEC_FILE, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as declaredChecks from './declared-checks';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
@@ -13,6 +14,12 @@ import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helper
 import { clearTestReportsCommand } from './test-run';
 import type { WorkflowCheck } from './workflow';
 import { Workspace } from './workspace';
+
+// 선언 비교를 던지게 만드는 시험이 부를 수 있게 비교 함수를 원래 구현을 따르는 spy로 바꾼다
+vi.mock('./declared-checks', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./declared-checks')>();
+  return { ...original, weakenedDeclarations: vi.fn(original.weakenedDeclarations) };
+});
 
 /** 단색 배경에 원하는 색을 칠한 PNG 버퍼를 만든다 */
 function image(width: number, height: number, paint: (x: number, y: number) => [number, number, number] = () => [255, 255, 255]): Buffer {
@@ -3398,6 +3405,27 @@ workflow:
     const check = gate.checks.find((entry) => entry.name === 'weakened-declarations');
     expect(check).toMatchObject({ stage: 'review', ok: false, attempts: 1 });
     expect(check?.detail).toContain('읽을 수 없게 바꿨습니다');
+    expect(gate.lastOutcome).toBe('retry');
+  });
+
+  it('선언을 견주지 못하면(비교가 던짐) 게이트를 거절하지 않고 리뷰 단계 실패로 남기며, 앞의 통과가 남지 않는다', async () => {
+    const target = withWorkflow({ tests: [unit] });
+    const { gate, workspace } = await setup(target);
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    expect(gate.lastOutcome).toBe('pass');
+
+    // 비교 판정은 네이티브라 견줄 수 없는 선언에서 던질 수 있다. YAML 읽기가 짝 없는 서로게이트를 먼저 막으므로(ADR-197) 비교 함수를 직접 던지게 한다
+    vi.mocked(declaredChecks.weakenedDeclarations).mockImplementationOnce(() => {
+      throw new Error('짝 없는 서로게이트가 든 선언');
+    });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; int n; }\n');
+    await workspace.write(SPEC_FILE, studioYaml({ tests: [{ ...unit, command: ['./gradlew', 'test2'] }] }));
+    const outcome = await gate.check();
+    expect(outcome.kind).toBe('retry');
+    const check = gate.checks.find((entry) => entry.name === 'weakened-declarations');
+    expect(check).toMatchObject({ stage: 'review', ok: false, attempts: 1 });
+    expect(check?.detail).toContain('견주지 못했습니다');
     expect(gate.lastOutcome).toBe('retry');
   });
 
