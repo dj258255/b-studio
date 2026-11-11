@@ -8,6 +8,7 @@ pub mod cli_command;
 pub mod deploy_io;
 pub mod exec_stream;
 pub mod git_mask_fs;
+pub mod host_port;
 pub mod log_stream;
 pub mod process;
 pub mod process_bytes;

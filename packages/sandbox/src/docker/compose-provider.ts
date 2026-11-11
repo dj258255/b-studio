@@ -59,6 +59,7 @@ import {
   SANDBOX_NETWORK,
 } from './format';
 import { externalCallScript } from './external-call';
+import { native } from '../native';
 import { awaitedCondition, loadDependsOn, startWaves } from './compose-deps';
 import {
   defaultEvaluationAssetRoot,
@@ -104,15 +105,13 @@ async function removeSandboxImages(dockerBin: string, sandboxId: string): Promis
 }
 
 /** Docker VM 디스크가 가득 찼을 때 원인과 다음 행동을 알려 주는 문구 */
-export const DOCKER_OUT_OF_SPACE = "Docker 디스크가 가득 찼습니다. 'studio sandbox prune --dry-run' 으로 남은 샌드박스 자원을 확인하고 정리하거나 Docker VM 디스크를 늘리세요.";
-
-/** 호스트에서 미리 고른 포트를 colima VM 안의 다른 컨테이너가 이미 쓰고 있을 때 compose up이 남기는 stderr 패턴들 */
-const PORT_BIND_CONFLICT = /failed to bind port .*address already in use|error starting userland proxy|address already in use|port is already allocated/i;
+export const DOCKER_OUT_OF_SPACE = native.dockerOutOfSpace();
 
 /** compose up 실패가 호스트↔VM 포트 가시성 차이로 인한 바인드 충돌인지 본다(findFreeHostPort가 미리 고른 포트를
  *  VM 안의 다른 컨테이너가 이미 쓰고 있는 경우) — 다른 실패(디스크 부족, 이미지 빌드 실패 등)는 재시도하지 않는다 */
 export function isPortBindConflict(stderr: string): boolean {
-  return PORT_BIND_CONFLICT.test(stderr);
+  // compose up이 남기는 stderr 패턴은 Rust(crates/bstudio-guard/src/compose_helpers.rs)가 정한다
+  return native.isPortBindConflict(stderr);
 }
 
 /** compose up 포트 충돌 재시도 한도(최초 시도 포함) */
@@ -124,7 +123,9 @@ const PORT_RETRY_ATTEMPTS = 3;
  */
 export function describeDockerFailure(error: unknown): string {
   const text = error instanceof Error ? error.message : String(error);
-  return text.includes('no space left on device') ? `${text}\n${DOCKER_OUT_OF_SPACE}` : text;
+  // 판정은 Rust가 한다. 원문은 그대로 들고 있다가 이어 붙인다(짝 없는 서로게이트가 napi 경계에서 바뀌지 않게)
+  const note = native.dockerOutOfSpaceNote(text);
+  return note ? `${text}\n${note}` : text;
 }
 
 /** 샌드박스 출입구 스크립트. 원격 Docker 호스트에서도 돌도록 파일을 마운트하지 않고 내용을 compose 설정에 넣는다 */
@@ -1189,13 +1190,7 @@ const COMPOSE_SERVICE_LABEL = 'com.docker.compose.service';
  *  - byId: 이름을 주고 `--no-deps`를 붙인 up이면 true. 의존 서비스를 따라 띄우지 않으므로 확인한 컨테이너의 id로 바로 시작한다
  */
 export function splitUpArgs(args: readonly string[]): { create: string[]; services: string[]; byId: boolean } {
-  const [command = 'up', ...rest] = args;
-  const services = rest.filter((arg) => !arg.startsWith('-'));
-  return {
-    create: [command, '--no-start', ...rest.filter((arg) => arg !== '--detach')],
-    services,
-    byId: services.length > 0 && rest.includes('--no-deps'),
-  };
+  return native.splitUpArgs([...args]);
 }
 
 /**
@@ -1212,7 +1207,7 @@ export async function preallocatePublicUrlPorts(project: LoadedProject): Promise
 
 /** 스튜디오 서버·CLI 환경 변수 B_STUDIO_CONTAINER_RUNTIME. 격리 수준은 프로젝트가 아니라 운영자가 정한다 */
 export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return env.B_STUDIO_CONTAINER_RUNTIME?.trim() || undefined;
+  return native.runtimeFromEnv(env.B_STUDIO_CONTAINER_RUNTIME) ?? undefined;
 }
 
 /**
@@ -1220,8 +1215,7 @@ export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | u
  * `docker builder prune`처럼 다른 프로젝트의 빌드 캐시까지 지우지 않는다 — 이 샌드박스에만 적용된다.
  */
 export function sandboxBuildNoCache(env: NodeJS.ProcessEnv = process.env): boolean {
-  const value = env.B_STUDIO_SANDBOX_BUILD_NO_CACHE?.trim().toLowerCase();
-  return value === '1' || value === 'true';
+  return native.sandboxBuildNoCache(env.B_STUDIO_SANDBOX_BUILD_NO_CACHE);
 }
 
 async function assertRuntime(dockerBin: string, runtime: string): Promise<void> {
