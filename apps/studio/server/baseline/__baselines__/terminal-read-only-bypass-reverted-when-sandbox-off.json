@@ -120,7 +120,7 @@
           "last_assistant_message": "설명입니다."
         },
         "output": {
-          "systemMessage": "[b-studio] [b-studio] 읽기만 요청인데 파일이 바뀌어 되돌렸습니다: app/hello.txt 샌드박스가 켜져 있지 않아 변경을 되돌리지 못했습니다."
+          "systemMessage": "[b-studio] 읽기만 요청인데 파일이 바뀌었습니다: app/hello.txt 바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다)."
         }
       }
     }
@@ -141,10 +141,27 @@
         }
       },
       {
+        "type": "reverted",
+        "runId": "<run:1>",
+        "files": [
+          "app/hello.txt"
+        ],
+        "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..a5c6145 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+우회한 변경\n",
+        "restarted": [],
+        "databases": [],
+        "backup": {
+          "id": "<time>-0001",
+          "files": [
+            "app/hello.txt"
+          ],
+          "createdAt": "<createdAt>"
+        }
+      },
+      {
         "type": "run_finished",
         "runId": "<run:1>",
         "status": "failed",
-        "summary": "[b-studio] 읽기만 요청인데 파일이 바뀌어 되돌렸습니다: app/hello.txt\n\n샌드박스가 켜져 있지 않아 변경을 되돌리지 못했습니다.",
+        "summary": "[b-studio] 읽기만 요청인데 파일이 바뀌었습니다: app/hello.txt\n\n바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다).",
         "durationMs": "<durationMs>"
       }
     ],
@@ -253,11 +270,9 @@
         "sha": "<sha:1>"
       }
     ],
-    "status": [
-      " M app/hello.txt"
-    ],
+    "status": [],
     "files": {
-      "app/hello.txt": "우회한 변경\n"
+      "app/hello.txt": "안녕\n"
     },
     "sessionJson": {
       "version": 1,
@@ -328,10 +343,27 @@
           }
         },
         {
+          "type": "reverted",
+          "runId": "<run:1>",
+          "files": [
+            "app/hello.txt"
+          ],
+          "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..a5c6145 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+우회한 변경\n",
+          "restarted": [],
+          "databases": [],
+          "backup": {
+            "id": "<time>-0001",
+            "files": [
+              "app/hello.txt"
+            ],
+            "createdAt": "<createdAt>"
+          }
+        },
+        {
           "type": "run_finished",
           "runId": "<run:1>",
           "status": "failed",
-          "summary": "[b-studio] 읽기만 요청인데 파일이 바뀌어 되돌렸습니다: app/hello.txt\n\n샌드박스가 켜져 있지 않아 변경을 되돌리지 못했습니다.",
+          "summary": "[b-studio] 읽기만 요청인데 파일이 바뀌었습니다: app/hello.txt\n\n바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다).",
           "durationMs": "<durationMs>"
         }
       ],

@@ -3171,7 +3171,16 @@ async function revertRun(session: Session, runId: string, options: { cancelled?:
 async function revertRunDetailed(
   session: Session,
   runId: string,
-  { cancelled = false, alsoRestart = [] }: { cancelled?: boolean; alsoRestart?: string[] } = {},
+  {
+    cancelled = false,
+    alsoRestart = [],
+    hostOnly = false,
+  }: {
+    cancelled?: boolean;
+    alsoRestart?: string[];
+    /** 샌드박스를 한 번도 켜지 않은 세션: 작업 복사본만 되돌리고 DB 복원·서비스 재시작은 하지 않는다(컨테이너가 없다). 켜지 않았으니 DB도 이 실행이 바꿀 수 없었다 */
+    hostOnly?: boolean;
+  } = {},
 ): Promise<{ files: string[]; keptDocs: string[] }> {
   const dbRestorePoint = session.snapshot.checkpoints[0]!.sha;
   // 이 컴퓨터 방식에서 HEAD가 기억과 다르면(실행 도중 끼워 넣은 커밋 등) 그 위에서 되돌리지 않는다. 기억한 체크포인트와 다른
@@ -3194,7 +3203,7 @@ async function revertRunDetailed(
   if (docsCheckpoint) await rememberGit(session, docsCheckpoint.sha);
   else if (!untrustedGit()) await rememberGit(session);
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다(위 dbRestorePoint 기준)
-  const database = await session.databases.restore(dbRestorePoint, session.stop.signal);
+  const database = hostOnly ? { states: [], dependents: [] } : await session.databases.restore(dbRestorePoint, session.stop.signal);
   // 문서 체크포인트가 새로 생겼으면, 복원한(바른) DB 상태를 그 체크포인트의 덤프로도 남겨 다음 되돌리기가
   // 같은 "덤프 없음" 문제를 반복하지 않게 한다(연속 실패 시나리오)
   if (docsCheckpoint) await saveDatabases(session, docsCheckpoint.sha);
@@ -3203,6 +3212,10 @@ async function revertRunDetailed(
   if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return { files, keptDocs };
   // 되돌린 파일에 studio.yaml(생성 파일 포함, 도그푸딩 마찰 127)이 있으면 재시작 전에 project를 다시 읽는다
   if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
+  if (hostOnly) {
+    emit(session, { type: 'reverted', runId, cancelled: cancelled || undefined, files, patch, restarted: [], databases: [], backup });
+    return { files, keptDocs };
+  }
 
   const report = await restartServicesFor(
     session.sandbox,
@@ -7653,7 +7666,7 @@ function terminalViolation(id: string, reason: string): void {
     run.terminal.violation = reason;
     // 되돌리는 동안에도 실행은 세션에 걸려 있어 다른 요청이 끼어들지 못한다. 이미 닫혔으면 abandonTerminalRun이 아무 일도 하지 않는다
     void run.terminal
-      .serial(() => abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청의 변경을 되돌렸습니다: ${reason}` }))
+      .serial(() => abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을 실패로 닫습니다: ${reason}` }))
       .catch((error: unknown) => console.error('[b-studio] 감지된 위반으로 터미널 실행을 닫지 못했습니다', error));
     return;
   }
@@ -7664,8 +7677,14 @@ function terminalViolation(id: string, reason: string): void {
 
 /** 위반 사유로 실행을 실패로 닫고 이번 실행의 변경을 되돌린다. 에이전트에게는 되돌린 결과를 알린다(피드백이 아니다) */
 async function failTerminalRunForViolation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, reason: string): Promise<{ message: string }> {
-  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청의 변경을 되돌렸습니다: ${reason}` });
-  return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을 실패로 닫습니다: ${reason}` });
+  return { message: hookMessage(summary) };
+}
+
+/** 훅 답의 한 줄 알림. 사유 글이 이미 `[b-studio]`로 시작하면 다시 붙이지 않는다 */
+function hookMessage(summary: string): string {
+  const line = summary.replace(/\n+/g, ' ');
+  return line.startsWith('[b-studio]') ? line : `[b-studio] ${line}`;
 }
 
 /** 지금 터미널의 요청을 받을 수 없으면 그 이유 */
@@ -7754,7 +7773,10 @@ async function changesOutsideTools(session: Session): Promise<string[]> {
  * 통과하지 못한 채 끝나는 실행을 닫는다. 대화 창의 요청(execute)과 같은 규칙이다:
  *  - 이번 실행의 변경을 마지막 체크포인트로 되돌린다. 보관본이 남아 화면에서 되살릴 수 있다. 서비스도 되돌린 코드로 다시 뜬다
  *  - 샌드박스·도커 쪽 문제로 검증하지 못한 것(platformFailure)은 되돌리지 않는다. 바꾼 코드의 문제가 아니다(트러블슈팅 117)
- *  - 샌드박스가 켜져 있지 않으면 되돌릴 수 없다
+ *  - 샌드박스를 한 번도 켜지 않은 세션(지연 기동, bootPromise 없음)은 컨테이너가 없어 DB 복원과 서비스 재시작 없이 작업 복사본만 되돌린다.
+ *    읽기만 요청은 샌드박스를 켜지 않으므로, 훅을 우회한 변경을 알아보는 때가 바로 이 경우다(트러블슈팅 185)
+ *  - 켜는 중이거나 켜지 못한 세션은 되돌리지 않는다. 되돌리는 동안 컨테이너가 같은 파일을 보며 뜰 수 있다. 바뀐 파일이 남는다고 알린다
+ * 결과를 말하는 글은 되돌리기가 끝난 뒤에 붙인다. 사유 글(reason)에는 "되돌렸다"를 미리 쓰지 않는다
  * 되돌리는 동안에도 실행은 세션에 걸려 있어(session.run) 다른 요청이 끼어들지 못한다. 한 번만 한다
  */
 async function abandonTerminalRun(
@@ -7774,15 +7796,17 @@ async function abandonTerminalRun(
     const text = `b-studio 쪽(샌드박스·도커) 문제로 검증하지 못했습니다. 바꾼 코드의 문제가 아니라서 변경을 되돌리지 않고 작업 복사본에 그대로 뒀습니다(체크포인트는 남기지 않았습니다). 문제를 해결한 뒤 다음 요청을 보내면 그때 이 변경을 다시 검증합니다: ${platformFailure}`;
     emit(session, { type: 'notice', text, at: new Date().toISOString() });
     summary = `${summary}\n\n변경은 되돌리지 않았습니다.`.trim();
-  } else if (session.snapshot.status !== 'ready') {
-    summary = `${summary}\n\n샌드박스가 켜져 있지 않아 변경을 되돌리지 못했습니다.`.trim();
+  } else if (session.snapshot.status !== 'ready' && session.bootPromise) {
+    summary = `${summary}\n\n샌드박스가 켜지는 중이거나 켜지지 못해 변경을 되돌리지 못했습니다. 바뀐 파일은 작업 복사본에 그대로 남아 있습니다.`.trim();
   } else {
     const cancelled = status === 'cancelled';
+    // 샌드박스를 한 번도 켜지 않았다: 띄울 서비스도 복원할 DB 컨테이너도 없다
+    const hostOnly = !session.bootPromise;
     // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
-    const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
+    const unsettled = cancelled && !hostOnly ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
     let revertError: unknown;
     let keptDocs: string[] = [];
-    const reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled })
+    const reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled, hostOnly })
       .then((result) => {
         keptDocs = result.keptDocs;
         return result.files;
@@ -8169,10 +8193,10 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       const changed = [...new Set([...(await session.checkpoints.pendingFiles()), ...(await session.checkpoints.pendingExcludedFiles())])];
       const reason =
         before === undefined || after === undefined
-          ? '[b-studio] 읽기만 요청인데 파일이 바뀌었는지 확인하지 못해 되돌렸습니다'
-          : `[b-studio] 읽기만 요청인데 파일이 바뀌어 되돌렸습니다: ${changed.slice(0, 5).join(', ')}`;
+          ? '[b-studio] 읽기만 요청인데 파일이 바뀌었는지 확인하지 못했습니다'
+          : `[b-studio] 읽기만 요청인데 파일이 바뀌었습니다: ${changed.slice(0, 5).join(', ')}`;
       const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
-      return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+      return { message: hookMessage(summary) };
     }
     // 이 실행이 바꾼 것이 없다(사람이 미리 고쳐 둔 파일이 있어도). 게이트를 돌리지 않고 답만 한 턴으로 끝낸다
     settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
