@@ -11,7 +11,6 @@ import { crashLogExcerpt, DEFAULT_READINESS, ReadinessError, shouldRetryTransien
 import { assertSandboxId } from '../sandbox-id';
 import { Redactor } from '../secrets';
 import { composeEnvironment } from './compose-env';
-import { findPolicyViolations, type InspectedContainerPolicy } from './container-policy';
 import { withRemovedDirectories } from '../sync-paths';
 import type {
   BootNetwork,
@@ -60,7 +59,7 @@ import {
 } from './format';
 import { externalCallScript } from './external-call';
 import { native } from '../native';
-import { awaitedCondition, loadDependsOn, startWaves } from './compose-deps';
+import { loadDependsOn } from './compose-deps';
 import {
   defaultEvaluationAssetRoot,
   evaluationAssetSandboxDir,
@@ -70,7 +69,8 @@ import {
   type EvaluationAssetSlot,
 } from './evaluation-assets';
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
-import { findMissingMasks, loadGitMask, selectEvaluationAssetVolumes, type InspectedMount, type MaskVolume } from './git-mask';
+import { loadGitMask, type MaskVolume } from './git-mask';
+import { startVerifiedContainers, verifyContainers, type VerifiedContainer } from './verify-containers';
 import { bindMounts, planRelay, RELAY_SCRIPT } from './relay';
 import { foreignProcesses, scanProcesses, type ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage, mergeUsage, parseInspectOutput, parseStatsOutput } from './usage';
@@ -954,148 +954,46 @@ class LocalDockerSandbox implements Sandbox {
   /**
    * 확인한 컨테이너를 id로 시작한다. 서비스가 여럿이면 `up --no-deps a b`가 하던 대로 **목록 안의 의존 순서**를 지키고,
    * `service_healthy`·`service_completed_successfully` 조건은 그 상태가 될 때까지 기다린 뒤 다음 묶음을 시작한다.
-   * 목록에 없는 의존 서비스는 건드리지 않는다. 실패는 compose의 실패처럼 종료 코드와 stderr로 돌려준다
+   * 목록에 없는 의존 서비스는 건드리지 않는다. 실패는 compose의 실패처럼 종료 코드와 stderr로 돌려준다.
+   * 순서와 기다림은 Rust(crates/bstudio-io/src/container_verify.rs)가 한다. 의존 관계를 읽는 `compose config`만 여기서 부른다
    */
-  async #startVerified(verified: ReadonlyArray<{ id: string; service: string | undefined }>, services: readonly string[], signal?: AbortSignal): Promise<ExecResult> {
-    const idsOf = (names: readonly string[]) => verified.filter((container) => container.service !== undefined && names.includes(container.service)).map((container) => container.id);
-    const missing = services.filter((service) => idsOf([service]).length === 0);
-    if (missing.length > 0) throw new SandboxError(`만든 컨테이너를 찾지 못해 시작하지 않았습니다 (${this.id})`, missing.join(', '), { platform: true });
-    if (services.length === 1) return this.#docker(['start', ...idsOf(services)], signal);
-
-    const dependsOn = await loadDependsOn(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
-    const waves = startWaves(services, dependsOn);
-    let last: ExecResult = { exitCode: 0, stdout: '', stderr: '' };
-    for (const [index, wave] of waves.entries()) {
-      last = await this.#docker(['start', ...idsOf(wave)], signal);
-      if (last.exitCode !== 0) return last;
-      const later = waves.slice(index + 1).flat();
-      for (const service of wave) {
-        const condition = awaitedCondition(service, later, dependsOn);
-        if (!condition) continue;
-        const problem = await this.#waitForDependency(idsOf([service]), service, condition, signal);
-        if (problem) return { exitCode: 1, stdout: '', stderr: problem };
-      }
-    }
-    return last;
-  }
-
-  /** 의존 서비스가 조건을 채울 때까지 기다린다. 채우지 못하면 사유를 돌려준다(compose의 "dependency failed to start"와 같은 자리) */
-  async #waitForDependency(ids: readonly string[], service: string, condition: 'service_healthy' | 'service_completed_successfully', signal?: AbortSignal): Promise<string | undefined> {
-    const deadline = Date.now() + DEPENDENCY_WAIT_MS;
-    for (;;) {
-      signal?.throwIfAborted();
-      const inspected = await this.#docker(['inspect', '--format', '{{json .State}}', ...ids]);
-      if (inspected.exitCode !== 0) return `dependency failed to start: ${service}의 상태를 읽지 못했습니다`;
-      let states: Array<{ Status?: string; ExitCode?: number; Health?: { Status?: string } | null }>;
-      try {
-        states = inspected.stdout.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line));
-      } catch {
-        return `dependency failed to start: ${service}의 상태를 해석하지 못했습니다`;
-      }
-      if (states.length === 0) return `dependency failed to start: ${service}의 상태를 읽지 못했습니다`;
-      if (condition === 'service_healthy') {
-        // compose와 같다: healthcheck가 없는 서비스에 service_healthy를 걸면 기다릴 수 없어 실패한다
-        if (states.some((state) => !state.Health)) return `dependency failed to start: container ${service} has no healthcheck configured`;
-        if (states.every((state) => state.Health?.Status === 'healthy')) return undefined;
-        if (states.some((state) => state.Health?.Status === 'unhealthy')) return `dependency failed to start: container ${service} is unhealthy`;
-        if (states.some((state) => state.Status === 'exited' || state.Status === 'dead')) return `dependency failed to start: container ${service} exited`;
-      } else {
-        if (states.every((state) => state.Status === 'exited' && state.ExitCode === 0)) return undefined;
-        const failed = states.find((state) => state.Status === 'exited' && state.ExitCode !== 0);
-        if (failed) return `service "${service}" didn't complete successfully: exit ${failed.ExitCode}`;
-      }
-      if (Date.now() > deadline) return `dependency failed to start: ${service}이(가) ${Math.round(DEPENDENCY_WAIT_MS / 1000)}초 안에 준비되지 않았습니다`;
-      await sleep(this.#dependencyPollMs, undefined, { signal });
-    }
+  async #startVerified(verified: ReadonlyArray<VerifiedContainer>, services: readonly string[], signal?: AbortSignal): Promise<ExecResult> {
+    const dependsOn = services.length === 1 ? undefined : await loadDependsOn(this.project, { dockerBin: this.#dockerBin, env: this.#environment(), projectName: this.id, redact: (text) => this.redact(text) });
+    return startVerifiedContainers({
+      id: this.id,
+      dockerBin: this.#dockerBin,
+      env: this.#environment(),
+      verified,
+      services,
+      dependsOn,
+      pollMs: this.#dependencyPollMs,
+      waitMs: DEPENDENCY_WAIT_MS,
+      ...(signal ? { signal } : {}),
+    });
   }
 
   /**
    * 이 샌드박스의 실제 컨테이너 마운트를 보고, 확인한 컨테이너(id와 서비스 이름)를 돌려준다.
    * `.git` 보호가 빠진 컨테이너가 있으면 지우고 던진다 — 시작하기 전이면 한 번도 시작되지 않고, 시작한 뒤면 바로 죽인다
    * (`docker stop`은 종료를 10초까지 기다려 그동안 보호 없이 돈다). 목록·마운트·볼륨 정보를 읽지 못했거나
-   * 컨테이너가 하나도 보이지 않으면 확인하지 못한 것이므로 던진다
+   * 컨테이너가 하나도 보이지 않으면 확인하지 못한 것이므로 던진다. 순서·판정·지우기는 Rust 함수 하나가 한다(ADR-195 4f A4b)
    */
-  async #verifyMasks(phase: 'created' | 'started'): Promise<Array<{ id: string; service: string | undefined }>> {
-    const listed = await this.#docker(this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']));
-    // 목록을 읽지 못한 것을 "컨테이너 없음"으로 보면 확인을 건너뛴 채 시작하게 된다
-    if (listed.exitCode !== 0) throw new SandboxError(`컨테이너 목록을 확인하지 못했습니다 (${this.id})`, this.redact(listed.stderr), { platform: true });
-    const ids = listed.stdout.split('\n').map((id) => id.trim()).filter(Boolean);
-    // 만들기가 성공했는데 컨테이너가 보이지 않는다. 볼 것이 없다는 것은 확인했다는 뜻이 아니다
-    if (ids.length === 0) throw new SandboxError(`컨테이너가 보이지 않아 .git 보호를 확인하지 못했습니다 (${this.id})`, undefined, { platform: true });
-    const inspected = await this.#docker(['inspect', ...ids]);
-    if (inspected.exitCode !== 0) throw new SandboxError(`컨테이너 마운트를 확인하지 못했습니다 (${this.id})`, this.redact(inspected.stderr), { platform: true });
-    let containers: Array<Omit<InspectedContainerPolicy, 'Mounts' | 'Config'> & { Id: string; Name?: string; Mounts?: InspectedMount[]; Config?: { Labels?: Record<string, string> } }>;
-    try {
-      containers = JSON.parse(inspected.stdout);
-    } catch {
-      throw new SandboxError(`컨테이너 마운트(docker inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
-    }
-    // 목록의 컨테이너를 빠짐없이 봤는지 맞춰 본다. 일부만 돌아오면 나머지는 확인하지 않은 채 지나간다
-    const seen = new Set(Array.isArray(containers) ? containers.map((container) => container?.Id) : []);
-    if (!Array.isArray(containers) || ids.some((id) => !seen.has(id))) {
-      throw new SandboxError(`컨테이너 마운트를 일부만 확인했습니다 (${this.id})`, undefined, { platform: true });
-    }
-    const names = [...new Set(containers.flatMap((container) => (container.Mounts ?? []).filter((mount) => mount.Type === 'volume' && mount.Name).map((mount) => mount.Name!)))];
-    const volumeOptions: Record<string, { driver?: string; driver_opts?: Record<string, string> }> = {};
-    if (names.length > 0) {
-      const volumes = await this.#docker(['volume', 'inspect', ...names]);
-      // 볼륨 정보를 읽지 못하면 호스트 폴더에 묶인 이름 있는 볼륨을 알아볼 수 없어, 그 마운트의 보호가 빠져도 지나치게 된다
-      if (volumes.exitCode !== 0) throw new SandboxError(`볼륨 정보를 확인하지 못했습니다 (${this.id})`, this.redact(volumes.stderr), { platform: true });
-      try {
-        for (const volume of JSON.parse(volumes.stdout) as Array<{ Name: string; Driver?: string; Options?: Record<string, string> | null }>) {
-          volumeOptions[volume.Name] = { ...(volume.Driver ? { driver: volume.Driver } : {}), driver_opts: volume.Options ?? {} };
-        }
-      } catch {
-        throw new SandboxError(`볼륨 정보(docker volume inspect)를 해석하지 못했습니다 (${this.id})`, undefined, { platform: true });
-      }
-      // 물어본 볼륨이 답에 없으면 그 마운트가 호스트 폴더에 묶였는지 알 수 없다
-      const unknown = names.filter((name) => volumeOptions[name] === undefined);
-      if (unknown.length > 0) throw new SandboxError(`볼륨 정보를 일부만 확인했습니다 (${this.id})`, unknown.join(', '), { platform: true });
-    }
-    const failures: string[] = [];
-    const violations: string[] = [];
-    const remove: string[] = [];
-    // 평가 자산 자리의 기대는 계획(override에 적은 target·원본)에서 가져온다. 실제 마운트에서 거꾸로 계산하지 않는다
-    const evaluationAssetPlan: Record<string, MaskVolume[]> = {};
-    for (const [service, volumes] of Object.entries(this.#gitMask)) {
-      const planned = await selectEvaluationAssetVolumes(volumes, this.#evaluationAssets);
-      if (planned.length > 0) evaluationAssetPlan[service] = planned;
-    }
-    for (const container of containers) {
-      const service = container.Config?.Labels?.[COMPOSE_SERVICE_LABEL];
-      const name = service ?? container.Name ?? container.Id;
-      // compose 파일로 권한·네임스페이스·네트워크·포트·호스트 경로를 바꾼 컨테이너(이슈 #701). 마운트처럼 실제 설정을 본다
-      const escalated = findPolicyViolations(container, { projectName: this.id, sandboxNetwork: SANDBOX_NETWORK, egressNetwork: EGRESS_NETWORK, edgeService: EDGE_SERVICE });
-      const missing = await findMissingMasks(this.project.root, container.Mounts ?? [], volumeOptions, {
-        evaluationAssetPlan,
-        service,
-        tmpfs: container.HostConfig?.Tmpfs ?? {},
-      });
-      if (escalated.length === 0 && missing.length === 0) continue;
-      remove.push(container.Id);
-      if (escalated.length > 0) violations.push(`${name}: ${escalated.join(', ')}`);
-      if (missing.length > 0) failures.push(`${name}: ${missing.join(', ')}`);
-    }
-    if (remove.length === 0) return containers.map((container) => ({ id: container.Id, service: container.Config?.Labels?.[COMPOSE_SERVICE_LABEL] }));
-    // 지워 두면 다음 up이 새로 만들고 다시 확인한다. 남겨 두면 만들어진 채로 있어 다른 경로로 시작될 여지가 생긴다
-    const removed = await this.#docker(['rm', '--force', ...remove]);
-    const left = removed.exitCode === 0 ? '' : ' 그 컨테이너를 지우지 못했습니다 — 아직 돌고 있을 수 있습니다';
-    if (violations.length > 0) {
-      // 에이전트가 고친 compose 파일이 원인이므로 플랫폼 실패로 표시하지 않는다. 에이전트가 사유를 읽고 compose를 되돌릴 수 있다
-      throw new SandboxError(
-        phase === 'created'
-          ? `컨테이너에 샌드박스 격리를 벗어나는 설정이 있어 시작하지 않았습니다 (${this.id})${left}`
-          : `컨테이너에 샌드박스 격리를 벗어나는 설정이 있어 내렸습니다 (${this.id})${left}`,
-        [...violations, ...failures].join('\n'),
-      );
-    }
-    throw new SandboxError(
-      phase === 'created'
-        ? `컨테이너에 .git 읽기 전용 마운트가 빠져 시작하지 않았습니다 (${this.id})${left}`
-        : `컨테이너에 .git 읽기 전용 마운트가 빠져 내렸습니다 (${this.id})${left}`,
-      failures.join('\n'),
-      { platform: true },
-    );
+  async #verifyMasks(phase: 'created' | 'started'): Promise<VerifiedContainer[]> {
+    return verifyContainers({
+      id: this.id,
+      dockerBin: this.#dockerBin,
+      env: this.#environment(),
+      listArgs: this.#composeArgs(['ps', '--all', '--quiet', '--no-trunc']),
+      projectRoot: this.project.root,
+      gitMask: this.#gitMask,
+      evaluationAssets: this.#evaluationAssets,
+      sandboxNetwork: SANDBOX_NETWORK,
+      egressNetwork: EGRESS_NETWORK,
+      edgeService: EDGE_SERVICE,
+      serviceLabel: COMPOSE_SERVICE_LABEL,
+      phase,
+      redact: (text) => this.redact(text),
+    });
   }
 
   // docker/docker compose를 한 번 돌려 stdout·stderr를 모은다. 실행·취소는 Rust(crates/bstudio-io)가 한다(2c-2, #1043).

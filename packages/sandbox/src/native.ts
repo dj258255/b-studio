@@ -161,6 +161,11 @@ interface NativeGuard {
   realPath(target: string, cwd: string): Promise<string>;
   detectGitEntries(projectRoot: string, mountSources: string[], cwd: string): Promise<NativeGitEntry[]>;
   prepareStateMasks(entries: NativeGitEntry[]): Promise<{ entries: NativeGitEntry[]; failure?: { state: string; detail: string } | null }>;
+  // 컨테이너 사후 확인과 확인한 컨테이너 시작(ADR-195 4f A4b). verifyContainers는 던지지 않고 결과로 돌려준다
+  verifyContainers(input: NativeVerifyInput): Promise<NativeVerifyResult>;
+  startVerifiedContainers(input: NativeStartInput, signal: AbortSignal | undefined | null): Promise<NativeStartResult>;
+  selectEvaluationAssetVolumes(volumesJson: string, assetsJson: string, cwd: string): Promise<string>;
+  findMissingMasks(projectRoot: string, mountsJson: string, volumeOptionsJson: string, plannedJson: string, tmpfs: string[], cwd: string): Promise<string[]>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -752,6 +757,71 @@ export interface NativeExecSession {
   write(data: Buffer): boolean;
   end(): void;
   terminate(): void;
+}
+
+export interface NativeVerifyInput {
+  dockerBin: string;
+  envVars?: Record<string, string>;
+  listArgs: string[];
+  projectRoot: string;
+  cwd: string;
+  projectName: string;
+  sandboxNetwork: string;
+  egressNetwork: string;
+  edgeService: string;
+  studioCaller: string;
+  serviceLabel: string;
+  /** 서비스 → 마운트 계획(`MaskVolume[]`)의 JSON */
+  gitMaskJson: string;
+  /** 평가 자산 복사본(`{ path, source }[]`)의 JSON */
+  assetsJson: string;
+}
+
+export interface NativeVerifiedContainer {
+  id: string;
+  service?: string | null;
+}
+
+/** `kind`가 `verified`면 `containers`가 확인한 컨테이너다. 그 밖의 값은 실패다 */
+export interface NativeVerifyResult {
+  kind: NativeVerifyKind;
+  containers: NativeVerifiedContainer[];
+  /** 실패한 docker 명령의 stderr 원문(가리기 전) */
+  stderr?: string | null;
+  detail?: string | null;
+  platform: boolean;
+  removalFailed: boolean;
+}
+
+export type NativeVerifyKind =
+  | 'verified'
+  | 'list-failed'
+  | 'no-containers'
+  | 'inspect-failed'
+  | 'inspect-unparsed'
+  | 'inspect-partial'
+  | 'volume-failed'
+  | 'volume-unparsed'
+  | 'volume-partial'
+  | 'policy'
+  | 'mask';
+
+export interface NativeStartInput {
+  dockerBin: string;
+  envVars?: Record<string, string>;
+  verified: NativeVerifiedContainer[];
+  services: string[];
+  dependsOnJson?: string;
+  pollMs: number;
+  waitMs: number;
+}
+
+export interface NativeStartResult {
+  missing: string[];
+  aborted: boolean;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
 }
 
 export interface NativeGitEntry {

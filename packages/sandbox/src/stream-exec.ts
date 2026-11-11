@@ -14,7 +14,7 @@ interface StreamExecOptions {
 }
 
 /** `NodeJS.ProcessEnv`에서 값이 정의된 쌍만 추린다. `env`가 없으면 undefined(상속) */
-function definedEnv(env?: NodeJS.ProcessEnv): Record<string, string> | undefined {
+export function definedEnv(env?: NodeJS.ProcessEnv): Record<string, string> | undefined {
   if (!env) return undefined;
   const defined: Record<string, string> = {};
   for (const [name, value] of Object.entries(env)) {
