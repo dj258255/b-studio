@@ -4747,3 +4747,194 @@ pub fn missing_services(env: Env, compose: ComposeRefJs, override_path: String, 
     let cancel = abort_cancel(signal);
     AsyncBlockBuilder::new(async move { Ok(rio::missing_services(&compose, &override_path, &names, Some(&cancel)).await) }).build(&env)
 }
+
+// ── 의존성 스냅샷·공유 볼륨·stats(ADR-195 4f A4c-3b) ──
+// 판정은 bstudio-guard(snapshots·usage), 키 파일 읽기와 docker를 부르는 순서는 bstudio-io(snapshot_io)가 한다.
+// `up`은 여기서 부르지 않는다(TS의 `#upQueue`·`#gitMask`를 지나야 한다). 이벤트(`onSnapshot`)를 알리는 것도 TS다. TS 껍데기: packages/sandbox/src/docker/snapshot-run.ts
+use bstudio_io::snapshot_io as sio;
+
+#[napi(object)]
+pub struct SnapshotScopeJs {
+    /// studio.yaml의 프로젝트 이름(스냅샷 이름·자리에 든다)
+    pub project_name: String,
+    pub sandbox_id: String,
+}
+
+fn snapshot_scope(js: SnapshotScopeJs) -> sio::Scope {
+    sio::Scope { project_name: js.project_name, sandbox_id: js.sandbox_id }
+}
+
+#[napi(object)]
+pub struct PlanVolumeJs {
+    pub service: String,
+    pub volume: String,
+    /// 프로젝트 루트 기준 서비스 폴더
+    pub spec_path: String,
+    pub key: Vec<String>,
+}
+
+#[napi(object)]
+pub struct SnapshotPlanJs {
+    pub service: String,
+    pub volume: String,
+    pub snapshot: String,
+    pub slot: String,
+    pub sandbox_volume: String,
+}
+
+fn snapshot_plan(js: SnapshotPlanJs) -> sio::Plan {
+    sio::Plan { service: js.service, volume: js.volume, snapshot: js.snapshot, slot: js.slot, sandbox_volume: js.sandbox_volume }
+}
+
+/// 키 파일을 호스트에서 읽어 스냅샷마다 이름을 만든다. docker를 부르지 않는다
+#[napi]
+pub fn plan_snapshots(env: Env, scope: SnapshotScopeJs, root: String, volumes: Vec<PlanVolumeJs>) -> Result<AsyncBlock<Vec<SnapshotPlanJs>>> {
+    let scope = snapshot_scope(scope);
+    let volumes: Vec<sio::PlanVolume> = volumes.into_iter().map(|v| sio::PlanVolume { service: v.service, volume: v.volume, spec_path: v.spec_path, key: v.key }).collect();
+    AsyncBlockBuilder::new(async move {
+        let plans = sio::plan_snapshots(&scope, &root, &volumes).await;
+        Ok(plans.into_iter().map(|p| SnapshotPlanJs { service: p.service, volume: p.volume, snapshot: p.snapshot, slot: p.slot, sandbox_volume: p.sandbox_volume }).collect())
+    })
+    .build(&env)
+}
+
+/// `kind`: `missing` · `seeded`(elapsedMs) · `failed`(reason)
+#[napi(object)]
+pub struct SeedResultJs {
+    pub kind: String,
+    pub elapsed_ms: f64,
+    pub reason: Option<String>,
+}
+
+/// 스냅샷이 있으면 이 샌드박스의 볼륨을 만들어 채운다. 던지지 않고 결과(`kind`)로 돌려준다
+#[napi]
+pub fn seed_snapshot(env: Env, compose: ComposeRefJs, scope: SnapshotScopeJs, plan: SnapshotPlanJs, image: String, signal: Option<AbortSignal>) -> Result<AsyncBlock<SeedResultJs>> {
+    let (compose, scope, plan) = (compose_ref(compose), snapshot_scope(scope), snapshot_plan(plan));
+    let cancel = abort_cancel(signal);
+    AsyncBlockBuilder::new(async move {
+        Ok(match sio::seed_snapshot(&compose, &scope, &plan, &image, Some(&cancel)).await {
+            sio::SeedOutcome::Missing => SeedResultJs { kind: "missing".into(), elapsed_ms: 0.0, reason: None },
+            sio::SeedOutcome::Seeded { elapsed_ms } => SeedResultJs { kind: "seeded".into(), elapsed_ms: elapsed_ms as f64, reason: None },
+            sio::SeedOutcome::Failed { reason } => SeedResultJs { kind: "failed".into(), elapsed_ms: 0.0, reason: Some(reason) },
+        })
+    })
+    .build(&env)
+}
+
+/// `kind`: `existing` · `captured`(elapsedMs) · `failed`(message·detail)
+#[napi(object)]
+pub struct CaptureResultJs {
+    pub kind: String,
+    pub elapsed_ms: f64,
+    pub message: Option<String>,
+    pub detail: Option<String>,
+}
+
+/// 설치가 끝난 샌드박스 볼륨을 스냅샷 볼륨으로 복사한다. 정리는 하지 않는다(`pruneSnapshots`)
+#[napi]
+pub fn capture_snapshot(env: Env, compose: ComposeRefJs, scope: SnapshotScopeJs, plan: SnapshotPlanJs, image: String) -> Result<AsyncBlock<CaptureResultJs>> {
+    let (compose, scope, plan) = (compose_ref(compose), snapshot_scope(scope), snapshot_plan(plan));
+    AsyncBlockBuilder::new(async move {
+        Ok(match sio::capture_snapshot(&compose, &scope, &plan, &image).await {
+            sio::CaptureOutcome::Existing => CaptureResultJs { kind: "existing".into(), elapsed_ms: 0.0, message: None, detail: None },
+            sio::CaptureOutcome::Captured { elapsed_ms } => CaptureResultJs { kind: "captured".into(), elapsed_ms: elapsed_ms as f64, message: None, detail: None },
+            sio::CaptureOutcome::Failed { message, detail } => CaptureResultJs { kind: "failed".into(), elapsed_ms: 0.0, message: Some(message), detail: Some(detail) },
+        })
+    })
+    .build(&env)
+}
+
+/// `kind`: `done`(removed: `volume rm`을 부른 이름) · `dates-unknown` · `refused`
+#[napi(object)]
+pub struct PruneResultJs {
+    pub kind: String,
+    pub removed: Vec<String>,
+}
+
+/// 같은 자리의 스냅샷 가운데 최근 2개만 남긴다. `parseDates`는 만든 시각 글의 JSON 배열을 받아 같은 길이의 숫자 JSON 배열(읽을 수 없으면 null)을 돌려준다(JS `Date.parse`)
+#[napi]
+pub fn prune_snapshots(
+    env: Env,
+    compose: ComposeRefJs,
+    scope: SnapshotScopeJs,
+    plan: SnapshotPlanJs,
+    parse_dates: ThreadsafeFunction<String, String, String, Status, false>,
+) -> Result<AsyncBlock<PruneResultJs>> {
+    let (compose, scope, plan) = (compose_ref(compose), snapshot_scope(scope), snapshot_plan(plan));
+    let parse_dates = Arc::new(parse_dates);
+    AsyncBlockBuilder::new(async move {
+        let parser: sio::DateParser = Arc::new(move |texts: Vec<String>| {
+            let parse_dates = parse_dates.clone();
+            Box::pin(async move {
+                let json = serde_json::to_string(&texts).ok()?;
+                let answer = parse_dates.call_async(json).await.ok()?;
+                let values: Vec<Option<f64>> = serde_json::from_str(&answer).ok()?;
+                Some(values.into_iter().map(|value| value.unwrap_or(f64::NAN)).collect())
+            })
+        });
+        Ok(match sio::prune_snapshots(&compose, &scope, &plan, &parser).await {
+            sio::PruneOutcome::Done { removed } => PruneResultJs { kind: "done".into(), removed },
+            sio::PruneOutcome::DatesUnknown => PruneResultJs { kind: "dates-unknown".into(), removed: Vec::new() },
+            sio::PruneOutcome::Refused => PruneResultJs { kind: "refused".into(), removed: Vec::new() },
+        })
+    })
+    .build(&env)
+}
+
+/// `failed`가 false면 모두 만들었다. 실패는 먼저 끝난 하나의 명령·종료 코드(출력이 상한을 넘으면 `code`가 없다)·출력이다
+#[napi(object)]
+pub struct SharedVolumesResultJs {
+    pub failed: bool,
+    pub command: String,
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+/// external 볼륨을 만든다(compose는 만들어 주지 않는다). 던지지 않고 결과로 돌려준다
+#[napi]
+pub fn ensure_shared_volumes(env: Env, docker_bin: String, names: Vec<String>) -> Result<AsyncBlock<SharedVolumesResultJs>> {
+    AsyncBlockBuilder::new(async move {
+        Ok(match sio::ensure_shared_volumes(&docker_bin, &names).await {
+            None => SharedVolumesResultJs { failed: false, command: String::new(), code: None, stdout: String::new(), stderr: String::new() },
+            Some(failure) => SharedVolumesResultJs { failed: true, command: failure.command, code: failure.code, stdout: failure.stdout, stderr: failure.stderr },
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct StatsInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    pub managed: Vec<String>,
+    pub edge_service: String,
+    pub timeout_ms: f64,
+}
+
+/// `kind`: `done`(json: `ServiceUsage[]`을 `encodeNative`한 글) · `list-failed`·`inspect-failed`(timedOut·stderr) · `timed-out` · `parse`(message)
+#[napi(object)]
+pub struct StatsResultJs {
+    pub kind: String,
+    pub json: String,
+    pub timed_out: bool,
+    pub stderr: String,
+    pub message: Option<String>,
+}
+
+/// `compose ps` → `inspect` → 실행 중인 것만 `stats`를 상한 시간 안에 읽는다. 던지지 않고 결과(`kind`)로 돌려준다
+#[napi]
+pub fn read_stats(env: Env, input: StatsInputJs) -> Result<AsyncBlock<StatsResultJs>> {
+    let stats_input = sio::StatsInput { compose: compose_ref(input.compose), override_path: input.override_path, managed: input.managed, edge_service: input.edge_service, timeout_ms: input.timeout_ms };
+    AsyncBlockBuilder::new(async move {
+        let blank = |kind: &str| StatsResultJs { kind: kind.to_owned(), json: String::new(), timed_out: false, stderr: String::new(), message: None };
+        Ok(match sio::read_stats(&stats_input).await {
+            sio::StatsOutcome::Done(json) => StatsResultJs { json, ..blank("done") },
+            sio::StatsOutcome::ListFailed { timed_out, stderr } => StatsResultJs { timed_out, stderr, ..blank("list-failed") },
+            sio::StatsOutcome::InspectFailed { timed_out, stderr } => StatsResultJs { timed_out, stderr, ..blank("inspect-failed") },
+            sio::StatsOutcome::TimedOut => blank("timed-out"),
+            sio::StatsOutcome::Parse(message) => StatsResultJs { message: Some(message), ..blank("parse") },
+        })
+    })
+    .build(&env)
+}

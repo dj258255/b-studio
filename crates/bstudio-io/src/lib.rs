@@ -19,6 +19,7 @@ pub mod port_retry;
 pub mod pty;
 pub mod readiness_io;
 pub mod safe_fs;
+pub mod snapshot_io;
 pub mod stream_exec;
 pub mod streaming;
 pub mod sync_relay;
