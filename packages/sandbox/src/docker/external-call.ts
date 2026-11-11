@@ -1,3 +1,4 @@
+import { native } from '../native';
 import type { ExternalCallRequest } from '../types';
 
 /**
@@ -6,48 +7,7 @@ import type { ExternalCallRequest } from '../types';
  * 요청 값은 JSON 리터럴로만 넣으므로 코드로 해석되지 않는다
  */
 export function externalCallScript(edgeScript: string, request: ExternalCallRequest & { name: string; via: string }): string {
-  return [
-    // edge.mjs의 서버 시작 조건을 끈다. import는 끌어올려지지만 이 문장은 시작 조건 확인보다 먼저 실행된다
-    "process.env.EDGE_MAIN = '0';",
-    edgeScript,
-    "import { writeFileSync as writeAuditLine } from 'node:fs';",
-    `const studioRequest = ${JSON.stringify(request)};`,
-    CALL_BODY,
-  ].join('\n');
+  // 대본 조립은 Rust(crates/bstudio-guard/src/external_call.rs)가 한다. 요청의 JSON 글자는 여기서 만들어 그대로 넘긴다
+  // (같은 JSON.stringify라 옛 코드와 바이트가 같고, 짝 없는 서로게이트도 \udXXX로 쓰여 napi 경계에서 바뀌지 않는다)
+  return native.externalCallScript(edgeScript, JSON.stringify(request));
 }
-
-const CALL_BODY = `
-const printResult = (result) => process.stdout.write('\\n' + JSON.stringify(result) + '\\n');
-const writeAudit = (record) => {
-  try {
-    writeAuditLine('/proc/1/fd/1', JSON.stringify({ edge: 'api', ...record, at: new Date().toISOString() }) + '\\n');
-  } catch {}
-};
-const studioTarget = new URL(studioRequest.path, 'http://edge');
-const studioMethod = studioRequest.method.toUpperCase();
-const studioExternal = parseExternals(process.env.EDGE_EXTERNALS).find((item) => item.name === studioRequest.name);
-const studioEntry = { caller: STUDIO_CALLER, via: studioRequest.via, target: studioRequest.name, method: studioMethod, path: studioTarget.pathname };
-const refuse = (status, reason) => {
-  writeAudit({ ...studioEntry, decision: 'deny', status, reason });
-  printResult({ decision: 'deny', status, body: 'b-studio: ' + reason, masked: 0, reason });
-};
-
-if (!studioExternal) {
-  refuse(404, '등록하지 않은 API입니다');
-} else if (hasEncodedSeparator(studioTarget.pathname)) {
-  refuse(403, '경로에 인코딩된 구분자나 ;가 있어 규칙을 검사할 수 없습니다');
-} else if (!isAllowedCall(studioExternal.policy, STUDIO_CALLER, studioMethod, studioTarget.pathname)) {
-  refuse(403, 'studio(에이전트 도구·API 탐색기)에 허용하지 않은 호출입니다');
-} else {
-  try {
-    const body = studioRequest.body ? Buffer.from(studioRequest.body) : undefined;
-    const headers = studioRequest.body ? { 'content-type': 'application/json' } : {};
-    const result = await callUpstream(studioExternal, process.env, { method: studioMethod, pathname: studioTarget.pathname, search: studioTarget.search, headers, body });
-    writeAudit({ ...studioEntry, decision: 'allow', status: result.status, masked: result.masked });
-    printResult({ decision: 'allow', status: result.status, contentType: result.headers['content-type'], body: result.body.toString('utf8'), masked: result.masked });
-  } catch (error) {
-    if (error instanceof ApiPolicyError) refuse(error.status, error.message);
-    else refuse(502, '사내 API에 연결하지 못했습니다 (' + (error?.code ?? error?.message ?? String(error)) + ')');
-  }
-}
-`;

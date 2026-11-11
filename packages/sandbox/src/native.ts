@@ -116,6 +116,25 @@ interface NativeGuard {
   // 던지지 않는다 — 비0 종료·취소·spawn 실패·maxBuffer 초과 모두 결과로 돌려준다(execFileAsync + isExecFailure와 같음).
   // signal로 취소하면 거절하지 않고 그때까지의 부분 출력과 exitCode 1을 돌려준다(stats의 timeout-cutoff 보존)
   runCommand(bin: string, args: string[], input: string | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, maxBuffer: number | undefined | null, signal: AbortSignal | undefined | null): Promise<ExecResult>;
+  // ── 샌드박스 조율의 순수 도우미(ADR-195 4f A4a). 큰 구조는 JSON 문자열(encodeNative·decodeNative). 수는 f64
+  parseDependsOn(configJson: string): string;
+  startWaves(services: string[], dependsOnJson: string): string[][];
+  awaitedCondition(service: string, later: string[], dependsOnJson: string): string | null | undefined;
+  /** 이름과 값은 같은 자리끼리 짝. 허용 목록을 거른 뒤 시크릿을 얹은 [이름, 값] 목록 */
+  composeEnvironment(secretNames: string[], secretValues: string[], envNames: string[], envValues: string[]): string[][];
+  externalCallScript(edgeScript: string, requestJson: string): string;
+  loadThreads(concurrent: number, daemonCpus: number | undefined | null): number;
+  loadRunArgs(name: string, network: string, sandboxId: string, threads: number, runtime: string | undefined | null, image: string): string[];
+  loadConfig(requestJson: string, port: number, threads: number): string;
+  loadScript(runner: string, configJson: string): string;
+  parseLoadOutput(stdout: string, requests: number, concurrent: number): string | null | undefined;
+  isPortBindConflict(stderr: string): boolean;
+  dockerOutOfSpace(): string;
+  dockerOutOfSpaceNote(text: string): string | null | undefined;
+  splitUpArgs(args: string[]): { create: string[]; services: string[]; byId: boolean };
+  runtimeFromEnv(value: string | undefined | null): string | null | undefined;
+  sandboxBuildNoCache(value: string | undefined | null): boolean;
+  findFreeHostPort(): Promise<number>;
   // ── 체크포인트 실행(ADR-195 4f A1). 바이트 그대로 돌려주는 실행과 `git archive | tar -x`. 던지지 않는다.
   // exitCode는 신호로 죽으면 null, 띄우기 실패는 spawnError. 취소·상한 넘김은 SIGTERM으로 멈춘다
   runCommandBytes(bin: string, args: string[], input: Buffer | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, maxBuffer: number, signal: AbortSignal | undefined | null): Promise<BytesResult>;

@@ -6,37 +6,21 @@
  * 가림은 선언된 시크릿만 알아 이 값은 로그에서도 가려지지 않는다.
  *
  * 허용 목록이다. CLI가 데몬·컨텍스트·자격 증명 도우미·빌드를 찾는 데 쓰는 이름만 넘기고, 선언된 시크릿을 그 위에 얹는다.
- * 목록에 없는 이름은 넘기지 않는다(compose는 빈 문자열로 채운다)
+ * 목록에 없는 이름은 넘기지 않는다(compose는 빈 문자열로 채운다).
+ * 목록과 이름 비교(대소문자 구분)는 Rust(crates/bstudio-guard/src/compose_env.rs)가 정한다
  */
-const EXACT = new Set([
-  'PATH',
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'TMPDIR',
-  'TMP',
-  'TEMP',
-  'LANG',
-  'SSH_AUTH_SOCK',
-  'XDG_CONFIG_HOME',
-  'XDG_RUNTIME_DIR',
-  // Windows에서 CLI와 자격 증명 도우미가 찾는 이름
-  'SystemRoot',
-  'ComSpec',
-  'PATHEXT',
-  'USERPROFILE',
-  'APPDATA',
-  'LOCALAPPDATA',
-  'ProgramData',
-]);
-const PREFIXES = ['DOCKER_', 'COMPOSE_', 'BUILDKIT_', 'BUILDX_', 'LC_'];
+import { native } from '../native';
 
 export function composeEnvironment(secrets: Readonly<Record<string, string>> = {}, env: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const picked: Record<string, string> = {};
-  for (const [name, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    if (EXACT.has(name) || PREFIXES.some((prefix) => name.startsWith(prefix))) picked[name] = value;
-  }
-  // studio(Next)의 타입은 NODE_ENV를 필수로 두지만 CLI에는 넘기지 않는다
-  return { ...picked, ...secrets } as NodeJS.ProcessEnv;
+  const secretEntries = Object.entries(secrets);
+  // 값이 없는 이름(undefined)은 환경에 없는 것으로 본다
+  const envEntries = Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined);
+  const picked = native.composeEnvironment(
+    secretEntries.map(([name]) => name),
+    secretEntries.map(([, value]) => value),
+    envEntries.map(([name]) => name),
+    envEntries.map(([, value]) => value),
+  );
+  // Object.fromEntries는 `__proto__`도 프로토타입이 아니라 키로 둔다. studio(Next)의 타입은 NODE_ENV를 필수로 두지만 CLI에는 넘기지 않는다
+  return Object.fromEntries(picked) as NodeJS.ProcessEnv;
 }
