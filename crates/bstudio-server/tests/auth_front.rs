@@ -160,3 +160,11 @@ fn base64_url(bytes: &[u8]) -> String {
     use base64::Engine as _;
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
+
+#[tokio::test]
+async fn 설정_오류의_500은_json_이스케이프를_지킨다() {
+    let (response, heads) = run(env(&[("B_STUDIO_AUTH", "token"), ("B_STUDIO_AUTH_SECRET", &"S".repeat(32))]), "GET /api/x HTTP/1.1\r\nHost: h\r\nConnection: close\r\n\r\n").await;
+    assert_eq!(response.status(), 500);
+    assert_eq!(String::from_utf8(response.body).unwrap(), "{\"error\":\"B_STUDIO_AUTH=token이면 B_STUDIO_AUTH_TOKENS에 \\\"이름:토큰\\\"을 하나 이상 넣어야 합니다\"}");
+    assert!(heads.is_empty());
+}

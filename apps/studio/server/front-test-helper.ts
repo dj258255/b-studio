@@ -63,3 +63,43 @@ export async function startFront(binary: string, args: readonly string[], env: N
     },
   };
 }
+
+export interface RunningNode {
+  child: ChildProcess;
+  /** 서버가 연 주소(http://127.0.0.1:포트) */
+  origin: string;
+  stop: () => Promise<void>;
+}
+
+/** 앞단 없이 Node 서버(tsx main.ts)를 공개 포트로 직접 띄운다. 앞단 너머와 같은 요청을 견주는 차등 시험의 기준선이다(ADR-195 4c) */
+export async function startNodeDirect(env: NodeJS.ProcessEnv, timeoutMs = 120_000): Promise<RunningNode> {
+  const child = spawn(path.join(repoRoot, 'node_modules/.bin/tsx'), ['--tsconfig', 'apps/studio/tsconfig.json', 'apps/studio/server/main.ts', '--port', '0', '--hostname', '127.0.0.1'], { cwd: repoRoot, env, stdio: ['ignore', 'pipe', 'pipe'] });
+  let text = '';
+  const origin = await new Promise<string>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Node 서버가 뜨지 않았습니다:\n${text}`)), timeoutMs);
+    const onData = (chunk: Buffer) => {
+      text += chunk.toString();
+      const ready = /b-studio 서버가 떴습니다: (http:\/\/[^\s]+)/.exec(text);
+      if (ready) {
+        clearTimeout(timer);
+        resolve(ready[1]!);
+      }
+    };
+    child.stdout!.on('data', onData);
+    child.stderr!.on('data', (chunk: Buffer) => (text += chunk.toString()));
+    child.once('exit', (code) => {
+      clearTimeout(timer);
+      reject(new Error(`Node 서버가 끝났습니다(${code}):\n${text}`));
+    });
+  });
+  return {
+    child,
+    origin,
+    stop: async () => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise((resolve) => child.once('exit', resolve));
+      child.kill('SIGTERM');
+      await exited;
+    },
+  };
+}

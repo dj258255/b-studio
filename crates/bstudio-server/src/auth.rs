@@ -851,4 +851,24 @@ mod tests {
         }
         assert_eq!(parse_revocations("{", "f").unwrap_err(), LoadError::Failed("f을(를) 읽지 못했습니다: JSON이 아닙니다".to_string()));
     }
+
+    #[test]
+    fn host가_없거나_메서드를_모르면_넘긴다() {
+        let view = |method: &str, hs: &[(&str, &str)]| RequestView { method: method.to_string(), target: "/api/x".to_string(), headers: headers(hs) };
+        let env = Env::default();
+        let mut load = || Ok(Revocations::default());
+        assert!(matches!(decide(&view("GET", &[]), &env, 0.0, &mut load), Decision::Defer(_)));
+        assert!(matches!(decide(&view("TRACE", &[("host", "localhost")]), &env, 0.0, &mut load), Decision::Defer(_)));
+        assert!(matches!(decide(&view("FOO", &[("host", "localhost")]), &env, 0.0, &mut load), Decision::Defer(_)));
+        assert_eq!(decide(&view("get", &[("host", "localhost")]), &env, 0.0, &mut load), Decision::Allow { user: "local".to_string() });
+    }
+
+    #[test]
+    fn 상대_경로_상태_폴더는_넘기고_절대_경로는_정리한다() {
+        let env = |dir: &str| Env::from_pairs([("B_STUDIO_AUTH_STATE_DIR", dir)]);
+        assert!(matches!(state_dir(&env("rel/dir")), Err(LoadError::Defer(_))));
+        assert!(matches!(state_dir(&env("")), Err(LoadError::Defer(_))));
+        assert_eq!(state_dir(&env("/a//b/../c")).unwrap(), PathBuf::from("/a/c"));
+        assert_eq!(state_dir(&Env::from_pairs([("HOME", "/home/u")])).unwrap(), PathBuf::from("/home/u/.cache/b-studio/auth"));
+    }
 }
