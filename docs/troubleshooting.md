@@ -6061,6 +6061,9 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 ### 시험
 - `packages/sandbox/src/docker/readiness-differential.test.ts`(요청 줄 35개 입력이 옛 `fetch`와 같은 줄·머리글로 가고, `ready.path` HARDENED 입력은 옛 쪽이 `example.com`으로 풀리고 새 쪽은 127.0.0.1의 서버만 받는 것), `readiness-hardened.test.ts`(`LocalDockerProvider.restart` 수준: 서버가 받은 요청 줄·Host 헤더), `crates/bstudio-io/src/readiness_io.rs`(요청 줄 규칙·응답 읽기), `packages/spec/src/spec.test.ts`(`ready.path`는 역슬래시·제어 문자를 거부).
 
+### 실측
+- 실제 Docker([기록](experiments/2026-11-12-a4c3a-readiness.md)): 스펙이 `ready.path: "/\\example.com/"`을 거절했다. 스펙을 거치지 않고 네이티브 준비 확인에 `/\example.com/a4c3a-marker.txt`를 넘기자 요청이 이 세션의 edge를 거쳐 web 컨테이너에 도착했고(httpd 로그 `url:/\example.com/a4c3a-marker.txt`), 작업 폴더의 그 파일로 200이 나와 준비됨이었다. `/<탭>/example.com/`도 web에 도착해 404였다. 옛 해석은 둘 다 `http://example.com/…`이다.
+
 ### 같은 종류로 남은 것(이번에 고치지 않았다)
 - 게이트(A5)가 부르는 `new URL(path, endpoint.url)` 가운데 출처를 비교하지 않는 자리가 있다: `packages/agent/src/verify.ts`의 계약 읽기(`service.contract.extract`, 두 곳)와 `packages/agent/src/gate.ts`의 헤드리스 브라우저 대체 확인(`probe.path`, 1241줄 근처). 같은 `SERVICE_PATH`를 쓰므로 `/\example.com/`이 다른 호스트를 가리킬 수 있다(나머지 자리는 `url.origin`을 견준다). A5에서 호스트 고정으로 옮길 때 함께 닫는다.
 

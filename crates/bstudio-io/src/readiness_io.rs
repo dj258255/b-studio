@@ -187,11 +187,14 @@ pub async fn probe_http(port: u16, path: &str, timeout: Duration) -> Result<u16,
             if head[..seen] != b"HTTP/"[..seen] {
                 return Err("HPE_INVALID_CONSTANT".to_owned());
             }
-            // 줄 끝은 CRLF여야 한다(낱개 LF는 HTTP 머리가 아니다)
-            if head.iter().enumerate().any(|(at, byte)| *byte == b'\n' && (at == 0 || head[at - 1] != b'\r')) {
+            // 머리의 줄 끝은 CRLF여야 한다(낱개 LF는 HTTP 머리가 아니다). 머리와 함께 읽힌 본문은 보지 않는다: 본문은 어떤 바이트든 될 수 있다
+            // (실측: busybox httpd의 404가 머리와 본문을 한 번에 보냈고, 본문의 `\n`을 머리의 것으로 읽어 실패했다)
+            let head_end = find_head_end(&head);
+            let scope = &head[..head_end.unwrap_or(head.len())];
+            if scope.iter().enumerate().any(|(at, byte)| *byte == b'\n' && (at == 0 || scope[at - 1] != b'\r')) {
                 return Err("HPE_INVALID_HEADER_TOKEN".to_owned());
             }
-            if let Some(end) = find_head_end(&head) {
+            if let Some(end) = head_end {
                 let status = parse_head(&head[..end])?;
                 if (100..200).contains(&status) {
                     informational += 1;
@@ -649,6 +652,17 @@ mod tests {
         assert_eq!(status(b"HTTP/1.1 999 X\r\n\r\n").await, Ok(999));
         // 정보 응답은 건너뛰고 최종 응답을 읽는다
         assert_eq!(status(b"HTTP/1.1 103 Early\r\n\r\nHTTP/1.1 200 OK\r\n\r\n").await, Ok(200));
+    }
+
+    /// 실측(busybox httpd)에서 404 응답이 머리와 본문을 한 번에 보냈고, 본문의 낱개 LF를 머리의 것으로 읽어 `HPE_INVALID_HEADER_TOKEN`이 됐다.
+    /// 줄 끝 검사는 머리(빈 줄까지)에만 한다
+    #[tokio::test]
+    async fn 본문의_낱개_줄바꿈은_머리의_오류가_아니다() {
+        assert_eq!(status(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-type: text/html\r\n\r\n<HTML><HEAD>\n<BODY>\n</BODY></HTML>\n").await, Ok(404));
+        assert_eq!(status(b"HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n# shop\n\n").await, Ok(200));
+        assert_eq!(status(b"HTTP/1.1 103 Early\r\n\r\nHTTP/1.1 200 OK\r\n\r\n\nbody\n").await, Ok(200));
+        // 머리 안의 낱개 LF는 여전히 통과가 아니다(본문이 함께 와도)
+        assert_eq!(status(b"HTTP/1.1 200 OK\nX: 1\r\n\r\nbody\n").await, Err("HPE_INVALID_HEADER_TOKEN".into()));
     }
 
     #[tokio::test]

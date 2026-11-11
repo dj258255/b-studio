@@ -41,7 +41,7 @@ afterEach(async () => {
 
 // ── 시험 서버 ────────────────────────────────────────────────────────────
 
-type Reply = { status: number; location?: string } | 'close' | 'garbage' | 'hang' | 'reset' | 'bad-header' | 'raw-late';
+type Reply = { status: number; location?: string } | 'close' | 'garbage' | 'hang' | 'reset' | 'bad-header' | 'raw-late' | 'html-404' | 'body-200';
 interface Request {
   requestLine: string;
   host: string | undefined;
@@ -78,6 +78,9 @@ async function listen(replies: Reply[]): Promise<Server> {
       if (reply === 'garbage') return void socket.end('hello world\r\n\r\n');
       if (reply === 'bad-header') return void socket.end('HTTP/1.1 200 OK\r\nbad header line\r\n\r\n');
       if (reply === 'raw-late') return void socket.end('HTTP/1.1 200 OK\r\n');
+      // busybox httpd처럼 머리와 본문(낱개 LF가 든 HTML)을 한 번에 보낸다(실측에서 Rust 쪽이 본문의 LF를 머리의 것으로 읽어 실패했다)
+      if (reply === 'html-404') return void socket.end('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-type: text/html\r\n\r\n<HTML><HEAD><TITLE>404 Not Found</TITLE></HEAD>\n<BODY><H1>404 Not Found</H1>\n</BODY></HTML>\n');
+      if (reply === 'body-200') return void socket.end('HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\n# shop\n\n');
       socket.end(`HTTP/1.1 ${reply.status} X\r\n${reply.location ? `Location: ${reply.location}\r\n` : ''}Content-Length: 0\r\n\r\n`);
     });
   });
@@ -334,6 +337,9 @@ const readyScenarios: ReadyScenario[] = [
   { name: '정상: 한 번 200 뒤 503이면 연속이 끊겨 다시 센다', replies: [{ status: 200 }, { status: 503 }, { status: 200 }, { status: 200 }], script: okScript },
   { name: '정상: 기대 상태가 302이면 리다이렉트를 따르지 않고 302를 받는다', ready: { path: '/', expectStatus: 302 }, replies: [{ status: 302, location: 'http://example.com/' }], script: okScript },
   { name: '정상: 기대 상태가 404', ready: { path: '/missing', expectStatus: 404 }, replies: [{ status: 404 }], script: okScript },
+  { name: '정상: 머리와 본문을 한 번에 보내는 200(본문에 낱개 LF)', replies: ['body-200'], script: okScript },
+  { name: '정상: 기대 상태가 404이고 본문이 낱개 LF가 든 HTML', ready: { path: '/missing', expectStatus: 404 }, replies: ['html-404'], script: okScript },
+  { name: '실패: 기대와 다른 404가 본문과 함께 오면 이유에 404가 든다', replies: ['html-404'], policy: { timeoutMs: 120 }, timing: true, script: okScript },
   { name: '실패: 기대 상태가 302인데 200이 온다', ready: { path: '/', expectStatus: 302 }, policy: { timeoutMs: 120 }, timing: true, script: okScript },
   { name: '실패: 계속 503이면 시간 초과 이유에 마지막 확인이 든다', replies: [{ status: 503 }], policy: { timeoutMs: 150 }, timing: true, script: okScript },
   { name: '실패: 연결할 수 없다(ECONNREFUSED)', replies: 'closed', policy: { timeoutMs: 120 }, timing: true, script: okScript },
