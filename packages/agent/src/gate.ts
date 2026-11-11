@@ -509,7 +509,13 @@ export class VerificationGate {
     this.checks = [...recordChecks];
 
     const text = formatVerificationReport(report, { allowBreaking });
-    onEvent({ type: 'verify_result', report, text });
+    // report.ok면 이 뒤에 선언 검사·리뷰가 더 돈다(오래 걸릴 수 있다). 그 사이에 이 결과만 보고 통과로 읽지 않도록 알리고,
+    // 끝나면 gate_done을 낸다(#1155). 서비스 확인이 실패한 결과는 뒤에 기다릴 검사가 없어 이 표시가 없다
+    onEvent({ type: 'verify_result', report, text, ...(report.ok ? { moreChecks: true } : {}) });
+    // 이 호출이 verify_result 뒤에서 끝나는 모든 정상 경로가 낸다. 도중에 던지면(취소·오류) 내지 않아 개요가 통과로 읽지 않는다
+    const gateDone = (ok: boolean): void => {
+      if (report.ok) onEvent({ type: 'gate_done', ok });
+    };
     // 세션이 시작할 때는 없던 부가 서비스를 새로 올렸으면 대화 화면에도 바로, 왜 켰는지와 함께 알린다
     // (도그푸딩 마찰 138, ADR-146) — report.text에도 같은 줄이 있지만, 그건 검증 결과 전체를 읽어야 보인다
     if (report.addedAddons?.length) {
@@ -548,6 +554,7 @@ export class VerificationGate {
           this.checks = [...checks, ...recordChecks];
           for (const check of this.checks) onEvent({ type: 'workflow_check', check });
           this.platformFailure = this.#loadPlatformFailure;
+          gateDone(false);
           return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${this.#loadPlatformFailure}` };
         }
         this.#stage('review');
@@ -568,20 +575,26 @@ export class VerificationGate {
       // light는 건너뛴 단계를 실패로 보지 않는다. 통과한 단계만 남겨 배포 조건(releaseRequires)이 자연히 막는다
       if (this.#options.verify === 'light') {
         this.verified = true;
+        gateDone(true);
         return { kind: 'pass' };
       }
       // 스키마가 실행 수단 없는 필수 단계를 막지만, 어떤 경로로든 단계가 돌지 않았다면 통과로 보지 않는다
       const missing = missingVerificationStages(project, this.passedStages);
-      if (missing.length > 0) return { kind: 'exhausted', summary: `워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: ${missing.join(', ')}` };
+      if (missing.length > 0) {
+        gateDone(false);
+        return { kind: 'exhausted', summary: `워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: ${missing.join(', ')}` };
+      }
       this.verified = true;
+      gateDone(true);
       return { kind: 'pass' };
     }
 
-    return this.#failure(text, failedChecks);
+    gateDone(false);
+    return this.#failure(text, failedChecks, report.ok);
   }
 
   /** 검증 실패를 시도 횟수에 세고, 남은 기회가 있으면 모델에게 돌려줄 안내를, 없으면 중단 사유를 돌려준다 */
-  #failure(reportText: string, failedChecks: readonly WorkflowCheck[]): GateOutcome {
+  #failure(reportText: string, failedChecks: readonly WorkflowCheck[], reportOk = false): GateOutcome {
     this.attempts += 1;
     if (this.attempts >= this.#maxAttempts) {
       // 사람 확인 기록 위조로 막힌 것이면 사유를 요약에 남긴다(대화에서 왜 되돌렸는지 바로 보이게)
@@ -591,7 +604,9 @@ export class VerificationGate {
       const declared = this.#unadoptedChange ? ` — 확인의 선언을 바꾸려던 것이면 '확인 선언 변경 허용'을 켜고 다시 요청하세요(이번 실행에서 바뀐 선언: ${this.#unadoptedChange})` : '';
       return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다${reason}${declared}` };
     }
-    const body = reportText ? `${reportText}${formatFailedChecks(failedChecks)}` : formatFailedChecks(failedChecks).trimStart();
+    // 실패를 앞에 쓴다. 서비스 확인이 통과했는데 뒤 검사가 실패한 경우 보고서가 "검증 통과"로 시작하면 첫 줄이 통과로 읽힌다(#1155)
+    const failed = formatFailedChecks(failedChecks).trimStart();
+    const body = !reportText ? failed : reportOk ? `${failed}\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n${reportText}` : `${reportText}${formatFailedChecks(failedChecks)}`;
     // 선언을 고쳐도 이 실행의 검증에는 쓰이지 않는다는 것을 모델이 모르면 같은 수정을 되풀이하다 시도를 다 쓴다
     const declared = this.#unadoptedChange
       ? `\n\n[참고] 이번 실행에서 ${SPEC_FILE}의 확인 선언을 바꿨지만(${this.#unadoptedChange}) 이 검증은 실행을 시작할 때의 선언으로 돌았습니다. 선언은 사용자가 허용한 요청에서만 그 실행의 검증에 쓰입니다. 선언을 바꾸는 것이 사용자의 요청이면 같은 수정을 되풀이하지 말고, 되묻기 도구(ask_user)로 사용자에게 "'확인 선언 변경 허용'을 켜고 답해 달라"고 알리세요.`

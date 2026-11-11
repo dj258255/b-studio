@@ -505,20 +505,37 @@ export function gateStatusOf(snapshot: SessionSnapshot, recent: readonly StudioE
   // verify_result는 서비스 재시작·준비 판정·계약까지의 결과다. 그 뒤 선언 검사·리뷰는 workflow_check로 따로 온다(#989).
   // 마지막 검증 시작 뒤(검증 없이 기록 검사만 돈 경우는 실행 전체)에 실패한 검사가 있으면 통과가 아니다
   let checkFailed = false;
+  // moreChecks인 verify_result 뒤에는 선언 검사·리뷰가 더 돌고 gate_done으로 끝난다(#1155). 그 전에는 통과가 아니다.
+  // moreChecks가 없는 기록(옛 기록, 서비스 확인 실패)은 verify_result가 곧 끝이다
+  let gateOpen = false;
+  let gateDoneOk: boolean | undefined;
   for (const event of run) {
     if (event.type !== 'agent') continue;
     if (event.event.type === 'verify_start' || event.event.type === 'verify_result') {
       if (event.event.type === 'verify_start') checkFailed = false;
+      gateOpen = event.event.type === 'verify_result' && event.event.moreChecks === true;
+      gateDoneOk = undefined;
       lastVerify = event.event;
+    } else if (event.event.type === 'gate_done') {
+      gateOpen = false;
+      gateDoneOk = event.event.ok;
     } else if (event.event.type === 'workflow_check' && !event.event.check.ok) {
       checkFailed = true;
     }
   }
+  const open = gateOpen && lastVerify?.type === 'verify_result' && lastVerify.report.ok;
   const state: AgentGateStatus['state'] =
     checkFailed && lastVerify?.type !== 'verify_start'
       ? 'failed'
-      : lastVerify?.type === 'verify_result'
-      ? lastVerify.report.ok
+      : open
+        ? // 끝난 실행에 gate_done이 없으면(취소·오류) 통과를 모른다. 실패로 끝난 실행만 failed다
+          !finished && snapshot.running
+          ? 'verifying'
+          : finished?.type === 'run_finished' && finished.status === 'failed'
+            ? 'failed'
+            : 'none'
+        : lastVerify?.type === 'verify_result'
+      ? lastVerify.report.ok && gateDoneOk !== false
         ? 'passed'
         : 'failed'
       : lastVerify?.type === 'verify_start' && !finished && snapshot.running
@@ -634,6 +651,8 @@ function describeActivity(event: Exclude<AgentEvent, { type: 'tokens' }>): strin
       return `게이트: ${event.check.name}`;
     case 'verify_start':
       return `검증 준비: 파일 ${event.files.length}개`;
+    case 'gate_done':
+      return event.ok ? '검증 게이트 통과' : '검증 게이트 실패';
     case 'verify_result':
       // 서비스·계약까지의 결과다. 선언 검사는 뒤에 따로 돈다(#989)
       return event.report.ok ? '서비스 확인 통과' : '검증 실패';

@@ -19,6 +19,8 @@ function item(input: SessionOverviewSource) {
 const started = (runId: string): StudioEvent => ({ type: 'run_started', runId, request: '주문 목록에 필터' });
 const verifyStart = (runId: string): StudioEvent => ({ type: 'agent', runId, event: { type: 'verify_start', files: ['a.ts'] } });
 const verifyResult = (runId: string, ok: boolean): StudioEvent => ({ type: 'agent', runId, event: { type: 'verify_result', report: { ok } } } as unknown as StudioEvent);
+const pendingVerifyResult = (runId: string, ok: boolean): StudioEvent => ({ type: 'agent', runId, event: { type: 'verify_result', report: { ok }, moreChecks: ok } } as unknown as StudioEvent);
+const gateDone = (runId: string, ok: boolean): StudioEvent => ({ type: 'agent', runId, event: { type: 'gate_done', ok } } as unknown as StudioEvent);
 const workflowCheck = (runId: string, ok: boolean): StudioEvent => ({ type: 'agent', runId, event: { type: 'workflow_check', check: { stage: 'test', name: 'readme', ok, attempts: 1 } } } as unknown as StudioEvent);
 const finished = (runId: string, status: 'done' | 'failed' | 'error' | 'cancelled'): StudioEvent => ({ type: 'run_finished', runId, status, summary: '' });
 const checkpoint = (sha: string, passed: boolean) => ({ sha, shortSha: sha.slice(0, 7), message: 'm', createdAt: '2026-10-22T10:00:00.000Z', files: [], ...(passed ? { passedStages: ['test' as const] } : {}) });
@@ -72,6 +74,26 @@ describe('게이트 상태', () => {
     expect(item(source({ recent: [started('r1'), verifyStart('r1'), verifyResult('r1', true), workflowCheck('r1', false), verifyStart('r1'), verifyResult('r1', true), workflowCheck('r1', true)] })).gate?.state).toBe('passed');
     // 바뀐 파일 없이 기록 검사만 다시 돌아 실패한 경우(verify_start 없이 workflow_check만 온다)
     expect(item(source({ recent: [started('r1'), workflowCheck('r1', false)] })).gate?.state).toBe('failed');
+  });
+
+  it('서비스 확인이 통과해도 선언 검사·리뷰가 끝나기 전(gate_done 전)에는 passed가 아니다(#1155)', () => {
+    const running = snapshot({ running: true });
+    expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true)] })).gate?.state).toBe('verifying');
+    // 앞의 통과 검사가 먼저 와도 마찬가지다
+    expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), workflowCheck('r1', true)] })).gate?.state).toBe('verifying');
+    // 끝났다는 이벤트가 오면 그 결과다
+    expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), workflowCheck('r1', true), gateDone('r1', true)] })).gate?.state).toBe('passed');
+    expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), workflowCheck('r1', true), gateDone('r1', false)] })).gate?.state).toBe('failed');
+    // 서비스 확인이 실패한 판정은 기다릴 것이 없다
+    expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', false)] })).gate?.state).toBe('failed');
+    // 다시 검증을 시작하면 앞 회차의 gate_done을 들고 오지 않는다
+    expect(item(source({ snapshot: running, recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), gateDone('r1', false), verifyStart('r1'), pendingVerifyResult('r1', true)] })).gate?.state).toBe('verifying');
+  });
+
+  it('gate_done 없이 실행이 끝나면(취소·오류) 통과로 보지 않는다(#1155)', () => {
+    expect(item(source({ recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), finished('r1', 'cancelled')] })).gate?.state).toBe('none');
+    expect(item(source({ recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), finished('r1', 'done')] })).gate?.state).toBe('none');
+    expect(item(source({ recent: [started('r1'), verifyStart('r1'), pendingVerifyResult('r1', true), finished('r1', 'failed')] })).gate?.state).toBe('failed');
   });
 
   it('끝난 실행의 verify_start는 검증 중으로 남지 않는다(취소·오류로 결과 없이 끝남)', () => {
