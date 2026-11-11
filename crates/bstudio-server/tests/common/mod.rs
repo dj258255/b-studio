@@ -75,12 +75,17 @@ pub async fn spawn_upstream(path: &Path, seen: Seen, reply: Reply) {
     });
 }
 
-/// 앞단을 TCP 임시 포트에 붙여 돌린다. (포트, 종료 신호)
+/// 앞단을 TCP 임시 포트에 붙여 돌린다(인증 판단은 끈다: 프록시 규칙만 본다). (포트, 종료 신호)
 pub async fn spawn_front(upstream: PathBuf) -> (u16, oneshot::Sender<()>) {
+    spawn_front_with(upstream, bstudio_server::proxy::AuthGate::disabled()).await
+}
+
+/// 인증 판단을 정해서 앞단을 돌린다
+pub async fn spawn_front_with(upstream: PathBuf, gate: bstudio_server::proxy::AuthGate) -> (u16, oneshot::Sender<()>) {
     let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (stop, stopped) = oneshot::channel::<()>();
-    let router = bstudio_server::proxy::router(upstream);
+    let router = bstudio_server::proxy::router(upstream, gate);
     tokio::spawn(async move {
         bstudio_server::proxy::serve(listener, router, async {
             let _ = stopped.await;
