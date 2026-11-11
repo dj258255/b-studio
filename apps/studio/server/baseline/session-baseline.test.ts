@@ -38,6 +38,8 @@ describe.concurrent.each([
         const snapshot = await runScenario(scenario, startTarget);
         // 가짜 docker가 모르는 호출을 받았으면 시나리오가 빠뜨린 것이다 — 조용히 지나치지 않는다
         expect(snapshot.docker).toMatchObject({ unknown: [] });
+        // 사진은 지금 값만 고정한다. 옳은 동작을 적은 시나리오는 그 기대를 먼저 본다
+        expect(scenario.check?.(snapshot) ?? []).toEqual([]);
         await expect(`${JSON.stringify(snapshot, null, 2)}\n`).toMatchFileSnapshot(baselinePath(scenario.name));
       },
       240_000,
