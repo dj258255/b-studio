@@ -10,6 +10,14 @@ const ROOT = '/work/shop';
 const ro = (source: string, target: string) => ({ type: 'bind', source, target, read_only: true, bind: { create_host_path: false } });
 const empty = (dir: string, target: string) => ro(`${dir}/.git/b-studio-empty`, target);
 const dirEntry = (dir: string, hasState = true): GitEntry => ({ dir, kind: 'directory', hasState });
+const ALL_VARIANTS = ['.Git', '.gIt', '.GIt', '.giT', '.GiT', '.gIT', '.GIT'];
+/** 이 파일 시스템이 대소문자를 구분하지 않는가. 기대값을 내 기기의 파일 시스템에 묶지 않으려고 시험마다 잰다 */
+const caseInsensitive = async (dir: string) => {
+  await writeFile(path.join(dir, 'probe-case'), '');
+  const folded = await lstat(path.join(dir, 'PROBE-CASE')).then(() => true, () => false);
+  await rm(path.join(dir, 'probe-case'));
+  return folded;
+};
 
 describe('planGitMask 마운트 꼴별 계획', () => {
   it('프로젝트 루트 전체를 마운트하면 .git은 읽기 전용, 상태 폴더는 빈 폴더를 읽기 전용으로 얹어 덮는다', () => {
@@ -42,6 +50,13 @@ describe('planGitMask 마운트 꼴별 계획', () => {
 
   it('.git이 없으면 아무것도 하지 않는다', () => {
     expect(planGitMask([{ service: 'api', source: ROOT, target: '/workspace' }], [])).toEqual({});
+  });
+
+  it('.git 파일의 대소문자 변형 자리에도 같은 파일을 읽기 전용으로 겹치고, 폴더나 변형이 아닌 이름에는 얹지 않는다(#1028)', () => {
+    const plan = planGitMask([{ service: 'api', source: ROOT, target: '/workspace' }], [{ dir: ROOT, kind: 'file', hasState: false, aliases: ['.GIT', '../x', '.gits'] }]);
+    expect(plan).toEqual({ api: [ro(`${ROOT}/.git`, '/workspace/.GIT'), ro(`${ROOT}/.git`, '/workspace/.git')] });
+    const folder = planGitMask([{ service: 'api', source: ROOT, target: '/workspace' }], [{ ...dirEntry(ROOT), aliases: ['.GIT'] }]);
+    expect(folder).toEqual({ api: [ro(`${ROOT}/.git`, '/workspace/.git'), empty(ROOT, '/workspace/.git/b-studio')] });
   });
 
   it('.git이 파일(worktree 포인터)이면 그 파일만 읽기 전용으로 겹친다', () => {
@@ -158,14 +173,33 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
   it('프로젝트 폴더의 .git 폴더와 상태 폴더를 찾는다', async () => {
     const root = await temp();
     await mkdir(path.join(root, '.git', 'b-studio'), { recursive: true });
-    expect(await detectGitEntries(root, [root])).toEqual([{ dir: root, kind: 'directory', hasState: true }]);
+    expect(await detectGitEntries(root, [root])).toEqual([{ dir: root, kind: 'directory', hasState: true, aliases: [] }]);
   });
 
   it('.git이 파일이면 파일로, 없으면 아무것도 돌려주지 않는다', async () => {
     const root = await temp();
     expect(await detectGitEntries(root, [root])).toEqual([]);
     await writeFile(path.join(root, '.git'), 'gitdir: /elsewhere/.git/worktrees/x\n');
-    expect(await detectGitEntries(root, [root])).toEqual([{ dir: root, kind: 'file', hasState: false }]);
+    const aliases = (await caseInsensitive(root)) ? ALL_VARIANTS : [];
+    expect(await detectGitEntries(root, [root])).toEqual([{ dir: root, kind: 'file', hasState: false, aliases }]);
+  });
+
+  it('대소문자를 구분하지 않는 볼륨이면 .git 파일의 변형 자리마다 같은 가림을 얹고, 시작 뒤 대조도 그 자리를 본다(#1028)', async () => {
+    const root = await temp();
+    await writeFile(path.join(root, '.git'), 'gitdir: /elsewhere/.git/worktrees/x\n');
+    const insensitive = await caseInsensitive(root);
+    const config = { services: { api: { volumes: [{ type: 'bind', source: root, target: '/app' }] } } };
+    const plan = await computeGitMask(root, config);
+    const expected = [`/app/.git`, ...(insensitive ? ALL_VARIANTS.map((name) => `/app/${name}`) : [])].sort();
+    expect((plan.api ?? []).map((volume) => volume.target).sort()).toEqual(expected);
+    expect((plan.api ?? []).every((volume) => volume.source === path.join(root, '.git') && volume.read_only)).toBe(true);
+
+    // 변형 자리 하나가 실제 마운트에서 빠지면 시작 뒤 대조가 그 자리를 빠졌다고 알린다
+    const inspected = (plan.api ?? [])
+      .filter((volume) => volume.target !== '/app/.GIT')
+      .map((volume) => ({ Type: 'bind', Source: volume.source, Destination: volume.target, RW: false }));
+    const missing = await findMissingMasks(root, [{ Type: 'bind', Source: root, Destination: '/app', RW: true }, ...inspected], {});
+    expect(missing).toEqual(insensitive ? ['/app/.GIT'] : []);
   });
 
   it('심볼릭 링크 .git은 마운트 지점으로 쓸 수 없어 건너뛴다', async () => {
@@ -181,7 +215,7 @@ describe('detectGitEntries / computeGitMask 실제 폴더', () => {
     await mkdir(path.join(repo, '.git', 'b-studio'), { recursive: true });
     await mkdir(root);
     expect(await detectGitEntries(root, [root])).toEqual([]);
-    expect(await detectGitEntries(root, [repo])).toEqual([{ dir: repo, kind: 'directory', hasState: true }]);
+    expect(await detectGitEntries(root, [repo])).toEqual([{ dir: repo, kind: 'directory', hasState: true, aliases: [] }]);
   });
 
   it('compose가 정규화한 services에서 서비스별 마스크를 계산한다(심볼릭 링크 경로도 같은 곳으로 본다)', async () => {
