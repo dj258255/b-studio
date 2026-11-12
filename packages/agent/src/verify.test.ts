@@ -6,7 +6,7 @@ import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
-import { findSecretLeaks, formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
+import { captureBaselines, findSecretLeaks, formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
 
 const project = {
   root: '/tmp/orders',
@@ -148,6 +148,24 @@ describe('verifyChanges', () => {
     expect(report.ok).toBe(true);
     expect(formatVerificationReport(report, { allowBreaking: false })).toContain('샌드박스 파일 반영 확인: 1.2초');
     expect(report.contracts[0]?.changes.map((c) => c.target)).toEqual(['Order.memo']);
+  });
+
+  it('계약 추출 경로가 서비스 밖 호스트로 풀리면 요청하지 않고 실패로 본다(#1187)', async () => {
+    // new URL은 `\\`를 `/`로 읽고 탭·줄바꿈을 지운다. "/"로 시작하고 "//"로 시작하지 않는 스펙 검사를 통과한 뒤 다른 호스트가 된다
+    for (const extract of ['/\\example.com/v3/api-docs', '/\t/example.com/v3/api-docs', '/\n/example.com/']) {
+      const fetched: string[] = [];
+      const offHost = { ...project, managed: project.managed.map(([name, service]) => [name, { ...service, contract: { extract } }]) } as unknown as LoadedProject;
+      const fetcher = async (url: string) => {
+        fetched.push(url);
+        return baseline;
+      };
+      const baselines = await captureBaselines(fakeSandbox(), offHost, fetcher);
+      const report = await verifyChanges({ sandbox: fakeSandbox(), project: offHost, changedFiles: ['api/src/main/java/Order.java'], baselines, allowBreaking: false, fetcher });
+      expect(fetched).toEqual([]);
+      expect(baselines.size).toBe(0);
+      expect(report.ok).toBe(false);
+      expect(report.contracts[0]?.error).toContain('서비스 밖');
+    }
   });
 
   it('허용하지 않았는데 호환을 깨면 실패로 본다', async () => {

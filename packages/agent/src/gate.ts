@@ -18,7 +18,7 @@ import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
-import { captureBaselines, formatVerificationReport, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
+import { captureBaselines, formatVerificationReport, serviceUrl, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
@@ -1238,7 +1238,13 @@ export class VerificationGate {
   ): Promise<string[]> {
     const { sandbox, pageFetcher = fetchPage } = this.#options;
     const endpoint = await sandbox.endpoint(probe.service);
-    const url = new URL(probe.path, endpoint.url);
+    let url: URL;
+    try {
+      url = new URL(serviceUrl(probe.path, endpoint.url));
+    } catch (error) {
+      // 서비스 밖으로 풀리는 경로는 요청하지 않고 실패다(#1187). 바깥 호스트의 응답으로 화면 확인을 통과시키지 않는다
+      throw fail(`헤드리스 브라우저를 쓸 수 없어 ${probe.service}${probe.path}로 대신 확인하려 했지만 ${error instanceof Error ? error.message : String(error)}`);
+    }
     try {
       const { status } = await pageFetcher(url.href, signal);
       this.#addWarning(
