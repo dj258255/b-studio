@@ -191,6 +191,15 @@ interface NativeGuard {
   pruneSnapshots(compose: NativeComposeRef, scope: NativeSnapshotScope, plan: NativeSnapshotPlan, parseDates: (texts: string) => string): Promise<NativePruneResult>;
   ensureSharedVolumes(dockerBin: string, names: string[]): Promise<NativeSharedVolumesResult>;
   readStats(input: NativeStatsInput): Promise<NativeStatsResult>;
+  // ── 샌드박스 끝맺음·부하 러너·사내 API 호출·만들기 준비(ADR-195 4f A4c-3c). 던지지 않고 결과(`kind`)로 돌려준다(makeWorkDir만 던진다). `up`은 부르지 않는다
+  removeSandboxImages(dockerBin: string, sandboxId: string, cwd: string | undefined | null): Promise<NativeCheckedResult>;
+  cleanupSandbox(dockerBin: string, sandboxId: string, assetRoot: string, cwd: string | undefined | null): Promise<NativeCleanupResult>;
+  destroySandbox(input: NativeDestroyInput): Promise<NativeDestroyResult>;
+  assertRuntime(dockerBin: string, runtime: string): Promise<NativeRuntimeCheck>;
+  makeWorkDir(): Promise<string>;
+  abortCreate(workDir: string, assetRoot: string, sandboxId: string): Promise<string[]>;
+  callExternal(input: NativeExternalInput, signal: AbortSignal | undefined | null): Promise<NativeExternalResult>;
+  runLoad(input: NativeLoadInput, signal: AbortSignal | undefined | null): Promise<NativeLoadResult>;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -1171,4 +1180,87 @@ export function decodeNative<T>(text: string): T {
     if (item !== null && typeof item === 'object' && !Array.isArray(item) && NONFINITE_KEY in item) return Number((item as Record<string, string>)[NONFINITE_KEY]);
     return item;
   }) as T;
+}
+
+/** `execChecked`가 던지던 것과 같은 정보. `kind`: `ok` · `invalid-id` · `failed`(`code`가 없으면 출력이 상한을 넘었다) */
+export interface NativeCheckedResult {
+  kind: 'ok' | 'invalid-id' | 'failed';
+  message: string;
+  code?: number | null;
+  stdout: string;
+  stderr: string;
+}
+
+export interface NativeCleanupResult {
+  kind: 'done' | 'invalid-id';
+  failure?: string | null;
+}
+
+export interface NativeDestroyInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  workDir: string;
+  assetRoot: string;
+  cwd?: string;
+}
+
+export interface NativeDestroyResult {
+  kind: 'done' | 'invalid-id';
+  downFailed: boolean;
+  downStderr: string;
+  images: NativeCheckedResult;
+  workDir?: string | null;
+  assets?: string | null;
+}
+
+export interface NativeRuntimeCheck {
+  kind: 'present' | 'missing' | 'info-failed';
+  message: string;
+  available: string[];
+}
+
+export interface NativeExternalInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  edgeService: string;
+  externals: string[];
+  name: string;
+  path: string;
+  edgeScript: string;
+  requestJson: string;
+}
+
+export interface NativeExternalResult {
+  kind: 'done' | 'failed' | 'not-registered' | 'path-not-absolute';
+  last: string;
+  stderr: string;
+}
+
+export interface NativeLoadInput {
+  compose: NativeComposeRef;
+  overridePath: string;
+  service: string;
+  port: number;
+  sandboxNetwork: string;
+  runtime?: string;
+  image: string;
+  requestJson: string;
+  requests: number;
+  concurrent: number;
+  runnerScript: string;
+  cpusKnown: boolean;
+  daemonCpus?: number;
+  limitMs: number;
+  signalAlreadyAborted: boolean;
+}
+
+export interface NativeLoadResult {
+  kind: 'done' | 'invalid-id' | 'state-unreadable' | 'not-running' | 'config-invalid' | 'aborted' | 'timed-out' | 'runner-failed' | 'unreadable';
+  json: string;
+  message: string;
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  cpusRead: boolean;
+  daemonCpus?: number | null;
 }

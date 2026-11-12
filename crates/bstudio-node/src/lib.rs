@@ -4962,3 +4962,254 @@ pub fn checkpoint_remote(env: Env, op: String, input: String, hook: ThreadsafeFu
     })
     .build(&env)
 }
+
+// ── 샌드박스 끝맺음·부하 러너·사내 API 호출·만들기 준비(ADR-195 4f A4c-3c) ──
+// 판정은 bstudio-guard(load_runner·external_call·docker_format), docker를 부르는 순서와 지우는 대상은 bstudio-io(lifecycle_io)가 한다.
+// `up`은 여기서 부르지 않는다. 던지지 않고 결과(`kind`)로 돌려준다(작업 폴더 만들기만 던진다). TS 껍데기: packages/sandbox/src/docker/lifecycle-run.ts
+use bstudio_io::lifecycle_io as lio;
+
+/// `execChecked`가 던지던 것과 같은 정보. `kind`: `ok` · `invalid-id`(샌드박스 id의 꼴이 아니다) · `failed`(code가 없으면 출력이 상한을 넘었다)
+#[napi(object)]
+pub struct CheckedResultJs {
+    pub kind: String,
+    pub message: String,
+    pub code: Option<i32>,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+fn checked_blank(kind: &str) -> CheckedResultJs {
+    CheckedResultJs { kind: kind.to_owned(), message: String::new(), code: None, stdout: String::new(), stderr: String::new() }
+}
+
+fn images_result(result: std::result::Result<(), lio::RemoveImagesError>) -> CheckedResultJs {
+    match result {
+        Ok(()) => checked_blank("ok"),
+        Err(lio::RemoveImagesError::InvalidId) => checked_blank("invalid-id"),
+        Err(lio::RemoveImagesError::Exec(failure)) => CheckedResultJs { message: failure.message, code: failure.code, stdout: failure.stdout, stderr: failure.stderr, ..checked_blank("failed") },
+    }
+}
+
+/// 이 샌드박스가 빌드한 이미지를 지운다(`image ls --filter reference=<id>-*` 결과 가운데 `<id>-`로 시작하는 것만 `image rm`)
+#[napi]
+pub fn remove_sandbox_images(env: Env, docker_bin: String, sandbox_id: String, cwd: Option<String>) -> Result<AsyncBlock<CheckedResultJs>> {
+    AsyncBlockBuilder::new(async move { Ok(images_result(lio::remove_sandbox_images(&docker_bin, &sandbox_id, cwd.as_deref()).await)) }).build(&env)
+}
+
+/// `kind`: `done`(failure: 지우기가 실패했으면 그 글) · `invalid-id`
+#[napi(object)]
+pub struct CleanupResultJs {
+    pub kind: String,
+    pub failure: Option<String>,
+}
+
+/// compose 파일 없이 프로젝트 이름으로 지우고 평가 자산 복사본 폴더를 지운다
+#[napi]
+pub fn cleanup_sandbox(env: Env, docker_bin: String, sandbox_id: String, asset_root: String, cwd: Option<String>) -> Result<AsyncBlock<CleanupResultJs>> {
+    AsyncBlockBuilder::new(async move {
+        Ok(match lio::cleanup_sandbox(&docker_bin, &sandbox_id, &asset_root, cwd.as_deref()).await {
+            lio::CleanupOutcome::InvalidId => CleanupResultJs { kind: "invalid-id".into(), failure: None },
+            lio::CleanupOutcome::Done { failure } => CleanupResultJs { kind: "done".into(), failure },
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct DestroyInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    pub work_dir: String,
+    pub asset_root: String,
+    pub cwd: Option<String>,
+}
+
+/// `kind`: `done` · `invalid-id`. `done`이면 단계마다의 결과: `downFailed`(stderr), `images`(`ok`·`invalid-id`·`failed`), `workDir`·`assets`(지우지 못한 이유)
+#[napi(object)]
+pub struct DestroyResultJs {
+    pub kind: String,
+    pub down_failed: bool,
+    pub down_stderr: String,
+    pub images: CheckedResultJs,
+    pub work_dir: Option<String>,
+    pub assets: Option<String>,
+}
+
+/// `down` → 이 샌드박스가 빌드한 이미지 → 작업 폴더 → 평가 자산 복사본 폴더. `up`의 줄을 타지 않는다
+#[napi]
+pub fn destroy_sandbox(env: Env, input: DestroyInputJs) -> Result<AsyncBlock<DestroyResultJs>> {
+    let input = lio::DestroyInput { compose: compose_ref(input.compose), override_path: input.override_path, work_dir: input.work_dir, asset_root: input.asset_root, cwd: input.cwd };
+    AsyncBlockBuilder::new(async move {
+        Ok(match lio::destroy_sandbox(&input).await {
+            lio::DestroyOutcome::InvalidId => DestroyResultJs { kind: "invalid-id".into(), down_failed: false, down_stderr: String::new(), images: checked_blank("ok"), work_dir: None, assets: None },
+            lio::DestroyOutcome::Done { down, images, work_dir, assets } => DestroyResultJs {
+                kind: "done".into(),
+                down_failed: down.is_some(),
+                down_stderr: down.map(|failure| failure.stderr).unwrap_or_default(),
+                images: images_result(images.map_or(std::result::Result::Ok(()), std::result::Result::Err)),
+                work_dir,
+                assets,
+            },
+        })
+    })
+    .build(&env)
+}
+
+/// `kind`: `present` · `missing`(available: 등록된 런타임) · `info-failed`(message: 옛 `execChecked`의 글)
+#[napi(object)]
+pub struct RuntimeCheckJs {
+    pub kind: String,
+    pub message: String,
+    pub available: Vec<String>,
+}
+
+#[napi]
+pub fn assert_runtime(env: Env, docker_bin: String, runtime: String) -> Result<AsyncBlock<RuntimeCheckJs>> {
+    AsyncBlockBuilder::new(async move {
+        Ok(match lio::assert_runtime(&docker_bin, &runtime).await {
+            lio::RuntimeCheck::Present => RuntimeCheckJs { kind: "present".into(), message: String::new(), available: Vec::new() },
+            lio::RuntimeCheck::Missing(available) => RuntimeCheckJs { kind: "missing".into(), message: String::new(), available },
+            lio::RuntimeCheck::InfoFailed(message) => RuntimeCheckJs { kind: "info-failed".into(), message, available: Vec::new() },
+        })
+    })
+    .build(&env)
+}
+
+/// 임시 폴더 아래에 작업 폴더(`b-studio-` + 6자, 권한 0700)를 만들고 절대 경로를 돌려준다
+#[napi]
+pub async fn make_work_dir() -> Result<String> {
+    lio::make_work_dir().await.map_err(Error::from_reason)
+}
+
+/// create가 샌드박스를 돌려주지 못했을 때 이 create가 만든 작업 폴더와 복사본 폴더를 지운다. 지우지 못한 이유 목록을 돌려준다(던지지 않는다)
+#[napi]
+pub async fn abort_create(work_dir: String, asset_root: String, sandbox_id: String) -> Vec<String> {
+    lio::abort_create(&work_dir, &asset_root, &sandbox_id).await
+}
+
+#[napi(object)]
+pub struct ExternalInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    pub edge_service: String,
+    pub externals: Vec<String>,
+    pub name: String,
+    pub path: String,
+    pub edge_script: String,
+    pub request_json: String,
+}
+
+/// `kind`: `done`(last) · `failed`(stderr) · `not-registered` · `path-not-absolute`
+#[napi(object)]
+pub struct ExternalResultJs {
+    pub kind: String,
+    pub last: String,
+    pub stderr: String,
+}
+
+/// 등록한 사내 API이고 경로가 `/`로 시작할 때만 edge 컨테이너 안에서 호출한다
+#[napi]
+pub fn call_external(env: Env, input: ExternalInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<ExternalResultJs>> {
+    let cancel = abort_cancel(signal);
+    let input = lio::ExternalInput {
+        compose: compose_ref(input.compose),
+        override_path: input.override_path,
+        edge_service: input.edge_service,
+        externals: input.externals,
+        name: input.name,
+        path: input.path,
+        edge_script: input.edge_script,
+        request_json: input.request_json,
+    };
+    AsyncBlockBuilder::new(async move {
+        let blank = |kind: &str| ExternalResultJs { kind: kind.to_owned(), last: String::new(), stderr: String::new() };
+        Ok(match lio::call_external(&input, Some(&cancel)).await {
+            lio::ExternalOutcome::NotRegistered => blank("not-registered"),
+            lio::ExternalOutcome::PathNotAbsolute => blank("path-not-absolute"),
+            lio::ExternalOutcome::Failed { stderr } => ExternalResultJs { stderr, ..blank("failed") },
+            lio::ExternalOutcome::Done { last } => ExternalResultJs { last, ..blank("done") },
+        })
+    })
+    .build(&env)
+}
+
+#[napi(object)]
+pub struct LoadInputJs {
+    pub compose: ComposeRefJs,
+    pub override_path: String,
+    pub service: String,
+    pub port: f64,
+    pub sandbox_network: String,
+    pub runtime: Option<String>,
+    pub image: String,
+    pub request_json: String,
+    pub requests: f64,
+    pub concurrent: f64,
+    pub runner_script: String,
+    /// 이미 읽어 둔 도커 CPU 수가 있으면 true(그때 `daemonCpus`가 없으면 알 수 없다는 뜻이다)
+    pub cpus_known: bool,
+    pub daemon_cpus: Option<f64>,
+    pub limit_ms: f64,
+    pub signal_already_aborted: bool,
+}
+
+/// `kind`: `done`(json: `LoadResult`의 `encodeNative`) · `invalid-id` · `state-unreadable`(message) · `not-running`(message: 상태) · `config-invalid`(message) · `aborted` · `timed-out` ·
+/// `runner-failed`(exitCode·stderr) · `unreadable`(stdout). `cpusRead`면 이번에 `docker info`로 읽은 값(`daemonCpus`, 없으면 알 수 없음)을 TS가 캐시한다
+#[napi(object)]
+pub struct LoadResultJs {
+    pub kind: String,
+    pub json: String,
+    pub message: String,
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub cpus_read: bool,
+    pub daemon_cpus: Option<f64>,
+}
+
+/// 서비스 상태 확인 → CPU 수 → `docker run`(상한 시간) → 중단·시간 초과면 이 실행이 만든 이름으로만 `rm --force` → 결과 읽기
+#[napi]
+pub fn run_load(env: Env, input: LoadInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<LoadResultJs>> {
+    let cancel = abort_cancel(signal);
+    let input = lio::LoadInput {
+        compose: compose_ref(input.compose),
+        override_path: input.override_path,
+        service: input.service,
+        port: input.port,
+        sandbox_network: input.sandbox_network,
+        runtime: input.runtime,
+        image: input.image,
+        request_json: input.request_json,
+        requests: input.requests,
+        concurrent: input.concurrent,
+        runner_script: input.runner_script,
+        daemon_cpus: input.cpus_known.then_some(input.daemon_cpus),
+        limit_ms: if input.limit_ms.is_finite() && input.limit_ms > 0.0 { input.limit_ms as u64 } else { 0 },
+        signal_already_aborted: input.signal_already_aborted,
+    };
+    AsyncBlockBuilder::new(async move {
+        let report = lio::run_load(&input, &cancel).await;
+        let blank = |kind: &str| LoadResultJs {
+            kind: kind.to_owned(),
+            json: String::new(),
+            message: String::new(),
+            exit_code: 0,
+            stdout: String::new(),
+            stderr: String::new(),
+            cpus_read: report.daemon_cpus_read.is_some(),
+            daemon_cpus: report.daemon_cpus_read.flatten(),
+        };
+        Ok(match report.outcome {
+            lio::LoadOutcome::InvalidId => blank("invalid-id"),
+            lio::LoadOutcome::StateUnreadable(message) => LoadResultJs { message, ..blank("state-unreadable") },
+            lio::LoadOutcome::NotRunning(state) => LoadResultJs { message: state, ..blank("not-running") },
+            lio::LoadOutcome::ConfigInvalid(message) => LoadResultJs { message, ..blank("config-invalid") },
+            lio::LoadOutcome::Aborted => blank("aborted"),
+            lio::LoadOutcome::TimedOut => blank("timed-out"),
+            lio::LoadOutcome::RunnerFailed { exit_code, stderr } => LoadResultJs { exit_code, stderr, ..blank("runner-failed") },
+            lio::LoadOutcome::Unreadable { stdout } => LoadResultJs { stdout, ..blank("unreadable") },
+            lio::LoadOutcome::Done(json) => LoadResultJs { json, ..blank("done") },
+        })
+    })
+    .build(&env)
+}

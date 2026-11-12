@@ -13,6 +13,7 @@ pub mod exec_stream;
 mod fake_docker;
 pub mod git_mask_fs;
 pub mod host_port;
+pub mod lifecycle_io;
 pub mod log_stream;
 pub mod process;
 pub mod process_bytes;
