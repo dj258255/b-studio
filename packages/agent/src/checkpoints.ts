@@ -287,16 +287,9 @@ interface ParsedLogRecord {
   verifyTrailers: string[];
   incompleteTrailers: string[];
 }
-/** 가져오기 전에 원격 세션 브랜치를 받아 두는 곳. origin/*는 원본 폴더의 브랜치를 가리킬 수 있어 쓰지 않는다 */
-const REMOTE_REF = 'refs/b-studio/remote';
-/** 기준 브랜치(main 등)를 받아 두는 곳 (ADR-076) */
-const BASE_REF = 'refs/b-studio/base';
-/** 기준 브랜치 확인(baseStatus)을 이 시간 안에 다시 부르면 새로 가져오지 않는다. 화면이 자주 물어도 origin에 부담을 주지 않는다 */
-const BASE_FETCH_THROTTLE_MS = 60_000;
 const MAX_PATCH_CHARS = 200_000;
 const MAX_BODY_CHARS = 8_000;
 const CLONE_TIMEOUT_MS = 300_000;
-const PUSH_TIMEOUT_MS = 120_000;
 const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-studio.local' };
 /**
  * b-studio가 부르는 git은 저장소의 훅과 fsmonitor를 쓰지 않는다(이슈 #699). 이 컴퓨터 방식에서는 에이전트가 작업
@@ -306,6 +299,14 @@ const DEFAULT_AUTHOR: GitAuthor = { name: 'b-studio', email: 'checkpoints@b-stud
  * 모든 git 호출의 인자 맨 앞(하위 명령보다 앞)에 붙인다
  */
 export const GIT_HARDENING = ['-c', 'core.hooksPath=/dev/null', '-c', 'core.fsmonitor=false', '-c', 'core.attributesFile=/dev/null'];
+/** Rust로 보낼 기억한 Git 상태. 짝 없는 서로게이트가 napi 경계에서 U+FFFD로 합쳐져 다른 값이 같아지지 않게 단사 변환한다(Rust가 git이 낸 글자도 같은 규칙으로 바꿔 견준다) */
+function rememberedInput(remembered: RememberedGit): Record<string, string | undefined> {
+  return {
+    branch: encodeLoneSurrogates(remembered.branch),
+    lastCheckpoint: encodeLoneSurrogates(remembered.lastCheckpoint),
+    originUrl: remembered.originUrl === undefined ? undefined : encodeLoneSurrogates(remembered.originUrl),
+  };
+}
 /** 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다 */
 const GENERATED = ['node_modules/', '.next/', 'build/', '.gradle/', '.venv/', '__pycache__/', '*.tsbuildinfo', 'next-env.d.ts', '*.b-studio-relay-*'];
 /**
@@ -1301,30 +1302,17 @@ export class CheckpointStore {
 
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
   async repository(): Promise<RepositoryInfo | undefined> {
-    const [base, branch] = await Promise.all([this.#getMeta('base'), this.#getMeta('branch')]);
-    if (!base || !branch) return undefined;
-    return {
-      remoteUrl: (await this.#git(['remote', 'get-url', 'origin'])).trim(),
-      base,
-      branch,
-      subdir: (await this.#subdir()) || undefined,
-      pushedSha: await this.#getMeta('pushed'),
-      remoteSha: await this.#getMeta('remote'),
-      pullRequestUrl: await this.#getMeta('pullrequest'),
-      pullRequestBase: await this.#getMeta('pullrequestBase'),
-    };
+    return (await this.#remote<RepositoryInfo | null>('repository')) ?? undefined;
   }
 
   /** 지금 작업 복사본의 HEAD와 체크아웃된 브랜치. 분리된 HEAD면 branch가 없다(이슈 #699) */
   async headState(): Promise<HeadState> {
-    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
-    const branch = await this.#git(['symbolic-ref', '--quiet', '--short', 'HEAD']).then((out) => out.trim() || undefined, () => undefined);
-    return { head, branch };
+    return this.#remote<HeadState>('headState');
   }
 
   /** origin 주소. 원격이 없으면 undefined. 세션을 만들 때 기억할 주소를 읽는 데 쓴다(이슈 #699) */
   async remoteUrl(): Promise<string | undefined> {
-    return this.#git(['remote', 'get-url', 'origin']).then((out) => out.trim() || undefined, () => undefined);
+    return (await this.#remote<string | null>('remoteUrl')) ?? undefined;
   }
 
   /** ancestor가 descendant의 조상인가(같으면 참). 터미널 턴 끝 검사가 에이전트의 커밋을 풀 수 있는지 판단할 때 쓴다 */
@@ -1337,11 +1325,7 @@ export class CheckpointStore {
    * 에이전트가 터미널에서 직접 만든 커밋을 b-studio가 검증할 수 있게 풀 때 쓴다. 푼 커밋 수를 돌려준다
    */
   async uncommitTo(sha: string): Promise<number> {
-    const resolved = await this.#resolve(sha);
-    const count = Number((await this.#git(['rev-list', '--count', `${resolved}..HEAD`])).trim());
-    if (count === 0) return 0;
-    await this.#git(['reset', '--soft', resolved]);
-    return count;
+    return (await this.#remote<number | null>('uncommitTo', { sha: encodeLoneSurrogates(sha) })) ?? Number.NaN;
   }
 
   /**
@@ -1351,25 +1335,27 @@ export class CheckpointStore {
    * 브랜치가 없어졌으면 그 체크포인트에서 다시 만든다
    */
   async restoreRememberedHead(remembered: RememberedGit): Promise<{ files: string[]; patch: string; backup?: DiscardBackup }> {
-    const checkpoint = await this.#resolve(remembered.lastCheckpoint);
-    const scope = await this.#scope();
-    const relative = await this.#relative();
-    const excluded = await this.#excludedDiff(await this.#headSha());
-    // 지금 작업 복사본 전체를 인덱스에 올린 뒤 기억한 체크포인트와 견준다. 브랜치를 바꿔 커밋한 경우에도 그 내용이
-    // 보관본에 담긴다 — 현재 HEAD 기준으로 보면 이미 커밋이라 변경이 없어 보이기 때문이다
-    await this.#git(['add', '-A', ...scope]);
-    const files = (await this.#git(['diff', '--cached', '--name-only', '-z', ...relative, checkpoint])).split('\0').filter(Boolean);
-    const patch = files.length > 0 ? await this.#git(['diff', '--cached', '--no-color', ...relative, checkpoint]) : '';
-    const backup = await this.#backupChanges(files, excluded, checkpoint);
-    // 세션 브랜치로 강제로 옮긴 뒤 기억한 체크포인트로 되돌린다. 브랜치가 없어졌으면(에이전트가 지웠으면) 그 체크포인트에서 다시 만든다
-    await this.#git(['checkout', '-f', remembered.branch]).catch(async () => {
-      await this.#git(['checkout', '-f', checkpoint]);
-      await this.#git(['checkout', '-B', remembered.branch]);
-    });
-    await this.#git(['reset', '-q', '--hard', checkpoint]);
-    await this.#git(['clean', '-q', '-fd', ...scope]);
-    const excludedReverted = await this.#applyExcludedDiff(excluded);
-    return { files: [...new Set([...files, ...excludedReverted])].sort(), patch: capText(patch, MAX_PATCH_CHARS), backup };
+    // 순서(Rust, crates/bstudio-io/src/checkpoint_remote.rs): 체크포인트 확인 → before → add -A → 바뀐 파일·패치 → backup → checkout → reset → clean → after.
+    // 백업(backup 콜백)이 실패하면 Rust가 checkout·reset·clean을 부르지 않는다
+    let excluded: ExcludedChange[] = [];
+    let backup: DiscardBackup | undefined;
+    let reverted: string[] = [];
+    const done = await this.#remote<{ files: string[]; patch: string }>(
+      'restoreRememberedHead',
+      { remembered: rememberedInput(remembered) },
+      {
+        beforeRestore: async () => {
+          excluded = await this.#excludedDiff(await this.#headSha());
+        },
+        backup: async (request) => {
+          backup = await this.#backupChanges(request.files as string[], excluded, request.checkpoint as string);
+        },
+        afterRestore: async () => {
+          reverted = await this.#applyExcludedDiff(excluded);
+        },
+      },
+    );
+    return { files: [...new Set([...done.files, ...reverted])].sort(), patch: done.patch, backup };
   }
 
   /**
@@ -1378,57 +1364,7 @@ export class CheckpointStore {
    * 무엇이 다른지와, 사람이 고친 것이면 되돌린 뒤 다시 하라는 안내를 담는다
    */
   async assertTrustedGit(remembered: RememberedGit): Promise<void> {
-    const mismatches: string[] = [];
-    const state = await this.headState();
-    if (state.branch !== remembered.branch) {
-      mismatches.push(
-        state.branch === undefined
-          ? `지금 HEAD가 브랜치가 아니라 커밋을 가리킵니다(기억한 세션 브랜치: ${remembered.branch})`
-          : `지금 브랜치(${state.branch})가 기억한 세션 브랜치(${remembered.branch})와 다릅니다`,
-      );
-    }
-    if (state.head !== remembered.lastCheckpoint) {
-      mismatches.push(`지금 HEAD(${state.head.slice(0, 7)})가 b-studio가 마지막으로 남긴 체크포인트(${remembered.lastCheckpoint.slice(0, 7)})와 다릅니다`);
-    }
-    if (remembered.originUrl !== undefined) {
-      const originUrl = (await this.remoteUrl()) ?? '';
-      if (originUrl !== remembered.originUrl) mismatches.push(`remote.origin.url이 기억한 주소와 다릅니다(지금: ${originUrl || '없음'})`);
-    }
-    mismatches.push(...(await this.#dangerousLocalConfig()));
-    if (mismatches.length > 0) {
-      throw new CheckpointError(
-        `작업 복사본의 Git 설정이 b-studio가 기억한 것과 달라 멈췄습니다:\n- ${mismatches.join('\n- ')}\n사람이 직접 고친 것이면 되돌린 뒤 다시 시도하세요.`,
-      );
-    }
-  }
-
-  /**
-   * 저장소 설정에 원격 주소를 바꾸거나, 자격 증명을 가로채거나, b-studio의 git이 프로그램을 부르게 하는 값이 있으면 그 설명들
-   * (이슈 #699·#706). git이 실제로 읽는 규칙 그대로 읽는다: include를 펼치고(`--includes`), worktree 설정(`config.worktree`)도
-   * 포함한다. 범위(`--show-scope`)가 local·worktree인 것만 본다 — 전역·시스템 설정은 사용자의 것이고, command는 b-studio가 붙인 `-c`다
-   */
-  async #dangerousLocalConfig(): Promise<string[]> {
-    // 값에 개행이 들어갈 수 있어 -z(NUL 구분)로 읽는다. 항목마다 "범위\0출처\0키\n값\0"이다.
-    // 읽지 못하면 빈 목록이 아니라 던진다 — 확인하지 못한 것을 "위험한 값이 없다"로 보면 안 된다
-    const output = await this.#git(['config', '--list', '--includes', '--show-scope', '--show-origin', '-z']);
-    // 작업 폴더 밖 저장소(내 폴더 방식)는 git init이 core.worktree를 적고, b-studio는 --work-tree를 직접 넘겨 그 값을 쓰지 않는다
-    const found = native.checkpointDangerousLocalConfig(output, Boolean(this.#separateGitDir));
-    if (!found) throw new CheckpointError('저장소 설정을 읽었지만 형식을 알아보지 못해 확인하지 못했습니다');
-    return found;
-  }
-
-  /**
-   * `.git/info/attributes`에 적힌 속성(이슈 #706). 커밋에 들어가지 않고 에이전트가 고칠 수 있는 파일인데, 필터·diff·병합
-   * 드라이버를 걸거나 내보내기(git archive)에서 파일을 빼고 바꾼다(export-ignore, export-subst). b-studio는 이 파일을 쓰지 않으므로
-   * 주석과 빈 줄이 아닌 줄이 있으면 모두 알린다
-   */
-  async #infoAttributes(): Promise<string[]> {
-    const file = path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', 'info/attributes'])).trim());
-    const text = await readFile(file, 'utf8').catch((error: NodeJS.ErrnoException) => {
-      if (error.code === 'ENOENT') return '';
-      throw new CheckpointError(`.git/info/attributes를 읽지 못해 확인하지 못했습니다: ${error.message}`);
-    });
-    return native.checkpointInfoAttributes(text);
+    await this.#remote('assertTrustedGit', { remembered: rememberedInput(remembered) });
   }
 
   /**
@@ -1436,12 +1372,7 @@ export class CheckpointStore {
    * 위험한 설정이나 `.git/info/attributes`가 있으면 던진다. 컨테이너 방식은 `.git`이 읽기 전용이라 여기 걸릴 것이 없다
    */
   async #assertSafeLocalGit(): Promise<void> {
-    const found = [...(await this.#dangerousLocalConfig()), ...(await this.#infoAttributes())];
-    if (found.length > 0) {
-      throw new CheckpointError(
-        `작업 복사본의 Git 설정이 b-studio가 커밋하거나 내보내는 내용을 바꿀 수 있어 멈췄습니다:\n- ${found.join('\n- ')}\n사람이 직접 고친 것이면 되돌린 뒤 다시 시도하세요.`,
-      );
-    }
+    await this.#remote('assertSafeLocalGit');
   }
 
   /** expectedHead를 주면 지금 HEAD가 그것과 같은지 보고, 그 sha(주지 않았으면 지금 HEAD)를 돌려준다(이슈 #706) */
@@ -1472,34 +1403,60 @@ export class CheckpointStore {
   }
 
   /**
-   * 원격에 닿는 git 명령(fetch·push·ls-remote). 닿기 전에 지금 작업 복사본의 Git이 기억한 것과 같은지 먼저 본다
-   * (이슈 #699). 원격 주소를 바꾸거나 자격 증명을 가로채는 설정이 있으면 여기서 멈춘다 — baseStatus처럼 이 확인
-   * 없이 먼저 fetch하던 길을 막기 위해 원격 명령을 이 한 함수로 모은다
+   * 원격 경로(올리기·가져오기·기준 브랜치·PR 대상)와 신뢰 확인의 git 호출 순서는 Rust(`checkpoint_remote.rs`)가 한다(ADR-195 4f A2).
+   * 원격에 닿는 명령(fetch·push·ls-remote)은 Rust에서 신뢰 확인을 지나는 한 함수로만 부른다 — 여기서는 부를 수 없다.
+   * 이 함수는 입력을 JSON으로 보내고 결과를 옛 오류 클래스로 바꾼다. 순서 중간에 TS 상태가 끼는 자리(저장하지 않은 변경 수, 백업·제외 스냅샷)는 `hooks`로 Rust가 부른다.
+   * 캐시(`#start`·`#subdirCache`)는 Rust가 읽은 값을 돌려받아 갱신한다(콜드·웜에서 git 호출 순서가 옛 코드와 같다)
    */
-  async #remoteGit(remembered: RememberedGit, args: string[], options?: { timeout?: number }): Promise<string> {
-    await this.assertTrustedGit(remembered);
-    return this.#git(args, options);
+  async #remote<T = undefined>(
+    op: string,
+    input: Record<string, unknown> = {},
+    hooks: Record<string, (request: Record<string, unknown>) => Promise<void>> = {},
+  ): Promise<T> {
+    let thrown: { error: unknown } | undefined;
+    const hook = async (text: string): Promise<string> => {
+      try {
+        const request = JSON.parse(text, (_key, value: unknown) => (typeof value === 'string' ? decodeLoneSurrogates(value) : value)) as Record<string, unknown>;
+        // Rust가 읽어 둔 캐시를 먼저 받는다(콜백 안의 git 호출 순서가 옛 코드와 같다)
+        if (typeof request.start === 'string') this.#start = request.start;
+        if (typeof request.subdir === 'string') this.#subdirCache = request.subdir;
+        if (request.op === 'pendingFiles') return JSON.stringify({ ok: true, count: (await this.pendingFiles()).length });
+        const handler = hooks[String(request.op)];
+        if (!handler) throw new CheckpointError(`알 수 없는 원격 경로 콜백입니다: ${String(request.op)}`);
+        await handler(request);
+        return JSON.stringify({ ok: true });
+      } catch (error) {
+        thrown ??= { error };
+        return JSON.stringify({ ok: false });
+      }
+    };
+    const text = await native.checkpointRemote(
+      op,
+      JSON.stringify({ root: this.root, gitBin: this.#gitBin, gitDir: this.#separateGitDir, start: this.#start, subdir: this.#subdirCache, ...input }),
+      hook,
+    );
+    const result = JSON.parse(text, (_key, value: unknown) => (typeof value === 'string' ? decodeLoneSurrogates(value) : value)) as {
+      ok: boolean;
+      value?: T;
+      kind?: string;
+      message?: string;
+      conflicts?: string[];
+      cache?: { start?: string | null; subdir?: string | null };
+    };
+    this.#start = result.cache?.start ?? this.#start;
+    this.#subdirCache = result.cache?.subdir ?? this.#subdirCache;
+    if (result.ok) return result.value as T;
+    if (result.kind === 'conflict') throw new RemoteConflictError(result.conflicts ?? []);
+    if (result.kind === 'hook') throw thrown?.error ?? new CheckpointError('원격 경로의 콜백이 실패했습니다');
+    throw new CheckpointError(result.message ?? '원격 경로가 실패했습니다');
   }
 
-  /**
-   * PR을 어느 원격 브랜치로 열지 원격에 물어 정한다. 기준 브랜치가 원격에 없으면(원본 폴더가 올리지 않은 로컬
-   * 브랜치를 체크아웃하고 있던 경우) 원격의 기본 브랜치를 대상으로 삼고, 원래의 기준 브랜치 이름을 함께 돌려준다.
-   * 원격에 닿지 못하면 던진다. 부르는 쪽이 "확인하지 못함"으로 다룬다.
-   * remembered를 주면 원격에 닿기 전에 지금 작업 복사본의 Git이 기억한 것과 같은지 먼저 본다(이슈 #699)
-   */
   async pullRequestTarget(remembered: RememberedGit): Promise<PullRequestTarget> {
-    const info = await this.repository();
-    if (!info) throw new CheckpointError('원격 저장소와 연결되지 않은 세션입니다');
-
-    const baseRef = `refs/heads/${info.base}`;
-    const listed = await this.#remoteGit(remembered, ['ls-remote', '--symref', 'origin', 'HEAD', baseRef], { timeout: PUSH_TIMEOUT_MS });
-    const target = decodeNative<PullRequestTarget>(native.checkpointPullRequestTarget(listed, baseRef, info.base));
-    await this.#setMeta('pullrequestBase', target.base);
-    return target;
+    return this.#remote<PullRequestTarget>('pullRequestTarget', { remembered: rememberedInput(remembered) });
   }
 
   async recordPullRequest(url: string): Promise<void> {
-    await this.#setMeta('pullrequest', url);
+    await this.#remote('recordPullRequest', { url });
   }
 
   /** 세션 시작 이후 체크포인트 커밋. 오래된 것부터. 원격에서 가져온 커밋은 병합 커밋으로만 들어간다 */
@@ -1555,32 +1512,7 @@ export class CheckpointStore {
    * 브랜치·원격 주소·HEAD를 바꿨으면 멈춘다. 올릴 브랜치는 config(b-studio.branch)가 아니라 기억한 값에서 읽는다
    */
   async push(remembered: RememberedGit): Promise<PushResult> {
-    const info = await this.repository();
-    if (!info) throw new CheckpointError('원격 저장소와 연결되지 않은 세션입니다');
-    if ((await this.pendingFiles()).length > 0) throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 올릴 수 없습니다');
-    const branch = remembered.branch;
-    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
-    const commits = Number((await this.#git(['rev-list', '--count', '--first-parent', `${await this.#startSha()}..HEAD`])).trim());
-    if (commits === 0) throw new CheckpointError('올릴 체크포인트가 없습니다. 요청이 검증 게이트를 통과하면 체크포인트가 생깁니다');
-
-    const ref = `refs/heads/${branch}`;
-    // 한 번도 올리거나 가져오지 않았으면 빈 값: 원격에 같은 이름의 브랜치가 없어야 한다
-    const expected = info.remoteSha ?? info.pushedSha ?? '';
-    try {
-      await this.#remoteGit(remembered, ['push', `--force-with-lease=${ref}:${expected}`, 'origin', `HEAD:${ref}`], { timeout: PUSH_TIMEOUT_MS });
-    } catch (error) {
-      if (error instanceof CheckpointError && error.message.includes('stale info')) {
-        throw new CheckpointError(
-          `원격의 ${branch} 브랜치가 스튜디오가 마지막으로 확인한 상태와 달라 덮어쓰지 않았습니다. 다른 사람이 올린 커밋이면 원격 변경을 가져온 뒤 다시 올리세요.`,
-        );
-      }
-      throw error;
-    }
-
-    const forced = expected !== '' && !(await this.#isAncestor(expected, head));
-    await this.#setMeta('pushed', head);
-    await this.#setMeta('remote', head);
-    return { sha: head, commits, forced };
+    return this.#remote<PushResult>('push', { remembered: rememberedInput(remembered) });
   }
 
   /**
@@ -1592,58 +1524,17 @@ export class CheckpointStore {
    * remembered는 필수다. 가져오기 전에 지금 작업 복사본의 Git이 기억한 것과 같은지 본다(이슈 #699)
    */
   async integrateRemote(remembered: RememberedGit): Promise<RemoteSyncResult> {
-    const info = await this.repository();
-    if (!info) throw new CheckpointError('원격 저장소와 연결되지 않은 세션입니다');
-    if ((await this.pendingFiles()).length > 0) throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 원격 변경을 가져올 수 없습니다');
+    const result = await this.#remote<RemoteSyncResult>('integrateRemote', { remembered: rememberedInput(remembered) });
+    if (result.status === 'up-to-date') return result;
+    return this.#withCheckpoint(result);
+  }
 
-    const branch = remembered.branch;
-    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
-    const ref = `refs/heads/${branch}`;
-    const listed = (await this.#remoteGit(remembered, ['ls-remote', '--heads', 'origin', ref], { timeout: PUSH_TIMEOUT_MS })).trim();
-    if (!listed) return { status: 'up-to-date', commits: [], files: [], previous: head };
-
-    await this.#remoteGit(remembered, ['fetch', '--quiet', '--no-tags', 'origin', `+${ref}:${REMOTE_REF}`], { timeout: PUSH_TIMEOUT_MS });
-    const remote = (await this.#git(['rev-parse', REMOTE_REF])).trim();
-    if (!(await this.#isAncestor(await this.#startSha(), remote))) {
-      throw new CheckpointError(`원격의 ${branch} 브랜치가 이 세션의 시작 커밋을 포함하지 않아 가져오지 않았습니다`);
-    }
-    if (await this.#isAncestor(remote, head)) {
-      // 지금 기록이 원격을 모두 담고 있으므로 원격 상태로 기록해도 덮어쓸 커밋이 없다
-      await this.#setMeta('remote', remote);
-      return { status: 'up-to-date', remoteSha: remote, commits: [], files: [], previous: head };
-    }
-
-    // 원격에만 있는 커밋의 시작점: 마지막으로 확인한 원격 상태가 원격 기록에 남아 있으면 그곳, 아니면 두 기록이 갈라진 곳
-    const known = info.remoteSha ?? info.pushedSha;
-    const from = known && (await this.#isAncestor(known, remote)) ? known : (await this.#git(['merge-base', head, remote])).trim();
-    const commits = await this.#remoteCommits(from, remote);
-    const picked = !(await this.#isAncestor(from, head));
-    if (picked && (await this.#git(['rev-list', '--merges', `${from}..${remote}`])).trim()) {
-      throw new CheckpointError('원격에만 있는 커밋에 병합 커밋이 있어 옮겨 오지 못했습니다. PR에서 기록을 정리한 뒤 다시 가져오세요');
-    }
-
-    try {
-      await this.#git(picked ? ['cherry-pick', '--no-commit', `${from}..${remote}`] : ['merge', '--no-ff', '--no-commit', remote]);
-    } catch (error) {
-      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U', ...(await this.#relative())])).split('\0').filter(Boolean).sort();
-      await this.#git([picked ? 'cherry-pick' : 'merge', '--abort']).catch(() => {});
-      await this.#git(['reset', '-q', '--hard', head]);
-      await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
-      if (conflicts.length > 0) throw new RemoteConflictError(conflicts);
-      throw error;
-    }
-
-    const body = commits.map((commit) => `- ${commit.shortSha} ${commit.subject} (${commit.author})`).join('\n');
-    await this.#git([
-      'commit', '-q', '--allow-empty', '--cleanup=whitespace',
-      '-m', `원격 커밋 ${commits.length}개 가져오기`, ...(body ? ['-m', capText(body, MAX_BODY_CHARS)] : []),
-    ]);
-    // 모노레포에서는 프로젝트 밖 변경도 함께 들어오지만, 게이트가 확인할 파일은 프로젝트 폴더 안의 것뿐이다
-    const files = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), head, 'HEAD'])).split('\0').filter(Boolean).sort();
+  /** 병합·옮겨 오기가 끝난 HEAD를 체크포인트로 읽고, 생성 파일(제외됨) 스냅샷은 병합 전 것을 물려받는다 */
+  async #withCheckpoint(result: RemoteSyncResult): Promise<RemoteSyncResult> {
     const checkpoint = await this.#checkpoint('HEAD');
     // 가져온 커밋은 생성 파일(제외됨)을 바꾸지 않는다 — 지금 디스크를 받아들이지 않고 병합 전 스냅샷을 그대로 물려받는다
-    await this.#carryForwardExcludedSnapshot(head, checkpoint.sha);
-    return { status: picked ? 'picked' : 'merged', remoteSha: remote, commits, files, checkpoint, previous: head };
+    await this.#carryForwardExcludedSnapshot(result.previous, checkpoint.sha);
+    return { ...result, checkpoint };
   }
 
   /**
@@ -1651,11 +1542,7 @@ export class CheckpointStore {
    * 가져온 체크포인트가 지금 기록에 없으면(검증에 실패해 되돌렸으면) 기록하지 않는다. 기록하면 리뷰어 커밋을 덮어쓸 수 있다
    */
   async acceptRemote(result: RemoteSyncResult): Promise<void> {
-    if (!result.remoteSha || !result.checkpoint) return;
-    if (!(await this.#isAncestor(result.checkpoint.sha, 'HEAD'))) {
-      throw new CheckpointError('가져온 체크포인트가 지금 기록에 없어 원격 상태로 기록하지 않았습니다');
-    }
-    await this.#setMeta('remote', result.remoteSha);
+    await this.#remote('acceptRemote', { remoteSha: result.remoteSha ?? null, checkpoint: result.checkpoint?.sha ?? null });
   }
 
   /**
@@ -1665,29 +1552,7 @@ export class CheckpointStore {
    * remembered는 필수다. 새로 가져올 때는 원격에 닿기 전에 지금 작업 복사본의 Git이 기억한 것과 같은지 본다(이슈 #699)
    */
   async baseStatus(remembered: RememberedGit, { force = false }: { force?: boolean } = {}): Promise<BaseStatus> {
-    const info = await this.repository();
-    if (!info) throw new CheckpointError('원본 저장소와 연결되지 않은 세션입니다');
-
-    const lastFetchedAt = await this.#getMeta('baseFetchedAt');
-    const stale = force || !lastFetchedAt || Date.now() - Date.parse(lastFetchedAt) >= BASE_FETCH_THROTTLE_MS;
-    if (stale) await this.#fetchBase(remembered, info.base);
-    const fetchedAt = (await this.#getMeta('baseFetchedAt')) ?? new Date().toISOString();
-
-    const baseSha = await this.#git(['rev-parse', '--verify', '--quiet', BASE_REF]).then(
-      (out) => out.trim(),
-      () => undefined,
-    );
-    if (!baseSha) return { base: info.base, behind: 0, lastFetchedAt: fetchedAt };
-
-    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
-    const behind = Number((await this.#git(['rev-list', '--count', `${head}..${baseSha}`])).trim());
-    const aheadCommits = Number((await this.#git(['rev-list', '--count', `${baseSha}..${head}`])).trim());
-    return { base: info.base, behind, aheadCommits, lastFetchedAt: fetchedAt };
-  }
-
-  async #fetchBase(remembered: RememberedGit, base: string): Promise<void> {
-    await this.#remoteGit(remembered, ['fetch', '--quiet', '--no-tags', 'origin', `+refs/heads/${base}:${BASE_REF}`], { timeout: PUSH_TIMEOUT_MS });
-    await this.#setMeta('baseFetchedAt', new Date().toISOString());
+    return this.#remote<BaseStatus>('baseStatus', { remembered: rememberedInput(remembered), force });
   }
 
   /**
@@ -1700,49 +1565,9 @@ export class CheckpointStore {
    * remembered는 필수다. 따라잡기 전에 지금 작업 복사본의 Git이 기억한 것과 같은지 본다(이슈 #699)
    */
   async integrateBase(remembered: RememberedGit): Promise<RemoteSyncResult> {
-    const info = await this.repository();
-    if (!info) throw new CheckpointError('원본 저장소와 연결되지 않은 세션입니다');
-    if ((await this.pendingFiles()).length > 0) {
-      throw new CheckpointError('체크포인트로 저장하지 않은 변경이 있어 기준 브랜치를 따라잡을 수 없습니다');
-    }
-
-    const head = (await this.#git(['rev-parse', 'HEAD'])).trim();
-    await this.#fetchBase(remembered, info.base);
-    const baseSha = (await this.#git(['rev-parse', BASE_REF])).trim();
-
-    if (await this.#isAncestor(baseSha, head)) return { status: 'up-to-date', commits: [], files: [], previous: head };
-
-    const mergeBase = (await this.#git(['merge-base', head, baseSha])).trim();
-    const commits = await this.#remoteCommits(mergeBase, baseSha);
-
-    try {
-      await this.#git(['merge', '--no-ff', '--no-commit', baseSha]);
-    } catch (error) {
-      const conflicts = (await this.#git(['diff', '--name-only', '-z', '--diff-filter=U', ...(await this.#relative())])).split('\0').filter(Boolean).sort();
-      await this.#git(['merge', '--abort']).catch(() => {});
-      await this.#git(['reset', '-q', '--hard', head]);
-      await this.#git(['clean', '-q', '-fd', ...(await this.#scope())]);
-      if (conflicts.length > 0) throw new RemoteConflictError(conflicts);
-      throw error;
-    }
-
-    const body = commits.map((commit) => `- ${commit.shortSha} ${commit.subject} (${commit.author})`).join('\n');
-    await this.#git([
-      'commit', '-q', '--allow-empty', '--cleanup=whitespace',
-      '-m', `${withObjectParticle(info.base)} 따라잡는다 (${commits.length}커밋)`, ...(body ? ['-m', capText(body, MAX_BODY_CHARS)] : []),
-    ]);
-    // 프로젝트 밖 변경도 함께 들어올 수 있지만(모노레포), 게이트가 확인할 파일은 프로젝트 폴더 안의 것뿐이다
-    const files = (await this.#git(['diff', '--name-only', '-z', ...(await this.#relative()), head, 'HEAD'])).split('\0').filter(Boolean).sort();
-    const checkpoint = await this.#checkpoint('HEAD');
-    // 기준 브랜치를 따라잡아도 생성 파일(제외됨)은 바뀌지 않는다 — 지금 디스크를 받아들이지 않고 병합 전 스냅샷을 그대로 물려받는다
-    await this.#carryForwardExcludedSnapshot(head, checkpoint.sha);
-    return { status: 'merged', remoteSha: baseSha, commits, files, checkpoint, previous: head };
-  }
-
-  async #remoteCommits(from: string, remote: string): Promise<RemoteCommit[]> {
-    return native
-      .checkpointRemoteCommits(await this.#git(['log', '--reverse', '--format=%H%x00%h%x00%s%x00%an%x1e', `${from}..${remote}`]))
-      .map(([sha = '', shortSha = '', subject = '', author = '']) => ({ sha, shortSha, subject, author }));
+    const result = await this.#remote<RemoteSyncResult>('integrateBase', { remembered: rememberedInput(remembered) });
+    if (result.status === 'up-to-date') return result;
+    return this.#withCheckpoint(result);
   }
 
   async #firstParent(sha: string): Promise<string | undefined> {
@@ -2130,11 +1955,6 @@ export function redactCredentials(text: string): string {
 
 async function resolveReal(target: string): Promise<string> {
   return realpath(target).catch(() => path.resolve(target));
-}
-
-/** 한글 조사 '을/를'을 고른다. 브랜치 이름은 대개 영문이라 마지막 글자의 발음(모음이면 '를')으로 대략 고른다 */
-function withObjectParticle(word: string): string {
-  return native.checkpointWithObjectParticle(word);
 }
 
 /** 타임스탬프 + 단조 증가 번호. 같은 밀리초에 여러 백업이 생겨도(테스트 등) 사전순 정렬이 생성 순서와 같다 */
