@@ -40,6 +40,29 @@ describe('http_request', () => {
   });
 });
 
+describe('get_contract', () => {
+  it('계약 추출 경로가 서비스 밖 호스트로 풀리면 요청하지 않는다(#1187)', async () => {
+    for (const extract of ['/\\example.com/v3/api-docs', '/\t/example.com/']) {
+      const fetched: string[] = [];
+      const withContract = {
+        ...project,
+        managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract } }]],
+      } as unknown as LoadedProject;
+      const outcome = await executeTool('get_contract', { service: 'api' }, {
+        ...context,
+        project: withContract,
+        fetcher: async (url: string) => {
+          fetched.push(url);
+          return {};
+        },
+      }).catch((error: unknown) => ({ ok: false, content: String(error) }));
+      expect(fetched).toEqual([]);
+      expect(outcome.ok).toBe(false);
+      expect(outcome.content).toContain('서비스 밖');
+    }
+  });
+});
+
 /** 도그푸딩 마찰 130: edge·서비스 컨테이너가 없어 compose가 "is not running"으로 알리면, 도구 결과에서
  * 자동 복구 시도와 그 결과를 분명히 알리는지 본다(ADR-143). 코드를 고쳐도 다시 뜨지 않는 문제라는 점을
  * 모델이 알아야 restart_service·service_logs를 반복하지 않는다 */

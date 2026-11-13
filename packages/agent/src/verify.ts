@@ -10,7 +10,8 @@ import { syncSystemPackages } from './system-packages-sync';
 export type ContractFetcher = (url: string) => Promise<OpenApiDocument>;
 
 export const fetchContract: ContractFetcher = async (url) => {
-  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  // 서비스가 3xx로 다른 호스트를 가리키면 따라가지 않는다(#1187). 게이트의 다른 요청과 같다
+  const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return (await response.json()) as OpenApiDocument;
 };
@@ -119,7 +120,7 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
     contractServices.map(async ([name, service]): Promise<ContractCheck> => {
       try {
         const endpoint = await sandbox.endpoint(name);
-        const current = await fetcher(new URL(service.contract!.extract, endpoint.url).toString());
+        const current = await fetcher(serviceUrl(service.contract!.extract, endpoint.url));
         return { service: name, changes: diffContracts(baselines.get(name), current) };
       } catch (error) {
         return { service: name, changes: [], error: describe(error) };
@@ -359,6 +360,16 @@ export function mentionsDeletedFile(logTail: readonly string[], deleted: readonl
   return native.verifyMentionsDeletedFile(logTail.map(encodeLoneSurrogates), deleted.map(encodeLoneSurrogates));
 }
 
+/**
+ * 스펙 경로를 서비스 엔드포인트 위의 주소로 만든다. `new URL`은 `\\`를 `/`로 읽고 탭·줄바꿈을 지워 `/\\example.com/`·`/<탭>/example.com/`이
+ * 다른 호스트로 풀리므로(#1187, 트러블슈팅 192와 같은 꼴), 출처가 엔드포인트와 다르면 요청하지 않고 던진다
+ */
+export function serviceUrl(specPath: string, endpointUrl: string): string {
+  const url = new URL(specPath, endpointUrl);
+  if (url.origin !== new URL(endpointUrl).origin) throw new Error(`경로(${JSON.stringify(specPath)})가 서비스 밖 호스트를 가리켜 요청하지 않았습니다`);
+  return url.toString();
+}
+
 /** 세션 시작 시점의 계약을 저장해 둔다. 실패한 서비스는 비교 기준 없이 진행한다 */
 export async function captureBaselines(
   sandbox: Sandbox,
@@ -370,7 +381,7 @@ export async function captureBaselines(
     if (!service.contract || project.offServices?.has(name)) continue;
     try {
       const endpoint = await sandbox.endpoint(name);
-      baselines.set(name, await fetcher(new URL(service.contract.extract, endpoint.url).toString()));
+      baselines.set(name, await fetcher(serviceUrl(service.contract.extract, endpoint.url)));
     } catch {
       // 기준이 없으면 모든 계약 항목이 "추가"로 보인다
     }

@@ -23,7 +23,7 @@ import {
   type SelfCheckMode,
   type ToolResultCache,
 } from './tool-output';
-import type { ContractFetcher } from './verify';
+import { serviceUrl, type ContractFetcher } from './verify';
 import type { Workspace } from './workspace';
 
 type BetaTool = Anthropic.Beta.BetaTool;
@@ -624,7 +624,7 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       const contract = context.project.managed.find(([serviceKey]) => serviceKey === target)?.[1].contract;
       if (!contract) return failure(`${target} does not expose a contract`);
       const endpoint = await sandbox.endpoint(target);
-      return success(sandbox.redact(summarizeContract(await context.fetcher(new URL(contract.extract, endpoint.url).toString()))));
+      return success(sandbox.redact(summarizeContract(await context.fetcher(serviceUrl(contract.extract, endpoint.url)))));
     }
     case 'design_frames': {
       if (!context.design) return failure('Design is not configured for this session');

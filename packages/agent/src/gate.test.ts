@@ -1165,6 +1165,31 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(gate.passedStages.has('browser_check')).toBe(false);
   });
 
+  it('fallbackProbe 경로가 서비스 밖 호스트로 풀리면 요청하지 않고 화면 확인을 실패시킨다(#1187)', async () => {
+    for (const path of ['/\\example.com/', '/\t/example.com/']) {
+      const target = withWorkflow({
+        pageChecks: [{ service: 'api', path: '/', mode: 'browser', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false, fallbackProbe: { service: 'api', path } }],
+      });
+      const probed: string[] = [];
+      const { gate, workspace } = await setup(target, {
+        browser: async () => {
+          throw new BrowserUnavailableError('executable not found');
+        },
+        page: async (url) => {
+          probed.push(url);
+          return { status: 200, text: '' };
+        },
+      });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+
+      const outcome = await gate.check();
+      expect(probed).toEqual([]);
+      expect(outcome.kind).toBe('retry');
+      expect(outcome.kind === 'retry' && outcome.feedback).toContain('서비스 밖');
+      expect(gate.passedStages.has('browser_check')).toBe(false);
+    }
+  });
+
   it('도구 게이트를 거치지 않고 바뀐 보호 경로도 리뷰 단계에서 막는다', async () => {
     const target = withWorkflow({ protectedPaths: ['api/src'] });
     const { gate, workspace } = await setup(target);
