@@ -10,7 +10,8 @@ import { syncSystemPackages } from './system-packages-sync';
 export type ContractFetcher = (url: string) => Promise<OpenApiDocument>;
 
 export const fetchContract: ContractFetcher = async (url) => {
-  const response = await fetch(url, { signal: AbortSignal.timeout(15_000) });
+  // 서비스가 3xx로 다른 호스트를 가리키면 따라가지 않는다(#1187). 게이트의 다른 요청과 같다
+  const response = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(15_000) });
   if (!response.ok) throw new Error(`HTTP ${response.status}`);
   return (await response.json()) as OpenApiDocument;
 };

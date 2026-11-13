@@ -1,4 +1,6 @@
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { ContainerState, InfraCheckResult, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
@@ -6,7 +8,7 @@ import { loadProject, type LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { servicesForFiles } from './services';
-import { captureBaselines, findSecretLeaks, formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
+import { captureBaselines, fetchContract, findSecretLeaks, formatVerificationReport, mentionsDeletedFile, restartServicesFor, verifyChanges } from './verify';
 
 const project = {
   root: '/tmp/orders',
@@ -165,6 +167,31 @@ describe('verifyChanges', () => {
       expect(baselines.size).toBe(0);
       expect(report.ok).toBe(false);
       expect(report.contracts[0]?.error).toContain('서비스 밖');
+    }
+  });
+
+  it('계약을 가져올 때 서비스가 다른 호스트로 넘기는 리다이렉트를 따라가지 않는다(#1187)', async () => {
+    // 경로가 서비스 안이어도 서비스가 302로 다른 곳을 가리키면 호스트가 그곳에 요청하게 된다. 게이트의 다른 요청처럼 따라가지 않는다
+    const listen = (server: Server) => new Promise<string>((resolve) => server.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(server.address() as AddressInfo).port}`)));
+    let outsideHits = 0;
+    const outside = createServer((_req, res) => {
+      outsideHits += 1;
+      res.setHeader('content-type', 'application/json');
+      res.end(JSON.stringify(baseline));
+    });
+    const outsideUrl = await listen(outside);
+    const service = createServer((_req, res) => {
+      res.statusCode = 302;
+      res.setHeader('location', `${outsideUrl}/v3/api-docs`);
+      res.end();
+    });
+    const serviceUrl = await listen(service);
+    try {
+      await expect(fetchContract(`${serviceUrl}/v3/api-docs`)).rejects.toThrow('HTTP 302');
+      expect(outsideHits).toBe(0);
+    } finally {
+      await new Promise((resolve) => service.close(resolve));
+      await new Promise((resolve) => outside.close(resolve));
     }
   });
 
