@@ -381,13 +381,15 @@ describe('신뢰 확인: assertTrustedGit·#assertSafeLocalGit', () => {
     ['diff.evil.textconv', 'cat'],
     ['merge.evil.driver', 'cat'],
     ['includeIf.gitdir:/.path', '%ROOT%/missing-include-config'],
-    ['core.worktree', '/tmp'],
+    // /tmp를 쓰면 Linux에서는 시험 임시 폴더(다른 world)까지 git status에 잡혀 결과가 순서에 따라 달라진다 — world 안의 빈 폴더를 쓴다
+    ['core.worktree', '%ROOT%/elsewhere'],
   ];
 
   it.each(dangerous)('위험한 설정 %s', async (key, value) => {
     const out = await compare(async ({ w, make, step }) => {
       await commitOrder(w, 'a', '요청: A');
       const ok = await remembered(w);
+      await mkdir(path.join(w.base, 'elsewhere'), { recursive: true });
       await git(w.workDir, 'config', key, value.replace('%ROOT%', w.base));
       await step('assertTrustedGit', () => make().assertTrustedGit(ok));
     });
