@@ -4939,6 +4939,30 @@ pub fn read_stats(env: Env, input: StatsInputJs) -> Result<AsyncBlock<StatsResul
     .build(&env)
 }
 
+// ── 체크포인트 원격 경로(ADR-195 4f A2) ──
+// git을 부르는 순서는 bstudio-io(checkpoint_remote)가 한다. 체크포인트 상태(백업·제외 스냅샷·캐시)는 TS가 들고, 순서 중간에 필요하면 `hook`으로 부른다.
+// 입력·출력은 JSON 글이다(op마다 모양이 다르다). 글자는 `encodeLoneSurrogates`한 꼴이다. TS 껍데기: packages/agent/src/checkpoints.ts
+use bstudio_io::checkpoint_remote as cr;
+use napi::bindgen_prelude::Promise;
+
+/// `op`: repository · headState · remoteUrl · uncommitTo · recordPullRequest · assertTrustedGit · assertSafeLocalGit · pullRequestTarget · push · integrateRemote · acceptRemote · baseStatus · integrateBase · restoreRememberedHead.
+/// `hook`은 요청(JSON 글)을 받아 응답(JSON 글)을 돌려주는 JS 함수다. 던지지 않고 결과(`ok`)로 돌려준다
+#[napi]
+pub fn checkpoint_remote(env: Env, op: String, input: String, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        Ok(cr::run(&op, &input, Some(hook)).await)
+    })
+    .build(&env)
+}
+
 // ── 샌드박스 끝맺음·부하 러너·사내 API 호출·만들기 준비(ADR-195 4f A4c-3c) ──
 // 판정은 bstudio-guard(load_runner·external_call·docker_format), docker를 부르는 순서와 지우는 대상은 bstudio-io(lifecycle_io)가 한다.
 // `up`은 여기서 부르지 않는다. 던지지 않고 결과(`kind`)로 돌려준다(작업 폴더 만들기만 던진다). TS 껍데기: packages/sandbox/src/docker/lifecycle-run.ts
