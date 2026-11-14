@@ -40,6 +40,7 @@ use bstudio_guard::review_input::template;
 use bstudio_guard::task_graph;
 use bstudio_guard::usage;
 
+use crate::gate_auto::{auto_pages, AutoPlan};
 use crate::verify_io::{call, call_done, req, s, string_list, strings, Answer, Fail, Hook, Res};
 
 /// 동시에 돌리는 확인 수(`CHECK_CONCURRENCY`)
@@ -72,7 +73,7 @@ pub(crate) fn lossy(value: &JsValue) -> JsValue {
 }
 
 /// 값 안의 모든 글자를 경계의 꼴로 만든다(키는 바꾸지 않는다. TS의 `encodeStrings`와 같다)
-fn enc_value(value: &JsValue) -> JsValue {
+pub(crate) fn enc_value(value: &JsValue) -> JsValue {
     match value {
         JsValue::Str(text) => JsValue::Str(enc(text)),
         JsValue::Arr(items) => JsValue::Arr(items.iter().map(enc_value).collect()),
@@ -130,10 +131,10 @@ struct Plan {
 }
 
 /// 자동으로 연 화면 확인 하나(`#autoPages`가 정한 것): 확인 선언과 추정한 id·sampleParams로 연 값
-struct AutoEntry {
-    page: JsValue,
-    probed_id: Option<String>,
-    sampled: Option<String>,
+pub(crate) struct AutoEntry {
+    pub page: JsValue,
+    pub probed_id: Option<String>,
+    pub sampled: Option<String>,
 }
 
 fn list_of<'a>(value: &'a JsValue, key: &str) -> Res<&'a [JsValue]> {
@@ -143,18 +144,11 @@ fn list_of<'a>(value: &'a JsValue, key: &str) -> Res<&'a [JsValue]> {
     }
 }
 
-fn read_plan(begin: &JsValue) -> Res<Plan> {
+fn read_plan(begin: &JsValue, auto: AutoPlan) -> Res<Plan> {
     let tests_raw = list_of(begin, "tests")?;
     let mut tests = Vec::new();
     for test in tests_raw {
         tests.push(TestCase { name: template(test.prop("name")), service: template(test.prop("service")), command: string_list(test.prop("command"))? });
-    }
-    let auto_names = list_of(begin, "autoNames")?.iter().map(|name| name.as_str().map(str::to_owned).ok_or(Fail::Hook)).collect::<Res<Vec<_>>>()?;
-    let auto_skipped = list_of(begin, "autoSkipped")?.to_vec();
-    for check in &auto_skipped {
-        if !is_check(check) {
-            return Err(Fail::Hook);
-        }
     }
     // 화면 확인의 판정이 읽는 값. 없으면 빈 목록이고, 그 번호의 확인을 돌리려 하면 알아볼 수 없는 응답이다(통과로 열리지 않는다)
     let page_checks = match begin.prop("pageChecks") {
@@ -162,37 +156,17 @@ fn read_plan(begin: &JsValue) -> Res<Plan> {
         None => Vec::new(),
         Some(_) => return Err(Fail::Hook),
     };
-    let mut auto_entries = Vec::new();
-    match begin.prop("autoEntries") {
-        Some(JsValue::Arr(items)) => {
-            for item in items {
-                let optional = |key: &str| match item.prop(key) {
-                    None => Ok(None),
-                    Some(JsValue::Str(text)) => Ok(Some(text.clone())),
-                    Some(_) => Err(Fail::Hook),
-                };
-                auto_entries.push(AutoEntry { page: item.prop("page").cloned().ok_or(Fail::Hook)?, probed_id: optional("probedId")?, sampled: optional("sampled")? });
-            }
-        }
-        None => {}
-        Some(_) => return Err(Fail::Hook),
-    }
     Ok(Plan {
         pages: list_of(begin, "pages")?.to_vec(),
         page_checks,
-        auto_entries,
+        auto_entries: auto.entries,
         tests,
         test_values: tests_raw.to_vec(),
         concurrency: list_of(begin, "concurrency")?.to_vec(),
         loads: list_of(begin, "loads")?.to_vec(),
-        auto_names,
-        auto_skipped,
+        auto_names: auto.names,
+        auto_skipped: auto.skipped,
     })
-}
-
-/// 검사 하나의 모양(`stage`·`name` 글자, `ok` 불리언)
-fn is_check(check: &JsValue) -> bool {
-    matches!(check, JsValue::Obj(_)) && matches!(check.prop("stage"), Some(JsValue::Str(_))) && matches!(check.prop("name"), Some(JsValue::Str(_))) && matches!(check.prop("ok"), Some(JsValue::Bool(_)))
 }
 
 // ── 작업 그래프 ──────────────────────────────────────────────────────────
@@ -750,7 +724,14 @@ fn max_attempts_of(value: Option<&JsValue>) -> f64 {
 /// 옛 `#runDeclaredChecks()`
 pub(crate) async fn run(hook: &Hook) -> Res<Declared> {
     let begin = call_done(hook, req("declaredBegin", vec![])).await?;
-    let plan = read_plan(&begin)?;
+    // 자동 화면 고르기(ADR-195 4f A5c-2)는 Rust가 한다. 읽는 일(바뀐 파일 목록·studio.yaml·폴더·import 그래프)과 요청만 콜백이다
+    let auto = auto_pages(hook, &begin).await?;
+    if !auto.entries.is_empty() || !auto.skipped.is_empty() {
+        // TS가 자동 페이지의 확인 선언을 들고, 이름별 부산물을 비운다
+        let pages = JsValue::Arr(auto.entries.iter().map(|entry| entry.page.clone()).collect());
+        call_done(hook, req("declaredAutoReady", vec![("pages", pages)])).await?;
+    }
+    let plan = read_plan(&begin, auto)?;
     if plan.pages.is_empty() && plan.tests.is_empty() && plan.concurrency.is_empty() && plan.loads.is_empty() && plan.auto_names.is_empty() && plan.auto_skipped.is_empty() {
         return Ok(Declared { checks: Vec::new(), load_failure: None });
     }
@@ -893,8 +874,10 @@ mod tests {
         Arc::new(Log { calls: Mutex::new(Vec::new()), in_flight: AtomicUsize::new(0), max_in_flight: AtomicUsize::new(0) })
     }
 
-    fn plan(tests: &str, concurrency: &str, loads: &str, skipped: &str) -> String {
-        format!(r#"{{"ok":true,"pages":[],"tests":[{tests}],"concurrency":[{concurrency}],"loads":[{loads}],"autoNames":[],"autoSkipped":[{skipped}]}}"#)
+    /// `auto`는 자동 화면 고르기의 입력(`declaredBegin`의 `auto`). 비면 설정 없음(null)이다
+    fn plan(tests: &str, concurrency: &str, loads: &str, auto: &str) -> String {
+        let auto = if auto.is_empty() { "null" } else { auto };
+        format!(r#"{{"ok":true,"pages":[],"tests":[{tests}],"concurrency":[{concurrency}],"loads":[{loads}],"auto":{auto}}}"#)
     }
 
     fn test_case(name: &str, max_attempts: Option<u32>) -> String {
@@ -1046,7 +1029,7 @@ mod tests {
         // 계획 응답 없음, 모양 어긋남, 근거 줄이 글이 아님
         assert_eq!(run_sync(hook(fresh(), 0, Box::new(|_, _| None))).err(), Some(Fail::Hook));
         assert_eq!(run_sync(hook(fresh(), 0, Box::new(|_, _| Some(r#"{"ok":true}"#.to_owned())))).err(), Some(Fail::Hook));
-        let base = basic(plan("", "", "", r#"{"stage":"browser_check","name":"x","ok":"true"}"#));
+        let base = basic(plan("", "", "", "5"));
         assert_eq!(run_sync(hook(fresh(), 0, base)).err(), Some(Fail::Hook));
         // 테스트 실행 응답이 없으면(None) 그 노드의 실패가 아니라 검사 전체의 실패다
         let base = basic(plan(&test_case("unit", None), "", "", ""));
@@ -1056,9 +1039,11 @@ mod tests {
 
     #[test]
     fn 건너뛴_자동_페이지는_결과_맨_뒤에_그대로_남는다() {
-        let skipped = r#"{"stage":"browser_check","name":"web /x (자동, 건너뜀)","ok":true,"attempts":1}"#;
-        let declared = run_sync(hook(fresh(), 0, with_items(basic(plan(&test_case("unit", None), "", "", skipped)), 1))).ok().unwrap();
-        assert_eq!(names(&declared), ["unit", "web /x (자동, 건너뜀)"]);
+        let auto = r#"{"config":{"service":"ghost"},"managed":[],"specFile":"studio.yaml","maxPagesDefault":5,"maxPagesCap":10,"defaultFallback":"1","traceDepth":5}"#;
+        let reply = with_items(basic(plan(&test_case("unit", None), "", "", auto)), 1);
+        let ready = Box::new(move |op: &str, request: &JsValue| if op == "declaredAutoReady" { Some(r#"{"ok":true}"#.to_owned()) } else { reply(op, request) });
+        let declared = run_sync(hook(fresh(), 0, ready)).ok().unwrap();
+        assert_eq!(names(&declared), ["unit", "ghost ghost (자동, 건너뜀)"]);
     }
 
     fn concurrency_case(extra: &str) -> String {
@@ -1154,7 +1139,7 @@ mod tests {
         let hook = hook(log.clone(), 0, Box::new(move |op, request| if op == "declaredExec" { Some(r#"{"ok":false,"error":{"message":"실패"}}"#.to_owned()) } else { base(op, request) }));
         let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
         let (results, started) = runtime.block_on(async {
-            let declared_plan = read_plan(&js_json::parse_native(&plan(&tests, "", "", "")).unwrap()).unwrap();
+            let declared_plan = read_plan(&js_json::parse_native(&plan(&tests, "", "", "")).unwrap(), AutoPlan { entries: Vec::new(), names: Vec::new(), skipped: Vec::new() }).unwrap();
             let ctx = Arc::new(Ctx { hook: hook.clone(), plan: declared_plan, notes: Mutex::new(HashMap::new()) });
             let nodes: Vec<NodeSpec> = (0..2).map(|index| NodeSpec { id: format!("test:{index}"), name: format!("{index}"), stage: "test", kind: Kind::Test(index), max_attempts: 1.0 }).collect();
             let deps = vec![vec![], vec!["test:0".to_owned()]];

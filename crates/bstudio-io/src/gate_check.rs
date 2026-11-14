@@ -569,9 +569,40 @@ mod tests {
         })
     }
 
-    /// 선언한 검사 실행의 첫 콜백 응답. `skipped`는 결과에 그대로 얹히는 check 목록(건너뛴 자동 페이지 자리)이라, 시험이 검사 결과를 끼워 넣는 데 쓴다
-    fn begin(skipped: &str) -> String {
-        format!(r#"{{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[],"autoNames":[],"autoSkipped":[{skipped}]}}"#)
+    /// 선언한 검사 실행의 첫 콜백 응답. `auto`는 자동 화면 고르기의 입력(없으면 설정 없음)이다
+    fn begin(auto: &str) -> String {
+        let auto = if auto.is_empty() { "null" } else { auto };
+        format!(r#"{{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[],"auto":{auto}}}"#)
+    }
+
+    /// 선언한 테스트를 이름별로 통과(`None`)·실패(`Some(stderr)`)시키는 응답. 시험이 검사 결과를 끼워 넣는 데 쓴다
+    fn declared_tests(tests: &[(&str, Option<&str>)]) -> Answer {
+        let tests: Vec<(String, Option<String>)> = tests.iter().map(|(name, fail)| ((*name).to_owned(), fail.map(str::to_owned))).collect();
+        Box::new(move |op, request| match op {
+            "declaredBegin" => {
+                let list = tests.iter().map(|(name, _)| format!(r#"{{"name":"{name}","service":"api","command":["run","{name}"]}}"#)).collect::<Vec<_>>().join(",");
+                Some(Some(format!(r#"{{"ok":true,"pages":[],"tests":[{list}],"concurrency":[],"loads":[],"auto":null}}"#)))
+            }
+            "declaredExec" => {
+                let name = match request.prop("command") {
+                    Some(JsValue::Arr(command)) => command.get(1).and_then(JsValue::as_str).unwrap_or("").to_owned(),
+                    _ => String::new(),
+                };
+                let fail = tests.iter().find(|(candidate, _)| *candidate == name).and_then(|(_, fail)| fail.clone());
+                Some(Some(match fail {
+                    None => r#"{"ok":true,"exitCode":0,"stdout":"","stderr":""}"#.to_owned(),
+                    Some(stderr) => format!(r#"{{"ok":true,"exitCode":1,"stdout":"","stderr":{}}}"#, js_json::stringify(&s(stderr))),
+                }))
+            }
+            "declaredPageData" => {
+                let items = vec![r#"{"blocked":[],"warnings":[]}"#; tests.len()].join(",");
+                Some(Some(format!(r#"{{"ok":true,"items":[{items}]}}"#)))
+            }
+            "declaredRedact" => Some(Some(js_json::to_native(&obj(vec![("ok", Some(JsValue::Bool(true))), ("text", request.prop("text").cloned())])))),
+            "declaredClearReports" => Some(Some(r#"{"ok":true}"#.to_owned())),
+            "declaredStats" => Some(Some(r#"{"ok":true,"usage":[]}"#.to_owned())),
+            _ => None,
+        })
     }
 
     fn normal(op: &str, request: &JsValue) -> Option<String> {
@@ -729,14 +760,13 @@ mod tests {
 
     #[test]
     fn 선언한_검사가_실패하면_실패를_앞에_쓰고_서비스_확인_통과를_참고로_붙인다() {
-        let failing = check_json("test", "unit", false, Some("종료 코드 1"));
         let log = fresh();
-        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(&failing)))));
+        let hook = scripted(log.clone(), declared_tests(&[("unit", Some("출력"))]));
         let result = run_sync(&input(&[]), hook);
         assert_eq!(kind(&result), "retry");
         let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
         let body = feedback.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n");
-        assert!(body.starts_with("워크플로 검사 실패:\n- [test] unit (시도 1회)\n종료 코드 1\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과"), "{body}");
+        assert!(body.starts_with("워크플로 검사 실패:\n- [test] unit (시도 1회)\n종료 코드 1\n출력\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과"), "{body}");
         // 보고서가 통과여도 뒤 검사가 실패하면 gate_done은 ok: false다
         let log = log.lock().unwrap();
         assert_eq!(log.events.last().unwrap().prop("ok"), Some(&JsValue::Bool(false)));
@@ -758,13 +788,7 @@ mod tests {
     #[test]
     fn 통과하면_verified를_켜고_통과한_단계를_알린다() {
         let log = fresh();
-        let hook = scripted(
-            log.clone(),
-            Box::new(|op, _| match op {
-                "declaredBegin" => Some(Some(begin(&check_json("test", "unit", true, None)))),
-                _ => None,
-            }),
-        );
+        let hook = scripted(log.clone(), declared_tests(&[("unit", None)]));
         let result = run_sync(&input(&[]), hook);
         assert_eq!(kind(&result), "pass");
         let log = log.lock().unwrap();
@@ -776,8 +800,7 @@ mod tests {
     #[test]
     fn 단계의_검사_중_하나라도_실패하면_그_단계를_통과로_세지_않는다() {
         let log = fresh();
-        let checks = format!("{},{}", check_json("test", "a", true, None), check_json("test", "b", false, Some("실패")));
-        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(&checks)))));
+        let hook = scripted(log.clone(), declared_tests(&[("a", None), ("b", Some("실패"))]));
         let result = run_sync(&input(&[]), hook);
         assert_eq!(kind(&result), "retry");
         let log = log.lock().unwrap();
@@ -849,7 +872,7 @@ mod tests {
         let hook = scripted(
             log.clone(),
             Box::new(|op, _| match op {
-                "declaredBegin" => Some(Some(r#"{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[{"name":"orders-p95"}],"autoNames":[],"autoSkipped":[]}"#.to_owned())),
+                "declaredBegin" => Some(Some(r#"{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[{"name":"orders-p95"}],"auto":null}"#.to_owned())),
                 "declaredLoadSupported" => Some(Some(r#"{"ok":true,"supported":false}"#.to_owned())),
                 _ => None,
             }),
@@ -964,8 +987,8 @@ mod tests {
     }
 
     #[test]
-    fn 검사의_ok가_불리언이_아니면_통과로_세지_않고_알아볼_수_없는_응답이다() {
-        for bad in [r#"{"stage":"test","name":"x","ok":"true","attempts":1}"#, r#"{"stage":"test","name":"x","attempts":1}"#, r#"{"stage":"test","ok":true}"#, r#"[]"#] {
+    fn 자동_화면_입력이_알아볼_수_없는_모양이면_통과로_세지_않고_알아볼_수_없는_응답이다() {
+        for bad in ["5", "[]", r#""x""#, r#"{"config":{"service":"web"}}"#] {
             let hook = scripted(fresh(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(bad)))));
             let result = run_sync(&input(&[]), hook);
             assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"), "{bad}");
@@ -1027,8 +1050,7 @@ mod tests {
     fn 실패한_검사_목록과_보고서_글에는_짝_없는_서로게이트가_replacement로_들어간다() {
         // TS가 보낸 인코딩 글자(짝 없는 서로게이트 U+D800 → U+E010 + 니블)가 옛 napi 경계처럼 U+FFFD가 된다
         let encoded = "x\u{E010}\u{E00D}\u{E008}\u{E000}y";
-        let failing = check_json("test", "unit", false, Some(encoded));
-        let hook = scripted(fresh(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(&failing)))));
+        let hook = scripted(fresh(), declared_tests(&[("unit", Some(encoded))]));
         let result = run_sync(&input(&[]), hook);
         let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
         assert!(feedback.contains("x\u{FFFD}y"), "{feedback}");

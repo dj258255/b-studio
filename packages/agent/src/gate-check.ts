@@ -4,11 +4,13 @@ import { SPEC_FILE, type LoadedProject, type WorkflowPageCheck, type WorkflowSta
 import { BrowserUnavailableError, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import { TEST_TIMEOUT_MS, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
+import { autoHandlers, autoInput } from './gate-auto';
 import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
 import { TaskGraphError } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { decodeStrings, encodeStrings, failure, serviceUrl, verifyChangesSetup, type HookHandler, type HookRequest, type VerificationReport, type VerifyOptions } from './verify';
 import type { WorkflowCheck, WorkflowCompare, WorkflowStepCheck } from './workflow';
+import type { Workspace } from './workspace';
 import type { WorkflowPageCompare } from '@b-studio/spec';
 
 /**
@@ -45,9 +47,18 @@ export interface AutoPageEntry {
   sampled?: string;
 }
 
+/** 자동 화면 고르기가 게이트 객체에서 빌려 쓰는 값 */
+export interface AutoOps {
+  readonly workspace: Workspace;
+  /** 옵션의 `reloadProject`. 없으면 이번 실행에서 studio.yaml이 바뀐 때만 디스크에서 읽는다 */
+  readonly reloadProject: (() => Promise<LoadedProject>) | undefined;
+  /** 시작 때 프로젝트의 root(studio.yaml을 읽는 곳) */
+  readonly projectRoot: string;
+}
+
 /**
  * 선언한 검사 실행(`runDeclaredChecks` 아래)이 쓰는 TS 쪽 값과 동작. 조율·판정·글 조립은 Rust(`gate_declared.rs`, ADR-195 4f A5b-2)가 하고,
- * 화면 확인(`autoPages`·`checkPage`와 그 부산물)과 sandbox·HTTP 요청은 여기로 부른다. 옛 구현(`declared-legacy.ts`)도 같은 값을 쓴다
+ * 화면 확인(`checkPage`의 부산물)과 자동 화면 고르기가 읽는 바깥 값(`auto`), sandbox·HTTP 요청은 여기로 부른다. 옛 구현(`declared-legacy.ts`)도 같은 값을 쓴다
  */
 export interface DeclaredHost {
   readonly sandbox: Sandbox;
@@ -56,7 +67,8 @@ export interface DeclaredHost {
   /** 이번 검증에 쓰는 프로젝트(부르는 때의 것) */
   readonly project: LoadedProject;
   readonly requestService: ServiceRequest;
-  autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: AutoPageEntry[]; skipped: WorkflowCheck[] }>;
+  /** 자동 화면 고르기(ADR-195 4f A5c-2)가 읽는 바깥 값. 고르는 규칙·막는 규칙·글 조립은 Rust(`gate_auto.rs`)가 하고, 옛 구현(`auto-pages-legacy.ts`)도 같은 값을 쓴다 */
+  readonly auto: AutoOps;
   /** 화면 확인이 부르는 바깥 동작(브라우저 러너·페이지 요청·스크린샷 저장·디자인 비교·경고). 판정과 순서는 Rust(`gate_page.rs`, ADR-195 4f A5c-1)가 한다 */
   readonly page: PageOps;
   /** 화면 확인이 이름별로 모으는 부산물 */
@@ -130,7 +142,7 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
   /** 작업 그래프가 노드에 넘기던 신호. 취소 신호가 없으면 취소되지 않는 신호다(`runTaskGraph`와 같다) */
   const graphSignal = signal ?? new AbortController().signal;
   /** `declaredBegin`이 읽은 선언과 자동 페이지. `checkPage`가 번호로 꺼낸다 */
-  let declaredPlan: { pages: WorkflowPageCheck[]; auto: Awaited<ReturnType<DeclaredHost['autoPages']>> } | undefined;
+  let declaredPlan: { pages: WorkflowPageCheck[]; auto: { pages: Array<{ page: WorkflowPageCheck }> } } | undefined;
   /** 디자인 비교를 하는 화면 확인의 마지막 러너 결과(스크린샷 포함). 이름별로 든다 — 스크린샷(Buffer)은 경계를 넘기지 않는다 */
   const browserResults = new Map<string, BrowserPageResult>();
   /** 화면 확인 하나의 선언: 선언한 pageChecks의 `index`번째, 자동이면 자동 페이지의 `index`번째 */
@@ -198,26 +210,31 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
       const tests = workflow?.tests ?? [];
       const concurrency = workflow?.concurrencyChecks ?? [];
       const loads = workflow?.loadChecks ?? [];
-      // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
-      const auto = await declared.autoPages(pages);
-      declaredPlan = { pages, auto };
+      // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks).
+      // 고르는 일은 Rust가 한다(ADR-195 4f A5c-2): 여기서는 입력(`auto`)만 건네고, 고른 자동 페이지의 확인 선언은 `declaredAutoReady`로 받는다
+      declaredPlan = { pages, auto: { pages: [] } };
       browserResults.clear();
-      if (pages.length > 0 || tests.length > 0 || concurrency.length > 0 || loads.length > 0 || auto.pages.length > 0 || auto.skipped.length > 0) {
+      if (pages.length > 0 || tests.length > 0 || concurrency.length > 0 || loads.length > 0) {
         for (const map of Object.values(declared.pageMaps)) map.clear();
       }
       return {
         ok: true,
         pages: pages.map((page) => ({ service: page.service, path: page.path, mode: page.mode, viewport: page.viewport ?? null, stepCount: page.steps?.length ?? 0 })),
-        // 화면 확인의 판정은 Rust가 한다: 판정이 읽는 선언 전체와, 자동 페이지가 열 선언·추정한 id·sampleParams로 연 값
+        // 화면 확인의 판정은 Rust가 한다: 판정이 읽는 선언 전체
         pageChecks: pages,
-        autoEntries: auto.pages.map((entry) => ({ page: entry.page, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) })),
+        auto: autoInput(declared),
         tests: tests.map((test) => ({ name: test.name, service: test.service, command: test.command, ...(test.maxAttempts !== undefined ? { maxAttempts: test.maxAttempts } : {}) })),
         concurrency,
         loads,
-        autoNames: auto.pages.map((entry) => entry.name),
-        autoSkipped: auto.skipped,
       };
     },
+    // Rust가 자동 화면을 골랐다(열 화면이나 건너뜀이 있을 때만 부른다): 자동 페이지의 확인 선언을 들고, 이름별 부산물을 비운다
+    declaredAutoReady: ({ pages }) => {
+      declaredPlan!.auto = { pages: (pages as WorkflowPageCheck[]).map((page) => ({ page })) };
+      for (const map of Object.values(declared.pageMaps)) map.clear();
+      return { ok: true };
+    },
+    ...autoHandlers(declared),
     // ── 화면 확인(ADR-195 4f A5c-1): 판정·순서·글 조립은 Rust(`gate_page.rs`)가 한다. 아래는 그 Rust가 부르는 바깥 동작이다 ──
     declaredPageFetch: async ({ href }) => {
       try {
