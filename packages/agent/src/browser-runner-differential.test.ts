@@ -21,6 +21,11 @@ const page = (body: string, head = '') => `<!doctype html><html><head>${head}</h
 let server: Server;
 let base = '';
 let closedPort = 0;
+/** 허용 밖 서버. 요청이 닿으면 센다 */
+let outside: Server;
+let outsideBase = '';
+let outsidePort = 0;
+let outsideHits = 0;
 
 /** 요청 경로에 따라 응답을 돌려준다 */
 function route(path: string): { status?: number; type?: string; body: string | Buffer; headers?: Record<string, string>; delay?: number } {
@@ -120,6 +125,14 @@ function route(path: string): { status?: number; type?: string; body: string | B
             '<script src="/chunk-404.js"></script>',
         ),
       };
+    case '/outside-direct':
+      // 허용 출처 밖으로 곧바로 나가는 요청(이미지·fetch·https·워커 스크립트). 리다이렉트가 아니라 첫 요청이다
+      return {
+        body: page(
+          `<img src="${outsideBase}/pixel.png"><img src="https://127.0.0.1:${outsidePort}/tls.png">` +
+            scripts(`fetch('${outsideBase}/data.json').catch(() => {})`, `fetch('https://127.0.0.1:${outsidePort}/tls.json').catch(() => {})`, `fetch('/api/ok')`),
+        ),
+      };
     case '/refused-image':
       return { body: page(`<img src="http://127.0.0.1:${closedPort}/gone.png">` + scripts(`fetch('http://127.0.0.1:${closedPort}/api').catch(() => {})`)) };
     case '/media':
@@ -214,6 +227,15 @@ beforeAll(async () => {
   closedPort = (probe.address() as AddressInfo).port;
   await new Promise<void>((resolve) => probe.close(() => resolve()));
 
+  outside = createServer((_request, response) => {
+    outsideHits += 1;
+    response.writeHead(200, { 'content-type': 'text/plain', 'access-control-allow-origin': '*' });
+    response.end('outside');
+  });
+  await new Promise<void>((resolve) => outside.listen(0, '127.0.0.1', resolve));
+  outsidePort = (outside.address() as AddressInfo).port;
+  outsideBase = `http://127.0.0.1:${outsidePort}`;
+
   server = createServer((request, response) => {
     const path = (request.url ?? '').split('?')[0]!;
     const reply = route(path);
@@ -230,7 +252,14 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 
-afterAll(() => new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); }));
+afterAll(
+  () =>
+    new Promise<void>((resolve) => {
+      server.closeAllConnections();
+      outside.closeAllConnections();
+      outside.close(() => server.close(() => resolve()));
+    }),
+);
 
 /**
  * 서로 다른 요청의 실패·미디어 오류·막은 요청은 네트워크 도착 순서로 쌓이는데, 같은 러너를 두 번 돌려도 그 순서가 달라진다(실측: 옛 러너도 6회 중 2가지 순서).
@@ -350,11 +379,25 @@ describe('Rust 러너는 옛 러너와 같은 결과를 낸다 (ADR-199)', { tim
     expect(native).toBe(old);
   });
 
+  it('허용 밖으로 곧바로 나가는 요청(http·https 이미지와 fetch)은 둘 다 같은 글로 막고 서버에 닿지 않는다', async () => {
+    outsideHits = 0;
+    const { native } = await compare('/outside-direct', { allowedOrigins: [base] });
+    expect(outsideHits).toBe(0);
+    expect([...native.blockedRequests].sort()).toEqual([`${outsideBase}/data.json`, `${outsideBase}/pixel.png`, `https://127.0.0.1:${outsidePort}/tls.json`, `https://127.0.0.1:${outsidePort}/tls.png`].sort());
+    // 막은 요청은 앱의 실패가 아니다
+    expect(native.failedRequests).toEqual([]);
+  });
+
   it('measureLoad를 켜면 둘 다 loadMs를 0 이상으로 재고, 워밍업 이동의 오류는 비운다', async () => {
     const { old, native } = await compare('/ok', { measureLoad: true });
     expect(old.loadMs).toBeGreaterThanOrEqual(0);
     expect(native.loadMs).toBeGreaterThanOrEqual(0);
     await compare('/resources', { measureLoad: true });
+    // 워밍업 이동이 남긴 예외·console 오류는 비워져 한 번씩만 남는다
+    const errors = await compare('/exceptions', { measureLoad: true });
+    expect(errors.native.pageErrors.filter((line) => line === 'boom')).toHaveLength(1);
+    const consoleCases = await compare('/console-forms', { measureLoad: true });
+    expect(consoleCases.native.consoleErrors.filter((line) => line === 'plain text')).toHaveLength(1);
     const off = await runInBrowserNative(`${base}/ok`, {});
     expect(off.loadMs).toBeUndefined();
   });
@@ -393,7 +436,10 @@ describe('Rust 러너는 옛 러너와 같은 결과를 낸다 (ADR-199)', { tim
     for (const runner of [runInBrowser, runInBrowserNative]) {
       const controller = new AbortController();
       setTimeout(() => controller.abort(), 700);
+      const startedAt = Date.now();
       await expect(runner(`${base}/hanging-request`, { signal: controller.signal, allowedOrigins: [base] })).rejects.toThrow(/abort/i);
+      // 신호를 무시하면 이 화면은 networkidle 상한(5초)까지 간다. 취소는 그 전에 끝나야 한다
+      expect(Date.now() - startedAt).toBeLessThan(4000);
       const already = new AbortController();
       already.abort();
       await expect(runner(`${base}/ok`, { signal: already.signal })).rejects.toThrow(/abort/i);

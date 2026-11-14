@@ -31,6 +31,10 @@ const EVALUATE_TIMEOUT: Duration = Duration::from_secs(60);
 const SERVICE_WORKER_BLOCK_SCRIPT: &str = "(() => {\n      \nif (navigator.serviceWorker) navigator.serviceWorker.register = async () => { console.warn('Service Worker registration blocked by Playwright'); };\n\n    })();";
 const MEDIA_BINDING: &str = "__bStudioMediaError__";
 
+/// 시험에서 프록시 시작을 실패시킨다(프록시 없이 브라우저를 띄우지 않는지 확인한다)
+#[cfg(test)]
+static FAIL_PROXY_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct BrowserRunInput {
     /// 차례로 시도할 실행 파일(Playwright가 받은 Chromium, 설치된 Chrome). 모두 못 띄우면 `Unavailable`이다
     pub executables: Vec<String>,
@@ -277,10 +281,6 @@ fn str_at<'a>(value: &'a Value, pointer: &str) -> Option<&'a str> {
 }
 
 fn handle_event(shared: &Arc<Shared>, event: Event) {
-    if std::env::var_os("B_STUDIO_TRACE").is_some() {
-        let text = event.params.to_string();
-        eprintln!("EVT {:?} {} {}", event.session_id.as_deref().map(|s| &s[..6.min(s.len())]), event.method, &text[..text.len().min(3000)]);
-    }
     {
         let mut state = shared.state.lock().unwrap();
         state.frames().advance(Instant::now());
@@ -930,11 +930,15 @@ pub async fn run_in_browser(input: &BrowserRunInput, cancel: &Cancel) -> Result<
         Some(allowed) => {
             let judged = allowed.clone();
             let notify_shared = shared.clone();
-            let started = OriginProxy::start(
-                Arc::new(move |url: &str| is_allowed_url(url, &judged)),
-                Arc::new(move |block| on_proxy_blocked(&notify_shared, block)),
-            )
-            .await;
+            #[cfg(test)]
+            let forced_failure = FAIL_PROXY_START.load(Ordering::SeqCst);
+            #[cfg(not(test))]
+            let forced_failure = false;
+            let started = if forced_failure {
+                Err(std::io::Error::other("시험이 프록시 시작을 실패시켰습니다"))
+            } else {
+                OriginProxy::start(Arc::new(move |url: &str| is_allowed_url(url, &judged)), Arc::new(move |block| on_proxy_blocked(&notify_shared, block))).await
+            };
             match started {
                 Ok(proxy) => Some(proxy),
                 Err(error) => return Err(RunError::Unavailable(format!("출처 제한 프록시를 시작할 수 없습니다: {error}"))),
@@ -1041,5 +1045,231 @@ mod tests {
         // 비운 뒤에는 같은 URL의 실패를 다시 기록한다
         state.record_failure("http://h/a", "404");
         assert_eq!(state.failed_requests.len(), 1);
+    }
+
+    use tokio::io::{AsyncReadExt, DuplexStream};
+
+    /// 가짜 브라우저와 이어진 공유 상태. `dispatch`가 브라우저에 보내는 명령은 돌려주는 스트림에서 읽는다
+    fn fake_shared(allowed: Option<Vec<&str>>) -> (Arc<Shared>, DuplexStream) {
+        let (client, server) = tokio::io::duplex(1 << 20);
+        let (reader, writer) = tokio::io::split(client);
+        let cdp = Cdp::start(reader, writer, |_| {}, |_| {});
+        let shared = Arc::new(Shared {
+            state: Mutex::new(state()),
+            notify: Notify::new(),
+            cdp: Mutex::new(Some(cdp)),
+            attempt: AtomicU64::new(1),
+            config: Config { allowed: allowed.map(|list| Arc::new(list.into_iter().map(str::to_owned).collect())), media_script: String::new(), viewport: (1280, 800) },
+        });
+        (shared, server)
+    }
+
+    fn event(method: &str, session: Option<&str>, params: Value) -> Event {
+        Event { method: method.to_owned(), params, session_id: session.map(str::to_owned) }
+    }
+
+    fn page_session(shared: &Arc<Shared>) {
+        let mut state = shared.state.lock().unwrap();
+        state.sessions.insert("S".to_owned(), SessionInfo { kind: Kind::Page, target_id: "MAIN".to_owned() });
+        state.frames().frame_attached("MAIN", None);
+    }
+
+    fn send(shared: &Arc<Shared>, method: &str, params: Value) {
+        let mut state = shared.state.lock().unwrap();
+        dispatch(shared, &mut state, event(method, Some("S"), params));
+    }
+
+    /// 브라우저로 나간 명령들(메서드, 매개변수). 비동기 쓰기 작업이 보낼 시간을 잠깐 준다
+    async fn sent_commands(server: &mut DuplexStream) -> Vec<(String, Value)> {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut buffer = vec![0u8; 1 << 16];
+        let read = match tokio::time::timeout(Duration::from_millis(100), server.read(&mut buffer)).await {
+            Ok(Ok(read)) => read,
+            _ => 0,
+        };
+        buffer[..read]
+            .split(|byte| *byte == 0)
+            .filter(|frame| !frame.is_empty())
+            .map(|frame| {
+                let message: Value = serde_json::from_slice(frame).unwrap();
+                (message["method"].as_str().unwrap().to_owned(), message["params"].clone())
+            })
+            .collect()
+    }
+
+    fn paused(id: &str, url: &str, network_id: &str) -> Value {
+        json!({ "requestId": id, "request": { "url": url, "method": "GET" }, "networkId": network_id, "frameId": "MAIN", "resourceType": "XHR" })
+    }
+
+    #[tokio::test]
+    async fn the_first_layer_continues_only_allowed_urls_and_fails_the_rest() {
+        let (shared, mut server) = fake_shared(Some(vec!["http://127.0.0.1:5173"]));
+        page_session(&shared);
+        send(&shared, "Fetch.requestPaused", paused("j1", "http://127.0.0.1:5173/app.js", "n1"));
+        send(&shared, "Fetch.requestPaused", paused("j2", "http://127.0.0.1:9/secret", "n2"));
+        send(&shared, "Fetch.requestPaused", paused("j3", "data:text/plain,x", "n3"));
+        send(&shared, "Fetch.requestPaused", paused("j4", "not a url", "n4"));
+        let commands = sent_commands(&mut server).await;
+        let summary: Vec<(&str, &str, Option<&str>)> = commands.iter().map(|(method, params)| (method.as_str(), params["requestId"].as_str().unwrap(), params["errorReason"].as_str())).collect();
+        assert_eq!(
+            summary,
+            vec![("Fetch.continueRequest", "j1", None), ("Fetch.failRequest", "j2", Some("BlockedByClient")), ("Fetch.continueRequest", "j3", None), ("Fetch.failRequest", "j4", Some("BlockedByClient"))]
+        );
+        let blocked = shared.state.lock().unwrap().blocked_urls.items.clone();
+        assert_eq!(blocked, vec!["http://127.0.0.1:9/secret".to_owned(), "not a url".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn redirect_hops_stop_again_with_the_same_network_id_and_are_judged_too() {
+        let (shared, mut server) = fake_shared(Some(vec!["http://127.0.0.1:5173"]));
+        page_session(&shared);
+        // 첫 홉은 허용 출처, 리다이렉트된 둘째 홉은 허용 밖(http), 셋째 요청의 둘째 홉은 허용 밖 https
+        send(&shared, "Fetch.requestPaused", paused("a1", "http://127.0.0.1:5173/redir", "n1"));
+        send(&shared, "Fetch.requestPaused", paused("a2", "http://127.0.0.1:9/hop-http", "n1"));
+        send(&shared, "Fetch.requestPaused", paused("b1", "http://127.0.0.1:5173/redir2", "n2"));
+        send(&shared, "Fetch.requestPaused", paused("b2", "https://127.0.0.1:9/hop-https", "n2"));
+        // `redirectedRequestId`가 오는 브라우저도 홉으로 본다
+        let mut explicit = paused("c2", "https://127.0.0.1:10/hop", "n3");
+        explicit["redirectedRequestId"] = json!("c1");
+        send(&shared, "Fetch.requestPaused", explicit);
+        let commands = sent_commands(&mut server).await;
+        let methods: Vec<&str> = commands.iter().map(|(method, _)| method.as_str()).collect();
+        assert_eq!(methods, vec!["Fetch.continueRequest", "Fetch.failRequest", "Fetch.continueRequest", "Fetch.failRequest", "Fetch.failRequest"]);
+        let state = shared.state.lock().unwrap();
+        // http 홉은 URL로, https 홉은 옛 러너(프록시가 막은 CONNECT)와 같은 터널 꼴로 남는다
+        assert_eq!(state.blocked_urls.items, vec!["http://127.0.0.1:9/hop-http".to_owned(), "CONNECT 127.0.0.1:9".to_owned(), "CONNECT 127.0.0.1:10".to_owned()]);
+        assert!(state.blocked_tunnels.contains("127.0.0.1:9") && state.blocked_tunnels.contains("127.0.0.1:10"));
+    }
+
+    #[tokio::test]
+    async fn favicon_requests_are_aborted_without_a_record_and_unrestricted_runs_continue_everything() {
+        let (shared, mut server) = fake_shared(Some(vec!["http://127.0.0.1:5173"]));
+        page_session(&shared);
+        send(&shared, "Fetch.requestPaused", paused("f1", "http://127.0.0.1:9/favicon.ico", "n1"));
+        let commands = sent_commands(&mut server).await;
+        assert_eq!(commands[0].0, "Fetch.failRequest");
+        assert_eq!(commands[0].1["errorReason"], "Aborted");
+        assert!(shared.state.lock().unwrap().blocked_urls.items.is_empty());
+
+        let (open, mut open_server) = fake_shared(None);
+        page_session(&open);
+        send(&open, "Fetch.requestPaused", paused("o1", "http://anywhere.example/x", "n1"));
+        let commands = sent_commands(&mut open_server).await;
+        assert_eq!(commands[0].0, "Fetch.continueRequest");
+        assert!(open.state.lock().unwrap().blocked_urls.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn proxy_blocks_inside_the_allowed_origin_are_kept_apart_from_boundary_blocks() {
+        let (shared, _server) = fake_shared(Some(vec!["http://127.0.0.1:5173"]));
+        on_proxy_blocked(&shared, ProxyBlock::Url("http://127.0.0.1:9/outside".to_owned()));
+        on_proxy_blocked(&shared, ProxyBlock::Url("http://127.0.0.1:5173/odd-method".to_owned()));
+        on_proxy_blocked(&shared, ProxyBlock::ServiceWorker("http://127.0.0.1:5173/sw.js".to_owned()));
+        on_proxy_blocked(&shared, ProxyBlock::Tunnel("127.0.0.1:9".to_owned()));
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.blocked_urls.items, vec!["http://127.0.0.1:9/outside".to_owned(), "CONNECT 127.0.0.1:9".to_owned()]);
+        assert_eq!(state.blocked_inside.items, vec!["http://127.0.0.1:5173/odd-method".to_owned(), "SERVICE-WORKER http://127.0.0.1:5173/sw.js".to_owned()]);
+        assert!(state.blocked_tunnels.contains("127.0.0.1:9"));
+    }
+
+    #[tokio::test]
+    async fn console_errors_exceptions_and_media_errors_are_collected_by_the_playwright_rules() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        let text = |value: &str| json!({ "type": "string", "value": value });
+        send(&shared, "Runtime.consoleAPICalled", json!({ "type": "error", "args": [text("a"), { "type": "number", "value": 1 }], "executionContextId": 5 }));
+        send(&shared, "Runtime.consoleAPICalled", json!({ "type": "warning", "args": [text("w")], "executionContextId": 5 }));
+        send(&shared, "Runtime.consoleAPICalled", json!({ "type": "error", "args": [text("Failed to load resource: x")], "executionContextId": 5 }));
+        send(&shared, "Runtime.consoleAPICalled", json!({ "type": "error", "args": [text("zero context")], "executionContextId": 0 }));
+        send(&shared, "Log.entryAdded", json!({ "entry": { "source": "security", "level": "error", "text": "Refused to execute inline script" } }));
+        send(&shared, "Log.entryAdded", json!({ "entry": { "source": "network", "level": "error", "text": "Failed to load resource: the server responded with a status of 404" } }));
+        send(&shared, "Log.entryAdded", json!({ "entry": { "source": "worker", "level": "error", "text": "from worker" } }));
+        send(&shared, "Log.entryAdded", json!({ "entry": { "source": "javascript", "level": "warning", "text": "warned" } }));
+        send(&shared, "Runtime.exceptionThrown", json!({ "exceptionDetails": { "exception": { "type": "object", "description": "Error: boom\n    at x" } } }));
+        send(&shared, "Runtime.bindingCalled", json!({ "name": "__bStudioMediaError__", "payload": "video MEDIA_ERR_NETWORK http://h/v.mp4" }));
+        send(&shared, "Runtime.bindingCalled", json!({ "name": "other", "payload": "ignored" }));
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.console_errors, vec!["a 1".to_owned(), "Refused to execute inline script".to_owned()]);
+        assert_eq!(state.page_errors, vec!["boom".to_owned()]);
+        assert_eq!(state.media_errors, vec!["video MEDIA_ERR_NETWORK http://h/v.mp4".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn requests_are_paired_with_responses_redirects_and_failures_like_playwright() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        let will_be_sent = |id: &str, url: &str, extra: Value| {
+            let mut params = json!({ "requestId": id, "loaderId": "L", "request": { "url": url }, "frameId": "MAIN", "type": "Fetch" });
+            for (key, value) in extra.as_object().unwrap() {
+                params[key] = value.clone();
+            }
+            params
+        };
+        // 404 응답, 같은 URL의 뒤따르는 ERR_ABORTED(첫 기록만), 파비콘, 연결 거부
+        send(&shared, "Network.requestWillBeSent", will_be_sent("r1", "http://h/a.js", json!({})));
+        send(&shared, "Network.responseReceived", json!({ "requestId": "r1", "response": { "status": 404 } }));
+        send(&shared, "Network.loadingFailed", json!({ "requestId": "r1", "errorText": "net::ERR_ABORTED", "canceled": true }));
+        send(&shared, "Network.requestWillBeSent", will_be_sent("r2", "http://h/favicon.ico", json!({})));
+        send(&shared, "Network.responseReceived", json!({ "requestId": "r2", "response": { "status": 404 } }));
+        send(&shared, "Network.requestWillBeSent", will_be_sent("r3", "http://127.0.0.1:1/x", json!({})));
+        send(&shared, "Network.loadingFailed", json!({ "requestId": "r3", "errorText": "net::ERR_CONNECTION_REFUSED" }));
+        // 리다이렉트 홉: 앞 홉의 응답(302)은 실패가 아니고, 뒤 홉이 500이면 실패다
+        send(&shared, "Network.requestWillBeSent", will_be_sent("r4", "http://h/redir", json!({})));
+        send(&shared, "Network.requestWillBeSent", will_be_sent("r4", "http://h/final", json!({ "redirectResponse": { "status": 302 } })));
+        send(&shared, "Network.responseReceived", json!({ "requestId": "r4", "response": { "status": 500 } }));
+        send(&shared, "Network.loadingFinished", json!({ "requestId": "r4" }));
+        // 알 수 없는 프레임의 요청은 세지 않는다
+        send(&shared, "Network.requestWillBeSent", will_be_sent("r5", "http://h/orphan", json!({ "frameId": "UNKNOWN" })));
+        send(&shared, "Network.responseReceived", json!({ "requestId": "r5", "response": { "status": 500 } }));
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.failed_requests, vec!["404 http://h/a.js".to_owned(), "net::ERR_CONNECTION_REFUSED http://127.0.0.1:1/x".to_owned(), "500 http://h/final".to_owned()]);
+        // 페이지 쪽이 보낸 요청의 URL: 파비콘과 알 수 없는 프레임의 요청은 없다
+        assert!(state.seen_urls.contains("http://h/a.js") && state.seen_urls.contains("http://h/final") && state.seen_urls.contains("http://h/redir"));
+        assert!(!state.seen_urls.contains("http://h/favicon.ico") && !state.seen_urls.contains("http://h/orphan"));
+    }
+
+    #[tokio::test]
+    async fn a_proxy_that_cannot_start_means_unavailable_and_no_browser_is_launched_without_it() {
+        FAIL_PROXY_START.store(true, Ordering::SeqCst);
+        let input = BrowserRunInput {
+            // 이 경로가 시도됐다면(프록시 없이 띄우려 했다면) 오류 글이 달라진다
+            executables: vec!["/nonexistent/should-not-be-tried".to_owned()],
+            url: "http://127.0.0.1:1/".to_owned(),
+            viewport: (1280, 800),
+            viewport_script: None,
+            allowed_origins: Some(vec!["http://127.0.0.1:1".to_owned()]),
+            measure_load: false,
+            media_error_script: String::new(),
+        };
+        let outcome = run_in_browser(&input, &Cancel::default()).await;
+        FAIL_PROXY_START.store(false, Ordering::SeqCst);
+        match outcome {
+            Err(RunError::Unavailable(message)) => assert!(message.contains("출처 제한 프록시를 시작할 수 없습니다"), "{message}"),
+            other => panic!("프록시를 못 세우면 unavailable이어야 한다: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_missing_executable_is_unavailable_with_every_attempt_listed() {
+        let input = BrowserRunInput {
+            executables: vec!["/nonexistent/a".to_owned(), "/nonexistent/b".to_owned()],
+            url: "http://127.0.0.1:1/".to_owned(),
+            viewport: (1280, 800),
+            viewport_script: None,
+            allowed_origins: None,
+            measure_load: false,
+            media_error_script: String::new(),
+        };
+        match run_in_browser(&input, &Cancel::default()).await {
+            Err(RunError::Unavailable(message)) => {
+                assert!(message.starts_with("헤드리스 브라우저를 실행할 수 없습니다: "), "{message}");
+                assert!(message.contains("/nonexistent/a") && message.contains(" / ") && message.contains("/nonexistent/b"), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // 이미 취소된 신호는 아무것도 띄우지 않고 끝난다
+        let cancel = Cancel::default();
+        cancel.cancel();
+        assert_eq!(run_in_browser(&input, &cancel).await, Err(RunError::Aborted));
     }
 }
