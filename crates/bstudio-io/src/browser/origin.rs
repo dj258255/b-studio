@@ -7,6 +7,7 @@
 //! | [`is_allowed_url`] | 요청 가로채기, 프록시의 URL·터널 판정 | **여는 쪽**(허용 목록에 있으면 통과). 파싱할 수 없으면 거부한다 |
 //! | [`tunnel_target`] | 막은 CONNECT와 같은 곳으로 가던 요청을 실패 기록에서 빼기 | 기록을 거르는 쪽. 모르면 `None`(거르지 않는다 = 실패로 남긴다) |
 //! | [`parse_authority`] | 프록시의 CONNECT 대상 읽기 | 여는 쪽. 모르는 모양은 `None`(= 막는다) |
+//! | [`is_tunnel_allowed`] | 프록시의 CONNECT 판정, 요청 가로채기가 https 홉을 터널 꼴로 적을지 | 여는 쪽(터널을 연다). 기록 쪽에서는 "프록시가 막았을 때만" 터널 꼴로 적어, 터널 억제가 허용 출처의 실패를 가리지 않게 한다 |
 //!
 //! URL 파싱은 WHATWG를 따르는 `url` 크레이트가 한 번만 하고, 판정과 접속이 그 결과를 함께 쓴다.
 
@@ -22,6 +23,13 @@ pub fn is_allowed_url(url: &str, allowed: &[String]) -> bool {
 pub fn is_allowed_parsed(parsed: &Url, allowed: &[String]) -> bool {
     let protocol = format!("{}:", parsed.scheme());
     is_allowed_request(&protocol, &parsed.origin().ascii_serialization(), allowed)
+}
+
+/// CONNECT 터널을 열어도 되는가(여는 쪽). 터널은 https인지 웹소켓인지 알 수 없으므로, 같은 `host:port`의 http나 https가 허용일 때만 연다.
+/// 프록시의 CONNECT 판정과, 요청 가로채기가 https 홉을 "프록시가 막았을 터널" 꼴로 적을지 정할 때 같은 함수를 쓴다.
+/// `host_port`는 [`tunnel_target`]과 같은 꼴(IPv6는 대괄호)이다
+pub fn is_tunnel_allowed(host_port: &str, is_allowed: impl Fn(&str) -> bool) -> bool {
+    is_allowed(&format!("http://{host_port}/")) || is_allowed(&format!("https://{host_port}/"))
 }
 
 /// URL이 CONNECT로 가는 대상의 `host:port`. 스킴을 모르는 터널이라 기본 포트로 맞춘다(https·wss는 443, 그 밖은 80). 파싱하지 못하면 `None`.
@@ -109,6 +117,17 @@ mod tests {
         assert_eq!(tunnel_target("http://[::1]:9/x").as_deref(), Some("[::1]:9"));
         assert_eq!(tunnel_target("not a url"), None);
         assert_eq!(tunnel_target("data:text/plain,x"), None);
+    }
+
+    #[test]
+    fn tunnel_is_allowed_only_when_http_or_https_of_the_same_host_port_is() {
+        let list = allowed(&["http://127.0.0.1:5173", "https://secure.test"]);
+        let judge = |url: &str| is_allowed_url(url, &list);
+        assert!(is_tunnel_allowed("127.0.0.1:5173", judge));
+        assert!(is_tunnel_allowed("secure.test:443", judge));
+        assert!(!is_tunnel_allowed("127.0.0.1:5174", judge));
+        assert!(!is_tunnel_allowed("secure.test:444", judge));
+        assert!(!is_tunnel_allowed("[::1]:5173", judge));
     }
 
     #[test]

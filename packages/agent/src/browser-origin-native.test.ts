@@ -131,6 +131,11 @@ describe.each(RUNNERS)('출처 제한은 네트워크 층에서도 막는다 (#1
           return html(
             `<script>fetch('/api-fail', { method: 'PROPFIND' }).catch(() => {}).then(() => fetch('/api-fail')).then((r) => { ${done("'status:' + r.status")} }).catch((e) => { ${done("'err:' + e")} });</script>`,
           );
+        case '/https-self-hide':
+          // 허용 출처와 같은 host:port의 https로 리다이렉트한 홉을 막은 기록이, 허용 출처(http)의 진짜 실패를 가리면 안 된다
+          return html(
+            `<script>fetch('/redir?to=' + encodeURIComponent('https://127.0.0.1:${allowed.port}/tls')).catch(() => {}).then(() => fetch('/api-fail')).then((r) => { ${done("'status:' + r.status")} }).catch((e) => { ${done("'err:' + e")} });</script>`,
+          );
         case '/api-fail':
           response.writeHead(500, { 'content-type': 'text/plain' });
           response.end('boom');
@@ -231,6 +236,13 @@ describe.each(RUNNERS)('출처 제한은 네트워크 층에서도 막는다 (#1
     expect(firstLine(result.text)).toBe('status:500');
     expect(result.failedRequests).toContain(`500 ${allowed.base}/api-fail`);
     expect(result.blockedRequests).toContain(`SERVICE-WORKER ${allowed.base}/api-fail`);
+  });
+
+  it('같은 host:port의 https로 리다이렉트한 홉을 막아도 허용 출처(http)의 실패를 가리지 않는다', async () => {
+    reset(allowed);
+    const result = await run(`${allowed.base}/https-self-hide`, { allowedOrigins: [allowed.base] });
+    expect(firstLine(result.text)).toBe('status:500');
+    expect(result.failedRequests).toContain(`500 ${allowed.base}/api-fail`);
   });
 
   it('낯선 메서드라 막은 허용 출처 주소도 그 주소의 실패를 가리지 않는다 (막은 요청 자체가 실패로 남는다)', async () => {

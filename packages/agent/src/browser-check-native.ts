@@ -67,6 +67,8 @@ export const runInBrowserNative: BrowserRunner = async (url, { viewport = DEFAUL
     signal?.throwIfAborted();
     throw new Error('취소되었습니다');
   }
+  // 모르는 종류는 성공으로 읽지 않는다
+  if (result.kind !== 'done') throw new Error(`Rust 화면 확인 러너가 알 수 없는 결과를 돌려주었습니다: ${String(result.kind)}`);
   const { pathname } = new URL(url);
   const report: BrowserPageResult = {
     status: result.status ?? null,

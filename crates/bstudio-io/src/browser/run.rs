@@ -9,7 +9,7 @@ use super::cdp::{Cdp, CdpError, Event};
 use super::console_text::{console_text, exception_message};
 use super::frames::{FrameManager, RequestKey};
 use super::launch::{BrowserProcess, ProfileDir};
-use super::origin::{is_allowed_url, tunnel_target};
+use super::origin::{is_allowed_url, is_tunnel_allowed, tunnel_target};
 use super::proxy::{OriginProxy, ProxyBlock};
 use crate::container_verify::Cancel;
 use serde_json::{json, Value};
@@ -529,9 +529,12 @@ fn on_request_paused(shared: &Arc<Shared>, state: &mut State, session_id: &str, 
         shared.cdp().fire(Some(session_id), "Fetch.continueRequest", json!({ "requestId": request_id }));
     } else {
         // 옛 러너는 리다이렉트 홉을 Playwright의 라우트가 보지 못해 프록시가 막았고, https 홉은 URL을 모르는 터널(`CONNECT host:port`)로 남겼다.
-        // 같은 글로 남기려고 https 리다이렉트 홉은 터널 꼴로 적는다(요청 자체는 이 층에서 URL을 보고 막는다)
+        // 같은 글로 남기려고 https 리다이렉트 홉은 터널 꼴로 적는다(요청 자체는 이 층에서 URL을 보고 막는다). 단, 프록시도 그 터널을 막았을
+        // 때만이다. 터널 꼴 기록은 같은 host:port로 가는 실패를 모두 억제하므로, 허용 출처와 같은 host:port(http는 허용, https는 아님)를
+        // 터널로 적으면 허용 출처의 진짜 실패까지 가려진다. 그때는 막은 URL 그대로 적는다(그 URL 하나만 억제된다)
         let tunnel = is_redirect_hop && Url::parse(url).is_ok_and(|parsed| parsed.scheme() == "https");
-        match tunnel.then(|| tunnel_target(url)).flatten() {
+        let proxy_would_block = |target: &String| !is_tunnel_allowed(target, |candidate| is_allowed_url(candidate, allowed));
+        match tunnel.then(|| tunnel_target(url)).flatten().filter(proxy_would_block) {
             Some(target) => {
                 state.blocked_urls.insert(format!("CONNECT {target}"));
                 state.blocked_tunnels.insert(target);

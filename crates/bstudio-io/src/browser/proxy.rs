@@ -15,7 +15,7 @@
 //! 한 연결에서 요청 하나만 다루고(응답 뒤 연결을 닫는다) 업스트림에는 `Connection: close`로 보낸다. 그래서 파이프라인으로 몰래 끼워 넣은
 //! 둘째 요청이 판정 없이 지나갈 길이 없다. 업스트림 실패는 502다.
 
-use super::origin::{host_text, parse_authority, socket_host};
+use super::origin::{host_text, is_tunnel_allowed, parse_authority, socket_host};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -155,8 +155,7 @@ async fn handle_connect(mut client: TcpStream, context: &Context, authority: &st
     // 그 host:port로는 평문 요청도 이미 허용돼 있어 터널이 허용 범위를 넓히지 않는다
     let target = parse_authority(authority).and_then(|(parsed, port)| {
         let host = host_text(&parsed)?;
-        let allowed = (context.is_allowed)(&format!("http://{host}:{port}/")) || (context.is_allowed)(&format!("https://{host}:{port}/"));
-        allowed.then_some((host, port))
+        is_tunnel_allowed(&format!("{host}:{port}"), |url| (context.is_allowed)(url)).then_some((host, port))
     });
     let Some((host, port)) = target else {
         (context.on_blocked)(ProxyBlock::Tunnel(authority.to_owned()));
