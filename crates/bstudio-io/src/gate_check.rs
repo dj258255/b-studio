@@ -256,7 +256,8 @@ async fn run_verify(g: &Gate, files: &[String], also_restart: &[String]) -> Res<
 }
 
 fn report_text(g: &Gate, report: &JsValue) -> String {
-    verify_judge::format_verification_report(&js_json::to_native(&lossy(report)), g.allow_breaking, &g.spec_file)
+    // 이 크레이트가 만든 글자(옛 코드에서 napi가 돌려주던 글자)는 TS 경계의 꼴로 만든다: 본문에 있던 예약 글자(U+E000..U+E01F)가 짝 없는 서로게이트 이스케이프로 읽히지 않게
+    bstudio_guard::checkpoint_git::encode_reserved(&verify_judge::format_verification_report(&js_json::to_native(&lossy(report)), g.allow_breaking, &g.spec_file))
 }
 
 // ── 실패 ─────────────────────────────────────────────────────────────────
@@ -315,7 +316,10 @@ fn format_failed(failed: &[JsValue]) -> Res<String> {
             ]))
         })
         .collect();
-    gate_helpers::format_failed_checks(&JsValue::Arr(picked)).or_else(|message| input_error(message))
+    match gate_helpers::format_failed_checks(&JsValue::Arr(picked)) {
+        Ok(text) => Ok(bstudio_guard::checkpoint_git::encode_reserved(&text)),
+        Err(message) => input_error(message),
+    }
 }
 
 // ── check ────────────────────────────────────────────────────────────────

@@ -1,13 +1,15 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { decodeNative, encodeNative, native, type LoadRequest, type Sandbox } from '@b-studio/sandbox';
 import { SPEC_FILE, type LoadedProject, type WorkflowPageCheck, type WorkflowStage } from '@b-studio/spec';
-import { TEST_TIMEOUT_MS, type GateOutcome, type ServiceRequest } from './gate';
+import { BrowserUnavailableError, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
+import { TEST_TIMEOUT_MS, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
 import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
 import { TaskGraphError } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
-import { decodeStrings, encodeStrings, failure, verifyChangesSetup, type HookHandler, type HookRequest, type VerificationReport, type VerifyOptions } from './verify';
+import { decodeStrings, encodeStrings, failure, serviceUrl, verifyChangesSetup, type HookHandler, type HookRequest, type VerificationReport, type VerifyOptions } from './verify';
 import type { WorkflowCheck, WorkflowCompare, WorkflowStepCheck } from './workflow';
+import type { WorkflowPageCompare } from '@b-studio/spec';
 
 /**
  * 게이트 check의 상태 기계(순서·분기·결과 조립)는 Rust(`crates/bstudio-io/src/gate_check.rs`, ADR-195 4f A5b-1)가 한다.
@@ -55,7 +57,8 @@ export interface DeclaredHost {
   readonly project: LoadedProject;
   readonly requestService: ServiceRequest;
   autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: AutoPageEntry[]; skipped: WorkflowCheck[] }>;
-  checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options?: { auto?: boolean; probedId?: string; sampled?: string }): Promise<string[]>;
+  /** 화면 확인이 부르는 바깥 동작(브라우저 러너·페이지 요청·스크린샷 저장·디자인 비교·경고). 판정과 순서는 Rust(`gate_page.rs`, ADR-195 4f A5c-1)가 한다 */
+  readonly page: PageOps;
   /** 화면 확인이 이름별로 모으는 부산물 */
   readonly pageMaps: {
     readonly steps: Map<string, WorkflowStepCheck[]>;
@@ -64,6 +67,23 @@ export interface DeclaredHost {
     readonly loadMs: Map<string, number>;
     readonly warnings: Map<string, string[]>;
   };
+}
+
+/** 화면 확인(`#checkPage` 아래)이 게이트 객체에서 빌려 쓰는 동작. 옛 구현(`check-page-legacy.ts`)도 같은 것을 쓴다 */
+export interface PageOps {
+  readonly sandbox: Sandbox;
+  readonly pageFetcher: PageFetcher;
+  readonly browserRunner: BrowserRunner;
+  readonly saveArtifact: ((input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => Promise<string>) | undefined;
+  readonly onBrowserFrame: ((input: { check: string; frame: BrowserFrame }) => void) | undefined;
+  /** 화면 확인이 요청해도 되는 출처(세션의 모든 managed 서비스) */
+  serviceOrigins(): Promise<string[]>;
+  /** 단계 스크린샷을 저장하고 식별자를 붙인다. 저장 실패는 삼킨다(옛 그대로) */
+  saveSteps(name: string, steps: readonly BrowserPageStep[]): Promise<WorkflowStepCheck[]>;
+  /** 마지막 단계의 스크린샷을 디자인 기준 이미지와 비교한다. 실패하면 던진다 */
+  compareDesign(compare: WorkflowPageCompare, name: string, result: BrowserPageResult, sandbox: Sandbox): Promise<void>;
+  /** 게이트를 막지 않는 참고 문구를 이름별로 모아 둔다 */
+  addWarning(name: string, message: string): void;
 }
 
 export interface GateHost {
@@ -111,6 +131,10 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
   const graphSignal = signal ?? new AbortController().signal;
   /** `declaredBegin`이 읽은 선언과 자동 페이지. `checkPage`가 번호로 꺼낸다 */
   let declaredPlan: { pages: WorkflowPageCheck[]; auto: Awaited<ReturnType<DeclaredHost['autoPages']>> } | undefined;
+  /** 디자인 비교를 하는 화면 확인의 마지막 러너 결과(스크린샷 포함). 이름별로 든다 — 스크린샷(Buffer)은 경계를 넘기지 않는다 */
+  const browserResults = new Map<string, BrowserPageResult>();
+  /** 화면 확인 하나의 선언: 선언한 pageChecks의 `index`번째, 자동이면 자동 페이지의 `index`번째 */
+  const pageOf = (auto: unknown, index: unknown): WorkflowPageCheck => (auto === true ? declaredPlan!.auto.pages[Number(index)]!.page : declaredPlan!.pages[Number(index)]!);
   let thrown: { error: unknown } | undefined;
   /** 서비스 확인(`verifyChanges`) 한 번의 콜백 처리기. Rust가 `verifyBegin`을 부를 때마다 새로 만든다 */
   let verifyHandlers: Handlers = {};
@@ -177,12 +201,16 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
       // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
       const auto = await declared.autoPages(pages);
       declaredPlan = { pages, auto };
+      browserResults.clear();
       if (pages.length > 0 || tests.length > 0 || concurrency.length > 0 || loads.length > 0 || auto.pages.length > 0 || auto.skipped.length > 0) {
         for (const map of Object.values(declared.pageMaps)) map.clear();
       }
       return {
         ok: true,
         pages: pages.map((page) => ({ service: page.service, path: page.path, mode: page.mode, viewport: page.viewport ?? null, stepCount: page.steps?.length ?? 0 })),
+        // 화면 확인의 판정은 Rust가 한다: 판정이 읽는 선언 전체와, 자동 페이지가 열 선언·추정한 id·sampleParams로 연 값
+        pageChecks: pages,
+        autoEntries: auto.pages.map((entry) => ({ page: entry.page, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) })),
         tests: tests.map((test) => ({ name: test.name, service: test.service, command: test.command, ...(test.maxAttempts !== undefined ? { maxAttempts: test.maxAttempts } : {}) })),
         concurrency,
         loads,
@@ -190,18 +218,81 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
         autoSkipped: auto.skipped,
       };
     },
-    declaredCheckPage: async ({ auto, index, name }) => {
+    // ── 화면 확인(ADR-195 4f A5c-1): 판정·순서·글 조립은 Rust(`gate_page.rs`)가 한다. 아래는 그 Rust가 부르는 바깥 동작이다 ──
+    declaredPageFetch: async ({ href }) => {
       try {
-        const plan = declaredPlan!;
-        if (auto === true) {
-          const entry = plan.auto.pages[Number(index)]!;
-          const options = { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) };
-          return { ok: true, evidence: await declared.checkPage(entry.page, String(name), graphSignal, options) };
-        }
-        return { ok: true, evidence: await declared.checkPage(plan.pages[Number(index)]!, String(name), graphSignal) };
+        const response = await declared.page.pageFetcher(String(href), graphSignal);
+        return { ok: true, status: response.status, text: response.text };
       } catch (error) {
         return failure(error);
       }
+    },
+    // `fallbackProbe`의 경로를 서비스 위의 주소로 만든다. 출처가 다르면 던진다(#1187): Rust는 요청하지 않고 실패로 본다
+    declaredServiceUrl: ({ base, path }) => {
+      try {
+        return { ok: true, href: new URL(serviceUrl(String(path), String(base))).href };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    // 브라우저 러너를 돌리고 판정에 쓰는 값만 돌려준다. 스크린샷(Buffer)은 경계를 넘기지 않고 이름으로 들고 있다가 단계 저장·디자인 비교가 쓴다.
+    // 헤드리스 브라우저를 못 띄운 오류만 `kind: 'unavailable'`로 알린다(Rust가 fallbackProbe가 있을 때만 대신 HTTP로 확인한다)
+    declaredBrowserRun: async ({ auto, index, name, href }) => {
+      try {
+        const page = pageOf(auto, index);
+        const label = String(name);
+        const { page: ops, pageMaps } = declared;
+        let result: BrowserPageResult;
+        try {
+          result = await ops.browserRunner(String(href), {
+            viewport: page.viewport,
+            ...(page.expectInViewport ? { viewportTexts: page.expectInViewport } : {}),
+            steps: page.steps,
+            signal: graphSignal,
+            // 로드 예산을 적은 확인만 잰다. 재려면 워밍업 이동을 한 번 더 해야 해서(게이트 시간이 늘고, 워밍업 때의 오류는 비운다)
+            // 예산이 없는 확인까지 두 번 열면 첫 로드에서만 나는 오류를 놓칠 수 있다
+            measureLoad: page.maxLoadMs !== undefined,
+            // 스크린샷을 저장할 곳이 있거나 디자인 비교를 할 때만 찍는다
+            capture: ops.saveArtifact !== undefined || page.compare !== undefined,
+            // 세션 서비스의 출처 밖으로는 요청이 나가지 못하게 한다(모델이 만든 페이지를 통한 요청 위조 차단)
+            allowedOrigins: await ops.serviceOrigins(),
+            ...(ops.onBrowserFrame ? { onFrame: (frame: BrowserFrame) => ops.onBrowserFrame!({ check: label, frame }) } : {}),
+          });
+        } catch (error) {
+          if (error instanceof BrowserUnavailableError) return failure(error, { kind: 'unavailable' });
+          // 실패한 단계의 스크린샷도 결과에 남긴다
+          if (error instanceof StepFailedError) pageMaps.steps.set(label, await ops.saveSteps(label, error.steps));
+          return failure(error);
+        }
+        if (ops.saveArtifact) pageMaps.steps.set(label, await ops.saveSteps(label, result.steps));
+        if (result.blockedRequests.length > 0) pageMaps.blocked.set(label, result.blockedRequests);
+        if (result.loadMs !== undefined) pageMaps.loadMs.set(label, result.loadMs);
+        if (page.compare) browserResults.set(label, result);
+        else browserResults.delete(label);
+        return {
+          ok: true,
+          result: { ...result, blockedRequests: undefined, steps: Array.isArray(result.steps) ? result.steps.map((step) => ({ label: step.label, ok: step.ok })) : result.steps },
+        };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    // 문제가 없을 때만 Rust가 부른다. 기준 이미지 읽기·비교·저장은 TS가 한다
+    declaredCompare: async ({ auto, index, name }) => {
+      try {
+        const page = pageOf(auto, index);
+        const label = String(name);
+        const result = browserResults.get(label);
+        if (!page.compare || !result) throw new Error('디자인 비교에 쓸 화면 확인 결과가 없습니다');
+        await declared.page.compareDesign(page.compare, label, result, declared.page.sandbox);
+        return { ok: true };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredWarn: ({ name, message }) => {
+      declared.page.addWarning(String(name), String(message));
+      return { ok: true };
     },
     declaredClearReports: async ({ service }) => {
       const spec = declared.project.managed.find(([name]) => name === service)?.[1];

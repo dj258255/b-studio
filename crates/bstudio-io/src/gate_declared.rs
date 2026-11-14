@@ -58,16 +58,16 @@ fn obj(pairs: Vec<(&str, Option<JsValue>)>) -> JsValue {
 }
 
 /// 이 크레이트가 만든 글자(옛 코드에서 napi가 돌려주던 글자)를 TS 경계의 꼴로 만든다
-fn enc(plain: &str) -> String {
+pub(crate) fn enc(plain: &str) -> String {
     cg::encode_reserved(plain)
 }
 
 /// TS가 보낸 글자를 옛 napi 경계가 받던 꼴(짝 없는 서로게이트는 U+FFFD)로 만든다
-fn lossy_str(encoded: &str) -> String {
+pub(crate) fn lossy_str(encoded: &str) -> String {
     js::well_formed_from_encoded(encoded)
 }
 
-fn lossy(value: &JsValue) -> JsValue {
+pub(crate) fn lossy(value: &JsValue) -> JsValue {
     crate::gate_check::lossy(value)
 }
 
@@ -103,7 +103,7 @@ async fn graph_error<T>(hook: &Hook, message: String) -> Res<T> {
     Err(Fail::Hook)
 }
 
-fn text_field(value: &JsValue, key: &str) -> Res<String> {
+pub(crate) fn text_field(value: &JsValue, key: &str) -> Res<String> {
     value.prop(key).and_then(JsValue::as_str).map(str::to_owned).ok_or(Fail::Hook)
 }
 
@@ -118,12 +118,22 @@ struct TestCase {
 /// TS가 읽어 준 선언과 자동 페이지. 화면 확인 본체(`#checkPage`·`#autoPages`)는 TS가 든다
 struct Plan {
     pages: Vec<JsValue>,
+    /// 선언한 pageChecks의 전체(판정이 읽는 `expectText` 등). `pages`는 이름 짓기용 요약이다
+    page_checks: Vec<JsValue>,
+    auto_entries: Vec<AutoEntry>,
     tests: Vec<TestCase>,
     test_values: Vec<JsValue>,
     concurrency: Vec<JsValue>,
     loads: Vec<JsValue>,
     auto_names: Vec<String>,
     auto_skipped: Vec<JsValue>,
+}
+
+/// 자동으로 연 화면 확인 하나(`#autoPages`가 정한 것): 확인 선언과 추정한 id·sampleParams로 연 값
+struct AutoEntry {
+    page: JsValue,
+    probed_id: Option<String>,
+    sampled: Option<String>,
 }
 
 fn list_of<'a>(value: &'a JsValue, key: &str) -> Res<&'a [JsValue]> {
@@ -146,8 +156,31 @@ fn read_plan(begin: &JsValue) -> Res<Plan> {
             return Err(Fail::Hook);
         }
     }
+    // 화면 확인의 판정이 읽는 값. 없으면 빈 목록이고, 그 번호의 확인을 돌리려 하면 알아볼 수 없는 응답이다(통과로 열리지 않는다)
+    let page_checks = match begin.prop("pageChecks") {
+        Some(JsValue::Arr(items)) => items.clone(),
+        None => Vec::new(),
+        Some(_) => return Err(Fail::Hook),
+    };
+    let mut auto_entries = Vec::new();
+    match begin.prop("autoEntries") {
+        Some(JsValue::Arr(items)) => {
+            for item in items {
+                let optional = |key: &str| match item.prop(key) {
+                    None => Ok(None),
+                    Some(JsValue::Str(text)) => Ok(Some(text.clone())),
+                    Some(_) => Err(Fail::Hook),
+                };
+                auto_entries.push(AutoEntry { page: item.prop("page").cloned().ok_or(Fail::Hook)?, probed_id: optional("probedId")?, sampled: optional("sampled")? });
+            }
+        }
+        None => {}
+        Some(_) => return Err(Fail::Hook),
+    }
     Ok(Plan {
         pages: list_of(begin, "pages")?.to_vec(),
+        page_checks,
+        auto_entries,
         tests,
         test_values: tests_raw.to_vec(),
         concurrency: list_of(begin, "concurrency")?.to_vec(),
@@ -295,18 +328,21 @@ async fn run_graph(ctx: &Arc<Ctx>, nodes: &[NodeSpec], depends_on: &[Vec<String>
 // ── 화면 확인 ────────────────────────────────────────────────────────────
 
 async fn run_page(ctx: &Arc<Ctx>, node: &NodeSpec, auto: bool, index: usize) -> Res<Result<Option<Vec<String>>, String>> {
-    let request = req("declaredCheckPage", vec![("auto", JsValue::Bool(auto)), ("index", JsValue::Num(index as f64)), ("name", s(node.name.clone()))]);
-    match call(&ctx.hook, request).await? {
-        Answer::Done(value) => Ok(Ok(Some(string_list(value.prop("evidence"))?))),
-        Answer::Failed { message, .. } => Ok(Err(message)),
-    }
+    // 판정과 순서는 Rust(`gate_page.rs`)가 한다. 바깥 동작(러너·페이지 요청·스크린샷 저장·디자인 비교)만 콜백이다
+    let (page, probed_id, sampled) = if auto {
+        let entry = ctx.plan.auto_entries.get(index).ok_or(Fail::Hook)?;
+        (&entry.page, entry.probed_id.as_deref(), entry.sampled.as_deref())
+    } else {
+        (ctx.plan.page_checks.get(index).ok_or(Fail::Hook)?, None, None)
+    };
+    crate::gate_page::check_page(&ctx.hook, page, &crate::gate_page::PageRun { auto, index, name: &node.name, probed_id, sampled }).await
 }
 
 // ── 테스트 ───────────────────────────────────────────────────────────────
 
 /// 옛 `evidenceOrNone(() => finishEvidence(lines, redact))`. 줄마다 가리고(콜백), 가린 뒤에 자른다. 만드는 중 실패하면 근거 없이(빈 목록) 돌려준다 —
 /// 판정은 이미 났고 근거는 사람이 보는 표시일 뿐이다. 콜백이 `fatal`이면 그것은 삼키지 않는다
-async fn evidence_or_none(hook: &Hook, lines: Vec<String>) -> Res<Vec<String>> {
+pub(crate) async fn evidence_or_none(hook: &Hook, lines: Vec<String>) -> Res<Vec<String>> {
     let mut out = Vec::new();
     for line in check_evidence::cap_evidence_lines(&lines) {
         let answer = call(hook, req("declaredRedact", vec![("text", s(enc(&line))), ("rethrow", JsValue::Bool(false))])).await?;
@@ -369,7 +405,7 @@ async fn run_test(ctx: &Arc<Ctx>, index: usize) -> Res<Result<Option<Vec<String>
 
 // ── 동시 요청 ────────────────────────────────────────────────────────────
 
-enum Stop {
+pub(crate) enum Stop {
     /// 콜백의 실패: 이 검사 전체를 멈춘다
     Fail(Fail),
     /// `Promise.all`이 거절한 오류의 글
@@ -413,7 +449,7 @@ async fn all_requests(mut futures: Vec<RequestFuture<'_>>) -> Result<Vec<(f64, S
 }
 
 /// 콜백 하나를 부르되 실패 응답은 `Stop::Message`로 바꾼다
-async fn request_op(hook: &Hook, request: JsValue) -> Result<JsValue, Stop> {
+pub(crate) async fn request_op(hook: &Hook, request: JsValue) -> Result<JsValue, Stop> {
     match call(hook, request).await {
         Ok(Answer::Done(value)) => Ok(value),
         Ok(Answer::Failed { message, .. }) => Err(Stop::Message(message)),
@@ -422,14 +458,14 @@ async fn request_op(hook: &Hook, request: JsValue) -> Result<JsValue, Stop> {
 }
 
 /// 요청 하나. 돌려주는 값은 (상태 코드, 본문). 상태 코드가 수가 아니면 알아볼 수 없는 응답이다
-fn response_of(value: &JsValue) -> Result<(f64, String), Stop> {
+pub(crate) fn response_of(value: &JsValue) -> Result<(f64, String), Stop> {
     match value.prop("status") {
         Some(JsValue::Num(status)) => Ok((*status, template(value.prop("text")))),
         _ => Err(Stop::Fail(Fail::Hook)),
     }
 }
 
-fn stopped<T>(stop: Stop) -> Res<Result<T, String>> {
+pub(crate) fn stopped<T>(stop: Stop) -> Res<Result<T, String>> {
     match stop {
         Stop::Fail(fail) => Err(fail),
         Stop::Message(message) => Ok(Err(message)),
@@ -437,7 +473,7 @@ fn stopped<T>(stop: Stop) -> Res<Result<T, String>> {
 }
 
 /// 가린 글을 돌려준다. `wire`는 이미 경계의 꼴(TS가 보낸 글자를 이은 것이거나 `enc`한 것)이다. 가리는 함수가 던지면 그 오류의 글이다(옛 `new Error(sandbox.redact(...))`가 던지던 것)
-async fn redact_soft(hook: &Hook, wire: &str) -> Res<Result<String, (String, bool)>> {
+pub(crate) async fn redact_soft(hook: &Hook, wire: &str) -> Res<Result<String, (String, bool)>> {
     match call(hook, req("declaredRedact", vec![("text", s(wire)), ("rethrow", JsValue::Bool(false))])).await? {
         Answer::Done(value) => match value.prop("text") {
             Some(JsValue::Str(text)) => Ok(Ok(text.clone())),

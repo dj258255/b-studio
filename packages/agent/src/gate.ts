@@ -414,7 +414,7 @@ export class VerificationGate {
    * check의 순서·분기·결과 조립은 Rust(`crates/bstudio-io/src/gate_check.rs`, ADR-195 4f A5b-1)가 한다: 기록 검사 모으기 → 바뀐 파일 0개 분기 → `run` 단계 → 남은 프로세스(#765) → 서비스 확인(플랫폼
    * 실패면 한 번 더) → `contract_check` 단계 → `verify_result` → 새 부가 서비스 경고 → 플랫폼 실패 `exhausted` → `light` 분기 또는 선언 검사 → 다시 견줌(TOCTOU) → 부하 플랫폼 실패 → 리뷰 → 단계별 통과 집계 →
    * 최종 판정과 `gate_done`(#1155) → 실패 안내(`#failure`) 글. 서비스 안 남은 프로세스 조회의 글 모양과 "확인하지 못하면 managed 전부 다시 띄우기"(#strayServices)도 Rust다.
-   * 선언한 검사 실행(이름 짓기·작업 그래프·테스트·동시 요청·부하·결과 조립)도 Rust(`gate_declared.rs`, ADR-195 4f A5b-2)다. 화면 확인(`#autoPages`·`#checkPage`)과 sandbox·HTTP 요청만 `GateHost.declared`로 부른다.
+   * 선언한 검사 실행(이름 짓기·작업 그래프·테스트·동시 요청·부하·결과 조립)도 Rust(`gate_declared.rs`, ADR-195 4f A5b-2)다. 화면 확인의 판정·순서·글 조립도 Rust(`gate_page.rs`, ADR-195 4f A5c-1)다. 자동 페이지 찾기(`#autoPages`)와 브라우저 러너·페이지 요청·스크린샷 저장·디자인 비교·sandbox·HTTP 요청만 `GateHost.declared`로 부른다.
    * 여기는 Rust가 부르는 하위 단계(`GateHost`)를 이 객체의 필드·메서드에 잇는다. 상태 필드는 옛 코드가 바꾸던 자리마다 Rust가 알려 준다.
    */
   #check(): Promise<GateOutcome> {
@@ -526,7 +526,25 @@ export class VerificationGate {
           return gate.#options.requestService ?? requestService;
         },
         autoPages: (declared) => this.#autoPages(declared),
-        checkPage: (page, name, pageSignal, options) => this.#checkPage(page, name, pageSignal, options),
+        page: {
+          sandbox,
+          get pageFetcher() {
+            return gate.#options.pageFetcher ?? fetchPage;
+          },
+          get browserRunner() {
+            return gate.#options.browserRunner ?? runInBrowser;
+          },
+          get saveArtifact() {
+            return gate.#options.saveArtifact;
+          },
+          get onBrowserFrame() {
+            return gate.#options.onBrowserFrame;
+          },
+          serviceOrigins: () => this.#serviceOrigins(),
+          saveSteps: (name, steps) => this.#saveSteps(name, steps),
+          compareDesign: (compare, name, result, pageSandbox) => this.#compareDesign(compare, name, result, pageSandbox),
+          addWarning: (name, message) => this.#addWarning(name, message),
+        },
         pageMaps: { steps: this.#pageSteps, compares: this.#pageCompares, blocked: this.#pageBlocked, loadMs: this.#pageLoadMs, warnings: this.#pageWarnings },
       },
       recheckEvaluationAssets: (recordChecks) => this.#recheckEvaluationAssets(recordChecks),
@@ -893,191 +911,6 @@ export class VerificationGate {
     const list = this.#pageWarnings.get(name) ?? [];
     list.push(message);
     this.#pageWarnings.set(name, list);
-  }
-
-  async #checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string; sampled?: string } = {}): Promise<string[]> {
-    const { sandbox, pageFetcher = fetchPage, browserRunner = runInBrowser, saveArtifact, onBrowserFrame } = this.#options;
-    // 자동으로 연 페이지의 실패는 경로를 앞에 붙여, 실패 서명에서 선언한 pageChecks의 실패와 구분되게 한다
-    const fail = (message: string) => new Error(sandbox.redact(options.auto ? `자동 페이지 ${page.path}: ${message}` : message));
-    // ① api를 불러 값을 꺼내 둔다. 여기서 실패하면 화면을 열지 않고 멈춘다(렌더링을 낭비하지 않는다)
-    const api = await this.#apiValue(page, pageFetcher, signal);
-    const endpoint = await sandbox.endpoint(page.service);
-    const url = new URL(page.path, endpoint.url);
-    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
-    const redact = (line: string) => sandbox.redact(line);
-    const evidenceContext: PageEvidenceContext = { redact, ...(options.auto ? { auto: true } : {}), ...(options.probedId !== undefined ? { probedId: options.probedId } : {}), ...(api ? { api } : {}) };
-    if (page.mode === 'browser') {
-      let result: BrowserPageResult;
-      try {
-        result = await browserRunner(url.href, {
-          viewport: page.viewport,
-          ...(page.expectInViewport ? { viewportTexts: page.expectInViewport } : {}),
-          steps: page.steps,
-          signal,
-          // 로드 예산을 적은 확인만 잰다. 재려면 워밍업 이동을 한 번 더 해야 해서(게이트 시간이 늘고, 워밍업 때의 오류는 비운다)
-          // 예산이 없는 확인까지 두 번 열면 첫 로드에서만 나는 오류를 놓칠 수 있다
-          measureLoad: page.maxLoadMs !== undefined,
-          // 스크린샷을 저장할 곳이 있거나 디자인 비교를 할 때만 찍는다
-          capture: saveArtifact !== undefined || page.compare !== undefined,
-          // 세션 서비스의 출처 밖으로는 요청이 나가지 못하게 한다(모델이 만든 페이지를 통한 요청 위조 차단)
-          allowedOrigins: await this.#serviceOrigins(),
-          ...(onBrowserFrame ? { onFrame: (frame: BrowserFrame) => onBrowserFrame({ check: name, frame }) } : {}),
-        });
-      } catch (error) {
-        // 헤드리스 브라우저를 못 띄우면(ADR-050은 원래 그대로 실패시킨다) fallbackProbe가 있는 확인만 대신 HTTP로 확인한다
-        if (error instanceof BrowserUnavailableError && page.fallbackProbe) {
-          return this.#checkFallbackProbe(page.fallbackProbe, page, name, signal, fail, error);
-        }
-        // 실패한 단계의 스크린샷도 결과에 남긴다
-        if (error instanceof StepFailedError) this.#pageSteps.set(name, await this.#saveSteps(name, error.steps));
-        throw error;
-      }
-      if (saveArtifact) this.#pageSteps.set(name, await this.#saveSteps(name, result.steps));
-      if (result.blockedRequests.length > 0) this.#pageBlocked.set(name, result.blockedRequests);
-      const problems: string[] = [];
-      if (options.probedId !== undefined) {
-        // 추정한 id로 연 동적 경로(ADR-078): id가 실제로 없을 수도 있어 404·500만 실패로 본다
-        if (result.status === 404 || (result.status !== null && result.status >= 500)) problems.push(dynamicProbeStatusProblem(options.probedId, result.status));
-      } else if (result.status !== page.expectStatus) {
-        problems.push(`HTTP ${result.status ?? '응답 없음'} (기대 ${page.expectStatus})`);
-      }
-      if (page.expectText && !result.text.includes(page.expectText)) problems.push(`렌더링된 화면에 '${page.expectText}'가 없습니다`);
-      // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
-      if (page.expectAnyText && !page.expectAnyText.some((candidate) => result.text.includes(candidate))) problems.push(missingAnyText(page.expectAnyText));
-      // expectAllText는 적은 문구가 모두 있어야 통과한다. 빠진 것만 알린다
-      const missingAllRendered = page.expectAllText?.filter((candidate) => !result.text.includes(candidate)) ?? [];
-      if (missingAllRendered.length > 0) problems.push(missingAllText(missingAllRendered));
-      // expectInViewport: 글자가 DOM에 있는 것만이 아니라 첫 화면에 온전히 보이는지(ADR-161). 재지 못했으면 통과로 보지 않는다
-      if (page.expectInViewport) problems.push(...viewportProblems(page.expectInViewport, result.viewportTexts));
-      // ④ api에서 꺼낸 값이 렌더링된 글자에 있는지. expectText와 같은 위치에서 본다
-      if (api && !containsApiValue(result.text, api.value)) problems.push(missingApiValue(api, page.path));
-      if (result.pageErrors.length > 0) problems.push(`스크립트 예외: ${result.pageErrors.slice(0, 3).join(' | ')}`);
-      if (!page.allowConsoleErrors && result.consoleErrors.length > 0) problems.push(`console.error: ${result.consoleErrors.slice(0, 3).join(' | ')}`);
-      if (!page.allowConsoleErrors && result.failedRequests.length > 0) problems.push(`실패한 요청: ${result.failedRequests.slice(0, 3).join(' | ')}`);
-      // <video>/<audio>/<img>의 로드·재생 실패(트러블슈팅 83). 같은 네트워크 404가 failedRequests에도 남을 수 있지만,
-      // 이쪽은 "그 요청이 실제로 어느 화면 요소의 재생을 망가뜨렸는지"를 직접 보여준다
-      if (!page.allowConsoleErrors && result.mediaErrors.length > 0) problems.push(`미디어 오류: ${result.mediaErrors.slice(0, 3).join(' | ')}`);
-      // 데이터를 못 받아 로딩 상태에서 멈춘 화면(ADR-078). 실패한 요청·콘솔 오류·스크립트 예외를 증거로 함께 본다
-      if (!page.allowLoadingPlaceholder) {
-        const stuck = detectStuckLoading(result.text, {
-          failedRequests: result.failedRequests.length,
-          consoleErrors: result.consoleErrors.length,
-          pageErrors: result.pageErrors.length,
-        });
-        if (stuck) problems.push(stuck);
-      }
-      if (page.noHorizontalScroll && result.horizontalOverflowPx > 1) problems.push(`가로로 ${result.horizontalOverflowPx}px 넘칩니다`);
-      if (result.loadMs !== undefined) this.#pageLoadMs.set(name, result.loadMs);
-      if (page.maxLoadMs !== undefined) {
-        // 예산을 적었는데 재지 못했으면 "검사 안 함"이 통과로 보이지 않도록 실패로 본다
-        if (result.loadMs === undefined) problems.push(`로드 시간을 재지 못했습니다 (예산 ${page.maxLoadMs.toLocaleString('ko-KR')}ms)`);
-        else if (result.loadMs > page.maxLoadMs) {
-          problems.push(`로드 ${result.loadMs.toLocaleString('ko-KR')}ms (예산 ${page.maxLoadMs.toLocaleString('ko-KR')}ms)`);
-        }
-      }
-      // 화면 출력에 시크릿 값이 섞여 있을 수 있어 가린 뒤 모델에게 돌려준다
-      if (options.auto) {
-        // 상태 코드가 200이어도 본문이 Next.js 오류 화면이면 실패다(새로 만든 페이지가 500을 내는 것을 잡는 자리)
-        const marker = nextErrorMarker(result.text, page.expectStatus);
-        if (marker) problems.push(`Next.js 오류 화면: '${marker}'`);
-      }
-      // 추정한 id로 연 화면이 실패했으면, 그 id의 데이터가 없어서일 수 있다는 것과 실제 id를 알려 주는 방법을 붙인다.
-      // (상태 코드 문제는 이미 같은 안내를 담고 있다.) 안내가 없으면 "실패한 요청: 404 …/1/…"만 보고 화면 코드를 의심하게 된다
-      if (problems.length > 0 && options.probedId !== undefined && !problems.some((problem) => problem.includes('추정한 id('))) {
-        problems.push(dynamicProbeDataHint(options.probedId));
-      }
-      if (problems.length > 0 && options.sampled !== undefined) problems.push(sampledValueHint(options.sampled));
-      if (problems.length > 0) throw fail(problems.join('\n'));
-      if (page.compare) await this.#compareDesign(page.compare, name, result, sandbox);
-      return evidenceOrNone(() => finishEvidence(browserPageEvidence(page, result, evidenceContext), redact));
-    }
-    const { status, text } = await pageFetcher(url.href, signal);
-    if (options.probedId !== undefined) {
-      // 추정한 id로 연 동적 경로(ADR-078): id가 실제로 없을 수도 있어 404·500만 실패로 본다
-      if (status === 404 || status >= 500) throw fail(dynamicProbeStatusProblem(options.probedId, status));
-    } else if (status !== page.expectStatus) {
-      throw fail(`HTTP ${status} (기대 ${page.expectStatus})${options.sampled !== undefined ? `\n${sampledValueHint(options.sampled)}` : ''}`);
-    }
-    if (options.auto) {
-      const marker = nextErrorMarker(text, page.expectStatus);
-      if (marker) throw fail(`Next.js 오류 화면: '${marker}'`);
-      // HTTP 확인은 자바스크립트를 실행하지 않아 클라이언트 fetch가 실패했는지 확정할 수 없다. 보수적으로 경고만 남긴다(ADR-078)
-      const stuck = detectStuckLoading(stripHtml(text));
-      if (stuck) this.#addWarning(name, `[참고] ${stuck} — HTTP 확인은 자바스크립트를 실행하지 않아 확정할 수 없습니다. 확실히 판정하려면 autoPageChecks.mode: browser를 쓰세요`);
-    }
-    if (page.expectText && !text.includes(page.expectText)) throw fail(`응답 본문에 '${page.expectText}'가 없습니다`);
-    // expectAnyText는 적은 문구 중 하나라도 있으면 통과한다(숫자 표기가 갈릴 때)
-    if (page.expectAnyText && !page.expectAnyText.some((candidate) => text.includes(candidate))) throw fail(missingAnyText(page.expectAnyText));
-    // expectAllText는 적은 문구가 모두 있어야 통과한다. 빠진 것만 알린다
-    const missingAll = page.expectAllText?.filter((candidate) => !text.includes(candidate)) ?? [];
-    if (missingAll.length > 0) throw fail(missingAllText(missingAll));
-    // ④ api에서 꺼낸 값이 응답 본문(http) 글자에 있는지
-    if (api && !containsApiValue(text, api.value)) throw fail(missingApiValue(api, page.path));
-    return evidenceOrNone(() => finishEvidence(httpPageEvidence(page, { status, text }, evidenceContext), redact));
-  }
-
-  /**
-   * 헤드리스 브라우저를 못 띄울 때(fix/frontend-backend-url) fallbackProbe가 가리키는 서비스·경로로 평범한 HTTP 요청을
-   * 한 번 보낸다. 응답을 받으면(상태 코드와 무관하게) 그 주소가 살아 있다는 뜻이라 화면 확인을 통과시키되, 콘솔
-   * 오류·실패한 요청 같은 화면 단위 문제는 보지 못했다는 참고 문구를 남긴다. 연결 자체가 안 되면(연결 거부 등) 실패로 본다
-   */
-  async #checkFallbackProbe(
-    probe: { service: string; path: string },
-    page: WorkflowPageCheck,
-    name: string,
-    signal: AbortSignal,
-    fail: (message: string) => Error,
-    browserError: BrowserUnavailableError,
-  ): Promise<string[]> {
-    const { sandbox, pageFetcher = fetchPage } = this.#options;
-    const endpoint = await sandbox.endpoint(probe.service);
-    let url: URL;
-    try {
-      url = new URL(serviceUrl(probe.path, endpoint.url));
-    } catch (error) {
-      // 서비스 밖으로 풀리는 경로는 요청하지 않고 실패다(#1187). 바깥 호스트의 응답으로 화면 확인을 통과시키지 않는다
-      throw fail(`헤드리스 브라우저를 쓸 수 없어 ${probe.service}${probe.path}로 대신 확인하려 했지만 ${error instanceof Error ? error.message : String(error)}`);
-    }
-    try {
-      const { status } = await pageFetcher(url.href, signal);
-      this.#addWarning(
-        name,
-        `[참고] 헤드리스 브라우저를 쓸 수 없어(${browserError.message}) 화면 확인 대신 ${probe.service}${probe.path}로 HTTP 확인만 했습니다(응답 ${status}). 콘솔 오류·실패한 요청·화면에 보이는 오류 문구는 확인하지 못했습니다`,
-      );
-      if (page.expectInViewport) {
-        this.#addWarning(name, `[참고] expectInViewport(${page.expectInViewport.map((value) => `'${value}'`).join(', ')})가 첫 화면에 보이는지는 확인하지 못했습니다 — 헤드리스 브라우저가 필요합니다`);
-      }
-      return evidenceOrNone(() => finishEvidence([`헤드리스 브라우저 없이 ${probe.service}${probe.path}의 HTTP 응답(${status})만 확인했습니다 — 화면은 열지 않았습니다`], (line) => sandbox.redact(line)));
-    } catch (error) {
-      throw fail(
-        `헤드리스 브라우저를 쓸 수 없어 ${probe.service}${probe.path}로 대신 확인했는데 연결하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  }
-
-  /**
-   * pageChecks.expectFromApi가 있으면 api를 불러 jsonPath 값(문자열·숫자)을 꺼낸다. 없으면 undefined.
-   * 동시 요청 확인과 같은 규칙으로 **세션 서비스의 출처로만** 요청한다.
-   * 상태·값이 없음은 에이전트가 문구만 보고 고칠 수 있게 구체적으로 알리고, 객체·배열·빈 문자열은 확인 설정 오류로 본다.
-   */
-  async #apiValue(page: WorkflowPageCheck, fetcher: PageFetcher, signal: AbortSignal): Promise<ApiValue | undefined> {
-    const expect = page.expectFromApi;
-    if (!expect) return undefined;
-    const { sandbox } = this.#options;
-    const endpoint = await sandbox.endpoint(expect.service);
-    const url = new URL(expect.path, endpoint.url);
-    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
-    const { status, text } = await fetcher(url.href, signal);
-    if (status < 200 || status >= 300) throw new Error(sandbox.redact(`${expect.service} GET ${expect.path}가 HTTP ${status}을 돌려줬습니다`));
-    const value = readJsonPath(text, expect.jsonPath);
-    if (value === undefined || value === null) {
-      // 자르기 전에 가린다. 200자 경계에 걸친 시크릿의 앞부분이 남지 않게 한다(#751)
-      throw new Error(sandbox.redact(`${expect.service} 응답에 ${expect.jsonPath}이 없습니다. 응답 앞부분: ${sandbox.redact(text).slice(0, 200)}`));
-    }
-    if (typeof value === 'object') throw new Error(`${expect.jsonPath}는 ${Array.isArray(value) ? '배열' : '객체'}입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
-    if (typeof value !== 'string' && typeof value !== 'number') throw new Error(`${expect.jsonPath}는 ${typeof value}입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
-    if (typeof value === 'string' && value.trim() === '') throw new Error(`${expect.jsonPath} 값이 빈 문자열입니다. 화면에 그려질 문자열·숫자 값을 가리키세요`);
-    return { service: expect.service, jsonPath: expect.jsonPath, value };
   }
 
   /**
