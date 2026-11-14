@@ -2,9 +2,10 @@
 // pnpm install 뒤(postinstall)와 pnpm test 앞에서 돈다. cargo는 바뀐 것이 없으면 바로 끝난다.
 // 이 모듈이 없으면 sandbox가 판정을 하지 못해 던진다. TS로 대신 판정하는 길은 없다.
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, lstatSync, mkdirSync, rmSync } from 'node:fs';
+import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { installNative } from './install-native.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -29,11 +30,5 @@ if (!built) {
 const outDir = path.join(root, 'packages', 'sandbox', 'native');
 const out = path.join(outDir, 'bstudio_node.node');
 mkdirSync(outDir, { recursive: true });
-// 대상이 심볼릭 링크면 링크 너머에 쓰지 않도록 지우고 새로 만든다
-try {
-  if (lstatSync(out).isSymbolicLink()) rmSync(out);
-} catch {
-  // 없으면 새로 만든다
-}
-copyFileSync(path.join(root, 'target', 'release', built), out);
+installNative(path.join(root, 'target', 'release', built), out);
 console.log(`[build-native] ${path.relative(root, out)}`);
