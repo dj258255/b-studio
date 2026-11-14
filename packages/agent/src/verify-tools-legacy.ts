@@ -103,7 +103,7 @@ export function legacyFormatVerificationReport(report: LegacyReport, { allowBrea
     }
     lines.push(`- ${check.service} 계약:`, ...formatContractChanges(check.changes).split('\n').map((line) => `    ${line}`));
     if (!allowBreaking && check.changes.some((change) => change.breaking)) {
-      lines.push('    요청에 삭제·변경이 명시되지 않았으므로 호환을 깨는 변경은 허용되지 않습니다.');
+      lines.push('    이 요청은 호환을 깨는 변경을 허용하지 않았습니다(허용은 사람이 요청할 때 켭니다). 의도하지 않은 변경이면 되돌리고, 사람이 요청한 변경이면 되돌리지 말고 그 사실을 알리세요.');
     }
   }
 
