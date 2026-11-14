@@ -6337,4 +6337,5 @@ Next.js 16 프로젝트에서 HTTP 모드 자동 화면 확인을 쓸 수 없었
   - `--force-webrtc-ip-handling-policy`만으로는 Google Chrome에서 STUN 패킷이 127.0.0.1의 UDP 서버에 닿았다. 인자별 실측: headless shell은 `--force-…`만 있을 때 0개, `--webrtc-…`만 있을 때 5개. Google Chrome은 그 반대였고, 둘 다 있으면 두 브라우저 모두 0개였다.
   - 서비스 워커 요청은 Playwright가 보지 못해(`serviceWorkers: 'block'`에서는 워커에 붙지 않는다) 기록을 거르자 빠졌다. 그래서 서비스 워커가 설치되지 못하게 스크립트 요청을 막았다.
   - 고친 뒤 browser-check·origin-proxy 시험 61개가 headless shell과 Google Chrome 양쪽에서 통과한다.
+- 그 고침을 독립 보안 검토에 맡겼다. 서비스 워커 스크립트로 막은 **허용 출처 안의 주소**가 실패 억제 목록(`blockedUrls`)에 들어가, 같은 주소의 진짜 요청 실패(500)가 `failedRequests`에서 가려진다는 지적이 나왔다. 같은 시험을 기존 막기에 돌려 보니, 표준 밖 메서드(`fetch(주소, {method: 'PROPFIND'})`)로 막힌 허용 출처 주소도 같았다. 둘 다 시험으로 재현했고(`expected [] to include '500 …/api-fail'`), 허용 출처 안을 막은 것은 실패 억제에 넣지 않고 기록에만 남기게 고쳤다. 시험 63개가 두 브라우저에서 통과한다.
 - 같은 모양의 다른 자리: 실험 기능인 원격 브라우저(`remote-browser.ts`)와 탐색 QA(`explore-qa.ts`)는 같은 `restrictPageToOrigins`를 쓰지만 프록시를 쓰지 않아 이 구멍이 그대로 있다. 실험 경로만을 위한 수정은 하지 않았다.

@@ -126,7 +126,7 @@ describe('startOriginProxy (#1210)', { timeout: 30_000 }, () => {
         const result = await raw(proxy, `GET http://${host}/x HTTP/1.1\r\nHost: ${host}\r\n\r\n`);
         expect(result, host).toEqual({ response: '', closed: true });
       }
-      expect(blocks.map((block) => (block.kind === 'url' ? block.url : block.hostPort))).toEqual([
+      expect(blocks.map((block) => (block.kind === 'tunnel' ? block.hostPort : block.url))).toEqual([
         `http://localhost:${allowedPort}/x`,
         `http://[::1]:${allowedPort}/x`,
         `http://0.0.0.0:${allowedPort}/x`,
@@ -188,7 +188,7 @@ describe('startOriginProxy (#1210)', { timeout: 30_000 }, () => {
         `GET http://${host}/sw.js HTTP/1.1\r\nHost: ${host}\r\nSec-Fetch-Dest: ServiceWorker\r\n\r\n`,
       ];
       for (const payload of cases) expect(await raw(proxy, payload), payload).toEqual({ response: '', closed: true });
-      expect(blocks).toEqual(cases.map(() => ({ kind: 'url', url: `http://${host}/sw.js` })));
+      expect(blocks).toEqual(cases.map(() => ({ kind: 'serviceWorker', url: `http://${host}/sw.js` })));
     });
     expect(allowedLog).toEqual([]);
   });
@@ -272,7 +272,7 @@ describe('프록시 뒤의 브라우저 (#1210)', { timeout: 60_000 }, () => {
     const seen: string[] = [];
     const proxy = await startOriginProxy({
       isAllowed: () => false,
-      onBlocked: (block) => seen.push(block.kind === 'url' ? block.url : `CONNECT ${block.hostPort}`),
+      onBlocked: (block) => seen.push(block.kind === 'tunnel' ? `CONNECT ${block.hostPort}` : block.url),
     });
     // 환경 변수로 Playwright의 loopback 프록시를 끄더라도 인자로 다시 켜져 있어야 한다
     const previous = process.env.PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK;

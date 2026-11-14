@@ -470,6 +470,10 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
   // 막은 알림이 요청 실패 이벤트보다 먼저 들어가야 하므로 프록시를 브라우저보다 먼저 만든다
   const blockedUrls = new Set<string>();
   const blockedTunnels = new Set<string>();
+  // 프록시가 허용 출처 안의 주소를 막은 것: 서비스 워커 스크립트(`SERVICE-WORKER <url>`)와 낯선 모양(표준 밖 메서드 등)의 요청.
+  // blockedUrls와 섞지 않는다. blockedUrls는 "경계 밖이라 막았으니 앱의 실패가 아니다"라며 실패 기록에서 빼는 목록이라,
+  // 허용 출처 주소가 들어가면 같은 주소의 진짜 요청 실패(500 등)가 가려진다. 여기 든 요청의 실패는 그대로 실패로 남는다
+  const blockedInside = new Set<string>();
   // 허용 출처가 주어졌는데 프록시를 세우지 못하면 프록시 없이 브라우저를 띄우지 않는다(검사를 통과시키지 않고 "브라우저 없음"으로 알린다)
   let proxy: OriginProxy | undefined;
   if (allowedOrigins) {
@@ -478,7 +482,10 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       proxy = await startOriginProxy({
         isAllowed: (requestUrl) => isAllowedRequest(requestUrl, allowedSet),
         onBlocked: (block) => {
-          if (block.kind === 'url') blockedUrls.add(block.url);
+          if (block.kind === 'url') {
+            if (isAllowedRequest(block.url, allowedSet)) blockedInside.add(block.url);
+            else blockedUrls.add(block.url);
+          } else if (block.kind === 'serviceWorker') blockedInside.add(`SERVICE-WORKER ${block.url}`);
           else {
             // 터널(https·웹소켓)은 URL을 알 수 없어 접속하려던 host:port로 남긴다
             blockedUrls.add(`CONNECT ${block.hostPort}`);
@@ -555,6 +562,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         blockedUrls.clear();
         blockedTunnels.clear();
         seenUrls.clear();
+        blockedInside.clear();
       }
       const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
       await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
@@ -597,7 +605,8 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         consoleErrors,
         failedRequests,
         mediaErrors,
-        blockedRequests: pageBlockedRequests(blockedUrls, seenUrls),
+        // 허용 출처 안을 막은 것은 늘 남긴다. 서비스 워커 막기는 Playwright가 그 요청을 보지 못해도(막힌 설정에서는 서비스 워커에 붙지 않는다) 우회 시도의 흔적이다
+        blockedRequests: [...pageBlockedRequests(blockedUrls, seenUrls), ...blockedInside],
         horizontalOverflowPx: overflow,
         ...(viewportReport ? { viewportTexts: viewportReport } : {}),
         ...(loadMs !== null ? { loadMs } : {}),

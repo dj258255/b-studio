@@ -10610,6 +10610,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 8. **fail-closed.** 허용 출처가 주어졌는데 프록시를 세우지 못하면 프록시 없이 브라우저를 띄우지 않고 `BrowserUnavailableError`("출처 제한 프록시를 시작할 수 없습니다")를 던진다. 게이트는 이를 기존 "헤드리스 브라우저를 쓸 수 없음"과 같게 다룬다(검사를 통과시키지 않는다. `fallbackProbe`가 있는 확인만 브라우저 없이 HTTP로 확인한다). 브라우저를 띄우지 못했을 때도 세운 프록시를 닫는다.
 9. 허용 출처가 없는 호출(`allowedOrigins` 미지정)은 프록시도 라우트도 쓰지 않아 그대로다.
 10. **서비스 워커 스크립트 요청은 허용 출처라도 막는다.** 브라우저가 서비스 워커 스크립트를 받을 때 붙이는 `Service-Worker: script` 머리나 `Sec-Fetch-Dest: serviceworker`가 있으면 끊는다(둘 중 하나만 있어도). 화면 확인은 서비스 워커를 쓰지 않는다는 전제(`serviceWorkers: 'block'`)를 네트워크 층에서 지킨다. 설치된 서비스 워커의 요청도 결정 2로 막히지만, Playwright는 막힌 설정에서 서비스 워커에 붙지 않아 그 요청을 기록할 수 없다. 그래서 설치 자체를 막는다.
+    - **허용 출처 안의 주소를 막은 것은 실패 기록에서 빼지 않는다.** 서비스 워커 스크립트, 그리고 표준 밖 메서드처럼 낯선 모양이라 막은 허용 출처 주소가 여기에 해당한다. 기록에는 `SERVICE-WORKER <url>`, `<url>`로 늘 남긴다. 처음 판은 이것을 "경계 밖이라 막았다"는 목록(`blockedUrls`)에 넣었다. 그러면 페이지가 같은 주소를 먼저 서비스 워커로 등록하려 하거나 `fetch(주소, {method: 'PROPFIND'})`로 막히게 한 뒤, 그 주소의 진짜 요청 실패(500)를 `failedRequests`에서 가릴 수 있었다(독립 보안 검토가 서비스 워커 쪽을 지적했고, 같은 시험을 메서드 쪽에 돌려 같은 결함을 찾았다). 이제 `blockedUrls`에는 허용 출처 밖 주소만 들어간다.
 11. **막은 기록(`blockedRequests`)에는 페이지 쪽이 보낸 요청만 남긴다.** 브라우저가 스스로 내는 배경 요청(Google Chrome의 시간 동기화·로그인 확인 등)도 프록시를 지나고 막히지만, 앱의 요청이 아니므로 "다른 출처 요청을 막았다"는 기록에서 뺀다. 페이지 쪽 요청은 컨텍스트의 `request`(문서·프레임·워커)와 페이지의 `websocket`으로 본 URL이다. 터널(`CONNECT host:port`)은 같은 host:port로 가는 https·ws·wss URL을 봤을 때 남긴다. **막는 것은 바뀌지 않고 기록만 거른다.** 실패 기록(`failedRequests`)에서 빼는 판단은 지금처럼 막은 것 전부를 본다.
 
 ### 판정 함수를 부르는 자리: 막는 쪽인지 여는 쪽인지
@@ -10621,7 +10622,8 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 | 프록시: 절대 형식 요청 | 허용이면 그 URL의 host:port로 전달, 아니면 끊기 | 파싱 실패·origin-form·Host 불일치·알 수 없는 메서드·Upgrade는 막음 |
 | 프록시: CONNECT | 허용 출처의 같은 host:port(http든 https든)일 때만 터널 | 문자 규칙·포트 범위에 맞지 않으면 막음 |
 | 프록시: `upgrade` 이벤트(절대 형식 Upgrade) | 항상 막음(Chromium이 이 길을 쓰지 않음을 실측) | 해당 없음 |
-| 프록시: 서비스 워커 스크립트 머리 | 거부 목록(막는 쪽). 허용 출처라도 머리가 있으면 막음 | 머리 값의 대소문자는 접어서 비교 |
+| 프록시: 서비스 워커 스크립트 머리 | 거부 목록(막는 쪽). 허용 출처라도 머리가 있으면 막음. 따로 알리고(`serviceWorker`) 실패 억제에 넣지 않음 | 머리 값의 대소문자는 접어서 비교 |
+| `runInBrowser`의 막은 알림 분류 | 실패 억제(`blockedUrls`)에는 `isAllowedRequest`가 거부한 주소만 넣음(넓히면 허용 출처의 실패가 가려지므로 좁게) | 허용 출처 안 주소는 억제하지 않음 |
 | `pageBlockedRequests`(기록 거르기) | 판정이 아니라 기록. 막은 것 가운데 페이지 쪽이 보낸 것만 남김. 막는 데는 쓰지 않음 | URL을 파싱하지 못하면 터널 대상으로 세지 않음 |
 | `connection-legacy.ts`의 같은 이름 함수 | 이번에 건드리지 않음(차등 시험용 옛 구현) | |
 
@@ -10636,7 +10638,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 시험(실제 Chromium, 허용 밖 서버는 요청 기록과 TCP 접속 수로 확인): `browser-check.test.ts`의 "출처 제한은 네트워크 층에서도 막는다 (#1210)" 열한 개, `origin-proxy.test.ts` 열한 개(날것의 소켓: Host 불일치·origin-form·Upgrade·CONNECT 대상 규칙, 업스트림 실패는 502, close, loopback·링크 로컬이 프록시를 지남, WebRTC), `browser-check-fail-closed.test.ts` 네 개. 고치기 전 코드에서 새 시험 열 개 중 여덟 개가 실패했다(허용 밖 서버가 `GET /pixel.png`·`GET /frame`을 받음, 문서 이동 결과가 `outside-secret`, 서비스 워커가 `sw:reached:200`, 허용 밖 ws의 서버 도달). 허용 출처의 ws와 평범한 화면은 고치기 전에도 통과해 회귀 시험으로 남겼다.
 - Chromium이 프록시로 보낸 것(실측): 127.0.0.1·localhost·`[::1]`·`foo.localhost`·`169.254.169.254`가 모두 절대 형식 `GET http://…`로 프록시에 왔다(링크 로컬도 `<-loopback>`으로 우회가 꺼진다). `ws://`·`wss://`·`https://`는 `CONNECT host:port`였다. 막힌 포트(예: 9번)는 프록시 전에 `ERR_UNSAFE_PORT`로 끝난다.
 - 변이(원래 코드에 하나씩 넣어 시험이 잡는지): 판정을 늘 허용(9개 실패), loopback 인자 제거(환경 변수 시험 포함 2개), loopback 우회 다시 켜기(11개), CONNECT 판정 넓히기(4개), 막은 URL·터널 알림 빼기(10개·4개), 프록시 실패 시 프록시 없이 띄우기(1개), Host 검사 빼기(1개), 403으로 막기(6개), 막은 터널을 실패 기록에서 빼는 처리 제거(1개), WebRTC 인자 제거(2개), Upgrade 막기 제거(1개), 알 수 없는 메서드 허용(1개), 판정 없이 전달(10개), close에서 연결 끊기 빼기(시간 초과로 실패). 처음에는 Upgrade와 close 변이가 통과해, 시험을 더했다(`Connection: Upgrade` 없이 `Upgrade`만 단 요청, 터널이 선 연결의 close).
-- **처음 낸 고침의 결함(CI에서 발견)**: headless shell에서만 쟀던 처음 판은 CI(Linux)에서 시험 11개가 실패했다. CI에는 headless shell이 없어 `launchBrowser`가 시스템 Google Chrome으로 넘어갔다. 이 기기의 Google Chrome으로 재현해 결정 7(인자 두 이름)·10(서비스 워커 스크립트)·11(기록 거르기)을 더했다. 고친 뒤 browser-check·origin-proxy 시험 61개가 headless shell과 Google Chrome(macOS) 양쪽에서 통과한다. 더한 것의 변이: 일반 이름 WebRTC 인자 빼기(Chrome에서 3개 실패), `--force-…` 빼기(headless shell에서 2개), 서비스 워커 머리 막기 빼기(headless shell 2개·Chrome 4개), 두 머리 중 하나만 보기(각 1개), 기록 거르기 빼기(Chrome에서 11개), 터널 기록 버리기(Chrome 4개), 웹소켓 URL 안 모으기(Chrome 3개), 워밍업 뒤 본 URL 안 비우기(Chrome 2개).
+- **처음 낸 고침의 결함(CI에서 발견)**: headless shell에서만 쟀던 처음 판은 CI(Linux)에서 시험 11개가 실패했다. CI에는 headless shell이 없어 `launchBrowser`가 시스템 Google Chrome으로 넘어갔다. 이 기기의 Google Chrome으로 재현해 결정 7(인자 두 이름)·10(서비스 워커 스크립트)·11(기록 거르기)을 더했다. 고친 뒤 browser-check·origin-proxy 시험 61개가 headless shell과 Google Chrome(macOS) 양쪽에서 통과한다. 더한 것의 변이: 일반 이름 WebRTC 인자 빼기(Chrome에서 3개 실패), `--force-…` 빼기(headless shell에서 2개), 서비스 워커 머리 막기 빼기(headless shell 2개·Chrome 4개), 두 머리 중 하나만 보기(각 1개), 기록 거르기 빼기(Chrome에서 11개), 터널 기록 버리기(Chrome 4개), 웹소켓 URL 안 모으기(Chrome 3개), 워밍업 뒤 본 URL 안 비우기(Chrome 2개), 서비스 워커 막기를 실패 억제 목록에 섞기(1개), 서비스 워커 기록 빼기(2개), 낯선 메서드로 막은 허용 출처 주소를 실패 억제에 넣기(1개). 마지막 두 결함의 시험은 고치기 전 코드에서 `expected [] to include '500 …/api-fail'`로 실패했다.
 - 로드 시간(`loadMs`, 같은 페이지 12회 중앙값, 이미지 40개와 스크립트가 든 로컬 페이지, 워밍업 뒤 두 번째 이동): 프록시·라우트 없음 12ms, 라우트만(옛 동작) 22ms, 프록시만 16ms, 라우트와 프록시 28ms. 프록시가 요청마다 더하는 것은 라우트만 있을 때보다 약 6ms(리소스 42개)다. `runInBrowser` 호출 전체 시간은 허용 출처 없음 746ms, 있음 797ms(중앙값 12회, 프록시 시작·라우트·서비스 워커 차단을 모두 합친 값이라 프록시만의 비용은 아니다). 한 기계에서 한 번 잰 값이다.
 
 - 실제 세션(2026-11-14, 이 브랜치의 studio, 실제 Claude Code, A5c-2 실측의 `nx` 프로젝트(Next.js 16.4.3 `next dev`)를 브라우저 모드 자동 화면 확인으로)에서 두 갈래를 봤다.

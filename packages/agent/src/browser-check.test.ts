@@ -580,6 +580,20 @@ describe('출처 제한은 네트워크 층에서도 막는다 (#1210)', { timeo
           return html(
             `<script>ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, '/sw-probe.js').then(() => navigator.serviceWorker.ready).then(() => new Promise((resolve) => { const t = setInterval(() => { if (navigator.serviceWorker.controller) { clearInterval(t); resolve(); } }, 50); })).then(() => fetch('/swprobe')).then((r) => r.text()).then((t) => { ${done("'sw:' + t")} }).catch((e) => { ${done("'sw-err:' + e")} });</script>`,
           );
+        case '/sw-hide':
+          // 서비스 워커 스크립트로 막힌 허용 출처 주소가 그 주소의 진짜 요청 실패를 가리면 안 된다
+          return html(
+            `<script>ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, '/api-fail').catch(() => {}).then(() => fetch('/api-fail')).then((r) => { ${done("'status:' + r.status")} }).catch((e) => { ${done("'err:' + e")} });</script>`,
+          );
+        case '/method-hide':
+          // 낯선 메서드라 프록시가 막은 허용 출처 주소가 그 주소의 진짜 요청 실패를 가리면 안 된다
+          return html(
+            `<script>fetch('/api-fail', { method: 'PROPFIND' }).catch(() => {}).then(() => fetch('/api-fail')).then((r) => { ${done("'status:' + r.status")} }).catch((e) => { ${done("'err:' + e")} });</script>`,
+          );
+        case '/api-fail':
+          response.writeHead(500, { 'content-type': 'text/plain' });
+          response.end('boom');
+          return;
         case '/sw-probe.js':
           response.writeHead(200, { 'content-type': 'text/javascript' });
           response.end(
@@ -668,6 +682,23 @@ describe('출처 제한은 네트워크 층에서도 막는다 (#1210)', { timeo
     expect(allowed.requests.some((entry) => entry.includes('/sw-probe.js'))).toBe(false);
     expect(outside.requests).toEqual([]);
     expect(outside.connections).toBe(0);
+    expect(result.blockedRequests).toContain(`SERVICE-WORKER ${allowed.base}/sw-probe.js`);
+  });
+
+  it('서비스 워커 스크립트로 막은 허용 출처 주소는 그 주소의 실패 기록을 지우지 않고, 막은 기록에 따로 남는다', async () => {
+    reset(allowed);
+    const result = await runInBrowser(`${allowed.base}/sw-hide`, { allowedOrigins: [allowed.base], steps: DONE });
+    expect(firstLine(result.text)).toBe('status:500');
+    expect(result.failedRequests).toContain(`500 ${allowed.base}/api-fail`);
+    expect(result.blockedRequests).toContain(`SERVICE-WORKER ${allowed.base}/api-fail`);
+  });
+
+  it('낯선 메서드라 막은 허용 출처 주소도 그 주소의 실패를 가리지 않는다 (막은 요청 자체가 실패로 남는다)', async () => {
+    reset(allowed);
+    const result = await runInBrowser(`${allowed.base}/method-hide`, { allowedOrigins: [allowed.base], steps: DONE });
+    expect(firstLine(result.text)).toBe('status:500');
+    expect(result.failedRequests.some((entry) => entry.endsWith(`${allowed.base}/api-fail`))).toBe(true);
+    expect(result.blockedRequests).toContain(`${allowed.base}/api-fail`);
   });
 
   it('허용 출처의 웹소켓은 동작한다 (개발 서버의 HMR 연결)', async () => {

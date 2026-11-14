@@ -21,7 +21,15 @@ import { connect as netConnect, type AddressInfo, type Socket } from 'node:net';
  * 본다(`net::ERR_EMPTY_RESPONSE`, 문서 이동이면 이동이 오류로 끝난다. 기존 `blockedbyclient`와 같은 결과다).
  */
 
-export type OriginProxyBlock = { readonly kind: 'url'; readonly url: string } | { readonly kind: 'tunnel'; readonly hostPort: string };
+/**
+ * 막은 것의 종류. `url`·`tunnel`은 허용 출처 밖이거나 모르는 모양이라 막은 것이고, `serviceWorker`는 허용 출처 안이라도
+ * 서비스 워커 스크립트라 막은 것이다. `serviceWorker`의 URL은 허용 출처 안의 주소일 수 있으므로, 부르는 쪽은 이것을
+ * "경계 밖이라 막은 요청"(실패 기록에서 빼는 목록)과 섞으면 안 된다. 섞으면 같은 주소의 진짜 요청 실패가 가려진다
+ */
+export type OriginProxyBlock =
+  | { readonly kind: 'url'; readonly url: string }
+  | { readonly kind: 'tunnel'; readonly hostPort: string }
+  | { readonly kind: 'serviceWorker'; readonly url: string };
 
 export interface OriginProxy {
   /** 브라우저의 `--proxy-server`에 넘길 주소(`http://127.0.0.1:포트`) */
@@ -94,6 +102,12 @@ export async function startOriginProxy({ isAllowed, onBlocked }: OriginProxyOpti
       blockUrl(target, clientRequest.socket);
       return;
     }
+    // 서비스 워커 스크립트(위 설명)는 허용 출처라도 막는다. 둘 중 하나만 있어도 막고, 다른 막기와 구분해 알린다
+    if (clientRequest.headers['service-worker'] !== undefined || clientRequest.headers['sec-fetch-dest']?.toLowerCase() === 'serviceworker') {
+      onBlocked({ kind: 'serviceWorker', url: target });
+      clientRequest.socket.destroy();
+      return;
+    }
     const hostHeader = clientRequest.headers.host;
     const hostHeaders = clientRequest.rawHeaders.filter((value, index) => index % 2 === 0 && value.toLowerCase() === 'host');
     if (
@@ -102,9 +116,6 @@ export async function startOriginProxy({ isAllowed, onBlocked }: OriginProxyOpti
       parsed.password !== '' ||
       !FORWARDED_METHODS.has(method) ||
       clientRequest.headers.upgrade !== undefined ||
-      // 서비스 워커 스크립트(위 설명). 둘 중 하나만 있어도 막는다
-      clientRequest.headers['service-worker'] !== undefined ||
-      clientRequest.headers['sec-fetch-dest']?.toLowerCase() === 'serviceworker' ||
       // 절대 형식 URL과 Host 머리가 다르면 어느 쪽이 진짜 목적지인지 알 수 없다
       hostHeaders.length !== 1 ||
       hostHeader?.toLowerCase() !== parsed.host ||
