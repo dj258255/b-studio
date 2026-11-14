@@ -221,6 +221,7 @@
 - [197. 호환 깨짐을 막은 안내가 '요청에 삭제·변경이 명시되지 않았다'고 말해, 삭제를 분명히 요청한 터미널 세션에서 틀린 안내가 됨 — 허용 표시가 없었다고 말한다](#197-호환-깨짐을-막은-안내가-요청에-삭제변경이-명시되지-않았다고-말해-삭제를-분명히-요청한-터미널-세션에서-틀린-안내가-됨--허용-표시가-없었다고-말한다)
 - [198. 실패 안내 글이 본문에 있던 사설 영역 글자(U+E000~U+E01F)를 짝 없는 서로게이트 이스케이프로 다시 읽게 만들었음 — Rust가 만든 글자도 경계의 꼴로 인코딩한다](#198-실패-안내-글이-본문에-있던-사설-영역-글자ue000ue01f를-짝-없는-서로게이트-이스케이프로-다시-읽게-만들었음--rust가-만든-글자도-경계의-꼴로-인코딩한다)
 - [199. HTTP 모드 자동 화면 확인이 Next.js 16의 정상 화면을 오류 화면으로 판정했음 — 화면 글자에서 표지를 찾고, 스트리밍 도중의 서버 오류는 digest 신호로 잡는다](#199-http-모드-자동-화면-확인이-nextjs-16의-정상-화면을-오류-화면으로-판정했음--화면-글자에서-표지를-찾고-스트리밍-도중의-서버-오류는-digest-신호로-잡는다)
+- [200. 화면 확인 브라우저의 출처 제한을 허용 출처의 리다이렉트와 서비스 워커로 넘을 수 있었음 — 브라우저를 로컬 전달 프록시 뒤에서 띄우고 프록시가 접속 주소를 검사한다](#200-화면-확인-브라우저의-출처-제한을-허용-출처의-리다이렉트와-서비스-워커로-넘을-수-있었음--브라우저를-로컬-전달-프록시-뒤에서-띄우고-프록시가-접속-주소를-검사한다)
 
 ---
 
@@ -6287,3 +6288,54 @@ Next.js 16 프로젝트에서 HTTP 모드 자동 화면 확인을 쓸 수 없었
   - 고치기 전에 세 번 실패하던 요청("`Price.tsx`에서 원 앞에 공백 하나")이 첫 시도에 통과했다. `/orders/1 (자동, id 추정 · Price.tsx 변경)`의 근거는 `HTTP 200 — 추정한 id(1)로 열어 404·500만 실패로 봤습니다`, `Next.js 오류 화면 표지 없음`이었다
   - page에 Suspense 안에서 던지는 서버 컴포넌트를 넣게 하자, HTTP 200인데도 `Next.js 오류 화면: 서버 렌더링이 도중에 실패했습니다(digest '1439402313')`로 세 번 막히고 되돌려졌다
 - 보지 못한 것: Next.js 15 이하, Pages Router, `forbidden()`·`unauthorized()`의 실제 응답은 받아 보지 않았다(시험에는 합성 글자 하나만 있다). 걷어내기(`strip_html`)는 `<script`로 시작하는 다른 이름의 요소(`<script-x>`)도 함께 걷어낸다. Next.js가 오류 화면에 그런 요소를 쓰는 경우는 보지 못했다.
+
+## 200. 화면 확인 브라우저의 출처 제한을 허용 출처의 리다이렉트와 서비스 워커로 넘을 수 있었음 — 브라우저를 로컬 전달 프록시 뒤에서 띄우고 프록시가 접속 주소를 검사한다
+
+- 날짜: 2026-11-14, 이슈 #1210
+- 실행 경로: 로컬 CLI(claude-code) + 로컬 Docker. 게이트의 화면 확인(`runInBrowser`)은 모든 경로가 함께 쓴다
+
+### 증상
+
+`runInBrowser(A, { allowedOrigins: [A] })`로 연 페이지가 허용 밖 출처 B에 닿았다(A, B는 127.0.0.1의 다른 포트).
+
+- A가 `302 Location: B/redirected`를 돌려주면 B의 서버가 `GET /redirected`를 받았고 페이지가 본문을 읽었다. 문서 이동이 리다이렉트되면 B의 화면 글자가 게이트 결과(`text`)로 돌아왔다.
+- 페이지가 `ServiceWorkerContainer.prototype.register.call(navigator.serviceWorker, '/sw.js')`로 서비스 워커를 등록하면, 그 워커의 `fetch(B)`가 B에 닿았다.
+
+### 원인
+
+출처 제한이 Playwright의 `page.route('**/*')`와 `serviceWorkers: 'block'` 두 가지뿐이었다.
+
+- Playwright는 `redirectedFrom`이 있는 요청을 라우트 처리기 없이 `Fetch.continueRequest`로 자동 통과시킨다. 리다이렉트의 둘째 홉부터는 판정 함수(`isAllowedRequest`)가 불리지 않는다. 판정 결함이 아니라 판정이 불리지 않는 자리였다.
+- `'block'`은 `navigator.serviceWorker.register`를 바꿔치는 init 스크립트일 뿐이라 prototype으로 부르면 우회된다. 서비스 워커의 fetch는 페이지의 라우트를 거치지 않는다.
+
+둘 다 "브라우저가 낸 요청마다 앱이 판정을 부른다"는 가정이 틀린 자리다. 접속은 브라우저가 하고 확인은 라우트가 하니, 확인하는 쪽과 접속하는 쪽이 다른 계층이었다.
+
+### 영향
+
+화면 확인 브라우저는 호스트에서 돈다. 모델이 만든 서비스가 리다이렉트나 서비스 워커를 써서 호스트의 다른 로컬 주소(다른 서비스, 사설망)로 요청을 보내고, 응답 글자를 게이트 결과로 돌려받을 수 있었다. 직접 요청, 허용 밖 iframe 이동, 전용 워커의 직접 fetch는 라우트가 막고 있었다.
+
+### 고침
+
+허용 출처가 주어진 `runInBrowser`는 `startOriginProxy`(`packages/agent/src/origin-proxy.ts`)가 연 로컬 전달 프록시 뒤에서 브라우저를 띄운다. 라우트와 서비스 워커 init 스크립트는 첫 층으로 그대로 두고(평소의 차단은 `blockedbyclient`와 `blockedRequests`로 그대로 난다), 프록시가 둘째 층이다. 브라우저의 모든 네트워크(리다이렉트 홉, 서비스 워커, 워커, 미리 연결)가 한 자리에서 판정된다. 판정 규칙과 선택지는 ADR-198.
+
+- Chromium은 기본으로 loopback을 프록시 없이 보낸다. `--proxy-bypass-list=<-loopback>`을 직접 넣는다(Playwright가 스스로 붙이지만 `PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK`이 켜져 있으면 붙이지 않고, 그러면 요청이 프록시를 우회한다).
+- WebRTC의 UDP는 HTTP 프록시를 지나지 않는다. `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`와 `--webrtc-ip-handling-policy=disable_non_proxied_udp`를 함께 넣는다. Playwright의 headless shell은 앞의 이름만, 시스템 Google Chrome은 뒤의 이름만 따른다.
+- 서비스 워커 스크립트 요청(`Service-Worker: script` 머리나 `Sec-Fetch-Dest: serviceworker`)은 허용 출처라도 프록시가 막는다. prototype으로 우회한 등록도 스크립트를 받지 못해 설치되지 않는다.
+- 프록시는 브라우저가 스스로 내는 배경 요청(Google Chrome의 시간 동기화·로그인 확인 등)도 막는다. 이것은 앱의 요청이 아니므로 `blockedRequests`에는 페이지 쪽이 보낸 요청(컨텍스트의 `request`, 페이지의 `websocket`으로 본 URL)만 남긴다. 막는 것은 그대로이고 기록만 거른다.
+- 프록시를 세우지 못하면 프록시 없이 브라우저를 띄우지 않고 `BrowserUnavailableError`를 던진다(기존 "브라우저 없음" 처리와 같다).
+
+### 확인
+
+(시험·변이·측정은 ADR-198의 검증 절)
+
+- 시험: `browser-check.test.ts` "출처 제한은 네트워크 층에서도 막는다 (#1210)"(실제 Chromium, 허용 밖 서버의 요청 기록과 접속 수로 확인), `origin-proxy.test.ts`, `browser-check-fail-closed.test.ts`. 고치기 전 코드에서 열 개 중 여덟 개가 실패했다(허용 밖 서버가 `GET /pixel.png`·`GET /frame`을 받았고, 문서 이동은 `outside-secret`을 글자로 돌려줬고, 서비스 워커는 `sw:reached:200`이었다). 허용 출처의 웹소켓과 평범한 화면 두 개는 고치기 전에도 통과해 회귀 시험으로 남았다.
+- 실제 세션(2026-11-14, 이 브랜치의 studio, 실제 Claude Code, A5c-2 실측의 `nx` 프로젝트(Next.js 16.4.3 `next dev`)를 브라우저 모드 자동 화면 확인으로)에서 두 갈래를 봤다.
+  - 통과: `Price.tsx`만 바꾸자 `/orders/1 (자동, id 추정 · Price.tsx 변경)`이 `스크립트 예외 0건 · console.error 0건 · 실패한 요청 0건 · 미디어 오류 0건`으로 통과했다. 개발 서버의 HMR 웹소켓이 프록시를 지나서도 깨지지 않았다(깨지면 콘솔 오류로 실패한다)
+  - 막힘: 허용 밖 주소(호스트의 `127.0.0.1:39871`, 요청을 파일에 적는 작은 서버)로 302를 주는 route와 그것을 `<img>`로 여는 page를 만들게 하자, detail에 `다른 출처 요청 1건을 막았습니다`가 남았고 그 서버의 요청 기록은 0줄이었다. 이미지가 뜨지 않아 미디어 오류로 세 번 실패하고 되돌려졌다
+- 처음 낸 고침은 headless shell에서만 쟀고, CI(Linux)에서 실패했다. CI에는 headless shell이 설치돼 있지 않아 `launchBrowser`가 시스템 Google Chrome(`channel: 'chrome'`)으로 넘어갔기 때문이다. 이 기기의 Google Chrome으로 같은 실패를 재현했고, 결함 셋을 고쳤다.
+  - Google Chrome의 배경 요청(`clients2.google.com/time`, `CONNECT www.gstatic.com:443`·`accounts.google.com:443`·`www.google.com:443`)이 막혀 `blockedRequests`에 섞였다(시험 9개 실패).
+  - `--force-webrtc-ip-handling-policy`만으로는 Google Chrome에서 STUN 패킷이 127.0.0.1의 UDP 서버에 닿았다. 인자별 실측: headless shell은 `--force-…`만 있을 때 0개, `--webrtc-…`만 있을 때 5개. Google Chrome은 그 반대였고, 둘 다 있으면 두 브라우저 모두 0개였다.
+  - 서비스 워커 요청은 Playwright가 보지 못해(`serviceWorkers: 'block'`에서는 워커에 붙지 않는다) 기록을 거르자 빠졌다. 그래서 서비스 워커가 설치되지 못하게 스크립트 요청을 막았다.
+  - 고친 뒤 browser-check·origin-proxy 시험 61개가 headless shell과 Google Chrome 양쪽에서 통과한다.
+- 그 고침을 독립 보안 검토에 맡겼다. 서비스 워커 스크립트로 막은 **허용 출처 안의 주소**가 실패 억제 목록(`blockedUrls`)에 들어가, 같은 주소의 진짜 요청 실패(500)가 `failedRequests`에서 가려진다는 지적이 나왔다. 같은 시험을 기존 막기에 돌려 보니, 표준 밖 메서드(`fetch(주소, {method: 'PROPFIND'})`)로 막힌 허용 출처 주소도 같았다. 둘 다 시험으로 재현했고(`expected [] to include '500 …/api-fail'`), 허용 출처 안을 막은 것은 실패 억제에 넣지 않고 기록에만 남기게 고쳤다. 시험 63개가 두 브라우저에서 통과한다.
+- 같은 모양의 다른 자리: 실험 기능인 원격 브라우저(`remote-browser.ts`)와 탐색 QA(`explore-qa.ts`)는 같은 `restrictPageToOrigins`를 쓰지만 프록시를 쓰지 않아 이 구멍이 그대로 있다. 실험 경로만을 위한 수정은 하지 않았다.
