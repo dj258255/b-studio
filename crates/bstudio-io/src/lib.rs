@@ -26,4 +26,5 @@ pub mod stream_exec;
 pub mod streaming;
 pub mod sync_relay;
 pub mod up_loop;
+pub mod verify_io;
 pub mod workspace_io;
