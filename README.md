@@ -226,7 +226,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 |---|---|
 | 지금 어디까지 왔는가 | [구현 상태와 일정](docs/status.md) — 영역별 완료 상태, [로드맵](ROADMAP.md) — 마일스톤별 완료 조건·예상과 실제 |
 | 무엇을 만들기로 했는가 | GitHub Issue(배경·선택지·완료 조건) |
-| 무엇을 바꿨는가 · 왜 그렇게 골랐는가 | GitHub PR 본문과 [설계 결정 기록(ADR)](docs/decisions.md) |
+| 무엇을 바꿨는가 · 왜 그렇게 골랐는가 | GitHub PR 본문과 [설계 결정 기록(ADR)](docs/decisions.md). 길잡이는 [ADR 지도](docs/adr-map.md) |
 | 실제로 무엇을 확인했는가 | [검증 기록](docs/verification.md), [실험 기록](docs/experiments/README.md) |
 | 사용자에게 무엇이 나갔는가 | [변경 기록](CHANGELOG.md) |
 | 무엇이 아직 열려 있는가 | [트러블슈팅](docs/troubleshooting.md), [검증 기록의 알려진 한계](docs/verification.md#알려진-한계) |
@@ -245,7 +245,11 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 
 ## 문서
 
+처음 보는 분은 [핵심 결정 요약](docs/key-decisions.md)부터 읽습니다. ADR 199개의 길잡이는 [ADR 지도](docs/adr-map.md)에 있습니다.
+
 - [문서 안내](docs/README.md)
+- [핵심 결정 요약](docs/key-decisions.md)
+- [ADR 지도](docs/adr-map.md)
 - [로드맵](ROADMAP.md)
 - [변경 기록](CHANGELOG.md)
 - [구현 상태와 일정](docs/status.md)
