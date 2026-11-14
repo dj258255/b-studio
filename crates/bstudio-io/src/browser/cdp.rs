@@ -12,6 +12,9 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::AbortHandle;
 
+/// 틀 하나의 크기 상한. 읽기 전에 본다: 넘으면 더 모으지 않고 연결을 오류로 닫는다(페이지가 거대한 console 글을 남겨 호스트 메모리를 쓰지 못하게)
+pub const MAX_FRAME_BYTES: usize = 256 * 1024 * 1024;
+
 /// NUL로 끝나는 틀을 잘라 낸다. 조각 경계가 틀 가운데에 와도, 한 조각에 틀이 여럿이어도 된다
 #[derive(Default)]
 pub struct FrameSplitter {
@@ -86,9 +89,24 @@ impl Cdp {
     /// `on_close`는 연결이 끊기면 한 번 불린다(이유 포함). 끊기면 기다리던 명령은 모두 오류로 끝난다
     pub fn start<R, W>(
         reader: R,
+        writer: W,
+        mut on_event: impl FnMut(Event) + Send + 'static,
+        on_close: impl FnOnce(String) + Send + 'static,
+    ) -> Self
+    where
+        R: AsyncRead + Unpin + Send + 'static,
+        W: AsyncWrite + Unpin + Send + 'static,
+    {
+        Self::start_with_limit(reader, writer, on_event, on_close, MAX_FRAME_BYTES)
+    }
+
+    /// `start`와 같고 틀 크기 상한을 정한다(시험이 작은 상한으로 확인한다)
+    pub fn start_with_limit<R, W>(
+        reader: R,
         mut writer: W,
         mut on_event: impl FnMut(Event) + Send + 'static,
         on_close: impl FnOnce(String) + Send + 'static,
+        max_frame_bytes: usize,
     ) -> Self
     where
         R: AsyncRead + Unpin + Send + 'static,
@@ -135,6 +153,10 @@ impl Cdp {
                         Ok(read) => read,
                         Err(error) => break format!("브라우저 연결을 읽지 못했습니다: {error}"),
                     };
+                    // 상한은 모으기 전에 본다(이 조각을 붙이면 아직 NUL이 없는 틀이 상한을 넘는가)
+                    if splitter.pending() + read > max_frame_bytes && !chunk[..read].contains(&0) {
+                        break format!("브라우저가 {max_frame_bytes}바이트를 넘는 틀을 보냈습니다");
+                    }
                     let mut failed = None;
                     for frame in splitter.push(&chunk[..read]) {
                         match serde_json::from_slice::<Value>(&frame) {
@@ -356,6 +378,27 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert!(reason.lock().unwrap().as_deref().unwrap().contains("잘렸"));
+    }
+
+    #[tokio::test]
+    async fn a_frame_over_the_limit_closes_the_connection_instead_of_growing_without_bound() {
+        let (client, mut server) = duplex(1 << 20);
+        let (reader, writer) = tokio::io::split(client);
+        let reason = Arc::new(Mutex::new(None::<String>));
+        let cdp = Cdp::start_with_limit(reader, writer, |_| {}, {
+            let reason = reason.clone();
+            move |why| *reason.lock().unwrap() = Some(why)
+        }, 1000);
+        // NUL 없이 상한을 넘게 보낸다
+        server.write_all(&vec![b'x'; 2000]).await.unwrap();
+        for _ in 0..100 {
+            if reason.lock().unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(reason.lock().unwrap().as_deref().unwrap_or("").contains("넘는 틀"));
+        assert!(cdp.is_closed());
     }
 
     #[tokio::test]

@@ -220,6 +220,7 @@
 - [ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다](#adr-196-보호-경로의-되돌림은-이-실행에서-처음-쓰기-직전에-고정한-내용과-바이트까지-같을-때만-인정한다)
 - [ADR-197 spec의 YAML 읽기는 Rust가 하고, JS와 다르게 읽을 수 있는 꼴은 읽지 않고 거절한다](#adr-197-spec의-YAML-읽기는-Rust가-하고-JS와-다르게-읽을-수-있는-꼴은-읽지-않고-거절한다)
 - [ADR-198 화면 확인 브라우저의 출처 제한은 라우트에 더해 로컬 전달 프록시가 접속 주소를 검사한다](#adr-198-화면-확인-브라우저의-출처-제한은-라우트에-더해-로컬-전달-프록시가-접속-주소를-검사한다)
+- [ADR-199 화면 확인 러너를 Rust CDP로 옮긴다: 파이프로 Chromium을 직접 말하고, 출처 제한 두 층은 같은 판정으로 옮긴다](#adr-199-화면-확인-러너를-rust-cdp로-옮긴다-파이프로-chromium을-직접-말하고-출처-제한-두-층은-같은-판정으로-옮긴다)
 
 ---
 
@@ -10488,6 +10489,11 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **변이 시험**: Rust 분기 52곳을 하나씩 깨 봤다(가림 확인 호출 빼기, 확인 못 한 가림을 받아들이기, 겹침 결과 무시, `kept` 되살리기 빼기·되살린 화면 id·시작 값으로 다시 만들기 빼기, 겹침 예외 빼기·`kept` 건너뜀 빼기·서비스 이름 무시, `SAFE_SEGMENT` 넓히기 넷(`.`·65자·빈 글자·유니코드 글자)·받는 쪽 조건 넓히기 둘, 관리형 서비스 확인 빼기, probe 꺼짐 무시, 건너뜀 check 빼기 여섯 갈래·import 안내·깊이 안내·상한 안내 빼기, `sampleIdFrom` 비교를 키 순서 무시로, api 값 안전성·출처·상태 범위, 되돌릴 때 키·시작 값·sampleIdFrom 복원 빼기, 이름 표시·`sampled` 빼기, 서비스 경로 모양·followImports 끔 무시·서비스 밖 파일, 알아볼 수 없는 응답을 통과 쪽으로 읽기 등). 모두 시험이 잡았다. 처음 하나(서비스 폴더 밖 소스 파일을 서비스 안으로 세는 변이)는 시험이 소스 파일을 하나도 쓰지 않아 못 잡아 시나리오를 보강했다. 정수 키 순서를 넣은 순서로 읽는 변이는 같은 동작이다(키 목록이 TS에서 이미 JS 순서로 오고, 순서가 결과에 영향을 주는 자리가 없다). 알아볼 수 없는 응답 둘(`autoLatest`의 알 수 없는 상태, `autoShadows`의 알 수 없는 응답)은 차등 시험이 만들 수 없는 자리라 Rust 단위 시험이 잡는다.
 - 실측(2026-11-14, [기록](experiments/2026-11-14-a5c2-auto-pages.md)): 실제 Claude Code 세션과 Next.js 16.4.3 프로젝트에서 봤다. 바뀐 컴포넌트에서 import를 따라가 `/`(선언과 겹쳐 건너뜀)와 `/orders/[id]`(기본 id `1`, 이름 `(자동, id 추정 · Price.tsx 변경)`)를 골랐고, 브라우저 모드로 통과했다. page가 예외를 던지게 바꾸자 HTTP 500 실패 세 번 뒤 소진·되돌리기가 났다. HTTP 모드에서는 정상 page를 Next.js 오류 화면으로 판정하는 기존 결함을 찾아 따로 적었다([#1207](https://github.com/dj258255/b-studio/issues/1207)). Next 16이 정상 응답에도 기본 404 컴포넌트를 RSC 페이로드로 싣는데, HTTP 모드는 원본 HTML로 표지를 찾기 때문이다. 이 조각 전부터 같은 판정이다.
 - 돌리지 않은 검증: 실행 중 표본 값·가림 확인·밀려난 화면 되살리기·import 상한·그래프 실패는 실제 세션에서 재지 않았다(차등 시험으로만). 다른 러너 다섯 개는 타입 검사로만 확인했고, Kubernetes 제공자는 구현하지 않았다. 실험 경로는 확인하지 않았다.
+
+### 덧붙임: A6a 결과 — 화면 확인 러너(`runInBrowser`)의 Rust CDP 구현, 단계 없는 확인만 ([#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-199)
+
+- 옮긴 것(`crates/bstudio-io/src/browser/`, napi `runBrowserCheck`, TS 껍데기 `packages/agent/src/browser-check-native.ts`의 `runInBrowserNative`): Chromium 실행(`--remote-debugging-pipe`, Playwright와 같은 인자, 임시 프로필 폴더), 컨텍스트·페이지·이동(`page.goto` 의미), networkidle(Playwright의 프레임·타이머 규칙을 옮김), `pageErrors`·`consoleErrors`·`failedRequests`·`mediaErrors`, 출처 제한 두 층(CDP `Fetch` 요청 가로채기 + 로컬 전달 프록시의 Rust 이전)과 서비스 워커 막기, 글자·가로 넘침·`viewportTexts`·`loadMs`, 중단 신호. 게이트의 기본 `browserRunner`는 그대로 `runInBrowser`다(A6c에서 바꾼다). `steps`·`capture`·`onFrame`이 오면 조용히 무시하지 않고 `BrowserUnavailableError`가 아닌 오류로 던진다.
+- 자세한 내용·검증·남은 한계는 ADR-199.
 
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 

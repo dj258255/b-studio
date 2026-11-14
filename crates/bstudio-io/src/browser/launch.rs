@@ -114,6 +114,13 @@ impl ProfileDir {
     }
 }
 
+impl Drop for ProfileDir {
+    /// 취소로 작업이 버려져도 이 러너가 만든 폴더는 남지 않게 한다. 명시적으로 지운 뒤에는 없는 폴더라 아무 일도 하지 않는다
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
+}
+
 #[cfg(unix)]
 fn create_private_dir(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::DirBuilderExt;

@@ -761,22 +761,34 @@ struct Session {
     profile: ProfileDir,
 }
 
+/// 프록시 뒤에서 띄울 때의 실행 인자. loopback도 프록시를 지나게 한다(허용 출처가 바로 loopback이다. 빠지면 Chromium이 loopback을 프록시 없이 보내 프록시가 아무것도 보지 못한다).
+/// WebRTC의 UDP는 HTTP 프록시를 지나지 않아 막는다. 인자 이름은 둘 다 넣는다: headless shell은 `--force-webrtc-ip-handling-policy`만,
+/// 시스템 Google Chrome은 `--webrtc-ip-handling-policy`만 따른다(ADR-198 결정 7)
+fn proxy_launch_args(server: &str) -> Vec<String> {
+    vec![
+        format!("--proxy-server={server}"),
+        "--proxy-bypass-list=<-loopback>".to_owned(),
+        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
+        "--webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
+    ]
+}
+
+/// `Target.createBrowserContext`의 매개변수. 프록시를 쓰면 컨텍스트도 같은 프록시와 `<-loopback>`으로 만든다
+fn context_params(proxy_server: Option<&str>) -> Value {
+    let mut params = json!({ "disposeOnDetach": true });
+    if let Some(server) = proxy_server {
+        params["proxyServer"] = json!(server);
+        params["proxyBypassList"] = json!("<-loopback>");
+    }
+    params
+}
+
 async fn launch_one(shared: &Arc<Shared>, executable: &str, proxy_server: Option<&str>) -> Result<Session, String> {
     if !Path::new(executable).is_file() {
         return Err(format!("browserType.launch: Executable doesn't exist at {executable}"));
     }
     let profile = ProfileDir::create().map_err(|error| format!("browserType.launch: 임시 프로필 폴더를 만들 수 없습니다: {error}"))?;
-    let mut args = Vec::new();
-    if let Some(server) = proxy_server {
-        // loopback도 프록시를 지나게 한다(허용 출처가 바로 loopback이다). WebRTC의 UDP는 HTTP 프록시를 지나지 않아 막는다. 인자 이름은 둘 다 넣는다:
-        // headless shell은 `--force-webrtc-ip-handling-policy`만, 시스템 Google Chrome은 `--webrtc-ip-handling-policy`만 따른다(ADR-198 결정 7)
-        args.extend([
-            format!("--proxy-server={server}"),
-            "--proxy-bypass-list=<-loopback>".to_owned(),
-            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
-            "--webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
-        ]);
-    }
+    let args = proxy_server.map(proxy_launch_args).unwrap_or_default();
     #[cfg(unix)]
     {
         let (mut process, pipes) = match super::launch::spawn(Path::new(executable), &args, profile.path()) {
@@ -844,12 +856,7 @@ async fn drive(shared: &Arc<Shared>, input: &BrowserRunInput, session: &Session,
         async move { cdp.send(None, method, params).await.map_err(|error| RunError::Failed(format!("{method}: {error}"))) }
     };
     browser("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true })).await?;
-    let mut context_params = json!({ "disposeOnDetach": true });
-    if let Some(server) = proxy_server {
-        context_params["proxyServer"] = json!(server);
-        context_params["proxyBypassList"] = json!("<-loopback>");
-    }
-    let context = browser("Target.createBrowserContext", context_params).await?;
+    let context = browser("Target.createBrowserContext", context_params(proxy_server)).await?;
     let context_id = str_at(&context, "/browserContextId").unwrap_or_default().to_owned();
     let downloads = session.profile.path().join("downloads");
     browser("Browser.setDownloadBehavior", json!({ "behavior": "allowAndName", "browserContextId": context_id, "downloadPath": downloads.display().to_string(), "eventsEnabled": true })).await?;
@@ -1226,6 +1233,25 @@ mod tests {
         // 페이지 쪽이 보낸 요청의 URL: 파비콘과 알 수 없는 프레임의 요청은 없다
         assert!(state.seen_urls.contains("http://h/a.js") && state.seen_urls.contains("http://h/final") && state.seen_urls.contains("http://h/redir"));
         assert!(!state.seen_urls.contains("http://h/favicon.ico") && !state.seen_urls.contains("http://h/orphan"));
+    }
+
+    #[test]
+    fn a_proxied_browser_gets_loopback_through_the_proxy_and_both_webrtc_policy_names() {
+        let args = proxy_launch_args("http://127.0.0.1:4000");
+        assert_eq!(
+            args,
+            vec![
+                "--proxy-server=http://127.0.0.1:4000".to_owned(),
+                "--proxy-bypass-list=<-loopback>".to_owned(),
+                "--force-webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
+                "--webrtc-ip-handling-policy=disable_non_proxied_udp".to_owned(),
+            ]
+        );
+        let proxied = context_params(Some("http://127.0.0.1:4000"));
+        assert_eq!(proxied["proxyServer"], "http://127.0.0.1:4000");
+        assert_eq!(proxied["proxyBypassList"], "<-loopback>");
+        // 프록시를 쓰지 않으면 컨텍스트에 프록시 설정이 없다
+        assert_eq!(context_params(None), json!({ "disposeOnDetach": true }));
     }
 
     #[tokio::test]
