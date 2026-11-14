@@ -884,6 +884,18 @@ async fn evaluate(shared: &Arc<Shared>, session: &str, expression: &str) -> Resu
     Err(evaluate_error(last))
 }
 
+/// 브라우저 오류 화면에서 측정 식 대신 돌려주는 값의 표시
+const BROWSER_ERROR_PAGE_MARK: &str = "__bStudioBrowserErrorPage";
+
+/// 측정 식을 감싼다: 지금 문서가 브라우저 오류 화면(`chrome-error:`)이면 식을 돌리지 않고 표시만 돌려준다. 확인과 측정이 한 평가 안이라 그 사이에 문서가 바뀌지 않는다
+fn guard_browser_error_page(expression: &str) -> String {
+    format!("(location.protocol === 'chrome-error:' ? {{ {BROWSER_ERROR_PAGE_MARK}: true }} : ({expression}))")
+}
+
+fn is_browser_error_page(value: &Value) -> bool {
+    value.get(BROWSER_ERROR_PAGE_MARK).and_then(Value::as_bool) == Some(true)
+}
+
 /// 빈 문서에서 `VIEWPORT_MEASURE_SCRIPT`가 내는 값: 글자마다 "화면에 없음"
 fn empty_document_viewport_report(viewport: (u32, u32), texts: &[String]) -> String {
     let findings: Vec<Value> = texts.iter().map(|text| json!({ "text": text, "visible": false, "problem": { "kind": "absent" } })).collect();
@@ -1054,20 +1066,16 @@ async fn drive(shared: &Arc<Shared>, input: &BrowserRunInput, session: &Session,
 
     // 브라우저가 만든 오류 화면(`chrome-error://`, 막힌 이동 뒤 등)은 빈 문서로 읽는다. 옛 러너(Playwright의 기본 실행 환경)는 이 문서를 비어 있는 것으로 읽었다
     // (실측: `body`가 비어 있다. 같은 브라우저에서 CDP로 직접 읽으면 오류 문구가 보인다). 오류 문구에는 페이지가 고른 호스트 이름이 들어가므로
-    // (`주문완료.test이(가) 차단됨`) 그것을 화면 글자로 읽으면 `expectText`를 통과시킬 길이 된다. 글자·가로 넘침·보임을 읽지 않고 빈 문서의 값으로 채운다
-    let browser_error_page = {
-        let mut state = shared.state.lock().unwrap();
-        let main = state.frames().main_frame_id().map(str::to_owned);
-        main.and_then(|id| state.frames().frame_url(&id).map(|url| url.starts_with("chrome-error://"))).unwrap_or(false)
-    };
-    let measured = if browser_error_page {
-        json!({ "text": "", "overflow": 0 })
-    } else {
-        evaluate(shared, &page, "({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })").await?
-    };
+    // (`주문완료.test이(가) 차단됨`) 그것을 화면 글자로 읽으면 `expectText`를 통과시킬 길이 된다. 글자·가로 넘침·보임을 읽지 않고 빈 문서의 값으로 채운다.
+    // 오류 화면인지는 측정하는 평가 안에서 본다(`guard_browser_error_page`). 평가 전에 따로 보면, 그 사이에 페이지가 막힌 곳으로 이동해 다시 만든 실행 환경이
+    // 오류 화면을 읽을 수 있다. 격리된 실행 환경의 `location`은 페이지가 바꿀 수 없다
+    let measured = evaluate(shared, &page, &guard_browser_error_page("({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })")).await?;
+    let measured = if is_browser_error_page(&measured) { json!({ "text": "", "overflow": 0 }) } else { measured };
     let viewport_texts_json = match &input.viewport_script {
-        Some(_) if browser_error_page => Some(empty_document_viewport_report(input.viewport, &input.viewport_texts)),
-        Some(script) => Some(serde_json::to_string(&evaluate(shared, &page, script).await?).unwrap_or_default()),
+        Some(script) => {
+            let report = evaluate(shared, &page, &guard_browser_error_page(script)).await?;
+            Some(if is_browser_error_page(&report) { empty_document_viewport_report(input.viewport, &input.viewport_texts) } else { serde_json::to_string(&report).unwrap_or_default() })
+        }
         None => None,
     };
     let load_ms = if input.measure_load {
@@ -1569,6 +1577,18 @@ mod tests {
         // 끊긴 연결은 오류다(결과를 돌려주지 않는다)
         shared.state.lock().unwrap().disconnected = Some("끊김".to_owned());
         assert_eq!(steps::wait_for_idle(&shared, Duration::from_millis(1), Duration::from_millis(1), Duration::from_millis(50)).await, Err("끊김".to_owned()));
+    }
+
+    #[test]
+    fn the_error_page_check_runs_inside_the_measuring_evaluation() {
+        let guarded = guard_browser_error_page("({ a: 1 })");
+        assert!(guarded.starts_with("(location.protocol === 'chrome-error:' ? "));
+        assert!(guarded.ends_with(": (({ a: 1 })))"));
+        assert!(is_browser_error_page(&json!({ BROWSER_ERROR_PAGE_MARK: true })));
+        // 측정 결과나 다른 모양은 오류 화면이 아니다
+        for value in [json!({ "text": "", "overflow": 0 }), json!({ BROWSER_ERROR_PAGE_MARK: "true" }), json!(null), json!(true)] {
+            assert!(!is_browser_error_page(&value), "{value}");
+        }
     }
 
     #[test]

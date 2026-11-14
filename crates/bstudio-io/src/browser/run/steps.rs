@@ -35,6 +35,11 @@ pub(super) const IDLE_QUIET: Duration = Duration::from_millis(500);
 pub(super) const IDLE_TIMEOUT: Duration = Duration::from_secs(5);
 const IDLE_POLL: Duration = Duration::from_millis(20);
 
+/// 지금 문서가 브라우저 오류 화면(`chrome-error:`, 막힌 이동 뒤 등)인가. 그 화면의 문구에는 페이지가 고른 호스트 이름이 들어가므로(`주문완료.test이(가) 차단됨`),
+/// 단계의 선택자가 거기서 요소를 찾으면 `waitFor: 'text=주문완료'`가 통과한다. 화면 글자 측정과 같이 빈 문서로 본다(옛 러너는 headless shell에서 아무것도
+/// 찾지 못했다). 요소를 찾는 같은 평가 안에서 보므로, 확인과 찾기 사이에 문서가 바뀌지 않는다
+const ERROR_PAGE_HAS_NO_ELEMENTS: &str = "location.protocol === 'chrome-error:'";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepAction {
     Click(String),
@@ -281,9 +286,11 @@ impl<'a> Ctx<'a> {
         }
     }
 
-    /// 해석한 선택자와 맞는 첫 요소(없으면 `None`). 반환한 객체 id는 쓴 뒤 `release`한다
+    /// 해석한 선택자와 맞는 첫 요소(없으면 `None`). 반환한 객체 id는 쓴 뒤 `release`한다.
+    /// 브라우저 오류 화면에서는 아무것도 찾지 않는다([`ERROR_PAGE_HAS_NO_ELEMENTS`])
     async fn query_first(&self, parsed: &Value) -> Result<Option<String>, StepError> {
-        let result = self.call("function(parsed) { const elements = this.querySelectorAll(parsed, document); return elements[0] || null; }", vec![json!({ "value": parsed })], false).await?;
+        let function = format!("function(parsed) {{ if ({ERROR_PAGE_HAS_NO_ELEMENTS}) return null; const elements = this.querySelectorAll(parsed, document); return elements[0] || null; }}");
+        let result = self.call(&function, vec![json!({ "value": parsed })], false).await?;
         Ok(result.get("objectId").and_then(Value::as_str).map(str::to_owned))
     }
 
@@ -611,9 +618,8 @@ pub(super) async fn wait_for(shared: &Arc<Shared>, session: &str, selector: &str
 
 async fn visible_once(ctx: &Ctx<'_>, parsed: &Value) -> Result<bool, StepError> {
     ctx.pre_checks().await?;
-    let result = ctx
-        .call("function(parsed) { const element = this.querySelectorAll(parsed, document)[0]; return element ? this.utils.isElementVisible(element) : false; }", vec![json!({ "value": parsed })], true)
-        .await?;
+    let function = format!("function(parsed) {{ if ({ERROR_PAGE_HAS_NO_ELEMENTS}) return false; const element = this.querySelectorAll(parsed, document)[0]; return element ? this.utils.isElementVisible(element) : false; }}");
+    let result = ctx.call(&function, vec![json!({ "value": parsed })], true).await?;
     match result.get("value").and_then(Value::as_bool) {
         Some(visible) => Ok(visible),
         None => Err(StepError::NonRetriable(format!("보임 확인의 결과를 알 수 없습니다: {result}"))),

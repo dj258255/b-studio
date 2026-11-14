@@ -10780,7 +10780,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 **옛 러너와 달라진 것.**
 - (의도) 위의 6번.
-- (의도) **브라우저 오류 화면(`chrome-error://`, 허용 밖으로 이동해 막힌 뒤)은 빈 문서로 읽는다.** 글자 `''`, 가로 넘침 0, `viewportTexts`는 모두 "화면에 없음". 옛 러너는 이 화면을 headless shell에서는 빈 문서로, 시스템 Chrome에서는 오류 문구로 읽는다(같은 시험이 두 브라우저에서 달랐다). 오류 문구에는 페이지가 고른 호스트 이름이 들어가므로(`주문완료.invalid이(가) 차단됨`) 화면 글자로 읽으면 `expectText`를 통과시킬 길이 된다. 새 러너는 브라우저와 무관하게 막는 쪽(빈 문서)으로 고정했다. A6a의 새 러너도 이 화면을 기본 실행 환경에서 읽어 오류 문구를 돌려줬다(트러블슈팅 202).
+- (의도) **브라우저 오류 화면(`chrome-error://`, 허용 밖으로 이동해 막힌 뒤)은 빈 문서로 읽는다.** 글자 `''`, 가로 넘침 0, `viewportTexts`는 모두 "화면에 없음". 옛 러너는 이 화면을 headless shell에서는 빈 문서로, 시스템 Chrome에서는 오류 문구로 읽는다(같은 시험이 두 브라우저에서 달랐다). 오류 문구에는 페이지가 고른 호스트 이름이 들어가므로(`주문완료.invalid이(가) 차단됨`) 화면 글자로 읽으면 `expectText`를 통과시킬 길이 된다. 새 러너는 브라우저와 무관하게 막는 쪽(빈 문서)으로 고정했다. A6a의 새 러너도 이 화면을 기본 실행 환경에서 읽어 오류 문구를 돌려줬다(트러블슈팅 202). 단계의 선택자도 이 화면에서는 아무것도 찾지 않는다(옛 러너는 headless shell에서 `waitFor: 'text=<막힌 호스트>'`·`click: 'button'`이 시간 초과로 실패하고, 시스템 Chrome에서는 오류 문구·버튼을 찾아 통과한다). 오류 화면인지는 측정·찾기를 하는 같은 평가 안에서 `location.protocol`로 본다. 평가 전에 따로 보면 그 사이에 문서가 바뀔 수 있다(자동 보안 검토의 지적).
 - 연결이 끊기거나 페이지가 충돌하면 `StepFailedError`가 아니라 일반 실패(`failed`)다(앱의 실패가 아니라 확인하지 못한 것이다. 옛 러너는 이 경우도 단계 실패로 감쌌다. 시험으로 재현하지 못했다).
 - `press`에 안전 상한 60초가 있다(위 3).
 - 팝업·`enter-frame` 선택자(`iframe >> internal:control=enter-frame >> …`)·`_react`·`_vue`·사용자 정의 엔진처럼 메인 월드나 다른 프레임이 필요한 선택자는 지원하지 않는다(옛 러너는 일부 동작한다). 워크플로 선언이 쓰는 꼴(`text=`, `role=`, CSS, `>>`, `:has-text`, `nth=`, `xpath=`)은 시험했다.
@@ -10795,8 +10795,8 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 **검증.**
 - **시험을 먼저 썼다.** 단계 시나리오 16개를 구현 전에 돌려 `Error: Rust 화면 확인 러너는 단계(steps)·스크린샷(capture)·화면 중계(onFrame)를 아직 지원하지 않습니다`(성공 시나리오)와 `expected { kind: 'Error', … } to deeply equal { kind: 'StepFailedError', … }`(실패 시나리오)로 16개 모두 실패했다. 구현 뒤 통과.
 - **차등 시험**(`browser-runner-differential.test.ts`): 단계 시나리오(`text=`·`role=`·CSS·`>>`·`:has-text`·`nth=`, fill 뒤 Enter 제출, Tab·Shift+Tab·`Control+A`·`ControlOrMeta+A`·글자·`Meta+KeyZ`·Numpad·`Control++` 같은 키 열일곱 가지, input·number·date·textarea·contenteditable fill과 빈 글자 지우기, 늦게 나타나는 요소, 스크롤해야 보이는 버튼, 애니메이션 중인 버튼, 나중에 활성화되는 버튼, 링크 클릭으로 이동한 뒤의 단계, 전역을 바꾼 페이지에서의 단계), 실패 시나리오(없는 선택자·가려진 버튼·비활성 버튼·보이지 않는 요소 waitFor·input이 아닌 요소·읽기 전용·checkbox fill·알 수 없는 키·깨진 선택자·모르는 엔진·`text=`·xpath 오류·동작 없는 단계)의 오류 글 첫 줄과 `steps` 배열이 같다. 단계가 보낸 fetch가 500(빠른·느린·이어 보낸 요청)이면 둘 다 `failedRequests`에 남고, `capture`는 단계 수만큼 PNG가 있고 크기가 뷰포트와 같으며(바이트는 견주지 않는다), 출처 제한과 함께 단계가 허용 밖으로 fetch·이미지·이동하면 막히고 기록되며 서버에 닿지 않고, 중단 신호가 단계 도중에 와도 브라우저·임시 폴더가 남지 않는다. 위조 시험은 의도한 차이로 따로 둔다.
-- **두 브라우저**: headless shell(Chromium 153.0.8010.12)과 시스템 Google Chrome 157.0.8103.51(`B_STUDIO_BROWSER_EXECUTABLE`) 모두에서 `browser-runner-differential.test.ts`(41개)와 `browser-origin-native.test.ts`(27개) 68개가 통과했다.
-- **전체**: `cargo test -p bstudio-io -p bstudio-node` 461개 통과, `pnpm typecheck`·`pnpm --filter @b-studio/studio lint` 통과, `pnpm test` 16491개 중 1개가 `verify-containers-differential`의 15초 시간 초과(알려진 흔들림 #1188)로 실패했고 단독으로 다시 돌리면 62개가 통과했다.
+- **두 브라우저**: headless shell(Chromium 153.0.8010.12)과 시스템 Google Chrome 157.0.8103.51(`B_STUDIO_BROWSER_EXECUTABLE`) 모두에서 `browser-runner-differential.test.ts`(41개)와 `browser-origin-native.test.ts`(28개) 69개가 통과했다.
+- **전체**: `cargo test -p bstudio-io -p bstudio-node` 462개 통과, `pnpm typecheck`·`pnpm --filter @b-studio/studio lint` 통과, `pnpm test` 16491개 중 1개가 `verify-containers-differential`의 15초 시간 초과(알려진 흔들림 #1188)로 실패했고 단독으로 다시 돌리면 62개가 통과했다.
 - **Rust 단위 시험**: 키 해석(`+` 나누기, 수정 키 조합, 모르는 키와 앞서 나간 수정 키, 맥 명령, `ControlOrMeta`, 자동 반복, 표 닫힘), 재시도 일정(바깥·안쪽 고리, 스크롤 방식), 클릭 지점(자르기·0.99 넓이·소수 둘째 자리), 이동 기다림(`SignalBarrier`), 오류 글 첫 줄, 상태 결과의 엄격한 읽기, 대상 확인 결과, 실행 환경 재생성(새 문서·사라짐 알림·만드는 도중의 변경·남의 컨텍스트), 메인 프레임만 실행 환경을 버리는지, 떠 있는 요청 집합(시작·종료·실패·이벤트 스트림·파비콘), 기다림의 상한과 끊김, 빈 문서 보고서.
 - **변이 시험**(원래 코드에 하나씩 넣고 시험이 잡는지. 되돌릴 때는 파일 복사본으로 되돌렸다. 치환은 함수 본문에만 맞췄다):
 
@@ -10812,7 +10812,9 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
   | 주입 스크립트를 페이지 실행 환경에서 돌리기 | 전역을 바꾼 페이지의 단계(1개 실패) |
   | 측정을 페이지 실행 환경에서 하기 | 위조 시험(1개 실패) |
   | 새 문서 뒤 실행 환경 다시 만들기 빼기 | 링크 클릭 뒤의 단계(1개 실패). 처음에 세대 번호 비교만 뺀 변이는 통과했다(`invalidate`가 핸들도 지워 중복이다). 환경을 버리는 함수를 없앤 변이로 다시 쟀다 |
-  | 브라우저 오류 화면을 빈 문서로 읽기 빼기 | 막힌 곳으로 스스로 이동하는 시험(1개 실패) |
+  | 브라우저 오류 화면을 빈 문서로 읽기 빼기(측정 식을 감싸지 않기) | 막힌 곳으로 스스로 이동하는 시험(1개 실패, 두 브라우저) |
+  | 요소 찾기의 오류 화면 확인 빼기 | 오류 화면의 단계 시험(`click: 'button'`, 1개 실패) |
+  | 보임 확인의 오류 화면 확인 빼기 | 오류 화면의 단계 시험(`waitFor: 'text=order-done'`, 1개 실패) |
   | capture 실패를 단계 실패로 바꾸기 | **시험하지 못했다.** 스크린샷 실패를 일부러 낼 방법이 없다. 옛 러너는 `.catch(() => undefined)`로 삼키고(소스 `record`), 새 러너도 삼킨다. 어느 쪽이 같은지는 소스로만 확인했다 |
 
 - **시간**(같은 페이지에서 단계 세 개[click·fill·press]를 도는 호출 전체, 12회 중앙값, 한 기계에서 한 번 잰 값): 옛 1367ms, 새 1726ms(약 360ms 느림. A6a의 약 400ms와 같은 차이이고 원인은 여전히 찾지 못했다).

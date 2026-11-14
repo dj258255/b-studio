@@ -6392,10 +6392,15 @@ A6a(#1213)를 검토하다 Rust 코드를 바꿔 `pnpm build:native`를 다시 �
 
 ### 고침
 
-메인 프레임이 `chrome-error://`이면 글자 `''`, 가로 넘침 0, `viewportTexts`는 모두 "화면에 없음"(빈 문서의 값)으로 채우고 DOM을 읽지 않는다(`crates/bstudio-io/src/browser/run.rs`의 `browser_error_page`).
+지금 문서가 `chrome-error:`이면 글자 `''`, 가로 넘침 0, `viewportTexts`는 모두 "화면에 없음"(빈 문서의 값)으로 채우고 DOM을 읽지 않는다. 단계의 선택자도 이 화면에서는 아무것도 찾지 않는다(`waitFor`·`click`·`fill`이 오류 문구나 오류 화면의 버튼과 맞지 않는다).
+
+- **오류 화면인지는 측정·찾기를 하는 같은 평가 안에서 본다**(`crates/bstudio-io/src/browser/run.rs`의 `guard_browser_error_page`, `run/steps.rs`의 `ERROR_PAGE_HAS_NO_ELEMENTS`). 처음 고침은 평가 전에 메인 프레임 주소를 한 번 보고 평가했는데, 자동 보안 검토가 그 사이에 페이지가 막힌 곳으로 이동하면 다시 만든 실행 환경이 오류 화면을 읽는다고 지적했다(확인과 사용 사이의 틈). 격리된 실행 환경의 `location`은 페이지가 바꿀 수 없다.
+- **단계의 선택자**: 검토 중 같은 화면에서 `waitFor: 'text=order-done'`이 새 러너에서 통과하는 것을 찾았다. 옛 러너는 headless shell에서 이 단계가 시간 초과로 실패한다(시스템 Chrome에서는 통과한다. 원래 있던 구멍). 워크플로가 `waitFor`를 확인 수단으로 쓰면 막힌 이동이 통과가 된다.
 
 ### 확인
 
 - 시험 `페이지가 막힌 곳으로 스스로 이동해 브라우저 오류 화면이 떠도 그 문구…`와 단계로 이동하는 `출처 제한과 함께…`(두 브라우저). 빈 문서 처리를 빼면 시험이 실패한다(변이 표, ADR-199 A6b). 기본 실행 환경에서 읽은 값이 오류 문구인 것은 디버그 출력으로 확인했다(`document.body.innerText`가 `127.0.0.1이(가) 차단됨…`).
+- 시험 `막힌 곳으로 이동한 뒤의 브라우저 오류 화면에서 단계의 선택자는 아무것도 찾지 못한다…`(두 브라우저): 고치기 전에는 `AssertionError: {"waitFor":"text=order-done"}: expected undefined to be an instance of StepFailedError`로 실패했다(단계가 통과함). 요소 찾기 쪽 확인만 빼면 `{"click":"button"}`이, 보임 확인 쪽만 빼면 `{"waitFor":"text=order-done"}`이 같은 글로 실패한다.
+- 평가 안의 확인을 빼면(식을 그대로 돌리면) 스스로 이동하는 시험이 두 브라우저에서 `expected 'order-done.invalid이(가) 차단됨…' to be ''`로 실패한다. 평가 전의 주소 확인은 지웠으므로 이 시험이 통과하는 것은 평가 안의 확인 덕분이다. 확인과 평가 사이에 이동이 끼는 경합 자체는 시점을 맞출 방법이 없어 재현하지 않았다.
 - 옛 러너와 비교할 때는 이 화면의 글자·`viewportTexts`를 무시한다(옛 러너가 브라우저에 따라 다르다).
 - 한계: 오류 화면 말고 페이지 자신이 그린 화면의 글자는 이 규칙과 무관하다.

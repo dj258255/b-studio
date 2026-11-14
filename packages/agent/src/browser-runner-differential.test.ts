@@ -761,6 +761,18 @@ describe('Rust 러너의 단계(click·fill·press·waitFor)는 옛 러너와 �
     expect(native.blockedRequests).toContain('http://order-done.invalid/');
   });
 
+  it('막힌 곳으로 이동한 뒤의 브라우저 오류 화면에서 단계의 선택자는 아무것도 찾지 못한다 (오류 문구로 waitFor·click을 통과시키지 않는다)', async () => {
+    // 옛 러너는 headless shell에서 이 두 단계가 시간 초과로 실패한다(시스템 Chrome에서는 오류 화면의 문구·버튼을 찾아 통과한다)
+    for (const step of [{ waitFor: 'text=order-done' }, { click: 'button' }]) {
+      const failure = await runInBrowserNative(`${base}/blocked-nav`, { allowedOrigins: [base], steps: [step] }).then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+      expect(failure, JSON.stringify(step)).toBeInstanceOf(StepFailedError);
+      expect((failure as StepFailedError).message).toMatch(/Timeout 5000ms exceeded/);
+    }
+  }, 30_000);
+
   it('의도한 차이: 페이지가 전역을 바꿔 글자·넘침·보임 판정을 속여도 Rust 러너는 진짜 값을 잰다 (옛 러너는 속는다)', async () => {
     const options: BrowserPageOptions = { viewport: { width: 800, height: 400 }, viewportTexts: ['숨은 글자', '진짜 글자'] };
     const old = await runInBrowser(`${base}/forged`, options);
