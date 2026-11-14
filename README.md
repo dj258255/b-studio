@@ -93,7 +93,7 @@
 | 토큰 | 요청·세션·사용자별 한도, 턴별 문맥 분석, 비용 보고서. 터미널 실행은 CLI의 공식 텔레메트리로 세고, 메인 CLI와 그 안의 서브에이전트별 토큰·하는 일·할 수 있는 범위를 `studio desk`에서 펼쳐 본다. 구독 계정마다 5시간·주간 한도도 본다 |
 | 요구사항 | 명세에서 요구사항(EARS·시나리오)을 뽑아 이슈 발행, 추적 매트릭스, 올리기 전 점검, PR 생성과 자동 리뷰로 잇는다. 고칠 것이 남은 요구사항 수와 Ready 배지를 보인다 |
 | 저장소 | GitHub·Gitea 이슈·PR을 터미널 작업대에서 본다 |
-| 실행 환경 | 샌드박스 로그·자원, 사용자가 직접 띄운 서비스를 보기만 하는 "내 환경", 설정한 프로젝트의 운영 이미지 배포와 롤백 |
+| 실행 환경 | 샌드박스 로그·자원, 설정한 프로젝트의 운영 이미지 배포와 롤백 |
 | 앱 | 터미널 작업대(`studio desk`)와 CLI. 웹 화면과 데스크톱 앱은 없다 |
 
 ## 빠른 시작
@@ -226,7 +226,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 |---|---|
 | 지금 어디까지 왔는가 | [구현 상태와 일정](docs/status.md) — 영역별 완료 상태, [로드맵](ROADMAP.md) — 마일스톤별 완료 조건·예상과 실제 |
 | 무엇을 만들기로 했는가 | GitHub Issue(배경·선택지·완료 조건) |
-| 무엇을 바꿨는가 · 왜 그렇게 골랐는가 | GitHub PR 본문과 [설계 결정 기록(ADR)](docs/decisions.md) |
+| 무엇을 바꿨는가 · 왜 그렇게 골랐는가 | GitHub PR 본문과 [설계 결정 기록(ADR)](docs/decisions.md). 길잡이는 [ADR 지도](docs/adr-map.md) |
 | 실제로 무엇을 확인했는가 | [검증 기록](docs/verification.md), [실험 기록](docs/experiments/README.md) |
 | 사용자에게 무엇이 나갔는가 | [변경 기록](CHANGELOG.md) |
 | 무엇이 아직 열려 있는가 | [트러블슈팅](docs/troubleshooting.md), [검증 기록의 알려진 한계](docs/verification.md#알려진-한계) |
@@ -245,7 +245,11 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 
 ## 문서
 
+처음 보는 분은 [핵심 결정 요약](docs/key-decisions.md)부터 읽습니다. ADR 199개의 길잡이는 [ADR 지도](docs/adr-map.md)에 있습니다.
+
 - [문서 안내](docs/README.md)
+- [핵심 결정 요약](docs/key-decisions.md)
+- [ADR 지도](docs/adr-map.md)
 - [로드맵](ROADMAP.md)
 - [변경 기록](CHANGELOG.md)
 - [구현 상태와 일정](docs/status.md)
