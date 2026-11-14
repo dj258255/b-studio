@@ -532,3 +532,487 @@ pub async fn run(input: &str, hook: Option<Hook>) -> String {
     };
     js_json::to_native(&out)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct Log {
+        ops: Vec<String>,
+        events: Vec<JsValue>,
+        states: Vec<JsValue>,
+    }
+
+    type Answer = Box<dyn Fn(&str, &JsValue) -> Option<Option<String>> + Send + Sync>;
+
+    /// 요청을 `log`에 적고, `custom`이 `Some`을 돌려주면 그것을(안의 `None`은 응답 없음), 아니면 정상 응답을 돌려주는 콜백
+    fn scripted(log: Arc<Mutex<Log>>, custom: Answer) -> Hook {
+        Arc::new(move |request: String| {
+            let parsed = js_json::parse_native(&request).expect("요청은 JSON");
+            let op = parsed.prop("op").and_then(JsValue::as_str).unwrap_or("").to_owned();
+            {
+                let mut log = log.lock().unwrap();
+                log.ops.push(op.clone());
+                if op == "emit" {
+                    log.events.push(parsed.prop("event").cloned().unwrap());
+                }
+                if op == "setState" {
+                    log.states.push(parsed.clone());
+                }
+            }
+            let reply = custom(&op, &parsed).unwrap_or_else(|| normal(&op, &parsed));
+            Box::pin(async move { reply })
+        })
+    }
+
+    fn normal(op: &str, request: &JsValue) -> Option<String> {
+        Some(
+            match op {
+                "outsideSync" => r#"{"ok":true,"rejected":[]}"#.to_owned(),
+                "reviewDeclared" => r#"{"ok":true,"checks":[],"unadoptedChange":null}"#.to_owned(),
+                "requirementRecords" | "evaluationAssets" | "reviewChecks" => r#"{"ok":true,"checks":[]}"#.to_owned(),
+                "changedCount" => r#"{"ok":true,"count":1}"#.to_owned(),
+                "filesToVerify" => r#"{"ok":true,"files":["api/a.java"]}"#.to_owned(),
+                "emit" | "setState" | "markVersion" | "throwIfAborted" | "retrySleep" => r#"{"ok":true}"#.to_owned(),
+                "strayProcesses" => r#"{"ok":true,"unsupported":true}"#.to_owned(),
+                "verifyBegin" => r#"{"ok":true,"input":{"root":"/nonexistent-root","files":["api/a.java"],"offServices":null,"managed":[{"name":"api","hasContract":true}],"specFile":"studio.yaml","composeChanged":false,"hasEnsureInfra":false}}"#.to_owned(),
+                "runDeclared" => r#"{"ok":true,"checks":[],"loadPlatformFailure":null}"#.to_owned(),
+                "recheckEvaluationAssets" | "recheckOutsideChanges" => js_json::to_native(&obj(vec![("ok", Some(JsValue::Bool(true))), ("checks", request.prop("recordChecks").cloned())])),
+                "missingStages" => r#"{"ok":true,"missing":[]}"#.to_owned(),
+                "servicesForFiles" => r#"{"ok":true,"services":["api"],"unmatched":[]}"#.to_owned(),
+                "syncSystemPackages" | "restart" => r#"{"ok":true}"#.to_owned(),
+                "sync" => r#"{"ok":true,"elapsedMs":5}"#.to_owned(),
+                "stats" => r#"{"ok":true,"entries":[]}"#.to_owned(),
+                "logs" => r#"{"ok":true,"lines":["로그"]}"#.to_owned(),
+                "egressDenials" => r#"{"ok":true,"denials":[]}"#.to_owned(),
+                "contract" => r#"{"ok":true,"changes":[]}"#.to_owned(),
+                _ => return None,
+            },
+        )
+    }
+
+    fn input(extra: &[(&str, &str)]) -> String {
+        let mut fields: Vec<(String, String)> = [
+            ("recheck", "false"),
+            ("light", "false"),
+            ("allowBreaking", "false"),
+            ("retryDelayMs", "0"),
+            ("attempts", "0"),
+            ("maxAttempts", "3"),
+            ("specFile", "\"studio.yaml\""),
+            ("manualVerificationCheck", "\"manual-verification\""),
+        ]
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+        for (key, value) in extra {
+            fields.retain(|(k, _)| k != key);
+            fields.push(((*key).to_owned(), (*value).to_owned()));
+        }
+        format!("{{{}}}", fields.iter().map(|(k, v)| format!("\"{k}\":{v}")).collect::<Vec<_>>().join(","))
+    }
+
+    fn run_sync(input: &str, hook: Hook) -> JsValue {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        js_json::parse_native(&runtime.block_on(run(input, Some(hook)))).expect("결과는 JSON")
+    }
+
+    fn fresh() -> Arc<Mutex<Log>> {
+        Arc::new(Mutex::new(Log::default()))
+    }
+
+    fn none() -> Answer {
+        Box::new(|_, _| None)
+    }
+
+    fn kind(result: &JsValue) -> String {
+        result.prop("value").and_then(|v| v.prop("kind")).and_then(JsValue::as_str).map(str::to_owned).unwrap_or_else(|| format!("오류:{}", result.prop("kind").and_then(JsValue::as_str).unwrap_or("?")))
+    }
+
+    fn event_types(log: &Log) -> Vec<String> {
+        log.events.iter().map(|event| event.prop("type").and_then(JsValue::as_str).unwrap().to_owned()).collect()
+    }
+
+    fn check_json(stage: &str, name: &str, ok: bool, detail: Option<&str>) -> String {
+        let detail = detail.map(|d| format!(",\"detail\":{}", js_json::stringify(&s(d)))).unwrap_or_default();
+        format!("{{\"stage\":\"{stage}\",\"name\":\"{name}\",\"ok\":{ok},\"attempts\":1{detail}}}")
+    }
+
+    #[test]
+    fn 정상은_정해진_순서로_콜백을_부르고_통과한다() {
+        let log = fresh();
+        let result = run_sync(&input(&[]), scripted(log.clone(), none()));
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        // 순서: 도구 밖 동기화 → 선언 → 기록 검사 둘 → 바뀐 파일 수 → 바뀐 파일 → run 단계·verify_start → 버전 → 남은 프로세스 → 서비스 확인 → … → 선언한 검사 → 리뷰 → 필수 단계
+        let gate_ops: Vec<&str> = log.ops.iter().map(String::as_str).filter(|op| !matches!(*op, "emit" | "setState")).collect();
+        assert_eq!(
+            gate_ops,
+            ["outsideSync", "reviewDeclared", "requirementRecords", "evaluationAssets", "changedCount", "filesToVerify", "markVersion", "strayProcesses", "verifyBegin", "servicesForFiles", "syncSystemPackages", "sync", "restart", "contract", "throwIfAborted", "runDeclared", "throwIfAborted", "recheckEvaluationAssets", "recheckOutsideChanges", "reviewChecks", "missingStages"]
+        );
+        assert_eq!(event_types(&log), ["stage", "verify_start", "stage", "verify_result", "stage", "gate_done"]);
+        let more = log.events[3].prop("moreChecks");
+        assert_eq!(more, Some(&JsValue::Bool(true)));
+        assert_eq!(log.events[5].prop("ok"), Some(&JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn 바뀐_파일이_0개고_기록_검사가_통과하면_이벤트_없이_통과한다() {
+        let log = fresh();
+        let result = run_sync(&input(&[]), scripted(log.clone(), Box::new(|op, _| (op == "changedCount").then(|| Some(r#"{"ok":true,"count":0}"#.to_owned())))));
+        assert_eq!(kind(&result), "pass");
+        assert!(log.lock().unwrap().events.is_empty());
+        assert!(!log.lock().unwrap().ops.contains(&"filesToVerify".to_owned()));
+    }
+
+    #[test]
+    fn recheck면_바뀐_파일_수를_묻지_않고_스펙_파일로_검증한다() {
+        let log = fresh();
+        let result = run_sync(&input(&[("recheck", "true")]), scripted(log.clone(), none()));
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        assert!(!log.ops.contains(&"changedCount".to_owned()));
+        assert!(!log.ops.contains(&"filesToVerify".to_owned()));
+        assert_eq!(log.events[1].prop("files"), Some(&JsValue::Arr(vec![s("studio.yaml")])));
+    }
+
+    #[test]
+    fn 바뀐_파일이_0개여도_기록_검사가_실패하면_검사만으로_실패한다() {
+        let log = fresh();
+        let failing = check_json("review", "manual-verification", false, Some("첫 줄\n둘째 줄"));
+        let hook = scripted(
+            log.clone(),
+            Box::new(move |op, _| match op {
+                "changedCount" => Some(Some(r#"{"ok":true,"count":0}"#.to_owned())),
+                "requirementRecords" => Some(Some(format!(r#"{{"ok":true,"checks":[{failing}]}}"#))),
+                _ => None,
+            }),
+        );
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "retry");
+        let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
+        assert!(feedback.starts_with("[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n워크플로 검사 실패:\n- [review] manual-verification (시도 1회)\n첫 줄\n둘째 줄"), "{feedback}");
+        let log = log.lock().unwrap();
+        assert_eq!(event_types(&log), ["workflow_check"]);
+        // 시도 횟수는 상태로 알린다
+        assert!(log.states.iter().any(|state| state.prop("attempts") == Some(&JsValue::Num(1.0))));
+    }
+
+    #[test]
+    fn 시도를_다_쓰면_사람_확인_기록의_첫_줄을_사유로_적는다() {
+        let failing = check_json("review", "manual-verification", false, Some("첫 줄\n둘째 줄"));
+        let hook = scripted(
+            fresh(),
+            Box::new(move |op, _| match op {
+                "changedCount" => Some(Some(r#"{"ok":true,"count":0}"#.to_owned())),
+                "requirementRecords" => Some(Some(format!(r#"{{"ok":true,"checks":[{failing}]}}"#))),
+                "reviewDeclared" => Some(Some(r#"{"ok":true,"checks":[],"unadoptedChange":"삭제: 테스트 unit"}"#.to_owned())),
+                _ => None,
+            }),
+        );
+        let result = run_sync(&input(&[("attempts", "2")]), hook);
+        assert_eq!(
+            result.prop("value").and_then(|v| v.prop("summary")).and_then(JsValue::as_str),
+            Some("검증 게이트를 3번 통과하지 못했습니다 — 첫 줄 — 확인의 선언을 바꾸려던 것이면 '확인 선언 변경 허용'을 켜고 다시 요청하세요(이번 실행에서 바뀐 선언: 삭제: 테스트 unit)")
+        );
+    }
+
+    #[test]
+    fn 선언한_검사가_실패하면_실패를_앞에_쓰고_서비스_확인_통과를_참고로_붙인다() {
+        let failing = check_json("test", "unit", false, Some("종료 코드 1"));
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{failing}],"loadPlatformFailure":null}}"#)))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "retry");
+        let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
+        let body = feedback.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n");
+        assert!(body.starts_with("워크플로 검사 실패:\n- [test] unit (시도 1회)\n종료 코드 1\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과"), "{body}");
+        // 보고서가 통과여도 뒤 검사가 실패하면 gate_done은 ok: false다
+        let log = log.lock().unwrap();
+        assert_eq!(log.events.last().unwrap().prop("ok"), Some(&JsValue::Bool(false)));
+        assert_eq!(log.events.last().unwrap().prop("type").and_then(JsValue::as_str), Some("gate_done"));
+    }
+
+    #[test]
+    fn 필수_단계가_빠졌으면_완료로_인정하지_않는다() {
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(|op, _| (op == "missingStages").then(|| Some(r#"{"ok":true,"missing":["test","review"]}"#.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(result.prop("value").and_then(|v| v.prop("summary")).and_then(JsValue::as_str), Some("워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: test, review"));
+        let log = log.lock().unwrap();
+        assert_eq!(log.events.last().unwrap().prop("ok"), Some(&JsValue::Bool(false)));
+        // verified를 켜지 않는다
+        assert!(!log.states.iter().any(|state| state.prop("verified").is_some()));
+    }
+
+    #[test]
+    fn 통과하면_verified를_켜고_통과한_단계를_알린다() {
+        let log = fresh();
+        let hook = scripted(
+            log.clone(),
+            Box::new(|op, _| match op {
+                "runDeclared" => Some(Some(format!(r#"{{"ok":true,"checks":[{}],"loadPlatformFailure":null}}"#, check_json("test", "unit", true, None)))),
+                _ => None,
+            }),
+        );
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        let passed = log.states.iter().rev().find_map(|state| state.prop("passedStages")).unwrap().clone();
+        assert_eq!(passed, JsValue::Arr(vec![s("run"), s("contract_check"), s("test")]));
+        assert!(log.states.iter().any(|state| state.prop("verified") == Some(&JsValue::Bool(true))));
+    }
+
+    #[test]
+    fn 단계의_검사_중_하나라도_실패하면_그_단계를_통과로_세지_않는다() {
+        let log = fresh();
+        let checks = format!("{},{}", check_json("test", "a", true, None), check_json("test", "b", false, Some("실패")));
+        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{checks}],"loadPlatformFailure":null}}"#)))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "retry");
+        let log = log.lock().unwrap();
+        let passed = log.states.iter().rev().find_map(|state| state.prop("passedStages")).unwrap().clone();
+        assert_eq!(passed, JsValue::Arr(vec![s("run"), s("contract_check")]));
+        assert!(!log.states.iter().any(|state| state.prop("verified").is_some()));
+    }
+
+    #[test]
+    fn light는_선언한_검사와_리뷰를_돌리지_않고_건너뛴_단계를_기록한다() {
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(|op, _| (op == "missingStages").then(|| Some(r#"{"ok":true,"missing":["test"]}"#.to_owned()))));
+        let result = run_sync(&input(&[("light", "true")]), hook);
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        for op in ["runDeclared", "reviewChecks", "recheckEvaluationAssets"] {
+            assert!(!log.ops.contains(&op.to_owned()), "{op}");
+        }
+        assert!(log.states.iter().any(|state| state.prop("skippedStages") == Some(&JsValue::Arr(vec![s("test")]))));
+        assert!(log.states.iter().any(|state| state.prop("verified") == Some(&JsValue::Bool(true))));
+        assert_eq!(event_types(&log), ["stage", "verify_start", "stage", "verify_result", "gate_done"]);
+    }
+
+    #[test]
+    fn light에서도_기록_검사가_실패하면_통과하지_않는다() {
+        let failing = check_json("review", "manual-verification", false, Some("위조"));
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "requirementRecords").then(|| Some(format!(r#"{{"ok":true,"checks":[{failing}]}}"#)))));
+        let result = run_sync(&input(&[("light", "true")]), hook);
+        assert_eq!(kind(&result), "retry");
+        assert!(!log.lock().unwrap().states.iter().any(|state| state.prop("verified").is_some()));
+    }
+
+    fn platform_failing_sync(op: &str) -> Option<Option<String>> {
+        (op == "sync").then(|| Some(r#"{"ok":false,"error":{"message":"반영 안 됨\n둘째 줄","platform":true}}"#.to_owned()))
+    }
+
+    #[test]
+    fn 플랫폼_실패면_취소를_확인하고_기다린_뒤_한_번만_다시_하고_그래도_실패면_시도로_세지_않고_멈춘다() {
+        let log = fresh();
+        let result = run_sync(&input(&[("retryDelayMs", "1500")]), scripted(log.clone(), Box::new(|op, _| platform_failing_sync(op))));
+        assert_eq!(result.prop("value").and_then(|v| v.prop("summary")).and_then(JsValue::as_str), Some("b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 반영 안 됨"));
+        let log = log.lock().unwrap();
+        assert_eq!(log.ops.iter().filter(|op| op.as_str() == "verifyBegin").count(), 2);
+        assert_eq!(log.ops.iter().filter(|op| op.as_str() == "sync").count(), 2);
+        let sleeps: Vec<_> = log.ops.iter().filter(|op| op.as_str() == "retrySleep").collect();
+        assert_eq!(sleeps.len(), 1);
+        // 시도 횟수는 올리지 않는다
+        assert!(!log.states.iter().any(|state| state.prop("attempts").is_some()));
+        assert!(log.states.iter().any(|state| state.prop("platformFailure") == Some(&s("반영 안 됨"))));
+        assert_eq!(event_types(&log), ["stage", "verify_start", "stage", "verify_result"]);
+        assert!(!log.ops.contains(&"runDeclared".to_owned()));
+    }
+
+    #[test]
+    fn 플랫폼_실패가_아닌_실패는_다시_하지_않는다() {
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(|op, _| (op == "restart").then(|| Some(r#"{"ok":false,"error":{"message":"종료됨"}}"#.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "retry");
+        let log = log.lock().unwrap();
+        assert_eq!(log.ops.iter().filter(|op| op.as_str() == "verifyBegin").count(), 1);
+        assert!(!log.ops.contains(&"retrySleep".to_owned()));
+    }
+
+    #[test]
+    fn 부하_확인을_재지_못하면_gate_done_false_뒤_멈추고_리뷰를_돌리지_않는다() {
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(|op, _| (op == "runDeclared").then(|| Some(r#"{"ok":true,"checks":[],"loadPlatformFailure":"러너 실패"}"#.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(result.prop("value").and_then(|v| v.prop("summary")).and_then(JsValue::as_str), Some("b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 러너 실패"));
+        let log = log.lock().unwrap();
+        assert!(!log.ops.contains(&"reviewChecks".to_owned()));
+        assert_eq!(log.events.last().unwrap().prop("ok"), Some(&JsValue::Bool(false)));
+    }
+
+    #[test]
+    fn 남은_프로세스는_세_개까지_적고_조회가_실패하면_managed_전부를_다시_띄운다() {
+        let log = fresh();
+        let reports = r#"{"ok":true,"reports":[{"service":"api","processes":[{"pid":1,"command":"a"},{"pid":2,"command":""},{"pid":3},{"pid":4,"command":"d"}]},{"service":"web","error":"못 봄","processes":[]}]}"#;
+        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "strayProcesses").then(|| Some(reports.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        let checks = log.states.iter().find_map(|state| state.prop("checks")).unwrap();
+        let JsValue::Arr(checks) = checks else { panic!() };
+        assert_eq!(checks[0].prop("name"), Some(&s("background-processes")));
+        assert_eq!(
+            checks[0].prop("detail").and_then(JsValue::as_str),
+            Some("검사 전에 서비스 안에 남은 백그라운드 프로세스가 있어 그 서비스를 다시 띄웠습니다(서비스 안 명령으로 오래 도는 프로세스를 남기지 마세요) — api: a, pid 2, pid 3 외 1개 / web: 못 봄")
+        );
+        drop(log);
+
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(|op, _| (op == "strayProcesses").then(|| Some(r#"{"ok":false,"error":{"message":"도커가 응답하지 않습니다"},"managed":["api","web"]}"#.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        let JsValue::Arr(checks) = log.states.iter().find_map(|state| state.prop("checks")).unwrap().clone() else { panic!() };
+        assert_eq!(checks[0].prop("detail").and_then(JsValue::as_str), Some("서비스 안의 백그라운드 프로세스를 확인하지 못해 서비스를 모두 다시 띄웠습니다: 도커가 응답하지 않습니다"));
+        // 조회 실패가 통과한 기록으로 남는다(실패로 세지 않는다)
+        assert_eq!(checks[0].prop("ok"), Some(&JsValue::Bool(true)));
+    }
+
+    #[test]
+    fn 남은_프로세스_조회가_취소로_끊기면_취소다() {
+        let hook = scripted(fresh(), Box::new(|op, _| (op == "strayProcesses").then(|| Some(r#"{"ok":false,"error":{"message":"끊김","aborted":true},"managed":["api"]}"#.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("aborted"));
+    }
+
+    #[test]
+    fn 새_부가_서비스는_verify_result_바로_뒤에_경고로_알린다() {
+        let log = fresh();
+        // 서비스 확인의 보고서에 addedAddons가 들게 하려면 compose가 바뀌어야 하므로, 여기서는 verify_io가 아니라 이벤트 모양만 본다
+        let hook = scripted(
+            log.clone(),
+            Box::new(|op, request| {
+                if op == "verifyBegin" {
+                    let mut input = request.clone();
+                    let _ = &mut input;
+                    return Some(Some(r#"{"ok":true,"input":{"root":"/nonexistent-root","files":["compose.yaml"],"offServices":null,"managed":[{"name":"api","hasContract":false}],"specFile":"studio.yaml","composeChanged":true,"hasEnsureInfra":true}}"#.to_owned()));
+                }
+                match op {
+                    "composeInfo" => Some(Some(r#"{"ok":true,"composeServices":["api","mediamtx"],"managedNames":["api"]}"#.to_owned())),
+                    "ensureInfra" => Some(Some(r#"{"ok":true,"result":{"ok":true,"recovered":["mediamtx"]}}"#.to_owned())),
+                    "loadProject" => Some(Some(r#"{"ok":true}"#.to_owned())),
+                    "servicesForFiles" => Some(Some(r#"{"ok":true,"services":["api"],"unmatched":[]}"#.to_owned())),
+                    _ => None,
+                }
+            }),
+        );
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "pass");
+        let log = log.lock().unwrap();
+        let types = event_types(&log);
+        let at = types.iter().position(|t| t == "warning").expect("경고 이벤트");
+        assert_eq!(types[at - 1], "verify_result");
+        assert_eq!(log.events[at].prop("message"), Some(&s("compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): mediamtx")));
+    }
+
+    #[test]
+    fn 도구_밖에서_거절한_경로가_있으면_outside_tool_changes로_실패한다() {
+        let log = fresh();
+        let hook = scripted(log.clone(), Box::new(|op, _| (op == "outsideSync").then(|| Some(r#"{"ok":true,"rejected":["link.java"]}"#.to_owned()))));
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(kind(&result), "retry");
+        let log = log.lock().unwrap();
+        assert!(log.events.iter().any(|event| event.prop("check").and_then(|c| c.prop("name")) == Some(&s("outside-tool-changes")) && event.prop("check").and_then(|c| c.prop("ok")) == Some(&JsValue::Bool(false))));
+    }
+
+    #[test]
+    fn 콜백이_응답하지_않거나_알아볼_수_없으면_모든_자리에서_통과가_아니라_hook_오류다() {
+        // 정상 흐름이 부르는 콜백(게이트 op와 서비스 확인 op) 하나씩 응답을 깨 본다
+        let probe = fresh();
+        run_sync(&input(&[]), scripted(probe.clone(), none()));
+        let mut seen: Vec<String> = Vec::new();
+        for op in probe.lock().unwrap().ops.iter() {
+            if !seen.contains(op) {
+                seen.push(op.clone());
+            }
+        }
+        assert!(seen.len() >= 18, "{seen:?}");
+        for target in &seen {
+            for broken in [None, Some("not json".to_owned()), Some("[]".to_owned()), Some(r#"{"fatal":true}"#.to_owned()), Some(r#"{"ok":"yes"}"#.to_owned())] {
+                let log = fresh();
+                let target = target.clone();
+                let answer = broken.clone();
+                let result = run_sync(&input(&[]), scripted(log.clone(), Box::new({ let target = target.clone(); move |op, _| (op == target).then(|| answer.clone()) })));
+                assert_eq!(result.prop("ok"), Some(&JsValue::Bool(false)), "{target} / {broken:?}: {result:?}");
+                assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"), "{target} / {broken:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn 검사의_ok가_불리언이_아니면_통과로_세지_않고_알아볼_수_없는_응답이다() {
+        for bad in [r#"{"stage":"test","name":"x","ok":"true","attempts":1}"#, r#"{"stage":"test","name":"x","attempts":1}"#, r#"{"stage":"test","ok":true}"#, r#"[]"#] {
+            let hook = scripted(fresh(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{bad}],"loadPlatformFailure":null}}"#)))));
+            let result = run_sync(&input(&[]), hook);
+            assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"), "{bad}");
+        }
+    }
+
+    #[test]
+    fn 취소를_확인하는_콜백이_던지면_그_뒤_단계도_gate_done도_없다() {
+        // 서비스 확인 뒤 첫 취소 확인에서 끊긴다
+        let log = fresh();
+        let result = run_sync(&input(&[]), scripted(log.clone(), Box::new(|op, _| (op == "throwIfAborted").then(|| Some(r#"{"fatal":true}"#.to_owned())))));
+        assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"));
+        let log = log.lock().unwrap();
+        assert_eq!(event_types(&log), ["stage", "verify_start"]);
+        assert!(!log.ops.contains(&"runDeclared".to_owned()));
+        assert!(!log.states.iter().any(|state| state.prop("report").is_some()));
+    }
+
+    #[test]
+    fn 선언한_검사_뒤_취소를_확인하는_콜백이_던지면_다시_견줌과_리뷰와_gate_done이_없다() {
+        let log = fresh();
+        let count = Arc::new(Mutex::new(0));
+        let hook = scripted(
+            log.clone(),
+            Box::new({
+                let count = count.clone();
+                move |op, _| {
+                    if op != "throwIfAborted" {
+                        return None;
+                    }
+                    let mut n = count.lock().unwrap();
+                    *n += 1;
+                    (*n == 2).then(|| Some(r#"{"fatal":true}"#.to_owned()))
+                }
+            }),
+        );
+        let result = run_sync(&input(&[]), hook);
+        assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"));
+        let log = log.lock().unwrap();
+        assert!(log.ops.contains(&"runDeclared".to_owned()));
+        for op in ["recheckEvaluationAssets", "recheckOutsideChanges", "reviewChecks"] {
+            assert!(!log.ops.contains(&op.to_owned()), "{op}");
+        }
+        assert!(!event_types(&log).contains(&"gate_done".to_owned()));
+    }
+
+    #[test]
+    fn 입력이_어긋나거나_콜백이_없으면_오류다() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        assert!(runtime.block_on(run(&input(&[]), None)).contains("\"kind\":\"hook\""));
+        assert!(runtime.block_on(run("{", Some(scripted(fresh(), none())))).contains("\"kind\":\"input\""));
+        for key in ["recheck", "light", "allowBreaking", "retryDelayMs", "attempts", "maxAttempts", "specFile", "manualVerificationCheck"] {
+            let broken = input(&[(key, "null")]);
+            assert!(runtime.block_on(run(&broken, Some(scripted(fresh(), none())))).contains("\"kind\":\"input\""), "{key}");
+        }
+    }
+
+    #[test]
+    fn 실패한_검사_목록과_보고서_글에는_짝_없는_서로게이트가_replacement로_들어간다() {
+        // TS가 보낸 인코딩 글자(짝 없는 서로게이트 U+D800 → U+E010 + 니블)가 옛 napi 경계처럼 U+FFFD가 된다
+        let encoded = "x\u{E010}\u{E00D}\u{E008}\u{E000}y";
+        let failing = check_json("test", "unit", false, Some(encoded));
+        let hook = scripted(fresh(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{failing}],"loadPlatformFailure":null}}"#)))));
+        let result = run_sync(&input(&[]), hook);
+        let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
+        assert!(feedback.contains("x\u{FFFD}y"), "{feedback}");
+    }
+}

@@ -461,7 +461,7 @@ describe('플랫폼 실패', () => {
 
 describe('남은 프로세스(#765)', () => {
   const found = [
-    { service: 'api', processes: [{ pid: 15, command: 'sh -c while true; do cp b a; done' }, { pid: 16, command: '' }, { pid: 17, command: 'c' }, { pid: 18, command: 'd' }, { pid: 19, command: 'e' }] },
+    { service: 'api', processes: [{ pid: 15, command: 'sh -c while true; do cp b a; done' }, { pid: 16, command: '' }, { pid: 17, command: 'c' }, { pid: 18, command: 'd' }, { pid: 19, command: 'e' }, { pid: 20, command: 'lone \ud800 x' }] },
     { service: 'web', error: '확인하지 못했습니다', processes: [] },
   ];
 
@@ -472,7 +472,7 @@ describe('남은 프로세스(#765)', () => {
     });
     expect(out.calls.indexOf('scan')).toBeLessThan(out.calls.indexOf('restart:api'));
     const detail = (out.traces[0]!.state as { checks: Array<{ name: string; detail?: string }> }).checks.find((check) => check.name === 'background-processes')!.detail!;
-    expect(detail).toContain('api: sh -c while true; do cp b a; done, pid 16, c 외 2개 / web: 확인하지 못했습니다');
+    expect(detail).toContain('api: sh -c while true; do cp b a; done, pid 16, c 외 3개 / web: 확인하지 못했습니다');
   });
 
   it('찾지 못하면(빈 목록) 아무것도 더하지 않는다', async () => {
