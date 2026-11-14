@@ -1,4 +1,4 @@
-import { chromium } from 'playwright-core';
+import { createRequire } from 'node:module';
 import { native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import { BrowserUnavailableError, MEDIA_ERROR_INIT_SCRIPT, StepFailedError, StepWithoutActionError, VIEWPORT_MEASURE_SCRIPT, describeStep, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextReport } from './browser-check';
@@ -24,20 +24,31 @@ function systemChromePaths(): string[] {
   return ['/opt/google/chrome/chrome'];
 }
 
+type PlaywrightRegistry = { findExecutable(name: string): { executablePath(): string | undefined } | undefined };
+
 /**
- * 옛 `launchBrowser`와 같은 순서로 시도할 실행 파일: B_STUDIO_BROWSER_EXECUTABLE이 있으면 그것만, 없으면 Playwright가 받은 Chromium → 설치된 Chrome.
- * 경로는 파일이 있는지 보지 않고 넘긴다(없으면 Rust가 그 이유를 `unavailable`로 알린다)
+ * 옛 러너의 `chromium.launch({ headless: true })`가 띄우는 실행 파일(Playwright가 받은 headless shell)의 경로. `chromium.executablePath()`는
+ * 전체 Chromium(새 headless 모드)이라 다르다. 그것을 띄우면 시작·대상 만들기·종료가 느려 호출 전체가 약 400ms 길어졌다(ADR-199 A6c 덧붙임).
+ * 경로는 Playwright의 설치 목록(`registry`)에서 읽는다. 공개 API가 아니므로 찾지 못하면 없는 것으로 친다(그러면 설치된 Chrome을 시도한다)
  */
-function candidateExecutables(): string[] {
+function playwrightHeadlessShell(): string | undefined {
+  try {
+    const bundle = createRequire(import.meta.url)('playwright-core/lib/coreBundle') as { registry?: { registry?: PlaywrightRegistry } };
+    return bundle.registry?.registry?.findExecutable('chromium-headless-shell')?.executablePath() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 옛 `launchBrowser`와 같은 순서로 시도할 실행 파일: B_STUDIO_BROWSER_EXECUTABLE이 있으면 그것만, 없으면 Playwright가 받은 headless shell → 설치된 Chrome.
+ * 전체 Chromium은 시도하지 않는다(옛 러너도 띄우지 않는다). 경로는 파일이 있는지 보지 않고 넘긴다(없으면 Rust가 그 이유를 `unavailable`로 알린다)
+ */
+export function nativeBrowserCandidates(): string[] {
   const configured = process.env.B_STUDIO_BROWSER_EXECUTABLE;
   if (configured) return [configured];
-  const candidates: string[] = [];
-  try {
-    candidates.push(chromium.executablePath());
-  } catch {
-    // Playwright가 Chromium 경로를 알지 못하면(지원하지 않는 플랫폼) 설치된 Chrome만 시도한다
-  }
-  return [...candidates, ...systemChromePaths()];
+  const shell = playwrightHeadlessShell();
+  return [...(shell ? [shell] : []), ...systemChromePaths()];
 }
 
 type NativeBrowserStepInput = { label: string; kind: 'click' | 'fill' | 'press' | 'waitFor' | 'none'; value: string; text?: string };
@@ -66,7 +77,7 @@ export const runInBrowserNative: BrowserRunner = async (url, { viewport = DEFAUL
   try {
     result = await native.runBrowserCheck(
       {
-        executables: candidateExecutables(),
+        executables: nativeBrowserCandidates(),
         url,
         viewportWidth: viewport.width,
         viewportHeight: viewport.height,

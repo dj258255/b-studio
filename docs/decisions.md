@@ -10750,7 +10750,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ### 남은 한계와 재지 않은 것
 - **A6a의 범위 밖**(A6b에서 단계·스크린샷을 더했다): `steps`·`capture`·`onFrame`은 지원하지 않고 던진다(A6b·A6c). 게이트의 기본 `browserRunner`는 `runInBrowser`다. 실제 세션(실제 Claude Code)에서의 실측은 하지 않았다 — 게이트가 이 러너를 쓰지 않으므로 실제 세션에서 잴 것이 없다(A6c의 완료 조건이다). 그래서 `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
-- **호출 전체 시간 +약 400ms의 원인 미확인**(위 검증의 측정 참고).
+- **호출 전체 시간 +약 400ms의 원인 미확인**(위 검증의 측정 참고). → 원인을 찾아 고쳤다: 새 러너가 headless shell이 아니라 전체 Chromium을 띄우고 있었다("A6c-1 덧붙임").
 - **옛 러너는 중단 뒤 프로필 폴더를 남길 때가 있다(관측 한 번).** 이 PR의 CI(Linux, 시스템 Chrome)에서 중단 시험 동안 TMPDIR을 빈 폴더로 격리했는데도 `playwright_chromiumdev_profile-*` 하나가 남았다. Rust 러너의 폴더(`b-studio-cdp-*`)는 남지 않았다. 옛 러너는 실험 경로가 계속 쓰므로 고치지 않았고, 중단 시험은 Rust 러너의 폴더만 견준다. macOS에서는 남지 않았다.
 - **Linux·Windows는 재지 못했다.** unix만 구현했고 그 밖은 `unavailable`이다. 시스템 Chrome의 기본 경로 `/opt/google/chrome/chrome`(Playwright의 'chrome' 채널이 찾는 곳이라고 본 값)은 Linux에서 확인하지 않았다. CI(headless shell 없음, 시스템 Chrome)에서 처음 돌 때 달라질 수 있다.
 - **시험하지 않은 경로**: 서로 다른 사이트의 iframe(OOPIF) 세션 준비(코드는 있다. 시험한 iframe은 같은 사이트라 같은 세션이다), 팝업, 내려받기, 브라우저가 중간에 죽는 경우(연결이 끊기면 오류로 끝나는 것은 CDP 단위 시험까지만), 브라우저를 띄우는 도중의 취소(프로세스 그룹과 임시 폴더를 `Drop`이 정리하도록 썼지만 그 순간을 시험으로 겨냥하지 않았다. 시험한 취소는 이동 중이다), 워커 세션의 `Fetch.enable`이 이 브라우저에서 받아들여지는지(실패해도 프록시가 막는다).
@@ -10817,10 +10817,34 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
   | 보임 확인의 오류 화면 확인 빼기 | 오류 화면의 단계 시험(`waitFor: 'text=order-done'`, 1개 실패) |
   | capture 실패를 단계 실패로 바꾸기 | **시험하지 못했다.** 스크린샷 실패를 일부러 낼 방법이 없다. 옛 러너는 `.catch(() => undefined)`로 삼키고(소스 `record`), 새 러너도 삼킨다. 어느 쪽이 같은지는 소스로만 확인했다 |
 
-- **시간**(같은 페이지에서 단계 세 개[click·fill·press]를 도는 호출 전체, 12회 중앙값, 한 기계에서 한 번 잰 값): 옛 1367ms, 새 1726ms(약 360ms 느림. A6a의 약 400ms와 같은 차이이고 원인은 여전히 찾지 못했다).
+- **시간**(같은 페이지에서 단계 세 개[click·fill·press]를 도는 호출 전체, 12회 중앙값, 한 기계에서 한 번 잰 값): 옛 1367ms, 새 1726ms(약 360ms 느림. A6a의 약 400ms와 같은 차이이고 원인은 여전히 찾지 못했다). → 원인과 고친 뒤의 값은 "A6c-1 덧붙임".
 
 **남은 한계·재지 않은 것.**
 - 위 "옛 러너와 달라진 것"의 선택자 범위, 팝업.
 - Linux·Windows는 재지 못했다(CI Linux에서 처음 돈다). 시스템 Chrome의 `chrome-error://` 화면은 headless shell과 달리 오류 문구가 있어 두 브라우저에서 시험을 따로 맞췄다.
 - 맥 편집 명령은 맥에서만 시험했다(리눅스에서 `Control+A`가 어떻게 되는지는 같은 소스 규칙을 따르지만 재지 않았다).
 - 실제 세션(Claude Code)에서의 실측은 하지 않았다(게이트가 아직 이 러너를 쓰지 않는다. A6c의 완료 조건). `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
+
+### A6c-1 덧붙임: 새 러너가 띄우는 실행 파일과 호출 시간 (2026-11-15, macOS arm64)
+
+**무엇이 문제였나.** A6a·A6b에서 남긴 "호출 전체가 옛 러너보다 약 400ms 느림(원인 모름)"의 원인은 실행 파일이었다. 새 러너는 Playwright가 받은 브라우저 경로를 `chromium.executablePath()`로 얻었는데, 이것은 **전체 Chromium**(`chromium-1243/…/Google Chrome for Testing`)이다. 옛 러너의 `chromium.launch({ headless: true })`는 **headless shell**(`chromium_headless_shell-1243/…/chrome-headless-shell`)을 띄운다. 같은 Chromium 153이지만, 전체 Chromium은 새 headless 모드로 브라우저 UI까지 만든다.
+
+**어떻게 찾았나.** CDP 송수신과 Playwright `DEBUG=pw:protocol`에 시각을 남겨 같은 페이지의 두 번째 호출을 메시지 단위로 견줬다(한 번 잰 값).
+
+| 구간 | 옛 러너(headless shell) | 새 러너(전체 Chromium) |
+|---|---|---|
+| 실행 → 첫 응답(`Browser.getVersion`) | 78ms | 197ms |
+| `Target.createTarget` 왕복 | 8ms | 162ms |
+
+새 러너 쪽에는 그 사이 `browser_ui` 대상(`chrome://omnibox-popup.top-chrome/`, 주소창 팝업) 둘이 붙어 떼어 내는 왕복(약 85ms씩)이 있었다. headless shell에는 이런 대상이 없다. 앞서 "늘어난 시간이 CDP 왕복마다 고르게 퍼져 있다"고 적은 것은 틀린 관찰이었다. 늘어난 시간은 시작·대상 만들기·종료에 몰려 있었다.
+
+**고침.** `nativeBrowserCandidates()`(`packages/agent/src/browser-check-native.ts`)가 Playwright의 설치 목록(`playwright-core/lib/coreBundle`의 `registry.findExecutable('chromium-headless-shell')`)에서 headless shell 경로를 읽어 먼저 시도하고, 그다음 설치된 Chrome을 시도한다. 전체 Chromium은 시도하지 않는다(옛 러너도 띄우지 않는다). 설치 목록은 공개 API가 아니므로, 읽지 못하면 headless shell이 없는 것으로 치고 설치된 Chrome을 시도한다. `B_STUDIO_BROWSER_EXECUTABLE`이 있으면 그것만 쓰는 규칙은 같다.
+
+**고친 뒤 값**(같은 기계, 12회 중앙값, 한 번 잰 값): 단계 없는 호출은 옛 664ms·새 682ms, 단계 셋(click·fill·press)인 호출은 옛 1331ms·새 1328ms. 남은 차이는 약 20ms 안팎이다.
+
+**정정.** A6a·A6b의 검증에 "headless shell(Chromium 153.0.8010.12)에서 통과"라고 적은 것 가운데 **새 러너** 쪽은 실제로는 전체 Chromium 153(새 headless 모드)에서 돈 것이다(옛 러너는 headless shell이 맞다). 고친 뒤 새 러너를 진짜 headless shell로 다시 돌려 `browser-runner-differential.test.ts`(41개)·`browser-origin-native.test.ts`(28개)·`browser-check-native.test.ts`(2개) 71개가 통과했고, 시스템 Google Chrome 157에서도 69개가 통과했다.
+
+**검증.** `browser-check-native.test.ts`: 지정이 없으면 첫 후보가 headless shell 경로이고 `chromium.executablePath()`(전체 Chromium)는 후보에 없다. 고치기 전 판본(함수 이름만 바꿔 export)에서 `AssertionError: expected '/Users/…/ms-playw…' to match /chromium_h…/` 로 실패했다.
+
+**남은 것.** 운영 이미지(`apps/studio/Dockerfile`)와 CI는 Playwright 브라우저를 설치하지 않는다(CI는 실행 머신의 시스템 Chrome으로 돈다). 끝 모양(Node 없는 실행 파일)에서는 이 설치 목록을 읽을 수 없으므로, C1 전에 Rust가 headless shell을 직접 찾는 규칙이 필요하다.
+
