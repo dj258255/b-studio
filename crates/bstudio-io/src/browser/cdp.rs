@@ -90,7 +90,7 @@ impl Cdp {
     pub fn start<R, W>(
         reader: R,
         writer: W,
-        mut on_event: impl FnMut(Event) + Send + 'static,
+        on_event: impl FnMut(Event) + Send + 'static,
         on_close: impl FnOnce(String) + Send + 'static,
     ) -> Self
     where
@@ -187,6 +187,27 @@ impl Cdp {
             Ok(result) => result,
             Err(_) => Err(CdpError { message: self.inner.reason() }),
         }
+    }
+
+    /// 명령 여럿을 **차례대로 한꺼번에** 보내고 응답을 모두 기다린다. 브라우저는 보낸 순서대로 처리하므로 하나씩 기다리며 보낸 것과 결과가 같고, 왕복 수만 줄어든다.
+    /// 결과는 보낸 순서와 같다. 연결이 끊긴 뒤에 보낸 명령은 오류다
+    pub async fn send_batch(&self, session_id: Option<&str>, commands: Vec<(&str, Value)>) -> Vec<Result<Value, CdpError>> {
+        let mut pending = Vec::with_capacity(commands.len());
+        for (method, params) in commands {
+            let (id, receiver) = self.register();
+            pending.push((self.write(id, session_id, method, params), receiver));
+        }
+        let mut results = Vec::with_capacity(pending.len());
+        for (written, receiver) in pending {
+            results.push(match written {
+                Err(error) => Err(error),
+                Ok(()) => match receiver.await {
+                    Ok(result) => result,
+                    Err(_) => Err(CdpError { message: self.inner.reason() }),
+                },
+            });
+        }
+        results
     }
 
     /// 응답을 기다리지 않는다. 처리기 안(동기)에서 쓴다. 응답이 오류여도 알 수 없으므로 실패해도 되는 명령에만 쓴다
@@ -399,6 +420,35 @@ mod tests {
         }
         assert!(reason.lock().unwrap().as_deref().unwrap_or("").contains("넘는 틀"));
         assert!(cdp.is_closed());
+    }
+
+    #[tokio::test]
+    async fn a_batch_is_written_in_order_and_answered_in_order_even_when_a_middle_one_fails() {
+        let (client, mut server) = duplex(1 << 16);
+        let (reader, writer) = tokio::io::split(client);
+        let cdp = Cdp::start(reader, writer, |_| {}, |_| {});
+        let waiting = tokio::spawn({
+            let cdp = cdp.clone();
+            async move { cdp.send_batch(Some("s"), vec![("A.one", json!({})), ("B.two", json!({})), ("C.three", json!({}))]).await }
+        });
+        let mut request = vec![0u8; 4096];
+        let mut seen = Vec::new();
+        while seen.len() < 3 {
+            let read = server.read(&mut request).await.unwrap();
+            for frame in request[..read].split(|byte| *byte == 0).filter(|frame| !frame.is_empty()) {
+                seen.push(serde_json::from_slice::<Value>(frame).unwrap());
+            }
+        }
+        let methods: Vec<&str> = seen.iter().map(|message| message["method"].as_str().unwrap()).collect();
+        assert_eq!(methods, vec!["A.one", "B.two", "C.three"]);
+        // 응답은 거꾸로 와도 결과는 보낸 순서대로이고, 가운데 하나가 실패해도 나머지는 성공이다
+        server.write_all(format!("{{\"id\":{},\"result\":{{\"n\":3}}}}\0", seen[2]["id"]).as_bytes()).await.unwrap();
+        server.write_all(format!("{{\"id\":{},\"error\":{{\"message\":\"nope\"}}}}\0", seen[1]["id"]).as_bytes()).await.unwrap();
+        server.write_all(format!("{{\"id\":{},\"result\":{{\"n\":1}}}}\0", seen[0]["id"]).as_bytes()).await.unwrap();
+        let results = waiting.await.unwrap();
+        assert_eq!(results[0].as_ref().unwrap()["n"], 1);
+        assert_eq!(results[1].as_ref().unwrap_err().message, "nope");
+        assert_eq!(results[2].as_ref().unwrap()["n"], 3);
     }
 
     #[tokio::test]

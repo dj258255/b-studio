@@ -570,64 +570,76 @@ async fn send_ok(shared: &Shared, session: &str, method: &str, params: Value) ->
     shared.cdp().send(Some(session), method, params).await.map_err(|error: CdpError| RunError::Failed(format!("{method}: {error}")))
 }
 
-/// 메인 페이지 세션을 준비한다(Playwright가 보내는 것과 같은 설정). 끝에서 멈춰 있던 대상을 깨운다
+/// 메인 페이지 세션을 준비한다(Playwright가 보내는 것과 같은 설정). 끝에서 멈춰 있던 대상을 깨운다.
+/// 서로 기다릴 필요가 없는 명령은 한꺼번에 보낸다(브라우저는 보낸 순서대로 처리하므로 결과는 같고 왕복만 줄어든다)
 async fn setup_page(shared: &Arc<Shared>, session: &str) -> Result<(), RunError> {
     let (width, height) = shared.config.viewport;
-    let window = shared.cdp().send(Some(session), "Browser.getWindowForTarget", json!({})).await.ok();
-    send_ok(shared, session, "Page.enable", json!({})).await?;
-    let tree = send_ok(shared, session, "Page.getFrameTree", json!({})).await?;
-    {
-        let mut state = shared.state.lock().unwrap();
-        register_frame_tree(&mut state, tree.get("frameTree").unwrap_or(&Value::Null));
-    }
-    shared.notify.notify_waiters();
-    send_ok(shared, session, "Log.enable", json!({})).await?;
-    send_ok(shared, session, "Page.setLifecycleEventsEnabled", json!({ "enabled": true })).await?;
-    send_ok(shared, session, "Runtime.enable", json!({})).await?;
-    send_ok(shared, session, "Network.enable", json!({})).await?;
-    send_ok(shared, session, "Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true })).await?;
-    send_ok(shared, session, "Emulation.setFocusEmulationEnabled", json!({ "enabled": true })).await?;
+    let cdp = shared.cdp();
+    let window = cdp.send(Some(session), "Browser.getWindowForTarget", json!({})).await.ok();
+    let mut commands: Vec<(&str, Value)> = Vec::new();
     if let Some(window_id) = window.as_ref().and_then(|value| value.get("windowId")).and_then(Value::as_i64) {
-        let _ = shared.cdp().send(Some(session), "Browser.setWindowBounds", json!({ "windowId": window_id, "bounds": { "width": width, "height": height } })).await;
+        commands.push(("Browser.setWindowBounds", json!({ "windowId": window_id, "bounds": { "width": width, "height": height } })));
     }
-    send_ok(
-        shared,
-        session,
-        "Emulation.setDeviceMetricsOverride",
-        json!({ "mobile": false, "width": width, "height": height, "screenWidth": width, "screenHeight": height, "deviceScaleFactor": 1, "screenOrientation": { "angle": 0, "type": "landscapePrimary" } }),
-    )
-    .await?;
+    let bounds = commands.len();
+    commands.extend([
+        ("Page.enable", json!({})),
+        ("Page.getFrameTree", json!({})),
+        ("Log.enable", json!({})),
+        ("Page.setLifecycleEventsEnabled", json!({ "enabled": true })),
+        ("Runtime.enable", json!({})),
+        ("Network.enable", json!({})),
+        ("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true })),
+        ("Emulation.setFocusEmulationEnabled", json!({ "enabled": true })),
+        (
+            "Emulation.setDeviceMetricsOverride",
+            json!({ "mobile": false, "width": width, "height": height, "screenWidth": width, "screenHeight": height, "deviceScaleFactor": 1, "screenOrientation": { "angle": 0, "type": "landscapePrimary" } }),
+        ),
+    ]);
     if let Some(fonts) = font_families() {
-        send_ok(shared, session, "Page.setFontFamilies", fonts).await?;
+        commands.push(("Page.setFontFamilies", fonts));
     }
-    send_ok(
-        shared,
-        session,
+    commands.push((
         "Emulation.setEmulatedMedia",
         json!({ "media": "", "features": [
             { "name": "prefers-color-scheme", "value": "light" },
             { "name": "prefers-reduced-motion", "value": "no-preference" },
             { "name": "forced-colors", "value": "none" },
             { "name": "prefers-contrast", "value": "no-preference" } ] }),
-    )
-    .await?;
-    enable_interception_and_scripts(shared, session).await?;
+    ));
+    commands.extend(interception_and_script_commands(shared));
+    let methods: Vec<String> = commands.iter().map(|(method, _)| (*method).to_owned()).collect();
+    let results = cdp.send_batch(Some(session), commands).await;
+    for (index, (method, result)) in methods.iter().zip(results).enumerate() {
+        // 창 크기를 못 바꾸는 브라우저가 있다. 나머지는 하나라도 실패하면 준비가 안 된 것이다
+        if method == "Browser.setWindowBounds" && index < bounds {
+            continue;
+        }
+        let value = result.map_err(|error| RunError::Failed(format!("{method}: {error}")))?;
+        if method == "Page.getFrameTree" {
+            {
+                let mut state = shared.state.lock().unwrap();
+                register_frame_tree(&mut state, value.get("frameTree").unwrap_or(&Value::Null));
+            }
+            shared.notify.notify_waiters();
+        }
+    }
     send_ok(shared, session, "Runtime.runIfWaitingForDebugger", json!({})).await?;
     Ok(())
 }
 
-/// 요청 가로채기·서비스 워커 막기·미디어 오류 수집을 건다. 페이지 세션과 OOPIF iframe 세션이 같다
-async fn enable_interception_and_scripts(shared: &Arc<Shared>, session: &str) -> Result<(), RunError> {
+/// 요청 가로채기·서비스 워커 막기·미디어 오류 수집을 거는 명령들. 페이지 세션과 OOPIF iframe 세션이 같다
+fn interception_and_script_commands(shared: &Shared) -> Vec<(&'static str, Value)> {
+    let mut commands: Vec<(&'static str, Value)> = Vec::new();
     if shared.config.allowed.is_some() {
-        // 서비스 워커를 막는다. init 스크립트(옛 러너와 같은 글)로 `register`를 바꾸고, 이미 있을 수 있는 서비스 워커가 요청을 가로채지 못하게 우회시킨다
-        send_ok(shared, session, "Page.addScriptToEvaluateOnNewDocument", json!({ "source": SERVICE_WORKER_BLOCK_SCRIPT, "runImmediately": true })).await?;
-        send_ok(shared, session, "Network.setBypassServiceWorker", json!({ "bypass": true })).await?;
-        send_ok(shared, session, "Network.setCacheDisabled", json!({ "cacheDisabled": true })).await?;
-        send_ok(shared, session, "Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] })).await?;
+        // 서비스 워커를 막는다. init 스크립트(옛 러너와 같은 글)로 `register`를 바꾸고, 이미 있을 수 있는 서비스 워커가 페이지 요청을 가로채지 못하게 우회시킨다
+        commands.push(("Page.addScriptToEvaluateOnNewDocument", json!({ "source": SERVICE_WORKER_BLOCK_SCRIPT, "runImmediately": true })));
+        commands.push(("Network.setBypassServiceWorker", json!({ "bypass": true })));
+        commands.push(("Network.setCacheDisabled", json!({ "cacheDisabled": true })));
+        commands.push(("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*", "requestStage": "Request" }] })));
     }
-    send_ok(shared, session, "Runtime.addBinding", json!({ "name": MEDIA_BINDING })).await?;
-    send_ok(shared, session, "Page.addScriptToEvaluateOnNewDocument", json!({ "source": shared.config.media_script, "runImmediately": true })).await?;
-    Ok(())
+    commands.push(("Runtime.addBinding", json!({ "name": MEDIA_BINDING })));
+    commands.push(("Page.addScriptToEvaluateOnNewDocument", json!({ "source": shared.config.media_script, "runImmediately": true })));
+    commands
 }
 
 fn register_frame_tree(state: &mut State, tree: &Value) {
@@ -678,7 +690,7 @@ async fn setup_child(shared: Arc<Shared>, session: String, is_worker: bool) {
         send("Runtime.enable", json!({})).await;
         send("Network.enable", json!({})).await;
         send("Target.setAutoAttach", json!({ "autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true })).await;
-        let _ = enable_interception_and_scripts(&shared, &session).await;
+        let _ = cdp.send_batch(Some(&session), interception_and_script_commands(&shared)).await;
         send("Runtime.runIfWaitingForDebugger", json!({})).await;
     }
 }
