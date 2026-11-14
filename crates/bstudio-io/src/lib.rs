@@ -11,6 +11,7 @@ pub mod deploy_io;
 pub mod exec_stream;
 #[cfg(test)]
 mod fake_docker;
+pub mod gate_auto;
 pub mod gate_check;
 pub mod gate_declared;
 pub mod gate_page;

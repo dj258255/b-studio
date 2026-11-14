@@ -9,6 +9,7 @@
 import { formatBytes, SandboxError } from '@b-studio/sandbox';
 import type { WorkflowConcurrencyCheck, WorkflowLoadCheck, WorkflowStage, WorkflowTest } from '@b-studio/spec';
 import type { DeclaredHost } from './gate-check';
+import { legacyAutoPages } from './auto-pages-legacy';
 import { legacyCheckPage } from './check-page-legacy';
 import { CHECK_CONCURRENCY, describeConcurrencyExpect, evidenceOrNone, OUTPUT_TAIL_LINES, readJsonPath, TEST_TIMEOUT_MS } from './gate';
 import { finishEvidence, testEvidence } from './check-evidence';
@@ -46,7 +47,7 @@ async function legacyDeclaredInner(run: Run): Promise<WorkflowCheck[]> {
   const tests = workflow?.tests ?? [];
   const concurrency = workflow?.concurrencyChecks ?? [];
   const loads = workflow?.loadChecks ?? [];
-  const auto = await host.autoPages(pages);
+  const auto = await legacyAutoPages(host, pages);
   run.loadPlatformFailure = undefined;
   if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && loads.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
 
