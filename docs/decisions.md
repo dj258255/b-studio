@@ -10415,6 +10415,17 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **변이 시험**: Rust 분기 47곳을 하나씩 깨고 시험이 잡는지 봤다. 처음 4곳이 잡히지 않아 시험을 보강했다(기준 계약 실패를 저장으로 셈 → Rust 단위 시험, 성공해야 하는 콜백의 실패 응답 → 성공 필드가 함께 온 응답 시험, systemPackages 동기화 빠짐 → Dockerfile 확인 시험, 중복 제거 빠짐은 변이가 컴파일되지 않아 고쳐 다시 돌렸다). 보강 뒤 47곳 모두 잡혔다.
 - **실측**(2026-11-14, 실제 Claude Code 세션, [기록](experiments/2026-11-14-a5a-verify.md)): README 수정은 재시작·준비·계약 변경 없음으로 통과, `openapi.json`에서 속성을 지우면 `property-removed`로 세 번 막고 되돌림, README를 지우면 준비 실패(HTTP 404)로 세 번 막음. 지운 파일 재시도·OOM·막힌 접속·반영 확인 실패·specError·새 부가 서비스·취소는 차등 시험으로만 확인했다. 다른 러너·Kubernetes 제공자는 돌리지 않았다.
 
+### 덧붙임: A5b-1 결과 — 게이트 check의 상태 기계(`gate.ts`의 `#check`·`#failure`·`#strayServices`)를 Rust로 (2026-11-14, [#1199](https://github.com/dj258255/b-studio/issues/1199))
+
+- 옮긴 것(`crates/bstudio-io/src/gate_check.rs`, napi `gate_check_run`, TS 껍데기 `packages/agent/src/gate-check.ts`): 기록 검사 모으기 → 바뀐 파일 0개 분기 → `run` 단계·`verify_start` → 남은 프로세스 → 서비스 확인(`verify_io`를 같은 크레이트 안에서 바로 부르고, 플랫폼 실패면 한 번 기다렸다 다시) → `contract_check` → `verify_result`(`moreChecks`) → 새 부가 서비스 경고 → 플랫폼 실패 `exhausted` → `light` 또는 선언한 검사 → 다시 견줌(TOCTOU) → 부하 플랫폼 실패 → 리뷰 → 단계별 통과 집계 → 최종 판정·`gate_done`(#1155) → 실패 안내 글(`#failure`).
+- **상태는 TS가 든다.** 옛 코드가 필드를 바꾸던 그 자리마다 Rust가 `setState` 콜백으로 알린다(중간에 던져도 그때까지 바뀐 필드가 옛 코드와 같다). 이벤트도 옛 코드가 `onEvent`를 부르던 자리에서 `emit` 콜백으로 낸다. `lastOutcome` 비우기·채우기는 TS(`check()`)다.
+- **콜백으로 TS에 남긴 것**: 도구 밖 변경 동기화, 선언 정하기(`#reviewDeclaredChecks`, `#project`·`#unadoptedChange`를 바꿈), 요구사항 기록·평가 자산 검사, 바뀐 파일 수·목록, 선언한 검사 실행(A5b-2), 다시 견줌 둘, 리뷰(`reviewChanges`)와 필수 단계 대조(`missingVerificationStages`; 둘 다 이미 네이티브 판정이지만 TS `project`를 받아 콜백으로 둠), 남은 프로세스 조회, 취소 확인, 재시도 sleep. 실패한 검사 목록 글(`gate_helpers::format_failed_checks`)·검증 보고서 글(`verify_judge::format_verification_report`)·도구 밖 거절 글(`connection_judge::rejected_change_feedback`)은 Rust에서 직접 부른다.
+- **fail-closed.** 콜백이 응답하지 않거나 알아볼 수 없으면 `Fail::Hook`(통과가 아님)이고 TS가 저장한 오류를 그대로 던진다. 검사의 `ok`는 불리언 `true`일 때만 통과로 세고, `stage`·`name`·`ok`가 없는 검사는 알아볼 수 없는 응답이다. 최종 통과는 `report.ok && 실패 검사 0개 && (light || 필수 단계 누락 0)`다. 취소는 옛 `throwIfAborted` 자리마다 콜백으로 확인하고, 던지면 `gate_done`도 이후 단계도 없다.
+- **옛 코드와 같게 둔 것(글자)**: 실패한 검사 목록 글과 보고서 글은 옛 코드가 napi 경계를 거쳐 짝 없는 서로게이트가 U+FFFD였다. Rust에서도 그 두 함수에 넣는 값만 같은 꼴(`well_formed_from_encoded`)로 만들었다. 사유·선언 변경 요약은 옛 코드가 JS 글자 그대로 이었으므로 그대로 잇는다. 다르게 한 것은 없다.
+- **차등 시험**(`gate-check-differential.test.ts`, 44개)과 Rust 단위 시험 24개. 옛 `#check`·`#failure`를 `gate-legacy.ts`에 두고(하위 단계는 게이트가 꺼내 주는 `GateHost`로 같은 것을 부른다) 같은 시나리오의 이벤트 배열 전체(JSON 글), 결과, 게이트 공개 상태, sandbox 호출 순서를 견준다. 하위 단계 자체는 둘이 같은 메서드라 이 시험이 견주는 것은 부르는 순서·분기·결과 조립이다.
+- **변이 시험**: Rust 분기 25곳을 하나씩 깨 봤다. 둘이 잡히지 않아 보강했다 — 플랫폼 실패 상태를 다음 통과 check에서 비움(차등 시험 시나리오 추가), 선언한 검사 뒤 취소 확인(Rust 단위 시험이 잡음, 통합 시나리오에서는 선언한 검사 쪽이 먼저 던져 구분되지 않음). `ok` 비불리언 허용 변이는 입력 검증 때문에 같은 동작이라 잡히지 않는 것이 맞다.
+- 돌리지 않은 검증: 실제 세션 실측(조정자가 한다), 다른 러너·Kubernetes 제공자.
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

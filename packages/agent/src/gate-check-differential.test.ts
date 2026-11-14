@@ -437,6 +437,17 @@ describe('플랫폼 실패', () => {
     expect(types(out.traces[0]!)).toEqual(['stage', 'verify_start', 'stage', 'verify_result']);
   });
 
+  it('플랫폼 실패 뒤 다음 check가 통과하면 platformFailure를 비운다', async () => {
+    const out = await compare(() => ({ restarts: { api: ['platform', 'platform'] } }), async (w) => {
+      await w.write(...CHANGE);
+      await w.run('platform');
+      await w.run('recovered');
+    });
+    expect((out.traces[0]!.state as { platformFailure?: string }).platformFailure).toContain('가릴 빈 폴더');
+    expect(outcomeOf(out.traces[1]!)).toEqual({ kind: 'pass' });
+    expect((out.traces[1]!.state as { platformFailure?: string }).platformFailure).toBeUndefined();
+  });
+
   it('부하 확인을 b-studio 쪽 문제로 재지 못하면 gate_done(false) 뒤 exhausted다', async () => {
     const load: WorkflowLoadCheck = { name: 'orders-p95', service: 'api', method: 'POST', path: '/api/orders', concurrent: 10, warmup: 0, expect: { p95Ms: 200 } } as WorkflowLoadCheck;
     const out = await compare(
