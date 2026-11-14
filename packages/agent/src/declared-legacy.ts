@@ -9,6 +9,7 @@
 import { formatBytes, SandboxError } from '@b-studio/sandbox';
 import type { WorkflowConcurrencyCheck, WorkflowLoadCheck, WorkflowStage, WorkflowTest } from '@b-studio/spec';
 import type { DeclaredHost } from './gate-check';
+import { legacyCheckPage } from './check-page-legacy';
 import { CHECK_CONCURRENCY, describeConcurrencyExpect, evidenceOrNone, OUTPUT_TAIL_LINES, readJsonPath, TEST_TIMEOUT_MS } from './gate';
 import { finishEvidence, testEvidence } from './check-evidence';
 import { judgeLoad, loadRequestFor } from './load-check';
@@ -68,7 +69,7 @@ async function legacyDeclaredInner(run: Run): Promise<WorkflowCheck[]> {
     const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
     const name = unique(`${page.service} ${page.path}${page.mode === 'browser' ? ` (${browser}${steps})` : ''}`);
     meta.push({ stage: 'browser_check', name });
-    nodes.push({ id: `page:${name}`, run: ({ signal }) => host.checkPage(page, name, signal) });
+    nodes.push({ id: `page:${name}`, run: ({ signal }) => legacyCheckPage(host, page, name, signal) });
   }
   for (const entry of auto.pages) {
     const name = unique(entry.name);
@@ -76,7 +77,7 @@ async function legacyDeclaredInner(run: Run): Promise<WorkflowCheck[]> {
     nodes.push({
       id: `page:${name}`,
       run: ({ signal }) =>
-        host.checkPage(entry.page, name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) }),
+        legacyCheckPage(host, entry.page, name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) }),
     });
   }
   for (const test of tests) {
