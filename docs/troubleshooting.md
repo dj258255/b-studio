@@ -224,6 +224,7 @@
 - [200. 화면 확인 브라우저의 출처 제한을 허용 출처의 리다이렉트와 서비스 워커로 넘을 수 있었음 — 브라우저를 로컬 전달 프록시 뒤에서 띄우고 프록시가 접속 주소를 검사한다](#200-화면-확인-브라우저의-출처-제한을-허용-출처의-리다이렉트와-서비스-워커로-넘을-수-있었음--브라우저를-로컬-전달-프록시-뒤에서-띄우고-프록시가-접속-주소를-검사한다)
 - [201. napi 모듈을 다시 빌드하면 그 모듈을 불러온 프로세스가 살아 있는 동안 새 프로세스가 SIGKILL로 죽었음 — 같은 inode에 덮어쓰지 않고 새 파일로 바꿔 넣는다](#201-napi-모듈을-다시-빌드하면-그-모듈을-불러온-프로세스가-살아-있는-동안-새-프로세스가-sigkill로-죽었음--같은-inode에-덮어쓰지-않고-새-파일로-바꿔-넣는다)
 - [202. Rust 화면 확인 러너가 허용 밖으로 이동해 막힌 뒤의 브라우저 오류 화면 문구를 화면 글자로 읽었음 — 오류 화면은 빈 문서로 읽는다](#202-rust-화면-확인-러너가-허용-밖으로-이동해-막힌-뒤의-브라우저-오류-화면-문구를-화면-글자로-읽었음--오류-화면은-빈-문서로-읽는다)
+- [203. Rust 화면 확인 러너가 headless shell 대신 전체 Chromium을 띄워 호출이 약 400ms 느렸음 — Playwright 설치 목록에서 headless shell을 찾는다](#203-rust-화면-확인-러너가-headless-shell-대신-전체-chromium을-띄워-호출이-약-400ms-느렸음--playwright-설치-목록에서-headless-shell을-찾는다)
 
 ---
 
@@ -6404,3 +6405,31 @@ A6a(#1213)를 검토하다 Rust 코드를 바꿔 `pnpm build:native`를 다시 �
 - 평가 안의 확인을 빼면(식을 그대로 돌리면) 스스로 이동하는 시험이 두 브라우저에서 `expected 'order-done.invalid이(가) 차단됨…' to be ''`로 실패한다. 평가 전의 주소 확인은 지웠으므로 이 시험이 통과하는 것은 평가 안의 확인 덕분이다. 확인과 평가 사이에 이동이 끼는 경합 자체는 시점을 맞출 방법이 없어 재현하지 않았다.
 - 옛 러너와 비교할 때는 이 화면의 글자·`viewportTexts`를 무시한다(옛 러너가 브라우저에 따라 다르다).
 - 한계: 오류 화면 말고 페이지 자신이 그린 화면의 글자는 이 규칙과 무관하다.
+
+## 203. Rust 화면 확인 러너가 headless shell 대신 전체 Chromium을 띄워 호출이 약 400ms 느렸음 — Playwright 설치 목록에서 headless shell을 찾는다
+
+- 날짜: 2026-11-15, 이슈 #1212(A6c)
+- 실행 경로: `runInBrowserNative`(Rust CDP 러너, 게이트의 기본 러너는 아직 아니다)
+
+### 증상
+
+같은 페이지를 확인하는 호출 전체가 옛 러너(Playwright)보다 약 400ms 느렸다(단계 없는 호출 옛 약 660ms·새 약 1080ms, 단계 셋이면 약 360ms 차이). 페이지의 `loadMs`는 같았다.
+
+### 원인
+
+새 러너가 실행 파일을 `chromium.executablePath()`로 얻었는데, 이것은 headless shell이 아니라 전체 Chromium이다. 옛 러너의 `chromium.launch({ headless: true })`는 headless shell을 띄운다. 전체 Chromium은 첫 응답까지 197ms(headless shell 78ms)가 걸리고, 주소창 팝업 같은 `browser_ui` 대상이 붙어 `Target.createTarget`이 162ms(8ms)가 걸렸다. A6a에서는 늘어난 시간이 CDP 왕복마다 퍼져 있다고 잘못 읽어 원인을 놓쳤다. 메시지 단위 시각을 Playwright 프로토콜 기록과 나란히 놓고서야 보였다.
+
+### 영향
+
+시간만 늘었다. 판정 결과는 같았다. 다만 A6a·A6b의 검증에서 "headless shell에서 통과"라고 적은 새 러너 실행은 실제로는 전체 Chromium이었다(ADR-199 "A6c-1 덧붙임"에서 정정).
+
+### 고침
+
+`nativeBrowserCandidates()`가 Playwright 설치 목록(`registry.findExecutable('chromium-headless-shell')`)에서 headless shell을 먼저, 설치된 Chrome을 그다음에 시도한다. 전체 Chromium은 시도하지 않는다.
+
+### 확인
+
+- `browser-check-native.test.ts`: 고치기 전 판본에서 첫 후보가 전체 Chromium이라 `expected '/Users/…/ms-playw…' to match /chromium_h…/` 로 실패했다.
+- 고친 뒤 호출 시간(12회 중앙값, 한 번 잰 값): 단계 없음 옛 664ms·새 682ms, 단계 셋 옛 1331ms·새 1328ms.
+- 차등 시험 71개(headless shell)·69개(Google Chrome 157) 통과.
+
