@@ -102,15 +102,24 @@ export interface VerifyOptions {
  *  2. 계약을 다시 추출해 세션 시작 시점과 비교했을 때 호환을 깨지 않는지
  */
 export async function verifyChanges(options: VerifyOptions): Promise<VerificationReport> {
-  const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start, alsoRestart } = options;
+  const { start } = options;
   // 순서(Rust, crates/bstudio-io/src/verify_io.rs): findSecretLeaks → restartServicesFor → platformFailureOf → (sync 실패면 조기 반환) → 준비된 서비스만 계약 추출(병렬) → 판정(verify_judge.rs).
   // 샌드박스·프로젝트·계약 가져오기는 TS가 들고 콜백으로 불린다. 계약 주소는 `serviceUrl`(WHATWG `new URL`로 출처를 비교한다)이라 Rust로 옮기지 않았다
   // (확인하는 쪽과 요청하는 쪽이 같은 입력을 다르게 읽지 않게)
+  const { input, handlers } = verifyChangesSetup(options);
+  return runVerify<VerificationReport>('verifyChanges', input, handlers, start?.signal);
+}
+
+/**
+ * `verifyChanges`가 Rust에 넘기는 입력과 콜백 처리기. 게이트 check(`gate-check.ts`)가 `verifyChanges`를 Rust 안에서 바로 부를 때도 같은 것을 쓴다.
+ * 재시작이 다시 읽은 선언을 든 처리기(`declared`)는 부를 때마다 새로 만든다(옛 코드가 `verifyChanges`를 부를 때마다 새로 만들던 것과 같다)
+ */
+export function verifyChangesSetup(options: VerifyOptions): { input: Record<string, unknown>; handlers: Record<string, HookHandler> } {
+  const { sandbox, project, changedFiles, baselines, allowBreaking, fetcher = fetchContract, start, alsoRestart } = options;
   const restart = restartHooks(sandbox, project, changedFiles, start);
-  return runVerify<VerificationReport>(
-    'verifyChanges',
-    { ...verifyInput(sandbox, project, changedFiles), ...(alsoRestart ? { alsoRestart } : {}), allowBreaking },
-    {
+  return {
+    input: { ...verifyInput(sandbox, project, changedFiles), ...(alsoRestart ? { alsoRestart } : {}), allowBreaking },
+    handlers: {
       ...restart.handlers,
       ...secretHandlers(sandbox),
       contract: ({ service }) =>
@@ -121,8 +130,7 @@ export async function verifyChanges(options: VerifyOptions): Promise<Verificatio
           return { changes: diffContracts(baselines.get(String(service)), current) };
         }),
     },
-    start?.signal,
-  );
+  };
 }
 
 /**
@@ -199,18 +207,18 @@ export async function restartServicesFor(
 // servicesForFiles(`process.cwd()`를 읽는다), 계약 가져오기(endpoint → serviceUrl → fetcher → diffContracts), sleep(취소 신호를 지킨다).
 // 응답은 `{ ok: true, ... }`, 옛 코드가 `catch`로 값으로 읽던 실패 `{ ok: false, error: { message, platform?, aborted? } }`, 옛 코드에서 그대로 던지던 실패(콜백 오류를 저장하고 `{ fatal: true }`)다.
 
-type HookRequest = Record<string, unknown>;
-type HookHandler = (request: HookRequest) => Promise<Record<string, unknown>> | Record<string, unknown>;
+export type HookRequest = Record<string, unknown>;
+export type HookHandler = (request: HookRequest) => Promise<Record<string, unknown>> | Record<string, unknown>;
 
 /** 글자를 Rust 경계의 꼴(`encodeLoneSurrogates`)로 바꾼다. 키는 바꾸지 않는다 */
-function encodeStrings(value: unknown): unknown {
+export function encodeStrings(value: unknown): unknown {
   if (typeof value === 'string') return encodeLoneSurrogates(value);
   if (Array.isArray(value)) return value.map(encodeStrings);
   if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, encodeStrings(item)]));
   return value;
 }
 
-function decodeStrings<T>(value: T): T {
+export function decodeStrings<T>(value: T): T {
   if (typeof value === 'string') return decodeLoneSurrogates(value) as T;
   if (Array.isArray(value)) return value.map(decodeStrings) as T;
   if (value !== null && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, decodeStrings(item)])) as T;
@@ -218,7 +226,7 @@ function decodeStrings<T>(value: T): T {
 }
 
 /** 옛 코드가 `catch`로 값으로 읽던 실패를 응답으로 바꾼다(삼킬지 값으로 쓸지는 Rust가 정한다) */
-function failure(error: unknown, extra: Record<string, unknown> = {}, aborted = false): Record<string, unknown> {
+export function failure(error: unknown, extra: Record<string, unknown> = {}, aborted = false): Record<string, unknown> {
   return { ok: false, error: { message: describe(error), ...(isPlatformError(error) ? { platform: true } : {}), ...(aborted ? { aborted: true } : {}) }, ...extra };
 }
 
@@ -394,6 +402,6 @@ export function formatVerificationReport(report: VerificationReport, { allowBrea
   return native.verifyFormatReport(json, allowBreaking, SPEC_FILE);
 }
 
-function describe(error: unknown): string {
+export function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }

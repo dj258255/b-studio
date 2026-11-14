@@ -4986,6 +4986,27 @@ pub fn verify_run(env: Env, op: String, input: String, hook: ThreadsafeFunction<
     .build(&env)
 }
 
+// ── 게이트 check의 상태 기계(ADR-195 4f A5b-1) ──
+// 순서·분기·결과 조립은 bstudio-io(gate_check)가 하고, 서비스 확인은 같은 크레이트의 verify_io를 바로 부른다. 상태·sandbox·workspace·project는 TS가 들고 `hook`으로 부른다.
+// 입력·출력은 JSON 글이다(`encodeNative`·`encodeLoneSurrogates`한 꼴). 던지지 않고 결과(`ok`·`kind`)로 돌려준다. TS 껍데기: packages/agent/src/gate-check.ts
+use bstudio_io::gate_check as gcheck;
+
+#[napi]
+pub fn gate_check_run(env: Env, input: String, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: gcheck::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        Ok(gcheck::run(&input, Some(hook)).await)
+    })
+    .build(&env)
+}
+
 // ── 샌드박스 끝맺음·부하 러너·사내 API 호출·만들기 준비(ADR-195 4f A4c-3c) ──
 // 판정은 bstudio-guard(load_runner·external_call·docker_format), docker를 부르는 순서와 지우는 대상은 bstudio-io(lifecycle_io)가 한다.
 // `up`은 여기서 부르지 않는다. 던지지 않고 결과(`kind`)로 돌려준다(작업 폴더 만들기만 던진다). TS 껍데기: packages/sandbox/src/docker/lifecycle-run.ts

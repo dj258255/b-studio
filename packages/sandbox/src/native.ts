@@ -141,6 +141,8 @@ interface NativeGuard {
   checkpointRemote(op: string, input: string, hook: (request: string) => Promise<string>): Promise<string>;
   /** 게이트 검증의 조율(ADR-195 4f A5a). op: verifyChanges·restartServicesFor·findSecretLeaks·captureBaselines. `hook`은 요청(JSON)을 받아 응답(JSON)을 돌려준다. 던지지 않고 결과의 `ok`·`kind`로 돌려준다 */
   verifyRun(op: string, input: string, hook: (request: string) => Promise<string>): Promise<string>;
+  /** 게이트 check의 상태 기계(ADR-195 4f A5b-1). `input`·결과는 JSON. `hook`은 요청(JSON)을 받아 응답(JSON)을 돌려준다. 던지지 않고 결과의 `ok`·`kind`로 돌려준다 */
+  gateCheckRun(input: string, hook: (request: string) => Promise<string>): Promise<string>;
   runCommandBytes(bin: string, args: string[], input: Buffer | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, maxBuffer: number, signal: AbortSignal | undefined | null): Promise<BytesResult>;
   runArchiveExtract(gitBin: string, gitArgs: string[], gitEnv: Record<string, string> | undefined | null, dest: string): Promise<ArchiveExtractResult>;
   // ── I/O: 링크 안전 파일 시스템 준비(2단계 2c-1b). 아무것도 재귀로 따라가며 지우지 않는다(링크는 링크만).

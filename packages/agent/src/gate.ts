@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { lstat, readdir, readFile } from 'node:fs/promises';
-import { setTimeout as sleep } from 'node:timers/promises';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, encodeNative, formatBytes, native, SandboxError, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
@@ -18,7 +17,8 @@ import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runTaskGraph, type TaskNode } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
-import { captureBaselines, formatVerificationReport, serviceUrl, verifyChanges, type ContractFetcher, type VerificationReport } from './verify';
+import { GATE_HOST, runGateCheck, type GateHost } from './gate-check';
+import { captureBaselines, serviceUrl, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
 import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
@@ -393,38 +393,6 @@ export class VerificationGate {
   }
 
   /**
-   * 서비스가 준비된 뒤 `docker exec`(run_in_service 등)로 들어와 남은 프로세스가 있는 서비스를 찾는다(#765).
-   * 그런 프로세스는 검사하는 동안 파일을 바꿨다가 끝나기 전에 되돌릴 수 있고, 앞뒤 지문이 같아 #recheckOutsideChanges가 잡지 못한다.
-   * 끝내지 않고 그 서비스를 다시 띄운다: 서비스가 스스로 다른 세션으로 띄운 서버(Gradle의 bootRun)를 잘못 끝내지 않고,
-   * 셸이 없는 이미지에서도 같게 동작한다. 확인하지 못한 서비스와 찾기가 실패한 경우는 managed 서비스를 다시 띄운다(모르면 막는 쪽).
-   * 무엇을 찾았는지는 통과로 표시한 review 기록으로 남긴다 — 실패가 아니라 에이전트가 알아야 할 사실이다.
-   * 남은 한계: 이 컴퓨터 방식 터미널의 호스트 셸과, 서비스의 개발 서버가 다시 읽어 들인 코드가 서버 안에서 하는 일은 막지 못한다.
-   */
-  async #strayServices(): Promise<{ services: string[]; note?: WorkflowCheck }> {
-    const { sandbox, signal } = this.#options;
-    if (!sandbox.strayProcesses) return { services: [] };
-    const note = (detail: string): WorkflowCheck => ({ stage: 'review', name: 'background-processes', ok: true, attempts: 1, detail });
-    let reports: Awaited<ReturnType<NonNullable<Sandbox['strayProcesses']>>>;
-    try {
-      reports = await sandbox.strayProcesses({ signal });
-    } catch (error) {
-      signal?.throwIfAborted();
-      const all = this.#project.managed.map(([name]) => name);
-      return { services: all, note: note(`서비스 안의 백그라운드 프로세스를 확인하지 못해 서비스를 모두 다시 띄웠습니다: ${error instanceof Error ? error.message : String(error)}`) };
-    }
-    if (reports.length === 0) return { services: [] };
-    const lines = reports.map((report) =>
-      report.error !== undefined
-        ? `${report.service}: ${report.error}`
-        : `${report.service}: ${report.processes.slice(0, 3).map((process) => process.command || `pid ${process.pid}`).join(', ')}${report.processes.length > 3 ? ` 외 ${report.processes.length - 3}개` : ''}`,
-    );
-    return {
-      services: reports.map((report) => report.service),
-      note: note(`검사 전에 서비스 안에 남은 백그라운드 프로세스가 있어 그 서비스를 다시 띄웠습니다(서비스 안 명령으로 오래 도는 프로세스를 남기지 마세요) — ${lines.join(' / ')}`),
-    };
-  }
-
-  /**
    * 승격이 새 재시도 예산을 줄 때 쓴다. 상한을 "지금까지 시도한 수 + 예산"으로 다시 잡으므로,
    * 남은 횟수에 더하는 게 아니라 그 모델에게 예산만큼의 기회를 새로 준다(E4에서 2번째 실패 뒤 승격하고도
    * 한 번밖에 남지 않았던 문제). 돌려주는 값은 이 호출로 다음 시도가 가능해졌는지다
@@ -447,173 +415,122 @@ export class VerificationGate {
     return outcome;
   }
 
-  async #check(): Promise<GateOutcome> {
-    const { sandbox, workspace, allowBreaking, fetcher, signal, onServiceStatus, onEvent } = this.#options;
-    // 도구 밖 변경을 작업 공간에 옮긴다. 바뀐 파일 수를 보기 전에 해야, 그것만 바뀐 턴도 "바뀐 파일 없음"으로 지나가지 않는다.
-    // 게이트가 다룰 수 없는 경로(링크·비밀 파일 등)가 바뀌었으면 검증하지 않고 실패로 남긴다
-    const rejectedOutside = (await this.#outsideTracker?.sync())?.rejected ?? [];
-    // 확인 선언을 먼저 정한다. 그 뒤의 모든 단계가 같은 선언을 본다
-    const declaredChecks = await this.#reviewDeclaredChecks();
-    const project = this.#project;
-    // 바뀐 파일 목록에 의존하지 않는 검사들(요구사항 검증 기록·평가 자산 지문·도구 밖 변경). 바뀐 파일이 0개인 턴에서도 돈다
-    const recordChecks = [
-      ...(await this.#requirementRecordChecks()),
-      ...(await this.#evaluationAssetChecks()),
-      ...declaredChecks,
-      ...(rejectedOutside.length > 0
-        ? [{ stage: 'review' as const, name: 'outside-tool-changes', ok: false, attempts: 1, detail: rejectedChangeFeedback(rejectedOutside) }]
-        : []),
-    ];
-    const recheck = this.#options.recheck === true;
-    if (!recheck && workspace.changedFiles().length === 0) {
-      if (recordChecks.every((check) => check.ok)) return { kind: 'pass' };
-      // 바뀐 파일로 추적되지 않은 경로(서비스 안 명령 등)로 검증 기록만 고쳤다: 다른 단계는 돌릴 것이 없다
-      this.checks = recordChecks;
-      for (const check of recordChecks) onEvent({ type: 'workflow_check', check });
-      return this.#failure('', recordChecks.filter((check) => !check.ok));
-    }
+  /**
+   * check의 순서·분기·결과 조립은 Rust(`crates/bstudio-io/src/gate_check.rs`, ADR-195 4f A5b-1)가 한다: 기록 검사 모으기 → 바뀐 파일 0개 분기 → `run` 단계 → 남은 프로세스(#765) → 서비스 확인(플랫폼
+   * 실패면 한 번 더) → `contract_check` 단계 → `verify_result` → 새 부가 서비스 경고 → 플랫폼 실패 `exhausted` → `light` 분기 또는 선언 검사 → 다시 견줌(TOCTOU) → 부하 플랫폼 실패 → 리뷰 → 단계별 통과 집계 →
+   * 최종 판정과 `gate_done`(#1155) → 실패 안내(`#failure`) 글. 서비스 안 남은 프로세스 조회의 글 모양과 "확인하지 못하면 managed 전부 다시 띄우기"(#strayServices)도 Rust다.
+   * 여기는 Rust가 부르는 하위 단계(`GateHost`)를 이 객체의 필드·메서드에 잇는다. 상태 필드는 옛 코드가 바꾸던 자리마다 Rust가 알려 준다.
+   */
+  #check(): Promise<GateOutcome> {
+    return runGateCheck(this.#host());
+  }
 
-    // 다시 확인은 studio.yaml을 바뀐 파일로 넘겨 관리 서비스를 모두 다시 띄우고 선언을 다시 읽게 한다(servicesForFiles)
-    const files = recheck ? [SPEC_FILE] : this.#filesToVerify();
-    this.#stage('run');
-    onEvent({ type: 'verify_start', files });
-    this.#verifiedVersion = workspace.version;
-    // 바뀌지 않은 서비스에 b-studio가 모르는 백그라운드 프로세스가 남았으면 그 서비스도 다시 띄운다(#765). 다시 띄운 뒤의 검사는
-    // 그 프로세스 없이 돌고, 그 전에 바뀐 파일은 검사 뒤의 다시 견줌(#recheckOutsideChanges)이 잡는다
-    const strays = await this.#strayServices();
-    if (strays.note) recordChecks.push(strays.note);
-    const verify = () =>
-      verifyChanges({
+  /** 차등 시험이 옛 구현(`gate-legacy.ts`)에 같은 하위 단계를 넘기려고 꺼내 간다. 제품 코드는 쓰지 않는다 */
+  [GATE_HOST](): GateHost {
+    return this.#host();
+  }
+
+  #host(): GateHost {
+    const gate = this;
+    const { sandbox, workspace, signal, onEvent, onServiceStatus, fetcher, allowBreaking } = this.#options;
+    return {
+      sandbox,
+      signal,
+      onEvent,
+      recheck: this.#options.recheck === true,
+      light: this.#options.verify === 'light',
+      allowBreaking,
+      platformRetryDelayMs: this.#options.platformRetryDelayMs ?? PLATFORM_RETRY_DELAY_MS,
+      state: {
+        get attempts() {
+          return gate.attempts;
+        },
+        set attempts(value) {
+          gate.attempts = value;
+        },
+        get maxAttempts() {
+          return gate.#maxAttempts;
+        },
+        get report() {
+          return gate.report;
+        },
+        set report(value) {
+          gate.report = value;
+        },
+        get checks() {
+          return gate.checks;
+        },
+        set checks(value) {
+          gate.checks = value;
+        },
+        get passedStages() {
+          return gate.passedStages;
+        },
+        set passedStages(value) {
+          gate.passedStages = value;
+        },
+        get skippedStages() {
+          return gate.skippedStages;
+        },
+        set skippedStages(value) {
+          gate.skippedStages = value;
+        },
+        get verified() {
+          return gate.verified;
+        },
+        set verified(value) {
+          gate.verified = value;
+        },
+        get platformFailure() {
+          return gate.platformFailure;
+        },
+        set platformFailure(value) {
+          gate.platformFailure = value;
+        },
+        get failedServices() {
+          return gate.#failedServices;
+        },
+        set failedServices(value) {
+          gate.#failedServices = value;
+        },
+        get project() {
+          return gate.#project;
+        },
+        get unadoptedChange() {
+          return gate.#unadoptedChange;
+        },
+        get loadPlatformFailure() {
+          return gate.#loadPlatformFailure;
+        },
+      },
+      verifyOptions: (files, alsoRestart) => ({
         sandbox,
-        project,
+        project: this.#project,
         changedFiles: files,
         baselines: this.#baselines,
         allowBreaking,
         fetcher,
         start: { signal, onStatus: onServiceStatus },
-        ...(strays.services.length > 0 ? { alsoRestart: strays.services } : {}),
-      });
-    let report = await verify();
-    // 샌드박스·도커 쪽 실패는 잠깐의 경합일 수 있다(서비스 둘이 함께 재시작될 때 등). 모델을 거치지 않고 한 번만 그대로 다시 해 본다
-    if (!report.ok && report.platformFailure) {
-      signal?.throwIfAborted();
-      await sleep(this.#options.platformRetryDelayMs ?? PLATFORM_RETRY_DELAY_MS, undefined, { signal });
-      report = await verify();
-    }
-    // 도중에 취소되면 계약 조회처럼 결과로 바뀐 중단까지 게이트 실패로 알리지 않는다
-    signal?.throwIfAborted();
-    this.#stage('contract_check');
-    this.report = report;
-    this.#failedServices = new Set(report.restarted.filter((check) => !check.ready).map((check) => check.service));
-    this.passedStages = new Set();
-    this.checks = [...recordChecks];
-
-    const text = formatVerificationReport(report, { allowBreaking });
-    // report.ok면 이 뒤에 선언 검사·리뷰가 더 돈다(오래 걸릴 수 있다). 그 사이에 이 결과만 보고 통과로 읽지 않도록 알리고,
-    // 끝나면 gate_done을 낸다(#1155). 서비스 확인이 실패한 결과는 뒤에 기다릴 검사가 없어 이 표시가 없다
-    onEvent({ type: 'verify_result', report, text, ...(report.ok ? { moreChecks: true } : {}) });
-    // 이 호출이 verify_result 뒤에서 끝나는 모든 정상 경로가 낸다. 도중에 던지면(취소·오류) 내지 않아 개요가 통과로 읽지 않는다
-    const gateDone = (ok: boolean): void => {
-      if (report.ok) onEvent({ type: 'gate_done', ok });
-    };
-    // 세션이 시작할 때는 없던 부가 서비스를 새로 올렸으면 대화 화면에도 바로, 왜 켰는지와 함께 알린다
-    // (도그푸딩 마찰 138, ADR-146) — report.text에도 같은 줄이 있지만, 그건 검증 결과 전체를 읽어야 보인다
-    if (report.addedAddons?.length) {
-      onEvent({
-        type: 'warning',
-        message: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${report.addedAddons.join(', ')}`,
-      });
-    }
-
-    // 다시 해도 샌드박스·도커 쪽 문제면 여기서 멈춘다. 에이전트가 고칠 수 없는 실패라 재시도 횟수로 세지 않고,
-    // 고치라고 돌려보내지도 않는다(전에는 같은 실패로 재시도 3번을 다 쓰고 변경이 되돌려졌다, 트러블슈팅 117)
-    if (!report.ok && report.platformFailure) {
-      this.platformFailure = report.platformFailure;
-      return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${report.platformFailure}` };
-    }
-    this.platformFailure = undefined;
-
-    // 서비스가 뜨지 않았거나 계약이 깨졌으면 그 위에서 테스트나 화면 확인을 돌려도 의미가 없다
-    if (report.ok) {
-      this.passedStages.add('run');
-      this.passedStages.add('contract_check');
-      if (this.#options.verify === 'light') {
-        // 가볍게 확인: 재시작·준비 판정·계약만 돌린다. 건너뛴 단계는 기록만 하고 실패로 보지 않는다
-        this.skippedStages = missingVerificationStages(project, this.passedStages);
-        for (const check of recordChecks) onEvent({ type: 'workflow_check', check });
-      } else {
-        const checks = await this.#runDeclaredChecks();
-        signal?.throwIfAborted();
-        // 선언한 검사(테스트)를 돌리는 동안 평가 자산이 바뀌었을 수 있다. 검사 뒤에 지문을 다시 떠 견주고, 다르면 같은 실패로 바꾼다(TOCTOU)
-        await this.#recheckEvaluationAssets(recordChecks);
-        // 도구 밖 변경도 같은 이유로 검사 뒤에 한 번 더 동기화한다. 검사 전에만 동기화하면 판정은 바뀐 내용으로 났는데 지문은
-        // 바뀌기 전 것이라, 검증하지 않은 내용이 체크포인트로 갈 수 있다. 바뀌었으면 실패로 남긴다
-        await this.#recheckOutsideChanges(recordChecks);
-        // 부하 확인을 재지 못한 것이 b-studio 쪽 문제면 여기서 멈춘다. 서비스 재시작의 플랫폼 실패와 같은 규칙이다(트러블슈팅 117)
-        if (this.#loadPlatformFailure) {
-          this.checks = [...checks, ...recordChecks];
-          for (const check of this.checks) onEvent({ type: 'workflow_check', check });
-          this.platformFailure = this.#loadPlatformFailure;
-          gateDone(false);
-          return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${this.#loadPlatformFailure}` };
-        }
-        this.#stage('review');
+        ...(alsoRestart.length > 0 ? { alsoRestart } : {}),
+      }),
+      outsideSync: async () => (await this.#outsideTracker?.sync())?.rejected ?? [],
+      reviewDeclaredChecks: () => this.#reviewDeclaredChecks(),
+      requirementRecordChecks: () => this.#requirementRecordChecks(),
+      evaluationAssetChecks: () => this.#evaluationAssetChecks(),
+      changedFiles: () => workspace.changedFiles(),
+      filesToVerify: () => this.#filesToVerify(),
+      markVerifiedVersion: () => {
+        this.#verifiedVersion = workspace.version;
+      },
+      runDeclaredChecks: () => this.#runDeclaredChecks(),
+      recheckEvaluationAssets: (recordChecks) => this.#recheckEvaluationAssets(recordChecks),
+      recheckOutsideChanges: (recordChecks) => this.#recheckOutsideChanges(recordChecks),
+      reviewChecks: () => {
         // 쓰기 직전 고정값과 바이트까지 같은 보호 경로 파일은 "쓰고 되돌린 것"이라 보호 경로 확인에서 뺀다(이슈 #992). 고정값이 없으면 바뀐 것으로 본다
-        const changed = recheck ? [] : workspace.changedFiles();
-        checks.push(...reviewChanges(project, changed, workspace.restoredProtectedFiles(changed)), ...recordChecks);
-        this.checks = checks;
-        for (const check of checks) onEvent({ type: 'workflow_check', check });
-        for (const stage of ['browser_check', 'test', 'concurrency_check', 'load_check', 'review'] as const) {
-          const ofStage = checks.filter((check) => check.stage === stage);
-          if (ofStage.length > 0 && ofStage.every((check) => check.ok)) this.passedStages.add(stage);
-        }
-      }
-    }
-
-    const failedChecks = this.checks.filter((check) => !check.ok);
-    if (report.ok && failedChecks.length === 0) {
-      // light는 건너뛴 단계를 실패로 보지 않는다. 통과한 단계만 남겨 배포 조건(releaseRequires)이 자연히 막는다
-      if (this.#options.verify === 'light') {
-        this.verified = true;
-        gateDone(true);
-        return { kind: 'pass' };
-      }
-      // 스키마가 실행 수단 없는 필수 단계를 막지만, 어떤 경로로든 단계가 돌지 않았다면 통과로 보지 않는다
-      const missing = missingVerificationStages(project, this.passedStages);
-      if (missing.length > 0) {
-        gateDone(false);
-        return { kind: 'exhausted', summary: `워크플로 필수 단계가 실행되지 않아 완료로 인정하지 않습니다: ${missing.join(', ')}` };
-      }
-      this.verified = true;
-      gateDone(true);
-      return { kind: 'pass' };
-    }
-
-    gateDone(false);
-    return this.#failure(text, failedChecks, report.ok);
-  }
-
-  /** 검증 실패를 시도 횟수에 세고, 남은 기회가 있으면 모델에게 돌려줄 안내를, 없으면 중단 사유를 돌려준다 */
-  #failure(reportText: string, failedChecks: readonly WorkflowCheck[], reportOk = false): GateOutcome {
-    this.attempts += 1;
-    if (this.attempts >= this.#maxAttempts) {
-      // 사람 확인 기록 위조로 막힌 것이면 사유를 요약에 남긴다(대화에서 왜 되돌렸는지 바로 보이게)
-      const record = failedChecks.find((check) => check.name === MANUAL_VERIFICATION_CHECK);
-      const reason = record?.detail ? ` — ${record.detail.split('\n')[0]}` : '';
-      // 선언을 고치려던 요청이면 사용자가 다음에 할 일을 알 수 있게 한다(같은 요청을 다시 보내도 같은 자리에서 막힌다)
-      const declared = this.#unadoptedChange ? ` — 확인의 선언을 바꾸려던 것이면 '확인 선언 변경 허용'을 켜고 다시 요청하세요(이번 실행에서 바뀐 선언: ${this.#unadoptedChange})` : '';
-      return { kind: 'exhausted', summary: `검증 게이트를 ${this.attempts}번 통과하지 못했습니다${reason}${declared}` };
-    }
-    // 실패를 앞에 쓴다. 서비스 확인이 통과했는데 뒤 검사가 실패한 경우 보고서가 "검증 통과"로 시작하면 첫 줄이 통과로 읽힌다(#1155)
-    const failed = formatFailedChecks(failedChecks).trimStart();
-    const body = !reportText ? failed : reportOk ? `${failed}\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n${reportText}` : `${reportText}${formatFailedChecks(failedChecks)}`;
-    // 선언을 고쳐도 이 실행의 검증에는 쓰이지 않는다는 것을 모델이 모르면 같은 수정을 되풀이하다 시도를 다 쓴다
-    const declared = this.#unadoptedChange
-      ? `\n\n[참고] 이번 실행에서 ${SPEC_FILE}의 확인 선언을 바꿨지만(${this.#unadoptedChange}) 이 검증은 실행을 시작할 때의 선언으로 돌았습니다. 선언은 사용자가 허용한 요청에서만 그 실행의 검증에 쓰입니다. 선언을 바꾸는 것이 사용자의 요청이면 같은 수정을 되풀이하지 말고, 되묻기 도구(ask_user)로 사용자에게 "'확인 선언 변경 허용'을 켜고 답해 달라"고 알리세요.`
-      : '';
-    return {
-      kind: 'retry',
-      feedback: `[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n${body}${declared}`,
+        const changed = this.#options.recheck === true ? [] : workspace.changedFiles();
+        return reviewChanges(this.#project, changed, workspace.restoredProtectedFiles(changed));
+      },
+      missingStages: (passed) => missingVerificationStages(this.#project, passed),
     };
   }
 

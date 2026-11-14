@@ -46,35 +46,35 @@ pub enum Fail {
     Input(String),
 }
 
-type Res<T> = Result<T, Fail>;
+pub(crate) type Res<T> = Result<T, Fail>;
 
-fn input_error<T>(message: impl Into<String>) -> Res<T> {
+pub(crate) fn input_error<T>(message: impl Into<String>) -> Res<T> {
     Err(Fail::Input(message.into()))
 }
 
 // ── 콜백 ────────────────────────────────────────────────────────────────
 
 /// 콜백 응답. `Failed`는 옛 코드가 `catch`로 값으로 읽던 실패다(`value`는 응답 전체: 실패해도 함께 온 값을 읽는다. 예: 로그를 모으다 실패해도 그때까지의 줄)
-enum Answer {
+pub(crate) enum Answer {
     Done(JsValue),
     Failed { message: String, platform: bool, aborted: bool, value: JsValue },
 }
 
-fn s(text: impl Into<String>) -> JsValue {
+pub(crate) fn s(text: impl Into<String>) -> JsValue {
     JsValue::Str(text.into())
 }
 
-fn strings(items: &[String]) -> JsValue {
+pub(crate) fn strings(items: &[String]) -> JsValue {
     JsValue::Arr(items.iter().map(|item| s(item.clone())).collect())
 }
 
-fn req(op: &str, fields: Vec<(&str, JsValue)>) -> JsValue {
+pub(crate) fn req(op: &str, fields: Vec<(&str, JsValue)>) -> JsValue {
     let mut pairs: Vec<(&str, Option<JsValue>)> = vec![("op", Some(s(op)))];
     pairs.extend(fields.into_iter().map(|(key, value)| (key, Some(value))));
     js_json::object(pairs)
 }
 
-async fn call(hook: &Hook, request: JsValue) -> Res<Answer> {
+pub(crate) async fn call(hook: &Hook, request: JsValue) -> Res<Answer> {
     let answer = hook(js_json::to_native(&request)).await.ok_or(Fail::Hook)?;
     let value = js_json::parse_native(&answer).map_err(|_| Fail::Hook)?;
     if !matches!(value, JsValue::Obj(_)) || matches!(value.prop("fatal"), Some(JsValue::Bool(true))) {
@@ -93,7 +93,7 @@ async fn call(hook: &Hook, request: JsValue) -> Res<Answer> {
 }
 
 /// 성공해야 하는 콜백(옛 코드에서 실패하면 그대로 던지던 자리). 실패 응답은 알아볼 수 없는 응답이다
-async fn call_done(hook: &Hook, request: JsValue) -> Res<JsValue> {
+pub(crate) async fn call_done(hook: &Hook, request: JsValue) -> Res<JsValue> {
     match call(hook, request).await? {
         Answer::Done(value) => Ok(value),
         Answer::Failed { .. } => Err(Fail::Hook),
@@ -101,7 +101,7 @@ async fn call_done(hook: &Hook, request: JsValue) -> Res<JsValue> {
 }
 
 /// 문자열 목록이어야 하는 필드. 없거나 모양이 다르면 `Fail::Hook`
-fn string_list(value: Option<&JsValue>) -> Res<Vec<String>> {
+pub(crate) fn string_list(value: Option<&JsValue>) -> Res<Vec<String>> {
     match value {
         Some(JsValue::Arr(items)) => items.iter().map(|item| item.as_str().map(str::to_owned).ok_or(Fail::Hook)).collect(),
         _ => Err(Fail::Hook),
@@ -584,7 +584,7 @@ pub async fn run(op: &str, input: &str, hook: Option<Hook>) -> String {
     js_json::to_native(&out)
 }
 
-async fn dispatch(op: &str, input: &str, hook: Option<Hook>) -> Res<JsValue> {
+pub(crate) async fn dispatch(op: &str, input: &str, hook: Option<Hook>) -> Res<JsValue> {
     let (mut ctx, value) = read_input(input)?;
     ctx.hook = hook.ok_or(Fail::Hook)?;
     let ctx = Arc::new(ctx);
