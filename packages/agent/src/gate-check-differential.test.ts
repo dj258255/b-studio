@@ -473,7 +473,7 @@ describe('플랫폼 실패', () => {
 describe('남은 프로세스(#765)', () => {
   const found = [
     { service: 'api', processes: [{ pid: 15, command: 'sh -c while true; do cp b a; done' }, { pid: 16, command: '' }, { pid: 17, command: 'c' }, { pid: 18, command: 'd' }, { pid: 19, command: 'e' }, { pid: 20, command: 'lone \ud800 x' }] },
-    { service: 'web', error: '확인하지 못했습니다', processes: [] },
+    { service: 'web', error: '확인하지 못했습니다' },
   ];
 
   it('찾으면 그 서비스도 다시 띄우고 무엇을 찾았는지 review 기록으로 남긴다', async () => {
