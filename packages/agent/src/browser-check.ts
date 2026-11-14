@@ -160,7 +160,7 @@ const MEDIA_ERROR_NAMES: Record<number, string> = {
  * 에이전트 패키지는 DOM 타입을 쓰지 않아(다른 page.evaluate 호출과 같은 이유) 평문 문자열로 둔다.
  * `window.__bStudioMediaError__`는 goto 전에 exposeFunction으로 등록해 둔다
  */
-const MEDIA_ERROR_INIT_SCRIPT = `(() => {
+export const MEDIA_ERROR_INIT_SCRIPT = `(() => {
   var names = ${JSON.stringify(MEDIA_ERROR_NAMES)};
   document.addEventListener('error', function (event) {
     var target = event.target;

@@ -220,6 +220,7 @@
 - [ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다](#adr-196-보호-경로의-되돌림은-이-실행에서-처음-쓰기-직전에-고정한-내용과-바이트까지-같을-때만-인정한다)
 - [ADR-197 spec의 YAML 읽기는 Rust가 하고, JS와 다르게 읽을 수 있는 꼴은 읽지 않고 거절한다](#adr-197-spec의-YAML-읽기는-Rust가-하고-JS와-다르게-읽을-수-있는-꼴은-읽지-않고-거절한다)
 - [ADR-198 화면 확인 브라우저의 출처 제한은 라우트에 더해 로컬 전달 프록시가 접속 주소를 검사한다](#adr-198-화면-확인-브라우저의-출처-제한은-라우트에-더해-로컬-전달-프록시가-접속-주소를-검사한다)
+- [ADR-199 화면 확인 러너를 Rust CDP로 옮긴다: 파이프로 Chromium을 직접 말하고, 출처 제한 두 층은 같은 판정으로 옮긴다](#adr-199-화면-확인-러너를-rust-cdp로-옮긴다-파이프로-chromium을-직접-말하고-출처-제한-두-층은-같은-판정으로-옮긴다)
 
 ---
 
@@ -10489,6 +10490,11 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 실측(2026-11-14, [기록](experiments/2026-11-14-a5c2-auto-pages.md)): 실제 Claude Code 세션과 Next.js 16.4.3 프로젝트에서 봤다. 바뀐 컴포넌트에서 import를 따라가 `/`(선언과 겹쳐 건너뜀)와 `/orders/[id]`(기본 id `1`, 이름 `(자동, id 추정 · Price.tsx 변경)`)를 골랐고, 브라우저 모드로 통과했다. page가 예외를 던지게 바꾸자 HTTP 500 실패 세 번 뒤 소진·되돌리기가 났다. HTTP 모드에서는 정상 page를 Next.js 오류 화면으로 판정하는 기존 결함을 찾아 따로 적었다([#1207](https://github.com/dj258255/b-studio/issues/1207)). Next 16이 정상 응답에도 기본 404 컴포넌트를 RSC 페이로드로 싣는데, HTTP 모드는 원본 HTML로 표지를 찾기 때문이다. 이 조각 전부터 같은 판정이다.
 - 돌리지 않은 검증: 실행 중 표본 값·가림 확인·밀려난 화면 되살리기·import 상한·그래프 실패는 실제 세션에서 재지 않았다(차등 시험으로만). 다른 러너 다섯 개는 타입 검사로만 확인했고, Kubernetes 제공자는 구현하지 않았다. 실험 경로는 확인하지 않았다.
 
+### 덧붙임: A6a 결과 — 화면 확인 러너(`runInBrowser`)의 Rust CDP 구현, 단계 없는 확인만 ([#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-199)
+
+- 옮긴 것(`crates/bstudio-io/src/browser/`, napi `runBrowserCheck`, TS 껍데기 `packages/agent/src/browser-check-native.ts`의 `runInBrowserNative`): Chromium 실행(`--remote-debugging-pipe`, Playwright와 같은 인자, 임시 프로필 폴더), 컨텍스트·페이지·이동(`page.goto` 의미), networkidle(Playwright의 프레임·타이머 규칙을 옮김), `pageErrors`·`consoleErrors`·`failedRequests`·`mediaErrors`, 출처 제한 두 층(CDP `Fetch` 요청 가로채기 + 로컬 전달 프록시의 Rust 이전)과 서비스 워커 막기, 글자·가로 넘침·`viewportTexts`·`loadMs`, 중단 신호. 게이트의 기본 `browserRunner`는 그대로 `runInBrowser`다(A6c에서 바꾼다). `steps`·`capture`·`onFrame`이 오면 조용히 무시하지 않고 `BrowserUnavailableError`가 아닌 오류로 던진다.
+- 자세한 내용·검증·남은 한계는 ADR-199.
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택
@@ -10653,3 +10659,100 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 프록시 안에서 접속하는 업스트림 연결에 시간 상한은 두지 않았다(브라우저가 닫히면 프록시도 닫힌다).
 - 브라우저가 프록시 없이 보내는 다른 경로(헤드리스 셸의 내부 통신, QUIC 등)는 따로 재지 않았다. 재 본 것은 HTTP·HTTPS·ws·wss·WebRTC STUN이다.
 - IPv6 loopback(`[::1]`) 서버로 가는 요청은 시험에서 허용 밖 서버를 `::1`에 세워 접속 수 0을 확인했다(IPv6가 없는 환경이면 그 서버는 서지 않고 그 확인은 비어 있다).
+
+---
+
+## ADR-199 화면 확인 러너를 Rust CDP로 옮긴다: 파이프로 Chromium을 직접 말하고, 출처 제한 두 층은 같은 판정으로 옮긴다
+
+상태: 채택(A6a: 단계 없는 확인만. 단계·스크린샷은 A6b, 화면 중계와 게이트 기본값 전환은 A6c)
+관련: 이슈 [#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-191(Rust로 단계적 이전), ADR-192(실행 파일 하나), ADR-193(I/O), ADR-195(4f A6), ADR-198(출처 제한 두 층)
+
+### 맥락
+- 게이트의 화면 확인 판정은 A5c-1에서 Rust로 옮겼지만, 브라우저를 띄워 페이지를 열고 값을 모으는 러너(`runInBrowser`, TS + Playwright)는 아직 Node 라이브러리다. 끝 모양(Node 없는 실행 파일 하나)에서는 Playwright를 쓸 수 없다.
+- 판정(`browser_problems`)은 러너가 모은 값만 본다. 값이 달라지면 판정이 바뀌므로 **같은 페이지에서 같은 필드가 나오는 것**이 결정 기준이다. 출처 제한(ADR-198)은 막는 검사라 열리는 쪽으로 틀리면 안 된다.
+- 이번 조각(A6a)은 `steps`가 빈 확인만 다룬다. 게이트의 기본 `browserRunner`는 바꾸지 않는다.
+
+### 결정
+1. **구조.** `crates/bstudio-io/src/browser/`: `cdp`(연결), `launch`(실행·임시 프로필), `frames`(Playwright의 프레임·생명주기·networkidle 규칙), `console_text`(console·예외 글), `origin`(출처 판정), `proxy`(로컬 전달 프록시), `run`(조율). napi `runBrowserCheck`(`crates/bstudio-node`)와 TS 껍데기 `runInBrowserNative`(`packages/agent/src/browser-check-native.ts`)가 `runInBrowser`와 같은 입력·출력·오류 타입(`BrowserUnavailableError` 포함)을 쓴다. 새 크레이트는 만들지 않았다(의존성은 이미 락에 있던 `url`·`httparse`뿐).
+2. **CDP는 파이프로만 말한다.** `--remote-debugging-pipe`(자식의 fd 3·4, NUL로 끝나는 JSON 틀)를 쓰고 디버깅 포트를 열지 않는다(같은 기계의 다른 프로세스가 붙을 수 없다). 읽기 작업이 틀을 **순서대로** 처리한다: 이벤트는 처리기를 부른 뒤 다음 틀을 읽고 응답은 그 자리에서 기다리는 쪽에 넘기므로, 응답을 받은 시점에는 그 앞의 이벤트가 모두 상태에 들어 있다(결과를 읽는 쪽이 이 순서에 기댄다). 틀 읽기는 조각 경계·큰 메시지·잘린 끝을 시험했고(연결이 끝났는데 NUL 없는 바이트가 남으면 "잘렸다"는 오류다), 파이프 끝은 부모·자식 모두 CLOEXEC이고 번호를 10 이상으로 옮긴 뒤 자식에서 3·4로 옮겨 서로 덮지 않는다. unix만 구현하고 그 밖의 OS는 `unavailable`이다.
+3. **실행 인자는 Playwright 1.63이 쓰는 것과 같다**(`lib/coreBundle.js`의 `chromiumSwitches`와 실측 로그 첫 줄). 컨텍스트·페이지를 만들고 보내는 설정도 같은 순서다(`Target.createBrowserContext` → `createTarget` → 페이지 세션 → `Page.enable`·`getFrameTree`·`Log.enable`·`setLifecycleEventsEnabled`·`Runtime.enable`·`Network.enable`·`Target.setAutoAttach`·뷰포트·글꼴·`setEmulatedMedia`). 실행 파일은 TS가 넘긴다: `B_STUDIO_BROWSER_EXECUTABLE`이 있으면 그것만, 없으면 `chromium.executablePath()`(Playwright가 받은 headless shell) → 설치된 Chrome 순이다. 모두 못 띄우면 `BrowserUnavailableError`다. Node 없는 Chromium 설치는 C1에서 정한다. 화면 안에서 도는 스크립트(미디어 오류 수집, 첫 화면 글자 측정)는 TS가 문자열로 넘긴다(옛 러너와 같은 글을 쓰게 하려고 원본을 한 곳에 둔다). Playwright의 주입 스크립트를 떼어 쓰는 일은 A6b다.
+4. **console·예외 글은 Playwright의 규칙을 그대로 옮겼다.** `console.error`의 글은 `JSHandle`의 미리보기를 공백으로 잇는다: 노드는 `JSHandle@node`, 객체(objectId가 있는 것)는 `renderPreview`(설명이 없으면 `JSHandle@종류`), 객체가 아닌 값은 `String(값)`이고 `unserializableValue`는 NaN·Infinity·-Infinity·-0만 읽는다(`-0`은 `0`, `10n`은 `undefined`). `%s` 같은 형식 지정자는 풀지 않는다. 잡히지 않은 예외는 `description || String(value)`에서 첫 `    at` 앞까지를 `splitErrorMessage`(첫 `:` 앞을 name으로 떼고 뒤 두 글자부터 message, UTF-16 길이로 견줌)로 자른 message다. `consoleErrors`는 type이 `error`이고 `Failed to load resource`로 시작하지 않는 것이고 브라우저가 스스로 남기는 `Log.entryAdded`(콘텐츠 보안 정책 위반 등)도 같게 센다(워커 출처는 워커 세션이 따로). 근거 소스: `playwright-core@1.63.0/lib/coreBundle.js`의 `renderPreview`·`createHandle`·`JSHandle`·`getExceptionMessage`·`exceptionToError`·`splitErrorMessage`·`CRPage`의 `_onConsoleAPI`·`_onLogEntryAdded`.
+5. **요청 짝짓기와 networkidle도 Playwright의 규칙이다.** 응답 상태 400 이상과 `loadingFailed`의 `errorText || blockedReason`를 모으고, 파비콘(`/favicon.ico`로 끝나는 URL은 Playwright가 이벤트를 내지 않고, 경로가 `/favicon.ico`인 것은 `recordFailure`가 뺀다)·같은 URL의 둘째 기록·막은 요청을 뺀다. 알 수 없는 프레임의 요청은 요청으로 세지 않는다. networkidle은 `FrameManager`·`Frame`(`frames.js`)을 옮겼다: 프레임마다 진행 중 요청 집합(파비콘·이벤트 스트림 제외), 비면 500ms 타이머, 자식 프레임이 모두 잠잠해야 메인이 잠잠하다. **한 번 든 networkidle은 새 요청이 시작돼도 다음 재계산까지 남고, 남아 있는 동안에는 타이머를 새로 걸지 않는다**(이 비대칭까지 옮겼다. 옛 러너와 같은 시점에 "잠잠"이 되도록). 시간은 밖에서 넣고 타이머는 마감 시각으로 들고 있다가 이벤트를 처리하기 전에 터뜨린다(실제 타이머가 아니라 시험할 수 있다).
+6. **이동은 `page.goto(url, {waitUntil:'load', timeout:30000})`와 같은 뜻이다.** `Page.navigate` → 이동 결과(`loaderId`가 같은 커밋, 또는 중단) → `load` 생명주기 → 최종 문서 요청의 응답(리다이렉트를 따라간 끝, 응답이 없으면 null). 이어서 networkidle을 5초 상한까지 기다리고 상한을 넘겨도 오류로 만들지 않는다(연결이 끊긴 것은 오류다). 이동 실패의 오류 글 첫 줄은 옛 러너와 같다(`page.goto: net::ERR_CONNECTION_REFUSED at <url>`). 생명주기 이벤트는 기록에도 남겨, 이동 직후 지워진 `load`를 기다리는 쪽이 놓치지 않게 한다.
+7. **출처 제한 첫 층은 CDP `Fetch`다.** `Fetch.enable`(Request 단계, 모든 URL)로 모든 요청을 멈춰 `is_allowed_url`로 판정하고 허용이면 `continueRequest`, 아니면 `failRequest(BlockedByClient)`와 막은 기록이다. **리다이렉트 홉도 같은 이벤트로 온다**(실측: 허용 출처의 `302`가 가리킨 http·https 주소가 새 `requestPaused`로 왔고 허용 밖 서버에는 접속·요청이 0이었다). Chrome 153(headless shell)에서는 `redirectedRequestId` 없이 왔으므로(157은 재지 않았다) 같은 `networkId`로 다시 멈추는 것과 `redirectedRequestId`가 있는 것을 모두 홉으로 본다. 옛 러너는 Playwright가 홉을 라우트 없이 통과시켜 프록시가 막았고 https 홉은 `CONNECT host:port`로 남겼으므로, 같은 글로 남기려고 https 홉은 터널 꼴로 적는다(요청은 이 층이 URL을 보고 막는다). **단, 프록시도 그 터널을 막았을 때만이다**(같은 host:port의 http·https가 모두 허용 밖, 프록시와 같은 `is_tunnel_allowed`). 터널 꼴 기록은 같은 host:port로 가는 실패를 모두 억제하므로, 허용 출처 `http://127.0.0.1:PORT`의 페이지가 `https://127.0.0.1:PORT/…`로 리다이렉트하면 그 뒤 허용 출처의 진짜 500까지 실패 기록에서 사라졌다(검토에서 찾아 시험으로 재현: `expected [] to include '500 …/api-fail'`, 옛 러너는 통과). 그때는 막은 URL 그대로 적는다. 서비스 워커·워커의 요청이 이 층을 거치지 않으면 둘째 층이 막는다. 파비콘 요청은 Playwright처럼 판정 없이 중단한다(앱의 요청이 아니다). 워커 세션에도 `Fetch.enable`을 시도한다(실패해도 프록시가 막는다).
+8. **서비스 워커는 옛 러너의 init 스크립트(같은 글)와, 더해서 `Network.setBypassServiceWorker`로 막는다.** init 스크립트는 `navigator.serviceWorker.register`를 바꿔치므로 `ServiceWorkerContainer.prototype.register.call`로 우회되고, 우회한 등록은 프록시가 스크립트 요청(`Service-Worker: script`·`Sec-Fetch-Dest: serviceworker`)을 끊어 설치되지 못한다(결정 9). 우회(`setBypassServiceWorker`)는 이미 있을 수 있는 서비스 워커가 페이지 요청을 가로채지 못하게 하는 더 단단한 층이다. **서비스 워커 대상(Target)을 붙잡아 닫는 방법은 쓰지 않았다**: 등록하는 도중(스크립트를 받기 전)에도 대상이 붙으므로, 붙었다고 위반으로 세거나 닫으면 막힌 등록이 거절되지 않고 계속 대기한다(처음 구현이 그랬고, 시험이 잡았다). 붙은 대상은 떼어 이어서 돌게 한다. 이때 떼는 명령은 그 대상을 붙인 쪽의 세션으로 보내야 한다(부모 세션이 붙인 자식을 브라우저 수준으로 떼면 떼어지지 않아 멈춘 채 남는다).
+9. **출처 제한 둘째 층(프록시)은 `origin-proxy.ts`와 같은 규칙으로 tokio에서 다시 썼다.** 판정과 접속은 같은 파싱 결과(`url` 크레이트, WHATWG)를 쓴다. 막는 것: origin-form, 알 수 없는 메서드(표준 일곱 밖), Host 불일치·중복·없음, Upgrade, 사용자 정보, `http:` 아닌 절대 형식, 서비스 워커 스크립트 요청(허용 출처라도), 문자 규칙에 맞지 않는 CONNECT 대상. CONNECT는 같은 host:port의 http·https가 허용일 때만 연다. 막을 때는 연결을 끊고(CONNECT는 403 뒤) 업스트림 실패는 502다. 옛 구현과 달라진 점: 한 연결에서 요청 하나만 다루고(응답 뒤 닫는다) 업스트림에 `Connection: close`로 보낸다 — 파이프라인으로 끼워 넣은 둘째 요청이 판정 없이 지날 길이 없다. 요청 본문은 `Content-Length`만큼 또는 chunked 청크 경계까지만 옮기고(길이가 모호하면 끊는다) 더 온 바이트는 버린다. 머리는 64KiB를 넘으면 읽기를 멈추고 끊는다. 인자: `--proxy-server`, `--proxy-bypass-list=<-loopback>`, `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`, `--webrtc-ip-handling-policy=disable_non_proxied_udp`(ADR-198 결정 7: 따르는 이름이 브라우저마다 다르므로 둘 다). 컨텍스트도 같은 프록시로 만든다. **프록시를 세우지 못하면 `unavailable`이고 프록시 없이 띄우지 않는다.**
+10. **막은 기록은 옛 러너와 같은 글이다.** 허용 밖 URL(터널은 `CONNECT host:port`)은 막은 기록(실패 억제 대상)이고, 허용 출처 안의 주소를 막은 것(서비스 워커 스크립트 `SERVICE-WORKER <url>`, 낯선 모양의 요청)은 따로 모아 같은 주소의 진짜 실패를 가리지 않는다(ADR-198 결정 10). 기록에는 페이지 쪽이 보낸 요청(문서·프레임·워커의 요청, 웹소켓)만 남긴다. 브라우저의 배경 요청은 막되 기록하지 않는다(결정 11). Rust는 CDP로 페이지·워커의 요청을 직접 보므로 같은 규칙을 그 기준으로 맞췄다.
+11. **정리와 취소.** 브라우저는 프로세스 그룹으로 묶어 띄우고(우리가 만든 그룹), 닫을 때 `Browser.close` → 종료 대기 → 시간이 지나면 그룹째 죽인다. 거두기 전에만 그룹을 죽이므로 다른 그룹과 겹치지 않는다. 임시 프로필 폴더는 임시 폴더 바로 아래의 접두 이름이고 링크가 아닌 폴더일 때만 지운다(링크로 바뀌었으면 지우지 않는다. 여러 번 불려도 같다). 취소는 어느 단계에서든 브라우저·프록시·임시 폴더를 정리한 뒤 중단 오류로 끝난다. TS 껍데기는 옛 러너처럼 정리가 끝난 뒤 `signal.throwIfAborted()`로 중단 오류를 던진다.
+12. **끝나지 않는 상태는 통과가 아니다.** 연결이 끊기거나(틀이 잘린 채 끝남 포함) 페이지가 충돌하면 기다리는 모든 곳이 오류로 끝나고, 결과는 평가 응답을 받은 뒤 상태를 다시 확인하고서만 만든다. 조용히 삼키는 자리는 두지 않았다(옛 러너가 networkidle 기다림의 오류를 삼키던 것만, 연결이 끊긴 경우는 오류로 바꿨다).
+
+### 호출부별 막는 쪽인지 여는 쪽인지(AGENTS.md "막는 검사를 고칠 때")
+| 자리 | 쪽 | 모르는·깨진 입력 |
+|---|---|---|
+| `is_allowed_url`(요청 가로채기, 프록시의 URL·터널 판정) | **허용 목록(여는 쪽)** | 파싱할 수 없으면 거부. 판정을 넓히지 않았다(내부 스킴 `data:`·`blob:`·`about:`은 허용 목록과 무관하게 통과, 그 밖은 출처가 글자 그대로 같아야 통과) |
+| 요청 가로채기: 허용 밖 요청 | 막는 쪽 | 모르는 요청(파싱 실패)은 막는다. 홉도 같은 판정 |
+| 요청 가로채기: 파비콘 | 중단(앱의 요청 아님) | 판정 없이 막는다(막는 쪽이라 넓어지지 않는다) |
+| 프록시: 절대 형식 요청 | 허용이면 그 URL의 host:port로 전달 | origin-form·파싱 실패·Host 불일치·알 수 없는 메서드·Upgrade·사용자 정보·http 아님은 막음 |
+| 프록시: CONNECT | 허용 출처의 같은 host:port일 때만 터널 | 문자 규칙·포트 범위에 맞지 않으면 막음 |
+| 프록시: 서비스 워커 머리 | 거부 목록(막는 쪽) | 머리 값의 대소문자를 접어 비교, 둘 중 하나만 있어도 막음 |
+| `Network.setBypassServiceWorker` | 막는 쪽 | — |
+| `record_failure`의 억제(막은 URL·터널·파비콘·같은 URL) | **여는 쪽(실패로 세지 않음)이므로 좁게**: 억제는 허용 밖으로 막은 URL·터널만 | 허용 출처 안을 막은 것은 억제하지 않는다 |
+| `blocked_requests`(기록 거르기) | 판정이 아니라 기록. 막는 데는 쓰지 않음 | URL을 파싱하지 못하면 터널 대상으로 세지 않음 |
+| 프로필 폴더 지우기 | 지우는 쪽 | 임시 폴더 바로 아래의 접두 이름이고 링크가 아닌 폴더일 때만. 모르면 지우지 않고 이유를 돌려줌 |
+
+### 검토한 선택지
+- **Rust CDP 라이브러리(chromiumoxide 등)**: 이벤트 순서·요청 짝짓기·networkidle·출처 제한을 우리가 쥐어야 해서 결국 아래층을 다시 짜게 된다. 의존성만 늘고 선택자 호환(A6b)도 없다.
+- **선택자를 CSS만 받게 줄이기**: 이미 쓰는 `text=` 선언이 깨진다(호환 깨짐). A6b의 일이다.
+- **Playwright 서버를 별도 프로세스로 들고 가기**: Node가 남는다(끝 모양과 맞지 않는다).
+- **서비스 워커 대상을 붙잡아 닫기**: 결정 8. 등록하는 도중의 대상까지 위반으로 세게 되어 막힌 등록이 대기한다.
+- **막은 요청을 403으로 응답하기**: ADR-198 결정 3 그대로 연결을 끊는다.
+
+### 옛 러너와 다른 것(같게 못 맞춘 것과 이유)
+- 이동 실패의 오류 글은 **첫 줄만** 같다. Playwright는 뒤에 `Call log:`와 단계 기록을 붙인다.
+- 브라우저를 못 띄운 이유의 글이 다르다. 옛: Playwright의 첫 줄(`browserType.launch: Executable doesn't exist at …`, 'chrome' 채널은 `Chromium distribution 'chrome' is not found at …`). 새: 첫 시도와 같은 꼴이고 'chrome' 채널 시도도 같은 `Executable doesn't exist at …`다. 두 시도의 글을 ` / `로 잇는 것과 `BrowserUnavailableError`인 것은 같다.
+- `failedRequests`·`mediaErrors`·`blockedRequests`는 서로 다른 요청의 도착 순서로 쌓이는데 **옛 러너도 같은 러너를 두 번 돌리면 순서가 달라진다**(실측: 같은 페이지 6회에서 순서가 두 가지로 갈렸다). 차등 시험은 이 세 목록을 정렬해 견주고, 한 스크립트 안에서 차례로 부르는 console·예외는 순서까지 견준다.
+- 팝업(`window.open`)은 새 러너가 떼어 내 보지 않는다. 옛 러너는 팝업을 별도 Page로 두어 그 오류는 세지 않지만, 컨텍스트의 `request` 이벤트(막은 기록을 거르는 데 쓰는 URL)는 팝업의 요청도 받는다(소스로만 확인했고 재지 않았다).
+- 내려받기 설정은 Playwright처럼 `allowAndName`이되 받는 폴더를 임시 프로필 아래로 둔다(끝나면 함께 지워진다).
+- `Runtime.consoleAPICalled`는 Playwright가 실행 컨텍스트를 아는 것만 센다. 새 러너는 컨텍스트 id가 0이 아닌 것을 모두 센다(워커는 컨텍스트와 무관하게 센다).
+
+### 검증 (2026-11-14, macOS arm64, Playwright 1.63.0)
+- **시험을 먼저 썼다.** `browser-runner-differential.test.ts`는 구현 전에 `Cannot find module './browser-check-native'`로 스위트째 실패했다(0개 실행). 구현 뒤 시험은 아래와 같다.
+- **차등 시험**(`packages/agent/src/browser-runner-differential.test.ts`, 22개, 실제 Chromium): 같은 로컬 고정 페이지를 옛 `runInBrowser`와 새 `runInBrowserNative`로 열어 결과 전체를 견준다(`loadMs`는 둘 다 0 이상인지만). 평범한 페이지, console.error 서른 가지 안팎(객체·배열·함수·클래스·심볼·`-0`·bigint·노드·빈 칸 있는 배열·여러 인자·`%s`·유니코드·Map·Set·assert·group), 콘텐츠 보안 정책 위반(`Log.entryAdded`), 잡히지 않은 예외 스물한 꼴(문자열·객체·null·undefined·숫자·배열·Error 하위 클래스·여러 줄·`a: b: c`·끝이 `:`·빈 메시지·이름을 덮은 오류·거절된 약속·타이머·구문 오류), 404·500 리소스·파비콘 예외·같은 URL 둘째 기록, 연결 거부 이미지·fetch, 깨진 `<video>`·`<audio>`·`<img>`, 가로 넘침(모바일·데스크톱), `viewportTexts`(보임·잘림·숨김·창 밖·없음), 리다이렉트된 문서(한 번·두 번·404로), 문서 상태 404·500, 이동 실패(닫힌 포트: 오류 글 첫 줄이 같다), `measureLoad`(워밍업 이동의 오류·예외·console 비움), 늦게 오는 console.error(networkidle 안 300ms·밖 2.5초), 끝나지 않는 요청(networkidle 5초 상한: 3초의 오류는 잡고 7.5초는 놓침), 전용 워커·iframe·`srcdoc`의 오류, `alert`·`confirm`, `pushState`·스크립트 이동·본문 없는 문서·느린 스크립트, 허용 밖으로 곧바로 나가는 http·https 요청, 중단 신호(700ms에 중단하면 4초 안에 끝나고 임시 프로필 폴더가 남지 않음. 이미 중단된 신호도), 실행 파일 없음(`BrowserUnavailableError`), 아직 지원하지 않는 입력(오류, `BrowserUnavailableError` 아님)을 견준다.
+- **#1210 시험을 Rust 러너에도 돌렸다**(`browser-origin-native.test.ts`, 열네 개를 옛·새 러너 둘에 돌려 28개): `browser-check.test.ts`의 "출처 제한은 네트워크 층에서도 막는다 (#1210)" 전부(리다이렉트된 fetch·https·이미지·iframe·문서 이동, 전용 워커, `prototype`으로 우회한 서비스 워커 등록, 서비스 워커 스크립트로 막은 주소·낯선 메서드로 막은 주소·같은 host:port의 https로 리다이렉트해 막은 홉의 실패 기록 보존, 허용 ws, 허용 밖 ws·wss, `localhost`·`[::1]`로의 리다이렉트). 허용 밖 서버가 받은 요청 기록과 TCP 접속 수가 0이어야 한다. 완료 표시를 기다리는 `steps`가 아직 없어 화면 글자는 networkidle 뒤에 읽는다.
+- **출처 판정 차등 시험**(`browser-origin-judge-differential.test.ts`, 3개): Rust(`url` 크레이트)와 TS(WHATWG `new URL`)에 같은 URL 일흔 개 안팎(IPv4 줄임·16진·8진·전각·끝의 점·사용자 정보·`\@`·`#@`·`blob:`·`file:`·제어 문자·공백·깨진 포트·파싱 실패)을 네 가지 허용 목록으로 넣어 답이 모두 같다.
+- **두 브라우저에서 모두 통과**: Playwright가 받은 headless shell(Chromium 153.0.8010.12)과 시스템 Google Chrome 157.0.8103.51(`B_STUDIO_BROWSER_EXECUTABLE`), 위 세 파일 53개씩. CI(Linux)에서는 headless shell이 없어 시스템 Chrome으로 돈다 — Linux에서는 재지 못했다.
+- **Rust 단위 시험**(`crates/bstudio-io/src/browser/`, 48개; `cargo test -p bstudio-io -p bstudio-node` 432개 통과): CDP 틀 읽기(NUL 경계·조각 경계·10MiB 메시지·빈 틀·잘린 끝·상한 초과·응답/오류/끊김·묶음 보내기의 순서), console·예외 글(숫자 서식·미리보기·`splitErrorMessage`), 프레임·networkidle(500ms 규칙, 새 요청이 타이머를 되돌림, 한 번 든 networkidle이 남는 비대칭, 문서 요청만 남기고 지움, 이동 중단, 리다이렉트 홉, 자식 프레임), 출처 판정과 CONNECT 대상·터널 허용 규칙, 프록시(날것의 소켓: 정규화된 origin-form 전달, 막는 열 가지 꼴, 서비스 워커 머리 세 가지, CONNECT 허용·일곱 가지 거부, 업스트림 실패 502, 본문 길이·chunked·모호한 길이·끼워 넣은 둘째 요청 버리기, close), 요청 가로채기(허용·거부·홉·`redirectedRequestId`·파비콘·무제한 실행), 요청 짝짓기(404 뒤 ERR_ABORTED, 파비콘, 연결 거부, 리다이렉트 홉, 알 수 없는 프레임), 프록시 인자 네 개와 컨텍스트 설정, 프록시를 못 세우면 `unavailable`(실행 파일을 시도하지 않음), 실행 파일 없음, 임시 프로필 폴더(0700·유일·링크로 바뀌면 지우지 않음·임시 폴더 바로 아래가 아니면 지우지 않음).
+- **변이 시험**(원래 코드에 하나씩 넣어 시험이 잡는지. 되돌릴 때는 파일 복사본으로 되돌렸다): 아래 표(실패 개수는 그 변이에서 실패한 시험 수).
+
+  | 변이 | Rust 단위 시험 | #1210 시험(Rust 러너) | 차등 시험 |
+  |---|---|---|---|
+  | 요청 가로채기 판정을 늘 허용 | 2개 실패 | 통과(프록시가 둘째 층으로 막는다) | 1개 실패(허용 밖 직접 요청의 막은 글) |
+  | 리다이렉트 홉을 판정 없이 통과 | 1개 실패 | 통과(프록시가 막는다) | 통과 |
+  | 프록시 판정을 늘 허용 | 통과 | 1개 실패(허용 밖 ws·wss) | 통과 |
+  | loopback 우회를 다시 켜기(실행 인자와 컨텍스트 둘 다 뺌) | 1개 실패 | 4개 실패 | 통과 |
+  | loopback 인자만 뺌 | 1개 실패 | 통과(컨텍스트 설정이 보완) | 통과 |
+  | loopback 컨텍스트 설정만 뺌 | 1개 실패 | 4개 실패 | 통과 |
+  | CONNECT 넓히기 | 1개 실패 | 1개 실패(허용 밖 ws·wss) | 통과 |
+  | 프록시 실패 시 프록시 없이 띄우기 | 1개 실패 | 통과 | 통과 |
+  | 막은 요청을 failedRequests로 세기 | 1개 실패 | 2개 실패 | 1개 실패 |
+  | console 필터(`Failed to load resource`) 빼기 | 1개 실패 | 통과 | 1개 실패 |
+  | 파비콘 예외 빼기(두 군데) | 2개 실패 | 4개 실패 | 1개 실패 |
+  | networkidle 기다림 빼기 | 통과 | 8개 실패 | 2개 실패 |
+  | 워밍업 뒤 비우기 빼기 | 통과 | 통과 | 1개 실패 |
+  | 중단 신호 무시 | 통과 | 통과 | 1개 실패(4초 안에 끝나야 함) |
+
+  처음 판에서 **loopback 우회를 다시 켜는 변이가 모든 시험을 통과했다**: 인자만 빼면 컨텍스트 설정이 같은 `<-loopback>`을 줘 가려졌고, 변이 시험의 치환이 시험의 기대값까지 지웠다(들여쓰기가 겹친 문자열). 프록시 인자 네 개와 컨텍스트 설정을 따로 시험하고(단위 시험), 변이를 함수 본문에만 맞춰 다시 잰 것이 위 세 줄이다. 요청 가로채기와 프록시는 서로를 가려 주므로 통합 시험만으로는 한 층의 변이가 안 잡히는 자리(처음 두 줄, 프록시 인자 하나)가 있고, 그 자리는 단위 시험이 맡는다.
+- **로드 시간**(같은 페이지 12회 중앙값, 이미지 40개와 스크립트가 든 로컬 페이지, `measureLoad`로 워밍업 뒤 두 번째 이동의 `loadMs`. 한 기계에서 한 번 잰 값이다): 출처 제한 없음 옛 13ms·새 13ms, 출처 제한 있음 옛 34ms·새 32ms. **호출 전체 시간은 새 러너가 약 400ms 느렸다**(출처 제한 없음 옛 712ms·새 1113ms, 있음 옛 737ms·새 1139ms, 12회 중앙값). 브라우저를 띄우고 첫 응답을 받기까지(`Browser.getVersion`)가 Node 안에서는 215~360ms, Rust만으로 돌린 시험에서는 70~100ms, Playwright(`chromium.launch`)는 약 85ms였다. **원인을 찾지 못했다.** 아닌 것으로 잰 것: 프로세스 그룹(`setsid`로도), stderr·stdout·stdin 연결, 환경 변수 비우기, 작업 폴더, 파일 기술자 한도와 상속 fd 닫기, 신호 처리·차단 마스크, 스레드 QoS, 큰 힙(1.5GB 확보), 멀티 스레드 런타임, 페이지 준비 명령의 직렬 전송(한꺼번에 보내도록 고쳤지만 호출 전체는 그대로). 실행 인자는 Playwright의 것과 글자까지 같다(실측 로그와 대조). 검토 때 Node 안(vitest)에서 단계별로 나눠 한 번 더 쟀다(빈 페이지, 출처 제한 없음, 4회 중 뒤 3회가 비슷함): 프로세스 실행(`spawn` 반환) 7ms, 첫 응답 약 200ms, 컨텍스트·타깃 만들기 약 160ms, 페이지 준비 약 100ms, 이동 12ms, networkidle 대기 약 500ms(규칙대로), 종료 약 87ms, 전체 약 1060ms. 그래서 `pre_exec` 때문에 `posix_spawn` 대신 fork+exec로 가는 것은 원인이 아니고(실행 7ms), 늘어난 시간은 첫 응답부터 CDP 왕복마다 고르게 퍼져 있다. 기다리는 쪽(`wait_until`)은 알림을 먼저 걸고 조건을 보므로 알림을 놓치는 구조가 아니다. A6c(기본값 전환) 전에 풀어야 하는 한계다.
+
+### 남은 한계와 재지 않은 것
+- **이번 조각의 범위 밖**: `steps`·`capture`·`onFrame`은 지원하지 않고 던진다(A6b·A6c). 게이트의 기본 `browserRunner`는 `runInBrowser`다. 실제 세션(실제 Claude Code)에서의 실측은 하지 않았다 — 게이트가 이 러너를 쓰지 않으므로 실제 세션에서 잴 것이 없다(A6c의 완료 조건이다). 그래서 `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
+- **호출 전체 시간 +약 400ms의 원인 미확인**(위 검증의 측정 참고).
+- **옛 러너는 중단 뒤 프로필 폴더를 남길 때가 있다(관측 한 번).** 이 PR의 CI(Linux, 시스템 Chrome)에서 중단 시험 동안 TMPDIR을 빈 폴더로 격리했는데도 `playwright_chromiumdev_profile-*` 하나가 남았다. Rust 러너의 폴더(`b-studio-cdp-*`)는 남지 않았다. 옛 러너는 실험 경로가 계속 쓰므로 고치지 않았고, 중단 시험은 Rust 러너의 폴더만 견준다. macOS에서는 남지 않았다.
+- **Linux·Windows는 재지 못했다.** unix만 구현했고 그 밖은 `unavailable`이다. 시스템 Chrome의 기본 경로 `/opt/google/chrome/chrome`(Playwright의 'chrome' 채널이 찾는 곳이라고 본 값)은 Linux에서 확인하지 않았다. CI(headless shell 없음, 시스템 Chrome)에서 처음 돌 때 달라질 수 있다.
+- **시험하지 않은 경로**: 서로 다른 사이트의 iframe(OOPIF) 세션 준비(코드는 있다. 시험한 iframe은 같은 사이트라 같은 세션이다), 팝업, 내려받기, 브라우저가 중간에 죽는 경우(연결이 끊기면 오류로 끝나는 것은 CDP 단위 시험까지만), 브라우저를 띄우는 도중의 취소(프로세스 그룹과 임시 폴더를 `Drop`이 정리하도록 썼지만 그 순간을 시험으로 겨냥하지 않았다. 시험한 취소는 이동 중이다), 워커 세션의 `Fetch.enable`이 이 브라우저에서 받아들여지는지(실패해도 프록시가 막는다).
+- **Chrome 157에서 `redirectedRequestId`가 오는지는 재지 않았다.** Chrome 153(headless shell)에서는 오지 않고 같은 `networkId`로 다시 멈췄다. 두 방식 모두 홉으로 보며, 157에서도 https 홉이 터널 꼴로 기록돼 시험이 통과했다.
+- **옛 러너의 `Call log:`·두 번째 시도(`channel: 'chrome'`)의 오류 글은 같게 맞추지 않았다**(위 "옛 러너와 다른 것").
+- **프록시**: 한 연결에서 요청 하나만 다루므로(keep-alive 없음) 요청마다 연결을 새로 연다(옛 구현도 업스트림은 새 연결이었다). 업스트림 연결 시도에는 30초 상한을 뒀다(옛 구현에는 없었다). 응답 본문은 업스트림이 닫을 때까지 그대로 옮기며 본문 길이를 해석하지 않는다. DNS 재바인딩·프록시 밖으로 나가는 다른 경로(QUIC 등)는 ADR-198의 한계 그대로다.
+- **`consoleErrors`의 실행 컨텍스트**: Playwright는 프레임 관리자가 아는 컨텍스트의 console만 센다. 새 러너는 컨텍스트 id가 0이 아니면 센다(결과가 다른 입력은 찾지 못했다).
+- **실험 경로(원격 브라우저·탐색 QA)는 이 러너를 쓰지 않는다**(ADR-166). 다른 러너 다섯 개도 건드리지 않았다.
+- 한 번 잰 값(로드 시간)은 한 번 잰 값이다. 차등 시험은 이 기계(macOS arm64)에서 돌렸다.

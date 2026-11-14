@@ -11,6 +11,9 @@ publish.workspace = true
 bstudio-guard = { path = "../bstudio-guard" }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["process", "fs", "io-util", "rt", "rt-multi-thread", "macros", "sync", "time", "net"] }
+# 화면 확인 러너(ADR-199): WHATWG URL 파싱(출처 판정·프록시가 같은 파싱 결과를 쓴다)과 프록시의 요청 머리 읽기
+url = "=2.5.8"
+httparse = "=1.10.1"
 # PTY(가상 터미널)는 blocking I/O라 tokio가 아니라 std::thread로 격리한다(ADR-193 2c-4). wezterm의 crate.
 portable-pty = "0.9"
 

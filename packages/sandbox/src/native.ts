@@ -204,6 +204,9 @@ interface NativeGuard {
   abortCreate(workDir: string, assetRoot: string, sandboxId: string): Promise<string[]>;
   callExternal(input: NativeExternalInput, signal: AbortSignal | undefined | null): Promise<NativeExternalResult>;
   runLoad(input: NativeLoadInput, signal: AbortSignal | undefined | null): Promise<NativeLoadResult>;
+  // ── 화면 확인 러너(ADR-199, 4f A6a). 던지지 않고 결과(`kind`)로 돌려준다
+  runBrowserCheck(input: NativeBrowserRunInput, signal: AbortSignal | undefined | null): Promise<NativeBrowserRunResult>;
+  browserIsAllowedUrl(url: string, allowedOrigins: string[]): boolean;
   // ── I/O 조율: 호스트 PTY(2단계 2c-4a, #1049). host-terminal의 node-pty를 portable-pty로 대체한다.
   // 양방향: write/resize/kill은 동기, onData(출력 Buffer)·onExit(종료 코드)는 Rust 스레드에서 역류한다(ThreadsafeFunction).
   // env는 상속 없이 통째 치환한다(node-pty와 같다). 출력은 raw bytes다(UTF-8 경계가 조각에서 잘릴 수 있어 터미널이 재조립).
@@ -1240,6 +1243,35 @@ export interface NativeExternalResult {
   kind: 'done' | 'failed' | 'not-registered' | 'path-not-absolute';
   last: string;
   stderr: string;
+}
+
+export interface NativeBrowserRunInput {
+  /** 차례로 시도할 실행 파일. 모두 못 띄우면 `unavailable`이다 */
+  executables: string[];
+  url: string;
+  viewportWidth: number;
+  viewportHeight: number;
+  /** `VIEWPORT_MEASURE_SCRIPT(texts)`로 만든 식. 글자를 넘기지 않았으면 없다 */
+  viewportScript?: string | null;
+  allowedOrigins?: string[] | null;
+  measureLoad: boolean;
+  mediaErrorScript: string;
+}
+
+/** `kind`: `done`(나머지 필드) · `unavailable`(message) · `failed`(message) · `aborted` */
+export interface NativeBrowserRunResult {
+  kind: 'done' | 'unavailable' | 'failed' | 'aborted';
+  message: string;
+  status?: number | null;
+  text: string;
+  pageErrors: string[];
+  consoleErrors: string[];
+  failedRequests: string[];
+  mediaErrors: string[];
+  blockedRequests: string[];
+  horizontalOverflowPx: number;
+  viewportTextsJson?: string | null;
+  loadMs?: number | null;
 }
 
 export interface NativeLoadInput {
