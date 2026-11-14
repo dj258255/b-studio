@@ -59,11 +59,13 @@ pub struct FrameManager {
     pub nav_events: Vec<NavEvent>,
     /// 생명주기 이벤트가 새로 일어난 기록 `(메인 프레임인가, 이름)`. 이벤트가 일어났다가 다음 이동에 지워져도 기다리는 쪽이 놓치지 않게 한다
     pub lifecycle_log: Vec<(bool, String)>,
+    /// 메인 프레임이 이동을 요청한 때(`Page.frameRequestedNavigation`)의 `nav_events` 길이. 클릭이 요청한 이동이 끝났는지 볼 때 쓴다(`SignalBarrier`)
+    pub nav_requests: Vec<usize>,
 }
 
 impl FrameManager {
     pub fn new(now: Instant) -> Self {
-        Self { frames: HashMap::new(), main: None, now, nav_events: Vec::new(), lifecycle_log: Vec::new() }
+        Self { frames: HashMap::new(), main: None, now, nav_events: Vec::new(), lifecycle_log: Vec::new(), nav_requests: Vec::new() }
     }
 
     pub fn main_frame_id(&self) -> Option<&str> {
@@ -240,7 +242,15 @@ impl FrameManager {
         }
     }
 
+    /// 이 프레임에 이동이 요청돼 아직 커밋·중단되지 않았는가(`Frame.pendingDocument()`)
+    pub fn has_pending_document(&self, id: &str) -> bool {
+        self.frames.get(id).is_some_and(|frame| frame.pending.is_some())
+    }
+
     pub fn frame_requested_navigation(&mut self, id: &str) {
+        if self.main.as_deref() == Some(id) && self.frames.contains_key(id) {
+            self.nav_requests.push(self.nav_events.len());
+        }
         let Some(frame) = self.frames.get_mut(id) else { return };
         // documentId 없이 요청한 이동: 이미 같은(없는) documentId의 대기 문서가 있으면 그대로 둔다
         if frame.pending.as_ref().is_some_and(|pending| pending.document_id.is_none()) {

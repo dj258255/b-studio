@@ -6,6 +6,7 @@
 
 ### 추가
 
+- 화면 확인 러너의 Rust 구현 `runInBrowserNative`가 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷(`capture`)을 돕니다(ADR-199 A6b, #1212). Playwright 1.63.0의 주입 스크립트(Apache-2.0, 고지 파일 `crates/bstudio-io/src/browser/third_party/playwright/`)를 격리된 실행 환경에 올려 선택자와 동작 가능성(보임·활성·안정·클릭 대상)을 판정하고, 화면 글자·가로 넘침·`viewportTexts`·로드 시간도 거기서 읽어 페이지가 전역을 바꿔도 위조되지 않습니다(옛 러너와 의도한 차이). 브라우저 오류 화면은 빈 문서로 읽습니다. 게이트의 기본 러너는 아직 `runInBrowser`입니다(A6c).
 - 화면 확인 러너의 Rust 구현 `runInBrowserNative`(`crates/bstudio-io/src/browser/`, napi `runBrowserCheck`)을 더했습니다(ADR-199, ADR-195 4f A6a, #1212). Chromium을 `--remote-debugging-pipe`로 띄워 CDP를 직접 말하고, 옛 `runInBrowser`(Playwright)와 같은 결과를 내도록 실제 Chromium으로 차등 시험했습니다(headless shell 153·Google Chrome 157). 출처 제한 두 층(CDP `Fetch` 요청 가로채기 + 로컬 전달 프록시)도 옮겼고 #1210의 시험을 Rust 러너에도 돌렸습니다. 단계·스크린샷·화면 중계는 아직 지원하지 않아 던지며, 게이트의 기본 러너는 그대로 `runInBrowser`입니다(A6b·A6c).
 - `GET /api/health`가 `apiVersion`(지금 1)을 싣습니다(#1002). `studio desk`가 쓰는 API(에이전트 목록·목록 통로, 프로젝트, 세션 만들기·터미널·이름 바꾸기·멈추기·다시 켜기, 터미널 통로, 구독 한도, AI 계정)는 실제 HTTP로 부르는 계약 테스트(`apps/studio/server/contract.test.ts`)로 고정했습니다. 기존 키는 그대로입니다.
 

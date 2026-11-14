@@ -10495,6 +10495,10 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 옮긴 것(`crates/bstudio-io/src/browser/`, napi `runBrowserCheck`, TS 껍데기 `packages/agent/src/browser-check-native.ts`의 `runInBrowserNative`): Chromium 실행(`--remote-debugging-pipe`, Playwright와 같은 인자, 임시 프로필 폴더), 컨텍스트·페이지·이동(`page.goto` 의미), networkidle(Playwright의 프레임·타이머 규칙을 옮김), `pageErrors`·`consoleErrors`·`failedRequests`·`mediaErrors`, 출처 제한 두 층(CDP `Fetch` 요청 가로채기 + 로컬 전달 프록시의 Rust 이전)과 서비스 워커 막기, 글자·가로 넘침·`viewportTexts`·`loadMs`, 중단 신호. 게이트의 기본 `browserRunner`는 그대로 `runInBrowser`다(A6c에서 바꾼다). `steps`·`capture`·`onFrame`이 오면 조용히 무시하지 않고 `BrowserUnavailableError`가 아닌 오류로 던진다.
 - 자세한 내용·검증·남은 한계는 ADR-199.
 
+### 덧붙임: A6b 결과 — 화면 확인 러너에 단계(click·fill·press·waitFor)와 스크린샷, 화면 값 측정은 격리된 실행 환경으로 ([#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-199)
+
+- `runInBrowserNative`가 `steps`·`capture`를 받는다(`onFrame`과 게이트 기본값 전환은 A6c). Playwright 1.63.0의 주입 스크립트를 떼어 격리된 실행 환경(`Page.createIsolatedWorld`)에 올리고, 화면 글자·가로 넘침·`viewportTexts`·로드 시간도 거기서 읽는다(옛 러너는 페이지와 같은 환경에서 읽어 위조될 수 있었다). 자세한 내용은 ADR-199의 "A6b 덧붙임".
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택
@@ -10664,7 +10668,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ## ADR-199 화면 확인 러너를 Rust CDP로 옮긴다: 파이프로 Chromium을 직접 말하고, 출처 제한 두 층은 같은 판정으로 옮긴다
 
-상태: 채택(A6a: 단계 없는 확인만. 단계·스크린샷은 A6b, 화면 중계와 게이트 기본값 전환은 A6c)
+상태: 채택(A6a: 단계 없는 확인, A6b: 단계·스크린샷·격리된 실행 환경, 화면 중계와 게이트 기본값 전환은 A6c)
 관련: 이슈 [#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-191(Rust로 단계적 이전), ADR-192(실행 파일 하나), ADR-193(I/O), ADR-195(4f A6), ADR-198(출처 제한 두 층)
 
 ### 맥락
@@ -10745,7 +10749,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **로드 시간**(같은 페이지 12회 중앙값, 이미지 40개와 스크립트가 든 로컬 페이지, `measureLoad`로 워밍업 뒤 두 번째 이동의 `loadMs`. 한 기계에서 한 번 잰 값이다): 출처 제한 없음 옛 13ms·새 13ms, 출처 제한 있음 옛 34ms·새 32ms. **호출 전체 시간은 새 러너가 약 400ms 느렸다**(출처 제한 없음 옛 712ms·새 1113ms, 있음 옛 737ms·새 1139ms, 12회 중앙값). 브라우저를 띄우고 첫 응답을 받기까지(`Browser.getVersion`)가 Node 안에서는 215~360ms, Rust만으로 돌린 시험에서는 70~100ms, Playwright(`chromium.launch`)는 약 85ms였다. **원인을 찾지 못했다.** 아닌 것으로 잰 것: 프로세스 그룹(`setsid`로도), stderr·stdout·stdin 연결, 환경 변수 비우기, 작업 폴더, 파일 기술자 한도와 상속 fd 닫기, 신호 처리·차단 마스크, 스레드 QoS, 큰 힙(1.5GB 확보), 멀티 스레드 런타임, 페이지 준비 명령의 직렬 전송(한꺼번에 보내도록 고쳤지만 호출 전체는 그대로). 실행 인자는 Playwright의 것과 글자까지 같다(실측 로그와 대조). 검토 때 Node 안(vitest)에서 단계별로 나눠 한 번 더 쟀다(빈 페이지, 출처 제한 없음, 4회 중 뒤 3회가 비슷함): 프로세스 실행(`spawn` 반환) 7ms, 첫 응답 약 200ms, 컨텍스트·타깃 만들기 약 160ms, 페이지 준비 약 100ms, 이동 12ms, networkidle 대기 약 500ms(규칙대로), 종료 약 87ms, 전체 약 1060ms. 그래서 `pre_exec` 때문에 `posix_spawn` 대신 fork+exec로 가는 것은 원인이 아니고(실행 7ms), 늘어난 시간은 첫 응답부터 CDP 왕복마다 고르게 퍼져 있다. 기다리는 쪽(`wait_until`)은 알림을 먼저 걸고 조건을 보므로 알림을 놓치는 구조가 아니다. A6c(기본값 전환) 전에 풀어야 하는 한계다.
 
 ### 남은 한계와 재지 않은 것
-- **이번 조각의 범위 밖**: `steps`·`capture`·`onFrame`은 지원하지 않고 던진다(A6b·A6c). 게이트의 기본 `browserRunner`는 `runInBrowser`다. 실제 세션(실제 Claude Code)에서의 실측은 하지 않았다 — 게이트가 이 러너를 쓰지 않으므로 실제 세션에서 잴 것이 없다(A6c의 완료 조건이다). 그래서 `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
+- **A6a의 범위 밖**(A6b에서 단계·스크린샷을 더했다): `steps`·`capture`·`onFrame`은 지원하지 않고 던진다(A6b·A6c). 게이트의 기본 `browserRunner`는 `runInBrowser`다. 실제 세션(실제 Claude Code)에서의 실측은 하지 않았다 — 게이트가 이 러너를 쓰지 않으므로 실제 세션에서 잴 것이 없다(A6c의 완료 조건이다). 그래서 `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
 - **호출 전체 시간 +약 400ms의 원인 미확인**(위 검증의 측정 참고).
 - **옛 러너는 중단 뒤 프로필 폴더를 남길 때가 있다(관측 한 번).** 이 PR의 CI(Linux, 시스템 Chrome)에서 중단 시험 동안 TMPDIR을 빈 폴더로 격리했는데도 `playwright_chromiumdev_profile-*` 하나가 남았다. Rust 러너의 폴더(`b-studio-cdp-*`)는 남지 않았다. 옛 러너는 실험 경로가 계속 쓰므로 고치지 않았고, 중단 시험은 Rust 러너의 폴더만 견준다. macOS에서는 남지 않았다.
 - **Linux·Windows는 재지 못했다.** unix만 구현했고 그 밖은 `unavailable`이다. 시스템 Chrome의 기본 경로 `/opt/google/chrome/chrome`(Playwright의 'chrome' 채널이 찾는 곳이라고 본 값)은 Linux에서 확인하지 않았다. CI(headless shell 없음, 시스템 Chrome)에서 처음 돌 때 달라질 수 있다.
@@ -10756,3 +10760,67 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **`consoleErrors`의 실행 컨텍스트**: Playwright는 프레임 관리자가 아는 컨텍스트의 console만 센다. 새 러너는 컨텍스트 id가 0이 아니면 센다(결과가 다른 입력은 찾지 못했다).
 - **실험 경로(원격 브라우저·탐색 QA)는 이 러너를 쓰지 않는다**(ADR-166). 다른 러너 다섯 개도 건드리지 않았다.
 - 한 번 잰 값(로드 시간)은 한 번 잰 값이다. 차등 시험은 이 기계(macOS arm64)에서 돌렸다.
+
+### A6b 덧붙임: 단계(`click`·`fill`·`press`·`waitFor`)·스크린샷·격리된 실행 환경 (2026-11-14, macOS arm64, Playwright 1.63.0)
+
+**무엇이 달라졌나.** `runInBrowserNative`가 `steps`와 `capture`를 받고 옛 `runInBrowser`와 같은 결과(`steps` 배열, `StepFailedError`의 글과 그때까지의 단계, `StepWithoutActionError`)를 낸다. `onFrame`은 여전히 던진다(A6c). 게이트의 기본 `browserRunner`는 `runInBrowser`다.
+
+1. **주입 스크립트(Apache-2.0).** `playwright-core@1.63.0`(`pnpm-lock.yaml`의 버전) `coreBundle.js`의 `injectedScriptSource`를 `crates/bstudio-io/src/browser/third_party/playwright/injected_script_source.js`로 그대로 떼어 `include_str!`한다(첫 줄 주석에 버전·원본 위치). 같은 폴더에 `LICENSE`·`NOTICE`(원본 복사), `SOURCES`(떼어 낸 파일·원본 위치·다시 만드는 법), `extract.mjs`(떼어 내는 스크립트)가 있다. 키 표(`us_keyboard_layout.json`)·맥 편집 명령(`mac_editing_commands.json`)·스크린샷 준비 함수(`prepare_for_screenshots.js`)도 같은 방법으로 떼었다(손으로 줄이지 않았다). 버전을 올리면 이 목록·차등 시험을 다시 돌린다.
+2. **격리된 실행 환경(utility world).** `Page.createIsolatedWorld`로 만든 환경에 주입 스크립트를 올리고(Playwright가 크로미움에 넘기는 옵션 그대로: `isUtilityWorld`, `stableRafCount: 1`, `shouldPrependErrorPrefix: false`), 선택자 해석·보임·활성·안정·편집 가능·클릭 대상 확인을 거기서 한다. **새 문서마다 다시 만든다**: 메인 프레임의 `Page.frameNavigated`, `Runtime.executionContextDestroyed`(우리 것일 때), `executionContextsCleared`마다 지금 것을 버리고 다음에 쓸 때 만든다. 만드는 도중에 문서가 바뀌었으면 저장하지 않는다(세대 번호). 사라진 환경에 대한 평가 오류("Cannot find context…", "Execution context was destroyed", "Could not find object…")는 환경을 버리고 다시 시도한다(Playwright도 이 오류는 재시도한다). 환경 id가 바뀐 것을 놓치면 옛 id로 평가해 "없음"으로 읽히므로 저장 전에 세대를 본다.
+3. **단계 규칙과 근거**(`coreBundle.js`의 함수 이름):
+   - `click`: `Frame.click` → `_retryWithProgressIfNotConnected` → `ElementHandle._click` → `_retryPointerAction` → `_performPointerAction`: 보임·활성·안정(`checkElementStates`, 두 애니메이션 프레임 동안 상자가 같음) → 화면 안으로 스크롤 → `DOM.getContentQuads`로 클릭 지점(창에 맞춰 자른 첫 사각형 가운데, 소수 둘째 자리까지 자름) → `setupHitTargetInterceptor`(그 지점의 맨 위 요소가 대상이어야 한다, 아니면 설명 글) → `Input.dispatchMouseEvent`(mouseMoved·mousePressed·mouseReleased) → 대상 확인 해제(`stop()`). 클릭이 요청한 메인 프레임 이동(`Page.frameRequestedNavigation`)은 커밋·중단될 때까지 기다리고(`SignalBarrier`), 동작 전에는 대기 중인 문서가 있으면 그 이동을 기다린다(`performActionPreChecks`).
+   - `fill`: `ElementHandle._fill`: 보임·활성·편집 가능 확인 뒤 주입 스크립트의 `fill`. `needsinput`이면 글자는 `Input.insertText`, 빈 글자는 `Delete` 키.
+   - `waitFor`: `Frame.waitForSelector`(state `visible`, `isElementVisible`).
+   - `press`: `Keyboard.press`(`+`로 나눔, 앞 토큰을 차례로 누르고 마지막 키를 눌렀다 떼고 앞 토큰을 거꾸로 뗌), `usKeyboardLayout`의 닫힌 표(`buildLayoutClosure`), 맥에서만 편집 명령(`macEditingCommands`, `insert…` 제외), `ControlOrMeta`는 호스트가 맥이면 Meta.
+   - **재시도 일정**(소스에서 읽은 값): 선택자를 다시 찾는 바깥 고리 `retryWithProgressAndBackoff`는 `[20, 50, 100, 100, 500]`ms(마감/5보다 큰 뒤쪽은 뺀다. 5초 마감이면 마감/5=1000이라 그대로)에 맨 앞 0을 붙여 0·20·50·100·100·500·500…, 요소 동작의 안쪽 고리 `_retryAction`은 첫 시도 0, 다시 시도마다 `[0, 20, 100, 100, 500]`(다섯 번째부터 500). 스크롤 방식은 시도마다 `기본 → {end,end} → {center,center} → {start,start}`를 돌려 쓴다. 상한은 5초(`click`·`fill`·`waitFor`), `press`는 상한이 없다(옛 러너와 같다. 다만 응답이 오지 않는 브라우저를 영원히 기다리지 않게 안전 상한 60초를 뒀다).
+   - **오류 글**: 첫 줄만 쓴다. 시간 초과는 `page.click: Timeout 5000ms exceeded.`(`page.fill`·`page.waitForSelector`), 페이지 안에서 던진 오류는 `page.fill: Error: …`(실측), 틀린 선택자·모르는 엔진은 접두사 없이(`page.click: Unexpected token "" while parsing css selector "button[". …`), 알 수 없는 키는 `keyboard.press: Unknown key: "…"`. 이것들은 차등 시험이 옛 러너의 글과 견준다. `StepFailedError.steps`에는 실패한 단계(ok:false, detail)까지 들어 있고, 동작 없는 단계는 앞 단계를 돈 뒤 그 자리에서 `StepWithoutActionError`로 던진다.
+4. **단계 뒤 요청 기다리기(#684).** 단계가 하나라도 있으면 `waitForIdle({graceMs:100, quietMs:500, timeoutMs:5000})`와 같은 뜻으로 기다린 뒤 글자를 읽는다. 떠 있는 요청은 요청 id 집합이다(파비콘은 세지 않고, 이벤트 스트림은 응답의 머리가 오면 뺀다. 상한을 넘겨도 오류가 아니다). 연결이 끊겼으면 오류다.
+5. **`capture`.** 첫 화면과 각 단계(실패한 단계 포함) 뒤에 `Page.captureScreenshot`(png, 시각 뷰포트 크기의 clip, `captureBeyondViewport:false`)을 찍는다. 글꼴 준비(`document.fonts.ready`)를 기다리고 캐럿을 숨겼다 되돌린다(Playwright의 `inPagePrepareForScreenshots`). 스크린샷이 실패하면 옛 러너처럼 삼키고 그 단계를 스크린샷 없이 남긴다(단계 결과는 그대로. 연결이 끊긴 것은 뒤의 확인이 오류로 바꾼다).
+6. **화면 값 측정을 격리된 실행 환경으로(의도한 차이).** `text`·`horizontalOverflowPx`·`viewportTexts`·`loadMs`를 격리된 환경에서 읽는다. A6a 검토에서 나온 한계(옛 러너와 같은 환경에서 읽어 모델이 만든 페이지가 `HTMLElement.prototype.innerText`·`Math.max`·`getBoundingClientRect` 등을 바꿔치면 게이트가 보는 값이 위조된다)를 푼 것이다. 위조 페이지(`/forged`)에서 옛 러너는 위조된 글자·넘침 0·숨은 글자 "보임"을 돌려주고 새 러너는 진짜 값(글자, 넘침 100px, 숨은 글자 안 보임)을 돌려준다. 정직한 페이지에서는 차등 시험이 그대로 같다. `loadMs`(`performance.getEntriesByType('navigation')`)도 격리된 환경에서 읽혔다(`measureLoad` 시험).
+
+**옛 러너와 달라진 것.**
+- (의도) 위의 6번.
+- (의도) **브라우저 오류 화면(`chrome-error://`, 허용 밖으로 이동해 막힌 뒤)은 빈 문서로 읽는다.** 글자 `''`, 가로 넘침 0, `viewportTexts`는 모두 "화면에 없음". 옛 러너는 이 화면을 headless shell에서는 빈 문서로, 시스템 Chrome에서는 오류 문구로 읽는다(같은 시험이 두 브라우저에서 달랐다). 오류 문구에는 페이지가 고른 호스트 이름이 들어가므로(`주문완료.invalid이(가) 차단됨`) 화면 글자로 읽으면 `expectText`를 통과시킬 길이 된다. 새 러너는 브라우저와 무관하게 막는 쪽(빈 문서)으로 고정했다. A6a의 새 러너도 이 화면을 기본 실행 환경에서 읽어 오류 문구를 돌려줬다(트러블슈팅 202). 단계의 선택자도 이 화면에서는 아무것도 찾지 않는다(옛 러너는 headless shell에서 `waitFor: 'text=<막힌 호스트>'`·`click: 'button'`이 시간 초과로 실패하고, 시스템 Chrome에서는 오류 문구·버튼을 찾아 통과한다). 오류 화면인지는 측정·찾기를 하는 같은 평가 안에서 `location.protocol`로 본다. 평가 전에 따로 보면 그 사이에 문서가 바뀔 수 있다(자동 보안 검토의 지적).
+- 연결이 끊기거나 페이지가 충돌하면 `StepFailedError`가 아니라 일반 실패(`failed`)다(앱의 실패가 아니라 확인하지 못한 것이다. 옛 러너는 이 경우도 단계 실패로 감쌌다. 시험으로 재현하지 못했다).
+- `press`에 안전 상한 60초가 있다(위 3).
+- 팝업·`enter-frame` 선택자(`iframe >> internal:control=enter-frame >> …`)·`_react`·`_vue`·사용자 정의 엔진처럼 메인 월드나 다른 프레임이 필요한 선택자는 지원하지 않는다(옛 러너는 일부 동작한다). 워크플로 선언이 쓰는 꼴(`text=`, `role=`, CSS, `>>`, `:has-text`, `nth=`, `xpath=`)은 시험했다.
+
+**판정 쪽에서 직접 찾아본 자리**(AGENTS.md "게이트와 판정을 고칠 때").
+- 단계 뒤 기다림을 건너뛰는 분기: 단계가 있으면 늘 기다린다(`!input.steps.is_empty()`). 실패한 단계는 던지므로 기다림이 없는 것은 옛 러너와 같다. 건너뛰면 #684 시험이 실패한다(변이 표).
+- 실패를 덜 세는 자리: 기록은 `State`에 쌓일 뿐 단계·스크린샷이 지우지 않는다. 스크린샷 실패는 삼키지만 단계 성공·실패에는 영향이 없다. 연결이 끊긴 뒤의 스크린샷 실패는 삼키되 마지막 `fatal` 확인이 오류로 바꾼다.
+- "하나라도 맞으면 통과"가 되는 자리: 클릭 대상 확인은 맨 위 요소 하나만 본다(투명·1px·가려진 요소도 맨 위에 있으면 대상이 아니면 실패). `stop()`이 "done"이 아닌 어떤 모양이든 실패다(모르는 모양은 맞는 것으로 치지 않는다). 예외: 클릭이 문서를 바꿔 `stop()` 평가가 던지면 "끝남"으로 본다(Playwright가 `.catch(() => "done")`로 같게 한다. 대상 확인이 어긋났어도 페이지가 이동하면 통과로 읽힐 수 있다. 옛 러너와 같다).
+- 실행 환경 id가 바뀌었는데 옛 id로 평가하는 자리: 새 문서·사라짐 알림마다 버리고, 평가 오류도 버린다. 환경을 만드는 도중에 바뀌면 저장하지 않는다. 지우면 링크 클릭 뒤 단계 시험이 실패한다(변이 표).
+- 모르면 실패: `checkElementStates`·`fill`·보임 확인의 결과가 알려진 모양이 아니면 단계 오류(통과가 아니다). 이벤트를 끝까지 못 받았거나 연결이 끊겼으면 단계 성공으로 바꾸지 않는다.
+
+**검증.**
+- **시험을 먼저 썼다.** 단계 시나리오 16개를 구현 전에 돌려 `Error: Rust 화면 확인 러너는 단계(steps)·스크린샷(capture)·화면 중계(onFrame)를 아직 지원하지 않습니다`(성공 시나리오)와 `expected { kind: 'Error', … } to deeply equal { kind: 'StepFailedError', … }`(실패 시나리오)로 16개 모두 실패했다. 구현 뒤 통과.
+- **차등 시험**(`browser-runner-differential.test.ts`): 단계 시나리오(`text=`·`role=`·CSS·`>>`·`:has-text`·`nth=`, fill 뒤 Enter 제출, Tab·Shift+Tab·`Control+A`·`ControlOrMeta+A`·글자·`Meta+KeyZ`·Numpad·`Control++` 같은 키 열일곱 가지, input·number·date·textarea·contenteditable fill과 빈 글자 지우기, 늦게 나타나는 요소, 스크롤해야 보이는 버튼, 애니메이션 중인 버튼, 나중에 활성화되는 버튼, 링크 클릭으로 이동한 뒤의 단계, 전역을 바꾼 페이지에서의 단계), 실패 시나리오(없는 선택자·가려진 버튼·비활성 버튼·보이지 않는 요소 waitFor·input이 아닌 요소·읽기 전용·checkbox fill·알 수 없는 키·깨진 선택자·모르는 엔진·`text=`·xpath 오류·동작 없는 단계)의 오류 글 첫 줄과 `steps` 배열이 같다. 단계가 보낸 fetch가 500(빠른·느린·이어 보낸 요청)이면 둘 다 `failedRequests`에 남고, `capture`는 단계 수만큼 PNG가 있고 크기가 뷰포트와 같으며(바이트는 견주지 않는다), 출처 제한과 함께 단계가 허용 밖으로 fetch·이미지·이동하면 막히고 기록되며 서버에 닿지 않고, 중단 신호가 단계 도중에 와도 브라우저·임시 폴더가 남지 않는다. 위조 시험은 의도한 차이로 따로 둔다.
+- **두 브라우저**: headless shell(Chromium 153.0.8010.12)과 시스템 Google Chrome 157.0.8103.51(`B_STUDIO_BROWSER_EXECUTABLE`) 모두에서 `browser-runner-differential.test.ts`(41개)와 `browser-origin-native.test.ts`(28개) 69개가 통과했다.
+- **전체**: `cargo test -p bstudio-io -p bstudio-node` 462개 통과, `pnpm typecheck`·`pnpm --filter @b-studio/studio lint` 통과, `pnpm test` 16491개 중 1개가 `verify-containers-differential`의 15초 시간 초과(알려진 흔들림 #1188)로 실패했고 단독으로 다시 돌리면 62개가 통과했다.
+- **Rust 단위 시험**: 키 해석(`+` 나누기, 수정 키 조합, 모르는 키와 앞서 나간 수정 키, 맥 명령, `ControlOrMeta`, 자동 반복, 표 닫힘), 재시도 일정(바깥·안쪽 고리, 스크롤 방식), 클릭 지점(자르기·0.99 넓이·소수 둘째 자리), 이동 기다림(`SignalBarrier`), 오류 글 첫 줄, 상태 결과의 엄격한 읽기, 대상 확인 결과, 실행 환경 재생성(새 문서·사라짐 알림·만드는 도중의 변경·남의 컨텍스트), 메인 프레임만 실행 환경을 버리는지, 떠 있는 요청 집합(시작·종료·실패·이벤트 스트림·파비콘), 기다림의 상한과 끊김, 빈 문서 보고서.
+- **변이 시험**(원래 코드에 하나씩 넣고 시험이 잡는지. 되돌릴 때는 파일 복사본으로 되돌렸다. 치환은 함수 본문에만 맞췄다):
+
+  | 변이 | 잡은 시험 |
+  |---|---|
+  | 안정 판정 빼기 | 애니메이션 중인 버튼(1개 실패) |
+  | 클릭 대상 확인 빼기 | 가려진 버튼(1개 실패) |
+  | 활성 판정 빼기 | 비활성 버튼(1개 실패) |
+  | 재시도 없이 한 번만 | 나중에 활성화되는 버튼(1개 실패) |
+  | 단계 뒤 요청 기다리기 빼기 | 단계가 보낸 fetch 500(1개 실패) |
+  | 오류 글 첫 줄 자르기 빼기(두 곳) | 깨진 선택자·xpath 오류(1개 실패). 한 곳만 빼면 다른 곳이 막아 통과했다(두 겹이다) |
+  | 실패한 단계 기록 빼기 | 없는 선택자 click의 `steps` 배열(1개 실패) |
+  | 주입 스크립트를 페이지 실행 환경에서 돌리기 | 전역을 바꾼 페이지의 단계(1개 실패) |
+  | 측정을 페이지 실행 환경에서 하기 | 위조 시험(1개 실패) |
+  | 새 문서 뒤 실행 환경 다시 만들기 빼기 | 링크 클릭 뒤의 단계(1개 실패). 처음에 세대 번호 비교만 뺀 변이는 통과했다(`invalidate`가 핸들도 지워 중복이다). 환경을 버리는 함수를 없앤 변이로 다시 쟀다 |
+  | 브라우저 오류 화면을 빈 문서로 읽기 빼기(측정 식을 감싸지 않기) | 막힌 곳으로 스스로 이동하는 시험(1개 실패, 두 브라우저) |
+  | 요소 찾기의 오류 화면 확인 빼기 | 오류 화면의 단계 시험(`click: 'button'`, 1개 실패) |
+  | 보임 확인의 오류 화면 확인 빼기 | 오류 화면의 단계 시험(`waitFor: 'text=order-done'`, 1개 실패) |
+  | capture 실패를 단계 실패로 바꾸기 | **시험하지 못했다.** 스크린샷 실패를 일부러 낼 방법이 없다. 옛 러너는 `.catch(() => undefined)`로 삼키고(소스 `record`), 새 러너도 삼킨다. 어느 쪽이 같은지는 소스로만 확인했다 |
+
+- **시간**(같은 페이지에서 단계 세 개[click·fill·press]를 도는 호출 전체, 12회 중앙값, 한 기계에서 한 번 잰 값): 옛 1367ms, 새 1726ms(약 360ms 느림. A6a의 약 400ms와 같은 차이이고 원인은 여전히 찾지 못했다).
+
+**남은 한계·재지 않은 것.**
+- 위 "옛 러너와 달라진 것"의 선택자 범위, 팝업.
+- Linux·Windows는 재지 못했다(CI Linux에서 처음 돈다). 시스템 Chrome의 `chrome-error://` 화면은 headless shell과 달리 오류 문구가 있어 두 브라우저에서 시험을 따로 맞췄다.
+- 맥 편집 명령은 맥에서만 시험했다(리눅스에서 `Control+A`가 어떻게 되는지는 같은 소스 규칙을 따르지만 재지 않았다).
+- 실제 세션(Claude Code)에서의 실측은 하지 않았다(게이트가 아직 이 러너를 쓰지 않는다. A6c의 완료 조건). `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.

@@ -5281,12 +5281,34 @@ pub struct BrowserRunInputJs {
     pub viewport_width: u32,
     pub viewport_height: u32,
     pub viewport_script: Option<String>,
+    pub viewport_texts: Option<Vec<String>>,
     pub allowed_origins: Option<Vec<String>>,
     pub measure_load: bool,
     pub media_error_script: String,
+    pub steps: Vec<BrowserStepInputJs>,
+    pub capture: bool,
+    pub open_label: String,
 }
 
-/// `kind`: `done`(나머지 필드) · `unavailable`(message: 브라우저·프록시를 쓸 수 없다) · `failed`(message: 이동·측정 실패) · `aborted`
+/// 단계 하나. `kind`: `click`·`fill`·`press`·`waitFor`·`none`(동작 없음). `value`는 선택자(`click`·`fill`·`waitFor`) 또는 키(`press`), `text`는 `fill`의 글자
+#[napi(object)]
+pub struct BrowserStepInputJs {
+    pub label: String,
+    pub kind: String,
+    pub value: String,
+    pub text: Option<String>,
+}
+
+#[napi(object)]
+pub struct BrowserStepResultJs {
+    pub label: String,
+    pub ok: bool,
+    pub detail: Option<String>,
+    pub screenshot: Option<Buffer>,
+}
+
+/// `kind`: `done`(나머지 필드) · `unavailable`(message: 브라우저·프록시를 쓸 수 없다) · `failed`(message: 이동·측정 실패) ·
+/// `stepFailed`(message: 단계 실패 글, steps: 실패한 단계까지의 기록) · `stepWithoutAction`(message) · `aborted`
 #[napi(object)]
 pub struct BrowserRunResultJs {
     pub kind: String,
@@ -5301,6 +5323,11 @@ pub struct BrowserRunResultJs {
     pub horizontal_overflow_px: f64,
     pub viewport_texts_json: Option<String>,
     pub load_ms: Option<f64>,
+    pub steps: Vec<BrowserStepResultJs>,
+}
+
+fn step_results(steps: Vec<brw::BrowserStepRecord>) -> Vec<BrowserStepResultJs> {
+    steps.into_iter().map(|step| BrowserStepResultJs { label: step.label, ok: step.ok, detail: step.detail, screenshot: step.screenshot.map(Buffer::from) }).collect()
 }
 
 fn browser_result(kind: &str, message: String, output: brw::BrowserRunOutput) -> BrowserRunResultJs {
@@ -5317,10 +5344,23 @@ fn browser_result(kind: &str, message: String, output: brw::BrowserRunOutput) ->
         horizontal_overflow_px: output.horizontal_overflow_px,
         viewport_texts_json: output.viewport_texts_json,
         load_ms: output.load_ms,
+        steps: step_results(output.steps),
     }
 }
 
-/// 헤드리스 브라우저로 페이지를 열어 결과를 모은다(단계가 없는 확인). `signal`로 취소하면 브라우저·프록시·임시 폴더를 정리한 뒤 `aborted`로 끝난다
+/// 모르는 종류의 단계는 동작 없음으로 읽는다(실행하지 않고 입력 오류로 끝난다)
+fn browser_step(step: BrowserStepInputJs) -> brw::BrowserStepInput {
+    let action = match step.kind.as_str() {
+        "click" => brw::BrowserStepAction::Click(step.value),
+        "fill" => brw::BrowserStepAction::Fill { selector: step.value, text: step.text.unwrap_or_default() },
+        "press" => brw::BrowserStepAction::Press(step.value),
+        "waitFor" => brw::BrowserStepAction::WaitFor(step.value),
+        _ => brw::BrowserStepAction::None,
+    };
+    brw::BrowserStepInput { label: step.label, action }
+}
+
+/// 헤드리스 브라우저로 페이지를 열어 결과를 모은다(단계·스크린샷 포함). `signal`로 취소하면 브라우저·프록시·임시 폴더를 정리한 뒤 `aborted`로 끝난다
 #[napi]
 pub fn run_browser_check(env: Env, input: BrowserRunInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<BrowserRunResultJs>> {
     let cancel = abort_cancel(signal);
@@ -5329,15 +5369,21 @@ pub fn run_browser_check(env: Env, input: BrowserRunInputJs, signal: Option<Abor
         url: input.url,
         viewport: (input.viewport_width, input.viewport_height),
         viewport_script: input.viewport_script,
+        viewport_texts: input.viewport_texts.unwrap_or_default(),
         allowed_origins: input.allowed_origins,
         measure_load: input.measure_load,
         media_error_script: input.media_error_script,
+        steps: input.steps.into_iter().map(browser_step).collect(),
+        capture: input.capture,
+        open_label: input.open_label,
     };
     AsyncBlockBuilder::new(async move {
         Ok(match brw::run_in_browser(&input, &cancel).await {
             Ok(output) => browser_result("done", String::new(), output),
             Err(brw::RunError::Unavailable(message)) => browser_result("unavailable", message, Default::default()),
             Err(brw::RunError::Failed(message)) => browser_result("failed", message, Default::default()),
+            Err(brw::RunError::StepWithoutAction(message)) => browser_result("stepWithoutAction", message, Default::default()),
+            Err(brw::RunError::StepFailed { message, steps }) => browser_result("stepFailed", message, brw::BrowserRunOutput { steps, ..Default::default() }),
             Err(brw::RunError::Aborted) => browser_result("aborted", String::new(), Default::default()),
         })
     })
