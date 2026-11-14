@@ -139,7 +139,7 @@ export class StepFailedError extends Error {
 }
 
 /** 선언한 네 동작 중 어느 것도 없는 단계. 단계 실패가 아니라 잘못된 입력이라 따로 구분한다 */
-class StepWithoutActionError extends Error {}
+export class StepWithoutActionError extends Error {}
 
 /** 브라우저가 알아서 요청하는 파비콘인가(여는 쪽: 실패로 세지 않는다). 파싱할 수 없는 URL은 던진다. 경로 판정은 Rust */
 export function isAutomaticFavicon(url: string): boolean {

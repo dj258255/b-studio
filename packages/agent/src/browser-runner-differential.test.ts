@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { BrowserUnavailableError, runInBrowser, type BrowserPageResult, type BrowserPageOptions } from './browser-check';
+import { BrowserUnavailableError, StepFailedError, StepWithoutActionError, runInBrowser, type BrowserPageResult, type BrowserPageOptions, type BrowserPageStep } from './browser-check';
 import { runInBrowserNative } from './browser-check-native';
 
 /**
@@ -216,6 +216,102 @@ function route(path: string): { status?: number; type?: string; body: string | B
       return { type: 'text/javascript', body: '/* ok */' };
     case '/hang':
       return { body: '', delay: 60_000 };
+    // ── 단계(A6b): 상호작용 페이지들. 값은 body의 보이는 글자(innerText)로 읽으므로 결과를 글자로 드러낸다
+    case '/steps':
+      return {
+        body: page(
+          `<h1>단계 확인</h1><button id="go" class="primary" onclick="count()">바로 주문</button><p id="o">누른 횟수 0</p>
+<form id="f"><input id="q" name="q" placeholder="검색"><button type="submit" id="submit">찾기</button></form><p id="r">결과 없음</p>
+<input id="a" value="abcdef"><input id="b"><p id="focus">포커스 없음</p><p id="sel">선택 없음</p><a id="link" href="/plain">다른 화면으로</a>` +
+            scripts(
+              `var n = 0; function count() { n++; document.getElementById('o').textContent = '누른 횟수 ' + n; }`,
+              `document.getElementById('f').addEventListener('submit', function (e) { e.preventDefault(); document.getElementById('r').textContent = '검색: ' + document.getElementById('q').value; });`,
+              `['a', 'b'].forEach(function (id) { document.getElementById(id).addEventListener('focus', function () { document.getElementById('focus').textContent = '포커스 ' + id; }); });`,
+              `document.getElementById('a').addEventListener('keydown', function (e) { var t = e.target; setTimeout(function () { document.getElementById('sel').textContent = '선택 ' + e.key + ' ' + t.selectionStart + '-' + t.selectionEnd; }, 0); });`,
+            ),
+        ),
+      };
+    case '/steps-fill':
+      return {
+        body: page(
+          `<input id="t" value="기존"><input id="d" type="date"><input id="n" type="number"><textarea id="ta">옛</textarea><div id="ce" contenteditable="true">옛 글</div><div id="plain">입력 아님</div><input id="ro" readonly value="읽기 전용"><input id="dis" disabled><input id="chk" type="checkbox"><p id="log"></p>` +
+            scripts(`document.addEventListener('input', function (e) { var t = e.target; document.getElementById('log').textContent += t.id + '=' + (t.value !== undefined ? t.value : t.textContent) + '; '; });`),
+        ),
+      };
+    case '/steps-keys':
+      return {
+        body: page(
+          `<input id="k"><p id="log">기록:</p>` +
+            scripts(
+              `var k = document.getElementById('k'); k.focus();`,
+              `['keydown', 'keypress', 'keyup'].forEach(function (type) { k.addEventListener(type, function (e) { document.getElementById('log').textContent += ' ' + type.slice(3, 4) + ':' + e.key + '/' + e.code + '/' + (e.ctrlKey ? 'C' : '') + (e.shiftKey ? 'S' : '') + (e.altKey ? 'A' : '') + (e.metaKey ? 'M' : ''); }); });`,
+            ),
+        ),
+      };
+    case '/steps-late':
+      return { body: page('<p>처음 화면</p>' + scripts(`setTimeout(function () { var p = document.createElement('p'); p.id = 'late'; p.textContent = '늦게 나타남'; document.body.appendChild(p); }, 1200)`)) };
+    case '/steps-scroll':
+      return { body: page('<div style="height:2500px">길다</div><button id="far" onclick="document.getElementById(\'o\').textContent = \'아래 버튼 눌림\'">아래 버튼</button><p id="o">대기</p>') };
+    case '/steps-anim':
+      return {
+        body: page(
+          `<style>#m { position: absolute; left: 0; top: 200px; width: 120px; height: 40px; transition: left 0.8s linear; }</style><button id="m" onclick="document.getElementById('o').textContent = '눌림 위치 ' + Math.round(this.getBoundingClientRect().left)">움직이는 버튼</button><p id="o">대기</p>` +
+            scripts(`setTimeout(function () { document.getElementById('m').style.left = '300px'; }, 30)`),
+        ),
+      };
+    case '/steps-enable-late':
+      return {
+        body: page(`<button id="b" disabled onclick="document.getElementById('o').textContent = '활성화 뒤 눌림'">곧 활성화</button><p id="o">대기</p>` + scripts(`setTimeout(function () { document.getElementById('b').disabled = false; }, 800)`)),
+      };
+    case '/steps-covered':
+      return { body: page('<button id="b" onclick="document.getElementById(\'o\').textContent = \'눌림\'">가려진 버튼</button><p id="o">대기</p><div style="position:fixed;left:0;top:0;right:0;bottom:0"></div>') };
+    case '/steps-disabled':
+      return { body: page('<button id="b" disabled onclick="document.getElementById(\'o\').textContent = \'눌림\'">비활성 버튼</button><p id="o">대기</p>') };
+    case '/steps-hidden':
+      return { body: page('<p>보이는 글자</p><div id="h" style="display:none">숨은 글자</div>') };
+    case '/steps-fetch':
+      return {
+        body: page(
+          `<button id="fast" onclick="fetch('/api/500')">바로 실패</button><button id="slow" onclick="fetch('/api/slow500')">느리게 실패</button><button id="chain" onclick="fetch('/api/ok').then(function () { return fetch('/api/404'); })">이어서 실패</button><p>대기</p>`,
+        ),
+      };
+    case '/api/slow500':
+      return { status: 500, type: 'application/json', body: '{}', delay: 300 };
+    case '/steps-outside':
+      return {
+        body: page(
+          `<button id="f" onclick="fetch('${outsideBase}/data.json').catch(function () {})">밖으로 요청</button><button id="n" onclick="location.assign('${outsideBase}/page')">밖으로 이동</button><button id="i" onclick="var i = new Image(); i.src = '${outsideBase}/pixel.png'">밖 이미지</button><p>허용 안</p>`,
+        ),
+      };
+    case '/blocked-nav':
+      return { body: page('<p>이동 전</p>' + scripts(`location.assign('http://order-done.invalid/')`)) };
+    case '/forged':
+      // 페이지가 전역을 바꿔 판정을 속이려는 화면. 숨은 글자를 "보이는" 것으로, 가로 넘침을 0으로, 화면 글자를 다른 글자로 읽히게 한다
+      return {
+        body: page(
+          `<div style="width:900px;height:10px;background:#ccc"></div><p id="hidden" style="display:none">숨은 글자</p><p>진짜 글자</p>` +
+            scripts(
+              `Object.defineProperty(HTMLElement.prototype, 'innerText', { get: function () { return '위조된 글자 주문 완료'; }, configurable: true });`,
+              `Math.max = function () { return 0; };`,
+              `Element.prototype.getClientRects = function () { return [{ width: 100, height: 20 }]; };`,
+              `Element.prototype.getBoundingClientRect = function () { return { left: 10, top: 10, right: 110, bottom: 30, width: 100, height: 20, x: 10, y: 10 }; };`,
+              `Document.prototype.elementFromPoint = function () { return document.getElementById('hidden'); };`,
+            ),
+          '<style>body { margin: 0 }</style>',
+        ),
+      };
+    case '/steps-forged':
+      // 선택자·판정에 쓰이는 전역을 바꾼 화면: 실행 환경이 같으면 보임 판정이 깨져 단계가 멈춘다
+      return {
+        body: page(
+          `<button id="b" onclick="document.getElementById('o').textContent = '위조된 화면에서 눌림'">눌러 보세요</button><p id="o">대기</p>` +
+            scripts(
+              `Element.prototype.getBoundingClientRect = function () { return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0 }; };`,
+              `Array.prototype.some = function () { return false; }; Array.prototype.includes = function () { return false; }; Array.prototype.indexOf = function () { return -1; };`,
+              `Object.defineProperty(Element.prototype, 'isConnected', { get: function () { return false; }, configurable: true });`,
+            ),
+        ),
+      };
     default:
       return { status: 404, type: 'text/plain', body: 'not found' };
   }
@@ -266,20 +362,34 @@ afterAll(
  * 서로 다른 요청의 실패·미디어 오류·막은 요청은 네트워크 도착 순서로 쌓이는데, 같은 러너를 두 번 돌려도 그 순서가 달라진다(실측: 옛 러너도 6회 중 2가지 순서).
  * 그래서 이 목록들은 정렬해서 견준다. 한 스크립트 안에서 차례로 부르는 console·예외는 순서까지 견준다. 워커·iframe처럼 대상이 여럿인 페이지만 `unorderedErrors`로 정렬한다
  */
-const normalize = ({ loadMs: _loadMs, ...rest }: BrowserPageResult, unorderedErrors: boolean) => ({
+const normalize = ({ loadMs: _loadMs, ...rest }: BrowserPageResult, unorderedErrors: boolean, ignoreScreenText = false) => ({
   ...rest,
+  // 브라우저 오류 화면(막힌 이동 뒤)의 글자: 옛 러너는 브라우저에 따라 빈 문서(headless shell)나 오류 문구(시스템 Chrome)를 읽는다. 새 러너는 늘 빈 문서로 읽는 의도한 차이다
+  ...(ignoreScreenText ? { text: '', viewportTexts: undefined } : {}),
+  steps: normalizeSteps(rest.steps),
   failedRequests: [...rest.failedRequests].sort(),
   mediaErrors: [...rest.mediaErrors].sort(),
   blockedRequests: [...rest.blockedRequests].sort(),
   ...(unorderedErrors ? { consoleErrors: [...rest.consoleErrors].sort(), pageErrors: [...rest.pageErrors].sort() } : {}),
 });
 
+/** PNG 머리(서명 8바이트 + IHDR)에서 가로·세로를 읽는다. PNG가 아니면 null */
+function pngSize(data: Buffer): { width: number; height: number } | null {
+  if (data.length < 24 || !data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return null;
+  return { width: data.readUInt32BE(16), height: data.readUInt32BE(20) };
+}
+
+/** 스크린샷 바이트는 견주지 않고, PNG인지와 크기만 견준다 */
+function normalizeSteps(steps: readonly BrowserPageStep[]) {
+  return steps.map(({ screenshot, ...rest }) => ({ ...rest, ...(screenshot ? { screenshot: { png: pngSize(screenshot) } } : {}) }));
+}
+
 /** 둘 다 돌려 `loadMs`를 뺀 결과를 견준다 */
-async function compare(path: string, options: BrowserPageOptions = {}, unorderedErrors = false): Promise<{ old: BrowserPageResult; native: BrowserPageResult }> {
+async function compare(path: string, options: BrowserPageOptions = {}, unorderedErrors = false, ignoreScreenText = false): Promise<{ old: BrowserPageResult; native: BrowserPageResult }> {
   const url = path.startsWith('http') ? path : `${base}${path}`;
   const old = await runInBrowser(url, options);
   const native = await runInBrowserNative(url, options);
-  expect(normalize(native, unorderedErrors), path).toEqual(normalize(old, unorderedErrors));
+  expect(normalize(native, unorderedErrors, ignoreScreenText), path).toEqual(normalize(old, unorderedErrors, ignoreScreenText));
   expect(old.loadMs === undefined, path).toBe(native.loadMs === undefined);
   return { old, native };
 }
@@ -474,13 +584,221 @@ describe('Rust 러너는 옛 러너와 같은 결과를 낸다 (ADR-199)', { tim
     }
   });
 
-  it('아직 지원하지 않는 입력은 조용히 무시하지 않고, 브라우저 없음이 아닌 오류로 던진다', async () => {
-    const attempts: BrowserPageOptions[] = [{ steps: [{ click: 'button' }] }, { capture: true }, { onFrame: () => {} }];
-    for (const options of attempts) {
-      const error = await runInBrowserNative(`${base}/ok`, options).catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(Error);
-      expect(error).not.toBeInstanceOf(BrowserUnavailableError);
-      expect((error as Error).message).toMatch(/아직 지원하지 않/);
+  it('아직 지원하지 않는 입력(화면 중계)은 조용히 무시하지 않고, 브라우저 없음이 아닌 오류로 던진다', async () => {
+    const error = await runInBrowserNative(`${base}/ok`, { onFrame: () => {} }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toBeInstanceOf(BrowserUnavailableError);
+    expect((error as Error).message).toMatch(/아직 지원하지 않/);
+  });
+});
+
+/** 단계가 실패했을 때 두 러너가 던진 것을 같은 모양으로 모은다 */
+async function failureOf(runner: typeof runInBrowser, url: string, options: BrowserPageOptions) {
+  try {
+    await runner(url, options);
+  } catch (error) {
+    if (error instanceof StepFailedError) return { kind: 'StepFailedError', message: error.message, steps: normalizeSteps(error.steps) };
+    return { kind: (error as Error).constructor.name, message: (error as Error).message };
+  }
+  return { kind: '(던지지 않음)' };
+}
+
+/** 같은 단계를 두 러너로 돌려 실패의 종류·오류 글(첫 줄이 같은 한 줄)·그때까지의 단계가 같은지 견준다 */
+async function compareFailure(path: string, options: BrowserPageOptions) {
+  const url = path.startsWith('http') ? path : `${base}${path}`;
+  const old = await failureOf(runInBrowser, url, options);
+  const native = await failureOf(runInBrowserNative, url, options);
+  expect(native, path).toEqual(old);
+  return native as { kind: string; message: string; steps?: ReturnType<typeof normalizeSteps> };
+}
+
+describe('Rust 러너의 단계(click·fill·press·waitFor)는 옛 러너와 같은 결과를 낸다 (ADR-199 A6b)', { timeout: 180_000 }, () => {
+  it('click: text=·role=·CSS·>> 이어 쓰기 선택자로 같은 버튼을 누른다', async () => {
+    const { native } = await compare('/steps', {
+      steps: [{ click: 'text=바로 주문' }, { click: 'role=button[name="바로 주문"]' }, { click: 'button.primary' }, { click: 'form >> button[type=submit]' }, { click: '#go >> nth=0' }, { click: 'button:has-text("바로 주문")' }, { click: '[id=go]' }],
+    });
+    expect(native.text).toContain('누른 횟수 6');
+    expect(native.steps.map((step) => step.label)).toEqual(['open /steps', 'click text=바로 주문', 'click role=button[name="바로 주문"]', 'click button.primary', 'click form >> button[type=submit]', 'click #go >> nth=0', 'click button:has-text("바로 주문")', 'click [id=go]']);
+    expect(native.steps.every((step) => step.ok)).toBe(true);
+  });
+
+  it('fill 뒤 Enter 제출, Tab·Shift+Tab 이동, Control+A·ControlOrMeta+A, 글자 키', async () => {
+    const submitted = await compare('/steps', { steps: [{ fill: { selector: '#q', text: '김토스' } }, { press: 'Enter' }, { waitFor: 'text=검색: 김토스' }] });
+    expect(submitted.native.text).toContain('검색: 김토스');
+    const moved = await compare('/steps', { steps: [{ click: '#a' }, { press: 'Control+A' }, { press: 'Tab' }, { press: 'Shift+Tab' }, { press: 'ControlOrMeta+A' }, { press: 'ArrowDown' }, { press: 'Shift+Tab' }] });
+    expect(moved.native.text).toContain('포커스 ');
+    expect(moved.native.text).not.toContain('포커스 없음');
+    await compare('/steps-keys', {
+      steps: [{ press: 'a' }, { press: 'Shift+A' }, { press: 'Shift+a' }, { press: 'Control+Shift+KeyB' }, { press: 'Alt+ArrowDown' }, { press: 'Meta+KeyZ' }, { press: 'Shift+Meta+KeyZ' }, { press: 'Enter' }, { press: 'NumpadEnter' }, { press: 'Backspace' }, { press: 'Escape' }, { press: '1' }, { press: '+' }, { press: 'Control++' }, { press: 'Home' }, { press: 'PageDown' }, { press: 'F5' }],
+    });
+  });
+
+  it('fill: input·textarea·contenteditable·date를 채우고, 빈 글자는 지운다', async () => {
+    const { native } = await compare('/steps-fill', {
+      steps: [{ fill: { selector: '#t', text: '새 글' } }, { fill: { selector: '#d', text: '2026-11-14' } }, { fill: { selector: '#n', text: ' 42 ' } }, { fill: { selector: '#ta', text: '여러\n줄' } }, { fill: { selector: '#ce', text: '편집 가능' } }, { fill: { selector: '#t', text: '' } }],
+    });
+    expect(native.text).toContain('t=새 글');
+    expect(native.text).toContain('d=2026-11-14');
+    expect(native.text).toContain('n=42');
+    expect(native.text).toContain('ce=편집 가능');
+    expect(native.text).toContain('t=;');
+  });
+
+  it('waitFor: 늦게 나타나는 요소를 기다린다', async () => {
+    const { native } = await compare('/steps-late', { steps: [{ waitFor: 'text=늦게 나타남' }, { waitFor: '#late' }] });
+    expect(native.text).toContain('늦게 나타남');
+  });
+
+  it('스크롤해야 보이는 버튼과 애니메이션 중인 버튼(안정할 때까지 기다린다)', async () => {
+    const far = await compare('/steps-scroll', { steps: [{ click: 'text=아래 버튼' }] });
+    expect(far.native.text).toContain('아래 버튼 눌림');
+    const moving = await compare('/steps-anim', { steps: [{ click: '#m' }] });
+    // 움직임이 끝난 뒤(left 300px)에 눌러야 한다
+    expect(moving.native.text).toContain('눌림 위치 300');
+  });
+
+  it('처음에는 비활성이던 버튼이 곧 활성화되면 다시 시도해 누른다', async () => {
+    const { native } = await compare('/steps-enable-late', { steps: [{ click: 'text=곧 활성화' }] });
+    expect(native.text).toContain('활성화 뒤 눌림');
+  });
+
+  it('새 문서로 이동한 뒤의 단계: 링크 클릭과 폼 제출이 이동을 마친 뒤 이어진다', async () => {
+    const link = await compare('/steps', { steps: [{ click: 'text=다른 화면으로' }, { waitFor: 'text=평범한 화면' }, { click: 'p' }] });
+    expect(link.native.text).toContain('평범한 화면');
+    expect(link.native.steps.map((step) => step.label)).toEqual(['open /steps', 'click text=다른 화면으로', 'waitFor text=평범한 화면', 'click p']);
+  });
+
+  it('페이지가 전역(Element.prototype·Array.prototype)을 바꿔도 단계는 격리된 실행 환경에서 같게 돈다', async () => {
+    const { native } = await compare('/steps-forged', { steps: [{ click: 'text=눌러 보세요' }, { waitFor: '#o' }] });
+    expect(native.text).toContain('위조된 화면에서 눌림');
+  });
+
+  it('실패: 없는 선택자 click은 5초 시간 초과이고 오류 글 첫 줄과 단계 배열이 같다', async () => {
+    const failure = await compareFailure('/steps', { steps: [{ click: '#go' }, { click: '#nope' }, { click: '#go' }] });
+    expect(failure.kind).toBe('StepFailedError');
+    expect(failure.message).toBe('2번째 단계 실패 (click #nope): page.click: Timeout 5000ms exceeded.');
+    expect(failure.steps).toEqual([{ label: 'open /steps', ok: true }, { label: 'click #go', ok: true }, { label: 'click #nope', ok: false, detail: 'page.click: Timeout 5000ms exceeded.' }]);
+  });
+
+  it('실패: 가려진 버튼·비활성 버튼은 시간 초과이고 누르지 않는다', async () => {
+    const covered = await compareFailure('/steps-covered', { steps: [{ click: '#b' }] });
+    expect(covered.message).toBe('1번째 단계 실패 (click #b): page.click: Timeout 5000ms exceeded.');
+    const disabled = await compareFailure('/steps-disabled', { steps: [{ click: 'text=비활성 버튼' }] });
+    expect(disabled.message).toBe('1번째 단계 실패 (click text=비활성 버튼): page.click: Timeout 5000ms exceeded.');
+  });
+
+  it('실패: 보이지 않는 요소 waitFor, input이 아닌 요소 fill, 편집할 수 없는 입력, 알 수 없는 키, 깨진 선택자', async () => {
+    const hidden = await compareFailure('/steps-hidden', { steps: [{ waitFor: '#h' }] });
+    expect(hidden.message).toBe('1번째 단계 실패 (waitFor #h): page.waitForSelector: Timeout 5000ms exceeded.');
+    const notInput = await compareFailure('/steps-fill', { steps: [{ fill: { selector: '#plain', text: 'x' } }] });
+    expect(notInput.message).toBe('1번째 단계 실패 (fill #plain): page.fill: Error: Element is not an <input>, <textarea>, <select> or [contenteditable] and does not have a role allowing [aria-readonly]');
+    const readonly = await compareFailure('/steps-fill', { steps: [{ fill: { selector: '#ro', text: 'x' } }] });
+    expect(readonly.message).toMatch(/^1번째 단계 실패 \(fill #ro\): page\.fill: Timeout 5000ms exceeded\.$/);
+    const checkbox = await compareFailure('/steps-fill', { steps: [{ fill: { selector: '#chk', text: 'x' } }] });
+    expect(checkbox.message).toBe('1번째 단계 실패 (fill #chk): page.fill: Error: Input of type "checkbox" cannot be filled');
+    const unknownKey = await compareFailure('/steps-keys', { steps: [{ press: 'NoSuchKey' }] });
+    expect(unknownKey.message).toBe('1번째 단계 실패 (press NoSuchKey): keyboard.press: Unknown key: "NoSuchKey"');
+    await compareFailure('/steps-keys', { steps: [{ press: 'Control+NoSuchKey' }] });
+    const badSelector = await compareFailure('/steps', { steps: [{ click: 'button[' }] });
+    expect(badSelector.message).toBe('1번째 단계 실패 (click button[): page.click: Unexpected token "" while parsing css selector "button[". Did you mean to CSS.escape it?');
+    // 틀린 선택자는 5초를 기다리지 않고 바로 실패한다. 모르는 엔진도 같은 규칙으로 바로 실패한다
+    await compareFailure('/steps', { steps: [{ waitFor: 'nosuchengine=abc' }] });
+    await compareFailure('/steps', { steps: [{ click: 'text=' }] });
+    // 페이지 안에서 던진 오류는 스택이 붙어 여러 줄이다. 첫 줄만 쓴다
+    const xpath = await compareFailure('/steps', { steps: [{ click: 'xpath=//*[' }] });
+    expect(xpath.message.includes('\n')).toBe(false);
+  });
+
+  it('동작이 없는 단계는 단계 실패로 감싸지 않고 그 자리에서 던진다 (앞 단계는 돈다)', async () => {
+    const failure = await compareFailure('/steps', { steps: [{ click: '#go' }, {} as never] });
+    expect(failure.kind).toBe('StepWithoutActionError');
+    expect(failure.message).toBe('2번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)');
+    const native = await runInBrowserNative(`${base}/steps`, { steps: [{} as never] }).catch((error: unknown) => error);
+    expect(native).toBeInstanceOf(StepWithoutActionError);
+  });
+
+  it('단계가 보낸 fetch가 500을 받으면 둘 다 failedRequests에 남긴다 (#684: 단계 뒤 요청을 기다린다)', async () => {
+    for (const selector of ['#fast', '#slow']) {
+      const { native } = await compare('/steps-fetch', { steps: [{ click: selector }] });
+      expect(native.failedRequests.some((line) => line.startsWith('500 ') && line.includes('/api/')), selector).toBe(true);
+    }
+    // 이어서 보내는 요청의 실패도 기다린다(응답을 받고 이어 보낸 요청)
+    const chained = await compare('/steps-fetch', { steps: [{ click: '#chain' }] });
+    expect(chained.native.failedRequests.some((line) => line.startsWith('404 ') && line.endsWith('/api/404'))).toBe(true);
+  });
+
+  it('capture: 단계 수(첫 화면 포함)만큼 PNG가 있고 크기가 뷰포트와 같다. 실패한 단계의 스크린샷도 담는다', async () => {
+    const viewport = { width: 640, height: 480 };
+    const { old, native } = await compare('/steps', { viewport, capture: true, steps: [{ click: '#go' }, { fill: { selector: '#q', text: '가' } }, { press: 'Enter' }] });
+    for (const result of [old, native]) {
+      expect(result.steps).toHaveLength(4);
+      for (const step of result.steps) expect(pngSize(step.screenshot!), step.label).toEqual(viewport);
+    }
+    const failure = await compareFailure('/steps', { viewport, capture: true, steps: [{ click: '#go' }, { click: '#nope' }] });
+    expect(failure.steps).toHaveLength(3);
+    expect(failure.steps!.at(-1)).toMatchObject({ ok: false, screenshot: { png: viewport } });
+    // 켜지 않으면 스크린샷이 없다
+    const off = await runInBrowserNative(`${base}/steps`, { viewport, steps: [{ click: '#go' }] });
+    expect(off.steps.every((step) => step.screenshot === undefined)).toBe(true);
+  });
+
+  it('출처 제한과 함께: 단계가 허용 밖으로 fetch·이동·이미지를 보내면 막히고 기록되고 서버에 닿지 않는다', async () => {
+    outsideHits = 0;
+    const { native } = await compare('/steps-outside', { allowedOrigins: [base], steps: [{ click: '#f' }, { click: '#i' }, { click: '#n' }] }, false, true);
+    expect(outsideHits).toBe(0);
+    expect(native.blockedRequests).toEqual(expect.arrayContaining([`${outsideBase}/data.json`, `${outsideBase}/pixel.png`, `${outsideBase}/page`]));
+    expect(native.failedRequests).toEqual([]);
+    // 막힌 이동 뒤의 브라우저 오류 화면은 빈 문서로 읽는다(옛 러너는 headless shell에서 빈 문서, 시스템 Chrome에서 오류 문구를 읽는다. 의도한 차이): 오류 문구(페이지가 고른 호스트 이름이 들어간다)를 화면 글자로 읽지 않는다
+    expect(native.text).toBe('');
+    const withViewport = await compare('/steps-outside', { allowedOrigins: [base], steps: [{ click: '#n' }], viewportTexts: ['밖으로 이동', 'ERR_BLOCKED_BY_CLIENT'] }, false, true);
+    expect(withViewport.native.viewportTexts?.findings.every((finding) => !finding.visible)).toBe(true);
+  });
+
+  it('페이지가 막힌 곳으로 스스로 이동해 브라우저 오류 화면이 떠도 그 문구(페이지가 고른 호스트 이름)를 화면 글자로 읽지 않는다', async () => {
+    const { native } = await compare('/blocked-nav', { allowedOrigins: [base] }, false, true);
+    expect(native.text).toBe('');
+    expect(native.text).not.toContain('order-done');
+    expect(native.blockedRequests).toContain('http://order-done.invalid/');
+  });
+
+  it('의도한 차이: 페이지가 전역을 바꿔 글자·넘침·보임 판정을 속여도 Rust 러너는 진짜 값을 잰다 (옛 러너는 속는다)', async () => {
+    const options: BrowserPageOptions = { viewport: { width: 800, height: 400 }, viewportTexts: ['숨은 글자', '진짜 글자'] };
+    const old = await runInBrowser(`${base}/forged`, options);
+    const native = await runInBrowserNative(`${base}/forged`, options);
+    // 옛 러너(같은 실행 환경에서 잼): 위조된 글자, 가로 넘침 0, 숨은 글자가 "보인다"
+    expect(old.text).toBe('위조된 글자 주문 완료');
+    expect(old.horizontalOverflowPx).toBe(0);
+    expect(old.viewportTexts?.findings.find((finding) => finding.text === '숨은 글자')?.visible).toBe(true);
+    // Rust 러너(격리된 실행 환경에서 잼): 진짜 값
+    expect(native.text).toContain('진짜 글자');
+    expect(native.text).not.toContain('위조된');
+    expect(native.horizontalOverflowPx).toBe(100);
+    const hidden = native.viewportTexts?.findings.find((finding) => finding.text === '숨은 글자');
+    expect(hidden).toMatchObject({ visible: false });
+    expect(hidden?.problem?.kind).not.toBe(undefined);
+    expect(native.viewportTexts?.findings.find((finding) => finding.text === '진짜 글자')?.visible).toBe(true);
+    // 로드 시간도 격리된 실행 환경에서 읽힌다
+    const timed = await runInBrowserNative(`${base}/forged`, { measureLoad: true });
+    expect(timed.loadMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it('중단 신호가 단계 도중에 와도 브라우저·프록시·임시 폴더가 남지 않고 중단 오류로 끝난다', async () => {
+    const savedTmpdir = process.env.TMPDIR;
+    const isolated = mkdtempSync(path.join(tmpdir(), 'runner-abort-steps-'));
+    process.env.TMPDIR = isolated;
+    try {
+      const controller = new AbortController();
+      setTimeout(() => controller.abort(), 900);
+      const startedAt = Date.now();
+      // 없는 선택자를 5초까지 기다리는 도중에 중단한다
+      await expect(runInBrowserNative(`${base}/steps`, { signal: controller.signal, allowedOrigins: [base], steps: [{ click: '#nope' }] })).rejects.toThrow(/abort/i);
+      expect(Date.now() - startedAt).toBeLessThan(4000);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      expect(tmpEntries().filter((name) => name.startsWith('b-studio-cdp-'))).toEqual([]);
+    } finally {
+      if (savedTmpdir === undefined) delete process.env.TMPDIR;
+      else process.env.TMPDIR = savedTmpdir;
+      rmSync(isolated, { recursive: true, force: true });
     }
   });
 });

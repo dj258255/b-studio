@@ -1,11 +1,14 @@
 //! 화면 확인 러너(ADR-199): 브라우저를 띄워 페이지를 열고 결과를 모은다. 옛 `runInBrowser`(Playwright)와 같은 결과를 낸다.
-//! 이번 조각은 단계(`steps`)가 빈 확인만 다룬다(단계·스크린샷은 A6b, 화면 중계는 A6c).
+//! 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷은 [`steps`]가, 격리된 실행 환경(utility world)은 [`utility`]가 맡는다(A6b). 화면 중계는 A6c다.
+//! 화면 값(글자·가로 넘침·`viewportTexts`·로드 시간)과 단계의 선택자 판정은 격리된 실행 환경에서 읽는다(페이지가 전역을 바꿔도 위조되지 않는다).
 //!
 //! 구조: 읽기 작업([`super::cdp`])이 CDP 틀을 순서대로 [`dispatch`]에 넘기고, 처리기는 공유 상태([`State`])만 고친다. 기다리는 쪽
 //! ([`wait_until`])은 상태를 잠깐 잠그고 조건을 본 뒤 알림을 기다린다. 응답을 받은 시점에는 그 앞의 이벤트가 모두 상태에 들어가 있다.
 //! 이벤트를 끝까지 받지 못했거나 연결이 끊기면 통과가 아니라 오류다(`fatal`).
 
 use super::cdp::{Cdp, CdpError, Event};
+use steps::{StepAction, StepInput, StepRecord};
+use utility::UtilityWorld;
 use super::console_text::{console_text, exception_message};
 use super::frames::{FrameManager, RequestKey};
 use super::launch::{BrowserProcess, ProfileDir};
@@ -20,6 +23,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 use url::Url;
+
+mod steps;
+mod utility;
+
+pub use steps::{StepAction as BrowserStepAction, StepInput as BrowserStepInput, StepRecord as BrowserStepRecord};
 
 const NAVIGATION_TIMEOUT: Duration = Duration::from_secs(30);
 /// 네트워크가 잠잠해질 때까지 기다리되, 끝나지 않는 요청(개발 서버의 HMR 연결 등) 때문에 멈추지 않게 둔 상한
@@ -42,11 +50,19 @@ pub struct BrowserRunInput {
     pub viewport: (u32, u32),
     /// `VIEWPORT_MEASURE_SCRIPT(texts)`로 만든 식. 글자를 넘기지 않았으면 없다
     pub viewport_script: Option<String>,
+    /// 위 식에 넣은 글자들. 브라우저 오류 화면에서 식을 돌리지 않고 "화면에 없음"으로 채울 때 쓴다
+    pub viewport_texts: Vec<String>,
     /// 허용 출처. 있으면 출처 제한(요청 가로채기 + 프록시 + 서비스 워커 막기)을 켠다
     pub allowed_origins: Option<Vec<String>>,
     pub measure_load: bool,
     /// 모든 문서에 넣는 미디어 오류 수집 스크립트(`MEDIA_ERROR_INIT_SCRIPT`)
     pub media_error_script: String,
+    /// 페이지를 연 뒤 순서대로 실행할 동작
+    pub steps: Vec<StepInput>,
+    /// 켜면 페이지를 연 직후와 각 단계 뒤에 뷰포트 스크린샷(PNG)을 찍는다
+    pub capture: bool,
+    /// 페이지를 연 직후의 단계 이름(`open <경로>`)
+    pub open_label: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -62,6 +78,8 @@ pub struct BrowserRunOutput {
     /// `viewport_script`의 결과를 JSON 글로
     pub viewport_texts_json: Option<String>,
     pub load_ms: Option<f64>,
+    /// 페이지를 연 직후와 각 단계의 결과. 첫 항목은 `open_label`
+    pub steps: Vec<StepRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,13 +88,18 @@ pub enum RunError {
     Unavailable(String),
     /// 이동·측정이 실패했다(첫 줄은 옛 러너의 오류 글과 같게 맞춘다)
     Failed(String),
+    /// 단계가 실패했다. `message`는 옛 러너의 `StepFailedError` 글(`N번째 단계 실패 (…): …`), `steps`는 실패한 단계까지의 기록이다
+    StepFailed { message: String, steps: Vec<StepRecord> },
+    /// 선언한 네 동작이 하나도 없는 단계(단계 실패로 감싸지 않는다)
+    StepWithoutAction(String),
     Aborted,
 }
 
 impl std::fmt::Display for RunError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RunError::Unavailable(message) | RunError::Failed(message) => f.write_str(message),
+            RunError::Unavailable(message) | RunError::Failed(message) | RunError::StepWithoutAction(message) => f.write_str(message),
+            RunError::StepFailed { message, .. } => f.write_str(message),
             RunError::Aborted => f.write_str("취소되었습니다"),
         }
     }
@@ -121,6 +144,8 @@ struct Req {
     frame: String,
     is_favicon: bool,
     excluded_from_idle: bool,
+    /// 이벤트 스트림(응답의 머리가 오면 끝난 것으로 센다. 본문은 끝나지 않는 것이 정상이다)
+    event_stream: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -153,6 +178,10 @@ struct State {
     paused_network_ids: HashSet<String>,
     disconnected: Option<String>,
     crashed: Option<String>,
+    /// 격리된 실행 환경(새 문서가 열릴 때마다 다시 만든다)
+    utility: UtilityWorld,
+    /// 아직 끝나지 않은 요청의 id(단계 뒤 요청 기다리기, #684). 파비콘은 세지 않고, 이벤트 스트림은 응답의 머리가 오면 뺀다
+    pending_requests: HashSet<String>,
 }
 
 impl State {
@@ -237,6 +266,40 @@ impl Shared {
 enum WaitError {
     Timeout,
     Failed(String),
+}
+
+/// 단계·실행 환경 쪽 오류
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StepError {
+    /// 마감을 넘겼다
+    Timeout,
+    /// 연결이 끊겼거나 페이지가 충돌했다(단계 성공으로 바꾸지 않는다)
+    Fatal(String),
+    /// 다시 시도하지 않는 오류(틀린 선택자, 알 수 없는 키, 편집할 수 없는 요소 …). 글은 Playwright가 붙이는 그대로다
+    NonRetriable(String),
+    /// 실행 환경이 사라졌다(문서가 바뀌는 도중). 다시 만들어 다시 시도한다
+    ContextGone,
+}
+
+/// 마감이 있는 명령 하나. 마감을 넘기면 `Timeout`, 연결이 끊겼으면 `Fatal`, 실행 환경이 사라졌다는 오류면 `ContextGone`(지금 실행 환경을 버린다)
+async fn send_ok_raw(shared: &Shared, session: Option<&str>, method: &str, params: Value, deadline: Instant) -> Result<Value, StepError> {
+    let cdp = shared.cdp();
+    let call = cdp.send(session, method, params);
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), call).await {
+        Err(_) => Err(StepError::Timeout),
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(error)) => {
+            let mut state = shared.state.lock().unwrap();
+            if let Some(reason) = state.fatal() {
+                return Err(StepError::Fatal(reason));
+            }
+            if utility::is_context_gone(&error.message) {
+                state.utility.invalidate();
+                return Err(StepError::ContextGone);
+            }
+            Err(StepError::NonRetriable(format!("{method}: {}", error.message)))
+        }
+    }
 }
 
 impl WaitError {
@@ -331,9 +394,20 @@ fn dispatch(shared: &Arc<Shared>, state: &mut State, event: Event) {
                 "Page.frameNavigated" => {
                     if let Some(frame) = params.get("frame") {
                         let url = format!("{}{}", str_at(frame, "/url").unwrap_or_default(), str_at(frame, "/urlFragment").unwrap_or_default());
-                        state.frames().frame_committed_new_document(str_at(frame, "/id").unwrap_or_default(), &url, str_at(frame, "/loaderId").unwrap_or_default());
+                        let frame_id = str_at(frame, "/id").unwrap_or_default();
+                        state.frames().frame_committed_new_document(frame_id, &url, str_at(frame, "/loaderId").unwrap_or_default());
+                        // 메인 프레임의 새 문서: 옛 문서의 격리된 실행 환경은 쓰지 않는다(옛 id로 평가하면 "없음"으로 읽힌다)
+                        if state.frames().main_frame_id() == Some(frame_id) {
+                            state.utility.invalidate();
+                        }
                     }
                 }
+                "Runtime.executionContextDestroyed" => {
+                    if let Some(id) = params.get("executionContextId").and_then(Value::as_i64) {
+                        state.utility.context_destroyed(id);
+                    }
+                }
+                "Runtime.executionContextsCleared" => state.utility.invalidate(),
                 "Page.navigatedWithinDocument" => {
                     state.frames().frame_committed_same_document(str_at(params, "/frameId").unwrap_or_default(), str_at(params, "/url").unwrap_or_default());
                 }
@@ -392,6 +466,9 @@ fn dispatch(shared: &Arc<Shared>, state: &mut State, event: Event) {
                 "Network.requestWillBeSent" => on_request_will_be_sent(state, &kind, params),
                 "Network.responseReceived" => on_response_received(state, params),
                 "Network.loadingFinished" => {
+                    if let Some(id) = str_at(params, "/requestId") {
+                        state.pending_requests.remove(id);
+                    }
                     if let Some(request) = str_at(params, "/requestId").and_then(|id| state.requests.remove(id)) {
                         let frame = request.frame.clone();
                         state.frames().request_finished(request.key, &frame, request.excluded_from_idle);
@@ -484,14 +561,22 @@ fn on_request_will_be_sent(state: &mut State, kind: &Kind, params: &Value) {
     if !is_favicon {
         state.seen_urls.insert(url.clone());
     }
-    state.requests.insert(request_id, Req { key, url, frame, is_favicon, excluded_from_idle: excluded });
+    let event_stream = str_at(params, "/type") == Some("EventSource");
+    if !is_favicon {
+        state.pending_requests.insert(request_id.clone());
+    }
+    state.requests.insert(request_id, Req { key, url, frame, is_favicon, excluded_from_idle: excluded, event_stream });
 }
 
 fn on_response_received(state: &mut State, params: &Value) {
     let Some(request_id) = str_at(params, "/requestId") else { return };
     let status = params.pointer("/response/status").and_then(Value::as_u64).unwrap_or(0) as u16;
     let Some(request) = state.requests.get(request_id) else { return };
-    let (key, url, favicon) = (request.key, request.url.clone(), request.is_favicon);
+    let (key, url, favicon, event_stream) = (request.key, request.url.clone(), request.is_favicon, request.event_stream);
+    // 이벤트 스트림은 응답의 머리가 오면 끝난 것으로 센다(본문은 끝나지 않는 것이 정상이다)
+    if event_stream {
+        state.pending_requests.remove(request_id);
+    }
     state.responses.insert(key, Resp::Status(status));
     if !favicon && status >= 400 {
         state.record_failure(&url, &status.to_string());
@@ -499,6 +584,9 @@ fn on_response_received(state: &mut State, params: &Value) {
 }
 
 fn on_loading_failed(state: &mut State, params: &Value) {
+    if let Some(id) = str_at(params, "/requestId") {
+        state.pending_requests.remove(id);
+    }
     let Some(request) = str_at(params, "/requestId").and_then(|id| state.requests.remove(id)) else { return };
     // 오류 글: errorText || blockedReason || ""
     let text = [str_at(params, "/errorText"), str_at(params, "/blockedReason")].into_iter().flatten().find(|text| !text.is_empty()).unwrap_or("").to_owned();
@@ -756,19 +844,59 @@ async fn goto(shared: &Arc<Shared>, session: &str, url: &str) -> Result<Option<u
     })
 }
 
-/// 페이지 안에서 식을 평가해 값을 JSON으로 받는다
+/// 격리된 실행 환경(utility world)에서 식을 평가해 값을 JSON으로 받는다. DOM은 페이지와 같지만 전역은 따로라서, 페이지가 `Array.prototype`·
+/// `Math`·`HTMLElement.prototype`의 접근자를 바꿔도 읽은 값은 영향을 받지 않는다(옛 러너는 페이지와 같은 환경에서 읽어 위조될 수 있었다).
+/// 새 문서가 열려 실행 환경이 사라졌으면 다시 만들어 몇 번 더 시도한다
 async fn evaluate(shared: &Arc<Shared>, session: &str, expression: &str) -> Result<Value, RunError> {
-    let cdp = shared.cdp();
-    let call = cdp.send(Some(session), "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }));
-    let reply = match tokio::time::timeout(EVALUATE_TIMEOUT, call).await {
-        Err(_) => return Err(RunError::Failed("page.evaluate: Timeout".to_owned())),
-        Ok(Err(error)) => return Err(RunError::Failed(format!("page.evaluate: {error}"))),
-        Ok(Ok(reply)) => reply,
-    };
-    if let Some(details) = reply.get("exceptionDetails") {
-        return Err(RunError::Failed(format!("page.evaluate: {}", exception_message(details).lines().next().unwrap_or(""))));
+    const ATTEMPTS: usize = 4;
+    let deadline = Instant::now() + EVALUATE_TIMEOUT;
+    let mut last = StepError::ContextGone;
+    for _ in 0..ATTEMPTS {
+        let handle = match utility::ensure(shared, session, deadline).await {
+            Ok(handle) => handle,
+            Err(StepError::ContextGone) => {
+                last = StepError::ContextGone;
+                continue;
+            }
+            Err(error) => return Err(evaluate_error(error)),
+        };
+        let params = json!({ "expression": expression, "contextId": handle.context_id, "returnByValue": true, "awaitPromise": true });
+        let reply = match send_ok_raw(shared, Some(session), "Runtime.evaluate", params, deadline).await {
+            Ok(reply) => reply,
+            Err(StepError::ContextGone) => {
+                last = StepError::ContextGone;
+                continue;
+            }
+            Err(error) => return Err(evaluate_error(error)),
+        };
+        if let Some(details) = reply.get("exceptionDetails") {
+            let text = details.pointer("/exception/description").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| exception_message(details));
+            let first = text.lines().next().unwrap_or("").to_owned();
+            if utility::is_context_gone(&first) {
+                shared.state.lock().unwrap().utility.invalidate();
+                last = StepError::ContextGone;
+                continue;
+            }
+            return Err(RunError::Failed(format!("page.evaluate: {first}")));
+        }
+        return Ok(reply.pointer("/result/value").cloned().unwrap_or(Value::Null));
     }
-    Ok(reply.pointer("/result/value").cloned().unwrap_or(Value::Null))
+    Err(evaluate_error(last))
+}
+
+/// 빈 문서에서 `VIEWPORT_MEASURE_SCRIPT`가 내는 값: 글자마다 "화면에 없음"
+fn empty_document_viewport_report(viewport: (u32, u32), texts: &[String]) -> String {
+    let findings: Vec<Value> = texts.iter().map(|text| json!({ "text": text, "visible": false, "problem": { "kind": "absent" } })).collect();
+    serde_json::to_string(&json!({ "width": viewport.0, "height": viewport.1, "findings": findings })).unwrap_or_default()
+}
+
+fn evaluate_error(error: StepError) -> RunError {
+    match error {
+        StepError::Timeout => RunError::Failed("page.evaluate: Timeout".to_owned()),
+        StepError::Fatal(reason) => RunError::Failed(reason),
+        StepError::NonRetriable(message) => RunError::Failed(format!("page.evaluate: {message}")),
+        StepError::ContextGone => RunError::Failed("page.evaluate: Execution context was destroyed".to_owned()),
+    }
 }
 
 struct Session {
@@ -894,8 +1022,51 @@ async fn drive(shared: &Arc<Shared>, input: &BrowserRunInput, session: &Session,
         Err(WaitError::Failed(reason)) => return Err(RunError::Failed(reason)),
     }
 
-    let measured = evaluate(shared, &page, "({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })").await?;
+    // 페이지를 연 직후의 단계와 각 단계. 단계는 순서대로 실행하고, 실패하면 그 자리에서 멈춰 몇 번째 단계였는지 알린다
+    let mut records = vec![record_step(shared, &page, input, &input.open_label, true, None).await];
+    for (index, step) in input.steps.iter().enumerate() {
+        let outcome = match &step.action {
+            // 타입을 통과한 잘못된 입력이다. 단계 실패로 감싸지 않고 그 자리에서 던진다(옛 러너와 같다)
+            StepAction::None => return Err(RunError::StepWithoutAction(format!("{}번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)", index + 1))),
+            StepAction::Click(selector) => steps::click(shared, &page, selector).await.map_err(|error| steps::to_failure("page.click", error)),
+            StepAction::Fill { selector, text } => steps::fill(shared, &page, selector, text).await.map_err(|error| steps::to_failure("page.fill", error)),
+            StepAction::WaitFor(selector) => steps::wait_for(shared, &page, selector).await.map_err(|error| steps::to_failure("page.waitForSelector", error)),
+            StepAction::Press(key) => steps::press(shared, &page, key).await,
+        };
+        match outcome {
+            Ok(()) => records.push(record_step(shared, &page, input, &step.label, true, None).await),
+            // 연결이 끊겼거나 페이지가 충돌한 것은 앱의 실패가 아니라 확인하지 못한 것이다. 단계 실패로 바꾸지 않는다
+            Err(steps::StepFailure::Fatal(reason)) => return Err(RunError::Failed(reason)),
+            Err(steps::StepFailure::Reason(reason)) => {
+                // 실패한 단계의 스크린샷도 남겨 오류에 함께 담는다
+                records.push(record_step(shared, &page, input, &step.label, false, Some(reason.clone())).await);
+                if let Some(fatal) = shared.state.lock().unwrap().fatal() {
+                    return Err(RunError::Failed(fatal));
+                }
+                return Err(RunError::StepFailed { message: format!("{}번째 단계 실패 ({}): {reason}", index + 1, step.label), steps: records });
+            }
+        }
+    }
+    // 단계가 낸 요청이 끝나길 기다린다. 기다리지 않으면 마지막 단계가 보낸 요청의 실패(제출이 받은 500 등)가 기록되기 전에 결과를 돌려준다(#684)
+    if !input.steps.is_empty() {
+        steps::wait_for_idle(shared, steps::IDLE_GRACE, steps::IDLE_QUIET, steps::IDLE_TIMEOUT).await.map_err(RunError::Failed)?;
+    }
+
+    // 브라우저가 만든 오류 화면(`chrome-error://`, 막힌 이동 뒤 등)은 빈 문서로 읽는다. 옛 러너(Playwright의 기본 실행 환경)는 이 문서를 비어 있는 것으로 읽었다
+    // (실측: `body`가 비어 있다. 같은 브라우저에서 CDP로 직접 읽으면 오류 문구가 보인다). 오류 문구에는 페이지가 고른 호스트 이름이 들어가므로
+    // (`주문완료.test이(가) 차단됨`) 그것을 화면 글자로 읽으면 `expectText`를 통과시킬 길이 된다. 글자·가로 넘침·보임을 읽지 않고 빈 문서의 값으로 채운다
+    let browser_error_page = {
+        let mut state = shared.state.lock().unwrap();
+        let main = state.frames().main_frame_id().map(str::to_owned);
+        main.and_then(|id| state.frames().frame_url(&id).map(|url| url.starts_with("chrome-error://"))).unwrap_or(false)
+    };
+    let measured = if browser_error_page {
+        json!({ "text": "", "overflow": 0 })
+    } else {
+        evaluate(shared, &page, "({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })").await?
+    };
     let viewport_texts_json = match &input.viewport_script {
+        Some(_) if browser_error_page => Some(empty_document_viewport_report(input.viewport, &input.viewport_texts)),
         Some(script) => Some(serde_json::to_string(&evaluate(shared, &page, script).await?).unwrap_or_default()),
         None => None,
     };
@@ -920,7 +1091,15 @@ async fn drive(shared: &Arc<Shared>, input: &BrowserRunInput, session: &Session,
         horizontal_overflow_px: measured.get("overflow").and_then(Value::as_f64).unwrap_or(0.0),
         viewport_texts_json,
         load_ms,
+        steps: records,
     })
+}
+
+/// 단계 하나의 결과를 남긴다. 스크린샷을 켰으면 그 시점의 뷰포트 PNG를 담는다. 스크린샷이 실패해도 단계 결과는 그대로다(옛 러너는 실패를 삼킨다.
+/// 연결이 끊긴 것은 이 뒤의 확인(`fatal`)이 오류로 바꾼다)
+async fn record_step(shared: &Arc<Shared>, session: &str, input: &BrowserRunInput, label: &str, ok: bool, detail: Option<String>) -> StepRecord {
+    let screenshot = if input.capture { steps::capture(shared, session, input.viewport).await } else { None };
+    StepRecord { label: label.to_owned(), ok, detail, screenshot }
 }
 
 async fn shutdown(shared: &Arc<Shared>, session: Session) {
@@ -1278,9 +1457,13 @@ mod tests {
             url: "http://127.0.0.1:1/".to_owned(),
             viewport: (1280, 800),
             viewport_script: None,
+            viewport_texts: Vec::new(),
             allowed_origins: Some(vec!["http://127.0.0.1:1".to_owned()]),
             measure_load: false,
             media_error_script: String::new(),
+            steps: Vec::new(),
+            capture: false,
+            open_label: "open /".to_owned(),
         };
         let outcome = run_in_browser(&input, &Cancel::default()).await;
         FAIL_PROXY_START.store(false, Ordering::SeqCst);
@@ -1297,9 +1480,13 @@ mod tests {
             url: "http://127.0.0.1:1/".to_owned(),
             viewport: (1280, 800),
             viewport_script: None,
+            viewport_texts: Vec::new(),
             allowed_origins: None,
             measure_load: false,
             media_error_script: String::new(),
+            steps: Vec::new(),
+            capture: false,
+            open_label: "open /".to_owned(),
         };
         match run_in_browser(&input, &Cancel::default()).await {
             Err(RunError::Unavailable(message)) => {
@@ -1312,5 +1499,83 @@ mod tests {
         let cancel = Cancel::default();
         cancel.cancel();
         assert_eq!(run_in_browser(&input, &cancel).await, Err(RunError::Aborted));
+    }
+
+    #[tokio::test]
+    async fn a_new_main_frame_document_discards_the_utility_world_but_a_child_frame_does_not() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        {
+            let mut state = shared.state.lock().unwrap();
+            let generation = state.utility.generation();
+            assert!(state.utility.store(7, "obj".to_owned(), generation));
+            state.frames().frame_attached("CHILD", Some("MAIN"));
+        }
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "CHILD", "url": "http://h/c", "loaderId": "L2" } }));
+        assert!(shared.state.lock().unwrap().utility.current().is_some());
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "MAIN", "url": "http://h/next", "loaderId": "L3" } }));
+        assert!(shared.state.lock().unwrap().utility.current().is_none());
+        // 실행 환경이 사라졌다는 알림도 버린다(우리 것일 때만)
+        {
+            let mut state = shared.state.lock().unwrap();
+            let generation = state.utility.generation();
+            state.utility.store(9, "obj2".to_owned(), generation);
+        }
+        send(&shared, "Runtime.executionContextDestroyed", json!({ "executionContextId": 5 }));
+        assert!(shared.state.lock().unwrap().utility.current().is_some());
+        send(&shared, "Runtime.executionContextsCleared", json!({}));
+        assert!(shared.state.lock().unwrap().utility.current().is_none());
+    }
+
+    #[tokio::test]
+    async fn pending_requests_follow_start_finish_failure_and_event_stream_headers() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        let started = |id: &str, url: &str, kind: &str| json!({ "requestId": id, "loaderId": "L", "request": { "url": url }, "frameId": "MAIN", "type": kind });
+        send(&shared, "Network.requestWillBeSent", started("a", "http://h/a", "Fetch"));
+        send(&shared, "Network.requestWillBeSent", started("b", "http://h/b", "Fetch"));
+        send(&shared, "Network.requestWillBeSent", started("s", "http://h/stream", "EventSource"));
+        send(&shared, "Network.requestWillBeSent", started("f", "http://h/favicon.ico", "Other"));
+        // 파비콘은 세지 않는다
+        assert_eq!(shared.state.lock().unwrap().pending_requests.len(), 3);
+        send(&shared, "Network.responseReceived", json!({ "requestId": "s", "response": { "status": 200 } }));
+        send(&shared, "Network.responseReceived", json!({ "requestId": "a", "response": { "status": 500 } }));
+        // 이벤트 스트림은 응답의 머리가 오면 빠지지만, 보통 요청은 본문이 끝날 때까지 남는다
+        assert_eq!(shared.state.lock().unwrap().pending_requests.len(), 2);
+        send(&shared, "Network.loadingFinished", json!({ "requestId": "a" }));
+        send(&shared, "Network.loadingFailed", json!({ "requestId": "b", "errorText": "net::ERR_ABORTED" }));
+        assert!(shared.state.lock().unwrap().pending_requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn waiting_for_idle_holds_until_pending_requests_end_and_stops_at_the_cap() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        shared.state.lock().unwrap().pending_requests.insert("x".to_owned());
+        let releaser = shared.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            releaser.state.lock().unwrap().pending_requests.clear();
+        });
+        let started = Instant::now();
+        steps::wait_for_idle(&shared, Duration::from_millis(20), Duration::from_millis(100), Duration::from_secs(5)).await.unwrap();
+        // 요청이 끝난 뒤에야(300ms) 조용한 시간(100ms)을 채우고 끝난다
+        assert!(started.elapsed() >= Duration::from_millis(390), "{:?}", started.elapsed());
+        // 끝나지 않는 요청이 있어도 상한에서 멈춘다(오류가 아니다)
+        shared.state.lock().unwrap().pending_requests.insert("y".to_owned());
+        let capped = Instant::now();
+        steps::wait_for_idle(&shared, Duration::from_millis(10), Duration::from_millis(50), Duration::from_millis(200)).await.unwrap();
+        assert!(capped.elapsed() >= Duration::from_millis(190) && capped.elapsed() < Duration::from_millis(600));
+        // 끊긴 연결은 오류다(결과를 돌려주지 않는다)
+        shared.state.lock().unwrap().disconnected = Some("끊김".to_owned());
+        assert_eq!(steps::wait_for_idle(&shared, Duration::from_millis(1), Duration::from_millis(1), Duration::from_millis(50)).await, Err("끊김".to_owned()));
+    }
+
+    #[test]
+    fn an_empty_document_reports_every_viewport_text_as_absent() {
+        let report: Value = serde_json::from_str(&empty_document_viewport_report((800, 400), &["가".to_owned(), "나".to_owned()])).unwrap();
+        assert_eq!(report["width"], 800);
+        assert_eq!(report["height"], 400);
+        assert_eq!(report["findings"][1], json!({ "text": "나", "visible": false, "problem": { "kind": "absent" } }));
     }
 }

@@ -7,14 +7,16 @@
 //! - [`origin`]·[`proxy`]: 출처 제한 두 층(요청 가로채기의 판정, 로컬 전달 프록시)
 //! - [`run`]: 위를 묶어 페이지를 열고 결과를 모은다
 //!
-//! 이번 조각은 단계(`steps`)가 빈 확인만 다룬다. 단계·스크린샷은 A6b, 화면 중계와 게이트 기본값 전환은 A6c다.
+//! 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷, 격리된 실행 환경(utility world)은 A6b에서 더했다([`keyboard`]·`run/steps`·`run/utility`).
+//! 화면 중계와 게이트 기본값 전환은 A6c다.
 
 pub mod cdp;
 pub mod console_text;
 pub mod frames;
+pub mod keyboard;
 pub mod launch;
 pub mod origin;
 pub mod proxy;
 pub mod run;
 
-pub use run::{run_in_browser, BrowserRunInput, BrowserRunOutput, RunError};
+pub use run::{run_in_browser, BrowserRunInput, BrowserRunOutput, BrowserStepAction, BrowserStepInput, BrowserStepRecord, RunError};

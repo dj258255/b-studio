@@ -1253,14 +1253,37 @@ export interface NativeBrowserRunInput {
   viewportHeight: number;
   /** `VIEWPORT_MEASURE_SCRIPT(texts)`로 만든 식. 글자를 넘기지 않았으면 없다 */
   viewportScript?: string | null;
+  /** `viewportScript`에 넣은 글자들 */
+  viewportTexts?: string[] | null;
   allowedOrigins?: string[] | null;
   measureLoad: boolean;
   mediaErrorScript: string;
+  /** 페이지를 연 뒤 순서대로 실행할 단계 */
+  steps: NativeBrowserStepInput[];
+  /** 켜면 페이지를 연 직후와 각 단계 뒤에 뷰포트 스크린샷(PNG)을 찍는다 */
+  capture: boolean;
+  /** 페이지를 연 직후의 단계 이름(`open <경로>`) */
+  openLabel: string;
 }
 
-/** `kind`: `done`(나머지 필드) · `unavailable`(message) · `failed`(message) · `aborted` */
+/** `kind`가 `none`이면 선언한 네 동작이 없는 단계다. `value`는 선택자(click·fill·waitFor) 또는 키(press), `text`는 fill의 글자 */
+export interface NativeBrowserStepInput {
+  label: string;
+  kind: 'click' | 'fill' | 'press' | 'waitFor' | 'none';
+  value: string;
+  text?: string | null;
+}
+
+export interface NativeBrowserStepResult {
+  label: string;
+  ok: boolean;
+  detail?: string | null;
+  screenshot?: Buffer | null;
+}
+
+/** `kind`: `done`(나머지 필드) · `unavailable`(message) · `failed`(message) · `stepFailed`(message, steps) · `stepWithoutAction`(message) · `aborted` */
 export interface NativeBrowserRunResult {
-  kind: 'done' | 'unavailable' | 'failed' | 'aborted';
+  kind: 'done' | 'unavailable' | 'failed' | 'stepFailed' | 'stepWithoutAction' | 'aborted';
   message: string;
   status?: number | null;
   text: string;
@@ -1272,6 +1295,8 @@ export interface NativeBrowserRunResult {
   horizontalOverflowPx: number;
   viewportTextsJson?: string | null;
   loadMs?: number | null;
+  /** 페이지를 연 직후와 각 단계의 결과(`done`·`stepFailed`일 때) */
+  steps: NativeBrowserStepResult[];
 }
 
 export interface NativeLoadInput {
