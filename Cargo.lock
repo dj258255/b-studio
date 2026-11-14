@@ -125,11 +125,13 @@ name = "bstudio-io"
 version = "0.1.0"
 dependencies = [
  "bstudio-guard",
+ "httparse",
  "libc",
  "portable-pty",
  "serde_json",
  "tempfile",
  "tokio",
+ "url",
 ]
 
 [[package]]

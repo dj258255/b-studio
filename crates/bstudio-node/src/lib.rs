@@ -5270,3 +5270,82 @@ pub fn run_load(env: Env, input: LoadInputJs, signal: Option<AbortSignal>) -> Re
     })
     .build(&env)
 }
+
+// ── 화면 확인 러너(ADR-199, 4f A6a). 브라우저를 띄워 페이지를 열고 결과를 모으는 일은 bstudio-io가 하고, 여기는 값을 바꾸고 취소를 잇는다.
+use bstudio_io::browser as brw;
+
+#[napi(object)]
+pub struct BrowserRunInputJs {
+    pub executables: Vec<String>,
+    pub url: String,
+    pub viewport_width: u32,
+    pub viewport_height: u32,
+    pub viewport_script: Option<String>,
+    pub allowed_origins: Option<Vec<String>>,
+    pub measure_load: bool,
+    pub media_error_script: String,
+}
+
+/// `kind`: `done`(나머지 필드) · `unavailable`(message: 브라우저·프록시를 쓸 수 없다) · `failed`(message: 이동·측정 실패) · `aborted`
+#[napi(object)]
+pub struct BrowserRunResultJs {
+    pub kind: String,
+    pub message: String,
+    pub status: Option<u32>,
+    pub text: String,
+    pub page_errors: Vec<String>,
+    pub console_errors: Vec<String>,
+    pub failed_requests: Vec<String>,
+    pub media_errors: Vec<String>,
+    pub blocked_requests: Vec<String>,
+    pub horizontal_overflow_px: f64,
+    pub viewport_texts_json: Option<String>,
+    pub load_ms: Option<f64>,
+}
+
+fn browser_result(kind: &str, message: String, output: brw::BrowserRunOutput) -> BrowserRunResultJs {
+    BrowserRunResultJs {
+        kind: kind.to_owned(),
+        message,
+        status: output.status.map(u32::from),
+        text: output.text,
+        page_errors: output.page_errors,
+        console_errors: output.console_errors,
+        failed_requests: output.failed_requests,
+        media_errors: output.media_errors,
+        blocked_requests: output.blocked_requests,
+        horizontal_overflow_px: output.horizontal_overflow_px,
+        viewport_texts_json: output.viewport_texts_json,
+        load_ms: output.load_ms,
+    }
+}
+
+/// 헤드리스 브라우저로 페이지를 열어 결과를 모은다(단계가 없는 확인). `signal`로 취소하면 브라우저·프록시·임시 폴더를 정리한 뒤 `aborted`로 끝난다
+#[napi]
+pub fn run_browser_check(env: Env, input: BrowserRunInputJs, signal: Option<AbortSignal>) -> Result<AsyncBlock<BrowserRunResultJs>> {
+    let cancel = abort_cancel(signal);
+    let input = brw::BrowserRunInput {
+        executables: input.executables,
+        url: input.url,
+        viewport: (input.viewport_width, input.viewport_height),
+        viewport_script: input.viewport_script,
+        allowed_origins: input.allowed_origins,
+        measure_load: input.measure_load,
+        media_error_script: input.media_error_script,
+    };
+    AsyncBlockBuilder::new(async move {
+        Ok(match brw::run_in_browser(&input, &cancel).await {
+            Ok(output) => browser_result("done", String::new(), output),
+            Err(brw::RunError::Unavailable(message)) => browser_result("unavailable", message, Default::default()),
+            Err(brw::RunError::Failed(message)) => browser_result("failed", message, Default::default()),
+            Err(brw::RunError::Aborted) => browser_result("aborted", String::new(), Default::default()),
+        })
+    })
+    .build(&env)
+}
+
+/// 출처 제한의 판정(요청 가로채기와 프록시가 같은 함수를 쓴다). TS `isAllowedRequest`와 같은 입력에 같은 답인지 차등 시험한다
+#[napi]
+pub fn browser_is_allowed_url(url: String, allowed_origins: Vec<String>) -> bool {
+    brw::origin::is_allowed_url(&url, &allowed_origins)
+}
