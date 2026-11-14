@@ -598,11 +598,19 @@ async fn http_mode(cx: &Cx<'_>, href: &str, api: Option<&Api>, expect_status: f6
         return Ok(Err(cx.fail(&format!("HTTP {} (기대 {}){hint}", js_num(status), js_num(expect_status))).await?));
     }
     if run.auto {
-        if let Some(marker) = next_error_marker(&text, expect_status) {
+        // 표지는 화면에 보이는 글자(스크립트·스타일을 걷어낸 글자)에서 찾는다. Next.js 16은 정상 응답의 RSC 데이터(스크립트 안)에도 기본 not-found 화면 글자를 싣는다(#1207)
+        let visible = gate_helpers::strip_html(&lossy_str(&text));
+        if let Some(marker) = next_error_marker(&visible, expect_status) {
             return Ok(Err(cx.fail(&format!("Next.js 오류 화면: '{marker}'")).await?));
         }
+        // 셸을 보낸 뒤 난 서버 오류는 화면 글자에 표지가 없고 원문의 신호로만 드러난다
+        if let Some(digest) = gate_helpers::next_render_error_digest(&lossy_str(&text), expect_status) {
+            let shown = if digest.is_empty() { "digest 없음".to_owned() } else { format!("digest '{digest}'") };
+            let problem = format!("Next.js 오류 화면: 서버 렌더링이 도중에 실패했습니다({shown}). 상태 코드는 {}이지만 화면 일부를 서버에서 그리지 못했습니다", js_num(status));
+            return Ok(Err(cx.fail(&problem).await?));
+        }
         // HTTP 확인은 자바스크립트를 실행하지 않아 클라이언트 fetch가 실패했는지 확정할 수 없다. 보수적으로 경고만 남긴다(ADR-078)
-        if let Some(stuck) = detect_stuck(&gate_helpers::strip_html(&lossy_str(&text)), None) {
+        if let Some(stuck) = detect_stuck(&visible, None) {
             cx.warn(format!("[참고] {stuck} — HTTP 확인은 자바스크립트를 실행하지 않아 확정할 수 없습니다. 확실히 판정하려면 autoPageChecks.mode: browser를 쓰세요")).await?;
         }
     }

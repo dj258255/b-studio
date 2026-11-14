@@ -39,6 +39,7 @@
    - 그런데 `/orders/1`은 HTTP 200으로 정상 화면을 돌려줬는데도 세 번 모두 `자동 페이지 /orders/1: Next.js 오류 화면: 'This page could not be found'`로 실패했다. 소진 뒤 바뀐 파일 1개가 되돌려졌다
    - 응답 HTML(`home.html`, `o1.html`)을 저장해 따로 확인했다. Next 16은 정상 page의 응답에도 기본 404 컴포넌트(`not-found`)를 RSC 페이로드로 싣는다. main의 네이티브 판정 `gateNextErrorMarker`는 그 HTML을 그대로 받으면 표지를 찾는다. 스크립트를 걷어낸 글자(`gateStripHtml` 결과)를 받으면 찾지 않는다
    - HTTP 모드는 원본 HTML을 넘긴다. 이 판정은 A5c-1 전부터 같고 이 브랜치에서도 바뀌지 않았다. 그래서 이 조각의 결함이 아니라 기존 결함으로 #1207에 따로 적었다. 고치는 일은 통과 쪽 변경이라 따로 한다
+   - (뒤에 덧붙임) #1207에서 고쳤다. 같은 프로젝트를 HTTP 모드로 다시 재어 통과하는 것을 확인했다(트러블슈팅 199)
 2. **브라우저 모드: 통과.** 설정을 `mode: browser`로 바꾸고(세션 시작 체크포인트 `47b0e5e`) 새 세션 `be64a9d0`에 같은 요청을 보냈다. 체크포인트 `5fd9f6b`가 남았고, 끝 줄은 `Workflow-Passed: run, contract_check, browser_check, review`였다.
    - `web /orders/1 (자동, id 추정 · Price.tsx 변경)`: 근거는 셋이었다. 단계 스크린샷 하나(`open /orders/1`)도 저장됐다
      - `HTTP 200 — 추정한 id(1)로 열어 404·500만 실패로 봤습니다`
