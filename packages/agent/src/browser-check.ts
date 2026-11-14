@@ -292,13 +292,15 @@ export async function launchBrowser(options: { proxyServer?: string } = {}): Pro
  * 프록시 뒤에서 띄울 때의 실행 옵션(#1210). Chromium은 기본으로 loopback(127.0.0.1·localhost·[::1])을 프록시 없이 보내는데,
  * 허용 출처가 바로 loopback이므로 이걸 빠뜨리면 프록시가 아무것도 보지 못한다. Playwright는 `<-loopback>`을 스스로 붙이지만
  * 환경 변수 PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK이 켜져 있으면 붙이지 않으므로(실측: 그러면 요청이 프록시를 우회한다)
- * 같은 규칙을 인자로 직접 넣는다. WebRTC의 UDP는 HTTP 프록시를 지나지 않아 `disable_non_proxied_udp`로 막는다
+ * 같은 규칙을 인자로 직접 넣는다. WebRTC의 UDP는 HTTP 프록시를 지나지 않아 `disable_non_proxied_udp`로 막는다.
+ * 인자 이름은 둘 다 넣는다: Playwright의 headless shell은 `--force-webrtc-ip-handling-policy`만, 시스템 Google Chrome(`channel: 'chrome'`)은
+ * `--webrtc-ip-handling-policy`만 따른다(실측: 한쪽만 넣으면 다른 브라우저에서 STUN 패킷 5개가 닿았다)
  */
 function proxyLaunchOptions(proxyServer: string | undefined) {
   if (proxyServer === undefined) return {};
   return {
     proxy: { server: proxyServer },
-    args: ['--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
+    args: ['--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--webrtc-ip-handling-policy=disable_non_proxied_udp'],
   };
 }
 
@@ -430,16 +432,36 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   };
 }
 
-/** 프록시가 막은 CONNECT(https·웹소켓) 대상의 host:port와 같은 곳으로 가던 요청인지. 스킴을 모르는 터널이라 기본 포트로 맞춘다 */
-function isBlockedTunnel(url: string, blockedTunnels: ReadonlySet<string>): boolean {
-  if (blockedTunnels.size === 0) return false;
+/** URL이 CONNECT로 가는 대상의 host:port. 스킴을 모르는 터널이라 기본 포트로 맞춘다. 파싱하지 못하면 undefined */
+function tunnelTarget(url: string): string | undefined {
   try {
     const { protocol, hostname, port } = new URL(url);
     const effective = port !== '' ? port : protocol === 'https:' || protocol === 'wss:' ? '443' : '80';
-    return blockedTunnels.has(`${hostname}:${effective}`);
+    return `${hostname}:${effective}`;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** 프록시가 막은 CONNECT(https·웹소켓) 대상의 host:port와 같은 곳으로 가던 요청인지 */
+function isBlockedTunnel(url: string, blockedTunnels: ReadonlySet<string>): boolean {
+  if (blockedTunnels.size === 0) return false;
+  const target = tunnelTarget(url);
+  return target !== undefined && blockedTunnels.has(target);
+}
+
+/**
+ * 막은 요청 가운데 페이지 쪽(문서·프레임·워커·서비스 워커·웹소켓)이 실제로 보낸 것만 기록으로 돌려준다.
+ * 프록시는 브라우저가 스스로 내는 배경 요청(Google Chrome의 시간 동기화·로그인 확인 등)도 지나가게 되어 함께 막는데,
+ * 그건 앱의 요청이 아니라 "다른 출처 요청을 막았다"는 기록에 넣지 않는다. 막는 것은 그대로이고 기록만 거른다
+ */
+function pageBlockedRequests(blockedUrls: ReadonlySet<string>, seenUrls: ReadonlySet<string>): string[] {
+  const seenTunnels = new Set<string>();
+  for (const url of seenUrls) {
+    const target = tunnelTarget(url);
+    if (target !== undefined) seenTunnels.add(target);
+  }
+  return [...blockedUrls].filter((entry) => (entry.startsWith('CONNECT ') ? seenTunnels.has(entry.slice('CONNECT '.length)) : seenUrls.has(entry)));
 }
 
 export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
@@ -480,6 +502,11 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
   try {
     // 허용 출처를 넘기면 서비스 워커를 막는다. 서비스 워커가 만든 요청은 page.route를 우회하기 때문이다(첫 층. 프록시가 둘째 층이다)
     const page = await browser.newPage({ viewport, ...(allowedOrigins ? { serviceWorkers: 'block' as const } : {}) });
+    // 페이지 쪽이 보낸 요청의 URL. 막은 기록에서 브라우저의 배경 요청을 거르는 데 쓴다(pageBlockedRequests).
+    // 컨텍스트의 request는 문서·프레임·워커·서비스 워커의 요청을 받고, 웹소켓은 request가 아니라 따로 온다
+    const seenUrls = new Set<string>();
+    page.context().on('request', (request) => void seenUrls.add(request.url()));
+    page.on('websocket', (socket) => void seenUrls.add(socket.url()));
     if (allowedOrigins) await restrictPageToOrigins(page, allowedOrigins, ({ url: blocked }) => void blockedUrls.add(blocked));
     const pageErrors: string[] = [];
     const consoleErrors: string[] = [];
@@ -527,6 +554,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         failedUrls.clear();
         blockedUrls.clear();
         blockedTunnels.clear();
+        seenUrls.clear();
       }
       const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
       await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
@@ -569,7 +597,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         consoleErrors,
         failedRequests,
         mediaErrors,
-        blockedRequests: [...blockedUrls],
+        blockedRequests: pageBlockedRequests(blockedUrls, seenUrls),
         horizontalOverflowPx: overflow,
         ...(viewportReport ? { viewportTexts: viewportReport } : {}),
         ...(loadMs !== null ? { loadMs } : {}),

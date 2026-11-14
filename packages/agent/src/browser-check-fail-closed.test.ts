@@ -43,7 +43,7 @@ describe('출처 제한 프록시를 세우지 못할 때', () => {
     expect(launch.mock.calls[0]![0]).toEqual({
       headless: true,
       proxy: { server: 'http://127.0.0.1:4321' },
-      args: ['--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
+      args: ['--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--webrtc-ip-handling-policy=disable_non_proxied_udp'],
     });
   });
 });

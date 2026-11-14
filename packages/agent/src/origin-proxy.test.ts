@@ -178,6 +178,21 @@ describe('startOriginProxy (#1210)', { timeout: 30_000 }, () => {
     expect(allowedLog).toEqual([]);
   });
 
+  it('서비스 워커 스크립트 요청은 허용 출처라도 막는다 (Service-Worker 머리 또는 Sec-Fetch-Dest: serviceworker)', async () => {
+    allowedLog.length = 0;
+    await withProxy(async (proxy, blocks) => {
+      const host = `127.0.0.1:${allowedPort}`;
+      const cases = [
+        `GET http://${host}/sw.js HTTP/1.1\r\nHost: ${host}\r\nService-Worker: script\r\n\r\n`,
+        `GET http://${host}/sw.js HTTP/1.1\r\nHost: ${host}\r\nSec-Fetch-Dest: serviceworker\r\n\r\n`,
+        `GET http://${host}/sw.js HTTP/1.1\r\nHost: ${host}\r\nSec-Fetch-Dest: ServiceWorker\r\n\r\n`,
+      ];
+      for (const payload of cases) expect(await raw(proxy, payload), payload).toEqual({ response: '', closed: true });
+      expect(blocks).toEqual(cases.map(() => ({ kind: 'url', url: `http://${host}/sw.js` })));
+    });
+    expect(allowedLog).toEqual([]);
+  });
+
   it('허용 출처의 같은 host:port로만 CONNECT 터널을 연다', async () => {
     outsideConnections = 0;
     await withProxy(async (proxy, blocks) => {
@@ -267,7 +282,9 @@ describe('프록시 뒤의 브라우저 (#1210)', { timeout: 60_000 }, () => {
       const page = await browser.newPage();
       const targets = [`http://127.0.0.1:${allowedPort}/a`, `http://localhost:${allowedPort}/b`, `http://[::1]:${allowedPort}/c`, `http://foo.localhost:${allowedPort}/d`, `http://169.254.169.254/e`, `https://127.0.0.1:${allowedPort}/f`];
       for (const target of targets) await page.goto(target, { timeout: 8000 }).catch(() => {});
-      expect(seen).toEqual([
+      // Google Chrome은 시간 동기화·로그인 확인 같은 배경 요청도 프록시로 보낸다. 시험 주소로 가는 것만 견준다
+      // Chrome은 응답 없이 끊긴 이동을 한 번 다시 보내기도 해서 같은 주소는 한 번만 센다
+      expect([...new Set(seen.filter((entry) => entry.includes(`:${allowedPort}`) || entry.includes('169.254.169.254')))]).toEqual([
         `http://127.0.0.1:${allowedPort}/a`,
         `http://localhost:${allowedPort}/b`,
         `http://[::1]:${allowedPort}/c`,
@@ -295,8 +312,9 @@ describe('프록시 뒤의 브라우저 (#1210)', { timeout: 60_000 }, () => {
       await page.goto('about:blank');
       const port = udp.address().port;
       const state = await page.evaluate(
-        `(async () => { const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:${port}' }, { urls: 'stun:localhost:${port}' }] }); pc.createDataChannel('x'); await pc.setLocalDescription(await pc.createOffer()); await new Promise((resolve) => setTimeout(resolve, 2500)); return pc.iceGatheringState; })()`,
+        `(async () => { const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:127.0.0.1:${port}' }, { urls: 'stun:localhost:${port}' }] }); pc.createDataChannel('x'); await pc.setLocalDescription(await pc.createOffer()); const started = Date.now(); while (pc.iceGatheringState !== 'complete' && Date.now() - started < 8000) await new Promise((resolve) => setTimeout(resolve, 100)); return pc.iceGatheringState; })()`,
       );
+      // UDP를 막으면 수집이 곧 끝난다. 인자가 하나라도 안 먹으면 STUN을 보내며 수집이 끝나지 않는다(headless shell과 Google Chrome이 따르는 인자 이름이 다르다)
       expect(state).toBe('complete');
       expect(packets).toBe(0);
     } finally {

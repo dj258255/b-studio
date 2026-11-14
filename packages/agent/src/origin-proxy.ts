@@ -11,6 +11,11 @@ import { connect as netConnect, type AddressInfo, type Socket } from 'node:net';
  * 같은 문자열을 한 번만 파싱해 판정과 접속에 함께 쓰고, Host 머리로 다른 곳에 가지 않는다.
  * 모르는 요청(origin-form, 알 수 없는 메서드, 파싱 실패, Host 불일치, Upgrade)은 모두 막는다(막는 쪽으로 틀린다).
  *
+ * 서비스 워커 스크립트 요청은 허용 출처라도 막는다. 화면 확인은 서비스 워커를 쓰지 않는다는 전제인데(`serviceWorkers: 'block'`),
+ * 그 설정은 `register`를 바꿔치는 init 스크립트뿐이라 우회할 수 있고, Playwright는 막힌 설정에서 서비스 워커에 붙지 않아
+ * 그 요청을 보지 못한다. 브라우저는 서비스 워커 스크립트를 받을 때 `Service-Worker: script` 머리와 `Sec-Fetch-Dest: serviceworker`를
+ * 붙이므로(Service Workers 명세, Fetch Metadata) 그 요청을 막으면 우회 등록도 설치되지 못한다.
+ *
  * 막을 때는 업스트림에 접속하지 않고 클라이언트 연결을 끊는다. 상태 코드 응답을 주지 않는 이유: 403 같은 응답을 주면 문서 이동이
  * 응답으로 끝나(상태 코드만 다른 화면) 상태 코드를 따지지 않는 확인이 통과할 수 있다. 연결을 끊으면 브라우저는 요청이 실패한 것으로
  * 본다(`net::ERR_EMPTY_RESPONSE`, 문서 이동이면 이동이 오류로 끝난다. 기존 `blockedbyclient`와 같은 결과다).
@@ -97,6 +102,9 @@ export async function startOriginProxy({ isAllowed, onBlocked }: OriginProxyOpti
       parsed.password !== '' ||
       !FORWARDED_METHODS.has(method) ||
       clientRequest.headers.upgrade !== undefined ||
+      // 서비스 워커 스크립트(위 설명). 둘 중 하나만 있어도 막는다
+      clientRequest.headers['service-worker'] !== undefined ||
+      clientRequest.headers['sec-fetch-dest']?.toLowerCase() === 'serviceworker' ||
       // 절대 형식 URL과 Host 머리가 다르면 어느 쪽이 진짜 목적지인지 알 수 없다
       hostHeaders.length !== 1 ||
       hostHeader?.toLowerCase() !== parsed.host ||

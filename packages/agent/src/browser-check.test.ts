@@ -659,13 +659,15 @@ describe('출처 제한은 네트워크 층에서도 막는다 (#1210)', { timeo
     expect(result.blockedRequests).toEqual([`${outside.base}/from-worker`]);
   });
 
-  it('prototype으로 우회해 등록한 서비스 워커의 fetch도 허용 밖 서버에 닿지 않는다', async () => {
+  it('prototype으로 우회한 서비스 워커 등록은 스크립트를 받지 못해 설치되지 않고, 허용 밖 서버에도 닿지 않는다', async () => {
     reset(outside);
+    reset(allowed);
     const result = await runInBrowser(`${allowed.base}/sw-bypass`, { allowedOrigins: [allowed.base], steps: DONE });
-    expect(firstLine(result.text)).toBe('sw:blocked');
+    expect(firstLine(result.text)).toMatch(/^sw-err:/);
+    // 서비스 워커 스크립트 요청은 프록시가 허용 출처 서버에 보내지 않는다
+    expect(allowed.requests.some((entry) => entry.includes('/sw-probe.js'))).toBe(false);
     expect(outside.requests).toEqual([]);
     expect(outside.connections).toBe(0);
-    expect(result.blockedRequests).toContain(`${outside.base}/from-sw`);
   });
 
   it('허용 출처의 웹소켓은 동작한다 (개발 서버의 HMR 연결)', async () => {
