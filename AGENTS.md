@@ -9,7 +9,7 @@
 1. **이슈부터 엽니다.** 새 기능·개선은 "착수 명세" 양식, 버그는 "버그" 양식의 항목을 모두 채웁니다. 라벨과 마일스톤을 답니다. 큰 일은 `tracking` 이슈 아래에 하위 이슈로 묶습니다.
 2. **worktree에서 일합니다.** `origin/main`에서 딴 브랜치를 별도 worktree에 만듭니다. 메인 체크아웃의 브랜치를 바꾸거나 pull·stash하지 않습니다. 다른 세션이 그 체크아웃을 쓰고 있을 수 있습니다.
 3. **테스트를 먼저 씁니다.** 고치기 전 코드에서 실패하는 것을 확인하고 그 출력을 PR에 적습니다. 고친 뒤에는 고친 부분만 되돌려 새 테스트가 다시 실패하는지 봅니다(통과만 하는 테스트는 아무것도 확인하지 않습니다).
-4. **내보내기 전에 돌립니다.** `pnpm typecheck`(패키지 6개), `pnpm test`, `pnpm --filter @b-studio/studio lint`. 루트에는 `lint` 스크립트가 없습니다.
+4. **내보내기 전에 돌립니다.** `pnpm typecheck`(패키지 5개: spec·agent·sandbox·apps/cli·apps/studio), `pnpm test`, `pnpm --filter @b-studio/studio lint`. Rust(`crates/`)를 건드렸으면 `cargo test --workspace --locked`도 돌립니다(CI가 가장 먼저 도는 단계입니다). 루트에는 `lint` 스크립트가 없습니다.
 5. **PR은 처음부터 템플릿 절로 엽니다.** `Closes #이슈`를 적습니다. 본문 검사는 다시 돌려도 처음 본문을 읽으므로, 나중에 고치면 검사가 또 실패합니다.
 6. **CI가 통과한 뒤 squash 병합합니다.** 병합 직전에 PR의 head가 방금 확인한 커밋과 같은지 봅니다. force-push하지 않습니다.
 7. **병합 뒤** worktree와 브랜치를 지웁니다. 실측이 남았으면 실제 세션에서 재고 문서에 적습니다.
