@@ -86,7 +86,7 @@ impl JsObject {
 }
 
 /// 배열 인덱스 꼴(정규 10진, 0..=2^32-2)이면 그 값
-fn array_index(key: &str) -> Option<u32> {
+pub fn array_index(key: &str) -> Option<u32> {
     let b = key.as_bytes();
     if b.is_empty() || b.len() > 10 || !b.iter().all(u8::is_ascii_digit) || (b[0] == b'0' && b.len() > 1) {
         return None;

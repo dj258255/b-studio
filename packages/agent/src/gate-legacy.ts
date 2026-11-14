@@ -13,6 +13,7 @@ import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
 import { formatVerificationReport, verifyChanges } from './verify';
 import type { WorkflowCheck } from './workflow';
 import { rejectedChangeFeedback } from './change-tracker';
+import { legacyRunDeclaredChecks } from './declared-legacy';
 
 /** 옛 `check()`: 결과를 `lastOutcome`에 남긴다 */
 export async function legacyCheck(gate: VerificationGate): Promise<GateOutcome> {
@@ -114,16 +115,18 @@ async function legacyCheckInner(host: GateHost): Promise<GateOutcome> {
       state.skippedStages = host.missingStages(state.passedStages);
       for (const check of recordChecks) onEvent({ type: 'workflow_check', check });
     } else {
-      const checks = await host.runDeclaredChecks();
+      const declared = await legacyRunDeclaredChecks(host.declared);
+      const checks = declared.checks;
+      const loadPlatformFailure = declared.loadPlatformFailure;
       signal?.throwIfAborted();
       await host.recheckEvaluationAssets(recordChecks);
       await host.recheckOutsideChanges(recordChecks);
-      if (state.loadPlatformFailure) {
+      if (loadPlatformFailure) {
         state.checks = [...checks, ...recordChecks];
         for (const check of state.checks) onEvent({ type: 'workflow_check', check });
-        state.platformFailure = state.loadPlatformFailure;
+        state.platformFailure = loadPlatformFailure;
         gateDone(false);
-        return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${state.loadPlatformFailure}` };
+        return { kind: 'exhausted', summary: `b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — ${loadPlatformFailure}` };
       }
       stage('review');
       checks.push(...host.reviewChecks(), ...recordChecks);

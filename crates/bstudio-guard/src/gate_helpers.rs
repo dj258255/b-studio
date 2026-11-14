@@ -2,8 +2,8 @@
 //! `containsApiValue`·`missingApiValue`·`viewportProblemText`·`viewportProblems`·`missingAllText`·`missingAnyText`·`dynamicProbeDataHint`·`dynamicNames`(구간 번호)·
 //! `acceptedNotes`·`usesInRunValue`·`sampledValues`·`stripHtml`·`formatFailedChecks`·`compareDetail`·`describeConcurrencyExpect`.
 //!
-//! 실행 흐름(샌드박스·브라우저 호출), `readJsonPath`(JSON 값을 TS로 돌려줘 비교에 쓰이므로 경계를 지나면 짝 없는 서로게이트가 달라진다), `withoutInRunValues`
-//! (JS 객체의 펼침·`delete`·키 순서로 설정을 다시 만든다)는 TS에 남는다.
+//! 실행 흐름(샌드박스·브라우저 호출)과 `withoutInRunValues`(JS 객체의 펼침·`delete`·키 순서로 설정을 다시 만든다)는 TS에 남는다.
+//! `readJsonPath`는 `read_json_path`로 옮겼다(ADR-195 4f A5b-2). 동시 요청 확인의 `then` 판정이 Rust 안에서 돌기 때문이다. 화면 확인의 `expectFromApi`는 아직 TS의 `readJsonPath`를 쓴다.
 //!
 //! JS와 같게 읽는 곳:
 //! - `containsApiValue`의 숫자: `String(value)`는 `js::number_to_string`, `value.toLocaleString('en-US')`는 `to_locale_string_en_us`(ICU의 en-US 기본값:
@@ -566,5 +566,221 @@ mod tests {
         let expect = js_json::parse(r#"{"successCount":{"atMost":0},"allStatusIn":[]}"#).unwrap();
         assert_eq!(describe_concurrency_expect(&expect).unwrap(), "최대 0, 상태 ");
         assert_eq!(describe_concurrency_expect(&js_json::parse("{}").unwrap()).unwrap(), "");
+    }
+}
+
+// ── readJsonPath(ADR-195 4f A5b-2) ─────────────────────────────────────────
+
+/// `readJsonPath`가 읽은 값. JS는 객체·배열에 없는 키를 읽으면 `Object.prototype`·`Array.prototype`에서 상속한 값을 돌려준다.
+/// 상속한 것 가운데 함수는 `JSON.stringify`가 `undefined`로 쓰고 `typeof`가 `'function'`이라 다음 걸음이 모두 `undefined`다(여기서는 `Undefined`와 같다).
+/// 함수가 아닌 것은 `__proto__`뿐이다: 객체에서는 `Object.prototype`(`{}`), 배열에서는 `Array.prototype`(`[]`), `Object.prototype.__proto__`는 `null`, `Array.prototype`의 `length`는 0이다.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PathValue {
+    Undefined,
+    Value(JsValue),
+    ObjectProto,
+    ArrayProto,
+}
+
+/// JSON이 이 읽기가 지원하는 깊이를 넘었다(JS는 읽는다: 모른다는 뜻이다)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TooDeep;
+
+impl PathValue {
+    /// `JSON.stringify(actual)`, `undefined`면 `undefined`라는 글자(템플릿 문자열의 `${…}`). 짝 없는 서로게이트는 JS처럼 `\udXXX`로 쓴다.
+    /// 글자는 `encodeLoneSurrogates`한 꼴로 받고 돌려준다(예약 글자는 그대로 두고, 짝 없는 서로게이트만 ASCII 이스케이프가 된다)
+    pub fn display(&self) -> String {
+        match self {
+            PathValue::Undefined => "undefined".to_owned(),
+            PathValue::Value(value) => json_text(value),
+            PathValue::ObjectProto => "{}".to_owned(),
+            PathValue::ArrayProto => "[]".to_owned(),
+        }
+    }
+
+    /// `actual === expected`. 객체·배열·`undefined`는 어떤 기대와도 다르다
+    pub fn strict_equals(&self, expected: &JsValue) -> bool {
+        matches!(self, PathValue::Value(value) if value.strict_equals(expected))
+    }
+}
+
+/// `JSON.stringify(value)`: `js_json::stringify`에 짝 없는 서로게이트 이스케이프(`\ud800`, 소문자 16진)를 더한다
+pub fn json_text(value: &JsValue) -> String {
+    let encoded = crate::js_json::stringify(value);
+    let chars: Vec<char> = encoded.chars().collect();
+    let mut out = String::with_capacity(encoded.len());
+    let mut i = 0;
+    while i < chars.len() {
+        match js::read_lone_escape(&chars, i) {
+            Some((Err(unit), used)) => {
+                out.push_str(&format!("\\u{unit:04x}"));
+                i += used;
+            }
+            Some((Ok(_), used)) => {
+                out.extend(&chars[i..i + used]);
+                i += used;
+            }
+            None => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+static NULL: JsValue = JsValue::Null;
+
+#[derive(Clone, Copy)]
+enum Cur<'a> {
+    Json(&'a JsValue),
+    Len(usize),
+    ObjectProto,
+    ArrayProto,
+    Undefined,
+}
+
+/// `value[key]`(`typeof value === 'object'`이고 null이 아닐 때만 부른다)
+fn read_key<'a>(cur: Cur<'a>, key: &str) -> Cur<'a> {
+    match cur {
+        Cur::Json(JsValue::Obj(object)) => match object.get(key) {
+            Some(value) => Cur::Json(value),
+            None if key == "__proto__" => Cur::ObjectProto,
+            None => Cur::Undefined,
+        },
+        Cur::Json(JsValue::Arr(items)) => match crate::js_json::array_index(key) {
+            Some(index) => items.get(index as usize).map_or(Cur::Undefined, Cur::Json),
+            None if key == "length" => Cur::Len(items.len()),
+            None if key == "__proto__" => Cur::ArrayProto,
+            None => Cur::Undefined,
+        },
+        Cur::ObjectProto if key == "__proto__" => Cur::Json(&NULL),
+        Cur::ArrayProto if key == "length" => Cur::Len(0),
+        Cur::ArrayProto if key == "__proto__" => Cur::ObjectProto,
+        _ => Cur::Undefined,
+    }
+}
+
+/// `typeof value === 'object' && value !== null`
+fn is_object(cur: Cur) -> bool {
+    matches!(cur, Cur::Json(JsValue::Obj(_)) | Cur::Json(JsValue::Arr(_)) | Cur::ObjectProto | Cur::ArrayProto)
+}
+
+/// `^([^[\]]*)((?:\[\d+\])*)$`: 키와 대괄호 숫자들. 안 맞으면 `None`
+fn split_segment(segment: &str) -> Option<(&str, Vec<&str>)> {
+    let at = segment.find(['[', ']']).unwrap_or(segment.len());
+    let (key, mut rest) = segment.split_at(at);
+    let mut indexes = Vec::new();
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('[')?;
+        let digits = inner.bytes().take_while(u8::is_ascii_digit).count();
+        if digits == 0 {
+            return None;
+        }
+        let after = inner[digits..].strip_prefix(']')?;
+        indexes.push(&inner[..digits]);
+        rest = after;
+    }
+    Some((key, indexes))
+}
+
+/// 응답 JSON에서 값을 꺼낸다(옛 `readJsonPath`, `gate.ts`). `$.a.b`와 `$[0].a`, `$.items[0].qty` 정도만 지원하고 그 밖은 `Undefined`다.
+/// JSON.parse가 던지면 `Undefined`다. 글자는 `encodeLoneSurrogates`한 꼴이다.
+///
+/// 의도한 차이: 중첩이 `js_json`이 읽는 깊이를 넘으면 `Err(TooDeep)`이다(JS는 읽는다). 부르는 쪽은 통과로 세지 않는다.
+pub fn read_json_path(text: &str, json_path: &str) -> Result<PathValue, TooDeep> {
+    let document = match crate::js_json::parse_lone_encoded(text) {
+        Ok(value) => value,
+        Err(crate::js_json::LoneParseError::Invalid) => return Ok(PathValue::Undefined),
+        Err(crate::js_json::LoneParseError::TooDeep) => return Err(TooDeep),
+    };
+    // `jsonPath.replace(/^\$\.?/, '').split('.').filter(Boolean)`
+    let stripped = json_path.strip_prefix('$').map_or(json_path, |rest| rest.strip_prefix('.').unwrap_or(rest));
+    let mut cur = Cur::Json(&document);
+    for segment in stripped.split('.').filter(|segment| !segment.is_empty()) {
+        let Some((key, indexes)) = split_segment(segment) else { return Ok(PathValue::Undefined) };
+        if !key.is_empty() {
+            if !is_object(cur) {
+                return Ok(PathValue::Undefined);
+            }
+            cur = read_key(cur, key);
+        }
+        for digits in indexes {
+            // `Array.isArray(value)`: 배열과 `Array.prototype`. `value[Number(digits)]`
+            cur = match cur {
+                Cur::Json(JsValue::Arr(items)) => {
+                    let index: f64 = digits.parse().unwrap_or(f64::INFINITY);
+                    if index < items.len() as f64 { items.get(index as usize).map_or(Cur::Undefined, Cur::Json) } else { Cur::Undefined }
+                }
+                _ => Cur::Undefined,
+            };
+        }
+    }
+    Ok(match cur {
+        Cur::Json(value) => PathValue::Value(value.clone()),
+        Cur::Len(len) => PathValue::Value(JsValue::Num(len as f64)),
+        Cur::ObjectProto => PathValue::ObjectProto,
+        Cur::ArrayProto => PathValue::ArrayProto,
+        Cur::Undefined => PathValue::Undefined,
+    })
+}
+
+#[cfg(test)]
+mod json_path_tests {
+    use super::*;
+
+    fn read(text: &str, path: &str) -> String {
+        read_json_path(text, path).expect("깊이 안").display()
+    }
+
+    #[test]
+    fn 경로를_js처럼_읽는다() {
+        assert_eq!(read(r#"{"a":{"b":[10,{"c":"d"}]}}"#, "$.a.b[1].c"), r#""d""#);
+        assert_eq!(read(r#"{"items":[5,6,7]}"#, "$.items.length"), "3");
+        assert_eq!(read(r#"{"items":[5,6,7]}"#, "$.items.1"), "6");
+        assert_eq!(read(r#"{"items":[5,6,7]}"#, "$.items.01"), "undefined");
+        assert_eq!(read(r#"[10,20]"#, "$[1]"), "20");
+        assert_eq!(read(r#"{"a":1}"#, "a"), "1");
+        assert_eq!(read(r#"{"a":1}"#, "$"), r#"{"a":1}"#);
+        assert_eq!(read(r#"{"a":1,"a":2}"#, "$.a"), "2");
+        assert_eq!(read(r#"{"a":-0}"#, "$.a"), "0");
+        assert_eq!(read(r#"{"a":9007199254740993}"#, "$.a"), "9007199254740992");
+        assert_eq!(read("not json", "$"), "undefined");
+        assert_eq!(read(r#"{"a":[1]}"#, "$.a[99999999999999999999]"), "undefined");
+        assert_eq!(read(r#"{"a":[1]}"#, "$.a[0]x"), "undefined");
+    }
+
+    #[test]
+    fn 없는_키는_prototype에서_상속한_값으로_읽는다() {
+        assert_eq!(read(r#"{"a":{}}"#, "$.a.constructor"), "undefined");
+        assert_eq!(read(r#"{"a":{}}"#, "$.a.__proto__"), "{}");
+        assert_eq!(read(r#"{"a":{}}"#, "$.a.__proto__.__proto__"), "null");
+        assert_eq!(read(r#"{"a":{}}"#, "$.a.__proto__.__proto__.x"), "undefined");
+        assert_eq!(read(r#"{"a":[]}"#, "$.a.__proto__"), "[]");
+        assert_eq!(read(r#"{"a":[]}"#, "$.a.__proto__.length"), "0");
+        assert_eq!(read(r#"{"a":{"__proto__":7}}"#, "$.a.__proto__"), "7");
+        assert_eq!(read(r#"{"a":{"constructor":6}}"#, "$.a.constructor"), "6");
+    }
+
+    #[test]
+    fn 값이_같은지는_엄격하게_본다() {
+        let value = read_json_path(r#"{"a":0,"b":"0","c":[1]}"#, "$.a").unwrap();
+        assert!(value.strict_equals(&JsValue::Num(0.0)) && value.strict_equals(&JsValue::Num(-0.0)));
+        assert!(!value.strict_equals(&JsValue::Str("0".into())));
+        assert!(!read_json_path(r#"{"a":[1]}"#, "$.a").unwrap().strict_equals(&JsValue::Num(1.0)));
+        assert!(!read_json_path(r#"{"a":1}"#, "$.b").unwrap().strict_equals(&JsValue::Num(1.0)));
+    }
+
+    #[test]
+    fn 짝_없는_서로게이트는_ascii_이스케이프로_쓴다() {
+        // U+D800 = 0xD000 | (8 << 8) | (0 << 4) | 0
+        assert_eq!(json_text(&JsValue::Str("\u{E010}\u{E008}\u{E000}\u{E000}".into())), "\"\\ud800\"");
+        assert_eq!(json_text(&JsValue::Str("\u{E011}\u{E000}\u{E001}".into())), "\"\u{E011}\u{E000}\u{E001}\"");
+    }
+
+    #[test]
+    fn 너무_깊은_json은_모른다고_답한다() {
+        let deep = format!("{}1{}", "[".repeat(2500), "]".repeat(2500));
+        assert_eq!(read_json_path(&deep, "$"), Err(TooDeep));
     }
 }

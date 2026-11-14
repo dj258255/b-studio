@@ -629,6 +629,8 @@ interface NativeGuard {
   gateFormatFailedChecks(checksJson: string): string;
   gateCompareDetail(ratio: number, max: number, width: number, height: number): string;
   gateDescribeConcurrencyExpect(expectJson: string): string;
+  /** `readJsonPath`(ADR-195 4f A5b-2). 세 인자는 `encodeLoneSurrogates`한 글자(`equalsJson`은 JSON). `{ shown, equal }` 또는 `{ tooDeep: true }`의 JSON */
+  gateReadJsonPath(text: string, jsonPath: string, equalsJson: string): string;
   // ── agent: 작업 공간의 막는 검사(3단계 3w). workspaceIsDenied·workspaceIsSecretFile은 거부 목록이라 짝 없는 서로게이트가 U+FFFD로 합쳐져도 더 막을 뿐이다.
   // workspaceIsInside는 path.relative(root, target)의 결과를 encodeLoneSurrogates한 글자로 받는 허용 목록(통과가 곧 안쪽).
   // workspaceInputProblem은 0 없음·1 절대 경로·2 쓸 수 없는 글자(NUL, POSIX의 역슬래시). external이면 2를 보지 않는다
