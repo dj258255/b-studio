@@ -219,6 +219,7 @@
 - [ADR-195 4단계: Rust 서버를 앞에 두고 옮기지 않은 경로는 Node로 넘긴다, 인증을 옮기기 전에는 공개 경로만 직접 처리한다](#adr-195-4단계-rust-서버를-앞에-두고-옮기지-않은-경로는-node로-넘긴다-인증을-옮기기-전에는-공개-경로만-직접-처리한다)
 - [ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다](#adr-196-보호-경로의-되돌림은-이-실행에서-처음-쓰기-직전에-고정한-내용과-바이트까지-같을-때만-인정한다)
 - [ADR-197 spec의 YAML 읽기는 Rust가 하고, JS와 다르게 읽을 수 있는 꼴은 읽지 않고 거절한다](#adr-197-spec의-YAML-읽기는-Rust가-하고-JS와-다르게-읽을-수-있는-꼴은-읽지-않고-거절한다)
+- [ADR-198 화면 확인 브라우저의 출처 제한은 라우트에 더해 로컬 전달 프록시가 접속 주소를 검사한다](#adr-198-화면-확인-브라우저의-출처-제한은-라우트에-더해-로컬-전달-프록시가-접속-주소를-검사한다)
 
 ---
 
@@ -10587,3 +10588,58 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 오류 위치(줄·칸)는 파서의 것이라 JS와 다르다. 옛 `[CODE]`는 사라진다.
 - 처리 속도·메모리는 재지 않았다. 별칭 폭탄과 깊은 중첩만 개별 프로세스로 쟀다(별칭 폭탄은 JS와 같게 실패하고, 20초 안에 끝난다). 키가 20만 개인 파일은 JS도 20초 안에 끝내지 못했다.
 - `yaml`은 spec의 devDependency로만 남는다(시험의 기대값 기준). 쓰는 다른 곳(`packages/agent`의 `explore-qa-save.ts`, `packages/sandbox`의 `docker/deploy.ts`·`docker/compose-provider.ts`)은 이번에 옮기지 않았다. 쓰기·stringify와 compose 파일 다루기가 섞여 있어 따로 정한다.
+
+## ADR-198 화면 확인 브라우저의 출처 제한은 라우트에 더해 로컬 전달 프록시가 접속 주소를 검사한다
+
+상태: 채택
+관련: 이슈 [#1210](https://github.com/dj258255/b-studio/issues/1210), 트러블슈팅 200, ADR-166(지원 범위와 실험 기능)
+
+### 맥락
+- 화면 확인 브라우저(`runInBrowser`)는 호스트에서 돌고, 모델이 만든 서비스가 호스트의 다른 로컬 주소나 외부로 요청을 보내지 못하게 `restrictPageToOrigins`(Playwright `page.route('**/*')`)와 `serviceWorkers: 'block'`으로 출처를 제한했다.
+- 2026-11-14 A6 사전 조사에서 실제 Chromium(Playwright 1.63.0)으로 두 길이 열려 있음을 쟀다. (1) 리다이렉트: Playwright는 `redirectedFrom`이 있는 요청을 라우트 처리기 없이 자동 통과시켜, 허용 출처의 `302 Location: <허용 밖>`을 따라 허용 밖 서버에 닿고 본문까지 읽혔다. (2) 서비스 워커: `'block'`은 `register`를 바꿔치는 init 스크립트라 `ServiceWorkerContainer.prototype.register.call`로 우회되고, 그 워커의 fetch는 라우트를 거치지 않는다.
+- 공통 원인은 확인하는 쪽(페이지의 라우트)과 접속하는 쪽(브라우저의 네트워크 스택)이 다른 계층이라는 것이다. 라우트가 보지 못하는 요청 경로를 하나씩 막는 방식(리다이렉트 직접 따라가기, 서비스 워커 차단 강화)은 새 경로가 생기면 다시 샌다.
+
+### 결정
+1. **허용 출처가 주어진 브라우저는 로컬 전달 프록시(`packages/agent/src/origin-proxy.ts`) 뒤에서 띄운다.** `127.0.0.1:0`에 HTTP 전달 프록시를 `runInBrowser` 호출 하나에 하나 세우고, 브라우저를 닫은 뒤 함께 닫는다(열려 있는 연결도 끊는다). 브라우저의 모든 네트워크(리다이렉트의 모든 홉, 서비스 워커·워커, 미리 연결)가 프록시를 지나므로 한 자리에서 판정한다. 기존 `page.route` 검사와 서비스 워커 init 스크립트는 첫 층으로 그대로 둔다(평소의 차단은 `blockedbyclient`와 `blockedRequests`로 그대로 난다).
+2. **판정은 라우트와 같은 함수 하나다.** 프록시는 `isAllowedRequest(url, allowed)`를 받아 쓴다. 프록시는 **판정한 URL을 파싱한 결과의 host:port로만** 접속한다(같은 문자열을 한 번 파싱해 판정과 접속에 함께 쓴다). Host 머리로 다른 곳에 가지 않는다.
+3. **막을 때는 업스트림에 접속하지 않고 응답 없이 연결을 끊는다**(CONNECT는 403 후 끊음). 403 같은 응답을 주면 문서 이동이 응답으로 끝나, 상태 코드를 따지지 않는 확인(추정 id의 동적 화면 확인은 404·5xx만 실패로 본다)이 통과할 수 있다. 연결을 끊으면 브라우저는 `net::ERR_EMPTY_RESPONSE`로 요청 실패로 보고, 문서 이동이면 `page.goto`가 던진다(기존 `blockedbyclient`와 같은 결과). 막은 알림(`onBlocked`)은 끊기 전에 동기로 불러 `blockedUrls`에 먼저 넣어, 요청 실패 이벤트가 앱의 실패(`failedRequests`)로 세지 않게 한다.
+4. **CONNECT(https·웹소켓)는 허용 출처의 같은 host:port일 때만 터널을 연다.** 실측으로 Chromium은 `ws://`와 `wss://` 모두 프록시에 `CONNECT host:port`로 보낸다(평문 ws도 절대 형식 Upgrade가 아니다). 터널 안의 바이트는 볼 수 없으므로 스킴을 알 수 없고, 허용 출처 목록에 `http://host:port`나 `https://host:port` 둘 중 하나가 있으면 연다. 그 host:port로는 평문 요청이 이미 허용돼 있어 터널이 허용 범위를 넓히지 않는다. Next.js 개발 서버의 HMR 웹소켓(허용 출처의 ws)이 이 규칙으로 동작한다.
+5. **모르는 요청은 막는다.** origin-form(`GET /path`), 파싱 실패, 사용자 정보가 든 URL, `http:` 아닌 절대 형식, 표준 일곱 메서드(GET·HEAD·POST·PUT·PATCH·DELETE·OPTIONS) 밖의 메서드, Upgrade 머리, 절대 형식 URL과 Host 머리가 다르거나 Host가 없거나 둘, 문자 규칙에 맞지 않는 CONNECT 대상(`user@`, 경로, 포트 없음·0·65535 초과)은 모두 막는다.
+6. **loopback을 프록시로 보낸다.** Chromium은 기본으로 127.0.0.1·localhost·[::1]을 프록시 없이 보낸다. Playwright는 `--proxy-bypass-list=<-loopback>`을 스스로 붙이지만(번들 `shouldProxyLoopback`) 환경 변수 `PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK`이 켜져 있으면 붙이지 않고, 그러면 요청이 프록시를 우회한다(실측). 그래서 같은 인자를 직접 넣는다. 허용 출처가 바로 loopback이므로 이것이 빠지면 프록시가 아무것도 보지 못한다.
+7. **WebRTC의 UDP를 막는다.** `--force-webrtc-ip-handling-policy=disable_non_proxied_udp`. 실측: 이 인자가 없으면 STUN 요청이 127.0.0.1의 UDP 서버에 4개 닿았고, 있으면 0개였다.
+8. **fail-closed.** 허용 출처가 주어졌는데 프록시를 세우지 못하면 프록시 없이 브라우저를 띄우지 않고 `BrowserUnavailableError`("출처 제한 프록시를 시작할 수 없습니다")를 던진다. 게이트는 이를 기존 "헤드리스 브라우저를 쓸 수 없음"과 같게 다룬다(검사를 통과시키지 않는다. `fallbackProbe`가 있는 확인만 브라우저 없이 HTTP로 확인한다). 브라우저를 띄우지 못했을 때도 세운 프록시를 닫는다.
+9. 허용 출처가 없는 호출(`allowedOrigins` 미지정)은 프록시도 라우트도 쓰지 않아 그대로다.
+
+### 판정 함수를 부르는 자리: 막는 쪽인지 여는 쪽인지
+`isAllowedRequest`는 **허용 목록**(여는 쪽)이다. 넓게 맞추면 범위 밖이 범위 안이 되므로 이번에 판정을 넓히지 않았고, 모르는 입력은 모두 "범위 밖"으로 처리한다.
+
+| 자리 | 쓰임 | 모르는·깨진 입력 |
+|---|---|---|
+| `restrictPageToOrigins`의 라우트(첫 층) | 허용이면 `continue`, 아니면 `abort('blockedbyclient')`. 리다이렉트 둘째 홉과 서비스 워커는 이 자리가 불리지 않는다 | 파싱 실패는 거부 |
+| 프록시: 절대 형식 요청 | 허용이면 그 URL의 host:port로 전달, 아니면 끊기 | 파싱 실패·origin-form·Host 불일치·알 수 없는 메서드·Upgrade는 막음 |
+| 프록시: CONNECT | 허용 출처의 같은 host:port(http든 https든)일 때만 터널 | 문자 규칙·포트 범위에 맞지 않으면 막음 |
+| 프록시: `upgrade` 이벤트(절대 형식 Upgrade) | 항상 막음(Chromium이 이 길을 쓰지 않음을 실측) | 해당 없음 |
+| `connection-legacy.ts`의 같은 이름 함수 | 이번에 건드리지 않음(차등 시험용 옛 구현) | |
+
+### 검토한 선택지
+- **라우트를 리다이렉트마다 다시 걸기**: Playwright 번들이 `redirectedFrom`이 있는 요청을 자동 통과시키는 것은 우리 코드로 바꿀 수 없다. 서비스 워커도 라우트 밖이다.
+- **CDP `Fetch`를 직접 쓰기**: 서비스 워커 대상까지 자동 연결·`Fetch.enable`을 하면 가능하지만 새 경로가 생길 때마다 대상 종류를 따라가야 한다. 접속 자체를 한 자리에서 보는 프록시가 더 좁다.
+- **Chromium 인자만으로(`--host-resolver-rules`, `--proxy-bypass-list`)**: 이름 해석 규칙은 IP를 직접 쓰는 요청을 막지 못하고 포트도 가릴 수 없다.
+- **403 응답으로 막기**: 문서 이동이 응답으로 끝나 상태 코드를 따지지 않는 확인이 통과할 수 있다(결정 3).
+- **MITM으로 https·wss 안을 보기**: 인증서를 심어야 해서 하지 않았다. CONNECT는 같은 host:port 허용으로 좁혔다.
+
+### 검증 (2026-11-14, macOS, Playwright 1.63.0, 헤드리스 셸 Chromium 153)
+- 시험(실제 Chromium, 허용 밖 서버는 요청 기록과 TCP 접속 수로 확인): `browser-check.test.ts`의 "출처 제한은 네트워크 층에서도 막는다 (#1210)" 열한 개, `origin-proxy.test.ts` 열한 개(날것의 소켓: Host 불일치·origin-form·Upgrade·CONNECT 대상 규칙, 업스트림 실패는 502, close, loopback·링크 로컬이 프록시를 지남, WebRTC), `browser-check-fail-closed.test.ts` 네 개. 고치기 전 코드에서 새 시험 열 개 중 여덟 개가 실패했다(허용 밖 서버가 `GET /pixel.png`·`GET /frame`을 받음, 문서 이동 결과가 `outside-secret`, 서비스 워커가 `sw:reached:200`, 허용 밖 ws의 서버 도달). 허용 출처의 ws와 평범한 화면은 고치기 전에도 통과해 회귀 시험으로 남겼다.
+- Chromium이 프록시로 보낸 것(실측): 127.0.0.1·localhost·`[::1]`·`foo.localhost`·`169.254.169.254`가 모두 절대 형식 `GET http://…`로 프록시에 왔다(링크 로컬도 `<-loopback>`으로 우회가 꺼진다). `ws://`·`wss://`·`https://`는 `CONNECT host:port`였다. 막힌 포트(예: 9번)는 프록시 전에 `ERR_UNSAFE_PORT`로 끝난다.
+- 변이(원래 코드에 하나씩 넣어 시험이 잡는지): 판정을 늘 허용(9개 실패), loopback 인자 제거(환경 변수 시험 포함 2개), loopback 우회 다시 켜기(11개), CONNECT 판정 넓히기(4개), 막은 URL·터널 알림 빼기(10개·4개), 프록시 실패 시 프록시 없이 띄우기(1개), Host 검사 빼기(1개), 403으로 막기(6개), 막은 터널을 실패 기록에서 빼는 처리 제거(1개), WebRTC 인자 제거(2개), Upgrade 막기 제거(1개), 알 수 없는 메서드 허용(1개), 판정 없이 전달(10개), close에서 연결 끊기 빼기(시간 초과로 실패). 처음에는 Upgrade와 close 변이가 통과해, 시험을 더했다(`Connection: Upgrade` 없이 `Upgrade`만 단 요청, 터널이 선 연결의 close).
+- 로드 시간(`loadMs`, 같은 페이지 12회 중앙값, 이미지 40개와 스크립트가 든 로컬 페이지, 워밍업 뒤 두 번째 이동): 프록시·라우트 없음 12ms, 라우트만(옛 동작) 22ms, 프록시만 16ms, 라우트와 프록시 28ms. 프록시가 요청마다 더하는 것은 라우트만 있을 때보다 약 6ms(리소스 42개)다. `runInBrowser` 호출 전체 시간은 허용 출처 없음 746ms, 있음 797ms(중앙값 12회, 프록시 시작·라우트·서비스 워커 차단을 모두 합친 값이라 프록시만의 비용은 아니다). 한 기계에서 한 번 잰 값이다.
+
+### 남은 한계와 재지 않은 것
+- **실험 경로는 이 고침을 받지 않는다.** `remote-browser.ts`(원격 브라우저)와 `explore-qa.ts`(탐색 QA)는 `launchBrowser()`를 프록시 없이 부르고 `restrictPageToOrigins`만 쓴다(ADR-166, 공통 코드를 고쳐 자연히 따라오는 것만 받는다). 이 둘에는 같은 구멍이 그대로 있다.
+- 허용 밖 웹소켓은 이제 막히지만, 브라우저가 남기는 `WebSocket connection to '…' failed` 콘솔 오류는 `consoleErrors`에 남아 해당 검사가 실패한다(앱이 허용 밖 서버로 웹소켓을 여는 것은 이 환경에서 동작하지 않는 앱이라고 본다). 예전에는 이 연결이 막히지 않았다.
+- 막힌 CONNECT는 `blockedRequests`에 URL이 아니라 `CONNECT host:port`로 남는다(터널 안의 스킴·경로를 알 수 없다).
+- 이름은 글자로 비교한다. 허용 출처의 이름이 DNS로 다른 주소를 가리키게 바꾸는 공격(DNS 재바인딩)은 막지 않는다. 프록시와 브라우저가 같은 이름을 각자 풀어 접속한다.
+- 프록시 안에서 접속하는 업스트림 연결에 시간 상한은 두지 않았다(브라우저가 닫히면 프록시도 닫힌다).
+- 브라우저가 프록시 없이 보내는 다른 경로(헤드리스 셸의 내부 통신, QUIC 등)는 따로 재지 않았다. 재 본 것은 HTTP·HTTPS·ws·wss·WebRTC STUN이다.
+- IPv6 loopback(`[::1]`) 서버로 가는 요청은 시험에서 허용 밖 서버를 `::1`에 세워 접속 수 0을 확인했다(IPv6가 없는 환경이면 그 서버는 서지 않고 그 확인은 비어 있다).
+- 커밋 보안 검토의 결과는 아직 받지 않았다. 막는 검사를 바꾼 변경이므로 검토가 온 뒤에 병합한다.

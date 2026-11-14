@@ -1,6 +1,7 @@
 import type { Browser, CDPSession, Page } from 'playwright-core';
 import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
+import { startOriginProxy, type OriginProxy } from './origin-proxy';
 import { trackPendingRequests } from './pending-requests';
 
 /** CDP screencast로 받은 화면 한 장. `at`은 프레임을 받은 시각(ms) */
@@ -272,19 +273,33 @@ export function describeStep(step: WorkflowPageStep): string {
  * Playwright가 내려받은 Chromium을 먼저 쓰고, 없으면 설치된 Chrome을 쓴다.
  * B_STUDIO_BROWSER_EXECUTABLE로 실행 파일을 지정할 수 있다. 어느 것도 없으면 검사를 통과시키지 않고 실패로 알린다
  */
-export async function launchBrowser(): Promise<Browser> {
+export async function launchBrowser(options: { proxyServer?: string } = {}): Promise<Browser> {
   const { chromium } = await import('playwright-core');
   const executablePath = process.env.B_STUDIO_BROWSER_EXECUTABLE;
   const attempts = executablePath ? [{ executablePath }] : [{}, { channel: 'chrome' }];
   const failures: string[] = [];
   for (const attempt of attempts) {
     try {
-      return await chromium.launch({ headless: true, ...attempt });
+      return await chromium.launch({ headless: true, ...proxyLaunchOptions(options.proxyServer), ...attempt });
     } catch (error) {
       failures.push(error instanceof Error ? error.message.split('\n')[0]! : String(error));
     }
   }
   throw new BrowserUnavailableError(`헤드리스 브라우저를 실행할 수 없습니다: ${failures.join(' / ')}`);
+}
+
+/**
+ * 프록시 뒤에서 띄울 때의 실행 옵션(#1210). Chromium은 기본으로 loopback(127.0.0.1·localhost·[::1])을 프록시 없이 보내는데,
+ * 허용 출처가 바로 loopback이므로 이걸 빠뜨리면 프록시가 아무것도 보지 못한다. Playwright는 `<-loopback>`을 스스로 붙이지만
+ * 환경 변수 PLAYWRIGHT_DISABLE_FORCED_CHROMIUM_PROXIED_LOOPBACK이 켜져 있으면 붙이지 않으므로(실측: 그러면 요청이 프록시를 우회한다)
+ * 같은 규칙을 인자로 직접 넣는다. WebRTC의 UDP는 HTTP 프록시를 지나지 않아 `disable_non_proxied_udp`로 막는다
+ */
+function proxyLaunchOptions(proxyServer: string | undefined) {
+  if (proxyServer === undefined) return {};
+  return {
+    proxy: { server: proxyServer },
+    args: ['--proxy-bypass-list=<-loopback>', '--force-webrtc-ip-handling-policy=disable_non_proxied_udp'],
+  };
 }
 
 /**
@@ -415,16 +430,56 @@ export function createScreencast(client: CDPSession, viewport: { width: number; 
   };
 }
 
+/** 프록시가 막은 CONNECT(https·웹소켓) 대상의 host:port와 같은 곳으로 가던 요청인지. 스킴을 모르는 터널이라 기본 포트로 맞춘다 */
+function isBlockedTunnel(url: string, blockedTunnels: ReadonlySet<string>): boolean {
+  if (blockedTunnels.size === 0) return false;
+  try {
+    const { protocol, hostname, port } = new URL(url);
+    const effective = port !== '' ? port : protocol === 'https:' || protocol === 'wss:' ? '443' : '80';
+    return blockedTunnels.has(`${hostname}:${effective}`);
+  } catch {
+    return false;
+  }
+}
+
 export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
   signal?.throwIfAborted();
-  const browser = await launchBrowser();
+  // 허용 출처 밖으로 나가는 요청을 막은 URL을 모아 둔다(앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않는다).
+  // 막은 알림이 요청 실패 이벤트보다 먼저 들어가야 하므로 프록시를 브라우저보다 먼저 만든다
+  const blockedUrls = new Set<string>();
+  const blockedTunnels = new Set<string>();
+  // 허용 출처가 주어졌는데 프록시를 세우지 못하면 프록시 없이 브라우저를 띄우지 않는다(검사를 통과시키지 않고 "브라우저 없음"으로 알린다)
+  let proxy: OriginProxy | undefined;
+  if (allowedOrigins) {
+    const allowedSet = new Set(allowedOrigins);
+    try {
+      proxy = await startOriginProxy({
+        isAllowed: (requestUrl) => isAllowedRequest(requestUrl, allowedSet),
+        onBlocked: (block) => {
+          if (block.kind === 'url') blockedUrls.add(block.url);
+          else {
+            // 터널(https·웹소켓)은 URL을 알 수 없어 접속하려던 host:port로 남긴다
+            blockedUrls.add(`CONNECT ${block.hostPort}`);
+            blockedTunnels.add(block.hostPort);
+          }
+        },
+      });
+    } catch (error) {
+      throw new BrowserUnavailableError(`출처 제한 프록시를 시작할 수 없습니다: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  let browser: Browser;
+  try {
+    browser = await launchBrowser(proxy ? { proxyServer: proxy.server } : {});
+  } catch (error) {
+    await proxy?.close();
+    throw error;
+  }
   const abort = () => void browser.close();
   signal?.addEventListener('abort', abort, { once: true });
   try {
-    // 허용 출처를 넘기면 서비스 워커를 막는다. 서비스 워커가 만든 요청은 page.route를 우회하기 때문이다
+    // 허용 출처를 넘기면 서비스 워커를 막는다. 서비스 워커가 만든 요청은 page.route를 우회하기 때문이다(첫 층. 프록시가 둘째 층이다)
     const page = await browser.newPage({ viewport, ...(allowedOrigins ? { serviceWorkers: 'block' as const } : {}) });
-    // 허용 출처 밖으로 나가려는 요청을 막고, 막은 URL을 모아 둔다(앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않는다)
-    const blockedUrls = new Set<string>();
     if (allowedOrigins) await restrictPageToOrigins(page, allowedOrigins, ({ url: blocked }) => void blockedUrls.add(blocked));
     const pageErrors: string[] = [];
     const consoleErrors: string[] = [];
@@ -442,7 +497,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
     const failedUrls = new Set<string>();
     const recordFailure = (url: string, reason: string) => {
       // 허용 출처 밖이라 막은 요청은 앱의 오류가 아니므로 실패로 세지 않는다(이중 기록 방지)
-      if (isAutomaticFavicon(url) || failedUrls.has(url) || blockedUrls.has(url)) return;
+      if (isAutomaticFavicon(url) || failedUrls.has(url) || blockedUrls.has(url) || isBlockedTunnel(url, blockedTunnels)) return;
       failedUrls.add(url);
       failedRequests.push(`${reason} ${url}`);
     };
@@ -471,6 +526,7 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
         mediaErrors.length = 0;
         failedUrls.clear();
         blockedUrls.clear();
+        blockedTunnels.clear();
       }
       const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
       await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
@@ -525,6 +581,8 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
   } finally {
     signal?.removeEventListener('abort', abort);
     await browser.close().catch(() => {});
+    // 브라우저를 닫은 뒤에 닫는다. 열려 있는 연결도 여기서 끊는다
+    await proxy?.close();
     signal?.throwIfAborted();
   }
 };
