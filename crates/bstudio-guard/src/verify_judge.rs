@@ -154,7 +154,7 @@ fn format_inner(report_json: &str, allow_breaking: bool, spec_file: &str) -> Res
         lines.extend(contract_diff::format_contract_changes(changes)?.split('\n').map(|line| format!("    {line}")));
         let breaking = list(Some(changes), "changes", false)?.iter().any(|change| truthy(change.prop("breaking")));
         if !allow_breaking && breaking {
-            lines.push("    요청에 삭제·변경이 명시되지 않았으므로 호환을 깨는 변경은 허용되지 않습니다.".into());
+            lines.push("    이 요청은 호환을 깨는 변경을 허용하지 않았습니다(허용은 사람이 요청할 때 켭니다). 의도하지 않은 변경이면 되돌리고, 사람이 요청한 변경이면 되돌리지 말고 그 사실을 알리세요.".into());
         }
     }
 

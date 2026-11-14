@@ -210,6 +210,18 @@ describe('verifyChanges', () => {
     expect((await verifyChanges({ ...options, allowBreaking: true })).ok).toBe(true);
   });
 
+  it('호환 깨짐을 막은 안내는 요청 글이 아니라 허용 표시가 없었다고 말한다(#1197)', async () => {
+    // 터미널 경로는 사람이 삭제를 분명히 요청해도 허용 표시가 없다. "요청에 명시되지 않았다"는 사람의 요청과 맞지 않는다
+    const after = structuredClone(baseline);
+    delete after.components!.schemas!.Order!.properties!.total;
+    const report = await verifyChanges({ sandbox: fakeSandbox(), project, changedFiles: ['api/src/main/java/Order.java'], baselines: new Map([['api', baseline]]), fetcher: async () => after, allowBreaking: false });
+    const text = formatVerificationReport(report, { allowBreaking: false });
+    expect(text).not.toContain('요청에 삭제·변경이 명시되지 않았으므로');
+    expect(text).toContain('이 요청은 호환을 깨는 변경을 허용하지 않았습니다');
+    expect(text).toContain('사람이 요청한 변경이면 되돌리지 말고 그 사실을 알리세요');
+    expect(formatVerificationReport(report, { allowBreaking: true })).not.toContain('허용하지 않았습니다');
+  });
+
   it('샌드박스가 파일 변경을 보지 못하면 재시작하지 않고 실패한다', async () => {
     const sandbox = fakeSandbox([], { syncFails: true });
     const report = await verifyChanges({
