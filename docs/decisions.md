@@ -10747,6 +10747,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 ### 남은 한계와 재지 않은 것
 - **이번 조각의 범위 밖**: `steps`·`capture`·`onFrame`은 지원하지 않고 던진다(A6b·A6c). 게이트의 기본 `browserRunner`는 `runInBrowser`다. 실제 세션(실제 Claude Code)에서의 실측은 하지 않았다 — 게이트가 이 러너를 쓰지 않으므로 실제 세션에서 잴 것이 없다(A6c의 완료 조건이다). 그래서 `docs/status.md`의 "마지막 실제 확인"은 고치지 않았다.
 - **호출 전체 시간 +약 400ms의 원인 미확인**(위 검증의 측정 참고).
+- **옛 러너는 중단 뒤 프로필 폴더를 남길 때가 있다(관측 한 번).** 이 PR의 CI(Linux, 시스템 Chrome)에서 중단 시험 동안 TMPDIR을 빈 폴더로 격리했는데도 `playwright_chromiumdev_profile-*` 하나가 남았다. Rust 러너의 폴더(`b-studio-cdp-*`)는 남지 않았다. 옛 러너는 실험 경로가 계속 쓰므로 고치지 않았고, 중단 시험은 Rust 러너의 폴더만 견준다. macOS에서는 남지 않았다.
 - **Linux·Windows는 재지 못했다.** unix만 구현했고 그 밖은 `unavailable`이다. 시스템 Chrome의 기본 경로 `/opt/google/chrome/chrome`(Playwright의 'chrome' 채널이 찾는 곳이라고 본 값)은 Linux에서 확인하지 않았다. CI(headless shell 없음, 시스템 Chrome)에서 처음 돌 때 달라질 수 있다.
 - **시험하지 않은 경로**: 서로 다른 사이트의 iframe(OOPIF) 세션 준비(코드는 있다. 시험한 iframe은 같은 사이트라 같은 세션이다), 팝업, 내려받기, 브라우저가 중간에 죽는 경우(연결이 끊기면 오류로 끝나는 것은 CDP 단위 시험까지만), 브라우저를 띄우는 도중의 취소(프로세스 그룹과 임시 폴더를 `Drop`이 정리하도록 썼지만 그 순간을 시험으로 겨냥하지 않았다. 시험한 취소는 이동 중이다), 워커 세션의 `Fetch.enable`이 이 브라우저에서 받아들여지는지(실패해도 프록시가 막는다).
 - **Chrome 157에서 `redirectedRequestId`가 오는지는 재지 않았다.** Chrome 153(headless shell)에서는 오지 않고 같은 `networkId`로 다시 멈췄다. 두 방식 모두 홉으로 보며, 157에서도 https 홉이 터널 꼴로 기록돼 시험이 통과했다.
