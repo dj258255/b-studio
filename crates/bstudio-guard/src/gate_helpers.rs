@@ -37,6 +37,44 @@ pub fn next_error_marker(text: &str, expect_status: f64) -> Option<&'static str>
     None
 }
 
+/// React가 스트리밍 도중 서버 렌더링이 실패한 Suspense 경계를 클라이언트 렌더링으로 넘길 때 부르는 함수의 호출 머리(`$RX("<경계 id>","<digest>",…)`). 정의(`$RX=function`)와는 겹치지 않는다
+const REACT_CLIENT_RENDER_CALL: &str = "$RX(\"";
+/// Next.js RSC 데이터의 오류 조각 머리. 데이터는 `<script>` 안 JS 글자라 따옴표가 `\"`로 들어 있다(`…:E{\"digest\":\"<digest>\",…`)
+const RSC_ERROR_CHUNK: &str = "E{\\\"digest\\\":\\\"";
+/// `redirect()`가 같은 통로로 보내는 digest 머리. 오류가 아니라 의도한 넘기기다
+const NEXT_REDIRECT_DIGEST: &str = "NEXT_REDIRECT;";
+/// `notFound()`의 digest. 기대 상태가 404일 때만 오류로 보지 않는다(`next_error_marker`와 같은 규칙)
+const NEXT_NOT_FOUND_DIGEST: &str = "NEXT_HTTP_ERROR_FALLBACK;404";
+/// 실패 글에 싣는 digest의 최대 글자 수
+const DIGEST_MAX_CHARS: usize = 80;
+
+/// HTTP 확인 원문(HTML)에서 찾은 서버 렌더링 오류 신호의 digest(#1207). 없으면 `None`.
+/// 셸을 보낸 뒤(상태 코드가 이미 나간 뒤) Suspense 안에서 난 서버 오류는 화면 글자에 표지를 남기지 않고, React의 `$RX(…)` 호출과 RSC 오류 조각으로만 드러난다.
+/// 신호가 있는데 digest를 읽지 못하면 빈 글자로 돌려준다(오류로 본다). `NEXT_REDIRECT;`로 시작하는 digest와 기대가 404일 때의 `notFound()`만 뺀다
+pub fn next_render_error_digest(html: &str, expect_status: f64) -> Option<String> {
+    let mut digests: Vec<String> = Vec::new();
+    let mut at = 0;
+    while let Some(found) = html[at..].find(REACT_CLIENT_RENDER_CALL) {
+        at += found + REACT_CLIENT_RENDER_CALL.len();
+        let rest = &html[at..];
+        let digest = rest
+            .find('"')
+            .and_then(|end| rest[end + 1..].strip_prefix(",\""))
+            .map(|tail| tail[..tail.find(['"', '\\']).unwrap_or(tail.len())].to_owned());
+        digests.push(digest.unwrap_or_default());
+    }
+    let mut at = 0;
+    while let Some(found) = html[at..].find(RSC_ERROR_CHUNK) {
+        at += found + RSC_ERROR_CHUNK.len();
+        let tail = &html[at..];
+        digests.push(tail[..tail.find(['"', '\\']).unwrap_or(tail.len())].to_owned());
+    }
+    digests
+        .into_iter()
+        .find(|digest| !digest.starts_with(NEXT_REDIRECT_DIGEST) && !(expect_status == 404.0 && digest == NEXT_NOT_FOUND_DIGEST))
+        .map(|digest| digest.chars().take(DIGEST_MAX_CHARS).collect())
+}
+
 /// `{ service, mode, expectStatus, viewport? }` → 선언형 pageChecks와 같은 모양. 설정에 없는 값은 pageChecks의 기본값과 같게 둔다(콘솔 오류·가로 스크롤은 허용하지 않는다)
 pub fn auto_page_check(config: &JsValue, route_path: &str) -> JsValue {
     let viewport = config.prop("viewport").filter(|v| v.truthy()).cloned();
@@ -449,6 +487,78 @@ mod tests {
         assert_eq!(next_error_marker("This page could not be foun", 200.0), None);
         assert_eq!(next_error_marker("", f64::NAN), None);
         assert_eq!(next_error_marker("This page could not be found", f64::NAN), Some(NEXT_NOT_FOUND_MARKER));
+    }
+
+    /// Next.js 16.4.3에서 실제로 받은 응답(`tests/vectors/next16/README.md`)
+    macro_rules! next16 {
+        ($name:literal) => {
+            (
+                include_str!(concat!("../tests/vectors/next16/dev-", $name, ".html")),
+                include_str!(concat!("../tests/vectors/next16/prod-", $name, ".html")),
+            )
+        };
+    }
+
+    #[test]
+    fn next16_정상_응답은_스크립트_안에만_not_found_글자가_있어_화면_글자에서는_표지가_없다() {
+        for (dev, prod) in [next16!("home"), next16!("ok"), next16!("order-1"), next16!("dyn"), next16!("sp"), next16!("cerr"), next16!("rd")] {
+            for html in [dev, prod] {
+                assert_eq!(next_error_marker(html, 200.0), Some(NEXT_NOT_FOUND_MARKER), "원문에는 있다(#1207의 오탐)");
+                assert_eq!(next_error_marker(&strip_html(html), 200.0), None);
+                assert_eq!(next_render_error_digest(html, 200.0), None);
+            }
+        }
+    }
+
+    #[test]
+    fn next16_스트리밍_도중의_서버_오류는_digest로_잡는다() {
+        let (dev, prod) = next16!("errs");
+        assert_eq!(next_error_marker(&strip_html(dev), 200.0), None, "화면 글자에는 표지가 없다");
+        assert_eq!(next_render_error_digest(dev, 200.0).as_deref(), Some("3772761063"));
+        assert_eq!(next_render_error_digest(prod, 200.0).as_deref(), Some("3873002581"));
+        let (dev, prod) = next16!("nfs");
+        for html in [dev, prod] {
+            assert_eq!(next_render_error_digest(html, 200.0).as_deref(), Some(NEXT_NOT_FOUND_DIGEST));
+            assert_eq!(next_render_error_digest(html, 404.0), None);
+        }
+        // 상태 코드로 먼저 막히는 응답에도 신호는 있다
+        for (dev, prod) in [next16!("err"), next16!("nf")] {
+            assert!(next_render_error_digest(dev, 200.0).is_some());
+            assert!(next_render_error_digest(prod, 200.0).is_some());
+        }
+    }
+
+    #[test]
+    fn next16_기본_404_화면은_화면_글자에서_표지를_찾는다() {
+        let (dev, prod) = next16!("nope");
+        for html in [dev, prod] {
+            assert_eq!(next_error_marker(&strip_html(html), 200.0), Some(NEXT_NOT_FOUND_MARKER));
+            assert_eq!(next_error_marker(&strip_html(html), 404.0), None);
+        }
+    }
+
+    #[test]
+    fn 렌더링_오류_digest_읽기의_경계() {
+        // 넘기기는 오류가 아니다. 넘기기와 오류가 함께 있으면 오류를 돌려준다
+        assert_eq!(next_render_error_digest(r#"$RX("B:0","NEXT_REDIRECT;replace;/ok;307;","x")"#, 200.0), None);
+        assert_eq!(next_render_error_digest(r#"$RX("B:0","NEXT_REDIRECT;push;/a;307;")$RX("B:1","42")"#, 200.0).as_deref(), Some("42"));
+        // digest를 읽지 못하면 빈 글자(오류로 본다)
+        assert_eq!(next_render_error_digest(r#"$RX("B:0")"#, 200.0).as_deref(), Some(""));
+        assert_eq!(next_render_error_digest(r#"$RX("B:0",null,"m")"#, 200.0).as_deref(), Some(""));
+        assert_eq!(next_render_error_digest(r#"$RX("B:0"#, 200.0).as_deref(), Some(""));
+        assert_eq!(next_render_error_digest(r#"$RX("B:0",""#, 200.0).as_deref(), Some(""));
+        // 정의만 있으면 신호가 아니다
+        assert_eq!(next_render_error_digest("$RX=function(b,c,d,e,f){}", 200.0), None);
+        // RSC 오류 조각(스크립트 안 JS 글자)
+        assert_eq!(next_render_error_digest(r#"push([1,"3c:E{\"digest\":\"99\",\"name\":\"Error\"}"])"#, 200.0).as_deref(), Some("99"));
+        assert_eq!(next_render_error_digest(r#"E{\"digest\":\""#, 200.0).as_deref(), Some(""));
+        assert_eq!(next_render_error_digest(r#"E{\"digest\":\"NEXT_HTTP_ERROR_FALLBACK;403\""#, 404.0).as_deref(), Some("NEXT_HTTP_ERROR_FALLBACK;403"));
+        // 기대가 404가 아니면 notFound()는 오류다. NaN도 404가 아니다
+        assert_eq!(next_render_error_digest(r#"$RX("B:0","NEXT_HTTP_ERROR_FALLBACK;404")"#, f64::NAN).as_deref(), Some(NEXT_NOT_FOUND_DIGEST));
+        // 긴 digest는 80글자로 자른다(글자 단위)
+        let long = format!(r#"$RX("B:0","{}")"#, "가".repeat(200));
+        assert_eq!(next_render_error_digest(&long, 200.0).map(|d| d.chars().count()), Some(80));
+        assert_eq!(next_render_error_digest("", 200.0), None);
     }
 
     #[test]

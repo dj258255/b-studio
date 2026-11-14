@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { PNG } from 'pngjs';
@@ -931,6 +932,59 @@ describe('무작위 사례(시드 고정)', () => {
       expect(current.calls, label).toEqual(legacy.calls);
     }
   }, 120_000);
+});
+
+// #1207: 이 묶음은 옛 코드와 일부러 다르다(견주지 않고 지금 구현만 돈다). 옛 판정은 HTTP 모드에서 오류 화면 표지를 스크립트까지 포함한 원문에서 찾아,
+// Next.js 16이 모든 응답의 RSC 데이터에 싣는 기본 not-found 글자 때문에 정상 화면도 실패시켰다. 응답은 Next.js 16.4.3에서 실제로 받은 것이다(`crates/bstudio-guard/tests/vectors/next16/README.md`)
+describe('자동 페이지 HTTP 모드: Next.js 16 실제 응답 (#1207)', () => {
+  const vector = (name: string): string => readFileSync(path.join(import.meta.dirname, '../../../crates/bstudio-guard/tests/vectors/next16', `${name}.html`), 'utf8');
+  const auto = (over: Record<string, unknown> = {}) => ({ service: 'web', mode: 'http', expectStatus: 200, maxPages: 5, ...over }) as never;
+  const pageFile = 'export default function Page() { return null; }\n';
+  const simple = { 'web/app/dashboard/page.tsx': pageFile };
+  const dyn = { 'web/app/orders/[id]/page.tsx': pageFile };
+  const run = (name: string, status = 200, changes: Record<string, string> = simple, over: Record<string, unknown> = {}) =>
+    runWorld('current', { nextjs: true, workflow: { autoPageChecks: auto(over) }, changes, page: async () => ({ status, text: vector(name) }) });
+
+  for (const kind of ['dev', 'prod']) {
+    for (const name of ['home', 'ok', 'order-1', 'dyn', 'sp', 'cerr', 'rd']) {
+      it(`${kind}-${name}: 정상 응답(스크립트 안에만 not-found 글자)은 통과한다`, async () => {
+        const { trace } = await run(`${kind}-${name}`);
+        expect(pageCheck(trace)).toMatchObject({ ok: true });
+      });
+    }
+    it(`${kind}-errs: 스트리밍 도중 서버 컴포넌트가 던지면(상태 200) 실패한다`, async () => {
+      const { trace } = await run(`${kind}-errs`);
+      const digest = kind === 'dev' ? '3772761063' : '3873002581';
+      expect(pageCheck(trace)).toMatchObject({ ok: false });
+      expect(detail(trace)).toBe(`자동 페이지 /dashboard: Next.js 오류 화면: 서버 렌더링이 도중에 실패했습니다(digest '${digest}'). 상태 코드는 200이지만 화면 일부를 서버에서 그리지 못했습니다`);
+    });
+    it(`${kind}-nfs: 스트리밍 도중 notFound()면(상태 200) 실패한다`, async () => {
+      const { trace } = await run(`${kind}-nfs`);
+      expect(detail(trace)).toContain("Next.js 오류 화면: 서버 렌더링이 도중에 실패했습니다(digest 'NEXT_HTTP_ERROR_FALLBACK;404')");
+    });
+    it(`${kind}-nfs: 기대가 404여도 상태 200이면 상태 판정이 먼저 막는다`, async () => {
+      const { trace } = await run(`${kind}-nfs`, 200, simple, { expectStatus: 404 });
+      expect(detail(trace)).toBe('자동 페이지 /dashboard: HTTP 200 (기대 404)');
+    });
+    it(`${kind}-nope: 화면에 보이는 기본 404 글자는 그대로 잡는다(상태가 200이라고 해도)`, async () => {
+      const { trace } = await run(`${kind}-nope`);
+      expect(detail(trace)).toBe("자동 페이지 /dashboard: Next.js 오류 화면: 'This page could not be found'");
+    });
+    it(`${kind}-nope: 기대가 404면 기본 404 화면은 통과한다`, async () => {
+      const { trace } = await run(`${kind}-nope`, 404, simple, { expectStatus: 404 });
+      expect(pageCheck(trace)).toMatchObject({ ok: true });
+    });
+    it(`${kind}-err·nf: 상태 코드가 먼저 막는다`, async () => {
+      expect(detail((await run(`${kind}-err`, 500)).trace)).toBe('자동 페이지 /dashboard: HTTP 500 (기대 200)');
+      expect(detail((await run(`${kind}-nf`, 404)).trace)).toBe('자동 페이지 /dashboard: HTTP 404 (기대 200)');
+    });
+  }
+  it('추정 id로 연 동적 경로: 정상 응답은 통과하고 스트리밍 오류는 실패한다', async () => {
+    expect(pageCheck((await run('dev-order-1', 200, dyn)).trace)).toMatchObject({ ok: true });
+    expect(detail((await run('dev-errs', 200, dyn)).trace)).toBe(
+      "자동 페이지 /orders/1: Next.js 오류 화면: 서버 렌더링이 도중에 실패했습니다(digest '3772761063'). 상태 코드는 200이지만 화면 일부를 서버에서 그리지 못했습니다",
+    );
+  });
 });
 
 void encodeLoneSurrogates;
