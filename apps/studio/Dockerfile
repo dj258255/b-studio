@@ -20,7 +20,7 @@ ENV COREPACK_ENABLE_DOWNLOAD_PROMPT=0 \
 # 잠금 파일과 패키지 목록이 같으면 의존성 층을 다시 쓴다
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 # pnpm install의 postinstall이 부른다. 이 단계에는 cargo가 없어 B_STUDIO_SKIP_NATIVE_BUILD로 건너뛰고 앞 단계의 결과를 넣는다
-COPY scripts/build-native.mjs scripts/
+COPY scripts/build-native.mjs scripts/install-native.mjs scripts/
 COPY apps/studio/package.json apps/studio/
 COPY apps/cli/package.json apps/cli/
 COPY packages/agent/package.json packages/agent/
