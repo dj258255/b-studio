@@ -12,11 +12,12 @@ b-studio는 모델이 생성한 코드를 실제 서비스처럼 실행하고 �
 ```bash
 corepack enable
 pnpm install
-pnpm test
+cargo test --workspace --locked
 pnpm typecheck
+pnpm test
 ```
 
-스튜디오 서버나 터미널 작업대를 고칠 때는 `pnpm studio --mode demo`로 띄워 보고, lint와 production build도 확인합니다.
+CI도 이 순서로 돌립니다(`.github/workflows/ci.yml`의 `check`). `pnpm --filter @b-studio/studio lint`와 `pnpm --filter @b-studio/studio build`까지 돌립니다. 이 `build`는 라우트 코드젠이 최신인지 보는 `gen-routes --check`이고 production 번들 빌드가 아닙니다. 스튜디오 서버나 터미널 작업대를 고칠 때는 `pnpm studio --mode demo`로 띄워 보고 lint와 이 확인도 돌립니다.
 
 ## 작업 흐름
 
@@ -58,7 +59,7 @@ pnpm typecheck
   ```
 
 - 틀린 예상을 지우지 않습니다. PR의 "예상과 실제" 표에 차이 원인을 적습니다.
-- 2026-09-24 이전 작업은 예상을 남기지 않았습니다(README "일정과 작업 방식" 참조).
+- 2026-09-24 이전 작업은 예상을 남기지 않았습니다([구현 상태](docs/status.md)의 "일정과 작업 방식" 참조).
 
 ## 실험
 
@@ -82,7 +83,7 @@ pnpm typecheck
 
 ## 변경 원칙
 
-- 명세는 `spec`, 실행 경계는 `sandbox`, 모델 루프와 게이트는 `agent`, UI와 세션 API는 `studio`에 둡니다.
+- 명세는 `spec`, 실행 경계는 `sandbox`, 모델 루프와 게이트는 `agent`, 세션 API와 서버는 `studio`, 화면(터미널 작업대)은 `apps/cli/src/desk`에 둡니다. 막는 검사 같은 판정은 순수 Rust 크레이트 `crates/bstudio-guard`, 프로세스·파일·소켓 I/O는 `crates/bstudio-io`, Node와 잇는 napi 접착은 `crates/bstudio-node`, 공개 포트 앞단은 `crates/bstudio-server`에 둡니다(ADR-191~195). 옮긴 판정은 옛 TS 구현과의 차등 시험으로 묶고, 옮긴 PR에서 TS 구현을 지웁니다.
 - 외부 입력은 스키마에서 검증하고 경로·URL·환경 변수 이름을 좁게 허용합니다.
 - 모델의 완료 메시지를 신뢰하지 않고 플랫폼이 관찰할 수 있는 결과로 판정합니다.
 - 실패, 취소, 프로세스 종료 뒤에도 사용자 코드와 DB가 일관된 상태로 돌아오는지 확인합니다.
@@ -96,7 +97,8 @@ pnpm typecheck
 | `packages/spec` | 관련 단위 테스트, `pnpm typecheck` |
 | `packages/sandbox` | 단위 테스트, 가능하면 실제 Docker 재현 |
 | `packages/agent` | 단위 테스트, 게이트 변경은 `pnpm e2e:agent`. e2e 다섯 개는 main에 들어간 뒤와 매일 밤 `e2e` 워크플로가 돌린다(Actions에서 손으로도 돌릴 수 있다) |
-| `apps/studio` | 타입 검사, lint, production build, 관련 브라우저 흐름 |
+| `crates/*` | `cargo test --workspace --locked`. 판정을 옮겼으면 옛 TS 구현과 같은 입력의 차등 시험. 막는 검사는 커밋 보안 검토 뒤 병합 |
+| `apps/studio` | 타입 검사, lint, `pnpm --filter @b-studio/studio build`(라우트 코드젠 확인), 관련 서버 계약 시험(`apps/studio/server`) |
 | `apps/cli` | 관련 단위 테스트, `pnpm typecheck`. `desk`처럼 화면을 그리는 명령은 확인용 스튜디오에 붙여 실제 터미널(또는 node-pty)에서 |
 | 템플릿 | 템플릿 자체 빌드와 `examples/orders` 기동 |
 | 문서만 | 링크, 명령, 파일 경로가 현재 저장소와 맞는지 확인 |

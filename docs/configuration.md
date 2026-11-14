@@ -17,6 +17,10 @@ deploy: {}
 workflow: {}
 repository: {}
 design: {}
+review: {}
+guide: {}
+models: {}
+checkpoints: {}
 ```
 
 | 필드 | 필수 | 설명 |
@@ -31,8 +35,12 @@ design: {}
 | `secrets` | 아니요 | 서버에서 읽어 서비스에 주입할 시크릿 선언 |
 | `deploy` | 아니요 | 운영 Dockerfile과 공개 포트 |
 | `workflow` | 아니요 | 에이전트 작업 단계·도구·보호 경로·승인·릴리스 조건 |
-| `repository` | 아니요 | 모노레포 하위 프로젝트 처리 |
+| `repository` | 아니요 | 모노레포 하위 프로젝트 처리(`monorepo`, 기본 `false`)와 main 따라잡기(`autoCatchUp`, 기본 `true`, 뒤처진 세션 브랜치를 올리기 전·리뷰 라운드 전에 조용히 따라잡고 충돌하면 건드리지 않음, ADR-076) |
 | `design` | 아니요 | Figma 디자인 파일 URL(에이전트 도구·시각 비교 기준) |
+| `review` | 아니요 | PR 자동 리뷰 라운드(ADR-074). `auto`(기본 `true`)와 `maxRounds`(1~3, 기본 2). 절을 적지 않아도 기본값이 채워져 켜져 있습니다. 지적이 심각(blocker·major)할 때만 같은 세션에 고침을 요청하고 다시 리뷰하며, 머지는 사람이 합니다 |
+| `guide` | 아니요 | 프로젝트 지침 파일(ADR-077). `file`(기본 `AGENTS.md`, 없으면 `CLAUDE.md`를 대신 찾음), `maxChars`(기본 8000), `enabled`(기본 `true`). 매 실행 시작마다 세션 작업 복사본에서 읽어 모델에게 넘깁니다. 끄면 파일이 있어도 읽지 않습니다 |
+| `models` | 아니요 | 계획-실행 분리에 쓸 모델(`plan`·`execute`, [아래](#계획-실행-분리-adr-075)) |
+| `checkpoints` | 아니요 | 체크포인트 커밋 제목 규칙(`conventionalCommits`, 기본 `true`, [아래](#체크포인트-커밋-제목-adr-080)) |
 
 ## managed 서비스
 
@@ -209,28 +217,6 @@ Dockerfile은 compose `build.context` 기준 경로입니다. 포트를 생략�
 
 `deploy` 절을 적지 않으면(로컬 폴더 모드 기본값) desk의 실행·배포 화면(`Ctrl-b v`)에 배포가 보이지 않습니다. 같은 PC의 Docker에만 배포하는 기능이라, 다른 호스트에 배포하는 프로젝트는 이 절을 적지 마세요.
 
-## 내 환경 관찰
-
-"내 환경"은 **관찰 전용**입니다. b-studio가 띄운 샌드박스(로그·리소스)와는 별개로, 이 프로젝트 폴더에서 사용자가 `docker compose up`으로 직접 띄운 컨테이너와, studio.yaml이 선언한 포트에서 호스트가 직접 뜬 프로세스(`gradle bootRun`, `next dev` 등)를 찾아 보여줍니다. b-studio는 이 화면에서 아무것도 재시작·중지·삭제하지 않고, 검증 게이트·체크포인트와도 무관합니다.
-
-**docker compose 프로젝트 자동 감지**: Compose가 컨테이너에 자동으로 붙이는 `com.docker.compose.project.working_dir` 레이블이 이 프로젝트 폴더(또는 그 하위 폴더)를 가리키는 컨테이너만 모읍니다. 설정할 것은 없습니다 — 같은 폴더에서 `docker compose up -d`를 실행하면 다음에 탭을 열 때 바로 보입니다.
-
-**호스트 프로세스와 Actuator 로그**: studio.yaml의 managed 서비스가 선언한 포트에서 듣고 있는 프로세스를 PID·CPU·메모리와 함께 보여줍니다. 로그는 자동으로 가져올 수 없으므로, Spring Boot 앱이라면 Actuator의 `health`·`logfile` 엔드포인트를 열어 두면 됩니다.
-
-```yaml
-# application.yml (호스트에서 gradle bootRun으로 띄우는 Spring Boot 서비스)
-management:
-  endpoints:
-    web:
-      exposure:
-        include: health,logfile
-logging:
-  file:
-    name: logs/app.log
-```
-
-이 설정이 없으면 "내 환경"이 포트·PID·리소스까지는 보여주되, 로그 자리에는 설정 방법을 안내하는 문구만 남깁니다.
-
 ## 실험 기능 (`B_STUDIO_EXPERIMENTAL`)
 
 지원 범위(단일 세션, 로컬 CLI 백엔드, 로컬 Docker) 밖의 기능은 기본 화면에서 숨깁니다(ADR-166, [구현 상태의 지원 범위](status.md#지원-범위)). 스튜디오를 띄울 때 환경 변수로 켭니다.
@@ -313,7 +299,7 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - `claude`가 PATH에 없으면 `B_STUDIO_CLAUDE_BIN`에 절대 경로를 적습니다(없으면 터미널을 열지 않고, 컨테이너 방식으로 띄우는 길을 함께 알립니다).
 - 세션의 AI가 Codex(`codex` 백엔드)면 `claude` 대신 `codex`를 띄웁니다(ADR-180). 훅·b-studio 도구·사용량 텔레메트리는 `codex`를 부를 때 설정 덮어쓰기(`-c`)로 붙고, 토큰은 실행 인자가 아니라 관문 폴더의 환경 파일로 넘깁니다. 처음 열면 Codex가 "Hooks need review"를 묻습니다. **Trust all and continue**를 고르면 그 뒤 세션에서는 다시 묻지 않습니다(b-studio가 대신 믿지 않습니다). `codex`가 PATH에 없으면 `B_STUDIO_CODEX_BIN`에 절대 경로를 적습니다. 컨테이너 방식은 claude만 씁니다.
 - b-studio가 띄운 `codex`는 시작할 때 스스로 업데이트를 확인하지 않습니다(`check_for_update_on_startup=false`). 업데이트는 평소 터미널에서 직접 합니다. 화면의 "CLI 떠 있음"은 첫 요청 전이라도 `codex`가 뜨면 켜집니다.
-- 작업 화면의 새 요청을 **터미널로** 보내면(또는 `studio desk`의 새 요청) 첫 요청은 CLI 실행 인자(`claude "<요청>"`, `codex "<요청>"`)로 넘어갑니다. 키 입력으로 넣지 않습니다. CLI가 폴더 신뢰 같은 것을 먼저 물으면 사람이 그 칸에서 답하고, 답한 뒤 요청이 이어집니다.
+- `studio desk`의 새 요청(`Ctrl-b n`)을 **터미널로** 보내면 첫 요청은 CLI 실행 인자(`claude "<요청>"`, `codex "<요청>"`)로 넘어갑니다. 키 입력으로 넣지 않습니다. CLI가 폴더 신뢰 같은 것을 먼저 물으면 사람이 그 칸에서 답하고, 답한 뒤 요청이 이어집니다.
 - **격리가 없습니다.** CLI는 이 컴퓨터의 다른 파일에도 닿습니다. 평소 터미널에서 CLI를 쓰는 것과 같은 신뢰 수준입니다. 작업 복사본의 `.git`도 읽기 전용이 아닙니다(CLI에는 커밋하지 말라고 알립니다. 체크포인트는 b-studio가 남깁니다).
 - 관문 설정 파일은 같은 사용자의 것이라 에이전트가 고칠 수 있습니다. 그래서 터미널이 열려 있는 동안 그 파일이 쓴 그대로인지 계속 보고(다르면 되돌리고 알립니다), 훅 없이 뜬 CLI도 찾아 알립니다(이슈 #695). 작정한 우회는 막지 못합니다 — 그 경우의 답은 컨테이너 방식입니다.
 
@@ -369,14 +355,15 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 | `B_STUDIO_ANTHROPIC_CONTEXT` | 위 기본 모델의 컨텍스트 크기(토큰). 0 이하이거나 숫자가 아니면 기본값을 씁니다 | `200000` |
 | `B_STUDIO_OPENCODE_MODEL` | `opencode` 백엔드의 모델(`provider/model`). 세션에서 고른 모델이 먼저입니다. 둘 다 없으면 실행이 "모델을 골라야 합니다" 오류로 끝납니다 | 없음 |
 | `B_STUDIO_GEMINI_MODEL` | Gemini CLI 백엔드의 모델(예: `gemini-2.5-pro`). 세션에서 고른 모델이 먼저이고, 둘 다 없으면 같은 오류로 끝납니다 | 없음 |
+| `B_STUDIO_SKIP_NATIVE_BUILD` | `1`이면 `pnpm install`의 `postinstall`(`scripts/build-native.mjs`)이 Rust 모듈 빌드를 건너뜁니다. cargo가 없는 운영 이미지의 node 단계가 앞 단계에서 빌드한 `bstudio_node.node`를 복사해 쓸 때 씁니다(`apps/studio/Dockerfile`). 이 파일이 없으면 판정을 하지 못해 던지므로 개발 환경에서는 쓰지 않습니다 | 없음 |
+| `B_STUDIO_CONTAINER_RUNTIME` | 서비스 컨테이너의 OCI 런타임(예: `runsc`, gVisor). 격리 수준은 프로젝트가 아니라 운영자가 정합니다 | 없음(Docker 기본 런타임) |
 | `B_STUDIO_FIGMA_API` | Figma REST API 주소. 테스트에서 가짜 서버를 가리킬 때 씁니다 | `https://api.figma.com` |
-| `B_STUDIO_DOCKER_BIN` | "내 환경"이 컨테이너를 읽을 때 부르는 docker 실행 파일 | `docker` |
 | `B_STUDIO_AUTH_STATE_DIR` | 로그아웃한 세션과 운영자가 무효화한 사용자를 적는 파일(`revocations.json`)의 폴더 | `~/.cache/b-studio/auth` |
 | `B_STUDIO_TASK_PLANS_DIR` | 작업 분해 계획을 저장하는 폴더 | `~/.cache/b-studio/task-plans` |
 | `B_STUDIO_MODEL_OBSERVATIONS_FILE` | API 모드의 모델 라우터가 쓰는 모델별 실측 기록(게이트 통과 여부 등, 최근 5,000건) | `~/.cache/b-studio/model-observations.json` |
 | `B_STUDIO_MODEL_DEFAULTS_FILE` | 프로젝트·백엔드마다 마지막에 고른 모델을 기억하는 파일. 새 세션의 기본 모델이 됩니다 | `~/.cache/b-studio/model-defaults.json` |
 | `B_STUDIO_CLAUDE_USAGE_API` | `0`이면 쉬는 Claude 계정의 한도를 사용량 API로 묻지 않습니다. 이 API는 Claude Code의 `/usage`가 부르는 것으로 문서가 없고, 구독 토큰을 Claude Code 밖에서 쓰는 것이라 약관상 회색지대입니다. 계정마다 10분에 한 번만 묻고 429면 물러납니다(ADR-187) | 켬 |
-| `B_STUDIO_BACKEND_RULES_FILE` | 작업 화면의 새 요청이 AI를 고를 때 쓰는 규칙 파일. 작업 화면의 "규칙 고치기"가 씁니다(ADR-179) | `~/.cache/b-studio/backend-rules.json` |
+| `B_STUDIO_BACKEND_RULES_FILE` | desk의 새 요청이 AI를 고를 때 쓰는 규칙 파일. desk 설정 화면(`Ctrl-b g`)의 라우팅 규칙 탭이 씁니다(ADR-179) | `~/.cache/b-studio/backend-rules.json` |
 
 벤치·부하 시험이 자식 프로세스에 넘기는 값(`B_STUDIO_BENCH_*`)과 터미널·관문이 컨테이너나 훅에 넘기는 값(`B_STUDIO_TTY_*`, `B_STUDIO_TERMINAL_COMMAND`, `B_STUDIO_GATE_TOKEN`, `B_STUDIO_LOAD`)은 b-studio가 스스로 채우므로 설정하지 않습니다.
 
@@ -546,10 +533,10 @@ workflow:
 
 ### 가볍게 확인 (요청 옵션 `verify`)
 
-대화 입력창의 **"가볍게 확인"** 스위치는 요청마다 `verify: light`를 보냅니다(기본 `full`). `full`은 지금과 한 글자도 다르지 않고, `light`는 게이트가 **서비스 재시작·준비 판정·계약 비교(`run`·`contract_check`)만** 실행하고 `test`·`browser_check`·`concurrency_check`·`review`는 건너뜁니다. `workflow.required` 대조는 건너뛴 단계를 "건너뜀"으로만 기록하고 실패로 보지 않습니다.
+요청 옵션 `verify: "light"`(`POST /api/sessions/<id>/messages`)로 고르는 **"가볍게 확인"**입니다(기본 `full`). 웹 화면의 스위치는 웹 화면과 함께 지워졌고 API 옵션만 남았습니다. `full`은 지금과 한 글자도 다르지 않고, `light`는 게이트가 **서비스 재시작·준비 판정·계약 비교(`run`·`contract_check`)만** 실행하고 `test`·`browser_check`·`concurrency_check`·`review`는 건너뜁니다. `workflow.required` 대조는 건너뛴 단계를 "건너뜀"으로만 기록하고 실패로 보지 않습니다.
 
 - **체크포인트 표기**: `full`은 통과한 단계를 `Workflow-Passed` 트레일러로 남깁니다. `light`는 실제로 통과한 단계만 적고 `Workflow-Verify: light`를 더합니다. 다시 켜서 읽어도 같은 값입니다.
-- **배포는 자연히 막힙니다**: `releaseRequires`는 건너뛴 단계를 채우지 못하므로, `light` 체크포인트는 `test`·`review` 같은 조건이 있으면 배포가 거부됩니다. 배포 화면은 "가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다"라고 안내합니다. 전체 검증(`full`)을 한 번 더 통과해 새 체크포인트를 만들면 배포할 수 있습니다.
+- **배포는 자연히 막힙니다**: `releaseRequires`는 건너뛴 단계를 채우지 못하므로, `light` 체크포인트는 `test`·`review` 같은 조건이 있으면 배포가 거부됩니다. 배포 API가 이를 거부합니다. 전체 검증(`full`)을 한 번 더 통과해 새 체크포인트를 만들면 배포할 수 있습니다.
 - **쓰이는 곳**: 사람이 보낸 단일 세션 요청과 벤치(`--verify light`, [#182](https://github.com/dj258255/b-studio/pull/182))에서 쓰입니다. 작업 분해 레인·Fleet·CLI 경로는 `full` 그대로입니다.
 - **효과는 시간이지 토큰이 아닙니다**: E5([보고서](experiments/2026-09-29-e5-light-verify.md))에서 종단 시간은 15%, 게이트 시간은 53% 줄었지만 토큰은 줄지 않았습니다. 건너뛰는 단계는 b-studio 코드가 실행하고 모델을 부르지 않기 때문입니다. 작은 과제 3개 × 3회에서 잰 결과이며, 큰 변경이나 계약이 얽힌 작업에서는 `full`로 확인하세요.
 
@@ -569,7 +556,7 @@ workflow:
 - **보관**: 되돌리기 전에 바뀐 파일을 백업합니다. 세션 기록에 "검증을 통과하지 못한 변경을 되돌렸습니다: 파일 N개"와 되돌린 변경, 백업이 있으면 되살리기 경로가 남습니다.
 - **되살리기**: 되살리면 작업 트리로 그대로 돌아오지만 체크포인트가 아니라 **미검증 상태**입니다(아직 git에 커밋되지 않은 pending 변경). 다음 요청이 그 변경 위에서 이어서 작업하고 검증 게이트를 통과해야 비로소 체크포인트로 남습니다.
 - **데이터베이스**: `databases`를 선언한 프로젝트는 파일과 함께 데이터베이스도 마지막 체크포인트 시점으로 되돌립니다(파일만 되돌리면 이미 적용된 마이그레이션이 DB에 남아 서비스가 기동하지 못합니다). 되살린 백업의 DB는 되돌리지 않고, 다음 요청의 검증 게이트가 서비스를 다시 띄울 때 마이그레이션을 다시 적용하게 둡니다.
-- **지금 체크포인트로 되돌리기**: 체크포인트 기록 화면의 "되돌리기"는 지금(head) 체크포인트를 가리켜도 거부하지 않습니다. 파일은 움직일 게 없지만, 데이터베이스가 그 체크포인트 이후 어긋났을 수 있어(위 상황이 드물게 새나갔을 때) **데이터베이스만 다시 맞추는** 안전한 경로로 씁니다. 데이터베이스를 선언하지 않은 프로젝트는 지금 체크포인트를 가리키면 정말 할 일이 없어 그대로 거부합니다.
+- **지금 체크포인트로 되돌리기**: desk 세션 자세히(`Ctrl-b i`)의 "되돌리기"(`u`)는 지금(head) 체크포인트를 가리켜도 거부하지 않습니다. 파일은 움직일 게 없지만, 데이터베이스가 그 체크포인트 이후 어긋났을 수 있어(위 상황이 드물게 새나갔을 때) **데이터베이스만 다시 맞추는** 안전한 경로로 씁니다. 데이터베이스를 선언하지 않은 프로젝트는 지금 체크포인트를 가리키면 정말 할 일이 없어 그대로 거부합니다.
 
 ### 자가 확인 범위 (`B_STUDIO_SELF_CHECK`)
 
@@ -731,7 +718,7 @@ pageChecks:
 
 ## 디자인 (Figma)
 
-Figma 파일 URL을 두면 에이전트가 `design_frames`·`design_frame` 도구로 프레임 목록과 구조·스타일 요약을 볼 수 있고, 화면의 "디자인" 패널에서 고른 프레임을 PNG로 가져와 시각 비교(`pageChecks.compare`)의 기준 이미지로 쓸 수 있습니다.
+Figma 파일 URL을 두면 에이전트가 `design_frames`·`design_frame` 도구로 프레임 목록과 구조·스타일 요약을 볼 수 있습니다. 프레임을 PNG로 가져와 시각 비교(`pageChecks.compare`)의 기준 이미지로 쓰던 "디자인" 패널과 그 API 라우트는 웹 화면과 함께 지워졌습니다(`apps/studio/app/api`에 디자인 라우트가 없음을 확인했습니다). desk 터미널에는 디자인 비교·요소 고르기가 없습니다(브라우저가 필요함). 아래 설정과 에이전트 도구가 지금 남은 부분입니다.
 
 ```yaml
 design:
@@ -744,7 +731,7 @@ design:
 | `figma.fileUrl` | `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...`. 파일 키는 여기서 뽑아 검증하고, 형식이 아니면 불러올 때 거부합니다 |
 
 - 토큰은 `studio.yaml`이 아니라 **서버 환경 변수 `FIGMA_TOKEN`**에서만 읽습니다. 값은 로그·오류·화면·모델 어디에도 넣지 않습니다.
-- 스튜디오는 `studio.yaml`을 고치지 않습니다. 화면의 "디자인" 패널에서 **세션 단위로** URL을 저장할 수 있고(세션 설정이 `studio.yaml`보다 우선), 팀과 공유하려면 패널이 보여 주는 줄을 사람이 커밋합니다.
+- 스튜디오는 `studio.yaml`을 고치지 않습니다. 세션 단위로 URL을 저장하던 "디자인" 패널은 웹 화면과 함께 지워졌으므로, 팀과 공유하든 안 하든 `studio.yaml`의 `design.figma.fileUrl` 줄을 직접 적습니다.
 - `.fig` 파일은 Figma에 한 번 Import해야 파일 키가 생깁니다.
 - 토큰 발급 방법과 운영 주의는 [운영 문서](operations.md)의 "Figma 연동"을 보세요.
 
