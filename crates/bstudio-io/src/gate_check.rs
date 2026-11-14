@@ -26,6 +26,7 @@ use bstudio_guard::js;
 use bstudio_guard::js_json::{self, JsValue};
 use bstudio_guard::verify_judge;
 
+use crate::gate_declared;
 use crate::verify_io::{self, call, call_done, input_error, req, s, string_list, strings, Answer, Fail, Res};
 
 pub use crate::checkpoint_remote::Hook;
@@ -101,7 +102,7 @@ fn checks_of(value: Option<&JsValue>) -> Res<Vec<JsValue>> {
 }
 
 /// 옛 코드가 napi 경계(`encodeNative` → Rust)에서 글자를 바꾸던 꼴: 짝 없는 서로게이트는 U+FFFD, 예약 글자는 원래 글자
-fn lossy(value: &JsValue) -> JsValue {
+pub(crate) fn lossy(value: &JsValue) -> JsValue {
     match value {
         JsValue::Str(text) => JsValue::Str(js::well_formed_from_encoded(text)),
         JsValue::Arr(items) => JsValue::Arr(items.iter().map(lossy).collect()),
@@ -430,13 +431,10 @@ async fn check(g: &Gate) -> Res<JsValue> {
             g.set_state(vec![("skippedStages", strings(&skipped))]).await?;
             g.workflow_checks(&record).await?;
         } else {
-            let answer = call_done(hook, req("runDeclared", vec![])).await?;
-            let mut declared_checks = checks_of(answer.prop("checks"))?;
-            let load_failure = match answer.prop("loadPlatformFailure") {
-                Some(JsValue::Str(text)) if !text.is_empty() => Some(text.clone()),
-                Some(JsValue::Str(_)) | Some(JsValue::Null) | None => None,
-                Some(_) => return Err(Fail::Hook),
-            };
+            // 선언한 검사 실행은 이 크레이트 안에서 한다(`gate_declared`, ADR-195 4f A5b-2). 화면 확인·sandbox·HTTP 요청만 콜백이다
+            let declared = gate_declared::run(hook).await?;
+            let mut declared_checks = declared.checks;
+            let load_failure = declared.load_failure;
             g.throw_if_aborted().await?;
             // 선언한 검사(테스트)를 돌리는 동안 평가 자산·도구 밖 파일이 바뀌었을 수 있다. 검사 뒤에 다시 견주고, 다르면 실패로 바꾼다(TOCTOU)
             record = g.checks_from("recheckEvaluationAssets", vec![("recordChecks", JsValue::Arr(record))]).await?;
@@ -567,6 +565,11 @@ mod tests {
         })
     }
 
+    /// 선언한 검사 실행의 첫 콜백 응답. `skipped`는 결과에 그대로 얹히는 check 목록(건너뛴 자동 페이지 자리)이라, 시험이 검사 결과를 끼워 넣는 데 쓴다
+    fn begin(skipped: &str) -> String {
+        format!(r#"{{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[],"autoNames":[],"autoSkipped":[{skipped}]}}"#)
+    }
+
     fn normal(op: &str, request: &JsValue) -> Option<String> {
         Some(
             match op {
@@ -578,7 +581,8 @@ mod tests {
                 "emit" | "setState" | "markVersion" | "throwIfAborted" | "retrySleep" => r#"{"ok":true}"#.to_owned(),
                 "strayProcesses" => r#"{"ok":true,"unsupported":true}"#.to_owned(),
                 "verifyBegin" => r#"{"ok":true,"input":{"root":"/nonexistent-root","files":["api/a.java"],"offServices":null,"managed":[{"name":"api","hasContract":true}],"specFile":"studio.yaml","composeChanged":false,"hasEnsureInfra":false}}"#.to_owned(),
-                "runDeclared" => r#"{"ok":true,"checks":[],"loadPlatformFailure":null}"#.to_owned(),
+                "declaredBegin" => begin(""),
+                "declaredPageData" => r#"{"ok":true,"items":[]}"#.to_owned(),
                 "recheckEvaluationAssets" | "recheckOutsideChanges" => js_json::to_native(&obj(vec![("ok", Some(JsValue::Bool(true))), ("checks", request.prop("recordChecks").cloned())])),
                 "missingStages" => r#"{"ok":true,"missing":[]}"#.to_owned(),
                 "servicesForFiles" => r#"{"ok":true,"services":["api"],"unmatched":[]}"#.to_owned(),
@@ -650,7 +654,7 @@ mod tests {
         let gate_ops: Vec<&str> = log.ops.iter().map(String::as_str).filter(|op| !matches!(*op, "emit" | "setState")).collect();
         assert_eq!(
             gate_ops,
-            ["outsideSync", "reviewDeclared", "requirementRecords", "evaluationAssets", "changedCount", "filesToVerify", "markVersion", "strayProcesses", "verifyBegin", "servicesForFiles", "syncSystemPackages", "sync", "restart", "contract", "throwIfAborted", "runDeclared", "throwIfAborted", "recheckEvaluationAssets", "recheckOutsideChanges", "reviewChecks", "missingStages"]
+            ["outsideSync", "reviewDeclared", "requirementRecords", "evaluationAssets", "changedCount", "filesToVerify", "markVersion", "strayProcesses", "verifyBegin", "servicesForFiles", "syncSystemPackages", "sync", "restart", "contract", "throwIfAborted", "declaredBegin", "throwIfAborted", "recheckEvaluationAssets", "recheckOutsideChanges", "reviewChecks", "missingStages"]
         );
         assert_eq!(event_types(&log), ["stage", "verify_start", "stage", "verify_result", "stage", "gate_done"]);
         let more = log.events[3].prop("moreChecks");
@@ -723,7 +727,7 @@ mod tests {
     fn 선언한_검사가_실패하면_실패를_앞에_쓰고_서비스_확인_통과를_참고로_붙인다() {
         let failing = check_json("test", "unit", false, Some("종료 코드 1"));
         let log = fresh();
-        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{failing}],"loadPlatformFailure":null}}"#)))));
+        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(&failing)))));
         let result = run_sync(&input(&[]), hook);
         assert_eq!(kind(&result), "retry");
         let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
@@ -753,7 +757,7 @@ mod tests {
         let hook = scripted(
             log.clone(),
             Box::new(|op, _| match op {
-                "runDeclared" => Some(Some(format!(r#"{{"ok":true,"checks":[{}],"loadPlatformFailure":null}}"#, check_json("test", "unit", true, None)))),
+                "declaredBegin" => Some(Some(begin(&check_json("test", "unit", true, None)))),
                 _ => None,
             }),
         );
@@ -769,7 +773,7 @@ mod tests {
     fn 단계의_검사_중_하나라도_실패하면_그_단계를_통과로_세지_않는다() {
         let log = fresh();
         let checks = format!("{},{}", check_json("test", "a", true, None), check_json("test", "b", false, Some("실패")));
-        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{checks}],"loadPlatformFailure":null}}"#)))));
+        let hook = scripted(log.clone(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(&checks)))));
         let result = run_sync(&input(&[]), hook);
         assert_eq!(kind(&result), "retry");
         let log = log.lock().unwrap();
@@ -785,7 +789,7 @@ mod tests {
         let result = run_sync(&input(&[("light", "true")]), hook);
         assert_eq!(kind(&result), "pass");
         let log = log.lock().unwrap();
-        for op in ["runDeclared", "reviewChecks", "recheckEvaluationAssets"] {
+        for op in ["declaredBegin", "reviewChecks", "recheckEvaluationAssets"] {
             assert!(!log.ops.contains(&op.to_owned()), "{op}");
         }
         assert!(log.states.iter().any(|state| state.prop("skippedStages") == Some(&JsValue::Arr(vec![s("test")]))));
@@ -821,7 +825,7 @@ mod tests {
         assert!(!log.states.iter().any(|state| state.prop("attempts").is_some()));
         assert!(log.states.iter().any(|state| state.prop("platformFailure") == Some(&s("반영 안 됨"))));
         assert_eq!(event_types(&log), ["stage", "verify_start", "stage", "verify_result"]);
-        assert!(!log.ops.contains(&"runDeclared".to_owned()));
+        assert!(!log.ops.contains(&"declaredBegin".to_owned()));
     }
 
     #[test]
@@ -838,9 +842,19 @@ mod tests {
     #[test]
     fn 부하_확인을_재지_못하면_gate_done_false_뒤_멈추고_리뷰를_돌리지_않는다() {
         let log = fresh();
-        let hook = scripted(log.clone(), Box::new(|op, _| (op == "runDeclared").then(|| Some(r#"{"ok":true,"checks":[],"loadPlatformFailure":"러너 실패"}"#.to_owned()))));
+        let hook = scripted(
+            log.clone(),
+            Box::new(|op, _| match op {
+                "declaredBegin" => Some(Some(r#"{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[{"name":"orders-p95"}],"autoNames":[],"autoSkipped":[]}"#.to_owned())),
+                "declaredLoadSupported" => Some(Some(r#"{"ok":true,"supported":false}"#.to_owned())),
+                _ => None,
+            }),
+        );
         let result = run_sync(&input(&[]), hook);
-        assert_eq!(result.prop("value").and_then(|v| v.prop("summary")).and_then(JsValue::as_str), Some("b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 러너 실패"));
+        assert_eq!(
+            result.prop("value").and_then(|v| v.prop("summary")).and_then(JsValue::as_str),
+            Some("b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 부하 확인 'orders-p95': 이 샌드박스 제공자는 부하 확인(workflow.loadChecks)을 지원하지 않습니다. 로컬 Docker 제공자에서만 잴 수 있습니다")
+        );
         let log = log.lock().unwrap();
         assert!(!log.ops.contains(&"reviewChecks".to_owned()));
         assert_eq!(log.events.last().unwrap().prop("ok"), Some(&JsValue::Bool(false)));
@@ -948,7 +962,7 @@ mod tests {
     #[test]
     fn 검사의_ok가_불리언이_아니면_통과로_세지_않고_알아볼_수_없는_응답이다() {
         for bad in [r#"{"stage":"test","name":"x","ok":"true","attempts":1}"#, r#"{"stage":"test","name":"x","attempts":1}"#, r#"{"stage":"test","ok":true}"#, r#"[]"#] {
-            let hook = scripted(fresh(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{bad}],"loadPlatformFailure":null}}"#)))));
+            let hook = scripted(fresh(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(bad)))));
             let result = run_sync(&input(&[]), hook);
             assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"), "{bad}");
         }
@@ -962,7 +976,7 @@ mod tests {
         assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"));
         let log = log.lock().unwrap();
         assert_eq!(event_types(&log), ["stage", "verify_start"]);
-        assert!(!log.ops.contains(&"runDeclared".to_owned()));
+        assert!(!log.ops.contains(&"declaredBegin".to_owned()));
         assert!(!log.states.iter().any(|state| state.prop("report").is_some()));
     }
 
@@ -987,7 +1001,7 @@ mod tests {
         let result = run_sync(&input(&[]), hook);
         assert_eq!(result.prop("kind").and_then(JsValue::as_str), Some("hook"));
         let log = log.lock().unwrap();
-        assert!(log.ops.contains(&"runDeclared".to_owned()));
+        assert!(log.ops.contains(&"declaredBegin".to_owned()));
         for op in ["recheckEvaluationAssets", "recheckOutsideChanges", "reviewChecks"] {
             assert!(!log.ops.contains(&op.to_owned()), "{op}");
         }
@@ -1010,7 +1024,7 @@ mod tests {
         // TS가 보낸 인코딩 글자(짝 없는 서로게이트 U+D800 → U+E010 + 니블)가 옛 napi 경계처럼 U+FFFD가 된다
         let encoded = "x\u{E010}\u{E00D}\u{E008}\u{E000}y";
         let failing = check_json("test", "unit", false, Some(encoded));
-        let hook = scripted(fresh(), Box::new(move |op, _| (op == "runDeclared").then(|| Some(format!(r#"{{"ok":true,"checks":[{failing}],"loadPlatformFailure":null}}"#)))));
+        let hook = scripted(fresh(), Box::new(move |op, _| (op == "declaredBegin").then(|| Some(begin(&failing)))));
         let result = run_sync(&input(&[]), hook);
         let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
         assert!(feedback.contains("x\u{FFFD}y"), "{feedback}");

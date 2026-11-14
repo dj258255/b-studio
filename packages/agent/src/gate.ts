@@ -2,21 +2,18 @@ import { createHash } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { lstat, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
-import { decodeNative, encodeLoneSurrogates, encodeNative, formatBytes, native, SandboxError, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage, type WorkflowTest } from '@b-studio/spec';
+import { decodeNative, encodeLoneSurrogates, encodeNative, native, type Sandbox, type StartOptions } from '@b-studio/sandbox';
+import { loadProject, SAFE_SEGMENT, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage } from '@b-studio/spec';
 import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
-import { browserPageEvidence, finishEvidence, httpPageEvidence, testEvidence, type PageEvidenceContext } from './check-evidence';
+import { browserPageEvidence, finishEvidence, httpPageEvidence, type PageEvidenceContext } from './check-evidence';
 import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, weakenedDeclarations, withDeclaredChecks } from './declared-checks';
-import { judgeLoad, loadRequestFor } from './load-check';
 import type { AgentEvent } from './loop';
 import { collectImportGraph, DEFAULT_IMPORT_GRAPH_LIMITS, DEFAULT_TRACE_DEPTH, isGraphSourceFile, isPageFileInService, tracePages, type PageCandidate } from './import-graph';
 import { findStaticShadows, StaticShadowUnknownError } from './next-static-shadow';
 import { DEFAULT_DYNAMIC_ROUTE_FALLBACK, routesFromCandidates, routesFromChangedFiles, type NextRoute, type NextRoutes } from './next-routes';
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
-import { runTaskGraph, type TaskNode } from './task-graph';
-import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { GATE_HOST, runGateCheck, type GateHost } from './gate-check';
 import { captureBaselines, serviceUrl, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
@@ -68,11 +65,13 @@ export type PageFetcher = (url: string, signal?: AbortSignal) => Promise<{ statu
 const PAGE_TIMEOUT_MS = 30_000;
 /** 샌드박스·도커 쪽 실패 뒤 한 번 다시 해 보기 전에 기다리는 시간 */
 const PLATFORM_RETRY_DELAY_MS = 1_500;
-const TEST_TIMEOUT_MS = 10 * 60_000;
+/** 테스트 하나가 기다릴 시간. 시간 상한은 선언한 검사 실행의 `declaredExec` 콜백(`gate-check.ts`)이 이 값으로 신호를 연다 */
+export const TEST_TIMEOUT_MS = 10 * 60_000;
 /** 동시 요청 확인에서 요청 하나가 기다릴 시간 */
 const REQUEST_TIMEOUT_MS = 15_000;
-const CHECK_CONCURRENCY = 2;
-const OUTPUT_TAIL_LINES = 30;
+/** 같은 값이 Rust(`gate_declared.rs`의 `CHECK_CONCURRENCY`·`OUTPUT_TAIL_LINES`)에 있다. 이 TS 쪽은 옛 구현(`declared-legacy.ts`)이 쓴다 */
+export const CHECK_CONCURRENCY = 2;
+export const OUTPUT_TAIL_LINES = 30;
 /** 평가 자산 지문이 담을 수 있는 파일 수 상한. 넘으면 실패하고 선언을 좁히라고 알린다 */
 const MAX_EVALUATION_ASSET_FILES = 2_000;
 /** 평가 자산이 바뀌었을 때 사유에 나열할 파일 수 상한 */
@@ -118,7 +117,7 @@ export type ServiceRequest = (
   init: { method: string; headers?: Record<string, string>; body?: string; signal?: AbortSignal },
 ) => Promise<{ status: number; text: string }>;
 
-const requestService: ServiceRequest = async (url, init) => {
+export const requestService: ServiceRequest = async (url, init) => {
   const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
   const response = await fetch(url, {
     method: init.method,
@@ -237,10 +236,6 @@ export class VerificationGate {
   #pageLoadMs = new Map<string, number>();
   /** 화면 확인 이름 → 게이트를 막지 않는 참고 문구(ADR-078). HTTP 모드의 로딩 문구 경고처럼, 확정할 수 없지만 알려 둘 만한 것을 담는다 */
   #pageWarnings = new Map<string, string[]>();
-  /** 동시 요청 확인 이름 → 통과했을 때의 요약(성공 건수·상태 분포·then 값) */
-  #concurrencyNotes = new Map<string, string>();
-  /** 부하 확인을 b-studio 쪽 문제(러너를 띄우지 못함 등)로 재지 못했을 때의 사유. 코드를 고쳐서 풀 수 없으므로 재시도 횟수로 세지 않는다 */
-  #loadPlatformFailure: string | undefined;
   /** 이번 검증에 쓰는 프로젝트. 보통은 실행을 시작할 때의 것이고, 사용자가 선언 변경을 허용한 요청에서만 확인 선언이 지금 파일의 것으로 바뀐다 */
   #project: LoadedProject;
   /** 이번 실행에서 확인 선언이 바뀌었지만 허용되지 않아 쓰지 않은 변경의 요약. 실패 안내에 싣는다 */
@@ -419,6 +414,7 @@ export class VerificationGate {
    * check의 순서·분기·결과 조립은 Rust(`crates/bstudio-io/src/gate_check.rs`, ADR-195 4f A5b-1)가 한다: 기록 검사 모으기 → 바뀐 파일 0개 분기 → `run` 단계 → 남은 프로세스(#765) → 서비스 확인(플랫폼
    * 실패면 한 번 더) → `contract_check` 단계 → `verify_result` → 새 부가 서비스 경고 → 플랫폼 실패 `exhausted` → `light` 분기 또는 선언 검사 → 다시 견줌(TOCTOU) → 부하 플랫폼 실패 → 리뷰 → 단계별 통과 집계 →
    * 최종 판정과 `gate_done`(#1155) → 실패 안내(`#failure`) 글. 서비스 안 남은 프로세스 조회의 글 모양과 "확인하지 못하면 managed 전부 다시 띄우기"(#strayServices)도 Rust다.
+   * 선언한 검사 실행(이름 짓기·작업 그래프·테스트·동시 요청·부하·결과 조립)도 Rust(`gate_declared.rs`, ADR-195 4f A5b-2)다. 화면 확인(`#autoPages`·`#checkPage`)과 sandbox·HTTP 요청만 `GateHost.declared`로 부른다.
    * 여기는 Rust가 부르는 하위 단계(`GateHost`)를 이 객체의 필드·메서드에 잇는다. 상태 필드는 옛 코드가 바꾸던 자리마다 Rust가 알려 준다.
    */
   #check(): Promise<GateOutcome> {
@@ -499,9 +495,6 @@ export class VerificationGate {
         get unadoptedChange() {
           return gate.#unadoptedChange;
         },
-        get loadPlatformFailure() {
-          return gate.#loadPlatformFailure;
-        },
       },
       verifyOptions: (files, alsoRestart) => ({
         sandbox,
@@ -522,7 +515,20 @@ export class VerificationGate {
       markVerifiedVersion: () => {
         this.#verifiedVersion = workspace.version;
       },
-      runDeclaredChecks: () => this.#runDeclaredChecks(),
+      declared: {
+        sandbox,
+        signal,
+        onEvent,
+        get project() {
+          return gate.#project;
+        },
+        get requestService() {
+          return gate.#options.requestService ?? requestService;
+        },
+        autoPages: (declared) => this.#autoPages(declared),
+        checkPage: (page, name, pageSignal, options) => this.#checkPage(page, name, pageSignal, options),
+        pageMaps: { steps: this.#pageSteps, compares: this.#pageCompares, blocked: this.#pageBlocked, loadMs: this.#pageLoadMs, warnings: this.#pageWarnings },
+      },
       recheckEvaluationAssets: (recordChecks) => this.#recheckEvaluationAssets(recordChecks),
       recheckOutsideChanges: (recordChecks) => this.#recheckOutsideChanges(recordChecks),
       reviewChecks: () => {
@@ -632,136 +638,6 @@ export class VerificationGate {
 
   #stage(stage: WorkflowStage): void {
     this.#options.onEvent({ type: 'stage', stage, source: 'platform' });
-  }
-
-  /** studio.yaml에 선언한 화면 확인·테스트·동시 요청 확인은 서로 기다릴 이유가 없으므로 작업 그래프로 동시에 돌린다 */
-  async #runDeclaredChecks(): Promise<WorkflowCheck[]> {
-    const workflow = this.#project.spec.workflow;
-    const pages = workflow?.pageChecks ?? [];
-    const tests = workflow?.tests ?? [];
-    const concurrency = workflow?.concurrencyChecks ?? [];
-    const loads = workflow?.loadChecks ?? [];
-    // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
-    const auto = await this.#autoPages(pages);
-    this.#loadPlatformFailure = undefined;
-    if (pages.length === 0 && tests.length === 0 && concurrency.length === 0 && loads.length === 0 && auto.pages.length === 0 && auto.skipped.length === 0) return [];
-
-    const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
-    // 각 확인은 통과하면 무엇을 쟀는지(근거)를 돌려준다. 이름으로 모으지 않는다 — 이름이 같은 확인끼리 근거가 바뀌어 붙지 않게 한다
-    const nodes: TaskNode<string[] | void>[] = [];
-    this.#pageSteps.clear();
-    this.#pageCompares.clear();
-    this.#pageBlocked.clear();
-    this.#pageLoadMs.clear();
-    this.#pageWarnings.clear();
-    this.#concurrencyNotes.clear();
-    // 같은 화면을 다른 기대값·다른 단계로 두 번 확인하면 이름이 같아진다. 이름은 작업 id이자 스크린샷·경고·비교 결과를 모으는 열쇠라
-    // 겹치면 게이트가 던지거나 두 확인의 결과가 섞인다(트러블슈팅 120). 둘째부터 번호를 붙여 구별한다
-    const seen = new Map<string, number>();
-    const unique = (name: string): string => {
-      const count = (seen.get(name) ?? 0) + 1;
-      seen.set(name, count);
-      return count === 1 ? name : `${name} #${count}`;
-    };
-    for (const page of pages) {
-      const browser = page.viewport ? `browser ${page.viewport.width}x${page.viewport.height}` : 'browser';
-      const steps = page.steps?.length ? `, 단계 ${page.steps.length}개` : '';
-      const name = unique(`${page.service} ${page.path}${page.mode === 'browser' ? ` (${browser}${steps})` : ''}`);
-      meta.push({ stage: 'browser_check', name });
-      nodes.push({ id: `page:${name}`, run: ({ signal }) => this.#checkPage(page, name, signal) });
-    }
-    for (const entry of auto.pages) {
-      const name = unique(entry.name);
-      meta.push({ stage: 'browser_check', name });
-      // 자동 페이지는 같은 #checkPage로 돌리되 오류 화면 표지까지 본다. 추정한 id로 연 동적 경로는 probedId를 함께 넘겨 관대하게 판정한다
-      nodes.push({
-        id: `page:${name}`,
-        run: ({ signal }) =>
-          this.#checkPage(entry.page, name, signal, { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) }),
-      });
-    }
-    for (const test of tests) {
-      meta.push({ stage: 'test', name: test.name });
-      nodes.push({ id: `test:${test.name}`, maxAttempts: test.maxAttempts, run: ({ signal }) => this.#runTest(test, signal) });
-    }
-    for (const check of concurrency) {
-      meta.push({ stage: 'concurrency_check', name: check.name });
-      nodes.push({ id: `concurrency:${check.name}`, run: ({ signal }) => this.#runConcurrencyCheck(check, check.name, signal) });
-    }
-    // 건너뛴 자동 페이지만 있는 경우(상한 초과 등)에는 browser_check를 돌았다고 세지 않는다
-    if (pages.length > 0 || auto.pages.length > 0) this.#stage('browser_check');
-    if (tests.length > 0) this.#stage('test');
-    if (concurrency.length > 0) this.#stage('concurrency_check');
-
-    if (tests.length > 0) await this.#clearTestReports(tests);
-    const results = await runTaskGraph(nodes, { concurrency: CHECK_CONCURRENCY, signal: this.#options.signal });
-    const checks = results.map((result, index) => {
-      const entry = meta[index]!;
-      const steps = this.#pageSteps.get(entry.name);
-      const compare = this.#pageCompares.get(entry.name);
-      const loadMs = this.#pageLoadMs.get(entry.name);
-      // 동시 요청 확인은 통과해도 결과 요약을 남긴다(성공 건수·상태 분포·then 값)
-      const note = this.#concurrencyNotes.get(entry.name);
-      // 실패 사유에 막은 요청 수를 한 줄 덧붙인다. 통과해도 남겨 QA 보기에서 볼 수 있게 한다
-      const blocked = this.#pageBlocked.get(entry.name) ?? [];
-      // 게이트를 막지 않는 참고 문구(HTTP 모드의 로딩 문구 경고 등). 통과해도 남긴다
-      const warnings = this.#pageWarnings.get(entry.name) ?? [];
-      const detail = [result.error, note, blocked.length > 0 ? `다른 출처 요청 ${blocked.length}건을 막았습니다` : undefined, ...warnings]
-        .filter((line) => line !== undefined)
-        .join('\n');
-      const ok = result.status === 'succeeded';
-      // 근거는 통과한 확인에만 붙인다. 실패하면 사유(detail)가 그 자리를 맡는다
-      const evidence = ok && result.value ? result.value : undefined;
-      return {
-        ...entry,
-        ok,
-        attempts: result.attempts,
-        detail: detail || undefined,
-        ...(evidence?.length ? { evidence } : {}),
-        ...(steps ? { steps } : {}),
-        ...(compare ? { compare } : {}),
-        ...(loadMs !== undefined ? { metrics: { loadMs } } : {}),
-      };
-    });
-    // 부하 확인은 다른 확인이 모두 끝난 뒤에 하나씩 돌린다. 화면 확인·테스트와 함께 돌리면 서로의 부하가 응답 시간에 섞인다
-    const loadChecks = await this.#runLoadChecks(loads);
-    // 건너뛴 라우트도 check로 남긴다(ok). 조용히 사라지면 "확인했다"처럼 보인다
-    return [...checks, ...loadChecks, ...auto.skipped];
-  }
-
-  /**
-   * 샌드박스 네트워크 안의 러너로 응답 시간을 재고 선언한 기준과 비교한다(ADR-163).
-   * 한 번의 실패를 재시도로 덮지 않는다 — 다시 재서 통과한 값을 고르면 느린 순간이 숨는다.
-   * 재지 못한 확인은 통과로 세지 않는다. 제공자가 지원하지 않거나 러너를 띄우지 못한 것은 b-studio 쪽 문제로 따로 알린다
-   */
-  async #runLoadChecks(loads: readonly WorkflowLoadCheck[]): Promise<WorkflowCheck[]> {
-    if (loads.length === 0) return [];
-    this.#stage('load_check');
-    const { sandbox, signal } = this.#options;
-    const redact = (line: string) => sandbox.redact(line);
-    const checks: WorkflowCheck[] = [];
-    for (const check of loads) {
-      signal?.throwIfAborted();
-      const entry = { stage: 'load_check' as const, name: check.name, attempts: 1 };
-      if (!sandbox.runLoad) {
-        const detail = '이 샌드박스 제공자는 부하 확인(workflow.loadChecks)을 지원하지 않습니다. 로컬 Docker 제공자에서만 잴 수 있습니다';
-        this.#loadPlatformFailure ??= `부하 확인 '${check.name}': ${detail}`;
-        checks.push({ ...entry, ok: false, detail });
-        continue;
-      }
-      try {
-        const judged = judgeLoad(check, await sandbox.runLoad(loadRequestFor(check), { signal }));
-        const ok = judged.problems.length === 0;
-        const evidence = ok ? evidenceOrNone(() => finishEvidence(judged.evidence, redact)) : [];
-        checks.push({ ...entry, ok, detail: redact([judged.note, ...judged.problems].join('\n')), ...(evidence.length ? { evidence } : {}) });
-      } catch (error) {
-        signal?.throwIfAborted();
-        const detail = redact(error instanceof Error ? error.message : String(error));
-        if (error instanceof SandboxError && error.platform) this.#loadPlatformFailure ??= `부하 확인 '${check.name}': ${detail}`;
-        checks.push({ ...entry, ok: false, detail });
-      }
-    }
-    return checks;
   }
 
   /**
@@ -1269,109 +1145,6 @@ export class VerificationGate {
   }
 
   /**
-   * 게이트가 끝나면 studio가 테스트를 통과시킨 서비스의 고정 경로에서 보고서를 모아 새 체크포인트의 근거로 남긴다(collectGateTestReports).
-   * 그 자리에 테스트 탭이 예전에 남긴 보고서나 에이전트가 만든 파일이 있으면 이번 게이트의 결과처럼 모이므로, 테스트를 돌리기 전에
-   * 서비스마다 한 번 비운다(#756). 지우지 못해도 테스트는 돌린다 — 테스트 판정은 종료 코드로 하고, 보고서는 근거로만 쓴다
-   */
-  async #clearTestReports(tests: readonly WorkflowTest[]): Promise<void> {
-    const services = new Set(tests.map((test) => test.service));
-    await Promise.all(
-      [...services].map(async (service) => {
-        const spec = this.#project.managed.find(([name]) => name === service)?.[1];
-        if (!spec) return;
-        await this.#options.sandbox
-          .exec(service, clearTestReportsCommand(reportRootsForIncludes(spec.includes)), this.#options.signal ? { signal: this.#options.signal } : {})
-          .catch(() => {});
-      }),
-    );
-  }
-
-  async #runTest(test: WorkflowTest, signal: AbortSignal): Promise<string[]> {
-    const timeout = AbortSignal.timeout(TEST_TIMEOUT_MS);
-    const startedAt = performance.now();
-    // exec는 기본으로 출력의 시크릿 값을 가려서 돌려준다. 실패 출력이 모델에게 그대로 들어가므로 가린 결과만 쓴다
-    const result = await this.#options.sandbox.exec(test.service, test.command, { signal: AbortSignal.any([signal, timeout]) });
-    if (result.exitCode !== 0) {
-      const revived = await this.#reviveIfOomKilled(test.service, signal);
-      const output = `${result.stdout}\n${result.stderr}`.trim().split('\n').slice(-OUTPUT_TAIL_LINES).join('\n');
-      throw new Error(`종료 코드 ${result.exitCode}${revived ? `\n환경 문제: ${test.service} 컨테이너가 ${revived} 종료됐습니다. 코드 문제가 아닐 수 있습니다 — 서비스를 다시 띄웠습니다(다음 시도에서 이어집니다)` : ''}\n${output}`);
-    }
-    return evidenceOrNone(() => finishEvidence(testEvidence(test.service, test.command, performance.now() - startedAt), (line) => this.#options.sandbox.redact(line)));
-  }
-
-  /**
-   * test 단계 exec가 실패했을 때, 테스트 JVM이 코드 문제가 아니라 메모리 한도를 넘어 컨테이너째로
-   * 죽은 것인지 본다(트러블슈팅 116). 맞으면 다음 시도(workflow.tests의 maxAttempts)가 죽은 컨테이너에
-   * 또 부딪히지 않도록 여기서 미리 되살린다 — restartOnce(verify.ts)가 서비스 재시작 실패를 다루는 것과
-   * 같은 신호(stats().oomKilled)를 쓴다. 되살리기 자체가 실패해도(이미 한 번 죽은 컨테이너라 더 불안정할
-   * 수 있다) 원래 실패를 가리지 않도록 삼킨다 — 다음 시도가 어차피 그 실패를 다시 드러낸다
-   */
-  async #reviveIfOomKilled(service: string, signal: AbortSignal): Promise<string | undefined> {
-    const { sandbox } = this.#options;
-    const usage = (await sandbox.stats().catch(() => [])).find((candidate) => candidate.service === service);
-    if (!usage?.oomKilled) return undefined;
-    await sandbox.restart(service, { signal }).catch(() => {});
-    return `메모리 한도${usage.memoryLimitBytes ? ` (${formatBytes(usage.memoryLimitBytes)})` : ''}를 넘어`;
-  }
-
-  /**
-   * 같은 요청을 동시에 보낸 뒤 기대한 불변식을 확인한다. **세션 서비스의 출처로만** 요청한다(화면 확인과 같은 규칙).
-   * 한 번의 실패를 재시도로 덮지 않는다 — 재시도하면 경합이 숨는다. DB 트랜잭션 격리 수준과 타이밍에 따라 결과가 흔들릴 수 있어 임계값은 넉넉히 잡는다.
-   */
-  async #runConcurrencyCheck(check: WorkflowConcurrencyCheck, name: string, signal: AbortSignal): Promise<void> {
-    const { sandbox } = this.#options;
-    const request = this.#options.requestService ?? requestService;
-    const endpoint = await sandbox.endpoint(check.service);
-    const url = new URL(check.path, endpoint.url);
-    if (url.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
-
-    const responses = await Promise.all(
-      Array.from({ length: check.concurrent }, () =>
-        request(url.href, {
-          method: check.method,
-          ...(check.headers ? { headers: check.headers } : {}),
-          ...(check.method !== 'GET' && check.body !== undefined ? { body: check.body } : {}),
-          signal,
-        }),
-      ),
-    );
-    const successCount = responses.filter((response) => response.status >= 200 && response.status < 300).length;
-    const counts = new Map<number, number>();
-    for (const response of responses) counts.set(response.status, (counts.get(response.status) ?? 0) + 1);
-    const statusDetail = [...counts.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([status, count]) => `${status}:${count}`)
-      .join(', ');
-
-    const parts = [`성공 ${successCount}/${check.concurrent} (기대: ${describeConcurrencyExpect(check.expect)})`, `상태 ${statusDetail}`];
-    const problems: string[] = [];
-    const { successCount: expectedCount, allStatusIn, then } = check.expect;
-    if (expectedCount?.exactly !== undefined && successCount !== expectedCount.exactly) {
-      problems.push(`성공 ${successCount}/${check.concurrent} (기대: 정확히 ${expectedCount.exactly})`);
-    }
-    if (expectedCount?.atMost !== undefined && successCount > expectedCount.atMost) {
-      problems.push(`성공 ${successCount}/${check.concurrent} (기대: 최대 ${expectedCount.atMost})`);
-    }
-    if (allStatusIn && !responses.every((response) => allStatusIn.includes(response.status))) {
-      const outside = [...new Set(responses.map((response) => response.status).filter((status) => !allStatusIn.includes(status)))].join(', ');
-      problems.push(`기대 밖 상태 코드: ${outside} (기대: ${allStatusIn.join(', ')})`);
-    }
-    if (then) {
-      const thenUrl = new URL(then.path, endpoint.url);
-      if (thenUrl.origin !== new URL(endpoint.url).origin) throw new Error('path must stay on the service host');
-      const response = await request(thenUrl.href, { method: 'GET', signal });
-      const actual = readJsonPath(response.text, then.jsonPath);
-      parts.push(`${then.jsonPath} = ${JSON.stringify(actual)}`);
-      if (actual !== then.equals) problems.push(`${then.jsonPath} 값이 ${JSON.stringify(actual)} (기대: ${JSON.stringify(then.equals)})`);
-    }
-
-    // 원인을 추정하지 않고 숫자만 남긴다
-    const note = parts.join(' · ');
-    if (problems.length > 0) throw new Error(sandbox.redact([note, ...problems].join('\n')));
-    this.#concurrencyNotes.set(name, note);
-  }
-
-  /**
    * 화면 확인이 요청해도 되는 출처. 세션의 모든 managed 서비스가 게이트에서 쓰는 주소(endpoint)의 출처를 모은다.
    * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 화면이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
    */
@@ -1513,7 +1286,7 @@ export function describeConcurrencyExpect(expect: ConcurrencyExpect): string {
 
 /** api에서 꺼낸 값. 화면 글자와 비교한다 */
 /** 근거는 사람이 보는 표시일 뿐이라, 만들다 실패해도 이미 내려진 통과 판정을 뒤집지 않는다(근거 없이 통과로 남는다) */
-function evidenceOrNone(build: () => string[]): string[] {
+export function evidenceOrNone(build: () => string[]): string[] {
   try {
     return build();
   } catch {
@@ -1661,7 +1434,7 @@ export function stripHtml(html: string): string {
  * 응답 JSON에서 값을 꺼낸다. `$.a.b`와 `$[0].a`, `$.items[0].qty` 정도만 지원하고 그 밖은 undefined를 돌려준다.
  * 외부 라이브러리(k6 등) 없이 결과 불변식만 보려는 최소 구현이다
  */
-function readJsonPath(text: string, jsonPath: string): unknown {
+export function readJsonPath(text: string, jsonPath: string): unknown {
   let value: unknown;
   try {
     value = JSON.parse(text);

@@ -10,6 +10,7 @@
 
 ### 바뀜
 
+- 게이트의 선언한 검사 실행(이름 짓기, 작업 그래프의 동시 실행·재시도, 테스트와 OOM 되살리기, 동시 요청 확인의 판정·출처 제한·`then` 값 읽기, 부하 확인, 결과 조립)을 Rust(`crates/bstudio-io/src/gate_declared.rs`)로 옮겼습니다(ADR-195 4f A5b-2, #1202). 화면 확인·sandbox 호출·HTTP 요청은 콜백으로 TS에 남습니다. 검사 목록·이벤트·안내 글은 그대로입니다.
 - 게이트 check의 상태 기계(기록 검사 모으기, 바뀐 파일 0개 분기, 서비스 확인과 플랫폼 실패 재시도, 선언한 검사 뒤 다시 견줌, 단계별 통과 집계, 최종 판정과 `gate_done`, 실패 안내 글, 서비스 안 남은 프로세스 처리)을 Rust로 옮겼습니다(ADR-195 4f A5b-1, #1199). 이벤트 순서와 안내 글은 그대로입니다.
 - 게이트 검증의 조율(`verifyChanges`·`restartServicesFor`·`captureBaselines`·`findSecretLeaks`: 시크릿 검사 → 반영 확인 → 서비스별 재시작과 지운 파일 재시도 → 계약 비교 → 판정)을 Rust 함수 하나(`crates/bstudio-io/src/verify_io.rs`)로 옮겼습니다(ADR-195 4f A5a, #1195). 샌드박스·프로젝트·계약 가져오기는 TS가 콜백으로 맡고, 콜백이 실패하거나 응답을 알아볼 수 없으면 통과가 아니라 오류입니다. 옛 코드와 달라진 동작은 없습니다(옛 구현을 `verify-legacy.ts`로 두고 차등 시험으로 견줬습니다).
 - 체크포인트의 원격 경로(올리기 `push`·가져오기 `integrateRemote`·`acceptRemote`·기준 브랜치 `baseStatus`·`integrateBase`·PR 대상 `pullRequestTarget`)와 작업 복사본의 Git 신뢰 확인(`assertTrustedGit`·`#assertSafeLocalGit`), 터미널이 어긋낸 기록 되돌리기(`restoreRememberedHead`·`uncommitTo`)의 git 호출 순서를 Rust 함수 하나(`crates/bstudio-io/src/checkpoint_remote.rs`)로 옮겼습니다(ADR-195 4f A2, #1193). 원격에 닿는 명령(`fetch`·`push`·`ls-remote`)은 신뢰 확인을 지나는 한 함수로만 부르고, 설정을 읽지 못하면 오류입니다. 되돌리기는 백업이 끝난 뒤에만 `checkout`·`reset`·`clean`을 부릅니다. 옛 코드와 달라진 것: 터미널 기록 되돌리기도 `git add -A` 앞에서 저장소 설정(clean 필터 등)을 확인합니다, 읽지 못하는 `baseFetchedAt`은 오래된 것으로 보고 새로 가져옵니다(트러블슈팅 195). DB 분기(`database-branches.ts`)는 옮기지 않았습니다(ADR-195 덧붙임).

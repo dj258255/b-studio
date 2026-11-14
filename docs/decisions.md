@@ -10427,6 +10427,19 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 실측(2026-11-14, [기록](experiments/2026-11-14-a5b1-gate-check.md)): 실제 Claude Code 세션 하나에서 통과(`Workflow-Passed: run, contract_check, test, review`), 바뀐 파일 0개(검증 없이 지나감, 체크포인트 그대로), 계약 실패 세 번 뒤 소진·되돌리기를 봤다. 나머지 분기는 차등 시험으로만.
 - 돌리지 않은 검증: 다른 러너·Kubernetes 제공자.
 
+### 덧붙임: A5b-2 결과 — 게이트의 선언한 검사 실행(`#runDeclaredChecks` 아래)을 Rust로 (2026-11-14, [#1202](https://github.com/dj258255/b-studio/issues/1202))
+
+- 옮긴 것(`crates/bstudio-io/src/gate_declared.rs`, `gate_check.rs`가 `runDeclared` 콜백 대신 `gate_declared::run`을 부른다): 이름 짓기(같은 이름 둘째부터 ` #2`, 트러블슈팅 120)·화면 확인 이름 글·단계 이벤트(`browser_check`는 선언 페이지나 자동 페이지가 있을 때만)·보고서 비우기·**작업 그래프 실행**(`runTaskGraph`와 같은 동작: 동시 2, `maxAttempts` 재시도, 의존 실패 건너뛰기, 결과는 노드 순서, `executeNode`가 `run`의 예외를 취소로 난 것까지 `failed`로 돌려주고 바깥 반복 맨 앞 `throwIfAborted`에서만 던지며 마지막 작업이 끝나면 던지지 않음)·테스트(출력 꼬리 30줄, OOM 되살리기, 근거)·동시 요청(판정·글·`readJsonPath`·`then.equals` 비교)·부하 확인(하나씩, 재지 못하면 통과가 아님, 플랫폼 실패 기록)·결과 조립(`detail`·`evidence`는 통과한 것에만·`steps`·`compare`·`metrics.loadMs`). TS `runTaskGraph`와 `task-plans.ts`는 그대로다.
+- **콜백 경계(결정).** TS에 남긴 것: 선언 읽기와 자동 페이지 계산(`declaredBegin`), 화면 확인 본체(`declaredCheckPage`, 부산물 맵은 `declaredPageData`로 읽음), sandbox `exec`·`stats`·`restart`·`endpoint`·`runLoad`·`redact`, HTTP 요청, 취소 확인, 보고서 비우기의 서비스·명령 계산(`declaredClearReports`). 콜백 이름은 서비스 확인(`verify.ts`)의 처리기와 겹치지 않게 모두 `declared`로 시작한다(처음에 `restart`·`stats`·`endpoint`가 서비스 확인 처리기를 가려 기존 시험이 깨졌다). 이미 네이티브였던 판정은 Rust에서 바로 부른다: `judge_load`·`load_request_for`·`test_evidence`·`describe_concurrency_expect`·`format_bytes`·작업 그래프 꼴 판정(`task_graph::validate`)·`finish_evidence`(줄 수·길이 묶기를 `cap_evidence_lines`·`clamp_evidence_line`으로 쪼개 줄마다 `redact` 콜백을 사이에 끼움). `readJsonPath`는 새로 Rust(`gate_helpers::read_json_path`)로 옮겼고 화면 확인의 `expectFromApi`가 쓰는 TS `readJsonPath`는 남았다.
+- **URL 해석(출처 제한).** Rust에서 URL을 풀지 않는다. TS 콜백 `declaredResolveUrl`이 옛 코드와 같은 `new URL(path, endpoint.url)`로 `{ href, sameOrigin }`을 함께 돌려주고, Rust는 `sameOrigin`이 거짓이면 요청하지 않고 참이면 **그 `href` 그대로** 요청한다. 확인하는 해석과 요청하는 해석이 같은 값에서 나온다. 차등 시험이 역슬래시·`//host`·탭·퍼센트 인코딩·IPv6·기본 포트·`user@host`가 든 경로를 옛 코드와 견준다.
+- **시간 상한.** `TEST_TIMEOUT_MS` 신호는 `declaredExec` 콜백이 연다(취소 신호와 합침). 시작 시각(근거의 걸린 시간)은 Rust가 콜백을 부르는 때다.
+- **fail-closed.** 콜백이 응답하지 않거나 알아볼 수 없으면(종료 코드·상태 코드가 수가 아님, 근거가 글 목록이 아님, 계획 모양 어긋남) `Fail::Hook`이고, `{ok:false}`는 그 노드의 실패로 `failed`+재시도, `{fatal:true}`(TS가 저장한 오류: 취소·`TaskGraphError`·이벤트 처리기 오류)는 검사 전체의 중단이다. 삼키는 자리는 옛 코드의 셋뿐이다(보고서 비우기, OOM 되살리기의 `stats`·`restart`, 근거 만들기 실패 → 근거 없이 통과).
+- **옛 코드와 다르게 한 것**: ① 응답 JSON이 `js_json`이 읽는 깊이(2000)를 넘으면 `then` 값을 읽지 못한 것으로 보고 실패다(JS는 읽는다. 통과로 열리지 않는 쪽). ② 동시 요청의 상태 코드가 수가 아니면 `Fail::Hook`(옛 코드는 형 변환으로 견줌). ③ 노드 둘 이상이 동시에 도는 동안 각자 부르는 콜백이 끼어드는 순서는 같지 않을 수 있다(시작 순서만 같다. 스레드를 건너오는 시간 때문. 가짜 sandbox가 마이크로태스크로 곧장 답하면 옛 코드는 호출이 노드끼리 번갈아 나가고 새 코드는 노드 하나가 먼저 끝까지 간다). ④ 이 조각에서 옛 결함은 찾지 못했다. 옛 코드의 이름 겹침 모양(테스트·동시 요청·화면 이름이 같으면 요약·부산물이 이름으로 섞임)은 판정에 영향이 없어 그대로 두고 차등 시험이 고정한다.
+- **차등 시험**(`packages/agent/src/declared-checks-differential.test.ts`, 65개)과 Rust 단위 시험(`gate_declared` 15개, `read_json_path` 5개, `gate_check`는 `declaredBegin` 응답으로 갱신). 옛 `declared-legacy.ts`(gate-legacy.ts가 부름)와 지금 구현에 같은 시나리오를 넣어 결과·이벤트 배열·게이트 상태·sandbox와 요청 호출 기록을 견준다. `readJsonPath`는 고정 사례 100여 개와 시드 고정 무작위 400개를 JS 함수와 직접 견준다.
+- **변이 시험**: Rust 분기 25곳을 하나씩 깨 봤다(재지 못한 부하를 통과로, 테스트 종료 코드 무시, 동시 요청 판정 넷, 출처 확인 둘, `ok` 계산, 건너뛴 자동 페이지 빼기, 취소 확인 넷, 플랫폼 기록, 동시 상한, 재시도, 이름 번호, 근거 가림 등). 처음 둘이 잡히지 않아 보강했다(근거를 가린 값으로 남기는지, 그래프 반복 앞 취소 확인은 Rust 단위 시험). 나머지 둘은 같은 동작이다(근거를 실패에도 붙이는 변이는 실패 노드의 `value`가 없어 같고, 부하 예외 뒤 취소 확인은 바깥 `throwIfAborted`가 같은 사유를 던진다).
+- **자체 점검에서 고친 것(새 코드의 실수)**: 가리는 함수에 글자를 두 번 인코딩해 넘기던 실수(동시 요청의 실패 사유)를 자체 점검에서 고쳤고, 짝 없는 서로게이트 시험이 고정한다.
+- 돌리지 않은 검증: 실제 세션 실측(지시에 따라 따로), 화면 확인 본체(A5c), 다른 러너·Kubernetes 제공자는 타입 검사로만.
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택

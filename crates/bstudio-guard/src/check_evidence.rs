@@ -105,22 +105,29 @@ fn quote_all(values: &[&JsValue], redact: Redact) -> Result<String, String> {
     Ok(values.iter().map(|v| quote(v, redact)).collect::<Result<Vec<_>, _>>()?.join(", "))
 }
 
-/// 줄 수와 길이를 묶고 시크릿 값을 가린다
-pub fn finish_evidence(lines: &[String], redact: Redact) -> Result<Vec<String>, String> {
-    let capped: Vec<String> = if lines.len() > MAX_EVIDENCE_LINES {
+/// 줄 수를 묶는다(`finish_evidence`의 첫 단계). 상한을 넘으면 앞 `MAX_EVIDENCE_LINES - 1`줄과 "그 밖에 N가지"다
+pub fn cap_evidence_lines(lines: &[String]) -> Vec<String> {
+    if lines.len() > MAX_EVIDENCE_LINES {
         let mut head = lines[..MAX_EVIDENCE_LINES - 1].to_vec();
         head.push(format!("그 밖에 {}가지", lines.len() - (MAX_EVIDENCE_LINES - 1)));
         head
     } else {
         lines.to_vec()
-    };
-    capped
-        .iter()
-        .map(|line| {
-            let safe = redact(line)?;
-            Ok(if utf16_len(&safe) > MAX_LINE_LENGTH { format!("{}…", truncate_utf16(&safe, MAX_LINE_LENGTH)) } else { safe })
-        })
-        .collect()
+    }
+}
+
+/// 가린 줄의 길이를 묶는다(`finish_evidence`의 둘째 단계). 가리는 함수를 비동기로 부르는 쪽(`bstudio-io`의 게이트)이 줄마다 가린 뒤 부른다
+pub fn clamp_evidence_line(safe: String) -> String {
+    if utf16_len(&safe) > MAX_LINE_LENGTH {
+        format!("{}…", truncate_utf16(&safe, MAX_LINE_LENGTH))
+    } else {
+        safe
+    }
+}
+
+/// 줄 수와 길이를 묶고 시크릿 값을 가린다
+pub fn finish_evidence(lines: &[String], redact: Redact) -> Result<Vec<String>, String> {
+    cap_evidence_lines(lines).iter().map(|line| Ok(clamp_evidence_line(redact(line)?))).collect()
 }
 
 /// `text.includes(candidate)`. 후보는 문자열로 바꿔 찾는다

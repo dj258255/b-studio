@@ -1,11 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { decodeNative, encodeNative, native, type Sandbox } from '@b-studio/sandbox';
-import { SPEC_FILE, type LoadedProject, type WorkflowStage } from '@b-studio/spec';
-import type { GateOutcome } from './gate';
+import { decodeNative, encodeNative, native, type LoadRequest, type Sandbox } from '@b-studio/sandbox';
+import { SPEC_FILE, type LoadedProject, type WorkflowPageCheck, type WorkflowStage } from '@b-studio/spec';
+import { TEST_TIMEOUT_MS, type GateOutcome, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
 import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
+import { TaskGraphError } from './task-graph';
+import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { decodeStrings, encodeStrings, failure, verifyChangesSetup, type HookHandler, type HookRequest, type VerificationReport, type VerifyOptions } from './verify';
-import type { WorkflowCheck } from './workflow';
+import type { WorkflowCheck, WorkflowCompare, WorkflowStepCheck } from './workflow';
 
 /**
  * 게이트 check의 상태 기계(순서·분기·결과 조립)는 Rust(`crates/bstudio-io/src/gate_check.rs`, ADR-195 4f A5b-1)가 한다.
@@ -31,11 +33,42 @@ export interface GateState {
   readonly project: LoadedProject;
   /** `reviewDeclaredChecks`가 정한, 허용되지 않아 쓰지 않은 선언 변경의 요약 */
   readonly unadoptedChange: string | undefined;
-  /** `runDeclaredChecks`가 남긴, 부하 확인을 b-studio 쪽 문제로 재지 못한 사유 */
-  readonly loadPlatformFailure: string | undefined;
+}
+
+/** 자동으로 연 화면 확인 하나. `name`은 이름 짓기 전의 이름이다 */
+export interface AutoPageEntry {
+  page: WorkflowPageCheck;
+  name: string;
+  probedId?: string;
+  sampled?: string;
+}
+
+/**
+ * 선언한 검사 실행(`runDeclaredChecks` 아래)이 쓰는 TS 쪽 값과 동작. 조율·판정·글 조립은 Rust(`gate_declared.rs`, ADR-195 4f A5b-2)가 하고,
+ * 화면 확인(`autoPages`·`checkPage`와 그 부산물)과 sandbox·HTTP 요청은 여기로 부른다. 옛 구현(`declared-legacy.ts`)도 같은 값을 쓴다
+ */
+export interface DeclaredHost {
+  readonly sandbox: Sandbox;
+  readonly signal: AbortSignal | undefined;
+  readonly onEvent: (event: AgentEvent) => void;
+  /** 이번 검증에 쓰는 프로젝트(부르는 때의 것) */
+  readonly project: LoadedProject;
+  readonly requestService: ServiceRequest;
+  autoPages(declared: readonly WorkflowPageCheck[]): Promise<{ pages: AutoPageEntry[]; skipped: WorkflowCheck[] }>;
+  checkPage(page: WorkflowPageCheck, name: string, signal: AbortSignal, options?: { auto?: boolean; probedId?: string; sampled?: string }): Promise<string[]>;
+  /** 화면 확인이 이름별로 모으는 부산물 */
+  readonly pageMaps: {
+    readonly steps: Map<string, WorkflowStepCheck[]>;
+    readonly compares: Map<string, WorkflowCompare>;
+    readonly blocked: Map<string, string[]>;
+    readonly loadMs: Map<string, number>;
+    readonly warnings: Map<string, string[]>;
+  };
 }
 
 export interface GateHost {
+  /** 선언한 검사 실행이 쓰는 TS 쪽 값과 동작 */
+  readonly declared: DeclaredHost;
   readonly sandbox: Sandbox;
   readonly signal: AbortSignal | undefined;
   readonly onEvent: (event: AgentEvent) => void;
@@ -56,7 +89,6 @@ export interface GateHost {
   filesToVerify(): string[];
   /** `#verifiedVersion = workspace.version` */
   markVerifiedVersion(): void;
-  runDeclaredChecks(): Promise<WorkflowCheck[]>;
   /** 배열을 그 자리에서 바꾼다 */
   recheckEvaluationAssets(recordChecks: WorkflowCheck[]): Promise<void>;
   recheckOutsideChanges(recordChecks: WorkflowCheck[]): Promise<void>;
@@ -74,7 +106,11 @@ type Handlers = Record<string, HookHandler>;
 const stages = (value: unknown): WorkflowStage[] => value as WorkflowStage[];
 
 export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
-  const { state, signal } = host;
+  const { state, signal, declared } = host;
+  /** 작업 그래프가 노드에 넘기던 신호. 취소 신호가 없으면 취소되지 않는 신호다(`runTaskGraph`와 같다) */
+  const graphSignal = signal ?? new AbortController().signal;
+  /** `declaredBegin`이 읽은 선언과 자동 페이지. `checkPage`가 번호로 꺼낸다 */
+  let declaredPlan: { pages: WorkflowPageCheck[]; auto: Awaited<ReturnType<DeclaredHost['autoPages']>> } | undefined;
   let thrown: { error: unknown } | undefined;
   /** 서비스 확인(`verifyChanges`) 한 번의 콜백 처리기. Rust가 `verifyBegin`을 부를 때마다 새로 만든다 */
   let verifyHandlers: Handlers = {};
@@ -131,9 +167,142 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
       host.onEvent(event as AgentEvent);
       return { ok: true };
     },
-    runDeclared: async () => {
-      const checks = await host.runDeclaredChecks();
-      return { ok: true, checks, loadPlatformFailure: state.loadPlatformFailure ?? null };
+    // ── 선언한 검사 실행(ADR-195 4f A5b-2): 조율·판정·글 조립은 Rust(`gate_declared.rs`), 아래는 그 Rust가 부르는 바깥 동작이다 ──
+    declaredBegin: async () => {
+      const workflow = declared.project.spec.workflow;
+      const pages = workflow?.pageChecks ?? [];
+      const tests = workflow?.tests ?? [];
+      const concurrency = workflow?.concurrencyChecks ?? [];
+      const loads = workflow?.loadChecks ?? [];
+      // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks)
+      const auto = await declared.autoPages(pages);
+      declaredPlan = { pages, auto };
+      if (pages.length > 0 || tests.length > 0 || concurrency.length > 0 || loads.length > 0 || auto.pages.length > 0 || auto.skipped.length > 0) {
+        for (const map of Object.values(declared.pageMaps)) map.clear();
+      }
+      return {
+        ok: true,
+        pages: pages.map((page) => ({ service: page.service, path: page.path, mode: page.mode, viewport: page.viewport ?? null, stepCount: page.steps?.length ?? 0 })),
+        tests: tests.map((test) => ({ name: test.name, service: test.service, command: test.command, ...(test.maxAttempts !== undefined ? { maxAttempts: test.maxAttempts } : {}) })),
+        concurrency,
+        loads,
+        autoNames: auto.pages.map((entry) => entry.name),
+        autoSkipped: auto.skipped,
+      };
+    },
+    declaredCheckPage: async ({ auto, index, name }) => {
+      try {
+        const plan = declaredPlan!;
+        if (auto === true) {
+          const entry = plan.auto.pages[Number(index)]!;
+          const options = { auto: true, ...(entry.probedId !== undefined ? { probedId: entry.probedId } : {}), ...(entry.sampled ? { sampled: entry.sampled } : {}) };
+          return { ok: true, evidence: await declared.checkPage(entry.page, String(name), graphSignal, options) };
+        }
+        return { ok: true, evidence: await declared.checkPage(plan.pages[Number(index)]!, String(name), graphSignal) };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredClearReports: async ({ service }) => {
+      const spec = declared.project.managed.find(([name]) => name === service)?.[1];
+      if (!spec) return { ok: true };
+      const command = clearTestReportsCommand(reportRootsForIncludes(spec.includes));
+      try {
+        await declared.sandbox.exec(String(service), command, signal ? { signal } : {});
+        return { ok: true };
+      } catch (error) {
+        // 지우지 못해도 테스트는 돌린다 — 삼킬지는 Rust가 정한다
+        return failure(error);
+      }
+    },
+    declaredExec: async ({ service, command }) => {
+      // 시간 상한(`TEST_TIMEOUT_MS`)은 이 콜백이 연 신호로 둔다. 취소 신호와 합친다
+      const timeout = AbortSignal.timeout(TEST_TIMEOUT_MS);
+      try {
+        // exec는 기본으로 출력의 시크릿 값을 가려서 돌려준다. 실패 출력이 모델에게 그대로 들어가므로 가린 결과만 쓴다
+        const result = await declared.sandbox.exec(String(service), command as string[], { signal: AbortSignal.any([graphSignal, timeout]) });
+        return { ok: true, exitCode: result.exitCode, stdout: result.stdout, stderr: result.stderr };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredStats: async () => {
+      try {
+        const usage = await declared.sandbox.stats();
+        return { ok: true, usage: usage.map((entry) => ({ service: entry.service, oomKilled: entry.oomKilled, memoryLimitBytes: entry.memoryLimitBytes })) };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredRestart: async ({ service }) => {
+      try {
+        await declared.sandbox.restart(String(service), { signal: graphSignal });
+        return { ok: true };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredEndpoint: async ({ service }) => {
+      try {
+        return { ok: true, url: (await declared.sandbox.endpoint(String(service))).url };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    // 출처 제한과 실제 요청이 같은 해석에서 나오게 한다: 여기서 푼 `href`를 Rust가 그대로 요청한다
+    declaredResolveUrl: ({ base, path }) => {
+      try {
+        const url = new URL(String(path), String(base));
+        return { ok: true, href: url.href, sameOrigin: url.origin === new URL(String(base)).origin };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredRequest: async ({ href, method, headers, body }) => {
+      try {
+        const response = await declared.requestService(String(href), {
+          method: String(method),
+          ...(headers ? { headers: headers as Record<string, string> } : {}),
+          ...(body !== undefined ? { body: String(body) } : {}),
+          signal: graphSignal,
+        });
+        return { ok: true, status: response.status, text: response.text };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredLoadSupported: () => ({ ok: true, supported: Boolean(declared.sandbox.runLoad) }),
+    declaredRunLoad: async ({ request }) => {
+      try {
+        return { ok: true, result: await declared.sandbox.runLoad!(request as LoadRequest, { signal }) };
+      } catch (error) {
+        return failure(error);
+      }
+    },
+    declaredRedact: ({ text, rethrow }) => {
+      try {
+        return { ok: true, text: declared.sandbox.redact(String(text)) };
+      } catch (error) {
+        // 근거를 만들다 난 실패는 삼키고, 실패 사유를 가리다 난 실패는 게이트 밖으로 올라간다 — 어느 쪽인지는 Rust가 알린다
+        if (rethrow === true) throw error;
+        return failure(error);
+      }
+    },
+    declaredPageData: ({ names }) => ({
+      ok: true,
+      items: (names as string[]).map((name) => {
+        const { steps, compares, blocked, loadMs, warnings } = declared.pageMaps;
+        return {
+          ...(steps.has(name) ? { steps: steps.get(name) } : {}),
+          ...(compares.has(name) ? { compare: compares.get(name) } : {}),
+          ...(loadMs.has(name) ? { loadMs: loadMs.get(name) } : {}),
+          blocked: blocked.get(name) ?? [],
+          warnings: warnings.get(name) ?? [],
+        };
+      }),
+    }),
+    declaredThrowGraphError: ({ message }) => {
+      throw new TaskGraphError(String(message));
     },
     recheckEvaluationAssets: async ({ recordChecks }) => {
       const checks = recordChecks as WorkflowCheck[];

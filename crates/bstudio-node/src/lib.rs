@@ -3146,6 +3146,19 @@ pub fn gate_describe_concurrency_expect(expect_json: String) -> Result<String> {
     fail(gh::describe_concurrency_expect(&input(&expect_json, "동시 요청 기대")?))
 }
 
+/// 동시 요청 확인의 `readJsonPath`(ADR-195 4f A5b-2). `text`·`json_path`·`equals_json`은 `encodeLoneSurrogates`한 글자다.
+/// 돌려주는 값: `{ shown, equal }`(`shown`은 `JSON.stringify(actual)` 또는 `undefined`라는 글자, `equal`은 `actual === equals`) 또는 JSON이 너무 깊어 읽지 못했으면 `{ tooDeep: true }`.
+/// 시험이 JS `readJsonPath`와 견주려고 부른다
+#[napi]
+pub fn gate_read_json_path(text: String, json_path: String, equals_json: String) -> Result<String> {
+    let equals = input(&equals_json, "기대 값")?;
+    let out = match gh::read_json_path(&text, &json_path) {
+        Ok(value) => js_json::object(vec![("shown", Some(JsValue::Str(value.display()))), ("equal", Some(JsValue::Bool(value.strict_equals(&equals))))]),
+        Err(_) => js_json::object(vec![("tooDeep", Some(JsValue::Bool(true)))]),
+    };
+    Ok(js_json::stringify(&out))
+}
+
 // ── agent: 작업 공간의 막는 검사(3단계 3w). TS 껍데기: packages/agent/src/workspace.ts
 use bstudio_guard::workspace_guard as wg;
 
