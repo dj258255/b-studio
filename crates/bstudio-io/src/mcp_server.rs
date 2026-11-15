@@ -1015,6 +1015,27 @@ mod tests {
     }
 
     #[test]
+    fn 도구_이름과_enum_값의_근접값은_맞지_않는다() {
+        let list = tools(true);
+        let server = ServerInfo { name: "n" };
+        let step = |params: String| match handle_request(&RpcRequest { id: JsValue::Num(1.0), method: "tools/call".into(), params: Some(js_json::parse_lone_encoded(&params).unwrap()) }, Some(&list), &server) {
+            Step::Done(message) => message,
+            Step::Call { .. } => "CALL".to_owned(),
+        };
+        // 도구 이름은 글자 그대로 같아야 한다(대소문자·앞뒤 공백·전각·접두·접미)
+        for name in ["A_TOOL", "a_Tool", " a_tool", "a_tool ", "ａ_tool", "a_too", "a_tool_x"] {
+            let message = step(format!(r#"{{"name":{},"arguments":{{"path":"p","n":1}}}}"#, quote(name)));
+            assert!(message.contains("not found") && message.contains(r#""isError":true"#), "{name}: {message}");
+        }
+        // enum 값도 글자 그대로 같아야 한다
+        for value in ["X", " x", "x ", "ｘ", "x\u{0}", "xy", ""] {
+            let message = step(format!(r#"{{"name":"a_tool","arguments":{{"path":"p","n":1,"mode":{}}}}}"#, quote(value)));
+            assert!(message.contains("Invalid option") && message.contains(r#""isError":true"#), "{value:?}: {message}");
+        }
+        assert_eq!(step(r#"{"name":"a_tool","arguments":{"path":"p","n":1,"mode":"x"}}"#.to_owned()), "CALL");
+    }
+
+    #[test]
     fn 알려진_메서드와_모르는_메서드() {
         let server = ServerInfo { name: "b-studio" };
         let run = |method: &str, tools: Option<&[Tool]>| match handle_request(&RpcRequest { id: JsValue::Str("x".into()), method: method.into(), params: None }, tools, &server) {

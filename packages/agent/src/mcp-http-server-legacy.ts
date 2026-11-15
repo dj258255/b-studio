@@ -1,4 +1,4 @@
-// 차등 시험의 기준: ADR-201(4f A7b)에서 전송·프로토콜을 Rust로 옮기기 전의 `mcp-http-server.ts`(node:http + @modelcontextprotocol/sdk 1.30.0)를 그대로 복사한 것이다.
+// 차등 시험의 기준: ADR-201(4f A7b)에서 전송·프로토콜을 Rust로 옮기기 전의 `mcp-http-server.ts`(node:http + @modelcontextprotocol/sdk 1.32.1)를 그대로 복사한 것이다.
 // 고치지 않는다. 시험(mcp-http-server-differential.test.ts)만 불러 쓰고 제품 코드는 불러 쓰지 않는다. 4g에서 함께 지운다.
 // 바뀐 것은 이 머리 주석뿐이다(authorize 등 보조 판정은 원래 같은 파일에 있었고 그대로 둔다).
 import { randomBytes } from 'node:crypto';
