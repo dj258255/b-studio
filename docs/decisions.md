@@ -10248,7 +10248,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ## ADR-199 화면 확인 러너를 Rust CDP로 옮긴다: 파이프로 Chromium을 직접 말하고, 출처 제한 두 층은 같은 판정으로 옮긴다
 
-상태: 채택(A6a: 단계 없는 확인, A6b: 단계·스크린샷·격리된 실행 환경, A6c-1: headless shell, A6c-2: 화면 중계는 옮기지 않고 지움, 게이트 기본값 전환은 A6c-3)
+상태: 채택(A6a: 단계 없는 확인, A6b: 단계·스크린샷·격리된 실행 환경, A6c-1: headless shell, A6c-2: 화면 중계는 옮기지 않고 지움, A6c-3: 게이트 기본값 전환)
 관련: 이슈 [#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-191(Rust로 단계적 이전), ADR-192(실행 파일 하나), ADR-193(I/O), ADR-195(4f A6), ADR-198(출처 제한 두 층)
 
 ### 맥락
@@ -10439,3 +10439,32 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 **바뀌지 않은 것.** 게이트의 판정, 출처 제한 두 층, 스크린샷 저장(`capture`·`saveArtifact`)은 그대로다. 옛 `runInBrowser`의 본문은 화면 중계를 켜고 끄던 안쪽 `try/finally`만 풀렸고(들여쓰기만 바뀜), 브라우저를 닫는 바깥 `finally`는 같다.
 
 **남은 것.** 게이트의 기본 `browserRunner`를 `runInBrowserNative`로 바꾸고 실제 세션에서 재는 일(A6c-3).
+
+### A6c-3 덧붙임: 게이트의 기본 화면 확인 러너를 Rust로 바꾼다 (2026-11-15)
+
+**무엇을 바꿨나.** `browserRunner`를 넘기지 않은 게이트(`gate.ts`의 `page.browserRunner`)가 `runInBrowser` 대신 `runInBrowserNative`를 쓴다. 옛 `runInBrowser`는 지우지 않고 차등 시험의 기준값으로만 남긴다. 다른 조각의 `*-legacy.ts`와 같은 자리이고, 견주는 시험과 함께 4g에서 지운다(ADR-195).
+
+**같이 고친 것: 브라우저를 못 찾아 HTTP 확인으로 약해지는 길.** 새 러너는 headless shell의 경로를 Playwright의 설치 목록(공개 API가 아님)에서 읽는다(A6c-1). 이 읽기가 깨지면 문제가 생긴다.
+- 옛 러너는 Playwright가 직접 찾아 브라우저로 확인했을 상황이다.
+- 새 러너만 "브라우저 없음"(`BrowserUnavailableError`)이 되면, 게이트는 대체 확인(HTTP)으로 통과한다. 판정이 열린 쪽으로 틀린다.
+
+그래서 headless shell을 찾지 못하면 설치된 Chrome 다음 마지막에 Playwright의 전체 Chromium을 시도한다(`browserCandidatesFrom`). 느려도 브라우저로 확인하는 쪽을 골랐다. headless shell을 찾으면 전체 Chromium은 넣지 않는다(A6c-1의 400ms).
+
+**판정이 달라지는 자리.** 화면 글자·가로 넘침·첫 화면 글자·로드 시간을 격리된 실행 환경에서 읽는다(A6b). 그래서 페이지가 전역(`HTMLElement.prototype.innerText` 등)을 바꿔치기해 만든 글자로는 더 이상 통과하지 않는다. 옛 기본값에서는 통과했다. 닫히는 쪽으로만 달라진다.
+
+**검증.**
+- **시험을 먼저 썼다.** `gate-default-browser.test.ts`는 `browserRunner` 없이 만든 게이트로 실제 브라우저를 띄운다.
+  - 페이지가 `innerText`를 위조하면 위조된 글자를 기대하는 확인이 실패하고, 진짜 글자를 기대하는 확인은 통과해야 한다.
+  - 고치기 전에는 `{"ok":true, … "evidence":[…,"'위조된 글자 주문 완료' 화면에 있음",…]}: expected true to be false`로 실패했다. 옛 기본값이 위조된 글자로 통과시킨다는 뜻이다. 고친 뒤 통과한다.
+- `browser-check-native.test.ts`: headless shell을 찾지 못하면 마지막 후보가 전체 Chromium이고, 찾으면 넣지 않는다. 그 줄을 지운 변이에서 실패한다.
+- **실제 세션**([실측 기록](experiments/2026-11-15-a6c3-native-runner-gate.md), 한 번 잰 값)
+  - 실제 Claude Code 세션에서 브라우저 모드의 통과, 실패·소진·되돌리기의 근거와 글이 옛 러너 때(A5c-1)와 글자까지 같았다.
+  - 브라우저 프로세스 7번이 모두 Rust 러너의 프로필(`b-studio-cdp-…`)이었다.
+  - Claude Code가 `innerText`를 바꿔치기하는 스크립트를 넣은 변경은 세 번 막혀 되돌려졌다. 같은 HTML을 옛 러너는 위조된 글자(`shop 화면 주문 합계: 12000원`)로, 새 러너는 진짜 화면(`주문 합계: 불러오는 중원`)으로 읽는다.
+
+**남은 한계.**
+- 단계·첫 화면 글자·로드 예산·자동 화면 확인은 실제 세션에서 Rust 러너로 재지 않았다(차등 시험과 단위 시험만).
+- Linux(CI)·Windows와 시스템 Chrome만 있는 기계는 실제 세션으로 재지 않았다.
+- 운영 이미지와 CI는 Playwright 브라우저를 설치하지 않는다. 브라우저가 없으면 두 러너 모두 `unavailable`이라 대체 확인으로 가는 것은 전과 같다.
+- 끝 모양(Node 없는 실행 파일)에서는 설치 목록과 `chromium.executablePath()`를 읽을 수 없다. C1 전에 Rust가 headless shell을 직접 찾는 규칙이 필요하다(A6c-1의 남은 것과 같다).
+
