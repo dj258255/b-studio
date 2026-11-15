@@ -107,7 +107,7 @@ export function childEnv(env: NodeJS.ProcessEnv, forbiddenRoot?: string): NodeJS
 const CONSUMED_BATCH = 64;
 
 /** Node `setTimeout`이 받는 값의 규칙(1 미만·너무 큰 값·숫자가 아닌 값은 1ms). 옛 구현의 타이머와 같게 맞춘다 */
-function timerMs(ms: number): number {
+export function timerMs(ms: number): number {
   return ms >= 1 && ms <= 2 ** 31 - 1 ? ms : 1;
 }
 
@@ -133,7 +133,13 @@ function unitsToString(units: Uint16Array): string {
  * 자식 프로세스의 입출력(띄우기·표준 입력·줄 나누기·표준 오류 끝부분·닫기 단계·끝 상태)은 Rust가 한다(crates/bstudio-io/src/cli_process.rs, ADR-195 4f A8a).
  * 여기는 Rust가 순서대로 넘기는 줄을 큐로 받아 JSON 객체만 내놓는다(해석은 TS, ADR-201). 옛 구현은 claude-cli-process-spawn-legacy.ts(차등 시험의 기준)
  */
-export function spawnClaudeCli(options: { command: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv; stop?: CliStopOptions }): ClaudeCliProcess {
+/**
+ * 자식을 띄우기 전의 준비(막는 쪽): 실행 파일을 절대 경로로 고르고(프로젝트 루트 안의 것은 고르지 않는다), 자식에게 넘길 환경(PATH 정리)과 닫기 단계 시간을 정한다.
+ * `spawnClaudeCli`와 러너 코어(`claude-code-runner.ts`의 `args` 콜백, ADR-202)가 같은 준비를 쓴다. 못 찾으면 띄우지 않고 오류를 돌려준다(`spawn <명령> ENOENT: <이유>`)
+ */
+export function prepareCliSpawn(options: { command: string; cwd: string; env: NodeJS.ProcessEnv; stop?: CliStopOptions }):
+  | { ok: true; resolved: string; env: Record<string, string>; termAfterMs: number; killAfterMs: number }
+  | { ok: false; error: Error } {
   const termAfterMs = options.stop?.termAfterMs ?? DEFAULT_TERM_AFTER_MS;
   const killAfterMs = options.stop?.killAfterMs ?? DEFAULT_KILL_AFTER_MS;
   // 실행 파일 경로와 인자는 배열로만 넘긴다(셸을 거치지 않는다)
@@ -142,11 +148,20 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
     // 프로젝트 루트(cwd) 안의 실행 파일은 고르지 않는다
     resolved = resolveCliCommand(options.command, options.env, options.cwd);
   } catch (error) {
-    return failedProcess(error as Error);
+    return { ok: false, error: error as Error };
   }
   // 자식이 PATH로 다시 찾는 인터프리터도 프로젝트 안의 것이 잡히지 않게 PATH를 정리해 넘긴다
   const env: Record<string, string> = {};
   for (const [name, value] of Object.entries(childEnv(options.env, options.cwd))) if (value !== undefined) env[name] = value;
+  return { ok: true, resolved, env, termAfterMs, killAfterMs };
+}
+
+export function spawnClaudeCli(options: { command: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv; stop?: CliStopOptions }): ClaudeCliProcess {
+  const prepared = prepareCliSpawn(options);
+  if (!prepared.ok) return failedProcess(prepared.error);
+  const { resolved, env } = prepared;
+  const termAfterMs = prepared.termAfterMs;
+  const killAfterMs = prepared.killAfterMs;
 
   // Rust가 밀어 주는 줄. 소비자(messages)가 느려도 줄은 여기 쌓인다
   const queue: string[] = [];
