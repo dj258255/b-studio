@@ -444,6 +444,16 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       const screenshot = capture ? await page.screenshot({ type: 'png' }).catch(() => undefined) : undefined;
       recorded.push({ label, ok, ...(detail !== undefined ? { detail } : {}), ...(screenshot ? { screenshot } : {}) });
     };
+    // 거절된 약속의 오류는 load 뒤에 올 수 있다. 워밍업 뒤 측정 문서가 커밋될 때 그사이 온 워밍업 문서의 오류를 한 번 더 비운다(#1236, Rust 러너와 같은 규칙).
+    // 측정 이동이 끝나면 기다림을 끝낸다(남기면 단계가 일으킨 이동이 측정한 오류를 지운다)
+    let awaitingCommit = false;
+    page.on('framenavigated', (frame) => {
+      if (frame !== page.mainFrame() || !awaitingCommit) return;
+      awaitingCommit = false;
+      pageErrors.length = 0;
+      consoleErrors.length = 0;
+      mediaErrors.length = 0;
+    });
     if (measureLoad) {
       // 개발 서버 첫 컴파일(콜드 스타트)이 첫 로드를 튀게 한다. 한 번 워밍업 이동 뒤에 잰다
       await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
@@ -457,8 +467,11 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
       blockedTunnels.clear();
       seenUrls.clear();
       blockedInside.clear();
+      awaitingCommit = true;
     }
-    const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+    const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS }).finally(() => {
+      awaitingCommit = false;
+    });
     await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
     await record(`open ${new URL(url).pathname}`, true);
     // 단계는 순서대로 실행한다. 실패하면 그 자리에서 멈춰 몇 번째 단계였는지 알린다
