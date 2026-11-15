@@ -1,4 +1,5 @@
 import { createRequire } from 'node:module';
+import { chromium } from 'playwright-core';
 import { native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import { BrowserUnavailableError, MEDIA_ERROR_INIT_SCRIPT, StepFailedError, StepWithoutActionError, VIEWPORT_MEASURE_SCRIPT, describeStep, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextReport } from './browser-check';
@@ -12,7 +13,7 @@ import { BrowserUnavailableError, MEDIA_ERROR_INIT_SCRIPT, StepFailedError, Step
  * 화면 글자·가로 넘침·`viewportTexts`·로드 시간은 페이지와 격리된 실행 환경에서 읽는다. 옛 러너는 페이지와 같은 실행 환경에서 읽어, 페이지가 전역을
  * 바꿔치면 위조된 값을 받는다(의도한 차이, ADR-199).
  *
- * 게이트의 기본 `browserRunner`는 아직 `runInBrowser`다(A6c에서 바꾼다).
+ * 게이트의 기본 `browserRunner`다(A6c-3). 옛 `runInBrowser`는 차등 시험의 기준값으로만 남는다.
  */
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
@@ -40,15 +41,36 @@ function playwrightHeadlessShell(): string | undefined {
   }
 }
 
+/** Playwright가 받은 전체 Chromium의 경로. 모르면 undefined */
+function playwrightFullChromium(): string | undefined {
+  try {
+    return chromium.executablePath() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * 옛 `launchBrowser`와 같은 순서로 시도할 실행 파일: B_STUDIO_BROWSER_EXECUTABLE이 있으면 그것만, 없으면 Playwright가 받은 headless shell → 설치된 Chrome.
- * 전체 Chromium은 시도하지 않는다(옛 러너도 띄우지 않는다). 경로는 파일이 있는지 보지 않고 넘긴다(없으면 Rust가 그 이유를 `unavailable`로 알린다)
+ * 시도할 실행 파일의 순서. 지정한 실행 파일이 있으면 그것만, 없으면 옛 `launchBrowser`처럼 headless shell → 설치된 Chrome.
+ * headless shell을 찾으면 전체 Chromium은 넣지 않는다(옛 러너도 띄우지 않고, 띄우면 호출이 수백 ms 느리다. A6c-1).
+ * 찾지 못했으면 마지막에 전체 Chromium을 둔다. headless shell의 경로는 공개 API가 아닌 설치 목록에서 읽으므로 그 읽기가 깨질 수 있는데, 옛 러너는 Playwright가
+ * 직접 찾아 브라우저로 확인했을 상황에서 새 러너만 "브라우저 없음"이 되면 게이트가 HTTP 확인으로 대신 통과한다(열린 쪽). 느려도 브라우저로 확인하는 쪽을 고른다(A6c-3)
+ */
+export function browserCandidatesFrom(input: { configured?: string; headlessShell?: string; systemChrome: readonly string[]; fullChromium?: string }): string[] {
+  if (input.configured) return [input.configured];
+  if (input.headlessShell) return [input.headlessShell, ...input.systemChrome];
+  return [...input.systemChrome, ...(input.fullChromium ? [input.fullChromium] : [])];
+}
+
+/**
+ * 이 기계에서 시도할 실행 파일(`browserCandidatesFrom`). B_STUDIO_BROWSER_EXECUTABLE이 지정한 실행 파일이다.
+ * 경로는 파일이 있는지 보지 않고 넘긴다(Rust가 순서대로 시도하고, 모두 실패하면 그 이유를 `unavailable`로 알린다)
  */
 export function nativeBrowserCandidates(): string[] {
   const configured = process.env.B_STUDIO_BROWSER_EXECUTABLE;
-  if (configured) return [configured];
-  const shell = playwrightHeadlessShell();
-  return [...(shell ? [shell] : []), ...systemChromePaths()];
+  const headlessShell = configured ? undefined : playwrightHeadlessShell();
+  const fullChromium = configured || headlessShell ? undefined : playwrightFullChromium();
+  return browserCandidatesFrom({ ...(configured ? { configured } : {}), ...(headlessShell ? { headlessShell } : {}), systemChrome: systemChromePaths(), ...(fullChromium ? { fullChromium } : {}) });
 }
 
 type NativeBrowserStepInput = { label: string; kind: 'click' | 'fill' | 'press' | 'waitFor' | 'none'; value: string; text?: string };

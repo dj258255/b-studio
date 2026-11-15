@@ -357,6 +357,10 @@ function pageBlockedRequests(blockedUrls: ReadonlySet<string>, seenUrls: Readonl
   return [...blockedUrls].filter((entry) => (entry.startsWith('CONNECT ') ? seenTunnels.has(entry.slice('CONNECT '.length)) : seenUrls.has(entry)));
 }
 
+/**
+ * 화면 확인 러너의 옛 Playwright 구현. 게이트의 기본 러너는 Rust 구현(`runInBrowserNative`, ADR-199 A6c-3)이고, 이것은 차등 시험의 기준값으로 남는다.
+ * 견주는 시험과 함께 지운다(ADR-195 4g)
+ */
 export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, measureLoad = false, signal }) => {
   signal?.throwIfAborted();
   // 허용 출처 밖으로 나가는 요청을 막은 URL을 모아 둔다(앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않는다).

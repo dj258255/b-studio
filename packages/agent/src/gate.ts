@@ -4,7 +4,8 @@ import { lstat, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, encodeNative, native, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage } from '@b-studio/spec';
-import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
+import { BrowserUnavailableError, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
+import { runInBrowserNative } from './browser-check-native';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, type PageEvidenceContext } from './check-evidence';
 import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, weakenedDeclarations, withDeclaredChecks } from './declared-checks';
@@ -533,7 +534,8 @@ export class VerificationGate {
             return gate.#options.pageFetcher ?? fetchPage;
           },
           get browserRunner() {
-            return gate.#options.browserRunner ?? runInBrowser;
+            // 기본은 Rust 러너다(ADR-199 A6c-3). 옛 Playwright 러너(`runInBrowser`)는 차등 시험의 기준값으로만 남는다
+            return gate.#options.browserRunner ?? runInBrowserNative;
           },
           get saveArtifact() {
             return gate.#options.saveArtifact;
