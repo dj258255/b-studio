@@ -154,6 +154,19 @@ interface NativeGuard {
     routes: string[],
     handler: (request: NativeLoopbackRequest) => Promise<NativeLoopbackResponse>,
   ): Promise<{ id: number; port: number }>;
+  /**
+   * MCP 도구 서버(ADR-201, 4f A7b). Rust가 127.0.0.1의 임의 포트를 열고 Host·토큰 확인, streamable HTTP(stateless) 처리, JSON-RPC 해석·분배, 도구 인자 검사, SSE 쓰기를 한다.
+   * `handler`는 두 일을 `kind`로 받는다: `list`(도구 목록 JSON `[{name, description?, input_schema}]`을 `specs`로, 못 얻으면 `error`로 돌려준다)와
+   * `call`(검사를 통과한 인자를 받아 도구를 실행하고 `ok`·`content`·`images`를 돌려준다). 이름·결과의 글자는 `encodeLoneSurrogates`한 꼴이고 `args`는 `decodeNative`로 읽는다.
+   * 닫는 것은 `closeLoopbackServer`다. 서버가 열려 있는 동안 Node 프로세스는 끝나지 않는다
+   */
+  startMcpServer(
+    token: string,
+    allowedHosts: string[],
+    name: string,
+    honorRequired: boolean,
+    handler: (call: NativeMcpCall) => Promise<NativeMcpAnswer>,
+  ): Promise<{ id: number; port: number }>;
   /** 새 연결을 받지 않고 열린 연결(처리 중인 것 포함)을 끊고, 끝나면 resolve한다. 모르는 id·이미 닫은 id는 아무 일도 하지 않는다 */
   closeLoopbackServer(id: number): Promise<void>;
   runCommandBytes(bin: string, args: string[], input: Buffer | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, maxBuffer: number, signal: AbortSignal | undefined | null): Promise<BytesResult>;
@@ -804,6 +817,21 @@ export interface NativeLoopbackRequest {
 export interface NativeLoopbackResponse {
   status: number;
   body: Buffer;
+}
+
+/** MCP 서버가 콜백에 넘기는 일. `list`는 도구 목록, `call`은 도구 실행(`name`은 도구 이름, `args`는 검사를 통과한 인자의 JSON) */
+export interface NativeMcpCall {
+  kind: 'list' | 'call';
+  name: string;
+  args: string;
+}
+
+export interface NativeMcpAnswer {
+  specs?: string;
+  error?: string;
+  ok: boolean;
+  content: string;
+  images: Array<{ data: string; mimeType: string }>;
 }
 
 export interface NativeHostPty {

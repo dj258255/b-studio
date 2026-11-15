@@ -21,6 +21,7 @@ pub mod host_port;
 pub mod lifecycle_io;
 pub mod log_stream;
 pub mod loopback_server;
+pub mod mcp_server;
 pub mod process;
 pub mod process_bytes;
 pub mod port_retry;

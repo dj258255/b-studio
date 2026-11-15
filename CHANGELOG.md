@@ -12,6 +12,7 @@
 
 ### 바뀜
 
+- MCP 도구 서버(`startToolServer`)의 전송과 프로토콜을 `node:http` + `@modelcontextprotocol/sdk`에서 Rust(`crates/bstudio-io/src/loopback_server.rs`·`mcp_server.rs`)로 옮겼습니다(ADR-201 덧붙임 A7b, ADR-195 4f A7b, #1241). 시그니처와 응답은 그대로입니다. Host·토큰 확인, streamable HTTP(stateless) 처리, JSON-RPC 해석·분배, 도구 인자 검사(모르는 키를 지우고 정수는 JS 안전 정수만), SSE 쓰기를 Rust가 하고 도구 목록 얻기와 도구 실행만 TS가 합니다. 도구 목록을 읽지 못하면 그 요청이 응답 없이 걸리던 것을 500 응답으로 고쳤습니다(트러블슈팅 205).
 - 훅 서버(`startHookServer`)의 전송을 `node:http`에서 Rust(`crates/bstudio-io/src/loopback_server.rs`)로 옮겼습니다(ADR-201, ADR-195 4f A7a, #1239). 시그니처와 응답은 그대로이고, 포트 열기·Host와 토큰 확인·라우트 원문 비교·본문 4MiB 상한·닫기를 Rust가 하며 본문 해석과 처리는 TS가 합니다. HTTP 머리는 Node(llhttp)보다 좁은 꼴만 받고 모르는 꼴은 응답 없이 끊습니다.
 - 이 컴퓨터 방식 세션 터미널과 터미널 작업대(desk)가 지원 범위에 들어가, 개인 PC 모드면 `B_STUDIO_EXPERIMENTAL` 없이 열립니다(ADR-200, #1234). 컨테이너 방식(`B_STUDIO_TERMINAL=container`)은 실험이라 계속 그 값을 켜야 열리고, 인증을 켠 서버에서는 어느 방식도 열리지 않습니다. `/api/health`의 `terminal`도 같은 판정입니다. Rust 이전 4g 전에는 실험 기능을 기능마다 물어 하나씩 지웁니다. 실험 기능을 끈 서버에서는 desk의 작업 나누기(`Ctrl-b t`)·여러 AI 비교(`Ctrl-b f`)가 열리지 않고 알림만 보입니다(`/api/health`에 `experimental`을 더함).
 - 게이트의 화면 확인이 기본으로 Rust 러너(`runInBrowserNative`)를 씁니다(ADR-199 A6c-3, #1212). 옛 Playwright 러너(`runInBrowser`)는 차등 시험의 기준값으로만 남습니다. 화면 글자·가로 넘침·첫 화면 글자·로드 시간을 페이지와 격리된 실행 환경에서 읽으므로, 페이지가 전역을 바꿔 위조한 글자로는 더 이상 통과하지 않습니다(옛 러너는 통과시켰습니다). Playwright의 headless shell을 찾지 못하면 설치된 Chrome 다음에 전체 Chromium을 시도해, 브라우저를 못 찾아 HTTP 확인으로 약해지는 일을 줄였습니다.
@@ -97,6 +98,7 @@
 
 ### 수정
 
+- Claude Code 러너가 도구 요청을 그 호출이 든 assistant 메시지보다 먼저 처리하면, 턴 상한을 넘긴 턴의 도구가 닫히기 전에 실행될 수 있던 것을 고쳤습니다(트러블슈팅 206, #1241). 이제 도구는 그 메시지(`tool_use`)를 stdout에서 본 뒤에 실행하고, 2초 안에 오지 않으면 그대로 실행합니다. MCP 서버를 Rust로 옮기며 요청이 다른 스레드에서 들어와 드러났습니다.
 - 화면 확인의 `measureLoad`가 워밍업 이동에서 `load` 뒤에 난 거절된 약속의 오류를 측정 결과에 섞어, 없는 오류로 실패할 수 있던 것을 고쳤습니다(#1236, 트러블슈팅 204). 측정 문서가 커밋될 때 그사이 온 오류를 한 번 더 비웁니다.
 - 화면 확인 Rust 러너가 headless shell 대신 전체 Chromium을 띄워 호출 전체가 옛 러너보다 약 400ms 느리던 것을 고쳤습니다. Playwright 설치 목록에서 headless shell을 먼저 찾습니다(트러블슈팅 203, ADR-199 "A6c-1 덧붙임").
 - macOS에서 `pnpm build:native`로 napi 모듈을 다시 빌드하면, 그 모듈을 불러온 프로세스(시험·studio)가 살아 있는 동안 새 프로세스가 SIGKILL로 죽던 문제를 고쳤습니다. 모듈을 같은 inode에 덮어쓰지 않고 새 파일로 바꿔 넣습니다(#1214, 트러블슈팅 201).

@@ -127,8 +127,17 @@ async function handleTurn() {
     else if (step.tool) {
       if (step.delay) await new Promise((r) => setTimeout(r, step.delay));
       const content = [{ type: 'tool_use', id: `toolu_${ids}`, name: `mcp__${serverName}__${step.tool}`, input: step.input }];
-      emit({ type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId });
-      await callTool(step.tool, step.input);
+      if (step.noMessage) {
+        void callTool(step.tool, step.input).catch(() => {});
+      } else if (step.callFirst !== undefined) {
+        const call = callTool(step.tool, step.input);
+        await new Promise((r) => setTimeout(r, step.callFirst));
+        emit({ type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId });
+        await call;
+      } else {
+        emit({ type: 'assistant', message: { id, content, ...usage }, parent_tool_use_id: null, session_id: sessionId });
+        await callTool(step.tool, step.input);
+      }
     } else {
       lastText = step.text;
       emit({ type: 'assistant', message: { id, content: [{ type: 'text', text: step.text }], ...usage }, parent_tool_use_id: null, session_id: sessionId });

@@ -60,6 +60,11 @@ export function resolveCompactWindow(raw: string | undefined): CompactWindowSett
 
 /** 지시 큐가 알림(onPush)을 주지 않을 때 확인하는 주기 */
 const STEERING_POLL_MS = 300;
+/**
+ * 도구 요청이 그 호출이 든 assistant 메시지(stdout)보다 먼저 처리됐을 때 그 메시지를 기다리는 상한. 진짜 CLI는 메시지를 먼저 쓰므로 보통 몇 ms 안에 온다.
+ * 넘기면 기다리지 않고 실행한다(메시지가 끝내 오지 않는 경우에 도구가 영영 멈추지 않게)
+ */
+const TOOL_USE_WAIT_MS = 2_000;
 
 /**
  * 일시적 네트워크 오류 재시도 기본값(ADR-142). 같은 세션을 resume으로 이어받아 지수 백오프로 기다린다.
@@ -278,8 +283,60 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
   const metrics: RunMetrics = { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0, ...(guide ? { guideChars: guide.charsUsed } : {}) };
   /** 실행이 끝났거나 끝내는 중이면 true. 그 뒤에 도착하는 도구 호출은 파일을 건드리지 않고 거절한다 */
   let toolsClosed = false;
+  // 도구 호출의 순서: 진짜 CLI는 assistant 메시지(tool_use)를 stdout에 먼저 쓰고 나서 MCP 요청을 보낸다. 그런데 MCP 서버는 다른 스레드에서 요청을 다 읽고
+  // 콜백을 넣으므로(ADR-201) 러너가 요청을 그 stdout 줄보다 먼저 처리할 수 있다. 턴 세기와 턴 상한(넘으면 toolsClosed)은 stdout 쪽에 있어서, 그대로 두면
+  // 상한을 넘긴 턴의 도구가 닫히기 전에 실행된다. 그래서 도구 이름마다 stdout에서 본 tool_use 수와 받은 요청 수를 세고, 요청이 앞서면 그 메시지를 기다린다
+  const toolUsesSeen = new Map<string, number>();
+  const toolUseIdsSeen = new Set<string>();
+  const toolCallsReceived = new Map<string, number>();
+  let toolUseWaiters: Array<() => void> = [];
+  const noteToolUses = (content: unknown) => {
+    if (!Array.isArray(content)) return;
+    for (const block of content) {
+      if (typeof block !== 'object' || block === null) continue;
+      const { type, id, name } = block as { type?: unknown; id?: unknown; name?: unknown };
+      if (type !== 'tool_use' || typeof name !== 'string') continue;
+      // 같은 블록이 다시 와도(재전송) 한 번만 센다
+      if (typeof id === 'string') {
+        if (toolUseIdsSeen.has(id)) continue;
+        toolUseIdsSeen.add(id);
+      }
+      toolUsesSeen.set(name, (toolUsesSeen.get(name) ?? 0) + 1);
+    }
+    wakeToolUseWaiters();
+  };
+  const wakeToolUseWaiters = () => {
+    const waiters = toolUseWaiters;
+    toolUseWaiters = [];
+    for (const wake of waiters) wake();
+  };
+  /** 이제부터 오는 도구 호출은 거절한다. 메시지를 기다리던 요청도 깨워 바로 거절되게 한다 */
+  const closeTools = () => {
+    toolsClosed = true;
+    wakeToolUseWaiters();
+  };
+  const awaitToolUse = async (name: string) => {
+    const wanted = (toolCallsReceived.get(name) ?? 0) + 1;
+    toolCallsReceived.set(name, wanted);
+    const deadline = Date.now() + TOOL_USE_WAIT_MS;
+    while ((toolUsesSeen.get(name) ?? 0) < wanted && !toolsClosed && !signal?.aborted) {
+      const left = deadline - Date.now();
+      if (left <= 0) return;
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(wake, left);
+        function wake() {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', wake);
+          resolve();
+        }
+        signal?.addEventListener('abort', wake, { once: true });
+        toolUseWaiters.push(wake);
+      });
+    }
+  };
   const runTool = (name: string, args: unknown) =>
     serial(async () => {
+      await awaitToolUse(toolName(name));
       // 취소하거나 끝낸 뒤 대기열에 남은 호출은 파일을 건드리지 않고 끝낸다
       signal?.throwIfAborted();
       if (toolsClosed) throw new Error('이 실행은 이미 끝나 도구를 쓸 수 없습니다');
@@ -368,7 +425,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
       ...(failureReason ? { failureReason } : {}),
       ...(mismatches.list.length > 0 ? { mismatches: [...mismatches.list] } : {}),
     };
-    toolsClosed = true;
+    closeTools();
     onEvent(status === 'failed' ? { type: 'failed', result } : { type: 'done', result });
     // 입력을 닫으면 Claude Code가 남은 기록을 쓰고 스스로 끝난다. 끝나지 않으면 정해진 시간 뒤 SIGTERM, SIGKILL
     currentProc?.stop('graceful');
@@ -539,6 +596,9 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
             break;
 
           case 'assistant': {
+            // 기다리는 도구 요청을 깨우는 것은 턴 세기·턴 상한 확인과 같은 동기 구간 안이다. 깨어난 요청은 마이크로태스크에서 돌므로 그때는 상한 확인이 끝나 있다.
+            // 하위 에이전트 메시지의 tool_use도 센다(그 요청도 이 서버로 오므로 기다리지 않게)
+            noteToolUses(message.message?.content);
             // 하위 에이전트 메시지는 없어야 하지만, 섞여 와도 본 대화로 세지 않는다
             if (message.parent_tool_use_id || !message.message?.id) break;
             // 한 호출의 입력 크기 = input + cache_read + cache_creation. 같은 id가 여러 번 와도 최댓값은 같다
@@ -568,7 +628,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
               if (turn > maxTurns) {
                 // 진행 중인 턴을 끝까지 기다리지 않는다: 입력을 닫고 바로 SIGTERM. 이미 보낸 도구 호출이 더 닿아도 파일을 건드리지 않게 닫는다.
                 // (SDK의 interrupt()는 공식 문서에 없는 제어 메시지라 쓰지 않는다 — ADR-194)
-                toolsClosed = true;
+                closeTools();
                 proc.stop('now');
                 // 하던 도구 호출이 있으면 끝나기를 기다린 뒤 게이트를 본다
                 await serial.idle();
@@ -751,7 +811,7 @@ export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise
     }
   } finally {
     signal?.removeEventListener('abort', onAbort);
-    toolsClosed = true;
+    closeTools();
     await toolServer?.close().catch(() => {});
     // 프로세스를 닫아도 이미 시작한 도구 핸들러는 이어서 돈다. 호출한 쪽이 변경을 되돌리기 전에 끝나기를 기다린다
     await serial.idle();

@@ -279,7 +279,7 @@
 | [ADR-195](decisions.md#adr-195-4단계-rust-서버를-앞에-두고-옮기지-않은-경로는-node로-넘긴다-인증을-옮기기-전에는-공개-경로만-직접-처리한다) ★ | axum 앞단이 공개 포트, Node는 유닉스 소켓 자식 | 유효·덧붙임 · 진행 중 |
 | [ADR-197](decisions.md#adr-197-spec의-yaml-읽기는-rust가-하고-js와-다르게-읽을-수-있는-꼴은-읽지-않고-거절한다) | `saphyr-parser` 위 직접 해석, 거절 규칙·펼친 깊이·방문 수 상한 | 유효 |
 | [ADR-199](decisions.md#adr-199-화면-확인-러너를-rust-cdp로-옮긴다-파이프로-chromium을-직접-말하고-출처-제한-두-층은-같은-판정으로-옮긴다) | Playwright 대신 `--remote-debugging-pipe` CDP, 격리된 실행 환경. 게이트의 기본 러너(A6c-3) | 유효·덧붙임 |
-| [ADR-201](decisions.md#adr-201-훅mcp-서버의-전송은-rust가-하고-처리는-ts-콜백에-둔다-http-머리는-직접-읽고-본문-해석은-b단계까지-ts에-남긴다) | 훅·MCP 서버의 전송(리스너·Host/토큰·라우트 원문 비교·본문 상한·닫기)은 Rust, 처리는 TS 콜백. HTTP 머리는 hyper 대신 직접 읽음(A7a) | 유효 |
+| [ADR-201](decisions.md#adr-201-훅mcp-서버의-전송은-rust가-하고-처리는-ts-콜백에-둔다-http-머리는-직접-읽고-본문-해석은-b단계까지-ts에-남긴다) | 훅·MCP 서버의 전송(리스너·Host/토큰·라우트 원문 비교·본문 상한·닫기)은 Rust, 처리는 TS 콜백. HTTP 머리는 hyper 대신 직접 읽음(A7a). MCP 서버는 SDK 대신 stateless streamable HTTP를 직접 구현해 옛 SDK 서버와 차등으로 맞춤(A7b) | 유효 |
 
 ### 문서·작업 방식
 
@@ -567,4 +567,4 @@
 | [ADR-198](decisions.md#adr-198-화면-확인-브라우저의-출처-제한은-라우트에-더해-로컬-전달-프록시가-접속-주소를-검사한다) | 리다이렉트·서비스 워커 우회를 프록시로 막음, fail-closed | 유효 | 출처 제한·보안 경계 |
 | [ADR-199](decisions.md#adr-199-화면-확인-러너를-rust-cdp로-옮긴다-파이프로-chromium을-직접-말하고-출처-제한-두-층은-같은-판정으로-옮긴다) | Playwright 대신 `--remote-debugging-pipe` CDP, 격리된 실행 환경. 게이트의 기본 러너(A6c-3) | 유효·덧붙임 | Rust 이전 |
 | [ADR-200](decisions.md#adr-200-지원-경로를-desk와-이-컴퓨터-방식-세션-터미널로-넓히고-실험-스위치-없이-연다-실험-기능은-4g-전에-하나씩-물어-지운다) | 지원 경로에 desk와 이 컴퓨터 방식 세션 터미널을 더해 실험 스위치 없이 연다, 4g 전에 실험 기능을 하나씩 물어 지움 | 유효 | 문서·작업 방식 |
-| [ADR-201](decisions.md#adr-201-훅mcp-서버의-전송은-rust가-하고-처리는-ts-콜백에-둔다-http-머리는-직접-읽고-본문-해석은-b단계까지-ts에-남긴다) | 훅·MCP 서버의 전송(리스너·Host/토큰·라우트 원문 비교·본문 상한·닫기)은 Rust, 처리는 TS 콜백. HTTP 머리는 hyper 대신 직접 읽음(A7a) | 유효 | Rust 이전 |
+| [ADR-201](decisions.md#adr-201-훅mcp-서버의-전송은-rust가-하고-처리는-ts-콜백에-둔다-http-머리는-직접-읽고-본문-해석은-b단계까지-ts에-남긴다) | 훅·MCP 서버의 전송(리스너·Host/토큰·라우트 원문 비교·본문 상한·닫기)은 Rust, 처리는 TS 콜백. HTTP 머리는 hyper 대신 직접 읽음(A7a). MCP 서버는 SDK 대신 stateless streamable HTTP를 직접 구현해 옛 SDK 서버와 차등으로 맞춤(A7b) | 유효 | Rust 이전 |

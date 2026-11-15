@@ -5460,6 +5460,82 @@ pub fn start_loopback_server(
     .build(&env)
 }
 
+// ── MCP 도구 서버(ADR-201, 4f A7b) ──
+// 전송과 프로토콜(JSON-RPC 해석·분배·인자 검사·SSE)은 Rust가 하고, 도구 목록 얻기와 도구 실행만 TS 콜백으로 남는다
+// (packages/agent/src/mcp-http-server.ts). 콜백 하나가 두 일을 `kind`로 가른다. 문자열(이름·인자·결과)은 `encodeLoneSurrogates`한 꼴이다
+
+/// 콜백에 가는 일. `kind`가 `list`면 도구 목록(JSON)을, `call`이면 도구 하나를 실행한다. `args`는 검사를 통과한 인자(JSON, `decodeNative`로 읽는다)
+#[napi(object)]
+pub struct McpCallJs {
+    pub kind: String,
+    pub name: String,
+    pub args: String,
+}
+
+#[napi(object)]
+pub struct McpImageJs {
+    pub data: String,
+    pub mime_type: String,
+}
+
+/// 콜백의 답. `list`는 `specs`(도구 목록 JSON)나 `error`(목록을 얻지 못한 이유), `call`은 `ok`·`content`·`images`
+#[napi(object)]
+pub struct McpAnswerJs {
+    pub specs: Option<String>,
+    pub error: Option<String>,
+    pub ok: bool,
+    pub content: String,
+    pub images: Vec<McpImageJs>,
+}
+
+/// MCP 서버를 열고 id와 실제 포트를 돌려준다. 닫는 것은 `close_loopback_server`다. 콜백이 던지면 `list`는 500, `call`은 isError 결과다
+#[napi]
+pub fn start_mcp_server(
+    env: Env,
+    token: String,
+    allowed_hosts: Vec<String>,
+    name: String,
+    honor_required: bool,
+    handler: ThreadsafeFunction<McpCallJs, Promise<McpAnswerJs>, McpCallJs, Status, false>,
+) -> Result<AsyncBlock<LoopbackStartedJs>> {
+    let handler = Arc::new(handler);
+    AsyncBlockBuilder::new(async move {
+        let list_handler = handler.clone();
+        let list: lsv::ListTools = Arc::new(move || {
+            let handler = list_handler.clone();
+            Box::pin(async move {
+                let call = McpCallJs { kind: "list".to_owned(), name: String::new(), args: String::new() };
+                let pending = handler.call_async(call).await.map_err(|error| error.to_string())?;
+                let answer = pending.await.map_err(|error| error.to_string())?;
+                match (answer.specs, answer.error) {
+                    (Some(specs), _) => Ok(specs),
+                    (None, error) => Err(error.unwrap_or_else(|| "도구 목록을 얻지 못했습니다".to_owned())),
+                }
+            })
+        });
+        let call_handler = handler;
+        let call: lsv::CallTool = Arc::new(move |name: String, args: String| {
+            let handler = call_handler.clone();
+            Box::pin(async move {
+                let failed = |text: &str| bstudio_io::mcp_server::ToolReply { ok: false, content: text.to_owned(), images: Vec::new() };
+                let request = McpCallJs { kind: "call".to_owned(), name, args };
+                let Ok(pending) = handler.call_async(request).await else { return failed("도구를 실행하지 못했습니다") };
+                match pending.await {
+                    Ok(answer) => bstudio_io::mcp_server::ToolReply { ok: answer.ok, content: answer.content, images: answer.images.into_iter().map(|image| (image.data, image.mime_type)).collect() },
+                    Err(error) => failed(&error.to_string()),
+                }
+            })
+        });
+        let config = lsv::McpConfig { token, allowed_hosts, name, honor_required, list, call, max_body_bytes: lsv::MAX_BODY_BYTES, keep_alive: lsv::SSE_KEEP_ALIVE };
+        let server = lsv::LoopbackServer::start_mcp(config).await.map_err(|error| Error::from_reason(error.to_string()))?;
+        let port = u32::from(server.port);
+        let id = LOOPBACK_NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        LOOPBACK_SERVERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((id, Arc::new(server)));
+        Ok(LoopbackStartedJs { id, port })
+    })
+    .build(&env)
+}
+
 /// 새 연결을 받지 않고 열린 연결(처리 중인 것 포함)을 끊고, 끝나면 돌아온다. 모르는 id나 이미 닫은 id는 아무 일도 하지 않는다
 #[napi]
 pub fn close_loopback_server(env: Env, id: u32) -> Result<AsyncBlock<()>> {
