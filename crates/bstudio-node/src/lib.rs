@@ -5619,6 +5619,8 @@ impl CliProcess {
             cwd: Some(cwd),
             term_after: clamp_ms(term_after_ms),
             kill_after: clamp_ms(kill_after_ms),
+            line_high: cli_process::LINE_HIGH,
+            line_low: cli_process::LINE_LOW,
         };
         let (handle, pump) = cli_process::spawn_cli(config, callback);
         // JS 메인 스레드라 tokio::spawn은 "no reactor"로 패닉한다 — ExecSession과 같이 global 런타임에 올린다
@@ -5630,6 +5632,12 @@ impl CliProcess {
     #[napi]
     pub fn write_line(&self, line: String) {
         self.handle.write_line(line);
+    }
+
+    /// 줄 `n`개를 소비했다고 알린다. 소비하지 않은 줄이 상한에 닿으면 Rust가 표준 출력 읽기를 멈추므로(자식이 쓰기에서 멈춘다) 소비자는 소비한 만큼 알려야 한다
+    #[napi]
+    pub fn consumed(&self, n: u32) {
+        self.handle.consumed(n as usize);
     }
 
     /// 표준 입력을 닫는다

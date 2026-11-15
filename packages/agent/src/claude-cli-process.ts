@@ -103,6 +103,9 @@ export function childEnv(env: NodeJS.ProcessEnv, forbiddenRoot?: string): NodeJS
   return { ...env, [key]: native.cliChildPath(value, forbiddenRoot) };
 }
 
+/** 소비한 줄을 이만큼 모아 Rust에 알린다(큐를 다 비우면 모자라도 알린다) */
+const CONSUMED_BATCH = 64;
+
 /** Node `setTimeout`이 받는 값의 규칙(1 미만·너무 큰 값·숫자가 아닌 값은 1ms). 옛 구현의 타이머와 같게 맞춘다 */
 function timerMs(ms: number): number {
   return ms >= 1 && ms <= 2 ** 31 - 1 ? ms : 1;
@@ -152,6 +155,8 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
   let wake: (() => void) | undefined;
   let inputClosed = false;
   let alive = true;
+  // 소비한 줄 수 가운데 Rust에 아직 알리지 않은 것. Rust는 소비하지 않은 줄이 상한에 닿으면 표준 출력 읽기를 멈춘다(옛 readline 반복자의 highWaterMark와 같은 성질)
+  let unreported = 0;
   let resolveExit!: (exit: CliExit) => void;
   const exited = new Promise<CliExit>((resolve) => {
     resolveExit = resolve;
@@ -171,6 +176,13 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
     wake?.();
   });
 
+  const reportConsumed = (): void => {
+    if (unreported === 0) return;
+    const n = unreported;
+    unreported = 0;
+    session.consumed(n);
+  };
+
   const closeInput = (): void => {
     if (inputClosed) return;
     inputClosed = true;
@@ -182,6 +194,7 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
       for (;;) {
         if (head < queue.length) {
           const line = queue[head++] ?? '';
+          if (++unreported >= CONSUMED_BATCH) reportConsumed();
           if (head > 4096 && head * 2 > queue.length) {
             queue.splice(0, head);
             head = 0;
@@ -196,6 +209,8 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
           if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) yield parsed as CliMessage;
           continue;
         }
+        // 큐를 다 비웠다: 기다리기 전에 소비를 알린다(안 알리면 멈춘 읽기가 풀리지 않아 교착한다)
+        reportConsumed();
         if (finished) return;
         await new Promise<void>((resolve) => {
           wake = resolve;

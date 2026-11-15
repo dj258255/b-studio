@@ -880,6 +880,8 @@ export interface NativeCliEvent {
 
 export interface NativeCliProcess {
   writeLine(line: string): void;
+  /** 줄 n개를 소비했다고 알린다. 소비하지 않은 줄이 1,024개에 닿으면 읽기를 멈춰 자식이 쓰기에서 멈춘다(옛 readline 반복자의 상한). 알리지 않으면 멈춘 채 풀리지 않는다 */
+  consumed(n: number): void;
   closeInput(): void;
   /** false: graceful, true: now */
   stop(now: boolean): void;

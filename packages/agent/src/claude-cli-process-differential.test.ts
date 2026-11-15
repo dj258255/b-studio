@@ -631,6 +631,74 @@ describe.each(bothImplementations)('닫기 단계 (%s)', (_name, spawnImpl) => {
   });
 });
 
+
+// ── 표준 출력 백프레셔: 소비자가 안 읽는 동안 자식이 쓰기에서 막힌다(옛 readline 비동기 반복자는 줄 1,024개에서 입력을 멈춘다) ──
+
+// 막히는 쓰기(fs.writeSync)로 줄을 낸다. 파이프가 차면 EAGAIN을 되풀이하며 기다린다(Node의 process.stdout은 파이프에서 비동기라 자식이 막히지 않는다).
+// 다 쓰면 표시 파일을 만든다
+const WRITER = `
+import fs from 'node:fs';
+const [marker, total] = [process.argv[2], Number(process.argv[3])];
+const wait = new Int32Array(new SharedArrayBuffer(4));
+for (let i = 1; i <= total; i++) {
+  const buf = Buffer.from('{"n":' + i + '}\\n');
+  for (let at = 0; at < buf.length; ) {
+    try { at += fs.writeSync(1, buf, at); } catch (e) { if (e.code === 'EAGAIN') Atomics.wait(wait, 0, 0, 1); else throw e; }
+  }
+}
+fs.writeFileSync(marker, 'done');
+setTimeout(() => process.exit(0), 20000); // 시험이 실패해도 남지 않게
+process.exit(0);
+`;
+const writerPath = path.join(root, 'writer.mjs');
+writeFileSync(writerPath, WRITER);
+
+describe.each(bothImplementations)('표준 출력 백프레셔 (%s)', (_name, spawnImpl) => {
+  for (const [title, pull] of [
+    ['messages()를 부르지 않는 동안', 0],
+    ['줄 10개만 읽고 멈춘 동안', 10],
+  ] as const) {
+    it(`${title} 자식이 막혀 있고, 다 소비하면 순서대로 끝까지 온다 (20만 줄)`, async () => {
+      const marker = path.join(root, `writer-${closeSeq++}.marker`);
+      const proc = spawnImpl({ command: process.execPath, args: [writerPath, marker, '200000'], cwd: root, env: { ...process.env }, stop: { termAfterMs: 200, killAfterMs: 200 } });
+      try {
+        const seen: number[] = [];
+        let iterator: AsyncIterator<CliMessage> | undefined;
+        if (pull > 0) {
+          iterator = proc.messages()[Symbol.asyncIterator]();
+          for (let i = 0; i < pull; i++) seen.push(((await iterator.next()).value as { n: number }).n);
+        }
+        await new Promise((r) => setTimeout(r, 1200));
+        expect(existsSync(marker), '소비하지 않는데 자식이 다 썼다(막히지 않았다)').toBe(false);
+        iterator ??= proc.messages()[Symbol.asyncIterator]();
+        const deadline = Date.now() + 40_000;
+        for (;;) {
+          if (Date.now() > deadline) throw new Error(`소비해도 끝나지 않는다(교착): ${seen.length}줄`);
+          const next = await Promise.race([iterator.next(), new Promise<never>((_, reject) => setTimeout(() => reject(new Error(`줄이 오지 않는다(교착): ${seen.length}줄`)), 15_000))]);
+          if (next.done) break;
+          seen.push((next.value as { n: number }).n);
+        }
+        expect(seen.length).toBe(200_000);
+        expect(seen.every((n, i) => n === i + 1)).toBe(true);
+        expect(existsSync(marker)).toBe(true);
+        expect((await proc.exited).code).toBe(0);
+      } finally {
+        proc.stop('now');
+        await proc.exited;
+      }
+    }, 90_000);
+  }
+
+  it('소비자가 없어 막힌 자식도 stop(now) 뒤에 끝난다', async () => {
+    const marker = path.join(root, `writer-${closeSeq++}.marker`);
+    const proc = spawnImpl({ command: process.execPath, args: [writerPath, marker, '2000000'], cwd: root, env: { ...process.env }, stop: { termAfterMs: 200, killAfterMs: 200 } });
+    await new Promise((r) => setTimeout(r, 800));
+    proc.stop('now');
+    const exit = await proc.exited;
+    expect(exit.signal === 'SIGTERM' || exit.signal === 'SIGKILL').toBe(true);
+  }, 30_000);
+});
+
 describe('새 구현만의 보장', () => {
   it('신호는 자기가 띄운 자식에게만 간다: 이웃 프로세스는 stop 뒤에도 산다', async () => {
     // 같은 시험 안에서 비슷한 자식을 둘 띄우고 하나만 stop한다

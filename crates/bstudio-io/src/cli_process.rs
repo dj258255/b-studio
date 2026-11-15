@@ -13,6 +13,8 @@
 //! - 닫기: `stop(Graceful)`은 입력을 닫고 `term_after` 뒤에도 살아 있으면 SIGTERM, 그 뒤 `kill_after` 뒤에도 살아 있으면 SIGKILL. `stop(Now)`는 입력을 닫고
 //!   바로 SIGTERM(걸려 있던 graceful 타이머를 당긴다). 이미 SIGTERM을 보냈으면 다시 보내지 않는다.
 //!   **신호는 자기가 띄운 프로세스의 pid에만, 아직 거두지 않은 동안에만** 보낸다(거둔 pid는 다른 프로세스가 쓸 수 있다). 거두기와 신호 보내기는 한 작업이 차례로 한다.
+//! - 표준 출력 백프레셔: 소비하지 않은 줄(`consumed`로 알린 만큼 뺀다)이 `LINE_HIGH`에 닿으면 읽기를 멈춰 파이프가 차고 자식이 쓰기에서 멈춘다(옛 `readline` 비동기 반복자의
+//!   `highWaterMark`와 같은 성질). `LINE_LOW` 이하로 내려가면 다시 읽는다. 자식이 끝나면(거두면) 한도를 풀고 남은 출력을 비운다(옛 Node의 `flushStdio`).
 //! - 입력 쪽이 먼저 닫혀도(EPIPE) 죽지 않는다: 남은 쓰기를 버린다. 닫힌 뒤의 쓰기도 버린다.
 //! - 띄우지 못하면(`spawn` 오류) 줄 없이 `Exit { code: None, signal: None, error }` 하나로 끝난다.
 //!
@@ -20,17 +22,23 @@
 
 use std::future::Future;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Notify};
 use tokio::time::Instant;
 
 /// 표준 오류에서 남기는 끝부분(UTF-16 단위). 옛 `STDERR_KEEP`
 pub const STDERR_KEEP: usize = 2_000;
 const READ_CHUNK: usize = 64 * 1024;
+/// 소비하지 않은 줄이 이만큼이면 표준 출력 읽기를 멈춘다. 옛 구현의 `readline` 비동기 반복자(`events.on`의 `highWaterMark: 1024`, Node 22.17에서 재서 확인)와 같다.
+/// 한 번 읽은 덩어리 안의 줄은 나눠 멈추지 않으므로(옛 구현도 같다) 그만큼은 넘을 수 있다
+pub const LINE_HIGH: usize = 1024;
+/// 멈춘 뒤 소비하지 않은 줄이 이만큼 이하로 내려가면 다시 읽는다(옛 구현은 0이 되어야 다시 읽었다. 더 일찍 다시 읽어 쌓이는 양의 상한은 같다)
+pub const LINE_LOW: usize = LINE_HIGH / 2;
 
 fn lossy(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -319,6 +327,35 @@ pub struct CliConfig {
     pub cwd: Option<String>,
     pub term_after: Duration,
     pub kill_after: Duration,
+    /// 소비하지 않은 줄이 이만큼이면 읽기를 멈춘다(`LINE_HIGH`)
+    pub line_high: usize,
+    /// 멈춘 뒤 이만큼 이하로 내려가면 다시 읽는다(`LINE_LOW`)
+    pub line_low: usize,
+}
+
+/// 표준 출력 줄의 소비 현황. 읽는 쪽이 줄을 내보낼 때 더하고, 소비하는 쪽이 `consumed`로 뺀다
+struct Backpressure {
+    pending: AtomicUsize,
+    released: AtomicBool,
+    wake: Notify,
+}
+
+impl Backpressure {
+    /// 소비하지 않은 줄이 `high` 미만이 될 때까지(한 번 멈췄으면 `low` 이하가 될 때까지) 기다린다. 자식이 끝나 풀렸으면 바로 돌아온다
+    async fn wait_for_room(&self, high: usize, low: usize) {
+        if self.pending.load(Ordering::Acquire) < high {
+            return;
+        }
+        loop {
+            let woken = self.wake.notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
+            if self.released.load(Ordering::Acquire) || self.pending.load(Ordering::Acquire) <= low {
+                return;
+            }
+            woken.await;
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -341,9 +378,16 @@ pub struct CliHandle {
     stdin: Mutex<Option<mpsc::UnboundedSender<Vec<u8>>>>,
     control: mpsc::UnboundedSender<(StopMode, Instant)>,
     stderr: Arc<Mutex<StderrTail>>,
+    backpressure: Arc<Backpressure>,
 }
 
 impl CliHandle {
+    /// 줄 `n`개를 소비했다고 알린다(읽기를 멈춰 둔 것을 풀 수 있다). 받은 것보다 많이 알려도 0에서 멈춘다
+    pub fn consumed(&self, n: usize) {
+        let _ = self.backpressure.pending.fetch_update(Ordering::AcqRel, Ordering::Acquire, |pending| Some(pending.saturating_sub(n)));
+        self.backpressure.wake.notify_one();
+    }
+
     /// 표준 입력에 한 줄(끝에 `\n`을 붙인다)을 쓴다. 닫힌 뒤나 자식이 끝난 뒤에는 버린다
     pub fn write_line(&self, line: String) {
         if let Some(tx) = self.stdin.lock().expect("stdin 잠금").as_ref() {
@@ -459,6 +503,8 @@ pub fn spawn_cli_with(config: CliConfig, on_event: OnCliEvent, signaler: Signale
     let (control_tx, mut control_rx) = mpsc::unbounded_channel::<(StopMode, Instant)>();
     let stderr_tail = Arc::new(Mutex::new(StderrTail::new()));
     let stderr_for_pump = stderr_tail.clone();
+    let backpressure = Arc::new(Backpressure { pending: AtomicUsize::new(0), released: AtomicBool::new(false), wake: Notify::new() });
+    let backpressure_for_pump = backpressure.clone();
 
     let mut command = Command::new(&config.bin);
     command.args(&config.args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).env_clear();
@@ -470,6 +516,7 @@ pub fn spawn_cli_with(config: CliConfig, on_event: OnCliEvent, signaler: Signale
     }
     let bin = config.bin.clone();
     let (term_after, kill_after) = (config.term_after, config.kill_after);
+    let (line_high, line_low) = (config.line_high, config.line_low);
 
     let pump = async move {
         let mut child = match command.spawn() {
@@ -497,7 +544,7 @@ pub fn spawn_cli_with(config: CliConfig, on_event: OnCliEvent, signaler: Signale
         });
 
         let io = async {
-            tokio::join!(read_lines(stdout, on_event.clone()), read_stderr(stderr, stderr_for_pump));
+            tokio::join!(read_lines(stdout, on_event.clone(), backpressure_for_pump.clone(), line_high, line_low), read_stderr(stderr, stderr_for_pump));
         };
         tokio::pin!(io);
 
@@ -529,6 +576,10 @@ pub fn spawn_cli_with(config: CliConfig, on_event: OnCliEvent, signaler: Signale
         loop {
             if status.is_some() && io_done {
                 break;
+            }
+            if status.is_some() && !backpressure_for_pump.released.swap(true, Ordering::AcqRel) {
+                // 자식이 끝났다: 소비를 기다리지 않고 남은 출력을 비운다(Node의 flushStdio)
+                backpressure_for_pump.wake.notify_one();
             }
             tokio::select! {
                 // 먼저 거둔다: 끝난 자식이 있으면 타이머·명령보다 앞서 알아야 거둔 pid에 신호를 보내지 않는다
@@ -579,19 +630,21 @@ pub fn spawn_cli_with(config: CliConfig, on_event: OnCliEvent, signaler: Signale
         on_event(CliEvent::Exit(status.unwrap_or(CliExit { code: None, signal: None, error: None })));
     };
 
-    (CliHandle { stdin: Mutex::new(Some(stdin_tx)), control: control_tx, stderr: stderr_tail }, pump)
+    (CliHandle { stdin: Mutex::new(Some(stdin_tx)), control: control_tx, stderr: stderr_tail, backpressure }, pump)
 }
 
 /// 표준 출력을 읽어 줄을 낸다. 한 번 읽은 덩어리에서 나온 줄은 한 사건으로 묶는다
-async fn read_lines(mut reader: impl AsyncRead + Unpin, on_event: OnCliEvent) {
+async fn read_lines(mut reader: impl AsyncRead + Unpin, on_event: OnCliEvent, backpressure: Arc<Backpressure>, high: usize, low: usize) {
     let mut lines = LineReader::new();
     let mut buffer = vec![0u8; READ_CHUNK];
     loop {
+        backpressure.wait_for_room(high, low).await;
         match reader.read(&mut buffer).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
                 let found = lines.write(&buffer[..n]);
                 if !found.is_empty() {
+                    backpressure.pending.fetch_add(found.len(), Ordering::AcqRel);
                     on_event(CliEvent::Lines(found));
                 }
             }
@@ -599,6 +652,7 @@ async fn read_lines(mut reader: impl AsyncRead + Unpin, on_event: OnCliEvent) {
     }
     let rest = lines.finish();
     if !rest.is_empty() {
+        backpressure.pending.fetch_add(rest.len(), Ordering::AcqRel);
         on_event(CliEvent::Lines(rest));
     }
 }
@@ -762,6 +816,8 @@ mod tests {
             cwd: None,
             term_after: Duration::from_secs(30),
             kill_after: Duration::from_secs(30),
+            line_high: LINE_HIGH,
+            line_low: LINE_LOW,
         }
     }
 
@@ -1029,10 +1085,125 @@ mod tests {
         assert_eq!(recorder.lock().unwrap().lines, ["hi"]);
     }
 
+
+    // ── 표준 출력 백프레셔: 소비하지 않은 줄이 상한을 넘으면 읽기를 멈춰 자식이 쓰기에서 멈춘다(옛 readline 비동기 반복자의 highWaterMark 1024와 같은 성질) ──
+
+    fn temp_marker() -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("written").to_str().unwrap().to_owned();
+        (dir, marker)
+    }
+
+    /// 받은 줄 수만큼 소비를 알리는 소비자
+    fn consume_all(handle: Arc<CliHandle>, recorder: Arc<Mutex<Recorder>>) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut reported = 0;
+            loop {
+                let seen = recorder.lock().unwrap().lines.len();
+                if seen > reported {
+                    handle.consumed(seen - reported);
+                    reported = seen;
+                }
+                if !recorder.lock().unwrap().exits.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn child_blocks_while_lines_are_not_consumed_and_finishes_after_they_are() {
+        let (_dir, marker) = temp_marker();
+        let (on_event, recorder) = collector();
+        let (handle, pump) = spawn_cli(config(&format!("seq 1 200000; echo done > {marker}")), on_event);
+        let handle = Arc::new(handle);
+        let pump = start(pump);
+        // 소비하지 않는 동안 자식은 쓰기에서 막혀 있다
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(!std::path::Path::new(&marker).exists(), "소비하지 않았는데 자식이 다 썼다");
+        let received = recorder.lock().unwrap().lines.len();
+        assert!(received < 20_000, "상한 없이 읽었다: {received}줄");
+        // 소비하면 끝까지 간다
+        let consumer = consume_all(handle.clone(), recorder.clone());
+        pump.await;
+        consumer.await.unwrap();
+        assert!(std::path::Path::new(&marker).exists());
+        let recorder = recorder.lock().unwrap();
+        assert_eq!(recorder.lines.len(), 200_000);
+        assert!(recorder.lines.iter().enumerate().all(|(i, line)| *line == (i + 1).to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_pauses_at_high_and_resumes_below_low() {
+        let (on_event, recorder) = collector();
+        let mut cfg = config("seq 1 100000");
+        cfg.line_high = 100;
+        cfg.line_low = 10;
+        let (handle, pump) = spawn_cli(cfg, on_event);
+        let handle = Arc::new(handle);
+        let pump = start(pump);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let first = recorder.lock().unwrap().lines.len();
+        assert!((100..=20_000).contains(&first), "{first}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(recorder.lock().unwrap().lines.len(), first, "멈춘 동안 더 읽었다");
+        // 상한 아래로 내려도 low 위면 다시 읽지 않는다
+        handle.consumed(first - 50);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(recorder.lock().unwrap().lines.len(), first, "low 위에서 다시 읽었다");
+        // low 아래로 내려가면 다시 읽는다
+        handle.consumed(50);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(recorder.lock().unwrap().lines.len() > first);
+        let consumer = consume_all(handle.clone(), recorder.clone());
+        pump.await;
+        consumer.await.unwrap();
+        assert_eq!(recorder.lock().unwrap().lines.len(), 100_000);
+    }
+
+    #[tokio::test]
+    async fn killed_child_does_not_wait_for_consumption_to_report_exit() {
+        // 소비자가 없어 막힌 자식을 끝내도 끝 사건이 온다(옛 구현은 자식이 끝나면 남은 출력을 비워 close가 왔다)
+        let signals = Signals::default();
+        let (on_event, recorder) = collector();
+        let (handle, pump) = spawn_cli_with(config("seq 1 2000000"), on_event, signals.signaler());
+        let pump = start(pump);
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        handle.stop(StopMode::Now);
+        pump.await;
+        let recorder = recorder.lock().unwrap();
+        assert_eq!(recorder.exits.len(), 1);
+        assert_eq!(recorder.exits[0].signal, Some("SIGTERM".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn one_huge_line_is_received_whole_even_above_the_limit() {
+        let (on_event, recorder) = collector();
+        let mut cfg = config("head -c 3000000 /dev/zero | tr '\\0' 'x'; echo; echo after");
+        cfg.line_high = 1;
+        cfg.line_low = 0;
+        let (handle, pump) = spawn_cli(cfg, on_event);
+        let handle = Arc::new(handle);
+        let pump = start(pump);
+        let consumer = consume_all(handle, recorder.clone());
+        pump.await;
+        consumer.await.unwrap();
+        let recorder = recorder.lock().unwrap();
+        assert_eq!(recorder.lines.len(), 2);
+        assert_eq!(recorder.lines[0].len(), 3_000_000);
+    }
+
     #[tokio::test]
     async fn very_long_line_and_many_lines_arrive_whole() {
-        let (exit, recorder) = run(config("head -c 5000000 /dev/zero | tr '\\0' 'x'; echo; seq 1 30000"), |_| {}).await;
-        assert_eq!(exit.code, Some(0));
+        let (on_event, recorder) = collector();
+        let (handle, pump) = spawn_cli(config("head -c 5000000 /dev/zero | tr '\\0' 'x'; echo; seq 1 30000"), on_event);
+        let pump = start(pump);
+        let consumer = consume_all(Arc::new(handle), recorder.clone());
+        pump.await;
+        consumer.await.unwrap();
+        let recorder = recorder.lock().unwrap();
+        assert_eq!(recorder.exits[0].code, Some(0));
         assert_eq!(recorder.lines.len(), 30001);
         assert_eq!(recorder.lines[0].len(), 5_000_000);
         assert_eq!(recorder.lines[30000], "30000");
