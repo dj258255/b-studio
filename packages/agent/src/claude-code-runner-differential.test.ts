@@ -184,13 +184,13 @@ const NAMED: Case[] = [
   },
   {
     name: '되묻기(변경 있음, 게이트 통과)',
-    turns: [[edit('customerName;'), { tool: 'ask_user', input: { question: '계속할까요?', options: ['예'], allowOther: false } }]],
+    turns: [[edit('customerName;'), { tool: 'ask_user', input: { question: '계속할까요?', options: ['예', '아니오'], allowOther: false } }]],
     restarts: [true],
     options: () => ({ interactive: true }),
   },
   {
     name: '되묻기(변경 있음, 게이트 실패)',
-    turns: [[edit('customerNam; String broken;'), { tool: 'ask_user', input: { question: '계속할까요?', options: ['예'], allowOther: false } }]],
+    turns: [[edit('customerNam; String broken;'), { tool: 'ask_user', input: { question: '계속할까요?', options: ['예', '아니오'], allowOther: false } }]],
     restarts: [false],
     options: () => ({ interactive: true }),
   },
@@ -363,10 +363,35 @@ const NAMED: Case[] = [
   { name: '트러블슈팅 206: tool_use가 아닌 블록', turns: [[{ raw: { type: 'assistant', message: { id: 'm1', content: [{ type: 'server_tool_use', id: 'srv_1', name: 'mcp__b-studio__edit_file', input: {} }] }, parent_tool_use_id: null } }, { ...read, id: 'm1' }, { ...edit('customerName;'), callFirst: 150 }]], restarts: [true], options: () => ({ maxTurns: 1 }) },
   { name: '트러블슈팅 206: noMessage + 둘째 메시지가 상한을 넘김', turns: [[{ text: '첫 턴.' }, { ...edit('customerName;'), noMessage: true }, { text: '', delay: 300 }, { text: '둘째 턴.' }]], restarts: [true], options: () => ({ maxTurns: 1 }) },
   { name: '트러블슈팅 206: noMessage + 결과로 끝남', turns: [[{ text: '첫 턴.' }, { ...edit('customerName;'), noMessage: true }, { text: '', delay: 300 }]], restarts: [true] },
+  {
+    name: '결과를 만든 뒤 done 이벤트 처리가 던져도 판정을 지킨다(트러블슈팅 131)',
+    turns: [[{ text: '끝' }]],
+    onEvent: (event) => {
+      if (event.type === 'done') throw new Error('이벤트 처리 실패');
+    },
+  },
+  {
+    name: '결과를 만든 뒤 failed 이벤트 처리가 던져도 판정을 지킨다',
+    turns: [[{ text: '끝' }]],
+    result: { is_error: true, result: 'boom' },
+    onEvent: (event) => {
+      if (event.type === 'failed') throw new Error('이벤트 처리 실패');
+    },
+  },
+  {
+    name: '결과를 받기 전 이벤트 처리가 던지면 그대로 던진다',
+    turns: [[{ text: '끝' }]],
+    onEvent: (event) => {
+      if (event.type === 'turn') throw new Error('이벤트 처리 실패');
+    },
+  },
   { name: '질문 모드', turns: [[write('Q'), { text: '계획입니다.' }]], options: () => ({ intent: 'ask' }) },
   { name: '조사 모드', turns: [[{ text: '찾았습니다.' }]], options: () => ({ intent: 'ask', research: true }) },
   { name: '이어받기(유효한 UUID)', turns: [[{ text: '이어서' }]], options: () => ({ resume: UUID }), invocations: [{ sessionId: '22222222-2222-4222-8222-222222222222' }] },
   { name: '이어받기(UUID가 아님)', turns: [[{ text: '새 대화' }]], options: () => ({ resume: 'not-a-uuid' }) },
+  { name: '이어받기(16진수와 줄표뿐이지만 UUID 꼴이 아님)', turns: [[{ text: '새 대화' }]], options: () => ({ resume: 'abcd-ef01-abcd' }) },
+  { name: '이어받기(길이는 맞지만 줄표 자리가 어긋남)', turns: [[{ text: '새 대화' }]], options: () => ({ resume: '1111111111111-4111-8111-111111111111' }) },
+  { name: '글자 그대로의 예약 글자(U+E010)가 든 줄', turns: [[{ text: '앞\ue010\ue000\ue000\ue000뒤' }, { text: '\ue011\ue001\ue000' }]] },
   { name: '세션 id가 결과 뒤에 바뀜', turns: [[{ text: '끝' }]], invocations: [{ pre: [] }], result: { session_id: '33333333-3333-4333-8333-333333333333' } },
   { name: '짝 없는 서로게이트가 든 글', turns: [[{ raw: { type: 'assistant', message: { id: 'm1', content: [{ type: 'text', text: 'A\\ud800B' }] }, session_id: UUID } }]], invocations: [{ pre: ['{"type":"assistant","message":{"id":"m0","content":[{"type":"text","text":"x\\ud800y"}]}}'] }] },
   { name: '이상한 줄(JSON 아님·배열·모르는 type)', turns: [[{ text: '끝.' }]], invocations: [{ pre: ['이건 JSON이 아닙니다', '[1,2]', '', '   ', '"문자열"', 'null', { type: 'future_message_type', payload: 1 }, { type: 'system', subtype: 'future_subtype' }] }] },
