@@ -7,6 +7,7 @@
 pub mod browser;
 pub mod checkpoint_remote;
 pub mod cli_command;
+pub mod cli_process;
 pub mod container_verify;
 pub mod deploy_io;
 pub mod exec_stream;
