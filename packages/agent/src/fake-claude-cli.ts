@@ -16,6 +16,13 @@ export type FakeStep = ({ tool: string; input: Record<string, unknown> } | { tex
   id?: string;
   /** 도구 호출 앞에서 기다리는 시간(ms) */
   delay?: number;
+  /**
+   * 도구 요청을 먼저 보내고 이 시간(ms) 뒤에 그 호출이 든 assistant 메시지를 낸다. 진짜 CLI는 메시지를 먼저 쓰지만,
+   * 러너가 요청을 stdout 줄보다 먼저 처리하는 경우(다른 스레드의 HTTP 서버)를 흉내 낸다
+   */
+  callFirst?: number;
+  /** 도구 요청만 보내고 그 호출의 assistant 메시지는 내지 않는다. 응답도 기다리지 않고 다음 단계로 간다 */
+  noMessage?: boolean;
 };
 
 export interface FakeInvocation {

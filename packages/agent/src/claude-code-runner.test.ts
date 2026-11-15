@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
@@ -1318,5 +1318,103 @@ describe('runClaudeCodeAgent 턴 상한에 걸리면 되돌리기 전에 게이�
     expect(result.summary).toContain('최대 턴 수(2)를 넘었습니다');
     expect(result.incomplete).toBe('max_turns');
     expect(result.changedFiles).toEqual(['api/src/Order.java']);
+  });
+
+  // 진짜 CLI는 도구를 부르기 전에 그 호출이 든 assistant 메시지를 stdout에 쓴다. 그래도 러너가 HTTP 요청을 stdout 줄보다 먼저 처리할 수 있다
+  // (MCP 서버가 다른 스레드에서 요청을 다 읽고 콜백을 넣는다, ADR-201). 턴 세기와 턴 상한은 stdout 쪽에 있으므로, 도구는 그 메시지를 본 뒤에 실행한다
+  it('도구 요청이 그 호출이 든 assistant 메시지보다 먼저 와도 턴을 먼저 세고 도구를 실행한다', async () => {
+    const { cli } = fakeClaudeCode({ turns: [[{ tool: 'read_file', input: { path: 'api/src/Order.java' }, callFirst: 150 }, { text: '읽었습니다.' }]] });
+    const events: Array<{ event: AgentEvent; at: number }> = [];
+
+    const result = await runClaudeCodeAgent({ request: '읽어줘', project, sandbox: fakeSandbox(project, [true]), ...cli, fetcher: async () => contract, onEvent: (event) => events.push({ event, at: Date.now() }) });
+
+    expect(result.status).toBe('done');
+    const turn = events.findIndex(({ event }) => event.type === 'turn' && event.turn === 1);
+    const call = events.findIndex(({ event }) => event.type === 'tool_call' && event.name === 'read_file');
+    expect(turn).toBeGreaterThanOrEqual(0);
+    expect(call).toBeGreaterThan(turn);
+    // 메시지가 오면 바로 깨어난다(대기 상한까지 기다리지 않는다)
+    expect(events[call]!.at - events[turn]!.at).toBeLessThan(1_000);
+  });
+
+  it('턴 상한을 넘긴 턴의 도구 요청이 그 메시지보다 먼저 와도 실행하지 않는다', async () => {
+    const original = readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8');
+    const { cli } = fakeClaudeCode({
+      turns: [
+        [
+          { tool: 'read_file', input: { path: 'api/src/Order.java' } },
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' }, callFirst: 150 },
+        ],
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    const result = await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), ...cli, fetcher: async () => contract, maxTurns: 1, onEvent: (event) => events.push(event) });
+
+    expect(events.some((event) => event.type === 'tool_call' && event.name === 'edit_file')).toBe(false);
+    expect(readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8')).toBe(original);
+    expect(result.changedFiles).toEqual([]);
+  });
+
+  it('tool_use가 아닌 블록은 같은 이름이어도 그 도구의 메시지로 세지 않는다', async () => {
+    const original = readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8');
+    const { cli } = fakeClaudeCode({
+      turns: [
+        [
+          // 첫 턴(m1)에 이름만 같은 다른 종류의 블록이 있다. 이것을 세면 다음 턴의 edit_file 요청이 메시지 없이 풀린다
+          { raw: { type: 'assistant', message: { id: 'm1', content: [{ type: 'server_tool_use', id: 'srv_1', name: 'mcp__b-studio__edit_file', input: {} }] }, parent_tool_use_id: null } },
+          { tool: 'read_file', input: { path: 'api/src/Order.java' }, id: 'm1' },
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' }, callFirst: 150 },
+        ],
+      ],
+    });
+    const events: AgentEvent[] = [];
+
+    await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), ...cli, fetcher: async () => contract, maxTurns: 1, onEvent: (event) => events.push(event) });
+
+    expect(events.some((event) => event.type === 'tool_call' && event.name === 'edit_file')).toBe(false);
+    expect(readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8')).toBe(original);
+  });
+
+  it('메시지를 기다리던 도구 요청은 도구가 닫히면 바로 거절된다(대기 상한까지 붙잡지 않는다)', async () => {
+    const original = readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8');
+    const { cli } = fakeClaudeCode({
+      turns: [
+        [
+          { text: '첫 턴.' },
+          // 메시지 없이 요청만 온다. 300ms 뒤 둘째 메시지가 턴 상한(1)을 넘겨 도구를 닫는다
+          { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' }, noMessage: true },
+          { text: '', delay: 300 },
+          { text: '둘째 턴.' },
+        ],
+      ],
+    });
+    const events: Array<{ event: AgentEvent; at: number }> = [];
+
+    await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), ...cli, fetcher: async () => contract, maxTurns: 1, onEvent: (event) => events.push({ event, at: Date.now() }) });
+    const ended = Date.now();
+
+    const second = events.find(({ event }) => event.type === 'turn' && event.turn === 2);
+    expect(second).toBeDefined();
+    expect(ended - second!.at).toBeLessThan(1_000);
+    expect(events.some(({ event }) => event.type === 'tool_call' && event.name === 'edit_file')).toBe(false);
+    expect(readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8')).toBe(original);
+  });
+
+  it('메시지를 기다리던 도구 요청은 실행이 결과로 끝나도 바로 거절된다', async () => {
+    const original = readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8');
+    // 메시지 없이 요청만 오고, 300ms 뒤 CLI가 턴을 끝낸다(result). 실행이 끝나며 도구가 닫힌다
+    const { cli } = fakeClaudeCode({ turns: [[{ text: '첫 턴.' }, { tool: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'customerNam;', new_text: 'customerName;' }, noMessage: true }, { text: '', delay: 300 }]] });
+    const events: Array<{ event: AgentEvent; at: number }> = [];
+
+    await runClaudeCodeAgent({ request: '고쳐줘', project, sandbox: fakeSandbox(project, [true]), ...cli, fetcher: async () => contract, onEvent: (event) => events.push({ event, at: Date.now() }) });
+    const ended = Date.now();
+
+    const first = events.find(({ event }) => event.type === 'turn' && event.turn === 1);
+    expect(first).toBeDefined();
+    // 대기 상한(2초)까지 붙잡으면 끝나는 시각이 첫 턴에서 2초 넘게 뒤로 밀린다
+    expect(ended - first!.at).toBeLessThan(1_500);
+    expect(events.some(({ event }) => event.type === 'tool_call' && event.name === 'edit_file')).toBe(false);
+    expect(readFileSync(path.join(project.root, 'api/src/Order.java'), 'utf8')).toBe(original);
   });
 });
