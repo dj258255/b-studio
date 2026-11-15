@@ -155,7 +155,6 @@ import {
   type AgentUsage,
   type BaseStatus,
   type BoardAccess,
-  type BrowserFrame,
   type CheckpointRef,
   type Checkpoint,
   type DatabaseState,
@@ -276,7 +275,6 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
-import { clearFrames, publish } from './live-frames';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -299,7 +297,6 @@ import {
   type AgentGatewayAddress,
   type HostCliKind,
 } from '@b-studio/sandbox';
-import { closeAllRemoteBrowsers, closeRemoteBrowser } from './remote-browsers';
 import { closeAllServicePreviewProxies, closeServicePreviewProxies, ensureServicePreviewProxy } from './service-preview-proxy';
 import { codexContextBlock, rememberCodexRun, type CodexRunSummary } from './codex-context';
 import { resolveCommandCodeModel } from './commandcode-models';
@@ -1271,11 +1268,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   // 터미널이 부르던 관문도 닫는다. 그 뒤에 늦게 온 훅은 닿지 못하고, CLI는 막히지 않은 채 끝난다
   await closeSessionGateway(id).catch(() => {});
   await session.sandbox.destroy().catch(() => {});
-  // 원격 브라우저는 샌드박스 화면을 중계하므로 샌드박스와 함께 내린다
-  await closeRemoteBrowser(id).catch(() => {});
   // 로컬 미리보기 프록시(ADR-113)도 가리키던 서비스가 없어지므로 함께 닫는다
   await closeServicePreviewProxies(id).catch(() => {});
-  clearFrames(id);
   session.snapshot.running = false;
   // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
   for (const service of session.snapshot.services) {
@@ -1712,12 +1706,12 @@ export async function localPreviewUrl(id: string, service: string): Promise<stri
 }
 
 /**
- * 원격 브라우저가 열 미리보기 주소. iframe 미리보기와 같은 규칙(게이트웨이 주소가 있으면 그것, 없으면 서비스 주소)을 쓴다.
+ * 탐색 QA 브라우저가 열 미리보기 주소. iframe 미리보기와 같은 규칙(게이트웨이 주소가 있으면 그것, 없으면 서비스 주소)을 쓴다.
  * 서버가 직접 여는 주소이므로 다른 출처로 나가지 않도록 이 값만 넘긴다
  */
 export function remoteBrowserUrl(id: string, service: string): string {
   const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 원격 브라우저를 열 수 있습니다');
+  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 탐색 QA 브라우저를 열 수 있습니다');
   const view = session.snapshot.services.find((candidate) => candidate.name === service);
   if (!view) throw new StudioError(404, `${service} 서비스가 없습니다`);
   const url = view.previewUrl ?? view.url;
@@ -1726,7 +1720,7 @@ export function remoteBrowserUrl(id: string, service: string): string {
 }
 
 /**
- * 원격 브라우저가 요청해도 되는 출처 목록. 세션의 모든 서비스 주소(루프백·미리보기 게이트웨이)의 출처를 모은다.
+ * 탐색 QA 브라우저가 요청해도 되는 출처 목록. 세션의 모든 서비스 주소(루프백·미리보기 게이트웨이)의 출처를 모은다.
  * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 앱이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
  */
 export function remoteBrowserAllowedOrigins(id: string): string[] {
@@ -2651,18 +2645,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     policy: scopedExecutionPolicy(session.project, plan.writableScope),
     // 레인 조율 게시판. 없으면 도구 목록이 지금과 같다(기본값: 공유 없음)
     board: plan.board,
-    // 화면 확인이 찍은 스크린샷은 세션 폴더에 남기고, 실시간 프레임은 채널로만 보낸다(기록에 쌓지 않는다)
+    // 화면 확인이 찍은 스크린샷은 세션 폴더에 남긴다
     saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
-    onBrowserFrame: ({ check, frame }: { check: string; frame: BrowserFrame }) =>
-      publish(session.snapshot.id, {
-        source: 'qa',
-        check,
-        mime: 'image/jpeg',
-        data: frame.data.toString('base64'),
-        width: frame.width,
-        height: frame.height,
-        at: frame.at,
-      }),
     // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
     design: designSourceFor(session, run.id),
     // 되묻기(ask_user) 도구는 사람이 있는 단일 세션 요청에만 넣는다
@@ -7934,8 +7918,6 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
       onServiceStatus: serviceStatus,
       onEvent,
       saveArtifact: (input) => saveSessionArtifact(session, run.id, input),
-      onBrowserFrame: ({ check, frame }) =>
-        publish(session.snapshot.id, { source: 'qa', check, mime: 'image/jpeg', data: frame.data.toString('base64'), width: frame.width, height: frame.height, at: frame.at }),
     });
     const context: ToolContext = {
       project,
@@ -8743,8 +8725,6 @@ function registerCleanup(): void {
     // 터미널의 Ctrl+C와 next dev가 넘긴 신호가 함께 온다
     if (cleaning) return;
     cleaning = true;
-    // 남은 원격 브라우저 프로세스를 함께 내린다. 기다릴 수 없으므로 최선 노력으로 끝낸다
-    void closeAllRemoteBrowsers();
     void closeAllServicePreviewProxies();
     for (const session of store.sessions.values()) {
       if (session.snapshot.status === 'stopped') continue;

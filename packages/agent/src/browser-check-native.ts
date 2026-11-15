@@ -7,7 +7,7 @@ import { BrowserUnavailableError, MEDIA_ERROR_INIT_SCRIPT, StepFailedError, Step
  * 화면 확인 러너의 Rust 구현(ADR-199, ADR-195 4f A6a). `runInBrowser`(Playwright)와 같은 입력·출력·오류 타입을 쓴다.
  * 브라우저를 띄우고 페이지를 열어 결과를 모으는 일은 Rust(`crates/bstudio-io/src/browser`)가 하고, 여기는 값을 넘기고 오류를 옛 타입으로 바꾼다.
  *
- * 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷(`capture`)을 돈다(A6b). 화면 중계(`onFrame`, A6c)는 아직 지원하지 않으므로 조용히 무시하지 않고 던진다.
+ * 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷(`capture`)을 돈다(A6b).
  * 던지는 오류는 `BrowserUnavailableError`가 아니다(그러면 HTTP 확인으로 대신 통과한다).
  * 화면 글자·가로 넘침·`viewportTexts`·로드 시간은 페이지와 격리된 실행 환경에서 읽는다. 옛 러너는 페이지와 같은 실행 환경에서 읽어, 페이지가 전역을
  * 바꿔치면 위조된 값을 받는다(의도한 차이, ADR-199).
@@ -67,11 +67,8 @@ function toPageSteps(steps: readonly { label: string; ok: boolean; detail?: stri
   return steps.map((step) => ({ label: step.label, ok: step.ok, ...(step.detail !== undefined && step.detail !== null ? { detail: step.detail } : {}), ...(step.screenshot ? { screenshot: step.screenshot } : {}) }));
 }
 
-export const runInBrowserNative: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
+export const runInBrowserNative: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, measureLoad = false, signal }) => {
   signal?.throwIfAborted();
-  if (onFrame) {
-    throw new Error('Rust 화면 확인 러너는 화면 중계(onFrame)를 아직 지원하지 않습니다');
-  }
   const { pathname } = new URL(url);
   let result;
   try {

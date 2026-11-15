@@ -1,5 +1,5 @@
 //! 화면 확인 러너(ADR-199): 브라우저를 띄워 페이지를 열고 결과를 모은다. 옛 `runInBrowser`(Playwright)와 같은 결과를 낸다.
-//! 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷은 [`steps`]가, 격리된 실행 환경(utility world)은 [`utility`]가 맡는다(A6b). 화면 중계는 A6c다.
+//! 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷은 [`steps`]가, 격리된 실행 환경(utility world)은 [`utility`]가 맡는다(A6b). 화면 중계는 옮기지 않는다(A6c-2).
 //! 화면 값(글자·가로 넘침·`viewportTexts`·로드 시간)과 단계의 선택자 판정은 격리된 실행 환경에서 읽는다(페이지가 전역을 바꿔도 위조되지 않는다).
 //!
 //! 구조: 읽기 작업([`super::cdp`])이 CDP 틀을 순서대로 [`dispatch`]에 넘기고, 처리기는 공유 상태([`State`])만 고친다. 기다리는 쪽

@@ -4,7 +4,7 @@ import { lstat, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, encodeNative, native, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage } from '@b-studio/spec';
-import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
+import { BrowserUnavailableError, runInBrowser, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, type PageEvidenceContext } from './check-evidence';
 import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, weakenedDeclarations, withDeclaredChecks } from './declared-checks';
@@ -154,8 +154,6 @@ export interface GateOptions {
    * 넘기면 browser 모드 화면 확인이 capture를 켜고 단계 스크린샷을 WorkflowCheck.steps에 남긴다
    */
   saveArtifact?: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => Promise<string>;
-  /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
-  onBrowserFrame?: (input: { check: string; frame: BrowserFrame }) => void;
   /** 동시 요청 확인이 세션 서비스에 보내는 요청. 넘기지 않으면 실제 fetch를 쓴다 */
   requestService?: ServiceRequest;
   /**
@@ -539,9 +537,6 @@ export class VerificationGate {
           },
           get saveArtifact() {
             return gate.#options.saveArtifact;
-          },
-          get onBrowserFrame() {
-            return gate.#options.onBrowserFrame;
           },
           serviceOrigins: () => this.#serviceOrigins(),
           saveSteps: (name, steps) => this.#saveSteps(name, steps),

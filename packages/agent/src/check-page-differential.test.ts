@@ -5,7 +5,7 @@ import { PNG } from 'pngjs';
 import { encodeLoneSurrogates, native, type Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
-import { BrowserUnavailableError, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
+import { BrowserUnavailableError, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import { Gen } from './differential-kit';
 import { VerificationGate, type PageFetcher } from './gate';
 import { legacyCheck } from './gate-legacy';
@@ -39,8 +39,6 @@ interface Setup {
   endpoint?: (service: string) => string | Promise<string>;
   /** 'none'이면 saveArtifact를 넘기지 않는다. 함수면 그것이 저장한다 */
   save?: 'none' | ((name: string) => string | Promise<string>);
-  /** 러너가 부르는 프레임 전달을 받을 처리기를 넘긴다 */
-  frames?: boolean;
   signal?: AbortSignal;
 }
 
@@ -115,9 +113,8 @@ async function runWorld(mode: Mode, setup: Setup): Promise<{ trace: Trace; calls
       return setup.page ? setup.page(url, signal) : { status: 200, text: '<h1>주문 목록</h1>' };
     },
     browserRunner: async (url, options) => {
-      const { signal, onFrame, ...rest } = options;
-      calls.push(`browser:${url}:${JSON.stringify(rest)}:signal=${signal instanceof AbortSignal}:frame=${onFrame !== undefined}`);
-      onFrame?.({ kind: 'test' } as unknown as BrowserFrame);
+      const { signal, ...rest } = options;
+      calls.push(`browser:${url}:${JSON.stringify(rest)}:signal=${signal instanceof AbortSignal}`);
       return setup.browser ? setup.browser(url, options) : rendered;
     },
     ...(setup.save === 'none'
@@ -128,7 +125,6 @@ async function runWorld(mode: Mode, setup: Setup): Promise<{ trace: Trace; calls
             return typeof setup.save === 'function' ? setup.save(name) : `art-${(saved += 1)}`;
           },
         }),
-    ...(setup.frames ? { onBrowserFrame: ({ check }: { check: string }) => void calls.push(`frame:${check}`) } : {}),
     onEvent: (event: AgentEvent) => void events.push(JSON.stringify(event)),
   });
   await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
@@ -390,16 +386,15 @@ describe('브라우저 모드', () => {
     expect(pageCheck(legacy.trace).evidence).toEqual(expect.arrayContaining([expect.stringContaining('단계 1/2개 실행: click a → click b'), expect.stringContaining('로드 1,234.5ms (예산 5,000ms)'), expect.stringContaining('창 390x844')]));
   });
 
-  it('러너에 넘기는 옵션(viewport·viewportTexts·steps·measureLoad·capture·allowedOrigins·signal·onFrame)', async () => {
+  it('러너에 넘기는 옵션(viewport·viewportTexts·steps·measureLoad·capture·allowedOrigins·signal)', async () => {
     const legacy = await compare(() =>
-      oneB({ viewport: { width: 390, height: 844 }, expectInViewport: ['주문'], maxLoadMs: 100, steps: [{ action: 'click', selector: 'a' }] as never }, { frames: true, browser: () => view({ loadMs: 1, viewportTexts: { width: 1, height: 1, findings: [{ text: '주문', visible: true }] } }) }),
+      oneB({ viewport: { width: 390, height: 844 }, expectInViewport: ['주문'], maxLoadMs: 100, steps: [{ action: 'click', selector: 'a' }] as never }, { browser: () => view({ loadMs: 1, viewportTexts: { width: 1, height: 1, findings: [{ text: '주문', visible: true }] } }) }),
     );
     const call = legacy.calls.find((entry) => entry.startsWith('browser:'))!;
     expect(call).toContain('"measureLoad":true');
     expect(call).toContain('"capture":true');
     expect(call).toContain('"allowedOrigins":["http://127.0.0.1:1"]');
-    expect(call).toContain('signal=true:frame=true');
-    expect(legacy.calls).toContain('frame:api /orders (browser 390x844, 단계 1개)');
+    expect(call).toContain('signal=true');
   });
 
   it('saveArtifact가 없으면 capture는 끄고(비교도 없으면) 단계를 저장하지 않는다', async () => {

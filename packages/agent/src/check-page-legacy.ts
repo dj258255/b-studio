@@ -7,7 +7,7 @@
  * 껍데기)를 그대로 부른다 — 이 조각이 옮긴 것은 그 조각들을 잇는 순서·판정·글 조립이다.
  */
 import type { WorkflowPageCheck } from '@b-studio/spec';
-import { BrowserUnavailableError, StepFailedError, type BrowserFrame, type BrowserPageResult } from './browser-check';
+import { BrowserUnavailableError, StepFailedError, type BrowserPageResult } from './browser-check';
 import type { DeclaredHost } from './gate-check';
 import {
   containsApiValue,
@@ -38,7 +38,7 @@ function dynamicProbeStatusProblem(probedId: string, status: number | null): str
 /** 옛 `#checkPage` */
 export async function legacyCheckPage(host: DeclaredHost, page: WorkflowPageCheck, name: string, signal: AbortSignal, options: { auto?: boolean; probedId?: string; sampled?: string } = {}): Promise<string[]> {
   const ops = host.page;
-  const { sandbox, pageFetcher, browserRunner, saveArtifact, onBrowserFrame } = ops;
+  const { sandbox, pageFetcher, browserRunner, saveArtifact } = ops;
   const { pageMaps } = host;
   // 자동으로 연 페이지의 실패는 경로를 앞에 붙여, 실패 서명에서 선언한 pageChecks의 실패와 구분되게 한다
   const fail = (message: string) => new Error(sandbox.redact(options.auto ? `자동 페이지 ${page.path}: ${message}` : message));
@@ -60,7 +60,6 @@ export async function legacyCheckPage(host: DeclaredHost, page: WorkflowPageChec
         measureLoad: page.maxLoadMs !== undefined,
         capture: saveArtifact !== undefined || page.compare !== undefined,
         allowedOrigins: await ops.serviceOrigins(),
-        ...(onBrowserFrame ? { onFrame: (frame: BrowserFrame) => onBrowserFrame({ check: name, frame }) } : {}),
       });
     } catch (error) {
       // 헤드리스 브라우저를 못 띄우면(ADR-050은 원래 그대로 실패시킨다) fallbackProbe가 있는 확인만 대신 HTTP로 확인한다

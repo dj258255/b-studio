@@ -85,22 +85,11 @@ export {
   launchBrowser,
   runInBrowser,
   StepFailedError,
-  type BrowserFrame,
   type BrowserPageOptions,
   type BrowserPageResult,
   type BrowserPageStep,
   type BrowserRunner,
 } from './browser-check';
-export {
-  openRemoteBrowser,
-  type RemoteBrowser,
-  type RemoteBrowserKeyEvent,
-  type RemoteBrowserMouseEvent,
-  type RemoteBrowserOptions,
-  type RemoteBrowserPick,
-  type RemoteBrowserRect,
-  type RemoteBrowserViewport,
-} from './remote-browser';
 export { DatabaseBranches, describeDatabaseState, type DatabaseAction, type DatabaseState } from './database-branches';
 export {
   buildExploreQaResult,

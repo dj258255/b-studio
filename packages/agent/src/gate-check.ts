@@ -1,7 +1,7 @@
 import { setTimeout as sleep } from 'node:timers/promises';
 import { decodeNative, encodeNative, native, type LoadRequest, type Sandbox } from '@b-studio/sandbox';
 import { SPEC_FILE, type LoadedProject, type WorkflowPageCheck, type WorkflowStage } from '@b-studio/spec';
-import { BrowserUnavailableError, StepFailedError, type BrowserFrame, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
+import { BrowserUnavailableError, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import { TEST_TIMEOUT_MS, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
 import type { AgentEvent } from './loop';
 import { autoHandlers, autoInput } from './gate-auto';
@@ -87,7 +87,6 @@ export interface PageOps {
   readonly pageFetcher: PageFetcher;
   readonly browserRunner: BrowserRunner;
   readonly saveArtifact: ((input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => Promise<string>) | undefined;
-  readonly onBrowserFrame: ((input: { check: string; frame: BrowserFrame }) => void) | undefined;
   /** 화면 확인이 요청해도 되는 출처(세션의 모든 managed 서비스) */
   serviceOrigins(): Promise<string[]>;
   /** 단계 스크린샷을 저장하고 식별자를 붙인다. 저장 실패는 삼킨다(옛 그대로) */
@@ -273,7 +272,6 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
             capture: ops.saveArtifact !== undefined || page.compare !== undefined,
             // 세션 서비스의 출처 밖으로는 요청이 나가지 못하게 한다(모델이 만든 페이지를 통한 요청 위조 차단)
             allowedOrigins: await ops.serviceOrigins(),
-            ...(ops.onBrowserFrame ? { onFrame: (frame: BrowserFrame) => ops.onBrowserFrame!({ check: label, frame }) } : {}),
           });
         } catch (error) {
           if (error instanceof BrowserUnavailableError) return failure(error, { kind: 'unavailable' });

@@ -5,7 +5,7 @@ import { createPreviewProxy } from './preview-proxy';
 /**
  * 세션의 서비스마다 하나씩 띄우는 로컬 미리보기 프록시(ADR-113). 처음 요청이 오면 127.0.0.1의 임의 포트에 열고,
  * 세션이 멈출 때까지 그대로 둔다. 세션이 재시작해 서비스 주소(포트)가 바뀌어도 프록시를 다시 만들지 않고
- * entry.target만 갱신한다 — remote-browsers.ts와 같은 "HMR에도 살아남는 전역 Map" 패턴을 쓴다
+ * entry.target만 갱신한다 — "HMR에도 살아남는 전역 Map" 패턴을 쓴다
  */
 interface ProxyEntry {
   server: Server;

@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import type { Browser, Page } from 'playwright-core';
-import { createScreencast, launchBrowser, restrictPageToOrigins, type BrowserFrame, type OriginBlockEvent } from './browser-check';
+import { launchBrowser, restrictPageToOrigins, type OriginBlockEvent } from './browser-check';
 import type { AgentUsage, ModelClient } from './loop';
 import { trackPendingRequests, type PendingRequests } from './pending-requests';
 
@@ -113,8 +113,8 @@ function assertSameOrigin(url: string, allowedOrigins: ReadonlySet<string>): voi
 }
 
 /**
- * 탐색형 QA 전용 헤드리스 Chromium 한 장. browser_check·원격 브라우저와 별개 인스턴스를 띄우고,
- * 같은 restrictPageToOrigins·createScreencast를 재사용해 보안 경계와 실시간 중계 경로를 그대로 물려받는다(설계안 §6.6).
+ * 탐색형 QA 전용 헤드리스 Chromium 한 장. browser_check와 별개 인스턴스를 띄우고,
+ * 같은 restrictPageToOrigins를 재사용해 보안 경계를 그대로 물려받는다(설계안 §6.6).
  */
 export class QaBrowser {
   readonly #browser: Browser;
@@ -138,34 +138,24 @@ export class QaBrowser {
   /** 아직 끝나지 않은 요청. settle이 이것이 빌 때까지 기다린다. 페이지를 받는 순간부터 센다(없으면 기다림을 건너뛰게 되므로 선택 값으로 두지 않는다) */
   readonly #pending: PendingRequests;
   readonly #refs = new Map<string, { selector: string; stableSelector?: string; rect: QaElement['rect'] }>();
-  readonly #screencast: ReturnType<typeof createScreencast> | undefined;
   #refSeq = 0;
   #viewport: QaViewport;
 
-  private constructor(
-    browser: Browser,
-    page: Page,
-    allowedOrigins: Set<string>,
-    viewport: QaViewport,
-    screencast: ReturnType<typeof createScreencast> | undefined,
-  ) {
+  private constructor(browser: Browser, page: Page, allowedOrigins: Set<string>, viewport: QaViewport) {
     this.#browser = browser;
     this.#page = page;
     this.#allowedOrigins = allowedOrigins;
     this.#viewport = viewport;
-    this.#screencast = screencast;
     this.#pending = trackPendingRequests(page);
   }
 
-  static async open(url: string, options: { allowedOrigins: readonly string[]; viewport?: QaViewport; onFrame?: (frame: BrowserFrame) => void }): Promise<QaBrowser> {
+  static async open(url: string, options: { allowedOrigins: readonly string[]; viewport?: QaViewport }): Promise<QaBrowser> {
     const viewport = options.viewport ?? DEFAULT_EXPLORE_VIEWPORT;
     const allowedOrigins = new Set(options.allowedOrigins);
     const browser = await launchBrowser();
     try {
       const page = await browser.newPage({ viewport, serviceWorkers: 'block' });
-      // CDP 세션은 생성자보다 먼저 받아 둬야 해서(비동기), screencast를 만든 뒤 한 번에 인스턴스를 만든다
-      const screencast = options.onFrame ? createScreencast(await page.context().newCDPSession(page), viewport, options.onFrame) : undefined;
-      const instance = new QaBrowser(browser, page, allowedOrigins, viewport, screencast);
+      const instance = new QaBrowser(browser, page, allowedOrigins, viewport);
       const blockedUrls = new Set<string>();
       await restrictPageToOrigins(page, options.allowedOrigins, (event: OriginBlockEvent) => {
         blockedUrls.add(event.url);
@@ -197,7 +187,6 @@ export class QaBrowser {
       });
       page.on('requestfailed', (request) => recordFailure(request.url(), request.failure()?.errorText ?? 'failed'));
 
-      if (screencast) await screencast.start(viewport.width);
       assertSameOrigin(url, allowedOrigins);
       await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
       return instance;
@@ -410,7 +399,6 @@ export class QaBrowser {
   }
 
   async close(): Promise<void> {
-    await this.#screencast?.stop();
     await this.#browser.close().catch(() => {});
   }
 }
@@ -431,7 +419,7 @@ export function matchScore(entry: RawElement, needle: string): number {
   return native.exploreQaMatchScore(entry.name, entry.text, entry.role, entry.testId, entry.tag, needle);
 }
 
-/** remote-browser.ts의 describeElementSnippet·selectorFor와 같은 생각이되, 인터랙티브 요소 전체를 걷고 role+name/텍스트 고유성까지 본다 */
+/** 인터랙티브 요소 전체를 걷고 role+name/텍스트 고유성까지 본다 */
 function collectElementsScript(): string {
   return `(() => {
   const escape = (value) => (window.CSS && window.CSS.escape ? window.CSS.escape(value) : value);
@@ -920,8 +908,7 @@ export type ExploreQaEvent =
   | { type: 'action'; record: QaActionRecord }
   | { type: 'finding'; finding: QaFinding }
   | { type: 'rejection'; rejection: QaExpectedRejection }
-  | { type: 'text'; text: string }
-  | { type: 'frame'; frame: BrowserFrame };
+  | { type: 'text'; text: string };
 
 export interface RunExploreQaOptions {
   client: ModelClient;
@@ -930,7 +917,6 @@ export interface RunExploreQaOptions {
   startUrl: string;
   allowedOrigins: readonly string[];
   viewport?: QaViewport;
-  onFrame?: (frame: BrowserFrame) => void;
   onEvent?: (event: ExploreQaEvent) => void;
   /**
    * 주면 행동마다 뷰포트 스크린샷을 찍어 저장하고 식별자를 QaActionRecord.artifact에 남긴다(단계 타임라인 썸네일용).
@@ -1184,13 +1170,13 @@ const WRAP_UP_ROUNDS = 3;
  * 클라이언트나 테스트용 ScriptedModelClient를 그대로 꽂을 수 있다.
  */
 export async function runExploreQa(options: RunExploreQaOptions): Promise<ExploreQaResult> {
-  const { client, goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, saveArtifact, signal } = options;
+  const { client, goal, startUrl, allowedOrigins, viewport, onEvent, saveArtifact, signal } = options;
   const maxActions = goal.maxActions ?? DEFAULT_MAX_ACTIONS;
   const maxMs = goal.maxMs ?? DEFAULT_MAX_MS;
   const repeatLimit = goal.repeatLimit ?? DEFAULT_REPEAT_LIMIT;
   const deadline = Date.now() + maxMs;
 
-  const browser = await QaBrowser.open(startUrl, { allowedOrigins, ...(viewport ? { viewport } : {}), ...(onFrame ? { onFrame } : {}) });
+  const browser = await QaBrowser.open(startUrl, { allowedOrigins, ...(viewport ? { viewport } : {}) });
   try {
     const tools = buildQaTools();
     const system = buildQaSystemPrompt(goal);

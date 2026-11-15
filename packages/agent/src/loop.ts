@@ -305,8 +305,6 @@ export interface RunAgentOptions {
   browserRunner?: BrowserRunner;
   /** 화면 확인 스크린샷을 저장하고 식별자를 돌려준다. 저장은 호출자가 한다 (agent는 파일 위치를 모른다) */
   saveArtifact?: GateOptions['saveArtifact'];
-  /** 화면 확인 중 받은 실시간 프레임. 미리보기 중계에 쓴다 */
-  onBrowserFrame?: GateOptions['onBrowserFrame'];
   /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘긴다(없으면 디자인 도구가 목록에 없다) */
   design?: DesignSource;
   /** true면 ask_user 도구를 넣는다. 단일 세션의 사용자 요청에만 켠다(레인·벤치·CLI는 기본 false) */
@@ -391,7 +389,6 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
     pageFetcher,
     browserRunner,
     saveArtifact,
-    onBrowserFrame,
     design,
     interactive = false,
     intent = 'build',
@@ -427,7 +424,6 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       pageFetcher,
       browserRunner,
       saveArtifact,
-      onBrowserFrame,
       signal,
       onServiceStatus,
       onEvent,

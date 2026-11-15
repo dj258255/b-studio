@@ -10248,7 +10248,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ## ADR-199 화면 확인 러너를 Rust CDP로 옮긴다: 파이프로 Chromium을 직접 말하고, 출처 제한 두 층은 같은 판정으로 옮긴다
 
-상태: 채택(A6a: 단계 없는 확인, A6b: 단계·스크린샷·격리된 실행 환경, 화면 중계와 게이트 기본값 전환은 A6c)
+상태: 채택(A6a: 단계 없는 확인, A6b: 단계·스크린샷·격리된 실행 환경, A6c-1: headless shell, A6c-2: 화면 중계는 옮기지 않고 지움, 게이트 기본값 전환은 A6c-3)
 관련: 이슈 [#1212](https://github.com/dj258255/b-studio/issues/1212), ADR-191(Rust로 단계적 이전), ADR-192(실행 파일 하나), ADR-193(I/O), ADR-195(4f A6), ADR-198(출처 제한 두 층)
 
 ### 맥락
@@ -10428,3 +10428,14 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 **남은 것.** 운영 이미지(`apps/studio/Dockerfile`)와 CI는 Playwright 브라우저를 설치하지 않는다(CI는 실행 머신의 시스템 Chrome으로 돈다). 끝 모양(Node 없는 실행 파일)에서는 이 설치 목록을 읽을 수 없으므로, C1 전에 Rust가 headless shell을 직접 찾는 규칙이 필요하다.
 
+### A6c-2 덧붙임: 화면 중계(onFrame)는 옮기지 않고 지운다 (2026-11-15)
+
+**무엇을 바꿨나.** A6a부터 "화면 중계(`onFrame`)는 A6c에서 옮긴다"고 적었다. 옮기려고 받는 쪽을 따라가 보니 **받는 쪽이 없었다.** 게이트의 화면 확인은 `onBrowserFrame` → 스튜디오의 `live-frames` 채널로 프레임을 보냈는데, 그 채널을 구독하던 유일한 경로 `app/api/sessions/[id]/frames/route.ts`는 #1016(2026-11-06, 웹 화면 시절 API 경로 삭제)에서 지워졌다. 그 뒤로는 시험 파일만 구독했다. 원격 브라우저(`remote-browsers.ts`, `packages/agent/src/remote-browser.ts`)도 여는 경로가 같은 PR에서 지워져 닫기 함수만 빈 목록을 돌고 있었다.
+
+그래서 CDP `Page.startScreencast`를 Rust로 옮기지 않고, 옛 러너 쪽의 프레임 경로를 지웠다(#1227): 게이트의 `onBrowserFrame` 사슬, `live-frames`, `createScreencast`·`BrowserFrame`·`BrowserPageOptions.onFrame`, 탐색 QA(실험)의 프레임 전달, 원격 브라우저 잔여 코드. `runInBrowserNative`가 `onFrame`을 받으면 던지던 거절도 없어졌다(옵션 자체가 없다). desk 미리보기 탭의 안내에서도 지운 기능(원격 브라우저 등)을 뺐다.
+
+**버린 것.** 화면 중계를 Rust로 옮기기: 받는 쪽이 없어 옮겨도 아무도 보지 않는다. desk에 다시 화면을 보여 줄 일이 생기면 그때 받는 쪽부터 설계한다(터미널에서는 그림을 그대로 보일 수 없어 방식부터 다르다).
+
+**바뀌지 않은 것.** 게이트의 판정, 출처 제한 두 층, 스크린샷 저장(`capture`·`saveArtifact`)은 그대로다. 옛 `runInBrowser`의 본문은 화면 중계를 켜고 끄던 안쪽 `try/finally`만 풀렸고(들여쓰기만 바뀜), 브라우저를 닫는 바깥 `finally`는 같다.
+
+**남은 것.** 게이트의 기본 `browserRunner`를 `runInBrowserNative`로 바꾸고 실제 세션에서 재는 일(A6c-3).
