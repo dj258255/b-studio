@@ -182,6 +182,8 @@ struct State {
     utility: UtilityWorld,
     /// 아직 끝나지 않은 요청의 id(단계 뒤 요청 기다리기, #684). 파비콘은 세지 않고, 이벤트 스트림은 응답의 머리가 오면 뺀다
     pending_requests: HashSet<String>,
+    /// 워밍업 뒤 측정 문서가 아직 커밋되지 않았다(#1236). 그사이 온 페이지 오류·console 오류·미디어 오류는 워밍업 문서의 늦은 것이라 커밋 때 버린다
+    awaiting_measured_commit: bool,
 }
 
 impl State {
@@ -205,6 +207,23 @@ impl State {
         self.seen_urls.clear();
         self.blocked_inside.clear();
         self.paused_network_ids.clear();
+        // 거절된 약속의 오류(unhandledrejection)는 load 뒤에 올 수 있다. 측정 문서가 커밋될 때 한 번 더 비운다(#1236)
+        self.awaiting_measured_commit = true;
+    }
+
+    /// 측정 문서(메인 프레임의 새 문서)가 커밋됐다. 커밋 전에는 측정 문서의 스크립트가 돌 수 없으므로(CDP 이벤트는 세션 안에서 순서대로 온다)
+    /// 그사이 쌓인 페이지 오류·console 오류·미디어 오류는 모두 워밍업 문서의 것이다. 요청 기록은 측정 문서의 요청이 커밋 전에 오므로 건드리지 않는다
+    /// 측정 이동이 끝났다. 커밋이 없었으면(같은 문서 안의 이동) 비우지 않고 기다림만 끝낸다 — 남기면 나중의 이동이 측정한 오류를 지운다
+    fn measured_navigation_finished(&mut self) {
+        self.awaiting_measured_commit = false;
+    }
+
+    fn measured_document_committed(&mut self) {
+        if std::mem::take(&mut self.awaiting_measured_commit) {
+            self.page_errors.clear();
+            self.console_errors.clear();
+            self.media_errors.clear();
+        }
     }
 
     /// 실패한 요청 하나를 기록한다. 파비콘은 센 적도 없고, 같은 URL은 첫 기록만 남기며, 경계에서 막은 요청은 앱의 오류가 아니다
@@ -399,6 +418,7 @@ fn dispatch(shared: &Arc<Shared>, state: &mut State, event: Event) {
                         // 메인 프레임의 새 문서: 옛 문서의 격리된 실행 환경은 쓰지 않는다(옛 id로 평가하면 "없음"으로 읽힌다)
                         if state.frames().main_frame_id() == Some(frame_id) {
                             state.utility.invalidate();
+                            state.measured_document_committed();
                         }
                     }
                 }
@@ -409,7 +429,12 @@ fn dispatch(shared: &Arc<Shared>, state: &mut State, event: Event) {
                 }
                 "Runtime.executionContextsCleared" => state.utility.invalidate(),
                 "Page.navigatedWithinDocument" => {
-                    state.frames().frame_committed_same_document(str_at(params, "/frameId").unwrap_or_default(), str_at(params, "/url").unwrap_or_default());
+                    let frame_id = str_at(params, "/frameId").unwrap_or_default();
+                    state.frames().frame_committed_same_document(frame_id, str_at(params, "/url").unwrap_or_default());
+                    // 측정 이동이 새 문서를 만들지 않았다: 비우지 않고 기다림만 끝낸다(#1236)
+                    if state.frames().main_frame_id() == Some(frame_id) {
+                        state.measured_navigation_finished();
+                    }
                 }
                 "Page.frameRequestedNavigation" => {
                     if str_at(params, "/disposition") == Some("currentTab") {
@@ -1026,7 +1051,10 @@ async fn drive(shared: &Arc<Shared>, input: &BrowserRunInput, session: &Session,
         goto(shared, &page, &input.url).await?;
         shared.state.lock().unwrap().reset_collected();
     }
-    let status = goto(shared, &page, &input.url).await?;
+    let status = goto(shared, &page, &input.url).await;
+    // 측정 이동이 끝났으면 커밋을 기다리지 않는다. 남겨 두면 단계가 일으킨 이동이 측정한 오류를 지운다(#1236)
+    shared.state.lock().unwrap().measured_navigation_finished();
+    let status = status?;
     // 네트워크가 잠잠해질 때까지 상한까지 기다린다. 상한을 넘겨도 오류로 만들지 않는다. 연결이 끊겼으면 오류다
     let from = shared.state.lock().unwrap().frames().lifecycle_log.len();
     match wait_until(shared, Instant::now() + SETTLE_TIMEOUT, |state| state.frames().main_has_lifecycle("networkidle", from).then_some(())).await {
@@ -1533,6 +1561,70 @@ mod tests {
         assert!(shared.state.lock().unwrap().utility.current().is_some());
         send(&shared, "Runtime.executionContextsCleared", json!({}));
         assert!(shared.state.lock().unwrap().utility.current().is_none());
+    }
+
+    /// #1236: 워밍업 이동의 거절 오류(unhandledrejection)는 load 뒤에 올 수 있다. 비운 뒤 측정 문서가 커밋되기 전에 온 것은 워밍업 문서의 것이라 버린다.
+    /// 측정 문서의 스크립트는 커밋 뒤에만 돌므로(CDP 이벤트는 세션 안에서 순서대로 온다) 측정 문서의 오류는 버리지 않는다
+    #[tokio::test]
+    async fn late_warmup_errors_before_the_measured_document_commits_are_dropped() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        let thrown = |text: &str| json!({ "exceptionDetails": { "exception": { "type": "object", "description": format!("Error: {text}\n    at x") } } });
+        let console = |text: &str| json!({ "type": "error", "args": [{ "type": "string", "value": text }], "executionContextId": 5 });
+        send(&shared, "Runtime.exceptionThrown", thrown("warmup"));
+        shared.state.lock().unwrap().reset_collected();
+        // 비운 뒤에 온 워밍업 문서의 늦은 오류
+        send(&shared, "Runtime.exceptionThrown", thrown("rejected late"));
+        send(&shared, "Runtime.consoleAPICalled", console("late console"));
+        send(&shared, "Runtime.bindingCalled", json!({ "name": "__bStudioMediaError__", "payload": "img late" }));
+        // 하위 프레임의 이동은 측정 문서의 커밋이 아니다
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "CHILD", "parentId": "MAIN", "url": "http://h/c", "loaderId": "L2" } }));
+        assert_eq!(shared.state.lock().unwrap().page_errors, vec!["rejected late".to_owned()]);
+        // 측정 문서가 커밋된다
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "MAIN", "url": "http://h/page", "loaderId": "L3" } }));
+        send(&shared, "Runtime.exceptionThrown", thrown("boom"));
+        send(&shared, "Runtime.consoleAPICalled", console("real console"));
+        {
+            let state = shared.state.lock().unwrap();
+            assert_eq!(state.page_errors, vec!["boom".to_owned()]);
+            assert_eq!(state.console_errors, vec!["real console".to_owned()]);
+            assert!(state.media_errors.is_empty());
+        }
+        // 그 뒤의 메인 프레임 이동(페이지가 스스로 옮겨 감)은 측정한 오류를 지우지 않는다
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "MAIN", "url": "http://h/next", "loaderId": "L4" } }));
+        assert_eq!(shared.state.lock().unwrap().page_errors, vec!["boom".to_owned()]);
+    }
+
+    /// 측정 이동이 새 문서를 만들지 않으면(같은 문서 안의 이동) 비우지 않고 기다림만 끝낸다. 남겨 두면 나중의 단계가 일으킨
+    /// 메인 프레임 이동이 측정 중 모은 오류를 지운다(통과 쪽으로 틀린다). 측정 이동이 끝난 뒤에도 같다
+    #[tokio::test]
+    async fn waiting_for_the_measured_commit_ends_without_clearing_on_same_document_navigation_or_after_goto() {
+        let thrown = |text: &str| json!({ "exceptionDetails": { "exception": { "type": "object", "description": format!("Error: {text}\n    at x") } } });
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        shared.state.lock().unwrap().reset_collected();
+        send(&shared, "Page.navigatedWithinDocument", json!({ "frameId": "MAIN", "url": "http://h/page#x" }));
+        send(&shared, "Runtime.exceptionThrown", thrown("measured"));
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "MAIN", "url": "http://h/next", "loaderId": "L2" } }));
+        assert_eq!(shared.state.lock().unwrap().page_errors, vec!["measured".to_owned()]);
+
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        shared.state.lock().unwrap().reset_collected();
+        shared.state.lock().unwrap().measured_navigation_finished();
+        send(&shared, "Runtime.exceptionThrown", thrown("from a step"));
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "MAIN", "url": "http://h/next", "loaderId": "L2" } }));
+        assert_eq!(shared.state.lock().unwrap().page_errors, vec!["from a step".to_owned()]);
+    }
+
+    /// 워밍업이 없는 실행(measureLoad 꺼짐)에서는 메인 프레임 이동이 오류를 지우지 않는다(지우면 통과 쪽으로 틀린다)
+    #[tokio::test]
+    async fn main_frame_navigation_without_warmup_keeps_errors() {
+        let (shared, _server) = fake_shared(None);
+        page_session(&shared);
+        send(&shared, "Runtime.exceptionThrown", json!({ "exceptionDetails": { "exception": { "type": "object", "description": "Error: before redirect\n    at x" } } }));
+        send(&shared, "Page.frameNavigated", json!({ "frame": { "id": "MAIN", "url": "http://h/next", "loaderId": "L2" } }));
+        assert_eq!(shared.state.lock().unwrap().page_errors, vec!["before redirect".to_owned()]);
     }
 
     #[tokio::test]

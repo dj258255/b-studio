@@ -35,6 +35,10 @@ function route(path: string): { status?: number; type?: string; body: string | B
       return { body: page('<h1 id="t"></h1>' + scripts(`document.getElementById('t').textContent = '주문 목록'`)) };
     case '/plain':
       return { body: page('<p>평범한 화면</p>') };
+    // #1236: load 30ms 뒤에 거절되는 약속. 응답을 300ms 늦추면 measureLoad의 측정 문서가 커밋되기 전에 워밍업 문서의 이 오류가
+    // 비운 뒤에 반드시 온다(경쟁을 확정적으로 만든다). 측정 문서의 같은 오류는 네트워크가 잠잠해지기를 기다리는 동안 온다
+    case '/late-rejection':
+      return { body: page('<p>늦은 거절</p>' + scripts(`addEventListener('load', () => { setTimeout(() => { Promise.reject(new Error('late after load')); }, 30); })`)), delay: 300 };
     case '/console-forms':
       return {
         body: page(
@@ -497,6 +501,13 @@ describe('Rust 러너는 옛 러너와 같은 결과를 낸다 (ADR-199)', { tim
     expect([...native.blockedRequests].sort()).toEqual([`${outsideBase}/data.json`, `${outsideBase}/pixel.png`, `https://127.0.0.1:${outsidePort}/tls.json`, `https://127.0.0.1:${outsidePort}/tls.png`].sort());
     // 막은 요청은 앱의 실패가 아니다
     expect(native.failedRequests).toEqual([]);
+  });
+
+  it('measureLoad의 워밍업 문서가 load 뒤에 낸 거절 오류는 둘 다 측정에 섞지 않는다(#1236)', async () => {
+    // 측정 문서의 오류는 한 번만 남아야 한다. 고치기 전에는 두 러너 모두 두 번 셌다
+    const { old, native } = await compare('/late-rejection', { measureLoad: true });
+    expect(old.pageErrors.filter((line) => line === 'late after load')).toHaveLength(1);
+    expect(native.pageErrors.filter((line) => line === 'late after load')).toHaveLength(1);
   });
 
   it('measureLoad를 켜면 둘 다 loadMs를 0 이상으로 재고, 워밍업 이동의 오류는 비운다', async () => {
