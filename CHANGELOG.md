@@ -12,6 +12,7 @@
 
 ### 바뀜
 
+- 훅 서버(`startHookServer`)의 전송을 `node:http`에서 Rust(`crates/bstudio-io/src/loopback_server.rs`)로 옮겼습니다(ADR-201, ADR-195 4f A7a, #1239). 시그니처와 응답은 그대로이고, 포트 열기·Host와 토큰 확인·라우트 원문 비교·본문 4MiB 상한·닫기를 Rust가 하며 본문 해석과 처리는 TS가 합니다. HTTP 머리는 Node(llhttp)보다 좁은 꼴만 받고 모르는 꼴은 응답 없이 끊습니다.
 - 이 컴퓨터 방식 세션 터미널과 터미널 작업대(desk)가 지원 범위에 들어가, 개인 PC 모드면 `B_STUDIO_EXPERIMENTAL` 없이 열립니다(ADR-200, #1234). 컨테이너 방식(`B_STUDIO_TERMINAL=container`)은 실험이라 계속 그 값을 켜야 열리고, 인증을 켠 서버에서는 어느 방식도 열리지 않습니다. `/api/health`의 `terminal`도 같은 판정입니다. Rust 이전 4g 전에는 실험 기능을 기능마다 물어 하나씩 지웁니다. 실험 기능을 끈 서버에서는 desk의 작업 나누기(`Ctrl-b t`)·여러 AI 비교(`Ctrl-b f`)가 열리지 않고 알림만 보입니다(`/api/health`에 `experimental`을 더함).
 - 게이트의 화면 확인이 기본으로 Rust 러너(`runInBrowserNative`)를 씁니다(ADR-199 A6c-3, #1212). 옛 Playwright 러너(`runInBrowser`)는 차등 시험의 기준값으로만 남습니다. 화면 글자·가로 넘침·첫 화면 글자·로드 시간을 페이지와 격리된 실행 환경에서 읽으므로, 페이지가 전역을 바꿔 위조한 글자로는 더 이상 통과하지 않습니다(옛 러너는 통과시켰습니다). Playwright의 headless shell을 찾지 못하면 설치된 Chrome 다음에 전체 Chromium을 시도해, 브라우저를 못 찾아 HTTP 확인으로 약해지는 일을 줄였습니다.
 - 받는 쪽이 지워진 화면 프레임 중계(`onBrowserFrame`·`live-frames`·`createScreencast`·`BrowserFrame`)와 원격 브라우저 잔여 코드(`remote-browsers.ts`·`remote-browser.ts`)를 지웠습니다. 게이트의 화면 확인 판정과 스크린샷 저장은 그대로입니다. desk 미리보기 탭의 안내도 지운 기능(원격 브라우저 등)을 더는 말하지 않습니다(#1227).

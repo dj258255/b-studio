@@ -143,6 +143,19 @@ interface NativeGuard {
   verifyRun(op: string, input: string, hook: (request: string) => Promise<string>): Promise<string>;
   /** 게이트 check의 상태 기계(ADR-195 4f A5b-1). `input`·결과는 JSON. `hook`은 요청(JSON)을 받아 응답(JSON)을 돌려준다. 던지지 않고 결과의 `ok`·`kind`로 돌려준다 */
   gateCheckRun(input: string, hook: (request: string) => Promise<string>): Promise<string>;
+  /**
+   * 루프백 서버의 전송(ADR-201, 4f A7a). Rust가 127.0.0.1의 임의 포트를 열고 Host·토큰·메서드·라우트·본문 상한(4MiB)을 확인한 뒤, 라우트에 맞은 요청의
+   * 원래 바이트를 `handler`에 넘긴다. `routes`는 요청 대상 원문(쿼리 포함)이고 `handler`가 받는 `route`는 그 번호다. 토큰·허용 이름·라우트는 `encodeLoneSurrogates`한 꼴로 넘긴다.
+   * 서버가 열려 있는 동안 Node 프로세스는 끝나지 않는다(`closeLoopbackServer`를 불러야 끝난다). `handler`가 던지면 그 요청은 500이다
+   */
+  startLoopbackServer(
+    token: string,
+    allowedHosts: string[],
+    routes: string[],
+    handler: (request: NativeLoopbackRequest) => Promise<NativeLoopbackResponse>,
+  ): Promise<{ id: number; port: number }>;
+  /** 새 연결을 받지 않고 열린 연결(처리 중인 것 포함)을 끊고, 끝나면 resolve한다. 모르는 id·이미 닫은 id는 아무 일도 하지 않는다 */
+  closeLoopbackServer(id: number): Promise<void>;
   runCommandBytes(bin: string, args: string[], input: Buffer | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, maxBuffer: number, signal: AbortSignal | undefined | null): Promise<BytesResult>;
   runArchiveExtract(gitBin: string, gitArgs: string[], gitEnv: Record<string, string> | undefined | null, dest: string): Promise<ArchiveExtractResult>;
   // ── I/O: 링크 안전 파일 시스템 준비(2단계 2c-1b). 아무것도 재귀로 따라가며 지우지 않는다(링크는 링크만).
@@ -780,6 +793,17 @@ export interface NativeVisualCompare {
   width: number;
   height: number;
   diff?: Buffer | null;
+}
+
+/** 루프백 서버가 콜백에 넘기는 요청. `body`는 받은 그대로의 바이트다(해석하지 않는다) */
+export interface NativeLoopbackRequest {
+  route: number;
+  body: Buffer;
+}
+
+export interface NativeLoopbackResponse {
+  status: number;
+  body: Buffer;
 }
 
 export interface NativeHostPty {

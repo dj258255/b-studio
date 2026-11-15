@@ -94,7 +94,7 @@ b-studio가 **지원한다고 말하는 범위**는 좁습니다: 한 세션에 
   - → 09-13 이후 멀티 모델 라우터, Agent Fleet, 워크플로 강제, 작업 분해 같은 기능은 PR 없이 main에 바로 커밋했습니다.
   - → 화면 문법 정리 작업은 이슈 [#39](https://github.com/dj258255/b-studio/issues/39)와 PR [#40](https://github.com/dj258255/b-studio/pull/40)으로 2026-09-24에 병합됐습니다.
 
-설계 판단은 [ADR](decisions.md)에 적었습니다. 이 절을 처음 쓸 때 77개였고 2026-11-15 기준 200개입니다(`grep -c "^## ADR-" docs/decisions.md`).
+설계 판단은 [ADR](decisions.md)에 적었습니다. 이 절을 처음 쓸 때 77개였고 2026-11-15 기준 201개입니다(`grep -c "^## ADR-" docs/decisions.md`).
 
 - 판단마다 근거를 남겼습니다.
   - → 샌드박스 제공자를 추상화한 근거는 ADR-006에 있습니다.

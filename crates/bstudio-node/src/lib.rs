@@ -5395,3 +5395,83 @@ pub fn run_browser_check(env: Env, input: BrowserRunInputJs, signal: Option<Abor
 pub fn browser_is_allowed_url(url: String, allowed_origins: Vec<String>) -> bool {
     brw::origin::is_allowed_url(&url, &allowed_origins)
 }
+
+// ── 루프백 서버의 전송(ADR-201, 4f A7a) ──
+// 리스너·Host/토큰·라우트·본문 상한·닫기는 bstudio-io(loopback_server)가 하고, 라우트에 맞은 요청의 **원래 바이트**를 `handler`(JS)에 넘긴다.
+// 처리와 본문 해석은 TS가 한다(packages/agent/src/hook-server.ts). 서버가 열려 있는 동안 `handler`(ThreadsafeFunction)가 Node 이벤트 루프를 붙잡고
+// (옛 `node:http` 서버처럼), `close`로 서버가 버려질 때 함께 풀린다. 문자열(토큰·허용 이름·라우트)은 `encodeLoneSurrogates`한 꼴이다
+use bstudio_io::loopback_server as lsv;
+use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+use std::sync::Mutex;
+
+/// 콜백에 가는 요청. `route`는 시작할 때 준 `routes`의 번호, `body`는 받은 그대로의 바이트다
+#[napi(object)]
+pub struct LoopbackRequestJs {
+    pub route: u32,
+    pub body: Buffer,
+}
+
+/// 콜백이 돌려주는 답. 응답 content-type은 application/json 고정이다
+#[napi(object)]
+pub struct LoopbackResponseJs {
+    pub status: u32,
+    pub body: Buffer,
+}
+
+#[napi(object)]
+pub struct LoopbackStartedJs {
+    pub id: u32,
+    pub port: u32,
+}
+
+static LOOPBACK_SERVERS: Mutex<Vec<(u32, Arc<lsv::LoopbackServer>)>> = Mutex::new(Vec::new());
+static LOOPBACK_NEXT_ID: AtomicU32 = AtomicU32::new(1);
+
+/// 서버를 열고 id와 실제 포트를 돌려준다. 콜백이 던지거나 답을 주지 못하면 그 요청은 500이다(처리를 거절로 본다)
+#[napi]
+pub fn start_loopback_server(
+    env: Env,
+    token: String,
+    allowed_hosts: Vec<String>,
+    routes: Vec<String>,
+    handler: ThreadsafeFunction<LoopbackRequestJs, Promise<LoopbackResponseJs>, LoopbackRequestJs, Status, false>,
+) -> Result<AsyncBlock<LoopbackStartedJs>> {
+    let handler = Arc::new(handler);
+    AsyncBlockBuilder::new(async move {
+        let callback: lsv::Handler = Arc::new(move |request: lsv::HandlerRequest| {
+            let handler = handler.clone();
+            Box::pin(async move {
+                let failed = || lsv::HandlerResponse { status: 500, body: br#"{"error":"internal"}"#.to_vec() };
+                let call = LoopbackRequestJs { route: request.route as u32, body: request.body.into() };
+                let Ok(pending) = handler.call_async(call).await else { return failed() };
+                match pending.await {
+                    Ok(answer) => lsv::HandlerResponse { status: u16::try_from(answer.status).unwrap_or(500), body: answer.body.to_vec() },
+                    Err(_) => failed(),
+                }
+            })
+        });
+        let config = lsv::LoopbackConfig { token, allowed_hosts, routes, handler: callback, max_body_bytes: lsv::MAX_BODY_BYTES };
+        let server = lsv::LoopbackServer::start(config).await.map_err(|error| Error::from_reason(error.to_string()))?;
+        let port = u32::from(server.port);
+        let id = LOOPBACK_NEXT_ID.fetch_add(1, AtomicOrdering::Relaxed);
+        LOOPBACK_SERVERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push((id, Arc::new(server)));
+        Ok(LoopbackStartedJs { id, port })
+    })
+    .build(&env)
+}
+
+/// 새 연결을 받지 않고 열린 연결(처리 중인 것 포함)을 끊고, 끝나면 돌아온다. 모르는 id나 이미 닫은 id는 아무 일도 하지 않는다
+#[napi]
+pub fn close_loopback_server(env: Env, id: u32) -> Result<AsyncBlock<()>> {
+    AsyncBlockBuilder::new(async move {
+        let server = {
+            let mut servers = LOOPBACK_SERVERS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            servers.iter().position(|(known, _)| *known == id).map(|at| servers.remove(at).1)
+        };
+        if let Some(server) = server {
+            server.close().await;
+        }
+        Ok(())
+    })
+    .build(&env)
+}
