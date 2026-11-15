@@ -1542,10 +1542,19 @@ async function recover(): Promise<void> {
 
     // idle은 샌드박스를 한 번도 켜지 않은 세션이라 정리할 컨테이너가 없다. 끼어든 요청도 없다
     const interrupted = data.snapshot.status !== 'stopped' && data.snapshot.status !== 'idle';
+    // 저장한 기록을 세션 기록(Rust)에 올리지 못하면(예: JSON.stringify가 재귀 깊이로 던지는 손으로 고친 파일) 그 세션만 건너뛴다.
+    // 파일은 그대로 두고, 다른 세션의 복구는 이어간다
+    let record: SessionRecord;
+    try {
+      record = new SessionRecord({ logs: false, history: closeUnfinished(data.history, interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP) });
+    } catch (error) {
+      console.error(`[b-studio] 세션 ${id}의 저장한 기록을 읽지 못해 복구하지 않았습니다`, describe(error));
+      continue;
+    }
     const entry: ArchivedSession = {
       data,
       snapshot: archivedSnapshot(data, interrupted ? '스튜디오 서버가 다시 시작돼 이전 샌드박스를 정리하는 중입니다.' : undefined),
-      record: new SessionRecord({ logs: false, history: closeUnfinished(data.history, interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP) }),
+      record,
       listeners: new Set(),
       cleanup: Promise.resolve(),
     };

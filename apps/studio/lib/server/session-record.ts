@@ -1,4 +1,4 @@
-import { decodeNative, native, type NativeSessionRecord } from '@b-studio/sandbox';
+import { native, type NativeSessionRecord } from '@b-studio/sandbox';
 import type { StudioEvent } from '@/lib/studio-events';
 
 /**
@@ -6,27 +6,53 @@ import type { StudioEvent } from '@/lib/studio-events';
  * 구독자 전달·SSE·저장 예약은 여기에 없다(`sessions.ts`의 세션이 쥔다). 옛 구현은 `session-record-legacy.ts`에 차등 시험의 기준으로 남아 있다.
  *
  * 경계: 이벤트는 `JSON.stringify`한 글자로 넘긴다. `JSON.stringify`는 짝 없는 서로게이트를 `\ud800` 이스케이프로 쓰므로 Rust가 글자 그대로 들고 있다가 돌려주면 `JSON.parse`가 원래 글자로 되돌린다.
- * 유한하지 않은 수와 -0은 JSON으로 쓸 수 없어 한 키짜리 표시 객체로 보내고 되받을 때(`decodeNative`) 되돌린다.
+ * 유한하지 않은 수와 -0, NUL로 시작하는 키는 `encodeEvent`가 바꿔 쓰고 되받을 때 되돌린다.
  */
 
 const NONFINITE_KEY = '\u0000nf';
+const NUL = '\u0000';
 
-/** `encodeNative`와 같되, 표시 객체와 같은 키(`\0nf`)만 던진다. NUL로 시작하는 다른 키는 모델이 도구 인자로 보낼 수 있어 받는다(Rust는 그 키를 받는 읽기를 쓴다) */
+/** NUL로 시작하는 키가 하나라도 있으면 그 키들 앞에 NUL을 하나 더 붙인 새 객체(순서 그대로). 없으면 그대로 */
+function escapeNulKeys(item: object): object {
+  const entries = Object.entries(item);
+  if (!entries.some(([key]) => key.startsWith(NUL))) return item;
+  // Object.fromEntries는 `__proto__`도 자기 속성으로 만든다(대입하면 원형이 바뀐다)
+  return Object.fromEntries(entries.map(([key, value]) => [key.startsWith(NUL) ? NUL + key : key, value]));
+}
+
+/**
+ * `JSON.stringify`하되 두 가지만 바꾼다. 어떤 이벤트도 던지지 않는다(던지면 그 이벤트가 기록에서 빠지고, 저장한 기록이면 복구가 멈춘다).
+ * - 유한하지 않은 수와 -0은 JSON으로 쓸 수 없어 한 키짜리 표시 객체(`{"\0nf": "NaN"}`)로 쓴다
+ * - NUL로 시작하는 키에는 NUL을 하나 더 붙인다. 그래서 표시 객체의 키는 이 표시에만 쓰이고, 모델이 도구 인자로 보낸 같은 이름의 키와 섞이지 않는다
+ *
+ * 둘 다 없는 이벤트는 `JSON.stringify(event)`와 글자까지 같다
+ */
 export function encodeEvent(event: StudioEvent): string {
   return JSON.stringify(event, (_key, item: unknown) => {
     if (typeof item === 'number' && (!Number.isFinite(item) || Object.is(item, -0))) return { [NONFINITE_KEY]: Object.is(item, -0) ? '-0' : String(item) };
-    if (item !== null && typeof item === 'object' && !Array.isArray(item) && Object.hasOwn(item, NONFINITE_KEY)) {
-      throw new Error('표시 객체와 같은 키(NUL + nf)는 세션 기록에 쌓을 수 없습니다');
-    }
+    if (item !== null && typeof item === 'object' && !Array.isArray(item)) return escapeNulKeys(item);
     return item;
   });
 }
 
+/** `encodeEvent`를 되돌린다: 표시 객체는 수로, NUL로 시작하는 키는 앞의 NUL 하나를 뗀다 */
+function revive(_key: string, value: unknown): unknown {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return value;
+  const keys = Object.keys(value);
+  if (keys.length === 1 && keys[0] === NONFINITE_KEY) {
+    const mark = (value as Record<string, unknown>)[NONFINITE_KEY];
+    if (mark === '-0') return -0;
+    if (mark === 'NaN' || mark === 'Infinity' || mark === '-Infinity') return Number(mark);
+  }
+  if (!keys.some((key) => key.startsWith(NUL))) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key.startsWith(NUL) ? key.slice(1) : key, item]));
+}
+
 /**
- * Rust가 준 JSON 배열 글자를 이벤트로 푼다. 표시 객체(유한하지 않은 수)가 있을 때만 reviver를 쓴다: reviver는 모든 값에 불려 `JSON.parse`를 몇 배 느리게 하는데,
- * 표시 객체는 `\u0000nf`(NUL + nf 키의 이스케이프)로만 글자에 나타난다
+ * Rust가 준 JSON 배열 글자를 이벤트로 푼다. NUL이 든 글자(`\u0000`, 표시 객체의 키나 NUL로 시작하는 키)가 있을 때만 reviver를 쓴다:
+ * reviver는 모든 값에 불려 `JSON.parse`를 몇 배 느리게 한다
  */
-const decodeEvents = (text: string): StudioEvent[] => (text.includes('\\u0000nf') ? decodeNative<StudioEvent[]>(text) : (JSON.parse(text) as StudioEvent[]));
+const decodeEvents = (text: string): StudioEvent[] => (text.includes('\\u0000') ? (JSON.parse(text, revive) as StudioEvent[]) : (JSON.parse(text) as StudioEvent[]));
 
 export class SessionRecord {
   private readonly inner: NativeSessionRecord;

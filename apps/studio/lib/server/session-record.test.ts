@@ -289,13 +289,38 @@ describe('세션 기록: 경계의 글자', () => {
     expect(Object.is(back!.event.values[4], 0)).toBe(true);
   });
 
-  it('NUL로 시작하는 키(모델이 도구 인자로 보낼 수 있다)도 쌓고 그대로 돌려준다. 표시 객체와 같은 키만 던진다', () => {
+  it('NUL로 시작하는 키(모델이 도구 인자로 보낼 수 있다)도 쌓고 그대로 돌려준다. 표시 객체와 같은 키도 던지지 않는다', () => {
     cases += 1;
     const { legacy, record } = newPair();
     pushBoth(legacy, record, as({ type: 'agent', runId: 'r', args: { '\u0000a': 1, '\u0000nfx': { '\u0000': 2 } } }));
+    // 표시 객체와 같은 키(NUL + nf)도 보통 키로 쌓는다. 던지면 그 도구 호출이 기록에서 빠진다(커밋 보안 검토 지적)
+    pushBoth(legacy, record, as({ type: 'tool_call', name: 'write_file', input: { '\u0000nf': 'Infinity', '\u0000\u0000nf': '-0', n: Number.NaN } }));
+    pushBoth(legacy, record, as({ type: 'run_started', runId: 'r2', request: '요청', extra: { '\u0000nf': 'NaN' } }));
     expectSame(legacy, record, true);
-    expect(() => record.push(as({ type: 'agent', args: { '\u0000nf': 'Infinity' } }))).toThrow(/표시 객체/);
-    expect(record.history()).toHaveLength(1);
+    const back = record.history() as unknown as Array<{ input?: Record<string, unknown>; extra?: Record<string, unknown> }>;
+    expect(Object.keys(back[1]!.input!)).toEqual(['\u0000nf', '\u0000\u0000nf', 'n']);
+    expect(back[1]!.input!['\u0000nf']).toBe('Infinity');
+    expect(Object.is(back[1]!.input!.n, Number.NaN)).toBe(true);
+    expect(back[2]!.extra).toEqual({ '\u0000nf': 'NaN' });
+    expect(record.lastRequest()).toBe('요청');
+  });
+
+  it('저장해 둔 기록에 표시 객체와 같은 키가 있어도 replaceHistory(복구·이어받기)가 던지지 않는다', () => {
+    cases += 1;
+    const saved = [as({ type: 'run_started', runId: 'r', request: 'x' }), as({ type: 'tool_call', name: 'edit_file', input: { '\u0000nf': '-0' } })];
+    const record = new SessionRecord({ logs: false, history: saved });
+    expect(record.history()).toEqual(saved);
+  });
+
+  it('__proto__ 키와 NUL 키가 함께 있어도 객체의 원형을 바꾸지 않는다', () => {
+    cases += 1;
+    const record = new SessionRecord({ logs: true });
+    const event = JSON.parse('{"type":"tool_call","input":{"__proto__":{"polluted":1},"\\u0000k":2}}') as StudioEvent;
+    record.push(event);
+    const [back] = record.history() as unknown as Array<{ input: Record<string, unknown> }>;
+    expect(Object.getPrototypeOf(back!.input)).toBe(Object.prototype);
+    expect(Object.keys(back!.input)).toEqual(['__proto__', '\u0000k']);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
   });
 
   it('JSON으로 쓸 수 없는 이벤트는 던지고 아무것도 쌓지 않는다', () => {
