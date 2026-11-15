@@ -168,9 +168,20 @@ mod tests {
 
     #[test]
     fn 빈_포트는_바로_다시_묶을_수_있다() {
-        let port = free_port().unwrap();
-        assert!(port > 0);
-        TcpListener::bind(("127.0.0.1", port)).unwrap();
+        // 확인하려는 것은 "돌려준 포트를 free_port가 쥐고 있지 않다"이다. 닫은 뒤 다시 묶기 전에 같은 프로세스의 다른 시험이 커널에게서
+        // 같은 포트를 받으면 AddrInUse가 난다(#1181). 그때는 새 포트로 다시 시도한다. free_port가 포트를 쥐고 있는 결함이면 매번 AddrInUse라
+        // 시도를 다 써서 실패한다. AddrInUse가 아닌 오류는 바로 실패한다
+        let mut last = None;
+        for _ in 0..20 {
+            let port = free_port().unwrap();
+            assert!(port > 0);
+            match TcpListener::bind(("127.0.0.1", port)) {
+                Ok(_) => return,
+                Err(error) if error.kind() == io::ErrorKind::AddrInUse => last = Some(error),
+                Err(error) => panic!("돌려준 포트 {port}에 다시 묶지 못했습니다: {error}"),
+            }
+        }
+        panic!("돌려준 포트에 20번 모두 다시 묶지 못했습니다(AddrInUse): {last:?}");
     }
 
     #[test]
