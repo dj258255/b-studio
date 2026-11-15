@@ -8,7 +8,7 @@
 //! - [`run`]: 위를 묶어 페이지를 열고 결과를 모은다
 //!
 //! 단계(`click`·`fill`·`press`·`waitFor`)와 스크린샷, 격리된 실행 환경(utility world)은 A6b에서 더했다([`keyboard`]·`run/steps`·`run/utility`).
-//! 화면 중계와 게이트 기본값 전환은 A6c다.
+//! 화면 중계(screencast)는 옮기지 않는다. 받는 쪽이 #1016에서 지워져 옛 러너에서도 지웠다(A6c-2). 게이트 기본값 전환은 A6c-3이다.
 
 pub mod cdp;
 pub mod console_text;

@@ -3,7 +3,7 @@
  *
  * 고른 세션 하나의 이벤트(`/api/sessions/:id/events`)를 받아 서비스 상태·로그·자원·배포 진행을 접고(applyRuntimeEvent),
  * 키(runtimeKey)는 화면 상태만 바꾸고 할 일(RuntimeEffect)을 돌려준다. 스튜디오를 부르는 일은 desk.ts가 한다.
- * 브라우저가 있어야 보이는 것(앱 화면, 원격 브라우저, 디자인 비교, 요소 고르기)은 주소만 보이고 시스템 브라우저로 연다
+ * 브라우저가 있어야 보이는 앱 화면은 주소만 보이고 시스템 브라우저로 연다
  * QA 탭(#916)은 탐색형 QA다: 목표 문장을 주면 스튜디오가 AI로 앱 화면을 눌러 보며 문제를 찾는다. 화면 사진은 주소로만 보이고 브라우저로 연다
  */
 import { fit, fitAnsi, stringWidth } from './screen';
@@ -724,7 +724,7 @@ function previewPane(state: RuntimeState, width: number, height: number, theme: 
     lines.push(row(text, at === state.row, width, theme));
   });
   lines.push('');
-  lines.push(`${muted}원격 브라우저·QA·디자인 비교·요소 고르기는 브라우저가 있어야 해서 터미널에서는 보이지 않습니다.${RESET}`);
+  lines.push(`${muted}앱 화면은 브라우저가 있어야 보여서 터미널에서는 주소만 보입니다.${RESET}`);
   lines.push(`${muted}앱 주소를 브라우저로 열어 확인하세요. 링크를 누르거나 o를 누르면 이 컴퓨터의 브라우저가 열립니다.${RESET}`);
   return { lines: lines.slice(0, height) };
 }

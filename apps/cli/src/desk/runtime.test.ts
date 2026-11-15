@@ -256,7 +256,9 @@ describe('미리보기 탭', () => {
     expect(press(withUrl, '\r').effects).toEqual([{ type: 'open-url', url: 'http://127.0.0.1:52000/' }]);
     expect(press(opened, 'o').effects).toEqual([{ type: 'preview', service: 'web', open: true }]);
     // 브라우저가 있어야 하는 화면은 안내만 한다
-    expect(text(withUrl)).toContain('원격 브라우저');
+    expect(text(withUrl)).toContain('앱 화면은 브라우저가 있어야 보여서');
+    // 지운 기능(원격 브라우저 등)을 안내하지 않는다
+    expect(text(withUrl)).not.toContain('원격 브라우저');
   });
 
   it('준비된 브라우저 서비스가 없으면 그렇다고 알린다', () => {
