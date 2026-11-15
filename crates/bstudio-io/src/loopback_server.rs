@@ -248,7 +248,7 @@ pub fn parse_head(head: &[u8]) -> Result<Head, HeadError> {
                     match trim_ows(token).to_ascii_lowercase().as_slice() {
                         b"close" => connection_close = true,
                         b"keep-alive" => connection_keep_alive = true,
-                        // `Connection: upgrade`는 Upgrade 헤더와 함께 아래에서 거절한다. 그 밖의 이름은 이 서버가 쓰지 않는다
+                        // 그 밖의 이름(`upgrade` 등)은 이 서버가 쓰지 않는다. Node도 'upgrade' 처리기가 없으면 일반 요청으로 처리한다
                         _ => {}
                     }
                 }
