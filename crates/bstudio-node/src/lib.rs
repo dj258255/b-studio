@@ -5823,3 +5823,85 @@ pub fn runner_parse_line(line: String) -> Option<String> {
         Err(LoneParseError::Invalid) => None,
     }
 }
+
+
+// ── 세션 이벤트 기록(ADR-203, 4f B1a) ──
+// 세션 하나의 history·logs와 질의. 구독자·SSE·저장 스케줄러는 TS 세션이 쥔다. 이벤트는 `JSON.stringify`한 글자(유한하지 않은 수는 `encodeNative`의 표시 객체)로 오가고,
+// 글자 그대로 들고 있다가 그대로 돌려준다. TS 껍데기: apps/studio/lib/server/session-record.ts
+#[napi]
+pub struct SessionRecord {
+    inner: bstudio_session::SessionRecord,
+}
+
+#[napi]
+impl SessionRecord {
+    /// `logs`가 거짓이면 보관 세션의 기록이다(logs 없음)
+    #[napi(constructor)]
+    pub fn new(logs: bool) -> Self {
+        Self { inner: bstudio_session::SessionRecord::new(logs) }
+    }
+
+    /// `emit`의 버퍼 처리. 돌려주는 값은 "`updatedAt`을 바꾸고 저장을 예약할 것인가". JSON이 아니면 던진다
+    #[napi]
+    pub fn push(&mut self, event_json: String) -> Result<bool> {
+        self.inner.push(event_json).map(|outcome| outcome.schedule).map_err(Error::from_reason)
+    }
+
+    /// 상한 없이 history 끝에 덧붙인다
+    #[napi]
+    pub fn append(&mut self, event_json: String) -> Result<()> {
+        self.inner.append(event_json).map_err(Error::from_reason)
+    }
+
+    /// history를 통째로 바꾼다. 하나라도 JSON이 아니면 던지고 아무것도 바꾸지 않는다
+    #[napi]
+    pub fn replace_history(&mut self, events_json: Vec<String>) -> Result<()> {
+        self.inner.replace_history(events_json).map_err(Error::from_reason)
+    }
+
+    #[napi]
+    pub fn has_logs(&self) -> bool {
+        self.inner.has_logs()
+    }
+
+    /// history의 마지막 `run_started` 이벤트(글자 그대로). 없으면 null
+    #[napi]
+    pub fn last_run_started(&self) -> Option<String> {
+        self.inner.last_run_started().map(str::to_owned)
+    }
+
+    /// 끝 n개를 JSON 배열 글자 하나로(이벤트 글자를 쉼표로 이은 것). 이벤트마다 napi 문자열을 만들고 `JSON.parse`를 부르는 비용을 한 번으로 줄인다
+    #[napi]
+    pub fn tail(&self, n: u32) -> String {
+        json_array(&self.inner.tail(n as usize))
+    }
+
+    #[napi]
+    pub fn history(&self) -> String {
+        json_array(&self.inner.history())
+    }
+
+    #[napi]
+    pub fn logs(&self) -> String {
+        json_array(&self.inner.logs())
+    }
+
+    #[napi]
+    pub fn trimmed_history(&self) -> String {
+        json_array(&self.inner.trimmed_history())
+    }
+}
+
+/// 이벤트 글자(각각 JSON 값 하나)를 이어 JSON 배열 글자로 만든다
+fn json_array(events: &[&str]) -> String {
+    let mut out = String::with_capacity(events.iter().map(|event| event.len() + 1).sum::<usize>() + 2);
+    out.push('[');
+    for (at, event) in events.iter().enumerate() {
+        if at > 0 {
+            out.push(',');
+        }
+        out.push_str(event);
+    }
+    out.push(']');
+    out
+}

@@ -333,6 +333,7 @@ import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type P
 import { findProject } from './projects';
 import { generatedFilePaths, overlayGeneratedFiles } from './project-registry';
 import { notifyAgentsChanged, pulseAfterCalls } from './agents-pulse';
+import { SessionRecord } from './session-record';
 import { computeOffServices, serviceSelectionFor, serviceSelectionStateDir, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
@@ -343,7 +344,6 @@ import {
   openCodeStateDirOf,
   readSessions,
   stateDirOf,
-  trimHistory,
   writeSession,
   writeSessionSync,
   type PersistedSession,
@@ -398,10 +398,8 @@ interface Session {
   provider: string;
   /** 원격 미리보기 주소에 넣는 128비트 토큰. 스튜디오에 사용자 인증이 없어 주소를 추측할 수 없게 한다 */
   previewToken: string;
-  /** 채팅·상태 이벤트. 새로 연결한 브라우저에 다시 보낸다 */
-  history: StudioEvent[];
-  /** 로그는 양이 많아 따로 최근 것만 둔다 */
-  logs: StudioEvent[];
+  /** 채팅·상태 이벤트(history)와 로그(logs, 양이 많아 따로 최근 것만 둔다). 새로 연결한 브라우저에 다시 보낸다. Rust가 쥔다(ADR-203) */
+  record: SessionRecord;
   listeners: Set<Listener>;
   conversation: Conversation;
   /**
@@ -583,16 +581,15 @@ export interface StoredTestRun {
 interface ArchivedSession {
   data: PersistedSession;
   snapshot: SessionSnapshot;
-  history: StudioEvent[];
+  /** 기록. 보관 세션은 logs가 없다 */
+  record: SessionRecord;
   listeners: Set<Listener>;
   /** 남은 샌드박스 정리. 끝난 뒤에 이어서 작업한다 */
   cleanup: Promise<void>;
 }
 
-const HISTORY_LIMIT = 5_000;
 /** docker stats 한 번이 1초 남짓 걸리므로 넉넉히 둔다 */
 const USAGE_INTERVAL_MS = 5_000;
-const LOG_LIMIT = 1_000;
 /** 시작에 실패했을 때 서비스마다 읽어 둘 마지막 로그 줄 수와 그 읽기에 쓸 시간 */
 const FAILURE_LOG_TAIL = 100;
 const FAILURE_LOG_TIMEOUT_MS = 10_000;
@@ -632,14 +629,13 @@ export function getSnapshot(id: string): SessionSnapshot | undefined {
 export async function listSessions(): Promise<SessionSummary[]> {
   await recoverSessions();
   const summaries = [
-    ...[...store.sessions.values()].map((session) => summarize(session.snapshot, session.history, session.updatedAt)),
-    ...[...archived.values()].map((entry) => summarize(entry.snapshot, entry.history, entry.data.savedAt)),
+    ...[...store.sessions.values()].map((session) => summarize(session.snapshot, session.record, session.updatedAt)),
+    ...[...archived.values()].map((entry) => summarize(entry.snapshot, entry.record, entry.data.savedAt)),
   ];
   return summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
 
-function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], updatedAt: string): SessionSummary {
-  const lastRequest = history.findLast((event) => event.type === 'run_started');
+function summarize(snapshot: SessionSnapshot, record: SessionRecord, updatedAt: string): SessionSummary {
   return {
     id: snapshot.id,
     projectId: snapshot.projectId,
@@ -651,7 +647,7 @@ function summarize(snapshot: SessionSnapshot, history: readonly StudioEvent[], u
     owner: snapshot.owner,
     workspace: snapshot.workspace ?? 'copy',
     checkpoints: snapshot.checkpoints.length,
-    lastRequest: lastRequest?.type === 'run_started' ? lastRequest.request : undefined,
+    lastRequest: record.lastRequest(),
     ...(snapshot.label ? { label: snapshot.label } : {}),
     updatedAt,
   };
@@ -666,22 +662,17 @@ const OVERVIEW_TAIL = 40;
  */
 export async function overviewSessions(): Promise<Array<{ snapshot: SessionSnapshot; recent: StudioEvent[]; updatedAt: string; runningSince?: string; lastRequest?: string }>> {
   await recoverSessions();
-  const tail = (events: readonly StudioEvent[]): StudioEvent[] => events.slice(-OVERVIEW_TAIL);
-  // 마지막 요청은 최근 이벤트에 없을 수 있어(도구 호출이 많으면 잘린다) 전체 기록에서 찾는다
-  const lastRequestOf = (events: readonly StudioEvent[]): string | undefined => {
-    const started = events.findLast((event) => event.type === 'run_started');
-    return started?.type === 'run_started' ? started.request : undefined;
-  };
+  // 마지막 요청은 최근 이벤트에 없을 수 있어(도구 호출이 많으면 잘린다) 전체 기록에서 찾는다(SessionRecord가 한다)
   return [
     ...[...store.sessions.values()].map((session) => ({
       snapshot: session.snapshot,
-      recent: tail(session.history),
-      lastRequest: lastRequestOf(session.history),
+      recent: session.record.tail(OVERVIEW_TAIL),
+      lastRequest: session.record.lastRequest(),
       updatedAt: session.updatedAt,
       ...(session.run ? { runningSince: session.run.startedAt } : {}),
       ...(session.snapshot.status === 'starting' && session.bootingSince ? { bootingSince: session.bootingSince } : {}),
     })),
-    ...[...archived.values()].map((entry) => ({ snapshot: entry.snapshot, recent: tail(entry.history), lastRequest: lastRequestOf(entry.history), updatedAt: entry.data.savedAt })),
+    ...[...archived.values()].map((entry) => ({ snapshot: entry.snapshot, recent: entry.record.tail(OVERVIEW_TAIL), lastRequest: entry.record.lastRequest(), updatedAt: entry.data.savedAt })),
   ];
 }
 
@@ -960,7 +951,6 @@ type NewSession = Pick<
   | 'provider'
   | 'previewToken'
   | 'checkpoints'
-  | 'history'
   | 'listeners'
   | 'conversation'
   | 'demoIndex'
@@ -973,14 +963,17 @@ type NewSession = Pick<
   | 'lazy'
   | 'serviceSelection'
 > &
-  Partial<Pick<Session, 'agentLedger' | 'terminalConversation'>>;
+  Partial<Pick<Session, 'agentLedger' | 'terminalConversation'>> & {
+    /** 저장해 둔 기록(이어받기). 새 세션이면 빈 목록 */
+    history: readonly StudioEvent[];
+  };
 
-function newSession(fields: NewSession): Session {
+function newSession({ history, ...fields }: NewSession): Session {
   return {
     ...fields,
+    record: new SessionRecord({ logs: true, history }),
     // 덤프는 에이전트 도구가 접근할 수 없고 커밋에도 들어가지 않는 .git 아래에 둔다
     databases: new DatabaseBranches(fields.sandbox, fields.project, path.join(fields.checkpoints.gitDir, 'b-studio', 'databases')),
-    logs: [],
     settledConversation: fields.conversation.length,
     stop: new AbortController(),
     exporting: false,
@@ -1064,8 +1057,9 @@ function replay(target: Session | ArchivedSession, listener: Listener): void {
   // 이기는" 문제를 없앤다. 체크포인트 수와 리뷰 라운드도 같은 식으로 통째로 덮어써지므로 함께 맞춘다
   const { repository, checkpoints, review } = target.snapshot;
   listener({ type: 'snapshot', snapshot: target.snapshot });
-  for (const event of target.history) listener(event);
-  if ('logs' in target) for (const event of target.logs) listener(event);
+  for (const event of target.record.history()) listener(event);
+  // 보관 세션의 기록은 logs가 없다
+  if (target.record.hasLogs()) for (const event of target.record.logs()) listener(event);
   listener({ type: 'snapshot_sync', repository, checkpoints, review });
 }
 
@@ -1375,7 +1369,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     } else {
       await entry!.cleanup;
       data = entry!.data;
-      history = entry!.history;
+      history = entry!.record.history();
     }
 
     // 이어서 작업하는 세션도 지금 스튜디오 서버에 설정한 한도를 따른다
@@ -1548,10 +1542,19 @@ async function recover(): Promise<void> {
 
     // idle은 샌드박스를 한 번도 켜지 않은 세션이라 정리할 컨테이너가 없다. 끼어든 요청도 없다
     const interrupted = data.snapshot.status !== 'stopped' && data.snapshot.status !== 'idle';
+    // 저장한 기록을 세션 기록(Rust)에 올리지 못하면(예: JSON.stringify가 재귀 깊이로 던지는 손으로 고친 파일) 그 세션만 건너뛴다.
+    // 파일은 그대로 두고, 다른 세션의 복구는 이어간다
+    let record: SessionRecord;
+    try {
+      record = new SessionRecord({ logs: false, history: closeUnfinished(data.history, interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP) });
+    } catch (error) {
+      console.error(`[b-studio] 세션 ${id}의 저장한 기록을 읽지 못해 복구하지 않았습니다`, describe(error));
+      continue;
+    }
     const entry: ArchivedSession = {
       data,
       snapshot: archivedSnapshot(data, interrupted ? '스튜디오 서버가 다시 시작돼 이전 샌드박스를 정리하는 중입니다.' : undefined),
-      history: closeUnfinished(data.history, interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP),
+      record,
       listeners: new Set(),
       cleanup: Promise.resolve(),
     };
@@ -1599,7 +1602,7 @@ async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
   for (const listener of entry.listeners) listener({ type: 'status', status: 'stopped', error });
   // 정리하지 못했으면 파일을 그대로 두어 다음 실행에서 다시 정리한다
   if (cleaned) {
-    entry.data = { ...entry.data, savedAt: new Date().toISOString(), owner: { pid: process.pid }, snapshot: entry.snapshot, history: entry.history };
+    entry.data = { ...entry.data, savedAt: new Date().toISOString(), owner: { pid: process.pid }, snapshot: entry.snapshot, history: entry.record.history() };
     await writeSession(entry.data).catch((cause: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', cause));
   }
 }
@@ -5682,12 +5685,6 @@ async function commitDocTabChange(id: string, file: string, message: string): Pr
 // 그 함수가 받는 모양으로 모으기만 한다.
 // ---------------------------------------------------------------------------
 
-/** 세션 기록에서 마지막으로 시작한 요청 글(관제 화면의 overviewSessions와 같은 방식 — run_started를 뒤에서 찾는다) */
-function lastRunStartedRequest(history: readonly StudioEvent[]): string | undefined {
-  const started = history.findLast((event) => event.type === 'run_started');
-  return started?.type === 'run_started' ? started.request : undefined;
-}
-
 export async function getSessionStatus(id: string): Promise<ProjectStatusView> {
   const session = requireSession(id);
   const snapshot = session.snapshot;
@@ -5696,7 +5693,7 @@ export async function getSessionStatus(id: string): Promise<ProjectStatusView> {
   const input: ProjectStatusInput = {
     projectName: snapshot.projectName,
     running: snapshot.running,
-    currentRequestSummary: snapshot.running ? lastRunStartedRequest(session.history) : undefined,
+    currentRequestSummary: snapshot.running ? session.record.lastRequest() : undefined,
     requirements: requirementsSnapshot.requirements.map((requirement) => ({
       id: requirement.id,
       title: requirement.title,
@@ -6737,7 +6734,7 @@ function watchUsage(session: Session): void {
  * 실패한 그 순간 서비스마다 마지막 줄을 한 번 읽어(따라가지 않는다) 로그에 더한다. 못 읽어도 실패 알림은 그대로 간다
  */
 async function captureFailureLogs(session: Session): Promise<void> {
-  const isNew = skipAlreadySeen(session.logs.flatMap((event) => (event.type === 'log' ? [event] : [])));
+  const isNew = skipAlreadySeen(session.record.logs().flatMap((event) => (event.type === 'log' ? [event] : [])));
   const signal = AbortSignal.any([session.stop.signal, AbortSignal.timeout(FAILURE_LOG_TIMEOUT_MS)]);
   try {
     for await (const line of session.sandbox.logs({ tail: FAILURE_LOG_TAIL, follow: false, signal })) {
@@ -6756,7 +6753,7 @@ function followLogs(session: Session, tail: number): void {
   session.logFollower = follower;
   const signal = AbortSignal.any([follower.signal, session.stop.signal]);
   // 다시 붙을 때 --tail이 재시작하지 않은 컨테이너(DB, edge)의 줄까지 다시 보내므로 이미 받은 줄은 건너뛴다
-  const isNew = skipAlreadySeen(session.logs.flatMap((event) => (event.type === 'log' ? [event] : [])));
+  const isNew = skipAlreadySeen(session.record.logs().flatMap((event) => (event.type === 'log' ? [event] : [])));
 
   void (async () => {
     try {
@@ -6771,16 +6768,17 @@ function followLogs(session: Session, tail: number): void {
 }
 
 function emit(session: Session, event: StudioEvent): void {
-  // 사용량과 파일 변경 알림은 자주 오므로 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷에서 최신 값을 받는다
-  const transient =
-    event.type === 'usage' || event.type === 'sandbox_link' || event.type === 'files_changed' || event.type === 'tests_changed' || event.type === 'deploy_log' || event.type === 'label';
-  if (!transient) {
-    const buffer = event.type === 'log' ? session.logs : session.history;
-    buffer.push(event);
-    const limit = event.type === 'log' ? LOG_LIMIT : HISTORY_LIMIT;
-    if (buffer.length > limit) buffer.splice(0, buffer.length - limit);
+  // 기록에 쌓는 일은 SessionRecord가 한다(Rust, ADR-203): 자주 오는 사용량·파일 변경 알림은 쌓지 않고, log는 logs에, 나머지는 history에 쌓는다.
+  // 돌려주는 값은 "updatedAt을 바꾸고 저장을 예약할 것인가"(쌓았고 log가 아닐 때)다
+  let schedule: boolean;
+  try {
+    schedule = session.record.push(event);
+  } catch (error) {
+    // JSON으로 쓸 수 없는 이벤트(옛 구현은 배열에 그대로 넣었다). 기록에 남지 못했다는 사실을 알리고, 구독자에게는 그대로 전달한다
+    console.error('[b-studio] 세션 기록에 이벤트를 쌓지 못했습니다', event.type, describe(error));
+    schedule = event.type !== 'log';
   }
-  if (!transient && event.type !== 'log') {
+  if (schedule) {
     session.updatedAt = new Date().toISOString();
     schedulePersist(session);
   }
@@ -6795,7 +6793,7 @@ function toPersisted(session: Session): PersistedSession {
     savedAt: session.updatedAt,
     owner: { pid: process.pid },
     snapshot: session.snapshot,
-    history: trimHistory(session.history),
+    history: session.record.trimmedHistory(),
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,

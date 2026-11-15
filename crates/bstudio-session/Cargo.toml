@@ -1,0 +1,11 @@
+[package]
+name = "bstudio-session"
+version = "0.1.0"
+description = "b-studio의 세션 기록(이벤트 history·logs)과 그 질의. Node를 모른다 — napi 층은 bstudio-node가 얹는다(ADR-203)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+bstudio-guard = { path = "../bstudio-guard" }
