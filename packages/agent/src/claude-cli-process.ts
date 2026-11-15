@@ -1,6 +1,5 @@
-import { spawn } from 'node:child_process';
-import { createInterface } from 'node:readline';
 import { decodeNative, native } from '@b-studio/sandbox';
+import type { NativeCliProcess } from '@b-studio/sandbox';
 
 /**
  * `claude` CLI 자식 프로세스를 공개 입출력(`-p --input-format stream-json --output-format stream-json`)으로 다루는 얇은 층.
@@ -68,8 +67,6 @@ export interface ClaudeCliProcess {
   stderrTail(): string;
 }
 
-const STDERR_KEEP = 2_000;
-
 function notFound(command: string, why: string): Error {
   return Object.assign(new Error(`spawn ${command} ENOENT: ${why}`), { code: 'ENOENT' });
 }
@@ -106,6 +103,33 @@ export function childEnv(env: NodeJS.ProcessEnv, forbiddenRoot?: string): NodeJS
   return { ...env, [key]: native.cliChildPath(value, forbiddenRoot) };
 }
 
+/** Node `setTimeout`이 받는 값의 규칙(1 미만·너무 큰 값·숫자가 아닌 값은 1ms). 옛 구현의 타이머와 같게 맞춘다 */
+function timerMs(ms: number): number {
+  return ms >= 1 && ms <= 2 ** 31 - 1 ? ms : 1;
+}
+
+/** Node가 띄우기 실패에 주던 것과 같은 모양의 오류 */
+function spawnError(event: { errorCode?: string | null; errorMessage?: string | null; errno?: number | null }, command: string, args: readonly string[]): Error {
+  return Object.assign(new Error(event.errorMessage ?? `spawn ${command} failed`), {
+    code: event.errorCode ?? undefined,
+    errno: event.errno ?? undefined,
+    syscall: `spawn ${command}`,
+    path: command,
+    spawnargs: [...args],
+  });
+}
+
+/** UTF-16 단위 그대로 글로 만든다(짝 없는 서로게이트도 보존한다) */
+function unitsToString(units: Uint16Array): string {
+  let text = '';
+  for (let at = 0; at < units.length; at += 4096) text += String.fromCharCode(...units.subarray(at, at + 4096));
+  return text;
+}
+
+/**
+ * 자식 프로세스의 입출력(띄우기·표준 입력·줄 나누기·표준 오류 끝부분·닫기 단계·끝 상태)은 Rust가 한다(crates/bstudio-io/src/cli_process.rs, ADR-195 4f A8a).
+ * 여기는 Rust가 순서대로 넘기는 줄을 큐로 받아 JSON 객체만 내놓는다(해석은 TS, ADR-201). 옛 구현은 claude-cli-process-spawn-legacy.ts(차등 시험의 기준)
+ */
 export function spawnClaudeCli(options: { command: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv; stop?: CliStopOptions }): ClaudeCliProcess {
   const termAfterMs = options.stop?.termAfterMs ?? DEFAULT_TERM_AFTER_MS;
   const killAfterMs = options.stop?.killAfterMs ?? DEFAULT_KILL_AFTER_MS;
@@ -118,83 +142,79 @@ export function spawnClaudeCli(options: { command: string; args: readonly string
     return failedProcess(error as Error);
   }
   // 자식이 PATH로 다시 찾는 인터프리터도 프로젝트 안의 것이 잡히지 않게 PATH를 정리해 넘긴다
-  const child = spawn(resolved, [...options.args], { cwd: options.cwd, env: childEnv(options.env, options.cwd), stdio: ['pipe', 'pipe', 'pipe'] });
-  // 입력 쪽이 먼저 닫혀도(CLI가 바로 끝난 경우) 실행 전체가 예외로 죽지 않게 한다. 실패는 결과 없음으로 드러난다
-  child.stdin.on('error', () => {});
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(childEnv(options.env, options.cwd))) if (value !== undefined) env[name] = value;
+
+  // Rust가 밀어 주는 줄. 소비자(messages)가 느려도 줄은 여기 쌓인다
+  const queue: string[] = [];
+  let head = 0;
+  let finished = false;
+  let wake: (() => void) | undefined;
   let inputClosed = false;
-  let termTimer: NodeJS.Timeout | undefined;
-  let killTimer: NodeJS.Timeout | undefined;
-  let termSent = false;
   let alive = true;
-  let stderr = '';
-  child.stderr.setEncoding('utf8');
-  child.stderr.on('data', (chunk: string) => {
-    stderr = (stderr + chunk).slice(-STDERR_KEEP);
+  let resolveExit!: (exit: CliExit) => void;
+  const exited = new Promise<CliExit>((resolve) => {
+    resolveExit = resolve;
   });
 
-  const exited = new Promise<CliExit>((resolve) => {
-    let spawnError: Error | undefined;
-    child.once('error', (error) => {
-      spawnError = error;
-      // 띄우지 못하면 close가 오지 않을 수 있다
-      if (child.pid === undefined) {
-        alive = false;
-        resolve({ code: null, signal: null, error });
-      }
-    });
-    child.once('close', (code, signal) => {
+  // 콜백이 session을 붙잡고 있어(JS 함수는 Rust 쪽 콜백이 살아 있는 동안 GC되지 않는다) 호출한 쪽이 proc를 놓아도 자식의 입력이 닫히지 않는다
+  const session: NativeCliProcess = new native.CliProcess(resolved, [...options.args], env, options.cwd, timerMs(termAfterMs), timerMs(killAfterMs), (event) => {
+    void session;
+    if (!event.exited) {
+      for (const line of event.lines ?? []) queue.push(line);
+    } else {
       alive = false;
-      clearTimeout(termTimer);
-      clearTimeout(killTimer);
-      resolve({ code, signal, ...(spawnError ? { error: spawnError } : {}) });
-    });
+      finished = true;
+      if (event.errorCode) resolveExit({ code: null, signal: null, error: spawnError(event, resolved, options.args) });
+      else resolveExit({ code: event.code ?? null, signal: (event.signal ?? null) as NodeJS.Signals | null });
+    }
+    wake?.();
   });
 
   const closeInput = (): void => {
     if (inputClosed) return;
     inputClosed = true;
-    child.stdin.end();
-  };
-  const sendTerm = (): void => {
-    if (!alive || termSent) return;
-    termSent = true;
-    child.kill('SIGTERM');
-    killTimer = setTimeout(() => {
-      if (alive) child.kill('SIGKILL');
-    }, killAfterMs);
+    session.closeInput();
   };
 
   return {
     async *messages() {
-      for await (const line of createInterface({ input: child.stdout, crlfDelay: Infinity })) {
-        if (!line.trim()) continue;
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
+      for (;;) {
+        if (head < queue.length) {
+          const line = queue[head++] ?? '';
+          if (head > 4096 && head * 2 > queue.length) {
+            queue.splice(0, head);
+            head = 0;
+          }
+          if (!line.trim()) continue;
+          let parsed: unknown;
+          try {
+            parsed = JSON.parse(line);
+          } catch {
+            continue;
+          }
+          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) yield parsed as CliMessage;
           continue;
         }
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) yield parsed as CliMessage;
+        if (finished) return;
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        wake = undefined;
       }
     },
     send(text) {
       if (inputClosed) return;
-      child.stdin.write(`${JSON.stringify({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null })}\n`);
+      session.writeLine(JSON.stringify({ type: 'user', message: { role: 'user', content: text }, parent_tool_use_id: null }));
     },
     closeInput,
     stop(mode) {
       closeInput();
-      if (!alive || termSent) return;
-      if (mode === 'now') {
-        clearTimeout(termTimer);
-        termTimer = undefined;
-        sendTerm();
-        return;
-      }
-      termTimer ??= setTimeout(sendTerm, termAfterMs);
+      if (!alive) return;
+      session.stop(mode === 'now');
     },
     exited,
-    stderrTail: () => stderr,
+    stderrTail: () => unitsToString(session.stderrTail()),
   };
 }
 

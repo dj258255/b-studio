@@ -5551,3 +5551,125 @@ pub fn close_loopback_server(env: Env, id: u32) -> Result<AsyncBlock<()>> {
     })
     .build(&env)
 }
+
+// ── CLI 프로세스 층(ADR-195 4f A8a) ──
+// `claude` CLI 자식의 입출력(띄우기·표준 입력 줄 쓰기·닫기, 표준 출력의 줄 나누기, 표준 오류 끝 2,000자, 닫기 단계, 끝 상태)은 bstudio-io(cli_process)가 하고,
+// JSON 해석은 TS가 한다(packages/agent/src/claude-cli-process.ts). 줄과 끝은 **하나의** ThreadsafeFunction으로 순서대로 밀려 온다(exec 세션과 같은 이유: 끝이 줄보다 먼저 닿지 않게).
+use bstudio_io::cli_process;
+use napi::bindgen_prelude::Uint16Array;
+
+/// JS로 가는 사건 하나. `exited`가 false면 `lines`가 있고, true면 `code`·`signal`·`error_*`가 끝 상태다(띄우기 실패면 `error_code`가 있다)
+#[napi(object)]
+pub struct CliEventJs {
+    pub lines: Option<Vec<String>>,
+    pub exited: bool,
+    pub code: Option<i32>,
+    pub signal: Option<String>,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub errno: Option<i32>,
+}
+
+#[napi]
+pub struct CliProcess {
+    handle: cli_process::CliHandle,
+}
+
+fn clamp_ms(ms: f64) -> std::time::Duration {
+    // 타이머 값은 TS가 Node `setTimeout`의 규칙으로 정리해서 보낸다. 여기서는 유한한 양수만 받는다
+    if ms.is_finite() && ms > 0.0 {
+        std::time::Duration::from_secs_f64(ms / 1000.0)
+    } else {
+        std::time::Duration::from_millis(1)
+    }
+}
+
+#[napi]
+impl CliProcess {
+    /// `bin args`를 띄운다(env는 이것만, cwd에서). `on_event`는 Rust 작업 스레드에서 `(event)` 한 인자로 불린다. 띄우기 실패도 `exited`로 온다
+    #[napi(constructor)]
+    pub fn new(
+        bin: String,
+        args: Vec<String>,
+        env_vars: HashMap<String, String>,
+        cwd: String,
+        term_after_ms: f64,
+        kill_after_ms: f64,
+        on_event: ThreadsafeFunction<CliEventJs, (), CliEventJs, Status, false>,
+    ) -> Self {
+        let callback: cli_process::OnCliEvent = Arc::new(move |event| {
+            let event = match event {
+                cli_process::CliEvent::Lines(lines) => CliEventJs { lines: Some(lines), exited: false, code: None, signal: None, error_code: None, error_message: None, errno: None },
+                cli_process::CliEvent::Exit(exit) => CliEventJs {
+                    lines: None,
+                    exited: true,
+                    code: exit.code,
+                    signal: exit.signal,
+                    error_code: exit.error.as_ref().map(|error| error.code.clone()),
+                    error_message: exit.error.as_ref().map(|error| error.message.clone()),
+                    errno: exit.error.as_ref().map(|error| error.errno),
+                },
+            };
+            on_event.call(event, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let config = cli_process::CliConfig {
+            bin,
+            args,
+            env: env_vars.into_iter().collect(),
+            cwd: Some(cwd),
+            term_after: clamp_ms(term_after_ms),
+            kill_after: clamp_ms(kill_after_ms),
+        };
+        let (handle, pump) = cli_process::spawn_cli(config, callback);
+        // JS 메인 스레드라 tokio::spawn은 "no reactor"로 패닉한다 — ExecSession과 같이 global 런타임에 올린다
+        napi::bindgen_prelude::spawn(pump);
+        Self { handle }
+    }
+
+    /// 표준 입력에 한 줄(끝에 `\n`을 붙인다)을 쓴다. 닫힌 뒤의 쓰기는 버린다
+    #[napi]
+    pub fn write_line(&self, line: String) {
+        self.handle.write_line(line);
+    }
+
+    /// 표준 입력을 닫는다
+    #[napi]
+    pub fn close_input(&self) {
+        self.handle.close_input();
+    }
+
+    /// 끝내 달라고 한다. `now`가 false면 graceful(입력 닫기 → term_after 뒤 SIGTERM → kill_after 뒤 SIGKILL), true면 입력 닫기 + 바로 SIGTERM
+    #[napi]
+    pub fn stop(&self, now: bool) {
+        self.handle.stop(if now { cli_process::StopMode::Now } else { cli_process::StopMode::Graceful });
+    }
+
+    /// 표준 오류의 끝부분. UTF-16 단위 그대로다(짝 없는 서로게이트가 남을 수 있어 글자가 아니라 단위로 돌려준다)
+    #[napi]
+    pub fn stderr_tail(&self) -> Uint16Array {
+        Uint16Array::new(self.handle.stderr_tail())
+    }
+}
+
+/// 차등 시험용: 덩어리 목록을 Node `StringDecoder`+`readline`과 같은 규칙으로 줄로 나눈다(프로세스 없이 순수 부분만 견준다)
+#[napi]
+pub fn cli_split_lines(chunks: Vec<Buffer>) -> Vec<String> {
+    let mut reader = cli_process::LineReader::new();
+    let mut lines = Vec::new();
+    for chunk in chunks.iter().filter(|chunk| !chunk.is_empty()) {
+        lines.extend(reader.write(chunk));
+    }
+    lines.extend(reader.finish());
+    lines
+}
+
+/// 차등 시험용: 덩어리 목록의 표준 오류 끝부분(UTF-16 단위)
+#[napi]
+pub fn cli_stderr_tail_of(chunks: Vec<Buffer>) -> Uint16Array {
+    let mut tail = cli_process::StderrTail::new();
+    for chunk in &chunks {
+        tail.write(chunk);
+    }
+    tail.finish();
+    Uint16Array::new(tail.units())
+}

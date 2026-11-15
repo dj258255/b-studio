@@ -257,6 +257,22 @@ interface NativeGuard {
     cwd: string | undefined | null,
     onEvent: (event: NativeExecEvent) => void,
   ) => NativeExecSession;
+  // ── CLI 프로세스 층(ADR-195 4f A8a). `claude` CLI 자식의 입출력: 띄우기·표준 입력 줄 쓰기·닫기·표준 출력의 줄 나누기(Node readline과 같게)·표준 오류 끝 2,000자(UTF-16 단위)·
+  // 닫기 단계(graceful: 입력 닫기 → termAfterMs 뒤 SIGTERM → killAfterMs 뒤 SIGKILL, now: 입력 닫기 + 바로 SIGTERM)·끝 상태. 줄과 끝은 하나의 onEvent로 순서대로 밀려 온다(끝이 마지막).
+  // env는 자식의 환경 전부다(비운 뒤 이것만 준다). JSON 해석은 TS가 한다
+  CliProcess: new (
+    bin: string,
+    args: string[],
+    env: Record<string, string>,
+    cwd: string,
+    termAfterMs: number,
+    killAfterMs: number,
+    onEvent: (event: NativeCliEvent) => void,
+  ) => NativeCliProcess;
+  /** 차등 시험용: 덩어리 목록을 Node `StringDecoder`+`readline`(crlfDelay: Infinity)과 같은 규칙으로 줄로 나눈다 */
+  cliSplitLines(chunks: Buffer[]): string[];
+  /** 차등 시험용: 덩어리 목록의 표준 오류 끝부분(UTF-16 단위, 입력 끝에 디코더를 비운다) */
+  cliStderrTailOf(chunks: Buffer[]): Uint16Array;
   // ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts가 쓴다. 모두 JS 스레드 밖(spawn_blocking)에서 돈다.
   freePort(): Promise<number>;
   // 잠금을 잡으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid. 그 밖의 I/O 오류는 거절한다. 죽은 프로세스의 잠금은 지우고 한 번 다시 시도한다
@@ -846,6 +862,28 @@ export interface NativeExecEvent {
   data?: Buffer | null;
   exited: boolean;
   code?: number | null;
+}
+
+export interface NativeCliEvent {
+  /** 표준 출력에서 나온 줄들(`exited`가 false일 때) */
+  lines?: string[] | null;
+  exited: boolean;
+  /** 끝 상태. 신호로 죽었거나 띄우지 못했으면 null */
+  code?: number | null;
+  /** Node의 신호 이름(`SIGTERM` 등) */
+  signal?: string | null;
+  /** 띄우지 못했을 때만: Node의 오류 이름(`ENOENT`), 메시지(`spawn <파일> ENOENT`), errno(음수) */
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  errno?: number | null;
+}
+
+export interface NativeCliProcess {
+  writeLine(line: string): void;
+  closeInput(): void;
+  /** false: graceful, true: now */
+  stop(now: boolean): void;
+  stderrTail(): Uint16Array;
 }
 
 export interface NativeExecSession {

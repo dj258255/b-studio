@@ -10090,6 +10090,14 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 ### 덧붙임: 4f A7b 결과 — MCP 도구 서버(`mcp-http-server.ts`의 `node:http` + `@modelcontextprotocol/sdk`)의 전송·프로토콜을 Rust로 ([#1241](https://github.com/dj258255/b-studio/issues/1241), ADR-201)
 - 같은 리스너 위에 stateless streamable HTTP(JSON-RPC 해석·분배, 인자 검사, SSE)를 직접 구현했다(`crates/bstudio-io/src/mcp_server.rs`). 도구 목록 얻기와 도구 실행만 TS 콜백으로 남는다. 옛 SDK 서버는 `mcp-http-server-legacy.ts`로 두고 원시 HTTP 차등 시험으로 맞췄다. 맞춘 것과 의도한 차이는 ADR-201의 "덧붙임: A7b".
 
+### 덧붙임: 4f A8a 결과 — CLI 프로세스 층(`spawnClaudeCli`)을 Rust로 ([#1244](https://github.com/dj258255/b-studio/issues/1244), ADR-201의 경계)
+- `claude` CLI 자식의 입출력(띄우기, 표준 입력 줄 쓰기·닫기, 표준 출력의 UTF-8 해석과 줄 나누기, 표준 오류 끝 2,000 UTF-16 단위, graceful/now 닫기 단계와 SIGTERM→SIGKILL, 끝 상태)을 `crates/bstudio-io/src/cli_process.rs`로 옮겼다. JSON 해석·빈 줄 건너뛰기·`messages()` 반복자·`resolveCliCommand`·`childEnv`는 TS에 남고, 시그니처와 `ClaudeCliProcess` 모양은 그대로다. 줄과 끝은 하나의 ThreadsafeFunction으로 순서대로 넘어가 끝이 줄보다 먼저 오지 않는다(옛 `close`).
+- 맞춘 것: 줄 나누기는 Node `readline`(`crlfDelay: Infinity`)의 알고리즘을, UTF-8 해석은 `StringDecoder`(`string_decoder.cc`)의 쥐기·끊기 규칙을 그대로 옮겼다. 시드 1,500개의 무작위 덩어리와 `\r`·`\n`·글자의 모든 경계 나눔(길이 7까지)을 Node와 견줘 같음을 확인했다. 표준 오류는 시드 600개로 `(stderr + chunk).slice(-2000)`과 견줬다.
+- 재서 확인한 옛 동작(Node 22.17): 입력 끝에 남은 미완성 UTF-8 바이트는 `readline`이 디코더를 비우지 않아 버려지고(표준 오류는 `setEncoding`의 `end`가 비워 U+FFFD가 된다), 줄 끝만 다른 덩어리 경계(`\r` | `\n`)는 한 줄 끝이다. 빈 줄은 TS가 건너뛰므로 `\r\n`을 둘로 나누는 변이는 `messages()`만으로는 안 보인다 — Rust 단위 시험과 `native.cliSplitLines` 차등 시험이 잡는다.
+- 닫기: 신호는 자기가 띄운 pid에만, `try_wait`로 아직 거두지 않았음을 확인한 같은 동기 구간에서만 보낸다(거둔 pid 재사용 방지). 거두기를 타이머·명령보다 먼저 보는 `biased` 선택이다. `now`는 걸려 있던 graceful 타이머를 당기고, 이미 SIGTERM을 보냈으면 다시 보내지 않으며 SIGKILL 타이머도 다시 걸지 않는다.
+- 달라진 점(의도): 표준 출력 줄이 소비자(`messages()`)보다 빨리 오면 옛 구현은 파이프가 차서 자식이 멈췄지만 새 구현은 TS 큐에 쌓는다(상한 없음). 알 수 없는 신호 번호는 `SIG<번호>`로 이름 짓는다(Node는 빈 문자열).
+- 실제 Claude Code 세션 실측은 하지 않았다(주인이 한다).
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택
