@@ -5,7 +5,6 @@ import {
   buildPageCheckFromExploreQa,
   runClaudeCodeExploreQa,
   runExploreQa,
-  type BrowserFrame,
   type ExploreQaEvent,
   type ExploreQaGoal,
   type ExploreQaResult,
@@ -15,14 +14,12 @@ import {
   type QaViewport,
 } from '@b-studio/agent';
 import { SPEC_FILE } from '@b-studio/spec';
-import { publish } from './live-frames';
 import { EXPLORE_QA_RUN_FILE, readExploreQaRunFile, writeExploreQaRunFile } from './explore-qa-run-file';
 import { exploreQaBackendFor, remoteBrowserAllowedOrigins, remoteBrowserUrl, saveExploreQaArtifact, sessionStateDir } from './sessions';
 
 /**
- * 세션마다 탐색형 QA 실행 하나를 관리한다(원격 브라우저의 remote-browsers.ts와 같은 모양).
+ * 세션마다 탐색형 QA 실행 하나를 관리한다.
  * 실행은 시작 요청에 바로 응답하지 않고 백그라운드로 돌며(목표에 따라 수십 초~분 단위), 상태는 폴링으로 조회한다.
- * 프레임은 기존 실시간 채널(live-frames.ts)의 새 source('explore')로 중계해 QA 탭이 같은 방식으로 받는다.
  */
 export class ExploreQaError extends Error {
   readonly status: number;
@@ -96,9 +93,6 @@ export function startExploreQa(sessionId: string, input: StartExploreQaInput): E
     else if (event.type === 'rejection' && event.rejection.requests.length > 0) run.expectedRejections.push(event.rejection);
     else if (event.type === 'text') run.texts.push(event.text);
   };
-  const onFrame = (frame: BrowserFrame): void => {
-    publish(sessionId, { source: 'explore', mime: 'image/jpeg', data: frame.data.toString('base64'), width: frame.width, height: frame.height, at: frame.at });
-  };
   const saveArtifact = (artifactInput: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> =>
     saveExploreQaArtifact(sessionId, artifactInput);
 
@@ -123,14 +117,13 @@ export function startExploreQa(sessionId: string, input: StartExploreQaInput): E
   };
 
   if (backend.kind === 'api') {
-    runExploreQa({ client: backend.client, goal, startUrl, allowedOrigins, viewport: DEFAULT_VIEWPORT, onFrame, onEvent, saveArtifact, signal: abort.signal }).then(finish, fail);
+    runExploreQa({ client: backend.client, goal, startUrl, allowedOrigins, viewport: DEFAULT_VIEWPORT, onEvent, saveArtifact, signal: abort.signal }).then(finish, fail);
   } else if (backend.kind === 'claude-code') {
     runClaudeCodeExploreQa({
       goal,
       startUrl,
       allowedOrigins,
       viewport: DEFAULT_VIEWPORT,
-      onFrame,
       onEvent,
       saveArtifact,
       cwd: projectRoot,

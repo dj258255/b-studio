@@ -316,7 +316,6 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     pageFetcher: options.pageFetcher,
     browserRunner: options.browserRunner,
     saveArtifact: options.saveArtifact,
-    onBrowserFrame: options.onBrowserFrame,
     signal,
     onServiceStatus,
     onEvent,

@@ -1,7 +1,6 @@
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import type { BrowserFrame } from './browser-check';
 import { spawnClaudeCli, type ClaudeCliProcess, type CliStopOptions } from './claude-cli-process';
 import { ClaudeCodeUsageTracker, mcpSetupFailure, noResultMessage } from './claude-code-runner';
 import {
@@ -56,7 +55,6 @@ export interface ClaudeCodeExploreQaOptions {
   startUrl: string;
   allowedOrigins: readonly string[];
   viewport?: QaViewport;
-  onFrame?: (frame: BrowserFrame) => void;
   onEvent?: (event: ExploreQaEvent) => void;
   /** 주면 행동마다 스크린샷을 찍어 저장하고 QaActionRecord.artifact에 남긴다(단계 타임라인 썸네일용) */
   saveArtifact?: RunExploreQaOptions['saveArtifact'];
@@ -77,13 +75,13 @@ export interface ClaudeCodeExploreQaOptions {
 export type ClaudeCodeExploreQaResult = ExploreQaResult;
 
 export async function runClaudeCodeExploreQa(options: ClaudeCodeExploreQaOptions): Promise<ClaudeCodeExploreQaResult> {
-  const { goal, startUrl, allowedOrigins, viewport, onFrame, onEvent, saveArtifact, cwd, model, command = 'claude', commandArgs = [], stop: stopOptions, env: processEnv = process.env, signal } = options;
+  const { goal, startUrl, allowedOrigins, viewport, onEvent, saveArtifact, cwd, model, command = 'claude', commandArgs = [], stop: stopOptions, env: processEnv = process.env, signal } = options;
   const maxActions = goal.maxActions ?? DEFAULT_MAX_ACTIONS;
   const maxMs = goal.maxMs ?? DEFAULT_MAX_MS;
   const repeatLimit = goal.repeatLimit ?? DEFAULT_REPEAT_LIMIT;
   const deadline = Date.now() + maxMs;
 
-  const browser = await QaBrowser.open(startUrl, { allowedOrigins, ...(viewport ? { viewport } : {}), ...(onFrame ? { onFrame } : {}) });
+  const browser = await QaBrowser.open(startUrl, { allowedOrigins, ...(viewport ? { viewport } : {}) });
   try {
     const specs = buildQaTools();
     const actions: QaActionRecord[] = [];

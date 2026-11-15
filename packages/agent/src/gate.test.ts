@@ -1268,7 +1268,6 @@ describe('VerificationGate 워크플로 단계', () => {
     });
     const workspace = new Workspace(target.root);
     const saved: Array<{ name: string; contentType: string }> = [];
-    const frames: Array<{ check: string; frame: unknown }> = [];
     const gate = await VerificationGate.create({
       project: target,
       sandbox: fakeSandbox(target, [true]),
@@ -1279,7 +1278,6 @@ describe('VerificationGate 워크플로 단계', () => {
       browserRunner: async (_url, options) => {
         // 저장할 곳이 있으면 게이트가 capture를 켠다
         expect(options.capture).toBe(true);
-        options.onFrame?.({ data: Buffer.from([9]), width: 390, height: 844, at: 7 });
         return {
           status: 200,
           text: '주문 목록',
@@ -1298,7 +1296,6 @@ describe('VerificationGate 워크플로 단계', () => {
         saved.push({ name, contentType });
         return `artifact-${saved.length}`;
       },
-      onBrowserFrame: ({ check, frame }) => frames.push({ check, frame }),
       onEvent: () => {},
     });
     await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
@@ -1309,7 +1306,6 @@ describe('VerificationGate 워크플로 단계', () => {
       { label: 'click #go', ok: true, artifact: 'artifact-2' },
     ]);
     expect(saved.map((entry) => entry.contentType)).toEqual(['image/png', 'image/png']);
-    expect(frames).toEqual([{ check: 'api /orders (browser 390x844)', frame: { data: Buffer.from([9]), width: 390, height: 844, at: 7 } }]);
   });
 
   it('스크린샷 저장이 실패해도 화면 확인 결과는 바뀌지 않는다', async () => {

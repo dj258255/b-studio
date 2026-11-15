@@ -288,14 +288,12 @@ describe('runExploreQa', { timeout: 60_000 }, () => {
       { toolCalls: [{ name: 'qa_wait', input: { forText: '주문 목록' } }] },
       { toolCalls: [{ name: 'qa_finish', input: { success: true, summary: '검색어를 채우고 버튼을 눌러 화면에 문구가 나타난 것을 확인했습니다' } }] },
     ]);
-    const frames: unknown[] = [];
     const actions: QaActionRecord[] = [];
     const result = await runExploreQa({
       client,
       goal: { goal: '검색어 입력칸에 값을 채운다', startPath: '/start', confirmText: '주문 목록' },
       startUrl: `${base}/start`,
       allowedOrigins: [base],
-      onFrame: (frame) => frames.push(frame),
       onEvent: (event) => {
         if (event.type === 'action') actions.push(event.record);
       },

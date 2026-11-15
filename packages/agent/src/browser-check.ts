@@ -1,16 +1,8 @@
-import type { Browser, CDPSession, Page } from 'playwright-core';
+import type { Browser, Page } from 'playwright-core';
 import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import type { WorkflowPageStep } from '@b-studio/spec';
 import { startOriginProxy, type OriginProxy } from './origin-proxy';
 import { trackPendingRequests } from './pending-requests';
-
-/** CDP screencast로 받은 화면 한 장. `at`은 프레임을 받은 시각(ms) */
-export interface BrowserFrame {
-  data: Buffer;
-  width: number;
-  height: number;
-  at: number;
-}
 
 /** 화면 확인 단계 한 줄. capture가 켜져 있으면 그 시점의 뷰포트 스크린샷(PNG)을 담는다 */
 export interface BrowserPageStep {
@@ -96,8 +88,6 @@ export interface BrowserPageOptions {
    * 서버(스튜디오 호스트)에서 도는 검사라, 모델이 만든 페이지가 호스트 내부나 외부로 나가면 요청 위조 통로가 된다
    */
   allowedOrigins?: string[];
-  /** CDP screencast 프레임. 초당 5장 상한으로 거른 뒤 넘긴다 */
-  onFrame?: (frame: BrowserFrame) => void;
   /**
    * true면 화면 로드를 잰다. 개발 서버 첫 컴파일(콜드 스타트) 때문에 첫 이동이 튀므로
    * 한 번 워밍업 이동을 한 뒤 다음 이동의 load까지 걸린 시간을 Performance API로 잰다(loadEventEnd - startTime).
@@ -117,13 +107,6 @@ const STEP_SETTLE_START_MS = 100;
 const STEP_SETTLE_QUIET_MS = 500;
 const STEP_TIMEOUT_MS = 5_000;
 const DEFAULT_VIEWPORT = { width: 1280, height: 800 };
-/** screencast 전송량 상한. 프레임은 세션 기록에 남기지 않고 실시간 채널로만 보낸다 */
-export const SCREENCAST_MAX_FPS = 5;
-const SCREENCAST_INTERVAL_MS = 1000 / SCREENCAST_MAX_FPS;
-/** 뷰포트와 크기가 다른 프레임을 몇 번 연달아 버린 뒤에 그대로 보낼지(createScreencast) */
-const SCREENCAST_MISMATCH_LIMIT = 5;
-/** 화면 중계를 다시 켠 뒤 이만큼 새 프레임이 없으면 마지막 프레임을 한 번 더 보낸다(createScreencast) */
-const SCREENCAST_REFRESH_MS = 400;
 
 export class BrowserUnavailableError extends Error {}
 
@@ -329,7 +312,7 @@ export interface OriginBlockEvent {
  * 페이지의 모든 요청을 허용한 출처로 제한한다. 메인·하위 프레임 이동과 하위 리소스(fetch·img·script 등)를 모두 검사해,
  * 허용 목록에 없는 출처면 막고 onBlocked으로 알린다. 그래서 모델이 만든 페이지가 (스튜디오) 호스트 내부나 외부로 새 나가지 않는다.
  * 서비스 워커는 이 검사를 우회하므로, 부르는 쪽이 페이지를 만들 때 serviceWorkers: 'block'을 함께 줘야 한다.
- * 원격 브라우저(remote-browser.ts)와 게이트의 화면 확인(runInBrowser)이 같은 규칙을 쓰도록 여기 모아 둔다
+ * 게이트의 화면 확인(runInBrowser)과 탐색 QA가 같은 규칙을 쓰도록 여기 모아 둔다
  */
 export async function restrictPageToOrigins(page: Page, allowedOrigins: readonly string[], onBlocked?: (event: OriginBlockEvent) => void): Promise<void> {
   const allowed = new Set(allowedOrigins);
@@ -340,96 +323,6 @@ export async function restrictPageToOrigins(page: Page, allowedOrigins: readonly
     onBlocked?.({ url: request.url(), kind: request.isNavigationRequest() ? 'navigation' : 'resource' });
     return route.abort('blockedbyclient');
   });
-}
-
-/**
- * CDP screencast를 켜고 끄는 도구. 리스너는 한 번만 붙이고 start·stop으로 전환한다.
- * ack를 빠뜨리면 브라우저가 전송을 멈추므로, 상한에 걸러 콜백을 건너뛸 때도 항상 ack한다.
- */
-export function createScreencast(client: CDPSession, viewport: { width: number; height: number }, onFrame: (frame: BrowserFrame) => void) {
-  // 초당 상한을 넘는 프레임은 버리지 않고 가장 최근 것 하나를 들고 있다가 간격이 지나면 보낸다(뒤쪽 스로틀).
-  // 앞쪽에서 버리기만 하면 변화의 마지막 프레임이 사라져, 페이지가 멈춘 뒤에도 미리보기가 그 전 화면에 머문다
-  let last = 0;
-  // 뷰포트와 크기가 다른 프레임이 연달아 온 수. 상한을 넘으면 기대가 틀린 것으로 보고 그대로 보낸다
-  let mismatched = 0;
-  let pending: BrowserFrame | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  // 켜거나 화면을 바꾼 뒤 프레임을 보냈는지. 정적인 페이지는 브라우저가 중계 프레임을 하나도 보내지 않을 때가 있어(실측: 원격
-  // 브라우저 테스트에서 프레임이 0개인 실행), 짧게 기다려 없으면 지금 화면을 직접 찍어 보낸다(#802)
-  let running = false;
-  let deliveredSinceMark = false;
-  let refreshTimer: ReturnType<typeof setTimeout> | undefined;
-  const deliver = (frame: BrowserFrame) => {
-    last = Date.now();
-    deliveredSinceMark = true;
-    onFrame({ ...frame, at: last });
-  };
-  const expectFrame = () => {
-    deliveredSinceMark = false;
-    if (refreshTimer) clearTimeout(refreshTimer);
-    refreshTimer = setTimeout(() => {
-      refreshTimer = undefined;
-      if (!running || deliveredSinceMark || timer) return;
-      void client
-        .send('Page.captureScreenshot', { format: 'jpeg', quality: 60 })
-        .then((shot) => {
-          // 찍는 사이에 중계가 프레임을 보냈거나 멈췄으면 보내지 않는다
-          if (!running || deliveredSinceMark) return;
-          deliver({ data: Buffer.from(shot.data, 'base64'), width: viewport.width, height: viewport.height, at: Date.now() });
-        })
-        .catch(() => {});
-    }, SCREENCAST_REFRESH_MS);
-  };
-  client.on('Page.screencastFrame', (params) => {
-    void client.send('Page.screencastFrameAck', { sessionId: params.sessionId }).catch(() => {});
-    const frame: BrowserFrame = {
-      data: Buffer.from(params.data, 'base64'),
-      width: params.metadata.deviceWidth || viewport.width,
-      height: params.metadata.deviceHeight || viewport.height,
-      at: Date.now(),
-    };
-    // 뷰포트를 적용하기 전(실측: 첫 프레임이 500x213)이나 크기를 바꾸는 도중의 프레임은 크기가 다르다. 원격 브라우저는 프레임 크기로
-    // 클릭 좌표를 바꾸므로 그런 프레임은 엉뚱한 곳을 누르게 한다(#789). 보내지 않는다. 다만 연달아 다르면 기대가 틀린 것이라
-    // (런타임이 크기를 다르게 보고하는 환경) 미리보기가 멈추지 않게 그대로 보낸다
-    if (frame.width !== viewport.width || frame.height !== viewport.height) {
-      mismatched += 1;
-      if (mismatched < SCREENCAST_MISMATCH_LIMIT) return;
-    } else {
-      mismatched = 0;
-    }
-    const wait = last + SCREENCAST_INTERVAL_MS - frame.at;
-    if (wait <= 0 && !timer) {
-      deliver(frame);
-      return;
-    }
-    pending = frame;
-    timer ??= setTimeout(() => {
-      timer = undefined;
-      const next = pending;
-      pending = undefined;
-      if (next) deliver(next);
-    }, Math.max(0, wait));
-  });
-  return {
-    start: async (maxWidth: number) => {
-      running = true;
-      await client.send('Page.startScreencast', { format: 'jpeg', quality: 60, maxWidth, everyNthFrame: 1 });
-      // 원격 브라우저는 영역 스크린샷을 찍으려고 중계를 껐다 켠다. 페이지가 그대로면 새 프레임이 오지 않아 미리보기가 잘린 화면에 멈춘다
-      expectFrame();
-    },
-    /** 화면을 바꾼 뒤(이동·새로고침·크기 변경) 부른다. 짧게 기다려 중계 프레임이 없으면 지금 화면을 찍어 보낸다 */
-    expectFrame,
-    stop: () => {
-      running = false;
-      // 멈춘 뒤에는 들고 있던 프레임도 보내지 않는다(잘린 화면이나 닫힌 브라우저의 프레임이 늦게 도착하지 않게)
-      if (timer) clearTimeout(timer);
-      if (refreshTimer) clearTimeout(refreshTimer);
-      refreshTimer = undefined;
-      timer = undefined;
-      pending = undefined;
-      return client.send('Page.stopScreencast').then(() => {}).catch(() => {});
-    },
-  };
 }
 
 /** URL이 CONNECT로 가는 대상의 host:port. 스킴을 모르는 터널이라 기본 포트로 맞춘다. 파싱하지 못하면 undefined */
@@ -464,7 +357,7 @@ function pageBlockedRequests(blockedUrls: ReadonlySet<string>, seenUrls: Readonl
   return [...blockedUrls].filter((entry) => (entry.startsWith('CONNECT ') ? seenTunnels.has(entry.slice('CONNECT '.length)) : seenUrls.has(entry)));
 }
 
-export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, onFrame, measureLoad = false, signal }) => {
+export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEWPORT, viewportTexts, steps = [], capture = false, allowedOrigins, measureLoad = false, signal }) => {
   signal?.throwIfAborted();
   // 허용 출처 밖으로 나가는 요청을 막은 URL을 모아 둔다(앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않는다).
   // 막은 알림이 요청 실패 이벤트보다 먼저 들어가야 하므로 프록시를 브라우저보다 먼저 만든다
@@ -541,80 +434,74 @@ export const runInBrowser: BrowserRunner = async (url, { viewport = DEFAULT_VIEW
     page.on('requestfailed', (request) => recordFailure(request.url(), request.failure()?.errorText ?? 'failed'));
     const pending = trackPendingRequests(page);
 
-    const screencast = onFrame ? createScreencast(await page.context().newCDPSession(page), viewport, onFrame) : undefined;
     const recorded: BrowserPageStep[] = [];
     // 단계마다 결과를 남긴다. capture가 켜져 있으면 그 시점의 뷰포트 스크린샷(PNG)을 함께 담는다
     const record = async (label: string, ok: boolean, detail?: string) => {
       const screenshot = capture ? await page.screenshot({ type: 'png' }).catch(() => undefined) : undefined;
       recorded.push({ label, ok, ...(detail !== undefined ? { detail } : {}), ...(screenshot ? { screenshot } : {}) });
     };
-    try {
-      if (screencast) await screencast.start(viewport.width);
-      if (measureLoad) {
-        // 개발 서버 첫 컴파일(콜드 스타트)이 첫 로드를 튀게 한다. 한 번 워밍업 이동 뒤에 잰다
-        await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
-        // 워밍업 이동의 오류·실패 요청은 측정 대상이 아니므로 비운다
-        pageErrors.length = 0;
-        consoleErrors.length = 0;
-        failedRequests.length = 0;
-        mediaErrors.length = 0;
-        failedUrls.clear();
-        blockedUrls.clear();
-        blockedTunnels.clear();
-        seenUrls.clear();
-        blockedInside.clear();
-      }
-      const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
-      await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
-      await record(`open ${new URL(url).pathname}`, true);
-      // 단계는 순서대로 실행한다. 실패하면 그 자리에서 멈춰 몇 번째 단계였는지 알린다
-      for (const [index, step] of steps.entries()) {
-        try {
-          if (step.click !== undefined) await page.click(step.click, { timeout: STEP_TIMEOUT_MS });
-          else if (step.fill !== undefined) await page.fill(step.fill.selector, step.fill.text, { timeout: STEP_TIMEOUT_MS });
-          else if (step.press !== undefined) await page.keyboard.press(step.press);
-          else if (step.waitFor !== undefined) await page.waitForSelector(step.waitFor, { timeout: STEP_TIMEOUT_MS });
-          else throw new StepWithoutActionError(`${index + 1}번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)`);
-          await record(describeStep(step), true);
-        } catch (error) {
-          // 동작 없는 단계는 타입을 통과한 잘못된 입력이라 단계 실패로 감싸지 않는다
-          if (error instanceof StepWithoutActionError) throw error;
-          const reason = error instanceof Error ? error.message.split('\n')[0]! : String(error);
-          // 실패한 단계의 스크린샷도 남겨 예외에 함께 담는다
-          await record(describeStep(step), false, reason);
-          throw new StepFailedError(`${index + 1}번째 단계 실패 (${describeStep(step)}): ${reason}`, recorded);
-        }
-      }
-      // 단계가 낸 요청이 끝나길 기다린다. 기다리지 않으면 마지막 단계가 보낸 요청의 실패(제출이 받은 500 등)가
-      // 기록되기 전에 결과를 돌려준다. 문서의 "네트워크 잠잠" 상태는 한 번 들면 유지돼 여기서는 기다림이 되지 않는다(#684)
-      if (steps.length > 0) await pending.waitForIdle({ graceMs: STEP_SETTLE_START_MS, quietMs: STEP_SETTLE_QUIET_MS, timeoutMs: SETTLE_TIMEOUT_MS });
-      // 에이전트 패키지는 DOM 타입을 쓰지 않으므로 페이지 안에서 실행할 식은 문자열로 넘긴다
-      const { text, overflow } = await page.evaluate<{ text: string; overflow: number }>(
-        `({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })`,
-      );
-      // 글자 위치 측정은 expectText와 같은 시점(단계를 마친 뒤)에 한다
-      const viewportReport = viewportTexts && viewportTexts.length > 0 ? await page.evaluate<ViewportTextReport>(VIEWPORT_MEASURE_SCRIPT(viewportTexts)) : undefined;
-      // 이동의 load까지 걸린 시간. 워밍업 뒤 이동이라 개발 서버 콜드 스타트가 섞이지 않는다
-      const loadMs = measureLoad
-        ? await page.evaluate<number | null>(`(() => { const nav = performance.getEntriesByType('navigation')[0]; return nav ? Math.round(nav.loadEventEnd - nav.startTime) : null; })()`)
-        : null;
-      return {
-        status: response?.status() ?? null,
-        text,
-        pageErrors,
-        consoleErrors,
-        failedRequests,
-        mediaErrors,
-        // 허용 출처 안을 막은 것은 늘 남긴다. 서비스 워커 막기는 Playwright가 그 요청을 보지 못해도(막힌 설정에서는 서비스 워커에 붙지 않는다) 우회 시도의 흔적이다
-        blockedRequests: [...pageBlockedRequests(blockedUrls, seenUrls), ...blockedInside],
-        horizontalOverflowPx: overflow,
-        ...(viewportReport ? { viewportTexts: viewportReport } : {}),
-        ...(loadMs !== null ? { loadMs } : {}),
-        steps: recorded,
-      };
-    } finally {
-      await screencast?.stop();
+    if (measureLoad) {
+      // 개발 서버 첫 컴파일(콜드 스타트)이 첫 로드를 튀게 한다. 한 번 워밍업 이동 뒤에 잰다
+      await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+      // 워밍업 이동의 오류·실패 요청은 측정 대상이 아니므로 비운다
+      pageErrors.length = 0;
+      consoleErrors.length = 0;
+      failedRequests.length = 0;
+      mediaErrors.length = 0;
+      failedUrls.clear();
+      blockedUrls.clear();
+      blockedTunnels.clear();
+      seenUrls.clear();
+      blockedInside.clear();
     }
+    const response = await page.goto(url, { waitUntil: 'load', timeout: NAVIGATION_TIMEOUT_MS });
+    await page.waitForLoadState('networkidle', { timeout: SETTLE_TIMEOUT_MS }).catch(() => {});
+    await record(`open ${new URL(url).pathname}`, true);
+    // 단계는 순서대로 실행한다. 실패하면 그 자리에서 멈춰 몇 번째 단계였는지 알린다
+    for (const [index, step] of steps.entries()) {
+      try {
+        if (step.click !== undefined) await page.click(step.click, { timeout: STEP_TIMEOUT_MS });
+        else if (step.fill !== undefined) await page.fill(step.fill.selector, step.fill.text, { timeout: STEP_TIMEOUT_MS });
+        else if (step.press !== undefined) await page.keyboard.press(step.press);
+        else if (step.waitFor !== undefined) await page.waitForSelector(step.waitFor, { timeout: STEP_TIMEOUT_MS });
+        else throw new StepWithoutActionError(`${index + 1}번째 단계에 실행할 동작이 없습니다 (click, fill, press, waitFor 중 하나가 필요합니다)`);
+        await record(describeStep(step), true);
+      } catch (error) {
+        // 동작 없는 단계는 타입을 통과한 잘못된 입력이라 단계 실패로 감싸지 않는다
+        if (error instanceof StepWithoutActionError) throw error;
+        const reason = error instanceof Error ? error.message.split('\n')[0]! : String(error);
+        // 실패한 단계의 스크린샷도 남겨 예외에 함께 담는다
+        await record(describeStep(step), false, reason);
+        throw new StepFailedError(`${index + 1}번째 단계 실패 (${describeStep(step)}): ${reason}`, recorded);
+      }
+    }
+    // 단계가 낸 요청이 끝나길 기다린다. 기다리지 않으면 마지막 단계가 보낸 요청의 실패(제출이 받은 500 등)가
+    // 기록되기 전에 결과를 돌려준다. 문서의 "네트워크 잠잠" 상태는 한 번 들면 유지돼 여기서는 기다림이 되지 않는다(#684)
+    if (steps.length > 0) await pending.waitForIdle({ graceMs: STEP_SETTLE_START_MS, quietMs: STEP_SETTLE_QUIET_MS, timeoutMs: SETTLE_TIMEOUT_MS });
+    // 에이전트 패키지는 DOM 타입을 쓰지 않으므로 페이지 안에서 실행할 식은 문자열로 넘긴다
+    const { text, overflow } = await page.evaluate<{ text: string; overflow: number }>(
+      `({ text: document.body ? document.body.innerText : '', overflow: Math.max(0, document.documentElement.scrollWidth - window.innerWidth) })`,
+    );
+    // 글자 위치 측정은 expectText와 같은 시점(단계를 마친 뒤)에 한다
+    const viewportReport = viewportTexts && viewportTexts.length > 0 ? await page.evaluate<ViewportTextReport>(VIEWPORT_MEASURE_SCRIPT(viewportTexts)) : undefined;
+    // 이동의 load까지 걸린 시간. 워밍업 뒤 이동이라 개발 서버 콜드 스타트가 섞이지 않는다
+    const loadMs = measureLoad
+      ? await page.evaluate<number | null>(`(() => { const nav = performance.getEntriesByType('navigation')[0]; return nav ? Math.round(nav.loadEventEnd - nav.startTime) : null; })()`)
+      : null;
+    return {
+      status: response?.status() ?? null,
+      text,
+      pageErrors,
+      consoleErrors,
+      failedRequests,
+      mediaErrors,
+      // 허용 출처 안을 막은 것은 늘 남긴다. 서비스 워커 막기는 Playwright가 그 요청을 보지 못해도(막힌 설정에서는 서비스 워커에 붙지 않는다) 우회 시도의 흔적이다
+      blockedRequests: [...pageBlockedRequests(blockedUrls, seenUrls), ...blockedInside],
+      horizontalOverflowPx: overflow,
+      ...(viewportReport ? { viewportTexts: viewportReport } : {}),
+      ...(loadMs !== null ? { loadMs } : {}),
+      steps: recorded,
+    };
   } finally {
     signal?.removeEventListener('abort', abort);
     await browser.close().catch(() => {});

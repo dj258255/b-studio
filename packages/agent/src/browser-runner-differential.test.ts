@@ -583,13 +583,6 @@ describe('Rust 러너는 옛 러너와 같은 결과를 낸다 (ADR-199)', { tim
       else process.env.B_STUDIO_BROWSER_EXECUTABLE = saved;
     }
   });
-
-  it('아직 지원하지 않는 입력(화면 중계)은 조용히 무시하지 않고, 브라우저 없음이 아닌 오류로 던진다', async () => {
-    const error = await runInBrowserNative(`${base}/ok`, { onFrame: () => {} }).catch((e: unknown) => e);
-    expect(error).toBeInstanceOf(Error);
-    expect(error).not.toBeInstanceOf(BrowserUnavailableError);
-    expect((error as Error).message).toMatch(/아직 지원하지 않/);
-  });
 });
 
 /** 단계가 실패했을 때 두 러너가 던진 것을 같은 모양으로 모은다 */
