@@ -141,6 +141,7 @@ version = "0.1.0"
 dependencies = [
  "bstudio-guard",
  "bstudio-io",
+ "bstudio-session",
  "napi",
  "napi-build",
  "napi-derive",
@@ -165,6 +166,13 @@ dependencies = [
  "tempfile",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "bstudio-session"
+version = "0.1.0"
+dependencies = [
+ "bstudio-guard",
 ]
 
 [[package]]

@@ -10104,6 +10104,10 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 차등 시험이 새 코드의 결함 하나를 먼저 찾았다: 줄의 글자 그대로의 예약 글자를 인코딩하지 않아 서로게이트로 읽던 것(트러블슈팅 207).
 - 실제 Claude Code 세션(stream-json 러너 경로)에서 통과, 게이트 실패 뒤 통과, 게이트 소진, 턴 상한 둘(변경 없음은 실패, 변경 있음은 재확인을 통과해 `incomplete`)을 봤다([기록](experiments/2026-11-16-a8b-runner-core-native.md)).
 
+### 덧붙임: 4f B1a 결과 — 세션의 이벤트 기록(history·logs)을 Rust `SessionRecord`로 ([#1251](https://github.com/dj258255/b-studio/issues/1251), ADR-203)
+- `Session.history`·`Session.logs`와 그 질의(마지막 요청·끝 40개·되감기·저장용 줄이기)를 `crates/bstudio-session`의 `SessionRecord`(napi 클래스, TS 껍데기 `session-record.ts`)로 옮겼다. 구독자·SSE·저장 스케줄러는 TS 세션에 그대로 있다(B1b·B3). 이벤트는 JSON 글자 그대로 들고, 읽는 값은 `type`뿐이다.
+- 차등 시험이 새 코드의 결함 하나를 먼저 찾았다: history와 logs가 한 순번을 나눠 써서 로그가 낀 기록에서 마지막 요청을 못 찾던 것(트러블슈팅 208). 되감기·저장은 옛 구현보다 약 2.3~3배 걸린다(ADR-203의 "비용").
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택
@@ -10707,4 +10711,75 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 게이트·결과 조립·도구 실행·지시 큐·인자 만들기는 TS 콜백이다. 샌드박스·작업 공간·프로젝트 상태가 TS에 있는 동안은 옮길 수 없다(5단계 이후).
 - 이벤트는 콜백 하나가 끝나야 다음 일을 하므로 이벤트마다 스레드 왕복이 있다(측정하지 않았다). 도구 실행 쪽 TS 이벤트(`tool_call`·`tool_result`)와 Rust가 내는 이벤트의 상대 순서는 도구 요청이 그 메시지를 본 뒤에야 풀리고(장부), 다음 메시지는 도구 결과를 받은 CLI만 내므로 차등 시험에서 같았다. 서로 독립인 TS 흐름(진행 중 지시의 `steer_applied` 등)과의 순서는 경쟁이다(옛 구현도 같다).
 - 장부의 `abort`는 닫힘 표시를 따로 세우지 않고 취소 이유로 거절한다(옛 구현과 같다). 러너가 `Aborted`를 돌려주는 경로는 TS가 `signal.throwIfAborted()`를 다시 해서 겹친다(변이 W11은 동등 변이로 살아남는다).
+- Linux·Windows에서는 돌려 보지 않았다.
+
+## ADR-203 세션 기록과 영속은 `bstudio-session`이 쥐고 세션의 나머지 상태는 저장할 때 TS가 준다
+
+상태: 채택(4f B1a: 기록) · 계획(4f B1b: 영속)
+관련: 이슈 [#1251](https://github.com/dj258255/b-studio/issues/1251)(B1a), 추적 [#1250](https://github.com/dj258255/b-studio/issues/1250)(B1), ADR-191(Rust 이전), ADR-195(4f), ADR-202(앞 단계), 트러블슈팅 208
+
+### 맥락
+- 세션의 이벤트 기록은 `sessions.ts`의 `Session.history`·`Session.logs` 배열이었다. `emit`이 쌓고(history 5,000개·logs 1,000개, 기록하지 않는 종류는 뺀다), 목록 요약(`summarize`)·관제(`overviewSessions`: 끝 40개와 마지막 요청)·현황(`lastRunStartedRequest`)·되감기(`replay`·`sessionHistory`)·로그 따라가기(`skipAlreadySeen`의 입력)·저장(`toPersisted`의 `trimHistory`)이 읽고, 이어받기(`resume`)와 복구(`recover`)가 통째로 바꾸거나 덧붙였다.
+- 4f의 B단계는 세션의 상태와 수명을 Rust로 옮긴다. 영속(B1b)이 저장할 때 history를 Rust에서 바로 끼워 넣으려면 기록이 먼저 Rust에 있어야 한다(#1250의 "버린 것 ①").
+
+### 결정
+**B1a(이 PR, 결과)**
+1. **새 크레이트 `crates/bstudio-session`**(Node를 모른다, `bstudio-guard`의 `js_json`에 기댄다). napi 클래스 `SessionRecord`는 `bstudio-node`에 둔다. TS 껍데기는 `apps/studio/lib/server/session-record.ts`.
+2. **`SessionRecord`가 쥔 것**: 세션 하나의 history와 logs와 그 질의.
+   - `push(event)`는 옛 `emit`의 버퍼 처리와 같다. 기록하지 않는 이벤트(`usage`·`sandbox_link`·`files_changed`·`tests_changed`·`deploy_log`·`label`)는 쌓지 않고, `log`는 logs(상한 1,000)에, 나머지는 history(상한 5,000)에 쌓고 넘치면 앞에서 자른다. 돌려주는 값은 "`updatedAt`을 바꾸고 저장을 예약할 것인가"(쌓았고 `log`가 아닐 때)다. TS의 `emit`은 이 값으로 `updatedAt`·`schedulePersist`를 하고, 구독자 전달과 `notifyAgentsChanged`는 지금처럼 한다.
+   - 질의: `lastRequest()`(마지막 `run_started`의 `request`), `tail(n)`, `history()`·`logs()`, `trimmedHistory()`(`trimHistory`와 같다. `toPersisted`가 이것을 부른다).
+   - 바꾸기: `replaceHistory(events)`(이어받기·복구), `append(event)`(상한 없이 덧붙이기). 보관 세션(`ArchivedSession`)은 logs 없는 같은 객체를 쓴다(`'logs' in target` 분기는 `hasLogs()`가 됐다).
+3. **경계**: 이벤트는 TS가 `JSON.stringify`한 글자로 넘기고(`encodeEvent`: 유한하지 않은 수와 -0은 `encodeNative`와 같은 표시 객체) 돌려받는 글자는 한 번의 `JSON.parse`로 푼다(표시 객체가 있을 때만 `decodeNative`의 reviver). Rust는 이벤트를 **글자 그대로** 들고, `js_json`(`JSON.parse`의 문법)으로 읽는 것은 `type`뿐이다. 이 점이 이슈의 "`js_json` 값으로 든다"와 다르다(아래 "옛 구현과 다른 것"). 마지막 요청은 Rust가 마지막 `run_started` **이벤트**를 찾아 주고, `request`를 읽는 것은 TS가 옛 코드와 같은 식(`started?.type === 'run_started' ? started.request : undefined`)으로 한다.
+4. **마지막 요청은 쌓을 때 적어 둔다**: history에 쌓은 순번을 적어 두고 앞에서 잘려 나간 만큼 빼 자리를 찾는다(목록 질의가 history 길이에 비례하지 않는다). 잘려 나간 `run_started`는 없는 것으로 본다(옛 `findLast`와 같다).
+5. **옛 TS는 차등 시험의 기준으로 남긴다**: `apps/studio/lib/server/session-record-legacy.ts`(`emit`의 버퍼 처리와 질의). 4g에서 지운다.
+
+**B1b(계획, 이 PR에서 하지 않는다)**: 영속(`toPersisted`·`flushPersist`·`writeSession`)과 저장 스케줄러를 `bstudio-session`으로 옮긴다. 세션의 나머지 상태(스냅샷·대화·러너 상태 등)는 TS가 저장할 때 Rust에 건네고, history는 Rust가 자기 기록에서 바로 끼운다(`trimmedHistory`가 이 PR에서 먼저 생긴 이유). 구독자·SSE는 B3/C1.
+
+### 호출부별 막는 쪽인지 여는 쪽인지(AGENTS.md "막는 검사를 고칠 때")
+이 변경은 막는 검사를 바꾸지 않는다. 기록은 판정이 아니라 보관이고, 완료·복구·보안 경계가 읽는 값이 아니다. 다만 같은 질문을 호출부마다 적는다.
+| 자리 | 쪽 | 모르는·깨진 입력 |
+|---|---|---|
+| `push`의 "기록하지 않음" 목록 | 걸러 내는 쪽(적게 쌓는다) | 목록과 글자 하나라도 다르면(대소문자·공백·접두) 보통 이벤트로 쌓는다. 쌓을 것을 빠뜨리는 쪽이 아니라 더 쌓는 쪽으로 틀린다 |
+| `trimmedHistory`의 "저장하지 않음" 목록 | 걸러 내는 쪽 | 같다: 목록에 없는 종류는 저장한다 |
+| `type`이 글자가 아니거나 없는 이벤트 | 보통 이벤트 | JS의 `===`와 같다(어느 목록에도 맞지 않는다) |
+| JSON이 아닌 글자 | 던진다 | 아무것도 쌓지 않는다. `emit`이 잡아 오류를 알리고 구독자에게는 그대로 전달한다 |
+| 너무 깊은 이벤트(`js_json`의 깊이 2,000 초과) | 보통 이벤트 | `type`을 읽지 못해 `log`·기록하지 않음으로 알아보지 못한다(옛 구현은 알아봤다). 이 깊이의 이벤트는 만들어지지 않는다 |
+
+### 옛 구현과 다른 것
+- **이벤트를 값으로 들지 않고 글자로 든다.** `js_json`으로 파싱해 값으로 들면 Rust `String`이 짝 없는 서로게이트를 담지 못해 U+FFFD로 바뀌고, 돌려줄 때 다시 직렬화해야 한다. `JSON.stringify`는 짝 없는 서로게이트를 `\ud800` 이스케이프로 쓰므로 글자 그대로 들면 잃는 글자가 없고 예약 글자(U+E000~U+E01F)도 인코딩할 필요가 없다. 되감기·저장은 글자를 이어 붙이기만 한다. B1b가 저장 파일에 history를 글자로 끼울 수 있다.
+- **JSON 경계**: 이벤트가 `undefined` 속성(사라진다)이나 `Date`(글자가 된다) 같은 JSON이 아닌 값을 담으면 옛 구현은 그대로 들고 있었다. 저장·SSE도 같은 경계라 화면에 보이는 값은 같다. 차등 시험은 `toEqual`(`undefined` 속성을 같게 본다)로 견준다.
+- **NUL로 시작하는 키**는 받는다(모델이 도구 인자로 보낼 수 있다). `encodeNative`는 던지지만 여기서는 표시 객체와 같은 키(NUL + `nf`) 하나만 던진다. 던지면 `emit`이 오류를 알리고 그 이벤트는 기록에 남지 않는다(구독자에게는 간다).
+- `tail(0)`은 빈 목록이다(옛 `slice(-0)`은 전체였다). 0을 넘기는 곳이 없다.
+- 옛 `emit`은 JSON으로 쓸 수 없는 이벤트(`BigInt`·순환)도 배열에 넣었다. 새 구현은 던지고 `emit`이 `console.error`로 알린다(저장·SSE에서 어차피 던지던 이벤트다).
+- `append`는 이 PR에서 제품 코드가 쓰지 않는다. 이어받기는 저장한 기록 뒤에 이벤트를 붙인 배열을 만들어 `replaceHistory`로 올린다(`newSession`이 새 세션의 기록을 만들 때 한 번). 시험과 B1b가 쓴다.
+
+### 검증 (2026-11-16, macOS arm64, Node 22.17)
+- **차등 시험**(`session-record.test.ts`, 82개): 시드 있는 무작위 이벤트 열 60개(80~400개씩, 종류·`run_started`의 `request`(글자·없음·수·null·객체·`undefined`)·짝 없는 서로게이트·예약 글자·`NaN`·`Infinity`·`-0`·NUL 키·큰 이벤트를 섞음)와 20KB 이벤트가 든 열 하나, 상한 경계(history 4,999~5,002개째·logs 999~1,002개째, 마지막 `run_started`가 상한에 밀려 나가는 시점, 저장 history 2,000개 경계), `replaceHistory`·덧붙이기 뒤의 상태(5,000개를 넘는 기록, 기록하지 않는 종류가 든 저장 기록)가 매 단계의 push 결과와 질의 결과(`lastRequest`·`tail`·전체·`trimmedHistory`)에서 옛 구현과 같다.
+- **Rust 단위 시험**(`bstudio-session`, 25개): 상한·잘림·마지막 요청의 위치·종류 판정(대소문자·공백·접두·이스케이프한 키·같은 키 두 번)·깨진 JSON·깊은 이벤트·글자 그대로 돌려주기.
+- **기존 시험이 고치지 않고 통과**: `sessions*.test.ts` 49개 파일(530개 시험)에 F0 기준 사진(`session-baseline`)과 `session-store` 시험이 들어 있다.
+- **변이**(Rust 단위 시험으로 27개, 그 가운데 21개는 네이티브를 다시 빌드해 TS 차등 시험으로도): 상한 하나 늘리기·줄이기(history·logs·저장), 기록하지 않는 이벤트 쌓기, 기록할 이벤트 빼기, 저장 예약 늘 참(log·기록하지 않는 이벤트)·늘 거짓, `log`를 history에 넣기, 종류 판정 넓히기(접두·대소문자), 마지막 요청을 첫 `run_started`로, 밀려난 `run_started` 계속 돌려주기, 보관 세션에 logs 주기·로그 쌓기, 저장 제외 넓히기·좁히기, `tail` 한 칸 모자라게, `replaceHistory`·`append`에 상한 걸기, 로그가 history 순번을 쓰기. 표는 PR 본문. Rust 단위 시험에서 살아남은 것은 동등 변이 하나(`replaceHistory`가 마지막 요청의 순번을 비우지 않아도 순번이 늘기만 해서 잘림 검사가 걸러 낸다)다. TS 차등 시험에서는 둘이 살아남았고(밀려난 `run_started`를 계속 돌려주기: TS가 `type`을 다시 확인해 `undefined`가 된다, `append`에 상한 걸기: 시험의 덧붙이기가 4개뿐) Rust 단위 시험이 잡는다. 처음에 TS 차등 시험이 놓친 종류 판정 넓히기 둘은 무작위 이벤트에 `login`·`Log`·`usage2` 같은 이름을 더해 잡게 했다.
+- **검토 전에 찾은 결함**: 처음 구현은 history와 logs가 한 순번을 나눠 써서 로그가 낀 기록에서 마지막 요청을 못 찾았다. 차등 시험이 찾았다(트러블슈팅 208).
+
+### 비용 (macOS arm64, Node 22.17, 기록 5,000개가 찬 뒤. 중앙값, 측정 스크립트로 잰 값이고 시험이 아니다)
+| 동작 | 옛 TS | 새 Rust |
+|---|---|---|
+| `emit`: 작은 이벤트(약 130 B) | 5.9~16.6µs(5,000개짜리 `splice`) | 1.7µs |
+| `emit`: log 한 줄 | 0.2µs | 1.7µs |
+| `emit`: 기록하지 않는 `usage` | 0.02µs | 1.1µs |
+| `emit`: 20KB 도구 결과 | 16µs(이벤트 만들기 포함) | 117µs(만들기 포함) |
+| `listSessions`의 마지막 요청(history 5,000) | 0.1µs(끝 가까이)~42µs(없거나 맨 앞) | 1.3µs(어디에 있든) |
+| `overviewSessions`(끝 40개 + 마지막 요청), 작은 이벤트 | 42µs | 20µs |
+| 같은 것, 10%가 20KB | 41µs | 340µs |
+| 되감기 한 번(history 5,000 + logs 1,000), 작은 이벤트 | 7µs | 2.6ms |
+| 같은 것, 10%가 20KB(약 10MB) | 7µs | 38ms |
+| 저장용 history 한 번, 작은 이벤트 | 0.1ms | 1.0ms |
+| 같은 것, 10%가 20KB | 0.1ms | 15ms |
+소비하는 쪽 비용까지 합치면(되감기는 SSE가 이벤트마다 `JSON.stringify`, 저장은 `JSON.stringify(data)`): 되감기 1.25ms→3.9ms(작은 이벤트)·27ms→67ms(10%가 20KB), 저장 0.53ms→1.4ms·11.7ms→26.7ms. 즉 되감기·저장은 약 2.3~3배다.
+- 줄인 것: 마지막 요청을 쌓을 때 순번으로 적어 두기(목록 질의가 길이에 비례하지 않음), 질의 결과를 이벤트마다 napi 문자열로 만들지 않고 JSON 배열 글자 하나로 넘기기(되감기 작은 이벤트 11.9ms→2.6ms, 저장 3.9ms→1.0ms), 표시 객체가 없으면 reviver 없이 `JSON.parse`.
+- 남는 비용: 되감기·저장은 Rust 글자를 TS 객체로 푸는 `JSON.parse`가 대부분이다. 되감기는 브라우저가 연결할 때, 저장은 요청 도중 최대 0.5초에 한 번이라 이벤트 흐름에는 끼지 않지만, 기록이 큰(20KB 도구 결과가 많은) 세션에서는 한 번에 수십 ms가 걸린다. B1b가 저장을 Rust로 옮기면 저장의 비용은 없어지고(글자를 이어 붙인다), SSE가 Rust로 오면(B3/C1) 되감기도 글자 그대로 흘려 `JSON.parse`가 없어진다. 그때까지 두는 이유: 구독자 전달이 TS에 있어 객체가 필요하다.
+
+### 남은 한계
+- 이 PR은 실제 세션에서 재지 않았다(세션의 주인이 B1b 뒤에 실측한다). 단위·차등·기존 세션 시험(가짜 도커·가짜 CLI 기반 F0 포함)으로만 확인했다.
+- 비용 숫자는 한 대(macOS arm64)에서 한 번 잰 값이다. Linux에서는 재지 않았다. 세션 수십 개의 목록 질의(`overviewSessions`)를 한꺼번에 불렀을 때는 재지 않았다(세션 하나의 값만 있다).
+- 이벤트가 JSON이 아닌 값을 담으면(`undefined` 속성 등) 기록에서 사라진다. 제품의 이벤트는 모두 JSON이 되는 값이다(저장·SSE가 같은 경계).
 - Linux·Windows에서는 돌려 보지 않았다.

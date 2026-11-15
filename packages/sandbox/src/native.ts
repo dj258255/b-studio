@@ -279,6 +279,8 @@ interface NativeGuard {
   ToolLedger: new (prefix: string, waitMs: number) => NativeToolLedger;
   /** 지원 러너의 코어. `claude` CLI 프로세스를 직접 쥐고 메시지 루프·실행 상태를 돈다. 게이트·결과 조립·도구 실행·인자 만들기·지시·이벤트는 `run`의 `hook`으로 TS를 부른다 */
   RunnerCore: new (ledger: NativeToolLedger) => NativeRunnerCore;
+  /** 세션 하나의 이벤트 기록(ADR-203, 4f B1a). `logs`가 거짓이면 보관 세션의 기록(logs 없음) */
+  SessionRecord: new (logs: boolean) => NativeSessionRecord;
   /** 차등 시험용: 줄 하나를 러너가 읽는 규칙으로 읽어 꼬리표 붙은 JSON(`["num", "-0", true]` 같은 꼴)으로 돌려준다. JSON이 아니면 null, 너무 깊으면 `"deep"` */
   runnerParseLine(line: string): string | null | undefined;
   /** 차등 시험용: 덩어리 목록을 Node `StringDecoder`+`readline`(crlfDelay: Infinity)과 같은 규칙으로 줄로 나눈다 */
@@ -900,6 +902,27 @@ export interface NativeToolLedger {
   idle(): Promise<void>;
   /** 시험용: assistant 메시지의 `content`(JSON 배열)에서 `tool_use`를 센다 */
   noteToolUses(contentJson: string): void;
+}
+
+/**
+ * 세션의 이벤트 기록(crates/bstudio-session). 이벤트는 `JSON.stringify`한 글자로 넘기고(유한하지 않은 수는 `encodeNative`의 표시 객체) 돌려받는 글자는 `decodeNative`로 읽는다.
+ * JSON이 아닌 글자를 넘기면 던진다
+ */
+export interface NativeSessionRecord {
+  /** `emit`의 버퍼 처리. 돌려주는 값은 "`updatedAt`을 바꾸고 저장을 예약할 것인가" */
+  push(eventJson: string): boolean;
+  /** 상한 없이 history 끝에 덧붙인다 */
+  append(eventJson: string): void;
+  /** history를 통째로 바꾼다. 하나라도 JSON이 아니면 던지고 아무것도 바꾸지 않는다 */
+  replaceHistory(eventsJson: string[]): void;
+  hasLogs(): boolean;
+  /** history의 마지막 `run_started` 이벤트(글자 그대로). 없으면 null */
+  lastRunStarted(): string | null | undefined;
+  /** 끝 n개. JSON 배열 글자 하나(이벤트 글자를 쉼표로 이은 것) */
+  tail(n: number): string;
+  history(): string;
+  logs(): string;
+  trimmedHistory(): string;
 }
 
 export interface NativeRunnerCore {
