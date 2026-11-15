@@ -102,12 +102,14 @@ function route(path: string): { status?: number; type?: string; body: string | B
             `throw new Error('')`,
             `throw new RangeError('range: with colon')`,
             `throw Object.assign(new Error('has name prop'), { name: 'Renamed' })`,
-            `Promise.reject(new Error('rejected error'))`,
-            `Promise.reject('rejected string')`,
             `setTimeout(() => { throw new Error('timer boom'); }, 50)`,
             `window.missing.call()`,
             `JSON.parse('{bad')`,
             `throw '유니코드: 한글 메시지'`,
+            // 거절된 약속은 동기 예외 뒤에 둔다. "잡히지 않은 거절"은 그 스크립트의 마이크로태스크가 끝난 뒤 따로 보고되어,
+            // 뒤따르는 스크립트의 동기 예외와 순서가 갈린다(#1248). 이 시험은 순서까지 견준다
+            `Promise.reject(new Error('rejected error'))`,
+            `Promise.reject('rejected string')`,
           ),
         ),
       };
