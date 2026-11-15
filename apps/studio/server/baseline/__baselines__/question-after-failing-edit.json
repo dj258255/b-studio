@@ -17,7 +17,8 @@
         "running": false,
         "owner": "local",
         "experimental": false,
-        "terminal": false,
+        "terminal": true,
+        "terminalMode": "host",
         "hasDeploy": false,
         "services": [
           {
@@ -438,7 +439,8 @@
           "running": false,
           "owner": "local",
           "experimental": false,
-          "terminal": false,
+          "terminal": true,
+          "terminalMode": "host",
           "hasDeploy": false,
           "services": [
             {
@@ -1068,7 +1070,8 @@
           }
         ],
         "status": "ready",
-        "terminal": false,
+        "terminal": true,
+        "terminalMode": "host",
         "tokens": {
           "cacheReadTokens": 1,
           "cacheWriteTokens": 2,
@@ -1124,7 +1127,8 @@
       "compose exec -T app sh -c true"
     ],
     "atShutdown": [
-      "compose down --volumes --remove-orphans --rmi local"
+      "compose down --volumes --remove-orphans --rmi local",
+      "rm --force <sandbox>-agent"
     ],
     "readKinds": [
       "compose config",

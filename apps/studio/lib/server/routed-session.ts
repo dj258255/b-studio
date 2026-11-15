@@ -95,7 +95,7 @@ export async function startRoutedSession(
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   const terminalDeps = input.terminal ? { ...defaultTerminalDeps, ...terminalOverrides } : undefined;
-  if (terminalDeps && !terminalDeps.allowed()) throw new StudioError(400, '터미널로 보내려면 실험 기능을 켠 개인 PC 모드여야 합니다(B_STUDIO_EXPERIMENTAL=1)');
+  if (terminalDeps && !terminalDeps.allowed()) throw new StudioError(400, '터미널로 보내려면 개인 PC 모드여야 합니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
   const only = terminalDeps ? terminalBackends(terminalDeps.mode()) : undefined;

@@ -6,8 +6,9 @@ import { desk, type DeskOptions } from '../desk/desk';
 import { createLaunchDeps, HEALTH_PATH, runLaunch, studioOrigin, type LaunchMode, type LaunchOptions, type ProbeResult } from './launch';
 
 /**
- * 새로 띄우는 서버에 채울 환경. desk의 칸은 세션 터미널이라 실험 기능을 켠 개인 PC 모드가 필요하고,
- * desk가 띄울 수 있는 CLI는 Claude Code(기본 모드)와 Codex다. 사용자가 이미 정한 값은 그대로 둔다
+ * 새로 띄우는 서버에 채울 환경. desk의 칸은 세션 터미널이라 개인 PC 모드가 필요하다(이 컴퓨터 방식은 지원 경로라 실험 기능 없이 열린다, ADR-200).
+ * 실험 기능은 desk의 실험 화면(운영 배포 등)이 보이도록 계속 켠다. desk가 띄울 수 있는 CLI는 Claude Code(기본 모드)와 Codex다.
+ * 사용자가 이미 정한 값은 그대로 둔다
  */
 export const STUDIO_SERVER_ENV: Readonly<Record<string, string>> = { B_STUDIO_EXPERIMENTAL: '1', B_STUDIO_BACKENDS: 'codex' };
 
@@ -62,7 +63,7 @@ export async function runStudio(options: StudioOptions, deps: StudioDeps): Promi
 
   // 떠 있던 서버를 재사용했으면 세션 터미널이 꺼진 채일 수 있다. 그러면 desk의 칸이 열리지 않으니 먼저 알린다
   if (terminalOff(await deps.probe(`${studioOrigin(options.port)}${HEALTH_PATH}`))) {
-    console.error('떠 있는 스튜디오는 세션 터미널을 쓸 수 없게 떠 있습니다(실험 기능이 꺼졌거나 개인 PC 모드가 아님).');
+    console.error('떠 있는 스튜디오는 세션 터미널을 쓸 수 없게 떠 있습니다(개인 PC 모드가 아니거나, 컨테이너 방식인데 실험 기능이 꺼짐).');
     console.error('pnpm studio stop으로 끈 뒤 pnpm studio를 다시 실행하세요.');
     return 1;
   }

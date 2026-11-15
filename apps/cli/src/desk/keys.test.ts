@@ -971,6 +971,27 @@ describe('다음 대기와 빠른 전환(#922)', () => {
   });
 });
 
+describe('실험 기능을 끈 스튜디오의 desk(ADR-200)', () => {
+  it('작업 나누기(Ctrl-b t)와 여러 AI 비교(Ctrl-b f)는 열지 않고 실험 기능이라고 알린다. 모르면(옛 스튜디오) 그대로 연다', () => {
+    const off = { ...initialState(), items: [item('a')], experimental: false };
+    const plans = handleInput(off, '\x02t');
+    expect(plans.state.plans).toBeUndefined();
+    expect(plans.effects).toEqual([]);
+    expect(plans.state.message).toContain('실험 기능');
+    expect(plans.state.message).toContain('B_STUDIO_EXPERIMENTAL=1');
+    const fleets = handleInput(off, '\x02f');
+    expect(fleets.state.fleets).toBeUndefined();
+    expect(fleets.effects).toEqual([]);
+    expect(fleets.state.message).toContain('실험 기능');
+    // 켰거나 모르면 연다
+    for (const experimental of [true, undefined]) {
+      const base = { ...initialState(), items: [item('a')], ...(experimental === undefined ? {} : { experimental }) };
+      expect(handleInput(base, '\x02t').effects).toEqual([{ type: 'plans-open' }]);
+      expect(handleInput(base, '\x02f').effects).toEqual([{ type: 'fleets-open' }]);
+    }
+  });
+});
+
 describe('실사용 점검에서 나온 입력·이동(#945)', () => {
   const waiting = (id: string): DeskItem => ({ ...item(id), terminal: { cli: 'up', waiting: 'permission' } });
 

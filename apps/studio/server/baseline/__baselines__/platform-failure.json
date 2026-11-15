@@ -17,7 +17,8 @@
         "running": false,
         "owner": "local",
         "experimental": false,
-        "terminal": false,
+        "terminal": true,
+        "terminalMode": "host",
         "hasDeploy": false,
         "services": [
           {
@@ -313,7 +314,8 @@
           "running": false,
           "owner": "local",
           "experimental": false,
-          "terminal": false,
+          "terminal": true,
+          "terminalMode": "host",
           "hasDeploy": false,
           "services": [
             {
@@ -800,7 +802,8 @@
           }
         ],
         "status": "ready",
-        "terminal": false,
+        "terminal": true,
+        "terminalMode": "host",
         "tokens": {
           "cacheReadTokens": 1,
           "cacheWriteTokens": 2,
@@ -852,7 +855,8 @@
       "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt"
     ],
     "atShutdown": [
-      "compose down --volumes --remove-orphans --rmi local"
+      "compose down --volumes --remove-orphans --rmi local",
+      "rm --force <sandbox>-agent"
     ],
     "readKinds": [
       "compose config",

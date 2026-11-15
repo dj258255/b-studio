@@ -271,7 +271,7 @@ export async function createTaskPlan(input: {
   let modelId = input.modelId?.trim() ?? '';
   if (cards !== undefined) {
     // 카드 계획은 모델을 부르지 않는다. 세션 터미널을 쓸 수 있을 때만 만들고, 기록용 모델 id는 'terminal'이다
-    if (!sessionTerminalAllowed()) throw new StudioError(409, '작업 카드는 세션 터미널을 쓸 수 있을 때(B_STUDIO_EXPERIMENTAL=1, 개인 PC 모드) 씁니다');
+    if (!sessionTerminalAllowed()) throw new StudioError(409, '작업 카드는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
     modelId = 'terminal';
   } else if (preset === undefined) {
     if (mode === 'claude-code') {

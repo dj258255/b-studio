@@ -76,9 +76,9 @@ describe('POST /api/sessions/[id]/terminal (이슈 #673)', () => {
     expect(mocks.openSessionTerminal).not.toHaveBeenCalled();
   });
 
-  it('쓸 수 없는 서버(실험 기능이 꺼졌거나 개인 PC 모드가 아님)에서는 열지도 입력하지도 못한다', async () => {
+  it('쓸 수 없는 서버(개인 PC 모드가 아니거나 실험 기능 없는 컨테이너 방식)에서는 열지도 입력하지도 못한다', async () => {
     mocks.sessionTerminalTarget.mockImplementation(() => {
-      throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
+      throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
     });
     for (const body of [{ action: 'open', cols: 80, rows: 24 }, { action: 'input', data: 'ls\r' }]) {
       const response = await post(body);

@@ -303,6 +303,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
+import { sessionTerminalAllowed } from './terminal-allowed';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { walkFiles } from './code-files';
@@ -6935,12 +6936,11 @@ export function previewAccessUrl(id: string, service: string, requestedPath: str
 }
 
 /**
- * 세션 터미널(#673)을 쓸 수 있는가. 컨테이너 안의 셸을 여는 일이라 실험 기능을 켠 개인 PC 모드에서만 연다.
- * 다른 실험 기능은 숨기기만 하지만(ADR-166) 이것은 막는다 — 새로 여는 입력 통로이고, 여러 사람이 쓰는 서버에서는 누구의 컨테이너에 누가 붙는지를 아직 정하지 않았다
+ * 세션 터미널(#673)을 쓸 수 있는가. 판정은 terminal-allowed.ts에 있다(health와 같은 판정): 개인 PC 모드에서만 열고,
+ * 이 컴퓨터 방식은 지원 경로라 실험 기능 없이, 컨테이너 방식은 실험 기능을 켰을 때만 연다(ADR-200).
+ * 다른 실험 기능은 숨기기만 하지만(ADR-166) 이것은 막는다 — 새로 여는 입력 통로이고, 여러 사람이 쓰는 서버에서는 누구의 터미널에 누가 붙는지를 아직 정하지 않았다
  */
-export function sessionTerminalAllowed(): boolean {
-  return experimentalEnabled() && localFolderAllowed();
-}
+export { sessionTerminalAllowed };
 
 /**
  * 세션 터미널이 붙을 자리: 샌드박스 id(컨테이너 이름과 라벨), 작업 복사본, 프로젝트 id(홈 볼륨).
@@ -6960,7 +6960,7 @@ export function sessionTerminalTarget(id: string): {
   accountDir: () => Promise<string | undefined>;
   model?: string;
 } {
-  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
+  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
   // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
@@ -7159,7 +7159,7 @@ function clipToolInput(input: unknown): Record<string, unknown> {
 
 /** 관문의 훅이 가리키는 세션. 멈춘 세션은 받지 않는다(켜다 실패한 세션은 받는다 — 열려 있는 터미널에서 고치는 중일 수 있다) */
 function terminalSession(id: string): Session {
-  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
+  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
   if (session.stop.signal.aborted || session.snapshot.status === 'stopped') throw new StudioError(409, '멈춘 세션입니다');
   return session;

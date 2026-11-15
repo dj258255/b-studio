@@ -106,12 +106,12 @@ describe('GET /api/terminals/stream (묶음 터미널 통로, B4)', () => {
     expect(mocks.subscribeSessionTerminal).toHaveBeenCalledTimes(2);
   });
 
-  it('쓸 수 없는 서버(실험 기능이 꺼졌거나 멈춘 세션)의 id도 그 id만 닫힌다', async () => {
+  it('쓸 수 없는 서버(개인 PC 모드가 아님)나 멈춘 세션의 id도 그 id만 닫힌다', async () => {
     mocks.sessionTerminalTarget.mockImplementation(() => {
-      throw new StudioError(403, '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)');
+      throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
     });
     const parsed = events(await collect(await get('a')));
-    expect(parsed).toContainEqual({ id: 'a', message: { kind: 'status', state: 'closed', message: '세션 터미널은 실험 기능을 켠 개인 PC 모드에서만 씁니다(B_STUDIO_EXPERIMENTAL=1)' } });
+    expect(parsed).toContainEqual({ id: 'a', message: { kind: 'status', state: 'closed', message: '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)' } });
     expect(mocks.subscribeSessionTerminal).not.toHaveBeenCalled();
   });
 

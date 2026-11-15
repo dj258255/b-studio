@@ -134,6 +134,17 @@ describe('스튜디오 손님', () => {
     expect(JSON.parse(seen[2]!.body)).toEqual({ projectId: 'p1', route: 'direct', backend: 'codex', accountId: 'acct-1a2b3c4d', request: 'x', intent: 'build', terminal: true });
   });
 
+  it('서버의 실험 기능 스위치를 health에서 읽는다. 값이 없는 옛 스튜디오면 모른다(ADR-200)', async () => {
+    const client = new StudioClient({ origin, token: 't' });
+    handler = (_req, res) => res.end(JSON.stringify({ status: 'ok', app: 'b-studio', terminal: true, experimental: false, apiVersion: 1 }));
+    expect(await client.serverExperimental()).toBe(false);
+    expect(seen[0]!.url).toBe('/api/health');
+    handler = (_req, res) => res.end(JSON.stringify({ status: 'ok', app: 'b-studio', terminal: true, experimental: true, apiVersion: 1 }));
+    expect(await client.serverExperimental()).toBe(true);
+    handler = (_req, res) => res.end(JSON.stringify({ status: 'ok', app: 'b-studio', terminal: true, apiVersion: 1 }));
+    expect(await client.serverExperimental()).toBeUndefined();
+  });
+
   it('계정 목록을 읽는다(#885)', async () => {
     handler = (_req, res) => {
       res.end(JSON.stringify({ accounts: [{ id: 'codex', name: '기본', backend: 'codex', builtin: true }] }));
