@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
+import { decodeNative, encodeLoneSurrogates, native, type NativeToolLedger } from '@b-studio/sandbox';
 import { decodeLoneSurrogates } from './lone-surrogates';
 import { zodShape } from './tool-schema';
 import type { buildTools, ToolOutcome } from './tools';
@@ -29,6 +29,12 @@ export interface ToolServerOptions {
    * 넣지 않으면 루프백 이름만 받는다
    */
   allowedHosts?: readonly string[];
+  /**
+   * 도구 순서 장부(ADR-202, 트러블슈팅 206). 주면 `tools/call`이 `run`을 부르기 **전에** 이 장부를 지난다: 도착 순서대로 하나씩 실행하고,
+   * 그 도구의 `tool_use`를 본 뒤에 실행하며(대기 상한을 넘기면 그대로), 닫혔거나 취소됐으면 `run`을 부르지 않고 isError 결과로 거절한다.
+   * 주지 않으면(실험 러너) 지금처럼 요청이 오는 대로 `run`을 부른다 — 순서 보장은 부르는 쪽이 맡는다
+   */
+  ledger?: NativeToolLedger;
 }
 
 /**
@@ -41,7 +47,7 @@ export interface ToolServerOptions {
  * 도구 목록 얻기(`specs`가 함수면 요청마다)와 도구 실행(`run`). 옛 `node:http` + `@modelcontextprotocol/sdk` 서버는 `mcp-http-server-legacy.ts`에 있다(차등 시험의 기준값).
  * 글자는 `encodeLoneSurrogates`한 꼴로 오간다(짝 없는 서로게이트가 경계에서 합쳐지지 않게).
  */
-export async function startToolServer({ specs, run, name = 'b-studio', allowedHosts = [], honorRequired = false }: ToolServerOptions): Promise<ToolServer> {
+export async function startToolServer({ specs, run, name = 'b-studio', allowedHosts = [], honorRequired = false, ledger }: ToolServerOptions): Promise<ToolServer> {
   const token = randomBytes(24).toString('hex');
   const { id, port } = await native.startMcpServer(token, allowedHosts.map(encodeLoneSurrogates), encodeLoneSurrogates(name), honorRequired, async (call) => {
     if (call.kind === 'list') {
@@ -64,7 +70,7 @@ export async function startToolServer({ specs, run, name = 'b-studio', allowedHo
       // 처리가 던지면 그 메시지로 isError 결과다(옛 SDK 서버와 같다)
       return { ok: false, content: encodeLoneSurrogates(describe(error)), images: [] };
     }
-  });
+  }, ledger ?? null);
 
   let closed = false;
   return {

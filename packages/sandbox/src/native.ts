@@ -166,6 +166,8 @@ interface NativeGuard {
     name: string,
     honorRequired: boolean,
     handler: (call: NativeMcpCall) => Promise<NativeMcpAnswer>,
+    /** 도구 순서 장부(ADR-202). 있으면 `tools/call`이 `handler`를 부르기 전에 장부를 지난다: 도착 순서대로 하나씩, 그 도구의 `tool_use`를 본 뒤에, 닫혔거나 취소됐으면 `handler`를 부르지 않고 isError 결과로 거절한다 */
+    ledger?: NativeToolLedger | null,
   ): Promise<{ id: number; port: number }>;
   /** 새 연결을 받지 않고 열린 연결(처리 중인 것 포함)을 끊고, 끝나면 resolve한다. 모르는 id·이미 닫은 id는 아무 일도 하지 않는다 */
   closeLoopbackServer(id: number): Promise<void>;
@@ -269,6 +271,16 @@ interface NativeGuard {
     killAfterMs: number,
     onEvent: (event: NativeCliEvent) => void,
   ) => NativeCliProcess;
+  // ── 지원 러너의 메시지 루프·실행 상태(ADR-202, 4f A8b) ──
+  /**
+   * 도구 순서 장부: 같은 실행의 러너 코어와 MCP 서버가 나눠 쥐는 객체. `prefix`는 MCP 요청의 도구 이름 앞에 붙는 말(`mcp__<서버>__`), `waitMs`는 도구 요청이
+   * 그 호출이 든 assistant 메시지를 기다리는 상한. 이름·이유의 글자는 `encodeLoneSurrogates`한 꼴이다
+   */
+  ToolLedger: new (prefix: string, waitMs: number) => NativeToolLedger;
+  /** 지원 러너의 코어. `claude` CLI 프로세스를 직접 쥐고 메시지 루프·실행 상태를 돈다. 게이트·결과 조립·도구 실행·인자 만들기·지시·이벤트는 `run`의 `hook`으로 TS를 부른다 */
+  RunnerCore: new (ledger: NativeToolLedger) => NativeRunnerCore;
+  /** 차등 시험용: 줄 하나를 러너가 읽는 규칙으로 읽어 꼬리표 붙은 JSON(`["num", "-0", true]` 같은 꼴)으로 돌려준다. JSON이 아니면 null, 너무 깊으면 `"deep"` */
+  runnerParseLine(line: string): string | null | undefined;
   /** 차등 시험용: 덩어리 목록을 Node `StringDecoder`+`readline`(crlfDelay: Infinity)과 같은 규칙으로 줄로 나눈다 */
   cliSplitLines(chunks: Buffer[]): string[];
   /** 차등 시험용: 덩어리 목록의 표준 오류 끝부분(UTF-16 단위, 입력 끝에 디코더를 비운다) */
@@ -876,6 +888,27 @@ export interface NativeCliEvent {
   errorCode?: string | null;
   errorMessage?: string | null;
   errno?: number | null;
+}
+
+export interface NativeToolLedger {
+  /** 이제부터 오는 도구 호출은 거절한다. 기다리던 요청도 깨운다 */
+  close(): void;
+  /** 취소했다. `reason`은 거절 글로 쓴다 */
+  abort(reason: string): void;
+  isClosed(): boolean;
+  /** 지금까지 도착한 도구 호출이 모두 끝나기를 기다린다 */
+  idle(): Promise<void>;
+  /** 시험용: assistant 메시지의 `content`(JSON 배열)에서 `tool_use`를 센다 */
+  noteToolUses(contentJson: string): void;
+}
+
+export interface NativeRunnerCore {
+  /** 취소했다. 도구 장부에 이유를 알리고 떠 있는 프로세스에 입력 닫기 + 바로 SIGTERM을 보낸다 */
+  abort(reason: string): void;
+  /** `proc`번 프로세스의 표준 입력에 사용자 메시지 한 줄을 보낸다(`text`는 `encodeLoneSurrogates`한 꼴). 그 프로세스가 지금 것이 아니면 버린다 */
+  send(proc: number, text: string): void;
+  /** 끝까지 돈다. `input`·결과는 JSON. 던지지 않고 결과의 `ok`·`kind`로 돌려준다 */
+  run(input: string, hook: (request: string) => Promise<string>): Promise<string>;
 }
 
 export interface NativeCliProcess {

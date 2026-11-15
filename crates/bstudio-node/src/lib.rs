@@ -5497,8 +5497,10 @@ pub fn start_mcp_server(
     name: String,
     honor_required: bool,
     handler: ThreadsafeFunction<McpCallJs, Promise<McpAnswerJs>, McpCallJs, Status, false>,
+    ledger: Option<&ToolLedger>,
 ) -> Result<AsyncBlock<LoopbackStartedJs>> {
     let handler = Arc::new(handler);
+    let ledger = ledger.map(|ledger| ledger.inner.clone());
     AsyncBlockBuilder::new(async move {
         let list_handler = handler.clone();
         let list: lsv::ListTools = Arc::new(move || {
@@ -5516,13 +5518,24 @@ pub fn start_mcp_server(
         let call_handler = handler;
         let call: lsv::CallTool = Arc::new(move |name: String, args: String| {
             let handler = call_handler.clone();
+            let ledger = ledger.clone();
             Box::pin(async move {
                 let failed = |text: &str| bstudio_io::mcp_server::ToolReply { ok: false, content: text.to_owned(), images: Vec::new() };
-                let request = McpCallJs { kind: "call".to_owned(), name, args };
-                let Ok(pending) = handler.call_async(request).await else { return failed("도구를 실행하지 못했습니다") };
-                match pending.await {
-                    Ok(answer) => bstudio_io::mcp_server::ToolReply { ok: answer.ok, content: answer.content, images: answer.images.into_iter().map(|image| (image.data, image.mime_type)).collect() },
-                    Err(error) => failed(&error.to_string()),
+                let request = McpCallJs { kind: "call".to_owned(), name: name.clone(), args };
+                let run = || async {
+                    let Ok(pending) = handler.call_async(request).await else { return failed("도구를 실행하지 못했습니다") };
+                    match pending.await {
+                        Ok(answer) => bstudio_io::mcp_server::ToolReply { ok: answer.ok, content: answer.content, images: answer.images.into_iter().map(|image| (image.data, image.mime_type)).collect() },
+                        Err(error) => failed(&error.to_string()),
+                    }
+                };
+                match ledger {
+                    // 장부가 있으면 TS 콜백 앞에서 순서·닫힘·취소를 가린다(ADR-202). 거절은 옛 `runTool`이 던지던 오류와 같은 isError 결과다
+                    Some(ledger) => match ledger.run(&name, run).await {
+                        Ok(reply) => reply,
+                        Err(reason) => failed(&reason),
+                    },
+                    None => run().await,
                 }
             })
         });
@@ -5680,4 +5693,133 @@ pub fn cli_stderr_tail_of(chunks: Vec<Buffer>) -> Uint16Array {
     }
     tail.finish();
     Uint16Array::new(tail.units())
+}
+
+
+// ── 도구 순서 장부와 러너 코어(ADR-202, 4f A8b) ──
+// 장부(tool_ledger)는 같은 실행의 러너 코어와 MCP 서버가 나눠 쥐는 객체다. MCP 서버의 `tools/call`은 TS의 도구 실행 콜백을 부르기 전에 이 장부를 지난다(`startMcpServer`의 선택 인자).
+// 러너 코어(cli_runner)는 `claude` CLI 프로세스를 직접 쥐고 메시지 루프·실행 상태를 돌며, 게이트·결과 조립·도구 실행·인자 만들기·지시·이벤트는 `hook`(TS)으로 부른다.
+// 입력·출력은 JSON 글이다(`encodeNative`·`encodeLoneSurrogates`한 꼴). TS 껍데기: packages/agent/src/claude-code-runner.ts
+use bstudio_io::cli_runner as crunner;
+use bstudio_io::tool_ledger as tledger;
+
+#[napi]
+pub struct ToolLedger {
+    inner: Arc<tledger::ToolLedger>,
+}
+
+#[napi]
+impl ToolLedger {
+    /// `prefix`는 MCP 요청의 도구 이름 앞에 붙는 말(`mcp__<서버>__`), `wait_ms`는 도구 요청이 그 호출이 든 메시지를 기다리는 상한
+    #[napi(constructor)]
+    pub fn new(prefix: String, wait_ms: f64) -> Self {
+        let wait = if wait_ms.is_finite() && wait_ms > 0.0 { std::time::Duration::from_secs_f64(wait_ms / 1000.0) } else { std::time::Duration::from_millis(1) };
+        Self { inner: Arc::new(tledger::ToolLedger::new(prefix, wait)) }
+    }
+
+    /// 이제부터 오는 도구 호출은 거절한다. 기다리던 요청도 깨운다
+    #[napi]
+    pub fn close(&self) {
+        self.inner.close();
+    }
+
+    /// 취소했다. `reason`은 거절 글로 쓴다
+    #[napi]
+    pub fn abort(&self, reason: String) {
+        self.inner.abort(&reason);
+    }
+
+    #[napi]
+    pub fn is_closed(&self) -> bool {
+        self.inner.is_closed()
+    }
+
+    /// 지금까지 도착한 도구 호출이 모두 끝나기를 기다린다
+    #[napi]
+    pub fn idle(&self, env: Env) -> Result<AsyncBlock<()>> {
+        let ledger = self.inner.clone();
+        AsyncBlockBuilder::new(async move {
+            ledger.idle().await;
+            Ok(())
+        })
+        .build(&env)
+    }
+
+    /// 시험용: assistant 메시지의 `content`(JSON 배열)에서 `tool_use`를 센다. 러너 코어가 쓰는 것과 같은 함수다
+    #[napi]
+    pub fn note_tool_uses(&self, content_json: String) -> Result<()> {
+        let value = bstudio_guard::js_json::parse_native(&content_json).map_err(Error::from_reason)?;
+        self.inner.note_tool_uses(Some(&value));
+        Ok(())
+    }
+}
+
+#[napi]
+pub struct RunnerCore {
+    shared: Arc<crunner::CoreShared>,
+    ledger: Arc<tledger::ToolLedger>,
+}
+
+#[napi]
+impl RunnerCore {
+    #[napi(constructor)]
+    pub fn new(ledger: &ToolLedger) -> Self {
+        Self { shared: crunner::CoreShared::new(ledger.inner.clone()), ledger: ledger.inner.clone() }
+    }
+
+    /// 취소했다(`signal`의 `abort`). 도구 장부에 이유를 알리고 떠 있는 프로세스에 입력 닫기 + 바로 SIGTERM을 보낸다
+    #[napi]
+    pub fn abort(&self, reason: String) {
+        self.shared.abort(&reason);
+    }
+
+    /// `proc`번 프로세스의 표준 입력에 사용자 메시지 한 줄을 보낸다(`text`는 `encodeLoneSurrogates`한 꼴). 그 프로세스가 지금 것이 아니면 버린다
+    #[napi]
+    pub fn send(&self, proc: u32, text: String) {
+        self.shared.send(proc, &text);
+    }
+
+    /// 러너 코어를 끝까지 돈다. `hook`은 요청(JSON)을 받아 응답(JSON)을 돌려준다. 던지지 않고 결과의 `ok`·`kind`로 돌려준다
+    #[napi]
+    pub fn run(&self, env: Env, input: String, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+        let (shared, ledger) = (self.shared.clone(), self.ledger.clone());
+        let hook = Arc::new(hook);
+        AsyncBlockBuilder::new(async move {
+            let hook: crunner::Hook = Arc::new(move |request: String| {
+                let hook = hook.clone();
+                Box::pin(async move {
+                    let pending = hook.call_async(request).await.ok()?;
+                    pending.await.ok()
+                })
+            });
+            Ok(crunner::run(&input, hook, shared, ledger).await)
+        })
+        .build(&env)
+    }
+}
+
+/// 차등 시험용: 줄 하나를 러너가 읽는 규칙(`js_json::parse_lone_encoded`)으로 읽어 값을 꼬리표 붙은 JSON으로 돌려준다
+/// (`["null"]`·`["bool", true]`·`["num", "<JS 글자>", 음의 0이면 true]`·`["str", 글자(encodeLoneSurrogates한 꼴)]`·`["arr", [...]]`·`["obj", [[키, 값]...]]`, 객체는 `Object.entries` 순서).
+/// JSON이 아니면 `null`, 너무 깊어 읽지 못하면 `"deep"`
+#[napi]
+pub fn runner_parse_line(line: String) -> Option<String> {
+    use bstudio_guard::js_json::{self, JsValue, LoneParseError};
+    fn tagged(value: &JsValue) -> String {
+        match value {
+            JsValue::Null => r#"["null"]"#.to_owned(),
+            JsValue::Bool(on) => format!(r#"["bool",{on}]"#),
+            JsValue::Num(n) => format!(r#"["num",{},{}]"#, bstudio_guard::js::json_quote(&bstudio_guard::js::number_to_string(*n)), *n == 0.0 && n.is_sign_negative()),
+            JsValue::Str(text) => format!(r#"["str",{}]"#, bstudio_guard::js::json_quote(text)),
+            JsValue::Arr(items) => format!(r#"["arr",[{}]]"#, items.iter().map(tagged).collect::<Vec<_>>().join(",")),
+            JsValue::Obj(object) => format!(
+                r#"["obj",[{}]]"#,
+                object.entries_js_order().into_iter().map(|(key, item)| format!("[{},{}]", bstudio_guard::js::json_quote(key), tagged(item))).collect::<Vec<_>>().join(",")
+            ),
+        }
+    }
+    match js_json::parse_lone_encoded(&bstudio_io::cli_runner::encode_line(&line)) {
+        Ok(value) => Some(tagged(&value)),
+        Err(LoneParseError::TooDeep) => Some("\"deep\"".to_owned()),
+        Err(LoneParseError::Invalid) => None,
+    }
 }

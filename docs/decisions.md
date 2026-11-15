@@ -10097,7 +10097,12 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 닫기: 신호는 자기가 띄운 pid에만, `try_wait`로 아직 거두지 않았음을 확인한 같은 동기 구간에서만 보낸다(거둔 pid 재사용 방지). 거두기를 타이머·명령보다 먼저 보는 `biased` 선택이다. `now`는 걸려 있던 graceful 타이머를 당기고, 이미 SIGTERM을 보냈으면 다시 보내지 않으며 SIGKILL 타이머도 다시 걸지 않는다.
 - 표준 출력 백프레셔: 옛 구현은 `readline` 비동기 반복자(`events.on`의 `highWaterMark: 1024`)가 입력을 멈춰 자식이 쓰기에서 멈췄다. Node 22.17에서 재 보니 소비자가 읽지 않을 때 자식(막히는 `writeSync`)은 반복자를 시작하지 않으면 줄 약 7,300개(13바이트 줄, 파이프·스트림 버퍼 약 95KB), 반복자를 시작해 한 줄만 읽고 멈추면 약 8,300개에서 막혔고(차이 약 1,000줄 = 상한 1,024), 120바이트 줄에서도 차이는 같은 약 1,000줄이었다. 새 구현은 소비하지 않은 줄이 `LINE_HIGH`(1,024, 옛 값과 같다)에 닿으면 Rust가 읽기를 멈추고 TS가 `consumed(n)`으로 소비를 알려(64줄씩, 큐를 비우면 기다리기 전에 바로) `LINE_LOW`(512) 이하에서 다시 읽는다. 옛 구현은 0이 되어야 다시 읽었다. 한 덩어리 안의 줄은 나눠 멈추지 않아(옛 구현도 같다) 그만큼은 넘을 수 있고, 수 MiB 줄은 통째로 받는다. 자식이 끝나면(거두면) 한도를 풀고 남은 출력을 비운다(Node의 `flushStdio`와 같다). 20만 줄을 쓰는 자식이 소비하지 않는 동안 막혀 있고 다 소비하면 순서대로 끝까지 오는 것을 옛 구현·새 구현에 같이 돌려 확인했다.
 - 달라진 점(의도): 알 수 없는 신호 번호는 `SIG<번호>`로 이름 짓는다(Node는 빈 문자열).
-- 실제 Claude Code 세션 실측은 하지 않았다(주인이 한다).
+- 실제 Claude Code 세션은 이 PR에서 재지 않았고, A8b의 실측에서 이 층을 함께 거쳤다([기록](experiments/2026-11-16-a8b-runner-core-native.md)).
+
+### 덧붙임: 4f A8b 결과 — 지원 러너의 메시지 루프·실행 상태·도구 순서 장부를 Rust로 ([#1246](https://github.com/dj258255/b-studio/issues/1246), ADR-202)
+- `runClaudeCodeAgent`의 메시지 루프와 실행 상태(턴·사용량·result 처리·게이트 분기·승격·네트워크 재시도·되묻기·프로세스 다시 띄우기)를 `crates/bstudio-io/src/cli_runner.rs`가 쥔다. A8a의 `cli_process`를 직접 쥐므로 줄이 TS를 거치지 않는다. 도구 순서 장부는 `tool_ledger.rs`의 객체로 러너 코어와 MCP 서버가 나눠 쥐고(`startToolServer`의 선택 옵션 `ledger`), 게이트·결과 조립·도구 실행·지시·인자 만들기는 TS 콜백이다. 옛 루프는 `claude-code-runner-loop-legacy.ts`로 두고 차등 시험으로 맞췄다. 맞춘 것·의도한 차이·막는 쪽/여는 쪽은 ADR-202.
+- 차등 시험이 새 코드의 결함 하나를 먼저 찾았다: 줄의 글자 그대로의 예약 글자를 인코딩하지 않아 서로게이트로 읽던 것(트러블슈팅 207).
+- 실제 Claude Code 세션(stream-json 러너 경로)에서 통과, 게이트 실패 뒤 통과, 게이트 소진, 턴 상한 둘(변경 없음은 실패, 변경 있음은 재확인을 통과해 `incomplete`)을 봤다([기록](experiments/2026-11-16-a8b-runner-core-native.md)).
 
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
@@ -10648,4 +10653,58 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 기준은 SDK 1.32.1 하나다(1.30.0·그 뒤 버전과 견주지 않았다). SDK를 올리면 차등 시험이 어긋나는 곳이 드러난다.
 - `initialize`의 `capabilities` 안쪽, `params.task`의 안쪽 필드, `_meta`의 알려지지 않은 키 같은 쓰지 않는 필드는 SDK의 zod를 그대로 옮기지 않았다. `arguments`·`name`·`cursor`·`protocolVersion`·`clientInfo`와 도구 인자는 글까지 맞췄다.
 - 도구 이름·인자 키가 `Object.prototype`의 속성 이름이면서 도구 스키마의 키인 경우(`constructor` 키를 가진 도구)는 시험하지 않았다(`buildTools`에 없다).
+- Linux·Windows에서는 돌려 보지 않았다.
+
+## ADR-202 지원 러너의 메시지 루프와 실행 상태는 Rust가 쥐고 게이트·결과·도구 실행은 TS 콜백에 둔다: 도구 순서 장부도 Rust 객체로 MCP 서버와 나눠 쥔다
+
+상태: 채택(4f A8b)
+관련: 이슈 [#1246](https://github.com/dj258255/b-studio/issues/1246), 추적 [#1243](https://github.com/dj258255/b-studio/issues/1243), ADR-131(턴 상한 재확인), ADR-142(네트워크 재시도), ADR-194(CLI 직접), ADR-195(4f), ADR-201(경계), 트러블슈팅 131·206·207
+
+### 맥락
+- 지원 러너(`claude-code-runner.ts`의 `runClaudeCodeAgent`)는 CLI가 낸 줄을 읽는 메시지 루프와 그 상태(턴·사용량·result 처리·게이트 분기·승격·네트워크 재시도·되묻기·프로세스 다시 띄우기)를 TS 변수로 들고 있었다. 완료를 정하는 흐름이라 막는 검사다. A8a가 CLI 프로세스 층을 Rust로 옮겼으므로(`cli_process.rs`) 줄이 Rust에서 TS를 거쳐 다시 Rust 판정(`runner_judge`)으로 가는 왕복이 남아 있었다.
+- 도구 순서 장부(`noteToolUses`·`awaitToolUse`·`closeTools`·`serialQueue`)는 MCP 서버(Rust, A7b)와 러너 루프(TS) 사이에 서 있었다. 도구 요청은 Rust 서버 스레드에서, 턴 세기는 TS 루프에서 일어나 둘을 TS 변수로 이었는데(트러블슈팅 206), 이제 양쪽이 모두 Rust라 같은 객체를 나눠 쥐는 편이 맞다.
+- 게이트·결과 조립·도구 실행·지시 큐·인자 만들기는 TS가 든 값(샌드박스·작업 공간·프로젝트)을 쓰므로 아직 옮길 수 없다. gate_check(A5b-1)가 "Rust가 흐름을 쥐고 TS 상태는 콜백"으로 한 선례를 따른다.
+
+### 결정
+1. **루프의 주인은 Rust**(`crates/bstudio-io/src/cli_runner.rs`). `cli_process`로 프로세스를 직접 띄우고 줄을 받는다. 줄은 `js_json::parse_lone_encoded`로 읽는다(`JSON.parse`와 같은 문법: 숫자는 JS number와 같게, `-0`, 큰 정수, 중복 키는 뒤 값, 짝 없는 서로게이트 보존). 글자 그대로의 예약 글자(U+E000..U+E01F)는 읽기 전에 인코딩한다(`encode_line`, 트러블슈팅 207). JSON이 아니거나 객체가 아닌 줄은 건너뛴다(옛 구현과 같다). TS `runClaudeCodeAgent`는 시그니처 그대로 준비(작업 공간·게이트·도구 목록·임시 파일·도구 서버)와 콜백 제공, 결과 조립만 한다.
+2. **Rust가 쥐는 것**: session_id 갱신·init의 `session` 이벤트(한 번)·`mcpSetupFailure`·요약 상태, assistant의 턴 세기·`turn`·`turn_usage`·최대 문맥·`text`·마지막 글·턴 상한, result의 도구 서버 미확인 실패·사용량·`tokens`·modelMs·`describeResultFailure`·`error_max_turns` 재확인·네트워크 재시도(상한·지수 대기·resume·안내 글)·되묻기 멈춤·게이트 판정 분기·승격, 프로세스 다시 띄우기(`reopen`)·프로세스마다의 사용량 base 누적·`lastExit`·결과 없음 실패, 예외 처리 규칙(결과가 있으면 삼킨다, 트러블슈팅 131).
+3. **TS 콜백**(napi `RunnerCore.run(input, hook)`의 `hook`, 요청 `{ op, ... }`·응답 `{ ok: true, ... }`, 던지면 TS가 그 Error를 보관하고 `{ fatal: true }`를 주면 Rust가 멈추고 끝난 뒤 TS가 **원래 Error를 그대로** 다시 던진다): `event`(이벤트 순서는 Rust가 정한다)·`args`(CLI 인자와 띄우기 준비)·`steerAttach`/`steerDetach`(프로세스마다 진행 중 지시)·`gateCheck`·`gateRecheck`·`gateAskedCheck`·`signature`·`grantBudget`·`asked`·`finish`(결과 조립)·`finishEmit`(완료·실패 이벤트)·`wait`(네트워크 대기와 취소 확인). 취소는 `RunnerCore.abort(이유)`다. 지시 글은 `RunnerCore.send(프로세스 번호, 글)`로 Rust 쪽 프로세스 입력에 간다.
+4. **도구 순서 장부는 Rust 객체**(`tool_ledger.rs`, napi `ToolLedger`). 러너 코어와 MCP 서버가 나눠 쥔다. `startToolServer`의 **선택** 옵션 `ledger`를 주면 `tools/call`이 TS 실행 콜백을 부르기 **전에** 장부를 지난다: 도착 순서대로 하나씩 실행하고(FIFO 잠금, 실행이 끝날 때까지 쥔다), 그 도구의 `tool_use`를 본 뒤에 실행하며(2초 상한을 넘기면 그대로), 취소됐거나 닫혔으면 TS를 부르지 않고 옛 `runTool`과 같은 글의 `isError` 결과를 낸다(취소 이유 글, `이 실행은 이미 끝나 도구를 쓸 수 없습니다`). 턴 상한·finish·끝·취소에서 닫고, 닫으면 기다리던 요청을 깨운다. `serial.idle()`도 이 객체의 `idle()`이다. 옵션이 없는 실험 러너(codex 등)는 지금처럼 돈다. 깨우는 시점은 옛 구현의 "같은 동기 구간 안에서 센 뒤 깨어난 요청이 마이크로태스크에서 돈다"를 그대로 옮겨, assistant 메시지의 턴 세기·턴 상한 확인·이벤트가 **끝난 뒤** 센다(상한을 넘겼으면 이미 닫았다).
+5. **옛 루프는 `claude-code-runner-loop-legacy.ts`로 복사**해 차등 시험의 기준으로 둔다(4g에서 지운다).
+
+### 호출부별 막는 쪽인지 여는 쪽인지(AGENTS.md "막는 검사를 고칠 때")
+| 자리 | 쪽 | 모르는·깨진 입력 |
+|---|---|---|
+| 도구 서버 연결 확인(`mcp_setup_failure`, 첫 result 전 init) | 막는 쪽 | `connected`로 확인한 init이 있어야 result를 믿는다. 없으면 통과가 아니라 실패 |
+| result 실패 설명(`describe_result_failure`) | 막는 쪽 | 성공이 확실할 때만 통과(`success`·`is_error` 거짓·거절 아님) |
+| 게이트 응답(`gateCheck`) | 막는 쪽 | `pass`·`retry`·`exhausted` 말고는 `Stop::Hook`(통과가 아니라 실행이 멈춘다) |
+| 턴 상한 | 막는 쪽 | `turn > maxTurns`이면 도구를 닫고 게이트를 한 번 더 본다 |
+| 도구 장부 `run` | 막는 쪽 | 닫힘·취소면 실행하지 않는다. 취소를 닫힘보다 먼저 본다 |
+| 도구 장부 `note_tool_uses` | 여는 쪽(기다리던 요청을 푼다) | `type`이 `tool_use`이고 `name`이 글자인 객체 블록만, 같은 `id`는 한 번만. 모르는 꼴은 세지 않는다(더 오래 기다릴 뿐 열지 않는다) |
+| 네트워크 재시도 | 여는 쪽(다시 시도) | 근거 있는 패턴만, 횟수·누적 대기 상한, 이어받을 세션이 없으면 원래 요청 |
+| 승격 | 여는 쪽(다시 시도) | 한 실행에 한 번, 게이트 서명이 정한다 |
+| 이어받을 대화 id | 허용 목록(여는 쪽) | UUID 꼴만(`is_session_id`), 아니면 경고하고 새 대화 |
+| 줄 읽기 | 건너뛰는 자리 | JSON이 아니거나 객체가 아니면 건너뛴다(옛 구현과 같다). **너무 깊어 읽지 못한 줄은 건너뛰지 않고 실행을 실패로 끝낸다** |
+
+### 옛 구현과 다른 것
+- 너무 깊게 중첩된 줄(`MAX_DEPTH` 2000 초과): 옛 구현은 `JSON.parse`로 읽고 처리했다. 건너뛰면 턴을 덜 세어 상한을 넘기므로(열린 쪽) 실행을 실패로 끝낸다(`claude-code-runner-differential.test.ts`의 "의도한 차이").
+- 모델 이름이 `constructor` 같은 `Object.prototype` 속성이면 옛 구현은 `usageByModelBase[model] ??=`가 `Object`를 잡아 `Object`를 오염시켰다. 여기서는 보통 키로 센다(`runner_judge`가 이미 한 의도한 차이와 같다).
+- 준비 단계(CLI 인자 만들기·지시 연결)가 던져도 프로세스를 끝내고 정리한 뒤 던진다(옛 구현은 `try` 앞이라 이미 띄운 프로세스를 남겼다). 한 프로세스를 일찍 닫을 때(승격·재시도·오류) 남은 줄을 소비해 비운다(옛 구현은 소비하지 않아 자식이 쓰기에서 멈출 수 있었다).
+- 도착 순서의 기준이 JS 콜백이 실행되는 때에서 Rust가 요청을 받은 때로 앞당겨졌다.
+- `describe_result_failure`·`mcp_setup_failure`에 넣는 값은 옛 구현이 napi 경계(`encodeNative`)를 거치던 꼴로 맞춘다(짝 없는 서로게이트는 U+FFFD).
+
+### 검증 (2026-11-16, macOS arm64, Node 22.17)
+- **기존 시험이 고치지 않고 통과**: `claude-code-runner.test.ts`(트러블슈팅 206의 다섯 개 포함)·`claude-code-runner-compact.test.ts`·`claude-cli-process*.test.ts`·`fake-claude-cli.test.ts`·`mcp-http-server*`·`codex-runner`·`explore-qa-claude-code` 등. 전체 결과는 PR 본문.
+- **차등 시험**(`claude-code-runner-differential.test.ts`): 같은 가짜 CLI 시나리오·같은 가짜 샌드박스로 옛 루프와 새 루프를 돌려 이벤트 목록·결과·오류·가짜 CLI가 받은 입력(프롬프트·도구 호출·인자)을 견준다(시간 지표 `toolMs`·`gateMs`와 검증 보고서의 시간만 뺀다). 이름 붙인 시나리오(통과, 게이트 실패 뒤 통과, 소진, 턴 상한 둘, 되묻기 셋, 승격, 네트워크 재시도, init 없음, 도구 서버 연결 실패, 결과 없이 끝남, 요약 상태, 하위 에이전트, 같은 id 반복, 사용량, 진행 중 지시, 취소 여러 시점, 트러블슈팅 206의 `callFirst`·`noMessage`, 결과 뒤 예외, 이상한 줄 등)와 시드 있는 무작위 시나리오 48개(턴·도구·텍스트·결과 실패 종류·승격·재시도·지시를 섞음)가 같다. 의도한 차이 세 개는 별도 시험이다.
+- **JSON 차등**(`claude-code-runner-json-differential.test.ts`): `native.runnerParseLine`(러너가 줄을 읽는 규칙)과 `JSON.parse`를 꼬리표 트리로 견준다(숫자 경계·`-0`·큰 정수·지수, 서로게이트·예약 글자, 중복 키, `__proto__`, 키 순서). 고정 입력 80여 개와 시드 3,000개(문법을 깬 줄 포함)가 같다. 이 시험이 줄의 예약 글자 인코딩 빠짐을 먼저 찾았다(트러블슈팅 207).
+- **장부 시험**(`tool-ledger.test.ts`와 Rust 단위 시험 `tool_ledger`·`cli_runner`): `startToolServer`의 `ledger` 옵션(없으면 동시 실행, 있으면 FIFO·tool_use 뒤·상한·닫힘 거절·취소 이유·idle).
+- **실제 세션**(2026-11-16, Claude Code CLI 2.1.325): `/api/sessions` → `/messages`로 vf3 프로젝트에서 통과, 게이트 실패 뒤 통과, 게이트 소진, 턴 상한 둘. 2턴째 메시지 하나에 든 도구 호출 넷을 장부가 순서대로 실행했다([기록](experiments/2026-11-16-a8b-runner-core-native.md)).
+- **검토에서 찾은 결함**: 승격·재시도(`reopen`)나 오류로 줄 묶음의 나머지를 버릴 때 그 줄을 소비했다고 알리지 않았다. 버린 줄이 1,024개를 넘으면 읽기가 멈춘 채로 남아, 입력이 닫힌 뒤에도 출력을 더 쓰는 옛 프로세스가 스스로 끝나지 못하고 SIGTERM을 맞았다. 고치기 전 코드에서 시험(`reopen_accounts_for_lines_left_in_the_batch`)이 세 번 모두 실패했고(3.4초, 표시 파일 없음), 고친 뒤 통과했다. 처음 쓴 시험은 셸의 `printf`가 잘게 나눠 써서 조건이 만들어지지 않아 고치기 전에도 통과했으므로, 내용을 파일로 만들어 `cat`으로 한 번에 쓰게 바꿨다.
+- **변이**: 러너 코어·장부의 한 곳씩 망가뜨린 변이를 PR 본문의 표로 낸다(턴 상한 `>=`·빼기·한 턴 더, 도구 서버 미확인 실패 빼기, `mcpSetupFailure` 무시, 결과 없음을 성공으로, 결과 뒤 예외 던지기, 장부 대기 빼기·닫힘 안 보기·닫을 때 안 깨우기·`tool_use` 아닌 블록 세기·FIFO 대신 동시 실행·취소 안 보기·아무 tool_use나 풀기, 네트워크 상한 무시·모든 실패를 재시도, 승격 한 번만 규칙 빼기, 하위 에이전트를 턴으로 세기, 소진을 통과로, result 실패 무시, 되묻기 게이트 확인 빼기, id 검사 넓히기, 예약 글자 인코딩 빼기, 깊은 줄 건너뛰기). 처음에 두 개(결과 뒤 예외, 되묻기 게이트 확인)가 살아남아 시험을 더했다(결과 뒤 이벤트 처리가 던지는 시나리오 둘, 되묻기 시나리오의 선택지를 둘로 고침: 선택지가 하나면 `ask_user`가 거절돼 되묻기 경로를 타지 않았다).
+
+### 남은 한계
+- 실제 세션에서 러너 자신의 턴 상한(도구를 닫고 SIGTERM)은 보지 못했다. 같은 값을 받은 CLI가 `--max-turns`로 먼저 끝내 `error_max_turns` 경로를 탔다([기록](experiments/2026-11-16-a8b-runner-core-native.md)). 승격·네트워크 재시도·되묻기·실행 중 지시도 실제 세션에서는 보지 않았다(차등 시험만).
+- 게이트·결과 조립·도구 실행·지시 큐·인자 만들기는 TS 콜백이다. 샌드박스·작업 공간·프로젝트 상태가 TS에 있는 동안은 옮길 수 없다(5단계 이후).
+- 이벤트는 콜백 하나가 끝나야 다음 일을 하므로 이벤트마다 스레드 왕복이 있다(측정하지 않았다). 도구 실행 쪽 TS 이벤트(`tool_call`·`tool_result`)와 Rust가 내는 이벤트의 상대 순서는 도구 요청이 그 메시지를 본 뒤에야 풀리고(장부), 다음 메시지는 도구 결과를 받은 CLI만 내므로 차등 시험에서 같았다. 서로 독립인 TS 흐름(진행 중 지시의 `steer_applied` 등)과의 순서는 경쟁이다(옛 구현도 같다).
+- 장부의 `abort`는 닫힘 표시를 따로 세우지 않고 취소 이유로 거절한다(옛 구현과 같다). 러너가 `Aborted`를 돌려주는 경로는 TS가 `signal.throwIfAborted()`를 다시 해서 겹친다(변이 W11은 동등 변이로 살아남는다).
 - Linux·Windows에서는 돌려 보지 않았다.
