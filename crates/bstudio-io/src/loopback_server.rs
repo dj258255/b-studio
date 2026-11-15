@@ -26,7 +26,8 @@
 //! 청크 확장·트레일러는 Node가 받거나 다른 응답을 주지만 여기서는 응답 없이 끊는다. 본문이 상한보다 크다고 `Content-Length`가 밝히면 본문을 읽기 전에 413이다
 //! (Node는 상한을 넘는 바이트가 올 때까지 기다린다). 거절한 요청은 연결을 닫는다(Node는 본문을 건너뛰고 다음 요청을 읽는다).
 
-use bstudio_guard::connection_judge::{host_allowed, token_matches};
+use crate::mcp_server::{self, PostPlan, RpcRequest, ServerInfo, Step, Tool, ToolReply};
+use bstudio_guard::connection_judge::{authorize, host_allowed, token_matches};
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -74,10 +75,46 @@ pub struct LoopbackConfig {
 struct Shared {
     token: String,
     allowed_hosts: Vec<String>,
-    routes: Vec<String>,
-    handler: Handler,
     max_body_bytes: usize,
+    mode: Mode,
 }
+
+/// 이 서버가 받은 요청으로 하는 일. 훅 서버는 라우트에 맞는 요청의 바이트를 콜백에 넘기고, MCP 서버는 요청을 직접 풀어 도구 콜백을 부른다
+enum Mode {
+    Hook { routes: Vec<String>, handler: Handler },
+    Mcp(McpShared),
+}
+
+/// 도구 목록 콜백. 도구 목록의 JSON(`[{name, description?, input_schema}]`)이나 실패 이유를 돌려준다. HTTP 요청마다 필요할 때 한 번 부른다
+pub type ListTools = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+/// 도구 실행 콜백. 도구 이름과 검사를 통과한 인자(JSON)를 받아 결과를 돌려준다
+pub type CallTool = Arc<dyn Fn(String, String) -> Pin<Box<dyn Future<Output = ToolReply> + Send>> + Send + Sync>;
+
+pub struct McpConfig {
+    pub token: String,
+    /// 루프백 말고 받을 Host 이름(TS가 `encodeLoneSurrogates`한 꼴)
+    pub allowed_hosts: Vec<String>,
+    /// `initialize`가 돌려주는 서버 이름(`encodeLoneSurrogates`한 꼴)
+    pub name: String,
+    /// 스키마의 required에 없는 인자를 선택으로 연다(`zodShape`의 honorRequired)
+    pub honor_required: bool,
+    pub list: ListTools,
+    pub call: CallTool,
+    pub max_body_bytes: usize,
+    /// SSE 응답이 열려 있는 동안 이 간격으로 `: keepalive` 주석을 보낸다(SDK는 15초)
+    pub keep_alive: Duration,
+}
+
+struct McpShared {
+    name: String,
+    honor_required: bool,
+    list: ListTools,
+    call: CallTool,
+    keep_alive: Duration,
+}
+
+/// SDK의 SSE keepalive 간격
+pub const SSE_KEEP_ALIVE: Duration = Duration::from_secs(15);
 
 pub struct LoopbackServer {
     pub port: u16,
@@ -86,11 +123,22 @@ pub struct LoopbackServer {
 }
 
 impl LoopbackServer {
-    /// 127.0.0.1의 임의 포트를 연다
+    /// 127.0.0.1의 임의 포트를 연다(훅 서버)
     pub async fn start(config: LoopbackConfig) -> std::io::Result<Self> {
+        let shared = Shared { token: config.token, allowed_hosts: config.allowed_hosts, max_body_bytes: config.max_body_bytes, mode: Mode::Hook { routes: config.routes, handler: config.handler } };
+        Self::listen(shared).await
+    }
+
+    /// 127.0.0.1의 임의 포트를 연다(MCP 도구 서버, ADR-201 A7b)
+    pub async fn start_mcp(config: McpConfig) -> std::io::Result<Self> {
+        let mcp = McpShared { name: config.name, honor_required: config.honor_required, list: config.list, call: config.call, keep_alive: config.keep_alive };
+        Self::listen(Shared { token: config.token, allowed_hosts: config.allowed_hosts, max_body_bytes: config.max_body_bytes, mode: Mode::Mcp(mcp) }).await
+    }
+
+    async fn listen(shared: Shared) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let port = listener.local_addr()?.port();
-        let shared = Arc::new(Shared { token: config.token, allowed_hosts: config.allowed_hosts, routes: config.routes, handler: config.handler, max_body_bytes: config.max_body_bytes });
+        let shared = Arc::new(shared);
         let (shutdown, stop) = watch::channel(false);
         let accept = tokio::spawn(accept_loop(listener, shared, stop));
         Ok(Self { port, shutdown, accept: Mutex::new(Some(accept)) })
@@ -164,6 +212,16 @@ pub struct Head {
     pub body: BodyKind,
     pub expect_continue: bool,
     pub keep_alive: bool,
+    /// 모든 헤더(이름은 소문자, 값은 latin1, 받은 순서). MCP가 Accept·Content-Type·mcp-protocol-version을 읽는다
+    pub headers: Vec<(String, String)>,
+}
+
+impl Head {
+    /// 같은 이름의 헤더가 여럿이면 `, `로 이은 값(`Headers.get`·Node의 `req.headers`가 이어 붙이는 방식). 없으면 `None`
+    pub fn joined(&self, name: &str) -> Option<String> {
+        let values: Vec<&str> = self.headers.iter().filter(|(key, _)| key == name).map(|(_, value)| value.as_str()).collect();
+        (!values.is_empty()).then(|| values.join(", "))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -231,6 +289,7 @@ pub fn parse_head(head: &[u8]) -> Result<Head, HeadError> {
     let mut connection_close = false;
     let mut connection_keep_alive = false;
     let mut expect_continue = false;
+    let mut headers: Vec<(String, String)> = Vec::new();
     for line in &owned[1..] {
         let colon = line.iter().position(|byte| *byte == b':').ok_or(HeadError::Drop)?;
         let (name, value) = (&line[..colon], trim_ows(&line[colon + 1..]));
@@ -238,6 +297,7 @@ pub fn parse_head(head: &[u8]) -> Result<Head, HeadError> {
             return Err(HeadError::Drop);
         }
         let name = name.to_ascii_lowercase();
+        headers.push((String::from_utf8_lossy(&name).into_owned(), latin1(value)));
         match name.as_slice() {
             b"host" => host = host.or_else(|| Some(latin1(value))),
             b"authorization" => authorization = authorization.or_else(|| Some(latin1(value))),
@@ -280,7 +340,7 @@ pub fn parse_head(head: &[u8]) -> Result<Head, HeadError> {
         return Err(HeadError::MissingHost);
     }
     let keep_alive = if http11 { !connection_close } else { connection_keep_alive && !connection_close };
-    Ok(Head { method: method.to_owned(), target: String::from_utf8_lossy(target).into_owned(), http11, host, authorization, body, expect_continue, keep_alive })
+    Ok(Head { method: method.to_owned(), target: String::from_utf8_lossy(target).into_owned(), http11, host, authorization, body, expect_continue, keep_alive, headers })
 }
 
 /// 메서드가 POST이고 요청 대상 원문이 등록된 라우트와 정확히 같으면 그 번호. 막는 쪽: 모르는 꼴은 `None`(404)
@@ -325,20 +385,30 @@ async fn read_head(stream: &mut TcpStream, buf: &mut Vec<u8>, idle_limit: bool) 
 fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         403 => "Forbidden",
         404 => "Not Found",
+        405 => "Method Not Allowed",
+        406 => "Not Acceptable",
         413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
         500 => "Internal Server Error",
         _ => "Status",
     }
 }
 
 async fn write_response(stream: &mut TcpStream, status: u16, content_type: Option<&str>, body: &[u8], keep_alive: bool, with_body: bool) -> bool {
+    let headers: Vec<(&str, &str)> = content_type.map(|value| ("content-type", value)).into_iter().collect();
+    write_response_with(stream, status, &headers, body, keep_alive, with_body).await
+}
+
+/// 헤더를 여럿 실을 수 있는 응답 쓰기. `content-length`는 여기서 붙인다
+async fn write_response_with(stream: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: &[u8], keep_alive: bool, with_body: bool) -> bool {
     let mut out = format!("HTTP/1.1 {status} {}\r\n", reason(status));
-    if let Some(content_type) = content_type {
-        out.push_str(&format!("content-type: {content_type}\r\n"));
+    for (name, value) in headers {
+        out.push_str(&format!("{name}: {value}\r\n"));
     }
     out.push_str(&format!("content-length: {}\r\n", body.len()));
     if !keep_alive {
@@ -411,12 +481,16 @@ fn json_reply(status: u16, text: &str) -> (u16, Vec<u8>) {
 }
 
 async fn handle_request(stream: &mut TcpStream, buf: &mut Vec<u8>, head: Head, shared: &Shared) -> Next {
+    let (routes, handler) = match &shared.mode {
+        Mode::Hook { routes, handler } => (routes, handler),
+        Mode::Mcp(mcp) => return handle_mcp(stream, buf, head, shared, mcp).await,
+    };
     // ① Host ② 토큰 ③ 메서드·라우트. 거절하면 본문을 읽지 않고 응답한 뒤 닫는다
     let denied = if !host_allowed(head.host.as_deref(), &shared.allowed_hosts) {
         Some(json_reply(403, r#"{"error":"루프백에서만 접근할 수 있습니다"}"#))
     } else if !token_matches(head.authorization.as_deref(), &shared.token) {
         Some(json_reply(401, r#"{"error":"unauthorized"}"#))
-    } else if route_index(&head.method, &head.target, &shared.routes).is_none() {
+    } else if route_index(&head.method, &head.target, routes).is_none() {
         Some(json_reply(404, r#"{"error":"not found"}"#))
     } else {
         None
@@ -426,7 +500,7 @@ async fn handle_request(stream: &mut TcpStream, buf: &mut Vec<u8>, head: Head, s
         write_response(stream, status, Some("application/json"), &body, false, with_body).await;
         return Next::Linger;
     }
-    let route = route_index(&head.method, &head.target, &shared.routes).unwrap_or(usize::MAX);
+    let route = route_index(&head.method, &head.target, routes).unwrap_or(usize::MAX);
 
     // ④ 본문. 상한은 읽기 전에(선언된 길이) 그리고 읽는 동안(누적) 본다
     let max = shared.max_body_bytes;
@@ -454,12 +528,309 @@ async fn handle_request(stream: &mut TcpStream, buf: &mut Vec<u8>, head: Head, s
     };
 
     // ⑤ 콜백
-    let answer = (shared.handler)(HandlerRequest { route, body }).await;
+    let answer = handler(HandlerRequest { route, body }).await;
     let ok = write_response(stream, answer.status, Some("application/json"), &answer.body, head.keep_alive, with_body).await;
     if ok && head.keep_alive {
         Next::KeepAlive
     } else {
         Next::Close
+    }
+}
+
+// ── MCP 서버(ADR-201, 4f A7b) ──
+// 옛 서버는 `node:http`로 받아 `@hono/node-server`가 Web 요청으로 바꾼 뒤 SDK 트랜스포트가 처리했다. 옛 서버는 요청 경로를 보지 않고(`/mcp`가 아니어도 같다),
+// 메서드로만 갈라서 POST·GET·DELETE를 처리하고 나머지는 405로 답한다.
+
+/// 거절 응답: JSON-RPC 오류 본문, content-type은 application/json
+async fn write_rpc_error(stream: &mut TcpStream, status: u16, code: i32, message: &str, keep_alive: bool, with_body: bool) -> bool {
+    let body = mcp_server::http_error_body(code, message);
+    write_response_with(stream, status, &[("content-type", "application/json")], body.as_bytes(), keep_alive, with_body).await
+}
+
+/// `@hono/node-server`의 `buildUrl`이 요청 주소를 만들지 못하는 꼴인가의 반대. 만들지 못하면 SDK에 닿기 전에 본문 없는 400이다
+fn request_url_valid(host: Option<&str>, target: &str) -> bool {
+    if !target.starts_with('/') && (target.starts_with("http://") || target.starts_with("https://")) {
+        return url::Url::parse(target).is_ok();
+    }
+    let Some(host) = host.filter(|host| !host.is_empty()) else { return false };
+    let full = format!("http://{host}{target}");
+    if !hono_plain_host(host) {
+        let Ok(parsed) = url::Url::parse(&full) else { return false };
+        let hostname = parsed.host_str().unwrap_or("");
+        if hostname.chars().count() != host.chars().count() {
+            let bare = if host.contains(':') { host.rsplit_once(':').filter(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit())).map_or(host, |(name, _)| name) } else { host };
+            return hostname == bare.to_lowercase();
+        }
+        return true;
+    }
+    if target.is_empty() {
+        return true;
+    }
+    if !target.starts_with('/') {
+        return false;
+    }
+    if !hono_plain_request_url(target) || has_dot_segment(target) {
+        return url::Url::parse(&full).is_ok();
+    }
+    true
+}
+
+/// hono의 `reValidHost`: `^[a-z0-9._-]+(?::(?:[1-5]\d{3,4}|[6-9]\d{3}))?$`
+fn hono_plain_host(host: &str) -> bool {
+    let (name, port) = match host.split_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host, None),
+    };
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-')) {
+        return false;
+    }
+    let Some(port) = port else { return true };
+    let digits = port.bytes().all(|b| b.is_ascii_digit());
+    let first = port.as_bytes().first().copied().unwrap_or(b'0');
+    digits && ((matches!(first, b'1'..=b'5') && (4..=5).contains(&port.len())) || (matches!(first, b'6'..=b'9') && port.len() == 4))
+}
+
+/// hono의 `reValidRequestUrl`: `^\/[!#$&-;=?-\[\]_a-z~]*$`
+fn hono_plain_request_url(target: &str) -> bool {
+    target.starts_with('/') && target.bytes().skip(1).all(|b| matches!(b, b'!' | b'#' | b'$' | b'&'..=b';' | b'=' | b'?'..=b'[' | b']' | b'_' | b'a'..=b'z' | b'~'))
+}
+
+/// hono의 `reDotSegment`: `\/\.\.?(?:[/?#]|$)`
+fn has_dot_segment(target: &str) -> bool {
+    let bytes = target.as_bytes();
+    let ends = |at: usize| bytes.get(at).is_none_or(|b| matches!(b, b'/' | b'?' | b'#'));
+    (0..bytes.len()).any(|i| bytes[i] == b'/' && ((bytes[i + 1..].starts_with(b"..") && ends(i + 3)) || (bytes[i + 1..].starts_with(b".") && ends(i + 2))))
+}
+
+/// 거절·단순 응답 뒤: 읽지 않은 본문이 있으면 흘려 보내고 닫고, 없으면 연결 유지 여부를 따른다
+fn after_simple(head: &Head, ok: bool) -> Next {
+    if head.body != BodyKind::None {
+        Next::Linger
+    } else if ok && head.keep_alive {
+        Next::KeepAlive
+    } else {
+        Next::Close
+    }
+}
+
+async fn handle_mcp(stream: &mut TcpStream, buf: &mut Vec<u8>, head: Head, shared: &Shared, mcp: &McpShared) -> Next {
+    let with_body = head.method != "HEAD";
+    // ① Host·토큰. 옛 서버가 요청마다 가장 먼저 `authorize`를 불렀다(글과 JSON-RPC 코드가 여기서 정해진다)
+    if let Some((status, message)) = authorize(head.host.as_deref(), head.authorization.as_deref(), &shared.token, &shared.allowed_hosts) {
+        write_rpc_error(stream, status, i32::from(status) * -100, message, false, with_body).await;
+        return Next::Linger;
+    }
+    // ② hono가 요청 주소를 만들지 못하는 꼴
+    if !request_url_valid(head.host.as_deref(), &head.target) {
+        write_response_with(stream, 400, &[], b"", false, with_body).await;
+        return Next::Linger;
+    }
+    match head.method.as_str() {
+        "POST" => mcp_post(stream, buf, head, shared, mcp).await,
+        "GET" => mcp_get(stream, head, mcp).await,
+        "DELETE" => {
+            if let Some(message) = mcp_server::protocol_version_error(head.joined("mcp-protocol-version").as_deref()) {
+                let ok = write_rpc_error(stream, 400, -32000, &message, head.keep_alive, true).await;
+                return after_simple(&head, ok);
+            }
+            let ok = write_response_with(stream, 200, &[], b"", head.keep_alive, true).await;
+            after_simple(&head, ok)
+        }
+        _ => {
+            let body = mcp_server::http_error_body(-32000, mcp_server::METHOD_NOT_ALLOWED);
+            let ok = write_response_with(stream, 405, &[("allow", "GET, POST, DELETE"), ("content-type", "application/json")], body.as_bytes(), head.keep_alive, with_body).await;
+            after_simple(&head, ok)
+        }
+    }
+}
+
+async fn mcp_post(stream: &mut TcpStream, buf: &mut Vec<u8>, head: Head, shared: &Shared, mcp: &McpShared) -> Next {
+    // SDK의 순서: Accept → Content-Type → 본문(상한·JSON) → 배치·메시지 꼴 → 프로토콜 버전. 본문을 읽기 전의 거절은 본문을 흘려 보내고 닫는다
+    if !mcp_server::accepts(head.joined("accept").as_deref(), &["application/json", "text/event-stream"]) {
+        write_rpc_error(stream, 406, -32000, mcp_server::NOT_ACCEPTABLE_POST, false, true).await;
+        return Next::Linger;
+    }
+    if !mcp_server::is_json_content_type(head.joined("content-type").as_deref()) {
+        write_rpc_error(stream, 415, -32000, mcp_server::UNSUPPORTED_MEDIA_TYPE, false, true).await;
+        return Next::Linger;
+    }
+    let max = shared.max_body_bytes;
+    let too_large = matches!(head.body, BodyKind::Length(length) if length > max as u64);
+    if too_large {
+        write_rpc_error(stream, 413, -32000, &mcp_server::payload_too_large(max), false, true).await;
+        return Next::Linger;
+    }
+    if head.expect_continue && head.body != BodyKind::None && stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").await.is_err() {
+        return Next::Close;
+    }
+    let body = match read_body(stream, buf, &head.body, max).await {
+        BodyRead::Done(bytes) => bytes,
+        BodyRead::TooLarge => {
+            write_rpc_error(stream, 413, -32000, &mcp_server::payload_too_large(max), false, true).await;
+            return Next::Linger;
+        }
+        BodyRead::Broken => return Next::Close,
+    };
+    match mcp_server::plan_post(&body, head.joined("mcp-protocol-version").as_deref()) {
+        PostPlan::Reject { status, code, message } => {
+            let ok = write_rpc_error(stream, status, code, &message, head.keep_alive, true).await;
+            if ok && head.keep_alive { Next::KeepAlive } else { Next::Close }
+        }
+        PostPlan::Accepted => {
+            let ok = write_response_with(stream, 202, &[], b"", head.keep_alive, true).await;
+            if ok && head.keep_alive { Next::KeepAlive } else { Next::Close }
+        }
+        PostPlan::Requests(requests) => mcp_stream(stream, &head, mcp, requests).await,
+    }
+}
+
+/// 응답 쓰기: HTTP/1.1이면 chunked 한 덩어리씩, HTTP/1.0이면 그대로(연결을 닫아 끝을 알린다)
+async fn write_sse(stream: &mut TcpStream, chunked: bool, data: &str) -> bool {
+    if !chunked {
+        return stream.write_all(data.as_bytes()).await.is_ok();
+    }
+    let mut out = format!("{:x}\r\n", data.len()).into_bytes();
+    out.extend_from_slice(data.as_bytes());
+    out.extend_from_slice(b"\r\n");
+    stream.write_all(&out).await.is_ok()
+}
+
+async fn write_sse_head(stream: &mut TcpStream, head: &Head) -> bool {
+    let mut out = String::from("HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncache-control: no-cache, no-transform\r\n");
+    out.push_str(if head.keep_alive { "connection: keep-alive\r\n" } else { "connection: close\r\n" });
+    out.push_str("x-accel-buffering: no\r\n");
+    if head.http11 {
+        out.push_str("transfer-encoding: chunked\r\n");
+    }
+    out.push_str("\r\n");
+    stream.write_all(out.as_bytes()).await.is_ok()
+}
+
+/// 먼저 끝난 응답부터 내보내려고 만든 집합: 순서대로 한 번씩 폴링하고 끝난 것을 하나씩 돌려준다.
+/// 요청마다 독립이라 느린 `run`이 다른 요청의 응답을 막지 않는다(SDK도 응답이 준비되는 대로 쓴다)
+struct InOrder<'a> {
+    /// (요청 id의 열쇠, 응답 메시지)
+    futures: Vec<Pin<Box<dyn Future<Output = (String, String)> + Send + 'a>>>,
+}
+
+impl InOrder<'_> {
+    async fn next(&mut self) -> Option<(String, String)> {
+        if self.futures.is_empty() {
+            return None;
+        }
+        std::future::poll_fn(|cx| {
+            for index in 0..self.futures.len() {
+                if let std::task::Poll::Ready(message) = self.futures[index].as_mut().poll(cx) {
+                    drop(self.futures.remove(index));
+                    return std::task::Poll::Ready(Some(message));
+                }
+            }
+            std::task::Poll::Pending
+        })
+        .await
+    }
+}
+
+async fn mcp_stream(stream: &mut TcpStream, head: &Head, mcp: &McpShared, requests: Vec<RpcRequest>) -> Next {
+    // 도구 목록은 이 HTTP 요청에서 필요할 때 한 번 읽는다(함수로 준 목록은 요청마다 다시 읽는 것이 옛 동작이다)
+    let tools: Option<Vec<Tool>> = if mcp_server::needs_tools(&requests) {
+        match (mcp.list)().await.and_then(|text| mcp_server::parse_tools(&text, mcp.honor_required)) {
+            Ok(tools) => Some(tools),
+            Err(message) => {
+                let body = mcp_server::internal_error_body(&message);
+                let ok = write_response_with(stream, 500, &[("content-type", "application/json")], body.as_bytes(), head.keep_alive, true).await;
+                return if ok && head.keep_alive { Next::KeepAlive } else { Next::Close };
+            }
+        }
+    } else {
+        None
+    };
+    let server = ServerInfo { name: &mcp.name };
+    let mut pending = InOrder { futures: Vec::with_capacity(requests.len()) };
+    // SDK는 응답을 요청 id로 묶는다: 같은 id의 요청이 둘이면 첫 응답으로 모든 id가 채워진 것으로 보고 스트림을 닫는다
+    let mut expected: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for request in &requests {
+        let step = mcp_server::handle_request(request, tools.as_deref(), &server);
+        let call = match &step {
+            Step::Call { name, args, .. } => Some((mcp.call)(name.clone(), args.clone())),
+            Step::Done(_) => None,
+        };
+        let key = mcp_server::id_key(&request.id);
+        expected.insert(key.clone());
+        pending.futures.push(Box::pin(async move {
+            let message = match (step, call) {
+                (Step::Call { id, .. }, Some(call)) => mcp_server::call_result_message(&id, &call.await),
+                (Step::Done(message), _) => message,
+                (Step::Call { .. }, None) => String::new(),
+            };
+            (key, message)
+        }));
+    }
+    if !write_sse_head(stream, head).await {
+        return Next::Close;
+    }
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + mcp.keep_alive, mcp.keep_alive);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            next = pending.next() => match next {
+                Some((key, message)) => {
+                    if !write_sse(stream, head.http11, &mcp_server::sse_event(&message)).await {
+                        // 끊긴 연결: 이미 시작한 도구 실행은 끝까지 돈다(옛 서버도 그랬다)
+                        return Next::Close;
+                    }
+                    answered.insert(key);
+                    if answered.len() == expected.len() {
+                        break;
+                    }
+                }
+                None => break,
+            },
+            _ = tick.tick() => {
+                if !write_sse(stream, head.http11, ": keepalive\n\n").await {
+                    return Next::Close;
+                }
+            }
+        }
+    }
+    if head.http11 {
+        if stream.write_all(b"0\r\n\r\n").await.is_err() {
+            return Next::Close;
+        }
+        return if head.keep_alive { Next::KeepAlive } else { Next::Close };
+    }
+    Next::Close
+}
+
+/// GET: SSE 스트림을 열어 두고 keepalive를 보낸다(서버가 먼저 보낼 메시지는 없다). 클라이언트가 끊으면 끝난다
+async fn mcp_get(stream: &mut TcpStream, head: Head, mcp: &McpShared) -> Next {
+    if !mcp_server::accepts(head.joined("accept").as_deref(), &["text/event-stream"]) {
+        write_rpc_error(stream, 406, -32000, mcp_server::NOT_ACCEPTABLE_GET, false, true).await;
+        return Next::Linger;
+    }
+    if let Some(message) = mcp_server::protocol_version_error(head.joined("mcp-protocol-version").as_deref()) {
+        write_rpc_error(stream, 400, -32000, &message, false, true).await;
+        return Next::Linger;
+    }
+    if !write_sse_head(stream, &head).await {
+        return Next::Close;
+    }
+    let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + mcp.keep_alive, mcp.keep_alive);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut sink = [0u8; 1024];
+    loop {
+        tokio::select! {
+            read = stream.read(&mut sink) => match read {
+                Ok(0) | Err(_) => return Next::Close,
+                Ok(_) => {}
+            },
+            _ = tick.tick() => {
+                if !write_sse(stream, head.http11, ": keepalive\n\n").await {
+                    return Next::Close;
+                }
+            }
+        }
     }
 }
 
@@ -939,6 +1310,249 @@ mod tests {
         assert!(finished.is_ok(), "연결이 닫히지 않았다");
         assert_eq!(status_of(&out), 200);
         assert!(started.elapsed() >= Duration::from_millis(4500) && started.elapsed() < Duration::from_secs(7), "{:?}", started.elapsed());
+        fx.server.close().await;
+    }
+
+    // ── MCP 서버(A7b) ──
+
+    const SPECS: &str = r#"[{"name":"echo","description":"d","input_schema":{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}}]"#;
+
+    /// 도구 실행 `echo`는 `delay` 뒤 인자를 그대로 돌려준다. 호출 횟수와 마지막 인자를 센다
+    struct McpFixture {
+        server: LoopbackServer,
+        calls: Arc<AtomicUsize>,
+        last_args: Arc<std::sync::Mutex<Option<String>>>,
+    }
+
+    async fn start_mcp(delay: Duration, keep_alive: Duration, max_body_bytes: usize) -> McpFixture {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let last_args = Arc::new(std::sync::Mutex::new(None));
+        let (calls2, last2) = (calls.clone(), last_args.clone());
+        let list: ListTools = Arc::new(|| Box::pin(async { Ok(SPECS.to_owned()) }));
+        let call: CallTool = Arc::new(move |_name, args| {
+            let (calls, last) = (calls2.clone(), last2.clone());
+            Box::pin(async move {
+                calls.fetch_add(1, Ordering::SeqCst);
+                *last.lock().unwrap() = Some(args.clone());
+                tokio::time::sleep(delay).await;
+                ToolReply { ok: true, content: args, images: Vec::new() }
+            })
+        });
+        let config = McpConfig { token: TOKEN.to_owned(), allowed_hosts: Vec::new(), name: "b-studio".to_owned(), honor_required: false, list, call, max_body_bytes, keep_alive };
+        McpFixture { server: LoopbackServer::start_mcp(config).await.unwrap(), calls, last_args }
+    }
+
+    fn mcp_post(target: &str, extra: &str, body: &str) -> Vec<u8> {
+        format!(
+            "POST {target} HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nAccept: application/json, text/event-stream\r\nContent-Type: application/json\r\n{extra}Connection: close\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    }
+
+    fn call_body(text: &str) -> String {
+        format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"echo","arguments":{{"text":"{text}"}}}}}}"#)
+    }
+
+    /// chunked 본문을 풀어 SSE 글만 돌려준다
+    fn sse_text(response: &[u8]) -> String {
+        let at = response.windows(4).position(|w| w == b"\r\n\r\n").map_or(response.len(), |p| p + 4);
+        let mut rest = &response[at..];
+        let mut out = Vec::new();
+        while let Some(line_end) = rest.windows(2).position(|w| w == b"\r\n") {
+            let size = usize::from_str_radix(std::str::from_utf8(&rest[..line_end]).unwrap_or("0"), 16).unwrap_or(0);
+            if size == 0 {
+                break;
+            }
+            out.extend_from_slice(&rest[line_end + 2..line_end + 2 + size]);
+            rest = &rest[line_end + 2 + size + 2..];
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    }
+
+    #[tokio::test]
+    async fn mcp는_경로를_보지_않고_도구_호출을_sse로_답한다() {
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        for target in ["/mcp", "/", "/anything?x=1"] {
+            let response = raw(fx.server.port, &mcp_post(target, "", &call_body("안녕"))).await;
+            assert_eq!(status_of(&response), 200, "{target}");
+            let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
+            assert!(text.contains("content-type: text/event-stream\r\n") && text.contains("transfer-encoding: chunked\r\n"), "{text}");
+            assert_eq!(sse_text(&response), "event: message\ndata: {\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"{\\\"text\\\":\\\"안녕\\\"}\"}],\"isError\":false},\"jsonrpc\":\"2.0\",\"id\":1}\n\n");
+        }
+        assert_eq!(fx.last_args.lock().unwrap().clone().as_deref(), Some(r#"{"text":"안녕"}"#));
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_인증은_글과_json_rpc_코드를_옛_서버와_같게_낸다() {
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let bad_host = String::from_utf8(mcp_post("/mcp", "", "{}")).unwrap().replace("Host: 127.0.0.1", "Host: evil.com").into_bytes();
+        let response = raw(fx.server.port, &bad_host).await;
+        assert_eq!((status_of(&response), body_of(&response).as_str()), (403, r#"{"jsonrpc":"2.0","error":{"code":-40300,"message":"MCP 서버는 루프백에서만 접근할 수 있습니다"},"id":null}"#));
+        let bad_token = String::from_utf8(mcp_post("/mcp", "", "{}")).unwrap().replace(TOKEN, "x").into_bytes();
+        let response = raw(fx.server.port, &bad_token).await;
+        assert_eq!((status_of(&response), body_of(&response).as_str()), (401, r#"{"jsonrpc":"2.0","error":{"code":-40100,"message":"unauthorized"},"id":null}"#));
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 0);
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_본문_상한은_넘는_순간부터_413이고_정확히_상한이면_받는다() {
+        let ping = |pad: usize| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"p":"{}"}}}}"#, "x".repeat(pad));
+        let base = ping(0).len();
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, 1024).await;
+        let exact = raw(fx.server.port, &mcp_post("/mcp", "", &ping(1024 - base))).await;
+        assert_eq!(status_of(&exact), 200);
+        let over = raw(fx.server.port, &mcp_post("/mcp", "", &ping(1025 - base))).await;
+        assert_eq!(status_of(&over), 413);
+        assert!(body_of(&over).contains("Payload Too Large: Request body must not exceed 1024 bytes"), "{}", body_of(&over));
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_sse는_열려_있는_동안_keepalive를_보내고_응답을_마지막에_쓴다() {
+        let fx = start_mcp(Duration::from_millis(450), Duration::from_millis(100), MAX_BODY_BYTES).await;
+        let response = raw(fx.server.port, &mcp_post("/mcp", "", &call_body("x"))).await;
+        let text = sse_text(&response);
+        assert!(text.matches(": keepalive\n\n").count() >= 2, "{text}");
+        assert!(text.ends_with("\"id\":1}\n\n"), "{text}");
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_get은_스트림을_열어_두고_끊으면_끝난다_닫으면_끊는다() {
+        let fx = start_mcp(Duration::ZERO, Duration::from_millis(100), MAX_BODY_BYTES).await;
+        let request = format!("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nAccept: text/event-stream\r\n\r\n");
+        let mut stream = TcpStream::connect(("127.0.0.1", fx.server.port)).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut seen = Vec::new();
+        let mut chunk = [0u8; 4096];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(600);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(read)) = tokio::time::timeout(Duration::from_millis(100), stream.read(&mut chunk)).await {
+                seen.extend_from_slice(&chunk[..read]);
+            }
+        }
+        assert_eq!(status_of(&seen), 200);
+        assert!(String::from_utf8_lossy(&seen).matches(": keepalive").count() >= 2);
+        // 서버를 닫으면 열린 스트림도 끊긴다
+        fx.server.close().await;
+        let mut rest = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut rest)).await;
+        assert!(closed.is_ok(), "닫았는데 스트림이 열려 있다");
+    }
+
+    #[tokio::test]
+    async fn mcp_close는_처리_중인_도구_호출이_있어도_끝난다() {
+        let fx = start_mcp(Duration::from_secs(30), SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let mut busy = TcpStream::connect(("127.0.0.1", fx.server.port)).await.unwrap();
+        busy.write_all(&mcp_post("/mcp", "", &call_body("x"))).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 1);
+        let started = std::time::Instant::now();
+        fx.server.close().await;
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn hono가_요청_주소를_만들지_못하는_꼴은_걸러낸다() {
+        // 만들어지는 꼴
+        for (host, target) in [("127.0.0.1:3000", "/mcp"), ("localhost", "/"), ("LOCALHOST:80", "/x"), ("[::1]:3000", "/mcp"), ("127.0.0.1", "//mcp"), ("127.0.0.1:3000", "/a/../b"), ("127.0.0.1:65535", "/x"), ("host.docker.internal:1234", "/mcp?a=1")] {
+            assert!(request_url_valid(Some(host), target), "{host} {target}");
+        }
+        // 만들지 못하는 꼴(옛 서버는 SDK에 닿기 전에 본문 없는 400)
+        for (host, target) in [("127.0.0.1:99999", "/mcp"), ("127.0.0.1:abc", "/mcp"), ("localhost:80:90", "/mcp"), ("127.0.0.1", "*"), ("", "/mcp")] {
+            assert!(!request_url_valid(Some(host), target), "{host} {target}");
+        }
+        assert!(!request_url_valid(None, "/mcp"));
+        // 절대 형식 요청 대상은 Host를 보지 않고 그 주소를 파싱한다
+        assert!(request_url_valid(Some("127.0.0.1"), "http://example.com/x"));
+        assert!(has_dot_segment("/a/../b") && has_dot_segment("/a/./b") && has_dot_segment("/..") && has_dot_segment("/a/..?x") && !has_dot_segment("/a/..b") && !has_dot_segment("/a/.b/c"));
+    }
+
+    #[tokio::test]
+    async fn mcp_post는_accept와_content_type이_맞아야_하고_메서드는_post_get_delete만_받는다() {
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        let with = |from: &str, to: &str| String::from_utf8(mcp_post("/mcp", "", ping)).unwrap().replace(from, to).into_bytes();
+        let no_accept = raw(fx.server.port, &with("Accept: application/json, text/event-stream", "Accept: application/json")).await;
+        assert_eq!(status_of(&no_accept), 406);
+        assert!(body_of(&no_accept).contains("Not Acceptable: Client must accept both application/json and text/event-stream"));
+        let no_json = raw(fx.server.port, &with("Content-Type: application/json", "Content-Type: text/plain")).await;
+        assert_eq!(status_of(&no_json), 415);
+        assert!(body_of(&no_json).contains("Unsupported Media Type: Content-Type must be application/json"));
+        // 알림만이면 202, 본문 없음
+        let notification = raw(fx.server.port, &mcp_post("/mcp", "", r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)).await;
+        assert_eq!((status_of(&notification), body_of(&notification).as_str()), (202, ""));
+        // DELETE는 200, 그 밖의 메서드는 405와 Allow
+        let delete = raw(fx.server.port, format!("DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n").as_bytes()).await;
+        assert_eq!((status_of(&delete), body_of(&delete).as_str()), (200, ""));
+        let put = raw(fx.server.port, format!("PUT /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nConnection: close\r\n\r\n").as_bytes()).await;
+        assert_eq!(status_of(&put), 405);
+        assert!(String::from_utf8_lossy(&put).to_ascii_lowercase().contains("allow: get, post, delete\r\n"));
+        // GET은 text/event-stream을 받아야 한다
+        let get = raw(fx.server.port, format!("GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nAccept: application/json\r\nConnection: close\r\n\r\n").as_bytes()).await;
+        assert_eq!(status_of(&get), 406);
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 0);
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_인자_검사를_통과하지_못하면_도구를_부르지_않고_통과하면_모르는_키를_지운_인자를_넘긴다() {
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let body = |args: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"echo","arguments":{args}}}}}"#);
+        for bad in [r#"{"text":1}"#, "{}", r#"{"text":null}"#, r#"{"TEXT":"x"}"#] {
+            let response = raw(fx.server.port, &mcp_post("/mcp", "", &body(bad))).await;
+            assert_eq!(status_of(&response), 200, "{bad}");
+            assert!(sse_text(&response).contains("\"isError\":true") && sse_text(&response).contains("Input validation error: Invalid arguments for tool echo"), "{bad}: {}", sse_text(&response));
+        }
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 0);
+        let ok = raw(fx.server.port, &mcp_post("/mcp", "", &body(r#"{"extra":[1],"text":"t","more":{}}"#))).await;
+        assert!(sse_text(&ok).contains("\"isError\":false"));
+        assert_eq!(fx.last_args.lock().unwrap().clone().as_deref(), Some(r#"{"text":"t"}"#));
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_배치에서_같은_id의_요청이_둘이면_첫_응답만_쓰고_닫는다_도구_실행은_둘_다_한다() {
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let one = |text: &str| format!(r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"echo","arguments":{{"text":"{text}"}}}}}}"#);
+        let response = raw(fx.server.port, &mcp_post("/mcp", "", &format!("[{},{}]", one("a"), one("b")))).await;
+        assert_eq!(sse_text(&response).matches("event: message").count(), 1, "{}", sse_text(&response));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 2);
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_느린_도구_호출이_같은_배치의_빠른_요청과_다른_연결의_요청을_막지_않는다() {
+        let fx = start_mcp(Duration::from_millis(600), SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let port = fx.server.port;
+        let batch = format!(r#"[{},{{"jsonrpc":"2.0","id":2,"method":"ping"}}]"#, call_body("x"));
+        let slow = tokio::spawn(async move { raw(port, &mcp_post("/mcp", "", &batch)).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = std::time::Instant::now();
+        let other = raw(port, &mcp_post("/mcp", "", r#"{"jsonrpc":"2.0","id":3,"method":"ping"}"#)).await;
+        assert!(started.elapsed() < Duration::from_millis(400), "다른 연결의 요청이 막혔다: {:?}", started.elapsed());
+        assert!(sse_text(&other).contains("\"id\":3"));
+        // 같은 배치에서는 먼저 끝난 응답(ping)이 먼저 나온다
+        let text = sse_text(&slow.await.unwrap());
+        assert!(text.find("\"id\":2").unwrap() < text.find("\"id\":1").unwrap(), "{text}");
+        fx.server.close().await;
+    }
+
+    #[tokio::test]
+    async fn mcp_요청_주소를_만들_수_없는_host는_본문_없는_400이고_delete도_프로토콜_버전을_본다() {
+        let fx = start_mcp(Duration::ZERO, SSE_KEEP_ALIVE, MAX_BODY_BYTES).await;
+        let ping = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
+        // 루프백 이름이라 인증은 통과하지만 포트가 범위 밖이라 hono가 요청 주소를 만들지 못한다(옛 서버: SDK에 닿기 전에 본문 없는 400)
+        let bad_port = String::from_utf8(mcp_post("/mcp", "", ping)).unwrap().replace("Host: 127.0.0.1", "Host: 127.0.0.1:99999").into_bytes();
+        let response = raw(fx.server.port, &bad_port).await;
+        assert_eq!((status_of(&response), body_of(&response).as_str()), (400, ""));
+        let delete = |version: &str| format!("DELETE /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nmcp-protocol-version: {version}\r\nConnection: close\r\n\r\n").into_bytes();
+        assert_eq!(status_of(&raw(fx.server.port, &delete("1999")).await), 400);
+        assert_eq!(status_of(&raw(fx.server.port, &delete("2025-03-26")).await), 200);
         fx.server.close().await;
     }
 }

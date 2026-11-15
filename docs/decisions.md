@@ -10087,6 +10087,9 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 ### 덧붙임: 4f A7a 결과 — 훅 서버의 전송(`hook-server.ts`의 `node:http`)을 Rust로 ([#1239](https://github.com/dj258255/b-studio/issues/1239), ADR-201)
 - 리스너·Host/토큰 확인·라우트 원문 비교·본문 4MiB 상한·닫기는 `crates/bstudio-io/src/loopback_server.rs`가 하고, 라우트에 맞은 요청의 원래 바이트를 napi 콜백으로 TS에 넘긴다. 본문 해석(`JSON.parse`)과 처리는 TS에 남는다. 구체적인 결정과 옛 서버와 다른 점은 ADR-201.
 
+### 덧붙임: 4f A7b 결과 — MCP 도구 서버(`mcp-http-server.ts`의 `node:http` + `@modelcontextprotocol/sdk`)의 전송·프로토콜을 Rust로 ([#1241](https://github.com/dj258255/b-studio/issues/1241), ADR-201)
+- 같은 리스너 위에 stateless streamable HTTP(JSON-RPC 해석·분배, 인자 검사, SSE)를 직접 구현했다(`crates/bstudio-io/src/mcp_server.rs`). 도구 목록 얻기와 도구 실행만 TS 콜백으로 남는다. 옛 SDK 서버는 `mcp-http-server-legacy.ts`로 두고 원시 HTTP 차등 시험으로 맞췄다. 맞춘 것과 의도한 차이는 ADR-201의 "덧붙임: A7b".
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택
@@ -10522,8 +10525,8 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ## ADR-201 훅·MCP 서버의 전송은 Rust가 하고 처리는 TS 콜백에 둔다: HTTP 머리는 직접 읽고, 본문 해석은 B단계까지 TS에 남긴다
 
-상태: 채택(A7a: 훅 서버의 전송. A7b: MCP 서버는 아직 옮기지 않음)
-관련: 이슈 [#1238](https://github.com/dj258255/b-studio/issues/1238)(A7), [#1239](https://github.com/dj258255/b-studio/issues/1239)(A7a), ADR-191(Rust로 단계적 이전), ADR-195(4f), ADR-199(형식 참고)
+상태: 채택(A7a: 훅 서버의 전송. A7b: MCP 서버의 전송과 프로토콜 — 아래 "덧붙임: A7b")
+관련: 이슈 [#1238](https://github.com/dj258255/b-studio/issues/1238)(A7), [#1239](https://github.com/dj258255/b-studio/issues/1239)(A7a), [#1241](https://github.com/dj258255/b-studio/issues/1241)(A7b), ADR-191(Rust로 단계적 이전), ADR-195(4f), ADR-199(형식 참고)
 
 ### 맥락
 - 지원 경로의 관문(`terminal-gateway.ts`)은 훅 서버(`hook-server.ts`)를 띄운다. 대화 시작·요청 시작·쓰기 직전·턴의 끝·CLI 종료·텔레메트리가 모두 이 서버를 지난다. MCP 도구 서버(`mcp-http-server.ts`)도 같은 모양(루프백 포트, Host·토큰, 닫기)이다.
@@ -10566,7 +10569,70 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **변이**: 위 시험들이 Host·토큰·라우트·본문 상한·머리 읽기·닫기를 하나씩 망가뜨린 변이를 잡는다(PR 본문에 표).
 
 ### 남은 한계
-- 처리 함수와 본문 해석은 TS다(B단계). MCP 서버(A7b)는 옮기지 않았다.
+- 처리 함수와 본문 해석은 TS다(B단계). MCP 서버는 A7b에서 옮겼다(아래 덧붙임).
 - 실제 Claude Code 세션으로 새 훅 서버를 거쳐 보지 않았다(단위·차등·자식 프로세스 시험만). 지원 경로를 건드렸으므로 병합 전 실제 세션 실측이 필요하다.
 - 머리 상한은 16KiB로 Node와 같지만 경계 몇 바이트는 Node와 정확히 같다고 재지 않았다(16000바이트는 받고 17000바이트는 거절하는 것까지만 견줬다).
+- Linux·Windows에서는 돌려 보지 않았다.
+
+### 덧붙임: A7b — MCP 도구 서버의 전송과 프로토콜을 Rust로 ([#1241](https://github.com/dj258255/b-studio/issues/1241))
+
+`startToolServer(options)`의 시그니처와 돌려주는 값(`url`·`port`·`token`·`close()`)은 그대로이고, 안의 `node:http` + `@modelcontextprotocol/sdk`를 Rust로 바꿨다. 도구 목록 얻기(`specs`가 함수면 요청마다)와 도구 실행(`run`)만 TS 콜백으로 남는다.
+
+**기준 버전**: 결정 9와 이슈는 SDK를 1.30.0이라 적었지만 이 저장소에 실제로 깔린 것은 `@modelcontextprotocol/sdk` 1.32.1(zod 4.6.7, `@hono/node-server` 2.1.1)이다(`packages/agent/package.json`은 `^1.31.0`). 차등 시험의 기준은 설치된 1.32.1이고, 아래 "직접 돌려 확인한 사실"은 모두 이 설치본의 동작이다. 1.30.0과는 비교하지 않았다.
+
+#### 결정
+1. **같은 리스너, 다른 모드.** `loopback_server.rs`의 `Shared`가 `Mode::Hook`(라우트에 맞는 요청의 바이트를 콜백에 넘김)과 `Mode::Mcp`를 갖는다. 훅 서버의 동작은 바뀌지 않는다(`hook-server-differential.test.ts` 230개를 고치지 않고 통과). 요청 머리에는 받은 모든 헤더를 더했다(같은 이름은 `, `로 이어 `Headers.get`처럼 읽는다). 응답은 헤더를 여럿 실을 수 있게 하고, SSE는 chunked로 한 이벤트씩 쓴다(HTTP/1.0은 연결을 닫아 끝을 알린다).
+2. **프로토콜은 `mcp_server.rs`.** 소켓을 모르는 순수 판정이라 단위 시험이 쉽다: POST 본문 처리 계획(`plan_post`), 요청 분배(`handle_request`), 인자 검사(`validate_args`), 도구 목록의 JSON Schema. `rmcp`는 쓰지 않았다(결정 9의 이유 그대로: Host·토큰을 먼저 쥐고 모르는 꼴을 거절하는 순서와 SDK와 같은 응답 바이트를 우리가 쥐기 어렵다).
+3. **JSON은 `js_json::parse_lone_encoded`로 읽는다**(`JSON.parse` 문법, 중복 키는 뒤 값, 짝 없는 서로게이트 이스케이프는 단사 인코딩). 본문의 글자 그대로의 예약 글자(U+E000..U+E01F)는 읽기 전에 인코딩한다. 응답을 쓰는 자리(`sse_event`)에서만 `\ud800` 이스케이프와 원래 글자로 되돌린다. TS 콜백으로는 `encodeLoneSurrogates`한 글자와 `to_native` JSON(`-0`은 표시 객체)으로 오가서 `write_file`의 content 같은 인자가 `run`까지 손실 없이 간다.
+4. **napi 다리는 콜백 하나.** `startMcpServer(token, allowedHosts, name, honorRequired, handler)`의 `handler`가 `kind`(`list`·`call`)로 두 일을 받는다. 닫기는 `closeLoopbackServer(id)`를 같이 쓴다. 콜백(ThreadsafeFunction)이 서버가 열려 있는 동안 이벤트 루프를 붙잡는 것도 A7a와 같다(자식 프로세스 시험 셋).
+5. **동시성과 끊김.** 요청마다 독립이고(느린 `run`이 다른 연결·같은 배치의 다른 요청을 막지 않는다), 한 배치 안에서는 먼저 끝난 응답부터 쓴다. 연결이 끊겨도 이미 시작한 `run`은 끝까지 돈다(옛 서버도 `res.on('close')`에서 트랜스포트만 닫고 `run`은 돌았다). SSE는 열려 있는 동안 15초마다 `: keepalive`를 보낸다(SDK와 같다).
+6. **도구 목록을 읽지 못하면 그 요청만 500이다.** TS 콜백이 `zodShape`로 입력 형식을 먼저 확인해 던지고, Rust는 `-32603` JSON-RPC 본문의 500으로 답한다. 옛 서버는 이 자리에서 요청이 응답 없이 걸렸다(트러블슈팅 205).
+
+#### 호출부별 막는 쪽인지 여는 쪽인지
+| 자리 | 쪽 | 모르는·깨진 입력 |
+|---|---|---|
+| Host·토큰(`connection_judge::authorize`) | 여는 쪽 | 맞아야 통과. 글과 코드(`status * -100`)는 옛 서버와 같다 |
+| hono의 요청 주소 만들기(`request_url_valid`) | 막는 쪽 | 만들지 못하는 Host(`127.0.0.1:99999` 등)는 SDK에 닿기 전에 본문 없는 400 |
+| Accept·Content-Type·프로토콜 버전 | 막는 쪽 | Accept에 두 값이 모두 있어야 하고, Content-Type은 `content-type` 패키지처럼 읽는다 |
+| 본문 상한 4MiB·배치 100개 | 막는 쪽 | 읽기 전(선언)·읽는 동안 본다 |
+| 메시지 꼴(strict) | 막는 쪽 | 모르는 키·정수 아닌 id·`null` id는 400 -32700 |
+| 인자 검사(`validate_args`) | 막는 쪽 | 타입·필수·enum 대소문자·정수 범위, 모르는 키는 지운다 |
+| 도구 이름 찾기 | 허용 목록(여는 쪽) | 이름이 목록에 정확히 있어야 실행. `Object.prototype`의 이름은 "disabled" 결과 |
+
+#### 옛 SDK 서버에서 직접 돌려 확인한 사실(1.32.1)
+- 요청이 하나라도 있는 POST는 항상 SSE(`text/event-stream`, `event: message`)로 답하고, 알림·응답만 있으면 202(본문 없음)다. 빈 배열 `[]`도 202다. 응답 JSON의 키 순서는 성공 `{result, jsonrpc, id}`, 오류 `{jsonrpc, id, error}`이고 새 서버도 같은 순서로 쓴다.
+- 조사 메모가 405라 적었던 **DELETE는 200**(본문 없음, 프로토콜 버전이 지원 밖이면 400)이다. GET·DELETE·POST 밖의 메서드는 405와 `Allow: GET, POST, DELETE`다. HEAD도 405(본문 없음).
+- **옛 서버는 요청 경로를 보지 않는다**: `/`·`/other`·`/mcp?x=1`·`//mcp` 모두 같다. 다만 hono(`@hono/node-server`)가 요청 주소를 만들지 못하는 꼴은 SDK에 닿기 전에 본문 없는 400이다(요청 대상 `*`, 범위 밖 포트나 글자·빈 포트의 Host). 새 서버도 같은 판정(`reValidHost`·`reValidRequestUrl`·`reDotSegment`, 안 맞으면 URL 파싱)을 해서 그 요청들이 400이다.
+- 본문 상한은 SDK의 `readRequestBody`가 4MiB(4194304바이트)로 보고(선언된 Content-Length도 본다), 넘으면 413(-32000 `Payload Too Large: ...`)이다. 정확히 4MiB는 받는다. 배치는 100개까지(101개는 400 -32600).
+- Accept는 `includes`로 대소문자까지 글자 그대로 본다(`Application/JSON`이면 406). Content-Type은 `content-type` 패키지의 `parse`가 되면 `application/json`과 견주고, 던지면 `;` 앞의 글자로 견주되 `essence.length` 뒤 꼬리에 쉼표가 있으면 거절한다(`application/json; charset`은 통과, `application/json; a=b, c=d`는 415). 같은 헤더가 여러 줄이면 `, `로 이은 값으로 본다.
+- `mcp-protocol-version`이 지원 밖이면 400이지만 초기화 요청(`initialize`, 알림 꼴이어도)이면 건너뛴다. 초기화 요청이 배치에 다른 메시지와 섞이면 400 -32600.
+- 도구가 하나도 없으면 `capabilities`가 `{}`이고 `tools/list`·`tools/call`은 `Method not found`(-32601)다.
+- `tools/call`: 모르는 도구·검사 실패·처리가 던짐은 모두 `isError: true` 결과이고 JSON-RPC 오류가 아니다. 모르는 도구의 글은 `MCP error -32602: Tool X not found`인데 `Object.prototype`의 이름(`constructor`·`toString`·`__proto__` 등)은 `Tool X disabled`다(SDK가 도구를 `{}`에서 `[이름]`으로 찾는다). `arguments`가 `null`·배열·문자열이면 isError 결과가 아니라 `-32603` JSON-RPC 오류이고 글은 zod 이슈 JSON이다. 없으면 `{}`로 검사한다. `params.task`가 맞는 꼴이면 `-32603 Server does not support task creation (required for tools/call)`.
+- 검사 실패 글은 `MCP error -32602: Input validation error: Invalid arguments for tool <이름>: <zod 이슈마다 "글 at 경로">`를 줄바꿈으로 이은 것이다. 새 서버는 확인한 종류(타입·필수·enum·정수·범위·배열 항목·무한대)의 글까지 같게 만든다.
+- zod 4 `.int()`는 JS 안전 정수(±(2^53−1))만 받는다: `1.0`·`1e2`·`-0`은 정수, `1.5`·2^53·`1e300`·`"1"`은 거절. 정수 id도 같다. 통과한 인자는 모르는 키를 지운 객체이고 키 순서는 스키마 순서다.
+- `tools/list`의 JSON Schema는 draft-07 `{"$schema", type, properties, required}`이고 정수는 `minimum`·`maximum`이 붙는다. 선택 인자에 설명이 있으면 `description`이 `type` 앞에 오고 아니면 뒤에 온다(honorRequired를 켜고 끈 두 경우). enum은 중복을 빼고 정수 꼴 이름이 앞에 온다.
+- 같은 id의 요청이 한 배치에 둘이면 SDK가 응답을 id로 묶어서 첫 응답에서 스트림을 닫는다(둘째 요청의 도구 실행은 일어난다).
+- GET(`Accept: text/event-stream`)은 응답 머리를 바로 내고 열어 둔다(15초마다 keepalive). 본문 앞의 BOM은 `TextDecoder`가 지우고 잘못된 UTF-8은 U+FFFD가 된다.
+
+#### 새 서버가 옛 서버와 다른 것(모두 거절 쪽이거나 같은 거절의 글만 다름)
+- 토큰·Host가 틀린 요청에 4MiB를 넘는 본문을 보내는 중이거나 4MiB+1을 보내는 중이면, 옛 서버는 본문을 읽지 않고 응답해 RST로 응답이 사라진다(상태 0). 새 서버는 보내던 것을 흘려 보내며 401·403·413을 전달한다. Content-Length 없는 POST 뒤에 본문 바이트가 오면 옛 서버는 다음 요청으로 읽다 연결을 끊어 응답이 사라지고 새 서버는 400을 준다(처리 횟수는 같다). 차등 시험 이름: `토큰이 틀리면 4MiB가 넘는 본문이어도 401`, `Host가 나쁘면 4MiB가 넘는 본문이어도 403`, `본문: 4MiB + 1`, `본문: Content-Length 없는 POST`.
+- `MAX_DEPTH`(2000)를 넘는 중첩 JSON은 읽지 않고 거절한다(JS는 읽는다). 옛 서버가 내던 글(`Invalid JSON-RPC message`)로 거절하므로 깊은 배열·객체는 같다. 깊은 `params`를 가진 맞는 메시지만 옛 서버는 받았다.
+- `initialize`의 `capabilities` 안쪽은 알려진 키가 객체인지만 본다(SDK는 안쪽 필드까지 zod로 검사한다).
+- 도구 목록을 읽지 못하면(콜백이 던지면) 그 요청은 500이다. 옛 서버는 요청이 응답 없이 걸렸다.
+- 요청 줄·머리의 받는 꼴은 A7a와 같이 Node보다 좁다.
+
+#### 검증 (2026-11-16, macOS arm64, Node 22.17)
+- **차등 시험**(`mcp-http-server-differential.test.ts`): 같은 specs·`run`으로 옛 서버와 새 서버를 띄우고 같은 원시 바이트의 요청 421개를 보낸다. Host·토큰 근접값, 경로 20종, 메서드 10종×Accept 3종, Accept·Content-Type·프로토콜 버전 변형, JSON-RPC 꼴·id 경계, 배치, 초기화, `tools/list`(모두 필수·honorRequired·빈 목록·`buildTools`의 실제 도구), `tools/call`(타입 틀림·빠짐·남는 키·enum 대소문자·정수 경계 23종·중복 키·`__proto__`·도구 이름), 짝 없는 서로게이트·예약 글자·BOM·잘못된 UTF-8, 4MiB 경계·chunked·1MiB 인자. 상태·content-type·본문(SSE는 `data:`를 JSON으로 풀어)과 `run`이 받은 이름·인자까지 견준다. 옛 서버 결과 분포 `{0:6, 200:5, 202:14, 400:55, 401:10, 403:15, 405:25, 406:9, 413:2, 415:11, 200/sse:269}`, 새 서버 `{0:3, 200:5, 202:14, 400:56, 401:11, 403:16, 405:25, 406:9, 413:2, 415:11, 200/sse:269}`(마지막 실행. 옛 서버의 `0`은 RST 경합이라 세 번 돌렸을 때 6~7개, `413`은 1~2개로 흔들렸다). 다른 것은 위 네 개뿐이다(상태 0 → 거절).
+- **첫 실행에서 시험이 찾은 차이 셋**을 고쳤다: 깊은 배열의 거절 글, 같은 id 둘의 응답 수, 무한대 인자의 글(`received Infinity`).
+- **실제 SDK 클라이언트**(`mcp-http-server-client.test.ts`): `Client` + `StreamableHTTPClientTransport`로 협상·`listTools`·`callTool`(성공·검사 실패·모르는 도구·던짐·이미지)·`ping`·`close`, 짝 없는 서로게이트와 `-0`이 `run`까지 손실 없이 가는지, 느린 호출이 다른 요청을 막지 않는지, 배치 안의 완료 순서, 끊겨도 `run`이 끝나는지, 도구 목록 함수가 요청마다 불리고 던지면 500인지, `close()`가 처리 중에도 끝나는지.
+- **Rust 단위 시험**(`cargo test -p bstudio-io --lib -- mcp_server loopback_server`): 스키마가 SDK가 낸 JSON과 같음, 인자 검사 글, Content-Type 읽기, 본문 처리 순서, SSE·keepalive·GET 스트림·close, hono 주소 판정, 같은 id 닫기.
+- **프로세스 수명 시험**(`mcp-http-server-lifetime.test.ts`): close를 부르지 않으면 끝나지 않고, 부르면 끝난다.
+- **변이**: 인증(셋)·Accept(둘)·Content-Type(둘)·본문 상한(넷)·프로토콜 버전·배치 상한·메시지 strict·id 범위·초기화 하나만·인자 검사(문자열·enum 대소문자·정수 i64·하한·소수·필수·키 지우기·boolean·배열 항목·honorRequired)·isError·모르는 도구 실행·검사 실패해도 실행·keepalive·같은 id·완료 순서·hono 주소·405·DELETE 버전·close·BOM·예약 글자를 하나씩 망가뜨린 38개를 모두 잡는다(PR 본문에 표). 처음에는 id 범위·hono 주소·DELETE 프로토콜 버전 셋이 살아남아 시험을 더했다.
+
+#### 남은 한계
+- 실제 Claude Code 세션으로 새 MCP 서버를 거쳐 보지 않았다(단위·차등·SDK 클라이언트·자식 프로세스 시험만). 지원 경로를 건드렸으므로 병합 전 실제 세션 실측이 필요하다.
+- keepalive의 15초 간격은 Rust 단위 시험이 짧은 간격으로 확인했고 실제 15초를 기다리는 시험은 하지 않았다.
+- 기준은 SDK 1.32.1 하나다(1.30.0·그 뒤 버전과 견주지 않았다). SDK를 올리면 차등 시험이 어긋나는 곳이 드러난다.
+- `initialize`의 `capabilities` 안쪽, `params.task`의 안쪽 필드, `_meta`의 알려지지 않은 키 같은 쓰지 않는 필드는 SDK의 zod를 그대로 옮기지 않았다. `arguments`·`name`·`cursor`·`protocolVersion`·`clientInfo`와 도구 인자는 글까지 맞췄다.
+- 도구 이름·인자 키가 `Object.prototype`의 속성 이름이면서 도구 스키마의 키인 경우(`constructor` 키를 가진 도구)는 시험하지 않았다(`buildTools`에 없다).
 - Linux·Windows에서는 돌려 보지 않았다.

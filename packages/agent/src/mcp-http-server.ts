@@ -1,8 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { decodeLoneSurrogates } from './lone-surrogates';
 import { zodShape } from './tool-schema';
 import type { buildTools, ToolOutcome } from './tools';
 
@@ -37,71 +35,60 @@ export interface ToolServerOptions {
  * b-studio 도구를 로컬 streamable HTTP MCP 서버로 노출한다.
  * Codex CLI는 `-c mcp_servers.<이름>.url=...`로 이 주소를 받고, 토큰은 환경 변수로만 넘긴다(파일에 쓰지 않는다).
  * 127.0.0.1의 임의 포트에만 열고, 실행마다 새 bearer 토큰을 만들어 그 토큰이 맞는 요청만 받는다.
+ *
+ * 전송과 프로토콜은 Rust가 한다(ADR-201, crates/bstudio-io/src/loopback_server.rs·mcp_server.rs): 포트 열기, Host·토큰 확인, streamable HTTP(stateless),
+ * JSON-RPC 해석·분배, 도구 인자 검사(`zodShape` 규칙: 모르는 키를 지우고 정수는 JS 안전 정수만), SSE 쓰기, 닫기. 여기는 Rust가 부르는 두 가지만 맡는다:
+ * 도구 목록 얻기(`specs`가 함수면 요청마다)와 도구 실행(`run`). 옛 `node:http` + `@modelcontextprotocol/sdk` 서버는 `mcp-http-server-legacy.ts`에 있다(차등 시험의 기준값).
+ * 글자는 `encodeLoneSurrogates`한 꼴로 오간다(짝 없는 서로게이트가 경계에서 합쳐지지 않게).
  */
 export async function startToolServer({ specs, run, name = 'b-studio', allowedHosts = [], honorRequired = false }: ToolServerOptions): Promise<ToolServer> {
   const token = randomBytes(24).toString('hex');
-  const http = createServer((req, res) => {
-    void handle(req, res, { specs, run, name, token, allowedHosts, honorRequired });
+  const { id, port } = await native.startMcpServer(token, allowedHosts.map(encodeLoneSurrogates), encodeLoneSurrogates(name), honorRequired, async (call) => {
+    if (call.kind === 'list') {
+      try {
+        const list = typeof specs === 'function' ? specs() : specs;
+        // 지원하지 않는 입력 형식은 여기서 던진다(Rust는 `zodShape`가 받는 꼴만 읽는다). 던지면 그 요청은 500이다
+        for (const spec of list) zodShape(spec.input_schema as { properties?: unknown; required?: unknown }, { honorRequired });
+        const encoded = encodeLoneSurrogates(JSON.stringify(list.map((spec) => ({ name: spec.name, description: spec.description, input_schema: spec.input_schema }))));
+        return { specs: encoded, ok: true, content: '', images: [] };
+      } catch (error) {
+        return { error: describe(error), ok: false, content: '', images: [] };
+      }
+    }
+    try {
+      const args = decodeStrings(decodeNative<unknown>(call.args));
+      const outcome = await run(decodeLoneSurrogates(call.name), args);
+      const images = (outcome.images ?? []).map((image) => ({ data: encodeLoneSurrogates(image.data), mimeType: encodeLoneSurrogates(image.mimeType) }));
+      return { ok: Boolean(outcome.ok), content: encodeLoneSurrogates(outcome.content), images };
+    } catch (error) {
+      // 처리가 던지면 그 메시지로 isError 결과다(옛 SDK 서버와 같다)
+      return { ok: false, content: encodeLoneSurrogates(describe(error)), images: [] };
+    }
   });
-  http.on('clientError', (_error, socket) => socket.destroy());
-
-  await listen(http);
-  const address = http.address();
-  if (address === null || typeof address === 'string') throw new Error('MCP 서버가 포트를 열지 못했습니다');
 
   let closed = false;
   return {
-    url: `http://127.0.0.1:${address.port}/mcp`,
-    port: address.port,
+    url: `http://127.0.0.1:${port}/mcp`,
+    port,
     token,
     async close() {
       if (closed) return;
       closed = true;
-      // 열려 있는 keep-alive 연결이 남아 있으면 close()가 늦게 끝난다. 먼저 끊어 새 연결도 거부한다
-      http.closeAllConnections();
-      await new Promise<void>((resolve) => http.close(() => resolve()));
+      await native.closeLoopbackServer(id);
     },
   };
 }
 
-async function handle(req: IncomingMessage, res: ServerResponse, options: Required<ToolServerOptions> & { token: string }): Promise<void> {
-  const denied = authorize(req.headers.host, req.headers.authorization, options.token, options.allowedHosts);
-  if (denied !== undefined) {
-    res.writeHead(denied.status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: denied.status * -100, message: denied.message }, id: null }));
-    return;
+/** Rust가 `encodeLoneSurrogates`한 꼴로 보낸 값의 글자(값과 키)를 원래 글자로 되돌린다 */
+function decodeStrings(value: unknown): unknown {
+  if (typeof value === 'string') return decodeLoneSurrogates(value);
+  if (Array.isArray(value)) return value.map(decodeStrings);
+  if (value !== null && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, item] of Object.entries(value)) out[decodeLoneSurrogates(key)] = decodeStrings(item);
+    return out;
   }
-
-  // 상태를 두지 않는다(stateless). SDK는 stateless에서 트랜스포트 재사용을 금지하므로 요청마다 새로 만든다.
-  // 턴마다 codex가 새 프로세스로 붙고 세션을 이어받지 않으므로 세션 관리가 필요 없다
-  const server = new McpServer({ name: options.name, version: '0.0.0' });
-  for (const spec of typeof options.specs === 'function' ? options.specs() : options.specs) {
-    server.registerTool(
-      spec.name,
-      { description: spec.description, inputSchema: zodShape(spec.input_schema as { properties?: unknown; required?: unknown }, { honorRequired: options.honorRequired }) },
-      async (args: unknown) => {
-        const outcome = await options.run(spec.name, args);
-        const images = (outcome.images ?? []).map((image) => ({ type: 'image' as const, data: image.data, mimeType: image.mimeType }));
-        return { content: [{ type: 'text' as const, text: outcome.content }, ...images], isError: !outcome.ok };
-      },
-    );
-  }
-  const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-  const cleanup = () => {
-    void transport.close().catch(() => {});
-    void server.close().catch(() => {});
-  };
-  res.on('close', cleanup);
-
-  try {
-    await server.connect(transport);
-    // GET(SSE)·POST·DELETE를 모두 같은 핸들러로 넘긴다. 본문 파싱은 SDK가 한다
-    await transport.handleRequest(req, res);
-  } catch (error) {
-    cleanup();
-    if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
-    if (!res.writableEnded) res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: describe(error) }, id: null }));
-  }
+  return value;
 }
 
 /** 호스트·토큰은 견주는 값이라(여는 쪽) 짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐지지 않게 단사로 바꿔 보낸다. 없는 값은 그대로 없다 */
@@ -126,16 +113,6 @@ export function hostAllowed(host: string | undefined, allowedHosts: readonly str
  */
 export function tokenMatches(authorization: string | undefined, token: string): boolean {
   return native.connTokenMatches(encodeOptional(authorization), encodeLoneSurrogates(token));
-}
-
-function listen(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', () => {
-      server.off('error', reject);
-      resolve();
-    });
-  });
 }
 
 function describe(error: unknown): string {
