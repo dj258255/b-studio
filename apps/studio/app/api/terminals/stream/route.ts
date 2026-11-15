@@ -92,7 +92,7 @@ export async function GET(request: Request) {
               await authorizeSession(id, user);
               // 검사를 기다리는 사이 끊겼으면 붙이지 않는다
               if (out.closed()) return;
-              // 쓸 수 없는 서버(실험 기능이 꺼졌거나 개인 PC 모드가 아님)나 멈춘 세션이면 여기서 던진다
+              // 쓸 수 없는 서버(개인 PC 모드가 아니거나 실험 기능 없는 컨테이너 방식)나 멈춘 세션이면 여기서 던진다
               sessionTerminalTarget(id);
               if (out.closed()) return;
               const unsubscribe = subscribeSessionTerminal(id, (message) => out.message(id, message));

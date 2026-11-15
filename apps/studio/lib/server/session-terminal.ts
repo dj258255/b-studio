@@ -31,6 +31,7 @@ import {
 } from '@b-studio/sandbox';
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
+import { terminalModeSetting } from './terminal-allowed';
 
 /**
  * 세션 터미널(이슈 #673): 세션마다 에이전트 CLI용 컨테이너 하나와 그 안의 가상 터미널 하나를 든다.
@@ -59,10 +60,9 @@ export type TerminalMode = 'container' | 'host';
  * 오타가 조용히 다른 방식으로 떨어지지 않는다
  */
 export function sessionTerminalMode(env: Record<string, string | undefined> = process.env): TerminalMode {
-  const value = env.B_STUDIO_TERMINAL?.trim();
-  if (!value || value === 'host') return 'host';
-  if (value === 'container') return 'container';
-  throw new StudioError(500, `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${value})`);
+  const mode = terminalModeSetting(env);
+  if (mode) return mode;
+  throw new StudioError(500, `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${env.B_STUDIO_TERMINAL?.trim()})`);
 }
 
 export type TerminalMessage =

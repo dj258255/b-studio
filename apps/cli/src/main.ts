@@ -39,7 +39,7 @@ verify:
 
 studio (명령 없이):
   스튜디오를 브라우저 없이 뒤에서 띄우고(이미 떠 있으면 재사용) 바로 터미널 작업대(desk)를 연다
-  세션 터미널(B_STUDIO_EXPERIMENTAL=1)과 Codex(B_STUDIO_BACKENDS=codex)를 켜서 띄운다. 직접 정한 값이 있으면 그대로 쓴다
+  실험 기능(B_STUDIO_EXPERIMENTAL=1)과 Codex(B_STUDIO_BACKENDS=codex)를 켜서 띄운다. 직접 정한 값이 있으면 그대로 쓴다
   desk를 나가도 스튜디오는 뒤에서 돈다. 끄기는 studio stop
 
 launch:
@@ -50,7 +50,7 @@ launch:
 
 desk:
   터미널 하나에서 여러 AI CLI를 나란히 쓴다. 왼쪽은 스페이스(프로젝트), 오른쪽은 세션 카드 화면(Ctrl-b w) 또는 터미널 칸 1·2·4개
-  띄워 둔 스튜디오에 붙는다(이 컴퓨터 방식 세션 터미널, B_STUDIO_EXPERIMENTAL=1). 띄우기까지 한 번에 하려면 studio(명령 없이). 나가도 세션과 CLI는 계속 돈다
+  띄워 둔 스튜디오에 붙는다(이 컴퓨터 방식 세션 터미널, 개인 PC 모드). 띄우기까지 한 번에 하려면 studio(명령 없이). 나가도 세션과 CLI는 계속 돈다
   Ctrl-b 다음에  숫자 칸 고르기 · ↑↓ 사이드바 · Enter 고른 세션을 칸에 열기 · n 새 요청(규칙으로 AI를 골라 터미널로) · w 카드 화면
                  l 칸 수 1→2→4 · x 칸 비우기 · p 세션 멈추기 · r 이어서 작업 · , 이름 바꾸기 · ? 도움말 · q 나가기
                  g 설정(계정 더하기·로그인·그림, 라우팅 규칙, 화면, 키·알림)

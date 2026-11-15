@@ -1729,3 +1729,22 @@ describe('desk 작업대: 끝날 때 알림은 하나(#959)', () => {
     expect(notices(ctx.io.all)).toEqual(['b-studio: Claude · 요청 b · 끝남', 'b-studio: Claude · 요청 c · 끝남', 'b-studio: Claude · 요청 c · 검증 실패']);
   });
 });
+
+describe('desk 작업대: 실험 기능을 끈 스튜디오(ADR-200)', () => {
+  it('서버가 실험 기능을 껐다고 알리면 작업 나누기·여러 AI 비교를 열지 않는다. 모르면 연다', async () => {
+    const off = setup([item('a')], { experimental: false });
+    off.io.type('\x02t');
+    await tick();
+    expect(off.app.state.plans).toBeUndefined();
+    expect(off.app.state.message).toContain('실험 기능');
+    off.io.type('\x02f');
+    await tick();
+    expect(off.app.state.fleets).toBeUndefined();
+
+    const unknown = setup([item('a')]);
+    unknown.io.type('\x02t');
+    await tick();
+    // 가짜 손님에는 작업 나누기 API가 없어 "지원하지 않습니다"로 닫힌다. 실험 기능 알림이 아닌 것만 본다
+    expect(unknown.app.state.message ?? '').not.toContain('실험 기능');
+  });
+});

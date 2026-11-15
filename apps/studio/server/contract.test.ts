@@ -485,7 +485,7 @@ describe('계약: GET /api/health의 b-studio 표지', () => {
     const { status, json } = await call('GET', '/api/health', undefined, { cookie: false });
     expect(status).toBe(200);
     expect(
-      looseObject({ status: z.literal('ok'), app: z.literal('b-studio'), terminal: z.boolean(), apiVersion: z.literal(1) }).parse(json),
+      looseObject({ status: z.literal('ok'), app: z.literal('b-studio'), terminal: z.boolean(), experimental: z.boolean(), apiVersion: z.literal(1) }).parse(json),
     ).toMatchObject({ status: 'ok', app: 'b-studio', apiVersion: 1 });
   });
 });

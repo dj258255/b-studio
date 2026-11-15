@@ -216,6 +216,8 @@ export interface DeskState {
   folder?: FolderState;
   /** 지금 변경 화면(#924). 있으면 본문 전체가 그 세션의 지금 변경이다 */
   changes?: ChangesState;
+  /** 서버가 실험 기능을 켜고 떴는가(/api/health, ADR-200). false면 실험 화면(작업 나누기·여러 AI 비교)을 열지 않는다. 모르면 숨기지 않는다 */
+  experimental?: boolean;
 }
 
 export interface UsageState {
@@ -287,6 +289,11 @@ export type Effect =
   | { type: 'changes-open'; id: string; title: string }
   /** 지금 변경 화면이 낸 할 일 */
   | { type: 'changes'; effect: ChangesEffect };
+
+/** 실험 기능을 끈 서버에서 실험 화면 키를 눌렀을 때의 알림(운영 배포의 알림과 같은 꼴, ADR-166·200) */
+function experimentalNote(screen: string): string {
+  return `${screen}는 실험 기능입니다(B_STUDIO_EXPERIMENTAL=1로 띄우세요)`;
+}
 
 export function initialState(): DeskState {
   return { items: [], selected: 0, layout: 1, slots: Array.from({ length: SLOT_COUNT }, () => undefined), focus: 0, prefix: false };
@@ -673,6 +680,7 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
       effects.push({ type: 'plans', effect: { type: 'close' } });
       return { ...done, plans: undefined };
     }
+    if (state.experimental === false) return { ...done, message: experimentalNote('작업 나누기') };
     effects.push({ type: 'plans-open' });
     // 덮는 화면은 하나만 둔다
     return { ...done, plans: openPlans(), prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, fleets: undefined, folder: undefined, changes: undefined };
@@ -683,6 +691,7 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
       effects.push({ type: 'fleets', effect: { type: 'close' } });
       return { ...done, fleets: undefined };
     }
+    if (state.experimental === false) return { ...done, message: experimentalNote('여러 AI 비교') };
     if (state.plans) effects.push({ type: 'plans', effect: { type: 'close' } });
     // 바로 연다(이어서 친 키가 비교 화면으로 가게). 목록은 desk가 받아 채운다. 덮는 화면은 하나만 둔다
     effects.push({ type: 'fleets-open' });

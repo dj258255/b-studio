@@ -168,7 +168,7 @@ flowchart LR
 | `pnpm studio up <path>` | 프로젝트를 샌드박스에서 실행 |
 | `pnpm studio` | 스튜디오를 뒤에서 띄우고 바로 터미널 작업대를 연다(실험) |
 | `pnpm studio launch` · `pnpm studio stop` | 스튜디오를 화면 없이 백그라운드로 켠다 · 끈다 |
-| `pnpm studio desk` | 띄워 둔 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다(실험) |
+| `pnpm studio desk` | 띄워 둔 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다 |
 | `pnpm studio agent <path> "<request>"` | 에이전트에게 변경 요청 |
 | `pnpm studio verify <path>` | 편집기로 바꾼 지금 변경을 같은 게이트로 확인(체크포인트는 만들지 않음) |
 | `pnpm studio workflow <path>` | `studio.yaml`이 강제하는 단계·테스트·화면 확인·보호 경로·배포 조건을 보여 준다 |
@@ -245,7 +245,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷, 배포 �
 
 ## 문서
 
-처음 보는 분은 [핵심 결정 요약](docs/key-decisions.md)부터 읽습니다. ADR 199개의 길잡이는 [ADR 지도](docs/adr-map.md)에 있습니다.
+처음 보는 분은 [핵심 결정 요약](docs/key-decisions.md)부터 읽습니다. ADR 200개의 길잡이는 [ADR 지도](docs/adr-map.md)에 있습니다.
 
 - [문서 안내](docs/README.md)
 - [핵심 결정 요약](docs/key-decisions.md)

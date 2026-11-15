@@ -102,7 +102,7 @@ afterAll(() => {
 });
 
 describe('세션 터미널을 열 수 있는 자리 (이슈 #673)', () => {
-  it('실험 기능을 켠 개인 PC 모드에서만 연다. 화면에 싣는 표시도 같은 판정이다', async () => {
+  it('개인 PC 모드에서만 연다. 이 컴퓨터 방식은 지원 경로라 실험 기능 없이도, 컨테이너 방식은 실험 기능을 켰을 때만 연다(ADR-200). 화면에 싣는 표시도 같은 판정이다', async () => {
     await setup();
     const id = (await createSession('termproj', 'kim', 'copy')).id;
     await waitFor(id, 'ready');
@@ -116,15 +116,39 @@ describe('세션 터미널을 열 수 있는 자리 (이슈 #673)', () => {
     expect(target.root).not.toBe(fake.root);
     expect(target.root).toContain(process.env.B_STUDIO_SESSIONS_DIR!);
 
+    const savedTerminal = process.env.B_STUDIO_TERMINAL;
+    // 이 컴퓨터 방식(기본값)은 실험 기능을 꺼도 연다
+    delete process.env.B_STUDIO_EXPERIMENTAL;
+    delete process.env.B_STUDIO_TERMINAL;
+    expect(sessionTerminalAllowed()).toBe(true);
+    expect(getSnapshot(id)?.terminal).toBe(true);
+    expect(sessionTerminalTarget(id).projectId).toBe('termproj');
+    process.env.B_STUDIO_TERMINAL = 'host';
+    expect(sessionTerminalAllowed()).toBe(true);
+
+    // 컨테이너 방식은 실험이라 실험 기능을 꺼 두면 열지 않는다
+    process.env.B_STUDIO_TERMINAL = 'container';
+    expect(sessionTerminalAllowed()).toBe(false);
+    expect(() => sessionTerminalTarget(id)).toThrow('개인 PC 모드에서만');
+    process.env.B_STUDIO_EXPERIMENTAL = '1';
+    expect(sessionTerminalAllowed()).toBe(true);
+
+    // 모르는 방식은 실험 기능을 꺼 두면 열지 않는다(켜 두면 여는 자리에서 설정 오류로 던진다)
+    process.env.B_STUDIO_TERMINAL = 'conatiner';
     delete process.env.B_STUDIO_EXPERIMENTAL;
     expect(sessionTerminalAllowed()).toBe(false);
-    expect(() => sessionTerminalTarget(id)).toThrow('실험 기능을 켠 개인 PC 모드에서만');
 
+    // 여러 사람이 쓰는 서버(인증 켬)에서는 어느 방식이든 열지 않는다
     process.env.B_STUDIO_EXPERIMENTAL = '1';
-    process.env.B_STUDIO_AUTH = 'proxy';
-    expect(sessionTerminalAllowed()).toBe(false);
-    expect(() => sessionTerminalTarget(id)).toThrow('실험 기능을 켠 개인 PC 모드에서만');
+    for (const mode of ['host', 'container']) {
+      process.env.B_STUDIO_TERMINAL = mode;
+      process.env.B_STUDIO_AUTH = 'proxy';
+      expect(sessionTerminalAllowed()).toBe(false);
+      expect(() => sessionTerminalTarget(id)).toThrow('개인 PC 모드에서만');
+    }
     process.env.B_STUDIO_AUTH = 'none';
+    if (savedTerminal === undefined) delete process.env.B_STUDIO_TERMINAL;
+    else process.env.B_STUDIO_TERMINAL = savedTerminal;
     await stopSession(id);
   }, 20_000);
 

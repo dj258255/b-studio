@@ -149,6 +149,12 @@ export class StudioClient {
     return this.#request('GET', '/api/agents');
   }
 
+  /** 스튜디오가 실험 기능을 켜고 떴는가(/api/health의 experimental, ADR-200). 그 값이 없는 옛 스튜디오면 모른다(undefined) */
+  async serverExperimental(): Promise<boolean | undefined> {
+    const health = await this.#request<{ experimental?: unknown }>('GET', '/api/health');
+    return typeof health.experimental === 'boolean' ? health.experimental : undefined;
+  }
+
   projects(): Promise<DeskProject[]> {
     return this.#request('GET', '/api/projects');
   }

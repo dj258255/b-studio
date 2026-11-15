@@ -1158,13 +1158,19 @@ describe('b-studio 도구와 세션의 수명', () => {
     expect(getSnapshot(session.id)?.checkpoints.length ?? before).toBe(before);
   }, 30_000);
 
-  it('실험 기능을 끄면 훅을 받지 않는다(관문은 세션 터미널과 같은 자리에서만 연다)', async () => {
+  it('관문은 세션 터미널과 같은 자리에서만 연다: 실험 기능을 끈 컨테이너 방식이나 여러 사람이 쓰는 서버에서는 훅을 받지 않는다(ADR-200)', async () => {
     const session = await open();
+    const savedTerminal = process.env.B_STUDIO_TERMINAL;
+    process.env.B_STUDIO_TERMINAL = 'container';
     delete process.env.B_STUDIO_EXPERIMENTAL;
-    await expect(session.gateway.prompt({ prompt: '요청' })).rejects.toThrow('실험 기능을 켠 개인 PC 모드에서만');
+    await expect(session.gateway.prompt({ prompt: '요청' })).rejects.toThrow('개인 PC 모드에서만');
+    if (savedTerminal === undefined) delete process.env.B_STUDIO_TERMINAL;
+    else process.env.B_STUDIO_TERMINAL = savedTerminal;
+    // 이 컴퓨터 방식(기본값)이어도 인증을 켠 서버에서는 받지 않는다. 실험 기능을 꺼 둬도 같다
     process.env.B_STUDIO_AUTH = 'proxy';
+    await expect(session.gateway.stop({})).rejects.toThrow('개인 PC 모드에서만');
     process.env.B_STUDIO_EXPERIMENTAL = '1';
-    await expect(session.gateway.stop({})).rejects.toThrow('실험 기능을 켠 개인 PC 모드에서만');
+    await expect(session.gateway.stop({})).rejects.toThrow('개인 PC 모드에서만');
     process.env.B_STUDIO_AUTH = 'none';
     await stopSession(session.id);
   }, 30_000);

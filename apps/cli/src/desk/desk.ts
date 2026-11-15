@@ -275,6 +275,8 @@ export interface DeskLayoutStore {
 
 export interface DeskAppOptions {
   notify?: boolean;
+  /** 서버가 실험 기능을 켜고 떴는가(ADR-200). false면 작업 나누기·여러 AI 비교를 열지 않는다. 모르면 숨기지 않는다 */
+  experimental?: boolean;
   /** false면 작업이 끝났을 때 벨·OS 알림을 내지 않는다(#922). 표시는 그대로다 */
   notifyDone?: boolean;
   /** false면 권한·질문·입력 필요일 때 벨·OS 알림을 내지 않는다(#922). 표시는 그대로다 */
@@ -320,6 +322,8 @@ export interface DeskAppOptions {
 export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' | 'rules' | 'preview' | 'start' | 'open' | 'resize' | 'input' | 'stream' | 'stop' | 'resume' | 'rename'> &
   /** 사용량(#889). 없으면 사용량을 묻지 않는다 */
   { limits?: StudioClient['limits'] } &
+  /** 서버의 실험 기능 스위치(ADR-200). 없으면 모르는 것으로 보고 실험 화면을 숨기지 않는다 */
+  { serverExperimental?: StudioClient['serverExperimental'] } &
   /** 오늘·최근 7일 쓴 양(#925). 없으면 묻지 않는다 */
   { spend?: StudioClient['spend'] } &
   /** 기록 화면과 세션 자세히(#891). 없으면 그 화면에서 할 수 없다고 알린다 */
@@ -446,6 +450,8 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   }
   // 계정 그림(#890)을 카드에 쓰려고 계정 목록을 받는다. 옛 스튜디오면 없다
   const accounts = await client.accounts().catch((): DeskAccount[] => []);
+  // 실험 기능을 끈 서버면 실험 화면(작업 나누기·여러 AI 비교)을 숨긴다(ADR-200). 묻지 못하면 모르는 것으로 둔다(숨기기만 하는 것이라 경계가 아니다)
+  const experimental = await client.serverExperimental().catch((): undefined => undefined);
   const folder = spriteDir(dir);
   let knownSprites: string[] = [];
   const settings: SettingsHost = {
@@ -465,6 +471,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     openUrl: openInBrowser,
     requirements: { editor: systemEditor(env) },
     accounts,
+    experimental,
     // 명령 인자가 설정 파일보다 앞선다
     notify: options.notify ?? config.notify ?? true,
     notifyDone: config.notifyDone ?? true,
@@ -609,7 +616,7 @@ export class DeskApp {
     const open = (restored.slots ?? []).some((id, slot) => id && slot < (restored.layout ?? 1));
     const kitty = options.graphics === 'kitty' ? { kitty: new KittyImages() } : {};
     const ordered = byUrgency(items, new Set(restored.unseenDone ?? []));
-    this.#state = { ...initialState(), items: ordered, theme, sprites: options.sprites ?? {}, ...kitty, ...prefix, ...warnings, ...restored, ...(open ? {} : { view: 'space' as const }) };
+    this.#state = { ...initialState(), items: ordered, ...(options.experimental === false ? { experimental: false } : {}), theme, sprites: options.sprites ?? {}, ...kitty, ...prefix, ...warnings, ...restored, ...(open ? {} : { view: 'space' as const }) };
     for (const item of items) this.#last.set(item.id, statusOf(item));
   }
 
