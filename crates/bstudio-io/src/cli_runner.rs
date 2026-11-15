@@ -815,10 +815,16 @@ impl Runner {
                     return Ok(());
                 }
                 Some(CliEvent::Lines(lines)) => {
-                    for line in lines {
-                        self.handle_line(proc, &line).await?;
+                    let mut left = lines.len();
+                    for line in &lines {
+                        let handled = self.handle_line(proc, line).await;
                         proc.consumed(1);
-                        if self.reopen {
+                        left -= 1;
+                        if handled.is_err() || self.reopen {
+                            // 같은 덩어리에 남은 줄은 읽지 않고 버린다(뒤의 `drain`과 같다). 버린 줄도 소비했다고 알려야 한다:
+                            // 알리지 않으면 소비하지 않은 줄 수가 상한에 머물러 읽기가 멈추고, 입력이 닫힌 뒤 더 쓰는 프로세스가 스스로 끝나지 못한다
+                            proc.consumed(left);
+                            handled?;
                             return Ok(());
                         }
                     }
@@ -1090,6 +1096,8 @@ mod tests {
         events: Vec<JsValue>,
         ops: Vec<String>,
         finished: Option<(String, Option<String>)>,
+        /// `termAfterMs`(없으면 200)
+        term_ms: Option<f64>,
     }
 
     fn hook_for(script: Arc<StdMutex<Script>>, shell: String) -> Hook {
@@ -1112,7 +1120,7 @@ mod tests {
                         ("args", Some(JsValue::Arr(vec![s("-c"), s(shell.clone())]))),
                         ("env", Some(obj(vec![("PATH", txt("/usr/bin:/bin"))]))),
                         ("cwd", txt("/")),
-                        ("termAfterMs", num(200.0)),
+                        ("termAfterMs", num(state.term_ms.unwrap_or(200.0))),
                         ("killAfterMs", num(200.0)),
                     ])),
                     "asked" => r#"{"ok":true,"asked":false}"#.to_owned(),
@@ -1142,12 +1150,16 @@ mod tests {
     }
 
     fn input(max_turns: f64) -> String {
+        input_with(max_turns, 0.0)
+    }
+
+    fn input_with(max_turns: f64, network_attempts: f64) -> String {
         js_json::to_native(&obj(vec![
             ("maxTurns", num(max_turns)),
             ("server", txt("b-studio")),
             ("backend", txt("로컬")),
             ("effort", txt("high")),
-            ("network", Some(obj(vec![("maxAttempts", num(0.0)), ("maxWaitMs", num(0.0)), ("baseDelayMs", num(1.0))]))),
+            ("network", Some(obj(vec![("maxAttempts", num(network_attempts)), ("maxWaitMs", num(1000.0)), ("baseDelayMs", num(1.0))]))),
             ("networkResumePrompt", txt("이어서")),
             ("pendingPrompt", txt("요청")),
         ]))
@@ -1249,6 +1261,34 @@ mod tests {
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(written.contains("고치세요"), "{written}");
         assert_eq!(script.lock().unwrap().finished.as_ref().map(|(status, _)| status.as_str()), Some("done"));
+    }
+
+    #[tokio::test]
+    async fn reopen_accounts_for_lines_left_in_the_batch() {
+        // 네트워크 재시도로 프로세스를 다시 띄울 때, 결과 줄과 같은 덩어리에 온 남은 줄도 소비했다고 알려야 한다.
+        // 알리지 않으면 소비하지 않은 줄 수가 상한(1024)에 머물러 읽기가 멈추고, 입력이 닫힌 뒤 더 쓰는 옛 프로세스가
+        // 스스로 끝나지 못하고 SIGTERM을 맞는다(표시 파일이 생기지 않는다)
+        let dir = tempfile::tempdir().unwrap();
+        let flag = dir.path().join("second");
+        let marker = dir.path().join("first-finished");
+        let (flag, marker) = (flag.to_str().unwrap().to_owned(), marker.to_str().unwrap().to_owned());
+        let script = Arc::new(StdMutex::new(Script { term_ms: Some(3000.0), ..Default::default() }));
+        // 결과 줄과 그 뒤 1500줄을 한 번의 쓰기로 낸다(`cat`은 3KB를 한 번에 쓴다. 셸의 printf는 잘게 나눠 써서 한 덩어리가 되지 않는다)
+        let payload = dir.path().join("payload");
+        let failure = r#"{"type":"result","subtype":"success","is_error":true,"result":"ECONNRESET","modelUsage":{}}"#;
+        std::fs::write(&payload, format!("{failure}\n{}", "x\n".repeat(1500))).unwrap();
+        let payload = payload.to_str().unwrap().to_owned();
+        let shell = format!(
+            r#"if [ -f {flag} ]; then echo '{INIT}'; echo '{{"type":"result","subtype":"success","is_error":false,"result":"","modelUsage":{{}}}}'; sleep 0.3; exit 0; fi
+touch {flag}; echo '{INIT}'; sleep 0.1; cat {payload}; cat > /dev/null; seq 1 80000; touch {marker}"#
+        );
+        let ledger = Arc::new(ToolLedger::new("mcp__b-studio__", Duration::from_millis(100)));
+        let shared = CoreShared::new(ledger.clone());
+        let hook = hook_for(script.clone(), shell);
+        let answer = tokio::time::timeout(Duration::from_secs(20), run(&input_with(60.0, 1.0), hook, shared, ledger)).await.expect("코어가 끝나지 않았다");
+        let answer = js_json::parse_native(&answer).unwrap();
+        assert_eq!(answer.prop("outcome").and_then(JsValue::as_str), Some("done"), "{answer:?}");
+        assert!(std::path::Path::new(&marker).exists(), "옛 프로세스가 출력을 다 쓰지 못하고 끝났다(읽기가 멈췄다)");
     }
 
     #[tokio::test]
