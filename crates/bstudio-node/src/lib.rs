@@ -6358,6 +6358,80 @@ impl SessionRegistry {
     }
 }
 
+// ── 세션 만들기의 순서와 치우기(ADR-206, 4f B2c) ──
+// 순서와 실패 처리는 bstudio-session(create)이 정한다. 단계(복제·프로젝트 읽기·로그인 확인·샌드박스 만들기)와 치우기(샌드박스·맵·레지스트리)는 `hook`으로 TS를 부르고,
+// 세션 폴더는 코어가 배타적으로 만들고 B2a의 `remove_session_home`으로 지운다. TS 껍데기: apps/studio/lib/server/session-create.ts
+use bstudio_session::create as session_create;
+
+#[napi(object)]
+pub struct CreateRunInput {
+    pub root: String,
+    pub home: String,
+    pub session_id: String,
+    /// 내 폴더 세션의 사용자 폴더(없으면 작업 복사본 세션)
+    pub user_dir: Option<String>,
+}
+
+#[napi(object)]
+pub struct CreateUndoErrorJs {
+    pub name: String,
+    pub message: String,
+}
+
+/// 만들기의 결과. 실패하면 `ok`가 거짓이고 실패한 단계 이름과 원래 이유가 있다. `undo_errors`는 치우다 실패한 것이다(원래 오류가 아니다)
+#[napi(object)]
+pub struct CreateResultJs {
+    pub ok: bool,
+    pub step: Option<String>,
+    pub message: Option<String>,
+    pub undo_errors: Vec<CreateUndoErrorJs>,
+}
+
+#[napi(object)]
+pub struct CreateStepJs {
+    pub name: String,
+    pub undo: Option<String>,
+    pub undo_if_failed: bool,
+}
+
+/// 만들기의 단계 목록(순서대로)과 단계마다의 치우기 콜백 이름
+#[napi]
+pub fn session_create_steps() -> Vec<CreateStepJs> {
+    session_create::CREATE_STEPS.iter().map(|step| CreateStepJs { name: step.name.to_owned(), undo: step.undo.map(str::to_owned), undo_if_failed: step.undo_if_failed }).collect()
+}
+
+/// 세션을 만든다. 단계마다 `hook(단계 이름)`을 부르고, 실패하면 끝낸 단계의 치우기를 거꾸로 `hook(치우기 이름)`으로 부른 뒤 세션 폴더를 지운다.
+/// hook은 성공하면 null, 실패하면 이유를 돌려준다(던지지 않는다)
+#[napi]
+pub fn create_session_run(env: Env, input: CreateRunInput, hook: ThreadsafeFunction<String, Promise<Option<String>>, String, Status, false>) -> Result<AsyncBlock<CreateResultJs>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let create_input = session_create::CreateInput { root: &input.root, home: &input.home, session_id: &input.session_id, user_dir: input.user_dir.as_deref() };
+        let outcome = session_create::run_create(&create_input, |name| {
+            let hook = hook.clone();
+            async move {
+                let pending = hook.call_async(name.to_owned()).await.map_err(|error| format!("{name} 단계를 부르지 못했습니다: {}", error.reason))?;
+                match pending.await {
+                    Ok(None) => Ok(()),
+                    Ok(Some(message)) => Err(message),
+                    Err(error) => Err(error.reason.clone()),
+                }
+            }
+        })
+        .await;
+        Ok(match outcome {
+            Ok(()) => CreateResultJs { ok: true, step: None, message: None, undo_errors: Vec::new() },
+            Err(failure) => CreateResultJs {
+                ok: false,
+                step: Some(failure.step),
+                message: Some(failure.message),
+                undo_errors: failure.undo_errors.into_iter().map(|(name, message)| CreateUndoErrorJs { name, message }).collect(),
+            },
+        })
+    })
+    .build(&env)
+}
+
 /// 기록의 history로 세션 파일 한 번 쓰기(줄·예약 없이). `full_history`가 거짓이면 저장용 history(`trimHistory`), 참이면 기록 전체다.
 /// 바이트는 이 호출 안에서 만들고(같은 순간의 기록) 파일 쓰기는 JS 스레드 밖에서 한다. `head`·`tail`이 객체 글자가 아니면 던진다
 #[napi]
