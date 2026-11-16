@@ -332,6 +332,18 @@ describe('S6: 실행 도중 [읽기만]이 이어 와도 앞선 변경은 게이
     expect(await readFile(path.join(session.work, 'api/src/Sneaked.java'), 'utf8').catch(() => 'gone')).toBe('gone');
   }, 30_000);
 
+  it('쓰기 훅을 거치지 않고 바뀐 파일이 있는 실행에 [읽기만]이 이어 와도, 그 변경은 게이트 없이 done으로 가려지지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    // 쓰기 훅 없이(검증 상태 없이) 바뀐 파일. 읽기만이 켜지는 순간의 지문에 들어간다
+    await edit(session, 'api/src/Order.java', CHANGED);
+    await session.gateway.prompt({ prompt: '[읽기만] 방금 한 것을 설명해줘' });
+    const answer = await session.gateway.stop({ last_assistant_message: '설명합니다.' });
+    // 옛 판(검증 상태로만 표시): 지문이 같아 게이트 없이 done이 되고 파일이 체크포인트 없이 남았다
+    expect(fake.execCalls).toContainEqual(['./gradlew', 'test']);
+    expect(answer.message).toContain('검증 통과');
+  }, 30_000);
+
   it('앞선 변경 없이(검증 상태 없이) 읽기만이 이어 온 실행은 읽기만 규칙이다: 훅을 우회해 바뀌면 실패로 닫고 되돌린다', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });

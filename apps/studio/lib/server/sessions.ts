@@ -8467,9 +8467,16 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
     if (decision.markReadOnly) {
       // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
       opened.terminal.readOnlyFingerprint ??= await session.checkpoints.pendingFingerprint();
-      // 앞선 변경이 있는 실행에 이어 켜지는가는 켜는 줄에서 읽는다(S6, ADR-212). 지문을 기다리는 사이 검증 상태가 생겼을 수 있다.
-      // 이 실행의 지문은 앞서 바뀐 파일을 이미 품었으므로 턴 끝이 읽기만 지름길을 타지 않게 표시한다
-      if (!opened.terminal.readOnly && opened.terminal.verification !== undefined) opened.terminal.readOnlyAfterWork = true;
+      // 앞선 변경이 있는 실행에 이어 켜지는가는 켜는 줄에서 읽는다(S6, ADR-212). 이 실행의 지문은 앞서 바뀐 파일을 이미 품었으므로 턴 끝이 읽기만 지름길을 타지 않게 표시한다.
+      // 앞선 변경은 쓰기 훅을 지나 검증 상태가 세워진 것만이 아니다: 훅을 거치지 않고 바뀐 파일도 지문에 들어가 "바뀐 것 없음"으로 가려진다.
+      // 그래서 작업 복사본에 이미 바뀐 파일이 있어도 표시한다. 읽지 못하면 있는 것으로 본다(지름길 대신 게이트로 간다, 막는 쪽)
+      if (!opened.terminal.readOnly) {
+        const changedBefore = await changesOutsideTools(session).then(
+          (files) => files.length > 0,
+          () => true,
+        );
+        if (opened.terminal.verification !== undefined || changedBefore) opened.terminal.readOnlyAfterWork = true;
+      }
       opened.terminal.readOnly = true;
     }
     return opened.terminal.readOnly || decision.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
