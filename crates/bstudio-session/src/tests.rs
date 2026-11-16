@@ -270,3 +270,78 @@ fn run_started_앞에_로그가_끼어도_마지막_요청을_찾는다() {
     push(&mut record, ev("notice", 1));
     assert_eq!(record.last_run_started(), Some(run(r#""r""#).as_str()));
 }
+
+fn closed(history: &[&str], reason: &str) -> Vec<String> {
+    let mut record = SessionRecord::new(false);
+    record.replace_history(history.iter().map(|s| (*s).to_owned()).collect()).unwrap();
+    record.close_unfinished(reason).unwrap();
+    record.history().into_iter().skip(history.len()).map(str::to_owned).collect()
+}
+
+#[test]
+fn 닫기는_열린_요청을_set_순서로_닫고_종류별_순서를_지킨다() {
+    let out = closed(
+        &[
+            r#"{"type":"deploy_started","action":"a","target":"t"}"#,
+            r#"{"type":"remote_sync_started"}"#,
+            r#"{"type":"backup_restore_started","backupId":"b"}"#,
+            r#"{"type":"restore_started","checkpoint":{"sha":"s"}}"#,
+            r#"{"type":"run_started","runId":"z"}"#,
+            r#"{"type":"run_started","runId":"y"}"#,
+            r#"{"type":"run_started","runId":"z"}"#,
+        ],
+        "이유",
+    );
+    assert_eq!(
+        out,
+        [
+            r#"{"type":"run_finished","runId":"z","status":"error","summary":"이유"}"#,
+            r#"{"type":"run_finished","runId":"y","status":"error","summary":"이유"}"#,
+            r#"{"type":"restore_failed","checkpoint":{"sha":"s"},"error":"이유"}"#,
+            r#"{"type":"backup_restore_failed","backupId":"b","error":"이유"}"#,
+            r#"{"type":"remote_sync_failed","error":"이유"}"#,
+            r#"{"type":"deploy_failed","action":"a","target":"t","error":"이유"}"#,
+        ]
+    );
+}
+
+#[test]
+fn 닫기는_끝난_것을_빼고_필드가_없으면_키를_뺀다() {
+    assert!(closed(&[r#"{"type":"run_started","runId":"a"}"#, r#"{"type":"run_finished","runId":"a"}"#, r#"{"type":"restore_started","checkpoint":{}}"#, r#"{"type":"restored"}"#], "x").is_empty());
+    // 없는 runId는 하나로 센다(undefined), 거짓 checkpoint·backupId는 닫지 않는다
+    let out = closed(&[r#"{"type":"run_started"}"#, r#"{"type":"run_started"}"#, r#"{"type":"restore_started","checkpoint":0}"#, r#"{"type":"backup_restore_started","backupId":""}"#, r#"{"type":"deploy_started"}"#], "x");
+    assert_eq!(out, [r#"{"type":"run_finished","status":"error","summary":"x"}"#, r#"{"type":"deploy_failed","error":"x"}"#]);
+    // 글자가 아닌 type·대소문자·접두는 종류가 아니다
+    assert!(closed(&[r#"{"type":5}"#, r#"{"type":"RUN_STARTED","runId":"a"}"#, r#"{"type":"run_started ","runId":"a"}"#, r#"5"#, r#"[1]"#], "x").is_empty());
+}
+
+#[test]
+fn 닫기의_runid는_samevaluezero다() {
+    // 1과 1.0, -0과 0, NaN끼리 같고 객체는 늘 다르다. -0은 0으로 닫힌다
+    let out = closed(
+        &[
+            r#"{"type":"run_started","runId":1}"#,
+            r#"{"type":"run_started","runId":1.0}"#,
+            r#"{"type":"run_started","runId":-0}"#,
+            r#"{"type":"run_finished","runId":0}"#,
+            r#"{"type":"run_started","runId":{"\u0000nf":"NaN"}}"#,
+            r#"{"type":"run_started","runId":{"\u0000nf":"NaN"}}"#,
+            r#"{"type":"run_started","runId":{"a":1}}"#,
+            r#"{"type":"run_started","runId":{"a":1}}"#,
+            r#"{"type":"run_finished","runId":{"a":1}}"#,
+        ],
+        "x",
+    );
+    assert_eq!(out.len(), 4);
+    assert!(out[0].contains(r#""runId":1,"#));
+    assert!(out[1].contains(r#""runId":{"\u0000nf":"NaN"}"#));
+    assert!(out[2].contains(r#""runId":{"a":1}"#) && out[3].contains(r#""runId":{"a":1}"#));
+}
+
+#[test]
+fn 닫기는_null_이벤트와_깨진_이벤트에서_아무것도_덧붙이지_않는다() {
+    let mut record = SessionRecord::new(false);
+    record.replace_history(vec![r#"{"type":"run_started","runId":"a"}"#.to_owned(), "null".to_owned()]).unwrap();
+    assert!(record.close_unfinished("x").is_err());
+    assert_eq!(record.history_len(), 2);
+}

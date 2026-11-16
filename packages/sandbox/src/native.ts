@@ -281,6 +281,20 @@ interface NativeGuard {
   RunnerCore: new (ledger: NativeToolLedger) => NativeRunnerCore;
   /** 세션 하나의 이벤트 기록(ADR-203, 4f B1a). `logs`가 거짓이면 보관 세션의 기록(logs 없음) */
   SessionRecord: new (logs: boolean) => NativeSessionRecord;
+  /**
+   * 세션 하나의 저장(ADR-203, 4f B1b): 500ms 모으기와 쓰기를 차례로 잇는 줄. `record`는 저장할 history를 가진 그 세션의 기록이다.
+   * `state`는 쓰기를 시작할 때 메인 스레드에서 불리고(던지면 그 쓰기는 하지 않고 이유를 알린다) 인자는 쓰지 않는다. `onError`는 예약한 쓰기의 실패를 알린다.
+   * 두 콜백은 약한 참조라 이 객체가 Node 프로세스를 붙잡지 않는다. `delayMs`는 시험용이다(없으면 500)
+   */
+  Persister: new (record: NativeSessionRecord, state: (unused: number) => NativePersistState, onError: (message: string) => void, delayMs?: number) => NativePersister;
+  /** 세션 폴더들에서 저장된 세션을 읽는다(옛 `readSessions`). 폴더가 아닌 항목·읽을 수 없는 파일·JSON이 아니거나 형식이 다른 파일은 건너뛴다 */
+  readSessions(root: string): Promise<NativeStoredSession[]>;
+  /** 기록으로 세션 파일 한 번 쓰기(줄·예약 없이). `fullHistory`가 거짓이면 저장용 history, 참이면 기록 전체. `head`·`tail`이 객체 글자가 아니면 던진다 */
+  writeSessionRecord(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): Promise<void>;
+  /** `writeSessionRecord`의 동기 판: 종료 신호 처리처럼 기다릴 수 없는 곳에서 이 스레드에서 쓴다(임시 파일 `<file>.<pid>.exit.tmp`). 던질 수 있다 */
+  writeSessionRecordSync(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): void;
+  /** 사이드카 파일을 원자적으로 쓴다: 폴더 만들기 → 호출마다 다른 임시 파일 → rename. `mode`는 새 파일의 권한(예: 0o600) */
+  writeFileAtomic(file: string, text: string, mode?: number): Promise<void>;
   /** 차등 시험용: 줄 하나를 러너가 읽는 규칙으로 읽어 꼬리표 붙은 JSON(`["num", "-0", true]` 같은 꼴)으로 돌려준다. JSON이 아니면 null, 너무 깊으면 `"deep"` */
   runnerParseLine(line: string): string | null | undefined;
   /** 차등 시험용: 덩어리 목록을 Node `StringDecoder`+`readline`(crlfDelay: Infinity)과 같은 규칙으로 줄로 나눈다 */
@@ -915,6 +929,8 @@ export interface NativeSessionRecord {
   append(eventJson: string): void;
   /** history를 통째로 바꾼다. 하나라도 JSON이 아니면 던지고 아무것도 바꾸지 않는다 */
   replaceHistory(eventsJson: string[]): void;
+  /** 끝나지 못한 요청·되돌리기·원격 동기화·배포를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수. 이벤트를 읽지 못하면 던지고 아무것도 덧붙이지 않는다 */
+  closeUnfinished(reason: string): number;
   hasLogs(): boolean;
   /** history의 마지막 `run_started` 이벤트(글자 그대로). 없으면 null */
   lastRunStarted(): string | null | undefined;
@@ -923,6 +939,38 @@ export interface NativeSessionRecord {
   history(): string;
   logs(): string;
   trimmedHistory(): string;
+}
+
+/** `Persister`가 쓰기를 시작할 때 TS가 건네는 상태. Rust가 `head`와 `tail` 사이에 기록의 저장용 history를 끼워 옛 `JSON.stringify(toPersisted(session))`와 같은 글자를 쓴다 */
+export interface NativePersistState {
+  file: string;
+  /** `JSON.stringify({ version, savedAt, owner, snapshot })` */
+  head: string;
+  /** `JSON.stringify({ conversation, demoIndex, … git })`(옛 `toPersisted`의 `history` 뒤 키들) */
+  tail: string;
+  /** 상태를 만들지 못한 이유. 있으면 쓰지 않고 이유를 알린다(콜백이 던져도 같지만 Node가 경고한다) */
+  error?: string;
+}
+
+export interface NativePersister {
+  /** 저장을 예약한다(500ms 모으기). 이미 예약돼 있으면 아무것도 하지 않는다 */
+  schedule(): void;
+  /** 예약을 지운다(쓰지 않는다) */
+  cancel(): void;
+  /** 예약을 지우고 쓰기를 줄에 잇는다. 약속은 이번 쓰기가 끝날 때 풀리고 실패하면 이유를 담는다(던지지 않는다) */
+  flush(): Promise<string | null | undefined>;
+  /** 지금까지 줄에 선 쓰기가 모두 끝나면 풀린다 */
+  idle(): Promise<void>;
+  /** 종료 신호 처리용: 이 스레드에서 동기로 쓴다. 던질 수 있다 */
+  flushSync(file: string, head: string, tail: string): void;
+}
+
+/** `readSessions`의 한 세션: `history`를 뺀 나머지 JSON 글자와 파일의 history를 올린 기록 */
+export interface NativeStoredSession {
+  rest: string;
+  record: NativeSessionRecord;
+  /** history를 기록에 올리지 못한 이유. 있으면 기록은 비어 있고 그 세션은 건너뛰어야 한다 */
+  historyError?: string | null;
 }
 
 export interface NativeRunnerCore {

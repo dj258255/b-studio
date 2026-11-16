@@ -10108,6 +10108,11 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - `Session.history`·`Session.logs`와 그 질의(마지막 요청·끝 40개·되감기·저장용 줄이기)를 `crates/bstudio-session`의 `SessionRecord`(napi 클래스, TS 껍데기 `session-record.ts`)로 옮겼다. 구독자·SSE·저장 스케줄러는 TS 세션에 그대로 있다(B1b·B3). 이벤트는 JSON 글자 그대로 들고, 읽는 값은 `type`뿐이다.
 - 차등 시험이 새 코드의 결함 하나를 먼저 찾았다: history와 logs가 한 순번을 나눠 써서 로그가 낀 기록에서 마지막 요청을 못 찾던 것(트러블슈팅 208). 되감기·저장은 옛 구현보다 약 2.3~3배 걸린다(ADR-203의 "비용").
 
+### 덧붙임: 4f B1b 결과 — 세션의 영속(저장 예약·쓰기 줄·읽기·닫기)을 Rust `Persister`로 ([#1253](https://github.com/dj258255/b-studio/issues/1253), ADR-203)
+- `toPersisted`의 history 조립·`writeSession`·`readSessions`·`closeUnfinished`와 `schedulePersist`·`flushPersist`를 `crates/bstudio-session`의 `Persister`·`read_sessions`·`close_unfinished`로 옮겼다(TS 껍데기 `session-persist.ts`·`session-store.ts`). TS는 history를 뺀 `head`·`tail` 두 글자만 건네고 history는 Rust가 자기 기록에서 같은 틱에 끼운다. 저장 파일은 옛 `JSON.stringify(toPersisted(session))`와 바이트까지 같다(차등 시험). 옛 TS는 `session-store-legacy.ts`에 남겼다.
+- 시험이 새 코드의 결함 하나를 먼저 찾았다: Rust가 부르는 TS 콜백이 던지면 napi가 프로세스를 끝내거나 Node가 경고하던 것(트러블슈팅 210). 저장 한 번이 메인 스레드를 막는 시간은 기록 5,000개에서 약 0.6ms→0.05ms(작은 이벤트만)·약 13ms→0.6ms(10%가 20KB)다(ADR-203의 "비용(B1b)").
+- 실제 세션 실측(2026-11-16): 저장, studio를 내렸다 띄운 뒤의 복구, 이어받기·멈추기 저장, 이전 판이 남긴 세션 18개 복구([기록](experiments/2026-11-16-b1b-session-persist-native.md)).
+
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
 상태: 채택
@@ -10298,6 +10303,16 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 10. **막은 기록은 옛 러너와 같은 글이다.** 허용 밖 URL(터널은 `CONNECT host:port`)은 막은 기록(실패 억제 대상)이고, 허용 출처 안의 주소를 막은 것(서비스 워커 스크립트 `SERVICE-WORKER <url>`, 낯선 모양의 요청)은 따로 모아 같은 주소의 진짜 실패를 가리지 않는다(ADR-198 결정 10). 기록에는 페이지 쪽이 보낸 요청(문서·프레임·워커의 요청, 웹소켓)만 남긴다. 브라우저의 배경 요청은 막되 기록하지 않는다(결정 11). Rust는 CDP로 페이지·워커의 요청을 직접 보므로 같은 규칙을 그 기준으로 맞췄다.
 11. **정리와 취소.** 브라우저는 프로세스 그룹으로 묶어 띄우고(우리가 만든 그룹), 닫을 때 `Browser.close` → 종료 대기 → 시간이 지나면 그룹째 죽인다. 거두기 전에만 그룹을 죽이므로 다른 그룹과 겹치지 않는다. 임시 프로필 폴더는 임시 폴더 바로 아래의 접두 이름이고 링크가 아닌 폴더일 때만 지운다(링크로 바뀌었으면 지우지 않는다. 여러 번 불려도 같다). 취소는 어느 단계에서든 브라우저·프록시·임시 폴더를 정리한 뒤 중단 오류로 끝난다. TS 껍데기는 옛 러너처럼 정리가 끝난 뒤 `signal.throwIfAborted()`로 중단 오류를 던진다.
 12. **끝나지 않는 상태는 통과가 아니다.** 연결이 끊기거나(틀이 잘린 채 끝남 포함) 페이지가 충돌하면 기다리는 모든 곳이 오류로 끝나고, 결과는 평가 응답을 받은 뒤 상태를 다시 확인하고서만 만든다. 조용히 삼키는 자리는 두지 않았다(옛 러너가 networkidle 기다림의 오류를 삼키던 것만, 연결이 끊긴 경우는 오류로 바꿨다).
+
+### B1b: 호출부별 막는 쪽인지 여는 쪽인지
+영속은 판정이 아니라 보관이지만, 복구 때 "누구의 세션을 건드려도 되는가"(`owner.pid`)와 "이 파일을 읽어도 되는가"(형식 검사)를 정하는 읽기 검사가 이 PR에서 Rust로 옮겨졌다. 같은 질문을 적는다.
+| 자리 | 쪽 | 모르는·깨진 입력 |
+|---|---|---|
+| `read_sessions`의 형식 검사(`version`·`snapshot.id`·`workDir`·`sandbox.id`·`owner.pid`) | 여는 쪽(통과하면 복구하고 그 샌드박스를 정리한다) | 읽지 못한 멤버(2,000단계를 넘게 깊다)·JSON 문법 밖은 통과가 아니라 건너뛴다. JS의 참·거짓과 달리 읽어 통과시키는 일이 없도록 경계값(빈 글자·0·`-0`·`false`·`null`·`1.0`·`1e0`·큰 수·음수)을 차등으로 확인한다 |
+| 폴더가 아닌 항목(링크 포함) | 거르는 쪽(적게 읽는다) | 링크는 따라가지 않는다(옛 `Dirent.isDirectory()`와 같다) |
+| `close_unfinished`가 읽는 `type` | 닫는 쪽(통과시키면 "처리 중"이 남는다) | 읽지 못한 이벤트(JSON 문법 밖·`null`·필드가 너무 깊다)는 아무것도 덧붙이지 않고 그 세션을 건너뛴다. 조용히 지나치지 않는다 |
+| `head`·`tail` 형식 확인 | 막는 쪽(쓰지 않는다) | 객체 글자가 아니면 쓰지 않고 이유를 알린다. 이전 파일은 그대로 남는다 |
+| 임시 파일 지우기 | 지우는 쪽 | 이번 호출이 `create_new`로 새로 만든 일반 파일만 이름으로 지운다. 저장 폴더를 비우거나 지우는 코드는 없다 |
 
 ### 호출부별 막는 쪽인지 여는 쪽인지(AGENTS.md "막는 검사를 고칠 때")
 | 자리 | 쪽 | 모르는·깨진 입력 |
@@ -10715,8 +10730,8 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 
 ## ADR-203 세션 기록과 영속은 `bstudio-session`이 쥐고 세션의 나머지 상태는 저장할 때 TS가 준다
 
-상태: 채택(4f B1a: 기록) · 계획(4f B1b: 영속)
-관련: 이슈 [#1251](https://github.com/dj258255/b-studio/issues/1251)(B1a), 추적 [#1250](https://github.com/dj258255/b-studio/issues/1250)(B1), ADR-191(Rust 이전), ADR-195(4f), ADR-202(앞 단계), 트러블슈팅 208
+상태: 채택(4f B1a: 기록 · 4f B1b: 영속)
+관련: 이슈 [#1251](https://github.com/dj258255/b-studio/issues/1251)(B1a), [#1253](https://github.com/dj258255/b-studio/issues/1253)(B1b), 추적 [#1250](https://github.com/dj258255/b-studio/issues/1250)(B1), ADR-191(Rust 이전), ADR-195(4f), ADR-202(앞 단계), 트러블슈팅 208
 
 ### 맥락
 - 세션의 이벤트 기록은 `sessions.ts`의 `Session.history`·`Session.logs` 배열이었다. `emit`이 쌓고(history 5,000개·logs 1,000개, 기록하지 않는 종류는 뺀다), 목록 요약(`summarize`)·관제(`overviewSessions`: 끝 40개와 마지막 요청)·현황(`lastRunStartedRequest`)·되감기(`replay`·`sessionHistory`)·로그 따라가기(`skipAlreadySeen`의 입력)·저장(`toPersisted`의 `trimHistory`)이 읽고, 이어받기(`resume`)와 복구(`recover`)가 통째로 바꾸거나 덧붙였다.
@@ -10733,7 +10748,15 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 4. **마지막 요청은 쌓을 때 적어 둔다**: history에 쌓은 순번을 적어 두고 앞에서 잘려 나간 만큼 빼 자리를 찾는다(목록 질의가 history 길이에 비례하지 않는다). 잘려 나간 `run_started`는 없는 것으로 본다(옛 `findLast`와 같다).
 5. **옛 TS는 차등 시험의 기준으로 남긴다**: `apps/studio/lib/server/session-record-legacy.ts`(`emit`의 버퍼 처리와 질의). 4g에서 지운다.
 
-**B1b(계획, 이 PR에서 하지 않는다)**: 영속(`toPersisted`·`flushPersist`·`writeSession`)과 저장 스케줄러를 `bstudio-session`으로 옮긴다. 세션의 나머지 상태(스냅샷·대화·러너 상태 등)는 TS가 저장할 때 Rust에 건네고, history는 Rust가 자기 기록에서 바로 끼운다(`trimmedHistory`가 이 PR에서 먼저 생긴 이유). 구독자·SSE는 B3/C1.
+**B1b(결과, #1253)**: 영속(`toPersisted`의 history 조립·`writeSession`·`writeSessionSync`·`readSessions`·`closeUnfinished`)과 저장 스케줄러(`schedulePersist`·`flushPersist`)를 `bstudio-session`으로 옮겼다.
+1. **`Persister`**(`persister.rs`, napi 클래스 `Persister`, TS 껍데기 `session-persist.ts`): 세션 하나의 기록(`Arc<Mutex<SessionRecord>>`, napi `SessionRecord`와 공유)과 쓰기 줄을 쥔다. `schedule()`은 이미 예약돼 있으면 아무것도 하지 않고 500ms 뒤에 쓴다(처음 예약한 때부터 센다). 타이머는 런타임의 작업이고 콜백은 약한 `ThreadsafeFunction`이라 프로세스를 붙잡지 않는다(옛 `unref`). `flush()`는 예약을 지우고 쓰기를 **호출 순서대로** 줄에 잇는다(줄에 잇는 것은 호출 안에서 동기로 한다). 앞의 쓰기가 끝난 뒤에 다음 쓰기를 시작하고, 쓸 상태는 **그 쓰기를 시작할 때** 묻는다(옛 `chain.then(() => writeSession(toPersisted(session)))`). 약속은 이번 쓰기가 끝날 때 풀리고 실패하면 이유를 담는다(던지지 않는다). `idle()`은 줄에 선 쓰기가 끝나면 풀린다(옛 `await session.persist.chain`), `cancel()`은 예약만 지운다(옛 `clearTimeout`), `flushSync`는 종료 신호 처리용으로 `<file>.<pid>.exit.tmp`에 동기로 쓴다.
+2. **상태를 건네는 법**: 쓰기를 시작할 때 Node 메인 스레드의 TS 콜백이 `{ file, head, tail }`을 준다. `head`는 `JSON.stringify({ version, savedAt, owner, snapshot })`, `tail`은 `JSON.stringify({ conversation … git })`(옛 `toPersisted`의 `history` 뒤 키들)이다. Rust는 `head`의 끝 `}`를 떼고 `,"history":[` + 기록의 저장용 history + `],` + `tail`의 앞 `{`를 뗀 것을 이어 쓴다(옛 `JSON.stringify(toPersisted(session))`와 바이트까지 같다). `head`·`tail`이 `{`로 시작하고 `}`로 끝나는 객체 글자가 아니면 쓰지 않고 이유를 알린다. **history를 끼우는 일은 콜백이 돌아온 직후 같은 메인 스레드 틱(`call_with_return_value`의 콜백)에서 한다.** 그래서 history와 나머지 상태가 같은 시점의 것이다(옛 `toPersisted`가 한 번에 만들던 것과 같다). 워커 스레드에서 읽으면 둘 사이에 이벤트가 끼어 찢어진 저장이 된다.
+3. **파일 모양 ↔ 기록 글자**(`json_text.rs`): 기록 → 파일은 `\u0000`이 든 글자만, 그 가운데서도 `{`나 `,` 바로 뒤에 `"\u0000`이 오는 자리(NUL로 시작하는 키가 있을 수 있는 글자)가 있는 글자만 읽어서 표시 객체는 `null`(`-0`은 `0`)로, NUL로 시작하는 키는 NUL 하나를 떼 `JSON.stringify`와 같은 규칙으로 다시 쓴다. 나머지는 글자 그대로 쓴다. 파일 → 기록은 모든 이벤트를 읽어 `encodeEvent(JSON.parse(글자))`와 같은 글자로 만든다(수 `1.0`·`1e0`은 `1`, `-0`·`1e999`는 표시 객체, NUL 키는 NUL을 하나 더). 짝 없는 서로게이트는 `js_json`의 단사 인코딩으로 읽고 `\ud800` 이스케이프로 되돌린다.
+4. **`read_sessions(root)`**(`store.rs`, napi `readSessions`): 옛 `readSessions`와 같은 결과(폴더만·링크는 건너뜀, 읽을 수 없거나 JSON이 아니거나 형식이 다른 파일은 건너뜀, 폴더 이름의 바이트 순서)다. 파일 전체를 **깊이 제한 없이 훑어**(`scan.rs`, 반복) JSON 문법을 `JSON.parse`와 같게 확인하고 최상위 멤버의 자리를 얻는다. 형식 검사(`version === 1`, `snapshot.id`·`snapshot.workDir`·`sandbox.id`가 참, `owner.pid`가 `Number.isInteger`)는 `js_json`의 값으로 JS의 참·거짓 규칙과 같게 읽는다. 결과는 세션마다 `history`를 뺀 나머지 JSON 글자(멤버 원문을 이은 것, TS가 `JSON.parse`한다)와 기록이다(history는 TS 객체로 풀지 않는다).
+5. **`close_unfinished(reason)`**(`close.rs`, `SessionRecord.closeUnfinished`): 옛 `closeUnfinished`와 같은 이벤트를 기록 끝에 덧붙인다(상한 없이). 이벤트의 필드는 JS와 같게 읽는다(`type`은 글자여야 같다, `runId`는 `Set`의 `SameValueZero`: `1`과 `1.0`·`-0`과 `0`·`NaN`끼리 같고 객체는 늘 다르다, `checkpoint`·`backupId`는 JS의 참·거짓, 없는 필드는 새 이벤트에서 키가 빠진다).
+6. **사이드카**(`test-results.json`·`requirements-draft.json`): 쓰기를 `writeFileAtomic`(폴더 만들기 → 호출마다 다른 임시 파일 → rename, `requirements-draft.json`은 0o600) 하나로 모았다. 글자는 TS가 만든다(바이트는 그대로).
+7. **옛 TS는 차등 시험의 기준으로 남긴다**: `session-store-legacy.ts`(`legacyToPersisted`·`legacyWriteSession`·`legacyWriteSessionSync`·`legacyReadSessions`·`legacyCloseUnfinished`). 4g에서 지운다. `session-store.ts`의 `writeSession`·`writeSessionSync`·`readSessions`·`closeUnfinished`는 같은 시그니처로 남기고 Rust를 부른다(`readSessions`는 history를 올리지 못한 세션을 뺀다).
+8. 제품의 호출부: `sessions.ts`의 `toPersisted` 객체 조립은 `persistedBody`(history 제외, 키 순서가 파일의 순서)가 됐고, 보관 세션이 샌드박스를 정리한 뒤 쓰는 저장은 기록 전체를 쓴다(옛 구현이 `entry.record.history()`를 그대로 썼다). `archivedSnapshot`은 스냅샷만 만지므로 TS에 남았다. 구독자·SSE는 B3/C1.
 
 ### 호출부별 막는 쪽인지 여는 쪽인지(AGENTS.md "막는 검사를 고칠 때")
 이 변경은 막는 검사를 바꾸지 않는다. 기록은 판정이 아니라 보관이고, 완료·복구·보안 경계가 읽는 값이 아니다. 다만 같은 질문을 호출부마다 적는다.
@@ -10785,3 +10808,49 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - 비용 숫자는 한 대(macOS arm64)에서 한 번 잰 값이다. Linux에서는 재지 않았다. 세션 수십 개의 목록 질의(`overviewSessions`)를 한꺼번에 불렀을 때는 재지 않았다(세션 하나의 값만 있다).
 - 이벤트가 JSON이 아닌 값을 담으면(`undefined` 속성 등) 기록에서 사라진다. 제품의 이벤트는 모두 JSON이 되는 값이다(저장·SSE가 같은 경계).
 - Linux·Windows에서는 돌려 보지 않았다.
+
+### B1b: 옛 구현과 다른 것
+- **저장의 오류 알림**: 옛 `flushPersist`는 던진 오류 객체를 `console.error`에 그대로 넘겼다. 새 구현은 이유 글자(`message`)만 넘긴다(Rust에서 TS로 오류 객체를 옮기지 않는다).
+- **쓰기 오류가 늘 같은 자리에서 나는 것은 아니다**: 옛 구현은 `mkdir`·`writeFile`·`rename`의 Node 오류, 새 구현은 같은 단계의 Rust 오류 글자다(내용은 달라도 알리는 자리와 "세션은 계속한다"는 같다). 쓰기에 실패하면 우리가 만든 임시 파일을 지운다(옛 구현은 `rename`이 실패하면 임시 파일이 남았다).
+- **`requirements-draft.json`이 원자적으로 바뀐다**: 옛 구현은 `writeFile(file, …, { mode: 0o600 })`로 제자리에 썼다(쓰는 도중 멈추면 잘린 파일이 남을 수 있었다). 이제 `test-results.json`과 같이 임시 파일에 쓴 뒤 rename한다. 새 파일의 권한은 늘 0o600이다(옛 구현은 이미 있는 파일의 권한을 바꾸지 않았다).
+- **`readSessions`가 history를 올리지 못한 세션을 이유와 함께 알린다**: 옛 구현은 `history`가 없거나 배열이 아니어도 읽어 돌려주고 `recover`의 `closeUnfinished`가 던져 뒤의 세션이 복구되지 않았다(B1a에서 세션마다 건너뛰도록 고쳤다). 새 구현은 읽을 때 이유(`historyError`)를 붙여 그 세션만 건너뛴다. 호환 함수 `readSessions`는 그런 세션을 뺀다.
+- **너무 깊은 값**: 파일 전체의 JSON 문법 확인은 깊이 제한이 없지만, 값으로 읽는 것(`snapshot`·`sandbox`·`owner`의 형식 검사, history 이벤트의 글자 변환, `close_unfinished`가 읽는 필드, NUL 키가 든 이벤트의 저장용 변환)은 `js_json`의 깊이(2,000)에서 멈춘다. 읽지 못하면 통과가 아니라 그 세션(또는 그 쓰기)을 건너뛰고 이유를 알린다. 옛 구현은 V8이 읽는 깊이까지 모두 읽었다. 제품의 이벤트는 이 깊이에 닿지 않는다.
+- **파일 크기 상한**: Node의 `readFile(…, 'utf8')`처럼 문자열 상한(0x1fffffe8)을 넘는 파일은 건너뛴다. 바이트 수로 보므로 글자 수로는 상한 아래인 아주 큰 파일(다바이트 글자가 많은 파일)은 옛 구현이 읽는데 새 구현은 건너뛸 수 있다.
+- **폴더 이름이 UTF-8이 아닐 때**: 옛 구현은 Node가 U+FFFD로 바꾼 이름으로 파일을 찾지 못해 건너뛰었다. 새 구현은 실제 이름으로 읽는다.
+- **저장 콜백의 던짐**: 콜백이 던지면 napi가 프로세스를 끝내거나 Node가 경고하므로 TS 껍데기가 잡아 이유로 돌려준다(트러블슈팅 210). 던지는 대신 이유를 돌려받은 쓰기는 하지 않고 이전 파일을 남긴다.
+- **`closeUnfinished`의 입력이 `null` 이벤트이면** 옛 구현처럼 던진다(`null.type`). 아무것도 덧붙이지 않는다.
+
+### B1b 검증 (2026-11-16, macOS arm64, Node 22.17)
+- **차등 시험**(옛 TS `session-store-legacy.ts`·`session-record-legacy.ts`와 새 Rust, 시드 있는 무작위. 생성기는 `session-persist-fixtures.ts`: 짝 없는 서로게이트·예약 글자·NUL 키(표시 객체와 같은 키 포함)·정수 꼴 키·`NaN`·`Infinity`·`-0`·큰 이벤트·`undefined` 속성):
+  - 저장 파일의 바이트(`session-persist.test.ts`): 무작위 시드 60개(80~460개·기록 5,400개짜리 하나·20KB 이벤트 섞임)와 저장용 history 상한 경계(1,999~2,002개), 이음 자리(빈 tail·빈 history), 옛 `writeSession`과 같은 글자. 저장 → 읽기 → 저장의 바이트가 같다(시드 20개).
+  - 읽기(`session-store-native.test.ts`): 형식 검사의 경계값 약 130개(`version`·`snapshot.id`·`workDir`·`sandbox.id`·`owner.pid`에 빈 글자·0·`-0`·`false`·`null`·`"0"`·`1.0`·`1e0`·`1e300`·`1e999`·음수·배열·객체·같은 키 두 번·BOM·공백·JSON이 아닌 파일), 폴더가 아닌 항목·링크·`session.json`이 폴더인 경우·없는 `.git`, 이름 순서, 무작위 history 40개 세션(공백·`1.0`·`1e0`·`1e999`·`-0`·NUL 키가 든 파일 모양). 옛 `readSessions`와 결과(나머지 + history 객체)가 같다.
+  - 닫기: 무작위 열 80개(열린 것 여러 종류·필드 없음·글자 아님·중복 `runId`·`NaN`·`-0`·객체 `runId`·거짓 `checkpoint`)와 `null` 이벤트·상한 없이 덧붙이기. 옛 `closeUnfinished`와 같다.
+- **닫는 쪽 시험**: 앞의 쓰기가 끝난 뒤에 다음 상태를 읽는다(`flush` 6번을 기다리지 않고 불러도), 동시에 `flush` 30번과 `flushSync`를 섞어도 임시 파일이 남지 않는다, 같은 파일에 `writeSession` 50번이 동시에 써도 깨지지 않는다, 쓰기 실패(폴더 자리에 파일·`session.json` 자리에 폴더)는 이유를 알리고 다음 쓰기는 계속한다, 콜백이 던지거나 객체 글자가 아닌 글자를 주면 쓰지 않고 이전 파일이 남는다, 모으기(겹친 예약은 한 번·처음 예약한 때부터 센다·`flush`는 예약을 지운다·`cancel`은 쓰지 않는다), 타이머와 콜백이 Node 프로세스를 붙잡지 않는다(자식 프로세스로 확인).
+- **Rust 단위 시험**(`bstudio-session`, 58개): 위 시험을 런타임에서 직접(저장 이음·형식 검사·읽기·닫기·`SameValueZero`·쓰기 줄·예약), 스캐너(`JSON.parse`의 문법, 깊이 5만 단계), 글자 변환.
+- **기존 시험이 고치지 않고 통과**: `apps/studio/lib/server/sessions*`·`session*`·`apps/studio/server/baseline`(F0 기준 사진) 53개 파일 732개 시험이 통과했다(`session-store.test.ts`의 `writeSession`·`readSessions`·`closeUnfinished` 시험 포함).
+- **변이**(Rust 단위 시험으로 39개, 그 가운데 14개는 네이티브를 다시 빌드해 TS 차등·닫는 쪽 시험으로도): 형식 검사 하나씩 빼기·넓히기(`version`·`workDir`·`sandbox.id`, `pid`가 정수 아님 받기, 빈 `id` 받기, `version` 글자 받기), 링크 따라가기, 표시 객체를 `null`로 바꾸지 않기, NUL 키를 떼지 않기·두 번 떼기, 파일 → 기록에서 NUL을 더하지 않기, `-0`을 `null`로, `head`·`tail` 이음의 쉼표 빼기, 전체 history 쓰기, `head` 검사 빼기, 임시 이름 고정·종료용 이름을 무작위로, `rename` 실패 때 임시 파일 안 지우기, 앞 쓰기를 기다리지 않기, 모으기 타이머를 매번 새로 걸기, `flush`·`cancel`이 예약을 지우지 않기, 실패를 삼키기, `close_unfinished`에서 종류 하나씩 빼기(5)·`-0`을 0과 다르게 보기·거짓 `checkpoint` 닫기·같은 `runId` 두 번 담기·객체 `runId`를 같게 보기·`type` 대소문자 무시·`null` 이벤트 통과. 표는 PR 본문. Rust 단위 시험에서 살아남은 것 둘: 이름 정렬 빼기(이 기계의 폴더 순서가 이미 이름순이라 통합으로 못 잡고 `sort_names` 단위 시험만 있다), `create_new` 빼기(8자 무작위 이름이 겹쳐야 닿는다). TS 쪽을 다시 빌드해 돌린 변이 중 앞 쓰기·모으기·`close` 종류 빼기는 기계가 느려 TS 차등 시험으로는 돌리지 못했고 Rust 단위 시험이 잡는다.
+- 아래 비용은 측정 스크립트로 잰 값이고 시험이 아니다.
+
+### B1b 비용 (macOS arm64, Node 22.17, 기록 5,000개가 찬 뒤. 중앙값, 측정 스크립트로 잰 값이고 시험이 아니다. 같은 스크립트를 세 번 돌린 값이 3~7% 안에서 같았다)
+| 동작 | 옛 TS | B1a(main) | 새 구현 |
+|---|---|---|---|
+| 저장 한 번(파일 쓰기까지, 콜백 왕복 포함), 작은 이벤트만 | 1.2ms | 2.2~2.8ms | 0.45ms |
+| 같은 것, 10%가 20KB | 19.4~20ms | 35~36ms | 2.0~2.3ms |
+| 저장 한 번이 메인 스레드를 막는 시간, 작은 이벤트만 | 0.57ms | 1.5ms | 약 0.05ms(`head`·`tail` 직렬화 0.02ms + history 이음 0.05ms) |
+| 같은 것, 10%가 20KB | 12.5ms | 27.6ms | 약 0.6ms(history 이음) |
+| 복구 한 번(세션 하나 읽기), 작은 이벤트만 | 1.2ms(읽기만) | 3.8~4.0ms(읽기 + 기록 올리기) | 4.0~4.3ms |
+| 같은 것, 10%가 20KB | 17.7ms | 44ms | 47ms |
+| `emit` 한 번: 작은 이벤트 | 0.005µs(이미 예약된 `schedulePersist`만) + B1a의 push 1.85µs | push 1.85µs | push + `schedule()` 2.27µs(`schedule()` 이미 예약됨 0.37µs) |
+| `emit` 한 번: 20KB 이벤트 | | 110.6µs | 110~111µs |
+- 저장은 옛 구현보다 작은 이벤트에서 약 2.7배, 20KB가 섞이면 약 9배 빠르고 메인 스레드를 거의 막지 않는다(history를 TS 객체로 풀어 다시 직렬화하던 B1a의 비용이 없어졌다). B1a가 남긴 "저장 2.3~3배 느림"이 풀렸다.
+- 복구는 B1a와 같은 정도(+5~7%)다. 이유는 파일의 모든 이벤트를 읽어 `encodeEvent`와 같은 글자로 다시 쓰기 때문이다(수 `1.0`·`-0`·`1e999`와 NUL 키가 파일 모양과 다르다). 복구는 서버를 띄울 때 세션마다 한 번이다.
+- `emit`은 `persist.schedule()`의 napi 호출 한 번이 늘었다(0.4µs). 이미 예약돼 있을 때도 부르므로 옛 `if (timer) return`(0.005µs)보다 느리다. 이 크기는 `emit`의 push(1.85µs)의 20% 안쪽이다.
+
+### B1b 남은 한계
+- **실제 세션**(2026-11-16, Claude Code CLI 2.1.325, vf3): 이전 판들이 남긴 세션 18개를 모두 복구했다. 새 세션 하나를 돌린 뒤 저장 파일의 키 순서가 옛 `toPersisted`와 같았고 `JSON.stringify(JSON.parse(파일))`와 바이트까지 같았다. `pnpm studio stop`(종료 때 동기 저장) 뒤 다시 띄우자 목록에 돌아왔고, SSE 되감기 이벤트 35개가 저장 파일의 history와 글자까지 같았다. 이어받기 → 멈추기도 저장했고 `.tmp`는 남지 않았다. 같은 폴더의 19개를 옛 TS 읽기와 새 Rust 읽기가 같게 읽었다(history 1,342개, [기록](experiments/2026-11-16-b1b-session-persist-native.md)). B1a의 기록도 이 실측으로 처음 실제 세션을 지났다.
+- 비용 숫자는 한 대(macOS arm64)에서 잰 값이다. Linux에서는 재지 않았다. 세션 수십 개가 한꺼번에 저장될 때의 비용은 재지 않았다(세션 하나의 값만 있다).
+- 정렬하지 않은 폴더 읽기(Linux ext4 등)는 이 기계(APFS)에서 재현하지 못한다. 이름 정렬은 단위 시험(`sort_names`)으로만 확인한다(정렬을 빼는 변이는 이 기계의 폴더 순서가 이미 이름순이라 통합 시험에서 살아남는다).
+- 임시 파일 이름이 겹칠 때 새 이름을 고르는 길(`create_new`)은 8자 무작위가 겹쳐야 시험으로 닿을 수 없다(변이가 살아남는다).
+- 읽는 깊이(2,000)와 파일 크기 상한은 "옛 구현과 다른 것"에 적은 대로다. 풀지 않은 이유: 깊이는 `js_json`의 재귀 한계이고(제품 이벤트는 닿지 않는다) 바꾸려면 값 읽기를 반복형으로 다시 써야 한다.
+- 다른 러너·실험 경로는 이 변경의 대상이 아니다(저장은 공통 경로라 따라오지만 실험 경로만을 위한 확인은 하지 않았다).
+- Windows에서는 돌려 보지 않았다.

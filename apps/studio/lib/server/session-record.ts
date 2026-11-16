@@ -57,10 +57,30 @@ const decodeEvents = (text: string): StudioEvent[] => (text.includes('\\u0000') 
 export class SessionRecord {
   private readonly inner: NativeSessionRecord;
 
-  /** `logs`가 거짓이면 보관 세션의 기록이다(logs 없음, 되감기도 로그를 보내지 않는다) */
-  constructor(options: { logs: boolean; history?: readonly StudioEvent[] }) {
+  /**
+   * `logs`가 거짓이면 보관 세션의 기록이다(logs 없음, 되감기도 로그를 보내지 않는다).
+   * `native`는 이미 만들어진 Rust 기록을 감싼다(`readStoredSessions`가 파일에서 올린 기록)
+   */
+  constructor(options: { logs: boolean; history?: readonly StudioEvent[] } | { native: NativeSessionRecord }) {
+    if ('native' in options) {
+      this.inner = options.native;
+      return;
+    }
     this.inner = new native.SessionRecord(options.logs);
     if (options.history) this.replaceHistory(options.history);
+  }
+
+  /** 같은 세션의 `Persister`가 저장할 때 읽는 Rust 기록(ADR-203, B1b) */
+  get native(): NativeSessionRecord {
+    return this.inner;
+  }
+
+  /**
+   * 서버가 멈춰 끝나지 못한 요청·되돌리기·원격 동기화·배포를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수.
+   * 이벤트를 읽지 못하면(JSON이 아니거나 `null`이거나 필드가 너무 깊다) 던지고 아무것도 덧붙이지 않는다. 옛 `closeUnfinished`(`session-store-legacy.ts`)와 같은 결과다
+   */
+  closeUnfinished(reason: string): number {
+    return this.inner.closeUnfinished(reason);
   }
 
   /**
