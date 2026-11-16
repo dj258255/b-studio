@@ -135,23 +135,25 @@ impl BusyOp {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Holder {
+pub(crate) enum Holder {
     Run { run_id: String, phase: Phase, terminal: bool },
     Task(TaskKind),
 }
 
 #[derive(Clone, Debug)]
-struct Slot {
-    ticket: Ticket,
-    holder: Holder,
+pub(crate) struct Slot {
+    pub(crate) ticket: Ticket,
+    pub(crate) holder: Holder,
 }
 
 #[derive(Default)]
 pub struct Claims {
     /// 마지막으로 낸 표. 늘기만 한다(점유를 비워도 줄지 않는다)
     last: Ticket,
-    slot: Option<Slot>,
+    pub(crate) slot: Option<Slot>,
     export: Option<Ticket>,
+    /// 터미널 실행마다의 닫힘·CLI 종료 표시(ADR-210). 점유와 한 자물쇠 아래에 있어 "열린 실행인가"가 한 번에 정해진다
+    pub(crate) terminal: crate::terminal::Runs,
 }
 
 impl Claims {
@@ -224,6 +226,7 @@ impl SessionState {
         terminal_check(&inner)?;
         let ticket = inner.claims.issue();
         inner.claims.slot = Some(Slot { ticket, holder: Holder::Run { run_id: run_id.to_owned(), phase: Phase::Running, terminal: true } });
+        inner.claims.terminal.begin(ticket);
         Ok(ticket)
     }
 
