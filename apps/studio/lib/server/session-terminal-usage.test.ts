@@ -96,7 +96,7 @@ describe('정체 판정 차등', () => {
 });
 
 describe('사용량 소식 판정', () => {
-  const silent = { cliSendsUsage: true, telemetrySeen: false, writeHooks: 11, elapsedMs: 30_000 };
+  const silent = { cliSendsUsage: true, telemetrySeen: false, writeHooks: 11, elapsedMs: 30_000, silentBefore: false };
   it('소식을 받았거나 소식을 보내지 않는 CLI이거나 쓰기 훅이 적거나 열린 지 얼마 안 됐으면 정상이다', () => {
     expect(decideSilence(silent)).toBe('silent');
     expect(decideSilence({ ...silent, telemetrySeen: true })).toBe('fine');
@@ -104,5 +104,7 @@ describe('사용량 소식 판정', () => {
     expect(decideSilence({ ...silent, writeHooks: 10 })).toBe('fine');
     expect(decideSilence({ ...silent, elapsedMs: 29_999 })).toBe('fine');
     expect(decideSilence({ ...silent, elapsedMs: -1 })).toBe('silent');
+    expect(decideSilence({ ...silent, writeHooks: 1, elapsedMs: 0, silentBefore: true })).toBe('silent');
+    expect(decideSilence({ ...silent, writeHooks: 1, elapsedMs: 0, silentBefore: true, telemetrySeen: true })).toBe('fine');
   });
 });

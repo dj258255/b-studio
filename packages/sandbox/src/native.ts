@@ -1339,6 +1339,7 @@ export interface NativeTerminalSilenceFacts {
   telemetrySeen: boolean;
   writeHooks: number;
   elapsedMs: number;
+  silentBefore: boolean;
 }
 
 export interface NativeTerminalTurnEndFacts {

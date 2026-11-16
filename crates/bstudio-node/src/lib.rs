@@ -7234,13 +7234,14 @@ pub struct TerminalSilenceFactsJs {
     pub telemetry_seen: bool,
     pub write_hooks: u32,
     pub elapsed_ms: i64,
+    pub silent_before: bool,
 }
 
 /// 사용량 소식이 끊겼는가: `fine`·`silent`
 #[napi]
 pub fn terminal_decide_silence(facts: TerminalSilenceFactsJs) -> String {
     use session_terminal::usage::{decide_silence, Silence, SilenceFacts};
-    match decide_silence(&SilenceFacts { cli_sends_usage: facts.cli_sends_usage, telemetry_seen: facts.telemetry_seen, write_hooks: facts.write_hooks, elapsed_ms: facts.elapsed_ms }) {
+    match decide_silence(&SilenceFacts { cli_sends_usage: facts.cli_sends_usage, telemetry_seen: facts.telemetry_seen, write_hooks: facts.write_hooks, elapsed_ms: facts.elapsed_ms, silent_before: facts.silent_before }) {
         Silence::Fine => "fine",
         Silence::Silent => "silent",
     }

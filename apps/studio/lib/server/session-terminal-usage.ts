@@ -84,6 +84,8 @@ export interface SilenceFacts {
   writeHooks: number;
   /** 이 실행이 열린 지 흐른 시간(ms) */
   elapsedMs: number;
+  /** 이 세션이 앞서 끊김으로 판정됐고 그 뒤 사용량 소식을 받지 못했다 */
+  silentBefore: boolean;
 }
 
 /** 사용량 소식이 끊겨 한도를 볼 수 없는가. 알아보지 못한 결정은 끊긴 것이다(막는 쪽) */

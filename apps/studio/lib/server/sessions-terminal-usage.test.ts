@@ -363,6 +363,31 @@ describe('U2: 텔레메트리가 오지 않으면 한도를 볼 수 없다', () 
   }, 30_000);
 });
 
+describe('U2: 끊김으로 판정된 세션은 다음 실행에서도 소식이 올 때까지 막는다', () => {
+  async function writes(session: Opened, count: number): Promise<string | undefined> {
+    for (let i = 0; i < count; i += 1) {
+      const answer = await session.gateway.preTool(WRITE);
+      if (answer.deny) return answer.deny;
+    }
+    return undefined;
+  }
+
+  it('끊김으로 막힌 실행을 닫고 새 실행을 열어도, 소식이 오기 전의 첫 쓰기부터 막는다(실행마다 셈 없는 쓰기를 다시 주지 않는다)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(Date.now() + 40_000);
+    expect(await writes(session, 12)).toContain('사용량');
+    await session.gateway.stop({ last_assistant_message: '막혔습니다.' });
+    await session.gateway.prompt({ prompt: '다시 해 줘' });
+    // 옛 판(실행마다 새로 셈): 새 실행은 쓰기 10번·30초를 셈 없이 받는다
+    expect(await writes(session, 1)).toContain('사용량');
+    // 소식이 오면 세션 표시도 풀린다
+    await session.gateway.telemetry(otlp([rec('s1')]));
+    expect(await writes(session, 1)).toBeUndefined();
+  }, 30_000);
+});
+
 describe('U3: 실행을 연 사람은 세션 주인이다', () => {
   it('터미널 실행의 by는 늘 세션 주인이라 사용량이 주인의 한도에 센다', async () => {
     process.env.B_STUDIO_USER_TOKEN_LIMIT = '100000';

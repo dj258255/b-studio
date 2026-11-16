@@ -90,7 +90,7 @@ fn stall_interval_is_a_quarter_with_one_second_floor() {
 
 #[test]
 fn silence_table() {
-    let silent = SilenceFacts { cli_sends_usage: true, telemetry_seen: false, write_hooks: 11, elapsed_ms: 30_000 };
+    let silent = SilenceFacts { cli_sends_usage: true, telemetry_seen: false, write_hooks: 11, elapsed_ms: 30_000, silent_before: false };
     assert_eq!(decide_silence(&silent), Silence::Silent);
     assert_eq!(decide_silence(&SilenceFacts { telemetry_seen: true, ..silent }), Silence::Fine);
     assert_eq!(decide_silence(&SilenceFacts { cli_sends_usage: false, ..silent }), Silence::Fine);
@@ -99,6 +99,11 @@ fn silence_table() {
     // 시간을 알 수 없으면 시간 조건은 지난 것으로 본다
     assert_eq!(decide_silence(&SilenceFacts { elapsed_ms: -1, ..silent }), Silence::Silent);
     assert_eq!(decide_silence(&SilenceFacts { elapsed_ms: -1, write_hooks: 10, ..silent }), Silence::Fine);
+    // 앞서 끊김을 본 세션: 새 실행의 첫 쓰기부터 막는다. 소식을 받았거나 보내지 않는 CLI면 막지 않는다
+    let fresh = SilenceFacts { write_hooks: 1, elapsed_ms: 0, silent_before: true, ..silent };
+    assert_eq!(decide_silence(&fresh), Silence::Silent);
+    assert_eq!(decide_silence(&SilenceFacts { telemetry_seen: true, ..fresh }), Silence::Fine);
+    assert_eq!(decide_silence(&SilenceFacts { cli_sends_usage: false, ..fresh }), Silence::Fine);
 }
 
 #[test]

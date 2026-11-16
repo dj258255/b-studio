@@ -533,6 +533,11 @@ interface Session {
    * 다음 터미널 사용량이 올 때 먼저 다시 쓴다. 기억에만 둔다(studio를 다시 띄우면 잃는다)
    */
   ownerUnsaved?: Map<RunLedger | undefined, AgentUsage>;
+  /**
+   * 이 세션의 터미널 실행이 사용량 소식 끊김으로 판정된 뒤 아직 소식을 받지 못했다(ADR-213, U2). 다음 실행에도 이어져, 실행마다 셈 없는 쓰기를 다시 주지 않는다.
+   * 소식(텔레메트리 사용량)이 오면 지운다. 기억에만 둔다
+   */
+  terminalUsageSilent?: boolean;
   /** 터미널 CLI의 메인·서브에이전트별 사용량과 상태(#843). 화면용이고 기억에만 둔다 */
   agentLedger?: TerminalAgentLedger;
   /** 터미널 CLI가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 기억에만 둔다(화면용) */
@@ -7929,6 +7934,7 @@ async function terminalTelemetry(id: string, body: unknown): Promise<void> {
     // 사용량 소식이 이 실행에 왔다(ADR-213, U2). 한 번이라도 오면 사용량이 흐르는 세션이다
     const receiving = openTerminalRun(session);
     if (receiving) receiving.terminal.telemetrySeen = true;
+    session.terminalUsageSilent = undefined;
     // 앞서 사람 몫에 쓰지 못한 것이 있으면, 이번 묶음이 이미 센 것뿐이어도 다시 쓴다(ADR-213, U1)
     flushOwnerUnsaved(session);
     clearSettledTerminalAttention(session);
@@ -8654,9 +8660,17 @@ const TERMINAL_USAGE_SILENT_DENY =
  * 판정은 코어가 한다. Codex는 소식을 보낸다고 알려져 있지 않아(지원 범위 밖) 건드리지 않는다
  */
 function terminalUsageSilent(session: Session, run: ActiveRun & { terminal: TerminalRunState }): boolean {
-  return (
-    decideSilence({ cliSendsUsage: terminalCliKind(session) === 'claude', telemetrySeen: run.terminal.telemetrySeen, writeHooks: run.terminal.writeHooks, elapsedMs: Date.now() - run.terminal.openedMs }) === 'silent'
-  );
+  const silent =
+    decideSilence({
+      cliSendsUsage: terminalCliKind(session) === 'claude',
+      telemetrySeen: run.terminal.telemetrySeen,
+      writeHooks: run.terminal.writeHooks,
+      elapsedMs: Date.now() - run.terminal.openedMs,
+      silentBefore: session.terminalUsageSilent === true,
+    }) === 'silent';
+  // 한 번 끊김을 본 세션은 소식이 올 때까지 다음 실행에도 이어 막는다
+  if (silent) session.terminalUsageSilent = true;
+  return silent;
 }
 
 /** 쓰기 직전 훅이 이 도구를 쓸 수 있는지 판정하지 못해 막는 글 */

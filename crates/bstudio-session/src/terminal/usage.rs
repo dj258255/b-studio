@@ -149,6 +149,9 @@ pub struct SilenceFacts {
     pub write_hooks: u32,
     /// 이 실행이 열린 지 흐른 시간(ms). 시계가 거꾸로 갔으면 음수다
     pub elapsed_ms: i64,
+    /// 이 세션이 앞선 실행에서 이미 끊김으로 판정됐고, 그 뒤 사용량 소식을 한 번도 받지 못했다.
+    /// 실행마다 셈을 새로 하면 실행마다 쓰기 `SILENT_WRITE_HOOKS`번·`SILENT_AFTER_MS`를 셈 없이 다시 준다
+    pub silent_before: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,6 +166,10 @@ pub enum Silence {
 pub fn decide_silence(facts: &SilenceFacts) -> Silence {
     if !facts.cli_sends_usage || facts.telemetry_seen {
         return Silence::Fine;
+    }
+    // 이미 끊김을 본 세션은 여유를 다시 주지 않는다(소식이 오면 부른 쪽이 표시를 지운다)
+    if facts.silent_before {
+        return Silence::Silent;
     }
     let late = facts.elapsed_ms < 0 || facts.elapsed_ms >= SILENT_AFTER_MS;
     if facts.write_hooks > SILENT_WRITE_HOOKS && late {
