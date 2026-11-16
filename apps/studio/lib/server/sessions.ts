@@ -278,6 +278,16 @@ import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts } from './session-terminal-prompt';
+import {
+  decideAfterCheckpoint,
+  decideGateOutcome,
+  decideTurnEnd,
+  type CardCheck,
+  type FingerprintCheck,
+  type GitCheck,
+  type TurnEndFacts,
+  type UnchangedCheck,
+} from './session-terminal-turn-end';
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, violationRoute, type CloseActions } from './session-terminal-close';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
@@ -493,6 +503,11 @@ interface Session {
    * 그 뒤 처음 끝나는 실행을 실패로 닫고 되돌린다. 세션이 멈추면 지운다
    */
   pendingViolation?: string;
+  /**
+   * 통과한 턴 끝이 체크포인트를 남기는 중인 터미널 실행(ADR-212, S1). 그 사이 실행은 세션에서 떼어져 있어(`session.run`이 없다) 열린 실행이 아니다.
+   * 감시가 그 사이 위반을 찾으면 `pendingViolation`으로 미루지 않고 이 실행의 `terminal.violation`에 적는다: 저장이 끝난 직후 그 위반을 본다
+   */
+  terminalSaving?: ActiveRun & { terminal: TerminalRunState };
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
   /**
@@ -7495,7 +7510,19 @@ interface TerminalRunState {
    * 뒤따르는 한마디("더 자세히")에 쓰기로 바뀐다. 바꾸려면 이 실행이 끝난 뒤 표시 없이 새로 요청한다
    */
   readOnly: boolean;
+  /**
+   * 읽기만이 **앞선 변경이 있는 실행에 이어 켜졌다**(켜질 때 검증 상태가 이미 세워져 있었다, ADR-212, S6). 읽기만 지문은 켜지는 순간에 잡으므로 앞서 바뀐 파일이 지문에 들어가
+   * 턴 끝에서 "바뀐 것 없음"으로 보인다. 이 실행은 읽기만 지름길을 타지 않고 일반 칸으로 가서 그 변경이 게이트를 지난다. 한번 켜지면 실행이 닫힐 때까지 그대로다
+   */
+  readOnlyAfterWork?: boolean;
   startedMs: number;
+  /**
+   * 통과한 턴 끝이 체크포인트를 남기기 직전의 HEAD(ADR-212, S14). 저장 뒤 아래 단계가 던졌을 때 체크포인트가 이미 남았는지 Git으로 알아보는 기준이다.
+   * 저장이 실제로 일어나지 않은 경로(HEAD가 움직였다, 내용이 달라졌다)에서는 지운다
+   */
+  saveHead?: string;
+  /** 게이트가 센 실패 횟수를 읽는 자리. 게이트를 만든 뒤에 채운다(ADR-212, S12). 게이트 밖 사유로 돌려보낸 횟수와 합쳐 상한과 견준다 */
+  gate?: VerificationGate;
   /** 샌드박스 켜기와 변경 전 기준. 파일을 바꿀 수 있는 첫 도구나 턴의 끝에서 한 번 만든다(질문만 하는 턴은 샌드박스를 켜지 않는다) */
   verification?: Promise<TerminalVerification>;
   /** 게이트 밖의 이유(다룰 수 없는 경로가 바뀜, 검증하는 동안 파일이 바뀜)로 돌려보낸 횟수 */
@@ -8031,6 +8058,14 @@ function terminalViolation(id: string, reason: string): void {
   if (route === 'ignore') return;
   const message = `[b-studio] 검증을 우회할 수 있는 일이 감지되었습니다: ${reason}`;
   const run = route === 'close_open_run' ? openTerminalRun(session) : undefined;
+  // 통과한 턴 끝이 체크포인트를 남기는 중이면(실행이 세션에서 떼어져 열린 실행이 아니다) 그 실행의 위반으로 적는다. 담아 두면 통과한 실행이 done으로 닫히고
+  // 다음 실행이 엉뚱하게 실패한다. 저장이 끝난 직후 그 실행이 이 위반을 보고 실패로 닫는다(ADR-212, S1)
+  const saving = run ? undefined : savingTerminalRun(session);
+  if (saving) {
+    emit(session, { type: 'agent', runId: saving.id, event: { type: 'warning', message } });
+    saving.terminal.violation = reason;
+    return;
+  }
   if (run) {
     emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
     // 검증이 도는 중이면 큐를 기다리지 않고 곧바로 표시한다. finishTerminalTurn이 시작할 때와 체크포인트를 남기기 직전에 본다
@@ -8046,9 +8081,15 @@ function terminalViolation(id: string, reason: string): void {
   session.pendingViolation = reason;
 }
 
-/** 위반 사유로 실행을 실패로 닫고 이번 실행의 변경을 되돌린다. 에이전트에게는 되돌린 결과를 알린다(피드백이 아니다) */
-async function failTerminalRunForViolation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, reason: string): Promise<{ message: string }> {
-  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을 실패로 닫습니다: ${reason}` });
+/** 체크포인트를 남기는 중인 터미널 실행(S1). 닫기를 시작했거나 다시 열렸으면 없다 */
+function savingTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRunState }) | undefined {
+  const run = session.terminalSaving;
+  return run && session.run !== run && !terminalRunClosed(session.life, run.ticket) ? run : undefined;
+}
+
+/** 위반 사유로 실행을 실패로 닫고 이번 실행의 변경을 되돌린다. 에이전트에게는 되돌린 결과를 알린다(피드백이 아니다). `kept`는 이미 남긴 체크포인트를 말하는 글(그대로 두었다) */
+async function failTerminalRunForViolation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, reason: string, kept?: string): Promise<{ message: string }> {
+  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을 실패로 닫습니다: ${reason}${kept ? `\n\n${kept}` : ''}` });
   return { message: hookMessage(summary) };
 }
 
@@ -8423,6 +8464,9 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
     if (decision.markReadOnly) {
       // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
       opened.terminal.readOnlyFingerprint ??= await session.checkpoints.pendingFingerprint();
+      // 앞선 변경이 있는 실행에 이어 켜지는가는 켜는 줄에서 읽는다(S6, ADR-212). 지문을 기다리는 사이 검증 상태가 생겼을 수 있다.
+      // 이 실행의 지문은 앞서 바뀐 파일을 이미 품었으므로 턴 끝이 읽기만 지름길을 타지 않게 표시한다
+      if (!opened.terminal.readOnly && opened.terminal.verification !== undefined) opened.terminal.readOnlyAfterWork = true;
       opened.terminal.readOnly = true;
     }
     return opened.terminal.readOnly || decision.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
@@ -8686,45 +8730,110 @@ async function duringAgentContainerPause(
   }
 }
 
+/**
+ * 턴 끝 판정에 넘길 사실 가운데 부를 때마다 그 순간 값으로 읽는 것들(ADR-212). 닫힘·미룬 위반·위반은 기다림(Git 맞추기·지문·변경 목록 읽기) 사이에 바뀔 수 있어
+ * 판정을 다시 부를 때마다 다시 읽는다. `reads`는 그 칸에 닿았을 때 읽어 채운 사실이다
+ */
+interface TurnEndReads {
+  git: GitCheck;
+  /** Git 맞추기가 실행을 닫았을 때 그 글(훅 답으로 돌려준다) */
+  gitSummary: string;
+  fingerprint: FingerprintCheck;
+  unchanged: UnchangedCheck;
+  card: CardCheck;
+  /** 카드 쓰기 범위 밖으로 바뀐 파일(정렬) */
+  outside: string[];
+}
+
+function turnEndFacts(session: Session, run: ActiveRun & { terminal: TerminalRunState }, reads: TurnEndReads): TurnEndFacts {
+  const state = run.terminal;
+  // Git 맞추기가 실행을 실패로 닫았으면 그 닫힘은 우리 것이다: 닫힘·위반을 다시 보지 않고 그 결과(`git_failed`)를 돌려준다
+  const ownClose = reads.git === 'failed';
+  return {
+    closed: !ownClose && terminalRunClosed(session.life, run.ticket),
+    pendingViolation: !ownClose && session.pendingViolation !== undefined,
+    violation: !ownClose && state.violation !== undefined,
+    readOnly: state.readOnly,
+    readOnlyAfterWork: state.readOnlyAfterWork === true,
+    git: reads.git,
+    fingerprint: reads.fingerprint,
+    verification: state.verification !== undefined,
+    unchanged: reads.unchanged,
+    doneTests: (session.terminalTaskContext?.doneTests ?? []).length > 0,
+    hasCard: session.terminalTaskContext !== undefined,
+    card: reads.card,
+    unsettledAttempts: state.unsettledAttempts,
+    gateAttempts: state.gate?.attempts ?? 0,
+    maxAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
+  };
+}
+
+/**
+ * 턴의 끝(Stop 훅)의 판정을 따라 일한다. 판정은 코어가 한다(ADR-212, `session-terminal-turn-end.ts`): 사실을 읽어 넘기고, 돌려받은 할 일 하나를 한다.
+ * 읽기가 부수 효과인 사실(Git 맞추기·지문·바뀐 파일 목록·카드 범위)은 판정이 그 칸에 닿았을 때 읽는다. 읽은 뒤에는 모든 사실을 다시 읽어 같은 판정을 다시 부른다.
+ *
+ * 판정을 부르는 자리는 모두 막는 쪽이다(여는 것은 통과 한 칸뿐이고 그 칸은 게이트를 지난 뒤에만 선다): 모르는 결정은 `unknown`으로 실패로 닫는다.
+ */
 async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string): Promise<{ feedback?: string; message?: string }> {
   const state = run.terminal;
-  if (terminalRunClosed(session.life, run.ticket)) return {};
-  // 감시가 찾은 위반을 그때는 열린 실행이 없어 담아 두었다면, 그 뒤 처음 끝나는 이 실행을 실패로 닫고 되돌린다
-  if (session.pendingViolation !== undefined) {
-    const reason = session.pendingViolation;
+  const reads: TurnEndReads = { git: 'unread', gitSummary: '', fingerprint: 'unread', unchanged: 'unread', card: 'unread', outside: [] };
+  const closeMessage = (summary: string): { message: string } => ({ message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` });
+  /** 감시가 담아 둔 위반을 그때는 열린 실행이 없었다면, 그 뒤 처음 끝나는 이 실행이 가져가 실패로 닫고 되돌린다 */
+  const failForPendingViolation = (): Promise<{ message: string }> => {
+    const reason = session.pendingViolation ?? '감지된 위반';
     session.pendingViolation = undefined;
     return failTerminalRunForViolation(session, run, reason);
-  }
-  // 검증이 도는 중에 온 위반은 큐를 기다리지 않고 여기 적혀 있다. 통과로 남기지 않는다
-  if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
-  // 읽기만 실행은 파일을 바꾸지 않는다. 열릴 때 잡은 지문과 지금 지문을 견준다 —
-  // 사람이 요청 전에 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다.
-  // 이 규칙은 훅과 무관하게 컨테이너 방식에도 똑같이 적용된다
-  if (state.readOnly) {
-    // 읽기만은 Git도 바꾸지 않는다. 훅을 우회해 요청 도중 커밋이 생겼으면 그 자리에서 되돌리고 실패로 닫는다(이슈 #699).
-    // 읽기만은 커밋할 수 없으므로 풀지 않고(allowUnwind: false) 기억한 체크포인트로 되돌리기만 한다
-    const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
-    if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
-    const before = state.readOnlyFingerprint;
-    const after = await session.checkpoints.pendingFingerprint().catch(() => undefined);
-    if (before === undefined || after === undefined || before !== after) {
-      // 달라졌거나(훅이 우회되어 바뀐 채 끝났다) 재지 못했다(확신할 수 없다). 통과로 남기지 않고 실패로 닫고 되돌린다
-      const changed = [...new Set([...(await session.checkpoints.pendingFiles()), ...(await session.checkpoints.pendingExcludedFiles())])];
-      const reason =
-        before === undefined || after === undefined
-          ? '[b-studio] 읽기만 요청인데 파일이 바뀌었는지 확인하지 못했습니다'
-          : `[b-studio] 읽기만 요청인데 파일이 바뀌었습니다: ${changed.slice(0, 5).join(', ')}`;
-      const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
-      return { message: hookMessage(summary) };
+  };
+
+  // 1단계: 실행을 닫을 수 있는 읽기와 읽기만 칸. 옛 코드에서 `checking`을 세우기 앞이다(여기서 던지면 훅 오류로 돌아간다)
+  for (;;) {
+    const step = decideTurnEnd(turnEndFacts(session, run, reads));
+    switch (step.kind) {
+      case 'nothing':
+        return {};
+      case 'fail_pending_violation':
+        return failForPendingViolation();
+      case 'fail_violation':
+        // 검증이 도는 중에 온 위반은 큐를 기다리지 않고 여기 적혀 있다. 통과로 남기지 않는다
+        return failTerminalRunForViolation(session, run, state.violation ?? '감지된 위반');
+      case 'need_git': {
+        // 읽기만은 Git도 바꾸지 않는다. 훅을 우회해 요청 도중 커밋이 생겼으면 그 자리에서 되돌리고 실패로 닫는다(이슈 #699). 읽기만은 커밋할 수 없으므로 풀지 않는다(allowUnwind: false).
+        // 만들기는 직접 만든 커밋을 풀어 검증에 넣고, 풀 수 없는 모양(브랜치 전환, 기록 되감기)이면 되돌리고 실행을 실패로 닫는다
+        const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: step.allowUnwind });
+        reads.git = reconciled.failed ? 'failed' : 'aligned';
+        reads.gitSummary = reconciled.summary;
+        continue;
+      }
+      case 'git_failed':
+        return closeMessage(reads.gitSummary);
+      case 'need_fingerprint': {
+        // 읽기만 실행은 파일을 바꾸지 않는다. 열릴 때 잡은 지문과 지금 지문을 견준다 — 사람이 요청 전에 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다.
+        // 이 규칙은 훅과 무관하게 컨테이너 방식에도 똑같이 적용된다
+        const before = state.readOnlyFingerprint;
+        const after = await session.checkpoints.pendingFingerprint().catch(() => undefined);
+        reads.fingerprint = before === undefined || after === undefined ? 'unknown' : before === after ? 'same' : 'different';
+        continue;
+      }
+      case 'read_only_fail': {
+        // 달라졌거나(훅이 우회되어 바뀐 채 끝났다) 재지 못했다(확신할 수 없다). 통과로 남기지 않고 실패로 닫고 되돌린다
+        const changed = [...new Set([...(await session.checkpoints.pendingFiles()), ...(await session.checkpoints.pendingExcludedFiles())])];
+        const reason = step.unverified ? '[b-studio] 읽기만 요청인데 파일이 바뀌었는지 확인하지 못했습니다' : `[b-studio] 읽기만 요청인데 파일이 바뀌었습니다: ${changed.slice(0, 5).join(', ')}`;
+        const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
+        return { message: hookMessage(summary) };
+      }
+      case 'read_only_done':
+        // 이 실행이 바꾼 것이 없다(사람이 미리 고쳐 둔 파일이 있어도). 게이트를 돌리지 않고 답만 한 턴으로 끝낸다
+        await settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
+        return {};
+      case 'unknown':
+        return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 턴 끝의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
+      default:
+        break;
     }
-    // 이 실행이 바꾼 것이 없다(사람이 미리 고쳐 둔 파일이 있어도). 게이트를 돌리지 않고 답만 한 턴으로 끝낸다
-    await settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
-    return {};
+    // 읽기만 칸을 지났다. 아래는 `checking`을 세우고 던지면 catch가 닫는 구간이다
+    break;
   }
-  // 에이전트가 작업 복사본의 Git을 직접 움직였는지 본다(이슈 #699). b-studio가 기억한 곳과 같으면 그대로 간다.
-  // 직접 만든 커밋은 풀어 검증에 넣고, 풀 수 없는 모양(브랜치 전환, 기록 되감기)이면 되돌리고 실행을 실패로 닫는다
-  const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: true });
-  if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
+
   const onEvent = (event: AgentEvent): void => {
     // 토큰과 질문은 러너만 낸다(세션 이벤트의 agent 꼴에도 없다). 게이트와 도구가 내는 것만 옮긴다
     if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
@@ -8732,66 +8841,97 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
   if (text) onEvent({ type: 'text', text: clipText(text, TERMINAL_REQUEST_LIMIT) });
   state.checking = true;
   try {
-    // 기준을 잡은 적이 없고 작업 복사본도 그대로면 답만 한 턴이다(샌드박스를 켜지 않고 끝낸다). 다만 카드에 완료 검사가
-    // 있으면 이 지름길을 타지 않는다 — 게이트는 바뀐 파일이 없으면 test 단계를 돌리지 않아, 쓰기가 모두 거절돼 아무것도
-    // 안 바뀐 카드가 완료 명령이 있는데도 통과로 끝난다(#B6a 수정 2-1)
-    const unchanged = (await session.checkpoints.pendingFiles()).length === 0 && (await session.checkpoints.pendingExcludedFiles()).length === 0;
+    // 2단계: 바뀐 것 없음 → 카드 범위 → 게이트. 기준을 잡은 적이 없고 작업 복사본도 그대로면 답만 한 턴이다(샌드박스를 켜지 않고 끝낸다). 다만 카드에 완료 검사가
+    // 있으면 이 지름길을 타지 않는다 — 게이트는 바뀐 파일이 없으면 test 단계를 돌리지 않아, 쓰기가 모두 거절돼 아무것도 안 바뀐 카드가 완료 명령이 있는데도 통과로 끝난다(#B6a 수정 2-1)
     const doneTests = session.terminalTaskContext?.doneTests ?? [];
-    if (!state.verification && unchanged) {
-      if (doneTests.length > 0) {
-        // 완료 검사만 서비스에서 직접 돌린다(게이트는 바뀐 파일이 없으면 돌릴 수 없다). 서비스가 떠 있어야 하므로
-        // 게이트와 같은 방식으로 샌드박스를 켠다. 재시도 셈은 게이트 실패와 같은 unsettledAttempts를 쓴다
-        const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
-        signal.throwIfAborted();
-        await ensureBooted(session);
-        const infra = await ensureReadySessionInfra(session, signal);
-        if (!infra.ok) throw new Error(infra.reason);
-        const failures = await runDoneTests(session.sandbox, doneTests, signal);
-        // 완료 검사를 도는 동안 감시가 위반을 찾았으면(큐를 기다리지 않고 state.violation에 적힌다) 통과로 남기지 않는다
-        if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
-        if (failures.length === 0) {
-          await settleTerminalRun(session, run, { status: 'done', summary: text || '완료 조건을 통과했습니다.' });
+    for (;;) {
+      const step = decideTurnEnd(turnEndFacts(session, run, reads));
+      if (step.kind === 'run_gate') break;
+      switch (step.kind) {
+        case 'nothing':
           return {};
-        }
-        state.unsettledAttempts += 1;
-        if (state.unsettledAttempts >= TERMINAL_MAX_VERIFY_ATTEMPTS) {
-          const summary = await abandonTerminalRun(session, run, {
-            status: 'failed',
-            reason: `완료 조건을 ${state.unsettledAttempts}번 통과하지 못했습니다: ${failures.map((failure) => failure.name).join(', ')}`,
+        case 'fail_pending_violation':
+          return failForPendingViolation();
+        case 'fail_violation':
+          return failTerminalRunForViolation(session, run, state.violation ?? '감지된 위반');
+        case 'need_unchanged':
+          reads.unchanged = (await session.checkpoints.pendingFiles()).length === 0 && (await session.checkpoints.pendingExcludedFiles()).length === 0 ? 'yes' : 'no';
+          continue;
+        case 'settle_unchanged':
+          await settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
+          return {};
+        case 'run_done_tests': {
+          // 완료 검사만 서비스에서 직접 돌린다(게이트는 바뀐 파일이 없으면 돌릴 수 없다). 서비스가 떠 있어야 하므로 게이트와 같은 방식으로 샌드박스를 켠다.
+          // 재시도 셈은 게이트 실패와 같은 unsettledAttempts를 쓴다
+          const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+          signal.throwIfAborted();
+          await ensureBooted(session);
+          const infra = await ensureReadySessionInfra(session, signal);
+          if (!infra.ok) throw new Error(infra.reason);
+          const failures = await runDoneTests(session.sandbox, doneTests, signal);
+          // 완료 검사를 도는 동안 감시가 위반을 찾았으면(큐를 기다리지 않고 state.violation에 적힌다) 통과로 남기지 않는다. 위반이면 횟수를 세지 않는다
+          if (failures.length > 0 && state.violation === undefined) state.unsettledAttempts += 1;
+          const done = decideGateOutcome({
+            path: 'done_tests',
+            outcome: failures.length === 0 ? 'pass' : 'retry',
+            cancelled: false,
+            maxTurnsLimit: false,
+            violation: state.violation !== undefined,
+            unsettledAttempts: state.unsettledAttempts,
+            gateAttempts: 0,
+            maxAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
           });
-          return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+          if (done.kind === 'pass') {
+            await settleTerminalRun(session, run, { status: 'done', summary: text || '완료 조건을 통과했습니다.' });
+            return {};
+          }
+          if (done.kind === 'fail_violation') return failTerminalRunForViolation(session, run, state.violation ?? '감지된 위반');
+          if (done.kind === 'retry') return await retryOrClose(session, run, doneTestsFeedback(failures));
+          return closeMessage(
+            await abandonTerminalRun(session, run, {
+              status: 'failed',
+              reason: `완료 조건을 ${state.unsettledAttempts}번 통과하지 못했습니다: ${failures.map((failure) => failure.name).join(', ')}`,
+            }),
+          );
         }
-        return await retryOrClose(session, run, doneTestsFeedback(failures));
-      }
-      await settleTerminalRun(session, run, { status: 'done', summary: text || '바꾼 파일 없이 끝났습니다.' });
-      return {};
-    }
-    // 카드의 쓰기 범위를 턴 끝에서도 본다(#B6a). 훅을 거치지 않은 변경(셸 명령 등)을 여기서 잡는다.
-    // 게이트를 돌리지 않고 돌려보내며, 게이트 실패와 같은 재시도 셈에 넣어 무한히 돌지 않게 한다
-    const card = session.terminalTaskContext;
-    if (card) {
-      const changed = await changesOutsideTools(session);
-      const outside = changed.filter((file) => !isInScope(file, card.writableScope)).sort();
-      if (outside.length > 0) {
-        state.unsettledAttempts += 1;
-        if (state.unsettledAttempts >= TERMINAL_MAX_VERIFY_ATTEMPTS) {
-          const summary = await abandonTerminalRun(session, run, {
-            status: 'failed',
-            reason: `이 카드의 쓰기 범위(${card.writableScope.join(', ')}) 밖 파일을 바꿨습니다: ${outside.slice(0, 5).join(', ')}`,
-          });
-          return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+        case 'need_card_scope': {
+          // 카드의 쓰기 범위를 턴 끝에서도 본다(#B6a). 훅을 거치지 않은 변경(셸 명령 등)을 여기서 잡는다
+          const card = session.terminalTaskContext;
+          const changed = await changesOutsideTools(session);
+          reads.outside = card ? changed.filter((file) => !isInScope(file, card.writableScope)).sort() : [];
+          reads.card = reads.outside.length > 0 ? 'outside' : 'inside';
+          continue;
         }
-        const feedback = `[b-studio] 이 카드의 쓰기 범위(${card.writableScope.join(', ')}) 밖 파일을 바꿨습니다: ${outside.slice(0, 20).join(', ')}. 되돌린 뒤 턴을 끝내세요.`;
-        return await retryOrClose(session, run, feedback);
+        case 'card_retry':
+        case 'card_exhausted': {
+          // 게이트를 돌리지 않고 돌려보내며, 게이트 실패와 같은 재시도 셈에 넣어 무한히 돌지 않게 한다
+          const scope = session.terminalTaskContext?.writableScope ?? [];
+          state.unsettledAttempts += 1;
+          if (step.kind === 'card_exhausted') {
+            return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: `이 카드의 쓰기 범위(${scope.join(', ')}) 밖 파일을 바꿨습니다: ${reads.outside.slice(0, 5).join(', ')}` }));
+          }
+          return await retryOrClose(
+            session,
+            run,
+            `[b-studio] 이 카드의 쓰기 범위(${scope.join(', ')}) 밖 파일을 바꿨습니다: ${reads.outside.slice(0, 20).join(', ')}. 되돌린 뒤 턴을 끝내세요.`,
+          );
+        }
+        default:
+          // 1단계에서 끝났어야 하는 결정이거나 알아보지 못한 결정이다. 통과시키지 않고 닫는다
+          return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 턴 끝의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
       }
     }
     const verification = await terminalVerification(session, run);
     const { tracker, gate } = verification;
+    state.gate = gate;
     const started = performance.now();
-    /** 게이트 밖의 이유로 통과시키지 않는다. 상한까지는 에이전트에게 돌려주고, 넘으면 실패로 끝낸다 */
+    /** 게이트 밖 사유로 통과시키지 않았다. 센 뒤 돌려준다: 상한에 닿았는지는 게이트 쪽 횟수와 합쳐 판정이 정한다. 상한에 닿았을 때 쓸 글은 이 결과에 붙여 둔다 */
+    const unsettledSummaries = new WeakMap<object, string>();
     const unsettled = (summary: string, feedback: string): GateOutcome => {
       state.unsettledAttempts += 1;
-      return state.unsettledAttempts >= TERMINAL_MAX_VERIFY_ATTEMPTS ? { kind: 'exhausted', summary } : { kind: 'retry', feedback };
+      const outcome: GateOutcome = { kind: 'retry', feedback };
+      unsettledSummaries.set(outcome, summary);
+      return outcome;
     };
     const moved = (files: readonly string[]): GateOutcome =>
       unsettled(
@@ -8831,76 +8971,137 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       const failures = await runDoneTests(session.sandbox, doneTests, AbortSignal.any([session.stop.signal, run.cancel.signal]));
       if (failures.length > 0) outcome = unsettled('완료 조건을 통과하지 못했습니다', doneTestsFeedback(failures));
     }
-    if (run.cancel.signal.aborted || session.stop.signal.aborted) throw run.cancel.signal.reason ?? session.stop.signal.reason;
-    // 턴 상한에 닿은 실행은 재시도하지 않는다(#B5, ADR-131). 게이트를 통과하지 못하면 대화 실행처럼 실패로 닫고 되돌린다
-    if (state.limitReason === 'max_turns' && outcome.kind === 'retry') {
-      outcome = { kind: 'exhausted', summary: `최대 턴 수(${maxTurnsFor(session.project) ?? 0})를 넘었습니다` };
+    // 게이트 뒤 판정: 취소 → 턴 상한 → 통과면 위반 → 재시도·소진. 사실은 이 줄에서 한꺼번에 읽고, 통과면 다음 줄에서 곧바로 실행을 떼어 그 사이에 기다림이 없다
+    const gated = decideGateOutcome({
+      path: 'gate',
+      outcome: outcome.kind,
+      cancelled: run.cancel.signal.aborted || session.stop.signal.aborted,
+      maxTurnsLimit: state.limitReason === 'max_turns',
+      violation: state.violation !== undefined,
+      unsettledAttempts: state.unsettledAttempts,
+      gateAttempts: gate.attempts,
+      maxAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
+    });
+    switch (gated.kind) {
+      case 'throw_cancel':
+        throw run.cancel.signal.reason ?? session.stop.signal.reason;
+      case 'fail_violation':
+        // 게이트가 도는 동안 위반이 왔으면(큐를 기다리지 않고 state.violation에 적혔다) 통과시키지 않는다
+        return failTerminalRunForViolation(session, run, state.violation ?? '감지된 위반');
+      case 'retry':
+        return await retryOrClose(session, run, outcome.kind === 'retry' ? outcome.feedback : '[b-studio 검증 게이트] 검증을 통과하지 못했습니다.');
+      case 'exhaust': {
+        // 턴 상한에 닿은 실행은 재시도하지 않는다(#B5, ADR-131). 게이트를 통과하지 못하면 대화 실행처럼 실패로 닫고 되돌린다
+        const summary = gated.maxTurns
+          ? `최대 턴 수(${maxTurnsFor(session.project) ?? 0})를 넘었습니다`
+          : gated.attempts
+            ? (unsettledSummaries.get(outcome) ?? attemptsExhaustedSummary(gate.attempts, state.unsettledAttempts, outcome.kind === 'retry' ? outcome.feedback : ''))
+            : outcome.kind === 'exhausted'
+              ? outcome.summary
+              : (unsettledSummaries.get(outcome) ?? '검증을 통과하지 못했습니다');
+        const result = terminalResult(run, verification, 'failed', summary, 'exhausted', started);
+        onEvent({ type: 'failed', result });
+        return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: summary, platformFailure: gate.platformFailure }));
+      }
+      case 'pass':
+        break;
+      default:
+        // 알아보지 못한 결과다. 열린 채 두지 않고 실패로 닫는다
+        return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 검증 결과의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
+    }
+    // 통과: 여기부터는 취소를 받지 않는다(대화 창의 요청과 같다)
+    detachRun(session, run);
+    session.terminalSaving = run;
+    const head = session.snapshot.checkpoints[0]?.sha;
+    // 커밋되는 내용이 방금 검증한 내용과 같아야 한다. git이 추적하지 않는 생성 파일은 인덱스에 없으므로 견줄 대상에서 뺀다
+    const generated = new Set(await session.checkpoints.pendingExcludedFiles());
+    const expectStaged = new Map([...tracker.tracked].filter(([file]) => !generated.has(file)));
+    const expectExcluded = new Map([...tracker.tracked].filter(([file]) => generated.has(file)));
+    const passed = terminalResult(run, verification, 'done', text, 'pass', started);
+    // 턴 상한에 닿아 게이트만 통과한 실행은 하다 만 것으로 표시한다(#B5, ADR-131 덧붙임)
+    if (state.limitReason === 'max_turns') passed.incomplete = 'max_turns';
+    state.saveHead = head;
+    try {
+      if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
+      await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false, { unguardedWrites: pause === undefined }), checkpointTrailers(passed), text, false, expectStaged, expectExcluded);
+    } catch (error) {
+      if (error instanceof HeadMovedError) {
+        // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
+        // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다. 체크포인트는 만들어지지 않았다
+        state.saveHead = undefined;
+        session.terminalSaving = undefined;
+        if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
+        const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
+        if (reconciled.failed) return closeMessage(reconciled.summary);
+        throw error;
+      }
+      if (!(error instanceof StagedMismatchError)) throw error;
+      // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
+      state.saveHead = undefined;
+      session.terminalSaving = undefined;
+      if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
+      outcome = moved(error.files);
     }
     if (outcome.kind === 'pass') {
-      // 게이트가 도는 동안 위반이 왔으면(큐를 기다리지 않고 state.violation에 적혔다) 통과시키지 않는다
-      if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
-      // 통과: 여기부터는 취소를 받지 않는다(대화 창의 요청과 같다)
-      detachRun(session, run);
-      const head = session.snapshot.checkpoints[0]?.sha;
-      // 커밋되는 내용이 방금 검증한 내용과 같아야 한다. git이 추적하지 않는 생성 파일은 인덱스에 없으므로 견줄 대상에서 뺀다
-      const generated = new Set(await session.checkpoints.pendingExcludedFiles());
-      const expectStaged = new Map([...tracker.tracked].filter(([file]) => !generated.has(file)));
-      const expectExcluded = new Map([...tracker.tracked].filter(([file]) => generated.has(file)));
-      const passed = terminalResult(run, verification, 'done', text, 'pass', started);
-      // 턴 상한에 닿아 게이트만 통과한 실행은 하다 만 것으로 표시한다(#B5, ADR-131 덧붙임)
-      if (state.limitReason === 'max_turns') passed.incomplete = 'max_turns';
-      try {
-        if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
-        await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false, { unguardedWrites: pause === undefined }), checkpointTrailers(passed), text, false, expectStaged, expectExcluded);
-      } catch (error) {
-        if (error instanceof HeadMovedError) {
-          // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
-          // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다
-          if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
-          const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
-          if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
-          throw error;
-        }
-        if (!(error instanceof StagedMismatchError)) throw error;
-        // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
-        if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
-        outcome = moved(error.files);
+      const saved = session.snapshot.checkpoints[0];
+      const checkpointed = saved !== undefined && saved.sha !== head;
+      if (checkpointed) {
+        if (passed.checks) session.lastGateChecks = passed.checks;
+        void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests).catch(() => {});
+        syncRequirementIssuesInBackground(session);
+        // 대화 창의 에이전트는 터미널에서 일어난 일을 모른다. 다음 요청에서 알린다
+        noteForModel(session, `[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 ${saved.shortSha}를 남겼습니다(파일 ${saved.files.length}개: ${saved.files.slice(0, 20).join(', ')}). 이 파일을 다루기 전에 다시 읽으세요.`);
       }
-      if (outcome.kind === 'pass') {
-        const saved = session.snapshot.checkpoints[0];
-        const checkpointed = saved !== undefined && saved.sha !== head;
-        if (checkpointed) {
-          if (passed.checks) session.lastGateChecks = passed.checks;
-          void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests).catch(() => {});
-          syncRequirementIssuesInBackground(session);
-          // 대화 창의 에이전트는 터미널에서 일어난 일을 모른다. 다음 요청에서 알린다
-          noteForModel(session, `[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 ${saved.shortSha}를 남겼습니다(파일 ${saved.files.length}개: ${saved.files.slice(0, 20).join(', ')}). 이 파일을 다루기 전에 다시 읽으세요.`);
-        }
-        onEvent({ type: 'done', result: passed });
-        await settleTerminalRun(session, run, {
-          status: 'done',
-          summary: text || (checkpointed ? '검증을 통과해 체크포인트를 남겼습니다.' : '바꾼 파일 없이 끝났습니다.'),
-          ...(passed.incomplete ? { incomplete: passed.incomplete } : {}),
-          // 이 컴퓨터 방식은 검사 동안 멈출 컨테이너가 없었다(#850). 바꾼 파일이 없어 검사를 돌지 않은 실행에는 붙이지 않는다
-          ...(pause === undefined && gate.verified ? { unguardedWrites: true as const } : {}),
-        });
-        return { message: checkpointed ? `[b-studio] 검증 통과 — 체크포인트 ${saved.shortSha}` : '[b-studio] 검증 통과 — 남길 변경이 없어 체크포인트는 만들지 않았습니다' };
+      // 저장하는 동안 위반이 왔으면(`terminalViolation`이 이 실행의 위반으로 적었다) 통과로 닫지 않는다(S1). 체크포인트의 내용은 게이트가 본 내용과 같음을
+      // 저장이 확인했으므로 체크포인트는 그대로 두고, 그 뒤 작업 복사본에 생긴 변경만 방금 남긴 체크포인트로 되돌린다. 이 판정과 닫기 시작 사이에 기다림이 없다
+      if (decideAfterCheckpoint(state.violation !== undefined) === 'fail_violation') {
+        const kept = checkpointed ? `검증을 통과한 내용은 체크포인트 ${saved.shortSha}로 남겼고, 저장하는 동안 감지된 일이라 그 체크포인트는 그대로 둡니다.` : undefined;
+        return failTerminalRunForViolation(session, run, state.violation ?? '감지된 위반', kept);
       }
+      onEvent({ type: 'done', result: passed });
+      await settleTerminalRun(session, run, {
+        status: 'done',
+        summary: text || (checkpointed ? '검증을 통과해 체크포인트를 남겼습니다.' : '바꾼 파일 없이 끝났습니다.'),
+        ...(passed.incomplete ? { incomplete: passed.incomplete } : {}),
+        // 이 컴퓨터 방식은 검사 동안 멈출 컨테이너가 없었다(#850). 바꾼 파일이 없어 검사를 돌지 않은 실행에는 붙이지 않는다
+        ...(pause === undefined && gate.verified ? { unguardedWrites: true as const } : {}),
+      });
+      return { message: checkpointed ? `[b-studio] 검증 통과 — 체크포인트 ${saved.shortSha}` : '[b-studio] 검증 통과 — 남길 변경이 없어 체크포인트는 만들지 않았습니다' };
     }
-    if (outcome.kind === 'retry') {
-      return await retryOrClose(session, run, outcome.feedback);
-    }
-    if (outcome.kind === 'exhausted') {
-      const result = terminalResult(run, verification, 'failed', outcome.summary, 'exhausted', started);
+    // 통과시킨 뒤 내용이 바뀌어(StagedMismatch) 다시 돌려보낸다. 게이트 밖 사유 한 번을 세었으니 상한은 합쳐서 본다
+    const again = decideGateOutcome({
+      path: 'gate',
+      outcome: outcome.kind,
+      // 저장 중이라 취소를 받지 않았고, 턴 상한은 게이트 앞에서 이미 정했다(옛 코드와 같다)
+      cancelled: false,
+      maxTurnsLimit: false,
+      violation: false,
+      unsettledAttempts: state.unsettledAttempts,
+      gateAttempts: gate.attempts,
+      maxAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
+    });
+    if (again.kind === 'retry') return await retryOrClose(session, run, outcome.kind === 'retry' ? outcome.feedback : '[b-studio 검증 게이트] 검증을 통과하지 못했습니다.');
+    if (again.kind === 'exhaust') {
+      const summary = unsettledSummaries.get(outcome) ?? attemptsExhaustedSummary(gate.attempts, state.unsettledAttempts, outcome.kind === 'retry' ? outcome.feedback : '');
+      const result = terminalResult(run, verification, 'failed', summary, 'exhausted', started);
       onEvent({ type: 'failed', result });
-      const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: outcome.summary, platformFailure: gate.platformFailure });
-      return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+      return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: summary, platformFailure: gate.platformFailure }));
     }
-    return {};
+    return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 검증 결과의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
   } catch (error) {
     if (session.stop.signal.aborted) {
       await settleTerminalRun(session, run, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
       return {};
+    }
+    // 체크포인트를 남긴 뒤(또는 남기는 도중 커밋이 끝난 뒤)에 던졌으면 그 체크포인트는 이미 검증을 지난 내용이다. 낡은 기준으로 되돌리지 않고
+    // 알리고 실행만 닫는다(S14). 남았는지는 Git으로 본다 — 저장이 커밋한 뒤 던지면 화면의 체크포인트 목록이 아직 낡았다
+    const landed = await landedCheckpoint(session, run.id, state.saveHead);
+    if (landed) {
+      console.error('[b-studio] 체크포인트를 남긴 뒤 단계가 실패했습니다', error);
+      const summary = `검증을 통과해 체크포인트 ${landed.shortSha}를 남겼지만 그 뒤 단계에서 오류가 나 실행을 실패로 닫습니다. 체크포인트와 작업 복사본은 되돌리지 않았습니다: ${describe(error)}`;
+      emit(session, { type: 'notice', text: `[b-studio] ${summary}`, at: new Date().toISOString() });
+      await settleTerminalRun(session, run, { status: 'failed', summary });
+      return closeMessage(summary);
     }
     if (run.cancel.signal.aborted) {
       const summary = await abandonTerminalRun(session, run, { status: 'cancelled' });
@@ -8915,6 +9116,34 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
   } finally {
     state.checking = false;
+    if (session.terminalSaving === run) session.terminalSaving = undefined;
+  }
+}
+
+/** 게이트 쪽 횟수와 게이트 밖 사유의 횟수를 합쳐 상한에 닿았을 때 쓰는 글(S12) */
+function attemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: number, feedback: string): string {
+  const base = `검증 재시도 상한(${TERMINAL_MAX_VERIFY_ATTEMPTS}번)에 닿았습니다(게이트 ${gateAttempts}번, 게이트 밖 사유 ${unsettledAttempts}번)`;
+  return feedback ? `${base}: ${clipText(feedback, 800)}` : base;
+}
+
+/**
+ * 통과한 턴 끝이 저장하려던 체크포인트가 Git에 이미 남았는지 본다(S14). `saveHead`는 저장 직전의 HEAD다(저장이 일어나지 않은 경로에서는 없다).
+ * 지금 HEAD가 그 위에 쌓인 것이면 남았다고 보고 화면의 체크포인트 목록을 Git에 맞춘다(저장이 커밋한 뒤 목록을 고치기 전에 던졌을 수 있다).
+ * Git을 읽지 못하면 모르는 것이다: 남았다고 보지 않고 지금까지처럼 닫는다(아무것도 남지 않았다는 판단을 이 함수가 내리지 않는다)
+ */
+async function landedCheckpoint(session: Session, runId: string, saveHead: string | undefined): Promise<Checkpoint | undefined> {
+  if (saveHead === undefined) return undefined;
+  try {
+    const [latest] = await session.checkpoints.list(2);
+    if (!latest || latest.sha === saveHead || !(await session.checkpoints.isAncestorOf(saveHead, latest.sha))) return undefined;
+    if (session.snapshot.checkpoints[0]?.sha !== latest.sha) {
+      session.snapshot.checkpoints = [latest, ...session.snapshot.checkpoints];
+      await rememberGit(session, latest.sha);
+      emit(session, { type: 'checkpoint', runId, checkpoint: latest });
+    }
+    return latest;
+  } catch {
+    return undefined;
   }
 }
 
