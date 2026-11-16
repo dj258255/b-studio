@@ -277,7 +277,7 @@ import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
-import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts } from './session-terminal-prompt';
+import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
 import {
   decideAfterCheckpoint,
   decideGateOutcome,
@@ -288,6 +288,7 @@ import {
   type TurnEndFacts,
   type UnchangedCheck,
 } from './session-terminal-turn-end';
+import { decideSilence, decideStall, decideUsage, EARLY_USAGE_MS, LATE_USAGE_MS, stallIntervalMs } from './session-terminal-usage';
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, violationRoute, type CloseActions } from './session-terminal-close';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
@@ -318,7 +319,7 @@ import { walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { spendStore } from './spend-state';
-import { chargeUserUsage, judgeLimits, judgeRunLimits, newLedger, userLimitSetting, type RunLedger } from './session-limits';
+import { chargeUserUsage, judgeLimits, judgeRunLimits, newLedger, retryUserUsage, userLimitSetting, type RunLedger } from './session-limits';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
 import {
@@ -527,6 +528,11 @@ interface Session {
    * 별개로 둔다 — 귀속은 붙인 것만 기억하고, 이쪽은 받은 모든 요청 번호를 기억한다
    */
   countedUsageIds?: Set<string>;
+  /**
+   * 사람 몫에 쓰지 못한 터미널 사용량(ADR-213, U1). 원장(실행)별로 모은다 — 그 몫은 이미 그 원장의 누적에 들어 있으므로 다시 쓸 때 누적은 늘리지 않는다.
+   * 다음 터미널 사용량이 올 때 먼저 다시 쓴다. 기억에만 둔다(studio를 다시 띄우면 잃는다)
+   */
+  ownerUnsaved?: Map<RunLedger | undefined, AgentUsage>;
   /** 터미널 CLI의 메인·서브에이전트별 사용량과 상태(#843). 화면용이고 기억에만 둔다 */
   agentLedger?: TerminalAgentLedger;
   /** 터미널 CLI가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 기억에만 둔다(화면용) */
@@ -2906,8 +2912,27 @@ function chargeTerminalOwnerUsage(session: Session, usage: AgentUsage): void {
   const by = session.snapshot.owner;
   const setting = userLimitSetting(by);
   if (!by || !setting) return;
+  // 앞서 쓰지 못한 몫이 있으면 먼저 다시 쓴다(ADR-213, U1)
+  flushOwnerUnsaved(session);
   const open = openTerminalRun(session);
-  chargeUserUsage(by, usage, setting.window, open && open.by === by ? (open.userLedger ??= newLedger()) : undefined);
+  const ledger = open && open.by === by ? (open.userLedger ??= newLedger()) : undefined;
+  if (chargeUserUsage(by, usage, setting.window, ledger)) return;
+  // 쓰지 못했다. 한도 판정은 그 원장의 누적이 센다(ADR-209). 파일에는 없으므로 기억해 두었다가 다음에 다시 쓴다 — 이 요청을 다시 받지 않아도 사람 몫에서 빠지지 않게
+  const unsaved = (session.ownerUnsaved ??= new Map());
+  unsaved.set(ledger, addTokens(unsaved.get(ledger), usage));
+}
+
+/** 앞서 쓰지 못한 터미널 사용량을 사람 몫에 다시 쓴다. 쓰지 못하면 그대로 둔다(다음에 다시). 사람 한도를 정하지 않았으면 쓸 곳이 없으니 기억을 비운다 */
+function flushOwnerUnsaved(session: Session): void {
+  const unsaved = session.ownerUnsaved;
+  if (!unsaved || unsaved.size === 0) return;
+  const by = session.snapshot.owner;
+  const setting = userLimitSetting(by);
+  if (!by || !setting) {
+    unsaved.clear();
+    return;
+  }
+  for (const [ledger, usage] of [...unsaved]) if (retryUserUsage(by, usage, setting.window, ledger)) unsaved.delete(ledger);
 }
 
 /** 한도로 멈췄을 때 어느 한도인지 알린다. 사람 한도는 새 세션을 만들어도 풀리지 않으므로 구분해서 말한다 */
@@ -7482,11 +7507,9 @@ const TERMINAL_FALLBACK_REQUEST = '터미널에서 이어진 작업';
 /** 기록에 남기는 요청 글의 상한. 붙여넣은 긴 글이 세션 기록을 채우지 않게 한다 */
 const TERMINAL_REQUEST_LIMIT = 8000;
 /**
- * 실행이 닫힌 뒤 이 시간 안에 도착한 텔레메트리는 그 실행의 몫으로 본다(#726).
- * CLI의 로그 내보내기 기본 주기가 1초라 짧은 실행의 마지막 묶음이 닫힌 뒤에 올 수 있다. 너무 길게 두면
- * 실행 밖에서 쓴 것(사람이 CLI에서 대화만 한 것)이 앞 실행에 잘못 붙는다
+ * 실행이 닫힌 뒤 늦게 도착한 텔레메트리를 그 실행의 몫으로 보는 시간(코어의 `LATE_USAGE_MS`, #726)과, 도구 호출이 연 실행에 열린 시각 앞의 요청을
+ * 붙이는 시간(`EARLY_USAGE_MS`, ADR-213)은 `session-terminal-usage.ts`가 코어에서 읽는다
  */
-const TERMINAL_LATE_USAGE_MS = 5_000;
 /** 같은 requestId를 두 번 세지 않게 기억하는 개수. 세션마다 이만큼만 최근 것을 기억한다 */
 const TERMINAL_SEEN_USAGE_LIMIT = 2_000;
 /** 터미널 실행의 정체로 보는 기본 시간(초). 열린 실행에 이만큼 훅도 텔레메트리도 없으면 한 번 알린다(#B5) */
@@ -7557,6 +7580,14 @@ interface TerminalRunState {
   lastActivityMs: number;
   /** 이 실행에서 정체 경고를 이미 한 번 보냈는가. 움직임이 다시 생기면 거짓으로 돌려 다음 정체에 다시 알린다 */
   stallNotified: boolean;
+  /** 이 실행을 요청 훅이 아니라 도구 호출이 열었다. 그 도구를 정한 모델 요청은 열린 시각보다 앞서 끝났을 수 있다(ADR-213, U5) */
+  openedByTool: boolean;
+  /** 이 실행이 열린 시각(Date.now()). 사용량 소식이 끊겼는지 보는 기준이다 */
+  openedMs: number;
+  /** 이 실행이 열린 뒤 사용량 소식(텔레메트리)을 한 번이라도 받았다(ADR-213, U2) */
+  telemetrySeen: boolean;
+  /** 이 실행이 열린 뒤 온 쓰기 도구 훅(MCP 도구 포함)의 수. 사용량 소식 없이 이어지면 한도를 볼 수 없다 */
+  writeHooks: number;
   /**
    * 한도에 닿아 그 뒤의 쓰기 도구를 거절하는 중이다(#B5). max_turns는 턴 상한에 닿은 것(실행은 열린 채 두고
    * 턴이 끝나기를 기다린다), budget은 세션·사람 토큰 한도에 닿아 실행을 멈추고 되돌리는 중인 것이다
@@ -7755,7 +7786,8 @@ function terminalStallMs(): number {
 /** 정체 감시 타이머를 세션마다 하나 띄운다. 이미 돌면 그대로 둔다 — 실행이 바뀌어도 하나만 돈다 */
 function startTerminalStallWatch(session: Session, stallMs: number): void {
   if (session.terminalStallTimer) return;
-  session.terminalStallTimer = setInterval(() => checkTerminalStall(session, stallMs), stallMs);
+  // 주기는 정체 시간의 1/4(최소 1초)다. 정체 시간과 같으면 알림이 최대 두 배 늦는다(ADR-213, U6)
+  session.terminalStallTimer = setInterval(() => checkTerminalStall(session, stallMs), stallIntervalMs(stallMs));
   // 이 타이머가 프로세스를 붙잡지 않게 한다(세션이 멈추면 지운다)
   session.terminalStallTimer.unref?.();
 }
@@ -7783,12 +7815,13 @@ function terminalStallMessage(stallMs: number): string {
  */
 function checkTerminalStall(session: Session, stallMs: number): void {
   const run = openTerminalRun(session);
-  if (!run) {
+  // 알릴지는 코어가 정한다(ADR-213). 알리기만 하는 판정이다
+  const step = decideStall({ openRun: run !== undefined, notified: run?.terminal.stallNotified ?? false, idleMs: run ? Date.now() - run.terminal.lastActivityMs : 0, stallMs });
+  if (step === 'stop') {
     stopTerminalStallWatch(session);
     return;
   }
-  if (run.terminal.stallNotified) return;
-  if (Date.now() - run.terminal.lastActivityMs < stallMs) return;
+  if (step === 'nothing' || !run) return;
   run.terminal.stallNotified = true;
   const message = terminalStallMessage(stallMs);
   emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
@@ -7893,6 +7926,11 @@ async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   // 모델 요청이 왔다는 것은 CLI가 다시 움직였다는 뜻이다. 사람을 기다림 표시를 푼다(B7). 모아서 늦게 오므로 걸린 직후에는 풀지 않는다(#955).
   // 도구 훅이 없는 긴 생각도 CLI의 소식이다 — 화면의 마지막 소식 시각을 옮긴다(#955)
   if (requests.length > 0) {
+    // 사용량 소식이 이 실행에 왔다(ADR-213, U2). 한 번이라도 오면 사용량이 흐르는 세션이다
+    const receiving = openTerminalRun(session);
+    if (receiving) receiving.terminal.telemetrySeen = true;
+    // 앞서 사람 몫에 쓰지 못한 것이 있으면, 이번 묶음이 이미 센 것뿐이어도 다시 쓴다(ADR-213, U1)
+    flushOwnerUnsaved(session);
     clearSettledTerminalAttention(session);
     noteActivityPing((session.terminalActivity ??= newTerminalActivity()), Date.now());
   }
@@ -7956,17 +7994,6 @@ export function sessionCapabilities(id: string): AgentCapabilities | undefined {
   });
 }
 
-/** 한도 계산용 중복 방지. 실행에 붙지 않은 것도 세므로 귀속용(seenUsageIds)과 별개의 기억을 쓴다. 셌으면 참 */
-function countTerminalUsageOnce(session: Session, requestId: string | undefined): boolean {
-  // 요청 번호가 없으면 중복을 가릴 수 없다. 그대로 센다
-  if (requestId === undefined) return true;
-  const counted = (session.countedUsageIds ??= new Set());
-  if (counted.has(requestId)) return false;
-  counted.add(requestId);
-  if (counted.size > TERMINAL_SEEN_USAGE_LIMIT) counted.delete(counted.values().next().value!);
-  return true;
-}
-
 /**
  * 꺼낸 사용량 하나를 처리한다(#B5 수정 2차). 한도 계산과 실행 귀속을 나눈다:
  *  - 한도 계산(세션 합계·사람 몫): 실행에 붙든 안 붙든, 받은 사용량을 받은 순서대로 더한다. 세션 합계는 언제나
@@ -7978,10 +8005,32 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
   const open = openTerminalRun(session);
   const usage: AgentUsage = { inputTokens: request.inputTokens, outputTokens: request.outputTokens, cacheReadTokens: request.cacheReadTokens, cacheWriteTokens: request.cacheWriteTokens };
 
+  // 요청 하나를 어떻게 처리할지는 코어가 정한다(ADR-213): 셀지, 어느 실행에 붙일지, 턴을 셀지, 한도를 볼지. 덜 세는 쪽이 여는 쪽이라 모르면 센다
+  const id = request.requestId;
+  const hasId = id !== undefined;
+  const last = session.terminalRun;
+  const startedMs = open ? Date.parse(open.startedAt) : 0;
+  const step = decideUsage({
+    hasRequestId: hasId,
+    counted: hasId && (session.countedUsageIds?.has(id) ?? false),
+    attached: hasId && (session.seenUsageIds?.has(id) ?? false),
+    openRun: open !== undefined,
+    inOpenWindow: open !== undefined && request.at >= startedMs,
+    inEarlySlack: open !== undefined && request.at < startedMs && request.at >= startedMs - EARLY_USAGE_MS,
+    openedByTool: open?.terminal.openedByTool === true,
+    inClosedRun: last !== undefined && request.at >= last.startedMs && request.at <= last.endedMs,
+    inClosedLate: last !== undefined && request.at > last.endedMs && request.at <= last.endedMs + LATE_USAGE_MS,
+  });
+
   // 1) 한도 계산: 붙든 안 붙든 받은 사용량을 모두 세션 합계에 더한다(더하기로만).
   //    같은 요청 번호를 다시 받으면 더하지 않는다(그때 sessionTokens는 undefined가 된다)
   let sessionTokens: AgentUsage | undefined;
-  if (countTerminalUsageOnce(session, request.requestId)) {
+  if (step.count) {
+    if (hasId) {
+      const counted = (session.countedUsageIds ??= new Set());
+      counted.add(id);
+      if (counted.size > TERMINAL_SEEN_USAGE_LIMIT) counted.delete(counted.values().next().value!);
+    }
     sessionTokens = addTokens(session.snapshot.tokens, usage);
     session.snapshot.tokens = sessionTokens;
     // 에이전트 내역(#843)에도 세션 합계와 같은 요청만 넣는다. 그래서 내역의 합이 받은 터미널 사용량과 맞는다
@@ -7990,24 +8039,14 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
     spendStore().note({ at: request.at, backend: sessionBackend(session.snapshot), model: request.model, usage, ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}) });
   }
 
-  // 2) 실행 귀속: 열린 실행, 또는 막 닫힌 실행(+5초) 창에 드는 것만 붙인다
-  let runId: string | undefined;
-  if (open && request.at >= Date.parse(open.startedAt)) {
-    runId = open.id;
-  } else {
-    const last = session.terminalRun;
-    // 가장 최근에 닫힌 실행이고 그 시작과 끝(+5초) 사이에 든 것만 붙인다
-    if (last && request.at >= last.startedMs && request.at <= last.endedMs + TERMINAL_LATE_USAGE_MS) runId = last.runId;
-  }
-  // 실행에 붙일지 정한 뒤에 기억한다. 실행 밖으로 버린 것은 기억하지 않아야 한다 —
+  // 2) 실행 귀속: 코어가 정한 실행(열린 실행, 또는 막 닫힌 실행)에 붙인다
+  const runId = step.target === 'open' ? open?.id : step.target === 'closed' ? last?.runId : undefined;
+  // 붙이기로 한 것만 기억한다. 실행 밖으로 버린 것은 기억하지 않아야 한다 —
   // 지금 기억해 두면 나중에 같은 번호가 맞는 실행 창 안에서 와도 중복으로 보고 놓친다
-  if (runId !== undefined && request.requestId !== undefined) {
+  if (runId !== undefined && hasId) {
     const seen = (session.seenUsageIds ??= new Set());
-    if (seen.has(request.requestId)) runId = undefined;
-    else {
-      seen.add(request.requestId);
-      if (seen.size > TERMINAL_SEEN_USAGE_LIMIT) seen.delete(seen.values().next().value!);
-    }
+    seen.add(id);
+    if (seen.size > TERMINAL_SEEN_USAGE_LIMIT) seen.delete(seen.values().next().value!);
   }
   if (runId !== undefined) {
     emit(session, {
@@ -8018,27 +8057,29 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
       ...(request.costUsd !== undefined ? { costUsd: request.costUsd } : {}),
       ...(request.durationMs !== undefined ? { durationMs: request.durationMs } : {}),
     });
-    // 열린 실행에 붙는 것은 그 실행의 합계에도 더해, 닫힐 때 run_finished.usage·metrics에 실리게 한다
-    if (open && runId === open.id) {
-      const totals = (open.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0 });
+    // 알림이 닫기를 건드렸을 수 있으니 열린 실행을 다시 읽는다. 열린 실행에 붙는 것은 그 실행의 합계에도 더해, 닫힐 때 run_finished.usage·metrics에 실리게 한다
+    const stillOpenRun = openTerminalRun(session);
+    if (step.countTurn && stillOpenRun && runId === stillOpenRun.id) {
+      const totals = (stillOpenRun.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0 });
       totals.usage = addTokens(totals.usage, usage);
       totals.usageByModel[request.model] = addTokens(totals.usageByModel[request.model], usage);
       totals.modelCalls += 1;
       // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
-      open.terminal.modelCalls += 1;
-      noteTerminalActivity(session, open, { settled: true });
+      stillOpenRun.terminal.modelCalls += 1;
+      noteTerminalActivity(session, stillOpenRun, { settled: true });
     }
   }
 
   // 3) 같은 요청 번호를 다시 받았으면(이미 셌으면) 사람 몫·합계 알림·한도 판정을 건너뛴다
   if (sessionTokens === undefined) return;
-  // 사람 몫을 먼저 저장한 뒤 한도를 판정한다(#B5 수정 1·2차). 저장은 이 스레드에서 끝나고, 못 쓴 양은 이 실행의 원장이 센다(ADR-209). 붙지 않은 것은 세션 주인 몫이다
+  // 사람 몫을 먼저 저장한 뒤 한도를 판정한다(#B5 수정 1·2차). 저장은 이 스레드에서 끝난다. 못 쓴 양은 이 실행의 원장이 세고(ADR-209) 다음에 다시 쓴다(ADR-213). 붙지 않은 것은 세션 주인 몫이다
   chargeTerminalOwnerUsage(session, usage);
   // 화면이 세션 합계를 맞추도록 알린다. 붙은 실행이 있으면 그 실행 id로, 없으면 빈 id로(터미널 화면은 실행별 표시를 쓰지 않는다)
   emit(session, { type: 'tokens', runId: runId ?? '', usage, sessionTokens });
-  // 한도를 넘었으면 열린 실행이 있을 때 그 실행을 멈추고 되돌린다. 없으면 다음 요청 시작이 막히는 것으로 충분하다
+  // 한도를 넘었으면 열린 실행이 있을 때 그 실행을 멈추고 되돌린다. 없으면 다음 요청 시작이 막히는 것으로 충분하다.
+  // 사람 몫을 쓰는 사이와 알림 뒤에 실행이 닫혔을 수 있어 열린 실행을 다시 읽는다
   const stillOpen = openTerminalRun(session);
-  if (stillOpen) checkTerminalLimits(session, stillOpen);
+  if (step.checkLimits && stillOpen) checkTerminalLimits(session, stillOpen);
 }
 
 /** 터미널 실행의 합계를 run_finished.metrics에 실을 꼴로 만든다. 매 호출은 모델 이름별로만 세고 툴 시간은 재지 않는다 */
@@ -8155,6 +8196,10 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt 
       modelCalls: 0,
       lastActivityMs: Date.now(),
       stallNotified: false,
+      openedByTool: !fromPrompt,
+      openedMs: Date.now(),
+      telemetrySeen: false,
+      writeHooks: 0,
     };
     // 지문을 기다리는 사이 세션이 멈췄으면(멈추기가 점유를 비웠다) 열지 않는다
     if (!session.life.claims.holds(ticket)) return { busy: '[b-studio] 세션이 중지되어 요청을 시작하지 않았습니다.' };
@@ -8571,6 +8616,12 @@ function terminalPreToolFacts(
     texts.max_turns = limited;
     texts.run_budget = limited;
   }
+  // 한도에 닿지 않았어도 사용량 소식이 끊겼으면 한도를 볼 수 없다: 막는다(ADR-213, U2). 소식이 오면 풀린다
+  let limit: TerminalLimit = run.terminal.limitReason ?? 'none';
+  if (limit === 'none' && terminalUsageSilent(session, run)) {
+    limit = 'unknown';
+    texts.unknown = TERMINAL_USAGE_SILENT_DENY;
+  }
   if (options.scope !== undefined) texts.out_of_scope = options.scope;
   return {
     facts: {
@@ -8578,7 +8629,7 @@ function terminalPreToolFacts(
       budget: budget !== undefined,
       gotRun: true,
       readOnly: run.terminal.readOnly,
-      limit: run.terminal.limitReason ?? 'none',
+      limit,
       outOfScope: options.scope !== undefined,
       // 닫기를 시작했거나 중단 신호가 올랐다(기다리는 사이 위반·취소·CLI 종료·세션 멈춤)
       closed: terminalRunClosed(session.life, run.ticket) || (options.signal?.aborted ?? false) || run.cancel.signal.aborted,
@@ -8592,6 +8643,20 @@ function terminalPreToolDenyText(kind: PreToolDeny, texts: Partial<Record<PreToo
   if (kind === 'read_only') return TERMINAL_READ_ONLY_DENY;
   if (kind === 'closed') return TERMINAL_RUN_CLOSED_DENY;
   return texts[kind] ?? TERMINAL_UNDECIDED_TOOL_DENY;
+}
+
+/** 사용량 소식이 끊겨 한도를 볼 수 없어 막는 글(ADR-213, U2) */
+const TERMINAL_USAGE_SILENT_DENY =
+  '[b-studio] 터미널의 사용량(텔레메트리)이 오지 않아 턴·토큰 한도를 확인할 수 없어 파일을 바꾸거나 명령을 돌리는 도구를 막았습니다. CLI의 텔레메트리 설정을 확인하세요. 사용량이 다시 오면 풀립니다.';
+
+/**
+ * 이 실행의 사용량 소식이 끊겼는가(ADR-213, U2). 한도는 사용량이 올 때만 보므로 소식 없이 쓰기만 이어지면 턴 상한도 토큰 한도도 걸리지 않는다.
+ * 판정은 코어가 한다. Codex는 소식을 보낸다고 알려져 있지 않아(지원 범위 밖) 건드리지 않는다
+ */
+function terminalUsageSilent(session: Session, run: ActiveRun & { terminal: TerminalRunState }): boolean {
+  return (
+    decideSilence({ cliSendsUsage: terminalCliKind(session) === 'claude', telemetrySeen: run.terminal.telemetrySeen, writeHooks: run.terminal.writeHooks, elapsedMs: Date.now() - run.terminal.openedMs }) === 'silent'
+  );
 }
 
 /** 쓰기 직전 훅이 이 도구를 쓸 수 있는지 판정하지 못해 막는 글 */
@@ -8614,6 +8679,8 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const early = decidePreTool({ readTool, budget: budgetText !== undefined, gotRun: true, readOnly: false, limit: 'none', outOfScope: false, closed: false });
   if (!early.allow) return { deny: terminalPreToolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
   const run = await terminalRunForWork(session);
+  // 쓰기 훅을 센다(ADR-213, U2). 사용량 소식 없이 이어지는지 보는 값이다
+  if (!('busy' in run)) run.terminal.writeHooks += 1;
   // 앞의 판정(샌드박스를 켤지 말지): 실행을 얻었는가·읽기만·실행 한도·카드 범위를 그 순간의 사실로 본다. 이 판정의 허용은 최종이 아니다
   const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalScopeDeny(session, tool, input.tool_input) });
   const first = decidePreTool(before.facts);
@@ -8668,7 +8735,10 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   const early = decidePreTool({ readTool: false, budget: budgetText !== undefined, gotRun: true, readOnly: false, limit: 'none', outOfScope: false, closed: false });
   if (!early.allow) return { ok: false, content: terminalPreToolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
   const run = await terminalRunForWork(session);
-  if (!('busy' in run)) noteTerminalActivity(session, run);
+  if (!('busy' in run)) {
+    noteTerminalActivity(session, run);
+    run.terminal.writeHooks += 1;
+  }
   // 앞의 판정(샌드박스를 켤지 말지). 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행·한도에 닿은 실행에서는 돌리지 않는다(#B5). 이 판정의 허용은 최종이 아니다
   const before = terminalPreToolFacts(session, run, { readTool: false, scope: undefined });
   const first = decidePreTool(before.facts);

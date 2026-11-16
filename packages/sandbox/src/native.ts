@@ -332,6 +332,16 @@ interface NativeGuard {
   terminalDecideGateOutcome(facts: NativeTerminalGateFacts): NativeTerminalGateStep;
   /** 체크포인트를 남긴 직후 판정(ADR-212): `settle`·`fail_violation` */
   terminalDecideAfterCheckpoint(violation: boolean): string;
+  /** 터미널의 사용량 귀속 판정(ADR-213): 셀지, 붙일 실행, 턴을 셀지, 한도를 볼지 */
+  terminalDecideUsage(facts: NativeTerminalUsageFacts): NativeTerminalUsageStep;
+  terminalEarlyUsageMs(): number;
+  terminalLateUsageMs(): number;
+  /** 터미널의 정체 감시 한 회차(ADR-213): `stop`·`nothing`·`notify` */
+  terminalDecideStall(facts: NativeTerminalStallFacts): string;
+  /** 정체 감시 주기(ms) */
+  terminalStallIntervalMs(stallMs: number): number;
+  /** 사용량 소식이 끊겼는가(ADR-213): `fine`·`silent` */
+  terminalDecideSilence(facts: NativeTerminalSilenceFacts): string;
   runOutcomeDecideNormal(facts: NativeRunNormalFacts, pending: boolean): NativeRunOutcome;
   runOutcomeNeedsProbeNormal(facts: NativeRunNormalFacts): boolean;
   runOutcomeDecideException(facts: NativeRunExceptionFacts, pending: boolean): NativeRunOutcome;
@@ -1295,6 +1305,40 @@ export interface NativeTerminalPreToolFacts {
   limit: string;
   outOfScope: boolean;
   closed: boolean;
+}
+
+export interface NativeTerminalUsageFacts {
+  hasRequestId: boolean;
+  counted: boolean;
+  attached: boolean;
+  openRun: boolean;
+  inOpenWindow: boolean;
+  inEarlySlack: boolean;
+  openedByTool: boolean;
+  inClosedRun: boolean;
+  inClosedLate: boolean;
+}
+
+export interface NativeTerminalUsageStep {
+  count: boolean;
+  /** `none`·`open`·`closed` */
+  target: string;
+  countTurn: boolean;
+  checkLimits: boolean;
+}
+
+export interface NativeTerminalStallFacts {
+  openRun: boolean;
+  notified: boolean;
+  idleMs: number;
+  stallMs: number;
+}
+
+export interface NativeTerminalSilenceFacts {
+  cliSendsUsage: boolean;
+  telemetrySeen: boolean;
+  writeHooks: number;
+  elapsedMs: number;
 }
 
 export interface NativeTerminalTurnEndFacts {

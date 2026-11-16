@@ -20,6 +20,7 @@
 
 pub mod prompt;
 pub mod turn_end;
+pub mod usage;
 
 use crate::claim::{Holder, Phase, Slot, Ticket};
 use crate::outcome::{Action, FinishedStatus};
