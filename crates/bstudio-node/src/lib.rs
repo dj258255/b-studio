@@ -6763,6 +6763,165 @@ impl SessionState {
     }
 }
 
+// ── 세션 터미널 실행의 닫기·열린 실행·CLI 종료·위반 갈 곳(ADR-210, 4f B4a). 판정은 bstudio-session의 `terminal`이 한다. 표는 `beginTerminalRun`이 준 `token`이다 ──
+use bstudio_session::terminal as session_terminal;
+
+/// 닫기를 시작할 때의 입력. `kind`가 `settle`이면 `status`만 본다(`done`·`cancelled` 등 끝 상태). `abandon`이면 나머지 사실을 모두 본다
+#[napi(object)]
+pub struct TerminalCloseInputJs {
+    /// `abandon` 또는 `settle`
+    pub kind: String,
+    /// `abandon`: `failed`·`cancelled`·`error`. `settle`: `done`·`failed`·`awaiting_input`·`error`·`cancelled`
+    pub status: String,
+    pub stopping: bool,
+    pub platform_failure: bool,
+    pub local: bool,
+    pub ready: bool,
+    pub booted: bool,
+    pub has_reason: bool,
+}
+
+#[napi(object)]
+pub struct TerminalCloseDecisionJs {
+    /// `none`·`revert`·`revert_host_only`·`notice_platform`·`notice_kept`
+    pub action: String,
+    pub status: String,
+    /// `stopped`·`platform_kept`·`kept`·`reverted`·`cancelled_report`·`settled`
+    pub text: String,
+}
+
+fn finished_status(text: &str) -> Option<session_outcome::FinishedStatus> {
+    use session_outcome::FinishedStatus as F;
+    Some(match text {
+        "done" => F::Done,
+        "failed" => F::Failed,
+        "awaiting_input" => F::AwaitingInput,
+        "error" => F::Error,
+        "cancelled" => F::Cancelled,
+        _ => return None,
+    })
+}
+
+#[napi]
+impl SessionState {
+    /// 지금 열린 터미널 실행인가(옛 `session.run && !settled && !cancel.aborted`)
+    #[napi]
+    pub fn terminal_run_open(&self, token: f64) -> bool {
+        self.inner.terminal_run_open(token as u64)
+    }
+
+    /// 닫기를 시작한 실행인가(옛 `settled`). 모르는 표도 닫힌 것이다
+    #[napi]
+    pub fn terminal_run_closed(&self, token: f64) -> bool {
+        self.inner.terminal_run_closed(token as u64)
+    }
+
+    /// 닫기를 시작한다. 처음 부른 호출에만 할 일을 돌려준다(이미 닫았거나 모르는 표면 null). 알 수 없는 끝 상태는 던진다
+    #[napi]
+    pub fn terminal_close_begin(&self, token: f64, input: TerminalCloseInputJs) -> Result<Option<TerminalCloseDecisionJs>> {
+        let kind = match input.kind.as_str() {
+            "abandon" => {
+                let status = session_terminal::EndStatus::parse(&input.status).ok_or_else(|| Error::from_reason(format!("알 수 없는 끝 상태입니다: {}", input.status)))?;
+                session_terminal::CloseKind::Abandon(session_terminal::CloseFacts {
+                    status,
+                    stopping: input.stopping,
+                    platform_failure: input.platform_failure,
+                    local: input.local,
+                    ready: input.ready,
+                    booted: input.booted,
+                    has_reason: input.has_reason,
+                })
+            }
+            "settle" => session_terminal::CloseKind::Settle(finished_status(&input.status).ok_or_else(|| Error::from_reason(format!("알 수 없는 끝 상태입니다: {}", input.status)))?),
+            other => return Err(Error::from_reason(format!("알 수 없는 닫기 종류입니다: {other}"))),
+        };
+        Ok(self.inner.begin_terminal_close(token as u64, kind).map(|decision| TerminalCloseDecisionJs {
+            action: decision.action.as_str().to_owned(),
+            status: decision.status.as_str().to_owned(),
+            text: decision.text.as_str().to_owned(),
+        }))
+    }
+
+    /// `terminalCloseBegin`이 값을 준 호출이 곧바로 부른다. 단계마다 `hook({ step, arg })`를 불러 부수 효과를 TS가 하고, 순서와 표로 점유 풀기는 코어가 한다.
+    /// hook은 성공하면 null, 실패하면 이유를 돌려준다(던지지 않는다. 실패해도 코어는 끝까지 가서 점유를 푼다)
+    #[napi]
+    pub fn terminal_close_run(&self, env: Env, token: f64, hook: ThreadsafeFunction<RunCallJs, Promise<Option<String>>, RunCallJs, Status, false>) -> Result<AsyncBlock<()>> {
+        let inner = self.inner.clone();
+        let hook = Arc::new(hook);
+        AsyncBlockBuilder::new(async move {
+            inner
+                .run_terminal_close(token as u64, |name, arg| {
+                    let hook = hook.clone();
+                    async move {
+                        let call = RunCallJs { step: name.to_owned(), arg: arg.to_owned() };
+                        if let Ok(pending) = hook.call_async(call).await {
+                            let _ = pending.await;
+                        }
+                    }
+                })
+                .await;
+            Ok(())
+        })
+        .build(&env)
+    }
+
+    /// CLI가 끝났다. `nothing`·`defer`(검사 중이라 미룸, 미뤘다는 표시를 남긴다)·`failed`·`cancelled`(그 끝 상태로 닫는다)
+    #[napi]
+    pub fn terminal_cli_ended(&self, token: f64, checking: bool, has_feedback: bool) -> String {
+        match self.inner.terminal_cli_ended(token as u64, checking, has_feedback) {
+            session_terminal::CliEnded::Nothing => "nothing",
+            session_terminal::CliEnded::Defer => "defer",
+            session_terminal::CliEnded::Close(session_terminal::EndStatus::Failed) => "failed",
+            session_terminal::CliEnded::Close(session_terminal::EndStatus::Cancelled) => "cancelled",
+            session_terminal::CliEnded::Close(session_terminal::EndStatus::Error) => "error",
+        }
+        .to_owned()
+    }
+
+    /// 검사가 재시도로 끝났다. `feedback`(에이전트에게 돌려준다) 또는 `close_failed`(받을 CLI가 없어 실패로 닫는다)
+    #[napi]
+    pub fn terminal_retry(&self, token: f64) -> String {
+        match self.inner.terminal_retry(token as u64) {
+            session_terminal::Retry::Feedback => "feedback",
+            session_terminal::Retry::CloseFailed => "close_failed",
+        }
+        .to_owned()
+    }
+
+    /// 감시가 위반을 찾았다. `ignore`·`close_open_run`·`defer`
+    #[napi]
+    pub fn terminal_violation_route(&self, token: f64, alive: bool) -> String {
+        match self.inner.terminal_violation_route(token as u64, alive) {
+            session_terminal::ViolationRoute::Ignore => "ignore",
+            session_terminal::ViolationRoute::CloseOpenRun => "close_open_run",
+            session_terminal::ViolationRoute::Defer => "defer",
+        }
+        .to_owned()
+    }
+}
+
+/// 닫기 판정(시험·진단용. 실행은 `terminalCloseBegin`이 코어 안에서 같은 판정을 쓴다)
+#[napi]
+pub fn terminal_decide_close(input: TerminalCloseInputJs) -> Result<TerminalCloseDecisionJs> {
+    let status = session_terminal::EndStatus::parse(&input.status).ok_or_else(|| Error::from_reason(format!("알 수 없는 끝 상태입니다: {}", input.status)))?;
+    let decision = session_terminal::decide_close(&session_terminal::CloseFacts {
+        status,
+        stopping: input.stopping,
+        platform_failure: input.platform_failure,
+        local: input.local,
+        ready: input.ready,
+        booted: input.booted,
+        has_reason: input.has_reason,
+    });
+    Ok(TerminalCloseDecisionJs { action: decision.action.as_str().to_owned(), status: decision.status.as_str().to_owned(), text: decision.text.as_str().to_owned() })
+}
+
+/// 닫기의 단계 이름(순서대로)
+#[napi]
+pub fn terminal_close_steps() -> Vec<String> {
+    session_terminal::CLOSE_STEPS.iter().map(|name| (*name).to_owned()).collect()
+}
+
 /// 기록의 history로 세션 파일 한 번 쓰기(줄·예약 없이). `full_history`가 거짓이면 저장용 history(`trimHistory`), 참이면 기록 전체다.
 /// 바이트는 이 호출 안에서 만들고(같은 순간의 기록) 파일 쓰기는 JS 스레드 밖에서 한다. `head`·`tail`이 객체 글자가 아니면 던진다
 #[napi]

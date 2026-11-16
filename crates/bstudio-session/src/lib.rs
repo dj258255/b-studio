@@ -30,6 +30,7 @@ pub mod registry;
 mod scan;
 pub mod status;
 pub mod store;
+pub mod terminal;
 pub mod usage;
 
 pub const HISTORY_LIMIT: usize = 5_000;

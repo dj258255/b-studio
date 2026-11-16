@@ -316,6 +316,10 @@ interface NativeGuard {
   createSessionRun(input: NativeCreateRunInput, hook: (name: string) => Promise<string | null>): Promise<NativeCreateResult>;
   /** 요청 실행의 단계 이름(순서대로, ADR-208) */
   runOutcomeSteps(): string[];
+  /** 터미널 실행을 통과하지 못한 채 닫을 때의 판정(ADR-210). 시험·진단용: 실행은 `terminalCloseBegin`이 코어 안에서 같은 판정을 쓴다 */
+  terminalDecideClose(input: NativeTerminalCloseInput): NativeTerminalCloseDecision;
+  /** 닫기의 단계 이름(순서대로) */
+  terminalCloseSteps(): string[];
   runOutcomeDecideNormal(facts: NativeRunNormalFacts, pending: boolean): NativeRunOutcome;
   runOutcomeNeedsProbeNormal(facts: NativeRunNormalFacts): boolean;
   runOutcomeDecideException(facts: NativeRunExceptionFacts, pending: boolean): NativeRunOutcome;
@@ -1144,6 +1148,22 @@ export interface NativeSessionState {
   beginExport(): NativeClaimResult;
   /** 요청 하나를 끝까지 돈다. 단계마다 `hook`을 부르고 순서·끝 결정·점유 단계 바꾸기와 풀기는 코어가 한다(ADR-208) */
   runRequest(ask: boolean, token: number, hook: (call: NativeRunCall) => Promise<NativeRunReply>): Promise<void>;
+
+  // ── 세션 터미널 실행의 닫기·열린 실행·CLI 종료·위반 갈 곳(ADR-210). 표는 `beginTerminalRun`이 준 `token`이다 ──
+  /** 지금 열린 터미널 실행인가(점유가 이 표이고 단계가 `진행`이며 닫기를 시작하지 않았다) */
+  terminalRunOpen(token: number): boolean;
+  /** 닫기를 시작한 실행인가. 모르는 표도 닫힌 것이다 */
+  terminalRunClosed(token: number): boolean;
+  /** 닫기를 시작한다. 처음 부른 호출에만 할 일을 돌려준다(이미 닫았거나 모르는 표면 null). 이 순간부터 열린 실행이 아니다 */
+  terminalCloseBegin(token: number, input: NativeTerminalCloseInput): NativeTerminalCloseDecision | null;
+  /** `terminalCloseBegin`이 값을 준 호출이 곧바로 부른다. 단계마다 `hook`이 불리고 hook은 성공하면 null, 실패하면 이유를 돌려준다. 순서와 점유 풀기는 코어가 한다 */
+  terminalCloseRun(token: number, hook: (call: NativeRunCall) => Promise<string | null>): Promise<void>;
+  /** CLI가 끝났다: `nothing`·`defer`(검사 중이라 미룸)·`failed`·`cancelled`·`error` */
+  terminalCliEnded(token: number, checking: boolean, hasFeedback: boolean): string;
+  /** 검사가 재시도로 끝났다: `feedback`·`close_failed` */
+  terminalRetry(token: number): string;
+  /** 감시가 위반을 찾았다: `ignore`·`close_open_run`·`defer` */
+  terminalViolationRoute(token: number, alive: boolean): string;
   releaseExport(token: number): boolean;
   readonly exporting: boolean;
   deleteBusy(): NativeLifecycleFail | null;
@@ -1215,6 +1235,24 @@ export interface NativeRunOutcome {
   action: string;
   status: string;
   summary: string;
+}
+
+/** 터미널 실행을 닫을 때의 입력(ADR-210). `kind`가 `settle`이면 `status`만 본다 */
+export interface NativeTerminalCloseInput {
+  kind: 'abandon' | 'settle';
+  status: string;
+  stopping: boolean;
+  platformFailure: boolean;
+  local: boolean;
+  ready: boolean;
+  booted: boolean;
+  hasReason: boolean;
+}
+
+export interface NativeTerminalCloseDecision {
+  action: string;
+  status: string;
+  text: string;
 }
 
 export interface NativeClaimResult {
