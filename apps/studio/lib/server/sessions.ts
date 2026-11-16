@@ -359,6 +359,8 @@ type Listener = (event: StudioEvent) => void;
 /** 처리 중인 에이전트 요청 */
 interface ActiveRun {
   id: string;
+  /** 수명 코어의 점유 표(ADR-207). 이 실행이 잡은 점유를 이 표로만 푼다 */
+  ticket: number;
   /** 요청을 시작한 시각(ISO). 관제 화면이 진행 시간을 잰다 */
   startedAt: string;
   /** 사용자가 요청을 취소하면 abort한다. 에이전트가 끝나 체크포인트를 남기기 시작하면 세션에서 떼어 더는 취소를 받지 않는다 */
@@ -1201,10 +1203,9 @@ export function sendMessage(
   },
 ): { runId: string } {
   const session = requireSession(id);
-  // 지연 기동 세션(idle)은 요청을 받아들인다. 읽기만 하면 이대로 끝나고, 필요하면 실행 중에 샌드박스를 켠다
-  if (session.snapshot.status !== 'ready' && session.snapshot.status !== 'idle') throw new StudioError(409, '샌드박스가 준비된 뒤에 요청할 수 있습니다');
-  if (session.snapshot.running) throw new StudioError(409, '이전 요청을 처리하는 중입니다');
-  if (session.exporting) throw new StudioError(409, '원격 저장소에 올리는 중입니다');
+  // 판정은 수명 코어의 점유가 한다: 상태(지연 기동 세션 idle은 받아들인다. 읽기만 하면 이대로 끝나고, 필요하면 실행 중에 샌드박스를 켠다) → 바쁨 → 올리는 중 → 멈추는 중.
+  // 아래 요청 내용·한도 검사 뒤에 같은 판정으로 점유를 잡는다(그 사이에 기다림이 없다)
+  session.life.claims.checkRun();
 
   const request = text.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
@@ -1240,6 +1241,7 @@ export function sendMessage(
   };
   const run: ActiveRun = {
     id: randomUUID().slice(0, 8),
+    ticket: 0,
     startedAt: new Date().toISOString(),
     cancel: new AbortController(),
     baseTokens: session.snapshot.tokens,
@@ -1249,26 +1251,76 @@ export function sendMessage(
     ...(steering && session.snapshot.mode !== 'demo' ? { steering: new SteeringQueue() } : {}),
     ...(session.snapshot.pendingQuestion ? { answersQuestion: true } : {}),
   };
+  run.ticket = session.life.claims.beginRun(run.id);
   session.run = run;
   session.runsStarted = (session.runsStarted ?? 0) + 1;
-  session.snapshot.running = true;
-  // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
-  session.snapshot.pendingQuestion = undefined;
-  const model = startModelOf(session, plan);
-  emit(session, {
-    type: 'run_started',
-    runId: run.id,
-    request,
-    by,
-    intent: intent === 'ask' ? 'ask' : undefined,
-    at: new Date().toISOString(),
-    // AI별 결과표가 실행을 묶는 값(#821)
-    backend: sessionBackend(session.snapshot),
-    ...(model ? { model } : {}),
-    taskKind: classifyTask(request),
-  });
-  void execute(session, run, request, plan);
+  mirrorBusy(session);
+  try {
+    // 새 요청을 보내면 지난 질문은 답이 온 것으로 보고 지운다
+    session.snapshot.pendingQuestion = undefined;
+    const model = startModelOf(session, plan);
+    emit(session, {
+      type: 'run_started',
+      runId: run.id,
+      request,
+      by,
+      intent: intent === 'ask' ? 'ask' : undefined,
+      at: new Date().toISOString(),
+      // AI별 결과표가 실행을 묶는 값(#821)
+      backend: sessionBackend(session.snapshot),
+      ...(model ? { model } : {}),
+      taskKind: classifyTask(request),
+    });
+    void execute(session, run, request, plan);
+  } catch (error) {
+    // 실행이 시작되지 못했다. 잡은 점유를 표로 푼다(`execute`가 시작됐으면 그 `finally`가 푼다)
+    if (session.run === run) session.run = undefined;
+    releaseRun(session, run);
+    throw error;
+  }
   return { runId: run.id };
+}
+
+/**
+ * 화면용 거울: 수명 코어의 점유를 `snapshot.running`·`exporting`에 옮긴다(ADR-207). 판정은 거울이 아니라 코어(`session.life.claims`)에 묻는다.
+ * 바쁘지 않으면 취소 중 표시도 지운다
+ */
+function mirrorBusy(session: Session): void {
+  const { claims } = session.life;
+  session.snapshot.running = claims.busy;
+  session.exporting = claims.exporting;
+  if (!claims.busy) session.snapshot.cancelling = undefined;
+}
+
+/** 실행의 점유를 그 표로 푼다. 이미 풀렸거나(멈추기가 비웠다) 다른 점유의 표면 아무것도 하지 않는다 */
+function releaseRun(session: Session, run: Pick<ActiveRun, 'ticket'>): boolean {
+  const released = session.life.claims.release(run.ticket);
+  mirrorBusy(session);
+  return released;
+}
+
+/** 보조 작업의 점유를 그 표로 푼다 */
+function releaseTicket(session: Session, ticket: number): void {
+  session.life.claims.release(ticket);
+  mirrorBusy(session);
+}
+
+/** 에이전트가 끝나 체크포인트를 저장하는 단계로 넘어간다: 더는 취소를 받지 않는다(`session.run`을 떼고 점유의 단계를 바꾼다) */
+function detachRun(session: Session, run: ActiveRun): void {
+  if (session.run === run) session.run = undefined;
+  session.life.claims.setPhase(run.ticket, 'saving');
+}
+
+/** 저장 중이던 터미널 실행을 다시 연다(게이트가 도는 사이 HEAD가 움직였거나 커밋 전에 내용이 바뀐 경우). 점유가 그대로 이 실행의 것일 때만 */
+function reattachRun(session: Session, run: ActiveRun): boolean {
+  if (!session.life.claims.setPhase(run.ticket, 'running')) return false;
+  session.run = run;
+  return true;
+}
+
+/** 취소 중으로 표시한다(토큰 한도). 점유의 단계도 바꾼다 */
+function markRunCancelling(session: Session, run: ActiveRun): void {
+  session.life.claims.setPhase(run.ticket, 'cancelling');
 }
 
 /**
@@ -1277,9 +1329,10 @@ export function sendMessage(
  */
 export function cancelRun(id: string, runId: string): void {
   const session = requireSession(id);
+  // 판정은 코어가 한다: 실행 없음·다른 runId·저장 중은 409, 이미 취소 중이면 조용히 돌아온다. 통과하면 단계가 `취소 중`이 된다
+  if (session.life.claims.cancelRun(runId) === 'already') return;
   const run = session.run;
-  if (!run || run.id !== runId) throw new StudioError(409, '취소할 수 있는 요청이 없습니다. 이미 끝났거나 결과를 저장하는 중입니다');
-  if (run.cancel.signal.aborted) return;
+  if (!run || run.id !== runId) return;
   run.stopReason = 'user';
   session.snapshot.cancelling = 'user';
   emit(session, { type: 'run_cancelling', runId });
@@ -1311,8 +1364,9 @@ export function recordHandoff(id: string, input: { runId: string; to: 'split' | 
 export function steerRun(id: string, text: string): { runId: string } {
   const session = requireSession(id);
   if (session.snapshot.mode === 'demo') throw new StudioError(409, '이 모드는 실행 중 지시를 지원하지 않습니다');
+  const runId = session.life.claims.steerTarget();
   const run = session.run;
-  if (!run) throw new StudioError(409, '실행 중이 아닙니다. 새 요청으로 보내세요');
+  if (!run || run.id !== runId) throw new StudioError(409, '실행 중이 아닙니다. 새 요청으로 보내세요');
   if (!run.steering) throw new StudioError(409, '이 실행은 진행 중 지시를 받지 않습니다');
   const directive = text.trim();
   if (!directive) throw new StudioError(400, '지시 내용을 입력하세요');
@@ -1358,7 +1412,7 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
     // 로컬 미리보기 프록시(ADR-113)도 가리키던 서비스가 없어지므로 함께 닫는다
     close_preview_proxies: () => closeServicePreviewProxies(id),
     mark_services_stopped: () => {
-      session.snapshot.running = false;
+      // 옛 코드는 여기서 `snapshot.running = false`로 남의 점유까지 지웠다. 이제 점유는 수명 코어가 들고, 멈추기가 상태를 `stopped`로 바꿀 때(아래 `apply_status`) 코어가 비운다(ADR-207)
       // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
       for (const service of session.snapshot.services) {
         Object.assign(service, { state: 'stopped', url: undefined, previewUrl: undefined, detail: undefined });
@@ -1366,7 +1420,11 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
       }
     },
     // 코어가 이 단계 앞에서 상태를 stopped로 바꿨다. 거울(snapshot)에 옮기고 알린다
-    apply_status: () => applyStatus(session, session.life.current()),
+    apply_status: () => {
+      applyStatus(session, session.life.current());
+      // 코어가 상태를 바꾸며 실행·보조 작업의 점유를 비웠다. 거울에 옮긴다(옛 `mark_services_stopped`의 `running=false`가 하던 일)
+      mirrorBusy(session);
+    },
     // 중지한 세션에는 재는 것이 없다. 연결 상태를 남기면 다음에 올릴 때 낡은 값이 보인다.
     // 상태를 바꾼 뒤에 지운다 — 먼저 지우면 정리하는 몇 초 동안 화면이 "준비됨"으로 돌아간다
     clear_sandbox_link: () => {
@@ -1401,6 +1459,9 @@ export async function deleteSession(id: string): Promise<void> {
   const home = (live ?? entry)!.home;
   const root = sessionsRoot();
   assertDeletable(root, home, snapshot);
+  // 실행·보조 작업·터미널 실행·올리기가 점유 중이면 상태가 idle(지연 기동)이어도 지우지 않는다. 지우면 돌고 있는 CLI가 지운 폴더에서 계속 돌고, 끝나며 저장을 예약해 지운 폴더를 되살린다.
+  // 먼저 멈추면(stopAndDeleteSession) 점유가 비워져 지울 수 있다. 위 상태 판정과 아래 맵에서 빼기 사이에 기다림이 없다
+  live?.life.claims.checkDelete();
 
   if (live) {
     live.persist.cancel();
@@ -1898,7 +1959,7 @@ export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
  */
 export async function setSessionModel(id: string, modelId: string | undefined, effort?: string): Promise<ModelPickerView> {
   const session = requireSession(id);
-  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 모델을 바꿀 수 없습니다');
+  session.life.claims.rejectBusy('set_model');
   const backend = sessionBackend(session.snapshot);
   if (modelId !== undefined) {
     const trimmedModel = modelId.trim();
@@ -2415,7 +2476,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     const result = await runPlan(session, run, executionRequest, plan, signal);
     // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
     if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
-    session.run = undefined;
+    // 여기부터는 취소를 받지 않는다: 체크포인트를 저장하는 단계다
+    detachRun(session, run);
     if ('preflightError' in result) {
       finished = { status: 'error', summary: result.preflightError };
       return;
@@ -2526,13 +2588,13 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
     if (error instanceof LocalEditsError) {
       // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
       notStarted = true;
-      session.run = undefined;
+      detachRun(session, run);
       finished = { status: 'error', summary: error.message };
       return;
     }
     cancelled = run.cancel.signal.aborted && !session.stop.signal.aborted;
     // 취소해 되돌리는 동안 다시 누른 취소는 받아들인다. 오류로 되돌리는 중에는 취소를 받지 않는다
-    if (!cancelled) session.run = undefined;
+    if (!cancelled) detachRun(session, run);
     let reverted: string[] | undefined;
     let keptDocs: string[] = [];
     let revertError: unknown;
@@ -2557,7 +2619,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       finished = { status: 'cancelled', summary };
     }
   } finally {
-    session.run = undefined;
+    if (session.run === run) session.run = undefined;
     // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다.
     // 되묻고 멈춘 경우는 아직 시나리오가 끝나지 않았으므로 다음 단계로 넘기지 않는다(답을 받아 이어서 실행한다)
     if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask && finished?.status !== 'awaiting_input') {
@@ -2565,8 +2627,8 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
       session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
     }
-    session.snapshot.running = false;
-    session.snapshot.cancelling = undefined;
+    // 이 실행의 표로 점유를 푼다. 멈추기가 이미 비웠거나 다른 점유가 잡혀 있으면 아무것도 하지 않는다(늦게 끝난 실행이 남의 점유를 풀지 못한다)
+    releaseRun(session, run);
     // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
     const dropped = run.steering?.take() ?? [];
     if (!session.stop.signal.aborted && dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
@@ -2793,6 +2855,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
         run.stopReason = 'budget';
         run.limitKind = overSession ? 'session' : 'user';
         session.snapshot.cancelling = 'budget';
+        markRunCancelling(session, run);
         emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
         run.cancel.abort(new DOMException(overSession ? '세션 토큰 한도에 도달했습니다' : '사람별 토큰 한도에 도달했습니다', 'AbortError'));
       }
@@ -3654,14 +3717,14 @@ function noteForModel(session: Session, text: string): void {
  */
 export function restoreCheckpoint(id: string, sha: string): void {
   const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되돌릴 수 있습니다');
-  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+  session.life.claims.checkTask('restore');
   const target = session.snapshot.checkpoints.find((checkpoint) => checkpoint.sha === sha);
   if (!target) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
   const isHead = target.sha === session.snapshot.checkpoints[0]?.sha;
   if (isHead && !session.databases.enabled) throw new StudioError(409, '이미 최신 체크포인트이고 되돌릴 데이터베이스도 없습니다');
 
-  session.snapshot.running = true;
+  const ticket = session.life.claims.beginTask('restore');
+  mirrorBusy(session);
   emit(session, { type: 'restore_started', checkpoint: target });
 
   void (async () => {
@@ -3718,8 +3781,8 @@ export function restoreCheckpoint(id: string, sha: string): void {
     } catch (error) {
       event = { type: 'restore_failed', checkpoint: target, error: describe(error) };
     }
-    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
-    session.snapshot.running = false;
+    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다(이 작업의 표로만 푼다)
+    releaseTicket(session, ticket);
     if (!session.stop.signal.aborted) emit(session, event);
   })();
 }
@@ -3730,11 +3793,11 @@ export function restoreCheckpoint(id: string, sha: string): void {
  */
 export function restoreDiscardedBackup(id: string, backupId: string): void {
   const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 되살릴 수 있습니다');
-  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
+  session.life.claims.checkTask('restore_backup');
 
   // 되살리는 동안(git apply + 서비스 재시작, Spring Boot면 수십 초) 새 요청이 끼어들지 못하게 잡아 둔다(ADR-150)
-  session.snapshot.running = true;
+  const ticket = session.life.claims.beginTask('restore_backup');
+  mirrorBusy(session);
   emit(session, { type: 'backup_restore_started', backupId });
 
   void (async () => {
@@ -3753,8 +3816,8 @@ export function restoreDiscardedBackup(id: string, backupId: string): void {
     } catch (error) {
       event = { type: 'backup_restore_failed', backupId, error: describe(error) };
     }
-    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
-    session.snapshot.running = false;
+    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다(이 작업의 표로만 푼다)
+    releaseTicket(session, ticket);
     if (!session.stop.signal.aborted) emit(session, event);
   })();
 }
@@ -4154,10 +4217,9 @@ export async function exportSession(
 ): Promise<ExportResult> {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 올릴 곳이 없습니다');
-  if (session.snapshot.running) throw new StudioError(409, '작업이 끝난 뒤에 올릴 수 있습니다');
-  if (session.exporting) throw new StudioError(409, '이미 올리는 중입니다');
-
-  session.exporting = true;
+  // 판정은 코어가 한다: 바쁘면 "작업이 끝난 뒤에", 이미 올리는 중이면 "이미 올리는 중입니다"
+  const exportTicket = session.life.claims.beginExport();
+  mirrorBusy(session);
   try {
     // main 따라잡기(ADR-076): 기준 브랜치가 앞서 있고 깨끗하게 병합할 수 있으면 올리기 전에 조용히 먼저 따라잡는다
     await autoCatchUpBase(session);
@@ -4254,7 +4316,8 @@ export async function exportSession(
     }
     return result;
   } finally {
-    session.exporting = false;
+    session.life.claims.releaseExport(exportTicket);
+    mirrorBusy(session);
   }
 }
 
@@ -4656,15 +4719,17 @@ function runDeployJob(
 export function syncRemote(id: string): void {
   const session = requireSession(id);
   if (!session.snapshot.repository) throw new StudioError(409, '원본 프로젝트가 Git 저장소가 아니어서 가져올 원격 브랜치가 없습니다');
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 가져올 수 있습니다');
-  if (session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다');
-
-  session.snapshot.running = true;
+  const ticket = session.life.claims.beginTask('sync_remote');
+  mirrorBusy(session);
   emit(session, { type: 'remote_sync_started' });
   void (async () => {
-    const event = await runRemoteSync(session);
-    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
-    session.snapshot.running = false;
+    let event: StudioEvent;
+    try {
+      event = await runRemoteSync(session);
+    } finally {
+      // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다(이 작업의 표로만 푼다)
+      releaseTicket(session, ticket);
+    }
     if (!session.stop.signal.aborted) emit(session, event);
   })();
 }
@@ -4771,14 +4836,14 @@ export async function baseStatus(id: string, options: { force?: boolean } = {}):
  */
 export async function reverifySession(id: string, by: string, sha?: string): Promise<{ sha: string }> {
   const session = requireSession(id);
-  if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 다시 검증할 수 있습니다');
-  if (session.run || session.snapshot.running || session.exporting) throw new StudioError(409, '다른 작업을 처리하는 중입니다. 끝난 뒤 다시 검증하세요');
+  session.life.claims.checkTask('reverify');
   const head = session.snapshot.checkpoints[0];
   if (!head) throw new StudioError(409, '다시 검증할 체크포인트가 없습니다');
   if (sha !== undefined && sha !== head.sha) throw new StudioError(409, '지금 체크포인트만 다시 검증할 수 있습니다. 앞 체크포인트를 확인하려면 먼저 그 시점으로 되돌리세요');
 
   // 확인을 마칠 때까지 다른 요청이 끼어들지 못하게 먼저 잡는다
-  session.snapshot.running = true;
+  const ticket = session.life.claims.beginTask('reverify');
+  mirrorBusy(session);
   let before: { head: string; pending: string };
   try {
     await session.relaying;
@@ -4786,18 +4851,22 @@ export async function reverifySession(id: string, by: string, sha?: string): Pro
     if (before.head !== head.sha) throw new StudioError(409, '체크포인트 기록이 바뀌었습니다. 화면을 새로 고친 뒤 다시 검증하세요');
     if (before.pending !== '') throw new StudioError(409, '작업 복사본에 체크포인트에 없는 변경이 있어 다시 검증하지 않습니다. 변경을 요청으로 보내 체크포인트로 남기거나 되돌린 뒤 다시 검증하세요');
   } catch (error) {
-    session.snapshot.running = false;
+    releaseTicket(session, ticket);
     throw error;
   }
 
   const startedAt = new Date().toISOString();
   emit(session, { type: 'reverify_started', sha: head.sha, shortSha: head.shortSha, by, at: startedAt });
   void (async () => {
-    const outcome = await runReverify(session, before);
-    const record: ReverifyRecord = { sha: head.sha, shortSha: head.shortSha, by, startedAt, finishedAt: new Date().toISOString(), ...outcome };
-    session.snapshot.reverifications = [record, ...(session.snapshot.reverifications ?? [])].slice(0, REVERIFY_LIMIT);
-    // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
-    session.snapshot.running = false;
+    let record: ReverifyRecord;
+    try {
+      const outcome = await runReverify(session, before);
+      record = { sha: head.sha, shortSha: head.shortSha, by, startedAt, finishedAt: new Date().toISOString(), ...outcome };
+      session.snapshot.reverifications = [record, ...(session.snapshot.reverifications ?? [])].slice(0, REVERIFY_LIMIT);
+    } finally {
+      // 새로 연결한 브라우저가 실행 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다(이 작업의 표로만 푼다)
+      releaseTicket(session, ticket);
+    }
     if (!session.stop.signal.aborted) emit(session, { type: 'reverify_finished', record });
   })();
   return { sha: head.sha };
@@ -4953,19 +5022,25 @@ async function undoBaseSync(
 async function autoCatchUpBase(session: Session): Promise<void> {
   if (!session.snapshot.repository) return;
   if (session.project.spec.repository?.autoCatchUp === false) return;
-  if (session.snapshot.running) return;
-  const remembered = session.git;
-  // 확인하지 못했으면 따라잡지 않는다. 올리기·리뷰의 가드가 이 상태를 통과로 두지 않고 멈춘다(이슈 #699)
-  if (!remembered) return;
+  // 바쁘거나 멈추는 중이면 건너뛴다. **기다리기(`await`) 전에** 점유를 잡는다: 옛 코드는 확인한 뒤 기다리고 나서 잡아, 그 사이에 시작한 요청의 `running`을 끝에서 풀었다
+  const ticket = session.life.claims.beginCatchUp();
+  if (ticket === undefined) return;
+  mirrorBusy(session);
+  try {
+    const remembered = session.git;
+    // 확인하지 못했으면 따라잡지 않는다. 올리기·리뷰의 가드가 이 상태를 통과로 두지 않고 멈춘다(이슈 #699)
+    if (!remembered) return;
 
-  const status = await session.checkpoints.baseStatus(remembered).catch(() => undefined);
-  if (!status || status.behind === 0) return;
+    const status = await session.checkpoints.baseStatus(remembered).catch(() => undefined);
+    if (!status || status.behind === 0) return;
 
-  session.snapshot.running = true;
-  emit(session, { type: 'base_sync_started' });
-  const event = await runBaseCatchUp(session);
-  session.snapshot.running = false;
-  emit(session, event);
+    emit(session, { type: 'base_sync_started' });
+    const event = await runBaseCatchUp(session);
+    releaseTicket(session, ticket);
+    emit(session, event);
+  } finally {
+    releaseTicket(session, ticket);
+  }
 }
 
 async function describeRepository(store: CheckpointStore, sourceDirtyFiles: number): Promise<RepositoryView | undefined> {
@@ -5591,7 +5666,7 @@ export async function applySessionRequirements(id: string, input: unknown): Prom
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
   // 에이전트 실행이 도는 동안은 받지 않는다: 저장하면 재확인 판정 필드(hash·revisedAt)가 바뀌는데, 게이트는 실행 전 문서와
   // 견주어 그것을 실행이 바꾼 것으로 보고 실행을 실패시킨다(ADR-157). 조용히 받아 두고 긴 실행을 되돌리는 것보다 지금 알린다
-  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 요구사항을 저장할 수 없습니다. 끝난 뒤에 저장해 주세요');
+  session.life.claims.rejectBusy('save_requirements');
   // 화면이 보낸 시나리오 id가 요구사항 id와 어긋나면(재추출 병합이 요구사항 id만 바꾼 경우) 검증 전에 맞춘다
   const parsed = ApplyRequirementsSchema.safeParse(alignScenarioIdsInInput(input));
   if (!parsed.success) throw new StudioError(400, `요구사항 형식이 올바르지 않습니다: ${parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
@@ -5664,7 +5739,7 @@ export async function markRequirementManualVerification(id: string, requirementI
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인할 수 있습니다');
   // 에이전트 실행이 도는 동안은 받지 않는다: 게이트가 실행 전 문서와 견주어 이 기록을 실행이 넣은 것으로 오인하고(ADR-157),
   // 같은 문서를 에이전트도 쓰고 있어 서로 덮어쓸 수 있다
-  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 사람 확인을 남길 수 없습니다. 끝난 뒤에 눌러 주세요');
+  session.life.claims.rejectBusy('manual_verify');
   const note = input.note?.trim() ?? '';
   if (!note) throw new StudioError(400, '무엇을 어떻게 확인했는지 메모를 적어야 합니다');
   if (note.length > MANUAL_VERIFICATION_NOTE_MAX) throw new StudioError(400, `메모는 ${MANUAL_VERIFICATION_NOTE_MAX}자 이내로 적어 주세요`);
@@ -5686,7 +5761,7 @@ export async function markRequirementManualVerification(id: string, requirementI
 export async function clearRequirementManualVerification(id: string, requirementId: string): Promise<RequirementsSnapshot> {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 확인을 취소할 수 있습니다');
-  if (session.snapshot.running) throw new StudioError(409, '요청을 처리하는 동안에는 사람 확인을 취소할 수 없습니다. 끝난 뒤에 눌러 주세요');
+  session.life.claims.rejectBusy('manual_clear');
   const raw = await readTrustedRequirementsDocument(session);
   if (raw === undefined) throw new StudioError(404, 'docs/requirements.md가 없습니다');
   const { requirements, assumptions, manualSteps } = parseRequirementsMarkdown(raw);
@@ -5769,9 +5844,7 @@ export async function writeSessionDoc(id: string, file: string, content: string)
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 저장할 수 있습니다');
   if (!isDocsTabPath(file)) throw new StudioError(400, `${file}: 문서 탭은 docs/ 아래 마크다운과 README.md·CHANGELOG.md·CONTRIBUTING.md만 다룹니다`);
   // 요구사항 문서는 실행 중에 받지 않는다(applySessionRequirements와 같은 이유, ADR-157). 다른 문서는 그대로 받는다
-  if (file === REQUIREMENTS_FILE && session.snapshot.running) {
-    throw new StudioError(409, '요청을 처리하는 동안에는 요구사항 문서를 저장할 수 없습니다. 끝난 뒤에 저장해 주세요');
-  }
+  if (file === REQUIREMENTS_FILE) session.life.claims.rejectBusy('write_requirements_doc');
   await new Workspace(session.project.root).write(file, content);
   await commitDocTabChange(id, file, `docs: ${file} 내용을 고친다`);
   return { path: file, content };
@@ -6780,7 +6853,7 @@ const RELAY_ECHO_MS = 5_000;
  */
 function relayChanges(session: Session, renamed: string[]): void {
   const { sandbox, snapshot } = session;
-  if (!sandbox.relayChanges || snapshot.running || snapshot.status !== 'ready' || renamed.length === 0) return;
+  if (!sandbox.relayChanges || session.life.claims.busy || snapshot.status !== 'ready' || renamed.length === 0) return;
   const now = Date.now();
   for (const [file, at] of session.relayed) if (now - at > RELAY_ECHO_MS) session.relayed.delete(file);
   const changes = renamed.flatMap((file): FileChange[] => {
@@ -7574,6 +7647,7 @@ function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: Term
   run.limitKind = overSession ? 'session' : 'user';
   state.limitReason = 'budget';
   session.snapshot.cancelling = 'budget';
+  markRunCancelling(session, run);
   emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
   run.cancel.abort(new DOMException(overSession ? '세션 토큰 한도에 도달했습니다' : '사람별 토큰 한도에 도달했습니다', 'AbortError'));
   // CLI에 하던 일을 멈추라고 알린다(Esc). 실행을 닫는 일은 중단 신호를 듣는 쪽이 한다(cancelRun과 같다)
@@ -7784,9 +7858,8 @@ function hookMessage(summary: string): string {
 
 /** 지금 터미널의 요청을 받을 수 없으면 그 이유 */
 function terminalBusy(session: Session): string | undefined {
-  if (session.exporting) return '[b-studio] 원격 저장소에 올리는 중입니다. 끝난 뒤 다시 보내세요.';
-  if (session.run || session.snapshot.running) return '[b-studio] 앞선 요청을 처리하는 중입니다(대화 창에서 보낸 요청이거나 검증 결과를 저장하는 중). 끝난 뒤 다시 보내세요.';
-  return undefined;
+  // 판정은 수명 코어가 한다: 올리는 중 → 바쁨(대화 창의 요청·보조 작업·터미널의 다른 실행·저장 중) → 멈추는 중·멈춘 세션
+  return session.life.claims.terminalBusy();
 }
 
 /** 실행 한 건을 연다. 대화 창의 요청(sendMessage)과 같은 순서로 준비한다: 스튜디오 밖의 수정을 먼저 체크포인트로 남긴다 */
@@ -7803,57 +7876,70 @@ async function beginTerminalRun(session: Session, request: string): Promise<(Act
   // 기다리는 사이에 다른 요청이 시작됐을 수 있다. 여기부터 실행을 여는 데까지는 기다림이 없다
   const opened = openTerminalRun(session);
   if (opened) return opened;
-  const busy = terminalBusy(session);
-  if (busy) return { busy };
-  // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
-  const stallMs = terminalStallMs();
-  const readOnly = isReadOnlyPrompt(request);
-  // 켜 둔 확인 선언 변경 허용은 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 둔다(ADR-164)
-  const allowCheckChanges = !readOnly && session.snapshot.allowCheckChangesNext === true;
-  if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
-  const terminal: TerminalRunState = {
-    request,
-    readOnly,
-    ...(allowCheckChanges ? { allowCheckChanges: true } : {}),
-    // 읽기만 실행이 열리는 순간의 작업 복사본 지문을 지금 잡아 둔다. 끝날 때 다시 잡아 이 실행이 파일을 바꿨는지 가린다
-    // (사람이 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다)
-    ...(readOnly ? { readOnlyFingerprint: await session.checkpoints.pendingFingerprint() } : {}),
-    startedMs: performance.now(),
-    unsettledAttempts: 0,
-    serial: serialQueue(),
-    checking: false,
-    settled: false,
-    // 턴 상한·정체 감시가 보는 값들(#B5). 요청을 여는 순간부터 활동이 시작된 것으로 본다
-    modelCalls: 0,
-    lastActivityMs: Date.now(),
-    stallNotified: false,
-  };
-  const run: ActiveRun & { terminal: TerminalRunState } = {
-    id: randomUUID().slice(0, 8),
-    startedAt: new Date().toISOString(),
-    cancel: new AbortController(),
-    baseTokens: session.snapshot.tokens,
-    tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    by: session.snapshot.owner,
-    terminal,
-  };
-  session.run = run;
-  session.runsStarted = (session.runsStarted ?? 0) + 1;
-  session.snapshot.running = true;
-  session.snapshot.pendingQuestion = undefined;
-  // 터미널에서 도는 CLI로 남긴다(#821, #825). 세션의 백엔드가 아니라 실제로 띄운 CLI다
-  emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt, backend: terminalRunBackend(session), taskKind: classifyTask(request) });
-  // 정체 감시를 켠다(#B5). 실행이 닫히거나 세션이 멈추면 타이머도 멈춘다
-  startTerminalStallWatch(session, stallMs);
-  run.cancel.signal.addEventListener(
-    'abort',
-    () => {
-      // 검증이 도는 중이면 그 검증이 중단으로 끝나면서 닫는다. 아니면 하던 도구 호출 뒤에 줄을 서서 닫는다
-      if (!terminal.checking) void terminal.serial(() => abandonTerminalRun(session, run, { status: 'cancelled' })).catch((error: unknown) => console.error('[b-studio] 터미널 실행을 닫지 못했습니다', error));
-    },
-    { once: true },
-  );
-  return run;
+  // 이 실행을 열기로 하면 **기다리기(`await`) 전에** 점유를 잡는다: 읽기만 실행은 아래에서 작업 복사본의 지문을 기다리는데, 옛 코드는 그 뒤에 `session.run`을 덮어써 그 사이에 시작한 대화 창의 요청을 지웠다
+  const id = randomUUID().slice(0, 8);
+  const claimed = session.life.claims.beginTerminalRun(id);
+  if (typeof claimed !== 'number') return { busy: claimed.busy };
+  const ticket = claimed;
+  try {
+    // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
+    const stallMs = terminalStallMs();
+    const readOnly = isReadOnlyPrompt(request);
+    // 켜 둔 확인 선언 변경 허용은 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 둔다(ADR-164)
+    const allowCheckChanges = !readOnly && session.snapshot.allowCheckChangesNext === true;
+    if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
+    const terminal: TerminalRunState = {
+      request,
+      readOnly,
+      ...(allowCheckChanges ? { allowCheckChanges: true } : {}),
+      // 읽기만 실행이 열리는 순간의 작업 복사본 지문을 지금 잡아 둔다. 끝날 때 다시 잡아 이 실행이 파일을 바꿨는지 가린다
+      // (사람이 미리 고쳐 둔 파일은 양쪽 지문에 모두 들어가 오탐하지 않는다)
+      ...(readOnly ? { readOnlyFingerprint: await session.checkpoints.pendingFingerprint() } : {}),
+      startedMs: performance.now(),
+      unsettledAttempts: 0,
+      serial: serialQueue(),
+      checking: false,
+      settled: false,
+      // 턴 상한·정체 감시가 보는 값들(#B5). 요청을 여는 순간부터 활동이 시작된 것으로 본다
+      modelCalls: 0,
+      lastActivityMs: Date.now(),
+      stallNotified: false,
+    };
+    // 지문을 기다리는 사이 세션이 멈췄으면(멈추기가 점유를 비웠다) 열지 않는다
+    if (!session.life.claims.holds(ticket)) return { busy: '[b-studio] 세션이 중지되어 요청을 시작하지 않았습니다.' };
+    const run: ActiveRun & { terminal: TerminalRunState } = {
+      id,
+      ticket,
+      startedAt: new Date().toISOString(),
+      cancel: new AbortController(),
+      baseTokens: session.snapshot.tokens,
+      tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
+      by: session.snapshot.owner,
+      terminal,
+    };
+    session.run = run;
+    session.runsStarted = (session.runsStarted ?? 0) + 1;
+    mirrorBusy(session);
+    session.snapshot.pendingQuestion = undefined;
+    // 터미널에서 도는 CLI로 남긴다(#821, #825). 세션의 백엔드가 아니라 실제로 띄운 CLI다
+    emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt, backend: terminalRunBackend(session), taskKind: classifyTask(request) });
+    // 정체 감시를 켠다(#B5). 실행이 닫히거나 세션이 멈추면 타이머도 멈춘다
+    startTerminalStallWatch(session, stallMs);
+    run.cancel.signal.addEventListener(
+      'abort',
+      () => {
+        // 검증이 도는 중이면 그 검증이 중단으로 끝나면서 닫는다. 아니면 하던 도구 호출 뒤에 줄을 서서 닫는다
+        if (!terminal.checking) void terminal.serial(() => abandonTerminalRun(session, run, { status: 'cancelled' })).catch((error: unknown) => console.error('[b-studio] 터미널 실행을 닫지 못했습니다', error));
+      },
+      { once: true },
+    );
+    return run;
+  } catch (error) {
+    // 열지 못했다(정체 감시 주기 오타·지문 계산 실패). 잡은 점유를 그 표로 푼다
+    if (session.run?.ticket === ticket) session.run = undefined;
+    releaseTicket(session, ticket);
+    throw error;
+  }
 }
 
 /**
@@ -7933,6 +8019,8 @@ function settleTerminalRun(session: Session, run: ActiveRun & { terminal: Termin
 /** 닫힌 실행을 세션에서 떼고 결과를 알린다 */
 function announceTerminalRun(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'incomplete' | 'unguardedWrites' | 'platformFailure'>): void {
   if (session.run === run) session.run = undefined;
+  // 이 실행의 표로 점유를 푼다(멈추는 중이어도 푼다: 멈추기가 상태를 정리하지만 점유는 이 실행이 잡은 것이다)
+  releaseRun(session, run);
   // 실행이 닫혔으면 사람을 기다릴 일도 없다(B7). 실행이 닫힌 뒤의 대기는 사람이 볼 일이 아니다
   clearTerminalAttention(session);
   // 실행이 닫혔으면 정체 감시도 멈춘다. 돌고 있던 타이머가 다음 회차에 스스로 멈추게 두지 않는다
@@ -7941,8 +8029,6 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
   session.terminalRun = { runId: run.id, startedMs: Date.parse(run.startedAt), endedMs: Date.now() };
   // 세션이 멈추는 중이면 stopSession이 상태를 정리한다. 여기서는 끝났다는 알림만 건너뛴다
   if (session.stop.signal.aborted) return;
-  session.snapshot.running = false;
-  session.snapshot.cancelling = undefined;
   session.settledConversation = session.conversation.length;
   emit(session, {
     type: 'run_finished',
@@ -8417,7 +8503,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       // 게이트가 도는 동안 위반이 왔으면(큐를 기다리지 않고 state.violation에 적혔다) 통과시키지 않는다
       if (state.violation !== undefined) return failTerminalRunForViolation(session, run, state.violation);
       // 통과: 여기부터는 취소를 받지 않는다(대화 창의 요청과 같다)
-      if (session.run === run) session.run = undefined;
+      detachRun(session, run);
       const head = session.snapshot.checkpoints[0]?.sha;
       // 커밋되는 내용이 방금 검증한 내용과 같아야 한다. git이 추적하지 않는 생성 파일은 인덱스에 없으므로 견줄 대상에서 뺀다
       const generated = new Set(await session.checkpoints.pendingExcludedFiles());
@@ -8433,14 +8519,14 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         if (error instanceof HeadMovedError) {
           // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
           // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다
-          if (session.run === undefined && !state.settled) session.run = run;
+          if (session.run === undefined && !state.settled) reattachRun(session, run);
           const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
           if (reconciled.failed) return { message: `[b-studio] ${reconciled.summary.replace(/\n+/g, ' ')}` };
           throw error;
         }
         if (!(error instanceof StagedMismatchError)) throw error;
         // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
-        if (session.run === undefined && !state.settled) session.run = run;
+        if (session.run === undefined && !state.settled) reattachRun(session, run);
         outcome = moved(error.files);
       }
       if (outcome.kind === 'pass') {

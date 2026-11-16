@@ -251,11 +251,13 @@ describe('다시 검증(#798)', () => {
 
   it('다른 작업이 도는 중이면 돌리지 않는다', async () => {
     const id = await readySession();
-    getSnapshot(id)!.running = true;
+    // 바쁨은 거울(snapshot.running)이 아니라 수명 코어의 점유가 정한다(ADR-207). 진짜 점유를 하나 잡는다
+    const { claims } = (globalThis as { __bStudio?: { sessions: Map<string, { life: { claims: { beginTask(kind: string): number; release(ticket: number): boolean } } }> } }).__bStudio!.sessions.get(id)!.life;
+    const ticket = claims.beginTask('restore');
 
     await expect(reverifySession(id, 'lee')).rejects.toMatchObject({ status: 409 });
 
-    getSnapshot(id)!.running = false;
+    expect(claims.release(ticket)).toBe(true);
     await stopSession(id).catch(() => {});
   }, 30_000);
 });
