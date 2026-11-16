@@ -6916,6 +6916,99 @@ pub fn terminal_decide_close(input: TerminalCloseInputJs) -> Result<TerminalClos
     Ok(TerminalCloseDecisionJs { action: decision.action.as_str().to_owned(), status: decision.status.as_str().to_owned(), text: decision.text.as_str().to_owned() })
 }
 
+// ── 세션 터미널의 요청 시작·쓰기 직전·MCP 판정(ADR-211, 4f B4b). 순수 판정이다: 사실은 TS가 읽어 넘기고 결정만 돌려준다 ──
+
+/// 요청 시작 판정의 사실
+#[napi(object)]
+pub struct TerminalPromptFactsJs {
+    pub open_run: bool,
+    pub run_read_only: bool,
+    pub prompt_read_only: bool,
+    pub busy: bool,
+    pub slash: bool,
+    pub budget: bool,
+}
+
+#[napi(object)]
+pub struct TerminalPromptDecisionJs {
+    /// `attach`·`block`·`nothing`·`open`
+    pub kind: String,
+    /// `attach`일 때: 이 실행에 읽기만을 켠다
+    pub mark_read_only: bool,
+    /// `attach`일 때: 이어 붙은 뒤 실행이 읽기만이다
+    pub read_only: bool,
+    /// `block`일 때: `busy`·`budget`. 아니면 빈 글
+    pub block: String,
+}
+
+/// 요청 시작(UserPromptSubmit) 판정
+#[napi]
+pub fn terminal_decide_prompt(facts: TerminalPromptFactsJs) -> TerminalPromptDecisionJs {
+    use session_terminal::prompt::{decide_prompt, PromptBlock, PromptDecision, PromptFacts};
+    let decision = decide_prompt(&PromptFacts {
+        open_run: facts.open_run,
+        run_read_only: facts.run_read_only,
+        prompt_read_only: facts.prompt_read_only,
+        busy: facts.busy,
+        slash: facts.slash,
+        budget: facts.budget,
+    });
+    let empty = |kind: &str| TerminalPromptDecisionJs { kind: kind.to_owned(), mark_read_only: false, read_only: false, block: String::new() };
+    match decision {
+        PromptDecision::Attach { mark_read_only, read_only } => TerminalPromptDecisionJs { mark_read_only, read_only, ..empty("attach") },
+        PromptDecision::Block(PromptBlock::Busy) => TerminalPromptDecisionJs { block: "busy".to_owned(), ..empty("block") },
+        PromptDecision::Block(PromptBlock::Budget) => TerminalPromptDecisionJs { block: "budget".to_owned(), ..empty("block") },
+        PromptDecision::Nothing => empty("nothing"),
+        PromptDecision::Open => empty("open"),
+    }
+}
+
+/// 쓰기 직전·MCP 판정의 사실
+#[napi(object)]
+pub struct TerminalPreToolFactsJs {
+    pub read_tool: bool,
+    pub budget: bool,
+    /// 도구가 속할 실행을 얻었다(거짓이면 바쁨)
+    pub got_run: bool,
+    pub read_only: bool,
+    /// `none`·`max_turns`·`budget`. 그 밖의 글은 알아보지 못한 것이라 거절한다
+    pub limit: String,
+    pub out_of_scope: bool,
+    pub closed: bool,
+}
+
+#[napi(object)]
+pub struct TerminalPreToolDecisionJs {
+    pub allow: bool,
+    /// 거절할 때의 까닭 종류. 허용이면 빈 글
+    pub deny: String,
+}
+
+/// 쓰기 직전(PreToolUse)·b-studio 도구(MCP) 판정. 기다림 앞과 뒤에서 그 순간의 사실로 부르고, 뒤의 답이 최종이다
+#[napi]
+pub fn terminal_decide_pre_tool(facts: TerminalPreToolFactsJs) -> TerminalPreToolDecisionJs {
+    use session_terminal::prompt::{decide_pre_tool, Limit, PreToolDecision, PreToolFacts, RunAccess};
+    let decision = decide_pre_tool(&PreToolFacts {
+        read_tool: facts.read_tool,
+        budget: facts.budget,
+        access: if facts.got_run { RunAccess::Got } else { RunAccess::Busy },
+        read_only: facts.read_only,
+        limit: Limit::parse(&facts.limit),
+        out_of_scope: facts.out_of_scope,
+        closed: facts.closed,
+    });
+    match decision {
+        PreToolDecision::Allow => TerminalPreToolDecisionJs { allow: true, deny: String::new() },
+        PreToolDecision::Deny(kind) => TerminalPreToolDecisionJs { allow: false, deny: kind.as_str().to_owned() },
+    }
+}
+
+/// 다음 요청에 켜 둔 확인 선언 변경 허용을 이 실행이 가져가는가(ADR-164, ADR-211)
+#[napi]
+pub fn terminal_takes_check_changes(opened_by_prompt: bool, read_only: bool, allowed_next: bool) -> bool {
+    session_terminal::prompt::takes_check_changes(opened_by_prompt, read_only, allowed_next)
+}
+
 /// 닫기의 단계 이름(순서대로)
 #[napi]
 pub fn terminal_close_steps() -> Vec<String> {

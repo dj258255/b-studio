@@ -277,6 +277,7 @@ import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
+import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts } from './session-terminal-prompt';
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, violationRoute, type CloseActions } from './session-terminal-close';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
@@ -8063,31 +8064,37 @@ function terminalBusy(session: Session): string | undefined {
   return session.life.claims.terminalBusy();
 }
 
-/** 실행 한 건을 연다. 대화 창의 요청(sendMessage)과 같은 순서로 준비한다: 스튜디오 밖의 수정을 먼저 체크포인트로 남긴다 */
-async function beginTerminalRun(session: Session, request: string): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
-  try {
-    await session.relaying;
-    // 턴 사이에 끼워 넣은 커밋 위에 스튜디오 밖의 수정을 쌓아 그 커밋을 기억에 넣지 않게, 먼저 기억한 곳에 맞춘다(이슈 #706)
-    await realignGitBeforeRun(session);
-    const edits = await saveLocalEdits(session);
-    if (edits) emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
-  } catch (error) {
-    return { busy: `[b-studio] 스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}` };
-  }
-  // 기다리는 사이에 다른 요청이 시작됐을 수 있다. 여기부터 실행을 여는 데까지는 기다림이 없다
-  const opened = openTerminalRun(session);
-  if (opened) return opened;
-  // 이 실행을 열기로 하면 **기다리기(`await`) 전에** 점유를 잡는다: 읽기만 실행은 아래에서 작업 복사본의 지문을 기다리는데, 옛 코드는 그 뒤에 `session.run`을 덮어써 그 사이에 시작한 대화 창의 요청을 지웠다
+/**
+ * 실행 한 건을 연다. 대화 창의 요청(sendMessage)과 같은 순서로 준비한다: 스튜디오 밖의 수정을 먼저 체크포인트로 남긴다.
+ *
+ * **점유를 먼저 잡고 그 표 아래에서 준비한다**(ADR-211, P2). 옛 코드는 준비(`relaying`·`realignGitBeforeRun`·`saveLocalEdits`)를 기다린 뒤 점유를 잡아,
+ * 기다리는 사이 대화 창의 실행이나 작업이 점유를 잡으면 남의 실행 도중에 Git을 맞추거나 사람의 수정을 "직접 수정"으로 커밋했다. 준비가 실패하면 그 표로 풀고 지금과 같은 글로 거절한다.
+ * 열린 실행(`session.run`)은 준비가 끝난 뒤에 붙인다: 준비 중에 붙이면 그 사이 온 다른 훅이 아직 준비되지 않은 실행에 이어 붙는다. 준비 중에 온 다른 훅은 점유가 잡혀 있어 "바쁨"을 본다(닫는 쪽).
+ *
+ * `fromPrompt`는 사람의 요청(UserPromptSubmit)이 여는 실행인가다. 켜 둔 확인 선언 변경 허용은 그 실행만 가져간다(도구 호출이 연 실행은 가져가지 않는다, P3)
+ */
+async function beginTerminalRun(session: Session, request: string, { fromPrompt }: { fromPrompt: boolean }): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
   const id = randomUUID().slice(0, 8);
   const claimed = session.life.claims.beginTerminalRun(id);
   if (typeof claimed !== 'number') return { busy: claimed.busy };
   const ticket = claimed;
   try {
+    try {
+      await session.relaying;
+      // 턴 사이에 끼워 넣은 커밋 위에 스튜디오 밖의 수정을 쌓아 그 커밋을 기억에 넣지 않게, 먼저 기억한 곳에 맞춘다(이슈 #706)
+      await realignGitBeforeRun(session);
+      const edits = await saveLocalEdits(session);
+      if (edits) emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
+    } catch (error) {
+      // 준비하지 못했다. 이 표로 점유를 풀고(그 사이 멈추기가 비웠거나 다른 점유가 잡혔으면 표가 달라 아무것도 풀지 않는다) 지금과 같은 글로 거절한다
+      releaseTicket(session, ticket);
+      return { busy: `[b-studio] 스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}` };
+    }
     // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
     const stallMs = terminalStallMs();
     const readOnly = isReadOnlyPrompt(request);
-    // 켜 둔 확인 선언 변경 허용은 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 둔다(ADR-164)
-    const allowCheckChanges = !readOnly && session.snapshot.allowCheckChangesNext === true;
+    // 켜 둔 확인 선언 변경 허용은 사람의 요청이 연 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 두고, 도구 호출이 연 실행은 가져가지 않는다(ADR-164, ADR-211)
+    const allowCheckChanges = takesCheckChanges(fromPrompt, readOnly, session.snapshot.allowCheckChangesNext === true);
     if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
     const terminal: TerminalRunState = {
       request,
@@ -8297,7 +8304,7 @@ async function terminalRunForWork(session: Session): Promise<(ActiveRun & { term
   if (opened) return opened;
   const busy = terminalBusy(session);
   if (busy) return { busy };
-  return beginTerminalRun(session, session.terminalLabel ?? TERMINAL_FALLBACK_REQUEST);
+  return beginTerminalRun(session, session.terminalLabel ?? TERMINAL_FALLBACK_REQUEST, { fromPrompt: false });
 }
 
 /** 중단 신호가 오면 기다리던 일을 놓는다(일 자체는 뒤에서 끝난다) */
@@ -8394,27 +8401,37 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
   session.terminalLabel = prompt;
   noteTurnStarted((session.terminalActivity ??= newTerminalActivity()), Date.now());
+  // 판정은 코어가 한다(ADR-211): 열린 실행에 이어 붙임 → 바쁨 → "/" 명령 → 토큰 한도 → 새 실행. 사실은 이 줄에서 한꺼번에 읽는다(사이에 기다림이 없다).
+  // 바쁨·토큰 한도는 앞 칸에서 판정이 끝나면 읽지 않던 것이라 앞 칸이 맞지 않을 때만 읽는다(판정은 같다)
   const opened = openTerminalRun(session);
-  if (opened) {
+  const busy = opened ? undefined : terminalBusy(session);
+  const slash = prompt.startsWith('/');
+  const budget = opened || busy || slash ? undefined : terminalBudgetMessage(session);
+  const decision = decidePrompt({
+    openRun: opened !== undefined,
+    runReadOnly: opened?.terminal.readOnly === true,
+    promptReadOnly: isReadOnlyPrompt(prompt),
+    busy: busy !== undefined,
+    slash,
+    budget: budget !== undefined,
+  });
+  if (decision.kind === 'attach' && opened) {
     // 앞 요청이 끝나지 않았다(사용자가 도중에 끊고 다시 말했다). 같은 실행에 잇는다 — 변경 전 기준이 그대로 유지된다
     emit(session, { type: 'terminal_prompt', runId: opened.id, text: prompt, at: new Date().toISOString() });
     noteTerminalActivity(session, opened);
     // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
-    if (isReadOnlyPrompt(prompt)) {
+    if (decision.markReadOnly) {
       // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
       opened.terminal.readOnlyFingerprint ??= await session.checkpoints.pendingFingerprint();
       opened.terminal.readOnly = true;
     }
-    return opened.terminal.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
+    return opened.terminal.readOnly || decision.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
   }
-  const busy = terminalBusy(session);
-  if (busy) return { blocked: busy };
   // "/"로 시작하는 명령은 CLI 안에서 끝나는 것이 많다(/model, /clear). 실행은 실제로 작업이 시작될 때 연다
-  if (prompt.startsWith('/')) return {};
-  // 새 요청을 받기 전에 토큰 한도를 본다(#B5). 대화 실행의 409와 같은 문구로 막는다
-  const budget = terminalBudgetMessage(session);
-  if (budget) return { blocked: budget };
-  const run = await beginTerminalRun(session, prompt);
+  if (decision.kind === 'nothing') return {};
+  // 막는 쪽: 바쁨과 토큰 한도는 요청을 거절한다. 여는 것은 `open` 하나뿐이고, 그 밖의 결정(알아보지 못한 것 포함)은 거절이다
+  if (decision.kind !== 'open') return { blocked: (decision.kind === 'block' && decision.block === 'budget' ? budget : busy) ?? TERMINAL_UNDECIDED_DENY };
+  const run = await beginTerminalRun(session, prompt, { fromPrompt: true });
   if ('busy' in run) return { blocked: run.busy };
   // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
   const notes = session.terminalNotes?.splice(0) ?? [];
@@ -8443,6 +8460,8 @@ export function setTerminalCheckChanges(id: string, allow: boolean): boolean {
 const TERMINAL_READ_ONLY_NOTE = '[b-studio] 이 요청은 읽기만입니다. 파일을 바꾸거나 명령을 돌리는 도구(Write·Edit·Bash·b-studio 도구)는 거절됩니다. Read·Glob·Grep으로 읽고 답만 하세요.';
 /** 도구를 기다리는 사이 그 실행이 닫혔을 때(위반·취소·CLI 종료·세션 멈춤) 거절하는 말 */
 const TERMINAL_RUN_CLOSED_DENY = '[b-studio] 요청을 닫아 도구를 쓰지 않았습니다.';
+/** 판정이 거절했지만 글을 알아보지 못할 때(막는 쪽으로 틀린다) */
+const TERMINAL_UNDECIDED_DENY = '[b-studio] 요청을 받을 수 있는지 판정하지 못해 시작하지 않았습니다. 잠시 뒤 다시 시도하세요.';
 /** 읽기만 실행에서 쓰기 도구를 거절하는 말 */
 const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 이 요청이 끝난 뒤 "${AGENT_READ_ONLY_MARK}" 없이 새로 요청하세요.`;
 
@@ -8459,6 +8478,71 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   return result;
 }
 
+/** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
+async function terminalScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  // 카드 실행 맥락이 있으면 쓰기 범위를 건다(#B6a). 도구 입력의 파일 경로를 작업 복사본 기준 상대 경로로 바꿔 본다.
+  // 읽기 도구는 앞에서 이미 통과했다(AGENT_READ_TOOLS). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
+  const card = session.terminalTaskContext;
+  if (!card) return undefined;
+  // 패치 하나가 여러 파일을 바꿀 수 있다. 하나라도 범위 밖이면 도구 전체를 막는다
+  for (const path0 of terminalToolFilePaths(tool, toolInput)) {
+    const relative = terminalRelativePath(path0, session);
+    // 범위 안이어도 작업 복사본 밖을 가리키는 링크를 지나면 막는다(링크는 글자로는 안이지만 실제 파일은 밖이다)
+    const confined = relative !== undefined && (await terminalPathConfined(session.snapshot.workDir, relative));
+    if (relative === undefined || !isInScope(relative, card.writableScope) || !confined) {
+      return `[b-studio] 이 카드가 쓸 수 있는 경로는 ${card.writableScope.join(', ')}입니다. ${relative ?? path0}은 범위 밖이라 쓰지 않았습니다.`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * 쓰기 직전·MCP 판정에 넘길 사실과, 거절할 때 쓸 글. **마지막 기다림(`await`) 뒤에 한 줄로 읽는다**: 범위 확인(`scope`)은 기다림이 있어 미리 받아 오고, 나머지는 이 함수 안에서 동기로 읽는다.
+ * 기다림 앞과 뒤에서 각각 새로 읽는다(옛 코드는 앞에서만 읽었다). 실행이 없으면(바쁨) `run`이 `{ busy }`다
+ */
+function terminalPreToolFacts(
+  session: Session,
+  run: (ActiveRun & { terminal: TerminalRunState }) | { busy: string },
+  options: { readTool: boolean; scope: string | undefined; signal?: AbortSignal },
+): { facts: PreToolFacts; texts: Partial<Record<PreToolDeny, string>> } {
+  const budget = terminalBudgetMessage(session);
+  const texts: Partial<Record<PreToolDeny, string>> = {};
+  if (budget !== undefined) texts.budget = `[b-studio] ${budget}`;
+  if ('busy' in run) {
+    texts.busy = run.busy;
+    return { facts: { readTool: options.readTool, budget: budget !== undefined, gotRun: false, readOnly: false, limit: 'none', outOfScope: options.scope !== undefined, closed: false }, texts };
+  }
+  const limited = terminalRunLimitDeny(session, run);
+  if (limited !== undefined) {
+    texts.max_turns = limited;
+    texts.run_budget = limited;
+  }
+  if (options.scope !== undefined) texts.out_of_scope = options.scope;
+  return {
+    facts: {
+      readTool: options.readTool,
+      budget: budget !== undefined,
+      gotRun: true,
+      readOnly: run.terminal.readOnly,
+      limit: run.terminal.limitReason ?? 'none',
+      outOfScope: options.scope !== undefined,
+      // 닫기를 시작했거나 중단 신호가 올랐다(기다리는 사이 위반·취소·CLI 종료·세션 멈춤)
+      closed: terminalRunClosed(session.life, run.ticket) || (options.signal?.aborted ?? false) || run.cancel.signal.aborted,
+    },
+    texts,
+  };
+}
+
+/** 코어가 거절한 까닭을 화면에 낼 글로 바꾼다. 글이 없으면(알아보지 못한 까닭) 막는 쪽의 일반 글이다 */
+function terminalPreToolDenyText(kind: PreToolDeny, texts: Partial<Record<PreToolDeny, string>>): string {
+  if (kind === 'read_only') return TERMINAL_READ_ONLY_DENY;
+  if (kind === 'closed') return TERMINAL_RUN_CLOSED_DENY;
+  return texts[kind] ?? TERMINAL_UNDECIDED_TOOL_DENY;
+}
+
+/** 쓰기 직전 훅이 이 도구를 쓸 수 있는지 판정하지 못해 막는 글 */
+const TERMINAL_UNDECIDED_TOOL_DENY = '[b-studio] 이 도구를 쓸 수 있는지 판정하지 못해 막았습니다. 잠시 뒤 다시 시도하세요.';
+
 async function terminalToolDecision(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
   const session = terminalSession(id);
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
@@ -8467,46 +8551,43 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   if (running) noteTerminalActivity(session, running, { settled: true });
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
   noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
-  // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다)
-  if ((AGENT_READ_TOOLS as readonly string[]).includes(tool) || (CODEX_READ_TOOLS as readonly string[]).includes(tool)) return {};
-  // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다
-  const budget = terminalBudgetMessage(session);
-  if (budget) return { deny: `[b-studio] ${budget}` };
+  // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`)
+  const readTool = (AGENT_READ_TOOLS as readonly string[]).includes(tool) || (CODEX_READ_TOOLS as readonly string[]).includes(tool);
+  if (readTool) return {};
+  // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
+  // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다
+  const budgetText = terminalBudgetMessage(session);
+  const early = decidePreTool({ readTool, budget: budgetText !== undefined, gotRun: true, readOnly: false, limit: 'none', outOfScope: false, closed: false });
+  if (!early.allow) return { deny: terminalPreToolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
   const run = await terminalRunForWork(session);
+  // 앞의 판정(샌드박스를 켤지 말지): 실행을 얻었는가·읽기만·실행 한도·카드 범위를 그 순간의 사실로 본다. 이 판정의 허용은 최종이 아니다
+  const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalScopeDeny(session, tool, input.tool_input) });
+  const first = decidePreTool(before.facts);
+  if (!first.allow) return { deny: terminalPreToolDenyText(first.deny, before.texts) };
   if ('busy' in run) return { deny: run.busy };
-  // 읽기만 요청: 읽기 도구가 아닌 것은 모두 거절한다(샌드박스도 켜지 않는다)
-  if (run.terminal.readOnly) return { deny: TERMINAL_READ_ONLY_DENY };
-  // 한도에 닿은 실행이면 그 뒤의 쓰기 도구를 거절한다(#B5). 턴 상한은 실행이 열린 채로 턴이 끝나기를 기다린다
-  const limited = terminalRunLimitDeny(session, run);
-  if (limited) return { deny: limited };
-  // 카드 실행 맥락이 있으면 쓰기 범위를 건다(#B6a). 도구 입력의 파일 경로를 작업 복사본 기준 상대 경로로 바꿔 본다.
-  // 읽기 도구는 위에서 이미 통과했다(AGENT_READ_TOOLS). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
-  const card = session.terminalTaskContext;
-  if (card) {
-    // 패치 하나가 여러 파일을 바꿀 수 있다. 하나라도 범위 밖이면 도구 전체를 막는다
-    for (const path0 of terminalToolFilePaths(tool, input.tool_input)) {
-      const relative = terminalRelativePath(path0, session);
-      // 범위 안이어도 작업 복사본 밖을 가리키는 링크를 지나면 막는다(링크는 글자로는 안이지만 실제 파일은 밖이다)
-      const confined = relative !== undefined && (await terminalPathConfined(session.snapshot.workDir, relative));
-      if (relative === undefined || !isInScope(relative, card.writableScope) || !confined) {
-        return { deny: `[b-studio] 이 카드가 쓸 수 있는 경로는 ${card.writableScope.join(', ')}입니다. ${relative ?? path0}은 범위 밖이라 쓰지 않았습니다.` };
-      }
-    }
-  }
   // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+  // 기다림 뒤의 판정: 그 순간의 사실로 다시 읽어 부르고 이 답이 최종이다. 기다리는 사이 [읽기만] 요청이 이어 왔거나 턴 상한에 닿았거나
+  // 실행이 닫혔으면(위반·취소·CLI 종료·세션 멈춤) 허용하지 않는다. 닫힌 실행의 쓰기는 되돌린 뒤에 파일을 바꾸는 쓰기다
+  const finalDecision = async (): Promise<{ deny: string } | undefined> => {
+    const after = terminalPreToolFacts(session, run, { readTool, scope: await terminalScopeDeny(session, tool, input.tool_input), signal });
+    const answer = decidePreTool(after.facts);
+    return answer.allow ? undefined : { deny: terminalPreToolDenyText(answer.deny, after.texts) };
+  };
   try {
     const verification = await untilAborted(signal, terminalVerification(session, run));
+    // 켜기가 끝난 직후에 한 번 본다: 이미 거절할 것이면 보호 경로를 고정하지 않는다
+    const afterBoot = await finalDecision();
+    if (afterBoot) return afterBoot;
     // 이 도구가 바꿀 파일 중 보호 경로의 내용을 이 실행에서 처음 쓰기 직전에 고정한다(이슈 #992). 경로가 없는 도구(Bash 등)로 바뀐 파일은 고정값이 없어
     // 지금처럼 바뀐 것으로 남는다. 고정하지 못해도 도구를 막지 않는다(pinBeforeWrite는 던지지 않는다)
     for (const path0 of terminalToolFilePaths(tool, input.tool_input)) {
       const relative = terminalRelativePath(path0, session);
       if (relative !== undefined && relative !== '') await verification.workspace.pinBeforeWrite(relative);
     }
-    // 기다리는 사이 실행이 닫혔으면(위반·취소·CLI 종료·세션 멈춤) 허용하지 않는다. 닫힌 실행의 쓰기는 되돌린 뒤에 파일을 바꾸는 쓰기다
-    if (signal.aborted) return { deny: TERMINAL_RUN_CLOSED_DENY };
-    return {};
+    // 고정하는 사이에도 바뀔 수 있다. 허용은 마지막 기다림 바로 뒤의 이 판정이다
+    return (await finalDecision()) ?? {};
   } catch (error) {
     if (signal.aborted) return { deny: TERMINAL_RUN_CLOSED_DENY };
     // 변경 전 기준을 잡지 못했으면 바꾸게 두지 않는다. 두면 그 변경은 기준 없이 바뀐 것이 되어, 나중에 잡는 기준에 섞여 들어간다
@@ -8528,17 +8609,17 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   // 내주는 도구는 샌드박스가 있어야 도는 것뿐이다. 도구 서버가 이미 목록 밖의 이름을 받지 않지만 여기서도 본다
   // (파일 도구가 이 길로 불리면 변경 추적과 쓰기 직전의 훅을 건너뛴다)
   if (!gatewayToolSpecs(session.project).some((spec) => spec.name === name)) return { ok: false, content: `[b-studio] ${name}: 터미널에 내주지 않는 도구입니다` };
-  // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5)
-  const budget = terminalBudgetMessage(session);
-  if (budget) return { ok: false, content: `[b-studio] ${budget}` };
+  // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 허용은 아래에서 다시 판정한다
+  const budgetText = terminalBudgetMessage(session);
+  const early = decidePreTool({ readTool: false, budget: budgetText !== undefined, gotRun: true, readOnly: false, limit: 'none', outOfScope: false, closed: false });
+  if (!early.allow) return { ok: false, content: terminalPreToolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
   const run = await terminalRunForWork(session);
+  if (!('busy' in run)) noteTerminalActivity(session, run);
+  // 앞의 판정(샌드박스를 켤지 말지). 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행·한도에 닿은 실행에서는 돌리지 않는다(#B5). 이 판정의 허용은 최종이 아니다
+  const before = terminalPreToolFacts(session, run, { readTool: false, scope: undefined });
+  const first = decidePreTool(before.facts);
+  if (!first.allow) return { ok: false, content: terminalPreToolDenyText(first.deny, before.texts) };
   if ('busy' in run) return { ok: false, content: run.busy };
-  noteTerminalActivity(session, run);
-  // 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행에서는 돌리지 않는다
-  if (run.terminal.readOnly) return { ok: false, content: TERMINAL_READ_ONLY_DENY };
-  // 한도에 닿은 실행이면 훅을 거치지 않고 이 길로 불려도 돌리지 않는다(#B5)
-  const limited = terminalRunLimitDeny(session, run);
-  if (limited) return { ok: false, content: limited };
   let verification: TerminalVerification;
   const toolSignal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
   try {
@@ -8548,8 +8629,11 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
     return { ok: false, content: `[b-studio] 샌드박스를 쓸 수 없습니다: ${describe(error)}` };
   }
   return run.terminal.serial(async () => {
-    // 줄을 서는 사이 이 실행이 닫혔으면(앞선 턴 끝이 통과·실패로 닫았다) 도구를 돌리지 않는다
-    if (terminalRunClosed(session.life, run.ticket) || toolSignal.aborted) return { ok: false, content: TERMINAL_RUN_CLOSED_DENY };
+    // 줄을 서는 사이까지 기다린 뒤의 판정이 최종이다: 그 순간의 사실로 다시 읽는다. 이 실행이 닫혔거나(앞선 턴 끝이 통과·실패로 닫았다)
+    // [읽기만] 요청이 이어 왔거나 턴 상한에 닿았으면 도구를 돌리지 않는다. 이 판정과 도구 실행 사이에는 기다림이 없다
+    const after = terminalPreToolFacts(session, run, { readTool: false, scope: undefined, signal: toolSignal });
+    const answer = decidePreTool(after.facts);
+    if (!answer.allow) return { ok: false, content: terminalPreToolDenyText(answer.deny, after.texts) };
     emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name, input: args } });
     const outcome = await executeTool(name, args, verification.context);
     emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_result', name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length } });
