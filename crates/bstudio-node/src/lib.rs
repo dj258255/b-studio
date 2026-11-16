@@ -7009,6 +7009,142 @@ pub fn terminal_takes_check_changes(opened_by_prompt: bool, read_only: bool, all
     session_terminal::prompt::takes_check_changes(opened_by_prompt, read_only, allowed_next)
 }
 
+// ── 세션 터미널의 턴 끝(Stop 훅) 판정(ADR-212, 4f B4c). 순수 판정이다: 사실은 TS가 읽어 넘기고 다음 할 일만 돌려준다 ──
+
+/// 게이트 앞 단계의 사실. 글 값(`git`·`fingerprint`·`unchanged`·`card`)은 알아보지 못하면 닫는 쪽으로 읽는다
+#[napi(object)]
+pub struct TerminalTurnEndFactsJs {
+    pub closed: bool,
+    pub pending_violation: bool,
+    pub violation: bool,
+    pub read_only: bool,
+    pub read_only_after_work: bool,
+    /// `unread`·`aligned`·`failed`
+    pub git: String,
+    /// `unread`·`same`·`different`·`unknown`
+    pub fingerprint: String,
+    pub verification: bool,
+    /// `unread`·`yes`·`no`·`unknown`
+    pub unchanged: String,
+    pub done_tests: bool,
+    pub has_card: bool,
+    /// `unread`·`inside`·`outside`
+    pub card: String,
+    pub unsettled_attempts: u32,
+    pub gate_attempts: u32,
+    pub max_attempts: u32,
+}
+
+#[napi(object)]
+pub struct TerminalTurnEndStepJs {
+    /// `nothing`·`fail_pending_violation`·`fail_violation`·`need_git`·`git_failed`·`need_fingerprint`·`read_only_fail`·`read_only_done`·`need_unchanged`·`settle_unchanged`·`run_done_tests`·`need_card_scope`·`card_retry`·`card_exhausted`·`run_gate`
+    pub kind: String,
+    /// `need_git`일 때: 직접 만든 커밋을 풀어 검증에 넣는가
+    pub allow_unwind: bool,
+    /// `read_only_fail`일 때: 바뀌었는지 확인하지 못했다
+    pub unverified: bool,
+}
+
+/// 턴 끝의 게이트 앞 판정. 읽지 않은 사실(`unread`)이 필요한 칸에 닿으면 `need_*`를 돌려준다
+#[napi]
+pub fn terminal_decide_turn_end(facts: TerminalTurnEndFactsJs) -> TerminalTurnEndStepJs {
+    use session_terminal::turn_end::{decide_turn_end, CardScope, Fingerprint, GitCheck, TurnEndFacts, TurnEndStep, Unchanged};
+    let step = decide_turn_end(&TurnEndFacts {
+        closed: facts.closed,
+        pending_violation: facts.pending_violation,
+        violation: facts.violation,
+        read_only: facts.read_only,
+        read_only_after_work: facts.read_only_after_work,
+        git: GitCheck::parse(&facts.git),
+        fingerprint: Fingerprint::parse(&facts.fingerprint),
+        verification: facts.verification,
+        unchanged: Unchanged::parse(&facts.unchanged),
+        done_tests: facts.done_tests,
+        has_card: facts.has_card,
+        card: CardScope::parse(&facts.card),
+        unsettled_attempts: facts.unsettled_attempts,
+        gate_attempts: facts.gate_attempts,
+        max_attempts: facts.max_attempts,
+    });
+    let of = |kind: &str| TerminalTurnEndStepJs { kind: kind.to_owned(), allow_unwind: false, unverified: false };
+    match step {
+        TurnEndStep::Nothing => of("nothing"),
+        TurnEndStep::FailPendingViolation => of("fail_pending_violation"),
+        TurnEndStep::FailViolation => of("fail_violation"),
+        TurnEndStep::NeedGit { allow_unwind } => TerminalTurnEndStepJs { allow_unwind, ..of("need_git") },
+        TurnEndStep::GitFailed => of("git_failed"),
+        TurnEndStep::NeedFingerprint => of("need_fingerprint"),
+        TurnEndStep::ReadOnlyFail { unverified } => TerminalTurnEndStepJs { unverified, ..of("read_only_fail") },
+        TurnEndStep::ReadOnlyDone => of("read_only_done"),
+        TurnEndStep::NeedUnchanged => of("need_unchanged"),
+        TurnEndStep::SettleUnchanged => of("settle_unchanged"),
+        TurnEndStep::RunDoneTests => of("run_done_tests"),
+        TurnEndStep::NeedCardScope => of("need_card_scope"),
+        TurnEndStep::CardRetry => of("card_retry"),
+        TurnEndStep::CardExhausted => of("card_exhausted"),
+        TurnEndStep::RunGate => of("run_gate"),
+    }
+}
+
+/// 게이트(또는 완료 검사) 뒤의 사실
+#[napi(object)]
+pub struct TerminalGateFactsJs {
+    /// `gate`·`done_tests`. 알아보지 못하면 `gate`
+    pub path: String,
+    /// `pass`·`retry`·`exhausted`. 그 밖은 알아보지 못한 결과다
+    pub outcome: String,
+    pub cancelled: bool,
+    pub max_turns_limit: bool,
+    pub violation: bool,
+    pub unsettled_attempts: u32,
+    pub gate_attempts: u32,
+    pub max_attempts: u32,
+}
+
+#[napi(object)]
+pub struct TerminalGateStepJs {
+    /// `throw_cancel`·`pass`·`fail_violation`·`retry`·`exhaust`·`unknown`
+    pub kind: String,
+    /// `exhaust`일 때: 턴 상한 때문이다
+    pub max_turns: bool,
+    /// `exhaust`일 때: 게이트 밖 사유와 게이트의 횟수를 합쳐 상한에 닿았다
+    pub attempts: bool,
+}
+
+/// 게이트 뒤 판정: 취소 → 턴 상한 → 통과면 위반 → 재시도·소진
+#[napi]
+pub fn terminal_decide_gate_outcome(facts: TerminalGateFactsJs) -> TerminalGateStepJs {
+    use session_terminal::turn_end::{decide_gate_outcome, GateFacts, GateKind, GatePath, GateStep};
+    let step = decide_gate_outcome(&GateFacts {
+        path: GatePath::parse(&facts.path),
+        outcome: GateKind::parse(&facts.outcome),
+        cancelled: facts.cancelled,
+        max_turns_limit: facts.max_turns_limit,
+        violation: facts.violation,
+        unsettled_attempts: facts.unsettled_attempts,
+        gate_attempts: facts.gate_attempts,
+        max_attempts: facts.max_attempts,
+    });
+    let of = |kind: &str| TerminalGateStepJs { kind: kind.to_owned(), max_turns: false, attempts: false };
+    match step {
+        GateStep::ThrowCancel => of("throw_cancel"),
+        GateStep::Pass => of("pass"),
+        GateStep::FailViolation => of("fail_violation"),
+        GateStep::Retry => of("retry"),
+        GateStep::Exhaust { max_turns, attempts } => TerminalGateStepJs { max_turns, attempts, ..of("exhaust") },
+        GateStep::Unknown => of("unknown"),
+    }
+}
+
+/// 체크포인트를 남긴 직후 판정: 남기는 동안 위반이 왔으면 `fail_violation`, 아니면 `settle`
+#[napi]
+pub fn terminal_decide_after_checkpoint(violation: bool) -> String {
+    match session_terminal::turn_end::decide_after_checkpoint(violation) {
+        session_terminal::turn_end::SavedStep::Settle => "settle".to_owned(),
+        session_terminal::turn_end::SavedStep::FailViolation => "fail_violation".to_owned(),
+    }
+}
+
 /// 닫기의 단계 이름(순서대로)
 #[napi]
 pub fn terminal_close_steps() -> Vec<String> {

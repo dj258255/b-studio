@@ -326,6 +326,12 @@ interface NativeGuard {
   terminalDecidePreTool(facts: NativeTerminalPreToolFacts): NativeTerminalPreToolDecision;
   /** 다음 요청에 켜 둔 확인 선언 변경 허용을 이 실행이 가져가는가(ADR-164, ADR-211) */
   terminalTakesCheckChanges(openedByPrompt: boolean, readOnly: boolean, allowedNext: boolean): boolean;
+  /** 터미널의 턴 끝 게이트 앞 판정(ADR-212). 읽지 않은 사실(`unread`)이 필요한 칸에 닿으면 `need_*`를 돌려준다 */
+  terminalDecideTurnEnd(facts: NativeTerminalTurnEndFacts): NativeTerminalTurnEndStep;
+  /** 터미널의 게이트 뒤 판정(ADR-212): 취소 → 턴 상한 → 통과면 위반 → 재시도·소진 */
+  terminalDecideGateOutcome(facts: NativeTerminalGateFacts): NativeTerminalGateStep;
+  /** 체크포인트를 남긴 직후 판정(ADR-212): `settle`·`fail_violation` */
+  terminalDecideAfterCheckpoint(violation: boolean): string;
   runOutcomeDecideNormal(facts: NativeRunNormalFacts, pending: boolean): NativeRunOutcome;
   runOutcomeNeedsProbeNormal(facts: NativeRunNormalFacts): boolean;
   runOutcomeDecideException(facts: NativeRunExceptionFacts, pending: boolean): NativeRunOutcome;
@@ -1289,6 +1295,53 @@ export interface NativeTerminalPreToolFacts {
   limit: string;
   outOfScope: boolean;
   closed: boolean;
+}
+
+export interface NativeTerminalTurnEndFacts {
+  closed: boolean;
+  pendingViolation: boolean;
+  violation: boolean;
+  readOnly: boolean;
+  readOnlyAfterWork: boolean;
+  /** `unread`·`aligned`·`failed` */
+  git: string;
+  /** `unread`·`same`·`different`·`unknown` */
+  fingerprint: string;
+  verification: boolean;
+  /** `unread`·`yes`·`no`·`unknown` */
+  unchanged: string;
+  doneTests: boolean;
+  hasCard: boolean;
+  /** `unread`·`inside`·`outside` */
+  card: string;
+  unsettledAttempts: number;
+  gateAttempts: number;
+  maxAttempts: number;
+}
+
+export interface NativeTerminalTurnEndStep {
+  kind: string;
+  allowUnwind: boolean;
+  unverified: boolean;
+}
+
+export interface NativeTerminalGateFacts {
+  /** `gate`·`done_tests` */
+  path: string;
+  /** `pass`·`retry`·`exhausted` */
+  outcome: string;
+  cancelled: boolean;
+  maxTurnsLimit: boolean;
+  violation: boolean;
+  unsettledAttempts: number;
+  gateAttempts: number;
+  maxAttempts: number;
+}
+
+export interface NativeTerminalGateStep {
+  kind: string;
+  maxTurns: boolean;
+  attempts: boolean;
 }
 
 export interface NativeTerminalPreToolDecision {

@@ -19,6 +19,7 @@
 //! - 닫기가 시작되면 TS가 그 실행의 중단 신호를 끊는다(코어 밖). 옛 닫기는 신호를 끊지 않아 기다리던 훅이 닫힌 실행에서 허용을 돌려줬다
 
 pub mod prompt;
+pub mod turn_end;
 
 use crate::claim::{Holder, Phase, Slot, Ticket};
 use crate::outcome::{Action, FinishedStatus};
