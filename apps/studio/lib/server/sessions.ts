@@ -258,7 +258,6 @@ import type {
   ReviewStateView,
   SessionMode,
   SessionSnapshot,
-  SessionStatus,
   SessionSummary,
   StudioEvent,
   WorkspaceKind,
@@ -328,6 +327,7 @@ import { rememberProjectEffortDefault, rememberProjectModelDefault } from './mod
 import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-accounts';
 import { describe, StudioError } from './errors';
 import { assertDeletable, assertResumableHome, planRecovery, removeSessionHome } from './session-lifecycle';
+import { SessionLife, SessionRegistry, type StatusChange } from './session-status';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
@@ -415,6 +415,8 @@ interface Session {
    */
   settledConversation: number;
   stop: AbortController;
+  /** 세션 상태(Rust 수명 코어, ADR-205). `snapshot.status`·`error`는 이 값의 거울이다: `applyStatus`만 쓴다 */
+  life: SessionLife;
   logFollower?: AbortController;
   demoIndex: number;
   checkpoints: CheckpointStore;
@@ -613,9 +615,8 @@ interface Store {
   sessions: Map<string, Session>;
   /** 이전 버전 모듈이 만든 전역 객체에는 없을 수 있다 */
   archived?: Map<string, ArchivedSession>;
-  resuming?: Set<string>;
-  /** 로컬 폴더 세션을 만들거나 이어서 작업하려고 잡아 둔 폴더 */
-  claimedFolders?: Set<string>;
+  /** 이어받는 중인 세션과 내 폴더 세션의 폴더 점유(Rust, ADR-205). 이전 버전 모듈이 만든 전역 객체에는 없을 수 있다 */
+  registry?: SessionRegistry;
   recovery?: Promise<void>;
   previewGateway?: Server;
   /** Figma 클라이언트. 파일·노드 캐시를 요청 사이에도 유지한다 */
@@ -627,8 +628,7 @@ interface Store {
 const globalStore = globalThis as typeof globalThis & { __bStudio?: Store };
 const store: Store = (globalStore.__bStudio ??= { sessions: new Map(), cleanupRegistered: false });
 const archived = (store.archived ??= new Map());
-const resuming = (store.resuming ??= new Set());
-const claimedFolders = (store.claimedFolders ??= new Set());
+const registry = (store.registry ??= new SessionRegistry());
 
 export function getSnapshot(id: string): SessionSnapshot | undefined {
   return (store.sessions.get(id) ?? archived.get(id))?.snapshot;
@@ -938,6 +938,7 @@ async function startSession({
   session.snapshot.design = sessionDesignView(session);
 
   store.sessions.set(id, session);
+  registerSession(session);
   registerCleanup();
   // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
   session.git = await initialGitMemory(checkpoints);
@@ -990,6 +991,7 @@ function newSession({ history, ...fields }: NewSession): Session {
     databases: new DatabaseBranches(fields.sandbox, fields.project, path.join(fields.checkpoints.gitDir, 'b-studio', 'databases')),
     settledConversation: fields.conversation.length,
     stop: new AbortController(),
+    life: new SessionLife(fields.snapshot.status === 'idle' ? 'idle' : 'starting'),
     exporting: false,
     relayed: new Map(),
     relaying: Promise.resolve(),
@@ -1259,41 +1261,60 @@ export function steerRun(id: string, text: string): { runId: string } {
 
 export async function stopSession(id: string): Promise<SessionSnapshot> {
   const session = requireSession(id);
-  if (session.snapshot.status === 'stopped') return session.snapshot;
+  // 멈추기를 시작한다. 이 순간부터 지금 켜는 중인 샌드박스의 결과는 늦은 결과라 상태를 바꾸지 않는다(트러블슈팅 213)
+  const begin = session.life.beginStop();
+  if (begin === 'stopped') return session.snapshot;
+  // 다른 호출이 멈추는 중이면 그 끝을 기다린다(같은 단계를 두 번 밟지 않는다)
+  if (begin === 'joined') {
+    await session.life.joinStop();
+    return session.snapshot;
+  }
+  // 중지 신호는 멈추기를 시작한 호출이 바로 올린다(호출이 돌아오기 전에 올라가 있어야 한다). 이 뒤의 단계와 그 순서·실패 처리는 Rust 수명 코어가 정한다(STOP_STEPS)
   session.stop.abort();
-  // 감시가 담아 둔 위반은 세션이 멈추면 지운다
-  session.pendingViolation = undefined;
-  // 멈춘 세션에는 사람을 기다리는 터미널도 없다(B7)
-  clearTerminalAttention(session);
-  // 터미널에서 연 실행은 기다리는 러너가 없다. 여기서 닫아 두지 않으면 세션에 걸린 채 남는다(끝났다는 알림은 내지 않는다 — 멈춘 세션의 실행은 기록을 읽을 때 중단으로 본다)
-  const terminalRun = openTerminalRun(session);
-  if (terminalRun) settleTerminalRun(session, terminalRun, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
-  session.logFollower?.abort();
-  clearInterval(session.usageTimer);
-  // 터미널 실행의 정체 감시도 멈춘다(#B5). 세션에 타이머가 걸린 채 남지 않게 한다
-  stopTerminalStallWatch(session);
-  session.fileWatcher?.close();
-  // 세션 터미널의 컨테이너는 compose 밖에서 띄운 것이라 따로 지운다(#673)
-  await disposeSessionTerminal(id, session.sandbox.id);
-  // 터미널이 부르던 관문도 닫는다. 그 뒤에 늦게 온 훅은 닿지 못하고, CLI는 막히지 않은 채 끝난다
-  await closeSessionGateway(id).catch(() => {});
-  await session.sandbox.destroy().catch(() => {});
-  // 로컬 미리보기 프록시(ADR-113)도 가리키던 서비스가 없어지므로 함께 닫는다
-  await closeServicePreviewProxies(id).catch(() => {});
-  session.snapshot.running = false;
-  // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
-  for (const service of session.snapshot.services) {
-    Object.assign(service, { state: 'stopped', url: undefined, previewUrl: undefined, detail: undefined });
-    emit(session, { type: 'service', service: service.name, state: 'stopped' });
-  }
-  setStatus(session, 'stopped');
-  // 중지한 세션에는 재는 것이 없다. 연결 상태를 남기면 다음에 올릴 때 낡은 값이 보인다.
-  // 상태를 바꾼 뒤에 지운다 — 먼저 지우면 정리하는 몇 초 동안 화면이 "준비됨"으로 돌아간다
-  if (session.snapshot.sandboxLink) {
-    delete session.snapshot.sandboxLink;
-    emit(session, { type: 'sandbox_link' });
-  }
-  await flushPersist(session);
+  await session.life.runStop({
+    // 감시가 담아 둔 위반은 세션이 멈추면 지운다
+    clear_violation: () => {
+      session.pendingViolation = undefined;
+    },
+    // 멈춘 세션에는 사람을 기다리는 터미널도 없다(B7)
+    clear_terminal_attention: () => clearTerminalAttention(session),
+    // 터미널에서 연 실행은 기다리는 러너가 없다. 여기서 닫아 두지 않으면 세션에 걸린 채 남는다(끝났다는 알림은 내지 않는다 — 멈춘 세션의 실행은 기록을 읽을 때 중단으로 본다)
+    settle_terminal_run: () => {
+      const terminalRun = openTerminalRun(session);
+      if (terminalRun) settleTerminalRun(session, terminalRun, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
+    },
+    abort_log_follower: () => session.logFollower?.abort(),
+    clear_usage_timer: () => clearInterval(session.usageTimer),
+    // 터미널 실행의 정체 감시도 멈춘다(#B5). 세션에 타이머가 걸린 채 남지 않게 한다
+    stop_stall_watch: () => stopTerminalStallWatch(session),
+    close_file_watcher: () => session.fileWatcher?.close(),
+    // 세션 터미널의 컨테이너는 compose 밖에서 띄운 것이라 따로 지운다(#673)
+    dispose_terminal: () => disposeSessionTerminal(id, session.sandbox.id),
+    // 터미널이 부르던 관문도 닫는다. 그 뒤에 늦게 온 훅은 닿지 못하고, CLI는 막히지 않은 채 끝난다
+    close_gateway: () => closeSessionGateway(id),
+    destroy_sandbox: () => session.sandbox.destroy(),
+    // 로컬 미리보기 프록시(ADR-113)도 가리키던 서비스가 없어지므로 함께 닫는다
+    close_preview_proxies: () => closeServicePreviewProxies(id),
+    mark_services_stopped: () => {
+      session.snapshot.running = false;
+      // 사라진 주소로 미리보기를 계속 띄우지 않게 한다
+      for (const service of session.snapshot.services) {
+        Object.assign(service, { state: 'stopped', url: undefined, previewUrl: undefined, detail: undefined });
+        emit(session, { type: 'service', service: service.name, state: 'stopped' });
+      }
+    },
+    // 코어가 이 단계 앞에서 상태를 stopped로 바꿨다. 거울(snapshot)에 옮기고 알린다
+    apply_status: () => applyStatus(session, session.life.current()),
+    // 중지한 세션에는 재는 것이 없다. 연결 상태를 남기면 다음에 올릴 때 낡은 값이 보인다.
+    // 상태를 바꾼 뒤에 지운다 — 먼저 지우면 정리하는 몇 초 동안 화면이 "준비됨"으로 돌아간다
+    clear_sandbox_link: () => {
+      if (session.snapshot.sandboxLink) {
+        delete session.snapshot.sandboxLink;
+        emit(session, { type: 'sandbox_link' });
+      }
+    },
+    flush_persist: () => flushPersist(session),
+  });
   return session.snapshot;
 }
 
@@ -1322,11 +1343,10 @@ export async function deleteSession(id: string): Promise<void> {
   if (live) {
     live.persist.cancel();
     store.sessions.delete(id);
+    registry.unregister(id);
     notifyAgentsChanged();
   }
   if (entry) archived.delete(id);
-  // 두 세션이 같은 폴더를 잡지 못하게 막는 표시. 남아 있으면 그 폴더로 새 세션을 영영 시작하지 못한다
-  claimedFolders.delete(snapshot.workDir);
 
   // 내 폴더 세션이어도 사용자 폴더는 지우지 않는다: 세션 폴더(상태 폴더)만 지운다. Rust가 지우기 직전에 다시 확인한다
   await removeSessionHome(root, home, snapshot);
@@ -1350,11 +1370,9 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
   await recoverSessions();
   const live = store.sessions.get(id);
   const entry = archived.get(id);
-  if (!live && !entry) throw new StudioError(404, '세션을 찾을 수 없습니다');
-  if (live && live.snapshot.status !== 'stopped') throw new StudioError(409, '샌드박스를 중지한 세션만 이어서 작업할 수 있습니다');
-  if (resuming.has(id)) throw new StudioError(409, '이미 이어서 작업할 준비를 하는 중입니다');
+  // 판정은 Rust 레지스트리가 한다: 없음 404, 멈추지 않음 409, 이미 이어받는 중 409. 통과하면 이어받는 중에 넣는다(아래 finally에서 뺀다)
+  registry.beginResume(id, entry !== undefined);
 
-  resuming.add(id);
   let release: (() => void) | undefined;
   try {
     let data: PersistedBody;
@@ -1510,6 +1528,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
 
     archived.delete(id);
     store.sessions.set(id, session);
+    registerSession(session);
     registerCleanup();
     const preview = previewConfig();
     if (preview) ensurePreviewGateway(preview);
@@ -1519,10 +1538,10 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // DB 복원 기준점은 항상 previous.sha(이 함수 맨 위, localEdits·discardWorkingCopy가 새 체크포인트를 남기기 전에
     // 잡아 둔 값)를 쓴다. localEdits·discardWorkingCopy가 만드는 체크포인트는 saveDatabases를 부르지 않아 DB 덤프가
     // 없으므로, boot()가 그 체크포인트의 sha로 복원하면 덤프를 찾지 못해 DB가 그대로 남는다(ADR-018·ADR-131 실측)
-    session.bootPromise = boot(session, { discarded, discardBackup, databaseFrom: previous.sha });
+    session.bootPromise = startBoot(session, { discarded, discardBackup, databaseFrom: previous.sha });
     return session.snapshot;
   } finally {
-    resuming.delete(id);
+    registry.endResume(id);
     release?.();
   }
 }
@@ -1874,22 +1893,31 @@ function designSourceFor(session: Session, runId: string): DesignSource | undefi
  * 지연 기동 세션의 첫 필요(샌드박스 도구·첫 파일 변경·게이트·"지금 켜기")가 모두 이 한 곳을 지난다
  */
 async function ensureBooted(session: Session): Promise<void> {
-  if (session.snapshot.status === 'ready') return;
-  if (session.snapshot.status === 'stopped') throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
-  if (!session.bootPromise || session.snapshot.status === 'failed') {
+  // 켜야 하는가는 Rust 수명 코어가 정한다(켜져 있음·중지됨·켜는 중·켜기 시작). 멈추는 중인 세션은 새로 켜지 않는다
+  const request = session.life.requestBoot();
+  if (request.action === 'ready') return;
+  if (request.action === 'stopped') throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
+  if (request.action === 'start') {
     // 처음 켤 때는 의존성 설치 때문에 몇 분 걸릴 수 있다. 켜는 동안 도구 호출·게이트는 이 promise를 기다린다
     emit(session, { type: 'notice', text: '샌드박스를 켜는 중입니다 (처음이면 1분 안팎)', at: new Date().toISOString() });
-    session.bootPromise = startBoot(session);
+    if (request.change) applyStatus(session, request.change);
+    session.bootPromise = boot(session, request.generation);
   }
   await session.bootPromise;
-  // boot가 실패하면 상태가 failed로 바뀐다(위 가드의 타입 좁히기를 피하려고 단언한다)
-  if ((session.snapshot.status as SessionStatus) !== 'ready') throw new StudioError(502, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
+  // 켜기가 실패하면 상태가 failed로 바뀐다. 기다리는 사이에 멈추기가 시작됐으면(상태는 아직 stopped가 아닐 수 있다) 켜지 못한 것이 아니라 멈춘 세션이다
+  if (session.life.stopping || session.life.status === 'stopped') throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
+  if (session.life.status !== 'ready') throw new StudioError(502, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
 }
 
-/** 상태를 starting으로 옮기고 boot를 시작한다. 이미 starting이면(즉시 기동 세션) 다시 알리지 않는다 */
-function startBoot(session: Session): Promise<void> {
-  if (session.snapshot.status !== 'starting') setStatus(session, 'starting');
-  return boot(session);
+/**
+ * 세션을 만들자마자(또는 이어받자마자) 켠다. 처음 상태가 `starting`이라 상태를 바꾸지 않고 켜기만 시작한다(옛 `startBoot`는 `starting`이면 다시 알리지 않았다).
+ * `ensureBooted`와 같은 코어 규칙(켜기 세대)을 쓴다
+ */
+function startBoot(session: Session, resumed?: BootResume): Promise<void> {
+  const request = session.life.requestBoot();
+  if (request.action !== 'start') return Promise.resolve();
+  if (request.change) applyStatus(session, request.change);
+  return boot(session, request.generation, resumed);
 }
 
 /** "지금 켜기": 샌드박스를 지금 켠다. 진행은 이벤트로 알린다(boot API가 쓴다) */
@@ -1903,7 +1931,17 @@ export async function bootSession(id: string): Promise<SessionSnapshot> {
  * resumed가 있으면 이어서 작업하는 세션이다. 새 샌드박스의 데이터베이스를 마지막 체크포인트 상태로 맞춘다.
  * databaseFrom은 이어서 작업하기 전에 폴더의 수정을 새 체크포인트로 남겼을 때, 데이터베이스 상태를 가져올 그 앞 체크포인트다
  */
-async function boot(session: Session, resumed?: { discarded: string[]; discardBackup?: DiscardBackup; databaseFrom?: string }): Promise<void> {
+interface BootResume {
+  discarded: string[];
+  discardBackup?: DiscardBackup;
+  databaseFrom?: string;
+}
+
+/**
+ * `generation`은 이 켜기의 세대다(`life.requestBoot`가 돌려준 값). 끝났다고 알릴 때(`bootFinished`) 함께 알리고, 그 사이에 멈추기가 시작됐거나 다른 켜기가 시작됐으면
+ * 코어가 늦은 결과로 보고 상태를 바꾸지 않는다(트러블슈팅 213: 옛 코드는 멈추는 중에 끝난 켜기도 ready를 내고 감시를 다시 켰다)
+ */
+async function boot(session: Session, generation: number, resumed?: BootResume): Promise<void> {
   const signal = session.stop.signal;
   session.bootingSince = new Date().toISOString();
   const onStatus = (event: ServiceStatusEvent) => onServiceStatus(session, event);
@@ -1931,6 +1969,8 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
         emit(session, { type: 'boot_network', at: new Date().toISOString(), network });
       },
     });
+    // 샌드박스가 켜지는 사이에 멈추기가 시작됐으면(또는 서버가 끝나는 중이면) 이 켜기의 나머지는 하지 않는다. 결과를 알려도 코어가 무시한다
+    if (signal.aborted || !session.life.live(generation)) return;
     // 샌드박스가 준비되면 평가 자산의 복사본도 마지막 체크포인트의 판으로 맞춘다(#745). 실패하면 세션을 ready로 두지 않는다
     await syncEvaluationAssetsFromCheckpoint(session);
     const head = session.snapshot.checkpoints[0]!;
@@ -1949,14 +1989,20 @@ async function boot(session: Session, resumed?: { discarded: string[]; discardBa
       }
       emit(session, { type: 'resumed', checkpoint: head, discarded: resumed.discarded, databases: database.states, restarted, backup: resumed.discardBackup });
     }
-    setStatus(session, 'ready');
+    finishBoot(session, generation, { ok: true });
   } catch (error) {
-    if (signal.aborted) return;
+    if (signal.aborted || !session.life.live(generation)) return;
     // 실패를 알리기 전에 컨테이너의 마지막 줄을 실행 탭 로그에 남긴다. 화면이 실패를 보고 그 로그를 가리키기 때문이다
     await captureFailureLogs(session);
     session.bootPlatformFailure = error instanceof SandboxError && error.platform;
-    setStatus(session, 'failed', describe(error));
+    finishBoot(session, generation, { ok: false, error: describe(error) });
   }
+}
+
+/** 켜기가 끝났다고 코어에 알리고, 상태가 바뀌었을 때만(늦은 결과가 아닐 때만) 거울에 옮긴다. `ready`면 감시를 켠다 */
+function finishBoot(session: Session, generation: number, outcome: { ok: true } | { ok: false; error: string }): void {
+  const change = session.life.bootFinished(generation, outcome);
+  if (change) applyStatus(session, change);
 }
 
 /** build: 파일을 바꾸고 검증 게이트를 거치는 요청, ask: 파일을 바꾸지 않고 답과 계획만 받는 질문 */
@@ -3496,17 +3542,11 @@ function assertLocalFolderAllowed(): void {
 
 /**
  * 로컬 폴더 세션이 쓸 폴더를 잡는다. 두 세션이 같은 폴더를 바꾸면 한쪽의 되돌리기가 다른 쪽의 변경을 지우므로 거부한다.
- * sessionId는 이어서 작업하는 세션 자신이다. 돌려준 함수로 푼다
+ * sessionId는 이어서 작업하는 세션 자신이다. 돌려준 함수로 푼다. 이 판정은 폴더를 막는 검사다(거부 목록): 같은 폴더인지 알 수 없으면 거절한다
  */
 function claimFolder(root: string, sessionId?: string): () => void {
-  const busy = [...store.sessions.values()].find(
-    (session) =>
-      session.snapshot.workspace === 'local' && session.snapshot.workDir === root && session.snapshot.status !== 'stopped' && session.snapshot.id !== sessionId,
-  );
-  if (busy) throw new StudioError(409, `이 폴더는 세션 ${busy.snapshot.id}에서 작업하고 있습니다. 그 세션의 샌드박스를 중지한 뒤 시작하세요`);
-  if (claimedFolders.has(root)) throw new StudioError(409, '이 폴더로 다른 세션을 시작하는 중입니다. 끝난 뒤 다시 시도하세요');
-  claimedFolders.add(root);
-  return () => claimedFolders.delete(root);
+  // 판정은 Rust 레지스트리가 한다. 폴더는 글자가 같거나 폴더의 정체(장치·inode)가 같으면 같은 폴더다(링크로 만든 별칭·끝의 `/`·대소문자만 다른 경로, 트러블슈팅 214)
+  return registry.claimFolder(root, sessionId);
 }
 
 /** 체크포인트 시점의 데이터베이스 상태를 남긴다. 실패해도 작업은 계속하고 로그로 알린다 */
@@ -6631,7 +6671,12 @@ function onServiceStatus(session: Session, event: ServiceStatusEvent): void {
   emit(session, { type: 'service', service: service.name, state: service.state, url: service.url, previewUrl: service.previewUrl, detail: service.detail });
 }
 
-function setStatus(session: Session, status: SessionStatus, error?: string): void {
+/**
+ * 상태가 바뀐 것을 `snapshot`(거울)에 옮기고 `status` 이벤트를 낸다. `snapshot.status`·`error`는 여기서만 쓴다(값은 Rust 수명 코어가 정한다, ADR-205).
+ * `ready`가 되면 로그·사용량·파일 감시를 켠다
+ */
+function applyStatus(session: Session, change: StatusChange): void {
+  const { status, error } = change;
   session.snapshot.status = status;
   session.snapshot.error = error;
   if (status !== 'starting') delete session.bootingSince;
@@ -6641,6 +6686,11 @@ function setStatus(session: Session, status: SessionStatus, error?: string): voi
     watchUsage(session);
     watchFiles(session);
   }
+}
+
+/** 세션 맵에 넣은 세션을 레지스트리에도 올린다(폴더 점유·이어받기 판정이 상태를 읽는다) */
+function registerSession(session: Session): void {
+  registry.register(session.snapshot.id, session.life, session.snapshot.workspace === 'local', session.snapshot.workDir);
 }
 
 /** 서비스 안에서 명령이 만든 파일처럼 에이전트 도구를 거치지 않은 변경도 코드 화면이 다시 불러오게 한다 */

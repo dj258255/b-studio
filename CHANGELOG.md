@@ -12,6 +12,7 @@
 
 ### 바뀜
 
+- 세션의 상태 전이(`idle`·`starting`·`ready`·`failed`·`stopped`, 켜기 세대, 멈추는 중)와 멈추기 단계의 순서·실패 처리, 이어받기 판정(`resuming`)과 내 폴더 세션의 폴더 점유를 Rust(`crates/bstudio-session`의 `status`·`registry`, napi `SessionState`·`SessionRegistry`)로 옮겼습니다(ADR-205, ADR-195 4f B2b, #1260). 세션 하나의 상태는 코어 하나만 들고 `snapshot.status`는 그 거울입니다. 같은 세션을 동시에 멈추면 단계를 한 번만 밟고, 멈추는 중에는 새로 켜지 않습니다(409). 옛 TS는 `session-status-legacy.ts`에 차등 시험의 기준으로 남겼습니다.
 - 세션 지우기·복구·이어받기의 판정을 Rust(`crates/bstudio-session`의 `lifecycle`, napi `deleteSessionCheck`·`removeSessionHome`·`resumeSessionCheck`·`recoverSessionPlan`)로 옮겼습니다(ADR-204, ADR-195 4f B2a, #1257). 폴더는 저장 파일의 경로가 아니라 세션을 만들거나 읽어 온 폴더(`home`)로 정하고, 지우기는 직전에 부모·이름·링크 아님을 다시 확인합니다. 옛 TS 판정은 `session-lifecycle-legacy.ts`에 차등 시험의 기준으로 남겼습니다.
 - 세션의 영속(`toPersisted`·`writeSession`·`readSessions`·`closeUnfinished`·저장 예약과 쓰기 줄)을 Rust(`crates/bstudio-session`의 `Persister`·`read_sessions`·`close_unfinished`, napi 클래스)로 옮겼습니다(ADR-203, ADR-195 4f B1b, #1253). 저장 파일은 옛 `JSON.stringify(toPersisted(session))`와 바이트까지 같고, TS는 history를 뺀 `head`·`tail` 두 글자만 건네며 history는 Rust가 자기 기록에서 바로 끼웁니다. 저장 한 번이 메인 스레드를 막는 시간이 기록 5,000개에서 약 0.6ms→0.05ms(작은 이벤트만)·약 13ms→0.6ms(10%가 20KB)로 줄었습니다. `test-results.json`·`requirements-draft.json`도 Rust의 원자적 쓰기(임시 파일 → rename)를 씁니다(`requirements-draft.json`은 전에는 원자적이지 않았습니다). 옛 TS는 차등 시험의 기준(`session-store-legacy.ts`)으로 남깁니다. 시험이 저장 콜백이 던질 때 경고가 남는 결함 하나를 병합 전에 찾았습니다(트러블슈팅 210).
 - 세션의 이벤트 기록(`history` 5,000개·`logs` 1,000개와 마지막 요청·끝 40개·되감기·저장용 줄이기 질의)을 `sessions.ts`의 배열에서 Rust(`crates/bstudio-session`의 `SessionRecord`, napi 클래스)로 옮겼습니다(ADR-203, ADR-195 4f B1a, #1251). 목록·관제·되감기·이어받기·복구의 결과는 그대로입니다. 구독자 전달·SSE·저장 예약은 TS 세션이 그대로 쥡니다. 이벤트 하나를 쌓을 때 JSON 글자로 만드는 비용이 늘어(작은 이벤트 약 1.7µs, 20KB 도구 결과 약 0.12ms) 되감기 한 번은 기록 6,000개에서 약 2.6ms(작은 이벤트만)~38ms(10%가 20KB)입니다. 시드 있는 무작위 이벤트 열을 옛 TS 구현과 견준 차등 시험과 변이 확인이 있습니다. 시험이 처음 구현의 결함 하나(로그가 낀 기록에서 마지막 요청을 못 찾음, 트러블슈팅 208)를 병합 전에 찾았습니다.
@@ -103,6 +104,8 @@
 
 ### 수정
 
+- 켜는 중인 세션을 멈추는 동안 샌드박스 켜기가 끝나면 멈추기가 시작된 뒤에도 `ready` 상태가 나가고 사용량·로그·파일 감시가 다시 켜져 멈춘 세션에 남던 것을 고쳤습니다(트러블슈팅 213, ADR-205, #1260). 멈추는 중이거나 지난 켜기의 결과는 이제 상태를 바꾸지 않습니다. 켜기가 끝나기를 기다리던 호출은 성공 대신 409(중지된 세션)를 받습니다.
+- 내 폴더 세션 둘이 같은 폴더를 링크로 만든 별칭이나 대소문자만 다른 경로로 가리키면 둘째 세션이 시작되던 것을 고쳤습니다(트러블슈팅 214, ADR-205, #1260). 같은 폴더인지 글자뿐 아니라 폴더의 정체(장치 번호와 inode)로도 봅니다. 폴더의 정체를 읽지 못하면(권한 등) 다른 세션이 쓰고 있는지 확인할 수 없어 시작을 거절합니다.
 - 세션 지우기가 저장 파일의 경로(`workDir`·`stateDir`)를 글자로만 확인해, 세션 폴더 안의 링크·`..`로 저장소 밖이나 다른 세션의 폴더를 지울 수 있었고, 이어받기가 그 폴더에서 커밋하지 않은 변경을 버렸습니다. 이제 세션을 만들거나 읽어 온 폴더만 지우고 이어받습니다(ADR-204, 트러블슈팅 211, #1257).
 - Claude Code 러너가 도구 요청을 그 호출이 든 assistant 메시지보다 먼저 처리하면, 턴 상한을 넘긴 턴의 도구가 닫히기 전에 실행될 수 있던 것을 고쳤습니다(트러블슈팅 206, #1241). 이제 도구는 그 메시지(`tool_use`)를 stdout에서 본 뒤에 실행하고, 2초 안에 오지 않으면 그대로 실행합니다. MCP 서버를 Rust로 옮기며 요청이 다른 스레드에서 들어와 드러났습니다.
 - 화면 확인의 `measureLoad`가 워밍업 이동에서 `load` 뒤에 난 거절된 약속의 오류를 측정 결과에 섞어, 없는 오류로 실패할 수 있던 것을 고쳤습니다(#1236, 트러블슈팅 204). 측정 문서가 커밋될 때 그사이 온 오류를 한 번 더 비웁니다.

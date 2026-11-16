@@ -22,7 +22,9 @@ mod close;
 mod json_text;
 pub mod lifecycle;
 pub mod persister;
+pub mod registry;
 mod scan;
+pub mod status;
 pub mod store;
 
 pub const HISTORY_LIMIT: usize = 5_000;

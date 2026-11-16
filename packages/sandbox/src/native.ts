@@ -299,6 +299,13 @@ interface NativeGuard {
   recoverSessionPlan(status: string, ownerPid: number, selfPid: number, ownerAlive: boolean, sandboxId: string): NativeRecoverPlan;
   /** 저장된 샌드박스 id가 b-studio가 만든 id의 꼴인가(`SANDBOX_ID`) */
   isSandboxId(id: string): boolean;
+  // ── 세션 상태 전이·멈추기·이어받기 판정·폴더 점유(ADR-205, 4f B2b) ──
+  /** 세션 하나의 상태(`idle`·`starting`·`ready`·`failed`·`stopped`)와 멈추는 중 여부·켜기 세대. `initial`은 `idle` 또는 `starting`이다(아니면 던진다) */
+  SessionState: new (initial: string) => NativeSessionState;
+  /** 세션 맵 수준의 상태: 실행 중인 세션의 상태, 이어받는 중인 세션, 내 폴더 세션의 폴더 점유 */
+  SessionRegistry: new () => NativeSessionRegistry;
+  /** 멈추기의 단계 목록(순서대로). 마지막이 `flush_persist`다 */
+  sessionStopSteps(): NativeStopStep[];
   /** 기록으로 세션 파일 한 번 쓰기(줄·예약 없이). `fullHistory`가 거짓이면 저장용 history, 참이면 기록 전체. `head`·`tail`이 객체 글자가 아니면 던진다 */
   writeSessionRecord(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): Promise<void>;
   /** `writeSessionRecord`의 동기 판: 종료 신호 처리처럼 기다릴 수 없는 곳에서 이 스레드에서 쓴다(임시 파일 `<file>.<pid>.exit.tmp`). 던질 수 있다 */
@@ -1010,6 +1017,73 @@ export interface NativeStoredSession {
   record: NativeSessionRecord;
   /** history를 기록에 올리지 못한 이유. 있으면 기록은 비어 있고 그 세션은 건너뛰어야 한다 */
   historyError?: string | null;
+}
+
+export interface NativeStopStep {
+  name: string;
+  /** 실패해도 다음 단계로 간다 */
+  swallow: boolean;
+}
+
+export interface NativeStatusChange {
+  /** 거짓이면 늦은 결과라 바뀌지 않았다(`status`·`error`는 지금 값) */
+  applied: boolean;
+  status: string;
+  error?: string | null;
+}
+
+export interface NativeBootRequest {
+  /** `ready`(이미 켜짐) · `stopped`(중지됨 또는 멈추는 중) · `wait`(켜는 중) · `start`(켜기를 시작한다) */
+  action: 'ready' | 'stopped' | 'wait' | 'start';
+  /** `start`일 때 이 켜기의 세대 */
+  generation: number;
+  /** 거짓이면 상태가 바뀌지 않았다(`start`인데 이미 `starting`이었다 포함) */
+  changed: boolean;
+  status: string;
+  error?: string | null;
+}
+
+export interface NativeStopResult {
+  ok: boolean;
+  /** 던진 단계 */
+  step?: string | null;
+  message?: string | null;
+}
+
+export interface NativeSessionState {
+  readonly status: string;
+  readonly error: string | null;
+  readonly stopping: boolean;
+  readonly generation: number;
+  /** 켜기 `generation`이 지금도 이 세션의 켜기인가(멈추는 중이거나 세대가 지났거나 멈췄으면 거짓) */
+  live(generation: number): boolean;
+  requestBoot(): NativeBootRequest;
+  bootFinished(generation: number, ok: boolean, error?: string | null): NativeStatusChange;
+  /** `stopped`(이미 멈춤) · `joined`(다른 호출이 멈추는 중) · `started`(이 호출이 멈춘다) */
+  beginStop(): 'stopped' | 'joined' | 'started';
+  /** `started`를 받은 호출이 부른다. 단계마다 `hook(단계 이름)`이 불린다. hook은 성공하면 null, 실패하면 이유를 돌려준다(던지지 않는다) */
+  stop(hook: (step: string) => Promise<string | null>): Promise<NativeStopResult>;
+  /** `joined`를 받은 호출이 부른다 */
+  joinStop(): Promise<NativeStopResult>;
+}
+
+export interface NativeClaimResult {
+  token: number;
+  fail?: NativeLifecycleFail | null;
+}
+
+export interface NativeSessionRegistry {
+  /** 실행 중인 세션(세션 맵에 든 것)을 올린다. 같은 id가 있으면 바꾼다 */
+  register(id: string, state: NativeSessionState, local: boolean, workDir: string): void;
+  unregister(id: string): void;
+  /** 이어받기를 시작한다. 세션이 없으면 404, 멈추지 않았으면 409, 이미 이어받는 중이면 409. 통과하면 null이고 `resuming`에 든다 */
+  beginResume(id: string, archived: boolean): NativeLifecycleFail | null;
+  endResume(id: string): void;
+  resuming(id: string): boolean;
+  /** 내 폴더 세션이 쓸 폴더를 잡는다. 글자나 폴더의 정체(장치·inode)가 같은 폴더를 다른 세션이 쓰거나 다른 시작이 잡고 있으면 거절한다 */
+  claimFolder(root: string, sessionId?: string | null): NativeClaimResult;
+  releaseClaim(token: number): void;
+  claimed(): number;
 }
 
 export interface NativeRunnerCore {

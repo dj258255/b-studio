@@ -6116,6 +6116,248 @@ pub fn is_sandbox_id(id: String) -> bool {
     bstudio_session::lifecycle::is_sandbox_id(&id)
 }
 
+// ── 세션 상태 전이·멈추기·이어받기 판정·폴더 점유(ADR-205, 4f B2b) ──
+// 판정은 bstudio-session(status·registry)이 한다. 부수 효과(샌드박스·터미널·관문·감시·저장)는 TS가 쥐고, 멈추기는 단계마다 `hook`으로 TS를 부른다.
+// TS 껍데기: apps/studio/lib/server/session-status.ts
+use bstudio_session::registry as session_registry;
+use bstudio_session::status as session_status;
+
+impl From<session_registry::Fail> for LifecycleFail {
+    fn from(fail: session_registry::Fail) -> Self {
+        Self { status: u32::from(fail.status), message: fail.message }
+    }
+}
+
+/// 상태가 바뀐 것을 TS에 알린다. `applied`가 거짓이면 바뀌지 않았다(늦은 결과)
+#[napi(object)]
+pub struct StatusChangeJs {
+    pub applied: bool,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// `requestBoot`의 결과. `action`: `ready` · `stopped` · `wait` · `start`. `start`일 때 `generation`이 이 켜기의 세대이고, `changed`면 `status`(`starting`)로 바뀌었다
+#[napi(object)]
+pub struct BootRequestJs {
+    pub action: String,
+    pub generation: f64,
+    pub changed: bool,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+/// 멈추기의 결과. 던진 단계가 있으면 `ok`가 거짓이고 그 단계 이름과 이유가 있다
+#[napi(object)]
+pub struct StopResultJs {
+    pub ok: bool,
+    pub step: Option<String>,
+    pub message: Option<String>,
+}
+
+#[napi(object)]
+pub struct StopStepJs {
+    pub name: String,
+    /// 실패해도 다음 단계로 간다
+    pub swallow: bool,
+}
+
+fn stop_result(outcome: session_status::StopOutcome) -> StopResultJs {
+    match outcome {
+        Ok(()) => StopResultJs { ok: true, step: None, message: None },
+        Err(failure) => StopResultJs { ok: false, step: Some(failure.step), message: Some(failure.message) },
+    }
+}
+
+/// 멈추기의 단계 목록(순서대로). 마지막이 `flush_persist`다
+#[napi]
+pub fn session_stop_steps() -> Vec<StopStepJs> {
+    session_status::STOP_STEPS
+        .iter()
+        .chain(std::iter::once(&session_status::FLUSH_STEP))
+        .map(|step| StopStepJs { name: step.name.to_owned(), swallow: step.failure == session_status::Failure::Swallow })
+        .collect()
+}
+
+/// 세션 하나의 상태(`idle`·`starting`·`ready`·`failed`·`stopped`)와 멈추는 중 여부·켜기 세대. TS의 `Session`이 하나씩 쥔다
+#[napi]
+pub struct SessionState {
+    inner: Arc<session_status::SessionState>,
+}
+
+#[napi]
+impl SessionState {
+    /// `initial`은 `idle` 또는 `starting`이다
+    #[napi(constructor)]
+    pub fn new(initial: String) -> Result<Self> {
+        let status = session_status::SessionStatus::parse(&initial).and_then(session_status::SessionState::new).ok_or_else(|| Error::from_reason(format!("처음 상태는 idle 또는 starting이어야 합니다: {initial}")))?;
+        Ok(Self { inner: Arc::new(status) })
+    }
+
+    #[napi(getter)]
+    pub fn status(&self) -> String {
+        self.inner.status().as_str().to_owned()
+    }
+
+    #[napi(getter)]
+    pub fn error(&self) -> Option<String> {
+        self.inner.error()
+    }
+
+    #[napi(getter)]
+    pub fn stopping(&self) -> bool {
+        self.inner.stopping()
+    }
+
+    #[napi(getter)]
+    pub fn generation(&self) -> f64 {
+        self.inner.generation() as f64
+    }
+
+    /// 켜기 `generation`이 지금도 이 세션의 켜기인가
+    #[napi]
+    pub fn live(&self, generation: f64) -> bool {
+        self.inner.live(generation as u64)
+    }
+
+    #[napi]
+    pub fn request_boot(&self) -> BootRequestJs {
+        use session_status::BootRequest;
+        let current = |change: Option<session_status::Change>, action: &str, generation: u64| {
+            let changed = change.is_some();
+            let change = change.unwrap_or_else(|| self.inner.current());
+            BootRequestJs { action: action.to_owned(), generation: generation as f64, changed, status: change.status.as_str().to_owned(), error: change.error }
+        };
+        match self.inner.request_boot() {
+            BootRequest::Ready => current(None, "ready", 0),
+            BootRequest::Stopped => current(None, "stopped", 0),
+            BootRequest::Wait => current(None, "wait", 0),
+            BootRequest::Start { generation, change } => current(change, "start", generation),
+        }
+    }
+
+    /// 켜기가 끝났다. 지금 세대의 켜기이고 멈추는 중이 아닐 때만 `applied`다
+    #[napi]
+    pub fn boot_finished(&self, generation: f64, ok: bool, error: Option<String>) -> StatusChangeJs {
+        let outcome = if ok { session_status::BootOutcome::Ready } else { session_status::BootOutcome::Failed(error.unwrap_or_default()) };
+        match self.inner.boot_finished(generation as u64, outcome) {
+            Some(change) => StatusChangeJs { applied: true, status: change.status.as_str().to_owned(), error: change.error },
+            None => {
+                let current = self.inner.current();
+                StatusChangeJs { applied: false, status: current.status.as_str().to_owned(), error: current.error }
+            }
+        }
+    }
+
+    /// `stopped`(이미 멈춤) · `joined`(다른 호출이 멈추는 중) · `started`(이 호출이 멈춘다)
+    #[napi]
+    pub fn begin_stop(&self) -> String {
+        match self.inner.begin_stop() {
+            session_status::BeginStop::AlreadyStopped => "stopped",
+            session_status::BeginStop::Joined => "joined",
+            session_status::BeginStop::Started => "started",
+        }
+        .to_owned()
+    }
+
+    /// `beginStop`이 `started`를 돌려준 호출이 부른다. 단계마다 `hook(단계 이름)`을 불러 그 부수 효과를 TS가 한다. hook은 성공하면 null, 실패하면 이유를 돌려준다(던지지 않는다)
+    #[napi]
+    pub fn stop(&self, env: Env, hook: ThreadsafeFunction<String, Promise<Option<String>>, String, Status, false>) -> Result<AsyncBlock<StopResultJs>> {
+        let inner = self.inner.clone();
+        let hook = Arc::new(hook);
+        AsyncBlockBuilder::new(async move {
+            let outcome = inner
+                .run_stop(|name| {
+                    let hook = hook.clone();
+                    async move {
+                        let pending = hook.call_async(name.to_owned()).await.map_err(|error| format!("{name} 단계를 부르지 못했습니다: {}", error.reason))?;
+                        match pending.await {
+                            Ok(None) => Ok(()),
+                            Ok(Some(message)) => Err(message),
+                            Err(error) => Err(error.reason.clone()),
+                        }
+                    }
+                })
+                .await;
+            Ok(stop_result(outcome))
+        })
+        .build(&env)
+    }
+
+    /// `beginStop`이 `joined`를 돌려준 호출이 부른다. 멈추는 중인 호출이 끝나기를 기다려 그 결과를 돌려준다
+    #[napi]
+    pub fn join_stop(&self, env: Env) -> Result<AsyncBlock<StopResultJs>> {
+        let inner = self.inner.clone();
+        AsyncBlockBuilder::new(async move { Ok(stop_result(inner.join_stop().await)) }).build(&env)
+    }
+}
+
+#[napi(object)]
+pub struct ClaimResultJs {
+    /// 잡았으면 풀 때 쓰는 번호
+    pub token: f64,
+    pub fail: Option<LifecycleFail>,
+}
+
+/// 세션 맵 수준의 상태: 실행 중인 세션의 상태, 이어받는 중인 세션, 내 폴더 세션의 폴더 점유
+#[napi]
+pub struct SessionRegistry {
+    inner: session_registry::Registry,
+}
+
+#[napi]
+impl SessionRegistry {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self { inner: session_registry::Registry::new() }
+    }
+
+    /// 실행 중인 세션(세션 맵에 든 것)을 올린다. `local`은 내 폴더 세션, `work_dir`은 그 세션의 작업 폴더(내 폴더 세션은 사용자 폴더)다. 같은 id가 있으면 바꾼다
+    #[napi]
+    pub fn register(&self, id: String, state: &SessionState, local: bool, work_dir: String) {
+        self.inner.register(&id, state.inner.clone(), local, &work_dir);
+    }
+
+    #[napi]
+    pub fn unregister(&self, id: String) {
+        self.inner.unregister(&id);
+    }
+
+    /// 이어받기를 시작한다. 세션이 없으면 404, 멈추지 않았으면 409, 이미 이어받는 중이면 409. 통과하면 null이고 `resuming`에 든다
+    #[napi]
+    pub fn begin_resume(&self, id: String, archived: bool) -> Option<LifecycleFail> {
+        self.inner.begin_resume(&id, archived).err().map(LifecycleFail::from)
+    }
+
+    #[napi]
+    pub fn end_resume(&self, id: String) {
+        self.inner.end_resume(&id);
+    }
+
+    #[napi]
+    pub fn resuming(&self, id: String) -> bool {
+        self.inner.resuming(&id)
+    }
+
+    /// 내 폴더 세션이 쓸 폴더를 잡는다. 글자가 같거나 폴더의 정체(장치·inode)가 같은 폴더에서 실행 중인 다른 세션이 있거나 다른 시작이 잡고 있으면 거절한다
+    #[napi]
+    pub fn claim_folder(&self, root: String, session_id: Option<String>) -> ClaimResultJs {
+        match self.inner.claim_folder(&root, session_id.as_deref()) {
+            Ok(token) => ClaimResultJs { token: token as f64, fail: None },
+            Err(fail) => ClaimResultJs { token: 0.0, fail: Some(LifecycleFail::from(fail)) },
+        }
+    }
+
+    #[napi]
+    pub fn release_claim(&self, token: f64) {
+        self.inner.release_claim(token as u64);
+    }
+
+    #[napi]
+    pub fn claimed(&self) -> u32 {
+        self.inner.claimed() as u32
+    }
+}
+
 /// 기록의 history로 세션 파일 한 번 쓰기(줄·예약 없이). `full_history`가 거짓이면 저장용 history(`trimHistory`), 참이면 기록 전체다.
 /// 바이트는 이 호출 안에서 만들고(같은 순간의 기록) 파일 쓰기는 JS 스레드 밖에서 한다. `head`·`tail`이 객체 글자가 아니면 던진다
 #[napi]
