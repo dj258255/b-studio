@@ -10111,6 +10111,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 ### 덧붙임: 4f B1b 결과 — 세션의 영속(저장 예약·쓰기 줄·읽기·닫기)을 Rust `Persister`로 ([#1253](https://github.com/dj258255/b-studio/issues/1253), ADR-203)
 - `toPersisted`의 history 조립·`writeSession`·`readSessions`·`closeUnfinished`와 `schedulePersist`·`flushPersist`를 `crates/bstudio-session`의 `Persister`·`read_sessions`·`close_unfinished`로 옮겼다(TS 껍데기 `session-persist.ts`·`session-store.ts`). TS는 history를 뺀 `head`·`tail` 두 글자만 건네고 history는 Rust가 자기 기록에서 같은 틱에 끼운다. 저장 파일은 옛 `JSON.stringify(toPersisted(session))`와 바이트까지 같다(차등 시험). 옛 TS는 `session-store-legacy.ts`에 남겼다.
 - 시험이 새 코드의 결함 하나를 먼저 찾았다: Rust가 부르는 TS 콜백이 던지면 napi가 프로세스를 끝내거나 Node가 경고하던 것(트러블슈팅 210). 저장 한 번이 메인 스레드를 막는 시간은 기록 5,000개에서 약 0.6ms→0.05ms(작은 이벤트만)·약 13ms→0.6ms(10%가 20KB)다(ADR-203의 "비용(B1b)").
+- 실제 세션 실측(2026-11-16): 저장, studio를 내렸다 띄운 뒤의 복구, 이어받기·멈추기 저장, 이전 판이 남긴 세션 18개 복구([기록](experiments/2026-11-16-b1b-session-persist-native.md)).
 
 ## ADR-196 보호 경로의 "되돌림"은 이 실행에서 처음 쓰기 직전에 고정한 내용과 바이트까지 같을 때만 인정한다
 
@@ -10846,7 +10847,7 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - `emit`은 `persist.schedule()`의 napi 호출 한 번이 늘었다(0.4µs). 이미 예약돼 있을 때도 부르므로 옛 `if (timer) return`(0.005µs)보다 느리다. 이 크기는 `emit`의 push(1.85µs)의 20% 안쪽이다.
 
 ### B1b 남은 한계
-- 이 PR은 실제 세션에서 재지 않았다(세션의 주인이 실측한다: 저장, studio 다시 띄우기, 복구). 단위·차등·기존 세션 시험으로만 확인했다.
+- **실제 세션**(2026-11-16, Claude Code CLI 2.1.325, vf3): 이전 판들이 남긴 세션 18개를 모두 복구했다. 새 세션 하나를 돌린 뒤 저장 파일의 키 순서가 옛 `toPersisted`와 같았고 `JSON.stringify(JSON.parse(파일))`와 바이트까지 같았다. `pnpm studio stop`(종료 때 동기 저장) 뒤 다시 띄우자 목록에 돌아왔고, SSE 되감기 이벤트 35개가 저장 파일의 history와 글자까지 같았다. 이어받기 → 멈추기도 저장했고 `.tmp`는 남지 않았다. 같은 폴더의 19개를 옛 TS 읽기와 새 Rust 읽기가 같게 읽었다(history 1,342개, [기록](experiments/2026-11-16-b1b-session-persist-native.md)). B1a의 기록도 이 실측으로 처음 실제 세션을 지났다.
 - 비용 숫자는 한 대(macOS arm64)에서 잰 값이다. Linux에서는 재지 않았다. 세션 수십 개가 한꺼번에 저장될 때의 비용은 재지 않았다(세션 하나의 값만 있다).
 - 정렬하지 않은 폴더 읽기(Linux ext4 등)는 이 기계(APFS)에서 재현하지 못한다. 이름 정렬은 단위 시험(`sort_names`)으로만 확인한다(정렬을 빼는 변이는 이 기계의 폴더 순서가 이미 이름순이라 통합 시험에서 살아남는다).
 - 임시 파일 이름이 겹칠 때 새 이름을 고르는 길(`create_new`)은 8자 무작위가 겹쳐야 시험으로 닿을 수 없다(변이가 살아남는다).
