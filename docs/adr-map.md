@@ -281,7 +281,7 @@
 | [ADR-199](decisions.md#adr-199-화면-확인-러너를-rust-cdp로-옮긴다-파이프로-chromium을-직접-말하고-출처-제한-두-층은-같은-판정으로-옮긴다) | Playwright 대신 `--remote-debugging-pipe` CDP, 격리된 실행 환경. 게이트의 기본 러너(A6c-3) | 유효·덧붙임 |
 | [ADR-201](decisions.md#adr-201-훅mcp-서버의-전송은-rust가-하고-처리는-ts-콜백에-둔다-http-머리는-직접-읽고-본문-해석은-b단계까지-ts에-남긴다) | 훅·MCP 서버의 전송(리스너·Host/토큰·라우트 원문 비교·본문 상한·닫기)은 Rust, 처리는 TS 콜백. HTTP 머리는 hyper 대신 직접 읽음(A7a). MCP 서버는 SDK 대신 stateless streamable HTTP를 직접 구현해 옛 SDK 서버와 차등으로 맞춤(A7b) | 유효 |
 | [ADR-202](decisions.md#adr-202-지원-러너의-메시지-루프와-실행-상태는-rust가-쥐고-게이트결과도구-실행은-ts-콜백에-둔다-도구-순서-장부도-rust-객체로-mcp-서버와-나눠-쥔다) | 지원 러너의 메시지 루프·실행 상태(턴·사용량·result·게이트 분기·승격·네트워크 재시도·되묻기·다시 띄우기)는 Rust가 CLI 프로세스를 직접 쥐고 돌리고, 게이트·결과 조립·도구 실행은 TS 콜백. 도구 순서 장부는 Rust 객체로 MCP 서버와 나눠 쥠(A8b) | 유효 |
-| [ADR-203](decisions.md#adr-203-세션-기록과-영속은-bstudio-session이-쥐고-세션의-나머지-상태는-저장할-때-ts가-준다) | 세션의 이벤트 기록(history 5,000·logs 1,000, 마지막 요청·끝 n개·되감기·저장용 줄이기)을 Rust `SessionRecord`가 쥠(B1a). 이벤트는 JSON 글자 그대로 들고, 영속은 B1b에서 `bstudio-session`으로(계획) | 유효 · B1a 결과, B1b 계획 |
+| [ADR-203](decisions.md#adr-203-세션-기록과-영속은-bstudio-session이-쥐고-세션의-나머지-상태는-저장할-때-ts가-준다) | 세션의 이벤트 기록(history 5,000·logs 1,000, 마지막 요청·끝 n개·되감기·저장용 줄이기)을 Rust `SessionRecord`가 쥠(B1a). 이벤트는 JSON 글자 그대로 들고, 영속(저장 예약·쓰기 줄·읽기·끝나지 못한 요청 닫기)도 `Persister`·`read_sessions`·`close_unfinished`로 `bstudio-session`이 쥠(B1b) | 유효 · B1a·B1b 결과 |
 
 ### 문서·작업 방식
 
@@ -571,4 +571,4 @@
 | [ADR-200](decisions.md#adr-200-지원-경로를-desk와-이-컴퓨터-방식-세션-터미널로-넓히고-실험-스위치-없이-연다-실험-기능은-4g-전에-하나씩-물어-지운다) | 지원 경로에 desk와 이 컴퓨터 방식 세션 터미널을 더해 실험 스위치 없이 연다, 4g 전에 실험 기능을 하나씩 물어 지움 | 유효 | 문서·작업 방식 |
 | [ADR-201](decisions.md#adr-201-훅mcp-서버의-전송은-rust가-하고-처리는-ts-콜백에-둔다-http-머리는-직접-읽고-본문-해석은-b단계까지-ts에-남긴다) | 훅·MCP 서버의 전송(리스너·Host/토큰·라우트 원문 비교·본문 상한·닫기)은 Rust, 처리는 TS 콜백. HTTP 머리는 hyper 대신 직접 읽음(A7a). MCP 서버는 SDK 대신 stateless streamable HTTP를 직접 구현해 옛 SDK 서버와 차등으로 맞춤(A7b) | 유효 | Rust 이전 |
 | [ADR-202](decisions.md#adr-202-지원-러너의-메시지-루프와-실행-상태는-rust가-쥐고-게이트결과도구-실행은-ts-콜백에-둔다-도구-순서-장부도-rust-객체로-mcp-서버와-나눠-쥔다) | 지원 러너의 메시지 루프·실행 상태(턴·사용량·result·게이트 분기·승격·네트워크 재시도·되묻기·다시 띄우기)는 Rust가 CLI 프로세스를 직접 쥐고 돌리고, 게이트·결과 조립·도구 실행은 TS 콜백. 도구 순서 장부는 Rust 객체로 MCP 서버와 나눠 쥠(A8b) | 유효 | Rust 이전 |
-| [ADR-203](decisions.md#adr-203-세션-기록과-영속은-bstudio-session이-쥐고-세션의-나머지-상태는-저장할-때-ts가-준다) | 세션의 이벤트 기록(history 5,000·logs 1,000, 마지막 요청·끝 n개·되감기·저장용 줄이기)을 Rust `SessionRecord`가 쥠(B1a). 이벤트는 JSON 글자 그대로 들고, 영속은 B1b에서 `bstudio-session`으로(계획) | 유효 · B1a 결과, B1b 계획 | Rust 이전 |
+| [ADR-203](decisions.md#adr-203-세션-기록과-영속은-bstudio-session이-쥐고-세션의-나머지-상태는-저장할-때-ts가-준다) | 세션의 이벤트 기록(history 5,000·logs 1,000, 마지막 요청·끝 n개·되감기·저장용 줄이기)을 Rust `SessionRecord`가 쥠(B1a). 이벤트는 JSON 글자 그대로 들고, 영속(저장 예약·쓰기 줄·읽기·끝나지 못한 요청 닫기)도 `Persister`·`read_sessions`·`close_unfinished`로 `bstudio-session`이 쥠(B1b) | 유효 · B1a·B1b 결과 | Rust 이전 |

@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, lstat, mkdir, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -334,6 +334,7 @@ import { findProject } from './projects';
 import { generatedFilePaths, overlayGeneratedFiles } from './project-registry';
 import { notifyAgentsChanged, pulseAfterCalls } from './agents-pulse';
 import { SessionRecord } from './session-record';
+import { SessionPersist } from './session-persist';
 import { computeOffServices, serviceSelectionFor, serviceSelectionStateDir, writeServiceSelection } from './service-selection';
 import {
   archivedSnapshot,
@@ -342,11 +343,13 @@ import {
   geminiStateDirOf,
   isProcessAlive,
   openCodeStateDirOf,
-  readSessions,
+  readStoredSessions,
+  sessionFile,
+  splitPersisted,
   stateDirOf,
-  writeSession,
-  writeSessionSync,
-  type PersistedSession,
+  writeSidecar,
+  writeStoredSession,
+  type PersistedBody,
   type RememberedGit,
 } from './session-store';
 
@@ -523,7 +526,8 @@ interface Session {
   relaying: Promise<void>;
   /** 마지막으로 대화나 상태가 바뀐 시각. 세션 목록 정렬에 쓴다 */
   updatedAt: string;
-  persist: { timer?: NodeJS.Timeout; chain: Promise<void> };
+  /** 저장 예약과 쓰기 줄(Rust `Persister`, ADR-203 B1b). `emit`이 예약하고 상태가 크게 바뀌는 자리가 바로 쓴다 */
+  persist: SessionPersist;
   /**
    * 가장 최근 체크포인트를 만든 실행의 게이트 확인 결과(테스트·화면 확인 등 이름 붙은 확인, AgentResult.checks).
    * "명세" 탭(ADR-079)이 이름에 요구사항 id가 들어간 확인의 통과·실패를 증거로 삼는다. 체크포인트를 남기지 못한
@@ -579,7 +583,8 @@ export interface StoredTestRun {
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
 interface ArchivedSession {
-  data: PersistedSession;
+  /** 저장한 상태. history는 `record`(Rust)가 쥔다 */
+  data: PersistedBody;
   snapshot: SessionSnapshot;
   /** 기록. 보관 세션은 logs가 없다 */
   record: SessionRecord;
@@ -593,8 +598,6 @@ const USAGE_INTERVAL_MS = 5_000;
 /** 시작에 실패했을 때 서비스마다 읽어 둘 마지막 로그 줄 수와 그 읽기에 쓸 시간 */
 const FAILURE_LOG_TAIL = 100;
 const FAILURE_LOG_TIMEOUT_MS = 10_000;
-/** 도구 호출마다 이벤트가 오므로 모아서 쓴다 */
-const PERSIST_DELAY_MS = 500;
 const GENERATED = /[/\\](node_modules|\.next|build|\.gradle|\.venv)([/\\]|$)/;
 const INTERRUPTED_BY_RESTART = '스튜디오 서버가 멈춰 끝내지 못했습니다';
 const INTERRUPTED_BY_STOP = '샌드박스를 중지해 끝내지 못했습니다';
@@ -969,9 +972,12 @@ type NewSession = Pick<
   };
 
 function newSession({ history, ...fields }: NewSession): Session {
-  return {
+  const record = new SessionRecord({ logs: true, history });
+  // 저장할 때 Rust가 이 기록의 history를 끼운다. 콜백은 쓰기를 시작할 때 불려 그때의 세션 상태를 읽는다(아래 `session`은 그 전에 채워진다)
+  const persist = new SessionPersist(record, () => persistState(session));
+  const session: Session = {
     ...fields,
-    record: new SessionRecord({ logs: true, history }),
+    record,
     // 덤프는 에이전트 도구가 접근할 수 없고 커밋에도 들어가지 않는 .git 아래에 둔다
     databases: new DatabaseBranches(fields.sandbox, fields.project, path.join(fields.checkpoints.gitDir, 'b-studio', 'databases')),
     settledConversation: fields.conversation.length,
@@ -980,8 +986,9 @@ function newSession({ history, ...fields }: NewSession): Session {
     relayed: new Map(),
     relaying: Promise.resolve(),
     updatedAt: new Date().toISOString(),
-    persist: { chain: Promise.resolve() },
+    persist,
   };
+  return session;
 }
 
 function projectViews(
@@ -1312,7 +1319,7 @@ export async function deleteSession(id: string): Promise<void> {
   assertWithinSessionsRoot(dir);
 
   if (live) {
-    clearTimeout(live.persist.timer);
+    live.persist.cancel();
     store.sessions.delete(id);
     notifyAgentsChanged();
   }
@@ -1358,14 +1365,14 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
   resuming.add(id);
   let release: (() => void) | undefined;
   try {
-    let data: PersistedSession;
+    let data: PersistedBody;
     let history: StudioEvent[];
     if (live) {
       // 중지한 세션의 늦은 저장이 새 세션의 파일을 덮어쓰지 않게 기다린다
-      clearTimeout(live.persist.timer);
-      await live.persist.chain;
-      data = toPersisted(live);
-      history = closeUnfinished(data.history, INTERRUPTED_BY_STOP);
+      live.persist.cancel();
+      await live.persist.idle();
+      data = persistedBody(live);
+      history = closeUnfinished(live.record.trimmedHistory(), INTERRUPTED_BY_STOP);
     } else {
       await entry!.cleanup;
       data = entry!.data;
@@ -1534,7 +1541,8 @@ export function recoverSessions(): Promise<void> {
 }
 
 async function recover(): Promise<void> {
-  for (const data of await readSessions(sessionsRoot())) {
+  for (const stored of await readStoredSessions(sessionsRoot())) {
+    const { data } = stored;
     const { id } = data.snapshot;
     if (store.sessions.has(id) || archived.has(id)) continue;
     // 같은 세션 폴더를 쓰는 다른 스튜디오 프로세스가 실행 중이면 그 세션은 건드리지 않는다
@@ -1542,11 +1550,12 @@ async function recover(): Promise<void> {
 
     // idle은 샌드박스를 한 번도 켜지 않은 세션이라 정리할 컨테이너가 없다. 끼어든 요청도 없다
     const interrupted = data.snapshot.status !== 'stopped' && data.snapshot.status !== 'idle';
-    // 저장한 기록을 세션 기록(Rust)에 올리지 못하면(예: JSON.stringify가 재귀 깊이로 던지는 손으로 고친 파일) 그 세션만 건너뛴다.
-    // 파일은 그대로 두고, 다른 세션의 복구는 이어간다
-    let record: SessionRecord;
+    // 저장한 기록을 세션 기록(Rust)에 올리지 못하거나(없거나 배열이 아니거나 JSON 문법 밖이거나 너무 깊다) 끝나지 못한 요청을 닫지 못하면
+    // (예: null 이벤트) 그 세션만 건너뛴다. 파일은 그대로 두고, 다른 세션의 복구는 이어간다
+    const { record } = stored;
     try {
-      record = new SessionRecord({ logs: false, history: closeUnfinished(data.history, interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP) });
+      if (stored.historyError) throw new Error(stored.historyError);
+      record.closeUnfinished(interrupted ? INTERRUPTED_BY_RESTART : INTERRUPTED_BY_STOP);
     } catch (error) {
       console.error(`[b-studio] 세션 ${id}의 저장한 기록을 읽지 못해 복구하지 않았습니다`, describe(error));
       continue;
@@ -1602,8 +1611,8 @@ async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
   for (const listener of entry.listeners) listener({ type: 'status', status: 'stopped', error });
   // 정리하지 못했으면 파일을 그대로 두어 다음 실행에서 다시 정리한다
   if (cleaned) {
-    entry.data = { ...entry.data, savedAt: new Date().toISOString(), owner: { pid: process.pid }, snapshot: entry.snapshot, history: entry.record.history() };
-    await writeSession(entry.data).catch((cause: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', cause));
+    entry.data = { ...entry.data, savedAt: new Date().toISOString(), owner: { pid: process.pid }, snapshot: entry.snapshot };
+    await writeStoredSession(entry.data, entry.record).catch((cause: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', cause));
   }
 }
 
@@ -5166,9 +5175,8 @@ async function readRequirementExtractionDraftFile(session: Session): Promise<Per
 }
 
 async function writeRequirementExtractionDraftFile(session: Session, draft: PersistedRequirementsExtractionDraft): Promise<void> {
-  const file = requirementsDraftFile(session);
-  await mkdir(path.dirname(file), { recursive: true });
-  await writeFile(file, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600 });
+  // 임시 파일에 쓴 뒤 이름을 바꾼다(Rust). 쓰는 도중 멈춰도 이전 파일이 남는다
+  await writeSidecar(requirementsDraftFile(session), `${JSON.stringify(draft, null, 2)}\n`, 0o600);
 }
 
 /** 지금 남아 있는 추출 결과를 돌려준다("추출 결과" 하위 화면이 항상 보여준다). 없으면 undefined */
@@ -6134,17 +6142,13 @@ async function readTestResultsFile(session: Session): Promise<Record<string, Sto
 
 /** 지금 메모리의 testResults를 사이드카 파일에 남긴다(requirements-draft.json과 같은 임시 파일 + rename 방식) */
 async function writeTestResultsFile(session: Session): Promise<void> {
-  const file = testResultsFile(session);
-  await mkdir(path.dirname(file), { recursive: true });
   const data: PersistedTestResults = {
     version: 1,
     savedAt: new Date().toISOString(),
     results: Object.fromEntries(session.testResults ?? new Map()),
   };
-  // 임시 파일 이름은 호출마다 달라야 한다 — 같으면 겹쳐 쓰는 두 저장이 서로의 임시 파일을 지우고 rename이 ENOENT로 깨진다
-  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-  await writeFile(temp, JSON.stringify(data, null, 2));
-  await rename(temp, file);
+  // 폴더를 만들고 호출마다 다른 임시 파일에 쓴 뒤 이름을 바꾼다(Rust). 같은 이름이면 겹쳐 쓰는 두 저장이 서로의 임시 파일을 지우고 rename이 ENOENT로 깨진다
+  await writeSidecar(testResultsFile(session), JSON.stringify(data, null, 2));
 }
 
 /** 실행이 끝난 뒤 사이드카에 남긴다. 남기지 못해도(디스크 문제 등) 방금 돈 실행 자체는 그대로 쓸 수 있어야 하므로 던지지 않는다 */
@@ -6787,13 +6791,13 @@ function emit(session: Session, event: StudioEvent): void {
   if (event.type !== 'log' && event.type !== 'deploy_log') notifyAgentsChanged();
 }
 
-function toPersisted(session: Session): PersistedSession {
+/** 저장할 상태에서 history를 뺀 것. 키 순서가 파일의 키 순서다(`version`·`savedAt`·`owner`·`snapshot` 뒤에 history가 오고 나머지가 이 순서로 온다) */
+function persistedBody(session: Session): PersistedBody {
   return {
     version: 1,
     savedAt: session.updatedAt,
     owner: { pid: process.pid },
     snapshot: session.snapshot,
-    history: session.record.trimmedHistory(),
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
@@ -6811,20 +6815,19 @@ function toPersisted(session: Session): PersistedSession {
   };
 }
 
+/** `Persister`가 쓰기를 시작할 때 부르는 상태: 파일 경로와 `head`·`tail`. 이 두 글자 사이에 Rust가 기록의 저장용 history를 끼운다 */
+function persistState(session: Session): { file: string; head: string; tail: string } {
+  return { file: sessionFile(stateDirOf(session.snapshot)), ...splitPersisted(persistedBody(session)) };
+}
+
+/** 도구 호출마다 이벤트가 오므로 모아서 쓴다(Rust가 500ms 모은다). 이미 예약돼 있으면 아무것도 하지 않는다 */
 function schedulePersist(session: Session): void {
-  if (session.persist.timer) return;
-  session.persist.timer = setTimeout(() => void flushPersist(session), PERSIST_DELAY_MS);
-  session.persist.timer.unref();
+  session.persist.schedule();
 }
 
 /** 쓰기를 차례로 이어 붙여 같은 임시 파일을 동시에 쓰지 않는다. 저장에 실패해도 세션은 계속한다 */
 function flushPersist(session: Session): Promise<void> {
-  clearTimeout(session.persist.timer);
-  session.persist.timer = undefined;
-  session.persist.chain = session.persist.chain
-    .then(() => writeSession(toPersisted(session)))
-    .catch((error: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', error));
-  return session.persist.chain;
+  return session.persist.flush();
 }
 
 interface PreviewConfig {
@@ -8727,7 +8730,7 @@ function registerCleanup(): void {
     for (const session of store.sessions.values()) {
       if (session.snapshot.status === 'stopped') continue;
       session.stop.abort();
-      clearTimeout(session.persist.timer);
+      session.persist.cancel();
       try {
         // 샌드박스를 내리는 명령과, 그 밖에 있는 세션 터미널의 컨테이너를 지우는 명령. 터미널의 컨테이너는 실험 기능을 켰을 때만 있다
         const commands = [providerFromEnv().cleanupCommand?.(session.sandbox.id), sessionTerminalAllowed() ? agentCleanupCommand(session.sandbox.id) : undefined];
@@ -8738,7 +8741,7 @@ function registerCleanup(): void {
           child.on('error', (error) => console.error('[b-studio] 샌드박스 정리 명령을 실행하지 못했습니다', error));
           child.unref();
         }
-        writeSessionSync(toPersisted(session));
+        session.persist.flushSync(persistState(session));
       } catch (error) {
         console.error('[b-studio] 종료할 때 세션을 정리하지 못했습니다', session.snapshot.id, error);
       }

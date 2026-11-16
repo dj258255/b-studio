@@ -18,6 +18,12 @@
 use bstudio_guard::js_json::{self, JsValue};
 use std::collections::VecDeque;
 
+mod close;
+mod json_text;
+pub mod persister;
+mod scan;
+pub mod store;
+
 pub const HISTORY_LIMIT: usize = 5_000;
 pub const LOG_LIMIT: usize = 1_000;
 /// 저장하는 history의 상한(`session-store.ts`의 `PERSISTED_HISTORY_LIMIT`)

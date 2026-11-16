@@ -1,9 +1,8 @@
-import { randomUUID } from 'node:crypto';
-import { mkdirSync, renameSync, writeFileSync } from 'node:fs';
-import { mkdir, readdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { Checkpoint, CliTier } from '@b-studio/agent';
+import type { CliTier } from '@b-studio/agent';
+import { native } from '@b-studio/sandbox';
 import type { SessionSnapshot, StudioEvent } from '../studio-events';
+import { SessionRecord } from './session-record';
 
 /** 세션 상태 폴더 안의 저장 위치. .git 아래라 에이전트 도구가 접근하지 못하고 커밋에도 들어가지 않는다 */
 const FILE = path.join('.git', 'b-studio', 'session.json');
@@ -111,71 +110,86 @@ export function trimHistory(history: readonly StudioEvent[]): StudioEvent[] {
   return history.filter((event) => !['log', 'usage', 'service', 'status', 'snapshot', 'deploy_log'].includes(event.type)).slice(-PERSISTED_HISTORY_LIMIT);
 }
 
-/** 서버가 멈춰 끝나지 못한 요청과 되돌리기를 닫는다. 그대로 두면 다시 그린 화면이 "처리 중"에 멈춘다 */
+/**
+ * 서버가 멈춰 끝나지 못한 요청과 되돌리기를 닫는다. 그대로 두면 다시 그린 화면이 "처리 중"에 멈춘다.
+ * Rust 기록(`SessionRecord.closeUnfinished`, ADR-203 B1b)이 한다. 옛 구현은 `session-store-legacy.ts`의 `legacyCloseUnfinished`다
+ */
 export function closeUnfinished(history: readonly StudioEvent[], reason: string): StudioEvent[] {
-  const openRuns = new Set<string>();
-  let openRestore: Checkpoint | undefined;
-  let openRemoteSync = false;
-  let openBackupRestore: string | undefined;
-  let openDeploy: Extract<StudioEvent, { type: 'deploy_started' }> | undefined;
-  for (const event of history) {
-    if (event.type === 'deploy_started') openDeploy = event;
-    else if (event.type === 'deploy_finished' || event.type === 'deploy_failed') openDeploy = undefined;
-    if (event.type === 'run_started') openRuns.add(event.runId);
-    else if (event.type === 'run_finished') openRuns.delete(event.runId);
-    else if (event.type === 'restore_started') openRestore = event.checkpoint;
-    else if (event.type === 'restored' || event.type === 'restore_failed') openRestore = undefined;
-    else if (event.type === 'backup_restore_started') openBackupRestore = event.backupId;
-    else if (event.type === 'backup_restored' || event.type === 'backup_restore_failed') openBackupRestore = undefined;
-    else if (event.type === 'remote_sync_started') openRemoteSync = true;
-    else if (event.type === 'remote_synced' || event.type === 'remote_sync_failed') openRemoteSync = false;
-  }
-  return [
-    ...history,
-    ...[...openRuns].map((runId): StudioEvent => ({ type: 'run_finished', runId, status: 'error', summary: reason })),
-    ...(openRestore ? [{ type: 'restore_failed', checkpoint: openRestore, error: reason } satisfies StudioEvent] : []),
-    ...(openBackupRestore ? [{ type: 'backup_restore_failed', backupId: openBackupRestore, error: reason } satisfies StudioEvent] : []),
-    ...(openRemoteSync ? [{ type: 'remote_sync_failed', error: reason } satisfies StudioEvent] : []),
-    ...(openDeploy ? [{ type: 'deploy_failed', action: openDeploy.action, target: openDeploy.target, error: reason } satisfies StudioEvent] : []),
-  ];
+  const record = new SessionRecord({ logs: false, history });
+  record.closeUnfinished(reason);
+  return record.history();
 }
 
-/** 쓰는 도중 서버가 멈춰도 이전 파일이 남도록 임시 파일에 쓴 뒤 이름을 바꾼다 */
+/** 저장 상태에서 history를 뺀 것. history는 세션의 기록(Rust `SessionRecord`)이 쥐고 저장할 때 `Persister`가 끼운다 */
+export type PersistedBody = Omit<PersistedSession, 'history'>;
+
+/**
+ * 저장할 상태를 두 글자로 가른다. Rust가 `head`의 끝 `}`와 `tail`의 앞 `{`를 떼고 사이에 `,"history":[…],`를 끼워 파일을 쓴다.
+ * `body`의 키 순서가 파일의 키 순서다: `version`·`savedAt`·`owner`·`snapshot`이 앞에 오고 나머지가 `history` 뒤에 그 순서로 온다
+ * (옛 `JSON.stringify(toPersisted(session))`와 바이트까지 같다)
+ */
+export function splitPersisted(body: PersistedBody): { head: string; tail: string } {
+  const { version, savedAt, owner, snapshot, ...rest } = body;
+  return { head: JSON.stringify({ version, savedAt, owner, snapshot }), tail: JSON.stringify(rest) };
+}
+
+/** 쓰는 도중 서버가 멈춰도 이전 파일이 남도록 임시 파일에 쓴 뒤 이름을 바꾼다(Rust). `data.history`를 그대로 쓴다 */
 export async function writeSession(data: PersistedSession): Promise<void> {
-  const file = sessionFile(stateDirOf(data.snapshot));
-  await mkdir(path.dirname(file), { recursive: true });
-  // 임시 파일 이름은 호출마다 달라야 한다. 같으면 같은 세션 파일에 동시에 쓰는 두 저장이 서로의 임시 파일을 지우고 rename이 ENOENT로 깨진다
-  const temp = `${file}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
-  await writeFile(temp, JSON.stringify(data));
-  await rename(temp, file);
+  const { history, ...body } = data;
+  const { head, tail } = splitPersisted(body);
+  await native.writeSessionRecord(new SessionRecord({ logs: false, history }).native, sessionFile(stateDirOf(data.snapshot)), head, tail, true);
 }
 
 /**
- * 종료 신호 처리처럼 기다릴 수 없는 곳에서 쓴다.
- * 진행 중일 수 있는 비동기 쓰기와 같은 임시 파일을 동시에 쓰지 않도록 이름을 달리한다
+ * 보관 세션(이전 프로세스가 남긴 세션)을 쓴다. `record`의 history 전체를 쓴다(저장용으로 줄이지 않는다: 옛 구현이 `entry.record.history()`를 그대로 썼다).
+ * 바이트는 이 호출 안에서 만든다
  */
-export function writeSessionSync(data: PersistedSession): void {
-  const file = sessionFile(stateDirOf(data.snapshot));
-  mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.exit.tmp`;
-  writeFileSync(temp, JSON.stringify(data));
-  renameSync(temp, file);
+export async function writeStoredSession(data: PersistedBody, record: SessionRecord): Promise<void> {
+  const { head, tail } = splitPersisted(data);
+  await native.writeSessionRecord(record.native, sessionFile(stateDirOf(data.snapshot)), head, tail, true);
 }
 
-/** 세션 폴더들에서 저장된 세션을 읽는다. 읽을 수 없거나 형식이 다른 파일은 건너뛴다 */
-export async function readSessions(root: string): Promise<PersistedSession[]> {
-  const entries = await readdir(root, { withFileTypes: true }).catch(() => []);
-  const sessions: PersistedSession[] = [];
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue;
-    const data = await readFile(sessionFile(path.join(root, entry.name)), 'utf8')
-      .then((text) => JSON.parse(text) as PersistedSession)
-      .catch(() => undefined);
-    if (data?.version === 1 && data.snapshot?.id && data.snapshot.workDir && data.sandbox?.id && Number.isInteger(data.owner?.pid)) {
-      sessions.push(data);
+/**
+ * 종료 신호 처리처럼 기다릴 수 없는 곳에서 쓴다. 진행 중일 수 있는 비동기 쓰기와 같은 임시 파일을 동시에 쓰지 않도록 이름을 달리한다.
+ * 세션이 살아 있으면 `SessionPersist.flushSync`를 쓴다(이 함수는 `data.history`를 그대로 쓴다)
+ */
+export function writeSessionSync(data: PersistedSession): void {
+  const { history, ...body } = data;
+  const { head, tail } = splitPersisted(body);
+  native.writeSessionRecordSync(new SessionRecord({ logs: false, history }).native, sessionFile(stateDirOf(data.snapshot)), head, tail, true);
+}
+
+/** 사이드카 파일(`test-results.json`·`requirements-draft.json`)을 원자적으로 쓴다: 임시 파일 → rename. `mode`는 새 파일의 권한 */
+export function writeSidecar(file: string, text: string, mode?: number): Promise<void> {
+  return native.writeFileAtomic(file, text, mode);
+}
+
+/** 읽은 세션 하나: `history`를 뺀 상태와 파일의 history를 올린 기록(logs 없음) */
+export interface StoredSession {
+  data: PersistedBody;
+  record: SessionRecord;
+  /** history를 기록에 올리지 못한 이유(없거나 배열이 아니거나 이벤트가 JSON 문법 밖이거나 너무 깊다). 있으면 그 세션만 건너뛰어야 한다. 파일은 그대로 둔다 */
+  historyError?: string;
+}
+
+/** 세션 폴더들에서 저장된 세션을 읽는다(Rust). 폴더가 아닌 항목·읽을 수 없는 파일·JSON이 아니거나 형식이 다른 파일은 건너뛴다 */
+export async function readStoredSessions(root: string): Promise<StoredSession[]> {
+  const sessions: StoredSession[] = [];
+  for (const found of await native.readSessions(root)) {
+    let data: PersistedBody;
+    try {
+      data = JSON.parse(found.rest) as PersistedBody;
+    } catch {
+      continue;
     }
+    sessions.push({ data, record: new SessionRecord({ native: found.record }), ...(found.historyError ? { historyError: found.historyError } : {}) });
   }
   return sessions;
+}
+
+/** `readStoredSessions`의 결과에 history를 객체로 다시 붙인다(시험과 옛 호출부용). history를 올리지 못한 세션은 뺀다 */
+export async function readSessions(root: string): Promise<PersistedSession[]> {
+  return (await readStoredSessions(root)).flatMap((stored) => (stored.historyError ? [] : [{ ...stored.data, history: stored.record.history() }]));
 }
 
 /** 신호 0은 보내지 않고 권한과 존재만 확인한다. 다른 사용자의 프로세스(EPERM)도 살아 있는 것으로 본다 */
@@ -189,7 +203,7 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 /** 샌드박스가 없는 세션의 화면 상태. 이전 주소와 사용량은 더 이상 의미가 없다 */
-export function archivedSnapshot(data: PersistedSession, error?: string): SessionSnapshot {
+export function archivedSnapshot(data: Pick<PersistedSession, 'snapshot'>, error?: string): SessionSnapshot {
   return {
     ...data.snapshot,
     status: 'stopped',

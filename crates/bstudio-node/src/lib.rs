@@ -5825,12 +5825,23 @@ pub fn runner_parse_line(line: String) -> Option<String> {
 }
 
 
-// ── 세션 이벤트 기록(ADR-203, 4f B1a) ──
-// 세션 하나의 history·logs와 질의. 구독자·SSE·저장 스케줄러는 TS 세션이 쥔다. 이벤트는 `JSON.stringify`한 글자(유한하지 않은 수는 `encodeNative`의 표시 객체)로 오가고,
+// ── 세션 이벤트 기록(ADR-203, 4f B1a)과 영속(4f B1b) ──
+// 세션 하나의 history·logs와 질의. 구독자·SSE는 TS 세션이 쥔다. 이벤트는 `JSON.stringify`한 글자(유한하지 않은 수는 `encodeNative`의 표시 객체)로 오가고,
 // 글자 그대로 들고 있다가 그대로 돌려준다. TS 껍데기: apps/studio/lib/server/session-record.ts
+// 기록은 `Arc<Mutex<…>>`다: 같은 세션의 `Persister`가 저장할 때 같은 기록을 읽는다(B1b).
 #[napi]
 pub struct SessionRecord {
-    inner: bstudio_session::SessionRecord,
+    inner: Arc<Mutex<bstudio_session::SessionRecord>>,
+}
+
+impl SessionRecord {
+    fn wrap(inner: bstudio_session::SessionRecord) -> Self {
+        Self { inner: Arc::new(Mutex::new(inner)) }
+    }
+
+    fn guard(&self) -> std::sync::MutexGuard<'_, bstudio_session::SessionRecord> {
+        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 }
 
 #[napi]
@@ -5838,58 +5849,220 @@ impl SessionRecord {
     /// `logs`가 거짓이면 보관 세션의 기록이다(logs 없음)
     #[napi(constructor)]
     pub fn new(logs: bool) -> Self {
-        Self { inner: bstudio_session::SessionRecord::new(logs) }
+        Self::wrap(bstudio_session::SessionRecord::new(logs))
     }
 
     /// `emit`의 버퍼 처리. 돌려주는 값은 "`updatedAt`을 바꾸고 저장을 예약할 것인가". JSON이 아니면 던진다
     #[napi]
-    pub fn push(&mut self, event_json: String) -> Result<bool> {
-        self.inner.push(event_json).map(|outcome| outcome.schedule).map_err(Error::from_reason)
+    pub fn push(&self, event_json: String) -> Result<bool> {
+        self.guard().push(event_json).map(|outcome| outcome.schedule).map_err(Error::from_reason)
     }
 
     /// 상한 없이 history 끝에 덧붙인다
     #[napi]
-    pub fn append(&mut self, event_json: String) -> Result<()> {
-        self.inner.append(event_json).map_err(Error::from_reason)
+    pub fn append(&self, event_json: String) -> Result<()> {
+        self.guard().append(event_json).map_err(Error::from_reason)
     }
 
     /// history를 통째로 바꾼다. 하나라도 JSON이 아니면 던지고 아무것도 바꾸지 않는다
     #[napi]
-    pub fn replace_history(&mut self, events_json: Vec<String>) -> Result<()> {
-        self.inner.replace_history(events_json).map_err(Error::from_reason)
+    pub fn replace_history(&self, events_json: Vec<String>) -> Result<()> {
+        self.guard().replace_history(events_json).map_err(Error::from_reason)
+    }
+
+    /// 서버가 멈춰 끝나지 못한 요청·되돌리기·원격 동기화·배포를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수.
+    /// 이벤트를 읽지 못하면 던지고 아무것도 덧붙이지 않는다
+    #[napi]
+    pub fn close_unfinished(&self, reason: String) -> Result<u32> {
+        self.guard().close_unfinished(&reason).map(|count| count as u32).map_err(Error::from_reason)
     }
 
     #[napi]
     pub fn has_logs(&self) -> bool {
-        self.inner.has_logs()
+        self.guard().has_logs()
     }
 
     /// history의 마지막 `run_started` 이벤트(글자 그대로). 없으면 null
     #[napi]
     pub fn last_run_started(&self) -> Option<String> {
-        self.inner.last_run_started().map(str::to_owned)
+        self.guard().last_run_started().map(str::to_owned)
     }
 
     /// 끝 n개를 JSON 배열 글자 하나로(이벤트 글자를 쉼표로 이은 것). 이벤트마다 napi 문자열을 만들고 `JSON.parse`를 부르는 비용을 한 번으로 줄인다
     #[napi]
     pub fn tail(&self, n: u32) -> String {
-        json_array(&self.inner.tail(n as usize))
+        json_array(&self.guard().tail(n as usize))
     }
 
     #[napi]
     pub fn history(&self) -> String {
-        json_array(&self.inner.history())
+        json_array(&self.guard().history())
     }
 
     #[napi]
     pub fn logs(&self) -> String {
-        json_array(&self.inner.logs())
+        json_array(&self.guard().logs())
     }
 
     #[napi]
     pub fn trimmed_history(&self) -> String {
-        json_array(&self.inner.trimmed_history())
+        json_array(&self.guard().trimmed_history())
     }
+}
+
+/// 세션 하나의 저장(ADR-203, 4f B1b): 500ms 모으기와 쓰기를 차례로 잇는 줄. TS 껍데기: apps/studio/lib/server/session-persist.ts
+/// `state`는 쓰기를 시작할 때 Node 메인 스레드에서 불린다. 파일 경로와 `head`·`tail`(JSON 객체 글자)을 돌려주고, Rust가 같은 순간에 기록의 저장용 history를 끼운다.
+/// 두 콜백은 약한 참조라 이 객체가 Node 프로세스를 붙잡지 않는다
+#[napi(object)]
+pub struct PersistState {
+    pub file: String,
+    /// `JSON.stringify({ version, savedAt, owner, snapshot })`
+    pub head: String,
+    /// `JSON.stringify({ conversation, demoIndex, … git })`(옛 `toPersisted`의 `history` 뒤 키들)
+    pub tail: String,
+    /// 상태를 만들지 못했다는 이유. 있으면 쓰지 않고 이유를 알린다(콜백이 던지는 대신 이것을 주면 Node가 "잡지 못한 N-API 예외"로 경고하지 않는다)
+    pub error: Option<String>,
+}
+
+type PersistStateFn = ThreadsafeFunction<u32, PersistState, u32, Status, false, true>;
+type PersistErrorFn = ThreadsafeFunction<String, (), String, Status, false, true>;
+
+#[napi]
+pub struct Persister {
+    inner: bstudio_session::persister::Persister,
+}
+
+#[napi]
+impl Persister {
+    /// `delay_ms`는 시험용이다(없으면 500ms)
+    #[napi(constructor)]
+    pub fn new(record: &SessionRecord, state: PersistStateFn, on_error: PersistErrorFn, delay_ms: Option<u32>) -> Self {
+        use bstudio_session::persister::{BoxFuture, Prepared, Report, Source, Spawn};
+        let state = Arc::new(state);
+        let on_error = Arc::new(on_error);
+        let source: Source = Arc::new(move |record: Arc<Mutex<bstudio_session::SessionRecord>>| {
+            let state = state.clone();
+            let future: BoxFuture<std::result::Result<Prepared, String>> = Box::pin(async move {
+                let (done, result) = tokio::sync::oneshot::channel();
+                // 콜백이 돌아온 직후(같은 JS 틱, 그 사이에 이벤트가 끼지 않는다) 같은 스레드에서 기록의 history를 끼워 바이트를 만든다
+                let status = state.call_with_return_value(0, ThreadsafeFunctionCallMode::NonBlocking, move |returned: Result<PersistState>, _env: Env| {
+                    let prepared = match returned {
+                        Ok(PersistState { error: Some(reason), .. }) => Err(format!("저장할 상태를 만들지 못했습니다: {reason}")),
+                        Ok(parts) => {
+                            let guard = record.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                            bstudio_session::store::build_session_bytes(&guard, &parts.head, &parts.tail, true).map(|bytes| Prepared { file: PathBuf::from(parts.file), bytes })
+                        }
+                        Err(error) => Err(format!("저장할 상태를 만들지 못했습니다: {}", error.reason)),
+                    };
+                    let _ = done.send(prepared);
+                    Ok(())
+                });
+                if status != Status::Ok {
+                    return Err(format!("저장할 상태를 가져오지 못했습니다({status:?})"));
+                }
+                result.await.unwrap_or_else(|_| Err("저장할 상태를 받지 못했습니다(콜백이 불리지 않고 끝났습니다)".to_owned()))
+            });
+            future
+        });
+        let report: Report = Arc::new(move |message: String| {
+            on_error.call(message, ThreadsafeFunctionCallMode::NonBlocking);
+        });
+        let spawn: Spawn = Arc::new(|future: BoxFuture<()>| {
+            napi::bindgen_prelude::spawn(future);
+        });
+        let delay = delay_ms.map_or(bstudio_session::persister::DELAY, |ms| std::time::Duration::from_millis(u64::from(ms)));
+        Self { inner: bstudio_session::persister::Persister::with_delay(record.inner.clone(), source, report, spawn, delay) }
+    }
+
+    /// 저장을 예약한다(500ms 모으기). 이미 예약돼 있으면 아무것도 하지 않는다
+    #[napi]
+    pub fn schedule(&self) {
+        self.inner.schedule();
+    }
+
+    /// 예약을 지운다(쓰지 않는다)
+    #[napi]
+    pub fn cancel(&self) {
+        self.inner.cancel();
+    }
+
+    /// 예약을 지우고 쓰기를 줄에 잇는다. 앞의 쓰기가 끝난 뒤에 시작한다. 약속은 이번 쓰기가 끝날 때 풀리고, 실패하면 이유를 담는다(던지지 않는다)
+    #[napi]
+    pub fn flush(&self, env: Env) -> Result<AsyncBlock<Option<String>>> {
+        // 줄에 잇는 것은 이 호출 안에서 한다(호출 순서가 곧 쓰기 순서다)
+        let result = self.inner.flush();
+        AsyncBlockBuilder::new(async move { Ok(result.await.unwrap_or_else(|_| Some("저장 줄이 끊겨 쓰기 결과를 받지 못했습니다".to_owned()))) }).build(&env)
+    }
+
+    /// 지금까지 줄에 선 쓰기가 모두 끝나면 풀린다
+    #[napi]
+    pub fn idle(&self, env: Env) -> Result<AsyncBlock<()>> {
+        let result = self.inner.idle();
+        AsyncBlockBuilder::new(async move {
+            let _ = result.await;
+            Ok(())
+        })
+        .build(&env)
+    }
+
+    /// 종료 신호 처리용: 이 스레드에서 동기로 쓴다. 던질 수 있다
+    #[napi]
+    pub fn flush_sync(&self, file: String, head: String, tail: String) -> Result<()> {
+        self.inner.flush_sync(Path::new(&file), &head, &tail).map_err(Error::from_reason)
+    }
+}
+
+#[napi(object, object_from_js = false)]
+pub struct StoredSessionJs {
+    /// `history`를 뺀 나머지 JSON 객체 글자
+    pub rest: String,
+    /// 파일의 history를 올린 기록(logs 없음)
+    pub record: SessionRecord,
+    /// history를 기록에 올리지 못한 이유. 있으면 `record`는 비어 있고 그 세션은 건너뛰어야 한다
+    pub history_error: Option<String>,
+}
+
+/// 세션 폴더들에서 저장된 세션을 읽는다(옛 `readSessions`): 폴더가 아닌 항목·읽을 수 없는 파일·JSON이 아니거나 형식이 다른 파일은 건너뛴다
+#[napi]
+pub fn read_sessions(env: Env, root: String) -> Result<AsyncBlock<Vec<StoredSessionJs>>> {
+    AsyncBlockBuilder::new(async move {
+        let sessions = tokio::task::spawn_blocking(move || bstudio_session::store::read_sessions(Path::new(&root)))
+            .await
+            .map_err(|error| Error::from_reason(format!("세션 읽기가 중단됐습니다: {error}")))?;
+        Ok(sessions.into_iter().map(|stored| StoredSessionJs { rest: stored.rest, record: SessionRecord::wrap(stored.record), history_error: stored.history_error }).collect())
+    })
+    .build(&env)
+}
+
+/// 기록의 history로 세션 파일 한 번 쓰기(줄·예약 없이). `full_history`가 거짓이면 저장용 history(`trimHistory`), 참이면 기록 전체다.
+/// 바이트는 이 호출 안에서 만들고(같은 순간의 기록) 파일 쓰기는 JS 스레드 밖에서 한다. `head`·`tail`이 객체 글자가 아니면 던진다
+#[napi]
+pub fn write_session_record(env: Env, record: &SessionRecord, file: String, head: String, tail: String, full_history: bool) -> Result<AsyncBlock<()>> {
+    let bytes = bstudio_session::store::build_session_bytes(&record.guard(), &head, &tail, !full_history).map_err(Error::from_reason)?;
+    write_bytes_atomic(env, file, bytes, None)
+}
+
+/// `write_session_record`의 동기 판: 종료 신호 처리처럼 기다릴 수 없는 곳에서 이 스레드에서 쓴다. 임시 파일 이름은 `<file>.<pid>.exit.tmp`다. 던질 수 있다
+#[napi]
+pub fn write_session_record_sync(record: &SessionRecord, file: String, head: String, tail: String, full_history: bool) -> Result<()> {
+    let bytes = bstudio_session::store::build_session_bytes(&record.guard(), &head, &tail, !full_history).map_err(Error::from_reason)?;
+    bstudio_session::store::write_file_atomic(Path::new(&file), &bytes, None, bstudio_session::store::TempName::Exit).map_err(Error::from_reason)
+}
+
+/// 사이드카 파일(`test-results.json`·`requirements-draft.json`)을 원자적으로 쓴다: 폴더 만들기 → 호출마다 다른 임시 파일 → rename. `mode`는 새 파일의 권한(예: 0o600)
+#[napi]
+pub fn write_file_atomic(env: Env, file: String, text: String, mode: Option<u32>) -> Result<AsyncBlock<()>> {
+    write_bytes_atomic(env, file, text.into_bytes(), mode)
+}
+
+fn write_bytes_atomic(env: Env, file: String, bytes: Vec<u8>, mode: Option<u32>) -> Result<AsyncBlock<()>> {
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_session::store::write_file_atomic(Path::new(&file), &bytes, mode, bstudio_session::store::TempName::Random))
+            .await
+            .map_err(|error| Error::from_reason(format!("파일 쓰기가 중단됐습니다: {error}")))?
+            .map_err(Error::from_reason)
+    })
+    .build(&env)
 }
 
 /// 이벤트 글자(각각 JSON 값 하나)를 이어 JSON 배열 글자로 만든다
