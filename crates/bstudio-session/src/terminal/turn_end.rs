@@ -10,7 +10,8 @@
 //! 막는 검사다. 모르는 값은 통과가 아니다: 재지 못한 지문(`Unknown`)은 읽기만 실패이고, 알아보지 못한 게이트 결과는 `Unknown`으로 닫는다.
 //!
 //! 의도한 차이(옛 코드와 다른 칸. 나머지는 사실 조합 전체가 같다):
-//! - 읽기만이 **앞선 변경이 있는 실행에 이어 켜졌다면**(`read_only_after_work`) 읽기만 지름길(지문 견주기 → 바뀐 것 없음으로 done)을 타지 않고 일반 칸(게이트)으로 간다(S6)
+//! - 읽기만이 **앞선 변경이 있는 실행에 이어 켜졌다면**(`read_only_after_work`) 지문이 같을 때 읽기만 지름길(게이트 없이 done)을 타지 않고 일반 칸(게이트)으로 간다(S6).
+//!   읽기만 규칙 자체(Git을 풀지 않음, 읽기만이 켜진 뒤 바뀌었거나 재지 못했으면 실패)는 그대로 건다
 //! - 위반·닫힘을 기다림 사이에도 다시 본다(Git 맞추기·지문·변경 목록을 읽은 뒤): 옛 코드는 처음과 통과 직전에만 봤다
 //! - 게이트 밖 사유로 돌려보낸 횟수(`unsettled_attempts`)와 게이트가 센 횟수(`gate_attempts`)를 합쳐 상한(`max_attempts`)과 견준다(S12). 옛 코드는 둘을 따로 세어 최대 2배까지 돌려보냈다
 //! - 알아보지 못한 게이트 결과는 `Unknown`(닫는 쪽)이다. 옛 코드는 빈 답 `{}`로 돌아와 실행이 열린 채 남았다
@@ -171,20 +172,23 @@ pub fn decide_turn_end(f: &TurnEndFacts) -> TurnEndStep {
     if f.violation {
         return FailViolation;
     }
-    // 읽기만 지름길은 앞선 변경이 없는 읽기만 실행만 탄다. 앞선 변경이 있으면 일반 칸으로 가서 그 변경이 게이트를 지난다
-    let read_only = f.read_only && !f.read_only_after_work;
+    // 읽기만은 Git을 바꾸지 않는다: 앞선 변경이 있든 없든 읽기만이 켜진 실행은 직접 만든 커밋을 풀지 않는다(되돌리고 실패로 닫는다)
     match f.git {
-        GitCheck::Unread => return NeedGit { allow_unwind: !read_only },
+        GitCheck::Unread => return NeedGit { allow_unwind: !f.read_only },
         GitCheck::Failed => return GitFailed,
         GitCheck::Aligned => {}
     }
-    if read_only {
-        return match f.fingerprint {
-            Fingerprint::Unread => NeedFingerprint,
-            Fingerprint::Same => ReadOnlyDone,
-            Fingerprint::Different => ReadOnlyFail { unverified: false },
-            Fingerprint::Unknown => ReadOnlyFail { unverified: true },
-        };
+    // 읽기만 규칙(지문 견주기)은 읽기만이 켜진 모든 실행에 건다. 지문은 읽기만이 켜진 순간에 잡았으므로, 앞선 변경이 있는 실행이라도
+    // 그 뒤에 바뀐 것이 있거나 재지 못했으면 실패다. 같을 때, 앞선 변경이 없는 실행은 게이트 없이 done이고(지름길),
+    // 앞선 변경이 있는 실행은 일반 칸으로 가서 그 변경이 게이트를 지난다(S6)
+    if f.read_only {
+        match f.fingerprint {
+            Fingerprint::Unread => return NeedFingerprint,
+            Fingerprint::Different => return ReadOnlyFail { unverified: false },
+            Fingerprint::Unknown => return ReadOnlyFail { unverified: true },
+            Fingerprint::Same if !f.read_only_after_work => return ReadOnlyDone,
+            Fingerprint::Same => {}
+        }
     }
     match f.unchanged {
         Unchanged::Unread => return NeedUnchanged,

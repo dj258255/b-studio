@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -316,6 +317,21 @@ describe('S6: 실행 도중 [읽기만]이 이어 와도 앞선 변경은 게이
     expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
   }, 30_000);
 
+  it('앞선 변경이 있는 실행이라도 읽기만이 켜진 뒤 훅을 우회해 바뀌면 게이트로 넘기지 않고 실패로 닫고 되돌린다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await startWork(session);
+    await session.gateway.prompt({ prompt: '[읽기만] 방금 한 것을 설명해줘' });
+    // 읽기만이 켜진 뒤의 변경(쓰기 훅을 거치지 않았다)
+    await edit(session, 'api/src/Sneaked.java', 'class Sneaked {}\n');
+    const answer = await session.gateway.stop({ last_assistant_message: '설명합니다.' });
+    expect(answer.message).toContain('읽기만 요청인데 파일이 바뀌었습니다');
+    expect(fake.execCalls).not.toContainEqual(['./gradlew', 'test']);
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(await readFile(path.join(session.work, 'api/src/Sneaked.java'), 'utf8').catch(() => 'gone')).toBe('gone');
+  }, 30_000);
+
   it('앞선 변경 없이(검증 상태 없이) 읽기만이 이어 온 실행은 읽기만 규칙이다: 훅을 우회해 바뀌면 실패로 닫고 되돌린다', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
@@ -443,6 +459,31 @@ describe('S14: 체크포인트를 남긴 뒤에는 되돌리지 않는다', () =
     // 옛 코드: 커밋은 Git에 있는데 화면의 목록에는 없고, 낡은 기준으로 되돌렸다
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
     expect(await fileOf(session)).toBe(CHANGED);
+  }, 30_000);
+
+  it('저장이 커밋한 뒤 다른 쪽이 그 위에 커밋하고 저장이 던지면, 그 커밋을 검증한 체크포인트로 받아들이지 않는다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.map((checkpoint) => checkpoint.sha);
+    await startWork(session);
+    let foreign = '';
+    const held = holdCommit(session, () => {
+      // 훅 없이 뜬 CLI가 저장 도중 직접 커밋한 것을 흉내 낸다(검증을 거치지 않은 커밋)
+      const git = (...args: string[]) => execFileSync('git', ['-C', session.work, '-c', 'user.name=t', '-c', 'user.email=t@example.invalid', ...args], { encoding: 'utf8' }).trim();
+      git('commit', '--allow-empty', '-q', '-m', '검증 없이 끼어든 커밋');
+      foreign = git('rev-parse', 'HEAD');
+      throw new Error('커밋 뒤 단계가 던졌습니다');
+    });
+    const stopping = session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    await held.entered;
+    held.release();
+    await stopping;
+    const [finished] = await finishedRuns(session, 1);
+    expect(foreign).not.toBe('');
+    // 체크포인트 목록에 끼어든 커밋이 들어가지 않고, 실행은 통과(done)로도 "남겼다"로도 닫히지 않는다
+    expect(getSnapshot(session.id)!.checkpoints.map((checkpoint) => checkpoint.sha)).not.toContain(foreign);
+    expect(finished!.status).not.toBe('done');
+    expect(finished!.summary ?? '').not.toContain('체크포인트를 남겼지만');
+    expect(getSnapshot(session.id)!.checkpoints.length).toBeGreaterThanOrEqual(before.length);
   }, 30_000);
 
   it('저장 전에 던지면(게이트가 던졌다) 지금처럼 되돌린다(회귀 방지)', async () => {

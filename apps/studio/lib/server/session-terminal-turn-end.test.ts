@@ -140,19 +140,18 @@ describe('턴 끝 판정(게이트 앞): 옛 순서와 사실 조합을 견준�
     }
     // 2^5(닫힘·미룬 위반·위반·읽기만·앞선 변경) × 2(Git) × 3(지문) × 2^5(기준·바뀐 것 없음·완료 검사·카드·범위 밖) × 4(재시도 셈)
     expect(count).toBe(32 * 2 * 3 * 32 * 4);
-    // 의도한 차이 하나뿐이다: 읽기만이 앞선 변경이 있는 실행에 이어 켜졌다면 읽기만 지름길을 타지 않는다(S6).
-    // 그 칸은 읽기만이 아닌 실행과 같이 판정한다(`읽기만 = 거짓`으로 옛 판정을 부른 것과 같다)
+    // 의도한 차이 하나뿐이다: 읽기만이 앞선 변경이 있는 실행에 이어 켜졌고 지문이 같으면(읽기만이 켜진 뒤 바뀐 것이 없다) 읽기만 지름길(done)을 타지 않고
+    // 앞선 변경을 게이트에 넣는다(S6). 그 칸은 읽기만이 아닌 실행과 같이 판정한다(`읽기만 = 거짓`으로 옛 판정을 부른 것과 같다).
+    // 지문이 다르거나 재지 못한 칸은 옛 판정처럼 읽기만 실패다(읽기만 규칙은 앞선 변경이 있어도 건다)
     for (const { row, old, got } of differing) {
-      expect(row.readOnly && row.readOnlyAfterWork, JSON.stringify(row)).toBe(true);
+      expect(row.readOnly && row.readOnlyAfterWork && row.fingerprint === 'same', JSON.stringify(row)).toBe(true);
+      expect(old).toBe('read_only_done');
       const asMaker = legacyTurnEnd({ ...toLegacy(row), readOnly: false });
       expect(got, JSON.stringify({ row, old })).toBe(asMaker);
     }
-    // 읽기만이고 앞선 변경이 있으며 위반·닫힘·Git 실패가 없는 칸만 다르다. 그 칸에서 옛 판정은 읽기만 done/fail이었다
-    for (const { old } of differing) expect(['read_only_done', 'read_only_fail', 'read_only_fail_unverified']).toContain(old);
-    expect(differing.length).toBeGreaterThan(0);
-    // 칸 수: 읽기만 + 앞선 변경 + (닫힘·미룬 위반·위반·Git 실패 없음) = 지문 3 × 기준·바뀐 것 없음·완료 검사·카드·범위 밖 32 × 재시도 셈 4 = 384칸에서,
-    // 일반 판정이 옛 읽기만 판정과 우연히 같은 칸을 뺀 수. 일반 판정은 읽기만 판정(`read_only_*`)을 내지 않으므로 같은 칸은 없다
-    expect(differing).toHaveLength(3 * 32 * 4);
+    // 칸 수: 읽기만 + 앞선 변경 + 지문 같음 + (닫힘·미룬 위반·위반·Git 실패 없음) = 기준·바뀐 것 없음·완료 검사·카드·범위 밖 32 × 재시도 셈 4 = 128칸.
+    // 일반 판정은 읽기만 판정(`read_only_*`)을 내지 않으므로 그 칸은 모두 다르다
+    expect(differing).toHaveLength(32 * 4);
   });
 
   it('읽기만 + 앞선 변경이어도 닫힘·미룬 위반·위반·Git 실패는 먼저 본다', () => {
@@ -180,7 +179,7 @@ describe('턴 끝 판정(게이트 앞): 옛 순서와 사실 조합을 견준�
     expect(resolve(base).step.kind).toBe('run_gate');
   });
 
-  it('읽는 순서: Git은 만들기·앞선 변경이 있는 읽기만이면 풀 수 있고, 읽기만은 풀지 않는다', () => {
+  it('읽는 순서: Git은 만들기만 풀 수 있고, 읽기만(앞선 변경이 있어도)은 풀지 않고 지문부터 본다', () => {
     const base: Row = {
       closed: false,
       pendingViolation: false,
@@ -199,7 +198,9 @@ describe('턴 끝 판정(게이트 앞): 옛 순서와 사실 조합을 견준�
     };
     expect(resolve(base).reads).toEqual(['git(unwind)', 'unchanged', 'card']);
     expect(resolve({ ...base, readOnly: true }).reads).toEqual(['git', 'fingerprint']);
-    expect(resolve({ ...base, readOnly: true, readOnlyAfterWork: true }).reads).toEqual(['git(unwind)', 'unchanged', 'card']);
+    expect(resolve({ ...base, readOnly: true, readOnlyAfterWork: true }).reads).toEqual(['git', 'fingerprint', 'unchanged', 'card']);
+    // 앞선 변경이 있어도 읽기만이 켜진 뒤 바뀌었으면 그 자리에서 실패다(바뀐 것·카드를 읽지 않는다)
+    expect(resolve({ ...base, readOnly: true, readOnlyAfterWork: true, fingerprint: 'different' }).reads).toEqual(['git', 'fingerprint']);
     // 위반이 있으면 아무것도 읽지 않는다
     expect(resolve({ ...base, violation: true }).reads).toEqual([]);
   });

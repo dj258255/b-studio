@@ -549,6 +549,7 @@ export class CheckpointStore {
       expectStaged,
       expectExcluded,
       expectedHead,
+      onCommitted,
     }: {
       allowEmpty?: boolean;
       findSecrets?: (text: string) => string[];
@@ -574,6 +575,11 @@ export class CheckpointStore {
        * 원자적으로 비교하므로, 스테이징과 커밋 사이에 끼어든 커밋 위에 쌓지 않는다
        */
       expectedHead?: string;
+      /**
+       * 커밋이 HEAD에 올라간 직전에 그 sha로 부른다. 이 뒤의 단계(체크포인트 읽기, 생성 파일 스냅샷)가 던져도 부르는 쪽은 이 저장이 만든
+       * 커밋을 정확히 안다 — HEAD 위에 쌓인 아무 커밋을 "내가 남긴 것"으로 오인하지 않게 한다(ADR-212, S14)
+       */
+      onCommitted?: (sha: string) => void;
     } = {},
   ): Promise<Checkpoint | undefined> {
     const pending = await this.pendingFiles(); // pendingFiles가 중첩 저장소 검사를 겸한다
@@ -622,6 +628,7 @@ export class CheckpointStore {
       if (excluded) await rm(excluded.dir, { recursive: true, force: true });
       throw error;
     });
+    onCommitted?.(sha);
     const checkpoint = await this.#checkpoint(sha);
     if (excluded) await this.#placeExcludedSnapshot(checkpoint.sha, excluded);
     else await this.refreshExcludedSnapshot(checkpoint.sha);

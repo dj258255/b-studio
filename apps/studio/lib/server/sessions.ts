@@ -3443,6 +3443,8 @@ async function saveCheckpoint(
   expectStaged?: ReadonlyMap<string, string>,
   /** 검증한 생성 파일(git 추적 밖)의 지문. 주면 생성 파일 기준선도 이것과 같을 때만 남긴다(다르면 StagedMismatchError, #775) */
   expectExcluded?: ReadonlyMap<string, string>,
+  /** 커밋이 HEAD에 올라간 순간 그 sha로 부른다(뒤 단계가 던져도 부르는 쪽이 남긴 커밋을 정확히 안다, ADR-212) */
+  onCommitted?: (sha: string) => void,
 ): Promise<void> {
   const head = session.snapshot.checkpoints[0]!.sha;
   // 파일은 그대로여도 데이터만 바꾼 요청은 체크포인트로 남겨야 다음 되돌리기에서 사라지지 않는다
@@ -3464,6 +3466,7 @@ async function saveCheckpoint(
     ...(expectStaged ? { expectStaged } : {}),
     ...(expectExcluded ? { expectExcluded } : {}),
     expectedHead: expectedHeadFor(session),
+    ...(onCommitted ? { onCommitted } : {}),
   });
   if (!checkpoint) {
     // 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행도, 그 내용을 마지막 체크포인트 곁에 남긴다(그래야 다음
@@ -7517,10 +7520,10 @@ interface TerminalRunState {
   readOnlyAfterWork?: boolean;
   startedMs: number;
   /**
-   * 통과한 턴 끝이 체크포인트를 남기기 직전의 HEAD(ADR-212, S14). 저장 뒤 아래 단계가 던졌을 때 체크포인트가 이미 남았는지 Git으로 알아보는 기준이다.
-   * 저장이 실제로 일어나지 않은 경로(HEAD가 움직였다, 내용이 달라졌다)에서는 지운다
+   * 통과한 턴 끝의 저장이 실제로 만든 커밋의 sha(ADR-212, S14). 커밋이 HEAD에 올라간 순간 `commit()`이 알려 준다. 저장 뒤 아래 단계가 던졌을 때
+   * "이 저장이 남긴 체크포인트"를 이 값으로만 알아본다: HEAD 위에 쌓인 아무 커밋(훅 없이 뜬 CLI가 만든 것 등)을 검증한 체크포인트로 받아들이지 않는다
    */
-  saveHead?: string;
+  committedSha?: string;
   /** 게이트가 센 실패 횟수를 읽는 자리. 게이트를 만든 뒤에 채운다(ADR-212, S12). 게이트 밖 사유로 돌려보낸 횟수와 합쳐 상한과 견준다 */
   gate?: VerificationGate;
   /** 샌드박스 켜기와 변경 전 기준. 파일을 바꿀 수 있는 첫 도구나 턴의 끝에서 한 번 만든다(질문만 하는 턴은 샌드박스를 켜지 않는다) */
@@ -9020,15 +9023,17 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     const passed = terminalResult(run, verification, 'done', text, 'pass', started);
     // 턴 상한에 닿아 게이트만 통과한 실행은 하다 만 것으로 표시한다(#B5, ADR-131 덧붙임)
     if (state.limitReason === 'max_turns') passed.incomplete = 'max_turns';
-    state.saveHead = head;
+    state.committedSha = undefined;
     try {
       if (gate.verified) onEvent({ type: 'stage', stage: 'checkpoint', source: 'platform' });
-      await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false, { unguardedWrites: pause === undefined }), checkpointTrailers(passed), text, false, expectStaged, expectExcluded);
+      await saveCheckpoint(session, run.id, state.request, checkpointBody(passed, false, { unguardedWrites: pause === undefined }), checkpointTrailers(passed), text, false, expectStaged, expectExcluded, (sha) => {
+        state.committedSha = sha;
+      });
     } catch (error) {
       if (error instanceof HeadMovedError) {
         // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
         // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다. 체크포인트는 만들어지지 않았다
-        state.saveHead = undefined;
+        state.committedSha = undefined;
         session.terminalSaving = undefined;
         if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
         const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
@@ -9037,7 +9042,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       }
       if (!(error instanceof StagedMismatchError)) throw error;
       // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
-      state.saveHead = undefined;
+      state.committedSha = undefined;
       session.terminalSaving = undefined;
       if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
       outcome = moved(error.files);
@@ -9095,7 +9100,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     }
     // 체크포인트를 남긴 뒤(또는 남기는 도중 커밋이 끝난 뒤)에 던졌으면 그 체크포인트는 이미 검증을 지난 내용이다. 낡은 기준으로 되돌리지 않고
     // 알리고 실행만 닫는다(S14). 남았는지는 Git으로 본다 — 저장이 커밋한 뒤 던지면 화면의 체크포인트 목록이 아직 낡았다
-    const landed = await landedCheckpoint(session, run.id, state.saveHead);
+    const landed = await landedCheckpoint(session, run.id, state.committedSha);
     if (landed) {
       console.error('[b-studio] 체크포인트를 남긴 뒤 단계가 실패했습니다', error);
       const summary = `검증을 통과해 체크포인트 ${landed.shortSha}를 남겼지만 그 뒤 단계에서 오류가 나 실행을 실패로 닫습니다. 체크포인트와 작업 복사본은 되돌리지 않았습니다: ${describe(error)}`;
@@ -9127,15 +9132,15 @@ function attemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: numbe
 }
 
 /**
- * 통과한 턴 끝이 저장하려던 체크포인트가 Git에 이미 남았는지 본다(S14). `saveHead`는 저장 직전의 HEAD다(저장이 일어나지 않은 경로에서는 없다).
- * 지금 HEAD가 그 위에 쌓인 것이면 남았다고 보고 화면의 체크포인트 목록을 Git에 맞춘다(저장이 커밋한 뒤 목록을 고치기 전에 던졌을 수 있다).
- * Git을 읽지 못하면 모르는 것이다: 남았다고 보지 않고 지금까지처럼 닫는다(아무것도 남지 않았다는 판단을 이 함수가 내리지 않는다)
+ * 통과한 턴 끝의 저장이 남긴 체크포인트를 알아본다(S14). `committedSha`는 그 저장이 실제로 만든 커밋이다(커밋하지 않았으면 없다).
+ * 그 커밋이 지금 HEAD일 때만 남았다고 보고 화면의 체크포인트 목록을 Git에 맞춘다(저장이 커밋한 뒤 목록을 고치기 전에 던졌을 수 있다).
+ * HEAD가 그 위로 더 움직였거나 Git을 읽지 못하면 모르는 것이다: 남았다고 보지 않고 지금까지처럼 닫는다. 이 함수는 여는 쪽이라 확인한 것만 받아들인다
  */
-async function landedCheckpoint(session: Session, runId: string, saveHead: string | undefined): Promise<Checkpoint | undefined> {
-  if (saveHead === undefined) return undefined;
+async function landedCheckpoint(session: Session, runId: string, committedSha: string | undefined): Promise<Checkpoint | undefined> {
+  if (committedSha === undefined) return undefined;
   try {
     const [latest] = await session.checkpoints.list(2);
-    if (!latest || latest.sha === saveHead || !(await session.checkpoints.isAncestorOf(saveHead, latest.sha))) return undefined;
+    if (!latest || latest.sha !== committedSha) return undefined;
     if (session.snapshot.checkpoints[0]?.sha !== latest.sha) {
       session.snapshot.checkpoints = [latest, ...session.snapshot.checkpoints];
       await rememberGit(session, latest.sha);
