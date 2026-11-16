@@ -1098,6 +1098,47 @@ export interface NativeSessionState {
   stop(hook: (step: string) => Promise<string | null>): Promise<NativeStopResult>;
   /** `joined`를 받은 호출이 부른다 */
   joinStop(): Promise<NativeStopResult>;
+
+  // ── 세션의 바쁨: 점유와 표(ADR-207). 표는 `token`(0이 아닌 수)이다 ──
+  checkRun(): NativeLifecycleFail | null;
+  beginRun(runId: string): NativeClaimResult;
+  terminalBusy(): string | null;
+  beginTerminalRun(runId: string): NativeClaimResult;
+  setPhase(token: number, phase: 'running' | 'cancelling' | 'saving'): boolean;
+  cancelRun(runId: string): NativeCancelResult;
+  steerTarget(): NativeSteerTarget;
+  openRun(): string | null;
+  checkTask(kind: string): NativeLifecycleFail | null;
+  beginTask(kind: string): NativeClaimResult;
+  beginCatchUp(): number;
+  release(token: number): boolean;
+  holds(token: number): boolean;
+  readonly busy: boolean;
+  rejectBusy(op: string): NativeLifecycleFail | null;
+  beginExport(): NativeClaimResult;
+  releaseExport(token: number): boolean;
+  readonly exporting: boolean;
+  deleteBusy(): NativeLifecycleFail | null;
+  claimView(): NativeClaimView;
+}
+
+export interface NativeCancelResult {
+  /** `started` 또는 `already`. 거절이면 빈 글 */
+  outcome: string;
+  fail?: NativeLifecycleFail | null;
+}
+
+export interface NativeSteerTarget {
+  runId?: string | null;
+  fail?: NativeLifecycleFail | null;
+}
+
+export interface NativeClaimView {
+  kind?: string | null;
+  runId?: string | null;
+  phase?: string | null;
+  terminal: boolean;
+  exporting: boolean;
 }
 
 export interface NativeClaimResult {

@@ -6289,6 +6289,186 @@ impl SessionState {
         let inner = self.inner.clone();
         AsyncBlockBuilder::new(async move { Ok(stop_result(inner.join_stop().await)) }).build(&env)
     }
+
+    // ── 세션의 바쁨: 점유와 표(ADR-207, 4f B3a). 판정은 bstudio-session의 `claim`이 한다. 표는 `token`(0이 아닌 수)이다 ──
+
+    /// 요청(대화 창)을 받을 수 있는가. 못 받으면 `fail`
+    #[napi]
+    pub fn check_run(&self) -> Option<LifecycleFail> {
+        self.inner.check_run().err().map(claim_fail)
+    }
+
+    /// 요청 하나를 연다(`checkRun`을 다시 하고 잡는다)
+    #[napi]
+    pub fn begin_run(&self, run_id: String) -> ClaimResultJs {
+        claim_result(self.inner.begin_run(&run_id))
+    }
+
+    /// 터미널의 실행을 받을 수 없으면 그 이유(글)
+    #[napi]
+    pub fn terminal_busy(&self) -> Option<String> {
+        self.inner.terminal_busy()
+    }
+
+    /// 터미널의 실행 하나를 연다. 못 열면 `fail.message`가 그 이유(글)다
+    #[napi]
+    pub fn begin_terminal_run(&self, run_id: String) -> ClaimResultJs {
+        match self.inner.begin_terminal_run(&run_id) {
+            Ok(ticket) => ClaimResultJs { token: ticket as f64, fail: None },
+            Err(message) => ClaimResultJs { token: 0.0, fail: Some(LifecycleFail { status: 409, message }) },
+        }
+    }
+
+    /// 실행의 단계(`running`·`cancelling`·`saving`)를 바꾼다. 바뀌었으면 참
+    #[napi]
+    pub fn set_phase(&self, token: f64, phase: String) -> bool {
+        let phase = match phase.as_str() {
+            "running" => bstudio_session::claim::Phase::Running,
+            "cancelling" => bstudio_session::claim::Phase::Cancelling,
+            "saving" => bstudio_session::claim::Phase::Saving,
+            _ => return false,
+        };
+        self.inner.set_phase(token as u64, phase)
+    }
+
+    /// 사용자의 취소 요청. `fail`이 없으면 `started`(부른 쪽이 중단 신호를 올린다) 또는 `already`(이미 취소 중)
+    #[napi]
+    pub fn cancel_run(&self, run_id: String) -> CancelResultJs {
+        match self.inner.cancel_run(&run_id) {
+            Ok(bstudio_session::claim::CancelOutcome::Started) => CancelResultJs { outcome: "started".to_owned(), fail: None },
+            Ok(bstudio_session::claim::CancelOutcome::AlreadyCancelling) => CancelResultJs { outcome: "already".to_owned(), fail: None },
+            Err(fail) => CancelResultJs { outcome: String::new(), fail: Some(claim_fail(fail)) },
+        }
+    }
+
+    /// 진행 중 지시를 받을 실행의 id. 없으면 `fail`
+    #[napi]
+    pub fn steer_target(&self) -> SteerTargetJs {
+        match self.inner.steer_target() {
+            Ok(run_id) => SteerTargetJs { run_id: Some(run_id), fail: None },
+            Err(fail) => SteerTargetJs { run_id: None, fail: Some(claim_fail(fail)) },
+        }
+    }
+
+    /// 열린 실행(진행·취소 중)의 id
+    #[napi]
+    pub fn open_run(&self) -> Option<String> {
+        self.inner.open_run()
+    }
+
+    /// 보조 작업(`restore`·`restore_backup`·`sync_remote`·`reverify`)을 시작할 수 있는가
+    #[napi]
+    pub fn check_task(&self, kind: String) -> Option<LifecycleFail> {
+        match bstudio_session::claim::TaskKind::parse(&kind) {
+            Some(kind) => self.inner.check_task(kind).err().map(claim_fail),
+            None => Some(LifecycleFail { status: 500, message: format!("알 수 없는 보조 작업입니다: {kind}") }),
+        }
+    }
+
+    /// 보조 작업 하나를 연다
+    #[napi]
+    pub fn begin_task(&self, kind: String) -> ClaimResultJs {
+        match bstudio_session::claim::TaskKind::parse(&kind) {
+            Some(kind) => claim_result(self.inner.begin_task(kind)),
+            None => ClaimResultJs { token: 0.0, fail: Some(LifecycleFail { status: 500, message: format!("알 수 없는 보조 작업입니다: {kind}") }) },
+        }
+    }
+
+    /// 기준 브랜치 따라잡기를 연다. 건너뛰면 `token`이 0이다(오류가 아니다)
+    #[napi]
+    pub fn begin_catch_up(&self) -> f64 {
+        self.inner.begin_catch_up().map_or(0.0, |ticket| ticket as f64)
+    }
+
+    /// 표로 점유를 푼다. 표가 지금 점유의 표일 때만 풀고 참
+    #[napi]
+    pub fn release(&self, token: f64) -> bool {
+        self.inner.release(token as u64)
+    }
+
+    /// 이 표가 지금 점유인가
+    #[napi]
+    pub fn holds(&self, token: f64) -> bool {
+        self.inner.holds(token as u64)
+    }
+
+    /// 바쁜가(`snapshot.running`의 원본)
+    #[napi(getter)]
+    pub fn busy(&self) -> bool {
+        self.inner.busy()
+    }
+
+    /// `running`을 보고 거절하던 곳의 판정(`set_model`·`save_requirements`·`manual_verify`·`manual_clear`·`write_requirements_doc`)
+    #[napi]
+    pub fn reject_busy(&self, op: String) -> Option<LifecycleFail> {
+        match bstudio_session::claim::BusyOp::parse(&op) {
+            Some(op) => self.inner.reject_busy(op).err().map(claim_fail),
+            None => Some(LifecycleFail { status: 500, message: format!("알 수 없는 판정입니다: {op}") }),
+        }
+    }
+
+    /// 원격 올리기를 연다
+    #[napi]
+    pub fn begin_export(&self) -> ClaimResultJs {
+        claim_result(self.inner.begin_export())
+    }
+
+    #[napi]
+    pub fn release_export(&self, token: f64) -> bool {
+        self.inner.release_export(token as u64)
+    }
+
+    #[napi(getter)]
+    pub fn exporting(&self) -> bool {
+        self.inner.exporting()
+    }
+
+    /// 지우기 전의 점유 판정
+    #[napi]
+    pub fn delete_busy(&self) -> Option<LifecycleFail> {
+        self.inner.delete_busy().err().map(claim_fail)
+    }
+
+    /// 지금 점유의 모습(시험·진단용)
+    #[napi]
+    pub fn claim_view(&self) -> ClaimViewJs {
+        let view = self.inner.claim_view();
+        ClaimViewJs { kind: view.kind, run_id: view.run_id, phase: view.phase.map(|phase| phase.as_str().to_owned()), terminal: view.terminal, exporting: view.exporting }
+    }
+}
+
+
+fn claim_fail(fail: bstudio_session::lifecycle::Fail) -> LifecycleFail {
+    LifecycleFail::from(fail)
+}
+
+fn claim_result(result: std::result::Result<bstudio_session::claim::Ticket, bstudio_session::lifecycle::Fail>) -> ClaimResultJs {
+    match result {
+        Ok(ticket) => ClaimResultJs { token: ticket as f64, fail: None },
+        Err(fail) => ClaimResultJs { token: 0.0, fail: Some(claim_fail(fail)) },
+    }
+}
+
+#[napi(object)]
+pub struct CancelResultJs {
+    /// `started` 또는 `already`. 거절이면 빈 글
+    pub outcome: String,
+    pub fail: Option<LifecycleFail>,
+}
+
+#[napi(object)]
+pub struct SteerTargetJs {
+    pub run_id: Option<String>,
+    pub fail: Option<LifecycleFail>,
+}
+
+#[napi(object)]
+pub struct ClaimViewJs {
+    pub kind: Option<String>,
+    pub run_id: Option<String>,
+    pub phase: Option<String>,
+    pub terminal: bool,
+    pub exporting: bool,
 }
 
 #[napi(object)]

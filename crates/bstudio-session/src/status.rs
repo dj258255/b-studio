@@ -129,13 +129,15 @@ pub struct StopFailure {
 
 pub type StopOutcome = Result<(), StopFailure>;
 
-struct Inner {
-    status: SessionStatus,
+pub(crate) struct Inner {
+    pub(crate) status: SessionStatus,
     error: Option<String>,
-    stopping: bool,
+    pub(crate) stopping: bool,
     generation: u64,
     /// 켜기를 한 번이라도 시작했다(옛 `bootPromise`가 있다)
     booted: bool,
+    /// 세션이 바쁜 이유와 그 표(ADR-207). 상태·멈추는 중과 한 자물쇠 아래에 있어 "확인하고 잡기"가 한 번에 된다
+    pub(crate) claims: crate::claim::Claims,
 }
 
 pub struct SessionState {
@@ -150,10 +152,10 @@ impl SessionState {
             return None;
         }
         let (done, _) = watch::channel(None);
-        Some(Self { inner: Mutex::new(Inner { status: initial, error: None, stopping: false, generation: 0, booted: false }), done })
+        Some(Self { inner: Mutex::new(Inner { status: initial, error: None, stopping: false, generation: 0, booted: false, claims: crate::claim::Claims::default() }), done })
     }
 
-    fn lock(&self) -> MutexGuard<'_, Inner> {
+    pub(crate) fn lock(&self) -> MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
@@ -240,6 +242,9 @@ impl SessionState {
         let mut inner = self.lock();
         inner.status = SessionStatus::Stopped;
         inner.error = None;
+        // 멈춘 세션에는 실행·보조 작업의 점유가 없다. 늦게 끝나는 작업은 자기 표로 풀려 하지만 표가 이미 무효라 아무것도 하지 않는다(ADR-207).
+        // 원격 올리기(`exporting`)는 멈추기와 무관해 그대로 둔다(옛 코드도 멈추기가 `exporting`을 건드리지 않았다)
+        inner.claims.clear_slot();
         Change { status: SessionStatus::Stopped, error: None }
     }
 

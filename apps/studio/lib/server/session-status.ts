@@ -1,6 +1,7 @@
 import { native, type NativeSessionRegistry, type NativeSessionState } from '@b-studio/sandbox';
 import type { SessionStatus } from '../studio-events';
 import { StudioError } from './errors';
+import { SessionClaims } from './session-claim';
 
 /**
  * 세션 상태 전이·멈추기·이어받기 판정·폴더 점유(ADR-205, 4f B2b). 판정은 Rust `crates/bstudio-session`의 `status`·`registry`가 하고, 여기는 그 결과를 `StudioError`와
@@ -50,10 +51,13 @@ function describeError(error: unknown): string {
 /** 세션 하나의 상태. `Session`이 하나씩 쥔다 */
 export class SessionLife {
   readonly native: NativeSessionState;
+  /** 세션의 바쁨: 점유와 표, 판정(ADR-207). 상태·멈추는 중과 같은 코어가 든다 */
+  readonly claims: SessionClaims;
 
   /** `initial`: 지연 기동이면 `idle`, 만들자마자 켜면 `starting` */
   constructor(initial: 'idle' | 'starting') {
     this.native = new native.SessionState(initial);
+    this.claims = new SessionClaims(this.native);
   }
 
   get status(): SessionStatus {
