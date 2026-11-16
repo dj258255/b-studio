@@ -279,6 +279,7 @@ import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
+import { runRequest, type RunActions, type RunSummary } from './session-run';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
@@ -2434,6 +2435,15 @@ async function withPlanBrief(
   }
 }
 
+/** 검증하지 않은 변경의 파일 목록을 글로(20개까지) */
+function shownFiles(files: readonly string[]): string {
+  return `${files.slice(0, 20).join(', ')}${files.length > 20 ? ` 외 ${files.length - 20}개` : ''}`;
+}
+
+/**
+ * 요청 하나를 끝까지 돈다(ADR-208, 4f B3b). 단계 순서·끝 결정(체크포인트 저장·되돌리기·알림·끝 상태)·점유 단계 바꾸기와 풀기는 수명 코어(`session-run.ts`)가 정하고,
+ * 여기는 단계마다의 부수 효과와 끝 글 조립을 TS로 잇는다. 단계 사이에 넘기는 값은 이 함수의 지역 변수가 쥔다.
+ */
 async function execute(session: Session, run: ActiveRun, request: string, plan: RunPlan): Promise<void> {
   const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
   let finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'summary' | 'turns' | 'metrics' | 'durationMs' | 'verify' | 'mismatches'> | undefined;
@@ -2442,209 +2452,339 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   let notStarted = false;
   // 질문은 파일을 바꾸지 않으므로 직접 수정을 남기거나, 체크포인트를 만들거나, 되돌리지 않는다
   const ask = plan.intent === 'ask';
-  try {
-    let edits: Checkpoint | undefined;
-    try {
-      await session.relaying;
-      // 이 컴퓨터 방식에서 요청 사이에 끼워 넣은 커밋을 체크포인트로 굳히지 않게 먼저 기억한 곳에 맞춘다(이슈 #706)
-      if (!ask) await realignGitBeforeRun(session);
-      // 요청이 실패하거나 취소돼 마지막 체크포인트로 되돌릴 때 사람이 고친 파일까지 지우지 않도록 먼저 남긴다
-      if (!ask) edits = await saveLocalEdits(session);
-    } catch (error) {
-      throw new LocalEditsError(`스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}`);
-    }
-    if (edits) {
-      emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
-      noteForModel(
-        session,
-        `[b-studio] 사용자가 스튜디오 밖에서 파일 ${edits.files.length}개를 바꿔 체크포인트 ${edits.shortSha}로 남겼습니다: ${edits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`,
-      );
-    }
-    // 허용이 켜진 요청임을 모델도 알아야 한다. 모르면 "허용을 켜고 다시 요청해 달라"고 되묻거나, 이미 반영된 선언을 반영되지 않았다고 요약한다
-    if (plan.allowCheckChanges) {
-      noteForModel(
-        session,
-        `[b-studio] 사용자가 이 요청에 '확인 선언 변경 허용'을 켰습니다. 이번 실행의 검증은 ${SPEC_FILE}의 지금 확인 선언(tests·pageChecks·concurrencyChecks·loadChecks·autoPageChecks·required)으로 돕니다. 사용자가 요청한 선언만 바꾸고, 바꾼 것은 검증 결과의 declared-checks 줄에 남습니다.`,
-      );
-    }
-    const agentStarted = performance.now();
-    // 계획-실행 분리(ADR-075). 설정이 없거나 이 요청이 대상이 아니면 원래 요청 그대로 돌려준다(지금과 같은 동작)
-    const { request: executionRequest, planUsage } = await withPlanBrief(session, run, request, plan, signal);
-    // 게이트는 실행을 시작할 때의 선언으로 test를 돌린다. 에이전트가 이번 실행에서 studio.yaml을 고치면 체크포인트 저장이
-    // 설정을 다시 읽으므로(reloadSessionProject), 보고서 수거가 체크를 서비스에 짝지을 선언은 지금 잡아 둔다(ADR-153)
-    const gateTests = session.project.spec.workflow?.tests ?? [];
-    const result = await runPlan(session, run, executionRequest, plan, signal);
-    // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
-    if (run.cancel.signal.aborted) throw run.cancel.signal.reason;
-    // 여기부터는 취소를 받지 않는다: 체크포인트를 저장하는 단계다
-    detachRun(session, run);
-    if ('preflightError' in result) {
-      finished = { status: 'error', summary: result.preflightError };
-      return;
-    }
-    // 계획 호출 토큰을 이 실행의 모델별 사용량에 "계획: <모델>"로 합친다(토큰 탭이 그대로 표로 보여준다).
-    // 세션·사람 토큰 한도에는 반영하지 않는다(계획 호출은 실행 루프 밖의 별도 호출이라 그 예산 계산과 겹치면 부정확해진다) — 알려진 한계로 남긴다
-    if (planUsage) {
-      const metrics: RunMetrics = result.metrics ?? { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0 };
-      result.metrics = { ...metrics, usageByModel: { ...metrics.usageByModel, [`계획: ${planUsage.model}`]: planUsage.usage } };
-    }
 
-    // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다.
-    // 입력이 하나로 합쳐진 뒤로는 "바꾼 파일 없이 답만 한" 만들기 요청도 여기 오므로, 파일을 바꾼 실행만 관측값으로 남긴다
-    if (!ask && result.changedFiles.length > 0 && plan.kind === 'model' && plan.route) {
+  // 단계가 이어 쥐는 값
+  let edits: Checkpoint | undefined;
+  let agentStarted = performance.now();
+  let executionRequest = request;
+  let planUsage: { model: string; usage: AgentUsage } | undefined;
+  let gateTests = session.project.spec.workflow?.tests ?? [];
+  let result: AgentResult | undefined;
+  let preflightError: string | undefined;
+  /** 예외 경로에 들어섰다(첫 오류만 쥔다. 되돌리기 같은 뒷 단계는 던지지 않고 이유를 따로 쥔다) */
+  let thrown: unknown;
+  let inException = false;
+  /** 작업 복사본에 검증하지 않은 변경이 있는가를 읽은 결과(끝 결정이 이 칸을 볼 때만 읽는다) */
+  let pendingFiles: string[] = [];
+  let pendingUnknown: unknown;
+  let mismatchSummary = '';
+  /** 되돌리기를 시도했는가와 그 결과. 시도하지 않았으면 되돌릴 변경을 보지 않은 것이다 */
+  let revertAttempted = false;
+  let reverted: string[] | undefined;
+  let keptDocs: string[] = [];
+  let revertError: unknown;
+
+  /** 되돌린다. 던지지 않고 결과를 위 변수에 남긴다(예외 경로·켜지 않은 세션) */
+  const revertQuietly = async (options: { cancelled: boolean; alsoRestart: string[]; hostOnly: boolean }): Promise<boolean> => {
+    revertAttempted = true;
+    reverted = await revertRunDetailed(session, run.id, options)
+      .then((outcome) => {
+        keptDocs = outcome.keptDocs;
+        return outcome.files;
+      })
+      .catch((cause: unknown) => {
+        revertError = cause;
+        console.error('[b-studio] 되돌리기 실패', cause);
+        return undefined;
+      });
+    return reverted !== undefined;
+  };
+
+  const actions: RunActions = {
+    prepare_edits: async () => {
       try {
-        recordObservation({
-          modelId: plan.route.selected.id,
-          passed: result.status === 'done',
-          latencyMs: Math.round(performance.now() - agentStarted),
-          costUsd: estimateCost(plan.route.selected, result.usage),
-        });
+        await session.relaying;
+        // 이 컴퓨터 방식에서 요청 사이에 끼워 넣은 커밋을 체크포인트로 굳히지 않게 먼저 기억한 곳에 맞춘다(이슈 #706)
+        if (!ask) await realignGitBeforeRun(session);
+        // 요청이 실패하거나 취소돼 마지막 체크포인트로 되돌릴 때 사람이 고친 파일까지 지우지 않도록 먼저 남긴다
+        if (!ask) edits = await saveLocalEdits(session);
       } catch (error) {
-        // 관측 파일 오류 때문에 검증을 통과한 사용자 변경을 실패·되돌리면 안 된다
-        console.error('[b-studio] 모델 실측 기록을 남기지 못했습니다', error);
+        throw new LocalEditsError(`스튜디오 밖에서 바꾼 파일을 체크포인트로 남기지 못해 요청을 시작하지 않았습니다: ${describe(error)}`);
       }
-    }
-
-    // 되묻고 멈췄으면 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답은 다음 요청으로 온다
-    if (result.status === 'awaiting_input' && result.question) {
-      session.snapshot.pendingQuestion = {
-        runId: run.id,
-        question: result.question.question,
-        options: result.question.options,
-        allowOther: result.question.allowOther,
-        ...(result.question.proposal ? { proposal: result.question.proposal } : {}),
+    },
+    announce_edits: () => {
+      if (edits) {
+        emit(session, { type: 'local_edits_saved', checkpoint: edits, reason: 'request' });
+        noteForModel(
+          session,
+          `[b-studio] 사용자가 스튜디오 밖에서 파일 ${edits.files.length}개를 바꿔 체크포인트 ${edits.shortSha}로 남겼습니다: ${edits.files.slice(0, 20).join(', ')}. 이 파일을 다루기 전에 다시 읽으세요.`,
+        );
+      }
+      // 허용이 켜진 요청임을 모델도 알아야 한다. 모르면 "허용을 켜고 다시 요청해 달라"고 되묻거나, 이미 반영된 선언을 반영되지 않았다고 요약한다
+      if (plan.allowCheckChanges) {
+        noteForModel(
+          session,
+          `[b-studio] 사용자가 이 요청에 '확인 선언 변경 허용'을 켰습니다. 이번 실행의 검증은 ${SPEC_FILE}의 지금 확인 선언(tests·pageChecks·concurrencyChecks·loadChecks·autoPageChecks·required)으로 돕니다. 사용자가 요청한 선언만 바꾸고, 바꾼 것은 검증 결과의 declared-checks 줄에 남습니다.`,
+        );
+      }
+    },
+    plan_brief: async () => {
+      agentStarted = performance.now();
+      // 계획-실행 분리(ADR-075). 설정이 없거나 이 요청이 대상이 아니면 원래 요청 그대로 돌려준다(지금과 같은 동작)
+      const brief = await withPlanBrief(session, run, request, plan, signal);
+      executionRequest = brief.request;
+      planUsage = brief.planUsage;
+      // 게이트는 실행을 시작할 때의 선언으로 test를 돌린다. 에이전트가 이번 실행에서 studio.yaml을 고치면 체크포인트 저장이
+      // 설정을 다시 읽으므로(reloadSessionProject), 보고서 수거가 체크를 서비스에 짝지을 선언은 지금 잡아 둔다(ADR-153)
+      gateTests = session.project.spec.workflow?.tests ?? [];
+    },
+    run_plan: async () => {
+      const ran = await runPlan(session, run, executionRequest, plan, signal);
+      // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
+      if (run.cancel.signal.aborted) {
+        thrown = run.cancel.signal.reason;
+        inException = true;
+        return { cancelRequested: true };
+      }
+      if ('preflightError' in ran) {
+        preflightError = ran.preflightError;
+        return { preflight: true };
+      }
+      result = ran;
+      return {
+        result: ran.status,
+        questionGatePassed: ran.status === 'awaiting_input' && questionRunPassedGate(ran),
+        platformFailure: ran.status === 'failed' && Boolean(ran.report?.platformFailure),
       };
-    }
-    if (!ask) {
-      // 지연 기동 세션이 샌드박스를 켜지 않았다면 바뀐 것이 없다(바뀌었으면 도구/게이트가 켰다).
-      // 체크포인트도 되돌리기도 샌드박스가 필요하므로, 켠 세션에서만 한다
-      if (session.bootPromise && (result.status === 'done' || (result.status === 'awaiting_input' && questionRunPassedGate(result)))) {
-        // 커밋될 내용이 방금 검증한 내용과 같아야 한다. 러너가 실어 준 지문과 스테이징될 내용을 견준다.
-        // 지문이 없으면 빈 지문으로 본다 — 지문을 싣지 않는 러너(또는 앞으로 새 러너)가 검증하지 않은 내용을
-        // 체크포인트로 남기지 않게 닫힌 쪽으로 판정한다. 스테이징될 변경이 있으면 불일치로 되돌린다.
-        // git이 추적하지 않는 생성 파일(studio.yaml 등)은 인덱스에 없으므로 견줄 대상에서 뺀다
-        const generated = new Set(await session.checkpoints.pendingExcludedFiles());
-        const verified = Object.entries(result.verifiedFingerprints ?? {});
-        const expectStaged = new Map(verified.filter(([file]) => !generated.has(file)));
-        // 생성 파일은 인덱스 대신 스냅샷(기준선)으로 남는다. 그 내용도 검증한 것과 같을 때만 남긴다(#775)
-        const expectExcluded = new Map(verified.filter(([file]) => generated.has(file)));
+    },
+    // 여기부터는 취소를 받지 않는다: 코어가 점유의 단계를 저장 중으로 바꿨고, 세션에서 실행을 뗀다
+    detach_run: () => {
+      if (session.run === run) session.run = undefined;
+    },
+    tally_run: () => {
+      const ran = result!;
+      // 계획 호출 토큰을 이 실행의 모델별 사용량에 "계획: <모델>"로 합친다(토큰 탭이 그대로 표로 보여준다).
+      // 세션·사람 토큰 한도에는 반영하지 않는다(계획 호출은 실행 루프 밖의 별도 호출이라 그 예산 계산과 겹치면 부정확해진다) — 알려진 한계로 남긴다
+      if (planUsage) {
+        const metrics: RunMetrics = ran.metrics ?? { modelCalls: 0, maxContextTokens: 0, toolMs: 0, gateMs: 0 };
+        ran.metrics = { ...metrics, usageByModel: { ...metrics.usageByModel, [`계획: ${planUsage.model}`]: planUsage.usage } };
+      }
+      // 외부 검증 게이트가 있는 만들기 요청만 품질 실측으로 쓴다. 질문 완료는 정답을 뜻하지 않는다.
+      // 입력이 하나로 합쳐진 뒤로는 "바꾼 파일 없이 답만 한" 만들기 요청도 여기 오므로, 파일을 바꾼 실행만 관측값으로 남긴다
+      if (!ask && ran.changedFiles.length > 0 && plan.kind === 'model' && plan.route) {
         try {
-          // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
-          // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
-          await saveCheckpoint(session, run.id, request, checkpointBody(result, plan.allowBreaking), checkpointTrailers(result), result.summary, run.answersQuestion === true, expectStaged, expectExcluded);
-        } catch (error) {
-          if (!(error instanceof StagedMismatchError)) throw error;
-          // 게이트가 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 검증하지 않은 내용을 체크포인트로 남기지 않고 되돌린다
-          const reverted = await revertRun(session, run.id).catch((cause: unknown) => {
-            console.error('[b-studio] 검증 뒤 바뀐 변경을 되돌리지 못했습니다', cause);
-            return undefined;
+          recordObservation({
+            modelId: plan.route.selected.id,
+            passed: ran.status === 'done',
+            latencyMs: Math.round(performance.now() - agentStarted),
+            costUsd: estimateCost(plan.route.selected, ran.usage),
           });
-          const shown = error.files.slice(0, 20).join(', ');
-          const rest = error.files.length > 20 ? ` 외 ${error.files.length - 20}개` : '';
-          const summary = reverted
-            ? `검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않고 되돌렸습니다: ${shown}${rest}`
-            : `검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않았지만 되돌리지 못했습니다: ${shown}${rest}`;
-          emit(session, { type: 'notice', text: summary, at: new Date().toISOString() });
-          finished = { status: 'error', summary };
+        } catch (error) {
+          // 관측 파일 오류 때문에 검증을 통과한 사용자 변경을 실패·되돌리면 안 된다
+          console.error('[b-studio] 모델 실측 기록을 남기지 못했습니다', error);
+        }
+      }
+    },
+    note_question: () => {
+      const ran = result!;
+      // 되묻고 멈췄으면 질문을 스냅샷에 남겨 화면이 카드로 그린다. 답은 다음 요청으로 온다
+      if (ran.status === 'awaiting_input' && ran.question) {
+        session.snapshot.pendingQuestion = {
+          runId: run.id,
+          question: ran.question.question,
+          options: ran.question.options,
+          allowOther: ran.question.allowOther,
+          ...(ran.question.proposal ? { proposal: ran.question.proposal } : {}),
+        };
+      }
+    },
+    // 끝 결정이 "아무것도 하지 않던" 칸(켜지 않은 세션, ready가 아닌 세션)에서 검증하지 않은 변경이 남았는지 작업 복사본을 읽는다(읽기만 한다)
+    probe_pending: async () => {
+      try {
+        pendingFiles = await changesOutsideTools(session);
+      } catch (error) {
+        // 확인하지 못했으면 통과가 아니라 "있다"로 본다
+        pendingUnknown = error;
+        console.error('[b-studio] 검증하지 않은 변경이 남았는지 확인하지 못했습니다', error);
+      }
+      return { pending: pendingFiles.length > 0 || pendingUnknown !== undefined };
+    },
+    save_checkpoint: async () => {
+      const ran = result!;
+      // 커밋될 내용이 방금 검증한 내용과 같아야 한다. 러너가 실어 준 지문과 스테이징될 내용을 견준다.
+      // 지문이 없으면 빈 지문으로 본다 — 지문을 싣지 않는 러너(또는 앞으로 새 러너)가 검증하지 않은 내용을
+      // 체크포인트로 남기지 않게 닫힌 쪽으로 판정한다. 스테이징될 변경이 있으면 불일치로 되돌린다.
+      // git이 추적하지 않는 생성 파일(studio.yaml 등)은 인덱스에 없으므로 견줄 대상에서 뺀다
+      const generated = new Set(await session.checkpoints.pendingExcludedFiles());
+      // 읽는 사이 멈추기가 시작됐으면 멈춘 세션에 새 체크포인트를 남기지 않는다. 검증한 내용은 작업 복사본에 남고 다음 요청의 게이트가 다시 본다
+      if (session.stop.signal.aborted) return;
+      const verified = Object.entries(ran.verifiedFingerprints ?? {});
+      const expectStaged = new Map(verified.filter(([file]) => !generated.has(file)));
+      // 생성 파일은 인덱스 대신 스냅샷(기준선)으로 남는다. 그 내용도 검증한 것과 같을 때만 남긴다(#775)
+      const expectExcluded = new Map(verified.filter(([file]) => generated.has(file)));
+      try {
+        // 게이트를 통과한 변경만 체크포인트로 남긴다. 질문 전에 쓴 파일이 게이트를 통과했으면 그것도 남기고,
+        // 답을 기다리는 실행이 남긴 미검증 변경은 되돌리지 않는다(다음 요청이 이어서 다룬다)
+        await saveCheckpoint(session, run.id, request, checkpointBody(ran, plan.allowBreaking), checkpointTrailers(ran), ran.summary, run.answersQuestion === true, expectStaged, expectExcluded);
+      } catch (error) {
+        if (!(error instanceof StagedMismatchError)) throw error;
+        // 게이트가 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 코어가 되돌리기 단계를 부른다
+        mismatchSummary = shownFiles(error.files);
+        return { mismatch: true };
+      }
+    },
+    after_save: () => {
+      const ran = result!;
+      if (ran.checks) session.lastGateChecks = ran.checks;
+      // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
+      // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
+      // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
+      void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, ran.checks ?? [], gateTests).catch(() => {});
+      // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
+      syncRequirementIssuesInBackground(session);
+    },
+    revert_after_mismatch: async () => {
+      // 검증하지 않은 내용을 체크포인트로 남기지 않고 되돌린다
+      const ok = await revertRun(session, run.id)
+        .then(() => true)
+        .catch((cause: unknown) => {
+          console.error('[b-studio] 검증 뒤 바뀐 변경을 되돌리지 못했습니다', cause);
+          return false;
+        });
+      const rest = mismatchSummary;
+      mismatchSummary = ok ? `검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않고 되돌렸습니다: ${rest}` : `검증한 뒤에 바뀐 파일이 있어 체크포인트를 남기지 않았지만 되돌리지 못했습니다: ${rest}`;
+      emit(session, { type: 'notice', text: mismatchSummary, at: new Date().toISOString() });
+    },
+    revert_run: async (arg) => {
+      if (!inException) {
+        // 결과가 끝난 뒤의 되돌리기. 던지면 예외 경로가 한 번 더 되돌린다(옛 동작)
+        await revertRun(session, run.id);
+        return;
+      }
+      const wasCancelled = arg === 'cancelled';
+      // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
+      const unsettled = wasCancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
+      await revertQuietly({ cancelled: wasCancelled, alsoRestart: unsettled, hostOnly: false });
+    },
+    // 켜지 않은 세션: 컨테이너가 없어 DB 복원과 서비스 재시작 없이 작업 복사본만 되돌린다. 보관본이 남는다
+    revert_host_only: async (arg) => {
+      const ok = await revertQuietly({ cancelled: arg === 'cancelled', alsoRestart: [], hostOnly: true });
+      if (!ok) {
+        emit(session, { type: 'notice', text: `샌드박스를 켜지 않은 채 바뀐 파일을 되돌리지 못했습니다. 작업 복사본에 그대로 남아 있습니다: ${describe(revertError)}`, at: new Date().toISOString() });
+      }
+      return { reverted: ok };
+    },
+    notice_platform: () => {
+      // b-studio 쪽(샌드박스·도커) 문제로 검증하지 못한 변경은 되돌리지 않는다. 에이전트가 한 일이 틀린 것이 아니고, 문제를 해결한 뒤
+      // 다음 요청의 게이트가 이 변경을 그대로 검증한다(작업 트리에 남은 변경은 externalChanges로 게이트에 들어간다, ADR-131).
+      // 체크포인트는 남기지 않는다. 내 폴더 모드는 다음 요청이 남은 변경을 "직접 수정"으로 커밋하므로 전처럼 되돌리고 보관본을 남긴다
+      const platformFailure = result?.status === 'failed' ? result.report?.platformFailure : undefined;
+      emit(session, {
+        type: 'notice',
+        text: `b-studio 쪽(샌드박스·도커) 문제로 검증하지 못했습니다. 바꾼 코드의 문제가 아니라서 변경을 되돌리지 않고 작업 복사본에 그대로 뒀습니다(체크포인트는 남기지 않았습니다). 문제를 해결한 뒤 다음 요청을 보내면 그때 이 변경을 다시 검증합니다: ${platformFailure}`,
+        at: new Date().toISOString(),
+      });
+    },
+    // 샌드박스를 켜다 실패했거나 켜는 중이라 되돌리지 못했다(되돌리는 동안 컨테이너가 같은 파일을 보며 뜰 수 있다, ADR-131). 남은 파일과 이유를 알린다
+    notice_kept: () => {
+      const which = pendingUnknown !== undefined ? `바뀐 파일이 있는지 확인하지 못했습니다(${describe(pendingUnknown)})` : `바뀐 파일 ${pendingFiles.length}개: ${shownFiles(pendingFiles)}`;
+      emit(session, {
+        type: 'notice',
+        text: `샌드박스가 켜지는 중이거나 켜지지 못해 검증하지 못했고 변경을 되돌리지 않았습니다. 바뀐 파일은 작업 복사본에 그대로 남아 있습니다(체크포인트는 남기지 않았습니다). 문제를 해결한 뒤 다음 요청을 보내면 그때 이 변경을 다시 검증합니다. ${which}`,
+        at: new Date().toISOString(),
+      });
+    },
+    build_finished: (kind) => {
+      switch (kind as RunSummary) {
+        case 'local_edits':
+          // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
+          notStarted = true;
+          finished = { status: 'error', summary: describe(thrown) };
+          return;
+        case 'preflight':
+          finished = { status: 'error', summary: preflightError ?? '' };
+          return;
+        case 'mismatch':
+          finished = { status: 'error', summary: mismatchSummary };
+          return;
+        case 'error':
+          finished = { status: 'error', summary: describe(thrown) };
+          return;
+        case 'cancelled':
+          cancelled = true;
+          // 되돌리기를 시도하지 않았다면 되돌릴 변경을 보지 못한 것이다(되돌리지 못했다고 쓰지 않는다)
+          finished = { status: 'cancelled', summary: stoppedSummary(run, session.snapshot.tokenLimit, revertAttempted ? reverted : [], revertError, keptDocs) };
+          return;
+        case 'cancelled_question':
+          cancelled = true;
+          finished = { status: 'cancelled', summary: stoppedQuestionSummary(run, session.snapshot.tokenLimit) };
+          return;
+        case 'cancelled_kept': {
+          cancelled = true;
+          const reason = run.stopReason === 'budget' ? `${limitReason(run, session.snapshot.tokenLimit)} 요청을 멈췄습니다` : '요청을 취소했습니다';
+          finished = { status: 'cancelled', summary: `${reason}. 샌드박스가 켜지는 중이거나 켜지지 못해 변경을 되돌리지 못했습니다. 바뀐 파일은 작업 복사본에 그대로 남아 있습니다.` };
           return;
         }
-        if (result.checks) session.lastGateChecks = result.checks;
-        // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
-        // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
-        // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
-        void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, result.checks ?? [], gateTests).catch(() => {});
-        // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
-        syncRequirementIssuesInBackground(session);
-      } else if (session.snapshot.status === 'ready' && result.status !== 'awaiting_input') {
-        // b-studio 쪽(샌드박스·도커) 문제로 검증하지 못한 변경은 되돌리지 않는다. 에이전트가 한 일이 틀린 것이 아니고, 문제를 해결한 뒤
-        // 다음 요청의 게이트가 이 변경을 그대로 검증한다(작업 트리에 남은 변경은 externalChanges로 게이트에 들어간다, ADR-131).
-        // 체크포인트는 남기지 않는다. 내 폴더 모드는 다음 요청이 남은 변경을 "직접 수정"으로 커밋하므로 전처럼 되돌리고 보관본을 남긴다
-        const platformFailure = result.status === 'failed' ? result.report?.platformFailure : undefined;
-        if (platformFailure && session.snapshot.workspace !== 'local') {
-          emit(session, {
-            type: 'notice',
-            text: `b-studio 쪽(샌드박스·도커) 문제로 검증하지 못했습니다. 바꾼 코드의 문제가 아니라서 변경을 되돌리지 않고 작업 복사본에 그대로 뒀습니다(체크포인트는 남기지 않았습니다). 문제를 해결한 뒤 다음 요청을 보내면 그때 이 변경을 다시 검증합니다: ${platformFailure}`,
-            at: new Date().toISOString(),
-          });
-        } else {
-          await revertRun(session, run.id);
+        case 'unverified': {
+          const files = reverted && reverted.length > 0 ? reverted : pendingFiles;
+          finished = {
+            status: 'error',
+            summary: reverted
+              ? `샌드박스를 켜지 않아 검증하지 못한 변경이 있어 체크포인트를 남기지 않고 되돌렸습니다: ${shownFiles(files)}`
+              : `샌드박스를 켜지 않아 검증하지 못한 변경이 있어 체크포인트를 남기지 않았지만 되돌리지 못했습니다: ${shownFiles(files)}`,
+          };
+          return;
+        }
+        default: {
+          const ran = result!;
+          finished = {
+            status: ran.status,
+            summary: ran.summary,
+            turns: ran.turns,
+            metrics: ran.metrics,
+            durationMs: Math.round(performance.now() - agentStarted),
+            ...(ran.verify === 'light' ? { verify: 'light' as const } : {}),
+            ...(ran.status === 'done' && ran.incomplete === 'max_turns' ? { incomplete: 'max_turns' as const } : {}),
+            // 에이전트가 알린 요청과 확인의 어긋남(#666). 판정과 체크포인트는 그대로 두고 화면이 "확인 필요"로 보인다
+            ...(ran.mismatches?.length ? { mismatches: ran.mismatches } : {}),
+            // 가볍게 확인이 건너뛴 단계를 함께 남긴다(프로젝트 토큰 보고서가 이 수를 센다)
+            ...(ran.skippedStages && ran.skippedStages.length > 0 ? { skippedStages: [...ran.skippedStages] } : {}),
+          };
         }
       }
-    }
-    finished = {
-      status: result.status,
-      summary: result.summary,
-      turns: result.turns,
-      metrics: result.metrics,
-      durationMs: Math.round(performance.now() - agentStarted),
-      ...(result.verify === 'light' ? { verify: 'light' as const } : {}),
-      ...(result.status === 'done' && result.incomplete === 'max_turns' ? { incomplete: 'max_turns' as const } : {}),
-      // 에이전트가 알린 요청과 확인의 어긋남(#666). 판정과 체크포인트는 그대로 두고 화면이 "확인 필요"로 보인다
-      ...(result.mismatches?.length ? { mismatches: result.mismatches } : {}),
-      // 가볍게 확인이 건너뛴 단계를 함께 남긴다(프로젝트 토큰 보고서가 이 수를 센다)
-      ...(result.skippedStages && result.skippedStages.length > 0 ? { skippedStages: [...result.skippedStages] } : {}),
-    };
-  } catch (error) {
-    if (error instanceof LocalEditsError) {
-      // 되돌리면 체크포인트로 남기지 못한 사람의 수정이 지워지므로 그대로 두고 끝낸다
-      notStarted = true;
-      detachRun(session, run);
-      finished = { status: 'error', summary: error.message };
-      return;
-    }
-    cancelled = run.cancel.signal.aborted && !session.stop.signal.aborted;
-    // 취소해 되돌리는 동안 다시 누른 취소는 받아들인다. 오류로 되돌리는 중에는 취소를 받지 않는다
-    if (!cancelled) detachRun(session, run);
-    let reverted: string[] | undefined;
-    let keptDocs: string[] = [];
-    let revertError: unknown;
-    // 샌드박스가 켜져 있을 때만 되돌린다. 지연 기동 세션이 켜지기 전에 실패하면 되돌릴 샌드박스가 없다
-    if (!session.stop.signal.aborted && !ask && session.snapshot.status === 'ready') {
-      // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
-      const unsettled = cancelled ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
-      reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled })
-        .then((result) => {
-          keptDocs = result.keptDocs;
-          return result.files;
-        })
-        .catch((cause: unknown) => {
-          revertError = cause;
-          console.error('[b-studio] 되돌리기 실패', cause);
-          return undefined;
+    },
+    settle: () => {
+      if (session.run === run) session.run = undefined;
+      // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다.
+      // 되묻고 멈춘 경우는 아직 시나리오가 끝나지 않았으므로 다음 단계로 넘기지 않는다(답을 받아 이어서 실행한다)
+      if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask && finished?.status !== 'awaiting_input') {
+        session.demoIndex += 1;
+        session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
+        session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
+      }
+    },
+    // 코어가 이 실행의 표로 점유를 푼 뒤다(멈추기가 이미 비웠거나 다른 점유가 잡혀 있으면 코어가 아무것도 하지 않았다). 화면 거울을 맞춘다
+    announce_finished: (mode) => {
+      mirrorBusy(session);
+      // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
+      const dropped = run.steering?.take() ?? [];
+      // 멈추는 중이면 끝났다는 알림만 건너뛴다(멈추기가 상태를 정리한다)
+      if (mode !== 'announce') return;
+      if (dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
+      if (finished) {
+        session.settledConversation = session.conversation.length;
+        emit(session, {
+          type: 'run_finished',
+          runId: run.id,
+          ...finished,
+          usage: hasTokens(run.tokens) ? run.tokens : undefined,
+          sessionTokens: session.snapshot.tokens,
+          nextDemoRequest: session.snapshot.nextDemoRequest,
+          nextDemoQuestion: session.snapshot.nextDemoQuestion,
         });
-    }
-    if (!cancelled) finished = { status: 'error', summary: describe(error) };
-    else {
-      const summary = ask ? stoppedQuestionSummary(run, session.snapshot.tokenLimit) : stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError, keptDocs);
-      finished = { status: 'cancelled', summary };
-    }
-  } finally {
-    if (session.run === run) session.run = undefined;
-    // 데모 시나리오는 앞 단계의 파일을 전제로 하므로, 취소해 되돌린 요청은 다시 보낼 수 있게 남긴다.
-    // 되묻고 멈춘 경우는 아직 시나리오가 끝나지 않았으므로 다음 단계로 넘기지 않는다(답을 받아 이어서 실행한다)
-    if (session.snapshot.mode === 'demo' && !cancelled && !notStarted && !ask && finished?.status !== 'awaiting_input') {
-      session.demoIndex += 1;
-      session.snapshot.nextDemoRequest = demoScenarios(session.project)[session.demoIndex]?.request;
-      session.snapshot.nextDemoQuestion = demoScenarios(session.project)[session.demoIndex]?.question?.request;
-    }
-    // 이 실행의 표로 점유를 푼다. 멈추기가 이미 비웠거나 다른 점유가 잡혀 있으면 아무것도 하지 않는다(늦게 끝난 실행이 남의 점유를 풀지 못한다)
-    releaseRun(session, run);
-    // 실행이 끝났는데 러너가 꺼내 가지 않은 지시는 적용되지 못한 것이다. 화면에 다시 보내라고 알린다
-    const dropped = run.steering?.take() ?? [];
-    if (!session.stop.signal.aborted && dropped.length > 0) emit(session, { type: 'steer_dropped', runId: run.id, texts: dropped });
-    if (!session.stop.signal.aborted && finished) {
-      session.settledConversation = session.conversation.length;
-      emit(session, {
-        type: 'run_finished',
-        runId: run.id,
-        ...finished,
-        usage: hasTokens(run.tokens) ? run.tokens : undefined,
-        sessionTokens: session.snapshot.tokens,
-        nextDemoRequest: session.snapshot.nextDemoRequest,
-        nextDemoQuestion: session.snapshot.nextDemoQuestion,
-      });
-    }
-  }
+      }
+    },
+  };
+
+  await runRequest(session.life, ask, run.ticket, actions, {
+    signals: () => ({ cancelAborted: run.cancel.signal.aborted, stopAborted: session.stop.signal.aborted, booted: session.bootPromise !== undefined, local: session.snapshot.workspace === 'local' }),
+    isLocalEdits: (error) => error instanceof LocalEditsError,
+    onError: (error) => {
+      if (inException) return;
+      inException = true;
+      thrown = error;
+    },
+  });
 }
 
 /** 사람 한도 설정과 지금까지 쓴 양. 한도를 정하지 않았거나 누가 보냈는지 모르면 undefined */

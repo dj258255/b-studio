@@ -23,6 +23,7 @@ pub mod claim;
 pub mod create;
 mod json_text;
 pub mod lifecycle;
+pub mod outcome;
 pub mod persister;
 pub mod registry;
 mod scan;

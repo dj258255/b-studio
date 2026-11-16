@@ -6612,6 +6612,157 @@ pub fn create_session_run(env: Env, input: CreateRunInput, hook: ThreadsafeFunct
     .build(&env)
 }
 
+// ── 요청 실행의 끝 결정과 단계 순서(ADR-208, 4f B3b) ──
+// 판정은 bstudio-session(outcome)이 한다. 단계(앞 단계·계획 요약·러너·체크포인트 저장·되돌리기·알림·끝 알림)는 `hook`으로 TS를 부른다.
+// TS 껍데기: apps/studio/lib/server/session-run.ts
+use bstudio_session::outcome as session_outcome;
+
+#[napi(object)]
+pub struct RunCallJs {
+    pub step: String,
+    pub arg: String,
+}
+
+/// 콜백이 돌려주는 사실. 실패하면 `ok`가 거짓이다(콜백은 던지지 않는다)
+#[napi(object)]
+pub struct RunReplyJs {
+    pub ok: bool,
+    pub local_edits: bool,
+    /// `done`·`failed`·`awaiting_input`(`run_plan`만)
+    pub result: Option<String>,
+    pub preflight: bool,
+    pub question_gate_passed: bool,
+    pub platform_failure: bool,
+    pub cancel_requested: bool,
+    pub cancel_aborted: bool,
+    pub stop_aborted: bool,
+    pub booted: bool,
+    pub local: bool,
+    pub pending: bool,
+    pub mismatch: bool,
+    pub reverted: bool,
+}
+
+#[napi(object)]
+pub struct NormalFactsJs {
+    pub ask: bool,
+    pub result: String,
+    pub question_gate_passed: bool,
+    pub platform_failure: bool,
+    pub booted: bool,
+    pub status: String,
+    pub local: bool,
+    pub stopped: bool,
+}
+
+#[napi(object)]
+pub struct ExceptionFactsJs {
+    pub ask: bool,
+    pub cancelled: bool,
+    pub stopped: bool,
+    pub booted: bool,
+    pub status: String,
+}
+
+#[napi(object)]
+pub struct OutcomeJs {
+    pub action: String,
+    pub status: String,
+    pub summary: String,
+}
+
+fn outcome_js(decision: (session_outcome::Action, session_outcome::Finished)) -> OutcomeJs {
+    OutcomeJs { action: decision.0.as_str().to_owned(), status: decision.1.status.as_str().to_owned(), summary: decision.1.summary.as_str().to_owned() }
+}
+
+fn normal_facts(facts: &NormalFactsJs) -> Result<session_outcome::NormalFacts> {
+    let result = session_outcome::ResultStatus::parse(&facts.result).ok_or_else(|| Error::from_reason(format!("모르는 결과 상태입니다: {}", facts.result)))?;
+    let status = session_status::SessionStatus::parse(&facts.status).ok_or_else(|| Error::from_reason(format!("모르는 세션 상태입니다: {}", facts.status)))?;
+    Ok(session_outcome::NormalFacts { ask: facts.ask, result, question_gate_passed: facts.question_gate_passed, platform_failure: facts.platform_failure, booted: facts.booted, status, local: facts.local, stopped: facts.stopped })
+}
+
+fn exception_facts(facts: &ExceptionFactsJs) -> Result<session_outcome::ExceptionFacts> {
+    let status = session_status::SessionStatus::parse(&facts.status).ok_or_else(|| Error::from_reason(format!("모르는 세션 상태입니다: {}", facts.status)))?;
+    Ok(session_outcome::ExceptionFacts { ask: facts.ask, cancelled: facts.cancelled, stopped: facts.stopped, booted: facts.booted, status })
+}
+
+/// 요청 실행의 단계 이름(순서대로)
+#[napi]
+pub fn run_outcome_steps() -> Vec<String> {
+    session_outcome::RUN_STEPS.iter().map(|name| (*name).to_owned()).collect()
+}
+
+/// 결과가 나온 뒤의 판정. `pending`은 작업 복사본에 검증하지 않은 변경이 있는가(`runOutcomeNeedsProbeNormal`이 참인 칸에서만 본다)
+#[napi]
+pub fn run_outcome_decide_normal(facts: NormalFactsJs, pending: bool) -> Result<OutcomeJs> {
+    Ok(outcome_js(session_outcome::decide_normal(&normal_facts(&facts)?, pending)))
+}
+
+#[napi]
+pub fn run_outcome_needs_probe_normal(facts: NormalFactsJs) -> Result<bool> {
+    Ok(session_outcome::needs_probe_normal(&normal_facts(&facts)?))
+}
+
+/// 예외로 끝났을 때의 판정
+#[napi]
+pub fn run_outcome_decide_exception(facts: ExceptionFactsJs, pending: bool) -> Result<OutcomeJs> {
+    Ok(outcome_js(session_outcome::decide_exception(&exception_facts(&facts)?, pending)))
+}
+
+#[napi]
+pub fn run_outcome_needs_probe_exception(facts: ExceptionFactsJs) -> Result<bool> {
+    Ok(session_outcome::needs_probe_exception(&exception_facts(&facts)?))
+}
+
+fn run_reply(reply: RunReplyJs) -> session_outcome::Reply {
+    session_outcome::Reply {
+        ok: reply.ok,
+        local_edits: reply.local_edits,
+        result: reply.result.as_deref().and_then(session_outcome::ResultStatus::parse),
+        preflight: reply.preflight,
+        question_gate_passed: reply.question_gate_passed,
+        platform_failure: reply.platform_failure,
+        cancel_requested: reply.cancel_requested,
+        cancel_aborted: reply.cancel_aborted,
+        stop_aborted: reply.stop_aborted,
+        booted: reply.booted,
+        local: reply.local,
+        pending: reply.pending,
+        mismatch: reply.mismatch,
+        reverted: reply.reverted,
+    }
+}
+
+#[napi]
+impl SessionState {
+    /// 요청 하나를 끝까지 돈다. 단계마다 `hook({ step, arg })`를 불러 부수 효과를 TS가 하고, 순서·끝 결정·점유 단계 바꾸기와 풀기는 코어가 한다.
+    /// hook은 사실을 돌려준다(던지지 않는다). 끝에서 이 실행의 표로 점유를 푼다
+    #[napi]
+    pub fn run_request(&self, env: Env, ask: bool, token: f64, hook: ThreadsafeFunction<RunCallJs, Promise<RunReplyJs>, RunCallJs, Status, false>) -> Result<AsyncBlock<()>> {
+        let inner = self.inner.clone();
+        let hook = Arc::new(hook);
+        AsyncBlockBuilder::new(async move {
+            inner
+                .run_request(token as u64, ask, |name, arg| {
+                    let hook = hook.clone();
+                    async move {
+                        let call = RunCallJs { step: name.to_owned(), arg: arg.to_owned() };
+                        match hook.call_async(call).await {
+                            Ok(pending) => match pending.await {
+                                Ok(reply) => run_reply(reply),
+                                Err(_) => session_outcome::Reply::failed(false),
+                            },
+                            Err(_) => session_outcome::Reply::failed(false),
+                        }
+                    }
+                })
+                .await;
+            Ok(())
+        })
+        .build(&env)
+    }
+}
+
 /// 기록의 history로 세션 파일 한 번 쓰기(줄·예약 없이). `full_history`가 거짓이면 저장용 history(`trimHistory`), 참이면 기록 전체다.
 /// 바이트는 이 호출 안에서 만들고(같은 순간의 기록) 파일 쓰기는 JS 스레드 밖에서 한다. `head`·`tail`이 객체 글자가 아니면 던진다
 #[napi]
