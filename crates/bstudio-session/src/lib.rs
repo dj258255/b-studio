@@ -23,12 +23,14 @@ pub mod claim;
 pub mod create;
 mod json_text;
 pub mod lifecycle;
+pub mod limits;
 pub mod outcome;
 pub mod persister;
 pub mod registry;
 mod scan;
 pub mod status;
 pub mod store;
+pub mod usage;
 
 pub const HISTORY_LIMIT: usize = 5_000;
 pub const LOG_LIMIT: usize = 1_000;

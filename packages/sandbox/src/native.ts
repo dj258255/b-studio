@@ -326,6 +326,18 @@ interface NativeGuard {
   writeSessionRecordSync(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): void;
   /** 사이드카 파일을 원자적으로 쓴다: 폴더 만들기 → 호출마다 다른 임시 파일 → rename. `mode`는 새 파일의 권한(예: 0o600) */
   writeFileAtomic(file: string, text: string, mode?: number): Promise<void>;
+  // ── 토큰 한도 판정과 사람별 사용량 파일(ADR-209, 4f B3c) ──
+  /**
+   * 토큰 한도 판정. 요청 시작·대화 실행 중·터미널 실행 중이 이 함수 하나를 부른다. 사람 몫 = `fileTotal - saved + accum`.
+   * `userLimit`이 없으면 사람 몫은 보지 않는다. 수가 아니거나 음수·무한인 입력은 한도에 닿은 것으로 판정한다
+   */
+  judgeTokenLimit(sessionTotal: number, sessionLimit: number | undefined, userLimit: number | undefined, fileTotal: number, saved: number, accum: number): 'ok' | 'session' | 'user';
+  /** 사람별 사용량 파일에서 그 기간·사람의 합계. 쓴 사람이 없으면 null, 파일을 읽을 수 없으면 던진다 */
+  usageUserUsage(dir: string, period: string, user: string): NativeUsage | null;
+  /** 사람별 사용량 파일 전체를 `{"version":1,"periods":{...}}` 글자로. 없으면 빈 기록, 읽을 수 없으면 던진다 */
+  usageReadJson(dir: string): string;
+  /** 더하고 더한 뒤의 합계를 돌려준다(이 스레드에서 끝난다). 잠금을 얻지 못했거나 읽을 수 없거나 쓰지 못하면 쓰지 않고 던진다 */
+  usageAdd(dir: string, period: string, user: string, inputTokens: number, outputTokens: number, cacheReadTokens: number, cacheWriteTokens: number, lockWaitMs?: number): NativeUsage;
   /** 차등 시험용: 줄 하나를 러너가 읽는 규칙으로 읽어 꼬리표 붙은 JSON(`["num", "-0", true]` 같은 꼴)으로 돌려준다. JSON이 아니면 null, 너무 깊으면 `"deep"` */
   runnerParseLine(line: string): string | null | undefined;
   /** 차등 시험용: 덩어리 목록을 Node `StringDecoder`+`readline`(crlfDelay: Infinity)과 같은 규칙으로 줄로 나눈다 */
@@ -1087,6 +1099,14 @@ export interface NativeStopResult {
   /** 던진 단계 */
   step?: string | null;
   message?: string | null;
+}
+
+/** 사람 한 명의 한 기간 토큰 사용량(`usageUserUsage`·`usageAdd`) */
+export interface NativeUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
 }
 
 export interface NativeSessionState {
