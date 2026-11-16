@@ -6794,6 +6794,51 @@ fn write_bytes_atomic(env: Env, file: String, bytes: Vec<u8>, mode: Option<u32>)
     .build(&env)
 }
 
+// ── 토큰 한도 판정과 사람별 사용량 파일(ADR-209, 4f B3c). 판정은 bstudio-session의 `limits`, 파일은 `usage`가 한다 ──
+
+/// 토큰 한도 판정(요청 시작·대화 실행 중·터미널 실행 중이 모두 이 함수 하나를 부른다). `"ok"`·`"session"`·`"user"`를 돌려준다.
+/// 사람 한도(`userLimit`)가 없으면 사람 몫은 보지 않는다. 수가 아니거나 음수·무한인 입력은 한도에 닿은 것으로 판정한다(막는 검사라 모르는 입력은 넘은 것으로 본다)
+#[napi]
+pub fn judge_token_limit(session_total: f64, session_limit: Option<f64>, user_limit: Option<f64>, file_total: f64, saved: f64, accum: f64) -> String {
+    let user = user_limit.map(|limit| bstudio_session::limits::UserShare { limit, file_total, saved, accum });
+    bstudio_session::limits::judge(&bstudio_session::limits::Input { session_total, session_limit, user }).as_str().to_owned()
+}
+
+#[napi(object)]
+pub struct UsageJs {
+    pub input_tokens: f64,
+    pub output_tokens: f64,
+    pub cache_read_tokens: f64,
+    pub cache_write_tokens: f64,
+}
+
+impl From<bstudio_session::usage::Usage> for UsageJs {
+    fn from(usage: bstudio_session::usage::Usage) -> Self {
+        Self { input_tokens: usage.input, output_tokens: usage.output, cache_read_tokens: usage.cache_read, cache_write_tokens: usage.cache_write }
+    }
+}
+
+/// 사람별 사용량 파일에서 그 기간·사람의 합계. 쓴 사람이 없으면 null, 파일을 읽을 수 없으면 던진다(한도가 조용히 사라지지 않게)
+#[napi]
+pub fn usage_user_usage(dir: String, period: String, user: String) -> Result<Option<UsageJs>> {
+    bstudio_session::usage::user_usage(Path::new(&dir), &period, &user).map(|usage| usage.map(UsageJs::from)).map_err(Error::from_reason)
+}
+
+/// 사람별 사용량 파일 전체를 `{"version":1,"periods":{...}}` 글자로. 파일이 없으면 빈 기록, 읽을 수 없으면 던진다
+#[napi]
+pub fn usage_read_json(dir: String) -> Result<String> {
+    bstudio_session::usage::read_json(Path::new(&dir)).map_err(Error::from_reason)
+}
+
+/// 사람별 사용량 파일에 더하고 더한 뒤의 그 사람 합계를 돌려준다. 이 스레드에서 끝난다(프로세스 사이 잠금을 얻을 때까지 `lockWaitMs`(기본 3000)까지 기다린다).
+/// 잠금을 얻지 못했거나 파일을 읽을 수 없거나 쓰지 못하면 쓰지 않고 던진다. 돌아왔다는 것은 파일에 쓰였다는 뜻이다
+#[napi]
+pub fn usage_add(dir: String, period: String, user: String, input_tokens: f64, output_tokens: f64, cache_read_tokens: f64, cache_write_tokens: f64, lock_wait_ms: Option<u32>) -> Result<UsageJs> {
+    let usage = bstudio_session::usage::Usage::checked(input_tokens, output_tokens, cache_read_tokens, cache_write_tokens).map_err(Error::from_reason)?;
+    let wait = lock_wait_ms.map_or(bstudio_session::usage::DEFAULT_LOCK_WAIT, |ms| std::time::Duration::from_millis(u64::from(ms)));
+    bstudio_session::usage::add(Path::new(&dir), &period, &user, &usage, wait).map(UsageJs::from).map_err(Error::from_reason)
+}
+
 /// 이벤트 글자(각각 JSON 값 하나)를 이어 JSON 배열 글자로 만든다
 fn json_array(events: &[&str]) -> String {
     let mut out = String::with_capacity(events.iter().map(|event| event.len() + 1).sum::<usize>() + 2);

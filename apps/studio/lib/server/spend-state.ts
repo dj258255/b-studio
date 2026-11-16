@@ -9,7 +9,7 @@
  *  - 단가 표로 낸 추정(Codex처럼 비용을 알리지 않는 CLI): 단가(B_STUDIO_TOKEN_PRICES_JSON 등)가 있을 때만 내고 추정이라고 표시한다.
  *    단가가 없으면 비용을 지어내지 않고 "단가 없음"으로 둔다. 그런 줄이 하나라도 있으면 합계 비용도 내지 않는다.
  */
-import { readFileSync } from 'node:fs';
+import { copyFileSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { AgentUsage } from '@b-studio/agent';
@@ -173,14 +173,15 @@ export function summarizeSpend(record: SpendRecord, now: number, pricing: TokenP
   return { today: totalsOf(record, week.slice(0, 1), pricing), week: totalsOf(record, week, pricing), ...(pricing.error ? { priceError: pricing.error } : {}) };
 }
 
-function parseRecord(text: string): SpendRecord {
+/** 읽은 글이 기록의 꼴이 아니면 undefined(깨진 파일) */
+function parseRecord(text: string): SpendRecord | undefined {
   try {
     const days = (JSON.parse(text) as { days?: unknown } | null)?.days;
     if (days && typeof days === 'object' && !Array.isArray(days)) return { version: 1, days: days as SpendRecord['days'] };
   } catch {
-    // 깨진 파일: 비운 채 시작한다
+    // 깨진 파일
   }
-  return EMPTY;
+  return undefined;
 }
 
 export interface SpendStore {
@@ -196,18 +197,42 @@ export function createSpendStore(dir: string, options: { flushMs?: number } = {}
   let record: SpendRecord | undefined;
   let timer: NodeJS.Timeout | undefined;
   let writing: Promise<void> = Promise.resolve();
+  /** 처음 읽은 파일을 읽지 못해(없는 것이 아니라 읽기 오류) 쓰면 남의 내용을 덮어쓰게 될 때 그 까닭. 있으면 메모리에만 모으고 쓰지 않는다 */
+  let blocked: string | undefined;
+  /** 처음 읽은 파일이 깨져 있었다. 비운 채 시작하되 처음 쓰기 전에 원본을 `spend.json.broken`으로 남긴다 */
+  let broken = false;
   const load = (): SpendRecord => {
     if (record) return record;
+    let text: string | undefined;
     try {
-      record = parseRecord(readFileSync(file, 'utf8'));
-    } catch {
-      record = EMPTY;
+      text = readFileSync(file, 'utf8');
+    } catch (error) {
+      // 파일이 없는 것은 처음이다. 그 밖의 읽기 오류로 빈 기록에서 시작해 쓰면 읽지 못한 내용을 덮어쓴다
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        blocked = `${file}을(를) 읽지 못했습니다: ${(error as Error).message}`;
+        console.error(`[b-studio] 날마다의 토큰 기록을 읽지 못해 쓰지 않습니다(메모리에만 모읍니다): ${blocked}`);
+      }
     }
+    const parsed = text === undefined ? undefined : parseRecord(text);
+    if (text !== undefined && !parsed) broken = true;
+    record = parsed ?? EMPTY;
     return record;
   };
   const write = async (): Promise<void> => {
     timer = undefined;
     const snapshot = load();
+    if (blocked) return;
+    if (broken) {
+      // 깨진 원본은 한 번 남겨 둔다(덮어쓰기 전). 남기지 못하면 덮어쓰지 않는다
+      try {
+        copyFileSync(file, `${file}.broken`);
+        broken = false;
+      } catch (error) {
+        blocked = `깨진 ${file}을(를) 남기지 못했습니다: ${(error as Error).message}`;
+        console.error(`[b-studio] 날마다의 토큰 기록을 쓰지 않습니다: ${blocked}`);
+        return;
+      }
+    }
     const run = async () => {
       await mkdir(dir, { recursive: true, mode: 0o700 });
       const temp = `${file}.${process.pid}.${Date.now()}.tmp`;

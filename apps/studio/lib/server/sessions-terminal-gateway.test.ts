@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -2078,6 +2078,35 @@ describe('터미널 실행에도 턴 상한·토큰 한도·정체 알림을 건
       expect(finished.summary).toContain('오늘 쓸 수 있는 토큰 한도');
       await stopSession(session.id);
     } finally {
+      delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
+    }
+  }, 30_000);
+
+  // 4f B3c: 사람 몫을 파일에 저장하지 못해도(저장이 끝나지 않은 증가분) 이 실행이 쓴 만큼은 한도에 센다. 옛 코드는 저장된 값(600)만 봐서 멈추지 못했다.
+  // 파일에 이미 있는 몫(600)을 두는 것은 저장하지 못한 몫을 "저장한 몫"으로 잘못 세는 실수를 잡기 위해서다(0으로 눌려 가려진다)
+  it('사람 몫을 저장하지 못해도 파일 합계에 이 실행이 쓴 양을 더해 사람 한도를 판정해 멈춘다', async () => {
+    process.env.B_STUDIO_USER_TOKEN_LIMIT = '1000';
+    const usageDir = process.env.B_STUDIO_USAGE_DIR!;
+    await mkdir(usageDir, { recursive: true });
+    const today = new Date();
+    const key = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    await writeFile(path.join(usageDir, 'tokens.json'), JSON.stringify({ version: 1, periods: { [key]: { kim: { inputTokens: 600, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } } } }));
+    await chmod(usageDir, 0o500);
+    try {
+      const session = await open();
+      await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+      await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+
+      // 400은 저장하지 못한다(폴더가 쓰기 불가). 파일 600 + 이 실행 400 = 1000 = 한도
+      await session.gateway.telemetry(otlp([req(400, 0, 'p-1')]));
+
+      expect(session.ofType('run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+      const [finished] = await finishedRuns(session, 1);
+      expect(finished.status).toBe('cancelled');
+      expect(finished.summary).toContain('오늘 쓸 수 있는 토큰 한도');
+      await stopSession(session.id);
+    } finally {
+      await chmod(usageDir, 0o700);
       delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
     }
   }, 30_000);

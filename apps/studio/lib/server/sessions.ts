@@ -240,11 +240,8 @@ import {
   formatTokenCount,
   hasTokens,
   parseTokenLimit,
-  parseUsageWindow,
-  parseUserTokenLimit,
   subtractTokens,
   totalTokens,
-  type UsageWindow,
 } from '@/lib/usage';
 import type {
   LiveChangeFile,
@@ -309,7 +306,7 @@ import { walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { spendStore } from './spend-state';
-import { addUserUsage, userTokens } from './usage-state';
+import { chargeUserUsage, judgeLimits, judgeRunLimits, newLedger, userLimitSetting, type RunLedger } from './session-limits';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
 import {
@@ -373,12 +370,14 @@ interface ActiveRun {
   by?: string;
   /** 이미 이 사람 몫으로 더한 양. 토큰 이벤트는 실행 누적값을 주므로 늘어난 만큼만 더한다 */
   charged?: AgentUsage;
+  /** 이 실행이 사람 몫에 더하려 한 양과 파일에 쓰기가 끝난 양(ADR-209). 한도 판정이 파일 합계에서 저장한 몫을 빼고 누적을 더한다 */
+  userLedger?: RunLedger;
   /** 요청을 멈춘 이유. 사용자가 취소했거나 토큰 한도에 도달했다 */
   stopReason?: 'user' | 'budget';
   /** 에이전트의 질문이 걸려 있을 때 온 요청이다(그 질문에 대한 답). 답의 첫 문장은 체크포인트 제목으로 쓰지 않는다 */
   answersQuestion?: boolean;
-  /** 한도로 멈췄을 때 어느 한도인지 */
-  limitKind?: 'session' | 'user';
+  /** 한도로 멈췄을 때 어느 한도인지. `usage_unreadable`은 사람별 사용량 파일을 읽을 수 없어 한도를 판정하지 못했다는 뜻이다 */
+  limitKind?: 'session' | 'user' | 'usage_unreadable';
   /**
    * 실행 중 지시 큐. 사람이 보는 단일 세션이 이 실행을 시작했을 때만 있다(작업 분해 레인·플릿은 없다).
    * 러너가 다음 모델 호출 직전에 꺼내 가고, 남은 지시는 실행이 끝날 때 버림으로 기록한다
@@ -1210,18 +1209,9 @@ export function sendMessage(
 
   const request = text.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
-  const limit = session.snapshot.tokenLimit;
-  if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit) {
-    throw new StudioError(409, `이 세션은 토큰 한도(${formatTokenCount(limit)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`);
-  }
-  // 사람 한도는 세션과 따로 센다. 새 세션을 만들어도 같은 사람이면 그 기간 안에서는 더 쓸 수 없다
-  const personal = userTokenBudget(by);
-  if (personal && personal.used >= personal.limit) {
-    throw new StudioError(
-      409,
-      `${describeWindow(personal.window)} 쓸 수 있는 토큰 한도(${formatTokenCount(personal.limit)})에 도달해 새 요청을 받지 않습니다. 기간이 바뀐 뒤에 다시 요청하세요`,
-    );
-  }
+  // 세션·사람 한도는 코어의 판정 하나가 본다(ADR-209). 사람 한도는 세션과 따로 센다: 새 세션을 만들어도 같은 사람이면 그 기간 안에서는 더 쓸 수 없다
+  const startLimit = startLimitMessage(session, by);
+  if (startLimit) throw new StudioError(409, startLimit);
 
   // 되묻기(ask_user)는 사람이 보낸 단일 세션 요청에만 켠다. 레인·플릿·벤치·CLI는 도구 목록이 그대로다
   const plan = {
@@ -2787,50 +2777,57 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
   });
 }
 
-/** 사람 한도 설정과 지금까지 쓴 양. 한도를 정하지 않았거나 누가 보냈는지 모르면 undefined */
-function userTokenBudget(by: string | undefined): { used: number; limit: number; window: UsageWindow } | undefined {
-  if (!by) return undefined;
-  const limit = parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT);
-  if (limit === undefined) return undefined;
-  const window = parseUsageWindow(process.env.B_STUDIO_USER_TOKEN_WINDOW);
-  return { used: userTokens(by, window), limit, window };
+/**
+ * 세션·사람 토큰 한도에 이미 닿았으면 새 요청을 거절하는 글(요청 시작의 409와 터미널 시작 전 확인이 같은 글이다). 넘지 않았으면 undefined.
+ * 사람별 사용량 파일을 읽을 수 없으면 던진다(한도가 조용히 꺼지지 않게)
+ */
+function startLimitMessage(session: Session, by: string | undefined): string | undefined {
+  const limit = session.snapshot.tokenLimit;
+  const verdict = judgeLimits({ sessionTokens: totalTokens(session.snapshot.tokens), ...(limit !== undefined ? { sessionLimit: limit } : {}), ...(by ? { by } : {}) });
+  if (verdict === 'session') return `이 세션은 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`;
+  if (verdict === 'user') {
+    const personal = userLimitSetting(by);
+    return `${describeWindow(personal?.window ?? 'day')} 쓸 수 있는 토큰 한도(${formatTokenCount(personal?.limit ?? 0)})에 도달해 새 요청을 받지 않습니다. 기간이 바뀐 뒤에 다시 요청하세요`;
+  }
+  return undefined;
 }
 
-/** 사람 몫에 늘어난 만큼만 더한다. 기록을 쓰지 못해도 요청은 계속한다 */
-async function chargeUser(run: ActiveRun, usage: AgentUsage): Promise<void> {
-  if (!run.by || parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT) === undefined) return;
+/** 사람 몫에 늘어난 만큼만 더한다. 기록을 쓰지 못해도 요청은 계속한다(못 쓴 양은 이 실행의 원장에 남아 한도 판정이 센다) */
+function chargeUser(run: ActiveRun, usage: AgentUsage): void {
+  const setting = userLimitSetting(run.by);
+  if (!run.by || !setting) return;
   const delta = subtractTokens(usage, run.charged);
   run.charged = usage;
-  await recordUserUsage(run.by, delta);
+  chargeUserUsage(run.by, delta, setting.window, (run.userLedger ??= newLedger()));
 }
 
 /**
  * 터미널 사용량을 사람 몫에 더한다(#B5 수정 2차). 실행에 붙든 안 붙든 받은 만큼(usage)을 세션 주인 몫으로 더한다
- * (터미널 실행의 by도 주인이다). chargeUser와 같은 조건(사람 한도를 정했을 때만)으로 기록한다
+ * (터미널 실행의 by도 주인이다). chargeUser와 같은 조건(사람 한도를 정했을 때만)으로 기록한다.
+ * 열린 실행이 있고 그 실행의 사람이 주인이면 그 실행의 원장에 센다(ADR-209)
  */
-async function chargeTerminalOwnerUsage(session: Session, usage: AgentUsage): Promise<void> {
+function chargeTerminalOwnerUsage(session: Session, usage: AgentUsage): void {
   const by = session.snapshot.owner;
-  if (!by || parseUserTokenLimit(process.env.B_STUDIO_USER_TOKEN_LIMIT) === undefined) return;
-  await recordUserUsage(by, usage);
-}
-
-/** 사람 몫에 delta를 더한다(늘어난 것이 없으면 건너뛴다). 기록을 쓰지 못해도 실행은 계속한다 */
-async function recordUserUsage(by: string, delta: AgentUsage): Promise<void> {
-  if (!hasTokens(delta)) return;
-  try {
-    await addUserUsage(by, delta, parseUsageWindow(process.env.B_STUDIO_USER_TOKEN_WINDOW));
-  } catch (error) {
-    console.error('[b-studio] 사람별 토큰 사용량을 기록하지 못했습니다', error);
-  }
+  const setting = userLimitSetting(by);
+  if (!by || !setting) return;
+  const open = openTerminalRun(session);
+  chargeUserUsage(by, usage, setting.window, open && open.by === by ? (open.userLedger ??= newLedger()) : undefined);
 }
 
 /** 한도로 멈췄을 때 어느 한도인지 알린다. 사람 한도는 새 세션을 만들어도 풀리지 않으므로 구분해서 말한다 */
 function limitReason(run: ActiveRun, limit: number | undefined): string {
+  if (run.limitKind === 'usage_unreadable') return '사람별 토큰 사용량 기록을 읽지 못해';
   if (run.limitKind === 'user') {
-    const personal = userTokenBudget(run.by);
+    const personal = userLimitSetting(run.by);
     return `${describeWindow(personal?.window ?? 'day')} 쓸 수 있는 토큰 한도(${formatTokenCount(personal?.limit ?? 0)})에 도달해`;
   }
   return `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해`;
+}
+
+/** 실행 중 한도 판정이 멈추라고 했을 때 중단 신호에 싣는 글 */
+function limitAbortMessage(kind: 'session' | 'user' | 'usage_unreadable'): string {
+  if (kind === 'session') return '세션 토큰 한도에 도달했습니다';
+  return kind === 'user' ? '사람별 토큰 한도에 도달했습니다' : '사람별 토큰 사용량 기록을 읽지 못했습니다';
 }
 
 /** 멈춘 이유와 되돌린 결과. revertError가 있으면 되돌리지 못했다 */
@@ -2985,19 +2982,17 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       session.snapshot.tokens = addTokens(run.baseTokens, event.usage);
       emit(session, { type: 'tokens', runId: run.id, usage: event.usage, sessionTokens: session.snapshot.tokens });
       // 사람 몫에는 늘어난 만큼만 더한다. 세션이 여러 개여도 한 사람의 합계는 한 곳에 쌓인다
-      void chargeUser(run, event.usage);
+      chargeUser(run, event.usage);
       const limit = session.snapshot.tokenLimit;
-      const personal = userTokenBudget(run.by);
-      const overSession = limit !== undefined && totalTokens(session.snapshot.tokens) >= limit;
-      const overUser = personal !== undefined && personal.used + totalTokens(event.usage) >= personal.limit;
+      const verdict = judgeRunLimits({ sessionTokens: totalTokens(session.snapshot.tokens), ...(limit !== undefined ? { sessionLimit: limit } : {}), ...(run.by ? { by: run.by } : {}), ...(run.userLedger ? { ledger: run.userLedger } : {}) });
       // 게이트 실패를 되풀이하는 요청이 한도를 넘어 계속 토큰을 쓰지 않도록, 넘는 순간 멈추고 되돌린다
-      if ((overSession || overUser) && !run.cancel.signal.aborted) {
+      if (verdict !== 'ok' && !run.cancel.signal.aborted) {
         run.stopReason = 'budget';
-        run.limitKind = overSession ? 'session' : 'user';
+        run.limitKind = verdict;
         session.snapshot.cancelling = 'budget';
         markRunCancelling(session, run);
         emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
-        run.cancel.abort(new DOMException(overSession ? '세션 토큰 한도에 도달했습니다' : '사람별 토큰 한도에 도달했습니다', 'AbortError'));
+        run.cancel.abort(new DOMException(limitAbortMessage(verdict), 'AbortError'));
       }
     },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
@@ -7741,15 +7736,7 @@ function clearTerminalAttention(session: Session): void {
 
 /** 세션·사람 토큰 한도를 이미 넘었으면 그 사유(대화 실행의 409와 같은 문구). 넘지 않았으면 undefined */
 function terminalBudgetMessage(session: Session): string | undefined {
-  const limit = session.snapshot.tokenLimit;
-  if (limit !== undefined && totalTokens(session.snapshot.tokens) >= limit) {
-    return `이 세션은 토큰 한도(${formatTokenCount(limit)})에 도달해 새 요청을 받지 않습니다. 새 세션을 시작해 이어서 작업하세요`;
-  }
-  const personal = userTokenBudget(session.snapshot.owner);
-  if (personal && personal.used >= personal.limit) {
-    return `${describeWindow(personal.window)} 쓸 수 있는 토큰 한도(${formatTokenCount(personal.limit)})에 도달해 새 요청을 받지 않습니다. 기간이 바뀐 뒤에 다시 요청하세요`;
-  }
-  return undefined;
+  return startLimitMessage(session, session.snapshot.owner);
 }
 
 /** 한도에 닿은 실행의 쓰기 도구를 거절할 사유(#B5). 한도에 닿지 않았으면 undefined */
@@ -7778,18 +7765,16 @@ function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: Term
   // 이미 멈추는 중이거나 토큰 한도로 멈춘 실행은 다시 보지 않는다
   if (run.cancel.signal.aborted || state.limitReason === 'budget') return;
   const limit = session.snapshot.tokenLimit;
-  const personal = userTokenBudget(run.by);
-  const overSession = limit !== undefined && totalTokens(session.snapshot.tokens) >= limit;
-  // 사람 몫은 chargeUser가 저장한 뒤의 값으로만 본다(#B5 수정 2). 이 실행 누적을 더하면 이미 저장된 몫과 겹쳐 일찍 넘긴다
-  const overUser = personal !== undefined && personal.used >= personal.limit;
-  if (!overSession && !overUser) return;
+  // 대화 실행과 같은 판정이다(ADR-209). 사람 몫 = 파일 합계 − 이 실행이 저장을 마친 몫 + 이 실행 누적: 저장한 몫을 겹쳐 세지 않고(#B5 수정 2), 저장이 끝나지 않은 증가분도 센다
+  const verdict = judgeRunLimits({ sessionTokens: totalTokens(session.snapshot.tokens), ...(limit !== undefined ? { sessionLimit: limit } : {}), ...(run.by ? { by: run.by } : {}), ...(run.userLedger ? { ledger: run.userLedger } : {}) });
+  if (verdict === 'ok') return;
   run.stopReason = 'budget';
-  run.limitKind = overSession ? 'session' : 'user';
+  run.limitKind = verdict;
   state.limitReason = 'budget';
   session.snapshot.cancelling = 'budget';
   markRunCancelling(session, run);
   emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
-  run.cancel.abort(new DOMException(overSession ? '세션 토큰 한도에 도달했습니다' : '사람별 토큰 한도에 도달했습니다', 'AbortError'));
+  run.cancel.abort(new DOMException(limitAbortMessage(verdict), 'AbortError'));
   // CLI에 하던 일을 멈추라고 알린다(Esc). 실행을 닫는 일은 중단 신호를 듣는 쪽이 한다(cancelRun과 같다)
   interruptSessionTerminal(session.snapshot.id);
 }
@@ -7943,8 +7928,8 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
 
   // 3) 같은 요청 번호를 다시 받았으면(이미 셌으면) 사람 몫·합계 알림·한도 판정을 건너뛴다
   if (sessionTokens === undefined) return;
-  // 사람 몫을 먼저 저장한 뒤(await) 저장된 값으로 한도를 판정한다(#B5 수정 1·2차). 붙지 않은 것은 세션 주인 몫이다
-  await chargeTerminalOwnerUsage(session, usage);
+  // 사람 몫을 먼저 저장한 뒤 한도를 판정한다(#B5 수정 1·2차). 저장은 이 스레드에서 끝나고, 못 쓴 양은 이 실행의 원장이 센다(ADR-209). 붙지 않은 것은 세션 주인 몫이다
+  chargeTerminalOwnerUsage(session, usage);
   // 화면이 세션 합계를 맞추도록 알린다. 붙은 실행이 있으면 그 실행 id로, 없으면 빈 id로(터미널 화면은 실행별 표시를 쓰지 않는다)
   emit(session, { type: 'tokens', runId: runId ?? '', usage, sessionTokens });
   // 한도를 넘었으면 열린 실행이 있을 때 그 실행을 멈추고 되돌린다. 없으면 다음 요청 시작이 막히는 것으로 충분하다
