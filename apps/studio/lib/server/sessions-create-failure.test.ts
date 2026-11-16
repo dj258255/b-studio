@@ -31,6 +31,8 @@ const fake = vi.hoisted(() => ({
   startCalls: 0,
   startFailures: 0,
   gatewayFails: false,
+  /** 미리보기 게이트웨이가 던지기 직전에 불린다(맵에 든 세션의 저장이 예약된 채 실패하는 경우를 만든다) */
+  beforeGatewayFails: undefined as (() => void) | undefined,
   /** 다음 `randomUUID()`가 이 값을 돌려준다(8자 id가 겹치는 경우를 만든다) */
   forcedUuid: undefined as string | undefined,
   /** 샌드박스를 만드는 사이에 불린다(만들기가 도는 동안 다른 곳이 같은 id를 맵에 넣는 경우를 만든다) */
@@ -121,7 +123,10 @@ vi.mock('./preview-gateway', async (importOriginal) => {
   return {
     ...actual,
     createPreviewGateway: (...args: Parameters<typeof actual.createPreviewGateway>) => {
-      if (fake.gatewayFails) throw new Error('미리보기 게이트웨이를 만들지 못했습니다(가짜)');
+      if (fake.gatewayFails) {
+        fake.beforeGatewayFails?.();
+        throw new Error('미리보기 게이트웨이를 만들지 못했습니다(가짜)');
+      }
       return actual.createPreviewGateway(...args);
     },
   };
@@ -193,6 +198,7 @@ beforeEach(async () => {
     startCalls: 0,
     startFailures: 0,
     gatewayFails: false,
+    beforeGatewayFails: undefined,
     forcedUuid: undefined,
     duringCreate: undefined,
   });
@@ -307,6 +313,20 @@ describe('작업 복사본 세션: 만들다 실패하면 이 호출이 만든 �
     expect(fake.destroyCalls, '만든 샌드박스를 치웠다').toBe(1);
     expect(liveSessions().size, '반쯤 만든 세션이 맵에 남았다').toBe(0);
     expect(await entries(sessionsDir), '세션 폴더가 남았다').toEqual([]);
+  });
+
+  it('맵에 넣은 뒤 저장이 예약된 채 실패해도, 지운 세션 폴더에 저장 파일이 다시 생기지 않는다(다음 시작 때 유령 세션이 되지 않는다)', async () => {
+    process.env.B_STUDIO_PREVIEW_DOMAIN = 'preview.example.test';
+    fake.gatewayFails = true;
+    // 게이트웨이가 던지기 직전에, 맵에 든 세션의 저장을 예약해 둔다(이벤트 하나가 저장을 예약한 것과 같다)
+    fake.beforeGatewayFails = () => {
+      for (const session of liveSessions().values()) (session as unknown as { persist: { schedule(): void } }).persist.schedule();
+    };
+    const error = await failure(createSession('failproj', 'kim', 'copy'));
+    expect(error.message).toBe('미리보기 게이트웨이를 만들지 못했습니다(가짜)');
+    // 저장 예약(500ms)이 지나도록 기다린다
+    await new Promise((resolve) => setTimeout(resolve, 900));
+    expect(await entries(sessionsDir), '지운 세션 폴더에 예약된 저장이 저장 파일을 다시 썼다').toEqual([]);
   });
 
   it('샌드박스를 치우다 실패해도 원래 오류를 던지고, 그래도 폴더는 지운다', async () => {

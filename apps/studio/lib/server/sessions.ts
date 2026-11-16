@@ -997,7 +997,13 @@ async function startSession({
       },
       // 치우기(만들다 실패했을 때, 끝낸 단계만 거꾸로): 이 호출이 만든 것만 치운다
       destroy_sandbox: () => sandbox.destroy(),
-      unregister_session: () => {
+      unregister_session: async () => {
+        // 예약된 저장을 지우고 줄에 선 쓰기가 끝나기를 기다린다. 저장은 폴더를 다시 만들어 쓰므로, 이 뒤에 세션 폴더를 지워도
+        // 늦게 온 저장이 지운 폴더에 저장 파일을 다시 남겨 다음 시작 때 유령 세션으로 복구되는 일이 없게 한다
+        if (inMap) {
+          session.persist.cancel();
+          await session.persist.idle();
+        }
         if (inRegistry) registry.unregister(id);
         inRegistry = false;
         // 같은 id의 다른 세션을 빼지 않는다
