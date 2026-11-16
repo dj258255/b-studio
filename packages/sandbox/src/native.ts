@@ -306,6 +306,14 @@ interface NativeGuard {
   SessionRegistry: new () => NativeSessionRegistry;
   /** 멈추기의 단계 목록(순서대로). 마지막이 `flush_persist`다 */
   sessionStopSteps(): NativeStopStep[];
+  // ── 세션 만들기의 순서와 치우기(ADR-206, 4f B2c) ──
+  /** 만들기의 단계 목록(순서대로)과 단계마다의 치우기 콜백 이름 */
+  sessionCreateSteps(): NativeCreateStep[];
+  /**
+   * 세션을 만든다. 단계마다 `hook(단계 이름)`을, 실패하면 끝낸 단계의 치우기를 거꾸로 `hook(치우기 이름)`으로 부른다. 세션 폴더(`make_home`)는 코어가 배타적으로 만들고
+   * 실패하면 B2a의 `removeSessionHome` 규칙으로 지운다(이 호출이 만든 폴더만). hook은 성공하면 null, 실패하면 이유를 돌려준다(던지지 않는다)
+   */
+  createSessionRun(input: NativeCreateRunInput, hook: (name: string) => Promise<string | null>): Promise<NativeCreateResult>;
   /** 기록으로 세션 파일 한 번 쓰기(줄·예약 없이). `fullHistory`가 거짓이면 저장용 history, 참이면 기록 전체. `head`·`tail`이 객체 글자가 아니면 던진다 */
   writeSessionRecord(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): Promise<void>;
   /** `writeSessionRecord`의 동기 판: 종료 신호 처리처럼 기다릴 수 없는 곳에서 이 스레드에서 쓴다(임시 파일 `<file>.<pid>.exit.tmp`). 던질 수 있다 */
@@ -1017,6 +1025,31 @@ export interface NativeStoredSession {
   record: NativeSessionRecord;
   /** history를 기록에 올리지 못한 이유. 있으면 기록은 비어 있고 그 세션은 건너뛰어야 한다 */
   historyError?: string | null;
+}
+
+export interface NativeCreateStep {
+  name: string;
+  /** 이 단계를 끝낸 뒤 만들기가 실패하면 부르는 치우기 콜백 이름 */
+  undo?: string | null;
+  /** 이 단계 자신이 실패해도 치우기를 부른다 */
+  undoIfFailed: boolean;
+}
+
+export interface NativeCreateRunInput {
+  root: string;
+  home: string;
+  sessionId: string;
+  /** 내 폴더 세션의 사용자 폴더(없으면 작업 복사본 세션) */
+  userDir?: string;
+}
+
+export interface NativeCreateResult {
+  ok: boolean;
+  /** 실패한 단계 이름 */
+  step?: string | null;
+  message?: string | null;
+  /** 치우다 실패한 것(원래 오류가 아니다) */
+  undoErrors: Array<{ name: string; message: string }>;
 }
 
 export interface NativeStopStep {

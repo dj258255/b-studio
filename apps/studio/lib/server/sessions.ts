@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import type { Server } from 'node:http';
-import { cp, lstat, mkdir, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, lstat, open, readdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { z } from 'zod';
@@ -328,6 +328,7 @@ import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-ac
 import { describe, StudioError } from './errors';
 import { assertDeletable, assertResumableHome, planRecovery, removeSessionHome } from './session-lifecycle';
 import { SessionLife, SessionRegistry, type StatusChange } from './session-status';
+import { runCreate } from './session-create';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
@@ -806,151 +807,206 @@ async function startSession({
   accountId?: string;
 }): Promise<SessionSnapshot> {
   const id = randomUUID().slice(0, 8);
-  const sessionDir = path.join(sessionsRoot(), `${projectId}-${id}`);
+  const root = sessionsRoot();
+  const sessionDir = path.join(root, `${projectId}-${id}`);
   // 지연 기동 세션은 샌드박스를 켜지 않고 idle로 둔다
   const lazy = boot === 'on-demand';
-  // 승격 대상 모델 id가 레지스트리에 없으면 샌드박스를 띄우기 전에 거부한다(조용히 승격 없이 돌지 않게)
-  if (backend === 'api') apiEscalation();
 
   // 게이트를 통과한 변경만 남기고 실패한 변경은 되돌리기 위해 작업 폴더의 시작 상태를 체크포인트로 둔다
   const author = gitAuthor();
   let workDir = sessionDir;
   let stateDir: string | undefined;
-  let checkpoints: CheckpointStore;
-  let firstCheckpoint: Checkpoint;
+  let checkpoints!: CheckpointStore;
+  let firstCheckpoint!: Checkpoint;
   let sourceDirtyFiles = 0;
-  if (workspace === 'local') {
-    // 사용자의 폴더에서 바로 작업해 IDE의 수정과 에이전트의 수정이 같은 파일에 반영되게 한다.
-    // 체크포인트 저장소와 세션 상태는 사용자 폴더의 .git과 섞이지 않게 세션 폴더에 둔다
-    workDir = source.root;
-    stateDir = sessionDir;
-    checkpoints = new CheckpointStore(workDir, { author, gitDir: path.join(stateDir, '.git') });
-    firstCheckpoint = await checkpoints.init('세션 시작 (내 폴더)');
-  } else {
-    // 에이전트가 원본을 바꾸지 않도록 세션마다 작업 복사본을 만든다. Docker가 마운트할 수 있는 홈 아래에 둔다
-    await mkdir(path.dirname(workDir), { recursive: true });
-    // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
-    const allowSubfolder = source.spec.repository?.monorepo === true;
-    if (seed) {
-      // 작업 분해 레인·통합(ADR-096): 프로젝트 원본이 아니라 그 세션의 작업 복사본에서, 그 세션의 최신 체크포인트
-      // sha로 시작한다. 기준 브랜치·원격은 그 세션이 이미 기록해 둔 값을 그대로 물려받는다(inspectSource가 읽는다)
-      const cloned = await CheckpointStore.clone(seed.workDir, workDir, {
-        branch: sessionBranchName(projectId, id),
-        author,
-        allowSubfolder,
-        ref: seed.sha,
-        excludedFiles: generatedFilePaths,
-      });
-      checkpoints = cloned.store;
-      firstCheckpoint = cloned.start;
-      sourceDirtyFiles = cloned.source.dirtyFiles;
-      await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
-      // 체크포인트가 만들어진 뒤에 끼워 넣은 파일이라, 세션 시작 체크포인트의 생성 파일 스냅샷을 여기서 따로 맞춘다(도그푸딩 마찰 127)
-      await checkpoints.refreshExcludedSnapshot(firstCheckpoint.sha);
-    } else if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
-      // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
-      const cloned = await CheckpointStore.clone(source.root, workDir, {
-        branch: sessionBranchName(projectId, id),
-        author,
-        allowSubfolder,
-        excludedFiles: generatedFilePaths,
-      });
-      checkpoints = cloned.store;
-      firstCheckpoint = cloned.start;
-      sourceDirtyFiles = cloned.source.dirtyFiles;
-      // 폴더 열기로 등록한 프로젝트(ADR-067)는 b-studio가 만든 설정 파일이 커밋돼 있지 않아 복제에 빠진다. 복사본에 넣고 추적에서 뺀다
-      await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
-      await checkpoints.refreshExcludedSnapshot(firstCheckpoint.sha);
-    } else {
-      await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
-      checkpoints = new CheckpointStore(workDir, { author });
-      firstCheckpoint = await checkpoints.init('세션 시작');
-    }
-  }
-
-  const project = await loadProject(await checkpoints.projectRoot());
-  // 이 세션에만 pageChecks를 덧붙인다(작업 분해 통합 게이트). 프로젝트 객체는 세션마다 새로 읽으므로 다른 세션·레인에는 새지 않는다
-  if (extraPageChecks && extraPageChecks.length > 0) {
-    project.spec.workflow = { ...project.spec.workflow, pageChecks: [...(project.spec.workflow?.pageChecks ?? []), ...extraPageChecks] };
-  }
-  // CLI 백엔드는 샌드박스를 띄우기 전에 로그인을 확인한다. 실패하면 세션을 만들지 않고 이유를 돌려준다
-  await assertBackendReady(backend, project.root);
-  const repository = await describeRepository(checkpoints, sourceDirtyFiles);
-  // 이 프로젝트에서 띄울 서비스를 정한다(ADR-083). 저장한 선택이 없으면 기본값(관리형 + 기댐 닫힘)이다
-  const { selected: serviceSelection, addedServices } = await resolveServiceSelection(project, projectId);
-  // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
-  const provider = providerFromEnv();
-  // 샌드박스를 만들 때 평가 자산 자리의 종류와 첫 내용을 마지막 체크포인트의 판으로 정한다(#745). 작업 복사본의 지금 모습을 보면
-  // 에이전트가 종류를 바꿔 컨테이너가 붙잡은 자리와 b-studio가 쓰는 자리가 갈린다. 꺼내지 못하면 세션을 만들지 않는다
+  let project!: LoadedProject;
+  let repository: RepositoryView | undefined;
+  let serviceSelection!: Set<string>;
+  let addedServices: string[] = [];
+  let provider!: ReturnType<typeof providerFromEnv>;
   let initialAssets: EvaluationAssetContent[] = [];
-  try {
-    initialAssets = await evaluationAssetContents(checkpoints, project.spec.workflow?.evaluationAssets ?? [], firstCheckpoint.sha);
-  } catch (error) {
-    throw new StudioError(500, `평가 자산을 준비하지 못해 세션을 만들지 않았습니다: ${describe(error)}`);
-  }
-  const sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
+  let sandbox!: Session['sandbox'];
+  let session!: Session;
+  // 이 호출이 맵·레지스트리에 넣은 것만 치우려고 넣은 만큼만 표시한다(같은 id의 다른 세션을 빼지 않는다)
+  let inMap = false;
+  let inRegistry = false;
 
-  const session = newSession({
-    home: sessionDir,
-    snapshot: {
-      id,
-      projectId,
-      projectName: project.spec.name,
-      workDir,
-      workspace,
-      stateDir,
-      // 지연 기동 세션은 샌드박스가 꺼진 채 idle로 시작한다. 서비스도 꺼진 것으로 보여 준다
-      status: lazy ? 'idle' : 'starting',
-      mode,
-      backend,
-      ...(accountId ? { accountId } : {}),
-      modelId,
-      effort: effort as Effort | undefined,
-      running: false,
-      tokenLimit,
-      owner,
-      ...projectViews(project, lazy ? 'stopped' : 'starting', project.offServices),
-      nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
-      nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[0]?.question?.request : undefined,
-      runtime: provider.isolation,
-      checkpoints: [firstCheckpoint],
-      repository,
+  // 순서와 실패 처리는 Rust 수명 코어가 정한다(ADR-206). 각 단계는 아래 콜백이다. 세션 폴더는 코어가 배타적으로 만들고, 만들다 실패하면
+  // 끝낸 단계를 거꾸로 치운다(이 호출이 만든 샌드박스·맵 항목·세션 폴더만). 원래 오류는 그대로 던진다
+  await runCreate(
+    { root, home: sessionDir, sessionId: id, ...(workspace === 'local' ? { userDir: source.root } : {}) },
+    {
+      // 아무것도 만들기 전에 거절할 것을 먼저 본다
+      validate_start: () => {
+        // 승격 대상 모델 id가 레지스트리에 없으면 샌드박스를 띄우기 전에 거부한다(조용히 승격 없이 돌지 않게)
+        if (backend === 'api') apiEscalation();
+        // 같은 id의 세션이 이미 있으면 덮어쓰지 않는다(8자 id가 겹치는 일은 드물지만 겹치면 다른 세션을 잃는다)
+        if (store.sessions.has(id) || archived.has(id)) throw new StudioError(500, `세션 id가 이미 쓰이고 있어 만들지 않았습니다: ${id}`);
+      },
+      prepare_workdir: async () => {
+        if (workspace === 'local') {
+          // 사용자의 폴더에서 바로 작업해 IDE의 수정과 에이전트의 수정이 같은 파일에 반영되게 한다.
+          // 체크포인트 저장소와 세션 상태는 사용자 폴더의 .git과 섞이지 않게 세션 폴더에 둔다
+          workDir = source.root;
+          stateDir = sessionDir;
+          checkpoints = new CheckpointStore(workDir, { author, gitDir: path.join(stateDir, '.git') });
+          firstCheckpoint = await checkpoints.init('세션 시작 (내 폴더)');
+          return;
+        }
+        // 에이전트가 원본을 바꾸지 않도록 세션마다 작업 복사본을 만든다. Docker가 마운트할 수 있는 홈 아래에 둔다(세션 폴더는 코어가 이미 만들었다)
+        // 모노레포 하위 폴더 프로젝트는 studio.yaml에서 켰을 때만 상위 저장소를 복제한다
+        const allowSubfolder = source.spec.repository?.monorepo === true;
+        if (seed) {
+          // 작업 분해 레인·통합(ADR-096): 프로젝트 원본이 아니라 그 세션의 작업 복사본에서, 그 세션의 최신 체크포인트
+          // sha로 시작한다. 기준 브랜치·원격은 그 세션이 이미 기록해 둔 값을 그대로 물려받는다(inspectSource가 읽는다)
+          const cloned = await CheckpointStore.clone(seed.workDir, workDir, {
+            branch: sessionBranchName(projectId, id),
+            author,
+            allowSubfolder,
+            ref: seed.sha,
+            excludedFiles: generatedFilePaths,
+          });
+          checkpoints = cloned.store;
+          firstCheckpoint = cloned.start;
+          sourceDirtyFiles = cloned.source.dirtyFiles;
+          await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
+          // 체크포인트가 만들어진 뒤에 끼워 넣은 파일이라, 세션 시작 체크포인트의 생성 파일 스냅샷을 여기서 따로 맞춘다(도그푸딩 마찰 127)
+          await checkpoints.refreshExcludedSnapshot(firstCheckpoint.sha);
+        } else if (await CheckpointStore.inspectSource(source.root, { allowSubfolder })) {
+          // 원본이 Git 저장소면 커밋된 상태를 복제해 세션 브랜치에서 작업한다. 체크포인트가 곧 원격에 올릴 커밋이 된다
+          const cloned = await CheckpointStore.clone(source.root, workDir, {
+            branch: sessionBranchName(projectId, id),
+            author,
+            allowSubfolder,
+            excludedFiles: generatedFilePaths,
+          });
+          checkpoints = cloned.store;
+          firstCheckpoint = cloned.start;
+          sourceDirtyFiles = cloned.source.dirtyFiles;
+          // 폴더 열기로 등록한 프로젝트(ADR-067)는 b-studio가 만든 설정 파일이 커밋돼 있지 않아 복제에 빠진다. 복사본에 넣고 추적에서 뺀다
+          await overlayGeneratedFiles(source.root, await checkpoints.projectRoot(), workDir);
+          await checkpoints.refreshExcludedSnapshot(firstCheckpoint.sha);
+        } else {
+          await cp(source.root, workDir, { recursive: true, filter: (file) => !GENERATED.test(file) });
+          checkpoints = new CheckpointStore(workDir, { author });
+          firstCheckpoint = await checkpoints.init('세션 시작');
+        }
+      },
+      load_project: async () => {
+        project = await loadProject(await checkpoints.projectRoot());
+        // 이 세션에만 pageChecks를 덧붙인다(작업 분해 통합 게이트). 프로젝트 객체는 세션마다 새로 읽으므로 다른 세션·레인에는 새지 않는다
+        if (extraPageChecks && extraPageChecks.length > 0) {
+          project.spec.workflow = { ...project.spec.workflow, pageChecks: [...(project.spec.workflow?.pageChecks ?? []), ...extraPageChecks] };
+        }
+      },
+      // CLI 백엔드는 샌드박스를 띄우기 전에 로그인을 확인한다. 실패하면 세션을 만들지 않고 이유를 돌려준다
+      check_backend_ready: () => assertBackendReady(backend, project.root),
+      describe_repository: async () => {
+        repository = await describeRepository(checkpoints, sourceDirtyFiles);
+      },
+      // 이 프로젝트에서 띄울 서비스를 정한다(ADR-083). 저장한 선택이 없으면 기본값(관리형 + 기댐 닫힘)이다
+      select_services: async () => {
+        ({ selected: serviceSelection, addedServices } = await resolveServiceSelection(project, projectId));
+      },
+      // 샌드박스를 만들 때 평가 자산 자리의 종류와 첫 내용을 마지막 체크포인트의 판으로 정한다(#745). 작업 복사본의 지금 모습을 보면
+      // 에이전트가 종류를 바꿔 컨테이너가 붙잡은 자리와 b-studio가 쓰는 자리가 갈린다. 꺼내지 못하면 세션을 만들지 않는다
+      prepare_evaluation_assets: async () => {
+        // 시크릿 값은 스튜디오 서버의 환경 변수나 시크릿 파일에서만 읽는다 (복제한 작업 폴더에서는 읽지 않는다)
+        provider = providerFromEnv();
+        try {
+          initialAssets = await evaluationAssetContents(checkpoints, project.spec.workflow?.evaluationAssets ?? [], firstCheckpoint.sha);
+        } catch (error) {
+          throw new StudioError(500, `평가 자산을 준비하지 못해 세션을 만들지 않았습니다: ${describe(error)}`);
+        }
+      },
+      create_sandbox: async () => {
+        sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
+      },
+      register_session: () => {
+        session = newSession({
+          home: sessionDir,
+          snapshot: {
+            id,
+            projectId,
+            projectName: project.spec.name,
+            workDir,
+            workspace,
+            stateDir,
+            // 지연 기동 세션은 샌드박스가 꺼진 채 idle로 시작한다. 서비스도 꺼진 것으로 보여 준다
+            status: lazy ? 'idle' : 'starting',
+            mode,
+            backend,
+            ...(accountId ? { accountId } : {}),
+            modelId,
+            effort: effort as Effort | undefined,
+            running: false,
+            tokenLimit,
+            owner,
+            ...projectViews(project, lazy ? 'stopped' : 'starting', project.offServices),
+            nextDemoRequest: mode === 'demo' ? demoScenarios(project)[0]?.request : undefined,
+            nextDemoQuestion: mode === 'demo' ? demoScenarios(project)[0]?.question?.request : undefined,
+            runtime: provider.isolation,
+            checkpoints: [firstCheckpoint],
+            repository,
+          },
+          project,
+          sandbox,
+          provider: provider.name,
+          checkpoints,
+          history: [],
+          listeners: new Set(),
+          conversation: [],
+          demoIndex: 0,
+          claudeCode: { notes: [] },
+          codex: { notes: [], recent: [] },
+          commandCode: { notes: [] },
+          openCode: { notes: [] },
+          gemini: { notes: [] },
+          sourceDirtyFiles,
+          lazy,
+          serviceSelection,
+          previewToken: randomBytes(16).toString('hex'),
+        });
+        // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
+        session.snapshot.design = sessionDesignView(session);
+
+        // 만들기가 도는 사이(복제·샌드박스 만들기는 오래 걸린다)에 같은 id가 생겼으면 덮어쓰지 않는다. 덮어쓰면 그 세션을 잃고 실패했을 때 그 세션을 뺀다
+        if (store.sessions.has(id)) throw new StudioError(500, `세션 id가 이미 쓰이고 있어 만들지 않았습니다: ${id}`);
+        store.sessions.set(id, session);
+        inMap = true;
+        registerSession(session);
+        inRegistry = true;
+        registerCleanup();
+      },
+      // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
+      remember_git: async () => {
+        session.git = await initialGitMemory(checkpoints);
+      },
+      start_gateway: () => {
+        if (preview) ensurePreviewGateway(preview);
+        // 저장된 선택(known) 뒤에 compose에 새로 생긴 부가 서비스를 depends_on과 무관하게 자동으로 켰으면 알린다(도그푸딩 마찰 138, ADR-146)
+        if (addedServices.length > 0) {
+          emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
+        }
+      },
+      begin_boot: () => {
+        // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
+        void flushPersist(session);
+        // 지연 기동 세션은 여기서 켜지 않는다. 첫 만들기 요청·샌드박스 도구·"지금 켜기"가 켠다
+        if (!lazy) session.bootPromise = startBoot(session);
+      },
+      // 치우기(만들다 실패했을 때, 끝낸 단계만 거꾸로): 이 호출이 만든 것만 치운다
+      destroy_sandbox: () => sandbox.destroy(),
+      unregister_session: () => {
+        if (inRegistry) registry.unregister(id);
+        inRegistry = false;
+        // 같은 id의 다른 세션을 빼지 않는다
+        if (inMap && store.sessions.get(id) === session) store.sessions.delete(id);
+        inMap = false;
+      },
     },
-    project,
-    sandbox,
-    provider: provider.name,
-    checkpoints,
-    history: [],
-    listeners: new Set(),
-    conversation: [],
-    demoIndex: 0,
-    claudeCode: { notes: [] },
-    codex: { notes: [], recent: [] },
-    commandCode: { notes: [] },
-    openCode: { notes: [] },
-    gemini: { notes: [] },
-    sourceDirtyFiles,
-    lazy,
-    serviceSelection,
-    previewToken: randomBytes(16).toString('hex'),
-  });
-  // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
-  session.snapshot.design = sessionDesignView(session);
-
-  store.sessions.set(id, session);
-  registerSession(session);
-  registerCleanup();
-  // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
-  session.git = await initialGitMemory(checkpoints);
-  if (preview) ensurePreviewGateway(preview);
-  // 저장된 선택(known) 뒤에 compose에 새로 생긴 부가 서비스를 depends_on과 무관하게 자동으로 켰으면 알린다(도그푸딩 마찰 138, ADR-146)
-  if (addedServices.length > 0) {
-    emit(session, { type: 'notice', text: `compose에 새로 생긴 부가 서비스를 켰습니다(끄려면 서비스 메뉴에서): ${addedServices.join(', ')}`, at: new Date().toISOString() });
-  }
-  // 기동 도중에 서버가 멈춰도 다음 실행에서 샌드박스를 찾아 정리할 수 있도록 바로 남긴다
-  void flushPersist(session);
-  // 지연 기동 세션은 여기서 켜지 않는다. 첫 만들기 요청·샌드박스 도구·"지금 켜기"가 켠다
-  if (!lazy) session.bootPromise = startBoot(session);
+    (message, undoErrors) => console.error(`[b-studio] ${message}`, undoErrors),
+  );
   return session.snapshot;
 }
 
