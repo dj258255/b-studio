@@ -6014,6 +6014,8 @@ impl Persister {
 
 #[napi(object, object_from_js = false)]
 pub struct StoredSessionJs {
+    /// 이 세션을 읽어 온 폴더(`<root>/<항목 이름>`). 지우기·이어받기가 폴더를 정하는 값이다(ADR-204)
+    pub home: String,
     /// `history`를 뺀 나머지 JSON 객체 글자
     pub rest: String,
     /// 파일의 history를 올린 기록(logs 없음)
@@ -6029,9 +6031,89 @@ pub fn read_sessions(env: Env, root: String) -> Result<AsyncBlock<Vec<StoredSess
         let sessions = tokio::task::spawn_blocking(move || bstudio_session::store::read_sessions(Path::new(&root)))
             .await
             .map_err(|error| Error::from_reason(format!("세션 읽기가 중단됐습니다: {error}")))?;
-        Ok(sessions.into_iter().map(|stored| StoredSessionJs { rest: stored.rest, record: SessionRecord::wrap(stored.record), history_error: stored.history_error }).collect())
+        Ok(sessions.into_iter().map(|stored| StoredSessionJs { home: stored.home.to_string_lossy().into_owned(), rest: stored.rest, record: SessionRecord::wrap(stored.record), history_error: stored.history_error }).collect())
     })
     .build(&env)
+}
+
+/// 세션을 지우고 복구하고 이어받는 판정의 거절 이유(ADR-204). `status`는 HTTP 상태다
+#[napi(object)]
+pub struct LifecycleFail {
+    pub status: u32,
+    pub message: String,
+}
+
+impl From<bstudio_session::lifecycle::Fail> for LifecycleFail {
+    fn from(fail: bstudio_session::lifecycle::Fail) -> Self {
+        Self { status: u32::from(fail.status), message: fail.message }
+    }
+}
+
+/// `deleteSessionCheck`의 입력. 저장 파일(또는 메모리)의 세션 상태와 세션을 만들거나 읽어 온 폴더
+#[napi(object)]
+pub struct DeleteCheckInput {
+    pub status: String,
+    pub workspace: Option<String>,
+    pub root: String,
+    pub home: String,
+    pub session_id: String,
+    pub work_dir: String,
+    pub state_dir: Option<String>,
+}
+
+/// 세션을 지우기 전의 판정(디스크를 바꾸지 않는다). 거절하면 이유를, 통과하면 null을 돌려준다
+#[napi]
+pub fn delete_session_check(input: DeleteCheckInput) -> Option<LifecycleFail> {
+    bstudio_session::lifecycle::delete_check(&bstudio_session::lifecycle::DeleteInput {
+        status: &input.status,
+        workspace: input.workspace.as_deref(),
+        root: &input.root,
+        home: &input.home,
+        session_id: &input.session_id,
+        work_dir: &input.work_dir,
+        state_dir: input.state_dir.as_deref(),
+    })
+    .err()
+    .map(LifecycleFail::from)
+}
+
+/// 세션 폴더를 지운다(JS 스레드 밖에서). 지우기 직전에 폴더를 다시 확인하고, 확인하지 못하면 지우지 않고 이유를 돌려준다. 지웠거나 이미 없으면 null
+#[napi]
+pub fn remove_session_home(env: Env, root: String, home: String, session_id: String, user_dir: Option<String>) -> Result<AsyncBlock<Option<LifecycleFail>>> {
+    AsyncBlockBuilder::new(async move {
+        let result = tokio::task::spawn_blocking(move || bstudio_session::lifecycle::remove_session_home(&root, &home, &session_id, user_dir.as_deref()))
+            .await
+            .map_err(|error| Error::from_reason(format!("세션 폴더 지우기가 중단됐습니다: {error}")))?;
+        Ok(result.err().map(LifecycleFail::from))
+    })
+    .build(&env)
+}
+
+/// 이어받기 전에 저장 파일이 가리키는 폴더가 세션을 읽어 온 폴더인지 본다. 거절하면 이유를, 통과하면 null을 돌려준다
+#[napi]
+pub fn resume_session_check(home: String, workspace: Option<String>, work_dir: String, state_dir: Option<String>) -> Option<LifecycleFail> {
+    bstudio_session::lifecycle::resume_check(&home, workspace.as_deref(), &work_dir, state_dir.as_deref()).err().map(LifecycleFail::from)
+}
+
+#[napi(object)]
+pub struct RecoverPlanJs {
+    pub skip: bool,
+    pub interrupted: bool,
+    pub cleanup_terminal: bool,
+    pub sandbox_id_ok: bool,
+}
+
+/// 복구할 때 세션 하나를 어떻게 할지. `owner_alive`는 TS `isProcessAlive(owner.pid)`의 결과다
+#[napi]
+pub fn recover_session_plan(status: String, owner_pid: f64, self_pid: f64, owner_alive: bool, sandbox_id: String) -> RecoverPlanJs {
+    let plan = bstudio_session::lifecycle::recover_plan(&status, owner_pid, self_pid, owner_alive, &sandbox_id);
+    RecoverPlanJs { skip: plan.skip, interrupted: plan.interrupted, cleanup_terminal: plan.cleanup_terminal, sandbox_id_ok: plan.sandbox_id_ok }
+}
+
+/// 저장된 샌드박스 id가 b-studio가 만든 id의 꼴인가(`SANDBOX_ID`)
+#[napi]
+pub fn is_sandbox_id(id: String) -> bool {
+    bstudio_session::lifecycle::is_sandbox_id(&id)
 }
 
 /// 기록의 history로 세션 파일 한 번 쓰기(줄·예약 없이). `full_history`가 거짓이면 저장용 history(`trimHistory`), 참이면 기록 전체다.

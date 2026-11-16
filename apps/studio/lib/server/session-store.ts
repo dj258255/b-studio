@@ -144,9 +144,10 @@ export async function writeSession(data: PersistedSession): Promise<void> {
  * 보관 세션(이전 프로세스가 남긴 세션)을 쓴다. `record`의 history 전체를 쓴다(저장용으로 줄이지 않는다: 옛 구현이 `entry.record.history()`를 그대로 썼다).
  * 바이트는 이 호출 안에서 만든다
  */
-export async function writeStoredSession(data: PersistedBody, record: SessionRecord): Promise<void> {
+export async function writeStoredSession(data: PersistedBody, record: SessionRecord, home: string): Promise<void> {
   const { head, tail } = splitPersisted(data);
-  await native.writeSessionRecord(record.native, sessionFile(stateDirOf(data.snapshot)), head, tail, true);
+  // 쓰는 곳은 저장 파일의 경로 글자(`stateDirOf(data.snapshot)`)가 아니라 이 세션을 읽어 온 폴더다(ADR-204)
+  await native.writeSessionRecord(record.native, sessionFile(home), head, tail, true);
 }
 
 /**
@@ -166,6 +167,8 @@ export function writeSidecar(file: string, text: string, mode?: number): Promise
 
 /** 읽은 세션 하나: `history`를 뺀 상태와 파일의 history를 올린 기록(logs 없음) */
 export interface StoredSession {
+  /** 이 세션을 읽어 온 폴더(`<root>/<항목 이름>`). 지우기·이어받기는 저장 파일의 경로 글자(`workDir`·`stateDir`)가 아니라 이 값으로 폴더를 정한다(ADR-204) */
+  home: string;
   data: PersistedBody;
   record: SessionRecord;
   /** history를 기록에 올리지 못한 이유(없거나 배열이 아니거나 이벤트가 JSON 문법 밖이거나 너무 깊다). 있으면 그 세션만 건너뛰어야 한다. 파일은 그대로 둔다 */
@@ -182,7 +185,7 @@ export async function readStoredSessions(root: string): Promise<StoredSession[]>
     } catch {
       continue;
     }
-    sessions.push({ data, record: new SessionRecord({ native: found.record }), ...(found.historyError ? { historyError: found.historyError } : {}) });
+    sessions.push({ home: found.home, data, record: new SessionRecord({ native: found.record }), ...(found.historyError ? { historyError: found.historyError } : {}) });
   }
   return sessions;
 }

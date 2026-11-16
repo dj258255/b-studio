@@ -128,6 +128,16 @@ fn 읽기는_history를_뺀_나머지와_기록을_돌려준다() {
 }
 
 #[test]
+fn 읽은_세션은_읽어_온_폴더를_home으로_든다() {
+    // 저장 파일의 경로 글자(`workDir`)가 아니라 `<root>/<항목 이름>`이다(ADR-204)
+    let dir = tempfile::tempdir().unwrap();
+    put(dir.path(), "proj-aaaa0001", &OK.replace(r#""workDir":"/w""#, r#""workDir":"/somewhere/else""#));
+    put(dir.path(), "proj-aaaa0002", OK);
+    let found = read_sessions(dir.path());
+    assert_eq!(found.iter().map(|s| s.home.clone()).collect::<Vec<_>>(), [dir.path().join("proj-aaaa0001"), dir.path().join("proj-aaaa0002")]);
+}
+
+#[test]
 fn history가_없거나_배열이_아니면_이유가_붙는다() {
     let dir = tempfile::tempdir().unwrap();
     put(dir.path(), "a", &OK.replace(r#","history":[{"type":"notice"}]"#, ""));

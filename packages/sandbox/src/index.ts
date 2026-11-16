@@ -129,4 +129,4 @@ export {
 export { execArchiveExtract, execBytes, ExecBytesError, type ArchiveExtractOutcome, type ExecBytesOptions } from './exec-bytes';
 export { assertSandboxId, SANDBOX_ID } from './sandbox-id';
 export { native, encodeNative, decodeNative, encodeLoneSurrogates } from './native';
-export type { NativeCliProcess, NativeCliEvent, NativeToolLedger, NativeRunnerCore, NativeSessionRecord, NativePersister, NativePersistState, NativeStoredSession } from './native';
+export type { NativeCliProcess, NativeCliEvent, NativeToolLedger, NativeRunnerCore, NativeSessionRecord, NativePersister, NativePersistState, NativeStoredSession, NativeLifecycleFail, NativeDeleteCheckInput, NativeRecoverPlan } from './native';
