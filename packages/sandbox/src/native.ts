@@ -320,6 +320,12 @@ interface NativeGuard {
   terminalDecideClose(input: NativeTerminalCloseInput): NativeTerminalCloseDecision;
   /** 닫기의 단계 이름(순서대로) */
   terminalCloseSteps(): string[];
+  /** 터미널의 요청 시작 판정(ADR-211). 순수 판정이다 */
+  terminalDecidePrompt(facts: NativeTerminalPromptFacts): NativeTerminalPromptDecision;
+  /** 터미널의 쓰기 직전·MCP 판정(ADR-211). 기다림 앞과 뒤에서 그 순간의 사실로 부르고 뒤의 답이 최종이다 */
+  terminalDecidePreTool(facts: NativeTerminalPreToolFacts): NativeTerminalPreToolDecision;
+  /** 다음 요청에 켜 둔 확인 선언 변경 허용을 이 실행이 가져가는가(ADR-164, ADR-211) */
+  terminalTakesCheckChanges(openedByPrompt: boolean, readOnly: boolean, allowedNext: boolean): boolean;
   runOutcomeDecideNormal(facts: NativeRunNormalFacts, pending: boolean): NativeRunOutcome;
   runOutcomeNeedsProbeNormal(facts: NativeRunNormalFacts): boolean;
   runOutcomeDecideException(facts: NativeRunExceptionFacts, pending: boolean): NativeRunOutcome;
@@ -1253,6 +1259,42 @@ export interface NativeTerminalCloseDecision {
   action: string;
   status: string;
   text: string;
+}
+
+export interface NativeTerminalPromptFacts {
+  openRun: boolean;
+  runReadOnly: boolean;
+  promptReadOnly: boolean;
+  busy: boolean;
+  slash: boolean;
+  budget: boolean;
+}
+
+export interface NativeTerminalPromptDecision {
+  /** `attach`·`block`·`nothing`·`open` */
+  kind: string;
+  markReadOnly: boolean;
+  readOnly: boolean;
+  /** `block`일 때 `busy`·`budget` */
+  block: string;
+}
+
+export interface NativeTerminalPreToolFacts {
+  readTool: boolean;
+  budget: boolean;
+  /** 도구가 속할 실행을 얻었다(거짓이면 바쁨) */
+  gotRun: boolean;
+  readOnly: boolean;
+  /** `none`·`max_turns`·`budget`. 그 밖의 글은 거절한다 */
+  limit: string;
+  outOfScope: boolean;
+  closed: boolean;
+}
+
+export interface NativeTerminalPreToolDecision {
+  allow: boolean;
+  /** 거절의 까닭 종류. 허용이면 빈 글 */
+  deny: string;
 }
 
 export interface NativeClaimResult {
