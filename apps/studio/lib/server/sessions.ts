@@ -293,7 +293,6 @@ import {
   isReadOnlyPrompt,
   isResumableConversation,
   unwrapPastedPrompt,
-  SANDBOX_ID,
   type AgentGatewayAddress,
   type HostCliKind,
 } from '@b-studio/sandbox';
@@ -328,6 +327,7 @@ import { isSelectableEffort, isSelectableModel, listSelectableModels, type Model
 import { rememberProjectEffortDefault, rememberProjectModelDefault } from './model-defaults';
 import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-accounts';
 import { describe, StudioError } from './errors';
+import { assertDeletable, assertResumableHome, planRecovery, removeSessionHome } from './session-lifecycle';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
 import { ACCESS_PATH, createPreviewGateway, previewHost, safePreviewPath, type PreviewAccess, type PreviewTarget } from './preview-gateway';
 import { findProject } from './projects';
@@ -341,7 +341,6 @@ import {
   closeUnfinished,
   commandCodeStateDirOf,
   geminiStateDirOf,
-  isProcessAlive,
   openCodeStateDirOf,
   readStoredSessions,
   sessionFile,
@@ -395,6 +394,11 @@ export type BootMode = 'eager' | 'on-demand';
 
 interface Session {
   snapshot: SessionSnapshot;
+  /**
+   * 이 세션을 실제로 만든 폴더(`startSession`의 `sessionDir`) 또는 읽어 온 폴더(`readStoredSessions`의 `home`). 지우기와 이어받기는
+   * 저장 파일의 경로 글자(`snapshot.workDir`·`stateDir`)가 아니라 이 값으로 폴더를 정한다(ADR-204)
+   */
+  home: string;
   project: LoadedProject;
   sandbox: Sandbox;
   /** 샌드박스를 만든 제공자 이름. 서버가 비정상 종료된 뒤 남은 샌드박스를 정리할 때 쓴다 */
@@ -583,6 +587,8 @@ export interface StoredTestRun {
 
 /** 이전 스튜디오 프로세스가 남긴 세션. 샌드박스 없이 기록만 보여 주고, 이어서 작업하면 Session으로 바뀐다 */
 interface ArchivedSession {
+  /** 이 세션을 읽어 온 폴더. `Session.home`과 같은 뜻이다 */
+  home: string;
   /** 저장한 상태. history는 `record`(Rust)가 쥔다 */
   data: PersistedBody;
   snapshot: SessionSnapshot;
@@ -885,6 +891,7 @@ async function startSession({
   const sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
 
   const session = newSession({
+    home: sessionDir,
     snapshot: {
       id,
       projectId,
@@ -949,6 +956,7 @@ async function startSession({
 type NewSession = Pick<
   Session,
   | 'snapshot'
+  | 'home'
   | 'project'
   | 'sandbox'
   | 'provider'
@@ -1305,18 +1313,11 @@ export async function deleteSession(id: string): Promise<void> {
   // 켜지 못한(failed) 세션은 목록에 멈출 버튼이 없다. 남은 컨테이너를 먼저 정리(중지)하고 지운다
   if (live?.snapshot.status === 'failed') await stopSession(id).catch(() => {});
   const snapshot = (live ?? entry)!.snapshot;
-  // idle(지연 기동, 아직 켜지 않음)은 지울 샌드박스가 없어 그대로 지울 수 있다. 그 밖의 실행 중 상태는 먼저 멈춰야 한다
-  if (snapshot.status !== 'stopped' && snapshot.status !== 'idle') {
-    throw new StudioError(409, '실행 중인 세션은 지울 수 없습니다. 먼저 샌드박스를 중지한 뒤 지우세요');
-  }
-
-  const workspace = snapshot.workspace ?? 'copy';
-  const dir = stateDirOf(snapshot);
-  // 내 폴더 세션은 사용자 폴더를 지우면 안 된다. stateDir이 없어 workDir과 같아지면(있어야 하는데 없으면) 안전하게 멈춘다
-  if (workspace === 'local' && dir === snapshot.workDir) {
-    throw new StudioError(500, '내 폴더 세션의 상태 폴더를 확인하지 못해 지우지 않았습니다');
-  }
-  assertWithinSessionsRoot(dir);
+  // 판정은 Rust `delete_check`가 한다: idle(지연 기동, 아직 켜지 않음)은 지울 샌드박스가 없어 그대로 지울 수 있고 그 밖의 실행 중 상태는 먼저 멈춰야 한다(409).
+  // 지울 폴더는 저장 파일의 경로 글자가 아니라 이 세션을 만들거나 읽어 온 폴더(home)다. 저장 파일의 경로가 home과 다르면(링크·`..`·다른 세션 폴더·저장소 밖) 거절한다
+  const home = (live ?? entry)!.home;
+  const root = sessionsRoot();
+  assertDeletable(root, home, snapshot);
 
   if (live) {
     live.persist.cancel();
@@ -1327,17 +1328,8 @@ export async function deleteSession(id: string): Promise<void> {
   // 두 세션이 같은 폴더를 잡지 못하게 막는 표시. 남아 있으면 그 폴더로 새 세션을 영영 시작하지 못한다
   claimedFolders.delete(snapshot.workDir);
 
-  await rm(dir, { recursive: true, force: true });
-}
-
-/** 지울 폴더가 세션 저장소 루트 밖이거나 루트 그 자체면 거부한다(경로 조작·설정 오류 방어) */
-function assertWithinSessionsRoot(dir: string): void {
-  const root = path.resolve(sessionsRoot());
-  const target = path.resolve(dir);
-  const relative = path.relative(root, target);
-  if (relative === '' || relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new StudioError(500, `삭제할 폴더가 세션 저장소 밖에 있습니다: ${dir}`);
-  }
+  // 내 폴더 세션이어도 사용자 폴더는 지우지 않는다: 세션 폴더(상태 폴더)만 지운다. Rust가 지우기 직전에 다시 확인한다
+  await removeSessionHome(root, home, snapshot);
 }
 
 /**
@@ -1385,6 +1377,9 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 예전의 "만들 때 모드와 같아야 한다" 검사가 막던 것(예: 개인 PC에서 claude-code로 만든 세션을 API 모드 공유 서버에서
     // 이어서 돌리면 서버에서 로컬 CLI를 부르게 된다)을 허용 목록으로 계속 막는다
     const backend = assertResumableBackend(data.snapshot);
+    // 저장 파일이 가리키는 폴더(workDir·stateDir)가 이 세션을 만들거나 읽어 온 폴더가 아니면 그 폴더를 건드리지 않는다(되돌리기·체크포인트가 그 폴더에서 돈다)
+    const home = live ? live.home : entry!.home;
+    assertResumableHome(home, data.snapshot);
     const { workDir } = data.snapshot;
     const local = data.snapshot.workspace === 'local';
     if (local) assertLocalFolderAllowed();
@@ -1446,6 +1441,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     const sandbox = await provider.create(project, { secrets, ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
 
     const session = newSession({
+      home,
       snapshot: {
         ...data.snapshot,
         ...projectViews(project, 'starting', project.offServices),
@@ -1545,11 +1541,12 @@ async function recover(): Promise<void> {
     const { data } = stored;
     const { id } = data.snapshot;
     if (store.sessions.has(id) || archived.has(id)) continue;
-    // 같은 세션 폴더를 쓰는 다른 스튜디오 프로세스가 실행 중이면 그 세션은 건드리지 않는다
-    if (data.owner.pid !== process.pid && isProcessAlive(data.owner.pid)) continue;
+    // 판정(Rust)은 `planRecovery`가 한다. 같은 세션 폴더를 쓰는 다른 스튜디오 프로세스가 실행 중이면 그 세션은 건드리지 않는다
+    const plan = planRecovery(data.snapshot.status, data.owner.pid, data.sandbox.id);
+    if (plan.skip) continue;
 
     // idle은 샌드박스를 한 번도 켜지 않은 세션이라 정리할 컨테이너가 없다. 끼어든 요청도 없다
-    const interrupted = data.snapshot.status !== 'stopped' && data.snapshot.status !== 'idle';
+    const { interrupted } = plan;
     // 저장한 기록을 세션 기록(Rust)에 올리지 못하거나(없거나 배열이 아니거나 JSON 문법 밖이거나 너무 깊다) 끝나지 못한 요청을 닫지 못하면
     // (예: null 이벤트) 그 세션만 건너뛴다. 파일은 그대로 두고, 다른 세션의 복구는 이어간다
     const { record } = stored;
@@ -1561,6 +1558,7 @@ async function recover(): Promise<void> {
       continue;
     }
     const entry: ArchivedSession = {
+      home: stored.home,
       data,
       snapshot: archivedSnapshot(data, interrupted ? '스튜디오 서버가 다시 시작돼 이전 샌드박스를 정리하는 중입니다.' : undefined),
       record,
@@ -1571,7 +1569,7 @@ async function recover(): Promise<void> {
     if (interrupted) entry.cleanup = cleanupSandbox(entry);
     // 세션 터미널의 컨테이너는 샌드박스(compose 프로젝트) 밖에 있어 위의 정리로 지워지지 않는다. 샌드박스를 켜지 않은(idle) 세션에도
     // 있을 수 있다 — 터미널은 샌드박스 없이 열린다. 멈춘 세션은 멈출 때 이미 지웠다
-    if (data.snapshot.status !== 'stopped') entry.cleanup = entry.cleanup.then(() => cleanupTerminalLeftovers(id, data.sandbox.id));
+    if (plan.cleanupTerminal) entry.cleanup = entry.cleanup.then(() => cleanupTerminalLeftovers(id, data.sandbox.id, plan.sandboxIdOk));
   }
 }
 
@@ -1579,10 +1577,10 @@ async function recover(): Promise<void> {
  * 이전 스튜디오 프로세스가 남긴 세션 터미널을 치운다: 에이전트 컨테이너와, 그 컨테이너에 붙였던 관문 설정(토큰이 든 폴더).
  * 남겨 두면 스튜디오를 다시 띄울 때마다 세션마다 컨테이너가 하나씩 쌓인다(작업 복사본을 붙든 채로). 실패해도 세션을 여는 데는 지장이 없다
  */
-async function cleanupTerminalLeftovers(sessionId: string, sandboxId: string): Promise<void> {
+async function cleanupTerminalLeftovers(sessionId: string, sandboxId: string, sandboxIdOk: boolean): Promise<void> {
   // 저장된 기록의 값으로 컨테이너를 지운다. b-studio가 만든 id의 꼴이 아니면 지우지 않는다(샌드박스 정리와 같은 규칙).
   // 꼴을 보지 않으면 손상된 기록이 이름이 "-agent"로 끝나는 남의 컨테이너를 가리킬 수 있다
-  if (!SANDBOX_ID.test(sandboxId)) {
+  if (!sandboxIdOk) {
     console.error('[b-studio] 이전 세션 터미널을 정리하지 않았습니다: 샌드박스 id의 꼴이 아닙니다', sessionId);
     return;
   }
@@ -1612,7 +1610,7 @@ async function cleanupSandbox(entry: ArchivedSession): Promise<void> {
   // 정리하지 못했으면 파일을 그대로 두어 다음 실행에서 다시 정리한다
   if (cleaned) {
     entry.data = { ...entry.data, savedAt: new Date().toISOString(), owner: { pid: process.pid }, snapshot: entry.snapshot };
-    await writeStoredSession(entry.data, entry.record).catch((cause: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', cause));
+    await writeStoredSession(entry.data, entry.record, entry.home).catch((cause: unknown) => console.error('[b-studio] 세션 상태를 저장하지 못했습니다', cause));
   }
 }
 

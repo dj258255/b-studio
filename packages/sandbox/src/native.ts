@@ -289,6 +289,16 @@ interface NativeGuard {
   Persister: new (record: NativeSessionRecord, state: (unused: number) => NativePersistState, onError: (message: string) => void, delayMs?: number) => NativePersister;
   /** 세션 폴더들에서 저장된 세션을 읽는다(옛 `readSessions`). 폴더가 아닌 항목·읽을 수 없는 파일·JSON이 아니거나 형식이 다른 파일은 건너뛴다 */
   readSessions(root: string): Promise<NativeStoredSession[]>;
+  /** 세션을 지우기 전의 판정(ADR-204, 4f B2a). 디스크를 바꾸지 않는다. 거절하면 이유를, 통과하면 null을 돌려준다 */
+  deleteSessionCheck(input: NativeDeleteCheckInput): NativeLifecycleFail | null;
+  /** 세션 폴더를 지운다(JS 스레드 밖에서). 지우기 직전에 `root` 바로 아래의 `<프로젝트>-<sessionId>` 폴더인지·링크가 아닌지·`userDir`이 그 안이 아닌지 다시 확인하고, 하나라도 확인하지 못하면 지우지 않고 이유를 돌려준다. 지웠거나 이미 없으면 null */
+  removeSessionHome(root: string, home: string, sessionId: string, userDir?: string | null): Promise<NativeLifecycleFail | null>;
+  /** 이어받기 전의 판정: 저장 파일이 가리키는 폴더가 세션을 읽어 온 폴더(`home`)여야 한다. 거절하면 이유를, 통과하면 null을 돌려준다 */
+  resumeSessionCheck(home: string, workspace: string | null | undefined, workDir: string, stateDir?: string | null): NativeLifecycleFail | null;
+  /** 복구할 때 세션 하나를 어떻게 할지. `ownerAlive`는 `isProcessAlive(owner.pid)`의 결과다 */
+  recoverSessionPlan(status: string, ownerPid: number, selfPid: number, ownerAlive: boolean, sandboxId: string): NativeRecoverPlan;
+  /** 저장된 샌드박스 id가 b-studio가 만든 id의 꼴인가(`SANDBOX_ID`) */
+  isSandboxId(id: string): boolean;
   /** 기록으로 세션 파일 한 번 쓰기(줄·예약 없이). `fullHistory`가 거짓이면 저장용 history, 참이면 기록 전체. `head`·`tail`이 객체 글자가 아니면 던진다 */
   writeSessionRecord(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): Promise<void>;
   /** `writeSessionRecord`의 동기 판: 종료 신호 처리처럼 기다릴 수 없는 곳에서 이 스레드에서 쓴다(임시 파일 `<file>.<pid>.exit.tmp`). 던질 수 있다 */
@@ -965,8 +975,37 @@ export interface NativePersister {
   flushSync(file: string, head: string, tail: string): void;
 }
 
+/** 세션 지우기·이어받기 판정의 거절 이유. `status`는 HTTP 상태 */
+export interface NativeLifecycleFail {
+  status: number;
+  message: string;
+}
+
+export interface NativeDeleteCheckInput {
+  status: string;
+  workspace?: string | null;
+  root: string;
+  home: string;
+  sessionId: string;
+  workDir: string;
+  stateDir?: string | null;
+}
+
+export interface NativeRecoverPlan {
+  /** 같은 세션 폴더를 쓰는 다른 스튜디오 프로세스가 실행 중이라 건드리지 않는다 */
+  skip: boolean;
+  /** 서버가 멈춰 끝나지 못한 세션 */
+  interrupted: boolean;
+  /** 세션 터미널 찌꺼기를 치운다 */
+  cleanupTerminal: boolean;
+  /** 저장한 샌드박스 id가 b-studio가 만든 id의 꼴이다 */
+  sandboxIdOk: boolean;
+}
+
 /** `readSessions`의 한 세션: `history`를 뺀 나머지 JSON 글자와 파일의 history를 올린 기록 */
 export interface NativeStoredSession {
+  /** 이 세션을 읽어 온 폴더(`<root>/<항목 이름>`). 지우기·이어받기는 저장 파일의 경로 글자가 아니라 이 값으로 폴더를 정한다(ADR-204) */
+  home: string;
   rest: string;
   record: NativeSessionRecord;
   /** history를 기록에 올리지 못한 이유. 있으면 기록은 비어 있고 그 세션은 건너뛰어야 한다 */

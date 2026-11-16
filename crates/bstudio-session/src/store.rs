@@ -125,6 +125,8 @@ pub fn build_session_bytes(record: &SessionRecord, head: &str, tail: &str, trimm
 }
 
 pub struct StoredSession {
+    /// 이 세션을 읽어 온 폴더(`<root>/<항목 이름>`). 지우기·이어받기는 저장 파일의 경로 글자가 아니라 이 값으로 폴더를 정한다(ADR-204)
+    pub home: PathBuf,
     /// `history`를 뺀 나머지 JSON 객체 글자(멤버의 원문을 그대로 잇는다)
     pub rest: String,
     /// 파일의 history를 올린 기록(logs 없음). `history_error`가 있으면 비어 있다
@@ -186,7 +188,7 @@ fn read_session_text(text: &str) -> Option<StoredSession> {
         Ok(events) => record.replace_history(events).err(),
         Err(error) => Some(error),
     };
-    Some(StoredSession { rest, record, history_error })
+    Some(StoredSession { home: PathBuf::new(), rest, record, history_error })
 }
 
 fn load_history(text: &str, members: &[crate::scan::Member]) -> Result<Vec<String>, String> {
@@ -207,7 +209,8 @@ pub fn read_sessions(root: &Path) -> Vec<StoredSession> {
     sort_names(&mut names);
     let mut sessions = Vec::new();
     for name in names {
-        let file = session_file(&root.join(&name));
+        let home = root.join(&name);
+        let file = session_file(&home);
         let Ok(meta) = fs::metadata(&file) else { continue };
         if meta.len() > MAX_FILE_BYTES {
             continue;
@@ -216,7 +219,7 @@ pub fn read_sessions(root: &Path) -> Vec<StoredSession> {
         // Node의 `readFile(…, 'utf8')`처럼 틀린 바이트는 U+FFFD로 읽는다. BOM은 떼지 않는다(`JSON.parse`가 거절한다)
         let text = String::from_utf8_lossy(&bytes);
         if let Some(session) = read_session_text(&text) {
-            sessions.push(session);
+            sessions.push(StoredSession { home, ..session });
         }
     }
     sessions

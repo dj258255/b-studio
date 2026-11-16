@@ -20,6 +20,7 @@ use std::collections::VecDeque;
 
 mod close;
 mod json_text;
+pub mod lifecycle;
 pub mod persister;
 mod scan;
 pub mod store;
