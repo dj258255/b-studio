@@ -366,6 +366,11 @@ interface ActiveRun {
   /** 요청을 시작할 때의 세션 토큰 합계 */
   baseTokens?: AgentUsage;
   tokens: AgentUsage;
+  /**
+   * 이 실행의 턴 사용량(turn_usage)을 필드별로 모은 값(#1272). 한도 판정의 하한이다: 서브에이전트 사용량이 빠지고 출력 토큰이 덜 잡힐 수 있어
+   * 실제(tokens 이벤트)보다 작거나 같다. 실행마다 0에서 시작한다. 판정에만 쓰고, 기록은 tokens 이벤트가 오지 않은 채 실행이 끝날 때 `reconcileTurnUsage`가 한 번 맞춘다
+   */
+  turnUsage?: AgentUsage;
   /** 요청을 보낸 사람. 사용량을 세션을 만든 사람이 아니라 이 사람에게 붙인다 */
   by?: string;
   /** 이미 이 사람 몫으로 더한 양. 토큰 이벤트는 실행 누적값을 주므로 늘어난 만큼만 더한다 */
@@ -2519,7 +2524,13 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       gateTests = session.project.spec.workflow?.tests ?? [];
     },
     run_plan: async () => {
-      const ran = await runPlan(session, run, executionRequest, plan, signal);
+      let ran: Awaited<ReturnType<typeof runPlan>>;
+      try {
+        ran = await runPlan(session, run, executionRequest, plan, signal);
+      } finally {
+        // 정상·실패·취소·예외 모두, 끝 알림·저장·한도 기록보다 먼저 턴 사용량을 맞춘다(#1272)
+        reconcileTurnUsage(session, run);
+      }
       // 취소를 받은 직후 에이전트가 먼저 끝났어도 사용자가 원한 대로 되돌린다
       if (run.cancel.signal.aborted) {
         thrown = run.cancel.signal.reason;
@@ -2792,6 +2803,74 @@ function startLimitMessage(session: Session, by: string | undefined): string | u
   return undefined;
 }
 
+/**
+ * 대화 실행의 한도 판정과 멈춤(`tokens` 이벤트와 `turn_usage` 이벤트가 같은 길로 부른다). 막는 쪽이다: 한도에 닿으면 실행을 멈추고 되돌린다.
+ * extra는 아직 기록에 들어오지 않은 잠정 추가분이다. 판정에만 더하고 원장·세션 합계 자체는 바꾸지 않는다(복사본을 넘긴다)
+ */
+function stopIfOverLimit(session: Session, run: ActiveRun, extra: number): void {
+  const limit = session.snapshot.tokenLimit;
+  const ledger = run.userLedger;
+  const verdict = judgeRunLimits({
+    sessionTokens: totalTokens(session.snapshot.tokens) + extra,
+    ...(limit !== undefined ? { sessionLimit: limit } : {}),
+    ...(run.by ? { by: run.by } : {}),
+    ...(extra > 0 ? { ledger: { accum: (ledger?.accum ?? 0) + extra, saved: ledger?.saved ?? 0 } } : ledger ? { ledger } : {}),
+  });
+  // 게이트 실패를 되풀이하는 요청이 한도를 넘어 계속 토큰을 쓰지 않도록, 넘는 순간 멈추고 되돌린다
+  if (verdict === 'ok' || run.cancel.signal.aborted) return;
+  run.stopReason = 'budget';
+  run.limitKind = verdict;
+  session.snapshot.cancelling = 'budget';
+  markRunCancelling(session, run);
+  emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
+  run.cancel.abort(new DOMException(limitAbortMessage(verdict), 'AbortError'));
+}
+
+/** 실행 누적 사용량을 기록한다(`tokens` 이벤트와 끝 맞추기가 같은 길). 기록할 토큰이 없으면 false */
+function recordRunTokens(session: Session, run: ActiveRun, usage: AgentUsage): boolean {
+  run.tokens = usage;
+  // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다
+  if (!hasTokens(usage)) return false;
+  // 서버가 요청 도중에 멈춰도 그때까지 쓴 양이 세션 파일에 남도록 합계를 바로 바꾼다
+  session.snapshot.tokens = addTokens(run.baseTokens, usage);
+  emit(session, { type: 'tokens', runId: run.id, usage, sessionTokens: session.snapshot.tokens });
+  // 사람 몫에는 늘어난 만큼만 더한다. 세션이 여러 개여도 한 사람의 합계는 한 곳에 쌓인다
+  chargeUser(run, usage);
+  return true;
+}
+
+/**
+ * 러너가 끝난 뒤(정상·실패·취소·예외 모두, 끝 알림과 저장보다 먼저) 한 번 맞춘다(#1272). 한도로 멈추거나 사람이 취소하면 CLI가 끝나 result 줄(`tokens`)이
+ * 오지 않으므로, 그대로 두면 쓴 양이 기록에 없어 다음 요청이 시작 판정을 통과한다(열린 쪽으로 샌다). 턴 합계는 실제보다 작거나 같은 하한이므로
+ * 실제 누적(`run.tokens`)이 이미 같거나 크면 하지 않고, 아니면 필드별로 큰 쪽을 실제 값처럼 기록한다(겹쳐 세지 않는다: 사람 몫은 `chargeUser`가 이미 낸 만큼을 뺀다)
+ */
+function reconcileTurnUsage(session: Session, run: ActiveRun): void {
+  const turns = run.turnUsage;
+  if (!turns || totalTokens(turns) <= totalTokens(run.tokens)) return;
+  const merged: AgentUsage = {
+    inputTokens: Math.max(run.tokens.inputTokens, turns.inputTokens),
+    outputTokens: Math.max(run.tokens.outputTokens, turns.outputTokens),
+    cacheReadTokens: Math.max(run.tokens.cacheReadTokens, turns.cacheReadTokens),
+    cacheWriteTokens: Math.max(run.tokens.cacheWriteTokens, turns.cacheWriteTokens),
+  };
+  recordRunTokens(session, run, merged);
+}
+
+/** 턴 사용량 한 건의 네 값. 수가 아니거나 음수인 값은 0으로 센다(하한이므로 덜 세는 쪽이 안전하고, 실제 값은 tokens 이벤트가 판정한다) */
+function cleanTurnUsage(event: { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number }): AgentUsage {
+  const n = (value: unknown): number => (typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0);
+  return { inputTokens: n(event.inputTokens), outputTokens: n(event.outputTokens), cacheReadTokens: n(event.cacheReadTokens), cacheWriteTokens: n(event.cacheWriteTokens) };
+}
+
+/** 턴 사용량으로 한도를 판정한다(#1272). 판정은 잠정 하한으로, 기록은 `tokens`의 실제 값이나 끝 맞추기로만 한다 */
+function judgeTurnUsageLimit(session: Session, run: ActiveRun, event: Parameters<typeof cleanTurnUsage>[0]): void {
+  run.turnUsage = addTokens(run.turnUsage, cleanTurnUsage(event));
+  // 실제 누적(tokens)이 턴 합계 이상이면 추가분이 없다. 늦게 온 턴 사용량이 같은 토큰을 겹쳐 세지 않는다
+  const extra = Math.max(0, totalTokens(run.turnUsage) - totalTokens(run.tokens));
+  if (extra === 0) return;
+  stopIfOverLimit(session, run, extra);
+}
+
 /** 사람 몫에 늘어난 만큼만 더한다. 기록을 쓰지 못해도 요청은 계속한다(못 쓴 양은 이 실행의 원장에 남아 한도 판정이 센다) */
 function chargeUser(run: ActiveRun, usage: AgentUsage): void {
   const setting = userLimitSetting(run.by);
@@ -2974,26 +3053,14 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       // 질문은 세션 기록에 따로 남겨 화면이 카드로 그린다(대화 흐름에 남는다)
       if (event.type === 'question')
         return emit(session, { type: 'question', runId: run.id, question: event.question, options: event.options, allowOther: event.allowOther, ...(event.proposal ? { proposal: event.proposal } : {}) });
-      if (event.type !== 'tokens') return emit(session, { type: 'agent', runId: run.id, event });
-      run.tokens = event.usage;
-      // 스크립트 모델(데모 모드)은 토큰을 쓰지 않으므로 기록을 늘리지 않는다
-      if (!hasTokens(event.usage)) return;
-      // 서버가 요청 도중에 멈춰도 그때까지 쓴 양이 세션 파일에 남도록 합계를 바로 바꾼다
-      session.snapshot.tokens = addTokens(run.baseTokens, event.usage);
-      emit(session, { type: 'tokens', runId: run.id, usage: event.usage, sessionTokens: session.snapshot.tokens });
-      // 사람 몫에는 늘어난 만큼만 더한다. 세션이 여러 개여도 한 사람의 합계는 한 곳에 쌓인다
-      chargeUser(run, event.usage);
-      const limit = session.snapshot.tokenLimit;
-      const verdict = judgeRunLimits({ sessionTokens: totalTokens(session.snapshot.tokens), ...(limit !== undefined ? { sessionLimit: limit } : {}), ...(run.by ? { by: run.by } : {}), ...(run.userLedger ? { ledger: run.userLedger } : {}) });
-      // 게이트 실패를 되풀이하는 요청이 한도를 넘어 계속 토큰을 쓰지 않도록, 넘는 순간 멈추고 되돌린다
-      if (verdict !== 'ok' && !run.cancel.signal.aborted) {
-        run.stopReason = 'budget';
-        run.limitKind = verdict;
-        session.snapshot.cancelling = 'budget';
-        markRunCancelling(session, run);
-        emit(session, { type: 'run_cancelling', runId: run.id, reason: 'budget' });
-        run.cancel.abort(new DOMException(limitAbortMessage(verdict), 'AbortError'));
+      if (event.type !== 'tokens') {
+        emit(session, { type: 'agent', runId: run.id, event });
+        // 턴 사용량은 result 줄(tokens)보다 먼저 온다. 그 전에 한도를 넘기지 않도록 하한으로 한 번 더 판정한다(#1272)
+        if (event.type === 'turn_usage') judgeTurnUsageLimit(session, run, event);
+        return;
       }
+      if (!recordRunTokens(session, run, event.usage)) return;
+      stopIfOverLimit(session, run, 0);
     },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
   };

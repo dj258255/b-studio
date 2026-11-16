@@ -85,7 +85,7 @@ vi.mock('@b-studio/agent', async (importOriginal) => ({
     }),
 }));
 
-import { createSession, getSnapshot, sendMessage, stopSession, subscribe } from './sessions';
+import { cancelRun, createSession, getSnapshot, sendMessage, stopSession, subscribe } from './sessions';
 
 let root: string;
 const saved = { mode: process.env.B_STUDIO_MODE, backend: process.env.B_STUDIO_BACKENDS, sessions: process.env.B_STUDIO_SESSIONS_DIR, usage: process.env.B_STUDIO_USAGE_DIR, limit: process.env.B_STUDIO_USER_TOKEN_LIMIT };
@@ -102,6 +102,7 @@ async function until(condition: () => boolean | Promise<boolean>, label: string,
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 80));
 const tokens = (n: number) => ({ type: 'tokens', usage: { inputTokens: n, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+const turnUsage = (n: number, turn = 1) => ({ type: 'turn_usage', turn, inputTokens: n, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: n });
 const usageFile = () => path.join(root, 'usage', 'tokens.json');
 
 /** 파일에 저장된 kim의 오늘 합계(입력 토큰) */
@@ -109,6 +110,16 @@ async function storedInput(): Promise<number> {
   try {
     const periods = (JSON.parse(await readFile(usageFile(), 'utf8')) as { periods: Record<string, Record<string, { inputTokens: number }>> }).periods;
     return Object.values(periods).reduce((sum, people) => sum + (people.kim?.inputTokens ?? 0), 0);
+  } catch {
+    return 0;
+  }
+}
+
+/** 파일에 저장된 kim의 오늘 합계(네 값의 합) */
+async function storedTotal(): Promise<number> {
+  try {
+    const periods = (JSON.parse(await readFile(usageFile(), 'utf8')) as { periods: Record<string, Record<string, Record<string, number>>> }).periods;
+    return Object.values(periods).reduce((sum, people) => sum + Object.values(people.kim ?? {}).reduce((a, b) => a + b, 0), 0);
   } catch {
     return 0;
   }
@@ -225,5 +236,193 @@ describe('사용량 파일이 깨졌을 때 한도는 조용히 꺼지지 않는
     expect(getSnapshot(id)?.running).toBe(false);
     // 깨진 파일은 덮어쓰지 않는다
     expect(await readFile(usageFile(), 'utf8')).toBe('{깨진');
+  });
+});
+
+describe('턴 사용량(turn_usage)도 한도를 판정한다(#1272): tokens는 result 줄에서만 오므로 그 전에 한도를 넘기지 않게 한다', () => {
+  it('사람 한도: tokens가 오기 전에 턴 합계가 한도에 닿으면 멈추고, 판정 중에는 사람별 파일에 잠정값을 더하지 않는다(끝 맞추기가 한 번 기록한다)', async () => {
+    fake.honorAbort = false;
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+
+    // 한도(1000) 아래: 멈추지 않는다
+    run.emit(turnUsage(600, 1));
+    await settle();
+    expect(run.signal.aborted).toBe(false);
+    // 합계 600 + 399 = 999: 아직 아래(경계)
+    run.emit(turnUsage(399, 2));
+    await settle();
+    expect(run.signal.aborted).toBe(false);
+    expect(events.filter((event) => event.type === 'run_cancelling')).toEqual([]);
+
+    // 합계 1000: 한도에 닿는다(>=)
+    run.emit(turnUsage(1, 3));
+    await until(() => run.signal.aborted, '턴 합계로 멈춤');
+    expect(events.filter((event) => event.type === 'run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+    // 러너가 아직 끝나지 않은 동안에는 잠정값이 기록(파일·세션 합계·tokens 이벤트)에 없다
+    await settle();
+    expect(await storedInput()).toBe(0);
+    expect(getSnapshot(id)?.tokens?.inputTokens ?? 0).toBe(0);
+    expect(events.filter((event) => event.type === 'tokens')).toEqual([]);
+    run.release();
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(events.find((event) => event.type === 'run_finished')).toMatchObject({ status: 'cancelled', summary: expect.stringContaining('오늘 쓸 수 있는 토큰 한도') });
+    // turn_usage는 그대로 알림으로 나가고, 잠정값은 파일·세션 합계에 들어가지 않는다
+    expect(events.filter((event) => event.type === 'agent')).toHaveLength(3);
+    // 끝나면 한 번만, 턴 합계만큼 기록된다
+    expect(await storedInput()).toBe(1000);
+    expect(getSnapshot(id)?.tokens?.inputTokens).toBe(1000);
+  });
+
+  it('사람 한도: 이 실행이 이미 저장한 몫이 있어도 잠정 추가분만 더해 판정한다(겹쳐 세지 않는다)', async () => {
+    fake.honorAbort = false;
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+
+    run.emit(tokens(800));
+    await until(async () => (await storedInput()) === 800, '저장');
+    // 턴 합계 700은 실제 누적 800보다 작으므로 추가분이 없다
+    run.emit(turnUsage(700, 1));
+    await settle();
+    expect(run.signal.aborted).toBe(false);
+    // 턴 합계 1000이면 추가분 200: 800 + 200 = 1000으로 한도에 닿는다
+    run.emit(turnUsage(300, 2));
+    await until(() => run.signal.aborted, '추가분을 더해 멈춤');
+    expect(events.filter((event) => event.type === 'run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+    await settle();
+    expect(await storedInput()).toBe(800);
+    // 끝나면 실제 누적(800)과 턴 합계(1000) 중 큰 쪽으로 맞춘다: 겹쳐 1800이 되지 않는다
+    run.release();
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(await storedInput()).toBe(1000);
+  });
+
+  it('세션 한도: 턴 합계로 세션 합계가 한도에 닿으면 멈춘다', async () => {
+    delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '500';
+    try {
+      const { id, events } = await open();
+      ask(id);
+      await until(() => fake.runs.length === 1, '러너 시작');
+      const run = fake.runs[0]!;
+      run.emit(turnUsage(499, 1));
+      await settle();
+      expect(run.signal.aborted).toBe(false);
+      run.emit(turnUsage(1, 2));
+      await until(() => run.signal.aborted, '세션 한도로 멈춤');
+      expect(events.filter((event) => event.type === 'run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+      await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+      expect(events.find((event) => event.type === 'run_finished')).toMatchObject({ status: 'cancelled' });
+    } finally {
+      delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
+    }
+  });
+
+  it('수가 아닌 턴 사용량 값은 세지 않고, 판정을 느슨하게 만들지 않는다', async () => {
+    const { id } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+    run.emit({ type: 'turn_usage', turn: 1, inputTokens: Number.NaN, outputTokens: -5000, cacheReadTokens: 'x', cacheWriteTokens: undefined, contextTokens: 0 });
+    run.emit(turnUsage(999, 2));
+    await settle();
+    // 음수·NaN은 0으로 센다: 합계 999는 아직 한도 아래다
+    expect(run.signal.aborted).toBe(false);
+    run.emit(turnUsage(1, 3));
+    await until(() => run.signal.aborted, '정상 값은 계속 센다');
+  });
+
+  it('다음 실행은 턴 합계를 새로 시작한다', async () => {
+    const { id } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    fake.runs[0]!.emit(turnUsage(900, 1));
+    await settle();
+    expect(fake.runs[0]!.signal.aborted).toBe(false);
+    fake.runs[0]!.release();
+    await until(() => getSnapshot(id)?.running === false, '첫 실행 끝');
+    ask(id);
+    await until(() => fake.runs.length === 2, '둘째 러너 시작');
+    // 첫 실행의 900은 파일에 기록됐다. 둘째 실행의 턴 합계가 900에서 이어지면 950(파일 900과 겹쳐 한도 초과)으로 멈춘다
+    fake.runs[1]!.emit(turnUsage(50, 1));
+    await settle();
+    expect(fake.runs[1]!.signal.aborted).toBe(false);
+  });
+});
+
+describe('tokens가 끝내 오지 않는 실행도 쓴 양은 기록에 남는다(#1272): 멈추면 CLI가 끝나 result 줄이 오지 않는다', () => {
+  it('turn_usage로 멈추고 tokens가 오지 않으면 세션 합계와 사람별 파일이 턴 합계와 같고, 같은 사람의 다음 요청은 409다', async () => {
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+    run.emit({ type: 'turn_usage', turn: 1, inputTokens: 2, outputTokens: 4, cacheReadTokens: 1150, cacheWriteTokens: 353, contextTokens: 0 });
+    await until(() => run.signal.aborted, '턴 합계로 멈춤');
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(getSnapshot(id)?.tokens).toEqual({ inputTokens: 2, outputTokens: 4, cacheReadTokens: 1150, cacheWriteTokens: 353 });
+    expect(events.filter((event) => event.type === 'tokens')).toMatchObject([{ usage: { cacheReadTokens: 1150 }, sessionTokens: { inputTokens: 2 } }]);
+    expect(await storedInput()).toBe(2);
+    expect(await storedTotal()).toBe(1509);
+    await until(() => getSnapshot(id)?.running === false, '멈춤');
+    expect(() => ask(id)).toThrowError(expect.objectContaining({ status: 409 }));
+  });
+
+  it('멈춘 뒤 늦게 tokens(턴 합계보다 큼)가 오면 사람별 파일은 그 실제 값이고 겹쳐 세지 않는다', async () => {
+    fake.honorAbort = false;
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+    run.emit(turnUsage(1200, 1));
+    await until(() => run.signal.aborted, '멈춤');
+    run.emit(tokens(2000));
+    await until(async () => (await storedTotal()) === 2000, '실제 값 저장');
+    run.release();
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(await storedTotal()).toBe(2000);
+    expect(getSnapshot(id)?.tokens?.inputTokens).toBe(2000);
+  });
+
+  it('사람이 취소해 tokens 없이 끝나도 턴 합계가 기록된다', async () => {
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+    run.emit(turnUsage(300, 1));
+    const runId = (events.find((event) => event.type === 'agent') as { runId: string }).runId;
+    cancelRun(id, runId);
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(await storedTotal()).toBe(300);
+    expect(getSnapshot(id)?.tokens?.inputTokens).toBe(300);
+  });
+
+  it('실제 누적과 턴 사용량이 필드마다 엇갈려도 필드별로 큰 쪽으로 맞추고 이미 센 몫은 겹치지 않는다', async () => {
+    fake.honorAbort = false;
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+    run.emit(tokens(800));
+    await until(async () => (await storedInput()) === 800, '저장');
+    // 턴 합계 1100 > 실제 800이지만 입력은 100(< 800), 출력은 1000(> 0)
+    run.emit({ type: 'turn_usage', turn: 1, inputTokens: 100, outputTokens: 1000, cacheReadTokens: 0, cacheWriteTokens: 0, contextTokens: 0 });
+    run.release();
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(getSnapshot(id)?.tokens).toMatchObject({ inputTokens: 800, outputTokens: 1000 });
+    expect(await storedTotal()).toBe(1800);
+  });
+
+  it('한도 아래에서 정상으로 끝나도 tokens가 없으면 턴 합계를 기록한다', async () => {
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    fake.runs[0]!.emit(turnUsage(400, 1));
+    fake.runs[0]!.release();
+    await until(() => events.some((event) => event.type === 'run_finished'), '실행 끝');
+    expect(await storedTotal()).toBe(400);
   });
 });
