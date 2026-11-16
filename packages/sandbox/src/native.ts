@@ -314,6 +314,12 @@ interface NativeGuard {
    * 실패하면 B2a의 `removeSessionHome` 규칙으로 지운다(이 호출이 만든 폴더만). hook은 성공하면 null, 실패하면 이유를 돌려준다(던지지 않는다)
    */
   createSessionRun(input: NativeCreateRunInput, hook: (name: string) => Promise<string | null>): Promise<NativeCreateResult>;
+  /** 요청 실행의 단계 이름(순서대로, ADR-208) */
+  runOutcomeSteps(): string[];
+  runOutcomeDecideNormal(facts: NativeRunNormalFacts, pending: boolean): NativeRunOutcome;
+  runOutcomeNeedsProbeNormal(facts: NativeRunNormalFacts): boolean;
+  runOutcomeDecideException(facts: NativeRunExceptionFacts, pending: boolean): NativeRunOutcome;
+  runOutcomeNeedsProbeException(facts: NativeRunExceptionFacts): boolean;
   /** 기록으로 세션 파일 한 번 쓰기(줄·예약 없이). `fullHistory`가 거짓이면 저장용 history, 참이면 기록 전체. `head`·`tail`이 객체 글자가 아니면 던진다 */
   writeSessionRecord(record: NativeSessionRecord, file: string, head: string, tail: string, fullHistory: boolean): Promise<void>;
   /** `writeSessionRecord`의 동기 판: 종료 신호 처리처럼 기다릴 수 없는 곳에서 이 스레드에서 쓴다(임시 파일 `<file>.<pid>.exit.tmp`). 던질 수 있다 */
@@ -1116,6 +1122,8 @@ export interface NativeSessionState {
   readonly busy: boolean;
   rejectBusy(op: string): NativeLifecycleFail | null;
   beginExport(): NativeClaimResult;
+  /** 요청 하나를 끝까지 돈다. 단계마다 `hook`을 부르고 순서·끝 결정·점유 단계 바꾸기와 풀기는 코어가 한다(ADR-208) */
+  runRequest(ask: boolean, token: number, hook: (call: NativeRunCall) => Promise<NativeRunReply>): Promise<void>;
   releaseExport(token: number): boolean;
   readonly exporting: boolean;
   deleteBusy(): NativeLifecycleFail | null;
@@ -1139,6 +1147,54 @@ export interface NativeClaimView {
   phase?: string | null;
   terminal: boolean;
   exporting: boolean;
+}
+
+export interface NativeRunCall {
+  step: string;
+  arg: string;
+}
+
+/** 요청 실행의 콜백이 돌려주는 사실(ADR-208). 모든 칸이 있어야 한다 */
+export interface NativeRunReply {
+  ok: boolean;
+  localEdits: boolean;
+  result?: string | null;
+  preflight: boolean;
+  questionGatePassed: boolean;
+  platformFailure: boolean;
+  cancelRequested: boolean;
+  cancelAborted: boolean;
+  stopAborted: boolean;
+  booted: boolean;
+  local: boolean;
+  pending: boolean;
+  mismatch: boolean;
+  reverted: boolean;
+}
+
+export interface NativeRunNormalFacts {
+  ask: boolean;
+  result: string;
+  questionGatePassed: boolean;
+  platformFailure: boolean;
+  booted: boolean;
+  status: string;
+  local: boolean;
+  stopped: boolean;
+}
+
+export interface NativeRunExceptionFacts {
+  ask: boolean;
+  cancelled: boolean;
+  stopped: boolean;
+  booted: boolean;
+  status: string;
+}
+
+export interface NativeRunOutcome {
+  action: string;
+  status: string;
+  summary: string;
 }
 
 export interface NativeClaimResult {
