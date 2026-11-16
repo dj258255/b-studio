@@ -39,6 +39,8 @@ interface Case {
   onEvent?: (event: AgentEvent, ctx: Ctx) => void;
   /** 실행을 시작하고 이만큼 뒤에 취소한다(ms) */
   abortAfterMs?: number;
+  /** 가짜 샌드박스의 재시작(게이트의 확인)이 걸리는 시간(ms). 기본은 곧바로 끝난다 */
+  gateDelayMs?: number;
 }
 
 const SCRUB_KEYS = new Set(['toolMs', 'gateMs', 'elapsedMs', 'ms', 'durationMs', 'startedAt', 'at']);
@@ -58,6 +60,17 @@ interface Observed {
   spawns: number;
 }
 
+/** 재시작이 이만큼 걸리는 가짜 샌드박스(게이트가 느린 환경을 흉내 낸다) */
+function slowGate<T extends { restart: (service: string) => Promise<unknown> }>(sandbox: T, ms: number): T {
+  if (ms <= 0) return sandbox;
+  const restart = sandbox.restart.bind(sandbox);
+  sandbox.restart = async (service) => {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return restart(service);
+  };
+  return sandbox;
+}
+
 async function observe(impl: Impl, c: Case): Promise<Observed> {
   const project = await createOrdersProject('claude-code-diff-');
   const fake = fakeClaudeCli({
@@ -75,7 +88,7 @@ async function observe(impl: Impl, c: Case): Promise<Observed> {
   const options: ClaudeCodeRunOptions = {
     request: '고쳐줘',
     project,
-    sandbox: fakeSandbox(project, [...(c.restarts ?? [true, true, true, true])]),
+    sandbox: slowGate(fakeSandbox(project, [...(c.restarts ?? [true, true, true, true])]), c.gateDelayMs ?? 0),
     ...fake.cli,
     fetcher: async () => contract,
     signal: ctx.controller.signal,
@@ -119,6 +132,25 @@ const read: FakeStep = { tool: 'read_file', input: { path: 'api/src/Order.java' 
 const write = (name: string, n = 0): FakeStep => ({ tool: 'write_file', input: { path: `api/src/${name}.java`, content: `class ${name} { /* ${n} */ }\n` } });
 const UUID = '11111111-1111-4111-8111-111111111111';
 const NETWORK = "API Error: Can't reach the API server — check your internet or DNS (ENOTFOUND)";
+
+/**
+ * 승격 순간의 지시(트러블슈팅 212). 지시는 `verify_start`와 `model_escalated`마다 들어간다. `verify_start`의 지시는 승격 전 프로세스의 입력에 쓰여
+ * 그 프로세스가 곧바로 모델 턴을 하나 더 소비하고, 승격 뒤 프로세스도 지시마다 턴을 소비한다. 가짜 CLI는 턴이 떨어지면 종료 코드 1로 죽는데,
+ * 그 시각과 러너가 다음 줄(게이트 실패 안내)을 쓰는 시각이 경주하면 가짜 CLI의 기록에 안내가 한 번 더 남거나 남지 않는다(러너의 동작이 아니라 기록의 경합).
+ * 남는 턴을 넉넉히 줘 가짜 CLI가 죽지 않게 하면 러너가 쓴 줄이 모두 기록되어 게이트 시간과 무관하게 같다.
+ */
+function escalationSteerCase(name: string, extra: Partial<Case>, spareTurns = 4): Case {
+  return {
+    name,
+    turns: [[write('Order', 1), { text: '1' }], [write('Order', 2), { text: '2' }], [{ text: '3' }], ...Array.from({ length: spareTurns }, () => [{ text: '여분' }])],
+    restarts: [false, false, true],
+    options: (ctx) => ({ model: 'haiku', escalation: { to: 'sonnet', sameSignatureTimes: 1 }, steering: ctx.queue.steering }),
+    onEvent: (event, ctx) => {
+      if (event.type === 'verify_start' || event.type === 'model_escalated') ctx.queue.push('승격 순간의 지시');
+    },
+    ...extra,
+  };
+}
 
 const NAMED: Case[] = [
   { name: '통과(읽기만)', turns: [[read, { text: '읽었습니다.' }]] },
@@ -344,15 +376,8 @@ const NAMED: Case[] = [
       if (event.type === 'tool_result') ctx.queue.push('테스트도 추가해줘');
     },
   },
-  {
-    name: '진행 중 지시(승격 순간)',
-    turns: [[write('Order', 1), { text: '1' }], [write('Order', 2), { text: '2' }], [{ text: '3' }]],
-    restarts: [false, false, true],
-    options: (ctx) => ({ model: 'haiku', escalation: { to: 'sonnet', sameSignatureTimes: 1 }, steering: ctx.queue.steering }),
-    onEvent: (event, ctx) => {
-      if (event.type === 'verify_start' || event.type === 'model_escalated') ctx.queue.push('승격 순간의 지시');
-    },
-  },
+  escalationSteerCase('진행 중 지시(승격 순간)', {}),
+  escalationSteerCase('진행 중 지시(승격 순간, 느린 게이트)', { gateDelayMs: 600 }),
   { name: '취소: 첫 tool_result', turns: [[write('N'), read, { text: '추가했습니다.' }]], restarts: [true], onEvent: (event, ctx) => event.type === 'tool_result' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
   { name: '취소: session 이벤트', turns: [[read, { text: '읽었습니다.' }]], onEvent: (event, ctx) => event.type === 'session' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
   { name: '취소: 첫 turn 이벤트', turns: [[read, { text: '읽었습니다.' }]], onEvent: (event, ctx) => event.type === 'turn' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
@@ -407,6 +432,15 @@ describe('claude-code 러너: 옛 루프와 Rust 러너 코어의 차등(ADR-202
       await compare(c);
     }, 60_000);
   }
+});
+
+describe('승격 순간의 지시: 가짜 CLI의 기록이 게이트가 걸리는 시간과 무관하다(트러블슈팅 212)', () => {
+  it('같은 러너를 게이트 지연만 바꿔 돌려도 프롬프트와 실행 횟수가 같다', async () => {
+    const fast = await observe(runClaudeCodeAgent, escalationSteerCase('빠른 게이트', {}));
+    const slow = await observe(runClaudeCodeAgent, escalationSteerCase('느린 게이트', { gateDelayMs: 600 }));
+    expect(slow.prompts).toEqual(fast.prompts);
+    expect(slow.spawns).toEqual(fast.spawns);
+  }, 60_000);
 });
 
 // ── 시드 있는 무작위 시나리오 ──
