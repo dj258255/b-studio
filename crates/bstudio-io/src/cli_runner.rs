@@ -817,6 +817,14 @@ impl Runner {
                 Some(CliEvent::Lines(lines)) => {
                     let mut left = lines.len();
                     for line in &lines {
+                        // 취소한 뒤에 도착한 줄은 읽지 않고 버린다(막는 쪽: 모르는 상태는 없다, 취소 여부 하나뿐이다). SIGTERM은 제어 통로를 한 번 거쳐 가므로 그 사이에
+                        // CLI가 다음 메시지를 더 쓸 수 있다. 그 줄을 읽으면 취소한 실행이 턴·텍스트 이벤트를 내고 결과 줄이면 게이트(샌드박스 재시작)까지 돈다.
+                        // 도구는 장부가 이미 거절하지만, 읽는 쪽도 같은 기준으로 닫는다(트러블슈팅 216). 버린 줄도 소비했다고 알려야 읽기가 멈추지 않는다
+                        if self.shared.aborted() {
+                            proc.consumed(1);
+                            left -= 1;
+                            continue;
+                        }
                         let handled = self.handle_line(proc, line).await;
                         proc.consumed(1);
                         left -= 1;
