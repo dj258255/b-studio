@@ -455,10 +455,17 @@ describe('취소 뒤에는 도구도 메시지도 일을 하지 않는다(트러
     onEvent: (event, ctx) => event.type === 'tool_result' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')),
   };
 
-  it('취소한 뒤 도착한 메시지는 이벤트를 내지 않고 게이트도 돌지 않는다', async () => {
+  it('취소한 뒤 도착한 메시지는 턴·텍스트 이벤트를 내지 않고 게이트도 돌지 않는다. 결과 줄의 사용량만 센다', async () => {
     const current = await observe(runClaudeCodeAgent, aborted);
     expect(current.outcome).toEqual({ error: { name: 'AbortError', message: '요청을 취소했습니다' } });
-    expect((current.events as Array<{ type: string }>).map((event) => event.type)).toEqual(['session', 'turn', 'tool_call', 'policy', 'tool_result']);
+    // 가짜 CLI의 result는 modelUsage에 입력 토큰 10 × 메시지 수(4)를 싣는다. 모델이 이미 쓴 토큰이라 한도에서 빠지면 안 된다
+    expect(current.events.slice(4)).toEqual([{ type: 'tool_result', name: 'write_file', ok: true, content: 'wrote api/src/N.java', chars: 20, rawChars: 20 }, { type: 'tokens', usage: { inputTokens: 40, outputTokens: 5, cacheReadTokens: 1, cacheWriteTokens: 2 } }]);
+  }, 60_000);
+
+  it('취소한 뒤 도착한 결과 줄의 modelUsage를 읽지 못하면 던지지 않고 경고만 남긴다(취소는 AbortError로 끝난다)', async () => {
+    const current = await observe(runClaudeCodeAgent, { ...aborted, result: { modelUsage: { 'test-model': null } } });
+    expect(current.outcome).toEqual({ error: { name: 'AbortError', message: '요청을 취소했습니다' } });
+    expect((current.events as Array<{ type: string }>).map((event) => event.type)).toEqual(['session', 'turn', 'tool_call', 'policy', 'tool_result', 'warning']);
   }, 60_000);
 
   it('취소한 뒤 도착한 도구 요청은 실행하지 않고 취소 이유로 거절한다', async () => {

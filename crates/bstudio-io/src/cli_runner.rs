@@ -666,12 +666,30 @@ impl Runner {
         Ok(())
     }
 
-    async fn on_result(&mut self, proc: &mut Proc, message: &JsValue) -> R<()> {
-        // init으로 도구 서버 연결을 확인하지 못했다(init이 없었다). 도구 없이 돈 턴일 수 있어 결과를 통과로 쓰지 않는다
-        if !proc.tool_server_confirmed {
-            let text = format!("Claude Code가 {} 도구 서버에 연결됐는지 확인하지 못했습니다(시작 정보가 오지 않음)", self.cfg.server);
-            return self.finish(proc, "failed", Some(text), false, None).await;
+    /// 취소한 뒤 도착한 줄에서 **사용량만** 센다. result 줄이면 `tokens`를 내고(모델이 이미 쓴 토큰이 세션 합계와 사용자 한도에서 빠지지 않게), 그 밖의 줄과
+    /// 결과 판정(실패·턴 상한·네트워크 재시도·finish·게이트)은 하지 않는다. 취소는 어차피 `AbortError`로 끝나므로 `modelUsage`를 못 읽어도 던지지 않고(던지면 취소가
+    /// 다른 오류로 바뀐다) 경고를 남기고 그 줄을 버린다. 세션 id 기억은 `handle_line`과 같다(부수 이벤트가 없다)
+    async fn count_usage_after_abort(&mut self, line: &str) -> R<()> {
+        if js::trim(line).is_empty() {
+            return Ok(());
         }
+        let Ok(message @ JsValue::Obj(_)) = js_json::parse_lone_encoded(&encode_line(line)) else { return Ok(()) };
+        if let Some(JsValue::Str(session)) = message.prop("session_id") {
+            if !session.is_empty() {
+                self.session_id = Some(session.clone());
+            }
+        }
+        if self.result_set || !matches!(message.prop("type"), Some(JsValue::Str(kind)) if kind == "result") {
+            return Ok(());
+        }
+        if let Err(Stop::Thrown { message: reason, .. }) = self.record_usage(&message).await {
+            self.warn(format!("취소한 뒤 도착한 결과의 사용량을 읽지 못해 세지 않았습니다: {}", enc(&reason))).await?;
+        }
+        Ok(())
+    }
+
+    /// result 줄의 사용량을 실행 전체 누적에 반영하고 `tokens` 이벤트를 낸다(실패 판정·게이트와 별개다: 취소한 뒤에도 모델이 이미 쓴 토큰은 센다)
+    async fn record_usage(&mut self, message: &JsValue) -> R<()> {
         // modelUsage는 이 프로세스의 누적값이다. 끝난 프로세스들의 사용량(base)과 더해 실행 전체를 만든다
         let (total, by_model) = runner_judge::usage_of(message.prop("modelUsage")).map_err(|reason| Stop::Thrown { kind: "error", message: reason })?;
         self.query_usage = total;
@@ -685,6 +703,16 @@ impl Runner {
             self.metrics_model_ms = Some(self.model_ms_base + query_ms);
         }
         self.emit(obj(vec![("type", txt("tokens")), ("usage", Some(usage_value(self.usage)))])).await?;
+        Ok(())
+    }
+
+    async fn on_result(&mut self, proc: &mut Proc, message: &JsValue) -> R<()> {
+        // init으로 도구 서버 연결을 확인하지 못했다(init이 없었다). 도구 없이 돈 턴일 수 있어 결과를 통과로 쓰지 않는다
+        if !proc.tool_server_confirmed {
+            let text = format!("Claude Code가 {} 도구 서버에 연결됐는지 확인하지 못했습니다(시작 정보가 오지 않음)", self.cfg.server);
+            return self.finish(proc, "failed", Some(text), false, None).await;
+        }
+        self.record_usage(message).await?;
         // 옛 구현은 이 판정의 입력을 napi 경계(`encodeNative`)로 넘겨 짝 없는 서로게이트가 U+FFFD가 되었다
         if let Some(failure) = runner_judge::describe_result_failure(&lossy(message)) {
             // Claude Code 자신이 턴 상한(error_max_turns)으로 끝냈어도, 바로 실패로 끝내지 않고 지금까지의 변경이 게이트를 통과하는지 한 번 더 본다(ADR-131)
@@ -821,8 +849,10 @@ impl Runner {
                         // CLI가 다음 메시지를 더 쓸 수 있다. 그 줄을 읽으면 취소한 실행이 턴·텍스트 이벤트를 내고 결과 줄이면 게이트(샌드박스 재시작)까지 돈다.
                         // 도구는 장부가 이미 거절하지만, 읽는 쪽도 같은 기준으로 닫는다(트러블슈팅 216). 버린 줄도 소비했다고 알려야 읽기가 멈추지 않는다
                         if self.shared.aborted() {
+                            let counted = self.count_usage_after_abort(line).await;
                             proc.consumed(1);
                             left -= 1;
+                            counted?;
                             continue;
                         }
                         let handled = self.handle_line(proc, line).await;
