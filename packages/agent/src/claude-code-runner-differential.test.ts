@@ -41,6 +41,13 @@ interface Case {
   abortAfterMs?: number;
   /** 가짜 샌드박스의 재시작(게이트의 확인)이 걸리는 시간(ms). 기본은 곧바로 끝난다 */
   gateDelayMs?: number;
+  /** 가짜 CLI가 받은 도구 응답의 기록을 견주지 않는다. 취소(SIGTERM)와 응답이 CLI에 닿는 순서의 경쟁이라 시각에 따라 갈린다(트러블슈팅 216) */
+  skipToolLog?: boolean;
+  /**
+   * 취소를 건 이벤트 뒤의 이벤트를 견주지 않는다. 옛 루프는 취소 신호 뒤에도 이미 읽어 둔 줄을 계속 읽었고(턴·게이트 시작 이벤트), Rust 코어는 취소한 뒤의 줄을 버린다
+   * (트러블슈팅 216). 어디까지 읽었는지는 SIGTERM이 CLI에 닿는 시각에 달려 있어 견줄 수 없다
+   */
+  untilAbort?: boolean;
 }
 
 const SCRUB_KEYS = new Set(['toolMs', 'gateMs', 'elapsedMs', 'ms', 'durationMs', 'startedAt', 'at']);
@@ -83,6 +90,8 @@ async function observe(impl: Impl, c: Case): Promise<Observed> {
     ...(c.exitAfterResult ? { exitCodeAfterResult: c.exitAfterResult.code, stderrAfterResult: c.exitAfterResult.stderr } : {}),
   });
   const events: AgentEvent[] = [];
+  /** 취소가 처음 보인 시점까지 받은 이벤트 수 */
+  let abortedAt: number | undefined;
   const ctx: Ctx = { queue: fakeSteering(), controller: new AbortController(), events };
   const waits: number[] = [];
   const options: ClaudeCodeRunOptions = {
@@ -98,6 +107,7 @@ async function observe(impl: Impl, c: Case): Promise<Observed> {
     onEvent: (event) => {
       events.push(event);
       c.onEvent?.(event, ctx);
+      if (abortedAt === undefined && ctx.controller.signal.aborted) abortedAt = events.length;
     },
     ...(c.options?.(ctx) ?? {}),
   };
@@ -111,10 +121,10 @@ async function observe(impl: Impl, c: Case): Promise<Observed> {
   const logs = fake.logs();
   return {
     outcome,
-    events: scrub(events, project.root) as unknown[],
+    events: scrub(c.untilAbort && abortedAt !== undefined ? events.slice(0, abortedAt) : events, project.root) as unknown[],
     prompts: fake.prompts(),
     // 닫힌 뒤 거절된 요청의 응답은 가짜 CLI가 SIGTERM으로 죽기 전에 기록했는지가 경쟁이라 견주지 않는다(거절됐다는 사실은 `tool_call` 이벤트가 없다는 것과 파일이 그대로라는 것으로 본다)
-    tools: logs.flatMap((log) => log.tools.filter((tool) => !(tool.isError === true && tool.text.includes('이미 끝나 도구를 쓸 수 없습니다'))).map((tool) => ({ call: log.call, name: tool.name, input: tool.input, isError: tool.isError, error: tool.error, text: tool.text, images: tool.images }))),
+    tools: c.skipToolLog ? [] : logs.flatMap((log) => log.tools.filter((tool) => !(tool.isError === true && tool.text.includes('이미 끝나 도구를 쓸 수 없습니다'))).map((tool) => ({ call: log.call, name: tool.name, input: tool.input, isError: tool.isError, error: tool.error, text: tool.text, images: tool.images }))),
     // 임시 파일 경로(MCP 설정·지시문)와 프로세스마다 다른 값은 자리 표시로 바꾼다
     argv: logs.map((log) => log.args.map((arg, at) => (['--mcp-config', '--system-prompt-file'].includes(log.args[at - 1] ?? '') ? '<file>' : arg))),
     spawns: logs.length,
@@ -378,9 +388,9 @@ const NAMED: Case[] = [
   },
   escalationSteerCase('진행 중 지시(승격 순간)', {}),
   escalationSteerCase('진행 중 지시(승격 순간, 느린 게이트)', { gateDelayMs: 600 }),
-  { name: '취소: 첫 tool_result', turns: [[write('N'), read, { text: '추가했습니다.' }]], restarts: [true], onEvent: (event, ctx) => event.type === 'tool_result' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
-  { name: '취소: session 이벤트', turns: [[read, { text: '읽었습니다.' }]], onEvent: (event, ctx) => event.type === 'session' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
-  { name: '취소: 첫 turn 이벤트', turns: [[read, { text: '읽었습니다.' }]], onEvent: (event, ctx) => event.type === 'turn' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
+  { name: '취소: 첫 tool_result', turns: [[write('N'), read, { text: '추가했습니다.' }]], restarts: [true], skipToolLog: true, untilAbort: true, onEvent: (event, ctx) => event.type === 'tool_result' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
+  { name: '취소: session 이벤트', turns: [[read, { text: '읽었습니다.' }]], skipToolLog: true, untilAbort: true, onEvent: (event, ctx) => event.type === 'session' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
+  { name: '취소: 첫 turn 이벤트', turns: [[read, { text: '읽었습니다.' }]], skipToolLog: true, untilAbort: true, onEvent: (event, ctx) => event.type === 'turn' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')) },
   { name: '취소: 멈춰 있는 CLI', turns: [[{ hang: true }]], abortAfterMs: 300 },
   { name: '취소: 이유가 오류가 아님', turns: [[{ hang: true }]], onEvent: (event, ctx) => event.type === 'session' && ctx.controller.abort('글자 이유') },
   { name: '트러블슈팅 206: callFirst', turns: [[{ ...read, callFirst: 150 }, { text: '읽었습니다.' }]] },
@@ -432,6 +442,42 @@ describe('claude-code 러너: 옛 루프와 Rust 러너 코어의 차등(ADR-202
       await compare(c);
     }, 60_000);
   }
+});
+
+describe('취소 뒤에는 도구도 메시지도 일을 하지 않는다(트러블슈팅 216)', () => {
+  // SIGTERM을 무시하는 CLI는 취소 신호가 CLI에 가장 늦게 닿는 경우다(부하에서 SIGTERM이 늦는 것을 결정적으로 만든다). 취소는 첫 tool_result에서 건다.
+  // 옛 루프는 이 경우 취소 뒤의 메시지(턴 2·3·4, 게이트 시작)를 그대로 읽었다. Rust 코어는 읽지 않는다
+  const aborted: Case = {
+    name: '취소 뒤 CLI가 계속 쓴다',
+    turns: [[write('N'), write('M'), read, { text: '추가했습니다.' }]],
+    restarts: [true],
+    invocations: [{ ignoreSigterm: true }],
+    onEvent: (event, ctx) => event.type === 'tool_result' && ctx.controller.abort(new DOMException('요청을 취소했습니다', 'AbortError')),
+  };
+
+  it('취소한 뒤 도착한 메시지는 턴·텍스트 이벤트를 내지 않고 게이트도 돌지 않는다. 결과 줄의 사용량만 센다', async () => {
+    const current = await observe(runClaudeCodeAgent, aborted);
+    expect(current.outcome).toEqual({ error: { name: 'AbortError', message: '요청을 취소했습니다' } });
+    // 가짜 CLI의 result는 modelUsage에 입력 토큰 10 × 메시지 수(4)를 싣는다. 모델이 이미 쓴 토큰이라 한도에서 빠지면 안 된다
+    expect(current.events.slice(4)).toEqual([{ type: 'tool_result', name: 'write_file', ok: true, content: 'wrote api/src/N.java', chars: 20, rawChars: 20 }, { type: 'tokens', usage: { inputTokens: 40, outputTokens: 5, cacheReadTokens: 1, cacheWriteTokens: 2 } }]);
+  }, 60_000);
+
+  it('취소한 뒤 도착한 결과 줄의 modelUsage를 읽지 못하면 던지지 않고 경고만 남긴다(취소는 AbortError로 끝난다)', async () => {
+    const current = await observe(runClaudeCodeAgent, { ...aborted, result: { modelUsage: { 'test-model': null } } });
+    expect(current.outcome).toEqual({ error: { name: 'AbortError', message: '요청을 취소했습니다' } });
+    expect((current.events as Array<{ type: string }>).map((event) => event.type)).toEqual(['session', 'turn', 'tool_call', 'policy', 'tool_result', 'warning']);
+  }, 60_000);
+
+  it('취소한 뒤 도착한 도구 요청은 실행하지 않고 취소 이유로 거절한다', async () => {
+    const current = await observe(runClaudeCodeAgent, aborted);
+    const later = (current.tools as Array<{ name: string; input: { path?: string }; isError: boolean; text: string }>).slice(1);
+    expect(later.map((tool) => [tool.name, tool.isError, tool.text])).toEqual([
+      ['write_file', true, '요청을 취소했습니다'],
+      ['read_file', true, '요청을 취소했습니다'],
+    ]);
+    // 취소 전의 첫 쓰기만 실행됐다(도구 이벤트도 하나뿐이다)
+    expect((current.events as Array<{ type: string }>).filter((event) => event.type === 'tool_call')).toHaveLength(1);
+  }, 60_000);
 });
 
 describe('승격 순간의 지시: 가짜 CLI의 기록이 게이트가 걸리는 시간과 무관하다(트러블슈팅 212)', () => {
