@@ -289,6 +289,20 @@ import {
   type TurnEndFacts,
   type UnchangedCheck,
 } from './session-terminal-turn-end';
+import {
+  decideGateStage,
+  decideSaveFailure,
+  decideTurnEndError,
+  gateDeadlineMs,
+  landedState,
+  savingAccepts,
+  shouldReattach,
+  type GateStageFacts,
+  type GateStageStep,
+  type HeadRead,
+  type Landed,
+  type SaveFailureKind,
+} from './session-terminal-turn-end-rest';
 import { decideSilence, decideStall, decideUsage, EARLY_USAGE_MS, LATE_USAGE_MS, stallIntervalMs } from './session-terminal-usage';
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, turnFailed, violationRoute, type CloseActions } from './session-terminal-close';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
@@ -297,6 +311,7 @@ import { decideTurnLimit, modelCallsFromOtlp, usageUnverifiable, type ModelCall 
 import { agentSignalsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
 import {
+  AGENT_HOOK_EVENTS,
   AGENT_READ_ONLY_MARK,
   agentCleanupCommand,
   applyPatchPaths,
@@ -2055,8 +2070,18 @@ async function ensureBooted(session: Session): Promise<void> {
   await session.bootPromise;
   // 켜기가 실패하면 상태가 failed로 바뀐다. 기다리는 사이에 멈추기가 시작됐으면(상태는 아직 stopped가 아닐 수 있다) 켜지 못한 것이 아니라 멈춘 세션이다
   if (session.life.stopping || session.life.status === 'stopped') throw new StudioError(409, '중지된 세션입니다. 이어서 작업하면 새 샌드박스를 띄웁니다');
-  if (session.life.status !== 'ready') throw new StudioError(502, `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? '알 수 없는 이유'}`);
+  if (session.life.status !== 'ready') {
+    const reason = session.snapshot.error ?? '알 수 없는 이유';
+    const failure = new StudioError(502, `샌드박스를 켜지 못했습니다: ${reason}`);
+    // 이 오류가 켜기 실패에서 난 것임을 오류에 적어 둔다(ADR-217, N7). 턴 끝의 예외 경로는 세션에 남은 표시가 아니라 이 기록으로 플랫폼 실패를 알아본다.
+    // 켜기가 실패한 상태일 때만 적는다: 켜는 중이거나 늦은 결과로 상태가 바뀌지 않았다면 남은 표시는 앞선 켜기의 것일 수 있다
+    if (session.life.status === 'failed') bootFailureErrors.set(failure, { platform: session.bootPlatformFailure === true, reason });
+    throw failure;
+  }
 }
+
+/** `ensureBooted`가 던진 켜기 실패 오류 → 그 켜기 실패가 샌드박스·도커 쪽이었는가와 사유. 오류 객체로만 알아본다(세션에 남은 표시는 근거가 아니다, ADR-217) */
+const bootFailureErrors = new WeakMap<object, { platform: boolean; reason: string }>();
 
 /**
  * 세션을 만들자마자(또는 이어받자마자) 켠다. 처음 상태가 `starting`이라 상태를 바꾸지 않고 켜기만 시작한다(옛 `startBoot`는 `starting`이면 다시 알리지 않았다).
@@ -2660,7 +2685,7 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       // 게이트가 test 체크를 통과시킨 서비스에 한해, 그 보고서를 다시 실행하지 않고 모아 "테스트" 탭에 반영한다(실패해도 요청 결과에 영향 없음)
       // 어느 서비스인지는 이번 실행의 checks로 정한다 — 디스크에 보고서가 있다고 이번 게이트의 것은 아니다(ADR-153)
       // 수거는 비동기로 돌므로, 끝날 때의 HEAD가 아니라 방금 남긴 체크포인트(게이트가 검증한 코드)를 지금 잡아 넘긴다
-      void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, ran.checks ?? [], gateTests).catch(() => {});
+      collectGateTestReportsInBackground(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, ran.checks ?? [], gateTests);
       // 요구사항을 이슈로 발행해 뒀다면(사이드카 파일이 있으면) 상태를 반영한다. 발행한 적이 없으면 거의 비용 없이 건너뛴다
       syncRequirementIssuesInBackground(session);
     },
@@ -7560,6 +7585,11 @@ interface TerminalRunState {
   verification?: Promise<TerminalVerification>;
   /** 게이트 밖의 이유(다룰 수 없는 경로가 바뀜, 검증하는 동안 파일이 바뀜)로 돌려보낸 횟수 */
   unsettledAttempts: number;
+  /**
+   * 턴 끝 검증의 시간 상한이 지났을 때 서는 신호(ADR-217, N8). Stop 훅은 상한(`AGENT_HOOK_EVENTS.stop`)에 닿으면 CLI가 답을 버리고 턴을 끝낸다. 그 뒤 끝난 검사가 체크포인트를 남기지 않도록
+   * 상한보다 먼저 이 신호를 세우고 실행을 실패로 닫는다. 한 번 서면 이 실행에서는 꺼지지 않는다(실행은 그대로 닫힌다)
+   */
+  deadline: AbortController;
   /** 마지막으로 에이전트에게 돌려준 검증 결과. 고치지 않고 CLI가 끝나면 이 사유로 실패를 남긴다 */
   lastFeedback?: string;
   /** 도구 호출과 턴 끝 검증을 한 줄로 세운다 */
@@ -8149,7 +8179,8 @@ function terminalViolation(id: string, reason: string): void {
 /** 체크포인트를 남기는 중인 터미널 실행(S1). 닫기를 시작했거나 다시 열렸으면 없다 */
 function savingTerminalRun(session: Session): (ActiveRun & { terminal: TerminalRunState }) | undefined {
   const run = session.terminalSaving;
-  return run && session.run !== run && !terminalRunClosed(session.life, run.ticket) ? run : undefined;
+  // 받아들이는 조건은 코어가 정한다(ADR-217): 있고, 세션의 열린 실행으로 붙어 있지 않고, 닫기를 시작하지 않았다
+  return run && savingAccepts(true, session.run === run, terminalRunClosed(session.life, run.ticket)) ? run : undefined;
 }
 
 /** 위반 사유로 실행을 실패로 닫고 이번 실행의 변경을 되돌린다. 에이전트에게는 되돌린 결과를 알린다(피드백이 아니다). `kept`는 이미 남긴 체크포인트를 말하는 글(그대로 두었다) */
@@ -8210,6 +8241,7 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt,
       ...(readOnly ? { readOnlyFingerprint: await session.checkpoints.pendingFingerprint() } : {}),
       startedMs: performance.now(),
       unsettledAttempts: 0,
+      deadline: new AbortController(),
       serial: serialQueue(),
       checking: false,
       // 턴 상한·정체 감시가 보는 값들(#B5). 요청을 여는 순간부터 활동이 시작된 것으로 본다
@@ -8436,7 +8468,7 @@ function untilAborted<T>(signal: AbortSignal, work: Promise<T>): Promise<T> {
 function terminalVerification(session: Session, run: ActiveRun & { terminal: TerminalRunState }): Promise<TerminalVerification> {
   const state = run.terminal;
   if (state.verification) return state.verification;
-  const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+  const signal = AbortSignal.any([session.stop.signal, run.cancel.signal, state.deadline.signal]);
   const onEvent = (event: AgentEvent): void => {
     // 토큰과 질문은 러너만 낸다(세션 이벤트의 agent 꼴에도 없다). 게이트와 도구가 내는 것만 옮긴다
     if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
@@ -8816,6 +8848,8 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
 
 /** 턴의 끝(Stop 훅). 게이트를 돌려 통과면 체크포인트를 남기고, 실패면 결과를 에이전트에게 돌려준다 */
 async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedback?: string; message?: string }> {
+  // 훅이 도착한 시각. 게이트 시간 상한은 여기서부터 센다(CLI는 훅이 도착한 때부터 상한을 센다)
+  const arrivedMs = Date.now();
   const session = terminalSession(id);
   // 화면의 "지금 하는 일"을 지우고 마지막 답을 남긴다(#920). 검증 여부와 상관없다
   noteTurnEnded((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
@@ -8824,7 +8858,7 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
   if (!run) return {};
   noteTerminalActivity(session, run);
   const text = typeof input.last_assistant_message === 'string' ? input.last_assistant_message.trim() : '';
-  return run.terminal.serial(() => finishTerminalTurn(session, run, text));
+  return run.terminal.serial(() => finishTerminalTurn(session, run, text, arrivedMs));
 }
 
 /**
@@ -8838,12 +8872,7 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
  * 한계: 이 컴퓨터 방식(host)에는 멈출 컨테이너가 없어 pause가 undefined다. 그 방식에서는 컨테이너 밖의 셸이
  * 검사 중에 파일을 바꿨다가 되돌리면 지금처럼 잡지 못한다(게이트의 지문 견줌에만 기댄다).
  */
-async function duringAgentContainerPause(
-  session: Session,
-  pause: TerminalPause | undefined,
-  work: () => Promise<GateOutcome>,
-  onPauseFailed: (reason: string) => GateOutcome,
-): Promise<GateOutcome> {
+async function duringAgentContainerPause<T>(session: Session, pause: TerminalPause | undefined, work: () => Promise<T>, onPauseFailed: (reason: string) => T): Promise<T> {
   if (!pause) return work();
   try {
     await pause.pause(session.sandbox.id);
@@ -8903,7 +8932,7 @@ function turnEndFacts(session: Session, run: ActiveRun & { terminal: TerminalRun
  *
  * 판정을 부르는 자리는 모두 막는 쪽이다(여는 것은 통과 한 칸뿐이고 그 칸은 게이트를 지난 뒤에만 선다): 모르는 결정은 `unknown`으로 실패로 닫는다.
  */
-async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string): Promise<{ feedback?: string; message?: string }> {
+async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string, arrivedMs: number): Promise<{ feedback?: string; message?: string }> {
   const state = run.terminal;
   const reads: TurnEndReads = { git: 'unread', gitSummary: '', fingerprint: 'unread', unchanged: 'unread', card: 'unread', outside: [] };
   const closeMessage = (summary: string): { message: string } => ({ message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` });
@@ -8968,6 +8997,9 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     if (event.type !== 'tokens' && event.type !== 'question') emit(session, { type: 'agent', runId: run.id, event });
   };
   if (text) onEvent({ type: 'text', text: clipText(text, TERMINAL_REQUEST_LIMIT) });
+  // 샌드박스 켜기·게이트·완료 검사가 모두 이 상한 안에 끝나야 한다(ADR-217, N8). 넘으면 통과로 남기지 않고 실패로 닫는다
+  const turnDeadline = startTurnDeadline(state, arrivedMs);
+  const closeOnDeadline = async (): Promise<{ message: string }> => closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: deadlineReason(arrivedMs) }));
   state.checking = true;
   try {
     // 2단계: 바뀐 것 없음 → 카드 범위 → 게이트. 기준을 잡은 적이 없고 작업 복사본도 그대로면 답만 한 턴이다(샌드박스를 켜지 않고 끝낸다). 다만 카드에 완료 검사가
@@ -8992,12 +9024,18 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         case 'run_done_tests': {
           // 완료 검사만 서비스에서 직접 돌린다(게이트는 바뀐 파일이 없으면 돌릴 수 없다). 서비스가 떠 있어야 하므로 게이트와 같은 방식으로 샌드박스를 켠다.
           // 재시도 셈은 게이트 실패와 같은 unsettledAttempts를 쓴다
-          const signal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
+          const signal = AbortSignal.any([session.stop.signal, run.cancel.signal, state.deadline.signal]);
           signal.throwIfAborted();
-          await ensureBooted(session);
-          const infra = await ensureReadySessionInfra(session, signal);
-          if (!infra.ok) throw new Error(infra.reason);
-          const failures = await runDoneTests(session.sandbox, doneTests, signal);
+          const ranDone = await turnDeadline.within(
+            (async () => {
+              await ensureBooted(session);
+              const infra = await ensureReadySessionInfra(session, signal);
+              if (!infra.ok) throw new Error(infra.reason);
+              return runDoneTests(session.sandbox, doneTests, signal);
+            })(),
+          );
+          if (!ranDone.ok) return closeOnDeadline();
+          const failures = ranDone.value;
           // 완료 검사를 도는 동안 감시가 위반을 찾았으면(큐를 기다리지 않고 state.violation에 적힌다) 통과로 남기지 않는다. 위반이면 횟수를 세지 않는다
           if (failures.length > 0 && state.violation === undefined) state.unsettledAttempts += 1;
           const done = decideGateOutcome({
@@ -9050,7 +9088,15 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
           return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 턴 끝의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
       }
     }
-    const verification = await terminalVerification(session, run);
+    const stage: GateStageFacts = { deadlineExceeded: false, pauseFailed: false, rejected: 'unread', gate: 'unread', moved: 'unread', doneTests: 'unread' };
+    const prepared = await turnDeadline.within(terminalVerification(session, run));
+    if (!prepared.ok) {
+      // 샌드박스를 켜거나 변경 전 기준을 잡다가 상한을 넘겼다. 판정은 코어가 한다(시간 상한은 어느 칸보다 먼저 본다)
+      stage.deadlineExceeded = true;
+      if (decideGateStage(stage).kind === 'deadline') return closeOnDeadline();
+      return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 검증 결과의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
+    }
+    const verification = prepared.value;
     const { tracker, gate } = verification;
     state.gate = gate;
     const started = performance.now();
@@ -9067,38 +9113,114 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         `검증하는 동안 파일이 계속 바뀌어 통과시키지 않았습니다: ${files.slice(0, 5).join(', ')}`,
         ['[b-studio 검증 게이트] 검증하는 동안 바뀐 파일이 있어 통과로 인정하지 않았습니다.', ...files.slice(0, 20).map((file) => `- ${file}`), '뒤에서 파일을 바꾸는 명령이 돌고 있으면 끝낸 뒤 턴을 끝내세요.'].join('\n'),
       );
+    // 게이트 단계에서 읽은 값. 판정(코어)이 돌려준 칸에 닿았을 때 읽어 `stage`에 채운다
+    let checked: GateOutcome | undefined;
+    let rejectedPaths: string[] = [];
+    let movedPaths: string[] = [];
+    let pauseReason = '';
+    let doneFailures: Awaited<ReturnType<typeof runDoneTests>> = [];
+    /** 판정이 읽으라는 칸을 읽는다. 읽다가 상한을 넘기면 그 사실을 세운다(상한 뒤에 끝난 결과는 쓰지 않는다) */
+    const drive = async (stopAtDoneTests: boolean): Promise<GateStageStep> => {
+      for (;;) {
+        const step = decideGateStage(stage);
+        switch (step.kind) {
+          case 'need_rejected': {
+            // 게이트가 다룰 수 없는 경로(비밀 파일, 생성물, 링크)가 바뀌었는가. 건너뛰면 검증하지 않은 파일이 체크포인트에 들어간다
+            const read = await turnDeadline.within(tracker.sync());
+            if (!read.ok) stage.deadlineExceeded = true;
+            else {
+              rejectedPaths = read.value.rejected;
+              stage.rejected = rejectedPaths.length > 0 ? 'found' : 'clear';
+            }
+            continue;
+          }
+          case 'need_gate': {
+            const read = await turnDeadline.within(gate.check());
+            if (!read.ok) stage.deadlineExceeded = true;
+            else {
+              checked = read.value;
+              // 알아보지 못한 결과 글은 코어가 닫는 쪽으로 읽는다
+              stage.gate = read.value.kind as GateStageFacts['gate'];
+            }
+            continue;
+          }
+          case 'need_moved': {
+            // 게이트는 수 초에서 수 분을 돈다. 그동안 파일이 바뀌었으면 게이트가 본 것과 지금이 다르다
+            const read = await turnDeadline.within(tracker.sync());
+            if (!read.ok) stage.deadlineExceeded = true;
+            else {
+              movedPaths = [...read.value.changed, ...read.value.rejected];
+              stage.moved = movedPaths.length > 0 ? 'found' : 'clear';
+            }
+            continue;
+          }
+          case 'need_done_tests':
+            if (stopAtDoneTests) return step;
+            // 검증 상태가 이미 세워져 있어(도구 호출·쓰기 직전 훅) 이 게이트 경로로 왔더라도, 바뀐 파일이 없으면 게이트는 test 단계를
+            // 돌리지 않는다(변경 0이면 곧바로 통과한다). 카드의 완료 검사가 있으면 여기서 대신 돌린다(#B6a 수정 3).
+            // 바뀐 파일이 있으면 게이트의 test 단계가 workflow.tests(완료 검사 포함)를 이미 돌렸으므로 다시 돌리지 않는다
+            if (doneTests.length > 0 && verification.workspace.changedFiles().length === 0) {
+              const read = await turnDeadline.within(runDoneTests(session.sandbox, doneTests, AbortSignal.any([session.stop.signal, run.cancel.signal, state.deadline.signal])));
+              if (!read.ok) stage.deadlineExceeded = true;
+              else {
+                doneFailures = read.value;
+                stage.doneTests = doneFailures.length > 0 ? 'found' : 'clear';
+              }
+            } else stage.doneTests = 'clear';
+            continue;
+          default:
+            return step;
+        }
+      }
+    };
     // 첫 지문 동기화부터 게이트를 지나 마지막 지문 동기화까지를 컨테이너 일시정지로 감싼다(이슈 #765).
     // 이 컴퓨터 방식은 멈출 컨테이너가 없어 terminalPause가 undefined다 — 그 한계는 duringAgentContainerPause에 적었다
     const pause = sessionTerminalMode() === 'container' ? terminalPause() : undefined;
-    let outcome: GateOutcome = await duringAgentContainerPause(
+    let ended: GateStageStep = await duringAgentContainerPause(
       session,
       pause,
-      async () => {
-        const { rejected } = await tracker.sync();
-        if (rejected.length > 0) {
-          // 게이트가 다룰 수 없는 경로(비밀 파일, 생성물, 링크)가 바뀌었다. 건너뛰면 검증하지 않은 파일이 체크포인트에 들어간다
-          return unsettled(`게이트가 검증할 수 없는 경로가 남아 통과시키지 않았습니다: ${rejected.slice(0, 5).join(', ')}`, rejectedChangeFeedback(rejected));
-        }
-        const checked = await gate.check();
-        if (checked.kind === 'pass') {
-          // 게이트는 수 초에서 수 분을 돈다. 그동안 파일이 바뀌었으면 게이트가 본 것과 지금이 다르다
-          const during = await tracker.sync();
-          if (during.changed.length > 0 || during.rejected.length > 0) return moved([...during.changed, ...during.rejected]);
-        }
-        return checked;
+      () => drive(true),
+      (reason) => {
+        pauseReason = reason;
+        stage.pauseFailed = true;
+        return decideGateStage(stage);
       },
-      (reason) =>
-        unsettled(
-          `검증 동안 에이전트 컨테이너를 멈추지 못해 통과시키지 않았습니다: ${reason}`,
-          `[b-studio 검증 게이트] 검증 동안 에이전트 컨테이너를 멈추지 못해 통과로 인정하지 않았습니다(${reason}). 턴을 다시 끝내 주세요.`,
-        ),
     );
-    // 검증 상태가 이미 세워져 있어(도구 호출·쓰기 직전 훅) 이 게이트 경로로 왔더라도, 바뀐 파일이 없으면 게이트는 test 단계를
-    // 돌리지 않는다(변경 0이면 곧바로 통과한다). 카드의 완료 검사가 있으면 여기서 대신 돌린다(#B6a 수정 3).
-    // 바뀐 파일이 있으면 게이트의 test 단계가 workflow.tests(완료 검사 포함)를 이미 돌렸으므로 다시 돌리지 않는다
-    if (outcome.kind === 'pass' && doneTests.length > 0 && verification.workspace.changedFiles().length === 0) {
-      const failures = await runDoneTests(session.sandbox, doneTests, AbortSignal.any([session.stop.signal, run.cancel.signal]));
-      if (failures.length > 0) outcome = unsettled('완료 조건을 통과하지 못했습니다', doneTestsFeedback(failures));
+    // 완료 검사는 컨테이너를 푼 뒤에 돈다(옛 순서 그대로). 읽은 뒤 같은 판정을 다시 부른다
+    while (ended.kind === 'need_done_tests') ended = await drive(false);
+    let outcome: GateOutcome;
+    switch (ended.kind) {
+      case 'deadline':
+        return closeOnDeadline();
+      case 'pass':
+      case 'gate':
+        // 통과는 모든 확인이 끝난 뒤의 한 칸뿐이다. 게이트가 돌려보냈거나 소진했거나 알아보지 못한 결과를 냈으면 그 결과 그대로다
+        if (ended.kind === 'gate' && ended.result === 'unknown') {
+          return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 검증 결과의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
+        }
+        outcome = checked!;
+        break;
+      case 'unsettled':
+        switch (ended.reason) {
+          case 'pause_failed':
+            outcome = unsettled(
+              `검증 동안 에이전트 컨테이너를 멈추지 못해 통과시키지 않았습니다: ${pauseReason}`,
+              `[b-studio 검증 게이트] 검증 동안 에이전트 컨테이너를 멈추지 못해 통과로 인정하지 않았습니다(${pauseReason}). 턴을 다시 끝내 주세요.`,
+            );
+            break;
+          case 'rejected':
+            outcome = unsettled(`게이트가 검증할 수 없는 경로가 남아 통과시키지 않았습니다: ${rejectedPaths.slice(0, 5).join(', ')}`, rejectedChangeFeedback(rejectedPaths));
+            break;
+          case 'moved':
+            outcome = moved(movedPaths);
+            break;
+          default:
+            outcome = unsettled('완료 조건을 통과하지 못했습니다', doneTestsFeedback(doneFailures));
+        }
+        break;
+      default:
+        // 읽으라는 칸이 남았거나 알아보지 못한 결정이다. 통과시키지 않고 닫는다
+        return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 검증 결과의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
     }
     // 게이트 뒤 판정: 취소 → 턴 상한 → 통과면 위반 → 재시도·소진. 사실은 이 줄에서 한꺼번에 읽고, 통과면 다음 줄에서 곧바로 실행을 떼어 그 사이에 기다림이 없다
     const gated = decideGateOutcome({
@@ -9156,29 +9278,30 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         state.committedSha = sha;
       });
     } catch (error) {
-      if (error instanceof HeadMovedError) {
+      // 저장이 던진 오류의 갈 곳은 코어가 정한다(ADR-217). 알아보지 못한 오류는 그대로 다시 던져 예외 경로가 분류한다
+      const failure: SaveFailureKind = error instanceof HeadMovedError ? 'head_moved' : error instanceof StagedMismatchError ? 'staged_mismatch' : 'other';
+      const next = decideSaveFailure(failure);
+      if (next === 'rethrow') throw error;
+      // 체크포인트는 만들어지지 않았다. 실행을 다시 열어 둔다(닫기를 시작했으면 열지 않는다)
+      state.committedSha = undefined;
+      session.terminalSaving = undefined;
+      if (shouldReattach(session.run !== undefined, terminalRunClosed(session.life, run.ticket))) reattachRun(session, run);
+      if (next === 'reconcile_then_rethrow') {
         // 게이트가 도는 사이 HEAD가 움직였다(뒤에서 끼워 넣은 커밋, 이슈 #706). 그 위에 체크포인트를 쌓지 않는다. 기억한 체크포인트로
-        // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다. 체크포인트는 만들어지지 않았다
-        state.committedSha = undefined;
-        session.terminalSaving = undefined;
-        if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
+        // 되돌리고(바뀐 파일은 보관본) 실행을 실패로 닫는다 — 턴 끝 Git 검사와 같은 처리다
         const reconciled = await reconcileTerminalGit(session, run, { allowUnwind: false });
         if (reconciled.failed) return closeMessage(reconciled.summary);
         throw error;
       }
-      if (!(error instanceof StagedMismatchError)) throw error;
-      // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다. 실행을 다시 열어 둔다
-      state.committedSha = undefined;
-      session.terminalSaving = undefined;
-      if (session.run === undefined && !terminalRunClosed(session.life, run.ticket)) reattachRun(session, run);
-      outcome = moved(error.files);
+      // 통과시킨 뒤 커밋하기 전에 내용이 바뀌었다. 체크포인트는 없고 작업 복사본은 그대로다
+      outcome = moved((error as StagedMismatchError).files);
     }
     if (outcome.kind === 'pass') {
       const saved = session.snapshot.checkpoints[0];
       const checkpointed = saved !== undefined && saved.sha !== head;
       if (checkpointed) {
         if (passed.checks) session.lastGateChecks = passed.checks;
-        void collectGateTestReports(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests).catch(() => {});
+        collectGateTestReportsInBackground(session, evidenceBaseCheckpoint(session.snapshot.checkpoints)?.sha, passed.checks ?? [], verification.gateTests);
         syncRequirementIssuesInBackground(session);
         // 대화 창의 에이전트는 터미널에서 일어난 일을 모른다. 다음 요청에서 알린다
         noteForModel(session, `[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 ${saved.shortSha}를 남겼습니다(파일 ${saved.files.length}개: ${saved.files.slice(0, 20).join(', ')}). 이 파일을 다루기 전에 다시 읽으세요.`);
@@ -9220,35 +9343,103 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     }
     return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: '[b-studio] 검증 결과의 판정을 알아보지 못해 통과시키지 않고 실패로 닫습니다' }));
   } catch (error) {
-    if (session.stop.signal.aborted) {
-      await settleTerminalRun(session, run, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
-      return {};
+    // 예외 경로의 분류는 코어가 한다(ADR-217): 멈춤 → 남은 체크포인트 → 취소 → 시간 상한 → 플랫폼 실패 → 오류. 여기서는 사실을 읽고 돌려받은 칸을 한다.
+    // 남은 체크포인트는 멈추지 않았을 때만 읽는다(멈춤이 먼저라 읽어도 쓰이지 않고, 읽기가 화면의 목록을 고친다)
+    const stopped = session.stop.signal.aborted;
+    const landed: { state: Landed; checkpoint?: Checkpoint } = stopped ? { state: 'no' } : await landedCheckpoint(session, run.id, state.committedSha);
+    const boot = typeof error === 'object' && error !== null ? bootFailureErrors.get(error) : undefined;
+    const close = decideTurnEndError({
+      stopped,
+      landed: landed.state,
+      runCancelled: run.cancel.signal.aborted,
+      deadlineExceeded: state.deadline.signal.aborted,
+      // 플랫폼 실패는 이번 오류가 이번 실행에서 샌드박스를 켜지 못해 난 오류일 때만 인정한다. 세션에 남은 표시는 앞선 켜기의 것일 수 있다(트러블슈팅 254).
+      // 코드가 원인일 수 있는 실패(서비스가 준비되지 않음 등)는 여기 넣지 않는다 — AI의 실패를 플랫폼 탓으로 가리지 않는다
+      bootPlatformFailure: boot?.platform === true,
+    });
+    switch (close.kind) {
+      case 'stopped':
+        await settleTerminalRun(session, run, { status: 'cancelled', summary: '세션을 멈췄습니다.' });
+        return {};
+      case 'keep_landed': {
+        // 체크포인트를 남긴 뒤(또는 남기는 도중 커밋이 끝난 뒤)에 던졌으면 그 체크포인트는 이미 검증을 지난 내용이다. 낡은 기준으로 되돌리지 않고
+        // 알리고 실행만 닫는다(S14). 남았는지는 Git으로 본다 — 저장이 커밋한 뒤 던지면 화면의 체크포인트 목록이 아직 낡았다
+        console.error('[b-studio] 체크포인트를 남긴 뒤 단계가 실패했습니다', error);
+        const summary = `검증을 통과해 체크포인트 ${landed.checkpoint!.shortSha}를 남겼지만 그 뒤 단계에서 오류가 나 실행을 실패로 닫습니다. 체크포인트와 작업 복사본은 되돌리지 않았습니다: ${describe(error)}`;
+        emit(session, { type: 'notice', text: `[b-studio] ${summary}`, at: new Date().toISOString() });
+        await settleTerminalRun(session, run, { status: 'failed', summary });
+        return closeMessage(summary);
+      }
+      case 'cancelled': {
+        const summary = await abandonTerminalRun(session, run, { status: 'cancelled' });
+        return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+      }
+      case 'deadline':
+        return closeOnDeadline();
+      case 'platform': {
+        // 샌드박스·도커 쪽 문제로 켜지 못해 검증하지 못했으면 b-studio 쪽 문제다(#943). 바꾼 코드의 탓으로 되돌리거나 AI의 성적에 넣지 않는다.
+        // 체크포인트는 남기지 않으므로 다음 요청의 게이트가 이 변경을 다시 검증한다
+        console.error('[b-studio] 터미널 실행의 검증 실패', error);
+        const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}`, platformFailure: `샌드박스를 켜지 못했습니다: ${boot?.reason ?? describe(error)}` });
+        return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+      }
+      default: {
+        console.error('[b-studio] 터미널 실행의 검증 실패', error);
+        // 체크포인트가 남았는지 Git에서 읽지 못했으면 그 사실을 사유에 적는다(남았다고 보지 않고 지금까지처럼 닫는다)
+        const unknownNote = close.landedUnknown ? ' (저장이 남긴 체크포인트가 있는지 Git에서 읽지 못해 확인하지 못했습니다)' : '';
+        const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}${unknownNote}` });
+        return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+      }
     }
-    // 체크포인트를 남긴 뒤(또는 남기는 도중 커밋이 끝난 뒤)에 던졌으면 그 체크포인트는 이미 검증을 지난 내용이다. 낡은 기준으로 되돌리지 않고
-    // 알리고 실행만 닫는다(S14). 남았는지는 Git으로 본다 — 저장이 커밋한 뒤 던지면 화면의 체크포인트 목록이 아직 낡았다
-    const landed = await landedCheckpoint(session, run.id, state.committedSha);
-    if (landed) {
-      console.error('[b-studio] 체크포인트를 남긴 뒤 단계가 실패했습니다', error);
-      const summary = `검증을 통과해 체크포인트 ${landed.shortSha}를 남겼지만 그 뒤 단계에서 오류가 나 실행을 실패로 닫습니다. 체크포인트와 작업 복사본은 되돌리지 않았습니다: ${describe(error)}`;
-      emit(session, { type: 'notice', text: `[b-studio] ${summary}`, at: new Date().toISOString() });
-      await settleTerminalRun(session, run, { status: 'failed', summary });
-      return closeMessage(summary);
-    }
-    if (run.cancel.signal.aborted) {
-      const summary = await abandonTerminalRun(session, run, { status: 'cancelled' });
-      return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
-    }
-    console.error('[b-studio] 터미널 실행의 검증 실패', error);
-    // 샌드박스·도커 쪽 문제로 켜지 못해 검증하지 못했으면 b-studio 쪽 문제다(#943). 바꾼 코드의 탓으로 되돌리거나 AI의 성적에 넣지 않는다.
-    // 체크포인트는 남기지 않으므로 다음 요청의 게이트가 이 변경을 다시 검증한다
-    // 코드가 원인일 수 있는 실패(서비스가 준비되지 않음 등)는 여기 넣지 않는다 — AI의 실패를 플랫폼 탓으로 가리지 않는다
-    const platformFailure = session.snapshot.status === 'failed' && session.bootPlatformFailure ? `샌드박스를 켜지 못했습니다: ${session.snapshot.error ?? describe(error)}` : undefined;
-    const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}`, ...(platformFailure ? { platformFailure } : {}) });
-    return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
   } finally {
+    turnDeadline.clear();
     state.checking = false;
     if (session.terminalSaving === run) session.terminalSaving = undefined;
   }
+}
+
+/**
+ * 게이트가 남긴 시험 보고를 뒤에서 모은다(ADR-217, N9). 모으지 못하면 이 체크포인트의 시험 근거가 비어 요구사항·올리기 전 점검이 "재확인 필요"로 보인다.
+ * 요청 결과와 체크포인트는 그대로라 던지지 않고, 근거가 빠졌다는 알림만 남긴다(옛 코드는 아무 데도 남기지 않았다)
+ */
+function collectGateTestReportsInBackground(session: Session, verifiedSha: string | undefined, checks: readonly WorkflowCheck[], gateTests: readonly DeclaredGateTest[]): void {
+  void collectGateTestReports(session, verifiedSha, checks, gateTests).catch((error: unknown) => {
+    emit(session, { type: 'notice', text: `[b-studio] 게이트가 남긴 시험 보고를 모으지 못해 이 체크포인트의 시험 근거가 비어 있습니다. 요구사항과 올리기 전 점검에서 재확인이 필요하다고 보일 수 있습니다: ${describe(error)}`, at: new Date().toISOString() });
+  });
+}
+
+/** 게이트 시간 상한을 시험에서만 바꾼다. 값이 없으면 Stop 훅 상한(`AGENT_HOOK_EVENTS.stop`)보다 여유만큼 앞이다 */
+let gateDeadlineOverrideMs: number | undefined;
+export function setTerminalGateDeadlineForTest(ms: number | undefined): void {
+  gateDeadlineOverrideMs = ms;
+}
+function terminalGateDeadlineMs(): number {
+  return gateDeadlineOverrideMs ?? gateDeadlineMs(AGENT_HOOK_EVENTS.stop);
+}
+
+/** 턴 끝 검증의 시간 상한이 지났을 때 실행을 닫는 사유 글 */
+function deadlineReason(arrivedMs: number): string {
+  return `검증이 시간 상한(${Math.round(terminalGateDeadlineMs() / 1000)}초) 안에 끝나지 않아 통과시키지 않고 실패로 닫습니다. Stop 훅은 ${AGENT_HOOK_EVENTS.stop}초에 CLI가 끊고 답을 버리므로 그보다 먼저 닫아, 상한을 넘겨 끝난 검사가 체크포인트를 남기지 않게 합니다(훅이 도착한 뒤 ${Math.round((Date.now() - arrivedMs) / 1000)}초)`;
+}
+
+/**
+ * 턴 끝 검증의 시간 상한(ADR-217, N8). `within`은 일이 상한 안에 끝나면 그 값을, 상한이 먼저 오면 `{ ok: false }`를 돌려주고 그 실행의 `deadline` 신호를 세운다(검사가 멈추도록).
+ * 상한이 먼저 와도 일은 멈출 때까지 뒤에서 돌 수 있다: 뒤늦은 결과와 오류는 버린다(처리되지 않은 거절이 되지 않게 받아 둔다). 시각은 훅이 도착한 때부터 센다
+ */
+function startTurnDeadline(state: TerminalRunState, arrivedMs: number): { within: <T>(work: Promise<T>) => Promise<{ ok: true; value: T } | { ok: false }>; clear: () => void } {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const reached = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, Math.max(0, terminalGateDeadlineMs() - (Date.now() - arrivedMs)));
+  });
+  return {
+    async within<T>(work: Promise<T>): Promise<{ ok: true; value: T } | { ok: false }> {
+      work.catch(() => {});
+      const result = await Promise.race([work.then((value) => ({ ok: true as const, value })), reached.then(() => ({ ok: false as const }))]);
+      if (!result.ok && !state.deadline.signal.aborted) state.deadline.abort(new DOMException('검증 시간 상한을 넘었습니다', 'TimeoutError'));
+      return result;
+    },
+    clear: () => clearTimeout(timer),
+  };
 }
 
 /** 게이트 쪽 횟수와 게이트 밖 사유의 횟수를 합쳐 상한에 닿았을 때 쓰는 글(S12) */
@@ -9260,21 +9451,30 @@ function attemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: numbe
 /**
  * 통과한 턴 끝의 저장이 남긴 체크포인트를 알아본다(S14). `committedSha`는 그 저장이 실제로 만든 커밋이다(커밋하지 않았으면 없다).
  * 그 커밋이 지금 HEAD일 때만 남았다고 보고 화면의 체크포인트 목록을 Git에 맞춘다(저장이 커밋한 뒤 목록을 고치기 전에 던졌을 수 있다).
- * HEAD가 그 위로 더 움직였거나 Git을 읽지 못하면 모르는 것이다: 남았다고 보지 않고 지금까지처럼 닫는다. 이 함수는 여는 쪽이라 확인한 것만 받아들인다
+ * HEAD가 그 위로 더 움직였으면 없다. Git을 읽지 못했거나 목록을 맞추다 던졌으면 모르는 것(`unknown`)이다: 남았다고 보지 않고 지금까지처럼 닫되 사유에 확인하지 못했다고 적는다(ADR-217).
+ * 받아들이는 조건은 코어가 정한다. 이 함수는 여는 쪽(되돌리기를 건너뛴다)이라 확인한 것만 받아들인다
  */
-async function landedCheckpoint(session: Session, runId: string, committedSha: string | undefined): Promise<Checkpoint | undefined> {
-  if (committedSha === undefined) return undefined;
+async function landedCheckpoint(session: Session, runId: string, committedSha: string | undefined): Promise<{ state: Landed; checkpoint?: Checkpoint }> {
+  if (committedSha === undefined) return { state: 'no' };
+  let latest: Checkpoint | undefined;
+  let head: HeadRead;
   try {
-    const [latest] = await session.checkpoints.list(2);
-    if (!latest || latest.sha !== committedSha) return undefined;
+    [latest] = await session.checkpoints.list(2);
+    head = latest ? { kind: 'sha', sha: latest.sha } : { kind: 'empty' };
+  } catch {
+    head = { kind: 'failed' };
+  }
+  const state = landedState(committedSha, head);
+  if (state !== 'yes' || !latest) return { state };
+  try {
     if (session.snapshot.checkpoints[0]?.sha !== latest.sha) {
       session.snapshot.checkpoints = [latest, ...session.snapshot.checkpoints];
       await rememberGit(session, latest.sha);
       emit(session, { type: 'checkpoint', runId, checkpoint: latest });
     }
-    return latest;
+    return { state: 'yes', checkpoint: latest };
   } catch {
-    return undefined;
+    return { state: 'unknown' };
   }
 }
 

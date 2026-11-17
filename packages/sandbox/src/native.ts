@@ -338,6 +338,20 @@ interface NativeGuard {
   terminalDecideGateOutcome(facts: NativeTerminalGateFacts): NativeTerminalGateStep;
   /** 체크포인트를 남긴 직후 판정(ADR-212): `settle`·`fail_violation` */
   terminalDecideAfterCheckpoint(violation: boolean): string;
+  /** 저장이 남긴 체크포인트를 알아본다(ADR-217). `headRead`: `empty`·`sha`(`head`가 지금 HEAD)·그 밖은 읽지 못함. 결과 `yes`·`no`·`unknown` */
+  terminalLandedState(committed: string | null | undefined, headRead: string, head: string | null | undefined): string;
+  /** 턴 끝이 던졌을 때 무엇으로 닫을지(ADR-217): 멈춤 → 남은 체크포인트 → 취소 → 시간 상한 → 플랫폼 실패 → 오류 */
+  terminalDecideTurnEndError(facts: NativeTerminalErrorFacts): NativeTerminalErrorClose;
+  /** 체크포인트를 남기는 중인 실행을 위반을 적을 실행으로 받아들이는가(ADR-217) */
+  terminalSavingAccepts(hasSaving: boolean, attachedAsSessionRun: boolean, closed: boolean): boolean;
+  /** 저장 중이던 실행을 다시 여는가(ADR-217) */
+  terminalShouldReattach(sessionHasRun: boolean, closed: boolean): boolean;
+  /** 체크포인트 저장이 던진 오류의 갈 곳(ADR-217): `reconcile_then_rethrow`·`retry_moved`·`rethrow` */
+  terminalDecideSaveFailure(kind: string): string;
+  /** 게이트 단계 판정(ADR-217): 시간 상한 → 멈추지 못함 → 거절된 경로 → 게이트 → 통과 뒤 바뀜 → 완료 검사 */
+  terminalDecideGateStage(facts: NativeTerminalGateStageFacts): NativeTerminalGateStageStep;
+  /** 게이트 시간 상한(ms)(ADR-217): Stop 훅 상한(초)보다 여유만큼 앞이다 */
+  terminalGateDeadlineMs(hookSeconds: number): number;
   /** 터미널의 사용량 귀속 판정(ADR-213): 셀지, 붙일 실행, 턴을 셀지, 한도를 볼지 */
   terminalDecideUsage(facts: NativeTerminalUsageFacts): NativeTerminalUsageStep;
   /** 텔레메트리 본문(JSON 글)에서 모델 호출을 꺼낸다(ADR-216). 모양이 틀린 `api_request`도 한 호출로 센다. `now`는 받은 시각(ms) */
@@ -1446,6 +1460,39 @@ export interface NativeTerminalGateStep {
   kind: string;
   maxTurns: boolean;
   attempts: boolean;
+}
+
+export interface NativeTerminalErrorFacts {
+  stopped: boolean;
+  /** `yes`·`no`·`unknown` */
+  landed: string;
+  runCancelled: boolean;
+  deadlineExceeded: boolean;
+  bootPlatformFailure: boolean;
+}
+
+export interface NativeTerminalErrorClose {
+  /** `stopped`·`keep_landed`·`cancelled`·`deadline`·`platform`·`failure` */
+  kind: string;
+  landedUnknown: boolean;
+}
+
+export interface NativeTerminalGateStageFacts {
+  deadlineExceeded: boolean;
+  pauseFailed: boolean;
+  /** `unread`·`clear`·`found` */
+  rejected: string;
+  /** `unread`·`pass`·`retry`·`exhausted` */
+  gate: string;
+  moved: string;
+  doneTests: string;
+}
+
+export interface NativeTerminalGateStageStep {
+  kind: string;
+  end: string;
+  gate: string;
+  unsettled: string;
 }
 
 export interface NativeTerminalPreToolDecision {

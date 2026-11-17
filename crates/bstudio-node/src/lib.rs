@@ -7193,6 +7193,174 @@ pub fn terminal_decide_after_checkpoint(violation: bool) -> String {
     }
 }
 
+// ── 세션 터미널 턴 끝의 나머지(ADR-217, 4f B5c): 예외 경로 분류·게이트 밖 사유·남은 체크포인트·게이트 시간 상한. 순수 판정이다 ──
+
+/// 저장이 남긴 체크포인트를 알아본다. `head_read`: `empty`(읽었고 없음)·`sha`(`head`가 지금 HEAD)·그 밖은 읽지 못함. 결과: `yes`·`no`·`unknown`
+#[napi]
+pub fn terminal_landed_state(committed: Option<String>, head_read: String, head: Option<String>) -> String {
+    use session_terminal::turn_end_rest::{landed_state, HeadRead, Landed};
+    let head_text = head.unwrap_or_default();
+    let read = match head_read.as_str() {
+        "empty" => HeadRead::Empty,
+        "sha" => HeadRead::Sha(&head_text),
+        _ => HeadRead::Failed,
+    };
+    match landed_state(committed.as_deref(), read) {
+        Landed::Yes => "yes",
+        Landed::No => "no",
+        Landed::Unknown => "unknown",
+    }
+    .to_owned()
+}
+
+/// 예외 경로의 사실
+#[napi(object)]
+pub struct TerminalErrorFactsJs {
+    pub stopped: bool,
+    /// `yes`·`no`·`unknown`. 알아보지 못하면 `unknown`
+    pub landed: String,
+    pub run_cancelled: bool,
+    pub deadline_exceeded: bool,
+    /// 던져진 오류가 이번 실행에서 샌드박스를 켜지 못해 난 오류이고 그 켜기 실패가 플랫폼 쪽이었다
+    pub boot_platform_failure: bool,
+}
+
+#[napi(object)]
+pub struct TerminalErrorCloseJs {
+    /// `stopped`·`keep_landed`·`cancelled`·`deadline`·`platform`·`failure`
+    pub kind: String,
+    /// `failure`일 때: 남은 체크포인트를 읽지 못했다
+    pub landed_unknown: bool,
+}
+
+/// 턴 끝이 던졌을 때 무엇으로 닫을지: 멈춤 → 남은 체크포인트 → 취소 → 시간 상한 → 플랫폼 실패 → 오류
+#[napi]
+pub fn terminal_decide_turn_end_error(facts: TerminalErrorFactsJs) -> TerminalErrorCloseJs {
+    use session_terminal::turn_end_rest::{decide_turn_end_error, ErrorClose, ErrorFacts, Landed};
+    let landed = match facts.landed.as_str() {
+        "yes" => Landed::Yes,
+        "no" => Landed::No,
+        _ => Landed::Unknown,
+    };
+    let close = decide_turn_end_error(&ErrorFacts {
+        stopped: facts.stopped,
+        landed,
+        run_cancelled: facts.run_cancelled,
+        deadline_exceeded: facts.deadline_exceeded,
+        boot_platform_failure: facts.boot_platform_failure,
+    });
+    let of = |kind: &str, landed_unknown: bool| TerminalErrorCloseJs { kind: kind.to_owned(), landed_unknown };
+    match close {
+        ErrorClose::Stopped => of("stopped", false),
+        ErrorClose::KeepLanded => of("keep_landed", false),
+        ErrorClose::Cancelled => of("cancelled", false),
+        ErrorClose::Deadline => of("deadline", false),
+        ErrorClose::Platform => of("platform", false),
+        ErrorClose::Failure { landed_unknown } => of("failure", landed_unknown),
+    }
+}
+
+/// 체크포인트를 남기는 중인 실행을 위반을 적을 실행으로 받아들이는가
+#[napi]
+pub fn terminal_saving_accepts(has_saving: bool, attached_as_session_run: bool, closed: bool) -> bool {
+    session_terminal::turn_end_rest::saving_accepts(has_saving, attached_as_session_run, closed)
+}
+
+/// 저장 중이던 실행을 다시 여는가
+#[napi]
+pub fn terminal_should_reattach(session_has_run: bool, closed: bool) -> bool {
+    session_terminal::turn_end_rest::should_reattach(session_has_run, closed)
+}
+
+/// 체크포인트 저장이 던진 오류의 갈 곳. `kind`: `head_moved`·`staged_mismatch`·그 밖. 결과: `reconcile_then_rethrow`·`retry_moved`·`rethrow`
+#[napi]
+pub fn terminal_decide_save_failure(kind: String) -> String {
+    use session_terminal::turn_end_rest::{decide_save_failure, SaveFailure, SaveStep};
+    match decide_save_failure(SaveFailure::parse(&kind)) {
+        SaveStep::ReconcileThenRethrow => "reconcile_then_rethrow",
+        SaveStep::RetryMoved => "retry_moved",
+        SaveStep::Rethrow => "rethrow",
+    }
+    .to_owned()
+}
+
+/// 게이트 단계의 사실. 글 값은 알아보지 못하면 닫는 쪽으로 읽는다
+#[napi(object)]
+pub struct TerminalGateStageFactsJs {
+    pub deadline_exceeded: bool,
+    pub pause_failed: bool,
+    /// `unread`·`clear`·`found`
+    pub rejected: String,
+    /// `unread`·`pass`·`retry`·`exhausted`
+    pub gate: String,
+    /// `unread`·`clear`·`found`
+    pub moved: String,
+    /// `unread`·`clear`·`found`(실패)
+    pub done_tests: String,
+}
+
+#[napi(object)]
+pub struct TerminalGateStageStepJs {
+    /// `need_rejected`·`need_gate`·`need_moved`·`need_done_tests`·`final`
+    pub kind: String,
+    /// `final`일 때: `pass`·`gate`·`unsettled`·`deadline`
+    pub end: String,
+    /// `end`가 `gate`일 때: `retry`·`exhausted`·`unknown`
+    pub gate: String,
+    /// `end`가 `unsettled`일 때: `pause_failed`·`rejected`·`moved`·`done_tests_failed`
+    pub unsettled: String,
+}
+
+/// 게이트 단계 판정: 시간 상한 → 멈추지 못함 → 거절된 경로 → 게이트 → 통과 뒤 바뀜 → 완료 검사
+#[napi]
+pub fn terminal_decide_gate_stage(facts: TerminalGateStageFactsJs) -> TerminalGateStageStepJs {
+    use session_terminal::turn_end_rest::{decide_gate_stage, GateRead, GateStageFacts, GateStageStep, Probe, StageFinal, Unsettled};
+    let step = decide_gate_stage(&GateStageFacts {
+        deadline_exceeded: facts.deadline_exceeded,
+        pause_failed: facts.pause_failed,
+        rejected: Probe::parse(&facts.rejected),
+        gate: GateRead::parse(&facts.gate),
+        moved: Probe::parse(&facts.moved),
+        done_tests: Probe::parse(&facts.done_tests),
+    });
+    let of = |kind: &str, end: &str, gate: &str, unsettled: &str| TerminalGateStageStepJs { kind: kind.to_owned(), end: end.to_owned(), gate: gate.to_owned(), unsettled: unsettled.to_owned() };
+    match step {
+        GateStageStep::NeedRejected => of("need_rejected", "", "", ""),
+        GateStageStep::NeedGate => of("need_gate", "", "", ""),
+        GateStageStep::NeedMoved => of("need_moved", "", "", ""),
+        GateStageStep::NeedDoneTests => of("need_done_tests", "", "", ""),
+        GateStageStep::Final(StageFinal::Pass) => of("final", "pass", "", ""),
+        GateStageStep::Final(StageFinal::Deadline) => of("final", "deadline", "", ""),
+        GateStageStep::Final(StageFinal::Gate(read)) => of(
+            "final",
+            "gate",
+            match read {
+                GateRead::Retry => "retry",
+                GateRead::Exhausted => "exhausted",
+                _ => "unknown",
+            },
+            "",
+        ),
+        GateStageStep::Final(StageFinal::Unsettled(reason)) => of(
+            "final",
+            "unsettled",
+            "",
+            match reason {
+                Unsettled::PauseFailed => "pause_failed",
+                Unsettled::Rejected => "rejected",
+                Unsettled::Moved => "moved",
+                Unsettled::DoneTestsFailed => "done_tests_failed",
+            },
+        ),
+    }
+}
+
+/// 게이트 시간 상한(ms): Stop 훅 상한(초)보다 여유만큼 앞이다
+#[napi]
+pub fn terminal_gate_deadline_ms(hook_seconds: u32) -> f64 {
+    session_terminal::turn_end_rest::gate_deadline_ms(hook_seconds) as f64
+}
+
 // ── 세션 터미널의 사용량 귀속·정체 판정(ADR-213, 4f B4d). 순수 판정이다: 기억·저장·알림은 TS가 한다 ──
 
 /// 요청 하나를 처리하기 전의 사실
