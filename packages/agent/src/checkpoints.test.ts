@@ -983,6 +983,26 @@ describe('CheckpointStore 원격 저장소 연동', () => {
     expect(await store.pendingFiles()).toEqual(['api/src/Order.java']);
   });
 
+  it.each([
+    ['*', 'glob 문자'],
+    [':(glob)**', 'pathspec 매직(glob)'],
+    ['api/src/*.java', '폴더 안 glob'],
+    [':!x.md', 'pathspec 매직(제외)'],
+  ])('commitPaths는 경로를 글자 그대로 읽는다: 이름이 %s(%s)인 파일만 커밋하고 다른 바뀐 파일을 끌어들이지 않는다(ADR-218)', async (name) => {
+    const { source, workDir } = await createSourceRepository();
+    const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });
+    await mkdir(path.dirname(path.join(workDir, name)), { recursive: true });
+    await writeFile(path.join(workDir, name), 'pathspec\n');
+    // 범위 밖의 바뀐 파일(남긴 에이전트 변경을 흉내 낸다)
+    await writeFile(path.join(workDir, 'api/src/Order.java'), 'class Order { String agent; }\n');
+    await mkdir(path.join(workDir, 'docs'), { recursive: true });
+    await writeFile(path.join(workDir, 'docs/x.md'), '# x\n');
+
+    const checkpoint = await store.commitPaths([name], '직접 수정: 파일 1개');
+    expect(checkpoint?.files).toEqual([name]);
+    expect((await store.pendingFiles()).sort()).toEqual(['api/src/Order.java', 'docs/x.md']);
+  });
+
   it('fileAt은 커밋된 파일 내용을 읽고, 작업 트리에서 바뀐 값이나 없는 파일에는 속지 않는다(ADR-157)', async () => {
     const { source, workDir } = await createSourceRepository();
     const { store } = await CheckpointStore.clone(source, workDir, { branch: BRANCH });

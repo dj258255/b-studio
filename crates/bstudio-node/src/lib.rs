@@ -7361,6 +7361,173 @@ pub fn terminal_gate_deadline_ms(hook_seconds: u32) -> f64 {
     session_terminal::turn_end_rest::gate_deadline_ms(hook_seconds) as f64
 }
 
+// ── Git 맞추기·기억·되돌리기 조합·직접 수정 가르기(ADR-218, 4f B5d). 순수 판정이다: Git 읽기·행동과 알림은 TS가 한다 ──
+use bstudio_session::git_realign;
+
+/// 맞추기 판정의 사실
+#[napi(object)]
+pub struct GitRealignFactsJs {
+    pub remembered_head: String,
+    pub remembered_branch: String,
+    pub head: String,
+    /// 분리된 HEAD면 없다
+    pub branch: Option<String>,
+    /// 기억한 체크포인트가 지금 HEAD의 조상인가. 읽지 않았으면 없다
+    pub ancestor: Option<bool>,
+    pub allow_unwind: bool,
+}
+
+#[napi(object)]
+pub struct GitRealignStepJs {
+    /// `need_ancestor`·`same`·`unwind`·`restore`
+    pub kind: String,
+    /// `restore`일 때: `detached`·`branch_changed`·`foreign_commits`·`rewound`·`moved_during_action`
+    pub reason: String,
+}
+
+fn git_reason_name(reason: git_realign::Reason) -> &'static str {
+    match reason {
+        git_realign::Reason::Detached => "detached",
+        git_realign::Reason::BranchChanged => "branch_changed",
+        git_realign::Reason::ForeignCommits => "foreign_commits",
+        git_realign::Reason::Rewound => "rewound",
+        git_realign::Reason::MovedDuringAction => "moved_during_action",
+    }
+}
+
+/// 맞추기 판정: 같음 → (조상 읽기) → 풀기 또는 되돌리기
+#[napi]
+pub fn git_decide_realign(facts: GitRealignFactsJs) -> GitRealignStepJs {
+    use git_realign::{Realign, RealignStep};
+    let step = git_realign::decide_realign(&git_realign::RealignFacts {
+        remembered_head: &facts.remembered_head,
+        remembered_branch: &facts.remembered_branch,
+        head: &facts.head,
+        branch: facts.branch.as_deref(),
+        ancestor: facts.ancestor,
+        allow_unwind: facts.allow_unwind,
+    });
+    let of = |kind: &str, reason: &str| GitRealignStepJs { kind: kind.to_owned(), reason: reason.to_owned() };
+    match step {
+        RealignStep::NeedAncestor => of("need_ancestor", ""),
+        RealignStep::Done(Realign::Same) => of("same", ""),
+        RealignStep::Done(Realign::Unwind) => of("unwind", ""),
+        RealignStep::Done(Realign::Restore(reason)) => of("restore", git_reason_name(reason)),
+    }
+}
+
+/// 풀거나 되돌린 뒤 다시 읽은 끝 상태가 기억과 같은가. `read`가 거짓이면 읽지 못한 것이다
+#[napi]
+pub fn git_after_action_aligned(remembered_head: String, remembered_branch: String, read: bool, head: Option<String>, branch: Option<String>) -> bool {
+    let owned = if read { head.map(|head| (head, branch)) } else { None };
+    let view = owned.as_ref().map(|(head, branch)| (head.as_str(), branch.as_deref()));
+    git_realign::after_action(&remembered_head, &remembered_branch, view) == git_realign::After::Aligned
+}
+
+#[napi(object)]
+pub struct GitMemoryJs {
+    pub branch: String,
+    pub last_checkpoint: String,
+    pub origin_url: Option<String>,
+}
+
+/// b-studio가 HEAD를 움직인 자리에서 기억할 값. 모르면(머리·브랜치를 읽지 못함, 분리된 HEAD) 없다
+#[napi]
+pub fn git_decide_remember(head: String, branch: Option<String>, created: Option<String>) -> Option<GitMemoryJs> {
+    git_realign::decide_remember(&head, branch.as_deref(), created.as_deref()).map(|memory| GitMemoryJs { branch: memory.branch, last_checkpoint: memory.last_checkpoint, origin_url: None })
+}
+
+/// 처음 기억할 값. `origin`은 `none`·`url`·`failed`(읽지 못함). 모르는 것이 있으면 없다
+#[napi]
+pub fn git_decide_initial_memory(head: String, branch: Option<String>, origin: String, origin_url: Option<String>) -> Option<GitMemoryJs> {
+    let url = origin_url.unwrap_or_default();
+    let read = match origin.as_str() {
+        "none" => git_realign::OriginRead::None,
+        "url" => git_realign::OriginRead::Url(&url),
+        _ => git_realign::OriginRead::Failed,
+    };
+    git_realign::decide_initial_memory(&head, branch.as_deref(), read).map(|(memory, origin_url)| GitMemoryJs { branch: memory.branch, last_checkpoint: memory.last_checkpoint, origin_url })
+}
+
+/// 되돌리기가 먼저 맞추기를 하는가
+#[napi]
+pub fn git_revert_needs_realign(untrusted_git: bool, has_memory: bool) -> bool {
+    git_realign::revert_needs_realign(untrusted_git, has_memory)
+}
+
+#[napi(object)]
+pub struct GitRevertPlanJs {
+    /// `fail`·`already_restored`·`discard`
+    pub kind: String,
+    /// `discard`일 때: 버리기 앞에서 문서를 먼저 지키는가
+    pub protect_docs: bool,
+}
+
+/// 되돌리기의 순서. `aligned`: `same`·`unwound`·`restored`·`unrestorable`(알아보지 못하면 `unrestorable`로 읽는다)
+#[napi]
+pub fn git_plan_revert(aligned: String, read_only: bool) -> GitRevertPlanJs {
+    use git_realign::{Aligned, RevertPlan};
+    let aligned = match aligned.as_str() {
+        "same" => Aligned::Same,
+        "unwound" => Aligned::Unwound,
+        "restored" => Aligned::Restored,
+        _ => Aligned::Unrestorable,
+    };
+    match git_realign::plan_revert(&git_realign::RevertFacts { aligned, read_only }) {
+        RevertPlan::Fail => GitRevertPlanJs { kind: "fail".to_owned(), protect_docs: false },
+        RevertPlan::AlreadyRestored => GitRevertPlanJs { kind: "already_restored".to_owned(), protect_docs: false },
+        RevertPlan::Discard { protect_docs } => GitRevertPlanJs { kind: "discard".to_owned(), protect_docs },
+    }
+}
+
+/// 되돌린 뒤 무엇을 기억하는가: `docs_checkpoint`·`reread`·`keep`
+#[napi]
+pub fn git_remember_after_revert(docs_checkpoint: bool, untrusted_git: bool) -> String {
+    match git_realign::remember_after_revert(docs_checkpoint, untrusted_git) {
+        git_realign::RememberAfter::DocsCheckpoint => "docs_checkpoint",
+        git_realign::RememberAfter::Reread => "reread",
+        git_realign::RememberAfter::Keep => "keep",
+    }
+    .to_owned()
+}
+
+/// DB 복원 기준점: 문서를 지키기 전의 체크포인트
+#[napi]
+pub fn git_db_restore_base(before_protect: String, after_protect: Option<String>) -> String {
+    git_realign::db_restore_base(&before_protect, after_protect.as_deref()).to_owned()
+}
+
+/// 되돌린 뒤 남은 일: `nothing`·`host_only_report`·`restart_services`
+#[napi]
+pub fn git_revert_tail(files_empty: bool, database_touched: bool, also_restart_empty: bool, host_only: bool) -> String {
+    match git_realign::revert_tail(files_empty, database_touched, also_restart_empty, host_only) {
+        git_realign::RevertTail::Nothing => "nothing",
+        git_realign::RevertTail::HostOnlyReport => "host_only_report",
+        git_realign::RevertTail::RestartServices => "restart_services",
+    }
+    .to_owned()
+}
+
+#[napi(object)]
+pub struct GitLocalEditsSplitJs {
+    pub human: Vec<String>,
+    pub agent: Vec<String>,
+    pub kept: Vec<String>,
+}
+
+/// 바뀐 파일을 직접 수정으로 커밋할 것(`human`)과 변경으로 남길 것(`agent`)으로 가른다. `kept`는 지금도 바뀌어 있는 남긴 에이전트 변경 기억이다
+#[napi]
+pub fn git_split_local_edits(pending: Vec<String>, kept: Vec<String>) -> GitLocalEditsSplitJs {
+    let split = git_realign::split_local_edits(&pending, &kept);
+    GitLocalEditsSplitJs { human: split.human, agent: split.agent, kept: split.kept }
+}
+
+/// 남긴 에이전트 변경 기억에 파일을 더한다
+#[napi]
+pub fn git_merge_kept(existing: Vec<String>, added: Vec<String>) -> Vec<String> {
+    git_realign::merge_kept(&existing, &added)
+}
+
 // ── 세션 터미널의 사용량 귀속·정체 판정(ADR-213, 4f B4d). 순수 판정이다: 기억·저장·알림은 TS가 한다 ──
 
 /// 요청 하나를 처리하기 전의 사실

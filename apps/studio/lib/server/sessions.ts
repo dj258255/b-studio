@@ -276,6 +276,24 @@ import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
+import {
+  alignedAfterAction,
+  dbRestoreBase,
+  decideInitialMemory,
+  decideRealign,
+  decideRemember,
+  describeRestoreReason,
+  KEPT_UNKNOWN,
+  mergeKept,
+  planRevert,
+  rememberAfterRevert,
+  restoreKept,
+  revertNeedsRealign,
+  revertTail,
+  splitLocalEdits,
+  type Aligned,
+  type RestoreReason,
+} from './session-git-realign';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
 import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork } from './session-terminal-classify';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
@@ -617,6 +635,11 @@ interface Session {
    * 확인이 이 값과 지금 Git을 견준다
    */
   git?: RememberedGit;
+  /**
+   * 사람이 한 수정이 아니라 에이전트가 바꿔 검증 없이 남은 파일(내 폴더 세션, ADR-218). 실행이 켜는 중·켜지 못함·되돌리기 실패·멈춤으로 변경을 되돌리지 못한 채 닫히면 그때 바뀌어 있던 파일을 적는다.
+   * 다음 요청이 이 파일을 "직접 수정"으로 커밋하지 않고 변경으로 남겨 다음 게이트가 검증한다. 게이트를 지나 체크포인트가 되거나 되돌려지면 지운다. `..`는 모든 파일(읽지 못했거나 실행 도중 멈춤)
+   */
+  keptAgentChanges?: string[];
 }
 
 /** 서비스 하나의 마지막 테스트 실행 결과 */
@@ -1422,6 +1445,11 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
     await session.life.joinStop();
     return session.snapshot;
   }
+  // 실행이 열려 있는 채 멈추면 그 실행이 바꾼 파일은 되돌려지지 않고 남는다(멈추는 중에는 되돌리지 않는다). 내 폴더 세션을 이어서 작업할 때 그 파일을 직접 수정으로 커밋하지 않게
+  // 모든 파일을 검증 안 된 에이전트 변경으로 기억한다(ADR-218). 중지 신호를 올리기 전에 정한다 — 실행이 늦게 쓰는 파일까지 덮는다
+  if (session.snapshot.workspace === 'local' && (session.run !== undefined || session.terminalSaving !== undefined)) {
+    session.keptAgentChanges = mergeKept(session.keptAgentChanges ?? [], [KEPT_UNKNOWN]);
+  }
   // 중지 신호는 멈추기를 시작한 호출이 바로 올린다(호출이 돌아오기 전에 올라가 있어야 한다). 이 뒤의 단계와 그 순서·실패 처리는 Rust 수명 코어가 정한다(STOP_STEPS)
   session.stop.abort();
   // 켜 둔 확인 선언 변경 허용은 멈추면 지운다(N2, ADR-215). 허용은 사람이 "다음 요청 하나"에 켠 것이다. 멈춘 세션을 나중에 이어서 작업할 때 그 사이의 첫 요청이 가져가면 사람이 모르는 요청의 선언 변경이 받아들여진다
@@ -1585,13 +1613,18 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     let discardBackup: DiscardBackup | undefined;
     let restoredRecords: string[] = [];
     let localEdits: Checkpoint | undefined;
+    /** 이어서 작업하는 내 폴더 세션이 여전히 검증 안 된 에이전트 변경으로 기억하는 파일 */
+    let resumedKept: string[] = [];
     let resumeDocsCheckpoint: Checkpoint | undefined;
     if (local) {
       // 샌드박스를 멈춘 동안 IDE에서 고친 파일일 수 있어 버리지 않고 체크포인트로 남긴다
       const redactor = new Redactor(secrets);
-      localEdits = await commitLocalEdits(checkpoints, (text) => redactor.find(text)).catch((error: unknown) => {
+      // 멈추기 전에 에이전트가 바꿔 검증 없이 남은 파일은 직접 수정이 아니라 변경으로 남긴다(ADR-218, N12). 저장 파일의 기억은 옛 파일이면 없고 모양이 틀리면 모든 파일로 읽는다
+      const committed = await commitLocalEdits(checkpoints, (text) => redactor.find(text), undefined, restoreKept(data.keptAgentChanges) ?? []).catch((error: unknown) => {
         throw new StudioError(409, `폴더에서 바뀐 파일을 체크포인트로 남기지 못해 이어서 작업하지 않았습니다: ${describe(error)}`);
       });
+      localEdits = committed.checkpoint;
+      resumedKept = committed.kept;
       if (localEdits) history = [...history, { type: 'local_edits_saved', checkpoint: localEdits, reason: 'resume' }];
     } else {
       // 끝내지 못한 요청이 남긴 변경은 검증 게이트를 통과하지 않았으므로 버리지만, 문서는 먼저 지키고(ADR-099)
@@ -1673,6 +1706,7 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 기억한 Git 상태를 되살린다(이슈 #699). 이 기록이 없던 옛 세션이거나, 이어서 시작하며 b-studio가 HEAD를
     // 움직였으면(문서·직접 수정 체크포인트) 지금 값을 그 시점의 것으로 믿고 채운다
     session.git = data.git && !localEdits && !resumeDocsCheckpoint ? data.git : await initialGitMemory(checkpoints);
+    if (resumedKept.length > 0) session.keptAgentChanges = resumedKept;
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
@@ -2532,9 +2566,11 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
         keptDocs = outcome.keptDocs;
         return outcome.files;
       })
-      .catch((cause: unknown) => {
+      .catch(async (cause: unknown) => {
         revertError = cause;
         console.error('[b-studio] 되돌리기 실패', cause);
+        // 되돌리지 못한 변경은 이 실행이 바꾼 것이다. 다음 요청이 직접 수정으로 커밋하지 않게 기억한다(ADR-218)
+        await keepAgentChanges(session).catch(() => {});
         return undefined;
       });
     return reverted !== undefined;
@@ -2732,7 +2768,9 @@ async function execute(session: Session, run: ActiveRun, request: string, plan: 
       });
     },
     // 샌드박스를 켜다 실패했거나 켜는 중이라 되돌리지 못했다(되돌리는 동안 컨테이너가 같은 파일을 보며 뜰 수 있다, ADR-131). 남은 파일과 이유를 알린다
-    notice_kept: () => {
+    notice_kept: async () => {
+      // 되돌리지 않고 남긴 파일은 이 실행이 바꾼 것이다. 다음 요청이 직접 수정으로 커밋하지 않게 기억한다(내 폴더 세션, ADR-218). 목록을 읽지 못했으면 모든 파일로 기억한다
+      await keepAgentChanges(session, pendingUnknown !== undefined ? [KEPT_UNKNOWN] : pendingFiles).catch(() => {});
       const which = pendingUnknown !== undefined ? `바뀐 파일이 있는지 확인하지 못했습니다(${describe(pendingUnknown)})` : `바뀐 파일 ${pendingFiles.length}개: ${shownFiles(pendingFiles)}`;
       emit(session, {
         type: 'notice',
@@ -3380,10 +3418,14 @@ function checkpointTrailers(result: AgentResult): string[] {
  * 이 기록이 없던 옛 세션은 처음 읽을 때의 값을 그 시점의 것으로 믿는다. 분리된 HEAD 등 브랜치가 없는 모양이면 없다
  */
 async function initialGitMemory(checkpoints: CheckpointStore): Promise<RememberedGit | undefined> {
-  const { head, branch } = await checkpoints.headState().catch(() => ({ head: '', branch: undefined }));
-  if (!head || !branch) return undefined;
-  const originUrl = await checkpoints.remoteUrl().catch(() => undefined);
-  return { branch, lastCheckpoint: head, ...(originUrl ? { originUrl } : {}) };
+  const read = await checkpoints.headState().then((state) => state, () => undefined);
+  if (!read?.head || !read.branch) return undefined;
+  // 원격 주소를 읽지 못한 것과 원격이 없는 것은 다르다. 읽지 못했는데 "없음"으로 기억하면 나중의 원격 주소 확인이 열린다(ADR-218). 코어가 모르는 것이 있으면 기억하지 않는다고 정한다
+  const origin = await checkpoints.remoteUrl().then(
+    (url) => (url ? { kind: 'url' as const, url } : { kind: 'none' as const }),
+    () => ({ kind: 'failed' as const }),
+  );
+  return decideInitialMemory(read, origin);
 }
 
 /**
@@ -3392,11 +3434,12 @@ async function initialGitMemory(checkpoints: CheckpointStore): Promise<Remembere
  * b-studio가 움직인 것이 아닌 모양이면 건드리지 않는다(그 모양은 다음 턴의 검사가 잡는다)
  */
 async function rememberGit(session: Session, created?: string): Promise<void> {
-  const { head, branch } = await session.checkpoints.headState().catch(() => ({ head: '', branch: undefined }));
-  if (!head || !branch) return;
-  // b-studio가 방금 만든 커밋을 알면 지금 HEAD를 다시 읽은 값이 아니라 그 커밋을 기억한다(이슈 #706). 만든 직후에 끼어든
-  // 커밋이 있으면 기억과 HEAD가 달라 다음 검사가 잡는다
-  session.git = { branch, lastCheckpoint: created ?? head, ...(session.git?.originUrl ? { originUrl: session.git.originUrl } : {}) };
+  const read = await session.checkpoints.headState().then((state) => state, () => undefined);
+  // b-studio가 방금 만든 커밋(복원 대상 포함)을 알면 지금 HEAD를 다시 읽은 값이 아니라 그 커밋을 기억한다(이슈 #706, ADR-218). 만든 직후에 끼어든
+  // 커밋이 있으면 기억과 HEAD가 달라 다음 검사가 잡는다. 읽지 못했거나 분리된 HEAD면 기억하지 않는다(코어)
+  const memory = decideRemember(read, created);
+  if (!memory) return;
+  session.git = { branch: memory.branch, lastCheckpoint: memory.lastCheckpoint, ...(session.git?.originUrl ? { originUrl: session.git.originUrl } : {}) };
 }
 
 /**
@@ -3424,34 +3467,46 @@ type GitRealignment =
   | { kind: 'unrestorable'; which: string; error: unknown };
 
 /**
- * 지금 HEAD·브랜치가 기억한 것과 다르면 맞춘다(이슈 #699·#706). allowUnwind가 참이고 같은 브랜치에서 기억한 체크포인트 위에
+ * 지금 HEAD·브랜치가 기억한 것과 다르면 맞춘다(이슈 #699·#706). 판정은 코어가 한다(ADR-218). allowUnwind가 참이고 같은 브랜치에서 기억한 체크포인트 위에
  * 커밋만 얹었으면 풀어(reset --soft) 변경으로 돌린다 — 그 커밋의 작성자·트레일러는 버려진다. 그 밖(브랜치 전환, 분리된 HEAD,
- * 되감기)이면 바뀐 파일을 보관본으로 남기고 기억한 체크포인트로 되돌린다. 실행을 닫는 일은 부르는 쪽이 한다
+ * 되감기)이면 바뀐 파일을 보관본으로 남기고 기억한 체크포인트로 되돌린다. 실행을 닫는 일은 부르는 쪽이 한다.
+ *
+ * 읽기와 행동 사이에 커밋이 끼거나 브랜치가 바뀔 수 있다(N14). 풀거나 되돌린 뒤 끝 상태를 **다시 읽어** 기억과 같을 때만 받아들인다:
+ * 풀다가 어긋났으면 되돌리는 쪽으로 다시 맞추고, 되돌린 뒤에도 어긋나 있으면 되돌리지 못한 것이다(읽지 못해도 같다)
  */
 async function realignGit(session: Session, remembered: RememberedGit, { allowUnwind }: { allowUnwind: boolean }): Promise<GitRealignment> {
   const state = await session.checkpoints.headState();
-  if (state.head === remembered.lastCheckpoint && state.branch === remembered.branch) return { kind: 'same' };
-  const sameBranch = state.branch === remembered.branch;
-  // 같은 브랜치에서 기억한 체크포인트가 HEAD의 조상이면 그 위에 커밋만 얹은 것이다 — 풀어서 검증에 넣는다
-  const aheadOnSameBranch = sameBranch && (await session.checkpoints.isAncestorOf(remembered.lastCheckpoint, state.head));
-  if (allowUnwind && aheadOnSameBranch) {
+  const facts = { rememberedHead: remembered.lastCheckpoint, rememberedBranch: remembered.branch, head: state.head, branch: state.branch, allowUnwind };
+  let step = decideRealign(facts);
+  // 같은 브랜치에서 HEAD만 다를 때만 기억한 체크포인트가 HEAD의 조상인지 읽는다
+  if (step.kind === 'need_ancestor') step = decideRealign({ ...facts, ancestor: await session.checkpoints.isAncestorOf(remembered.lastCheckpoint, state.head) });
+  if (step.kind === 'same') return { kind: 'same' };
+  // 조상을 읽어 주었는데도 또 읽으라고 하면 알아보지 못한 것이다. 되돌리는 쪽으로 닫는다
+  if (step.kind === 'need_ancestor') step = { kind: 'restore', reason: 'rewound' };
+  /** 끝 상태를 다시 읽는다. 읽지 못하면 `undefined`(같지 않은 것으로 본다) */
+  const reread = async (): Promise<{ head: string; branch: string | undefined } | undefined> => session.checkpoints.headState().then((read) => read, () => undefined);
+  let reason: RestoreReason;
+  if (step.kind === 'unwind') {
     const count = await session.checkpoints.uncommitTo(remembered.lastCheckpoint);
-    if (count > 0) {
-      const text = `[b-studio] 작업 복사본에 b-studio가 만들지 않은 커밋 ${count}개가 있어 풀었습니다. b-studio가 검증한 뒤 직접 커밋합니다.`;
-      emit(session, { type: 'notice', text, at: new Date().toISOString() });
-      (session.terminalNotes ??= []).push(`${text} 터미널에서 git commit 하지 마세요 — b-studio가 커밋합니다.`);
+    if (alignedAfterAction(remembered, await reread())) {
+      if (count > 0) {
+        const text = `[b-studio] 작업 복사본에 b-studio가 만들지 않은 커밋 ${count}개가 있어 풀었습니다. b-studio가 검증한 뒤 직접 커밋합니다.`;
+        emit(session, { type: 'notice', text, at: new Date().toISOString() });
+        (session.terminalNotes ??= []).push(`${text} 터미널에서 git commit 하지 마세요 — b-studio가 커밋합니다.`);
+      }
+      return { kind: 'unwound', count };
     }
-    return { kind: 'unwound', count };
+    // 풀던 사이에 브랜치가 바뀌거나 커밋이 끼었다. 풀 수 없는 모양으로 보고 되돌린다
+    reason = 'moved_during_action';
+  } else {
+    reason = step.reason;
   }
-  const which = !sameBranch
-    ? state.branch === undefined
-      ? 'HEAD가 브랜치가 아니라 커밋을 가리킴'
-      : `브랜치가 ${state.branch}(으)로 바뀜`
-    : aheadOnSameBranch
-      ? '기록에 b-studio가 만들지 않은 커밋이 있음'
-      : '기록이 b-studio의 체크포인트보다 뒤로 되감기거나 고쳐짐';
+  const which = describeRestoreReason(reason, state.branch);
   try {
     const reverted = await session.checkpoints.restoreRememberedHead(remembered);
+    if (!alignedAfterAction(remembered, await reread())) {
+      return { kind: 'unrestorable', which, error: new Error('되돌린 뒤에도 HEAD·브랜치가 b-studio가 기억한 것과 다릅니다') };
+    }
     return { kind: 'restored', which, ...reverted };
   } catch (error) {
     return { kind: 'unrestorable', which, error };
@@ -3537,6 +3592,8 @@ async function saveCheckpoint(
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
   await rememberGit(session, checkpoint.sha);
+  // 게이트를 지나 체크포인트가 됐다. 남긴 에이전트 변경은 이제 검증된 내용이다(ADR-218)
+  session.keptAgentChanges = undefined;
   emit(session, { type: 'checkpoint', runId, checkpoint });
   await noticeIgnoredChanges(session, head, '이번 실행에서 체크포인트에 들어가지 않는 무시된(.gitignore) 파일이 생기거나 바뀌었습니다. 검사 결과에 영향을 줬을 수 있으니 확인하세요');
   // 에이전트가 이번 실행에서 studio.yaml을 바꿨으면(includes·systemPackages·workflow 등) 다음 요청부터 그 선언을 쓴다(도그푸딩 마찰 121)
@@ -3620,23 +3677,33 @@ async function revertRunDetailed(
     cancelled = false,
     alsoRestart = [],
     hostOnly = false,
+    readOnly = false,
   }: {
     cancelled?: boolean;
     alsoRestart?: string[];
     /** 샌드박스를 한 번도 켜지 않은 세션: 작업 복사본만 되돌리고 DB 복원·서비스 재시작은 하지 않는다(컨테이너가 없다). 켜지 않았으니 DB도 이 실행이 바꿀 수 없었다 */
     hostOnly?: boolean;
+    /**
+     * 아무것도 바꾸지 않겠다는 약속의 읽기만 요청이 위반으로 닫히는 되돌리기(N13, ADR-218). 바뀐 문서도 위반이라 게이트 없이 문서 체크포인트로 지키지 않고 보관본만 남기고 버린다
+     * (앞선 변경이 있는 실행에 이어 켜진 읽기만 `readOnlyAfterWork`는 아니다)
+     */
+    readOnly?: boolean;
   } = {},
 ): Promise<{ files: string[]; keptDocs: string[] }> {
-  const dbRestorePoint = session.snapshot.checkpoints[0]!.sha;
+  // DB 복원 기준점은 문서를 지키기 전의 체크포인트로 고정한다(코어, ADR-018·ADR-131). 문서 체크포인트에는 DB 덤프가 없다
+  const dbRestorePoint = dbRestoreBase(session.snapshot.checkpoints[0]!.sha, undefined);
   // 이 컴퓨터 방식에서 HEAD가 기억과 다르면(실행 도중 끼워 넣은 커밋 등) 그 위에서 되돌리지 않는다. 기억한 체크포인트와 다른
   // 부분을 모두 보관본으로 남기고 그 체크포인트로 되돌린다(이슈 #706). 되돌리지 못하면 던진다(되돌리지 못했다고 알린다)
-  const realigned = untrustedGit() && session.git ? await realignGit(session, session.git, { allowUnwind: false }) : { kind: 'same' as const };
-  if (realigned.kind === 'unrestorable') throw realigned.error;
+  const untrusted = untrustedGit();
+  const realigned: GitRealignment = revertNeedsRealign(untrusted, session.git !== undefined) ? await realignGit(session, session.git!, { allowUnwind: false }) : { kind: 'same' };
+  // 순서는 코어가 정한다: 맞추기 → 문서 지키기(읽기만 위반이면 하지 않는다) → 버리기. 모르는 결정은 되돌리지 못한 것이다
+  const plan = planRevert(realigned.kind as Aligned, readOnly);
+  if (plan.kind === 'fail') throw realigned.kind === 'unrestorable' ? realigned.error : new Error('되돌리기의 순서를 알아보지 못해 되돌리지 못했습니다');
   // 문서는 먼저 지키고(ADR-099), 남은 변경은 되살릴 수 있게 백업한 뒤에 버린다
   const { docsCheckpoint, files, patch, backup, restoredRecords } =
-    realigned.kind === 'restored'
+    plan.kind === 'already_restored' && realigned.kind === 'restored'
       ? { docsCheckpoint: undefined, files: realigned.files, patch: realigned.patch, backup: realigned.backup, restoredRecords: [] as string[] }
-      : await discardWorkingCopy(session.checkpoints, session.project.root, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session));
+      : await discardWorkingCopy(session.checkpoints, session.project.root, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session), plan.kind === 'discard' ? plan.protectDocs : false);
   if (restoredRecords.length > 0) emit(session, { type: 'notice', text: verificationRestoredNotice(restoredRecords), at: new Date().toISOString() });
   await noticeIgnoredChanges(session, dbRestorePoint, '되돌렸지만 무시된(.gitignore) 파일은 지우지 않아 남아 있습니다. 다음 검사에 영향을 줄 수 있으니 필요 없으면 지우세요');
   if (docsCheckpoint) {
@@ -3645,8 +3712,21 @@ async function revertRunDetailed(
   }
   // 되돌리기가 남긴 HEAD(문서 체크포인트 또는 그대로)를 다시 기억한다. 다음 턴 검사가 b-studio 자신의 커밋을 에이전트의 것으로 보지 않게 한다.
   // 이 컴퓨터 방식에서는 b-studio가 만든 문서 체크포인트만 기억에 넣는다. 지금 HEAD를 다시 읽으면 그 사이에 끼어든 커밋이 들어간다(이슈 #706)
-  if (docsCheckpoint) await rememberGit(session, docsCheckpoint.sha);
-  else if (!untrustedGit()) await rememberGit(session);
+  const remember = rememberAfterRevert(docsCheckpoint !== undefined, untrusted);
+  if (remember === 'docs_checkpoint' && docsCheckpoint) await rememberGit(session, docsCheckpoint.sha);
+  else if (remember === 'reread') await rememberGit(session);
+  // 버리는 사이에 커밋이 끼거나 브랜치가 바뀌었을 수 있다(N14). 끝 상태를 다시 읽어 기억과 다르면 기억한 체크포인트(문서 체크포인트를 남겼으면 그것)로 맞춘다
+  let again: Extract<GitRealignment, { kind: 'restored' }> | undefined;
+  if (untrusted && session.git && realigned.kind !== 'restored') {
+    const settled = await realignGit(session, session.git, { allowUnwind: false });
+    if (settled.kind === 'unrestorable') throw settled.error;
+    if (settled.kind === 'restored') again = settled;
+  }
+  const finalFiles = again ? [...new Set([...files, ...again.files])].sort() : files;
+  const finalPatch = again ? `${patch}${again.patch}` : patch;
+  const finalBackup = again?.backup ?? backup;
+  // 되돌렸으므로 남긴 에이전트 변경은 이제 없다(ADR-218)
+  session.keptAgentChanges = undefined;
   // 실패한 요청이 실행한 마이그레이션과 데이터 변경도 마지막 체크포인트 시점으로 되돌린다(위 dbRestorePoint 기준)
   const database = hostOnly ? { states: [], dependents: [] } : await session.databases.restore(dbRestorePoint, session.stop.signal);
   // 문서 체크포인트가 새로 생겼으면, 복원한(바른) DB 상태를 그 체크포인트의 덤프로도 남겨 다음 되돌리기가
@@ -3654,18 +3734,19 @@ async function revertRunDetailed(
   if (docsCheckpoint) await saveDatabases(session, docsCheckpoint.sha);
   const databaseTouched = database.states.some((state) => state.action === 'restored' || state.action === 'failed');
   const keptDocs = docsCheckpoint?.files ?? [];
-  if (files.length === 0 && !databaseTouched && alsoRestart.length === 0) return { files, keptDocs };
+  const after = revertTail(finalFiles.length === 0, databaseTouched, alsoRestart.length === 0, hostOnly);
+  if (after === 'nothing') return { files: finalFiles, keptDocs };
   // 되돌린 파일에 studio.yaml(생성 파일 포함, 도그푸딩 마찰 127)이 있으면 재시작 전에 project를 다시 읽는다
-  if (files.includes(SPEC_FILE)) await reloadSessionProject(session);
-  if (hostOnly) {
-    emit(session, { type: 'reverted', runId, cancelled: cancelled || undefined, files, patch, restarted: [], databases: [], backup });
-    return { files, keptDocs };
+  if (finalFiles.includes(SPEC_FILE)) await reloadSessionProject(session);
+  if (after === 'host_only_report') {
+    emit(session, { type: 'reverted', runId, cancelled: cancelled || undefined, files: finalFiles, patch: finalPatch, restarted: [], databases: [], backup: finalBackup });
+    return { files: finalFiles, keptDocs };
   }
 
   const report = await restartServicesFor(
     session.sandbox,
     session.project,
-    files,
+    finalFiles,
     { signal: session.stop.signal, onStatus: (event) => onServiceStatus(session, event) },
     { alsoRestart: [...new Set([...database.dependents, ...alsoRestart])] },
   );
@@ -3673,14 +3754,14 @@ async function revertRunDetailed(
     type: 'reverted',
     runId,
     cancelled: cancelled || undefined,
-    files,
-    patch,
+    files: finalFiles,
+    patch: finalPatch,
     restarted: report.restarted,
     databases: database.states,
     sync: report.sync,
-    backup,
+    backup: finalBackup,
   });
-  return { files, keptDocs };
+  return { files: finalFiles, keptDocs };
 }
 
 /**
@@ -3703,7 +3784,9 @@ class LocalEditsError extends Error {}
  */
 async function saveLocalEdits(session: Session): Promise<Checkpoint | undefined> {
   if (session.snapshot.workspace !== 'local') return undefined;
-  const checkpoint = await commitLocalEdits(session.checkpoints, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session));
+  const { checkpoint, kept } = await commitLocalEdits(session.checkpoints, (text) => session.sandbox.findSecrets(text), expectedHeadFor(session), session.keptAgentChanges ?? []);
+  // 지금도 바뀌어 있는 남긴 에이전트 변경만 기억에 둔다(커밋됐거나 사람이 되돌린 파일은 뺀다)
+  session.keptAgentChanges = kept.length > 0 ? kept : undefined;
   if (!checkpoint) return undefined;
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
@@ -3711,16 +3794,43 @@ async function saveLocalEdits(session: Session): Promise<Checkpoint | undefined>
   return checkpoint;
 }
 
-/** 검증 게이트 없이 체크포인트로 남긴다. 시크릿 값이 든 파일이 있으면 남기지 않고 오류를 낸다 */
-async function commitLocalEdits(checkpoints: CheckpointStore, findSecrets: (text: string) => string[], expectedHead?: string): Promise<Checkpoint | undefined> {
+/**
+ * 검증 게이트 없이 체크포인트로 남긴다. 시크릿 값이 든 파일이 있으면 남기지 않고 오류를 낸다.
+ * `kept`는 사람이 한 수정이 아니라 에이전트가 바꿔 검증 없이 남은 파일의 기억이다(ADR-218, N12). 그 파일은 직접 수정으로 커밋하지 않고 변경으로 남겨 다음 게이트가 검증하게 한다.
+ * 사람이 그 뒤 같은 파일을 또 고쳤는지는 알 수 없다 — 이름이 맞으면 에이전트 변경으로 본다(닫는 쪽). 돌려주는 `kept`는 지금도 바뀌어 있는 항목만 남긴 기억이다
+ */
+async function commitLocalEdits(
+  checkpoints: CheckpointStore,
+  findSecrets: (text: string) => string[],
+  expectedHead?: string,
+  kept: readonly string[] = [],
+): Promise<{ checkpoint?: Checkpoint; kept: string[] }> {
   const files = await checkpoints.pendingFiles();
-  if (files.length === 0) return undefined;
+  const split = splitLocalEdits(files, kept);
+  if (files.length === 0 || split.human.length === 0) return { kept: split.kept };
   // 게이트 기록이 없다는 것을 트레일러로 남긴다. 기본 배포 조건이 이 표시로 배포를 막는다(#772)
-  return checkpoints.commit(`직접 수정: 파일 ${files.length}개`, '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.', {
-    findSecrets,
-    expectedHead,
-    trailers: [formatVerifyTrailer('unverified')],
-  });
+  const subject = `직접 수정: 파일 ${split.human.length}개`;
+  const body = '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.';
+  const trailers = [formatVerifyTrailer('unverified')];
+  // 남긴 에이전트 변경이 없으면 지금까지처럼 바뀐 파일 전부를 커밋한다. 있으면 사람의 파일만 골라 커밋하고 나머지는 변경으로 둔다
+  const checkpoint =
+    split.agent.length === 0
+      ? await checkpoints.commit(subject, body, { findSecrets, expectedHead, trailers })
+      : await checkpoints.commitPaths(split.human, subject, body, { findSecrets, expectedHead, trailers });
+  // 커밋하고 남은 바뀐 파일 중 기억에 있던 것만 남긴다
+  return { checkpoint, kept: split.kept };
+}
+
+/**
+ * 실행이 변경을 되돌리지 못한 채 닫혀 작업 복사본에 남은 바뀐 파일을 "검증 안 된 에이전트 변경"으로 기억한다(내 폴더 세션만, ADR-218, N12).
+ * 사람이 한 수정이 아니라 에이전트가 바꾼 것이므로 다음 요청이 직접 수정으로 커밋하지 않는다. 파일 목록을 읽지 못하면 모든 파일로 기억한다(닫는 쪽).
+ * 열린 실행이 점유를 쥔 채로 부른다 — 점유가 풀린 뒤에 기억하면 그 사이 요청이 먼저 직접 수정으로 커밋한다
+ */
+async function keepAgentChanges(session: Session, files?: readonly string[]): Promise<void> {
+  if (session.snapshot.workspace !== 'local') return;
+  const pending = files ?? (await session.checkpoints.pendingFiles().then((read) => read, () => undefined));
+  session.keptAgentChanges = mergeKept(session.keptAgentChanges ?? [], pending ?? [KEPT_UNKNOWN]);
+  schedulePersist(session);
 }
 
 // ---------------------------------------------------------------------------
@@ -3857,8 +3967,10 @@ async function discardWorkingCopy(
   findSecrets: (text: string) => string[],
   /** 문서 체크포인트를 남길 때 HEAD가 있어야 할 곳(이슈 #706) */
   expectedHead?: string,
+  /** 거짓이면 문서를 먼저 지키지 않는다(읽기만 요청의 위반, N13·ADR-218). 바뀐 문서도 보관본으로만 남기고 버린다 */
+  protectDocs = true,
 ): Promise<{ docsCheckpoint?: Checkpoint; files: string[]; patch: string; backup?: DiscardBackup; restoredRecords: string[] }> {
-  const { checkpoint: docsCheckpoint, restoredRecords } = await protectPendingDocsBeforeDiscard(checkpoints, projectRoot, findSecrets, expectedHead);
+  const { checkpoint: docsCheckpoint, restoredRecords } = protectDocs ? await protectPendingDocsBeforeDiscard(checkpoints, projectRoot, findSecrets, expectedHead) : { checkpoint: undefined, restoredRecords: [] as string[] };
   const { files, patch, backup } = await checkpoints.discard();
   return { docsCheckpoint, files, patch, backup, restoredRecords };
 }
@@ -4026,7 +4138,10 @@ export function restoreCheckpoint(id: string, sha: string): void {
         { alsoRestart: database.dependents },
       );
       session.snapshot.checkpoints = await session.checkpoints.list();
-      await rememberGit(session);
+      // 복원이 스스로 맞춘 곳(복원 대상)을 기억한다. 복원이 DB·서비스를 기다리는 사이 끼어든 커밋이 있어도, 지금 HEAD를 다시 읽어 기억하면 그 커밋을 믿게 된다(N11, ADR-218)
+      await rememberGit(session, target.sha);
+      // 되돌렸으므로 남긴 에이전트 변경은 이제 없다
+      session.keptAgentChanges = undefined;
       const databaseResynced = database.states.some((state) => state.action === 'restored');
       // 이후 요청이 사라진 변경을 전제로 하지 않도록 대화에도 남긴다. 지금 체크포인트를 가리켰으면
       // "되돌렸다"는 말 대신 무엇을 다시 맞췄는지만 말한다(뒤의 체크포인트가 사라진 게 아니므로)
@@ -7274,6 +7389,8 @@ function persistedBody(session: Session): PersistedBody {
     sandbox: { id: session.sandbox.id, provider: session.provider },
     previewToken: session.previewToken,
     git: session.git,
+    // 키를 더하지 않으면 저장 파일의 바이트가 그대로다(옛 파일과 같다)
+    ...(session.keptAgentChanges && session.keptAgentChanges.length > 0 ? { keptAgentChanges: session.keptAgentChanges } : {}),
   };
 }
 
@@ -8331,6 +8448,9 @@ async function abandonTerminalRun(
     },
   });
   if (!decision) return '';
+  // 켜는 중이거나 켜지 못해 변경을 되돌리지 않고 닫는다. 그 파일은 사람이 고친 것이 아니라 이 실행이 바꾼 것이다: 다음 요청이 직접 수정으로 커밋하지 않게 기억한다(내 폴더 세션, ADR-218).
+  // 점유를 푸는 단계(`finishTerminalClose`) 앞에서 한다 — 푼 뒤에 기억하면 그 사이 온 요청이 먼저 커밋한다
+  if (decision.text === 'kept') await keepAgentChanges(session);
   // 부른 쪽에 돌려주는 글. 멈추는 중이면 끝 글은 정해진 글이지만 돌려주는 것은 사유 그대로다
   let summary = reason ?? '';
   let reverted: string[] | undefined;
@@ -8341,14 +8461,18 @@ async function abandonTerminalRun(
   const revert = async (hostOnly: boolean): Promise<void> => {
     // 취소하면 게이트나 도구가 다시 띄우던 서비스가 중간에 멈춰 있을 수 있어 준비되지 않은 서비스도 함께 다시 띄운다
     const unsettled = cancelled && !hostOnly ? session.snapshot.services.filter((service) => service.state !== 'ready').map((service) => service.name) : [];
-    reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled, hostOnly })
+    // 아무것도 바꾸지 않겠다는 약속의 읽기만 요청이 위반으로 닫히면 문서도 되돌린다(N13, ADR-218). 앞선 변경이 있는 실행에 이어 켜진 읽기만은 그렇지 않다
+    const readOnly = run.terminal.readOnly && run.terminal.readOnlyAfterWork !== true;
+    reverted = await revertRunDetailed(session, run.id, { cancelled, alsoRestart: unsettled, hostOnly, readOnly })
       .then((result) => {
         keptDocs = result.keptDocs;
         return result.files;
       })
-      .catch((cause: unknown) => {
+      .catch(async (cause: unknown) => {
         revertError = cause;
         console.error('[b-studio] 되돌리기 실패', cause);
+        // 되돌리지 못한 변경은 이 실행이 바꾼 것이다. 다음 요청이 직접 수정으로 커밋하지 않게 기억한다(ADR-218)
+        await keepAgentChanges(session).catch(() => {});
         return undefined;
       });
     if (reverted && reverted.length > 0) {

@@ -352,6 +352,28 @@ interface NativeGuard {
   terminalDecideGateStage(facts: NativeTerminalGateStageFacts): NativeTerminalGateStageStep;
   /** 게이트 시간 상한(ms)(ADR-217): Stop 훅 상한(초)보다 여유만큼 앞이다 */
   terminalGateDeadlineMs(hookSeconds: number): number;
+  /** Git 맞추기 판정(ADR-218): 같음 → (조상 읽기) → 풀기 또는 되돌리기 */
+  gitDecideRealign(facts: NativeGitRealignFacts): NativeGitRealignStep;
+  /** 풀거나 되돌린 뒤 다시 읽은 끝 상태가 기억과 같은가(ADR-218). `read`가 거짓이면 읽지 못한 것 */
+  gitAfterActionAligned(rememberedHead: string, rememberedBranch: string, read: boolean, head: string | null | undefined, branch: string | null | undefined): boolean;
+  /** b-studio가 HEAD를 움직인 자리에서 기억할 값(ADR-218). 모르면 없다 */
+  gitDecideRemember(head: string, branch: string | null | undefined, created: string | null | undefined): NativeGitMemory | null;
+  /** 처음 기억할 값(ADR-218). `origin`: `none`·`url`·`failed` */
+  gitDecideInitialMemory(head: string, branch: string | null | undefined, origin: string, originUrl: string | null | undefined): NativeGitMemory | null;
+  /** 되돌리기가 먼저 맞추기를 하는가(ADR-218) */
+  gitRevertNeedsRealign(untrustedGit: boolean, hasMemory: boolean): boolean;
+  /** 되돌리기의 순서(ADR-218): `fail`·`already_restored`·`discard` */
+  gitPlanRevert(aligned: string, readOnly: boolean): NativeGitRevertPlan;
+  /** 되돌린 뒤 무엇을 기억하는가(ADR-218): `docs_checkpoint`·`reread`·`keep` */
+  gitRememberAfterRevert(docsCheckpoint: boolean, untrustedGit: boolean): string;
+  /** DB 복원 기준점(ADR-218): 문서를 지키기 전의 체크포인트 */
+  gitDbRestoreBase(beforeProtect: string, afterProtect: string | null | undefined): string;
+  /** 되돌린 뒤 남은 일(ADR-218): `nothing`·`host_only_report`·`restart_services` */
+  gitRevertTail(filesEmpty: boolean, databaseTouched: boolean, alsoRestartEmpty: boolean, hostOnly: boolean): string;
+  /** 바뀐 파일을 직접 수정으로 커밋할 것과 변경으로 남길 것으로 가른다(ADR-218) */
+  gitSplitLocalEdits(pending: string[], kept: string[]): NativeGitLocalEditsSplit;
+  /** 남긴 에이전트 변경 기억에 파일을 더한다(ADR-218) */
+  gitMergeKept(existing: string[], added: string[]): string[];
   /** 터미널의 사용량 귀속 판정(ADR-213): 셀지, 붙일 실행, 턴을 셀지, 한도를 볼지 */
   terminalDecideUsage(facts: NativeTerminalUsageFacts): NativeTerminalUsageStep;
   /** 텔레메트리 본문(JSON 글)에서 모델 호출을 꺼낸다(ADR-216). 모양이 틀린 `api_request`도 한 호출로 센다. `now`는 받은 시각(ms) */
@@ -1460,6 +1482,39 @@ export interface NativeTerminalGateStep {
   kind: string;
   maxTurns: boolean;
   attempts: boolean;
+}
+
+export interface NativeGitRealignFacts {
+  rememberedHead: string;
+  rememberedBranch: string;
+  head: string;
+  branch?: string | null;
+  ancestor?: boolean | null;
+  allowUnwind: boolean;
+}
+
+export interface NativeGitRealignStep {
+  /** `need_ancestor`·`same`·`unwind`·`restore` */
+  kind: string;
+  /** `restore`일 때: `detached`·`branch_changed`·`foreign_commits`·`rewound`·`moved_during_action` */
+  reason: string;
+}
+
+export interface NativeGitMemory {
+  branch: string;
+  lastCheckpoint: string;
+  originUrl?: string | null;
+}
+
+export interface NativeGitRevertPlan {
+  kind: string;
+  protectDocs: boolean;
+}
+
+export interface NativeGitLocalEditsSplit {
+  human: string[];
+  agent: string[];
+  kept: string[];
 }
 
 export interface NativeTerminalErrorFacts {

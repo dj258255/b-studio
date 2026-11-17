@@ -21,6 +21,7 @@ use std::collections::VecDeque;
 mod close;
 pub mod claim;
 pub mod create;
+pub mod git_realign;
 mod json_text;
 pub mod lifecycle;
 pub mod limits;

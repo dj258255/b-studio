@@ -692,7 +692,10 @@ export class CheckpointStore {
     if (paths.length === 0) return undefined;
     const subdir = await this.#subdir();
     const scoped = paths.map((file) => (subdir ? `${subdir}/${file}` : file));
-    const changed = native.checkpointSplitNul(await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...scoped]));
+    // 경로는 파일 이름 그대로다. git이 glob(`*`)·pathspec 매직(`:(glob)`, `:/`, `:!`)으로 읽으면 이름 하나가 다른 바뀐 파일까지 끌어들여
+    // 게이트 없이 커밋된다(ADR-218: 남긴 에이전트 변경이 "직접 수정"으로 실린다). 경로를 넘기는 git 호출은 모두 글자 그대로 읽게 한다
+    const literal = { GIT_LITERAL_PATHSPECS: '1' };
+    const changed = native.checkpointSplitNul(await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', '--', ...scoped], { env: literal }));
     if (changed.length === 0) return undefined;
     if (findSecrets) {
       const leaks = await this.#secretLeaks(paths, `${message}\n${body ?? ''}`, findSecrets);
@@ -705,14 +708,19 @@ export class CheckpointStore {
     const index = path.join(gitDir, `b-studio-index-${process.pid}-${backupId()}`);
     let tree: string;
     try {
-      const env = { GIT_INDEX_FILE: index };
+      const env = { GIT_INDEX_FILE: index, ...literal };
       await this.#git(['read-tree', parentSha], { env });
       await this.#git(['add', '-A', '--', ...scoped], { env });
       tree = (await this.#git(['write-tree'], { env })).trim();
     } finally {
       await rm(index, { force: true });
     }
-    await this.#git(['add', '-A', '--', ...scoped]);
+    // 만든 트리가 부모와 다른 경로는 넘긴 경로뿐이어야 한다. 하나라도 범위 밖이면 커밋하지 않는다(시크릿 검사도 넘긴 경로만 읽었다)
+    const allowed = new Set(scoped);
+    const touched = native.checkpointSplitNul(await this.#git(['diff-tree', '-r', '--no-renames', '--name-only', '-z', parentSha, tree]));
+    const outside = touched.filter((file) => !allowed.has(file));
+    if (outside.length > 0) throw new CheckpointError(`지정한 경로 밖의 파일이 함께 담겨 체크포인트를 남기지 않았습니다: ${outside.slice(0, 5).join(', ')}`);
+    await this.#git(['add', '-A', '--', ...scoped], { env: literal });
     const sha = await this.#commitTree(tree, parentSha, commitMessage(message, body?.trim(), trailers), { allowEmpty: false });
     const checkpoint = await this.#checkpoint(sha);
     // 범위를 좁힌 커밋이라 생성 파일은 바꾸지 않았다 — 지금 디스크를 받아들이지 않고 부모의 스냅샷을 그대로 물려받는다
@@ -1020,7 +1028,8 @@ export class CheckpointStore {
     if (files.length === 0) return [];
     const subdir = await this.#subdir();
     const scoped = files.map((file) => (subdir ? `${subdir}/${file}` : file));
-    const out = await this.#git(['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all', '--', ...scoped]);
+    // 파일 이름 그대로 읽는다(commitPaths와 같은 이유, ADR-218)
+    const out = await this.#git(['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all', '--', ...scoped], { env: { GIT_LITERAL_PATHSPECS: '1' } });
     const ignored: string[] = [];
     for (const entry of out.split('\0').filter(Boolean)) {
       if (!entry.startsWith('!!')) continue;
