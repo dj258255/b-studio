@@ -1,5 +1,6 @@
+import { spawn } from 'node:child_process';
 import { describe, expect, it } from 'vitest';
-import { findUnhookedCli, findUnhookedCliOrUnknown, ptyPid } from './host-terminal';
+import { findUnhookedCli, findUnhookedCliByArgv, findUnhookedCliOrUnknown, processArgv, ptyPid } from './host-terminal';
 
 /** 감시가 쓰는 host-terminal의 두 자리(ADR-219, N20) */
 describe('ptyPid', () => {
@@ -37,5 +38,57 @@ describe('findUnhookedCli의 루트 pid', () => {
     expect(at(`${cliPath} --settings ${settingsPath} -p hi`)).toEqual([]);
     expect(at(`${cliPath} --settings ${settingsPath}x`)).toEqual([101]);
     expect(at(`${cliPath} --settings ${settingsPath} --settings /evil.json`)).toEqual([101]);
+  });
+});
+
+describe('진짜 argv(ADR-219 후속)', () => {
+  const settings = '/g/studio-a/settings.json';
+
+  /** 자기가 띄운 자식 하나의 진짜 argv를 읽는다. 끝나면 그 자식 PID만 끈다 */
+  it('요청 글 인자에 --settings가 든 붙은 CLI는 위반이 아니고, 다른 설정 파일을 받은 것은 위반이다', async () => {
+    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},5000)', '--mcp-config', '/m/mcp.json', '--settings', settings, 'explain --settings x'], { stdio: 'ignore' });
+    try {
+      const pid = child.pid!;
+      let argv: string[] | null = null;
+      for (let i = 0; i < 100; i += 1) {
+        argv = processArgv(pid);
+        if (argv?.includes('--settings')) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(argv).toEqual([process.execPath, '-e', 'setTimeout(()=>{},5000)', '--mcp-config', '/m/mcp.json', '--settings', settings, 'explain --settings x']);
+      // ps 한 줄은 따옴표를 잃는다: 인자들이 공백으로 이어진 한 줄
+      const processes = [
+        { pid: process.pid, ppid: 1, args: 'terminal-root' },
+        { pid, ppid: process.pid, args: argv!.join(' ') },
+      ];
+      expect(findUnhookedCliByArgv(process.pid, processes, { settingsPath: settings, cliPath: process.execPath })).toEqual([]);
+      expect(findUnhookedCliByArgv(process.pid, processes, { settingsPath: '/g/other/settings.json', cliPath: process.execPath })?.map((entry) => entry.pid)).toEqual([pid]);
+    } finally {
+      child.kill();
+    }
+  });
+
+  it('끝난 프로세스는 null이고 건너뛴다. 읽지 못하면 던진다(통과가 아니다)', () => {
+    const processes = [
+      { pid: 100, ppid: 1, args: '/bin/zsh' },
+      { pid: 101, ppid: 100, args: '/usr/local/bin/claude --resume' },
+    ];
+    const expected = { settingsPath: settings, cliPath: '/usr/local/bin/claude' };
+    expect(findUnhookedCliByArgv(100, processes, expected, () => null)).toEqual([]);
+    expect(() =>
+      findUnhookedCliByArgv(100, processes, expected, () => {
+        throw new Error('권한이 없습니다');
+      }),
+    ).toThrow('권한이 없습니다');
+    expect(findUnhookedCliByArgv(0, processes, expected, () => null)).toBeUndefined();
+    expect(findUnhookedCliByArgv(100, processes, expected, () => ['/usr/local/bin/claude', '--resume'])?.map((entry) => entry.pid)).toEqual([101]);
+  });
+
+  it('codex는 옛 규칙(ps 한 줄)이다', () => {
+    const processes = [
+      { pid: 100, ppid: 1, args: '/bin/zsh' },
+      { pid: 101, ppid: 100, args: '/opt/bin/codex' },
+    ];
+    expect(findUnhookedCliByArgv(100, processes, { settingsPath: '/g/root/studio-a', cliPath: '/opt/bin/codex', kind: 'codex' }, () => { throw new Error('읽지 않는다'); })?.map((entry) => entry.pid)).toEqual([101]);
   });
 });

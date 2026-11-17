@@ -8,10 +8,11 @@ import {
   expectedHostGatewayFiles,
   ACCOUNT_DIR_ENV,
   findHostCli,
-  findUnhookedCliOrUnknown,
+  findUnhookedCliByArgv,
   userStatusLineCommand,
   listProcesses,
   openAgentTerminal,
+  processArgv,
   openHostTerminal,
   pauseAgentContainer,
   probeAgentGateway,
@@ -321,7 +322,8 @@ const HOST_BACKEND: TerminalBackend = {
       if (rootPid === undefined) return { kind: 'unavailable' };
       try {
         const processes: ProcessEntry[] = await listProcesses();
-        const found = findUnhookedCliOrUnknown(rootPid, processes, { settingsPath, cliPath: cli.cliPath, kind: cli.kind });
+        // claude는 진짜 argv로, argv를 읽지 못하면 던져 이 회차의 검사를 실패(믿을 수 없음)로 둔다. 통과로 두지 않는다
+        const found = findUnhookedCliByArgv(rootPid, processes, { settingsPath, cliPath: cli.cliPath, kind: cli.kind }, processArgv);
         return found === undefined ? { kind: 'unavailable' } : { kind: 'listed', pids: found.map((entry) => entry.pid) };
       } catch {
         return { kind: 'failed' };

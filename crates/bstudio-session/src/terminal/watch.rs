@@ -131,19 +131,25 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
     }
 }
 
-/// root(PTY의 pid) 아래에서 도는 에이전트 CLI 중 우리 설정이 붙지 않은 것의 pid(트리를 앞 순서로 훑은 차례).
-/// root를 모르면(2보다 작다: 0은 모든 프로세스의 부모 자리이고 1은 init이다) `None`이다 — 찾을 수 없다는 뜻이다. 빈 목록(찾아 보니 없다)과 다르다
-pub fn find_unhooked_cli(root: i64, processes: &[Process], kind: CliKind, cli_path: &str, marker: &str) -> Option<Vec<i64>> {
-    if root < 2 {
-        return None;
+/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게 맞춘다). 요소 `--settings` 바로 다음 요소가 `settings_path`와 글자 그대로 같거나, 요소 하나가 `--settings=<settings_path>`이고,
+/// argv 전체에서 `--settings`·`--settings=…` 요소가 그것 하나뿐이어야 한다. 요청 글처럼 한 요소 안에 `--settings`가 섞인 것은 세지 않는다(ps 한 줄은 따옴표를 잃어 이것을 가르지 못했다)
+pub fn hooked_argv(argv: &[String], settings_path: &str) -> bool {
+    let is_option = |element: &String| element == "--settings" || element.starts_with("--settings=");
+    if argv.iter().filter(|element| is_option(element)).count() != 1 {
+        return false;
     }
+    let joined = format!("--settings={settings_path}");
+    argv.iter().enumerate().any(|(at, element)| (element == "--settings" && argv.get(at + 1).is_some_and(|next| next == settings_path)) || *element == joined)
+}
+
+/// 트리를 앞 순서로 훑어 `keep`이 참인 프로세스의 pid를 모은다. 같은 pid는 한 번만 본다. 깊이가 깊어도 넘치지 않게 스택을 직접 둔다
+fn walk_tree(root: i64, processes: &[Process], keep: &dyn Fn(&Process) -> bool) -> Vec<i64> {
     let mut children: HashMap<i64, Vec<&Process>> = HashMap::new();
     for process in processes {
         children.entry(process.ppid).or_default().push(process);
     }
     let mut found = Vec::new();
     let mut seen: BTreeSet<i64> = BTreeSet::from([root]);
-    // 직계 자식뿐 아니라 손자(셸 → 셸 → claude)까지 본다. 같은 pid를 두 번 보지 않는다. 깊이가 깊어도 넘치지 않게 스택을 직접 둔다
     let mut stack: Vec<(i64, usize)> = vec![(root, 0)];
     while let Some((pid, next)) = stack.pop() {
         let Some(list) = children.get(&pid) else { continue };
@@ -152,12 +158,31 @@ pub fn find_unhooked_cli(root: i64, processes: &[Process], kind: CliKind, cli_pa
         if !seen.insert(child.pid) {
             continue;
         }
-        if looks_like_agent_cli(&child.args, cli_path, kind) && !hooked(&child.args, marker, kind) {
+        if keep(child) {
             found.push(child.pid);
         }
         stack.push((child.pid, 0));
     }
-    Some(found)
+    found
+}
+
+/// root(PTY의 pid) 아래에서 도는 에이전트 CLI로 보이는 프로세스의 pid(ps 한 줄로, 넓게: 거부 목록 쪽). 감시는 이 후보마다 진짜 argv를 읽어 `hooked_argv`로 가른다.
+/// root를 모르면(2보다 작다) `None`이다
+pub fn cli_candidates(root: i64, processes: &[Process], kind: CliKind, cli_path: &str) -> Option<Vec<i64>> {
+    if root < 2 {
+        return None;
+    }
+    Some(walk_tree(root, processes, &|process| looks_like_agent_cli(&process.args, cli_path, kind)))
+}
+
+/// root(PTY의 pid) 아래에서 도는 에이전트 CLI 중 우리 설정이 붙지 않은 것의 pid(트리를 앞 순서로 훑은 차례)를 **ps 한 줄**로 판정한다.
+/// 감시의 claude는 이 판정을 쓰지 않고 진짜 argv를 쓴다(`cli_candidates`·`hooked_argv`). 이 함수는 codex(실험, 옛 규칙)와 argv를 읽지 못하는 자리의 차등 기준이다.
+/// root를 모르면(2보다 작다: 0은 모든 프로세스의 부모 자리이고 1은 init이다) `None`이다 — 찾을 수 없다는 뜻이다. 빈 목록(찾아 보니 없다)과 다르다
+pub fn find_unhooked_cli(root: i64, processes: &[Process], kind: CliKind, cli_path: &str, marker: &str) -> Option<Vec<i64>> {
+    if root < 2 {
+        return None;
+    }
+    Some(walk_tree(root, processes, &|process| looks_like_agent_cli(&process.args, cli_path, kind) && !hooked(&process.args, marker, kind)))
 }
 
 // ── 감시 상태 전이 ──

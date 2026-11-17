@@ -688,6 +688,46 @@ export function findUnhookedCliOrUnknown(
   return pids.map((pid) => byPid.get(pid)!);
 }
 
+/** 프로세스의 진짜 argv. 끝났으면 null, 읽지 못하면(권한·지원하지 않는 OS) 던진다 */
+export function processArgv(pid: number): string[] | null {
+  return native.terminalProcessArgv(pid);
+}
+
+/**
+ * 감시가 쓰는 판정(ADR-219 후속): claude는 ps 한 줄이 아니라 **진짜 argv**로 훅이 붙었는지 본다. `ps`의 인자 한 줄은 낱말마다 따옴표를 잃어
+ * 첫 요청 글(실행 인자로 실린다)에 든 `--settings`가 진짜 옵션과 구별되지 않았다. 후보(ps 한 줄로 CLI로 보이는 것, 넓게)마다 argv를 읽어
+ * `--settings <경로>`가 하나뿐인지 본다(여는 쪽이라 좁게). argv가 없으면(그 사이 끝났다) 건너뛰고, 읽지 못하면 던진다 — 부른 쪽은 이것을 프로세스 검사의 실패(믿을 수 없음)로 읽는다.
+ * codex는 옛 규칙(ps 한 줄의 표식 포함, 실험)이다. root를 모르면(2보다 작다) `undefined`다
+ */
+export function findUnhookedCliByArgv(
+  root: number,
+  processes: readonly ProcessEntry[],
+  expected: { settingsPath: string; cliPath: string; kind?: HostCliKind },
+  readArgv: (pid: number) => string[] | null = processArgv,
+): ProcessEntry[] | undefined {
+  const kind = expected.kind ?? 'claude';
+  if (kind === 'codex') return findUnhookedCliOrUnknown(root, processes, expected);
+  if (!Number.isSafeInteger(root) || processes.some((entry) => !Number.isSafeInteger(entry.pid) || !Number.isSafeInteger(entry.ppid))) {
+    throw new SandboxError('프로세스 목록을 읽지 못했습니다', '정수가 아닌 pid가 있습니다');
+  }
+  const pids = native.terminalCliCandidates(
+    root,
+    processes.map((entry) => ({ pid: entry.pid, ppid: entry.ppid, args: entry.args })),
+    kind,
+    expected.cliPath,
+  );
+  if (pids === null) return undefined;
+  const byPid = new Map<number, ProcessEntry>();
+  for (const entry of processes) if (!byPid.has(entry.pid)) byPid.set(entry.pid, entry);
+  const found: ProcessEntry[] = [];
+  for (const pid of pids) {
+    const argv = readArgv(pid);
+    if (argv === null) continue;
+    if (!native.terminalHookedArgv(argv, expected.settingsPath)) found.push(byPid.get(pid)!);
+  }
+  return found;
+}
+
 /** `findUnhookedCliOrUnknown`과 같되 root를 모르면 던진다(찾지 못한 것을 빈 목록으로 읽지 않는다) */
 export function findUnhookedCli(root: number, processes: readonly ProcessEntry[], expected: { settingsPath: string; cliPath: string; kind?: HostCliKind }): ProcessEntry[] {
   const found = findUnhookedCliOrUnknown(root, processes, expected);

@@ -37,6 +37,8 @@ const fake = vi.hoisted(() => ({
   listCalls: 0,
   /** 관문 파일 검사를 부른 횟수(검사 한 회차마다 한 번) */
   fileCalls: 0,
+  /** 진짜 argv를 읽는 가짜: pid별로 정해 두면 그 값(null은 끝남, Error는 읽지 못함), 없으면 ps 한 줄을 공백으로 자른 것 */
+  argv: new Map<number, string[] | null | Error>(),
 }));
 
 vi.mock('@b-studio/sandbox', async (importOriginal) => {
@@ -90,7 +92,14 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     fake.listCalls += 1;
     if (fake.psFails) throw new Error('ps를 읽지 못했습니다');
     return fake.processes.map((entry) => ({ ...entry }));
-  }, checkHostGatewayConfig: async () => {
+  }, processArgv: (pid: number) => {
+    const given = fake.argv.get(pid);
+    if (given instanceof Error) throw given;
+    if (given !== undefined) return given;
+    const entry = fake.processes.find((candidate) => candidate.pid === pid);
+    return entry ? entry.args.split(' ') : null;
+  },
+  checkHostGatewayConfig: async () => {
     fake.fileCalls += 1;
     return [];
   }, writeHostGatewayConfig: async () => '', providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }) };
@@ -154,6 +163,7 @@ beforeEach(async () => {
   fake.psFails = false;
   fake.listCalls = 0;
   fake.fileCalls = 0;
+  fake.argv = new Map();
   await serveContract();
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
@@ -371,6 +381,62 @@ describe('N15: 위반이 이어지는 동안 새로 열린 실행도 위반을 �
     expect(fake.execCalls).toContainEqual(['./gradlew', 'test']);
     expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'done' });
     expect(await readFile(path.join(session.work, 'api/src/Sneaked.java'), 'utf8')).toBe('class Sneaked {}\n');
+  }, 40_000);
+});
+
+describe('진짜 argv로 훅이 붙었는지 본다(ADR-219 후속)', () => {
+  it('첫 요청 글에 --settings가 든 붙은 CLI는 위반이 아니다', async () => {
+    const session = await open();
+    const watch = await watching(session);
+    const settings = path.join(watch.place, 'settings.json');
+    // 감싸개가 `exec <cli> --mcp-config M --settings S "$@"`로 부른다. 첫 요청 글은 한 인자다
+    const prompt = 'claude의 --settings 옵션 문서를 써 줘';
+    fake.processes = [SHELL, { pid: 5100, ppid: PTY_PID, args: `/x/fake/claude-real --mcp-config /m/mcp.json --settings ${settings} ${prompt}` }];
+    fake.argv.set(5100, ['/x/fake/claude-real', '--mcp-config', '/m/mcp.json', '--settings', settings, prompt]);
+    await watch.scan();
+    await startWork(session);
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message ?? '').not.toContain('검증을 우회할 수 있는 일');
+    expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'done' });
+  }, 40_000);
+
+  it('붙은 것처럼 보이는 요청 글만 받은 훅 없는 CLI는 위반이다(요청 글 자리의 표식은 진짜 --settings가 아니다)', async () => {
+    const session = await open();
+    const watch = await watching(session);
+    const settings = path.join(watch.place, 'settings.json');
+    const faked = `--settings ${settings}`;
+    fake.processes = [SHELL, { pid: 5200, ppid: PTY_PID, args: `/x/fake/claude-real ${faked}` }];
+    fake.argv.set(5200, ['/x/fake/claude-real', faked]);
+    await startWork(session);
+    await watch.scan();
+    // 알림이 열려 있던 실행을 곧바로 실패로 닫는다
+    expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'failed' });
+    expect(session.ofType('agent').some((event) => event.event.type === 'warning' && event.event.message.includes('pid 5200'))).toBe(true);
+  }, 40_000);
+
+  it('argv를 읽지 못하면 그 회차의 프로세스 검사는 실패이고 턴 끝을 통과로 닫지 않는다', async () => {
+    const session = await open();
+    const watch = await watching(session);
+    const settings = path.join(watch.place, 'settings.json');
+    fake.processes = [SHELL, { pid: 5300, ppid: PTY_PID, args: `/x/fake/claude-real --settings ${settings}` }];
+    fake.argv.set(5300, new Error('권한이 없습니다'));
+    await watch.scan();
+    await startWork(session);
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message).toContain('관문 감시가 확인하지 못했습니다');
+    expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'failed' });
+  }, 40_000);
+
+  it('후보가 그 사이 끝났으면(argv 없음) 건너뛴다', async () => {
+    const session = await open();
+    const watch = await watching(session);
+    fake.processes = [SHELL, { pid: 5400, ppid: PTY_PID, args: '/x/fake/claude-real --resume' }];
+    fake.argv.set(5400, null);
+    await watch.scan();
+    await startWork(session);
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    expect(answer.message ?? '').not.toContain('검증을 우회할 수 있는 일');
+    expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'done' });
   }, 40_000);
 });
 

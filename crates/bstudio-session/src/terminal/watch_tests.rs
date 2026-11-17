@@ -301,3 +301,62 @@ fn first_request_text_in_the_args_can_sway_the_marker_check() {
     let mention = [p(100, 1, "/bin/zsh"), p(101, 100, &format!("{CLI} --mcp-config /m --settings {SETTINGS} explain the --settings flag"))];
     assert_eq!(find(100, &mention), Some(vec![101]));
 }
+
+// ── 진짜 argv ──
+
+fn argv(items: &[&str]) -> Vec<String> {
+    items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+#[test]
+fn hooked_argv_wrapper_launch_with_request_text() {
+    // 감싸개가 `exec <cli> --mcp-config M --settings S "$@"`로 부른다. 요청 글은 한 요소다
+    let ok = argv(&[CLI, "--mcp-config", "/m/mcp.json", "--settings", SETTINGS, "explain the --settings flag"]);
+    assert!(hooked_argv(&ok, SETTINGS));
+    // 요청 글 요소가 표식 전체를 담아도 요소 하나라서 세지 않는다
+    let marker_text = format!("--settings {SETTINGS}");
+    assert!(hooked_argv(&argv(&[CLI, "--settings", SETTINGS, &marker_text]), SETTINGS));
+    assert!(hooked_argv(&argv(&[CLI, "--settings", SETTINGS]), SETTINGS));
+}
+
+#[test]
+fn hooked_argv_equals_form() {
+    assert!(hooked_argv(&argv(&[CLI, &format!("--settings={SETTINGS}"), "-p", "hi"]), SETTINGS));
+    assert!(!hooked_argv(&argv(&[CLI, "--settings=/evil.json"]), SETTINGS));
+}
+
+#[test]
+fn hooked_argv_rejects_other_files_and_extra_options() {
+    assert!(!hooked_argv(&argv(&[CLI, "--settings", &format!("{SETTINGS}x")]), SETTINGS));
+    assert!(!hooked_argv(&argv(&[CLI, "--settings", &format!("{SETTINGS}/evil.json")]), SETTINGS));
+    // 사용자가 덧붙인 --settings(뒤든 앞이든)
+    assert!(!hooked_argv(&argv(&[CLI, "--settings", SETTINGS, "--settings", "/evil.json"]), SETTINGS));
+    assert!(!hooked_argv(&argv(&[CLI, "--settings", "/evil.json", "--settings", SETTINGS]), SETTINGS));
+    assert!(!hooked_argv(&argv(&[CLI, "--settings", SETTINGS, "--settings=/evil.json"]), SETTINGS));
+    // 값이 없는 옵션, 다른 옵션의 값 자리
+    assert!(!hooked_argv(&argv(&[CLI, "--settings"]), SETTINGS));
+    assert!(!hooked_argv(&argv(&[CLI, "--mcp-config", SETTINGS]), SETTINGS));
+    assert!(!hooked_argv(&argv(&[CLI, "--resume"]), SETTINGS));
+    // 빈 argv
+    assert!(!hooked_argv(&[], SETTINGS));
+}
+
+#[test]
+fn hooked_argv_does_not_count_substrings_inside_an_element() {
+    let sneaky = argv(&[CLI, "--settings", SETTINGS, "--settings x"]);
+    assert!(hooked_argv(&sneaky, SETTINGS));
+    // 요소 안에 표식만 있고 진짜 --settings가 없는 것은 붙지 않았다(요청 글 자리에 표식만 받은 훅 없는 CLI)
+    assert!(!hooked_argv(&argv(&[CLI, &format!("--settings {SETTINGS}")]), SETTINGS));
+}
+
+#[test]
+fn cli_candidates_use_the_wide_ps_rule_and_unknown_root() {
+    let processes = [
+        p(100, 1, "/bin/zsh"),
+        p(101, 100, &format!("{CLI} --mcp-config /m --settings {SETTINGS} explain --settings x")),
+        p(102, 100, "/usr/bin/vim"),
+        p(103, 100, "node /x/node_modules/@anthropic-ai/claude-code/cli.js"),
+    ];
+    assert_eq!(cli_candidates(100, &processes, CliKind::Claude, CLI), Some(vec![101, 103]));
+    assert_eq!(cli_candidates(0, &processes, CliKind::Claude, CLI), None);
+}

@@ -7853,6 +7853,26 @@ pub fn terminal_find_unhooked_cli(root: i64, processes: Vec<TerminalProcessJs>, 
     find_unhooked_cli(root, &processes, CliKind::parse(&kind).unwrap_or(CliKind::Claude), &cli_path, &marker)
 }
 
+/// 루트 아래의 에이전트 CLI로 보이는 프로세스의 pid(ps 한 줄로, 넓게). 루트를 모르면(2보다 작다) 없음(null)이다
+#[napi]
+pub fn terminal_cli_candidates(root: i64, processes: Vec<TerminalProcessJs>, kind: String, cli_path: String) -> Option<Vec<i64>> {
+    use session_terminal::watch::{cli_candidates, CliKind, Process};
+    let processes: Vec<Process> = processes.into_iter().map(|p| Process { pid: p.pid, ppid: p.ppid, args: p.args }).collect();
+    cli_candidates(root, &processes, CliKind::parse(&kind).unwrap_or(CliKind::Claude), &cli_path)
+}
+
+/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게)
+#[napi]
+pub fn terminal_hooked_argv(argv: Vec<String>, settings_path: String) -> bool {
+    session_terminal::watch::hooked_argv(&argv, &settings_path)
+}
+
+/// 프로세스의 진짜 argv. 이미 끝났으면 null, 읽지 못하면(권한·지원하지 않는 OS·모양이 틀림) 던진다 — 부른 쪽은 통과로 읽지 않는다
+#[napi]
+pub fn terminal_process_argv(pid: i64) -> Result<Option<Vec<String>>> {
+    bstudio_io::process_argv::process_argv(pid).map_err(|error| Error::from_reason(format!("프로세스 {pid}의 argv를 읽지 못했습니다: {error}")))
+}
+
 /// 훅 요청 본문 종류: `empty`·`object`·`not_object`·`invalid`
 #[napi]
 pub fn terminal_hook_body_kind(body: Buffer) -> String {
