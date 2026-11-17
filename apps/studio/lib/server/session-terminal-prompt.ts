@@ -29,7 +29,8 @@ export type PromptDecision =
   | { kind: 'nothing' }
   | { kind: 'open' };
 
-export type TerminalLimit = 'none' | 'max_turns' | 'budget';
+/** `unknown`은 한도를 볼 수 없는 실행(사용량 소식이 끊겼다, ADR-213)이다. 코어는 한도에 닿은 것처럼 막는다 */
+export type TerminalLimit = 'none' | 'max_turns' | 'budget' | 'unknown';
 
 export interface PreToolFacts {
   /** 파일을 바꾸지 않는 도구다. MCP는 늘 거짓이다 */

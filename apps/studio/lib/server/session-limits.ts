@@ -38,15 +38,33 @@ export function newLedger(): RunLedger {
  * 사람 몫에 delta를 더한다(늘어난 것이 없으면 건너뛴다). 더하려 한 양은 먼저 원장의 누적에 넣고, 파일에 쓰기가 **성공한 뒤에만** 저장을 마친 몫에 넣는다.
  * 쓰지 못해도(잠금 시간 초과·읽을 수 없는 파일·쓰기 오류) 실행은 계속한다. 그 양은 누적에만 있어 한도 판정이 센다
  */
-export function chargeUserUsage(by: string, delta: AgentUsage, window: UsageWindow, ledger?: RunLedger): void {
-  if (!hasTokens(delta)) return;
+export function chargeUserUsage(by: string, delta: AgentUsage, window: UsageWindow, ledger?: RunLedger): boolean {
+  if (!hasTokens(delta)) return true;
   const tokens = totalTokens(delta);
   if (ledger) ledger.accum += tokens;
   try {
     addUserUsageSync(by, delta, window);
     if (ledger) ledger.saved += tokens;
+    return true;
   } catch (error) {
     console.error('[b-studio] 사람별 토큰 사용량을 기록하지 못했습니다', error);
+    return false;
+  }
+}
+
+/**
+ * 앞서 쓰지 못한 몫(`chargeUserUsage`가 거짓을 돌려줬다)을 다시 쓴다(ADR-213, U1). 그 몫은 이미 그때 원장의 누적에 들어 있으므로 누적은 다시 늘리지 않고,
+ * 쓰기가 성공했을 때만 저장을 마친 몫을 늘린다. 또 쓰지 못하면 거짓이다(부른 쪽이 계속 들고 있는다)
+ */
+export function retryUserUsage(by: string, delta: AgentUsage, window: UsageWindow, ledger?: RunLedger): boolean {
+  if (!hasTokens(delta)) return true;
+  try {
+    addUserUsageSync(by, delta, window);
+    if (ledger) ledger.saved += totalTokens(delta);
+    return true;
+  } catch (error) {
+    console.error('[b-studio] 사람별 토큰 사용량을 다시 기록하지 못했습니다', error);
+    return false;
   }
 }
 

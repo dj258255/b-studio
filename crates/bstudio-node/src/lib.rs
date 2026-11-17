@@ -7145,6 +7145,109 @@ pub fn terminal_decide_after_checkpoint(violation: bool) -> String {
     }
 }
 
+// ── 세션 터미널의 사용량 귀속·정체 판정(ADR-213, 4f B4d). 순수 판정이다: 기억·저장·알림은 TS가 한다 ──
+
+/// 요청 하나를 처리하기 전의 사실
+#[napi(object)]
+pub struct TerminalUsageFactsJs {
+    pub has_request_id: bool,
+    pub counted: bool,
+    pub attached: bool,
+    pub open_run: bool,
+    pub in_open_window: bool,
+    pub in_early_slack: bool,
+    pub opened_by_tool: bool,
+    pub in_closed_run: bool,
+    pub in_closed_late: bool,
+}
+
+#[napi(object)]
+pub struct TerminalUsageStepJs {
+    pub count: bool,
+    /// `none`·`open`·`closed`
+    pub target: String,
+    pub count_turn: bool,
+    pub check_limits: bool,
+}
+
+/// 요청 하나를 어떻게 처리할지: 셀지, 붙일 실행, 턴을 셀지, 한도를 볼지
+#[napi]
+pub fn terminal_decide_usage(facts: TerminalUsageFactsJs) -> TerminalUsageStepJs {
+    use session_terminal::usage::{decide_usage, UsageFacts};
+    let step = decide_usage(&UsageFacts {
+        has_request_id: facts.has_request_id,
+        counted: facts.counted,
+        attached: facts.attached,
+        open_run: facts.open_run,
+        in_open_window: facts.in_open_window,
+        in_early_slack: facts.in_early_slack,
+        opened_by_tool: facts.opened_by_tool,
+        in_closed_run: facts.in_closed_run,
+        in_closed_late: facts.in_closed_late,
+    });
+    TerminalUsageStepJs { count: step.count, target: step.target.as_str().to_owned(), count_turn: step.count_turn, check_limits: step.check_limits }
+}
+
+/// 도구 호출이 연 실행에 붙이는 열린 시각 앞의 시간(ms)
+#[napi]
+pub fn terminal_early_usage_ms() -> i64 {
+    session_terminal::usage::EARLY_USAGE_MS
+}
+
+/// 닫힌 실행에 늦게 닿는 사용량을 그 실행의 몫으로 보는 시간(ms)
+#[napi]
+pub fn terminal_late_usage_ms() -> i64 {
+    session_terminal::usage::LATE_USAGE_MS
+}
+
+#[napi(object)]
+pub struct TerminalStallFactsJs {
+    pub open_run: bool,
+    pub notified: bool,
+    pub idle_ms: i64,
+    pub stall_ms: i64,
+}
+
+/// 정체 감시 한 회차: `stop`·`nothing`·`notify`
+#[napi]
+pub fn terminal_decide_stall(facts: TerminalStallFactsJs) -> String {
+    use session_terminal::usage::{decide_stall, StallFacts, StallStep};
+    // 음수 정체 시간은 알아볼 수 없는 값이라 0으로 읽는다(알리기만 하는 판정)
+    let step = decide_stall(&StallFacts { open_run: facts.open_run, notified: facts.notified, idle_ms: facts.idle_ms, stall_ms: facts.stall_ms.max(0) as u64 });
+    match step {
+        StallStep::Stop => "stop",
+        StallStep::Nothing => "nothing",
+        StallStep::Notify => "notify",
+    }
+    .to_owned()
+}
+
+/// 정체 감시 주기(ms)
+#[napi]
+pub fn terminal_stall_interval_ms(stall_ms: i64) -> i64 {
+    session_terminal::usage::stall_interval_ms(stall_ms.max(0) as u64) as i64
+}
+
+#[napi(object)]
+pub struct TerminalSilenceFactsJs {
+    pub cli_sends_usage: bool,
+    pub telemetry_seen: bool,
+    pub write_hooks: u32,
+    pub elapsed_ms: i64,
+    pub silent_before: bool,
+}
+
+/// 사용량 소식이 끊겼는가: `fine`·`silent`
+#[napi]
+pub fn terminal_decide_silence(facts: TerminalSilenceFactsJs) -> String {
+    use session_terminal::usage::{decide_silence, Silence, SilenceFacts};
+    match decide_silence(&SilenceFacts { cli_sends_usage: facts.cli_sends_usage, telemetry_seen: facts.telemetry_seen, write_hooks: facts.write_hooks, elapsed_ms: facts.elapsed_ms, silent_before: facts.silent_before }) {
+        Silence::Fine => "fine",
+        Silence::Silent => "silent",
+    }
+    .to_owned()
+}
+
 /// 닫기의 단계 이름(순서대로)
 #[napi]
 pub fn terminal_close_steps() -> Vec<String> {
