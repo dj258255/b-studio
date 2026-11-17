@@ -23,6 +23,7 @@ pub mod limit;
 pub mod prompt;
 pub mod telemetry;
 pub mod turn_end;
+pub mod turn_end_rest;
 pub mod usage;
 
 use crate::claim::{Holder, Phase, Slot, Ticket};
