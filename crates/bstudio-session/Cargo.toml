@@ -9,6 +9,8 @@ publish.workspace = true
 
 [dependencies]
 bstudio-guard = { path = "../bstudio-guard" }
+# 읽기만 요청의 NFC 맞춤(terminal::classify). JS의 normalize('NFC')와 같은 뜻이다. bstudio-guard가 쓰는 판과 같다
+unicode-normalization = "0.1.26"
 # 저장 예약의 타이머(time)와 쓰기 줄(sync), 파일 쓰기를 JS 스레드 밖에서 하는 spawn_blocking(rt). 런타임은 부르는 쪽이 준다
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 

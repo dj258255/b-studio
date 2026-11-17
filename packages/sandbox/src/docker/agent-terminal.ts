@@ -151,14 +151,28 @@ const READ_ONLY_LEADING = String.raw`^[\s\u200b-\u200f\u2060\ufeff\u202a-\u202e\
 const PASTED_OPEN = String.raw`<pasted_content(?:\s+id="[^"]*")?>\r?\n?`;
 const PASTED_CLOSE = String.raw`\r?\n?</pasted_content(?:\s+id="[^"]*")?>`;
 
-/** 붙여 넣은 요청의 감싸개 표시만 지우고 안의 글은 남긴다. 표시가 없으면 그대로 돌려준다 */
+/** 붙여 넣은 요청의 감싸개 표시만 한 번 지우고 안의 글은 남긴다. 표시가 없으면 그대로 돌려준다 */
 export function unwrapPastedPrompt(prompt: string): string {
   return prompt.replace(new RegExp(PASTED_OPEN, 'g'), '').replace(new RegExp(PASTED_CLOSE, 'g'), '');
 }
 
-/** 조합형(NFD)으로 들어온 한글도 같은 글로 본다 */
+/** 감싸개를 벗기는 단계의 상한. 한 단계는 표시를 하나 이상 지우므로 정상 입력은 몇 단계 안에 끝난다. 넘으면 알아보지 못한 입력이라 읽기만으로 본다 */
+const UNWRAP_STEP_LIMIT = 64;
+
+/**
+ * 읽기만 요청인가. 감싸개를 **더 벗길 것이 없을 때까지** 벗기며 단계마다 표시로 시작하는지 본다 — 하나라도 시작하면 읽기만이다(ADR-215).
+ * 이어 붙은 표시(`<pasted_content<pasted_content>>`)는 벗기면 새 표시가 생겨, 한 번이나 두 번만 벗기면 단계마다 결과가 달랐다. 벗기기가 끝나지 않으면 읽기만이다(막는 쪽).
+ * 조합형(NFD)으로 들어온 한글도 같은 글로 본다. 서버는 같은 규칙을 Rust 코어(`terminal::classify`)로 부르고, 이 함수는 컨테이너 안의 훅 스크립트와 같은 꼴의 규칙이다
+ */
 export function isReadOnlyPrompt(prompt: string): boolean {
-  return unwrapPastedPrompt(prompt).normalize('NFC').replace(new RegExp(READ_ONLY_LEADING), '').startsWith(AGENT_READ_ONLY_MARK);
+  let current = prompt;
+  for (let step = 0; step < UNWRAP_STEP_LIMIT; step += 1) {
+    const next = unwrapPastedPrompt(current);
+    if (next.normalize('NFC').replace(new RegExp(READ_ONLY_LEADING), '').startsWith(AGENT_READ_ONLY_MARK)) return true;
+    if (next === current) return false;
+    current = next;
+  }
+  return true;
 }
 
 export const AGENT_HOOK_SCRIPT = `// b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.
@@ -174,13 +188,19 @@ function finish(output) {
   process.exit(0);
 }
 
-// 읽기만 요청인가. 서버와 같은 규칙이다(isReadOnlyPrompt) — 붙여 넣은 요청의 감싸개를 먼저 벗긴다
+// 읽기만 요청인가. 서버와 같은 규칙이다(Rust 코어의 classify, 같은 꼴의 isReadOnlyPrompt) — 붙여 넣은 요청의 감싸개를 더 벗길 것이 없을 때까지 벗기며 단계마다 본다
 function readOnlyPrompt() {
   try {
     const prompt = JSON.parse(body.toString('utf8')).prompt;
     if (typeof prompt !== 'string') return false;
-    const unwrapped = prompt.replace(new RegExp(${JSON.stringify(PASTED_OPEN)}, 'g'), '').replace(new RegExp(${JSON.stringify(PASTED_CLOSE)}, 'g'), '');
-    return unwrapped.normalize('NFC').replace(new RegExp(${JSON.stringify(READ_ONLY_LEADING)}), '').startsWith(${JSON.stringify(AGENT_READ_ONLY_MARK)});
+    let current = prompt;
+    for (let step = 0; step < ${UNWRAP_STEP_LIMIT}; step += 1) {
+      const next = current.replace(new RegExp(${JSON.stringify(PASTED_OPEN)}, 'g'), '').replace(new RegExp(${JSON.stringify(PASTED_CLOSE)}, 'g'), '');
+      if (next.normalize('NFC').replace(new RegExp(${JSON.stringify(READ_ONLY_LEADING)}), '').startsWith(${JSON.stringify(AGENT_READ_ONLY_MARK)})) return true;
+      if (next === current) return false;
+      current = next;
+    }
+    return true;
   } catch {
     return false;
   }
