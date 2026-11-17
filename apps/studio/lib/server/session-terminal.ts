@@ -8,7 +8,7 @@ import {
   expectedHostGatewayFiles,
   ACCOUNT_DIR_ENV,
   findHostCli,
-  findUnhookedCli,
+  findUnhookedCliOrUnknown,
   userStatusLineCommand,
   listProcesses,
   openAgentTerminal,
@@ -32,6 +32,7 @@ import {
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { terminalModeSetting } from './terminal-allowed';
+import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
 
 /**
  * 세션 터미널(이슈 #673): 세션마다 에이전트 CLI용 컨테이너 하나와 그 안의 가상 터미널 하나를 든다.
@@ -99,6 +100,8 @@ interface TerminalState {
   startPendingSince?: number;
   /** 열려 있는 터미널의 감시를 멈추는 함수(백엔드가 watch를 줄 때만). 터미널이 끝나거나 닫히면 부른다 */
   watchStop?: () => void;
+  /** 그 감시가 밖(실행의 열기·턴 끝)에 내주는 자리. 감시를 멈추면 등록을 지운다 */
+  watchControl?: WatchControl;
   /**
    * 이 스튜디오 프로세스에서 지금 샌드박스의 터미널을 연 적이 있는가(#872). 처음 열 때만 지난 CLI 대화를 이어 붙인다.
    * 같은 프로세스에서 다시 여는 것은 CLI·셸이 끝났거나 사람이 닫은 뒤라, 일부러 끝낸 대화를 되살리지 않는다
@@ -145,6 +148,11 @@ export interface TerminalTarget {
   onViolation?: (reason: string) => void;
 }
 
+/**
+ * 감시를 멈추는 함수. 실행의 열기와 턴 끝에 닿는 감시(ADR-219)는 이 함수에 달아 둔 `watchControl`로 내준다 — 달지 않은 감시(가짜, 옛 호출자)는 그 자리에 닿지 않는다
+ */
+export type WatchStop = (() => void) & { watchControl?: WatchControl };
+
 /** 터미널을 여는 자리(테스트가 가짜를 끼운다) */
 export interface TerminalBackend {
   /** 터미널이 붙을 자리를 준비하고 그 자리를 가리키는 값을 돌려준다(컨테이너 이름, 또는 관문 설정 폴더) */
@@ -169,7 +177,7 @@ export interface TerminalBackend {
    * 열린 터미널을 감시한다. 위반을 찾으면 report를 부른다. 돌려준 함수로 멈춘다.
    * 관문을 쓰지 않는 백엔드(컨테이너)는 이 메서드를 두지 않는다 — 관리 설정이 읽기 전용 마운트라 필요 없다
    */
-  watch?(place: string, terminal: AgentTerminal, target: TerminalTarget, report: (reason: string) => void): () => void;
+  watch?(place: string, terminal: AgentTerminal, target: TerminalTarget, report: (reason: string) => void): WatchStop;
   /**
    * 검사 구간(Stop 훅의 게이트) 동안 그 세션의 에이전트 컨테이너를 멈추고 푼다(이슈 #765).
    * 멈출 컨테이너가 없는 이 컴퓨터 방식은 두지 않는다 — 그 한계는 sessions.ts의 Stop 훅 게이트에 적었다
@@ -275,89 +283,86 @@ const HOST_BACKEND: TerminalBackend = {
     // 개발 서버가 모듈을 다시 읽으면 기억한 관문이 비어 있을 수 있다. 조용히 넘어가면 감시가 꺼진 것을 모른다
     if (!saved) {
       report('관문 감시를 시작하지 못했습니다(기억한 관문이 없습니다). 터미널을 닫았다가 다시 여세요');
-      return () => {};
+      // 감시가 꺼진 채로 턴이 통과로 닫히지 않게, 믿을 수 없다고 말하는 감시를 내준다
+      const stop: WatchStop = () => {};
+      stop.watchControl = { view: () => ({ live: [], problems: ['관문 감시를 시작하지 못했습니다(기억한 관문이 없습니다)'] }), recheck: async () => {} };
+      return stop;
     }
     const { address, cli, root, expected } = saved;
     const settingsPath = path.join(place, HOST_SETTINGS_FILE);
-    // PTY의 pid. 이 아래에서 도는 프로세스 중 훅 없는 CLI를 찾는다(pid를 모르면 파일 검사만 한다)
+    // PTY의 pid. 이 아래에서 도는 프로세스 중 훅 없는 CLI를 찾는다. 모르면 프로세스 검사를 "할 수 없음"으로 둔다(통과가 아니다, N20)
     const rootPid = (terminal as AgentTerminal & { pid?: number }).pid;
-    const warnedPids = new Set<number>();
+    // 감시 상태의 전이는 코어가 한다(ADR-219). 여기는 검사하고 결과를 넘길 뿐이다
+    let state = newWatchState(cli.kind);
     let stopped = false;
     let debounce: NodeJS.Timeout | undefined;
-    let fileFailures = 0;
-    let fileReported = false;
-    let psFailures = 0;
-    let psReported = false;
-    let inFlight = false;
+    let running: Promise<void> | undefined;
     let rerun = false;
 
-    const inspect = async (): Promise<void> => {
-      // 관문 파일 검사. 던지면 이 회차 파일 검사는 건너뛰되, 세 번 연달아 실패하면 감시가 조용히 꺼진 것처럼 보이지 않게 한 번 알린다
-      let changed: string[] | undefined;
+    const inspectFiles = async (): Promise<WatchFileCheck> => {
+      // 관문 파일 검사. 던지면 이 회차는 "확인하지 못함"이다
+      let changed: string[];
       try {
         changed = await checkHostGatewayConfig(place, expected);
-        fileFailures = 0;
       } catch {
-        fileFailures += 1;
-        if (fileFailures >= 3 && !fileReported) {
-          fileReported = true;
-          report('관문 파일을 확인하지 못했습니다');
-        }
+        return { kind: 'failed' };
       }
-      if (changed && changed.length > 0) {
-        // 쓴 그대로 되돌린다. 되돌리지 못하면 되돌렸다고 말하지 않는다(사유를 함께 남긴다)
-        try {
-          await writeHostGatewayConfig(target.sandboxId, address, cli, root);
-          report(`관문 파일이 바뀌어 되돌렸습니다: ${changed.join(', ')}`);
-        } catch (error) {
-          report(`관문 파일이 바뀌었는데 되돌리지 못했습니다: ${changed.join(', ')} (${error instanceof Error ? error.message : String(error)})`);
-        }
-      }
-      if (rootPid === undefined) return;
-      let processes: ProcessEntry[];
+      if (changed.length === 0) return { kind: 'clean' };
+      // 쓴 그대로 되돌린다. 되돌리지 못하면 되돌렸다고 말하지 않는다(사유를 함께 남긴다)
       try {
-        processes = await listProcesses();
-      } catch {
-        // 이번 회차는 건너뛴다. 세 번 연달아 실패하면 한 번 알린다
-        psFailures += 1;
-        if (psFailures >= 3 && !psReported) {
-          psReported = true;
-          report('터미널의 프로세스를 확인하지 못했습니다');
-        }
-        return;
-      }
-      psFailures = 0;
-      for (const entry of findUnhookedCli(rootPid, processes, { settingsPath, cliPath: cli.cliPath, kind: cli.kind })) {
-        // 같은 pid는 한 번만 알린다
-        if (warnedPids.has(entry.pid)) continue;
-        warnedPids.add(entry.pid);
-        report(`검증이 붙지 않은 CLI가 터미널에서 돌고 있습니다(pid ${entry.pid}). 이 터미널의 ${cli.kind}는 b-studio가 붙여 주는 설정으로 띄워야 합니다`);
+        await writeHostGatewayConfig(target.sandboxId, address, cli, root);
+        return { kind: 'changed', names: changed };
+      } catch (error) {
+        return { kind: 'changed', names: changed, restoreError: error instanceof Error ? error.message : String(error) };
       }
     };
 
-    // 주기 검사와 fs.watch 신호의 검사가 겹쳐 돌지 않게 한다. 돌고 있으면 끝난 뒤 한 번만 다시 돈다
-    const check = async (): Promise<void> => {
-      if (stopped) return;
-      if (inFlight) {
-        rerun = true;
-        return;
-      }
-      inFlight = true;
+    const inspectProcesses = async (): Promise<WatchPsCheck> => {
+      if (rootPid === undefined) return { kind: 'unavailable' };
       try {
-        do {
-          rerun = false;
-          await inspect();
-        } while (rerun && !stopped);
-      } finally {
-        inFlight = false;
+        const processes: ProcessEntry[] = await listProcesses();
+        const found = findUnhookedCliOrUnknown(rootPid, processes, { settingsPath, cliPath: cli.cliPath, kind: cli.kind });
+        return found === undefined ? { kind: 'unavailable' } : { kind: 'listed', pids: found.map((entry) => entry.pid) };
+      } catch {
+        return { kind: 'failed' };
       }
     };
+
+    const inspect = async (): Promise<void> => {
+      const file = await inspectFiles();
+      const ps = await inspectProcesses();
+      const round = watchRound(state, file, ps);
+      state = round.state;
+      for (const reason of round.reports) report(reason);
+    };
+
+    // 주기 검사와 fs.watch 신호의 검사가 겹쳐 돌지 않게 한다. 돌고 있으면 끝난 뒤 한 번만 다시 돈다. 돌려주는 약속은 "이 부름 뒤에 시작한 검사가 끝났다"까지 기다린다
+    const check = (): Promise<void> => {
+      if (stopped) return Promise.resolve();
+      if (running) {
+        rerun = true;
+        return running;
+      }
+      const current = (async () => {
+        try {
+          do {
+            rerun = false;
+            await inspect();
+          } while (rerun && !stopped);
+        } finally {
+          running = undefined;
+        }
+      })();
+      running = current;
+      return current;
+    };
+    const checkQuietly = (): void => void check().catch((error: unknown) => console.error('[b-studio] 관문 감시 검사가 실패했습니다', error));
 
     // fs.watch가 신호를 줄 때마다 곧바로 검사하지 않고 250ms로 모은다
     const schedule = (): void => {
       if (stopped) return;
       if (debounce) clearTimeout(debounce);
-      debounce = setTimeout(() => void check(), HOST_WATCH_DEBOUNCE_MS);
+      debounce = setTimeout(checkQuietly, HOST_WATCH_DEBOUNCE_MS);
     };
     // 관문 폴더와, 기대 파일이 놓인 폴더들(재귀 아님). 파일이 있는 자리에서 신호가 오게 한다
     const watchedDirs = new Set<string>([place]);
@@ -373,8 +378,8 @@ const HOST_BACKEND: TerminalBackend = {
         // 폴더가 아직 없을 수 있다(주기 검사가 다음 회차에 잡는다)
       }
     }
-    const timer = setInterval(() => void check(), HOST_WATCH_INTERVAL_MS);
-    return () => {
+    const timer = setInterval(checkQuietly, HOST_WATCH_INTERVAL_MS);
+    const stop: WatchStop = () => {
       stopped = true;
       clearInterval(timer);
       if (debounce) clearTimeout(debounce);
@@ -387,6 +392,8 @@ const HOST_BACKEND: TerminalBackend = {
       }
       if (hostGateways.get(place) === saved) hostGateways.delete(place);
     };
+    stop.watchControl = { view: () => watchView(state), recheck: check };
+    return stop;
   },
 };
 
@@ -525,10 +532,16 @@ export async function openSessionTerminal(
       });
       // 관문 파일 변조와 훅 없이 뜬 CLI를 감시한다. 찾으면 화면에 경고를 보내고 세션에 알린다(이슈 #695)
       if (backend.watch) {
-        current.watchStop = backend.watch(place, terminal, target, (reason) => {
+        const stop = backend.watch(place, terminal, target, (reason) => {
           emit(current, { kind: 'warning', message: reason });
           target.onViolation?.(reason);
         });
+        current.watchStop = stop;
+        // 실행의 열기와 턴 끝이 감시에 묻는 자리(ADR-219)
+        if (stop.watchControl) {
+          current.watchControl = stop.watchControl;
+          registerWatch(sessionId, stop.watchControl);
+        }
       }
       emit(current, { kind: 'status', state: 'open' });
     } catch (error) {
@@ -627,6 +640,9 @@ export async function resizeSessionTerminal(sessionId: string, size: { cols?: un
 function stopWatching(state: TerminalState): void {
   const stop = state.watchStop;
   state.watchStop = undefined;
+  // 멈춘 감시는 묻지 않는다(세션이 터미널 없이 남아도 옛 감시의 상태가 판정에 남지 않게 한다)
+  if (state.watchControl) unregisterWatch(state.watchControl);
+  state.watchControl = undefined;
   if (!stop) return;
   try {
     stop();

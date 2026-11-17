@@ -382,6 +382,14 @@ interface NativeGuard {
   terminalDecideLimit(facts: NativeTerminalLimitFacts): NativeTerminalLimitStep;
   /** 쓰기 직전 훅이 이 실행의 사용량을 확인할 수 없는가(ADR-216) */
   terminalUsageUnverifiable(silent: boolean, incomplete: boolean, tokenLimited: boolean): boolean;
+  /** 감시 상태 전이(ADR-219): 처음 상태, 한 번의 검사 결과를 넣기, 상태에서 읽는 살아 있는 위반과 건강 사유 */
+  terminalWatchNew(kind: string): NativeTerminalWatchState;
+  terminalWatchRound(state: NativeTerminalWatchState, input: NativeTerminalWatchInput): { state: NativeTerminalWatchState; reports: string[] };
+  terminalWatchView(state: NativeTerminalWatchState): { live: string[]; problems: string[] };
+  /** 루트 아래의 훅 없는 CLI의 pid. 루트를 모르면(2보다 작다) null(할 수 없음)이다 */
+  terminalFindUnhookedCli(root: number, processes: Array<{ pid: number; ppid: number; args: string }>, kind: string, cliPath: string, marker: string): number[] | null;
+  /** 훅 요청 본문 종류(ADR-219): `empty`·`object`·`not_object`·`invalid` */
+  terminalHookBodyKind(body: Buffer): string;
   terminalEarlyUsageMs(): number;
   terminalLateUsageMs(): number;
   /** 터미널의 정체 감시 한 회차(ADR-213): `stop`·`nothing`·`notify` */
@@ -1325,6 +1333,29 @@ export interface NativeTerminalCloseDecision {
   action: string;
   status: string;
   text: string;
+}
+
+export interface NativeTerminalWatchState {
+  kind: string;
+  warned: number[];
+  live: number[];
+  file: string;
+  fileFailures: number;
+  fileReported: boolean;
+  fileDetail: string;
+  ps: string;
+  psFailures: number;
+  psReported: boolean;
+}
+
+export interface NativeTerminalWatchInput {
+  /** `failed`·`clean`·`changed` */
+  file: string;
+  changed: string[];
+  restoreError?: string;
+  /** `unavailable`·`failed`·`listed` */
+  ps: string;
+  unhooked: number[];
 }
 
 /** 요청 글의 분류(ADR-215) */

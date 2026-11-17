@@ -656,50 +656,42 @@ export async function listProcesses(): Promise<ProcessEntry[]> {
   return entries;
 }
 
-/** CLI 패키지가 설치된 자리에 들어가는 글. 감싸개나 node 실행기가 진짜 CLI를 띄울 때도 인자에 남는다 */
-const CLI_PACKAGE_MARK: Record<HostCliKind, string> = { claude: '/@anthropic-ai/claude-code/', codex: '/@openai/codex' };
-
 /**
- * 이 프로세스가 에이전트 CLI로 보이는가. 첫 낱말의 파일 이름이 CLI 이름(`claude`·`codex`)이거나, 첫 낱말이 cliPath와 같거나,
- * 인자에 CLI 패키지 자리가 들었을 때. 감싸개(`bin/claude`, 셸 스크립트)는 `/bin/sh <감싸개>`로 보인다(대화형 codex 감싸개는
- * CLI가 끝날 때까지 부모로 남는다). 첫 낱말이 `/bin/sh`라 이 규칙에 걸리지 않고, 그 아래의 진짜 CLI를 본다
+ * root(PTY의 pid) 아래에서 도는 에이전트 CLI 중 우리 설정이 붙지 않은 것의 pid. 판정은 Rust 코어가 한다(ADR-219, `terminal::watch::find_unhooked_cli`).
+ * root를 모르면(2보다 작다) `undefined`다 — 아래에 아무것도 없다는 뜻(빈 목록)이 아니라 찾을 수 없다는 뜻이다. 부르는 쪽은 이것을 통과로 읽지 않는다(N20).
+ * 붙었다고 보는 것은 인자에 표식이 있는 것이다 — claude는 `--settings <settingsPath>`(낱말 경계로, `--settings`가 하나뿐일 때), codex는 훅 명령이 가리키는
+ * 관문 루트의 훅 스크립트 경로(`-c hooks.…` 안, 문자열 포함). 관문 폴더 경로에 빈칸이 있어도 `ps`의 인자 한 줄에서 그대로 견줄 수 있다.
+ * 옛 판정은 `session-terminal-watch-legacy.ts`에 차등 시험의 기준으로만 남아 있다
  */
-function looksLikeAgentCli(args: string, cliPath: string, kind: HostCliKind): boolean {
-  const first = args.trim().split(/\s+/)[0] ?? '';
-  return path.basename(first) === kind || first === cliPath || args.includes(CLI_PACKAGE_MARK[kind]);
-}
-
-/**
- * root(PTY의 pid) 아래에서 도는 에이전트 CLI 중 우리 설정이 붙지 않은 것.
- * 붙었다고 보는 것은 인자에 표식이 그대로 있는 것이다 — claude는 `--settings <settingsPath>`, codex는 훅 명령이 가리키는
- * 관문 루트의 훅 스크립트 경로(`-c hooks.…` 안). 관문 폴더 경로에 빈칸이 있어도 `ps`의 인자 한 줄에서 그대로 견줄 수 있게 문자열 포함으로 본다
- */
-export function findUnhookedCli(
+export function findUnhookedCliOrUnknown(
   root: number,
   processes: readonly ProcessEntry[],
   expected: { settingsPath: string; cliPath: string; kind?: HostCliKind },
-): ProcessEntry[] {
+): ProcessEntry[] | undefined {
   const kind = expected.kind ?? 'claude';
   // codex는 settingsPath 자리에 관문 폴더를 받아 그 위(관문 루트)의 훅 스크립트를 표식으로 본다
   const marker = kind === 'codex' ? path.join(path.dirname(path.dirname(expected.settingsPath)), CODEX_HOOK_SCRIPT_NAME) : `--settings ${expected.settingsPath}`;
-  const children = new Map<number, ProcessEntry[]>();
-  for (const process of processes) {
-    const list = children.get(process.ppid);
-    if (list) list.push(process);
-    else children.set(process.ppid, [process]);
+  // 정수가 아닌 pid(읽지 못한 목록)는 코어에 넘기지 않고 던진다. 건너뛰면 찾지 못한 것이 통과가 된다
+  if (!Number.isSafeInteger(root) || processes.some((entry) => !Number.isSafeInteger(entry.pid) || !Number.isSafeInteger(entry.ppid))) {
+    throw new SandboxError('프로세스 목록을 읽지 못했습니다', '정수가 아닌 pid가 있습니다');
   }
-  const found: ProcessEntry[] = [];
-  const seen = new Set<number>([root]);
-  // 직계 자식뿐 아니라 손자(셸 → 셸 → claude)까지 본다. 같은 pid를 두 번 보지 않는다
-  const walk = (pid: number): void => {
-    for (const child of children.get(pid) ?? []) {
-      if (seen.has(child.pid)) continue;
-      seen.add(child.pid);
-      if (looksLikeAgentCli(child.args, expected.cliPath, kind) && !child.args.includes(marker)) found.push(child);
-      walk(child.pid);
-    }
-  };
-  walk(root);
+  const pids = native.terminalFindUnhookedCli(
+    root,
+    processes.map((entry) => ({ pid: entry.pid, ppid: entry.ppid, args: entry.args })),
+    kind,
+    expected.cliPath,
+    marker,
+  );
+  if (pids === null) return undefined;
+  const byPid = new Map<number, ProcessEntry>();
+  for (const entry of processes) if (!byPid.has(entry.pid)) byPid.set(entry.pid, entry);
+  return pids.map((pid) => byPid.get(pid)!);
+}
+
+/** `findUnhookedCliOrUnknown`과 같되 root를 모르면 던진다(찾지 못한 것을 빈 목록으로 읽지 않는다) */
+export function findUnhookedCli(root: number, processes: readonly ProcessEntry[], expected: { settingsPath: string; cliPath: string; kind?: HostCliKind }): ProcessEntry[] {
+  const found = findUnhookedCliOrUnknown(root, processes, expected);
+  if (found === undefined) throw new SandboxError('터미널의 프로세스 번호를 알 수 없습니다', `root pid ${root}`);
   return found;
 }
 
@@ -801,8 +793,8 @@ export function hostShellLaunch(
 
 /** 가상 터미널(portable-pty, 또는 테스트의 가짜)에서 이 모듈이 쓰는 부분 */
 export interface HostPty {
-  /** 이 가상 터미널의 pid. 감시가 이 아래에서 훅 없이 뜬 CLI를 찾는 데 쓴다 */
-  readonly pid: number;
+  /** 이 가상 터미널의 pid. 감시가 이 아래에서 훅 없이 뜬 CLI를 찾는 데 쓴다. 플랫폼이 못 주면 undefined다(0으로 바꾸지 않는다: 0은 모든 프로세스의 부모 자리다, N20) */
+  readonly pid: number | undefined;
   write(data: string): void;
   resize(cols: number, rows: number): void;
   kill(signal?: string): void;
@@ -812,6 +804,11 @@ export interface HostPty {
 }
 /** 가상 터미널을 띄우는 자리(테스트가 가짜를 끼운다) */
 export type SpawnHostPty = (file: string, args: string[], options: { name: string; cols: number; rows: number; cwd: string; env: Record<string, string> }) => HostPty | Promise<HostPty>;
+
+/** 플랫폼이 pid를 주지 못하면(null) undefined다. 0으로 바꾸지 않는다: 0은 모든 프로세스의 부모 자리라 감시가 이 컴퓨터의 프로세스를 전부 훑는다(N20, ADR-219) */
+export function ptyPid(pid: number | null | undefined): number | undefined {
+  return pid ?? undefined;
+}
 
 /** Rust(portable-pty)로 가상 터미널을 연다(2c-4a, #1049). 출력·종료는 Rust 스레드에서 역류하므로 리스너 배열로 중계한다. */
 const spawnWithPortablePty: SpawnHostPty = (file, args, options) => {
@@ -833,7 +830,7 @@ const spawnWithPortablePty: SpawnHostPty = (file, args, options) => {
     },
   );
   return {
-    pid: pty.pid ?? 0,
+    pid: ptyPid(pty.pid),
     write: (data) => pty.write(Buffer.from(data, 'utf8')),
     resize: (cols, rows) => pty.resize(cols, rows),
     // portable-pty의 kill은 신호를 받지 않고 자식을 끝낸다(셸과 CLI가 함께 끝나는 목적엔 충분)
@@ -878,7 +875,7 @@ export async function openHostTerminal({
   accountEnv?: Record<string, string>;
   env?: Record<string, string | undefined>;
   spawnPty?: SpawnHostPty;
-}): Promise<AgentTerminal & { pid: number }> {
+}): Promise<AgentTerminal & { pid: number | undefined }> {
   const { cols, rows } = clampTerminalSize(size);
   const allowedAccountEnv = new Set(Object.values(ACCOUNT_DIR_ENV));
   for (const name of Object.keys(accountEnv)) {
