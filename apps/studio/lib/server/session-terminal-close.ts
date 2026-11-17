@@ -97,6 +97,14 @@ export function cliEnded(life: Life, ticket: number, checking: boolean, hasFeedb
   return life.native.terminalCliEnded(ticket, checking, hasFeedback) as CliEndedAction;
 }
 
+/**
+ * 턴이 API 오류로 끝났다(StopFailure). 열린 실행이 없으면 `nothing`, 검사 중이면 미룬다는 표시를 실행에 남기고 `defer`, 아니면 `failed`다.
+ * 피드백이 있었는지와 상관없이 취소가 아니라 실패로 닫는다(오류로 끊긴 턴은 일을 마친 것이 아니다)
+ */
+export function turnFailed(life: Life, ticket: number, checking: boolean): Extract<CliEndedAction, 'nothing' | 'defer' | 'failed'> {
+  return life.native.terminalTurnFailed(ticket, checking) as 'nothing' | 'defer' | 'failed';
+}
+
 /** 검사가 재시도(피드백)로 끝났다. CLI 종료를 미뤄 둔 실행이면 `close_failed`(받을 CLI가 없다) */
 export function retryRoute(life: Life, ticket: number): 'feedback' | 'close_failed' {
   return life.native.terminalRetry(ticket) as 'feedback' | 'close_failed';

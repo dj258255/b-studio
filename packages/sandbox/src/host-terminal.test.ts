@@ -192,6 +192,10 @@ describe('hostGatewaySettings', () => {
     const notification = hooks.Notification![0]!.hooks[0]!.command;
     expect(notification).toContain(`'${path.join('/gateway', HOOK_SCRIPT_NAME)}'`);
     expect(notification).toContain('notification');
+    // 이 컴퓨터 방식도 컨테이너 방식과 같은 설정을 쓴다: API 오류로 턴이 끝났을 때 오는 훅이 같은 관문 스크립트를 부른다(#1284)
+    const stopFailure = hooks.StopFailure![0]!.hooks[0]!.command;
+    expect(stopFailure).toContain(`'${path.join('/gateway', HOOK_SCRIPT_NAME)}'`);
+    expect(stopFailure.endsWith(' stop-failure')).toBe(true);
     expect(expectedHostGatewayFiles(address, '/gateway', { kind: 'claude', cliPath: '/usr/local/bin/claude', nodePath: '/n/bin/node' })['settings.json']!.content).toContain(`"${AGENT_NOTIFICATION_MATCHER}"`);
     // 텔레메트리 env도 같은 관문 주소·토큰으로 보낸다
     expect(settings.env).toEqual({

@@ -6878,6 +6878,19 @@ impl SessionState {
         .to_owned()
     }
 
+    /// 턴이 API 오류로 끝났다(StopFailure). `nothing`·`defer`(검사 중이라 미룸, 미뤘다는 표시를 남긴다)·`failed`(실패로 닫는다)
+    #[napi]
+    pub fn terminal_turn_failed(&self, token: f64, checking: bool) -> String {
+        match self.inner.terminal_turn_failed(token as u64, checking) {
+            session_terminal::CliEnded::Nothing => "nothing",
+            session_terminal::CliEnded::Defer => "defer",
+            session_terminal::CliEnded::Close(session_terminal::EndStatus::Failed) => "failed",
+            session_terminal::CliEnded::Close(session_terminal::EndStatus::Cancelled) => "cancelled",
+            session_terminal::CliEnded::Close(session_terminal::EndStatus::Error) => "error",
+        }
+        .to_owned()
+    }
+
     /// 검사가 재시도로 끝났다. `feedback`(에이전트에게 돌려준다) 또는 `close_failed`(받을 CLI가 없어 실패로 닫는다)
     #[napi]
     pub fn terminal_retry(&self, token: f64) -> String {

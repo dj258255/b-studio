@@ -1182,6 +1182,8 @@ export interface NativeSessionState {
   terminalCloseRun(token: number, hook: (call: NativeRunCall) => Promise<string | null>): Promise<void>;
   /** CLI가 끝났다: `nothing`·`defer`(검사 중이라 미룸)·`failed`·`cancelled`·`error` */
   terminalCliEnded(token: number, checking: boolean, hasFeedback: boolean): string;
+  /** 턴이 API 오류로 끝났다(StopFailure): `nothing`·`defer`(검사 중이라 미룸)·`failed` */
+  terminalTurnFailed(token: number, checking: boolean): string;
   /** 검사가 재시도로 끝났다: `feedback`·`close_failed` */
   terminalRetry(token: number): string;
   /** 감시가 위반을 찾았다: `ignore`·`close_open_run`·`defer` */

@@ -173,6 +173,26 @@ pub fn on_cli_ended(facts: &CliEndedFacts) -> CliEnded {
     CliEnded::Close(if facts.has_feedback { EndStatus::Failed } else { EndStatus::Cancelled })
 }
 
+/// 턴이 API 오류(사용 한도·인증·과부하 등)로 끝났다는 알림(StopFailure)의 사실. 오류의 종류는 판정에 쓰지 않는다(모르는 종류도 같다)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnFailedFacts {
+    /// 열린 실행이 있다
+    pub open: bool,
+    /// 턴 끝 검사가 도는 중이다
+    pub checking: bool,
+}
+
+/// 오류로 끊긴 턴은 일을 마친 것이 아니다. 검사를 돌려 통과시키지 않고 늘 실패로 닫는다(피드백이 있었는지와 상관없다)
+pub fn on_turn_failed(facts: &TurnFailedFacts) -> CliEnded {
+    if !facts.open {
+        return CliEnded::Nothing;
+    }
+    if facts.checking {
+        return CliEnded::Defer;
+    }
+    CliEnded::Close(EndStatus::Failed)
+}
+
 /// 감시가 찾은 위반의 사실
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViolationFacts {
@@ -339,6 +359,20 @@ impl SessionState {
         let mut inner = self.lock();
         let open = is_open(&inner, ticket);
         let decision = on_cli_ended(&CliEndedFacts { open, checking, has_feedback });
+        if decision == CliEnded::Defer {
+            if let Some(flags) = inner.claims.terminal.runs.get_mut(&ticket) {
+                flags.cli_ended = true;
+            }
+        }
+        decision
+    }
+
+    /// 턴이 API 오류로 끝났다(StopFailure). `ticket`은 세션에 걸린 터미널 실행의 표(없으면 0)다. 열린 실행이 없으면 `Nothing`,
+    /// 검사 중이면 미룬다는 표시를 남기고 `Defer`(검사가 재시도로 끝나면 실패로 닫는다), 아니면 `Close(Failed)`
+    pub fn terminal_turn_failed(&self, ticket: Ticket, checking: bool) -> CliEnded {
+        let mut inner = self.lock();
+        let open = is_open(&inner, ticket);
+        let decision = on_turn_failed(&TurnFailedFacts { open, checking });
         if decision == CliEnded::Defer {
             if let Some(flags) = inner.claims.terminal.runs.get_mut(&ticket) {
                 flags.cli_ended = true;

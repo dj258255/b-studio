@@ -15,6 +15,7 @@ function handlers(overrides: Partial<TerminalGatewayHandlers> = {}): TerminalGat
     preTool: async () => ({}),
     stop: async () => ({}),
     sessionEnd: async () => {},
+    stopFailure: async () => {},
     notification: async () => {},
     telemetry: async () => {},
     toolSpecs: () => [{ name: 'run_in_service', description: '서비스에서 명령 실행', input_schema: { type: 'object', properties: { service: { type: 'string', description: '서비스' } }, required: ['service'] } }] as never,
@@ -40,6 +41,17 @@ function post(url: string, token: string, body: unknown, host?: string): Promise
   });
 }
 
+describe('API 오류로 턴이 끝났을 때의 훅(#1284)', () => {
+  it('/stop-failure는 처리를 받은 입력으로 부르고 빈 답을 준다. 처리가 던지면 던진다(훅 서버가 5xx로 답하고 CLI는 이 답을 읽지 않는다)', async () => {
+    const inputs: unknown[] = [];
+    const routes = terminalHookRoutes(handlers({ stopFailure: async (input) => void inputs.push(input) }));
+    expect(await routes['/stop-failure']({ hook_event_name: 'StopFailure', error: 'rate_limit' })).toEqual({});
+    expect(inputs).toEqual([{ hook_event_name: 'StopFailure', error: 'rate_limit' }]);
+    const failing = terminalHookRoutes(handlers({ stopFailure: async () => { throw new Error('닫지 못했습니다'); } }));
+    await expect(failing['/stop-failure']({ error: 'unknown' })).rejects.toThrow('닫지 못했습니다');
+  });
+});
+
 describe('CLI 대화 id를 훅 입력에서 받는다(#872)', () => {
   it('대화의 시작·요청·쓰기 직전·턴의 끝·알림·종료 훅의 session_id를 알린다. 텔레메트리·ping과 id 없는 입력은 알리지 않는다', async () => {
     const seen: string[] = [];
@@ -51,11 +63,12 @@ describe('CLI 대화 id를 훅 입력에서 받는다(#872)', () => {
     await routes['/notification']({ session_id: 'a5' });
     await routes['/session-end']({ session_id: 'a6' });
     await routes['/activity']({ session_id: 'a7' });
+    await routes['/stop-failure']({ session_id: 'a8' });
     await routes['/v1/logs']({ session_id: 'x1' });
     await routes['/ping']({ session_id: 'x2' });
     await routes['/prompt']({ prompt: '고쳐줘' });
     await routes['/prompt']({ session_id: 42 });
-    expect(seen).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7']);
+    expect(seen).toEqual(['a1', 'a2', 'a3', 'a4', 'a5', 'a6', 'a7', 'a8']);
   });
 
   it('대화 id를 받다가 던져도 훅의 답은 그대로 간다(판정과 상관없는 기록이다)', async () => {

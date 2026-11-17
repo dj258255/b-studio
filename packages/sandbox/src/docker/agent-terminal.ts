@@ -81,6 +81,11 @@ export const AGENT_HOOK_EVENTS = {
   stop: 3600,
   /** CLI가 끝날 때. 열려 있던 실행을 닫는다 */
   'session-end': 10,
+  /**
+   * 사용 한도 같은 API 오류로 턴이 끝났을 때(CLI는 Stop 대신 이 훅을 부른다, #1284). 열려 있던 실행을 실패로 닫고 되돌린다.
+   * CLI는 답과 종료 코드를 읽지 않고 기다리지도 않는다(기본 상한 120초). 게이트는 돌리지 않으므로 되돌리는 시간만 본다
+   */
+  'stop-failure': 120,
   /** CLI가 사람을 기다릴 때(확인 창·되묻기·입력 대기). 실행이 사람을 기다린다는 표시를 남긴다(B7). 판정을 바꾸지 않는다 */
   notification: 15,
   /**
@@ -360,6 +365,8 @@ export function gatewaySettings(hookCommand: (event: AgentHookEvent) => string, 
       ],
       Stop: [{ hooks: [hook('stop')] }],
       SessionEnd: [{ hooks: [hook('session-end')] }],
+      // API 오류로 턴이 끝나면 Stop 대신 온다(#1284). 없으면 실행이 열린 채 남아 다음 요청을 삼킨다
+      StopFailure: [{ hooks: [hook('stop-failure')] }],
       // 사람을 기다리는 창이 뜨면 알린다(B7). matcher는 입력의 notification_type을 본다
       Notification: [{ matcher: AGENT_NOTIFICATION_MATCHER, hooks: [hook('notification')] }],
       // 권한 확인 창이 뜨는 그 순간 알린다(#920). Notification의 permission_prompt는 몇 초 늦게 온다. 답은 주지 않는다
