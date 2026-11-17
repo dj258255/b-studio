@@ -293,7 +293,8 @@ import { decideSilence, decideStall, decideUsage, EARLY_USAGE_MS, LATE_USAGE_MS,
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, turnFailed, violationRoute, type CloseActions } from './session-terminal-close';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
-import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
+import { decideTurnLimit, modelCallsFromOtlp, usageUnverifiable, type ModelCall } from './session-terminal-telemetry';
+import { agentSignalsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
 import type { TaskCardDone } from './task-cards';
 import {
   AGENT_READ_ONLY_MARK,
@@ -7592,6 +7593,11 @@ interface TerminalRunState {
   openedMs: number;
   /** 이 실행이 열린 뒤 사용량 소식(텔레메트리)을 한 번이라도 받았다(ADR-213, U2) */
   telemetrySeen: boolean;
+  /**
+   * 이 실행이 열린 뒤 받은 텔레메트리 가운데 읽지 못한 것이 있다: 모델 호출인데 토큰을 알 수 없거나, 본문의 모양이 깨져 호출이 있었는지 알 수 없다(ADR-216).
+   * 토큰 한도가 있는 세션은 쓰기를 막는다(턴은 센다). 실행마다 새로 시작한다
+   */
+  usageIncomplete: boolean;
   /** 이 실행이 열린 뒤 온 쓰기 도구 훅(MCP 도구 포함)의 수. 사용량 소식 없이 이어지면 한도를 볼 수 없다 */
   writeHooks: number;
   /**
@@ -7900,13 +7906,11 @@ function terminalRunLimitDeny(session: Session, run: ActiveRun & { terminal: Ter
  */
 function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: TerminalRunState }): void {
   const state = run.terminal;
-  // 턴 상한(ADR-131). 요청 옵션은 없다 — studio.yaml(workflow.maxTurns)만 본다
-  if (state.limitReason !== 'budget') {
-    const maxTurns = maxTurnsFor(session.project);
-    if (maxTurns !== undefined && state.modelCalls >= maxTurns) state.limitReason = 'max_turns';
-  }
-  // 이미 멈추는 중이거나 토큰 한도로 멈춘 실행은 다시 보지 않는다
-  if (run.cancel.signal.aborted || state.limitReason === 'budget') return;
+  // 턴 상한 전이는 코어가 정한다(ADR-216). 요청 옵션은 없다 — studio.yaml(workflow.maxTurns)만 본다.
+  // budget이 선 뒤에는 턴을 보지 않고, max_turns는 풀리지 않는다. 이미 멈추는 중이거나 토큰 한도로 멈춘 실행은 토큰 한도를 다시 보지 않는다
+  const turns = decideTurnLimit({ reason: state.limitReason, maxTurns: maxTurnsFor(session.project), modelCalls: state.modelCalls, aborted: run.cancel.signal.aborted });
+  state.limitReason = turns.reason;
+  if (!turns.checkBudget) return;
   const limit = session.snapshot.tokenLimit;
   // 대화 실행과 같은 판정이다(ADR-209). 사람 몫 = 파일 합계 − 이 실행이 저장을 마친 몫 + 이 실행 누적: 저장한 몫을 겹쳐 세지 않고(#B5 수정 2), 저장이 끝나지 않은 증가분도 센다
   const verdict = judgeRunLimits({ sessionTokens: totalTokens(session.snapshot.tokens), ...(limit !== undefined ? { sessionLimit: limit } : {}), ...(run.by ? { by: run.by } : {}), ...(run.userLedger ? { ledger: run.userLedger } : {}) });
@@ -7928,13 +7932,18 @@ function checkTerminalLimits(session: Session, run: ActiveRun & { terminal: Term
  */
 async function terminalTelemetry(id: string, body: unknown): Promise<void> {
   const session = terminalSession(id);
-  const requests = apiRequestsFromOtlp(body);
+  // 본문 해석은 코어가 한다(ADR-216): 모양이 틀린 모델 요청도 한 호출로 세고, 엉뚱한 시각은 받은 시각으로 바꾸고, 읽지 못한 자리는 센다
+  const { calls: requests, defects } = modelCallsFromOtlp(body);
+  // 호출이 있었는지 알 수 없는 본문은 그 실행의 토큰을 확인할 수 없는 것이다(토큰 한도가 있는 세션만 막는다)
+  if (defects > 0) {
+    const open = openTerminalRun(session);
+    if (open) open.terminal.usageIncomplete = true;
+  }
   // 모델 요청이 왔다는 것은 CLI가 다시 움직였다는 뜻이다. 사람을 기다림 표시를 푼다(B7). 모아서 늦게 오므로 걸린 직후에는 풀지 않는다(#955).
   // 도구 훅이 없는 긴 생각도 CLI의 소식이다 — 화면의 마지막 소식 시각을 옮긴다(#955)
   if (requests.length > 0) {
-    // 사용량 소식이 이 실행에 왔다(ADR-213, U2). 한 번이라도 오면 사용량이 흐르는 세션이다
-    const receiving = openTerminalRun(session);
-    if (receiving) receiving.terminal.telemetrySeen = true;
+    // 사용량이 흐르는 세션이다(ADR-213, U2): 세션 단위 끊김 표시는 푼다. 앞 실행의 늦은 사용량도 소식이 흐른다는 증거다.
+    // 실행의 "소식이 왔다"(telemetrySeen)는 여기서 세우지 않는다. 그 요청이 실제로 붙은 실행에만 세운다(attributeRunUsage, ADR-216)
     session.terminalUsageSilent = undefined;
     // 앞서 사람 몫에 쓰지 못한 것이 있으면, 이번 묶음이 이미 센 것뿐이어도 다시 쓴다(ADR-213, U1)
     flushOwnerUnsaved(session);
@@ -8008,7 +8017,7 @@ export function sessionCapabilities(id: string): AgentCapabilities | undefined {
  *    같은 요청 번호는 한 번만 센다(요청 번호가 없으면 가릴 수 없어 그대로 더한다)
  *  - 실행 귀속(run_usage·실행 합계·턴 수): 지금 규칙 그대로. 붙은 실행이 있을 때만 붙이고, 붙인 것만 기억한다(B3)
  */
-async function attributeRunUsage(session: Session, request: ApiRequestUsage): Promise<void> {
+async function attributeRunUsage(session: Session, request: ModelCall): Promise<void> {
   const open = openTerminalRun(session);
   const usage: AgentUsage = { inputTokens: request.inputTokens, outputTokens: request.outputTokens, cacheReadTokens: request.cacheReadTokens, cacheWriteTokens: request.cacheWriteTokens };
 
@@ -8028,6 +8037,11 @@ async function attributeRunUsage(session: Session, request: ApiRequestUsage): Pr
     inClosedRun: last !== undefined && request.at >= last.startedMs && request.at <= last.endedMs,
     inClosedLate: last !== undefined && request.at > last.endedMs && request.at <= last.endedMs + LATE_USAGE_MS,
   });
+
+  // 이 요청이 실제로 붙은 실행에만 사용량 소식이 왔다고 표시한다(U2, ADR-216). 앞 실행의 늦은 사용량이 새 실행의 끊김 판정을 끄지 않게 한다
+  if (open && step.markSeen) open.terminal.telemetrySeen = true;
+  // 토큰을 읽지 못한 호출은 세션 합계에 읽은 것만 더해진다(내려잡은 값). 지금 열린 실행의 토큰 한도는 확인할 수 없다
+  if (open && step.count && !request.tokensComplete) open.terminal.usageIncomplete = true;
 
   // 1) 한도 계산: 붙든 안 붙든 받은 사용량을 모두 세션 합계에 더한다(더하기로만).
   //    같은 요청 번호를 다시 받으면 더하지 않는다(그때 sessionTokens는 undefined가 된다)
@@ -8205,6 +8219,7 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt,
       openedByTool: !fromPrompt,
       openedMs: Date.now(),
       telemetrySeen: false,
+      usageIncomplete: false,
       writeHooks: 0,
     };
     // 지문을 기다리는 사이 세션이 멈췄으면(멈추기가 점유를 비웠다) 열지 않는다
@@ -8631,9 +8646,13 @@ function terminalPreToolFacts(
   }
   // 한도에 닿지 않았어도 사용량 소식이 끊겼으면 한도를 볼 수 없다: 막는다(ADR-213, U2). 소식이 오면 풀린다
   let limit: TerminalLimit = run.terminal.limitReason ?? 'none';
-  if (limit === 'none' && terminalUsageSilent(session, run)) {
-    limit = 'unknown';
-    texts.unknown = TERMINAL_USAGE_SILENT_DENY;
+  if (limit === 'none') {
+    const silent = terminalUsageSilent(session, run);
+    // 읽지 못한 호출이 있었고 토큰 한도가 있으면 토큰 한도를 확인할 수 없다(ADR-216). 턴만 있는 세션은 센 턴으로 계속 본다
+    if (usageUnverifiable(silent, run.terminal.usageIncomplete, tokenLimited(session, run))) {
+      limit = 'unknown';
+      texts.unknown = silent ? TERMINAL_USAGE_SILENT_DENY : TERMINAL_USAGE_UNREADABLE_DENY;
+    }
   }
   if (options.scope !== undefined) texts.out_of_scope = options.scope;
   return {
@@ -8661,6 +8680,15 @@ function terminalPreToolDenyText(kind: PreToolDeny, texts: Partial<Record<PreToo
 /** 사용량 소식이 끊겨 한도를 볼 수 없어 막는 글(ADR-213, U2) */
 const TERMINAL_USAGE_SILENT_DENY =
   '[b-studio] 터미널의 사용량(텔레메트리)이 오지 않아 턴·토큰 한도를 확인할 수 없어 파일을 바꾸거나 명령을 돌리는 도구를 막았습니다. CLI의 텔레메트리 설정을 확인하세요. 사용량이 다시 오면 풀립니다.';
+
+/** 읽지 못한 사용량 기록이 있어 토큰 한도를 확인할 수 없어 막는 글(ADR-216) */
+const TERMINAL_USAGE_UNREADABLE_DENY =
+  '[b-studio] 터미널이 보낸 사용량 기록 일부를 읽지 못해 토큰 한도를 확인할 수 없어 파일을 바꾸거나 명령을 돌리는 도구를 막았습니다. 지금 하던 일을 정리하고 턴을 끝내세요.';
+
+/** 이 실행에 토큰 한도(세션 또는 사람)가 걸려 있는가 */
+function tokenLimited(session: Session, run: ActiveRun): boolean {
+  return session.snapshot.tokenLimit !== undefined || userLimitSetting(run.by) !== undefined;
+}
 
 /**
  * 이 실행의 사용량 소식이 끊겼는가(ADR-213, U2). 한도는 사용량이 올 때만 보므로 소식 없이 쓰기만 이어지면 턴 상한도 토큰 한도도 걸리지 않는다.

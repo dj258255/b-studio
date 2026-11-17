@@ -28,7 +28,9 @@ describe('사용량 귀속 차등 (옛 분기 순서와 사실 조합 전체)', 
       rows += 1;
       const step = decideUsage(facts);
       const old = legacyUsage({ hasRequestId: facts.hasRequestId, counted: facts.counted, attached: facts.attached, openRun: facts.openRun, inOpenWindow: facts.inOpenWindow, inClosedWindow: facts.inClosedRun || facts.inClosedLate });
-      if (JSON.stringify(step) !== JSON.stringify(old)) differing.push(facts);
+      // 옛 판정에는 없는 `markSeen`(ADR-216)은 따로 본다: 열린 실행에 붙을 때만 선다
+      expect(step.markSeen).toBe(step.target === 'open');
+      if (JSON.stringify({ count: step.count, target: step.target, countTurn: step.countTurn, checkLimits: step.checkLimits }) !== JSON.stringify(old)) differing.push(facts);
     }
     expect(rows).toBe(512);
     expect(differing.length).toBeGreaterThan(0);

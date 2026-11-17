@@ -7216,6 +7216,8 @@ pub struct TerminalUsageStepJs {
     pub target: String,
     pub count_turn: bool,
     pub check_limits: bool,
+    /// 이 요청이 붙은 열린 실행에 사용량 소식이 왔다고 표시한다(ADR-216)
+    pub mark_seen: bool,
 }
 
 /// 요청 하나를 어떻게 처리할지: 셀지, 붙일 실행, 턴을 셀지, 한도를 볼지
@@ -7233,7 +7235,7 @@ pub fn terminal_decide_usage(facts: TerminalUsageFactsJs) -> TerminalUsageStepJs
         in_closed_run: facts.in_closed_run,
         in_closed_late: facts.in_closed_late,
     });
-    TerminalUsageStepJs { count: step.count, target: step.target.as_str().to_owned(), count_turn: step.count_turn, check_limits: step.check_limits }
+    TerminalUsageStepJs { count: step.count, target: step.target.as_str().to_owned(), count_turn: step.count_turn, check_limits: step.check_limits, mark_seen: step.marks_telemetry_seen() }
 }
 
 /// 도구 호출이 연 실행에 붙이는 열린 시각 앞의 시간(ms)
@@ -7294,6 +7296,97 @@ pub fn terminal_decide_silence(facts: TerminalSilenceFactsJs) -> String {
         Silence::Silent => "silent",
     }
     .to_owned()
+}
+
+// ── 세션 터미널의 턴 상한 전이와 텔레메트리 본문 해석(ADR-216, 4f B5b). 순수 판정이다 ──
+
+/// 모델 호출 하나(텔레메트리 본문에서 꺼낸 것). 시각은 받은 시각을 기준으로 믿을 수 있는 값이다
+#[napi(object)]
+pub struct TerminalModelCallJs {
+    pub at: i64,
+    /// `cli`·`observed`·`received`·`received_off_clock`
+    pub time_source: String,
+    pub model: String,
+    pub input_tokens: f64,
+    pub output_tokens: f64,
+    pub cache_read_tokens: f64,
+    pub cache_write_tokens: f64,
+    /// 네 토큰 수를 모두 읽었다. 아니면 읽은 것만 더해졌고 나머지는 0이다
+    pub tokens_complete: bool,
+    pub request_id: Option<String>,
+    pub prompt_id: Option<String>,
+    pub session_id: Option<String>,
+    pub cost_usd: Option<f64>,
+    pub duration_ms: Option<f64>,
+    pub agent: Option<String>,
+    pub conversation_id: Option<String>,
+}
+
+#[napi(object)]
+pub struct TerminalTelemetryJs {
+    pub calls: Vec<TerminalModelCallJs>,
+    /// 읽지 못하고 건너뛴 자리의 수(그 안의 모델 호출은 알 수 없다)
+    pub defects: u32,
+}
+
+/// 텔레메트리 본문(JSON 글)에서 모델 호출을 꺼낸다(순수 함수). `now`는 받은 시각(ms)이다
+#[napi]
+pub fn terminal_parse_telemetry(body: String, now: i64) -> TerminalTelemetryJs {
+    let parsed = session_terminal::telemetry::parse_model_calls(&body, now);
+    TerminalTelemetryJs {
+        calls: parsed
+            .calls
+            .into_iter()
+            .map(|call| TerminalModelCallJs {
+                at: call.at_ms,
+                time_source: call.time_source.as_str().to_owned(),
+                model: call.model,
+                input_tokens: call.input_tokens,
+                output_tokens: call.output_tokens,
+                cache_read_tokens: call.cache_read_tokens,
+                cache_write_tokens: call.cache_write_tokens,
+                tokens_complete: call.tokens_complete,
+                request_id: call.request_id,
+                prompt_id: call.prompt_id,
+                session_id: call.session_id,
+                cost_usd: call.cost_usd,
+                duration_ms: call.duration_ms,
+                agent: call.agent,
+                conversation_id: call.conversation_id,
+            })
+            .collect(),
+        defects: parsed.defects,
+    }
+}
+
+#[napi(object)]
+pub struct TerminalLimitFactsJs {
+    /// `none`·`max_turns`·`budget`(그 밖은 `max_turns`로 읽는다)
+    pub reason: String,
+    /// 턴 상한. 없으면 턴을 보지 않는다
+    pub max_turns: Option<f64>,
+    pub model_calls: u32,
+    pub aborted: bool,
+}
+
+#[napi(object)]
+pub struct TerminalLimitStepJs {
+    pub reason: String,
+    pub check_budget: bool,
+}
+
+/// 사용량이 더해진 뒤 한도를 볼 때의 전이: 턴 상한을 본 사유와 토큰 한도를 이어서 볼지
+#[napi]
+pub fn terminal_decide_limit(facts: TerminalLimitFactsJs) -> TerminalLimitStepJs {
+    use session_terminal::limit::{decide_limit, LimitFacts, LimitReason};
+    let step = decide_limit(&LimitFacts { reason: LimitReason::parse(&facts.reason), max_turns: facts.max_turns, model_calls: facts.model_calls, aborted: facts.aborted });
+    TerminalLimitStepJs { reason: step.reason.as_str().to_owned(), check_budget: step.check_budget }
+}
+
+/// 쓰기 직전 훅이 이 실행의 사용량을 확인할 수 없는가
+#[napi]
+pub fn terminal_usage_unverifiable(silent: bool, incomplete: bool, token_limited: bool) -> bool {
+    session_terminal::limit::usage_unverifiable(silent, incomplete, token_limited)
 }
 
 /// 닫기의 단계 이름(순서대로)

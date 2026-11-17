@@ -340,6 +340,12 @@ interface NativeGuard {
   terminalDecideAfterCheckpoint(violation: boolean): string;
   /** 터미널의 사용량 귀속 판정(ADR-213): 셀지, 붙일 실행, 턴을 셀지, 한도를 볼지 */
   terminalDecideUsage(facts: NativeTerminalUsageFacts): NativeTerminalUsageStep;
+  /** 텔레메트리 본문(JSON 글)에서 모델 호출을 꺼낸다(ADR-216). 모양이 틀린 `api_request`도 한 호출로 센다. `now`는 받은 시각(ms) */
+  terminalParseTelemetry(body: string, now: number): NativeTerminalTelemetry;
+  /** 사용량이 더해진 뒤 한도를 볼 때의 전이(ADR-216): 턴 상한을 본 사유와 토큰 한도를 이어서 볼지 */
+  terminalDecideLimit(facts: NativeTerminalLimitFacts): NativeTerminalLimitStep;
+  /** 쓰기 직전 훅이 이 실행의 사용량을 확인할 수 없는가(ADR-216) */
+  terminalUsageUnverifiable(silent: boolean, incomplete: boolean, tokenLimited: boolean): boolean;
   terminalEarlyUsageMs(): number;
   terminalLateUsageMs(): number;
   /** 터미널의 정체 감시 한 회차(ADR-213): `stop`·`nothing`·`notify` */
@@ -1340,6 +1346,44 @@ export interface NativeTerminalUsageStep {
   target: string;
   countTurn: boolean;
   checkLimits: boolean;
+  /** 이 요청이 붙은 열린 실행에 사용량 소식이 왔다고 표시한다(ADR-216) */
+  markSeen: boolean;
+}
+
+export interface NativeTerminalModelCall {
+  at: number;
+  /** `cli`·`observed`·`received`·`received_off_clock` */
+  timeSource: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  tokensComplete: boolean;
+  requestId?: string | null;
+  promptId?: string | null;
+  sessionId?: string | null;
+  costUsd?: number | null;
+  durationMs?: number | null;
+  agent?: string | null;
+  conversationId?: string | null;
+}
+
+export interface NativeTerminalTelemetry {
+  calls: NativeTerminalModelCall[];
+  defects: number;
+}
+
+export interface NativeTerminalLimitFacts {
+  reason: string;
+  maxTurns?: number;
+  modelCalls: number;
+  aborted: boolean;
+}
+
+export interface NativeTerminalLimitStep {
+  reason: string;
+  checkBudget: boolean;
 }
 
 export interface NativeTerminalStallFacts {

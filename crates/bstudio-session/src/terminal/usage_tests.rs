@@ -124,3 +124,13 @@ fn every_fact_combination_follows_the_documented_order() {
         }
     }
 }
+
+#[test]
+fn only_a_request_attached_to_the_open_run_marks_telemetry_seen() {
+    // 열린 실행에 붙은 것만 소식으로 센다. 닫힌 실행의 늦은 사용량·창 밖·중복은 새 실행의 끊김 판정을 끄지 않는다
+    assert!(decide_usage(&UsageFacts { open_run: true, in_open_window: true, ..facts() }).marks_telemetry_seen());
+    assert!(!decide_usage(&UsageFacts { open_run: true, in_closed_late: true, ..facts() }).marks_telemetry_seen());
+    assert!(!decide_usage(&UsageFacts { open_run: true, ..facts() }).marks_telemetry_seen());
+    assert!(!decide_usage(&UsageFacts { open_run: true, in_open_window: true, attached: true, ..facts() }).marks_telemetry_seen());
+    assert!(!decide_usage(&facts()).marks_telemetry_seen());
+}
