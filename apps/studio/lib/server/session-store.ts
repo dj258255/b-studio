@@ -64,6 +64,11 @@ export interface PersistedSession {
    * 지금 Git을 견준다. 이 필드가 생기기 전 기록에는 없다 — 그때는 처음 읽을 때 지금 값으로 채운다
    */
   git?: RememberedGit;
+  /**
+   * 사람이 한 수정이 아니라 에이전트가 바꿔 검증 없이 남은 파일(내 폴더 세션, ADR-218). 이어서 작업할 때 이 파일을 직접 수정으로 커밋하지 않고 변경으로 남긴다. `..`는 모든 파일.
+   * 이 필드가 생기기 전 기록에는 없다. 모양이 틀리면 모든 파일로 읽는다
+   */
+  keptAgentChanges?: string[];
 }
 
 export function sessionFile(stateDir: string): string {
