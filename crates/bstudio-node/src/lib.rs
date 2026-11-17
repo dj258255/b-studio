@@ -7022,6 +7022,41 @@ pub fn terminal_takes_check_changes(opened_by_prompt: bool, read_only: bool, all
     session_terminal::prompt::takes_check_changes(opened_by_prompt, read_only, allowed_next)
 }
 
+/// 요청 글의 분류(ADR-215)
+#[napi(object)]
+pub struct TerminalPromptClassJs {
+    /// 읽기만 요청이다(감싸개를 끝까지 벗기며 하나라도 표시로 시작하면 참, 벗기기가 끝나지 않아도 참)
+    pub read_only: bool,
+    /// 감싸개를 한 번 벗기고 자른 글이 `/`로 시작한다
+    pub slash_command: bool,
+    /// 감싸개를 한 번 벗기고 앞뒤 빈칸을 자른 글
+    pub unwrapped: String,
+}
+
+/// 요청 글을 분류한다(순수 함수)
+#[napi]
+pub fn terminal_classify_prompt(text: String) -> TerminalPromptClassJs {
+    let class = session_terminal::classify::classify_prompt(&text);
+    TerminalPromptClassJs { read_only: class.read_only, slash_command: class.slash_command, unwrapped: class.unwrapped }
+}
+
+/// 읽기 도구인가(Claude Code와 Codex의 표를 함께 본다). 열린 것은 정확히 일치하는 이름뿐이다
+#[napi]
+pub fn terminal_is_read_tool(name: String) -> bool {
+    session_terminal::classify::is_read_tool(&name)
+}
+
+/// 읽기만이 앞선 변경이 있는 실행에 이어 켜질 때 턴 끝에 표시하는가. `changed_before`: 0 없음·1 있음·그 밖(읽지 못함)은 있는 것으로 본다
+#[napi]
+pub fn terminal_read_only_after_work(already_read_only: bool, verification_started: bool, changed_before: i32) -> bool {
+    let changed = match changed_before {
+        0 => Some(false),
+        1 => Some(true),
+        _ => None,
+    };
+    session_terminal::classify::read_only_after_work(already_read_only, verification_started, changed)
+}
+
 // ── 세션 터미널의 턴 끝(Stop 훅) 판정(ADR-212, 4f B4c). 순수 판정이다: 사실은 TS가 읽어 넘기고 다음 할 일만 돌려준다 ──
 
 /// 게이트 앞 단계의 사실. 글 값(`git`·`fingerprint`·`unchanged`·`card`)은 알아보지 못하면 닫는 쪽으로 읽는다

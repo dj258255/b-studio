@@ -277,6 +277,7 @@ import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
+import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork } from './session-terminal-classify';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
 import {
   decideAfterCheckpoint,
@@ -296,13 +297,9 @@ import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from 
 import type { TaskCardDone } from './task-cards';
 import {
   AGENT_READ_ONLY_MARK,
-  AGENT_READ_TOOLS,
   agentCleanupCommand,
   applyPatchPaths,
-  CODEX_READ_TOOLS,
-  isReadOnlyPrompt,
   isResumableConversation,
-  unwrapPastedPrompt,
   type AgentGatewayAddress,
   type HostCliKind,
 } from '@b-studio/sandbox';
@@ -1411,6 +1408,8 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
   }
   // 중지 신호는 멈추기를 시작한 호출이 바로 올린다(호출이 돌아오기 전에 올라가 있어야 한다). 이 뒤의 단계와 그 순서·실패 처리는 Rust 수명 코어가 정한다(STOP_STEPS)
   session.stop.abort();
+  // 켜 둔 확인 선언 변경 허용은 멈추면 지운다(N2, ADR-215). 허용은 사람이 "다음 요청 하나"에 켠 것이다. 멈춘 세션을 나중에 이어서 작업할 때 그 사이의 첫 요청이 가져가면 사람이 모르는 요청의 선언 변경이 받아들여진다
+  session.snapshot.allowCheckChangesNext = undefined;
   await session.life.runStop({
     // 감시가 담아 둔 위반은 세션이 멈추면 지운다
     clear_violation: () => {
@@ -1614,6 +1613,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
         error: undefined,
         running: false,
         cancelling: undefined,
+        // 이어받은 세션은 허용 없이 시작한다. 멈춘 사이 켜졌거나 옛 파일(읽어 온 기록)에 실려 있어도 지운다(N2, ADR-215)
+        allowCheckChangesNext: undefined,
         tokenLimit,
         usage: undefined,
         runtime: provider.isolation,
@@ -8164,7 +8165,7 @@ function terminalBusy(session: Session): string | undefined {
  *
  * `fromPrompt`는 사람의 요청(UserPromptSubmit)이 여는 실행인가다. 켜 둔 확인 선언 변경 허용은 그 실행만 가져간다(도구 호출이 연 실행은 가져가지 않는다, P3)
  */
-async function beginTerminalRun(session: Session, request: string, { fromPrompt }: { fromPrompt: boolean }): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
+async function beginTerminalRun(session: Session, request: string, { fromPrompt, readOnly = isReadOnlyPrompt(request) }: { fromPrompt: boolean; readOnly?: boolean }): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
   const id = randomUUID().slice(0, 8);
   const claimed = session.life.claims.beginTerminalRun(id);
   if (typeof claimed !== 'number') return { busy: claimed.busy };
@@ -8183,10 +8184,9 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt 
     }
     // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
     const stallMs = terminalStallMs();
-    const readOnly = isReadOnlyPrompt(request);
     // 켜 둔 확인 선언 변경 허용은 사람의 요청이 연 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 두고, 도구 호출이 연 실행은 가져가지 않는다(ADR-164, ADR-211)
+    // 허용은 여기서 가져가기만 하고 지우지 않는다: 실행이 열린 뒤에 지운다(N2, ADR-215). 열기 전에 지우면 세션이 멈춰 열지 못할 때 허용이 쓰이지 않은 채 사라진다
     const allowCheckChanges = takesCheckChanges(fromPrompt, readOnly, session.snapshot.allowCheckChangesNext === true);
-    if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
     const terminal: TerminalRunState = {
       request,
       readOnly,
@@ -8220,6 +8220,8 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt 
       terminal,
     };
     session.run = run;
+    // 실행이 열렸다. 켜 둔 허용은 이 실행이 가져갔다(다음 요청 하나)
+    if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
     session.runsStarted = (session.runsStarted ?? 0) + 1;
     mirrorBusy(session);
     session.snapshot.pendingQuestion = undefined;
@@ -8490,8 +8492,10 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
 /** 요청의 시작(UserPromptSubmit 훅) */
 async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ blocked?: string; note?: string }> {
   const session = terminalSession(id);
-  const prompt = typeof input.prompt === 'string' ? clipText(unwrapPastedPrompt(input.prompt).trim(), TERMINAL_REQUEST_LIMIT) : '';
-  if (!prompt) return {};
+  // 요청 글의 분류는 코어가 한다(ADR-215): 읽기만·`/` 명령·감싸개를 벗긴 글. 읽기만은 자르기 전의 원문에서 읽는다(자른 글이 아니라)
+  const classified = typeof input.prompt === 'string' ? classifyPrompt(input.prompt) : undefined;
+  const prompt = classified ? clipText(classified.unwrapped, TERMINAL_REQUEST_LIMIT) : '';
+  if (!prompt || !classified) return {};
   // 마지막으로 받은 요청 글을 기억해 둔다. 앞 실행의 검증이 도는 동안 보낸 요청은 그 실행에 이어 붙지만,
   // 실제 작업은 그 실행이 닫힌 뒤에 시작될 수 있다. 그때 새로 여는 실행의 이름이 된다
   session.terminalLabel = prompt;
@@ -8500,12 +8504,12 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   // 바쁨·토큰 한도는 앞 칸에서 판정이 끝나면 읽지 않던 것이라 앞 칸이 맞지 않을 때만 읽는다(판정은 같다)
   const opened = openTerminalRun(session);
   const busy = opened ? undefined : terminalBusy(session);
-  const slash = prompt.startsWith('/');
+  const slash = classified.slashCommand;
   const budget = opened || busy || slash ? undefined : terminalBudgetMessage(session);
   const decision = decidePrompt({
     openRun: opened !== undefined,
     runReadOnly: opened?.terminal.readOnly === true,
-    promptReadOnly: isReadOnlyPrompt(prompt),
+    promptReadOnly: classified.readOnly,
     busy: busy !== undefined,
     slash,
     budget: budget !== undefined,
@@ -8516,19 +8520,22 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
     noteTerminalActivity(session, opened);
     // 읽기만은 켜지기만 한다(위 TerminalRunState.readOnly). 표시 없는 요청이 이어 와도 이 실행에서는 풀리지 않는다
     if (decision.markReadOnly) {
+      // 읽기만을 **먼저** 세운다(N1, ADR-215). 아래의 지문·변경 목록 읽기는 기다림이다. 요청 훅의 답을 기다리는 사이 온 쓰기 직전 훅은 그 순간의 `readOnly`를 읽으므로,
+      // 기다린 뒤에 세우면 그 사이의 쓰기가 허용된다(여는 쪽). 지문을 읽지 못해도 읽기만은 켜진 채 남고, 턴 끝은 지문이 없으면 확인하지 못한 것으로 닫는다(막는 쪽)
+      const wasReadOnly = opened.terminal.readOnly;
+      opened.terminal.readOnly = true;
       // 이 실행에 처음 읽기만이 켜지면 그 순간의 작업 복사본 지문을 잡는다(끝날 때 다시 잡아 견준다)
       opened.terminal.readOnlyFingerprint ??= await session.checkpoints.pendingFingerprint();
       // 앞선 변경이 있는 실행에 이어 켜지는가는 켜는 줄에서 읽는다(S6, ADR-212). 이 실행의 지문은 앞서 바뀐 파일을 이미 품었으므로 턴 끝이 읽기만 지름길을 타지 않게 표시한다.
       // 앞선 변경은 쓰기 훅을 지나 검증 상태가 세워진 것만이 아니다: 훅을 거치지 않고 바뀐 파일도 지문에 들어가 "바뀐 것 없음"으로 가려진다.
-      // 그래서 작업 복사본에 이미 바뀐 파일이 있어도 표시한다. 읽지 못하면 있는 것으로 본다(지름길 대신 게이트로 간다, 막는 쪽)
-      if (!opened.terminal.readOnly) {
+      // 그래서 작업 복사본에 이미 바뀐 파일이 있어도 표시한다. 읽지 못하면 있는 것으로 본다(지름길 대신 게이트로 간다, 막는 쪽). 표시할지는 코어가 정한다
+      if (!wasReadOnly) {
         const changedBefore = await changesOutsideTools(session).then(
           (files) => files.length > 0,
-          () => true,
+          () => undefined,
         );
-        if (opened.terminal.verification !== undefined || changedBefore) opened.terminal.readOnlyAfterWork = true;
+        if (readOnlyAfterWork(false, opened.terminal.verification !== undefined, changedBefore)) opened.terminal.readOnlyAfterWork = true;
       }
-      opened.terminal.readOnly = true;
     }
     return opened.terminal.readOnly || decision.readOnly ? { note: TERMINAL_READ_ONLY_NOTE } : {};
   }
@@ -8536,7 +8543,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
   if (decision.kind === 'nothing') return {};
   // 막는 쪽: 바쁨과 토큰 한도는 요청을 거절한다. 여는 것은 `open` 하나뿐이고, 그 밖의 결정(알아보지 못한 것 포함)은 거절이다
   if (decision.kind !== 'open') return { blocked: (decision.kind === 'block' && decision.block === 'budget' ? budget : busy) ?? TERMINAL_UNDECIDED_DENY };
-  const run = await beginTerminalRun(session, prompt, { fromPrompt: true });
+  const run = await beginTerminalRun(session, prompt, { fromPrompt: true, readOnly: classified.readOnly });
   if ('busy' in run) return { blocked: run.busy };
   // CLI가 모르는 채 되돌려진 변경이 있으면 이 요청의 맥락에 덧붙여 알린다(한 번만)
   const notes = session.terminalNotes?.splice(0) ?? [];
@@ -8586,7 +8593,7 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
 /** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
 async function terminalScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
   // 카드 실행 맥락이 있으면 쓰기 범위를 건다(#B6a). 도구 입력의 파일 경로를 작업 복사본 기준 상대 경로로 바꿔 본다.
-  // 읽기 도구는 앞에서 이미 통과했다(AGENT_READ_TOOLS). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
+  // 읽기 도구는 앞에서 이미 통과했다(isReadTool). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
   const card = session.terminalTaskContext;
   if (!card) return undefined;
   // 패치 하나가 여러 파일을 바꿀 수 있다. 하나라도 범위 밖이면 도구 전체를 막는다
@@ -8684,8 +8691,8 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   if (running) noteTerminalActivity(session, running, { settled: true });
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
   noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
-  // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`)
-  const readTool = (AGENT_READ_TOOLS as readonly string[]).includes(tool) || (CODEX_READ_TOOLS as readonly string[]).includes(tool);
+  // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`). 이름 대조는 코어가 한다(ADR-215)
+  const readTool = isReadTool(tool);
   if (readTool) return {};
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다

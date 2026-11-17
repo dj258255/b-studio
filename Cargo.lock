@@ -175,6 +175,7 @@ dependencies = [
  "bstudio-guard",
  "tempfile",
  "tokio",
+ "unicode-normalization",
 ]
 
 [[package]]

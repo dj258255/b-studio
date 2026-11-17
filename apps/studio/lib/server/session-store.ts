@@ -213,6 +213,8 @@ export function archivedSnapshot(data: Pick<PersistedSession, 'snapshot'>, error
     running: false,
     cancelling: undefined,
     deploying: undefined,
+    // 켜 둔 확인 선언 변경 허용은 읽어 온 세션에 이어지지 않는다(ADR-215). 옛 파일에 실려 있어도 읽을 수 있고, 여기서 뺀다
+    allowCheckChangesNext: undefined,
     error,
     usage: undefined,
     services: data.snapshot.services.map((service) => ({ ...service, state: 'stopped' as const, url: undefined, previewUrl: undefined, detail: undefined })),

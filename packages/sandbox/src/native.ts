@@ -326,6 +326,12 @@ interface NativeGuard {
   terminalDecidePreTool(facts: NativeTerminalPreToolFacts): NativeTerminalPreToolDecision;
   /** 다음 요청에 켜 둔 확인 선언 변경 허용을 이 실행이 가져가는가(ADR-164, ADR-211) */
   terminalTakesCheckChanges(openedByPrompt: boolean, readOnly: boolean, allowedNext: boolean): boolean;
+  /** 요청 글의 분류(ADR-215): 읽기만(감싸개를 끝까지 벗기며 하나라도 표시로 시작하면 참)·`/` 명령·감싸개를 한 번 벗기고 자른 글. 순수 함수다 */
+  terminalClassifyPrompt(text: string): NativeTerminalPromptClass;
+  /** 읽기 도구인가(ADR-215): Claude Code와 Codex의 표에 정확히 일치하는 이름만 참이다 */
+  terminalIsReadTool(name: string): boolean;
+  /** 읽기만이 앞선 변경이 있는 실행에 이어 켜질 때 턴 끝에 표시하는가(ADR-215). `changedBefore`: 0 없음, 1 있음, 그 밖은 읽지 못함(있는 것으로 본다) */
+  terminalReadOnlyAfterWork(alreadyReadOnly: boolean, verificationStarted: boolean, changedBefore: number): boolean;
   /** 터미널의 턴 끝 게이트 앞 판정(ADR-212). 읽지 않은 사실(`unread`)이 필요한 칸에 닿으면 `need_*`를 돌려준다 */
   terminalDecideTurnEnd(facts: NativeTerminalTurnEndFacts): NativeTerminalTurnEndStep;
   /** 터미널의 게이트 뒤 판정(ADR-212): 취소 → 턴 상한 → 통과면 위반 → 재시도·소진 */
@@ -1277,6 +1283,13 @@ export interface NativeTerminalCloseDecision {
   action: string;
   status: string;
   text: string;
+}
+
+/** 요청 글의 분류(ADR-215) */
+export interface NativeTerminalPromptClass {
+  readOnly: boolean;
+  slashCommand: boolean;
+  unwrapped: string;
 }
 
 export interface NativeTerminalPromptFacts {
