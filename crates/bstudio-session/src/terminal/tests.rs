@@ -313,6 +313,38 @@ async fn a_stale_release_never_frees_a_newer_claim() {
 }
 
 #[test]
+fn turn_failed_table() {
+    // 열린 실행이 없으면 할 일이 없다(검사 중이라는 사실이 있어도 같다)
+    for checking in [false, true] {
+        assert_eq!(on_turn_failed(&TurnFailedFacts { open: false, checking }), CliEnded::Nothing);
+    }
+    // 검사 중이면 미룬다. 그 검사가 닫는다
+    assert_eq!(on_turn_failed(&TurnFailedFacts { open: true, checking: true }), CliEnded::Defer);
+    // 그 밖에는 늘 실패로 닫는다. CLI 종료와 달리 피드백이 없어도 취소로 닫지 않는다
+    assert_eq!(on_turn_failed(&TurnFailedFacts { open: true, checking: false }), CliEnded::Close(EndStatus::Failed));
+}
+
+#[test]
+fn turn_failed_marks_the_deferred_close_only_on_an_open_run() {
+    let state = ready();
+    let ticket = state.begin_terminal_run("t").unwrap();
+    assert_eq!(state.terminal_retry(ticket), Retry::Feedback);
+    // 열린 실행이 없는 표(0)는 아무것도 하지 않고 표시도 남기지 않는다
+    assert_eq!(state.terminal_turn_failed(0, true), CliEnded::Nothing);
+    assert_eq!(state.terminal_retry(ticket), Retry::Feedback);
+    // 검사 중이 아니면 바로 실패로 닫는다. 미룬다는 표시를 남기지 않는다
+    assert_eq!(state.terminal_turn_failed(ticket, false), CliEnded::Close(EndStatus::Failed));
+    assert_eq!(state.terminal_retry(ticket), Retry::Feedback);
+    // 검사 중이면 미루고 표시를 남긴다. 검사가 재시도로 끝나면 실패로 닫는다
+    assert_eq!(state.terminal_turn_failed(ticket, true), CliEnded::Defer);
+    assert_eq!(state.terminal_retry(ticket), Retry::CloseFailed);
+    // 닫힌 실행에는 더 하지 않는다
+    state.begin_terminal_close(ticket, CloseKind::Settle(FinishedStatus::Done)).unwrap();
+    assert_eq!(state.terminal_turn_failed(ticket, true), CliEnded::Nothing);
+    assert_eq!(state.terminal_turn_failed(ticket, false), CliEnded::Nothing);
+}
+
+#[test]
 fn cli_ended_marks_the_deferred_close_only_on_an_open_run() {
     let state = ready();
     let ticket = state.begin_terminal_run("t").unwrap();

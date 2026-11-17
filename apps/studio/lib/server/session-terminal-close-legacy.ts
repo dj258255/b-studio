@@ -47,6 +47,11 @@ export function legacyCliEnded(facts: { open: boolean; checking: boolean; hasFee
   return facts.hasFeedback ? 'failed' : 'cancelled';
 }
 
+/** 턴이 API 오류로 끝났을 때: 옛 코드는 그 훅(StopFailure)을 설치하지 않아 아무것도 하지 않았다(실행이 열린 채 남았다, #1284) */
+export function legacyTurnFailed(): 'nothing' {
+  return 'nothing';
+}
+
 /** 검사가 재시도로 끝났을 때: 옛 코드는 CLI가 끝났는지 몰라 늘 피드백을 돌려줬다 */
 export function legacyRetry(): 'feedback' | 'close_failed' {
   return 'feedback';

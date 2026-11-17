@@ -289,7 +289,7 @@ import {
   type UnchangedCheck,
 } from './session-terminal-turn-end';
 import { decideSilence, decideStall, decideUsage, EARLY_USAGE_MS, LATE_USAGE_MS, stallIntervalMs } from './session-terminal-usage';
-import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, violationRoute, type CloseActions } from './session-terminal-close';
+import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, turnFailed, violationRoute, type CloseActions } from './session-terminal-close';
 import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { agentSignalsFromOtlp, apiRequestsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
@@ -9320,6 +9320,31 @@ async function terminalCliEnded(id: string): Promise<void> {
   );
 }
 
+/** 훅 입력의 오류 종류(`error`)를 사유에 적을 글로 바꾼다. 모르는 것(없거나 문자열이 아니거나 낯선 글자·긴 값)은 "알 수 없는 오류"다 */
+function apiErrorKind(input: HookInput): string {
+  const kind = typeof input.error === 'string' ? input.error.trim() : '';
+  return /^[A-Za-z0-9_.-]{1,40}$/.test(kind) ? kind : '알 수 없는 오류';
+}
+
+/**
+ * 사용 한도·인증·과부하 같은 API 오류로 턴이 끝났다(StopFailure 훅, #1284). CLI는 이때 Stop을 부르지 않아 실행이 열린 채 남고 다음 요청을 삼켰다.
+ * CLI 종료(`terminalCliEnded`)와 같은 꼴로 닫되 늘 **실패로 닫고 되돌린다**(피드백이 없어도 취소가 아니다). 게이트는 돌리지 않는다 —
+ * 오류로 끊긴 턴은 일을 마친 것이 아니어서, 돌려 통과시키면 덜 끝난 일이 `done`이 된다. 검사가 도는 중이면 미룬다(그 검사가 닫는다).
+ * CLI는 사용 한도가 풀리면 같은 턴을 이어 갈 수 있다. 그때 오는 쓰기 도구 훅이 새 실행을 연다(닫은 실행에는 붙지 않는다).
+ * 사람 기다림 표시(terminal_attention)는 만들지 않는다 — CLI는 입력 칸에서 쉬고 있고, 닫힌 실행의 실패 결과가 신호다
+ */
+async function terminalTurnFailed(id: string, input: HookInput): Promise<void> {
+  const session = terminalSession(id);
+  // 화면의 "지금 하는 일"을 지운다(정체 감시가 끝난 턴을 계속 지켜보지 않게). 마지막 답에는 오류 글이 남는다
+  noteTurnEnded((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
+  const run = openTerminalRun(session);
+  const feedback = run?.terminal.lastFeedback;
+  const action = turnFailed(session.life, terminalTicketOf(session), run?.terminal.checking ?? false);
+  if (!run || action !== 'failed') return;
+  const reason = `API 오류(${apiErrorKind(input)})로 턴이 끝나 요청을 닫았습니다.${feedback ? `\n\n앞선 검증 결과:\n${clipText(feedback, 4000)}` : ''}`;
+  await run.terminal.serial(() => abandonTerminalRun(session, run, { status: 'failed', reason }));
+}
+
 /** CLI가 끝났는데 마지막으로 돌려준 검증 결과가 있을 때 실패로 닫는 사유 */
 function cliEndedReason(feedback: string): string {
   return `검증을 통과하지 못한 채 CLI가 끝났습니다.\n\n${clipText(feedback, 4000)}`;
@@ -9407,6 +9432,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
     },
+    stopFailure: (input) => terminalTurnFailed(id, input),
     notification: async (input) => {
       terminalNotification(id, input);
     },

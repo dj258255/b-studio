@@ -27,6 +27,8 @@ export interface TerminalGatewayHandlers {
   stop(input: HookInput): Promise<{ feedback?: string; message?: string }>;
   /** CLI가 끝났다 */
   sessionEnd(input: HookInput): Promise<void>;
+  /** API 오류(사용 한도 등)로 턴이 끝났다(StopFailure, #1284). 열린 실행을 실패로 닫는다. CLI는 답을 읽지 않는다 */
+  stopFailure(input: HookInput): Promise<void>;
   /**
    * CLI가 사람을 기다린다(Notification 훅, B7): 권한 확인 창·되묻기·입력 대기. 알리기만 하고 판정을 바꾸지 않는다 —
    * 여기서 권한을 대신 허락하거나 CLI의 확인 창을 건너뛰지 않는다
@@ -66,7 +68,7 @@ const say = (message: string | undefined): Record<string, unknown> => (message ?
 export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput) => Promise<Record<string, unknown>>> {
   const routes = hookRoutes(handlers);
   // CLI의 훅 입력에는 대화 id(session_id)가 실린다(Claude Code는 모든 훅, Codex도 같은 이름). 텔레메트리와 ping은 훅 입력이 아니다
-  for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end', '/activity'] as const) {
+  for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end', '/stop-failure', '/activity'] as const) {
     const route = routes[name];
     routes[name] = async (input) => {
       if (typeof input.session_id === 'string' && input.session_id) {
@@ -111,6 +113,11 @@ function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEven
     },
     '/session-end': async (input) => {
       await handlers.sessionEnd(input);
+      return {};
+    },
+    // 사용 한도 같은 API 오류로 턴이 끝났다(#1284). 닫고 빈 답(200)을 준다 — CLI는 이 답을 읽지 않는다
+    '/stop-failure': async (input) => {
+      await handlers.stopFailure(input);
       return {};
     },
     // CLI가 확인 창·되묻기·입력 대기에서 멈췄다(B7). 알리기만 하고 빈 답(200)을 준다 — 결정을 바꾸지 않는다

@@ -245,6 +245,7 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
       'SessionEnd',
       'SessionStart',
       'Stop',
+      'StopFailure',
       'SubagentStart',
       'SubagentStop',
       'TaskCompleted',
@@ -257,6 +258,9 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     expect(command('Stop').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop');
     expect(command('SessionStart').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-start');
     expect(command('SessionEnd').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-end');
+    // 사용 한도 같은 API 오류로 턴이 끝나면 CLI는 Stop 대신 이 훅을 부른다(#1284). 빠지면 실행이 열린 채 남는다. 답을 읽지 않는 훅이다
+    expect(command('StopFailure').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop-failure');
+    expect(command('StopFailure').timeout).toBe(AGENT_HOOK_EVENTS['stop-failure']);
     expect(command('PreToolUse').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs pre-tool');
     // B7: 사람을 기다리는 창(권한 확인·되묻기·입력 필요·입력 대기)에서 알림 훅이 온다
     expect(command('Notification').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification');
@@ -586,7 +590,7 @@ describe('훅 스크립트 (컨테이너 안에서 CLI의 훅이 실행한다)',
     expect(await run(file, '', '{}')).toEqual({ code: 0, stdout: '' });
     expect(seen).toEqual([]);
     // 훅으로 거는 종류는 설정이 거는 종류와 같다
-    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['activity', 'notification', 'pre-tool', 'prompt', 'session-end', 'session-start', 'statusline', 'stop']);
+    expect(Object.keys(AGENT_HOOK_EVENTS).sort()).toEqual(['activity', 'notification', 'pre-tool', 'prompt', 'session-end', 'session-start', 'statusline', 'stop', 'stop-failure']);
   });
 
   it('닿는지 묻는 일(ping)은 닿으면 0, 닿지 못하거나 관문이 오류로 답하면 0이 아닌 값으로 끝난다', async () => {
