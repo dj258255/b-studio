@@ -39,6 +39,8 @@ export interface UsageStep {
   countTurn: boolean;
   /** 더한 뒤 한도를 본다 */
   checkLimits: boolean;
+  /** 이 요청이 붙은 열린 실행에 "사용량 소식이 왔다"를 세운다(ADR-216, N5). 붙지 않은 요청은 세우지 않는다 */
+  markSeen: boolean;
 }
 
 const TARGETS = new Set<string>(['none', 'open', 'closed']);
@@ -46,8 +48,8 @@ const TARGETS = new Set<string>(['none', 'open', 'closed']);
 /** 요청 하나를 어떻게 처리할지. 알아보지 못한 결정은 붙이지 않고 센다 */
 export function decideUsage(facts: UsageFacts): UsageStep {
   const step = native.terminalDecideUsage(facts);
-  if (!TARGETS.has(step.target)) return { count: true, target: 'none', countTurn: false, checkLimits: true };
-  return { count: step.count, target: step.target as UsageTarget, countTurn: step.countTurn, checkLimits: step.checkLimits };
+  if (!TARGETS.has(step.target)) return { count: true, target: 'none', countTurn: false, checkLimits: true, markSeen: false };
+  return { count: step.count, target: step.target as UsageTarget, countTurn: step.countTurn, checkLimits: step.checkLimits, markSeen: step.markSeen };
 }
 
 /** 도구 호출이 연 실행에 붙이는 열린 시각 앞의 시간(ms) */

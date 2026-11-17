@@ -79,6 +79,14 @@ pub struct UsageStep {
     pub check_limits: bool,
 }
 
+impl UsageStep {
+    /// 이 요청이 붙은 열린 실행에 "사용량 소식이 왔다"(U2)를 세운다. 요청이 실제로 붙은 실행에만 세운다 —
+    /// 앞 실행의 늦은 사용량이 새 실행의 끊김 판정을 꺼 버리지 않게 한다(ADR-216, N5). 붙지 않은 요청과 닫힌 실행에 붙은 요청은 세우지 않는다
+    pub fn marks_telemetry_seen(&self) -> bool {
+        self.target == RunTarget::Open
+    }
+}
+
 /// 옛 `attributeRunUsage`의 순서: 한도용 중복 → (열린 실행의 창 → 막 닫힌 실행의 창) → 귀속용 중복 → 턴 → 한도
 pub fn decide_usage(facts: &UsageFacts) -> UsageStep {
     // 요청 번호가 없으면 중복을 가릴 수 없다. 모르면 센다
