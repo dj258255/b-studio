@@ -192,6 +192,7 @@ export function hostCliWrapper(dir: string, claudePath: string, configDir?: stri
     ...accountExport('claude', configDir),
     // --mcp-config는 값을 여러 개 받는다(`<configs...>`). 사용자 인자 바로 앞에 두면 첫 낱말(요청 글)을 설정 파일로 먹으므로,
     // 값을 하나만 받는 --settings를 뒤에 둔다(#836)
+    // 감시는 이 정확한 자리(`<cli> --mcp-config M --settings S`)로 훅이 붙었는지 판정한다(ADR-219, hooked_argv). 순서를 바꾸면 판정도 같이 바꾼다
     `exec ${shellQuote(claudePath)} --mcp-config ${shellQuote(path.join(dir, MCP_FILE))} --settings ${shellQuote(path.join(dir, SETTINGS_FILE))} "$@"`,
     '',
   ].join('\n');
