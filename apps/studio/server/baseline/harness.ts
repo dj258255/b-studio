@@ -120,7 +120,7 @@ export async function firstDirWith(name: string, searchPath: string = process.en
   return undefined;
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
+export async function git(cwd: string, args: string[]): Promise<string> {
   // 사용자의 git 설정(서명, 훅, 별칭)을 읽지 않는다
   const env = {
     PATH: process.env.PATH,
@@ -275,17 +275,27 @@ export class Driver {
   readonly events: SseEvent[] = [];
   #abort: AbortController | undefined;
   #reading: Promise<void> | undefined;
+  readonly #streams: SseStream[] = [];
 
   constructor(
     readonly origin: string,
     readonly world: World,
   ) {}
 
-  /** HTTP 호출 하나. 응답은 기준 사진에 남기고 파싱한 본문을 돌려준다 */
-  async call(step: string, method: string, pathname: string, body?: unknown): Promise<{ status: number; body: Record<string, unknown> }> {
+  /** 로컬 토큰 쿠키를 요구하는 통로(터미널 통로와 확인 선언 변경 허용). desk가 같은 파일을 읽어 쿠키로 싣는다 */
+  static needsLocalToken(pathname: string): boolean {
+    const bare = pathname.split('?')[0]!;
+    return bare.endsWith('/terminal') || bare.endsWith('/check-changes') || bare.startsWith('/api/terminals/');
+  }
+
+  /**
+   * HTTP 호출 하나. 응답은 기준 사진에 남기고 파싱한 본문을 돌려준다.
+   * `after`를 주면 그 일이 끝난 뒤에 사진에 남긴다 — 응답이 돌아오기 전에 시나리오가 다른 일(CLI 흉내의 훅 호출)을 하는 호출에서, 기록 순서가 두 일의 끝나는 시각에 달리지 않게 한다
+   */
+  async call(step: string, method: string, pathname: string, body?: unknown, options: { after?: Promise<unknown> } = {}): Promise<{ status: number; body: Record<string, unknown> }> {
     const response = await fetch(new URL(pathname, this.origin), {
       method,
-      headers: { 'content-type': 'application/json', host: 'localhost:3000', ...(pathname.endsWith('/terminal') ? { cookie: `b_studio_local=${await this.#localToken()}` } : {}) },
+      headers: { 'content-type': 'application/json', host: 'localhost:3000', ...(Driver.needsLocalToken(pathname) ? { cookie: `b_studio_local=${await this.#localToken()}` } : {}) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const text = await response.text();
@@ -295,8 +305,115 @@ export class Driver {
     } catch {
       // JSON이 아닌 본문은 글 그대로 남긴다
     }
+    if (options.after) await options.after;
     this.exchanges.push({ step, method, path: pathname, status: response.status, body: parsed });
     return { status: response.status, body: parsed as Record<string, unknown> };
+  }
+
+  /** 사진에 값 하나를 그대로 남긴다(HTTP·훅이 아닌 것을 프로세스 밖에서 읽은 값: 가짜 CLI가 받은 인자 등) */
+  observe(step: string, name: string, value: unknown): void {
+    this.exchanges.push({ step, method: 'OBSERVE', path: name, status: 0, body: value });
+  }
+
+  /** 관문 폴더(터미널을 연 뒤에 생긴다). 훅 스크립트와 주소 파일, 설정이 든다 */
+  async gatewayDir(): Promise<string> {
+    const gateway = path.join(this.world.root, 'gateway');
+    let dirs = await readdir(gateway).catch(() => [] as string[]);
+    for (let attempt = 0; dirs.length === 0 && attempt < 100; attempt++) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      dirs = await readdir(gateway).catch(() => [] as string[]);
+    }
+    if (dirs.length !== 1) throw new Error(`관문 폴더가 하나여야 합니다: ${dirs.join(', ')}`);
+    return path.join(gateway, dirs[0]!);
+  }
+
+  /**
+   * 가짜 `claude`가 뜬 횟수가 `count`가 될 때까지 기다려, 그 마지막 실행이 받은 인자(argv)와 작업 폴더를 사진에 남긴다.
+   * 실행 인자는 서버가 CLI에 넘긴 것(감싸개가 붙인 관문 설정 경로, 첫 요청, 모델)이라 프로세스 밖에서 읽을 수 있다
+   */
+  async observeCli(step: string, count = 1): Promise<{ args: string[]; cwd: string }> {
+    const file = path.join(this.world.binDir, 'claude-terminal.jsonl');
+    const deadline = Date.now() + 30_000;
+    for (;;) {
+      const lines = (await readFile(file, 'utf8').catch(() => '')).split('\n').filter(Boolean);
+      if (lines.length >= count) {
+        const launched = JSON.parse(lines[count - 1]!) as { args: string[]; cwd: string };
+        this.observe(step, 'claude-argv', launched);
+        return launched;
+      }
+      if (Date.now() > deadline) throw new Error(`가짜 claude가 ${count}번 뜨기를 기다리다 시간이 지났습니다(지금 ${lines.length}번)`);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  /**
+   * CLI가 관문의 `/v1/logs`로 보내는 OTLP/HTTP JSON 텔레메트리를 같은 방식(주소 파일의 주소와 토큰, Bearer)으로 보낸다.
+   * 진짜 CLI가 보내는 모양을 흉내 낸 값이라 같다는 보장은 없다
+   */
+  async telemetry(step: string, body: unknown, options: { token?: string; raw?: string } = {}): Promise<{ status: number; body: unknown }> {
+    const address = JSON.parse(await readFile(path.join(await this.gatewayDir(), 'b-studio-gateway.json'), 'utf8')) as { url: string; token: string };
+    const response = await fetch(`${address.url}/v1/logs`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${options.token ?? address.token}` }, body: options.raw ?? JSON.stringify(body) });
+    const text = await response.text();
+    let parsed: unknown = text;
+    try {
+      parsed = text === '' ? null : JSON.parse(text);
+    } catch {
+      // JSON이 아닌 본문은 글 그대로 남긴다
+    }
+    // 토큰은 사진에 남기지 않는다(서버가 세션마다 새로 만든다). 틀린 토큰을 보냈는지만 남긴다
+    this.exchanges.push({ step, method: 'POST', path: '<gateway>/v1/logs', status: response.status, body: { input: options.raw ?? body, ...(options.token !== undefined ? { wrongToken: true } : {}), output: parsed } });
+    return { status: response.status, body: parsed };
+  }
+
+  /**
+   * SSE 통로를 열어 `data:` 조각(JSON)을 모은다. 통로의 조각은 타이머에 달려 오는 순서·개수가 달라질 수 있어, 사진에 남길 것은 시나리오가 `observe`로 고른다
+   */
+  async openStream(pathname: string): Promise<SseStream> {
+    const abort = new AbortController();
+    const response = await fetch(new URL(pathname, this.origin), {
+      headers: { host: 'localhost:3000', accept: 'text/event-stream', ...(Driver.needsLocalToken(pathname) ? { cookie: `b_studio_local=${await this.#localToken()}` } : {}) },
+      signal: abort.signal,
+    });
+    if (!response.ok || !response.body) throw new Error(`통로 연결 실패(${pathname}): ${response.status}`);
+    const messages: unknown[] = [];
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    const reading = (async () => {
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) return;
+          buffer += decoder.decode(value, { stream: true });
+          for (let at = buffer.indexOf('\n\n'); at >= 0; at = buffer.indexOf('\n\n')) {
+            const frame = buffer.slice(0, at);
+            buffer = buffer.slice(at + 2);
+            const line = frame.split('\n').find((candidate) => candidate.startsWith('data: '));
+            if (line) messages.push(JSON.parse(line.slice(6)) as unknown);
+          }
+        }
+      } catch {
+        // 연결을 닫으면 읽기가 끝난다
+      }
+    })();
+    const stream: SseStream = {
+      messages,
+      waitFor: async (label, predicate, timeoutMs = 60_000) => {
+        const deadline = Date.now() + timeoutMs;
+        for (;;) {
+          const found = messages.find(predicate);
+          if (found !== undefined) return found;
+          if (Date.now() > deadline) throw new Error(`통로 조각을 기다리다 시간이 지났습니다(${label}). 지금까지:\n${messages.map((entry) => JSON.stringify(entry).slice(0, 200)).join('\n')}`);
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      },
+      close: async () => {
+        abort.abort();
+        await reading;
+      },
+    };
+    this.#streams.push(stream);
+    return stream;
   }
 
   /**
@@ -304,15 +421,8 @@ export class Driver {
    * 응답(JSON)을 돌려주고 입력과 함께 기준 사진에 남긴다. 진짜 CLI의 훅 입력을 흉내 낸 값이라, 진짜 CLI가 보내는 모양과 같다는 보장은 없다
    */
   async hook(step: string, event: string, input: Record<string, unknown>): Promise<Record<string, unknown>> {
-    const gateway = path.join(this.world.root, 'gateway');
     // 터미널을 연 직후에는 관문 폴더가 아직 없을 수 있다
-    let dirs = await readdir(gateway).catch(() => [] as string[]);
-    for (let attempt = 0; dirs.length === 0 && attempt < 100; attempt++) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-      dirs = await readdir(gateway).catch(() => [] as string[]);
-    }
-    if (dirs.length !== 1) throw new Error(`관문 폴더가 하나여야 합니다: ${dirs.join(', ')}`);
-    const script = path.join(gateway, dirs[0]!, 'b-studio-hook.mjs');
+    const script = path.join(await this.gatewayDir(), 'b-studio-hook.mjs');
     const stdout = await new Promise<string>((resolve, reject) => {
       const child = execFile(process.execPath, [script, event], { env: { ...this.world.env }, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 }, (error, out) => (error ? reject(error) : resolve(out)));
       child.stdin!.end(JSON.stringify(input));
@@ -335,6 +445,9 @@ export class Driver {
 
   /** `/api/sessions/[id]/events`를 열어 이벤트를 모은다(snapshot부터 온다) */
   async subscribe(sessionId: string): Promise<void> {
+    // 앞 연결이 있으면(멈춘 세션을 다시 켠 뒤 다시 붙을 때) 닫고 이어서 모은다
+    this.#abort?.abort();
+    await this.#reading;
     this.#abort = new AbortController();
     const response = await fetch(new URL(`/api/sessions/${sessionId}/events`, this.origin), { headers: { host: 'localhost:3000' }, signal: this.#abort.signal });
     if (!response.ok || !response.body) throw new Error(`이벤트 연결 실패: ${response.status}`);
@@ -374,7 +487,15 @@ export class Driver {
   async close(): Promise<void> {
     this.#abort?.abort();
     await this.#reading;
+    for (const stream of this.#streams) await stream.close();
   }
+}
+
+/** `Driver.openStream`이 돌려주는 통로. `messages`는 지금까지 온 조각(순서대로) */
+export interface SseStream {
+  messages: unknown[];
+  waitFor: (label: string, predicate: (message: unknown) => boolean, timeoutMs?: number) => Promise<unknown>;
+  close: () => Promise<void>;
 }
 
 /**
@@ -472,6 +593,22 @@ export function laneEvents(events: SseEvent[]): { run: unknown[]; platform: unkn
     push(event.runId !== undefined ? run : event.type === 'files_changed' ? files : platform, event);
   }
   return { run, platform, files };
+}
+
+/**
+ * 파일 변경 알림의 개수를 지운다: 알림이 왔는지만 남기고 `fileRevision`은 자리표시자로 바꾼다.
+ * 감시는 첫 변경부터 500ms 안의 변경을 한 번으로 묶고(`file-watch.ts`), 리눅스의 재귀 감시는 켜지는 데 시간이 걸려 같은 시나리오의 알림 수가 기계마다 다르다(C1a 첫 CI에서 2번이 1번이 됐다).
+ * 알림은 코드 화면을 다시 불러오라는 신호일 뿐 판정에 쓰이지 않는다
+ */
+export function withoutFileRevisionCount(snapshot: BaselineSnapshot): BaselineSnapshot {
+  const mask = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(mask);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, key === 'fileRevision' && typeof inner === 'number' ? '<fileRevision>' : mask(inner)]));
+    return value;
+  };
+  const events = snapshot.events as Record<string, unknown> & { files: unknown[] };
+  const files = events.files;
+  return mask({ ...snapshot, events: { ...events, files: files.length > 0 ? [{ type: 'files_changed', revision: '<fileRevision>' }] : [] } }) as BaselineSnapshot;
 }
 
 export async function snapshotOf(world: World, driver: Driver, session: { id: string; workDir: string; stateDir?: string }, files: string[] = [], shutdownFrom?: number): Promise<BaselineSnapshot> {
