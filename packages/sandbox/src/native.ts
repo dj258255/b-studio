@@ -1021,6 +1021,34 @@ interface NativeGuard {
   workspaceRemoveFile(root: string, relative: string): Promise<void>;
   workspaceFingerprints(root: string, files: string[]): Promise<string[]>;
   WorkspacePinStore: new () => NativeWorkspacePinStore;
+  // ── 세션 조율 함수의 글 조립(ADR-195 4f C1-6a/6b). 트레일러는 게이트 통과의 근거라 바이트까지 같아야 한다.
+  // 입력 JSON은 `encodeNative`, 결과 JSON은 `decodeNative`로 읽는다. TS 껍데기: apps/studio/lib/server/session-text.ts
+  sessionTerminalTexts(specFile: string): string;
+  sessionPretoolDenyText(kind: string, textsJson: string, agentReadOnlyMark: string): string;
+  sessionCheckpointBody(
+    reportJson: string | null | undefined,
+    reportUnserializable: boolean,
+    allowBreaking: boolean,
+    checksJson: string,
+    verifyAttempts: number,
+    summary: string,
+    unguardedWrites: boolean,
+  ): string;
+  sessionCheckpointTrailers(passedStages: string[] | null | undefined, verify: string | null | undefined, incomplete: string | null | undefined): string[];
+  sessionTerminalResult(inputJson: string): string;
+  sessionHookMessage(summary: string): string;
+  sessionDoneTestsFeedback(failuresJson: string): string;
+  sessionTerminalStallMessage(stallMs: number): string;
+  sessionLimitAbortMessage(kind: string): string;
+  sessionApiErrorKind(raw: string | null | undefined): string;
+  sessionAttemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: number, feedbackClipped: string, maxAttempts: number): string;
+  sessionCliEndedReason(feedbackClipped: string): string;
+  sessionDeadlineReason(deadlineSeconds: string, hookSeconds: string, elapsedSeconds: string): string;
+  sessionGitRealignUnrestorableMessage(which: string, errorText: string): string;
+  sessionGitRealignNotice(which: string, filesLen: number, backupId: string | null | undefined): string;
+  sessionGitRealignFailureReason(which: string, errorText: string): string;
+  sessionGitRealignRestoredReason(which: string, filesLen: number, backupId: string | null | undefined): string;
+  sessionLandedPlan(committedSha: string | null | undefined, listed: boolean, latestSha: string | null | undefined): string;
 }
 
 export interface NativeWorkspaceFileRead {

@@ -54,11 +54,7 @@ import {
   findUnexecutedTests,
   findUnverifiedScenarioIds,
   flattenDiscoveredFile,
-  formatCheckedCoverage,
-  formatVerificationReport,
-  formatIncompleteTrailer,
   formatVerifyTrailer,
-  formatWorkflowTrailer,
   isBlockingFinding,
   isDocCheckpointPath,
   isInScope,
@@ -278,6 +274,26 @@ import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
 import { revertedText } from './revert-outcome';
 import {
+  apiErrorKind,
+  assembleTerminalResult,
+  attemptsExhaustedSummary,
+  checkpointBody,
+  checkpointTrailers,
+  cliEndedReason as cliEndedReasonOf,
+  deadlineReasonOf,
+  doneTestsFeedback,
+  gitRealignFailureReason,
+  gitRealignNotice,
+  gitRealignRestoredReason,
+  gitRealignUnrestorableMessage,
+  hookMessage,
+  landedPlan,
+  limitAbortMessage,
+  pretoolDenyText,
+  TERMINAL_TEXTS,
+  terminalStallMessage,
+} from './session-text';
+import {
   alignedAfterAction,
   dbRestoreBase,
   decideInitialMemory,
@@ -313,12 +329,10 @@ import {
   decideSaveFailure,
   decideTurnEndError,
   gateDeadlineMs,
-  landedState,
   savingAccepts,
   shouldReattach,
   type GateStageFacts,
   type GateStageStep,
-  type HeadRead,
   type Landed,
   type SaveFailureKind,
 } from './session-terminal-turn-end-rest';
@@ -331,7 +345,6 @@ import { agentSignalsFromOtlp, type ApiRequestUsage } from './terminal-telemetry
 import type { TaskCardDone } from './task-cards';
 import {
   AGENT_HOOK_EVENTS,
-  AGENT_READ_ONLY_MARK,
   agentCleanupCommand,
   applyPatchPaths,
   isResumableConversation,
@@ -3016,12 +3029,6 @@ function limitReason(run: ActiveRun, limit: number | undefined): string {
   return `세션 토큰 한도(${formatTokenCount(limit ?? 0)})에 도달해`;
 }
 
-/** 실행 중 한도 판정이 멈추라고 했을 때 중단 신호에 싣는 글 */
-function limitAbortMessage(kind: 'session' | 'user' | 'usage_unreadable'): string {
-  if (kind === 'session') return '세션 토큰 한도에 도달했습니다';
-  return kind === 'user' ? '사람별 토큰 한도에 도달했습니다' : '사람별 토큰 사용량 기록을 읽지 못했습니다';
-}
-
 /** 멈춘 이유와 되돌린 결과. revertError가 있으면 되돌리지 못했다 */
 function stoppedSummary(run: ActiveRun, limit: number | undefined, reverted: string[] | undefined, revertError: unknown, keptDocs: readonly string[] = []): string {
   if (run.stopReason === 'budget') {
@@ -3386,34 +3393,6 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
   });
 }
 
-/** PR 리뷰어가 요청마다 무엇을 확인했는지 볼 수 있도록 검증 결과와 에이전트 요약을 커밋 본문에 남긴다 */
-function checkpointBody(result: AgentResult, allowBreaking: boolean, { unguardedWrites = false }: { unguardedWrites?: boolean } = {}): string {
-  const sections: string[] = [];
-  if (result.report) sections.push(formatVerificationReport(result.report, { allowBreaking }));
-  // 이 컴퓨터 방식 터미널은 검사 동안 멈출 컨테이너가 없다(#850). 무엇을 막지 않았는지 기록에 남긴다
-  if (unguardedWrites) sections.push(UNGUARDED_WRITES_NOTE);
-  const coverage = formatCheckedCoverage(result.checks);
-  if (coverage) sections.push(coverage);
-  if (result.verifyAttempts > 0) sections.push(`검증 게이트 재시도: ${result.verifyAttempts}회`);
-  const summary = result.summary.trim();
-  if (summary) sections.push(`에이전트 요약:\n${summary.split('\n').slice(0, 30).join('\n')}`);
-  return sections.join('\n\n');
-}
-
-/** 이 컴퓨터 방식 터미널 실행의 체크포인트 본문에 남기는 한 줄(#850). 판정과는 상관없다 */
-const UNGUARDED_WRITES_NOTE = '검사 동안 다른 프로세스의 쓰기를 막지 않았습니다(이 컴퓨터 방식 터미널. 컨테이너 방식은 검사 동안 에이전트 컨테이너를 멈춥니다)';
-
-/** 배포할 때 releaseRequires와 대조하는 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
-function checkpointTrailers(result: AgentResult): string[] {
-  if (!result.passedStages) return [];
-  const trailers = [formatWorkflowTrailer(result.passedStages)];
-  // 가볍게 확인한 체크포인트는 건너뛴 단계를 채우지 못한다(배포 조건이 막는다). 화면이 안내를 바꾸도록 표시를 남긴다
-  if (result.verify === 'light') trailers.push(formatVerifyTrailer('light'));
-  // 턴 상한에서 게이트만 통과한 실행은 체크포인트로 남기되 하다 만 것으로 표시한다(ADR-131 덧붙임)
-  if (result.incomplete === 'max_turns') trailers.push(formatIncompleteTrailer('max_turns'));
-  return trailers;
-}
-
 /**
  * 세션을 만들거나 이어서 작업할 때 기억할 Git 상태(작업 복사본 밖, 세션 저장)를 지금 값으로 채운다(이슈 #699).
  * 이 기록이 없던 옛 세션은 처음 읽을 때의 값을 그 시점의 것으로 믿는다. 분리된 HEAD 등 브랜치가 없는 모양이면 없다
@@ -3523,11 +3502,10 @@ async function realignGitBeforeRun(session: Session): Promise<void> {
   if (!untrustedGit() || !session.git) return;
   const realigned = await realignGit(session, session.git, { allowUnwind: true });
   if (realigned.kind === 'unrestorable') {
-    throw new CheckpointError(`작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${realigned.which}) 되돌리려 했지만 되돌리지 못했습니다: ${describe(realigned.error)}`);
+    throw new CheckpointError(gitRealignUnrestorableMessage(realigned.which, describe(realigned.error)));
   }
   if (realigned.kind === 'restored') {
-    const kept = realigned.files.length > 0 ? ` 바뀐 파일 ${realigned.files.length}개는 보관본으로 남겼습니다${realigned.backup ? `(id: ${realigned.backup.id})` : ''}.` : '';
-    const text = `[b-studio] 요청 사이에 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라져(${realigned.which}) 마지막 체크포인트로 되돌렸습니다.${kept}`;
+    const text = gitRealignNotice(realigned.which, realigned.files.length, realigned.backup?.id);
     emit(session, { type: 'notice', text, at: new Date().toISOString() });
     (session.terminalNotes ??= []).push(text);
   }
@@ -7903,11 +7881,6 @@ async function runDoneTests(
   return failures;
 }
 
-/** 완료 검사 실패를 게이트 실패와 같은 모양의 feedback으로 만든다 */
-function doneTestsFeedback(failures: readonly { name: string; detail: string }[]): string {
-  return `[b-studio 검증 게이트] 완료 조건이 통과하지 못했습니다. 고친 뒤 턴을 끝내세요.\n\n${failures.map((failure) => `- ${failure.name}\n${failure.detail}`).join('\n')}`;
-}
-
 /**
  * 열려 있는 터미널 실행. 대화 창의 실행이거나, 이미 닫혔거나, 취소를 받아 닫히는 중인 실행이면 없다.
  * 닫히는 중인 실행(되돌리는 동안)은 세션에 걸려 있어 새 요청과 도구 호출을 막지만, 그 실행에 이어 붙이지는 않는다.
@@ -7957,16 +7930,6 @@ function stopTerminalStallWatch(session: Session): void {
   if (!session.terminalStallTimer) return;
   clearInterval(session.terminalStallTimer);
   session.terminalStallTimer = undefined;
-}
-
-/**
- * 정체 알림 문구(#B5 수정 3). 설정한 시간으로 만든다 — 60초의 배수면 N분, 아니면 N초. 멈추거나 되돌리지 않고
- * 사람에게만 알린다(사람의 확인을 기다리는 경우가 흔하다)
- */
-function terminalStallMessage(stallMs: number): string {
-  const seconds = Math.round(stallMs / 1000);
-  const label = seconds % 60 === 0 ? `${seconds / 60}분` : `${seconds}초`;
-  return `터미널 요청이 ${label} 넘게 움직임이 없습니다. CLI가 확인을 기다리는지 터미널을 보세요`;
 }
 
 /**
@@ -8305,12 +8268,6 @@ function savingTerminalRun(session: Session): (ActiveRun & { terminal: TerminalR
 async function failTerminalRunForViolation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, reason: string, kept?: string): Promise<{ message: string }> {
   const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: `[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을 실패로 닫습니다: ${reason}${kept ? `\n\n${kept}` : ''}` });
   return { message: hookMessage(summary) };
-}
-
-/** 훅 답의 한 줄 알림. 사유 글이 이미 `[b-studio]`로 시작하면 다시 붙이지 않는다 */
-function hookMessage(summary: string): string {
-  const line = summary.replace(/\n+/g, ' ');
-  return line.startsWith('[b-studio]') ? line : `[b-studio] ${line}`;
 }
 
 /** 지금 터미널의 요청을 받을 수 없으면 그 이유 */
@@ -8733,7 +8690,7 @@ async function terminalPromptSubmitted(id: string, input: HookInput): Promise<{ 
 }
 
 /** 확인 선언 변경 허용을 가져간 실행의 CLI에 알리는 글. 모르면 "허용을 켜고 다시 요청해 달라"고 되묻는다(대화 실행의 noteForModel과 같은 뜻) */
-const TERMINAL_CHECK_CHANGES_NOTE = `[b-studio] 사용자가 이 요청에 '확인 선언 변경 허용'을 켰습니다. 이번 실행의 검증은 ${SPEC_FILE}의 지금 확인 선언(tests·pageChecks·concurrencyChecks·loadChecks·autoPageChecks·required)으로 돕니다. 사용자가 요청한 선언만 바꾸고, 바꾼 것은 검증 결과의 declared-checks 줄에 남습니다.`;
+const TERMINAL_CHECK_CHANGES_NOTE = TERMINAL_TEXTS.checkChangesNote;
 
 /**
  * 터미널 세션의 다음 요청 하나에서 확인 선언의 변경을 받아들일지 켜고 끈다(#916, ADR-164). 지금 켜져 있는지 돌려준다.
@@ -8749,13 +8706,11 @@ export function setTerminalCheckChanges(id: string, allow: boolean): boolean {
 }
 
 /** 읽기만 요청에서 에이전트에게 덧붙이는 말. 도구가 거절되는 까닭을 미리 알려 헛돌지 않게 한다 */
-const TERMINAL_READ_ONLY_NOTE = '[b-studio] 이 요청은 읽기만입니다. 파일을 바꾸거나 명령을 돌리는 도구(Write·Edit·Bash·b-studio 도구)는 거절됩니다. Read·Glob·Grep으로 읽고 답만 하세요.';
+const TERMINAL_READ_ONLY_NOTE = TERMINAL_TEXTS.readOnlyNote;
 /** 도구를 기다리는 사이 그 실행이 닫혔을 때(위반·취소·CLI 종료·세션 멈춤) 거절하는 말 */
-const TERMINAL_RUN_CLOSED_DENY = '[b-studio] 요청을 닫아 도구를 쓰지 않았습니다.';
+const TERMINAL_RUN_CLOSED_DENY = TERMINAL_TEXTS.runClosedDeny;
 /** 판정이 거절했지만 글을 알아보지 못할 때(막는 쪽으로 틀린다) */
-const TERMINAL_UNDECIDED_DENY = '[b-studio] 요청을 받을 수 있는지 판정하지 못해 시작하지 않았습니다. 잠시 뒤 다시 시도하세요.';
-/** 읽기만 실행에서 쓰기 도구를 거절하는 말 */
-const TERMINAL_READ_ONLY_DENY = `[b-studio] 읽기만 요청이라 파일을 바꾸거나 명령을 돌리는 도구를 쓰지 않았습니다. 바꾸려면 이 요청이 끝난 뒤 "${AGENT_READ_ONLY_MARK}" 없이 새로 요청하세요.`;
+const TERMINAL_UNDECIDED_DENY = TERMINAL_TEXTS.undecidedDeny;
 
 /**
  * 파일을 바꿀 수 있는 도구를 쓰기 직전(PreToolUse 훅). 거절하면 화면의 "지금 하는 일"에 거절 까닭을 남긴다(#942) —
@@ -8835,20 +8790,11 @@ function terminalPreToolFacts(
   };
 }
 
-/** 코어가 거절한 까닭을 화면에 낼 글로 바꾼다. 글이 없으면(알아보지 못한 까닭) 막는 쪽의 일반 글이다 */
-function terminalPreToolDenyText(kind: PreToolDeny, texts: Partial<Record<PreToolDeny, string>>): string {
-  if (kind === 'read_only') return TERMINAL_READ_ONLY_DENY;
-  if (kind === 'closed') return TERMINAL_RUN_CLOSED_DENY;
-  return texts[kind] ?? TERMINAL_UNDECIDED_TOOL_DENY;
-}
-
 /** 사용량 소식이 끊겨 한도를 볼 수 없어 막는 글(ADR-213, U2) */
-const TERMINAL_USAGE_SILENT_DENY =
-  '[b-studio] 터미널의 사용량(텔레메트리)이 오지 않아 턴·토큰 한도를 확인할 수 없어 파일을 바꾸거나 명령을 돌리는 도구를 막았습니다. CLI의 텔레메트리 설정을 확인하세요. 사용량이 다시 오면 풀립니다.';
+const TERMINAL_USAGE_SILENT_DENY = TERMINAL_TEXTS.usageSilentDeny;
 
 /** 읽지 못한 사용량 기록이 있어 토큰 한도를 확인할 수 없어 막는 글(ADR-216) */
-const TERMINAL_USAGE_UNREADABLE_DENY =
-  '[b-studio] 터미널이 보낸 사용량 기록 일부를 읽지 못해 토큰 한도를 확인할 수 없어 파일을 바꾸거나 명령을 돌리는 도구를 막았습니다. 지금 하던 일을 정리하고 턴을 끝내세요.';
+const TERMINAL_USAGE_UNREADABLE_DENY = TERMINAL_TEXTS.usageUnreadableDeny;
 
 /** 이 실행에 토큰 한도(세션 또는 사람)가 걸려 있는가 */
 function tokenLimited(session: Session, run: ActiveRun): boolean {
@@ -8873,9 +8819,6 @@ function terminalUsageSilent(session: Session, run: ActiveRun & { terminal: Term
   return silent;
 }
 
-/** 쓰기 직전 훅이 이 도구를 쓸 수 있는지 판정하지 못해 막는 글 */
-const TERMINAL_UNDECIDED_TOOL_DENY = '[b-studio] 이 도구를 쓸 수 있는지 판정하지 못해 막았습니다. 잠시 뒤 다시 시도하세요.';
-
 async function terminalToolDecision(id: string, input: HookInput): Promise<{ deny?: string; message?: string }> {
   const session = terminalSession(id);
   const tool = typeof input.tool_name === 'string' ? input.tool_name : '';
@@ -8891,14 +8834,14 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다
   const budgetText = terminalBudgetMessage(session);
   const early = decidePreTool({ readTool, budget: budgetText !== undefined, gotRun: true, readOnly: false, limit: 'none', outOfScope: false, closed: false });
-  if (!early.allow) return { deny: terminalPreToolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
+  if (!early.allow) return { deny: pretoolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
   const run = await terminalRunForWork(session);
   // 쓰기 훅을 센다(ADR-213, U2). 사용량 소식 없이 이어지는지 보는 값이다
   if (!('busy' in run)) run.terminal.writeHooks += 1;
   // 앞의 판정(샌드박스를 켤지 말지): 실행을 얻었는가·읽기만·실행 한도·카드 범위를 그 순간의 사실로 본다. 이 판정의 허용은 최종이 아니다
   const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalScopeDeny(session, tool, input.tool_input) });
   const first = decidePreTool(before.facts);
-  if (!first.allow) return { deny: terminalPreToolDenyText(first.deny, before.texts) };
+  if (!first.allow) return { deny: pretoolDenyText(first.deny, before.texts) };
   if ('busy' in run) return { deny: run.busy };
   // b-studio 도구는 도구 서버 쪽에서 호출과 결과를 함께 남긴다
   if (tool && !tool.startsWith('mcp__b-studio__')) emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name: tool, input: clipToolInput(input.tool_input) } });
@@ -8908,7 +8851,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const finalDecision = async (): Promise<{ deny: string } | undefined> => {
     const after = terminalPreToolFacts(session, run, { readTool, scope: await terminalScopeDeny(session, tool, input.tool_input), signal });
     const answer = decidePreTool(after.facts);
-    return answer.allow ? undefined : { deny: terminalPreToolDenyText(answer.deny, after.texts) };
+    return answer.allow ? undefined : { deny: pretoolDenyText(answer.deny, after.texts) };
   };
   try {
     const verification = await untilAborted(signal, terminalVerification(session, run));
@@ -8947,7 +8890,7 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 허용은 아래에서 다시 판정한다
   const budgetText = terminalBudgetMessage(session);
   const early = decidePreTool({ readTool: false, budget: budgetText !== undefined, gotRun: true, readOnly: false, limit: 'none', outOfScope: false, closed: false });
-  if (!early.allow) return { ok: false, content: terminalPreToolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
+  if (!early.allow) return { ok: false, content: pretoolDenyText(early.deny, budgetText !== undefined ? { budget: `[b-studio] ${budgetText}` } : {}) };
   const run = await terminalRunForWork(session);
   if (!('busy' in run)) {
     noteTerminalActivity(session, run);
@@ -8956,7 +8899,7 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   // 앞의 판정(샌드박스를 켤지 말지). 쓰기 직전의 훅이 먼저 막지만, 훅을 거치지 않고 이 길로 불려도 읽기만 실행·한도에 닿은 실행에서는 돌리지 않는다(#B5). 이 판정의 허용은 최종이 아니다
   const before = terminalPreToolFacts(session, run, { readTool: false, scope: undefined });
   const first = decidePreTool(before.facts);
-  if (!first.allow) return { ok: false, content: terminalPreToolDenyText(first.deny, before.texts) };
+  if (!first.allow) return { ok: false, content: pretoolDenyText(first.deny, before.texts) };
   if ('busy' in run) return { ok: false, content: run.busy };
   let verification: TerminalVerification;
   const toolSignal = AbortSignal.any([session.stop.signal, run.cancel.signal]);
@@ -8971,7 +8914,7 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
     // [읽기만] 요청이 이어 왔거나 턴 상한에 닿았으면 도구를 돌리지 않는다. 이 판정과 도구 실행 사이에는 기다림이 없다
     const after = terminalPreToolFacts(session, run, { readTool: false, scope: undefined, signal: toolSignal });
     const answer = decidePreTool(after.facts);
-    if (!answer.allow) return { ok: false, content: terminalPreToolDenyText(answer.deny, after.texts) };
+    if (!answer.allow) return { ok: false, content: pretoolDenyText(answer.deny, after.texts) };
     emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_call', name, input: args } });
     const outcome = await executeTool(name, args, verification.context);
     emit(session, { type: 'agent', runId: run.id, event: { type: 'tool_result', name, ok: outcome.ok, content: outcome.content, chars: outcome.content.length, rawChars: outcome.rawChars ?? outcome.content.length } });
@@ -9384,7 +9327,13 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         const summary = gated.maxTurns
           ? `최대 턴 수(${maxTurnsFor(session.project) ?? 0})를 넘었습니다`
           : gated.attempts
-            ? (unsettledSummaries.get(outcome) ?? attemptsExhaustedSummary(gate.attempts, state.unsettledAttempts, outcome.kind === 'retry' ? outcome.feedback : ''))
+            ? (unsettledSummaries.get(outcome) ??
+              attemptsExhaustedSummary(
+                gate.attempts,
+                state.unsettledAttempts,
+                clipText(outcome.kind === 'retry' ? outcome.feedback : '', 800),
+                TERMINAL_MAX_VERIFY_ATTEMPTS,
+              ))
             : outcome.kind === 'exhausted'
               ? outcome.summary
               : (unsettledSummaries.get(outcome) ?? '검증을 통과하지 못했습니다');
@@ -9474,7 +9423,9 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     });
     if (again.kind === 'retry') return await retryOrClose(session, run, outcome.kind === 'retry' ? outcome.feedback : '[b-studio 검증 게이트] 검증을 통과하지 못했습니다.');
     if (again.kind === 'exhaust') {
-      const summary = unsettledSummaries.get(outcome) ?? attemptsExhaustedSummary(gate.attempts, state.unsettledAttempts, outcome.kind === 'retry' ? outcome.feedback : '');
+      const summary =
+        unsettledSummaries.get(outcome) ??
+        attemptsExhaustedSummary(gate.attempts, state.unsettledAttempts, clipText(outcome.kind === 'retry' ? outcome.feedback : '', 800), TERMINAL_MAX_VERIFY_ATTEMPTS);
       const result = terminalResult(run, verification, 'failed', summary, 'exhausted', started);
       onEvent({ type: 'failed', result });
       return closeMessage(await abandonTerminalRun(session, run, { status: 'failed', reason: summary, platformFailure: gate.platformFailure }));
@@ -9557,7 +9508,7 @@ function terminalGateDeadlineMs(): number {
 
 /** 턴 끝 검증의 시간 상한이 지났을 때 실행을 닫는 사유 글 */
 function deadlineReason(arrivedMs: number): string {
-  return `검증이 시간 상한(${Math.round(terminalGateDeadlineMs() / 1000)}초) 안에 끝나지 않아 통과시키지 않고 실패로 닫습니다. Stop 훅은 ${AGENT_HOOK_EVENTS.stop}초에 CLI가 끊고 답을 버리므로 그보다 먼저 닫아, 상한을 넘겨 끝난 검사가 체크포인트를 남기지 않게 합니다(훅이 도착한 뒤 ${Math.round((Date.now() - arrivedMs) / 1000)}초)`;
+  return deadlineReasonOf(Math.round(terminalGateDeadlineMs() / 1000), AGENT_HOOK_EVENTS.stop, Math.round((Date.now() - arrivedMs) / 1000));
 }
 
 /**
@@ -9580,12 +9531,6 @@ function startTurnDeadline(state: TerminalRunState, arrivedMs: number): { within
   };
 }
 
-/** 게이트 쪽 횟수와 게이트 밖 사유의 횟수를 합쳐 상한에 닿았을 때 쓰는 글(S12) */
-function attemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: number, feedback: string): string {
-  const base = `검증 재시도 상한(${TERMINAL_MAX_VERIFY_ATTEMPTS}번)에 닿았습니다(게이트 ${gateAttempts}번, 게이트 밖 사유 ${unsettledAttempts}번)`;
-  return feedback ? `${base}: ${clipText(feedback, 800)}` : base;
-}
-
 /**
  * 통과한 턴 끝의 저장이 남긴 체크포인트를 알아본다(S14). `committedSha`는 그 저장이 실제로 만든 커밋이다(커밋하지 않았으면 없다).
  * 그 커밋이 지금 HEAD일 때만 남았다고 보고 화면의 체크포인트 목록을 Git에 맞춘다(저장이 커밋한 뒤 목록을 고치기 전에 던졌을 수 있다).
@@ -9595,15 +9540,14 @@ function attemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: numbe
 async function landedCheckpoint(session: Session, runId: string, committedSha: string | undefined): Promise<{ state: Landed; checkpoint?: Checkpoint }> {
   if (committedSha === undefined) return { state: 'no' };
   let latest: Checkpoint | undefined;
-  let head: HeadRead;
+  let listed = true;
   try {
     [latest] = await session.checkpoints.list(2);
-    head = latest ? { kind: 'sha', sha: latest.sha } : { kind: 'empty' };
   } catch {
-    head = { kind: 'failed' };
+    listed = false;
   }
-  const state = landedState(committedSha, head);
-  if (state !== 'yes' || !latest) return { state };
+  const plan = landedPlan(committedSha, listed, latest?.sha);
+  if (!plan.adopt || !latest) return { state: plan.state };
   try {
     if (session.snapshot.checkpoints[0]?.sha !== latest.sha) {
       session.snapshot.checkpoints = [latest, ...session.snapshot.checkpoints];
@@ -9634,7 +9578,7 @@ async function reconcileTerminalGit(
   if (!remembered) {
     const summary = await abandonTerminalRun(session, run, {
       status: 'failed',
-      reason: '[b-studio] 작업 복사본의 Git 상태를 기억하지 못해 확인하지 못했습니다. 작업 복사본의 git 저장소를 확인한 뒤 다시 요청하세요',
+      reason: TERMINAL_TEXTS.gitMissingReason,
     });
     return { failed: true, summary };
   }
@@ -9643,14 +9587,13 @@ async function reconcileTerminalGit(
   const realigned = await realignGit(session, remembered, { allowUnwind });
   if (realigned.kind === 'same' || realigned.kind === 'unwound') return { failed: false, summary: '' };
   if (realigned.kind === 'unrestorable') {
-    const reason = `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${realigned.which}) 마지막 체크포인트로 되돌리려 했지만 되돌리지 못했습니다: ${describe(realigned.error)}`;
+    const reason = gitRealignFailureReason(realigned.which, describe(realigned.error));
     const summary = await abandonTerminalRun(session, run, { status: 'failed', reason });
     return { failed: true, summary };
   }
-  const backupNote = realigned.files.length > 0 ? ` 바뀐 파일 ${realigned.files.length}개는 보관본으로 남겼습니다${realigned.backup ? `(id: ${realigned.backup.id})` : ''}.` : '';
   const summary = await abandonTerminalRun(session, run, {
     status: 'failed',
-    reason: `[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(${realigned.which}) 마지막 체크포인트로 되돌렸습니다.${backupNote}`,
+    reason: gitRealignRestoredReason(realigned.which, realigned.files.length, realigned.backup?.id),
   });
   return { failed: true, summary };
 }
@@ -9658,7 +9601,7 @@ async function reconcileTerminalGit(
 /** 게이트의 결과를 실행 결과의 꼴로 옮긴다(체크포인트 본문과 트레일러, 대화 창의 결과 카드가 이 꼴을 읽는다) */
 function terminalResult(run: ActiveRun, verification: TerminalVerification, status: 'done' | 'failed', summary: string, outcome: GateOutcome['kind'], startedMs: number): AgentResult {
   const { workspace, gate } = verification;
-  return {
+  return assembleTerminalResult({
     status,
     summary,
     changedFiles: workspace.changedFiles(),
@@ -9667,11 +9610,12 @@ function terminalResult(run: ActiveRun, verification: TerminalVerification, stat
     gateOutcome: outcome,
     passedStages: [...gate.passedStages],
     verifyAttempts: gate.attempts,
-    turns: 0,
     // CLI가 텔레메트리로 알려 온 터미널 실행의 사용량(#726). 받은 것이 없으면 0이다
     usage: run.terminalUsage?.usage ?? { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    metrics: { modelCalls: run.terminalUsage?.modelCalls ?? 0, maxContextTokens: 0, toolMs: 0, gateMs: Math.round(performance.now() - startedMs), ...(run.terminalUsage ? { usageByModel: run.terminalUsage.usageByModel } : {}) },
-  };
+    modelCalls: run.terminalUsage?.modelCalls ?? 0,
+    usageByModel: run.terminalUsage?.usageByModel,
+    gateMs: Math.round(performance.now() - startedMs),
+  });
 }
 
 /** CLI가 끝났다(SessionEnd 훅). 열려 있던 실행을 닫는다 — 검증이 도는 중이면 그 검증이 닫는다 */
@@ -9688,15 +9632,9 @@ async function terminalCliEnded(id: string): Promise<void> {
   if (!run || action === 'nothing' || action === 'defer') return;
   await run.terminal.serial(() =>
     feedback
-      ? abandonTerminalRun(session, run, { status: 'failed', reason: cliEndedReason(feedback) })
+      ? abandonTerminalRun(session, run, { status: 'failed', reason: cliEndedReasonOf(clipText(feedback, 4000)) })
       : abandonTerminalRun(session, run, { status: 'cancelled', reason: 'CLI가 끝나 요청을 닫았습니다.' }),
   );
-}
-
-/** 훅 입력의 오류 종류(`error`)를 사유에 적을 글로 바꾼다. 모르는 것(없거나 문자열이 아니거나 낯선 글자·긴 값)은 "알 수 없는 오류"다 */
-function apiErrorKind(input: HookInput): string {
-  const kind = typeof input.error === 'string' ? input.error.trim() : '';
-  return /^[A-Za-z0-9_.-]{1,40}$/.test(kind) ? kind : '알 수 없는 오류';
 }
 
 /**
@@ -9714,13 +9652,8 @@ async function terminalTurnFailed(id: string, input: HookInput): Promise<void> {
   const feedback = run?.terminal.lastFeedback;
   const action = turnFailed(session.life, terminalTicketOf(session), run?.terminal.checking ?? false);
   if (!run || action !== 'failed') return;
-  const reason = `API 오류(${apiErrorKind(input)})로 턴이 끝나 요청을 닫았습니다.${feedback ? `\n\n앞선 검증 결과:\n${clipText(feedback, 4000)}` : ''}`;
+  const reason = `API 오류(${apiErrorKind(typeof input.error === 'string' ? input.error : undefined)})로 턴이 끝나 요청을 닫았습니다.${feedback ? `\n\n앞선 검증 결과:\n${clipText(feedback, 4000)}` : ''}`;
   await run.terminal.serial(() => abandonTerminalRun(session, run, { status: 'failed', reason }));
-}
-
-/** CLI가 끝났는데 마지막으로 돌려준 검증 결과가 있을 때 실패로 닫는 사유 */
-function cliEndedReason(feedback: string): string {
-  return `검증을 통과하지 못한 채 CLI가 끝났습니다.\n\n${clipText(feedback, 4000)}`;
 }
 
 /**
@@ -9730,7 +9663,7 @@ function cliEndedReason(feedback: string): string {
 async function retryOrClose(session: Session, run: ActiveRun & { terminal: TerminalRunState }, feedback: string): Promise<{ feedback?: string; message?: string }> {
   run.terminal.lastFeedback = feedback;
   if (retryRoute(session.life, run.ticket) === 'feedback') return { feedback };
-  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: cliEndedReason(feedback) });
+  const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: cliEndedReasonOf(clipText(feedback, 4000)) });
   return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
 }
 
