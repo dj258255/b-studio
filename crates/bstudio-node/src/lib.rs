@@ -8304,3 +8304,186 @@ pub fn compose_cors_environment_from(environment_json: String) -> Result<String>
 pub fn compose_frontend_backend_env_name(name: String) -> bool {
     compose_import::frontend_backend_env_name(&name)
 }
+
+// ── 이 컴퓨터 방식 터미널의 관문 글과 폴더(4f C1 5단계). 글은 `bstudio-session::terminal::gateway`, 파일 syscall은 `bstudio-io::host_gateway` ──
+
+/// 검증 함수가 돌려주는 꼴. 실패는 `SandboxError`의 제목·상세 두 글자다(옛 TS가 그 두 글자로 다시 만든다)
+fn gateway_ok<T: serde::Serialize>(value: T) -> String {
+    serde_json::json!({ "ok": true, "value": value }).to_string()
+}
+
+fn gateway_err(error: bstudio_session::terminal::gateway::GatewayError) -> String {
+    serde_json::json!({ "ok": false, "title": error.title, "detail": error.detail }).to_string()
+}
+
+/// 셸 명령에 넣을 글을 작은따옴표로 감싼다(셸 주입 방지)
+#[napi]
+pub fn terminal_shell_quote(text: String) -> String {
+    session_terminal::gateway::shell_quote(&text)
+}
+
+/// CLI 실행 인자로 넘길 첫 요청 글. `{"ok":true,"value"}` 또는 `{"ok":false,"title","detail"}`(JSON)
+#[napi]
+pub fn terminal_first_prompt_arg(text: String) -> String {
+    match session_terminal::gateway::first_prompt_arg(&text) {
+        Ok(value) => gateway_ok(value),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// 이어 붙일 수 있는 꼴의 대화 id인가
+#[napi]
+pub fn terminal_is_resumable_conversation(id: String) -> bool {
+    session_terminal::gateway::is_resumable_conversation(&id)
+}
+
+/// CLI 실행 인자로 넘길 대화 id. `{"ok":true,"value"}` 또는 `{"ok":false,"title","detail"}`(JSON)
+#[napi]
+pub fn terminal_resume_conversation_arg(id: String) -> String {
+    match session_terminal::gateway::resume_conversation_arg(&id) {
+        Ok(value) => gateway_ok(value),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// CLI 실행 인자로 넘길 모델 id. `{"ok":true,"value"}` 또는 `{"ok":false,"title","detail"}`(JSON)
+#[napi]
+pub fn terminal_cli_model_arg(model: String) -> String {
+    match session_terminal::gateway::cli_model_arg(&model) {
+        Ok(value) => gateway_ok(value),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// 터미널에 넘길 환경(허용한 이름만). `env`는 `[[이름, 값], …]`의 나온 순서. 결과도 같은 꼴의 JSON 봉투다
+#[napi]
+pub fn terminal_host_terminal_env(gateway_dir: Option<String>, env: Vec<Vec<String>>) -> String {
+    let pairs: Vec<(String, String)> = env
+        .into_iter()
+        .filter_map(|pair| {
+            let mut items = pair.into_iter();
+            Some((items.next()?, items.next()?))
+        })
+        .collect();
+    match session_terminal::gateway::host_terminal_env(gateway_dir.as_deref(), &pairs) {
+        Ok(value) => gateway_ok(value.into_iter().map(|(key, value)| vec![key, value]).collect::<Vec<_>>()),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// 이 컴퓨터용 CLI 설정 JSON(`JSON.stringify(settings, null, 2)`와 같은 글자, 끝의 줄바꿈 없음)
+#[napi]
+pub fn terminal_host_gateway_settings_json(dir: String, node_path: String, hook_url: String, hook_token: String) -> String {
+    session_terminal::gateway::host_gateway_settings_json(&dir, &node_path, &hook_url, &hook_token)
+}
+
+/// claude 감싸개 글. 감시가 보는 `<cli> --mcp-config M --settings S` 순서를 지킨다(ADR-219)
+#[napi]
+pub fn terminal_host_cli_wrapper(dir: String, claude_path: String, config_dir: Option<String>) -> String {
+    session_terminal::gateway::host_cli_wrapper(&dir, &claude_path, config_dir.as_deref())
+}
+
+#[napi(object)]
+pub struct GatewayContentJs {
+    pub name: String,
+    pub content: String,
+}
+
+/// zsh의 관문 폴더에 둘 네 파일(이름, 내용)을 나온 순서대로
+#[napi]
+pub fn terminal_host_zsh_files(dir: String, kind: String) -> Vec<GatewayContentJs> {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_zsh_files(&dir, kind).into_iter().map(|(name, content)| GatewayContentJs { name, content }).collect()
+}
+
+/// bash의 관문 폴더에 둘 시작 파일
+#[napi]
+pub fn terminal_host_bash_rc(dir: String, kind: String) -> String {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_bash_rc(&dir, kind)
+}
+
+/// 터미널을 열면 도는 명령(관문이 없을 때)
+#[napi]
+pub fn terminal_host_terminal_command(kind: String) -> String {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_terminal_command(kind)
+}
+
+/// 셸 함수를 정의할 자리가 없는 셸(fish 등)의 대체 명령
+#[napi]
+pub fn terminal_host_fallback_command(dir: String, kind: String) -> String {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_fallback_command(&dir, kind)
+}
+
+/// 관문의 훅 답 꼴(JSON 글자). `kind`: `none`·`message`·`block`·`session_start`·`prompt_note`·`pre_tool_deny`
+#[napi]
+pub fn terminal_hook_response(kind: String, text: Option<String>) -> String {
+    session_terminal::gateway::hook_response(&kind, text.as_deref())
+}
+
+#[napi(object)]
+pub struct GatewayFileJs {
+    pub name: String,
+    pub content: String,
+    pub mode: u32,
+}
+
+impl From<GatewayFileJs> for bstudio_io::host_gateway::GatewayFile {
+    fn from(file: GatewayFileJs) -> Self {
+        Self { name: file.name, content: file.content, mode: file.mode }
+    }
+}
+
+/// 관문 폴더 자리를 준비하고 링크를 푼 진짜 경로를 돌려준다
+#[napi]
+pub fn terminal_prepare_host_gateway(env: Env, root: String, sandbox_id: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move {
+        let dir = tokio::task::spawn_blocking(move || bstudio_io::host_gateway::prepare_gateway_dir(Path::new(&root), &sandbox_id))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 폴더 준비가 중단됐습니다: {error}")))?
+            .map_err(|error| Error::from_reason(error.message()))?;
+        Ok(dir.to_string_lossy().into_owned())
+    })
+    .build(&env)
+}
+
+/// 관문 폴더에 기대하는 파일을 쓴다(내용이 같으면 그대로 두고 권한만 다시 조인다)
+#[napi]
+pub fn terminal_write_gateway_files(env: Env, dir: String, files: Vec<GatewayFileJs>, statusline_name: String) -> Result<AsyncBlock<()>> {
+    let files: Vec<bstudio_io::host_gateway::GatewayFile> = files.into_iter().map(Into::into).collect();
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_io::host_gateway::write_gateway_files(Path::new(&dir), &files, &statusline_name))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 파일 쓰기가 중단됐습니다: {error}")))?
+            .map_err(|error| Error::from_reason(error.message()))?;
+        Ok(())
+    })
+    .build(&env)
+}
+
+/// 관문 폴더가 쓴 그대로인가. 다른 파일·폴더의 이름을 돌려준다(관문 폴더 자체는 '.')
+#[napi]
+pub fn terminal_check_host_gateway_config(env: Env, dir: String, expected: Vec<GatewayFileJs>) -> Result<AsyncBlock<Vec<String>>> {
+    let expected: Vec<bstudio_io::host_gateway::GatewayFile> = expected.into_iter().map(Into::into).collect();
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_io::host_gateway::check_gateway_config(Path::new(&dir), &expected))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 파일 확인이 중단됐습니다: {error}")))
+    })
+    .build(&env)
+}
+
+/// 세션이 멈출 때 그 세션의 관문 설정을 지운다(링크를 따라가지 않고, 비었을 때만 폴더를 지운다)
+#[napi]
+pub fn terminal_remove_host_gateway_config(env: Env, root: String, sandbox_id: String) -> Result<AsyncBlock<()>> {
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_io::host_gateway::remove_gateway_config(Path::new(&root), &sandbox_id))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 폴더 지우기가 중단됐습니다: {error}")))?
+            .map_err(|error| Error::from_reason(error.message()))?;
+        Ok(())
+    })
+    .build(&env)
+}
