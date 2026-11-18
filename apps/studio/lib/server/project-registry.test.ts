@@ -1,8 +1,9 @@
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { CheckpointStore } from '@b-studio/agent';
 import { afterEach, describe, expect, it } from 'vitest';
-import { readRegistry, unregisterProject } from './project-registry';
+import { generatedFilePaths, readRegistry, unregisterProject } from './project-registry';
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -34,5 +35,38 @@ describe('등록 파일 쓰기(임시 이름이 프로세스마다 겹치지 않
       expect(entry.path).toMatch(/^\/tmp\/p-\d+$/);
       expect(ids).toContain(entry.id);
     }
+  });
+});
+
+describe('생성 파일 이름 경계(제품 경로를 막지 않는다)', () => {
+  it('generatedFilePaths가 내는 이름은 체크포인트가 거부하지 않는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-generated-'));
+    roots.push(root);
+    await mkdir(path.join(root, 'apps/web'), { recursive: true });
+    for (const file of ['studio.yaml', 'compose.b-studio.yaml', 'Dockerfile.b-studio', 'apps/web/Dockerfile.b-studio']) {
+      await writeFile(path.join(root, file), 'generated\n');
+    }
+
+    // 실제로 내는 이름: studio.yaml·compose.b-studio.yaml·루트/한 단계/두 단계의 Dockerfile.b-studio
+    expect(await generatedFilePaths(root)).toEqual(['studio.yaml', 'compose.b-studio.yaml', 'Dockerfile.b-studio', 'apps/web/Dockerfile.b-studio']);
+
+    const store = new CheckpointStore(root, { excludedFiles: (projectRoot) => generatedFilePaths(projectRoot) });
+    await expect(store.init()).resolves.toBeDefined();
+    await writeFile(path.join(root, 'studio.yaml'), 'changed\n');
+    await expect(store.discard()).resolves.toBeDefined();
+  });
+});
+
+describe('생성 파일 이름 경계(링크 폴더를 따라가지 않는다)', () => {
+  it('링크 폴더 아래의 Dockerfile.b-studio는 내지 않는다', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'b-studio-link-'));
+    const outside = await mkdtemp(path.join(tmpdir(), 'b-studio-link-out-'));
+    roots.push(root, outside);
+    await mkdir(path.join(outside, 'web'), { recursive: true });
+    await writeFile(path.join(outside, 'web', 'Dockerfile.b-studio'), 'outside\n');
+    // 프로젝트 안의 apps는 프로젝트 밖 폴더를 가리키는 링크다
+    await symlink(outside, path.join(root, 'apps'));
+
+    expect(await generatedFilePaths(root)).toEqual([]);
   });
 });

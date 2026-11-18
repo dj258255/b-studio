@@ -44,3 +44,4 @@ pub mod workspace_io;
 pub mod host_gateway;
 pub mod spec_load;
 pub mod gate_workflow;
+pub mod checkpoint_names;
