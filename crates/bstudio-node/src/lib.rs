@@ -8035,3 +8035,191 @@ fn json_array(events: &[&str]) -> String {
     out.push(']');
     out
 }
+
+// ── spec의 순수 계산(ADR-195 4e 뒤, 3단계 (a)). `@b-studio/spec`의 `service-selection`·`public-url.findPublicUrlRefs`·
+// `system-packages`·`compose-import`를 옮긴 것. 객체는 JSON 문자열(encodeNative·decodeNative)로 주고받고,
+// YAML 글자를 받는 함수는 Rust가 직접 읽는다. TS 껍데기: packages/spec/src/{service-selection,public-url,system-packages,compose-import}.ts
+use bstudio_guard::js_json::JsObject;
+use bstudio_guard::{compose_import, service_selection, system_packages};
+
+fn object_input(json: &str, what: &str) -> Result<JsObject> {
+    match input(json, what)? {
+        JsValue::Obj(o) => Ok(o),
+        _ => Err(Error::from_reason(format!("{what}가 객체가 아닙니다"))),
+    }
+}
+
+#[napi]
+pub fn service_dependency_closure(roots: Vec<String>, graph_json: String) -> Result<Vec<String>> {
+    let graph = object_input(&graph_json, "서비스 의존 그래프")?;
+    fail(service_selection::dependency_closure(&roots, &graph))
+}
+
+#[napi]
+pub fn service_default_selection(roots: Vec<String>, graph_json: String) -> Result<Vec<String>> {
+    let graph = object_input(&graph_json, "서비스 의존 그래프")?;
+    fail(service_selection::default_selection(&roots, &graph))
+}
+
+#[napi]
+pub fn service_dependents_of(name: String, selected: Vec<String>, graph_json: String) -> Result<Vec<String>> {
+    let graph = object_input(&graph_json, "서비스 의존 그래프")?;
+    fail(service_selection::dependents_of(&name, &selected, &graph))
+}
+
+#[napi]
+pub fn service_newly_added(known: Vec<String>, compose_services: Vec<String>) -> Vec<String> {
+    service_selection::newly_added(&known, &compose_services)
+}
+
+#[napi]
+pub fn public_url_find_refs(services_json: String) -> Result<String> {
+    let services = input(&services_json, "compose services")?;
+    let refs = fail(public_url::find_refs(&services))?;
+    let rows: Vec<JsValue> = refs
+        .iter()
+        .map(|reference| {
+            let mut o = JsObject::new();
+            o.set("service", JsValue::Str(reference.service.clone()));
+            o.set("envKey", JsValue::Str(reference.env_key.clone()));
+            o.set("template", JsValue::Str(reference.template.clone()));
+            o.set("targetService", JsValue::Str(reference.target_service.clone()));
+            JsValue::Obj(o)
+        })
+        .collect();
+    Ok(out(&JsValue::Arr(rows)))
+}
+
+#[napi]
+pub fn system_package_detect_family(image: String) -> Option<String> {
+    system_packages::detect_package_family(&image).map(|family| family.as_str().to_owned())
+}
+
+#[napi]
+pub fn system_package_apply(dockerfile: String, packages: Vec<String>) -> Result<String> {
+    fail(system_packages::apply_system_packages(&dockerfile, &packages))
+}
+
+#[napi]
+pub fn compose_engine_of_image(image: String) -> Option<String> {
+    compose_import::engine_of_image(&image).map(str::to_owned)
+}
+
+#[napi]
+pub fn compose_is_prod_compose_file(file_name: String) -> bool {
+    compose_import::is_prod_compose_file(&file_name)
+}
+
+#[napi]
+pub fn compose_import_supporting_services(compose_text: String, source_file: String) -> String {
+    out(&compose_import::import_supporting_services(&compose_text, &source_file))
+}
+
+#[napi]
+pub fn compose_sanitize_service_name(value: String) -> String {
+    compose_import::sanitize_service_name(&value)
+}
+
+#[napi]
+pub fn compose_sanitize_sql_identifier(value: String) -> String {
+    compose_import::sanitize_sql_identifier(&value)
+}
+
+#[napi]
+pub fn compose_propose_postgres_service(database: String, reason: String, service_name: String) -> String {
+    out(&compose_import::propose_postgres_service(&database, &reason, &service_name))
+}
+
+#[napi]
+pub fn compose_suggests_postgres_need(template: String, dependency_text: String) -> bool {
+    compose_import::suggests_postgres_need(&template, &dependency_text)
+}
+
+#[napi]
+pub fn compose_detect_env_references(config_text: String) -> String {
+    out(&compose_import::detect_env_references(&config_text))
+}
+
+#[napi]
+pub fn compose_database_credentials_for(engine: String, environment_json: String) -> Result<Option<String>> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(compose_import::database_credentials_for(&engine, &environment).map(|credentials| out(&compose_import::credentials_value(&credentials))))
+}
+
+#[napi]
+pub fn compose_needs_dev_default_credentials(engine: String, environment_json: String) -> Result<bool> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(compose_import::needs_dev_default_credentials(&engine, &environment))
+}
+
+#[napi]
+pub fn compose_with_dev_default_credentials(service_json: String, note: String) -> Result<String> {
+    let service = input(&service_json, "부가 서비스")?;
+    Ok(out(&fail(compose_import::with_dev_default_credentials(&service, &note))?))
+}
+
+#[napi]
+pub fn compose_with_default_healthcheck(service_json: String) -> Result<String> {
+    let service = input(&service_json, "부가 서비스")?;
+    Ok(out(&fail(compose_import::with_default_healthcheck(&service))?))
+}
+
+#[napi]
+pub fn compose_wire_app_environment(template: String, refs_json: String, infra_json: String) -> Result<String> {
+    let refs = input(&refs_json, "환경 참조")?;
+    let infra = input(&infra_json, "인프라 목록")?;
+    Ok(out(&fail(compose_import::wire_app_environment(&template, &refs, &infra))?))
+}
+
+#[napi]
+pub fn compose_database_spec_for(engine: String, environment_json: String) -> Result<Option<String>> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(compose_import::database_spec_for(&engine, &environment).map(|spec| out(&spec)))
+}
+
+#[napi]
+pub fn compose_suffix_from_url_value(value: String) -> String {
+    compose_import::suffix_from_url_value(&value)
+}
+
+#[napi]
+pub fn compose_detect_backend_url_env_from_environment(environment_json: String) -> Result<Option<String>> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(fail(compose_import::detect_backend_url_env_from_environment(&environment))?.map(|found| out(&found)))
+}
+
+#[napi]
+pub fn compose_detect_backend_url_env_from_code(source_text: String) -> Option<String> {
+    compose_import::detect_backend_url_env_from_code(&source_text).map(|found| out(&found))
+}
+
+#[napi]
+pub fn compose_detect_server_backend_url_env_from_code(source_text: String) -> Option<String> {
+    compose_import::detect_server_backend_url_env_from_code(&source_text).map(|found| out(&found))
+}
+
+#[napi]
+pub fn compose_detect_backend_url_env_from_assignments(source_text: String) -> Option<String> {
+    compose_import::detect_backend_url_env_from_assignments(&source_text).map(|found| out(&found))
+}
+
+#[napi]
+pub fn compose_environment_from_compose_text(compose_text: String, service_name: String) -> Option<String> {
+    compose_import::environment_from_compose_text(&compose_text, &service_name).map(|environment| out(&environment))
+}
+
+#[napi]
+pub fn compose_original_compose_service_for(compose_text: String, service_path: String, service_name: String) -> Option<String> {
+    compose_import::original_compose_service_for(&compose_text, &service_path, &service_name).map(|service| out(&service))
+}
+
+#[napi]
+pub fn compose_cors_environment_from(environment_json: String) -> Result<String> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(out(&compose_import::cors_environment_from(&environment)))
+}
+
+#[napi]
+pub fn compose_frontend_backend_env_name(name: String) -> bool {
+    compose_import::frontend_backend_env_name(&name)
+}

@@ -31,6 +31,58 @@ pub fn resolve(value: &str, resolve: &mut dyn FnMut(&str) -> String) -> String {
     out
 }
 
+/// compose의 environment 값 중 자리 표시자가 있는 항목 하나(옛 TS `PublicUrlRef`와 같은 모양)
+#[derive(Debug, Clone, PartialEq)]
+pub struct PublicUrlRef {
+    pub service: String,
+    pub env_key: String,
+    pub template: String,
+    pub target_service: String,
+}
+
+/// compose의 services(`Record<서비스, unknown>`)에서 자리 표시자가 있는 environment 값을 모두 찾는다.
+/// `services`가 객체가 아니면 옛 `Object.entries`처럼 던진다. 배열은 JS처럼 인덱스 이름의 객체로 읽는다
+pub fn find_refs(services: &crate::js_json::JsValue) -> Result<Vec<PublicUrlRef>, String> {
+    use crate::js_json::JsValue;
+    let entries: Vec<(String, &JsValue)> = match services {
+        JsValue::Obj(o) => o.entries_js_order().into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
+        JsValue::Arr(items) => items.iter().enumerate().map(|(i, v)| (i.to_string(), v)).collect(),
+        _ => return Err("compose services가 객체가 아닙니다".to_owned()),
+    };
+    let mut refs = Vec::new();
+    for (service, raw) in entries {
+        let environment = match raw {
+            JsValue::Obj(o) => o.get("environment"),
+            _ => None,
+        };
+        let Some(environment) = environment else { continue };
+        let env_entries: Vec<(String, String)> = match environment {
+            JsValue::Arr(items) => items
+                .iter()
+                .filter_map(|entry| match entry {
+                    JsValue::Str(entry) => entry.find('=').map(|eq| (entry[..eq].to_owned(), entry[eq + 1..].to_owned())),
+                    _ => None,
+                })
+                .collect(),
+            JsValue::Obj(o) => o
+                .entries_js_order()
+                .into_iter()
+                .filter_map(|(key, value)| match value {
+                    JsValue::Str(value) => Some((key.to_owned(), value.clone())),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
+        for (env_key, template) in env_entries {
+            let Some(caps) = pattern().captures(&template) else { continue };
+            let target_service = caps[1].to_owned();
+            refs.push(PublicUrlRef { service: service.clone(), env_key, template, target_service });
+        }
+    }
+    Ok(refs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -58,5 +110,24 @@ mod tests {
         for v in ["${b-studio:services.Backend.publicUrl}", "${b-studio:services.1a.publicUrl}", "${b-studio:services..publicUrl}", "${BACKEND_PORT:-8080}", "${b-studio:services.é.publicUrl}"] {
             assert_eq!(resolve(v, &mut |_| "X".into()), v);
         }
+    }
+
+    #[test]
+    fn environment의_자리_표시자를_찾는다() {
+        let value = crate::js_json::parse_native(
+            r#"{"frontend":{"environment":{"NEXT_PUBLIC_API_BASE_URL":"${b-studio:services.backend.publicUrl}/api","PORT":"3000"}},"backend":{}}"#,
+        )
+        .unwrap();
+        let refs = find_refs(&value).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].service, "frontend");
+        assert_eq!(refs[0].env_key, "NEXT_PUBLIC_API_BASE_URL");
+        assert_eq!(refs[0].target_service, "backend");
+
+        let list = crate::js_json::parse_native(r#"{"frontend":{"environment":["A=${b-studio:services.backend.publicUrl}","B=1",2,"C"]}}"#).unwrap();
+        let refs = find_refs(&list).unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].env_key, "A");
+        assert_eq!(refs[0].template, "${b-studio:services.backend.publicUrl}");
     }
 }

@@ -84,3 +84,6 @@ pub mod visual_compare;
 pub mod workflow;
 pub mod workspace_guard;
 pub mod yaml;
+pub mod compose_import;
+pub mod service_selection;
+pub mod system_packages;
