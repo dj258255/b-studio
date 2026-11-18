@@ -44,16 +44,27 @@ async fn 예약이_겹쳐도_한_번만_쓰고_처음_예약한_때부터_센다
         r.persister.schedule();
     }
     assert!(!r.file.exists());
+    // 정해진 시각 창 안의 횟수로 재면 실행기 부하에 흔들린다(#1299). 횟수가 바뀔 때까지 넉넉한 상한 안에서 기다린다
+    let started = Instant::now();
+    while r.calls.load(Ordering::SeqCst) < 1 {
+        assert!(started.elapsed() < PATIENCE, "예약한 쓰기가 {PATIENCE:?} 안에 일어나지 않았다");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // 스무 번의 예약은 한 번의 쓰기다: 지연(80ms)을 넉넉히 넘겨 기다려도 더 쓰지 않는다
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(r.calls.load(Ordering::SeqCst), 1);
-    // 예약을 계속해도 처음 예약한 때부터 센다
+    // 예약을 계속해도 처음 예약한 때부터 센다: 지연보다 짧은 간격(10ms)으로 예약을 이어도 쓰기가 굶지 않는다.
+    // 예약할 때마다 처음부터 다시 센다면 쓰기가 한 번도 일어나지 않아 상한에 걸린다
     let started = Instant::now();
-    while started.elapsed() < Duration::from_millis(400) {
+    while r.calls.load(Ordering::SeqCst) < 4 {
+        assert!(started.elapsed() < PATIENCE, "예약을 이어 가는 동안 쓰기가 {}번에 머물렀다", r.calls.load(Ordering::SeqCst));
         r.persister.schedule();
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(r.calls.load(Ordering::SeqCst) >= 4);
 }
+
+/// 시각에 기대는 시험의 상한. 기대하는 일은 수백 ms 안에 끝나고, 이 값은 부하가 큰 실행기에서도 넘지 않을 만큼 넉넉하게 잡는다
+const PATIENCE: Duration = Duration::from_secs(10);
 
 #[tokio::test(flavor = "multi_thread")]
 async fn flush는_예약을_지우고_cancel은_쓰지_않는다() {
