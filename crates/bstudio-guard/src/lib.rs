@@ -30,6 +30,7 @@ pub mod edge_config;
 pub mod external_call;
 pub mod escalation;
 pub mod explore_qa;
+pub mod gate_assets;
 pub mod gate_helpers;
 pub mod git_mask;
 pub mod host_containers;

@@ -4980,6 +4980,63 @@ pub fn checkpoint_remote(env: Env, op: String, input: String, hook: ThreadsafeFu
     .build(&env)
 }
 
+// ── 게이트의 남은 I/O: 평가 자산 지문과 화면 확인 관측(D2) ──
+// 판정은 bstudio-guard(gate_assets), 파일 훑기·비교는 bstudio-io(gate_assets)가 한다. 저장·엔드포인트는 TS가 들고 `hook`으로 부른다.
+// TS 껍데기: packages/agent/src/gate.ts
+use bstudio_io::gate_assets as ga_io;
+
+/// 선언한 평가 자산의 지문. `{kind:'ok',digests:[[경로,sha256]]}` 또는 `{kind:'error',detail}` JSON
+#[napi]
+pub fn gate_fingerprint_evaluation_assets(env: Env, root: String, assets: Vec<String>) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(ga_io::baseline_json(&ga_io::fingerprint(&root, &assets).await)) }).build(&env)
+}
+
+/// 기준선과 지금 지문을 견줘 `evaluation-assets` 검사 결과(JSON 배열)를 만든다
+#[napi]
+pub fn gate_evaluate_evaluation_assets(env: Env, root: String, assets: Vec<String>, baseline: String, has_tests: bool) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(ga_io::evaluate(&root, &assets, &baseline, has_tests).await) }).build(&env)
+}
+
+/// 화면 확인이 요청해도 되는 출처(JSON 배열). `endpoint` 요청(JSON)에 `{ok:true,url}` 또는 `{ok:false}`로 답한다
+#[napi]
+pub fn gate_service_origins(env: Env, names: Vec<String>, skipped: Vec<String>, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        Ok(ga_io::service_origins(&names, &skipped, Some(&hook)).await)
+    })
+    .build(&env)
+}
+
+/// 단계 스크린샷 저장. `saveArtifact` 요청(JSON)에 `{ok:true,artifact}` 또는 `{ok:false,message}`로 답한다. `{steps,warnings}` JSON
+#[napi]
+pub fn gate_save_steps(env: Env, name: String, steps_json: String, has_save: bool, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        Ok(ga_io::save_steps(&name, &steps_json, has_save, Some(&hook)).await)
+    })
+    .build(&env)
+}
+
+/// 디자인 기준 이미지와 실제 화면을 비교한다. `{ok:true,ratio,width,height,diff,reference}` 또는 `{ok:false,kind,message}` JSON
+#[napi]
+pub fn gate_compare_design(env: Env, root: String, reference: String, masks_json: String, threshold: f64, actual: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(ga_io::compare_design(&root, &reference, &masks_json, threshold, &actual).await) }).build(&env)
+}
+
 // ── 게이트 검증의 조율(ADR-195 4f A5a) ──
 // 판정은 bstudio-guard(verify_judge), 부르는 순서·재시도·결과 조립은 bstudio-io(verify_io)가 한다. 샌드박스·프로젝트·계약은 TS가 들고 `hook`으로 부른다.
 // 입력·출력은 JSON 글이다(`encodeNative`·`encodeLoneSurrogates`한 꼴). TS 껍데기: packages/agent/src/verify.ts

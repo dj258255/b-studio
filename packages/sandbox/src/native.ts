@@ -831,6 +831,17 @@ interface NativeGuard {
   gateSampledValues(pageFile: string, sampleParams: string[][]): string | null | undefined;
   gateStripHtml(html: string): string;
   gateFormatFailedChecks(checksJson: string): string;
+  // ── 게이트의 남은 I/O(D2): 평가 자산 지문·훑기와 화면 확인 관측 ──
+  /** 선언한 평가 자산의 지문. `{kind:'ok',digests:[[경로,sha256]]}` 또는 `{kind:'error',detail}` JSON */
+  gateFingerprintEvaluationAssets(root: string, assets: string[]): Promise<string>;
+  /** 기준선(JSON)과 지금 지문을 견줘 `evaluation-assets` 검사 결과(JSON 배열)를 만든다 */
+  gateEvaluateEvaluationAssets(root: string, assets: string[], baseline: string, hasTests: boolean): Promise<string>;
+  /** 화면 확인이 요청해도 되는 출처(JSON 배열). `hook`은 `{op:'endpoint',name}`에 `{ok:true,url}` 또는 `{ok:false}`로 답한다 */
+  gateServiceOrigins(names: string[], skipped: string[], hook: (request: string) => Promise<string>): Promise<string>;
+  /** 단계 스크린샷 저장. `hook`은 `{op:'saveArtifact',...}`에 `{ok:true,artifact}` 또는 `{ok:false,message}`로 답한다. `{steps,warnings}` JSON */
+  gateSaveSteps(name: string, stepsJson: string, hasSave: boolean, hook: (request: string) => Promise<string>): Promise<string>;
+  /** 디자인 기준 이미지와 실제 화면 비교. `{ok:true,ratio,width,height,diff,reference}` 또는 `{ok:false,kind,message}` JSON */
+  gateCompareDesign(root: string, reference: string, masksJson: string, threshold: number, actual: string): Promise<string>;
   gateCompareDetail(ratio: number, max: number, width: number, height: number): string;
   gateDescribeConcurrencyExpect(expectJson: string): string;
   /** `readJsonPath`(ADR-195 4f A5b-2). 세 인자는 `encodeLoneSurrogates`한 글자(`equalsJson`은 JSON). `{ shown, equal }` 또는 `{ tooDeep: true }`의 JSON */

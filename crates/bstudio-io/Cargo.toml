@@ -16,6 +16,8 @@ url = "=2.5.8"
 httparse = "=1.10.1"
 # 단계 스크린샷(PNG)을 CDP의 base64 글에서 푼다(A6b). bstudio-server가 이미 쓰는 같은 버전이다
 base64 = "=0.23.1"
+# 평가 자산 지문(sha256). bstudio-server가 이미 쓰는 같은 버전이다
+sha2 = "=0.11.1"
 # PTY(가상 터미널)는 blocking I/O라 tokio가 아니라 std::thread로 격리한다(ADR-193 2c-4). wezterm의 crate.
 portable-pty = "0.9"
 

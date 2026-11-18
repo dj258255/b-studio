@@ -1,6 +1,3 @@
-import { createHash } from 'node:crypto';
-import { realpathSync } from 'node:fs';
-import { lstat, readdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, encodeNative, native, type Sandbox, type StartOptions } from '@b-studio/sandbox';
 import { loadProject, SPEC_FILE, SpecError, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage } from '@b-studio/spec';
@@ -16,7 +13,7 @@ import { GATE_HOST, runGateCheck, type GateHost } from './gate-check';
 import { captureBaselines, serviceUrl, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
-import { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
+import type { CompareResult } from './visual-compare';
 import { MANUAL_VERIFICATION_CHECK, reviewRequirementRecords } from './requirement-integrity';
 import { REQUIREMENTS_FILE } from './requirements';
 import { readProjectFileSync, readRegularFileBytesSync, type Workspace } from './workspace';
@@ -71,9 +68,6 @@ const REQUEST_TIMEOUT_MS = 15_000;
 export const CHECK_CONCURRENCY = 2;
 export const OUTPUT_TAIL_LINES = 30;
 /** 평가 자산 지문이 담을 수 있는 파일 수 상한. 넘으면 실패하고 선언을 좁히라고 알린다 */
-const MAX_EVALUATION_ASSET_FILES = 2_000;
-/** 평가 자산이 바뀌었을 때 사유에 나열할 파일 수 상한 */
-const MAX_EVALUATION_ASSET_LIST = 20;
 /** 검사하는 동안 바뀐 도구 밖 파일을 사유에 나열할 수 상한 */
 const MAX_OUTSIDE_CHANGE_LIST = 20;
 
@@ -334,16 +328,9 @@ export class VerificationGate {
   async #evaluationAssetChecks(): Promise<WorkflowCheck[]> {
     const assets = this.#evaluationAssets;
     if (assets.length === 0) return [];
-    const stage: WorkflowCheck['stage'] = this.#project.spec.workflow?.tests?.length ? 'test' : 'review';
-    const baseline = this.#evaluationAssetBaseline;
-    const current = await fingerprintEvaluationAssets(this.#options.project.root, assets);
-    if (current.kind === 'error') return [evaluationAssetFailure(stage, current.detail)];
-    if (baseline.kind === 'error') return [evaluationAssetFailure(stage, baseline.detail)];
-    const changed = [...new Set([...baseline.digests.keys(), ...current.digests.keys()])]
-      .filter((file) => baseline.digests.get(file) !== current.digests.get(file))
-      .sort();
-    if (changed.length === 0) return [{ stage, name: 'evaluation-assets', ok: true, attempts: 1 }];
-    return [{ stage, name: 'evaluation-assets', ok: false, attempts: 1, detail: describeEvaluationAssetChange(changed) }];
+    const hasTests = Boolean(this.#project.spec.workflow?.tests?.length);
+    const baseline = JSON.stringify(this.#evaluationAssetBaseline);
+    return decodeNative<WorkflowCheck[]>(await native.gateEvaluateEvaluationAssets(this.#options.project.root, [...assets], baseline, hasTests));
   }
 
   /**
@@ -670,20 +657,26 @@ export class VerificationGate {
    * browser_check의 browser 모드가 아니면 스크린샷이 없어 저장하지 않는다
    */
   async #saveSteps(name: string, steps: readonly BrowserPageStep[]): Promise<WorkflowStepCheck[]> {
+    const encoded = steps.map((step) => ({
+      label: step.label,
+      ok: step.ok,
+      ...(step.detail !== undefined ? { detail: step.detail } : {}),
+      ...(step.screenshot !== undefined ? { screenshot: step.screenshot.toString('base64') } : {}),
+    }));
     const save = this.#options.saveArtifact;
-    const saved: WorkflowStepCheck[] = [];
-    for (const [index, step] of steps.entries()) {
-      let artifact: string | undefined;
-      if (save && step.screenshot) {
-        try {
-          artifact = await save({ name: `${name} ${index + 1}. ${step.label}`, data: step.screenshot, contentType: 'image/png' });
-        } catch (error) {
-          console.warn(`화면 확인 스크린샷을 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
-        }
+    const hook = async (text: string): Promise<string> => {
+      const request = JSON.parse(text) as { op?: string; name?: string; data?: string };
+      if (request.op !== 'saveArtifact' || !save) return JSON.stringify({ ok: false, message: '저장할 곳이 없습니다' });
+      try {
+        const artifact = await save({ name: String(request.name), data: Buffer.from(String(request.data), 'base64'), contentType: 'image/png' });
+        return JSON.stringify({ ok: true, artifact });
+      } catch (error) {
+        return JSON.stringify({ ok: false, message: error instanceof Error ? error.message : String(error) });
       }
-      saved.push({ label: step.label, ok: step.ok, ...(step.detail !== undefined ? { detail: step.detail } : {}), ...(artifact ? { artifact } : {}) });
-    }
-    return saved;
+    };
+    const result = decodeNative<{ steps: WorkflowStepCheck[]; warnings: string[] }>(await native.gateSaveSteps(name, JSON.stringify(encoded), save !== undefined, hook));
+    for (const warning of result.warnings) console.warn(warning);
+    return result.steps;
   }
 
   /**
@@ -694,18 +687,26 @@ export class VerificationGate {
   async #compareDesign(compare: WorkflowPageCompare, name: string, result: BrowserPageResult, sandbox: Sandbox): Promise<void> {
     const actual = result.steps.at(-1)?.screenshot;
     if (!actual) throw new Error('디자인 비교에 쓸 뷰포트 스크린샷을 찍지 못했습니다');
-    const reference = await readFile(path.join(this.#options.project.root, compare.reference)).catch(() => undefined);
-    if (!reference) throw new Error(`디자인 기준 이미지를 읽지 못했습니다: ${compare.reference}`);
-
-    let comparison: CompareResult;
-    try {
-      comparison = compareScreenshot({ actual, reference, masks: compare.masks, threshold: compare.threshold });
-    } catch (error) {
-      // 비교 자체가 성립하지 않는 경우(너비 불일치)는 원인을 그대로 알린다
-      if (error instanceof VisualCompareError) throw new Error(sandbox.redact(error.message));
-      throw error;
+    const outcome = decodeNative<
+      { ok: true; ratio: number; width: number; height: number; diff: string; reference: string } | { ok: false; kind: 'missing' | 'compare' | 'decode'; message: string }
+    >(
+      await native.gateCompareDesign(
+        this.#options.project.root,
+        compare.reference,
+        JSON.stringify(compare.masks ?? []),
+        compare.threshold ?? 0.1,
+        actual.toString('base64'),
+      ),
+    );
+    if (!outcome.ok) {
+      // 옛 코드는 비교가 성립하지 않을 때(VisualCompareError)만 가렸다. 기준 이미지·PNG 오류는 그대로 알린다
+      if (outcome.kind === 'compare') throw new Error(sandbox.redact(outcome.message));
+      throw new Error(outcome.message);
     }
-    this.#pageCompares.set(name, { ratio: comparison.ratio, max: compare.maxDiffRatio, ...(await this.#saveCompareImages(name, reference, actual, comparison.diff)) });
+    const reference = Buffer.from(outcome.reference, 'base64');
+    const diff = Buffer.from(outcome.diff, 'base64');
+    const comparison: CompareResult = { ratio: outcome.ratio, diffPixels: 0, comparedPixels: 0, width: outcome.width, height: outcome.height, diff };
+    this.#pageCompares.set(name, { ratio: comparison.ratio, max: compare.maxDiffRatio, ...(await this.#saveCompareImages(name, reference, actual, diff)) });
     if (comparison.ratio > compare.maxDiffRatio) throw new Error(compareDetail(comparison, compare.maxDiffRatio));
   }
 
@@ -735,16 +736,19 @@ export class VerificationGate {
    */
   async #serviceOrigins(): Promise<string[]> {
     const { sandbox, project } = this.#options;
-    const origins = new Set<string>();
-    for (const [name] of project.managed) {
-      if (project.offServices?.has(name)) continue;
+    const names = project.managed.map(([name]) => name);
+    const skipped = [...(project.offServices ?? [])];
+    const hook = async (text: string): Promise<string> => {
+      const request = JSON.parse(text) as { op?: string; name?: string };
+      if (request.op !== 'endpoint') return JSON.stringify({ ok: false });
       try {
-        origins.add(new URL((await sandbox.endpoint(name)).url).origin);
+        return JSON.stringify({ ok: true, url: (await sandbox.endpoint(String(request.name))).url });
       } catch {
         // 아직 준비되지 않았거나 없는 서비스의 주소는 건너뛴다
+        return JSON.stringify({ ok: false });
       }
-    }
-    return [...origins];
+    };
+    return decodeNative<string[]>(await native.gateServiceOrigins(names, skipped, hook));
   }
 
   /** 지난 검증 이후 바뀐 파일 + 지난번에 준비에 실패한 서비스의 파일 (고치지 않았더라도 다시 확인해야 한다) */
@@ -761,97 +765,17 @@ export class VerificationGate {
   }
 }
 
-/** 평가 자산 지문: 정상이면 경로→sha256, 읽을 수 없었으면 그 사유 */
-type EvaluationAssetBaseline = { kind: 'ok'; digests: Map<string, string> } | { kind: 'error'; detail: string };
-
-interface EvaluationAssetScan {
-  digests: Map<string, string>;
-  count: number;
-}
-
-function evaluationAssetFailure(stage: WorkflowCheck['stage'], detail: string): WorkflowCheck {
-  return { stage, name: 'evaluation-assets', ok: false, attempts: 1, detail };
-}
-
-/** 평가 자산이 바뀌었을 때의 사유. 사람이 고치는 자산이라는 것과 되돌리는 방법을 알린다 (최대 20개까지 나열) */
-function describeEvaluationAssetChange(changed: readonly string[]): string {
-  const shown = changed.slice(0, MAX_EVALUATION_ASSET_LIST);
-  const rest = changed.length - shown.length;
-  const list = rest > 0 ? `${shown.join(', ')} 외 ${rest}개` : shown.join(', ');
-  return `평가 자산이 바뀌었습니다: ${list}. 평가 자산은 사람이 고칩니다 — 되돌리고 구현을 고치세요. 평가 자산이 틀렸다고 판단하면 그 까닭을 답에 적어 사람에게 알리세요.`;
-}
+/** 평가 자산 지문: 정상이면 경로→sha256, 읽을 수 없었으면 그 사유(Rust `bstudio_guard::gate_assets`와 같은 꼴) */
+type EvaluationAssetBaseline = { kind: 'ok'; digests: Array<[string, string]> } | { kind: 'error'; detail: string };
 
 /**
  * 선언한 평가 자산의 지문을 뜬다(ADR-175). 경로별 sha256이고, 폴더면 그 아래 일반 파일을 모두 담는다.
  * 링크·특수 파일이거나 읽을 수 없으면 실패로 알린다(닫힌 쪽 — 견줄 수 없으면 통과시키지 않는다).
  * 없는 경로는 지문에 넣지 않는다(선언했지만 아직 없는 자산이 새로 생기면 그때 "바뀜"으로 잡힌다).
+ * 훑기는 Rust(`crates/bstudio-io/src/gate_assets.rs`)가 하고, 비교·글은 `bstudio_guard::gate_assets`가 한다.
  */
 async function fingerprintEvaluationAssets(root: string, assets: readonly string[]): Promise<EvaluationAssetBaseline> {
-  const scan: EvaluationAssetScan = { digests: new Map(), count: 0 };
-  for (const asset of assets) {
-    const error = await collectEvaluationAsset(root, path.normalize(asset), scan);
-    if (error) return { kind: 'error', detail: `${asset}: ${error}` };
-  }
-  return { kind: 'ok', digests: scan.digests };
-}
-
-/** 자산 하나(파일 또는 폴더)를 훑어 지문에 담는다. 문제가 있으면 사유를, 없으면 undefined를 돌려준다 */
-async function collectEvaluationAsset(root: string, relative: string, scan: EvaluationAssetScan): Promise<string | undefined> {
-  // 상위 폴더가 링크면 그 너머를 보지 않는다(readProjectFileSync와 같은 규칙)
-  if (!parentsAreReal(root, relative)) return '상위 폴더가 심볼릭 링크입니다';
-  const absolute = path.join(root, relative);
-  const info = await lstat(absolute).catch((error: NodeJS.ErrnoException) => error);
-  if (info instanceof Error) {
-    if (info.code === 'ENOENT' || info.code === 'ENOTDIR') return undefined;
-    return `읽을 수 없습니다(${info.code ?? '알 수 없는 오류'})`;
-  }
-  if (info.isSymbolicLink()) return '심볼릭 링크입니다';
-  if (!info.isDirectory()) return recordEvaluationFile(absolute, relative, scan);
-  return walkEvaluationAssetDir(absolute, relative, scan);
-}
-
-/** 폴더 아래의 일반 파일을 모두 지문에 담는다. 링크·특수 파일이 있으면 실패한다 */
-async function walkEvaluationAssetDir(dir: string, relative: string, scan: EvaluationAssetScan): Promise<string | undefined> {
-  const entries = await readdir(dir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => error);
-  if (entries instanceof Error) return `폴더를 읽지 못했습니다(${entries.code ?? '알 수 없는 오류'})`;
-  entries.sort((a, b) => a.name.localeCompare(b.name));
-  for (const entry of entries) {
-    const childRelative = `${relative}/${entry.name}`;
-    if (entry.isSymbolicLink()) return `${childRelative}: 심볼릭 링크입니다`;
-    if (entry.isDirectory()) {
-      const error = await walkEvaluationAssetDir(path.join(dir, entry.name), childRelative, scan);
-      if (error) return error;
-    } else if (entry.isFile()) {
-      const error = recordEvaluationFile(path.join(dir, entry.name), childRelative, scan);
-      if (error) return error;
-    } else {
-      return `${childRelative}: 일반 파일도 폴더도 아닙니다`;
-    }
-  }
-  return undefined;
-}
-
-/** 일반 파일 하나의 내용을 지문에 담는다. 바이트로 해시한다 — 글자로 바꾸면 서로 다른 바이트가 같은 글자가 되어, 이미지·바이너리 자산을 바꿔도 지문이 같아진다(parser differential). 파일 수 상한을 넘거나 읽을 수 없거나 읽는 도중 바뀌었으면 실패한다 */
-function recordEvaluationFile(absolute: string, relative: string, scan: EvaluationAssetScan): string | undefined {
-  scan.count += 1;
-  if (scan.count > MAX_EVALUATION_ASSET_FILES) return `파일이 ${MAX_EVALUATION_ASSET_FILES}개를 넘습니다 — 선언을 좁히세요`;
-  const read = readRegularFileBytesSync(absolute);
-  if (read.kind !== 'bytes') return read.kind === 'irregular' ? read.reason : '파일이 없습니다';
-  // 확인한 크기만큼 다 읽지 못했으면 지문을 뜨는 동안 파일이 바뀐 것이다. 어중간하게 읽은 바이트를 지문으로 삼지 않는다(닫힌 쪽)
-  if (!read.complete) return '읽는 동안 파일이 바뀌었습니다';
-  scan.digests.set(relative, createHash('sha256').update(read.content).digest('hex'));
-  return undefined;
-}
-
-/** 프로젝트 루트 기준 상대 경로의 상위 폴더 중 링크가 있으면 false. 열 수 없으면 true(아래 lstat이 판정한다) */
-function parentsAreReal(root: string, relative: string): boolean {
-  const parent = path.dirname(relative);
-  if (parent === '.') return true;
-  try {
-    return realpathSync(path.join(root, parent)) === path.join(realpathSync(root), parent);
-  } catch {
-    return true;
-  }
+  return decodeNative<EvaluationAssetBaseline>(await native.gateFingerprintEvaluationAssets(root, [...assets]));
 }
 
 export function formatFailedChecks(checks: readonly WorkflowCheck[]): string {

@@ -130,6 +130,7 @@ dependencies = [
  "libc",
  "portable-pty",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "url",
