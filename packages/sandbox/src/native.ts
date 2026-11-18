@@ -889,6 +889,10 @@ interface NativeGuard {
   gateFingerprintEvaluationAssets(root: string, assets: string[]): Promise<string>;
   /** 기준선(JSON)과 지금 지문을 견줘 `evaluation-assets` 검사 결과(JSON 배열)를 만든다 */
   gateEvaluateEvaluationAssets(root: string, assets: string[], baseline: string, hasTests: boolean): Promise<string>;
+  /** 게이트가 끝에 다시 읽는 studio.yaml의 workflow. `{kind:'ok',workflow?}`·`{kind:'missing'}`·`{kind:'irregular',reason}`·`{kind:'specError',message,issues}` JSON */
+  gateLatestWorkflow(root: string): Promise<string>;
+  /** 게이트가 끝에 다시 읽는 요구사항 문서의 기록 판정. `hook`은 두 글자에서 판정에 넘길 id 목록(JSON)을 돌려준다. 결과는 검사 JSON 배열 */
+  gateRequirementRecordChecks(root: string, beforeText: string | undefined | null, hook: (request: string) => Promise<string>): Promise<string>;
   /** 화면 확인이 요청해도 되는 출처(JSON 배열). `hook`은 `{op:'endpoint',name}`에 `{ok:true,url}` 또는 `{ok:false}`로 답한다 */
   gateServiceOrigins(names: string[], skipped: string[], hook: (request: string) => Promise<string>): Promise<string>;
   /** 단계 스크린샷 저장. `hook`은 `{op:'saveArtifact',...}`에 `{ok:true,artifact}` 또는 `{ok:false,message}`로 답한다. `{steps,warnings}` JSON */

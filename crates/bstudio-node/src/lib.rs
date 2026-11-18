@@ -8660,3 +8660,36 @@ pub async fn spec_load_project(dir: String) -> Result<String> {
     let result = bstudio_io::spec_load::load_project(&dir).await;
     Ok(bstudio_io::spec_load::result_json(result))
 }
+
+// ── 게이트가 끝에 다시 읽는 파일(2단계 (b)). 파일 읽기는 bstudio-io::gate_workflow, 판정은 bstudio-guard가 한다.
+// TS 껍데기: packages/agent/src/gate-workflow.ts. 게이트 인스턴스 상태(바뀐 파일·스냅샷·redact)는 TS가 들고 넘긴다
+use bstudio_io::gate_workflow as gw;
+
+/// `{kind:'ok', workflow?}` · `{kind:'missing'}` · `{kind:'irregular', reason}` · `{kind:'specError', message, issues}` JSON
+#[napi]
+pub fn gate_latest_workflow(env: Env, root: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(gw::latest_workflow_json(&gw::latest_workflow(&root).await)) }).build(&env)
+}
+
+/// `before_text`는 실행 시작 때 TS가 고정한 스냅샷의 글자(없으면 null·undefined). `hook`은 두 글자에서
+/// `{beforeEffective,afterEffective,afterIds}`(encodeLoneSurrogates한 id 목록)를 돌려준다. 결과는 검사 JSON 배열
+#[napi]
+pub fn gate_requirement_record_checks(
+    env: Env,
+    root: String,
+    before_text: Option<String>,
+    hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>,
+) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        gw::requirement_record_checks(&root, before_text, &hook).await.map_err(Error::from_reason)
+    })
+    .build(&env)
+}
