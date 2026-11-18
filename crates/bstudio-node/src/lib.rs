@@ -8597,3 +8597,66 @@ pub fn session_git_realign_restored_reason(which: String, files_len: f64, backup
 pub fn session_landed_plan(committed_sha: Option<String>, listed: bool, latest_sha: Option<String>) -> String {
     terminal_text::landed_plan(committed_sha.as_deref(), listed, latest_sha.as_deref())
 }
+
+// ── spec 스키마 검증(3단계 (b)). `packages/spec/src/schema.ts`의 Zod를 Rust로 옮긴 것.
+// 결과는 `{ ok, issues: [{ path, message }], value }`(encodeNative·decodeNative). 이름은 TS가 내보내는 스키마 이름이다
+use bstudio_guard::spec_schema;
+
+#[napi]
+pub fn spec_validate(schema: String, value_json: String) -> Result<String> {
+    let value = input(&value_json, "검증할 값")?;
+    let outcome = spec_schema::validate(&schema, Some(&value));
+    let mut result = JsObject::new();
+    if outcome.issues.is_empty() {
+        result.set("ok", JsValue::Bool(true));
+        result.set("value", outcome.value.unwrap_or(JsValue::Null));
+    } else {
+        result.set("ok", JsValue::Bool(false));
+        let issues: Vec<JsValue> = outcome
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let mut o = JsObject::new();
+                o.set("path", JsValue::Arr(issue.path.into_iter().map(|seg| seg.into_value()).collect()));
+                o.set("message", JsValue::Str(issue.message));
+                JsValue::Obj(o)
+            })
+            .collect();
+        result.set("issues", JsValue::Arr(issues));
+    }
+    Ok(out(&JsValue::Obj(result)))
+}
+
+/// 스키마 이름으로 검증한다. `value_json`이 없으면 JS `undefined`다(JSON으로 undefined를 담을 수 없다)
+#[napi]
+pub fn spec_validate_optional(schema: String, value_json: Option<String>) -> Result<String> {
+    let value = value_json.map(|json| bstudio_guard::js_json::parse_schema_input(&json)).transpose().map_err(Error::from_reason)?;
+    let outcome = spec_schema::validate_optional(&schema, value.as_ref());
+    let mut result = JsObject::new();
+    if outcome.issues.is_empty() {
+        result.set("ok", JsValue::Bool(true));
+        let mut value = outcome.value.unwrap_or(JsValue::Null);
+        bstudio_guard::js_json::escape_nul_keys(&mut value);
+        result.set("value", value);
+    } else {
+        result.set("ok", JsValue::Bool(false));
+        let issues: Vec<JsValue> = outcome
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let mut o = JsObject::new();
+                o.set("path", JsValue::Arr(issue.path.into_iter().map(|seg| seg.into_value()).collect()));
+                o.set("message", JsValue::Str(issue.message));
+                JsValue::Obj(o)
+            })
+            .collect();
+        result.set("issues", JsValue::Arr(issues));
+    }
+    Ok(out(&JsValue::Obj(result)))
+}
+
+#[napi]
+pub async fn spec_load_project(dir: String) -> Result<String> {
+    let result = bstudio_io::spec_load::load_project(&dir).await;
+    Ok(bstudio_io::spec_load::result_json(result))
+}

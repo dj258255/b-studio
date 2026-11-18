@@ -11,6 +11,11 @@ import { createRequire } from 'node:module';
 export interface NativeSpec {
   yamlParse(text: string, merge: boolean): { kind: 'value' | 'syntax' | 'unsupported'; json?: string | null; message?: string | null; line: number; col: number };
 
+  /** `valueJson`이 없으면 JS `undefined`다. 결과는 `{ ok, value }` 또는 `{ ok: false, issues: [{ path, message }] }` */
+  specValidateOptional(schema: string, valueJson: string | undefined | null): string;
+  /** `loadProject` 전체(파일 읽기·YAML·스키마·교차 검증). 결과는 `{ ok, project }` 또는 `{ ok: false, message, issues }` */
+  specLoadProject(dir: string): Promise<string>;
+
   serviceDependencyClosure(roots: string[], graphJson: string): string[];
   serviceDefaultSelection(roots: string[], graphJson: string): string[];
   serviceDependentsOf(name: string, selected: string[], graphJson: string): string[];
@@ -63,6 +68,10 @@ export const nativeYaml: NativeSpec = native;
 /** `NaN`·`Infinity`·`-0`은 JSON으로 쓸 수 없어 NUL로 시작하는 키 하나짜리 객체로 주고받는다(crates/bstudio-guard/src/js_json.rs) */
 const NONFINITE_KEY = '\u0000nf';
 
+function define(target: Record<string, unknown>, key: string, value: unknown): void {
+  Object.defineProperty(target, key, { value, enumerable: true, writable: true, configurable: true });
+}
+
 /**
  * Rust로 보낼 JSON. 유한하지 않은 수와 -0은 표시 객체로 쓴다. 데이터의 객체가 NUL로 시작하는 키를 가지면 던진다.
  * sandbox의 같은 함수와 같은 규칙이다(spec은 sandbox에 의존할 수 없어 한 벌 더 둔다)
@@ -83,4 +92,40 @@ export function decodeNative<T>(text: string): T {
     if (item !== null && typeof item === 'object' && !Array.isArray(item) && NONFINITE_KEY in item) return Number((item as Record<string, string>)[NONFINITE_KEY]);
     return item;
   }) as T;
+}
+
+/**
+ * 스키마 검증 입력. `encodeNative`와 같되 데이터의 NUL 시작 키를 앞에 NUL 하나 더 붙여, `NaN` 표시 객체와 구분한다
+ * (Rust `js_json::parse_schema_input`이 되돌린다). Zod는 NUL 키도 받으므로 이 경계에서 잃지 않는다
+ */
+export function encodeSchema(value: unknown): string {
+  const seen = new WeakSet<object>();
+  const visit = (item: unknown): unknown => {
+    if (typeof item === 'number' && (!Number.isFinite(item) || Object.is(item, -0))) return { [NONFINITE_KEY]: Object.is(item, -0) ? '-0' : String(item) };
+    if (Array.isArray(item)) return item.map(visit);
+    if (item !== null && typeof item === 'object') {
+      if (seen.has(item)) throw new TypeError('순환 구조는 스키마로 보낼 수 없습니다');
+      seen.add(item);
+      const out: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(item)) define(out, key.startsWith('\u0000') ? `\u0000${key}` : key, visit(entry));
+      seen.delete(item);
+      return out;
+    }
+    return item;
+  };
+  return JSON.stringify(visit(value));
+}
+
+/** Rust가 보낸 스키마 결과. 표시 객체를 수로 되돌리고, 앞에 NUL이 붙은 데이터 키를 원래대로 돌린다 */
+export function decodeSchema<T>(text: string): T {
+  const restore = (item: unknown): unknown => {
+    if (Array.isArray(item)) return item.map(restore);
+    if (item !== null && typeof item === 'object') {
+      const out: Record<string, unknown> = {};
+      for (const [key, entry] of Object.entries(item)) define(out, key.startsWith('\u0000') ? key.slice(1) : key, restore(entry));
+      return out;
+    }
+    return item;
+  };
+  return restore(decodeNative(text)) as T;
 }

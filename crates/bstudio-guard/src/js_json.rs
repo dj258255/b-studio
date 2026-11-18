@@ -205,7 +205,7 @@ pub fn js_less(a: &JsValue, b: &JsValue) -> bool {
 
 /// `JSON.parse`. 문법 밖이면 이유를 돌려준다
 pub fn parse(text: &str) -> Result<JsValue, String> {
-    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, nul_keys: false, encode_lone: false, too_deep: false };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, schema: false, nul_keys: false, encode_lone: false, too_deep: false };
     p.document()
 }
 
@@ -214,7 +214,7 @@ pub fn parse(text: &str) -> Result<JsValue, String> {
 /// - NUL로 시작하는 키도 받는다(JS는 받는다. 거절하면 그 안의 기록을 놓친다)
 /// - 중첩이 `MAX_DEPTH`를 넘어 읽지 못한 것은 `TooDeep`으로 돌려준다(JS는 읽는다: 모른다는 뜻이다)
 pub fn parse_lone_encoded(text: &str) -> Result<JsValue, LoneParseError> {
-    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, nul_keys: true, encode_lone: true, too_deep: false };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, schema: false, nul_keys: true, encode_lone: true, too_deep: false };
     p.document().map_err(|_| if p.too_deep { LoneParseError::TooDeep } else { LoneParseError::Invalid })
 }
 
@@ -228,8 +228,56 @@ pub enum LoneParseError {
 
 /// Node와 주고받은 값(`encode`한 것)을 읽는다. `parse`와 같되 `NaN`·`Infinity` 표시 객체를 수로 바꾼다
 pub fn parse_native(text: &str) -> Result<JsValue, String> {
-    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: true, nul_keys: false, encode_lone: false, too_deep: false };
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: true, schema: false, nul_keys: false, encode_lone: false, too_deep: false };
     p.document()
+}
+
+/// 스키마 검증 입력. 데이터의 NUL 시작 키는 앞에 NUL을 하나 더 붙여 보내고(TS `encodeSchema`), 여기서 되돌린다.
+/// `NaN`·`Infinity`·`-0` 표시 객체는 `parse_native`와 같이 수로 읽는다
+pub fn parse_schema_input(text: &str) -> Result<JsValue, String> {
+    let mut p = Parser { s: text.as_bytes(), text, i: 0, native: false, schema: true, nul_keys: true, encode_lone: false, too_deep: false };
+    let mut value = p.document()?;
+    unescape_nul_keys(&mut value);
+    Ok(value)
+}
+
+fn unescape_nul_keys(value: &mut JsValue) {
+    match value {
+        JsValue::Obj(o) => {
+            let entries = std::mem::take(&mut o.entries);
+            for (key, mut item) in entries {
+                unescape_nul_keys(&mut item);
+                let key = key.strip_prefix('\u{0}').map(str::to_owned).unwrap_or(key);
+                o.set(&key, item);
+            }
+        }
+        JsValue::Arr(items) => {
+            for item in items {
+                unescape_nul_keys(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Rust가 스키마 결과를 보낼 때 데이터의 NUL 시작 키를 앞에 NUL 하나 더 붙인다(TS `decodeSchema`가 되돌린다)
+pub fn escape_nul_keys(value: &mut JsValue) {
+    match value {
+        JsValue::Obj(o) => {
+            let entries = std::mem::take(&mut o.entries);
+            for (key, mut item) in entries {
+                escape_nul_keys(&mut item);
+                let key = if key.starts_with('\u{0}') { format!("\u{0}{key}") } else { key };
+                o.set(&key, item);
+            }
+        }
+        JsValue::Arr(items) => {
+            for item in items {
+                escape_nul_keys(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Node로 보낸다: `JSON.stringify`와 같고, 유한하지 않은 수만 표시 객체로 쓴다
@@ -367,6 +415,8 @@ struct Parser<'a> {
     text: &'a str,
     i: usize,
     native: bool,
+    /// 스키마 검증 입력: NUL로 시작하는 키를 받고, 데이터 키는 앞에 NUL을 하나 더 붙여 표시 객체와 구분한다
+    schema: bool,
     nul_keys: bool,
     encode_lone: bool,
     too_deep: bool,
@@ -574,7 +624,7 @@ impl Parser<'_> {
                 return self.err("객체의 키");
             }
             let key = self.string()?;
-            if key.starts_with('\u{0}') && !self.nul_keys && !(self.native && key == NONFINITE_KEY) {
+            if key.starts_with('\u{0}') && !self.nul_keys && !((self.native || self.schema) && key == NONFINITE_KEY) {
                 return self.err("NUL로 시작하는 키는 받지 않습니다");
             }
             self.ws();
@@ -599,7 +649,7 @@ impl Parser<'_> {
 
     /// 받은 값에서 `NaN`·`Infinity` 표시 객체(NUL로 시작하는 키 하나)를 수로 바꾼다. 진짜 객체는 NUL 키를 갖지 못한다
     fn finish_object(&self, obj: JsObject) -> JsValue {
-        if self.native {
+        if self.native || self.schema {
             if let [(key, JsValue::Str(text))] = obj.entries() {
                 if key == NONFINITE_KEY {
                     return match text.as_str() {
