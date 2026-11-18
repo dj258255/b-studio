@@ -1,3 +1,4 @@
+import { decodeSchema, encodeSchema, native } from './native';
 import { z } from 'zod';
 
 const NAME = /^[a-z][a-z0-9-]*$/;
@@ -824,3 +825,68 @@ export type ManagedServiceSpec = z.infer<typeof ManagedServiceSchema>;
 export type ExternalServiceSpec = z.infer<typeof ExternalServiceSchema>;
 type ServiceSpec = z.infer<typeof ServiceSchema>;
 export type StudioSpec = z.infer<typeof StudioSpecSchema>;
+
+
+/**
+ * 검증은 Rust(`crates/bstudio-guard/src/spec_schema/`)가 한다(3단계 (b)). Zod 정의는 타입(`z.infer`)과
+ * 스키마 객체의 나머지 표면(`shape` 등)을 그대로 지키기 위해 남기고, `parse`·`safeParse`만 Rust로 바꾼다.
+ * 옛 Zod 동작은 `schema-legacy.ts`로 남겨 차등 시험만 그것을 import한다.
+ */
+type RustIssue = { path: Array<string | number>; message: string };
+
+function useRust<T extends z.ZodType>(schema: T, name: string): T {
+  const safeParse = (value: unknown): { success: true; data: unknown } | { success: false; error: z.ZodError } => {
+    const encoded = value === undefined ? undefined : encodeSchema(value);
+    const result = decodeSchema<{ ok: boolean; value?: unknown; issues?: RustIssue[] }>(native.specValidateOptional(name, encoded));
+    if (result.ok) return { success: true, data: result.value };
+    return {
+      success: false,
+      error: new z.ZodError((result.issues ?? []).map((issue) => ({ code: 'custom', path: issue.path, message: issue.message }) as never)),
+    };
+  };
+  (schema as unknown as { safeParse: unknown }).safeParse = safeParse;
+  (schema as unknown as { parse: unknown }).parse = (value: unknown) => {
+    const result = safeParse(value);
+    if (result.success) return result.data;
+    throw result.error;
+  };
+  return schema;
+}
+
+for (const [schema, name] of [
+  [HttpProbeSchema, 'HttpProbeSchema'],
+  [PreviewKindSchema, 'PreviewKindSchema'],
+  [HttpMethodSchema, 'HttpMethodSchema'],
+  [SnapshotSchema, 'SnapshotSchema'],
+  [ManagedServiceSchema, 'ManagedServiceSchema'],
+  [PolicyRuleSchema, 'PolicyRuleSchema'],
+  [EgressRuleSchema, 'EgressRuleSchema'],
+  [ExternalPolicySchema, 'ExternalPolicySchema'],
+  [ExternalServiceSchema, 'ExternalServiceSchema'],
+  [ServiceSchema, 'ServiceSchema'],
+  [ResourceLimitSchema, 'ResourceLimitSchema'],
+  [DatabaseSchema, 'DatabaseSchema'],
+  [SecretSchema, 'SecretSchema'],
+  [DeploySchema, 'DeploySchema'],
+  [WorkflowStageSchema, 'WorkflowStageSchema'],
+  [WorkflowTestSchema, 'WorkflowTestSchema'],
+  [ConcurrencyExpectSchema, 'ConcurrencyExpectSchema'],
+  [WorkflowConcurrencyCheckSchema, 'WorkflowConcurrencyCheckSchema'],
+  [LoadExpectSchema, 'LoadExpectSchema'],
+  [WorkflowLoadCheckSchema, 'WorkflowLoadCheckSchema'],
+  [WorkflowPageStepSchema, 'WorkflowPageStepSchema'],
+  [CompareMaskSchema, 'CompareMaskSchema'],
+  [WorkflowPageCompareSchema, 'WorkflowPageCompareSchema'],
+  [WorkflowPageExpectFromApiSchema, 'WorkflowPageExpectFromApiSchema'],
+  [WorkflowPageCheckSchema, 'WorkflowPageCheckSchema'],
+  [AutoPageChecksSchema, 'AutoPageChecksSchema'],
+  [WorkflowSchema, 'WorkflowSchema'],
+  [DesignSchema, 'DesignSchema'],
+  [ReviewSchema, 'ReviewSchema'],
+  [GuideSchema, 'GuideSchema'],
+  [CheckpointsSchema, 'CheckpointsSchema'],
+  [ModelsSchema, 'ModelsSchema'],
+  [StudioSpecSchema, 'StudioSpecSchema'],
+] as const) {
+  useRust(schema, name);
+}
