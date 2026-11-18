@@ -75,7 +75,7 @@ export {
   type GeminiRunResult,
 } from './gemini-cli-runner';
 export { hostAllowed, startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
-export { startHookServer, type HookHandler, type HookInput, type HookServer, type HookServerOptions } from './hook-server';
+export { readHookBody, startHookServer, type HookBodyKind, type HookHandler, type HookInput, type HookMeta, type HookServer, type HookServerOptions } from './hook-server';
 export { ChangeTracker, rejectedChangeFeedback, type ChangeTrackerOptions, type Fingerprinter } from './change-tracker';
 export { boardMcpToolSpecs, externalBoardAccess, runBoardMcpTool, type BoardMcpToolSpec } from './board-mcp';
 export { handleBoardMcpRequest } from './board-mcp-server';

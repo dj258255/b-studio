@@ -7724,6 +7724,161 @@ pub fn terminal_usage_unverifiable(silent: bool, incomplete: bool, token_limited
     session_terminal::limit::usage_unverifiable(silent, incomplete, token_limited)
 }
 
+// ── 세션 터미널의 감시 판정과 훅 본문 읽기(ADR-219, 4f B5e). 순수 판정이다: ps·파일 읽기·타이머는 TS가 한다 ──
+
+/// 감시 상태. TS는 값을 그대로 들고 다니며 `terminalWatchRound`에 되돌려 준다
+#[napi(object)]
+pub struct TerminalWatchStateJs {
+    /// `claude`·`codex`
+    pub kind: String,
+    pub warned: Vec<i64>,
+    pub live: Vec<i64>,
+    /// `unknown`·`ok`·`failed`·`unrestored`(그 밖은 `failed`로 읽는다)
+    pub file: String,
+    pub file_failures: u32,
+    pub file_reported: bool,
+    pub file_detail: String,
+    /// `unknown`·`ok`·`failed`·`unavailable`(그 밖은 `failed`로 읽는다)
+    pub ps: String,
+    pub ps_failures: u32,
+    pub ps_reported: bool,
+}
+
+fn watch_state_from_js(state: &TerminalWatchStateJs) -> session_terminal::watch::WatchState {
+    use session_terminal::watch::{CliKind, FileState, PsState, WatchState};
+    WatchState {
+        // 알아보지 못한 종류는 claude(옛 기본값)로 읽는다
+        kind: CliKind::parse(&state.kind).unwrap_or(CliKind::Claude),
+        warned: state.warned.clone(),
+        live: state.live.clone(),
+        file: FileState::parse(&state.file),
+        file_failures: state.file_failures,
+        file_reported: state.file_reported,
+        file_detail: state.file_detail.clone(),
+        ps: PsState::parse(&state.ps),
+        ps_failures: state.ps_failures,
+        ps_reported: state.ps_reported,
+    }
+}
+
+fn watch_state_to_js(state: session_terminal::watch::WatchState) -> TerminalWatchStateJs {
+    TerminalWatchStateJs {
+        kind: state.kind.as_str().to_owned(),
+        warned: state.warned,
+        live: state.live,
+        file: state.file.as_str().to_owned(),
+        file_failures: state.file_failures,
+        file_reported: state.file_reported,
+        file_detail: state.file_detail,
+        ps: state.ps.as_str().to_owned(),
+        ps_failures: state.ps_failures,
+        ps_reported: state.ps_reported,
+    }
+}
+
+/// 처음 상태(검사를 한 번도 하지 않았다)
+#[napi]
+pub fn terminal_watch_new(kind: String) -> TerminalWatchStateJs {
+    use session_terminal::watch::{CliKind, WatchState};
+    watch_state_to_js(WatchState::new(CliKind::parse(&kind).unwrap_or(CliKind::Claude)))
+}
+
+/// 한 번의 검사 결과
+#[napi(object)]
+pub struct TerminalWatchInputJs {
+    /// 관문 파일 검사: `failed`·`clean`·`changed`
+    pub file: String,
+    /// `changed`일 때 바뀐 파일 이름
+    pub changed: Vec<String>,
+    /// `changed`일 때 되돌리지 못한 사유(되돌렸으면 없다)
+    pub restore_error: Option<String>,
+    /// 프로세스 검사: `unavailable`·`failed`·`listed`(알아보지 못한 글은 `failed`)
+    pub ps: String,
+    /// `listed`일 때 훅 없는 CLI의 pid
+    pub unhooked: Vec<i64>,
+}
+
+#[napi(object)]
+pub struct TerminalWatchRoundJs {
+    pub state: TerminalWatchStateJs,
+    /// 알릴 글(순서대로)
+    pub reports: Vec<String>,
+}
+
+#[napi]
+pub fn terminal_watch_round(state: TerminalWatchStateJs, input: TerminalWatchInputJs) -> TerminalWatchRoundJs {
+    use session_terminal::watch::{watch_round, FileCheck, PsCheck};
+    let file = match input.file.as_str() {
+        "clean" => FileCheck::Clean,
+        "changed" => FileCheck::Changed { names: input.changed, restore_error: input.restore_error },
+        _ => FileCheck::Failed,
+    };
+    let ps = match input.ps.as_str() {
+        "unavailable" => PsCheck::Unavailable,
+        "listed" => PsCheck::Listed(input.unhooked),
+        _ => PsCheck::Failed,
+    };
+    let (next, reports) = watch_round(&watch_state_from_js(&state), &file, &ps);
+    TerminalWatchRoundJs { state: watch_state_to_js(next), reports }
+}
+
+#[napi(object)]
+pub struct TerminalWatchViewJs {
+    /// 지금 살아 있는 위반(새 실행에 다시 적는다)
+    pub live: Vec<String>,
+    /// 감시를 믿을 수 없는 사유(비어 있으면 믿을 수 있다)
+    pub problems: Vec<String>,
+}
+
+#[napi]
+pub fn terminal_watch_view(state: TerminalWatchStateJs) -> TerminalWatchViewJs {
+    use session_terminal::watch::{health_problems, live_violations};
+    let state = watch_state_from_js(&state);
+    TerminalWatchViewJs { live: live_violations(&state), problems: health_problems(&state) }
+}
+
+#[napi(object)]
+pub struct TerminalProcessJs {
+    pub pid: i64,
+    pub ppid: i64,
+    pub args: String,
+}
+
+/// 루트 아래에서 도는 훅 없는 CLI의 pid. 루트를 모르면(2보다 작다) 없음(null)이다 — 찾을 수 없다는 뜻이다
+#[napi]
+pub fn terminal_find_unhooked_cli(root: i64, processes: Vec<TerminalProcessJs>, kind: String, cli_path: String, marker: String) -> Option<Vec<i64>> {
+    use session_terminal::watch::{find_unhooked_cli, CliKind, Process};
+    let processes: Vec<Process> = processes.into_iter().map(|p| Process { pid: p.pid, ppid: p.ppid, args: p.args }).collect();
+    // 알아보지 못한 종류는 claude(좁게 맞추는 쪽)로 읽는다
+    find_unhooked_cli(root, &processes, CliKind::parse(&kind).unwrap_or(CliKind::Claude), &cli_path, &marker)
+}
+
+/// 루트 아래의 에이전트 CLI로 보이는 프로세스의 pid(ps 한 줄로, 넓게). 루트를 모르면(2보다 작다) 없음(null)이다
+#[napi]
+pub fn terminal_cli_candidates(root: i64, processes: Vec<TerminalProcessJs>, kind: String, cli_path: String) -> Option<Vec<i64>> {
+    use session_terminal::watch::{cli_candidates, CliKind, Process};
+    let processes: Vec<Process> = processes.into_iter().map(|p| Process { pid: p.pid, ppid: p.ppid, args: p.args }).collect();
+    cli_candidates(root, &processes, CliKind::parse(&kind).unwrap_or(CliKind::Claude), &cli_path)
+}
+
+/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게): 감싸개가 부르는 정확한 자리(`--mcp-config M --settings S`)만 인정한다
+#[napi]
+pub fn terminal_hooked_argv(argv: Vec<String>, settings_path: String, mcp_path: String) -> bool {
+    session_terminal::watch::hooked_argv(&argv, &settings_path, &mcp_path)
+}
+
+/// 프로세스의 진짜 argv. 이미 끝났으면 null, 읽지 못하면(권한·지원하지 않는 OS·모양이 틀림) 던진다 — 부른 쪽은 통과로 읽지 않는다
+#[napi]
+pub fn terminal_process_argv(pid: i64) -> Result<Option<Vec<String>>> {
+    bstudio_io::process_argv::process_argv(pid).map_err(|error| Error::from_reason(format!("프로세스 {pid}의 argv를 읽지 못했습니다: {error}")))
+}
+
+/// 훅 요청 본문 종류: `empty`·`object`·`not_object`·`invalid`
+#[napi]
+pub fn terminal_hook_body_kind(body: Buffer) -> String {
+    session_terminal::watch::hook_body_kind(&body).as_str().to_owned()
+}
+
 /// 닫기의 단계 이름(순서대로)
 #[napi]
 pub fn terminal_close_steps() -> Vec<String> {

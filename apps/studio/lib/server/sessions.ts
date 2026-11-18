@@ -271,6 +271,7 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { FigmaClient } from './figma';
+import { liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -8371,6 +8372,9 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt,
       usageIncomplete: false,
       writeHooks: 0,
     };
+    // 지금 살아 있는 감시의 위반(앞 실행을 닫은 훅 없는 CLI가 아직 도는 것 등)을 이 실행에도 적는다(N15, ADR-219). 알림은 한 번만 오므로, 이어 열리는 실행이 모르고 통과하지 않게 한다.
+    // 기다림(한 번 더 검사)은 점유를 다시 확인하기 앞에 둔다. 아래에서 열린 실행에 붙이기까지는 기다림이 없다
+    const live = await liveWatchViolation(session.snapshot.id);
     // 지문을 기다리는 사이 세션이 멈췄으면(멈추기가 점유를 비웠다) 열지 않는다
     if (!session.life.claims.holds(ticket)) return { busy: '[b-studio] 세션이 중지되어 요청을 시작하지 않았습니다.' };
     const run: ActiveRun & { terminal: TerminalRunState } = {
@@ -8384,6 +8388,11 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt,
       terminal,
     };
     session.run = run;
+    if (live !== undefined) {
+      // 닫는 것은 턴 끝이다(`fail_violation`): 도구를 쓰기 전에 닫으면 이어지는 도구 호출이 실행을 또 열어 같은 일을 되풀이한다
+      terminal.violation = live;
+      emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message: `[b-studio] 검증을 우회할 수 있는 일이 계속되고 있습니다: ${live}` } });
+    }
     // 실행이 열렸다. 켜 둔 허용은 이 실행이 가져갔다(다음 요청 하나)
     if (allowCheckChanges) session.snapshot.allowCheckChangesNext = undefined;
     session.runsStarted = (session.runsStarted ?? 0) + 1;
@@ -9066,6 +9075,11 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
     session.pendingViolation = undefined;
     return failTerminalRunForViolation(session, run, reason);
   };
+
+  // 감시를 믿을 수 있는지 먼저 묻는다(N17, ADR-219). 마지막 검사가 실패했거나 아직 한 번도 돌지 않았거나 pid를 모르면 감시는 그 자리에서 한 번 더 검사하고,
+  // 그래도 믿을 수 없으면 통과로 닫지 않는다. 막는 쪽으로 정했다: 에이전트가 고칠 수 없는 감시의 문제라 피드백(재시도)은 같은 자리를 돌게 한다
+  const watchProblem = await verifyWatch(session.snapshot.id);
+  if (watchProblem !== undefined && state.violation === undefined) state.violation = watchProblem;
 
   // 1단계: 실행을 닫을 수 있는 읽기와 읽기만 칸. 옛 코드에서 `checking`을 세우기 앞이다(여기서 던지면 훅 오류로 돌아간다)
   for (;;) {

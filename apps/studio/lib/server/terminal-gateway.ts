@@ -1,4 +1,4 @@
-import { startHookServer, startToolServer, type HookInput, type HookServer, type ToolOutcome, type ToolServer, type ToolServerOptions } from '@b-studio/agent';
+import { startHookServer, startToolServer, type HookInput, type HookMeta, type HookServer, type ToolOutcome, type ToolServer, type ToolServerOptions } from '@b-studio/agent';
 import { AGENT_GATEWAY_HOST, HOST_GATEWAY_HOST, type AgentGatewayAddress, type AgentHookEvent } from '@b-studio/sandbox';
 import { sessionTerminalMode } from './session-terminal';
 
@@ -64,13 +64,21 @@ export interface TerminalGateway {
 /** 사용자에게만 보이는 한 줄. CLI가 "<훅> says: …"로 보여 준다 */
 const say = (message: string | undefined): Record<string, unknown> => (message ? { systemMessage: message } : {});
 
+/** 본문을 읽지 못한 쓰기 직전 훅에 주는 거절 글. 도구 이름 없이 판정하면 허용이 될 수 있어 막는다(ADR-219, N18) */
+export const UNREADABLE_PRE_TOOL_DENY = '[b-studio] 도구 호출의 본문을 읽지 못해 파일을 바꿀 수 있는 도구를 막았습니다. 다시 시도해 주세요.';
+/** 본문을 읽지 못한 요청 시작 훅에 주는 거절 글 */
+export const UNREADABLE_PROMPT_BLOCK = '[b-studio] 요청의 본문을 읽지 못해 보내지 않았습니다. 다시 보내 주세요.';
+
+/** 본문이 입력 객체로 읽혔는가. 메타가 없으면(훅 서버를 거치지 않은 부름) 읽힌 것으로 본다 */
+const readable = (meta: HookMeta | undefined): boolean => meta === undefined || meta.body === 'object';
+
 /** 훅 종류 → 처리. 핸들러가 던지면 훅 서버가 5xx로 답하고, 훅 스크립트는 CLI를 막지 않는다(판정은 호스트의 게이트가 한다) */
-export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput) => Promise<Record<string, unknown>>> {
+export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput, meta?: HookMeta) => Promise<Record<string, unknown>>> {
   const routes = hookRoutes(handlers);
   // CLI의 훅 입력에는 대화 id(session_id)가 실린다(Claude Code는 모든 훅, Codex도 같은 이름). 텔레메트리와 ping은 훅 입력이 아니다
   for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end', '/stop-failure', '/activity'] as const) {
     const route = routes[name];
-    routes[name] = async (input) => {
+    routes[name] = async (input, meta) => {
       if (typeof input.session_id === 'string' && input.session_id) {
         try {
           handlers.conversation?.(input.session_id);
@@ -78,16 +86,18 @@ export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/
           // 이어 붙이기용 기록일 뿐이다. 판정과 훅의 답은 그대로 간다
         }
       }
-      return route(input);
+      return route(input, meta);
     };
   }
   return routes;
 }
 
-function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput) => Promise<Record<string, unknown>>> {
+function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput, meta?: HookMeta) => Promise<Record<string, unknown>>> {
   return {
     // CLI의 텔레메트리 로그(OTLP/HTTP JSON). 받아서 실행에 붙이고 빈 답(200)을 준다
-    '/v1/logs': async (input) => {
+    '/v1/logs': async (input, meta) => {
+      // 읽지 못한 본문을 빈 내보내기로 세지 않는다. 5xx로 답한다(통로라 CLI는 그대로 돈다)
+      if (!readable(meta)) throw new Error('텔레메트리 본문을 읽지 못했습니다');
       await handlers.telemetry(input);
       return {};
     },
@@ -97,12 +107,16 @@ function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEven
       const note = await handlers.note();
       return note ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } } : {};
     },
-    '/prompt': async (input) => {
+    '/prompt': async (input, meta) => {
+      // 요청 글을 읽지 못하면 읽기만 요청인지 알 수 없다. 보통 요청으로 열면 읽기만 약속이 풀린다: 보내지 않는다
+      if (!readable(meta)) return { decision: 'block', reason: UNREADABLE_PROMPT_BLOCK };
       const { blocked, note } = await handlers.prompt(input);
       if (blocked) return { decision: 'block', reason: blocked };
       return note ? { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: note } } : {};
     },
-    '/pre-tool': async (input) => {
+    '/pre-tool': async (input, meta) => {
+      // 본문을 읽지 못한 도구 호출은 `{}`(도구 이름 없음)로 판정하면 읽기 도구도 아니고 경로도 없어 카드 쓰기 범위를 지나 허용이 된다: 막는다
+      if (!readable(meta)) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: UNREADABLE_PRE_TOOL_DENY } };
       const { deny, message } = await handlers.preTool(input);
       if (deny) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: deny } };
       return say(message);

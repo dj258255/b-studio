@@ -25,6 +25,7 @@ pub mod telemetry;
 pub mod turn_end;
 pub mod turn_end_rest;
 pub mod usage;
+pub mod watch;
 
 use crate::claim::{Holder, Phase, Slot, Ticket};
 use crate::outcome::{Action, FinishedStatus};
