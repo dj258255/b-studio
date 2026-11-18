@@ -306,6 +306,46 @@ describe('removeHostGatewayConfig', () => {
     expect(await readFile(path.join(dir2, 'other.txt'), 'utf8')).toBe('남겨 둘 것');
     expect(await exists(dir2)).toBe(true);
   });
+
+  it('CLI가 끝나 zsh가 관문의 ZDOTDIR에 남긴 .zcompdump 파일도 지워 관문 폴더가 남지 않는다(#1296)', async () => {
+    const root = await tempDir('b-studio-host-remove-zcomp-');
+    const dir = await writeHostGatewayConfig('studio-orders-zc', address, cli, root);
+    // oh-my-zsh와 plain compinit이 쓰는 이름
+    await writeFile(path.join(dir, 'shell/zsh/.zcompdump-host-5.9'), 'dump');
+    await writeFile(path.join(dir, 'shell/zsh/.zcompdump-host-5.9.zwc'), 'zwc');
+    await writeFile(path.join(dir, 'shell/zsh/.zcompdump'), 'dump');
+    await removeHostGatewayConfig('studio-orders-zc', root);
+    expect(await exists(dir)).toBe(false);
+  });
+
+  it('.zcompdump 이름의 링크는 링크만 지우고 그 너머를 건드리지 않으며, 같은 이름의 폴더와 다른 파일은 남긴다(#1296)', async () => {
+    const root = await tempDir('b-studio-host-remove-zcomp-link-');
+    const outside = await tempDir('b-studio-host-remove-zcomp-out-');
+    await writeFile(path.join(outside, 'keep'), '건드리지 마라\n');
+    const dir = await writeHostGatewayConfig('studio-orders-zl', address, cli, root);
+    const zsh = path.join(dir, 'shell/zsh');
+    await symlink(path.join(outside, 'keep'), path.join(zsh, '.zcompdump-link'));
+    await mkdir(path.join(zsh, '.zcompdump-dir'));
+    await writeFile(path.join(zsh, '.zcompdump-dir/inner'), '폴더 안');
+    await writeFile(path.join(zsh, 'notes.txt'), '남겨 둘 것');
+    await removeHostGatewayConfig('studio-orders-zl', root);
+    expect(await readFile(path.join(outside, 'keep'), 'utf8')).toBe('건드리지 마라\n');
+    expect(await exists(path.join(zsh, '.zcompdump-link'))).toBe(false);
+    expect(await readFile(path.join(zsh, '.zcompdump-dir/inner'), 'utf8')).toBe('폴더 안');
+    expect(await readFile(path.join(zsh, 'notes.txt'), 'utf8')).toBe('남겨 둘 것');
+  });
+
+  it('shell/zsh 자체가 링크면 그 너머의 .zcompdump를 지우지 않는다(#1296)', async () => {
+    const root = await tempDir('b-studio-host-remove-zcomp-dirlink-');
+    const outside = await tempDir('b-studio-host-remove-zcomp-dirout-');
+    await writeFile(path.join(outside, '.zcompdump-host-5.9'), '남의 것\n');
+    const dir = await writeHostGatewayConfig('studio-orders-zd', address, cli, root);
+    await rm(path.join(dir, 'shell/zsh'), { recursive: true, force: true });
+    await symlink(outside, path.join(dir, 'shell/zsh'));
+    await removeHostGatewayConfig('studio-orders-zd', root);
+    expect(await readFile(path.join(outside, '.zcompdump-host-5.9'), 'utf8')).toBe('남의 것\n');
+    expect(await exists(dir)).toBe(false);
+  });
 });
 
 describe('findHostCli', () => {
