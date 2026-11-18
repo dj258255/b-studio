@@ -5,6 +5,7 @@
 //! 이 크레이트를 붙이고, 4단계(ADR-191·192)에서 Rust HTTP 서버가 같은 크레이트를 직접 쓴다.
 
 pub mod browser;
+pub mod checkpoint_local;
 pub mod checkpoint_remote;
 pub mod cli_command;
 pub mod cli_process;
@@ -14,6 +15,7 @@ pub mod deploy_io;
 pub mod exec_stream;
 #[cfg(test)]
 mod fake_docker;
+pub mod gate_assets;
 pub mod gate_auto;
 pub mod gate_check;
 pub mod gate_declared;
@@ -39,3 +41,7 @@ pub mod tool_ledger;
 pub mod up_loop;
 pub mod verify_io;
 pub mod workspace_io;
+pub mod host_gateway;
+pub mod spec_load;
+pub mod gate_workflow;
+pub mod checkpoint_names;

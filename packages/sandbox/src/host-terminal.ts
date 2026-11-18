@@ -1,5 +1,4 @@
-import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, readdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { native } from './native';
@@ -13,8 +12,6 @@ import {
   clampTerminalSize,
   defaultAgentGatewayRoot,
   GATEWAY_FILE_NAME,
-  gatewayDirFor,
-  gatewaySettings,
   HOOK_SCRIPT_NAME,
   STATUSLINE_FILE,
   type AgentGatewayAddress,
@@ -57,34 +54,11 @@ const SHELL_DIR = 'shell';
 const ZSH_DIR = path.join(SHELL_DIR, 'zsh');
 const ZSH_START_FILES = ['.zshenv', '.zprofile', '.zshrc', '.zlogin'] as const;
 const BASH_RC_FILE = path.join(SHELL_DIR, 'bashrc');
-/** 관문 폴더 안에 만들 폴더들. 지울 때는 이 역순으로 지운다 */
-const GATEWAY_DIRS = [WRAPPER_DIR, SHELL_DIR, ZSH_DIR] as const;
-/** 권한을 700으로 유지해야 하는 폴더들(폴더 기준 이름). 빈 이름은 관문 폴더 그 자체를 뜻한다 */
-const GATEWAY_FOLDER_NAMES = ['', WRAPPER_DIR, SHELL_DIR, ZSH_DIR] as const;
-/** 관문 폴더에 쓰는 파일들(폴더 기준). hostGatewayFiles의 키와 같아야 한다 */
-const GATEWAY_FILE_NAMES = [
-  SETTINGS_FILE,
-  MCP_FILE,
-  HOOK_SCRIPT_NAME,
-  GATEWAY_FILE_NAME,
-  STATUSLINE_FILE,
-  CODEX_ENV_FILE,
-  path.join(WRAPPER_DIR, 'claude'),
-  path.join(WRAPPER_DIR, 'codex'),
-  ...ZSH_START_FILES.map((name) => path.join(ZSH_DIR, name)),
-  BASH_RC_FILE,
-];
 const HOST_PING_SECONDS = 5;
-/** 첫 실행의 표식. 안쪽에서 연 셸이나 CLI가 띄운 셸이 CLI를 또 띄우지 않게 export한다 */
-const SHELL_STARTED_VAR = 'BSTUDIO_TERMINAL_STARTED';
-/** CLI에서 나온 뒤 사용자에게 보이는 한 줄(셸 시작 파일·대체 명령이 함께 쓴다) */
-function shellStartedNotice(kind: HostCliKind): string {
-  return `[b-studio] ${kind}에서 나왔습니다. 다시 띄우려면 ${kind} 를 입력하세요.`;
-}
 
-/** 셸 명령에 넣을 글을 작은따옴표로 감싼다. 경로에 빈칸이나 따옴표가 있어도 한 덩어리로 읽힌다 */
+/** 셸 명령에 넣을 글을 작은따옴표로 감싼다. 경로에 빈칸이나 따옴표가 있어도 한 덩어리로 읽힌다(판정은 Rust 코어가 한다) */
 export function shellQuote(value: string): string {
-  return `'${value.replace(/'/g, `'\\''`)}'`;
+  return native.terminalShellQuote(value);
 }
 
 /** 터미널에서 띄우는 에이전트 CLI. 세션의 백엔드가 codex면 codex, 그 밖에는 claude다(#825) */
@@ -177,25 +151,17 @@ export async function findHostCli(env: Record<string, string | undefined> = proc
 
 /** 이 컴퓨터용 CLI 설정: 훅 명령이 세션의 관문 폴더에 둔 스크립트를 부른다(텔레메트리도 같은 관문 주소로 보낸다) */
 export function hostGatewaySettings(address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>, dir: string, nodePath: string): Record<string, unknown> {
-  return gatewaySettings((event) => `${shellQuote(nodePath)} ${shellQuote(path.join(dir, HOOK_SCRIPT_NAME))} ${event}`, address);
+  return JSON.parse(native.terminalHostGatewaySettingsJson(dir, nodePath, address.hookUrl, address.hookToken)) as Record<string, unknown>;
 }
 
 /**
  * 인자를 붙여 CLI를 부르는 감싸개. 터미널의 PATH 맨 앞에 놓여, 터미널에서 `claude`를 어떻게 띄우든(다시 띄우거나 `--resume`을 주거나)
- * 훅과 b-studio 도구가 붙는다. 사용자가 준 인자는 그대로 넘긴다
+ * 훅과 b-studio 도구가 붙는다. 사용자가 준 인자는 그대로 넘긴다.
+ * `--mcp-config`는 값을 여러 개 받으므로 첫 낱말(요청 글)을 설정 파일로 먹지 않게 `--settings`를 뒤에 둔다(#836).
+ * 감시가 이 정확한 자리(`<cli> --mcp-config M --settings S`)로 붙었는지 판정한다(ADR-219). 순서는 Rust 코어가 지킨다
  */
 export function hostCliWrapper(dir: string, claudePath: string, configDir?: string): string {
-  return [
-    '#!/bin/sh',
-    '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
-    // 세션의 계정(#885). 사용자의 시작 파일이 같은 변수를 정해도 이 세션의 CLI는 고른 계정으로 뜬다
-    ...accountExport('claude', configDir),
-    // --mcp-config는 값을 여러 개 받는다(`<configs...>`). 사용자 인자 바로 앞에 두면 첫 낱말(요청 글)을 설정 파일로 먹으므로,
-    // 값을 하나만 받는 --settings를 뒤에 둔다(#836)
-    // 감시는 이 정확한 자리(`<cli> --mcp-config M --settings S`)로 훅이 붙었는지 판정한다(ADR-219, hooked_argv). 순서를 바꾸면 판정도 같이 바꾼다
-    `exec ${shellQuote(claudePath)} --mcp-config ${shellQuote(path.join(dir, MCP_FILE))} --settings ${shellQuote(path.join(dir, SETTINGS_FILE))} "$@"`,
-    '',
-  ].join('\n');
+  return native.terminalHostCliWrapper(dir, claudePath, configDir);
 }
 
 /** TOML 기본 문자열. JSON의 이스케이프는 TOML 기본 문자열에서도 같은 뜻이다 */
@@ -286,11 +252,6 @@ export function hostCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 
   ].join('\n');
 }
 
-/** 감싸개(관문 폴더 안)의 절대 경로. 셸 함수가 이것을 부른다 */
-function wrapperPath(dir: string, kind: HostCliKind): string {
-  return path.join(dir, WRAPPER_DIR, kind);
-}
-
 /**
  * 첫 요청(#836). 터미널을 열 때 받은 첫 요청 글을 CLI의 실행 인자로 넘긴다. 키 입력(붙여 넣기 + Enter)으로 넣지 않는다:
  * CLI가 시작하며 묻는 창(폴더 신뢰, 훅 신뢰, 업데이트)이 뜨면 그 글과 Enter가 사람 대신 그 창의 답이 된다.
@@ -298,20 +259,20 @@ function wrapperPath(dir: string, kind: HostCliKind): string {
  * 셸 변수는 내보내지 않으므로 사용자의 시작 파일이 띄우는 프로그램과 CLI에 내려가지 않는다. 첫 실행에서 한 번 쓰고 지운다
  */
 export const FIRST_PROMPT_ENV = 'B_STUDIO_FIRST_PROMPT';
-const FIRST_PROMPT_VAR = 'BSTUDIO_FIRST_PROMPT_VALUE';
-/** 첫 요청 글의 길이 상한. 화면의 붙여 넣기 상한(8천 자)에 앞말이 붙어도 넘지 않게 잡는다 */
-const FIRST_PROMPT_MAX = 10_000;
+
+/** 검증 함수의 `{ok,value|title,detail}` 봉투를 풀거나 `SandboxError`로 만든다 */
+function gatewayValue<T>(json: string): T {
+  const result = JSON.parse(json) as { ok: boolean; value?: T; title?: string; detail?: string };
+  if (result.ok) return result.value as T;
+  throw new SandboxError(result.title!, result.detail);
+}
 
 /**
  * CLI 실행 인자로 넘길 첫 요청 글. 옵션(`-`로 시작)이나 하위 명령(`update`처럼 빈칸 없는 한 낱말)으로 읽히지 않게 앞에 "요청: "을 붙인다.
  * `--`로 옵션을 끝내는 길은 쓰지 않는다: claude(commander)는 `--` 뒤의 첫 낱말도 하위 명령으로 맞춰 본다
  */
 export function firstPromptArg(text: string): string {
-  const body = text.trim();
-  if (!body) throw new SandboxError('첫 요청 글이 비어 있습니다', '빈 글은 CLI에 넘기지 않습니다');
-  if (body.includes('\0')) throw new SandboxError('첫 요청 글에 NUL 문자가 있습니다', '환경 변수로 넘길 수 없습니다');
-  if (body.length > FIRST_PROMPT_MAX) throw new SandboxError('첫 요청 글이 너무 깁니다', `${FIRST_PROMPT_MAX}자까지 넘깁니다`);
-  return body.startsWith('-') || !/\s/.test(body) ? `요청: ${body}` : body;
+  return gatewayValue<string>(native.terminalFirstPromptArg(text));
 }
 
 /**
@@ -319,19 +280,15 @@ export function firstPromptArg(text: string): string {
  * (claude `--resume <id>`, codex `resume <id>`). 첫 요청과 같이 PTY 환경 변수로만 받고, 시작 파일보다 먼저 셸 변수로 옮겨 환경에서 지운다
  */
 export const RESUME_CONVERSATION_ENV = 'B_STUDIO_RESUME_ID';
-const RESUME_CONVERSATION_VAR = 'BSTUDIO_RESUME_ID_VALUE';
-/** 대화 id의 꼴. 두 CLI 모두 UUID를 쓰고, 옵션(-로 시작)·빈칸·셸 글자는 받지 않는다 */
-const RESUME_CONVERSATION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 
-/** 이어 붙일 수 있는 꼴의 대화 id인가. 훅으로 온 값을 기억하기 전에 본다 */
+/** 이어 붙일 수 있는 꼴의 대화 id인가. 훅으로 온 값을 기억하기 전에 본다(꼴 판정은 Rust 코어가 한다) */
 export function isResumableConversation(id: unknown): id is string {
-  return typeof id === 'string' && RESUME_CONVERSATION_PATTERN.test(id);
+  return typeof id === 'string' && native.terminalIsResumableConversation(id);
 }
 
 /** CLI 실행 인자로 넘길 대화 id. 꼴이 맞지 않으면 던진다(훅으로 온 값이라 바깥에서 온 값이다) */
 export function resumeConversationArg(id: string): string {
-  if (!isResumableConversation(id)) throw new SandboxError('이어 붙일 대화 id의 꼴이 맞지 않습니다', '영문·숫자·밑줄·붙임표로 된 128자 이하의 id만 넘깁니다');
-  return id;
+  return gatewayValue<string>(native.terminalResumeConversationArg(id));
 }
 
 /**
@@ -339,126 +296,20 @@ export function resumeConversationArg(id: string): string {
  * 첫 요청과 같이 PTY 환경 변수로만 받고, 시작 파일보다 먼저 셸 변수로 옮겨 환경에서 지운다. 없으면 CLI 기본 모델이다
  */
 export const CLI_MODEL_ENV = 'B_STUDIO_CLI_MODEL';
-const CLI_MODEL_VAR = 'BSTUDIO_CLI_MODEL_VALUE';
-/** 모델 id의 꼴. 별칭(sonnet), 문맥 창 꼬리표(`[1m]`), 제공자 접두어(`openai/`)를 받고, 옵션(-로 시작)·빈칸·셸 글자는 받지 않는다 */
-const CLI_MODEL_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/[\]-]{0,127}$/;
 
-/** CLI 실행 인자로 넘길 모델 id. 꼴이 맞지 않으면 던진다 */
+/** CLI 실행 인자로 넘길 모델 id. 꼴이 맞지 않으면 던진다(꼴 판정은 Rust 코어가 한다) */
 export function cliModelArg(model: string): string {
-  if (!CLI_MODEL_PATTERN.test(model)) throw new SandboxError('CLI에 넘길 모델 id의 꼴이 맞지 않습니다', '영문·숫자로 시작하고 . _ : / [ ] - 만 쓴 128자 이하의 id만 넘깁니다');
-  return model;
+  return gatewayValue<string>(native.terminalCliModelArg(model));
 }
 
-/** 받은 첫 요청과 대화 id를 셸 변수로 옮기고 환경에서 지운다. 사용자의 시작 파일보다 먼저 돈다 */
-const FIRST_PROMPT_CAPTURE = [
-  `if [ -n "\${${FIRST_PROMPT_ENV}+x}" ]; then`,
-  `  ${FIRST_PROMPT_VAR}="$${FIRST_PROMPT_ENV}"`,
-  `  unset ${FIRST_PROMPT_ENV}`,
-  'fi',
-  `if [ -n "\${${RESUME_CONVERSATION_ENV}+x}" ]; then`,
-  `  ${RESUME_CONVERSATION_VAR}="$${RESUME_CONVERSATION_ENV}"`,
-  `  unset ${RESUME_CONVERSATION_ENV}`,
-  'fi',
-  `if [ -n "\${${CLI_MODEL_ENV}+x}" ]; then`,
-  `  ${CLI_MODEL_VAR}="$${CLI_MODEL_ENV}"`,
-  `  unset ${CLI_MODEL_ENV}`,
-  'fi',
-];
-
-/** 이어 붙이지 못했을 때 터미널에 남기는 안내. CLI를 대신 새로 띄우지 않는다(사람이 일부러 끝낸 것과 가를 수 없다) */
-function resumeFailedNotice(kind: HostCliKind): string {
-  return `[b-studio] 지난 대화를 이어 붙이지 못했습니다. '${kind}'를 치면 새 대화로 시작합니다.`;
-}
-
-/**
- * CLI를 처음 띄우는 자리. 첫 요청이 있으면 인자로 한 번 넘긴다(새 대화). 없고 대화 id가 있으면 그 대화를 이어 붙인다(#872).
- * 둘 다 없으면 인자 없이 띄운다. 두 변수 모두 한 번 쓰고 지운다
- */
-function firstLaunch(command: string, kind: HostCliKind, indent = ''): string[] {
-  // 모델이 있으면 한 낱말(`--model=<id>`)로, 없으면 낱말 자체가 없어진다. 따옴표 안이라 [ ] 가 파일 이름으로 풀리지 않는다(#988)
-  const model = `\${${CLI_MODEL_VAR}:+"--model=$${CLI_MODEL_VAR}"}`;
-  const resume = kind === 'codex' ? `${command} resume ${model} "$${RESUME_CONVERSATION_VAR}"` : `${command} ${model} --resume "$${RESUME_CONVERSATION_VAR}"`;
-  return [
-    `if [ -n "\${${FIRST_PROMPT_VAR}+x}" ]; then`,
-    `  ${command} ${model} "$${FIRST_PROMPT_VAR}"`,
-    `elif [ -n "\${${RESUME_CONVERSATION_VAR}+x}" ]; then`,
-    `  ${resume} || printf '%s\\n' ${shellQuote(resumeFailedNotice(kind))}`,
-    'else',
-    `  ${command} ${model}`,
-    'fi',
-    `unset ${FIRST_PROMPT_VAR} ${RESUME_CONVERSATION_VAR} ${CLI_MODEL_VAR}`,
-  ].map((line) => indent + line);
-}
-
-/**
- * zsh 시작 파일 하나의 틀. ZDOTDIR을 사용자의 것으로 두고 사용자의 파일을 그대로 읽은 뒤, b-studio의 몇 줄을 더한다.
- * 그래야 사용자 설정(플러그인·별칭·프롬프트)이 평소 터미널과 같고, 우리 파일은 ZDOTDIR을 우리 폴더로 되돌려 다음 파일도 우리가 읽는다
- */
-function zshStartFile(name: string, extra: { before?: readonly string[]; after?: readonly string[] } = {}): string {
-  return [
-    '# b-studio가 만든 파일입니다. 사용자의 시작 파일을 그대로 읽은 뒤 b-studio의 몇 줄을 더합니다.',
-    'BSTUDIO_ZDOTDIR="$ZDOTDIR"',
-    'ZDOTDIR="${BSTUDIO_USER_ZDOTDIR:-$HOME}"',
-    ...(extra.before ?? []),
-    `[ -r "$ZDOTDIR/${name}" ] && . "$ZDOTDIR/${name}"`,
-    '# 사용자의 파일이 ZDOTDIR을 바꿨으면 그 값을 사용자의 것으로 기억한다',
-    'export BSTUDIO_USER_ZDOTDIR="$ZDOTDIR"',
-    'ZDOTDIR="$BSTUDIO_ZDOTDIR"',
-    'unset BSTUDIO_ZDOTDIR',
-    ...(extra.after ?? []),
-    '',
-  ].join('\n');
-}
-
-/** zsh의 관문 폴더에 둘 네 파일 → 내용 */
+/** zsh의 관문 폴더에 둘 네 파일 → 내용. 셸 주입을 막는 글은 Rust 코어가 만든다(ADR-219) */
 export function hostZshFiles(dir: string, kind: HostCliKind = 'claude'): Record<(typeof ZSH_START_FILES)[number], string> {
-  const wrapper = shellQuote(wrapperPath(dir, kind));
-  return {
-    // 첫 요청은 사용자의 .zshenv보다 먼저 환경에서 지운다(#836)
-    '.zshenv': zshStartFile('.zshenv', { before: FIRST_PROMPT_CAPTURE }),
-    '.zprofile': zshStartFile('.zprofile'),
-    '.zshrc': zshStartFile('.zshrc', {
-      // macOS의 /etc/zshrc가 HISTFILE을 $ZDOTDIR 아래로 잡는다. 그대로 두면 명령 기록이 관문 폴더에 쌓였다가 지워진다
-      before: ['HISTFILE="${BSTUDIO_USER_ZDOTDIR:-$HOME}/.zsh_history"'],
-      // 별칭은 함수보다 먼저 풀린다. 사용자가 `alias claude=…`를 두었으면(예전 설치 방식) 그 별칭을 지우고 함수를 정의한다.
-      // `function name { … }` 꼴은 이름 자리에서 별칭을 풀지 않는다. PATH 순서와도 무관하므로 진짜 CLI를 PATH 앞에 두어도 이긴다
-      after: [`unalias ${kind} 2>/dev/null`, `function ${kind} { ${wrapper} "$@"; }`],
-    }),
-    '.zlogin': zshStartFile('.zlogin', {
-      after: [
-        `if [[ -o interactive && -z "$${SHELL_STARTED_VAR}" ]]; then`,
-        `  export ${SHELL_STARTED_VAR}=1`,
-        ...firstLaunch(kind, kind, '  '),
-        `  print -r -- ${shellQuote(shellStartedNotice(kind))}`,
-        'fi',
-      ],
-    }),
-  };
+  return Object.fromEntries(native.terminalHostZshFiles(dir, kind).map((file) => [file.name, file.content])) as Record<(typeof ZSH_START_FILES)[number], string>;
 }
 
 /** bash의 관문 폴더에 둘 시작 파일 → 내용. 로그인 셸의 순서(/etc/profile, 그다음 사용자 파일 하나)를 흉내 낸다 */
 export function hostBashRc(dir: string, kind: HostCliKind = 'claude'): string {
-  const wrapper = shellQuote(wrapperPath(dir, kind));
-  return [
-    '# b-studio가 만든 파일입니다. 로그인 셸의 순서를 흉내 낸 뒤 b-studio의 몇 줄을 더합니다.',
-    // 첫 요청은 시작 파일보다 먼저 환경에서 지운다(#836)
-    ...FIRST_PROMPT_CAPTURE,
-    '[ -r /etc/profile ] && . /etc/profile',
-    'if [ -r "$HOME/.bash_profile" ]; then . "$HOME/.bash_profile"',
-    'elif [ -r "$HOME/.bash_login" ]; then . "$HOME/.bash_login"',
-    'elif [ -r "$HOME/.profile" ]; then . "$HOME/.profile"',
-    'fi',
-    // 별칭은 함수보다 먼저 풀린다. 대화형(-i)이라 사용자의 `alias claude=…`가 있으면 그 별칭을 지우고 함수를 정의한다.
-    // `function name { … }` 꼴은 이름 자리에서 별칭을 풀지 않는다. PATH 순서와도 무관하므로 진짜 CLI를 PATH 앞에 두어도 이긴다
-    `unalias ${kind} 2>/dev/null`,
-    `function ${kind} { ${wrapper} "$@"; }`,
-    `if [ -z "$${SHELL_STARTED_VAR}" ]; then`,
-    `  export ${SHELL_STARTED_VAR}=1`,
-    ...firstLaunch(kind, kind, '  '),
-    `  printf '%s\\n' ${shellQuote(shellStartedNotice(kind))}`,
-    'fi',
-    '',
-  ].join('\n');
+  return native.terminalHostBashRc(dir, kind);
 }
 
 /** Codex 훅 스크립트의 자리(폴더 기준). 관문 루트에 하나를 두고 모든 세션이 같이 쓴다 — 훅 명령 글이 세션마다 같아야 한다 */
@@ -486,7 +337,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     };
   }
   return {
-    [SETTINGS_FILE]: file(`${JSON.stringify(hostGatewaySettings(address, dir, cli.nodePath), null, 2)}\n`),
+    [SETTINGS_FILE]: file(`${native.terminalHostGatewaySettingsJson(dir, cli.nodePath, address.hookUrl, address.hookToken)}\n`),
     [MCP_FILE]: file(`${JSON.stringify(agentManagedMcp(address), null, 2)}\n`),
     [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
     [GATEWAY_FILE_NAME]: addressFile,
@@ -502,68 +353,27 @@ export function hostGatewayFiles(address: AgentGatewayAddress, dir: string, cli:
   return Object.fromEntries(Object.entries(expectedHostGatewayFiles(address, dir, cli)).map(([name, spec]) => [name, spec.content]));
 }
 
-/** 부모가 진짜 폴더일 때만 자식을 본다. 부모가 링크면 그 너머로 들어가지 않는다(관문 폴더 밖을 건드리지 않는다) */
-async function lstatChild(parent: string, child: string): Promise<Awaited<ReturnType<typeof lstat>> | undefined> {
-  const info = await lstat(parent).catch(() => undefined);
-  if (!info?.isDirectory() || info.isSymbolicLink()) return undefined;
-  return lstat(child).catch(() => undefined);
+/** Rust가 던진 두 줄짜리 오류(제목·상세)를 옛 `SandboxError`로 되돌린다 */
+function gatewayIoError(error: unknown): never {
+  const message = error instanceof Error ? error.message : String(error);
+  const [title, ...rest] = message.split('\n');
+  if (rest.length) throw new SandboxError(title!, rest.join('\n'));
+  throw error;
 }
 
-/** 보통 폴더일 때만 권한을 조인다(링크를 따라가 그 너머의 폴더 권한을 바꾸지 않는다) */
-async function chmodRealDir(target: string, mode: number): Promise<void> {
-  const info = await lstat(target).catch(() => undefined);
-  if (info?.isDirectory() && !info.isSymbolicLink()) await chmod(target, mode);
-}
-
-/**
- * 관문 폴더 아래의 폴더 자리를 확보한다. 자리가 링크거나 폴더가 아니면 자리 자체를 지우고 새로 만든다 —
- * 링크의 대상은 건드리지 않는다. `mkdir`은 자리 자체만 만들고 링크를 따라가지 않는다
- */
-async function ensureGatewayDir(target: string): Promise<void> {
-  const info = await lstat(target).catch(() => undefined);
-  if (info && (!info.isDirectory() || info.isSymbolicLink())) await rm(target, { force: true });
-  await mkdir(target, { recursive: true, mode: 0o700 });
-  const after = await lstat(target).catch(() => undefined);
-  if (!after?.isDirectory() || after.isSymbolicLink()) throw new SandboxError('관문 폴더를 만들지 못했습니다', target);
+function gatewaySpecs(expected: Record<string, { content: string; mode: number }>): Array<{ name: string; content: string; mode: number }> {
+  return Object.entries(expected).map(([name, spec]) => ({ name, content: spec.content, mode: spec.mode }));
 }
 
 /**
  * 세션의 관문 설정을 이 컴퓨터에 쓰고 그 폴더를 돌려준다. 토큰이 들어 있으므로 이 사용자만 읽을 수 있게 둔다.
  * 컨테이너 방식과 같은 폴더(`<루트>/<샌드박스 id>`)를 쓴다 — 세션은 한 번에 한 방식으로만 열린다.
- * 관문 폴더 안의 링크를 따라가지 않는다: 하위 폴더 자리가 링크면 그 자리만 지우고 새로 만든다
+ * 관문 폴더 안의 링크를 따라가지 않는다: 하위 폴더 자리가 링크면 그 자리만 지우고 새로 만든다(집행은 Rust 코어가 한다)
  */
 export async function writeHostGatewayConfig(sandboxId: string, address: AgentGatewayAddress, cli: HostCli, root: string = defaultAgentGatewayRoot()): Promise<string> {
-  await mkdir(root, { recursive: true, mode: 0o700 });
-  const made = gatewayDirFor(sandboxId, root);
-  // 관문 폴더 자체가 링크면 그 너머를 건드리지 않고 멈춘다(루트 아래의 세션 폴더를 링크로 바꾼 경우다)
-  const madeInfo = await lstat(made).catch(() => undefined);
-  if (madeInfo?.isSymbolicLink()) throw new SandboxError('관문 폴더가 심볼릭 링크입니다', made);
-  await mkdir(made, { recursive: true, mode: 0o700 });
-  // 훅 명령과 감싸개에 이 폴더의 경로가 들어간다. 링크를 푼 진짜 경로로 적는다(위에서 링크가 아님을 확인했다)
-  const dir = await realpath(made);
-  for (const name of GATEWAY_DIRS) await ensureGatewayDir(path.join(dir, name));
-  // 이미 있던 폴더에는 mkdir의 mode가 적용되지 않는다. 부를 때마다 다시 조인다
-  await chmodRealDir(dir, 0o700);
-  for (const name of GATEWAY_DIRS) await chmodRealDir(path.join(dir, name), 0o700);
+  const dir = await native.terminalPrepareHostGateway(root, sandboxId).catch(gatewayIoError);
   const expected = expectedHostGatewayFiles(address, dir, cli);
-  // 사용자가 상태 줄을 지웠으면 지난번에 적어 둔 원래 명령도 지운다(#920). 링크면 자리만 지운다
-  if (!(STATUSLINE_FILE in expected)) await rm(path.join(dir, STATUSLINE_FILE), { force: true }).catch(() => {});
-  for (const [name, { content, mode }] of Object.entries(expected)) {
-    const target = path.join(dir, name);
-    // 기대하는 자리가 보통 파일이 아니면(없거나, 심볼릭 링크거나, 폴더면) 다시 쓴다. 링크를 남겨 두면 검사가 매번 위반으로 본다
-    const info = await lstat(target).catch(() => undefined);
-    const same = info?.isFile() === true && !info.isSymbolicLink() && (await readFile(target, 'utf8').catch(() => undefined)) === content;
-    if (!same) {
-      // 추측할 수 없는 이름을 새로 만들 때만 쓰고(wx) 옮긴다. 미리 심어 둔 링크를 따라 쓰지 않는다.
-      // rename은 자리의 링크를 그 대상이 아니라 자리 자체로 바꾼다
-      const staged = `${target}.${randomBytes(8).toString('hex')}.tmp`;
-      await writeFile(staged, content, { mode, flag: 'wx' });
-      await rename(staged, target);
-    }
-    // 내용이 같아 쓰지 않았어도 권한이 넓혀져 있을 수 있다(주소 파일에는 토큰이 있다). 보통 파일일 때만 다시 조인다
-    const after = await lstat(target).catch(() => undefined);
-    if (after?.isFile() && !after.isSymbolicLink()) await chmod(target, mode);
-  }
+  await native.terminalWriteGatewayFiles(dir, gatewaySpecs(expected), STATUSLINE_FILE).catch(gatewayIoError);
   return dir;
 }
 
@@ -574,20 +384,7 @@ export async function writeHostGatewayConfig(sandboxId: string, address: AgentGa
  * 관문 폴더 안에 기대하지 않은 파일이 생긴 것은 위반으로 보지 않는다(우리가 읽지 않는다)
  */
 export async function checkHostGatewayConfig(dir: string, expected: Record<string, { content: string; mode: number }>): Promise<string[]> {
-  const bad: string[] = [];
-  for (const [name, spec] of Object.entries(expected)) {
-    const target = path.join(dir, name);
-    const info = await lstat(target).catch(() => undefined);
-    if (!info || info.isSymbolicLink() || !info.isFile() || (info.mode & 0o777) !== spec.mode || (await readFile(target, 'utf8').catch(() => undefined)) !== spec.content) {
-      bad.push(name);
-    }
-  }
-  for (const name of GATEWAY_FOLDER_NAMES) {
-    const target = name ? path.join(dir, name) : dir;
-    const info = await lstat(target).catch(() => undefined);
-    if (!info || info.isSymbolicLink() || !info.isDirectory() || (info.mode & 0o777) !== 0o700) bad.push(name || '.');
-  }
-  return bad;
+  return native.terminalCheckHostGatewayConfig(dir, gatewaySpecs(expected)).catch(gatewayIoError);
 }
 
 /**
@@ -595,45 +392,7 @@ export async function checkHostGatewayConfig(dir: string, expected: Record<strin
  * 링크를 따라가지 않는다: 관문 폴더 자체나 하위 폴더가 링크면 그 너머의 파일은 건드리지 않고 링크 자리만 지운다
  */
 export async function removeHostGatewayConfig(sandboxId: string, root: string = defaultAgentGatewayRoot()): Promise<void> {
-  const dir = gatewayDirFor(sandboxId, root);
-  const dirInfo = await lstat(dir).catch(() => undefined);
-  // 관문 폴더 자체가 링크면 그 너머를 건드리지 않고 링크만 지운다
-  if (dirInfo?.isSymbolicLink()) {
-    await rm(dir, { force: true }).catch(() => {});
-    return;
-  }
-  if (!dirInfo) return;
-  // 하위 폴더가 링크면 그 안으로 들어가지 않고 링크 자체만 지운다
-  for (const name of GATEWAY_DIRS) {
-    const folder = path.join(dir, name);
-    const info = await lstatChild(path.dirname(folder), folder);
-    if (info?.isSymbolicLink()) await rm(folder, { force: true }).catch(() => {});
-  }
-  // 파일은 그 부모 폴더가 진짜일 때만 지운다(부모가 링크면 그 너머의 파일을 지우지 않는다)
-  for (const name of GATEWAY_FILE_NAMES) {
-    const target = path.join(dir, name);
-    if (!(await lstatChild(path.dirname(target), target))) continue;
-    await rm(target, { force: true }).catch(() => {});
-  }
-  // CLI가 끝나 터미널이 zsh로 돌아가면 compinit이 ZDOTDIR(관문의 shell/zsh)에 `.zcompdump*`를 쓴다(#1296). 다시 만들어지는 캐시라 지운다.
-  // 진짜 shell/zsh 바로 아래의 이름만 본다. 링크면 링크 자리만 지우고(rm은 링크를 따라가지 않는다) 폴더는 건드리지 않는다
-  const zsh = path.join(dir, ZSH_DIR);
-  const zshInfo = await lstatChild(path.dirname(zsh), zsh);
-  if (zshInfo?.isDirectory() && !zshInfo.isSymbolicLink()) {
-    for (const name of await readdir(zsh).catch(() => [] as string[])) {
-      if (!name.startsWith('.zcompdump')) continue;
-      const target = path.join(zsh, name);
-      const info = await lstat(target).catch(() => undefined);
-      if (info && (info.isFile() || info.isSymbolicLink())) await rm(target, { force: true }).catch(() => {});
-    }
-  }
-  // 진짜 폴더만 비었을 때 지운다(역순)
-  for (const name of [...GATEWAY_DIRS].reverse()) {
-    const folder = path.join(dir, name);
-    const info = await lstatChild(path.dirname(folder), folder);
-    if (info?.isDirectory() && !info.isSymbolicLink()) await rmdir(folder).catch(() => {});
-  }
-  await rmdir(dir).catch(() => {});
+  await native.terminalRemoveHostGatewayConfig(root, sandboxId).catch(gatewayIoError);
 }
 
 /**
@@ -756,39 +515,9 @@ export function findUnhookedCli(root: number, processes: readonly ProcessEntry[]
  * 그때의 변경은 다음 요청의 검증에 "실행 전부터 있던 변경"으로 들어간다
  */
 export function hostTerminalCommand(kind: HostCliKind = 'claude'): string {
-  return [
-    // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
-    'trap : INT',
-    ...FIRST_PROMPT_CAPTURE,
-    ...firstLaunch(kind, kind),
-    `printf "%s\\n" ${JSON.stringify(shellStartedNotice(kind))}`,
-    'exec "${SHELL:-/bin/sh}"',
-  ].join('\n');
+  return native.terminalHostTerminalCommand(kind);
 }
 export const HOST_TERMINAL_COMMAND = hostTerminalCommand('claude');
-
-/** 터미널로 그대로 넘기는 이름. 나머지(PATH의 실제 내용, 버전 관리자, 프록시 등)는 사용자의 로그인 셸이 시작 파일로 만든다 */
-const TERMINAL_ENV_NAMES = ['HOME', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LANGUAGE', 'TMPDIR', 'TZ', 'SSH_AUTH_SOCK', 'DISPLAY', 'WAYLAND_DISPLAY', '__CF_USER_TEXT_ENCODING'];
-/** 앞머리로 넘기는 이름 */
-const TERMINAL_ENV_PREFIXES = ['LC_', 'XDG_'];
-/** 터미널의 PATH. 감싸개 폴더가 있으면 그 앞에 두고, 스튜디오 프로세스의 PATH는 넘기지 않는다 */
-const TERMINAL_PATH = ['/usr/local/bin', '/usr/bin', '/bin', '/usr/sbin', '/sbin'];
-
-/** B_STUDIO_TERMINAL_ENV: 터미널에 더 넘길 환경 변수 이름. 쉼표로 구분하고, 빈 것은 건너뛰고, 틀린 이름은 던진다 */
-function extraTerminalEnvNames(env: Record<string, string | undefined>): string[] {
-  const raw = env.B_STUDIO_TERMINAL_ENV?.trim();
-  if (!raw) return [];
-  const names: string[] = [];
-  for (const piece of raw.split(',')) {
-    const name = piece.trim();
-    if (!name) continue;
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || name.startsWith('B_STUDIO_')) {
-      throw new SandboxError('B_STUDIO_TERMINAL_ENV에 쓸 수 없는 환경 변수 이름이 있습니다', `${name} — 영문·숫자·밑줄로 된 이름이어야 하고 B_STUDIO_로 시작할 수 없습니다`);
-    }
-    names.push(name);
-  }
-  return names;
-}
 
 /**
  * 터미널에 넘길 환경. 스튜디오 프로세스의 환경을 그대로 내려보내지 않고 **허용한 이름만** 넘긴다.
@@ -797,30 +526,8 @@ function extraTerminalEnvNames(env: Record<string, string | undefined>): string[
  * `B_STUDIO_`만 빼는 것으로는 부족하다. 나머지는 사용자의 로그인 셸이 시작 파일로 만든다 — 평소 터미널을 열 때와 같다
  */
 export function hostTerminalEnv(gatewayDir: string | undefined, env: Record<string, string | undefined> = process.env): Record<string, string> {
-  const wanted = new Set([...TERMINAL_ENV_NAMES, ...extraTerminalEnvNames(env)]);
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(env)) {
-    if (value === undefined) continue;
-    if (wanted.has(key) || TERMINAL_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) result[key] = value;
-  }
-  result.TERM = 'xterm-256color';
-  result.COLORTERM = 'truecolor';
-  result.PATH = [...(gatewayDir ? [path.join(gatewayDir, WRAPPER_DIR)] : []), ...TERMINAL_PATH].join(path.delimiter);
-  return result;
-}
-
-/** 셸 함수를 정의할 자리가 없는 셸( fish 등)의 대체 명령. 감싸개 절대 경로로 띄우고, 다시 띄울 때도 그 경로를 쓰라고 알린다 */
-function hostFallbackCommand(dir: string, kind: HostCliKind): string {
-  const safe = `[b-studio] 이 셸에서는 ${kind}를 다시 띄울 때 검증이 붙지 않을 수 있습니다. '${wrapperPath(dir, kind)}'로 띄우세요.`;
-  return [
-    // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
-    'trap : INT',
-    ...FIRST_PROMPT_CAPTURE,
-    ...firstLaunch(shellQuote(wrapperPath(dir, kind)), kind),
-    `printf "%s\\n" ${shellQuote(shellStartedNotice(kind))}`,
-    `printf "%s\\n" ${shellQuote(safe)}`,
-    'exec "${SHELL:-/bin/sh}"',
-  ].join('\n');
+  const pairs = Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined);
+  return Object.fromEntries(gatewayValue<string[][]>(native.terminalHostTerminalEnv(gatewayDir, pairs))) as Record<string, string>;
 }
 
 /**
@@ -843,7 +550,7 @@ export function hostShellLaunch(
     return { file: shell, args: ['--rcfile', path.join(gatewayDir, BASH_RC_FILE), '-i'], env: {} };
   }
   // fish 등: 셸 함수를 정의할 자리가 없다. 감싸개 절대 경로로 한 번 띄우고, 다시 띄울 때는 그 경로를 쓰라고 알린다
-  return { file: '/bin/sh', args: ['-c', hostFallbackCommand(gatewayDir, kind)], env: {} };
+  return { file: '/bin/sh', args: ['-c', native.terminalHostFallbackCommand(gatewayDir, kind)], env: {} };
 }
 
 /** 가상 터미널(portable-pty, 또는 테스트의 가짜)에서 이 모듈이 쓰는 부분 */

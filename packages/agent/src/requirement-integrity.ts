@@ -74,6 +74,11 @@ function readIds(before: string | undefined, after: string | undefined): { befor
   return { beforeEffective, afterEffective: effectiveVerificationIds(after).map(encodeLoneSurrogates), afterIds: requirementIds(after).map(encodeLoneSurrogates) };
 }
 
+/** 게이트가 읽은 두 문서 글자에서 Rust 판정에 넘길 id 목록을 만든다(게이트 껍데기용) */
+export function requirementRecordIdsForGate(before: string | undefined, after: string | undefined): { beforeEffective: string[]; afterEffective: string[]; afterIds: string[] } {
+  return readIds(before, after);
+}
+
 function encodeText(text: string | undefined): string | undefined {
   return text === undefined ? undefined : encodeLoneSurrogates(text);
 }

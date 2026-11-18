@@ -445,6 +445,33 @@ describe('N13: 읽기만 요청이 위반으로 끝나면 문서까지 되돌린
   }, 30_000);
 });
 
+describe('#1303: 브랜치를 바꾼 뒤 되돌림 알림', () => {
+  it('앞머리는 한 번만 붙고, 보관본으로 남긴 파일이 있으면 "바뀐 파일은 없었습니다"를 덧붙이지 않는다', async () => {
+    fake.terminalMode = 'host';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await edit(session, 'api/src/Order.java', CHANGED);
+    // 사람이 터미널 밖에서 브랜치를 바꾼다. 작업 복사본의 변경은 그대로 남아 있다
+    await git(session, 'checkout', '-q', '-b', 'user-branch');
+    const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
+    const message = answer.message ?? '';
+    expect(message).toContain('브랜치가 user-branch(으)로 바뀜');
+    expect(message).toContain('마지막 체크포인트로 되돌렸습니다');
+    expect(message).toContain('보관본으로 남겼습니다');
+    // (1) 앞머리는 한 번만
+    expect(message.match(/\[b-studio\]/g) ?? []).toHaveLength(1);
+    // (2) 보관본으로 남긴 파일이 있으면 "바뀐 파일은 없었습니다"를 덧붙이지 않는다
+    expect(message).not.toContain('바뀐 파일은 없었습니다');
+    // 화면·기록에 남는 끝 글도 같은 글이다
+    const finished = session.ofType('run_finished').at(-1)!;
+    expect(finished.summary.match(/\[b-studio\]/g) ?? []).toHaveLength(1);
+    expect(finished.summary).not.toContain('바뀐 파일은 없었습니다');
+    // 판정은 그대로: 기억한 브랜치로 돌아오고 작업 복사본도 마지막 체크포인트와 같다
+    expect(await branchOf(session)).toBe(rememberedGitForTest(session.id)!.branch);
+    expect(await fileOf(session)).toBe(ORIGINAL);
+  }, 30_000);
+});
+
 describe('N14: 맞추기의 읽기와 행동 사이', () => {
   it('풀기 직전에 브랜치가 바뀌면 끝 상태가 기억과 맞지 않으므로 되돌려 맞춘다(다른 브랜치에 체크포인트를 쌓지 않는다)', async () => {
     fake.terminalMode = 'host';

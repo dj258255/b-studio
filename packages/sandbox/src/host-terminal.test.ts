@@ -1,6 +1,6 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -62,6 +62,25 @@ const GATEWAY_FILES = ['settings.json', 'mcp.json', HOOK_SCRIPT_NAME, GATEWAY_FI
 
 const exists = (file: string): Promise<boolean> => stat(file).then(() => true, () => false);
 const modeOf = async (file: string): Promise<number> => (await stat(file)).mode & 0o777;
+
+/** 링크를 따라가지 않고 폴더 나무를 [경로, 종류:내용]으로 적는다(지우기가 너머를 건드렸는지 보려고) */
+async function treeOf(dir: string, prefix = ''): Promise<Array<[string, string]>> {
+  const out: Array<[string, string]> = [];
+  for (const name of (await readdir(dir)).sort()) {
+    const target = path.join(dir, name);
+    const relative = prefix ? `${prefix}/${name}` : name;
+    const info = await lstat(target);
+    if (info.isSymbolicLink()) {
+      out.push([relative, `link:${await readlink(target)}`]);
+    } else if (info.isDirectory()) {
+      out.push([relative, 'dir']);
+      out.push(...(await treeOf(target, relative)));
+    } else {
+      out.push([relative, `file:${await readFile(target, 'utf8')}`]);
+    }
+  }
+  return out;
+}
 
 /** 감싸개 자리를 채우는 가짜. `WRAPPED <인자>`를 찍는다 */
 async function writeShellGateway(dir: string): Promise<void> {
@@ -345,6 +364,31 @@ describe('removeHostGatewayConfig', () => {
     await removeHostGatewayConfig('studio-orders-zd', root);
     expect(await readFile(path.join(outside, '.zcompdump-host-5.9'), 'utf8')).toBe('남의 것\n');
     expect(await exists(dir)).toBe(false);
+  });
+
+  it('관문 폴더 자체가 링크면 링크 자리만 지우고 대상 폴더의 나무는 그대로 둔다', async () => {
+    const root = await tempDir('b-studio-host-remove-root-link-');
+    const outside = await tempDir('b-studio-host-remove-root-out-');
+    // 링크 너머에 관문 파일 이름과 같은 파일·폴더를 진짜로 둔다. 변이(링크 확인을 끄는 것)가 있으면 .zcompdump가 지워진다
+    await mkdir(path.join(outside, 'bin'), { recursive: true });
+    await mkdir(path.join(outside, 'shell', 'zsh'), { recursive: true });
+    await writeFile(path.join(outside, 'settings.json'), '남의 설정\n');
+    await writeFile(path.join(outside, 'mcp.json'), '남의 mcp\n');
+    await writeFile(path.join(outside, 'bin', 'claude'), '남의 감싸개\n');
+    await writeFile(path.join(outside, 'shell', 'bashrc'), '남의 bashrc\n');
+    await writeFile(path.join(outside, 'shell', 'zsh', '.zprofile'), '남의 zprofile\n');
+    await writeFile(path.join(outside, 'shell', 'zsh', '.zcompdump-host-5.9'), '남의 dump\n');
+    await writeFile(path.join(outside, 'notes.txt'), '남겨 둘 것\n');
+    const before = await treeOf(outside);
+
+    const link = path.join(root, 'studio-orders-root-link');
+    await symlink(outside, link);
+    await removeHostGatewayConfig('studio-orders-root-link', root);
+
+    // (a) 관문 폴더 자리(링크)가 없어졌다
+    expect(await lstat(link).then(() => true, () => false)).toBe(false);
+    // (b) 링크 너머의 나무는 그대로다 — 같은 이름의 파일·폴더와 .zcompdump까지
+    expect(await treeOf(outside)).toEqual(before);
   });
 });
 

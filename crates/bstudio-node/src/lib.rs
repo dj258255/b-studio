@@ -4958,7 +4958,11 @@ pub fn read_stats(env: Env, input: StatsInputJs) -> Result<AsyncBlock<StatsResul
 use bstudio_io::checkpoint_remote as cr;
 use napi::bindgen_prelude::Promise;
 
-/// `op`: repository · headState · remoteUrl · uncommitTo · recordPullRequest · assertTrustedGit · assertSafeLocalGit · pullRequestTarget · push · integrateRemote · acceptRemote · baseStatus · integrateBase · restoreRememberedHead.
+/// `op`: repository · headState · remoteUrl · uncommitTo · recordPullRequest · assertTrustedGit · assertSafeLocalGit · pullRequestTarget · push · integrateRemote · acceptRemote · baseStatus · integrateBase · restoreRememberedHead,
+/// 그리고 로컬 경로·사이드카(D1a): checkpoint · list · patch · fileAt · blobAt · listBlobs · sessionDiff · diffSince · commitBefore ·
+/// discardedBackups · refreshExcludedSnapshot · stageExcludedSnapshot · placeExcludedSnapshot · carryForwardExcludedSnapshot ·
+/// excludedDiff · applyExcludedDiff · pendingExcludedFiles · ignoredChangedSince · backupChanges · pruneBackups,
+/// 쓰기·걷기(D1c): configure · init · commit · commitPaths · discard · restore · assertNoNestedRepos · findNestedGitRepos.
 /// `hook`은 요청(JSON 글)을 받아 응답(JSON 글)을 돌려주는 JS 함수다. 던지지 않고 결과(`ok`)로 돌려준다
 #[napi]
 pub fn checkpoint_remote(env: Env, op: String, input: String, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
@@ -4974,6 +4978,63 @@ pub fn checkpoint_remote(env: Env, op: String, input: String, hook: ThreadsafeFu
         Ok(cr::run(&op, &input, Some(hook)).await)
     })
     .build(&env)
+}
+
+// ── 게이트의 남은 I/O: 평가 자산 지문과 화면 확인 관측(D2) ──
+// 판정은 bstudio-guard(gate_assets), 파일 훑기·비교는 bstudio-io(gate_assets)가 한다. 저장·엔드포인트는 TS가 들고 `hook`으로 부른다.
+// TS 껍데기: packages/agent/src/gate.ts
+use bstudio_io::gate_assets as ga_io;
+
+/// 선언한 평가 자산의 지문. `{kind:'ok',digests:[[경로,sha256]]}` 또는 `{kind:'error',detail}` JSON
+#[napi]
+pub fn gate_fingerprint_evaluation_assets(env: Env, root: String, assets: Vec<String>) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(ga_io::baseline_json(&ga_io::fingerprint(&root, &assets).await)) }).build(&env)
+}
+
+/// 기준선과 지금 지문을 견줘 `evaluation-assets` 검사 결과(JSON 배열)를 만든다
+#[napi]
+pub fn gate_evaluate_evaluation_assets(env: Env, root: String, assets: Vec<String>, baseline: String, has_tests: bool) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(ga_io::evaluate(&root, &assets, &baseline, has_tests).await) }).build(&env)
+}
+
+/// 화면 확인이 요청해도 되는 출처(JSON 배열). `endpoint` 요청(JSON)에 `{ok:true,url}` 또는 `{ok:false}`로 답한다
+#[napi]
+pub fn gate_service_origins(env: Env, names: Vec<String>, skipped: Vec<String>, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        Ok(ga_io::service_origins(&names, &skipped, Some(&hook)).await)
+    })
+    .build(&env)
+}
+
+/// 단계 스크린샷 저장. `saveArtifact` 요청(JSON)에 `{ok:true,artifact}` 또는 `{ok:false,message}`로 답한다. `{steps,warnings}` JSON
+#[napi]
+pub fn gate_save_steps(env: Env, name: String, steps_json: String, has_save: bool, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        Ok(ga_io::save_steps(&name, &steps_json, has_save, Some(&hook)).await)
+    })
+    .build(&env)
+}
+
+/// 디자인 기준 이미지와 실제 화면을 비교한다. `{ok:true,ratio,width,height,diff,reference}` 또는 `{ok:false,kind,message}` JSON
+#[napi]
+pub fn gate_compare_design(env: Env, root: String, reference: String, masks_json: String, threshold: f64, actual: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(ga_io::compare_design(&root, &reference, &masks_json, threshold, &actual).await) }).build(&env)
 }
 
 // ── 게이트 검증의 조율(ADR-195 4f A5a) ──
@@ -7961,6 +8022,87 @@ pub fn usage_add(dir: String, period: String, user: String, input_tokens: f64, o
     bstudio_session::usage::add(Path::new(&dir), &period, &user, &usage, wait).map(UsageJs::from).map_err(Error::from_reason)
 }
 
+// ── compose-provider의 인자 조립과 오류 글(ADR-195 4f A4c-4). 실행 순서·클래스 상태는 TS에 남는다.
+// `tail`·`edgePort`처럼 옛 TS가 `String(...)`으로 만든 값은 TS가 만든 글자를 그대로 받는다(JS 수 표기를 Rust가 다시 만들지 않는다).
+// TS 껍데기: packages/sandbox/src/docker/compose-provider.ts
+use bstudio_guard::compose_args;
+
+#[napi]
+pub fn compose_command_args(project_name: String, project_root: String, compose_path: String, override_path: String, args: Vec<String>) -> Vec<String> {
+    compose_args::compose_command_args(&project_name, &project_root, &compose_path, &override_path, &args)
+}
+
+#[napi]
+pub fn sandbox_cleanup_args(project_name: String) -> Vec<String> {
+    compose_args::sandbox_cleanup_args(&project_name)
+}
+
+#[napi]
+pub fn service_running_args(name: String, running: bool) -> Vec<String> {
+    compose_args::service_running_args(&name, running)
+}
+
+#[napi]
+pub fn service_recreate_args(name: String) -> Vec<String> {
+    compose_args::service_recreate_args(&name)
+}
+
+#[napi]
+pub fn edge_port_args(edge_service: String, edge_port: String) -> Vec<String> {
+    compose_args::edge_port_args(&edge_service, &edge_port)
+}
+
+#[napi]
+pub fn compose_ps_args(name: String) -> Vec<String> {
+    compose_args::compose_ps_args(&name)
+}
+
+#[napi]
+pub fn compose_logs_args(services: Vec<String>, follow: bool, tail: String) -> Vec<String> {
+    compose_args::compose_logs_args(&services, follow, &tail)
+}
+
+#[napi]
+pub fn compose_exec_args(name: String, command: Vec<String>) -> Vec<String> {
+    compose_args::compose_exec_args(&name, &command)
+}
+
+/// `selected`가 없으면 전체 빌드, 빈 목록이면 null(부르지 않는다)
+#[napi]
+pub fn sandbox_build_args(no_cache: bool, selected: Option<Vec<String>>) -> Option<Vec<String>> {
+    compose_args::sandbox_build_args(no_cache, selected)
+}
+
+#[napi]
+pub fn compose_up_remove_orphans_args(up_args: Vec<String>) -> Vec<String> {
+    compose_args::compose_up_remove_orphans_args(&up_args)
+}
+
+#[napi]
+pub fn compose_failure_message(command: String, sandbox_id: String) -> String {
+    compose_args::compose_failure_message(&command, &sandbox_id)
+}
+
+#[napi]
+pub fn compose_service_required_message(name: String, sandbox_id: String) -> String {
+    compose_args::compose_service_required_message(&name, &sandbox_id)
+}
+
+#[napi]
+pub fn managed_service_required_message(name: String) -> String {
+    compose_args::managed_service_required_message(&name)
+}
+
+#[napi]
+pub fn compose_config_unreadable_message(sandbox_id: String) -> String {
+    compose_args::compose_config_unreadable_message(&sandbox_id)
+}
+
+#[napi]
+pub fn readiness_stopped_message(failed_first: String) -> String {
+    compose_args::readiness_stopped_message(&failed_first)
+}
+
 /// 이벤트 글자(각각 JSON 값 하나)를 이어 JSON 배열 글자로 만든다
 fn json_array(events: &[&str]) -> String {
     let mut out = String::with_capacity(events.iter().map(|event| event.len() + 1).sum::<usize>() + 2);
@@ -7973,4 +8115,581 @@ fn json_array(events: &[&str]) -> String {
     }
     out.push(']');
     out
+}
+
+// ── spec의 순수 계산(ADR-195 4e 뒤, 3단계 (a)). `@b-studio/spec`의 `service-selection`·`public-url.findPublicUrlRefs`·
+// `system-packages`·`compose-import`를 옮긴 것. 객체는 JSON 문자열(encodeNative·decodeNative)로 주고받고,
+// YAML 글자를 받는 함수는 Rust가 직접 읽는다. TS 껍데기: packages/spec/src/{service-selection,public-url,system-packages,compose-import}.ts
+use bstudio_guard::js_json::JsObject;
+use bstudio_guard::{compose_import, service_selection, system_packages};
+
+fn object_input(json: &str, what: &str) -> Result<JsObject> {
+    match input(json, what)? {
+        JsValue::Obj(o) => Ok(o),
+        _ => Err(Error::from_reason(format!("{what}가 객체가 아닙니다"))),
+    }
+}
+
+#[napi]
+pub fn service_dependency_closure(roots: Vec<String>, graph_json: String) -> Result<Vec<String>> {
+    let graph = object_input(&graph_json, "서비스 의존 그래프")?;
+    fail(service_selection::dependency_closure(&roots, &graph))
+}
+
+#[napi]
+pub fn service_default_selection(roots: Vec<String>, graph_json: String) -> Result<Vec<String>> {
+    let graph = object_input(&graph_json, "서비스 의존 그래프")?;
+    fail(service_selection::default_selection(&roots, &graph))
+}
+
+#[napi]
+pub fn service_dependents_of(name: String, selected: Vec<String>, graph_json: String) -> Result<Vec<String>> {
+    let graph = object_input(&graph_json, "서비스 의존 그래프")?;
+    fail(service_selection::dependents_of(&name, &selected, &graph))
+}
+
+#[napi]
+pub fn service_newly_added(known: Vec<String>, compose_services: Vec<String>) -> Vec<String> {
+    service_selection::newly_added(&known, &compose_services)
+}
+
+#[napi]
+pub fn public_url_find_refs(services_json: String) -> Result<String> {
+    let services = input(&services_json, "compose services")?;
+    let refs = fail(public_url::find_refs(&services))?;
+    let rows: Vec<JsValue> = refs
+        .iter()
+        .map(|reference| {
+            let mut o = JsObject::new();
+            o.set("service", JsValue::Str(reference.service.clone()));
+            o.set("envKey", JsValue::Str(reference.env_key.clone()));
+            o.set("template", JsValue::Str(reference.template.clone()));
+            o.set("targetService", JsValue::Str(reference.target_service.clone()));
+            JsValue::Obj(o)
+        })
+        .collect();
+    Ok(out(&JsValue::Arr(rows)))
+}
+
+#[napi]
+pub fn system_package_detect_family(image: String) -> Option<String> {
+    system_packages::detect_package_family(&image).map(|family| family.as_str().to_owned())
+}
+
+#[napi]
+pub fn system_package_apply(dockerfile: String, packages: Vec<String>) -> Result<String> {
+    fail(system_packages::apply_system_packages(&dockerfile, &packages))
+}
+
+#[napi]
+pub fn compose_engine_of_image(image: String) -> Option<String> {
+    compose_import::engine_of_image(&image).map(str::to_owned)
+}
+
+#[napi]
+pub fn compose_is_prod_compose_file(file_name: String) -> bool {
+    compose_import::is_prod_compose_file(&file_name)
+}
+
+#[napi]
+pub fn compose_import_supporting_services(compose_text: String, source_file: String) -> String {
+    out(&compose_import::import_supporting_services(&compose_text, &source_file))
+}
+
+#[napi]
+pub fn compose_sanitize_service_name(value: String) -> String {
+    compose_import::sanitize_service_name(&value)
+}
+
+#[napi]
+pub fn compose_sanitize_sql_identifier(value: String) -> String {
+    compose_import::sanitize_sql_identifier(&value)
+}
+
+#[napi]
+pub fn compose_propose_postgres_service(database: String, reason: String, service_name: String) -> String {
+    out(&compose_import::propose_postgres_service(&database, &reason, &service_name))
+}
+
+#[napi]
+pub fn compose_suggests_postgres_need(template: String, dependency_text: String) -> bool {
+    compose_import::suggests_postgres_need(&template, &dependency_text)
+}
+
+#[napi]
+pub fn compose_detect_env_references(config_text: String) -> String {
+    out(&compose_import::detect_env_references(&config_text))
+}
+
+#[napi]
+pub fn compose_database_credentials_for(engine: String, environment_json: String) -> Result<Option<String>> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(compose_import::database_credentials_for(&engine, &environment).map(|credentials| out(&compose_import::credentials_value(&credentials))))
+}
+
+#[napi]
+pub fn compose_needs_dev_default_credentials(engine: String, environment_json: String) -> Result<bool> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(compose_import::needs_dev_default_credentials(&engine, &environment))
+}
+
+#[napi]
+pub fn compose_with_dev_default_credentials(service_json: String, note: String) -> Result<String> {
+    let service = input(&service_json, "부가 서비스")?;
+    Ok(out(&fail(compose_import::with_dev_default_credentials(&service, &note))?))
+}
+
+#[napi]
+pub fn compose_with_default_healthcheck(service_json: String) -> Result<String> {
+    let service = input(&service_json, "부가 서비스")?;
+    Ok(out(&fail(compose_import::with_default_healthcheck(&service))?))
+}
+
+#[napi]
+pub fn compose_wire_app_environment(template: String, refs_json: String, infra_json: String) -> Result<String> {
+    let refs = input(&refs_json, "환경 참조")?;
+    let infra = input(&infra_json, "인프라 목록")?;
+    Ok(out(&fail(compose_import::wire_app_environment(&template, &refs, &infra))?))
+}
+
+#[napi]
+pub fn compose_database_spec_for(engine: String, environment_json: String) -> Result<Option<String>> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(compose_import::database_spec_for(&engine, &environment).map(|spec| out(&spec)))
+}
+
+#[napi]
+pub fn compose_suffix_from_url_value(value: String) -> String {
+    compose_import::suffix_from_url_value(&value)
+}
+
+#[napi]
+pub fn compose_detect_backend_url_env_from_environment(environment_json: String) -> Result<Option<String>> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(fail(compose_import::detect_backend_url_env_from_environment(&environment))?.map(|found| out(&found)))
+}
+
+#[napi]
+pub fn compose_detect_backend_url_env_from_code(source_text: String) -> Option<String> {
+    compose_import::detect_backend_url_env_from_code(&source_text).map(|found| out(&found))
+}
+
+#[napi]
+pub fn compose_detect_server_backend_url_env_from_code(source_text: String) -> Option<String> {
+    compose_import::detect_server_backend_url_env_from_code(&source_text).map(|found| out(&found))
+}
+
+#[napi]
+pub fn compose_detect_backend_url_env_from_assignments(source_text: String) -> Option<String> {
+    compose_import::detect_backend_url_env_from_assignments(&source_text).map(|found| out(&found))
+}
+
+#[napi]
+pub fn compose_environment_from_compose_text(compose_text: String, service_name: String) -> Option<String> {
+    compose_import::environment_from_compose_text(&compose_text, &service_name).map(|environment| out(&environment))
+}
+
+#[napi]
+pub fn compose_original_compose_service_for(compose_text: String, service_path: String, service_name: String) -> Option<String> {
+    compose_import::original_compose_service_for(&compose_text, &service_path, &service_name).map(|service| out(&service))
+}
+
+#[napi]
+pub fn compose_cors_environment_from(environment_json: String) -> Result<String> {
+    let environment = object_input(&environment_json, "환경 변수")?;
+    Ok(out(&compose_import::cors_environment_from(&environment)))
+}
+
+#[napi]
+pub fn compose_frontend_backend_env_name(name: String) -> bool {
+    compose_import::frontend_backend_env_name(&name)
+}
+
+// ── 이 컴퓨터 방식 터미널의 관문 글과 폴더(4f C1 5단계). 글은 `bstudio-session::terminal::gateway`, 파일 syscall은 `bstudio-io::host_gateway` ──
+
+/// 검증 함수가 돌려주는 꼴. 실패는 `SandboxError`의 제목·상세 두 글자다(옛 TS가 그 두 글자로 다시 만든다)
+fn gateway_ok<T: serde::Serialize>(value: T) -> String {
+    serde_json::json!({ "ok": true, "value": value }).to_string()
+}
+
+fn gateway_err(error: bstudio_session::terminal::gateway::GatewayError) -> String {
+    serde_json::json!({ "ok": false, "title": error.title, "detail": error.detail }).to_string()
+}
+
+/// 셸 명령에 넣을 글을 작은따옴표로 감싼다(셸 주입 방지)
+#[napi]
+pub fn terminal_shell_quote(text: String) -> String {
+    session_terminal::gateway::shell_quote(&text)
+}
+
+/// CLI 실행 인자로 넘길 첫 요청 글. `{"ok":true,"value"}` 또는 `{"ok":false,"title","detail"}`(JSON)
+#[napi]
+pub fn terminal_first_prompt_arg(text: String) -> String {
+    match session_terminal::gateway::first_prompt_arg(&text) {
+        Ok(value) => gateway_ok(value),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// 이어 붙일 수 있는 꼴의 대화 id인가
+#[napi]
+pub fn terminal_is_resumable_conversation(id: String) -> bool {
+    session_terminal::gateway::is_resumable_conversation(&id)
+}
+
+/// CLI 실행 인자로 넘길 대화 id. `{"ok":true,"value"}` 또는 `{"ok":false,"title","detail"}`(JSON)
+#[napi]
+pub fn terminal_resume_conversation_arg(id: String) -> String {
+    match session_terminal::gateway::resume_conversation_arg(&id) {
+        Ok(value) => gateway_ok(value),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// CLI 실행 인자로 넘길 모델 id. `{"ok":true,"value"}` 또는 `{"ok":false,"title","detail"}`(JSON)
+#[napi]
+pub fn terminal_cli_model_arg(model: String) -> String {
+    match session_terminal::gateway::cli_model_arg(&model) {
+        Ok(value) => gateway_ok(value),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// 터미널에 넘길 환경(허용한 이름만). `env`는 `[[이름, 값], …]`의 나온 순서. 결과도 같은 꼴의 JSON 봉투다
+#[napi]
+pub fn terminal_host_terminal_env(gateway_dir: Option<String>, env: Vec<Vec<String>>) -> String {
+    let pairs: Vec<(String, String)> = env
+        .into_iter()
+        .filter_map(|pair| {
+            let mut items = pair.into_iter();
+            Some((items.next()?, items.next()?))
+        })
+        .collect();
+    match session_terminal::gateway::host_terminal_env(gateway_dir.as_deref(), &pairs) {
+        Ok(value) => gateway_ok(value.into_iter().map(|(key, value)| vec![key, value]).collect::<Vec<_>>()),
+        Err(error) => gateway_err(error),
+    }
+}
+
+/// 이 컴퓨터용 CLI 설정 JSON(`JSON.stringify(settings, null, 2)`와 같은 글자, 끝의 줄바꿈 없음)
+#[napi]
+pub fn terminal_host_gateway_settings_json(dir: String, node_path: String, hook_url: String, hook_token: String) -> String {
+    session_terminal::gateway::host_gateway_settings_json(&dir, &node_path, &hook_url, &hook_token)
+}
+
+/// claude 감싸개 글. 감시가 보는 `<cli> --mcp-config M --settings S` 순서를 지킨다(ADR-219)
+#[napi]
+pub fn terminal_host_cli_wrapper(dir: String, claude_path: String, config_dir: Option<String>) -> String {
+    session_terminal::gateway::host_cli_wrapper(&dir, &claude_path, config_dir.as_deref())
+}
+
+#[napi(object)]
+pub struct GatewayContentJs {
+    pub name: String,
+    pub content: String,
+}
+
+/// zsh의 관문 폴더에 둘 네 파일(이름, 내용)을 나온 순서대로
+#[napi]
+pub fn terminal_host_zsh_files(dir: String, kind: String) -> Vec<GatewayContentJs> {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_zsh_files(&dir, kind).into_iter().map(|(name, content)| GatewayContentJs { name, content }).collect()
+}
+
+/// bash의 관문 폴더에 둘 시작 파일
+#[napi]
+pub fn terminal_host_bash_rc(dir: String, kind: String) -> String {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_bash_rc(&dir, kind)
+}
+
+/// 터미널을 열면 도는 명령(관문이 없을 때)
+#[napi]
+pub fn terminal_host_terminal_command(kind: String) -> String {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_terminal_command(kind)
+}
+
+/// 셸 함수를 정의할 자리가 없는 셸(fish 등)의 대체 명령
+#[napi]
+pub fn terminal_host_fallback_command(dir: String, kind: String) -> String {
+    let kind = session_terminal::gateway::CliKind::parse(&kind).unwrap_or(session_terminal::gateway::CliKind::Claude);
+    session_terminal::gateway::host_fallback_command(&dir, kind)
+}
+
+/// 관문의 훅 답 꼴(JSON 글자). `kind`: `none`·`message`·`block`·`session_start`·`prompt_note`·`pre_tool_deny`
+#[napi]
+pub fn terminal_hook_response(kind: String, text: Option<String>) -> String {
+    session_terminal::gateway::hook_response(&kind, text.as_deref())
+}
+
+#[napi(object)]
+pub struct GatewayFileJs {
+    pub name: String,
+    pub content: String,
+    pub mode: u32,
+}
+
+impl From<GatewayFileJs> for bstudio_io::host_gateway::GatewayFile {
+    fn from(file: GatewayFileJs) -> Self {
+        Self { name: file.name, content: file.content, mode: file.mode }
+    }
+}
+
+/// 관문 폴더 자리를 준비하고 링크를 푼 진짜 경로를 돌려준다
+#[napi]
+pub fn terminal_prepare_host_gateway(env: Env, root: String, sandbox_id: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move {
+        let dir = tokio::task::spawn_blocking(move || bstudio_io::host_gateway::prepare_gateway_dir(Path::new(&root), &sandbox_id))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 폴더 준비가 중단됐습니다: {error}")))?
+            .map_err(|error| Error::from_reason(error.message()))?;
+        Ok(dir.to_string_lossy().into_owned())
+    })
+    .build(&env)
+}
+
+/// 관문 폴더에 기대하는 파일을 쓴다(내용이 같으면 그대로 두고 권한만 다시 조인다)
+#[napi]
+pub fn terminal_write_gateway_files(env: Env, dir: String, files: Vec<GatewayFileJs>, statusline_name: String) -> Result<AsyncBlock<()>> {
+    let files: Vec<bstudio_io::host_gateway::GatewayFile> = files.into_iter().map(Into::into).collect();
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_io::host_gateway::write_gateway_files(Path::new(&dir), &files, &statusline_name))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 파일 쓰기가 중단됐습니다: {error}")))?
+            .map_err(|error| Error::from_reason(error.message()))?;
+        Ok(())
+    })
+    .build(&env)
+}
+
+/// 관문 폴더가 쓴 그대로인가. 다른 파일·폴더의 이름을 돌려준다(관문 폴더 자체는 '.')
+#[napi]
+pub fn terminal_check_host_gateway_config(env: Env, dir: String, expected: Vec<GatewayFileJs>) -> Result<AsyncBlock<Vec<String>>> {
+    let expected: Vec<bstudio_io::host_gateway::GatewayFile> = expected.into_iter().map(Into::into).collect();
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_io::host_gateway::check_gateway_config(Path::new(&dir), &expected))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 파일 확인이 중단됐습니다: {error}")))
+    })
+    .build(&env)
+}
+
+/// 세션이 멈출 때 그 세션의 관문 설정을 지운다(링크를 따라가지 않고, 비었을 때만 폴더를 지운다)
+#[napi]
+pub fn terminal_remove_host_gateway_config(env: Env, root: String, sandbox_id: String) -> Result<AsyncBlock<()>> {
+    AsyncBlockBuilder::new(async move {
+        tokio::task::spawn_blocking(move || bstudio_io::host_gateway::remove_gateway_config(Path::new(&root), &sandbox_id))
+            .await
+            .map_err(|error| Error::from_reason(format!("관문 폴더 지우기가 중단됐습니다: {error}")))?
+            .map_err(|error| Error::from_reason(error.message()))?;
+        Ok(())
+    })
+    .build(&env)
+}
+
+// ── 세션 조율 함수의 글 조립(ADR-195 4f C1-6a/6b). `Session` 상태·git·파일은 TS가 쥐고, 여기는 같은 값에 같은 글자만 낸다.
+// 트레일러는 게이트 통과의 근거라 바이트까지 같아야 한다. TS 껍데기: apps/studio/lib/server/session-text.ts
+use bstudio_session::terminal_text;
+
+#[napi]
+pub fn session_terminal_texts(spec_file: String) -> String {
+    terminal_text::terminal_texts(&spec_file)
+}
+
+#[napi]
+pub fn session_pretool_deny_text(kind: String, texts_json: String, agent_read_only_mark: String) -> Result<String> {
+    fail(terminal_text::pretool_deny_text(&kind, &texts_json, &agent_read_only_mark))
+}
+
+#[napi]
+pub fn session_checkpoint_body(
+    report_json: Option<String>,
+    report_unserializable: bool,
+    allow_breaking: bool,
+    checks_json: String,
+    verify_attempts: f64,
+    summary: String,
+    unguarded_writes: bool,
+) -> Result<String> {
+    fail(terminal_text::checkpoint_body(
+        report_json.as_deref(),
+        report_unserializable,
+        allow_breaking,
+        &checks_json,
+        verify_attempts,
+        &summary,
+        unguarded_writes,
+    ))
+}
+
+#[napi]
+pub fn session_checkpoint_trailers(passed_stages: Option<Vec<String>>, verify: Option<String>, incomplete: Option<String>) -> Vec<String> {
+    terminal_text::checkpoint_trailers(passed_stages.as_deref(), verify.as_deref(), incomplete.as_deref())
+}
+
+#[napi]
+pub fn session_terminal_result(input_json: String) -> Result<String> {
+    fail(terminal_text::terminal_result(&input_json))
+}
+
+#[napi]
+pub fn session_hook_message(summary: String) -> String {
+    terminal_text::hook_message(&summary)
+}
+
+#[napi]
+pub fn session_done_tests_feedback(failures_json: String) -> Result<String> {
+    fail(terminal_text::done_tests_feedback(&failures_json))
+}
+
+#[napi]
+pub fn session_terminal_stall_message(stall_ms: f64) -> String {
+    terminal_text::terminal_stall_message(stall_ms)
+}
+
+#[napi]
+pub fn session_limit_abort_message(kind: String) -> String {
+    terminal_text::limit_abort_message(&kind)
+}
+
+#[napi]
+pub fn session_api_error_kind(raw: Option<String>) -> String {
+    terminal_text::api_error_kind(raw.as_deref())
+}
+
+#[napi]
+pub fn session_attempts_exhausted_summary(gate_attempts: f64, unsettled_attempts: f64, feedback_clipped: String, max_attempts: f64) -> String {
+    terminal_text::attempts_exhausted_summary(gate_attempts, unsettled_attempts, &feedback_clipped, max_attempts)
+}
+
+#[napi]
+pub fn session_cli_ended_reason(feedback_clipped: String) -> String {
+    terminal_text::cli_ended_reason(&feedback_clipped)
+}
+
+#[napi]
+pub fn session_deadline_reason(deadline_seconds: String, hook_seconds: String, elapsed_seconds: String) -> String {
+    terminal_text::deadline_reason(&deadline_seconds, &hook_seconds, &elapsed_seconds)
+}
+
+#[napi]
+pub fn session_git_realign_unrestorable_message(which: String, error_text: String) -> String {
+    terminal_text::git_realign_unrestorable_message(&which, &error_text)
+}
+
+#[napi]
+pub fn session_git_realign_notice(which: String, files_len: f64, backup_id: Option<String>) -> String {
+    terminal_text::git_realign_notice(&which, files_len, backup_id.as_deref())
+}
+
+#[napi]
+pub fn session_git_realign_failure_reason(which: String, error_text: String) -> String {
+    terminal_text::git_realign_failure_reason(&which, &error_text)
+}
+
+#[napi]
+pub fn session_git_realign_restored_reason(which: String, files_len: f64, backup_id: Option<String>) -> String {
+    terminal_text::git_realign_restored_reason(&which, files_len, backup_id.as_deref())
+}
+
+#[napi]
+pub fn session_landed_plan(committed_sha: Option<String>, listed: bool, latest_sha: Option<String>) -> String {
+    terminal_text::landed_plan(committed_sha.as_deref(), listed, latest_sha.as_deref())
+}
+
+// ── spec 스키마 검증(3단계 (b)). `packages/spec/src/schema.ts`의 Zod를 Rust로 옮긴 것.
+// 결과는 `{ ok, issues: [{ path, message }], value }`(encodeNative·decodeNative). 이름은 TS가 내보내는 스키마 이름이다
+use bstudio_guard::spec_schema;
+
+#[napi]
+pub fn spec_validate(schema: String, value_json: String) -> Result<String> {
+    let value = input(&value_json, "검증할 값")?;
+    let outcome = spec_schema::validate(&schema, Some(&value));
+    let mut result = JsObject::new();
+    if outcome.issues.is_empty() {
+        result.set("ok", JsValue::Bool(true));
+        result.set("value", outcome.value.unwrap_or(JsValue::Null));
+    } else {
+        result.set("ok", JsValue::Bool(false));
+        let issues: Vec<JsValue> = outcome
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let mut o = JsObject::new();
+                o.set("path", JsValue::Arr(issue.path.into_iter().map(|seg| seg.into_value()).collect()));
+                o.set("message", JsValue::Str(issue.message));
+                JsValue::Obj(o)
+            })
+            .collect();
+        result.set("issues", JsValue::Arr(issues));
+    }
+    Ok(out(&JsValue::Obj(result)))
+}
+
+/// 스키마 이름으로 검증한다. `value_json`이 없으면 JS `undefined`다(JSON으로 undefined를 담을 수 없다)
+#[napi]
+pub fn spec_validate_optional(schema: String, value_json: Option<String>) -> Result<String> {
+    let value = value_json.map(|json| bstudio_guard::js_json::parse_schema_input(&json)).transpose().map_err(Error::from_reason)?;
+    let outcome = spec_schema::validate_optional(&schema, value.as_ref());
+    let mut result = JsObject::new();
+    if outcome.issues.is_empty() {
+        result.set("ok", JsValue::Bool(true));
+        let mut value = outcome.value.unwrap_or(JsValue::Null);
+        bstudio_guard::js_json::escape_nul_keys(&mut value);
+        result.set("value", value);
+    } else {
+        result.set("ok", JsValue::Bool(false));
+        let issues: Vec<JsValue> = outcome
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let mut o = JsObject::new();
+                o.set("path", JsValue::Arr(issue.path.into_iter().map(|seg| seg.into_value()).collect()));
+                o.set("message", JsValue::Str(issue.message));
+                JsValue::Obj(o)
+            })
+            .collect();
+        result.set("issues", JsValue::Arr(issues));
+    }
+    Ok(out(&JsValue::Obj(result)))
+}
+
+#[napi]
+pub async fn spec_load_project(dir: String) -> Result<String> {
+    let result = bstudio_io::spec_load::load_project(&dir).await;
+    Ok(bstudio_io::spec_load::result_json(result))
+}
+
+// ── 게이트가 끝에 다시 읽는 파일(2단계 (b)). 파일 읽기는 bstudio-io::gate_workflow, 판정은 bstudio-guard가 한다.
+// TS 껍데기: packages/agent/src/gate-workflow.ts. 게이트 인스턴스 상태(바뀐 파일·스냅샷·redact)는 TS가 들고 넘긴다
+use bstudio_io::gate_workflow as gw;
+
+/// `{kind:'ok', workflow?}` · `{kind:'missing'}` · `{kind:'irregular', reason}` · `{kind:'specError', message, issues}` JSON
+#[napi]
+pub fn gate_latest_workflow(env: Env, root: String) -> Result<AsyncBlock<String>> {
+    AsyncBlockBuilder::new(async move { Ok(gw::latest_workflow_json(&gw::latest_workflow(&root).await)) }).build(&env)
+}
+
+/// `before_text`는 실행 시작 때 TS가 고정한 스냅샷의 글자(없으면 null·undefined). `hook`은 두 글자에서
+/// `{beforeEffective,afterEffective,afterIds}`(encodeLoneSurrogates한 id 목록)를 돌려준다. 결과는 검사 JSON 배열
+#[napi]
+pub fn gate_requirement_record_checks(
+    env: Env,
+    root: String,
+    before_text: Option<String>,
+    hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>,
+) -> Result<AsyncBlock<String>> {
+    let hook = Arc::new(hook);
+    AsyncBlockBuilder::new(async move {
+        let hook: cr::Hook = Arc::new(move |request: String| {
+            let hook = hook.clone();
+            Box::pin(async move {
+                let pending = hook.call_async(request).await.ok()?;
+                pending.await.ok()
+            })
+        });
+        gw::requirement_record_checks(&root, before_text, &hook).await.map_err(Error::from_reason)
+    })
+    .build(&env)
 }

@@ -134,6 +134,24 @@ interface NativeGuard {
   splitUpArgs(args: string[]): { create: string[]; services: string[]; byId: boolean };
   runtimeFromEnv(value: string | undefined | null): string | null | undefined;
   sandboxBuildNoCache(value: string | undefined | null): boolean;
+  // ── compose-provider의 인자 조립과 오류 글(ADR-195 4f A4c-4). 실행 순서·클래스 상태는 TS에 남는다.
+  // `tail`·`edgePort`는 TS가 `String(...)`으로 만든 글자를 그대로 넘긴다(JS 수 표기를 Rust가 다시 만들지 않는다)
+  composeCommandArgs(projectName: string, projectRoot: string, composePath: string, overridePath: string, args: string[]): string[];
+  sandboxCleanupArgs(projectName: string): string[];
+  serviceRunningArgs(name: string, running: boolean): string[];
+  serviceRecreateArgs(name: string): string[];
+  edgePortArgs(edgeService: string, edgePort: string): string[];
+  composePsArgs(name: string): string[];
+  composeLogsArgs(services: string[], follow: boolean, tail: string): string[];
+  composeExecArgs(name: string, command: string[]): string[];
+  /** `selected`가 없으면 전체 빌드, 빈 목록이면 null(부르지 않는다) */
+  sandboxBuildArgs(noCache: boolean, selected: string[] | undefined | null): string[] | null | undefined;
+  composeUpRemoveOrphansArgs(upArgs: string[]): string[];
+  composeFailureMessage(command: string, sandboxId: string): string;
+  composeServiceRequiredMessage(name: string, sandboxId: string): string;
+  managedServiceRequiredMessage(name: string): string;
+  composeConfigUnreadableMessage(sandboxId: string): string;
+  readinessStoppedMessage(failedFirst: string): string;
   findFreeHostPort(): Promise<number>;
   // ── 체크포인트 실행(ADR-195 4f A1). 바이트 그대로 돌려주는 실행과 `git archive | tar -x`. 던지지 않는다.
   // exitCode는 신호로 죽으면 null, 띄우기 실패는 spawnError. 취소·상한 넘김은 SIGTERM으로 멈춘다
@@ -396,6 +414,41 @@ interface NativeGuard {
   terminalProcessArgv(pid: number): string[] | null;
   /** 훅 요청 본문 종류(ADR-219): `empty`·`object`·`not_object`·`invalid` */
   terminalHookBodyKind(body: Buffer): string;
+  // ── 이 컴퓨터 방식 터미널의 관문 글과 폴더(4f C1 5단계). 검증 함수는 `{ok:true,value}` 또는 `{ok:false,title,detail}` 봉투(JSON)를 돌려준다 ──
+  /** 셸 명령에 넣을 글을 작은따옴표로 감싼다(셸 주입 방지) */
+  terminalShellQuote(text: string): string;
+  /** CLI 실행 인자로 넘길 첫 요청 글. 옵션·하위 명령으로 읽히지 않게 앞말을 붙인다 */
+  terminalFirstPromptArg(text: string): string;
+  /** 이어 붙일 수 있는 꼴의 대화 id인가 */
+  terminalIsResumableConversation(id: string): boolean;
+  /** CLI 실행 인자로 넘길 대화 id */
+  terminalResumeConversationArg(id: string): string;
+  /** CLI 실행 인자로 넘길 모델 id */
+  terminalCliModelArg(model: string): string;
+  /** 터미널에 넘길 환경(허용한 이름만). `env`는 `[[이름, 값], …]`의 나온 순서 */
+  terminalHostTerminalEnv(gatewayDir: string | undefined | null, env: string[][]): string;
+  /** 이 컴퓨터용 CLI 설정 JSON(`JSON.stringify(settings, null, 2)`와 같은 글자, 끝의 줄바꿈 없음) */
+  terminalHostGatewaySettingsJson(dir: string, nodePath: string, hookUrl: string, hookToken: string): string;
+  /** claude 감싸개 글. `<cli> --mcp-config M --settings S` 순서를 지킨다(ADR-219) */
+  terminalHostCliWrapper(dir: string, claudePath: string, configDir?: string | null): string;
+  /** zsh 시작 파일 넷(이름, 내용)을 나온 순서대로 */
+  terminalHostZshFiles(dir: string, kind: string): Array<{ name: string; content: string }>;
+  /** bash 시작 파일 */
+  terminalHostBashRc(dir: string, kind: string): string;
+  /** 터미널을 열면 도는 명령(관문이 없을 때) */
+  terminalHostTerminalCommand(kind: string): string;
+  /** 셸 함수를 정의할 자리가 없는 셸(fish 등)의 대체 명령 */
+  terminalHostFallbackCommand(dir: string, kind: string): string;
+  /** 관문의 훅 답 꼴(JSON 글자). `kind`: `none`·`message`·`block`·`session_start`·`prompt_note`·`pre_tool_deny` */
+  terminalHookResponse(kind: string, text?: string | null): string;
+  /** 관문 폴더 자리를 준비하고 링크를 푼 진짜 경로를 돌려준다 */
+  terminalPrepareHostGateway(root: string, sandboxId: string): Promise<string>;
+  /** 관문 폴더에 기대하는 파일을 쓴다(내용이 같으면 그대로 두고 권한만 다시 조인다) */
+  terminalWriteGatewayFiles(dir: string, files: Array<{ name: string; content: string; mode: number }>, statuslineName: string): Promise<void>;
+  /** 관문 폴더가 쓴 그대로인가. 다른 파일·폴더의 이름(관문 폴더 자체는 '.') */
+  terminalCheckHostGatewayConfig(dir: string, expected: Array<{ name: string; content: string; mode: number }>): Promise<string[]>;
+  /** 세션이 멈출 때 그 세션의 관문 설정을 지운다(링크를 따라가지 않고, 비었을 때만 폴더를 지운다) */
+  terminalRemoveHostGatewayConfig(root: string, sandboxId: string): Promise<void>;
   terminalEarlyUsageMs(): number;
   terminalLateUsageMs(): number;
   /** 터미널의 정체 감시 한 회차(ADR-213): `stop`·`nothing`·`notify` */
@@ -831,6 +884,21 @@ interface NativeGuard {
   gateSampledValues(pageFile: string, sampleParams: string[][]): string | null | undefined;
   gateStripHtml(html: string): string;
   gateFormatFailedChecks(checksJson: string): string;
+  // ── 게이트의 남은 I/O(D2): 평가 자산 지문·훑기와 화면 확인 관측 ──
+  /** 선언한 평가 자산의 지문. `{kind:'ok',digests:[[경로,sha256]]}` 또는 `{kind:'error',detail}` JSON */
+  gateFingerprintEvaluationAssets(root: string, assets: string[]): Promise<string>;
+  /** 기준선(JSON)과 지금 지문을 견줘 `evaluation-assets` 검사 결과(JSON 배열)를 만든다 */
+  gateEvaluateEvaluationAssets(root: string, assets: string[], baseline: string, hasTests: boolean): Promise<string>;
+  /** 게이트가 끝에 다시 읽는 studio.yaml의 workflow. `{kind:'ok',workflow?}`·`{kind:'missing'}`·`{kind:'irregular',reason}`·`{kind:'specError',message,issues}` JSON */
+  gateLatestWorkflow(root: string): Promise<string>;
+  /** 게이트가 끝에 다시 읽는 요구사항 문서의 기록 판정. `hook`은 두 글자에서 판정에 넘길 id 목록(JSON)을 돌려준다. 결과는 검사 JSON 배열 */
+  gateRequirementRecordChecks(root: string, beforeText: string | undefined | null, hook: (request: string) => Promise<string>): Promise<string>;
+  /** 화면 확인이 요청해도 되는 출처(JSON 배열). `hook`은 `{op:'endpoint',name}`에 `{ok:true,url}` 또는 `{ok:false}`로 답한다 */
+  gateServiceOrigins(names: string[], skipped: string[], hook: (request: string) => Promise<string>): Promise<string>;
+  /** 단계 스크린샷 저장. `hook`은 `{op:'saveArtifact',...}`에 `{ok:true,artifact}` 또는 `{ok:false,message}`로 답한다. `{steps,warnings}` JSON */
+  gateSaveSteps(name: string, stepsJson: string, hasSave: boolean, hook: (request: string) => Promise<string>): Promise<string>;
+  /** 디자인 기준 이미지와 실제 화면 비교. `{ok:true,ratio,width,height,diff,reference}` 또는 `{ok:false,kind,message}` JSON */
+  gateCompareDesign(root: string, reference: string, masksJson: string, threshold: number, actual: string): Promise<string>;
   gateCompareDetail(ratio: number, max: number, width: number, height: number): string;
   gateDescribeConcurrencyExpect(expectJson: string): string;
   /** `readJsonPath`(ADR-195 4f A5b-2). 세 인자는 `encodeLoneSurrogates`한 글자(`equalsJson`은 JSON). `{ shown, equal }` 또는 `{ tooDeep: true }`의 JSON */
@@ -957,6 +1025,34 @@ interface NativeGuard {
   workspaceRemoveFile(root: string, relative: string): Promise<void>;
   workspaceFingerprints(root: string, files: string[]): Promise<string[]>;
   WorkspacePinStore: new () => NativeWorkspacePinStore;
+  // ── 세션 조율 함수의 글 조립(ADR-195 4f C1-6a/6b). 트레일러는 게이트 통과의 근거라 바이트까지 같아야 한다.
+  // 입력 JSON은 `encodeNative`, 결과 JSON은 `decodeNative`로 읽는다. TS 껍데기: apps/studio/lib/server/session-text.ts
+  sessionTerminalTexts(specFile: string): string;
+  sessionPretoolDenyText(kind: string, textsJson: string, agentReadOnlyMark: string): string;
+  sessionCheckpointBody(
+    reportJson: string | null | undefined,
+    reportUnserializable: boolean,
+    allowBreaking: boolean,
+    checksJson: string,
+    verifyAttempts: number,
+    summary: string,
+    unguardedWrites: boolean,
+  ): string;
+  sessionCheckpointTrailers(passedStages: string[] | null | undefined, verify: string | null | undefined, incomplete: string | null | undefined): string[];
+  sessionTerminalResult(inputJson: string): string;
+  sessionHookMessage(summary: string): string;
+  sessionDoneTestsFeedback(failuresJson: string): string;
+  sessionTerminalStallMessage(stallMs: number): string;
+  sessionLimitAbortMessage(kind: string): string;
+  sessionApiErrorKind(raw: string | null | undefined): string;
+  sessionAttemptsExhaustedSummary(gateAttempts: number, unsettledAttempts: number, feedbackClipped: string, maxAttempts: number): string;
+  sessionCliEndedReason(feedbackClipped: string): string;
+  sessionDeadlineReason(deadlineSeconds: string, hookSeconds: string, elapsedSeconds: string): string;
+  sessionGitRealignUnrestorableMessage(which: string, errorText: string): string;
+  sessionGitRealignNotice(which: string, filesLen: number, backupId: string | null | undefined): string;
+  sessionGitRealignFailureReason(which: string, errorText: string): string;
+  sessionGitRealignRestoredReason(which: string, filesLen: number, backupId: string | null | undefined): string;
+  sessionLandedPlan(committedSha: string | null | undefined, listed: boolean, latestSha: string | null | undefined): string;
 }
 
 export interface NativeWorkspaceFileRead {

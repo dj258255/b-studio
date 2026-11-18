@@ -19,7 +19,11 @@
  *      통로라(이미 PyPI·npm·Maven이 그렇듯) 격리를 넓히는 셈이고, 무엇이 설치됐는지 로그에만 남아 보기 어렵다. 기각.
  *  (c) 사용자가 Dockerfile.b-studio를 직접 고치게 둠(handEdited) — 이미 가능하지만 "생성 파일 다시 만들기"가
  *      손으로 고친 파일로 보고 경고하게 되고, 선언이 아니라 자유 형식이라 사람이 한눈에 "무엇을 설치했는지" 모아 보기 어렵다. 기각(보조 수단으로는 남긴다).
+ *
+ * 변환과 오류 글은 Rust(`crates/bstudio-guard/src/system_packages.rs`)가 한다. 옛 TS는
+ * `system-packages-legacy.ts`로 남겨 차등 시험만 그것을 import한다.
  */
+import { native } from './native';
 
 /** 지원하는 베이스 이미지의 패키지 관리자 계열 */
 export type PackageFamily = 'apt' | 'apk';
@@ -32,47 +36,10 @@ export class SystemPackageError extends Error {
   }
 }
 
-/** apt(Debian·Ubuntu)·apk(Alpine) 패키지 이름. 생성 Dockerfile의 RUN 줄에 그대로 들어가므로 여기서도 다시 검증한다(방어적 중복 검사) */
-const SYSTEM_PACKAGE_NAME = /^[a-z0-9][a-z0-9.+-]{0,63}$/;
-
-/** Alpine 계열로 보는 이미지 이름 패턴(명시적으로 alpine을 포함하는 태그) */
-const APK_IMAGE = /alpine/i;
-/** b-studio가 생성하는 템플릿이 쓰는 Debian·Ubuntu 계열 베이스 이미지 이름(project-detect.ts의 detectNode·detectSpring·detectFastApi 참고) */
-const APT_IMAGE = /^(node|python|eclipse-temurin|gradle|maven|debian|ubuntu)(:|$)/i;
-
 /** FROM 줄의 이미지 이름으로 패키지 계열을 가린다. 모르는 계열이면 undefined(조용히 무시하지 않고 호출부가 오류를 낸다) */
 export function detectPackageFamily(image: string): PackageFamily | undefined {
-  const trimmed = image.trim();
-  if (APK_IMAGE.test(trimmed)) return 'apk';
-  if (APT_IMAGE.test(trimmed)) return 'apt';
-  return undefined;
-}
-
-/** Dockerfile 본문에서 FROM 줄의 이미지 이름. 없으면 undefined */
-function fromImage(dockerfile: string): string | undefined {
-  return /^FROM\s+(\S+)/m.exec(dockerfile)?.[1];
-}
-
-const MARKER_BEGIN = '# b-studio: systemPackages(studio.yaml)가 설치를 선언한 패키지';
-const MARKER_END = '# b-studio: systemPackages 끝';
-
-function installCommand(family: PackageFamily, packages: readonly string[]): string {
-  return family === 'apt'
-    ? `RUN apt-get update && apt-get install -y --no-install-recommends ${packages.join(' ')} && rm -rf /var/lib/apt/lists/*`
-    : `RUN apk add --no-cache ${packages.join(' ')}`;
-}
-
-/** 이전에 applySystemPackages가 넣은 블록(마커 사이)을 지운다. 마커가 없거나 짝이 안 맞으면 그대로 둔다(손상된 상태를 추측해 건드리지 않는다) */
-function stripManagedBlock(dockerfile: string): string {
-  const lines = dockerfile.split('\n');
-  const begin = lines.indexOf(MARKER_BEGIN);
-  if (begin === -1) return dockerfile;
-  const end = lines.indexOf(MARKER_END, begin);
-  if (end === -1) return dockerfile;
-  // 삽입할 때 마커 앞에 넣은 구분용 빈 줄도 함께 지운다
-  const start = begin > 0 && lines[begin - 1] === '' ? begin - 1 : begin;
-  lines.splice(start, end - start + 1);
-  return lines.join('\n');
+  const family = native.systemPackageDetectFamily(image);
+  return family === 'apt' || family === 'apk' ? family : undefined;
 }
 
 /**
@@ -82,26 +49,9 @@ function stripManagedBlock(dockerfile: string): string {
  * (studio.yaml 스키마가 이미 막지만, 이 함수가 다른 경로에서도 안전하도록 방어적으로 검사한다)
  */
 export function applySystemPackages(dockerfile: string, packages: readonly string[]): string {
-  const stripped = stripManagedBlock(dockerfile);
-  if (packages.length === 0) return stripped;
-
-  for (const name of packages) {
-    if (!SYSTEM_PACKAGE_NAME.test(name)) throw new SystemPackageError(`'${name}'은(는) 올바른 패키지 이름이 아닙니다(영문 소문자·숫자로 시작, 그 뒤 영문 소문자·숫자·.·+·-만 허용)`);
+  try {
+    return native.systemPackageApply(dockerfile, [...packages]);
+  } catch (error) {
+    throw new SystemPackageError(error instanceof Error ? error.message : String(error));
   }
-
-  const image = fromImage(stripped);
-  if (!image) throw new SystemPackageError('Dockerfile에 FROM 줄이 없어 systemPackages를 설치할 자리를 찾지 못했습니다');
-  const family = detectPackageFamily(image);
-  if (!family) {
-    throw new SystemPackageError(
-      `'${image}' 베이스 이미지의 패키지 계열(apt 또는 apk)을 알 수 없어 systemPackages를 설치할 수 없습니다. ` +
-        'Debian·Ubuntu(apt) 또는 Alpine(apk) 계열 이미지만 지원합니다 — 다른 계열이면 Dockerfile.b-studio를 직접 고치세요.',
-    );
-  }
-
-  const lines = stripped.split('\n');
-  const fromIndex = lines.findIndex((line) => /^FROM\s+\S+/.test(line));
-  const block = ['', MARKER_BEGIN, installCommand(family, packages), MARKER_END];
-  lines.splice(fromIndex + 1, 0, ...block);
-  return lines.join('\n');
 }

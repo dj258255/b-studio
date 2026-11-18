@@ -422,6 +422,15 @@ pub fn encode_lone_unit(unit: u32) -> String {
 }
 
 /// 예약 글자(U+E000..=U+E01F) 하나의 인코딩. 예약 글자가 아니면 그대로
+pub fn encode_lone_surrogates(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        // Rust 문자열에는 짝 없는 서로게이트가 없다. 예약 글자만 TS `encodeLoneSurrogates`와 같이 인코딩한다
+        out.push_str(&encode_reserved_char(c));
+    }
+    out
+}
+
 pub fn encode_reserved_char(c: char) -> String {
     let u = c as u32;
     if (0xE000..=0xE01F).contains(&u) {
