@@ -136,7 +136,7 @@
           "last_assistant_message": "고쳤습니다."
         },
         "output": {
-          "systemMessage": "[b-studio] [b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(브랜치가 user-branch(으)로 바뀜) 마지막 체크포인트로 되돌렸습니다. 바뀐 파일 1개는 보관본으로 남겼습니다(id: <time>-0001). 바뀐 파일은 없었습니다."
+          "systemMessage": "[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(브랜치가 user-branch(으)로 바뀜) 마지막 체크포인트로 되돌렸습니다. 바뀐 파일 1개는 보관본으로 남겼습니다(id: <time>-0001)."
         }
       }
     }
@@ -172,7 +172,7 @@
         "type": "run_finished",
         "runId": "<run:1>",
         "status": "failed",
-        "summary": "[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(브랜치가 user-branch(으)로 바뀜) 마지막 체크포인트로 되돌렸습니다. 바뀐 파일 1개는 보관본으로 남겼습니다(id: <time>-0001).\n\n바뀐 파일은 없었습니다.",
+        "summary": "[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(브랜치가 user-branch(으)로 바뀜) 마지막 체크포인트로 되돌렸습니다. 바뀐 파일 1개는 보관본으로 남겼습니다(id: <time>-0001).",
         "durationMs": "<durationMs>"
       }
     ],
@@ -402,7 +402,7 @@
           "durationMs": "<durationMs>",
           "runId": "<run:1>",
           "status": "failed",
-          "summary": "[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(브랜치가 user-branch(으)로 바뀜) 마지막 체크포인트로 되돌렸습니다. 바뀐 파일 1개는 보관본으로 남겼습니다(id: <time>-0001).\n\n바뀐 파일은 없었습니다.",
+          "summary": "[b-studio] 작업 복사본의 Git 기록이 b-studio가 남긴 체크포인트와 달라(브랜치가 user-branch(으)로 바뀜) 마지막 체크포인트로 되돌렸습니다. 바뀐 파일 1개는 보관본으로 남겼습니다(id: <time>-0001).",
           "type": "run_finished"
         }
       ],
