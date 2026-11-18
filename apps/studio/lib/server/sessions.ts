@@ -8398,7 +8398,19 @@ async function changesOutsideTools(session: Session): Promise<string[]> {
 async function abandonTerminalRun(
   session: Session,
   run: ActiveRun & { terminal: TerminalRunState },
-  { status, reason, platformFailure }: { status: 'failed' | 'cancelled' | 'error'; /** 왜 닫는가(사람이 읽을 글). 취소는 정해진 글을 쓴다 */ reason?: string; platformFailure?: string },
+  {
+    status,
+    reason,
+    platformFailure,
+    outcomeKnown = false,
+  }: {
+    status: 'failed' | 'cancelled' | 'error';
+    /** 왜 닫는가(사람이 읽을 글). 취소는 정해진 글을 쓴다 */
+    reason?: string;
+    platformFailure?: string;
+    /** 사유 글이 이미 되돌림 결과(보관본으로 남긴 파일 수 등)를 말한다. 요청 사이 Git 맞추기가 되돌린 경우처럼, 덧붙일 결과가 없으면 "바뀐 파일은 없었습니다"를 또 쓰지 않는다 */
+    outcomeKnown?: boolean;
+  },
 ): Promise<string> {
   // 판정은 수명 코어가 한다(ADR-210): 닫기를 시작하는 이 순간의 사실로 한 번만 정한다. 이미 닫았으면 아무것도 하지 않는다
   const decision = beginTerminalClose(session.life, run.ticket, {
@@ -8459,6 +8471,8 @@ async function abandonTerminalRun(
       if (text === 'platform_kept') summary = `${summary}\n\n변경은 되돌리지 않았습니다.`.trim();
       else if (text === 'kept') summary = `${summary}\n\n샌드박스가 켜지는 중이거나 켜지지 못해 변경을 되돌리지 못했습니다. 바뀐 파일은 작업 복사본에 그대로 남아 있습니다.`.trim();
       else if (text === 'reverted' || text === 'cancelled_report') {
+        // 사유가 이미 결과를 말했고(요청 사이 Git 맞추기의 되돌림) 이 되돌리기가 아무것도 찾지 못했으면 "바뀐 파일은 없었습니다"를 덧붙이지 않는다(이슈 #1303)
+        if (outcomeKnown && reverted !== undefined && reverted.length === 0 && keptDocs.length === 0) return;
         const outcome = !reverted ? `변경을 되돌리지 못했습니다: ${describe(revertError)}` : revertedText(reverted, keptDocs, { restorable: true });
         summary = text === 'cancelled_report' ? stoppedSummary(run, session.snapshot.tokenLimit, reverted, revertError, keptDocs) : `${summary}\n\n${outcome}.`.trim();
       }
@@ -9011,7 +9025,8 @@ function turnEndFacts(session: Session, run: ActiveRun & { terminal: TerminalRun
 async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal: TerminalRunState }, text: string, arrivedMs: number): Promise<{ feedback?: string; message?: string }> {
   const state = run.terminal;
   const reads: TurnEndReads = { git: 'unread', gitSummary: '', fingerprint: 'unread', unchanged: 'unread', card: 'unread', outside: [] };
-  const closeMessage = (summary: string): { message: string } => ({ message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` });
+  // 사유 글이 이미 `[b-studio]`로 시작하면 다시 붙이지 않는다(이슈 #1303). `hookMessage`가 개행을 접고 앞머리를 한 번만 붙인다
+  const closeMessage = (summary: string): { message: string } => ({ message: hookMessage(summary) });
   /** 감시가 담아 둔 위반을 그때는 열린 실행이 없었다면, 그 뒤 처음 끝나는 이 실행이 가져가 실패로 닫고 되돌린다 */
   const failForPendingViolation = (): Promise<{ message: string }> => {
     const reason = session.pendingViolation ?? '감지된 위반';
@@ -9461,7 +9476,7 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
       }
       case 'cancelled': {
         const summary = await abandonTerminalRun(session, run, { status: 'cancelled' });
-        return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+        return { message: hookMessage(summary) };
       }
       case 'deadline':
         return closeOnDeadline();
@@ -9470,14 +9485,14 @@ async function finishTerminalTurn(session: Session, run: ActiveRun & { terminal:
         // 체크포인트는 남기지 않으므로 다음 요청의 게이트가 이 변경을 다시 검증한다
         console.error('[b-studio] 터미널 실행의 검증 실패', error);
         const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}`, platformFailure: `샌드박스를 켜지 못했습니다: ${boot?.reason ?? describe(error)}` });
-        return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+        return { message: hookMessage(summary) };
       }
       default: {
         console.error('[b-studio] 터미널 실행의 검증 실패', error);
         // 체크포인트가 남았는지 Git에서 읽지 못했으면 그 사실을 사유에 적는다(남았다고 보지 않고 지금까지처럼 닫는다)
         const unknownNote = close.landedUnknown ? ' (저장이 남긴 체크포인트가 있는지 Git에서 읽지 못해 확인하지 못했습니다)' : '';
         const summary = await abandonTerminalRun(session, run, { status: 'error', reason: `검증을 끝내지 못했습니다: ${describe(error)}${unknownNote}` });
-        return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+        return { message: hookMessage(summary) };
       }
     }
   } finally {
@@ -9594,6 +9609,8 @@ async function reconcileTerminalGit(
   const summary = await abandonTerminalRun(session, run, {
     status: 'failed',
     reason: gitRealignRestoredReason(realigned.which, realigned.files.length, realigned.backup?.id),
+    // 사유가 이미 되돌림과 보관본을 말했다. 이 실행을 닫으며 또 되돌릴 것이 없으면 결과 글을 덧붙이지 않는다(이슈 #1303)
+    outcomeKnown: true,
   });
   return { failed: true, summary };
 }
@@ -9664,7 +9681,7 @@ async function retryOrClose(session: Session, run: ActiveRun & { terminal: Termi
   run.terminal.lastFeedback = feedback;
   if (retryRoute(session.life, run.ticket) === 'feedback') return { feedback };
   const summary = await abandonTerminalRun(session, run, { status: 'failed', reason: cliEndedReasonOf(clipText(feedback, 4000)) });
-  return { message: `[b-studio] ${summary.replace(/\n+/g, ' ')}` };
+  return { message: hookMessage(summary) };
 }
 
 /**
