@@ -8304,3 +8304,113 @@ pub fn compose_cors_environment_from(environment_json: String) -> Result<String>
 pub fn compose_frontend_backend_env_name(name: String) -> bool {
     compose_import::frontend_backend_env_name(&name)
 }
+
+// ── 세션 조율 함수의 글 조립(ADR-195 4f C1-6a/6b). `Session` 상태·git·파일은 TS가 쥐고, 여기는 같은 값에 같은 글자만 낸다.
+// 트레일러는 게이트 통과의 근거라 바이트까지 같아야 한다. TS 껍데기: apps/studio/lib/server/session-text.ts
+use bstudio_session::terminal_text;
+
+#[napi]
+pub fn session_terminal_texts(spec_file: String) -> String {
+    terminal_text::terminal_texts(&spec_file)
+}
+
+#[napi]
+pub fn session_pretool_deny_text(kind: String, texts_json: String, agent_read_only_mark: String) -> Result<String> {
+    fail(terminal_text::pretool_deny_text(&kind, &texts_json, &agent_read_only_mark))
+}
+
+#[napi]
+pub fn session_checkpoint_body(
+    report_json: Option<String>,
+    report_unserializable: bool,
+    allow_breaking: bool,
+    checks_json: String,
+    verify_attempts: f64,
+    summary: String,
+    unguarded_writes: bool,
+) -> Result<String> {
+    fail(terminal_text::checkpoint_body(
+        report_json.as_deref(),
+        report_unserializable,
+        allow_breaking,
+        &checks_json,
+        verify_attempts,
+        &summary,
+        unguarded_writes,
+    ))
+}
+
+#[napi]
+pub fn session_checkpoint_trailers(passed_stages: Option<Vec<String>>, verify: Option<String>, incomplete: Option<String>) -> Vec<String> {
+    terminal_text::checkpoint_trailers(passed_stages.as_deref(), verify.as_deref(), incomplete.as_deref())
+}
+
+#[napi]
+pub fn session_terminal_result(input_json: String) -> Result<String> {
+    fail(terminal_text::terminal_result(&input_json))
+}
+
+#[napi]
+pub fn session_hook_message(summary: String) -> String {
+    terminal_text::hook_message(&summary)
+}
+
+#[napi]
+pub fn session_done_tests_feedback(failures_json: String) -> Result<String> {
+    fail(terminal_text::done_tests_feedback(&failures_json))
+}
+
+#[napi]
+pub fn session_terminal_stall_message(stall_ms: f64) -> String {
+    terminal_text::terminal_stall_message(stall_ms)
+}
+
+#[napi]
+pub fn session_limit_abort_message(kind: String) -> String {
+    terminal_text::limit_abort_message(&kind)
+}
+
+#[napi]
+pub fn session_api_error_kind(raw: Option<String>) -> String {
+    terminal_text::api_error_kind(raw.as_deref())
+}
+
+#[napi]
+pub fn session_attempts_exhausted_summary(gate_attempts: f64, unsettled_attempts: f64, feedback_clipped: String, max_attempts: f64) -> String {
+    terminal_text::attempts_exhausted_summary(gate_attempts, unsettled_attempts, &feedback_clipped, max_attempts)
+}
+
+#[napi]
+pub fn session_cli_ended_reason(feedback_clipped: String) -> String {
+    terminal_text::cli_ended_reason(&feedback_clipped)
+}
+
+#[napi]
+pub fn session_deadline_reason(deadline_seconds: String, hook_seconds: String, elapsed_seconds: String) -> String {
+    terminal_text::deadline_reason(&deadline_seconds, &hook_seconds, &elapsed_seconds)
+}
+
+#[napi]
+pub fn session_git_realign_unrestorable_message(which: String, error_text: String) -> String {
+    terminal_text::git_realign_unrestorable_message(&which, &error_text)
+}
+
+#[napi]
+pub fn session_git_realign_notice(which: String, files_len: f64, backup_id: Option<String>) -> String {
+    terminal_text::git_realign_notice(&which, files_len, backup_id.as_deref())
+}
+
+#[napi]
+pub fn session_git_realign_failure_reason(which: String, error_text: String) -> String {
+    terminal_text::git_realign_failure_reason(&which, &error_text)
+}
+
+#[napi]
+pub fn session_git_realign_restored_reason(which: String, files_len: f64, backup_id: Option<String>) -> String {
+    terminal_text::git_realign_restored_reason(&which, files_len, backup_id.as_deref())
+}
+
+#[napi]
+pub fn session_landed_plan(committed_sha: Option<String>, listed: bool, latest_sha: Option<String>) -> String {
+    terminal_text::landed_plan(committed_sha.as_deref(), listed, latest_sha.as_deref())
+}
