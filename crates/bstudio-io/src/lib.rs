@@ -5,6 +5,7 @@
 //! 이 크레이트를 붙이고, 4단계(ADR-191·192)에서 Rust HTTP 서버가 같은 크레이트를 직접 쓴다.
 
 pub mod browser;
+pub mod checkpoint_local;
 pub mod checkpoint_remote;
 pub mod cli_command;
 pub mod cli_process;

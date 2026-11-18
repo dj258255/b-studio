@@ -3,6 +3,9 @@
 //! `baseStatus`·`#fetchBase`·`integrateBase`·`pullRequestTarget`·`recordPullRequest`·`repository`·`headState`·`remoteUrl`·`uncommitTo`·`restoreRememberedHead`)
 //! (ADR-195 4f A2).
 //!
+//! 로컬 경로(읽기 전용과 백업·제외 스냅샷 = 청크 D1a)는 [`crate::checkpoint_local`]이 맡는다. 두 모듈이 같은 [`Repo`]의 git 실행(하드닝·인덱스 잠금 재시도·
+//! 오류 글·글자 인코딩)을 쓰도록 여기서 꺼내 준다 — 로컬 경로를 위해 git을 부르는 코드를 한 벌 더 두면 옛 동작과 갈라진다.
+//!
 //! 판정(`dangerous_local_config`·`info_attributes`·`remote_commits`·`pull_request_target`·`redact_credentials`·`is_index_lock_failure`·`subcommand`·`is_sha`)은
 //! `bstudio_guard::checkpoint_git`이 하고, 여기는 git을 부르는 **순서**만 한다. 체크포인트 상태(메타는 저장소 설정 `b-studio.*`에 있다. 백업·제외 스냅샷·`CheckpointStore`의
 //! 캐시)는 TS가 든다. 순서 중간에 TS 상태가 끼는 자리는 콜백(`Hook`)으로 부르고, 콜백이 실패하면 그 뒤 단계를 하지 않는다.
@@ -64,11 +67,15 @@ pub enum Fail {
     Checkpoint(String),
     /// `RemoteConflictError(conflicts)`
     Conflict(Vec<String>),
+    /// `StagedMismatchError(files)` — 검증한 생성 파일 지문과 지금 디스크가 다르다
+    StagedMismatch(Vec<String>),
+    /// 파일 I/O 실패. 옛 코드가 `fs`에서 받아 그대로 던지던 `Error`다(백업·스냅샷을 쓰다 난 오류)
+    Io(String),
     /// 콜백이 실패했다. TS가 콜백에서 잡은 오류를 그대로 던진다
     Hook,
 }
 
-type Res<T> = Result<T, Fail>;
+pub(crate) type Res<T> = Result<T, Fail>;
 
 fn fail<T>(message: impl Into<String>) -> Res<T> {
     Err(Fail::Checkpoint(message.into()))
@@ -98,6 +105,10 @@ pub struct Repo {
     pub start: Option<String>,
     pub subdir: Option<String>,
     pub hook: Option<Hook>,
+    /// `CheckpointStore`의 커밋 작성자 이메일(`encodeLoneSurrogates`한 꼴). `#checkpoint`가 통과 기록을 읽을 커밋인지 가른다
+    pub author_email: Option<String>,
+    /// `excludedFiles` 제공자가 있는가. 없으면 생성 파일 사이드카를 만들지 않는다(옛 코드의 `this.#excludedFiles` 검사)
+    pub has_excluded_files: bool,
 }
 
 /// git이 낸 글자를 TS가 보낸 글자와 견줄 수 있게 인코딩한다
@@ -221,7 +232,7 @@ fn parse_iso_ms(text: &str) -> Option<i64> {
 }
 
 /// 목록을 UTF-16 순서(JS `sort()`)로 정렬한다
-fn sort_utf16(mut items: Vec<String>) -> Vec<String> {
+pub(crate) fn sort_utf16(mut items: Vec<String>) -> Vec<String> {
     items.sort_by(|a, b| js::cmp_utf16(a, b));
     items
 }
@@ -239,7 +250,7 @@ impl Repo {
     // ── git 실행 ────────────────────────────────────────────────────────
 
     /// 로컬 git. 원격에 닿는 하위 명령은 부르지 못한다(`remote_git`만 부른다)
-    async fn git(&self, args: Vec<String>) -> Res<String> {
+    pub(crate) async fn git(&self, args: Vec<String>) -> Res<String> {
         if network_command(&args) {
             return fail(format!("원격에 닿는 git 명령({})은 신뢰 확인을 지나는 함수로만 부를 수 있습니다", cg::subcommand(&args).unwrap_or_default()));
         }
@@ -248,6 +259,20 @@ impl Repo {
 
     /// 인자 앞에 위치(`-C`·`--git-dir`)와 하드닝을 붙여 실행하고, 인덱스 잠금 충돌이면 다시 한다(옛 `runGit`·`runGitWithRetry`)
     async fn run_git(&self, args: Vec<String>, timeout_ms: Option<u64>) -> Res<String> {
+        Ok(enc(&String::from_utf8_lossy(&self.run_git_bytes_env(args, timeout_ms, &[]).await?)))
+    }
+
+    /// `run_git`과 같지만 stdout을 UTF-8로 바꾸지 않고 바이트로 돌려준다(`cat-file blob`처럼 내용이 UTF-8이 아닐 수 있는 명령)
+    pub(crate) async fn run_git_bytes(&self, args: Vec<String>, timeout_ms: Option<u64>) -> Res<Vec<u8>> {
+        self.run_git_bytes_env(args, timeout_ms, &[]).await
+    }
+
+    /// 이 호출에만 더할 환경 변수를 붙인다(옛 `#git(args, { env: { GIT_LITERAL_PATHSPECS: '1' } })`)
+    pub(crate) async fn run_git_env(&self, args: Vec<String>, extra: &[(&str, &str)]) -> Res<String> {
+        Ok(enc(&String::from_utf8_lossy(&self.run_git_bytes_env(args, None, extra).await?)))
+    }
+
+    async fn run_git_bytes_env(&self, args: Vec<String>, timeout_ms: Option<u64>, extra_env: &[(&str, &str)]) -> Res<Vec<u8>> {
         let mut hardened: Vec<String> = args.iter().map(|a| arg(a)).collect();
         // diff·show의 출력은 리뷰·화면·보관본으로 간다. 저장소 설정의 외부 diff와 textconv가 내용을 바꾸지 못하게 한다(이슈 #706)
         if matches!(hardened.first().map(String::as_str), Some("diff" | "show")) {
@@ -259,7 +284,11 @@ impl Repo {
         };
         let full: Vec<String> = cat(vec![g!["-C", &self.root], location, hardened]);
         let spawned: Vec<String> = cat(vec![GIT_HARDENING.iter().map(|a| (*a).to_owned()).collect(), full.clone()]);
-        let env = git_env();
+        let mut env = git_env();
+        for (name, value) in extra_env {
+            env.retain(|(key, _)| key != name);
+            env.push(((*name).to_owned(), (*value).to_owned()));
+        }
         let mut attempt = 0;
         loop {
             let timeout = timeout_ms;
@@ -279,7 +308,7 @@ impl Repo {
             } else if out.exit_code != Some(0) {
                 (false, out.stderr.clone())
             } else {
-                return Ok(enc(&String::from_utf8_lossy(&out.stdout)));
+                return Ok(out.stdout);
             };
             let stderr_text = String::from_utf8_lossy(&stderr).into_owned();
             if let Some(delay) = INDEX_LOCK_RETRY_DELAYS_MS.get(attempt) {
@@ -303,7 +332,7 @@ impl Repo {
 
     // ── 메타·캐시 ───────────────────────────────────────────────────────
 
-    async fn get_meta(&self, key: &str) -> Option<String> {
+    pub(crate) async fn get_meta(&self, key: &str) -> Option<String> {
         self.git(g!["config", "--get", format!("b-studio.{key}")]).await.ok().map(|out| trim(&out)).and_then(non_empty)
     }
 
@@ -311,7 +340,7 @@ impl Repo {
         self.git(g!["config", format!("b-studio.{key}"), value]).await.map(|_| ())
     }
 
-    async fn subdir(&mut self) -> String {
+    pub(crate) async fn subdir(&mut self) -> String {
         if self.subdir.is_none() {
             let loaded = self.get_meta("subdir").await.unwrap_or_default();
             self.subdir = Some(loaded);
@@ -320,18 +349,18 @@ impl Repo {
     }
 
     /// git 명령의 대상을 프로젝트 폴더로 한정한다
-    async fn scope(&mut self) -> Vec<String> {
+    pub(crate) async fn scope(&mut self) -> Vec<String> {
         let subdir = self.subdir().await;
         if subdir.is_empty() { Vec::new() } else { g!["--", subdir] }
     }
 
     /// diff 계열 출력의 경로를 프로젝트 폴더 기준으로 바꾸고 폴더 밖 변경은 뺀다
-    async fn relative(&mut self) -> Vec<String> {
+    pub(crate) async fn relative(&mut self) -> Vec<String> {
         let subdir = self.subdir().await;
         if subdir.is_empty() { Vec::new() } else { g![format!("--relative={subdir}")] }
     }
 
-    async fn start_sha(&mut self) -> Res<String> {
+    pub(crate) async fn start_sha(&mut self) -> Res<String> {
         if self.start.is_none() {
             let loaded = match self.get_meta("start").await {
                 Some(start) => start,
@@ -347,7 +376,7 @@ impl Repo {
         self.git(g!["merge-base", "--is-ancestor", ancestor, descendant]).await.is_ok()
     }
 
-    async fn resolve(&self, sha: &str) -> Res<String> {
+    pub(crate) async fn resolve(&self, sha: &str) -> Res<String> {
         if !cg::is_sha(sha) {
             return fail("체크포인트 ID 형식이 올바르지 않습니다");
         }
@@ -357,7 +386,20 @@ impl Repo {
         }
     }
 
-    async fn hook(&self, request: Value) -> Res<Value> {
+    /// 지금 HEAD 커밋의 sha(옛 `#headSha`)
+    pub(crate) async fn head_sha(&self) -> Res<String> {
+        Ok(trim(&self.git(g!["rev-parse", "HEAD"]).await?))
+    }
+
+    /// 체크포인트 저장소 위치. 따로 정하지 않으면 작업 폴더의 `.git`이다(옛 `gitDir` getter)
+    pub(crate) fn git_dir_path(&self) -> String {
+        match &self.git_dir {
+            Some(dir) => dir.clone(),
+            None => node_path::join(&[&self.root, ".git"]),
+        }
+    }
+
+    pub(crate) async fn hook(&self, request: Value) -> Res<Value> {
         let hook = self.hook.as_ref().ok_or(Fail::Hook)?;
         // TS가 든 캐시(`#start`·`#subdirCache`)를 콜백이 쓰기 전에 맞춘다(콜백 안의 git 호출 순서가 옛 코드와 같다)
         let mut request = request;
@@ -733,7 +775,7 @@ impl Repo {
 }
 
 /// Node의 `fs.readFile` 오류 글(`EISDIR: illegal operation on a directory, read` 꼴)과 같게 쓴다
-fn node_error_message(error: &std::io::Error, file: &str) -> String {
+pub(crate) fn node_error_message(error: &std::io::Error, file: &str) -> String {
     let (code, text) = match error.raw_os_error() {
         Some(21) => ("EISDIR", "illegal operation on a directory"),
         Some(13) => ("EACCES", "permission denied"),
@@ -754,7 +796,7 @@ fn remembered(input: &Value) -> Option<Remembered> {
 }
 
 /// napi가 부르는 한 입구. `op`에 따라 위 함수를 부르고 결과를 JSON으로 돌려준다.
-/// 입력: `{ root, gitBin, gitDir?, start?, subdir?, remembered?, ... }`. 출력: `{ ok, value | kind·message·conflicts, cache: { start, subdir } }`
+/// 입력: `{ root, gitBin, gitDir?, start?, subdir?, authorEmail?, hasExcludedFiles?, remembered?, ... }`. 출력: `{ ok, value | kind·message·conflicts·files, cache: { start, subdir } }`
 pub async fn run(op: &str, input: &str, hook: Option<Hook>) -> String {
     let Ok(input) = serde_json::from_str::<Value>(input) else {
         return json!({ "ok": false, "kind": "checkpoint", "message": "원격 경로 입력을 읽지 못했습니다", "cache": {} }).to_string();
@@ -762,7 +804,16 @@ pub async fn run(op: &str, input: &str, hook: Option<Hook>) -> String {
     let (Some(root), Some(git_bin)) = (str_field(&input, "root"), str_field(&input, "gitBin")) else {
         return json!({ "ok": false, "kind": "checkpoint", "message": "원격 경로 입력에 root·gitBin이 없습니다", "cache": {} }).to_string();
     };
-    let mut repo = Repo { root, git_bin, git_dir: str_field(&input, "gitDir"), start: str_field(&input, "start"), subdir: str_field(&input, "subdir"), hook };
+    let mut repo = Repo {
+        root,
+        git_bin,
+        git_dir: str_field(&input, "gitDir"),
+        start: str_field(&input, "start"),
+        subdir: str_field(&input, "subdir"),
+        hook,
+        author_email: str_field(&input, "authorEmail"),
+        has_excluded_files: input.get("hasExcludedFiles").and_then(Value::as_bool).unwrap_or(false),
+    };
     let remembered = remembered(&input);
     let result = dispatch(&mut repo, op, &input, remembered.as_ref()).await;
     let mut out = Map::new();
@@ -780,6 +831,16 @@ pub async fn run(op: &str, input: &str, hook: Option<Hook>) -> String {
             out.insert("ok".into(), json!(false));
             out.insert("kind".into(), json!("conflict"));
             out.insert("conflicts".into(), json!(conflicts));
+        }
+        Err(Fail::StagedMismatch(files)) => {
+            out.insert("ok".into(), json!(false));
+            out.insert("kind".into(), json!("staged_mismatch"));
+            out.insert("files".into(), json!(files));
+        }
+        Err(Fail::Io(message)) => {
+            out.insert("ok".into(), json!(false));
+            out.insert("kind".into(), json!("io"));
+            out.insert("message".into(), json!(message));
         }
         Err(Fail::Hook) => {
             out.insert("ok".into(), json!(false));
@@ -808,7 +869,11 @@ async fn dispatch(repo: &mut Repo, op: &str, input: &Value, remembered: Option<&
         "baseStatus" => repo.base_status(need()?, input.get("force").and_then(Value::as_bool).unwrap_or(false)).await,
         "integrateBase" => repo.integrate_base(need()?).await,
         "restoreRememberedHead" => repo.restore_remembered_head(need()?).await,
-        other => fail(format!("알 수 없는 원격 경로 연산입니다: {other}")),
+        // 로컬 경로·사이드카(D1a)는 같은 Repo의 git 실행을 쓴다(crate::checkpoint_local)
+        other => match crate::checkpoint_local::dispatch(repo, other, input).await {
+            Some(result) => result,
+            None => fail(format!("알 수 없는 원격 경로 연산입니다: {other}")),
+        },
     }
 }
 
@@ -835,7 +900,7 @@ mod tests {
     }
 
     fn repo(dir: &Path, git_bin: &str, hook: Option<Hook>) -> Repo {
-        Repo { root: dir.to_string_lossy().into_owned(), git_bin: git_bin.to_owned(), git_dir: None, start: None, subdir: None, hook }
+        Repo { root: dir.to_string_lossy().into_owned(), git_bin: git_bin.to_owned(), git_dir: None, start: None, subdir: None, hook, author_email: None, has_excluded_files: false }
     }
 
     fn init(dir: &Path) {

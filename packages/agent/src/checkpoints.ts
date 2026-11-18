@@ -1,6 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import type { Dirent } from 'node:fs';
-import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
+import { appendFile, lstat, mkdir, readdir, readFile, readlink, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, execArchiveExtract, execBytes, ExecBytesError, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
@@ -320,16 +320,10 @@ function isDotGit(name: string): boolean {
 }
 /** discard()·restore() 백업을 이 안에 둔다(ADR-099). 작업 복사본이 아니라 체크포인트 저장소 쪽이라 커밋·게이트에 걸리지 않는다 */
 const BACKUP_DIRNAME = 'b-studio/discarded';
-/** 백업은 이 개수를 넘으면 오래된 것부터 지운다. 방금 만든 백업은 이 한도를 넘어도 지우지 않는다 */
-const BACKUP_KEEP_MAX = 10;
-/** 백업 전체 용량이 이 값을 넘으면 오래된 것부터 지운다(방금 만든 백업은 예외) */
-const BACKUP_KEEP_BYTES = 200 * 1024 * 1024;
 /** 체크포인트마다 생성 파일(제외됨) 스냅샷을 이 안에 둔다(ADR-141). 체크포인트 sha별 하위 폴더 하나씩이다 */
 const EXCLUDED_DIRNAME = 'b-studio/excluded';
-/** 커밋 전에 읽어 둔 생성 파일을 두는 곳. 정리(#pruneExcludedSnapshots)가 체크포인트 스냅샷으로 보지 않게 따로 둔다 */
-const EXCLUDED_STAGING_DIRNAME = 'b-studio/excluded-staging';
-/** 생성 파일은 작아서(studio.yaml 등 텍스트 몇 개) discard 백업(10개)보다 훨씬 넉넉하게 남겨도 된다 */
-const EXCLUDED_KEEP_MAX = 200;
+// 백업·제외 스냅샷의 나머지 모양(한도 10개/200MB·스냅샷 200개, staging 폴더 이름)은 Rust(`crates/bstudio-io/src/checkpoint_local.rs`)가 안다.
+// TS는 `excludedSnapshotFile`·`restoreBackup`이 읽는 폴더 이름만 안다.
 
 /**
  * 세션 작업 복사본의 Git 기록으로 체크포인트를 관리한다.
@@ -365,7 +359,7 @@ export class CheckpointStore {
    * 없을 때(도그푸딩 마찰 131) 사람이 참고할 경로를 알려주는 용도다
    */
   excludedSnapshotFile(sha: string, file: string): string {
-    return path.join(this.#excludedSnapshotDir(sha), 'files', file);
+    return path.join(this.gitDir, EXCLUDED_DIRNAME, sha, 'files', file);
   }
 
   /**
@@ -774,25 +768,12 @@ export class CheckpointStore {
    * 원격에서 가져온 커밋은 병합 커밋 하나로만 보이도록 첫 번째 부모만 따라간다
    */
   async list(limit = 50): Promise<Checkpoint[]> {
-    const start = await this.#startSha();
-    const shas = (await this.#git(['log', '--first-parent', `-n${Math.max(limit - 1, 0)}`, '--format=%H', `${start}..HEAD`])).split('\n').filter(Boolean);
-    return Promise.all([...shas, start].map((sha) => this.#checkpoint(sha)));
+    return this.#remote<Checkpoint[]>('list', { limit });
   }
 
   /** 체크포인트 하나의 변경. redact는 pendingPatch처럼 자르기 전에 적용한다(#751) */
   async patch(sha: string, redact: (text: string) => string = (text) => text): Promise<string> {
-    const commit = await this.#resolve(sha);
-    // 복제한 저장소의 시작 커밋은 원본 기록의 커밋이라 그 diff는 이 세션의 변경이 아니다
-    if (commit === (await this.#startSha()) && (await this.#getMeta('base'))) {
-      return `# 세션을 시작한 시점입니다. ${await this.#getMeta('base')} 브랜치의 커밋이며 이 세션에서 바꾼 내용은 없습니다.\n`;
-    }
-    // 병합 커밋도 체크포인트 사이의 변경으로 보이도록 첫 번째 부모와 비교한다
-    const parent = await this.#firstParent(commit);
-    const relative = await this.#relative();
-    const patch = parent
-      ? await this.#git(['diff', '--no-color', ...relative, parent, commit])
-      : await this.#git(['show', '--format=', '--patch', '--no-color', ...relative, commit]);
-    return capText(redact(patch), MAX_PATCH_CHARS);
+    return this.#remote<string>('patch', { sha }, { redact: async (request) => ({ text: redact(String(request.text ?? '')) }) });
   }
 
   /**
@@ -801,12 +782,7 @@ export class CheckpointStore {
    * (요구사항 문서의 사람 확인 기록 되돌리기, ADR-157).
    */
   async fileAt(file: string, ref = 'HEAD'): Promise<string | undefined> {
-    const subdir = await this.#subdir();
-    const target = subdir ? `${subdir}/${file}` : file;
-    return this.#git(['show', `${ref}:${target}`]).then(
-      (out) => out,
-      () => undefined,
-    );
+    return (await this.#remote<string | null>('fileAt', { file, ref })) ?? undefined;
   }
 
   /**
@@ -816,14 +792,9 @@ export class CheckpointStore {
    * 가리키는 링크로 바뀌어도 그 내용을 쓰지 않는다. 모노레포 하위 폴더 처리는 fileAt과 같다
    */
   async blobAt(file: string, ref: string): Promise<BlobAt> {
-    const subdir = await this.#subdir();
-    const target = subdir ? `${subdir}/${file}` : file;
-    const entry = (await this.#git(['ls-tree', '-z', ref, '--', target])).split('\0').find(Boolean);
-    if (!entry) return { kind: 'missing' };
-    const tab = entry.indexOf('\t');
-    const [mode = '', , oid = ''] = (tab < 0 ? entry : entry.slice(0, tab)).split(' ');
-    if (mode === '100644' || mode === '100755') return { kind: 'file', content: await this.#gitBytes(['cat-file', 'blob', oid]), executable: mode === '100755' };
-    return { kind: 'unsupported', mode };
+    const found = await this.#remote<{ kind: 'file'; content: string; executable: boolean } | { kind: 'missing' } | { kind: 'unsupported'; mode: string }>('blobAt', { file, ref });
+    if (found.kind !== 'file') return found;
+    return { kind: 'file', content: Buffer.from(found.content, 'base64'), executable: found.executable };
   }
 
   /**
@@ -832,23 +803,8 @@ export class CheckpointStore {
    * 돌려주는 path는 프로젝트 폴더 기준이다(blobAt과 같은 규칙, 모노레포 하위 폴더도 같다)
    */
   async listBlobs(ref: string, dir: string): Promise<CheckpointBlob[]> {
-    const subdir = await this.#subdir();
-    const target = subdir ? `${subdir}/${dir}` : dir;
-    const entries = (await this.#git(['ls-tree', '-r', '-z', ref, '--', target])).split('\0').filter(Boolean);
-    const blobs: CheckpointBlob[] = [];
-    for (const entry of entries) {
-      const tab = entry.indexOf('\t');
-      if (tab < 0) continue;
-      const [mode = '', , oid = ''] = entry.slice(0, tab).split(' ');
-      if (mode !== '100644' && mode !== '100755') continue;
-      const rootPath = entry.slice(tab + 1);
-      if (subdir) {
-        if (!rootPath.startsWith(`${subdir}/`)) continue;
-      }
-      const path = subdir ? rootPath.slice(subdir.length + 1) : rootPath;
-      blobs.push({ path, content: await this.#gitBytes(['cat-file', 'blob', oid]), executable: mode === '100755' });
-    }
-    return blobs.sort((a, b) => a.path.localeCompare(b.path));
+    const blobs = await this.#remote<Array<{ path: string; content: string; executable: boolean }>>('listBlobs', { ref, dir });
+    return blobs.map((blob) => ({ path: blob.path, content: Buffer.from(blob.content, 'base64'), executable: blob.executable })).sort((a, b) => a.path.localeCompare(b.path));
   }
 
   /**
@@ -924,17 +880,8 @@ export class CheckpointStore {
 
   /** 지금까지 남은 되살리기 백업. 최신순 */
   async discardedBackups(): Promise<DiscardBackup[]> {
-    const root = this.#backupRoot();
-    const ids = await readdir(root).catch(() => [] as string[]);
-    const backups = await Promise.all(
-      ids.map((id) =>
-        readFile(path.join(root, id, 'meta.json'), 'utf8').then(
-          (text) => JSON.parse(text) as DiscardBackup,
-          () => undefined,
-        ),
-      ),
-    );
-    return backups.filter((backup): backup is DiscardBackup => backup !== undefined).sort((a, b) => b.id.localeCompare(a.id));
+    const backups = await this.#remote<DiscardBackup[]>('discardedBackups');
+    return backups.sort((a, b) => b.id.localeCompare(a.id));
   }
 
   /**
@@ -945,32 +892,17 @@ export class CheckpointStore {
    * 변경만 담는다. base는 견줄 기준 커밋(기본 HEAD). restoreRememberedHead는 기억한 체크포인트를 기준으로 준다
    */
   async #backupChanges(trackedFiles: readonly string[], excluded: readonly ExcludedChange[], base = 'HEAD'): Promise<DiscardBackup | undefined> {
-    // --binary로 바이너리 파일도 되살릴 수 있게 하고, 백업은 화면에 보여줄 것이 아니라 캡 없이 전체를 남긴다
-    const patch = trackedFiles.length > 0 ? await this.#git(['diff', '--cached', '--no-color', '--binary', base]) : '';
-    if (!patch.trim() && excluded.length === 0) return undefined;
-
+    // 백업 id와 만든 시각은 TS가 정한다(옛 `backupSequence`·`new Date()`를 그대로 이어 간다)
     const id = backupId();
-    const dir = this.#backupDir(id);
-    await mkdir(dir, { recursive: true });
     const createdAt = new Date().toISOString();
-    const files = [...new Set([...trackedFiles, ...excluded.map((change) => change.file)])].sort();
-    const backup: DiscardBackup = { id, files, createdAt };
-    if (patch.trim()) await writeFile(path.join(dir, 'changes.patch'), patch, 'utf8');
-    if (excluded.length > 0) {
-      const manifest: Record<string, boolean> = {};
-      for (const change of excluded) {
-        manifest[change.file] = change.before !== undefined;
-        if (change.before !== undefined) {
-          const to = path.join(dir, 'excluded', change.file);
-          await mkdir(path.dirname(to), { recursive: true });
-          await writeFile(to, change.before);
-        }
-      }
-      await writeFile(path.join(dir, 'excluded-manifest.json'), JSON.stringify(manifest));
-    }
-    await writeFile(path.join(dir, 'meta.json'), JSON.stringify(backup), 'utf8');
-    await this.#pruneBackups(id);
-    return backup;
+    const encoded = excluded.map((change) => ({
+      file: change.file,
+      before: change.before === undefined ? null : change.before.toString('base64'),
+    }));
+    return (
+      (await this.#remote<DiscardBackup | null>('backupChanges', { trackedFiles: [...trackedFiles], excluded: encoded, base, id, createdAt })) ??
+      undefined
+    );
   }
 
   #backupRoot(): string {
@@ -979,24 +911,6 @@ export class CheckpointStore {
 
   #backupDir(id: string): string {
     return path.join(this.#backupRoot(), id);
-  }
-
-  /** 개수(BACKUP_KEEP_MAX)·용량(BACKUP_KEEP_BYTES) 한도를 넘으면 오래된 백업부터 지운다. 방금 만든 백업(keepId)은 지우지 않는다 */
-  async #pruneBackups(keepId: string): Promise<void> {
-    const root = this.#backupRoot();
-    const ids = (await readdir(root).catch(() => [] as string[])).sort(); // 타임스탬프 기반 id라 오름차순 = 오래된 것부터
-    const sized = await Promise.all(
-      ids.map(async (id) => ({ id, bytes: await stat(path.join(root, id, 'changes.patch')).then((info) => info.size, () => 0) })),
-    );
-    let total = sized.reduce((sum, entry) => sum + entry.bytes, 0);
-    let count = sized.length;
-    for (const entry of sized) {
-      if (entry.id === keepId) continue;
-      if (count <= BACKUP_KEEP_MAX && total <= BACKUP_KEEP_BYTES) break;
-      await rm(path.join(root, entry.id), { recursive: true, force: true });
-      total -= entry.bytes;
-      count -= 1;
-    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1009,44 +923,13 @@ export class CheckpointStore {
   // 않으므로 push()·exportTree()에도 새지 않는다(원래 요구사항 그대로 유지).
   // ---------------------------------------------------------------------------
 
-  /** 지금 HEAD 커밋의 sha */
-  async #headSha(): Promise<string> {
-    return (await this.#git(['rev-parse', 'HEAD'])).trim();
-  }
-
-  #excludedSnapshotRoot(): string {
-    return path.join(this.gitDir, EXCLUDED_DIRNAME);
-  }
-
-  #excludedSnapshotDir(sha: string): string {
-    return path.join(this.#excludedSnapshotRoot(), sha);
-  }
-
-  /** excludedFiles 제공자의 후보 중 이 저장소가 실제로 무시하는(git status --ignored) 파일만 돌려준다.
-   * 사용자가 직접 만든 studio.yaml처럼 평범하게 추적되는 파일은 여기서 걸러져 평소 git 흐름에 그대로 맡겨진다 */
-  async #ignoredAmong(files: readonly string[]): Promise<string[]> {
-    if (files.length === 0) return [];
-    const subdir = await this.#subdir();
-    const scoped = files.map((file) => (subdir ? `${subdir}/${file}` : file));
-    // 파일 이름 그대로 읽는다(commitPaths와 같은 이유, ADR-218)
-    const out = await this.#git(['status', '--porcelain=v1', '-z', '--ignored=matching', '--untracked-files=all', '--', ...scoped], { env: { GIT_LITERAL_PATHSPECS: '1' } });
-    const ignored: string[] = [];
-    for (const entry of out.split('\0').filter(Boolean)) {
-      if (!entry.startsWith('!!')) continue;
-      const file = entry.slice(3);
-      ignored.push(subdir ? file.slice(subdir.length + 1) : file);
-    }
-    return ignored;
-  }
-
-  async #readExcludedManifest(sha: string): Promise<Record<string, boolean> | undefined> {
-    const text = await readFile(path.join(this.#excludedSnapshotDir(sha), 'manifest.json'), 'utf8').catch(() => undefined);
-    if (text === undefined) return undefined;
-    try {
-      return JSON.parse(text) as Record<string, boolean>;
-    } catch {
-      return undefined;
-    }
+  /** `excludedFiles` 제공자를 Rust 콜백으로 넘긴다. 없으면 빈 객체(그때는 사이드카를 만들지 않는다) */
+  #excludedFilesHooks(): Record<string, (request: Record<string, unknown>) => Promise<unknown>> {
+    if (!this.#excludedFiles) return {};
+    const excludedFiles = this.#excludedFiles;
+    return {
+      excludedFiles: async (request) => ({ files: [...(await excludedFiles(String(request.projectRoot)))] }),
+    };
   }
 
   /**
@@ -1062,8 +945,7 @@ export class CheckpointStore {
    */
   async refreshExcludedSnapshot(sha = 'HEAD', expected?: ReadonlyMap<string, string>): Promise<void> {
     if (!this.#excludedFiles) return;
-    const commit = sha === 'HEAD' ? await this.#headSha() : await this.#resolve(sha);
-    await this.#placeExcludedSnapshot(commit, await this.#stageExcludedSnapshot(expected, commit));
+    await this.#remote('refreshExcludedSnapshot', { sha, expected: expected ? [...expected] : null }, this.#excludedFilesHooks());
   }
 
   /**
@@ -1076,84 +958,16 @@ export class CheckpointStore {
    * 견준 뒤에 디스크가 바뀌어도 검증하지 않은 내용이 기준선이 되지 않는다
    */
   async #stageExcludedSnapshot(expected?: ReadonlyMap<string, string>, base?: string): Promise<{ dir: string; manifest: Record<string, boolean> }> {
-    const projectRoot = await this.projectRoot();
-    const ignored = this.#excludedFiles ? await this.#ignoredAmong(await this.#excludedFiles(projectRoot)) : [];
-    const dir = path.join(this.gitDir, EXCLUDED_STAGING_DIRNAME, randomUUID());
-    await mkdir(path.join(dir, 'files'), { recursive: true });
-    const manifest: Record<string, boolean> = {};
-    const links = new Map<string, string>();
-    try {
-      for (const file of ignored) {
-        const absolute = path.join(projectRoot, file);
-        const info = await lstat(absolute).catch(() => undefined);
-        if (info?.isSymbolicLink()) links.set(file, `link:${await readlink(absolute).catch(() => '')}`);
-        const content = await readFile(absolute).catch(() => undefined);
-        manifest[file] = content !== undefined;
-        if (content !== undefined) {
-          const to = path.join(dir, 'files', file);
-          await mkdir(path.dirname(to), { recursive: true });
-          await writeFile(to, content);
-        }
-      }
-      if (expected) {
-        const mismatched = await this.#excludedMismatch(expected, { dir, manifest, links }, base ?? (await this.#headSha()));
-        if (mismatched.length > 0) throw new StagedMismatchError(mismatched);
-      }
-    } catch (error) {
-      await rm(dir, { recursive: true, force: true });
-      throw error;
-    }
-    return { dir, manifest };
-  }
-
-  /** 읽어 둔 생성 파일 중 검증과 다른 것(#stageExcludedSnapshot의 규칙) */
-  async #excludedMismatch(
-    expected: ReadonlyMap<string, string>,
-    staged: { dir: string; manifest: Record<string, boolean>; links: ReadonlyMap<string, string> },
-    base: string,
-  ): Promise<string[]> {
-    const previous = await this.#readExcludedManifest(base);
-    const subdir = await this.#subdir();
-    const files = new Set([...Object.keys(staged.manifest), ...expected.keys(), ...Object.keys(previous ?? {})]);
-    const mismatched: string[] = [];
-    for (const file of files) {
-      const content = staged.manifest[file] ? await readFile(path.join(staged.dir, 'files', file)) : undefined;
-      const want = expected.get(file);
-      if (want !== undefined) {
-        if ((await this.#excludedPrint(file, content, staged, subdir)) !== want) mismatched.push(file);
-        continue;
-      }
-      if (!previous) continue;
-      const before = previous[file] ? await readFile(path.join(this.#excludedSnapshotDir(base), 'files', file)).catch(() => undefined) : undefined;
-      const same = content === undefined ? before === undefined : before !== undefined && content.equals(before);
-      if (!same) mismatched.push(file);
-    }
-    return mismatched.sort();
-  }
-
-  /** 읽어 둔 생성 파일 하나의 지문. stagedFingerprints와 같은 꼴이다(일반 파일은 그 경로의 git 변환을 거친 blob id) */
-  async #excludedPrint(file: string, content: Buffer | undefined, staged: { dir: string; links: ReadonlyMap<string, string> }, subdir: string): Promise<string> {
-    const link = staged.links.get(file);
-    if (link !== undefined) return link;
-    if (content === undefined) return 'missing';
-    // hash-object도 add처럼 필터를 돈다. 돌기 전에 설정을 본다(이슈 #706). --path로 원래 경로의 속성(줄 끝 변환 등)을 쓴다
-    await this.#assertSafeLocalGit();
-    const id = (await this.#git(['hash-object', `--path=${subdir ? `${subdir}/${file}` : file}`, '--', path.join(staged.dir, 'files', file)])).trim();
-    return `blob:${id}`;
+    return this.#remote<{ dir: string; manifest: Record<string, boolean> }>(
+      'stageExcludedSnapshot',
+      { expected: expected ? [...expected] : null, base: base ?? null },
+      this.#excludedFilesHooks(),
+    );
   }
 
   /** 읽어 둔 생성 파일을 sha 체크포인트의 스냅샷으로 옮긴다. 생성 파일이 하나도 없으면 스냅샷을 두지 않는다(예전과 같다) */
   async #placeExcludedSnapshot(sha: string, staged: { dir: string; manifest: Record<string, boolean> }): Promise<void> {
-    const target = this.#excludedSnapshotDir(sha);
-    await rm(target, { recursive: true, force: true });
-    if (Object.keys(staged.manifest).length === 0) {
-      await rm(staged.dir, { recursive: true, force: true });
-      return;
-    }
-    await writeFile(path.join(staged.dir, 'manifest.json'), JSON.stringify(staged.manifest));
-    await mkdir(path.dirname(target), { recursive: true });
-    await rename(staged.dir, target);
-    await this.#pruneExcludedSnapshots();
+    await this.#remote('placeExcludedSnapshot', { sha, dir: staged.dir, manifest: staged.manifest });
   }
 
   /**
@@ -1163,18 +977,9 @@ export class CheckpointStore {
    */
   async #carryForwardExcludedSnapshot(parentSha: string, newSha: string): Promise<void> {
     if (!this.#excludedFiles || parentSha === newSha) return;
-    const from = this.#excludedSnapshotDir(parentSha);
-    const to = this.#excludedSnapshotDir(newSha);
-    await rm(to, { recursive: true, force: true });
-    const hasParentSnapshot = await stat(from).then((info) => info.isDirectory(), () => false);
-    if (!hasParentSnapshot) return;
-    await cp(from, to, { recursive: true });
+    await this.#remote('carryForwardExcludedSnapshot', { parentSha, newSha });
   }
 
-  /**
-   * 지금 디스크의 생성 파일이 마지막 체크포인트(HEAD)의 스냅샷과 다른지 본다. 되돌리지 않고 이름만 돌려준다 —
-   * studio 쪽이 추적한 파일은 그대로였지만 생성 파일만 바뀐 성공한 실행 뒤에, project를 다시 읽을지 정할 때 쓴다.
-   */
   /**
    * 체크포인트(sha) 뒤에 생기거나 바뀐 무시된(.gitignore) 파일(#778). 되돌리기(`clean -fd`)는 무시된 파일을 지우지 않아, 실패한
    * 실행이 만든 테스트 설정 같은 파일이 남아 다음 게이트의 결과를 바꿀 수 있다. 지우지 않고 알리기만 한다. 무시된 파일이 언제
@@ -1184,27 +989,12 @@ export class CheckpointStore {
    *  - 커밋 시각은 초 단위라 수정 시각도 초로 내려 견준다. 체크포인트와 같은 초에 바뀐 파일은 빠진다
    */
   async ignoredChangedSince(sha = 'HEAD'): Promise<string[]> {
-    const since = Date.parse((await this.#git(['show', '-s', '--format=%cI', sha])).trim()) / 1000;
-    const out = await this.#git(['status', '--porcelain=v1', '-z', '--ignored=traditional', '--untracked-files=normal', ...(await this.#scope())]);
-    const entries = out
-      .split('\0')
-      .filter((entry) => entry.startsWith('!! '))
-      .map((entry) => entry.slice(3))
-      .filter((file) => !file.endsWith('/'));
-    const projectRoot = await this.projectRoot();
-    const excluded = new Set(this.#excludedFiles ? await this.#excludedFiles(projectRoot) : []);
-    const changed: string[] = [];
-    for (const file of await this.#fromRoot(entries)) {
-      if (excluded.has(file)) continue;
-      const info = await lstat(path.join(projectRoot, file)).catch(() => undefined);
-      if (info?.isFile() && Math.floor(info.mtimeMs / 1000) > since) changed.push(file);
-    }
-    return changed.sort();
+    return this.#remote<string[]>('ignoredChangedSince', { sha }, this.#excludedFilesHooks());
   }
 
   async pendingExcludedFiles(): Promise<string[]> {
     if (!this.#excludedFiles) return [];
-    return (await this.#excludedDiff(await this.#headSha())).map((change) => change.file);
+    return this.#remote<string[]>('pendingExcludedFiles', {}, this.#excludedFilesHooks());
   }
 
   /**
@@ -1214,53 +1004,19 @@ export class CheckpointStore {
    */
   async #excludedDiff(target: string): Promise<ExcludedChange[]> {
     if (!this.#excludedFiles) return [];
-    const projectRoot = await this.projectRoot();
-    const candidates = await this.#excludedFiles(projectRoot);
-    const manifest = await this.#readExcludedManifest(target);
-    // 대상 체크포인트의 스냅샷이 없으면(이 기능 이전에 만든 체크포인트, 또는 개수 상한으로 정리된 오래된 스냅샷) 그 시점의
-    // 생성 파일 상태를 모른다. 모르는 것을 "없었다"로 보면 지금 있는 studio.yaml·compose를 모두 지워 세션이 뜨지 않는다
-    // (도그푸딩 실측: 세션 재개가 생성 파일 5개를 지워 compose build가 실패했다). 모를 때는 건드리지 않는다
-    if (!manifest) return [];
-    const files = [...new Set([...(await this.#ignoredAmong(candidates)), ...Object.keys(manifest)])].sort();
-    const dir = this.#excludedSnapshotDir(target);
-    const changes: ExcludedChange[] = [];
-    for (const file of files) {
-      const current = await readFile(path.join(projectRoot, file)).catch(() => undefined);
-      const existedAtTarget = manifest[file] ?? false;
-      const targetContent = existedAtTarget ? await readFile(path.join(dir, 'files', file)).catch(() => undefined) : undefined;
-      const changed = existedAtTarget ? current === undefined || targetContent === undefined || !current.equals(targetContent) : current !== undefined;
-      if (changed) changes.push({ file, before: current, after: targetContent });
-    }
-    return changes;
+    const changes = await this.#remote<Array<{ file: string; before: string | null; after: string | null }>>('excludedDiff', { target }, this.#excludedFilesHooks());
+    return changes.map((change) => ({
+      file: change.file,
+      before: change.before === null ? undefined : Buffer.from(change.before, 'base64'),
+      after: change.after === null ? undefined : Buffer.from(change.after, 'base64'),
+    }));
   }
 
   /** #excludedDiff가 계산한 변경을 실제로 적용한다(없던 파일은 지우고, 있던 파일은 그 내용으로 되돌린다). 적용한 파일 이름을 돌려준다 */
   async #applyExcludedDiff(changes: readonly ExcludedChange[]): Promise<string[]> {
     if (changes.length === 0) return [];
-    const projectRoot = await this.projectRoot();
-    const applied: string[] = [];
-    for (const { file, after } of changes) {
-      const target = path.join(projectRoot, file);
-      if (after === undefined) await rm(target, { force: true });
-      else {
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, after);
-      }
-      applied.push(file);
-    }
-    return applied;
-  }
-
-  /** 체크포인트마다 쌓이는 생성 파일 스냅샷을 EXCLUDED_KEEP_MAX개까지만 남기고(작아서 넉넉하게), 오래된 것부터 지운다 */
-  async #pruneExcludedSnapshots(): Promise<void> {
-    const root = this.#excludedSnapshotRoot();
-    const ids = await readdir(root).catch(() => [] as string[]);
-    if (ids.length <= EXCLUDED_KEEP_MAX) return;
-    const withTime = await Promise.all(ids.map(async (id) => ({ id, time: await stat(path.join(root, id)).then((info) => info.mtimeMs, () => 0) })));
-    withTime.sort((a, b) => a.time - b.time);
-    for (const entry of withTime.slice(0, withTime.length - EXCLUDED_KEEP_MAX)) {
-      await rm(path.join(root, entry.id), { recursive: true, force: true });
-    }
+    const encoded = changes.map((change) => ({ file: change.file, after: change.after === undefined ? null : change.after.toString('base64') }));
+    return this.#remote<string[]>('applyExcludedDiff', { changes: encoded });
   }
 
   /**
@@ -1294,8 +1050,7 @@ export class CheckpointStore {
    * 갈라진 지점이라서다). AI 리뷰가 보는 diff가 이 함수로 만든다. 크기 제한은 부르는 쪽(pr-review.ts의 truncateDiff)이 한다
    */
   async sessionDiff(): Promise<string> {
-    const start = await this.#startSha();
-    return this.#git(['diff', '--no-color', ...(await this.#relative()), start, 'HEAD']);
+    return this.#remote<string>('sessionDiff');
   }
 
   /**
@@ -1304,7 +1059,7 @@ export class CheckpointStore {
    * 리뷰한 커밋 이후의 변경만 다시 보는 데 쓴다 — 같은 지적을 되풀이해 보고하지 않도록 범위를 좁힌다
    */
   async diffSince(sha: string): Promise<string> {
-    return this.#git(['diff', '--no-color', ...(await this.#relative()), sha, 'HEAD']);
+    return this.#remote<string>('diffSince', { sha });
   }
 
   /**
@@ -1312,8 +1067,7 @@ export class CheckpointStore {
    * 기준점을 되짚을 때 쓴다 — 그 라운드가 시작될 때 HEAD였던 커밋이 곧 그 라운드가 본 diff의 끝이다
    */
   async commitBefore(iso: string): Promise<string | undefined> {
-    const out = await this.#git(['rev-list', '-1', `--before=${iso}`, 'HEAD']).catch(() => '');
-    return out.trim() || undefined;
+    return (await this.#remote<string | null>('commitBefore', { iso })) ?? undefined;
   }
 
   /** 원본 Git 저장소에서 시작한 세션만 원격 정보가 있다 */
@@ -1427,7 +1181,7 @@ export class CheckpointStore {
   async #remote<T = undefined>(
     op: string,
     input: Record<string, unknown> = {},
-    hooks: Record<string, (request: Record<string, unknown>) => Promise<void>> = {},
+    hooks: Record<string, (request: Record<string, unknown>) => Promise<unknown>> = {},
   ): Promise<T> {
     let thrown: { error: unknown } | undefined;
     const hook = async (text: string): Promise<string> => {
@@ -1439,8 +1193,8 @@ export class CheckpointStore {
         if (request.op === 'pendingFiles') return JSON.stringify({ ok: true, count: (await this.pendingFiles()).length });
         const handler = hooks[String(request.op)];
         if (!handler) throw new CheckpointError(`알 수 없는 원격 경로 콜백입니다: ${String(request.op)}`);
-        await handler(request);
-        return JSON.stringify({ ok: true });
+        const answer = await handler(request);
+        return JSON.stringify({ ok: true, ...(answer !== null && typeof answer === 'object' ? answer : {}) });
       } catch (error) {
         thrown ??= { error };
         return JSON.stringify({ ok: false });
@@ -1448,7 +1202,16 @@ export class CheckpointStore {
     };
     const text = await native.checkpointRemote(
       op,
-      JSON.stringify({ root: this.root, gitBin: this.#gitBin, gitDir: this.#separateGitDir, start: this.#start, subdir: this.#subdirCache, ...input }),
+      JSON.stringify({
+        root: this.root,
+        gitBin: this.#gitBin,
+        gitDir: this.#separateGitDir,
+        start: this.#start,
+        subdir: this.#subdirCache,
+        authorEmail: encodeLoneSurrogates(this.#author.email),
+        hasExcludedFiles: this.#excludedFiles !== undefined,
+        ...input,
+      }),
       hook,
     );
     const result = JSON.parse(text, (_key, value: unknown) => (typeof value === 'string' ? decodeLoneSurrogates(value) : value)) as {
@@ -1457,12 +1220,16 @@ export class CheckpointStore {
       kind?: string;
       message?: string;
       conflicts?: string[];
+      files?: string[];
       cache?: { start?: string | null; subdir?: string | null };
     };
     this.#start = result.cache?.start ?? this.#start;
     this.#subdirCache = result.cache?.subdir ?? this.#subdirCache;
     if (result.ok) return result.value as T;
     if (result.kind === 'conflict') throw new RemoteConflictError(result.conflicts ?? []);
+    if (result.kind === 'staged_mismatch') throw new StagedMismatchError(result.files ?? []);
+    // 옛 코드가 `fs`에서 받아 그대로 던지던 오류다(백업·스냅샷을 쓰다 난 오류). CheckpointError로 바꾸지 않는다
+    if (result.kind === 'io') throw new Error(result.message ?? '파일을 다루지 못했습니다');
     if (result.kind === 'hook') throw thrown?.error ?? new CheckpointError('원격 경로의 콜백이 실패했습니다');
     throw new CheckpointError(result.message ?? '원격 경로가 실패했습니다');
   }
@@ -1600,55 +1367,12 @@ export class CheckpointStore {
   }
 
   async #checkpoint(ref: string): Promise<Checkpoint> {
-    // 트레일러는 git이 마지막 문단에서만 읽는다. 본문(에이전트 요약)에 같은 모양의 줄이 있어도 통과 기록이 되지 않는다
-    const record = decodeNative<ParsedLogRecord & { createdAt: string }>(
-      native.checkpointShowRecord(
-        await this.#git([
-          'show', '-s',
-          `--format=%H%x00%h%x00%s%x00%cI%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_INCOMPLETE_TRAILER},valueonly,separator=%x1f)`,
-          ref,
-        ]),
-        encodeLoneSurrogates(this.#author.email),
-      ),
-    );
-    const { sha, shortSha, subject, createdAt } = record;
-    // 통과 기록은 스튜디오가 만든 커밋에서만 읽는다. 원격에 쓸 수 있는 사람이 커밋 메시지에 트레일러를 적어 가져온 체크포인트를 배포 조건 통과처럼 보이게 하지 못하게 한다
-    const passedStages = record.ours ? parseWorkflowTrailerValues(record.trailers) : undefined;
-    const verify = record.ours ? parseVerifyTrailerValues(record.verifyTrailers) : undefined;
-    const incomplete = record.ours ? parseIncompleteTrailerValues(record.incompleteTrailers) : undefined;
-
-    if (sha === (await this.#startSha())) {
-      const base = await this.#getMeta('base');
-      const files = await this.#fromRoot((await this.#git(['ls-tree', '-r', '--name-only', '-z', sha])).split('\0').filter(Boolean));
-      return { sha, shortSha, message: base ? `세션 시작 (${base} 브랜치)` : subject, createdAt, files };
-    }
-    const files = await this.#changedFiles(sha);
-    const outsideFiles = verify === 'docs' ? await this.#changedBeyond(sha, files) : 0;
-    return {
-      sha,
-      shortSha,
-      message: subject,
-      createdAt,
-      files,
-      ...(passedStages ? { passedStages } : {}),
-      ...(verify ? { verify } : {}),
-      ...(incomplete ? { incomplete } : {}),
-      ...(outsideFiles > 0 ? { outsideFiles } : {}),
-    };
+    return this.#remote<Checkpoint>('checkpoint', { ref });
   }
 
-  /**
-   * 커밋이 바꾼 경로 중 files(프로젝트 폴더 기준 목록)에 드러나지 않는 것의 수. 저장소 전체를 이름 바꾸기 감지 없이 본다 —
-   * 그래야 폴더 밖 변경과, 이름 바꾸기로 사라진 원래 파일(목록에는 새 이름만 남는다)이 둘 다 잡힌다
-   */
-  async #changedBeyond(sha: string, files: readonly string[]): Promise<number> {
-    const subdir = await this.#subdir();
-    const parent = await this.#firstParent(sha);
-    const output = parent
-      ? await this.#git(['diff', '--no-renames', '--name-only', '-z', parent, sha])
-      : await this.#git(['diff-tree', '--no-renames', '--no-commit-id', '--name-only', '-r', '-z', '--root', sha]);
-    const listed = new Set(files.map((file) => (subdir ? `${subdir}/${file}` : file)));
-    return output.split('\0').filter((file) => file && !listed.has(file)).length;
+  /** 지금 HEAD 커밋의 sha(생성 파일 스냅샷의 기준을 정하는 TS 쪽 호출부가 쓴다) */
+  async #headSha(): Promise<string> {
+    return (await this.#git(['rev-parse', 'HEAD'])).trim();
   }
 
   /** 첫 번째 부모와 비교한다. 병합 커밋은 기본 diff-tree 출력이 비어 있기 때문이다 */
@@ -1676,13 +1400,6 @@ export class CheckpointStore {
   async #relative(): Promise<string[]> {
     const subdir = await this.#subdir();
     return subdir ? [`--relative=${subdir}`] : [];
-  }
-
-  /** 저장소 루트 기준 경로를 프로젝트 기준으로 바꾸고, 프로젝트 밖 경로는 뺀다 */
-  async #fromRoot(files: string[]): Promise<string[]> {
-    const subdir = await this.#subdir();
-    if (!subdir) return files;
-    return files.filter((file) => file.startsWith(`${subdir}/`)).map((file) => file.slice(subdir.length + 1));
   }
 
   async #startSha(): Promise<string> {
