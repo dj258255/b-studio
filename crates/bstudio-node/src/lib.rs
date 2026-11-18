@@ -7965,6 +7965,87 @@ pub fn usage_add(dir: String, period: String, user: String, input_tokens: f64, o
     bstudio_session::usage::add(Path::new(&dir), &period, &user, &usage, wait).map(UsageJs::from).map_err(Error::from_reason)
 }
 
+// ── compose-provider의 인자 조립과 오류 글(ADR-195 4f A4c-4). 실행 순서·클래스 상태는 TS에 남는다.
+// `tail`·`edgePort`처럼 옛 TS가 `String(...)`으로 만든 값은 TS가 만든 글자를 그대로 받는다(JS 수 표기를 Rust가 다시 만들지 않는다).
+// TS 껍데기: packages/sandbox/src/docker/compose-provider.ts
+use bstudio_guard::compose_args;
+
+#[napi]
+pub fn compose_command_args(project_name: String, project_root: String, compose_path: String, override_path: String, args: Vec<String>) -> Vec<String> {
+    compose_args::compose_command_args(&project_name, &project_root, &compose_path, &override_path, &args)
+}
+
+#[napi]
+pub fn sandbox_cleanup_args(project_name: String) -> Vec<String> {
+    compose_args::sandbox_cleanup_args(&project_name)
+}
+
+#[napi]
+pub fn service_running_args(name: String, running: bool) -> Vec<String> {
+    compose_args::service_running_args(&name, running)
+}
+
+#[napi]
+pub fn service_recreate_args(name: String) -> Vec<String> {
+    compose_args::service_recreate_args(&name)
+}
+
+#[napi]
+pub fn edge_port_args(edge_service: String, edge_port: String) -> Vec<String> {
+    compose_args::edge_port_args(&edge_service, &edge_port)
+}
+
+#[napi]
+pub fn compose_ps_args(name: String) -> Vec<String> {
+    compose_args::compose_ps_args(&name)
+}
+
+#[napi]
+pub fn compose_logs_args(services: Vec<String>, follow: bool, tail: String) -> Vec<String> {
+    compose_args::compose_logs_args(&services, follow, &tail)
+}
+
+#[napi]
+pub fn compose_exec_args(name: String, command: Vec<String>) -> Vec<String> {
+    compose_args::compose_exec_args(&name, &command)
+}
+
+/// `selected`가 없으면 전체 빌드, 빈 목록이면 null(부르지 않는다)
+#[napi]
+pub fn sandbox_build_args(no_cache: bool, selected: Option<Vec<String>>) -> Option<Vec<String>> {
+    compose_args::sandbox_build_args(no_cache, selected)
+}
+
+#[napi]
+pub fn compose_up_remove_orphans_args(up_args: Vec<String>) -> Vec<String> {
+    compose_args::compose_up_remove_orphans_args(&up_args)
+}
+
+#[napi]
+pub fn compose_failure_message(command: String, sandbox_id: String) -> String {
+    compose_args::compose_failure_message(&command, &sandbox_id)
+}
+
+#[napi]
+pub fn compose_service_required_message(name: String, sandbox_id: String) -> String {
+    compose_args::compose_service_required_message(&name, &sandbox_id)
+}
+
+#[napi]
+pub fn managed_service_required_message(name: String) -> String {
+    compose_args::managed_service_required_message(&name)
+}
+
+#[napi]
+pub fn compose_config_unreadable_message(sandbox_id: String) -> String {
+    compose_args::compose_config_unreadable_message(&sandbox_id)
+}
+
+#[napi]
+pub fn readiness_stopped_message(failed_first: String) -> String {
+    compose_args::readiness_stopped_message(&failed_first)
+}
+
 /// 이벤트 글자(각각 JSON 값 하나)를 이어 JSON 배열 글자로 만든다
 fn json_array(events: &[&str]) -> String {
     let mut out = String::with_capacity(events.iter().map(|event| event.len() + 1).sum::<usize>() + 2);

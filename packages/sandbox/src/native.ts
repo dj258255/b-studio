@@ -134,6 +134,24 @@ interface NativeGuard {
   splitUpArgs(args: string[]): { create: string[]; services: string[]; byId: boolean };
   runtimeFromEnv(value: string | undefined | null): string | null | undefined;
   sandboxBuildNoCache(value: string | undefined | null): boolean;
+  // ── compose-provider의 인자 조립과 오류 글(ADR-195 4f A4c-4). 실행 순서·클래스 상태는 TS에 남는다.
+  // `tail`·`edgePort`는 TS가 `String(...)`으로 만든 글자를 그대로 넘긴다(JS 수 표기를 Rust가 다시 만들지 않는다)
+  composeCommandArgs(projectName: string, projectRoot: string, composePath: string, overridePath: string, args: string[]): string[];
+  sandboxCleanupArgs(projectName: string): string[];
+  serviceRunningArgs(name: string, running: boolean): string[];
+  serviceRecreateArgs(name: string): string[];
+  edgePortArgs(edgeService: string, edgePort: string): string[];
+  composePsArgs(name: string): string[];
+  composeLogsArgs(services: string[], follow: boolean, tail: string): string[];
+  composeExecArgs(name: string, command: string[]): string[];
+  /** `selected`가 없으면 전체 빌드, 빈 목록이면 null(부르지 않는다) */
+  sandboxBuildArgs(noCache: boolean, selected: string[] | undefined | null): string[] | null | undefined;
+  composeUpRemoveOrphansArgs(upArgs: string[]): string[];
+  composeFailureMessage(command: string, sandboxId: string): string;
+  composeServiceRequiredMessage(name: string, sandboxId: string): string;
+  managedServiceRequiredMessage(name: string): string;
+  composeConfigUnreadableMessage(sandboxId: string): string;
+  readinessStoppedMessage(failedFirst: string): string;
   findFreeHostPort(): Promise<number>;
   // ── 체크포인트 실행(ADR-195 4f A1). 바이트 그대로 돌려주는 실행과 `git archive | tar -x`. 던지지 않는다.
   // exitCode는 신호로 죽으면 null, 띄우기 실패는 spawnError. 취소·상한 넘김은 SIGTERM으로 멈춘다

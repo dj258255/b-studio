@@ -101,6 +101,87 @@ export function describeDockerFailure(error: unknown): string {
   return note ? `${text}\n${note}` : text;
 }
 
+/**
+ * 아래 인자 조립·오류 글은 Rust(crates/bstudio-guard/src/compose_args.rs, ADR-195 4f A4c-4)가 만든다.
+ * 실행 순서와 클래스 상태(`#upQueue`·`#processBaseline`·`#composeConfig`)는 이 파일에 남는다.
+ * `tail`·`edgePort`처럼 옛 코드가 `String(...)`으로 만든 값은 여기서 만든 글자를 그대로 넘긴다(JS 수 표기를 Rust가 다시 만들지 않는다).
+ */
+export function composeCommandArgs(projectName: string, projectRoot: string, composePath: string, overridePath: string, args: readonly string[]): string[] {
+  return native.composeCommandArgs(projectName, projectRoot, composePath, overridePath, [...args]);
+}
+
+/** compose 파일 없이도 프로젝트 이름(라벨)으로 이 샌드박스의 자원을 지우는 `down` 인자. external 공유 캐시는 지우지 않는다 */
+export function sandboxCleanupArgs(projectName: string): string[] {
+  return native.sandboxCleanupArgs(projectName);
+}
+
+/** 서비스 하나를 켜거나 끄는 인자(ADR-083). 켤 때는 이미지를 다시 빌드하고 다른 서비스는 따라 띄우지 않는다(`--no-deps`) */
+export function serviceRunningArgs(name: string, running: boolean): string[] {
+  return native.serviceRunningArgs(name, running);
+}
+
+/** 서비스를 새로 만들어 띄우는 인자(`--build --force-recreate --no-deps`) */
+export function serviceRecreateArgs(name: string): string[] {
+  return native.serviceRecreateArgs(name);
+}
+
+/** edge가 서비스를 위해 공개한 호스트 포트를 읽는 `compose port` 인자. 포트는 `String(edgePortFor(...))`로 만든 글자다 */
+export function edgePortArgs(edgeService: string, edgePort: string): string[] {
+  return native.edgePortArgs(edgeService, edgePort);
+}
+
+/** 서비스의 컨테이너 상태를 읽는 `compose ps` 인자 */
+export function composePsArgs(name: string): string[] {
+  return native.composePsArgs(name);
+}
+
+/** `compose logs` 인자. `tail`은 `String(tail)`로 만든 글자다 */
+export function composeLogsArgs(services: readonly string[], follow: boolean, tail: string): string[] {
+  return native.composeLogsArgs([...services], follow, tail);
+}
+
+/** `compose exec` 인자. 명령은 문자열로 잇지 않고 인자 배열 그대로 넘긴다 */
+export function composeExecArgs(name: string, command: readonly string[]): string[] {
+  return native.composeExecArgs(name, [...command]);
+}
+
+/**
+ * `compose build` 인자. `selected`가 없으면 전체를 빌드하고, 비어 있으면 undefined(부르지 않는다 — 인자 없는 build는 "전부 빌드"라는 뜻이라서다)
+ */
+export function sandboxBuildArgs(noCache: boolean, selected: readonly string[] | undefined): string[] | undefined {
+  return native.sandboxBuildArgs(noCache, selected ? [...selected] : undefined) ?? undefined;
+}
+
+/** 전체 서비스용 `compose up` 인자(`up --detach --remove-orphans` + 넘긴 인자) */
+export function composeUpRemoveOrphansArgs(upArgs: readonly string[]): string[] {
+  return native.composeUpRemoveOrphansArgs([...upArgs]);
+}
+
+/** `docker compose <command> 실패 (<sandbox id>)` */
+export function composeFailureMessage(command: string, sandboxId: string): string {
+  return native.composeFailureMessage(command, sandboxId);
+}
+
+/** compose 서비스가 아닌 이름을 다룰 때의 거절 글 */
+export function composeServiceRequiredMessage(name: string, sandboxId: string): string {
+  return native.composeServiceRequiredMessage(name, sandboxId);
+}
+
+/** managed 서비스가 아닌 이름을 다룰 때의 거절 글 */
+export function managedServiceRequiredMessage(name: string): string {
+  return native.managedServiceRequiredMessage(name);
+}
+
+/** `compose config --format json`을 읽지 못했을 때의 글 */
+export function composeConfigUnreadableMessage(sandboxId: string): string {
+  return native.composeConfigUnreadableMessage(sandboxId);
+}
+
+/** 한 서비스가 준비에 실패해 나머지 확인을 멈췄을 때 멈춘 서비스에 붙이는 이유 */
+export function readinessStoppedMessage(failedFirst: string): string {
+  return native.readinessStoppedMessage(failedFirst);
+}
+
 /** 샌드박스 출입구 스크립트. 원격 Docker 호스트에서도 돌도록 파일을 마운트하지 않고 내용을 compose 설정에 넣는다 */
 const EDGE_SCRIPT = new URL('../../edge/edge.mjs', import.meta.url);
 
@@ -154,7 +235,7 @@ export class LocalDockerProvider implements SandboxProvider {
     assertSandboxId(sandboxId);
     return {
       command: this.#options.dockerBin ?? 'docker',
-      args: ['compose', '--project-name', sandboxId, 'down', '--volumes', '--remove-orphans', '--rmi', 'local'],
+      args: sandboxCleanupArgs(sandboxId),
     };
   }
 
@@ -292,8 +373,7 @@ class LocalDockerSandbox implements Sandbox {
     // 스냅샷 복사가 compose up을 늦추지 않도록 이미지 빌드와 동시에 한다. 꺼 둔 서비스는 스냅샷도 건드리지 않는다
     const plans = (await planSnapshots(this.#snapshotContext())).filter((plan) => isSelected(plan.service));
     // 선택이 있는데 띄울 게 없으면(전부 꺼 둠) build를 부르지 않는다 — 인자 없는 build는 "전부 빌드"라는 뜻이라서다
-    const buildBase = noCache ? ['build', '--no-cache'] : ['build'];
-    const buildArgs = !selected ? buildBase : selected.size === 0 ? undefined : [...buildBase, ...selected];
+    const buildArgs = sandboxBuildArgs(noCache, selected ? [...selected] : undefined);
     const [seeded] = await Promise.all([
       noCache ? Promise.resolve(plans.map(() => false)) : Promise.all(plans.map((plan) => seedSnapshot(this.#snapshotContext(), plan, options))),
       buildArgs ? this.#composeOrThrow(buildArgs, options.signal) : Promise.resolve(),
@@ -311,7 +391,7 @@ class LocalDockerSandbox implements Sandbox {
       ? (event) =>
           options.onStatus!(
             event.phase === 'failed' && failedFirst && event.service !== failedFirst && !options.signal?.aborted
-              ? { ...event, reason: `${failedFirst} 서비스가 준비에 실패해 확인을 멈췄습니다` }
+              ? { ...event, reason: readinessStoppedMessage(failedFirst) }
               : event,
           )
       : undefined;
@@ -342,8 +422,8 @@ class LocalDockerSandbox implements Sandbox {
    * 준비 판정은 하지 않는다 — 호출자가 managed 서비스를 켰다면 restart()나 endpoint()로 상태를 반영한다
    */
   async setServiceRunning(name: string, running: boolean, { signal }: { signal?: AbortSignal } = {}): Promise<void> {
-    if (!this.project.composeServices.includes(name)) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 compose 서비스가 아닙니다 (${this.id})`);
-    await this.#composeOrThrow(running ? ['up', '--detach', '--build', '--no-deps', name] : ['stop', name], signal);
+    if (!this.project.composeServices.includes(name)) throw new SandboxError(composeServiceRequiredMessage(name, this.id));
+    await this.#composeOrThrow(serviceRunningArgs(name, running), signal);
   }
 
   /**
@@ -352,8 +432,8 @@ class LocalDockerSandbox implements Sandbox {
    * 호출자(executeTool)는 이 메서드를 부르기 전에 데이터베이스·꺼 둔 서비스를 걸러낸다
    */
   async restartAddon(name: string, { signal }: { signal?: AbortSignal } = {}): Promise<void> {
-    if (!this.project.composeServices.includes(name)) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 compose 서비스가 아닙니다 (${this.id})`);
-    await this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], signal);
+    if (!this.project.composeServices.includes(name)) throw new SandboxError(composeServiceRequiredMessage(name, this.id));
+    await this.#composeOrThrow(serviceRecreateArgs(name), signal);
   }
 
   /**
@@ -390,7 +470,7 @@ class LocalDockerSandbox implements Sandbox {
     this.#managed(name);
     options.onStatus?.({ service: name, phase: 'starting' });
     // 소스를 마운트하는 개발 이미지는 이미지가 그대로여도 컨테이너를 새로 만들어야 변경이 반영된다
-    await this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], options.signal);
+    await this.#composeOrThrow(serviceRecreateArgs(name), options.signal);
     const endpoint = await this.#awaitReady(name, options);
     await this.#recordProcessBaseline(name);
     return endpoint;
@@ -426,12 +506,12 @@ class LocalDockerSandbox implements Sandbox {
   async endpoint(name: string): Promise<ServiceEndpoint> {
     const service = this.#managed(name);
     // 서비스는 internal 네트워크에 있어 포트를 공개할 수 없으므로 edge가 대신 공개한 포트를 쓴다
-    const { stdout } = await this.#composeOrThrow(['port', EDGE_SERVICE, String(edgePortFor(this.project, name))]);
+    const { stdout } = await this.#composeOrThrow(edgePortArgs(EDGE_SERVICE, String(edgePortFor(this.project, name))));
     return { service: name, containerPort: service.port, url: `http://127.0.0.1:${parseHostPort(stdout)}` };
   }
 
   async state(name: string): Promise<ContainerState> {
-    const { stdout } = await this.#compose(['ps', '--all', '--format', 'json', name]);
+    const { stdout } = await this.#compose(composePsArgs(name));
     return parseContainerState(stdout);
   }
 
@@ -444,15 +524,7 @@ class LocalDockerSandbox implements Sandbox {
   }
 
   async *logs({ services = [], tail = 200, follow = true, signal }: LogOptions = {}): AsyncIterable<LogLine> {
-    const args = this.#composeArgs([
-      'logs',
-      ...(follow ? ['--follow'] : []),
-      '--no-color',
-      '--timestamps',
-      '--tail',
-      String(tail),
-      ...services,
-    ]);
+    const args = this.#composeArgs(composeLogsArgs(services, follow, String(tail)));
     // Rust(LogStream)가 docker를 띄워 stdout을 줄 단위로 당겨 준다(2c-3b, #1047). 당기기 모델이라 소비가 느려도 안 샌다.
     // parseLogLine(시각 분리)·redact(가림)·Date 변환은 여기 남는다 — Rust는 raw 줄만 흘린다.
     // for await가 끝나거나(EOF) 호출부가 break하거나 signal이 깨면 LogStream이 자식을 kill한다(옛 finally의 child.kill()).
@@ -476,17 +548,17 @@ class LocalDockerSandbox implements Sandbox {
     command: string[],
     { signal, input, raw = false }: { signal?: AbortSignal; input?: string; raw?: boolean } = {},
   ): Promise<ExecResult> {
-    const result = await this.#docker(this.#composeArgs(['exec', '-T', name, ...command]), signal, input);
+    const result = await this.#docker(this.#composeArgs(composeExecArgs(name, command)), signal, input);
     return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
   }
 
   async execToFile(name: string, command: string[], outputFile: string, { signal, raw = false }: { signal?: AbortSignal; raw?: boolean } = {}): Promise<ExecResult> {
-    const result = await runCommandToFile(this.#dockerBin, this.#composeArgs(['exec', '-T', name, ...command]), outputFile, { signal, env: this.#environment() });
+    const result = await runCommandToFile(this.#dockerBin, this.#composeArgs(composeExecArgs(name, command)), outputFile, { signal, env: this.#environment() });
     return raw ? result : { ...result, stderr: this.redact(result.stderr) };
   }
 
   async execFromFile(name: string, command: string[], inputFile: string, { signal, raw = false }: { signal?: AbortSignal; raw?: boolean } = {}): Promise<ExecResult> {
-    const result = await runCommandFromFile(this.#dockerBin, this.#composeArgs(['exec', '-T', name, ...command]), inputFile, { signal, env: this.#environment() });
+    const result = await runCommandFromFile(this.#dockerBin, this.#composeArgs(composeExecArgs(name, command)), inputFile, { signal, env: this.#environment() });
     return raw ? result : { ...result, stdout: this.redact(result.stdout), stderr: this.redact(result.stderr) };
   }
 
@@ -494,7 +566,7 @@ class LocalDockerSandbox implements Sandbox {
     if (changes.length === 0) return [];
     // 바인드 마운트는 세션 동안 바뀌지 않으므로 compose 해석은 한 번만 한다(캐시는 상태라 여기 남는다). 읽거나 해석하지 못하면 캐시를 비운다
     this.#composeConfig ??= this.#compose(['config', '--format', 'json']).then((result) => {
-      if (result.exitCode !== 0) throw new SandboxError(`compose 설정을 읽지 못했습니다 (${this.id})`, this.redact(result.stderr));
+      if (result.exitCode !== 0) throw new SandboxError(composeConfigUnreadableMessage(this.id), this.redact(result.stderr));
       JSON.parse(result.stdout);
       return result.stdout;
     });
@@ -587,7 +659,7 @@ class LocalDockerSandbox implements Sandbox {
       edgePort: (name) => edgePortFor(this.project, name),
       managed: (name) => this.#managed(name),
       policyFor: (service) => this.#policyFor(service),
-      recreate: (name, signal) => this.#composeOrThrow(['up', '--detach', '--build', '--no-deps', '--force-recreate', name], signal),
+      recreate: (name, signal) => this.#composeOrThrow(serviceRecreateArgs(name), signal),
       composeFailure: (command, result) => this.#composeFailure(command, result),
     };
   }
@@ -608,19 +680,12 @@ class LocalDockerSandbox implements Sandbox {
 
   #managed(name: string): ManagedServiceSpec {
     const entry = this.project.managed.find(([serviceName]) => serviceName === name);
-    if (!entry) throw new SandboxError(`'${name}'은(는) 이 프로젝트의 managed 서비스가 아닙니다`);
+    if (!entry) throw new SandboxError(managedServiceRequiredMessage(name));
     return entry[1];
   }
 
   #composeArgs(args: string[]): string[] {
-    return [
-      'compose',
-      '--project-name', this.id,
-      '--project-directory', this.project.root,
-      '--file', this.project.composePath,
-      '--file', this.#overridePath,
-      ...args,
-    ];
+    return composeCommandArgs(this.id, this.project.root, this.project.composePath, this.#overridePath, args);
   }
 
   async #compose(args: string[], signal?: AbortSignal): Promise<ExecResult> {
@@ -703,7 +768,7 @@ class LocalDockerSandbox implements Sandbox {
    * 빌드 실패처럼 코드가 원인일 수 있는 실패가 섞여 있으므로, 도커에 닿지 못한 것이 분명할 때만 플랫폼 쪽으로 표시한다
    */
   #composeFailure(command: string, result: ExecResult): SandboxError {
-    return new SandboxError(`docker compose ${command} 실패 (${this.id})`, describeDockerFailure(this.redact(result.stderr)), { platform: isDockerUnreachable(result.stderr) });
+    return new SandboxError(composeFailureMessage(command, this.id), describeDockerFailure(this.redact(result.stderr)), { platform: isDockerUnreachable(result.stderr) });
   }
 
   /**
@@ -736,7 +801,7 @@ class LocalDockerSandbox implements Sandbox {
       overrideInput: this.#overrideInput(),
       gitMask: this.#gitMask,
       evaluationAssets: this.#evaluationAssets,
-      args: ['up', '--detach', '--remove-orphans', ...upArgs],
+      args: composeUpRemoveOrphansArgs(upArgs),
       sandboxNetwork: SANDBOX_NETWORK,
       egressNetwork: EGRESS_NETWORK,
       edgeService: EDGE_SERVICE,
