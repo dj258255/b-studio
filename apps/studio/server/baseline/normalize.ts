@@ -16,6 +16,8 @@ export interface Normalizer {
 const VOLATILE_KEYS = new Set([
   'durationMs',
   'elapsedMs',
+  'runningForMs',
+  'lastUsageAt',
   'gateMs',
   'toolMs',
   'latencyMs',

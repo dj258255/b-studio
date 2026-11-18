@@ -1,6 +1,6 @@
-import { writeFile } from 'node:fs/promises';
+import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import type { BaselineSnapshot, DiskState, Driver, DockerScenario, WorldOptions } from './harness';
+import { git, type BaselineSnapshot, type DiskState, type Driver, type DockerScenario, type WorldOptions } from './harness';
 
 /**
  * 게이트 판정 표(4f-plan.md "먼저 고정할 판정 표")의 행마다 시나리오 하나. 모두 `/api/sessions/[id]/messages` 경로(stream-json 러너 + 가짜 CLI)로 몬다.
@@ -34,6 +34,8 @@ export interface FakeCli {
   writeBypassingHook: (relativePath: string, content: string) => Promise<void>;
   /** 턴이 끝남(Stop 훅). 게이트가 도는 동안 기다려, 훅의 답(피드백이면 decision: block)을 돌려준다 */
   stop: (text: string) => Promise<Record<string, unknown>>;
+  /** 그 밖의 훅(Notification, SessionEnd, StopFailure …)을 부른다. 대화 id·작업 폴더·기록 경로는 채워 준다 */
+  hook: (step: string, event: string, input: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
 
 export interface ScenarioContext {
@@ -42,6 +44,11 @@ export interface ScenarioContext {
   driver: Driver;
   /** 세션을 만든다(POST /api/sessions). 만든 세션 id를 돌려주고 이벤트를 구독한다 */
   start: (body?: Record<string, unknown>) => Promise<string>;
+  /**
+   * 첫 요청을 함께 보내 세션을 만든다(POST /api/sessions의 route + terminal). 서버가 터미널을 열고 첫 요청을 CLI 실행 인자로 넘기므로, CLI 흉내가 시작·요청 훅을 부른다.
+   * `body`는 route·backend·request·intent 같은 요청 본문. 세션 id와 CLI 흉내를 돌려준다. `silent`면 CLI 흉내가 훅을 부르지 않는다(CLI가 응하지 않는 경우)
+   */
+  startRouted: (body: Record<string, unknown>, options?: { silent?: boolean }) => Promise<{ id: string; claude: FakeCli | undefined }>;
   /** 만든 세션의 작업 복사본(세션 폴더) 경로 */
   workDir: () => string;
   /** 메시지를 보내고 그 실행이 끝날 때까지 기다린다. 끝난 `run_finished` 이벤트를 돌려준다 */
@@ -411,3 +418,407 @@ export const terminalScenarios: Scenario[] = [
     },
   },
 ];
+
+// ── desk가 실제로 부르는 흐름(C1a, #1301): 모두 지원 경로(이 컴퓨터 방식 세션 터미널)다 ──
+export const deskScenarios: Scenario[] = [
+  {
+    name: 'desk-direct-first-request-pass',
+    covers: 'desk의 만들기(route: direct + terminal): 서버가 터미널을 열고 첫 요청을 CLI 실행 인자로 넘기며, 그 요청이 훅으로 이어져 통과하면 체크포인트',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ startRouted }) => {
+      const { claude } = await startRouted({ route: 'direct', backend: 'claude-code', request: 'hello.txt를 고쳐 주세요', intent: 'build' });
+      await claude!.write('app/hello.txt', '첫 요청 수정\n');
+      await claude!.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-rules-first-request-pass',
+    covers: 'desk의 만들기(route: rules + terminal): 규칙이 고른 AI로 세션을 만들고 첫 요청을 CLI 실행 인자로 넘긴다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ startRouted }) => {
+      const { claude } = await startRouted({ route: 'rules', request: 'hello.txt를 고쳐 주세요', intent: 'build' });
+      await claude!.write('app/hello.txt', '규칙으로 고른 수정\n');
+      await claude!.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-first-request-not-started',
+    covers: 'desk의 만들기: 첫 요청을 넘겼지만 CLI가 훅을 부르지 않으면(폴더 신뢰 창 등) 정해진 시간 뒤 안내와 함께 201로 돌려준다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ startRouted }) => {
+      // CLI 흉내가 훅을 부르지 않는다: 서버가 기다리다 안내를 준다
+      await startRouted({ route: 'direct', backend: 'claude-code', request: '대답이 없는 요청', intent: 'build' }, { silent: true });
+    },
+  },
+  {
+    name: 'desk-stop-resume-turn',
+    covers: 'desk의 멈추기(DELETE)와 다시 켜기(resume): 멈춘 세션의 터미널을 다시 열면 이전 대화를 이어 붙여 뜨고, 그 터미널의 한 턴이 통과한다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '멈추기 전 수정\n');
+      await claude.stop('고쳤습니다.');
+      await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
+      await driver.call('멈춘 세션 다시 멈추기', 'DELETE', `/api/sessions/${id}`);
+      await driver.call('다시 켜기', 'POST', `/api/sessions/${id}/resume`);
+      await driver.waitFor('resumed', (event) => event.type === 'resumed');
+      const again = await cli(id);
+      await driver.observeCli('다시 연 CLI가 받은 인자', 2);
+      await again.prompt('한 번 더 고쳐 주세요');
+      await again.write('app/hello.txt', '다시 켠 뒤 수정\n');
+      await again.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-stop-while-running',
+    covers: 'desk의 멈추기: 실행이 열린 채(요청 뒤·턴 끝 전) 멈추면 그 실행을 알림 없이 닫고(끝났다는 이벤트가 없다), 이미 쓴 파일은 되돌리지 않고 남기며, 관문의 서버를 닫고 폴더를 지운다. 다시 켠 뒤의 새 요청은 새 실행이다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      const address = JSON.parse(await readFile(path.join(await driver.gatewayDir(), 'b-studio-gateway.json'), 'utf8')) as { url: string };
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '쓰다 멈춘 수정\n');
+      await driver.call('실행 중 멈추기', 'DELETE', `/api/sessions/${id}`);
+      await driver.call('멈춘 뒤 읽기', 'GET', `/api/sessions/${id}`);
+      // 멈추면 관문의 서버와 설정 폴더도 사라진다(토큰이 든 파일을 남기지 않는다)
+      driver.observe('멈춘 뒤 관문 폴더', 'gateway-entries', await readdir(path.join(driver.world.root, 'gateway')).catch(() => null));
+      driver.observe('멈춘 뒤 관문 서버', 'gateway-reachable', await fetch(`${address.url}/ping`, { method: 'POST', signal: AbortSignal.timeout(3_000) }).then(() => true, () => false));
+      // 다시 켜면 앞 실행은 닫혀 있고, 새 요청은 새 실행이다
+      await driver.call('다시 켜기', 'POST', `/api/sessions/${id}/resume`);
+      await driver.waitFor('resumed', (event) => event.type === 'resumed');
+      const again = await cli(id);
+      await again.prompt('이어서 고쳐 주세요');
+      await again.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-rename',
+    covers: 'desk의 이름 바꾸기(PATCH): 저장하고 이벤트로 알리며, 빈 이름은 지우고, 문자열이 아니면 400',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, driver }) => {
+      const id = await start();
+      await driver.call('이름 바꾸기', 'PATCH', `/api/sessions/${id}`, { label: '주문 목록 작업' });
+      // 저장은 모아서 한다. 세션 기록(session.json)에 이름이 들어갈 때까지 기다려 본다(서버를 끄기 전의 값)
+      driver.observe('저장된 이름', 'session-json-label', await persistedLabel(driver.world.sessionsDir));
+      await driver.call('바뀐 이름 읽기', 'GET', `/api/sessions/${id}`);
+      await driver.call('이름 지우기', 'PATCH', `/api/sessions/${id}`, { label: '' });
+      await driver.call('문자열이 아닌 이름', 'PATCH', `/api/sessions/${id}`, { label: 7 });
+      await driver.call('없는 세션 이름 바꾸기', 'PATCH', '/api/sessions/no-such-session', { label: 'x' });
+      await driver.call('이름 다시 정하기', 'PATCH', `/api/sessions/${id}`, { label: '마지막 이름' });
+    },
+  },
+  {
+    name: 'desk-boot',
+    covers: 'desk의 지금 켜기(boot): 지연 기동 세션의 샌드박스를 켜고 202로 답하며, 서비스 상태가 이벤트로 온다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, driver }) => {
+      const id = await start();
+      await driver.call('지금 켜기', 'POST', `/api/sessions/${id}/boot`);
+      await driver.waitFor('서비스 준비', (event) => event.type === 'status' && event.status === 'ready');
+      await driver.call('이미 켜진 세션 켜기', 'POST', `/api/sessions/${id}/boot`);
+    },
+  },
+  {
+    name: 'desk-check-changes',
+    covers: 'desk의 확인 선언 변경 허용(check-changes): 다음 요청 하나에서 켜고 끄며, boolean이 아니면 400',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, driver }) => {
+      const id = await start();
+      await driver.call('허용 켜기', 'POST', `/api/sessions/${id}/check-changes`, { allow: true });
+      await driver.call('켠 것 읽기', 'GET', `/api/sessions/${id}`);
+      await driver.call('허용 끄기', 'POST', `/api/sessions/${id}/check-changes`, { allow: false });
+      await driver.call('boolean이 아닌 값', 'POST', `/api/sessions/${id}/check-changes`, { allow: 'yes' });
+      await driver.call('없는 세션', 'POST', '/api/sessions/no-such-session/check-changes', { allow: true });
+    },
+  },
+  {
+    name: 'desk-agents-overview',
+    covers: 'desk의 목록(GET /api/agents): 요청이 열려 있는 동안과 통과한 뒤의 세션 항목(상태·게이트·터미널)',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      await driver.call('만든 직후 목록', 'GET', '/api/agents');
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '목록 확인 수정\n');
+      await driver.call('요청이 열려 있는 동안 목록', 'GET', '/api/agents');
+      await claude.stop('고쳤습니다.');
+      await driver.call('통과한 뒤 목록', 'GET', '/api/agents');
+    },
+  },
+  {
+    name: 'desk-agents-stream',
+    covers: 'desk의 목록 통로(GET /api/agents/stream): 처음에 전체(full)를 보내고, 이름이 바뀌면 그 항목만 조각(delta)으로 보낸다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, driver }) => {
+      const id = await start();
+      const stream = await driver.openStream('/api/agents/stream');
+      const full = await stream.waitFor('full', (message) => (message as { type?: string }).type === 'full');
+      driver.observe('처음 조각', 'agents-stream', full);
+      await driver.call('이름 바꾸기', 'PATCH', `/api/sessions/${id}`, { label: '통로 확인용 이름' });
+      const delta = await stream.waitFor('이름이 바뀐 조각', (message) => {
+        const entry = message as { type?: string; items?: Array<{ title?: string }> };
+        return entry.type === 'delta' && (entry.items ?? []).some((item) => item.title?.includes('통로 확인용 이름'));
+      });
+      driver.observe('이름이 바뀐 조각', 'agents-stream', delta);
+    },
+  },
+  {
+    name: 'desk-terminals-stream',
+    covers: 'desk의 터미널 묶음 통로(GET /api/terminals/stream?ids=): 열기·CLI 시작·CLI 끝이 상태 조각으로 오고, 쓸 수 없는 id는 그 id만 닫힘으로 알린다(출력 바이트는 남기지 않는다)',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const stream = await driver.openStream(`/api/terminals/stream?ids=${id},no-such-session`);
+      await stream.waitFor('쓸 수 없는 id', (message) => (message as { id?: string }).id === 'no-such-session');
+      const claude = await cli(id);
+      await stream.waitFor('CLI 시작', (message) => {
+        const entry = message as { id?: string; message?: { kind?: string; alive?: boolean } };
+        return entry.id === id && entry.message?.kind === 'cli' && entry.message.alive === true;
+      });
+      await claude.hook('CLI 끝', 'session-end', { hook_event_name: 'SessionEnd', reason: 'other' });
+      await stream.waitFor('CLI 끝', (message) => {
+        const entry = message as { id?: string; message?: { kind?: string; alive?: boolean } };
+        return entry.id === id && entry.message?.kind === 'cli' && entry.message.alive === false;
+      });
+      // 출력 바이트(data)는 셸의 글이라 남기지 않는다. 상태 조각만 순서대로 남긴다
+      driver.observe('상태 조각', 'terminals-stream', stream.messages.filter((message) => (message as { message?: { kind?: string } }).message?.kind !== 'data'));
+    },
+  },
+  {
+    name: 'desk-hook-notification',
+    covers: '터미널 Notification 훅: 권한 확인 창은 사람을 기다림 표시로 남기고(훅 답은 빈 값), 모르는 종류와 열린 실행 없는 입력 대기는 무시하며, 도구가 다시 움직이면 푼다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.hook('열린 실행 없는 입력 대기', 'notification', { hook_event_name: 'Notification', notification_type: 'idle_prompt', message: 'Claude is waiting for your input' });
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.hook('모르는 종류', 'notification', { hook_event_name: 'Notification', notification_type: 'something_new', message: '모르는 알림' });
+      await claude.hook('권한 확인 창', 'notification', { hook_event_name: 'Notification', notification_type: 'permission_prompt', message: 'Claude needs your permission to use Write' });
+      await driver.call('기다리는 중 읽기', 'GET', `/api/sessions/${id}`);
+      await claude.hook('도구가 끝남', 'activity', { hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: { file_path: 'app/hello.txt' }, tool_use_id: 'toolu_9' });
+      await driver.call('다시 움직인 뒤 읽기', 'GET', `/api/sessions/${id}`);
+      await claude.stop('설명했습니다.');
+    },
+  },
+  {
+    name: 'desk-hook-session-end-closes-run',
+    covers: '터미널 SessionEnd 훅: 검증 결과를 돌려준 적 없이 CLI가 끝나면 열린 실행을 취소로 닫고 바뀐 파일을 되돌린다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '쓰다 끝난 수정\n');
+      await claude.hook('CLI 끝', 'session-end', { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' });
+    },
+  },
+  {
+    name: 'desk-hook-session-end-after-feedback',
+    covers: '터미널 SessionEnd 훅: 검증 실패 피드백을 돌려준 뒤 CLI가 끝나면 그 실행을 실패로 닫고 되돌린다',
+    options: terminalOptions({ files: WITH_TEST, docker: { rules: failExec() } }),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '틀림\n');
+      await claude.stop('첫 시도입니다.');
+      await claude.hook('CLI 끝', 'session-end', { hook_event_name: 'SessionEnd', reason: 'prompt_input_exit' });
+    },
+  },
+  {
+    name: 'desk-hook-stop-failure',
+    covers: '터미널 StopFailure 훅: API 오류로 턴이 끝나면 게이트 없이 실행을 실패로 닫고 되돌린다. 다음 요청은 새 실행으로 통과한다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '오류로 끊긴 수정\n');
+      await claude.hook('API 오류로 턴이 끝남', 'stop-failure', { hook_event_name: 'StopFailure', error: 'rate_limit', error_details: '사용 한도에 닿았습니다' });
+      await claude.prompt('다시 고쳐 주세요');
+      await claude.write('app/hello.txt', '다시 쓴 수정\n');
+      await claude.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-telemetry',
+    covers: '관문 텔레메트리(/v1/logs): 모델 요청의 토큰·비용을 열린 실행에 붙이고 빈 답(200)을 준다. 토큰이 틀리면 거절하고, 객체가 아닌 본문은 5xx로 답한다(CLI는 그대로 돈다)',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      const str = (stringValue: string) => ({ stringValue });
+      const int = (intValue: string) => ({ intValue });
+      const record = [
+        { key: 'event.name', value: str('api_request') },
+        { key: 'model', value: str('claude-sonnet-4-5') },
+        { key: 'input_tokens', value: int('1200') },
+        { key: 'output_tokens', value: int('340') },
+        { key: 'cache_read_tokens', value: int('5000') },
+        { key: 'cache_creation_tokens', value: int('200') },
+        { key: 'cost_usd', value: { doubleValue: 0.0123 } },
+        { key: 'duration_ms', value: int('2100') },
+        { key: 'request_id', value: str('req_1') },
+      ];
+      await driver.telemetry('모델 요청 하나', { resourceLogs: [{ scopeLogs: [{ logRecords: [{ attributes: record }] }] }] });
+      await driver.telemetry('같은 요청 다시', { resourceLogs: [{ scopeLogs: [{ logRecords: [{ attributes: record }] }] }] });
+      await driver.telemetry('틀린 토큰', {}, { token: 'wrong-token' });
+      await driver.telemetry('객체가 아닌 본문', [], {});
+      await driver.telemetry('JSON이 아닌 본문', undefined, { raw: '이것은 JSON이 아닙니다' });
+      await claude.write('app/hello.txt', '텔레메트리 확인 수정\n');
+      await claude.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-gate-file-moved',
+    covers: '게이트가 도는 동안 파일이 더 바뀌면(훅을 거치지 않은 쓰기) 그 검증으로 체크포인트를 남기지 않는다: 지문이 달라진 것을 알아본다',
+    options: terminalOptions({ files: WITH_TEST, docker: { rules: [{ when: ['compose', 'exec', 'true'], delayMs: 4_000 }] } }),
+    files: ['app/hello.txt', 'app/readme.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '게이트 전 수정\n');
+      const stopping = claude.stop('고쳤습니다.');
+      await driver.waitFor('검증 시작', (event) => event.type === 'agent' && (event.event as { type?: string }).type === 'verify_start');
+      // 검증이 도는 동안 CLI가 훅을 거치지 않고 다른 파일을 바꾼다
+      await claude.writeBypassingHook('app/readme.txt', '검증 중에 바뀐 파일\n');
+      await stopping;
+      // 피드백을 받은 CLI가 파일을 더 건드리지 않고 다시 끝낸다: 바뀐 파일까지 포함해 검증하고 통과한다
+      await claude.stop('다시 끝냅니다.');
+    },
+  },
+  {
+    name: 'desk-gateway-tamper',
+    covers: '관문 감시: 열린 실행 중에 관문 설정(settings.json)을 고치면 위반으로 그 실행을 실패로 닫고 되돌리며, 설정 파일은 쓴 그대로 되돌려 놓는다. 다음 요청은 새 실행으로 통과한다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      const settings = path.join(await driver.gatewayDir(), 'settings.json');
+      const original = await readFile(settings, 'utf8');
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '위반 전 수정\n');
+      await writeFile(settings, '{"hooks":{}}\n');
+      await driver.waitFor('위반으로 닫힘', (event) => event.type === 'run_finished' && event.status === 'failed', 60_000);
+      driver.observe('관문 설정 되돌림', 'gateway-settings-restored', await restoredTo(settings, original));
+      await claude.prompt('다시 고쳐 주세요');
+      await claude.write('app/hello.txt', '위반 뒤 수정\n');
+      await claude.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-user-commit-unwound',
+    covers: '터미널 밖의 커밋(사용자가 같은 브랜치에 커밋을 얹음): 기억한 체크포인트의 자손이면 커밋을 풀어(reset --soft) 변경을 검증에 넣고, 통과하면 체크포인트를 남긴다',
+    options: terminalOptions(),
+    files: ['app/hello.txt', 'app/user.txt'],
+    run: async ({ start, cli, workDir }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '에이전트 수정\n');
+      await writeFile(path.join(workDir(), 'app/user.txt'), '사용자 파일\n');
+      await git(workDir(), ['add', '-A']);
+      await git(workDir(), ['commit', '--quiet', '-m', '사용자가 직접 한 커밋']);
+      await claude.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-user-branch-switch-reverted',
+    covers: '터미널 밖의 브랜치 바꿈: 풀 수 없는 모양이라 변경을 보관본으로 남기고 마지막 체크포인트로 되돌린 뒤 실행을 실패로 닫는다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, workDir }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '브랜치를 바꾸기 전 수정\n');
+      await git(workDir(), ['checkout', '--quiet', '-b', 'user-branch']);
+      await claude.stop('고쳤습니다.');
+    },
+  },
+  {
+    name: 'desk-check-changes-first-request',
+    covers: '만들기에서 켠 확인 선언 변경 허용(allowCheckChanges)은 첫 요청 하나만 받아들인다: studio.yaml의 test를 바꾼 첫 요청은 체크포인트가 되고, 다음 요청의 같은 종류의 변경은 막힌다',
+    options: terminalOptions({ files: WITH_TEST }),
+    files: ['studio.yaml'],
+    run: async ({ startRouted, driver }) => {
+      const declared = await readFile(path.join(driver.world.projectsDir, driver.world.projectId, 'studio.yaml'), 'utf8');
+      const { id, claude } = await startRouted({ route: 'direct', backend: 'claude-code', request: '테스트 명령을 바꿔 주세요', intent: 'build', allowCheckChanges: true });
+      await driver.call('요청을 가져간 뒤 읽기', 'GET', `/api/sessions/${id}`);
+      await claude!.write('studio.yaml', declared.replace('"true"', '"echo weakened"'));
+      await claude!.stop('확인 선언을 바꿨습니다.');
+      await claude!.prompt('테스트 명령을 또 바꿔 주세요');
+      await claude!.write('studio.yaml', declared.replace('"true"', '"echo weaker still"'));
+      await claude!.stop('확인 선언을 또 바꿨습니다.');
+    },
+  },
+  {
+    name: 'desk-create-errors',
+    covers: 'desk의 만들기 요청 검사: 규칙과 backend를 함께 보내면, 요청이 비면, route 없이 terminal을 보내면, 알 수 없는 값이면 400, 없는 프로젝트는 404. 어느 것도 세션을 만들지 않는다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, driver }) => {
+      await start();
+      const post = (step: string, body: Record<string, unknown>) => driver.call(step, 'POST', '/api/sessions', { projectId: 'demo', ...body });
+      await post('규칙과 backend를 함께', { route: 'rules', backend: 'claude-code', request: 'x', terminal: true });
+      await post('요청이 비어 있음', { route: 'direct', backend: 'claude-code', request: '  ', terminal: true });
+      await post('route 없이 terminal', { terminal: true });
+      await post('알 수 없는 route', { route: 'random', request: 'x', terminal: true });
+      await post('직접 고르는데 backend 없음', { route: 'direct', request: 'x', terminal: true });
+      await post('알 수 없는 intent', { route: 'direct', backend: 'claude-code', request: 'x', intent: 'plan', terminal: true });
+      await post('terminal이 true가 아님', { route: 'direct', backend: 'claude-code', request: 'x', terminal: false });
+      await post('allowCheckChanges가 boolean이 아님', { route: 'direct', backend: 'claude-code', request: 'x', terminal: true, allowCheckChanges: 'yes' });
+      await post('서버가 허용하지 않는 백엔드', { route: 'direct', backend: 'gemini', request: 'x', terminal: true });
+      await driver.call('없는 프로젝트', 'POST', '/api/sessions', { projectId: 'no-such-project', route: 'direct', backend: 'claude-code', request: 'x', terminal: true });
+      await driver.call('projectId 없음', 'POST', '/api/sessions', { route: 'direct', backend: 'claude-code', request: 'x', terminal: true });
+      await driver.call('만든 세션 목록', 'GET', '/api/sessions');
+    },
+  },
+];
+
+/** 감시가 관문 설정을 되돌릴 때까지 잠깐 기다려 같아졌는지 본다 */
+async function restoredTo(file: string, original: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 60; attempt++) {
+    if ((await readFile(file, 'utf8').catch(() => '')) === original) return true;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return false;
+}
+
+/** 세션 기록(session.json)에 이름이 저장될 때까지(최대 10초) 기다려 그 이름을 읽는다. 저장되지 않으면 null */
+async function persistedLabel(sessionsDir: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const dirs = await readdir(sessionsDir).catch(() => [] as string[]);
+    for (const dir of dirs) {
+      const saved = await readFile(path.join(sessionsDir, dir, '.git', 'b-studio', 'session.json'), 'utf8').catch(() => '');
+      const label = saved ? ((JSON.parse(saved) as { snapshot?: { label?: string } }).snapshot?.label ?? null) : null;
+      if (label) return label;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return null;
+}

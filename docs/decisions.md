@@ -9715,6 +9715,44 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **F0가 못 한 것**(이유와 함께): ① 지문 없음(빈 지문, 닫힌 쪽): `claude-code` 러너는 지문을 항상 싣는다. 지문을 싣지 않는 러너는 실험 러너라 HTTP 바깥에서 만들 수 없다 → 러너 코드의 단위 시험이 맡는다. ② 체크포인트 세부(지문은 git blob id, `.gitattributes`·autocrlf, 실행 비트, 링크, 안쪽 저장소, 생성 파일 스냅샷, `index.lock` 재시도, `HeadMovedError`, 내 폴더 방식의 gitDir, 보관본 `rm -r`): 흐름 수준의 사진으로는 안 보이는 입력 조합이다 → A1의 차등 시험(옛 TS와 새 구현을 같은 입력으로)이 맡는다. ③ 보호 경로의 "되돌림" 비교(ADR-196)와 위치로 넘김, 1MiB 상한: `/messages`의 쓰기 도구는 쓰기 자리에서 거절돼서 비교까지 가지 않는다. 셸로 바꾼 경우는 서비스 안 명령이 필요해 가짜 docker로 흉내 내기 어렵다 → A3의 차등 시험. ④ 도커 정책 순서의 세부: 가짜 docker의 `compose config`가 마운트 없는 서비스를 돌려줘서 `.git` 가림 계획이 만들어지지 않는다(`findMissingMasks`와 platform 실패 `compose-provider.ts:1093` 경로, created·started 두 번째 확인, 시크릿·override 순서는 닿지 않는다). 정책 위반 한 가지(`privileged`)와 `rm --force` 뒤 시작하지 않음만 고정했다 → A4가 마운트가 있는 `config`를 가짜 docker에 더한다. ⑤ 터미널의 `tracker.rejected`, 게이트 중 바뀐 파일(moved), 카드 쓰기 범위, 감시가 찾은 위반(`pendingViolation`), `reconcileTerminalGit`, 게이트가 끝나기 전 개요가 통과로 보이지 않음(#1155): 카드 레인(실험), 호스트 파일 감시 타이머, 에이전트가 git을 직접 움직이는 입력, `/api/agents` 스트림이 더 필요하다 → B4 때 시나리오로 더한다. ⑥ 컨테이너 방식 세션 터미널: 도커 안에서 도는 PTY가 필요하다(가짜 docker가 못 흉내 낸다). 실험이고 D0에서 호스트를 고르면 지운다. ⑦ 게이트의 화면 확인(`browser_check`, playwright)과 `Workflow-Passed: none` 금지(`hasEmptyPassedTrailer`): 시나리오에 넣지 않았다 → A5·A6에서. ⑧ 진짜 CLI의 stream-json·훅 입력과 같은지, 진짜 docker가 같은 출력을 내는지는 이 장치로 알 수 없다(가짜끼리의 약속이다) → 실제 세션 실측(★)이 맡는다.
 - **옛 동작에서 찾은 것**: 터미널의 읽기만 요청이 훅을 우회해 파일을 바꾸면 실행은 실패로 닫히지만, 지연 기동 세션이라 샌드박스가 꺼져 있으면 되돌리지 못한다. 그런데 실패 글은 "되돌렸습니다"로 시작한다(`terminal-read-only-bypass-not-reverted-when-sandbox-off`). F0에서는 고치지 않고 기준 사진에 그때 동작을 그대로 넣었다(트러블슈팅 185). 그 뒤 #1163에서 고쳤고 시나리오 이름을 `terminal-read-only-bypass-reverted-when-sandbox-off`로 바꿨다.
 
+### 덧붙임: C1a — desk 흐름의 기준 사진(2026-11-18, [#1301](https://github.com/dj258255/b-studio/issues/1301))
+
+F0의 사진은 터미널 시나리오가 7개뿐이라, desk가 실제로 부르는 흐름 대부분이 Rust 대상과 견줄 사진이 없었다. 시나리오 22개를 더했다(모두 `options.terminal`, 앞단 + Node 대상). 제품 코드는 바꾸지 않았고, 기존 24개 사진은 바이트까지 그대로다. 프로세스 밖에서만 관찰한다(HTTP·SSE·디스크·훅 스크립트·관문 주소 파일·가짜 docker·가짜 claude가 받은 argv). 프로세스 안 시험용 주입 함수는 쓰지 않았다.
+
+| 시나리오 | 고정하는 동작 |
+| --- | --- |
+| desk-direct-first-request-pass, desk-rules-first-request-pass | 만들기(route direct·rules + terminal): 서버가 터미널을 열고 첫 요청을 CLI 실행 인자의 마지막 낱말로 넘긴다(가짜 claude의 argv: `--mcp-config`·`--settings` 뒤). 그 요청이 훅으로 이어져 통과하면 체크포인트 |
+| desk-first-request-not-started | CLI가 훅을 부르지 않으면 정해진 시간 뒤 안내(`pasteError`)와 함께 201 |
+| desk-create-errors | 만들기 본문 검사 11가지(400·404). 세션이 만들어지지 않는다 |
+| desk-check-changes-first-request | 만들기의 `allowCheckChanges`는 첫 요청 하나만: studio.yaml의 test를 바꾼 첫 요청은 체크포인트, 다음 요청의 같은 변경은 막힌다 |
+| desk-stop-resume-turn | DELETE(두 번째 DELETE도 같은 답) → resume → 터미널을 다시 열면 `--resume <대화 id>`로 뜨고 한 턴 통과. 이어 열 때 이전 실행의 이벤트가 같은 연결로 다시 온다 |
+| desk-stop-while-running | 실행이 열린 채 멈추면 끝났다는 이벤트 없이 닫히고, 쓴 파일은 되돌리지 않으며, 관문 폴더를 비우고 관문 서버를 닫는다. 다시 켠 뒤 새 요청은 새 실행 |
+| desk-rename | PATCH: 응답·이벤트·세션 기록(session.json) 저장, 빈 이름은 지움, 문자열이 아니면 400, 없는 세션 404 |
+| desk-boot, desk-check-changes | boot의 202와 서비스 상태 이벤트, check-changes의 켜기·끄기·400·404 |
+| desk-agents-overview | `GET /api/agents`: 만든 직후(dormant)·실행 중(working, 지금 하는 일)·통과 뒤(passed) |
+| desk-agents-stream | `GET /api/agents/stream`: 처음 `full`, 이름이 바뀌면 그 항목만 `delta` |
+| desk-terminals-stream | `GET /api/terminals/stream?ids=`: 열기·CLI 시작·끝이 상태 조각으로 오고 쓸 수 없는 id는 그 id만 닫힘. 출력 바이트(data)는 셸의 글이라 남기지 않는다 |
+| desk-hook-notification | 권한 확인 창은 사람 기다림 표시, 모르는 종류와 열린 실행 없는 입력 대기는 무시, 도구가 움직이면 풂. 훅 응답은 빈 값 |
+| desk-hook-session-end-closes-run, desk-hook-session-end-after-feedback | SessionEnd: 피드백 없이 끝나면 취소로 닫고 되돌림, 피드백 뒤 끝나면 실패로 닫고 되돌림 |
+| desk-hook-stop-failure | StopFailure: 게이트 없이 실패로 닫고 되돌림. 다음 요청은 새 실행으로 통과(앞 요청의 되돌림 안내가 요청 훅 답에 실린다) |
+| desk-telemetry | `/v1/logs`: 모델 요청의 토큰·비용이 열린 실행에 붙고(같은 request_id는 한 번), 빈 답. 틀린 토큰 401, 객체가 아니거나 JSON이 아닌 본문 500 |
+| desk-gate-file-moved | 게이트가 도는 동안 훅을 거치지 않고 바뀐 파일이 있으면 통과로 인정하지 않고 피드백(`decision: block`). 다시 끝내면 바뀐 파일까지 포함해 통과 |
+| desk-gateway-tamper | 열린 실행 중 관문 `settings.json`을 고치면 감시가 그 실행을 실패로 닫고 되돌리고 설정을 되돌려 놓는다. 다음 요청은 새 실행으로 통과 |
+| desk-user-commit-unwound, desk-user-branch-switch-reverted | `reconcileTerminalGit`: 사용자가 같은 브랜치에 커밋을 얹으면 풀어 검증에 넣고 통과, 브랜치를 바꾸면 보관본을 남기고 되돌려 실패 |
+
+**못 한 것과 이유**
+- 이슈 본문의 "check-changes: 바뀐 것 있음/없음"은 실제 API가 아니다. check-changes는 다음 요청에서 확인 선언 변경을 허용하는 스위치라서 그 뜻으로 고정했다.
+- 훅 `/notification`·`/session-end`·`/stop-failure`·`/v1/logs`의 입력 모양은 기존 `FakeCli`처럼 진짜 CLI의 입력을 보고 흉내 낸 값이다. 진짜 CLI와 같다는 보장은 없다.
+- 멈출 때 열린 실행을 닫는 단계(`settle_terminal_run`)는 변이로 잡히지 않았다. 닫는 결과가 메모리에만 있고(끝났다는 이벤트도 없고 session.json은 읽을 때 중단으로 본다) 프로세스 밖에서 볼 수 있는 값이 없다. 관찰할 방법이 생기면 더한다.
+- `/api/agents/stream`의 타이머 조각(사용량 갱신 등)은 남기지 않고, 처음 `full`과 이름이 바뀐 항목의 `delta`만 고른다. `/api/terminals/stream`도 같다.
+- `/messages` 경로는 더하지 않았다(D4 전). 게이트 중 바뀐 파일과 위반은 `moved`·`violation` 가운데 파일이 바뀐 것과 설정 변조를 다뤘고, 훅 없이 뜬 CLI(ps 검사)는 다루지 않았다.
+
+**하네스 변경**(기존 사진은 바뀌지 않았다): `Driver.call`의 쿠키를 터미널 통로 말고 check-changes·`/api/terminals/*`에도 싣고 `after`를 받는다. `observe`·`gatewayDir`·`observeCli`(가짜 claude의 argv)·`telemetry`·`openStream`(SSE)을 더했다. `startRouted`(첫 요청 넘기기 + 그 사이의 시작·요청 훅)를 더했다. 정규화는 시간 측정인 `runningForMs`·`lastUsageAt`을 가린다(기존 사진에는 없는 키).
+
+**변이**(제품 코드 한 줄씩 바꾸고 되돌림, 시나리오별 시험을 돌림): 권한 확인 알림 무시 → desk-hook-notification, `/notification` 훅 응답 바꿈 → desk-hook-notification, StopFailure가 실행을 닫지 않음 → desk-hook-stop-failure, 텔레메트리를 실행에 붙이지 않음 → desk-telemetry, SessionEnd가 실행을 닫지 않음 → desk-hook-session-end 둘, 멈출 때 관문을 닫지 않음 → desk-stop-while-running, 이름 바꾸기를 저장하지 않음 → desk-rename, 이름 바꾸기 이벤트를 내지 않음 → desk-rename. 8개 모두 잡혔다. 멈출 때 열린 실행을 닫지 않는 변이만 잡히지 않았다(위).
+
+**시간**: desk 시나리오 22개를 한 번에(동시) 돌리면 약 55초(이 기기에서 잰 값, 세 번 연달아 54~56초). 사진은 세 번 연달아 만들어 바이트까지 같았다. 정규화에 `lastUsageAt`을 더하기 전에는 텔레메트리 한 개가 흔들렸다(에포크 ms 값이 사진에 들어 있었다).
+
 ### 덧붙임: A1 1부 결과 — 체크포인트의 git·tar 실행을 Rust로 (2026-11-11, [#1165](https://github.com/dj258255/b-studio/issues/1165))
 
 - 옮긴 것: `packages/agent/src/checkpoints.ts`의 `execFile`·`spawn` 전부. `git ...`(`runGit`·`runGitBuffer`, `#git`·`#gitBytes`·`#remoteGit`이 모두 여기를 지난다), `check-ignore -z --stdin`(`#ignoredDirs`), `git archive | tar -x --no-same-owner`(`exportTree`). `checkpoints.ts`에 `node:child_process`·`node:util`의 `promisify`가 남지 않는다. 인자 배열(`GIT_HARDENING` 포함), 환경(`gitEnv()`, 통째로 바꿈), 재시도·오류 문구, 판정은 그대로 두고 실행 경계만 바꿨다.
