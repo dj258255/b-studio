@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { chmod, lstat, mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, readdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { native } from './native';
@@ -614,6 +614,18 @@ export async function removeHostGatewayConfig(sandboxId: string, root: string = 
     const target = path.join(dir, name);
     if (!(await lstatChild(path.dirname(target), target))) continue;
     await rm(target, { force: true }).catch(() => {});
+  }
+  // CLI가 끝나 터미널이 zsh로 돌아가면 compinit이 ZDOTDIR(관문의 shell/zsh)에 `.zcompdump*`를 쓴다(#1296). 다시 만들어지는 캐시라 지운다.
+  // 진짜 shell/zsh 바로 아래의 이름만 본다. 링크면 링크 자리만 지우고(rm은 링크를 따라가지 않는다) 폴더는 건드리지 않는다
+  const zsh = path.join(dir, ZSH_DIR);
+  const zshInfo = await lstatChild(path.dirname(zsh), zsh);
+  if (zshInfo?.isDirectory() && !zshInfo.isSymbolicLink()) {
+    for (const name of await readdir(zsh).catch(() => [] as string[])) {
+      if (!name.startsWith('.zcompdump')) continue;
+      const target = path.join(zsh, name);
+      const info = await lstat(target).catch(() => undefined);
+      if (info && (info.isFile() || info.isSymbolicLink())) await rm(target, { force: true }).catch(() => {});
+    }
   }
   // 진짜 폴더만 비었을 때 지운다(역순)
   for (const name of [...GATEWAY_DIRS].reverse()) {
