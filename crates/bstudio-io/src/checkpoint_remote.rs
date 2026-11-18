@@ -55,7 +55,7 @@ const PUSH_TIMEOUT_MS: u64 = 120_000;
 const GIT_MAX_BUFFER: usize = 64 * 1024 * 1024;
 const INDEX_LOCK_RETRY_DELAYS_MS: [u64; 7] = [25, 50, 100, 200, 400, 800, 1400];
 /// b-studio가 부르는 git은 저장소의 훅과 fsmonitor·전역 속성 파일을 쓰지 않는다(이슈 #699). 모든 호출의 맨 앞에 붙인다
-const GIT_HARDENING: [&str; 6] = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null"];
+pub(crate) const GIT_HARDENING: [&str; 6] = ["-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "core.attributesFile=/dev/null"];
 
 /// TS 콜백. 요청(JSON 글)을 받아 응답(JSON 글)을 돌려준다. 호출이 실패하면 `None`(TS가 던진 오류는 TS가 들고 있다)
 pub type Hook = Arc<dyn Fn(String) -> Pin<Box<dyn Future<Output = Option<String>> + Send>> + Send + Sync>;
@@ -69,6 +69,8 @@ pub enum Fail {
     Conflict(Vec<String>),
     /// `StagedMismatchError(files)` — 검증한 생성 파일 지문과 지금 디스크가 다르다
     StagedMismatch(Vec<String>),
+    /// `HeadMovedError(expected, actual)` — 커밋하려는데 HEAD가 기대한 커밋이 아니다
+    HeadMoved { expected: String, actual: String },
     /// 파일 I/O 실패. 옛 코드가 `fs`에서 받아 그대로 던지던 `Error`다(백업·스냅샷을 쓰다 난 오류)
     Io(String),
     /// 콜백이 실패했다. TS가 콜백에서 잡은 오류를 그대로 던진다
@@ -107,6 +109,8 @@ pub struct Repo {
     pub hook: Option<Hook>,
     /// `CheckpointStore`의 커밋 작성자 이메일(`encodeLoneSurrogates`한 꼴). `#checkpoint`가 통과 기록을 읽을 커밋인지 가른다
     pub author_email: Option<String>,
+    /// 커밋 작성자 이름(`encodeLoneSurrogates`한 꼴). 저장소 설정(`user.name`)에 쓸 때 되돌린다
+    pub author_name: Option<String>,
     /// `excludedFiles` 제공자가 있는가. 없으면 생성 파일 사이드카를 만들지 않는다(옛 코드의 `this.#excludedFiles` 검사)
     pub has_excluded_files: bool,
 }
@@ -122,7 +126,7 @@ fn arg(text: &str) -> String {
 }
 
 /// JS `text.slice(0, n)`(UTF-16 단위). 인코딩 이스케이프는 단위 하나로 센다
-fn units_prefix(text: &str, n: usize) -> String {
+pub(crate) fn units_prefix(text: &str, n: usize) -> String {
     let chars: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let (mut at, mut units) = (0, 0);
@@ -140,7 +144,7 @@ fn units_prefix(text: &str, n: usize) -> String {
     out
 }
 
-fn trim(text: &str) -> String {
+pub(crate) fn trim(text: &str) -> String {
     js::trim(text).to_owned()
 }
 
@@ -163,7 +167,7 @@ fn network_command(args: &[String]) -> bool {
     }
 }
 
-fn git_env() -> Vec<(String, String)> {
+pub(crate) fn git_env() -> Vec<(String, String)> {
     git_env_from(std::env::vars_os().map(|(k, v)| (k.to_string_lossy().into_owned(), v.to_string_lossy().into_owned())).collect())
 }
 
@@ -336,7 +340,7 @@ impl Repo {
         self.git(g!["config", "--get", format!("b-studio.{key}")]).await.ok().map(|out| trim(&out)).and_then(non_empty)
     }
 
-    async fn set_meta(&self, key: &str, value: &str) -> Res<()> {
+    pub(crate) async fn set_meta(&self, key: &str, value: &str) -> Res<()> {
         self.git(g!["config", format!("b-studio.{key}"), value]).await.map(|_| ())
     }
 
@@ -372,7 +376,7 @@ impl Repo {
     }
 
     /// 실패를 거짓으로 읽는다(옛 `#isAncestor`와 같다)
-    async fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
+    pub(crate) async fn is_ancestor(&self, ancestor: &str, descendant: &str) -> bool {
         self.git(g!["merge-base", "--is-ancestor", ancestor, descendant]).await.is_ok()
     }
 
@@ -812,6 +816,7 @@ pub async fn run(op: &str, input: &str, hook: Option<Hook>) -> String {
         subdir: str_field(&input, "subdir"),
         hook,
         author_email: str_field(&input, "authorEmail"),
+        author_name: str_field(&input, "authorName"),
         has_excluded_files: input.get("hasExcludedFiles").and_then(Value::as_bool).unwrap_or(false),
     };
     let remembered = remembered(&input);
@@ -841,6 +846,12 @@ pub async fn run(op: &str, input: &str, hook: Option<Hook>) -> String {
             out.insert("ok".into(), json!(false));
             out.insert("kind".into(), json!("io"));
             out.insert("message".into(), json!(message));
+        }
+        Err(Fail::HeadMoved { expected, actual }) => {
+            out.insert("ok".into(), json!(false));
+            out.insert("kind".into(), json!("head_moved"));
+            out.insert("expected".into(), json!(expected));
+            out.insert("actual".into(), json!(actual));
         }
         Err(Fail::Hook) => {
             out.insert("ok".into(), json!(false));
@@ -900,7 +911,17 @@ mod tests {
     }
 
     fn repo(dir: &Path, git_bin: &str, hook: Option<Hook>) -> Repo {
-        Repo { root: dir.to_string_lossy().into_owned(), git_bin: git_bin.to_owned(), git_dir: None, start: None, subdir: None, hook, author_email: None, has_excluded_files: false }
+        Repo {
+            root: dir.to_string_lossy().into_owned(),
+            git_bin: git_bin.to_owned(),
+            git_dir: None,
+            start: None,
+            subdir: None,
+            hook,
+            author_email: None,
+            author_name: None,
+            has_excluded_files: false,
+        }
     }
 
     fn init(dir: &Path) {

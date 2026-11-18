@@ -27,7 +27,7 @@ use bstudio_guard::node_path;
 use bstudio_guard::workflow;
 use serde_json::{json, Map, Value};
 
-use crate::checkpoint_remote::{node_error_message, sort_utf16, Fail, Repo, Res};
+use crate::checkpoint_remote::{node_error_message, sort_utf16, trim, Fail, Repo, Res};
 
 const BACKUP_DIRNAME: &str = "b-studio/discarded";
 /// 백업은 이 개수를 넘으면 오래된 것부터 지운다. 방금 만든 백업은 이 한도를 넘어도 지우지 않는다
@@ -46,6 +46,12 @@ const WORKFLOW_VERIFY_TRAILER: &str = "Workflow-Verify";
 const WORKFLOW_INCOMPLETE_TRAILER: &str = "Workflow-Incomplete";
 
 const MAX_PATCH_CHARS: usize = 200_000;
+/// git 한 번의 stdout·stderr 상한(바이트). 넘으면 멈추고 던진다
+const GIT_MAX_BUFFER: usize = 64 * 1024 * 1024;
+/// 샌드박스가 프로젝트 폴더에 만드는 생성물. 사용자 프로젝트의 .gitignore를 건드리지 않고 이 저장소에서만 제외한다
+const GENERATED: [&str; 9] = ["node_modules/", ".next/", "build/", ".gradle/", ".venv/", "__pycache__/", "*.tsbuildinfo", "next-env.d.ts", "*.b-studio-relay-*"];
+/// 중첩 저장소를 찾을 때의 상한. 닿으면 "확인하지 못함"(fail-closed)이다
+const NESTED_LIMIT: usize = 100;
 
 macro_rules! g {
     ($($arg:expr),* $(,)?) => { vec![$(String::from($arg)),*] };
@@ -76,9 +82,9 @@ fn opt_text(input: &Value, key: &str) -> Option<String> {
     input.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-/// `[키, 값]` 쌍 목록(`expected`). `null`이면 없다
-fn expected_pairs(input: &Value) -> Option<Vec<(String, String)>> {
-    let items = input.get("expected")?.as_array()?;
+/// `[키, 값]` 쌍 목록. `null`이면 없다
+fn pairs(input: &Value, key: &str) -> Option<Vec<(String, String)>> {
+    let items = input.get(key)?.as_array()?;
     Some(
         items
             .iter()
@@ -194,6 +200,14 @@ async fn remove_any(path: &str) -> std::io::Result<()> {
             Err(error) if error.kind() == NotFound => Ok(()),
             other => other,
         },
+    }
+}
+
+/// 스테이징 폴더를 지우고 원래 오류를 돌려준다. 정리에서 난 오류가 원래 오류를 덮어쓴다(옛 코드의 `catch { await rm(...); throw error }`와 같다)
+async fn cleanup_staged(dir: &str, original: Fail) -> Fail {
+    match remove_any(dir).await {
+        Ok(()) => original,
+        Err(error) => io_fail(error, "rm", dir),
     }
 }
 
@@ -601,8 +615,7 @@ impl Repo {
             if let Some(bytes) = &content {
                 let to = node_path::join(&[&files_dir, file]);
                 if let Err(error) = write_create(&to, bytes).await {
-                    let _ = remove_any(&dir).await;
-                    return Err(io_fail(error, "open", &to));
+                    return Err(cleanup_staged(&dir, io_fail(error, "open", &to)).await);
                 }
             }
         }
@@ -611,22 +624,15 @@ impl Repo {
                 Some(base) => base,
                 None => match self.head_sha().await {
                     Ok(head) => head,
-                    Err(error) => {
-                        let _ = remove_any(&dir).await;
-                        return Err(error);
-                    }
+                    Err(error) => return Err(cleanup_staged(&dir, error).await),
                 },
             };
             let mismatched = match self.excluded_mismatch(expected, &dir, &manifest, &links, &base).await {
                 Ok(mismatched) => mismatched,
-                Err(error) => {
-                    let _ = remove_any(&dir).await;
-                    return Err(error);
-                }
+                Err(error) => return Err(cleanup_staged(&dir, error).await),
             };
             if !mismatched.is_empty() {
-                let _ = remove_any(&dir).await;
-                return Err(Fail::StagedMismatch(mismatched));
+                return Err(cleanup_staged(&dir, Fail::StagedMismatch(mismatched)).await);
             }
         }
         Ok(Staged { dir, manifest })
@@ -830,7 +836,7 @@ impl Repo {
     // ── 되살리기 백업 ───────────────────────────────────────────────────
 
     /// 인덱스 전체(base 대비)를 되살릴 수 있는 패치로 저장하고 생성 파일의 지금 내용도 함께 담는다(옛 `#backupChanges`)
-    async fn backup_changes(&mut self, tracked: &[String], excluded: &[Value], base: &str, id: &str, created_at: &str) -> Res<Value> {
+    async fn backup_changes(&mut self, tracked: &[String], excluded: &[Value], base: &str) -> Res<Value> {
         // --binary로 바이너리 파일도 되살릴 수 있게 하고, 백업은 화면에 보여줄 것이 아니라 캡 없이 전체를 남긴다
         let patch = if tracked.is_empty() {
             String::new()
@@ -840,7 +846,9 @@ impl Repo {
         if js::trim(&patch).is_empty() && excluded.is_empty() {
             return Ok(Value::Null);
         }
-        let dir = backup_dir(self, id);
+        // 백업 id와 만든 시각은 필요할 때만 TS에서 받는다(옛 코드는 버릴 것이 없으면 `backupId()`를 부르지 않았다)
+        let (id, created_at) = self.backup_identity().await?;
+        let dir = backup_dir(self, &id);
         if let Err(error) = tokio::fs::create_dir_all(&dir).await {
             return Err(io_fail(error, "mkdir", &dir));
         }
@@ -891,7 +899,7 @@ impl Repo {
         if let Err(error) = tokio::fs::write(&target, text).await {
             return Err(io_fail(error, "open", &target));
         }
-        self.prune_backups(id).await?;
+        self.prune_backups(&id).await?;
         Ok(backup)
     }
 
@@ -938,6 +946,552 @@ impl Repo {
     }
 }
 
+// ── 쓰기(D1c) ──────────────────────────────────────────────────────────
+
+impl Repo {
+    /// 백업 id와 만든 시각은 TS가 정한다(옛 `backupId()`와 `new Date()`를 그대로 잇는다). 버릴 것이 없으면 부르지 않는다
+    async fn backup_identity(&self) -> Res<(String, String)> {
+        let answer = self.hook(json!({ "op": "backupIdentity" })).await?;
+        let id = answer.get("id").and_then(Value::as_str).ok_or(Fail::Hook)?.to_owned();
+        let created_at = answer.get("createdAt").and_then(Value::as_str).ok_or(Fail::Hook)?.to_owned();
+        Ok((id, created_at))
+    }
+
+    /// 마지막 체크포인트 이후 바뀐 파일(프로젝트 기준, 정렬). 중첩 저장소 검사를 겸한다(옛 `pendingFiles`)
+    async fn pending_files(&mut self) -> Res<Vec<String>> {
+        self.assert_no_nested_repos().await?;
+        let scope = self.scope().await;
+        let output = self.git(cat(vec![g!["status", "--porcelain=v1", "-z", "--untracked-files=all"], scope])).await?;
+        // 판정 함수는 raw 글자를 받는다(옛 TS가 `#git`의 raw 출력을 넘겼다). git 출력은 인코딩된 꼴이므로 되돌린다
+        let subdir = dec(&self.subdir().await);
+        Ok(sort_utf16(cg::pending_files(&dec(&output), &subdir)))
+    }
+
+    /// 사용자 전역 설정(커밋 훅, 서명)이 체크포인트 커밋을 막거나 입력을 기다리며 멈추지 않도록 이 저장소에만 설정한다
+    async fn configure(&self) -> Res<()> {
+        let hooks = node_path::join(&[&self.git_dir_path(), "b-studio-hooks"]);
+        if let Err(error) = tokio::fs::create_dir_all(&hooks).await {
+            return Err(io_fail(error, "mkdir", &hooks));
+        }
+        self.git(g!["config", "core.hooksPath", hooks]).await?;
+        self.git(g!["config", "commit.gpgsign", "false"]).await?;
+        self.git(g!["config", "user.name", dec(self.author_name.as_deref().unwrap_or(""))]).await?;
+        self.git(g!["config", "user.email", dec(self.author_email.as_deref().unwrap_or(""))]).await?;
+        self.exclude_generated().await
+    }
+
+    async fn exclude_generated(&self) -> Res<()> {
+        let file = node_path::join(&[&self.git_dir_path(), "info", "exclude"]);
+        let parent = node_path::dirname(&file);
+        if let Err(error) = tokio::fs::create_dir_all(&parent).await {
+            return Err(io_fail(error, "mkdir", &parent));
+        }
+        let current = read_text(&file).await.unwrap_or_default();
+        let lines: HashSet<&str> = current.split('\n').collect();
+        let missing: Vec<&str> = GENERATED.iter().copied().filter(|pattern| !lines.contains(pattern)).collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        let separator = if current.is_empty() || current.ends_with('\n') { "" } else { "\n" };
+        let text = format!("{separator}# b-studio 샌드박스 생성물\n{}\n", missing.join("\n"));
+        use tokio::io::AsyncWriteExt;
+        let mut handle = tokio::fs::OpenOptions::new().append(true).create(true).open(&file).await.map_err(|error| io_fail(error, "open", &file))?;
+        if let Err(error) = handle.write_all(text.as_bytes()).await {
+            return Err(io_fail(error, "write", &file));
+        }
+        Ok(())
+    }
+
+    /// 저장소가 없으면 만들고, 지금 상태를 첫 체크포인트로 남긴다(옛 `init`)
+    async fn init(&mut self, message: &str) -> Res<Value> {
+        if let Some(dir) = self.git_dir.clone() {
+            // 작업 폴더가 다른 저장소(사용자의 저장소) 안에 있어도 그 저장소를 쓰지 않고 따로 만든다
+            let exists = tokio::fs::metadata(node_path::join(&[&dir, "HEAD"])).await.is_ok();
+            if !exists {
+                let parent = node_path::dirname(&dir);
+                if let Err(error) = tokio::fs::create_dir_all(&parent).await {
+                    return Err(io_fail(error, "mkdir", &parent));
+                }
+                self.git(g!["init", "-q", "-b", "main"]).await?;
+            }
+        } else {
+            let toplevel = match self.git(g!["rev-parse", "--show-toplevel"]).await {
+                Ok(output) => Some(resolve_real(&js::trim(&output)).await),
+                Err(_) => None,
+            };
+            if toplevel.as_deref() != Some(resolve_real(&self.root).await.as_str()) {
+                self.git(g!["init", "-q", "-b", "main"]).await?;
+            }
+        }
+
+        self.configure().await?;
+        self.assert_no_nested_repos().await?;
+        self.git(g!["add", "-A"]).await?;
+        self.git(g!["commit", "-q", "--allow-empty", "-m", cg::one_line(message)]).await?;
+        let head = trim(&self.git(g!["rev-parse", "HEAD"]).await?);
+        if self.get_meta("start").await.is_none() {
+            self.set_meta("start", &head).await?;
+        }
+        let checkpoint = self.checkpoint(&head).await?;
+        let sha = checkpoint.get("sha").and_then(Value::as_str).unwrap_or("").to_owned();
+        self.refresh_excluded_snapshot(&sha, None).await?;
+        Ok(checkpoint)
+    }
+
+    /// expectedHead를 주면 지금 HEAD가 그것과 같은지 보고, 그 sha(주지 않았으면 지금 HEAD)를 돌려준다(이슈 #706)
+    async fn expect_head(&self, expected: Option<&str>) -> Res<String> {
+        let head = trim(&self.git(g!["rev-parse", "--verify", "HEAD^{commit}"]).await?);
+        if let Some(expected) = expected {
+            if head != expected {
+                return Err(Fail::HeadMoved { expected: expected.to_owned(), actual: head });
+            }
+        }
+        Ok(head)
+    }
+
+    /// 스테이징된 변경이 기대한 지문과 다른 파일들(옛 `#stagedMismatch`). 기대는 TS가 encode한 꼴이고 결과도 그 꼴이다
+    async fn staged_mismatch(&mut self, expected: &[(String, String)]) -> Res<Vec<String>> {
+        let scope = self.scope().await;
+        let staged = self.git(cat(vec![g!["diff", "--cached", "--name-only", "--no-renames", "-z"], scope.clone()])).await?;
+        let index = self.git(cat(vec![g!["ls-files", "--stage", "-z"], scope])).await?;
+        // 판정 함수는 raw git 출력·raw subdir을 받고 기대(TS가 encode한 것)만 인코딩된 꼴로 받는다
+        let subdir = dec(&self.subdir().await);
+        let keys: Vec<String> = expected.iter().map(|(key, _)| key.clone()).collect();
+        let values: Vec<String> = expected.iter().map(|(_, value)| value.clone()).collect();
+        Ok(cg::staged_mismatch(&dec(&index), &dec(&staged), &subdir, &keys, &values))
+    }
+
+    /// TS `sandbox.findSecrets`(콜백). 글자는 인코딩해 넘겨 짝 없는 서로게이트가 경계에서 바뀌지 않게 한다
+    async fn find_secrets(&self, text: &str) -> Res<Vec<String>> {
+        let answer = self.hook(json!({ "op": "findSecrets", "text": cg::encode_reserved(text) })).await?;
+        Ok(string_array(answer.get("secrets")))
+    }
+
+    /// "파일 (시크릿 이름)" 목록. 값은 담지 않는다(옛 `#secretLeaks`)
+    async fn secret_leaks(&mut self, files: &[String], text: &str, has_find_secrets: bool) -> Res<Vec<String>> {
+        if !has_find_secrets {
+            return Ok(Vec::new());
+        }
+        let mut leaks = Vec::new();
+        let in_text = self.find_secrets(text).await?;
+        if !in_text.is_empty() {
+            leaks.push(format!("커밋 메시지 ({})", in_text.join(", ")));
+        }
+        let project_root = project_root(self).await;
+        for file in files {
+            // 옛 코드는 읽지 못한 파일을 건너뛰었다(검사는 하되 그 파일의 내용으로 막지 않는다)
+            let content = read_text(&node_path::join(&[&project_root, file])).await;
+            let found = match content {
+                Some(content) => self.find_secrets(&content).await?,
+                None => Vec::new(),
+            };
+            if !found.is_empty() {
+                leaks.push(format!("{file} ({})", found.join(", ")));
+            }
+        }
+        Ok(leaks)
+    }
+
+    /// 트리와 부모를 정해 커밋을 만들고, HEAD가 아직 그 부모일 때만 HEAD를 옮긴다(이슈 #706, 옛 `#commitTree`)
+    async fn commit_tree(&self, tree: &str, parent: &str, message: &str, allow_empty: bool) -> Res<String> {
+        if !allow_empty {
+            let parent_tree = trim(&self.git(g!["rev-parse", format!("{parent}^{{tree}}")]).await?);
+            if tree == parent_tree {
+                return fail("git commit 실패: 커밋할 변경이 없습니다");
+            }
+        }
+        let sha = trim(&self.git(g!["commit-tree", tree, "-p", parent, "-m", message]).await?);
+        let reflog = format!("commit: {}", message.split('\n').next().unwrap_or(""));
+        match self.git(g!["update-ref", "-m", reflog, "HEAD", &sha, parent]).await {
+            Ok(_) => Ok(sha),
+            Err(error) => {
+                let head = trim(&self.git(g!["rev-parse", "--verify", "HEAD"]).await.unwrap_or_default());
+                if head != parent {
+                    return Err(Fail::HeadMoved { expected: parent.to_owned(), actual: head });
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// 바뀐 파일이 있으면 체크포인트로 남긴다(옛 `commit`)
+    async fn commit(&mut self, input: &Value) -> Res<Value> {
+        let message = text(input, "message");
+        let body = opt_text(input, "body");
+        let allow_empty = input.get("allowEmpty").and_then(Value::as_bool).unwrap_or(false);
+        let trailers = string_array(input.get("trailers"));
+        let expect_staged = pairs(input, "expectStaged");
+        let expect_excluded = pairs(input, "expectExcluded");
+        let expected_head = opt_text(input, "expectedHead");
+        let has_find_secrets = input.get("hasFindSecrets").and_then(Value::as_bool).unwrap_or(false);
+        let has_on_committed = input.get("hasOnCommitted").and_then(Value::as_bool).unwrap_or(false);
+
+        let pending = self.pending_files().await?; // pendingFiles가 중첩 저장소 검사를 겸한다
+        if !allow_empty && pending.is_empty() {
+            return Ok(Value::Null);
+        }
+        // 부모는 스테이징하기 전에 정한다. 그 뒤에 끼어든 커밋은 HEAD를 옮길 때 걸린다
+        let parent = self.expect_head(expected_head.as_deref()).await?;
+        // 마지막 방어선(ADR-131): 코드 변경이 있는데 "통과한 단계 없음" 트레일러면 남기지 않는다
+        let code_files: Vec<String> = pending.iter().filter(|file| !workflow::is_doc_checkpoint_path(file)).cloned().collect();
+        if !code_files.is_empty() && workflow::has_empty_passed_trailer(&trailers) && !workflow::has_docs_verify_trailer(&trailers) {
+            return fail(format!("검증 게이트를 거치지 않은 코드 변경이 있어 체크포인트를 남기지 않았습니다: {}", code_files.iter().take(20).cloned().collect::<Vec<_>>().join(", ")));
+        }
+        // 검증 게이트는 에이전트 도구로 쓴 파일만 보지만, 커밋은 명령이 만든 파일까지 담는다. 올리기 전 마지막으로 막는다
+        if has_find_secrets {
+            let leaks = self.secret_leaks(&pending, &format!("{message}\n{}", body.clone().unwrap_or_default()), true).await?;
+            if !leaks.is_empty() {
+                return fail(format!("시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: {}", leaks.join(", ")));
+            }
+        }
+        // add는 저장소 설정의 필터를 돈다. 돌기 전에 설정을 본다(이슈 #706)
+        self.assert_safe_local_git().await?;
+        let scope = self.scope().await;
+        self.git(cat(vec![g!["add", "-A"], scope.clone()])).await?;
+        if let Some(expected) = &expect_staged {
+            let mismatched = match self.staged_mismatch(expected).await {
+                Ok(mismatched) => mismatched,
+                Err(error) => {
+                    let _ = self.git(cat(vec![g!["reset", "-q"], scope.clone()])).await;
+                    return Err(error);
+                }
+            };
+            if !mismatched.is_empty() {
+                let _ = self.git(cat(vec![g!["reset", "-q"], scope.clone()])).await;
+                return Err(Fail::StagedMismatch(mismatched));
+            }
+        }
+        let mut excluded: Option<Staged> = None;
+        if let Some(expected) = &expect_excluded {
+            match self.stage_excluded_snapshot(Some(expected.clone()), None).await {
+                Ok(staged) => excluded = Some(staged),
+                Err(error) => {
+                    let _ = self.git(cat(vec![g!["reset", "-q"], scope.clone()])).await;
+                    return Err(error);
+                }
+            }
+        }
+        let text_body = body.as_deref().map(|value| js::trim(value).to_owned());
+        let tree = trim(&self.git(g!["write-tree"]).await?);
+        let message_text = cg::commit_message(&message, text_body.as_deref(), &trailers);
+        let sha = match self.commit_tree(&tree, &parent, &message_text, allow_empty).await {
+            Ok(sha) => sha,
+            Err(error) => {
+                let _ = self.git(cat(vec![g!["reset", "-q"], scope])).await;
+                // 옛 코드는 이 정리에서 난 오류가 원래 오류를 덮어쓰게 두었다
+                if let Some(staged) = &excluded {
+                    if let Err(remove) = remove_any(&staged.dir).await {
+                        return Err(io_fail(remove, "rm", &staged.dir));
+                    }
+                }
+                return Err(error);
+            }
+        };
+        if has_on_committed {
+            self.hook(json!({ "op": "onCommitted", "sha": sha })).await?;
+        }
+        let checkpoint = self.checkpoint(&sha).await?;
+        let checkpoint_sha = checkpoint.get("sha").and_then(Value::as_str).unwrap_or("").to_owned();
+        if let Some(staged) = &excluded {
+            self.place_excluded_snapshot(&checkpoint_sha, staged).await?;
+        } else {
+            self.refresh_excluded_snapshot(&checkpoint_sha, None).await?;
+        }
+        Ok(checkpoint)
+    }
+
+    /// 지정한 경로만 범위로 체크포인트를 남긴다(옛 `commitPaths`)
+    async fn commit_paths(&mut self, input: &Value) -> Res<Value> {
+        let paths = string_array(input.get("paths"));
+        if paths.is_empty() {
+            return Ok(Value::Null);
+        }
+        let message = text(input, "message");
+        let body = opt_text(input, "body");
+        let trailers = string_array(input.get("trailers"));
+        let expected_head = opt_text(input, "expectedHead");
+        let has_find_secrets = input.get("hasFindSecrets").and_then(Value::as_bool).unwrap_or(false);
+        let temp_id = text(input, "tempIndexId");
+
+        let subdir = dec(&self.subdir().await);
+        let scoped: Vec<String> = paths.iter().map(|file| if subdir.is_empty() { file.clone() } else { format!("{subdir}/{file}") }).collect();
+        // 경로는 파일 이름 그대로다(git이 glob·pathspec 매직으로 읽지 않게 한다, ADR-218)
+        let literal = [("GIT_LITERAL_PATHSPECS", "1")];
+        let changed = cg::split_nul(
+            &self.run_git_env(cat(vec![g!["status", "--porcelain=v1", "-z", "--untracked-files=all", "--"], scoped.clone()]), &literal).await?,
+        );
+        if changed.is_empty() {
+            return Ok(Value::Null);
+        }
+        if has_find_secrets {
+            let leaks = self.secret_leaks(&paths, &format!("{message}\n{}", body.clone().unwrap_or_default()), true).await?;
+            if !leaks.is_empty() {
+                return fail(format!("시크릿 값이 들어 있어 체크포인트를 남기지 않았습니다: {}", leaks.join(", ")));
+            }
+        }
+        let parent = self.expect_head(expected_head.as_deref()).await?;
+        self.assert_safe_local_git().await?;
+        // 부모의 트리에 이 경로들만 얹은 트리를 따로 만든다. 진짜 인덱스의 다른 스테이징은 건드리지 않는다
+        let git_dir = trim(&self.git(g!["rev-parse", "--absolute-git-dir"]).await?);
+        let index = node_path::join(&[&git_dir, &format!("b-studio-index-{}-{temp_id}", std::process::id())]);
+        let index_env = [("GIT_INDEX_FILE", index.as_str()), ("GIT_LITERAL_PATHSPECS", "1")];
+        let built: Res<String> = async {
+            self.run_git_env(g!["read-tree", &parent], &index_env).await?;
+            self.run_git_env(cat(vec![g!["add", "-A", "--"], scoped.clone()]), &index_env).await?;
+            Ok(trim(&self.run_git_env(g!["write-tree"], &index_env).await?))
+        }
+        .await;
+        // `finally` — 정리에서 난 오류가 결과를 덮어쓴다(옛 코드와 같다)
+        let remove_error = match tokio::fs::remove_file(&index).await {
+            Ok(()) => None,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(io_fail(error, "rm", &index)),
+        };
+        if let Some(error) = remove_error {
+            return Err(error);
+        }
+        let tree = built?;
+        // 만든 트리가 부모와 다른 경로는 넘긴 경로뿐이어야 한다. 하나라도 범위 밖이면 커밋하지 않는다
+        let allowed: HashSet<String> = scoped.iter().cloned().collect();
+        let touched: Vec<String> = cg::split_nul(&self.git(g!["diff-tree", "-r", "--no-renames", "--name-only", "-z", &parent, &tree]).await?).into_iter().map(|file| dec(&file)).collect();
+        let outside: Vec<String> = touched.into_iter().filter(|file| !allowed.contains(file)).collect();
+        if !outside.is_empty() {
+            return fail(format!("지정한 경로 밖의 파일이 함께 담겨 체크포인트를 남기지 않았습니다: {}", outside.iter().take(5).cloned().collect::<Vec<_>>().join(", ")));
+        }
+        self.run_git_env(cat(vec![g!["add", "-A", "--"], scoped]), &literal).await?;
+        let text_body = body.as_deref().map(|value| js::trim(value).to_owned());
+        let message_text = cg::commit_message(&message, text_body.as_deref(), &trailers);
+        let sha = self.commit_tree(&tree, &parent, &message_text, false).await?;
+        let checkpoint = self.checkpoint(&sha).await?;
+        let checkpoint_sha = checkpoint.get("sha").and_then(Value::as_str).unwrap_or("").to_owned();
+        // 범위를 좁힌 커밋이라 생성 파일은 바꾸지 않았다 — 부모의 스냅샷을 그대로 물려받는다
+        self.carry_forward_excluded_snapshot(&parent, &checkpoint_sha).await?;
+        Ok(checkpoint)
+    }
+
+    /// 마지막 체크포인트 이후의 변경을 버린다(옛 `discard`)
+    async fn discard(&mut self) -> Res<Value> {
+        let files = self.pending_files().await?;
+        let head = self.head_sha().await?;
+        let excluded = self.excluded_diff(&head).await?;
+        if files.is_empty() && excluded.is_empty() {
+            return Ok(json!({ "files": files, "patch": "" }));
+        }
+        let scope = self.scope().await;
+        let mut patch = String::new();
+        if !files.is_empty() {
+            self.git(cat(vec![g!["add", "-A"], scope.clone()])).await?;
+            let relative = self.relative().await;
+            patch = self.git(cat(vec![g!["diff", "--cached", "--no-color"], relative, g!["HEAD"]])).await?;
+        }
+        let backup = self.backup_changes(&files, &excluded, "HEAD").await?;
+        if !files.is_empty() {
+            self.git(g!["reset", "-q", "--hard", "HEAD"]).await?;
+            self.git(cat(vec![g!["clean", "-q", "-fd"], scope])).await?;
+        }
+        let reverted = self.apply_excluded_diff(&excluded).await?;
+        let mut merged: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for file in files.into_iter().chain(reverted) {
+            if seen.insert(file.clone()) {
+                merged.push(file);
+            }
+        }
+        Ok(json!({ "files": sort_utf16(merged), "patch": cg::cap_text(&patch, MAX_PATCH_CHARS), "backup": backup }))
+    }
+
+    /// 이 세션 기록에 있는 체크포인트로 되돌린다(옛 `restore`)
+    async fn restore(&mut self, sha: &str) -> Res<Value> {
+        let commit = self.resolve(sha).await?;
+        let start = self.start_sha().await?;
+        let in_session = self.is_ancestor(&start, &commit).await && self.is_ancestor(&commit, "HEAD").await;
+        if !in_session {
+            return fail("현재 세션 기록에 없는 체크포인트입니다");
+        }
+        let scope = self.scope().await;
+        let pending = self.pending_files().await?;
+        let relative = self.relative().await;
+        let committed: Vec<String> = cg::split_nul(&self.git(cat(vec![g!["diff", "--name-only", "-z"], relative, g![&commit, "HEAD"]])).await?).into_iter().map(|file| dec(&file)).collect();
+        let excluded = self.excluded_diff(&commit).await?;
+        self.git(cat(vec![g!["add", "-A"], scope.clone()])).await?;
+        let backup = self.backup_changes(&pending, &excluded, "HEAD").await?;
+        self.git(g!["reset", "-q", "--hard", &commit]).await?;
+        self.git(cat(vec![g!["clean", "-q", "-fd"], scope])).await?;
+        let reverted = self.apply_excluded_diff(&excluded).await?;
+        let mut merged: Vec<String> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for file in pending.into_iter().chain(committed).chain(reverted) {
+            if seen.insert(file.clone()) {
+                merged.push(file);
+            }
+        }
+        Ok(json!({ "checkpoint": self.checkpoint(&commit).await?, "files": sort_utf16(merged), "backup": backup }))
+    }
+}
+
+// ── 걷기(D1c) ──────────────────────────────────────────────────────────
+
+enum Partition<'a> {
+    Repo(&'a Repo),
+    Hook(&'a crate::checkpoint_remote::Hook),
+}
+
+impl Partition<'_> {
+    async fn ignored(&self, dirs: Vec<String>) -> Res<HashSet<String>> {
+        match self {
+            Partition::Repo(repo) => repo.ignored_dirs(&dirs).await,
+            Partition::Hook(hook) => {
+                let answer = hook(json!({ "op": "partitionIgnored", "dirs": dirs }).to_string()).await.ok_or(Fail::Hook)?;
+                let value: Value = serde_json::from_str(&answer).map_err(|_| Fail::Hook)?;
+                if value.get("ok") != Some(&Value::Bool(true)) {
+                    return Err(Fail::Hook);
+                }
+                Ok(string_array(value.get("ignored")).into_iter().collect())
+            }
+        }
+    }
+}
+
+/// 작업 폴더를 걸으며 최상위 저장소가 아니고 git이 무시하지도 않는 `.git`을 모은다(fail-closed용. 옛 `findNestedGitRepos`)
+fn walk_repos<'a>(
+    base: &'a str,
+    root: &'a str,
+    top: Option<&'a str>,
+    limit: usize,
+    partition: &'a Partition<'a>,
+    found: &'a mut Vec<String>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Res<()>> + Send + 'a>> {
+    Box::pin(async move {
+        if found.len() >= limit {
+            return Ok(());
+        }
+        let mut entries = match tokio::fs::read_dir(root).await {
+            Ok(entries) => entries,
+            // 읽을 수 없는 폴더는 건너뛴다(권한 등). 옛 코드와 같다
+            Err(_) => return Ok(()),
+        };
+        let mut subdirs: Vec<String> = Vec::new();
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let full = node_path::join(&[root, &name]);
+            if cg::is_dot_git(&name) {
+                let is_top = top.map_or(false, |top| node_path::resolve(&cwd(), &[&full]) == top);
+                if !is_top {
+                    found.push(node_path::relative(&cwd(), base, &full));
+                }
+                continue; // .git 안으로는 들어가지 않는다
+            }
+            let Ok(file_type) = entry.file_type().await else { continue };
+            if file_type.is_symlink() || !file_type.is_dir() {
+                continue;
+            }
+            subdirs.push(full);
+        }
+        if found.len() >= limit || subdirs.is_empty() {
+            return Ok(());
+        }
+        let relatives: Vec<String> = subdirs.iter().map(|sub| node_path::relative(&cwd(), base, sub)).collect();
+        let ignored = partition.ignored(relatives).await?;
+        for sub in subdirs {
+            if found.len() >= limit {
+                return Ok(());
+            }
+            let relative = node_path::relative(&cwd(), base, &sub);
+            if !ignored.contains(&relative) {
+                walk_repos(base, &sub, top, limit, partition, found).await?;
+            }
+        }
+        Ok(())
+    })
+}
+
+impl Repo {
+    /// 주어진 프로젝트 기준 디렉터리 경로 중 git이 무시하는 집합(옛 `#ignoredDirs`). 실패는 통과가 아니다
+    async fn ignored_dirs(&self, paths: &[String]) -> Res<HashSet<String>> {
+        if paths.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let location: Vec<String> = match &self.git_dir {
+            Some(dir) => g!["--git-dir", dir, "--work-tree", &self.root],
+            None => Vec::new(),
+        };
+        let full = cat(vec![crate::checkpoint_remote::GIT_HARDENING.iter().map(|arg| (*arg).to_owned()).collect(), g!["-C", &self.root], location, g!["check-ignore", "-z", "--stdin"]]);
+        let input = paths.join("\0");
+        let env = crate::checkpoint_remote::git_env();
+        let out = crate::process_bytes::run_command_bytes(
+            &self.git_bin,
+            &full,
+            Some(input.as_bytes()),
+            Some(&env),
+            None,
+            std::future::pending::<()>(),
+            GIT_MAX_BUFFER + 1,
+        )
+        .await;
+        let stderr = || js::trim(&String::from_utf8_lossy(&out.stderr)).to_owned();
+        if let Some(spawn) = &out.spawn_error {
+            return fail(format!("중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore ENOENT): {spawn}"));
+        }
+        if out.stdout.len() > GIT_MAX_BUFFER || out.stderr.len() > GIT_MAX_BUFFER {
+            return fail(format!("중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore ERR_CHILD_PROCESS_STDIO_MAXBUFFER): {}", stderr()));
+        }
+        if out.aborted {
+            return fail(format!("중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore null): {}", stderr()));
+        }
+        match out.exit_code {
+            Some(0) | Some(1) => Ok(String::from_utf8_lossy(&out.stdout).split('\0').filter(|file| !file.is_empty()).map(str::to_owned).collect()),
+            code => fail(format!("중첩 저장소의 무시 여부를 확인하지 못했습니다 (check-ignore {}): {}", code.map_or_else(|| "null".to_owned(), |code| code.to_string()), stderr())),
+        }
+    }
+
+    /// 작업 폴더 안에 추적되는 중첩 git 저장소가 있으면 던진다. 한도에 닿으면 "확인하지 못함"으로 던진다(fail-closed)
+    async fn assert_no_nested_repos(&self) -> Res<()> {
+        let limit = NESTED_LIMIT;
+        let top = node_path::resolve(&cwd(), &[&self.root, ".git"]);
+        let partition = Partition::Repo(self);
+        let mut found = Vec::new();
+        walk_repos(&self.root, &self.root, Some(&top), limit, &partition, &mut found).await?;
+        if found.len() >= limit {
+            return fail(format!("작업 폴더 안에 추적되는 git 저장소가 너무 많아({limit}개 이상) 안전을 확인하지 못했습니다. 중첩된 git 저장소를 지우거나 작업 폴더 밖으로 옮기세요"));
+        }
+        if found.is_empty() {
+            return Ok(());
+        }
+        let sample = format!("{}{}", found.iter().take(3).cloned().collect::<Vec<_>>().join(", "), if found.len() > 3 { " 등" } else { "" });
+        fail(format!(
+            "작업 폴더 안에 다른 git 저장소가 있습니다({sample}). 체크포인트는 작업 폴더 전체를 하나의 저장소로 다루므로, 중첩된 git 저장소를 지우거나 작업 폴더 밖으로 옮긴 뒤 다시 시도하세요"
+        ))
+    }
+}
+
+/// `findNestedGitRepos` op. 훅으로 `partitionIgnored`를 부른다
+async fn find_nested_git_repos(repo: &Repo, input: &Value) -> Res<Value> {
+    let root = text(input, "root");
+    let top = opt_text(input, "top");
+    let limit = input.get("limit").and_then(Value::as_i64).unwrap_or(NESTED_LIMIT as i64).max(0) as usize;
+    let hook = repo.hook.as_ref().ok_or(Fail::Hook)?;
+    let partition = Partition::Hook(hook);
+    let mut found = Vec::new();
+    walk_repos(&root, &root, top.as_deref(), limit, &partition, &mut found).await?;
+    Ok(json!(found))
+}
+
+fn dec(text: &str) -> String {
+    js::well_formed_from_encoded(text)
+}
+
+fn cwd() -> String {
+    std::env::current_dir().map(|dir| dir.to_string_lossy().into_owned()).unwrap_or_else(|_| ".".to_owned())
+}
+
+/// Node `fs.realpath` 실패 시 `path.resolve`(옛 `resolveReal`)
+async fn resolve_real(path: &str) -> String {
+    match tokio::fs::canonicalize(path).await {
+        Ok(real) => real.to_string_lossy().into_owned(),
+        Err(_) => node_path::resolve(&cwd(), &[path]),
+    }
+}
+
 /// napi 입구 하나로 들어온 로컬 연산. 모르는 이름이면 `None`(부르는 쪽이 오류를 만든다)
 pub(crate) async fn dispatch(repo: &mut Repo, op: &str, input: &Value) -> Option<Res<Value>> {
     Some(match op {
@@ -951,8 +1505,8 @@ pub(crate) async fn dispatch(repo: &mut Repo, op: &str, input: &Value) -> Option
         "diffSince" => repo.diff_since(&text(input, "sha")).await,
         "commitBefore" => repo.commit_before(&text(input, "iso")).await,
         "discardedBackups" => repo.discarded_backups().await,
-        "refreshExcludedSnapshot" => repo.refresh_excluded_snapshot(&opt_text(input, "sha").unwrap_or_else(|| "HEAD".to_owned()), expected_pairs(input)).await,
-        "stageExcludedSnapshot" => match repo.stage_excluded_snapshot(expected_pairs(input), opt_text(input, "base")).await {
+        "refreshExcludedSnapshot" => repo.refresh_excluded_snapshot(&opt_text(input, "sha").unwrap_or_else(|| "HEAD".to_owned()), pairs(input, "expected")).await,
+        "stageExcludedSnapshot" => match repo.stage_excluded_snapshot(pairs(input, "expected"), opt_text(input, "base")).await {
             Ok(staged) => Ok(json!({ "dir": staged.dir, "manifest": Value::Object(staged.manifest) })),
             Err(error) => Err(error),
         },
@@ -982,9 +1536,17 @@ pub(crate) async fn dispatch(repo: &mut Repo, op: &str, input: &Value) -> Option
         "ignoredChangedSince" => repo.ignored_changed_since(&opt_text(input, "sha").unwrap_or_else(|| "HEAD".to_owned())).await,
         "backupChanges" => {
             let excluded = input.get("excluded").and_then(Value::as_array).cloned().unwrap_or_default();
-            repo.backup_changes(&string_array(input.get("trackedFiles")), &excluded, &text(input, "base"), &text(input, "id"), &text(input, "createdAt")).await
+            repo.backup_changes(&string_array(input.get("trackedFiles")), &excluded, &text(input, "base")).await
         }
         "pruneBackups" => repo.prune_backups(&text(input, "keepId")).await.map(|()| Value::Null),
+        "configure" => repo.configure().await.map(|()| Value::Null),
+        "init" => repo.init(&text(input, "message")).await,
+        "commit" => repo.commit(input).await,
+        "commitPaths" => repo.commit_paths(input).await,
+        "discard" => repo.discard().await,
+        "restore" => repo.restore(&text(input, "sha")).await,
+        "assertNoNestedRepos" => repo.assert_no_nested_repos().await.map(|()| Value::Null),
+        "findNestedGitRepos" => find_nested_git_repos(repo, input).await,
         _ => return None,
     })
 }
@@ -1016,6 +1578,7 @@ mod tests {
             subdir: Some(String::new()),
             hook: None,
             author_email: Some("t@e".into()),
+            author_name: Some("t".into()),
             has_excluded_files: false,
         }
     }
@@ -1114,9 +1677,18 @@ mod tests {
     async fn 백업은_패치와_생성_파일_내용과_메타를_남긴다() {
         let dir = tempfile::tempdir().unwrap();
         init(dir.path());
-        let mut repo = repo(dir.path());
         let excluded = vec![json!({ "file": "studio.yaml", "before": b64(b"two\n") })];
-        let backup = repo.backup_changes(&[], &excluded, "HEAD", "id-1", "2026-11-18T00:00:00.000Z").await.expect("backup");
+        let hook: Hook = Arc::new(|request| {
+            Box::pin(async move {
+                if request.contains("backupIdentity") {
+                    Some("{\"ok\":true,\"id\":\"id-1\",\"createdAt\":\"2026-11-18T00:00:00.000Z\"}".to_owned())
+                } else {
+                    Some("{\"ok\":true}".to_owned())
+                }
+            })
+        });
+        let mut repo = Repo { hook: Some(hook), ..repo(dir.path()) };
+        let backup = repo.backup_changes(&[], &excluded, "HEAD").await.expect("backup");
         assert_eq!(backup, json!({ "id": "id-1", "files": ["studio.yaml"], "createdAt": "2026-11-18T00:00:00.000Z" }));
         assert_eq!(std::fs::read(backup_dir(&repo, "id-1") + "/excluded/studio.yaml").unwrap(), b"two\n");
         assert_eq!(std::fs::read_to_string(backup_dir(&repo, "id-1") + "/excluded-manifest.json").unwrap(), "{\"studio.yaml\":true}");

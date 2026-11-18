@@ -4961,7 +4961,8 @@ use napi::bindgen_prelude::Promise;
 /// `op`: repository · headState · remoteUrl · uncommitTo · recordPullRequest · assertTrustedGit · assertSafeLocalGit · pullRequestTarget · push · integrateRemote · acceptRemote · baseStatus · integrateBase · restoreRememberedHead,
 /// 그리고 로컬 경로·사이드카(D1a): checkpoint · list · patch · fileAt · blobAt · listBlobs · sessionDiff · diffSince · commitBefore ·
 /// discardedBackups · refreshExcludedSnapshot · stageExcludedSnapshot · placeExcludedSnapshot · carryForwardExcludedSnapshot ·
-/// excludedDiff · applyExcludedDiff · pendingExcludedFiles · ignoredChangedSince · backupChanges · pruneBackups.
+/// excludedDiff · applyExcludedDiff · pendingExcludedFiles · ignoredChangedSince · backupChanges · pruneBackups,
+/// 쓰기·걷기(D1c): configure · init · commit · commitPaths · discard · restore · assertNoNestedRepos · findNestedGitRepos.
 /// `hook`은 요청(JSON 글)을 받아 응답(JSON 글)을 돌려주는 JS 함수다. 던지지 않고 결과(`ok`)로 돌려준다
 #[napi]
 pub fn checkpoint_remote(env: Env, op: String, input: String, hook: ThreadsafeFunction<String, Promise<String>, String, Status, false>) -> Result<AsyncBlock<String>> {
