@@ -131,15 +131,20 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
     }
 }
 
-/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게 맞춘다). 요소 `--settings` 바로 다음 요소가 `settings_path`와 글자 그대로 같거나, 요소 하나가 `--settings=<settings_path>`이고,
-/// argv 전체에서 `--settings`·`--settings=…` 요소가 그것 하나뿐이어야 한다. 요청 글처럼 한 요소 안에 `--settings`가 섞인 것은 세지 않는다(ps 한 줄은 따옴표를 잃어 이것을 가르지 못했다)
-pub fn hooked_argv(argv: &[String], settings_path: &str) -> bool {
-    let is_option = |element: &String| element == "--settings" || element.starts_with("--settings=");
-    if argv.iter().filter(|element| is_option(element)).count() != 1 {
+/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게 맞춘다). 감싸개는 늘 `exec <cli> --mcp-config <M> --settings <S> "$@"`로 부르므로 그 **정확한 자리**만 인정한다:
+/// - argv에서 `--mcp-config`가 처음 나오는 자리를 i라 할 때 `argv[i..i+4] == ["--mcp-config", M, "--settings", S]`(M은 관문 폴더의 mcp.json, S는 settings.json)
+/// - i는 1이거나, 2이면서 argv[1]이 CLI 스크립트(`/@anthropic-ai/claude-code/`가 든 경로. node가 띄운 꼴)일 때뿐이다
+/// - argv 전체에서 `--settings`·`--settings=…` 요소가 그 하나뿐이다(사용자가 덧붙인 덮어쓰기는 붙지 않은 것)
+///
+/// 요청 글처럼 한 요소 안에 섞인 `--settings`는 세지 않는다(ps 한 줄은 따옴표를 잃어 가르지 못했다). `--`(그 뒤는 요청 글)나 값을 받는 다른 옵션(`--model --settings S`)이 `--settings`를 값으로
+/// 먹는 꼴은 자리가 맞지 않아 인정하지 않는다. `--settings=<S>` 꼴은 감싸개가 쓰지 않으므로 인정하지 않는다
+pub fn hooked_argv(argv: &[String], settings_path: &str, mcp_path: &str) -> bool {
+    if argv.iter().filter(|element| *element == "--settings" || element.starts_with("--settings=")).count() != 1 {
         return false;
     }
-    let joined = format!("--settings={settings_path}");
-    argv.iter().enumerate().any(|(at, element)| (element == "--settings" && argv.get(at + 1).is_some_and(|next| next == settings_path)) || *element == joined)
+    let Some(at) = argv.iter().position(|element| element == "--mcp-config") else { return false };
+    let slot_ok = at == 1 || (at == 2 && argv.get(1).is_some_and(|script| script.contains(CLAUDE_PACKAGE_MARK)));
+    slot_ok && argv.get(at..at + 4).is_some_and(|four| four[1] == mcp_path && four[2] == "--settings" && four[3] == settings_path)
 }
 
 /// 트리를 앞 순서로 훑어 `keep`이 참인 프로세스의 pid를 모은다. 같은 pid는 한 번만 본다. 깊이가 깊어도 넘치지 않게 스택을 직접 둔다

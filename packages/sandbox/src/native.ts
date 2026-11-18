@@ -390,8 +390,8 @@ interface NativeGuard {
   terminalFindUnhookedCli(root: number, processes: Array<{ pid: number; ppid: number; args: string }>, kind: string, cliPath: string, marker: string): number[] | null;
   /** 루트 아래의 에이전트 CLI로 보이는 프로세스의 pid(ps 한 줄로, 넓게). 루트를 모르면 null이다 */
   terminalCliCandidates(root: number, processes: Array<{ pid: number; ppid: number; args: string }>, kind: string, cliPath: string): number[] | null;
-  /** 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게): `--settings <경로>` 또는 `--settings=<경로>`가 하나뿐일 때 */
-  terminalHookedArgv(argv: string[], settingsPath: string): boolean;
+  /** 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게): 감싸개가 부르는 정확한 자리 `--mcp-config <M> --settings <S>`이고 `--settings`가 하나뿐일 때 */
+  terminalHookedArgv(argv: string[], settingsPath: string, mcpPath: string): boolean;
   /** 프로세스의 진짜 argv. 끝났으면 null, 읽지 못하면 던진다 */
   terminalProcessArgv(pid: number): string[] | null;
   /** 훅 요청 본문 종류(ADR-219): `empty`·`object`·`not_object`·`invalid` */

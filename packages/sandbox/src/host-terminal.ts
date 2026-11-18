@@ -696,7 +696,7 @@ export function processArgv(pid: number): string[] | null {
 /**
  * 감시가 쓰는 판정(ADR-219 후속): claude는 ps 한 줄이 아니라 **진짜 argv**로 훅이 붙었는지 본다. `ps`의 인자 한 줄은 낱말마다 따옴표를 잃어
  * 첫 요청 글(실행 인자로 실린다)에 든 `--settings`가 진짜 옵션과 구별되지 않았다. 후보(ps 한 줄로 CLI로 보이는 것, 넓게)마다 argv를 읽어
- * `--settings <경로>`가 하나뿐인지 본다(여는 쪽이라 좁게). argv가 없으면(그 사이 끝났다) 건너뛰고, 읽지 못하면 던진다 — 부른 쪽은 이것을 프로세스 검사의 실패(믿을 수 없음)로 읽는다.
+ * 감싸개가 붙이는 정확한 자리(`--mcp-config <M> --settings <S>`, `--settings`는 하나뿐)인지 본다(여는 쪽이라 좁게). argv가 없으면(그 사이 끝났다) 건너뛰고, 읽지 못하면 던진다 — 부른 쪽은 이것을 프로세스 검사의 실패(믿을 수 없음)로 읽는다.
  * codex는 옛 규칙(ps 한 줄의 표식 포함, 실험)이다. root를 모르면(2보다 작다) `undefined`다
  */
 export function findUnhookedCliByArgv(
@@ -719,11 +719,13 @@ export function findUnhookedCliByArgv(
   if (pids === null) return undefined;
   const byPid = new Map<number, ProcessEntry>();
   for (const entry of processes) if (!byPid.has(entry.pid)) byPid.set(entry.pid, entry);
+  // 감싸개가 `--mcp-config <관문 폴더>/mcp.json --settings <관문 폴더>/settings.json`을 붙인다: 두 파일은 같은 폴더에 있다
+  const mcpPath = path.join(path.dirname(expected.settingsPath), MCP_FILE);
   const found: ProcessEntry[] = [];
   for (const pid of pids) {
     const argv = readArgv(pid);
     if (argv === null) continue;
-    if (!native.terminalHookedArgv(argv, expected.settingsPath)) found.push(byPid.get(pid)!);
+    if (!native.terminalHookedArgv(argv, expected.settingsPath, mcpPath)) found.push(byPid.get(pid)!);
   }
   return found;
 }

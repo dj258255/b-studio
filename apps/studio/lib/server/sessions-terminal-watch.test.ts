@@ -391,8 +391,8 @@ describe('진짜 argv로 훅이 붙었는지 본다(ADR-219 후속)', () => {
     const settings = path.join(watch.place, 'settings.json');
     // 감싸개가 `exec <cli> --mcp-config M --settings S "$@"`로 부른다. 첫 요청 글은 한 인자다
     const prompt = 'claude의 --settings 옵션 문서를 써 줘';
-    fake.processes = [SHELL, { pid: 5100, ppid: PTY_PID, args: `/x/fake/claude-real --mcp-config /m/mcp.json --settings ${settings} ${prompt}` }];
-    fake.argv.set(5100, ['/x/fake/claude-real', '--mcp-config', '/m/mcp.json', '--settings', settings, prompt]);
+    fake.processes = [SHELL, { pid: 5100, ppid: PTY_PID, args: `/x/fake/claude-real --mcp-config ${path.join(watch.place, 'mcp.json')} --settings ${settings} ${prompt}` }];
+    fake.argv.set(5100, ['/x/fake/claude-real', '--mcp-config', path.join(watch.place, 'mcp.json'), '--settings', settings, prompt]);
     await watch.scan();
     await startWork(session);
     const answer = await session.gateway.stop({ last_assistant_message: '했습니다.' });
@@ -412,6 +412,18 @@ describe('진짜 argv로 훅이 붙었는지 본다(ADR-219 후속)', () => {
     // 알림이 열려 있던 실행을 곧바로 실패로 닫는다
     expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'failed' });
     expect(session.ofType('agent').some((event) => event.event.type === 'warning' && event.event.message.includes('pid 5200'))).toBe(true);
+  }, 40_000);
+
+  it('`--` 뒤나 값을 받는 옵션 뒤의 --settings는 붙은 것이 아니다(감싸개가 붙이는 자리가 아니다)', async () => {
+    const session = await open();
+    const watch = await watching(session);
+    const settings = path.join(watch.place, 'settings.json');
+    fake.processes = [SHELL, { pid: 5500, ppid: PTY_PID, args: `/x/fake/claude-real --model --settings ${settings}` }];
+    fake.argv.set(5500, ['/x/fake/claude-real', '--model', '--settings', settings]);
+    await startWork(session);
+    await watch.scan();
+    expect((await finishedRuns(session, 1))[0]).toMatchObject({ status: 'failed' });
+    expect(session.ofType('agent').some((event) => event.event.type === 'warning' && event.event.message.includes('pid 5500'))).toBe(true);
   }, 40_000);
 
   it('argv를 읽지 못하면 그 회차의 프로세스 검사는 실패이고 턴 끝을 통과로 닫지 않는다', async () => {

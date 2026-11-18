@@ -7947,10 +7947,11 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 
 ### 해결
 
-- 진짜 argv를 읽는다: `crates/bstudio-io/src/process_argv.rs`(macOS `sysctl(KERN_PROCARGS2)`, Linux `/proc/<pid>/cmdline`). 후보(ps 한 줄로 CLI로 보이는 것)마다 읽어 `hooked_argv`(요소 `--settings` 다음 요소가 경로와 같거나 `--settings=<경로>` 요소가 있고, `--settings` 요소가 하나뿐)로 판정한다. 끝난 프로세스는 건너뛰고, 읽지 못하면 그 회차의 프로세스 검사가 실패(믿을 수 없음, 265의 길)다. 통과로 두지 않는다.
+- 진짜 argv를 읽는다: `crates/bstudio-io/src/process_argv.rs`(macOS `sysctl(KERN_PROCARGS2)`, Linux `/proc/<pid>/cmdline`). 후보(ps 한 줄로 CLI로 보이는 것)마다 읽어 `hooked_argv`로 판정한다. 읽지 못하면 그 회차의 프로세스 검사가 실패(믿을 수 없음, 265의 길)다. 통과로 두지 않는다.
+- **커밋 보안 검토가 이 고침의 두 틈(여는 쪽)을 짚었고 같은 PR에서 닫았다.** (1) 처음 `hooked_argv`는 `--settings` 요소와 다음 요소만 봐서 `claude -- --settings S`·`claude --model --settings S`(값을 받는 옵션이 `--settings`를 값으로 먹음)를 붙은 것으로 봤다. 지금은 감싸개가 부르는 정확한 자리(`argv[i..i+4] == ["--mcp-config", M, "--settings", S]`, i는 1 또는 node가 CLI 스크립트를 띄운 꼴의 2, `--settings` 요소는 하나뿐)만 인정하고 `--settings=<S>` 꼴은 인정하지 않는다. (2) `process_argv`가 `EINVAL`(macOS는 살아 있는 다른 계정의 프로세스에도 낸다)·`/proc`의 없음(`hidepid`)·빈 cmdline을 곧바로 끝남으로 봤다. 지금은 `kill(pid, 0)`이 `ESRCH`일 때만 끝남(`None`)이고, 살아 있는데 못 읽었거나 확인하지 못하면 오류다. 좀비의 ps 줄(`<defunct>`·`[claude] <defunct>`)은 CLI 후보에 걸리지 않는다.
 
 ### 확인
 
 - 고치기 전(fdc4748): "첫 요청 글에 --settings가 든 붙은 CLI는 위반이 아니다"가 `expected '[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을…' not to contain '검증을 우회할 수 있는 일'`로 실패했다(`before-fix-argv.txt`).
-- 고친 뒤 통과한다. 자기가 띄운 자식의 진짜 argv를 읽는 시험(Rust·TS)이 있다. 변이: 요소 안 부분 문자열도 세기(Rust 2개), 오류를 통과로 두기(TS 2개), 끝난 후보를 위반으로 세기(TS 2개), 하나뿐 조건 빼기(Rust 1개), ps 한 줄 판정으로 되돌리기(세션 시험 4개).
+- 고친 뒤 통과한다. 자기가 띄운 자식의 진짜 argv를 읽는 시험(Rust·TS)이 있다. 변이: 요소 안 부분 문자열도 세기(Rust 2개), 오류를 통과로 두기(TS 2개), 끝난 후보를 위반으로 세기(TS 2개), 하나뿐 조건 빼기(Rust 1개), ps 한 줄 판정으로 되돌리기(세션 시험 4개). 보안 검토가 짚은 두 틈의 변이: 자리 조건 빼기·M 대조 빼기·자리 2의 스크립트 조건 빼기·`--settings=` 다시 인정·살아 있는데 못 읽은 것을 끝남으로 보기·존재 확인 오류를 끝남으로 보기(각 Rust 1개). 고치기 전(dcaf1fd): `--model --settings S`를 붙은 것으로 봐 세션 시험이 실패했다(`before-fix-slot.txt`).
 - 남은 오탐: 요청 글이 정확히 `--settings`(또는 `--settings=…`로 시작)인 한 요소이면 옵션으로 센다.

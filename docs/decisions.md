@@ -11980,8 +11980,9 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
    - `/stop`·`/session-end`·`/stop-failure`는 읽지 못해도 지금처럼 `{}`로 처리한다. 확인했다: `terminalTurnEnded`는 입력에서 마지막 답 글만 읽고 게이트는 입력과 무관하게 돌며, `terminalTurnFailed`는 `{}`에서도 닫고, `sessionEnd`는 입력을 읽지 않는다 — 모두 닫는 쪽이다(시험으로 고정).
 6. **claude의 표식 대조는 진짜 argv로 한다**(268·269). 처음에는 `ps` 한 줄을 낱말 경계와 `--settings` 하나로 좁혔지만, 한 줄은 낱말마다 따옴표를 잃어 첫 요청 글(실행 인자로 실린다: 감싸개가 `exec <cli> --mcp-config M --settings S "$@"`를 부른다)에 든 `--settings`가 진짜 옵션과 구별되지 않았다. 요청 글에 `--settings`라는 낱말만 있어도 정상 CLI가 위반이 되어(오탐), 이번 N15 수정과 겹치면 그 CLI가 사는 동안 연 실행이 모두 "검증이 붙지 않은 CLI"로 실패했다. 반대쪽(훅 없는 CLI가 요청 글 자리에 표식을 받아 통과)도 같은 원인이다.
    - `crates/bstudio-io/src/process_argv.rs`의 `process_argv(pid)`: macOS는 `sysctl(KERN_PROCARGS2)`(앞 4바이트 argc, 실행 경로, 채움 NUL, argv argc개), Linux는 `/proc/<pid>/cmdline`을 NUL로 자른다. 끝난 프로세스(`ESRCH`·`EINVAL`·파일 없음·빈 cmdline)는 `None`, 그 밖의 실패(권한, 읽다 만 버퍼, 지원하지 않는 OS)는 오류다(napi `terminalProcessArgv`).
-   - 순수 판정 `hooked_argv(argv, settings_path)`(여는 쪽이라 좁게): 요소 `--settings` 바로 다음 요소가 경로와 글자 그대로 같거나 요소 하나가 `--settings=<경로>`이고, argv 전체에서 `--settings`·`--settings=…` **요소**가 그것 하나뿐이어야 한다. 요청 글처럼 한 요소 안에 섞인 것은 세지 않는다.
-   - 감시는 후보(`cli_candidates`: ps 한 줄로 CLI로 보이는 것, 넓게 그대로)마다 argv를 읽어 판정한다(`findUnhookedCliByArgv`). `None`(그 사이 끝남)은 건너뛰고, 오류는 그 회차의 프로세스 검사를 실패(믿을 수 없음, 결정 3의 길)로 둔다 — 통과로 두지 않는다. codex는 옛 규칙(ps 한 줄의 표식 포함, 실험)이다.
+   - 순수 판정 `hooked_argv(argv, settings_path, mcp_path)`(여는 쪽이라 좁게): 감싸개는 늘 `exec <cli> --mcp-config <M> --settings <S> "$@"`로 부르므로 그 **정확한 자리**만 인정한다. argv에서 `--mcp-config`가 처음 나오는 자리 i에 대해 `argv[i..i+4] == ["--mcp-config", M, "--settings", S]`(M은 관문 폴더의 `mcp.json`, S는 `settings.json`)이고, i는 1이거나(네이티브 CLI) 2이면서 argv[1]이 CLI 스크립트(`/@anthropic-ai/claude-code/`가 든 경로, node가 띄운 꼴)일 때뿐이며, argv 전체에서 `--settings`·`--settings=…` 요소가 그것 하나뿐이어야 한다. 요청 글처럼 한 요소 안에 섞인 것은 세지 않는다. `--settings=<S>` 꼴은 감싸개가 쓰지 않으므로 인정하지 않는다.
+   - **보안 검토가 짚은 두 틈을 닫았다**(둘 다 여는 쪽): (1) 처음 판정은 `--settings` 요소와 다음 요소만 봐서 `claude -- --settings S`(`--` 뒤는 요청 글)와 `claude --model --settings S`(값을 받는 옵션이 `--settings`를 값으로 먹음)를 붙은 것으로 봤다. 위의 정확한 자리로 좁혔다. (2) `process_argv`가 `EINVAL`(macOS는 살아 있는 다른 계정의 프로세스에도 낸다)과 `/proc`의 없음(`hidepid`)·빈 cmdline을 곧바로 끝난 것으로 봤다. 이제 읽을 것이 없다고 해도 `kill(pid, 0)`이 `ESRCH`일 때만 `None`(끝남)이고, 살아 있거나(0·`EPERM`) 확인하지 못했으면 오류다(읽지 못한 살아 있는 프로세스를 건너뛰면 훅 없는 CLI가 통과한다). 좀비의 ps 줄은 `<defunct>`(macOS)·`[claude] <defunct>`(Linux) 꼴이라 CLI 후보 규칙(첫 낱말의 파일 이름이 CLI 이름)에 걸리지 않아 argv를 읽지 않는다(macOS에서 직접 만든 좀비의 ps 줄로 확인, 시험으로 고정).
+   - 감시는 후보(`cli_candidates`: ps 한 줄로 CLI로 보이는 것, 넓게 그대로)마다 argv를 읽어 판정한다(`findUnhookedCliByArgv`). `None`(없다고 확인된 끝남)은 건너뛰고, 오류는 그 회차의 프로세스 검사를 실패(믿을 수 없음, 결정 3의 길)로 둔다 — 통과로 두지 않는다. codex는 옛 규칙(ps 한 줄의 표식 포함, 실험)이다.
    - ps 한 줄 판정(`find_unhooked_cli`·`hooked`의 낱말 경계·`--settings` 하나뿐)은 지우지 않고 codex와 차등 기준으로 남겼다. 감시의 claude는 더 쓰지 않는다. 남은 한계: 요청 글이 **정확히** `--settings`이거나 `--settings=…`로 시작하는 한 요소이면 옵션으로 세어 오탐한다(그런 글은 CLI도 옵션으로 읽을 것이다).
 7. 게이트, 쓰기 직전 판정의 순서, 읽기 도구 표는 바꾸지 않았다. 옛 판정은 `session-terminal-watch-legacy.ts`에 차등 기준으로 남겼다(4g에서 지운다).
 
@@ -11989,7 +11990,8 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 | 자리 | 쪽 | 모르는 입력 |
 |---|---|---|
 | `find_unhooked_cli`(CLI로 보는 규칙) | 위반을 찾는 쪽(거부 목록). 넓을수록 더 막는다 | 루트를 모르면 "할 수 없음" |
-| 표식 대조 `hooked_argv`(진짜 argv) | **붙었다고 보는 쪽(여는 쪽)**: 좁게 맞춘다 | `--settings` 요소가 하나가 아니거나 값이 경로와 다르면 붙지 않은 것. argv를 읽지 못하면 검사 실패 |
+| 표식 대조 `hooked_argv`(진짜 argv) | **붙었다고 보는 쪽(여는 쪽)**: 좁게 맞춘다 | 감싸개의 정확한 자리(`--mcp-config M --settings S`)가 아니거나 `--settings` 요소가 하나가 아니면 붙지 않은 것. argv를 읽지 못하면(살아 있는데 못 읽음 포함) 검사 실패 |
+| `process_argv`의 끝남 판정 | 건너뛰는 쪽(여는 쪽): `kill(pid, 0)`이 `ESRCH`일 때만 | 읽지 못했는데 살아 있거나 확인하지 못하면 오류 |
 | 표식 대조 `hooked`(ps 한 줄) | 여는 쪽(좁게). codex와 차등 기준 | 낱말 경계가 아니거나 `--settings`가 둘 이상이면 붙지 않은 것 |
 | `liveWatchViolation`(실행을 열 때) | 막는 쪽 | 등록된 감시가 없으면 감시하지 않는 터미널이라 적지 않는다 |
 | `verifyWatch`(턴 끝) | 막는 쪽 | 한 번도 검사하지 못했거나 실패했거나 pid를 모르면 통과로 닫지 않는다 |
@@ -12022,4 +12024,9 @@ SDK가 붙이던 `CLAUDE_AGENT_SDK_CLIENT_APP`은 공식 환경 변수 문서에
 - **고치기 전 실패**(`before-fix-argv.txt`, 커밋 fdc4748): "첫 요청 글에 --settings가 든 붙은 CLI는 위반이 아니다"가 `expected '[b-studio] 검증을 우회할 수 있는 일이 감지되어 이 요청을…' not to contain '검증을 우회할 수 있는 일'`로 실패했다(ps 한 줄 판정이 요청 글의 낱말을 옵션으로 세어 정상 CLI를 위반으로 닫았다). 요청 글 자리에 표식만 받은 훅 없는 CLI는 통과였고(`expected '[b-studio] 검증 통과 …' to contain 'pid 5200'`), argv를 읽지 못하는 경우의 시험 둘도 실패했다(그 길이 없었다).
 - **시험**: Rust `hooked_argv` 단위(요청 글 요소의 `--settings`, 표식 전체를 담은 요소, `--settings=` 꼴, 덧붙인 `--settings /evil.json`, `settings.jsonx`, 값 없는 옵션, 빈 argv), `process_argv` 파서와 **자기가 띄운 자식의 진짜 argv**(Rust `/bin/sleep`, TS `process.execPath -e … --mcp-config M --settings S 'explain --settings x'`, 끝나면 그 자식만 끈다), 세션 수준 넷(붙은 CLI의 요청 글 오탐 없음, 요청 글 자리의 표식만 받은 CLI는 위반, argv를 읽지 못하면 턴 끝을 통과로 닫지 않음, 그 사이 끝난 후보는 건너뜀).
 - **변이**: 요소 안 부분 문자열도 세기(Rust 2개 실패), 오류를 통과로 두기(TS 2개), 끝난 후보를 위반으로 세기(TS 2개), `--settings` 하나뿐 조건 빼기(Rust 1개), 감시를 ps 한 줄 판정으로 되돌리기(세션 시험 4개).
+
+### 덧붙임 2: 커밋 보안 검토가 짚은 두 틈 (같은 PR)
+- **고치기 전 실패**(`before-fix-slot.txt`, 커밋 dcaf1fd): "`--` 뒤나 값을 받는 옵션 뒤의 --settings는 붙은 것이 아니다" 세션 시험이 실패했다(`--model --settings S`를 붙은 것으로 봐 위반 알림이 오지 않았다). 끝남 판정은 함수를 나누어 실패를 주입하는 새 Rust 시험(`process_argv_with`)으로 확인한다. 옛 판정은 `EINVAL`을 곧바로 끝남으로 읽어 그 시험을 쓸 수 없다.
+- **시험**: `hooked_argv`의 `--` 앞뒤, `--model --settings S`, 자리 3 이상, 자리 2인데 argv[1]이 CLI 스크립트가 아닌 것, 앞의 다른 `--mcp-config`, M 대조, 정상(자리 1, 자리 2 node), 요청 글에 `--settings`가 섞인 정상. `process_argv_with`(끝남 확인됨 → `None`, 살아 있는데 못 읽음 → 오류, 확인 실패 → 오류), 실제 자식: 끝나 거둔 자식은 `None`, node가 CLI 스크립트(`…/@anthropic-ai/claude-code/cli.js`)를 띄운 자식의 진짜 argv(자리 2).
+- **변이**: 자리 조건 빼기(1개 실패), M 대조 빼기(1), 자리 2의 CLI 스크립트 조건 빼기(1), `--settings=` 꼴을 다시 인정(1), 살아 있는데 못 읽은 것을 끝남으로 보기(1), 존재 확인 오류를 끝남으로 보기(1).
 

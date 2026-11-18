@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findUnhookedCli, findUnhookedCliByArgv, findUnhookedCliOrUnknown, processArgv, ptyPid } from './host-terminal';
 
@@ -44,9 +47,14 @@ describe('findUnhookedCli의 루트 pid', () => {
 describe('진짜 argv(ADR-219 후속)', () => {
   const settings = '/g/studio-a/settings.json';
 
-  /** 자기가 띄운 자식 하나의 진짜 argv를 읽는다. 끝나면 그 자식 PID만 끈다 */
+  /** 자기가 띄운 자식 하나의 진짜 argv를 읽는다. node가 CLI 스크립트를 띄운 꼴(자리 2)이다. 끝나면 그 자식 PID만 끈다 */
   it('요청 글 인자에 --settings가 든 붙은 CLI는 위반이 아니고, 다른 설정 파일을 받은 것은 위반이다', async () => {
-    const child = spawn(process.execPath, ['-e', 'setTimeout(()=>{},5000)', '--mcp-config', '/m/mcp.json', '--settings', settings, 'explain --settings x'], { stdio: 'ignore' });
+    const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-argv-'));
+    const script = path.join(dir, 'node_modules/@anthropic-ai/claude-code/cli.js');
+    await mkdir(path.dirname(script), { recursive: true });
+    await writeFile(script, 'setTimeout(() => {}, 5000);\n');
+    const mcp = path.join(path.dirname(settings), 'mcp.json');
+    const child = spawn(process.execPath, [script, '--mcp-config', mcp, '--settings', settings, 'explain --settings x'], { stdio: 'ignore' });
     try {
       const pid = child.pid!;
       let argv: string[] | null = null;
@@ -55,7 +63,7 @@ describe('진짜 argv(ADR-219 후속)', () => {
         if (argv?.includes('--settings')) break;
         await new Promise((resolve) => setTimeout(resolve, 20));
       }
-      expect(argv).toEqual([process.execPath, '-e', 'setTimeout(()=>{},5000)', '--mcp-config', '/m/mcp.json', '--settings', settings, 'explain --settings x']);
+      expect(argv).toEqual([process.execPath, script, '--mcp-config', mcp, '--settings', settings, 'explain --settings x']);
       // ps 한 줄은 따옴표를 잃는다: 인자들이 공백으로 이어진 한 줄
       const processes = [
         { pid: process.pid, ppid: 1, args: 'terminal-root' },
@@ -65,7 +73,15 @@ describe('진짜 argv(ADR-219 후속)', () => {
       expect(findUnhookedCliByArgv(process.pid, processes, { settingsPath: '/g/other/settings.json', cliPath: process.execPath })?.map((entry) => entry.pid)).toEqual([pid]);
     } finally {
       child.kill();
+      await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it('끝나 거둔 자식은 null이다', async () => {
+    const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    const pid = child.pid!;
+    await new Promise((resolve) => child.once('exit', resolve));
+    expect(processArgv(pid)).toBeNull();
   });
 
   it('끝난 프로세스는 null이고 건너뛴다. 읽지 못하면 던진다(통과가 아니다)', () => {

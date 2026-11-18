@@ -122,6 +122,10 @@ fn looks_like_cli_rules() {
     assert!(!looks_like_agent_cli("/bin/sh /g/bin/claude", CLI, k));
     assert!(!looks_like_agent_cli("/usr/bin/claudex", CLI, k));
     assert!(!looks_like_agent_cli("", CLI, k));
+    // 좀비의 ps 줄(macOS `<defunct>`, Linux `[claude] <defunct>`, BSD `(claude)`)은 후보가 아니다: argv를 읽지 않는다
+    assert!(!looks_like_agent_cli("<defunct>", CLI, k));
+    assert!(!looks_like_agent_cli("[claude] <defunct>", CLI, k));
+    assert!(!looks_like_agent_cli("(claude)", CLI, k));
     // 빈 cliPath와 빈 인자(옛 규칙 그대로)
     assert!(looks_like_agent_cli("", "", k));
     // 맨 앞 공백(JS 공백 포함)은 걷는다
@@ -304,49 +308,78 @@ fn first_request_text_in_the_args_can_sway_the_marker_check() {
 
 // ── 진짜 argv ──
 
+const MCP: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/mcp.json";
+const SCRIPT: &str = "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js";
+
 fn argv(items: &[&str]) -> Vec<String> {
     items.iter().map(|item| (*item).to_owned()).collect()
+}
+
+fn hooked_a(items: &[&str]) -> bool {
+    hooked_argv(&argv(items), SETTINGS, MCP)
 }
 
 #[test]
 fn hooked_argv_wrapper_launch_with_request_text() {
     // 감싸개가 `exec <cli> --mcp-config M --settings S "$@"`로 부른다. 요청 글은 한 요소다
-    let ok = argv(&[CLI, "--mcp-config", "/m/mcp.json", "--settings", SETTINGS, "explain the --settings flag"]);
-    assert!(hooked_argv(&ok, SETTINGS));
+    assert!(hooked_a(&[CLI, "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(hooked_a(&[CLI, "--mcp-config", MCP, "--settings", SETTINGS, "explain the --settings flag"]));
     // 요청 글 요소가 표식 전체를 담아도 요소 하나라서 세지 않는다
     let marker_text = format!("--settings {SETTINGS}");
-    assert!(hooked_argv(&argv(&[CLI, "--settings", SETTINGS, &marker_text]), SETTINGS));
-    assert!(hooked_argv(&argv(&[CLI, "--settings", SETTINGS]), SETTINGS));
+    assert!(hooked_a(&[CLI, "--mcp-config", MCP, "--settings", SETTINGS, &marker_text]));
+    // node가 CLI 스크립트를 띄운 꼴(자리 2)
+    assert!(hooked_a(&["node", SCRIPT, "--mcp-config", MCP, "--settings", SETTINGS, "-p", "hi"]));
+    assert!(hooked_a(&[SCRIPT, "--mcp-config", MCP, "--settings", SETTINGS]));
 }
 
 #[test]
-fn hooked_argv_equals_form() {
-    assert!(hooked_argv(&argv(&[CLI, &format!("--settings={SETTINGS}"), "-p", "hi"]), SETTINGS));
-    assert!(!hooked_argv(&argv(&[CLI, "--settings=/evil.json"]), SETTINGS));
+fn hooked_argv_requires_the_exact_wrapper_slot() {
+    // `--` 뒤는 요청 글이다
+    assert!(!hooked_a(&[CLI, "--", "--settings", SETTINGS]));
+    assert!(!hooked_a(&[CLI, "--", "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 값을 받는 옵션이 `--settings`를 값으로 먹는다
+    assert!(!hooked_a(&[CLI, "--model", "--settings", SETTINGS]));
+    assert!(!hooked_a(&[CLI, "--model", "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 자리 3 이상
+    assert!(!hooked_a(&[CLI, "-p", "hi", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_a(&["node", SCRIPT, "-p", "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 자리 2인데 argv[1]이 CLI 스크립트가 아니다
+    assert!(!hooked_a(&[CLI, "-p", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_a(&["node", "/tmp/evil.js", "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 처음 나온 --mcp-config가 아닌 뒤의 것은 보지 않는다
+    assert!(!hooked_a(&[CLI, "--mcp-config", "/evil/mcp.json", "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 네 요소가 다 있어야 한다
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, "--settings"]));
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP]));
 }
 
 #[test]
-fn hooked_argv_rejects_other_files_and_extra_options() {
-    assert!(!hooked_argv(&argv(&[CLI, "--settings", &format!("{SETTINGS}x")]), SETTINGS));
-    assert!(!hooked_argv(&argv(&[CLI, "--settings", &format!("{SETTINGS}/evil.json")]), SETTINGS));
+fn hooked_argv_checks_the_mcp_file() {
+    assert!(!hooked_a(&[CLI, "--mcp-config", "/evil/mcp.json", "--settings", SETTINGS]));
+    assert!(!hooked_a(&[CLI, "--mcp-config", "", "--settings", SETTINGS]));
+}
+
+#[test]
+fn hooked_argv_rejects_other_files_extra_options_and_the_equals_form() {
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, "--settings", &format!("{SETTINGS}x")]));
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, "--settings", &format!("{SETTINGS}/evil.json")]));
     // 사용자가 덧붙인 --settings(뒤든 앞이든)
-    assert!(!hooked_argv(&argv(&[CLI, "--settings", SETTINGS, "--settings", "/evil.json"]), SETTINGS));
-    assert!(!hooked_argv(&argv(&[CLI, "--settings", "/evil.json", "--settings", SETTINGS]), SETTINGS));
-    assert!(!hooked_argv(&argv(&[CLI, "--settings", SETTINGS, "--settings=/evil.json"]), SETTINGS));
-    // 값이 없는 옵션, 다른 옵션의 값 자리
-    assert!(!hooked_argv(&argv(&[CLI, "--settings"]), SETTINGS));
-    assert!(!hooked_argv(&argv(&[CLI, "--mcp-config", SETTINGS]), SETTINGS));
-    assert!(!hooked_argv(&argv(&[CLI, "--resume"]), SETTINGS));
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, "--settings", SETTINGS, "--settings", "/evil.json"]));
+    assert!(!hooked_a(&[CLI, "--settings", "/evil.json", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, "--settings", SETTINGS, "--settings=/evil.json"]));
+    // 감싸개가 쓰지 않는 `--settings=<S>` 꼴
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, &format!("--settings={SETTINGS}")]));
+    assert!(!hooked_a(&[CLI, &format!("--settings={SETTINGS}")]));
+    assert!(!hooked_a(&[CLI, "--resume"]));
     // 빈 argv
-    assert!(!hooked_argv(&[], SETTINGS));
+    assert!(!hooked_a(&[]));
 }
 
 #[test]
 fn hooked_argv_does_not_count_substrings_inside_an_element() {
-    let sneaky = argv(&[CLI, "--settings", SETTINGS, "--settings x"]);
-    assert!(hooked_argv(&sneaky, SETTINGS));
-    // 요소 안에 표식만 있고 진짜 --settings가 없는 것은 붙지 않았다(요청 글 자리에 표식만 받은 훅 없는 CLI)
-    assert!(!hooked_argv(&argv(&[CLI, &format!("--settings {SETTINGS}")]), SETTINGS));
+    // 요소 안에 표식만 있고 진짜 --settings가 없는 것은 붙지 않았다
+    assert!(!hooked_a(&[CLI, &format!("--settings {SETTINGS}")]));
+    assert!(!hooked_a(&[CLI, "--mcp-config", MCP, &format!("--settings {SETTINGS}")]));
 }
 
 #[test]

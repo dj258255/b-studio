@@ -7861,10 +7861,10 @@ pub fn terminal_cli_candidates(root: i64, processes: Vec<TerminalProcessJs>, kin
     cli_candidates(root, &processes, CliKind::parse(&kind).unwrap_or(CliKind::Claude), &cli_path)
 }
 
-/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게)
+/// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게): 감싸개가 부르는 정확한 자리(`--mcp-config M --settings S`)만 인정한다
 #[napi]
-pub fn terminal_hooked_argv(argv: Vec<String>, settings_path: String) -> bool {
-    session_terminal::watch::hooked_argv(&argv, &settings_path)
+pub fn terminal_hooked_argv(argv: Vec<String>, settings_path: String, mcp_path: String) -> bool {
+    session_terminal::watch::hooked_argv(&argv, &settings_path, &mcp_path)
 }
 
 /// 프로세스의 진짜 argv. 이미 끝났으면 null, 읽지 못하면(권한·지원하지 않는 OS·모양이 틀림) 던진다 — 부른 쪽은 통과로 읽지 않는다
