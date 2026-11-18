@@ -12069,3 +12069,69 @@ F0의 사진은 터미널 시나리오가 7개뿐이라, desk가 실제로 부�
 - **시험**: `hooked_argv`의 `--` 앞뒤, `--model --settings S`, 자리 3 이상, 자리 2인데 argv[1]이 CLI 스크립트가 아닌 것, 앞의 다른 `--mcp-config`, M 대조, 정상(자리 1, 자리 2 node), 요청 글에 `--settings`가 섞인 정상. `process_argv_with`(끝남 확인됨 → `None`, 살아 있는데 못 읽음 → 오류, 확인 실패 → 오류), 실제 자식: 끝나 거둔 자식은 `None`, node가 CLI 스크립트(`…/@anthropic-ai/claude-code/cli.js`)를 띄운 자식의 진짜 argv(자리 2).
 - **변이**: 자리 조건 빼기(1개 실패), M 대조 빼기(1), 자리 2의 CLI 스크립트 조건 빼기(1), `--settings=` 꼴을 다시 인정(1), 살아 있는데 못 읽은 것을 끝남으로 보기(1), 존재 확인 오류를 끝남으로 보기(1).
 
+## ADR-220 세션 효과 코드는 Node가 상태의 주인인 채로 Rust 크레이트로 옮기고, 옛 TS를 얼려 같은 입력에 같은 결과를 내는지 견주며, 막는 검사는 판정 한 줄을 끄는 변이로 확인한다
+
+상태: 채택(4f C1 효과 묶음)
+관련: 이슈 [#1305](https://github.com/dj258255/b-studio/issues/1305), 추적 [#1300](https://github.com/dj258255/b-studio/issues/1300)(C1, 결정 D1 = β), ADR-191·192·195(4f 방식 X), ADR-200(지원 범위), ADR-210~219(B4·B5에서 판정을 옮긴 방식), "덧붙임: C1a"(기준 사진), 트러블슈팅 272
+
+### 맥락
+- B5까지 지원 경로의 **판정**은 Rust 코어로 옮겼다. 판정을 둘러싼 **효과**(git·파일 읽기·쓰기, 글 조립, studio.yaml 검증)는 TS에만 남아 있었다. 그래서 다음 PR(⑤)에서 `bstudio-server`가 Node 없이 세션을 돌릴 수 없었다.
+- 결정 D1(β)은 "효과도 Rust로 옮기고, napi로 부르다가 마지막에 서버로 스위치한다"이다. 이번 묶음이 그 앞 절반이다.
+
+### 결정
+1. **상태는 Node에 둔다.** `Session` 메모리 상태, compose 제공자의 큐(`#upQueue`·`#processBaseline`·`#composeConfig`), 게이트 인스턴스의 관측 상태는 TS가 쥔다. 옮기는 것은 상태를 받아 결과를 내는 효과와 글이다. 상태 소유는 ⑤에서 옮긴다.
+2. **크레이트는 napi를 모른다.** 효과는 `bstudio-io`(파일·git), 글과 순수 판정은 `bstudio-session`·`bstudio-guard`에 둔다. napi 바인딩은 `bstudio-node`에만 둔다. ⑤의 서버가 같은 크레이트를 직접 링크한다.
+3. **TS는 같은 시그니처의 껍데기로 남는다.** 기존 vitest가 그대로 회귀 시험으로 돈다.
+4. **옛 TS를 `*-legacy.ts`로 얼리고 차등 시험으로 견준다.** 같은 입력을 옛 구현과 새 구현에 넣어 반환값, 오류 글(바이트), 파일 나무, git 상태, docker 인자를 비교한다. 화면과 훅 응답에 그대로 나가는 글이라 오류 글은 바이트까지 같아야 한다.
+5. **옛 코드가 던지던 자리를 삼키지 않는다.** `.ok()`·`unwrap_or_default()`처럼 오류를 빈 값으로 바꾸는 도구는 옛 코드도 그 자리에서 삼켰을 때만 쓴다. 단계마다 "삼키는 자리" 표를 만들어 하나씩 확인했다.
+6. **막는 검사와 지우는 코드는 판정 한 줄을 끄는 변이로 확인한다.** 시험이 실패하지 않으면 시험을 더한다(아래 검증).
+7. **실험 경로는 옮기지 않는다.** Codex 전용 글, 컨테이너 터미널 함수, Kubernetes, 배포(`deploy.ts`), 지우기(`prune.ts`)는 TS에 남는다(ADR-200).
+
+### 옮긴 것
+| 단계 | 옛 TS | Rust |
+|---|---|---|
+| 1 체크포인트 | `checkpoints.ts`의 읽기(`list`·`patch`·`fileAt`·`blobAt`·`sessionDiff` 등), 생성 파일 사이드카·되살리기 백업, 쓰기(`commit`·`commitPaths`·`discard`·`restore`·`init`·`#commitTree`), 중첩 저장소 걷기 | `bstudio-io::checkpoint_local`(napi 입구는 기존 `checkpointRemote` 하나) |
+| 2 게이트 | 평가 자산 지문·판정, 단계 저장·디자인 비교·서비스 출처, 워크플로 다시 읽기, 요구사항 기록 확인의 파일 읽기 | `bstudio-guard::gate_assets`, `bstudio-io::gate_assets`·`gate_workflow` |
+| 3 spec | 서비스 선택, 공개 주소 참조, 시스템 패키지, compose 가져오기, `schema.ts`(Zod 33개 스키마), `load.ts`(경로 읽기·교차 검증) | `bstudio-guard::{service_selection, public_url, system_packages, compose_import, spec_schema, spec_load}`, `bstudio-io::spec_load` |
+| 4 샌드박스 | compose 제공자의 docker 인자 조립·오류 글 | `bstudio-guard::compose_args` |
+| 5 터미널 | 이 컴퓨터 방식 터미널의 실행 글(`shellQuote`·감싸개·zsh/bash 시작 파일·환경), 관문 폴더 쓰기·검사·지우기, 훅 답 꼴 | `bstudio-session::terminal::gateway`, `bstudio-io::host_gateway` |
+| 6 조율 | 체크포인트 본문·트레일러, 거절 글, `terminalResult`, Git 맞추기 글, `landedCheckpoint`의 분기 | `bstudio-session::terminal_text` |
+
+- spec은 sandbox에 의존할 수 없어(sandbox가 spec에 의존한다) 자기 `packages/spec/src/native.ts`로 같은 `.node`를 싣는다.
+- `schema.ts`의 Zod 정의는 타입(`z.infer`)의 원천으로 남는다. 검증(`parse`·`safeParse`)은 Rust만 한다. Zod 정의와 Rust 규칙이 어긋나면 `schema-legacy.ts`와 견주는 차등 시험이 잡는다.
+
+### 판정을 부르는 자리 (막는 쪽인가 여는 쪽인가)
+- **허용 목록**(넓게 맞추면 범위 밖이 범위 안이 된다): `commitPaths`의 "넘긴 경로 밖 파일이 트리에 섞이면 거부", 시스템 패키지 이름, studio.yaml의 이름·경로·환경 변수 이름·egress 호스트 정규식, 생성 파일(`excludedFiles`) 이름, `shellQuote`.
+- **거부 목록·막는 판정**: 시크릿 검사, 스테이징 불일치, HEAD 이동, 중첩 저장소, 평가 자산 변경(파일 2,000개 상한·256KiB 읽기 상한·링크는 실패), 프로젝트 밖 링크(studio.yaml), 관문 폴더 변조.
+- **지우는 코드**: 관문 폴더 지우기(`.zcompdump*` 포함). 링크를 따라가지 않고 링크 자리만 지운다.
+- JS 정규식과 Rust `regex`의 차이(`\w`·`\d`·`\b`는 ASCII, `\s`는 JS 집합, `/i`는 ASCII만 접기)를 맞췄고, 18개 정규식 필드를 무작위 8,000개 글자로 견줬다.
+
+### 의도한 차이 (옛 동작과 다른 칸)
+1. **짝 없는 서로게이트**: napi 경계에서 U+FFFD가 된다. UTF-8 파일에서 읽은 글자에는 생기지 않는다. docker 인자는 Node도 UTF-8로 보낼 때 같은 변환을 하므로 바이트가 같다.
+2. **생성 파일 이름을 경계에서 거부하고, 생성 파일 자리의 링크를 따라가지 않는다(더 막음).** 공개 옵션 `excludedFiles`가 `..`·절대 경로·`.git` 조각·빈 조각을 돌려주면 던진다. 옛 코드는 `.git/config`·`a//b`·`./a`를 받아들였다. 제품 경로(`generatedFilePaths`)가 내는 이름은 모두 지난다. 생성 파일 자리가 링크이면 옛 코드는 링크를 따라 바깥 내용을 사이드카·백업에 넣었고, `discard`·`restore`·`restoreBackup`이 링크 너머에 덮어썼다(트러블슈팅 273). 이제 git처럼 링크를 `link:<대상>`으로 기록하고 링크로 되돌린다. 조각마다 `O_NOFOLLOW`로 내려가며 너머를 읽거나 쓰지 않는다.
+3. **관문 파일 비교가 글자 대신 바이트다(더 닫힘).** 잘못된 UTF-8이 우연히 같은 글자로 풀리는 경우만 갈린다.
+4. **게이트 평가 자산의 폴더 정렬**: 옛 `localeCompare` 대신 UTF-16 순서다. 여러 오류가 동시에 있을 때 첫 오류의 선택만 갈릴 수 있다. 판정과 단일 오류 글은 같다.
+5. **Zod 오류의 `issue.code`는 `custom`이다.** path·message·순서·성공 값은 같다. 저장소에서 `code`를 읽는 곳은 없다.
+6. **#1303**: 되돌림 알림의 앞머리가 한 번만 붙고, 결과를 이미 말한 사유에 "바뀐 파일은 없었습니다"를 덧붙이지 않는다(트러블슈팅 272).
+
+### 검증 (2026-11-18, macOS arm64)
+- `cargo test --workspace --locked`, `pnpm typecheck`, studio lint, 바꾼 패키지의 vitest가 통과했다. 기준 사진 48개 중 바뀐 것은 #1303의 `desk-user-branch-switch-reverted` 하나다.
+- 변이(판정 한 줄을 끄고 시험이 실패하는지):
+  - 잡은 것: `commitPaths` 경로 밖 방어선, HEAD 확인, `secret_leaks`, 스테이징한 파일 읽기 실패 삼킴, 평가 자산 2,000개 상한·판정 항상 통과, 시스템 패키지 이름 정규식, studio.yaml 이름 정규식, external 서비스 교차 검증, `shellQuote`, 가벼운 확인 트레일러, 요구사항 문서를 읽지 못해도 통과, 생성 파일 이름 검사.
+  - 처음에 빠져나간 것: 관문 폴더 자체가 링크일 때 링크만 지우는 줄. 다음 줄의 검사가 너머를 막아 파일은 지워지지 않았지만, 링크가 남는 차이를 어떤 시험도 보지 않았다(옛 TS에도 없던 시험). 시험을 더해 잡게 했다.
+  - 두 겹이라 한 겹만으로는 가를 수 없는 것: studio.yaml의 프로젝트 밖 링크 검사(realpath 확인과 열기 뒤 재확인). 한 겹을 끄면 다른 겹이 같은 글로 막는다. 둘을 함께 끄면 시험이 실패한다. 옛 TS도 같은 두 겹이었다.
+- 구현은 위임했다(Command Code 네 창, worktree를 나눠 동시에). 판정·지우기 코드는 이 세션이 직접 읽고 변이를 넣어 확인했다.
+
+### 한계
+- **요구사항 문서의 id 계산**(`parseRequirementsMarkdown`)은 TS에 남았다. 게이트의 요구사항 판정은 Rust가 하지만 id 목록은 훅으로 TS에서 받는다. ⑤ 전에 옮겨야 한다.
+- **compose 제공자의 실행 순서와 상태, 세션 조율의 상태가 큰 함수**(`beginTerminalRun`·`finishTerminalTurn` 등)는 ⑤의 일이다.
+- **`restoreBackup`은 보통 파일 patch를 먼저 적용한 뒤 생성 파일을 되살린다.** 생성 파일 되살리기가 링크 때문에 실패하면 보통 파일만 되살아난 채로 남는다(옛 순서와 같다).
+- **`z.url()`은 `url` 크레이트 위의 Node 호환 계층**이다. 무작위 URL 5,000개로 견줬지만 WHATWG의 드문 꼴에서 차이가 남을 수 있다.
+- 관문의 zsh 시작 파일은 사용자 `.zshrc`를 그대로 읽는다(옛 코드와 같다). 실측 중 oh-my-zsh가 업데이트를 물어 CLI가 뜨기 전에 멈춘 적이 있다. desk에서는 사람이 답하면 넘어간다. 실측은 `DISABLE_AUTO_UPDATE`를 `B_STUDIO_TERMINAL_ENV`로 넘겨 그 질문만 껐다.
+
+### 실제 세션 확인 (2026-11-18, macOS arm64, Claude Code + claude-fable-5-2, 이 컴퓨터 방식 세션 터미널)
+한 번씩 돌렸다. 하네스는 `measure-term.mjs`(세션 터미널 API로 실제 CLI를 몬다)다.
+- **통과**: Edit → 게이트 검증 → 체크포인트(ahead 1) → done. 이어서 다음 요청을 받아 취소하면 cancelled("바뀐 파일은 없었습니다")로 닫혔다.
+- **브랜치 바꿈**: 끼운 커밋은 풀어서 b-studio가 검증한 뒤 다시 커밋했다. 브랜치를 바꾸면 마지막 체크포인트로 되돌리고, 알림의 앞머리는 한 번만 붙었다. "바뀐 파일은 없었습니다"도 덧붙지 않았다(#1303).
+- **CLI 종료**: `/exit` 뒤 흉내 낸 `.zcompdump*`까지 지워지고 관문 폴더가 남지 않았다.
+- **관문 변조**: settings.json을 바꾼 요청은 "관문 파일이 바뀌어 되돌렸습니다"로 실패로 닫혔다. 고친 뒤 요청은 다시 통과했다.
