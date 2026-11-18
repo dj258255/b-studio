@@ -429,6 +429,16 @@ describe('중첩 git 저장소 걷기 차등(D1c)', () => {
     const currentNoTop = await findNestedGitRepos(root, undefined, partition, 100);
     expect(currentNoTop.sort()).toEqual(legacyNoTop.sort());
   });
+
+  it('항목이 많은 폴더를 한도로 자를 때 남는 저장소가 옛 구현과 같다(옛 readdir은 이름순, 파일 시스템 순서가 아니다)', async () => {
+    const root = path.join(sandboxRoot, 'dig-many');
+    for (let i = 39; i >= 0; i--) await mkdir(path.join(root, `d${String(i).padStart(2, '0')}`, '.git'), { recursive: true });
+    const partition = async (): Promise<Set<string>> => new Set();
+    const legacy = await legacyFindNestedGitRepos(root, undefined, partition, 5);
+    const current = await findNestedGitRepos(root, undefined, partition, 5);
+    expect(current).toEqual(legacy);
+    expect(current).toEqual(['d00/.git', 'd01/.git', 'd02/.git', 'd03/.git', 'd04/.git']);
+  });
 });
 
 // ── 생성 파일 이름 경계(의도한 차이: 더 막음) ──────────────────────────────

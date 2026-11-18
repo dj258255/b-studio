@@ -312,6 +312,8 @@ async fn read_dir_names(path: &str) -> Vec<String> {
     while let Ok(Some(entry)) = entries.next_entry().await {
         names.push(entry.file_name().to_string_lossy().into_owned());
     }
+    // Node `readdir`(libuv `scandir`)은 바이트 이름순으로 돌려준다. 파일 시스템의 원래 순서를 따르면 옛 구현과 갈린다
+    names.sort();
     names
 }
 
@@ -1511,9 +1513,14 @@ fn walk_repos<'a>(
             // 읽을 수 없는 폴더는 건너뛴다(권한 등). 옛 코드와 같다
             Err(_) => return Ok(()),
         };
-        let mut subdirs: Vec<String> = Vec::new();
+        let mut listed = Vec::new();
         while let Ok(Some(entry)) = entries.next_entry().await {
-            let name = entry.file_name().to_string_lossy().into_owned();
+            listed.push((entry.file_name().to_string_lossy().into_owned(), entry));
+        }
+        // Node `readdir`(libuv `scandir`)은 바이트 이름순이다. 한도로 자를 때 남는 항목이 옛 구현과 같으려면 같은 순서로 걷는다
+        listed.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut subdirs: Vec<String> = Vec::new();
+        for (name, entry) in listed {
             let full = node_path::join(&[root, &name]);
             if cg::is_dot_git(&name) {
                 let is_top = top.map_or(false, |top| node_path::resolve(&cwd(), &[&full]) == top);
@@ -1723,6 +1730,31 @@ mod tests {
             author_name: Some("t".into()),
             has_excluded_files: false,
         }
+    }
+
+    /// Node `readdir`은 libuv가 바이트 이름순으로 정렬해 돌려준다. 한도로 자르는 걷기와 폴더 이름 목록이
+    /// 파일 시스템의 원래 순서(ext4는 해시 순서)를 따르면 리눅스에서만 옛 구현과 다른 항목이 남는다
+    #[tokio::test]
+    async fn 걷기와_폴더_이름_목록은_파일_시스템과_상관없이_바이트_이름순이다() {
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path());
+        let names: Vec<String> = (0..40).rev().map(|i| format!("d{i:02}")).collect();
+        for name in &names {
+            std::fs::create_dir_all(dir.path().join(name).join(".git")).unwrap();
+        }
+        let repo = repo(dir.path());
+        let root = repo.root.clone();
+        let top = node_path::join(&[&root, ".git"]);
+        let partition = Partition::Repo(&repo);
+        let mut found = Vec::new();
+        walk_repos(&root, &root, Some(&top), 5, &partition, &mut found).await.expect("walk");
+        let expected: Vec<String> = (0..5).map(|i| format!("d{i:02}/.git")).collect();
+        assert_eq!(found, expected);
+
+        let listed = read_dir_names(&root).await;
+        let mut sorted = listed.clone();
+        sorted.sort();
+        assert_eq!(listed, sorted);
     }
 
     #[tokio::test]

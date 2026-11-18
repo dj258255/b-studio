@@ -51,13 +51,14 @@ describe('schema 정규식: legacy Zod와 Rust가 같은 판정을 낸다', () =
     ['secret key', legacy.StudioSpecSchema, current.StudioSpecSchema, (s) => ({ version: 1, name: 'x', services: { web: { source: 'managed', template: 'x', path: 'x', port: 1, preview: 'browser' } }, secrets: { [s]: { services: [] } } })],
   ];
 
-  it('무작위 글자 8000개 × 필드 18개에서 결과가 같다', () => {
-    for (let i = 0; i < 8000; i += 1) {
-      const value = randomString();
-      for (const [label, a, b, make] of fields) {
+  // 같은 무작위 글자 8000개를 필드마다 따로 견준다. 한 시험에 14만 번을 몰면 느린 CI에서 시간 상한을 넘는다
+  const values = Array.from({ length: 8000 }, () => randomString());
+  for (const [label, a, b, make] of fields) {
+    it(`무작위 글자 8000개에서 ${label}의 결과가 같다`, () => {
+      for (const value of values) {
         const input = make(value);
         expect(result(b, input), `${label} ${JSON.stringify(value)}`).toEqual(result(a, input));
       }
-    }
-  });
+    });
+  }
 });
