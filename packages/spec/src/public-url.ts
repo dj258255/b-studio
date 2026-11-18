@@ -8,11 +8,12 @@
  * 바꿔 넣는다. 이 파일은 그 자리 표시자의 문법과 찾기·채우기 순수 함수만 둔다(Docker를 모른다 — 어느 샌드박스
  * 제공자든 같은 규칙을 쓸 수 있게 한다).
  *
- * 자리 표시자 문법은 일부러 `${VAR}` / `${VAR:-default}`처럼 docker compose가 아는 모양이 아니게 골랐다. compose의
- * 치환 규칙은 중괄호 안이 셸 변수 이름(영문·숫자·_로 시작)이어야 하는데 `b-studio:services.backend.publicUrl`은
- * 콜론·점·하이픈이 섞여 있어 그 규칙에 맞지 않는다. compose는 모양이 안 맞는 `${...}`는 건드리지 않고 그대로
- * 둔다(치환 실패로 보지 않는다) — 그래서 compose에 넘기기 전에 우리가 직접 바꿔 넣어야 한다.
+ * 자리 표시자 문법은 일부러 `${VAR}` / `${VAR:-default}`처럼 docker compose가 아는 모양이 아니게 골랐다.
+ *
+ * 찾기는 Rust(`crates/bstudio-guard/src/public_url.rs`의 `find_refs`)가 한다. 옛 TS는 `public-url-legacy.ts`로 남겨
+ * 차등 시험만 그것을 import한다. 만들기·채우기는 지금처럼 TS에 둔다(채우기는 sandbox의 Rust와 차등 시험으로 묶여 있다).
  */
+import { decodeNative, encodeNative, native } from './native';
 
 /** 자리 표시자 안의 서비스 이름 문법. studio.yaml 서비스 이름 규칙(소문자로 시작, 소문자·숫자·-)과 같다 */
 const SERVICE_NAME = '[a-z][a-z0-9-]*';
@@ -44,41 +45,10 @@ export interface PublicUrlRef {
   targetService: string;
 }
 
-/** compose의 environment 항목(목록 "KEY=value" 또는 맵 { KEY: value })에서 문자열 값만 꺼낸다 */
-function stringEnvEntries(value: unknown): Array<[string, string]> {
-  if (Array.isArray(value)) {
-    const out: Array<[string, string]> = [];
-    for (const entry of value) {
-      if (typeof entry !== 'string') continue;
-      const eq = entry.indexOf('=');
-      if (eq === -1) continue;
-      out.push([entry.slice(0, eq), entry.slice(eq + 1)]);
-    }
-    return out;
-  }
-  if (value && typeof value === 'object') {
-    const out: Array<[string, string]> = [];
-    for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
-      if (typeof raw === 'string') out.push([key, raw]);
-    }
-    return out;
-  }
-  return [];
-}
-
 /**
  * 파싱한 compose의 services 전체(`Record<서비스, unknown>`)에서 자리 표시자가 있는 environment 값을 모두 찾는다.
  * 순수 함수라 compose 파일을 읽는 일은 호출자가 한다(packages/spec/src/load.ts).
  */
 export function findPublicUrlRefs(services: Record<string, unknown>): PublicUrlRef[] {
-  const refs: PublicUrlRef[] = [];
-  for (const [service, raw] of Object.entries(services)) {
-    const def = raw as { environment?: unknown } | null;
-    if (!def || typeof def !== 'object') continue;
-    for (const [envKey, template] of stringEnvEntries(def.environment)) {
-      const match = pattern().exec(template);
-      if (match) refs.push({ service, envKey, template, targetService: match[1]! });
-    }
-  }
-  return refs;
+  return decodeNative<PublicUrlRef[]>(native.publicUrlFindRefs(encodeNative(services)));
 }
