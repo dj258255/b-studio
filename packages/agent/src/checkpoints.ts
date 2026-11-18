@@ -157,8 +157,14 @@ export interface DiscardBackup {
 interface ExcludedChange {
   /** 프로젝트 폴더 기준 경로 */
   file: string;
+  /** 지금 자리가 파일이면 내용, 링크·없음이면 undefined */
   before: Buffer | undefined;
+  /** 스냅샷 자리가 파일이면 내용, 링크·없음이면 undefined */
   after: Buffer | undefined;
+  /** 지금 자리가 링크면 가리키는 곳. 링크가 아니면 undefined */
+  beforeLink?: string;
+  /** 스냅샷 자리가 링크면 가리키는 곳. 링크가 아니면 undefined */
+  afterLink?: string;
 }
 
 /** 원격 세션 브랜치에만 있던 커밋 (리뷰어가 올린 커밋 등) */
@@ -708,19 +714,10 @@ export class CheckpointStore {
     }
 
     if (excludedManifestText !== undefined) {
-      // 생성 파일(제외됨)은 git 기록이 없어 충돌을 확인할 길이 없다 — 백업한 내용으로 그대로 덮어쓴다(단순화, 알려진 한계)
-      const manifest = JSON.parse(excludedManifestText) as Record<string, boolean>;
-      const projectRoot = await this.projectRoot();
-      for (const [file, existed] of Object.entries(manifest)) {
-        const target = path.join(projectRoot, file);
-        if (!existed) {
-          await rm(target, { force: true });
-          continue;
-        }
-        const content = await readFile(path.join(dir, 'excluded', file));
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, content);
-      }
+      // 생성 파일(제외됨)은 git 기록이 없어 충돌을 확인할 길이 없다 — 백업한 내용으로 그대로 되살린다.
+      // 경로의 어느 조각이 링크여도 따라가지 않도록 쓰기·지우기·링크 만들기는 Rust(`workspace_io`)가 한다.
+      // 백업 폴더는 손으로 바뀔 수 있으므로 manifest 이름도 그 자리에서 다시 검사한다
+      await this.#remote('restoreBackupExcluded', { backupDir: dir });
     }
     return { files: meta.files };
   }
@@ -742,6 +739,7 @@ export class CheckpointStore {
     const encoded = excluded.map((change) => ({
       file: change.file,
       before: change.before === undefined ? null : change.before.toString('base64'),
+      beforeLink: change.beforeLink ?? null,
     }));
     const backup = await this.#remote<DiscardBackup | null>('backupChanges', { trackedFiles: [...trackedFiles], excluded: encoded, base }, this.#backupIdentityHooks());
     return backup ?? undefined;
@@ -851,18 +849,28 @@ export class CheckpointStore {
    */
   async #excludedDiff(target: string): Promise<ExcludedChange[]> {
     if (!this.#excludedFiles) return [];
-    const changes = await this.#remote<Array<{ file: string; before: string | null; after: string | null }>>('excludedDiff', { target }, this.#excludedFilesHooks());
+    const changes = await this.#remote<Array<{ file: string; before: string | null; after: string | null; beforeLink?: string | null; afterLink?: string | null }>>(
+      'excludedDiff',
+      { target },
+      this.#excludedFilesHooks(),
+    );
     return changes.map((change) => ({
       file: change.file,
       before: change.before === null ? undefined : Buffer.from(change.before, 'base64'),
       after: change.after === null ? undefined : Buffer.from(change.after, 'base64'),
+      ...(change.beforeLink ? { beforeLink: change.beforeLink } : {}),
+      ...(change.afterLink ? { afterLink: change.afterLink } : {}),
     }));
   }
 
   /** #excludedDiff가 계산한 변경을 실제로 적용한다(없던 파일은 지우고, 있던 파일은 그 내용으로 되돌린다). 적용한 파일 이름을 돌려준다 */
   async #applyExcludedDiff(changes: readonly ExcludedChange[]): Promise<string[]> {
     if (changes.length === 0) return [];
-    const encoded = changes.map((change) => ({ file: change.file, after: change.after === undefined ? null : change.after.toString('base64') }));
+    const encoded = changes.map((change) => ({
+      file: change.file,
+      after: change.after === undefined ? null : change.after.toString('base64'),
+      afterLink: change.afterLink ?? null,
+    }));
     return this.#remote<string[]>('applyExcludedDiff', { changes: encoded });
   }
 

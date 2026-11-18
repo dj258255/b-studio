@@ -8,14 +8,16 @@
 //! 상태(백업 id와 생성 시각, `#start`·`#subdirCache` 캐시)는 Node가 든다. 백업 id는 TS가 만들어 넘기고, 처음 만든 시각도 TS가 넘긴다 —
 //! 옛 코드가 쓰던 `backupSequence`와 `new Date()`를 그대로 이어 가기 위해서다. 스냅샷 폴더 이름(staging)만 Rust가 만든다(사용자에게 보이지 않는다).
 //!
-//! 경로 규칙(옛 TS 그대로):
-//! - `#excludedDiff`·`#applyExcludedDiff`·`ignoredChangedSince`는 프로젝트 폴더 기준 이름을 `path.join`으로 잇는다. 옛 코드는 이름에 `..`가 있으면
-//!   폴더 밖으로 나갈 수 있었다(후보는 `studio.yaml` 같은 생성 파일 이름이라 보통 그런 값이 없다). 이번 이전은 **동작을 바꾸지 않는다** — 좁히는 일은 따로 한다.
-//! - `#applyExcludedDiff`의 제거는 옛 `rm(target, { force: true })`와 같다. 폴더면 지우지 않고 오류다(`unlink_force`). 링크는 링크 자리만 지운다.
+//! 경로 규칙:
+//! - `excludedFiles`가 돌려준 이름은 받은 자리에서 허용 목록으로 검사한다(`checkpoint_names`). 프로젝트 밖을 가리키는 이름은
+//!   그 이름만 빼지 않고 커밋·되돌리기를 멈춘다.
+//! - 생성 파일을 프로젝트 폴더에서 읽고 쓰고 지우는 자리는 `workspace_io`의 dirfd·`O_NOFOLLOW`를 쓴다. **경로의 어느 조각이 링크여도
+//!   따라가지 않는다** — 링크·비정규 파일·읽는 중 바뀜은 "없음"이 아니라 오류다(옛 코드는 `path.join` 뒤 `readFile`/`writeFile`이라 링크를 따라갔다).
+//! - `#applyExcludedDiff`의 제거는 옛 `rm(target, { force: true })`와 같다. 없으면 성공, 폴더면 오류다. 링크는 링크 자리만 지운다.
 //! - `#carryForwardExcludedSnapshot`의 복사는 링크를 따라가지 않고 링크로 복사한다(옛 `fs.cp` 기본값과 같은 쪽; 링크 너머를 복사하지 않는다).
-//! - `#stageExcludedSnapshot`은 링크를 `link:<가리키는 곳>`으로 기록하면서 내용도 읽는다(옛 코드와 같다 — 읽기는 링크를 따라간다).
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -172,18 +174,86 @@ async fn read_text(path: &str) -> Option<String> {
     read_bytes(path).await.map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// 프로젝트 폴더의 생성 파일 자리 상태. 링크는 대상 글자만 든다(내용을 읽지 않는다)
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ExcludedState {
+    Missing,
+    File(Vec<u8>),
+    Link(String),
+}
+
+/// 경로의 어느 조각도 링크를 따라가지 않고 자리 상태를 본다(`workspace_io`의 dirfd·`O_NOFOLLOW`).
+/// 링크는 `Link(대상)`이고 내용을 읽지 않는다. 폴더·장치·읽는 중 바뀜은 "없음"이 아니라 오류다
+fn inspect_excluded(root: &str, file: &str) -> Res<ExcludedState> {
+    use crate::workspace_io::{lstat_project_file, read_project_file, readlink_project_file, FileRead, Kind};
+    let stat = match lstat_project_file(Path::new(root), file) {
+        Ok(stat) => stat,
+        Err(failure) if failure.is_missing() => return Ok(ExcludedState::Missing),
+        Err(failure) => return Err(Fail::Checkpoint(format!("생성 파일 자리를 확인하지 못했습니다: {file} — {}", failure.code()))),
+    };
+    match stat.kind {
+        Kind::Link => match readlink_project_file(Path::new(root), file) {
+            Ok(target) => Ok(ExcludedState::Link(target)),
+            Err(failure) => Err(Fail::Checkpoint(format!("생성 파일 링크를 읽지 못했습니다: {file} — {}", failure.code()))),
+        },
+        Kind::File => match read_project_file(Path::new(root), file, f64::MAX) {
+            FileRead::Bytes { content, complete } if complete => Ok(ExcludedState::File(content)),
+            FileRead::Bytes { .. } => Err(Fail::Checkpoint(format!("생성 파일을 읽는 동안 바뀌었습니다: {file}"))),
+            FileRead::Missing => Err(Fail::Checkpoint(format!("생성 파일이 확인하는 동안 사라졌습니다: {file}"))),
+            FileRead::Irregular(reason) => Err(Fail::Checkpoint(format!("생성 파일을 읽지 못했습니다: {file} — {reason}"))),
+        },
+        Kind::Dir | Kind::Other => Err(Fail::Checkpoint(format!("생성 파일 자리가 일반 파일도 링크도 아닙니다: {file}"))),
+    }
+}
+
+/// 링크를 `link:<대상>`으로 기록한 값인가
+fn manifest_link(manifest: &Map<String, Value>, file: &str) -> Option<String> {
+    manifest.get(file)?.as_str()?.strip_prefix("link:").map(str::to_owned)
+}
+
+/// 사이드카 스냅샷의 자리 상태. 링크는 기록만 읽고 대상 내용을 읽지 않는다
+async fn snapshot_state(manifest: &Map<String, Value>, dir: &str, file: &str) -> Res<ExcludedState> {
+    if let Some(target) = manifest_link(manifest, file) {
+        return Ok(ExcludedState::Link(target));
+    }
+    if map_truthy(manifest, file) {
+        let path = node_path::join(&[dir, "files", file]);
+        match tokio::fs::read(&path).await {
+            Ok(bytes) => Ok(ExcludedState::File(bytes)),
+            Err(_) => Err(Fail::Checkpoint(format!("생성 파일 스냅샷을 읽지 못했습니다: {file}"))),
+        }
+    } else {
+        Ok(ExcludedState::Missing)
+    }
+}
+
+/// 프로젝트 폴더의 생성 파일을 쓴다. 부모 폴더는 링크 없이 내려가고 파일은 `O_NOFOLLOW`로 연다
+fn write_excluded(root: &str, file: &str, bytes: &[u8], make_dirs: bool) -> Res<()> {
+    crate::workspace_io::write_project_file(Path::new(root), file, bytes, make_dirs)
+        .map_err(|failure| Fail::Checkpoint(format!("생성 파일을 쓰지 못했습니다: {file} — {}", failure.code())))
+}
+
+/// 프로젝트 폴더의 생성 파일을 지운다. 없으면 그대로 성공이다. 부모 폴더는 링크 없이 내려간다
+fn remove_excluded(root: &str, file: &str) -> Res<()> {
+    match crate::workspace_io::remove_project_file(Path::new(root), file) {
+        Ok(()) => Ok(()),
+        Err(failure) if failure.is_missing() => Ok(()),
+        Err(failure) => Err(Fail::Checkpoint(format!("생성 파일을 지우지 못했습니다: {file} — {}", failure.code()))),
+    }
+}
+
+/// 프로젝트 폴더의 생성 파일 자리에 링크를 만든다. 부모 폴더는 링크 없이 내려간다. 같은 자리는 부르는 쪽이 먼저 지운다
+fn link_excluded(root: &str, file: &str, target: &str) -> Res<()> {
+    crate::workspace_io::symlink_project_file(Path::new(root), file, target)
+        .map_err(|failure| Fail::Checkpoint(format!("생성 파일 링크를 만들지 못했습니다: {file} — {}", failure.code())))
+}
+
 async fn read_manifest(repo: &Repo, sha: &str) -> Option<Map<String, Value>> {
     let text = read_text(&node_path::join(&[&excluded_dir(repo, sha), "manifest.json"])).await?;
     match serde_json::from_str::<Value>(&text) {
         Ok(Value::Object(map)) => Some(map),
         _ => None,
     }
-}
-
-/// `fs.writeFile`처럼 상위 폴더를 만들고 쓴다(옛 코드는 `mkdir(dirname, { recursive: true })`를 먼저 불렀다)
-async fn write_create(path: &str, bytes: &[u8]) -> std::io::Result<()> {
-    tokio::fs::create_dir_all(node_path::dirname(path)).await?;
-    tokio::fs::write(path, bytes).await
 }
 
 /// `fs.rm(path, { recursive: true, force: true })`. 링크는 링크 자리만 지우고 너머를 건드리지 않는다
@@ -208,21 +278,6 @@ async fn cleanup_staged(dir: &str, original: Fail) -> Fail {
     match remove_any(dir).await {
         Ok(()) => original,
         Err(error) => io_fail(error, "rm", dir),
-    }
-}
-
-/// `fs.rm(path, { force: true })` — 폴더는 지우지 않고 오류다(`recursive` 없음). 링크는 링크 자리만 지운다
-async fn unlink_force(path: &str) -> std::io::Result<()> {
-    use std::io::ErrorKind::NotFound;
-    match tokio::fs::symlink_metadata(path).await {
-        Err(error) if error.kind() == NotFound => Ok(()),
-        Err(error) => Err(error),
-        // EISDIR: `fs.rm`은 recursive가 아니면 폴더를 지우지 않는다(옛 코드도 던졌다)
-        Ok(meta) if meta.file_type().is_dir() => Err(std::io::Error::from_raw_os_error(21)),
-        Ok(_) => match tokio::fs::remove_file(path).await {
-            Err(error) if error.kind() == NotFound => Ok(()),
-            other => other,
-        },
     }
 }
 
@@ -481,10 +536,19 @@ impl Repo {
 
     // ── 생성 파일 사이드카 ──────────────────────────────────────────────
 
-    /// `excludedFiles` 제공자를 부른다(상태가 TS에 있다)
+    /// `excludedFiles` 제공자를 부른다(상태가 TS에 있다).
+    /// 이 이름들은 프로젝트 폴더와 `path.join`으로 이어져 읽고 쓴다. 제공자는 공개 옵션이라 프로젝트 밖을 가리키는 이름이
+    /// 들어올 수 있으므로 **경계에서 한 번** 검사한다(허용 목록). 하나라도 어기면 그 이름만 빼지 않고 던진다 —
+    /// 생성 파일을 확인하지 못한 채 커밋·되돌리기가 통과하면 안 된다
     async fn excluded_files(&self, project_root: &str) -> Res<Vec<String>> {
         let answer = self.hook(json!({ "op": "excludedFiles", "projectRoot": project_root })).await?;
-        Ok(string_array(answer.get("files")))
+        let files = string_array(answer.get("files"));
+        for file in &files {
+            if let Some(reason) = crate::checkpoint_names::excluded_name_problem(file) {
+                return fail(format!("생성 파일 이름이 올바르지 않습니다: {file:?} — {reason}"));
+            }
+        }
+        Ok(files)
     }
 
     /// 후보 중 이 저장소가 실제로 무시하는(`git status --ignored`) 파일만(옛 `#ignoredAmong`)
@@ -577,13 +641,15 @@ impl Repo {
                 continue;
             }
             let Some(previous) = &previous else { continue };
-            let before = if map_truthy(previous, &file) { read_bytes(&node_path::join(&[&excluded_dir(self, base), "files", &file])).await } else { None };
-            let same = match (&content, &before) {
-                (None, None) => true,
-                (Some(content), Some(before)) => content == before,
-                _ => false,
+            let before = snapshot_state(previous, &excluded_dir(self, base), &file).await?;
+            let current = if let Some(target) = links.get(&file) {
+                ExcludedState::Link(target.clone())
+            } else if let Some(content) = &content {
+                ExcludedState::File(content.clone())
+            } else {
+                ExcludedState::Missing
             };
-            if !same {
+            if current != before {
                 mismatched.push(file);
             }
         }
@@ -603,19 +669,24 @@ impl Repo {
         let mut manifest = Map::new();
         let mut links = HashMap::new();
         for file in &ignored {
-            let absolute = node_path::join(&[&project_root, file]);
-            if let Ok(meta) = tokio::fs::symlink_metadata(&absolute).await {
-                if meta.file_type().is_symlink() {
-                    let target = tokio::fs::read_link(&absolute).await.map(|path| path.to_string_lossy().into_owned()).unwrap_or_default();
+            let state = match inspect_excluded(&project_root, file) {
+                Ok(state) => state,
+                Err(error) => return Err(cleanup_staged(&dir, error).await),
+            };
+            match state {
+                // 링크는 `link:<가리키는 곳>`으로 기록하고 내용은 읽지 않는다(git이 링크를 다루는 방식과 같다)
+                ExcludedState::Link(target) => {
                     links.insert(file.clone(), format!("link:{target}"));
+                    manifest.insert(file.clone(), json!(format!("link:{target}")));
                 }
-            }
-            let content = read_bytes(&absolute).await;
-            manifest.insert(file.clone(), json!(content.is_some()));
-            if let Some(bytes) = &content {
-                let to = node_path::join(&[&files_dir, file]);
-                if let Err(error) = write_create(&to, bytes).await {
-                    return Err(cleanup_staged(&dir, io_fail(error, "open", &to)).await);
+                ExcludedState::File(bytes) => {
+                    manifest.insert(file.clone(), json!(true));
+                    if let Err(error) = write_excluded(&files_dir, file, &bytes, true) {
+                        return Err(cleanup_staged(&dir, error).await);
+                    }
+                }
+                ExcludedState::Missing => {
+                    manifest.insert(file.clone(), json!(false));
                 }
             }
         }
@@ -725,17 +796,28 @@ impl Repo {
         let snapshot = excluded_dir(self, target);
         let mut changes = Vec::new();
         for file in files {
-            let current = read_bytes(&node_path::join(&[&project_root, &file])).await;
-            let existed = map_truthy(&manifest, &file);
-            let at_target = if existed { read_bytes(&node_path::join(&[&snapshot, "files", &file])).await } else { None };
-            let changed = if existed { current.is_none() || at_target.is_none() || current != at_target } else { current.is_some() };
-            if changed {
-                changes.push(json!({
-                    "file": file,
-                    "before": current.as_deref().map(b64).map(Value::String).unwrap_or(Value::Null),
-                    "after": at_target.as_deref().map(b64).map(Value::String).unwrap_or(Value::Null),
-                }));
+            let current = inspect_excluded(&project_root, &file)?;
+            let target_state = snapshot_state(&manifest, &snapshot, &file).await?;
+            if current == target_state {
+                continue;
             }
+            let (before, before_link) = match &current {
+                ExcludedState::File(bytes) => (Value::String(b64(bytes)), Value::Null),
+                ExcludedState::Link(target) => (Value::Null, Value::String(target.clone())),
+                ExcludedState::Missing => (Value::Null, Value::Null),
+            };
+            let (after, after_link) = match &target_state {
+                ExcludedState::File(bytes) => (Value::String(b64(bytes)), Value::Null),
+                ExcludedState::Link(target) => (Value::Null, Value::String(target.clone())),
+                ExcludedState::Missing => (Value::Null, Value::Null),
+            };
+            changes.push(json!({
+                "file": file,
+                "before": before,
+                "after": after,
+                "beforeLink": before_link,
+                "afterLink": after_link,
+            }));
         }
         Ok(changes)
     }
@@ -746,17 +828,26 @@ impl Repo {
         let mut applied = Vec::new();
         for change in changes {
             let file = change.get("file").and_then(Value::as_str).unwrap_or_default().to_owned();
-            let target = node_path::join(&[&project_root, &file]);
-            match change.get("after").and_then(Value::as_str) {
-                None => {
-                    if let Err(error) = unlink_force(&target).await {
-                        return Err(io_fail(error, "rm", &target));
+            let current = inspect_excluded(&project_root, &file)?;
+            match (change.get("afterLink").and_then(Value::as_str), change.get("after").and_then(Value::as_str)) {
+                // 스냅샷이 링크면 지금 자리를 nofollow로 지우고 같은 대상의 링크를 다시 만든다(너머는 건드리지 않는다)
+                (Some(target), _) => {
+                    if current != ExcludedState::Missing {
+                        remove_excluded(&project_root, &file)?;
                     }
+                    link_excluded(&project_root, &file, target)?;
                 }
-                Some(encoded) => {
+                // 스냅샷이 파일인데 지금이 링크면 링크 자체를 지우고 파일을 만든다(링크 너머에 쓰지 않는다)
+                (None, Some(encoded)) => {
                     let Some(bytes) = unb64(encoded) else { return fail("생성 파일 내용을 풀지 못했습니다") };
-                    if let Err(error) = write_create(&target, &bytes).await {
-                        return Err(io_fail(error, "open", &target));
+                    if matches!(current, ExcludedState::Link(_)) {
+                        remove_excluded(&project_root, &file)?;
+                    }
+                    write_excluded(&project_root, &file, &bytes, true)?;
+                }
+                (None, None) => {
+                    if current != ExcludedState::Missing {
+                        remove_excluded(&project_root, &file)?;
                     }
                 }
             }
@@ -878,13 +969,16 @@ impl Repo {
             for change in excluded {
                 let file = change.get("file").and_then(Value::as_str).unwrap_or_default().to_owned();
                 let before = change.get("before").and_then(Value::as_str);
+                let before_link = change.get("beforeLink").and_then(Value::as_str);
+                // 링크는 대상 글자만 기록하고 너머의 내용은 복사하지 않는다
+                if let Some(target) = before_link {
+                    manifest.insert(file, json!(format!("link:{target}")));
+                    continue;
+                }
                 manifest.insert(file.clone(), json!(before.is_some()));
                 if let Some(encoded) = before {
                     let Some(bytes) = unb64(encoded) else { return fail("생성 파일 내용을 풀지 못했습니다") };
-                    let target = node_path::join(&[&dir, "excluded", &file]);
-                    if let Err(error) = write_create(&target, &bytes).await {
-                        return Err(io_fail(error, "open", &target));
-                    }
+                    write_excluded(&dir, &format!("excluded/{file}"), &bytes, true)?;
                 }
             }
             let target = node_path::join(&[&dir, "excluded-manifest.json"]);
@@ -901,6 +995,53 @@ impl Repo {
         }
         self.prune_backups(&id).await?;
         Ok(backup)
+    }
+
+    /// 백업에 담은 생성 파일을 되살린다. manifest 이름은 백업 폴더가 손으로 바뀔 수 있어 경계에서 다시 검사하고,
+    /// 파일 쓰기·지우기·링크 만들기는 프로젝트 폴더에서 nofollow로 한다. 확인하지 못하면 오류다.
+    /// 링크는 대상 글자만 기록되어 있으므로 같은 대상의 링크를 다시 만들고, 너머의 내용은 읽거나 쓰지 않는다
+    async fn restore_backup_excluded(&mut self, backup_dir: &str) -> Res<Value> {
+        let text = match crate::workspace_io::read_project_file(Path::new(backup_dir), "excluded-manifest.json", f64::MAX) {
+            crate::workspace_io::FileRead::Missing => return Ok(json!([])),
+            crate::workspace_io::FileRead::Bytes { content, complete } if complete => String::from_utf8_lossy(&content).into_owned(),
+            crate::workspace_io::FileRead::Bytes { .. } => return fail("백업의 생성 파일 목록을 읽는 동안 바뀌었습니다"),
+            crate::workspace_io::FileRead::Irregular(reason) => return fail(format!("백업의 생성 파일 목록을 읽지 못했습니다 — {reason}")),
+        };
+        let value: Value = serde_json::from_str(&text).map_err(|_| Fail::Checkpoint("백업의 생성 파일 목록을 읽지 못했습니다".to_owned()))?;
+        let Value::Object(manifest) = value else {
+            return fail("백업의 생성 파일 목록이 객체가 아닙니다");
+        };
+        let project_root = project_root(self).await;
+        let backup_root = Path::new(backup_dir);
+        let mut applied = Vec::new();
+        for (file, entry) in manifest {
+            if let Some(reason) = crate::checkpoint_names::excluded_name_problem(&file) {
+                return fail(format!("백업의 생성 파일 이름이 올바르지 않습니다: {file:?} — {reason}"));
+            }
+            if let Some(target) = entry.as_str().and_then(|text| text.strip_prefix("link:")) {
+                remove_excluded(&project_root, &file)?;
+                link_excluded(&project_root, &file, target)?;
+            } else if entry.as_bool() == Some(true) {
+                let relative = format!("excluded/{file}");
+                let content = match crate::workspace_io::read_project_file(backup_root, &relative, f64::MAX) {
+                    crate::workspace_io::FileRead::Bytes { content, complete } if complete => content,
+                    crate::workspace_io::FileRead::Missing => return fail(format!("백업의 생성 파일이 없습니다: {file}")),
+                    crate::workspace_io::FileRead::Bytes { .. } => return fail(format!("백업의 생성 파일을 읽는 동안 바뀌었습니다: {file}")),
+                    crate::workspace_io::FileRead::Irregular(reason) => return fail(format!("백업의 생성 파일을 읽지 못했습니다: {file} — {reason}")),
+                };
+                // 스냅샷이 파일인데 지금 자리가 링크면 링크 자체를 지우고 파일을 만든다(너머에 쓰지 않는다)
+                if matches!(inspect_excluded(&project_root, &file)?, ExcludedState::Link(_)) {
+                    remove_excluded(&project_root, &file)?;
+                }
+                write_excluded(&project_root, &file, &content, true)?;
+            } else if entry.as_bool() == Some(false) {
+                remove_excluded(&project_root, &file)?;
+            } else {
+                return fail(format!("백업의 생성 파일 항목을 읽지 못했습니다: {file}"));
+            }
+            applied.push(file);
+        }
+        Ok(json!(applied))
     }
 
     /// 개수·용량 한도를 넘으면 오래된 백업부터 지운다. 방금 만든 백업(`keep_id`)은 지우지 않는다
@@ -1539,6 +1680,7 @@ pub(crate) async fn dispatch(repo: &mut Repo, op: &str, input: &Value) -> Option
             repo.backup_changes(&string_array(input.get("trackedFiles")), &excluded, &text(input, "base")).await
         }
         "pruneBackups" => repo.prune_backups(&text(input, "keepId")).await.map(|()| Value::Null),
+        "restoreBackupExcluded" => repo.restore_backup_excluded(&text(input, "backupDir")).await,
         "configure" => repo.configure().await.map(|()| Value::Null),
         "init" => repo.init(&text(input, "message")).await,
         "commit" => repo.commit(input).await,
@@ -1671,6 +1813,300 @@ mod tests {
             Err(Fail::Checkpoint(message)) => assert!(message.starts_with("git rev-list 실패"), "{message}"),
             other => panic!("오류여야 한다: {other:?}"),
         }
+    }
+
+    fn failure_text(result: Res<Value>) -> String {
+        match result {
+            Err(Fail::Checkpoint(message)) => message,
+            Err(other) => format!("{other:?}"),
+            Ok(_) => "OK".to_owned(),
+        }
+    }
+
+    fn malicious_excluded(name: &str) -> Hook {
+        let name = name.to_owned();
+        Arc::new(move |request| {
+            let name = name.clone();
+            Box::pin(async move {
+                if request.contains("backupIdentity") {
+                    Some(json!({ "ok": true, "id": "id-1", "createdAt": "2026-11-18T00:00:00.000Z" }).to_string())
+                } else {
+                    Some(json!({ "ok": true, "files": [name] }).to_string())
+                }
+            })
+        })
+    }
+
+    fn assert_decoys(name: &str, label: &str, base: &std::path::Path, project: &std::path::Path, before_git: &[u8], before_hosts: &Option<Vec<u8>>) {
+        assert_eq!(std::fs::read_to_string(base.join("outside.txt")).unwrap(), "decoy\n", "{name}: {label} 뒤에 ../outside.txt가 바뀌었다");
+        assert_eq!(std::fs::read_to_string(base.join("absolute.txt")).unwrap(), "decoy\n", "{name}: {label} 뒤에 절대 경로 미끼가 바뀌었다");
+        assert_eq!(std::fs::read(project.join(".git/config")).unwrap(), before_git, "{name}: {label} 뒤에 .git/config가 바뀌었다");
+        assert_eq!(&std::fs::read("/etc/hosts").ok(), before_hosts, "{name}: {label} 뒤에 /etc/hosts가 바뀌었다");
+    }
+
+    /// `excludedFiles` 제공자가 어긋난 이름을 돌려주면 init·commit·discard·restore가 프로젝트 밖을 건드리지 않고 거부해야 한다.
+    /// 미끼는 프로젝트 폴더 밖(부모 폴더)과 절대 경로에 두고, 이름이 `.git/config`면 그 파일도 본다
+    #[tokio::test]
+    async fn 생성_파일_이름은_경계에서_거부하고_프로젝트_밖을_건드리지_않는다() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("order");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(base.path().join("outside.txt"), "decoy\n").unwrap();
+        let absolute = base.path().join("absolute.txt");
+        std::fs::write(&absolute, "decoy\n").unwrap();
+        let absolute_name = absolute.to_string_lossy().into_owned();
+        let before_hosts = std::fs::read("/etc/hosts").ok();
+        let cases = ["../outside.txt", "/etc/hosts", "a/../../outside.txt", "", "a\0b", ".git/config", "a//b", "./a", "a/"];
+
+        // 기준 저장소를 만든다(정상 이름 없이). start 메타가 생긴다
+        let mut benign = repo(&project);
+        benign.init("시작").await.expect("init");
+        let start = benign.start_sha().await.expect("start");
+        std::fs::write(project.join("a.txt"), "changed\n").unwrap();
+
+        let mut outcomes: Vec<(String, [String; 4])> = Vec::new();
+        for (index, name) in cases.into_iter().map(str::to_owned).chain(std::iter::once(absolute_name)).enumerate() {
+            let mut bad = Repo { hook: Some(malicious_excluded(&name)), has_excluded_files: true, ..repo(&project) };
+            let init_error = failure_text(bad.init("다시 시작").await);
+            assert_decoys(&name, "init", base.path(), &project, &std::fs::read(project.join(".git/config")).unwrap(), &before_hosts);
+
+            // init 뒤의 기준선. configure가 .git/config를 쓰므로 그 뒤에 뜬다
+            let before_git = std::fs::read(project.join(".git/config")).unwrap();
+            // 앞 이름의 오류로 남은 파일이 다음 init에 커밋되므로, 매번 새 이름을 써서 track할 변경이 있게 한다
+            std::fs::write(project.join(format!("b-{index}.txt")), "b\n").unwrap();
+            let commit_error = failure_text(bad.commit(&json!({ "message": "커밋", "expectExcluded": [] })).await);
+            assert_decoys(&name, "commit", base.path(), &project, &before_git, &before_hosts);
+
+            let discard_error = failure_text(bad.discard().await);
+            assert_decoys(&name, "discard", base.path(), &project, &before_git, &before_hosts);
+
+            let restore_error = failure_text(bad.restore(&start).await);
+            assert_decoys(&name, "restore", base.path(), &project, &before_git, &before_hosts);
+            outcomes.push((name, [init_error, commit_error, discard_error, restore_error]));
+        }
+        let wrong: Vec<_> = outcomes.iter().filter(|(_, messages)| messages.iter().any(|message| !message.contains("생성 파일 이름"))).collect();
+        assert!(wrong.is_empty(), "경계에서 거부되지 않은 이름/동작: {wrong:#?}");
+    }
+
+    fn tree_has_bytes(dir: &std::path::Path, needle: &[u8]) -> bool {
+        let Ok(entries) = std::fs::read_dir(dir) else { return false };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            if meta.file_type().is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                if tree_has_bytes(&path, needle) {
+                    return true;
+                }
+            } else if std::fs::read(&path).is_ok_and(|bytes| bytes == needle) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn manifest_of(project: &std::path::Path, sha: &str) -> Value {
+        let dir = project.join(".git/b-studio/excluded").join(sha);
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap()
+    }
+
+    fn ignored_studio(project: &std::path::Path) {
+        let exclude = project.join(".git/info/exclude");
+        let mut text = std::fs::read_to_string(&exclude).unwrap_or_default();
+        text.push_str("/studio.yaml\n");
+        std::fs::write(&exclude, text).unwrap();
+    }
+
+    /// 프로젝트 안을 가리키는 링크는 `link:<대상>`으로 기록하고, 되돌리면 그 자리에 같은 대상의 링크를 다시 만든다
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 생성_파일_링크는_기록하고_되돌리면_같은_대상을_다시_만든다() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("order");
+        std::fs::create_dir_all(project.join("spec")).unwrap();
+        std::fs::write(project.join("spec/real.yaml"), "inside\n").unwrap();
+        std::fs::write(project.join("spec/other.yaml"), "other\n").unwrap();
+        let mut benign = repo(&project);
+        benign.init("시작").await.expect("init");
+        ignored_studio(&project);
+        std::os::unix::fs::symlink("spec/real.yaml", project.join("studio.yaml")).unwrap();
+
+        let mut store = Repo { hook: Some(malicious_excluded("studio.yaml")), has_excluded_files: true, ..repo(&project) };
+        let init = store.init("다시 시작").await.expect("링크가 있어도 init은 성공한다");
+        let sha = init["sha"].as_str().unwrap().to_owned();
+        assert_eq!(manifest_of(&project, &sha)["studio.yaml"], "link:spec/real.yaml");
+        assert!(!project.join(".git/b-studio/excluded").join(&sha).join("files/studio.yaml").exists(), "링크 대상 내용을 사이드카에 쓰지 않는다");
+
+        // 게이트가 링크를 `link:<대상>`으로 지문해도 같은 규칙으로 맞는다
+        store
+            .stage_excluded_snapshot(Some(vec![("studio.yaml".to_owned(), "link:spec/real.yaml".to_owned())]), None)
+            .await
+            .expect("링크 지문이 맞는다");
+        let mismatch = store.stage_excluded_snapshot(Some(vec![("studio.yaml".to_owned(), "link:spec/other.yaml".to_owned())]), None).await;
+        assert!(matches!(mismatch, Err(Fail::StagedMismatch(files)) if files == vec!["studio.yaml".to_owned()]));
+
+        std::fs::write(project.join("a.txt"), "changed\n").unwrap();
+        store.commit(&json!({ "message": "링크 커밋" })).await.expect("링크가 있어도 commit은 성공한다");
+
+        // 지금 자리가 파일로 바뀌어도 되돌리면 스냅샷의 링크를 다시 만든다
+        std::fs::remove_file(project.join("studio.yaml")).unwrap();
+        std::fs::write(project.join("studio.yaml"), "changed\n").unwrap();
+        store.discard().await.expect("링크로 되돌린다");
+        assert_eq!(std::fs::read_link(project.join("studio.yaml")).unwrap(), std::path::Path::new("spec/real.yaml"));
+        assert_eq!(std::fs::read_to_string(project.join("spec/real.yaml")).unwrap(), "inside\n");
+
+        // 링크 대상이 바뀌어도 restore는 그 체크포인트의 링크를 다시 만든다
+        std::fs::remove_file(project.join("studio.yaml")).unwrap();
+        std::os::unix::fs::symlink("spec/other.yaml", project.join("studio.yaml")).unwrap();
+        store.restore(&sha).await.expect("링크로 복원한다");
+        assert_eq!(std::fs::read_link(project.join("studio.yaml")).unwrap(), std::path::Path::new("spec/real.yaml"));
+        assert_eq!(std::fs::read_to_string(project.join("spec/other.yaml")).unwrap(), "other\n");
+    }
+
+    /// 프로젝트 밖을 가리키는 링크도 성공하되, 바깥 내용을 사이드카·백업에 넣지 않고 바깥 파일을 바꾸지 않는다
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 바깥을_가리키는_링크는_내용을_읽지_않고_링크로_기록한다() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("order");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let one = outside.join("one.txt");
+        let two = outside.join("two.txt");
+        std::fs::write(&one, "outside-one\n").unwrap();
+        std::fs::write(&two, "outside-two\n").unwrap();
+
+        let mut benign = repo(&project);
+        benign.init("시작").await.expect("init");
+        ignored_studio(&project);
+        std::os::unix::fs::symlink(&one, project.join("studio.yaml")).unwrap();
+
+        let mut store = Repo { hook: Some(malicious_excluded("studio.yaml")), has_excluded_files: true, ..repo(&project) };
+        let init = store.init("다시 시작").await.expect("바깥 링크가 있어도 init은 성공한다");
+        let sha = init["sha"].as_str().unwrap().to_owned();
+        assert_eq!(manifest_of(&project, &sha)["studio.yaml"], format!("link:{}", one.display()));
+        assert!(!tree_has_bytes(&project.join(".git/b-studio"), b"outside-one\n"), "바깥 내용이 사이드카에 들어갔다");
+        assert_eq!(std::fs::read_to_string(&one).unwrap(), "outside-one\n");
+
+        // 링크 대상을 바꾸고 discard: 백업에는 대상 글자만, 바깥 파일은 그대로
+        std::fs::remove_file(project.join("studio.yaml")).unwrap();
+        std::os::unix::fs::symlink(&two, project.join("studio.yaml")).unwrap();
+        store.discard().await.expect("바깥 링크를 되돌린다");
+        assert_eq!(std::fs::read_link(project.join("studio.yaml")).unwrap(), one);
+        assert_eq!(std::fs::read_to_string(&two).unwrap(), "outside-two\n");
+        assert!(!tree_has_bytes(&project.join(".git/b-studio"), b"outside-two\n"), "바깥 내용이 백업에 들어갔다");
+        let backup_manifest = std::fs::read_to_string(project.join(".git/b-studio/discarded/id-1/excluded-manifest.json")).unwrap();
+        assert!(backup_manifest.contains(&format!("link:{}", two.display())), "{backup_manifest}");
+        assert!(!project.join(".git/b-studio/discarded/id-1/excluded/studio.yaml").exists(), "백업에 링크 내용을 복사하지 않는다");
+
+        std::fs::write(project.join("a.txt"), "changed\n").unwrap();
+        store.commit(&json!({ "message": "바깥 링크 커밋" })).await.expect("바깥 링크가 있어도 commit은 성공한다");
+    }
+
+    /// 스냅샷은 파일이었는데 지금 자리가 링크면 링크 자체를 지우고 파일을 만든다(너머에 쓰지 않는다)
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 스냅샷이_파일인데_지금_링크면_링크만_지우고_파일을_만든다() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("order");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let leak = outside.join("leak.txt");
+        std::fs::write(&leak, "outside\n").unwrap();
+        let mut benign = repo(&project);
+        benign.init("시작").await.expect("init");
+        ignored_studio(&project);
+        std::fs::write(project.join("studio.yaml"), "inside\n").unwrap();
+
+        let mut store = Repo { hook: Some(malicious_excluded("studio.yaml")), has_excluded_files: true, ..repo(&project) };
+        let head = store.head_sha().await.expect("head");
+        store.refresh_excluded_snapshot(&head, None).await.expect("snapshot");
+
+        std::fs::remove_file(project.join("studio.yaml")).unwrap();
+        std::os::unix::fs::symlink(&leak, project.join("studio.yaml")).unwrap();
+        store.discard().await.expect("파일로 되돌린다");
+        assert_eq!(std::fs::read_to_string(&leak).unwrap(), "outside\n");
+        let info = std::fs::symlink_metadata(project.join("studio.yaml")).unwrap();
+        assert!(info.is_file() && !info.file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(project.join("studio.yaml")).unwrap(), "inside\n");
+    }
+
+    /// `apply_excluded_diff`는 링크 자리를 지우고 링크나 파일을 만든다. 중간 폴더 링크는 따라가지 않는다
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 되돌리기는_링크_자리만_바꾸고_중간_폴더_링크는_따라가지_않는다() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("order");
+        let outside = base.path().join("outside");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(outside.join("web")).unwrap();
+        let leak = outside.join("leak.txt");
+        std::fs::write(&leak, "outside\n").unwrap();
+        let nested = outside.join("web/target.txt");
+        std::fs::write(&nested, "outside-target\n").unwrap();
+        std::os::unix::fs::symlink(&leak, project.join("studio.yaml")).unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("apps")).unwrap();
+
+        let mut repo = repo(&project);
+        // 스냅샷이 파일이면 링크를 지우고 파일을 만든다
+        repo.apply_excluded_diff(&[json!({ "file": "studio.yaml", "after": b64(b"inside\n") })]).await.expect("파일로 되돌린다");
+        assert!(std::fs::symlink_metadata(project.join("studio.yaml")).unwrap().is_file());
+        assert_eq!(std::fs::read_to_string(&leak).unwrap(), "outside\n");
+
+        // 스냅샷이 링크면 같은 대상의 링크를 다시 만든다
+        std::fs::remove_file(project.join("studio.yaml")).unwrap();
+        std::fs::write(project.join("studio.yaml"), "file\n").unwrap();
+        repo.apply_excluded_diff(&[json!({ "file": "studio.yaml", "afterLink": leak.to_string_lossy() })]).await.expect("링크로 되돌린다");
+        assert_eq!(std::fs::read_link(project.join("studio.yaml")).unwrap(), leak);
+        assert_eq!(std::fs::read_to_string(&leak).unwrap(), "outside\n");
+
+        // 중간 폴더가 링크면 따라가지 않고 오류다
+        let remove = repo.apply_excluded_diff(&[json!({ "file": "apps/web/target.txt", "after": Value::Null })]).await;
+        assert!(remove.is_err(), "중간 폴더 링크를 따라가지 않는다");
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "outside-target\n");
+    }
+
+    /// 백업 되살리기도 nofollow다. 백업 폴더의 manifest 이름은 손으로 바뀔 수 있어 경계에서 다시 검사하고,
+    /// 프로젝트의 중간 폴더가 링크면 너머에 쓰지 않고 오류다
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn 백업_되살리기도_링크_너머를_건드리지_않는다() {
+        let base = tempfile::tempdir().unwrap();
+        let project = base.path().join("order");
+        let outside = base.path().join("outside");
+        let backup = base.path().join("backup");
+        std::fs::create_dir_all(project.join("spec")).unwrap();
+        std::fs::create_dir_all(outside.join("web")).unwrap();
+        std::fs::create_dir_all(backup.join("excluded/apps/web")).unwrap();
+        std::fs::write(project.join("spec/real.yaml"), "real\n").unwrap();
+        let decoy = outside.join("web/Dockerfile.b-studio");
+        std::fs::write(&decoy, "outside\n").unwrap();
+        std::fs::write(backup.join("excluded/apps/web/Dockerfile.b-studio"), "backup\n").unwrap();
+        std::os::unix::fs::symlink(&outside, project.join("apps")).unwrap();
+
+        let manifest = backup.join("excluded-manifest.json");
+        std::fs::write(&manifest, json!({ "apps/web/Dockerfile.b-studio": true }).to_string()).unwrap();
+        let mut repo = repo(&project);
+        let result = repo.restore_backup_excluded(&backup.to_string_lossy()).await;
+        assert!(result.is_err(), "프로젝트의 링크 폴더를 따라 쓰지 않는다");
+        assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "outside\n");
+
+        // 백업 manifest의 이름도 다시 검사한다
+        std::fs::write(&manifest, json!({ "../outside.txt": true }).to_string()).unwrap();
+        let result = repo.restore_backup_excluded(&backup.to_string_lossy()).await;
+        assert!(result.is_err(), "백업 manifest의 `..` 이름을 거부한다");
+        assert_eq!(std::fs::read_to_string(&decoy).unwrap(), "outside\n");
+
+        // 링크 백업은 같은 대상의 링크로 되살린다
+        std::fs::write(project.join("studio.yaml"), "file\n").unwrap();
+        std::fs::write(&manifest, json!({ "studio.yaml": "link:spec/real.yaml" }).to_string()).unwrap();
+        repo.restore_backup_excluded(&backup.to_string_lossy()).await.expect("링크를 되살린다");
+        assert_eq!(std::fs::read_link(project.join("studio.yaml")).unwrap(), std::path::Path::new("spec/real.yaml"));
+        assert_eq!(std::fs::read_to_string(project.join("spec/real.yaml")).unwrap(), "real\n");
     }
 
     #[tokio::test]

@@ -658,6 +658,100 @@ mod imp {
         Ok(())
     }
 
+    /// `lstat`과 같되 숨긴 이름을 거르지 않는다(생성 파일 이름이 `.env` 계열이어도 본다). 경로의 어느 조각도 링크를 따라가지 않는다
+    pub fn lstat_project_file(root: &Path, relative: &str) -> Result<Stat, Failure> {
+        let opened = open_parent(root, relative, false, false)?;
+        let st = match &opened.leaf {
+            Some(leaf) => fstatat_nofollow(opened.parent.as_raw_fd(), &cstring(leaf)?),
+            None => fstatat_nofollow(opened.parent.as_raw_fd(), c"."),
+        }
+        .map_err(|code| Failure::Os(errno_name(code)))?;
+        Ok(Stat { kind: kind_of(st.st_mode), size: st.st_size.max(0) as u64 })
+    }
+
+    /// 링크의 가리키는 곳을 읽는다(링크를 따라가지 않는다). 링크가 아니면 `NotRegular`. 부모 폴더는 링크 없이 내려간다
+    pub fn readlink_project_file(root: &Path, relative: &str) -> Result<String, Failure> {
+        let opened = open_parent(root, relative, false, false)?;
+        let Some(leaf) = &opened.leaf else {
+            return Err(Failure::NotRegular);
+        };
+        let c = cstring(leaf)?;
+        let st = fstatat_nofollow(opened.parent.as_raw_fd(), &c).map_err(|code| Failure::Os(errno_name(code)))?;
+        if kind_of(st.st_mode) != Kind::Link {
+            return Err(Failure::NotRegular);
+        }
+        let mut buffer = vec![0u8; 4096];
+        // SAFETY: buffer는 쓸 수 있는 자리이고 c는 NUL로 끝난다
+        let length = unsafe { libc::readlinkat(opened.parent.as_raw_fd(), c.as_ptr(), buffer.as_mut_ptr().cast(), buffer.len()) };
+        if length < 0 {
+            return Err(Failure::Os(errno_name(errno())));
+        }
+        Ok(String::from_utf8_lossy(&buffer[..length as usize]).into_owned())
+    }
+
+    /// 심볼릭 링크를 만든다(`symlinkat`). 부모 폴더는 링크 없이 내려가며(`make_dirs`면 없는 것을 만들며) 연다.
+    /// 같은 자리에 이미 항목이 있으면 `EEXIST`다(지우는 것은 부르는 쪽이 nofollow로 먼저 한다)
+    pub fn symlink_project_file(root: &Path, relative: &str, target: &str) -> Result<(), Failure> {
+        let opened = open_parent(root, relative, false, true)?;
+        let Some(leaf) = &opened.leaf else {
+            return Err(Failure::Os("EISDIR"));
+        };
+        let c = cstring(leaf)?;
+        let t = cstring(target)?;
+        // SAFETY: 두 C 문자열은 NUL로 끝나고 부모는 열려 있는 서술자다
+        if unsafe { libc::symlinkat(t.as_ptr(), opened.parent.as_raw_fd(), c.as_ptr()) } == 0 {
+            Ok(())
+        } else {
+            Err(Failure::Os(errno_name(errno())))
+        }
+    }
+
+    /// `write_file`과 같되 숨긴 이름을 거르지 않는다(생성 파일처럼 정해진 이름이 `.env` 계열이어도 쓴다).
+    /// 부모 폴더는 링크 없이 내려가고 파일은 `O_NOFOLLOW`로 연다
+    pub fn write_project_file(root: &Path, relative: &str, data: &[u8], make_dirs: bool) -> Result<(), Failure> {
+        let opened = open_parent(root, relative, false, make_dirs)?;
+        let Some(leaf) = &opened.leaf else {
+            return Err(Failure::Os("EISDIR"));
+        };
+        let c = cstring(leaf)?;
+        let fd = match openat(opened.parent.as_raw_fd(), &c, libc::O_WRONLY | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK, 0o666) {
+            Ok(fd) => fd,
+            Err(libc::ELOOP | libc::EMLINK) => return Err(Failure::Link),
+            Err(code) => return Err(Failure::Os(errno_name(code))),
+        };
+        let file = File::from(fd);
+        let meta = file.metadata().map_err(|error| Failure::Os(errno_name(error.raw_os_error().unwrap_or(0))))?;
+        if !meta.is_file() {
+            return Err(Failure::NotRegular);
+        }
+        file.set_len(0).map_err(|error| Failure::Os(errno_name(error.raw_os_error().unwrap_or(0))))?;
+        let mut offset = 0usize;
+        while offset < data.len() {
+            match FileExt::write_at(&file, &data[offset..], offset as u64) {
+                Ok(0) => return Err(Failure::Os("EIO")),
+                Ok(written) => offset += written,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(Failure::Os(errno_name(error.raw_os_error().unwrap_or(0)))),
+            }
+        }
+        Ok(())
+    }
+
+    /// `remove_file`과 같되 숨긴 이름을 거르지 않는다. 부모는 링크 없이 내려가고 그 이름의 항목만 지운다
+    pub fn remove_project_file(root: &Path, relative: &str) -> Result<(), Failure> {
+        let opened = open_parent(root, relative, false, false)?;
+        let Some(leaf) = &opened.leaf else {
+            return Err(Failure::Os("EISDIR"));
+        };
+        let c = cstring(leaf)?;
+        // SAFETY: c는 NUL로 끝나는 C 문자열이고 부모는 열려 있는 서술자다. 플래그 0은 폴더를 지우지 않는다
+        if unsafe { libc::unlinkat(opened.parent.as_raw_fd(), c.as_ptr(), 0) } == 0 {
+            Ok(())
+        } else {
+            Err(Failure::Os(errno_name(errno())))
+        }
+    }
+
     /// 항목 하나를 지운다. `unlinkat(부모, 이름, 0)`이라 **그 이름의 항목만** 지운다: 링크면 링크만 지우고 너머를 따라가지 않으며, 폴더는 지우지 못한다(오류).
     /// 부모는 링크 없이 내려간다. 루트 자신은 지우지 못한다
     pub fn remove_file(root: &Path, relative: &str) -> Result<(), Failure> {
@@ -761,7 +855,27 @@ mod imp {
         Err(unsupported())
     }
 
+    pub fn lstat_project_file(_root: &Path, _relative: &str) -> Result<Stat, Failure> {
+        Err(unsupported())
+    }
+
+    pub fn readlink_project_file(_root: &Path, _relative: &str) -> Result<String, Failure> {
+        Err(unsupported())
+    }
+
+    pub fn symlink_project_file(_root: &Path, _relative: &str, _target: &str) -> Result<(), Failure> {
+        Err(unsupported())
+    }
+
+    pub fn write_project_file(_root: &Path, _relative: &str, _data: &[u8], _make_dirs: bool) -> Result<(), Failure> {
+        Err(unsupported())
+    }
+
     pub fn remove_file(_root: &Path, _relative: &str) -> Result<(), Failure> {
+        Err(unsupported())
+    }
+
+    pub fn remove_project_file(_root: &Path, _relative: &str) -> Result<(), Failure> {
         Err(unsupported())
     }
 
@@ -770,7 +884,10 @@ mod imp {
     }
 }
 
-pub use imp::{fingerprint, lstat, read_dir, read_file, read_project_file, read_regular_file, remove_file, resolve, write_file};
+pub use imp::{
+    fingerprint, lstat, lstat_project_file, read_dir, read_file, read_project_file, read_regular_file, readlink_project_file, remove_file, remove_project_file, resolve, symlink_project_file,
+    write_file, write_project_file,
+};
 
 #[cfg(all(test, unix))]
 mod tests {

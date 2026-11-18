@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -68,7 +68,7 @@ interface World {
   store: Store;
 }
 
-async function createWorld(Store: StoreClass): Promise<World> {
+async function createWorldWith(Store: StoreClass, excluded: string[]): Promise<World> {
   const base = path.join(sandboxRoot, `world-${++worldSeq}`);
   const source = path.join(base, 'orders');
   await mkdir(path.join(source, 'api/src'), { recursive: true });
@@ -78,8 +78,12 @@ async function createWorld(Store: StoreClass): Promise<World> {
   await git(source, 'add', '-A');
   await git(source, 'commit', '-q', '-m', 'init');
   const workDir = path.join(base, 'sessions', 'orders-s1');
-  const { store } = await Store.clone(source, workDir, { branch: BRANCH, excludedFiles: async () => EXCLUDED });
+  const { store } = await Store.clone(source, workDir, { branch: BRANCH, excludedFiles: async () => excluded });
   return { base, source, workDir, store };
+}
+
+async function createWorld(Store: StoreClass): Promise<World> {
+  return createWorldWith(Store, EXCLUDED);
 }
 
 /** 세션 작업 복사본의 프로젝트 파일을 쓴다(프로젝트 루트는 저장소 루트와 같다) */
@@ -424,5 +428,194 @@ describe('중첩 git 저장소 걷기 차등(D1c)', () => {
     const legacyNoTop = await legacyFindNestedGitRepos(root, undefined, partition, 100);
     const currentNoTop = await findNestedGitRepos(root, undefined, partition, 100);
     expect(currentNoTop.sort()).toEqual(legacyNoTop.sort());
+  });
+});
+
+// ── 생성 파일 이름 경계(의도한 차이: 더 막음) ──────────────────────────────
+
+describe('생성 파일 이름 경계', () => {
+  const NAMES = ['../outside.txt', '/etc/hosts', 'a/../../x', '', 'a\0b', '.git/config', 'a//b', './a', 'a/'];
+
+  it('프로젝트 밖·보호 경로를 가리키는 이름은 새 구현이 init에서 거부한다(옛 구현은 그대로 썼다)', async () => {
+    for (const name of NAMES) {
+      const legacy = await createWorldWith(LegacyCheckpointStore, [name]);
+      const current = await createWorldWith(CheckpointStore, [name]);
+      // 프로젝트 폴더(orders) 밖에 미끼를 둔다. `../outside.txt`는 여기를 가리킨다
+      const legacyDecoy = path.join(legacy.base, 'outside.txt');
+      const currentDecoy = path.join(current.base, 'outside.txt');
+      await writeFile(legacyDecoy, 'decoy\n');
+      await writeFile(currentDecoy, 'decoy\n');
+
+      const legacyError = await legacy.store.init().then(
+        () => undefined,
+        (error: unknown) => describeError(error),
+      );
+      const currentError = await current.store.init().then(
+        () => undefined,
+        (error: unknown) => describeError(error),
+      );
+
+      // 미끼는 두 세계 모두 그대로다
+      expect(await readFile(legacyDecoy, 'utf8')).toBe('decoy\n');
+      expect(await readFile(currentDecoy, 'utf8')).toBe('decoy\n');
+      // 새 구현은 경계에서 거부한다(의도한 차이)
+      expect({ name, error: currentError?.name }).toEqual({ name, error: 'CheckpointError' });
+      expect(currentError?.message).toContain('생성 파일 이름이 올바르지 않습니다');
+      // 옛 구현은 이 검사를 하지 않는다. 경계 검사에서 갈린다는 것만 고정한다
+      expect(legacyError?.message ?? '').not.toContain('생성 파일 이름이 올바르지 않습니다');
+    }
+  });
+
+  it('`.git/config`는 옛 구현이 init을 마치고, 새 구현은 거부한다', async () => {
+    const legacy = await createWorldWith(LegacyCheckpointStore, ['.git/config']);
+    const current = await createWorldWith(CheckpointStore, ['.git/config']);
+    expect(await legacy.store.init()).toBeDefined();
+    await expect(current.store.init()).rejects.toThrow('생성 파일 이름이 올바르지 않습니다');
+  });
+});
+
+describe('생성 파일 이름 경계: 중간 폴더 링크', () => {
+  it('링크 폴더 아래 이름은 옛·새 구현 모두 사이드카·백업으로 읽어 오지 않는다', async () => {
+    for (const Store of [LegacyCheckpointStore, CheckpointStore]) {
+      const w = await createWorldWith(Store, ['apps/web/Dockerfile.b-studio']);
+      const outside = path.join(w.base, 'outside');
+      await mkdir(path.join(outside, 'web'), { recursive: true });
+      await writeFile(path.join(outside, 'web', 'Dockerfile.b-studio'), 'outside-dockerfile\n');
+      // 세션 작업 복사본의 apps는 프로젝트 밖 폴더를 가리킨다
+      await symlink(outside, path.join(w.workDir, 'apps'));
+
+      await w.store.init().catch(() => undefined);
+      await writeProject(w, 'api/src/Order.java', 'class Order { int a; int b; }\n');
+      await w.store.commit('요청: 링크 밖에 이름을 둔다').catch(() => undefined);
+      await w.store.discard().catch(() => undefined);
+      const shas = await w.store.list().catch(() => []);
+      if (shas.length > 0) await w.store.restore(shas.at(-1)!.sha).catch(() => undefined);
+
+      // 바깥 미끼는 그대로다
+      expect(await readFile(path.join(outside, 'web', 'Dockerfile.b-studio'), 'utf8')).toBe('outside-dockerfile\n');
+      // 사이드카·백업 어디에도 링크 너머의 내용이 들어가지 않았다
+      const tree = await folderTree(path.join(w.workDir, '.git/b-studio'));
+      expect(Object.values(tree)).not.toContain(Buffer.from('outside-dockerfile\n').toString('base64'));
+    }
+  });
+});
+
+describe('생성 파일 링크: git처럼 링크로 다룬다', () => {
+  it('(a) 프로젝트 안을 가리키는 링크는 옛·새 모두 성공하고 같은 대상을 유지한다', async () => {
+    const run = async (Store: StoreClass) => {
+      const w = await createWorldWith(Store, ['studio.yaml']);
+      await mkdir(path.join(w.workDir, 'spec'), { recursive: true });
+      await writeFile(path.join(w.workDir, 'spec/real.yaml'), 'real\n');
+      await symlink('spec/real.yaml', path.join(w.workDir, 'studio.yaml'));
+      await exclude(w, '/studio.yaml');
+      const start = await w.store.init();
+      await writeProject(w, 'api/src/Order.java', 'class Order { int a; }\n');
+      await w.store.commit('요청: 링크');
+      await w.store.discard();
+      await w.store.restore(start.sha);
+      const info = await lstat(path.join(w.workDir, 'studio.yaml'));
+      return {
+        link: info.isSymbolicLink(),
+        target: info.isSymbolicLink() ? await readlink(path.join(w.workDir, 'studio.yaml')) : null,
+        real: await readFile(path.join(w.workDir, 'spec/real.yaml'), 'utf8'),
+      };
+    };
+    const legacy = await run(LegacyCheckpointStore);
+    const current = await run(CheckpointStore);
+    expect(current).toEqual({ link: true, target: 'spec/real.yaml', real: 'real\n' });
+    expect(current).toEqual(legacy);
+  });
+
+  it('(b) 바깥 링크: 새 구현은 바깥 내용을 사이드카에 넣지 않는다(옛 구현은 넣었다 — 의도한 차이)', async () => {
+    const run = async (Store: StoreClass) => {
+      const w = await createWorldWith(Store, ['studio.yaml']);
+      const outside = path.join(w.base, 'outside.txt');
+      await writeFile(outside, 'outside\n');
+      await symlink(outside, path.join(w.workDir, 'studio.yaml'));
+      await exclude(w, '/studio.yaml');
+      await w.store.init();
+      const tree = await folderTree(path.join(w.workDir, '.git/b-studio'));
+      return {
+        hasOutsideContent: Object.values(tree).includes(Buffer.from('outside\n').toString('base64')),
+        outside: await readFile(outside, 'utf8'),
+      };
+    };
+    const legacy = await run(LegacyCheckpointStore);
+    const current = await run(CheckpointStore);
+    // 새 구현은 링크 대상 글자만 기록하고 내용을 읽지 않는다
+    expect(current).toEqual({ hasOutsideContent: false, outside: 'outside\n' });
+    // 옛 구현은 링크를 따라 내용을 사이드카에 넣었다(의도한 차이)
+    expect(legacy).toEqual({ hasOutsideContent: true, outside: 'outside\n' });
+  });
+
+  it('(c) 스냅샷은 파일인데 지금 링크: 새 구현은 링크만 지우고, 옛 구현은 링크 너머를 덮어썼다', async () => {
+    const run = async (Store: StoreClass) => {
+      const w = await createWorldWith(Store, ['studio.yaml']);
+      const leak = path.join(w.base, 'leak.txt');
+      await writeFile(leak, 'outside\n');
+      await writeFile(path.join(w.workDir, 'studio.yaml'), 'inside\n');
+      await exclude(w, '/studio.yaml');
+      await w.store.init();
+      await rm(path.join(w.workDir, 'studio.yaml'));
+      await symlink(leak, path.join(w.workDir, 'studio.yaml'));
+      await w.store.discard();
+      const info = await lstat(path.join(w.workDir, 'studio.yaml'));
+      return {
+        leak: await readFile(leak, 'utf8'),
+        link: info.isSymbolicLink(),
+        content: await readFile(path.join(w.workDir, 'studio.yaml'), 'utf8'),
+      };
+    };
+    const legacy = await run(LegacyCheckpointStore);
+    const current = await run(CheckpointStore);
+    // 새 구현: 링크 자체를 지우고 파일을 만든다. 바깥은 그대로다
+    expect(current).toEqual({ leak: 'outside\n', link: false, content: 'inside\n' });
+    // 옛 구현: 링크를 따라 바깥 파일을 덮어썼다(의도한 차이)
+    expect(legacy).toEqual({ leak: 'inside\n', link: true, content: 'inside\n' });
+  });
+});
+
+describe('restoreBackup: 생성 파일 되살리기도 링크를 따라가지 않는다', () => {
+  it('백업 뒤 중간 폴더가 링크가 되면 새 구현은 쓰지 않고, 옛 구현은 링크 너머를 덮어썼다(의도한 차이)', async () => {
+    const run = async (Store: StoreClass) => {
+      const w = await createWorldWith(Store, ['apps/web/Dockerfile.b-studio']);
+      await writeProject(w, 'apps/web/Dockerfile.b-studio', 'generated-1\n');
+      await exclude(w, '/apps/web/Dockerfile.b-studio');
+      await w.store.init();
+
+      await writeProject(w, 'api/src/Order.java', 'class Order { int a; }\n');
+      await writeProject(w, 'apps/web/Dockerfile.b-studio', 'generated-2\n');
+      const { backup } = await w.store.discard();
+      expect(backup).toBeDefined();
+
+      // 되살리기 직전에 중간 폴더를 프로젝트 밖 링크로 바꾼다
+      const outside = path.join(w.base, 'outside');
+      await mkdir(path.join(outside, 'web'), { recursive: true });
+      const decoy = path.join(outside, 'web/Dockerfile.b-studio');
+      await writeFile(decoy, 'outside\n');
+      await rm(path.join(w.workDir, 'apps'), { recursive: true, force: true });
+      await symlink(outside, path.join(w.workDir, 'apps'));
+
+      const result = await w.store.restoreBackup(backup!.id).then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error: describeError(error) }),
+      );
+      return {
+        result,
+        decoy: await readFile(decoy, 'utf8'),
+        tracked: await readFile(path.join(w.workDir, 'api/src/Order.java'), 'utf8'),
+      };
+    };
+
+    const legacy = await run(LegacyCheckpointStore);
+    const current = await run(CheckpointStore);
+    // 새 구현: 링크 폴더를 따라 쓰지 않고 오류. 그래도 보통 파일(백업의 files/)은 되살린다
+    expect(current.result.ok).toBe(false);
+    expect(current.decoy).toBe('outside\n');
+    expect(current.tracked).toBe('class Order { int a; }\n');
+    // 옛 구현: 링크를 따라 바깥 파일을 덮어썼다(의도한 차이)
+    expect(legacy.result.ok).toBe(true);
+    expect(legacy.decoy).toBe('generated-2\n');
+    expect(legacy.tracked).toBe('class Order { int a; }\n');
   });
 });
