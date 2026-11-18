@@ -1,0 +1,299 @@
+{
+  "http": [
+    {
+      "step": "CLI가 받은 인자",
+      "method": "OBSERVE",
+      "path": "claude-argv",
+      "status": 0,
+      "body": {
+        "args": [
+          "--mcp-config",
+          "<root>/gateway/<sandbox>/mcp.json",
+          "--settings",
+          "<root>/gateway/<sandbox>/settings.json",
+          "대답이 없는 요청"
+        ],
+        "cwd": "<root>/sessions/demo-<sid>"
+      }
+    },
+    {
+      "step": "세션 만들기(첫 요청 넘기기)",
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 201,
+      "body": {
+        "session": {
+          "id": "<sid>",
+          "projectId": "demo",
+          "projectName": "demo",
+          "workDir": "<root>/sessions/demo-<sid>",
+          "workspace": "copy",
+          "status": "idle",
+          "mode": "claude-code",
+          "backend": "claude-code",
+          "running": false,
+          "owner": "local",
+          "experimental": true,
+          "terminal": true,
+          "terminalMode": "host",
+          "hasDeploy": false,
+          "services": [
+            {
+              "name": "app",
+              "template": "nextjs",
+              "preview": "browser",
+              "state": "stopped",
+              "hasContract": false
+            }
+          ],
+          "externals": [],
+          "checkpoints": [
+            {
+              "sha": "<sha:1>",
+              "shortSha": "<sha:1>",
+              "message": "세션 시작 (main 브랜치)",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/hello.txt",
+                "app/readme.txt",
+                "compose.yaml",
+                "studio.yaml"
+              ]
+            }
+          ],
+          "repository": {
+            "remote": "<root>/projects/demo",
+            "kind": "local",
+            "base": "main",
+            "branch": "b-studio/demo-<sid>",
+            "sourceDirtyFiles": 0,
+            "canCreatePullRequest": false
+          }
+        },
+        "routing": {
+          "backend": "claude-code",
+          "rule": "direct",
+          "matched": "직접 고름",
+          "kind": {
+            "complexity": "simple",
+            "risk": "normal"
+          },
+          "skipped": []
+        },
+        "terminal": {
+          "opened": true,
+          "pasted": true,
+          "pasteError": "요청을 CLI에 넘겼지만 10초 안에 실행이 시작되지 않았습니다. CLI가 시작할 때 묻는 창(폴더 신뢰 등)이 떠 있으면 그 터미널에서 답하세요. 답하면 요청이 이어집니다"
+        }
+      }
+    }
+  ],
+  "events": {
+    "run": [],
+    "platform": [
+      {
+        "type": "snapshot",
+        "snapshot": {
+          "id": "<sid>",
+          "projectId": "demo",
+          "projectName": "demo",
+          "workDir": "<root>/sessions/demo-<sid>",
+          "workspace": "copy",
+          "status": "idle",
+          "mode": "claude-code",
+          "backend": "claude-code",
+          "running": false,
+          "owner": "local",
+          "experimental": true,
+          "terminal": true,
+          "terminalMode": "host",
+          "hasDeploy": false,
+          "services": [
+            {
+              "name": "app",
+              "template": "nextjs",
+              "preview": "browser",
+              "state": "stopped",
+              "hasContract": false
+            }
+          ],
+          "externals": [],
+          "checkpoints": [
+            {
+              "sha": "<sha:1>",
+              "shortSha": "<sha:1>",
+              "message": "세션 시작 (main 브랜치)",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/hello.txt",
+                "app/readme.txt",
+                "compose.yaml",
+                "studio.yaml"
+              ]
+            }
+          ],
+          "repository": {
+            "remote": "<root>/projects/demo",
+            "kind": "local",
+            "base": "main",
+            "branch": "b-studio/demo-<sid>",
+            "sourceDirtyFiles": 0,
+            "canCreatePullRequest": false
+          }
+        }
+      },
+      {
+        "type": "snapshot_sync",
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        },
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ]
+      }
+    ],
+    "files": []
+  },
+  "disk": {
+    "commits": [
+      {
+        "sha": "<sha:1>",
+        "message": "데모 프로젝트"
+      }
+    ],
+    "refs": [
+      {
+        "name": "refs/heads/b-studio/demo-<sid>",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/heads/main",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/HEAD",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/main",
+        "sha": "<sha:1>"
+      }
+    ],
+    "status": [],
+    "files": {
+      "app/hello.txt": "안녕\n"
+    },
+    "sessionJson": {
+      "claudeCode": {
+        "notes": []
+      },
+      "codex": {
+        "notes": [],
+        "recent": []
+      },
+      "commandCode": {
+        "notes": []
+      },
+      "conversation": [],
+      "demoIndex": 0,
+      "gemini": {
+        "notes": []
+      },
+      "git": {
+        "branch": "b-studio/demo-<sid>",
+        "lastCheckpoint": "<sha:1>",
+        "originUrl": "<root>/projects/demo"
+      },
+      "history": [],
+      "openCode": {
+        "notes": []
+      },
+      "owner": {
+        "pid": "<pid>"
+      },
+      "previewToken": "<previewToken>",
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "savedAt": "<savedAt>",
+      "snapshot": {
+        "backend": "claude-code",
+        "checkpoints": [
+          {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ],
+            "message": "세션 시작 (main 브랜치)",
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>"
+          }
+        ],
+        "experimental": true,
+        "externals": [],
+        "hasDeploy": false,
+        "id": "<sid>",
+        "mode": "claude-code",
+        "owner": "local",
+        "projectId": "demo",
+        "projectName": "demo",
+        "repository": {
+          "base": "main",
+          "branch": "b-studio/demo-<sid>",
+          "canCreatePullRequest": false,
+          "kind": "local",
+          "remote": "<root>/projects/demo",
+          "sourceDirtyFiles": 0
+        },
+        "running": false,
+        "services": [
+          {
+            "hasContract": false,
+            "name": "app",
+            "preview": "browser",
+            "state": "stopped",
+            "template": "nextjs"
+          }
+        ],
+        "status": "idle",
+        "terminal": true,
+        "terminalMode": "host",
+        "workDir": "<root>/sessions/demo-<sid>",
+        "workspace": "copy"
+      },
+      "sourceDirtyFiles": 0,
+      "version": 1
+    }
+  },
+  "docker": {
+    "mutating": [],
+    "atShutdown": [
+      "compose down --volumes --remove-orphans --rmi local",
+      "rm --force <sandbox>-agent"
+    ],
+    "readKinds": [
+      "compose config"
+    ],
+    "unknown": []
+  }
+}

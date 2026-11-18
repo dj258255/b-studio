@@ -6,7 +6,7 @@ import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { createWorld, firstDirWith, readDisk, startFrontTarget, startNodeTarget, type Target, type World } from './harness';
 import { baselinePath, runScenario } from './run-scenario';
-import { scenarios, terminalScenarios } from './scenarios';
+import { deskScenarios, scenarios, terminalScenarios } from './scenarios';
 
 /**
  * 세션 경로의 바깥 동작 기준 사진(ADR-195 4f F0). 시나리오마다 진짜 studio 서버(앞단 + Node)를 임시 HOME·임시 세션 폴더·임시 프로젝트로 띄우고,
@@ -57,6 +57,7 @@ describe('시험 장치', () => {
 describe.concurrent.each([
   ['세션 경로 기준 사진(/messages: stream-json 러너)', scenarios],
   ['세션 터미널 경로 기준 사진(훅 호출)', terminalScenarios],
+  ['desk 흐름 기준 사진(C1a: 만들기·멈추기·다시 켜기·목록·훅)', deskScenarios],
 ] as const)('%s', (_name, list) => {
   for (const scenario of list) {
     it(
