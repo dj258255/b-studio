@@ -199,10 +199,10 @@ mod tests {
     fn reads_the_real_argv_of_a_child_we_started() {
         let mut child = std::process::Command::new("/bin/sleep").arg("5").spawn().unwrap();
         let pid = i64::from(child.id());
-        // exec 직후에는 아직 부모의 모습일 수 있어 잠깐 기다린다
+        // exec 직후에는 아직 부모의 모습일 수 있어 잠깐 기다린다. Linux는 exec 도중 cmdline이 잠깐 비어 "살아 있는데 못 읽음"(오류)이 될 수 있어 그 동안은 다시 묻는다
         let mut argv = None;
         for _ in 0..50 {
-            argv = process_argv(pid).unwrap();
+            argv = process_argv(pid).ok().flatten();
             if argv.as_deref() == Some(&["/bin/sleep".to_owned(), "5".to_owned()][..]) {
                 break;
             }
