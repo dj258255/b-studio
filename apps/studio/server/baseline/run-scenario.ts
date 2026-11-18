@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createWorld, Driver, snapshotOf, startFrontTarget, type BaselineSnapshot, type Target, type World } from './harness';
+import { createWorld, Driver, snapshotOf, startFrontTarget, withoutFileRevisionCount, type BaselineSnapshot, type Target, type World } from './harness';
 import type { FakeCli, Scenario } from './scenarios';
 
 /**
@@ -67,7 +67,8 @@ export async function runScenario(scenario: Scenario, startTarget: (world: World
     const beforeShutdown = (await world.dockerCalls()).length;
     await target.stop();
     target = undefined;
-    return await snapshotOf(world, live, session, scenario.files ?? [], beforeShutdown);
+    const snapshot = await snapshotOf(world, live, session, scenario.files ?? [], beforeShutdown);
+    return scenario.fileRevisionCount === 'ignore' ? withoutFileRevisionCount(snapshot) : snapshot;
   } finally {
     await driver.close();
     await target?.stop();

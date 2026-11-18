@@ -19,6 +19,8 @@ export interface Scenario {
    * 어긋난 것을 사람이 읽을 글로 돌려준다(비면 통과)
    */
   check?: (snapshot: BaselineSnapshot) => string[];
+  /** `ignore`면 파일 변경 알림의 개수를 사진에 남기지 않는다(왔는지만). 이유는 `withoutFileRevisionCount` */
+  fileRevisionCount?: 'ignore';
 }
 
 /**
@@ -420,7 +422,8 @@ export const terminalScenarios: Scenario[] = [
 ];
 
 // ── desk가 실제로 부르는 흐름(C1a, #1301): 모두 지원 경로(이 컴퓨터 방식 세션 터미널)다 ──
-export const deskScenarios: Scenario[] = [
+// desk 흐름은 파일 변경 알림의 개수를 사진에 남기지 않는다(`withoutFileRevisionCount`)
+export const deskScenarios: Scenario[] = ([
   {
     name: 'desk-direct-first-request-pass',
     covers: 'desk의 만들기(route: direct + terminal): 서버가 터미널을 열고 첫 요청을 CLI 실행 인자로 넘기며, 그 요청이 훅으로 이어져 통과하면 체크포인트',
@@ -798,7 +801,7 @@ export const deskScenarios: Scenario[] = [
       await driver.call('만든 세션 목록', 'GET', '/api/sessions');
     },
   },
-];
+] satisfies Scenario[]).map((scenario): Scenario => ({ ...scenario, fileRevisionCount: 'ignore' }));
 
 /** 감시가 관문 설정을 되돌릴 때까지 잠깐 기다려 같아졌는지 본다 */
 async function restoredTo(file: string, original: string): Promise<boolean> {

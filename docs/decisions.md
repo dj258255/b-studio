@@ -9747,7 +9747,7 @@ F0의 사진은 터미널 시나리오가 7개뿐이라, desk가 실제로 부�
 - `/api/agents/stream`의 타이머 조각(사용량 갱신 등)은 남기지 않고, 처음 `full`과 이름이 바뀐 항목의 `delta`만 고른다. `/api/terminals/stream`도 같다.
 - `/messages` 경로는 더하지 않았다(D4 전). 게이트 중 바뀐 파일과 위반은 `moved`·`violation` 가운데 파일이 바뀐 것과 설정 변조를 다뤘고, 훅 없이 뜬 CLI(ps 검사)는 다루지 않았다.
 
-**하네스 변경**(기존 사진은 바뀌지 않았다): `Driver.call`의 쿠키를 터미널 통로 말고 check-changes·`/api/terminals/*`에도 싣고 `after`를 받는다. `observe`·`gatewayDir`·`observeCli`(가짜 claude의 argv)·`telemetry`·`openStream`(SSE)을 더했다. `startRouted`(첫 요청 넘기기 + 그 사이의 시작·요청 훅)를 더했다. 정규화는 시간 측정인 `runningForMs`·`lastUsageAt`을 가린다(기존 사진에는 없는 키).
+**하네스 변경**(기존 사진은 바뀌지 않았다): `Driver.call`의 쿠키를 터미널 통로 말고 check-changes·`/api/terminals/*`에도 싣고 `after`를 받는다. `observe`·`gatewayDir`·`observeCli`(가짜 claude의 argv)·`telemetry`·`openStream`(SSE)을 더했다. `startRouted`(첫 요청 넘기기 + 그 사이의 시작·요청 훅)를 더했다. 정규화는 시간 측정인 `runningForMs`·`lastUsageAt`을 가린다(기존 사진에는 없는 키). desk 시나리오는 파일 변경 알림의 **개수**를 남기지 않고 왔는지만 남긴다(`withoutFileRevisionCount`). 감시가 첫 변경부터 500ms 안의 변경을 묶고 리눅스의 재귀 감시는 켜지는 데 시간이 걸려, 첫 CI(ubuntu)에서 `desk-hook-stop-failure`의 알림이 2번이 아니라 1번이었다. 알림은 코드 화면을 다시 불러오라는 신호라 판정에 쓰이지 않는다. 기존 24개 사진은 개수를 그대로 남긴다.
 
 **변이**(제품 코드 한 줄씩 바꾸고 되돌림, 시나리오별 시험을 돌림): 권한 확인 알림 무시 → desk-hook-notification, `/notification` 훅 응답 바꿈 → desk-hook-notification, StopFailure가 실행을 닫지 않음 → desk-hook-stop-failure, 텔레메트리를 실행에 붙이지 않음 → desk-telemetry, SessionEnd가 실행을 닫지 않음 → desk-hook-session-end 둘, 멈출 때 관문을 닫지 않음 → desk-stop-while-running, 이름 바꾸기를 저장하지 않음 → desk-rename, 이름 바꾸기 이벤트를 내지 않음 → desk-rename. 8개 모두 잡혔다. 멈출 때 열린 실행을 닫지 않는 변이만 잡히지 않았다(위).
 

@@ -298,7 +298,7 @@
     "files": [
       {
         "type": "files_changed",
-        "revision": 1
+        "revision": "<fileRevision>"
       }
     ]
   },
@@ -443,7 +443,7 @@
         ],
         "experimental": true,
         "externals": [],
-        "fileRevision": 1,
+        "fileRevision": "<fileRevision>",
         "hasDeploy": false,
         "id": "<sid>",
         "mode": "claude-code",

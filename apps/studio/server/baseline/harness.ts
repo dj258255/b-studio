@@ -595,6 +595,22 @@ export function laneEvents(events: SseEvent[]): { run: unknown[]; platform: unkn
   return { run, platform, files };
 }
 
+/**
+ * 파일 변경 알림의 개수를 지운다: 알림이 왔는지만 남기고 `fileRevision`은 자리표시자로 바꾼다.
+ * 감시는 첫 변경부터 500ms 안의 변경을 한 번으로 묶고(`file-watch.ts`), 리눅스의 재귀 감시는 켜지는 데 시간이 걸려 같은 시나리오의 알림 수가 기계마다 다르다(C1a 첫 CI에서 2번이 1번이 됐다).
+ * 알림은 코드 화면을 다시 불러오라는 신호일 뿐 판정에 쓰이지 않는다
+ */
+export function withoutFileRevisionCount(snapshot: BaselineSnapshot): BaselineSnapshot {
+  const mask = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(mask);
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([key, inner]) => [key, key === 'fileRevision' && typeof inner === 'number' ? '<fileRevision>' : mask(inner)]));
+    return value;
+  };
+  const events = snapshot.events as Record<string, unknown> & { files: unknown[] };
+  const files = events.files;
+  return mask({ ...snapshot, events: { ...events, files: files.length > 0 ? [{ type: 'files_changed', revision: '<fileRevision>' }] : [] } }) as BaselineSnapshot;
+}
+
 export async function snapshotOf(world: World, driver: Driver, session: { id: string; workDir: string; stateDir?: string }, files: string[] = [], shutdownFrom?: number): Promise<BaselineSnapshot> {
   const n = normalizer(world, session.id);
   const disk = await readDisk(session, files);

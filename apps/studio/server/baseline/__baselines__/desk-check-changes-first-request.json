@@ -867,11 +867,7 @@
     "files": [
       {
         "type": "files_changed",
-        "revision": 1
-      },
-      {
-        "type": "files_changed",
-        "revision": 2
+        "revision": "<fileRevision>"
       }
     ]
   },
@@ -1427,7 +1423,7 @@
         ],
         "experimental": true,
         "externals": [],
-        "fileRevision": 2,
+        "fileRevision": "<fileRevision>",
         "hasDeploy": false,
         "id": "<sid>",
         "mode": "claude-code",
