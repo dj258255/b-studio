@@ -396,6 +396,41 @@ interface NativeGuard {
   terminalProcessArgv(pid: number): string[] | null;
   /** 훅 요청 본문 종류(ADR-219): `empty`·`object`·`not_object`·`invalid` */
   terminalHookBodyKind(body: Buffer): string;
+  // ── 이 컴퓨터 방식 터미널의 관문 글과 폴더(4f C1 5단계). 검증 함수는 `{ok:true,value}` 또는 `{ok:false,title,detail}` 봉투(JSON)를 돌려준다 ──
+  /** 셸 명령에 넣을 글을 작은따옴표로 감싼다(셸 주입 방지) */
+  terminalShellQuote(text: string): string;
+  /** CLI 실행 인자로 넘길 첫 요청 글. 옵션·하위 명령으로 읽히지 않게 앞말을 붙인다 */
+  terminalFirstPromptArg(text: string): string;
+  /** 이어 붙일 수 있는 꼴의 대화 id인가 */
+  terminalIsResumableConversation(id: string): boolean;
+  /** CLI 실행 인자로 넘길 대화 id */
+  terminalResumeConversationArg(id: string): string;
+  /** CLI 실행 인자로 넘길 모델 id */
+  terminalCliModelArg(model: string): string;
+  /** 터미널에 넘길 환경(허용한 이름만). `env`는 `[[이름, 값], …]`의 나온 순서 */
+  terminalHostTerminalEnv(gatewayDir: string | undefined | null, env: string[][]): string;
+  /** 이 컴퓨터용 CLI 설정 JSON(`JSON.stringify(settings, null, 2)`와 같은 글자, 끝의 줄바꿈 없음) */
+  terminalHostGatewaySettingsJson(dir: string, nodePath: string, hookUrl: string, hookToken: string): string;
+  /** claude 감싸개 글. `<cli> --mcp-config M --settings S` 순서를 지킨다(ADR-219) */
+  terminalHostCliWrapper(dir: string, claudePath: string, configDir?: string | null): string;
+  /** zsh 시작 파일 넷(이름, 내용)을 나온 순서대로 */
+  terminalHostZshFiles(dir: string, kind: string): Array<{ name: string; content: string }>;
+  /** bash 시작 파일 */
+  terminalHostBashRc(dir: string, kind: string): string;
+  /** 터미널을 열면 도는 명령(관문이 없을 때) */
+  terminalHostTerminalCommand(kind: string): string;
+  /** 셸 함수를 정의할 자리가 없는 셸(fish 등)의 대체 명령 */
+  terminalHostFallbackCommand(dir: string, kind: string): string;
+  /** 관문의 훅 답 꼴(JSON 글자). `kind`: `none`·`message`·`block`·`session_start`·`prompt_note`·`pre_tool_deny` */
+  terminalHookResponse(kind: string, text?: string | null): string;
+  /** 관문 폴더 자리를 준비하고 링크를 푼 진짜 경로를 돌려준다 */
+  terminalPrepareHostGateway(root: string, sandboxId: string): Promise<string>;
+  /** 관문 폴더에 기대하는 파일을 쓴다(내용이 같으면 그대로 두고 권한만 다시 조인다) */
+  terminalWriteGatewayFiles(dir: string, files: Array<{ name: string; content: string; mode: number }>, statuslineName: string): Promise<void>;
+  /** 관문 폴더가 쓴 그대로인가. 다른 파일·폴더의 이름(관문 폴더 자체는 '.') */
+  terminalCheckHostGatewayConfig(dir: string, expected: Array<{ name: string; content: string; mode: number }>): Promise<string[]>;
+  /** 세션이 멈출 때 그 세션의 관문 설정을 지운다(링크를 따라가지 않고, 비었을 때만 폴더를 지운다) */
+  terminalRemoveHostGatewayConfig(root: string, sandboxId: string): Promise<void>;
   terminalEarlyUsageMs(): number;
   terminalLateUsageMs(): number;
   /** 터미널의 정체 감시 한 회차(ADR-213): `stop`·`nothing`·`notify` */

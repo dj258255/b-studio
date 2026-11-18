@@ -1,5 +1,5 @@
 import { startHookServer, startToolServer, type HookInput, type HookMeta, type HookServer, type ToolOutcome, type ToolServer, type ToolServerOptions } from '@b-studio/agent';
-import { AGENT_GATEWAY_HOST, HOST_GATEWAY_HOST, type AgentGatewayAddress, type AgentHookEvent } from '@b-studio/sandbox';
+import { AGENT_GATEWAY_HOST, HOST_GATEWAY_HOST, native, type AgentGatewayAddress, type AgentHookEvent } from '@b-studio/sandbox';
 import { sessionTerminalMode } from './session-terminal';
 
 /**
@@ -61,8 +61,12 @@ export interface TerminalGateway {
   close(): Promise<void>;
 }
 
-/** 사용자에게만 보이는 한 줄. CLI가 "<훅> says: …"로 보여 준다 */
-const say = (message: string | undefined): Record<string, unknown> => (message ? { systemMessage: message } : {});
+/**
+ * 훅 종류에 따른 CLI 답의 꼴(ADR-219, 4f C1 5단계). 꼴은 Rust 코어(`terminal::gateway::hook_response`)가 만들고
+ * 여기서는 `JSON.parse`로 받기만 한다. CLI의 규약이 한 곳에 있게 하려는 것이다
+ */
+const answer = (kind: 'none' | 'message' | 'block' | 'session_start' | 'prompt_note' | 'pre_tool_deny', text?: string): Record<string, unknown> =>
+  JSON.parse(native.terminalHookResponse(kind, text)) as Record<string, unknown>;
 
 /** 본문을 읽지 못한 쓰기 직전 훅에 주는 거절 글. 도구 이름 없이 판정하면 허용이 될 수 있어 막는다(ADR-219, N18) */
 export const UNREADABLE_PRE_TOOL_DENY = '[b-studio] 도구 호출의 본문을 읽지 못해 파일을 바꿀 수 있는 도구를 막았습니다. 다시 시도해 주세요.';
@@ -99,54 +103,54 @@ function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEven
       // 읽지 못한 본문을 빈 내보내기로 세지 않는다. 5xx로 답한다(통로라 CLI는 그대로 돈다)
       if (!readable(meta)) throw new Error('텔레메트리 본문을 읽지 못했습니다');
       await handlers.telemetry(input);
-      return {};
+      return answer('none');
     },
     // 터미널을 열기 전에 컨테이너에서 여기에 닿는지 묻는다
-    '/ping': async () => ({}),
+    '/ping': async () => answer('none'),
     '/session-start': async () => {
       const note = await handlers.note();
-      return note ? { hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: note } } : {};
+      return answer('session_start', note);
     },
     '/prompt': async (input, meta) => {
       // 요청 글을 읽지 못하면 읽기만 요청인지 알 수 없다. 보통 요청으로 열면 읽기만 약속이 풀린다: 보내지 않는다
-      if (!readable(meta)) return { decision: 'block', reason: UNREADABLE_PROMPT_BLOCK };
+      if (!readable(meta)) return answer('block', UNREADABLE_PROMPT_BLOCK);
       const { blocked, note } = await handlers.prompt(input);
-      if (blocked) return { decision: 'block', reason: blocked };
-      return note ? { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: note } } : {};
+      if (blocked) return answer('block', blocked);
+      return answer('prompt_note', note);
     },
     '/pre-tool': async (input, meta) => {
       // 본문을 읽지 못한 도구 호출은 `{}`(도구 이름 없음)로 판정하면 읽기 도구도 아니고 경로도 없어 카드 쓰기 범위를 지나 허용이 된다: 막는다
-      if (!readable(meta)) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: UNREADABLE_PRE_TOOL_DENY } };
+      if (!readable(meta)) return answer('pre_tool_deny', UNREADABLE_PRE_TOOL_DENY);
       const { deny, message } = await handlers.preTool(input);
-      if (deny) return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: deny } };
-      return say(message);
+      if (deny) return answer('pre_tool_deny', deny);
+      return answer('message', message);
     },
     '/stop': async (input) => {
       const { feedback, message } = await handlers.stop(input);
-      return feedback ? { decision: 'block', reason: feedback } : say(message);
+      return feedback ? answer('block', feedback) : answer('message', message);
     },
     '/session-end': async (input) => {
       await handlers.sessionEnd(input);
-      return {};
+      return answer('none');
     },
     // 사용 한도 같은 API 오류로 턴이 끝났다(#1284). 닫고 빈 답(200)을 준다 — CLI는 이 답을 읽지 않는다
     '/stop-failure': async (input) => {
       await handlers.stopFailure(input);
-      return {};
+      return answer('none');
     },
     // CLI가 확인 창·되묻기·입력 대기에서 멈췄다(B7). 알리기만 하고 빈 답(200)을 준다 — 결정을 바꾸지 않는다
     '/notification': async (input) => {
       await handlers.notification(input);
-      return {};
+      return answer('none');
     },
     // 지켜보기만 한다(#920). 처리가 던져도 빈 답이다 — CLI는 이 답을 읽지 않고, 판정과 상관없다
     '/activity': async (input) => {
       await handlers.activity?.(input).catch(() => {});
-      return {};
+      return answer('none');
     },
     '/statusline': async (input) => {
       await handlers.statusline?.(input).catch(() => {});
-      return {};
+      return answer('none');
     },
   };
 }
