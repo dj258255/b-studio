@@ -15,8 +15,6 @@ export { describeSnapshotEvent, SNAPSHOT_LABEL } from './docker/snapshots';
 export { describeUsage, formatBytes } from './docker/usage';
 export { classifyRole } from './service-role';
 export { RELAY_PREFIX } from './docker/relay';
-export { defaultDeployRoot, DeployError, DockerDeployer, type DeployerOptions, type DeployLog, type DeployResult, type DeployRunOptions, type DeployStage, type DeployStatus } from './docker/deploy';
-export type { DeployHistoryEntry, DeployRelease, DeployState } from './docker/deploy-plan';
 export { MIN_SECRET_LENGTH, parseDotenv, Redactor, resolveSecrets, SECRET_ENV_PREFIX, SecretError } from './secrets';
 export {
   assertReadonlyDockerArgs,

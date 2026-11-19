@@ -53,7 +53,7 @@ export interface WaitForReadyOptions {
 
 /**
  * HTTP 확인을 `fetch`로 하는 준비 대기. Docker 제공자의 준비 확인은 Rust(`crates/bstudio-io/src/readiness_io.rs`, ADR-195 4f A4c-3a)로 옮겼고
- * `docker/ready-legacy.ts`(차등 시험의 기준값)와 deploy가 쓴다.
+ * `docker/ready-legacy.ts`(차등 시험의 기준값)만 이것을 쓴다.
  * 주소를 `new URL(path, base)`로 만들어 받으므로 부르는 쪽이 경로를 검증해야 한다(트러블슈팅 192)
  */
 export async function waitForReady(options: WaitForReadyOptions): Promise<void> {

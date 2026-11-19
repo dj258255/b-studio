@@ -295,7 +295,7 @@ export interface DeskSpend {
   priceError?: string;
 }
 
-// ─── 실행·배포·미리보기·저장소 화면(#895, Ctrl-b v) ───
+// ─── 실행·미리보기·저장소 화면(#895, Ctrl-b v) ───
 
 export type DeskServiceState = 'starting' | 'probing' | 'ready' | 'failed' | 'stopped' | 'off';
 
@@ -332,14 +332,6 @@ export interface DeskCheckpoint {
   createdAt: string;
 }
 
-/** 배포가 도는 중이면 스냅샷에 있다. lines는 최근 진행 줄 */
-export interface DeskDeploying {
-  action: 'deploy' | 'rollback';
-  target: string;
-  startedAt: string;
-  lines: string[];
-}
-
 /** `/api/sessions/:id/events`의 스냅샷에서 이 화면이 쓰는 것 */
 export interface DeskSessionView {
   id: string;
@@ -349,9 +341,7 @@ export interface DeskSessionView {
   services: DeskService[];
   usage?: { at: string; services: DeskServiceUsage[] };
   checkpoints: DeskCheckpoint[];
-  hasDeploy?: boolean;
   experimental?: boolean;
-  deploying?: DeskDeploying;
   /** 샌드박스에 닿지 않거나 컨테이너가 사라졌다. 있으면 서비스 상태를 믿을 수 없다 */
   sandboxLink?: DeskSandboxLink;
 }
@@ -371,28 +361,7 @@ export type DeskSessionEvent =
   | { type: 'usage'; at: string; services: DeskServiceUsage[] }
   | { type: 'sandbox_link'; link?: DeskSandboxLink }
   | { type: 'checkpoint'; checkpoint: DeskCheckpoint }
-  | { type: 'deploy_started'; action: 'deploy' | 'rollback'; target: string; at: string }
-  | { type: 'deploy_log'; line: string }
-  | { type: 'deploy_finished'; action: 'deploy' | 'rollback'; release: string; label: string; urls: Record<string, string> }
-  | { type: 'deploy_failed'; action: 'deploy' | 'rollback'; target: string; error: string; detail?: string }
   | { type: string };
-
-export interface DeskRelease {
-  id: string;
-  createdAt: string;
-  finishedAt?: string;
-  source: { label: string; sha?: string };
-  by?: string;
-  status: 'active' | 'previous' | 'retired' | 'failed';
-  error?: string;
-}
-
-/** `GET /api/sessions/:id/deploys` */
-export interface DeskDeployStatus {
-  state: { active?: string; releases: DeskRelease[] };
-  urls: Record<string, string>;
-  containers: Array<{ name: string; state: string }>;
-}
 
 export interface DeskChecklistItem {
   id: string;

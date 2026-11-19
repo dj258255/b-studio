@@ -38,7 +38,7 @@ export function checkpointBody(result: AgentResult, allowBreaking: boolean, { un
   return native.sessionCheckpointBody(reportJson, reportUnserializable, allowBreaking, encodeNative(checks), result.verifyAttempts, result.summary, unguardedWrites);
 }
 
-/** 배포할 때 releaseRequires와 대조하는 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
+/** 체크포인트에 남길 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
 export function checkpointTrailers(result: AgentResult): string[] {
   return native.sessionCheckpointTrailers(result.passedStages ? [...result.passedStages] : null, result.verify ?? null, result.incomplete ?? null);
 }

@@ -2,7 +2,6 @@ import { readYaml, YamlReadError } from './yaml-read';
 import {
   StudioSpecSchema,
   type DatabaseSpec,
-  type DeployServiceSpec,
   type EgressRule,
   type ExternalServiceSpec,
   type ManagedServiceSpec,
@@ -52,8 +51,6 @@ export interface LoadedProject {
   secrets: Array<[name: string, secret: SecretSpec]>;
   /** 등록한 사내 API. 샌드박스에서는 이 이름의 호스트로 부르고 edge가 정책을 적용한다 */
   external: Array<[name: string, service: ExternalServiceSpec]>;
-  /** managed 서비스 이름 → 운영 배포 설정. 적지 않은 서비스도 기본값(Dockerfile)으로 채운다 */
-  deploy: Record<string, DeployServiceSpec>;
   /**
    * 런타임 공개 URL 주입(fix/frontend-backend-url). compose의 environment 값에 `${b-studio:services.<서비스>.publicUrl}`
    * 자리 표시자가 있으면 여기 담는다. 샌드박스 제공자가 띄우기 직전에 targetService의 호스트 포트를 먼저 정해(pre-allocate)
