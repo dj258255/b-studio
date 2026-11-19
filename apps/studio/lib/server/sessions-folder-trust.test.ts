@@ -70,6 +70,8 @@ const keys = ['HOME', 'XDG_CONFIG_HOME', 'CLAUDE_CONFIG_DIR', 'B_STUDIO_CLAUDE_C
 const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 let root: string;
 let defaultConfig: string;
+/** 원본 프로젝트 폴더의 실제 경로. 사람이 claude에서 이 폴더를 믿었다고 둔다(복사한 세션 폴더는 원본을 믿었을 때만 적는다) */
+let sourceKey: string;
 
 async function makeProject(projectDir: string, name: string): Promise<void> {
   await mkdir(path.join(projectDir, 'api', 'src'), { recursive: true });
@@ -94,7 +96,7 @@ const exists = (target: string) => stat(target).then(() => true, () => false);
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'b-studio-folder-trust-'));
   defaultConfig = path.join(root, '.claude.json');
-  await writeFile(defaultConfig, JSON.stringify({ numStartups: 3, projects: { '/elsewhere': { hasTrustDialogAccepted: true } } }, null, 2));
+
   // 기본 계정의 설정 파일은 홈의 .claude.json이다(터미널에는 서버의 CLAUDE_CONFIG_DIR이 넘어가지 않는다)
   process.env.HOME = root;
   process.env.XDG_CONFIG_HOME = path.join(root, 'xdg');
@@ -109,6 +111,8 @@ beforeEach(async () => {
   const projectDir = path.join(root, 'project');
   await makeProject(projectDir, 'trustproj');
   fake.root = projectDir;
+  sourceKey = await realpath(projectDir);
+  await writeFile(defaultConfig, JSON.stringify({ numStartups: 3, projects: { '/elsewhere': { hasTrustDialogAccepted: true }, [sourceKey]: { hasTrustDialogAccepted: true } } }, null, 2));
 });
 
 afterAll(() => {
@@ -132,7 +136,7 @@ describe('복사 모드 세션의 폴더 신뢰', () => {
     await stopSession(created.id);
     await deleteSession(created.id);
     config = await readJson(defaultConfig);
-    expect(Object.keys(config.projects)).toEqual(['/elsewhere']);
+    expect(Object.keys(config.projects)).toEqual(['/elsewhere', sourceKey]);
     expect(config.numStartups).toBe(3);
   });
 
@@ -162,7 +166,7 @@ describe('복사 모드 세션의 폴더 신뢰', () => {
     await writeFile(defaultConfig, '{ broken');
     const created = await createSession('trustproj', 'kim', 'copy');
     expect(await readFile(defaultConfig, 'utf8')).toBe('{ broken');
-    expect(sessionFolderTrustFailure(created.id)).toContain('올바른 JSON이 아니라');
+    expect(sessionFolderTrustFailure(created.id)).toContain('claude 설정 파일');
     // 파일은 있는데 못 쓴 경우는 사용자가 알 수 있게 알림을 남긴다
     expect(sessionHistory(created.id).some((event) => event.type === 'notice' && event.text.includes('폴더 신뢰를 적지 못했습니다'))).toBe(true);
     await stopSession(created.id);
@@ -183,7 +187,7 @@ describe('복사 모드 세션의 폴더 신뢰', () => {
     const accountDir = path.join(root, 'claude-fio');
     await mkdir(accountDir, { recursive: true });
     const accountConfig = path.join(accountDir, '.claude.json');
-    await writeFile(accountConfig, JSON.stringify({ projects: {} }, null, 2));
+    await writeFile(accountConfig, JSON.stringify({ projects: { [sourceKey]: { hasTrustDialogAccepted: true } } }, null, 2));
     const account = await addAiAccount({ name: '피오', backend: 'claude-code', configDir: accountDir });
     const before = await readFile(defaultConfig, 'utf8');
 
@@ -193,6 +197,28 @@ describe('복사 모드 세션의 폴더 신뢰', () => {
 
     await stopSession(created.id);
     await deleteSession(created.id);
-    expect((await readJson(accountConfig)).projects).toEqual({});
+    expect((await readJson(accountConfig)).projects).toEqual({ [sourceKey]: { hasTrustDialogAccepted: true } });
+  });
+
+  it('사람이 claude에서 원본 폴더를 믿은 적이 없으면 세션 폴더도 적지 않는다(복사한 내용의 훅·MCP 설정이 신뢰 창 없이 돌지 않게)', async () => {
+    await writeFile(defaultConfig, JSON.stringify({ projects: { '/elsewhere': { hasTrustDialogAccepted: true }, [sourceKey]: { hasTrustDialogAccepted: false } } }, null, 2));
+    const before = await readFile(defaultConfig, 'utf8');
+    const created = await createSession('trustproj', 'kim', 'copy');
+    expect(await readFile(defaultConfig, 'utf8')).toBe(before);
+    expect(sessionFolderTrustFailure(created.id)).toContain('믿은 적이 없어');
+    // 흔한 경우라 세션 알림은 내지 않는다. 터미널 레인이 신뢰 창 안내를 사유와 함께 보인다
+    expect(sessionHistory(created.id).some((event) => event.type === 'notice' && event.text.includes('폴더 신뢰'))).toBe(false);
+    await stopSession(created.id);
+    await deleteSession(created.id);
+  });
+
+  it('원본과 같은 실행 설정(.mcp.json·.claude/settings.json)을 복사한 세션 폴더는 적는다', async () => {
+    await mkdir(path.join(fake.root, '.claude'), { recursive: true });
+    await writeFile(path.join(fake.root, '.claude', 'settings.json'), '{"hooks":{}}\n');
+    await writeFile(path.join(fake.root, '.mcp.json'), '{"mcpServers":{}}\n');
+    const created = await createSession('trustproj', 'kim', 'copy');
+    expect((await readJson(defaultConfig)).projects[await realpath(created.workDir)]).toEqual({ hasTrustDialogAccepted: true });
+    await stopSession(created.id);
+    await deleteSession(created.id);
   });
 });

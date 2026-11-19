@@ -2,7 +2,10 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, utimes, wr
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { claudeConfigFile, trustSessionFolder, untrustSessionFolders } from './claude-trust';
+import { createRequire } from 'node:module';
+import { claudeConfigFile, execSurfaceChange, sourceFolderTrusted, trustSessionFolder, untrustSessionFolders } from './claude-trust';
+
+const require = createRequire(import.meta.url);
 
 // 실제 ~/.claude.json이나 CLAUDE_CONFIG_DIR을 건드리지 않는다: 모든 경로를 임시 폴더 안에 둔다
 let base: string;
@@ -354,5 +357,70 @@ describe('신뢰 기록 지우기', () => {
     await writeFile(configFile, 'not json');
     expect((await untrustSessionFolders(a, { sessionsRoot, configDir })).ok).toBe(false);
     expect(await readFile(configFile, 'utf8')).toBe('not json');
+  });
+});
+
+describe('원본을 믿었을 때만 적는다(복사한 내용이 원본에서 오기 때문)', () => {
+  async function source(name: string, git = true): Promise<string> {
+    const dir = path.join(base, 'src', name);
+    await mkdir(dir, { recursive: true });
+    if (git) await mkdir(path.join(dir, '.git'));
+    return realpathNative(dir);
+  }
+  const { realpath } = require('node:fs') as typeof import('node:fs');
+  const realpathNative = (p: string) => new Promise<string>((ok, no) => realpath.native(p, (e, r) => (e ? no(e) : ok(r))));
+
+  it('원본의 실제 경로 키가 true면 믿은 것이고, false·없음·다른 대소문자는 믿지 않은 것이다', async () => {
+    const trusted = await source('trusted');
+    const plain = await source('plain');
+    const falsy = await source('falsy');
+    await writeConfig({ projects: { [trusted]: { hasTrustDialogAccepted: true }, [falsy]: { hasTrustDialogAccepted: false }, [plain.toUpperCase()]: { hasTrustDialogAccepted: true } } });
+    expect(await sourceFolderTrusted(trusted, { configDir })).toEqual({ trusted: true });
+    expect(await sourceFolderTrusted(falsy, { configDir })).toMatchObject({ trusted: false });
+    expect(await sourceFolderTrusted(plain, { configDir })).toMatchObject({ trusted: false });
+  });
+
+  it('git 저장소 안의 하위 폴더는 그 저장소 루트를 믿었으면 믿은 것이다(claude가 저장소 루트로 신뢰를 정한다)', async () => {
+    const repo = await source('mono');
+    const sub = path.join(repo, 'apps', 'web');
+    await mkdir(sub, { recursive: true });
+    await writeConfig({ projects: { [repo]: { hasTrustDialogAccepted: true } } });
+    expect(await sourceFolderTrusted(sub, { configDir })).toEqual({ trusted: true });
+  });
+
+  it('git 저장소의 바깥 상위 폴더를 믿은 것은 그 저장소를 믿은 것이 아니다', async () => {
+    const repo = await source('inner');
+    await writeConfig({ projects: { [path.dirname(repo)]: { hasTrustDialogAccepted: true } } });
+    expect(await sourceFolderTrusted(repo, { configDir })).toMatchObject({ trusted: false });
+  });
+
+  it('설정 파일이 없거나 깨졌으면 모른다(믿지 않은 것으로 본다)', async () => {
+    const repo = await source('nofile');
+    expect(await sourceFolderTrusted(repo, { configDir })).toMatchObject({ trusted: false, missing: true });
+    await writeFile(configFile, '{ broken');
+    expect(await sourceFolderTrusted(repo, { configDir })).toMatchObject({ trusted: false });
+  });
+
+  it('세션 폴더의 실행 설정 파일이 원본과 바이트까지 같거나 없으면 그대로이고, 다르거나 새로 생겼거나 링크면 바뀐 것이다', async () => {
+    const src = await source('surface');
+    const work = await makeSession('surface-1');
+    await mkdir(path.join(src, '.claude'), { recursive: true });
+    await mkdir(path.join(work, '.claude'), { recursive: true });
+    await writeFile(path.join(src, '.claude', 'settings.json'), '{"hooks":{}}');
+    await writeFile(path.join(work, '.claude', 'settings.json'), '{"hooks":{}}');
+    // 원본에만 있는 로컬 설정은 복사본에 없어도 된다
+    await writeFile(path.join(src, '.claude', 'settings.local.json'), '{}');
+    expect(await execSurfaceChange(work, src)).toBeUndefined();
+
+    await writeFile(path.join(work, '.mcp.json'), '{"mcpServers":{"x":{"command":"sh"}}}');
+    expect(await execSurfaceChange(work, src)).toContain('.mcp.json');
+    await rm(path.join(work, '.mcp.json'));
+
+    await writeFile(path.join(work, '.claude', 'settings.json'), '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"sh evil"}]}]}}');
+    expect(await execSurfaceChange(work, src)).toContain('settings.json');
+
+    await rm(path.join(work, '.claude', 'settings.json'));
+    await symlink(path.join(src, '.claude', 'settings.json'), path.join(work, '.claude', 'settings.json'));
+    expect(await execSurfaceChange(work, src)).toContain('settings.json');
   });
 });

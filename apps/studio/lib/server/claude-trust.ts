@@ -209,6 +209,67 @@ export async function trustSessionFolder(folder: string, options: TrustOptions):
   }
 }
 
+/**
+ * 사람이 claude에서 원본 폴더를 이미 믿었는가. 세션 폴더의 내용은 원본에서 복사한 것이라, b-studio가 폴더를 만들었다는 것은
+ * 그 내용(훅·MCP 서버를 정하는 설정)을 믿을 근거가 아니다. 원본의 실제 경로나 그것을 담은 가장 가까운 git 저장소 루트의 키가
+ * 정확히(대소문자까지) true여야 믿은 것이다 — claude는 git 저장소 안에서 저장소 루트로 신뢰를 정하고, 저장소 바깥 상위 폴더의 신뢰는
+ * 그 저장소에 닿지 않는다. 허용 목록이라 좁게 맞추고, 파일을 읽지 못하면 믿지 않은 것으로 본다
+ */
+export async function sourceFolderTrusted(
+  sourceRoot: string,
+  options: Pick<TrustOptions, 'configDir' | 'env' | 'home'>,
+): Promise<{ trusted: true } | { trusted: false; reason: string; /** 설정 파일이 없다 */ missing?: true; /** 파일은 읽었고 원본을 믿은 기록이 없다(흔한 경우라 알림을 내지 않는다) */ notTrusted?: true }> {
+  const file = claudeConfigFile(options.configDir, options.env, options.home);
+  let candidates: string[];
+  try {
+    const real = await realpathNative(sourceRoot);
+    candidates = [real];
+    for (let dir = real; ; dir = path.dirname(dir)) {
+      const isRepo = await lstat(path.join(dir, '.git')).then(
+        () => true,
+        () => false,
+      );
+      if (isRepo) {
+        if (dir !== real) candidates.push(dir);
+        break;
+      }
+      if (path.dirname(dir) === dir) break;
+    }
+  } catch (error) {
+    return { trusted: false, reason: `원본 폴더를 확인하지 못해 신뢰를 적지 않았습니다: ${describe(error)}` };
+  }
+  let config: unknown;
+  try {
+    config = JSON.parse(await readFile(await realpathNative(file), 'utf8'));
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === 'ENOENT';
+    return { trusted: false, reason: `claude 설정 파일(${file})을 읽지 못해 원본을 믿었는지 알 수 없습니다: ${describe(error)}`, ...(missing ? { missing: true as const } : {}) };
+  }
+  const projects = isRecord(config) && isRecord(config.projects) ? config.projects : {};
+  if (candidates.some((key) => isRecord(projects[key]) && projects[key].hasTrustDialogAccepted === true)) return { trusted: true };
+  return { trusted: false, notTrusted: true, reason: '원본 폴더를 claude에서 믿은 적이 없어 세션 폴더에도 신뢰를 적지 않았습니다(원본 폴더에서 claude를 한 번 띄워 믿으면 그 뒤 세션은 묻지 않습니다)' };
+}
+
+/** claude가 그 폴더에서 읽어 명령을 실행하거나 서버를 띄우는 설정 파일(훅·MCP) */
+const EXEC_SURFACE = ['.claude/settings.json', '.claude/settings.local.json', '.mcp.json'] as const;
+
+/**
+ * 세션 폴더의 실행 설정 파일이 원본과 달라졌는가. 다르면 그 파일 이름을 돌려준다. 세션 폴더에 있는 파일은 원본에 같은 바이트로 있어야 하고
+ * (원본에만 있는 파일은 괜찮다: 커밋하지 않은 로컬 설정은 복사본에 없다), 링크나 일반 파일이 아닌 것은 달라진 것으로 본다.
+ * 에이전트가 이어받은 세션(작업 분해 레인)에서 훅을 더했으면 그 내용은 사람이 믿은 원본이 아니다
+ */
+export async function execSurfaceChange(workFolder: string, sourceFolder: string): Promise<string | undefined> {
+  for (const name of EXEC_SURFACE) {
+    const work = path.join(workFolder, name);
+    const info = await lstat(work).catch(() => undefined);
+    if (!info) continue;
+    if (!info.isFile()) return name;
+    const [mine, theirs] = await Promise.all([readFile(work), readFile(path.join(sourceFolder, name)).catch(() => undefined)]);
+    if (!theirs || !mine.equals(theirs)) return name;
+  }
+  return undefined;
+}
+
 /** 대소문자·유니코드 정규화를 가리지 않고 맞추는 글자 꼴(지우는 쪽만 쓴다) */
 const fold = (value: string): string => value.normalize('NFC').toLowerCase();
 

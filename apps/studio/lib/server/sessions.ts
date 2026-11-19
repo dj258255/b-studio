@@ -375,7 +375,7 @@ import { rememberProjectEffortDefault, rememberProjectModelDefault } from './mod
 import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-accounts';
 import { describe, StudioError } from './errors';
 import { assertDeletable, assertResumableHome, planRecovery, removeSessionHome } from './session-lifecycle';
-import { trustSessionFolder, untrustSessionFolders } from './claude-trust';
+import { execSurfaceChange, sourceFolderTrusted, trustSessionFolder, untrustSessionFolders } from './claude-trust';
 import { SessionLife, SessionRegistry, type StatusChange } from './session-status';
 import { runCreate } from './session-create';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
@@ -1059,7 +1059,13 @@ async function startSession({
         // 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 던지지 않는다. 끝의 단계가 실패하면 unregister_session이 지운다
         if (workspace !== 'local') {
           trustAttempted = true;
-          await recordFolderTrust(session, sessionDir, [workDir, project.root]);
+          // 작업 폴더(모노레포면 저장소 루트)와 프로젝트 폴더를 원본의 같은 자리와 짝짓는다. 원본 폴더 = source.root, 그 저장소 루트는 같은 상대 경로만큼 위다
+          const up = path.relative(workDir, project.root);
+          const sourceTop = up ? path.resolve(source.root, ...up.split(path.sep).map(() => '..')) : source.root;
+          await recordFolderTrust(session, source.root, [
+            [workDir, sourceTop],
+            [project.root, source.root],
+          ]);
         }
       },
       // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
@@ -7416,12 +7422,33 @@ function terminalModel(session: Session): { model?: string } {
  * 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 이 컴퓨터 방식 터미널의 claude가 쓰는 세션만 적는다 — 컨테이너 방식의 claude는
  * 컨테이너 안의 설정을 읽어 이 기록이 닿지 않는다. 사용자가 연 로컬 폴더는 부르지 않는다. 던지지 않는다: 실패하면 사유를 세션에 남기고 알림을 낸다
  */
-async function recordFolderTrust(session: Session, home: string, folders: readonly string[]): Promise<void> {
+async function recordFolderTrust(session: Session, sourceRoot: string, folders: readonly (readonly [work: string, source: string])[]): Promise<void> {
   try {
     if (!sessionTerminalAllowed() || sessionTerminalMode() !== 'host' || terminalCliKind(session) !== 'claude') return;
     const { configDir } = await sessionAccount(session.snapshot);
+    // 세션 폴더의 내용은 원본에서 왔다. 사람이 원본을 믿지 않았으면 적지 않는다(그때는 알림 없이 터미널 레인이 신뢰 창 안내를 사유와 함께 보인다)
+    const source = await sourceFolderTrusted(sourceRoot, configDir ? { configDir } : {});
+    if (!source.trusted) {
+      session.folderTrust = { recorded: false, reason: source.reason };
+      // 설정 파일은 있는데 읽지 못했으면(깨진 JSON 등) 사용자가 알 수 있게 알린다. 믿은 기록이 없거나 파일이 없는 것은 흔한 경우라 터미널 레인 안내로 둔다
+      if (!source.missing && !source.notTrusted) {
+        emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${source.reason})`, at: new Date().toISOString() });
+      }
+      return;
+    }
+    const pairs = [...new Map(folders.map(([work, original]) => [work, original] as const))];
+    // 에이전트가 이어받은 세션(작업 분해 레인)에서 훅·MCP 설정을 바꿨으면 그 내용은 사람이 믿은 원본이 아니다. 하나라도 다르면 아무것도 적지 않는다
+    for (const [folder, original] of pairs) {
+      const changed = await execSurfaceChange(folder, original);
+      if (changed) {
+        const reason = `세션 폴더의 ${changed}이(가) 원본과 달라 신뢰를 적지 않았습니다`;
+        session.folderTrust = { recorded: false, reason };
+        emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 않았습니다. 터미널에서 claude가 폴더 신뢰를 물으면 확인하고 고르세요 (${reason})`, at: new Date().toISOString() });
+        return;
+      }
+    }
     let failure: { reason: string; missing?: true } | undefined;
-    for (const folder of new Set(folders)) {
+    for (const [folder] of pairs) {
       const result = await trustSessionFolder(folder, { sessionsRoot: sessionsRoot(), ...(configDir ? { configDir } : {}) });
       if (!result.ok) failure ??= { reason: result.reason, ...(result.missing ? { missing: true as const } : {}) };
     }
