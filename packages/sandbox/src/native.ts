@@ -91,22 +91,6 @@ interface NativeGuard {
   buildOverride(inputJson: string): string;
   composeUpArgs(explicit: string[] | undefined, edgeService: string): string[];
   resolvePublicUrlPlaceholders(value: string, hostPortsJson: string): string;
-  // ── 무중단 배포 계획(2단계 2b-2b 셋째 묶음, #1036). 입력·출력은 JSON 문자열. 모양이 어긋난 입력은 던진다
-  emptyDeployState(project: string): string;
-  deployBaseName(project: string): string;
-  deployReleaseName(project: string, id: string): string;
-  deployProxyName(project: string): string;
-  deployImageName(project: string, service: string, id: string): string;
-  deployContainerName(composeProject: string, service: string): string;
-  newReleaseId(nowMs: number): string;
-  proxyListenPort(index: number): number;
-  planBaseCompose(configJson: string, projectJson: string): string;
-  planReleaseCompose(configJson: string, projectJson: string, releaseId: string, imagesJson: string): string;
-  buildArgsFor(dockerfile: string, buildJson: string, environmentJson: string): string;
-  summarizeBuildOutput(output: string, maxLines: number): string;
-  buildCaddyfile(routesJson: string): string;
-  releasesToRetire(statusesJson: string, keepPrevious: number): number[];
-  trimRecords(idsJson: string, active: string | undefined): number[];
   // ── I/O 조율: stream-exec(2단계 2c-1, #1041). 자식 프로세스 출력을 파일로 흘리거나 파일을 입력으로 넣는다.
   // env를 주면 상속 없이 통째로 바꾼다(Node spawn과 같음). signal로 취소하면 자식을 죽인다
   runCommandToFile(bin: string, args: string[], outputFile: string, env: Record<string, string> | undefined | null, signal: AbortSignal | undefined | null): Promise<ExecResult>;
@@ -193,9 +177,6 @@ interface NativeGuard {
   // 오류는 메시지를 담은 Error로 거절된다. 이름을 받는 곳은 한 이름이 아니면(`..`·구분자·NUL·빈 이름) 거부한다
   prepareEvaluationAssetSlot(source: string, kind: 'file' | 'directory', parent: string): Promise<void>;
   removeSandboxDirectory(dir: string): Promise<void>;
-  // ── I/O 조율: 줄 단위 역류 실행(2단계 2c-3a, #1045). deploy의 #docker가 쓴다. 출력을 줄마다 onLine에 흘리고 뒤쪽 200K를 모은다.
-  // onLine은 ThreadsafeFunction으로 Rust 작업 스레드에서 (line) 한 인자로 불린다. cwd를 받는다. 던지지 않는다(취소 시 부분 결과)
-  runCommandStreaming(bin: string, args: string[], input: string | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, onLine: (line: string) => void, signal: AbortSignal | undefined | null): Promise<ExecResult>;
   // ── I/O 조율: 로그 스트림(2단계 2c-3b, #1047). compose-provider의 logs()가 쓴다. docker compose logs의 stdout을
   // 줄 단위로 당겨 주는 AsyncIterator. 당기기(pull) 모델이라 소비가 느리면 docker 읽기가 막힌다(백프레셔).
   // raw 줄만 흘린다 — parseLogLine·redact·Date 변환은 TS가 한다. signal이 깨거나 소비자가 그만두면 자식을 kill한다.
@@ -482,18 +463,6 @@ interface NativeGuard {
   cliSplitLines(chunks: Buffer[]): string[];
   /** 차등 시험용: 덩어리 목록의 표준 오류 끝부분(UTF-16 단위, 입력 끝에 디코더를 비운다) */
   cliStderrTailOf(chunks: Buffer[]): Uint16Array;
-  // ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts가 쓴다. 모두 JS 스레드 밖(spawn_blocking)에서 돈다.
-  freePort(): Promise<number>;
-  // 잠금을 잡으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid. 그 밖의 I/O 오류는 거절한다. 죽은 프로세스의 잠금은 지우고 한 번 다시 시도한다
-  acquireDeployLock(lock: string): Promise<number>;
-  releaseDeployLock(lock: string): Promise<void>;
-  // 없거나 읽지 못하면 null
-  readTextFile(path: string): Promise<string | null>;
-  // 부모 폴더를 만들고 쓴다. atomic은 임시 파일에 쓴 뒤 rename한다
-  writeTextFile(path: string, content: string): Promise<void>;
-  writeTextFileAtomic(path: string, content: string): Promise<void>;
-  // 127.0.0.1에 GET 한 번(리다이렉트 안 따름). 던지지 않고 { status } 또는 { error }
-  probeHttpStatus(port: number, path: string, timeoutMs: number): Promise<{ status?: number | null; error?: string | null }>;
   // ── agent: test-discovery(3단계 3a). 결과 객체는 JSON 문자열(옛 TS의 JSON.stringify와 같은 글자). 모양이 어긋난 평탄화 입력은 던진다.
   // framework가 undefined·null이면 내용으로 짐작한다
   extractRequirementIds(text: string): string[];

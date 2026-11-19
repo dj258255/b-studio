@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { applyRuntimeEvent, logColor, openRuntime, renderRuntime, runtimeHint, runtimeKey, runtimePaste, type RuntimeEffect, type RuntimeState } from './runtime';
 import { stringWidth, stripAnsi } from './screen';
 import { DEFAULT_THEME } from './theme';
-import type { DeskDeployStatus, DeskRepoList, DeskSessionView } from './types';
+import type { DeskRepoList, DeskSessionView } from './types';
 
 const ESC = '\x1b';
 const DOWN = '\x1b[B';
@@ -19,7 +19,6 @@ const view = (patch: Partial<DeskSessionView> = {}): DeskSessionView => ({
   ],
   usage: { at: '2026-10-23T05:00:00Z', services: [{ service: 'web', state: 'running', cpuPercent: 42, memoryBytes: 300 * 1024 * 1024, memoryLimitBytes: 1024 * 1024 * 1024 }] },
   checkpoints: [{ sha: 'abc1234def', shortSha: 'abc1234', message: '주문 모듈 나누기', createdAt: '2026-10-23T04:00:00Z' }],
-  hasDeploy: true,
   experimental: true,
   ...patch,
 });
@@ -80,17 +79,6 @@ describe('세션 이벤트 접기', () => {
     expect(state.logs).toHaveLength(0);
   });
 
-  it('배포 진행 줄과 끝을 접는다. 끝나면 결과 한 줄을 남긴다', () => {
-    let state = applyRuntimeEvent(ready(), { type: 'deploy_started', action: 'deploy', target: 'abc1234', at: '2026-10-23T05:00:00Z' });
-    state = applyRuntimeEvent(state, { type: 'deploy_log', line: '이미지 빌드 중' });
-    expect(state.snapshot?.deploying?.lines).toEqual(['이미지 빌드 중']);
-    state = applyRuntimeEvent(state, { type: 'deploy_finished', action: 'deploy', release: 'r2', label: '주문 모듈 나누기', urls: { web: 'http://127.0.0.1:9000' } });
-    expect(state.snapshot?.deploying).toBeUndefined();
-    expect(state.deploy.result).toContain('배포했습니다');
-    state = applyRuntimeEvent(state, { type: 'deploy_failed', action: 'rollback', target: 'r1', error: '이미지가 없습니다' });
-    expect(state.deploy.result).toContain('이미지가 없습니다');
-  });
-
   it('모르는 이벤트는 그대로 둔다', () => {
     const state = ready();
     expect(applyRuntimeEvent(state, { type: 'agent' })).toBe(state);
@@ -101,20 +89,16 @@ describe('탭과 닫기', () => {
   it('Tab과 숫자로 탭을 옮기고, Esc로 닫는다', () => {
     expect(press(ready(), '\t').state?.tab).toBe('logs');
     expect(press(ready(), '\x1b[Z').state?.tab).toBe('qa');
-    expect(press(ready(), '4').state?.tab).toBe('preview');
+    expect(press(ready(), '3').state?.tab).toBe('preview');
     const closed = press(ready(), ESC);
     expect(closed.state).toBeUndefined();
     expect(closed.effects).toEqual([{ type: 'close' }]);
   });
 
-  it('배포·저장소·미리보기 탭은 처음 들어갈 때 한 번 불러온다', () => {
-    const deploy = press(ready(), '3');
-    expect(deploy.effects).toEqual([{ type: 'load-deploys' }]);
-    const loaded = { ...deploy.state!, deploy: { ...deploy.state!.deploy, status: { state: { releases: [] }, urls: {}, containers: [] } } };
-    expect(press(press(loaded, '1').state!, '3').effects).toEqual([]);
-    expect(press(ready(), '5').effects).toEqual([{ type: 'load-repo', view: 'presubmit', state: 'open' }]);
+  it('저장소·미리보기 탭은 처음 들어갈 때 한 번 불러온다', () => {
+    expect(press(ready(), '4').effects).toEqual([{ type: 'load-repo', view: 'presubmit', state: 'open' }]);
     // 미리보기는 준비된 브라우저 서비스의 주소를 받는다
-    expect(press(ready(), '4').effects).toEqual([{ type: 'preview', service: 'web', open: false }]);
+    expect(press(ready(), '3').effects).toEqual([{ type: 'preview', service: 'web', open: false }]);
   });
 });
 
@@ -198,59 +182,9 @@ describe('로그 탭', () => {
   });
 });
 
-describe('배포 탭', () => {
-  const status: DeskDeployStatus = {
-    state: {
-      active: 'r2',
-      releases: [
-        { id: 'r2', createdAt: '2026-10-23T04:00:00Z', source: { label: '주문 모듈 나누기' }, status: 'active' },
-        { id: 'r1', createdAt: '2026-10-22T04:00:00Z', source: { label: '첫 배포' }, status: 'previous' },
-      ],
-    },
-    urls: { web: 'http://127.0.0.1:9000' },
-    containers: [{ name: 'web', state: 'running' }],
-  };
-  const deployTab = (patch: Partial<DeskSessionView> = {}): RuntimeState => {
-    const opened = press(ready(patch), '3').state!;
-    return { ...opened, deploy: { ...opened.deploy, status } };
-  };
-
-  it('운영 주소를 누를 수 있는 링크로, 릴리스를 상태와 함께 보인다', () => {
-    const lines = renderRuntime(deployTab(), { w: 100, h: 24 }, theme).lines.join('\n');
-    expect(lines).toContain('\x1b]8;;http://127.0.0.1:9000\x07');
-    const shown = text(deployTab());
-    expect(shown).toContain('지금 운영');
-    expect(shown).toContain('첫 배포');
-  });
-
-  it('d는 최신 체크포인트를 묻고 배포한다. b는 고른 이전 릴리스로 되돌린다', () => {
-    const asked = press(deployTab(), 'd');
-    expect(asked.state?.confirm).toMatchObject({ kind: 'deploy', sha: 'abc1234def' });
-    expect(runtimeHint(asked.state!)).toContain('abc1234');
-    expect(press(asked.state!, 'y').effects).toEqual([{ type: 'deploy', sha: 'abc1234def' }]);
-    expect(press(deployTab(), 'b').state?.note).toContain('이전');
-    const back = press(deployTab(), DOWN, 'b');
-    expect(back.state?.confirm).toMatchObject({ kind: 'rollback', releaseId: 'r1' });
-    expect(press(back.state!, 'y').effects).toEqual([{ type: 'rollback', releaseId: 'r1' }]);
-  });
-
-  it('배포 절이 없거나 실험 기능이 꺼졌으면 배포하지 않고 까닭을 보인다', () => {
-    const none = press(deployTab({ hasDeploy: false }), 'd');
-    expect(none.effects).toEqual([]);
-    expect(text(none.state!)).toContain('deploy 절이 없습니다');
-    expect(press(deployTab({ experimental: false }), 'd').state?.note).toContain('B_STUDIO_EXPERIMENTAL');
-  });
-
-  it('배포가 도는 중이면 진행 줄을 보이고 새 배포를 막는다', () => {
-    const running = applyRuntimeEvent(applyRuntimeEvent(deployTab(), { type: 'deploy_started', action: 'deploy', target: 'abc1234', at: '2026-10-23T05:00:00Z' }), { type: 'deploy_log', line: '이미지 빌드 중' });
-    expect(text(running)).toContain('이미지 빌드 중');
-    expect(press(running, 'd').state?.note).toContain('도는 중');
-  });
-});
-
 describe('미리보기 탭', () => {
   it('받은 앱 주소를 링크로 보이고, Enter나 o로 브라우저에서 연다', () => {
-    const opened = press(ready(), '4').state!;
+    const opened = press(ready(), '3').state!;
     const withUrl = { ...opened, previews: { web: { url: 'http://127.0.0.1:52000/' } } };
     expect(renderRuntime(withUrl, { w: 100, h: 24 }, theme).lines.join('\n')).toContain('\x1b]8;;http://127.0.0.1:52000/\x07');
     expect(press(withUrl, '\r').effects).toEqual([{ type: 'open-url', url: 'http://127.0.0.1:52000/' }]);
@@ -262,7 +196,7 @@ describe('미리보기 탭', () => {
   });
 
   it('준비된 브라우저 서비스가 없으면 그렇다고 알린다', () => {
-    const none = press(ready({ services: [{ name: 'api', template: 'spring-boot', preview: 'openapi', state: 'ready', url: 'http://127.0.0.1:41003' }] }), '4');
+    const none = press(ready({ services: [{ name: 'api', template: 'spring-boot', preview: 'openapi', state: 'ready', url: 'http://127.0.0.1:41003' }] }), '3');
     expect(none.effects).toEqual([]);
     expect(text(none.state!)).toContain('미리 볼 화면이 없습니다');
   });
@@ -276,7 +210,7 @@ describe('저장소 탭', () => {
   };
 
   it('점검·이슈·PR을 i p c로 오가고, 처음 볼 때 불러온다', () => {
-    const repo = press(ready(), '5').state!;
+    const repo = press(ready(), '4').state!;
     expect(press(repo, 'i').effects).toEqual([{ type: 'load-repo', view: 'issues', state: 'open' }]);
     expect(press(repo, 'p').effects).toEqual([{ type: 'load-repo', view: 'pulls', state: 'open' }]);
     const loaded = { ...press(repo, 'i').state!, repo: { ...repo.repo, view: 'issues' as const, issues } };
@@ -286,7 +220,7 @@ describe('저장소 탭', () => {
   });
 
   it('점검 결과를 표시와 함께, 토큰이 없으면 까닭을 보인다', () => {
-    const repo = press(ready(), '5').state!;
+    const repo = press(ready(), '4').state!;
     const checked = {
       ...repo,
       repo: {
@@ -346,9 +280,9 @@ describe('탐색형 QA 탭(#916)', () => {
     },
   };
 
-  /** QA 탭(여섯째)으로 간 상태 */
+  /** QA 탭(다섯째)으로 간 상태 */
   function qaTab(patch: Partial<NonNullable<RuntimeState['qa']>> = {}): RuntimeState {
-    const entered = press(ready(), '6');
+    const entered = press(ready(), '5');
     expect(entered.effects).toEqual([{ type: 'qa-load' }]);
     return { ...entered.state!, qa: { ...entered.state!.qa, loading: false, ...patch } };
   }
@@ -381,7 +315,7 @@ describe('탐색형 QA 탭(#916)', () => {
 
   it('화면이 있는 서비스가 없으면 시작할 수 없다고 알린다', () => {
     const base = applyRuntimeEvent(openRuntime('s1', '주문'), { type: 'snapshot', snapshot: view({ services: [{ name: 'api', template: 'spring-boot', preview: 'openapi', state: 'ready' }] }) });
-    const state = { ...press(base, '6').state!, qa: { run: null } };
+    const state = { ...press(base, '5').state!, qa: { run: null } };
     expect(press(state, 'n').state!.note).toContain('화면이 있는 서비스');
   });
 

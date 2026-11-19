@@ -334,7 +334,7 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   Partial<Pick<StudioClient, RequirementsCall>> &
   /** 여러 AI 비교(#892). 없으면 Ctrl-b f가 열 수 없다고 알린다 */
   Partial<Pick<StudioClient, FleetsCall>> &
-  /** 실행·배포·미리보기·저장소 화면(#895). 없으면 그 화면에서 할 수 없다고 알린다 */
+  /** 실행·미리보기·저장소 화면(#895). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, RuntimeCall>> &
   /** 폴더 열기(#916). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, FolderCall>> &
@@ -350,7 +350,7 @@ type ChangesCall = 'liveChanges';
 /** 폴더 열기가 부르는 스튜디오 API(#916) */
 type FolderCall = 'folders' | 'proposeFolder' | 'registerFolder';
 
-type RuntimeCall = 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository' | 'exploreQa' | 'startExploreQa' | 'stopExploreQa' | 'saveExploreQa' | 'artifactUrl';
+type RuntimeCall = 'sessionEvents' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository' | 'exploreQa' | 'startExploreQa' | 'stopExploreQa' | 'saveExploreQa' | 'artifactUrl';
 
 /** 여러 AI 비교 화면이 부르는 스튜디오 API(#892) */
 type FleetsCall = 'fleets' | 'fleet' | 'createFleet' | 'chooseFleetWinner' | 'deleteFleet';
@@ -1008,7 +1008,7 @@ export class DeskApp {
     }
   }
 
-  // ─── 실행·배포·미리보기·저장소 화면(#895) ───
+  // ─── 실행·미리보기·저장소 화면(#895) ───
 
   /** 실행 화면을 바꾼다. 그사이 닫혔거나 다른 세션의 화면이면 아무것도 하지 않는다 */
   #patchRuntime(id: string, change: (runtime: NonNullable<DeskState['runtime']>) => NonNullable<DeskState['runtime']>): void {
@@ -1041,8 +1041,6 @@ export class DeskApp {
       (event) => {
         if (controller.signal.aborted) return;
         this.#patchRuntime(id, (runtime) => applyRuntimeEvent(runtime, event));
-        // 배포가 끝나면 릴리스 목록이 바뀌었다. 배포 탭을 본 적이 있으면 다시 받는다
-        if ((event.type === 'deploy_finished' || event.type === 'deploy_failed') && this.#state.runtime?.deploy.status) void this.#loadDeploys(id);
       },
       controller.signal,
     ).then(
@@ -1081,15 +1079,6 @@ export class DeskApp {
     this.#qaTimer.unref?.();
   }
 
-  async #loadDeploys(id: string): Promise<void> {
-    try {
-      const status = await this.#call('deploys')(id);
-      this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, status, loading: false, error: undefined } }));
-    } catch (error) {
-      this.#patchRuntime(id, (runtime) => ({ ...runtime, deploy: { ...runtime.deploy, loading: false, error: `배포 상태를 받지 못했습니다: ${messageOf(error)}` } }));
-    }
-  }
-
   #runtimeOpenUrl(id: string, url: string): void {
     const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
     if (!browsable(url)) note(`열 수 없는 주소입니다: ${url}`);
@@ -1110,17 +1099,6 @@ export class DeskApp {
     const note = (text: string) => this.#patchRuntime(id, (runtime) => ({ ...runtime, note: text }));
     try {
       switch (effect.type) {
-        case 'load-deploys':
-          await this.#loadDeploys(id);
-          return;
-        case 'deploy':
-          await this.#call('deploy')(id, effect.sha);
-          note('배포를 시작했습니다. 진행은 이 화면에 나옵니다');
-          return;
-        case 'rollback':
-          await this.#call('rollback')(id, effect.releaseId);
-          note('되돌리기를 시작했습니다. 진행은 이 화면에 나옵니다');
-          return;
         case 'service':
           await this.#call('setService')(id, effect.service, effect.on);
           note(effect.on ? `${effect.service}를 켜는 중입니다` : `${effect.service}를 껐습니다`);

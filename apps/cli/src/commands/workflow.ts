@@ -1,4 +1,4 @@
-import { piPolicyEnvironment, VERIFICATION_STAGES, workflowReleaseRequirements, workflowStages } from '@b-studio/agent';
+import { piPolicyEnvironment, VERIFICATION_STAGES, workflowStages } from '@b-studio/agent';
 import type { LoadedProject } from '@b-studio/spec';
 
 /**
@@ -25,7 +25,6 @@ export function workflow(project: LoadedProject, options: { piEnv: boolean }): n
   }
   console.log(`보호 경로: ${spec?.protectedPaths?.join(', ') || '없음'}`);
   if (spec?.maxChangedFiles !== undefined) console.log(`요청당 변경 파일 상한: ${spec.maxChangedFiles}`);
-  console.log(`배포 조건: ${workflowReleaseRequirements(project).join(', ')}`);
   return 0;
 }
 

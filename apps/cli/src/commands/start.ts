@@ -7,7 +7,7 @@ import { createLaunchDeps, HEALTH_PATH, runLaunch, studioOrigin, type LaunchMode
 
 /**
  * 새로 띄우는 서버에 채울 환경. desk의 칸은 세션 터미널이라 개인 PC 모드가 필요하다(이 컴퓨터 방식은 지원 경로라 실험 기능 없이 열린다, ADR-200).
- * 실험 기능은 desk의 실험 화면(운영 배포 등)이 보이도록 계속 켠다. desk가 띄울 수 있는 CLI는 Claude Code(기본 모드)와 Codex다.
+ * 실험 기능은 desk의 실험 화면(여러 AI 비교 등)이 보이도록 계속 켠다. desk가 띄울 수 있는 CLI는 Claude Code(기본 모드)와 Codex다.
  * 사용자가 이미 정한 값은 그대로 둔다
  */
 export const STUDIO_SERVER_ENV: Readonly<Record<string, string>> = { B_STUDIO_EXPERIMENTAL: '1', B_STUDIO_BACKENDS: 'codex' };

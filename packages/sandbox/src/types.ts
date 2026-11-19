@@ -121,7 +121,7 @@ export type ContainerHealth = 'starting' | 'healthy' | 'unhealthy';
 export interface ServiceUsage {
   /** compose 서비스 이름 */
   service: string;
-  /** 실제 컨테이너 이름(docker) 또는 Pod 이름(kubernetes). 없으면 service와 같다고 본다 */
+  /** 실제 컨테이너 이름(docker). 없으면 service와 같다고 본다 */
   containerName?: string;
   /** 이 컨테이너가 어느 갈래인지. 옛 제공자나 고정 픽스처와 호환하도록 없을 수도 있다 */
   role?: ServiceRole;
@@ -371,10 +371,10 @@ export interface InfraCheckResult {
   reason?: string;
 }
 
-/** 샌드박스를 만드는 구현체. 로컬 Docker → 사내 Kubernetes 등으로 교체할 수 있다 */
+/** 샌드박스를 만드는 구현체. 지금은 로컬 Docker 하나다(kubernetes 제공자는 ADR-221로 지움) */
 export interface SandboxProvider {
   readonly name: string;
-  /** 격리 표시 (예: Kubernetes RuntimeClass). 화면에 격리 수준을 표시할 때 쓴다 */
+  /** 격리 표시. 이를 채우던 Kubernetes 제공자와 gVisor 런타임을 지워(ADR-221) 지금은 늘 비어 있다 */
   readonly isolation?: string;
   create(project: LoadedProject, options?: CreateSandboxOptions): Promise<Sandbox>;
   /**
