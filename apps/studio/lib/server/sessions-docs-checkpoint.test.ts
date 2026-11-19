@@ -206,7 +206,7 @@ describe('문서 체크포인트(ADR-096)', () => {
     const checkpoint = await commitWorkingCopyDocs(id, ['docs/requirements.md'], 'docs: 요구사항을 정리한다 (R1)');
 
     expect(checkpoint).toMatchObject({ message: 'docs: 요구사항을 정리한다 (R1)', files: ['docs/requirements.md'], verify: 'docs' });
-    // 검증 게이트를 거치지 않았으므로 통과 기록(Workflow-Passed)이 없다 — 배포 조건·"검증됨" 판정의 증거가 되지 않는다
+    // 검증 게이트를 거치지 않았으므로 통과 기록(Workflow-Passed)이 없다 — "검증됨" 판정의 증거가 되지 않는다
     expect(checkpoint!.passedStages).toBeUndefined();
     expect(getSnapshot(id)!.checkpoints[0]).toMatchObject({ sha: checkpoint!.sha, verify: 'docs' });
 

@@ -1,0 +1,5 @@
+# 막는 검사의 이름 접기(foldName)가 Rust std의 Unicode 표를 따르므로 판을 고정한다(#1323).
+# 올릴 때는 packages/agent/src/path-policy-codepoints.test.ts의 고정 목록을 그 판으로 다시 만든다
+[toolchain]
+channel = "1.100.0"
+profile = "minimal"

@@ -8,8 +8,6 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const fake = vi.hoisted(() => ({
   root: '',
   execCalls: [] as string[][],
-  /** 가짜 배포기가 받은 것: 어느 체크포인트를, 어떤 파일이 든 폴더로 배포하라고 했는지 */
-  deploys: [] as Array<{ sha: string; label: string; files: string[] }>,
   /** 재시작을 실패시킨다: 'platform'은 샌드박스 쪽 오류(SandboxError.platform), 'code'는 서비스가 뜨지 않음 */
   restartFails: undefined as undefined | 'platform' | 'code',
   restarts: 0,
@@ -78,16 +76,6 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     },
     async destroy() {},
   } as unknown as Sandbox;
-  // 운영 배포(Docker 빌드)도 하지 않는다. 꺼낸 파일 폴더와 배포하라고 넘긴 체크포인트만 적어 둔다
-  class FakeDeployer {
-    constructor(private readonly project: { root: string }) {}
-    async deploy(source: { label: string; sha: string }) {
-      const { readdir } = await import('node:fs/promises');
-      const files = (await readdir(this.project.root, { recursive: true })).map(String).sort();
-      fake.deploys.push({ sha: source.sha, label: source.label, files });
-      return { release: { id: 'release-1', source }, urls: [], previous: undefined };
-    }
-  }
   return {
     ...actual,
     providerFromEnv: () => ({
@@ -98,9 +86,6 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
         return sandbox;
       },
     }),
-    DockerDeployer: FakeDeployer,
-    defaultDeployRoot: () => `${fake.root}-deploys`,
-    resolveSecrets: async () => ({}),
   };
 });
 
@@ -109,7 +94,7 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { applySessionRequirements, createSession, deploySession, getSnapshot, releaseBasisCheckpoint, sendMessage, sessionHistory, stopSession, subscribe } from './sessions';
+import { createSession, getSnapshot, sendMessage, sessionHistory, stopSession, subscribe } from './sessions';
 
 let root: string;
 const saved = {
@@ -221,19 +206,7 @@ describe('가볍게 확인(verify light)', () => {
     await stopSession(created).catch(() => {});
   });
 
-  it('가볍게 확인한 체크포인트는 배포 조건(releaseRequires)을 채우지 못해 배포를 거부한다', async () => {
-    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(created)).toBe('ready');
-
-    await runWrite(created, 'light');
-
-    // releaseRequires에 test가 있는데 가볍게 확인은 test를 건너뛰었으므로 막혀야 하고, 안내가 나와야 한다
-    expect(() => deploySession(created, { by: 'kim' })).toThrow(/배포 조건을 채우지 못했습니다.*test.*가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다/s);
-
-    await stopSession(created).catch(() => {});
-  });
-
-  it('전체 검증(full)은 지금처럼 테스트까지 돌려 배포 조건을 채운다', async () => {
+  it('전체 검증(full)은 지금처럼 테스트까지 돌린다', async () => {
     const created = (await createSession('verifyproj', 'kim', 'copy')).id;
     expect(await waitForReady(created)).toBe('ready');
     fake.execCalls = [];
@@ -245,106 +218,6 @@ describe('가볍게 확인(verify light)', () => {
     expect(checkpoint.verify).toBeUndefined();
     // 선언한 테스트가 실제로 돌았다
     expect(fake.execCalls).toEqual([[ './gradlew', 'test' ]]);
-
-    await stopSession(created).catch(() => {});
-  });
-});
-
-describe('배포 조건은 코드가 같은 체크포인트의 통과 기록을 본다(도그푸딩 마찰 166)', () => {
-  const full = { sha: 'c2', passedStages: ['run', 'test'] };
-  const first = { sha: 'c0' };
-  const requirementsDoc = { sha: 'd1', verify: 'docs', files: ['docs/requirements.md'], outsideFiles: 0 };
-
-  it('요구사항 기록만 바꾼 문서 체크포인트는 건너뛰고 그 앞의 가장 최근 체크포인트를 본다', () => {
-    expect(releaseBasisCheckpoint([requirementsDoc, full, first], requirementsDoc)).toBe(full);
-    // 문서 체크포인트가 여러 개 쌓여도 같다
-    const another = { ...requirementsDoc, sha: 'd2' };
-    expect(releaseBasisCheckpoint([another, requirementsDoc, full, first], another)).toBe(full);
-    // 게이트를 거친 체크포인트는 자기 자신이다
-    expect(releaseBasisCheckpoint([requirementsDoc, full, first], full)).toBe(full);
-  });
-
-  it('고른 체크포인트보다 새 체크포인트의 통과 기록은 보지 않는다(앞으로가 아니라 뒤로만 간다)', () => {
-    const newer = { sha: 'c3', passedStages: ['run', 'test', 'review'] };
-    expect(releaseBasisCheckpoint([newer, requirementsDoc, full, first], requirementsDoc)).toBe(full);
-  });
-
-  it('코드를 바꿨을 수 있는 체크포인트는 건너뛰지 않는다', () => {
-    const light = { sha: 'l1', verify: 'light', passedStages: ['run'], files: ['api/src/Order.java'] };
-    expect(releaseBasisCheckpoint([light, full], light)).toBe(light);
-    // 다른 문서를 바꾼 문서 체크포인트, 프로젝트 폴더 밖 변경이 있는 것, 파일 목록을 모르는 것
-    const otherDoc = { sha: 'd3', verify: 'docs', files: ['docs/api.md'], outsideFiles: 0 };
-    const outside = { sha: 'd4', verify: 'docs', files: ['docs/requirements.md'], outsideFiles: 1 };
-    const unknownFiles = { sha: 'd5', verify: 'docs' };
-    for (const head of [otherDoc, outside, unknownFiles]) expect(releaseBasisCheckpoint([head, full], head)).toBe(head);
-  });
-
-  it('체크포인트가 전부 문서 체크포인트면 가장 오래된 것을 보고, 목록에 없는 체크포인트는 그대로 돌려준다', () => {
-    const oldest = { ...requirementsDoc, sha: 'd0' };
-    expect(releaseBasisCheckpoint([requirementsDoc, oldest], requirementsDoc)).toBe(oldest);
-    const stray = { sha: 'zz' };
-    expect(releaseBasisCheckpoint([requirementsDoc, full], stray)).toBe(stray);
-  });
-
-  it('가볍게 확인한 체크포인트 위에 요구사항을 저장해도 배포는 그 체크포인트의 통과 기록으로 막히고 이유를 알린다', async () => {
-    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(created)).toBe('ready');
-    await runWrite(created, 'light');
-    const light = getSnapshot(created)!.checkpoints[0]!;
-
-    // 화면에서 요구사항을 저장하면 문서 체크포인트가 맨 앞에 놓인다
-    await applySessionRequirements(created, { requirements: [{ id: 'R1', title: '주문 메모', kind: 'api', priority: 'must', acceptance: ['메모를 저장한다'] }] });
-    const head = getSnapshot(created)!.checkpoints[0]!;
-    expect(head.sha).not.toBe(light.sha);
-    expect(head.verify).toBe('docs');
-    expect(head.passedStages).toBeUndefined();
-
-    // 전에는 HEAD(문서 체크포인트)의 빈 통과 기록을 봐서 "검증 게이트를 거치지 않은 체크포인트"라고만 했다
-    let message = '';
-    try {
-      deploySession(created, { by: 'kim' });
-    } catch (error) {
-      message = (error as Error).message;
-    }
-    expect(message).toContain(`코드가 같은 체크포인트 ${light.shortSha}의 통과 기록을 봤습니다`);
-    expect(message).toContain('가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다');
-    expect(message).not.toContain('검증 게이트를 거치지 않은 체크포인트입니다');
-    // 가볍게 확인이 통과시킨 단계(run)는 빠진 단계로 나오지 않는다
-    expect(message).not.toMatch(/통과 기록이 없는 단계: [^.(]*\brun\b/);
-
-    await stopSession(created).catch(() => {});
-  });
-
-  it('전체 검증을 통과한 체크포인트 위에 요구사항을 저장한 뒤 배포하면, 게이트를 통과한 체크포인트의 파일이 배포된다(문서 체크포인트의 파일이 아니다)', async () => {
-    const created = (await createSession('verifyproj', 'kim', 'copy')).id;
-    expect(await waitForReady(created)).toBe('ready');
-    await runWrite(created, undefined);
-    const verified = getSnapshot(created)!.checkpoints[0]!;
-    await applySessionRequirements(created, { requirements: [{ id: 'R1', title: '주문 메모', kind: 'api', priority: 'must', acceptance: ['메모를 저장한다'] }] });
-    const head = getSnapshot(created)!.checkpoints[0]!;
-    expect(head.verify).toBe('docs');
-    expect(head.sha).not.toBe(verified.sha);
-
-    fake.deploys = [];
-    const finished = new Promise<string>((resolve) => {
-      const unsubscribe = subscribe(created, (event) => {
-        if (event.type === 'deploy_finished' || event.type === 'deploy_failed') {
-          unsubscribe();
-          resolve(event.type === 'deploy_failed' ? `failed: ${event.error}` : event.type);
-        }
-      });
-    });
-    deploySession(created, { by: 'kim' });
-    expect(getSnapshot(created)!.deploying?.target).toBe(verified.shortSha);
-    expect(await finished).toBe('deploy_finished');
-
-    expect(fake.deploys).toHaveLength(1);
-    // 통과 기록을 읽은 그 체크포인트를 배포한다
-    expect(fake.deploys[0]!.sha).toBe(verified.sha);
-    expect(fake.deploys[0]!.label).toContain(verified.shortSha);
-    // 게이트를 통과한 코드는 들어 있고, 게이트를 거치지 않은 요구사항 문서는 들어 있지 않다
-    expect(fake.deploys[0]!.files).toContain('api/src/Order.java');
-    expect(fake.deploys[0]!.files.some((file) => file.endsWith('requirements.md'))).toBe(false);
 
     await stopSession(created).catch(() => {});
   });

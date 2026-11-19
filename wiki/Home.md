@@ -29,7 +29,7 @@ flowchart LR
 
 ## 현재 구현 범위
 
-- Docker와 Kubernetes 샌드박스 제공자
+- Docker 샌드박스 제공자
 - Next.js·Spring Boot·FastAPI 템플릿
 - 터미널 작업대(desk)와 CLI, 미리보기 주소, 로그, 체크포인트·diff
 - 검증 게이트, 요청 취소, 체크포인트, DB 복원, 세션 복구

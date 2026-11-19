@@ -195,7 +195,7 @@ describe('다시 검증(#798)', () => {
     // 바뀐 파일이 없어도 처음부터: 관리 서비스를 모두 다시 띄운다
     expect([...new Set(fake.restarted)].sort()).toEqual(['api', 'web']);
     const after = getSnapshot(id)!;
-    // 새 체크포인트를 만들지 않고, 통과 기록(트레일러)도 바꾸지 않는다 — 배포 조건은 이 기록을 받지 않는다
+    // 새 체크포인트를 만들지 않고, 통과 기록(트레일러)도 바꾸지 않는다
     expect(after.checkpoints.map((checkpoint) => [checkpoint.sha, checkpoint.passedStages])).toEqual(before.map((checkpoint) => [checkpoint.sha, checkpoint.passedStages]));
     expect(after.reverifications?.[0]).toMatchObject({ sha: before[0]!.sha, ok: true, by: 'lee' });
     expect(after.running).toBe(false);

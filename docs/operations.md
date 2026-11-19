@@ -1,4 +1,4 @@
-# 운영과 배포
+# 운영
 
 이 문서는 b-studio를 개인 개발 환경이 아닌 공유 서버에서 운영할 때 확인해야 할 항목을 정리합니다.
 
@@ -15,7 +15,7 @@
 
 모드는 `pnpm studio launch --mode local|demo|commandcode|codex`(또는 명령 없는 `pnpm studio --mode …`)로 고르는 것이 기본 길입니다. 이 길은 Rust 앞단(`crates/bstudio-server`)이 공개 포트를 열고 Node 서버를 그 자식으로 띄웁니다(ADR-195). 아래의 `pnpm studio:codex`·`studio:commandcode`·`studio:opencode`·`studio:demo`·`studio:local`은 앞단과 desk 없이 Node 서버만 `B_STUDIO_MODE`를 줘서 직접 띄우는 개발용 길입니다. `launch.ts`의 설명대로 앞단 없이 뜬 서버는 인증 판단을 하는 앞단이 없는 다른 서버이므로 공유 환경에는 쓰지 않습니다(두 길의 인증 동작 차이를 이 문서를 쓰며 따로 재지는 않았습니다). `opencode`는 `launch --mode`에 없어서 `pnpm studio:opencode`가 유일한 길입니다.
 
-프로젝트, 세션, Fleet, 배포 데이터는 각각 `B_STUDIO_PROJECTS_DIR`, `B_STUDIO_SESSIONS_DIR`, `B_STUDIO_FLEETS_DIR`, `B_STUDIO_DEPLOYS_DIR`로 위치를 분리할 수 있습니다. 운영에서는 영속 볼륨에 두고 접근 권한을 제한하세요.
+프로젝트, 세션, Fleet 데이터는 각각 `B_STUDIO_PROJECTS_DIR`, `B_STUDIO_SESSIONS_DIR`, `B_STUDIO_FLEETS_DIR`로 위치를 분리할 수 있습니다. 운영에서는 영속 볼륨에 두고 접근 권한을 제한하세요.
 
 `claude-code` 모드에서 쓸 모델은 `B_STUDIO_CLAUDE_CODE_MODEL`로 고정할 수 있습니다(예: `sonnet`). 비우면 로그인 계정의 기본 모델을 씁니다. 실제로 쓴 모델 이름은 세션 이벤트로 기록됩니다.
 
@@ -199,18 +199,6 @@ JSON이 잘못됐으면 서버는 죽지 않고 토큰 보고서에 "단가 표�
 
 [`config/model-registry.example.json`](../config/model-registry.example.json)을 복사해 공급자, 모델, 비용과 기능을 설정하고 `B_STUDIO_MODEL_REGISTRY`로 경로를 지정합니다. API 키는 레지스트리 파일에 넣지 말고 공급자별 환경 변수나 시크릿 저장소에서 주입하세요.
 
-## 로컬 Docker 배포
-
-```bash
-pnpm studio deploy examples/orders
-pnpm studio deploy examples/orders --status
-pnpm studio deploy examples/orders --rollback <release-id>
-pnpm studio deploy examples/orders --remove
-pnpm studio deploy examples/orders --remove --volumes
-```
-
-`--rollback`은 컨테이너 이미지만 이전 릴리스로 되돌립니다. 데이터베이스 마이그레이션은 자동으로 되돌리지 않으므로, 하위 호환 마이그레이션과 별도 복구 절차를 준비해야 합니다. `--remove`는 DB 볼륨을 기본적으로 보존하며 `--volumes`를 붙일 때만 함께 제거합니다.
-
 ## 남은 샌드박스 자원 정리
 
 비정상 종료나 실패로 남은 샌드박스 자원(컨테이너·이미지·볼륨·네트워크)을 확인하고 지웁니다. Docker VM 디스크가 가득 차 샌드박스가 뜨지 않을 때도 같은 명령을 씁니다.
@@ -280,13 +268,6 @@ pnpm studio sandbox prune
 
 - **이미지 빌드 단계에서 받은 것(docker build가 받는 의존성)은 컨테이너 NetIO에 잡히지 않습니다.** 첫 기동의 다운로드가 대부분 빌드 단계에서 일어나면 컨테이너 수신 값은 작게, 기동 시간은 크게 나옵니다. 두 값은 서로 다른 단계를 재므로 함께 봅니다.
 - **edge 프록시 컨테이너는 뺍니다.** 서비스 트래픽이 edge를 지나가므로 더하면 이중 계산이 됩니다.
-- **Kubernetes 제공자는 아직 이 지표를 내지 않습니다.** 로컬 Docker 제공자(`local-docker`)만 기동 네트워크를 기록합니다.
-
-## Kubernetes 제공자
-
-`B_STUDIO_SANDBOX_PROVIDER=kubernetes`로 선택하며 환경에 따라 `B_STUDIO_KUBECONFIG`, `B_STUDIO_KUBECTL`, `B_STUDIO_K8S_CONTEXT`, `B_STUDIO_K8S_RUNTIME_CLASS`, `B_STUDIO_K8S_REGISTRY`를 설정합니다. 로컬 kind 검증에는 `B_STUDIO_K8S_KIND_CLUSTER`, `B_STUDIO_K8S_HOST_PATHS`도 사용합니다.
-
-실제 운영 전에는 RuntimeClass, NetworkPolicy, 이미지 레지스트리, 스토리지 클래스, 로그 보존을 조직 정책에 맞게 검증하세요.
 
 ## 원격 미리보기
 
@@ -322,7 +303,7 @@ pnpm studio sandbox prune
 - 체크포인트로 남기지 않은 변경 수.
 - 진행 중인 작업 여부.
 
-누락이 ✗로 보여도 PR 만들기는 막지 않습니다. 사람이 판단해 올리고, 배포 조건은 `releaseRequires`가 따로 막습니다.
+누락이 ✗로 보여도 PR 만들기는 막지 않습니다. 사람이 판단해 올립니다.
 
 ## 작업 분해 계획 상한
 
@@ -356,15 +337,15 @@ GitHub는 하위 이슈 API(`POST /repos/{owner}/{repo}/issues/{n}/sub_issues`, 
 
 ## 백업과 복구
 
-세션·체크포인트, DB 덤프, 사용량 기록, 배포 상태, 인증 설정, 모델 레지스트리를 백업하세요. 소스 코드와 데이터베이스 내용이 포함될 수 있으므로 암호화와 보존 기간을 조직 정책에 맞추고 실제 복구 훈련을 수행해야 합니다.
+세션·체크포인트, DB 덤프, 사용량 기록, 인증 설정, 모델 레지스트리를 백업하세요. 소스 코드와 데이터베이스 내용이 포함될 수 있으므로 암호화와 보존 기간을 조직 정책에 맞추고 실제 복구 훈련을 수행해야 합니다.
 
 ## 운영 전 체크리스트
 
 - [ ] API 인증과 관리자 목록을 설정했다.
 - [ ] TLS와 인증 프록시 우회 방지를 확인했다.
 - [ ] 모델 및 사용자 토큰 한도를 설정했다.
-- [ ] 세션·배포·사용량 경로를 영속 볼륨에 두었다.
+- [ ] 세션·사용량 경로를 영속 볼륨에 두었다.
 - [ ] 프로젝트별 `resources`, `network.egress`, `secrets`를 검토했다.
-- [ ] Docker 소켓 또는 Kubernetes 권한을 최소화했다.
+- [ ] Docker 소켓 권한을 최소화했다.
 - [ ] 백업과 복구, DB 마이그레이션 롤백 절차를 시험했다.
 - [ ] [보안 정책](../SECURITY.md)의 알려진 경계를 검토했다.

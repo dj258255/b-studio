@@ -1,7 +1,7 @@
 /**
- * 실행·배포·미리보기·저장소 화면(#895, 앞글쇠 다음 v): 웹 세션 화면의 실행·화면·저장소 탭이 하던 일을 터미널로 옮긴다.
+ * 실행·미리보기·저장소 화면(#895, 앞글쇠 다음 v): 웹 세션 화면의 실행·화면·저장소 탭이 하던 일을 터미널로 옮긴다.
  *
- * 고른 세션 하나의 이벤트(`/api/sessions/:id/events`)를 받아 서비스 상태·로그·자원·배포 진행을 접고(applyRuntimeEvent),
+ * 고른 세션 하나의 이벤트(`/api/sessions/:id/events`)를 받아 서비스 상태·로그·자원을 접고(applyRuntimeEvent),
  * 키(runtimeKey)는 화면 상태만 바꾸고 할 일(RuntimeEffect)을 돌려준다. 스튜디오를 부르는 일은 desk.ts가 한다.
  * 브라우저가 있어야 보이는 앱 화면은 주소만 보이고 시스템 브라우저로 연다
  * QA 탭(#916)은 탐색형 QA다: 목표 문장을 주면 스튜디오가 AI로 앱 화면을 눌러 보며 문제를 찾는다. 화면 사진은 주소로만 보이고 브라우저로 연다
@@ -9,14 +9,13 @@
 import { fit, fitAnsi, stringWidth } from './screen';
 import { bg, BOLD, fg, RESET, type ColorToken, type Theme } from './theme';
 import { bar, box } from './widgets';
-import type { DeskDeployStatus, DeskPull, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskServiceState, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
+import type { DeskPull, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskServiceState, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
 
-export type RuntimeTab = 'services' | 'logs' | 'deploy' | 'preview' | 'repo' | 'qa';
+export type RuntimeTab = 'services' | 'logs' | 'preview' | 'repo' | 'qa';
 
 export const RUNTIME_TABS: ReadonlyArray<{ tab: RuntimeTab; label: string }> = [
   { tab: 'services', label: '실행' },
   { tab: 'logs', label: '로그' },
-  { tab: 'deploy', label: '배포' },
   { tab: 'preview', label: '미리보기' },
   { tab: 'repo', label: '저장소' },
   { tab: 'qa', label: 'QA' },
@@ -24,8 +23,6 @@ export const RUNTIME_TABS: ReadonlyArray<{ tab: RuntimeTab; label: string }> = [
 
 /** 쌓아 두는 로그 줄 수. 서버의 LOG_LIMIT과 같다 */
 export const RUNTIME_LOG_LIMIT = 1000;
-/** 배포 진행 줄 수. 스튜디오의 DEPLOY_LOG_LIMIT와 같다 */
-const DEPLOY_LINES = 200;
 const TAB_WIDTH = 13;
 
 export interface RuntimeLog {
@@ -38,8 +35,6 @@ export type RepoView = 'presubmit' | 'issues' | 'pulls';
 
 export type RuntimeConfirm =
   | { kind: 'service'; service: string; on: boolean }
-  | { kind: 'deploy'; sha: string; shortSha: string; label: string }
-  | { kind: 'rollback'; releaseId: string; label: string }
   /** 끝난 탐색형 QA를 studio.yaml의 화면 확인으로 덧붙일지 */
   | { kind: 'qa-save'; service: string };
 
@@ -73,7 +68,6 @@ export interface RuntimeState {
   search?: { text: string; editing: boolean };
   /** 로그를 아래에서 몇 줄 올려 보는지. 0이면 새 줄을 따라간다 */
   scroll: number;
-  deploy: { status?: DeskDeployStatus; loading?: boolean; error?: string; result?: string };
   /** 서비스마다 받은 미리보기 주소 */
   previews: Record<string, { url?: string; loading?: boolean; error?: string }>;
   repo: { view: RepoView; state: 'open' | 'closed'; submission?: DeskSubmission; issues?: DeskRepoList; pulls?: DeskRepoList; loading?: boolean; error?: string };
@@ -86,9 +80,6 @@ export interface RuntimeState {
 
 export type RuntimeEffect =
   | { type: 'close' }
-  | { type: 'load-deploys' }
-  | { type: 'deploy'; sha: string }
-  | { type: 'rollback'; releaseId: string }
   | { type: 'service'; service: string; on: boolean }
   | { type: 'boot' }
   /** 미리보기 주소를 받는다. open이면 받은 뒤 브라우저로 연다 */
@@ -114,7 +105,7 @@ const LEFT = ['\x1b[D', '\x1bOD'];
 const RIGHT = ['\x1b[C', '\x1bOC'];
 
 export function openRuntime(id: string, title: string): RuntimeState {
-  return { id, title, tab: 'services', row: 0, logs: [], scroll: 0, deploy: {}, previews: {}, repo: { view: 'presubmit', state: 'open' } };
+  return { id, title, tab: 'services', row: 0, logs: [], scroll: 0, previews: {}, repo: { view: 'presubmit', state: 'open' } };
 }
 
 // ─── 이벤트 접기 ───
@@ -184,25 +175,6 @@ export function applyRuntimeEvent(state: RuntimeState, event: DeskSessionEvent):
       if (!snapshot) return state;
       return { ...state, snapshot: { ...snapshot, checkpoints: [checkpoint, ...snapshot.checkpoints] } };
     }
-    case 'deploy_started': {
-      const { action, target, at } = event as { action: 'deploy' | 'rollback'; target: string; at: string };
-      return { ...patchSnapshot(state, { deploying: { action, target, startedAt: at, lines: [] } }), deploy: { ...state.deploy, result: undefined } };
-    }
-    case 'deploy_log': {
-      const deploying = snapshot?.deploying;
-      if (!deploying) return state;
-      const { line } = event as { line: string };
-      return patchSnapshot(state, { deploying: { ...deploying, lines: [...deploying.lines.slice(-(DEPLOY_LINES - 1)), line] } });
-    }
-    case 'deploy_finished': {
-      const { action, label } = event as { action: 'deploy' | 'rollback'; label: string };
-      const result = action === 'deploy' ? `배포했습니다: ${label}` : `되돌렸습니다: ${label}`;
-      return { ...patchSnapshot(state, { deploying: undefined }), deploy: { ...state.deploy, result } };
-    }
-    case 'deploy_failed': {
-      const { action, error } = event as { action: 'deploy' | 'rollback'; error: string };
-      return { ...patchSnapshot(state, { deploying: undefined }), deploy: { ...state.deploy, result: `${action === 'deploy' ? '배포' : '되돌리기'}에 실패했습니다: ${error}` } };
-    }
     default:
       return state;
   }
@@ -221,10 +193,6 @@ export function visibleLogs(state: RuntimeState): RuntimeLog[] {
   return state.logs.filter((log) => (!state.logService || log.service === state.logService) && (!needle || log.text.toLowerCase().includes(needle)));
 }
 
-function releases(state: RuntimeState) {
-  return state.deploy.status?.state.releases ?? [];
-}
-
 function repoItems(state: RuntimeState): Array<{ url: string }> {
   if (state.repo.view === 'issues') return state.repo.issues?.issues ?? [];
   if (state.repo.view === 'pulls') return state.repo.pulls?.pulls ?? [];
@@ -235,8 +203,6 @@ function rowCount(state: RuntimeState): number {
   switch (state.tab) {
     case 'services':
       return state.snapshot?.services.length ?? 0;
-    case 'deploy':
-      return releases(state).length;
     case 'preview':
       return previewServices(state).length;
     case 'repo':
@@ -248,13 +214,9 @@ function rowCount(state: RuntimeState): number {
   }
 }
 
-/** 탭에 들어갈 때 할 일: 처음 보는 배포·저장소는 불러오고, 미리보기는 아직 받지 않은 주소를 받는다 */
+/** 탭에 들어갈 때 할 일: 처음 보는 저장소는 불러오고, 미리보기는 아직 받지 않은 주소를 받는다 */
 function enterTab(state: RuntimeState, tab: RuntimeTab, effects: RuntimeEffect[]): RuntimeState {
   const next: RuntimeState = { ...state, tab, row: 0, confirm: undefined, note: undefined, search: state.search?.editing ? undefined : state.search };
-  if (tab === 'deploy' && !state.deploy.status && !state.deploy.loading) {
-    effects.push({ type: 'load-deploys' });
-    return { ...next, deploy: { ...state.deploy, loading: true } };
-  }
   if (tab === 'repo') return loadRepoIfNeeded(next, effects);
   if (tab === 'qa' && state.qa?.run === undefined && !state.qa?.loading) {
     effects.push({ type: 'qa-load' });
@@ -289,9 +251,7 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
     const base = { ...state, confirm: undefined };
     if (key !== 'y' && key !== 'Y' && !ENTER.includes(key)) return { state: base, effects };
     if (confirm.kind === 'service') effects.push({ type: 'service', service: confirm.service, on: confirm.on });
-    else if (confirm.kind === 'qa-save') effects.push({ type: 'qa-save', service: confirm.service });
-    else if (confirm.kind === 'deploy') effects.push({ type: 'deploy', sha: confirm.sha });
-    else effects.push({ type: 'rollback', releaseId: confirm.releaseId });
+    else effects.push({ type: 'qa-save', service: confirm.service });
     return { state: base, effects };
   }
 
@@ -317,7 +277,7 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
     const next = RUNTIME_TABS[(at + (key === '\t' ? 1 : RUNTIME_TABS.length - 1)) % RUNTIME_TABS.length]!.tab;
     return { state: enterTab(state, next, effects), effects };
   }
-  if (/^[1-6]$/.test(key)) {
+  if (/^[1-5]$/.test(key)) {
     const next = RUNTIME_TABS[Number(key) - 1]!.tab;
     return { state: next === state.tab ? state : enterTab(state, next, effects), effects };
   }
@@ -331,8 +291,6 @@ export function runtimeKey(start: RuntimeState, key: string): { state: RuntimeSt
   switch (state.tab) {
     case 'services':
       return { state: servicesKey(state, key, effects), effects };
-    case 'deploy':
-      return { state: deployKey(state, key, effects), effects };
     case 'preview':
       return { state: previewKey(state, key, effects), effects };
     case 'repo':
@@ -452,32 +410,6 @@ function logsKey(state: RuntimeState, key: string, _effects: RuntimeEffect[]): R
   }
   if (key === 'c') return { ...state, logService: undefined, search: undefined, scroll: 0 };
   return state;
-}
-
-function deployKey(state: RuntimeState, key: string, effects: RuntimeEffect[]): RuntimeState {
-  const snapshot = state.snapshot;
-  if (key === 'r') {
-    effects.push({ type: 'load-deploys' });
-    return { ...state, deploy: { ...state.deploy, loading: true } };
-  }
-  if (key === 'o' || ENTER.includes(key)) {
-    const url = Object.values(state.deploy.status?.urls ?? {})[0];
-    if (!url) return { ...state, note: '운영 주소가 아직 없습니다' };
-    effects.push({ type: 'open-url', url });
-    return state;
-  }
-  if (key !== 'd' && key !== 'b') return state;
-  if (!snapshot?.hasDeploy) return { ...state, note: '이 프로젝트의 studio.yaml에 deploy 절이 없습니다' };
-  if (!snapshot.experimental) return { ...state, note: '운영 배포는 실험 기능입니다(B_STUDIO_EXPERIMENTAL=1로 띄우세요)' };
-  if (snapshot.deploying) return { ...state, note: '배포가 도는 중입니다. 끝난 뒤에 하세요' };
-  if (key === 'd') {
-    const head = snapshot.checkpoints[0];
-    if (!head) return { ...state, note: '배포할 체크포인트가 없습니다' };
-    return { ...state, confirm: { kind: 'deploy', sha: head.sha, shortSha: head.shortSha, label: head.message } };
-  }
-  const release = releases(state)[state.row];
-  if (!release || release.status !== 'previous') return { ...state, note: '되돌릴 이전 릴리스(이전)를 ↑↓로 고르세요' };
-  return { ...state, confirm: { kind: 'rollback', releaseId: release.id, label: release.source.label } };
 }
 
 function previewKey(state: RuntimeState, key: string, effects: RuntimeEffect[]): RuntimeState {
@@ -662,52 +594,6 @@ function logsPane(state: RuntimeState, width: number, height: number, theme: The
   return { lines, ...(state.search?.editing ? { cursor: { x: stringWidth(`찾기> ${state.search.text}`), y: 0 } } : {}) };
 }
 
-const RELEASE_LABEL: Record<string, { label: string; color: ColorToken }> = {
-  active: { label: '지금 운영', color: 'green' },
-  previous: { label: '이전', color: 'accent' },
-  retired: { label: '정리됨', color: 'muted' },
-  failed: { label: '실패', color: 'red' },
-};
-
-function deployPane(state: RuntimeState, snapshot: DeskSessionView, width: number, height: number, theme: Theme): Pane {
-  const muted = fg(theme, 'muted');
-  const lines: string[] = [];
-  if (!snapshot.hasDeploy) {
-    lines.push(`${muted}이 프로젝트의 studio.yaml에 deploy 절이 없습니다. deploy 절을 쓰면 여기서 운영 배포를 합니다${RESET}`);
-    return { lines };
-  }
-  if (!snapshot.experimental) lines.push(`${fg(theme, 'yellow')}운영 배포는 실험 기능입니다(B_STUDIO_EXPERIMENTAL=1)${RESET}`);
-  const head = snapshot.checkpoints[0];
-  lines.push(`${muted}배포할 체크포인트${RESET} ${head ? `${head.shortSha} ${head.message}` : '없음'}`);
-  if (state.deploy.result) lines.push(state.deploy.result.includes('실패') ? `${fg(theme, 'red')}${state.deploy.result}${RESET}` : `${fg(theme, 'green')}${state.deploy.result}${RESET}`);
-  if (snapshot.deploying) {
-    const deploying = snapshot.deploying;
-    lines.push(`${fg(theme, 'accent')}◐ ${deploying.action === 'deploy' ? '배포' : '되돌리기'} 도는 중${RESET} ${muted}${deploying.target}${RESET}`);
-    for (const line of deploying.lines.slice(-6)) lines.push(`  ${muted}${line}${RESET}`);
-  }
-  if (state.deploy.error) lines.push(`${fg(theme, 'red')}${state.deploy.error}${RESET}`);
-  const status = state.deploy.status;
-  if (!status) {
-    lines.push(`${muted}${state.deploy.loading ? '배포 상태를 받는 중…' : '배포 상태를 아직 받지 않았습니다(r)'}${RESET}`);
-    return { lines: lines.slice(0, height) };
-  }
-  lines.push('');
-  const urls = Object.entries(status.urls);
-  if (urls.length === 0) lines.push(`${muted}운영 주소가 아직 없습니다${RESET}`);
-  for (const [service, url] of urls) lines.push(`${muted}운영${RESET} ${service} ${link(url)}`);
-  if (status.containers.length > 0) lines.push(`${muted}컨테이너${RESET} ${status.containers.map((container) => `${container.name} ${container.state}`).join(' · ')}`);
-  lines.push('');
-  const list = releases(state);
-  if (list.length === 0) lines.push(`${muted}릴리스가 아직 없습니다. d로 처음 배포합니다${RESET}`);
-  const shown = windowed(list, state.row, Math.max(0, height - lines.length));
-  shown.items.forEach((release, at) => {
-    const look = RELEASE_LABEL[release.status] ?? RELEASE_LABEL.retired!;
-    const text = `${fg(theme, look.color)}${fit(look.label, 10)}${RESET} ${muted}${day(release.createdAt)}${RESET} ${release.source.label}${release.error ? ` ${fg(theme, 'red')}${release.error}${RESET}` : ''}`;
-    lines.push(row(text, shown.offset + at === state.row, width, theme));
-  });
-  return { lines: lines.slice(0, height) };
-}
-
 function previewPane(state: RuntimeState, width: number, height: number, theme: Theme): Pane {
   const muted = fg(theme, 'muted');
   const lines: string[] = [];
@@ -800,7 +686,6 @@ export function renderRuntime(state: RuntimeState, size: { w: number; h: number 
   if (!snapshot) pane = { lines: [state.error ? `${fg(theme, 'red')}${state.error}${RESET}` : `${muted}세션에 연결하는 중…${RESET}`] };
   else if (state.tab === 'services') pane = servicesPane(state, snapshot, contentWidth, inner.h, theme);
   else if (state.tab === 'logs') pane = logsPane(state, contentWidth, inner.h, theme);
-  else if (state.tab === 'deploy') pane = deployPane(state, snapshot, contentWidth, inner.h, theme);
   else if (state.tab === 'preview') pane = previewPane(state, contentWidth, inner.h, theme);
   else if (state.tab === 'qa') pane = qaPane(state, contentWidth, inner.h, theme, _now);
   else pane = repoPane(state, contentWidth, inner.h, theme);
@@ -828,21 +713,17 @@ export function runtimeHint(state: RuntimeState): string {
   const confirm = state.confirm;
   if (confirm) {
     if (confirm.kind === 'service') return ` ${confirm.service}를 끌까요? 다시 켤 때까지 그 서비스는 돌지 않습니다 · y 끄기 · 다른 키 그만두기`;
-    if (confirm.kind === 'deploy') return ` 체크포인트 ${confirm.shortSha}(${confirm.label})를 운영에 배포할까요? · y 배포 · 다른 키 그만두기`;
-    if (confirm.kind === 'qa-save') return ` 이 실행의 동작을 studio.yaml의 화면 확인(pageChecks, ${confirm.service})으로 덧붙일까요? 다음 검증부터 게이트가 돌립니다 · y 저장 · 다른 키 그만두기`;
-    return ` 운영을 ${confirm.label}(${confirm.releaseId}) 릴리스로 되돌릴까요? · y 되돌리기 · 다른 키 그만두기`;
+    return ` 이 실행의 동작을 studio.yaml의 화면 확인(pageChecks, ${confirm.service})으로 덧붙일까요? 다음 검증부터 게이트가 돌립니다 · y 저장 · 다른 키 그만두기`;
   }
   if (state.note) return ` ${state.note}`;
   if (state.search?.editing) return ' 찾을 글을 쓰고 Enter · Esc 그만두기';
-  const common = 'Tab·1~6 탭 · Esc 닫기';
+  const common = 'Tab·1~5 탭 · Esc 닫기';
   if (state.qa?.form) return ' Enter 다음 칸(마지막 칸이면 시작) · ↑↓ 칸 옮기기 · ←→ 서비스 · Esc 그만두기';
   switch (state.tab) {
     case 'services':
       return ` ↑↓ 고르기 · Enter 끄고 켜기 · l 로그 · o 브라우저로 열기 · b 샌드박스 켜기 · ${common}`;
     case 'logs':
       return ` ↑↓ PgUp PgDn 올려 보기 · G 따라가기 · / 찾기 · s 서비스 · c 거르기 지우기 · ${common}`;
-    case 'deploy':
-      return ` d 최신 체크포인트 배포 · ↑↓ 고르고 b 되돌리기 · o 운영 주소 열기 · r 다시 받기 · ${common}`;
     case 'preview':
       return ` ↑↓ 고르기 · Enter·o 브라우저로 열기 · r 주소 다시 받기 · ${common}`;
     case 'qa':

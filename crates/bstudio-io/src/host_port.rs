@@ -1,6 +1,6 @@
 //! 호스트에서 미리 정해 둘 빈 포트(옛 TS: `packages/sandbox/src/docker/free-port.ts`, ADR-195 4f A4a).
 //!
-//! `deploy_io::free_port`(포트 0으로 OS에 받기)와 뜻이 다르다. 이쪽은 먼저 40000~59999 대역에서 무작위 포트를 몇 번 직접 바인드해 본다.
+//! `free_port`(포트 0으로 OS에 받기)와 뜻이 다르다. 이쪽은 먼저 40000~59999 대역에서 무작위 포트를 몇 번 직접 바인드해 본다.
 //! colima/Docker가 컨테이너 포트를 동적으로 퍼뜨리는 32768대와 떨어뜨려, 호스트에서는 비어 보이는데 VM 안에서는 이미 다른 컨테이너가 쓰고
 //! 있을 확률을 낮추려는 것이다. 대역이 모두 막혀 있을 때만 `free_port`로 돌아간다.
 //!
@@ -40,9 +40,15 @@ pub fn find_free_host_port_with(mut candidate: impl FnMut() -> u16, mut bind_tes
     fallback()
 }
 
+/// 127.0.0.1의 빈 포트 하나. 닫은 뒤 돌려주므로 사용 전에 다른 프로세스가 가져갈 수 있다
+fn free_port() -> io::Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
 /// 127.0.0.1에서 비어 있는 호스트 포트 하나
 pub fn find_free_host_port() -> io::Result<u16> {
-    find_free_host_port_with(random_high_band_port, real_bind_test, crate::deploy_io::free_port)
+    find_free_host_port_with(random_high_band_port, real_bind_test, free_port)
 }
 
 #[cfg(test)]

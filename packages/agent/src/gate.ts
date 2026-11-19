@@ -50,7 +50,7 @@ export async function recheckGateOnMaxTurns(gate: VerificationGate | undefined, 
 
 /**
  * 검증 범위. full은 지금과 같고, light(가볍게 확인)는 서비스 재시작·준비 판정·계약만 돌린다.
- * 작은 변경에서 빠른 피드백을 받으려는 것이라, 건너뛴 단계는 배포 조건(releaseRequires)이 자연히 막는다.
+ * 작은 변경에서 빠른 피드백을 받으려는 것이라, 건너뛴 단계는 결과의 skippedStages에 남는다.
  */
 export type VerifyMode = 'full' | 'light';
 

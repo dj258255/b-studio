@@ -875,8 +875,7 @@ export class CheckpointStore {
   }
 
   /**
-   * 체크포인트의 파일을 폴더로 꺼낸다. 운영 배포는 작업 폴더가 아니라 게이트를 통과한 체크포인트를 빌드한다.
-   * 기록한 파일만 나오므로 생성물과 무시한 파일은 들어가지 않는다. 모노레포 하위 폴더 세션은 저장소 전체를 꺼내고 프로젝트 폴더를 돌려준다
+   * 체크포인트의 파일을 폴더로 꺼낸다. 기록한 파일만 나오므로 생성물과 무시한 파일은 들어가지 않는다. 모노레포 하위 폴더 세션은 저장소 전체를 꺼내고 프로젝트 폴더를 돌려준다
    */
   async exportTree(sha: string, dest: string): Promise<string> {
     const commit = await this.#resolve(sha);
