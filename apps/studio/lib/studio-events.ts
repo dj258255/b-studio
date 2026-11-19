@@ -160,7 +160,7 @@ export interface SessionSnapshot {
    * 사람이 desk에서 켜고(로컬 토큰이 있는 요청만), 그 뒤 처음 시작되는 만들기 실행이 가져가며 꺼진다
    */
   allowCheckChangesNext?: true;
-  /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
+  /** 제공자가 알리는 격리 표시 (예: Kubernetes RuntimeClass). 없으면 표시하지 않는다 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
   nextDemoRequest?: string;

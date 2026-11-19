@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { EDGE_SERVICE } from '../edge-config';
-import { egressAuditExcerpt, parseContainerState, parseContainerStates, parseEgressDenial, parseHostPort, parseLogLine, parseRuntimes, parseSyncOutput, SyncObservations } from './format';
+import { egressAuditExcerpt, parseContainerState, parseContainerStates, parseEgressDenial, parseHostPort, parseLogLine, parseSyncOutput, SyncObservations } from './format';
 import { discoverUserContainers, classifyOwnership, matchesProjectRoot, mergeHostContainerStats, parseHostContainers } from './host-containers';
 import { classifyActuatorProbe, isForwarderProcess, matchDeclaredPorts, parseLsofListening, parsePsRow, parseSsListening } from './host-processes';
 import { composeVolumeName, describeSnapshotEvent, snapshotName, snapshotSlot, snapshotsToPrune } from './snapshots';
@@ -435,23 +435,6 @@ check('egressAuditExcerpt', egressAuditExcerpt as never, [
     [[[]], []],
 ]);
 
-// 런타임 이름은 UTF-16 순서(`😀` < `～`). 배열이면 인덱스 문자열이 문자열 순서(`0 1 10 11 2`), 객체가 아니거나 JSON이 아니면 빈 배열
-check('parseRuntimes', parseRuntimes as never, [
-    [['{"runsc":{},"runc":{},"\\uff5e":{},"😀":{},"io.containerd.runc.v2":{},"Runc":{}}'], ['Runc', 'io.containerd.runc.v2', 'runc', 'runsc', '😀', '\uff5e']],
-    [['{"b":1,"10":1,"9":1,"2":1,"a":1}'], ['10', '2', '9', 'a', 'b']],
-    [['[1,2,3,4,5,6,7,8,9,10,11]'], ['0', '1', '10', '2', '3', '4', '5', '6', '7', '8', '9']],
-    [['null'], []],
-    [['"x"'], []],
-    [['5'], []],
-    [['true'], []],
-    [['{'], []],
-    [[''], []],
-    [['  '], []],
-    [['{}'], []],
-    [['\ufeff{}'], []],
-    [['{"a":1,"a":2}'], ['a']],
-]);
-
 // 마지막 줄 끝의 `:숫자`. 0·없음은 던지고(메시지에 `JSON.stringify`한 출력), 아주 큰 수는 Infinity
 check('parseHostPort', parseHostPort as never, [
     [['0.0.0.0:3000\n[::]:3001\n'], 3001],
@@ -602,14 +585,12 @@ describe('의도한 차이', () => {
     expect(() => parseHostContainers('[' + nulKey + ']')).toThrow();
     expect(parseEgressDenial('{"edge":"egress","decision":"deny","host":"x","at":"y","\\u0000k":1}')).toBeUndefined();
     expect(egressAuditExcerpt(['{"edge":"egress","decision":"deny","host":"x","\\u0000k":1}'])).toEqual([]);
-    expect(parseRuntimes('{"\\u0000k":{}}')).toEqual([]);
     expect(() => parseContainerStates('{"Service":"a","State":"running","\\u0000k":1}')).toThrow();
   });
 
   it('중첩이 2000단계를 넘는 JSON은 읽지 않는다(옛 TS는 훨씬 깊어도 읽었다)', () => {
     const deep = '['.repeat(2100) + ']'.repeat(2100);
     expect(() => parseInspectOutput(deep)).toThrow();
-    expect(parseRuntimes(deep)).toEqual([]);
     const ok = '['.repeat(1500) + ']'.repeat(1500);
     expect(parseInspectOutput(ok).length).toBe(1);
   });

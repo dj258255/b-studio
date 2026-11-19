@@ -35,8 +35,6 @@ export interface LoadRunPlan {
   network: string;
   sandboxId: string;
   threads: number;
-  /** 샌드박스 컨테이너에 쓰는 Docker 런타임(gVisor 등). 서비스와 같은 격리로 돌린다 */
-  runtime?: string;
 }
 
 /**
@@ -59,7 +57,6 @@ export function loadRunArgs(plan: LoadRunPlan): string[] {
     '--cap-drop', 'ALL',
     '--security-opt', 'no-new-privileges',
     '--user', '65534:65534',
-    ...(plan.runtime ? ['--runtime', plan.runtime] : []),
     LOAD_RUNNER_IMAGE,
     'node', '--input-type=module', '-',
   ];

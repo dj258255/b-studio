@@ -252,11 +252,4 @@ describe('create 실패 정리(트러블슈팅 194)', () => {
     expect(await readdir(tmp)).toEqual([]);
   });
 
-  it('런타임이 등록돼 있지 않으면 작업 폴더를 만들기 전에 거절한다', async () => {
-    const fake = await fakeDocker({ info: { out: '{"runc":{}}\n' } });
-    const tmp = await privateTmp(fake);
-    const provider = new LocalDockerProvider({ dockerBin: fake.bin, runtime: 'runsc' });
-    await expect(provider.create(project)).rejects.toThrow("컨테이너 런타임 'runsc'이 Docker 데몬에 등록되지 않았습니다 (등록된 런타임: runc)");
-    expect(await readdir(tmp)).toEqual([]);
-  });
 });

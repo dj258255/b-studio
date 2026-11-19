@@ -17,11 +17,11 @@ import { verifyError } from './verify-containers';
  * override는 **JSON**으로 쓴다(YAML 1.2는 JSON을 포함하고 compose가 읽는다). 파일 이름은 `compose.override.yaml` 그대로다
  */
 
-export type OverrideSettings = { edgeScript: string; runtime: string | undefined; hostPorts: Record<string, number> };
+export type OverrideSettings = { edgeScript: string; hostPorts: Record<string, number> };
 
 /** `buildOverride`의 입력에서 마스크만 뺀 것. 마스크는 Rust가 얹는다 */
-export function overrideInputJson(project: LoadedProject, sandboxId: string, { edgeScript, runtime, hostPorts }: OverrideSettings): string {
-  return encodeNative({ ...nativeProject(project), sandboxId, edgeScript, runtime, hostPorts }) ?? 'null';
+export function overrideInputJson(project: LoadedProject, sandboxId: string, { edgeScript, hostPorts }: OverrideSettings): string {
+  return encodeNative({ ...nativeProject(project), sandboxId, edgeScript, hostPorts }) ?? 'null';
 }
 
 function plainAssets(assets: readonly EvaluationAssetCopy[]) {

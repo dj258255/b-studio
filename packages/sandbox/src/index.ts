@@ -2,7 +2,7 @@ export * from './types';
 export * from './errors';
 export * from './readiness';
 export { stripAnsi } from './ansi';
-export { describeDockerFailure, DOCKER_OUT_OF_SPACE, LocalDockerProvider, runtimeFromEnv, type LocalDockerProviderOptions } from './docker/compose-provider';
+export { describeDockerFailure, DOCKER_OUT_OF_SPACE, LocalDockerProvider, type LocalDockerProviderOptions } from './docker/compose-provider';
 export {
   findSandboxLeftovers,
   pruneSandboxLeftovers,

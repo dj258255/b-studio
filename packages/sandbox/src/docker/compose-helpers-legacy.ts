@@ -22,10 +22,6 @@ export function splitUpArgs(args: readonly string[]): { create: string[]; servic
   };
 }
 
-export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return env.B_STUDIO_CONTAINER_RUNTIME?.trim() || undefined;
-}
-
 export function sandboxBuildNoCache(env: NodeJS.ProcessEnv = process.env): boolean {
   const value = env.B_STUDIO_SANDBOX_BUILD_NO_CACHE?.trim().toLowerCase();
   return value === '1' || value === 'true';

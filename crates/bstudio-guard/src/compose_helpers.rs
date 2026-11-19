@@ -54,11 +54,6 @@ pub fn split_up_args(args: &[String]) -> UpArgs {
     UpArgs { create, services, by_id }
 }
 
-/// 스튜디오 서버·CLI 환경 변수 `B_STUDIO_CONTAINER_RUNTIME`의 값. 격리 수준은 프로젝트가 아니라 운영자가 정한다
-pub fn runtime_from_env(value: Option<&str>) -> Option<String> {
-    value.map(js::trim).filter(|v| !v.is_empty()).map(str::to_owned)
-}
-
 /// `B_STUDIO_SANDBOX_BUILD_NO_CACHE`의 값이 `1`이나 `true`(대소문자 무관)이면 이 샌드박스 프로젝트의 이미지를 레이어 캐시 없이 빌드하고
 /// 스냅샷도 쓰지 않는다. `docker builder prune`처럼 다른 프로젝트의 빌드 캐시까지 지우지 않는다 — 이 샌드박스에만 적용된다.
 /// JS의 `toLowerCase`가 ASCII `1`·`true`로 접는 비ASCII 글자는 없으므로 ASCII 소문자화로 같다
@@ -109,11 +104,7 @@ mod tests {
     }
 
     #[test]
-    fn 런타임과_캐시_환경_변수를_읽는다() {
-        assert_eq!(runtime_from_env(Some("  runsc ")), Some("runsc".into()));
-        assert_eq!(runtime_from_env(Some("   ")), None);
-        assert_eq!(runtime_from_env(Some("")), None);
-        assert_eq!(runtime_from_env(None), None);
+    fn 캐시_환경_변수를_읽는다() {
         for yes in ["1", "true", " TRUE ", "True\n"] {
             assert!(sandbox_build_no_cache(Some(yes)), "{yes:?}");
         }

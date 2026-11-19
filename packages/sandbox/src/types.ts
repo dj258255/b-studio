@@ -374,7 +374,7 @@ export interface InfraCheckResult {
 /** 샌드박스를 만드는 구현체. 로컬 Docker → 사내 Kubernetes 등으로 교체할 수 있다 */
 export interface SandboxProvider {
   readonly name: string;
-  /** 컨테이너 격리 런타임 (예: runsc, gvisor). 화면에 격리 수준을 표시할 때 쓴다 */
+  /** 격리 표시 (예: Kubernetes RuntimeClass). 화면에 격리 수준을 표시할 때 쓴다 */
   readonly isolation?: string;
   create(project: LoadedProject, options?: CreateSandboxOptions): Promise<Sandbox>;
   /**

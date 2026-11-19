@@ -7,11 +7,11 @@ import { execChecked } from '../exec-checked';
 import { assertSandboxId } from '../sandbox-id';
 import { externalCallScript } from './external-call-legacy';
 import { removeEvaluationAssets } from './evaluation-assets';
-import { parseContainerState, parseRuntimes } from './format';
+import { parseContainerState } from './format';
 import { loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner-legacy';
 
 /**
- * A4c-3c 이전의 `removeSandboxImages`·`LocalDockerProvider.cleanup`·`LocalDockerSandbox.destroy`·`callExternal`·`runLoad`·`assertRuntime`(차등 시험의 기준값).
+ * A4c-3c 이전의 `removeSandboxImages`·`LocalDockerProvider.cleanup`·`LocalDockerSandbox.destroy`·`callExternal`·`runLoad`(차등 시험의 기준값).
  * 지금 구현은 Rust(crates/bstudio-io/src/lifecycle_io.rs)다. 클래스의 비공개 메서드는 컨텍스트 객체로 풀어 받는다. 이 파일은 견주는 시험만 쓴다.
  * 견주는 TS를 지우는 PR(4g)에서 함께 지운다.
  */
@@ -55,7 +55,6 @@ export interface LegacyLifecycleContext {
   edgeService: string;
   external: ReadonlyArray<readonly [string, unknown]>;
   managedPort: (name: string) => number;
-  runtime?: string;
   sandboxNetwork: string;
   runnerScriptPath: string;
   /** 옛 `#loadRunner`·`#daemonCpus`(상태) */
@@ -104,7 +103,7 @@ export async function runLoadLegacy(ctx: LegacyLifecycleContext, request: LoadRe
   const name = `${ctx.id}-load-${randomBytes(4).toString('hex')}`;
   const script = loadScript(await ctx.loadCache.runner, loadConfig(request, { port, threads }));
   const limit = AbortSignal.timeout(ctx.loadLimitMs);
-  const args = loadRunArgs({ name, network: `${ctx.id}_${ctx.sandboxNetwork}`, sandboxId: ctx.id, threads, ...(ctx.runtime ? { runtime: ctx.runtime } : {}) });
+  const args = loadRunArgs({ name, network: `${ctx.id}_${ctx.sandboxNetwork}`, sandboxId: ctx.id, threads });
   const result = await ctx.docker(args, signal ? AbortSignal.any([signal, limit]) : limit, script);
 
   if (signal?.aborted || limit.aborted) {
@@ -119,17 +118,4 @@ export async function runLoadLegacy(ctx: LegacyLifecycleContext, request: LoadRe
   const parsed = parseLoadOutput(result.stdout, request);
   if (!parsed) throw new SandboxError('부하 러너의 결과를 읽지 못했습니다', ctx.redact(result.stdout.trim().split('\n').slice(-3).join('\n')), { platform: true });
   return parsed;
-}
-
-export async function assertRuntimeLegacy(dockerBin: string, runtime: string): Promise<void> {
-  let stdout: string;
-  try {
-    ({ stdout } = await execChecked(dockerBin, ['info', '--format', '{{json .Runtimes}}']));
-  } catch (error) {
-    throw new SandboxError('Docker 데몬 정보를 읽지 못해 컨테이너 런타임을 확인하지 못했습니다', error instanceof Error ? error.message : String(error));
-  }
-  const available = parseRuntimes(stdout);
-  if (!available.includes(runtime)) {
-    throw new SandboxError(`컨테이너 런타임 '${runtime}'이 Docker 데몬에 등록되지 않았습니다 (등록된 런타임: ${available.join(', ') || '없음'})`);
-  }
 }

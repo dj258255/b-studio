@@ -30,12 +30,11 @@ export function buildOverride(
   sandboxId: string,
   {
     edgeScript = '',
-    runtime,
     hostPorts = {},
     gitMask = {},
-  }: { edgeScript?: string; runtime?: string; hostPorts?: Record<string, number>; gitMask?: Readonly<Record<string, readonly MaskVolume[]>> } = {},
+  }: { edgeScript?: string; hostPorts?: Record<string, number>; gitMask?: Readonly<Record<string, readonly MaskVolume[]>> } = {},
 ): ComposeOverride {
-  return JSON.parse(native.buildOverride(encodeNative({ ...nativeProject(project), sandboxId, edgeScript, runtime, hostPorts, gitMask }))) as ComposeOverride;
+  return JSON.parse(native.buildOverride(encodeNative({ ...nativeProject(project), sandboxId, edgeScript, hostPorts, gitMask }))) as ComposeOverride;
 }
 
 /**
@@ -65,11 +64,6 @@ export function parseEgressDenial(text: string): EgressDenial | undefined {
  */
 export function egressAuditExcerpt(lines: readonly string[], max = 5): string[] {
   return native.egressAuditExcerpt([...lines], max);
-}
-
-/** `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다 */
-export function parseRuntimes(stdout: string): string[] {
-  return native.parseRuntimes(stdout);
 }
 
 /** `docker compose port <service> <port>` 출력에서 호스트 포트를 읽는다 */
