@@ -1,4 +1,4 @@
-import { chmod, lstat, mkdir, mkdtemp, readdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -30,14 +30,9 @@ afterEach(async () => {
 });
 
 const allBytes = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
-const outDir = async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), 'checkpoint-exec-out-'));
-  cleanup.push(dir);
-  return dir;
-};
 
 describe('체크포인트 실행의 바깥 동작(git·tar)', () => {
-  it('바이너리 파일은 blobAt·exportTree 모두 바이트 그대로 나온다', async () => {
+  it('바이너리 파일은 blobAt이 바이트 그대로 돌려준다', async () => {
     await writeFile(path.join(root, 'all.bin'), allBytes);
     await writeFile(path.join(root, 'bad-utf8.txt'), Buffer.from([0x61, 0xff, 0xfe, 0x62]));
     const store = new CheckpointStore(root);
@@ -45,10 +40,8 @@ describe('체크포인트 실행의 바깥 동작(git·tar)', () => {
     const blob = await store.blobAt('all.bin', start.sha);
     expect(blob.kind).toBe('file');
     expect(blob.kind === 'file' && Buffer.compare(blob.content, allBytes)).toBe(0);
-    const out = await outDir();
-    await store.exportTree(start.sha, out);
-    expect(Buffer.compare(await readFile(path.join(out, 'all.bin')), allBytes)).toBe(0);
-    expect(Buffer.compare(await readFile(path.join(out, 'bad-utf8.txt')), Buffer.from([0x61, 0xff, 0xfe, 0x62]))).toBe(0);
+    const bad = await store.blobAt('bad-utf8.txt', start.sha);
+    expect(bad.kind === 'file' && Buffer.compare(bad.content, Buffer.from([0x61, 0xff, 0xfe, 0x62]))).toBe(0);
   });
 
   it('UTF-8이 아닌 바이트가 든 파일을 문자열로 읽으면 U+FFFD로 바뀐다(옛 execFile의 utf8 디코딩)', async () => {
@@ -79,45 +72,6 @@ describe('체크포인트 실행의 바깥 동작(git·tar)', () => {
     expect(error).toBeInstanceOf(CheckpointError);
     expect(error.message).toMatch(/^git diff 실패: /);
     expect(error.message).not.toContain('시간 초과');
-  });
-
-  it('exportTree: 실행 비트와 심볼릭 링크를 보존하고 dest 밖에는 아무것도 쓰지 않는다', async () => {
-    await mkdir(path.join(root, 'bin'), { recursive: true });
-    await writeFile(path.join(root, 'bin/run.sh'), '#!/bin/sh\necho hi\n');
-    await chmod(path.join(root, 'bin/run.sh'), 0o755);
-    await writeFile(path.join(root, 'plain.txt'), 'plain\n');
-    await symlink('plain.txt', path.join(root, 'rel-link'));
-    await symlink('/nonexistent-outside-target/secret', path.join(root, 'abs-link'));
-    const store = new CheckpointStore(root);
-    const start = await store.init();
-    const parent = await outDir();
-    const dest = path.join(parent, 'dest');
-    await store.exportTree(start.sha, dest);
-    expect((await lstat(path.join(dest, 'bin/run.sh'))).mode & 0o111).not.toBe(0);
-    expect((await lstat(path.join(dest, 'plain.txt'))).mode & 0o111).toBe(0);
-    expect((await lstat(path.join(dest, 'rel-link'))).isSymbolicLink()).toBe(true);
-    expect(await readlink(path.join(dest, 'rel-link'))).toBe('plain.txt');
-    expect(await readlink(path.join(dest, 'abs-link'))).toBe('/nonexistent-outside-target/secret');
-    expect(await readdir(parent)).toEqual(['dest']);
-  });
-
-  it('exportTree: 큰 파일(5MB)도 파이프로 끝까지 풀린다', async () => {
-    const big = Buffer.alloc(5 * 1024 * 1024, 7);
-    await writeFile(path.join(root, 'big.bin'), big);
-    const store = new CheckpointStore(root);
-    const start = await store.init();
-    const out = await outDir();
-    await store.exportTree(start.sha, out);
-    expect(Buffer.compare(await readFile(path.join(out, 'big.bin')), big)).toBe(0);
-  });
-
-  it('exportTree: git archive가 실패하면 "체크포인트를 꺼내지 못했습니다"와 종료 코드를 알린다', async () => {
-    const store = new CheckpointStore(root);
-    const start = await store.init();
-    // resolve는 통과하지만 archive가 실패하게: dest가 파일이면 tar가 실패한다
-    const parent = await outDir();
-    await writeFile(path.join(parent, 'file'), 'x');
-    await expect(store.exportTree(start.sha, path.join(parent, 'file', 'sub'))).rejects.toThrow();
   });
 
   it('check-ignore: 개행·유니코드 이름의 중첩 저장소는 무시 여부를 stdin(NUL 구분)으로 정확히 판단한다', async () => {
@@ -166,7 +120,7 @@ case " $* " in *" check-ignore "*) tee "${dir}/stdin" | exec "${realGit}" "$@" ;
     try {
       const store = new CheckpointStore(root, { gitBin: bin });
       const start = await store.init();
-      await store.exportTree(start.sha, await outDir());
+      await store.blobAt('plain.txt', start.sha);
     } finally {
       delete process.env.GIT_DIR;
     }
@@ -174,7 +128,6 @@ case " $* " in *" check-ignore "*) tee "${dir}/stdin" | exec "${realGit}" "$@" ;
     const args = lines.filter((line) => line.startsWith('ARGS:'));
     expect(args.length).toBeGreaterThan(3);
     for (const line of args) expect(line).toMatch(/^ARGS: \[-c\] \[core\.hooksPath=\/dev\/null\] \[-c\] \[core\.fsmonitor=false\] \[-c\] \[core\.attributesFile=\/dev\/null\] \[-C\] /);
-    expect(args.some((line) => line.includes('[archive] [--format=tar]'))).toBe(true);
     for (const line of lines.filter((item) => item.startsWith('ENV:'))) expect(line).toBe('ENV:0|0|1|unset');
   });
 
@@ -211,38 +164,5 @@ case " $* " in *" check-ignore "*) tee "${dir}/stdin" | exec "${realGit}" "$@" ;
     );
     expect(error.message).toMatch(/^git diff 실패: fatal: /);
     expect(error.message).not.toContain('hunter2');
-  });
-
-  it('exportTree: git archive만 실패해도(종료 코드 9) 알린다', async () => {
-    const { bin } = await spyGit('case " $* " in *" archive "*) echo "archive-broke" 1>&2; exit 9 ;; esac');
-    const store = new CheckpointStore(root, { gitBin: bin });
-    const start = await store.init();
-    const error = await store.exportTree(start.sha, await outDir()).then(
-      () => expect.unreachable(),
-      (e: unknown) => e as CheckpointError,
-    );
-    expect(error.message).toContain('archive-broke');
-    expect(error.message).toContain('git archive이(가) 9로 끝났습니다');
-  });
-
-  it('exportTree: tar는 `-x --no-same-owner -C dest`로 불리고, tar만 실패해도(종료 코드 5) 알린다', async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), 'checkpoint-exec-faketar-'));
-    cleanup.push(dir);
-    const argsFile = path.join(dir, 'tar-args');
-    await writeFile(path.join(dir, 'tar'), `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}"\ncat > /dev/null\necho tar-broke 1>&2\nexit 5\n`, { mode: 0o755 });
-    const store = new CheckpointStore(root);
-    const start = await store.init();
-    const dest = await outDir();
-    const savedPath = process.env.PATH;
-    process.env.PATH = `${dir}${path.delimiter}${savedPath ?? ''}`;
-    const error = await store.exportTree(start.sha, dest).then(
-      () => expect.unreachable(),
-      (e: unknown) => e as CheckpointError,
-    );
-    process.env.PATH = savedPath;
-    expect(error.message).toContain('tar-broke');
-    expect(error.message).toContain('tar이(가) 5로 끝났습니다');
-    expect(error.message).not.toContain('git archive이(가)');
-    expect((await readFile(argsFile, 'utf8')).split('\n').filter(Boolean)).toEqual(['-x', '--no-same-owner', '-C', dest]);
   });
 });

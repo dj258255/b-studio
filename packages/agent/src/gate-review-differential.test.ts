@@ -178,7 +178,6 @@ function genWorkflow(g: Gen): any {
   if (g.chance(0.4)) w.evaluationAssets = g.some(POLICY, 3);
   if (g.chance(0.5)) w.deniedCommands = g.some(POLICY, 3);
   if (g.chance(0.4)) w.requireApprovalFor = g.some(POLICY, 3);
-  if (g.chance(0.5)) w.releaseRequires = g.some(POLICY, 3);
   if (g.chance(0.4)) w.allowedTools = g.some(['read_file', 'write_file', 'run', '😀', '1'], 4);
   if (g.chance(0.5)) w.maxChangedFiles = g.pick(NUMBERS);
   if (g.chance(0.4)) w.maxTurns = g.pick([20, 300]);
@@ -208,7 +207,7 @@ function mutateWorkflow(g: Gen, started: any): any {
         if (latest[field]?.length > 1) latest[field].reverse();
         break;
       case 5: {
-        const key = g.pick(['protectedPaths', 'evaluationAssets', 'deniedCommands', 'requireApprovalFor', 'releaseRequires'] as const);
+        const key = g.pick(['protectedPaths', 'evaluationAssets', 'deniedCommands', 'requireApprovalFor'] as const);
         if (latest[key]?.length) latest[key].splice(g.int(latest[key].length), 1);
         else latest[key] = g.some(POLICY, 3);
         break;
@@ -265,7 +264,7 @@ function wrongWorkflow(g: Gen, w: any): { workflow: any; kind: Kind } {
       copy.tests = [{ name: g.pick(['\ud800', 'a\udc00', '\ud800x']), service: 's' }];
       return { workflow: copy, kind: 'surrogate' };
     case 7:
-      copy.releaseRequires = ['\ud800'];
+      copy.requireApprovalFor = ['\ud800'];
       return { workflow: copy, kind: 'surrogate' };
     case 8:
       copy.deniedCommands = [5, null, 'x', Number.NaN, true];

@@ -91,7 +91,6 @@ services:
   api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
 workflow:
   required: [plan, implement, run, checkpoint]
-  releaseRequires: [checkpoint]
 review:
   auto: false
 `,

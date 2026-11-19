@@ -105,10 +105,6 @@ export function workflowStages(project: LoadedProject): readonly WorkflowStage[]
   return native.workflowStages(workflow?.required, workflow?.pageChecks?.length ?? 0, workflow?.tests?.length ?? 0, workflow?.concurrencyChecks?.length ?? 0, workflow?.loadChecks?.length ?? 0) as WorkflowStage[];
 }
 
-export function workflowReleaseRequirements(project: LoadedProject): readonly WorkflowStage[] {
-  return native.workflowReleaseRequirements(project.spec.workflow?.releaseRequires) as WorkflowStage[];
-}
-
 /** 체크포인트 커밋 본문 끝에 남기는 트레일러. 스튜디오를 다시 켜도 어떤 검증을 통과한 체크포인트인지 Git에서 읽을 수 있다 */
 export const WORKFLOW_TRAILER = 'Workflow-Passed';
 
@@ -118,9 +114,8 @@ export function formatWorkflowTrailer(stages: readonly WorkflowStage[]): string 
 
 /**
  * 가볍게 확인(light)했거나 문서만 바꿔(docs) 검증 게이트를 거치지 않은 체크포인트임을 커밋 본문 끝에 남기는 트레일러.
- * 배포 화면과 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-096).
- * unverified는 요청 사이에 쌓인 변경을 게이트 없이 남긴 "직접 수정" 체크포인트다. releaseRequires를 적지 않은 기본 설정에서도
- * 배포하지 않는다(#772)
+ * 요구사항 "검증됨" 판정이 이 값으로 이 체크포인트를 게이트 증거로 세지 않는다(ADR-096).
+ * unverified는 요청 사이에 쌓인 변경을 게이트 없이 남긴 "직접 수정" 체크포인트다(#772)
  */
 export const WORKFLOW_VERIFY_TRAILER = 'Workflow-Verify';
 
@@ -168,21 +163,6 @@ export function isDocCheckpointPath(file: string): boolean {
  */
 export function parseWorkflowTrailerValues(values: readonly string[]): WorkflowStage[] | undefined {
   return (native.workflowParsePassedTrailer([...values]) ?? undefined) as WorkflowStage[] | undefined;
-}
-
-/**
- * 배포 전에 체크포인트가 releaseRequires를 채웠는지 본다. 빠진 단계를 돌려준다.
- * checkpoint는 체크포인트가 있다는 것 자체로 채워진다. 검증 기록이 없는 체크포인트는 다른 단계를 하나도 채우지 못한다.
- * 예외: releaseRequires를 적지 않은 기본 설정에서 게이트를 거치지 않은 직접 수정 체크포인트(verify: 'unverified')는 checkpoint도
- * 채우지 못한다(#772). 기본값 [checkpoint]가 "체크포인트면 무엇이든"이라 게이트 없는 커밋도 배포되던 자리다. 직접 적은 조건은 그대로 따른다
- */
-export function releaseBlockers(project: LoadedProject, passedStages: readonly WorkflowStage[] | undefined, verify?: VerifyTrailer): WorkflowStage[] {
-  const declared = project.spec.workflow?.releaseRequires;
-  // 통과로 이어지는 같음 비교라 양쪽을 단사 인코딩해 보내고 위치로 돌려받는다. -1은 checkpoint(게이트를 거치지 않은 직접 수정 체크포인트)
-  const positions = native.workflowReleaseBlockers(declared?.map(encodeLoneSurrogates), declared !== undefined, passedStages?.map(encodeLoneSurrogates), verify);
-  // 위치로 원래 글자를 꺼낸다(Rust가 돌려준 글자는 짝 없는 서로게이트가 U+FFFD가 된다)
-  const requirements = declared ?? ['checkpoint'];
-  return positions.map((position) => (position < 0 ? 'checkpoint' : requirements[position]!));
 }
 
 /** 게이트가 통과시킨 단계와 필수 단계를 비교해 빠진 검증 단계를 돌려준다 */

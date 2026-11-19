@@ -16,10 +16,8 @@ import {
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
   protectedPathsFor,
-  releaseBlockers,
   reviewChanges,
   uncoveredChangeWarnings,
-  workflowReleaseRequirements,
   workflowStages,
 } from './workflow';
 import { legacy } from './workflow-legacy';
@@ -210,7 +208,6 @@ function projectCase(g: Gen, withLone = false): ProjectCase {
   if (g.chance(0.3)) workflow.protectedPaths = g.list(0, 3, () => g.pick(['.env', 'infra', 'apps/web', 'STUDIO.YAML', 'a/', './x', '..', '', maybeLone(g, withLone, 'p'), 'é', 'docs/README.md']));
   if (g.chance(0.2)) workflow.evaluationAssets = g.list(0, 2, () => g.pick(['tests', 'apps/api/src/test', 'grader.sh', 'e\u0301', maybeLone(g, withLone, 't')]));
   if (g.chance(0.3)) workflow.maxChangedFiles = g.pick([1, 2, 3, 5, 10]);
-  if (g.chance(0.3)) workflow.releaseRequires = stageList(1, 4);
   if (g.chance(0.3)) workflow.maxTurns = g.pick([1, 60, 300]);
   const fileParts = ['app/page.tsx', 'app/shorts/page.tsx', 'app/[id]/page.tsx', 'src/app/(g)/p/page.tsx', 'lib/a.test.ts', 'x.spec.mjs', 'vitest.config.mts', 'jest.config.js', '__tests__/a.ts', 'src/__tests__/b.ts', 'src/main.ts', 'a/b.test.tsx', 'x.test.json', 'app/layout.tsx', 'e2e/playwright.config.ts'];
   const roots = [...SERVICE_PATHS, ...(managed ?? []).flatMap((m) => [m.path, ...(m.includes ?? [])])];
@@ -330,28 +327,16 @@ describe('워크플로 차등 시험(옛 TS와 Rust 껍데기)', () => {
     expect(docs.allowedDifferent).toBeGreaterThan(0);
   });
 
-  it('단계·배포 요구·보호 경로·턴 상한', { timeout: 300_000 }, () => {
+  it('단계·보호 경로·턴 상한', { timeout: 300_000 }, () => {
     const stages = compare('workflowStages', (g) => projectCase(g), (i) => legacy.workflowStages(toProject(i)), (i) => workflowStages(toProject(i)), classifyList);
     expect(stages.distribution['값']).toBeGreaterThan(stages.cases / 2);
-    compare('workflowReleaseRequirements', (g) => projectCase(g), (i) => legacy.workflowReleaseRequirements(toProject(i)), (i) => workflowReleaseRequirements(toProject(i)), classifyList);
     compare('protectedPathsFor', (g) => projectCase(g, true), (i) => legacy.protectedPathsFor(i.workflow as never), (i) => protectedPathsFor(i.workflow as never), classifyList);
     const turns = compare('maxTurnsFor', (g) => projectCase(g), (i) => legacy.maxTurnsFor(toProject(i), i.override), (i) => maxTurnsFor(toProject(i), i.override), (a) => String(valueOf(a)));
     expect(turns.distribution['undefined']).toBeGreaterThan(0);
     expect(turns.distribution['NaN']).toBeGreaterThan(0);
   });
 
-  it('배포 막음·빠진 검증 단계: 열린 쪽 뒤집힘 0', { timeout: 300_000 }, () => {
-    const blockers = compare(
-      'releaseBlockers',
-      (g) => projectCase(g, true),
-      (i) => legacy.releaseBlockers(toProject(i), i.passed as never, i.verify),
-      (i) => releaseBlockers(toProject(i), i.passed as never, i.verify),
-      classifyList,
-      { opened: lostItem },
-    );
-    expect(blockers.opened + blockers.openedWithLone).toBe(0);
-    expect(blockers.distribution['값']).toBeGreaterThan(blockers.cases / 10);
-    expect(blockers.distribution['빈 결과']).toBeGreaterThan(blockers.cases / 10);
+  it('빠진 검증 단계: 열린 쪽 뒤집힘 0', { timeout: 300_000 }, () => {
     const missing = compare(
       'missingVerificationStages',
       (g) => projectCase(g, true),
@@ -453,8 +438,6 @@ describe('워크플로 차등 시험(옛 TS와 Rust 껍데기)', () => {
     });
 
     it('판정을 빼거나 넓힌 옛 구현', { timeout: 300_000 }, () => {
-      expect(detects((g) => { const i = projectCase(g); return { a: legacy.releaseBlockers(toProject(i), i.passed as never, i.verify).slice(1), b: releaseBlockers(toProject(i), i.passed as never, i.verify) }; })).toBeGreaterThan(0);
-      expect(detects((g) => { const i = projectCase(g); return { a: legacy.releaseBlockers(toProject(i), i.passed as never, undefined), b: releaseBlockers(toProject(i), i.passed as never, i.verify) }; })).toBeGreaterThan(0);
       expect(detects((g) => { const i = projectCase(g); return { a: legacy.missingVerificationStages(toProject(i), new Set(['run', 'test', 'review', 'plan'] as never[])), b: missingVerificationStages(toProject(i), new Set((i.passed ?? []) as never[])) }; })).toBeGreaterThan(0);
       expect(detects((g) => { const i = projectCase(g); return { a: legacy.reviewChanges(toProject(i), i.files).filter((c) => c.name !== 'protected-paths'), b: reviewChanges(toProject(i), i.files) }; })).toBeGreaterThan(0);
       expect(detects((g) => { const i = projectCase(g); return { a: legacy.reviewChanges(toProject(i), i.files.slice(1)), b: reviewChanges(toProject(i), i.files) }; })).toBeGreaterThan(0);

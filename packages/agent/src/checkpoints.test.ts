@@ -331,22 +331,6 @@ describe('CheckpointStore', () => {
     expect(await new CheckpointStore(root, { gitDir }).list()).toHaveLength(1);
   });
 
-  it('체크포인트의 기록한 파일만 폴더로 꺼내고, 남기지 않은 변경은 넣지 않는다', async () => {
-    const store = new CheckpointStore(root);
-    const start = await store.init();
-    await write('api/src/Order.java', 'class Order { String memo; }\n');
-    const memo = (await store.commit('요청: 메모'))!;
-    await write('api/src/Draft.java', 'class Draft {}\n');
-    const out = await mkdtemp(path.join(tmpdir(), 'checkpoint-export-'));
-
-    expect(await store.exportTree(start.sha, path.join(out, 'start'))).toBe(path.join(out, 'start'));
-    expect(await readFile(path.join(out, 'start/api/src/Order.java'), 'utf8')).toBe('class Order {}\n');
-    await store.exportTree(memo.shortSha, path.join(out, 'memo'));
-    expect(await readFile(path.join(out, 'memo/api/src/Order.java'), 'utf8')).toBe('class Order { String memo; }\n');
-    await expect(readFile(path.join(out, 'memo/api/src/Draft.java'), 'utf8')).rejects.toThrow();
-    await expect(store.exportTree('not-a-sha', path.join(out, 'bad'))).rejects.toThrow(CheckpointError);
-  });
-
   it('지금 상태를 첫 체크포인트로 남기고 샌드박스 생성물은 제외한다', async () => {
     await mkdir(path.join(root, 'web/node_modules/next'), { recursive: true });
     await write('web/node_modules/next/index.js', '');
@@ -1917,7 +1901,7 @@ describe('작업 복사본의 git 설정을 펼쳐 읽고 더 넓게 막는다 (
 });
 
 describe('b-studio의 git은 필터·속성·환경으로 내용이 바뀌지 않는다 (이슈 #706)', () => {
-  it('.git/info/attributes로 내보내기에서 파일을 빼거나 바꾸려 하면 내보내지 않는다', async () => {
+  it('.git/info/attributes로 git이 내용을 바꾸거나 뺄 수 있으면 지문을 읽지 않는다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
     await write('api/src/Order.java', 'class Order { String memo; }\n');
@@ -1925,8 +1909,7 @@ describe('b-studio의 git은 필터·속성·환경으로 내용이 바뀌지 �
     await mkdir(path.join(root, '.git/info'), { recursive: true });
     await writeFile(path.join(root, '.git/info/attributes'), 'api/src/Order.java export-ignore\n');
 
-    const out = path.join(root, '..', `${path.basename(root)}.export`);
-    await expect(store.exportTree(checkpoint.sha, out)).rejects.toThrow(/attributes/);
+    await expect(store.stagedFingerprints(['api/src/Order.java'])).rejects.toThrow(/attributes/);
   });
 
   it('전역 속성 파일(core.attributesFile)이 거는 clean 필터는 b-studio의 커밋에 쓰이지 않는다', async () => {

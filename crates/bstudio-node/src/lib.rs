@@ -3040,20 +3040,6 @@ pub fn workflow_stages(required: Option<Vec<String>>, page_checks: u32, tests: u
 }
 
 #[napi]
-pub fn workflow_release_requirements(release_requires: Option<Vec<String>>) -> Vec<String> {
-    wf::workflow_release_requirements(release_requires.as_deref())
-}
-
-/// 요구 목록에서 빠진 단계의 위치. `-1`은 `checkpoint`(게이트를 거치지 않은 직접 수정 체크포인트). 입력은 `encodeLoneSurrogates`한 꼴
-#[napi]
-pub fn workflow_release_blockers(requires: Option<Vec<String>>, declared: bool, passed: Option<Vec<String>>, verify: Option<String>) -> Vec<i32> {
-    match wf::release_blockers(requires.as_deref(), declared, passed.as_deref(), verify.as_deref()) {
-        wf::Blockers::Checkpoint => vec![-1],
-        wf::Blockers::Missing(indices) => indices.into_iter().map(|index| index as i32).collect(),
-    }
-}
-
-#[napi]
 pub fn workflow_missing_verification_stages(stages: Vec<String>, passed: Vec<String>) -> Vec<u32> {
     wf::missing_verification_stages(&stages, &passed).into_iter().map(|index| index as u32).collect()
 }
@@ -3734,25 +3720,6 @@ pub fn run_command_bytes(
             overflowed: output.overflowed,
             spawn_error: output.spawn_error,
         })
-    };
-    AsyncBlockBuilder::new(future).build(&env)
-}
-
-#[napi(object)]
-pub struct ArchiveExtractResult {
-    pub git_code: Option<i32>,
-    pub tar_code: Option<i32>,
-    pub stderr: Buffer,
-    pub spawn_error: Option<String>,
-}
-
-/// `git_bin git_args | tar -x --no-same-owner -C dest`
-#[napi]
-pub fn run_archive_extract(env: Env, git_bin: String, git_args: Vec<String>, git_env: Option<HashMap<String, String>>, dest: String) -> Result<AsyncBlock<ArchiveExtractResult>> {
-    let pairs = env_pairs(git_env);
-    let future = async move {
-        let output = process_bytes::run_archive_extract(&git_bin, &git_args, pairs.as_deref(), &dest).await;
-        Ok(ArchiveExtractResult { git_code: output.git_code, tar_code: output.tar_code, stderr: Buffer::from(output.stderr), spawn_error: output.spawn_error })
     };
     AsyncBlockBuilder::new(future).build(&env)
 }

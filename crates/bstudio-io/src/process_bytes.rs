@@ -1,4 +1,4 @@
-//! 바이트 그대로 돌려주는 실행(`run_command_bytes`)과 `git archive | tar -x` 파이프(`run_archive_extract`).
+//! 바이트 그대로 돌려주는 실행(`run_command_bytes`).
 //! 체크포인트(`packages/agent/src/checkpoints.ts`)의 `execFile`·`spawn`을 옮긴 것이다(ADR-195, 4f A1).
 //!
 //! `process::run_command`와 다른 점(옛 `execFile`과 맞추려고 달리했다):
@@ -23,8 +23,6 @@ use crate::process::{read_into, set_env};
 const MAX_BUFFER: usize = 256 * 1024 * 1024;
 /// SIGTERM 뒤 이 시간 안에 안 죽으면 SIGKILL
 const TERM_GRACE: Duration = Duration::from_secs(5);
-/// 파이프 해제의 stderr 상한(스트림마다). 옛 코드는 끝없이 모았다. 새 한계다
-const PIPE_STDERR_LIMIT: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BytesOutput {
@@ -176,58 +174,6 @@ pub async fn run_command_bytes(
     BytesOutput { exit_code, stdout, stderr, aborted, overflowed, spawn_error: None }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipelineOutput {
-    pub git_code: Option<i32>,
-    pub tar_code: Option<i32>,
-    /// git의 stderr 뒤에 tar의 stderr
-    pub stderr: Vec<u8>,
-    pub spawn_error: Option<String>,
-}
-
-/// `git_bin git_args | tar -x --no-same-owner -C dest`. git의 stdout을 tar의 stdin으로 직접 잇는다(파이프, 메모리에 올리지 않는다).
-/// git은 `git_env`로 환경을 통째로 바꾸고 stdin은 닫는다. tar는 환경을 상속한다(옛 코드와 같다).
-/// 시간 제한이 없다(옛 코드와 같다). 던지지 않는다.
-pub async fn run_archive_extract(git_bin: &str, git_args: &[String], git_env: Option<&[(String, String)]>, dest: &str) -> PipelineOutput {
-    let failure = |message: String| PipelineOutput { git_code: None, tar_code: None, stderr: Vec::new(), spawn_error: Some(message) };
-    let mut git_cmd = Command::new(resolve_in_env_path(git_bin, git_env));
-    git_cmd.args(git_args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
-    set_env(&mut git_cmd, git_env);
-    let mut git = match git_cmd.spawn() {
-        Ok(child) => child,
-        Err(error) => return failure(spawn_message(git_bin, &error)),
-    };
-    let git_stdout: Stdio = match git.stdout.take().expect("stdout은 piped다").try_into() {
-        Ok(stdio) => stdio,
-        Err(error) => {
-            let _ = git.start_kill();
-            let _ = git.wait().await;
-            return failure(format!("git 출력을 tar에 잇지 못했습니다: {error}"));
-        }
-    };
-    let mut tar_cmd = Command::new("tar");
-    tar_cmd.args(["-x", "--no-same-owner", "-C", dest]).stdin(git_stdout).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
-    let mut tar = match tar_cmd.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = git.start_kill();
-            let _ = git.wait().await;
-            return failure(spawn_message("tar", &error));
-        }
-    };
-    let git_err = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let tar_err = Arc::new(Mutex::new(Vec::<u8>::new()));
-    let unused = Arc::new(Notify::new());
-    let git_reader = tokio::spawn(read_into(git.stderr.take().expect("stderr은 piped다"), git_err.clone(), unused.clone(), PIPE_STDERR_LIMIT));
-    let tar_reader = tokio::spawn(read_into(tar.stderr.take().expect("stderr은 piped다"), tar_err.clone(), unused, PIPE_STDERR_LIMIT));
-    let (git_status, tar_status) = tokio::join!(git.wait(), tar.wait());
-    let _ = git_reader.await;
-    let _ = tar_reader.await;
-    let mut stderr = git_err.lock().expect("잠금").clone();
-    stderr.extend_from_slice(&tar_err.lock().expect("잠금"));
-    PipelineOutput { git_code: git_status.ok().and_then(|s| s.code()), tar_code: tar_status.ok().and_then(|s| s.code()), stderr, spawn_error: None }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -318,33 +264,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn archive_extract_pipes_git_into_tar_and_reports_both_codes() {
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("dest");
-        std::fs::create_dir(&dest).unwrap();
-        let script = format!("cd {} && printf hello > payload && tar -c payload", dir.path().display());
-        let ok = run_archive_extract("sh", &args(&["-c", &script]), None, dest.to_str().unwrap()).await;
-        assert_eq!((ok.git_code, ok.tar_code), (Some(0), Some(0)));
-        assert_eq!(std::fs::read_to_string(dest.join("payload")).unwrap(), "hello");
-        let bad = run_archive_extract("sh", &args(&["-c", "echo boom 1>&2; exit 9"]), None, dest.to_str().unwrap()).await;
-        assert_eq!(bad.git_code, Some(9));
-        assert!(String::from_utf8_lossy(&bad.stderr).contains("boom"));
-        let missing = run_archive_extract("definitely-not-a-real-binary-xyz", &[], None, dest.to_str().unwrap()).await;
-        assert!(missing.spawn_error.is_some());
-    }
-
-    #[tokio::test]
-    async fn archive_extract_into_a_file_fails_in_tar() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir.path().join("file");
-        std::fs::write(&file, "x").unwrap();
-        let script = format!("cd {} && printf hello > payload && tar -c payload", dir.path().display());
-        let out = run_archive_extract("sh", &args(&["-c", &script]), None, file.join("sub").to_str().unwrap()).await;
-        assert_eq!(out.git_code, Some(0));
-        assert_ne!(out.tar_code, Some(0));
-    }
-
-    #[tokio::test]
     async fn env_replaces_inherited_and_cwd_applies() {
         std::env::set_var("BSTUDIO_BYTES_PARENT", "leak");
         let dir = tempfile::tempdir().unwrap();
@@ -362,19 +281,6 @@ mod tests {
         let text = String::from_utf8_lossy(&out.stdout).into_owned();
         assert!(text.starts_with("none:set:"), "{text}");
         assert!(text.trim_end().ends_with(dir.path().canonicalize().unwrap().to_str().unwrap()), "{text}");
-    }
-
-    #[tokio::test]
-    async fn archive_extract_gives_git_the_replaced_env_and_tar_the_inherited_one() {
-        std::env::set_var("BSTUDIO_ARCHIVE_PARENT", "leak");
-        let dir = tempfile::tempdir().unwrap();
-        let dest = dir.path().join("dest");
-        std::fs::create_dir(&dest).unwrap();
-        let env = vec![("PATH".to_owned(), std::env::var("PATH").unwrap()), ("BSTUDIO_ARCHIVE_CHILD".to_owned(), "set".to_owned())];
-        let script = format!("cd {} && printf '%s:%s' \"${{BSTUDIO_ARCHIVE_PARENT:-none}}\" \"$BSTUDIO_ARCHIVE_CHILD\" > payload && tar -c payload", dir.path().display());
-        let out = run_archive_extract("/bin/sh", &args(&["-c", &script]), Some(&env), dest.to_str().unwrap()).await;
-        assert_eq!((out.git_code, out.tar_code), (Some(0), Some(0)));
-        assert_eq!(std::fs::read_to_string(dest.join("payload")).unwrap(), "none:set");
     }
 
     #[tokio::test]

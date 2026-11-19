@@ -10,13 +10,6 @@ export interface BytesResult {
   spawnError?: string | null;
 }
 
-export interface ArchiveExtractResult {
-  gitCode?: number | null;
-  tarCode?: number | null;
-  stderr: Buffer;
-  spawnError?: string | null;
-}
-
 /**
  * Rust로 옮긴 막는 검사 판정(crates/bstudio-node, ADR-191). 저장소 루트의 `pnpm install`·`pnpm build:native`가 만든다.
  *
@@ -172,7 +165,6 @@ interface NativeGuard {
   /** 새 연결을 받지 않고 열린 연결(처리 중인 것 포함)을 끊고, 끝나면 resolve한다. 모르는 id·이미 닫은 id는 아무 일도 하지 않는다 */
   closeLoopbackServer(id: number): Promise<void>;
   runCommandBytes(bin: string, args: string[], input: Buffer | undefined | null, env: Record<string, string> | undefined | null, cwd: string | undefined | null, maxBuffer: number, signal: AbortSignal | undefined | null): Promise<BytesResult>;
-  runArchiveExtract(gitBin: string, gitArgs: string[], gitEnv: Record<string, string> | undefined | null, dest: string): Promise<ArchiveExtractResult>;
   // ── I/O: 링크 안전 파일 시스템 준비(2단계 2c-1b). 아무것도 재귀로 따라가며 지우지 않는다(링크는 링크만).
   // 오류는 메시지를 담은 Error로 거절된다. 이름을 받는 곳은 한 이름이 아니면(`..`·구분자·NUL·빈 이름) 거부한다
   prepareEvaluationAssetSlot(source: string, kind: 'file' | 'directory', parent: string): Promise<void>;
@@ -889,9 +881,6 @@ interface NativeGuard {
   workflowHasEmptyPassedTrailer(trailers: string[]): boolean;
   workflowHasDocsVerifyTrailer(trailers: string[]): boolean;
   workflowStages(required: string[] | undefined, pageChecks: number, tests: number, concurrencyChecks: number, loadChecks: number): string[];
-  workflowReleaseRequirements(releaseRequires: string[] | undefined): string[];
-  /** 요구 목록에서 빠진 단계의 위치. -1은 checkpoint(게이트를 거치지 않은 직접 수정 체크포인트) */
-  workflowReleaseBlockers(requires: string[] | undefined, declared: boolean, passed: string[] | undefined, verify: string | undefined): number[];
   workflowMissingVerificationStages(stages: string[], passed: string[]): number[];
   workflowProtectedPaths(protectedPaths: string[] | undefined, evaluationAssets: string[] | undefined): string[];
   workflowMaxTurns(json: string): string;

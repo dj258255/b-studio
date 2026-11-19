@@ -96,7 +96,6 @@ services:
   api: { source: managed, template: spring-boot, path: api, port: 8080, preview: openapi }
 workflow:
   required: [plan, implement, run, contract_check, checkpoint]
-  releaseRequires: [checkpoint]
 review:
   auto: false
 ${autoCatchUp === undefined ? '' : `repository:\n  autoCatchUp: ${autoCatchUp}\n`}`;
