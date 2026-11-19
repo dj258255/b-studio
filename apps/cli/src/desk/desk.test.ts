@@ -748,10 +748,10 @@ describe('desk 작업대: 마우스, 배치 기억, 설정(#874)', () => {
 
   it('밖 터미널의 마우스(SGR)를 켜고 나갈 때 끈다. 끄는 설정이면 켜지 않는다', async () => {
     const on = setup();
-    expect(on.io.all).toContain('\x1b[?1000h\x1b[?1006h');
+    expect(on.io.all).toContain('\x1b[?1000h\x1b[?1002h\x1b[?1006h');
     on.io.type('\x02q');
     await on.done;
-    expect(on.io.all).toContain('\x1b[?1006l\x1b[?1000l');
+    expect(on.io.all).toContain('\x1b[?1006l\x1b[?1002l\x1b[?1000l');
     const off = setup(undefined, { mouse: false });
     expect(off.io.all).not.toContain('\x1b[?1000h');
   });
@@ -802,6 +802,154 @@ describe('desk 작업대: 마우스, 배치 기억, 설정(#874)', () => {
     ctx.io.type(click(LEFT_BODY.x, LEFT_BODY.y));
     await tick();
     expect(ctx.client.of('input', 'a').map((call) => call.data)).toEqual([`\x1b[M${String.fromCharCode(32 + 0, 32 + 8, 32 + 4)}`]);
+  });
+
+  describe('드래그나 두 번 눌러 고른 글을 바로 클립보드에(OSC 52)', () => {
+    // 한 칸 화면: 칸은 x=33부터, 몸은 y=2부터
+    const PANE_X = 33;
+    const BODY_Y = 2;
+    const osc52 = (text: string) => `\x1b]52;c;${Buffer.from(text).toString('base64')}\x07`;
+    const motion = (x: number, y: number) => `\x1b[<32;${x + 1};${y + 1}M`;
+
+    async function withText(options: DeskAppOptions = {}) {
+      const ctx = setup(undefined, options);
+      await openFirst(ctx);
+      ctx.client.data('a', 'hello world\r\n에이전트 apps/cli/src/desk.ts 끝');
+      await tick();
+      ctx.io.out = [];
+      return ctx;
+    }
+
+    it('왼쪽 단추로 끌어 놓으면 고른 글을 OSC 52로 보내고 개수를 알린다', async () => {
+      const ctx = await withText();
+      ctx.io.type(click(PANE_X + 2, BODY_Y));
+      ctx.io.type(motion(PANE_X + 5, BODY_Y));
+      await tick();
+      // 끄는 동안 고른 범위는 반전으로 보인다
+      expect(ctx.io.all).toContain(';7m');
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+      ctx.io.type(motion(PANE_X + 7, BODY_Y) + release(PANE_X + 7, BODY_Y));
+      await tick();
+      expect(ctx.io.all).toContain(osc52('llo wo'));
+      expect(ctx.app.state.message).toBe('6자를 클립보드에 복사했습니다');
+      expect(ctx.client.of('input', 'a')).toEqual([]);
+    });
+
+    it('누르고 움직이지 않고 떼면(그냥 누르기) 복사하지 않는다', async () => {
+      const ctx = await withText();
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + release(PANE_X + 2, BODY_Y));
+      await tick();
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+      expect(ctx.app.state.message ?? '').not.toMatch(/클립보드/);
+    });
+
+    it('칸 밖에서 놓아도 칸 안으로 맞춰 고른다(칸 경계를 넘지 않는다)', async () => {
+      const ctx = await withText();
+      // 사이드바 쪽(칸의 왼쪽 밖)까지 끌어 놓는다
+      ctx.io.type(click(PANE_X + 4, BODY_Y) + motion(5, BODY_Y) + release(5, BODY_Y));
+      await tick();
+      expect(ctx.io.all).toContain(osc52('hello'));
+    });
+
+    it('줄 가운데를 두 번 누르면(400ms 안) 그 단어를 골라 바로 복사하고, 경로는 한 단어다', async () => {
+      const ctx = await withText();
+      const at = { x: PANE_X + 20, y: BODY_Y + 1 };
+      ctx.io.type(click(at.x, at.y) + release(at.x, at.y));
+      await tick(100);
+      ctx.io.type(click(at.x, at.y) + release(at.x, at.y));
+      await tick();
+      expect(ctx.io.all).toContain(osc52('apps/cli/src/desk.ts'));
+      expect(ctx.app.state.message).toBe('20자를 클립보드에 복사했습니다');
+    });
+
+    it('두 번 누르는 사이가 400ms를 넘으면 단어를 고르지 않는다', async () => {
+      const ctx = await withText();
+      const at = { x: PANE_X + 2, y: BODY_Y };
+      ctx.io.type(click(at.x, at.y) + release(at.x, at.y));
+      await tick(500);
+      ctx.io.type(click(at.x, at.y) + release(at.x, at.y));
+      await tick();
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+    });
+
+    it('칸 머리 줄(몸 첫 줄 위)은 고르지 않는다', async () => {
+      const ctx = await withText();
+      ctx.io.type(click(PANE_X + 2, BODY_Y - 1) + motion(PANE_X + 8, BODY_Y - 1) + release(PANE_X + 8, BODY_Y - 1));
+      await tick();
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+    });
+
+    it('사이드바를 누르면 고른 글의 반전을 푼다', async () => {
+      const ctx = await withText();
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + motion(PANE_X + 7, BODY_Y) + release(PANE_X + 7, BODY_Y));
+      await tick();
+      ctx.io.out = [];
+      ctx.io.type(click(3, 1) + release(3, 1));
+      await tick();
+      expect(ctx.io.all).toContain('hello world');
+      expect(ctx.io.all).not.toContain(';7m');
+    });
+
+    it('글자를 입력하면 고른 글의 반전을 푼다', async () => {
+      const ctx = await withText();
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + motion(PANE_X + 7, BODY_Y) + release(PANE_X + 7, BODY_Y));
+      await tick();
+      ctx.io.out = [];
+      ctx.io.type('k');
+      await tick();
+      expect(ctx.io.all).toContain('hello world');
+      expect(ctx.io.all).not.toContain(';7m');
+    });
+
+    it('copyOnSelect가 false면 끌어도 고르지 않는다(지금 동작)', async () => {
+      const ctx = await withText({ copyOnSelect: false });
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + motion(PANE_X + 7, BODY_Y) + release(PANE_X + 7, BODY_Y));
+      await tick();
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+      expect(ctx.io.all).not.toContain(';7m');
+      const at = { x: PANE_X + 20, y: BODY_Y + 1 };
+      ctx.io.type(click(at.x, at.y) + release(at.x, at.y) + click(at.x, at.y) + release(at.x, at.y));
+      await tick();
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+    });
+
+    it('복사 모드 중에는 복사 모드가 먼저라 끌어도 고르지 않는다', async () => {
+      const ctx = await withText();
+      ctx.io.type('\x02[');
+      await tick();
+      ctx.io.out = [];
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + motion(PANE_X + 7, BODY_Y) + release(PANE_X + 7, BODY_Y));
+      await tick();
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+    });
+
+    it('CLI가 마우스를 요청하면 desk는 고르지 않고 넘긴다: vt200이면 움직임은 빼고, drag면 움직임도 넘긴다', async () => {
+      const ctx = await withText();
+      ctx.client.data('a', '\x1b[?1000h\x1b[?1006h');
+      await tick();
+      ctx.io.out = [];
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + motion(PANE_X + 5, BODY_Y) + release(PANE_X + 5, BODY_Y));
+      await tick();
+      expect(ctx.client.of('input', 'a').map((call) => call.data)).toEqual(['\x1b[<0;3;1M', '\x1b[<0;6;1m']);
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+      expect(ctx.io.all).not.toContain(';7m');
+      ctx.client.data('a', '\x1b[?1002h');
+      await tick();
+      const before = ctx.client.of('input', 'a').length;
+      ctx.io.type(click(PANE_X + 2, BODY_Y) + motion(PANE_X + 5, BODY_Y) + release(PANE_X + 5, BODY_Y));
+      await tick();
+      expect(ctx.client.of('input', 'a').slice(before).map((call) => call.data)).toEqual(['\x1b[<0;3;1M', '\x1b[<32;6;1M', '\x1b[<0;6;1m']);
+      expect(ctx.io.all).not.toContain('\x1b]52;');
+    });
+
+    it('사이드바 위의 움직임은 무시한다(고른 세션이 바뀌지 않는다)', async () => {
+      const ctx = setup();
+      const selected = ctx.app.state.selected;
+      ctx.io.type(motion(3, 1) + motion(3, 2) + motion(3, 3));
+      await tick();
+      expect(ctx.app.state.selected).toBe(selected);
+      expect(ctx.client.of('open')).toEqual([]);
+    });
   });
 
   it('사이드바를 누르면 그 세션을 고르고, 고른 세션을 한 번 더 누르면 고른 칸에 연다', async () => {

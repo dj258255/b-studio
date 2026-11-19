@@ -4,7 +4,7 @@
  */
 import { createRequire } from 'node:module';
 import type { Unicode11Addon as Unicode11AddonType } from '@xterm/addon-unicode11';
-import type { IBufferCell, IBufferLine, Terminal as HeadlessTerminal } from '@xterm/headless';
+import type { IBufferCell, IBufferLine, IMarker, Terminal as HeadlessTerminal } from '@xterm/headless';
 import { stringWidth } from './screen';
 import { rgbTo256 } from './theme';
 
@@ -41,8 +41,9 @@ function colorCode(cell: IBufferCell, ground: 'fg' | 'bg', truecolor: boolean): 
   return `${base + 8};5;${color}`;
 }
 
-function styleOf(cell: IBufferCell, truecolor: boolean): CellStyle {
-  const flags = [cell.isBold() ? '1' : '', cell.isDim() ? '2' : '', cell.isItalic() ? '3' : '', cell.isUnderline() ? '4' : '', cell.isInverse() ? '7' : '', cell.isInvisible() ? '8' : '', cell.isStrikethrough() ? '9' : '']
+/** invert: 마우스로 고른 칸이다. 이미 반전인 칸은 반전을 풀어 고른 것이 눈에 띄게 한다 */
+function styleOf(cell: IBufferCell, truecolor: boolean, invert = false): CellStyle {
+  const flags = [cell.isBold() ? '1' : '', cell.isDim() ? '2' : '', cell.isItalic() ? '3' : '', cell.isUnderline() ? '4' : '', (cell.isInverse() !== 0) !== invert ? '7' : '', cell.isInvisible() ? '8' : '', cell.isStrikethrough() ? '9' : '']
     .filter(Boolean)
     .join(';');
   return { fg: colorCode(cell, 'fg', truecolor), bg: colorCode(cell, 'bg', truecolor), flags };
@@ -64,6 +65,8 @@ export interface PaneModes {
   cursorHidden: boolean;
   /** CLI가 마우스 알림을 켰다(1000·1002·1003). 켰으면 desk가 칸 안의 마우스를 넘긴다(#874) */
   mouse: boolean;
+  /** CLI가 단추를 누른 채 움직임(1002)이나 모든 움직임(1003)을 켰다. 켰을 때만 움직임 이벤트를 넘긴다 */
+  mouseMotion: boolean;
   /** 마우스를 SGR 꼴(1006)로 받는다. 아니면 옛 꼴(X10)로 넘긴다 */
   sgrMouse: boolean;
 }
@@ -79,11 +82,39 @@ interface CopyView {
   query?: string;
 }
 
+/** 마우스로 고른 범위의 한쪽 끝. 줄은 버퍼의 절대 줄을 표식(marker)으로 들어, 새 출력으로 화면이 밀려도 같은 글을 가리킨다 */
+interface SelectionEnd {
+  /** 일반 화면: 새 출력으로 밀려도 같은 줄을 가리키는 표식. 대체 화면은 표식을 만들 수 없고 지난 줄이 없어 줄이 밀리지 않으므로 없다 */
+  marker?: IMarker;
+  /** 표식이 없을 때의 절대 줄 */
+  line: number;
+  col: number;
+}
+
+const lineOf = (end: SelectionEnd): number => (end.marker ? end.marker.line : end.line);
+
+interface Selection {
+  anchor: SelectionEnd;
+  end: SelectionEnd;
+  /** 단어 고르기: 한 칸짜리 단어도 고른 것이다 */
+  word: boolean;
+}
+
+/** 고른 범위: 앞에서 뒤 순서, 끝 칸 포함 */
+interface SelectionSpan {
+  from: { line: number; col: number };
+  to: { line: number; col: number };
+}
+
+/** 단어를 자르는 글자. 공백과 흔한 구분자다. 경로(/ . - _ ~)와 :(파일:줄, 주소)는 단어 안에 둔다 */
+const WORD_BREAK = /[\s"'`()[\]{}<>,;|=!*]/u;
+
 export class PaneTerminal {
   readonly #term: HeadlessTerminal;
   #cursorHidden = false;
   #sgrMouse = false;
   #copy: CopyView | undefined;
+  #selection: Selection | undefined;
   readonly #truecolor: boolean;
 
   constructor(cols: number, rows: number, options: { truecolor?: boolean } = {}) {
@@ -98,6 +129,8 @@ export class PaneTerminal {
       if (params.includes(1006)) this.#sgrMouse = !hidden;
       return false;
     };
+    // 일반 화면과 대체 화면은 줄이 따로라 고른 범위는 화면이 바뀌면 푼다
+    this.#term.buffer.onBufferChange(() => this.clearSelection());
     this.#term.parser.registerCsiHandler({ prefix: '?', final: 'h' }, cursorMode(false));
     this.#term.parser.registerCsiHandler({ prefix: '?', final: 'l' }, cursorMode(true));
     this.#term.parser.registerEscHandler({ final: 'c' }, () => {
@@ -139,6 +172,7 @@ export class PaneTerminal {
       appCursor: modes.applicationCursorKeysMode,
       cursorHidden: this.#cursorHidden,
       mouse: modes.mouseTrackingMode !== 'none',
+      mouseMotion: modes.mouseTrackingMode === 'drag' || modes.mouseTrackingMode === 'any',
       sgrMouse: this.#sgrMouse,
     };
   }
@@ -158,7 +192,11 @@ export class PaneTerminal {
     if (this.#copy) return this.#copyLines(this.#copy);
     const buffer = this.#term.buffer.active;
     const out: string[] = [];
-    for (let y = 0; y < this.#term.rows; y++) out.push(this.#styled(buffer.getLine(buffer.viewportY + y)));
+    const selection = this.#selectionSpan();
+    for (let y = 0; y < this.#term.rows; y++) {
+      const absolute = buffer.viewportY + y;
+      out.push(this.#styled(buffer.getLine(absolute), selection ? this.#selectedCols(selection, absolute) : undefined));
+    }
     return out;
   }
 
@@ -167,7 +205,8 @@ export class PaneTerminal {
     return this.#copy?.cols ?? this.#term.cols;
   }
 
-  #styled(line: IBufferLine | undefined): string {
+  /** selected: 이 줄에서 고른 칸 범위(양 끝 포함) */
+  #styled(line: IBufferLine | undefined, selected?: { from: number; to: number }): string {
     const nullCell = this.#term.buffer.active.getNullCell();
     let text = '';
     let used = 0;
@@ -180,7 +219,7 @@ export class PaneTerminal {
         // 두 칸 글자의 뒷칸은 앞칸이 이미 그렸다
         if (width === 0) continue;
         if (used + width > this.#term.cols) break;
-        const style = styleOf(cell, this.#truecolor);
+        const style = styleOf(cell, this.#truecolor, selected !== undefined && x >= selected.from && x <= selected.to);
         if (!sameStyle(style, current)) {
           text += sgr(style);
           current = style;
@@ -199,6 +238,7 @@ export class PaneTerminal {
 
   /** 복사 모드에 들어간다: 지난 줄과 화면을 떠 두고, 지금 커서 줄에서 시작한다 */
   enterCopy(): void {
+    this.clearSelection();
     const buffer = this.#term.buffer.active;
     const styled: string[] = [];
     const plain: string[] = [];
@@ -300,6 +340,122 @@ export class PaneTerminal {
     return out;
   }
 
+  // ---- 마우스로 고르기(copyOnSelect). 좌표는 화면 안의 칸(0부터)이고 줄은 지금 보이는 화면 기준이다. 안쪽 저장은 절대 줄이다 ----
+
+  get hasSelection(): boolean {
+    return this.#selectionSpan() !== undefined;
+  }
+
+  /** 고르기를 시작한다. 같은 칸에서 끝나면 고른 것이 없다 */
+  selectBegin(x: number, y: number): void {
+    this.clearSelection();
+    const at = this.#selectionEnd(x, y);
+    this.#selection = { anchor: at, end: this.#selectionEnd(x, y), word: false };
+  }
+
+  /** 고르기의 끝을 옮긴다. 화면 밖 좌표는 화면 안으로 맞춘다 */
+  selectTo(x: number, y: number): void {
+    const selection = this.#selection;
+    if (!selection) return;
+    selection.end.marker?.dispose();
+    selection.end = this.#selectionEnd(x, y);
+  }
+
+  /** 누른 자리의 단어를 고른다. 공백이나 구분자를 눌렀으면 고르지 않고 false */
+  selectWord(x: number, y: number): boolean {
+    this.clearSelection();
+    const buffer = this.#term.buffer.active;
+    const absolute = buffer.viewportY + Math.max(0, Math.min(this.#term.rows - 1, y));
+    const line = buffer.getLine(absolute);
+    if (!line) return false;
+    const cols = this.#term.cols;
+    const nullCell = buffer.getNullCell();
+    const isWord = (col: number): boolean => {
+      const cell = line.getCell(col, nullCell);
+      if (!cell) return false;
+      // 두 칸 글자의 뒷칸은 앞칸과 같은 글자로 본다
+      if (cell.getWidth() === 0) return col > 0 && isWord(col - 1);
+      const chars = cell.getChars();
+      return chars !== '' && !WORD_BREAK.test(chars);
+    };
+    let col = Math.max(0, Math.min(cols - 1, x));
+    if (!isWord(col)) return false;
+    let from = col;
+    while (from > 0 && isWord(from - 1)) from--;
+    let to = col;
+    while (to < cols - 1 && isWord(to + 1)) to++;
+    const first = this.#selectionEnd(from, y);
+    const last = this.#selectionEnd(to, y);
+    this.#selection = { anchor: first, end: last, word: true };
+    return true;
+  }
+
+  clearSelection(): void {
+    if (!this.#selection) return;
+    this.#selection.anchor.marker?.dispose();
+    this.#selection.end.marker?.dispose();
+    this.#selection = undefined;
+  }
+
+  /**
+   * 고른 글. 두 칸 글자는 한 번만, 줄바꿈으로 이어진 줄은 줄바꿈 없이 잇고, 줄 끝의 빈칸은 뺀다.
+   * 고른 줄이 지난 줄 상한(SCROLLBACK)을 넘어 밀려났으면 고른 것이 없다
+   */
+  selectedText(): string {
+    const span = this.#selectionSpan();
+    if (!span) return '';
+    const buffer = this.#term.buffer.active;
+    const nullCell = buffer.getNullCell();
+    let out = '';
+    for (let absolute = span.from.line; absolute <= span.to.line; absolute++) {
+      const line = buffer.getLine(absolute);
+      const range = this.#selectedCols(span, absolute)!;
+      let text = '';
+      if (line) {
+        for (let col = range.from; col <= range.to; col++) {
+          const cell = line.getCell(col, nullCell);
+          if (!cell || cell.getWidth() === 0) continue;
+          text += cell.getChars() || ' ';
+        }
+      }
+      const last = absolute === span.to.line;
+      if (!last && buffer.getLine(absolute + 1)?.isWrapped) out += text;
+      else out += last ? text.trimEnd() : `${text.trimEnd()}\n`;
+    }
+    return out;
+  }
+
+  /** 화면 안 칸을 고르기의 한쪽 끝으로 바꾼다: 절대 줄의 표식과 칸. 두 칸 글자의 뒷칸은 앞칸으로 맞춘다 */
+  #selectionEnd(x: number, y: number): SelectionEnd {
+    const buffer = this.#term.buffer.active;
+    const row = Math.max(0, Math.min(this.#term.rows - 1, y));
+    const absolute = buffer.viewportY + row;
+    let col = Math.max(0, Math.min(this.#term.cols - 1, x));
+    if (col > 0 && buffer.getLine(absolute)?.getCell(col)?.getWidth() === 0) col--;
+    // 표식은 커서 줄에서의 거리로 건다. 대체 화면이면 xterm이 표식을 만들지 않는다(undefined): 그때는 줄 번호를 그대로 든다
+    // (대체 화면은 지난 줄이 없어 밀리지 않고, 화면이 바뀌면 onBufferChange가 고른 것을 푼다). 마우스 처리 안에서 던지면 desk가 죽는다
+    const marker = buffer.type === 'normal' ? this.#term.registerMarker(absolute - (buffer.baseY + buffer.cursorY)) : undefined;
+    return marker ? { marker, line: absolute, col } : { line: absolute, col };
+  }
+
+  /** 고른 범위를 앞에서 뒤 순서로. 표식이 밀려나 없어졌거나 한 칸도 고르지 않았으면 undefined */
+  #selectionSpan(): SelectionSpan | undefined {
+    const selection = this.#selection;
+    if (!selection) return undefined;
+    const a = { line: lineOf(selection.anchor), col: selection.anchor.col };
+    const b = { line: lineOf(selection.end), col: selection.end.col };
+    if (a.line < 0 || b.line < 0) return undefined;
+    if (!selection.word && a.line === b.line && a.col === b.col) return undefined;
+    const forward = a.line < b.line || (a.line === b.line && a.col <= b.col);
+    return forward ? { from: a, to: b } : { from: b, to: a };
+  }
+
+  /** 절대 줄 하나에서 고른 칸 범위(양 끝 포함). 고른 줄이 아니면 undefined */
+  #selectedCols(span: SelectionSpan, absolute: number): { from: number; to: number } | undefined {
+    if (absolute < span.from.line || absolute > span.to.line) return undefined;
+    return { from: absolute === span.from.line ? span.from.col : 0, to: absolute === span.to.line ? span.to.col : this.#term.cols - 1 };
+  }
+
   /** 화면 안의 커서 자리(0부터). 복사 모드에서는 쓰지 않는다 */
   cursor(): { x: number; y: number } {
     const buffer = this.#term.buffer.active;
@@ -307,6 +463,7 @@ export class PaneTerminal {
   }
 
   dispose(): void {
+    this.clearSelection();
     this.#term.dispose();
   }
 }
