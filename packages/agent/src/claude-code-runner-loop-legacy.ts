@@ -149,7 +149,6 @@ export async function runClaudeCodeAgentLegacy(options: ClaudeCodeRunOptions): P
     signal,
     onServiceStatus,
     readOnly: ask,
-    design: options.design,
     onQuestion: (question) => {
       asked = question;
       onEvent({ type: 'question', ...question });
@@ -173,7 +172,6 @@ export async function runClaudeCodeAgentLegacy(options: ClaudeCodeRunOptions): P
     ...(options.board ? { board: options.board } : {}),
     // 허용 도구 목록은 조율 도구와 어긋남 보고 도구를 넣을지 정할 때만 쓴다
     ...(context.policy?.allowedTools ? { allowedTools: context.policy.allowedTools } : {}),
-    design: options.design !== undefined,
     interactive,
     mismatch: !ask,
   });

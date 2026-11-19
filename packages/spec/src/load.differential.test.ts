@@ -29,13 +29,12 @@ const SPEC = {
   network: { egress: ['example.com', { host: '*.example.com', methods: ['GET'], paths: ['/x'] }] },
   secrets: { TOKEN: { services: ['web'] } },
   deploy: { services: { web: { dockerfile: 'Dockerfile', port: 8300 } } },
-  design: { figma: { fileUrl: 'https://www.figma.com/design/abc/x' } },
   workflow: {
     required: ['plan', 'implement', 'run', 'test'],
     tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'] }],
     pageChecks: [
       { service: 'web', path: '/', mode: 'browser', expectText: 'x', viewport: 'mobile' },
-      { service: 'web', path: '/orders', compare: { reference: 'design/home.png', maxDiffRatio: 0.1 } },
+      { service: 'web', path: '/orders', expectText: '주문' },
     ],
     concurrencyChecks: [{ name: 'c', service: 'api', method: 'GET', path: '/', concurrent: 2, expect: { allStatusIn: [200] } }],
     loadChecks: [{ name: 'l', service: 'api', method: 'GET', path: '/', concurrent: 2, expect: { p95Ms: 200 } }],

@@ -9,9 +9,8 @@ import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
 import { TaskGraphError } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { decodeStrings, encodeStrings, failure, serviceUrl, verifyChangesSetup, type HookHandler, type HookRequest, type VerificationReport, type VerifyOptions } from './verify';
-import type { WorkflowCheck, WorkflowCompare, WorkflowStepCheck } from './workflow';
+import type { WorkflowCheck, WorkflowStepCheck } from './workflow';
 import type { Workspace } from './workspace';
-import type { WorkflowPageCompare } from '@b-studio/spec';
 
 /**
  * 게이트 check의 상태 기계(순서·분기·결과 조립)는 Rust(`crates/bstudio-io/src/gate_check.rs`, ADR-195 4f A5b-1)가 한다.
@@ -69,12 +68,11 @@ export interface DeclaredHost {
   readonly requestService: ServiceRequest;
   /** 자동 화면 고르기(ADR-195 4f A5c-2)가 읽는 바깥 값. 고르는 규칙·막는 규칙·글 조립은 Rust(`gate_auto.rs`)가 하고, 옛 구현(`auto-pages-legacy.ts`)도 같은 값을 쓴다 */
   readonly auto: AutoOps;
-  /** 화면 확인이 부르는 바깥 동작(브라우저 러너·페이지 요청·스크린샷 저장·디자인 비교·경고). 판정과 순서는 Rust(`gate_page.rs`, ADR-195 4f A5c-1)가 한다 */
+  /** 화면 확인이 부르는 바깥 동작(브라우저 러너·페이지 요청·스크린샷 저장·경고). 판정과 순서는 Rust(`gate_page.rs`, ADR-195 4f A5c-1)가 한다 */
   readonly page: PageOps;
   /** 화면 확인이 이름별로 모으는 부산물 */
   readonly pageMaps: {
     readonly steps: Map<string, WorkflowStepCheck[]>;
-    readonly compares: Map<string, WorkflowCompare>;
     readonly blocked: Map<string, string[]>;
     readonly loadMs: Map<string, number>;
     readonly warnings: Map<string, string[]>;
@@ -91,8 +89,6 @@ export interface PageOps {
   serviceOrigins(): Promise<string[]>;
   /** 단계 스크린샷을 저장하고 식별자를 붙인다. 저장 실패는 삼킨다(옛 그대로) */
   saveSteps(name: string, steps: readonly BrowserPageStep[]): Promise<WorkflowStepCheck[]>;
-  /** 마지막 단계의 스크린샷을 디자인 기준 이미지와 비교한다. 실패하면 던진다 */
-  compareDesign(compare: WorkflowPageCompare, name: string, result: BrowserPageResult, sandbox: Sandbox): Promise<void>;
   /** 게이트를 막지 않는 참고 문구를 이름별로 모아 둔다 */
   addWarning(name: string, message: string): void;
 }
@@ -142,8 +138,6 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
   const graphSignal = signal ?? new AbortController().signal;
   /** `declaredBegin`이 읽은 선언과 자동 페이지. `checkPage`가 번호로 꺼낸다 */
   let declaredPlan: { pages: WorkflowPageCheck[]; auto: { pages: Array<{ page: WorkflowPageCheck }> } } | undefined;
-  /** 디자인 비교를 하는 화면 확인의 마지막 러너 결과(스크린샷 포함). 이름별로 든다 — 스크린샷(Buffer)은 경계를 넘기지 않는다 */
-  const browserResults = new Map<string, BrowserPageResult>();
   /** 화면 확인 하나의 선언: 선언한 pageChecks의 `index`번째, 자동이면 자동 페이지의 `index`번째 */
   const pageOf = (auto: unknown, index: unknown): WorkflowPageCheck => (auto === true ? declaredPlan!.auto.pages[Number(index)]!.page : declaredPlan!.pages[Number(index)]!);
   let thrown: { error: unknown } | undefined;
@@ -212,7 +206,6 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
       // 이번 실행에서 바뀐 Next.js 페이지를 스스로 찾아 선언한 pageChecks와 같은 경로로 확인한다(autoPageChecks).
       // 고르는 일은 Rust가 한다(ADR-195 4f A5c-2): 여기서는 입력(`auto`)만 건네고, 고른 자동 페이지의 확인 선언은 `declaredAutoReady`로 받는다
       declaredPlan = { pages, auto: { pages: [] } };
-      browserResults.clear();
       if (pages.length > 0 || tests.length > 0 || concurrency.length > 0 || loads.length > 0) {
         for (const map of Object.values(declared.pageMaps)) map.clear();
       }
@@ -251,8 +244,8 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
         return failure(error);
       }
     },
-    // 브라우저 러너를 돌리고 판정에 쓰는 값만 돌려준다. 스크린샷(Buffer)은 경계를 넘기지 않고 이름으로 들고 있다가 단계 저장·디자인 비교가 쓴다.
-    // 헤드리스 브라우저를 못 띄운 오류만 `kind: 'unavailable'`로 알린다(Rust가 fallbackProbe가 있을 때만 대신 HTTP로 확인한다)
+    // 브라우저 러너를 돌리고 판정에 쓰는 값만 돌려준다. 헤드리스 브라우저를 못 띄운 오류만 `kind: 'unavailable'`로 알린다
+    // (Rust가 fallbackProbe가 있을 때만 대신 HTTP로 확인한다)
     declaredBrowserRun: async ({ auto, index, name, href }) => {
       try {
         const page = pageOf(auto, index);
@@ -268,8 +261,8 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
             // 로드 예산을 적은 확인만 잰다. 재려면 워밍업 이동을 한 번 더 해야 해서(게이트 시간이 늘고, 워밍업 때의 오류는 비운다)
             // 예산이 없는 확인까지 두 번 열면 첫 로드에서만 나는 오류를 놓칠 수 있다
             measureLoad: page.maxLoadMs !== undefined,
-            // 스크린샷을 저장할 곳이 있거나 디자인 비교를 할 때만 찍는다
-            capture: ops.saveArtifact !== undefined || page.compare !== undefined,
+            // 스크린샷을 저장할 곳이 있을 때만 찍는다
+            capture: ops.saveArtifact !== undefined,
             // 세션 서비스의 출처 밖으로는 요청이 나가지 못하게 한다(모델이 만든 페이지를 통한 요청 위조 차단)
             allowedOrigins: await ops.serviceOrigins(),
           });
@@ -282,25 +275,10 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
         if (ops.saveArtifact) pageMaps.steps.set(label, await ops.saveSteps(label, result.steps));
         if (result.blockedRequests.length > 0) pageMaps.blocked.set(label, result.blockedRequests);
         if (result.loadMs !== undefined) pageMaps.loadMs.set(label, result.loadMs);
-        if (page.compare) browserResults.set(label, result);
-        else browserResults.delete(label);
         return {
           ok: true,
           result: { ...result, blockedRequests: undefined, steps: Array.isArray(result.steps) ? result.steps.map((step) => ({ label: step.label, ok: step.ok })) : result.steps },
         };
-      } catch (error) {
-        return failure(error);
-      }
-    },
-    // 문제가 없을 때만 Rust가 부른다. 기준 이미지 읽기·비교·저장은 TS가 한다
-    declaredCompare: async ({ auto, index, name }) => {
-      try {
-        const page = pageOf(auto, index);
-        const label = String(name);
-        const result = browserResults.get(label);
-        if (!page.compare || !result) throw new Error('디자인 비교에 쓸 화면 확인 결과가 없습니다');
-        await declared.page.compareDesign(page.compare, label, result, declared.page.sandbox);
-        return { ok: true };
       } catch (error) {
         return failure(error);
       }
@@ -397,10 +375,9 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
     declaredPageData: ({ names }) => ({
       ok: true,
       items: (names as string[]).map((name) => {
-        const { steps, compares, blocked, loadMs, warnings } = declared.pageMaps;
+        const { steps, blocked, loadMs, warnings } = declared.pageMaps;
         return {
           ...(steps.has(name) ? { steps: steps.get(name) } : {}),
-          ...(compares.has(name) ? { compare: compares.get(name) } : {}),
           ...(loadMs.has(name) ? { loadMs: loadMs.get(name) } : {}),
           blocked: blocked.get(name) ?? [],
           warnings: warnings.get(name) ?? [],

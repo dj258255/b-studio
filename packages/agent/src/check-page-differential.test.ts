@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { PNG } from 'pngjs';
 import { encodeLoneSurrogates, native, type Sandbox } from '@b-studio/sandbox';
 import type { LoadedProject, WorkflowPageCheck, WorkflowSpec } from '@b-studio/spec';
 import { afterAll, describe, expect, it, vi } from 'vitest';
@@ -51,21 +50,6 @@ interface Trace {
 
 const rendered = { status: 200, text: '주문 목록', pageErrors: [], consoleErrors: [], failedRequests: [], mediaErrors: [], blockedRequests: [], horizontalOverflowPx: 0, steps: [] } as unknown as BrowserPageResult;
 const view = (over: Partial<BrowserPageResult> = {}): BrowserPageResult => ({ ...rendered, ...over }) as BrowserPageResult;
-
-const png = (width: number, height: number, paint: (x: number, y: number) => [number, number, number] = () => [255, 255, 255]): Buffer => {
-  const image = new PNG({ width, height });
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const index = (width * y + x) << 2;
-      const [r, g, b] = paint(x, y);
-      image.data[index] = r;
-      image.data[index + 1] = g;
-      image.data[index + 2] = b;
-      image.data[index + 3] = 255;
-    }
-  }
-  return PNG.sync.write(image);
-};
 
 async function runWorld(mode: Mode, setup: Setup): Promise<{ trace: Trace; calls: string[] }> {
   const base = await createOrdersProject('check-page-diff-');
@@ -475,73 +459,6 @@ describe('브라우저 모드', () => {
       }),
     );
     expect(detail(legacy.trace)).toBe('string-thrown');
-  });
-
-  it('디자인 비교는 문제가 없을 때만 부른다(문제가 있으면 부르지 않는다)', async () => {
-    const shot = png(20, 20);
-    const compareSpec = { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 };
-    const files = { 'design.png': shot };
-    const passing = await compare(() => oneB({ compare: compareSpec as never }, { files, browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: shot }] as BrowserPageStep[] }) }));
-    expect(pageCheck(passing.trace)).toMatchObject({ ok: true, compare: { ratio: 0, max: 0.02 } });
-    expect(passing.calls.filter((entry) => entry.startsWith('save:')).length).toBe(4);
-    const problem = await compare(() => oneB({ expectText: '없음', compare: compareSpec as never }, { files, browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: shot }] as BrowserPageStep[] }) }));
-    expect(pageCheck(problem.trace)).toMatchObject({ ok: false });
-    expect(pageCheck(problem.trace).compare).toBeUndefined();
-    expect(problem.calls.filter((entry) => entry.startsWith('save:')).length).toBe(1);
-  });
-
-  it('디자인 비교: 차이가 크면 비교 결과를 남기고 실패한다', async () => {
-    const compareSpec = { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 };
-    const legacy = await compare(() =>
-      oneB({ compare: compareSpec as never }, { files: { 'design.png': png(100, 100) }, browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: png(100, 100, (x, y) => (x < 20 && y < 20 ? [0, 0, 0] : [255, 255, 255])) }] as BrowserPageStep[] }) }),
-    );
-    expect(detail(legacy.trace)).toContain('디자인 차이 4.0% (허용 2.0%, 비교 100×100)');
-    expect(pageCheck(legacy.trace).compare).toBeTruthy();
-  });
-
-  it('디자인 비교: 스크린샷이 없으면 실패(찍지 못했습니다)', async () => {
-    const legacy = await compare(() => oneB({ compare: { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 } as never }, { files: { 'design.png': png(10, 10) }, browser: () => view({ steps: [{ label: 'open /orders', ok: true }] as BrowserPageStep[] }) }));
-    expect(detail(legacy.trace)).toBe('디자인 비교에 쓸 뷰포트 스크린샷을 찍지 못했습니다');
-  });
-
-  it('디자인 비교: 단계가 하나도 없으면 실패', async () => {
-    const legacy = await compare(() => oneB({ compare: { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 } as never }, { files: { 'design.png': png(10, 10) } }));
-    expect(detail(legacy.trace)).toBe('디자인 비교에 쓸 뷰포트 스크린샷을 찍지 못했습니다');
-  });
-
-  it('디자인 비교: 기준 이미지가 없으면 실패', async () => {
-    const legacy = await compare(() => oneB({ compare: { reference: 'missing.png', maxDiffRatio: 0.02, threshold: 0.1 } as never }, { browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: png(10, 10) }] as BrowserPageStep[] }) }));
-    expect(detail(legacy.trace)).toBe('디자인 기준 이미지를 읽지 못했습니다: missing.png');
-  });
-
-  it('디자인 비교: 너비가 다르면 실패', async () => {
-    const legacy = await compare(() => oneB({ compare: { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 } as never }, { files: { 'design.png': png(100, 100) }, browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: png(120, 100) }] as BrowserPageStep[] }) }));
-    expect(detail(legacy.trace)).toContain('이미지 너비가 다릅니다');
-  });
-
-  it('디자인 비교의 이미지 저장이 실패해도 비교 결과는 남는다', async () => {
-    const shot = png(10, 10);
-    let count = 0;
-    const legacy = await compare(() => {
-      count = 0;
-      return oneB({ compare: { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 } as never }, {
-        files: { 'design.png': shot },
-        save: () => {
-          if (++count === 3) throw new Error('저장 실패');
-          return `a${count}`;
-        },
-        browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: shot }] as BrowserPageStep[] }),
-      });
-    });
-    expect(pageCheck(legacy.trace)).toMatchObject({ ok: true });
-    expect(legacy.calls.some((entry) => entry.startsWith('warn:디자인 비교 이미지를 저장하지 못했습니다'))).toBe(true);
-  });
-
-  it('디자인 비교는 saveArtifact가 없어도 돈다(비교 이미지는 저장하지 않는다)', async () => {
-    const shot = png(10, 10);
-    const legacy = await compare(() => oneB({ compare: { reference: 'design.png', maxDiffRatio: 0.02, threshold: 0.1 } as never }, { save: 'none', files: { 'design.png': shot }, browser: () => view({ steps: [{ label: 'open /orders', ok: true, screenshot: shot }] as BrowserPageStep[] }) }));
-    expect(legacy.calls.find((entry) => entry.startsWith('browser:'))).toContain('"capture":true');
-    expect(pageCheck(legacy.trace)).toMatchObject({ ok: true, compare: { ratio: 0, max: 0.02 } });
   });
 
   it('가림: 실패 글은 가린 뒤에 돌려준다', async () => {

@@ -70,17 +70,6 @@ export interface ExternalApiView {
   authenticated: boolean;
 }
 
-/** 디자인(Figma) 연동 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
-export interface DesignView {
-  /** 지금 쓰는 Figma 파일 URL. 세션 설정이 studio.yaml보다 우선한다 */
-  fileUrl: string;
-  fileKey: string;
-  /** URL이 어디서 왔는지 */
-  from: 'session' | 'studio.yaml';
-  /** 서버에 FIGMA_TOKEN이 설정돼 있는지 */
-  hasToken: boolean;
-}
-
 /** 에이전트가 되물은 질문. 사용자가 답을 보내면 지운다 */
 export interface PendingQuestion {
   runId: string;
@@ -140,14 +129,12 @@ export interface SessionSnapshot {
   externals?: ExternalApiView[];
   /** 프로젝트 studio.yaml에 deploy 절이 있다. 없으면 실행 탭의 "배포" 하위 탭을 숨긴다(로컬 폴더 모드 기본값) */
   hasDeploy?: boolean;
-  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 원격 브라우저·디자인 비교·배포·나란히 보기를 숨긴다 */
+  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 원격 브라우저·배포·나란히 보기를 숨긴다 */
   experimental?: boolean;
   /** 세션 터미널을 쓸 수 있다(개인 PC 모드, 컨테이너 방식이면 실험 기능도 — 이슈 #673, ADR-200). 없거나 false면 대화 패널만 보인다 */
   terminal?: boolean;
   /** 터미널을 여는 방식(B_STUDIO_TERMINAL): container는 에이전트 컨테이너 안의 CLI, host는 이 컴퓨터의 CLI. terminal을 쓸 수 있을 때만 있다 */
   terminalMode?: 'container' | 'host';
-  /** 디자인(Figma) 연동. 설정하지 않았으면 없다 */
-  design?: DesignView;
   /** 마지막 실행이 되묻고 멈췄을 때 남긴 질문. 다음 요청을 보내면 지운다 */
   pendingQuestion?: PendingQuestion;
   /**
@@ -351,8 +338,6 @@ export type StudioEvent =
   | { type: 'service'; service: string; state: ServiceState; url?: string; previewUrl?: string; detail?: string }
   /** 서비스가 준비된 직후 기동 중 받은/보낸 바이트를 남긴다. 컨테이너 수명 누계이고, edge 프록시는 뺀다 */
   | { type: 'boot_network'; at: string; network: BootNetwork }
-  /** 세션의 디자인(Figma) 설정이 바뀌었다. URL을 지우면 design이 없다 */
-  | { type: 'design'; design?: DesignView }
   /** 대화 입력창에서 이 세션이 쓸 모델이나 노력 단계를 바꿨다. 없으면 각각 "기본"(계정·레지스트리 기본)으로 되돌린 것이다 */
   | { type: 'model'; modelId?: string; effort?: Effort }
   /** 사람이 세션 이름을 바꿨다(#875). label이 없으면 이름을 지웠다 */

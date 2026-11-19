@@ -1,8 +1,8 @@
-//! 게이트의 남은 I/O 중 효과만 옮긴 곳(D2): 평가 자산 지문·훑기와 화면 확인의 관측(단계 저장·디자인 비교·서비스 출처).
+//! 게이트의 남은 I/O 중 효과만 옮긴 곳(D2): 평가 자산 지문·훑기와 화면 확인의 관측(단계 저장·서비스 출처).
 //!
 //! - 평가 자산: 옛 TS `packages/agent/src/gate.ts`의 `fingerprintEvaluationAssets`·`collectEvaluationAsset`·`walkEvaluationAssetDir`·
 //!   `recordEvaluationFile`·`parentsAreReal`. 판정(비교·글)은 `bstudio_guard::gate_assets`가 하고, 여기는 파일을 훑는다.
-//! - 관측: 옛 `#saveSteps`·`#compareDesign`·`#serviceOrigins`. 저장·엔드포인트는 TS 콜백(`Hook`)으로 부른다(상태는 TS가 든다).
+//! - 관측: 옛 `#saveSteps`·`#serviceOrigins`. 저장·엔드포인트는 TS 콜백(`Hook`)으로 부른다(상태는 TS가 든다).
 //!
 //! **막는 쪽이다(평가 자산).** 견줄 수 없는 입력(링크·특수 파일·읽기 실패·개수 상한·읽는 동안 바뀜)은 통과가 아니라 실패다.
 //! 파일은 `workspace_io::read_regular_file`로 읽는다 — 링크를 따라가지 않고, 상한을 읽기 전에 보고, 다 읽지 못했으면 `complete`가 거짓이다.
@@ -10,10 +10,8 @@
 use std::path::Path;
 use std::pin::Pin;
 
-use base64::Engine;
 use bstudio_guard::gate_assets as ga;
 use bstudio_guard::node_path;
-use bstudio_guard::visual_compare::{self, Mask};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 
@@ -22,14 +20,6 @@ use crate::workspace_io::{self, FileRead};
 
 /// 평가 자산 파일 읽기 상한. 옛 `workspace.ts`의 `MAX_READ_BYTES`와 같다
 const MAX_READ_BYTES: f64 = 256.0 * 1024.0;
-
-fn b64(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
-}
-
-fn unb64(text: &str) -> Option<Vec<u8>> {
-    base64::engine::general_purpose::STANDARD.decode(text).ok()
-}
 
 /// Node `fs` 오류의 `code`. 모르면 `알 수 없는 오류`(옛 코드의 `code ?? '알 수 없는 오류'`)
 fn errno_name(error: &std::io::Error) -> String {
@@ -311,44 +301,6 @@ pub async fn save_steps(name: &str, steps_json: &str, has_save: bool, hook: Opti
         saved.push(Value::Object(item));
     }
     json!({ "steps": saved, "warnings": warnings }).to_string()
-}
-
-/// 디자인 기준 이미지와 실제 화면을 비교한다(옛 `#compareDesign`의 읽기·비교 부분).
-/// 실패 갈래: `찾지 못함`(기준 이미지), `compare`(옛 VisualCompareError), `decode`(PNG를 읽지 못함)
-pub async fn compare_design(root: &str, reference: &str, masks_json: &str, threshold: f64, actual_b64: &str) -> String {
-    let Some(actual) = unb64(actual_b64) else {
-        return json!({ "ok": false, "kind": "decode", "message": "실제 화면 이미지를 읽지 못했습니다" }).to_string();
-    };
-    let reference_path = node_path::join(&[root, reference]);
-    let reference_bytes = match tokio::fs::read(&reference_path).await {
-        Ok(bytes) => bytes,
-        Err(_) => return json!({ "ok": false, "kind": "missing", "message": format!("디자인 기준 이미지를 읽지 못했습니다: {reference}") }).to_string(),
-    };
-    let masks: Vec<Mask> = serde_json::from_str::<Value>(masks_json)
-        .ok()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .map(|mask| Mask {
-            x: mask.get("x").and_then(Value::as_f64).unwrap_or(0.0),
-            y: mask.get("y").and_then(Value::as_f64).unwrap_or(0.0),
-            width: mask.get("width").and_then(Value::as_f64).unwrap_or(0.0),
-            height: mask.get("height").and_then(Value::as_f64).unwrap_or(0.0),
-        })
-        .collect();
-    match visual_compare::compare(&actual, &reference_bytes, &masks, threshold) {
-        Ok(compared) => json!({
-            "ok": true,
-            "ratio": compared.diff_pixels as f64 / compared.compared_pixels as f64,
-            "width": compared.width,
-            "height": compared.height,
-            "diff": b64(&compared.diff),
-            "reference": b64(&reference_bytes),
-        })
-        .to_string(),
-        Err(visual_compare::Error::Compare(message)) => json!({ "ok": false, "kind": "compare", "message": message }).to_string(),
-        Err(visual_compare::Error::Decode(message)) => json!({ "ok": false, "kind": "decode", "message": message }).to_string(),
-    }
 }
 
 #[cfg(test)]

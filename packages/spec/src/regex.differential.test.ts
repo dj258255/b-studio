@@ -46,7 +46,6 @@ describe('schema 정규식: legacy Zod와 Rust가 같은 판정을 낸다', () =
     ['memory', legacy.ResourceLimitSchema, current.ResourceLimitSchema, (s) => ({ memory: s })],
     ['sql identifier', legacy.DatabaseSchema, current.DatabaseSchema, (s) => ({ engine: 'postgres', database: s, user: 'app' })],
     ['system package', legacy.ManagedServiceSchema, current.ManagedServiceSchema, (s) => ({ source: 'managed', template: 'x', path: 'x', port: 1, preview: 'browser', systemPackages: [s] })],
-    ['figma url', legacy.DesignSchema, current.DesignSchema, (s) => ({ figma: { fileUrl: s } })],
     ['sample param key', legacy.AutoPageChecksSchema, current.AutoPageChecksSchema, (s) => ({ service: 'web', sampleParams: { [s]: 'x' } })],
     ['secret key', legacy.StudioSpecSchema, current.StudioSpecSchema, (s) => ({ version: 1, name: 'x', services: { web: { source: 'managed', template: 'x', path: 'x', port: 1, preview: 'browser' } }, secrets: { [s]: { services: [] } } })],
   ];

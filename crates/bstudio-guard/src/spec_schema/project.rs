@@ -20,14 +20,13 @@ pub fn validate(name: &str, input: Option<&JsValue>) -> Outcome {
         "DatabaseSchema" => database(input),
         "SecretSchema" => secret(input),
         "DeploySchema" => deploy(input),
-        "DesignSchema" => design(input),
         "ReviewSchema" => review(input),
         "GuideSchema" => guide(input),
         "ModelsSchema" => models(input),
         "CheckpointsSchema" => checkpoints(input),
         "StudioSpecSchema" => studio_spec(input),
         "WorkflowSchema" | "WorkflowTestSchema" | "ConcurrencyExpectSchema" | "WorkflowConcurrencyCheckSchema" | "LoadExpectSchema" | "WorkflowLoadCheckSchema"
-        | "WorkflowPageStepSchema" | "CompareMaskSchema" | "WorkflowPageCompareSchema" | "WorkflowPageExpectFromApiSchema" | "WorkflowPageCheckSchema"
+        | "WorkflowPageStepSchema" | "WorkflowPageExpectFromApiSchema" | "WorkflowPageCheckSchema"
         | "AutoPageChecksSchema" | "WorkflowStageSchema" => super::workflow::validate(name, input),
         other => Outcome::failed(input.cloned(), issue(Vec::new(), format!("알 수 없는 스키마입니다: {other}"), true)),
     }
@@ -82,10 +81,6 @@ fn reserved_edge_re() -> &'static Regex {
             "^(EDGE_|NODE_|LD_|DYLD_)|^(PATH|HOME|HOSTNAME|SHELL|USER|PWD|TMPDIR|TZ|LANG|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|JAVA_TOOL_OPTIONS)$",
         )
     })
-}
-fn figma_re() -> &'static Regex {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| regex_plain(r"^https?://(?:www\.)?figma\.com/(?:design|file)/([A-Za-z0-9]+)(?:[/?#]|$)"))
 }
 fn control_re() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
@@ -216,11 +211,6 @@ fn url_value(input: Option<&JsValue>) -> Outcome {
     }
     let normalized = trimmed.replace(['\t', '\n', '\r'], "");
     Outcome { value: Some(JsValue::Str(normalized)), issues }
-}
-
-fn figma_file_key(url: &str) -> Option<String> {
-    let trimmed = js_trim(url);
-    figma_re().captures(trimmed).map(|caps| caps[1].to_owned())
 }
 
 fn boolean(input: Option<&JsValue>) -> Outcome {
@@ -497,32 +487,6 @@ fn deploy_service(input: Option<&JsValue>) -> Outcome {
     obj.finish()
 }
 
-fn design_figma(input: Option<&JsValue>) -> Outcome {
-    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    obj.set(
-        "fileUrl",
-        string_schema(obj.field("fileUrl"), &[], |value, issues| {
-            if figma_file_key(value).is_none() {
-                issues.push(issue(Vec::new(), "Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다", false));
-            }
-        }),
-    );
-    obj.finish_with(|mut out| {
-        if let Some(JsValue::Str(url)) = out.get("fileUrl").cloned() {
-            if let Some(key) = figma_file_key(&url) {
-                out.set("fileKey", JsValue::Str(key));
-            }
-        }
-        JsValue::Obj(out)
-    })
-}
-
-pub fn design(input: Option<&JsValue>) -> Outcome {
-    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    obj.set("figma", design_figma(obj.field("figma")));
-    obj.finish()
-}
-
 pub fn review(input: Option<&JsValue>) -> Outcome {
     let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
     obj.set("auto", defaulted(obj.field("auto"), || JsValue::Bool(true), |value| boolean(value)));
@@ -603,8 +567,8 @@ pub fn studio_spec(input: Option<&JsValue>) -> Outcome {
     if let Some(value) = obj.field("deploy") {
         obj.set("deploy", deploy(Some(value)));
     }
-    if let Some(value) = obj.field("design") {
-        obj.set("design", design(Some(value)));
+    if obj.field("design").is_some() {
+        obj.issues.push(issue(vec![Seg::Key("design".into())], "`design`은 더는 지원하지 않습니다. 이 항목을 지우세요", false));
     }
     if let Some(value) = obj.field("workflow") {
         obj.set("workflow", super::workflow::workflow(Some(value)));
@@ -668,3 +632,26 @@ fn compose_volume(input: Option<&JsValue>) -> Outcome {
 }
 
 // `services` record의 값 스키마는 `z.unknown()`이라 아무 값이나 통과한다. 위 `validate_record`의 value는 그대로 clone한다.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::js_json;
+
+    fn issues(value: &str) -> Vec<(Vec<Seg>, String)> {
+        studio_spec(Some(&js_json::parse(value).expect("JSON")))
+            .issues
+            .into_iter()
+            .map(|issue| (issue.path, issue.message))
+            .collect()
+    }
+
+    const BASE: &str = r#"{"version":1,"name":"orders","services":{"web":{"source":"managed","template":"nextjs","path":"web","port":3000,"preview":"browser"}}}"#;
+
+    #[test]
+    fn 지운_design_항목은_까닭과_함께_거절한다() {
+        let with_design = r#"{"version":1,"name":"orders","services":{"web":{"source":"managed","template":"nextjs","path":"web","port":3000,"preview":"browser"}},"design":{"figma":{"fileUrl":"https://www.figma.com/design/abc/x"}}}"#;
+        assert_eq!(issues(&with_design), vec![(vec![Seg::Key("design".into())], "`design`은 더는 지원하지 않습니다. 이 항목을 지우세요".to_owned())]);
+        assert!(issues(BASE).is_empty());
+    }
+}

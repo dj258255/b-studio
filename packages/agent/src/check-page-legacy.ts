@@ -3,7 +3,7 @@
  * 차등 시험(`check-page-differential.test.ts`)이 같은 시나리오를 이 옛 구현과 지금 구현에 넣어 견준다. 제품 코드는 이 파일을 쓰지 않는다. 지우지 않는다(4g에서 함께 지운다).
  *
  * 옛 코드가 `this.#options`·`this.#saveSteps` 같은 비공개 값으로 하던 일은 `DeclaredHost.page`(`PageOps`)로, 이름별 부산물 맵은 `DeclaredHost.pageMaps`로 한다.
- * 순서와 분기는 옛 코드의 한 줄도 바꾸지 않았다. 판정 조각(`nextErrorMarker`·`containsApiValue`·`viewportProblems`·`missing*Text`·근거 등)은 옛 코드가 부르던 그 함수(이미 네이티브인 것: `gate.ts`·`check-evidence.ts`의
+ * 순서와 분기는 옛 코드의 한 줄도 바꾸지 않았다. 디자인 비교를 지우면서(ADR-221) 그 갈래 두 줄만 뺐다. 판정 조각(`nextErrorMarker`·`containsApiValue`·`viewportProblems`·`missing*Text`·근거 등)은 옛 코드가 부르던 그 함수(이미 네이티브인 것: `gate.ts`·`check-evidence.ts`의
  * 껍데기)를 그대로 부른다 — 이 조각이 옮긴 것은 그 조각들을 잇는 순서·판정·글 조립이다.
  */
 import type { WorkflowPageCheck } from '@b-studio/spec';
@@ -58,7 +58,7 @@ export async function legacyCheckPage(host: DeclaredHost, page: WorkflowPageChec
         steps: page.steps,
         signal,
         measureLoad: page.maxLoadMs !== undefined,
-        capture: saveArtifact !== undefined || page.compare !== undefined,
+        capture: saveArtifact !== undefined,
         allowedOrigins: await ops.serviceOrigins(),
       });
     } catch (error) {
@@ -114,7 +114,6 @@ export async function legacyCheckPage(host: DeclaredHost, page: WorkflowPageChec
     }
     if (problems.length > 0 && options.sampled !== undefined) problems.push(sampledValueHint(options.sampled));
     if (problems.length > 0) throw fail(problems.join('\n'));
-    if (page.compare) await ops.compareDesign(page.compare, name, result, sandbox);
     return evidenceOrNone(() => finishEvidence(browserPageEvidence(page, result, evidenceContext), redact));
   }
   const { status, text } = await pageFetcher(url.href, signal);
