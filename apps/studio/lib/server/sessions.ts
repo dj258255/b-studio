@@ -1891,7 +1891,7 @@ export async function setSessionServiceSelection(id: string, service: string, on
   return { selection: listServiceSelection(id), ...(warning ? { warning } : {}) };
 }
 
-/** 화면 확인 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
+/** 화면 확인 스크린샷을 세션 폴더에 저장한다. 저장 위치는 agent가 모른다 */
 function saveSessionArtifact(session: Session, runId: string, input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }): Promise<string> {
   return saveArtifact(stateDirOf(session.snapshot), runId, input);
 }
@@ -1931,7 +1931,7 @@ export async function localPreviewUrl(id: string, service: string): Promise<stri
  * 탐색 QA 브라우저가 열 미리보기 주소. iframe 미리보기와 같은 규칙(게이트웨이 주소가 있으면 그것, 없으면 서비스 주소)을 쓴다.
  * 서버가 직접 여는 주소이므로 다른 출처로 나가지 않도록 이 값만 넘긴다
  */
-export function remoteBrowserUrl(id: string, service: string): string {
+export function exploreQaPreviewUrl(id: string, service: string): string {
   const session = requireSession(id);
   if (session.snapshot.status !== 'ready') throw new StudioError(409, '샌드박스가 준비된 뒤에 탐색 QA 브라우저를 열 수 있습니다');
   const view = session.snapshot.services.find((candidate) => candidate.name === service);
@@ -1945,7 +1945,7 @@ export function remoteBrowserUrl(id: string, service: string): string {
  * 탐색 QA 브라우저가 요청해도 되는 출처 목록. 세션의 모든 서비스 주소(루프백·미리보기 게이트웨이)의 출처를 모은다.
  * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 앱이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
  */
-export function remoteBrowserAllowedOrigins(id: string): string[] {
+export function exploreQaAllowedOrigins(id: string): string[] {
   const session = requireSession(id);
   const origins = new Set<string>();
   for (const service of session.snapshot.services) {

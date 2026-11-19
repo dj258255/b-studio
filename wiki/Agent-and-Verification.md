@@ -32,4 +32,4 @@ Agent Fleet는 같은 요청을 2~4개의 독립 세션·브랜치·샌드박스
 
 ## 검증 근거
 
-Docker E2E, 실제 브라우저, kind/gVisor, 인증과 배포 등 확인한 범위는 [검증 기록](https://github.com/dj258255/b-studio/blob/main/docs/verification.md)에 있습니다. 재현 가능한 실패와 수정 과정은 [[문제 해결|Troubleshooting]]에서 찾을 수 있습니다.
+Docker E2E, 실제 브라우저, kind, 인증과 배포 등 확인한 범위는 [검증 기록](https://github.com/dj258255/b-studio/blob/main/docs/verification.md)에 있습니다. 재현 가능한 실패와 수정 과정은 [[문제 해결|Troubleshooting]]에서 찾을 수 있습니다.

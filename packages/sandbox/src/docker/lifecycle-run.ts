@@ -9,7 +9,7 @@ import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, LOAD_RUNNER_IMAGE } from './
 import { composeRef } from './git-mask';
 
 /**
- * 끝맺음(`removeSandboxImages`·`cleanup`·`destroy`)·사내 API 호출(`callExternal`)·부하 러너(`runLoad`)·런타임 확인(`assertRuntime`)·만들기의 앞뒤(`createWorkDir`·`abortCreate`)의 TS 껍데기(ADR-195 4f A4c-3c).
+ * 끝맺음(`removeSandboxImages`·`cleanup`·`destroy`)·사내 API 호출(`callExternal`)·부하 러너(`runLoad`)·만들기의 앞뒤(`createWorkDir`·`abortCreate`)의 TS 껍데기(ADR-195 4f A4c-3c).
  * docker를 부르는 순서와 지우는 대상은 Rust(crates/bstudio-io/src/lifecycle_io.rs)가 하고, 여기는 결과를 옛 글 그대로의 오류로 바꾸고 시크릿을 가리기만 한다.
  * 옛 TS는 `lifecycle-legacy.ts`(차등 시험의 기준값).
  *
@@ -51,7 +51,6 @@ export interface LoadContext extends LifecycleContext {
   /** managed 서비스의 컨테이너 포트. managed가 아니면 던진다 */
   managedPort: (name: string) => number;
   sandboxNetwork: string;
-  runtime?: string | undefined;
   readRunner: () => Promise<string>;
   cache: LoadCache;
   /** `docker run`을 기다리는 상한(ms). 러너가 스스로 끝내는 상한(요청 제한 시간 포함) + 여유 */
@@ -167,7 +166,6 @@ export async function runLoadTest(ctx: LoadContext, request: LoadRequest, { sign
       service: request.service,
       port,
       sandboxNetwork: ctx.sandboxNetwork,
-      ...(ctx.runtime ? { runtime: ctx.runtime } : {}),
       image: LOAD_RUNNER_IMAGE,
       requestJson: encodeNative(request),
       requests: request.requests,
@@ -204,15 +202,6 @@ export async function runLoadTest(ctx: LoadContext, request: LoadRequest, { sign
       return decodeNative<LoadResult>(result.json);
     default:
       throw new SandboxError('부하 러너를 실행하지 못했습니다', `결과를 알 수 없습니다: ${String((result as { kind: unknown }).kind)}`, { platform: true });
-  }
-}
-
-/** 런타임이 Docker 데몬에 등록돼 있는지 만들기 전에 알린다 */
-export async function assertRuntime(dockerBin: string, runtime: string): Promise<void> {
-  const result = await native.assertRuntime(dockerBin, runtime);
-  if (result.kind === 'info-failed') throw new SandboxError('Docker 데몬 정보를 읽지 못해 컨테이너 런타임을 확인하지 못했습니다', result.message);
-  if (result.kind === 'missing') {
-    throw new SandboxError(`컨테이너 런타임 '${runtime}'이 Docker 데몬에 등록되지 않았습니다 (등록된 런타임: ${result.available.join(', ') || '없음'})`);
   }
 }
 

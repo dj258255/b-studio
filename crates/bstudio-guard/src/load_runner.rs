@@ -56,8 +56,6 @@ pub struct LoadRunPlan<'a> {
     pub network: &'a str,
     pub sandbox_id: &'a str,
     pub threads: f64,
-    /// 샌드박스 컨테이너에 쓰는 Docker 런타임(gVisor 등). 서비스와 같은 격리로 돌린다. 빈 글자는 없는 것과 같다
-    pub runtime: Option<&'a str>,
     /// 러너 이미지. 샌드박스 출입구(edge)와 같은 이미지다
     pub image: &'a str,
 }
@@ -84,10 +82,6 @@ pub fn load_run_args(plan: &LoadRunPlan) -> Vec<String> {
     .iter()
     .map(|s| (*s).to_owned())
     .collect();
-    if let Some(runtime) = plan.runtime.filter(|r| !r.is_empty()) {
-        args.push("--runtime".into());
-        args.push(runtime.to_owned());
-    }
     args.push(plan.image.to_owned());
     args.extend(["node", "--input-type=module", "-"].iter().map(|s| (*s).to_owned()));
     args
@@ -268,17 +262,15 @@ mod tests {
 
     #[test]
     fn 러너_인자는_고립_옵션을_모두_담는다() {
-        let plan = LoadRunPlan { name: "n", network: "net", sandbox_id: "sb", threads: 2.0, runtime: Some("runsc"), image: "img:1" };
+        let plan = LoadRunPlan { name: "n", network: "net", sandbox_id: "sb", threads: 2.0, image: "img:1" };
         let args = load_run_args(&plan);
         assert_eq!(args[..5], ["run", "--rm", "--interactive", "--pull", "never"]);
         assert!(args.windows(2).any(|w| w == ["--label", "b-studio.sandbox=sb"]));
         assert!(args.windows(2).any(|w| w == ["--cpus", "2"]));
-        assert!(args.windows(2).any(|w| w == ["--runtime", "runsc"]));
+        assert!(!args.contains(&"--runtime".to_owned()));
         assert!(args.windows(2).any(|w| w == ["--cap-drop", "ALL"]));
         assert!(args.contains(&"--read-only".to_owned()));
         assert_eq!(args[args.len() - 4..], ["img:1", "node", "--input-type=module", "-"]);
-        let none = load_run_args(&LoadRunPlan { runtime: Some(""), ..plan });
-        assert!(!none.contains(&"--runtime".to_owned()));
     }
 
     #[test]

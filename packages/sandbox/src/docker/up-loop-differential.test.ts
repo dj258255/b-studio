@@ -213,8 +213,8 @@ async function observe(kind: 'legacy' | 'now', scenario: Scenario, env: Env): Pr
   const initial = scenario.initial ? await scenario.initial(env) : {};
   // 처음 쓰기(생성 때의 쓰기와 같다). 옛 쪽은 YAML, 새 쪽은 Rust 쓰개(JSON)
   if (!scenario.brokenOverrideDir) {
-    if (kind === 'legacy') await writeFile(overridePath, stringify(buildOverride(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts, gitMask: initial })));
-    else await writeComposeOverride(overridePath, overrideInputJson(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts }), initial);
+    if (kind === 'legacy') await writeFile(overridePath, stringify(buildOverride(proj, 'studio-p', { edgeScript, hostPorts, gitMask: initial })));
+    else await writeComposeOverride(overridePath, overrideInputJson(proj, 'studio-p', { edgeScript, hostPorts }), initial);
   }
   const controller = new AbortController();
   if (scenario.abort === 'before') controller.abort();
@@ -242,7 +242,6 @@ async function observe(kind: 'legacy' | 'now', scenario: Scenario, env: Env): Pr
       env: dockerEnv,
       overridePath,
       edgeScript,
-      runtime: undefined,
       hostPorts,
       evaluationAssets,
       dependencyPollMs: 1,
@@ -262,7 +261,7 @@ async function observe(kind: 'legacy' | 'now', scenario: Scenario, env: Env): Pr
       dockerBin: env.bin,
       env: dockerEnv,
       overridePath,
-      overrideInput: overrideInputJson(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts }),
+      overrideInput: overrideInputJson(proj, 'studio-p', { edgeScript, hostPorts }),
       gitMask: initial,
       evaluationAssets,
       args,
@@ -445,7 +444,7 @@ describe('HARDENED: 옛 쪽보다 더 막는 의도한 차이', () => {
   it('override를 만들지 못하면(입력의 모양이 어긋남) 옛 buildOverride가 던지던 오류와 같은 글이다', async () => {
     const env = await environment();
     const proj = project(env);
-    const bad = { edgeScript: '', runtime: undefined, hostPorts: { api: 'x' as unknown as number } };
+    const bad = { edgeScript: '', hostPorts: { api: 'x' as unknown as number } };
     const legacy = (() => {
       try {
         buildOverride(proj, 'studio-p', { ...bad, gitMask: {} });
@@ -474,11 +473,11 @@ describe('HARDENED: 옛 쪽보다 더 막는 의도한 차이', () => {
     const edgeScript = 'a\u007fb\u0085c\u2028d\u2029e\ufeffz\u009fé\u{1f600}\n\t"q"\\';
     const proj = project(env);
     const target = path.join(env.dir, 'compose.override.yaml');
-    await writeComposeOverride(target, overrideInputJson(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts: {} }), {});
+    await writeComposeOverride(target, overrideInputJson(proj, 'studio-p', { edgeScript, hostPorts: {} }), {});
     const text = await readFile(target, 'utf8');
     // YAML 파서(yaml 패키지)가 읽은 값이 옛 YAML 직렬화를 읽은 값과 같다
     const written = parse(text) as { services: Record<string, { command: string[] }> };
-    const legacy = parse(stringify(buildOverride(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts: {}, gitMask: {} }))) as { services: Record<string, { command: string[] }> };
+    const legacy = parse(stringify(buildOverride(proj, 'studio-p', { edgeScript, hostPorts: {}, gitMask: {} }))) as { services: Record<string, { command: string[] }> };
     expect(written).toEqual(legacy);
     // 위험한 글자는 글 그대로 들어 있지 않다
     for (const raw of ['\u007f', '\u0085', '\u2028', '\u2029', '\ufeff', '\u009f']) expect(text).not.toContain(raw);

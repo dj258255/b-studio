@@ -63,7 +63,6 @@ import type { ScannedProcess } from './stray-processes';
 import { bootNetworkFromUsage } from './usage';
 import {
   abortCreate,
-  assertRuntime,
   callExternalApi,
   cleanupSandbox,
   createWorkDir,
@@ -198,8 +197,6 @@ export interface LocalDockerProviderOptions {
   dockerBin?: string;
   /** 모든 서비스에 적용할 준비 정책. studio.yaml의 ready.timeoutSeconds가 우선한다 */
   readiness?: Partial<ReadinessPolicy>;
-  /** 샌드박스 컨테이너에 쓸 Docker 런타임 (예: gVisor의 runsc). 비우면 데몬 기본값(runc) */
-  runtime?: string;
   /** 사용량 조회(ps·inspect·stats) 전체의 상한(ms). 기본 15초. 테스트에서 짧게 준다 */
   statsTimeoutMs?: number;
   /** 의존 서비스가 준비됐는지 다시 확인하기까지의 간격(ms). 기본 500ms. 테스트에서 짧게 준다 */
@@ -213,18 +210,14 @@ export interface LocalDockerProviderOptions {
 
 /**
  * 로컬 Docker(compose)로 샌드박스를 만든다.
- * 개발 환경과 사내 서버 한 대 운영용 구현이다. 컨테이너 격리만으로 부족하면
- * gVisor/Kata 기반 제공자로 교체한다.
+ * 개발 환경과 사내 서버 한 대 운영용 구현이다.
  */
 export class LocalDockerProvider implements SandboxProvider {
   readonly name = 'local-docker';
   readonly #options: LocalDockerProviderOptions;
 
-  readonly isolation: string | undefined;
-
   constructor(options: LocalDockerProviderOptions = {}) {
     this.#options = options;
-    this.isolation = options.runtime;
   }
 
   /**
@@ -248,8 +241,6 @@ export class LocalDockerProvider implements SandboxProvider {
   }
 
   async create(project: LoadedProject, { secrets = {}, evaluationAssets: initialAssets = [] }: CreateSandboxOptions = {}): Promise<Sandbox> {
-    // 런타임이 없으면 compose up 도중이 아니라 샌드박스를 만들기 전에 알린다
-    if (this.#options.runtime) await assertRuntime(this.#options.dockerBin ?? 'docker', this.#options.runtime);
     const id = `studio-${project.spec.name}-${randomBytes(3).toString('hex')}`;
     const workDir = await createWorkDir();
     const overridePath = path.join(workDir, 'compose.override.yaml');
@@ -268,7 +259,7 @@ export class LocalDockerProvider implements SandboxProvider {
         redact: (text) => new Redactor(secrets).redact(text),
       });
       // override는 Rust가 JSON으로 쓴다(임시 파일 + rename). 샌드박스가 다시 쓸 때(#regeneratePorts, up)도 같은 쓰개를 쓴다
-      await writeComposeOverride(overridePath, overrideInputJson(project, id, { edgeScript, runtime: this.#options.runtime, hostPorts }), gitMask);
+      await writeComposeOverride(overridePath, overrideInputJson(project, id, { edgeScript, hostPorts }), gitMask);
       return new LocalDockerSandbox(id, project, workDir, overridePath, this.#options, secrets, edgeScript, gitMask, hostPorts, evaluationAssetRoot, evaluationAssets);
     } catch (error) {
       // 샌드박스를 돌려주지 못하면 destroy도 불리지 않는다. 이 create가 만든 작업 폴더와 그 샌드박스 id의 복사본 폴더를 여기서 지운다
@@ -306,7 +297,6 @@ class LocalDockerSandbox implements Sandbox {
   /** 부하 러너 스크립트 원문과 도커 CPU 수(캐시는 상태라 여기 남는다) */
   readonly #loadCache: LoadCache = {};
   #hostPorts: Record<string, number>;
-  readonly #runtime: string | undefined;
   /** 평가 자산 복사본을 두는 루트와 이 샌드박스의 자리(#745). 마운트와 sync가 같은 자리를 본다 */
   readonly #evaluationAssetRoot: string;
   readonly #evaluationAssetSandboxDir: string;
@@ -341,7 +331,6 @@ class LocalDockerSandbox implements Sandbox {
     this.#overridePath = overridePath;
     this.#dockerBin = options.dockerBin ?? 'docker';
     this.#readiness = options.readiness ?? {};
-    this.#runtime = options.runtime;
     this.#statsTimeoutMs = options.statsTimeoutMs ?? STATS_TIMEOUT_MS;
     this.#dependencyPollMs = options.dependencyPollMs ?? DEPENDENCY_POLL_MS;
     this.#secrets = secrets;
@@ -609,7 +598,6 @@ class LocalDockerSandbox implements Sandbox {
         ...this.#lifecycleContext(),
         managedPort: (name) => this.#managed(name).port,
         sandboxNetwork: SANDBOX_NETWORK,
-        runtime: this.#runtime,
         readRunner: () => readFile(LOAD_RUNNER_SCRIPT, 'utf8'),
         cache: this.#loadCache,
         limitMs: LOAD_LIMIT_MS,
@@ -747,7 +735,7 @@ class LocalDockerSandbox implements Sandbox {
 
   /** override의 입력에서 마스크만 뺀 것. 마스크는 쓰는 쪽(Rust)이 얹는다 */
   #overrideInput(): string {
-    return overrideInputJson(this.project, this.id, { edgeScript: this.#edgeScript, runtime: this.#runtime, hostPorts: this.#hostPorts });
+    return overrideInputJson(this.project, this.id, { edgeScript: this.#edgeScript, hostPorts: this.#hostPorts });
   }
 
   // docker/docker compose를 한 번 돌려 stdout·stderr를 모은다. 실행·취소는 Rust(crates/bstudio-io)가 한다(2c-2, #1043).
@@ -850,11 +838,6 @@ export async function preallocatePublicUrlPorts(project: LoadedProject): Promise
   if (targets.length === 0) return {};
   const ports = await Promise.all(targets.map(() => findFreeHostPort()));
   return Object.fromEntries(targets.map((name, index) => [name, ports[index]!]));
-}
-
-/** 스튜디오 서버·CLI 환경 변수 B_STUDIO_CONTAINER_RUNTIME. 격리 수준은 프로젝트가 아니라 운영자가 정한다 */
-export function runtimeFromEnv(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return native.runtimeFromEnv(env.B_STUDIO_CONTAINER_RUNTIME) ?? undefined;
 }
 
 /**

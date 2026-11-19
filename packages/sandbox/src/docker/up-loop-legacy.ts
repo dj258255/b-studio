@@ -24,7 +24,6 @@ export interface LegacyUpContext {
   env: NodeJS.ProcessEnv;
   overridePath: string;
   edgeScript: string;
-  runtime: string | undefined;
   hostPorts: Record<string, number>;
   evaluationAssets: readonly EvaluationAssetCopy[];
   dependencyPollMs: number;
@@ -41,7 +40,7 @@ export async function upOnceLegacy(ctx: LegacyUpContext, args: string[], signal?
   const docker = (dockerArgs: string[], abort?: AbortSignal) => runCommand(ctx.dockerBin, dockerArgs, { signal: abort, env: ctx.env });
   const composeArgs = (rest: string[]) => ['compose', '--project-name', ctx.id, '--project-directory', ctx.project.root, '--file', ctx.project.composePath, '--file', ctx.overridePath, ...rest];
   const writeOverride = async () => {
-    const yaml = stringify(buildOverride(ctx.project, ctx.id, { edgeScript: ctx.edgeScript, runtime: ctx.runtime, hostPorts: ctx.hostPorts, gitMask: ctx.state.gitMask }));
+    const yaml = stringify(buildOverride(ctx.project, ctx.id, { edgeScript: ctx.edgeScript, hostPorts: ctx.hostPorts, gitMask: ctx.state.gitMask }));
     const temporary = `${ctx.overridePath}.${randomBytes(4).toString('hex')}.tmp`;
     await writeFile(temporary, yaml);
     await rename(temporary, ctx.overridePath);

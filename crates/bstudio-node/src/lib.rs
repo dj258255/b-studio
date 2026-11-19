@@ -342,11 +342,6 @@ pub fn egress_audit_excerpt(lines: Vec<String>, max: f64) -> Vec<String> {
 }
 
 #[napi]
-pub fn parse_runtimes(stdout: String) -> Vec<String> {
-    docker_format::parse_runtimes(&stdout)
-}
-
-#[napi]
 pub fn parse_host_port(stdout: String) -> Result<f64> {
     fail(docker_format::parse_host_port(&stdout))
 }
@@ -3762,8 +3757,8 @@ pub fn load_threads(concurrent: f64, daemon_cpus: Option<f64>) -> f64 {
 }
 
 #[napi]
-pub fn load_run_args(name: String, network: String, sandbox_id: String, threads: f64, runtime: Option<String>, image: String) -> Vec<String> {
-    load_runner::load_run_args(&load_runner::LoadRunPlan { name: &name, network: &network, sandbox_id: &sandbox_id, threads, runtime: runtime.as_deref(), image: &image })
+pub fn load_run_args(name: String, network: String, sandbox_id: String, threads: f64, image: String) -> Vec<String> {
+    load_runner::load_run_args(&load_runner::LoadRunPlan { name: &name, network: &network, sandbox_id: &sandbox_id, threads, image: &image })
 }
 
 #[napi]
@@ -3808,11 +3803,6 @@ pub struct UpArgs {
 pub fn split_up_args(args: Vec<String>) -> UpArgs {
     let split = compose_helpers::split_up_args(&args);
     UpArgs { create: split.create, services: split.services, by_id: split.by_id }
-}
-
-#[napi]
-pub fn runtime_from_env(value: Option<String>) -> Option<String> {
-    compose_helpers::runtime_from_env(value.as_deref())
 }
 
 #[napi]
@@ -4929,26 +4919,6 @@ pub fn destroy_sandbox(env: Env, input: DestroyInputJs) -> Result<AsyncBlock<Des
     .build(&env)
 }
 
-/// `kind`: `present` · `missing`(available: 등록된 런타임) · `info-failed`(message: 옛 `execChecked`의 글)
-#[napi(object)]
-pub struct RuntimeCheckJs {
-    pub kind: String,
-    pub message: String,
-    pub available: Vec<String>,
-}
-
-#[napi]
-pub fn assert_runtime(env: Env, docker_bin: String, runtime: String) -> Result<AsyncBlock<RuntimeCheckJs>> {
-    AsyncBlockBuilder::new(async move {
-        Ok(match lio::assert_runtime(&docker_bin, &runtime).await {
-            lio::RuntimeCheck::Present => RuntimeCheckJs { kind: "present".into(), message: String::new(), available: Vec::new() },
-            lio::RuntimeCheck::Missing(available) => RuntimeCheckJs { kind: "missing".into(), message: String::new(), available },
-            lio::RuntimeCheck::InfoFailed(message) => RuntimeCheckJs { kind: "info-failed".into(), message, available: Vec::new() },
-        })
-    })
-    .build(&env)
-}
-
 /// 임시 폴더 아래에 작업 폴더(`b-studio-` + 6자, 권한 0700)를 만들고 절대 경로를 돌려준다
 #[napi]
 pub async fn make_work_dir() -> Result<String> {
@@ -5014,7 +4984,6 @@ pub struct LoadInputJs {
     pub service: String,
     pub port: f64,
     pub sandbox_network: String,
-    pub runtime: Option<String>,
     pub image: String,
     pub request_json: String,
     pub requests: f64,
@@ -5051,7 +5020,6 @@ pub fn run_load(env: Env, input: LoadInputJs, signal: Option<AbortSignal>) -> Re
         service: input.service,
         port: input.port,
         sandbox_network: input.sandbox_network,
-        runtime: input.runtime,
         image: input.image,
         request_json: input.request_json,
         requests: input.requests,

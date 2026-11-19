@@ -482,7 +482,7 @@ async function observeRetry(kind: 'legacy' | 'now', scenario: RetryScenario, env
   const overridePath = path.join(runDir, 'compose.override.yaml');
   const edgeScript = '// edge\n';
   const initialPorts: Record<string, number> = scenario.refs ? { api: 40000 } : {};
-  await writeComposeOverride(overridePath, overrideInputJson(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts: initialPorts }), {});
+  await writeComposeOverride(overridePath, overrideInputJson(proj, 'studio-p', { edgeScript, hostPorts: initialPorts }), {});
   const secrets = scenario.secrets ?? {};
   const redactor = new Redactor(secrets);
   const redact = (text: string) => redactor.redact(text);
@@ -519,7 +519,6 @@ async function observeRetry(kind: 'legacy' | 'now', scenario: RetryScenario, env
     const ctx: LegacyRetryContext = {
       ...common,
       edgeScript,
-      runtime: undefined,
       dependencyPollMs: 1,
       dependencyWaitMs: 50,
       redact,
@@ -530,7 +529,7 @@ async function observeRetry(kind: 'legacy' | 'now', scenario: RetryScenario, env
   } else {
     run = upWithPortRetry({
       ...common,
-      overrideInput: overrideInputJson(proj, 'studio-p', { edgeScript, runtime: undefined, hostPorts: status.hostPorts }),
+      overrideInput: overrideInputJson(proj, 'studio-p', { edgeScript, hostPorts: status.hostPorts }),
       gitMask: status.gitMask,
       args: ['up', '--detach', '--remove-orphans', ...upArgs],
       pollMs: 1,

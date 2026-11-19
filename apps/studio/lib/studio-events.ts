@@ -127,7 +127,7 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
-  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 원격 브라우저·나란히 보기를 숨긴다 */
+  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 나란히 보기를 숨긴다 */
   experimental?: boolean;
   /** 세션 터미널을 쓸 수 있다(개인 PC 모드, 컨테이너 방식이면 실험 기능도 — 이슈 #673, ADR-200). 없거나 false면 대화 패널만 보인다 */
   terminal?: boolean;
@@ -145,7 +145,7 @@ export interface SessionSnapshot {
    * 사람이 desk에서 켜고(로컬 토큰이 있는 요청만), 그 뒤 처음 시작되는 만들기 실행이 가져가며 꺼진다
    */
   allowCheckChangesNext?: true;
-  /** 샌드박스 컨테이너의 Docker 런타임 (예: gVisor의 runsc). 없으면 데몬 기본값 */
+  /** 제공자가 알리는 격리 표시. 이를 채우던 제공자·런타임을 지워 지금은 늘 비어 있다 */
   runtime?: string;
   /** 데모 모드에서 다음에 실행할 수 있는 요청 */
   nextDemoRequest?: string;
