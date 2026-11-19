@@ -2,7 +2,7 @@ import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 /**
- * 화면 확인이 남긴 스크린샷과 요소 선택 스크린샷을 세션 폴더에 저장하고 제공한다.
+ * 화면 확인이 남긴 스크린샷을 세션 폴더에 저장하고 제공한다.
  * 저장 위치는 체크포인트 Git 저장소 안(`<세션 폴더>/.git/b-studio/artifacts`)이다.
  * 작업 폴더에 두면 `git add -A`가 커밋에 넣고 되돌리기의 `git clean -fd`가 지워 버린다
  */

@@ -140,7 +140,7 @@ export interface SessionSnapshot {
   externals?: ExternalApiView[];
   /** 프로젝트 studio.yaml에 deploy 절이 있다. 없으면 실행 탭의 "배포" 하위 탭을 숨긴다(로컬 폴더 모드 기본값) */
   hasDeploy?: boolean;
-  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 원격 브라우저·디자인 비교·배포·나란히 보기를 숨긴다 */
+  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 디자인 비교·배포·나란히 보기를 숨긴다 */
   experimental?: boolean;
   /** 세션 터미널을 쓸 수 있다(개인 PC 모드, 컨테이너 방식이면 실험 기능도 — 이슈 #673, ADR-200). 없거나 false면 대화 패널만 보인다 */
   terminal?: boolean;
