@@ -1062,7 +1062,7 @@ async function startSession({
           // 작업 폴더(모노레포면 저장소 루트)와 프로젝트 폴더를 원본의 같은 자리와 짝짓는다. 원본 폴더 = source.root, 그 저장소 루트는 같은 상대 경로만큼 위다
           const up = path.relative(workDir, project.root);
           const sourceTop = up ? path.resolve(source.root, ...up.split(path.sep).map(() => '..')) : source.root;
-          await recordFolderTrust(session, source.root, [
+          await recordFolderTrust(session, seed !== undefined, [
             [workDir, sourceTop],
             [project.root, source.root],
           ]);
@@ -7422,21 +7422,28 @@ function terminalModel(session: Session): { model?: string } {
  * 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 이 컴퓨터 방식 터미널의 claude가 쓰는 세션만 적는다 — 컨테이너 방식의 claude는
  * 컨테이너 안의 설정을 읽어 이 기록이 닿지 않는다. 사용자가 연 로컬 폴더는 부르지 않는다. 던지지 않는다: 실패하면 사유를 세션에 남기고 알림을 낸다
  */
-async function recordFolderTrust(session: Session, sourceRoot: string, folders: readonly (readonly [work: string, source: string])[]): Promise<void> {
+async function recordFolderTrust(session: Session, seeded: boolean, folders: readonly (readonly [work: string, source: string])[]): Promise<void> {
   try {
     if (!sessionTerminalAllowed() || sessionTerminalMode() !== 'host' || terminalCliKind(session) !== 'claude') return;
+    // 다른 세션에서 이어받은 세션(작업 분해 레인·통합)의 내용에는 에이전트가 쓴 것이 섞여 있다. 훅이 부르는 스크립트처럼 설정 파일만 견줘서는
+    // 알 수 없는 것이 있어, 사람이 믿은 원본의 내용이 아니므로 적지 않는다(신뢰 창이 뜬다)
+    if (seeded) {
+      session.folderTrust = { recorded: false, reason: '다른 세션에서 이어받은 세션이라(에이전트가 쓴 내용이 섞여 있다) 폴더 신뢰를 적지 않았습니다' };
+      return;
+    }
     const { configDir } = await sessionAccount(session.snapshot);
-    // 세션 폴더의 내용은 원본에서 왔다. 사람이 원본을 믿지 않았으면 적지 않는다(그때는 알림 없이 터미널 레인이 신뢰 창 안내를 사유와 함께 보인다)
-    const source = await sourceFolderTrusted(sourceRoot, configDir ? { configDir } : {});
-    if (!source.trusted) {
+    const pairs = [...new Map(folders.map(([work, original]) => [work, original] as const))];
+    // 세션 폴더의 내용은 원본에서 왔다. 짝마다 그 원본(모노레포면 저장소 루트와 하위 폴더 각각)을 사람이 믿었어야 한다. 하나라도 아니면 아무것도 적지 않는다
+    // (믿은 기록이 없거나 파일이 없는 것은 흔한 경우라 알림 없이 터미널 레인 안내로 두고, 파일을 읽지 못했으면 알린다)
+    for (const [, original] of pairs) {
+      const source = await sourceFolderTrusted(original, configDir ? { configDir } : {});
+      if (source.trusted) continue;
       session.folderTrust = { recorded: false, reason: source.reason };
-      // 설정 파일은 있는데 읽지 못했으면(깨진 JSON 등) 사용자가 알 수 있게 알린다. 믿은 기록이 없거나 파일이 없는 것은 흔한 경우라 터미널 레인 안내로 둔다
       if (!source.missing && !source.notTrusted) {
         emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${source.reason})`, at: new Date().toISOString() });
       }
       return;
     }
-    const pairs = [...new Map(folders.map(([work, original]) => [work, original] as const))];
     // 에이전트가 이어받은 세션(작업 분해 레인)에서 훅·MCP 설정을 바꿨으면 그 내용은 사람이 믿은 원본이 아니다. 하나라도 다르면 아무것도 적지 않는다
     for (const [folder, original] of pairs) {
       const changed = await execSurfaceChange(folder, original);

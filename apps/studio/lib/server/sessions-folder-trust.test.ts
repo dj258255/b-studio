@@ -212,6 +212,43 @@ describe('복사 모드 세션의 폴더 신뢰', () => {
     await deleteSession(created.id);
   });
 
+  it('다른 세션에서 이어받은 세션(작업 분해 레인)은 적지 않는다 — 에이전트가 쓴 내용(훅이 부르는 스크립트 등)이 섞여 있다', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const git = (...args: string[]) => execFileSync('git', ['-C', fake.root, ...args], { stdio: 'ignore' });
+    git('init', '-q');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+    const first = await createSession('trustproj', 'kim', 'copy');
+    expect((await readJson(defaultConfig)).projects[await realpath(first.workDir)]).toEqual({ hasTrustDialogAccepted: true });
+    const lane = await createSession('trustproj', 'kim', 'copy', { seedFromSessionId: first.id });
+    expect((await readJson(defaultConfig)).projects[await realpath(lane.workDir)]).toBeUndefined();
+    expect(sessionFolderTrustFailure(lane.id)).toContain('이어받은');
+    for (const id of [lane.id, first.id]) {
+      await stopSession(id);
+      await deleteSession(id);
+    }
+  });
+
+  it('모노레포 하위 폴더 프로젝트는 하위 폴더만 믿었으면 저장소 루트(작업 폴더)를 적지 않는다', async () => {
+    const { execFileSync } = await import('node:child_process');
+    const repo = path.join(root, 'mono');
+    const sub = path.join(repo, 'apps', 'shop');
+    await makeProject(sub, 'trustproj');
+    await writeFile(path.join(sub, 'studio.yaml'), (await readFile(path.join(sub, 'studio.yaml'), 'utf8')) + 'repository:\n  monorepo: true\n');
+    execFileSync('git', ['-C', repo, 'init', '-q'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', repo, 'add', '-A'], { stdio: 'ignore' });
+    execFileSync('git', ['-C', repo, 'commit', '-q', '-m', 'init'], { stdio: 'ignore' });
+    fake.root = sub;
+    // 사람이 하위 폴더 키만 믿었다(저장소 루트 키는 없다)
+    await writeFile(defaultConfig, JSON.stringify({ projects: { [await realpath(sub)]: { hasTrustDialogAccepted: true } } }, null, 2));
+    const before = await readFile(defaultConfig, 'utf8');
+    const created = await createSession('trustproj', 'kim', 'copy');
+    expect(await readFile(defaultConfig, 'utf8')).toBe(before);
+    expect(sessionFolderTrustFailure(created.id)).toContain('믿은 적이 없어');
+    await stopSession(created.id);
+    await deleteSession(created.id);
+  });
+
   it('원본과 같은 실행 설정(.mcp.json·.claude/settings.json)을 복사한 세션 폴더는 적는다', async () => {
     await mkdir(path.join(fake.root, '.claude'), { recursive: true });
     await writeFile(path.join(fake.root, '.claude', 'settings.json'), '{"hooks":{}}\n');
