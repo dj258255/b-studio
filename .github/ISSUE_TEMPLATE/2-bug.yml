@@ -39,7 +39,7 @@ body:
         - 웹 스튜디오 · demo
         - 웹 스튜디오 · api
         - 웹 스튜디오 · claude-code
-        - CLI (studio up·agent·verify·deploy)
+        - CLI (studio up·agent·verify)
         - 모름
     validations:
       required: true

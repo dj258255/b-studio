@@ -19,7 +19,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -731,7 +730,6 @@
           "experimental": true,
           "terminal": true,
           "terminalMode": "host",
-          "hasDeploy": false,
           "services": [
             {
               "name": "app",
@@ -1522,7 +1520,6 @@
         "experimental": true,
         "externals": [],
         "fileRevision": 4,
-        "hasDeploy": false,
         "id": "<sid>",
         "mode": "claude-code",
         "owner": "local",

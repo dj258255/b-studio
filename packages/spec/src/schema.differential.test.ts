@@ -42,7 +42,6 @@ const BASE = {
   resources: { db: { memory: '512m' } },
   network: { egress: ['example.com', { host: '*.example.com', methods: ['GET'], paths: ['/x'] }] },
   secrets: { TOKEN: { services: ['web'] } },
-  deploy: { services: { web: { dockerfile: 'Dockerfile', port: 8300 } } },
   design: { figma: { fileUrl: 'https://www.figma.com/design/abc/x' } },
   workflow: {
     required: ['plan', 'implement', 'run', 'test'],
@@ -95,7 +94,6 @@ const MEASURED: Array<[string, any, any, unknown]> = [
   ['이름 중복', legacy.StudioSpecSchema, current.StudioSpecSchema, { ...BASE, workflow: { tests: [{ name: 'unit', service: 'web', command: ['x'] }, { name: 'unit', service: 'web', command: ['y'] }] } }],
   ['문자열 min', legacy.ManagedServiceSchema, current.ManagedServiceSchema, { source: 'managed', template: '', path: 'web', port: 3000, preview: 'browser' }],
   ['null', legacy.StudioSpecSchema, current.StudioSpecSchema, { ...BASE, name: null }],
-  ['deploy 포트 범위', legacy.DeploySchema, current.DeploySchema, { services: { web: { port: 80 } } }],
   ['여러 오류 순서', legacy.StudioSpecSchema, current.StudioSpecSchema, { version: 1, name: 'Bad Name', services: { web: { source: 'managed', template: 'nextjs', path: 'web', port: 0, preview: 'browser' } }, secrets: { bad: { services: ['UPPER'] } } }],
   ['stage enum', legacy.WorkflowSchema, current.WorkflowSchema, { required: ['deploy'] }],
   ['viewport 변환', legacy.WorkflowPageCheckSchema, current.WorkflowPageCheckSchema, { service: 'web', path: '/', mode: 'browser', viewport: 'mobile' }],
@@ -132,7 +130,6 @@ services:
 
 const YAML_CASES = [
   SPEC_YAML,
-  `${SPEC_YAML}deploy:\n  services:\n    web: { port: 80 }\n`,
   `${SPEC_YAML}repository:\n  monorepo: "yes"\n`,
   `${SPEC_YAML}review:\n  maxRounds: 0\n`,
   `${SPEC_YAML}guide:\n  maxChars: 0\n`,
@@ -154,6 +151,23 @@ const YAML_CASES = [
   'version: 1\nname: x\nservices: [a]\n',
   'services: 3\n',
 ];
+
+describe('schema: 의도한 차이', () => {
+  const removed = '`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요';
+
+  it('deploy 절은 옛 스키마는 받고, 새 스키마는 지우라고 거절한다', () => {
+    const input = { ...BASE, deploy: { services: { web: { dockerfile: 'Dockerfile', port: 8300 } } } };
+    expect(legacy.StudioSpecSchema.safeParse(input).success).toBe(true);
+    expect(normalized(current.StudioSpecSchema.safeParse(input))).toEqual({ ok: false, issues: [{ path: ['deploy'], message: removed }] });
+  });
+
+  it('deploy.dockerfile에 어떤 글자가 와도 새 스키마는 지우라고 거절한다', () => {
+    for (const dockerfile of ['Dockerfile', '../Dockerfile', '', '\u0000', 'a b', 'Dockerfile\u2028']) {
+      const input = { ...BASE, deploy: { services: { web: { dockerfile } } } };
+      expect(normalized(current.StudioSpecSchema.safeParse(input))).toEqual({ ok: false, issues: [{ path: ['deploy'], message: removed }] });
+    }
+  });
+});
 
 describe('schema: legacy Zod와 Rust가 같다', () => {
   it('측정한 오류 꼴 전부가 같은 issues(path·message·순서)를 낸다', () => {
@@ -221,7 +235,6 @@ describe('schema: legacy Zod와 Rust가 같다', () => {
       ['load', legacy.WorkflowLoadCheckSchema, current.WorkflowLoadCheckSchema, BASE.workflow.loadChecks[0]],
       ['egress', legacy.EgressRuleSchema, current.EgressRuleSchema, BASE.network.egress[1]],
       ['resource', legacy.ResourceLimitSchema, current.ResourceLimitSchema, BASE.resources.db],
-      ['deploy', legacy.DeploySchema, current.DeploySchema, BASE.deploy],
       ['design', legacy.DesignSchema, current.DesignSchema, BASE.design],
       ['external', legacy.ExternalServiceSchema, current.ExternalServiceSchema, BASE.services.users],
       ['auto', legacy.AutoPageChecksSchema, current.AutoPageChecksSchema, BASE.workflow.autoPageChecks],

@@ -19,7 +19,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -213,7 +212,6 @@
           "experimental": true,
           "terminal": true,
           "terminalMode": "host",
-          "hasDeploy": false,
           "services": [
             {
               "name": "app",
@@ -431,7 +429,6 @@
         "error": "docker compose build 실패 (<sandbox>)\nbuild failed: base image not found",
         "experimental": true,
         "externals": [],
-        "hasDeploy": false,
         "id": "<sid>",
         "mode": "claude-code",
         "owner": "local",

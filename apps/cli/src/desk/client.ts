@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskDeployStatus, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
+import type { DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
 import type { LiveChangesView } from './changes';
 import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
@@ -540,7 +540,7 @@ export class StudioClient {
     }
   }
 
-  // ─── 실행·배포·미리보기·저장소 화면(#895) ───
+  // ─── 실행·미리보기·저장소 화면(#895) ───
 
   /** 세션 이벤트를 받는다. 처음에 스냅샷과 지금까지의 기록이 오고, 그 뒤로 새 이벤트가 온다. signal로 끊으면 끝난다 */
   async sessionEvents(id: string, onEvent: (event: DeskSessionEvent) => void, signal: AbortSignal): Promise<void> {
@@ -582,19 +582,6 @@ export class StudioClient {
     } finally {
       reader.cancel().catch(() => {});
     }
-  }
-
-  deploys(id: string): Promise<DeskDeployStatus> {
-    return this.#request('GET', `/api/sessions/${encodeURIComponent(id)}/deploys`);
-  }
-
-  /** 체크포인트를 운영에 배포한다. 진행은 세션 이벤트(deploy_*)로 온다 */
-  async deploy(id: string, sha: string): Promise<void> {
-    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/deploys`, { sha });
-  }
-
-  async rollback(id: string, releaseId: string): Promise<void> {
-    await this.#request('POST', `/api/sessions/${encodeURIComponent(id)}/deploys/rollback`, { releaseId });
   }
 
   /** 서비스를 켜거나 끈다(서비스 선택). 상태는 세션 이벤트(service)로 온다 */

@@ -470,7 +470,7 @@ async fn check(g: &Gate) -> Res<JsValue> {
 
     let failed: Vec<JsValue> = checks.iter().filter(|check| !is_ok(check)).cloned().collect();
     if report_ok && failed.is_empty() {
-        // light는 건너뛴 단계를 실패로 보지 않는다. 통과한 단계만 남겨 배포 조건(releaseRequires)이 자연히 막는다
+        // light는 건너뛴 단계를 실패로 보지 않는다. 통과한 단계만 남긴다
         if g.light {
             g.set_state(vec![("verified", JsValue::Bool(true))]).await?;
             g.gate_done(report_ok, true).await?;

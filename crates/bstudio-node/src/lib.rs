@@ -510,104 +510,6 @@ pub fn crash_log_excerpt(lines: Vec<String>, max: u32) -> Vec<String> {
     readiness::crash_log_excerpt(&lines, max as usize)
 }
 
-// ── 무중단 배포 계획(ADR-191 2단계 2b-2b 셋째 묶음, #1036). TS 껍데기: packages/sandbox/src/docker/deploy-plan.ts
-// 입력은 JSON 문자열(encodeNative), 출력도 JSON 문자열이다. 객체를 돌려주는 `releasesToRetire`·`trimRecords`는 목록 안 위치를 낸다
-// (TS가 같은 객체를 돌려주도록). 모양이 어긋난 입력은 던진다
-
-use bstudio_guard::deploy_plan;
-
-#[napi]
-pub fn empty_deploy_state(project: String) -> String {
-    out(&deploy_plan::empty_deploy_state(&project))
-}
-
-#[napi]
-pub fn deploy_base_name(project: String) -> String {
-    deploy_plan::base_name(&project)
-}
-
-#[napi]
-pub fn deploy_release_name(project: String, id: String) -> String {
-    deploy_plan::release_name(&project, &id)
-}
-
-#[napi]
-pub fn deploy_proxy_name(project: String) -> String {
-    deploy_plan::proxy_name(&project)
-}
-
-#[napi]
-pub fn deploy_image_name(project: String, service: String, id: String) -> String {
-    deploy_plan::image_name(&project, &service, &id)
-}
-
-#[napi]
-pub fn deploy_container_name(compose_project: String, service: String) -> String {
-    deploy_plan::container_name(&compose_project, &service)
-}
-
-/// `now_ms`는 `Date.getTime()`
-#[napi]
-pub fn new_release_id(now_ms: f64) -> String {
-    deploy_plan::new_release_id(now_ms)
-}
-
-#[napi]
-pub fn proxy_listen_port(index: f64) -> f64 {
-    deploy_plan::proxy_listen_port(index)
-}
-
-/// 부가 서비스가 없으면 `"null"`
-#[napi]
-pub fn plan_base_compose(config_json: String, project_json: String) -> Result<String> {
-    let config = input(&config_json, "compose 설정")?;
-    let project = input(&project_json, "프로젝트")?;
-    Ok(match fail(deploy_plan::plan_base_compose(&config, &project))? {
-        Some(plan) => out(&plan),
-        None => "null".to_owned(),
-    })
-}
-
-#[napi]
-pub fn plan_release_compose(config_json: String, project_json: String, release_id: String, images_json: String) -> Result<String> {
-    let config = input(&config_json, "compose 설정")?;
-    let project = input(&project_json, "프로젝트")?;
-    let images = input(&images_json, "운영 이미지")?;
-    Ok(out(&fail(deploy_plan::plan_release_compose(&config, &project, &release_id, &images))?))
-}
-
-/// `build_json`·`environment_json`은 없으면 `"null"`
-#[napi]
-pub fn build_args_for(dockerfile: String, build_json: String, environment_json: String) -> Result<String> {
-    let build = input(&build_json, "build")?;
-    let environment = input(&environment_json, "environment")?;
-    Ok(out(&fail(deploy_plan::build_args_for(&dockerfile, Some(&build), Some(&environment)))?))
-}
-
-#[napi]
-pub fn summarize_build_output(output: String, max_lines: f64) -> String {
-    deploy_plan::summarize_build_output(&output, max_lines)
-}
-
-#[napi]
-pub fn build_caddyfile(routes_json: String) -> Result<String> {
-    fail(deploy_plan::build_caddyfile(&input(&routes_json, "프록시 경로")?))
-}
-
-/// `statuses_json`은 릴리스의 `status` 목록. 정리할 릴리스의 위치를 돌려준다
-#[napi]
-pub fn releases_to_retire(statuses_json: String, keep_previous: f64) -> Result<Vec<u32>> {
-    let JsValue::Arr(statuses) = input(&statuses_json, "릴리스 상태 목록")? else { return Err(Error::from_reason("릴리스 상태 목록은 배열이어야 합니다")) };
-    Ok(deploy_plan::releases_to_retire(&statuses, keep_previous).into_iter().map(|i| i as u32).collect())
-}
-
-/// `ids_json`은 릴리스의 `id` 목록. 남길 릴리스의 위치를 돌려준다
-#[napi]
-pub fn trim_records(ids_json: String, active: Option<String>) -> Result<Vec<u32>> {
-    let JsValue::Arr(ids) = input(&ids_json, "릴리스 id 목록")? else { return Err(Error::from_reason("릴리스 id 목록은 배열이어야 합니다")) };
-    Ok(deploy_plan::trim_records(&ids, active.as_deref()).into_iter().map(|i| i as u32).collect())
-}
-
 // ── I/O 조율: stream-exec(2단계 2c-1, #1041). 자식 프로세스 출력을 파일로 흘리거나 파일을 입력으로 넣는다.
 // 판정은 하지 않는다 — bstudio-io가 syscall을 하고, 여기는 JS 값을 바꾸고 AbortSignal을 취소에 잇는다(ADR-193).
 // 동기 함수로 둔다: !Send인 AbortSignal을 JS 스레드에서 받아 Send한 Notify로 바꾸면, 작업 future는 Notify만 들어 Send다.
@@ -715,41 +617,6 @@ pub fn run_command(
             }
             None => bstudio_io::process::run_command(&bin, &args, input.as_deref(), pairs.as_deref(), cwd.as_deref(), cancel.notified()).await,
         };
-        Ok(ExecResult::from(output))
-    };
-    AsyncBlockBuilder::new(future).build(&env)
-}
-
-/// `bin args`를 실행하되 출력을 줄 단위로 `on_line`에 역류시키고 뒤쪽 200K를 모아 돌려준다(TS deploy `#docker`).
-/// `on_line`은 `ThreadsafeFunction`으로 JS 콜백을 Rust 작업 스레드에서 부른다(CalleeHandled=false라 `(line)` 한 인자).
-/// deploy의 onLine은 빠른 로그 출력이라 non-blocking push로 충분하다(백프레셔는 2c-3b의 logs에서 다룬다, #1045).
-#[napi]
-pub fn run_command_streaming(
-    env: Env,
-    bin: String,
-    args: Vec<String>,
-    input: Option<String>,
-    env_vars: Option<HashMap<String, String>>,
-    cwd: Option<String>,
-    on_line: ThreadsafeFunction<String, (), String, Status, false>,
-    signal: Option<AbortSignal>,
-) -> Result<AsyncBlock<ExecResult>> {
-    let pairs = env_pairs(env_vars);
-    let cancel = abort_notify(signal);
-    let callback: bstudio_io::streaming::OnLine = Arc::new(move |line: String| {
-        on_line.call(line, ThreadsafeFunctionCallMode::NonBlocking);
-    });
-    let future = async move {
-        let output = bstudio_io::streaming::run_command_streaming(
-            &bin,
-            &args,
-            input.as_deref(),
-            pairs.as_deref(),
-            cwd.as_deref(),
-            callback,
-            cancel.notified(),
-        )
-        .await;
         Ok(ExecResult::from(output))
     };
     AsyncBlockBuilder::new(future).build(&env)
@@ -1035,11 +902,7 @@ impl ExecSession {
     }
 }
 
-// ── I/O 조율: 배포 개별 I/O(2단계 2c-5). deploy.ts의 잠금·빈 포트·상태/compose 파일·운영 주소 확인 한 번.
-// 파일·소켓 syscall은 blocking이라 spawn_blocking으로 JS 스레드 밖에서 돌린다. 판정은 하지 않는다.
-use bstudio_io::deploy_io;
 use std::path::Path;
-use std::time::Duration;
 
 fn io_error(context: &str, error: std::io::Error) -> Error {
     Error::from_reason(format!("{context}: {error}"))
@@ -1047,65 +910,6 @@ fn io_error(context: &str, error: std::io::Error) -> Error {
 
 async fn blocking<T: Send + 'static>(task: impl FnOnce() -> T + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(task).await.map_err(|e| Error::from_reason(format!("I/O 작업이 중단됐습니다: {e}")))
-}
-
-/// `127.0.0.1`의 빈 포트 하나
-#[napi]
-pub async fn free_port() -> Result<u32> {
-    let port = blocking(deploy_io::free_port).await?.map_err(|e| io_error("빈 포트를 찾지 못했습니다", e))?;
-    Ok(u32::from(port))
-}
-
-/// 배포 잠금을 잡는다. 잡았으면 0, 살아 있는 프로세스가 쥐고 있으면 그 pid(0이 아님). 그 밖의 I/O 오류는 거절한다
-#[napi]
-pub async fn acquire_deploy_lock(lock: String) -> Result<u32> {
-    match blocking(move || deploy_io::acquire_lock(Path::new(&lock))).await?.map_err(|e| io_error("배포 잠금을 잡지 못했습니다", e))? {
-        deploy_io::LockOutcome::Acquired => Ok(0),
-        deploy_io::LockOutcome::Held(pid) => Ok(pid),
-    }
-}
-
-/// 배포 잠금 파일을 지운다(없거나 지우지 못해도 알리지 않는다)
-#[napi]
-pub async fn release_deploy_lock(lock: String) -> Result<()> {
-    blocking(move || deploy_io::release_lock(Path::new(&lock))).await
-}
-
-/// 파일을 UTF-8 문자열로 읽는다. 없거나 읽지 못하면 null
-#[napi]
-pub async fn read_text_file(path: String) -> Result<Option<String>> {
-    blocking(move || deploy_io::read_text(Path::new(&path))).await
-}
-
-/// 부모 폴더를 만들고 파일을 쓴다(덮어쓴다)
-#[napi]
-pub async fn write_text_file(path: String, content: String) -> Result<()> {
-    blocking(move || deploy_io::write_text(Path::new(&path), &content)).await?.map_err(|e| io_error("파일을 쓰지 못했습니다", e))
-}
-
-/// 부모 폴더를 만들고 임시 파일에 쓴 뒤 rename으로 바꿔 넣는다
-#[napi]
-pub async fn write_text_file_atomic(path: String, content: String) -> Result<()> {
-    blocking(move || deploy_io::write_text_atomic(Path::new(&path), &content)).await?.map_err(|e| io_error("파일을 쓰지 못했습니다", e))
-}
-
-/// `probe_http_status`의 결과. 상태를 얻으면 `status`, 못 얻으면 `error`(문장)
-#[napi(object)]
-pub struct HttpProbe {
-    pub status: Option<u32>,
-    pub error: Option<String>,
-}
-
-/// `http://127.0.0.1:<port><path>`에 GET 한 번(리다이렉트 안 따름, 본문 안 읽음). 던지지 않는다
-#[napi]
-pub async fn probe_http_status(port: u32, path: String, timeout_ms: u32) -> Result<HttpProbe> {
-    let Ok(port) = u16::try_from(port) else {
-        return Ok(HttpProbe { status: None, error: Some(format!("포트 {port}이(가) 범위를 벗어났습니다")) });
-    };
-    Ok(match deploy_io::probe_http_status(port, &path, Duration::from_millis(u64::from(timeout_ms))).await {
-        Ok(status) => HttpProbe { status: Some(u32::from(status)), error: None },
-        Err(error) => HttpProbe { status: None, error: Some(error) },
-    })
 }
 
 // ── 테스트 발견(ADR-191 3a). 결과는 JSON 문자열이다(옛 TS의 JSON.stringify와 같은 글자). TS 껍데기: packages/agent/src/test-discovery.ts
@@ -3185,7 +2989,7 @@ pub fn workspace_input_problem(file: String, backslash_sep: bool, external: bool
     u32::from(wg::input_problem(&file, backslash_sep, external))
 }
 
-// ── agent: 워크플로 판정(3단계 3v). 트레일러 만들기·읽기, 단계, 배포 막음, 검토, 확인 요약. 형 변환만 한다.
+// ── agent: 워크플로 판정(3단계 3v). 트레일러 만들기·읽기, 단계, 릴리스 조건 판정, 검토, 확인 요약. 형 변환만 한다.
 // TS 껍데기: packages/agent/src/workflow.ts, packages/agent/src/checkpoints.ts
 
 use bstudio_guard::workflow as wf;
@@ -5931,7 +5735,7 @@ impl SessionRecord {
         self.guard().replace_history(events_json).map_err(Error::from_reason)
     }
 
-    /// 서버가 멈춰 끝나지 못한 요청·되돌리기·원격 동기화·배포를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수.
+    /// 서버가 멈춰 끝나지 못한 요청·되돌리기·원격 동기화(옛 배포 포함)를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수.
     /// 이벤트를 읽지 못하면 던지고 아무것도 덧붙이지 않는다
     #[napi]
     pub fn close_unfinished(&self, reason: String) -> Result<u32> {
