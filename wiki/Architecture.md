@@ -7,7 +7,7 @@
 | `apps/cli` | 기동, 스튜디오 켜고 끄기, 단일 에이전트 요청, 지금 변경 검증, 터미널 작업대(`desk`), 배포, 인증 토큰 |
 | `apps/studio` | 세션·대화·미리보기·API·로그 UI와 Agent Fleet, 세션 터미널과 그 관문, AI 규칙표와 AI별 결과 |
 | `packages/spec` | `studio.yaml` 스키마와 compose 교차 검증 |
-| `packages/sandbox` | Docker/Kubernetes, 준비 판정, 네트워크·시크릿·DB |
+| `packages/sandbox` | Docker, 준비 판정, 네트워크·시크릿·DB |
 | `packages/agent` | 모델 도구 루프, 검증 게이트, Git 체크포인트와 원격 연동 |
 
 ```mermaid
@@ -34,6 +34,6 @@ flowchart TB
 
 ## 확장 지점
 
-`SandboxProvider`는 Local Docker와 Kubernetes 구현을, `ModelClient`는 Anthropic·OpenAI 호환 API·Gemini·Claude Code 실행을 교체합니다. 모델이 달라져도 작업 도구와 검증 게이트는 같은 계약을 사용합니다.
+`SandboxProvider`는 로컬 Docker 구현을, `ModelClient`는 Anthropic·OpenAI 호환 API·Gemini·Claude Code 실행을 교체합니다. 모델이 달라져도 작업 도구와 검증 게이트는 같은 계약을 사용합니다.
 
 상세 요청 흐름은 [저장소 아키텍처 문서](https://github.com/dj258255/b-studio/blob/main/docs/architecture.md), 결정별 비교는 [ADR](https://github.com/dj258255/b-studio/blob/main/docs/decisions.md)를 참고하세요.

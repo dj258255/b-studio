@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ComposeModel } from '../kubernetes/compose-model';
+import type { ComposeModel } from './compose-model';
 import { buildArgsFor, buildCaddyfile, deployNames, emptyDeployState, newReleaseId, planBaseCompose, planReleaseCompose, proxyListenPort, releasesToRetire, summarizeBuildOutput, trimRecords, type DeployRelease } from './deploy-plan';
 
 /**

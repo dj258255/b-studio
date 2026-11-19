@@ -4,7 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import type { LoadedProject } from '@b-studio/spec';
 import { stringify } from 'yaml';
 import { SandboxError } from '../errors';
-import { loadComposeModel, type ComposeModel } from '../kubernetes/compose-model';
+import { loadComposeModel, type ComposeModel } from './compose-model';
 import { native } from '../native';
 import { DEFAULT_READINESS, waitForReady } from '../readiness';
 import { Redactor } from '../secrets';
