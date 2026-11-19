@@ -378,6 +378,7 @@ import { rememberProjectEffortDefault, rememberProjectModelDefault } from './mod
 import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-accounts';
 import { describe, StudioError } from './errors';
 import { assertDeletable, assertResumableHome, planRecovery, removeSessionHome } from './session-lifecycle';
+import { trustSessionFolder, untrustSessionFolders } from './claude-trust';
 import { SessionLife, SessionRegistry, type StatusChange } from './session-status';
 import { runCreate } from './session-create';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
@@ -584,6 +585,11 @@ interface Session {
   terminalActivity?: TerminalActivity;
   /** 세션 터미널의 CLI가 훅으로 알려 온 마지막 대화 id와 그 CLI(#872). 스튜디오를 다시 띄운 뒤 터미널을 열 때 이어 붙인다 */
   terminalConversation?: TerminalConversation;
+  /**
+   * 폴더 신뢰 기록의 결과(ADR-222). 이 컴퓨터 방식 터미널의 claude가 쓰는 복사 모드 세션만 적는다. 기억에만 둔다
+   * (스튜디오를 다시 띄우면 비고, 그러면 안내를 보이지 않는다)
+   */
+  folderTrust?: { recorded: true } | { recorded: false; reason: string };
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -910,6 +916,8 @@ async function startSession({
   // 이 호출이 맵·레지스트리에 넣은 것만 치우려고 넣은 만큼만 표시한다(같은 id의 다른 세션을 빼지 않는다)
   let inMap = false;
   let inRegistry = false;
+  // 폴더 신뢰를 적으려 했는가. 만들다 실패하면 적은 것을 지운다
+  let trustAttempted = false;
 
   // 순서와 실패 처리는 Rust 수명 코어가 정한다(ADR-206). 각 단계는 아래 콜백이다. 세션 폴더는 코어가 배타적으로 만들고, 만들다 실패하면
   // 끝낸 단계를 거꾸로 치운다(이 호출이 만든 샌드박스·맵 항목·세션 폴더만). 원래 오류는 그대로 던진다
@@ -1002,7 +1010,7 @@ async function startSession({
       create_sandbox: async () => {
         sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
       },
-      register_session: () => {
+      register_session: async () => {
         session = newSession({
           home: sessionDir,
           snapshot: {
@@ -1057,6 +1065,11 @@ async function startSession({
         registerSession(session);
         inRegistry = true;
         registerCleanup();
+        // 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 던지지 않는다. 끝의 단계가 실패하면 unregister_session이 지운다
+        if (workspace !== 'local') {
+          trustAttempted = true;
+          await recordFolderTrust(session, sessionDir, [workDir, project.root]);
+        }
       },
       // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
       remember_git: async () => {
@@ -1078,6 +1091,7 @@ async function startSession({
       // 치우기(만들다 실패했을 때, 끝낸 단계만 거꾸로): 이 호출이 만든 것만 치운다
       destroy_sandbox: () => sandbox.destroy(),
       unregister_session: async () => {
+        if (trustAttempted) await forgetFolderTrust(session.snapshot, sessionDir);
         // 예약된 저장을 지우고 줄에 선 쓰기가 끝나기를 기다린다. 저장은 폴더를 다시 만들어 쓰므로, 이 뒤에 세션 폴더를 지워도
         // 늦게 온 저장이 지운 폴더에 저장 파일을 다시 남겨 다음 시작 때 유령 세션으로 복구되는 일이 없게 한다
         if (inMap) {
@@ -1544,6 +1558,8 @@ export async function deleteSession(id: string): Promise<void> {
   }
   if (entry) archived.delete(id);
 
+  // 복사 모드 세션이면 claude의 폴더 신뢰 기록도 지운다(ADR-222). 폴더가 있을 때 지워야 실제 경로로 맞출 수 있어 폴더보다 먼저 한다
+  await forgetFolderTrust(snapshot, home);
   // 내 폴더 세션이어도 사용자 폴더는 지우지 않는다: 세션 폴더(상태 폴더)만 지운다. Rust가 지우기 직전에 다시 확인한다
   await removeSessionHome(root, home, snapshot);
 }
@@ -7441,6 +7457,55 @@ function terminalModel(session: Session): { model?: string } {
   if (backend !== 'claude-code' && backend !== 'codex') return {};
   const model = cliModelOverride(session.snapshot.modelId);
   return model ? { model } : {};
+}
+
+/**
+ * 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 이 컴퓨터 방식 터미널의 claude가 쓰는 세션만 적는다 — 컨테이너 방식의 claude는
+ * 컨테이너 안의 설정을 읽어 이 기록이 닿지 않는다. 사용자가 연 로컬 폴더는 부르지 않는다. 던지지 않는다: 실패하면 사유를 세션에 남기고 알림을 낸다
+ */
+async function recordFolderTrust(session: Session, home: string, folders: readonly string[]): Promise<void> {
+  try {
+    if (!sessionTerminalAllowed() || sessionTerminalMode() !== 'host' || terminalCliKind(session) !== 'claude') return;
+    const { configDir } = await sessionAccount(session.snapshot);
+    let failure: { reason: string; missing?: true } | undefined;
+    for (const folder of new Set(folders)) {
+      const result = await trustSessionFolder(folder, { sessionsRoot: sessionsRoot(), ...(configDir ? { configDir } : {}) });
+      if (!result.ok) failure ??= { reason: result.reason, ...(result.missing ? { missing: true as const } : {}) };
+    }
+    if (failure === undefined) {
+      session.folderTrust = { recorded: true };
+      return;
+    }
+    session.folderTrust = { recorded: false, reason: failure.reason };
+    // 설정 파일이 아예 없으면(claude를 한 번도 쓰지 않은 계정) 세션 알림은 내지 않는다. 터미널 레인이 신뢰 창 안내를 사유와 함께 보인다
+    if (!failure.missing) {
+      emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${failure.reason})`, at: new Date().toISOString() });
+    }
+  } catch (error) {
+    session.folderTrust = { recorded: false, reason: describe(error) };
+    emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${describe(error)})`, at: new Date().toISOString() });
+  }
+}
+
+/** 폴더 신뢰를 적지 못한 세션의 사유. 적었거나 적으려 하지 않았으면 undefined(터미널 레인이 신뢰 창 안내를 이때만 보인다) */
+export function sessionFolderTrustFailure(id: string): string | undefined {
+  const trust = store.sessions.get(id)?.folderTrust;
+  return trust && !trust.recorded ? trust.reason : undefined;
+}
+
+/**
+ * 세션 폴더의 신뢰 기록을 지운다(최선 노력, 던지지 않는다). 믿음을 줄이는 쪽이라 터미널 방식·실험 설정이 바뀐 뒤에도 지운다.
+ * 설정 파일이 없으면 지울 것이 없다. 계정이 목록에서 빠졌으면 그 설정 파일을 알 수 없어 지우지 못한다(기록만 남는다)
+ */
+async function forgetFolderTrust(snapshot: Pick<SessionSnapshot, 'accountId' | 'mode' | 'backend' | 'workspace'>, home: string): Promise<void> {
+  if (snapshot.workspace === 'local') return;
+  try {
+    const { configDir } = await sessionAccount(snapshot);
+    const result = await untrustSessionFolders(home, { sessionsRoot: sessionsRoot(), ...(configDir ? { configDir } : {}) });
+    if (!result.ok && !result.missing) console.error(`[b-studio] 폴더 신뢰 기록을 지우지 못했습니다: ${result.reason}`);
+  } catch (error) {
+    console.error(`[b-studio] 폴더 신뢰 기록을 지우지 못했습니다: ${describe(error)}`);
+  }
 }
 
 /** 세션이 쓰는 AI 계정의 설정 폴더와 CLI 환경(#885). 기본 계정이면 둘 다 없다 */

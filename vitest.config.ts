@@ -7,6 +7,8 @@ export default defineConfig({
     alias: [{ find: /^@\//, replacement: `${path.resolve(import.meta.dirname, 'apps/studio')}/` }],
   },
   test: {
+    // claude 설정 파일의 위치를 빈 임시 폴더로 돌려 사용자의 실제 ~/.claude.json을 건드리지 않게 한다(ADR-222)
+    setupFiles: ['./vitest.setup.ts'],
     // 예제·템플릿 Next 앱을 빌드하면 생기는 .next 안의 사본은 테스트가 아니다
     exclude: [...configDefaults.exclude, '**/.next/**'],
     // 가짜 docker 테스트는 명령마다 셸을 띄워 부하에 따라 수 초가 걸린다 — 순서·결과를 보는 테스트라 속도로 실패시키지 않는다
