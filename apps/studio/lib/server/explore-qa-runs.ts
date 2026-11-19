@@ -15,7 +15,7 @@ import {
 } from '@b-studio/agent';
 import { SPEC_FILE } from '@b-studio/spec';
 import { EXPLORE_QA_RUN_FILE, readExploreQaRunFile, writeExploreQaRunFile } from './explore-qa-run-file';
-import { exploreQaBackendFor, remoteBrowserAllowedOrigins, remoteBrowserUrl, saveExploreQaArtifact, sessionStateDir } from './sessions';
+import { exploreQaAllowedOrigins, exploreQaBackendFor, exploreQaPreviewUrl, saveExploreQaArtifact, sessionStateDir } from './sessions';
 
 /**
  * 세션마다 탐색형 QA 실행 하나를 관리한다.
@@ -85,8 +85,8 @@ export function startExploreQa(sessionId: string, input: StartExploreQaInput): E
   const abort = new AbortController();
   store.set(sessionId, { run, abort });
 
-  const startUrl = new URL(input.startPath, remoteBrowserUrl(sessionId, input.service)).toString();
-  const allowedOrigins = remoteBrowserAllowedOrigins(sessionId);
+  const startUrl = new URL(input.startPath, exploreQaPreviewUrl(sessionId, input.service)).toString();
+  const allowedOrigins = exploreQaAllowedOrigins(sessionId);
   const onEvent = (event: ExploreQaEvent): void => {
     if (event.type === 'action') run.actions.push(event.record);
     else if (event.type === 'finding') run.findings.push(event.finding);

@@ -4,7 +4,7 @@ import { ArtifactError } from '@/lib/server/artifacts';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { readSessionArtifact, recoverSessions } from '@/lib/server/sessions';
 
-/** 세션 산출물(화면 확인·요소 선택 스크린샷)을 내려준다. 세션 산출물 폴더 안의 파일만, 세션을 바꿀 수 있는 사람에게 */
+/** 세션 산출물(화면 확인 스크린샷)을 내려준다. 세션 산출물 폴더 안의 파일만, 세션을 바꿀 수 있는 사람에게 */
 export async function GET(request: Request, context: RouteContext<'/api/sessions/[id]/artifacts/[...path]'>) {
   try {
     const user = requireUser(request.headers);
