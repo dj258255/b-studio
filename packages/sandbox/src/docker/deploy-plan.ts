@@ -1,5 +1,5 @@
 import type { LoadedProject } from '@b-studio/spec';
-import type { ComposeModel } from '../kubernetes/compose-model';
+import type { ComposeModel } from './compose-model';
 import { decodeNative, encodeNative, native } from '../native';
 
 /**

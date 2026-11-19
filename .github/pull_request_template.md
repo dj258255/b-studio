@@ -42,7 +42,7 @@ Closes #
 - [ ] 변경 목적과 사용자 영향을 설명했다
 - [ ] 관련 테스트를 추가하거나 수정했다
 - [ ] `pnpm test`와 `pnpm typecheck` 결과를 확인했다
-- [ ] 필요한 경우 lint, build, Docker/Kubernetes E2E를 확인했다
+- [ ] 필요한 경우 lint, build, Docker E2E를 확인했다
 - [ ] 실패·취소·복구 경로를 검토했다
 - [ ] 문서와 예제를 현재 동작에 맞췄다
 - [ ] 시크릿이나 생성물이 커밋되지 않았는지 확인했다

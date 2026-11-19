@@ -4,7 +4,7 @@
 
 - `claude-code` 모드는 개인 PC에서만 사용합니다.
 - 공유 서버는 API 모드와 `token` 또는 `proxy` 인증을 사용합니다.
-- Docker 소켓 또는 Kubernetes 권한을 가진 b-studio 프로세스 접근자를 제한합니다.
+- Docker 소켓을 가진 b-studio 프로세스 접근자를 제한합니다.
 - 세션, DB 덤프, 사용량, 배포 기록은 영속 볼륨에 두고 암호화·백업합니다.
 - 모델 키와 프로젝트 시크릿은 저장소가 아닌 시크릿 관리자에서 주입합니다.
 
@@ -39,7 +39,7 @@ pnpm studio deploy examples/orders --remove
 - [ ] 프로젝트별 자원 상한과 최소 egress
 - [ ] 시크릿 주입과 로그 보존 정책
 - [ ] 세션·DB·배포 상태 백업과 실제 복구 훈련
-- [ ] Kubernetes RuntimeClass, NetworkPolicy, RBAC와 이미지 출처
+- [ ] Docker 소켓 권한과 이미지 출처
 - [ ] DB 마이그레이션 하위 호환성과 별도 롤백 절차
 
 전체 환경 변수와 절차는 [운영 가이드](https://github.com/dj258255/b-studio/blob/main/docs/operations.md), 취약점 제보와 경계는 [보안 정책](https://github.com/dj258255/b-studio/blob/main/SECURITY.md)을 참고하세요.

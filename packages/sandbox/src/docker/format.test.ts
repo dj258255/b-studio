@@ -359,7 +359,7 @@ describe('SYNC_SCRIPT', { timeout: 20_000 }, () => {
   });
 
   it(
-    'Kubernetes 파드처럼 절대 경로를 넘기면 루트까지 올라가며 확인한다',
+    '절대 경로를 넘기면 루트까지 올라가며 확인한다',
     async () => {
       let file = '';
       const seen = await runSync(

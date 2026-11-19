@@ -4,7 +4,7 @@ import type { LoadedProject } from '@b-studio/spec';
 
 const execFileAsync = promisify(execFile);
 
-/** `docker compose config --format json`이 정규화한 서비스 한 개 (Kubernetes 번역에 쓰는 필드만) */
+/** `docker compose config --format json`이 정규화한 서비스 한 개 (배포 계획이 쓰는 필드만) */
 export interface ComposeService {
   image?: string;
   build?: { context: string; dockerfile?: string; args?: Record<string, string | null> };
@@ -25,7 +25,7 @@ export interface ComposeModel {
 
 /**
  * compose 파일 해석(변수 치환, 상대 경로, 짧은 문법)은 docker compose에 맡기고 정규화된 결과만 쓴다.
- * Kubernetes 제공자도 compose를 그대로 프로젝트의 실행 정의로 삼는다
+ * 배포 계획(`deploy-plan`)이 이 모델을 쓴다
  */
 export async function loadComposeModel(
   project: LoadedProject,
