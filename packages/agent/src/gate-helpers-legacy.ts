@@ -1,10 +1,9 @@
 // 차등 시험의 기준: ADR-191 3단계 3r에서 Rust로 옮기기 전의 TS 구현을 그대로 복사한 것이다(gate.ts의 순수 보조 판정).
-// 고치지 않는다. 시험(gate-helpers-differential.test.ts, gate-helpers-vectors.test.ts, surrogate-boundary.test.ts)만 불러 쓰고 제품 코드는 불러 쓰지 않는다.
+// 고치지 않는다. 디자인 비교를 지우면서(ADR-221) compareDetail만 뺐다. 시험(gate-helpers-differential.test.ts, gate-helpers-vectors.test.ts, surrogate-boundary.test.ts)만 불러 쓰고 제품 코드는 불러 쓰지 않는다.
 // export만 덧붙였고(함수 본문은 그대로), 옮기지 않고 TS에 남긴 readJsonPath·withoutInRunValues는 여기에 없다.
 import type { AutoPageChecks, ConcurrencyExpect, WorkflowPageCheck } from '@b-studio/spec';
 import { SPEC_FILE } from '@b-studio/spec';
 import type { ViewportTextFinding, ViewportTextReport } from './browser-check';
-import type { CompareResult } from './visual-compare';
 import type { WorkflowCheck } from './workflow';
 
 
@@ -46,11 +45,6 @@ export function formatFailedChecks(checks: readonly WorkflowCheck[]): string {
   if (checks.length === 0) return '';
   const lines = checks.map((check) => `- [${check.stage}] ${check.name} (시도 ${check.attempts}회)${check.detail ? `\n${check.detail}` : ''}`);
   return `\n\n워크플로 검사 실패:\n${lines.join('\n')}`;
-}
-
-/** 디자인 비교 실패 문구. 비율과 허용치, 비교한 크기를 함께 적는다 */
-export function compareDetail(comparison: CompareResult, max: number): string {
-  return `디자인 차이 ${(comparison.ratio * 100).toFixed(1)}% (허용 ${(max * 100).toFixed(1)}%, 비교 ${comparison.width}×${comparison.height})`;
 }
 
 /** 동시 요청 확인의 기대를 사람이 읽는 한 줄로. then 값은 따로 적으므로 여기 넣지 않는다 */

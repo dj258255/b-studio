@@ -817,7 +817,6 @@ pub(crate) async fn run(hook: &Hook) -> Res<Declared> {
             ("detail", (!detail.is_empty()).then(|| s(detail))),
             ("evidence", evidence.map(|lines| strings(lines))),
             ("steps", data.prop("steps").filter(|value| value.truthy()).cloned()),
-            ("compare", data.prop("compare").filter(|value| value.truthy()).cloned()),
             ("metrics", match data.prop("loadMs") {
                 Some(JsValue::Num(load_ms)) => Some(obj(vec![("loadMs", Some(JsValue::Num(*load_ms)))])),
                 _ => None,

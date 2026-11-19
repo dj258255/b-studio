@@ -1,14 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import path from 'node:path';
 import { PNG } from 'pngjs';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { decodeNative, native } from '@b-studio/sandbox';
 import type { BrowserPageStep } from './browser-check';
-import { legacyCompareDesign, legacySaveSteps, legacyServiceOrigins } from './gate-observation-legacy';
+import { legacySaveSteps, legacyServiceOrigins } from './gate-observation-legacy';
 
 /**
- * D2 (c): 화면 확인의 관측(단계 저장·디자인 비교·서비스 출처)을 Rust로 옮긴 조각의 차등 시험.
+ * D2 (c): 화면 확인의 관측(단계 저장·서비스 출처)을 Rust로 옮긴 조각의 차등 시험.
  * 저장·엔드포인트는 TS 콜백이고, 나머지는 Rust가 한다. 옛 TS(`gate-observation-legacy.ts`)와 같은 값을 내는지 견준다.
  */
 
@@ -27,25 +24,7 @@ function image(width: number, height: number, color: [number, number, number] = 
   return PNG.sync.write(png);
 }
 
-let root: string;
-
-beforeEach(async () => {
-  root = await mkdtemp(path.join(tmpdir(), 'gate-observation-diff-'));
-});
-
-afterEach(async () => {
-  vi.restoreAllMocks();
-  await rm(root, { recursive: true, force: true }).catch(() => {});
-});
-
 type SavedStep = { label: string; ok: boolean; detail?: string; artifact?: string };
-type CompareOutcome =
-  | { ok: true; ratio: number; width: number; height: number; diff: string; reference: string }
-  | { ok: false; kind: 'missing' | 'compare' | 'decode'; message: string };
-
-async function currentCompare(reference: string, actual: Buffer, masks: unknown[] = []): Promise<CompareOutcome> {
-  return decodeNative<CompareOutcome>(await native.gateCompareDesign(root, reference, JSON.stringify(masks), 0.1, actual.toString('base64')));
-}
 
 describe('화면 확인 관측 차등(D2c)', () => {
   it('단계 저장: 저장 성공·실패·스크린샷 없음·상세 문구가 옛 구현과 같다', async () => {
@@ -92,54 +71,6 @@ describe('화면 확인 관측 차등(D2c)', () => {
     );
     expect(currentNoSave.steps).toEqual(legacyNoSave);
     expect(currentNoSave.warnings).toEqual([]);
-  });
-
-  it('디자인 비교: 같음·다름·가림·너비 불일치·깨진 PNG·기준 없음이 옛 구현과 같다', async () => {
-    const identical = image(8, 6);
-    await writeFile(path.join(root, 'same.png'), identical);
-    await writeFile(path.join(root, 'different.png'), image(8, 6, [0, 0, 0]));
-    await writeFile(path.join(root, 'wide.png'), image(9, 6));
-    await writeFile(path.join(root, 'broken.png'), Buffer.from('not a png'));
-
-    const cases: Array<{ label: string; reference: string; actual?: Buffer; masks?: unknown[]; kind?: 'compare' | 'decode' | 'missing' }> = [
-      { label: '같음', reference: 'same.png', actual: identical },
-      { label: '다름', reference: 'different.png', actual: identical },
-      { label: '가림', reference: 'different.png', actual: identical, masks: [{ x: 0, y: 0, width: 8, height: 6 }] },
-      { label: '너비 불일치', reference: 'wide.png', actual: identical, kind: 'compare' },
-      { label: '깨진 기준', reference: 'broken.png', actual: identical, kind: 'decode' },
-      { label: '깨진 실제', reference: 'same.png', actual: Buffer.from('nope'), kind: 'decode' },
-      { label: '기준 없음', reference: 'missing.png', actual: identical, kind: 'missing' },
-    ];
-
-    for (const item of cases) {
-      const compare = { reference: item.reference, maxDiffRatio: 0.02, threshold: 0.1, masks: item.masks } as never;
-      if (item.actual === undefined) {
-        await expect(legacyCompareDesign(root, compare, undefined, (text) => text)).rejects.toThrow('디자인 비교에 쓸 뷰포트 스크린샷을 찍지 못했습니다');
-        continue;
-      }
-      let legacyValue: Awaited<ReturnType<typeof legacyCompareDesign>> | undefined;
-      let legacyError: Error | undefined;
-      try {
-        legacyValue = await legacyCompareDesign(root, compare, item.actual, (text) => text);
-      } catch (error) {
-        legacyError = error as Error;
-      }
-      const current = await currentCompare(item.reference, item.actual, item.masks);
-      if (item.kind) {
-        expect(legacyError, item.label).toBeDefined();
-        expect(current, item.label).toMatchObject({ ok: false, kind: item.kind });
-        if (!current.ok) expect(current.message, item.label).toBe(legacyError!.message);
-        continue;
-      }
-      expect(current.ok, item.label).toBe(true);
-      if (!current.ok || !legacyValue) continue;
-      expect(current.ratio, item.label).toBe(legacyValue.ratio);
-      expect(current.width, item.label).toBe(legacyValue.width);
-      expect(current.height, item.label).toBe(legacyValue.height);
-      expect(Buffer.from(current.diff, 'base64').equals(legacyValue.diff), item.label).toBe(true);
-      expect(Buffer.from(current.reference, 'base64').equals(await readFile(path.join(root, item.reference))), item.label).toBe(true);
-    }
-
   });
 
   it('서비스 출처: 순서·중복·기본 포트·실패·잘못된 URL이 옛 구현과 같다', async () => {

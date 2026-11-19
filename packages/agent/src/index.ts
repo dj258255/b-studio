@@ -134,7 +134,6 @@ export {
   type AppendPageCheckOptions,
 } from './explore-qa-save';
 export { runClaudeCodeExploreQa, type ClaudeCodeExploreQaOptions, type ClaudeCodeExploreQaResult } from './explore-qa-claude-code';
-export { type DesignFrameInfo, type DesignSource } from './design';
 export { ScriptedModelClient, type ScriptedTurn } from './scripted-client';
 export {
   backendSupportsBoard,
@@ -411,10 +410,8 @@ export {
   workflowReleaseRequirements,
   workflowStages,
   type WorkflowCheck,
-  type WorkflowCompare,
   type WorkflowStepCheck,
 } from './workflow';
-export { compareScreenshot, VisualCompareError, type CompareResult } from './visual-compare';
 export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, type TaskNode, type TaskResult, type TaskStatus } from './task-graph';
 export { AGENT_LANGUAGE_INSTRUCTION, AGENT_LANGUAGE_REMINDER, buildAskRequest, buildSystemPrompt, withLanguageReminder } from './prompts';
 export { readProjectFileSync, readRegularFileSync, Workspace, WorkspaceError, type RegularFileRead } from './workspace';

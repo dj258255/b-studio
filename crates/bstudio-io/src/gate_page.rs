@@ -5,7 +5,7 @@
 //!   삼키는 자리는 옛 코드와 같은 하나뿐이다: 근거(`evidenceOrNone`)를 만들다 난 실패(근거 없이 통과로 남는다 — 판정은 이미 났다).
 //! - 한 확인이 던진 실패(러너·요청·비교·가림 함수가 던진 것)는 그 확인의 실패 글이다(`Ok(Err(message))`). 콜백의 `{ ok: false, error: { message } }`가 그 던짐이다.
 //!   `{ fatal: true }`(TS가 오류를 저장했다)는 그 확인의 실패가 아니라 검사 전체의 중단이다(`Fail::Hook`).
-//! - 재지 못한 것은 통과가 아니다: 로드 예산을 적었는데 `loadMs`가 없으면 실패, 첫 화면 글자의 결과가 빠지면 실패(`viewportProblems`), 디자인 비교의 스크린샷이 없으면 실패(TS의 `compareDesign`).
+//! - 재지 못한 것은 통과가 아니다: 로드 예산을 적었는데 `loadMs`가 없으면 실패, 첫 화면 글자의 결과가 빠지면 실패(`viewportProblems`).
 //! - 출처 제한은 TS가 `new URL(path, endpoint.url)`로 푼 `{ href, sameOrigin }`을 그대로 쓴다. 러너와 요청은 그 `href`를 받는다 — 확인하는 해석과 여는 해석이 같은 값에서 나온다(Rust에서 URL을 다시 풀지 않는다).
 //! - 브라우저를 못 띄운 오류(`BrowserUnavailableError`)만 `fallbackProbe`로 간다. TS가 응답에 `kind: "unavailable"`을 실어 알린다. 그 밖의 러너 오류는 실패다.
 //!
@@ -569,13 +569,6 @@ async fn browser_mode(cx: &Cx<'_>, href: &str, api: Option<&Api>, expect_status:
     let problems = browser_problems(page, &result, run, api, expect_status)?;
     if !problems.is_empty() {
         return Ok(Err(cx.fail(&problems.join("\n")).await?));
-    }
-    // 문제가 없을 때만 디자인 비교를 한다(기준 이미지 읽기·비교·저장은 TS)
-    if truthy(page, "compare") {
-        let request = req("declaredCompare", vec![("auto", JsValue::Bool(run.auto)), ("index", JsValue::Num(run.index as f64)), ("name", s(run.name))]);
-        if let Answer::Failed { message, .. } = call(hook, request).await? {
-            return Ok(Err(message));
-        }
     }
     let (lossy_page, lossy_result, context) = (lossy(page), lossy(&result), lossy(&evidence_context(run, api)));
     let lines = page_evidence(hook, |redact| check_evidence::browser_page_evidence(&lossy_page, &lossy_result, Some(&context), redact)).await?;

@@ -79,7 +79,6 @@ pub mod tool_output;
 pub mod up_loop;
 pub mod usage;
 pub mod verify_judge;
-pub mod visual_compare;
 pub mod workflow;
 pub mod workspace_guard;
 pub mod yaml;

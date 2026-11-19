@@ -23,7 +23,6 @@ export function legacyToPersisted(body: Omit<PersistedSession, 'history'>, fullH
     conversation: body.conversation,
     demoIndex: body.demoIndex,
     claudeCode: body.claudeCode,
-    design: body.design,
     codex: body.codex,
     commandCode: body.commandCode,
     openCode: body.openCode,

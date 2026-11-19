@@ -466,31 +466,6 @@ const VECTORS: Vector[] = [
   ["formatFailedChecks", [[{ "stage": "load_check", "name": "l", "ok": false, "attempts": NaN, "detail": "x" }, { "stage": "load_check", "name": "l", "ok": false, "attempts": -0 }, { "stage": "load_check", "name": "l", "ok": false, "attempts": 1e+21 }, { "stage": "load_check", "name": "l", "ok": false, "attempts": 12.5 }, { "stage": "load_check", "name": "l", "ok": false, "attempts": Infinity }]], "\"\\n\\n워크플로 검사 실패:\\n- [load_check] l (시도 NaN회)\\nx\\n- [load_check] l (시도 0회)\\n- [load_check] l (시도 1e+21회)\\n- [load_check] l (시도 12.5회)\\n- [load_check] l (시도 Infinity회)\""],
   ["formatFailedChecks", [[{ "stage": "test", "name": "\ud800", "ok": false, "attempts": 1, "detail": "\udc00" }]], "\"\\n\\n워크플로 검사 실패:\\n- [test] � (시도 1회)\\n�\""],
   ["formatFailedChecks", [[{ "stage": "test", "name": "a'b", "ok": false, "attempts": 1, "detail": "\"q\"" }]], "\"\\n\\n워크플로 검사 실패:\\n- [test] a'b (시도 1회)\\n\\\"q\\\"\""],
-  ["compareDetail", [{ "ratio": 0.0123, "diffPixels": 0, "comparedPixels": 0, "width": 1280, "height": 800 }, 0.05], "\"디자인 차이 1.2% (허용 5.0%, 비교 1280×800)\""],
-  ["compareDetail", [{ "ratio": 0, "diffPixels": 0, "comparedPixels": 0, "width": 0, "height": 0 }, 0], "\"디자인 차이 0.0% (허용 0.0%, 비교 0×0)\""],
-  ["compareDetail", [{ "ratio": 1, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 1], "\"디자인 차이 100.0% (허용 100.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.00125, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.05], "\"디자인 차이 0.1% (허용 5.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.0005, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.0005], "\"디자인 차이 0.1% (허용 0.1%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.125, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.0125], "\"디자인 차이 12.5% (허용 1.3%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.1255, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.1], "\"디자인 차이 12.6% (허용 10.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.12345, "diffPixels": 0, "comparedPixels": 0, "width": 390, "height": 844 }, 0.012345], "\"디자인 차이 12.3% (허용 1.2%, 비교 390×844)\""],
-  ["compareDetail", [{ "ratio": 0.999999, "diffPixels": 0, "comparedPixels": 0, "width": 390, "height": 844 }, 0.05], "\"디자인 차이 100.0% (허용 5.0%, 비교 390×844)\""],
-  ["compareDetail", [{ "ratio": 0.05, "diffPixels": 0, "comparedPixels": 0, "width": 390, "height": 844 }, 0.05], "\"디자인 차이 5.0% (허용 5.0%, 비교 390×844)\""],
-  ["compareDetail", [{ "ratio": 0.0499, "diffPixels": 0, "comparedPixels": 0, "width": 390, "height": 844 }, 0.05], "\"디자인 차이 5.0% (허용 5.0%, 비교 390×844)\""],
-  ["compareDetail", [{ "ratio": 0.0501, "diffPixels": 0, "comparedPixels": 0, "width": 390, "height": 844 }, 0.05], "\"디자인 차이 5.0% (허용 5.0%, 비교 390×844)\""],
-  ["compareDetail", [{ "ratio": 1e-9, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 1e-9], "\"디자인 차이 0.0% (허용 0.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.1, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.2], "\"디자인 차이 10.0% (허용 20.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.3, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.7], "\"디자인 차이 30.0% (허용 70.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": NaN, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.05], "\"디자인 차이 NaN% (허용 5.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.05, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, NaN], "\"디자인 차이 5.0% (허용 NaN%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": -0.01, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 0.05], "\"디자인 차이 -1.0% (허용 5.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 1.5, "diffPixels": 0, "comparedPixels": 0, "width": 1, "height": 1 }, 2], "\"디자인 차이 150.0% (허용 200.0%, 비교 1×1)\""],
-  ["compareDetail", [{ "ratio": 0.05, "diffPixels": 0, "comparedPixels": 0, "width": NaN, "height": -0 }, 0.05], "\"디자인 차이 5.0% (허용 5.0%, 비교 NaN×0)\""],
-  ["compareDetail", [{ "ratio": 0.05, "diffPixels": 0, "comparedPixels": 0, "width": 1e+21, "height": 12.5 }, 0.05], "\"디자인 차이 5.0% (허용 5.0%, 비교 1e+21×12.5)\""],
-  ["compareDetail", [{ "ratio": 0.05, "diffPixels": 0, "comparedPixels": 0, "width": Infinity, "height": 0.5 }, 0.05], "\"디자인 차이 5.0% (허용 5.0%, 비교 Infinity×0.5)\""],
-  ["compareDetail", [{ "ratio": 0.0049, "diffPixels": 0, "comparedPixels": 0, "width": 5, "height": 5 }, 0.0051], "\"디자인 차이 0.5% (허용 0.5%, 비교 5×5)\""],
-  ["compareDetail", [{ "ratio": 0.00449, "diffPixels": 0, "comparedPixels": 0, "width": 5, "height": 5 }, 0.00451], "\"디자인 차이 0.4% (허용 0.5%, 비교 5×5)\""],
-  ["compareDetail", [{ "ratio": 0.00450000001, "diffPixels": 0, "comparedPixels": 0, "width": 5, "height": 5 }, 0.00350000001], "\"디자인 차이 0.5% (허용 0.4%, 비교 5×5)\""],
   ["describeConcurrencyExpect", [{  }], "\"\""],
   ["describeConcurrencyExpect", [{ "successCount": { "exactly": 1 } }], "\"정확히 1\""],
   ["describeConcurrencyExpect", [{ "successCount": { "exactly": 0 } }], "\"정확히 0\""],
@@ -529,7 +504,7 @@ describe('게이트의 순수 보조 판정: 벡터', () => {
     expect(VECTORS.length).toBeGreaterThan(450);
     const counts = new Map<string, number>();
     for (const [fn] of VECTORS) counts.set(fn, (counts.get(fn) ?? 0) + 1);
-    for (const [fn, min] of [['nextErrorMarker', 40], ['autoPageCheck', 5], ['containsApiValue', 100], ['missingApiValue', 10], ['viewportProblemText', 25], ['viewportProblems', 25], ['missingAllText', 8], ['missingAnyText', 8], ['dynamicProbeDataHint', 4], ['dynamicNames', 25], ['acceptedNotes', 10], ['usesInRunValue', 20], ['sampledValues', 25], ['stripHtml', 60], ['formatFailedChecks', 8], ['compareDetail', 20], ['describeConcurrencyExpect', 12]] as const) {
+    for (const [fn, min] of [['nextErrorMarker', 40], ['autoPageCheck', 5], ['containsApiValue', 100], ['missingApiValue', 10], ['viewportProblemText', 25], ['viewportProblems', 25], ['missingAllText', 8], ['missingAnyText', 8], ['dynamicProbeDataHint', 4], ['dynamicNames', 25], ['acceptedNotes', 10], ['usesInRunValue', 20], ['sampledValues', 25], ['stripHtml', 60], ['formatFailedChecks', 8], ['describeConcurrencyExpect', 12]] as const) {
       expect(counts.get(fn) ?? 0, fn).toBeGreaterThanOrEqual(min);
     }
   });
