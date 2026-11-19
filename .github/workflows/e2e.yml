@@ -40,9 +40,7 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          # 판을 고정한다. 코드 포인트 고정 목록(path-policy-codepoints.test.ts)이 Node의 Unicode 표에 묶여 있어,
-          # 러너의 22.23.5(리눅스)가 같은 Unicode·ICU 판인데도 새 글자 20개를 다르게 접어 시험이 깨졌다(#1323). 올릴 때 목록도 함께 고친다
-          node-version: 22.23.4
+          node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # 기반 이미지를 Docker Hub에서 익명으로 받으면 실행기 IP가 요청 한도에 걸린다(ci.yml의 이미지 빌드와 같은 이유).

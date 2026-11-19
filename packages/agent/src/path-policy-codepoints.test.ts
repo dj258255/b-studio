@@ -24,7 +24,8 @@ import { foldName as legacyFold } from './path-policy-legacy';
 type Pinned = Array<[hex: string, folded: string]>;
 /** Node의 Unicode 판 → 그 판에서 옛 구현과 다른 글자. 목록이 없는 판에서는 고정 목록 비교만 건너뛰고, 열린 쪽 검사는 어느 판에서도 한다 */
 const PINNED_BY_UNICODE = JSON.parse(readFileSync(new URL('./path-policy-fold-diffs.json', import.meta.url), 'utf8')) as Record<string, Pinned>;
-const PINNED_COUNT: Record<string, number> = { '16.0': 176, '17.0': 105 };
+// 새 구현의 접기는 Rust std의 Unicode 표를 따른다. 툴체인을 `rust-toolchain.toml`로 고정하고, 올릴 때 이 목록도 함께 고친다(#1323: 1.100에서 Unicode 17의 새 대문자 20개를 접기 시작했다)
+const PINNED_COUNT: Record<string, number> = { '16.0': 196, '17.0': 125 };
 const PINNED = PINNED_BY_UNICODE[process.versions.unicode ?? ''];
 
 function* codePoints(): Generator<number> {
