@@ -6,7 +6,6 @@ import { Gen, outcome, perturb, readEnvList, readEnvNumber, sameOutcome, type Ou
 import {
   acceptedNotes,
   autoPageCheck,
-  compareDetail,
   containsApiValue,
   describeConcurrencyExpect,
   dynamicNames,
@@ -26,7 +25,6 @@ import {
 } from './gate';
 import * as legacy from './gate-helpers-legacy';
 import type { WorkflowCheck } from './workflow';
-import type { CompareResult } from './visual-compare';
 
 /**
  * 게이트의 순수 보조 판정을 Rust로 옮기면서(ADR-191 3r) 옛 TS 구현(`gate-helpers-legacy.ts`, 옮기기 전 gate.ts의 본문 그대로)과 새 껍데기를 같은 무작위 입력으로 견준다.
@@ -318,13 +316,6 @@ function randomChecks(g: Gen): WorkflowCheck[] {
   }));
 }
 
-function randomCompare(g: Gen): { comparison: CompareResult; max: number } {
-  const ratio = g.pick([0, 1, 0.00125, 0.0005, 0.125, 0.1255, 0.12345, 0.999999, 1e-9, g.int(10001) / 10000, g.int(1000) / 8000, NaN, -0.01, 1.5]);
-  const max = g.pick([0, 0.05, 0.01, 0.1, 1, 0.0005, g.int(1001) / 1000, NaN]);
-  const comparison = { ratio, diffPixels: 0, comparedPixels: 0, width: g.pick([1280, 390, 0, NaN, 12.5, 1e21]), height: g.pick([800, 844, 0, -0]), diff: Buffer.alloc(0) } as CompareResult;
-  return { comparison, max };
-}
-
 const FUNCTIONS: Array<[string, (g: Gen) => void]> = [
   [
     'nextErrorMarker',
@@ -462,13 +453,6 @@ const FUNCTIONS: Array<[string, (g: Gen) => void]> = [
     (g) => {
       const checks = randomChecks(g);
       compare('formatFailedChecks', checks, () => legacy.formatFailedChecks(checks), () => formatFailedChecks(checks));
-    },
-  ],
-  [
-    'compareDetail',
-    (g) => {
-      const { comparison, max } = randomCompare(g);
-      compare('compareDetail', [comparison.ratio, max, comparison.width, comparison.height], () => legacy.compareDetail(comparison, max), () => compareDetail(comparison, max));
     },
   ],
   [

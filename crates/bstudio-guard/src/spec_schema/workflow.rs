@@ -17,8 +17,6 @@ pub fn validate(name: &str, input: Option<&JsValue>) -> Outcome {
         "LoadExpectSchema" => load_expect(input),
         "WorkflowLoadCheckSchema" => load_check(input),
         "WorkflowPageStepSchema" => page_step(input),
-        "CompareMaskSchema" => compare_mask(input),
-        "WorkflowPageCompareSchema" => page_compare(input),
         "WorkflowPageExpectFromApiSchema" => expect_from_api(input),
         "WorkflowPageCheckSchema" => page_check(input),
         "AutoPageChecksSchema" => auto_page_checks(input),
@@ -342,38 +340,6 @@ fn fill_schema(input: Option<&JsValue>) -> Outcome {
     obj.finish()
 }
 
-pub fn compare_mask(input: Option<&JsValue>) -> Outcome {
-    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    obj.set("x", int_min(obj.field("x"), 0.0));
-    obj.set("y", int_min(obj.field("y"), 0.0));
-    obj.set("width", int_min(obj.field("width"), 1.0));
-    obj.set("height", int_min(obj.field("height"), 1.0));
-    obj.finish()
-}
-
-pub fn page_compare(input: Option<&JsValue>) -> Outcome {
-    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    obj.set("reference", relative_path(obj.field("reference")));
-    obj.set("maxDiffRatio", validate_number(obj.field("maxDiffRatio"), &[NumberCheck::Min(0.0, true), NumberCheck::Max(1.0, true)]));
-    if obj.field("masks").is_some() {
-        let value = obj.field("masks").cloned();
-        obj.set(
-            "masks",
-            validate_array(value.as_ref(), |item| compare_mask(item), &[LengthCheck::Max(20, Some("masks는 최대 20개까지 쓸 수 있습니다"))]),
-        );
-    }
-    obj.set("threshold", defaulted(obj.field("threshold"), || JsValue::Num(0.1), |value| validate_number(value, &[NumberCheck::Min(0.0, true), NumberCheck::Max(1.0, true)])));
-    // reference가 .png인지 확인하는 refine은 상대 경로 검사 뒤에 붙는다
-    obj.run_checks(&mut |parsed, issues| {
-        if let Some(JsValue::Str(reference)) = parsed.get("reference") {
-            if !reference.to_lowercase().ends_with(".png") {
-                issues.push(issue(vec![Seg::Key("reference".into())], "reference는 .png 파일이어야 합니다", false));
-            }
-        }
-    });
-    obj.finish()
-}
-
 pub fn expect_from_api(input: Option<&JsValue>) -> Outcome {
     let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
     obj.set("service", name_string(obj.field("service")));
@@ -468,8 +434,7 @@ pub fn page_check(input: Option<&JsValue>) -> Outcome {
         obj.set("maxLoadMs", int_positive(value.as_ref()));
     }
     if obj.field("compare").is_some() {
-        let value = obj.field("compare").cloned();
-        obj.set("compare", page_compare(value.as_ref()));
+        obj.issues.push(issue(vec![Seg::Key("compare".into())], "`pageChecks[].compare`는 더는 지원하지 않습니다. 이 항목을 지우세요", false));
     }
     if obj.field("allowLoadingPlaceholder").is_some() {
         let value = obj.field("allowLoadingPlaceholder").cloned();
@@ -496,9 +461,6 @@ pub fn page_check(input: Option<&JsValue>) -> Outcome {
         }
         if parsed.get("maxLoadMs").is_some() {
             issues.push(issue(vec![Seg::Key("maxLoadMs".into())], "maxLoadMs는 mode: browser에서만 쓸 수 있습니다", false));
-        }
-        if parsed.get("compare").is_some() {
-            issues.push(issue(vec![Seg::Key("compare".into())], "compare는 mode: browser에서만 쓸 수 있습니다", false));
         }
         if parsed.get("allowLoadingPlaceholder").is_some() {
             issues.push(issue(vec![Seg::Key("allowLoadingPlaceholder".into())], "allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다", false));
@@ -638,7 +600,7 @@ pub fn workflow(input: Option<&JsValue>) -> Outcome {
         obj.set("releaseRequires", validate_array(value.as_ref(), |item| validate_enum(item, &stages), &[LengthCheck::Min(1, None)]));
     }
     obj.run_checks(&mut |parsed, issues| workflow_refinements(parsed, issues));
-    obj.finish_with(workflow_transform)
+    obj.finish()
 }
 
 fn array_len(parsed: &JsObject, key: &str) -> usize {
@@ -710,27 +672,17 @@ fn workflow_refinements(parsed: &JsObject, issues: &mut Vec<Issue>) {
     }
 }
 
-fn workflow_transform(mut out: JsObject) -> JsValue {
-    let references: Vec<String> = match out.get("pageChecks") {
-        Some(JsValue::Arr(checks)) => checks
-            .iter()
-            .filter_map(|check| check.prop("compare").and_then(|compare| compare.prop("reference")).and_then(JsValue::as_str).map(str::to_owned))
-            .collect(),
-        _ => Vec::new(),
-    };
-    if references.is_empty() {
-        return JsValue::Obj(out);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::js_json;
+
+    #[test]
+    fn 지운_compare_항목은_까닭과_함께_거절한다() {
+        let value = js_json::parse(r#"{"service":"web","path":"/","mode":"browser","compare":{"reference":"design/home.png","maxDiffRatio":0.1}}"#).expect("JSON");
+        let out = page_check(Some(&value));
+        assert_eq!(out.issues.len(), 1);
+        assert_eq!(out.issues[0].path, vec![Seg::Key("compare".into())]);
+        assert_eq!(out.issues[0].message, "`pageChecks[].compare`는 더는 지원하지 않습니다. 이 항목을 지우세요");
     }
-    let mut merged: Vec<String> = match out.get("evaluationAssets") {
-        Some(JsValue::Arr(items)) => items.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect(),
-        _ => Vec::new(),
-    };
-    let mut seen: HashSet<String> = merged.iter().cloned().collect();
-    for reference in references {
-        if seen.insert(reference.clone()) {
-            merged.push(reference);
-        }
-    }
-    out.set("evaluationAssets", JsValue::Arr(merged.into_iter().map(JsValue::Str).collect()));
-    JsValue::Obj(out)
 }

@@ -14,8 +14,6 @@ serde_json = { version = "1", features = ["preserve_order"] }
 regex = "1"
 # 경로 이름 접기(foldName)의 NFKD·NFKC. Node의 normalize와 Unicode 판이 달라 전체 코드 포인트로 견줬다(#1090)
 unicode-normalization = "0.1.26"
-# 디자인 비교(3ae)의 PNG 읽기·쓰기. pngjs 7.0.0과 같은 RGBA8을 내려고 IDENTITY 변환으로 원본 표본만 받고 팔레트·tRNS·깊이 확대는 직접 한다. 버전은 고정한다
-png = { version = "=0.18.1", default-features = false }
 # spec의 YAML 읽기(ADR-197). 이벤트 API만 쓰고 스칼라 해석·merge·중복 키는 yaml.rs가 직접 한다. 0.3.x는 짧은 기간에 여러 번 나왔으므로 판본을 고정한다
 saphyr-parser = "=0.3.3"
 # spec의 z.url()(3단계 (b)). Node WHATWG URL과 같은 판정을 위해 bstudio-io와 같은 판본을 쓴다

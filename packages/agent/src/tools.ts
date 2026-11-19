@@ -3,7 +3,6 @@ import { decodeNative, describeUsage, encodeLoneSurrogates, encodeNative, native
 import { parseSpec, SpecError, SPEC_FILE, type LoadedProject } from '@b-studio/spec';
 import { summarizeContract } from './contract-diff';
 import type { Note, NoteKind } from './coordination';
-import type { DesignSource } from './design';
 import { experimentalEnabled } from './experimental';
 import { checkToolPolicy, type ApprovalRequest, type ExecutionPolicy, type PolicyDecision } from './policy';
 import { servicesForFiles } from './services';
@@ -120,8 +119,6 @@ export interface ToolBuildOptions {
    * 목록에 없으면 도구를 아예 넣지 않는다 — 모델이 막히는 도구를 보지 않게.
    */
   allowedTools?: readonly string[];
-  /** 세션이 Figma 디자인을 설정했을 때 디자인 도구를 더한다 */
-  design?: boolean;
   /** 단일 세션의 사용자 요청일 때만 ask_user를 더한다 */
   interactive?: boolean;
   /** 어긋남을 받아 줄 러너일 때만 report_mismatch를 더한다(#666). 허용 도구 목록이 있으면 그 목록에도 있어야 한다 */
@@ -149,8 +146,6 @@ export interface ToolBuildOptions {
    * 목록에 없으면 도구를 아예 넣지 않는다 — 모델이 막히는 도구를 보지 않게.
    */
   allowedTools?: readonly string[];
-  /** 세션이 디자인(Figma)을 설정했을 때만 디자인 도구 두 개(design_frames·design_frame)를 더한다 */
-  design?: boolean;
 }
 
 export interface ToolContext {
@@ -165,8 +160,6 @@ export interface ToolContext {
   onServiceStatus?: StartOptions['onStatus'];
   /** 질문 모드. 파일을 바꾸거나 명령을 실행하는 도구와 조회가 아닌 HTTP 호출을 거부한다 */
   readOnly?: boolean;
-  /** Figma 디자인 자료원. 세션이 디자인을 설정했을 때만 넘어온다. 없으면 디자인 도구가 목록에 없다 */
-  design?: DesignSource;
   /** ask_user가 남긴 질문. 러너가 이걸 받으면 실행을 끝내고 사용자 답을 기다린다. 없으면 ask_user가 목록에 없다 */
   onQuestion?: (question: AskUserQuestion) => void;
   /** report_mismatch가 남긴 어긋남. 없으면 그 도구를 거부한다(#666) */
@@ -225,8 +218,6 @@ export const LOCAL_TOOLS: ReadonlySet<string> = new Set([
   'delete_file',
   'post_note',
   'read_notes',
-  'design_frames',
-  'design_frame',
   'ask_user',
   'propose_mode',
   'report_mismatch',
@@ -252,7 +243,6 @@ export interface ToolOutcome {
  *  - 파일 쓰기는 작업 공간 규칙(경로 제한, 덮어쓰기 충돌)을 강제해야 한다
  *  - 바뀐 파일을 기록해야 검증 게이트가 재시작할 서비스를 고를 수 있다
  * strict 모드는 선택 필드가 없는 스키마에서 가장 안전하므로 모든 필드를 필수로 둔다.
- * design을 넘기면(세션이 Figma 디자인을 설정했을 때) 디자인 도구를 더하고, 아니면 목록이 지금과 같다.
  * interactive를 넘기면(단일 세션의 사용자 요청일 때) ask_user를 더한다. 레인·벤치·CLI는 넘기지 않아 목록이 그대로다
  */
 export function buildTools(project: LoadedProject, options: ToolBuildOptions = {}): BetaTool[] {
@@ -382,17 +372,6 @@ export function buildTools(project: LoadedProject, options: ToolBuildOptions = {
       );
     }
   }
-  if (options.design) {
-    tools.push(
-      tool('design_frames', 'List the Figma design frames (page, id, name, size). Use an id with design_frame.', {}),
-      tool(
-        'design_frame',
-        'Summarize a Figma frame: structure, auto layout, colors, corner radius, and text styles. Saves the frame PNG as an artifact and returns only its reference path; the image itself is not sent to the model.',
-        { id: { type: 'string', description: 'Frame id from design_frames.' } },
-      ),
-    );
-  }
-
   if (options.interactive) {
     tools.push(
       tool(
@@ -625,18 +604,6 @@ async function runTool(name: string, args: Record<string, unknown>, context: Too
       if (!contract) return failure(`${target} does not expose a contract`);
       const endpoint = await sandbox.endpoint(target);
       return success(sandbox.redact(summarizeContract(await context.fetcher(serviceUrl(contract.extract, endpoint.url)))));
-    }
-    case 'design_frames': {
-      if (!context.design) return failure('Design is not configured for this session');
-      const frames = await context.design.frames();
-      return success(frames.length > 0 ? frames.map((frame) => `${frame.id}\t${frame.page}\t${frame.name}\t${frame.width}x${frame.height}`).join('\n') : '(no frames)');
-    }
-    case 'design_frame': {
-      if (!context.design) return failure('Design is not configured for this session');
-      const id = string(args, 'id');
-      const frame = await context.design.frame(id);
-      const artifact = await context.design.saveArtifact(`design ${id}`, frame.png);
-      return success(`${frame.summary}\n\nframe PNG saved as artifact: ${artifact} (the image is not sent to the model)`);
     }
     case 'ask_user': {
       if (!context.onQuestion) return failure('This run cannot ask the user a question.');

@@ -155,7 +155,6 @@ import {
   type DatabaseState,
   type DemoScenario,
   type DiscardBackup,
-  type DesignSource,
   type DocEvidence,
   type Effort,
   type EscalationPolicy,
@@ -237,7 +236,6 @@ import {
 import type {
   LiveChangeFile,
   LiveChanges,
-  DesignView,
   ExportPreview,
   ExportResult,
   RepositoryView,
@@ -261,7 +259,6 @@ import { resolveArtifact, saveArtifact } from './artifacts';
 import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-evidence';
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
-import { FigmaClient } from './figma';
 import { liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
@@ -531,8 +528,6 @@ interface Session {
   };
   /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
   sourceDirtyFiles: number;
-  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml의 설정보다 우선한다 */
-  design?: { fileUrl: string; fileKey: string };
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
@@ -706,8 +701,6 @@ interface Store {
   registry?: SessionRegistry;
   recovery?: Promise<void>;
   previewGateway?: Server;
-  /** Figma 클라이언트. 파일·노드 캐시를 요청 사이에도 유지한다 */
-  figma?: FigmaClient;
   /** 이미 쓴 미리보기 티켓의 임의 값과 만료 시각 */
   previewTickets?: Map<string, number>;
   cleanupRegistered: boolean;
@@ -1055,8 +1048,6 @@ async function startSession({
           serviceSelection,
           previewToken: randomBytes(16).toString('hex'),
         });
-        // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
-        session.snapshot.design = sessionDesignView(session);
 
         // 만들기가 도는 사이(복제·샌드박스 만들기는 오래 걸린다)에 같은 id가 생겼으면 덮어쓰지 않는다. 덮어쓰면 그 세션을 잃고 실패했을 때 그 세션을 뺀다
         if (store.sessions.has(id)) throw new StudioError(500, `세션 id가 이미 쓰이고 있어 만들지 않았습니다: ${id}`);
@@ -1722,9 +1713,6 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
-    // 세션 단위 디자인 설정을 되살리고, 화면 상태를 다시 계산한다(studio.yaml 설정이 바뀌었을 수 있다)
-    session.design = data.design;
-    session.snapshot.design = sessionDesignView(session);
     // 기억한 Git 상태를 되살린다(이슈 #699). 이 기록이 없던 옛 세션이거나, 이어서 시작하며 b-studio가 HEAD를
     // 움직였으면(문서·직접 수정 체크포인트) 지금 값을 그 시점의 것으로 믿고 채운다
     session.git = data.git && !localEdits && !resumeDocsCheckpoint ? data.git : await initialGitMemory(checkpoints);
@@ -2020,25 +2008,6 @@ export function exploreQaBackendFor(id: string): { projectRoot: string; backend:
   return { projectRoot, backend: { kind: 'unsupported', backend } };
 }
 
-/** 세션 단위 Figma 파일 키가 있으면 그걸, 없으면 studio.yaml의 design.figma를 쓴다 */
-function effectiveDesign(session: Pick<Session, 'design' | 'project'>): { fileUrl: string; fileKey: string } | undefined {
-  if (session.design) return session.design;
-  const figma = session.project.spec.design?.figma;
-  return figma ? { fileUrl: figma.fileUrl, fileKey: figma.fileKey } : undefined;
-}
-
-/** 화면에 보여 줄 디자인 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
-function sessionDesignView(session: Pick<Session, 'design' | 'project'>): DesignView | undefined {
-  const design = effectiveDesign(session);
-  if (!design) return undefined;
-  return { fileUrl: design.fileUrl, fileKey: design.fileKey, from: session.design ? 'session' : 'studio.yaml', hasToken: Boolean(process.env.FIGMA_TOKEN) };
-}
-
-/** HMR로 모듈이 다시 로드돼도 같은 캐시를 쓰도록 전역에 둔다. 토큰은 만들 때 읽으므로 바꾸려면 서버를 다시 시작한다 */
-function figmaClient(): FigmaClient {
-  return (store.figma ??= new FigmaClient({ token: process.env.FIGMA_TOKEN, baseUrl: process.env.B_STUDIO_FIGMA_API }));
-}
-
 /** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값(모델·노력 단계)을 함께 돌려준다 */
 export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
   const session = requireSession(id);
@@ -2089,19 +2058,6 @@ export async function setSessionLabel(id: string, label: string): Promise<Sessio
   // 보고 있는 화면(세션 화면 머리, 나란히 보기 칸)이 바로 바뀌게 알린다. 새로 붙는 화면은 스냅샷에서 받으므로 기록에 쌓지 않는다
   emit(session, clean ? { type: 'label', label: clean } : { type: 'label' });
   return session.snapshot;
-}
-
-/** 디자인 도구가 쓸 자료원. 세션에 디자인이 설정됐을 때만 runPlan이 넘긴다 */
-function designSourceFor(session: Session, runId: string): DesignSource | undefined {
-  const design = effectiveDesign(session);
-  if (!design) return undefined;
-  const client = figmaClient();
-  return {
-    frames: () => client.listFrames(design.fileKey, session.stop.signal),
-    frame: (id) => client.summarizeFrame(design.fileKey, id, session.stop.signal),
-    // 이미지는 세션 산출물로 저장하고 참조 경로만 모델에 돌려준다(모델에 이미지를 넘기지 않는다)
-    saveArtifact: (name, data) => saveArtifact(stateDirOf(session.snapshot), runId, { name, data, contentType: 'image/png' }),
-  };
 }
 
 /**
@@ -3172,8 +3128,6 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     board: plan.board,
     // 화면 확인이 찍은 스크린샷은 세션 폴더에 남긴다
     saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
-    // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
-    design: designSourceFor(session, run.id),
     // 되묻기(ask_user) 도구는 사람이 있는 단일 세션 요청에만 넣는다
     interactive: plan.interactive === true,
     signal,
@@ -7255,7 +7209,6 @@ function persistedBody(session: Session): PersistedBody {
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
-    design: session.design,
     codex: session.codex,
     commandCode: session.commandCode,
     openCode: session.openCode,

@@ -73,7 +73,6 @@ export function randomBody(random: () => number, workDir: string, seed: number):
     conversation: [{ role: 'user', content: text }, { n: pick(random, NUMBERS) }],
     demoIndex: seed % 5,
     claudeCode: { notes: [text], ...(random() < 0.5 ? { sessionId: 'abc' } : {}) },
-    design: random() < 0.5 ? undefined : { fileUrl: 'https://x', fileKey: 'k' },
     codex: random() < 0.5 ? undefined : { notes: [], recent: [] },
     commandCode: undefined,
     openCode: undefined,
