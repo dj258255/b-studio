@@ -1,5 +1,5 @@
 /**
- * desk에 붙은 실행 화면(#895): Ctrl-b v로 고른 세션의 이벤트를 받고, 배포·서비스·미리보기·저장소를 스튜디오에 묻는 것을 가짜로 본다
+ * desk에 붙은 실행 화면(#895): Ctrl-b v로 고른 세션의 이벤트를 받고, 서비스·미리보기·저장소를 스튜디오에 묻는 것을 가짜로 본다
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
@@ -8,7 +8,7 @@ import { DeskApp, type DeskClient, type DeskIo } from './desk';
 import { openFleets } from './fleets';
 import { handleInput, initialState } from './keys';
 import { stripAnsi } from './screen';
-import type { DeskDeployStatus, DeskItem, DeskRepoList, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
+import type { DeskItem, DeskRepoList, DeskSessionEvent, DeskSessionView, DeskSubmission } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -45,7 +45,6 @@ const snapshot: DeskSessionView = {
   status: 'ready',
   services: [{ name: 'web', template: 'nextjs', preview: 'browser', state: 'ready', url: 'http://127.0.0.1:41001' }],
   checkpoints: [{ sha: 'abc1234def', shortSha: 'abc1234', message: '주문 모듈 나누기', createdAt: '2026-10-23T04:00:00Z' }],
-  hasDeploy: true,
   experimental: true,
 };
 
@@ -88,9 +87,9 @@ class FakeRuntime {
   emit: (event: DeskSessionEvent) => void = () => {};
   signal: AbortSignal | undefined;
   eventsError: Error | undefined;
-  deployStatus: DeskDeployStatus = { state: { active: 'r1', releases: [{ id: 'r1', createdAt: '2026-10-22T00:00:00Z', source: { label: '첫 배포' }, status: 'active' }] }, urls: { web: 'http://127.0.0.1:9000' }, containers: [] };
+  repoUrl = 'https://github.com/me/shop/issues/3';
   /** DeskClient에 더할 실행 화면 메서드(#895) */
-  client(): Pick<StudioClient, 'sessionEvents' | 'deploys' | 'deploy' | 'rollback' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository'> {
+  client(): Pick<StudioClient, 'sessionEvents' | 'setService' | 'boot' | 'previewUrl' | 'submission' | 'repository'> {
     return {
         sessionEvents: (id, onEvent, signal) => {
           this.calls.push(`events ${id}`);
@@ -98,16 +97,6 @@ class FakeRuntime {
           if (this.eventsError) return Promise.reject(this.eventsError);
           this.emit = onEvent;
           return new Promise((resolve) => signal.addEventListener('abort', () => resolve()));
-        },
-        deploys: async (id) => {
-          this.calls.push(`deploys ${id}`);
-          return this.deployStatus;
-        },
-        deploy: async (id, sha) => {
-          this.calls.push(`deploy ${id} ${sha}`);
-        },
-        rollback: async (id, releaseId) => {
-          this.calls.push(`rollback ${id} ${releaseId}`);
         },
         setService: async (id, service, on) => {
           this.calls.push(`service ${id} ${service} ${on}`);
@@ -125,7 +114,7 @@ class FakeRuntime {
         },
         repository: async (projectId, kind, state): Promise<DeskRepoList> => {
           this.calls.push(`repository ${projectId} ${kind} ${state}`);
-          return { ok: true, issues: [{ number: 3, title: '버그', author: 'me', labels: [], updatedAt: '2026-10-22T00:00:00Z', url: 'https://github.com/me/shop/issues/3', state: 'open' }] };
+          return { ok: true, issues: [{ number: 3, title: '버그', author: 'me', labels: [], updatedAt: '2026-10-22T00:00:00Z', url: this.repoUrl, state: 'open' }] };
         },
     };
   }
@@ -224,7 +213,7 @@ describe('실행 화면에서 하는 일(#895)', () => {
 
   it('미리보기 탭은 주소를 받아 보이고, Enter로 브라우저를 연다', async () => {
     const ctx = await opened();
-    ctx.io.type('4');
+    ctx.io.type('3');
     await tick();
     expect(ctx.runtime.calls).toContain('preview a web');
     expect(screenText(ctx.io)).toContain('http://127.0.0.1:52000/');
@@ -233,27 +222,9 @@ describe('실행 화면에서 하는 일(#895)', () => {
     expect(ctx.runtime.opened).toEqual(['http://127.0.0.1:52000/']);
   });
 
-  it('배포 탭: 상태를 받고, d·y로 배포하고, 끝나면 상태를 다시 받는다', async () => {
-    const ctx = await opened();
-    ctx.io.type('3');
-    await tick();
-    expect(ctx.runtime.calls).toContain('deploys a');
-    expect(screenText(ctx.io)).toContain('첫 배포');
-    ctx.io.type('d');
-    await tick();
-    ctx.io.type('y');
-    await tick();
-    expect(ctx.runtime.calls).toContain('deploy a abc1234def');
-    ctx.runtime.emit({ type: 'deploy_started', action: 'deploy', target: 'abc1234', at: '2026-10-23T05:00:00Z' });
-    ctx.runtime.emit({ type: 'deploy_finished', action: 'deploy', release: 'r2', label: '주문 모듈 나누기', urls: {} });
-    await tick();
-    expect(ctx.runtime.calls.filter((call) => call === 'deploys a')).toHaveLength(2);
-    expect(screenText(ctx.io)).toContain('배포했습니다');
-  });
-
   it('저장소 탭: 점검을 받고, i로 이슈를 받아 Enter로 연다', async () => {
     const ctx = await opened();
-    ctx.io.type('5');
+    ctx.io.type('4');
     await tick();
     expect(ctx.runtime.calls).toContain('submission a');
     expect(screenText(ctx.io)).toContain('점검 1/1 통과');
@@ -268,10 +239,12 @@ describe('실행 화면에서 하는 일(#895)', () => {
 
   it('http·https가 아닌 주소는 열지 않는다', async () => {
     const ctx = await opened();
-    ctx.runtime.deployStatus = { ...ctx.runtime.deployStatus, urls: { web: 'javascript:alert(1)' } };
-    ctx.io.type('3');
+    ctx.runtime.repoUrl = 'javascript:alert(1)';
+    ctx.io.type('4');
     await tick();
-    ctx.io.type('o');
+    ctx.io.type('i');
+    await tick();
+    ctx.io.type('\r');
     await tick();
     expect(ctx.runtime.opened).toEqual([]);
     expect(ctx.app.state.runtime?.note).toContain('열 수 없는 주소');
@@ -304,7 +277,7 @@ describe('덮는 화면은 하나만(#895)', () => {
 
   it('화면 안의 글자는 실행 화면이 받고, 앞글쇠 다음 다른 화면 키는 실행 화면을 닫고 그리로 간다', () => {
     const opened = handleInput(base(), '\x02v').state;
-    // s는 사이드바 숨기기가 아니라 실행 화면의 키(로그 탭이 아니면 아무 일 없음), d는 배포 탭의 키
+    // s는 사이드바 숨기기가 아니라 실행 화면의 키(로그 탭이 아니면 아무 일 없음)
     const inside = handleInput(opened, '2s');
     expect(inside.state.runtime?.tab).toBe('logs');
     expect(inside.state.sidebarHidden).toBeUndefined();
@@ -357,7 +330,7 @@ describe('실행 화면의 탐색형 QA(#916)', () => {
     await tick();
     ctx.runtime.emit({ type: 'snapshot', snapshot });
     await tick();
-    ctx.io.type('6');
+    ctx.io.type('5');
     await tick();
     expect(calls).toEqual(['qa a']);
     expect(screenText(ctx.io)).toContain('n으로 시작');
@@ -391,7 +364,7 @@ describe('실행 화면의 탐색형 QA(#916)', () => {
     await tick();
     ctx.runtime.emit({ type: 'snapshot', snapshot });
     await tick();
-    ctx.io.type('6');
+    ctx.io.type('5');
     await tick();
     ctx.io.type('n목표\r\r\r');
     await tick();

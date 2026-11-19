@@ -4,7 +4,6 @@ import { loadProject, SpecError } from '@b-studio/spec';
 import { agent, BACKENDS, type Backend } from './commands/agent';
 import { authToken } from './commands/auth';
 import { bootProbe } from './commands/boot-probe';
-import { deploy } from './commands/deploy';
 import { desk } from './desk/desk';
 import { launch, LAUNCH_MODES, type LaunchMode } from './commands/launch';
 import { sandboxPrune } from './commands/sandbox';
@@ -24,7 +23,6 @@ const USAGE = `사용법:
   studio desk [--port <n>] [--no-notify] [--no-mouse]
   studio boot-probe <프로젝트 경로> [--json]
   studio agent <프로젝트 경로> "<요청>" [옵션]
-  studio deploy <프로젝트 경로> [--status | --rollback <릴리스> | --remove [--volumes]]
   studio workflow <프로젝트 경로> [--pi-env]
   studio verify <프로젝트 경로> [--allow-breaking] [--keep] [--logs]
   studio auth token <이름>
@@ -58,7 +56,7 @@ desk:
                  t 작업 나누기(계획 목록·새 계획·단계별 레인 카드, 승인 대기면 레인 AI·계정 바꾸기와 승인)
                  e 요구사항·문서(명세, 이 요구사항으로 작업, 편집기로 고치기, 테스트, 문서 읽기, 현황)
                  f 여러 AI 비교(같은 요청을 계정·모델까지 고른 2~4개 AI에 보내 카드로 나란히 보고 승자 고르기, 참가자를 칸에 나란히)
-                 v 실행(고른 세션의 서비스·자원, 로그 찾기, 운영 배포·되돌리기, 미리보기 주소를 브라우저로, 저장소 점검·이슈·PR, 탐색형 QA)
+                 v 실행(고른 세션의 서비스·자원, 로그 찾기, 미리보기 주소를 브라우저로, 저장소 점검·이슈·PR, 탐색형 QA)
                  a 폴더 열기(내 폴더를 프로젝트로 등록: 경로·Tab 채우기·하위 폴더, 살펴본 뒤 y로 등록)
                  Ctrl-b CLI에 Ctrl-b 보내기
   세션이 권한·답을 기다리거나 검증이 끝나면 사이드바에 !를 붙이고 벨과 OS 알림(OSC 9)을 낸다
@@ -78,7 +76,7 @@ boot-probe:
   --json   사람이 읽는 한 줄 대신 한 줄 JSON을 출력한다
 
 workflow:
-  studio.yaml에서 강제할 단계, 테스트, 화면 확인, 보호 경로, 배포 조건을 보여 준다
+  studio.yaml에서 강제할 단계, 테스트, 화면 확인, 보호 경로를 보여 준다
   --pi-env           Pi 확장(packages/agent/pi/bstudio-policy.ts)이 읽는 환경 변수를 export 문으로 출력한다
 
 auth token:
@@ -87,12 +85,6 @@ auth token:
 sandbox:
   studio sandbox prune  b-studio가 만들었지만 쓰지 않는 Docker 자원(컨테이너·이미지·볼륨·네트워크)을 찾아 지운다
   --dry-run             지울 목록만 보여 주고 아무것도 지우지 않는다
-
-deploy:
-  운영 Dockerfile로 이미지를 만들어 로컬 Docker에 배포하고, 준비되면 고정 주소를 새 릴리스로 무중단 전환한다
-  --status           운영 주소, 컨테이너 상태, 릴리스 기록
-  --rollback <id>    이미지를 남긴 이전 릴리스로 빌드 없이 되돌린다 (데이터베이스 마이그레이션은 되돌리지 않는다)
-  --remove           운영 프록시, 릴리스, 기반 스택을 지운다. --volumes를 더하면 데이터베이스 볼륨도 지운다
 
 공통 옵션:
   --keep             끝나거나 실패해도 컨테이너를 지우지 않는다 (디버깅용)
@@ -137,10 +129,6 @@ async function main(argv: string[]): Promise<number> {
       effort: { type: 'string' },
       model: { type: 'string' },
       'free-only': { type: 'boolean', default: false },
-      status: { type: 'boolean', default: false },
-      rollback: { type: 'string' },
-      remove: { type: 'boolean', default: false },
-      volumes: { type: 'boolean', default: false },
       'pi-env': { type: 'boolean', default: false },
       'dry-run': { type: 'boolean', default: false },
       json: { type: 'boolean', default: false },
@@ -219,14 +207,6 @@ async function main(argv: string[]): Promise<number> {
       return 2;
     }
     return bootProbe(await loadProject(dir), { json: values.json });
-  }
-
-  if (command === 'deploy' && dir) {
-    if ([values.status, values.remove, values.rollback !== undefined].filter(Boolean).length > 1) {
-      console.error('--status, --rollback, --remove는 하나만 쓸 수 있습니다');
-      return 2;
-    }
-    return deploy(await loadProject(dir), { status: values.status, rollback: values.rollback, remove: values.remove, volumes: values.volumes });
   }
 
   if (command === 'workflow' && dir) {

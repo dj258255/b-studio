@@ -81,7 +81,7 @@ fn normalized(value: Option<JsValue>) -> Option<JsValue> {
 }
 
 impl SessionRecord {
-    /// 끝나지 못한 요청·되돌리기·원격 동기화·배포를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수를 돌려준다.
+    /// 끝나지 못한 요청·되돌리기·원격 동기화(옛 배포 포함)를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수를 돌려준다.
     /// 이벤트 하나라도 읽지 못하면(JSON이 아니거나 `null`이거나 필드가 너무 깊다) 아무것도 덧붙이지 않고 알린다
     pub fn close_unfinished(&mut self, reason: &str) -> Result<usize, String> {
         let mut open_runs: Vec<OpenRun> = Vec::new();

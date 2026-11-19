@@ -19,7 +19,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -73,7 +72,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -135,7 +133,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -190,7 +187,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -262,7 +258,6 @@
         "experimental": true,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -318,7 +313,6 @@
           "experimental": true,
           "terminal": true,
           "terminalMode": "host",
-          "hasDeploy": false,
           "services": [
             {
               "name": "app",
@@ -473,7 +467,6 @@
         ],
         "experimental": true,
         "externals": [],
-        "hasDeploy": false,
         "id": "<sid>",
         "label": "마지막 이름",
         "mode": "claude-code",

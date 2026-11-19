@@ -217,7 +217,6 @@ export function archivedSnapshot(data: Pick<PersistedSession, 'snapshot'>, error
     status: 'stopped',
     running: false,
     cancelling: undefined,
-    deploying: undefined,
     // 켜 둔 확인 선언 변경 허용은 읽어 온 세션에 이어지지 않는다(ADR-215). 옛 파일에 실려 있어도 읽을 수 있고, 여기서 뺀다
     allowCheckChangesNext: undefined,
     error,

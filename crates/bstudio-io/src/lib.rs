@@ -11,7 +11,6 @@ pub mod cli_command;
 pub mod cli_process;
 pub mod cli_runner;
 pub mod container_verify;
-pub mod deploy_io;
 pub mod exec_stream;
 #[cfg(test)]
 mod fake_docker;
@@ -35,7 +34,6 @@ pub mod readiness_io;
 pub mod safe_fs;
 pub mod snapshot_io;
 pub mod stream_exec;
-pub mod streaming;
 pub mod sync_relay;
 pub mod tool_ledger;
 pub mod up_loop;

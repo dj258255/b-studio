@@ -1,5 +1,5 @@
 /**
- * 실행 화면(#895)이 부르는 스튜디오 API: 세션 이벤트 통로, 배포, 서비스 켜고 끄기, 미리보기 주소, 저장소
+ * 실행 화면(#895)이 부르는 스튜디오 API: 세션 이벤트 통로, 서비스 켜고 끄기, 미리보기 주소, 저장소
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
@@ -61,19 +61,7 @@ describe('세션 이벤트 통로', () => {
   });
 });
 
-describe('배포·서비스·미리보기·저장소', () => {
-  it('배포 상태를 받고, 배포·되돌리기를 보낸다', async () => {
-    handler = (_req, res) => res.end(JSON.stringify({ state: { releases: [] }, urls: {}, containers: [] }));
-    await client.deploys('s1');
-    await client.deploy('s1', 'abc');
-    await client.rollback('s1', 'r1');
-    expect(seen.map((entry) => `${entry.method} ${entry.url} ${entry.body}`)).toEqual([
-      'GET /api/sessions/s1/deploys ',
-      'POST /api/sessions/s1/deploys {"sha":"abc"}',
-      'POST /api/sessions/s1/deploys/rollback {"releaseId":"r1"}',
-    ]);
-  });
-
+describe('서비스·미리보기·저장소', () => {
   it('서비스를 켜고 끄고, 샌드박스를 켠다', async () => {
     await client.setService('s1', 'web app', false);
     await client.boot('s1');

@@ -34,12 +34,10 @@ CI는 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)의 `check` 작�
 | Agent Fleet | 2개 독립 후보 E2E | 분리된 브랜치·샌드박스, 결과 비교와 선택 확인 |
 | 워크플로 강제 | `pnpm e2e:agent` 3개 시나리오, 실제 Docker | 통과 시나리오 2개에서 web 컨테이너 `pnpm lint`와 `/` 화면 확인을 게이트가 실행하고 5개 검증 단계 통과 기록. 계약이 깨진 시나리오는 test 단계를 실행하지 않고 failed |
 | 헤드리스 브라우저 화면 확인 | Chromium 실제 실행 단위 테스트 + `pnpm e2e:agent`(web `/`를 390x844로 렌더링) | 클라이언트가 만든 문구 읽기, 스크립트 예외·`console.error`·404 리소스 수집, 모바일 가로 넘침 510px 측정. 실제 Next 개발 서버에서 3개 시나리오 통과 |
-| 배포 조건 전 과정 | `pnpm e2e:deploy-gate`, 실제 Docker·배포 API 라우트 | 검증 기록 없는 체크포인트 409 거부, 스크립트 예외 화면을 실제 브라우저 확인이 실패시킨 뒤 수정 통과, 트레일러 기록, 202 수락과 운영 릴리스 완료·운영 주소 응답까지 확인 |
 | 예제 api 테스트 | `pnpm e2e:agent`(개발 서버가 도는 api 컨테이너) + 같은 명령을 컨테이너에서 직접 실행 | `bootRun` 중에도 Gradle 잠금 충돌 없이 `api-unit` 통과. 단언을 일부러 틀리게 바꾸면 `1 test completed, 1 failed`로 실제 실패하는 것까지 확인 |
 | 작업 분해 | `pnpm e2e:task-plan`, 실제 Docker 세션 3개 | 레인 2개 동시 실행, 같은 레인의 a2가 a1 파일을 읽음, 다른 레인의 범위 밖 쓰기 차단, 통합 세션에서 파일 3개 재적용 뒤 5개 검증 단계 재통과 (98.1초) |
-| 샌드박스 이미지 정리 | 실제 Docker에서 세션 종료 뒤 이미지 확인 | 수정 전 세션마다 `studio-<프로젝트>-<id>-*` 이미지가 남아 디스크를 채웠고, 수정 뒤 배포 조건 E2E 종료 시 남은 샌드박스 이미지 0개 |
+| 샌드박스 이미지 정리 | 실제 Docker에서 세션 종료 뒤 이미지 확인 | 수정 전 세션마다 `studio-<프로젝트>-<id>-*` 이미지가 남아 디스크를 채웠고, 수정 뒤 세션 종료 시 남은 샌드박스 이미지 0개 |
 | Pi 정책 확장 | 단위 테스트 + Pi 0.73.1의 `loadExtensions`·`ExtensionRunner`로 실제 로드 | 로드 오류 없음. 보호 경로·프로젝트 밖 쓰기, `&&` 뒤 `git push`, `.env` 읽기 차단과 일반 읽기·쓰기 허용, 시스템 프롬프트 안내까지 10개 확인. 모델을 붙인 전체 세션은 아님 |
-| 운영 배포 | 실제 Docker와 고정 주소 | 새 릴리스 전환, 상태, 롤백, 제거 확인 |
 | 인증과 한도 | token/proxy 모드, 실제 모델 | 세션 권한, 사용자별·세션별 토큰 차단 확인 |
 | 동시 요청 확인(`concurrency_check`) | 가짜 요청 함수 단위 테스트, 그리고 2026-11-14 실제 Docker 샌드박스의 실제 Claude Code 세션([기록](experiments/2026-11-14-a5b2-declared-checks.md)) | 단위 테스트: 10개를 실제로 동시에 보냄(최대 동시 수 확인), 성공 건수·상태 분포·`then` 값 판정, 출처 밖 경로 거부, 타임아웃 실패. 실제 세션: `GET /README.md` 4개 동시(정확히 4건 성공, `then`으로 `$.openapi` 확인)가 통과하고, `$.openapi`를 틀리게 바꾼 요청은 세 번 실패 뒤 소진·되돌리기로 끝남. 동시 요청의 출처 밖 경로와 취소는 실제로 재지 않음 |
 | 백엔드 Rust 이전(ADR-191~199) | 실제 Docker·실제 Claude Code 세션·실제 브라우저, 2026-11-11~15. 기록 15건: [앞단 너머 세션](experiments/2026-11-11-rust-front-session.md), 샌드박스 조율([A4b](experiments/2026-11-11-a4b-verify-containers.md), [A4c-1](experiments/2026-11-12-a4c1-up-loop.md), [A4c-2](experiments/2026-11-12-a4c2-sync-relay-port.md), [A4c-3a](experiments/2026-11-12-a4c3a-readiness.md), [A4c-3b](experiments/2026-11-12-a4c3b-snapshots.md), [A4c-3c](experiments/2026-11-12-a4c3c-lifecycle.md)), [체크포인트 원격 A2](experiments/2026-11-12-a2-checkpoint-remote.md), 게이트([A5a](experiments/2026-11-14-a5a-verify.md), [A5b-1](experiments/2026-11-14-a5b1-gate-check.md), [A5b-2](experiments/2026-11-14-a5b2-declared-checks.md), [A5c-1](experiments/2026-11-14-a5c1-check-page.md), [A5c-2](experiments/2026-11-14-a5c2-auto-pages.md)), 화면 확인 러너([A6c-3](experiments/2026-11-15-a6c3-native-runner-gate.md)) | 옮긴 조각마다 옛 동작과 같은 결과가 나오는지 봤다. 앞단 너머로 실제 세션 둘이 게이트 통과·체크포인트까지 갔고, 샌드박스 만들기·준비·스냅샷·끝맺음, 게이트의 통과·실패·소진, 선언한 검사, 화면 확인(HTTP·브라우저 모드, 자동 화면)을 실제 Docker와 브라우저로 봤다. 화면 확인 러너의 Rust CDP 구현은 게이트의 기본값으로 바꾼 뒤(A6c-3) 실제 세션에서 브라우저 모드의 통과·실패와 화면 글자를 위조한 페이지의 막힘을 봤다. **보지 못한 것**: 단계·첫 화면 글자·로드 예산·자동 화면 확인을 Rust 러너로 돌린 실제 세션 기록은 없다(차등 시험과 단위 시험만). 호출 시간은 A6c-1의 한 기계 12회 중앙값뿐이다(고친 뒤 차이 수십 ms 안, ADR-199). 부하 확인·OOM 컨테이너 되살리기·테스트 시간 상한·취소는 실제로 재지 않았다([A5b-2 기록](experiments/2026-11-14-a5b2-declared-checks.md)). 앞단과 Node가 함께 도는 메모리는 재지 않았다 |
@@ -154,7 +152,6 @@ pnpm test
 pnpm typecheck
 pnpm e2e:agent
 pnpm e2e:fleet
-pnpm e2e:deploy-gate
 pnpm e2e:task-plan
 pnpm e2e:two-sessions
 pnpm bench:boot examples/orders 3
