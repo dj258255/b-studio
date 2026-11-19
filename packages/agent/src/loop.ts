@@ -337,7 +337,7 @@ export interface RunAgentOptions {
   ensureSandbox?: () => Promise<void>;
   /**
    * 검증 범위(기본 full). light(가볍게 확인)면 게이트가 서비스 재시작·준비 판정·계약만 돌리고
-   * 테스트·화면 확인·동시 요청·리뷰는 건너뛴다. 건너뛴 단계는 결과의 skippedStages로 남고 배포 조건이 막는다
+   * 테스트·화면 확인·동시 요청·리뷰는 건너뛴다. 건너뛴 단계는 결과의 skippedStages로 남는다
    */
   verify?: VerifyMode;
   /** 사용자가 이 요청에서 확인 선언의 변경을 허용했다(ADR-164). 켜면 게이트가 바뀐 선언으로 검증한다. 사람이 보낸 요청에서만 켠다 */

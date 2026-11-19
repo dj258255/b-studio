@@ -1,7 +1,7 @@
 //! 세션 조율 함수가 만드는 글(옛 TS: `apps/studio/lib/server/sessions.ts`, ADR-195 4f C1-6a/6b).
 //!
 //! `Session` 메모리 상태·git·파일·타이머는 TS가 쥐고, 여기는 **같은 값에 같은 글자**를 내는 순수 함수만 둔다.
-//! 트레일러는 게이트 통과의 근거로 커밋과 배포 판정에 쓰이므로 바이트까지 옛 글자와 같아야 한다(`checkpoint_trailers`).
+//! 트레일러는 게이트 통과의 근거로 커밋과 검증 판정에 쓰이므로 바이트까지 옛 글자와 같아야 한다(`checkpoint_trailers`).
 //! 글자를 만드는 데 쓰던 판정·형식화(`format_verification_report`, `format_checked_coverage`, 트레일러)는 `bstudio-guard`가 이미 한다.
 //!
 //! 숫자를 글자로 바꾸는 자리(검증 횟수·게이트 횟수·경과 초)는 호출자가 JS 표기로 만들어 넘긴다. 이 모듈이 받는 수는
@@ -119,11 +119,11 @@ pub fn checkpoint_body(
     Ok(sections.join("\n\n"))
 }
 
-/// 배포할 때 releaseRequires와 대조하는 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다
+/// 체크포인트에 남길 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다
 pub fn checkpoint_trailers(passed_stages: Option<&[String]>, verify: Option<&str>, incomplete: Option<&str>) -> Vec<String> {
     let Some(stages) = passed_stages else { return Vec::new() };
     let mut trailers = vec![workflow::format_workflow_trailer(stages)];
-    // 가볍게 확인한 체크포인트는 건너뛴 단계를 채우지 못한다(배포 조건이 막는다). 화면이 안내를 바꾸도록 표시를 남긴다
+    // 가볍게 확인한 체크포인트는 건너뛴 단계를 채우지 못한다. 화면이 안내를 바꾸도록 표시를 남긴다
     if verify == Some("light") {
         trailers.push(workflow::format_verify_trailer("light"));
     }

@@ -127,9 +127,7 @@ export interface SessionSnapshot {
   services: ServiceView[];
   /** 등록한 사내 API */
   externals?: ExternalApiView[];
-  /** 프로젝트 studio.yaml에 deploy 절이 있다. 없으면 실행 탭의 "배포" 하위 탭을 숨긴다(로컬 폴더 모드 기본값) */
-  hasDeploy?: boolean;
-  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 원격 브라우저·배포·나란히 보기를 숨긴다 */
+  /** 실험 기능을 화면에 보인다(B_STUDIO_EXPERIMENTAL, ADR-166). 없거나 false면 원격 브라우저·나란히 보기를 숨긴다 */
   experimental?: boolean;
   /** 세션 터미널을 쓸 수 있다(개인 PC 모드, 컨테이너 방식이면 실험 기능도 — 이슈 #673, ADR-200). 없거나 false면 대화 패널만 보인다 */
   terminal?: boolean;
@@ -157,7 +155,7 @@ export interface SessionSnapshot {
   checkpoints: Checkpoint[];
   /**
    * "다시 검증"(#798, ADR-181)의 기록. 최신이 먼저 오고 REVERIFY_LIMIT개까지 둔다. 체크포인트를 새로 만들거나 트레일러를
-   * 바꾸지 않으므로 배포 조건(releaseRequires)의 근거가 되지 않는다. 지금 그 체크포인트가 같은 게이트를 지나는지 보는 기록일 뿐이다
+   * 바꾸지 않으므로 새 체크포인트나 검증 기록의 근거가 되지 않는다. 지금 그 체크포인트가 같은 게이트를 지나는지 보는 기록일 뿐이다
    */
   reverifications?: ReverifyRecord[];
   /** 원본 프로젝트가 Git 저장소일 때만 있다 */
@@ -174,8 +172,6 @@ export interface SessionSnapshot {
   testsRevision?: number;
   /** 지금 테스트를 실행 중인 서비스 이름. 다른 브라우저 탭에서도 "실행 중"을 보여 준다 */
   testsRunning?: string[];
-  /** 이 세션에서 시작한 운영 배포나 되돌리기가 진행 중이다. lines는 최근 진행 줄 */
-  deploying?: DeployingView;
   /** PR 자동 리뷰 라운드(ADR-074) 진행 상태. PR을 아직 만들지 않았거나 리뷰를 한 번도 돌리지 않았으면 없다 */
   review?: ReviewStateView;
 }
@@ -234,15 +230,6 @@ export interface ReviewStateView {
 }
 
 export type DeployAction = 'deploy' | 'rollback';
-
-export interface DeployingView {
-  action: DeployAction;
-  /** 배포할 체크포인트나 되돌릴 릴리스 */
-  target: string;
-  startedAt: string;
-  by?: string;
-  lines: string[];
-}
 
 /** 원본이 Git 저장소인 세션의 원격 연동 상태 */
 export interface RepositoryView {
@@ -571,7 +558,7 @@ export type StudioEvent =
       requirementsTrackingWarning?: string;
     }
   | { type: 'deploy_started'; action: DeployAction; target: string; at: string; by?: string }
-  /** 기록에 쌓지 않는다. 새로 연결한 브라우저는 스냅샷의 deploying.lines에서 최근 줄을 받는다 */
+  /** 기록에 쌓지 않는다 */
   | { type: 'deploy_log'; line: string }
   | {
       type: 'deploy_finished';

@@ -19,7 +19,6 @@ pub fn validate(name: &str, input: Option<&JsValue>) -> Outcome {
         "ResourceLimitSchema" => resource_limit(input),
         "DatabaseSchema" => database(input),
         "SecretSchema" => secret(input),
-        "DeploySchema" => deploy(input),
         "ReviewSchema" => review(input),
         "GuideSchema" => guide(input),
         "ModelsSchema" => models(input),
@@ -467,25 +466,7 @@ pub fn secret(input: Option<&JsValue>) -> Outcome {
     obj.finish()
 }
 
-pub fn deploy(input: Option<&JsValue>) -> Outcome {
-    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    obj.set(
-        "services",
-        defaulted(obj.field("services"), || JsValue::Obj(JsObject::new()), |value| {
-            validate_record(value, |key| name_re().is_match(key), |item| deploy_service(item))
-        }),
-    );
-    obj.finish()
-}
-
-fn deploy_service(input: Option<&JsValue>) -> Outcome {
-    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    obj.set("dockerfile", defaulted(obj.field("dockerfile"), || JsValue::Str("Dockerfile".into()), |value| relative_path(value)));
-    if let Some(value) = obj.field("port") {
-        obj.set("port", validate_number(Some(value), &[NumberCheck::Int, NumberCheck::Min(1024.0, true), NumberCheck::Max(65535.0, true)]));
-    }
-    obj.finish()
-}
+const DEPLOY_REMOVED: &str = "`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요";
 
 pub fn review(input: Option<&JsValue>) -> Outcome {
     let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
@@ -564,8 +545,8 @@ pub fn studio_spec(input: Option<&JsValue>) -> Outcome {
     if let Some(value) = obj.field("secrets") {
         obj.set("secrets", validate_record(Some(value), |key| env_name_re().is_match(key), |item| secret(item)));
     }
-    if let Some(value) = obj.field("deploy") {
-        obj.set("deploy", deploy(Some(value)));
+    if obj.field("deploy").is_some() {
+        obj.issues.push(issue(vec![Seg::Key("deploy".to_owned())], DEPLOY_REMOVED.to_owned(), false));
     }
     if obj.field("design").is_some() {
         obj.issues.push(issue(vec![Seg::Key("design".into())], "`design`은 더는 지원하지 않습니다. 이 항목을 지우세요", false));

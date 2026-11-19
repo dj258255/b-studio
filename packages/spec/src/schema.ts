@@ -212,19 +212,9 @@ export const SecretSchema = z.object({
   description: z.string().optional(),
 });
 
-/** 운영 배포 설정. managed 서비스마다 운영 이미지를 빌드할 Dockerfile과 운영 주소로 공개할 루프백 포트 */
-export const DeploySchema = z.object({
-  services: z
-    .record(
-      z.string().regex(NAME),
-      z.object({
-        /** compose build.context 기준 경로. 개발용 Dockerfile.dev와 따로 둔다 */
-        dockerfile: RELATIVE_PATH.default('Dockerfile'),
-        /** 운영 프록시가 이 서비스를 공개할 127.0.0.1의 포트. 없으면 첫 배포 때 빈 포트를 골라 기억한다 */
-        port: z.number().int().min(1024).max(65535).optional(),
-      }),
-    )
-    .default({}),
+/** 지운 운영 배포 설정. 조용히 무시하지 않고 이 항목을 지우라고 거절한다(ADR-221) */
+const RemovedDeploySchema = z.unknown().superRefine((_, ctx) => {
+  ctx.addIssue({ code: 'custom', message: '`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요' });
 });
 
 /** 에이전트가 작업을 끝냈다고 주장해도 스튜디오가 순서대로 확인할 개발 단계 */
@@ -707,7 +697,7 @@ export const StudioSpecSchema = z.object({
     .optional(),
   /** 환경 변수 이름 → 받을 서비스 */
   secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
-  deploy: DeploySchema.optional(),
+  deploy: RemovedDeploySchema.optional(),
   /** Pi·Claude·API 에이전트에 공통으로 적용하는 실행 정책 */
   workflow: WorkflowSchema.optional(),
   repository: z
@@ -739,8 +729,6 @@ type SnapshotSpec = z.infer<typeof SnapshotSchema>;
 export type DatabaseSpec = z.infer<typeof DatabaseSchema>;
 export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type SecretSpec = z.infer<typeof SecretSchema>;
-export type DeploySpec = z.infer<typeof DeploySchema>;
-export type DeployServiceSpec = DeploySpec['services'][string];
 type ReviewSpec = z.infer<typeof ReviewSchema>;
 export type GuideSpec = z.infer<typeof GuideSchema>;
 type ModelsSpec = z.infer<typeof ModelsSchema>;
@@ -806,7 +794,6 @@ for (const [schema, name] of [
   [ResourceLimitSchema, 'ResourceLimitSchema'],
   [DatabaseSchema, 'DatabaseSchema'],
   [SecretSchema, 'SecretSchema'],
-  [DeploySchema, 'DeploySchema'],
   [WorkflowStageSchema, 'WorkflowStageSchema'],
   [WorkflowTestSchema, 'WorkflowTestSchema'],
   [ConcurrencyExpectSchema, 'ConcurrencyExpectSchema'],

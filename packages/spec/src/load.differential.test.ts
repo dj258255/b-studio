@@ -28,7 +28,6 @@ const SPEC = {
   resources: { db: { memory: '512m' } },
   network: { egress: ['example.com', { host: '*.example.com', methods: ['GET'], paths: ['/x'] }] },
   secrets: { TOKEN: { services: ['web'] } },
-  deploy: { services: { web: { dockerfile: 'Dockerfile', port: 8300 } } },
   workflow: {
     required: ['plan', 'implement', 'run', 'test'],
     tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'] }],
@@ -149,10 +148,6 @@ describe('loadProject: legacy TS와 Rust가 같다', () => {
     const unusedSecret = structuredClone(SPEC);
     unusedSecret.secrets = { UNUSED: { services: [] } } as never;
     await compare(await makeDir(stringify(unusedSecret)), 'unused secret');
-
-    const badDeploy = structuredClone(SPEC);
-    badDeploy.deploy = { services: { api: { dockerfile: 'Dockerfile', port: 8300 }, web: { dockerfile: 'Dockerfile', port: 8300 } } } as never;
-    await compare(await makeDir(stringify(badDeploy)), 'deploy duplicate port');
 
     await compare(await makeDir(stringify(SPEC), 'not: [valid'), 'compose yaml');
     await compare(path.join(root, 'does-not-exist'), 'missing spec');

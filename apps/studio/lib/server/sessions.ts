@@ -97,7 +97,6 @@ import {
   preflightCommandCode,
   preflightOpenCode,
   preflightGemini,
-  releaseBlockers,
   RemoteConflictError,
   reviewIndependence,
   scopedExecutionPolicy,
@@ -201,15 +200,11 @@ import {
   type RequirementLintWarning,
 } from '@b-studio/agent';
 import {
-  defaultDeployRoot,
   describeSnapshotEvent,
-  DockerDeployer,
   providerFromEnv,
   Redactor,
   resolveSecrets,
   SandboxError,
-  type DeployLog,
-  type DeployResult,
   type EvaluationAssetContent,
   type FileChange,
   type Sandbox,
@@ -1143,7 +1138,7 @@ function projectViews(
   project: LoadedProject,
   state: 'starting' | 'stopped' = 'starting',
   offManaged: ReadonlySet<string> = new Set(),
-): Pick<SessionSnapshot, 'services' | 'externals' | 'hasDeploy' | 'experimental' | 'terminal' | 'terminalMode'> {
+): Pick<SessionSnapshot, 'services' | 'externals' | 'experimental' | 'terminal' | 'terminalMode'> {
   const terminal = sessionTerminalAllowed();
   return {
     // 서버 설정이라 프로젝트와 무관하지만, 화면이 탭을 그릴 때 함께 읽도록 여기서 싣는다(다시 열 때마다 지금 값으로 바뀐다)
@@ -1151,9 +1146,6 @@ function projectViews(
     terminal,
     // 터미널을 쓸 수 있을 때만 방식을 싣는다. 쓸 수 없으면 화면이 터미널을 그리지 않으므로 방식도 알릴 것이 없다
     ...(terminal ? { terminalMode: sessionTerminalMode() } : {}),
-    // project.deploy(로더가 채운 값)는 선언하지 않은 서비스도 기본값(Dockerfile)으로 채우므로 늘 비어 있지 않다.
-    // "배포" 하위 탭을 보일지는 spec.deploy(원본, 선언했을 때만 있음)로 판단해야 한다
-    hasDeploy: project.spec.deploy !== undefined,
     services: project.managed.map(([name, service]) => ({
       name,
       template: service.template,
@@ -3741,7 +3733,7 @@ async function commitLocalEdits(
   const files = await checkpoints.pendingFiles();
   const split = splitLocalEdits(files, kept);
   if (files.length === 0 || split.human.length === 0) return { kept: split.kept };
-  // 게이트 기록이 없다는 것을 트레일러로 남긴다. 기본 배포 조건이 이 표시로 배포를 막는다(#772)
+  // 게이트 기록이 없다는 것을 트레일러로 남긴다(#772)
   const subject = `직접 수정: 파일 ${split.human.length}개`;
   const body = '스튜디오 밖(IDE 등)에서 바꾼 파일입니다. 검증 게이트를 거치지 않았습니다.';
   const trailers = [formatVerifyTrailer('unverified')];
@@ -3924,7 +3916,7 @@ function discardedNote(files: readonly string[], backup?: DiscardBackup): string
  * paths로 좁혀 커밋하므로(CheckpointStore.commitPaths) 작업 복사본에 다른 변경이 함께 있어도 그 변경은 건드리지
  * 않고 그대로 pending으로 남는다. 범위 안에 바뀐 파일이 없으면 조용히 건너뛴다(undefined).
  * Workflow-Verify 트레일러에 'docs'를 남겨 이 체크포인트가 게이트 통과 증거로 쓰이지 않게 한다(requirements.ts의
- * computeRequirementStatus는 애초에 체크포인트만으로 "검증됨"을 매기지 않지만, 배포 조건·체크포인트 화면이 이
+ * computeRequirementStatus는 애초에 체크포인트만으로 "검증됨"을 매기지 않지만, 체크포인트 화면이 이
  * 표시로 "문서" 체크포인트를 가볍게 확인·직접 수정과 같은 방식으로 구분해 보여 준다).
  * 다른 화면(문서 탭 등)도 Workspace로 docs/를 쓴 뒤 그대로 재사용할 수 있게 공개한다.
  */
@@ -4945,100 +4937,6 @@ export async function resolveReviewFinding(
   return session.snapshot;
 }
 
-/** 배포 진행 줄은 최근 것만 스냅샷에 둔다. 빌드 출력이 수백 줄이라 전부 두면 새로 연결할 때 무겁다 */
-const DEPLOY_LOG_LIMIT = 200;
-
-/**
- * 세션의 체크포인트를 운영 배포한다. 작업 폴더가 아니라 체크포인트를 꺼내 빌드하므로 게이트를 통과한 상태만 배포된다.
- * 샌드박스와 따로 돌고 오래 걸리므로 바로 돌아가며, 진행과 결과는 이벤트로 알린다
- */
-export function deploySession(id: string, { by, sha }: { by?: string; sha?: string }): void {
-  const session = requireSession(id);
-  if (session.snapshot.deploying) throw new StudioError(409, '이 세션에서 이미 배포하는 중입니다');
-  const checkpoint = sha ? session.snapshot.checkpoints.find((candidate) => candidate.sha === sha) : session.snapshot.checkpoints[0];
-  if (!checkpoint) throw new StudioError(404, '체크포인트를 찾을 수 없습니다');
-  // 배포하는 것은 게이트를 통과한 체크포인트의 파일이다. 요구사항 기록만 바꾼 문서 체크포인트(요구사항 저장, 사람 확인 저장 등)는
-  // 게이트를 거치지 않아 통과 기록이 없으므로, 그 앞의 가장 최근 체크포인트로 내려가 그 통과 기록을 보고 그 파일을 꺼낸다
-  // (releaseBasisCheckpoint). 문서 체크포인트의 파일을 꺼내면 게이트를 거치지 않은 문서 내용이 배포에 실린다
-  const basis = releaseBasisCheckpoint(session.snapshot.checkpoints, checkpoint);
-  // 규칙은 체크포인트 안의 studio.yaml이 아니라 실행 중인 세션의 것을 쓴다. 같은 변경에서 규칙을 느슨하게 고쳐 배포하지 못하게 한다
-  const blockers = releaseBlockers(session.project, basis.passedStages, basis.verify);
-  if (basis.verify === 'unverified' && blockers.includes('checkpoint')) {
-    throw new StudioError(
-      409,
-      `체크포인트 ${basis.shortSha}는 검증 게이트를 거치지 않은 직접 수정 체크포인트라 배포하지 않습니다. 다음 요청에서 게이트를 통과한 체크포인트를 배포하세요. 직접 수정도 배포하려면 studio.yaml의 workflow.releaseRequires에 조건을 적으세요.`,
-    );
-  }
-  if (blockers.length > 0) {
-    // 가볍게 확인한 체크포인트는 건너뛴 단계가 통과 기록에 없어 여기서 자연히 막힌다. 이유를 분명히 알려 준다
-    const light = basis.verify === 'light' ? ' 가볍게 확인한 체크포인트는 전체 검증 뒤 배포할 수 있습니다.' : '';
-    const via = basis.sha === checkpoint.sha ? '' : `(코드가 같은 체크포인트 ${basis.shortSha}의 통과 기록을 봤습니다)`;
-    throw new StudioError(
-      409,
-      `체크포인트 ${checkpoint.shortSha}${via}는 배포 조건을 채우지 못했습니다. 통과 기록이 없는 단계: ${blockers.join(', ')}${basis.passedStages ? '' : ' (검증 게이트를 거치지 않은 체크포인트입니다)'}${light}`,
-    );
-  }
-
-  runDeployJob(session, { action: 'deploy', target: basis.shortSha, by }, async (onLog) => {
-    // 같은 체크포인트를 동시에 배포해도 폴더가 겹치지 않게 한다
-    const sourceRoot = path.join(defaultDeployRoot(), session.project.spec.name, 'sources', `${basis.shortSha}-${randomBytes(3).toString('hex')}`);
-    try {
-      if (basis.sha !== checkpoint.sha) {
-        onLog({ stage: 'prepare', text: `체크포인트 ${checkpoint.shortSha}는 요구사항 기록만 바꾼 문서 체크포인트라, 게이트를 통과한 체크포인트 ${basis.shortSha}의 파일을 배포합니다` });
-      }
-      onLog({ stage: 'prepare', text: `체크포인트 ${basis.shortSha}의 파일을 꺼냅니다` });
-      const project = await loadProject(await session.checkpoints.exportTree(basis.sha, sourceRoot));
-      const deployer = new DockerDeployer(project, { secrets: await resolveSecrets(project) });
-      return await deployer.deploy({ label: `체크포인트 ${basis.shortSha} ${basis.message}`, sha: basis.sha }, { onLog, by });
-    } finally {
-      // 이미지를 만든 뒤에는 꺼낸 파일이 필요 없다. 릴리스 compose 파일은 배포 상태 폴더에 따로 있다
-      await rm(sourceRoot, { recursive: true, force: true });
-    }
-  });
-}
-
-/** 이미지를 남긴 이전 릴리스로 빌드 없이 되돌린다 */
-export function rollbackSessionDeploy(id: string, releaseId: string, { by }: { by?: string }): void {
-  const session = requireSession(id);
-  if (session.snapshot.deploying) throw new StudioError(409, '이 세션에서 이미 배포하는 중입니다');
-  runDeployJob(session, { action: 'rollback', target: releaseId, by }, async (onLog) => {
-    const deployer = new DockerDeployer(session.project, { secrets: await resolveSecrets(session.project) });
-    return deployer.rollback(releaseId, { onLog, by });
-  });
-}
-
-function runDeployJob(
-  session: Session,
-  { action, target, by }: { action: 'deploy' | 'rollback'; target: string; by?: string },
-  job: (onLog: (log: DeployLog) => void) => Promise<DeployResult>,
-): void {
-  const at = new Date().toISOString();
-  session.snapshot.deploying = { action, target, startedAt: at, by, lines: [] };
-  emit(session, { type: 'deploy_started', action, target, at, by });
-  const onLog = (log: DeployLog) => {
-    const deploying = session.snapshot.deploying;
-    if (!deploying) return;
-    const line = `${log.service ? `[${log.service}] ` : ''}${log.text}`;
-    deploying.lines.push(line);
-    if (deploying.lines.length > DEPLOY_LOG_LIMIT) deploying.lines.splice(0, deploying.lines.length - DEPLOY_LOG_LIMIT);
-    emit(session, { type: 'deploy_log', line });
-  };
-
-  void (async () => {
-    let event: StudioEvent;
-    try {
-      const result = await job(onLog);
-      event = { type: 'deploy_finished', action, release: result.release.id, label: result.release.source.label, urls: result.urls, previous: result.previous };
-    } catch (error) {
-      const detail = (error as { detail?: unknown }).detail;
-      event = { type: 'deploy_failed', action, target, error: describe(error).split('\n')[0]!, ...(typeof detail === 'string' && detail.trim() ? { detail: detail.trim().slice(-4_000) } : {}) };
-    }
-    // 새로 연결한 브라우저가 배포 중 상태에 멈추지 않도록 이벤트보다 먼저 푼다
-    session.snapshot.deploying = undefined;
-    emit(session, event);
-  })();
-}
-
 /**
  * 원격 세션 브랜치에 다른 사람(리뷰어)이 올린 커밋을 가져온다. 오래 걸리므로 바로 돌아가고 결과는 이벤트로 알린다.
  * 가져온 변경도 에이전트의 변경처럼 게이트를 거치고, 통과하지 못하면 파일과 데이터베이스를 가져오기 전으로 되돌린다
@@ -5153,12 +5051,11 @@ export async function baseStatus(id: string, options: { force?: boolean } = {}):
 
 /**
  * 다시 검증(#798, ADR-181). 에이전트 실행 없이 지금 체크포인트의 내용을 같은 게이트로 처음부터 돌린다: 관리 서비스를 모두
- * 다시 띄우고, 계약과 선언한 확인(테스트·화면 확인 등)을 모두 돈다. 쓰임은 기준 브랜치를 따라잡은 뒤, 선언한 테스트를 바꾼 뒤,
- * 오래된 체크포인트를 배포하기 전이다.
+ * 다시 띄우고, 계약과 선언한 확인(테스트·화면 확인 등)을 모두 돈다. 쓰임은 기준 브랜치를 따라잡은 뒤, 선언한 테스트를 바꾼 뒤다.
  *  - 지금(head) 체크포인트만 확인한다. 작업 복사본이 그 체크포인트와 다르면(체크포인트에 없는 변경) 돌리지 않는다.
  *    게이트는 디스크에 있는 것을 확인하므로, 다르면 확인한 내용과 기록에 적을 체크포인트가 달라진다
  *  - 돌리는 동안 작업 복사본이나 head가 바뀌면 통과로 남기지 않는다(앞뒤 지문 대조)
- *  - 결과는 세션 기록(이벤트와 snapshot.reverifications)에만 남긴다. 새 체크포인트·트레일러를 만들지 않아 배포 조건의 근거가 되지 않는다
+ *  - 결과는 세션 기록(이벤트와 snapshot.reverifications)에만 남긴다. 새 체크포인트·트레일러를 만들지 않는다
  * 검사는 오래 걸리므로 막는 조건만 확인하고 돌아간다. 결과는 reverify_finished 이벤트로 알린다
  */
 export async function reverifySession(id: string, by: string, sha?: string): Promise<{ sha: string }> {
@@ -5774,21 +5671,6 @@ export function evidenceBaseCheckpoint<T extends { verify?: string; files?: read
 }
 
 /**
- * 배포할 체크포인트: 고른 체크포인트에서부터 요구사항 기록만 바꾼 문서 체크포인트를 건너뛴 가장 최근 것
- * (ADR-156의 evidenceBaseCheckpoint와 같은 규칙, 도그푸딩 마찰 166). 문서 체크포인트는 게이트를 거치지 않아 통과 기록이 없다.
- * 게이트를 통과한 체크포인트 위에 사람 확인 하나만 저장해도 HEAD가 문서 체크포인트가 되어 배포가 "검증 게이트를 거치지 않은
- * 체크포인트"로 막혔다. 통과 기록도 배포할 파일도 여기서 고른 체크포인트의 것을 쓴다 — 통과 기록만 여기서 읽고 파일은 문서
- * 체크포인트에서 꺼내면, 게이트를 거치지 않은 문서 내용이 배포에 실린다. 가볍게 확인한 체크포인트나 다른 문서를 바꾼 문서
- * 체크포인트는 건너뛰지 않는다.
- * 입력은 최신순이고, 고른 체크포인트가 목록에 없으면 그 체크포인트를 그대로 돌려준다.
- */
-export function releaseBasisCheckpoint<T extends { sha: string; verify?: string; files?: readonly string[]; outsideFiles?: number }>(checkpoints: readonly T[], chosen: T): T {
-  const index = checkpoints.findIndex((checkpoint) => checkpoint.sha === chosen.sha);
-  if (index < 0) return chosen;
-  return evidenceBaseCheckpoint(checkpoints.slice(index)) ?? chosen;
-}
-
-/**
  * 테스트 근거에 영향을 주지 않는다고 보는 파일: 요구사항 문서와 이슈 발행 기록. 둘 다 b-studio가 화면 동작(요구사항 저장,
  * 사람 확인 저장·취소, 이슈 발행)으로 직접 쓰는 기록이고, 요구사항 내용이 바뀐 것은 요구사항마다 "재확인 필요"로 따로 잡는다
  */
@@ -5830,7 +5712,7 @@ export interface RequirementEvidenceBasis {
  * 인정할지 정하는 미체크포인트 변경 수. 에이전트 실행이 진행 중이면 그 변경은 아직 어느 체크포인트에도 속하지 않고,
  * 게이트를 통과하면 테스트가 다시 돌아 새 결과로 바뀌며 통과하지 못하면 버려져 HEAD가 그대로이므로 0으로 본다.
  * 실행 중이 아니면(되살린 보관본·내 폴더 모드에서 사용자가 고친 파일) 그대로 돌려줘 근거로 인정하지 않는다.
- * "지금 작업 복사본을 내보내도 되는가"(올리기 전 점검·배포)는 이 함수를 쓰지 않고 실제 변경 수를 그대로 쓴다.
+ * "지금 작업 복사본을 내보내도 되는가"(올리기 전 점검)는 이 함수를 쓰지 않고 실제 변경 수를 그대로 쓴다.
  */
 export function evidencePendingFilesCount(pendingFilesCount: number, agentRunActive: boolean): number {
   return agentRunActive ? 0 : pendingFilesCount;
@@ -7298,7 +7180,7 @@ function emit(session: Session, event: StudioEvent): void {
   }
   for (const listener of session.listeners) listener(event);
   // desk의 목록 통로(#923)가 다시 계산하게 알린다. 로그 줄은 너무 잦고 목록에 보이지 않으므로 뺀다
-  if (event.type !== 'log' && event.type !== 'deploy_log') notifyAgentsChanged();
+  if (event.type !== 'log') notifyAgentsChanged();
 }
 
 /** 저장할 상태에서 history를 뺀 것. 키 순서가 파일의 키 순서다(`version`·`savedAt`·`owner`·`snapshot` 뒤에 history가 오고 나머지가 이 순서로 온다) */

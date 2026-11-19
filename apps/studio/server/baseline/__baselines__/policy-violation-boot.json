@@ -19,7 +19,6 @@
         "experimental": false,
         "terminal": true,
         "terminalMode": "host",
-        "hasDeploy": false,
         "services": [
           {
             "name": "app",
@@ -228,7 +227,6 @@
           "experimental": false,
           "terminal": true,
           "terminalMode": "host",
-          "hasDeploy": false,
           "services": [
             {
               "name": "app",
@@ -543,7 +541,6 @@
         "error": "컨테이너에 샌드박스 격리를 벗어나는 설정이 있어 시작하지 않았습니다 (<sandbox>)\napp: privileged",
         "experimental": false,
         "externals": [],
-        "hasDeploy": false,
         "id": "<sid>",
         "mode": "claude-code",
         "owner": "local",

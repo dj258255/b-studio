@@ -36,7 +36,6 @@ describe('schema 정규식: legacy Zod와 Rust가 같은 판정을 낸다', () =
     ['ready.path', legacy.ManagedServiceSchema, current.ManagedServiceSchema, (s) => ({ source: 'managed', template: 'x', path: 'x', port: 1, preview: 'browser', ready: { path: s } })],
     ['contract.extract', legacy.ManagedServiceSchema, current.ManagedServiceSchema, (s) => ({ source: 'managed', template: 'x', path: 'x', port: 1, preview: 'browser', contract: { extract: s } })],
     ['relative path', legacy.SnapshotSchema, current.SnapshotSchema, (s) => ({ volume: 'v', key: [s] })],
-    ['deploy dockerfile', legacy.DeploySchema, current.DeploySchema, (s) => ({ services: { web: { dockerfile: s } } })],
     ['project relative', legacy.StudioSpecSchema, current.StudioSpecSchema, (s) => ({ version: 1, name: 'x', services: { web: { source: 'managed', template: 'x', path: 'x', port: 1, preview: 'browser', includes: [s] } } })],
     ['path pattern', legacy.PolicyRuleSchema, current.PolicyRuleSchema, (s) => ({ callers: ['studio'], methods: ['GET'], paths: [s] })],
     ['egress host', legacy.EgressRuleSchema, current.EgressRuleSchema, (s) => s],

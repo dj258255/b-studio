@@ -72,7 +72,7 @@ describe('CheckpointStore', () => {
     const local = await store.commit('직접 수정: 파일 1개', '스튜디오 밖에서 바꾼 파일입니다.');
     expect(local?.passedStages).toBeUndefined();
 
-    // 본문이 길이 상한을 넘어 잘려도 트레일러는 잘리지 않아야 한다. 잘리면 검증을 통과한 체크포인트가 배포 거부된다
+    // 본문이 길이 상한을 넘어 잘려도 트레일러는 잘리지 않아야 한다. 잘리면 검증을 통과한 체크포인트의 기록이 사라진다
     await write('api/src/Order.java', 'class Order { String memo; String note; String tag; }\n');
     const long = await store.commit('요청: 긴 검증 보고서', `${'로그 한 줄\n'.repeat(2_000)}`, {
       trailers: [formatWorkflowTrailer(['run', 'contract_check', 'review'])],

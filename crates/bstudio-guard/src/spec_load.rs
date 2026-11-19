@@ -244,19 +244,6 @@ pub fn build_project(root: &str, spec: &JsValue, compose: &JsValue, compose_path
         }
     }
 
-    let mut deploy_ports: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-    for (name, service) in entries(&spec.prop("deploy").and_then(|deploy| deploy.prop("services")).cloned().unwrap_or(JsValue::Obj(JsObject::new()))) {
-        if !managed_names.contains(&name) {
-            issues.push(format!("deploy.services.{name}: managed 서비스만 배포 설정을 가질 수 있습니다"));
-        }
-        let Some(port) = service.prop("port") else { continue };
-        let text = port.to_js_string();
-        if let Some(taken) = deploy_ports.get(&text) {
-            issues.push(format!("deploy.services.{name}.port: {taken} 서비스와 같은 포트({text})입니다"));
-        }
-        deploy_ports.insert(text, name);
-    }
-
     if !issues.is_empty() {
         return Err(SpecFailure::issues(format!("{SPEC_FILE}과 {compose_name}가 맞지 않습니다"), issues));
     }
@@ -293,7 +280,6 @@ pub fn build_project(root: &str, spec: &JsValue, compose: &JsValue, compose_path
     out.set("egress", workflow_egress(spec));
     out.set("secrets", JsValue::Arr(entries(&secrets_value).into_iter().map(|(name, secret)| pairs(&name, &secret)).collect()));
     out.set("external", JsValue::Arr(external.iter().map(|(name, service)| pairs(name, service)).collect()));
-    out.set("deploy", JsValue::Obj(deploy_map(&managed, spec)));
     out.set(
         "publicUrlRefs",
         JsValue::Arr(
@@ -315,18 +301,4 @@ pub fn build_project(root: &str, spec: &JsValue, compose: &JsValue, compose_path
 
 fn workflow_egress(spec: &JsValue) -> JsValue {
     spec.prop("network").and_then(|network| network.prop("egress")).cloned().unwrap_or(JsValue::Arr(Vec::new()))
-}
-
-fn deploy_map(managed: &[(String, JsValue)], spec: &JsValue) -> JsObject {
-    let configured = spec.prop("deploy").and_then(|deploy| deploy.prop("services"));
-    let mut out = JsObject::new();
-    for (name, _) in managed {
-        let value = configured.and_then(|services| services.prop(name)).cloned().unwrap_or_else(|| {
-            let mut default = JsObject::new();
-            default.set("dockerfile", JsValue::Str("Dockerfile".into()));
-            JsValue::Obj(default)
-        });
-        out.set(name, value);
-    }
-    out
 }

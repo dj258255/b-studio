@@ -1,6 +1,6 @@
 //! 샌드박스 네트워크의 유일한 출입구(edge 프록시)의 설정(ADR-191 2단계 2b-2a). 옛 `packages/sandbox/src/edge-config.ts`.
 //!
-//! Docker와 Kubernetes 제공자가 같은 설정을 쓴다. 값은 JS가 만들던 글자와 같아야 한다(compose YAML과 매니페스트에 그대로 들어간다).
+//! Docker 제공자가 쓰는 설정. 값은 JS가 만들던 글자와 같아야 한다(compose YAML과 매니페스트에 그대로 들어간다).
 //! 이름·포트를 모르는 입력(managed가 아닌 서비스)은 만들지 않고 오류로 멈춘다.
 
 use crate::js_json::{self, JsObject, JsValue};

@@ -19,7 +19,7 @@
  * 요구사항·문서 화면(#894, 앞글쇠 다음 e, 스페이스 화면에서는 e만)도 본문 전체를 덮는다. 열려 있으면 키와 붙여넣기는 그 화면이 받고(requirements.ts), Esc로 닫는다
  * 여러 AI 비교 화면(#892, 앞글쇠 다음 f, 스페이스·사용량 화면에서는 f만)도 작업 나누기처럼 덮는 화면이다. 앞글쇠가 아닌 키와 붙여넣기는 그 화면이 받고(fleets.ts),
  * 앞글쇠 다음 다른 화면 키는 비교 화면을 닫고 그 일을 한다. 그래서 비교 화면 안의 w(승자)와 앞글쇠 다음 w(카드 화면)는 섞이지 않는다
- * 실행 화면(#895, 앞글쇠 다음 v, 스페이스 화면에서는 v만)도 같은 덮는 화면이다. 앞글쇠가 아닌 키(d 배포, b 되돌리기, l·s·G·o·/ …)와 붙여넣기는 그 화면이 받고(runtime.ts),
+ * 실행 화면(#895, 앞글쇠 다음 v, 스페이스 화면에서는 v만)도 같은 덮는 화면이다. 앞글쇠가 아닌 키(l·s·G·o·/ …)와 붙여넣기는 그 화면이 받고(runtime.ts),
  * 앞글쇠 다음 다른 화면 키는 실행 화면을 닫고 그 일을 한다. 앞글쇠 다음 v는 닫는다
  * 폴더 열기 화면(#916, 앞글쇠 다음 a, 스페이스 화면에서는 a만, 새 요청의 프로젝트 고르기 끝 줄)도 같은 덮는 화면이다. 경로 입력이라 앞글쇠가 아닌 키와 붙여넣기는
  * 그 화면이 받고(folder.ts), 앞글쇠 다음 다른 화면 키는 폴더 열기를 닫고 그 일을 한다
@@ -204,7 +204,7 @@ export interface DeskState {
   detail?: DetailState;
   /** 설정 화면(#890). 있으면 본문 전체가 설정 화면이다 */
   settings?: SettingsState;
-  /** 고른 세션의 실행·배포·미리보기·저장소 화면(#895). 있으면 본문 전체가 이 화면이다 */
+  /** 고른 세션의 실행·미리보기·저장소 화면(#895). 있으면 본문 전체가 이 화면이다 */
   runtime?: RuntimeState;
   /** 여러 AI 비교 화면(#892). 있으면 본문 전체가 비교 화면이다 */
   fleets?: FleetsState;
@@ -290,7 +290,7 @@ export type Effect =
   /** 지금 변경 화면이 낸 할 일 */
   | { type: 'changes'; effect: ChangesEffect };
 
-/** 실험 기능을 끈 서버에서 실험 화면 키를 눌렀을 때의 알림(운영 배포의 알림과 같은 꼴, ADR-166·200) */
+/** 실험 기능을 끈 서버에서 실험 화면 키를 눌렀을 때의 알림(ADR-166·200) */
 function experimentalNote(screen: string): string {
   return `${screen}는 실험 기능입니다(B_STUDIO_EXPERIMENTAL=1로 띄우세요)`;
 }
@@ -477,7 +477,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       continue;
     }
     if (state.runtime && !state.prefix && input[at] !== prefixOf(state)) {
-      // 실행 화면(#895): 앞글쇠가 아닌 키는 모두 그 화면이 받는다(d 배포, b 되돌리기, l 로그, s 서비스, / 찾기 …). 앞글쇠 다음 키는 commandKey가 받는다
+      // 실행 화면(#895): 앞글쇠가 아닌 키는 모두 그 화면이 받는다(l 로그, s 서비스, / 찾기 …). 앞글쇠 다음 키는 commandKey가 받는다
       const key = nextKey(input, at);
       at += key.length;
       const result = runtimeKey(state.runtime, key);
