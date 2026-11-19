@@ -85,7 +85,9 @@ describe('foldName 전체 코드 포인트 비교(옛 TS와 Rust)', () => {
     }
     const pinnedCps = PINNED.map(([hex]) => Number.parseInt(hex, 16));
     const fullyDiffering = [...differing].filter(([cp, inputs]) => inputs.length === 4 && legacyFold(String.fromCodePoint(cp)) === String.fromCodePoint(cp));
-    expect(fullyDiffering.map(([cp]) => cp).sort((a, b) => a - b)).toEqual([...pinnedCps].sort((a, b) => a - b));
+    // 같은 Unicode·ICU 판이어도 Node 빌드에 따라 다를 수 있다(#1323). 실패하면 어느 Node인지 보이게 한다
+    const where = `Node ${process.version} (Unicode ${process.versions.unicode}, ICU ${process.versions.icu}, ${process.platform})`;
+    expect(fullyDiffering.map(([cp]) => cp).sort((a, b) => a - b), where).toEqual([...pinnedCps].sort((a, b) => a - b));
     for (const [hex, folded] of PINNED) {
       const cp = Number.parseInt(hex, 16);
       const c = String.fromCodePoint(cp);
