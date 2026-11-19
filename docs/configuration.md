@@ -216,7 +216,7 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - 켜면 에이전트에게 나눠서 병렬·여러 명 비교로 넘기자고 제안하는 도구(`propose_mode`)가 더해집니다.
 - 끄면 desk의 작업 나누기(`Ctrl-b t`)·여러 AI 비교(`Ctrl-b f`)가 열리지 않고 "실험 기능입니다" 알림만 보입니다. desk는 시작할 때 `/api/health`의 `experimental`로 이 값을 읽습니다.
 - **숨기는 것이지 막는 것이 아닙니다.** 여러 AI 비교·작업 분해의 API, 벤치, E2E는 켜지 않아도 그대로 동작합니다.
-- 다른 백엔드(`B_STUDIO_BACKENDS`), gVisor 런타임은 각자의 환경 변수로 고르는 것이라 이 값과 무관합니다. 그 값을 직접 넣었다면 이미 고른 것으로 봅니다.
+- 다른 백엔드(`B_STUDIO_BACKENDS`)는 자기 환경 변수로 고르는 것이라 이 값과 무관합니다. 그 값을 직접 넣었다면 이미 고른 것으로 봅니다.
 - 값은 `1`·`true`·`on`입니다. 스튜디오를 다시 띄워야 바뀝니다.
 
 ## 세션 터미널
@@ -344,7 +344,7 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 | `B_STUDIO_OPENCODE_MODEL` | `opencode` 백엔드의 모델(`provider/model`). 세션에서 고른 모델이 먼저입니다. 둘 다 없으면 실행이 "모델을 골라야 합니다" 오류로 끝납니다 | 없음 |
 | `B_STUDIO_GEMINI_MODEL` | Gemini CLI 백엔드의 모델(예: `gemini-2.5-pro`). 세션에서 고른 모델이 먼저이고, 둘 다 없으면 같은 오류로 끝납니다 | 없음 |
 | `B_STUDIO_SKIP_NATIVE_BUILD` | `1`이면 `pnpm install`의 `postinstall`(`scripts/build-native.mjs`)이 Rust 모듈 빌드를 건너뜁니다. cargo가 없는 운영 이미지의 node 단계가 앞 단계에서 빌드한 `bstudio_node.node`를 복사해 쓸 때 씁니다(`apps/studio/Dockerfile`). 이 파일이 없으면 판정을 하지 못해 던지므로 개발 환경에서는 쓰지 않습니다 | 없음 |
-| `B_STUDIO_CONTAINER_RUNTIME` | 서비스 컨테이너의 OCI 런타임(예: `runsc`, gVisor). 격리 수준은 프로젝트가 아니라 운영자가 정합니다 | 없음(Docker 기본 런타임) |
+| `B_STUDIO_CONTAINER_RUNTIME` | 더는 지원하지 않습니다. 값이 있으면 조용히 기본 런타임으로 떨어지지 않고 시작을 거절합니다(ADR-221). 서비스 컨테이너는 Docker 기본 런타임으로 돕니다 | 없음 |
 | `B_STUDIO_FIGMA_API` | Figma REST API 주소. 테스트에서 가짜 서버를 가리킬 때 씁니다 | `https://api.figma.com` |
 | `B_STUDIO_AUTH_STATE_DIR` | 로그아웃한 세션과 운영자가 무효화한 사용자를 적는 파일(`revocations.json`)의 폴더 | `~/.cache/b-studio/auth` |
 | `B_STUDIO_TASK_PLANS_DIR` | 작업 분해 계획을 저장하는 폴더 | `~/.cache/b-studio/task-plans` |

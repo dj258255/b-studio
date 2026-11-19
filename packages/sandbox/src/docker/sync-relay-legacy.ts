@@ -107,7 +107,6 @@ export interface LegacyRetryContext {
   env: NodeJS.ProcessEnv;
   overridePath: string;
   edgeScript: string;
-  runtime: string | undefined;
   evaluationAssets: readonly EvaluationAssetCopy[];
   dependencyPollMs: number;
   dependencyWaitMs: number;
@@ -130,7 +129,7 @@ async function composeUpOrThrow(ctx: LegacyRetryContext, args: string[], signal?
     dockerBin: ctx.dockerBin,
     env: ctx.env,
     overridePath: ctx.overridePath,
-    overrideInput: overrideInputJson(ctx.project, ctx.id, { edgeScript: ctx.edgeScript, runtime: ctx.runtime, hostPorts: ctx.state.hostPorts }),
+    overrideInput: overrideInputJson(ctx.project, ctx.id, { edgeScript: ctx.edgeScript, hostPorts: ctx.state.hostPorts }),
     gitMask: ctx.state.gitMask,
     evaluationAssets: ctx.evaluationAssets,
     args,
@@ -167,7 +166,7 @@ export async function composeUpWithPortRetryLegacy(ctx: LegacyRetryContext, upAr
         throw new SandboxError(`${message}\n포트 충돌이 반복돼 ${PORT_RETRY_ATTEMPTS}회 재시도 후 포기했습니다`, undefined, { platform: true });
       }
       ctx.state.hostPorts = await preallocatePublicUrlPorts(ctx.project);
-      await writeComposeOverride(ctx.overridePath, overrideInputJson(ctx.project, ctx.id, { edgeScript: ctx.edgeScript, runtime: ctx.runtime, hostPorts: ctx.state.hostPorts }), ctx.state.gitMask);
+      await writeComposeOverride(ctx.overridePath, overrideInputJson(ctx.project, ctx.id, { edgeScript: ctx.edgeScript, hostPorts: ctx.state.hostPorts }), ctx.state.gitMask);
       await ctx.docker(composeArgs(['rm', '--stop', '--force', '--volumes']), signal);
     }
   }

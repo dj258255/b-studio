@@ -187,12 +187,6 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
         Some(v) => str_of(Some(v), "edgeScript")?,
         None => String::new(),
     };
-    // `runtime ? {runtime} : {}`: 빈 문자열은 건다고 보지 않는다
-    let runtime = match optional(input.prop("runtime")) {
-        Some(JsValue::Str(s)) if !s.is_empty() => Some(s.clone()),
-        Some(JsValue::Str(_)) | None => None,
-        Some(_) => return Err("runtime은(는) 문자열이어야 합니다".to_owned()),
-    };
     let host_ports = match optional(input.prop("hostPorts")) {
         Some(v) => obj_of(Some(v), "hostPorts")?.clone(),
         None => JsObject::new(),
@@ -212,21 +206,14 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
 
     // 프록시가 듣기 전에 서비스가 뜨면 첫 다운로드가 연결 거부로 실패하고 컨테이너가 끝난다
     let wait_for_edge = JsValue::Obj(object(vec![(EDGE_SERVICE, JsValue::Obj(object(vec![("condition", JsValue::str("service_healthy"))])))]));
-    let isolate = |o: &mut JsObject| {
-        // gVisor(runsc) 같은 런타임은 에이전트 코드가 도는 서비스와 샌드박스 네트워크에 노출된 edge에 모두 건다
-        if let Some(rt) = &runtime {
-            o.set("runtime", JsValue::str(rt.clone()));
-        }
-    };
 
     let mut services = JsObject::new();
     for name in &p.compose_services {
-        let mut service = object(vec![
+        let service = object(vec![
             ("networks", strs_value(&[SANDBOX_NETWORK.to_owned()])),
             ("environment", environment.clone()),
             ("depends_on", wait_for_edge.clone()),
         ]);
-        isolate(&mut service);
         services.set(name, JsValue::Obj(service));
     }
     for (name, _) in &p.managed {
@@ -289,7 +276,6 @@ pub fn build_override(input: &JsValue) -> Result<JsValue, String> {
     }
     let mut edge = JsObject::new();
     edge.set("image", JsValue::str(EDGE_IMAGE));
-    isolate(&mut edge);
     edge.set("command", strs_value(&["node".to_owned(), "--input-type=module".to_owned(), "-e".to_owned(), escape_dollar(&edge_script)]));
     edge.set("environment", JsValue::Obj(edge_env));
     // 등록한 사내 API 이름을 internal 네트워크의 별칭으로 가져, 서비스가 http://<이름>/으로 부르면 edge로 온다
@@ -443,7 +429,6 @@ mod tests {
         assert!(build(r#"{"managed":[],"composeServices":[1],"sandboxId":"s"}"#).is_err());
         assert!(build(r#"{"managed":[["a",1]],"sandboxId":"s","hostPorts":{"a":1.5}}"#).is_err());
         assert!(build(r#"{"managed":[["a",1]],"sandboxId":"s","hostPorts":{"a":65536}}"#).is_err());
-        assert!(build(r#"{"managed":[["a",1]],"sandboxId":"s","runtime":5}"#).is_err());
         assert!(build(r#"{"managed":[]}"#).is_err());
     }
 

@@ -52,9 +52,7 @@ describe('loadRunArgs', () => {
     expect(args.slice(-3)).toEqual(['node', '--input-type=module', '-']);
   });
 
-  it('샌드박스가 쓰는 런타임이 있으면 같은 런타임으로 돌린다', () => {
-    const isolated = loadRunArgs({ name: 'n', network: 'net', sandboxId: 'id', threads: 1, runtime: 'runsc' });
-    expect(isolated[isolated.indexOf('--runtime') + 1]).toBe('runsc');
+  it('런타임을 고르지 않는다', () => {
     expect(args).not.toContain('--runtime');
   });
 });

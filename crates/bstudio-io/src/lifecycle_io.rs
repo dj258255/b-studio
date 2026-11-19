@@ -1,7 +1,7 @@
 //! 샌드박스의 끝맺음·부하 러너·사내 API 호출·만들기 준비(옛 TS: `LocalDockerProvider.cleanup`·`create`의 앞뒤, `LocalDockerSandbox.destroy`·`callExternal`·`runLoad`,
-//! `removeSandboxImages`·`assertRuntime`)(ADR-195 4f A4c-3c).
+//! `removeSandboxImages`)(ADR-195 4f A4c-3c).
 //!
-//! 판정(`load_threads`·`load_run_args`·`load_config`·`load_script`·`parse_load_output`·`external_call_script`·`parse_runtimes`·`parse_container_state`)은
+//! 판정(`load_threads`·`load_run_args`·`load_config`·`load_script`·`parse_load_output`·`external_call_script`·`parse_container_state`)은
 //! `bstudio_guard`가 하고, 여기는 docker를 부르는 순서와 지우는 대상만 정한다. **`up`은 부르지 않는다**(A4c-3a·3b와 같다: `up`은 TS의 `#upQueue`·`#gitMask`를 지난다).
 //! `destroy`의 `down`은 옛 코드도 `#upQueue`를 타지 않았다(`#compose`는 첫 인자가 `up`일 때만 줄을 세운다). 그대로 줄 밖에서 부른다(ADR-195 A4c-3c).
 //!
@@ -247,31 +247,6 @@ async fn remove_work_dir(work_dir: &str) -> Result<(), String> {
 
 // ── create의 앞뒤 ───────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RuntimeCheck {
-    /// 데몬 정보를 읽지 못했다(옛 `execChecked`가 던진 글)
-    InfoFailed(String),
-    /// 등록되지 않았다. 등록된 런타임 목록
-    Missing(Vec<String>),
-    Present,
-}
-
-/// 런타임이 Docker 데몬에 등록돼 있는지 본다(`docker info --format {{json .Runtimes}}`). 컨테이너를 만들기 전에 알리려고 `create`가 먼저 부른다
-pub async fn assert_runtime(docker_bin: &str, runtime: &str) -> RuntimeCheck {
-    let args = strings(&["info", "--format", "{{json .Runtimes}}"]);
-    match exec_checked(docker_bin, &args, None).await {
-        Err(error) => RuntimeCheck::InfoFailed(error.message),
-        Ok(output) => {
-            let available = docker_format::parse_runtimes(&output.stdout);
-            if available.iter().any(|name| name == runtime) {
-                RuntimeCheck::Present
-            } else {
-                RuntimeCheck::Missing(available)
-            }
-        }
-    }
-}
-
 /// 이 샌드박스의 작업 폴더를 임시 폴더 아래에 만든다(`mkdtemp`와 같다: `b-studio-` + 무작위 6자, 권한 0700). 만든 절대 경로를 돌려준다
 pub async fn make_work_dir() -> Result<String, String> {
     tokio::task::spawn_blocking(|| {
@@ -371,7 +346,6 @@ pub struct LoadInput {
     pub port: f64,
     /// 샌드박스의 internal 네트워크 이름의 끝(`SANDBOX_NETWORK`). 실제 이름은 `<id>_<끝>`이다
     pub sandbox_network: String,
-    pub runtime: Option<String>,
     pub image: String,
     /// `LoadRequest`의 `encodeNative`
     pub request_json: String,
@@ -457,7 +431,7 @@ pub async fn run_load(input: &LoadInput, cancel: &Cancel) -> LoadReport {
     };
     let script = load_runner::load_script(&input.runner_script, &js_json::stringify(&config));
     let network = format!("{id}_{}", input.sandbox_network);
-    let args = load_runner::load_run_args(&LoadRunPlan { name: &name, network: &network, sandbox_id: &id, threads, runtime: input.runtime.as_deref(), image: &input.image });
+    let args = load_runner::load_run_args(&LoadRunPlan { name: &name, network: &network, sandbox_id: &id, threads, image: &input.image });
 
     // 신호가 깨거나 상한(`limit_ms`)이 지나면 docker 클라이언트만 끝난다
     let limit_hit = Arc::new(AtomicBool::new(false));
@@ -758,19 +732,6 @@ mod tests {
     // ── create의 앞뒤 ──
 
     #[tokio::test]
-    async fn 런타임_확인() {
-        let fake = Fake::new();
-        fake.set("info", "{\"runc\":{\"path\":\"runc\"},\"runsc\":{\"path\":\"runsc\"}}\n");
-        assert_eq!(assert_runtime(&fake.bin(), "runsc").await, RuntimeCheck::Present);
-        assert_eq!(assert_runtime(&fake.bin(), "kata").await, RuntimeCheck::Missing(vec!["runc".into(), "runsc".into()]));
-        assert_eq!(fake.calls()[0], "info --format {{json .Runtimes}}");
-        let fake = Fake::new();
-        fake.fail("info", 1, "Cannot connect");
-        let RuntimeCheck::InfoFailed(message) = assert_runtime(&fake.bin(), "runsc").await else { panic!() };
-        assert!(message.ends_with("\nCannot connect"));
-    }
-
-    #[tokio::test]
     async fn 작업_폴더를_만들고_create_실패_때_그_폴더와_복사본만_지운다() {
         let dir = make_work_dir().await.unwrap();
         let path = std::path::Path::new(&dir);
@@ -886,7 +847,6 @@ mod tests {
             service: "api".into(),
             port: 8080.0,
             sandbox_network: "sandbox".into(),
-            runtime: None,
             image: "busybox:1.37".into(),
             request_json: "{\"service\":\"api\",\"method\":\"GET\",\"path\":\"/\",\"requests\":10,\"concurrent\":2}".into(),
             requests: 10.0,

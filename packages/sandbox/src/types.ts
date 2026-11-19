@@ -374,7 +374,7 @@ export interface InfraCheckResult {
 /** 샌드박스를 만드는 구현체. 지금은 로컬 Docker 하나다(kubernetes 제공자는 ADR-221로 지움) */
 export interface SandboxProvider {
   readonly name: string;
-  /** 컨테이너 격리 런타임 (예: runsc, gvisor). 화면에 격리 수준을 표시할 때 쓴다 */
+  /** 격리 표시. 이를 채우던 Kubernetes 제공자와 gVisor 런타임을 지워(ADR-221) 지금은 늘 비어 있다 */
   readonly isolation?: string;
   create(project: LoadedProject, options?: CreateSandboxOptions): Promise<Sandbox>;
   /**

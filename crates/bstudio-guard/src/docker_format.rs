@@ -6,7 +6,7 @@
 use regex::Regex;
 use std::sync::LazyLock;
 
-use crate::js::{self, cmp_utf16, number_to_string, relative_start, to_number};
+use crate::js::{self, number_to_string, relative_start, to_number};
 use crate::js_json::{self, object, JsValue};
 use crate::usage::CONTAINER_STATES;
 
@@ -66,19 +66,6 @@ pub fn egress_audit_excerpt(lines: &[String], max: f64) -> Vec<String> {
     // picked.slice(-max)
     let start = relative_start(picked.len(), -max);
     picked.split_off(start)
-}
-
-/// `docker info --format '{{json .Runtimes}}'` 출력에서 등록된 런타임 이름을 읽는다
-pub fn parse_runtimes(stdout: &str) -> Vec<String> {
-    let text = js::trim(stdout);
-    let Ok(runtimes) = js_json::parse(if text.is_empty() { "{}" } else { text }) else { return Vec::new() };
-    let mut keys: Vec<String> = match &runtimes {
-        JsValue::Obj(o) => o.entries().iter().map(|(k, _)| k.clone()).collect(),
-        JsValue::Arr(items) => (0..items.len()).map(|i| i.to_string()).collect(),
-        _ => return Vec::new(),
-    };
-    keys.sort_by(|a, b| cmp_utf16(a, b));
-    keys
 }
 
 /// `docker compose port <service> <port>` 출력에서 호스트 포트를 읽는다
@@ -284,16 +271,6 @@ mod tests {
         assert_eq!(egress_audit_excerpt(&lines, -2.0).len(), 6);
         let errs = vec![r#"{"edge":"egress","decision":"error","host":"h"}"#.to_owned(), r#"{"edge":"egress","decision":"allow","host":"h"}"#.to_owned()];
         assert_eq!(egress_audit_excerpt(&errs, 5.0), vec!["h: error"]);
-    }
-
-    #[test]
-    fn 런타임_이름은_utf16_순서로_정렬한다() {
-        assert_eq!(parse_runtimes(r#"{"runsc":{},"runc":{},"～":{},"😀":{}}"#), vec!["runc", "runsc", "😀", "\u{ff5e}"]);
-        assert_eq!(parse_runtimes("[1,2]"), vec!["0", "1"]);
-        assert!(parse_runtimes("null").is_empty());
-        assert!(parse_runtimes("{").is_empty());
-        assert!(parse_runtimes("").is_empty());
-        assert!(parse_runtimes("5").is_empty());
     }
 
     #[test]

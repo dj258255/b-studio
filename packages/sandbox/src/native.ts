@@ -75,7 +75,6 @@ interface NativeGuard {
   foreignProcesses(nowPids: number[], nowStarts: string[], baselinePids: number[], baselineStarts: string[]): number[];
   parseEgressDenial(text: string): string | null | undefined;
   egressAuditExcerpt(lines: string[], max: number): string[];
-  parseRuntimes(stdout: string): string[];
   parseHostPort(stdout: string): number;
   parseContainerStates(stdout: string): string[][];
   parseContainerState(stdout: string): string;
@@ -108,7 +107,7 @@ interface NativeGuard {
   composeEnvironment(secretNames: string[], secretValues: string[], envNames: string[], envValues: string[]): string[][];
   externalCallScript(edgeScript: string, requestJson: string): string;
   loadThreads(concurrent: number, daemonCpus: number | undefined | null): number;
-  loadRunArgs(name: string, network: string, sandboxId: string, threads: number, runtime: string | undefined | null, image: string): string[];
+  loadRunArgs(name: string, network: string, sandboxId: string, threads: number, image: string): string[];
   loadConfig(requestJson: string, port: number, threads: number): string;
   loadScript(runner: string, configJson: string): string;
   parseLoadOutput(stdout: string, requests: number, concurrent: number): string | null | undefined;
@@ -116,7 +115,6 @@ interface NativeGuard {
   dockerOutOfSpace(): string;
   dockerOutOfSpaceNote(text: string): string | null | undefined;
   splitUpArgs(args: string[]): { create: string[]; services: string[]; byId: boolean };
-  runtimeFromEnv(value: string | undefined | null): string | null | undefined;
   sandboxBuildNoCache(value: string | undefined | null): boolean;
   // ── compose-provider의 인자 조립과 오류 글(ADR-195 4f A4c-4). 실행 순서·클래스 상태는 TS에 남는다.
   // `tail`·`edgePort`는 TS가 `String(...)`으로 만든 글자를 그대로 넘긴다(JS 수 표기를 Rust가 다시 만들지 않는다)
@@ -226,7 +224,6 @@ interface NativeGuard {
   removeSandboxImages(dockerBin: string, sandboxId: string, cwd: string | undefined | null): Promise<NativeCheckedResult>;
   cleanupSandbox(dockerBin: string, sandboxId: string, assetRoot: string, cwd: string | undefined | null): Promise<NativeCleanupResult>;
   destroySandbox(input: NativeDestroyInput): Promise<NativeDestroyResult>;
-  assertRuntime(dockerBin: string, runtime: string): Promise<NativeRuntimeCheck>;
   makeWorkDir(): Promise<string>;
   abortCreate(workDir: string, assetRoot: string, sandboxId: string): Promise<string[]>;
   callExternal(input: NativeExternalInput, signal: AbortSignal | undefined | null): Promise<NativeExternalResult>;
@@ -2122,12 +2119,6 @@ export interface NativeDestroyResult {
   assets?: string | null;
 }
 
-export interface NativeRuntimeCheck {
-  kind: 'present' | 'missing' | 'info-failed';
-  message: string;
-  available: string[];
-}
-
 export interface NativeExternalInput {
   compose: NativeComposeRef;
   overridePath: string;
@@ -2205,7 +2196,6 @@ export interface NativeLoadInput {
   service: string;
   port: number;
   sandboxNetwork: string;
-  runtime?: string;
   image: string;
   requestJson: string;
   requests: number;

@@ -12,7 +12,6 @@ import type { ExecResult, ExternalCallRequest, LoadRequest } from '../types';
 import { composeEnvironment } from './compose-env';
 import { describeDockerFailure } from './compose-provider';
 import {
-  assertRuntimeLegacy,
   callExternalLegacy,
   cleanupLegacy,
   destroyLegacy,
@@ -21,7 +20,6 @@ import {
   type LegacyLifecycleContext,
 } from './lifecycle-legacy';
 import {
-  assertRuntime,
   callExternalApi,
   cleanupSandbox,
   destroySandbox,
@@ -189,7 +187,6 @@ interface Setup {
   /** 옛·새 쪽 모두에 같은 모양으로 폴더를 채운다 */
   prepare?: (layout: Layout) => Promise<void>;
   external?: string[];
-  runtime?: string;
   loadLimitMs?: number;
 }
 
@@ -205,7 +202,6 @@ interface Api {
   destroy(): Promise<void>;
   external(name: string, request: ExternalCallRequest, options?: { signal?: AbortSignal }): Promise<unknown>;
   load(request: LoadRequest, options?: { signal?: AbortSignal }): Promise<unknown>;
-  runtime(runtime: string): Promise<void>;
 }
 
 function apiFor(kind: 'legacy' | 'now', layout: Layout, setup: Setup, id = ID): Api {
@@ -237,7 +233,6 @@ function apiFor(kind: 'legacy' | 'now', layout: Layout, setup: Setup, id = ID): 
       edgeService: 'edge',
       external,
       managedPort,
-      ...(setup.runtime ? { runtime: setup.runtime } : {}),
       sandboxNetwork: 'sandbox',
       runnerScriptPath: runnerPath,
       loadCache: {},
@@ -249,20 +244,18 @@ function apiFor(kind: 'legacy' | 'now', layout: Layout, setup: Setup, id = ID): 
       destroy: () => destroyLegacy(ctx),
       external: (name, request, options) => callExternalLegacy(ctx, name, request, { via: 'agent', ...options }),
       load: (request, options) => runLoadLegacy(ctx, request, options),
-      runtime: (runtime) => assertRuntimeLegacy(layout.bin, runtime),
     };
   }
   const base = { id, dockerBin: layout.bin, env: dockerEnv, project: { root: layout.proj, composePath: layout.composePath }, overridePath: layout.overridePath, redact, composeFailure };
   const destroyCtx: DestroyContext = { ...base, workDir: layout.workDir, evaluationAssetRoot: layout.assets };
   const externalCtx: ExternalContext = { ...base, edgeScript: EDGE, edgeService: 'edge', external };
-  const loadCtx: LoadContext = { ...base, managedPort, sandboxNetwork: 'sandbox', runtime: setup.runtime, readRunner: () => readFile(runnerPath, 'utf8'), cache: loadCache, limitMs };
+  const loadCtx: LoadContext = { ...base, managedPort, sandboxNetwork: 'sandbox', readRunner: () => readFile(runnerPath, 'utf8'), cache: loadCache, limitMs };
   return {
     removeImages: (target = id) => removeSandboxImages(layout.bin, target),
     cleanup: (target = id) => cleanupSandbox({ dockerBin: layout.bin, evaluationAssetRoot: layout.assets }, target),
     destroy: () => destroySandbox(destroyCtx),
     external: (name, request, options) => callExternalApi(externalCtx, name, request, { via: 'agent', ...options }),
     load: (request, options) => runLoadTest(loadCtx, request, options ?? {}),
-    runtime: (runtime) => assertRuntime(layout.bin, runtime),
   };
 }
 
@@ -749,11 +742,6 @@ describe('runLoad', () => {
     }
   });
 
-  it('도커 런타임을 주면 러너에도 같은 런타임을 준다', async () => {
-    const { now } = await same({ ps: RUNNING, info: { out: '4\n' }, run: { out: `${OUTPUT(SMALL)}\n` } }, (api) => api.load(SMALL), { runtime: 'runsc' });
-    expect(now.calls[2]).toContain('--runtime');
-  });
-
   it('서비스가 실행 중이 아니면 러너를 띄우지 않는다', async () => {
     for (const out of ['{"Service":"api","State":"exited"}\n', '', '[]', 'not json']) {
       await same({ ps: { out } }, (api) => api.load(SMALL));
@@ -852,25 +840,5 @@ describe('runLoad', () => {
     const { legacy, now } = await both({ ps: RUNNING, info: { out: '4\n' }, run: { out } }, (api) => api.load(SMALL), { secrets });
     expect(JSON.stringify(legacy.outcome)).toContain('BBBBBBBB-second-line');
     expect(JSON.stringify(now.outcome)).not.toContain('BBBBBBBB-second-line');
-  });
-});
-
-// ── 런타임 확인 ───────────────────────────────────────────────────────────
-
-describe('assertRuntime', () => {
-  const INFO = '{"runc":{"path":"runc"},"runsc":{"path":"runsc"}}\n';
-  it('등록돼 있으면 통과한다', async () => {
-    const { now } = await same({ info: { out: INFO } }, (api) => api.runtime('runsc'));
-    expect(now.calls).toEqual([['info', '--format', '{{json .Runtimes}}']]);
-    expect(now.cwds).toEqual(['<CWD>']);
-  });
-  it('등록돼 있지 않으면 등록된 목록을 알린다', async () => {
-    await same({ info: { out: INFO } }, (api) => api.runtime('kata'));
-    await same({ info: { out: '{}\n' } }, (api) => api.runtime('kata'));
-    await same({ info: { out: 'not json' } }, (api) => api.runtime('kata'));
-  });
-  it('데몬 정보를 읽지 못하면 옛 execChecked의 글을 상세로 붙인다', async () => {
-    const { now } = await same({ info: { code: 1, err: 'Cannot connect' } }, (api) => api.runtime('runsc'));
-    expect(now.outcome).toMatchObject({ ok: false, error: { message: expect.stringContaining('Command failed') as unknown } });
   });
 });

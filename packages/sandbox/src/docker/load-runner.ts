@@ -30,8 +30,6 @@ export interface LoadRunPlan {
   network: string;
   sandboxId: string;
   threads: number;
-  /** 샌드박스 컨테이너에 쓰는 Docker 런타임(gVisor 등). 서비스와 같은 격리로 돌린다 */
-  runtime?: string;
 }
 
 /**
@@ -40,7 +38,7 @@ export interface LoadRunPlan {
  * 이미지는 새로 받지 않는다(--pull never) — 확인 도중에 네트워크에서 무언가를 받는 일이 없게 한다
  */
 export function loadRunArgs(plan: LoadRunPlan): string[] {
-  return native.loadRunArgs(plan.name, plan.network, plan.sandboxId, plan.threads, plan.runtime, LOAD_RUNNER_IMAGE);
+  return native.loadRunArgs(plan.name, plan.network, plan.sandboxId, plan.threads, LOAD_RUNNER_IMAGE);
 }
 
 /** 러너에 넘길 설정. 대상은 서비스 이름과 컨테이너 포트로만 정해진다 — 경로가 다른 호스트를 가리킬 방법이 없다 */

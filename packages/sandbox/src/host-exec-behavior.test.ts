@@ -141,11 +141,6 @@ describe('compose 설정 읽기와 docker info', () => {
     await expect(loadDependsOn(project, { dockerBin: ok.bin })).resolves.toEqual({ a: { b: { condition: 'service_started' } } });
   });
 
-  it('docker info가 실패하면 샌드박스를 만들기 전에 던진다', async () => {
-    const docker = await fakeBin('echo "daemon down" >&2; exit 1');
-    const fakeProject = { spec: { name: 'orders' }, root: '/tmp/orders', composePath: '/tmp/orders/compose.yaml', managed: [], composeServices: [] } as unknown as LoadedProject;
-    await expect(new LocalDockerProvider({ dockerBin: docker.bin, runtime: 'runsc' }).create(fakeProject)).rejects.toThrow('Docker 데몬 정보를 읽지 못해');
-  });
 });
 
 describe('호스트 터미널의 호스트 프로세스', () => {

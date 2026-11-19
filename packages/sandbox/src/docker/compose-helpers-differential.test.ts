@@ -6,7 +6,7 @@ import { externalCallScript as legacyExternalCallScript } from './external-call-
 import * as legacyLoad from './load-runner-legacy';
 import { awaitedCondition, parseDependsOn, startWaves, type DependsOn } from './compose-deps';
 import { composeEnvironment } from './compose-env';
-import { describeDockerFailure, DOCKER_OUT_OF_SPACE, isPortBindConflict, runtimeFromEnv, sandboxBuildNoCache, splitUpArgs } from './compose-provider';
+import { describeDockerFailure, DOCKER_OUT_OF_SPACE, isPortBindConflict, sandboxBuildNoCache, splitUpArgs } from './compose-provider';
 import { externalCallScript } from './external-call';
 import { LOAD_DEADLINE_MS, LOAD_REQUEST_TIMEOUT_MS, LOAD_RUNNER_IMAGE, LOAD_RUNNER_SERVICE, loadConfig, loadRunArgs, loadScript, loadThreads, parseLoadOutput } from './load-runner';
 import type { LoadRequest } from '../types';
@@ -265,12 +265,10 @@ describe('부하 러너: 계획과 출력 해석이 옛 구현과 같다', () =>
     }
   });
 
-  it('loadRunArgs: 런타임 유무, 빈 런타임, 수 표기', () => {
-    for (const runtime of [undefined, '', 'runsc', 'kata-qemu', ' runsc ', '한글']) {
-      for (const threads of [1, 2, 4, 1.5, 0, NaN, 1e21, 1e-7]) {
-        const plan = { name: 'b-studio-load-ab', network: 'sb_sandbox', sandboxId: 'sb', threads, ...(runtime === undefined ? {} : { runtime }) };
-        expect(loadRunArgs(plan), JSON.stringify(plan)).toEqual(legacyLoad.loadRunArgs(plan));
-      }
+  it('loadRunArgs: 수 표기', () => {
+    for (const threads of [1, 2, 4, 1.5, 0, NaN, 1e21, 1e-7]) {
+      const plan = { name: 'b-studio-load-ab', network: 'sb_sandbox', sandboxId: 'sb', threads };
+      expect(loadRunArgs(plan), JSON.stringify(plan)).toEqual(legacyLoad.loadRunArgs(plan));
     }
     expect(LOAD_RUNNER_IMAGE).toBe(legacyLoad.LOAD_RUNNER_IMAGE);
   });
@@ -479,14 +477,12 @@ describe('LocalDockerProvider의 순수 도우미가 옛 구현과 같다', () =
     }
   });
 
-  it('runtimeFromEnv·sandboxBuildNoCache: 공백, 대소문자, 닮은 글자', () => {
-    const values = [undefined, '', ' ', '\n', 'runsc', ' runsc ', '\truntime\n', '﻿runsc', ' runsc', '\u0085runsc', 'run sc', '1', ' 1 ', '1\n', '01', '0', 'true', 'TRUE', 'True', ' tRuE\t', 'tru', 'truee', 'yes', 'on', '2', 'K', 'trıe', 'TRUE ', '　true', '１', 'ｔｒｕｅ'];
+  it('sandboxBuildNoCache: 공백, 대소문자, 닮은 글자', () => {
+    const values = [undefined, '', ' ', '\n', 'runsc', ' runsc ', '\truntime\n', '﻿runsc', ' runsc', '\u0085runsc', 'run sc', '1', ' 1 ', '1\n', '01', '0', 'true', 'TRUE', 'True', ' tRuE\t', 'tru', 'truee', 'yes', 'on', '2', 'K', 'trıe', 'TRUE ', '　true', '１', 'ｔｒｕｅ'];
     for (const value of values) {
-      const env = value === undefined ? {} : { B_STUDIO_CONTAINER_RUNTIME: value, B_STUDIO_SANDBOX_BUILD_NO_CACHE: value };
-      expect(runtimeFromEnv(env), JSON.stringify(value)).toBe(legacyHelpers.runtimeFromEnv(env));
+      const env = value === undefined ? {} : { B_STUDIO_SANDBOX_BUILD_NO_CACHE: value };
       expect(sandboxBuildNoCache(env), JSON.stringify(value)).toBe(legacyHelpers.sandboxBuildNoCache(env));
     }
-    expect(runtimeFromEnv()).toBe(legacyHelpers.runtimeFromEnv());
     expect(sandboxBuildNoCache()).toBe(legacyHelpers.sandboxBuildNoCache());
   });
 });
