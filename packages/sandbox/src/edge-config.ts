@@ -2,7 +2,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { encodeNative, native } from './native';
 
 /**
- * 샌드박스 네트워크의 유일한 출입구(packages/sandbox/edge/edge.mjs)의 설정. Docker와 Kubernetes 제공자가 같은 설정을 쓴다.
+ * 샌드박스 네트워크의 유일한 출입구(packages/sandbox/edge/edge.mjs)의 설정. 로컬 Docker 제공자가 쓴다.
  * 값을 정하는 코드와 상수는 Rust(crates/bstudio-guard/src/edge_config.rs)에 있고, 여기는 이름과 시그니처를 지키는 껍데기다(ADR-191)
  */
 const constants = JSON.parse(native.edgeConstants()) as {
