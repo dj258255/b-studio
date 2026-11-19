@@ -98,8 +98,11 @@ const WHEEL_LINES = 3;
 const ENTER_SCREEN = '\x1b[?1049h\x1b[?2004h\x1b[H\x1b[2J';
 const LEAVE_SCREEN = '\x1b[?2026l\x1b[0m\x1b[?25h\x1b[?2004l\x1b[?1049l';
 // 마우스는 누름·뗌·휠(1000)을 SGR 꼴(1006)로 받는다. 끌기(1002)는 받지 않는다(#874)
-const MOUSE_ON = '\x1b[?1000h\x1b[?1006h';
-const MOUSE_OFF = '\x1b[?1006l\x1b[?1000l';
+// 1002: 단추를 누른 채 움직임도 받는다(칸 안에서 끌어 글을 고르고, CLI가 움직임 추적을 켰으면 넘긴다)
+const MOUSE_ON = '\x1b[?1000h\x1b[?1002h\x1b[?1006h';
+const MOUSE_OFF = '\x1b[?1006l\x1b[?1002l\x1b[?1000l';
+/** 두 번 누르기로 보는 사이(같은 칸) */
+const DOUBLE_PRESS_MS = 400;
 // 창이 포커스를 잃고 얻는 것(1004)을 받아 그동안 움짤을 멈춘다(#902)
 const FOCUS_ON = '\x1b[?1004h';
 const FOCUS_OFF = '\x1b[?1004l';
@@ -283,6 +286,8 @@ export interface DeskAppOptions {
   notifyInput?: boolean;
   /** false면 밖 터미널의 마우스를 켜지 않는다 */
   mouse?: boolean;
+  /** false면 칸 안에서 끌거나 두 번 눌러도 글을 고르지 않는다(기본 켬) */
+  copyOnSelect?: boolean;
   /** false면 칸의 24비트 색을 256색으로 낮춰 그린다 */
   truecolor?: boolean;
   /** desk 자신의 색 팔레트(#887). 없으면 dark */
@@ -477,6 +482,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     notifyDone: config.notifyDone ?? true,
     notifyInput: config.notifyInput ?? true,
     mouse: options.mouse ?? config.mouse ?? true,
+    copyOnSelect: config.copyOnSelect ?? true,
     truecolor: colorDepth(env, config.color) === 'truecolor',
     ...(config.theme ? { theme: config.theme } : {}),
     sprites,
@@ -544,6 +550,12 @@ export class DeskApp {
   #restored = false;
   #finish: (code: number) => void = () => {};
   readonly #mouseOn: boolean;
+  readonly #copyOnSelect: boolean;
+  /** 끌고 있는 중인 선택(칸 안에서 왼쪽 단추를 누른 채). 칸 경계를 넘지 않게 그 칸의 자리를 들고 있다 */
+  #drag: { id: string; rect: { x: number; y: number } } | undefined;
+  /** 글이 골라져 반전으로 그려지는 칸 */
+  #selectedId: string | undefined;
+  #lastPress: { slot: number; id: string; at: number } | undefined;
   readonly #truecolor: boolean;
   readonly #layoutStore: DeskLayoutStore | undefined;
   readonly #commentStore: DeskCommentStore;
@@ -596,6 +608,7 @@ export class DeskApp {
     this.#notifyDone = options.notifyDone !== false;
     this.#notifyInput = options.notifyInput !== false;
     this.#mouseOn = options.mouse !== false;
+    this.#copyOnSelect = options.copyOnSelect !== false;
     this.#truecolor = options.truecolor !== false;
     this.#layoutStore = options.layoutStore;
     this.#commentStore = options.commentStore ?? memoryComments();
@@ -803,12 +816,14 @@ export class DeskApp {
   #apply(effect: Effect): void {
     switch (effect.type) {
       case 'input': {
+        this.#clearSelection();
         // 안쪽 CLI가 응용 커서 키 모드면 방향키를 그 꼴로 바꾼다(밖 터미널은 늘 보통 꼴로 보낸다)
         const modes = this.#panes.get(effect.id)?.modes();
         this.#send(effect.id, modes ? toInnerKeys(effect.data, modes) : effect.data);
         return;
       }
       case 'paste':
+        this.#clearSelection();
         this.#send(effect.id, pasteFor(effect, this.#panes.get(effect.id)?.modes().bracketedPaste ?? false));
         return;
       case 'reopen':
@@ -2275,6 +2290,13 @@ export class DeskApp {
     const { button, x, y, release } = event;
     const wheel = (button & 64) !== 0 ? ((button & 1) === 0 ? -1 : 1) : 0;
     const press = !release && (button & 32) === 0;
+    const motion = !wheel && !release && (button & 32) !== 0;
+    // 끌고 있는 선택의 움직임·놓음은 어디서 와도(사이드바 위여도) 그 칸 안으로 맞춰 이어 간다
+    if (this.#drag && (motion || (release && !wheel))) {
+      this.#dragTo(x, y, release);
+      return;
+    }
+    if (press && !wheel) this.#clearSelection();
     const size = this.#size();
     const side = sidebarView(this.#state, size);
     if (!this.#state.sidebarHidden && x < side.rect.w && y >= side.rect.y && y < side.rect.y + side.rect.h) {
@@ -2348,6 +2370,8 @@ export class DeskApp {
     const pane = id ? this.#panes.get(id) : undefined;
     const modes = pane?.modes();
     if (id && pane && modes?.mouse && !pane.inCopy && slot === this.#state.focus && y > rect.y) {
+      // 움직임은 CLI가 움직임 추적(1002·1003)을 켰을 때만 넘긴다. vt200만 켠 CLI는 움직임을 기대하지 않는다
+      if (motion && !modes.mouseMotion) return;
       // 칸 몸의 첫 줄은 칸 머리 다음 줄이다. 좌표는 1부터
       const column = x - rect.x + 1;
       const line = y - rect.y;
@@ -2362,7 +2386,64 @@ export class DeskApp {
       this.#state = { ...this.#state, focus: slot };
     }
     if (wheel && id && pane) this.#wheel(id, pane, wheel);
+    // 왼쪽 단추: CLI가 마우스를 요청하지 않은 칸의 몸에서는 글을 고른다(칸 머리와 복사 모드는 제외)
+    else if (this.#copyOnSelect && id && pane && !modes?.mouse && !pane.inCopy && y > rect.y && (button & 67) === 0) this.#beginSelect(slot, id, pane, rect, x, y);
     this.#clearSeen();
+    this.#scheduleRender();
+  }
+
+  /** 칸 몸에서 왼쪽 단추를 눌렀다: 같은 칸을 400ms 안에 다시 누르면 단어를 골라 복사하고, 아니면 끌기를 시작한다 */
+  #beginSelect(slot: number, id: string, pane: PaneTerminal, rect: { x: number; y: number }, x: number, y: number): void {
+    const col = x - rect.x;
+    const row = y - rect.y - 1;
+    const now = Date.now();
+    const last = this.#lastPress;
+    if (last && last.slot === slot && last.id === id && now - last.at <= DOUBLE_PRESS_MS) {
+      this.#lastPress = undefined;
+      if (pane.selectWord(col, row)) {
+        this.#selectedId = id;
+        this.#finishSelect(pane);
+      }
+      return;
+    }
+    this.#lastPress = { slot, id, at: now };
+    pane.selectBegin(col, row);
+    this.#selectedId = id;
+    this.#drag = { id, rect };
+  }
+
+  /** 끄는 동안 고른 끝을 옮긴다. 놓으면 고른 글을 복사한다 */
+  #dragTo(x: number, y: number, release: boolean): void {
+    const drag = this.#drag!;
+    const pane = this.#panes.get(drag.id);
+    if (release) this.#drag = undefined;
+    if (!pane || pane.inCopy) {
+      this.#drag = undefined;
+      return;
+    }
+    pane.selectTo(x - drag.rect.x, y - drag.rect.y - 1);
+    if (release) this.#finishSelect(pane);
+    this.#scheduleRender();
+  }
+
+  /** 고른 글을 밖 터미널의 클립보드로 보낸다(복사 모드의 yank와 같은 OSC 52). 고른 것이 없으면 아무것도 하지 않는다 */
+  #finishSelect(pane: PaneTerminal): void {
+    const text = pane.selectedText();
+    if (!pane.hasSelection || !text) {
+      pane.clearSelection();
+      return;
+    }
+    this.#io.write(`\x1b]52;c;${Buffer.from(text).toString('base64')}\x07`);
+    this.#state = { ...this.#state, message: `${[...text].length}자를 클립보드에 복사했습니다` };
+  }
+
+  /** 고른 글의 반전과 끌기를 푼다 */
+  #clearSelection(): void {
+    this.#drag = undefined;
+    if (this.#selectedId === undefined) return;
+    this.#panes.get(this.#selectedId)?.clearSelection();
+    this.#selectedId = undefined;
+    this.#prevFrame = [];
     this.#scheduleRender();
   }
 
