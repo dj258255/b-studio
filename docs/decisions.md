@@ -1069,6 +1069,8 @@ Docker 호스트의 가짜 사내 API를 예제 복사본에 등록했습니다.
 
 ## ADR-028 Kubernetes 제공자: 서비스마다 agent-sandbox Sandbox를 둔다
 
+> **지금 상태(2026-11-19): 지나감.** Kubernetes 제공자를 지웠습니다(`packages/sandbox/src/kubernetes/`와 제공자를 고르는 분기, 관련 시험). 넣으면 시작을 거절합니다(ADR-221). [ADR 지도](adr-map.md#바뀌었거나-지나간-adr)
+
 상태: 채택
 
 ### 맥락

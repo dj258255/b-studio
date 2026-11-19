@@ -10,7 +10,6 @@ export {
   type PruneResult,
   type SandboxLeftovers,
 } from './docker/prune';
-export { KubernetesProvider, type ImageLoader, type KubernetesProviderOptions } from './kubernetes/kubernetes-provider';
 export { providerFromEnv } from './provider';
 export { describeSnapshotEvent, SNAPSHOT_LABEL } from './docker/snapshots';
 export { describeUsage, formatBytes } from './docker/usage';

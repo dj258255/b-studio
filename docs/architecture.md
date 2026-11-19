@@ -64,7 +64,7 @@ flowchart TB
 | `crates/bstudio-io` | `bstudio-guard`가 정한 일을 실제로 하는 I/O: 자식 프로세스, 파일, 소켓, PTY, 게이트 check·선언한 검사·화면 확인 러너(CDP). napi를 모른다(ADR-193) |
 | `crates/bstudio-node` | `bstudio-guard`·`bstudio-io`를 Node에 붙이는 napi 접착 층. 형 변환과 비동기·취소 접착만 하고 판정은 하지 않는다. `pnpm install`의 `postinstall`(`scripts/build-native.mjs`)이 빌드해 `packages/sandbox/native/`에 둔다. TS 쪽 껍데기는 `packages/sandbox/src/native.ts` |
 | `packages/spec` | `studio.yaml` 스키마와 compose 교차 검증. YAML 읽기는 Rust가 한다(ADR-197) |
-| `packages/sandbox` | Docker/Kubernetes 제공자, 준비 판정, 네트워크·시크릿·DB·배포. 판정과 I/O의 상당 부분이 Rust로 옮겨져 일부 파일은 napi를 부르는 껍데기다 |
+| `packages/sandbox` | Docker 제공자, 준비 판정, 네트워크·시크릿·DB·배포. 판정과 I/O의 상당 부분이 Rust로 옮겨져 일부 파일은 napi를 부르는 껍데기다 |
 | `packages/agent` | 모델 클라이언트, 제한된 도구, 워크플로 정책, 검증 게이트, Git 체크포인트와 원격 연동. 게이트 check·선언한 검사·화면 확인 판정의 조율은 Rust로 옮겨졌고 TS가 그 호출을 잇는다 |
 
 ## Rust 앞단과 이전 진행 상태
@@ -201,7 +201,7 @@ Pi 확장은 이 게이트 밖에서 동작하는 안내·조기 차단 계층�
 
 ## 확장 지점
 
-- `SandboxProvider`: Local Docker와 Kubernetes 구현을 교체할 수 있습니다.
+- `SandboxProvider`: `LocalDockerProvider` 하나를 둡니다(kubernetes 제공자는 ADR-221로 지움).
 - `ModelClient`: Anthropic, OpenAI 호환 API, Gemini, 로컬 Claude Code를 같은 루프에서 사용합니다.
 - `studio.yaml`: compose와 OpenAPI를 대체하지 않고 스튜디오 전용 정책만 덧붙입니다.
 

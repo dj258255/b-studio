@@ -268,13 +268,6 @@ pnpm studio sandbox prune
 
 - **이미지 빌드 단계에서 받은 것(docker build가 받는 의존성)은 컨테이너 NetIO에 잡히지 않습니다.** 첫 기동의 다운로드가 대부분 빌드 단계에서 일어나면 컨테이너 수신 값은 작게, 기동 시간은 크게 나옵니다. 두 값은 서로 다른 단계를 재므로 함께 봅니다.
 - **edge 프록시 컨테이너는 뺍니다.** 서비스 트래픽이 edge를 지나가므로 더하면 이중 계산이 됩니다.
-- **Kubernetes 제공자는 아직 이 지표를 내지 않습니다.** 로컬 Docker 제공자(`local-docker`)만 기동 네트워크를 기록합니다.
-
-## Kubernetes 제공자
-
-`B_STUDIO_SANDBOX_PROVIDER=kubernetes`로 선택하며 환경에 따라 `B_STUDIO_KUBECONFIG`, `B_STUDIO_KUBECTL`, `B_STUDIO_K8S_CONTEXT`, `B_STUDIO_K8S_RUNTIME_CLASS`, `B_STUDIO_K8S_REGISTRY`를 설정합니다. 로컬 kind 검증에는 `B_STUDIO_K8S_KIND_CLUSTER`, `B_STUDIO_K8S_HOST_PATHS`도 사용합니다.
-
-실제 운영 전에는 RuntimeClass, NetworkPolicy, 이미지 레지스트리, 스토리지 클래스, 로그 보존을 조직 정책에 맞게 검증하세요.
 
 ## 원격 미리보기
 
@@ -355,6 +348,6 @@ GitHub는 하위 이슈 API(`POST /repos/{owner}/{repo}/issues/{n}/sub_issues`, 
 - [ ] 모델 및 사용자 토큰 한도를 설정했다.
 - [ ] 세션·사용량 경로를 영속 볼륨에 두었다.
 - [ ] 프로젝트별 `resources`, `network.egress`, `secrets`를 검토했다.
-- [ ] Docker 소켓 또는 Kubernetes 권한을 최소화했다.
+- [ ] Docker 소켓 권한을 최소화했다.
 - [ ] 백업과 복구, DB 마이그레이션 롤백 절차를 시험했다.
 - [ ] [보안 정책](../SECURITY.md)의 알려진 경계를 검토했다.

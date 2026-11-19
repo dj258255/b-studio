@@ -35,7 +35,7 @@
 
 ### 후보마다 전용 작업 공간을 받습니다
 
-- 후보마다 전용 Git 복제본·브랜치·샌드박스(Docker 또는 Kubernetes)를 받아 병렬 작업이 서로의 파일과 실행 환경을 덮지 않습니다.
+- 후보마다 전용 Git 복제본·브랜치·샌드박스(Docker)를 받아 병렬 작업이 서로의 파일과 실행 환경을 덮지 않습니다.
 - 자원 한도, 네트워크 허용 목록, 시크릿 가림, 보호 경로, 사내 API 정책 프록시를 `studio.yaml` 한 곳에서 겁니다.
 - 작업을 레인으로 나누면 레인마다 선언한 쓰기 범위를 실행기가 강제합니다.
 
@@ -152,7 +152,7 @@ flowchart LR
 | `apps/cli/` | 터미널 작업대(`desk`)와 `studio up`·`launch`·`stop`·`agent`·`verify`·`workflow`·`boot-probe`·`auth`·`sandbox prune` 명령 | 화면과 터미널 진입점을 한 곳에 묶는다 |
 | `apps/studio/` | 스튜디오 서버(화면 없는 API. 세션·게이트·체크포인트·계정·사용량)와 `bench/` 실험 하네스 | 서버와 실험 벤치가 같은 모델·게이트 코드를 호출해 같이 둔다 |
 | `packages/spec/` | `studio.yaml` 스키마와 compose 교차 검증 | CLI·서버가 같은 로더를 공유해야 한다 |
-| `packages/sandbox/` | Docker/Kubernetes 샌드박스, edge 프록시, 정책 경계 | 격리 실행이라는 한 책임을 독립 패키지로 둔다 |
+| `packages/sandbox/` | Docker 샌드박스, edge 프록시, 정책 경계 | 격리 실행이라는 한 책임을 독립 패키지로 둔다 |
 | `packages/agent/` | 에이전트 루프, 도구, 모델 라우터, 검증 게이트, 체크포인트 | 신뢰 장치의 본체. CLI·서버 모두 이 패키지를 부른다([공구함](docs/toolkit.md)) |
 | `templates/` | Next.js·Spring Boot·FastAPI 원본 | managed 서비스를 만들 때 복사하는 뼈대. 워크스페이스 밖에 둬 템플릿 자체 의존성과 섞이지 않는다 |
 | `examples/orders/` | web + api + PostgreSQL 예제 프로젝트 | 모든 실험·E2E·도그푸딩이 쓰는 공통 과제 |
@@ -217,7 +217,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷은 [`studi
 
 ## 지금 어디까지 왔나
 
-**지원 범위는 좁습니다.** 한 세션에 요청 하나씩, 로컬 CLI 백엔드(Claude Code), 로컬 Docker 샌드박스입니다. 도그푸딩에서 매일 쓰며 고친 경로가 이것입니다. 작업 분해·여러 명 비교, 다른 백엔드, Kubernetes, 디자인 비교 같은 나머지 기능은 **실험**으로 두고 기본 화면에서 숨깁니다(`B_STUDIO_EXPERIMENTAL=1`로 켭니다). 기능마다 마지막으로 실제 환경에서 확인한 날짜는 [구현 상태](docs/status.md#지원-범위)에 있습니다.
+**지원 범위는 좁습니다.** 한 세션에 요청 하나씩, 로컬 CLI 백엔드(Claude Code), 로컬 Docker 샌드박스입니다. 도그푸딩에서 매일 쓰며 고친 경로가 이것입니다. 작업 분해·여러 명 비교, 다른 백엔드, 디자인 비교 같은 나머지 기능은 **실험**으로 두고 기본 화면에서 숨깁니다(`B_STUDIO_EXPERIMENTAL=1`로 켭니다). 기능마다 마지막으로 실제 환경에서 확인한 날짜는 [구현 상태](docs/status.md#지원-범위)에 있습니다.
 
 | 알고 싶은 것 | 확인하는 곳 |
 |---|---|
@@ -233,8 +233,7 @@ managed/external 서비스, 네트워크 정책, 시크릿, 스냅샷은 [`studi
 - 실제 계정으로 확인한 구독 백엔드는 Claude Code·Command Code·Codex입니다. Codex는 2026-10-28에 실제 ChatGPT 구독으로 러너를 돌렸고 E1을 24회 재현했습니다([실측](docs/experiments/2026-10-28-codex-real.md), [E1-b](docs/experiments/2026-10-28-codex-e1b.md)). 다만 계정 기본 모델 하나와 SDK 0.157.0으로만 봤고 과제는 이 저장소 예제의 작은 것 4개입니다. OpenCode·Gemini는 로그인 가능한 계정이 없어 실제 모델 호출까지는 확인하지 못했습니다(도구 경계만 주입 프로세스로 확인, [구현 상태](docs/status.md)).
 - 터미널 작업대(`studio desk`)와 세션 터미널은 실제 Claude Code로 2026-10-27·30에 돌렸습니다. 새 요청 보내기, 카드와 알림, 게이트 통과와 체크포인트, 라우팅 기록까지 봤습니다([1차](docs/experiments/2026-10-27-real-claude-desk.md), [2차](docs/experiments/2026-10-30-real-claude-desk-2.md)). 권한 대기 문구, 할 일 막대와 남은 시간 추정, 쓰기 범위 밖 쓰기 거절은 보지 못했습니다. 진짜 Codex CLI는 폴더 신뢰 창까지만 열어 봤고 그 너머의 세션은 보지 못했습니다([기록](docs/experiments/2026-10-28-codex-terminal.md)). 작은 busybox 프로젝트로 한 번씩 본 값입니다. 2026-10-22에 넣은 다른 기능의 확인 범위는 [구현 상태](docs/status.md#2026-10-22에-넣은-기능의-실제-확인-범위)에 나눠 적었습니다.
 - 백엔드를 Rust로 옮기는 중(ADR-191~199)이라, 옮긴 부분은 옛 TS 구현과의 차등 시험과 실제 Docker·Claude Code 세션으로 확인했지만([구현 상태](docs/status.md#지원)) 화면 확인 러너는 Rust 길로 바꿨지만 단계·첫 화면 글자·로드 예산을 그 길로 돌린 실제 세션 기록은 아직 없습니다(ADR-199 A6c-3). 앞단과 Node가 함께 도는 동안 메모리가 가벼워졌다고 주장하지 않으며 잰 적이 없습니다.
-- 실험으로 둔 기능(작업 분해, 여러 명 비교, OpenCode·Gemini 백엔드, Codex 백엔드의 실측 밖 사용, Kubernetes, 디자인 비교 등)은 도그푸딩에서 쓰지 않았습니다. 테스트는 돌지만 실제 환경에서 확인한 날짜가 오래됐거나 없습니다([구현 상태](docs/status.md#지원-범위)).
-- Kubernetes 검증은 로컬 kind 기준입니다. 관리형 클러스터에서는 아직 확인하지 않았습니다.
+- 실험으로 둔 기능(작업 분해, 여러 명 비교, OpenCode·Gemini 백엔드, Codex 백엔드의 실측 밖 사용, 디자인 비교 등)은 도그푸딩에서 쓰지 않았습니다. 테스트는 돌지만 실제 환경에서 확인한 날짜가 오래됐거나 없습니다([구현 상태](docs/status.md#지원-범위)).
 - API 키를 쓰는 실제 외부 공급자 경로는 자격 증명이 있는 환경에서 아직 돌려 보지 않았습니다.
 
 전체 목록과 각 항목의 조건은 [검증 기록의 알려진 한계](docs/verification.md#알려진-한계)에 있습니다.
