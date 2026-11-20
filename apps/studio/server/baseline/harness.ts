@@ -285,7 +285,8 @@ export class Driver {
   /** 로컬 토큰 쿠키를 요구하는 통로(터미널 통로와 확인 선언 변경 허용). desk가 같은 파일을 읽어 쿠키로 싣는다 */
   static needsLocalToken(pathname: string): boolean {
     const bare = pathname.split('?')[0]!;
-    return bare.endsWith('/terminal') || bare.endsWith('/check-changes') || bare.startsWith('/api/terminals/');
+    // 터미널을 여는 만들기 요청(세션·Fleet·카드 작업 분해)도 터미널 통로와 같은 검사를 거친다(ADR-223). desk는 모든 요청에 토큰을 싣는다
+    return bare.endsWith('/terminal') || bare.endsWith('/check-changes') || bare.startsWith('/api/terminals/') || bare === '/api/sessions' || bare === '/api/fleets' || bare === '/api/task-plans';
   }
 
   /**
