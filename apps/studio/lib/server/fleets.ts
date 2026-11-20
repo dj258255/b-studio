@@ -403,6 +403,15 @@ async function runTerminalMember(fleet: FleetView, member: FleetMemberView): Pro
       member.finishedAt = new Date().toISOString();
     }
   } finally {
+    // 켠 허용은 끝나면 반드시 끈다. 허용은 "다음 만들기 실행 하나"가 가져갈 때만 지워진다 — 붙여 넣기 전에 실패했거나 읽기 실행으로 끝났으면
+    // 세션에 남아, 뒤에 사람이 그 세션에서 친 무관한 요청이 확인 변경 허용으로 돈다(게이트를 푸는 상태가 남는다)
+    if (fleet.allowBreaking) {
+      try {
+        setTerminalCheckChanges(member.sessionId, false);
+      } catch {
+        // 세션이 이미 지워졌으면 끌 허용도 없다
+      }
+    }
     delete member.waiting;
     try {
       persist(fleet);
