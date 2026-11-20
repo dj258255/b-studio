@@ -259,7 +259,7 @@ import { resolveArtifact, saveArtifact } from './artifacts';
 import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-evidence';
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
-import { liveWatchViolation, verifyWatch } from './session-terminal-watch';
+import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -547,6 +547,11 @@ interface Session {
   terminalSaving?: ActiveRun & { terminal: TerminalRunState };
   /** 터미널에서 마지막으로 받은 요청 글. 요청의 시작을 알리는 훅 없이 작업이 이어질 때(명령으로 시작한 턴 등) 그 실행의 이름으로 쓴다 */
   terminalLabel?: string;
+  /**
+   * 이 세션의 터미널을 연 적이 있다(`sessionTerminalTarget`이 불렸다). 서버가 작업 폴더에 직접 쓰는 길(`applyServerChanges`)은 이 세션을 받지 않는다:
+   * 같은 폴더에 CLI나 사람이 쓸 수 있어 "서버가 쓴 것만 바뀌었다"가 성립하지 않는다. 한 번 서면 이 세션 객체에서는 꺼지지 않는다
+   */
+  terminalOpened?: boolean;
   /**
    * 가장 최근에 닫힌 터미널 실행의 시작·끝 시각(#726). CLI의 텔레메트리는 내보내기 주기가 있어 실행이 닫힌 뒤
    * 몇 초 안에 도착할 수 있다. 그때 이 실행에 붙인다(실행이 끝난 뒤 늦게 온 사용량도 그 실행의 몫이다)
@@ -7378,6 +7383,8 @@ export function sessionTerminalTarget(id: string): {
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
+  // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
+  session.terminalOpened = true;
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
   // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
   const alive = (): boolean => terminalSessionAlive(session);
@@ -8219,7 +8226,11 @@ function terminalBusy(session: Session): string | undefined {
  *
  * `fromPrompt`는 사람의 요청(UserPromptSubmit)이 여는 실행인가다. 켜 둔 확인 선언 변경 허용은 그 실행만 가져간다(도구 호출이 연 실행은 가져가지 않는다, P3)
  */
-async function beginTerminalRun(session: Session, request: string, { fromPrompt, readOnly = isReadOnlyPrompt(request) }: { fromPrompt: boolean; readOnly?: boolean }): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
+async function beginTerminalRun(
+  session: Session,
+  request: string,
+  { fromPrompt, readOnly = isReadOnlyPrompt(request), via = 'terminal' }: { fromPrompt: boolean; readOnly?: boolean; via?: 'terminal' | 'server' },
+): Promise<(ActiveRun & { terminal: TerminalRunState }) | { busy: string }> {
   const id = randomUUID().slice(0, 8);
   const claimed = session.life.claims.beginTerminalRun(id);
   if (typeof claimed !== 'number') return { busy: claimed.busy };
@@ -8290,7 +8301,17 @@ async function beginTerminalRun(session: Session, request: string, { fromPrompt,
     mirrorBusy(session);
     session.snapshot.pendingQuestion = undefined;
     // 터미널에서 도는 CLI로 남긴다(#821, #825). 세션의 백엔드가 아니라 실제로 띄운 CLI다
-    emit(session, { type: 'run_started', runId: run.id, request, by: run.by, via: 'terminal', at: run.startedAt, backend: terminalRunBackend(session), taskKind: classifyTask(request) });
+    // 서버가 연 실행(applyServerChanges)은 CLI가 아니라 서버가 쓴다. 화면과 터미널 레인이 CLI의 실행으로 읽지 않게 via를 달리 하고, 백엔드는 대화 실행과 같이 세션의 것을 남긴다
+    emit(session, {
+      type: 'run_started',
+      runId: run.id,
+      request,
+      by: run.by,
+      via,
+      at: run.startedAt,
+      backend: via === 'server' ? sessionBackend(session.snapshot) : terminalRunBackend(session),
+      taskKind: classifyTask(request),
+    });
     // 정체 감시를 켠다(#B5). 실행이 닫히거나 세션이 멈추면 타이머도 멈춘다
     startTerminalStallWatch(session, stallMs);
     run.cancel.signal.addEventListener(
@@ -8883,6 +8904,167 @@ async function terminalTurnEnded(id: string, input: HookInput): Promise<{ feedba
   noteTerminalActivity(session, run);
   const text = typeof input.last_assistant_message === 'string' ? input.last_assistant_message.trim() : '';
   return run.terminal.serial(() => finishTerminalTurn(session, run, text, arrivedMs));
+}
+
+/** `applyServerChanges`가 돌려주는 결과. status는 그 실행의 run_finished가 말한 값이다 */
+export interface ServerChangesResult {
+  runId: string;
+  status: string;
+  summary: string;
+  /** 통과해 새 체크포인트가 남았을 때만 있다 */
+  checkpoint?: Checkpoint;
+  durationMs?: number;
+}
+
+/**
+ * 서버가 쓸 경로의 글자 검사(막는 쪽: 모르는 모양은 거절한다). 상대 경로만 받는다 — 절대 경로, `..`·`.`·빈 조각, NUL, 역슬래시는 거절한다.
+ * 실제 위치(링크·숨긴 이름·범위)는 이 검사 뒤에 터미널의 쓰기 판단과 작업 공간이 같은 규칙으로 본다
+ */
+function serverChangePathProblem(file: string): string | undefined {
+  if (file === '') return '경로가 비어 있습니다';
+  if (file.includes('\0')) return '경로에 NUL이 있습니다';
+  if (file.includes('\\')) return '경로에 역슬래시가 있습니다';
+  if (file.startsWith('/') || /^[A-Za-z]:/.test(file)) return '절대 경로는 쓸 수 없습니다';
+  if (file.split('/').some((part) => part === '' || part === '.' || part === '..')) return '경로에 빈 조각, ., ..이 있습니다';
+  return undefined;
+}
+
+/**
+ * 서버가 계산한 파일 변경(작업 분해 통합의 레인 결과)을 이 세션의 작업 폴더에 쓰고, 터미널의 턴 끝과 같은 판정(`finishTerminalTurn`)으로 닫는다(ADR-224, #1340).
+ * 채팅식 실행(`sendMessage`) 없이 쓴다. 모델도 CLI도 부르지 않는다.
+ *
+ * 순서: 거절(아무것도 쓰기 전에) → 실행 열기(`fromPrompt: false`라 켜 둔 확인 선언 변경 허용을 가져가지 않는다) → 쓰기 범위 걸기 → 변경 전 기준 잡기 →
+ * 파일을 하나도 쓰기 전에 전부 거르기 → 쓰기 → 턴 끝 판정. 재시도(피드백)를 받을 CLI가 없으므로 피드백이 나오면 그 글로 실패로 닫는다.
+ * 어떤 길로 돌아가도 이 함수가 연 실행은 닫혀 있다(열린 채 돌아가면 다음 요청이 바쁨으로 막힌다).
+ *
+ * 막는 쪽이다: 터미널을 연 세션·열린 터미널 실행·감시가 있는 세션·컨테이너 방식은 거절한다(아래 이유). 쓰기 범위(`writableScope`)는 허용 목록이라 빈 목록은 어디에도 쓰지 못한다.
+ */
+export async function applyServerChanges(
+  id: string,
+  input: {
+    /** 실행 기록에 남는 요청 글 */
+    request: string;
+    writes: ReadonlyArray<{ path: string; content: string }>;
+    deletes: readonly string[];
+    /** 허용 목록. 빈 목록이면 어디에도 쓰지 못한다 */
+    writableScope: readonly string[];
+  },
+): Promise<ServerChangesResult> {
+  const session = requireSession(id);
+  if (!terminalSessionAlive(session)) throw new StudioError(409, '멈춘 세션입니다');
+  // 컨테이너 방식의 턴 끝은 검사 동안 에이전트 컨테이너를 멈춘다(`duringAgentContainerPause`). 서버가 쓰는 세션에는 그 컨테이너가 없어 멈추지 못하고 통과할 수 없다.
+  // 멈추기를 건너뛰는 예외는 두지 않는다: 이 방식은 거절하고, 부르는 쪽이 따로 정한다
+  if (sessionTerminalMode() === 'container') throw new StudioError(409, '컨테이너 방식에서는 서버가 쓴 변경을 터미널 판정으로 검증하지 못합니다');
+  // 같은 작업 폴더에 CLI나 사람이 쓸 수 있는 세션은 받지 않는다. 감시(`verifyWatch`)가 없는 터미널은 통과로 읽히므로 이 전제는 여기서 코드로 지킨다
+  if (session.terminalOpened === true || hasWatch(id) || openTerminalRun(session) !== undefined) {
+    throw new StudioError(409, '터미널을 연 적이 있는 세션에는 서버가 변경을 쓰지 않습니다(같은 작업 폴더에 다른 쪽이 쓸 수 있습니다)');
+  }
+  // 이미 걸린 카드 맥락을 덮어쓰고 끝에 지우면 그 맥락의 주인이 범위 없이 일하게 된다
+  if (session.terminalTaskContext !== undefined) throw new StudioError(409, '이미 쓰기 범위가 걸린 세션입니다');
+
+  // 서버가 연 실행은 사람의 요청이 아니다: 켜 둔 확인 선언 변경 허용을 가져가지 않는다
+  const finishedEvents: Array<Extract<StudioEvent, { type: 'run_finished' }>> = [];
+  const listener: Listener = (event) => {
+    if (event.type === 'run_finished') finishedEvents.push(event);
+  };
+  session.listeners.add(listener);
+  let run: (ActiveRun & { terminal: TerminalRunState }) | undefined;
+  let head: string | undefined;
+  try {
+    const opened = await beginTerminalRun(session, input.request, { fromPrompt: false, readOnly: false, via: 'server' });
+    // 다른 실행·작업이 잡혀 있다
+    if ('busy' in opened) throw new StudioError(409, opened.busy);
+    run = opened;
+    const opening = opened;
+    // 정체 감시는 CLI의 침묵을 알리는 것이다. 서버가 쓰는 실행에는 CLI가 없어 "터미널이 N초 움직이지 않았다"는 잘못된 경고가 된다
+    stopTerminalStallWatch(session);
+    head = session.snapshot.checkpoints[0]?.sha;
+    const fail = async (reason: string): Promise<void> => {
+      await opening.terminal.serial(() => abandonTerminalRun(session, opening, { status: 'failed', reason: `[b-studio] ${reason}` }));
+    };
+    try {
+      // 쓰기 범위(허용 목록)를 건다. 턴 끝의 카드 범위 검사(`need_card_scope`)가 도구 밖 변경도 이 범위로 본다. 끝나면 아래 finally가 푼다
+      setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: [] });
+      await opening.terminal.serial(async () => {
+        const problem = await writeServerChanges(session, opening, input);
+        if (problem !== undefined) {
+          await abandonTerminalRun(session, opening, { status: 'failed', reason: `[b-studio] ${problem}` });
+          return;
+        }
+        // 턴 끝 판정. Stop 훅과 같은 함수를 같은 줄(serial) 안에서 부른다
+        const verdict = await finishTerminalTurn(session, opening, `서버가 파일 ${input.writes.length}개를 쓰고 ${input.deletes.length}개를 지웠습니다.`, Date.now());
+        // 재시도를 요청했다: 되돌릴 CLI가 없다. 기다리지 않고 그 글을 사유로 실패로 닫는다
+        if (verdict.feedback !== undefined) await abandonTerminalRun(session, opening, { status: 'failed', reason: `[b-studio] 서버가 쓴 변경이 검증을 통과하지 못했습니다. 되돌려 고칠 에이전트가 없어 다시 시도하지 않고 실패로 닫습니다:\n${clipText(verdict.feedback, 4000)}` });
+      });
+    } catch (error) {
+      // 판정이 던졌다. 열린 채 두지 않는다
+      await fail(`서버가 쓴 변경을 검증하지 못했습니다: ${describe(error)}`).catch(() => {});
+    }
+    // 안전망: 어떤 길로 왔든 닫혀 있어야 한다(이미 닫혔으면 아무 일도 하지 않는다)
+    if (!terminalRunClosed(session.life, opening.ticket)) await fail('서버가 쓴 변경의 판정이 실행을 닫지 않아 실패로 닫습니다').catch(() => {});
+  } finally {
+    session.listeners.delete(listener);
+    // 맥락은 이 함수가 걸었을 때만 지운다(위에서 이미 걸려 있으면 던졌다)
+    if (run) setTerminalTaskContext(id, undefined);
+  }
+  const finished = finishedEvents.find((event) => event.runId === run!.id);
+  const saved = getSnapshot(id)?.checkpoints[0];
+  const base = { runId: run.id, ...(finished?.durationMs !== undefined ? { durationMs: finished.durationMs } : {}) };
+  // 끝 알림이 없으면(세션이 멈추는 중이면 알리지 않는다) 통과로 읽지 않는다
+  if (!finished) return { ...base, status: 'cancelled', summary: '세션이 멈춰 서버가 쓴 변경의 결과를 알 수 없습니다' };
+  const checkpoint = finished.status === 'done' && saved !== undefined && saved.sha !== head ? saved : undefined;
+  return { ...base, status: finished.status, summary: finished.summary, ...(checkpoint ? { checkpoint } : {}) };
+}
+
+/**
+ * 서버가 쓸 파일을 하나도 쓰기 전에 전부 거르고, 모두 통과하면 쓴다. 거른 사유가 있으면 그 글을(아무것도 쓰지 않았다), 없으면 undefined.
+ * 쓰는 도중 던지면 이미 쓴 것은 실행을 실패로 닫는 쪽(`abandonTerminalRun`)이 되돌린다.
+ *
+ * 변경 전 기준(`terminalVerification`: 샌드박스·계약 기준·요구사항 문서)은 **쓰기 전에** 잡는다. CLI의 쓰기 직전 훅이 하는 것과 같은 순서다 —
+ * 쓴 뒤에 잡으면 쓴 내용이 기준이 되어 계약을 깨는 변경이 "원래 그랬던 것"이 된다
+ */
+async function writeServerChanges(
+  session: Session,
+  run: ActiveRun & { terminal: TerminalRunState },
+  input: { writes: ReadonlyArray<{ path: string; content: string }>; deletes: readonly string[] },
+): Promise<string | undefined> {
+  const card = session.terminalTaskContext;
+  // 범위가 걸려 있지 않으면 범위 검사가 아무것도 막지 않는다(`terminalScopeDeny`는 맥락이 없으면 통과다). 허용 목록이므로 모르면 막는다
+  if (!card) return '쓰기 범위가 걸려 있지 않아 서버가 쓸 수 없습니다';
+  const paths = [...input.writes.map((write) => write.path), ...input.deletes];
+  const seen = new Set<string>();
+  for (const file of paths) {
+    const bad = serverChangePathProblem(file);
+    if (bad) return `${file}: ${bad}`;
+    // 같은 파일을 쓰고 지우는 것은 순서에 따라 결과가 달라진다. 모르면 막는다
+    if (seen.has(file)) return `${file}: 같은 경로가 두 번 있습니다`;
+    seen.add(file);
+  }
+  let verification: TerminalVerification;
+  try {
+    verification = await untilAborted(AbortSignal.any([session.stop.signal, run.cancel.signal]), terminalVerification(session, run));
+  } catch (error) {
+    return `샌드박스를 준비하지 못해 서버가 쓸 수 없습니다: ${describe(error)}`;
+  }
+  for (const file of paths) {
+    // CLI의 쓰기 도구 훅과 같은 판단이다: 쓰기 범위(허용 목록)와, 작업 복사본 밖을 가리키는 링크
+    const scope = await terminalScopeDeny(session, 'Write', { file_path: file });
+    if (scope) return scope;
+    // 숨긴 이름(.git·.env·생성물)과 링크를 지나는 경로를 파일 도구와 같은 규칙으로 거른다(작업 공간이 쓰기·지우기에서 한 번 더 본다)
+    try {
+      await verification.workspace.assertToolPath(file);
+    } catch (error) {
+      return `${file}: ${describe(error)}`;
+    }
+  }
+  // 지우기는 일반 파일만이다(작업 공간이 링크·폴더를 지우지 않는다)
+  for (const file of input.deletes) {
+    const info = await lstat(path.join(verification.workspace.root, file)).catch(() => undefined);
+    if (!info?.isFile()) return `${file}: 일반 파일만 지울 수 있습니다`;
+  }
+  for (const write of input.writes) await verification.workspace.write(write.path, write.content);
+  for (const file of input.deletes) await verification.workspace.remove(file);
+  return undefined;
 }
 
 /**
