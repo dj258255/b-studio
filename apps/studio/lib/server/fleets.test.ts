@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -19,6 +19,12 @@ const fake = vi.hoisted(() => ({
     fake.stopAndDeleted.push(args[0]);
   }),
   stopAndDeleted: [] as string[],
+  /** 터미널 Fleet 시험이 호출 순서를 보는 기록 */
+  calls: [] as string[],
+  setTerminalCheckChanges: vi.fn((id: string, allow: boolean) => {
+    fake.calls.push(`check:${id}:${allow}`);
+    return allow;
+  }),
   models: [
     {
       id: 'model-a',
@@ -62,6 +68,7 @@ vi.mock('./sessions', async (importOriginal) => {
     createSession: fake.createSession,
     getSnapshot: fake.getSnapshot,
     sendMessage: fake.sendMessage,
+    setTerminalCheckChanges: fake.setTerminalCheckChanges,
     stopAndDeleteSession: fake.stopAndDeleteSession,
     subscribe: (id: string, listener: (event: StudioEvent) => void) => {
       fake.listeners.set(id, listener);
@@ -87,13 +94,16 @@ vi.mock('./ai-accounts', async (importOriginal) => {
 });
 
 import { StudioError } from './errors';
-import { chooseFleetWinner, createFleet, defaultFleetCandidates, deleteFleet, getFleet, listFleets } from './fleets';
+import { chooseFleetWinner, createFleet, defaultFleetCandidates, deleteFleet, getFleet, listFleets, setFleetTerminalDepsForTest } from './fleets';
+import type { TerminalTaskDeps } from './terminal-lane';
 
 const directory = mkdtempSync(path.join(tmpdir(), 'b-studio-fleets-'));
 const saved = {
   mode: process.env.B_STUDIO_MODE,
   backends: process.env.B_STUDIO_BACKENDS,
   dir: process.env.B_STUDIO_FLEETS_DIR,
+  terminal: process.env.B_STUDIO_TERMINAL,
+  experimental: process.env.B_STUDIO_EXPERIMENTAL,
 };
 
 beforeEach(() => {
@@ -102,6 +112,11 @@ beforeEach(() => {
   fake.sendMessage.mockClear();
   fake.stopAndDeleteSession.mockClear();
   fake.stopAndDeleted = [];
+  fake.calls = [];
+  fake.setTerminalCheckChanges.mockClear();
+  setFleetTerminalDepsForTest(undefined);
+  delete process.env.B_STUDIO_TERMINAL;
+  delete process.env.B_STUDIO_EXPERIMENTAL;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_FLEETS_DIR = directory;
   // 허용 목록은 서버 모드 하나뿐이다. 넓히는 테스트만 직접 세운다
@@ -113,6 +128,8 @@ afterAll(() => {
     ['B_STUDIO_MODE', saved.mode],
     ['B_STUDIO_BACKENDS', saved.backends],
     ['B_STUDIO_FLEETS_DIR', saved.dir],
+    ['B_STUDIO_TERMINAL', saved.terminal],
+    ['B_STUDIO_EXPERIMENTAL', saved.experimental],
   ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -376,5 +393,265 @@ describe('deleteFleet', () => {
 
     expect(fake.stopAndDeleteSession).toHaveBeenCalledTimes(1);
     expect(fake.stopAndDeleteSession).toHaveBeenCalledWith(fleet.members[1]!.sessionId);
+  });
+});
+
+/**
+ * 터미널 Fleet 시험의 가짜 터미널. 세션마다 붙여 넣은 글을 기억했다가 Enter가 오면 그 글로 run_started를 흘린다.
+ * 이벤트는 Fleet의 구독(fake.listeners)과 runTerminalTask의 구독 양쪽에 간다(실제 세션의 subscribe가 둘 다에 알리는 것과 같다)
+ */
+function terminalHarness(config: { openFails?: (sessionId: string) => boolean } = {}) {
+  const pasted = new Map<string, string>();
+  const lane = new Map<string, (event: StudioEvent) => void>();
+  const state = { status: 'ready' as string, cliUp: true };
+  const emit = (sessionId: string, event: StudioEvent): void => {
+    lane.get(sessionId)?.(event);
+    fake.listeners.get(sessionId)?.(event);
+  };
+  const deps: Partial<TerminalTaskDeps> = {
+    driver: {
+      open: async (sessionId) => {
+        fake.calls.push(`open:${sessionId}`);
+        if (config.openFails?.(sessionId)) throw new Error('터미널을 열지 못했습니다');
+      },
+      cliAlive: () => state.cliUp,
+      write: (sessionId, data) => {
+        if (data.startsWith('\x1b[200~')) {
+          fake.calls.push(`paste:${sessionId}`);
+          pasted.set(sessionId, data.slice('\x1b[200~'.length, -'\x1b[201~'.length));
+          return;
+        }
+        emit(sessionId, { type: 'run_started', runId: `trun-${sessionId}`, request: pasted.get(sessionId) ?? '', via: 'terminal' } as StudioEvent);
+      },
+    },
+    subscribe: (sessionId, listener) => {
+      lane.set(sessionId, listener);
+      return () => lane.delete(sessionId);
+    },
+    readEvents: () => [],
+    setTaskContext: (sessionId, context) => {
+      fake.calls.push(`context:${sessionId}:${context === undefined ? 'clear' : context.writableScope.join(',')}`);
+    },
+    status: () => state.status,
+    attention: () => undefined,
+    openRunId: () => undefined,
+    cancelRun: () => {},
+    trustFailure: () => undefined,
+    closeTimeoutMs: 50,
+    cliTimeoutMs: 200,
+    submitTimeoutMs: 200,
+    runTimeoutMs: 2_000,
+    usageGraceMs: 0,
+    pollMs: 2,
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  };
+  setFleetTerminalDepsForTest(deps);
+  return { emit, state };
+}
+
+async function until(check: () => boolean, message: string): Promise<void> {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
+    if (check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  throw new Error(message);
+}
+
+const USAGE = { inputTokens: 10, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 };
+
+describe('터미널 Fleet', () => {
+  async function terminalFleet(overrides: { allowBreaking?: boolean; owner?: string } = {}) {
+    process.env.B_STUDIO_BACKENDS = 'claude-code';
+    return createFleet({
+      projectId: 'orders',
+      request: '검색을 추가해줘',
+      candidates: [{ backend: 'claude-code', model: 'sonnet' }, { backend: 'claude-code' }],
+      owner: overrides.owner ?? 'tess',
+      runner: 'terminal',
+      ...(overrides.allowBreaking ? { allowBreaking: true } : {}),
+      preflights: { claudeCode: async () => ({ ok: true as const }) },
+    });
+  }
+
+  it('두 멤버가 세션 터미널에서 끝까지 돌고 각자의 runId·결과·비용이 남는다(채팅 sendMessage는 부르지 않는다)', async () => {
+    const harness = terminalHarness();
+    const created = await terminalFleet();
+    expect(created.runner).toBe('terminal');
+    const [first, second] = created.members;
+
+    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
+    expect(getFleet(created.id, 'tess').members.map((member) => member.runId)).toEqual([`trun-${first!.sessionId}`, `trun-${second!.sessionId}`]);
+    // 실행이 시작된 뒤의 체크포인트는 Fleet의 구독이 그 runId로 받는다
+    harness.emit(first!.sessionId, { type: 'checkpoint', runId: `trun-${first!.sessionId}`, checkpoint: { sha: 'abcdef123456', shortSha: 'abcdef1', files: ['a.ts'] } } as StudioEvent);
+
+    for (const [index, member] of created.members.entries()) {
+      const runId = `trun-${member.sessionId}`;
+      harness.emit(member.sessionId, { type: 'run_usage', runId, usage: USAGE, costUsd: 0.25 * (index + 1) } as StudioEvent);
+      harness.emit(member.sessionId, { type: 'run_finished', runId, status: 'done', summary: `${index}번 끝`, turns: 9, usage: { ...USAGE, inputTokens: 999 } } as StudioEvent);
+    }
+    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'done'), '멤버가 끝나지 않았습니다');
+
+    const members = getFleet(created.id, 'tess').members;
+    expect(members.map((member) => [member.runId, member.status, member.summary, member.costUsd])).toEqual([
+      [`trun-${first!.sessionId}`, 'done', '0번 끝', 0.25],
+      [`trun-${second!.sessionId}`, 'done', '1번 끝', 0.5],
+    ]);
+    // 사용량은 run_usage(텔레메트리)를 더한 값, 턴 수는 알 수 없어 두지 않는다
+    expect(members[0]!.usage).toEqual(USAGE);
+    expect(members[0]!.turns).toBeUndefined();
+    expect(members[0]!.checkpoint).toEqual({ sha: 'abcdef123456', shortSha: 'abcdef1', files: ['a.ts'] });
+    expect(members.every((member) => member.waiting === undefined && member.finishedAt)).toBe(true);
+    expect(fake.sendMessage).not.toHaveBeenCalled();
+    // 끝난 멤버의 구독은 풀린다
+    expect(fake.listeners.has(first!.sessionId)).toBe(false);
+    // 쓰기 범위를 걸지 않는다: 카드 범위가 빈 목록이면 어디에도 못 쓰는 뜻이라 Fleet이 일하지 못한다
+    expect(fake.calls.filter((call) => call.startsWith('context:') && !call.endsWith(':clear'))).toEqual([]);
+    const saved = JSON.parse(readFileSync(path.join(directory, `${created.id}.json`), 'utf8')) as { runner: string; members: Array<{ status: string }> };
+    expect(saved.runner).toBe('terminal');
+    expect(saved.members.map((member) => member.status)).toEqual(['done', 'done']);
+  });
+
+  it('runner를 주지 않으면 chat이고, 모르는 값은 세션을 만들기 전에 거절한다', async () => {
+    const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'tess' });
+    expect(fleet.runner).toBe('chat');
+    expect(fake.sendMessage).toHaveBeenCalledTimes(2);
+    fake.createSession.mockClear();
+    await expect(createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'tess', runner: 'pty' as never })).rejects.toMatchObject({ status: 400 });
+    expect(fake.createSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['api 후보', { backends: 'api', terminal: undefined, experimental: undefined, candidates: [{ backend: 'api' as const, model: 'model-a' }, { backend: 'api' as const, model: 'model-b' }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: api' }],
+    ['컨테이너 방식의 codex', { backends: 'codex', terminal: 'container', experimental: '1', candidates: [{ backend: 'codex' as const }, { backend: 'codex' as const }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: codex' }],
+    ['터미널을 쓸 수 없는 서버', { backends: 'claude-code', terminal: 'container', experimental: undefined, candidates: [{ backend: 'claude-code' as const }, { backend: 'claude-code' as const }], message: '세션 터미널' }],
+  ])('%s는 400으로 거절하고 세션을 만들지 않는다', async (_name, setup) => {
+    process.env.B_STUDIO_BACKENDS = setup.backends;
+    if (setup.terminal) process.env.B_STUDIO_TERMINAL = setup.terminal;
+    if (setup.experimental) process.env.B_STUDIO_EXPERIMENTAL = setup.experimental;
+    const error = await createFleet({
+      projectId: 'orders',
+      request: '요청',
+      candidates: setup.candidates,
+      owner: 'rejected-owner',
+      runner: 'terminal',
+      preflights: { claudeCode: async () => ({ ok: true as const }), codex: async () => ({ ok: true as const }) },
+    }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+
+    expect(error).toBeInstanceOf(StudioError);
+    expect((error as StudioError).status).toBe(400);
+    expect((error as StudioError).message).toContain(setup.message);
+    expect(fake.createSession).not.toHaveBeenCalled();
+    expect(listFleets('rejected-owner')).toEqual([]);
+  });
+
+  it('이 컴퓨터 방식이면 codex 후보도 받는다', async () => {
+    terminalHarness();
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    const fleet = await createFleet({
+      projectId: 'orders',
+      request: '요청',
+      candidates: [{ backend: 'codex' }, { backend: 'codex' }],
+      owner: 'tess',
+      runner: 'terminal',
+      preflights: { codex: async () => ({ ok: true as const }) },
+    });
+    expect(fleet.members).toHaveLength(2);
+    expect(fake.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('터미널 방식은 호환성을 깨는 변경 허용(allowBreaking)을 받지 못해 세션을 만들기 전에 400으로 거절한다(다른 허용으로 바꿔 켜지 않는다)', async () => {
+    terminalHarness();
+    const error = await terminalFleet({ allowBreaking: true }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(StudioError);
+    expect((error as StudioError).status).toBe(400);
+    expect(fake.createSession).not.toHaveBeenCalled();
+    expect(fake.setTerminalCheckChanges).not.toHaveBeenCalled();
+  });
+
+  it('터미널 멤버를 돌릴 때 확인 선언 변경 허용을 켜지 않는다', async () => {
+    terminalHarness();
+    const created = await terminalFleet();
+    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
+    expect(fake.setTerminalCheckChanges).not.toHaveBeenCalled();
+  });
+
+  it('실행이 던지면 그 멤버만 error가 되고, 이미 끝난 멤버는 덮어쓰지 않는다', async () => {
+    // 두 번째로 여는 터미널(둘째 멤버)만 열리지 않는다
+    let opens = 0;
+    const harness = terminalHarness({ openFails: () => (opens += 1) === 2 });
+    const created = await terminalFleet();
+    const [firstId] = created.members.map((member) => member.sessionId) as [string, string];
+    await until(() => getFleet(created.id, 'tess').members[1]!.status === 'error', '던진 멤버가 error가 되지 않았습니다');
+    expect(getFleet(created.id, 'tess').members[1]).toMatchObject({ status: 'error', summary: '터미널을 열지 못했습니다' });
+    expect(getFleet(created.id, 'tess').members[0]!.status).not.toBe('error');
+
+    // 첫 멤버는 실행 중 샌드박스가 멈춰 Fleet이 먼저 닫는다. 그 뒤 runTerminalTask가 던져도 덮어쓰지 않는다
+    await until(() => getFleet(created.id, 'tess').members[0]!.status === 'running', '첫 멤버가 running이 되지 않았습니다');
+    harness.state.status = 'stopped';
+    harness.emit(firstId, { type: 'status', status: 'stopped' } as StudioEvent);
+    await until(() => getFleet(created.id, 'tess').members[0]!.status === 'error', '멈춘 멤버가 error가 되지 않았습니다');
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(getFleet(created.id, 'tess').members[0]!.summary).toBe('샌드박스가 중지됐습니다');
+  });
+
+  it('Fleet이 먼저 닫은 멤버는, 실행이 뒤늦게 done으로 끝나도 덮어쓰지 않는다', async () => {
+    const harness = terminalHarness();
+    const created = await terminalFleet();
+    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
+    const member = created.members[0]!;
+
+    // 세션 상태는 그대로 두고 Fleet만 멈춤 이벤트를 받는다(실행은 계속 돈다)
+    harness.emit(member.sessionId, { type: 'status', status: 'stopped' } as StudioEvent);
+    expect(getFleet(created.id, 'tess').members[0]).toMatchObject({ status: 'error', summary: '샌드박스가 중지됐습니다' });
+    harness.emit(member.sessionId, { type: 'run_finished', runId: `trun-${member.sessionId}`, status: 'done', summary: '뒤늦은 완료', usage: USAGE } as StudioEvent);
+    await new Promise((resolve) => setTimeout(resolve, 60));
+
+    expect(getFleet(created.id, 'tess').members[0]).toMatchObject({ status: 'error', summary: '샌드박스가 중지됐습니다' });
+  });
+
+  it('CLI가 뜨기를 기다리는 동안 멤버에 기다리는 안내를 남기고, 뜨면 지운다', async () => {
+    const harness = terminalHarness();
+    harness.state.cliUp = false;
+    const created = await terminalFleet();
+    await until(() => getFleet(created.id, 'tess').members.every((member) => member.waiting?.includes('claude가 뜨기를 기다립니다')), '기다리는 안내가 남지 않았습니다');
+
+    harness.state.cliUp = true;
+    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
+    expect(getFleet(created.id, 'tess').members.every((member) => member.waiting === undefined)).toBe(true);
+  });
+
+  it('서버를 다시 켜면 끝나지 않은 터미널 멤버는 세션이 살아 있어도 이어받지 못함으로 닫고, 채팅 멤버는 이어받는다', async () => {
+    const globals = globalThis as typeof globalThis & { __bStudioFleets?: { fleets: Map<string, unknown>; subscribed: Set<string>; loaded: boolean } };
+    const store = globals.__bStudioFleets!;
+    const restartDir = mkdtempSync(path.join(tmpdir(), 'b-studio-fleets-restart-'));
+    const previousDir = process.env.B_STUDIO_FLEETS_DIR;
+    const member = (sessionId: string) => ({ sessionId, backend: 'claude-code', label: 'x', provider: 'claude-code', status: 'running', runId: 'r1' });
+    const base = { owner: 'tess', projectId: 'orders', projectName: 'Orders', request: '요청', allowBreaking: false, createdAt: new Date().toISOString() };
+    try {
+      process.env.B_STUDIO_FLEETS_DIR = restartDir;
+      writeFileSync(path.join(restartDir, 'term0001.json'), JSON.stringify({ ...base, id: 'term0001', runner: 'terminal', members: [member('s-term')] }));
+      writeFileSync(path.join(restartDir, 'chat0001.json'), JSON.stringify({ ...base, id: 'chat0001', members: [member('s-chat')] }));
+      fake.getSnapshot.mockImplementation((() => ({ status: 'ready' })) as never);
+      store.fleets.clear();
+      store.subscribed.clear();
+      store.loaded = false;
+
+      expect(getFleet('term0001', 'tess').members[0]).toMatchObject({ status: 'error', summary: 'Studio가 다시 시작되어 진행 상태를 이어받지 못했습니다. 세션을 열어 기록을 확인하세요.' });
+      // 옛 기록(runner 없음)은 chat이고, 세션이 살아 있으면 지금처럼 이어받는다
+      expect(getFleet('chat0001', 'tess')).toMatchObject({ runner: 'chat' });
+      expect(getFleet('chat0001', 'tess').members[0]!.status).toBe('running');
+    } finally {
+      fake.getSnapshot.mockImplementation((() => undefined) as never);
+      store.fleets.clear();
+      store.subscribed.clear();
+      process.env.B_STUDIO_FLEETS_DIR = previousDir;
+      rmSync(restartDir, { recursive: true, force: true });
+    }
   });
 });

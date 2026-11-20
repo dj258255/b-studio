@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   projectModelDefault: vi.fn((): string | undefined => undefined),
   projectEffortDefault: vi.fn((): string | undefined => undefined),
   startRoutedSession: vi.fn(async (input: Record<string, unknown>) => ({ session: { id: 'session-r' }, routing: { backend: 'codex', rule: 0 }, runId: 'run-1', input })),
+  localToken: 'f'.repeat(64),
 }));
 
 vi.mock('@/lib/server/access', () => ({ requireUser: mocks.requireUser }));
@@ -19,13 +20,22 @@ vi.mock('@/lib/server/model-defaults', () => ({ projectModelDefault: mocks.proje
 // createSession·listSessions만 바꿔 끼우고 resolveSessionBackend(허용 목록 검증)는 실제 것을 쓴다
 vi.mock('@/lib/server/sessions', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@/lib/server/sessions')>();
-  return { ...actual, createSession: mocks.createSession, listSessions: mocks.listSessions };
+  return { ...actual, createSession: mocks.createSession, listSessions: mocks.listSessions, recoverSessions: async () => {} };
 });
+vi.mock('@/lib/server/local-token', () => ({
+  LOCAL_TOKEN_COOKIE: 'b_studio_local',
+  hasLocalToken: (cookie: string | undefined) => cookie === mocks.localToken,
+  localToken: () => mocks.localToken,
+  localTokenPath: () => '/tmp/b-studio-local-token',
+}));
 
 import { GET, POST } from './route';
 
-function post(body: unknown): Promise<Response> {
-  return POST(new Request('http://localhost/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }));
+/** 세션 터미널 통로와 같은 조건(이 컴퓨터 주소 + 로컬 토큰)을 갖춘 요청 머리. desk가 보내는 요청과 같다 */
+const LOCAL: Record<string, string> = { host: '127.0.0.1:3000', cookie: `b_studio_local=${'f'.repeat(64)}` };
+
+function post(body: unknown, headers: Record<string, string> = LOCAL): Promise<Response> {
+  return POST(new Request('http://localhost/api/sessions', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }));
 }
 
 function get(query = ''): Promise<Response> {
@@ -102,6 +112,18 @@ describe('POST /api/sessions — 규칙으로 고르기(#822)', () => {
     expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: true, allowCheckChanges: false })).status).toBe(201);
     expect(mocks.startRoutedSession).toHaveBeenLastCalledWith({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', terminal: true });
     expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘', terminal: true, allowCheckChanges: 'yes' })).status).toBe(400);
+  });
+
+  it('terminal: true는 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다(터미널을 열고 첫 요청을 CLI에 넘기기 때문에)', async () => {
+    const refused: Record<string, string>[] = [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie! }];
+    for (const headers of refused) {
+      const response = await post({ projectId: 'orders', route: 'rules', request: '선언을 바꿔 줘', terminal: true, allowCheckChanges: true }, headers);
+      expect(response.status, JSON.stringify(headers)).toBe(403);
+    }
+    expect(mocks.startRoutedSession).not.toHaveBeenCalled();
+    expect(mocks.createSession).not.toHaveBeenCalled();
+    // 터미널을 열지 않는 요청은 지금처럼 로그인만 본다
+    expect((await post({ projectId: 'orders', route: 'rules', request: '고쳐 줘' }, {})).status).toBe(201);
   });
 
   it('terminal: true를 규칙·직접 고름과 함께 넘기고, true가 아니거나 route 없이 주면 400(#836)', async () => {

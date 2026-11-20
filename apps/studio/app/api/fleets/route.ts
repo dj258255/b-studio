@@ -1,6 +1,7 @@
 import { requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { createFleet, listFleets } from '@/lib/server/fleets';
+import { assertTerminalAccess } from '@/lib/server/terminal-access';
 import type { FleetCandidate } from '@/lib/fleet-types';
 import type { SessionMode } from '@/lib/studio-events';
 
@@ -15,19 +16,24 @@ export function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const user = requireUser(request.headers);
+    requireUser(request.headers);
     const body = (await request.json().catch(() => ({}))) as {
       projectId?: unknown;
       request?: unknown;
       candidates?: unknown;
       modelIds?: unknown;
       allowBreaking?: unknown;
+      runner?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
     if (typeof body.request !== 'string') throw new StudioError(400, 'request가 필요합니다');
     // 후보는 {backend, model?} 짝이거나 기존 입력(모델 id 목록)이다. 둘 다 없으면 서버가 기본 후보를 만든다
     const candidates = parseCandidates(body.candidates);
     const modelIds = parseModelIds(body.modelIds);
+    if (body.runner !== undefined && body.runner !== 'chat' && body.runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
+    // 터미널 방식은 멤버마다 세션 터미널을 열고 그 안의 CLI를 몬다(이 컴퓨터 방식이면 이 컴퓨터에서 돈다). 세션 터미널 통로와 같은 검사
+    // (이 컴퓨터 주소·로컬 토큰)를 거친다 — 로그인만으로 열면 같은 컴퓨터의 다른 프로세스가 터미널 통로의 검사를 비켜 간다
+    const user = body.runner === 'terminal' ? await assertTerminalAccess(request.headers) : requireUser(request.headers);
     return Response.json(
       await createFleet({
         projectId: body.projectId,
@@ -36,6 +42,7 @@ export async function POST(request: Request) {
         ...(modelIds ? { modelIds } : {}),
         owner: user,
         allowBreaking: body.allowBreaking === true,
+        ...(body.runner !== undefined ? { runner: body.runner } : {}),
       }),
       { status: 201 },
     );

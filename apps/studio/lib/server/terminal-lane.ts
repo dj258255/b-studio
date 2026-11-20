@@ -22,10 +22,16 @@ export interface TerminalLaneDriver {
 }
 
 export interface TerminalTaskOptions {
-  /** 이 카드가 쓸 수 있는 경로(작업 복사본 기준 상대). 터미널 실행의 쓰기 범위로 건다 */
-  writableScope: readonly string[];
+  /**
+   * 이 카드가 쓸 수 있는 경로(작업 복사본 기준 상대). 터미널 실행의 쓰기 범위로 건다.
+   * **빈 목록은 "어디에도 쓰지 못한다"는 뜻이다**(허용 목록이라 빈 것은 모두 범위 밖). 범위를 걸지 않으려면(Fleet) undefined로 둔다 —
+   * 그러면 카드 맥락을 걸지 않아 지금의 일반 터미널 실행과 같다
+   */
+  writableScope: readonly string[] | undefined;
   /** 이 카드의 완료 검사. 이 실행 동안만 게이트의 test 단계에 더한다 */
   doneTests: readonly TaskCardDone[];
+  /** 우리가 붙여 넣은 요청의 run_started를 잡은 순간 한 번 부른다(그 실행의 runId). 이후 이벤트를 runId로 받으려는 쪽이 쓴다 */
+  onStarted?: (runId: string) => void;
   /** 지금 무엇을 기다리는지 화면에 알린다(없으면 undefined). CLI를 기다리는 동안만 값이 있다 */
   onWaiting?: (note: string | undefined) => void;
 }
@@ -87,6 +93,9 @@ function trustFailureNote(reason: string): string {
 const LEFTOVER_QUEUED_NOTE = '[b-studio] 붙여 넣은 요청이 나중에 들어갈 수 있어 카드의 쓰기 범위를 그 세션에 남겨 둡니다. 풀려면 세션을 멈추세요.';
 const LEFTOVER_RUN_NOTE = '[b-studio] 카드의 쓰기 범위가 그 세션에 남아 있습니다 — 실행을 닫지 못했습니다. 풀려면 세션을 멈추세요.';
 
+/** 쓰기 범위를 걸지 않은 실행(Fleet)이 비정상 종료한 뒤 덧붙이는 안내. 남길 맥락이 없어 요청이 남아 있을 수 있다는 사실만 적는다 */
+const LEFTOVER_UNSCOPED_NOTE = '[b-studio] 붙여 넣은 요청이 터미널에 남아 나중에 들어갈 수 있습니다. 세션을 열어 확인하세요.';
+
 const defaultDeps: TerminalTaskDeps = {
   driver: terminalLaneDriver,
   subscribe,
@@ -134,7 +143,7 @@ export async function runTerminalTask(
   overrides?: Partial<TerminalTaskDeps>,
 ): Promise<TerminalTaskResult> {
   const deps: TerminalTaskDeps = { ...defaultDeps, ...overrides };
-  deps.setTaskContext(sessionId, { writableScope: options.writableScope, doneTests: options.doneTests });
+  if (options.writableScope !== undefined) deps.setTaskContext(sessionId, { writableScope: options.writableScope, doneTests: options.doneTests });
   let unsubscribe: (() => void) | undefined;
   /** 붙여 넣은 뒤인가. 이 뒤로는 터미널의 실행이 열려 있을 수 있다 */
   let pasted = false;
@@ -161,6 +170,12 @@ export async function runTerminalTask(
     unsubscribe = deps.subscribe(sessionId, (event) => {
       if (event.type === 'run_started' && event.via === 'terminal' && box.started === undefined && !seen.has(event.runId) && isOurRequest(event.request, pasteText)) {
         box.started = event;
+        // 폴링을 기다리지 않고 바로 알린다 — 그 사이 오는 체크포인트 같은 이벤트를 알리는 쪽이 놓치지 않게
+        try {
+          options.onStarted?.(event.runId);
+        } catch {
+          // 알림 실패가 실행을 깨뜨리면 안 된다
+        }
       } else if (event.type === 'run_usage') usages.push({ runId: event.runId, usage: event.usage, ...(event.costUsd !== undefined ? { costUsd: event.costUsd } : {}) });
       else if (event.type === 'run_finished' && box.started !== undefined && event.runId === box.started.runId) box.finished = event;
     });
@@ -213,7 +228,8 @@ export async function runTerminalTask(
     // 그 밖의 비정상 종료: 열린 실행을 취소해 보되 맥락은 남긴다(닫힌 쪽). 붙여 넣은 글은 입력 줄·CLI 대기열에
     // 남아 나중에 들어가 계속 돌 수 있으므로, 지금 지우면 범위·완료 검사 없이 일하게 된다
     await cancelOpenRuns(sessionId, deps);
-    throw new Error(`${errorMessage(error)}\n${ourRunStarted ? LEFTOVER_RUN_NOTE : LEFTOVER_QUEUED_NOTE}`);
+    const note = options.writableScope === undefined ? LEFTOVER_UNSCOPED_NOTE : ourRunStarted ? LEFTOVER_RUN_NOTE : LEFTOVER_QUEUED_NOTE;
+    throw new Error(`${errorMessage(error)}\n${note}`);
   } finally {
     options.onWaiting?.(undefined);
     unsubscribe?.();
