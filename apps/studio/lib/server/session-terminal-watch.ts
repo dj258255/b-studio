@@ -58,6 +58,11 @@ export function unregisterWatch(control: WatchControl): void {
   for (const [sessionId, registered] of controls) if (registered === control) controls.delete(sessionId);
 }
 
+/** 이 세션에 열린 터미널의 감시가 등록돼 있는가. 서버가 작업 폴더에 직접 쓰기 전에 CLI·사람이 같은 폴더에 쓰는 자리가 없는지 본다(막는 쪽) */
+export function hasWatch(sessionId: string): boolean {
+  return controls.has(sessionId);
+}
+
 async function recheck(control: WatchControl): Promise<void> {
   try {
     await control.recheck();
