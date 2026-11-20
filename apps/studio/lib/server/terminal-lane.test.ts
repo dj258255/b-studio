@@ -10,6 +10,7 @@ vi.mock('./sessions', () => ({
   subscribe: () => () => {},
   openTerminalRunId: () => undefined,
   cancelRun: () => {},
+  sessionFolderTrustFailure: () => undefined,
 }));
 vi.mock('./session-terminal', () => ({
   openSessionTerminal: async () => {},
@@ -42,6 +43,8 @@ function harness(
     foreignFirst?: boolean;
     /** run_started.request를 <pasted_content>로 감싼다 */
     wrap?: boolean;
+    /** 폴더 신뢰를 미리 적지 못한 사유(없으면 적었거나 적으려 하지 않은 것) */
+    trustFailure?: string;
   } = {},
 ) {
   const writes: string[] = [];
@@ -92,6 +95,7 @@ function harness(
     },
     status: () => state.status,
     attention: () => state.attention,
+    trustFailure: () => config.trustFailure,
     openRunId: () => state.open,
     cancelRun: (_sessionId, runId) => {
       state.cancels.push(runId);
@@ -155,13 +159,24 @@ describe('터미널 레인의 한 작업', () => {
     const running = runTerminalTask('s1', 'do it', options({ onWaiting: (note) => waiting.push(note) }), h.deps);
 
     await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
-    // 폴더 신뢰를 사람이 격자에서 고르라고 알린다(상위 폴더 신뢰가 Git 저장소 하위 폴더에는 이어지지 않는다 — 수정 2-2)
-    expect(waiting[0]).toContain('터미널의 claude가 뜨기를 기다립니다');
-    expect(waiting[0]).toContain('새 세션 폴더마다 claude가 폴더 신뢰를 묻습니다');
-    expect(waiting[0]).toContain('Yes, I trust this folder');
+    // 신뢰를 미리 적었으면(또는 적으려 하지 않았으면) 폴더 신뢰 안내를 보이지 않는다(ADR-222)
+    expect(waiting[0]).toBe('터미널의 claude가 뜨기를 기다립니다.');
     h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '끝' });
     await running;
     expect(waiting.at(-1)).toBeUndefined();
+  });
+
+  it('폴더 신뢰를 미리 적지 못했으면 그 사유와 함께 격자에서 고르라고 알린다', async () => {
+    let checks = 0;
+    const h = harness({ alive: () => (checks += 1) > 3, trustFailure: '설정 파일이 없습니다' });
+    const waiting: Array<string | undefined> = [];
+    const running = runTerminalTask('s1', 'do it', options({ onWaiting: (note) => waiting.push(note) }), h.deps);
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+    expect(waiting[0]).toContain('터미널의 claude가 뜨기를 기다립니다');
+    expect(waiting[0]).toContain('설정 파일이 없습니다');
+    expect(waiting[0]).toContain('Yes, I trust this folder');
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '끝' });
+    await running;
   });
 
   it('CLI가 끝내 뜨지 않으면 던진다', async () => {

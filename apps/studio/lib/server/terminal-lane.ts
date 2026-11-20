@@ -2,7 +2,7 @@ import type { AgentUsage, RunMetrics } from '@b-studio/agent';
 import type { StudioEvent } from '@/lib/studio-events';
 import { terminalPasteText } from '@/lib/terminal';
 import { openSessionTerminal, sessionTerminalCliAlive, writeSessionTerminal } from './session-terminal';
-import { cancelRun, getSnapshot, openTerminalRunId, sessionHistory, sessionTerminalTarget, setTerminalTaskContext, subscribe } from './sessions';
+import { cancelRun, getSnapshot, openTerminalRunId, sessionFolderTrustFailure, sessionHistory, sessionTerminalTarget, setTerminalTaskContext, subscribe } from './sessions';
 import type { TaskCardDone } from './task-cards';
 
 /**
@@ -45,6 +45,8 @@ export interface TerminalTaskDeps {
   openRunId: (sessionId: string) => string | undefined;
   /** 실행 하나를 취소한다(CLI에 Esc, 중단 신호를 받은 쪽이 되돌리고 닫는다) */
   cancelRun: (sessionId: string, runId: string) => void;
+  /** 그 세션 폴더의 신뢰를 미리 적지 못한 사유(적었거나 적으려 하지 않았으면 undefined). 있을 때만 폴더 신뢰 안내를 보인다 */
+  trustFailure: (sessionId: string) => string | undefined;
   /** 취소한 실행이 닫히기를 기다리는 상한. 넘으면 맥락을 지우지 않고 남긴다 */
   closeTimeoutMs: number;
   /** CLI가 뜨기를 기다리는 상한 */
@@ -70,10 +72,13 @@ export const terminalLaneDriver: TerminalLaneDriver = {
 };
 
 // 세션 작업 복사본은 Git 저장소라, claude가 새 세션 폴더마다 폴더 신뢰를 묻는다(상위 폴더의 신뢰는 일반 폴더에는
-// 이어지지만 Git 저장소인 하위 폴더에는 이어지지 않는다 — claude 2.1.302 실측). b-studio가 신뢰를 대신 골라 주는
-// 길은 만들지 않는다. 사람이 격자에서 그 칸을 열어 확인해야 한다
-const WAIT_CLI_NOTE =
-  '터미널의 claude가 뜨기를 기다립니다. 새 세션 폴더마다 claude가 폴더 신뢰를 묻습니다 — 격자에서 그 칸을 열어 "Yes, I trust this folder"를 고르세요.';
+// 이어지지만 Git 저장소인 하위 폴더에는 이어지지 않는다 — claude 2.1.302 실측). b-studio는 자기가 만든 세션 폴더를 세션을 만들 때
+// claude의 설정 파일에 미리 적는다(ADR-222). 그래서 안내는 그 기록이 실패했을 때만 보인다. 권한 확인 창은 대신 고르지 않는다
+const WAIT_CLI_NOTE = '터미널의 claude가 뜨기를 기다립니다.';
+
+function trustFailureNote(reason: string): string {
+  return `${WAIT_CLI_NOTE} 이 세션 폴더의 신뢰를 미리 적지 못했습니다(${reason}) — claude가 폴더 신뢰를 물으면 격자에서 그 칸을 열어 "Yes, I trust this folder"를 고르세요.`;
+}
 
 /**
  * 비정상 종료 뒤 맥락을 남길 때 오류 글에 덧붙이는 안내(#B6a 수정 5). 남아 있다는 사실과 푸는 방법(세션을 멈추기)을 적는다.
@@ -91,6 +96,7 @@ const defaultDeps: TerminalTaskDeps = {
   attention: (sessionId) => getSnapshot(sessionId)?.terminalAttention,
   openRunId: openTerminalRunId,
   cancelRun,
+  trustFailure: sessionFolderTrustFailure,
   closeTimeoutMs: 60_000,
   cliTimeoutMs: 10 * 60_000,
   submitTimeoutMs: 30_000,
@@ -136,7 +142,8 @@ export async function runTerminalTask(
   let ourRunStarted = false;
   try {
     // 1·2. CLI가 뜰 때까지 기다린다
-    options.onWaiting?.(WAIT_CLI_NOTE);
+    const trustFailure = deps.trustFailure(sessionId);
+    options.onWaiting?.(trustFailure === undefined ? WAIT_CLI_NOTE : trustFailureNote(trustFailure));
     await waitForCli(sessionId, deps);
     options.onWaiting?.(undefined);
 
