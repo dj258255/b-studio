@@ -1163,15 +1163,6 @@ export class CheckpointStore {
     return (await this.#git(['rev-list', '--parents', '-n', '1', sha])).trim().split(' ')[1];
   }
 
-  async #resolve(sha: string): Promise<string> {
-    if (!native.checkpointIsSha(sha)) throw new CheckpointError('체크포인트 ID 형식이 올바르지 않습니다');
-    try {
-      return (await this.#git(['rev-parse', '--verify', '--quiet', `${sha}^{commit}`])).trim();
-    } catch {
-      throw new CheckpointError('체크포인트를 찾을 수 없습니다');
-    }
-  }
-
   async #checkpoint(ref: string): Promise<Checkpoint> {
     return this.#remote<Checkpoint>('checkpoint', { ref });
   }
