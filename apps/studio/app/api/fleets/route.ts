@@ -22,12 +22,14 @@ export async function POST(request: Request) {
       candidates?: unknown;
       modelIds?: unknown;
       allowBreaking?: unknown;
+      runner?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
     if (typeof body.request !== 'string') throw new StudioError(400, 'request가 필요합니다');
     // 후보는 {backend, model?} 짝이거나 기존 입력(모델 id 목록)이다. 둘 다 없으면 서버가 기본 후보를 만든다
     const candidates = parseCandidates(body.candidates);
     const modelIds = parseModelIds(body.modelIds);
+    if (body.runner !== undefined && body.runner !== 'chat' && body.runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
     return Response.json(
       await createFleet({
         projectId: body.projectId,
@@ -36,6 +38,7 @@ export async function POST(request: Request) {
         ...(modelIds ? { modelIds } : {}),
         owner: user,
         allowBreaking: body.allowBreaking === true,
+        ...(body.runner !== undefined ? { runner: body.runner } : {}),
       }),
       { status: 201 },
     );

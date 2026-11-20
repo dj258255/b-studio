@@ -3,13 +3,15 @@ import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFile
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { estimateCost } from '@b-studio/agent';
-import type { FleetCandidate, FleetMemberView, FleetView } from '@/lib/fleet-types';
+import type { FleetCandidate, FleetMemberStatus, FleetMemberView, FleetView } from '@/lib/fleet-types';
 import type { SessionMode, StudioEvent } from '@/lib/studio-events';
 import { accountProcessEnv, resolveSessionAccount, type AiAccount } from './ai-accounts';
 import { StudioError } from './errors';
 import { listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
-import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
+import { sessionTerminalMode } from './session-terminal';
+import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, setTerminalCheckChanges, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
+import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 
 const MAX_MEMBERS = 4;
 const MAX_REQUEST = 20_000;
@@ -34,10 +36,14 @@ export function defaultFleetCandidates(backends: readonly SessionMode[]): FleetC
 interface FleetStore {
   fleets: Map<string, FleetView>;
   subscribed: Set<string>;
+  /** 구독 해제 함수(세션 id별). 터미널 멤버는 run_finished 뒤 결과가 확정될 때 이것으로 구독을 푼다 */
+  unwatch: Map<string, () => void>;
   loaded: boolean;
 }
 const globalFleets = globalThis as typeof globalThis & { __bStudioFleets?: FleetStore };
-const fleetStore: FleetStore = (globalFleets.__bStudioFleets ??= { fleets: new Map(), subscribed: new Set(), loaded: false });
+const fleetStore: FleetStore = (globalFleets.__bStudioFleets ??= { fleets: new Map(), subscribed: new Set(), unwatch: new Map(), loaded: false });
+// 이전 판의 전역(unwatch 없음)이 남아 있어도 쓸 수 있게 채운다(개발 서버의 모듈 다시 읽기)
+fleetStore.unwatch ??= new Map();
 const fleets = fleetStore.fleets;
 const subscribed = fleetStore.subscribed;
 
@@ -63,6 +69,8 @@ export async function createFleet(input: {
   modelIds?: readonly string[];
   owner: string;
   allowBreaking?: boolean;
+  /** 멤버를 돌리는 방식. 없으면 chat(채팅식 실행). terminal이면 세션 터미널의 CLI에 요청을 붙여 넣어 돌린다 */
+  runner?: 'chat' | 'terminal';
   /** 서버 안에서만 넘긴다(테스트). CLI 로그인 확인을 바꿔 끼운다 */
   preflights?: BackendPreflights;
 }): Promise<FleetView> {
@@ -72,10 +80,15 @@ export async function createFleet(input: {
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
 
+  const runner = input.runner ?? 'chat';
+  if (runner !== 'chat' && runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
+
   const candidates = candidatesOf(input);
   if (candidates.length < 2 || candidates.length > MAX_MEMBERS) throw new StudioError(400, `비교할 후보를 2~${MAX_MEMBERS}개 고르세요`);
   const selected: ValidatedCandidate[] = [];
   for (const candidate of candidates) selected.push(await validateCandidate(candidate));
+  // 터미널로 못 띄우는 후보는 세션을 하나도 만들기 전에 거절한다(조용히 다른 백엔드로 바꾸지 않는다)
+  if (runner === 'terminal') assertTerminalRunnable(selected);
 
   // CLI 백엔드는 멤버를 만들기 전에 로그인을 확인한다. 실패하면 Fleet을 만들지 않고 이유를 알린다
   // (멤버를 몇 개 만들다 실패하면 절반만 뜬 비교가 남는다). 계정을 고른 후보는 그 계정의 설정 폴더로 확인한다(#892)
@@ -95,6 +108,7 @@ export async function createFleet(input: {
     projectName: input.projectId,
     request,
     allowBreaking: input.allowBreaking === true,
+    runner,
     createdAt: new Date().toISOString(),
     members: [],
   };
@@ -138,6 +152,20 @@ export async function createFleet(input: {
     }
   }
   return clone(fleet);
+}
+
+/**
+ * 터미널 실행이 띄울 수 있는 후보만 받는다. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex도 띄운다
+ * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex가 아니면 claude를 띄운다 — 컨테이너 방식 codex를 받으면 엉뚱한 CLI가 뜬다).
+ * **허용 목록이라 모르는 백엔드는 거절한다**
+ */
+function assertTerminalRunnable(selected: readonly ValidatedCandidate[]): void {
+  if (!sessionTerminalAllowed()) throw new StudioError(400, '이 서버에서는 세션 터미널을 쓸 수 없어 터미널 방식 Fleet을 만들 수 없습니다');
+  const mode = sessionTerminalMode();
+  for (const candidate of selected) {
+    const runnable = candidate.backend === 'claude-code' || (candidate.backend === 'codex' && mode === 'host');
+    if (!runnable) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${candidate.backend}`);
+  }
 }
 
 /**
@@ -235,6 +263,11 @@ function watchMember(fleet: FleetView, member: FleetMemberView): void {
   if (subscribed.has(member.sessionId) || terminal(member.status)) return;
   subscribed.add(member.sessionId);
   let unsubscribe = () => {};
+  const release = () => {
+    subscribed.delete(member.sessionId);
+    fleetStore.unwatch.delete(member.sessionId);
+    unsubscribe();
+  };
   unsubscribe = subscribe(member.sessionId, (event) => {
     try {
       updateMember(fleet, member, event);
@@ -242,17 +275,12 @@ function watchMember(fleet: FleetView, member: FleetMemberView): void {
       // 비교 화면의 기록 실패가 실제 에이전트 실행과 체크포인트 저장을 깨뜨리면 안 된다
       console.error(`[b-studio] Agent Fleet ${fleet.id}/${member.sessionId} 상태를 반영하지 못했습니다`, error);
     } finally {
-      if (terminal(member.status)) {
-        subscribed.delete(member.sessionId);
-        unsubscribe();
-      }
+      if (terminal(member.status)) release();
     }
   });
+  fleetStore.unwatch.set(member.sessionId, release);
   // subscribe가 이전 이벤트를 재생하는 동안 이미 끝난 세션일 수 있다
-  if (terminal(member.status)) {
-    subscribed.delete(member.sessionId);
-    unsubscribe();
-  }
+  if (terminal(member.status)) release();
 }
 
 function updateMember(fleet: FleetView, member: FleetMemberView, event: StudioEvent): void {
@@ -278,7 +306,8 @@ function updateMember(fleet: FleetView, member: FleetMemberView, event: StudioEv
     persist(fleet);
     return;
   }
-  if (event.type === 'run_finished' && event.runId === member.runId) {
+  // 터미널 Fleet의 끝은 runTerminalTask가 돌려준 값으로만 쓴다(늦게 오는 텔레메트리까지 더한 값이라, 여기서 쓰면 두 번 쓴다)
+  if (event.type === 'run_finished' && event.runId === member.runId && fleet.runner !== 'terminal') {
     member.status = event.status;
     member.summary = event.summary;
     member.turns = event.turns;
@@ -298,9 +327,19 @@ function updateMember(fleet: FleetView, member: FleetMemberView, event: StudioEv
   }
 }
 
+/** 테스트가 터미널 실행의 driver·이벤트 통로·시계를 바꿔 끼우는 자리. undefined면 실제 값(terminal-lane.ts)을 쓴다 */
+let terminalDeps: Partial<TerminalTaskDeps> | undefined;
+export function setFleetTerminalDepsForTest(deps: Partial<TerminalTaskDeps> | undefined): void {
+  terminalDeps = deps;
+}
+
 function startMember(fleet: FleetView, member: FleetMemberView): void {
   // 같은 ready 이벤트가 재생돼도 runId를 먼저 넣어 한 번만 보낸다
   member.runId = 'starting';
+  if (fleet.runner === 'terminal') {
+    void runTerminalMember(fleet, member);
+    return;
+  }
   try {
     const { runId } = sendMessage(member.sessionId, fleet.request, { allowBreaking: fleet.allowBreaking, by: fleet.owner });
     member.runId = runId;
@@ -312,6 +351,67 @@ function startMember(fleet: FleetView, member: FleetMemberView): void {
     member.finishedAt = new Date().toISOString();
   }
   persist(fleet);
+}
+
+/**
+ * 터미널 멤버 하나를 세션 터미널에서 돌린다. 작업 분해의 터미널 레인과 같은 runTerminalTask를 쓴다.
+ * 쓰기 범위는 걸지 않는다(Fleet은 지금도 쓰기 범위가 없다) — `writableScope: []`는 "어디에도 못 쓴다"는 뜻이라 쓰지 않는다
+ */
+async function runTerminalMember(fleet: FleetView, member: FleetMemberView): Promise<void> {
+  const driver = terminalDeps?.driver ?? terminalLaneDriver;
+  try {
+    await driver.open(member.sessionId);
+    // 터미널의 요청은 CLI가 훅으로 알려 와 요청마다 옵션을 실을 수 없다. 붙여 넣기 전에 미리 켜 두면 그 뒤 처음 시작되는 만들기 실행이 가져간다
+    if (fleet.allowBreaking) setTerminalCheckChanges(member.sessionId, true);
+    const result = await runTerminalTask(
+      member.sessionId,
+      fleet.request,
+      {
+        writableScope: undefined,
+        doneTests: [],
+        onStarted: (runId) => {
+          // 이 runId로 이후의 checkpoint 이벤트를 updateMember가 받는다
+          if (terminal(member.status)) return;
+          member.runId = runId;
+          member.status = 'running';
+          member.startedAt = new Date().toISOString();
+          persist(fleet);
+        },
+        onWaiting: (note) => {
+          if (terminal(member.status) || member.waiting === note) return;
+          if (note === undefined) delete member.waiting;
+          else member.waiting = note;
+          persist(fleet);
+        },
+      },
+      terminalDeps,
+    );
+    // 멈춤 등으로 먼저 닫힌 멤버는 덮어쓰지 않는다
+    if (terminal(member.status)) return;
+    member.runId = result.runId;
+    member.status = result.status as FleetMemberStatus;
+    member.summary = result.summary;
+    if (result.usage) member.usage = result.usage;
+    if (result.metrics?.usageByModel) member.usageByModel = result.metrics.usageByModel;
+    // 비용은 CLI 텔레메트리가 알려 온 값만 쓴다(estimateCost로 추정하지 않는다). 없으면 두지 않는다
+    if (result.costUsd !== undefined) member.costUsd = result.costUsd;
+    member.finishedAt = new Date().toISOString();
+  } catch (error) {
+    if (!terminal(member.status)) {
+      member.status = 'error';
+      member.summary = describe(error);
+      member.finishedAt = new Date().toISOString();
+    }
+  } finally {
+    delete member.waiting;
+    try {
+      persist(fleet);
+    } catch (error) {
+      console.error(`[b-studio] Agent Fleet ${fleet.id}/${member.sessionId} 상태를 저장하지 못했습니다`, error);
+    }
+    // 끝난 멤버의 구독은 푼다(터미널 Fleet은 run_finished를 구독이 아니라 결과로 쓰므로 여기서 푼다)
+    if (terminal(member.status)) fleetStore.unwatch.get(member.sessionId)?.();
+  }
 }
 
 function failMember(fleet: FleetView, member: FleetMemberView, summary: string): void {
@@ -331,11 +431,18 @@ function ensureLoaded(): void {
       try {
         const parsed = JSON.parse(readFileSync(path.join(root(), name), 'utf8')) as FleetView;
         if (!parsed?.id || !Array.isArray(parsed.members)) continue;
+        // runner 필드가 생기기 전 기록은 채팅식뿐이었다
+        parsed.runner ??= 'chat';
         // 프로세스가 바뀌면 진행 중 실행을 그대로 이어받을 수 없다. 세션 기록은 각 링크에서 확인할 수 있다
         for (const member of parsed.members) {
           // backend 필드가 생기기 전 기록은 api 모드뿐이었다
           member.backend ??= 'api';
-          if (!terminal(member.status)) {
+          if (!terminal(member.status) && parsed.runner === 'terminal') {
+            // 실행을 몰던 runTerminalTask는 프로세스와 함께 사라졌다. 세션이 살아 있어도 이어받을 수 없다
+            member.status = 'error';
+            member.summary = 'Studio가 다시 시작되어 진행 상태를 이어받지 못했습니다. 세션을 열어 기록을 확인하세요.';
+            member.finishedAt = new Date().toISOString();
+          } else if (!terminal(member.status)) {
             const snapshot = getSnapshot(member.sessionId);
             if (snapshot?.status === 'ready') watchMember(parsed, member);
             else {

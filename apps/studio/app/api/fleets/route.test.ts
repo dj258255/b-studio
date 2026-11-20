@@ -78,4 +78,17 @@ describe('POST /api/fleets', () => {
     }
     expect(mocks.createFleet).not.toHaveBeenCalled();
   });
+
+  it('runner(chat·terminal)를 그대로 넘기고, 다른 값은 400으로 거절한다', async () => {
+    const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal' });
+    expect(response.status).toBe(201);
+    expect(mocks.createFleet).toHaveBeenCalledWith({ projectId: 'orders', request: '요청', owner: 'kim', allowBreaking: false, runner: 'terminal' });
+
+    mocks.createFleet.mockClear();
+    for (const runner of ['pty', 3, null]) {
+      const wrong = await post({ projectId: 'orders', request: '요청', runner });
+      expect(wrong.status, JSON.stringify(runner)).toBe(400);
+    }
+    expect(mocks.createFleet).not.toHaveBeenCalled();
+  });
 });

@@ -376,3 +376,34 @@ describe('비정상 종료 뒤 맥락은 우리 실행의 run_finished 또는 �
     expect(h.contexts.at(-1)).toBeUndefined();
   });
 });
+
+describe('Fleet이 쓰는 옵션: onStarted·범위 없는 실행', () => {
+  it('우리 요청의 run_started를 잡는 순간 onStarted를 한 번 부른다(다른 요청의 실행에는 부르지 않는다)', async () => {
+    const h = harness({ foreignFirst: true });
+    const started: string[] = [];
+    const running = runTerminalTask('s1', 'do it', options({ onStarted: (runId) => started.push(runId) }), h.deps);
+
+    await until(() => started.length > 0, 'onStarted가 불리지 않았습니다');
+    // 사람이 그 사이 친 다른 요청(foreign-1)이 아니라 우리 글의 실행이다
+    expect(started).toEqual(['run-1']);
+    h.emit({ type: 'run_finished', runId: 'run-1', status: 'done', summary: '끝' });
+    await running;
+    expect(started).toEqual(['run-1']);
+  });
+
+  it('writableScope가 undefined면 카드 맥락을 걸지 않는다(빈 목록은 어디에도 못 쓴다는 뜻이라 걸어야 한다)', async () => {
+    const unscoped = harness();
+    const first = runTerminalTask('s1', 'do it', options({ writableScope: undefined }), unscoped.deps);
+    await until(() => unscoped.writes.length >= 2, '붙여 넣지 않았습니다');
+    unscoped.emit({ type: 'run_finished', runId: unscoped.startedRunId(), status: 'done', summary: '끝' });
+    await first;
+    expect(unscoped.contexts.filter((context) => context !== undefined)).toEqual([]);
+
+    const empty = harness();
+    const second = runTerminalTask('s1', 'do it', options({ writableScope: [] }), empty.deps);
+    await until(() => empty.writes.length >= 2, '붙여 넣지 않았습니다');
+    empty.emit({ type: 'run_finished', runId: empty.startedRunId(), status: 'done', summary: '끝' });
+    await second;
+    expect(empty.contexts[0]).toEqual({ writableScope: [], doneTests: [] });
+  });
+});
