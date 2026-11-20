@@ -1,6 +1,6 @@
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, encodeNative, native, type Sandbox, type StartOptions } from '@b-studio/sandbox';
-import { SPEC_FILE, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowPageCheck, type WorkflowPageCompare, type WorkflowSpec, type WorkflowStage } from '@b-studio/spec';
+import { SPEC_FILE, type AutoPageChecks, type ConcurrencyExpect, type LoadedProject, type WorkflowPageCheck, type WorkflowSpec, type WorkflowStage } from '@b-studio/spec';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner, type ViewportTextFinding, type ViewportTextReport } from './browser-check';
 import { runInBrowserNative } from './browser-check-native';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
@@ -11,9 +11,8 @@ import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { GATE_HOST, runGateCheck, type GateHost } from './gate-check';
 import { captureBaselines, serviceUrl, type ContractFetcher, type VerificationReport } from './verify';
-import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowCompare, type WorkflowStepCheck } from './workflow';
+import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
-import type { CompareResult } from './visual-compare';
 import { REQUIREMENTS_FILE } from './requirements';
 import type { Workspace } from './workspace';
 import { latestWorkflow, requirementRecordChecks } from './gate-workflow';
@@ -218,8 +217,6 @@ export class VerificationGate {
   #failedServices = new Set<string>();
   /** 화면 확인 이름 → 단계 결과. 실패해 예외로 끝나도 실패 단계의 스크린샷을 남기려고 따로 모은다 */
   #pageSteps = new Map<string, WorkflowStepCheck[]>();
-  /** 화면 확인 이름 → 디자인 비교 결과. 실패해 예외로 끝나도 결과를 남기려고 따로 모은다 */
-  #pageCompares = new Map<string, WorkflowCompare>();
   /** 화면 확인 이름 → 허용 출처 밖이라 막은 요청. 앱의 오류가 아니라 경계에서 막은 것이라 실패로 세지 않고 기록만 한다 */
   #pageBlocked = new Map<string, string[]>();
   /** 화면 확인 이름 → 측정한 로드 시간(ms). 예산을 적은 확인만 재어 결과에 남긴다 */
@@ -511,10 +508,9 @@ export class VerificationGate {
           },
           serviceOrigins: () => this.#serviceOrigins(),
           saveSteps: (name, steps) => this.#saveSteps(name, steps),
-          compareDesign: (compare, name, result, pageSandbox) => this.#compareDesign(compare, name, result, pageSandbox),
           addWarning: (name, message) => this.#addWarning(name, message),
         },
-        pageMaps: { steps: this.#pageSteps, compares: this.#pageCompares, blocked: this.#pageBlocked, loadMs: this.#pageLoadMs, warnings: this.#pageWarnings },
+        pageMaps: { steps: this.#pageSteps, blocked: this.#pageBlocked, loadMs: this.#pageLoadMs, warnings: this.#pageWarnings },
       },
       recheckEvaluationAssets: (recordChecks) => this.#recheckEvaluationAssets(recordChecks),
       recheckOutsideChanges: (recordChecks) => this.#recheckOutsideChanges(recordChecks),
@@ -655,57 +651,6 @@ export class VerificationGate {
   }
 
   /**
-   * 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 비교한다.
-   * 기준 이미지는 project.root 기준으로 읽고, 없거나 읽지 못하면 건너뛰지 않고 확인 실패로 알린다.
-   * 비율이 허용치를 넘으면 실패시키되, 비교 이미지는 산출물로 남겨 화면에서 볼 수 있게 한다
-   */
-  async #compareDesign(compare: WorkflowPageCompare, name: string, result: BrowserPageResult, sandbox: Sandbox): Promise<void> {
-    const actual = result.steps.at(-1)?.screenshot;
-    if (!actual) throw new Error('디자인 비교에 쓸 뷰포트 스크린샷을 찍지 못했습니다');
-    const outcome = decodeNative<
-      { ok: true; ratio: number; width: number; height: number; diff: string; reference: string } | { ok: false; kind: 'missing' | 'compare' | 'decode'; message: string }
-    >(
-      await native.gateCompareDesign(
-        this.#options.project.root,
-        compare.reference,
-        JSON.stringify(compare.masks ?? []),
-        compare.threshold ?? 0.1,
-        actual.toString('base64'),
-      ),
-    );
-    if (!outcome.ok) {
-      // 옛 코드는 비교가 성립하지 않을 때(VisualCompareError)만 가렸다. 기준 이미지·PNG 오류는 그대로 알린다
-      if (outcome.kind === 'compare') throw new Error(sandbox.redact(outcome.message));
-      throw new Error(outcome.message);
-    }
-    const reference = Buffer.from(outcome.reference, 'base64');
-    const diff = Buffer.from(outcome.diff, 'base64');
-    const comparison: CompareResult = { ratio: outcome.ratio, diffPixels: 0, comparedPixels: 0, width: outcome.width, height: outcome.height, diff };
-    this.#pageCompares.set(name, { ratio: comparison.ratio, max: compare.maxDiffRatio, ...(await this.#saveCompareImages(name, reference, actual, diff)) });
-    if (comparison.ratio > compare.maxDiffRatio) throw new Error(compareDetail(comparison, compare.maxDiffRatio));
-  }
-
-  /** 기준·실제·차이 이미지를 저장한다. 저장은 관측용이라 실패해도 비교 결과를 바꾸지 않고 경고만 남긴다 */
-  async #saveCompareImages(name: string, reference: Buffer, actual: Buffer, diff: Buffer): Promise<Pick<WorkflowCompare, 'reference' | 'actual' | 'diff'>> {
-    const save = this.#options.saveArtifact;
-    const saved: Pick<WorkflowCompare, 'reference' | 'actual' | 'diff'> = {};
-    if (!save) return saved;
-    const images: Array<[keyof typeof saved, string, Buffer]> = [
-      ['reference', '디자인', reference],
-      ['actual', '실제', actual],
-      ['diff', '차이', diff],
-    ];
-    for (const [key, label, data] of images) {
-      try {
-        saved[key] = await save({ name: `${name} ${label} 이미지`, data, contentType: 'image/png' });
-      } catch (error) {
-        console.warn(`디자인 비교 이미지를 저장하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
-      }
-    }
-    return saved;
-  }
-
-  /**
    * 화면 확인이 요청해도 되는 출처. 세션의 모든 managed 서비스가 게이트에서 쓰는 주소(endpoint)의 출처를 모은다.
    * 프론트가 다른 포트의 백엔드를 부르므로 한 서비스만 허용하면 화면이 망가지고, 그 밖의 출처로는 나가지 못하게 한다
    */
@@ -755,11 +700,6 @@ async function fingerprintEvaluationAssets(root: string, assets: readonly string
 
 export function formatFailedChecks(checks: readonly WorkflowCheck[]): string {
   return native.gateFormatFailedChecks(encodeNative(checks.map((check) => ({ stage: check.stage, name: check.name, attempts: check.attempts, detail: check.detail }))));
-}
-
-/** 디자인 비교 실패 문구. 비율과 허용치, 비교한 크기를 함께 적는다 */
-export function compareDetail(comparison: CompareResult, max: number): string {
-  return native.gateCompareDetail(comparison.ratio, max, comparison.width, comparison.height);
 }
 
 /** 동시 요청 확인의 기대를 사람이 읽는 한 줄로. then 값은 따로 적으므로 여기 넣지 않는다 */

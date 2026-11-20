@@ -15,7 +15,6 @@ network: {}
 secrets: {}
 workflow: {}
 repository: {}
-design: {}
 review: {}
 guide: {}
 models: {}
@@ -34,7 +33,6 @@ checkpoints: {}
 | `secrets` | 아니요 | 서버에서 읽어 서비스에 주입할 시크릿 선언 |
 | `workflow` | 아니요 | 에이전트 작업 단계·도구·보호 경로·승인 |
 | `repository` | 아니요 | 모노레포 하위 프로젝트 처리(`monorepo`, 기본 `false`)와 main 따라잡기(`autoCatchUp`, 기본 `true`, 뒤처진 세션 브랜치를 올리기 전·리뷰 라운드 전에 조용히 따라잡고 충돌하면 건드리지 않음, ADR-076) |
-| `design` | 아니요 | Figma 디자인 파일 URL(에이전트 도구·시각 비교 기준) |
 | `review` | 아니요 | PR 자동 리뷰 라운드(ADR-074). `auto`(기본 `true`)와 `maxRounds`(1~3, 기본 2). 절을 적지 않아도 기본값이 채워져 켜져 있습니다. 지적이 심각(blocker·major)할 때만 같은 세션에 고침을 요청하고 다시 리뷰하며, 머지는 사람이 합니다 |
 | `guide` | 아니요 | 프로젝트 지침 파일(ADR-077). `file`(기본 `AGENTS.md`, 없으면 `CLAUDE.md`를 대신 찾음), `maxChars`(기본 8000), `enabled`(기본 `true`). 매 실행 시작마다 세션 작업 복사본에서 읽어 모델에게 넘깁니다. 끄면 파일이 있어도 읽지 않습니다 |
 | `models` | 아니요 | 계획-실행 분리에 쓸 모델(`plan`·`execute`, [아래](#계획-실행-분리-adr-075)) |
@@ -287,7 +285,8 @@ B_STUDIO_EXPERIMENTAL=1 pnpm studio launch
 - `claude`가 PATH에 없으면 `B_STUDIO_CLAUDE_BIN`에 절대 경로를 적습니다(없으면 터미널을 열지 않고, 컨테이너 방식으로 띄우는 길을 함께 알립니다).
 - 세션의 AI가 Codex(`codex` 백엔드)면 `claude` 대신 `codex`를 띄웁니다(ADR-180). 훅·b-studio 도구·사용량 텔레메트리는 `codex`를 부를 때 설정 덮어쓰기(`-c`)로 붙고, 토큰은 실행 인자가 아니라 관문 폴더의 환경 파일로 넘깁니다. 처음 열면 Codex가 "Hooks need review"를 묻습니다. **Trust all and continue**를 고르면 그 뒤 세션에서는 다시 묻지 않습니다(b-studio가 대신 믿지 않습니다). `codex`가 PATH에 없으면 `B_STUDIO_CODEX_BIN`에 절대 경로를 적습니다. 컨테이너 방식은 claude만 씁니다.
 - b-studio가 띄운 `codex`는 시작할 때 스스로 업데이트를 확인하지 않습니다(`check_for_update_on_startup=false`). 업데이트는 평소 터미널에서 직접 합니다. 화면의 "CLI 떠 있음"은 첫 요청 전이라도 `codex`가 뜨면 켜집니다.
-- `studio desk`의 새 요청(`Ctrl-b n`)을 **터미널로** 보내면 첫 요청은 CLI 실행 인자(`claude "<요청>"`, `codex "<요청>"`)로 넘어갑니다. 키 입력으로 넣지 않습니다. CLI가 폴더 신뢰 같은 것을 먼저 물으면 사람이 그 칸에서 답하고, 답한 뒤 요청이 이어집니다.
+- `studio desk`의 새 요청(`Ctrl-b n`)을 **터미널로** 보내면 첫 요청은 CLI 실행 인자(`claude "<요청>"`, `codex "<요청>"`)로 넘어갑니다. 키 입력으로 넣지 않습니다. CLI가 먼저 묻는 것이 있으면(폴더 신뢰를 미리 적지 못했을 때 등) 사람이 그 칸에서 답하고, 답한 뒤 요청이 이어집니다.
+- **세션 폴더의 신뢰는 b-studio가 미리 적습니다**(ADR-222). 복사 모드 세션(Fleet·작업 분해 레인·일반 세션)을 만들 때, 그 작업 복사본의 실제 경로를 claude 설정 파일의 `projects["<경로>"].hasTrustDialogAccepted`에 적어 새 폴더마다 뜨는 신뢰 창을 없앱니다. 기본 계정은 `~/.claude.json`, 다른 계정은 그 설정 폴더의 `.claude.json`이고, 세션을 지우면 그 기록도 지웁니다. 원본 폴더를 claude에서 한 번 믿어 둔 경우에만 적고(세션 폴더의 내용이 원본에서 오기 때문), 세션 폴더의 `.claude/settings.json`·`.claude/settings.local.json`·`.mcp.json`이 원본과 다르거나 다른 세션에서 이어받은 세션(작업 분해 레인)이면 적지 않습니다. 세션 폴더 루트 안의 실제 폴더만 적고, 설정 파일이 없거나 JSON이 깨졌으면 아무것도 쓰지 않고 claude가 평소처럼 신뢰 창을 띄웁니다(이때 세션 알림에 까닭이 남습니다). 사용자가 연 로컬 폴더와 권한 확인 창은 대신 고르지 않습니다. 셸 시작 파일이 `CLAUDE_CONFIG_DIR`을 따로 내보내는 환경이면 b-studio가 그 파일을 알 수 없으니, 기본 계정의 설정 폴더를 `B_STUDIO_CLAUDE_CONFIG_DIR`에 적으세요(그 폴더의 `.claude.json`을 씁니다).
 - **격리가 없습니다.** CLI는 이 컴퓨터의 다른 파일에도 닿습니다. 평소 터미널에서 CLI를 쓰는 것과 같은 신뢰 수준입니다. 작업 복사본의 `.git`도 읽기 전용이 아닙니다(CLI에는 커밋하지 말라고 알립니다. 체크포인트는 b-studio가 남깁니다).
 - 관문 설정 파일은 같은 사용자의 것이라 에이전트가 고칠 수 있습니다. 그래서 터미널이 열려 있는 동안 그 파일이 쓴 그대로인지 계속 보고(다르면 되돌리고 알립니다), 훅 없이 뜬 CLI도 찾아 알립니다(이슈 #695). 작정한 우회는 막지 못합니다 — 그 경우의 답은 컨테이너 방식입니다.
 
@@ -345,7 +344,6 @@ B_STUDIO_GATEWAY=1 pnpm studio launch
 | `B_STUDIO_GEMINI_MODEL` | Gemini CLI 백엔드의 모델(예: `gemini-2.5-pro`). 세션에서 고른 모델이 먼저이고, 둘 다 없으면 같은 오류로 끝납니다 | 없음 |
 | `B_STUDIO_SKIP_NATIVE_BUILD` | `1`이면 `pnpm install`의 `postinstall`(`scripts/build-native.mjs`)이 Rust 모듈 빌드를 건너뜁니다. cargo가 없는 운영 이미지의 node 단계가 앞 단계에서 빌드한 `bstudio_node.node`를 복사해 쓸 때 씁니다(`apps/studio/Dockerfile`). 이 파일이 없으면 판정을 하지 못해 던지므로 개발 환경에서는 쓰지 않습니다 | 없음 |
 | `B_STUDIO_CONTAINER_RUNTIME` | 더는 지원하지 않습니다. 값이 있으면 조용히 기본 런타임으로 떨어지지 않고 시작을 거절합니다(ADR-221). 서비스 컨테이너는 Docker 기본 런타임으로 돕니다 | 없음 |
-| `B_STUDIO_FIGMA_API` | Figma REST API 주소. 테스트에서 가짜 서버를 가리킬 때 씁니다 | `https://api.figma.com` |
 | `B_STUDIO_AUTH_STATE_DIR` | 로그아웃한 세션과 운영자가 무효화한 사용자를 적는 파일(`revocations.json`)의 폴더 | `~/.cache/b-studio/auth` |
 | `B_STUDIO_TASK_PLANS_DIR` | 작업 분해 계획을 저장하는 폴더 | `~/.cache/b-studio/task-plans` |
 | `B_STUDIO_MODEL_OBSERVATIONS_FILE` | API 모드의 모델 라우터가 쓰는 모델별 실측 기록(게이트 통과 여부 등, 최근 5,000건) | `~/.cache/b-studio/model-observations.json` |
@@ -387,11 +385,6 @@ workflow:
       mode: browser
       viewport: mobile
       maxLoadMs: 2500
-      compare:
-        reference: design/list.png
-        maxDiffRatio: 0.15
-        masks:
-          - { x: 0, y: 240, width: 375, height: 120 }
   concurrencyChecks:
     - name: stock-race
       service: api
@@ -423,11 +416,11 @@ workflow:
 |---|---|
 | `required` | 순서대로 확인할 단계. 이 중 `run`·`browser_check`·`contract_check`·`test`·`concurrency_check`·`load_check`·`review`는 게이트가 직접 실행해 판정하며, 통과 기록이 없으면 완료로 인정하지 않습니다. 생략하면 `plan → implement → run → contract_check → review → checkpoint`에 선언한 `pageChecks`·`tests`·`concurrencyChecks`·`loadChecks` 단계를 더합니다 |
 | `tests` | `test` 단계에서 서비스 컨테이너 안에서 실행할 명령. 종료 코드 0이어야 통과하고, 실패 시 출력 끝 30줄(시크릿 가림)을 모델에게 돌려줍니다. 한 명령당 10분 제한 |
-| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `expectAnyText`는 그중 **하나라도 있으면 통과**하는 문구 목록(1~5개)입니다(같은 값의 표기가 갈릴 때, 예: `45000`/`45,000`). `expectAllText`는 **모두 있어야 통과**하는 문구 목록(1~5개)이고, 실패하면 빠진 문구만 알립니다(한 화면에 여러 값이 함께 보여야 할 때, 예: 샘플 주문 세 건의 고객 이름). `expectInViewport`는 `mode: browser` 전용으로, 적은 글자(1~5개)가 **스크롤하지 않은 첫 화면에 온전히 보여야 통과**합니다(`expectText`는 DOM에 있기만 하면 통과해서, 안쪽 스크롤 영역에 잘린 버튼을 잡지 못합니다). `steps`를 마친 뒤 `viewport`(없으면 기본 창) 크기로 잽니다. 글자를 담은 가장 안쪽 요소가 렌더링돼 있고(크기가 0이 아니고 `display:none`·`visibility:hidden`이 아님), 그 사각형이 창 안에 들어 있고, `overflow`가 `visible`이 아닌 조상(안쪽 스크롤 영역)에 잘리지 않아야 보인다고 봅니다. 오차는 1px까지 허용하며, 같은 글자를 담은 요소가 여럿이면 하나라도 보이면 통과합니다. 투명하거나(`opacity`) 2px보다 작은 상자에 든 글자, 다른 요소에 덮인 글자는 보이는 것으로 치지 않고, `steps`가 창을 스크롤해 둔 상태면 첫 화면이 아니므로 실패합니다. 실패하면 어느 글자가 창 아래로 몇 px 넘쳤는지, 어떤 조상에 잘렸는지, 화면에 없는지, 숨겨졌는지와 창 크기를 알립니다. 헤드리스 브라우저를 못 띄우면 이 확인은 건너뛰지 않고, `fallbackProbe`가 없으면 화면 확인 전체가 실패하고, 있으면 "확인하지 못했다"는 참고 문구가 결과에 남습니다. 자동 화면 확인(`autoPageChecks`)에는 없습니다. `compare`를 적으면 마지막 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교합니다(아래 '디자인 비교'). `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다. `expectFromApi`를 적으면 api를 먼저 불러 그 값이 화면 글자에 있는지 확인합니다(아래 'api 값 확인') 통과한 확인은 무엇을 쟀는지(상태 코드, 화면에 있던 문구, 첫 화면에 보인 글자와 창 크기, 오류 건수, 허용했거나 보지 않은 것)를 결과에 남깁니다. |
+| `pageChecks` | `browser_check` 단계에서 재시작한 서비스의 화면을 확인합니다. `mode: http`(기본)는 응답 상태 코드와 본문 문구만 봅니다. `mode: browser`는 헤드리스 Chromium으로 렌더링하고 클라이언트 스크립트를 실행한 뒤 렌더링된 문구, 잡히지 않은 스크립트 예외, `console.error`, 실패한 요청(4xx·5xx·연결 실패, 브라우저가 스스로 여는 `/favicon.ico` 제외)을 실패로 봅니다. `viewport`로 창 크기를 정하고 `noHorizontalScroll: true`면 가로 넘침도 실패로 봅니다. `allowConsoleErrors: true`는 콘솔 오류와 실패한 요청을 허용합니다. `steps`는 `mode: browser`에서만 쓸 수 있고, 페이지를 연 뒤 순서대로 실행할 상호작용을 최대 10개까지 적습니다. 각 단계는 `click`(선택자 클릭)·`fill`(`{ selector, text }` 입력)·`press`(키 입력, 예: `Enter`)·`waitFor`(선택자 대기) 중 정확히 하나를 가지며, 임의 스크립트는 실행하지 않습니다. 단계가 실패하면 그 자리에서 멈추고 몇 번째 단계였는지 알립니다. `expectText`는 단계를 모두 마친 뒤의 화면을 봅니다. `expectAnyText`는 그중 **하나라도 있으면 통과**하는 문구 목록(1~5개)입니다(같은 값의 표기가 갈릴 때, 예: `45000`/`45,000`). `expectAllText`는 **모두 있어야 통과**하는 문구 목록(1~5개)이고, 실패하면 빠진 문구만 알립니다(한 화면에 여러 값이 함께 보여야 할 때, 예: 샘플 주문 세 건의 고객 이름). `expectInViewport`는 `mode: browser` 전용으로, 적은 글자(1~5개)가 **스크롤하지 않은 첫 화면에 온전히 보여야 통과**합니다(`expectText`는 DOM에 있기만 하면 통과해서, 안쪽 스크롤 영역에 잘린 버튼을 잡지 못합니다). `steps`를 마친 뒤 `viewport`(없으면 기본 창) 크기로 잽니다. 글자를 담은 가장 안쪽 요소가 렌더링돼 있고(크기가 0이 아니고 `display:none`·`visibility:hidden`이 아님), 그 사각형이 창 안에 들어 있고, `overflow`가 `visible`이 아닌 조상(안쪽 스크롤 영역)에 잘리지 않아야 보인다고 봅니다. 오차는 1px까지 허용하며, 같은 글자를 담은 요소가 여럿이면 하나라도 보이면 통과합니다. 투명하거나(`opacity`) 2px보다 작은 상자에 든 글자, 다른 요소에 덮인 글자는 보이는 것으로 치지 않고, `steps`가 창을 스크롤해 둔 상태면 첫 화면이 아니므로 실패합니다. 실패하면 어느 글자가 창 아래로 몇 px 넘쳤는지, 어떤 조상에 잘렸는지, 화면에 없는지, 숨겨졌는지와 창 크기를 알립니다. 헤드리스 브라우저를 못 띄우면 이 확인은 건너뛰지 않고, `fallbackProbe`가 없으면 화면 확인 전체가 실패하고, 있으면 "확인하지 못했다"는 참고 문구가 결과에 남습니다. 자동 화면 확인(`autoPageChecks`)에는 없습니다. `maxLoadMs`를 적으면 워밍업 뒤 첫 이동의 `load`까지 걸린 시간이 예산(ms)을 넘을 때 실패합니다(재지 못해도 통과로 보지 않습니다). 로드 시간은 예산을 적은 확인만 재어 결과에 남깁니다(재려면 페이지를 한 번 더 열어야 하기 때문입니다). 브라우저 전용 옵션을 `http`에 쓰면 불러올 때 거부합니다. `expectFromApi`를 적으면 api를 먼저 불러 그 값이 화면 글자에 있는지 확인합니다(아래 'api 값 확인') 통과한 확인은 무엇을 쟀는지(상태 코드, 화면에 있던 문구, 첫 화면에 보인 글자와 창 크기, 오류 건수, 허용했거나 보지 않은 것)를 결과에 남깁니다. |
 | `concurrencyChecks` | `concurrency_check` 단계에서 같은 요청을 `concurrent`(2~20)개 동시에 보내 결과 불변식을 확인합니다. k6 같은 부하 도구 없이 서버에서 `Promise.all`로 보내고, 요청마다 타임아웃을 겁니다. **세션 서비스의 출처로만** 요청합니다. `expect`에는 `successCount`(`exactly`/`atMost`), `allStatusIn`(허용 상태 코드), `then`(동시 요청 뒤 `GET`으로 JSON 값을 확인: `jsonPath`는 `$.stock` 같은 단순 경로, `equals`는 숫자나 문자열) 중 최소 하나를 적습니다. 통과해도 성공 건수·상태 분포·`then` 값을 결과에 남기고, 실패하면 원인을 추정하지 않고 숫자만 돌려줍니다 |
 | `loadChecks` | `load_check` 단계에서 같은 요청을 동시에 많이 보내 **응답 시간**을 잽니다(최대 5개). 호스트가 아니라 샌드박스 네트워크 안의 일회용 컨테이너에서 보냅니다. 아래 [부하 확인](#부하-확인-loadchecks)에 따로 적었습니다 |
 | `autoPageChecks` | **이번 실행에서 바뀐 Next.js 페이지(와 바뀐 컴포넌트·유틸을 쓰는 페이지)를 게이트가 스스로 찾아 열어 봅니다**(선택, 기본 없음). `service`는 `source: managed`이면서 템플릿이 `nextjs`여야 합니다. 아래 '바뀐 페이지 자동 확인' |
-| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 요청과 확인의 어긋남 알림 `report_mismatch`, 조율 게시판 `post_note`·`read_notes`, 디자인 `design_frames`·`design_frame`)도 쓰려면 목록에 넣어야 합니다 |
+| `allowedTools` · `deniedCommands` · `requireApprovalFor` | 도구 호출이 샌드박스에 닿기 전에 실행기가 막습니다. `allowedTools`를 적으면 **목록에 없는 도구는 모델에게 보이지도 않습니다.** 플랫폼이 상황에 따라 더하는 도구(되묻기 `ask_user`, 요청과 확인의 어긋남 알림 `report_mismatch`, 조율 게시판 `post_note`·`read_notes`)도 쓰려면 목록에 넣어야 합니다 |
 | `protectedPaths` | 쓰기 도구 호출을 막고, `review` 단계에서 전체 변경 파일을 한 번 더 확인합니다. `.env`처럼 점으로 시작하는 경로는 `.env.local` 같은 변형도 막습니다 |
 | `evaluationAssets` | **에이전트가 고치면 안 되는 평가 자산**(인수 테스트, 기대값 파일, 판정 스크립트)의 경로. 게이트가 실행 시작 때 그 파일들의 지문을 떠 두고 검사 때 디스크를 직접 견줘, 하나라도 더해지거나·바뀌거나·지워졌으면 실패합니다(`tests`가 있으면 `test` 단계, 없으면 `review` 단계). 파일 도구뿐 아니라 셸 명령·`run_in_service`로 고친 것도 잡습니다. 파일 도구의 쓰기는 `protectedPaths`처럼 미리 막습니다. 에이전트가 같은 실행에서 이 선언을 지워도 그 실행에는 시작 때 선언이 쓰입니다. 링크·특수 파일이 있거나 파일이 2000개를 넘으면 실패합니다(선언을 좁히세요). 평가 자산은 사람이 고칩니다 — 스튜디오 밖에서 고친 것은 다음 요청부터 기준이 됩니다. 서비스 컨테이너와 터미널 에이전트 컨테이너에는 **마지막 체크포인트에 커밋된 판**이 읽기 전용으로 붙어, 컨테이너 안 명령은 테스트 중이든 아니든 쓸 수 없고 테스트는 그 판으로 돕니다. 작업 복사본에서 고친 평가 자산은 체크포인트로 남은 뒤부터 테스트에 쓰입니다. 선언을 바꾸면 샌드박스를 새로 만들 때부터 반영됩니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
@@ -670,57 +663,9 @@ pageChecks:
 - **`jsonPath` 범위가 좁습니다.** 필터·와일드카드·함수는 없습니다. 정확한 경로를 적어야 합니다.
 - **캐시된 화면은 잡지 못합니다.** 확인은 지금 요청의 응답/렌더링만 봅니다. 페이지나 api가 캐시·CDN에 오래 남아 있으면 확인 시점의 결과를 봅니다.
 
-### 디자인 비교 (`compare`)
-
-`mode: browser` 화면 확인에 `compare`를 적으면, 마지막 단계 뒤의 **뷰포트 화면**을 디자인 기준 이미지와 픽셀 단위로 비교합니다. 운영자가 Figma 등에서 뽑은 기준 이미지를 프로젝트 안에 `.png`로 두고, `reference`에 프로젝트 루트 기준 상대 경로로 적습니다(추출은 제품 밖의 일입니다).
-
-```yaml
-pageChecks:
-  - service: web
-    path: /orders
-    mode: browser
-    viewport: mobile
-    compare:
-      reference: design/list.png
-      maxDiffRatio: 0.15
-      masks:
-        - { x: 0, y: 240, width: 375, height: 120 }   # 항상 달라지는 동적 영역
-      threshold: 0.1
-```
-
-| 키 | 설명 |
-|---|---|
-| `reference` | 프로젝트 안의 `.png` 상대 경로. `..`이나 절대 경로는 거부합니다 |
-| `maxDiffRatio` | 허용하는 최대 차이 비율(0~1). 넘으면 확인 실패입니다 |
-| `masks` | 비교에서 빼는 사각형(픽셀, 최대 20개). 두 이미지 모두 같은 색으로 칠해 동적 데이터·시각 요소를 가립니다 |
-| `threshold` | pixelmatch의 색 차이 민감도(0~1, 기본 0.1). 클수록 관대합니다 |
-
-- 기준 이미지와 실제 화면의 **너비가 다르면 자동으로 맞추지 않고 실패**합니다(뷰포트를 디자인 프레임 너비에 맞추라는 안내). 높이가 다르면 겹치는 위쪽만 비교합니다.
-- 기준 이미지가 없거나 읽지 못하면 건너뛰지 않고 확인 실패로 처리합니다("검사 안 함"이 통과로 보이지 않게).
-- 실패하면 `디자인 차이 12.4% (허용 10.0%, 비교 375×812)` 형태로 알리고, 디자인·실제·차이 이미지를 세션 산출물로 남겨 QA 보기에서 나란히 볼 수 있습니다.
-
 `studio workflow <프로젝트>`로 실제로 강제할 단계와 검사를 확인할 수 있습니다.
 
 `mode: browser`는 스튜디오 서버가 도는 호스트에서 Chromium을 띄웁니다. Playwright가 내려받은 Chromium을 먼저 쓰고, 없으면 설치된 Chrome을 쓰며, `B_STUDIO_BROWSER_EXECUTABLE`로 실행 파일을 지정할 수 있습니다. 어느 것도 없으면 검사는 통과가 아니라 실패로 끝납니다. 스튜디오를 브라우저가 없는 컨테이너 이미지로 운영한다면 `http` 모드를 쓰거나 이미지에 Chromium을 넣어야 합니다.
-
-## 디자인 (Figma)
-
-Figma 파일 URL을 두면 에이전트가 `design_frames`·`design_frame` 도구로 프레임 목록과 구조·스타일 요약을 볼 수 있습니다. 프레임을 PNG로 가져와 시각 비교(`pageChecks.compare`)의 기준 이미지로 쓰던 "디자인" 패널과 그 API 라우트는 웹 화면과 함께 지워졌습니다(`apps/studio/app/api`에 디자인 라우트가 없음을 확인했습니다). desk 터미널에는 디자인 비교·요소 고르기가 없습니다(브라우저가 필요함). 아래 설정과 에이전트 도구가 지금 남은 부분입니다.
-
-```yaml
-design:
-  figma:
-    fileUrl: https://www.figma.com/design/<파일 키>/<이름>
-```
-
-| 필드 | 설명 |
-|---|---|
-| `figma.fileUrl` | `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...`. 파일 키는 여기서 뽑아 검증하고, 형식이 아니면 불러올 때 거부합니다 |
-
-- 토큰은 `studio.yaml`이 아니라 **서버 환경 변수 `FIGMA_TOKEN`**에서만 읽습니다. 값은 로그·오류·화면·모델 어디에도 넣지 않습니다.
-- 스튜디오는 `studio.yaml`을 고치지 않습니다. 세션 단위로 URL을 저장하던 "디자인" 패널은 웹 화면과 함께 지워졌으므로, 팀과 공유하든 안 하든 `studio.yaml`의 `design.figma.fileUrl` 줄을 직접 적습니다.
-- `.fig` 파일은 Figma에 한 번 Import해야 파일 키가 생깁니다.
-- 토큰 발급 방법과 운영 주의는 [운영 문서](operations.md)의 "Figma 연동"을 보세요.
 
 ## 계획-실행 분리 (ADR-075)
 

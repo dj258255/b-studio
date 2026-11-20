@@ -46,6 +46,15 @@ describe('desk.json 설정', () => {
     expect(loadDeskConfig(dir)).toEqual({ config: { prefix: { key: '\x01', label: 'Ctrl-a' }, notify: false, mouse: false, color: '256' }, warnings: [] });
   });
 
+  it('copyOnSelect를 읽고, 불리언이 아니면 알린다', () => {
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ copyOnSelect: false }));
+    expect(loadDeskConfig(dir)).toEqual({ config: { copyOnSelect: false }, warnings: [] });
+    writeFileSync(join(dir, 'desk.json'), JSON.stringify({ copyOnSelect: 'yes' }));
+    const { config, warnings } = loadDeskConfig(dir);
+    expect(config).toEqual({});
+    expect(warnings.join('\n')).toMatch(/copyOnSelect/);
+  });
+
   it('잘못된 값은 기본값으로 두고 무엇이 틀렸는지 알린다', () => {
     writeFileSync(join(dir, 'desk.json'), JSON.stringify({ prefix: 'C-c', notify: 'no', mouse: 1, color: 'rgb', extra: true }));
     const { config, warnings } = loadDeskConfig(dir);

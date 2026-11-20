@@ -855,9 +855,6 @@ interface NativeGuard {
   gateServiceOrigins(names: string[], skipped: string[], hook: (request: string) => Promise<string>): Promise<string>;
   /** 단계 스크린샷 저장. `hook`은 `{op:'saveArtifact',...}`에 `{ok:true,artifact}` 또는 `{ok:false,message}`로 답한다. `{steps,warnings}` JSON */
   gateSaveSteps(name: string, stepsJson: string, hasSave: boolean, hook: (request: string) => Promise<string>): Promise<string>;
-  /** 디자인 기준 이미지와 실제 화면 비교. `{ok:true,ratio,width,height,diff,reference}` 또는 `{ok:false,kind,message}` JSON */
-  gateCompareDesign(root: string, reference: string, masksJson: string, threshold: number, actual: string): Promise<string>;
-  gateCompareDetail(ratio: number, max: number, width: number, height: number): string;
   gateDescribeConcurrencyExpect(expectJson: string): string;
   /** `readJsonPath`(ADR-195 4f A5b-2). 세 인자는 `encodeLoneSurrogates`한 글자(`equalsJson`은 JSON). `{ shown, equal }` 또는 `{ tooDeep: true }`의 JSON */
   gateReadJsonPath(text: string, jsonPath: string, equalsJson: string): string;
@@ -965,9 +962,6 @@ interface NativeGuard {
   reqReplyIsJsonPath(path: string): boolean;
   reqReplyTooBigBytes(message: string): number | null | undefined;
   reqReplyAddUsage(a: number[], b: number[]): number[];
-  // ── agent: 디자인 비교(3단계 3ae). 게이트는 비율이 허용치를 넘으면 실패시키므로 비율이 작아지는 쪽이 여는 쪽이고, 끝까지 가지 못한 입력(읽지 못한 PNG·너비 불일치·너무 큼·픽셀 0·범위 밖 threshold)은 모두 errorKind로 돌려준다.
-  // masks는 [x, y, width, height, ...]를 이어 붙인 숫자(소수·음수·NaN 그대로: 옛 JS 반복문과 같게 칠한다). errorKind는 'compare'(옛 VisualCompareError)·'decode'(PNG를 읽지 못함)
-  visualCompare(actual: Buffer, reference: Buffer, masks: number[], threshold: number): NativeVisualCompare;
   // ── agent: 작업 공간의 파일 시스템 I/O(ADR-195 4f A3). 경로의 어느 조각도 링크를 따라가지 않고 연 서술자로 읽고 쓰고 지운다(bstudio-io::workspace_io).
   // 비동기 함수의 실패는 거절된 Error의 message로 온다: LINK·OUTSIDE·DENIED·MISSING·NOT_REGULAR·TOO_LARGE:<크기>·OS:<오류 이름>·OTHER:<글>. 숨긴 이름은 여기서도 다시 막는다
   workspaceReadRegularFile(absolute: string, maxBytes: number): NativeWorkspaceFileRead;
@@ -1022,16 +1016,6 @@ export interface NativeWorkspacePinStore {
   pin(root: string, relative: string): void;
   pinUnpinned(relative: string, reason: string): void;
   restored(root: string, files: string[]): string[];
-}
-
-export interface NativeVisualCompare {
-  errorKind?: 'compare' | 'decode' | null;
-  message?: string | null;
-  diffPixels: number;
-  comparedPixels: number;
-  width: number;
-  height: number;
-  diff?: Buffer | null;
 }
 
 /** 루프백 서버가 콜백에 넘기는 요청. `body`는 받은 그대로의 바이트다(해석하지 않는다) */

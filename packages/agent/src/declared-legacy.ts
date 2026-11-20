@@ -4,7 +4,7 @@
  * 제품 코드는 이 파일을 쓰지 않는다. 지우지 않는다(4g에서 함께 지운다).
  *
  * 옛 코드가 `this.…`로 읽고 쓰던 것은 `DeclaredHost`(`GateHost.declared`)로 읽는다. 옛 `#loadPlatformFailure`·`#concurrencyNotes` 필드는 이 실행 안의 지역 값이다.
- * 순서와 분기는 옛 코드의 한 줄도 바꾸지 않았다.
+ * 순서와 분기는 옛 코드의 한 줄도 바꾸지 않았다. 디자인 비교를 지우면서(ADR-221) `pageMaps.compares` 갈래만 뺐다.
  */
 import { formatBytes, SandboxError } from '@b-studio/sandbox';
 import type { WorkflowConcurrencyCheck, WorkflowLoadCheck, WorkflowStage, WorkflowTest } from '@b-studio/spec';
@@ -54,7 +54,6 @@ async function legacyDeclaredInner(run: Run): Promise<WorkflowCheck[]> {
   const meta: Array<Pick<WorkflowCheck, 'stage' | 'name'>> = [];
   const nodes: TaskNode<string[] | void>[] = [];
   host.pageMaps.steps.clear();
-  host.pageMaps.compares.clear();
   host.pageMaps.blocked.clear();
   host.pageMaps.loadMs.clear();
   host.pageMaps.warnings.clear();
@@ -98,7 +97,6 @@ async function legacyDeclaredInner(run: Run): Promise<WorkflowCheck[]> {
   const checks = results.map((result, index) => {
     const entry = meta[index]!;
     const steps = host.pageMaps.steps.get(entry.name);
-    const compare = host.pageMaps.compares.get(entry.name);
     const loadMs = host.pageMaps.loadMs.get(entry.name);
     const note = run.concurrencyNotes.get(entry.name);
     const blocked = host.pageMaps.blocked.get(entry.name) ?? [];
@@ -115,7 +113,6 @@ async function legacyDeclaredInner(run: Run): Promise<WorkflowCheck[]> {
       detail: detail || undefined,
       ...(evidence?.length ? { evidence } : {}),
       ...(steps ? { steps } : {}),
-      ...(compare ? { compare } : {}),
       ...(loadMs !== undefined ? { metrics: { loadMs } } : {}),
     };
   });

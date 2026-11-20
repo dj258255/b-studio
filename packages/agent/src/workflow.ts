@@ -31,17 +31,6 @@ export interface WorkflowStepCheck {
   artifact?: string;
 }
 
-/** browser 화면 확인이 디자인 기준 이미지와 비교한 결과. 세 이미지는 산출물 식별자다 */
-export interface WorkflowCompare {
-  /** 실제 화면이 디자인과 다른 픽셀 비율 (0~1) */
-  ratio: number;
-  /** 허용한 최대 비율 (0~1) */
-  max: number;
-  reference?: string;
-  actual?: string;
-  diff?: string;
-}
-
 export interface WorkflowCheck {
   stage: 'browser_check' | 'test' | 'concurrency_check' | 'load_check' | 'review';
   name: string;
@@ -50,8 +39,6 @@ export interface WorkflowCheck {
   detail?: string;
   /** browser 모드 화면 확인의 단계별 결과. 스크린샷을 저장하지 않았으면 없다 */
   steps?: WorkflowStepCheck[];
-  /** 디자인 기준 이미지와 비교했으면 그 결과. compare를 선언하지 않았으면 없다 */
-  compare?: WorkflowCompare;
   /** 측정값. browser 모드 화면 확인의 로드 시간(loadMs). 예산(maxLoadMs)을 적은 확인만 잰다 */
   metrics?: { loadMs?: number };
   /** 통과한 확인이 무엇을 쟀는지(상태 코드, 확인한 문구, 첫 화면에서 잰 글자와 창 크기, 오류 건수 등). 사람이 보는 용도라 모델 피드백에는 싣지 않는다 */

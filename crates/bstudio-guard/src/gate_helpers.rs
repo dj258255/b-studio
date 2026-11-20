@@ -1,6 +1,6 @@
 //! 게이트의 순수 보조 판정(ADR-191 3단계 3r). 옛 `packages/agent/src/gate.ts`의 `nextErrorMarker`(`NEXT_ERROR_MARKERS`·`NEXT_NOT_FOUND_MARKER`)·`autoPageCheck`·
 //! `containsApiValue`·`missingApiValue`·`viewportProblemText`·`viewportProblems`·`missingAllText`·`missingAnyText`·`dynamicProbeDataHint`·`dynamicNames`(구간 번호)·
-//! `acceptedNotes`·`usesInRunValue`·`sampledValues`·`stripHtml`·`formatFailedChecks`·`compareDetail`·`describeConcurrencyExpect`.
+//! `acceptedNotes`·`usesInRunValue`·`sampledValues`·`stripHtml`·`formatFailedChecks`·`describeConcurrencyExpect`.
 //!
 //! 실행 흐름(샌드박스·브라우저 호출)과 `withoutInRunValues`(JS 객체의 펼침·`delete`·키 순서로 설정을 다시 만든다)는 TS에 남는다.
 //! `readJsonPath`는 `read_json_path`로 옮겼다(ADR-195 4f A5b-2). 동시 요청 확인의 `then` 판정이 Rust 안에서 돌기 때문이다. 화면 확인의 `expectFromApi`는 아직 TS의 `readJsonPath`를 쓴다.
@@ -443,11 +443,6 @@ pub fn format_failed_checks(checks: &JsValue) -> Result<String, String> {
     Ok(format!("\n\n워크플로 검사 실패:\n{}", lines.join("\n")))
 }
 
-/// 디자인 비교 실패 문구. 비율과 허용치, 비교한 크기를 함께 적는다
-pub fn compare_detail(ratio: f64, max: f64, width: f64, height: f64) -> String {
-    format!("디자인 차이 {}% (허용 {}%, 비교 {}×{})", js::to_fixed(ratio * 100.0, 1), js::to_fixed(max * 100.0, 1), js::number_to_string(width), js::number_to_string(height))
-}
-
 /// 동시 요청 확인의 기대를 사람이 읽는 한 줄로. `{ successCount?: { exactly?, atMost? }, allStatusIn?: number[] }`
 pub fn describe_concurrency_expect(expect: &JsValue) -> Result<String, String> {
     let mut parts: Vec<String> = Vec::new();
@@ -666,7 +661,6 @@ mod tests {
         let checks = js_json::parse(r#"[{"stage":"test","name":"단위","attempts":2,"detail":"실패"},{"stage":"review","name":"리뷰","attempts":1}]"#).unwrap();
         assert_eq!(format_failed_checks(&checks).unwrap(), "\n\n워크플로 검사 실패:\n- [test] 단위 (시도 2회)\n실패\n- [review] 리뷰 (시도 1회)");
         assert_eq!(format_failed_checks(&JsValue::Arr(vec![])).unwrap(), "");
-        assert_eq!(compare_detail(0.1234, 0.05, 1280.0, 800.0), "디자인 차이 12.3% (허용 5.0%, 비교 1280×800)");
     }
 
     #[test]

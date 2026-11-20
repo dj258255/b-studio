@@ -81,17 +81,14 @@ describe('parseSpec', () => {
     expect(parseSpec(`${ORDERS_SPEC}checkpoints:\n  conventionalCommits: false\n`).checkpoints).toEqual({ conventionalCommits: false });
   });
 
-  it('디자인 설정은 Figma URL의 파일 키를 뽑고, 형식이 틀리면 거부한다', () => {
-    expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2"\n`).design?.figma).toEqual({
-      fileUrl: 'https://www.figma.com/design/abc123XYZ/Orders?node-id=1-2',
-      fileKey: 'abc123XYZ',
-    });
-    // 옛 /file/ 경로와 www 없는 호스트도 받는다
-    expect(parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://figma.com/file/KEY9/legacy"\n`).design?.figma?.fileKey).toBe('KEY9');
-    expect(parseSpec(`${ORDERS_SPEC}`).design).toBeUndefined();
+  it('지운 디자인 항목(design·pageChecks[].compare)은 까닭과 함께 거절한다', () => {
+    const design = captureError(() => parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://www.figma.com/design/abc/x"\n`));
+    expect(design.issues).toContain('design: `design`은 더는 지원하지 않습니다. 이 항목을 지우세요');
 
-    const bad = captureError(() => parseSpec(`${ORDERS_SPEC}design:\n  figma:\n    fileUrl: "https://example.com/design/x"\n`));
-    expect(bad.issues.some((issue) => issue.startsWith('design.figma.fileUrl'))).toBe(true);
+    const compare = captureError(() =>
+      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: design/home.png, maxDiffRatio: 0.1 } }\n`),
+    );
+    expect(compare.issues).toContain('workflow.pageChecks.0.compare: `pageChecks[].compare`는 더는 지원하지 않습니다. 이 항목을 지우세요');
   });
 
   it('워크플로 정책의 단계와 보호 경로를 읽고 잘못된 단계를 거부한다', () => {
@@ -125,22 +122,6 @@ describe('parseSpec', () => {
     expect(captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  required: [plan, test, checkpoint]\n  evaluationAssets: [tests/acceptance]\n`)).issues).toEqual([
       'workflow.tests: required에 test가 있으면 실행할 tests가 최소 1개 필요합니다',
     ]);
-  });
-
-  it('디자인 비교의 기준 이미지는 따로 적지 않아도 평가 자산이 된다(#1138)', () => {
-    const page = (reference: string) => `    - { service: web, path: /, mode: browser, compare: { reference: ${reference}, maxDiffRatio: 0.1 } }\n`;
-    // 기준 이미지는 게이트가 통과를 정하는 근거라 에이전트가 바꾸면 안 된다: 평가 자산(파일 도구 차단·컨테이너 읽기 전용·지문 비교)에 합친다
-    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n${page('design/home.png')}${page('design/list.png')}`).workflow?.evaluationAssets).toEqual([
-      'design/home.png',
-      'design/list.png',
-    ]);
-    // 적은 평가 자산이 앞이고, 같은 경로는 한 번만 들어간다
-    expect(
-      parseSpec(`${ORDERS_SPEC}workflow:\n  evaluationAssets: [tests/acceptance, design/home.png]\n  pageChecks:\n${page('design/home.png')}${page('design/home.png')}`).workflow
-        ?.evaluationAssets,
-    ).toEqual(['tests/acceptance', 'design/home.png']);
-    // 비교가 없으면 평가 자산을 만들지 않는다(빈 배열도 아니다)
-    expect(parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: / }\n`).workflow?.evaluationAssets).toBeUndefined();
   });
 
   it('턴 상한(workflow.maxTurns)을 읽고, 생략하면 undefined이며, 범위 밖 값은 거부한다(ADR-131)', () => {
@@ -509,35 +490,6 @@ describe('parseSpec', () => {
     expect(empty.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.expectAllText'))).toBe(true);
     const tooMany = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, expectAllText: [a, b, c, d, e, f] }\n`));
     expect(tooMany.issues).toEqual(['workflow.pageChecks.0.expectAllText: expectAllText는 최대 5개까지 쓸 수 있습니다']);
-  });
-
-  it('디자인 비교는 프로젝트 안 .png와 허용 비율을 받고, http 모드나 프로젝트 밖 경로는 거부한다', () => {
-    const compareOf = (line: string) =>
-      parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - ${line}\n`).workflow?.pageChecks?.[0]?.compare;
-
-    expect(
-      compareOf(`{ service: web, path: /, mode: browser, viewport: mobile, compare: { reference: design/list.png, maxDiffRatio: 0.15, masks: [{ x: 0, y: 0, width: 10, height: 10 }] } }`),
-    ).toEqual({ reference: 'design/list.png', maxDiffRatio: 0.15, masks: [{ x: 0, y: 0, width: 10, height: 10 }], threshold: 0.1 });
-    // threshold를 적으면 그 값을, 생략하면 0.1을 쓴다
-    expect(compareOf(`{ service: web, path: /, mode: browser, compare: { reference: a.png, maxDiffRatio: 0, threshold: 0.4 } }`)).toEqual({
-      reference: 'a.png',
-      maxDiffRatio: 0,
-      threshold: 0.4,
-    });
-
-    // .png가 아니면 거부
-    const notPng = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: design/list.jpg, maxDiffRatio: 0.1 } }\n`));
-    expect(notPng.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.compare.reference'))).toBe(true);
-    // 프로젝트 밖 경로는 거부
-    const outside = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: ../secret.png, maxDiffRatio: 0.1 } }\n`));
-    expect(outside.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.compare.reference'))).toBe(true);
-    // masks는 최대 20개
-    const masks = Array.from({ length: 21 }, () => '{ x: 0, y: 0, width: 1, height: 1 }').join(', ');
-    const tooMany = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, mode: browser, compare: { reference: a.png, maxDiffRatio: 0.1, masks: [${masks}] } }\n`));
-    expect(tooMany.issues.some((issue) => issue.startsWith('workflow.pageChecks.0.compare.masks'))).toBe(true);
-    // http 모드에서는 쓸 수 없다
-    const http = captureError(() => parseSpec(`${ORDERS_SPEC}workflow:\n  pageChecks:\n    - { service: web, path: /, compare: { reference: a.png, maxDiffRatio: 0.1 } }\n`));
-    expect(http.issues).toEqual(['workflow.pageChecks.0.compare: compare는 mode: browser에서만 쓸 수 있습니다']);
   });
 
   it('뷰포트는 크기 객체나 mobile·tablet·desktop 이름으로 적고 파싱 뒤에는 항상 크기 객체로 맞춘다', () => {

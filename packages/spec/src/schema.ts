@@ -429,28 +429,6 @@ const ViewportSchema = z
   ])
   .transform((value): { width: number; height: number } => (typeof value === 'string' ? VIEWPORT_PRESETS[value] : value));
 
-const MAX_COMPARE_MASKS = 20;
-
-/** 기준 이미지에서 비교에서 빼는 사각형. 동적 데이터나 항상 달라지는 시각 요소를 가린다 */
-export const CompareMaskSchema = z.object({
-  x: z.number().int().min(0),
-  y: z.number().int().min(0),
-  width: z.number().int().min(1),
-  height: z.number().int().min(1),
-});
-
-/** 디자인 기준 이미지와 실제 화면을 픽셀 차이 비율로 비교하는 설정 */
-export const WorkflowPageCompareSchema = z.object({
-  /** 프로젝트 안의 .png 파일 상대 경로 (운영자가 Figma 등에서 뽑아 저장소에 둔다) */
-  reference: RELATIVE_PATH.refine((value) => value.toLowerCase().endsWith('.png'), 'reference는 .png 파일이어야 합니다'),
-  /** 허용하는 최대 차이 비율 (0~1) */
-  maxDiffRatio: z.number().min(0).max(1),
-  /** 두 이미지 모두 같은 색으로 칠해 비교에서 빼는 영역 */
-  masks: z.array(CompareMaskSchema).max(MAX_COMPARE_MASKS, `masks는 최대 ${MAX_COMPARE_MASKS}개까지 쓸 수 있습니다`).optional(),
-  /** pixelmatch의 색 차이 민감도 (0~1). 클수록 관대하다 */
-  threshold: z.number().min(0).max(1).default(0.1),
-});
-
 /**
  * api 응답에서 값을 꺼내 그 값이 화면 글자에 있는지 확인하는 설정.
  * 사람이 값을 미리 알 필요 없이(expectText와 달리) api가 실제로 돌려준 값을 화면에서 찾는다
@@ -513,8 +491,6 @@ export const WorkflowPageCheckSchema = z
     noHorizontalScroll: z.boolean().default(false),
     /** browser 전용. 워밍업 뒤 첫 이동의 load까지 이 시간(ms)을 넘으면 실패. 재지 못해도 통과로 보지 않는다 */
     maxLoadMs: z.number().int().positive().optional(),
-    /** browser 전용. 마지막 단계 뒤의 뷰포트 화면을 디자인 기준 이미지와 픽셀 차이 비율로 비교한다 */
-    compare: WorkflowPageCompareSchema.optional(),
     /**
      * browser 전용(ADR-078). 기본(생략·false)은 네트워크가 잠잠해진 뒤 렌더링된 글자가 "Loading…"·"로딩 중"·"불러오는 중" 같은
      * 로딩 문구뿐이거나(스켈레톤이라 글자가 거의 없으면서 콘솔 오류·실패한 요청이 있으면) 실패로 본다.
@@ -538,7 +514,6 @@ export const WorkflowPageCheckSchema = z
     if (check.noHorizontalScroll) ctx.addIssue({ code: 'custom', path: ['noHorizontalScroll'], message: 'noHorizontalScroll은 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowConsoleErrors) ctx.addIssue({ code: 'custom', path: ['allowConsoleErrors'], message: 'allowConsoleErrors는 mode: browser에서만 쓸 수 있습니다' });
     if (check.maxLoadMs !== undefined) ctx.addIssue({ code: 'custom', path: ['maxLoadMs'], message: 'maxLoadMs는 mode: browser에서만 쓸 수 있습니다' });
-    if (check.compare) ctx.addIssue({ code: 'custom', path: ['compare'], message: 'compare는 mode: browser에서만 쓸 수 있습니다' });
     if (check.allowLoadingPlaceholder !== undefined) {
       ctx.addIssue({ code: 'custom', path: ['allowLoadingPlaceholder'], message: 'allowLoadingPlaceholder는 mode: browser에서만 쓸 수 있습니다' });
     }
@@ -660,38 +635,7 @@ export const WorkflowSchema = z
       if (names.has(check.name)) ctx.addIssue({ code: 'custom', path: ['loadChecks', index, 'name'], message: `부하 확인 이름 '${check.name}'이 중복됩니다` });
       names.add(check.name);
     });
-   })
-  // 디자인 비교의 기준 이미지는 게이트가 통과를 정하는 근거다. 에이전트가 바꿀 수 있으면 바꾼 기준과 비교해 통과가 나온다(#1138).
-  // 따로 적지 않아도 평가 자산에 합쳐, 평가 자산을 읽는 모든 자리(파일 도구 차단, 컨테이너 읽기 전용 덮기, 게이트 지문 비교)가 함께 지키게 한다.
-  // 적은 평가 자산이 앞이고 같은 경로는 한 번만 넣는다. 비교가 없으면 평가 자산을 만들지 않는다
-  .transform((workflow) => {
-    const references = (workflow.pageChecks ?? []).flatMap((check) => (check.compare ? [check.compare.reference] : []));
-    if (references.length === 0) return workflow;
-    return { ...workflow, evaluationAssets: [...new Set([...(workflow.evaluationAssets ?? []), ...references])] };
   });
-
-/** Figma 디자인/파일 URL. `https://www.figma.com/design/<key>/...`과 `/file/<key>/...` 둘 다 받는다 */
-const FIGMA_FILE_URL = /^https?:\/\/(?:www\.)?figma\.com\/(?:design|file)\/([A-Za-z0-9]+)(?:[/?#]|$)/;
-
-/** Figma URL에서 파일 키를 뽑는다. 형식이 아니면 undefined */
-export function figmaFileKey(url: string): string | undefined {
-  return FIGMA_FILE_URL.exec(url.trim())?.[1];
-}
-
-/**
- * 디자인(Figma) 연동. 토큰은 studio.yaml이 아니라 서버 환경 변수 FIGMA_TOKEN에서만 읽는다.
- * fileKey는 URL에서 미리 뽑아 두어 다운스트림이 URL을 다시 파싱하지 않게 한다
- */
-export const DesignSchema = z
-  .object({
-    figma: z
-      .object({
-        /** `https://www.figma.com/design/<key>/...` 또는 `/file/<key>/...` */
-        fileUrl: z.string().refine((value) => figmaFileKey(value) !== undefined, 'Figma 디자인 URL(https://www.figma.com/design/<key>/...)이어야 합니다'),
-      })
-      .transform((value) => ({ fileUrl: value.fileUrl, fileKey: figmaFileKey(value.fileUrl)! })),
-  })
-  .optional();
 
 /**
  * PR 자동 리뷰 라운드(ADR-074) 설정. PR을 만든 뒤 읽기 전용 리뷰어가 diff를 보고 지적하면,
@@ -763,8 +707,6 @@ export const StudioSpecSchema = z.object({
   /** 환경 변수 이름 → 받을 서비스 */
   secrets: z.record(z.string().regex(ENV_NAME, '대문자, 숫자, 밑줄로 된 환경 변수 이름이어야 합니다'), SecretSchema).optional(),
   deploy: RemovedDeploySchema.optional(),
-  /** Figma 디자인 연동. fileUrl에서 뽑은 키로 서버가 Figma REST API를 부른다 */
-  design: DesignSchema,
   /** Pi·Claude·API 에이전트에 공통으로 적용하는 실행 정책 */
   workflow: WorkflowSchema.optional(),
   repository: z
@@ -796,7 +738,6 @@ type SnapshotSpec = z.infer<typeof SnapshotSchema>;
 export type DatabaseSpec = z.infer<typeof DatabaseSchema>;
 export type ResourceLimit = z.infer<typeof ResourceLimitSchema>;
 export type SecretSpec = z.infer<typeof SecretSchema>;
-type DesignSpec = z.infer<typeof DesignSchema>;
 type ReviewSpec = z.infer<typeof ReviewSchema>;
 export type GuideSpec = z.infer<typeof GuideSchema>;
 type ModelsSpec = z.infer<typeof ModelsSchema>;
@@ -812,8 +753,6 @@ export type WorkflowPageStep = z.infer<typeof WorkflowPageStepSchema>;
 type WorkflowPageExpectFromApi = z.infer<typeof WorkflowPageExpectFromApiSchema>;
 export type WorkflowPageCheck = z.infer<typeof WorkflowPageCheckSchema>;
 export type AutoPageChecks = z.infer<typeof AutoPageChecksSchema>;
-export type WorkflowPageCompare = z.infer<typeof WorkflowPageCompareSchema>;
-export type CompareMask = z.infer<typeof CompareMaskSchema>;
 type PolicyRule = z.infer<typeof PolicyRuleSchema>;
 export type ExternalPolicy = z.infer<typeof ExternalPolicySchema>;
 export type EgressRule = z.infer<typeof EgressRuleSchema>;
@@ -871,13 +810,10 @@ for (const [schema, name] of [
   [LoadExpectSchema, 'LoadExpectSchema'],
   [WorkflowLoadCheckSchema, 'WorkflowLoadCheckSchema'],
   [WorkflowPageStepSchema, 'WorkflowPageStepSchema'],
-  [CompareMaskSchema, 'CompareMaskSchema'],
-  [WorkflowPageCompareSchema, 'WorkflowPageCompareSchema'],
   [WorkflowPageExpectFromApiSchema, 'WorkflowPageExpectFromApiSchema'],
   [WorkflowPageCheckSchema, 'WorkflowPageCheckSchema'],
   [AutoPageChecksSchema, 'AutoPageChecksSchema'],
   [WorkflowSchema, 'WorkflowSchema'],
-  [DesignSchema, 'DesignSchema'],
   [ReviewSchema, 'ReviewSchema'],
   [GuideSchema, 'GuideSchema'],
   [CheckpointsSchema, 'CheckpointsSchema'],

@@ -209,39 +209,6 @@ describe('질문 모드', () => {
   });
 });
 
-describe('디자인 도구', () => {
-  const design = {
-    frames: async () => [{ id: '1:2', name: 'Orders', page: 'Page 1', width: 375, height: 812 }],
-    frame: async (id: string) => ({ summary: `frame ${id} summary`, png: Buffer.from([1, 2, 3]) }),
-    saveArtifact: async (name: string, data: Buffer) => `artifact/${name}/${data.length}`,
-  };
-
-  it('design을 넘기면 도구 목록에 더하고, 넘기지 않으면 목록이 그대로다', () => {
-    expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('design_frames');
-    expect(buildTools(project, { design: true }).map((candidate) => candidate.name)).toEqual(expect.arrayContaining(['design_frames', 'design_frame']));
-  });
-
-  it('design_frames는 페이지·id·이름·크기를 돌려준다', async () => {
-    expect(await executeTool('design_frames', {}, { ...context, design })).toEqual({ ok: true, content: '1:2\tPage 1\tOrders\t375x812' });
-  });
-
-  it('design_frame은 요약과 저장한 산출물 경로를 돌려주고 이미지는 넘기지 않는다', async () => {
-    const outcome = await executeTool('design_frame', { id: '1:2' }, { ...context, design });
-    expect(outcome.ok).toBe(true);
-    expect(outcome.content).toContain('frame 1:2 summary');
-    expect(outcome.content).toContain('artifact/design 1:2/3');
-    expect(outcome.content).toContain('not sent to the model');
-  });
-
-  it('질문 모드에서도 디자인 조회를 허용한다', async () => {
-    expect((await executeTool('design_frames', {}, { ...context, design, readOnly: true })).ok).toBe(true);
-  });
-
-  it('design이 없으면 실행을 거부한다', async () => {
-    expect(await executeTool('design_frames', {}, context)).toEqual({ ok: false, content: 'Design is not configured for this session' });
-  });
-});
-
 describe('되묻기 도구(ask_user)', () => {
   it('interactive를 넘길 때만 도구 목록에 넣고, 없으면 목록이 그대로다', () => {
     expect(buildTools(project).map((candidate) => candidate.name)).not.toContain('ask_user');
@@ -621,11 +588,6 @@ describe('조율 도구', () => {
     expect(names).not.toContain('read_notes');
   });
 
-  it('board와 디자인을 함께 켜면 두 묶음이 모두 들어간다', () => {
-    const names = buildTools(project, { board: boardContext().board, design: true }).map((candidate) => candidate.name);
-    expect(names).toEqual(expect.arrayContaining(['post_note', 'read_notes', 'design_frames', 'design_frame']));
-  });
-
   it('board가 있으면 두 도구를 더한다', () => {
     const names = buildTools(project, { board: boardContext().board }).map((candidate) => candidate.name);
     expect(names).toContain('post_note');
@@ -711,7 +673,7 @@ describe('조율 도구', () => {
 
 describe('도구 분류 (샌드박스 필요 여부)', () => {
   it('모든 도구가 SANDBOX_TOOLS나 LOCAL_TOOLS 중 하나에 들어 있다 (새 도구를 빠뜨리지 않게)', () => {
-    // 모든 조건부 도구(외부 API·계약·게시판·디자인·되묻기)를 켠 프로젝트로 도구 목록을 만든다
+    // 모든 조건부 도구(외부 API·계약·게시판·되묻기)를 켠 프로젝트로 도구 목록을 만든다
     const full = {
       ...project,
       managed: [['api', { source: 'managed', template: 'spring-boot', path: 'api', port: 8080, preview: 'openapi', contract: { extract: '/v3/api-docs' } }]],
@@ -719,7 +681,7 @@ describe('도구 분류 (샌드박스 필요 여부)', () => {
     } as unknown as LoadedProject;
     // 실험 기능에 묶인 도구(propose_mode)도 켠다
     vi.stubEnv('B_STUDIO_EXPERIMENTAL', '1');
-    const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, design: true, interactive: true, mismatch: true }).map((candidate) => candidate.name);
+    const names = buildTools(full, { board: { modelWrites: true } as unknown as BoardAccess, interactive: true, mismatch: true }).map((candidate) => candidate.name);
     vi.unstubAllEnvs();
 
     for (const name of names) {

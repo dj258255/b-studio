@@ -155,7 +155,6 @@ import {
   type DatabaseState,
   type DemoScenario,
   type DiscardBackup,
-  type DesignSource,
   type DocEvidence,
   type Effort,
   type EscalationPolicy,
@@ -237,7 +236,6 @@ import {
 import type {
   LiveChangeFile,
   LiveChanges,
-  DesignView,
   ExportPreview,
   ExportResult,
   RepositoryView,
@@ -261,7 +259,6 @@ import { resolveArtifact, saveArtifact } from './artifacts';
 import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-evidence';
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
-import { FigmaClient } from './figma';
 import { liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
@@ -378,6 +375,7 @@ import { rememberProjectEffortDefault, rememberProjectModelDefault } from './mod
 import { accountProcessEnv, findAiAccount, resolveSessionAccount } from './ai-accounts';
 import { describe, StudioError } from './errors';
 import { assertDeletable, assertResumableHome, planRecovery, removeSessionHome } from './session-lifecycle';
+import { execSurfaceChange, sourceFolderTrusted, trustSessionFolder, untrustSessionFolders } from './claude-trust';
 import { SessionLife, SessionRegistry, type StatusChange } from './session-status';
 import { runCreate } from './session-create';
 import { isDeniedPath, watchProjectFiles, type FileWatcher } from './file-watch';
@@ -530,8 +528,6 @@ interface Session {
   };
   /** 원본에서 커밋하지 않아 세션에 들어가지 않은 변경 수 */
   sourceDirtyFiles: number;
-  /** 세션 단위로 설정한 디자인(Figma) URL. studio.yaml의 설정보다 우선한다 */
-  design?: { fileUrl: string; fileKey: string };
   /** 원격에 올리는 동안에는 새 요청과 되돌리기를 받지 않는다 */
   exporting: boolean;
   run?: ActiveRun;
@@ -584,6 +580,11 @@ interface Session {
   terminalActivity?: TerminalActivity;
   /** 세션 터미널의 CLI가 훅으로 알려 온 마지막 대화 id와 그 CLI(#872). 스튜디오를 다시 띄운 뒤 터미널을 열 때 이어 붙인다 */
   terminalConversation?: TerminalConversation;
+  /**
+   * 폴더 신뢰 기록의 결과(ADR-222). 이 컴퓨터 방식 터미널의 claude가 쓰는 복사 모드 세션만 적는다. 기억에만 둔다
+   * (스튜디오를 다시 띄우면 비고, 그러면 안내를 보이지 않는다)
+   */
+  folderTrust?: { recorded: true } | { recorded: false; reason: string };
   /** 에이전트 실행을 시작한 횟수. 테스트 탭 실행이 도는 사이에 에이전트 실행이 있었는지 가리는 데 쓴다(ADR-152) */
   runsStarted?: number;
   /**
@@ -700,8 +701,6 @@ interface Store {
   registry?: SessionRegistry;
   recovery?: Promise<void>;
   previewGateway?: Server;
-  /** Figma 클라이언트. 파일·노드 캐시를 요청 사이에도 유지한다 */
-  figma?: FigmaClient;
   /** 이미 쓴 미리보기 티켓의 임의 값과 만료 시각 */
   previewTickets?: Map<string, number>;
   cleanupRegistered: boolean;
@@ -910,6 +909,8 @@ async function startSession({
   // 이 호출이 맵·레지스트리에 넣은 것만 치우려고 넣은 만큼만 표시한다(같은 id의 다른 세션을 빼지 않는다)
   let inMap = false;
   let inRegistry = false;
+  // 폴더 신뢰를 적으려 했는가. 만들다 실패하면 적은 것을 지운다
+  let trustAttempted = false;
 
   // 순서와 실패 처리는 Rust 수명 코어가 정한다(ADR-206). 각 단계는 아래 콜백이다. 세션 폴더는 코어가 배타적으로 만들고, 만들다 실패하면
   // 끝낸 단계를 거꾸로 치운다(이 호출이 만든 샌드박스·맵 항목·세션 폴더만). 원래 오류는 그대로 던진다
@@ -1002,7 +1003,7 @@ async function startSession({
       create_sandbox: async () => {
         sandbox = await provider.create(project, { secrets: await resolveSecrets(project), ...(initialAssets.length > 0 ? { evaluationAssets: initialAssets } : {}) });
       },
-      register_session: () => {
+      register_session: async () => {
         session = newSession({
           home: sessionDir,
           snapshot: {
@@ -1047,8 +1048,6 @@ async function startSession({
           serviceSelection,
           previewToken: randomBytes(16).toString('hex'),
         });
-        // studio.yaml에 design.figma가 있으면 그 설정을 화면에도 보여 준다(세션 단위 설정이 아직 없다)
-        session.snapshot.design = sessionDesignView(session);
 
         // 만들기가 도는 사이(복제·샌드박스 만들기는 오래 걸린다)에 같은 id가 생겼으면 덮어쓰지 않는다. 덮어쓰면 그 세션을 잃고 실패했을 때 그 세션을 뺀다
         if (store.sessions.has(id)) throw new StudioError(500, `세션 id가 이미 쓰이고 있어 만들지 않았습니다: ${id}`);
@@ -1057,6 +1056,17 @@ async function startSession({
         registerSession(session);
         inRegistry = true;
         registerCleanup();
+        // 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 던지지 않는다. 끝의 단계가 실패하면 unregister_session이 지운다
+        if (workspace !== 'local') {
+          trustAttempted = true;
+          // 작업 폴더(모노레포면 저장소 루트)와 프로젝트 폴더를 원본의 같은 자리와 짝짓는다. 원본 폴더 = source.root, 그 저장소 루트는 같은 상대 경로만큼 위다
+          const up = path.relative(workDir, project.root);
+          const sourceTop = up ? path.resolve(source.root, ...up.split(path.sep).map(() => '..')) : source.root;
+          await recordFolderTrust(session, seed !== undefined, [
+            [workDir, sourceTop],
+            [project.root, source.root],
+          ]);
+        }
       },
       // 세션 브랜치·시작 체크포인트·원격 주소를 작업 복사본 밖에 기억해 둔다(이슈 #699)
       remember_git: async () => {
@@ -1078,6 +1088,7 @@ async function startSession({
       // 치우기(만들다 실패했을 때, 끝낸 단계만 거꾸로): 이 호출이 만든 것만 치운다
       destroy_sandbox: () => sandbox.destroy(),
       unregister_session: async () => {
+        if (trustAttempted) await forgetFolderTrust(session.snapshot, sessionDir);
         // 예약된 저장을 지우고 줄에 선 쓰기가 끝나기를 기다린다. 저장은 폴더를 다시 만들어 쓰므로, 이 뒤에 세션 폴더를 지워도
         // 늦게 온 저장이 지운 폴더에 저장 파일을 다시 남겨 다음 시작 때 유령 세션으로 복구되는 일이 없게 한다
         if (inMap) {
@@ -1544,6 +1555,8 @@ export async function deleteSession(id: string): Promise<void> {
   }
   if (entry) archived.delete(id);
 
+  // 복사 모드 세션이면 claude의 폴더 신뢰 기록도 지운다(ADR-222). 폴더가 있을 때 지워야 실제 경로로 맞출 수 있어 폴더보다 먼저 한다
+  await forgetFolderTrust(snapshot, home);
   // 내 폴더 세션이어도 사용자 폴더는 지우지 않는다: 세션 폴더(상태 폴더)만 지운다. Rust가 지우기 직전에 다시 확인한다
   await removeSessionHome(root, home, snapshot);
 }
@@ -1706,9 +1719,6 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
       // 이어서 작업해도 열어 둔 미리보기 주소가 그대로 동작하게 같은 토큰을 쓴다
       previewToken: data.previewToken ?? randomBytes(16).toString('hex'),
     });
-    // 세션 단위 디자인 설정을 되살리고, 화면 상태를 다시 계산한다(studio.yaml 설정이 바뀌었을 수 있다)
-    session.design = data.design;
-    session.snapshot.design = sessionDesignView(session);
     // 기억한 Git 상태를 되살린다(이슈 #699). 이 기록이 없던 옛 세션이거나, 이어서 시작하며 b-studio가 HEAD를
     // 움직였으면(문서·직접 수정 체크포인트) 지금 값을 그 시점의 것으로 믿고 채운다
     session.git = data.git && !localEdits && !resumeDocsCheckpoint ? data.git : await initialGitMemory(checkpoints);
@@ -2004,25 +2014,6 @@ export function exploreQaBackendFor(id: string): { projectRoot: string; backend:
   return { projectRoot, backend: { kind: 'unsupported', backend } };
 }
 
-/** 세션 단위 Figma 파일 키가 있으면 그걸, 없으면 studio.yaml의 design.figma를 쓴다 */
-function effectiveDesign(session: Pick<Session, 'design' | 'project'>): { fileUrl: string; fileKey: string } | undefined {
-  if (session.design) return session.design;
-  const figma = session.project.spec.design?.figma;
-  return figma ? { fileUrl: figma.fileUrl, fileKey: figma.fileKey } : undefined;
-}
-
-/** 화면에 보여 줄 디자인 상태. 토큰 값은 넣지 않고 설정 여부만 알린다 */
-function sessionDesignView(session: Pick<Session, 'design' | 'project'>): DesignView | undefined {
-  const design = effectiveDesign(session);
-  if (!design) return undefined;
-  return { fileUrl: design.fileUrl, fileKey: design.fileKey, from: session.design ? 'session' : 'studio.yaml', hasToken: Boolean(process.env.FIGMA_TOKEN) };
-}
-
-/** HMR로 모듈이 다시 로드돼도 같은 캐시를 쓰도록 전역에 둔다. 토큰은 만들 때 읽으므로 바꾸려면 서버를 다시 시작한다 */
-function figmaClient(): FigmaClient {
-  return (store.figma ??= new FigmaClient({ token: process.env.FIGMA_TOKEN, baseUrl: process.env.B_STUDIO_FIGMA_API }));
-}
-
 /** 대화 입력창의 모델 선택 화면용. 이 세션 백엔드에서 고를 수 있는 목록과 지금 고른 값(모델·노력 단계)을 함께 돌려준다 */
 export async function sessionModelPicker(id: string): Promise<ModelPickerView> {
   const session = requireSession(id);
@@ -2073,19 +2064,6 @@ export async function setSessionLabel(id: string, label: string): Promise<Sessio
   // 보고 있는 화면(세션 화면 머리, 나란히 보기 칸)이 바로 바뀌게 알린다. 새로 붙는 화면은 스냅샷에서 받으므로 기록에 쌓지 않는다
   emit(session, clean ? { type: 'label', label: clean } : { type: 'label' });
   return session.snapshot;
-}
-
-/** 디자인 도구가 쓸 자료원. 세션에 디자인이 설정됐을 때만 runPlan이 넘긴다 */
-function designSourceFor(session: Session, runId: string): DesignSource | undefined {
-  const design = effectiveDesign(session);
-  if (!design) return undefined;
-  const client = figmaClient();
-  return {
-    frames: () => client.listFrames(design.fileKey, session.stop.signal),
-    frame: (id) => client.summarizeFrame(design.fileKey, id, session.stop.signal),
-    // 이미지는 세션 산출물로 저장하고 참조 경로만 모델에 돌려준다(모델에 이미지를 넘기지 않는다)
-    saveArtifact: (name, data) => saveArtifact(stateDirOf(session.snapshot), runId, { name, data, contentType: 'image/png' }),
-  };
 }
 
 /**
@@ -3156,8 +3134,6 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     board: plan.board,
     // 화면 확인이 찍은 스크린샷은 세션 폴더에 남긴다
     saveArtifact: (input: { name: string; data: Buffer; contentType: 'image/png' | 'image/jpeg' }) => saveSessionArtifact(session, run.id, input),
-    // 세션이 Figma 디자인을 설정했을 때만 디자인 도구를 넘긴다(없으면 도구 목록이 그대로다)
-    design: designSourceFor(session, run.id),
     // 되묻기(ask_user) 도구는 사람이 있는 단일 세션 요청에만 넣는다
     interactive: plan.interactive === true,
     signal,
@@ -7239,7 +7215,6 @@ function persistedBody(session: Session): PersistedBody {
     conversation: session.conversation.slice(0, session.settledConversation),
     demoIndex: session.demoIndex,
     claudeCode: session.claudeCode,
-    design: session.design,
     codex: session.codex,
     commandCode: session.commandCode,
     openCode: session.openCode,
@@ -7441,6 +7416,83 @@ function terminalModel(session: Session): { model?: string } {
   if (backend !== 'claude-code' && backend !== 'codex') return {};
   const model = cliModelOverride(session.snapshot.modelId);
   return model ? { model } : {};
+}
+
+/**
+ * 복사 모드 세션 폴더를 claude의 폴더 신뢰에 적는다(ADR-222). 이 컴퓨터 방식 터미널의 claude가 쓰는 세션만 적는다 — 컨테이너 방식의 claude는
+ * 컨테이너 안의 설정을 읽어 이 기록이 닿지 않는다. 사용자가 연 로컬 폴더는 부르지 않는다. 던지지 않는다: 실패하면 사유를 세션에 남기고 알림을 낸다
+ */
+async function recordFolderTrust(session: Session, seeded: boolean, folders: readonly (readonly [work: string, source: string])[]): Promise<void> {
+  try {
+    if (!sessionTerminalAllowed() || sessionTerminalMode() !== 'host' || terminalCliKind(session) !== 'claude') return;
+    // 다른 세션에서 이어받은 세션(작업 분해 레인·통합)의 내용에는 에이전트가 쓴 것이 섞여 있다. 훅이 부르는 스크립트처럼 설정 파일만 견줘서는
+    // 알 수 없는 것이 있어, 사람이 믿은 원본의 내용이 아니므로 적지 않는다(신뢰 창이 뜬다)
+    if (seeded) {
+      session.folderTrust = { recorded: false, reason: '다른 세션에서 이어받은 세션이라(에이전트가 쓴 내용이 섞여 있다) 폴더 신뢰를 적지 않았습니다' };
+      return;
+    }
+    const { configDir } = await sessionAccount(session.snapshot);
+    const pairs = [...new Map(folders.map(([work, original]) => [work, original] as const))];
+    // 세션 폴더의 내용은 원본에서 왔다. 짝마다 그 원본(모노레포면 저장소 루트와 하위 폴더 각각)을 사람이 믿었어야 한다. 하나라도 아니면 아무것도 적지 않는다
+    // (믿은 기록이 없거나 파일이 없는 것은 흔한 경우라 알림 없이 터미널 레인 안내로 두고, 파일을 읽지 못했으면 알린다)
+    for (const [, original] of pairs) {
+      const source = await sourceFolderTrusted(original, configDir ? { configDir } : {});
+      if (source.trusted) continue;
+      session.folderTrust = { recorded: false, reason: source.reason };
+      if (!source.missing && !source.notTrusted) {
+        emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${source.reason})`, at: new Date().toISOString() });
+      }
+      return;
+    }
+    // 에이전트가 이어받은 세션(작업 분해 레인)에서 훅·MCP 설정을 바꿨으면 그 내용은 사람이 믿은 원본이 아니다. 하나라도 다르면 아무것도 적지 않는다
+    for (const [folder, original] of pairs) {
+      const changed = await execSurfaceChange(folder, original);
+      if (changed) {
+        const reason = `세션 폴더의 ${changed}이(가) 원본과 달라 신뢰를 적지 않았습니다`;
+        session.folderTrust = { recorded: false, reason };
+        emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 않았습니다. 터미널에서 claude가 폴더 신뢰를 물으면 확인하고 고르세요 (${reason})`, at: new Date().toISOString() });
+        return;
+      }
+    }
+    let failure: { reason: string; missing?: true } | undefined;
+    for (const [folder] of pairs) {
+      const result = await trustSessionFolder(folder, { sessionsRoot: sessionsRoot(), ...(configDir ? { configDir } : {}) });
+      if (!result.ok) failure ??= { reason: result.reason, ...(result.missing ? { missing: true as const } : {}) };
+    }
+    if (failure === undefined) {
+      session.folderTrust = { recorded: true };
+      return;
+    }
+    session.folderTrust = { recorded: false, reason: failure.reason };
+    // 설정 파일이 아예 없으면(claude를 한 번도 쓰지 않은 계정) 세션 알림은 내지 않는다. 터미널 레인이 신뢰 창 안내를 사유와 함께 보인다
+    if (!failure.missing) {
+      emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${failure.reason})`, at: new Date().toISOString() });
+    }
+  } catch (error) {
+    session.folderTrust = { recorded: false, reason: describe(error) };
+    emit(session, { type: 'notice', text: `claude의 폴더 신뢰를 적지 못했습니다. 터미널에서 claude가 폴더 신뢰를 물으면 직접 고르세요 (${describe(error)})`, at: new Date().toISOString() });
+  }
+}
+
+/** 폴더 신뢰를 적지 못한 세션의 사유. 적었거나 적으려 하지 않았으면 undefined(터미널 레인이 신뢰 창 안내를 이때만 보인다) */
+export function sessionFolderTrustFailure(id: string): string | undefined {
+  const trust = store.sessions.get(id)?.folderTrust;
+  return trust && !trust.recorded ? trust.reason : undefined;
+}
+
+/**
+ * 세션 폴더의 신뢰 기록을 지운다(최선 노력, 던지지 않는다). 믿음을 줄이는 쪽이라 터미널 방식·실험 설정이 바뀐 뒤에도 지운다.
+ * 설정 파일이 없으면 지울 것이 없다. 계정이 목록에서 빠졌으면 그 설정 파일을 알 수 없어 지우지 못한다(기록만 남는다)
+ */
+async function forgetFolderTrust(snapshot: Pick<SessionSnapshot, 'accountId' | 'mode' | 'backend' | 'workspace'>, home: string): Promise<void> {
+  if (snapshot.workspace === 'local') return;
+  try {
+    const { configDir } = await sessionAccount(snapshot);
+    const result = await untrustSessionFolders(home, { sessionsRoot: sessionsRoot(), ...(configDir ? { configDir } : {}) });
+    if (!result.ok && !result.missing) console.error(`[b-studio] 폴더 신뢰 기록을 지우지 못했습니다: ${result.reason}`);
+  } catch (error) {
+    console.error(`[b-studio] 폴더 신뢰 기록을 지우지 못했습니다: ${describe(error)}`);
+  }
 }
 
 /** 세션이 쓰는 AI 계정의 설정 폴더와 CLI 환경(#885). 기본 계정이면 둘 다 없다 */

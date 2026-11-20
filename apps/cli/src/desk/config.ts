@@ -25,6 +25,8 @@ export interface DeskConfig {
   /** 권한·질문·입력 필요일 때의 벨·OS 알림(#922, 기본 켬) */
   notifyInput?: boolean;
   mouse?: boolean;
+  /** 칸 안에서 끌거나 두 번 눌러 고른 글을 바로 클립보드에 넣는다(기본 켬) */
+  copyOnSelect?: boolean;
   color?: ColorSetting;
   /** 색 팔레트(#887): dark(기본)·light */
   theme?: ThemeName;
@@ -98,7 +100,7 @@ export function loadDeskConfig(dir: string): { config: DeskConfig; warnings: str
     if (prefix) config.prefix = prefix;
     else warnings.push(`prefix는 "C-a" 꼴이어야 합니다(Ctrl-c·h·i·j·m은 쓸 수 없음). Ctrl-b를 씁니다`);
   }
-  for (const key of ['notify', 'notifyDone', 'notifyInput', 'mouse', 'animate'] as const) {
+  for (const key of ['notify', 'notifyDone', 'notifyInput', 'mouse', 'copyOnSelect', 'animate'] as const) {
     if (values[key] === undefined) continue;
     if (typeof values[key] === 'boolean') config[key] = values[key];
     else warnings.push(`${key}는 true나 false여야 합니다. 기본값(켬)을 씁니다`);
