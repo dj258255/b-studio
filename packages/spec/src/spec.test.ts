@@ -98,15 +98,12 @@ describe('parseSpec', () => {
     - { name: unit, service: api, command: [./gradlew, test] }
   allowedTools: [read_file, edit_file]
   protectedPaths: [.env, infra]
-  releaseRequires: [checkpoint]
 `);
     expect(spec.workflow).toMatchObject({
       required: ['plan', 'implement', 'run', 'test', 'checkpoint'],
       tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 1 }],
       allowedTools: ['read_file', 'edit_file'],
       protectedPaths: ['.env', 'infra'],
-      // zod는 모르는 키를 조용히 버린다. 선언한 필드가 실제로 남는지 확인한다
-      releaseRequires: ['checkpoint'],
     });
     expect(() => parseSpec(`${ORDERS_SPEC}workflow:
   required: [plan, deploy]

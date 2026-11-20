@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Dirent } from 'node:fs';
 import { appendFile, cp, lstat, mkdir, readdir, readFile, readlink, realpath, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { decodeNative, encodeLoneSurrogates, execArchiveExtract, execBytes, ExecBytesError, native } from '@b-studio/sandbox';
+import { decodeNative, encodeLoneSurrogates, execBytes, ExecBytesError, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
 import { CheckpointError, HeadMovedError, RemoteConflictError, StagedMismatchError } from './checkpoints';
 import { decodeLoneSurrogates } from './lone-surrogates';
@@ -1203,32 +1203,6 @@ export class LegacyCheckpointStore {
     for (const entry of withTime.slice(0, withTime.length - EXCLUDED_KEEP_MAX)) {
       await rm(path.join(root, entry.id), { recursive: true, force: true });
     }
-  }
-
-  /**
-   * 체크포인트의 파일을 폴더로 꺼낸다. 운영 배포는 작업 폴더가 아니라 게이트를 통과한 체크포인트를 빌드한다.
-   * 기록한 파일만 나오므로 생성물과 무시한 파일은 들어가지 않는다. 모노레포 하위 폴더 세션은 저장소 전체를 꺼내고 프로젝트 폴더를 돌려준다
-   */
-  async exportTree(sha: string, dest: string): Promise<string> {
-    const commit = await this.#resolve(sha);
-    // archive는 smudge 필터와 export-subst·export-ignore 속성을 따른다. 검증한 체크포인트와 다른 것이 나가지 않게 먼저 본다(이슈 #706)
-    await this.#assertSafeLocalGit();
-    await mkdir(dest, { recursive: true });
-    const location = this.#separateGitDir ? ['--git-dir', this.#separateGitDir, '--work-tree', this.root] : [];
-    // git archive와 tar를 Rust가 파이프로 잇는다(ADR-195 4f A1). root로 돌면 GNU tar는 기록된 소유자(uid 0)로 chown하려 해,
-    // 호스트 폴더를 마운트한 컨테이너에서 실패한다 (docs/troubleshooting.md 34). 그래서 `--no-same-owner`다
-    const outcome = await execArchiveExtract(this.#gitBin, [...GIT_HARDENING, '-C', this.root, ...location, 'archive', '--format=tar', commit], gitEnv(), dest);
-    if (outcome.spawnError !== null) throw new CheckpointError(`체크포인트를 꺼내지 못했습니다: ${redactCredentials(outcome.spawnError)}`);
-    let errors = outcome.stderr;
-    let failed = false;
-    for (const [name, code] of [['git archive', outcome.gitCode], ['tar', outcome.tarCode]] as const) {
-      if (code !== 0) {
-        failed = true;
-        errors += `\n${name}이(가) ${code}로 끝났습니다`;
-      }
-    }
-    if (failed) throw new CheckpointError(`체크포인트를 꺼내지 못했습니다: ${redactCredentials(errors.trim())}`);
-    return path.join(dest, await this.#subdir());
   }
 
   /**

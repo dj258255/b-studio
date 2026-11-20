@@ -54,9 +54,9 @@ describe('weakenedDeclarations', () => {
   });
 
   it('보호·실행 정책 목록에서 빠진 항목을 센다', () => {
-    const started = { protectedPaths: ['api/src', '.env'], evaluationAssets: ['tests/acceptance'], deniedCommands: ['git push'], requireApprovalFor: ['write_file'], releaseRequires: ['test', 'checkpoint'] } as WorkflowSpec;
-    const latest = { protectedPaths: ['.env'], evaluationAssets: [], deniedCommands: [], requireApprovalFor: ['write_file', 'run'], releaseRequires: ['checkpoint'] } as WorkflowSpec;
-    expect(weakenedDeclarations(started, latest)).toEqual(['삭제: 보호 경로 api/src', '삭제: 평가 자산 tests/acceptance', '삭제: 금지 명령 git push', '삭제: 배포 조건 단계 test']);
+    const started = { protectedPaths: ['api/src', '.env'], evaluationAssets: ['tests/acceptance'], deniedCommands: ['git push'], requireApprovalFor: ['write_file'] } as WorkflowSpec;
+    const latest = { protectedPaths: ['.env'], evaluationAssets: [], deniedCommands: [], requireApprovalFor: ['write_file', 'run'] } as WorkflowSpec;
+    expect(weakenedDeclarations(started, latest)).toEqual(['삭제: 보호 경로 api/src', '삭제: 평가 자산 tests/acceptance', '삭제: 금지 명령 git push']);
     // 더한 것은 약해진 것이 아니다
     expect(weakenedDeclarations({ protectedPaths: ['.env'] } as WorkflowSpec, { protectedPaths: ['.env', 'api/src'] } as WorkflowSpec)).toEqual([]);
   });
@@ -84,9 +84,9 @@ describe('weakenedDeclarations', () => {
 
 describe('withDeclaredChecks', () => {
   it('확인 선언만 지금 것으로 바꾸고 실행 정책은 시작할 때의 것을 둔다', () => {
-    const started = { tests: [unit], pageChecks: [page], protectedPaths: ['.env'], deniedCommands: ['git push'], maxChangedFiles: 3, releaseRequires: ['test', 'checkpoint'] } as WorkflowSpec;
-    const latest = { tests: [], loadChecks: [load], protectedPaths: [], deniedCommands: [], maxChangedFiles: 100, releaseRequires: ['checkpoint'], allowedTools: ['write_file'] } as unknown as WorkflowSpec;
-    expect(withDeclaredChecks(started, latest)).toEqual({ tests: [], loadChecks: [load], protectedPaths: ['.env'], deniedCommands: ['git push'], maxChangedFiles: 3, releaseRequires: ['test', 'checkpoint'] });
+    const started = { tests: [unit], pageChecks: [page], protectedPaths: ['.env'], deniedCommands: ['git push'], maxChangedFiles: 3 } as WorkflowSpec;
+    const latest = { tests: [], loadChecks: [load], protectedPaths: [], deniedCommands: [], maxChangedFiles: 100, allowedTools: ['write_file'] } as unknown as WorkflowSpec;
+    expect(withDeclaredChecks(started, latest)).toEqual({ tests: [], loadChecks: [load], protectedPaths: ['.env'], deniedCommands: ['git push'], maxChangedFiles: 3 });
   });
 
   it('지금 파일에 workflow가 없으면 확인 선언이 모두 빠지고 정책만 남는다', () => {

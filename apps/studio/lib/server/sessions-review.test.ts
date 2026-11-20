@@ -135,7 +135,6 @@ workflow:
     - name: unit
       service: api
       command: [./gradlew, test]
-  releaseRequires: [test, checkpoint]
 ${maxRounds === undefined ? '' : `review:\n  maxRounds: ${maxRounds}\n`}`;
 }
 

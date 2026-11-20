@@ -410,7 +410,6 @@ workflow:
   protectedPaths: [.env, .github/workflows, infra, migrations]
   evaluationAssets: [tests/acceptance]
   maxChangedFiles: 20
-  releaseRequires: [contract_check, test, review, checkpoint]
 ```
 
 | 키 | 적용 방식 |
@@ -426,7 +425,6 @@ workflow:
 | `evaluationAssets` | **에이전트가 고치면 안 되는 평가 자산**(인수 테스트, 기대값 파일, 판정 스크립트)의 경로. 게이트가 실행 시작 때 그 파일들의 지문을 떠 두고 검사 때 디스크를 직접 견줘, 하나라도 더해지거나·바뀌거나·지워졌으면 실패합니다(`tests`가 있으면 `test` 단계, 없으면 `review` 단계). 파일 도구뿐 아니라 셸 명령·`run_in_service`로 고친 것도 잡습니다. 파일 도구의 쓰기는 `protectedPaths`처럼 미리 막습니다. 에이전트가 같은 실행에서 이 선언을 지워도 그 실행에는 시작 때 선언이 쓰입니다. 링크·특수 파일이 있거나 파일이 2000개를 넘으면 실패합니다(선언을 좁히세요). 평가 자산은 사람이 고칩니다 — 스튜디오 밖에서 고친 것은 다음 요청부터 기준이 됩니다. 서비스 컨테이너와 터미널 에이전트 컨테이너에는 **마지막 체크포인트에 커밋된 판**이 읽기 전용으로 붙어, 컨테이너 안 명령은 테스트 중이든 아니든 쓸 수 없고 테스트는 그 판으로 돕니다. 작업 복사본에서 고친 평가 자산은 체크포인트로 남은 뒤부터 테스트에 쓰입니다. 선언을 바꾸면 샌드박스를 새로 만들 때부터 반영됩니다 |
 | `maxChangedFiles` | `review` 단계에서 한 요청의 변경 파일 수 상한을 확인합니다 |
 | `maxTurns` | 한 요청 안에서 모델이 쓸 수 있는 턴(모델 호출) 상한(1~300). 생략하면 각 실행기의 기본값(60)을 그대로 씁니다. 요청 옵션(`maxTurns`)이 있으면 이 값보다 우선합니다. 아래 '턴 상한' |
-| `releaseRequires` | `Workflow-Passed` 트레일러에 있어야 하는 단계(예전 배포 조건). 운영 배포 기능을 지워 배포 판정에는 쓰이지 않습니다(ADR-221) |
 
 불러올 때 검사하는 규칙:
 
@@ -434,6 +432,7 @@ workflow:
 - `tests`·`pageChecks`·`concurrencyChecks`·`loadChecks`의 `service`는 `source: managed` 서비스여야 합니다. `pageChecks.expectFromApi.service`(값을 꺼낼 api)도 마찬가지입니다.
 - `autoPageChecks.service`는 `source: managed`이면서 템플릿이 `nextjs`인 서비스여야 합니다(열어 볼 경로를 app 라우터 구조에서 찾습니다).
 - 테스트·동시 요청 확인·부하 확인 이름은 서로 중복될 수 없습니다.
+- `workflow.releaseRequires`는 더는 지원하지 않습니다. 운영 배포를 지운 뒤 아무 일도 하지 않던 항목이라, 적어 두면 조용히 무시하지 않고 "이 항목을 지우세요"로 거절합니다(빈 값·`~`·`[]`도 같습니다).
 - `concurrencyChecks.headers`는 5개까지이고, JSON 본문(`body`)은 8KB 이하입니다. `Authorization`·`Cookie` 같은 인증 헤더는 비밀 값을 담으므로 거부합니다(studio.yaml은 저장소에 커밋됩니다). 인증이 필요하면 서비스가 `secrets`의 환경 변수를 읽게 하세요.
 
 ### 부하 확인 (`loadChecks`)
@@ -502,7 +501,7 @@ workflow:
 |---|---|
 | 켜면 | 게이트가 검증할 때 `studio.yaml`을 다시 읽어, 이번 실행에서 바뀐 확인 선언으로 돌립니다 |
 | 바뀌는 것 | `tests`·`pageChecks`·`concurrencyChecks`·`loadChecks`·`autoPageChecks`·`required` |
-| 바뀌지 않는 것 | 허용 도구, 금지 명령, 보호 경로, 승인 대상, `maxChangedFiles`, `releaseRequires`. 켜도 요청을 시작할 때의 것입니다 |
+| 바뀌지 않는 것 | 허용 도구, 금지 명령, 보호 경로, 승인 대상, `maxChangedFiles`. 켜도 요청을 시작할 때의 것입니다 |
 | 남는 기록 | 리뷰 단계에 `declared-checks` 확인으로 "추가 · 삭제 · 변경"이 선언의 이름으로 남고, 체크포인트 본문에도 실립니다 |
 | 범위 | 그 요청 하나. 보낸 뒤에는 꺼집니다 |
 

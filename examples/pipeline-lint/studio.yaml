@@ -47,7 +47,6 @@ workflow:
   # 검사 도구와 스키마를 바꾸면 검사가 느슨해질 수 있어 toolbox 폴더는 사람 승인 없이 바꾸지 못하게 한다
   protectedPaths: [toolbox, .github/workflows]
   maxChangedFiles: 20
-  releaseRequires: [test, review, checkpoint]
 
 services:
   toolbox:

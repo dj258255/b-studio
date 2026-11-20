@@ -91,7 +91,6 @@ services:
   web: { source: managed, template: nextjs, path: web, port: 3000, preview: browser }
 workflow:
   required: [plan, implement, run, contract_check, test, checkpoint]
-  releaseRequires: [checkpoint, test]
   tests:
     - { name: api-test, service: api, command: [run-tests] }
 review:

@@ -14,6 +14,7 @@
 
 ### 바뀜
 
+- `studio.yaml`의 `workflow.releaseRequires`를 "`workflow.releaseRequires`는 더는 지원하지 않습니다. 이 항목을 지우세요"로 거절합니다(ADR-221, #1321). 운영 배포를 지운 뒤 아무 일도 하지 않으면서 배포 조건이 걸린다고 믿게 하던 설정입니다. 배포 전용 판정(`releaseBlockers`·`workflowReleaseRequirements`와 Rust·napi 짝)과 게이트의 "배포 조건 단계" 약화 비교 항목, `CheckpointStore.exportTree`와 그것만 쓰던 `git archive | tar -x` 파이프(`execArchiveExtract`·napi `runArchiveExtract`·Rust `run_archive_extract`)를 함께 지웠습니다. 예제 `studio.yaml` 둘에서도 그 줄을 뺐습니다.
 - Kubernetes 샌드박스 제공자를 지웠습니다(ADR-221, #1311). `packages/sandbox/src/kubernetes/`와 `B_STUDIO_SANDBOX_PROVIDER=kubernetes` 분기(`B_STUDIO_K8S_*` 설정), 관련 시험을 뺐습니다. 그 값을 넣으면 조용히 Docker로 떨어지지 않고 "더는 지원하지 않습니다"로 시작을 거절합니다. 로컬 Docker 제공자의 동작은 그대로입니다.
 - 운영 배포 기능을 지웠습니다(ADR-221, #1313). `studio deploy` 명령, 배포 API·desk 배포 탭, `DockerDeployer`와 배포 e2e, 배포용 Rust I/O를 지우고, `studio.yaml`의 `deploy` 절은 "`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요"로 거절합니다.
 - 원격 브라우저(미리보기 QA의 서버 소유 브라우저 화면 중계와 입력 되돌리기, ADR-052)를 지웠습니다(ADR-221, #1309). 화면은 웹 화면과 함께 지워져 desk에서 닿을 곳이 없고, 남은 코드는 탐색형 QA가 쓰던 미리보기 주소·허용 출처 helper였습니다(이름을 `exploreQaPreviewUrl`·`exploreQaAllowedOrigins`로 바꿈). 게이트의 화면 확인(Rust CDP 러너, ADR-199)과 탐색형 QA는 그대로이고, 지운 기능을 지금 쓸 수 있는 것처럼 말하던 문서를 고쳤습니다. studio.yaml에는 이 기능의 항목이 없습니다.

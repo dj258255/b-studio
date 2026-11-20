@@ -164,6 +164,32 @@ describe('schema: 의도한 차이', () => {
   });
 });
 
+describe('schema: workflow.releaseRequires 의도한 차이', () => {
+  const removed = '`workflow.releaseRequires`는 더는 지원하지 않습니다. 이 항목을 지우세요';
+
+  it('어떤 값이 와도 옛 스키마는 받고, 새 스키마는 지우라고 거절한다', () => {
+    for (const releaseRequires of [['checkpoint'], ['test', 'review', 'checkpoint'], []]) {
+      const input = { ...BASE, workflow: { releaseRequires } };
+      if (releaseRequires.length > 0) expect(legacy.StudioSpecSchema.safeParse(input).success).toBe(true);
+      expect(normalized(current.StudioSpecSchema.safeParse(input))).toEqual({ ok: false, issues: [{ path: ['workflow', 'releaseRequires'], message: removed }] });
+    }
+  });
+
+  it('빈 값(null)도 거절하고, YAML의 빈 값·~·[]는 파싱 단계에서 같은 글로 거절한다', () => {
+    const input = { ...BASE, workflow: { releaseRequires: null } };
+    expect(normalized(current.StudioSpecSchema.safeParse(input))).toEqual({ ok: false, issues: [{ path: ['workflow', 'releaseRequires'], message: removed }] });
+    for (const value of ['', ' ~', ' null', ' []', ' [checkpoint]']) {
+      let message = '';
+      try {
+        parseCurrent(`${SPEC_YAML}workflow:\n  releaseRequires:${value}\n`);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, value).toContain(removed);
+    }
+  });
+});
+
 describe('schema: legacy Zod와 Rust가 같다', () => {
   it('측정한 오류 꼴 전부가 같은 issues(path·message·순서)를 낸다', () => {
     for (const [label, a, b, input] of MEASURED) compare(label, a, b, input);

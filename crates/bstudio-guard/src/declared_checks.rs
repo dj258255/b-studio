@@ -14,12 +14,11 @@ use crate::review_input::{nullish_array, opt_prop, prop, template};
 const DECLARED_FIELDS: [&str; 6] = ["required", "tests", "pageChecks", "concurrencyChecks", "loadChecks", "autoPageChecks"];
 
 /// 약해졌는지 보는 실행 정책 목록과 사람이 읽는 이름
-const POLICY_LISTS: [(&str, &str); 5] = [
+const POLICY_LISTS: [(&str, &str); 4] = [
     ("protectedPaths", "보호 경로"),
     ("evaluationAssets", "평가 자산"),
     ("deniedCommands", "금지 명령"),
     ("requireApprovalFor", "승인 대상 도구"),
-    ("releaseRequires", "배포 조건 단계"),
 ];
 
 #[derive(Debug, Default, PartialEq)]
