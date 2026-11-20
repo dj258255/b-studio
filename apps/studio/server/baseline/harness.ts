@@ -154,6 +154,24 @@ async function quiet(file: string, ms = 400, limitMs = 15_000): Promise<void> {
   }
 }
 
+/**
+ * 가짜 docker의 호출 기록을 읽는다(#1333).
+ * 서버가 끝나며 따로 띄우는 정리 명령(compose down, 에이전트 컨테이너 rm)은 node가 늦게 떠, 기록이 "조용한 시간"(400ms)보다 늦게 올 수 있다.
+ * 그래서 셸 감싸개가 node를 띄우기 전에 남긴 "불렸다" 줄(`docker-spawned.log`, 셸이라 몇 ms 안에 쓴다)의 수만큼 기록이 올 때까지 기다린 뒤,
+ * 조용해질 때까지 한 번 더 기다려 읽는다. 상한을 넘기면 읽은 만큼 돌려준다(사진이 달라져 시험이 실패한다 — 통과로 덮지 않는다)
+ */
+export async function readDockerCalls(binDir: string, limitMs = 15_000): Promise<DockerCall[]> {
+  const file = path.join(binDir, 'docker-calls.jsonl');
+  const lines = async (name: string) => (await readFile(path.join(binDir, name), 'utf8').catch(() => '')).split('\n').filter(Boolean).length;
+  const deadline = Date.now() + limitMs;
+  while (Date.now() < deadline && (await lines('docker-calls.jsonl')) < (await lines('docker-spawned.log'))) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  await quiet(file);
+  const text = await readFile(file, 'utf8').catch(() => '');
+  return text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as DockerCall);
+}
+
 export async function createWorld(options: WorldOptions = {}): Promise<World> {
   // /tmp 아래 짧은 경로(unix 소켓·macOS 경로 길이)에 두고, 심볼릭 링크를 푼 실제 경로를 쓴다(macOS의 /tmp → /private/tmp)
   const root = await realpath(await mkdtemp(path.join('/tmp', 'bsb-')));
@@ -174,14 +192,16 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
   await git(projectRoot, ['commit', '--quiet', '-m', '데모 프로젝트']);
 
   // 가짜 실행 파일: 셸 한 줄 래퍼가 node로 스크립트를 부른다. 시나리오와 기록은 bin 폴더에 둔다(서버가 환경을 걸러도 닿는다)
-  const wrap = async (name: string, script: string, ...args: string[]) => {
+  const wrap = async (name: string, script: string, args: string[], spawnedLog?: string) => {
     const file = path.join(binDir, name);
-    await writeFile(file, `#!/bin/sh\nexec "${process.execPath}" "${script}" ${args.map((arg) => `"${arg}"`).join(' ')} "$@"\n`);
+    // spawnedLog가 있으면 node를 띄우기 전에 한 줄 남긴다(늦게 뜨는 node의 기록을 기다릴 근거, readDockerCalls)
+    const mark = spawnedLog ? `echo x >> "${spawnedLog}"\n` : '';
+    await writeFile(file, `#!/bin/sh\n${mark}exec "${process.execPath}" "${script}" ${args.map((arg) => `"${arg}"`).join(' ')} "$@"\n`);
     await chmod(file, 0o755);
   };
-  await wrap('docker', path.join(import.meta.dirname, 'fake-docker.mjs'), binDir);
-  if (options.terminal) await wrap('claude', path.join(import.meta.dirname, 'fake-claude-terminal.mjs'), path.join(binDir, 'claude-terminal.jsonl'));
-  else await wrap('claude', path.join(FIXTURES, 'fake-claude-cli.mjs'), path.join(binDir, 'claude-scenario.json'), path.join(binDir, 'claude-log'));
+  await wrap('docker', path.join(import.meta.dirname, 'fake-docker.mjs'), [binDir], path.join(binDir, 'docker-spawned.log'));
+  if (options.terminal) await wrap('claude', path.join(import.meta.dirname, 'fake-claude-terminal.mjs'), [path.join(binDir, 'claude-terminal.jsonl')]);
+  else await wrap('claude', path.join(FIXTURES, 'fake-claude-cli.mjs'), [path.join(binDir, 'claude-scenario.json'), path.join(binDir, 'claude-log')]);
   await writeFile(path.join(binDir, 'claude-scenario.json'), JSON.stringify(options.claude ?? {}));
 
   const ready = await startReadyServer();
@@ -220,11 +240,7 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
     env,
     readyPort: ready.port,
     setDocker: (scenario) => writeDocker(scenario),
-    dockerCalls: async () => {
-      await quiet(path.join(binDir, 'docker-calls.jsonl'));
-      const text = await readFile(path.join(binDir, 'docker-calls.jsonl'), 'utf8').catch(() => '');
-      return text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as DockerCall);
-    },
+    dockerCalls: () => readDockerCalls(binDir),
     cleanup: async () => {
       await ready.close();
       await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
