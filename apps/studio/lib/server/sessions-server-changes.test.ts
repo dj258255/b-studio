@@ -318,6 +318,19 @@ describe('applyServerChanges: 서버가 쓴 레인 결과를 터미널 턴 끝�
     it('같은 경로를 쓰고 지우거나 두 번 쓰면 거절한다', async () => {
       await rejected(await open(), { writes: [GOOD, GOOD] }, /두 번/);
     }, 30_000);
+
+    it('대소문자나 유니코드 정규화만 다른 같은 파일도 두 번으로 본다(대소문자를 구분하지 않는 볼륨에서는 같은 파일이다)', async () => {
+      await rejected(await open(), { writes: [GOOD, { path: 'api/src/ORDER.java', content: 'x' }] }, /두 번/);
+      await rejected(await open(), { writes: [{ path: 'api/src/caf\u00e9.java', content: 'x' }, { path: 'api/src/cafe\u0301.java', content: 'y' }] }, /두 번/);
+    }, 60_000);
+
+    it.each([
+      ['앞 공백', ' api/x.java'],
+      ['조각 끝 공백', 'api /x.java'],
+      ['끝 공백', 'api/x.java '],
+    ])('경로 조각 앞뒤의 공백: %s (범위 검사는 앞뒤 공백을 지운 글로 본다)', async (_name, file) => {
+      await rejected(await open(), { writes: [{ path: file, content: 'x' }] }, /공백/);
+    }, 30_000);
   });
 
   it('게이트가 실패하면 재시도 없이 실패로 닫고 쓴 파일을 되돌린다. 실행이 열린 채 남지 않는다', async () => {
@@ -403,6 +416,25 @@ describe('applyServerChanges: 서버가 쓴 레인 결과를 터미널 턴 끝�
       const openRun = openTerminalRunId(session.id);
       expect(openRun).toBeDefined();
       await refused(session, openRun);
+    }, 30_000);
+
+    it('서버 실행이 열려 있는 동안에는 세션 터미널을 열지 못한다(서버가 쓴 것만 바뀐다는 전제)', async () => {
+      const session = await open();
+      let release = (): void => {};
+      fake.hold = new Promise<void>((resolve) => (release = resolve));
+      fake.holdWord = 'test';
+      const running = apply(session);
+      for (let i = 0; i < 200 && !fake.execCalls.some((command) => command.includes('test')); i += 1) await new Promise((resolve) => setTimeout(resolve, 25));
+      let refusal: unknown;
+      try {
+        sessionTerminalTarget(session.id);
+      } catch (error) {
+        refusal = error;
+      }
+      release();
+      expect(refusal).toBeInstanceOf(StudioError);
+      expect((refusal as StudioError).status).toBe(409);
+      expect(await running).toMatchObject({ status: 'done' });
     }, 30_000);
 
     it('컨테이너 방식은 검사 동안 멈출 에이전트 컨테이너가 없어 받지 않는다', async () => {

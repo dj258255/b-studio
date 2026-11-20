@@ -1092,6 +1092,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     const writableScope = [...new Set(plan.lanes.flatMap((lane) => lane.paths))];
     const request = `작업 분해 통합: ${plan.request}`;
     let settled: { status: string; summary: string };
+    let appliedCheckpoint: Checkpoint | undefined;
     // 옛 길(채팅식 실행에 대본 턴으로 싣는다)을 타는 경우. 터미널 턴 끝 판정으로 가지 않는다:
     //  - verify가 'light': 가벼운 검증을 터미널 판정이 같은 뜻으로 받는지 아직 모른다
     //  - S4: 게이트가 실패하면 모델에 수리를 요청하는 길이라 모델 호출이 필요하다(#1327의 다른 항목)
@@ -1127,13 +1128,15 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     } else {
       // 서버가 레인 결과를 작업 폴더에 쓰고 터미널 턴 끝과 같은 판정으로 닫는다(ADR-224). 채팅식 실행도 모델 호출도 없다
       const applied = await applyServerChanges(snapshot.id, { request, writes, deletes: removable, writableScope });
+      appliedCheckpoint = applied.checkpoint;
       // 모델을 부르지 않으므로 usage·metrics는 없다
       integration.run = { status: applied.status, durationMs: applied.durationMs };
       // 통과했는데 체크포인트가 남지 않았으면 합친 결과의 근거가 없다. 옛 길은 세션 시작 체크포인트를 합친 결과로 적었다
       settled = applied.status === 'done' && applied.checkpoint === undefined ? { status: 'failed', summary: '검증은 통과했지만 합친 결과가 체크포인트로 남지 않았습니다(바뀐 파일이 없었습니다)' } : applied;
     }
     if (settled.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${settled.status} ${settled.summary}`);
-    Object.assign(integration, { status: 'done', checkpoint: checkpointView(getSnapshot(snapshot.id)?.checkpoints[0]) });
+    // 새 길은 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다). 옛 길은 세션의 최신 체크포인트다
+    Object.assign(integration, { status: 'done', checkpoint: checkpointView(appliedCheckpoint ?? getSnapshot(snapshot.id)?.checkpoints[0]) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
     recordMetrics(plan);

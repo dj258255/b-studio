@@ -552,6 +552,8 @@ interface Session {
    * 같은 폴더에 CLI나 사람이 쓸 수 있어 "서버가 쓴 것만 바뀌었다"가 성립하지 않는다. 한 번 서면 이 세션 객체에서는 꺼지지 않는다
    */
   terminalOpened?: boolean;
+  /** 서버가 이 세션의 작업 폴더에 쓰고 판정하는 중이다(`applyServerChanges`). 그동안 세션 터미널을 열지 않는다(같은 폴더에 다른 쪽이 쓰지 못하게) */
+  serverApplying?: boolean;
   /**
    * 가장 최근에 닫힌 터미널 실행의 시작·끝 시각(#726). CLI의 텔레메트리는 내보내기 주기가 있어 실행이 닫힌 뒤
    * 몇 초 안에 도착할 수 있다. 그때 이 실행에 붙인다(실행이 끝난 뒤 늦게 온 사용량도 그 실행의 몫이다)
@@ -7383,6 +7385,8 @@ export function sessionTerminalTarget(id: string): {
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
+  // 서버가 작업 폴더에 쓰고 판정하는 동안에는 열지 않는다. 열면 CLI·사람이 같은 폴더에 쓰고, CLI의 훅이 서버가 연 실행에 붙는다(ADR-224)
+  if (session.serverApplying === true) throw new StudioError(409, '서버가 이 세션에 변경을 쓰고 검증하는 중이라 터미널을 열 수 없습니다. 끝난 뒤 다시 여세요');
   // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
   session.terminalOpened = true;
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
@@ -8926,6 +8930,8 @@ function serverChangePathProblem(file: string): string | undefined {
   if (file.includes('\\')) return '경로에 역슬래시가 있습니다';
   if (file.startsWith('/') || /^[A-Za-z]:/.test(file)) return '절대 경로는 쓸 수 없습니다';
   if (file.split('/').some((part) => part === '' || part === '.' || part === '..')) return '경로에 빈 조각, ., ..이 있습니다';
+  // 범위 검사(terminalRelativePath)는 앞뒤 공백을 지운 글로 보고 실제 쓰기는 원문으로 쓴다. 둘이 다르게 읽는 모양은 받지 않는다
+  if (file.split('/').some((part) => part !== part.trim())) return '경로 조각 앞뒤에 공백이 있습니다';
   return undefined;
 }
 
@@ -8961,6 +8967,9 @@ export async function applyServerChanges(
   }
   // 이미 걸린 카드 맥락을 덮어쓰고 끝에 지우면 그 맥락의 주인이 범위 없이 일하게 된다
   if (session.terminalTaskContext !== undefined) throw new StudioError(409, '이미 쓰기 범위가 걸린 세션입니다');
+  if (session.serverApplying === true) throw new StudioError(409, '서버가 이미 이 세션에 변경을 쓰고 있습니다');
+  // 위 검사와 이 표 사이에 기다림이 없다. 표가 서 있는 동안 sessionTerminalTarget이 터미널을 열지 않는다
+  session.serverApplying = true;
 
   // 서버가 연 실행은 사람의 요청이 아니다: 켜 둔 확인 선언 변경 허용을 가져가지 않는다
   const finishedEvents: Array<Extract<StudioEvent, { type: 'run_finished' }>> = [];
@@ -9004,6 +9013,7 @@ export async function applyServerChanges(
     if (!terminalRunClosed(session.life, opening.ticket)) await fail('서버가 쓴 변경의 판정이 실행을 닫지 않아 실패로 닫습니다').catch(() => {});
   } finally {
     session.listeners.delete(listener);
+    session.serverApplying = undefined;
     // 맥락은 이 함수가 걸었을 때만 지운다(위에서 이미 걸려 있으면 던졌다)
     if (run) setTerminalTaskContext(id, undefined);
   }
@@ -9028,6 +9038,8 @@ async function writeServerChanges(
   run: ActiveRun & { terminal: TerminalRunState },
   input: { writes: ReadonlyArray<{ path: string; content: string }>; deletes: readonly string[] },
 ): Promise<string | undefined> {
+  // 쓰기 직전에 한 번 더: 그 사이 터미널이 열렸으면(열리지 않게 막았지만) 쓰지 않는다
+  if (session.terminalOpened === true || hasWatch(session.snapshot.id)) return '터미널이 열린 세션이라 서버가 쓰지 않습니다';
   const card = session.terminalTaskContext;
   // 범위가 걸려 있지 않으면 범위 검사가 아무것도 막지 않는다(`terminalScopeDeny`는 맥락이 없으면 통과다). 허용 목록이므로 모르면 막는다
   if (!card) return '쓰기 범위가 걸려 있지 않아 서버가 쓸 수 없습니다';
@@ -9037,8 +9049,10 @@ async function writeServerChanges(
     const bad = serverChangePathProblem(file);
     if (bad) return `${file}: ${bad}`;
     // 같은 파일을 쓰고 지우는 것은 순서에 따라 결과가 달라진다. 모르면 막는다
-    if (seen.has(file)) return `${file}: 같은 경로가 두 번 있습니다`;
-    seen.add(file);
+    // 대소문자를 구분하지 않는 볼륨(macOS·Windows 기본)과 유니코드 정규화에서 같은 파일이면 같은 경로로 본다
+    const key = file.normalize('NFC').toLowerCase();
+    if (seen.has(key)) return `${file}: 같은 경로가 두 번 있습니다`;
+    seen.add(key);
   }
   let verification: TerminalVerification;
   try {
