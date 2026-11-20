@@ -1,5 +1,6 @@
 import { requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
+import { assertTerminalAccess } from '@/lib/server/terminal-access';
 import { newSessionModel } from '@/lib/server/new-session';
 import { startRoutedSession } from '@/lib/server/routed-session';
 import { createSession, listSessions, resolveSessionBackend } from '@/lib/server/sessions';
@@ -23,7 +24,7 @@ export async function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const user = requireUser(request.headers);
+    requireUser(request.headers);
     const body = (await request.json().catch(() => ({}))) as {
       projectId?: unknown;
       workspace?: unknown;
@@ -37,6 +38,9 @@ export async function POST(request: Request) {
       allowCheckChanges?: unknown;
       accountId?: unknown;
     };
+    // terminal: true는 세션 터미널을 열고 첫 요청을 그 안의 CLI에 넘긴다(확인 변경 허용도 이 길로만 켠다). 세션 터미널 통로와 같은 검사
+    // (이 컴퓨터 주소·로컬 토큰)를 거친다 — 로그인만 보면 같은 컴퓨터의 다른 프로세스가 터미널 통로의 검사를 비켜 간다(ADR-223)
+    const user = body.terminal === true ? await assertTerminalAccess(request.headers) : requireUser(request.headers);
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
     // 쓸 AI 계정(#885). 계정 목록의 id다. 목록에 있는지와 CLI가 맞는지는 세션을 만들 때 본다
     if (body.accountId !== undefined && typeof body.accountId !== 'string') throw new StudioError(400, 'accountId는 문자열이어야 합니다');

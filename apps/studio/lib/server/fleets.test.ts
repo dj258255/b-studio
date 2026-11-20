@@ -562,46 +562,19 @@ describe('터미널 Fleet', () => {
     expect(fake.createSession).toHaveBeenCalledTimes(2);
   });
 
-  it('쓰기 범위 확인을 푼 Fleet은 요청을 붙여 넣기 전에 setTerminalCheckChanges를 켠다', async () => {
+  it('터미널 방식은 호환성을 깨는 변경 허용(allowBreaking)을 받지 못해 세션을 만들기 전에 400으로 거절한다(다른 허용으로 바꿔 켜지 않는다)', async () => {
     terminalHarness();
-    const created = await terminalFleet({ allowBreaking: true });
-    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
-
-    for (const member of created.members) {
-      const calls = fake.calls.filter((call) => call.endsWith(`:${member.sessionId}`) || call.includes(`:${member.sessionId}:`));
-      expect(calls.indexOf(`check:${member.sessionId}:true`)).toBeGreaterThan(calls.indexOf(`open:${member.sessionId}`));
-      expect(calls.indexOf(`check:${member.sessionId}:true`)).toBeLessThan(calls.indexOf(`paste:${member.sessionId}`));
-    }
+    const error = await terminalFleet({ allowBreaking: true }).then(
+      () => undefined,
+      (cause: unknown) => cause,
+    );
+    expect(error).toBeInstanceOf(StudioError);
+    expect((error as StudioError).status).toBe(400);
+    expect(fake.createSession).not.toHaveBeenCalled();
+    expect(fake.setTerminalCheckChanges).not.toHaveBeenCalled();
   });
 
-  it('쓰기 범위 확인을 푼 멤버가 끝나면 그 허용을 끈다(실행이 가져가지 않았어도 세션에 남아 뒤의 무관한 요청에 걸리지 않게)', async () => {
-    const harness = terminalHarness();
-    const created = await terminalFleet({ allowBreaking: true });
-    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
-    for (const member of created.members) {
-      const runId = `trun-${member.sessionId}`;
-      harness.emit(member.sessionId, { type: 'run_finished', runId, status: 'done', summary: '끝' } as StudioEvent);
-    }
-    await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'done'), '멤버가 끝나지 않았습니다');
-    for (const member of created.members) {
-      const on = fake.calls.indexOf(`check:${member.sessionId}:true`);
-      const off = fake.calls.lastIndexOf(`check:${member.sessionId}:false`);
-      expect(on).toBeGreaterThanOrEqual(0);
-      expect(off).toBeGreaterThan(on);
-    }
-  });
-
-  it('쓰기 범위 확인을 푼 멤버가 붙여 넣기 전에 실패해도 그 허용을 끈다', async () => {
-    const harness = terminalHarness();
-    const created = await terminalFleet({ allowBreaking: true });
-    await until(() => fake.calls.filter((call) => call.startsWith('check:') && call.endsWith(':true')).length === 2, '허용을 켜지 않았습니다');
-    // 실행이 시작되기 전에 세션이 멈춘다 — runTerminalTask가 던진다
-    harness.state.status = 'stopped';
-    for (const member of created.members) harness.emit(member.sessionId, { type: 'status', status: 'stopped' } as StudioEvent);
-    await until(() => created.members.every((member) => fake.calls.includes(`check:${member.sessionId}:false`)), '허용을 끄지 않았습니다');
-  });
-
-  it('allowBreaking이 아니면 setTerminalCheckChanges를 부르지 않는다', async () => {
+  it('터미널 멤버를 돌릴 때 확인 선언 변경 허용을 켜지 않는다', async () => {
     terminalHarness();
     const created = await terminalFleet();
     await until(() => getFleet(created.id, 'tess').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');

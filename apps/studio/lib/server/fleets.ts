@@ -10,7 +10,7 @@ import { StudioError } from './errors';
 import { listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { sessionTerminalMode } from './session-terminal';
-import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, setTerminalCheckChanges, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
+import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 
 const MAX_MEMBERS = 4;
@@ -88,7 +88,11 @@ export async function createFleet(input: {
   const selected: ValidatedCandidate[] = [];
   for (const candidate of candidates) selected.push(await validateCandidate(candidate));
   // 터미널로 못 띄우는 후보는 세션을 하나도 만들기 전에 거절한다(조용히 다른 백엔드로 바꾸지 않는다)
-  if (runner === 'terminal') assertTerminalRunnable(selected);
+  if (runner === 'terminal') {
+    // 터미널 실행은 호환성을 깨는 변경 허용을 실을 길이 없다(터미널 실행은 늘 false). 다른 뜻의 허용(확인 선언 변경)으로 바꿔 켜지 않고 거절한다
+    if (input.allowBreaking === true) throw new StudioError(400, '터미널 방식 Fleet은 아직 호환성을 깨는 변경 허용을 받지 못합니다');
+    assertTerminalRunnable(selected);
+  }
 
   // CLI 백엔드는 멤버를 만들기 전에 로그인을 확인한다. 실패하면 Fleet을 만들지 않고 이유를 알린다
   // (멤버를 몇 개 만들다 실패하면 절반만 뜬 비교가 남는다). 계정을 고른 후보는 그 계정의 설정 폴더로 확인한다(#892)
@@ -361,8 +365,6 @@ async function runTerminalMember(fleet: FleetView, member: FleetMemberView): Pro
   const driver = terminalDeps?.driver ?? terminalLaneDriver;
   try {
     await driver.open(member.sessionId);
-    // 터미널의 요청은 CLI가 훅으로 알려 와 요청마다 옵션을 실을 수 없다. 붙여 넣기 전에 미리 켜 두면 그 뒤 처음 시작되는 만들기 실행이 가져간다
-    if (fleet.allowBreaking) setTerminalCheckChanges(member.sessionId, true);
     const result = await runTerminalTask(
       member.sessionId,
       fleet.request,
@@ -403,15 +405,6 @@ async function runTerminalMember(fleet: FleetView, member: FleetMemberView): Pro
       member.finishedAt = new Date().toISOString();
     }
   } finally {
-    // 켠 허용은 끝나면 반드시 끈다. 허용은 "다음 만들기 실행 하나"가 가져갈 때만 지워진다 — 붙여 넣기 전에 실패했거나 읽기 실행으로 끝났으면
-    // 세션에 남아, 뒤에 사람이 그 세션에서 친 무관한 요청이 확인 변경 허용으로 돈다(게이트를 푸는 상태가 남는다)
-    if (fleet.allowBreaking) {
-      try {
-        setTerminalCheckChanges(member.sessionId, false);
-      } catch {
-        // 세션이 이미 지워졌으면 끌 허용도 없다
-      }
-    }
     delete member.waiting;
     try {
       persist(fleet);
