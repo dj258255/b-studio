@@ -104,7 +104,8 @@ describe('POST /api/fleets', () => {
   });
 
   it('터미널 방식은 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다(세션 터미널을 열고 그 안의 CLI를 몰기 때문에)', async () => {
-    for (const headers of [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }]) {
+    const refused: Record<string, string>[] = [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }];
+    for (const headers of refused) {
       const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal', allowBreaking: true }, headers);
       expect(response.status, JSON.stringify(headers)).toBe(403);
     }

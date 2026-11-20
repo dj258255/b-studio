@@ -104,7 +104,8 @@ describe('POST /api/task-plans', () => {
 
   it('카드 계획은 레인을 세션 터미널에서 돌리므로 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다', async () => {
     const cards = [{ title: 'A', request: 'A 작업', paths: ['web/a'] }];
-    for (const headers of [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }]) {
+    const refused: Record<string, string>[] = [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }];
+    for (const headers of refused) {
       const response = await post({ projectId: 'orders', cards }, headers);
       expect(response.status, JSON.stringify(headers)).toBe(403);
     }
