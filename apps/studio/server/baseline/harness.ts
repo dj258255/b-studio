@@ -577,6 +577,22 @@ export function summarizeDocker(calls: DockerCall[], n: Normalizer, shutdownFrom
 const NOISE_EVENTS = new Set(['usage']);
 
 /**
+ * 응답 본문에 실린 샌드박스 사용량(`{ at, services }`, 5초 타이머가 읽은 값)도 뺀다. 이벤트의 `usage`와 같은 값이라
+ * 멈추기·읽기 전에 타이머가 한 번 돌았는지에 따라 있고 없다(#1316). 토큰 사용량(`usage: { inputTokens, ... }`)은 판정에 쓰이므로 남긴다
+ */
+export function withoutTimerUsage(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(withoutTimerUsage);
+  if (!value || typeof value !== 'object') return value;
+  const isTimerUsage = (inner: unknown): boolean =>
+    !!inner && typeof inner === 'object' && !Array.isArray(inner) && 'at' in inner && Array.isArray((inner as { services?: unknown }).services);
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key, inner]) => !(key === 'usage' && isTimerUsage(inner)))
+      .map(([key, inner]) => [key, withoutTimerUsage(inner)]),
+  );
+}
+
+/**
  * 이벤트 열은 세 줄로 나눠 남긴다: 실행(runId가 있는 이벤트), 플랫폼(상태·서비스·알림 등), 파일 변경 알림.
  * 각 줄 안의 순서는 고정하지만 두 줄 사이의 끼어드는 순서는 서버 안의 타이머에 달려 있어 고정하지 않는다. 같은 이벤트가 연달아 오면 한 번으로 센다
  */
@@ -619,14 +635,15 @@ export async function snapshotOf(world: World, driver: Driver, session: { id: st
   n.learnRuns(driver.exchanges.map((exchange) => exchange.body));
   const lanes = laneEvents(driver.events);
   return {
-    http: driver.exchanges.map((exchange) => ({ ...exchange, path: n.text(exchange.path), body: n.value(exchange.body) })),
+    http: driver.exchanges.map((exchange) => ({ ...exchange, path: n.text(exchange.path), body: n.value(withoutTimerUsage(exchange.body)) })),
     events: { run: n.value(lanes.run), platform: n.value(lanes.platform), files: n.value(lanes.files) },
     disk: n.value({
       commits: disk.commits.map((commit) => ({ sha: commit.sha, message: commit.message })),
       refs: disk.refs,
       status: disk.status,
       files: disk.files,
-      sessionJson: disk.sessionJson,
+      // 저장된 세션 기록에도 같은 타이머 값이 실린다(저장 전에 타이머가 돌았는지에 따라 있고 없다, #1316)
+      sessionJson: withoutTimerUsage(disk.sessionJson),
     }),
     docker: summarizeDocker(await world.dockerCalls(), n, shutdownFrom),
   };
