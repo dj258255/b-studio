@@ -1077,7 +1077,9 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     // 통합 세션의 원본에도 없는 파일은 지울 수 없다. delete_file이 실패하면 통합 전체가 멈추므로 지울 목록에서 뺀다
     const integrationRoot = getSnapshot(snapshot.id)?.workDir;
     if (!integrationRoot) throw new Error('통합 세션의 작업 폴더를 찾지 못했습니다');
-    const removable = deletes.filter((file) => existsSync(path.join(integrationRoot, file)));
+    // 체크포인트의 파일 목록은 프로젝트 폴더 기준이다. 모노레포 하위 폴더 세션이면 작업 폴더(저장소 복사본) 아래의 그 폴더라, 작업 폴더로 보면 지울 파일이 없다고 조용히 빠진다(#1343)
+    const integrationProjectRoot = await new CheckpointStore(integrationRoot).projectRoot();
+    const removable = deletes.filter((file) => existsSync(path.join(integrationProjectRoot, file)));
     // 레인이 만들었다가 지운 파일만 있으면 적용할 변경이 없다. 빈 턴은 게이트를 그냥 통과하므로 여기서 멈춘다
     if (writes.length === 0 && removable.length === 0) throw new Error('통합 세션에 적용할 변경이 없습니다 (레인이 만들었다가 지운 파일만 있었습니다)');
     integration.files = [...writes.map((write) => write.path), ...removable].sort();
@@ -1179,7 +1181,8 @@ async function readLaneFile(lane: TaskPlanLaneView, file: string): Promise<LaneF
     return { kind: 'content', content: blob.content };
   }
   // 상한 없는 읽기 — 크기 초과는 아래 통합 쪽의 크기 검사가 "링크·서브모듈"이 아니라 제 문구로 알리게 한다
-  const read = readProjectFileSync(workDir, file, Number.POSITIVE_INFINITY);
+  // 파일 목록이 프로젝트 폴더 기준이므로 같은 폴더에서 읽는다(모노레포 하위 폴더 세션, #1343)
+  const read = readProjectFileSync(await new CheckpointStore(workDir).projectRoot(), file, Number.POSITIVE_INFINITY);
   if (read.kind === 'missing') return { kind: 'deleted' };
   if (read.kind === 'irregular') return { kind: 'unsupported' };
   return { kind: 'content', content: Buffer.from(read.content, 'utf8') };
