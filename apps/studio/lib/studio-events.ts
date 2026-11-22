@@ -349,8 +349,8 @@ export type StudioEvent =
       request: string;
       by?: string;
       intent?: 'ask';
-      /** 세션 터미널에서 CLI에 직접 보낸 요청이면 'terminal'(#673). 대화 창의 요청에는 없다 */
-      via?: 'terminal';
+      /** 세션 터미널에서 CLI에 직접 보낸 요청이면 'terminal'(#673), 서버가 레인 결과를 써서 연 실행이면 'server'(#1340). 대화 창의 요청에는 없다 */
+      via?: 'terminal' | 'server';
       /** 요청을 받은 시각(ISO). 이 필드가 생기기 전 기록에는 없다 */
       at?: string;
       /** 이 실행을 돌린 백엔드(#821). 이 필드가 생기기 전 기록은 세션의 백엔드로 본다 */

@@ -14,6 +14,7 @@
 
 ### 바뀜
 
+- 작업 분해의 통합이 채팅식 실행 없이 돕니다(ADR-224, #1340). 서버가 레인 결과를 통합 세션의 작업 폴더에 직접 쓰고(`applyServerChanges`), 터미널 턴 끝과 같은 판정(게이트·체크포인트)으로 닫습니다. 쓰기 전에 범위(허용 목록)·보호 경로·링크·절대 경로·`..`을 모두 거르고 하나라도 걸리면 아무것도 쓰지 않으며, 터미널을 연 적이 있는 세션과 컨테이너 방식은 거절합니다. 재시도를 받을 CLI가 없어 게이트가 돌려보내면 다시 시도하지 않고 실패로 닫고 되돌립니다. 켜 둔 확인 선언 변경 허용은 가져가지 않습니다. 이 실행의 `run_started`는 `via: 'server'`입니다. 가벼운 검증(`verify: light`)과 조율 S4, 컨테이너 방식은 아직 옛 길(채팅식 대본 턴)을 탑니다.
 - `studio.yaml`의 `workflow.releaseRequires`를 "`workflow.releaseRequires`는 더는 지원하지 않습니다. 이 항목을 지우세요"로 거절합니다(ADR-221, #1321). 운영 배포를 지운 뒤 아무 일도 하지 않으면서 배포 조건이 걸린다고 믿게 하던 설정입니다. 배포 전용 판정(`releaseBlockers`·`workflowReleaseRequirements`와 Rust·napi 짝)과 게이트의 "배포 조건 단계" 약화 비교 항목, `CheckpointStore.exportTree`와 그것만 쓰던 `git archive | tar -x` 파이프(`execArchiveExtract`·napi `runArchiveExtract`·Rust `run_archive_extract`)를 함께 지웠습니다. 예제 `studio.yaml` 둘에서도 그 줄을 뺐습니다.
 - Kubernetes 샌드박스 제공자를 지웠습니다(ADR-221, #1311). `packages/sandbox/src/kubernetes/`와 `B_STUDIO_SANDBOX_PROVIDER=kubernetes` 분기(`B_STUDIO_K8S_*` 설정), 관련 시험을 뺐습니다. 그 값을 넣으면 조용히 Docker로 떨어지지 않고 "더는 지원하지 않습니다"로 시작을 거절합니다. 로컬 Docker 제공자의 동작은 그대로입니다.
 - 운영 배포 기능을 지웠습니다(ADR-221, #1313). `studio deploy` 명령, 배포 API·desk 배포 탭, `DockerDeployer`와 배포 e2e, 배포용 Rust I/O를 지우고, `studio.yaml`의 `deploy` 절은 "`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요"로 거절합니다.
