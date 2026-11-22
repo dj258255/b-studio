@@ -693,12 +693,32 @@ mod tests {
         assert_eq!(status(Box::leak(many.into_boxed_slice())).await, Err("UND_ERR_SOCKET".into()));
     }
 
+    /// 잡았다가 놓은 빈 포트로 `attempt`를 돌린다. 놓은 사이 같은 프로세스의 다른 시험이 그 포트를 받으면 연결이 거절되지 않고
+    /// 끊긴다(ECONNRESET, #1342). 그래서 `refused`가 아니면 새 포트로 다시 한다. 코드가 거절을 다른 이름으로 옮기는 잘못이면
+    /// 모든 시도가 같은 값을 내므로 마지막 결과로 실패한다
+    async fn on_released_port<T, F, Fut>(attempt: F, refused: impl Fn(&T) -> bool) -> T
+    where
+        F: Fn(u16) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let mut last = None;
+        for _ in 0..5 {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            let result = attempt(port).await;
+            if refused(&result) {
+                return result;
+            }
+            last = Some(result);
+        }
+        last.unwrap()
+    }
+
     #[tokio::test]
     async fn 연결할_수_없으면_econnrefused이다() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        assert_eq!(probe_http(port, "/", Duration::from_secs(2)).await, Err("ECONNREFUSED".into()));
+        let result = on_released_port(|port| async move { probe_http(port, "/", Duration::from_secs(2)).await }, |result| *result == Err("ECONNREFUSED".into())).await;
+        assert_eq!(result, Err("ECONNREFUSED".into()));
     }
 
     #[tokio::test]
@@ -835,15 +855,20 @@ mod tests {
 
     #[tokio::test]
     async fn 연결할_수_없으면_econnrefused가_이유에_남는다() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        drop(listener);
-        let fake = Fake::new();
-        fake.set("other", &port_output(port)).set("ps", STATE_RUNNING);
-        let mut input = ready_input(&fake, Some(check("/", 200.0)));
-        input.ready.as_mut().unwrap().timeout_ms = 100.0;
-        let AwaitOutcome::Failed { reason, .. } = run(&input).await.0 else { panic!() };
-        assert_eq!(reason, "0초 안에 준비되지 않았습니다 (마지막 확인: ECONNREFUSED, 컨테이너 running)");
+        const WANT: &str = "0초 안에 준비되지 않았습니다 (마지막 확인: ECONNREFUSED, 컨테이너 running)";
+        let reason = on_released_port(
+            |port| async move {
+                let fake = Fake::new();
+                fake.set("other", &port_output(port)).set("ps", STATE_RUNNING);
+                let mut input = ready_input(&fake, Some(check("/", 200.0)));
+                input.ready.as_mut().unwrap().timeout_ms = 100.0;
+                let AwaitOutcome::Failed { reason, .. } = run(&input).await.0 else { panic!() };
+                reason
+            },
+            |reason| reason == WANT,
+        )
+        .await;
+        assert_eq!(reason, WANT);
     }
 
     fn crashed(fake: &Fake, port: u16) {

@@ -44,6 +44,9 @@ function failureEvent(runId: string): StudioEvent {
   } as StudioEvent;
 }
 
+/** 통합이 시도됐는가: 옛 길(대본 턴)이든 새 길(서버가 쓰기)이든 */
+const integrationAttempted = (): boolean => fake.sends.some((send) => send.options.scriptedTurns) || fake.serverChanges.length > 0;
+
 /** S4 수리 요청인지: 원래 요청 + 통합 게이트 실패 문구 */
 function isRepair(request: string): boolean {
   return request.includes('[조율] 레인') && request.includes('검증이 실패했습니다');
@@ -72,6 +75,10 @@ const fake = vi.hoisted(() => ({
   /** 세션을 만들 때 작업 폴더에 넣는 프로젝트 원본 파일 */
   sourceFiles: {} as Record<string, string>,
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
+  /** applyServerChanges(서버가 레인 결과를 써서 터미널 판정으로 닫는 통합 길)를 부른 기록(순서대로) */
+  serverChanges: [] as Array<{ sessionId: string; request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[] }>,
+  /** applyServerChanges가 돌려줄 체크포인트를 남기지 않는다(바뀐 파일이 없어 통과한 경우) */
+  serverNoCheckpoint: false,
   stopped: [] as string[],
   /** stopAndDeleteSession을 부른 세션 id들(순서 그대로, 계획·플릿을 지울 때 구성원 세션도 지우는지 확인한다) */
   stopAndDeleted: [] as string[],
@@ -260,6 +267,23 @@ vi.mock('./sessions', () => ({
     fake.listeners.set(id, set);
     return () => set.delete(listener);
   },
+  applyServerChanges: async (sessionId: string, input: { request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[] }) => {
+    fake.serverChanges.push({ sessionId, request: input.request, writes: [...input.writes], deletes: [...input.deletes], writableScope: [...input.writableScope] });
+    const session = fake.sessions.get(sessionId)!;
+    const runId = `server-run-${fake.serverChanges.length}`;
+    // 통합: 서버가 쓴 파일을 적용하고 게이트 결과는 fake.integration이 정한다
+    for (const write of input.writes) {
+      mkdirSync(path.dirname(path.join(session.workDir, write.path)), { recursive: true });
+      writeFileSync(path.join(session.workDir, write.path), write.content);
+    }
+    for (const file of input.deletes) rmSync(path.join(session.workDir, file), { force: true });
+    if (fake.integration !== 'done') return { runId, status: 'failed', summary: '검증 게이트를 통과하지 못했습니다', durationMs: fake.run.durationMs };
+    const files = [...new Set([...input.writes.map((write) => write.path), ...input.deletes])];
+    const checkpoint = { sha: runId, shortSha: runId, message: input.request, createdAt: '', files };
+    if (fake.serverNoCheckpoint) return { runId, status: 'done', summary: '바꾼 파일 없이 끝났습니다.', durationMs: fake.run.durationMs };
+    session.checkpoints.unshift(checkpoint);
+    return { runId, status: 'done', summary: '검증을 통과해 체크포인트를 남겼습니다.', checkpoint, durationMs: fake.run.durationMs };
+  },
   sendMessage: (sessionId: string, request: string, options: SendOptions) => {
     fake.sends.push({ sessionId, request, options });
     const session = fake.sessions.get(sessionId)!;
@@ -417,6 +441,8 @@ beforeEach(() => {
   fake.deletes = {};
   fake.sourceFiles = {};
   fake.sends = [];
+  fake.serverChanges = [];
+  fake.serverNoCheckpoint = false;
   fake.stopped = [];
   fake.stopAndDeleted = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
@@ -439,6 +465,7 @@ beforeEach(() => {
   fake.terminalCostUsd = undefined;
   fake.relinkAfterLane = {};
   fake.linkFiles = {};
+  delete process.env.B_STUDIO_TERMINAL;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
   // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
@@ -556,14 +583,19 @@ describe('작업 분해 실행', () => {
     expect(fake.sends.every((send) => send.options.steering === undefined)).toBe(true);
     expect(laneB.sessionId).not.toBe(laneA.sessionId);
 
-    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
+    // 통합은 채팅식 실행(대본 턴)이 아니라 서버가 쓰는 길로 간다
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(fake.sends.some((send) => send.sessionId === plan.integration?.sessionId)).toBe(false);
+    expect(fake.serverChanges).toHaveLength(1);
+    const integration = fake.serverChanges[0]!;
     expect(integration.sessionId).toBe(plan.integration?.sessionId);
-    expect(integration.options.scriptedTurns![0]!.toolCalls!.map((call) => [call.input.path, call.input.content]).sort()).toEqual([
+    expect(integration.request).toBe('작업 분해 통합: 메모 추가');
+    expect(integration.writes.map((write) => [write.path, write.content]).sort()).toEqual([
       ['web/a/one.md', 'one'],
       ['web/a/two.md', 'two'],
       ['web/b/one.md', 'b'],
     ]);
-    expect(integration.options.writableScope).toEqual(['web/a', 'web/b']);
+    expect(integration.writableScope).toEqual(['web/a', 'web/b']);
     expect(plan.integration).toMatchObject({ status: 'done', files: ['web/a/one.md', 'web/a/two.md', 'web/b/one.md'] });
     // 레인 세션은 통합 샌드박스를 띄우기 전에 내려 동시에 뜨는 샌드박스를 레인 수로 제한하고, 통합 세션은 검토용으로 남긴다
     expect([...new Set(fake.stopped)].sort()).toEqual([laneA.sessionId, laneB.sessionId].sort());
@@ -666,7 +698,7 @@ describe('작업 분해 실행', () => {
     expect(laneA.tasks.map((item) => item.status)).toEqual(['failed', 'skipped']);
     expect(plan.lanes.find((lane) => lane.tasks.length === 1)!.status).toBe('done');
     expect(plan.integration).toBeUndefined();
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
   });
 
   it('레인이 도구를 거치지 않고 범위 밖 파일을 바꿨으면 통합하지 않는다', async () => {
@@ -676,7 +708,7 @@ describe('작업 분해 실행', () => {
     const plan = await run({ projectId: 'orders', request: '범위 밖 변경', modelId: 'model-a', owner: 'kim' });
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('쓰기 범위 밖 파일을 바꿨습니다: web/b/sneaky.md');
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
   });
 
   it('레인이 끝난 뒤 작업 폴더의 파일이 바깥 파일을 가리키는 링크로 바뀌어도 통합은 체크포인트에 커밋된 내용을 쓴다(이슈 #744)', async () => {
@@ -690,11 +722,10 @@ describe('작업 분해 실행', () => {
     const plan = await run({ projectId: 'orders', request: '링크 바꿔치기', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('done');
-    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
-    const write = integration.options.scriptedTurns![0]!.toolCalls!.find((call) => call.input.path === 'web/a/one.md')!;
+    const write = fake.serverChanges[0]!.writes.find((entry) => entry.path === 'web/a/one.md')!;
     // 작업 폴더의 파일이 아니라 체크포인트에 커밋된 내용을 읽는다 — 링크가 가리키는 비밀 값이 실리지 않는다
-    expect(write.input.content).toBe('one');
-    expect(write.input.content).not.toContain('SECRET-CONTENT');
+    expect(write.content).toBe('one');
+    expect(write.content).not.toContain('SECRET-CONTENT');
   });
 
   it('체크포인트에 링크가 커밋돼 있으면 통합이 멈추고 링크·서브모듈이라고 알린다(이슈 #744)', async () => {
@@ -707,7 +738,7 @@ describe('작업 분해 실행', () => {
 
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('lane-1의 web/a/one.md은 링크·서브모듈이라 통합하지 않습니다');
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
   });
 
   it('레인이 지운 파일을 통합이 delete_file로 함께 적용한다', async () => {
@@ -720,12 +751,9 @@ describe('작업 분해 실행', () => {
     const plan = await run({ projectId: 'orders', request: '삭제 포함', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('done');
-    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
-    // 쓰기 먼저, 삭제 나중
-    expect(integration.options.scriptedTurns![0]!.toolCalls!.map((call) => [call.name, call.input.path])).toEqual([
-      ['write_file', 'web/a/one.md'],
-      ['delete_file', 'web/a/removed.md'],
-    ]);
+    const integration = fake.serverChanges[0]!;
+    expect(integration.writes.map((write) => write.path)).toEqual(['web/a/one.md']);
+    expect(integration.deletes).toEqual(['web/a/removed.md']);
     expect(plan.integration).toMatchObject({
       status: 'done',
       files: ['web/a/one.md', 'web/a/removed.md'],
@@ -742,8 +770,8 @@ describe('작업 분해 실행', () => {
     const plan = await run({ projectId: 'orders', request: '없는 파일 삭제', modelId: 'model-a', owner: 'kim' });
 
     expect(plan.status).toBe('done');
-    const integration = fake.sends.find((send) => send.options.scriptedTurns)!;
-    expect(integration.options.scriptedTurns![0]!.toolCalls!.map((call) => call.name)).toEqual(['write_file']);
+    expect(fake.serverChanges[0]!.writes.map((write) => write.path)).toEqual(['web/a/one.md']);
+    expect(fake.serverChanges[0]!.deletes).toEqual([]);
     expect(plan.integration).toMatchObject({ status: 'done', files: ['web/a/one.md'], deleted: [] });
   });
 
@@ -758,7 +786,7 @@ describe('작업 분해 실행', () => {
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('적용할 변경이 없습니다');
     // 아무것도 검증하지 않았는데 통과로 기록되면 안 된다. 스크립트 턴을 아예 보내지 않는다
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
   });
 
   it('api 모드가 아니거나 모델이 등록되지 않았으면 시작하지 않는다', async () => {
@@ -890,7 +918,8 @@ describe('작업 분해 실행', () => {
     expect(typeof lane.finishedAt).toBe('string');
     // run_finished의 지표가 작업 실행 기록으로 그대로 옮겨진다
     expect(lane.tasks[0]!.run).toEqual({ status: 'done', durationMs: 11, usage: fake.run.usage, metrics: fake.run.metrics });
-    expect(plan.integration?.run).toEqual({ status: 'done', durationMs: 11, usage: fake.run.usage, metrics: fake.run.metrics });
+    // 통합은 모델을 부르지 않는 서버 길이라 사용량·지표가 없다
+    expect(plan.integration?.run).toEqual({ status: 'done', durationMs: 11 });
     expect(plan.integration?.bootMs).toBeGreaterThanOrEqual(0);
 
     // 계획 호출 1회 + 레인 작업 실행 2회 × 2회 = 5 (통합은 스크립트 턴이라 세지 않는다), 최대 입력 크기는 9, 세션은 레인 2 + 통합 1
@@ -901,6 +930,71 @@ describe('작업 분해 실행', () => {
     expect(typeof plan.metrics!.endToEndMs).toBe('number');
   });
 
+});
+
+describe('통합이 가는 길: 서버가 쓰고 터미널 판정으로 닫는다(ADR-224)', () => {
+  const twoLanes = () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+  };
+
+  it('기본은 applyServerChanges로 합치고 채팅식 실행(sendMessage)으로 통합 세션에 아무것도 보내지 않는다', async () => {
+    twoLanes();
+    const plan = await run({ projectId: 'orders', request: '기본 통합', modelId: 'model-a', owner: 'kim' });
+    expect(plan.status).toBe('done');
+    expect(fake.serverChanges).toHaveLength(1);
+    expect(fake.sends.filter((send) => send.sessionId === plan.integration?.sessionId)).toEqual([]);
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    // 체크포인트는 서버가 남긴 것이 통합 기록에 채워진다
+    expect(plan.integration?.checkpoint).toMatchObject({ sha: 'server-run-1', files: ['web/a/one.md', 'web/b/one.md'] });
+  });
+
+  it('게이트를 통과하지 못하면 합친 결과가 게이트를 통과하지 못했다고 던진다', async () => {
+    twoLanes();
+    fake.integration = 'failed';
+    const plan = await run({ projectId: 'orders', request: '통합 실패', modelId: 'model-a', owner: 'kim' });
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('합친 결과가 게이트를 통과하지 못했습니다: failed 검증 게이트를 통과하지 못했습니다');
+    expect(plan.integration?.run).toEqual({ status: 'failed', durationMs: 11 });
+  });
+
+  it('통과했는데 체크포인트가 남지 않았으면 통합을 통과로 적지 않는다', async () => {
+    twoLanes();
+    fake.serverNoCheckpoint = true;
+    const plan = await run({ projectId: 'orders', request: '빈 통합', modelId: 'model-a', owner: 'kim' });
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.status).toBe('failed');
+    expect(plan.integration?.error).toContain('체크포인트로 남지 않았습니다');
+  });
+
+  it('verify light는 옛 길(채팅식 대본 턴)을 탄다', async () => {
+    twoLanes();
+    const plan = await run({ projectId: 'orders', request: '가볍게', modelId: 'model-a', owner: 'kim', verify: 'light' });
+    expect(plan.status).toBe('done');
+    expect(fake.serverChanges).toEqual([]);
+    expect(fake.sends.find((send) => send.options.scriptedTurns)!.options.verify).toBe('light');
+  });
+
+  it('S4는 옛 길을 탄다(수리가 모델 호출이다)', async () => {
+    twoLanes();
+    const plan = await run({ projectId: 'orders', request: 'S4 통합', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+    expect(plan.status).toBe('done');
+    expect(fake.serverChanges).toEqual([]);
+    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(true);
+  });
+
+  it('컨테이너 방식은 옛 길을 탄다(통합 세션에는 검사 동안 멈출 에이전트 컨테이너가 없다)', async () => {
+    twoLanes();
+    process.env.B_STUDIO_TERMINAL = 'container';
+    try {
+      const plan = await run({ projectId: 'orders', request: '컨테이너 통합', modelId: 'model-a', owner: 'kim' });
+      expect(plan.status).toBe('done');
+      expect(fake.serverChanges).toEqual([]);
+      expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(true);
+    } finally {
+      delete process.env.B_STUDIO_TERMINAL;
+    }
+  });
 });
 
 describe('고정 계획(presetPlan)', () => {
@@ -1133,8 +1227,9 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     expect(done.integration?.status).toBe('done');
     // 통합 세션 하나만 새로 만들어지고(레인 세션 2개는 다시 안 만든다), 레인에 대한 sendMessage도 새로 불리지 않는다
     expect(fake.counter).toBe(1);
-    expect(fake.sends).toHaveLength(1);
-    expect(fake.sends[0]!.options.scriptedTurns![0]!.toolCalls!.map((call) => call.input.path).sort()).toEqual(['web/a/one.md', 'web/b/one.md']);
+    expect(fake.sends).toHaveLength(0);
+    expect(fake.serverChanges).toHaveLength(1);
+    expect(fake.serverChanges[0]!.writes.map((write) => write.path).sort()).toEqual(['web/a/one.md', 'web/b/one.md']);
   });
 
   it('interrupted가 아닌 계획은 이어서 할 수 없고 남의 계획도 이어서 할 수 없다', async () => {
@@ -1160,7 +1255,7 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     expect(plan.integration?.error).toContain('결과 기록이 없어');
     // 통합 샌드박스를 띄우기 전에 멈춰야 한다. 스크립트 턴이 돌면 아무것도 합치지 않았는데 통과한 것처럼 남는다
     expect(fake.counter).toBe(0);
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
   });
 
   it('옛 계획(checkpointSha 없음)에서 작업 폴더의 파일이 링크면 통합하지 않고 멈춘다(이슈 #744)', async () => {
@@ -1184,7 +1279,7 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('lane-1의 web/a/one.md은 링크·서브모듈이라 통합하지 않습니다');
     // 링크를 따라가지 않고 멈춰, 통합 샌드박스도 띄우지 않는다
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
   });
 
   it('옛 계획(checkpointSha 없음)에서 상위 폴더가 바깥을 가리키는 링크면 그 너머를 읽지 않고 멈춘다(이슈 #744)', async () => {
@@ -1211,9 +1306,10 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     expect(plan.status).toBe('failed');
     expect(plan.integration?.error).toContain('lane-1의 web/a/one.md은 링크·서브모듈이라 통합하지 않습니다');
     // 바깥 폴더의 내용이 통합에 실리지 않는다(통합 샌드박스도 띄우지 않는다)
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
+    expect(integrationAttempted()).toBe(false);
     expect(
-      fake.sends.some((send) => (send.options.scriptedTurns?.[0]?.toolCalls ?? []).some((call) => call.input.content?.includes('SECRET-OUTSIDE'))),
+      fake.sends.some((send) => (send.options.scriptedTurns?.[0]?.toolCalls ?? []).some((call) => call.input.content?.includes('SECRET-OUTSIDE'))) ||
+        fake.serverChanges.some((change) => change.writes.some((write) => write.content.includes('SECRET-OUTSIDE'))),
     ).toBe(false);
   });
 });

@@ -68,7 +68,8 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { allowedBackends, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { sessionTerminalMode } from './session-terminal';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
 import { findAiAccount } from './ai-accounts';
@@ -1088,36 +1089,54 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     integration.status = 'running';
     persist(plan);
 
-    const turns: ScriptedTurn[] = [
-      {
-        toolCalls: [
-          ...writes.map((write) => ({ name: 'write_file', input: { path: write.path, content: write.content } })),
-          ...removable.map((file) => ({ name: 'delete_file', input: { path: file } })),
-        ],
-      },
-      { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
-    ];
     const writableScope = [...new Set(plan.lanes.flatMap((lane) => lane.paths))];
-    const outcome = await runAndWait(snapshot.id, `작업 분해 통합: ${plan.request}`, {
-      by: plan.owner,
-      scriptedTurns: turns,
-      // 모델을 부르지 않고 레인 결과를 합칠 뿐이라, 채팅의 "backend" 카드가 ScriptedModelClient의 기본값
-      // ("데모 스크립트에서 scripted 모델로 실행합니다")으로 보이지 않고 실제 쓰임을 보여주게 덮어쓴다(버그 리포트)
-      scriptedInfo: { backend: '레인 결과 합치기', model: '모델 호출 없음' },
-      writableScope,
-      ...(plan.verify ? { verify: plan.verify } : {}),
-    });
-    integration.run = runView(outcome);
-    let settled = outcome;
-    // S4: 통합 게이트가 실패하면 한 번만 통합 세션에 모델 수리를 요청한다(공유 없이 실패 뒤에만 비용을 내는 대조군).
-    // scriptedTurns 없이 보내므로 세션의 기본 모델 경로(API 모드는 계획의 모델, 로컬 CLI는 그 러너)로 실제 호출된다
-    if (outcome.status !== 'done' && plan.coordination?.strategy === 'S4') {
-      const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope, ...(plan.verify ? { verify: plan.verify } : {}) });
-      integration.repair = { attempted: true, status: repair.status, run: runView(repair) };
-      settled = repair;
+    const request = `작업 분해 통합: ${plan.request}`;
+    let settled: { status: string; summary: string };
+    let appliedCheckpoint: Checkpoint | undefined;
+    // 옛 길(채팅식 실행에 대본 턴으로 싣는다)을 타는 경우. 터미널 턴 끝 판정으로 가지 않는다:
+    //  - verify가 'light': 가벼운 검증을 터미널 판정이 같은 뜻으로 받는지 아직 모른다
+    //  - S4: 게이트가 실패하면 모델에 수리를 요청하는 길이라 모델 호출이 필요하다(#1327의 다른 항목)
+    //  - 컨테이너 방식: 터미널 판정이 검사 동안 에이전트 컨테이너를 멈추는데 통합 세션에는 그 컨테이너가 없다(실험 경로, 확인하지 않는다)
+    if (plan.verify === 'light' || plan.coordination?.strategy === 'S4' || sessionTerminalMode() === 'container') {
+      const turns: ScriptedTurn[] = [
+        {
+          toolCalls: [
+            ...writes.map((write) => ({ name: 'write_file', input: { path: write.path, content: write.content } })),
+            ...removable.map((file) => ({ name: 'delete_file', input: { path: file } })),
+          ],
+        },
+        { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
+      ];
+      const outcome = await runAndWait(snapshot.id, request, {
+        by: plan.owner,
+        scriptedTurns: turns,
+        // 모델을 부르지 않고 레인 결과를 합칠 뿐이라, 채팅의 "backend" 카드가 ScriptedModelClient의 기본값
+        // ("데모 스크립트에서 scripted 모델로 실행합니다")으로 보이지 않고 실제 쓰임을 보여주게 덮어쓴다(버그 리포트)
+        scriptedInfo: { backend: '레인 결과 합치기', model: '모델 호출 없음' },
+        writableScope,
+        ...(plan.verify ? { verify: plan.verify } : {}),
+      });
+      integration.run = runView(outcome);
+      settled = outcome;
+      // S4: 통합 게이트가 실패하면 한 번만 통합 세션에 모델 수리를 요청한다(공유 없이 실패 뒤에만 비용을 내는 대조군).
+      // scriptedTurns 없이 보내므로 세션의 기본 모델 경로(API 모드는 계획의 모델, 로컬 CLI는 그 러너)로 실제 호출된다
+      if (outcome.status !== 'done' && plan.coordination?.strategy === 'S4') {
+        const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope, ...(plan.verify ? { verify: plan.verify } : {}) });
+        integration.repair = { attempted: true, status: repair.status, run: runView(repair) };
+        settled = repair;
+      }
+    } else {
+      // 서버가 레인 결과를 작업 폴더에 쓰고 터미널 턴 끝과 같은 판정으로 닫는다(ADR-224). 채팅식 실행도 모델 호출도 없다
+      const applied = await applyServerChanges(snapshot.id, { request, writes, deletes: removable, writableScope });
+      appliedCheckpoint = applied.checkpoint;
+      // 모델을 부르지 않으므로 usage·metrics는 없다
+      integration.run = { status: applied.status, durationMs: applied.durationMs };
+      // 통과했는데 체크포인트가 남지 않았으면 합친 결과의 근거가 없다. 옛 길은 세션 시작 체크포인트를 합친 결과로 적었다
+      settled = applied.status === 'done' && applied.checkpoint === undefined ? { status: 'failed', summary: '검증은 통과했지만 합친 결과가 체크포인트로 남지 않았습니다(바뀐 파일이 없었습니다)' } : applied;
     }
     if (settled.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${settled.status} ${settled.summary}`);
-    Object.assign(integration, { status: 'done', checkpoint: checkpointView(getSnapshot(snapshot.id)?.checkpoints[0]) });
+    // 새 길은 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다). 옛 길은 세션의 최신 체크포인트다
+    Object.assign(integration, { status: 'done', checkpoint: checkpointView(appliedCheckpoint ?? getSnapshot(snapshot.id)?.checkpoints[0]) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
     recordMetrics(plan);
