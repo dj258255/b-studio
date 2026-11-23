@@ -105,7 +105,8 @@ async function main(): Promise<void> {
     let plan = created;
     let previous = '';
     while (!FINISHED.has(plan.status)) {
-      if (Date.now() - started > 30 * 60_000) throw new Error(`터미널 방식 작업 분해가 30분 안에 끝나지 않았습니다\n${await tail(actionLog)}`);
+      // 정상이면 3분 안팎이다(CI 실측). 가짜 CLI는 대본이 끝나면 더 일하지 않으므로, 턴 끝 검사가 막으면 여기서 멈춘다
+      if (Date.now() - started > 15 * 60_000) throw new Error(`터미널 방식 작업 분해가 15분 안에 끝나지 않았습니다\n${await tail(actionLog)}`);
       await delay(1_000);
       plan = getTaskPlan(created.id, LOCAL_USER);
       const current = `${plan.status} | ${plan.lanes.map((lane) => `${lane.id}=${lane.status}[${lane.tasks.map((task) => `${task.id}:${task.status}`).join(' ')}]`).join(' ')} | 통합=${plan.integration?.status ?? '-'}`;
