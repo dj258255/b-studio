@@ -217,6 +217,8 @@ vi.mock('./projects', () => ({
 
 vi.mock('./sessions', () => ({
   allowedBackends: () => fake.allowedBackends,
+  // 세션 만들기가 backend 없이 고르는 값(서버 모드). 실제 함수의 허용 목록 검사는 이 시험의 관심 밖이다
+  resolveSessionBackend: (requested?: string) => requested ?? process.env.B_STUDIO_MODE ?? 'api',
   sessionTerminalAllowed: () => fake.terminalAllowed,
   commitPendingWorkingCopyDocs: async (sessionId: string, message: string) => {
     fake.docsCommitted.push({ sessionId, message });
@@ -2498,5 +2500,171 @@ describe('사람이 쓴 작업 카드(#B6a)', () => {
     const full = `작업 카드: ${['가'.repeat(80), '가'.repeat(80), '가'.repeat(80)].join(' · ')}`;
     expect(settled.request).toBe(`${full.slice(0, 200)}…`);
     expect(settled.request.length).toBe(201);
+  });
+});
+
+describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
+  const twoLanes = () => {
+    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+  };
+  const statusOfError = async (input: Parameters<typeof createTaskPlan>[0]): Promise<{ status?: number; message: string }> => {
+    const error = await createTaskPlan(input).catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(StudioError);
+    return { status: (error as StudioError).status, message: (error as StudioError).message };
+  };
+  /** 거절은 계획도 세션도 만들지 않는다 */
+  let plansBefore = 0;
+  beforeEach(() => {
+    plansBefore = listTaskPlans('kim').length;
+  });
+  const nothingCreated = () => {
+    expect(listTaskPlans('kim')).toHaveLength(plansBefore);
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.modelCalls + fake.claudeCodeCalls).toBe(0);
+  };
+  const base = { projectId: 'orders', request: '요청', owner: 'kim', runner: 'terminal' as const };
+
+  it('모델 계획(claude-code 모드)은 승인 뒤 레인 둘이 터미널에서 돌고 통합까지 가며, 채팅 실행은 레인에서 한 번도 불리지 않고 계획 별칭이 세션 모델로 간다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    twoLanes();
+    const created = await createTaskPlan({ ...base, modelId: 'sonnet' });
+    expect(created.runner).toBe('terminal');
+    expect((await awaiting(created.id)).status).toBe('awaiting_approval');
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+
+    expect(plan.status).toBe('done');
+    expect(plan.runner).toBe('terminal');
+    expect(plan.integration?.status).toBe('done');
+    expect(fake.terminalSends).toHaveLength(2);
+    const laneSessions = new Set(plan.lanes.map((lane) => lane.sessionId));
+    expect(laneSessions.size).toBe(2);
+    expect(fake.sends.filter((send) => laneSessions.has(send.sessionId))).toEqual([]);
+    // 레인 세션 옵션(처음 둘)에 계획 별칭이 실린다. 통합 세션에는 모델 옵션이 없다
+    expect(fake.sessionOptions.slice(0, 2).map((options) => options.modelId)).toEqual(['sonnet', 'sonnet']);
+    expect(fake.sessionOptions[2]!.modelId).toBeUndefined();
+  });
+
+  it('계획 모델이 계정 기본(별칭 없음)이면 모델을 넘기지 않는다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    twoLanes();
+    const plan = await run({ ...base, modelId: '' });
+    expect(plan.status).toBe('done');
+    expect(fake.sessionOptions.slice(0, 2).every((options) => options.modelId === undefined)).toBe(true);
+  });
+
+  it('고정 계획도 터미널에서 레인 둘을 돌리고 통합까지 간다(기록용 modelId는 세션에 넘기지 않는다)', async () => {
+    twoLanes();
+    process.env.B_STUDIO_MODE = 'claude-code';
+    const plan = await run({ ...base, modelId: 'local-cli:preset', presetPlan: fake.plan });
+    expect(plan.status).toBe('done');
+    expect(plan.preset).toBe(true);
+    expect(plan.runner).toBe('terminal');
+    expect(fake.terminalSends).toHaveLength(2);
+    expect(fake.sends.filter((send) => plan.lanes.some((lane) => lane.sessionId === send.sessionId))).toEqual([]);
+    expect(fake.sessionOptions.every((options) => options.modelId === undefined)).toBe(true);
+  });
+
+  it('고정 계획은 레인이 고른 backend·model을 세션에 넘긴다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    const plan = await run({ ...base, modelId: 'local-cli:preset', presetPlan: { tasks: [{ ...task('a', ['web/a']), backend: 'codex', model: 'gpt-x' }] } });
+    expect(plan.status).toBe('done');
+    expect(fake.sessionOptions[0]).toMatchObject({ backend: 'codex', modelId: 'gpt-x' });
+  });
+
+  it('runner를 주지 않으면 지금 그대로다(채팅 방식, plan.runner 없음)', async () => {
+    twoLanes();
+    const plan = await run({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
+    expect(plan.runner).toBeUndefined();
+    expect(fake.terminalSends).toEqual([]);
+    expect(fake.sends.some((send) => plan.lanes.some((lane) => lane.sessionId === send.sessionId))).toBe(true);
+  });
+
+  it('모르는 runner 값과 cards + runner chat은 400이다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    expect((await statusOfError({ ...base, runner: 'pty' as never })).status).toBe(400);
+    expect((await statusOfError({ projectId: 'orders', owner: 'kim', runner: 'chat', cards: [{ title: 'a', request: 'a', paths: ['web/a'] }] })).status).toBe(400);
+    nothingCreated();
+  });
+
+  it('세션 터미널을 쓸 수 없으면 409이고 만들지 않는다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    fake.terminalAllowed = false;
+    expect((await statusOfError(base)).status).toBe(409);
+    nothingCreated();
+  });
+
+  it.each([
+    ['coordination', { coordination: { strategy: 'S2' as const, contracts: [] } }],
+    ['verify light', { verify: 'light' as const }],
+    ['pageChecks', { integrationChecks: { pageChecks: [{ service: 'web', path: '/orders' }] as never } }],
+    ['effort', { effort: 'high' }],
+  ])('%s를 함께 주면 400이고 조용히 빠뜨리지 않는다', async (_name, extra) => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    const error = await statusOfError({ ...base, ...extra });
+    expect(error.status).toBe(400);
+    nothingCreated();
+  });
+
+  it('고정 계획에도 같은 거절이 걸린다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    expect((await statusOfError({ ...base, modelId: 'x', presetPlan: { tasks: [task('a', ['web/a'])] }, verify: 'light' })).status).toBe(400);
+    nothingCreated();
+  });
+
+  it('API 모드의 모델 계획은 레인이 서버 기본 백엔드(api)로 떠 400이다', async () => {
+    const error = await statusOfError({ ...base, modelId: 'model-a' });
+    expect(error.status).toBe(400);
+    expect(error.message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: api');
+    nothingCreated();
+  });
+
+  it('고정 계획은 레인의 backend가 터미널로 못 띄우는 것이면 400이고, 컨테이너 방식 codex도 400이다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    const withBackend = (backend: string) => ({ ...base, modelId: 'local-cli:preset', presetPlan: { tasks: [{ ...task('a', ['web/a']), backend }] } });
+    expect((await statusOfError(withBackend('api'))).message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: api');
+    process.env.B_STUDIO_TERMINAL = 'container';
+    const container = await statusOfError(withBackend('codex'));
+    expect(container.status).toBe(400);
+    expect(container.message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: codex');
+    nothingCreated();
+  });
+
+  it('고정 계획의 형식 오류는 터미널 방식이어도 만들기 전에 400이다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    expect((await statusOfError({ ...base, modelId: 'local-cli:preset', presetPlan: { tasks: [task('a', ['../x'])] } })).status).toBe(400);
+    nothingCreated();
+  });
+
+  it('승인 대기 중 터미널 계획에서 터미널로 못 띄우는 백엔드를 고르면 400이고, effort도 400이다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    twoLanes();
+    const created = await createTaskPlan({ ...base, modelId: 'sonnet' });
+    const waiting = await awaiting(created.id);
+    const laneId = waiting.lanes[0]!.id;
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', laneId, { backend: 'api' }))).toBe(400);
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', laneId, { backend: 'claude-code', effort: 'high' }))).toBe(400);
+    expect(getTaskPlan(created.id, 'kim').lanes[0]!.backend).toBeUndefined();
+    // 터미널로 띄울 수 있는 것은 받는다
+    expect(setLaneBackend(created.id, 'kim', laneId, { backend: 'claude-code', model: 'opus' }).lanes[0]!.backend).toBe('claude-code');
+    // 레인이 고른 모델이 계획 별칭보다 먼저다
+    approveTaskPlan(created.id, 'kim');
+    await finished(created.id);
+    const first = fake.sessionOptions.find((options) => options.backend === 'claude-code');
+    expect(first?.modelId).toBe('opus');
+  });
+
+  it('계약 설정이 켜져도 터미널 계획은 계약 모델을 부르지 않고 경고를 남긴다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+    twoLanes();
+    const created = await createTaskPlan({ ...base, modelId: 'sonnet' });
+    const waiting = await awaiting(created.id);
+    expect(fake.contractCalls).toBe(0);
+    expect(waiting.contracts).toMatchObject({ source: 'model', count: 0 });
+    expect(waiting.contracts?.warning).toContain('터미널 레인은 아직 게시판을 읽지 못해');
+    expect(waiting.coordination).toBeUndefined();
   });
 });

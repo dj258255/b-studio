@@ -9,7 +9,7 @@ import { accountProcessEnv, resolveSessionAccount, type AiAccount } from './ai-a
 import { StudioError } from './errors';
 import { listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
-import { sessionTerminalMode } from './session-terminal';
+import { isTerminalRunnableBackend } from './session-terminal';
 import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 
@@ -159,16 +159,13 @@ export async function createFleet(input: {
 }
 
 /**
- * 터미널 실행이 띄울 수 있는 후보만 받는다. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex도 띄운다
- * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex가 아니면 claude를 띄운다 — 컨테이너 방식 codex를 받으면 엉뚱한 CLI가 뜬다).
+ * 터미널 실행이 띄울 수 있는 후보만 받는다(판정은 isTerminalRunnableBackend — 작업 분해와 같다).
  * **허용 목록이라 모르는 백엔드는 거절한다**
  */
 function assertTerminalRunnable(selected: readonly ValidatedCandidate[]): void {
   if (!sessionTerminalAllowed()) throw new StudioError(400, '이 서버에서는 세션 터미널을 쓸 수 없어 터미널 방식 Fleet을 만들 수 없습니다');
-  const mode = sessionTerminalMode();
   for (const candidate of selected) {
-    const runnable = candidate.backend === 'claude-code' || (candidate.backend === 'codex' && mode === 'host');
-    if (!runnable) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${candidate.backend}`);
+    if (!isTerminalRunnableBackend(candidate.backend)) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${candidate.backend}`);
   }
 }
 

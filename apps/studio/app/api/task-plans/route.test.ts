@@ -111,4 +111,28 @@ describe('POST /api/task-plans', () => {
     }
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
   });
+
+  it('runner(chat·terminal)를 그대로 넘기고, 다른 값은 400으로 거절한다', async () => {
+    const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal' }, LOCAL);
+    expect(response.status).toBe(201);
+    expect(mocks.createTaskPlan).toHaveBeenCalledWith({ projectId: 'orders', request: '요청', owner: 'kim', runner: 'terminal' });
+
+    mocks.createTaskPlan.mockClear();
+    for (const runner of ['pty', 3, null]) {
+      const wrong = await post({ projectId: 'orders', request: '요청', runner }, LOCAL);
+      expect(wrong.status, JSON.stringify(runner)).toBe(400);
+    }
+    expect(mocks.createTaskPlan).not.toHaveBeenCalled();
+  });
+
+  it('터미널 방식 계획은 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다', async () => {
+    const refused: Record<string, string>[] = [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }];
+    for (const headers of refused) {
+      const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal' }, headers);
+      expect(response.status, JSON.stringify(headers)).toBe(403);
+    }
+    expect(mocks.createTaskPlan).not.toHaveBeenCalled();
+    // 채팅 방식은 지금처럼 로그인만 본다
+    expect((await post({ projectId: 'orders', request: '요청', runner: 'chat' })).status).toBe(201);
+  });
 });

@@ -68,8 +68,8 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
-import { sessionTerminalMode } from './session-terminal';
+import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { isTerminalRunnableBackend, sessionTerminalMode } from './session-terminal';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
 import { findAiAccount } from './ai-accounts';
@@ -244,11 +244,21 @@ export async function createTaskPlan(input: {
    * 세션이 프로젝트 원본이 아니라 이 세션의 최신 체크포인트에서 시작한다(ADR-096).
    */
   sourceSessionId?: string;
+  /**
+   * 레인을 돌리는 방식. 'terminal'이면 레인마다 세션 터미널을 열어 그 안의 CLI에 요청을 붙여 넣는다. HTTP 라우트도 받는다.
+   * 카드 계획(cards)은 늘 terminal이다(cards와 'chat'을 함께 주면 400). 없으면 카드는 terminal, 나머지는 chat이다
+   */
+  runner?: 'chat' | 'terminal';
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
   const cards = input.cards;
   if (cards !== undefined && preset !== undefined) throw new StudioError(400, '작업 카드(cards)와 고정 계획(presetPlan)을 함께 넘길 수 없습니다');
+  if (input.runner !== undefined && input.runner !== 'chat' && input.runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
+  if (cards !== undefined && input.runner === 'chat') throw new StudioError(400, '작업 카드는 터미널에서만 돌립니다(runner: chat과 함께 줄 수 없습니다)');
+  const terminal = cards !== undefined || input.runner === 'terminal';
+  // 카드가 아닌 터미널 계획의 거절은 모델을 부르거나 세션·계획을 만들기 전에 동기로 한다(조용히 빠뜨리지 않는다)
+  if (terminal && cards === undefined) assertPlanTerminalRunnable(input);
   // 카드 계획은 모델을 부르지 않으므로 B_STUDIO_MODE 검사(PLANNER_MODES)를 하지 않는다. 세션 터미널 확인은 아래에서 한다
   if (cards === undefined) {
     if (preset === undefined) {
@@ -345,7 +355,9 @@ export async function createTaskPlan(input: {
     lanes: [],
     ...(preset === undefined ? {} : { preset: true as const }),
     // 사람이 쓴 작업 카드로 만든 계획. 레인은 세션 터미널에서 돈다
-    ...(cardData !== undefined ? { source: 'cards' as const, runner: 'terminal' as const } : {}),
+    ...(cardData !== undefined ? { source: 'cards' as const } : {}),
+    // 카드 계획은 늘, 모델·고정 계획은 runner: 'terminal'을 줬을 때만 레인을 세션 터미널에서 돌린다(채팅이면 필드 없음 — 옛 기록과 같다)
+    ...(terminal ? { runner: 'terminal' as const } : {}),
     // 가볍게 확인은 레인·통합 실행에 그대로 넘긴다. 없으면(full) 지금과 한 글자도 다르지 않다
     ...(input.verify === 'light' ? { verify: 'light' as const } : {}),
     ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
@@ -357,6 +369,38 @@ export async function createTaskPlan(input: {
   persist(plan);
   void execute(plan, preset, cardData).catch((error: unknown) => fail(plan, describe(error)));
   return clone(plan);
+}
+
+/**
+ * 카드가 아닌 계획을 터미널에서 돌려도 되는지 만들기 전에 본다(거절하는 쪽: 허용 목록이라 모르는 입력은 거절한다).
+ * 터미널 레인은 아직 게시판·가벼운 확인·통합 페이지 확인·노력 단계를 CLI에 넘기지 못한다 —
+ * 조용히 빠뜨리면 사람이 건 조건이 안 걸린 채 통과하므로 입력이 오면 거절한다.
+ * 레인을 띄울 백엔드는 모델 계획이면 서버 기본(레인 작업의 backend는 버려진다), 고정 계획이면 레인이 고른 값(없으면 서버 기본)이다
+ */
+function assertPlanTerminalRunnable(input: { presetPlan?: unknown; coordination?: CoordinationInput; verify?: VerifyMode; integrationChecks?: { pageChecks?: WorkflowPageCheck[] }; effort?: string }): void {
+  if (!sessionTerminalAllowed()) throw new StudioError(409, '터미널 방식 작업 분해는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
+  if (input.coordination) throw new StudioError(400, '터미널 레인은 아직 게시판을 읽지 못해 조율(coordination)과 함께 쓸 수 없습니다');
+  if (input.verify === 'light') throw new StudioError(400, '터미널 레인은 아직 가볍게 확인(verify: light)을 받지 못합니다');
+  if (input.integrationChecks?.pageChecks?.length) throw new StudioError(400, '터미널 레인은 아직 통합 페이지 확인(pageChecks)을 받지 못합니다');
+  if (asEffort(input.effort)) throw new StudioError(400, '터미널 레인은 아직 노력 단계(effort)를 CLI에 넘기지 못합니다');
+  const serverDefault = resolveSessionBackend(undefined);
+  const backends = new Set<string>();
+  if (input.presetPlan === undefined) {
+    backends.add(serverDefault);
+  } else {
+    // 고정 계획은 레인을 만들기 전에 검증해 레인마다 backend를 본다(카드와 같이 형식 오류는 TaskPlanError → 400)
+    let lanes: TaskLane[];
+    try {
+      lanes = planLanes(input.presetPlan, PLAN_LIMITS);
+    } catch (error) {
+      if (error instanceof TaskPlanError) throw new StudioError(400, error.message);
+      throw error;
+    }
+    for (const lane of lanes) for (const task of lane.tasks) backends.add(task.backend ?? serverDefault);
+  }
+  for (const backend of backends) {
+    if (!isTerminalRunnableBackend(backend)) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${backend}`);
+  }
 }
 
 /**
@@ -724,6 +768,11 @@ export function setLaneBackend(planId: string, owner: string, laneId: string, in
   const model = input.model?.trim() || undefined;
   if (model && model.length > 120) throw new StudioError(400, '모델 이름은 120자까지 입력할 수 있습니다');
   const effort = asEffort(input.effort);
+  // 터미널 계획의 레인은 터미널로 띄울 수 있는 백엔드여야 하고 노력 단계를 CLI에 넘기지 못한다 — 승인한 뒤에야 알게 되지 않게 지금 거절한다
+  if (plan.runner === 'terminal') {
+    if (!isTerminalRunnableBackend(backend)) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${backend}`);
+    if (effort) throw new StudioError(400, '터미널 레인은 아직 노력 단계(effort)를 CLI에 넘기지 못합니다');
+  }
 
   lane.backend = backend as PlanBackend;
   lane.model = model;
@@ -864,7 +913,14 @@ async function execute(plan: TaskPlanView, preset?: unknown, cards?: ReturnType<
   // 레인을 만든 직후, 레인을 돌리기 전에 레인 사이 계약을 받아 S2로 게시한다.
   // 실패해도 계획은 계속 간다(계약 없이) — 경고 한 줄만 남긴다
   if (usedModel && lanes.length >= 2 && !plan.coordination && contractsSetting()) {
-    await askLaneContracts(plan, project, lanes);
+    if (plan.runner === 'terminal') {
+      // 터미널 레인은 게시판을 읽지 못한다 — 계약을 받아도 레인에 닿지 않으므로 모델을 부르지 않고, 받지 않았다고 남긴다
+      const contracts: TaskPlanContractsView = { source: 'model', count: 0, warning: '터미널 레인은 아직 게시판을 읽지 못해 레인 사이 계약을 받지 않았습니다' };
+      plan.contracts = contracts;
+      console.warn(`[b-studio] 작업 분해 ${plan.id}: ${contracts.warning}`);
+    } else {
+      await askLaneContracts(plan, project, lanes);
+    }
   }
   // 사람이 쓴 카드에서 "실행"을 누른 것이 승인이다(승인 함수가 남기는 것과 같은 필드). 모델 계획은 승인을 기다린다
   if (cards !== undefined) {
@@ -1209,8 +1265,18 @@ function sessionModelOption(plan: TaskPlanView): { modelId?: string; effort?: Ef
 function laneSessionOption(plan: TaskPlanView, lane: TaskPlanLaneView): { modelId?: string; effort?: Effort; backend?: string; accountId?: string } {
   // 고른 계정은 그 계정의 CLI로 띄운다(#893). 계정은 레인 AI의 계정이라 백엔드도 함께 넘긴다
   const account = lane.accountId && lane.backend ? { backend: lane.backend, accountId: lane.accountId } : undefined;
-  // 터미널 레인은 모델 옵션을 넘기지 않는다(그 레인의 CLI가 모델을 정한다)
-  if (plan.runner === 'terminal') return account ?? {};
+  // 카드 계획의 터미널 레인은 모델 옵션을 넘기지 않는다(그 레인의 CLI가 모델을 정한다)
+  if (plan.runner === 'terminal' && plan.source === 'cards') return account ?? {};
+  if (plan.runner === 'terminal') {
+    // 모델·고정 계획의 터미널 레인: 레인이 고른 backend·model을 넘기고, 모델은 CLI를 처음 띄울 때 --model로 간다(terminalModel).
+    // 고른 모델이 없으면 모델 계획의 계획 별칭을 넘긴다(채팅 레인과 같은 모델). 고정 계획의 modelId는 기록용이라 넘기지 않는다.
+    // 계획 별칭은 claude 계열의 이름이라 다른 백엔드(레인이 codex를 고른 경우)에는 넘기지 않는다
+    const head = lane.tasks[0];
+    const backend = head?.backend ?? lane.backend;
+    const alias = !plan.preset && plan.modelId.startsWith(LOCAL_CLI_MODEL_PREFIX) && (backend === undefined || backend === 'claude-code') ? planModelAlias(plan.modelId) : '';
+    const model = head?.model ?? lane.model ?? (alias || undefined);
+    return { ...(backend ? { backend } : {}), ...(model ? { modelId: model } : {}), ...(account ? { accountId: account.accountId } : {}) };
+  }
   const option = laneModelOption(plan, lane);
   return account ? { ...option, accountId: account.accountId } : option;
 }
