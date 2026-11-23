@@ -2,7 +2,7 @@
 //! stateless streamable HTTP 서버가 하던 일 가운데 b-studio가 쓰는 만큼을 직접 구현한다. 전송(리스너·연결·SSE 쓰기)은 `loopback_server.rs`가 하고,
 //! 여기는 소켓을 모르는 판정과 JSON-RPC 처리만 담는다.
 //!
-//! 기준은 옛 서버(SDK 1.32.1 + hono, `mcp-http-server-legacy.ts`)다. 차등 시험(`mcp-http-server-differential.test.ts`)이 같은 요청에 같은 상태·본문인지 견준다.
+//! 기준은 옛 서버(SDK 1.32.1 + hono)였다. 그 사본 `mcp-http-server-legacy.ts`와 같은 요청에 같은 상태·본문인지 견주던 차등 시험 `mcp-http-server-differential.test.ts`는 #1347에서 지웠다.
 //!
 //! 맡는 것: POST 본문 검사(Accept·Content-Type·JSON·JSON-RPC 꼴·배치 상한·프로토콜 버전), `initialize`·`ping`·`tools/list`·`tools/call` 분배,
 //! 도구 인자 검사(`zodShape` 규칙: 모르는 키를 지우고, 정수는 JS 안전 정수만 받고, enum은 대소문자를 가린다), 도구 목록의 JSON Schema.

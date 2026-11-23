@@ -1,5 +1,5 @@
 //! 세션 터미널의 요청 시작(UserPromptSubmit)·쓰기 직전(PreToolUse)·b-studio 도구(MCP) 판정(ADR-211, 4f B4b). 옛 구현은 `sessions.ts`의 `terminalPromptSubmitted`·`terminalToolDecision`·
-//! `runTerminalTool`이었다(`session-terminal-prompt-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 글 조립과 사실 읽기는 TS가 하고, 여기는 **사실 조합 → 결정**만 정한다.
+//! `runTerminalTool`이었다(옛 구현 `session-terminal-prompt-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 글 조립과 사실 읽기는 TS가 하고, 여기는 **사실 조합 → 결정**만 정한다.
 //!
 //! **순서가 판정이다**: 먼저 맞는 칸이 이긴다. 옛 코드의 `if`가 놓인 순서를 그대로 옮겼다(시험이 칸마다 고정한다).
 //!

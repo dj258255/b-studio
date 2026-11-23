@@ -1,7 +1,6 @@
-import { setTimeout as sleep } from 'node:timers/promises';
 import { SandboxError } from './errors';
 import { native } from './native';
-import type { ContainerState, ProbeResult } from './types';
+import type { ProbeResult } from './types';
 
 export interface ReadinessPolicy {
   /** 연속으로 몇 번 성공해야 준비됐다고 볼지 */
@@ -40,66 +39,6 @@ export class ReadinessError extends SandboxError {
     this.name = 'ReadinessError';
     this.history = history;
   }
-}
-
-export interface WaitForReadyOptions {
-  url: string;
-  expectStatus: number;
-  policy: ReadinessPolicy;
-  getContainerState: () => Promise<ContainerState>;
-  signal?: AbortSignal;
-  onProbe?: (probe: ProbeResult) => void;
-}
-
-/**
- * HTTP 확인을 `fetch`로 하는 준비 대기. Docker 제공자의 준비 확인은 Rust(`crates/bstudio-io/src/readiness_io.rs`, ADR-195 4f A4c-3a)로 옮겼고
- * 옛 `docker/ready-legacy.ts`(#1347에서 지움)만 이것을 썼다.
- * 주소를 `new URL(path, base)`로 만들어 받으므로 부르는 쪽이 경로를 검증해야 한다(트러블슈팅 192)
- */
-export async function waitForReady(options: WaitForReadyOptions): Promise<void> {
-  const startedAt = Date.now();
-  const history: ProbeResult[] = [];
-
-  for (;;) {
-    options.signal?.throwIfAborted();
-    const probe = await probeOnce(options);
-    history.push(probe);
-    options.onProbe?.(probe);
-
-    const decision = decideReadiness(history, options.policy, Date.now() - startedAt);
-    if (decision.kind === 'ready') return;
-    if (decision.kind === 'failed') throw new ReadinessError(decision.reason, history);
-
-    await sleep(options.policy.intervalMs, undefined, { signal: options.signal });
-  }
-}
-
-async function probeOnce({ url, expectStatus, policy, getContainerState }: WaitForReadyOptions): Promise<ProbeResult> {
-  const [containerState, http] = await Promise.all([
-    getContainerState().catch((): ContainerState => 'unknown'),
-    fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(Math.max(policy.intervalMs, 2_000)) }).then(
-      async (response) => {
-        await response.body?.cancel();
-        return { status: response.status };
-      },
-      (error: unknown) => ({ error: describeFetchError(error) }),
-    ),
-  ]);
-
-  return {
-    at: Date.now(),
-    ok: 'status' in http && http.status === expectStatus,
-    ...http,
-    containerState,
-  };
-}
-
-function describeFetchError(error: unknown): string {
-  // AbortSignal.timeout은 DOMException(TimeoutError)으로 끝난다. 첫 요청 컴파일이 느린 Next dev에서 흔하다
-  if ((error as { name?: unknown } | null)?.name === 'TimeoutError') return 'TIMEOUT';
-  if (!(error instanceof Error)) return String(error);
-  const code = (error.cause as { code?: unknown } | undefined)?.code;
-  return typeof code === 'string' ? code : error.message;
 }
 
 /**

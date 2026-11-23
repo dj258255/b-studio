@@ -1,5 +1,5 @@
 //! 도구 순서 장부(ADR-202, 4f A8b). TS `packages/agent/src/claude-code-runner.ts`의 `serialQueue`·`noteToolUses`·`awaitToolUse`·`closeTools`·`runTool` 앞부분이 하던 일을 옮긴 것이다
-//! (옛 구현은 `claude-code-runner-loop-legacy.ts`, 차등 시험의 기준). 트러블슈팅 206.
+//! (옛 구현 `claude-code-runner-loop-legacy.ts`는 #1347에서 지웠다). 트러블슈팅 206.
 //!
 //! 왜 필요한가: 진짜 CLI는 assistant 메시지(`tool_use`)를 표준 출력에 먼저 쓰고 나서 MCP 요청을 보낸다. 그런데 MCP 서버는 다른 스레드에서 요청을 읽으므로
 //! 러너가 요청을 그 표준 출력 줄보다 먼저 처리할 수 있다. 턴 세기와 턴 상한(넘으면 도구를 닫는다)은 표준 출력 쪽에 있어서, 그대로 두면 상한을 넘긴 턴의 도구가

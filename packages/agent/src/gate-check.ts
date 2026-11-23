@@ -125,9 +125,6 @@ export interface GateHost {
   missingStages(passed: ReadonlySet<WorkflowStage>): WorkflowStage[];
 }
 
-/** 차등 시험이 옛 구현에 같은 하위 단계를 넘기려고 게이트에서 `GateHost`를 꺼내던 열쇠. 제품 코드는 쓰지 않는다(옛 구현은 #1347에서 지웠고 이 열쇠를 쓰는 곳도 없다. 지우는 것은 따로 한다) */
-export const GATE_HOST = Symbol('gate-host');
-
 type Handlers = Record<string, HookHandler>;
 
 const stages = (value: unknown): WorkflowStage[] => value as WorkflowStage[];

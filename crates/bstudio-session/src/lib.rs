@@ -1,6 +1,6 @@
 //! 세션 하나의 이벤트 기록(ADR-203, 4f B1a). Node를 모르는 순수 크레이트다.
 //!
-//! 옛 구현은 `apps/studio/lib/server/sessions.ts`의 `history`·`logs` 배열과 `emit`의 버퍼 처리였다(`session-record-legacy.ts`가 차등 시험의 기준으로 남아 있다).
+//! 옛 구현은 `apps/studio/lib/server/sessions.ts`의 `history`·`logs` 배열과 `emit`의 버퍼 처리였다(`session-record-legacy.ts`는 #1347에서 지웠다).
 //! 같은 입력에 같은 결과를 낸다:
 //! - `push`: 기록하지 않는 이벤트(`usage`·`sandbox_link`·`files_changed`·`tests_changed`·`deploy_log`·`label`)는 쌓지 않는다. `log`는 logs(상한 1,000)에,
 //!   나머지는 history(상한 5,000)에 쌓고 넘치면 앞에서 자른다. 돌려주는 값은 "`updatedAt`을 바꾸고 저장을 예약할 것인가"(기록했고 `log`가 아닐 때 참)다

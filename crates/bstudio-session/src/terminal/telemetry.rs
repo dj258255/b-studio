@@ -1,5 +1,5 @@
 //! 세션 터미널의 OTLP/HTTP JSON 텔레메트리 본문 해석(ADR-216, 4f B5b). 옛 구현은 `apps/studio/lib/server/terminal-telemetry.ts`의 `apiRequestsFromOtlp`였다
-//! (그 파일이 차등 시험의 기준으로 남아 있다). Node를 모른다. 본문 글(JSON)과 받은 시각을 받아 **모델 호출 목록**을 돌려주는 순수 함수다.
+//! (그 파일은 아직 TS에 있고 시험이 기대값 JSON과 견준다; 옛 사본 `session-terminal-telemetry-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 본문 글(JSON)과 받은 시각을 받아 **모델 호출 목록**을 돌려주는 순수 함수다.
 //! 서브에이전트 신호(`agentSignalsFromOtlp`)는 화면의 에이전트 내역에만 쓰고 한도에 닿지 않아 TS에 남긴다.
 //!
 //! **막는 검사의 입력이다. 덜 세는 쪽이 여는 쪽이다.** 모델 호출 수는 턴 상한을, 토큰은 토큰 한도를 정한다. 그래서 모르는 값은 센다:
