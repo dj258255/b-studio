@@ -1,6 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadModelFile, modelFilePath, ModelFileError } from './model-file';
 
@@ -41,6 +43,21 @@ describe('모델 파일', () => {
     chmodSync(real, 0o600);
     symlinkSync(real, file);
     expect(() => loadModelFile(file)).toThrow(/링크/);
+  });
+
+  it('FIFO면 열다가 멈추지 않고 거절한다', () => {
+    execFileSync('mkfifo', ['-m', '600', file]);
+    // 열기가 멈추면 이벤트 루프째 막혀 시험의 시간 상한도 걸리지 않는다. 자식 프로세스에서 상한을 두고 돌린다
+    const loader = fileURLToPath(import.meta.resolve('tsx'));
+    const script = `import { loadModelFile } from ${JSON.stringify(fileURLToPath(new URL('./model-file.ts', import.meta.url)))};
+try { loadModelFile(${JSON.stringify(file)}); console.log('읽음'); } catch (error) { console.log(error.message); }`;
+    const out = execFileSync(process.execPath, ['--import', loader, '--input-type=module', '-e', script], { encoding: 'utf8', timeout: 10_000 });
+    expect(out).toMatch(/일반 파일이 아닙니다/);
+  });
+
+  it('키 없는 anthropic 설정은 거절한다(SDK가 환경 변수의 키로 대신하지 않게)', () => {
+    write({ profile: { ...profile, provider: 'anthropic', baseUrl: undefined } });
+    expect(() => loadModelFile(file)).toThrow(/apiKey가 필요합니다/);
   });
 
   it('없으면 거절한다', () => {

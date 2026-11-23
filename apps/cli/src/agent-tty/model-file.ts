@@ -26,7 +26,8 @@ export function loadModelFile(file: string): LoadedModel {
   // O_NOFOLLOW라 마지막 조각이 링크면 열지 않는다(ELOOP)
   let fd: number;
   try {
-    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+    // O_NONBLOCK: FIFO 같은 특수 파일에서 열기가 멈추지 않게 한다(종류는 아래 fstat에서 거절한다)
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code === 'ELOOP') throw new ModelFileError(`모델 파일이 일반 파일이 아닙니다(링크는 허용하지 않습니다): ${file}`);
@@ -36,6 +37,9 @@ export function loadModelFile(file: string): LoadedModel {
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile()) throw new ModelFileError(`모델 파일이 일반 파일이 아닙니다(링크는 허용하지 않습니다): ${file}`);
+    // 다른 사용자가 심은 파일은 600이어도 믿지 않는다(키·모델 주소를 바꿔치기할 수 있다)
+    const uid = process.getuid?.();
+    if (uid !== undefined && stat.uid !== uid) throw new ModelFileError(`모델 파일의 주인이 이 사용자가 아닙니다: ${file}`);
     if ((stat.mode & 0o077) !== 0) throw new ModelFileError(`모델 파일의 권한이 600이 아닙니다(그룹·다른 사용자 권한이 있습니다): ${file}`);
     try {
       raw = JSON.parse(readFileSync(fd, 'utf8'));
@@ -56,5 +60,8 @@ export function loadModelFile(file: string): LoadedModel {
   } catch (error) {
     throw new ModelFileError(`모델 파일의 모델 설정이 올바르지 않습니다: ${error instanceof Error ? error.message : String(error)}`);
   }
+  // Anthropic SDK는 키를 받지 못하면 process.env의 키로 조용히 대신한다. 그 키가 파일의 baseUrl로 가지 않게 키 없는 anthropic 설정은 거절한다
+  // (다른 공급자의 클라이언트는 키가 없으면 로컬 주소가 아닌 한 스스로 던진다)
+  if (profile.provider === 'anthropic' && !apiKey) throw new ModelFileError('anthropic 모델에는 모델 파일의 apiKey가 필요합니다');
   return { profile, env: apiKey ? { [apiKeyEnvName(profile)]: apiKey } : {} };
 }
