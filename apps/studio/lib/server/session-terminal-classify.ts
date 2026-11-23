@@ -2,7 +2,7 @@ import { native } from '@b-studio/sandbox';
 
 /**
  * 세션 터미널의 요청·도구 입력 분류(ADR-215, 4f B5a). 판정은 Rust `crates/bstudio-session`의 `terminal::classify`가 한다(순수 함수).
- * 여기는 글을 코어에 넘기고 결과를 TS 값으로 돌려주는 껍데기다. 옛 판정은 `session-terminal-classify-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 여기는 글을 코어에 넘기고 결과를 TS 값으로 돌려주는 껍데기다. 옛 판정은 지웠다(#1347).
  *
  * 부르는 자리마다 막는 쪽인지 여는 쪽인지:
  * - `readOnly`: 읽기만을 놓치는 것이 여는 쪽이다(읽기만 요청의 쓰기가 허용된다). 코어가 의심스러우면 읽기만으로 읽는다

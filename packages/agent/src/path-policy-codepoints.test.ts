@@ -2,9 +2,12 @@ import { readFileSync } from 'node:fs';
 import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 import { Gen, readEnvNumber } from './differential-kit';
-import { foldName as legacyFold } from './path-policy-legacy';
 
 /**
+ * (#1347) 옛 TS 사본 `path-policy-legacy.ts`는 지웠다. 이 시험의 기준은 Node(ICU)가 계산하는 접기라서 값을 JSON으로 얼릴 수 없다
+ * (Node의 Unicode 판마다 값이 다르다). 그래서 사본 파일 대신 ICU 내장 함수만으로 쓴 기준 함수 `legacyFold`(옛 `foldName`과 같은 식 일곱 줄)를 이 파일 안에 둔다.
+ * 아래 설명에서 "옛 구현"은 이 기준 함수를 말한다.
+ *
  * `foldName`(거부 목록용 넓은 접기)을 Rust로 옮기면서(ADR-191 3q, #1090) 옛 TS와 전체 코드 포인트로 견준다.
  * NFKD·NFKC·`\p{M}\p{Cf}`·대소문자 접기는 Node(ICU)와 Rust(`unicode-normalization`·`regex`·std)의 Unicode 판이 갈릴 수 있어, 무작위 시험으로는 부족하다.
  *
@@ -21,6 +24,19 @@ import { foldName as legacyFold } from './path-policy-legacy';
  * **열린 쪽 뒤집힘을 따로 확인한다**: 옛 구현이 같은 꼴로 모으던 두 이름을 새 구현이 다른 꼴로 가르면 거부 목록이 이름 하나를 놓친다.
  * 시험한 모든 입력에서 "옛 결과가 같으면 새 결과도 같다"가 성립해야 하고(옛 분할을 새 분할이 세분하지 않는다), 규칙 이름(`.git`·`.env`)의 글자 하나를 바꾼 이름도 같게 본다.
  */
+/** Node(ICU) 내장 함수만으로 쓴 기준 접기. 옛 TS `foldName`과 같은 식이다. Rust 구현의 Unicode 표와 견주는 기준이다 */
+function legacyFold(segment: string): string {
+  const folded = segment
+    .normalize('NFKD')
+    .replace(/[\p{M}\p{Cf}]/gu, '')
+    .toUpperCase()
+    .toLowerCase()
+    .normalize('NFKC');
+  // 점과 공백뿐인 이름은 그대로 둔다(빈 이름으로 만들지 않는다)
+  const trimmed = folded.replace(/[. ]+$/, '');
+  return trimmed === '' ? folded : trimmed;
+}
+
 type Pinned = Array<[hex: string, folded: string]>;
 /** Node의 Unicode 판 → 그 판에서 옛 구현과 다른 글자. 목록이 없는 판에서는 고정 목록 비교만 건너뛰고, 열린 쪽 검사는 어느 판에서도 한다 */
 const PINNED_BY_UNICODE = JSON.parse(readFileSync(new URL('./path-policy-fold-diffs.json', import.meta.url), 'utf8')) as Record<string, Pinned>;

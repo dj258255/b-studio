@@ -1,47 +1,42 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { ClaudeCodeUsageTracker, describeResultFailure, isTransientNetworkFailure, mcpSetupFailure, noResultMessage, resolveCompactWindow } from './claude-code-runner';
-import * as legacy from './claude-code-runner-legacy';
 import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 
 /**
- * 러너 판정·사용량 벡터(ADR-191 3ac). 기대값은 옛 TS(`claude-code-runner-legacy.ts`)가 낸 값이다. 옛 TS에서 다른 것은 `intended`로 표시한 의도한 차이뿐이고,
+ * 러너 판정·사용량 벡터(ADR-191 3ac). 기대값은 옛 TS(`claude-code-runner-legacy.ts`, #1347에서 지움)가 낸 값이다. 옛 TS와 다른 것은 `intended`로 표시한 의도한 차이뿐이고,
  * 모두 옛 TS가 던지거나 열린 쪽(실패를 성공으로)으로 틀린 곳이다(트러블슈팅 176).
  * 결과 메시지는 "성공이 확실할 때만 undefined"이고, 도구 서버는 "connected이고 오류가 없을 때만 undefined"이다. 각 통과 조건마다 거의 같은 거부 입력을 둔다.
  */
 
-type Ran = { threw: true } | { threw: false; value: unknown };
-const ran = (fn: () => unknown): Ran => {
-  try {
-    return { threw: false, value: fn() };
-  } catch {
-    return { threw: true };
-  }
+/**
+ * `resolveCompactWindow` 등 아래 값 표의 기대값은 옛 TS가 같은 입력에 낸 값이다. `claude-code-runner-judge-frozen.json`에 얼렸다
+ * (입력 목록과 같은 순서. 글자 비교는 JSON 글자 그대로, 숫자는 `-0`·`NaN`을 가리도록 `enc`로 적었다).
+ */
+const FROZEN = JSON.parse(readFileSync(new URL('./claude-code-runner-judge-frozen.json', import.meta.url), 'utf8')) as {
+  compact: Array<string | null>;
+  transient: boolean[];
+  noResult: string[];
+  usage: Array<{ usage: string; byModel: string; input: string }>;
+  api: string[];
+  merge: { merged1: string; merged2: string; added: unknown };
 };
+const enc = (v: unknown): string => (Object.is(v, -0) ? '-0' : typeof v === 'undefined' ? 'undefined' : String(v));
 
 interface Case<T> {
   label: string;
   input: T;
   /** 새 구현의 기대 */
   expected: unknown;
-  /** 옛 구현이 다르게 읽는 의도한 차이: 옛 구현의 결과(던지면 'THROW') */
+  /** 옛 구현이 다르게 읽던 의도한 차이: 옛 구현의 결과(던지면 'THROW'). 기록용이다(옛 TS는 지웠다) */
   intended?: unknown;
 }
 
-function check<T>(name: string, cases: Array<Case<T>>, now: (input: T) => unknown, before: (input: T) => unknown): void {
+function check<T>(name: string, cases: Array<Case<T>>, now: (input: T) => unknown): void {
   describe(name, () => {
-    for (const { label, input, expected, intended } of cases) {
+    for (const { label, input, expected } of cases) {
       it(`새 구현: ${label}`, () => {
         expect(JSON.stringify(now(input))).toBe(JSON.stringify(expected));
-      });
-      it(`옛 구현: ${label}`, () => {
-        const old = ran(() => before(input));
-        if (intended !== undefined) {
-          // 'THROW': 옛 구현이 던진다. 'SUCCESS': 옛 구현이 성공(undefined)으로 읽는다
-          expect(old.threw ? 'THROW' : old.value === undefined ? 'SUCCESS' : JSON.stringify(old.value)).toBe(intended === 'THROW' || intended === 'SUCCESS' ? intended : JSON.stringify(intended));
-        } else {
-          expect(old.threw).toBe(false);
-          expect(JSON.stringify((old as { value: unknown }).value)).toBe(JSON.stringify(expected));
-        }
       });
     }
   });
@@ -85,7 +80,6 @@ check(
     { label: 'errors가 객체', input: result({ subtype: 'x', errors: { a: 1 } }), expected: 'Claude Code 실행 중 오류가 났습니다' },
   ],
   (message) => describeResultFailure(message),
-  (message) => legacy.describeResultFailure(message),
 );
 
 const init = (servers: unknown, errors?: unknown): never => ({ mcp_servers: servers, ...(errors === undefined ? {} : { mcp_server_errors: errors }) }) as never;
@@ -124,29 +118,30 @@ check(
     { label: '오류 목록이 객체(옛 TS는 던졌다)', input: init([ok], { name: 'x' }), expected: 'Claude Code가 b-studio 도구 서버에 연결하지 못했습니다: 도구 서버 목록의 형식을 읽지 못했습니다', intended: 'THROW' },
   ],
   (message) => mcpSetupFailure(message),
-  (message) => legacy.mcpSetupFailure(message),
 );
 
 describe('resolveCompactWindow', () => {
   const raws: Array<string | undefined> = [undefined, '', '  ', '0', 'off', 'OFF', 'Off', ' off ', 'of', 'offf', '49999', '50000', '50001', '200000', '9007199254740991', '9007199254740992', '99999999999999999999999999999999999999999', '0050000', '00', '000', '1e5', '5e4', '+50000', '-50000', '50000.0', '5０000', '５００００', '50_000', '0x10000', 'ſ', '\u0085 60000 \u0085', '﻿60000', 'abc', '١٢٣٤٥٦'];
-  for (const raw of raws) {
+  it('얼린 기대값 수가 입력 수와 같다', () => expect(FROZEN.compact).toHaveLength(raws.length));
+  raws.forEach((raw, index) => {
     it(`${JSON.stringify(raw)}`, () => {
-      expect(JSON.stringify(resolveCompactWindow(raw))).toBe(JSON.stringify(legacy.resolveCompactWindow(raw)));
+      expect(JSON.stringify(resolveCompactWindow(raw))).toBe(FROZEN.compact[index]);
     });
-  }
+  });
 });
 
 describe('isTransientNetworkFailure', () => {
   const messages = ['getaddrinfo ENOTFOUND api.anthropic.com', 'read ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', "Can't reach the API server", "can't reach the api server", 'Can’t reach the API server', 'overloaded_error', 'API is overloaded', 'overloaded', 'Overloaded.', 'overloadedx', 'xoverloaded', '_overloaded', 'overloaded_', 'overloaded1', '1overloaded', 'enotfound', 'ENOTFOUNDx', 'ENOT FOUND', 'enotfounD', 'ſ', 'ENOTFOUND'.replace('O', 'Ο'), 'K', '401 invalid x-api-key', 'rate_limit_error', '', 'overloadedoverloaded', 'overloaded overloaded', 'xoverloaded overloaded'];
-  for (const message of messages) {
+  it('얼린 기대값 수가 입력 수와 같다', () => expect(FROZEN.transient).toHaveLength(messages.length));
+  messages.forEach((message, index) => {
     it(JSON.stringify(message), () => {
-      expect(isTransientNetworkFailure(message)).toBe(legacy.isTransientNetworkFailure(message));
+      expect(isTransientNetworkFailure(message)).toBe(FROZEN.transient[index]);
     });
-  }
+  });
 });
 
 describe('noResultMessage', () => {
-  const exits: Array<Parameters<typeof legacy.noResultMessage>[0]> = [
+  const exits: Array<Parameters<typeof noResultMessage>[0]> = [
     undefined,
     { code: 0, signal: null, stderr: '' },
     { code: 1, signal: null, stderr: 'a\nb\nc\nd\n' },
@@ -160,7 +155,7 @@ describe('noResultMessage', () => {
   ];
   exits.forEach((exit, index) => {
     it(`입력 ${index}`, () => {
-      expect(noResultMessage(exit)).toBe(legacy.noResultMessage(exit));
+      expect(noResultMessage(exit)).toBe(FROZEN.noResult[index]);
     });
   });
 });
@@ -187,18 +182,16 @@ describe('사용량', () => {
   usages.forEach((message, index) => {
     it(`결과 ${index}: 합·모델별·합산`, () => {
       const tracker = new ClaudeCodeUsageTracker();
-      const old = new legacy.ClaudeCodeUsageTracker();
+      const old = FROZEN.usage[index]!;
       tracker.observeResult(message as never);
-      old.observeResult(message as never);
-      expect(JSON.stringify(tracker.usage)).toBe(JSON.stringify(old.usage));
-      expect(JSON.stringify(tracker.usageByModel)).toBe(JSON.stringify(old.usageByModel));
-      expect(Object.is(tracker.usage.inputTokens, old.usage.inputTokens)).toBe(true);
+      expect(JSON.stringify(tracker.usage)).toBe(old.usage);
+      expect(JSON.stringify(tracker.usageByModel)).toBe(old.byModel);
+      expect(enc(tracker.usage.inputTokens)).toBe(old.input);
     });
   });
 
-  it('null 항목은 옛 구현도 던진다(같은 자리에서 던진다)', () => {
+  it('null 항목은 던진다(옛 구현도 같은 자리에서 던졌다)', () => {
     const message = { modelUsage: { a: null } } as never;
-    expect(() => new legacy.ClaudeCodeUsageTracker().observeResult(message)).toThrow();
     expect(() => new ClaudeCodeUsageTracker().observeResult(message)).toThrow();
   });
 
@@ -212,43 +205,35 @@ describe('사용량', () => {
   });
 
   it('API 시간', () => {
-    for (const value of [undefined, 0, -0, 1.4, 1.5, 2.5, -1, Number.NaN, Number.POSITIVE_INFINITY, '5', null, 1e21, 0.49999999999999994, 4503599627370495.5]) {
+    const values = [undefined, 0, -0, 1.4, 1.5, 2.5, -1, Number.NaN, Number.POSITIVE_INFINITY, '5', null, 1e21, 0.49999999999999994, 4503599627370495.5];
+    expect(FROZEN.api).toHaveLength(values.length);
+    values.forEach((value, index) => {
       const now = native.runnerApiDurationOf(encodeNative(value ?? null));
-      const old = legacy.apiDurationOf({ duration_api_ms: value } as never);
-      expect(Object.is(now ?? undefined, old), String(value)).toBe(true);
-    }
+      expect(enc(now ?? undefined), String(value)).toBe(FROZEN.api[index]);
+    });
   });
 
   it('모델별 합치기', () => {
     const base = { a: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 }, b: { inputTokens: 5, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } };
     const query = { b: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 1, cacheWriteTokens: 1 }, c: { inputTokens: 9, outputTokens: 9, cacheReadTokens: 9, cacheWriteTokens: 9 } };
     const now = decodeNative(native.runnerMergeUsageByModel(encodeNative(base), encodeNative(query)));
-    expect(JSON.stringify(now)).toBe(JSON.stringify(legacy.mergeUsageByModel(base, query)));
-    expect(JSON.stringify(decodeNative(native.runnerMergeUsageByModel(encodeNative({}), encodeNative(query))))).toBe(JSON.stringify(legacy.mergeUsageByModel({}, query)));
+    expect(JSON.stringify(now)).toBe(FROZEN.merge.merged1);
+    expect(JSON.stringify(decodeNative(native.runnerMergeUsageByModel(encodeNative({}), encodeNative(query))))).toBe(FROZEN.merge.merged2);
     const target = { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 };
-    const old = { ...target };
-    legacy.addUsageInto(old, query.b);
-    expect(decodeNative(native.runnerAddUsage(encodeNative(target), encodeNative(query.b)))).toEqual(old);
+    expect(decodeNative(native.runnerAddUsage(encodeNative(target), encodeNative(query.b)))).toEqual(FROZEN.merge.added);
   });
 
-  it('의도한 차이: 문자열 토큰 수·문자열 modelUsage·__proto__ 모델', () => {
+  it('의도한 차이(옛 구현은 문자열 토큰 수를 이어 붙여 \'05\'를 냈고 __proto__ 모델을 버렸다): 문자열 토큰 수·문자열 modelUsage·__proto__ 모델', () => {
     const asString = { modelUsage: { a: { inputTokens: '5' } } } as never;
-    const old = new legacy.ClaudeCodeUsageTracker();
-    old.observeResult(asString);
-    expect(old.usage.inputTokens).toBe('05'); // 옛 구현은 문자열을 이어 붙였다
     const now = new ClaudeCodeUsageTracker();
     now.observeResult(asString);
     expect(now.usage.inputTokens).toBe(5);
     const text = new ClaudeCodeUsageTracker();
     text.observeResult({ modelUsage: 'ab' } as never);
     expect(text.usageByModel).toEqual({});
-    expect(Object.keys(new legacy.ClaudeCodeUsageTracker().usageByModel)).toEqual([]);
     const proto = JSON.parse('{"modelUsage":{"__proto__":{"inputTokens":4}}}') as never;
     const protoNow = new ClaudeCodeUsageTracker();
     protoNow.observeResult(proto);
     expect(Object.keys(protoNow.usageByModel)).toEqual(['__proto__']);
-    const protoOld = new legacy.ClaudeCodeUsageTracker();
-    protoOld.observeResult(proto);
-    expect(Object.keys(protoOld.usageByModel)).toEqual([]);
   });
 });

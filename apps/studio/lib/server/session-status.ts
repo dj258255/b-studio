@@ -5,7 +5,7 @@ import { SessionClaims } from './session-claim';
 
 /**
  * 세션 상태 전이·멈추기·이어받기 판정·폴더 점유(ADR-205, 4f B2b). 판정은 Rust `crates/bstudio-session`의 `status`·`registry`가 하고, 여기는 그 결과를 `StudioError`와
- * 콜백으로 바꾸는 껍데기다. 옛 TS 판정은 `session-status-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 콜백으로 바꾸는 껍데기다. 옛 TS 판정은 지웠다(#1347).
  *
  * `snapshot.status`는 `SessionLife.status`의 거울이다: 바뀔 때마다 이 모듈이 돌려주는 `StatusChange`를 `sessions.ts`의 `applyStatus`가 옮기고 `status` 이벤트를 낸다.
  */

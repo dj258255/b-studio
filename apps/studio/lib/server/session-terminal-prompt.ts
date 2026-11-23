@@ -2,7 +2,7 @@ import { native } from '@b-studio/sandbox';
 
 /**
  * 세션 터미널의 요청 시작·쓰기 직전·MCP 판정(ADR-211, 4f B4b). 판정은 Rust `crates/bstudio-session`의 `terminal::prompt`가 한다(순수 함수).
- * 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다. 글 조립은 `sessions.ts`가 한다. 옛 판정은 `session-terminal-prompt-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다. 글 조립은 `sessions.ts`가 한다. 옛 판정은 지웠다(#1347).
  *
  * 쓰기 직전 훅과 MCP는 샌드박스 켜기와 보호 경로 고정을 기다린다. 기다림 앞의 판정은 샌드박스를 켤지 말지(일찍 거절)에만 쓰고,
  * 기다림 뒤에 그 순간의 사실로 `decidePreTool`을 다시 불러 그 답을 최종으로 한다.

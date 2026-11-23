@@ -130,7 +130,7 @@ export function collectHostMounts(config: ComposeMountConfig): Array<Pick<BindMo
  * `docker compose config --format json` 결과에서 서비스별 마스크 마운트를 계산한다.
  * 마운트 소스는 심볼릭 링크를 풀어 `.git` 위치와 같은 꼴로 맞춘다.
  * `evaluationAssets`를 주면 git 마스크와 평가 자산 마스크를 한 맵으로 합친다. 같은 target이면 git 쪽 규칙이 이긴다(더 막는 쪽).
- * 계산은 Rust(crates/bstudio-io/src/up_loop.rs)가 한다(ADR-195 4f A4c-1). 옛 TS는 `git-mask-legacy.ts`.
+ * 계산은 Rust(crates/bstudio-io/src/up_loop.rs)가 한다(ADR-195 4f A4c-1). 옛 TS는 지웠다(#1347).
  * 실험 경로인 컨테이너 방식 터미널(`agent-terminal.ts`)이 쓴다
  */
 export async function computeGitMask(

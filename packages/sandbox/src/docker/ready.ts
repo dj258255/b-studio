@@ -11,7 +11,7 @@ import { PROCESS_SCAN_SCRIPT, type ScannedProcess } from './stray-processes';
 /**
  * 준비 확인(`#awaitReady`)·모르는 프로세스 검사(`#recordProcessBaseline`·`strayProcesses`)·인프라 확인(`#missingServices`)의 TS 껍데기(ADR-195 4f A4c-3a).
  * 엔드포인트 읽기, HTTP 확인과 컨테이너 상태 읽기의 반복, 죽었을 때 이유 만들기, 프로세스 찾기와 비교는 Rust(crates/bstudio-io/src/readiness_io.rs)가 한다.
- * 여기는 이벤트(`onStatus`·`onTransientRetry`)를 알리고 결과를 옛 글 그대로의 오류로 바꾸기만 한다. 옛 TS는 `ready-legacy.ts`(차등 시험의 기준값).
+ * 여기는 이벤트(`onStatus`·`onTransientRetry`)를 알리고 결과를 옛 글 그대로의 오류로 바꾸기만 한다. 옛 TS는 지웠다(#1347).
  *
  * **컨테이너를 다시 만드는 `up`은 Rust가 부르지 않는다.** `up`은 `#compose` → `#upWithGitMask`의 `#upQueue`(한 번에 하나)와 `#gitMask`(마지막으로 쓴 마스크)를 지나야
  * 하는데, 그 상태는 이 클래스가 쥐고 있다. 일시 오류로 죽었으면 Rust가 "다시 만들어 달라"(`recreate`)고 돌려주고, 여기서 `ctx.recreate`(= 옛 경로의 `#composeOrThrow`)로

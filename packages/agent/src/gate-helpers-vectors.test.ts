@@ -2,14 +2,13 @@ import { describe, expect, it } from 'vitest';
 import type { ViewportTextFinding } from './browser-check';
 import { wellFormed } from './differential-kit';
 import * as shell from './gate';
-import * as legacy from './gate-helpers-legacy';
 
 /**
- * 게이트의 순수 보조 판정의 벡터 시험(ADR-191 3r). 기대값은 옮기기 전 TS(`gate-helpers-legacy.ts`)가 낸 값이다(JSON 글자, 짝 없는 서로게이트는 U+FFFD로 맞췄다).
+ * 게이트의 순수 보조 판정의 벡터 시험(ADR-191 3r). 기대값은 옮기기 전 TS(`gate-helpers-legacy.ts`, #1347에서 지움)가 낸 값이다(JSON 글자, 짝 없는 서로게이트는 U+FFFD로 맞췄다).
  * 경계를 밟는다: 숫자 `1000` 대 `1,000`·`1 000`·`1,00`, 반올림 가운데(`1.0005`→`1.001`, `999.9995`→`1,000`), ±0·NaN·±Infinity·`1e21`, 상태 404 앞뒤(403·405·NaN·404.5),
  * 표지의 대소문자·한 글자 모자람·두 칸, 글자 값의 대소문자·앞뒤 공백·빈 글자, 첫 화면 글자의 앞뒤 공백·중복·`encodeLoneSurrogates` 충돌 꼴(U+E010·E011·`d800`),
  * 동적 세그먼트의 `[[id]]`·`[...slug]`·`x[id]`·`[a[b]`·개행, 동적 이름 사용 판정의 대소문자·덧붙임, `stripHtml`의 대소문자·미완성·ſ·ı·유니코드 공백.
- * 옛 TS에 돌리면(GATE_VECTORS_LEGACY=1) 의도한 차이(맨 아래 describe와 짝 없는 서로게이트가 문구에 들어간 벡터)만 실패한다.
+ * 옛 TS와 달랐던 곳은 의도한 차이(맨 아래 describe와 짝 없는 서로게이트가 문구에 들어간 벡터)뿐이다.
  */
 type Vector = [fn: string, args: unknown[], expected: string];
 const VECTORS: Vector[] = [
@@ -492,8 +491,8 @@ const VECTORS: Vector[] = [
   ["sampledValues", ["app/[id.x]/page.tsx", { "id": "1" }], "undefined"],
 ];
 
-const IMPL = (process.env.GATE_VECTORS_LEGACY ? legacy : shell) as unknown as Record<string, (...args: unknown[]) => unknown>;
-const SHELL = shell as unknown as Record<string, (...args: unknown[]) => unknown>;
+const IMPL = shell as unknown as Record<string, (...args: unknown[]) => unknown>;
+const SHELL = IMPL;
 
 function run(impl: Record<string, (...args: unknown[]) => unknown>, fn: string, args: unknown[]): string {
   return JSON.stringify(wellFormed(impl[fn]!(...args))) ?? 'undefined';
@@ -516,7 +515,7 @@ describe('게이트의 순수 보조 판정: 벡터', () => {
 
 const L = (cfg: Record<string, unknown>, keys: string[], flag: boolean) => ({ config: { service: 'web', mode: 'http', expectStatus: 200, maxPages: 5, ...cfg }, notes: [], inRunKeys: new Set(keys), inRunSampleIdFrom: flag });
 
-/** 의도한 차이: 옛 TS에 돌리면 이 describe의 시험이 실패한다(GATE_VECTORS_LEGACY=1). 기대값은 새 구현이 낸 값이고, 옛 값은 주석에 적었다 */
+/** 의도한 차이: 옛 TS는 이 describe의 시험과 다르게 답했다. 기대값은 새 구현이 낸 값이고, 옛 값은 주석에 적었다 */
 describe('게이트의 순수 보조 판정: 의도한 차이', () => {
   it('표지 목록은 TS 사본과 Rust가 같다', () => {
     for (const marker of shell.NEXT_ERROR_MARKERS) {

@@ -3,7 +3,7 @@ import type { StudioEvent } from '@/lib/studio-events';
 
 /**
  * 세션 하나의 이벤트 기록(history·logs)과 그 질의(ADR-203, 4f B1a). 기록은 Rust(`crates/bstudio-session`)가 쥐고 이 클래스는 JSON 경계만 맡는다.
- * 구독자 전달·SSE·저장 예약은 여기에 없다(`sessions.ts`의 세션이 쥔다). 옛 구현은 `session-record-legacy.ts`에 차등 시험의 기준으로 남아 있다.
+ * 구독자 전달·SSE·저장 예약은 여기에 없다(`sessions.ts`의 세션이 쥔다). 옛 구현은 지웠다(#1347).
  *
  * 경계: 이벤트는 `JSON.stringify`한 글자로 넘긴다. `JSON.stringify`는 짝 없는 서로게이트를 `\ud800` 이스케이프로 쓰므로 Rust가 글자 그대로 들고 있다가 돌려주면 `JSON.parse`가 원래 글자로 되돌린다.
  * 유한하지 않은 수와 -0, NUL로 시작하는 키는 `encodeEvent`가 바꿔 쓰고 되받을 때 되돌린다.
@@ -77,7 +77,7 @@ export class SessionRecord {
 
   /**
    * 서버가 멈춰 끝나지 못한 요청·되돌리기·원격 동기화(옛 배포 포함)를 닫는 이벤트를 history 끝에 덧붙인다(상한 없이). 덧붙인 개수.
-   * 이벤트를 읽지 못하면(JSON이 아니거나 `null`이거나 필드가 너무 깊다) 던지고 아무것도 덧붙이지 않는다. 옛 `closeUnfinished`(`session-store-legacy.ts`)와 같은 결과다
+   * 이벤트를 읽지 못하면(JSON이 아니거나 `null`이거나 필드가 너무 깊다) 던지고 아무것도 덧붙이지 않는다. 옛 `closeUnfinished`(옛 TS는 #1347에서 지웠다)와 같은 결과였다
    */
   closeUnfinished(reason: string): number {
     return this.inner.closeUnfinished(reason);

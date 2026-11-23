@@ -433,7 +433,7 @@ export async function listProcesses(): Promise<ProcessEntry[]> {
  * root를 모르면(2보다 작다) `undefined`다 — 아래에 아무것도 없다는 뜻(빈 목록)이 아니라 찾을 수 없다는 뜻이다. 부르는 쪽은 이것을 통과로 읽지 않는다(N20).
  * 붙었다고 보는 것은 인자에 표식이 있는 것이다 — claude는 `--settings <settingsPath>`(낱말 경계로, `--settings`가 하나뿐일 때), codex는 훅 명령이 가리키는
  * 관문 루트의 훅 스크립트 경로(`-c hooks.…` 안, 문자열 포함). 관문 폴더 경로에 빈칸이 있어도 `ps`의 인자 한 줄에서 그대로 견줄 수 있다.
- * 옛 판정은 `session-terminal-watch-legacy.ts`에 차등 시험의 기준으로만 남아 있다
+ * 옛 판정은 지웠다(#1347)
  */
 export function findUnhookedCliOrUnknown(
   root: number,

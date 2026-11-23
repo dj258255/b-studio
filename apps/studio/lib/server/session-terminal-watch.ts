@@ -3,7 +3,7 @@ import { native } from '@b-studio/sandbox';
 /**
  * 세션 터미널 감시(관문 파일 변조, 훅 없이 뜬 CLI)의 판정과, 감시가 실행의 열기·턴 끝에 닿는 자리(ADR-219, 4f B5e).
  * 판정은 Rust `crates/bstudio-session`의 `terminal::watch`가 한다(순수 함수). 여기는 검사 결과를 코어에 넘기고 돌려받은 상태를 들고 있는 껍데기이며,
- * `ps`·파일 읽기·`fs.watch`·타이머는 `session-terminal.ts`가 한다. 옛 판정은 `session-terminal-watch-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * `ps`·파일 읽기·`fs.watch`·타이머는 `session-terminal.ts`가 한다. 옛 판정은 지웠다(#1347).
  *
  * 이 모듈은 `session-terminal.ts`와 따로 둔다. `sessions.ts`가 감시에 묻는 두 함수(`liveWatchViolation`·`verifyWatch`)를 여기서 가져가므로, 터미널을 여는 모듈을 가짜로 바꾸는 시험에서도
  * 감시가 없는 세션(등록된 것이 없다)은 지금과 같게 통과한다.

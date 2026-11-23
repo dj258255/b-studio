@@ -2,11 +2,10 @@ import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { childEnv, resolveCliCommand } from './claude-cli-process';
-import * as legacy from './claude-cli-process-legacy';
 import { makeFixture, type Fixture } from './claude-cli-command-fixture';
 
 /**
- * CLI 실행 파일 고르기 벡터(ADR-191 3ac). 막는 쪽이다. 기대값은 옛 TS(`claude-cli-process-legacy.ts`)가 낸 값이고, 옛 TS에서 실패하는 것은 `intended`로 표시한 의도한 차이뿐이다.
+ * CLI 실행 파일 고르기 벡터(ADR-191 3ac). 막는 쪽이다. 기대값은 옛 TS(`claude-cli-process-legacy.ts`, #1347에서 지움)가 낸 값이고, 옛 TS와 다른 것은 `intended`로 표시한 의도한 차이뿐이다(그 값은 새 구현이 내는 값).
  * 의도한 차이는 모두 옛 TS가 열린 쪽으로 틀린 곳을 닫는 것이다(트러블슈팅 176).
  * 허용·인식 패턴마다 거의 같은 거부 입력을 둔다: 루트 이름의 접두인 형제 폴더, `..`로 시작하는 폴더 이름, 겹친 구분자, `..` 세그먼트, 링크, 대소문자.
  */
@@ -119,17 +118,6 @@ posixOnly('CLI 실행 파일 고르기 벡터', () => {
       }
       expect(outcomeOf(resolveCliCommand, vector)).toBe(vector.expected(f));
     });
-    it(`옛 구현에서도 같거나 의도한 차이만 다르다: ${vector.label}`, () => {
-      const old = outcomeOf(legacy.resolveCliCommand, vector);
-      if (vector.intended && !(vector.caseInsensitiveOnly && !caseInsensitive)) {
-        expect(old, '옛 TS는 열린 쪽으로 틀렸다').toBe(vector.intended(f));
-        expect(old).not.toBe(vector.expected(f));
-      } else if (vector.caseInsensitiveOnly) {
-        expect(old).toBe('ENOENT');
-      } else {
-        expect(old).toBe(vector.expected(f));
-      }
-    });
   }
 
   it('벡터 수와 의도한 차이 수', () => {
@@ -148,12 +136,9 @@ posixOnly('자식 PATH 벡터', () => {
     ['..bin을 뺀다(옛 TS는 남겼다)', (x) => path.join(x.project, '..bin'), () => '', true],
     ['안의 링크가 바깥을 가리켜도 뺀다(옛 TS는 남겼다)', (x) => path.join(x.project, 'tools'), () => '', true],
   ];
-  for (const [label, entries, expected, intended] of cases) {
+  for (const [label, entries, expected] of cases) {
     it(label, () => {
       expect(childEnv({ PATH: entries(f), HOME: '/h' }, f.project)).toEqual({ PATH: expected(f), HOME: '/h' });
-      const old = legacy.childEnv({ PATH: entries(f), HOME: '/h' }, f.project);
-      if (intended) expect(old.PATH).toBe(entries(f));
-      else expect(old.PATH).toBe(expected(f));
     });
   }
   it('PATH가 없으면 그대로, 루트가 없으면 절대 항목만 거른다', () => {
@@ -171,8 +156,6 @@ posixOnly('짝 없는 서로게이트가 든 경로', () => {
     for (const lone of ['\ud800', '\udbff', '\udc00', '\udfff']) {
       const entry = path.join(f.base, `sur${lone}rogate`, 'bin');
       const resolved = resolveCliCommand('claude', { PATH: entry }, f.project);
-      const old = legacy.resolveCliCommand('claude', { PATH: entry }, f.project);
-      expect(Buffer.from(resolved, 'utf8').equals(Buffer.from(old, 'utf8'))).toBe(true);
       expect(Buffer.from(resolved, 'utf8').toString('utf8')).toBe(path.join(dir, 'claude'));
     }
   });
