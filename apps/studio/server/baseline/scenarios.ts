@@ -419,7 +419,102 @@ export const terminalScenarios: Scenario[] = [
       await claude.stop('못 고쳤습니다.');
     },
   },
+  // 아래 넷은 채팅 경로의 같은 이름(terminal- 없는) 시나리오를 터미널 경로로 옮긴 것이다. 채팅 경로를 지울 때 채팅판만 지운다(#1353)
+  {
+    name: 'terminal-cancel-revert',
+    covers: '터미널 실행 취소(화면의 취소 라우트): 실행이 바꾼 파일을 되돌리고 체크포인트를 남기지 않는다',
+    options: terminalOptions(),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      const started = await driver.waitFor('실행 시작', (event) => event.type === 'run_started');
+      const runId = started.runId as string;
+      await claude.write('app/hello.txt', '취소될 내용\n');
+      await driver.call('cancel', 'POST', `/api/sessions/${id}/runs/${runId}/cancel`);
+      await driver.waitFor('run_finished', (event) => event.type === 'run_finished' && event.runId === runId);
+    },
+    check: (snapshot) => {
+      const problems: string[] = [];
+      const disk = snapshot.disk as DiskState;
+      if (disk.files['app/hello.txt'] !== '안녕\n') problems.push(`취소했는데 app/hello.txt가 원래 내용이 아니다: ${JSON.stringify(disk.files['app/hello.txt'])}`);
+      if (JSON.stringify(snapshot.events).includes('"type":"checkpoint"')) problems.push('취소한 실행이 체크포인트를 남겼다');
+      return problems;
+    },
+  },
+  {
+    name: 'terminal-platform-failure',
+    covers: '터미널 + 도커 쪽(platform) 실패: 복사본 방식이면 되돌리지도 체크포인트를 남기지도 않고, 변경은 작업 복사본에 남는다',
+    options: terminalOptions({
+      // 파일 반영 확인(docker run)이 도커에 닿지 못한 것처럼 실패한다
+      docker: { rules: [{ when: ['run', '--rm'], reply: { exit: 1, stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n' } }] },
+    }),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '플랫폼 실패 중\n');
+      await claude.stop('고쳤습니다.');
+    },
+    check: (snapshot) => platformFailureProblems(snapshot, { reverted: false }),
+  },
+  {
+    name: 'terminal-local-workspace-platform-failure',
+    covers: '터미널 + 내 폴더(local) 방식 + 플랫폼 실패: 복사본 방식과 달리 되돌린다',
+    options: terminalOptions({
+      docker: { rules: [{ when: ['run', '--rm'], reply: { exit: 1, stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n' } }] },
+    }),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start({ workspace: 'local' });
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '내 폴더 플랫폼 실패\n');
+      await claude.stop('고쳤습니다.');
+    },
+    check: (snapshot) => platformFailureProblems(snapshot, { reverted: true }),
+  },
+  {
+    name: 'terminal-policy-violation-boot',
+    covers: '터미널 쓰기 직전 훅 + 도커 정책 순서: 정책 위반이 든 inspect면 컨테이너를 지우고 시작하지 않으며(ready 안 나감), 기준을 잡지 못해 쓰기를 거절한다',
+    options: terminalOptions({ docker: { rules: [{ when: ['inspect'], inspectPatch: { app: { HostConfig: { Privileged: true } } } }] } }),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '위반\n');
+      await claude.stop('못 고쳤습니다.');
+    },
+    check: (snapshot) => {
+      const problems: string[] = [];
+      const docker = snapshot.docker as { mutating: string[] };
+      if (!docker.mutating.some((call) => call.startsWith('rm --force'))) problems.push('정책 위반 컨테이너를 지우지 않았다');
+      if (docker.mutating.some((call) => call.startsWith('start') || call.startsWith('compose start'))) problems.push('정책 위반 컨테이너를 시작했다');
+      const events = snapshot.events as { platform: Array<{ type: string; state?: string }> };
+      if (events.platform.some((event) => event.type === 'service' && event.state === 'ready')) problems.push('정책 위반인데 서비스가 ready로 나갔다');
+      if (!JSON.stringify(snapshot.http).includes('"permissionDecision":"deny"')) problems.push('기준을 잡지 못했는데 쓰기를 허락했다');
+      if ((snapshot.disk as DiskState).files['app/hello.txt'] !== '안녕\n') problems.push('거절한 쓰기가 작업 복사본에 남았다');
+      return problems;
+    },
+  },
 ];
+
+/** 플랫폼 실패의 옳은 동작: 실패로 닫고 체크포인트를 남기지 않는다. 복사본 방식은 변경을 남기고, 내 폴더 방식은 되돌린다 */
+function platformFailureProblems(snapshot: BaselineSnapshot, expected: { reverted: boolean }): string[] {
+  const problems: string[] = [];
+  const run = (snapshot.events as { run: Array<{ type: string; status?: string }> }).run;
+  const finished = run.filter((event) => event.type === 'run_finished');
+  if (finished.length !== 1 || finished[0].status !== 'failed') problems.push(`실행이 실패로 한 번 닫히지 않았다: ${JSON.stringify(finished.map((event) => event.status))}`);
+  if (run.some((event) => event.type === 'checkpoint')) problems.push('플랫폼 실패인데 체크포인트를 남겼다');
+  const disk = snapshot.disk as DiskState;
+  const original = disk.files['app/hello.txt'] === '안녕\n';
+  if (expected.reverted && !original) problems.push(`되돌려야 하는데 변경이 남았다: ${JSON.stringify(disk.files['app/hello.txt'])}`);
+  if (!expected.reverted && original) problems.push('바꾼 코드의 문제가 아닌데 변경을 되돌렸다');
+  return problems;
+}
 
 // ── desk가 실제로 부르는 흐름(C1a, #1301): 모두 지원 경로(이 컴퓨터 방식 세션 터미널)다 ──
 // desk 흐름은 파일 변경 알림의 개수를 사진에 남기지 않는다(`withoutFileRevisionCount`)

@@ -1,0 +1,712 @@
+{
+  "http": [
+    {
+      "step": "세션 만들기",
+      "method": "POST",
+      "path": "/api/sessions",
+      "status": 201,
+      "body": {
+        "id": "<sid>",
+        "projectId": "demo",
+        "projectName": "demo",
+        "workDir": "<root>/projects/demo",
+        "workspace": "local",
+        "stateDir": "<root>/sessions/demo-<sid>",
+        "status": "idle",
+        "mode": "claude-code",
+        "backend": "claude-code",
+        "running": false,
+        "owner": "local",
+        "experimental": true,
+        "terminal": true,
+        "terminalMode": "host",
+        "services": [
+          {
+            "name": "app",
+            "template": "nextjs",
+            "preview": "browser",
+            "state": "stopped",
+            "hasContract": false
+          }
+        ],
+        "externals": [],
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (내 폴더)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "step": "터미널 열기",
+      "method": "POST",
+      "path": "/api/sessions/<sid>/terminal",
+      "status": 200,
+      "body": {
+        "ok": true
+      }
+    },
+    {
+      "step": "CLI 시작",
+      "method": "HOOK",
+      "path": "/session-start",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/projects/demo",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "SessionStart",
+          "source": "startup"
+        },
+        "output": {
+          "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "# b-studio\n이 작업 폴더는 b-studio 세션의 작업 복사본이고, 이 CLI는 이 컴퓨터에서 돈다. 프로젝트의 서비스(app)는 각자의 컨테이너에서 돌고, 같은 폴더가 그 안에 연결되어 있다.\n빌드·테스트·서버 명령은 mcp__b-studio__run_in_service로 서비스 컨테이너 안에서 돌린다(검증 게이트가 보는 환경이 그쪽이다). 쓸 수 있는 b-studio 도구: mcp__b-studio__run_in_service, mcp__b-studio__restart_service, mcp__b-studio__service_logs, mcp__b-studio__service_stats, mcp__b-studio__http_request.\n커밋하지 않는다. git commit·git push·git reset·git checkout·git stash로 기록이나 브랜치를 바꾸지 않는다. 체크포인트(커밋)는 턴이 끝난 뒤 b-studio가 검증을 통과시켜 남긴다.\n작업 폴더 밖의 파일을 바꾸지 않는다.\n검증이 실패하면 결과가 \"Stop hook feedback\"으로 돌아온다. 그것은 사용자의 새 요청이 아니라 검증 결과다. 고친 뒤 다시 턴을 끝낸다.\n끝내 통과하지 못하면 b-studio가 이번 요청의 변경을 되돌린다(기록에서 되살릴 수 있다).\n사용자에게 보이는 글은 한국어로 쓴다."
+          }
+        }
+      }
+    },
+    {
+      "step": "요청",
+      "method": "HOOK",
+      "path": "/prompt",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/projects/demo",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "UserPromptSubmit",
+          "prompt": "hello.txt를 고쳐 주세요"
+        },
+        "output": {}
+      }
+    },
+    {
+      "step": "쓰기 직전",
+      "method": "HOOK",
+      "path": "/pre-tool",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/projects/demo",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "PreToolUse",
+          "tool_name": "Write",
+          "tool_input": {
+            "file_path": "<root>/projects/demo/app/hello.txt",
+            "content": "내 폴더 플랫폼 실패\n"
+          },
+          "tool_use_id": "toolu_1"
+        },
+        "output": {}
+      }
+    },
+    {
+      "step": "턴 끝",
+      "method": "HOOK",
+      "path": "/stop",
+      "status": 0,
+      "body": {
+        "input": {
+          "session_id": "conversation-1",
+          "cwd": "<root>/projects/demo",
+          "transcript_path": "/dev/null",
+          "hook_event_name": "Stop",
+          "stop_hook_active": false,
+          "last_assistant_message": "고쳤습니다."
+        },
+        "output": {
+          "systemMessage": "[b-studio] b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 샌드박스 파일 반영 확인에 실패했습니다 바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다)."
+        }
+      }
+    }
+  ],
+  "events": {
+    "run": [
+      {
+        "type": "run_started",
+        "runId": "<run:1>",
+        "request": "hello.txt를 고쳐 주세요",
+        "by": "local",
+        "via": "terminal",
+        "at": "<at>",
+        "backend": "claude-code",
+        "taskKind": {
+          "complexity": "simple",
+          "risk": "normal"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "Write",
+          "input": {
+            "file_path": "<root>/projects/demo/app/hello.txt",
+            "content": "내 폴더 플랫폼 실패\n"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "text",
+          "text": "고쳤습니다."
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "run",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_start",
+          "files": [
+            "app/hello.txt"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "contract_check",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_result",
+          "report": {
+            "ok": false,
+            "sync": {
+              "error": "샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+              "platform": true
+            },
+            "restarted": [],
+            "contracts": [],
+            "unverifiedFiles": [],
+            "secretLeaks": [],
+            "skippedOff": [],
+            "platformFailure": "샌드박스 파일 반영 확인에 실패했습니다"
+          },
+          "text": "검증 실패\n- b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요: 샌드박스 파일 반영 확인에 실패했습니다\n- 샌드박스 파일 반영 확인 실패: 샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "failed",
+          "result": {
+            "status": "failed",
+            "summary": "b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 샌드박스 파일 반영 확인에 실패했습니다",
+            "changedFiles": [
+              "app/hello.txt"
+            ],
+            "report": {
+              "ok": false,
+              "sync": {
+                "error": "샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+                "platform": true
+              },
+              "restarted": [],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": [],
+              "platformFailure": "샌드박스 파일 반영 확인에 실패했습니다"
+            },
+            "checks": [],
+            "gateOutcome": "exhausted",
+            "passedStages": [],
+            "verifyAttempts": 0,
+            "turns": 0,
+            "usage": {
+              "inputTokens": 0,
+              "outputTokens": 0,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            },
+            "metrics": {
+              "modelCalls": 0,
+              "maxContextTokens": 0,
+              "toolMs": "<toolMs>",
+              "gateMs": "<gateMs>"
+            }
+          }
+        }
+      },
+      {
+        "type": "reverted",
+        "runId": "<run:1>",
+        "files": [
+          "app/hello.txt"
+        ],
+        "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..a6bd915 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+내 폴더 플랫폼 실패\n",
+        "restarted": [],
+        "databases": [],
+        "sync": {
+          "error": "샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+          "platform": true
+        },
+        "backup": {
+          "id": "<time>-0001",
+          "files": [
+            "app/hello.txt"
+          ],
+          "createdAt": "<createdAt>"
+        }
+      },
+      {
+        "type": "run_finished",
+        "runId": "<run:1>",
+        "status": "failed",
+        "summary": "b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 샌드박스 파일 반영 확인에 실패했습니다\n\n바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다).",
+        "platformFailure": "샌드박스 파일 반영 확인에 실패했습니다",
+        "durationMs": "<durationMs>"
+      }
+    ],
+    "platform": [
+      {
+        "type": "snapshot",
+        "snapshot": {
+          "id": "<sid>",
+          "projectId": "demo",
+          "projectName": "demo",
+          "workDir": "<root>/projects/demo",
+          "workspace": "local",
+          "stateDir": "<root>/sessions/demo-<sid>",
+          "status": "idle",
+          "mode": "claude-code",
+          "backend": "claude-code",
+          "running": false,
+          "owner": "local",
+          "experimental": true,
+          "terminal": true,
+          "terminalMode": "host",
+          "services": [
+            {
+              "name": "app",
+              "template": "nextjs",
+              "preview": "browser",
+              "state": "stopped",
+              "hasContract": false
+            }
+          ],
+          "externals": [],
+          "checkpoints": [
+            {
+              "sha": "<sha:1>",
+              "shortSha": "<sha:1>",
+              "message": "세션 시작 (내 폴더)",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/hello.txt",
+                "app/readme.txt",
+                "compose.yaml",
+                "studio.yaml"
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "type": "snapshot_sync",
+        "checkpoints": [
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (내 폴더)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ]
+      },
+      {
+        "type": "notice",
+        "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+        "at": "<at>"
+      },
+      {
+        "type": "status",
+        "status": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "boot_network",
+        "at": "<at>",
+        "network": [
+          {
+            "service": "app",
+            "rxBytes": 1000,
+            "txBytes": 2000
+          }
+        ]
+      },
+      {
+        "type": "status",
+        "status": "ready"
+      }
+    ],
+    "files": [
+      {
+        "type": "files_changed",
+        "revision": 1
+      },
+      {
+        "type": "files_changed",
+        "revision": 2
+      }
+    ]
+  },
+  "disk": {
+    "commits": [
+      {
+        "sha": "<sha:1>",
+        "message": "세션 시작 (내 폴더)"
+      }
+    ],
+    "refs": [
+      {
+        "name": "refs/heads/main",
+        "sha": "<sha:1>"
+      }
+    ],
+    "status": [],
+    "files": {
+      "app/hello.txt": "안녕\n"
+    },
+    "sessionJson": {
+      "claudeCode": {
+        "notes": []
+      },
+      "codex": {
+        "notes": [],
+        "recent": []
+      },
+      "commandCode": {
+        "notes": []
+      },
+      "conversation": [],
+      "demoIndex": 0,
+      "gemini": {
+        "notes": []
+      },
+      "git": {
+        "branch": "main",
+        "lastCheckpoint": "<sha:1>"
+      },
+      "history": [
+        {
+          "at": "<at>",
+          "backend": "claude-code",
+          "by": "local",
+          "request": "hello.txt를 고쳐 주세요",
+          "runId": "<run:1>",
+          "taskKind": {
+            "complexity": "simple",
+            "risk": "normal"
+          },
+          "type": "run_started",
+          "via": "terminal"
+        },
+        {
+          "event": {
+            "input": {
+              "content": "내 폴더 플랫폼 실패\n",
+              "file_path": "<root>/projects/demo/app/hello.txt"
+            },
+            "name": "Write",
+            "type": "tool_call"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "at": "<at>",
+          "text": "샌드박스를 켜는 중입니다 (처음이면 1분 안팎)",
+          "type": "notice"
+        },
+        {
+          "at": "<at>",
+          "network": [
+            {
+              "rxBytes": 1000,
+              "service": "app",
+              "txBytes": 2000
+            }
+          ],
+          "type": "boot_network"
+        },
+        {
+          "event": {
+            "text": "고쳤습니다.",
+            "type": "text"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "run",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "files": [
+              "app/hello.txt"
+            ],
+            "type": "verify_start"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "contract_check",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "report": {
+              "contracts": [],
+              "ok": false,
+              "platformFailure": "샌드박스 파일 반영 확인에 실패했습니다",
+              "restarted": [],
+              "secretLeaks": [],
+              "skippedOff": [],
+              "sync": {
+                "error": "샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+                "platform": true
+              },
+              "unverifiedFiles": []
+            },
+            "text": "검증 실패\n- b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아니므로 코드를 고쳐서 풀려고 하지 마세요: 샌드박스 파일 반영 확인에 실패했습니다\n- 샌드박스 파일 반영 확인 실패: 샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "type": "verify_result"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "result": {
+              "changedFiles": [
+                "app/hello.txt"
+              ],
+              "checks": [],
+              "gateOutcome": "exhausted",
+              "metrics": {
+                "gateMs": "<gateMs>",
+                "maxContextTokens": 0,
+                "modelCalls": 0,
+                "toolMs": "<toolMs>"
+              },
+              "passedStages": [],
+              "report": {
+                "contracts": [],
+                "ok": false,
+                "platformFailure": "샌드박스 파일 반영 확인에 실패했습니다",
+                "restarted": [],
+                "secretLeaks": [],
+                "skippedOff": [],
+                "sync": {
+                  "error": "샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+                  "platform": true
+                },
+                "unverifiedFiles": []
+              },
+              "status": "failed",
+              "summary": "b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 샌드박스 파일 반영 확인에 실패했습니다",
+              "turns": 0,
+              "usage": {
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "inputTokens": 0,
+                "outputTokens": 0
+              },
+              "verifyAttempts": 0
+            },
+            "type": "failed"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "backup": {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt"
+            ],
+            "id": "<time>-0001"
+          },
+          "databases": [],
+          "files": [
+            "app/hello.txt"
+          ],
+          "patch": "diff --git a/app/hello.txt b/app/hello.txt\nindex f11e853..a6bd915 100644\n--- a/app/hello.txt\n+++ b/app/hello.txt\n@@ -1 +1 @@\n-안녕\n+내 폴더 플랫폼 실패\n",
+          "restarted": [],
+          "runId": "<run:1>",
+          "sync": {
+            "error": "샌드박스 파일 반영 확인에 실패했습니다\nCannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?",
+            "platform": true
+          },
+          "type": "reverted"
+        },
+        {
+          "durationMs": "<durationMs>",
+          "platformFailure": "샌드박스 파일 반영 확인에 실패했습니다",
+          "runId": "<run:1>",
+          "status": "failed",
+          "summary": "b-studio 쪽(샌드박스·도커) 문제로 검증을 끝내지 못했습니다. 바꾼 코드의 문제가 아닙니다 — 샌드박스 파일 반영 확인에 실패했습니다\n\n바뀐 파일 1개를 되돌렸습니다(대화 탭에서 되살릴 수 있습니다).",
+          "type": "run_finished"
+        }
+      ],
+      "openCode": {
+        "notes": []
+      },
+      "owner": {
+        "pid": "<pid>"
+      },
+      "previewToken": "<previewToken>",
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "savedAt": "<savedAt>",
+      "snapshot": {
+        "backend": "claude-code",
+        "bootNetwork": [
+          {
+            "rxBytes": 1000,
+            "service": "app",
+            "txBytes": 2000
+          }
+        ],
+        "checkpoints": [
+          {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ],
+            "message": "세션 시작 (내 폴더)",
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>"
+          }
+        ],
+        "experimental": true,
+        "externals": [],
+        "fileRevision": 2,
+        "id": "<sid>",
+        "mode": "claude-code",
+        "owner": "local",
+        "projectId": "demo",
+        "projectName": "demo",
+        "running": false,
+        "services": [
+          {
+            "hasContract": false,
+            "name": "app",
+            "preview": "browser",
+            "state": "ready",
+            "template": "nextjs",
+            "url": "http://127.0.0.1:<port>"
+          }
+        ],
+        "stateDir": "<root>/sessions/demo-<sid>",
+        "status": "ready",
+        "terminal": true,
+        "terminalMode": "host",
+        "workDir": "<root>/projects/demo",
+        "workspace": "local"
+      },
+      "sourceDirtyFiles": 0,
+      "terminalConversation": {
+        "cli": "claude",
+        "id": "conversation-1"
+      },
+      "version": 1
+    }
+  },
+  "docker": {
+    "mutating": [
+      "compose build app",
+      "compose up --no-start --remove-orphans --no-deps app b-studio-edge",
+      "start <container:1> <container:2>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "run --rm --network none --volume <root>/projects/demo:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "run --rm --network none --volume <root>/projects/demo:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
+      "run --rm --network none --volume <root>/projects/demo:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt"
+    ],
+    "atShutdown": [
+      "compose down --volumes --remove-orphans --rmi local",
+      "rm --force <sandbox>-agent"
+    ],
+    "readKinds": [
+      "compose config",
+      "compose logs",
+      "compose port b-studio-edge",
+      "compose ps",
+      "inspect",
+      "stats"
+    ],
+    "unknown": []
+  }
+}
