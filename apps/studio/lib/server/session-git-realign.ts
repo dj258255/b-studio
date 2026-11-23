@@ -3,7 +3,7 @@ import { native } from '@b-studio/sandbox';
 /**
  * Git 맞추기·기억·되돌리기 조합·직접 수정 가르기(ADR-218, 4f B5d). 판정은 Rust `crates/bstudio-session`의 `git_realign`이 한다(순수 함수).
  * 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다. Git 읽기·행동(`reset`·`checkout`·`commit`)과 알림·글 조립은 `sessions.ts`가 한다.
- * 옛 판정은 `session-git-realign-legacy.ts`에 차등 시험의 기준으로만 남아 있다. 모르는 결정은 닫는 쪽이다(되돌린다·되돌리지 못한 것으로 본다).
+ * 옛 판정은 지웠다(#1347). 모르는 결정은 닫는 쪽이다(되돌린다·되돌리지 못한 것으로 본다).
  */
 
 export type RestoreReason = 'detached' | 'branch_changed' | 'foreign_commits' | 'rewound' | 'moved_during_action';

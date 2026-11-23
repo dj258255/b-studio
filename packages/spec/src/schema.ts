@@ -766,7 +766,7 @@ export type StudioSpec = z.infer<typeof StudioSpecSchema>;
 /**
  * 검증은 Rust(`crates/bstudio-guard/src/spec_schema/`)가 한다(3단계 (b)). Zod 정의는 타입(`z.infer`)과
  * 스키마 객체의 나머지 표면(`shape` 등)을 그대로 지키기 위해 남기고, `parse`·`safeParse`만 Rust로 바꾼다.
- * 옛 Zod 동작은 `schema-legacy.ts`로 남겨 차등 시험만 그것을 import한다.
+ * 옛 Zod 동작은 지웠다(#1347).
  */
 type RustIssue = { path: Array<string | number>; message: string };
 

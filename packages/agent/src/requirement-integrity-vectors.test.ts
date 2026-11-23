@@ -1,10 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
+import * as impl from './requirement-integrity';
 
 /**
- * 요구사항 검증 기록 무결성(ADR-191 3단계 3x)의 벡터. 기대값은 옮기기 전 TS(`requirement-integrity-legacy.ts`)가 낸 값이다(`requirement-integrity-vectors.json`).
- * `VECTORS_AGAINST_LEGACY=1`로 돌리면 같은 벡터를 옛 TS에 넣는다(0건 실패해야 한다).
+ * 요구사항 검증 기록 무결성(ADR-191 3단계 3x)의 벡터. 기대값은 옮기기 전 TS(`requirement-integrity-legacy.ts`, #1347에서 지움)가 낸 값이다(`requirement-integrity-vectors.json`).
+ * 아래 벡터는 옛 TS와 한 건도 다르지 않았다(옛 TS와 달랐던 곳은 맨 아래 의도한 차이 묶음뿐이다).
  * 허용·인식하는 꼴마다 거의 같은 거부 입력을 넣는다: 앞 공백, 다른 글머리, 메모 없음, 날짜 꼴, 붙은 낱말, 헤딩 꼴, 닮은 표지, 같음 비교를 접두·대소문자로 넓힐 수 있는 값.
  */
 interface Vector {
@@ -18,7 +19,6 @@ interface Vector {
   restore: string | null;
 }
 const { integrity } = JSON.parse(readFileSync(new URL('./requirement-integrity-vectors.json', import.meta.url), 'utf8')) as { integrity: Vector[] };
-const impl = (await import(process.env.VECTORS_AGAINST_LEGACY ? './requirement-integrity-legacy' : './requirement-integrity')) as typeof import('./requirement-integrity');
 
 describe('요구사항 검증 기록 무결성 벡터', () => {
   it('입력이 비지 않았다', () => {
@@ -40,7 +40,7 @@ describe('요구사항 검증 기록 무결성 벡터', () => {
 });
 
 /**
- * 의도한 차이(옛 TS와 다르다, `VECTORS_AGAINST_LEGACY=1`에서는 실패해야 한다): 중첩이 2000을 넘는 JSON 블록은 이 구현이 읽지 못한다(옛 TS는 읽는다).
+ * 의도한 차이(옛 TS와 달랐다): 중첩이 2000을 넘는 JSON 블록은 이 구현이 읽지 못한다(옛 TS는 읽는다).
  * 읽지 못한 블록 안의 기록은 볼 수 없으므로 통과로 이어지지 않게 위조로 센다. 되돌릴 때는 그 블록을 없는 것으로 보고 실행 전 항목에서 다시 붙인다.
  */
 describe('요구사항 검증 기록 무결성: 의도한 차이', () => {

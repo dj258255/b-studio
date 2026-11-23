@@ -3,7 +3,7 @@ import { StudioError } from './errors';
 
 /**
  * 세션의 바쁨(ADR-207, 4f B3a). 판정과 점유는 Rust `crates/bstudio-session`의 `claim`이 하고, 여기는 그 결과를 `StudioError`로 바꾸는 껍데기다.
- * 옛 TS 판정(`snapshot.running`·`session.run`·`session.exporting`을 읽던 것)은 `session-claim-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 옛 TS 판정(`snapshot.running`·`session.run`·`session.exporting`을 읽던 것)은 지웠다(#1347).
  *
  * 잡으면 **표**(`Ticket`)를 받고, 풀 때는 그 표를 낸다. 표가 지금 점유의 표가 아니면 아무것도 하지 않는다(`release`가 `false`).
  * `snapshot.running`·`snapshot.cancelling`은 화면용 거울이다: 판정은 거울이 아니라 여기에 묻는다.

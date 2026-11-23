@@ -11,7 +11,7 @@ import { nativeUpInput, overrideError, upResultToExec, type UpOptions } from './
 /**
  * 파일 반영 확인(`sync`)·변경 알림(`relayChanges`)·포트 충돌 재시도(`#composeUpWithPortRetry`)의 TS 껍데기(ADR-195 4f A4c-2).
  * 호스트 해시, docker를 부르는 순서, 반복, 판정은 Rust(crates/bstudio-io/src/{sync_relay,port_retry}.rs, crates/bstudio-guard/src/sync_relay.rs)가 한다.
- * 여기는 결과를 옛 글 그대로의 `SandboxError`로 바꾸기만 한다. 옛 TS는 `sync-relay-legacy.ts`(차등 시험의 기준값).
+ * 여기는 결과를 옛 글 그대로의 `SandboxError`로 바꾸기만 한다. 옛 TS는 지웠다(#1347).
  */
 
 /** 파일 반영 확인에 쓰는 작은 이미지. 서비스 컨테이너가 죽어 있어도 확인할 수 있도록 별도 컨테이너로 돌린다 */

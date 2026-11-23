@@ -1,6 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { Gen, readEnvNumber } from './differential-kit';
-import * as legacy from './path-policy-legacy';
 import { checkToolPolicy, isProtectedPath, isWithinScope } from './policy';
 
 /**
@@ -10,9 +10,15 @@ import { checkToolPolicy, isProtectedPath, isWithinScope } from './policy';
  * 이름(짝 없는 서로게이트 → U+FFFD)으로 견준다. 옛 구현보다 넓게 맞출 뿐 좁아지지 않는다(커밋 보안 검토 지적: 보호 경로까지 단사로 바꾸면 `a\uFFFD` 보호 아래에
  * 실제로 써질 `a\uD800/x`를 놓친다).
  * 크기는 PATH_SURROGATE_PAIRS 환경 변수로 바꾼다.
+ *
+ * "옛 구현"의 값은 옛 TS(`path-policy-legacy.ts`, #1347에서 지움)가 같은 시드의 입력에 낸 값을 `path-policy-surrogates-frozen.json`에 얼려 두었다
+ * (입력마다 `1`=허용·보호·범위 안, `0`=아님을 이은 글자. 입력은 시드 3·5·9의 `Gen`이 같은 순서로 다시 만든다).
  */
+const FROZEN = JSON.parse(readFileSync(new URL('./path-policy-surrogates-frozen.json', import.meta.url), 'utf8')) as { pairs: number; withinScope: string; scopeOnlyAllow: string; oldAllow: string; fsProtected: string; protectedPath: string };
 const ALPHABET = ['a', 'b', '/', '.', '\ud800', '\udbff', '\udc00', '\udfff', '😀', '\ud83d', '\ude00', '�', '', '', ''];
 const PAIRS = readEnvNumber('PATH_SURROGATE_PAIRS', 20_000);
+if (PAIRS > FROZEN.pairs) throw new Error(`얼린 값은 ${FROZEN.pairs}개뿐입니다`);
+const frozenAt = (list: string, i: number): boolean => list[i] === '1';
 
 function pathOf(g: Gen): string {
   return g.text(ALPHABET, 1 + g.int(6));
@@ -20,7 +26,6 @@ function pathOf(g: Gen): string {
 
 describe('짝 없는 서로게이트가 든 경로의 쓰기 범위·보호 경로', () => {
   it('재현: 서로 다른 짝 없는 서로게이트·U+FFFD는 같은 범위가 아니다', () => {
-    expect(legacy.isWithinScope('a\ud800/x', 'a\udc00')).toBe(false);
     expect(isWithinScope('a\ud800/x', 'a\udc00')).toBe(false);
     expect(isWithinScope('a\ud800/x', 'a�')).toBe(false);
     expect(isWithinScope('a�/x', 'a\ud800')).toBe(false);
@@ -37,7 +42,7 @@ describe('짝 없는 서로게이트가 든 경로의 쓰기 범위·보호 경�
     for (let i = 0; i < PAIRS; i++) {
       const file = pathOf(g);
       const scope = g.int(3) === 0 ? file.slice(0, 1 + g.int(file.length)) : pathOf(g);
-      const old = legacy.isWithinScope(file, scope);
+      const old = frozenAt(FROZEN.withinScope, i);
       const now = isWithinScope(file, scope);
       if (!old && now) open += 1;
       if (now) inside += 1;
@@ -59,7 +64,6 @@ describe('짝 없는 서로게이트가 든 경로의 쓰기 범위·보호 경�
 
   it('checkToolPolicy: 쓰기 범위는 옛 구현과 같고, 보호 경로는 옛 구현과 파일 시스템 꼴이 막던 것을 모두 막는다', () => {
     const g = new Gen(5);
-    const fsForm = (text: string) => text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '\ufffd');
     let allowed = 0;
     let widened = 0;
     for (let i = 0; i < PAIRS; i++) {
@@ -68,10 +72,10 @@ describe('짝 없는 서로게이트가 든 경로의 쓰기 범위·보호 경�
       const protectedPaths = g.int(2) === 0 ? [g.int(2) === 0 ? pathOf(g) : file.slice(0, 1 + g.int(file.length))] : [];
       const label = JSON.stringify([file, writablePaths, protectedPaths]);
       const scopeOnly = checkToolPolicy('write_file', { path: file }, { writablePaths }, undefined).decision;
-      expect(scopeOnly, label).toBe(legacy.checkToolPolicy('write_file', { path: file }, { writablePaths }, undefined).decision);
+      expect(scopeOnly, label).toBe(frozenAt(FROZEN.scopeOnlyAllow, i) ? 'allow' : 'deny');
       const now = checkToolPolicy('write_file', { path: file }, { writablePaths, protectedPaths }, undefined).decision;
-      const old = legacy.checkToolPolicy('write_file', { path: file }, { writablePaths, protectedPaths }, undefined).decision;
-      const fsProtected = protectedPaths.some((rule) => legacy.isProtectedPath(fsForm(file), fsForm(rule)));
+      const old = frozenAt(FROZEN.oldAllow, i) ? 'allow' : 'deny';
+      const fsProtected = frozenAt(FROZEN.fsProtected, i);
       if (old === 'deny' || fsProtected) expect(now, label).toBe('deny');
       if (now === 'deny' && old === 'allow') {
         widened += 1;
@@ -88,7 +92,7 @@ describe('짝 없는 서로게이트가 든 경로의 쓰기 범위·보호 경�
     for (let i = 0; i < PAIRS; i++) {
       const file = pathOf(g);
       const rule = g.int(3) === 0 ? file.slice(0, 1 + g.int(file.length)) : pathOf(g);
-      if (legacy.isProtectedPath(file, rule)) expect(isProtectedPath(file, rule), JSON.stringify([file, rule])).toBe(true);
+      if (frozenAt(FROZEN.protectedPath, i)) expect(isProtectedPath(file, rule), JSON.stringify([file, rule])).toBe(true);
     }
   });
 });

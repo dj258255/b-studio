@@ -6071,7 +6071,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - 평가 자산이 계획에 있는데 컨테이너에 서비스 이름 라벨이 없으면 어느 자리를 볼지 알 수 없으므로 실패로 센다(옛 코드는 건너뛰었다).
 
 ### 시험
-- `crates/bstudio-io/src/container_verify.rs`(`git_자리_마운트가_없거나_…`, `docker_desktop_접두어가_붙은_프로젝트_마운트도_…`, `mounts_모양을_모르면_…`, `서비스_이름을_모르는_컨테이너는_…`), `verify-containers-differential.test.ts`의 HARDENED 시나리오 둘. 옛 `git-mask.test.ts`의 접두어 기대값은 새 동작(`.git` 자리도 요구)으로 고쳤다.
+- `crates/bstudio-io/src/container_verify.rs`(`git_자리_마운트가_없거나_…`, `docker_desktop_접두어가_붙은_프로젝트_마운트도_…`, `mounts_모양을_모르면_…`, `서비스_이름을_모르는_컨테이너는_…`), `verify-containers-scenarios.test.ts`의 HARDENED 시나리오 둘. 옛 `git-mask.test.ts`의 접두어 기대값은 새 동작(`.git` 자리도 요구)으로 고쳤다.
 
 ### 배운 것
 - **같은 입력을 읽는 두 자리(`.git` 확인과 평가 자산 확인)가 서로 다른 접두어 규칙을 쓰면, 한쪽에서 고친 보안 수정이 다른 쪽에 퍼지지 않는다.** 한 자리를 고칠 때 같은 입력을 읽는 이웃 자리에 같은 시험을 돌린다.
@@ -6089,7 +6089,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - 최상위가 객체가 아니면 해석 실패(`compose 설정(config --format json)을 해석하지 못해…`)로 멈춘다.
 
 ### 시험
-- `crates/bstudio-io/src/up_loop.rs`(`override를_쓰지_못하면_…`, `compose_config의_실패는_모두_멈춘다`), `crates/bstudio-guard/src/up_loop.rs`, `up-loop-differential.test.ts`의 HARDENED 시나리오.
+- `crates/bstudio-io/src/up_loop.rs`(`override를_쓰지_못하면_…`, `compose_config의_실패는_모두_멈춘다`), `crates/bstudio-guard/src/up_loop.rs`, `up-loop-scenarios.test.ts`의 HARDENED 시나리오.
 
 ### 배운 것
 - **상태를 먼저 올리고 부수 효과를 나중에 하면, 부수 효과가 실패했을 때 상태가 거짓이 된다.** "쓴 것 = 확인한 것"을 지키려면 쓴 뒤에만 상태를 올린다.
@@ -6115,7 +6115,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - 호스트 파일을 읽지 못하면(없음이 아닌 오류) 옛 코드도 원시 `fs` 오류로 던졌다. 이제 `SandboxError`('샌드박스 파일 반영을 확인하려고 호스트 파일을 읽지 못했습니다')이고 글이 바뀐다. 통과 여부는 같다.
 
 ### 시험
-- `crates/bstudio-guard/src/sync_relay.rs`(`같은_파일의_줄이_둘이면_…`, `모양을_모르는_줄이_있으면_…`), `crates/bstudio-io/src/sync_relay.rs`, `packages/sandbox/src/docker/sync-relay-port-differential.test.ts`의 `sync HARDENED`.
+- `crates/bstudio-guard/src/sync_relay.rs`(`같은_파일의_줄이_둘이면_…`, `모양을_모르는_줄이_있으면_…`), `crates/bstudio-io/src/sync_relay.rs`, `packages/sandbox/src/docker/sync-relay-port-scenarios.test.ts`의 `sync HARDENED`.
 
 ### 배운 것
 - **통과시키는 판정이 출력을 읽는 함수를 재사용할 때는, 그 함수가 "나중 값이 이긴다"거나 "모르는 줄은 건너뛴다"로 읽지 않는지 본다.** 읽기 함수가 관대한 것은 로그를 읽을 때는 맞지만, 근거로 쓸 때는 열리는 방향이다.
@@ -6142,7 +6142,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - 응답 읽기: 옛 `fetch`(undici)는 리다이렉트를 따르지 않는 `manual`이라 302를 그대로 받았고, 지금도 같다. 응답은 상태 줄과 **헤더까지** 읽는다(상태 줄만 맞고 헤더가 HTTP가 아니면 옛 쪽도 실패였고 지금도 실패다). 오류 이름은 옛 `describeFetchError`가 내던 것과 같다(`ECONNREFUSED`·`ECONNRESET`·`UND_ERR_SOCKET`·`HPE_INVALID_CONSTANT`·`HPE_INVALID_VERSION`·`HPE_INVALID_HEADER_TOKEN`·`UND_ERR_HEADERS_OVERFLOW`·`TIMEOUT`). 시간 제한은 연결부터 응답 머리까지 `max(intervalMs, 2000)`ms로 같다. 요청 머리글도 `fetch`가 보내던 것과 같다(`Connection`만 `close`).
 
 ### 시험
-- `packages/sandbox/src/docker/readiness-differential.test.ts`(요청 줄 35개 입력이 옛 `fetch`와 같은 줄·머리글로 가고, `ready.path` HARDENED 입력은 옛 쪽이 `example.com`으로 풀리고 새 쪽은 127.0.0.1의 서버만 받는 것), `readiness-hardened.test.ts`(`LocalDockerProvider.restart` 수준: 서버가 받은 요청 줄·Host 헤더), `crates/bstudio-io/src/readiness_io.rs`(요청 줄 규칙·응답 읽기), `packages/spec/src/spec.test.ts`(`ready.path`는 역슬래시·제어 문자를 거부).
+- `packages/sandbox/src/docker/readiness-scenarios.test.ts`(요청 줄 35개 입력이 옛 `fetch`와 같은 줄·머리글로 가고, `ready.path` HARDENED 입력은 옛 쪽이 `example.com`으로 풀리고 새 쪽은 127.0.0.1의 서버만 받는 것), `readiness-hardened.test.ts`(`LocalDockerProvider.restart` 수준: 서버가 받은 요청 줄·Host 헤더), `crates/bstudio-io/src/readiness_io.rs`(요청 줄 규칙·응답 읽기), `packages/spec/src/spec.test.ts`(`ready.path`는 역슬래시·제어 문자를 거부).
 
 ### 실측
 - 실제 Docker([기록](experiments/2026-11-12-a4c3a-readiness.md)): 스펙이 `ready.path: "/\\example.com/"`을 거절했다. 스펙을 거치지 않고 네이티브 준비 확인에 `/\example.com/a4c3a-marker.txt`를 넘기자 요청이 이 세션의 edge를 거쳐 web 컨테이너에 도착했고(httpd 로그 `url:/\example.com/a4c3a-marker.txt`), 작업 폴더의 그 파일로 200이 나와 준비됨이었다. `/<탭>/example.com/`도 web에 도착해 404였다. 옛 해석은 둘 다 `http://example.com/…`이다.
@@ -6155,7 +6155,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 
 ## 193. 스냅샷 채우기·정리가 종료 코드와 이름을 넓게 읽어 지우지 않을 볼륨을 지울 수 있었음 — 복사 단계의 종료 코드 3만 보고, 지울 이름은 계산값과 라벨 필터 결과로 좁혔다
 
-**구분:** ADR-195 4f A4c-3b(이슈 [#1189](https://github.com/dj258255/b-studio/issues/1189))에서 `#seedSnapshot`·`#pruneSnapshots`·`stats()`를 Rust로 옮기며 코드를 읽다가 찾았다. 실제 세션에서 만난 것이 아니고, 진짜 docker가 아래 입력을 내는 것은 보지 못했다. 가짜 docker로 옛 코드에서 재현했다(`snapshot-differential.test.ts`의 `HARDENED` 시험).
+**구분:** ADR-195 4f A4c-3b(이슈 [#1189](https://github.com/dj258255/b-studio/issues/1189))에서 `#seedSnapshot`·`#pruneSnapshots`·`stats()`를 Rust로 옮기며 코드를 읽다가 찾았다. 실제 세션에서 만난 것이 아니고, 진짜 docker가 아래 입력을 내는 것은 보지 못했다. 가짜 docker로 옛 코드에서 재현했다(`snapshot-scenarios.test.ts`의 `HARDENED` 시험).
 
 ### 겪을 수 있던 것(옛 TS `LocalDockerSandbox`)
 지우는 코드(`volume rm`)가 입력을 넓게 읽는 자리가 셋, 오류 글이 시크릿을 가리지 않는 자리가 하나 있었다.
@@ -6171,7 +6171,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - `stats()`의 `inspect` 오류도 시크릿을 가린다.
 
 ### 시험
-- `snapshot-differential.test.ts`: `HARDENED: volume create가 종료 코드 3으로 끝나도…`(옛 쪽 `volume rm`에 스냅샷이 들고 새 쪽은 없음), `HARDENED: 정리는 방금 저장한 스냅샷과 라벨 필터에 없는 이름은…`(옛 쪽은 둘 다 지움), `HARDENED: inspect 오류 글의 시크릿도 가린다`.
+- `snapshot-scenarios.test.ts`: `HARDENED: volume create가 종료 코드 3으로 끝나도…`(옛 쪽 `volume rm`에 스냅샷이 들고 새 쪽은 없음), `HARDENED: 정리는 방금 저장한 스냅샷과 라벨 필터에 없는 이름은…`(옛 쪽은 둘 다 지움), `HARDENED: inspect 오류 글의 시크릿도 가린다`.
 - Rust `snapshot_io`: `volume_create의_종료_코드_3은_스냅샷을_지우지_않는다`, `정리는_방금_저장한_것과_목록에_없던_이름과_접두사가_다른_이름을_지우지_않는다`, `정리는_라벨이_붙은_남의_볼륨도_접두사가_다르면_지우지_않는다`, `이름이_맞지_않는_계획은_docker를_부르지_않는다`.
 
 ### 같이 확인했으나 바꾸지 않은 것
@@ -6184,7 +6184,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 
 ## 194. 샌드박스 만들기가 실패하면 작업 폴더가 남고, 부하 러너의 실패 이유가 여러 줄 시크릿의 뒷줄을 가리지 못했음 — 만든 폴더를 지우고, 가린 뒤에 자르게 고쳤다
 
-**구분:** ADR-195 4f A4c-3c(이슈 [#1191](https://github.com/dj258255/b-studio/issues/1191))에서 `create`·`destroy`·`runLoad`를 Rust로 옮기며 코드를 읽다가 찾았다. 실제 세션에서 만난 것이 아니고, 가짜 docker로 옛 코드에서 재현했다(`lifecycle-differential.test.ts`의 `HARDENED` 시험, `lifecycle-provider.test.ts`의 `create 실패 정리`).
+**구분:** ADR-195 4f A4c-3c(이슈 [#1191](https://github.com/dj258255/b-studio/issues/1191))에서 `create`·`destroy`·`runLoad`를 Rust로 옮기며 코드를 읽다가 찾았다. 실제 세션에서 만난 것이 아니고, 가짜 docker로 옛 코드에서 재현했다(`lifecycle-scenarios.test.ts`의 `HARDENED` 시험, `lifecycle-provider.test.ts`의 `create 실패 정리`).
 
 ### 겪을 수 있던 것(옛 TS `LocalDockerProvider.create`, `LocalDockerSandbox.runLoad`·`destroy`)
 - **`create`가 실패하면 만들어 둔 작업 폴더(`<임시 폴더>/b-studio-xxxxxx`)가 남았다.** `mkdtemp`로 폴더를 만든 뒤 `try`는 평가 자산 복사본을 준비한 다음에야 시작했고, `catch`는 복사본 폴더만 지웠다. 마스크 계산(`compose config`)·override 쓰기가 실패하거나 평가 자산 준비가 중간에 실패하면 `compose.override.yaml`(edge 스크립트 원문과 서비스 정의가 든다)이 든 폴더가 임시 폴더에 쌓였다. 샌드박스를 돌려주지 못하면 `destroy`도 불리지 않으므로 지우는 쪽이 없었다. 평가 자산 준비 단계에서 실패하면 그때까지 만든 복사본도 `try` 밖이라 남았다.
@@ -6197,7 +6197,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - 모든 지우는 자리(`cleanup`·`destroy`·`removeSandboxImages`·`abort_create`·`runLoad`의 `rm --force`)는 `docker`를 부르기 전에 샌드박스 id가 `studio-<이름>-<16진 6자>` 꼴인지 본다. `destroy`는 작업 폴더 이름이 `b-studio-<6자>`가 아니면 지우지 않는다.
 
 ### 시험
-- `lifecycle-differential.test.ts`: `HARDENED: 실패 이유는 시크릿을 가린 뒤에 자른다…`(옛 쪽 detail에 시크릿 뒷줄이 있고 새 쪽에는 없음), `HARDENED: 읽지 못한 러너 출력도…`, `HARDENED: id의 꼴이 아니면 docker를 부르지 않고…`, `HARDENED: 이름이 b-studio-<6자>가 아닌 작업 폴더는 지우지 않는다`.
+- `lifecycle-scenarios.test.ts`: `HARDENED: 실패 이유는 시크릿을 가린 뒤에 자른다…`(옛 쪽 detail에 시크릿 뒷줄이 있고 새 쪽에는 없음), `HARDENED: 읽지 못한 러너 출력도…`, `HARDENED: id의 꼴이 아니면 docker를 부르지 않고…`, `HARDENED: 이름이 b-studio-<6자>가 아닌 작업 폴더는 지우지 않는다`.
 - `lifecycle-provider.test.ts`: `만들기가 실패하면 이 create가 만든 작업 폴더와 평가 자산 폴더를 지운다`. **같은 시험을 옛 `compose-provider.ts`(`a8d65a5`)에 돌려 실패하는 것을 확인했다**(옛 쪽은 `b-studio-xxxxxx` 폴더가 남는다).
 - Rust `lifecycle_io`: 이름꼴·id 꼴·`abort_create`·작업 폴더가 링크·파일·이름꼴 불일치일 때의 지우기.
 
@@ -6212,7 +6212,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 
 ## 195. 터미널이 어긋낸 기록을 되돌리는 코드가 `git add -A` 앞에서 저장소 설정을 확인하지 않아 clean 필터를 호스트에서 실행했고, 기준 브랜치 확인은 읽지 못하는 시각 하나로 영영 가져오지 않았음 — 되돌리기 앞에 같은 확인을 두고, 읽지 못한 시각은 오래된 것으로 읽게 고쳤다
 
-**구분:** ADR-195 4f A2(이슈 [#1193](https://github.com/dj258255/b-studio/issues/1193))에서 체크포인트의 원격 경로·되돌리기 순서를 Rust로 옮기며 `restoreRememberedHead`를 `commit`·`exportTree`와 견주다 찾았다. 실제 세션에서 만난 것이 아니다. 임시 폴더의 실제 git으로 옛 코드에서 재현했다(`checkpoint-remote-differential.test.ts`의 `HARDENED` 시험 둘).
+**구분:** ADR-195 4f A2(이슈 [#1193](https://github.com/dj258255/b-studio/issues/1193))에서 체크포인트의 원격 경로·되돌리기 순서를 Rust로 옮기며 `restoreRememberedHead`를 `commit`·`exportTree`와 견주다 찾았다. 실제 세션에서 만난 것이 아니다. 임시 폴더의 실제 git으로 옛 코드에서 재현했다(`checkpoint-remote-scenarios.test.ts`의 `HARDENED` 시험 둘).
 
 ### 겪을 수 있던 것(옛 TS `CheckpointStore`)
 - **`restoreRememberedHead`가 저장소 설정을 확인하지 않고 `git add -A`를 불렀다.** `commit`·`commitPaths`·`exportTree`·제외 스냅샷은 저장소 설정에 따라 프로그램을 부르는 명령(`add`·`hash-object`·`commit`·`archive`) 앞에서 `#assertSafeLocalGit`(위험한 설정과 `.git/info/attributes`)를 지난다. 터미널이 어긋낸 기록을 되돌리는 이 함수만 지나지 않았다. 이 컴퓨터 방식에서는 에이전트가 `.git/config`를 고칠 수 있으므로, 에이전트가 `filter.<이름>.clean`과 `.gitattributes`(또는 `.git/info/attributes`)를 심고 브랜치를 바꿔 두면 다음 요청 앞의 되돌리기(`realignGitBeforeRun`)가 `git add -A`로 그 필터를 **호스트에서** 실행했다. 임시 폴더에서 재현: 옛 쪽은 필터가 만든 표시 파일이 생기고 되돌리기가 끝났다. 컨테이너 방식은 `.git`이 읽기 전용이라 이 경로가 없다.
@@ -6223,7 +6223,7 @@ claude 2.1.302는 여러 줄로 붙여 넣은 요청을 요청 시작 훅(UserPr
 - `base_status`는 우리가 쓰는 꼴(`toISOString`)이 아닌 시각을 오래된 것으로 읽고 새로 가져온다(가져오기도 신뢰 확인을 지난다).
 
 ### 시험
-- `checkpoint-remote-differential.test.ts`: `저장소 설정에 clean 필터가 있으면 터미널 기록 되돌리기도 필터를 부르지 않는다`(옛 쪽은 필터가 실행되고 되돌리기가 끝남, 새 쪽은 필터를 부르지 않고 브랜치도 그대로), `baseFetchedAt을 읽지 못하면 오래된 것으로 보고 새로 가져온다`. Rust: `되돌리기는_저장소_설정에_clean_필터가_있으면_add_앞에서_멈춘다`, `시각은_toisostring_꼴로_쓰고_우리가_쓴_꼴만_읽는다`.
+- `checkpoint-remote-scenarios.test.ts`: `저장소 설정에 clean 필터가 있으면 터미널 기록 되돌리기도 필터를 부르지 않는다`(옛 쪽은 필터가 실행되고 되돌리기가 끝남, 새 쪽은 필터를 부르지 않고 브랜치도 그대로), `baseFetchedAt을 읽지 못하면 오래된 것으로 보고 새로 가져온다`. Rust: `되돌리기는_저장소_설정에_clean_필터가_있으면_add_앞에서_멈춘다`, `시각은_toisostring_꼴로_쓰고_우리가_쓴_꼴만_읽는다`.
 
 ### 같이 확인했으나 바꾸지 않은 것
 - `#isAncestor`는 git이 실패해도(띄우기 실패·시간 초과 포함) 거짓으로 읽는다. 쓰는 자리는 모두 거짓이 막는 쪽이거나(시작 커밋 포함 확인, `acceptRemote`), 거짓이어도 git이 다시 막거나(`merge`), 더 알리는 쪽(`forced` 표시)이라 열린 쪽으로 틀리는 곳은 찾지 못했다. 옛 동작 그대로 두었다.
@@ -6300,7 +6300,7 @@ desk(터미널 경로)에서 호환 깨짐을 허용하는 표시는 아직 없�
 
 ### 증상
 
-화면 확인 판정을 Rust로 옮기며 만든 차등 시험(`check-page-differential.test.ts`)에서, `expectText`에 U+E010 U+E000 U+E000 U+E001(TS↔Rust 경계가 짝 없는 서로게이트를 쓰는 이스케이프 글자)을 적고 일부러 틀리게 하자, 모델에게 돌려주는 안내(`feedback`)에서 그 네 글자가 한 글자(U+D001 `퀁`)로 바뀌어 있었다. 검사 목록의 `detail`과 이벤트 속 글은 옛 코드와 같았다.
+화면 확인 판정을 Rust로 옮기며 만든 차등 시험(`check-page-scenarios.test.ts`)에서, `expectText`에 U+E010 U+E000 U+E000 U+E001(TS↔Rust 경계가 짝 없는 서로게이트를 쓰는 이스케이프 글자)을 적고 일부러 틀리게 하자, 모델에게 돌려주는 안내(`feedback`)에서 그 네 글자가 한 글자(U+D001 `퀁`)로 바뀌어 있었다. 검사 목록의 `detail`과 이벤트 속 글은 옛 코드와 같았다.
 
 ### 원인
 
@@ -6316,7 +6316,7 @@ A5b-1(ADR-195)에서 옮긴 `format_failed`(실패한 검사 목록 글)와 `rep
 
 ### 확인
 
-- 시험: `check-page-differential.test.ts` `예약 글자(U+E010)가 본문에 그대로 있어도 짝 없는 서로게이트로 읽지 않는다`. 고치기 전 코드에서 옛 쪽은 `응답 본문에 '<U+E010 U+E000 U+E000 U+E001>'가 없습니다`, 지금 쪽은 `응답 본문에 '퀁'가 없습니다`로 갈려 실패했다. 고친 줄(`format_failed`의 인코딩)만 되돌리면 같은 시험이 다시 실패한다.
+- 시험: `check-page-scenarios.test.ts` `예약 글자(U+E010)가 본문에 그대로 있어도 짝 없는 서로게이트로 읽지 않는다`. 고치기 전 코드에서 옛 쪽은 `응답 본문에 '<U+E010 U+E000 U+E000 U+E001>'가 없습니다`, 지금 쪽은 `응답 본문에 '퀁'가 없습니다`로 갈려 실패했다. 고친 줄(`format_failed`의 인코딩)만 되돌리면 같은 시험이 다시 실패한다.
 - 같은 모양의 다른 자리를 이 조각에서 전수로 찾지는 않았다(A5b-1의 나머지 글 조립은 TS가 보낸 글자를 그대로 이어서 인코딩 문제가 없다).
 
 ## 199. HTTP 모드 자동 화면 확인이 Next.js 16의 정상 화면을 오류 화면으로 판정했음 — 화면 글자에서 표지를 찾고, 스트리밍 도중의 서버 오류는 digest 신호로 잡는다
@@ -6353,7 +6353,7 @@ Next.js 16 프로젝트에서 HTTP 모드 자동 화면 확인을 쓸 수 없었
   - 스트리밍 도중 서버 오류와 `notFound()`는 digest로 실패한다
   - 기본 404 화면은 화면 글자의 표지로 실패한다
   - 바로 던지는 page·바로 부르는 `notFound()`는 상태 코드(500·404)가 먼저 막는다
-- 시험: `check-page-differential.test.ts`의 `자동 페이지 HTTP 모드: Next.js 16 실제 응답 (#1207)` 27개, `gate_helpers`의 Rust 단위 시험 넷. 고치기 전 코드에서 TS 시험 19개가 실패했다. 정상 응답 15개는 `'This page could not be found'`로, 스트리밍 오류 4개는 digest 글 대신 같은 표지 글로 실패했다.
+- 시험: `check-page-scenarios.test.ts`의 `자동 페이지 HTTP 모드: Next.js 16 실제 응답 (#1207)` 27개, `gate_helpers`의 Rust 단위 시험 넷. 고치기 전 코드에서 TS 시험 19개가 실패했다. 정상 응답 15개는 `'This page could not be found'`로, 스트리밍 오류 4개는 digest 글 대신 같은 표지 글로 실패했다.
 - 변이: 아래 아홉 곳을 하나씩 깨 봤고, 모두 시험이 잡았다.
   - 표지를 다시 원문에서 찾기: 19개 실패
   - 렌더링 오류 확인 빼기: 5개 실패. 표지만 고치면 스트리밍 오류가 통과로 열리는 것을 이 변이가 보여 준다
@@ -6627,7 +6627,7 @@ CLI는 도구를 부르기 전에 그 호출이 든 assistant 메시지를 stdou
 ### 확인
 
 - `claude-code-runner-json-differential.test.ts`가 `JSON.parse`와 Rust의 읽기를 꼬리표 트리로 견줘 처음 실행에서 `"\uE010"`·`"\uE011\uE000"` 줄이 다르다고 알렸다(고치기 전). 고친 뒤 고정 입력과 시드 3,000개(60,000개로도 한 번 돌림)가 같다.
-- `claude-code-runner-differential.test.ts`의 "글자 그대로의 예약 글자(U+E010)가 든 줄"이 러너 전체에서 옛 루프와 같은 글을 낸다.
+- `claude-code-runner-scenarios.test.ts`의 "글자 그대로의 예약 글자(U+E010)가 든 줄"이 러너 전체에서 옛 루프와 같은 글을 낸다.
 - 변이: `encode_line`을 빼면 두 시험이 모두 실패한다.
 - 같은 자리에서 확인한 것: 줄에서 읽은 글 가운데 판정 함수(`describe_result_failure`·`mcp_setup_failure`)에 넣는 값은 옛 구현이 napi 경계를 거치던 꼴(짝 없는 서로게이트는 U+FFFD)로 맞추고 그 출력은 다시 인코딩해 TS로 보낸다.
 
@@ -6731,7 +6731,7 @@ history와 logs는 상한과 자르는 시점이 달라 한 순번을 나눠 쓰
 ## 212. 러너 차등 시험 '진행 중 지시(승격 순간)'가 가짜 CLI의 턴이 떨어지는 시각과 게이트 안내를 쓰는 시각의 경주로 가끔 실패했음 — 가짜 CLI에 남는 턴을 넉넉히 준다
 
 - 날짜: 2026-11-16, 이슈 #1256
-- 실행 경로: `packages/agent/src/claude-code-runner-differential.test.ts`의 "진행 중 지시(승격 순간)"(옛 루프와 Rust 러너 코어 차등). Linux CI에서 한 번 실패했고 macOS에서는 부하 없이 8번(다시 6번 병렬) 모두 통과했다.
+- 실행 경로: `packages/agent/src/claude-code-runner-scenarios.test.ts`의 "진행 중 지시(승격 순간)"(옛 루프와 Rust 러너 코어 차등). Linux CI에서 한 번 실패했고 macOS에서는 부하 없이 8번(다시 6번 병렬) 모두 통과했다.
 
 ### 증상
 
@@ -6839,7 +6839,7 @@ history와 logs는 상한과 자르는 시점이 달라 한 순번을 나눠 쓰
 ## 216. 러너 코어가 취소한 뒤에 도착한 CLI 줄을 읽어 턴 이벤트를 내고 게이트까지 돌았고, 차등 시험이 그 경주로 가끔 실패했음 — 취소한 뒤의 줄은 버린다
 
 - 날짜: 2026-11-16, 이슈 #1263
-- 실행 경로: `packages/agent/src/claude-code-runner-differential.test.ts`의 "취소: 첫 tool_result"(옛 루프와 Rust 러너 코어 차등). 다른 무거운 시험과 겹친 `pnpm test` 전체에서 한 번 실패했고 단독으로는 5번 모두 통과했다. 가짜 CLI와 임시 폴더만 썼다(실제 모델·Docker·실제 세션 폴더 없음).
+- 실행 경로: `packages/agent/src/claude-code-runner-scenarios.test.ts`의 "취소: 첫 tool_result"(옛 루프와 Rust 러너 코어 차등). 다른 무거운 시험과 겹친 `pnpm test` 전체에서 한 번 실패했고 단독으로는 5번 모두 통과했다. 가짜 CLI와 임시 폴더만 썼다(실제 모델·Docker·실제 세션 폴더 없음).
 
 ### 증상
 

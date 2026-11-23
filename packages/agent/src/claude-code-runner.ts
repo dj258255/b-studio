@@ -171,7 +171,7 @@ export interface ClaudeCodeResult extends AgentResult {
  * 메시지 루프와 실행 상태(턴·사용량·result 처리·게이트 분기·승격·네트워크 재시도·되묻기·프로세스 다시 띄우기)와 도구 순서 장부는 Rust가 쥔다
  * (crates/bstudio-io/src/cli_runner.rs·tool_ledger.rs, ADR-202, 4f A8b). Rust가 CLI 프로세스를 직접 쥐고 줄을 읽는다. 이 함수는 준비(작업 공간·게이트·도구 목록·임시 파일·
  * 도구 서버)와 Rust가 부르는 콜백(게이트·결과 조립·도구 실행·CLI 인자·지시·이벤트·네트워크 대기)을 제공하고, 끝나면 결과를 돌려준다.
- * 옛 TS 루프는 claude-code-runner-loop-legacy.ts(차등 시험의 기준)에 있다.
+ * 옛 TS 루프는 지웠다(#1347).
  */
 export async function runClaudeCodeAgent(options: ClaudeCodeRunOptions): Promise<ClaudeCodeResult> {
   const {

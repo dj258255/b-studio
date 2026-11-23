@@ -21,7 +21,7 @@
  *      손으로 고친 파일로 보고 경고하게 되고, 선언이 아니라 자유 형식이라 사람이 한눈에 "무엇을 설치했는지" 모아 보기 어렵다. 기각(보조 수단으로는 남긴다).
  *
  * 변환과 오류 글은 Rust(`crates/bstudio-guard/src/system_packages.rs`)가 한다. 옛 TS는
- * `system-packages-legacy.ts`로 남겨 차등 시험만 그것을 import한다.
+ * 지웠다(#1347).
  */
 import { native } from './native';
 

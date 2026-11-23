@@ -1,6 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
-import * as legacy from './connection-legacy';
 import { Gen, readEnvNumber } from './differential-kit';
 import { hostAllowed, tokenMatches } from './mcp-http-server';
 
@@ -9,8 +9,14 @@ import { hostAllowed, tokenMatches } from './mcp-http-server';
  * 서로 다른 두 값이 같다고 나오면 안 된다. 견줄 값을 `encodeLoneSurrogates`(단사)로 바꿔 보내 고쳤다.
  * 호출부별 방향: tokenMatches·hostAllowed·authorize·isAllowedRequest·isAutomaticFavicon은 모두 여는 쪽(같다고 나오면 인증·허용)이다.
  * 성질: 서로 다른 값은 다르다(열린 쪽 0). 크기는 CONN_SURROGATE_PAIRS 환경 변수로 바꾼다.
+ *
+ * 옛 TS(`connection-legacy.ts`, #1347에서 지움)의 `hostAllowed`가 같은 입력에 낸 값은 `connection-surrogates-frozen.json`에 얼려 두었다
+ * (`hostPairs`: 시드 2027의 입력 쌍마다 `1`=허용, `sigma`: 아래 시그마 문맥 81×3개, 같은 순서). 모든 코드 포인트 시험의 옛 값은 전부 허용이었다
+ * (옛 구현은 `host.toLowerCase()`와 `allowed.toLowerCase()`를 견주고, 허용 이름이 `c.toLowerCase()`이므로 어느 Node의 Unicode 판에서도 같다).
  */
+const FROZEN = JSON.parse(readFileSync(new URL('./connection-surrogates-frozen.json', import.meta.url), 'utf8')) as { pairs: number; hostPairs: string; sigma: string };
 const PAIRS = readEnvNumber('CONN_SURROGATE_PAIRS', 40_000);
+if (PAIRS > FROZEN.pairs) throw new Error(`얼린 값은 ${FROZEN.pairs}개뿐입니다`);
 
 /** 짝 없는 서로게이트, 쌍, 쌍의 절반, U+FFFD, 예약 구간(U+E000..U+E01F) 글자, 글자 */
 const ALPHABET = ['\ud800', '\udbff', '\udc00', '\udfff', '😀', '\ud83d', '\ude00', '�', '', '', '', '', 'a', 'b', 'A', '0', 'd', '8'];
@@ -27,7 +33,6 @@ describe('짝 없는 서로게이트가 든 토큰·호스트 비교(여는 쪽)
     const g = new Gen(2026);
     let different = 0;
     let mergedByBoundary = 0;
-    let oldMerged = 0;
     for (let i = 0; i < PAIRS; i++) {
       const a = valueOf(g);
       const b = g.chance(0.3) ? a : valueOf(g);
@@ -37,24 +42,21 @@ describe('짝 없는 서로게이트가 든 토큰·호스트 비교(여는 쪽)
         different += 1;
         // 경계에서 합쳐지면 같아지는 쌍(고치지 않았다면 열렸을 쌍)
         if (collapse(a) === collapse(b)) mergedByBoundary += 1;
-        if (legacy.tokenMatches(`Bearer ${a}`, b)) oldMerged += 1;
       }
     }
     expect(different).toBeGreaterThan(PAIRS / 2);
     // 입력이 이 성질을 실제로 밟는다
     expect(mergedByBoundary).toBeGreaterThan(20);
-    // 옛 구현(UTF-8로 바꾸며 U+FFFD로 합침)은 그런 쌍을 같다고 읽었다. 새 구현은 하나도 열지 않는다
-    expect(oldMerged).toBeGreaterThan(0);
   });
 
-  it('호스트: 허용 이름과 Host가 짝 없는 서로게이트만 다르면 다르다, 옛 구현과 모든 쌍에서 같다', () => {
+  it('호스트: 허용 이름과 Host가 짝 없는 서로게이트만 다르면 다르다, 옛 구현이 낸 값과 모든 쌍에서 같다', () => {
     const g = new Gen(2027);
     let mergedByBoundary = 0;
     for (let i = 0; i < PAIRS; i++) {
       const a = valueOf(g).replace(/[:[\]\s]/g, 'x');
       const b = g.chance(0.3) ? a : valueOf(g).replace(/[:[\]\s]/g, 'x');
       const actual = hostAllowed(a, [b]);
-      expect(actual, JSON.stringify([a, b])).toBe(legacy.hostAllowed(a, [b]));
+      expect(actual, JSON.stringify([a, b])).toBe(FROZEN.hostPairs[i] === '1');
       if (a.toLowerCase() !== b.toLowerCase() && collapse(a.toLowerCase()) === collapse(b.toLowerCase())) {
         mergedByBoundary += 1;
         expect(actual).toBe(false);
@@ -83,15 +85,16 @@ describe('짝 없는 서로게이트가 든 토큰·호스트 비교(여는 쪽)
 
 // 일부러 무거운 성질·차등 시험이다(전체 코드 포인트, 긴 패치). 기본 5초는 따로 돌려도 부하 23에서 4초대라 전체 실행 때 넘는다
 describe('호스트 이름의 소문자 변환: Rust와 JS가 같다', { timeout: 120_000 }, () => {
-  it('모든 코드 포인트(서로게이트 제외)와 시그마 앞뒤 문맥에서 옛 구현과 같다', () => {
+  it('모든 코드 포인트(서로게이트 제외)와 시그마 앞뒤 문맥에서 옛 구현이 낸 값과 같다', () => {
     let checked = 0;
+    let sigmaIndex = 0;
     for (let cp = 0; cp <= 0x10ffff; cp++) {
       if (cp >= 0xd800 && cp <= 0xdfff) continue;
       const c = String.fromCodePoint(cp);
       // 호스트 구문(공백·콜론·대괄호)은 이 시험의 대상이 아니다
       if (/[\s:[\]\u0085﻿]/.test(c)) continue;
       const expected = c.toLowerCase();
-      expect(hostAllowed(c, [expected]), `U+${cp.toString(16)}`).toBe(legacy.hostAllowed(c, [expected]));
+      expect(hostAllowed(c, [expected]), `U+${cp.toString(16)}`).toBe(true);
       checked += 1;
     }
     expect(checked).toBeGreaterThan(1_000_000);
@@ -101,7 +104,7 @@ describe('호스트 이름의 소문자 변환: Rust와 JS가 같다', { timeout
       for (const after of contexts) {
         const host = `${before}Σ${after}`;
         for (const allowed of [host.toLowerCase(), `${before.toLowerCase()}σ${after.toLowerCase()}`, `${before.toLowerCase()}ς${after.toLowerCase()}`]) {
-          expect(hostAllowed(host, [allowed]), JSON.stringify([host, allowed])).toBe(legacy.hostAllowed(host, [allowed]));
+          expect(hostAllowed(host, [allowed]), JSON.stringify([host, allowed])).toBe(FROZEN.sigma[sigmaIndex++] === '1');
         }
       }
     }

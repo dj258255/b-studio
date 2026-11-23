@@ -5,7 +5,7 @@ import { isProcessAlive } from './session-store';
 
 /**
  * 세션을 지우고 복구하고 이어받는 판정(ADR-204, 4f B2a). 판정은 Rust `crates/bstudio-session`의 `lifecycle`이 하고, 여기는 그 결과를 `StudioError`로 바꾸는 껍데기다.
- * 옛 TS 판정은 `session-lifecycle-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 옛 TS 판정은 지웠다(#1347).
  *
  * 세션의 `home`은 세션을 실제로 만든 폴더(`startSession`의 `sessionDir`) 또는 읽어 온 폴더(`readStoredSessions`의 `home`)다.
  * 저장 파일의 `workDir`·`stateDir` 글자는 믿지 않는다: 지울 폴더도, 이어받을 작업 폴더도 `home`과 같은지 먼저 본다.

@@ -11,7 +11,7 @@ import { composeRef } from './git-mask';
 /**
  * 끝맺음(`removeSandboxImages`·`cleanup`·`destroy`)·사내 API 호출(`callExternal`)·부하 러너(`runLoad`)·만들기의 앞뒤(`createWorkDir`·`abortCreate`)의 TS 껍데기(ADR-195 4f A4c-3c).
  * docker를 부르는 순서와 지우는 대상은 Rust(crates/bstudio-io/src/lifecycle_io.rs)가 하고, 여기는 결과를 옛 글 그대로의 오류로 바꾸고 시크릿을 가리기만 한다.
- * 옛 TS는 `lifecycle-legacy.ts`(차등 시험의 기준값).
+ * 옛 TS는 지웠다(#1347).
  *
  * **Rust는 `up`을 부르지 않는다.** `destroy`의 `down`은 옛 코드도 `#compose`를 지났지만 `#compose`는 첫 인자가 `up`일 때만 `#upQueue`에 줄을 세우므로 `down`은 줄을 타지 않았다. 그대로 줄 밖에서 부른다.
  * (진행 중인 `up`과 `down`이 겹칠 수 있다는 뜻이다. 옛 코드와 같고, 줄 세우면 destroy가 기동이 끝날 때까지 막혀 취소가 늦어지므로 바꾸지 않았다. ADR-195 A4c-3c)

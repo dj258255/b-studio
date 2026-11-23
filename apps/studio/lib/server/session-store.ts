@@ -115,7 +115,7 @@ export function trimHistory(history: readonly StudioEvent[]): StudioEvent[] {
 
 /**
  * 서버가 멈춰 끝나지 못한 요청과 되돌리기를 닫는다. 그대로 두면 다시 그린 화면이 "처리 중"에 멈춘다.
- * Rust 기록(`SessionRecord.closeUnfinished`, ADR-203 B1b)이 한다. 옛 구현은 `session-store-legacy.ts`의 `legacyCloseUnfinished`다
+ * Rust 기록(`SessionRecord.closeUnfinished`, ADR-203 B1b)이 한다. 옛 구현(`legacyCloseUnfinished`)은 #1347에서 지웠다
  */
 export function closeUnfinished(history: readonly StudioEvent[], reason: string): StudioEvent[] {
   const record = new SessionRecord({ logs: false, history });

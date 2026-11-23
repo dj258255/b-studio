@@ -11,7 +11,7 @@ import type { MaskVolume } from './git-mask';
  * 만든 컨테이너를 시작하기 전에 확인하고(`verifyContainers`), 확인한 컨테이너만 시작한다(`startVerifiedContainers`).
  * docker를 부르는 순서·판정·위반 컨테이너 지우기는 **모두 Rust 함수 하나**(crates/bstudio-io/src/container_verify.rs)가 한다.
  * 확인한 id 목록과 지우는 id 목록이 그 함수 안의 같은 값이고, 위반이 있으면 확인 결과를 돌려주지 않는다.
- * 여기는 그 결과를 `SandboxError`로 바꾸기만 한다(ADR-195 4f A4b). 옛 TS는 `verify-containers-legacy.ts`.
+ * 여기는 그 결과를 `SandboxError`로 바꾸기만 한다(ADR-195 4f A4b). 옛 TS는 지웠다(#1347).
  *
  * 오류의 구분: 정책 위반은 플랫폼 실패가 아니다(에이전트가 고칠 compose 문제). 가림 빠짐과 확인하지 못한 경우는 `platform: true`.
  * 지우지 못했으면 그 사실을 글에 적는다
