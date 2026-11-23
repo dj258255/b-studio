@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import * as current from './schema';
+import { parseSpec as parseCurrent } from './load';
 
 /**
  * 지운 studio.yaml 항목(`deploy`, `design`, `pageChecks[].compare`)을 스키마가 까닭과 함께 거절하는지 본다.
@@ -48,5 +49,43 @@ describe('schema: 지운 studio.yaml 항목을 거절한다', () => {
       ok: false,
       issues: [{ path: ['workflow', 'pageChecks', 0, 'compare'], message: '`pageChecks[].compare`는 더는 지원하지 않습니다. 이 항목을 지우세요' }],
     });
+  });
+});
+
+// #1330(ADR-221)이 옛 Zod 사본과 견주던 시험에 더한 releaseRequires 거절 시험에서 사본과 무관한 부분(새 스키마의 거절)만 옮겼다
+const SPEC_YAML = `
+version: 1
+name: orders
+services:
+  web:
+    source: managed
+    template: nextjs
+    path: web
+    port: 3000
+    preview: browser
+`;
+
+describe('schema: workflow.releaseRequires를 거절한다', () => {
+  const removed = '`workflow.releaseRequires`는 더는 지원하지 않습니다. 이 항목을 지우세요';
+
+  it('어떤 값이 와도 지우라고 거절한다', () => {
+    for (const releaseRequires of [['checkpoint'], ['test', 'review', 'checkpoint'], []]) {
+      const input = { ...BASE, workflow: { releaseRequires } };
+      expect(normalized(current.StudioSpecSchema.safeParse(input))).toEqual({ ok: false, issues: [{ path: ['workflow', 'releaseRequires'], message: removed }] });
+    }
+  });
+
+  it('빈 값(null)도 거절하고, YAML의 빈 값·~·[]는 파싱 단계에서 같은 글로 거절한다', () => {
+    const input = { ...BASE, workflow: { releaseRequires: null } };
+    expect(normalized(current.StudioSpecSchema.safeParse(input))).toEqual({ ok: false, issues: [{ path: ['workflow', 'releaseRequires'], message: removed }] });
+    for (const value of ['', ' ~', ' null', ' []', ' [checkpoint]']) {
+      let message = '';
+      try {
+        parseCurrent(`${SPEC_YAML}workflow:\n  releaseRequires:${value}\n`);
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message, value).toContain(removed);
+    }
   });
 });

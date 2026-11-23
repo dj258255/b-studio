@@ -217,6 +217,16 @@ const RemovedDeploySchema = z.unknown().superRefine((_, ctx) => {
   ctx.addIssue({ code: 'custom', message: '`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요' });
 });
 
+/**
+ * 지운 배포 조건 설정. 운영 배포를 지운 뒤 아무 일도 하지 않으므로 조용히 받지 않고 거절한다(ADR-221).
+ * 타입은 옛 꼴로 둔다: 고치지 않는 옛 기준값(`*-legacy.ts`)이 이 필드를 타입으로 읽는다. 값은 파싱을 통과하지 못하므로 실제로 들어오지 않는다
+ */
+const RemovedReleaseRequiresSchema = (
+  z.unknown().superRefine((_, ctx) => {
+    ctx.addIssue({ code: 'custom', message: '`workflow.releaseRequires`는 더는 지원하지 않습니다. 이 항목을 지우세요' });
+  }) as unknown as z.ZodType<z.infer<typeof WorkflowStageSchema>[]>
+);
+
 /** 에이전트가 작업을 끝냈다고 주장해도 스튜디오가 순서대로 확인할 개발 단계 */
 export const WorkflowStageSchema = z.enum([
   'plan',
@@ -595,8 +605,7 @@ export const WorkflowSchema = z
      * 파일 도구는 protectedPaths와 같게 막고, 게이트는 이 경로들의 지문을 실행 시작과 견주어 바뀌면 test 단계를 실패시킨다(ADR-175)
      */
     evaluationAssets: z.array(RELATIVE_PATH).optional(),
-    /** 배포할 체크포인트가 통과했어야 하는 단계. checkpoint만 두면(기본) 모든 체크포인트를 배포할 수 있다 */
-    releaseRequires: z.array(WorkflowStageSchema).min(1).optional(),
+    releaseRequires: RemovedReleaseRequiresSchema.optional(),
   })
   // 실행할 수단이 없는 단계를 필수로 두면 "선언은 됐지만 한 번도 돌지 않은" 단계가 통과처럼 보인다. 불러올 때 막는다
   .superRefine((workflow, ctx) => {

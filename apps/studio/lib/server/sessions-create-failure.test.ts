@@ -288,7 +288,7 @@ describe('작업 복사본 세션: 만들다 실패하면 이 호출이 만든 �
   it('평가 자산을 꺼내지 못하면 500으로 던지고 세션 폴더가 남지 않는다', async () => {
     // 선언한 자산이 체크포인트에 없다
     // (git ls-tree가 거부하는 경로 지정자라 꺼내기가 던진다. 없는 파일은 "빈 폴더 자산"이 되어 던지지 않는다)
-    await makeProject(fake.roots.failproj!, 'failproj', 'workflow:\n  required: [plan, implement, run, contract_check, test, review, checkpoint]\n  tests:\n    - { name: unit, service: api, command: [./gradlew, test] }\n  releaseRequires: [test, checkpoint]\n  evaluationAssets: [":(bogus)asset.json"]\n');
+    await makeProject(fake.roots.failproj!, 'failproj', 'workflow:\n  required: [plan, implement, run, contract_check, test, review, checkpoint]\n  tests:\n    - { name: unit, service: api, command: [./gradlew, test] }\n  evaluationAssets: [":(bogus)asset.json"]\n');
     const error = await failure(createSession('failproj', 'kim', 'copy'));
     expect(error.status).toBe(500);
     expect(error.message).toMatch(/^평가 자산을 준비하지 못해 세션을 만들지 않았습니다: /);
