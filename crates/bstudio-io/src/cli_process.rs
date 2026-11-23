@@ -1,5 +1,5 @@
 //! `claude` CLI 자식 프로세스의 입출력 층(ADR-195 4f A8a, ADR-201). TS `packages/agent/src/claude-cli-process.ts`의 `spawnClaudeCli`가
-//! `node:child_process`·`node:readline` 위에서 하던 일을 옮긴 것이다(옛 구현은 `claude-cli-process-spawn-legacy.ts`, 차등 시험의 기준).
+//! `node:child_process`·`node:readline` 위에서 하던 일을 옮긴 것이다(옛 구현 `claude-cli-process-spawn-legacy.ts`는 #1347에서 지웠다).
 //!
 //! 여기가 맡는 것: 자식 띄우기(인자 배열·env·cwd, 파이프 셋), 표준 입력 줄 쓰기·닫기, 표준 출력의 UTF-8 해석과 줄 나누기(Node `StringDecoder`·`readline`과
 //! 같게), 표준 오류 끝 2,000자 보관(UTF-16 단위), 닫기 단계(입력 닫기 → SIGTERM → SIGKILL), 끝 상태(code·signal·띄우기 오류).

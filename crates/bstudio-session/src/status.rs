@@ -1,5 +1,5 @@
 //! 세션 하나의 상태 전이와 멈추기의 순서(ADR-205, 4f B2b). 옛 구현은 `sessions.ts`의 `setStatus`·`ensureBooted`·`startBoot`·`boot`·`stopSession`이었다
-//! (`session-status-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 샌드박스·터미널·관문·감시·저장 같은 부수 효과는 TS가 쥐고, 여기는 **언제 무엇을 해도 되는가**만 정한다.
+//! (옛 구현 `session-status-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 샌드박스·터미널·관문·감시·저장 같은 부수 효과는 TS가 쥐고, 여기는 **언제 무엇을 해도 되는가**만 정한다.
 //!
 //! 상태 다섯 가지(`idle`·`starting`·`ready`·`failed`·`stopped`)는 이 값만 쥔다. TS의 `snapshot.status`는 이 값의 거울이다(바뀔 때마다 이 모듈이 돌려주는 `Change`를 TS가 옮긴다).
 //!

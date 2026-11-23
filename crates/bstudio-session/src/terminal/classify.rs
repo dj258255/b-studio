@@ -1,5 +1,5 @@
 //! 세션 터미널의 요청·도구 입력 분류(ADR-215, 4f B5a). 옛 구현은 `@b-studio/sandbox`의 `isReadOnlyPrompt`·`unwrapPastedPrompt`와 `sessions.ts`의 `/` 명령 판정·`AGENT_READ_TOOLS` 대조였다
-//! (`session-terminal-classify-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 순수 함수다: 글을 받아 분류만 돌려준다.
+//! (옛 구현 `session-terminal-classify-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 순수 함수다: 글을 받아 분류만 돌려준다.
 //!
 //! **막는 검사다. 읽기만을 놓치는 쪽이 여는 쪽이다**(읽기만 요청의 쓰기가 허용된다). 그래서 의심스러우면 읽기만으로 읽는다:
 //! - 붙여 넣은 요청의 감싸개 표시는 **더 벗길 것이 없을 때까지** 벗기고, 벗기는 단계마다 읽기만인지 본다. 하나라도 읽기만이면 읽기만이다.

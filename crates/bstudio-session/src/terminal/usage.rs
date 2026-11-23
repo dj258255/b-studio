@@ -1,5 +1,5 @@
 //! 세션 터미널의 사용량 귀속·정체 판정(ADR-213, 4f B4d). 옛 구현은 `sessions.ts`의 `countTerminalUsageOnce`·`attributeRunUsage`의 분기·`checkTerminalStall`이었다
-//! (`session-terminal-usage-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 기억(Set), 저장, 알림, 글 조립은 TS가 하고, 여기는 **요청 하나를 어떻게 처리할지**만 정한다.
+//! (옛 구현 `session-terminal-usage-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 기억(Set), 저장, 알림, 글 조립은 TS가 하고, 여기는 **요청 하나를 어떻게 처리할지**만 정한다.
 //!
 //! **막는 검사다. 덜 세는 쪽이 여는 쪽이다.** 사용량은 턴 상한과 토큰 한도의 입력이므로, 덜 세면 한도가 늦게 걸린다. 모르는 값은 센다:
 //! 요청 번호가 없으면 중복을 가릴 수 없어 그대로 센다. 순서는 옛 코드 그대로다(먼저 맞는 칸이 이긴다).

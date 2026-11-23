@@ -1,5 +1,5 @@
 //! 세션을 지우고 복구하고 이어받는 판정(ADR-204, 4f B2a). 옛 구현은 `sessions.ts`의 `deleteSession`·`assertWithinSessionsRoot`·`recover`였다
-//! (`session-lifecycle-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 부수 효과(샌드박스·터미널 정리, 메모리 맵)는 TS가 쥔다.
+//! (옛 구현 `session-lifecycle-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 부수 효과(샌드박스·터미널 정리, 메모리 맵)는 TS가 쥔다.
 //!
 //! **세션의 `home`**: 세션을 실제로 만든 폴더(`<세션 저장소>/<프로젝트>-<id>`) 또는 읽어 온 폴더다. 저장 파일의 `workDir`·`stateDir` 글자로 정하지 않는다.
 //! 옛 구현은 저장 파일의 경로를 글자로만 "저장소 안인가" 확인하고 그 경로를 `rm -rf`하거나 그 경로에서 `git clean`을 했다. 세션 폴더 안의 링크나 `..`는

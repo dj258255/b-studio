@@ -1,5 +1,5 @@
 //! 이 컴퓨터 방식 터미널의 관문 폴더 입출력(ADR-173, 4f C1 5단계). 옛 구현은 `packages/sandbox/src/host-terminal.ts`의
-//! `writeHostGatewayConfig`·`checkHostGatewayConfig`·`removeHostGatewayConfig`다(`host-terminal-legacy.ts`가 차등 시험의 기준이다).
+//! `writeHostGatewayConfig`·`checkHostGatewayConfig`·`removeHostGatewayConfig`다(옛 구현 `host-terminal-legacy.ts`는 #1347에서 지웠다).
 //! 글은 `bstudio_session::terminal::gateway`가 만든다. 여기는 그 글을 쓰고, 견주고, 지우기만 한다.
 //!
 //! **지우는 코드다.** 지우기 전에 경로가 링크인지, 파일인지, 진짜 폴더인지 먼저 본다(AGENTS.md "지우는 코드").

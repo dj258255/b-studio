@@ -1,6 +1,6 @@
 //! 세션 터미널의 감시(관문 파일 변조와 훅 없이 뜬 CLI를 찾는 일)의 판정(ADR-219, 4f B5e). 옛 구현은 `session-terminal.ts`의 `HOST_BACKEND.watch`(상태 변수들)와
 //! `packages/sandbox/src/host-terminal.ts`의 `findUnhookedCli`·`looksLikeAgentCli`, `packages/agent/src/hook-server.ts`의 본문 읽기였다
-//! (`session-terminal-watch-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. `ps`·파일 읽기·`fs.watch`·타이머는 TS가 하고, 여기는 **무엇을 알리고, 지금 무엇이 살아 있고,
+//! (옛 구현 `session-terminal-watch-legacy.ts`는 #1347에서 지웠다). Node를 모른다. `ps`·파일 읽기·`fs.watch`·타이머는 TS가 하고, 여기는 **무엇을 알리고, 지금 무엇이 살아 있고,
 //! 감시가 믿을 만한가**만 정한다.
 //!
 //! **세 가지를 순수 함수로 둔다.**

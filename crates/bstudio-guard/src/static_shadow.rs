@@ -1,5 +1,5 @@
 //! 동적 경로(`app/orders/[id]/page.tsx`)에 채운 값이 같은 주소 자리의 고정 경로와 겹치는지의 판정(ADR-159 결정 11, ADR-191 3단계 3aa).
-//! 옛 TS: `packages/agent/src/next-static-shadow-legacy.ts`. 막는 판정이다: 겹침과 "모름"은 값을 받지 않는다.
+//! 옛 TS: `packages/agent/src/next-static-shadow-legacy.ts`(#1347에서 지웠다). 막는 판정이다: 겹침과 "모름"은 값을 받지 않는다.
 //!
 //! 폴더 읽기(`readdir`·`lstat`)는 TS 껍데기가 한다. 경계는 **한 번에 하나씩 되묻는 단계 함수**다: `step`은 지금까지 읽은 것(`Known`)으로
 //! 옛 구현과 같은 순서로 판정을 돌리다가, 아직 읽지 않은 폴더나 경로를 만나면 그것 하나를 `Need`로 돌려준다. 껍데기가 읽어 `Known`에 더하고

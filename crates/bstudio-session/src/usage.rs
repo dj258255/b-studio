@@ -1,5 +1,5 @@
 //! 사람별 모델 토큰 사용량 파일 `tokens.json`의 주인(ADR-209, 4f B3c). 읽기·더하기·오래된 기간 정리·프로세스 사이 잠금을 이 모듈 하나가 한다.
-//! 옛 구현은 `apps/studio/lib/server/usage-state.ts`였다(`usage-state-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다.
+//! 옛 구현은 `apps/studio/lib/server/usage-state.ts`였다(옛 구현 `usage-state-legacy.ts`는 #1347에서 지웠다). Node를 모른다.
 //!
 //! 파일 형식과 글자는 옛 `JSON.stringify({ version: 1, periods }, null, 2)`와 같다: `{version:1, periods: {기간: {사람: {inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}}}}`.
 //! 값은 JS의 규칙(`bstudio_guard::js_json`)으로 읽고 써서, 건드리지 않은 사람·기간의 항목은 글자 그대로 남고 키 순서(정수 꼴 키가 먼저)도 JS와 같다.

@@ -1,5 +1,5 @@
 //! Git 맞추기·되돌리기 조합·직접 수정 가르기의 판정(ADR-218, 4f B5d). 옛 구현은 `sessions.ts`의 `realignGit`·`rememberGit`·`initialGitMemory`·`revertRunDetailed`·`commitLocalEdits`였다
-//! (`session-git-realign-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. Git 읽기·행동(`reset`·`checkout`·`commit`)과 알림·글 조립은 TS가 하고, 여기는 **사실 조합 → 할 일 하나**만 정한다.
+//! (옛 구현 `session-git-realign-legacy.ts`는 #1347에서 지웠다). Node를 모른다. Git 읽기·행동(`reset`·`checkout`·`commit`)과 알림·글 조립은 TS가 하고, 여기는 **사실 조합 → 할 일 하나**만 정한다.
 //!
 //! **판정을 부르는 자리마다 막는 쪽인가 여는 쪽인가**(AGENTS.md "막는 검사를 고칠 때"):
 //! - `decide_realign`: 풀기(`Unwind`)는 에이전트가 얹은 커밋을 검증 대상으로 되돌리는 **막는 쪽**이다. 그러나 `Same`은 "기억을 믿는다"는 **여는 쪽**이라 HEAD·브랜치가 둘 다 기억과 글자까지 같을 때만 선다.
