@@ -132,7 +132,7 @@ async function main(): Promise<void> {
     // 쓰기 직전 훅의 거절은 가짜 CLI가 받은 답으로 확인한다(레인 B의 작업 복사본에 파일이 없는 것은 통합 대상에서 본다)
     const actions = (await readFile(actionLog, 'utf8').catch(() => '')).split('\n').filter(Boolean).map((line) => JSON.parse(line) as { kind: string; path?: string; denied?: boolean; event?: string; output?: { hookSpecificOutput?: { permissionDecisionReason?: string } } });
     const intrude = actions.find((action) => action.kind === 'write' && action.path === 'web/plan-a/intrude.md');
-    const denyHook = actions.find((action) => action.kind === 'hook' && action.event === 'PreToolUse' && action.output?.hookSpecificOutput?.permissionDecisionReason?.includes('쓰기 범위'));
+    const denyHook = actions.find((action) => action.kind === 'hook' && action.event === 'PreToolUse' && /범위 밖/.test(action.output?.hookSpecificOutput?.permissionDecisionReason ?? '') && action.output?.hookSpecificOutput?.permissionDecisionReason?.includes('web/plan-a/intrude.md'));
     check(intrude?.denied === true && denyHook !== undefined, `레인 B가 레인 A 범위에 쓰려던 Write를 쓰기 직전 훅이 막음 (${denyHook?.output?.hookSpecificOutput?.permissionDecisionReason?.slice(0, 80) ?? '거절 없음'})`);
 
     const integration = plan.integration;
