@@ -2,10 +2,9 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import {
-  AnthropicModelClient,
   DEFAULT_MODEL,
   aggregateModelStats,
-  createProviderClient,
+  clientForProfile,
   routeModel,
   validateModelProfiles,
   type Effort,
@@ -44,18 +43,7 @@ export function modelById(id: string): ModelProfile {
  * 옵션을 아직 넣지 않았다) 조용히 무시하지 않고 호출한 쪽이 지원 여부를 먼저 물어보게 한다(model-picker.ts의 effortSupportedFor)
  */
 export function clientForModel(model: ModelProfile, effort?: Effort): ModelClient {
-  if (model.provider === 'anthropic') {
-    const name = model.apiKeyEnv ?? 'ANTHROPIC_API_KEY';
-    const credential = process.env[name]?.trim();
-    return new AnthropicModelClient({
-      model: model.model,
-      baseURL: model.baseUrl,
-      ...(name === 'ANTHROPIC_AUTH_TOKEN' ? { authToken: credential } : { apiKey: credential }),
-      authLabel: name,
-      ...(effort ? { effort } : {}),
-    });
-  }
-  return createProviderClient({ profile: model });
+  return clientForProfile(model, { env: process.env, effort });
 }
 
 function loadModels(): ModelProfile[] {

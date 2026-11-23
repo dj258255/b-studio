@@ -11,6 +11,7 @@ export {
   type RunMetrics,
   type Steering,
 } from './loop';
+export { apiKeyEnvName, clientForProfile } from './client-for-profile';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
 export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type EscalationPolicy } from './escalation';
 export {
@@ -733,4 +734,5 @@ export {
 export { experimentalEnabled, gatewayEnabled } from './experimental';
 export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, runClaudeGatewayAgent, terminalGatewayNote, type ClaudeGatewayRunOptions } from './claude-gateway-runner';
 export { serialQueue } from './claude-code-runner';
+export { parseArgs as parseInteractiveArgs } from './interactive/settings';
 export { runInteractiveSession, defaultSystemPrompt, MAX_MODEL_CALLS_PER_REQUEST, type InteractiveSessionOptions } from './interactive/session';
