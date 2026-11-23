@@ -182,6 +182,15 @@ export function loadTable(url: URL): FrozenTable {
 }
 
 /** 이름표로 값을 적고 꺼내는 표(호출 한 번이 아니라 시험의 한 단계 결과를 고정할 때 쓴다) */
+/**
+ * 이름표에 넣을 시각. 절대 시각(getTime)은 시간대마다 달라(현지 시각으로 만든 Date) CI(UTC)에서 이름표를 찾지 못한다.
+ * 기간 이름(periodKey)이 현지 날짜로 끊으므로 이름표도 현지 시각 글자로 적는다(예: 2026-09-12T09:00)
+ */
+export function localStamp(at: Date): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}T${pad(at.getHours())}:${pad(at.getMinutes())}`;
+}
+
 export function book(table: FrozenTable) {
   return {
     get(label: string): unknown {

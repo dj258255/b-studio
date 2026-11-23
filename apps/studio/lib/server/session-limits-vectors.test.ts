@@ -5,7 +5,7 @@ import { native } from '@b-studio/sandbox';
 import { afterEach, describe, expect, it } from 'vitest';
 import { periodKey } from '@/lib/usage';
 import { judgeLimits } from './session-limits';
-import { book, loadTable } from './frozen-vectors';
+import { book, loadTable, localStamp } from './frozen-vectors';
 import { addUserUsage } from './usage-state';
 
 /**
@@ -197,7 +197,7 @@ describe('토큰 한도 판정 차등', () => {
           for (const day of days) {
             process.env.B_STUDIO_USER_TOKEN_LIMIT = String(limit);
             process.env.B_STUDIO_USER_TOKEN_WINDOW = window;
-            const old = OLD.get(`period ${window} ${limit} ${day.getTime()}`);
+            const old = OLD.get(`period ${window} ${limit} ${localStamp(day)}`);
             expect(judgeLimits({ sessionTokens: 0, by: 'alice' }, day), `${window} ${limit} ${periodKey(window, day)}`).toBe(old);
           }
         }

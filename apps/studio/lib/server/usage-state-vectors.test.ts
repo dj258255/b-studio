@@ -4,7 +4,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import type { UsageWindow } from '@/lib/usage';
 import { addUserUsage as addNew, readUsage as readNew, userTokens as tokensNew, userUsage as usageNew } from './usage-state';
-import { book, digestOf, loadTable } from './frozen-vectors';
+import { book, digestOf, loadTable, localStamp } from './frozen-vectors';
 
 /**
  * 사람별 사용량 파일 벡터(ADR-209, 4f B3c): 같은 더하기 열을 Rust 주인에게 주고 파일 내용(바이트)·돌려준 합계·읽기 결과가 옛 `addUserUsage`가 낸 값
@@ -69,8 +69,8 @@ describe('사람별 사용량 파일 벡터', () => {
     for (const window of ['day', 'month'] as const) {
       for (const day of days) {
         for (const person of [...PEOPLE.slice(0, 6), 'nobody']) {
-          expect(usageNew(person, window, day, newDir), `${person} ${window}`).toEqual(OLD.get(`seed usage ${person} ${window} ${day.getTime()}`));
-          expect(tokensNew(person, window, day, newDir)).toBe(OLD.get(`seed tokens ${person} ${window} ${day.getTime()}`));
+          expect(usageNew(person, window, day, newDir), `${person} ${window}`).toEqual(OLD.get(`seed usage ${person} ${window} ${localStamp(day)}`));
+          expect(tokensNew(person, window, day, newDir)).toBe(OLD.get(`seed tokens ${person} ${window} ${localStamp(day)}`));
         }
       }
     }
