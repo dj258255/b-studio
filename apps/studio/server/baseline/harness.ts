@@ -75,7 +75,7 @@ export interface DockerCall {
   exit: number | null;
 }
 
-const MINIMAL_FILES: Record<string, string> = {
+export const MINIMAL_FILES: Record<string, string> = {
   'studio.yaml': `version: 1
 name: demo
 workflow:

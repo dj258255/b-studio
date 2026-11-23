@@ -1,6 +1,6 @@
 import { readdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { git, type BaselineSnapshot, type DiskState, type Driver, type DockerScenario, type WorldOptions } from './harness';
+import { git, MINIMAL_FILES, type BaselineSnapshot, type DiskState, type Driver, type DockerScenario, type WorldOptions } from './harness';
 
 /**
  * 게이트 판정 표(4f-plan.md "먼저 고정할 판정 표")의 행마다 시나리오 하나. 모두 `/api/sessions/[id]/messages` 경로(stream-json 러너 + 가짜 CLI)로 몬다.
@@ -308,6 +308,32 @@ services:
   },
 ];
 
+/** 하네스의 기본 studio.yaml(`createWorld`) */
+const DEFAULT_YAML = MINIMAL_FILES['studio.yaml']!;
+
+const PROTECTED_ENV_YAML = DEFAULT_YAML.replace('  required: [implement, checkpoint]\n', '  required: [implement, checkpoint]\n  protectedPaths: [.env]\n');
+
+/** `workflow:` 바로 아래에 턴 상한을 넣는다 */
+function withMaxTurns(yaml: string, maxTurns: number): string {
+  if (!yaml.includes('workflow:\n')) throw new Error('workflow 절이 없는 studio.yaml');
+  return yaml.replace('workflow:\n', `workflow:\n  maxTurns: ${maxTurns}\n`);
+}
+
+/** 관문 텔레메트리(/v1/logs)로 보내는 모델 요청들. request_id가 다르면 다른 턴으로 센다 */
+function modelRequests(requestIds: string[]): unknown {
+  const logRecords = requestIds.map((id) => ({
+    attributes: [
+      { key: 'event.name', value: { stringValue: 'api_request' } },
+      { key: 'model', value: { stringValue: 'claude-sonnet-4-5' } },
+      { key: 'input_tokens', value: { intValue: '100' } },
+      { key: 'output_tokens', value: { intValue: '10' } },
+      { key: 'cost_usd', value: { doubleValue: 0.001 } },
+      { key: 'request_id', value: { stringValue: id } },
+    ],
+  }));
+  return { resourceLogs: [{ scopeLogs: [{ logRecords }] }] };
+}
+
 // ── 세션 터미널 경로(실험 기능): 지원 경로가 무엇인지는 D0에서 사람이 정한다. 둘 다 고정해 둔다 ──
 const terminalOptions = (more: WorldOptions = {}): WorldOptions => ({ terminal: true, ...more });
 
@@ -500,7 +526,82 @@ export const terminalScenarios: Scenario[] = [
       return problems;
     },
   },
+  {
+    name: 'terminal-protected-path',
+    covers: '터미널 + 보호 경로: 쓰기 직전 훅은 거절하지 않지만 턴 끝 게이트가 잡아, 보호 경로의 변경은 체크포인트에 들어가지 않는다',
+    options: terminalOptions({ files: { 'studio.yaml': PROTECTED_ENV_YAML } }),
+    files: ['.env', 'app/hello.txt'],
+    run: async ({ start, cli }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('.env를 만들어 주세요');
+      await claude.write('.env', 'SECRET=1\n');
+      for (const text of ['썼습니다.', '다시 썼습니다.', '또 썼습니다.']) {
+        const answer = await claude.stop(text);
+        // 게이트가 피드백(block)을 주는 동안만 이어 간다. 실행이 닫히면 멈춘다
+        if (answer.decision !== 'block') break;
+      }
+    },
+    check: (snapshot) => {
+      const problems: string[] = [];
+      const run = (snapshot.events as { run: Array<{ type: string; checkpoint?: { files?: string[] } }> }).run;
+      if (run.some((event) => event.type === 'checkpoint' && (event.checkpoint?.files ?? []).includes('.env'))) problems.push('보호 경로(.env)의 변경이 체크포인트에 들어갔다');
+      const disk = snapshot.disk as DiskState;
+      if (disk.files['.env'] !== undefined && disk.files['.env'] !== null) problems.push(`보호 경로의 변경이 작업 복사본에 남았다: ${JSON.stringify(disk.files['.env'])}`);
+      return problems;
+    },
+  },
+  {
+    name: 'terminal-max-turns-pass',
+    covers: '터미널 턴 상한(workflow.maxTurns): 텔레메트리로 센 모델 호출이 상한에 닿으면 그 뒤 쓰기를 거절하고, 턴 끝 게이트를 통과하면 done + Workflow-Incomplete: max_turns',
+    options: terminalOptions({ files: { 'studio.yaml': withMaxTurns(DEFAULT_YAML, 1) } }),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '상한 전\n');
+      await driver.telemetry('모델 호출 1번(상한)', modelRequests(['turn-1']));
+      await claude.write('app/hello.txt', '상한 뒤 거절될 내용\n');
+      await claude.stop('여기까지.');
+    },
+    check: (snapshot) => {
+      const problems: string[] = [];
+      if (!JSON.stringify(snapshot.http).includes('"permissionDecision":"deny"')) problems.push('턴 상한에 닿은 뒤의 쓰기를 거절하지 않았다');
+      const run = (snapshot.events as { run: Array<{ type: string; status?: string; incomplete?: string }> }).run;
+      const finished = run.find((event) => event.type === 'run_finished');
+      if (finished?.status !== 'done' || finished.incomplete !== 'max_turns') problems.push(`done + max_turns로 닫히지 않았다: ${JSON.stringify(finished)}`);
+      if ((snapshot.disk as DiskState).files['app/hello.txt'] !== '상한 전\n') problems.push('상한 전 변경이 남지 않았거나 거절한 쓰기가 들어갔다');
+      if (!JSON.stringify(snapshot.disk).includes('Workflow-Incomplete: max_turns')) problems.push('체크포인트 커밋에 Workflow-Incomplete: max_turns가 없다');
+      return problems;
+    },
+  },
+  {
+    name: 'terminal-max-turns-fail',
+    covers: '터미널 턴 상한: 상한에 닿은 뒤 턴 끝 게이트를 통과하지 못하면 피드백으로 재시도하지 않고 실패로 닫아 되돌린다',
+    options: terminalOptions({ files: { 'studio.yaml': withMaxTurns(WITH_TEST!['studio.yaml'] as string, 1) }, docker: { rules: failExec() } }),
+    files: ['app/hello.txt'],
+    run: async ({ start, cli, driver }) => {
+      const id = await start();
+      const claude = await cli(id);
+      await claude.prompt('hello.txt를 고쳐 주세요');
+      await claude.write('app/hello.txt', '상한 전 틀림\n');
+      await driver.telemetry('모델 호출 1번(상한)', modelRequests(['turn-1']));
+      await claude.stop('여기까지.');
+    },
+    check: (snapshot) => {
+      const problems: string[] = [];
+      const hooks = JSON.stringify(snapshot.http);
+      if (hooks.includes('"decision":"block"')) problems.push('턴 상한에 닿았는데 피드백으로 다시 시키려 했다');
+      const run = (snapshot.events as { run: Array<{ type: string; status?: string }> }).run;
+      if (run.find((event) => event.type === 'run_finished')?.status !== 'failed') problems.push('실패로 닫히지 않았다');
+      if (run.some((event) => event.type === 'checkpoint')) problems.push('실패했는데 체크포인트를 남겼다');
+      if ((snapshot.disk as DiskState).files['app/hello.txt'] !== '안녕\n') problems.push('되돌리지 않았다');
+      return problems;
+    },
+  },
 ];
+
 
 /** 플랫폼 실패의 옳은 동작: 실패로 닫고 체크포인트를 남기지 않는다. 복사본 방식은 변경을 남기고, 내 폴더 방식은 되돌린다 */
 function platformFailureProblems(snapshot: BaselineSnapshot, expected: { reverted: boolean }): string[] {
