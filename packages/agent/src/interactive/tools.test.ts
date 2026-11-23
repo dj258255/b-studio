@@ -112,13 +112,27 @@ describe('작업 폴더 가둠(막는 검사)', () => {
     expect(() => lstatSync(path.join(outside, 'sub'))).toThrow();
   });
 
+  it('작업 폴더 안을 가리키는 폴더 링크를 지나는 경로도 읽기·쓰기 모두 거절한다(서버가 본 경로와 실제 경로가 갈리지 않게)', async () => {
+    await mkdir(path.join(work, 'tests', 'acceptance'), { recursive: true });
+    await writeFile(path.join(work, 'tests', 'acceptance', 'spec.txt'), '보호');
+    await mkdir(path.join(work, 'web'), { recursive: true });
+    await symlink(path.join(work, 'tests', 'acceptance'), path.join(work, 'web', 'notes'));
+    expect((await run('Write', { file_path: 'web/notes/new.txt', content: 'x' })).isError).toBe(true);
+    expect((await run('Edit', { file_path: 'web/notes/spec.txt', old_string: '보호', new_string: '바꿈' })).isError).toBe(true);
+    expect((await run('Read', { file_path: 'web/notes/spec.txt' })).isError).toBe(true);
+    expect(() => lstatSync(path.join(work, 'tests', 'acceptance', 'new.txt'))).toThrow();
+    expect(await readFile(path.join(work, 'tests', 'acceptance', 'spec.txt'), 'utf8')).toBe('보호');
+    // 링크가 없는 같은 곳은 그대로 쓸 수 있다
+    expect((await run('Write', { file_path: 'web/plain.txt', content: 'y' })).isError).toBe(false);
+  });
+
   it('쓰기는 마지막 조각이 링크면 안쪽을 가리켜도 거절하고, 깨진 링크도 거절한다', async () => {
     await writeFile(path.join(work, 'real.txt'), '원본');
     await symlink(path.join(work, 'real.txt'), path.join(work, 'inner-link.txt'));
     expect((await run('Write', { file_path: 'inner-link.txt', content: '덮음' })).isError).toBe(true);
     expect(await readFile(path.join(work, 'real.txt'), 'utf8')).toBe('원본');
-    // 읽기는 안쪽을 가리키는 링크를 따라간다
-    expect((await run('Read', { file_path: 'inner-link.txt' })).isError).toBe(false);
+    // 읽기도 안쪽을 가리키는 링크를 따라가지 않는다(서버가 본 경로와 읽는 파일이 갈리면 숨긴 경로를 링크로 비켜 읽을 수 있다)
+    expect((await run('Read', { file_path: 'inner-link.txt' })).isError).toBe(true);
     await symlink(path.join(outside, 'not-there.txt'), path.join(work, 'dangling.txt'));
     expect((await run('Write', { file_path: 'dangling.txt', content: 'x' })).isError).toBe(true);
     expect((await run('Read', { file_path: 'dangling.txt' })).isError).toBe(true);

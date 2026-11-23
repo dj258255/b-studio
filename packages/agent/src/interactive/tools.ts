@@ -84,6 +84,10 @@ export async function confine(cwd: string, requested: string): Promise<Confined>
   }
   const real = path.join(realProbe, ...tail);
   if (!within(root, real)) return { ok: false, reason: `링크를 따라가면 작업 폴더 밖입니다: ${requested}` };
+  // 작업 폴더 안을 가리키는 링크도 지나지 않는다: 훅(서버)에는 글자 그대로의 경로를 알리므로, 링크를 지나면 서버가 본 경로와
+  // 실제로 읽고 쓰는 경로가 갈린다(예: web/notes -> ../tests/acceptance면 서버는 web/notes/x를 보고 파일은 보호 경로에 써진다).
+  // 실제 경로가 글자 그대로의 경로와 같을 때만 연다. 대소문자만 다른 경로도 여기서 걸린다(모르면 거절)
+  if (real !== path.join(root, path.relative(path.resolve(cwd), abs))) return { ok: false, reason: `링크를 지나는 경로는 읽거나 쓰지 않습니다: ${requested}` };
   return { ok: true, abs, real, exists: tail.length === 0 };
 }
 
