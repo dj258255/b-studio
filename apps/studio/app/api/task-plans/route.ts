@@ -23,10 +23,14 @@ export async function POST(request: Request) {
       sourceSessionId?: unknown;
       /** 사람이 쓴 작업 카드(#B6a). 형식은 createTaskPlan(cardsToPlan)이 본다 */
       cards?: unknown;
+      /** 레인을 돌리는 방식: chat(기본) 또는 terminal. 카드는 늘 terminal이다 */
+      runner?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
-    // 카드 계획은 레인을 세션 터미널에서 돌린다(그 안의 CLI를 몬다). 세션 터미널 통로와 같은 검사(이 컴퓨터 주소·로컬 토큰)를 거친다
-    const user = body.cards !== undefined ? await assertTerminalAccess(request.headers) : requireUser(request.headers);
+    if (body.runner !== undefined && body.runner !== 'chat' && body.runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
+    const runner: 'chat' | 'terminal' | undefined = body.runner === 'chat' || body.runner === 'terminal' ? body.runner : undefined;
+    // 카드 계획과 터미널 방식 계획은 레인을 세션 터미널에서 돌린다(그 안의 CLI를 몬다). 세션 터미널 통로와 같은 검사(이 컴퓨터 주소·로컬 토큰)를 거친다
+    const user = body.cards !== undefined || body.runner === 'terminal' ? await assertTerminalAccess(request.headers) : requireUser(request.headers);
     // request는 카드가 있으면 없어도 된다(계획 요청을 카드 제목으로 만든다). 그 밖의 계획에서는 필요하다
     if (body.cards === undefined && typeof body.request !== 'string') throw new StudioError(400, 'request가 필요합니다');
     if (body.request !== undefined && typeof body.request !== 'string') throw new StudioError(400, 'request는 문자열이어야 합니다');
@@ -46,6 +50,7 @@ export async function POST(request: Request) {
       ...(typeof body.sourceSessionId === 'string' ? { sourceSessionId: body.sourceSessionId } : {}),
       // 카드는 사람이 쓴 계획이다. 형식 검증은 createTaskPlan(cardsToPlan)이 한다
       ...(body.cards !== undefined ? { cards: body.cards } : {}),
+      ...(runner !== undefined ? { runner } : {}),
     };
     return Response.json(await createTaskPlan(input), { status: 201 });
   } catch (error) {

@@ -67,6 +67,15 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
   throw new StudioError(500, `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${env.B_STUDIO_TERMINAL?.trim()})`);
 }
 
+/**
+ * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex도 띄운다
+ * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex가 아니면 claude를 띄운다 — 컨테이너 방식 codex를 받으면 엉뚱한 CLI가 뜬다).
+ * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
+ */
+export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
+  return backend === 'claude-code' || (backend === 'codex' && sessionTerminalMode(env) === 'host');
+}
+
 export type TerminalMessage =
   | { kind: 'data'; data: string }
   | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string }
