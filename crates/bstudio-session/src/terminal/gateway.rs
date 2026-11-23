@@ -1,7 +1,7 @@
 //! 이 컴퓨터 방식 터미널의 관문 글 생성(ADR-173, ADR-219, 4f C1 5단계). 옛 구현은 `packages/sandbox/src/host-terminal.ts`의
 //! `shellQuote`·`firstPromptArg`·`resumeConversationArg`·`cliModelArg`·`hostTerminalEnv`·`hostGatewaySettings`·`hostCliWrapper`·
 //! `hostZshFiles`·`hostBashRc`·`hostTerminalCommand`·`hostFallbackCommand`이고, 관문의 훅 답 꼴은
-//! `apps/studio/lib/server/terminal-gateway.ts`의 `hookRoutes`다(`host-terminal-legacy.ts`·`terminal-gateway-legacy.ts`가 차등 시험의 기준이다).
+//! `apps/studio/lib/server/terminal-gateway.ts`의 `hookRoutes`다(옛 구현 `host-terminal-legacy.ts`·`terminal-gateway-legacy.ts`는 #1347에서 지웠다).
 //! Node를 모른다. 파일을 쓰고 지우는 일은 `bstudio_io::host_gateway`가 한다.
 //!
 //! **셸 주입·옵션 주입을 막는 자리다.** 따옴표·작은따옴표·`$`·백틱·줄바꿈·NUL·`-`로 시작하는 글·유니코드를 넣어 옛 구현과 견준다.

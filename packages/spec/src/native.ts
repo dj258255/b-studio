@@ -6,7 +6,7 @@ import { createRequire } from 'node:module';
  * 두 패키지가 같은 모듈을 쓴다. 저장소 루트의 `pnpm build:native`가 만든다.
  *
  * 불러오지 못하면 던진다. TS로 대신하는 길을 두지 않는다 — 두 구현이 함께 있으면 같은 입력을 다르게 읽는 자리가 생긴다.
- * 옛 TS 구현은 `*-legacy.ts`로 남겨 차등 시험만 그것을 import한다.
+ * 옛 TS 구현은 지웠다(#1347).
  */
 export interface NativeSpec {
   yamlParse(text: string, merge: boolean): { kind: 'value' | 'syntax' | 'unsupported'; json?: string | null; message?: string | null; line: number; col: number };

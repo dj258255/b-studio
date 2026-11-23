@@ -1,6 +1,6 @@
 //! 워크플로 판정(옛 TS: `packages/agent/src/workflow.ts`와 `checkpoints.ts`의 트레일러 확인 둘, ADR-191 3단계 3v).
 //!
-//! 이 판정은 릴리스를 막고(`release_blockers`), 게이트가 빠뜨린 검증 단계를 알리고(`missing_verification_stages`),
+//! 이 판정은 게이트가 빠뜨린 검증 단계를 알리고(`missing_verification_stages`),
 //! 문서만 바꿨다는 주장으로 게이트를 건너뛸 수 있는지 정한다(`is_doc_checkpoint_path`·`has_docs_verify_trailer`). 그래서 **옛 막음이 새 통과로 뒤집히는 차이**가 없어야 한다.
 //!
 //! 짝 없는 서로게이트(트러블슈팅 166): napi·JSON 경계에서 U+FFFD로 합쳐진다. 통과·허용으로 이어지는 같음 비교(`passed.has(stage)`, 시험이 이 서비스를 다루는지,
@@ -147,36 +147,6 @@ pub fn workflow_stages(required: Option<&[String]>, page_checks: usize, tests: u
         insert_before("load_check", "review");
     }
     stages
-}
-
-pub fn workflow_release_requirements(release_requires: Option<&[String]>) -> Vec<String> {
-    release_requires.map_or_else(|| vec!["checkpoint".to_owned()], <[String]>::to_vec)
-}
-
-/// 배포 전에 빠진 단계의 위치(요구 목록 기준). `None`이면 `releaseRequires`가 없을 때의 `['checkpoint']`다. 모든 입력은 껍데기가 `encodeLoneSurrogates`로 바꿔 보낸다
-#[derive(Debug, PartialEq, Eq)]
-pub enum Blockers {
-    /// 게이트를 거치지 않은 직접 수정 체크포인트(#772)라 `checkpoint`가 빠졌다
-    Checkpoint,
-    /// 요구 목록에서 빠진 단계의 위치
-    Missing(Vec<usize>),
-}
-
-pub fn release_blockers(requires: Option<&[String]>, declared: bool, passed: Option<&[String]>, verify: Option<&str>) -> Blockers {
-    if verify == Some("unverified") && !declared {
-        return Blockers::Checkpoint;
-    }
-    let default = ["checkpoint".to_owned()];
-    let requires = requires.unwrap_or(&default);
-    let passed = passed.unwrap_or(&[]);
-    Blockers::Missing(
-        requires
-            .iter()
-            .enumerate()
-            .filter(|(_, stage)| stage.as_str() != "checkpoint" && !passed.contains(stage))
-            .map(|(index, _)| index)
-            .collect(),
-    )
 }
 
 /// 게이트가 통과시킨 단계와 필수 단계를 비교해 빠진 검증 단계의 위치(`stages` 기준)
@@ -637,20 +607,6 @@ mod tests {
             workflow_stages(None, 1, 1, 1, 1),
             v(&["plan", "implement", "run", "browser_check", "contract_check", "test", "concurrency_check", "load_check", "review", "checkpoint"])
         );
-        assert_eq!(workflow_release_requirements(None), v(&["checkpoint"]));
-        assert_eq!(workflow_release_requirements(Some(&v(&[]))), v(&[]));
-    }
-
-    #[test]
-    fn 배포_막음은_통과한_단계를_글자_그대로_견준다() {
-        let requires = v(&["checkpoint", "test", "review"]);
-        assert_eq!(release_blockers(Some(&requires), true, Some(&v(&["test"])), None), Blockers::Missing(vec![2]));
-        assert_eq!(release_blockers(Some(&requires), true, None, None), Blockers::Missing(vec![1, 2]));
-        assert_eq!(release_blockers(Some(&requires), true, Some(&v(&["Test", "test ", "tests"])), None), Blockers::Missing(vec![1, 2]));
-        assert_eq!(release_blockers(None, false, None, Some("unverified")), Blockers::Checkpoint);
-        assert_eq!(release_blockers(None, false, None, Some("light")), Blockers::Missing(vec![]));
-        assert_eq!(release_blockers(Some(&requires), true, None, Some("unverified")), Blockers::Missing(vec![1, 2]));
-        assert_eq!(release_blockers(Some(&v(&[])), true, None, Some("unverified")), Blockers::Missing(vec![]));
     }
 
     #[test]

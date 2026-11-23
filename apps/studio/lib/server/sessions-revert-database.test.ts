@@ -87,7 +87,6 @@ databases:
   db: { engine: postgres, database: app, user: app }
 workflow:
   required: [plan, implement, run, contract_check, checkpoint]
-  releaseRequires: [checkpoint]
 review:
   auto: false
 `;

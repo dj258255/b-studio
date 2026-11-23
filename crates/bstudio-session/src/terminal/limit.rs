@@ -1,5 +1,5 @@
 //! 세션 터미널의 턴 상한 전이와 "사용량을 확인할 수 없음" 판정(ADR-216, 4f B5b). 옛 구현은 `sessions.ts`의 `checkTerminalLimits` 앞부분과
-//! `terminalRunLimitDeny` 근처였다(`session-terminal-telemetry-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다.
+//! `terminalRunLimitDeny` 근처였다(`session-terminal-telemetry-legacy.ts`는 #1347에서 지웠다). Node를 모른다.
 //! 사용량 파일을 읽는 토큰 한도의 판정(`judgeRunLimits`)은 파일을 읽으므로 TS에 남고, 여기는 **그것을 언제 볼지와 턴 상한의 전이**만 정한다.
 //!
 //! **막는 검사다. 한도에 닿은 상태를 풀거나 건너뛰는 것이 여는 쪽이다.**

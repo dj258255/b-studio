@@ -128,7 +128,7 @@ export {
   type ProcessEntry,
   type SpawnHostPty,
 } from './host-terminal';
-export { execArchiveExtract, execBytes, ExecBytesError, type ArchiveExtractOutcome, type ExecBytesOptions } from './exec-bytes';
+export { execBytes, ExecBytesError, type ExecBytesOptions } from './exec-bytes';
 export { assertSandboxId, SANDBOX_ID } from './sandbox-id';
 export { native, encodeNative, decodeNative, encodeLoneSurrogates } from './native';
 export type { NativeCliProcess, NativeCliEvent, NativeToolLedger, NativeRunnerCore, NativeSessionRecord, NativePersister, NativePersistState, NativeStoredSession, NativeLifecycleFail, NativeDeleteCheckInput, NativeRecoverPlan, NativeSessionState, NativeSessionRegistry, NativeStopStep, NativeStatusChange, NativeBootRequest, NativeStopResult, NativeClaimResult, NativeCancelResult, NativeSteerTarget, NativeClaimView, NativeRunCall, NativeRunReply, NativeRunNormalFacts, NativeRunExceptionFacts, NativeRunOutcome, NativeTerminalCloseInput, NativeTerminalCloseDecision, NativeUsage } from './native';

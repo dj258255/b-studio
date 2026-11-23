@@ -12,7 +12,7 @@ import { verifyError } from './verify-containers';
  * 컨테이너 만들기 반복(`up`)과 override 쓰기. 시도마다 compose 파일의 마운트를 읽어 `.git` 마스크를 맞추고, 만들고, 확인하고,
  * 확인한 컨테이너만 시작하는 **반복 전체가 Rust 함수 하나**(crates/bstudio-io/src/up_loop.rs)다. override에 쓴 마스크와 확인한 마스크가
  * 그 함수 안의 같은 값이다. 여기는 결과를 옛 글 그대로의 `SandboxError`로 바꾸기만 한다(ADR-195 4f A4c-1).
- * 옛 TS는 `up-loop-legacy.ts`(차등 시험의 기준값).
+ * 옛 TS는 지웠다(#1347).
  *
  * override는 **JSON**으로 쓴다(YAML 1.2는 JSON을 포함하고 compose가 읽는다). 파일 이름은 `compose.override.yaml` 그대로다
  */

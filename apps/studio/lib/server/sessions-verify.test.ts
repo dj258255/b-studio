@@ -119,7 +119,6 @@ workflow:
     - name: unit
       service: api
       command: [./gradlew, test]
-  releaseRequires: [test, checkpoint]
 `,
   );
   await writeFile(path.join(root, 'project', 'compose.yaml'), 'services:\n  api: { build: ./api }\n');
@@ -303,7 +302,6 @@ workflow:
     - name: unit
       service: api
       command: [./gradlew, check]
-  releaseRequires: [test, checkpoint]
 `;
   /** 선언을 고치고 파일 하나를 바꾼 뒤 턴을 끝낸다. 게이트가 되돌려 보낼 때마다 한 줄씩 더 말한다 */
   const fixDeclarationTurns = [

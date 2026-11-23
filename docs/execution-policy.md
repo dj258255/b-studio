@@ -61,7 +61,6 @@ workflow:
   deniedCommands: [npm publish, git push, terraform apply]
   requireApprovalFor: [restart_service]
   protectedPaths: [.env, .github/workflows, infra, migrations]
-  releaseRequires: [contract_check, test, review, checkpoint]
 ```
 
 `read_lines`(줄 범위 읽기)와 `search_files`(낱말 검색)는 목록에 따로 적지 않아도 됩니다. `read_lines`는 `read_file`이 허용돼 있으면, `search_files`는 `read_file`과 `list_files`가 모두 허용돼 있으면 함께 허용됩니다. 그 도구들로 이미 할 수 있는 일의 일부라 권한이 늘지 않습니다.

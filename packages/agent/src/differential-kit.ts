@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 
 /**
- * 옛 TS 구현과 Rust 껍데기를 같은 무작위 입력으로 견주는 차등 시험의 공용 도구(ADR-191). 테스트 파일(`*-differential.test.ts`)만 쓴다.
+ * 옛 TS 구현과 Rust 껍데기를 같은 무작위 입력으로 견주던 차등 시험의 공용 도구(ADR-191). 옛 TS 사본과 그 차등 시험은 #1347에서 지웠고, 지금은 얼린 값으로 견주는 시험(`*-surrogates.test.ts` 따위)과 남은 `*-scenarios.test.ts`·`*-differential.test.ts`만 쓴다. 테스트 파일만 쓴다.
  * 입력은 시드를 고정한 mulberry32로 만든다(같은 시드는 언제나 같은 입력).
  */
 

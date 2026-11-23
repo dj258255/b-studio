@@ -13,28 +13,22 @@ import {
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
   protectedPathsFor,
-  releaseBlockers,
   reviewChanges,
   uncoveredChangeWarnings,
-  workflowReleaseRequirements,
   workflowStages,
 } from './workflow';
-import { legacy } from './workflow-legacy';
 
 /**
- * 워크플로 판정 벡터(ADR-191 3v). 기대값은 옮기기 전 TS(`workflow-legacy.ts`)가 낸 값이다.
- * `WORKFLOW_VECTORS_IMPL=legacy`로 돌리면 같은 벡터를 옛 구현에 넣는다: `intended`로 표시한 벡터(의도한 차이)만 실패해야 한다.
+ * 워크플로 판정 벡터(ADR-191 3v). 기대값은 옮기기 전 TS(`workflow-legacy.ts`, #1347에서 지움)가 낸 값이다.
+ * `intended`로 표시한 벡터(의도한 차이)만 옛 구현과 달랐고, 그 기대값은 새 구현이 내는 값이다.
  * 경계(같음·±1), 빈 값, 공백 종류와 함께 인식하는 값마다 거의 같은 거부 입력(접두·덧붙임·대소문자·빈 글자·다른 구분자)을 넣었다.
  */
 
-const useLegacy = process.env.WORKFLOW_VECTORS_IMPL === 'legacy';
-const impl = useLegacy
-  ? legacy
-  : {
-      formatWorkflowTrailer, formatVerifyTrailer, formatIncompleteTrailer, parseWorkflowTrailerValues, parseVerifyTrailerValues, parseIncompleteTrailerValues, isDocCheckpointPath,
-      hasEmptyPassedTrailer, hasDocsVerifyTrailer, workflowStages, workflowReleaseRequirements, releaseBlockers, missingVerificationStages, reviewChanges, uncoveredChangeWarnings,
-      formatCheckedCoverage, maxTurnsFor, protectedPathsFor,
-    };
+const impl = {
+  formatWorkflowTrailer, formatVerifyTrailer, formatIncompleteTrailer, parseWorkflowTrailerValues, parseVerifyTrailerValues, parseIncompleteTrailerValues, isDocCheckpointPath,
+  hasEmptyPassedTrailer, hasDocsVerifyTrailer, workflowStages, missingVerificationStages, reviewChanges, uncoveredChangeWarnings,
+  formatCheckedCoverage, maxTurnsFor, protectedPathsFor,
+};
 
 interface Vector {
   name: string;
@@ -197,32 +191,6 @@ add('동시 요청 확인은 review 앞', () => impl.workflowStages(proj({ concu
 add('부하 확인은 review 앞', () => impl.workflowStages(proj({ loadChecks: [{}] })), ['plan', 'implement', 'run', 'contract_check', 'load_check', 'review', 'checkpoint']);
 add('모두 선언하면 순서대로', () => impl.workflowStages(proj({ pageChecks: [{}], tests: [{}], concurrencyChecks: [{}], loadChecks: [{}] })), ['plan', 'implement', 'run', 'browser_check', 'contract_check', 'test', 'concurrency_check', 'load_check', 'review', 'checkpoint']);
 add('빈 선언 배열은 끼우지 않는다', () => impl.workflowStages(proj({ pageChecks: [], tests: [], concurrencyChecks: [], loadChecks: [] })), DEFAULTS);
-add('배포 조건 기본값', () => impl.workflowReleaseRequirements(proj()), ['checkpoint']);
-add('배포 조건 선언', () => impl.workflowReleaseRequirements(proj({ releaseRequires: ['test', 'review'] })), ['test', 'review']);
-add('배포 조건이 빈 배열이면 그대로', () => impl.workflowReleaseRequirements(proj({ releaseRequires: [] })), []);
-
-// ── 배포 막음 ────────────────────────────────────────────────────────────
-
-const blockers = (workflow: Record<string, unknown> | undefined, passedStages: string[] | undefined, mode?: 'light' | 'docs' | 'unverified') => impl.releaseBlockers(proj(workflow), passedStages as never, mode);
-add('기본 설정은 통과 기록 없이도 막지 않는다', () => blockers(undefined, undefined), []);
-add('기본 설정에서 직접 수정 체크포인트는 checkpoint가 빠진다', () => blockers(undefined, undefined, 'unverified'), ['checkpoint']);
-add('기본 설정에서 직접 수정이라도 통과 기록과 상관없다', () => blockers(undefined, ['run', 'review'], 'unverified'), ['checkpoint']);
-add('workflow가 있어도 releaseRequires가 없으면 직접 수정은 막는다', () => blockers({ tests: [{}] }, ['test'], 'unverified'), ['checkpoint']);
-for (const mode of ['light', 'docs'] as const) add(`기본 설정에서 ${mode}는 막지 않는다`, () => blockers(undefined, undefined, mode), []);
-add('선언한 조건이 있으면 직접 수정도 조건대로만 본다', () => blockers({ releaseRequires: ['checkpoint'] }, undefined, 'unverified'), []);
-add('선언한 조건: 통과한 단계는 빠지지 않는다', () => blockers({ releaseRequires: ['test', 'review'] }, ['test']), ['review']);
-add('선언한 조건: 기록이 없으면 전부 빠진다', () => blockers({ releaseRequires: ['test', 'review'] }, undefined), ['test', 'review']);
-add('선언한 조건: 빈 기록이면 전부 빠진다', () => blockers({ releaseRequires: ['test', 'review'] }, []), ['test', 'review']);
-add('선언한 조건: 모두 통과', () => blockers({ releaseRequires: ['test', 'review'] }, ['review', 'test', 'run']), []);
-add('선언한 조건에 checkpoint가 있어도 건너뛴다', () => blockers({ releaseRequires: ['checkpoint', 'test'] }, []), ['test']);
-add('선언한 조건: 직접 수정 + 선언은 조건대로', () => blockers({ releaseRequires: ['test'] }, ['test'], 'unverified'), []);
-add('선언한 조건: light 표시는 통과 기록을 지우지 않는다', () => blockers({ releaseRequires: ['test'] }, [], 'light'), ['test']);
-add('조건이 빈 배열이면 직접 수정이라도 막지 않는다', () => blockers({ releaseRequires: [] }, [], 'unverified'), []);
-add('단계 이름은 글자 그대로 견준다: 대소문자', () => blockers({ releaseRequires: ['test'] }, ['Test']), ['test']);
-add('단계 이름은 글자 그대로 견준다: 덧붙임', () => blockers({ releaseRequires: ['test'] }, ['test ', 'tests', 'xtest']), ['test']);
-add('단계 이름은 글자 그대로 견준다: 짝 없는 서로게이트', () => blockers({ releaseRequires: ['te\ud800st'] }, ['te\ud801st']), ['te\ud800st']);
-add('단계 이름은 글자 그대로 견준다: U+FFFD', () => blockers({ releaseRequires: ['te\ud800st'] }, ['te\ufffdst']), ['te\ud800st']);
-add('단계 이름은 글자 그대로 견준다: 같은 짝 없는 서로게이트', () => blockers({ releaseRequires: ['te\ud800st'] }, ['te\ud800st']), []);
 
 const missing = (workflow: Record<string, unknown> | undefined, passedStages: string[]) => impl.missingVerificationStages(proj(workflow), new Set(passedStages as never[]));
 add('기본 단계에서 통과 기록이 없으면 검증 단계가 빠진다', () => missing(undefined, []), ['run', 'contract_check', 'review']);
@@ -352,7 +320,7 @@ describe('워크플로 판정 벡터', () => {
   }
 
   it('벡터 수', () => {
-    expect(vectors.length).toBeGreaterThan(400);
+    expect(vectors.length).toBeGreaterThan(380);
     expect(vectors.filter((vector) => vector.intended).length).toBeGreaterThanOrEqual(15);
   });
 });

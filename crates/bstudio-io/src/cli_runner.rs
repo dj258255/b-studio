@@ -1,5 +1,5 @@
 //! 지원 러너(claude-code)의 메시지 루프와 실행 상태(ADR-202, 4f A8b). 옮기기 전 TS는 `packages/agent/src/claude-code-runner.ts`의 `runClaudeCodeAgent`가
-//! 들고 있던 변수와 `runQuery`의 메시지 루프였다(옛 구현은 `claude-code-runner-loop-legacy.ts`, 차등 시험의 기준).
+//! 들고 있던 변수와 `runQuery`의 메시지 루프였다(옛 구현 `claude-code-runner-loop-legacy.ts`는 #1347에서 지웠다).
 //!
 //! 이 코어가 CLI 프로세스(`cli_process.rs`, A8a)를 **직접** 쥔다: 줄은 TS를 거치지 않고 여기로 온다. 도구 순서 장부(`tool_ledger.rs`)는 MCP 서버와 나눠 쥔다.
 //!

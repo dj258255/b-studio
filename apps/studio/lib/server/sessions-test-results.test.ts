@@ -93,7 +93,6 @@ services:
   web: { source: managed, template: vite, path: web, port: 5173, preview: browser }
 workflow:
   required: [plan, implement, run, contract_check, checkpoint]
-  releaseRequires: [checkpoint]
 review:
   auto: false
 `;

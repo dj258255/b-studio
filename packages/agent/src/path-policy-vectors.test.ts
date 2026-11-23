@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 import { canonicalProjectPath, foldName, normalizeProjectPath } from './path-names';
-import * as legacy from './path-policy-legacy';
 import { checkToolPolicy, DEFAULT_DENIED_COMMANDS, hasApprovalToken, isProtectedPath, isToolAllowed, isWithinScope } from './policy';
 
 /**
@@ -13,7 +12,7 @@ import { checkToolPolicy, DEFAULT_DENIED_COMMANDS, hasApprovalToken, isProtected
  *  - 보호 경로(거부 목록, 넓게)와 쓰기 범위(허용 목록, 좁게)를 같은 쌍으로: `src` 대 `srcx/a`·`src/../x`·`SRC/a`·`src\a`, `.env`가 `.env.local`을 덮는 점 접두사 규칙
  *  - 도구 정책: 읽기 도구 함의(`read_lines`→`read_file`), 승인 토큰의 공백 종류, 금지 명령의 셸 감싸기(`sh -c`, `bash -lc`)와 `gradle --stop` 변형
  * Windows 판(`path.sep === '\\'`)은 Rust 함수를 직접 부른다(껍데기는 이 기계의 플랫폼 값을 넘긴다).
- * 옛 TS(`path-policy-legacy.ts`)에 돌리면 의도한 차이(맨 아래 describe)만 실패한다. 점·공백만 남는 조각을 빈 꼴로 모으는 차이(24개)는 첫 시험에서 따로 센다.
+ * 옛 TS(사본은 #1347에서 지웠다)와 달라진 곳은 맨 아래 describe의 의도한 차이뿐이다. 점·공백만 남는 조각을 빈 꼴로 모으는 차이(24개)는 첫 시험에서 따로 센다.
  */
 type Vector = [fn: string, args: unknown[], expected: string];
 // 벡터는 같은 폴더의 `path-policy-vectors.json`(옛 TS가 낸 값)이다. 리터럴로 두면 타입 검사가 감당하지 못한다
@@ -105,23 +104,20 @@ describe('path-names·policy 벡터(옛 TS가 낸 값)', () => {
   });
 });
 
-describe('의도한 차이(옛 TS에 돌리면 실패한다, 모두 더 막는 쪽)', () => {
+describe('의도한 차이(옛 TS와 달랐던 곳, 모두 더 막는 쪽)', () => {
   it('보호 경로에 빈 규칙이 있으면 거절한다: 옛 구현은 `find`가 찾은 빈 글자를 거짓으로 보아 통과시켰다', () => {
     const policy = { protectedPaths: ['', 'infra'] };
-    expect(legacy.checkToolPolicy('write_file', { path: 'web/x.ts' }, policy, undefined)).toEqual({ tool: 'write_file', decision: 'allow' });
     expect(checkToolPolicy('write_file', { path: 'web/x.ts' }, policy, undefined)).toEqual({ tool: 'write_file', decision: 'deny', reason: 'path is protected by execution policy: ' });
   });
 
   it('금지 명령에 빈 규칙이 있으면 거절한다: 옛 구현은 빈 규칙을 찾은 채 통과시켜 뒤의 규칙도 건너뛰었다', () => {
     const policy = { deniedCommands: ['', 'git status'] };
     const input = { command: ['sh', '-c', ' git status'] };
-    expect(legacy.checkToolPolicy('run_in_service', input, policy, undefined).decision).toBe('allow');
     expect(checkToolPolicy('run_in_service', input, policy, undefined)).toEqual({ tool: 'run_in_service', decision: 'deny', reason: 'command is blocked by execution policy: ' });
   });
 
   it('도구 이름이 Object.prototype의 속성 이름이면 옛 구현은 던졌고 새 구현은 거절한다', () => {
     for (const tool of ['constructor', 'toString', '__proto__', 'hasOwnProperty', 'valueOf']) {
-      expect(() => legacy.isToolAllowed(tool, ['read_file']), tool).toThrow();
       expect(isToolAllowed(tool, ['read_file']), tool).toBe(false);
       expect(checkToolPolicy(tool, {}, { allowedTools: ['read_file'] }, undefined), tool).toMatchObject({ decision: 'deny' });
       // 목록에 이름이 적혀 있으면 허용한다(옛 구현도 `includes`에서 돌아왔다)

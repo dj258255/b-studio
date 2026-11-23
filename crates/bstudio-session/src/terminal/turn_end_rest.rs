@@ -1,6 +1,6 @@
 //! 세션 터미널 턴 끝의 나머지(ADR-217, 4f B5c): 예외 경로 분류, 게이트 밖 사유, 남은 체크포인트·저장 중 실행·다시 붙이기의 조건, 게이트 시간 상한.
 //! 옛 구현은 `sessions.ts`의 `finishTerminalTurn`의 `catch` 블록, `GateOutcome`을 짓던 `unsettled`·`moved` 클로저, `landedCheckpoint`, `savingTerminalRun`이었다
-//! (`session-terminal-turn-end-rest-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 읽기(Git·지문·샌드박스)와 되돌리기·알림·글 조립은 TS가 하고, 여기는 **사실 조합 → 할 일 하나**만 정한다.
+//! (옛 구현 `session-terminal-turn-end-rest-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 읽기(Git·지문·샌드박스)와 되돌리기·알림·글 조립은 TS가 하고, 여기는 **사실 조합 → 할 일 하나**만 정한다.
 //!
 //! **판정을 부르는 자리마다 막는 쪽인가 여는 쪽인가**(AGENTS.md):
 //! - `decide_turn_end_error`: 되돌릴지를 정한다. **여는 쪽**은 `Stopped`·`KeepLanded`·`Platform`(바꾼 코드를 되돌리지 않고 남긴다)이고, 확인한 것만 받아들인다.

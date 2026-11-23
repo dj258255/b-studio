@@ -7,7 +7,7 @@ import type { PreToolDeny } from './session-terminal-prompt';
 /**
  * 세션 조율 함수가 만드는 글(ADR-195 4f C1-6a/6b). `Session` 상태·git·파일은 `sessions.ts`가 쥐고, 글자는 Rust
  * (`crates/bstudio-session/src/terminal_text.rs`)가 만든다. 트레일러는 게이트 통과의 근거라 바이트까지 같아야 한다.
- * 옛 구현은 `session-text-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 옛 구현은 지웠다(#1347).
  */
 
 export interface TerminalTexts {

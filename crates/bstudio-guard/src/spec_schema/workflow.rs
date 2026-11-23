@@ -538,6 +538,8 @@ pub fn auto_page_checks(input: Option<&JsValue>) -> Outcome {
     obj.finish()
 }
 
+const RELEASE_REQUIRES_REMOVED: &str = "`workflow.releaseRequires`는 더는 지원하지 않습니다. 이 항목을 지우세요";
+
 pub fn workflow(input: Option<&JsValue>) -> Outcome {
     let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
     let stages = ["plan", "implement", "run", "browser_check", "contract_check", "test", "concurrency_check", "load_check", "review", "checkpoint"];
@@ -596,8 +598,7 @@ pub fn workflow(input: Option<&JsValue>) -> Outcome {
         }
     }
     if obj.field("releaseRequires").is_some() {
-        let value = obj.field("releaseRequires").cloned();
-        obj.set("releaseRequires", validate_array(value.as_ref(), |item| validate_enum(item, &stages), &[LengthCheck::Min(1, None)]));
+        obj.issues.push(issue(vec![Seg::Key("releaseRequires".to_owned())], RELEASE_REQUIRES_REMOVED.to_owned(), false));
     }
     obj.run_checks(&mut |parsed, issues| workflow_refinements(parsed, issues));
     obj.finish()

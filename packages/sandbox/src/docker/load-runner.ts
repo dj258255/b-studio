@@ -9,7 +9,7 @@ import type { LoadRequest, LoadResult } from '../types';
 export const LOAD_RUNNER_IMAGE = EDGE_IMAGE;
 /** 러너 컨테이너의 b-studio.service 라벨. compose 서비스가 아니라 일회용 컨테이너라 사용량 화면에는 나오지 않는다 */
 export const LOAD_RUNNER_SERVICE = 'b-studio-load';
-/** (Rust crates/bstudio-guard/src/load_runner.rs에도 같은 값이 있다. load-runner-differential 시험이 맞는지 본다) */
+/** (Rust crates/bstudio-guard/src/load_runner.rs에도 같은 값이 있다. 이 이름의 차등 시험은 저장소에 없으니 고칠 때 둘을 함께 맞춘다) */
 /** 요청 하나가 이 시간 안에 응답하지 않으면 응답을 받지 못한 요청으로 센다 */
 export const LOAD_REQUEST_TIMEOUT_MS = 10_000;
 /** 준비 요청과 재는 요청을 합친 전체 상한. 넘으면 남은 요청을 보내지 않고 끝낸다 */

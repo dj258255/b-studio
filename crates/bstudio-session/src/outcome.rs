@@ -1,4 +1,4 @@
-//! 요청 실행(`execute`)의 끝 결정과 단계 순서(ADR-208, 4f B3b). 옛 구현은 `sessions.ts`의 `execute`였다(`session-run-outcome-legacy.ts`가 차등 시험의 기준으로 남아 있다).
+//! 요청 실행(`execute`)의 끝 결정과 단계 순서(ADR-208, 4f B3b). 옛 구현은 `sessions.ts`의 `execute`였다(`session-run-outcome-legacy.ts`는 #1347에서 지웠다).
 //! Node를 모른다. 체크포인트 저장·되돌리기·알림·러너 호출 같은 부수 효과는 TS 콜백이 하고, 여기는 **어떤 순서로 무엇을 하고, 결과가 나오면 무엇을 남기고 무엇을 되돌리는가**만 정한다.
 //!
 //! **끝 결정은 순수 판정이다**(`decide_normal`·`decide_exception`). 입력은 사실(질문 여부, 결과 상태, 켠 세션인지, 세션 상태, 질문 전 게이트 통과, 샌드박스 쪽 실패, 작업 공간,

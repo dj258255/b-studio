@@ -1,5 +1,5 @@
 //! 세션 터미널 실행의 닫기와 열린 실행 판정(ADR-210, 4f B4a). 옛 구현은 `sessions.ts`의 `abandonTerminalRun`·`settleTerminalRun`·`announceTerminalRun`·`terminalCliEnded`·
-//! `terminalViolation`·`openTerminalRun`이었다(`session-terminal-close-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다.
+//! `terminalViolation`·`openTerminalRun`이었다(옛 구현 `session-terminal-close-legacy.ts`는 #1347에서 지웠다). Node를 모른다.
 //! 되돌리기·알림·끝 글 조립·정체 감시 멈춤 같은 부수 효과는 TS 콜백이 하고, 여기는 **언제 닫고, 무엇을 하고, 어떤 순서로 풀며, 지금 열린 실행인가**만 정한다.
 //!
 //! **닫기 판정은 순수 함수다**(`decide_close`). 입력은 사실(멈추는 중, 끝 상태, 샌드박스·도커 쪽 실패, 내 폴더 세션, 상태 `ready`, 샌드박스를 켠 적 있음, 사유 글이 있는가)이고

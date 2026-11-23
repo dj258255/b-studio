@@ -2,7 +2,7 @@ import { native, type NativeSessionState } from '@b-studio/sandbox';
 
 /**
  * 세션 터미널 실행의 닫기·열린 실행·CLI 종료·위반 갈 곳(ADR-210, 4f B4a). 판정과 순서·점유 풀기는 Rust `crates/bstudio-session`의 `terminal`이 하고,
- * 여기는 단계마다 부수 효과(되돌리기·알림·끝 글 조립·떼기·끝 알림)를 TS 콜백으로 잇는 껍데기다. 옛 판정은 `session-terminal-close-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 여기는 단계마다 부수 효과(되돌리기·알림·끝 글 조립·떼기·끝 알림)를 TS 콜백으로 잇는 껍데기다. 옛 판정은 지웠다(#1347).
  *
  * 닫기는 두 번에 나뉜다. `beginTerminalClose`가 **동기**로 한 번만 닫기를 시작하고(그 순간부터 열린 실행이 아니다), 부른 쪽이 그 실행의 중단 신호를 끊은 뒤
  * `runTerminalClose`가 단계를 차례로 돈다. 콜백은 던지지 않는다(던지면 `onError`로 받고 코어는 끝까지 가서 점유를 푼다. Rust가 부르는 콜백이 던지면 Node가 경고한다, 트러블슈팅 210).

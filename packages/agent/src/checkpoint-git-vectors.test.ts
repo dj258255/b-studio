@@ -1,72 +1,43 @@
 import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
-import { legacy } from './checkpoint-git-legacy';
 import { gitEnvFrom, isIndexLockFailure, redactCredentials, stagedMismatchOf } from './checkpoints';
 
 /**
- * 체크포인트의 git 출력 판정 벡터(ADR-191 3s). 기대값은 옮기기 전 TS(`checkpoint-git-legacy.ts`)가 낸 값이다.
- * `CHECKPOINT_GIT_VECTORS_IMPL=legacy`로 돌리면 같은 벡터를 옛 구현에 넣는다: `intended`로 표시한 벡터(의도한 차이)만 실패해야 한다.
+ * 체크포인트의 git 출력 판정 벡터(ADR-191 3s). 기대값은 옮기기 전 TS(`checkpoint-git-legacy.ts`, #1347에서 지움)가 낸 값이다. `intended`로 표시한 벡터는 옛 TS와 다르게 답하는 의도한 차이이고, 기대값은 새 구현이 내는 값이다.
  * 경계(상한·하한·±1), 빈 값, 공백 종류와 함께 허용·인식 패턴마다 거의 같은 거부 입력(접두·덧붙임·대소문자·다른 구분자)을 넣었다.
  */
 
-const useLegacy = process.env.CHECKPOINT_GIT_VECTORS_IMPL === 'legacy';
-
-const impl = useLegacy
-  ? {
-      dangerous: (output: string, separate: boolean) => legacy.dangerousLocalConfig(output, separate),
-      attributes: (text: string) => legacy.infoAttributes(text),
-      staged: (ls: string, staged: string, subdir: string, expected: ReadonlyMap<string, string>) => legacy.stagedMismatch(ls, staged, subdir, expected),
-      pendingFiles: (output: string, subdir: string) => legacy.pendingFiles(output, subdir),
-      pendingChanges: (output: string, subdir: string) => legacy.pendingChanges(output, subdir),
-      commitStat: (output: string) => legacy.commitStat(output),
-      remote: (output: string) => legacy.remoteCommits(output),
-      session: (output: string, ours: string) => legacy.sessionRecords(output, ours),
-      show: (output: string, ours: string) => legacy.showRecord(output, ours),
-      oneLine: legacy.oneLine,
-      capText: legacy.capText,
-      stripSpace: legacy.stripSpace,
-      commitMessage: legacy.commitMessage,
-      subcommand: legacy.subcommand,
-      redact: legacy.redactCredentials,
-      lock: legacy.isIndexLockFailure,
-      particle: legacy.withObjectParticle,
-      dotGit: legacy.isDotGit,
-      sha: legacy.isSha,
-      backup: legacy.isBackupId,
-      target: (listed: string, baseRef: string, infoBase: string) => legacy.pullRequestTarget(listed, baseRef, infoBase),
-      envKeys: (source: Record<string, string>) => Object.keys(legacy.gitEnv(source)).sort(),
-    }
-  : {
-      dangerous: (output: string, separate: boolean) => native.checkpointDangerousLocalConfig(output, separate) ?? undefined,
-      attributes: (text: string) => native.checkpointInfoAttributes(text),
-      staged: (ls: string, staged: string, subdir: string, expected: ReadonlyMap<string, string>) => stagedMismatchOf(ls, staged, subdir, expected),
-      pendingFiles: (output: string, subdir: string) => native.checkpointPendingFiles(output, subdir).sort(),
-      pendingChanges: (output: string, subdir: string) =>
-        native
-          .checkpointPendingChanges(output, subdir)
-          .map(([file, change]) => ({ file: file!, change }))
-          .sort((a, b) => a.file.localeCompare(b.file)),
-      commitStat: (output: string) => {
-        const [insertions = 0, deletions = 0] = native.checkpointCommitStat(output);
-        return { insertions, deletions };
-      },
-      remote: (output: string) => native.checkpointRemoteCommits(output).map(([sha = '', shortSha = '', subject = '', author = '']) => ({ sha, shortSha, subject, author })),
-      session: (output: string, ours: string) => decodeNative(native.checkpointSessionRecords(output, encodeLoneSurrogates(ours))),
-      show: (output: string, ours: string) => decodeNative(native.checkpointShowRecord(output, encodeLoneSurrogates(ours))),
-      oneLine: native.checkpointOneLine,
-      capText: native.checkpointCapText,
-      stripSpace: native.checkpointStripSpace,
-      commitMessage: (subject: string, body: string | undefined, trailers: readonly string[]) => native.checkpointCommitMessage(subject, body, [...trailers]),
-      subcommand: (args: readonly string[]) => native.checkpointSubcommand([...args]) ?? undefined,
-      redact: redactCredentials,
-      lock: isIndexLockFailure,
-      particle: native.checkpointWithObjectParticle,
-      dotGit: native.checkpointIsDotGit,
-      sha: native.checkpointIsSha,
-      backup: native.checkpointIsBackupId,
-      target: (listed: string, baseRef: string, infoBase: string) => decodeNative(native.checkpointPullRequestTarget(listed, baseRef, infoBase)),
-      envKeys: (source: Record<string, string>) => Object.keys(gitEnvFrom(source)).filter((key) => key in source).sort(),
-    };
+const impl = {
+  dangerous: (output: string, separate: boolean) => native.checkpointDangerousLocalConfig(output, separate) ?? undefined,
+  attributes: (text: string) => native.checkpointInfoAttributes(text),
+  staged: (ls: string, staged: string, subdir: string, expected: ReadonlyMap<string, string>) => stagedMismatchOf(ls, staged, subdir, expected),
+  pendingFiles: (output: string, subdir: string) => native.checkpointPendingFiles(output, subdir).sort(),
+  pendingChanges: (output: string, subdir: string) =>
+    native
+      .checkpointPendingChanges(output, subdir)
+      .map(([file, change]) => ({ file: file!, change }))
+      .sort((a, b) => a.file.localeCompare(b.file)),
+  commitStat: (output: string) => {
+    const [insertions = 0, deletions = 0] = native.checkpointCommitStat(output);
+    return { insertions, deletions };
+  },
+  remote: (output: string) => native.checkpointRemoteCommits(output).map(([sha = '', shortSha = '', subject = '', author = '']) => ({ sha, shortSha, subject, author })),
+  session: (output: string, ours: string) => decodeNative(native.checkpointSessionRecords(output, encodeLoneSurrogates(ours))),
+  show: (output: string, ours: string) => decodeNative(native.checkpointShowRecord(output, encodeLoneSurrogates(ours))),
+  oneLine: native.checkpointOneLine,
+  capText: native.checkpointCapText,
+  stripSpace: native.checkpointStripSpace,
+  commitMessage: (subject: string, body: string | undefined, trailers: readonly string[]) => native.checkpointCommitMessage(subject, body, [...trailers]),
+  subcommand: (args: readonly string[]) => native.checkpointSubcommand([...args]) ?? undefined,
+  redact: redactCredentials,
+  lock: isIndexLockFailure,
+  particle: native.checkpointWithObjectParticle,
+  dotGit: native.checkpointIsDotGit,
+  sha: native.checkpointIsSha,
+  backup: native.checkpointIsBackupId,
+  target: (listed: string, baseRef: string, infoBase: string) => decodeNative(native.checkpointPullRequestTarget(listed, baseRef, infoBase)),
+  envKeys: (source: Record<string, string>) => Object.keys(gitEnvFrom(source)).filter((key) => key in source).sort(),
+};
 
 interface Vector {
   name: string;
@@ -383,7 +354,7 @@ add('git 환경: 짝 없는 서로게이트가 든 이름도 지운다', () => i
 
 // ── 시험 ─────────────────────────────────────────────────────────────────
 
-describe(`체크포인트 git 판정 벡터(${useLegacy ? '옛 TS' : 'Rust 껍데기'})`, () => {
+describe('체크포인트 git 판정 벡터(Rust 껍데기)', () => {
   it('벡터 수', () => {
     expect(vectors.length).toBeGreaterThan(400);
   });
@@ -391,14 +362,8 @@ describe(`체크포인트 git 판정 벡터(${useLegacy ? '옛 TS' : 'Rust 껍�
     expect(vectors.filter((vector) => vector.intended)).toHaveLength(20);
   });
   for (const vector of vectors) {
-    if (useLegacy && vector.intended) {
-      it(`${vector.name} (의도한 차이: 옛 TS는 다르게 답한다)`, () => {
-        expect(vector.run()).not.toEqual(vector.expected);
-      });
-    } else {
-      it(vector.name, () => {
-        expect(vector.run()).toEqual(vector.expected);
-      });
-    }
+    it(vector.name, () => {
+      expect(vector.run()).toEqual(vector.expected);
+    });
   }
 });

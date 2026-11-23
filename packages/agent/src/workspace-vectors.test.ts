@@ -2,7 +2,6 @@ import { readFileSync } from 'node:fs';
 import nodePath from 'node:path';
 import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
-import * as legacy from './workspace-legacy';
 import { isSecretFile } from './workspace';
 
 /**
@@ -13,11 +12,10 @@ import { isSecretFile } from './workspace';
  *  - 예시 파일 예외(허용 목록이라 좁게): `.env.example`은 열고 `.env.example.`·`.env.examples`·`.env.exam\u200Bple`·`.env.\uFF45xample`·`.env.example.x`·`.env..example`·켈빈 기호는 막는다
  *  - 안쪽 판정: 루트·밖·`..`로 시작하는 이름(`..x`)·접두만 같은 형제(`proj2`)·대소문자·보이지 않는 문자·Windows 드라이브·UNC
  *  - 들어온 경로: 절대 경로(`/x`, `C:/x`는 POSIX에서 상대), NUL, POSIX의 역슬래시
- * 옛 TS(`workspace-legacy.ts`)로 기대값을 돌려 보려면 WORKSPACE_VECTORS_IMPL=legacy: 의도한 차이만 실패해야 한다.
+ * 옛 TS(`workspace-legacy.ts`, #1347에서 지움)와 달랐던 곳은 의도한 차이(`intended`, 맨 아래 describe)뿐이다.
  */
 type Vector = [fn: string, args: unknown[], expected: string];
 const VECTORS = JSON.parse(readFileSync(new URL('./workspace-vectors.json', import.meta.url), 'utf8')) as Vector[];
-const USE_LEGACY = process.env.WORKSPACE_VECTORS_IMPL === 'legacy';
 
 /** workspace.ts의 `!isInsideRelative(path.normalize(받은 경로))`와 같은 호출(3y). 참이 바깥(거절) */
 function projectOutside(relative: string, win: boolean): boolean {
@@ -29,29 +27,29 @@ function run(fn: string, args: unknown[]): unknown {
   const text = args[0] as string;
   switch (fn) {
     case 'isDenied':
-      return USE_LEGACY ? legacy.isDenied(text) : native.workspaceIsDenied(text);
+      return native.workspaceIsDenied(text);
     case 'isSecretFile':
-      return USE_LEGACY ? legacy.isSecretFile(text) : isSecretFile(text);
+      return isSecretFile(text);
     case 'isInsidePosix':
-      return USE_LEGACY ? legacy.isInside(text, args[1] as string, nodePath.posix) : native.workspaceIsInside(encodeLoneSurrogates(nodePath.posix.relative(text, args[1] as string)), false);
+      return native.workspaceIsInside(encodeLoneSurrogates(nodePath.posix.relative(text, args[1] as string)), false);
     case 'isInsideWin':
-      return USE_LEGACY ? legacy.isInside(text, args[1] as string, nodePath.win32) : native.workspaceIsInside(encodeLoneSurrogates(nodePath.win32.relative(text, args[1] as string)), true);
+      return native.workspaceIsInside(encodeLoneSurrogates(nodePath.win32.relative(text, args[1] as string)), true);
     case 'resolveProblem':
-      return USE_LEGACY ? legacy.resolveInputProblem(text, nodePath.posix) : native.workspaceInputProblem(text, false, false);
+      return native.workspaceInputProblem(text, false, false);
     case 'resolveProblemWin':
-      return USE_LEGACY ? legacy.resolveInputProblem(text, nodePath.win32) : native.workspaceInputProblem(text, true, false);
+      return native.workspaceInputProblem(text, true, false);
     case 'externalProblem':
-      return USE_LEGACY ? legacy.externalInputProblem(text, nodePath.posix) : native.workspaceInputProblem(text, false, true);
+      return native.workspaceInputProblem(text, false, true);
     case 'externalProblemWin':
-      return USE_LEGACY ? legacy.externalInputProblem(text, nodePath.win32) : native.workspaceInputProblem(text, true, true);
+      return native.workspaceInputProblem(text, true, true);
     case 'projectOutsidePosix':
-      return USE_LEGACY ? legacy.projectPathOutside(text, nodePath.posix) : projectOutside(text, false);
+      return projectOutside(text, false);
     case 'projectOutsideWin':
-      return USE_LEGACY ? legacy.projectPathOutside(text, nodePath.win32) : projectOutside(text, true);
+      return projectOutside(text, true);
     case 'storedOutsidePosix':
-      return USE_LEGACY ? legacy.storedOutside(text, nodePath.posix) : !native.workspaceIsInside(encodeLoneSurrogates(text), false);
+      return !native.workspaceIsInside(encodeLoneSurrogates(text), false);
     case 'storedOutsideWin':
-      return USE_LEGACY ? legacy.storedOutside(text, nodePath.win32) : !native.workspaceIsInside(encodeLoneSurrogates(text), true);
+      return !native.workspaceIsInside(encodeLoneSurrogates(text), true);
     default:
       throw new Error(`알 수 없는 벡터 함수: ${fn}`);
   }
@@ -72,9 +70,7 @@ describe('workspace 막는 검사 벡터(옛 TS가 낸 값)', () => {
       const actual = JSON.stringify(run(fn, args));
       if (actual !== expected) bad.push(`${fn} ${JSON.stringify(args)}\n  기대 ${expected}\n  실제 ${actual}`);
     }
-    // 옛 TS(WORKSPACE_VECTORS_IMPL=legacy)에서는 의도한 차이 INTENDED_COUNT개만 실패한다
-    if (USE_LEGACY) expect(bad.length).toBe(INTENDED_COUNT);
-    else expect(bad.slice(0, 10)).toEqual([]);
+    expect(bad.slice(0, 10)).toEqual([]);
     expect(VECTORS.length).toBeGreaterThan(800);
   });
 
@@ -121,16 +117,14 @@ describe('프로젝트 밖 상대 경로(3y): 닮은 입력 쌍', () => {
   });
 });
 
-describe('의도한 차이(옛 TS에 돌리면 실패한다, 더 막는 쪽)', () => {
+describe('의도한 차이(옛 TS와 달랐던 곳, 더 막는 쪽)', () => {
   it('`.env.` 뒤에 줄 끝 글자가 오는 이름은 옛 구현이 통과시켰고 새 구현은 막는다', () => {
     for (const name of ['.env.\n', '.env.\r', '.env.\u2028', '.env.\u2029', '.env.local\n', '.env.a\nb', '.env.example\n', '.env.\nexample']) {
-      expect(legacy.isDenied(name), name).toBe(false);
       expect(run('isDenied', [name]), name).toBe(true);
       expect(run('isSecretFile', [name]), name).toBe(true);
     }
     // 줄 끝 글자가 `.env` 바로 뒤나 앞이면 `.env.`로 시작하지 않으므로 옛 구현과 같다(다른 이름이다)
-    for (const name of ['.env\n', '\n.env', '.env\r.local']) expect(run('isDenied', [name]), name).toBe(legacy.isDenied(name));
+    for (const name of ['.env\n', '\n.env', '.env\r.local']) expect(run('isDenied', [name]), name).toBe(false);
   });
 });
 
-const INTENDED_COUNT = VECTORS.filter(([fn, args, expected]) => intended(fn, args, expected)).length;

@@ -1,16 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { lintText } from './doc-lint';
-import * as old from './requirements-legacy';
 import * as cur from './requirements';
 
-// 옛 TS(ADR-191 3j 전, requirements-legacy.ts)가 같은 입력에 낸 값을 JSON으로 박았다. 옛 TS에 돌리면 `intended`가 붙은 벡터(의도한 차이)만 실패해야 한다.
+// 옛 TS(ADR-191 3j 전, requirements-legacy.ts, #1347에서 지움)가 같은 입력에 낸 값을 JSON으로 박았다. `intended`가 붙은 벡터(의도한 차이)만 옛 TS와 달랐다.
 // 경계를 밟는다: 범위 표기(R1~R32·구두점 종류)·id 꼴(R0·R01·R1.·R1.2.3), 트레일러(@rev0·거대한 개정·대소문자·NBSP), 테스트 파일 이름(확장자 조합·끝 줄바꿈),
 // 시나리오 id 맞추기(겹침·번호 없음·0·0이 앞선 번호), 내용 해시(필드마다), 상태 규칙(개정 시각과 같음·1ms 뒤·날짜만 있는 값·시나리오 남음·실패 우선),
 // 약한 표현(앞뒤 글자·하이픈·등의 꼴), "해야 한다" 개수, 사람이 할 일(거부 입력: collaboratorx·inviter·ſ·켈빈), 제목 200자·인수 조건 500자(±1·서로게이트 쌍),
 // 참조 경로(URL 앞 10글자 경계), 글자 수 상한(참조 파일 문맥·안내 요약: 정확히 같음·±1), 문서 린트(수치 단위 꼴·정확한 용어).
 // 의도한 차이(`intended`): 짝 없는 서로게이트가 든 제목의 내용 해시(옛 TS는 `\udXXX` 이스케이프 글자를, Rust는 U+FFFD를 해시), 서로게이트 쌍을 가르는 200·500·600자 자르기(옛 TS는 짝 없는 서로게이트, Rust는 U+FFFD).
 // 인자 `null`은 옛 코드의 `undefined`다. 결과 `{"__undefined":true}`는 `undefined`, `{"__throws":…}`는 던짐이다.
-type Mod = typeof old;
+type Mod = typeof cur & { lintText: typeof lintText };
 interface Vector { fn: string; args: unknown[]; out: unknown; intended?: boolean }
 
 const MOD = { ...cur, lintText } as unknown as Mod;
@@ -1016,19 +1015,6 @@ describe('요구사항 순수 코어 벡터', () => {
     for (const [fn, slot] of byFn) expect(slot.filled, fn).toBeGreaterThan(0);
     for (const fn of ['findMentionedIds', 'extractImplementsTrailers', 'findCheckpointMentions', 'isLikelyTestFile', 'isManualStepText', 'requirementContentDrifted', 'extractPathReferences', 'verifySpecQuote', 'mentionsRequirementId', 'lintRequirement']) {
       expect(byFn.get(fn)!.empty, fn).toBeGreaterThan(0);
-    }
-  });
-
-  it('옛 TS에 돌리면 의도한 차이만 실패한다', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-11-10T00:00:00.000Z'));
-    try {
-      const failed = VECTORS.filter((vector) => !sameAsExpected(vector, run(old, vector)));
-      expect(failed.every((vector) => vector.intended === true)).toBe(true);
-      expect(failed.length).toBe(VECTORS.filter((vector) => vector.intended).length);
-      expect(failed.length).toBe(5);
-    } finally {
-      vi.useRealTimers();
     }
   });
 });

@@ -1,4 +1,4 @@
-//! 세션 터미널의 턴 끝(Stop 훅) 판정(ADR-212, 4f B4c). 옛 구현은 `sessions.ts`의 `finishTerminalTurn`이었다(`session-terminal-turn-end-legacy.ts`가 차등 시험의 기준으로 남아 있다).
+//! 세션 터미널의 턴 끝(Stop 훅) 판정(ADR-212, 4f B4c). 옛 구현은 `sessions.ts`의 `finishTerminalTurn`이었다(`session-terminal-turn-end-legacy.ts`는 #1347에서 지웠다).
 //! Node를 모른다. 되돌리기·저장·알림·글 조립과 사실 읽기는 TS가 하고, 여기는 **사실 조합 → 다음 할 일 하나**만 정한다.
 //!
 //! **순서가 판정이다**: 먼저 맞는 칸이 이긴다. 옛 코드의 `if`가 놓인 순서를 그대로 옮겼다(시험이 칸마다 고정한다).

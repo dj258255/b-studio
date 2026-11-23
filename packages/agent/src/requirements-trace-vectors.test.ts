@@ -1,17 +1,16 @@
 import { describe, expect, it } from 'vitest';
-import * as old from './requirements-legacy';
 import * as cur from './requirements';
 
 /**
- * 추적표·시험 파일 훑기 벡터(ADR-191 3단계 3z). `out`은 새 구현이 내야 할 값이고, `intended`가 아닌 벡터는 옛 TS(requirements-legacy.ts)가 낸 값과 같다.
- * 옛 TS에 돌리면 `intended`가 붙은 벡터(옛 TS가 열린 쪽으로 틀린 자리를 닫은 것)만 실패해야 한다.
+ * 추적표·시험 파일 훑기 벡터(ADR-191 3단계 3z). `out`은 새 구현이 내야 할 값이고, `intended`가 아닌 벡터는 옛 TS(requirements-legacy.ts, #1347에서 지움)가 낸 값과 같다.
+ * `intended`가 붙은 벡터(옛 TS가 열린 쪽으로 틀린 자리를 닫은 것)만 옛 TS와 다르게 답했다.
  *
  * 경계를 밟는다 — 접두 일치(R1과 R10), 시나리오 언급(R1.2가 R1을 다룬다), 대소문자(r1), 보이지 않는 글자(R​1), 전각 숫자, 범위 표기(R1~R3),
  * 낱말에 붙은 id(xR1·R1x), 묶음 제목의 id, 같은 이름 합침, 메서드 이름(testR1Login·r1_login·testR31ThenR1·calculatesOrder2Total·checkERROR3), 빈 id,
  * 따옴표 처리(이스케이프된 따옴표·닫히지 않은 따옴표·백틱 여러 줄·it.only·it.each), 추적표(검증됨·실패·시나리오 남음·사람 확인·문서 확인·테스트 없는 필수·실행 결과 붙이기).
  * 의도한 차이(`intended`): 메서드 이름 가운데의 `r2`가 R2를 다루는 것으로 읽던 것(`calculatesOrder2Total`·`testServer3`·`checkERROR3`)과 빈 id·`R`+숫자 꼴이 아닌 id가 모든 메서드를 다루는 것으로 읽던 것.
  */
-type Mod = typeof old;
+type Mod = typeof cur;
 interface Vector {
   name: string;
   call: string;
@@ -388,12 +387,6 @@ describe('추적표·시험 훑기 벡터 (ADR-191 3z)', () => {
   it('모든 벡터가 기대한 값과 글자까지 같다', () => {
     const failures = VECTORS.filter((vector) => !same(vector, runVector(cur as unknown as Mod, vector))).map((vector) => `${vector.name}: ${JSON.stringify(runVector(cur as unknown as Mod, vector)).slice(0, 300)}`);
     expect(failures).toEqual([]);
-  });
-
-  it('옛 TS에 돌리면 의도한 차이만 실패한다', () => {
-    const failed = VECTORS.filter((vector) => !same(vector, runVector(old, vector)));
-    expect(failed.filter((vector) => vector.intended !== true).map((vector) => vector.name)).toEqual([]);
-    expect(failed.map((vector) => vector.name)).toEqual(VECTORS.filter((vector) => vector.intended).map((vector) => vector.name));
   });
 
   it('함수마다 값이 있는 결과와 빈 결과를 둘 다 담는다', () => {

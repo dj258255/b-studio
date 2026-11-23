@@ -11,7 +11,7 @@ import { SYNC_HELPER_IMAGE } from './sync-relay';
 /**
  * 의존성 스냅샷(`#planSnapshots`·`#seedSnapshot`·`#captureSnapshot`·`#pruneSnapshots`)·공유 볼륨(`#ensureSharedVolumes`)·`stats()`의 TS 껍데기(ADR-195 4f A4c-3b).
  * 키 파일 읽기, docker를 부르는 순서, 지우는 대상 고르기, 사용량 읽기는 Rust(crates/bstudio-io/src/snapshot_io.rs)가 한다.
- * 여기는 이벤트(`onSnapshot`)를 알리고 결과를 옛 글 그대로의 오류로 바꾸기만 한다. 옛 TS는 `snapshot-legacy.ts`(차등 시험의 기준값).
+ * 여기는 이벤트(`onSnapshot`)를 알리고 결과를 옛 글 그대로의 오류로 바꾸기만 한다. 옛 TS는 지웠다(#1347).
  *
  * **Rust는 `up`을 부르지 않는다.** 스냅샷 채우기는 `build`와 동시에, 저장은 서비스가 준비된 뒤에 도는데, 그 앞뒤의 `up`은 `#composeOrThrow` → `#upQueue`·`#gitMask`를 지난다
  * (순서 조율은 `LocalDockerSandbox.start()`에 남는다).

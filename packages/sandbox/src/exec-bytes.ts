@@ -77,20 +77,3 @@ export async function execBytes(bin: string, args: readonly string[], options: E
   }
   return { stdout: result.stdout, stderr: result.stderr };
 }
-
-export interface ArchiveExtractOutcome {
-  gitCode: number | null;
-  tarCode: number | null;
-  stderr: string;
-  spawnError: string | null;
-}
-
-/**
- * `gitBin gitArgs | tar -x --no-same-owner -C dest`를 Rust가 두 프로세스를 파이프로 이어 돌린다(ADR-195 4f A1).
- * git은 `gitEnv`로 환경을 통째로 바꾸고 stdin을 닫는다. tar는 환경을 상속한다. 던지지 않는다 — 종료 코드(신호로 죽으면 null)를 읽는 쪽이 판단한다.
- * stderr는 git 것 뒤에 tar 것이고 합쳐 1MiB씩까지만 받는다.
- */
-export async function execArchiveExtract(gitBin: string, gitArgs: readonly string[], gitEnv: NodeJS.ProcessEnv, dest: string): Promise<ArchiveExtractOutcome> {
-  const result = await native.runArchiveExtract(gitBin, [...gitArgs], definedEnv(gitEnv) ?? {}, dest);
-  return { gitCode: result.gitCode ?? null, tarCode: result.tarCode ?? null, stderr: result.stderr.toString('utf8'), spawnError: result.spawnError ?? null };
-}

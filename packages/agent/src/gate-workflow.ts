@@ -8,7 +8,7 @@ import type { WorkflowCheck } from './workflow';
 /**
  * 게이트가 끝에 다시 읽는 두 파일(2단계 (b)).
  * 파일 읽기와 판정은 Rust(`crates/bstudio-io/src/gate_workflow.rs`)가 하고, 게이트 인스턴스 상태(바뀐 파일·스냅샷·redact)는 TS가 들고 있다.
- * 옛 TS는 `gate-workflow-legacy.ts`로 남겨 차등 시험만 그것을 import한다.
+ * 옛 TS는 지웠다(#1347).
  */
 
 export type LatestWorkflowResult = { workflow: LoadedProject['spec']['workflow'] } | { error: string };

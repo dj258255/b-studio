@@ -14,7 +14,6 @@ import {
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
   piPolicyEnvironment,
-  releaseBlockers,
   formatWorkflowTrailer,
   reviewChanges,
   uncoveredChangeWarnings,
@@ -109,14 +108,7 @@ describe('project workflow', () => {
     expect(reviewChanges(project, files, ['infra/a', 'infra/b']).find((check) => check.name === 'change-size')).toMatchObject({ ok: false });
   });
 
-  it('배포 조건은 체크포인트에 남은 통과 기록으로 판정하고, 기록이 없는 체크포인트는 checkpoint 외 조건을 채우지 못한다', () => {
-    const strict = projectWith({ tests: [unit], releaseRequires: ['test', 'review', 'checkpoint'] });
-    expect(releaseBlockers(strict, ['run', 'contract_check', 'test', 'review'])).toEqual([]);
-    expect(releaseBlockers(strict, ['run', 'contract_check', 'review'])).toEqual(['test']);
-    expect(releaseBlockers(strict, undefined)).toEqual(['test', 'review']);
-    // 선언하지 않으면 기존처럼 모든 체크포인트를 배포할 수 있다
-    expect(releaseBlockers(projectWith(), undefined)).toEqual([]);
-
+  it('체크포인트에 남은 통과 기록 트레일러를 읽는다', () => {
     const value = (stages: Parameters<typeof formatWorkflowTrailer>[0]) => formatWorkflowTrailer(stages).split(': ')[1]!;
     expect(parseWorkflowTrailerValues([value(['run', 'review'])])).toEqual(['run', 'review']);
     expect(parseWorkflowTrailerValues([value([])])).toEqual([]);
@@ -125,15 +117,9 @@ describe('project workflow', () => {
     expect(parseWorkflowTrailerValues(['test, review', 'run, deploy'])).toEqual(['run']);
   });
 
-  it('releaseRequires를 적지 않으면 게이트를 거치지 않은 직접 수정 체크포인트(Workflow-Verify: unverified)는 배포하지 않는다(#772)', () => {
+  it('게이트를 거치지 않은 직접 수정 체크포인트는 Workflow-Verify: unverified로 표시한다(#772)', () => {
     expect(formatVerifyTrailer('unverified')).toBe(`${WORKFLOW_VERIFY_TRAILER}: unverified`);
     expect(parseVerifyTrailerValues(['unverified'])).toBe('unverified');
-    expect(releaseBlockers(projectWith(), undefined, 'unverified')).toEqual(['checkpoint']);
-    // 세션 시작·원격 반영처럼 표시가 없는 체크포인트는 지금처럼 배포할 수 있다
-    expect(releaseBlockers(projectWith(), undefined)).toEqual([]);
-    // releaseRequires를 직접 적으면 그 조건만 본다
-    expect(releaseBlockers(projectWith({ releaseRequires: ['checkpoint'] }), undefined, 'unverified')).toEqual([]);
-    expect(releaseBlockers(projectWith({ tests: [unit], releaseRequires: ['test', 'checkpoint'] }), undefined, 'unverified')).toEqual(['test']);
   });
 
   it('가볍게 확인(Workflow-Verify) 표시를 읽고, 없거나 다른 값이면 전체 검증으로 본다', () => {
@@ -149,9 +135,6 @@ describe('project workflow', () => {
     expect(parseVerifyTrailerValues(['docs'])).toBe('docs');
     expect(parseVerifyTrailerValues(['light', 'docs'])).toBe('docs');
     expect(parseVerifyTrailerValues(['DOCS'])).toBe('docs');
-    // 가볍게 확인한 체크포인트(run·contract_check만 통과)는 releaseRequires가 채워지지 않아 배포가 막힌다
-    const strict = projectWith({ releaseRequires: ['contract_check', 'test', 'review', 'checkpoint'] });
-    expect(releaseBlockers(strict, ['run', 'contract_check'])).toEqual(['test', 'review']);
   });
 
   it('Pi 확장이 읽을 환경 변수를 같은 studio.yaml에서 만든다', () => {

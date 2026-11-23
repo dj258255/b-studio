@@ -1,5 +1,5 @@
 //! 세션이 "바쁜지"를 정하는 점유(ADR-207, 4f B3a). 옛 구현은 `sessions.ts`의 `snapshot.running`(boolean)·`session.run`의 유무·`session.exporting`이었다
-//! (`session-claim-legacy.ts`가 차등 시험의 기준으로 남아 있다). Node를 모른다. 점유는 수명 코어(`SessionState`)의 같은 자물쇠 아래에 있어
+//! (옛 구현 `session-claim-legacy.ts`는 #1347에서 지웠다). Node를 모른다. 점유는 수명 코어(`SessionState`)의 같은 자물쇠 아래에 있어
 //! 상태·멈추는 중 여부를 확인하고 잡는 일이 한 번에 된다.
 //!
 //! **점유는 자리 하나(`slot`)와 올리기 하나(`export`)다.**

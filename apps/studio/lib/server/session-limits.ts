@@ -5,7 +5,7 @@ import { addUserUsageSync, userTokens } from './usage-state';
 
 /**
  * 토큰 한도 판정(ADR-209, 4f B3c). 판정은 Rust `bstudio-session`의 `limits` 함수 하나(`native.judgeTokenLimit`)가 하고, 요청 시작·대화 실행 중·터미널 실행 중이
- * 모두 여기를 거쳐 그 함수를 부른다. 옛 TS 판정 셋은 `session-limits-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 모두 여기를 거쳐 그 함수를 부른다. 옛 TS 판정 셋은 지웠다(#1347).
  *
  * 사람 몫 = 파일의 사람 합계 − 이 실행이 저장을 마친 몫 + 이 실행 누적. 이 실행의 원장(`RunLedger`)은 쓰기가 성공했을 때만 저장을 마친 몫을 늘린다.
  * 요청 시작은 실행이 없으므로 원장이 없다(누적 0, 저장 0).
