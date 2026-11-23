@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync } from 'node:fs';
+import { closeSync, constants, fstatSync, openSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { apiKeyEnvName, validateModelProfiles, type ModelProfile } from '@b-studio/agent';
 
@@ -22,19 +22,28 @@ export function modelFilePath(settingsFile: string): string {
  * 모델 설정 검증 실패는 모두 사유와 함께 ModelFileError로 던진다. 키가 든 파일이라 600이 아니면 읽지 않는다
  */
 export function loadModelFile(file: string): LoadedModel {
-  let stat;
+  // 한 번 연 핸들로 확인하고 읽는다: 경로로 확인한 뒤 다시 경로로 읽으면 그 사이에 바꿔친 파일을 읽을 수 있다.
+  // O_NOFOLLOW라 마지막 조각이 링크면 열지 않는다(ELOOP)
+  let fd: number;
   try {
-    stat = lstatSync(file);
-  } catch {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === 'ELOOP') throw new ModelFileError(`모델 파일이 일반 파일이 아닙니다(링크는 허용하지 않습니다): ${file}`);
     throw new ModelFileError(`모델 파일이 없거나 읽을 수 없습니다: ${file}`);
   }
-  if (!stat.isFile()) throw new ModelFileError(`모델 파일이 일반 파일이 아닙니다(링크는 허용하지 않습니다): ${file}`);
-  if ((stat.mode & 0o077) !== 0) throw new ModelFileError(`모델 파일의 권한이 600이 아닙니다(그룹·다른 사용자 권한이 있습니다): ${file}`);
   let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(file, 'utf8'));
-  } catch {
-    throw new ModelFileError(`모델 파일이 올바른 JSON이 아닙니다: ${file}`);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new ModelFileError(`모델 파일이 일반 파일이 아닙니다(링크는 허용하지 않습니다): ${file}`);
+    if ((stat.mode & 0o077) !== 0) throw new ModelFileError(`모델 파일의 권한이 600이 아닙니다(그룹·다른 사용자 권한이 있습니다): ${file}`);
+    try {
+      raw = JSON.parse(readFileSync(fd, 'utf8'));
+    } catch {
+      throw new ModelFileError(`모델 파일이 올바른 JSON이 아닙니다: ${file}`);
+    }
+  } finally {
+    closeSync(fd);
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new ModelFileError('모델 파일은 {"profile": …} 꼴의 객체여야 합니다');
   const { profile: rawProfile, apiKey } = raw as { profile?: unknown; apiKey?: unknown };

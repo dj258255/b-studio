@@ -12361,4 +12361,5 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 - 진입점은 `apps/cli/src/agent-tty.ts`다. 모델은 `--settings` 파일과 같은 폴더의 `agent-model.json`(`{ profile, apiKey? }`)에서 읽는다.
 - **fail closed**: 파일이 없거나, 일반 파일이 아니거나(링크 포함), 그룹·다른 사용자 권한이 있거나(600이 아님), JSON이 아니거나, 모델 설정 검증(`validateModelProfiles`)에 실패하면 사유를 stderr에 적고 세션을 시작하지 않은 채 1로 끝난다. 훅도 부르지 않는다.
 - 키는 `clientForProfile`에 넘기는 env 객체에만 들어간다(`profile.apiKeyEnv` 또는 공급자 기본 이름). `process.env`·인자·출력·텔레메트리에는 넣지 않는다. 비용은 프로필의 `pricing`에서 계산한다.
+- 확인과 읽기는 `O_NOFOLLOW`로 한 번 연 핸들에서 한다(`fstat`으로 종류·권한을 보고 같은 핸들로 읽는다). 경로로 확인한 뒤 다시 경로로 읽으면 그 사이에 바꿔친 파일을 읽을 수 있어서다(검토에서 고침, `O_NOFOLLOW`를 빼면 링크 시험이 실패).
 - 재지 않은 것: 서버가 이 파일을 쓰는 쪽(2b)과 실제 PTY에서의 동작.

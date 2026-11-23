@@ -1,4 +1,4 @@
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -33,6 +33,14 @@ function write(content: unknown, mode = 0o600) {
 describe('모델 파일', () => {
   it('설정 파일과 같은 폴더의 agent-model.json을 가리킨다', () => {
     expect(modelFilePath(path.join(dir, 'settings.json'))).toBe(file);
+  });
+
+  it('링크면 600의 올바른 파일을 가리켜도 거절한다(확인한 대상과 읽는 대상이 갈리지 않게)', () => {
+    const real = path.join(dir, 'real.json');
+    writeFileSync(real, JSON.stringify({ profile, apiKey: 'k' }));
+    chmodSync(real, 0o600);
+    symlinkSync(real, file);
+    expect(() => loadModelFile(file)).toThrow(/링크/);
   });
 
   it('없으면 거절한다', () => {
