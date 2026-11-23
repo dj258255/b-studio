@@ -63,7 +63,7 @@ const PLATFORM_RETRY_DELAY_MS = 1_500;
 export const TEST_TIMEOUT_MS = 10 * 60_000;
 /** 동시 요청 확인에서 요청 하나가 기다릴 시간 */
 const REQUEST_TIMEOUT_MS = 15_000;
-/** 같은 값이 Rust(`gate_declared.rs`의 `CHECK_CONCURRENCY`·`OUTPUT_TAIL_LINES`)에 있다. 이 TS 쪽은 옛 구현(`declared-legacy.ts`)이 쓴다 */
+/** 같은 값이 Rust(`gate_declared.rs`의 `CHECK_CONCURRENCY`·`OUTPUT_TAIL_LINES`)에 있다. 이 TS 쪽 상수는 옛 구현(#1347에서 지움)이 쓰던 것이다 */
 export const CHECK_CONCURRENCY = 2;
 export const OUTPUT_TAIL_LINES = 30;
 /** 평가 자산 지문이 담을 수 있는 파일 수 상한. 넘으면 실패하고 선언을 좁히라고 알린다 */
@@ -383,7 +383,7 @@ export class VerificationGate {
     return runGateCheck(this.#host());
   }
 
-  /** 차등 시험이 옛 구현(`gate-legacy.ts`)에 같은 하위 단계를 넘기려고 꺼내 간다. 제품 코드는 쓰지 않는다 */
+  /** 차등 시험이 옛 구현에 같은 하위 단계를 넘기려고 꺼내 가던 것이다. 제품 코드는 쓰지 않는다(옛 구현은 #1347에서 지웠다) */
   [GATE_HOST](): GateHost {
     return this.#host();
   }

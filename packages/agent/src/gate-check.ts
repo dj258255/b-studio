@@ -57,7 +57,7 @@ export interface AutoOps {
 
 /**
  * 선언한 검사 실행(`runDeclaredChecks` 아래)이 쓰는 TS 쪽 값과 동작. 조율·판정·글 조립은 Rust(`gate_declared.rs`, ADR-195 4f A5b-2)가 하고,
- * 화면 확인(`checkPage`의 부산물)과 자동 화면 고르기가 읽는 바깥 값(`auto`), sandbox·HTTP 요청은 여기로 부른다. 옛 구현(`declared-legacy.ts`)도 같은 값을 쓴다
+ * 화면 확인(`checkPage`의 부산물)과 자동 화면 고르기가 읽는 바깥 값(`auto`), sandbox·HTTP 요청은 여기로 부른다.
  */
 export interface DeclaredHost {
   readonly sandbox: Sandbox;
@@ -66,7 +66,7 @@ export interface DeclaredHost {
   /** 이번 검증에 쓰는 프로젝트(부르는 때의 것) */
   readonly project: LoadedProject;
   readonly requestService: ServiceRequest;
-  /** 자동 화면 고르기(ADR-195 4f A5c-2)가 읽는 바깥 값. 고르는 규칙·막는 규칙·글 조립은 Rust(`gate_auto.rs`)가 하고, 옛 구현(`auto-pages-legacy.ts`)도 같은 값을 쓴다 */
+  /** 자동 화면 고르기(ADR-195 4f A5c-2)가 읽는 바깥 값. 고르는 규칙·막는 규칙·글 조립은 Rust(`gate_auto.rs`)가 한다 */
   readonly auto: AutoOps;
   /** 화면 확인이 부르는 바깥 동작(브라우저 러너·페이지 요청·스크린샷 저장·경고). 판정과 순서는 Rust(`gate_page.rs`, ADR-195 4f A5c-1)가 한다 */
   readonly page: PageOps;
@@ -79,7 +79,7 @@ export interface DeclaredHost {
   };
 }
 
-/** 화면 확인(`#checkPage` 아래)이 게이트 객체에서 빌려 쓰는 동작. 옛 구현(`check-page-legacy.ts`)도 같은 것을 쓴다 */
+/** 화면 확인(`#checkPage` 아래)이 게이트 객체에서 빌려 쓰는 동작 */
 export interface PageOps {
   readonly sandbox: Sandbox;
   readonly pageFetcher: PageFetcher;
@@ -125,7 +125,7 @@ export interface GateHost {
   missingStages(passed: ReadonlySet<WorkflowStage>): WorkflowStage[];
 }
 
-/** 차등 시험이 옛 구현(`gate-legacy.ts`)에 같은 하위 단계를 넘기려고 게이트에서 `GateHost`를 꺼내는 열쇠. 제품 코드는 쓰지 않는다 */
+/** 차등 시험이 옛 구현에 같은 하위 단계를 넘기려고 게이트에서 `GateHost`를 꺼내던 열쇠. 제품 코드는 쓰지 않는다(옛 구현은 #1347에서 지웠고 이 열쇠를 쓰는 곳도 없다. 지우는 것은 따로 한다) */
 export const GATE_HOST = Symbol('gate-host');
 
 type Handlers = Record<string, HookHandler>;

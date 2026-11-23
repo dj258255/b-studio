@@ -12,7 +12,7 @@
  *
  * 순수 판정(번호·경로, 묶음 표 읽기, 프롬프트·틀, 승인 확인, 검토 독립성, 완료·성공 판정)은 Rust
  * (`crates/bstudio-guard/src/design_pipeline.rs`, ADR-191 3단계 3o)가 한다. 여기에는 zod 스키마·타입·상수와 같은 이름·시그니처의
- * 껍데기만 남았다. 옛 구현은 `design-pipeline-differential.test.ts`에 시험용으로만 남아 있다.
+ * 껍데기만 남았다. 옛 구현은 시험 안에 두었다가 #1347에서 지웠다.
  */
 import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';

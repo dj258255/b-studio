@@ -1,21 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import { Board } from './coordination/board';
-import { LegacyBoard } from './coordination/board-legacy';
 import { externalBoardAccess, runBoardMcpTool } from './board-mcp';
 import { describeStep, isAllowedRequest, isAutomaticFavicon } from './browser-check';
 import { rejectedChangeFeedback } from './change-tracker';
-import * as legacy from './connection-legacy';
 import { authorize, hostAllowed, tokenMatches } from './mcp-http-server';
 
 /**
- * 연결·인증·조율 판정(ADR-191 3t)의 벡터. 기대값은 옛 TS(`connection-legacy.ts`, `coordination/board-legacy.ts`)가 낸 값이다.
- * `CONN_VECTORS_AGAINST=legacy`로 돌리면 옛 구현에 같은 벡터를 넣는다 — 이름이 "의도한 차이:"로 시작하는 벡터만 실패해야 한다.
+ * 연결·인증·조율 판정(ADR-191 3t)의 벡터. 기대값은 옛 TS(`connection-legacy.ts`, `coordination/board-legacy.ts`, #1347에서 지움)가 낸 값이다.
+ * 이름이 "의도한 차이:"로 시작하는 벡터만 옛 TS와 다르게 답한다(기대값은 새 구현이 내는 값).
  * 허용·인식 패턴마다 거의 같은 거부 입력(접두·덧붙임·대소문자·빈 글자·다른 구분자)을 둔다.
  */
-const AGAINST_LEGACY = process.env['CONN_VECTORS_AGAINST'] === 'legacy';
-const subject = AGAINST_LEGACY
-  ? { hostAllowed: legacy.hostAllowed, tokenMatches: legacy.tokenMatches, authorize: legacy.authorize, isAllowedRequest: legacy.isAllowedRequest, isAutomaticFavicon: legacy.isAutomaticFavicon, describeStep: legacy.describeStep as (step: never) => string, rejectedChangeFeedback: legacy.rejectedChangeFeedback, runBoardMcpTool: legacy.runBoardMcpTool, Board: LegacyBoard as unknown as typeof Board }
-  : { hostAllowed, tokenMatches, authorize, isAllowedRequest, isAutomaticFavicon, describeStep: describeStep as (step: never) => string, rejectedChangeFeedback, runBoardMcpTool, Board };
+const subject = { hostAllowed, tokenMatches, authorize, isAllowedRequest, isAutomaticFavicon, describeStep: describeStep as (step: never) => string, rejectedChangeFeedback, runBoardMcpTool, Board };
 
 const DOCKER = ['host.docker.internal'];
 

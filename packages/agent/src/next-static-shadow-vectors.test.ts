@@ -2,16 +2,13 @@ import { chmodSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { findStaticShadows as findNew, StaticShadowUnknownError, type StaticShadow, type StaticShadowInput } from './next-static-shadow';
-import { findStaticShadows as findLegacy, StaticShadowUnknownError as LegacyUnknownError } from './next-static-shadow-legacy';
 import { buildProject } from './next-static-shadow-testkit';
 
 /**
- * 고정 경로 판정(ADR-191 3aa)의 벡터. 기대값은 옛 TS(`next-static-shadow-legacy.ts`)가 낸 값이다. 옛 구현에 돌리면(`STATIC_SHADOW_IMPL=legacy`, 의도한 차이는 "다르다"를 단언한다)
- * `intended`로 표시한 것만 실패해야 하고, 그것들은 옛 구현이 놓쳤거나(옛 [] → 새 겹침) 더 막는 쪽으로 바꾼 곳이다.
+ * 고정 경로 판정(ADR-191 3aa)의 벡터. 기대값은 옛 TS(`next-static-shadow-legacy.ts`, #1347에서 지움)가 낸 값이다.
+ * `intended`로 표시한 벡터만 옛 구현과 달랐고(옛 구현이 놓쳤거나(옛 [] → 새 겹침) 더 막는 쪽으로 바꾼 곳), 그 기대값은 새 구현이 내는 값이다.
  */
-/** `legacy`: 옛 구현에 돌려 intended만 다른지 본다. `legacy-raw`: 옛 구현에 돌려 intended도 기대값 그대로 견준다(고치기 전 실패 출력용) */
-const IMPL = process.env['STATIC_SHADOW_IMPL'] ?? 'new';
-const find = IMPL.startsWith('legacy') ? findLegacy : findNew;
+const find = findNew;
 
 /** unknown: StaticShadowUnknownError 메시지에 든 글 */
 type Expected = { shadows: Array<[string, string, string]> } | { unknown: string };
@@ -48,7 +45,7 @@ async function run(vector: Vector, implementation: typeof find): Promise<Expecte
     const shadows: StaticShadow[] = await implementation(input);
     return { shadows: shadows.map((s): [string, string, string] => [s.name, s.value, s.where]) };
   } catch (error) {
-    if (error instanceof StaticShadowUnknownError || error instanceof LegacyUnknownError) return { unknown: error.message };
+    if (error instanceof StaticShadowUnknownError) return { unknown: error.message };
     throw error;
   }
 }
@@ -270,16 +267,9 @@ describe('findStaticShadows 벡터(ADR-191 3aa): 기대값은 옛 TS가 낸 값'
   });
 
   for (const vector of vectors) {
-    const intended = IMPL === 'legacy' && vector.intended === true;
-    const title = `${intended ? '[의도한 차이: 옛 구현은 다르다] ' : ''}${vector.name}`;
-    it(title, async () => {
+    it(vector.name, async () => {
       const actual = await run(vector, find);
       const expected = vector.expected;
-      const matches = 'unknown' in expected ? 'unknown' in actual && actual.unknown.includes(expected.unknown) : JSON.stringify(actual) === JSON.stringify(expected);
-      if (intended) {
-        expect(matches).toBe(false);
-        return;
-      }
       if ('unknown' in expected) expect(actual).toEqual({ unknown: expect.stringContaining(expected.unknown) });
       else expect(actual).toEqual(expected);
     });
@@ -294,12 +284,11 @@ describe('짝 없는 서로게이트: 이름 견주기는 거부 목록이라 �
     expect('new\ud800').not.toBe('new\udc00');
   });
 
-  it('두 값 모두 U+FFFD 이름과 겹친 것으로 본다(더 막는 쪽). 옛 구현은 어느 쪽도 겹치지 않는다고 했다. 결과의 value는 입력 그대로다', async () => {
+  it('두 값 모두 U+FFFD 이름과 겹친 것으로 본다(더 막는 쪽). (옛 구현은 어느 쪽도 겹치지 않는다고 했다.) 결과의 value는 입력 그대로다', async () => {
     for (const value of ['new\ud800', 'new\udc00']) {
       const root = buildProject(['web/app/orders/new\ufffd/page.tsx']);
       const input = { root, servicePath: 'web', pageFile: PAGE, values: { id: value }, check: new Set(['id']) };
       expect(await findNew(input)).toEqual([{ name: 'id', value, where: 'web/app/orders/new\ufffd' }]);
-      expect(await findLegacy(input)).toEqual([]);
     }
   });
 
@@ -308,22 +297,19 @@ describe('짝 없는 서로게이트: 이름 견주기는 거부 목록이라 �
     const input = (value: string) => ({ root, servicePath: 'web', pageFile: PAGE, values: { id: value }, check: new Set(['id']) });
     expect(await findNew(input('\u{1F600}'))).toEqual([{ name: 'id', value: '\u{1F600}', where: 'web/app/orders/\u{1F600}' }]);
     expect(await findNew(input('\u{1F601}'))).toEqual([]);
-    expect(await findLegacy(input('\u{1F601}'))).toEqual([]);
   });
 });
 
 describe('폴더를 읽지 못하면 모른다(빈 폴더로 읽지 않는다)', () => {
   const unreadable = process.getuid?.() === 0 ? it.skip : it;
-  for (const [label, find] of [['새 구현', findNew], ['옛 구현', findLegacy]] as const) {
-    unreadable(`${label}: 읽기 권한이 없는 폴더는 StaticShadowUnknownError`, async () => {
-      const root = buildProject(['web/app/orders/new/page.tsx']);
-      const locked = path.join(root, 'web/app/orders');
-      chmodSync(locked, 0o000);
-      try {
-        await expect(find({ root, servicePath: 'web', pageFile: PAGE, values: { id: 'new' }, check: new Set(['id']) })).rejects.toThrow('web/app/orders 폴더를 읽지 못했습니다');
-      } finally {
-        chmodSync(locked, 0o755);
-      }
-    });
-  }
+  unreadable(`읽기 권한이 없는 폴더는 StaticShadowUnknownError`, async () => {
+    const root = buildProject(['web/app/orders/new/page.tsx']);
+    const locked = path.join(root, 'web/app/orders');
+    chmodSync(locked, 0o000);
+    try {
+      await expect(find({ root, servicePath: 'web', pageFile: PAGE, values: { id: 'new' }, check: new Set(['id']) })).rejects.toThrow('web/app/orders 폴더를 읽지 못했습니다');
+    } finally {
+      chmodSync(locked, 0o755);
+    }
+  });
 });

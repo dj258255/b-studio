@@ -3,7 +3,7 @@ import { native } from '@b-studio/sandbox';
 /**
  * 세션 터미널 턴 끝의 나머지(ADR-217, 4f B5c): 예외 경로 분류, 게이트 밖 사유, 남은 체크포인트·저장 중 실행·다시 붙이기의 조건, 게이트 시간 상한.
  * 판정은 Rust `crates/bstudio-session`의 `terminal::turn_end_rest`가 한다(순수 함수). 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다.
- * 읽기(Git·지문·샌드박스)와 되돌리기·알림·글 조립은 `sessions.ts`가 한다. 옛 판정은 `session-terminal-turn-end-rest-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 읽기(Git·지문·샌드박스)와 되돌리기·알림·글 조립은 `sessions.ts`가 한다. 옛 판정은 지웠다(#1347).
  * 모르는 결정은 닫는 쪽이다(예외 경로는 오류로 되돌리고, 게이트 단계는 알아보지 못한 결과로 실패로 닫는다).
  */
 

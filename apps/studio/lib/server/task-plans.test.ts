@@ -74,6 +74,8 @@ const fake = vi.hoisted(() => ({
   deletes: {} as Record<string, string[]>,
   /** 세션을 만들 때 작업 폴더에 넣는 프로젝트 원본 파일 */
   sourceFiles: {} as Record<string, string>,
+  /** 모노레포 하위 폴더 프로젝트를 흉내 낸다: 세션 작업 폴더(저장소 복사본) 아래 이 폴더가 프로젝트 폴더다. 체크포인트의 파일 목록은 이 폴더 기준이다 */
+  subdir: '',
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   /** applyServerChanges(서버가 레인 결과를 써서 터미널 판정으로 닫는 통합 길)를 부른 기록(순서대로) */
   serverChanges: [] as Array<{ sessionId: string; request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[] }>,
@@ -144,6 +146,9 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
       }
       static async inspectSource() {
         return fake.source;
+      }
+      async projectRoot() {
+        return path.join(this.#root, fake.subdir);
       }
       async blobAt(file: string, ref: string) {
         for (const session of fake.sessions.values()) {
@@ -238,8 +243,8 @@ vi.mock('./sessions', () => ({
     mkdirSync(workDir, { recursive: true });
     // 실제 세션은 프로젝트 원본을 복사해 시작한다. 지운 파일이 여기 있으면 통합 세션도 그 파일을 갖고 시작한다
     for (const [file, content] of Object.entries(fake.sourceFiles)) {
-      mkdirSync(path.dirname(path.join(workDir, file)), { recursive: true });
-      writeFileSync(path.join(workDir, file), content);
+      mkdirSync(path.dirname(path.join(workDir, fake.subdir, file)), { recursive: true });
+      writeFileSync(path.join(workDir, fake.subdir, file), content);
     }
     fake.sessions.set(id, {
       id,
@@ -442,6 +447,7 @@ beforeEach(() => {
   fake.history.clear();
   fake.deletes = {};
   fake.sourceFiles = {};
+  fake.subdir = '';
   fake.sends = [];
   fake.serverChanges = [];
   fake.serverNoCheckpoint = false;
@@ -761,6 +767,21 @@ describe('작업 분해 실행', () => {
       files: ['web/a/one.md', 'web/a/removed.md'],
       deleted: ['web/a/removed.md'],
     });
+  });
+
+  it('모노레포 하위 폴더 프로젝트에서도 레인이 지운 파일을 통합이 함께 지운다(체크포인트 파일 목록은 프로젝트 폴더 기준이다, #1343)', async () => {
+    fake.subdir = 'svc';
+    fake.plan = { tasks: [task('a', ['web/a'])] };
+    fake.writes = { a: { 'web/a/one.md': 'one' } };
+    // 통합 세션은 작업 폴더/svc/web/a/removed.md를 가진 원본에서 시작한다
+    fake.sourceFiles = { 'web/a/removed.md': 'old' };
+    fake.deletes = { a: ['web/a/removed.md'] };
+
+    const plan = await run({ projectId: 'orders', request: '하위 폴더 삭제', modelId: 'model-a', owner: 'kim' });
+
+    expect(plan.status).toBe('done');
+    expect(fake.serverChanges[0]!.deletes).toEqual(['web/a/removed.md']);
+    expect(plan.integration).toMatchObject({ status: 'done', deleted: ['web/a/removed.md'] });
   });
 
   it('통합 세션의 원본에도 없는 파일은 지울 목록에서 뺀다', async () => {
@@ -1258,6 +1279,28 @@ describe('서버 재시작 뒤 이어서 하기', () => {
     // 통합 샌드박스를 띄우기 전에 멈춰야 한다. 스크립트 턴이 돌면 아무것도 합치지 않았는데 통과한 것처럼 남는다
     expect(fake.counter).toBe(0);
     expect(integrationAttempted()).toBe(false);
+  });
+
+  it('옛 계획(checkpointSha 없음)은 모노레포 하위 폴더 프로젝트에서 프로젝트 폴더의 파일을 읽어 통합한다(#1343)', async () => {
+    fake.subdir = 'svc';
+    const laneDir = path.join(fake.root, 'lane-old-subdir');
+    mkdirSync(path.join(laneDir, 'svc/web/a'), { recursive: true });
+    writeFileSync(path.join(laneDir, 'svc/web/a/one.md'), 'lane result');
+    // 저장소 루트의 같은 이름 파일은 프로젝트 밖이다. 이것을 읽으면 레인 결과가 아니다
+    mkdirSync(path.join(laneDir, 'web/a'), { recursive: true });
+    writeFileSync(path.join(laneDir, 'web/a/one.md'), 'WRONG');
+    writePlan({
+      id: 'plan-old-subdir',
+      owner: 'kim',
+      status: 'interrupted',
+      lanes: [laneView('lane-1', 'done', { sessionId: 'session-old-subdir', workDir: laneDir, changedFiles: ['web/a/one.md'], paths: ['web/a'] })],
+    });
+
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    resumeTaskPlan('plan-old-subdir', 'kim');
+
+    await settled(() => reloaded('plan-old-subdir', 'kim'));
+    expect(fake.serverChanges[0]?.writes).toEqual([{ path: 'web/a/one.md', content: 'lane result' }]);
   });
 
   it('옛 계획(checkpointSha 없음)에서 작업 폴더의 파일이 링크면 통합하지 않고 멈춘다(이슈 #744)', async () => {

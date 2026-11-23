@@ -131,7 +131,7 @@ function unitsToString(units: Uint16Array): string {
 
 /**
  * 자식 프로세스의 입출력(띄우기·표준 입력·줄 나누기·표준 오류 끝부분·닫기 단계·끝 상태)은 Rust가 한다(crates/bstudio-io/src/cli_process.rs, ADR-195 4f A8a).
- * 여기는 Rust가 순서대로 넘기는 줄을 큐로 받아 JSON 객체만 내놓는다(해석은 TS, ADR-201). 옛 구현은 claude-cli-process-spawn-legacy.ts(차등 시험의 기준)
+ * 여기는 Rust가 순서대로 넘기는 줄을 큐로 받아 JSON 객체만 내놓는다(해석은 TS, ADR-201). 옛 구현은 지웠다(#1347)
  */
 /**
  * 자식을 띄우기 전의 준비(막는 쪽): 실행 파일을 절대 경로로 고르고(프로젝트 루트 안의 것은 고르지 않는다), 자식에게 넘길 환경(PATH 정리)과 닫기 단계 시간을 정한다.

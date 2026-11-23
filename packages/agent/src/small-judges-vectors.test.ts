@@ -1,19 +1,14 @@
 import { createHash } from 'node:crypto';
-import { Readable } from 'node:stream';
 import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 import { pickStaleTemp, restoreDatabaseName } from './database-branches';
-import { legacyNormalizedDumpHashFromStream, legacyRestoreDatabaseName, legacySweepVictims } from './database-branches-legacy';
 import { summarizeJsonContent } from './json-summary';
-import { legacySummarizeJsonContent } from './json-summary-legacy';
 import { appendUserText, formatSteering } from './loop';
-import { legacyAppendUserText, legacyFormatSteering } from './loop-legacy';
 import { validateTaskGraph, type TaskNode } from './task-graph';
-import { legacyValidateGraph } from './task-graph-legacy';
 
 /**
- * 작은 판정 모음(ADR-191 3af)의 벡터. 기대값은 옛 TS가 낸 값이다. 옛 TS와 다르게 정한 것(의도한 차이)은 `old`에 옛 값을 따로 적어
- * 옛 TS가 정말 그 값을 내는지(= 고친 결함이 실제로 있었는지)도 이 시험이 확인한다.
+ * 작은 판정 모음(ADR-191 3af)의 벡터. 기대값은 옛 TS가 낸 값이다. 옛 TS와 다르게 정한 것(의도한 차이)은 `old`에 옛 값을 따로 적어 두었다
+ * (옛 TS 사본은 #1347에서 지웠으므로 `old`는 기록일 뿐 이 시험이 옛 TS에 돌려 확인하지는 않는다).
  */
 const newHash = (bytes: Buffer, step = 0): string => {
   const normalizer = new native.NativeDumpNormalizer();
@@ -23,7 +18,6 @@ const newHash = (bytes: Buffer, step = 0): string => {
   hash.update(normalizer.finish());
   return hash.digest('hex');
 };
-const oldHash = (bytes: Buffer) => legacyNormalizedDumpHashFromStream(Readable.from([bytes]));
 const b = (text: string) => Buffer.from(text, 'utf8');
 
 interface DumpVector {
@@ -71,7 +65,6 @@ describe('덤프 정규화 벡터', () => {
       expect(newHash(vector.a) === newHash(vector.c)).toBe(vector.equal);
       // 아무 자리에서 끊어 먹여도 같다
       for (const step of [1, 2, 3, 7]) expect(newHash(vector.a, step)).toBe(newHash(vector.a));
-      expect((await oldHash(vector.a)) === (await oldHash(vector.c))).toBe(vector.old ?? vector.equal);
     });
   }
 
@@ -112,7 +105,6 @@ describe('임시 DB 이름 벡터', () => {
   for (const [name, kept] of cases) {
     it(`${JSON.stringify(name.slice(0, 20))}(길이 ${name.length})`, () => {
       expect(restoreDatabaseName(name)).toBe(`${kept}__b_studio_restore`);
-      expect(legacyRestoreDatabaseName(name)).toBe(`${kept}__b_studio_restore`);
     });
   }
 });
@@ -129,16 +121,13 @@ describe('임시 파일 이름 벡터(모든 pid가 죽었다고 가정)', () =>
   };
   it('지우는 이름', () => {
     expect(pickStaleTemp(names.지움, dead)).toEqual(names.지움);
-    expect(legacySweepVictims(names.지움, dead)).toEqual(names.지움);
   });
   it('의도한 차이: 옛 판정은 지우고 새 판정은 지우지 않는 이름(옛 TS에서 실패하는 벡터)', () => {
     expect(pickStaleTemp(names.지우지않음_옛판정은지움, dead)).toEqual([]);
-    // 옛 판정은 `.tmp`로 끝나면서 pid가 양의 정수로 읽히거나 pid를 못 읽은 이름을 모두 지운다(`abcdef0.save.12.tmp`는 pid 자리가 'abcdef0'이라 못 읽어 지운다)
-    expect(legacySweepVictims(names.지우지않음_옛판정은지움, dead)).toEqual(names.지우지않음_옛판정은지움);
+    // 옛 판정은 `.tmp`로 끝나면서 pid가 양의 정수로 읽히거나 pid를 못 읽은 이름을 모두 지웠다(`abcdef0.save.12.tmp`는 pid 자리가 'abcdef0'이라 못 읽어 지웠다)
   });
   it('옛 판정도 지우지 않던 이름은 새 판정도 지우지 않는다', () => {
     expect(pickStaleTemp(names.지우지않음_옛판정도, dead)).toEqual([]);
-    expect(legacySweepVictims(names.지우지않음_옛판정도, dead)).toEqual([]);
   });
   it('살아 있는 pid의 파일은 남기고, 이 프로세스의 pid는 늘 남긴다', () => {
     expect(pickStaleTemp(['abcdef0.save.123.1.tmp', 'abcdef0.save.124.1.tmp'], (pid) => pid === 123)).toEqual(['abcdef0.save.124.1.tmp']);
@@ -182,7 +171,6 @@ describe('작업 그래프 벡터', () => {
   for (const [name, nodes, expected] of cases) {
     it(name, () => {
       expect(outcome(() => validateTaskGraph(nodes))).toBe(expected);
-      expect(outcome(() => legacyValidateGraph(nodes))).toBe(expected);
     });
   }
 
@@ -226,7 +214,6 @@ describe('진행 중 지시 벡터', () => {
   for (const [texts, expected] of cases) {
     it(JSON.stringify(texts), () => {
       expect(formatSteering(texts)).toBe(expected);
-      expect(legacyFormatSteering(texts)).toBe(expected);
     });
   }
 
@@ -249,7 +236,6 @@ describe('진행 중 지시 벡터', () => {
     ];
     for (const [name, make, expected] of inputs) {
       expect(apply(make(), 't', appendUserText), name).toBe(expected);
-      expect(apply(make(), 't', legacyAppendUserText), name).toBe(expected);
     }
   });
 
@@ -300,7 +286,6 @@ describe('JSON 요약 벡터', () => {
   for (const [name, text, expected] of cases) {
     it(name, () => {
       expect(summarizeJsonContent(text)).toBe(expected);
-      expect(legacySummarizeJsonContent(text)).toBe(expected);
     });
   }
 
@@ -311,8 +296,6 @@ describe('JSON 요약 벡터', () => {
     expect(summarizeJsonContent('{"\ue010":1,"\\ue011":2}')).toBe('\ue010, \ue011');
     // 글 안의 짝 없는 서로게이트 글자 그대로(이스케이프가 아니라)도 같다
     expect(summarizeJsonContent('{"\ud800":1,"\udc00":2}')).toBe('\ud800, \udc00');
-    expect(legacySummarizeJsonContent('{"\ud800":1,"\udc00":2}')).toBe('\ud800, \udc00');
-    expect(legacySummarizeJsonContent('{"\\ud800":[1],"\\udc00":2}')).toBe('\ud800 1개, \udc00');
   });
 
   it('성질 시험: 인코딩 없이 보내면 서로 다른 서로게이트 키가 한 키로 합쳐진다(U+FFFD)', () => {
@@ -322,7 +305,6 @@ describe('JSON 요약 벡터', () => {
 
   it('의도한 차이: 너무 깊은 중첩은 요약하지 않는다(옛 TS는 읽는다)', () => {
     const deep = `${'['.repeat(2500)}${']'.repeat(2500)}`;
-    expect(legacySummarizeJsonContent(deep)).toBe('배열, 1개 항목');
     expect(summarizeJsonContent(deep)).toBeUndefined();
     const ok = `${'['.repeat(1500)}${']'.repeat(1500)}`;
     expect(summarizeJsonContent(ok)).toBe('배열, 1개 항목');

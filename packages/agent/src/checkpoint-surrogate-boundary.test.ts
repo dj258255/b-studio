@@ -1,6 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { decodeNative, encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
-import { legacy } from './checkpoint-git-legacy';
 import { gitEnvFrom, stagedMismatchOf } from './checkpoints';
 import { Gen, readEnvNumber } from './differential-kit';
 import { decodeLoneSurrogates } from './lone-surrogates';
@@ -13,9 +13,14 @@ import { decodeLoneSurrogates } from './lone-surrogates';
  * 성질: 옛 구현(JS 문자열 비교)이 "다르다"인데 새 구현이 "같다"인 쌍은 0이고, 그 반대도 0이다. 인코딩을 빼면 열린 쪽 뒤집힘이 생기는지로 시험 자체를 확인한다.
  * 거부 목록 쪽(환경 변수 이름의 GIT_*, 위험 설정 키)은 U+FFFD로 합쳐져도 더 막을 뿐이라 인코딩하지 않는다: 이름이 아니라 자리로 답해 지워진다.
  * 크기는 SURROGATE_PAIRS 환경 변수로 바꾼다.
+ *
+ * 옛 TS(`checkpoint-git-legacy.ts`, #1347에서 지움)가 같은 시드(11·13)의 입력에 낸 값은 `checkpoint-surrogate-boundary-frozen.json`에 얼려 두었다
+ * (`staged`: 입력마다 옛 불일치 목록에 기대 경로가 들었는가(1)·git 경로가 들었는가(2)의 합, 목록은 이 둘의 부분집합이라 그대로 되살린다. `ours`: 옛 작성자 비교 `1`/`0`).
  */
+const FROZEN = JSON.parse(readFileSync(new URL('./checkpoint-surrogate-boundary-frozen.json', import.meta.url), 'utf8')) as { pairs: number; staged: string; ours: string };
 const ALPHABET = ['\ud800', '\udbff', '\udc00', '\udfff', '😀', '\ud83d', '\ude00', '�', '', '', '', '', '', '', '', '', '', 'a', 'b', 'd', '8', '0', '/'];
 const PAIRS = readEnvNumber('SURROGATE_PAIRS', 30_000);
+if (PAIRS > FROZEN.pairs) throw new Error(`얼린 값은 ${FROZEN.pairs}개뿐입니다`);
 
 const wellFormed = (text: string) => text.replace(/[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g, '�');
 /** git이 낼 수 있는 경로: 짝 없는 서로게이트가 없다(유효한 UTF-8을 읽은 것) */
@@ -51,7 +56,8 @@ describe('짝 없는 서로게이트 경계', () => {
       const ls = `100644 aaa 0\t${actualPath}\0`;
       const staged = `${actualPath}\0`;
       const expected = new Map([[expectedPath, 'blob:aaa']]);
-      const before = legacy.stagedMismatch(ls, staged, '', expected);
+      const code = Number(FROZEN.staged[i]);
+      const before = [...new Set([...(code & 1 ? [expectedPath] : []), ...(code & 2 ? [actualPath] : [])])].sort();
       const after = stagedMismatchOf(ls, staged, '', expected);
       if (before.length > 0) mismatches++;
       expect(after).toEqual(before);
@@ -77,7 +83,7 @@ describe('짝 없는 서로게이트 경계', () => {
     for (let i = 0; i < PAIRS; i++) {
       const [ours, anyEmail] = pair(g);
       const gitEmail = gitSide(anyEmail);
-      const before = legacy.sessionRecords(`s\0h\0subject\0body\0${gitEmail}\0a\0b\0c\x1e`, ours)[0]!.ours;
+      const before = FROZEN.ours[i] === '1';
       const after = (decodeNative(native.checkpointSessionRecords(`s\0h\0subject\0body\0${gitEmail}\0a\0b\0c\x1e`, encodeLoneSurrogates(ours))) as Array<{ ours: boolean }>)[0]!.ours;
       if (before) trues++;
       expect(after).toBe(before);

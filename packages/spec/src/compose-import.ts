@@ -4,7 +4,7 @@
  * 잘 알려진 인프라 이미지를 쓰는 서비스를 읽어 `compose.b-studio.yaml`에 함께 넣을 형태로 정리한다.
  * 순수 함수만 둔다(파일을 찾고 읽는 일은 호출자가 한다) — apps/studio는 `yaml` 패키지를 직접 물고 있지 않고, 이 패키지는 이미 물고 있다.
  *
- * 계산은 Rust(`crates/bstudio-guard/src/compose_import.rs`)가 한다. 옛 TS는 `compose-import-legacy.ts`로 남겨
+ * 계산은 Rust(`crates/bstudio-guard/src/compose_import.rs`)가 한다. 옛 TS는 #1347에서 지웠다.
  * 차등 시험만 그것을 import한다.
  */
 import { decodeNative, encodeNative, native } from './native';

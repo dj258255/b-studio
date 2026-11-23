@@ -7,7 +7,6 @@ import { AGENT_HOOK_SCRIPT, AGENT_READ_TOOLS, AGENT_WRITE_TOOL_MATCHER, CODEX_RE
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StudioEvent } from '../studio-events';
 import { classifyPrompt, isReadTool } from './session-terminal-classify';
-import { LEGACY_AGENT_READ_TOOLS, LEGACY_CODEX_READ_TOOLS, legacyIsReadTool, legacyServerPrompt, legacyServerReadOnly } from './session-terminal-classify-legacy';
 import { archivedSnapshot } from './session-store';
 
 /**
@@ -101,6 +100,11 @@ vi.mock('./session-terminal', () => ({
 }));
 
 import { createSession, getSnapshot, openTerminalRunId, resumeSession, sessionTerminalTarget, setTerminalCheckChanges, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { frozenModule, loadTable } from './frozen-vectors';
+
+// 아래 `legacy*`는 옛 TS가 낸 값을 JSON에서 꺼내는 껍데기다(옛 TS 파일은 지웠다). 같은 입력은 같은 값을 돌려준다.
+const FROZEN = loadTable(new URL('./sessions-terminal-classify-vectors.json', import.meta.url));
+const { LEGACY_AGENT_READ_TOOLS, LEGACY_CODEX_READ_TOOLS, legacyIsReadTool, legacyServerPrompt, legacyServerReadOnly } = frozenModule(FROZEN, 'session-terminal-classify-legacy:');
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 

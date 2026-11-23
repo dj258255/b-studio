@@ -1,49 +1,32 @@
 import { readFileSync } from 'node:fs';
-import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
+import { native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 import { Gen } from './differential-kit';
-import * as old from './requirements-replies-legacy';
 import * as cur from './requirements';
 import { parsePlannerReply } from './task-plan';
 
 /**
- * 모델 답 읽기(ADR-191 3단계 3ad)의 벡터. 기대값은 옮기기 전 TS(`requirements-replies-legacy.ts`)가 낸 JSON 글자다(`requirements-replies-vectors.json`).
- * `VECTORS_AGAINST_LEGACY=1`로 돌리면 같은 벡터를 옛 TS에 넣는다. 그러면 `intended`(의도한 차이: 낱말 중간을 자른 ASCII 인용을 옛 TS는 "명세에 있음"으로 읽는다, 트러블슈팅 179)만 실패해야 한다.
+ * 모델 답 읽기(ADR-191 3단계 3ad)의 벡터. 기대값은 옮기기 전 TS(`requirements-replies-legacy.ts`, #1347에서 지움)가 낸 JSON 글자다(`requirements-replies-vectors.json`).
+ * `intended`(의도한 차이: 낱말 중간을 자른 ASCII 인용을 옛 TS는 "명세에 있음"으로 읽는다, 트러블슈팅 179)만 옛 TS와 달랐고, 그 기대값은 새 구현이 내는 값이다.
  * 인식하는 꼴마다 거의 같은 거부 입력을 넣었다: 펜스(표지 없음·대문자·붙임·하나뿐·네 개·안의 펜스), 목록 상한의 같음·±1(60·5·20·10·20, 시나리오 20), 인용의 대소문자·공백 종류·보이지 않는 글자·앞부분만·일부 낱말만·낱말 중간,
  * 코드 단위 300 경계(두 단위 글자·짝 없는 서로게이트·예약 글자), 상한 문구의 접두·접미·구분자·전각 숫자, JSON 이름의 대소문자·덧붙임·유니코드 접힘 글자.
  */
 interface Vector { name: string; fn: string; args: unknown[]; out: unknown; intended?: boolean }
 const { vectors } = JSON.parse(readFileSync(new URL('./requirements-replies-vectors.json', import.meta.url), 'utf8')) as { vectors: Vector[] };
-const legacy = Boolean(process.env.VECTORS_AGAINST_LEGACY);
-
-function recommendLegacy(text: string, spec: string): unknown {
-  const raw = old.parsePlannerReplyLegacy(text);
-  const result = cur.RecommendationReplySchema.safeParse(raw);
-  if (!result.success) throw new Error(`추천 응답 형식이 올바르지 않습니다: ${result.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
-  return { recommendations: old.enforceSpecQuoteEvidenceLegacy(result.data.recommendations as old.Recommendation[], spec) };
-}
-
+/** 옛 TS `verifySpecQuote`가 아래 무작위 입력(시드 3)에 낸 값(`1`/`0`을 이은 글자) */
+const FROZEN_QUOTE = JSON.parse(readFileSync(new URL('./requirements-replies-quote-frozen.json', import.meta.url), 'utf8')) as { pairs: number; quote: string };
 function call(vector: Vector): unknown {
   const [a, b] = vector.args as [never, never];
   switch (vector.fn) {
-    case 'planner': return legacy ? old.parsePlannerReplyLegacy(a) : parsePlannerReply(a);
-    case 'repair': return legacy ? old.repairExtractionReplyLegacy(a) : cur.repairExtractionReply(a);
-    case 'recommend': return legacy ? recommendLegacy(a, b) : cur.parseRecommendationReply(a, b);
-    case 'preview': return legacy ? old.firstLinesPreviewLegacy(a) : cur.buildReferencedFilePreview('x.txt', a, 1).preview;
-    case 'jsonPath': return legacy ? old.isJsonPathLegacy(a) : native.reqReplyIsJsonPath(a);
-    case 'tooBig': {
-      if (legacy) {
-        const match = old.REFERENCE_FILE_TOO_BIG.exec(a);
-        return match ? Number(match[1]) : null;
-      }
+    case 'planner': return parsePlannerReply(a);
+    case 'repair': return cur.repairExtractionReply(a);
+    case 'recommend': return cur.parseRecommendationReply(a, b);
+    case 'preview': return cur.buildReferencedFilePreview('x.txt', a, 1).preview;
+    case 'jsonPath': return native.reqReplyIsJsonPath(a);
+    case 'tooBig':
       return native.reqReplyTooBigBytes(a) ?? null;
-    }
     case 'usage': {
       const [x, y] = vector.args as [number[], number[]];
-      if (legacy) {
-        const r = old.addUsageLegacy({ inputTokens: x[0]!, outputTokens: x[1]!, cacheReadTokens: x[2]!, cacheWriteTokens: x[3]! }, { inputTokens: y[0]!, outputTokens: y[1]!, cacheReadTokens: y[2]!, cacheWriteTokens: y[3]! });
-        return [r.inputTokens, r.outputTokens, r.cacheReadTokens, r.cacheWriteTokens];
-      }
       return native.reqReplyAddUsage(x, y);
     }
     default: throw new Error(`모르는 fn ${vector.fn}`);
@@ -73,14 +56,9 @@ describe('모델 답 읽기 벡터', () => {
     expect(vectors.filter((v) => v.intended).length).toBeGreaterThanOrEqual(10);
   });
 
-  it(legacy ? '옛 TS: 의도한 차이(intended)만 실패한다' : '새 구현은 모든 벡터와 같다', () => {
+  it('새 구현은 모든 벡터와 같다', () => {
     const failed = vectors.filter((vector) => run(vector) !== JSON.stringify(vector.out));
-    if (legacy) {
-      expect(failed.filter((v) => !v.intended).map((v) => v.name)).toEqual([]);
-      expect(failed.length).toBe(vectors.filter((v) => v.intended).length);
-    } else {
-      expect(failed.map((v) => v.name)).toEqual([]);
-    }
+    expect(failed.map((v) => v.name)).toEqual([]);
   });
 
   it('입력을 고쳐 쓰지 않는다', () => {
@@ -95,7 +73,6 @@ describe('짝 없는 서로게이트 성질', () => {
   it('인코딩하지 않고 보내면 서로 다른 짝 없는 서로게이트가 합쳐져 인용이 있다로 뒤집힌다(재현)', () => {
     // 경계에서 둘 다 U+FFFD가 되어 같은 글자가 된다 — 인코딩 없이 보낸 판정은 열린다
     expect(native.reqCoreVerifySpecQuote('\ud800', 'x\udc00y')).toBe(true);
-    expect(old.verifySpecQuote('\ud800', 'x\udc00y')).toBe(false);
     // 껍데기는 인코딩해서 보내므로 열리지 않는다
     expect(cur.verifySpecQuote('\ud800', 'x\udc00y')).toBe(false);
     const text = `\`\`\`json\n${JSON.stringify({ recommendations: [{ question: 'q', answer: 'a', rationale: 'r', basis: 'spec', specQuote: '\ud800' }] })}\n\`\`\``;
@@ -109,17 +86,17 @@ describe('짝 없는 서로게이트 성질', () => {
     let flips = 0;
     let rawOpened = 0;
     let both = 0;
+    expect(FROZEN_QUOTE.pairs).toBe(20000);
     for (let i = 0; i < 20000; i++) {
       const quote = g.text(pool, 1 + g.int(3));
       const spec = g.text(pool, 1 + g.int(6));
-      const before = old.verifySpecQuote(quote, spec);
+      const before = FROZEN_QUOTE.quote[i] === '1';
       const after = cur.verifySpecQuote(quote, spec);
       if (!before && after) flips += 1;
       if (before && after) both += 1;
       if (!before && native.reqCoreVerifySpecQuote(quote, spec)) rawOpened += 1;
       // 인코딩한 두 글자의 비교는 옛 TS(코드 단위 비교)와 같다. 예외는 문서에 적힌 닫는 쪽(옛 "있음" → 새 "없음": 짝의 일부)뿐이다
       if (before !== after) expect(before && !after, JSON.stringify([quote, spec])).toBe(true);
-      void encodeLoneSurrogates;
     }
     expect(flips).toBe(0);
     expect(both).toBeGreaterThan(500);

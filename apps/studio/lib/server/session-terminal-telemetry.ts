@@ -4,7 +4,7 @@ import type { ApiRequestUsage } from './terminal-telemetry';
 /**
  * 세션 터미널의 텔레메트리 본문 해석과 턴 상한 전이(ADR-216, 4f B5b). 판정은 Rust `crates/bstudio-session`의
  * `terminal::telemetry`·`terminal::limit`가 한다(순수 함수). 여기는 본문과 사실을 코어에 넘기고 결과를 TS 값으로 돌려주는 껍데기다.
- * 옛 판정은 `session-terminal-telemetry-legacy.ts`(와 `terminal-telemetry.ts`의 `apiRequestsFromOtlp`)에 차등 시험의 기준으로만 남아 있다.
+ * 옛 판정(`session-terminal-telemetry-legacy.ts`)은 #1347에서 지웠다.
  * 서브에이전트 신호(`agentSignalsFromOtlp`)는 화면의 에이전트 내역에만 쓰고 한도에 닿지 않아 `terminal-telemetry.ts`에 남긴다.
  *
  * 막는 검사의 입력이다. 덜 세는 쪽이 여는 쪽이라, 코어가 알아보지 못한 값은 센다/확인할 수 없음으로 읽는다.
