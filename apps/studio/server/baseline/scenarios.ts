@@ -933,7 +933,8 @@ async function persistedLabel(sessionsDir: string): Promise<string | null> {
 const agentOptions = (agentCli: NonNullable<WorldOptions['agentCli']>, more: WorldOptions = {}): WorldOptions => ({ agentCli, ...more });
 
 /** 조건이 참이 될 때까지 사진에 남기지 않고 되풀이해 읽는다(되풀이 횟수가 시각에 달려 있어 사진에 남기지 않는다) */
-async function waitUntil<T>(label: string, read: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 120_000): Promise<T> {
+// 상한은 시험 하나의 상한(240초) 안에서 넉넉히 둔다. 작업 분해는 레인 둘과 통합을 차례로 돌아, 사진 수십 개가 함께 도는 전체 시험에서 120초를 넘긴 적이 있다
+async function waitUntil<T>(label: string, read: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 200_000): Promise<T> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const value = await read();
