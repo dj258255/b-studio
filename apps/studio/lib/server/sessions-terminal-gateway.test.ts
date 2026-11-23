@@ -2940,3 +2940,108 @@ describe('작업 분해가 터미널 세션에 붙이는 조율 게시판 (이�
     await stopSession(session.id);
   }, 30_000);
 });
+
+describe('터미널 실행도 끝날 때 모델 관측을 남긴다 (이슈 #1359)', () => {
+  const otlp = (records: Array<Record<string, unknown>>): unknown => ({ resourceLogs: [{ scopeLogs: [{ logRecords: records }] }] });
+  const req = (model: string, outputTokens: number, requestId: string, costUsd?: number): Record<string, unknown> => ({
+    timeUnixNano: String(Date.now() * 1_000_000),
+    attributes: [
+      { key: 'event.name', value: { stringValue: 'claude_code.api_request' } },
+      { key: 'model', value: { stringValue: model } },
+      { key: 'input_tokens', value: { intValue: '100' } },
+      { key: 'output_tokens', value: { intValue: String(outputTokens) } },
+      { key: 'request_id', value: { stringValue: requestId } },
+      ...(costUsd !== undefined ? [{ key: 'cost_usd', value: { doubleValue: costUsd } }] : []),
+    ],
+  });
+  let file: string;
+  const saved = process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE;
+  beforeEach(async () => {
+    file = path.join(await mkdtemp(path.join(tmpdir(), 'b-studio-observations-')), 'model-observations.json');
+    process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE = file;
+  });
+  afterEach(() => {
+    if (saved === undefined) delete process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE;
+    else process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE = saved;
+  });
+  const recorded = async () => (await import('./model-observations')).observations();
+
+  it('게이트를 통과하면 텔레메트리에서 가장 많이 답한 모델로 passed: true를 남기고, 모든 요청에 실린 비용을 합친다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([req('claude-haiku-5', 5, 'r1', 0.001), req('claude-sonnet-5', 50, 'r2', 0.02)]));
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    const [observation, ...rest] = await recorded();
+    expect(rest).toEqual([]);
+    expect(observation).toMatchObject({ modelId: 'claude-sonnet-5', passed: true });
+    expect(observation!.costUsd).toBeCloseTo(0.021, 6);
+    expect(observation!.latencyMs).toBeGreaterThanOrEqual(0);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('비용이 일부 요청에만 실려 왔으면 비용을 비운다(적게 합치지 않는다)', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([req('claude-sonnet-5', 50, 'r1', 0.02), req('claude-sonnet-5', 50, 'r2')]));
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    const [observation] = await recorded();
+    expect(observation).toMatchObject({ modelId: 'claude-sonnet-5', passed: true });
+    expect(observation!.costUsd).toBeUndefined();
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('재시도 상한까지 통과하지 못하면 passed: false를 남긴다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([req('claude-sonnet-5', 50, 'r1')]));
+    await write(session, 'api/src/Order.java', 'class Order { String memo }\n');
+    fake.failCommands = ['test'];
+    await session.gateway.stop({});
+    await session.gateway.stop({});
+    await session.gateway.stop({ last_assistant_message: '더는 못 고치겠습니다.' });
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    expect(await recorded()).toMatchObject([{ modelId: 'claude-sonnet-5', passed: false }]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('샌드박스·도커 쪽 문제로 검증하지 못한 실행은 모델 탓이 아니라 남기지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([req('claude-sonnet-5', 50, 'r1')]));
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    fake.restartFails = 'platform';
+    await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(session.ofType('run_finished')).toMatchObject([{ status: 'failed' }]);
+    expect(await recorded()).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('사람이 취소한 실행은 게이트를 한 번 돌았어도 남기지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([req('claude-sonnet-5', 50, 'r1')]));
+    await write(session, 'api/src/Order.java', 'class Order { String memo }\n');
+    fake.failCommands = ['test'];
+    expect((await session.gateway.stop({})).feedback).toBeDefined();
+    cancelRun(session.id, session.ofType('run_started')[0]!.runId);
+    await expect.poll(() => session.ofType('run_finished').length).toBe(1);
+    expect(session.ofType('run_finished')[0]!.status).toBe('cancelled');
+    expect(await recorded()).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('텔레메트리가 없어 쓴 모델을 모르거나, 파일을 바꾸지 않은 턴은 남기지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo; }\n');
+    expect((await session.gateway.stop({ last_assistant_message: '추가했습니다.' })).message).toContain('검증 통과 — 체크포인트');
+    await session.gateway.prompt({ prompt: '이 프로젝트 구조를 설명해줘' });
+    await session.gateway.telemetry(otlp([req('claude-sonnet-5', 50, 'r2')]));
+    expect(await session.gateway.stop({ last_assistant_message: 'api 서비스 하나로 된 프로젝트입니다.' })).toEqual({});
+    expect(session.ofType('run_finished')).toHaveLength(2);
+    expect(await recorded()).toEqual([]);
+    await stopSession(session.id);
+  }, 30_000);
+});

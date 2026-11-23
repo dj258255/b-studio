@@ -11,3 +11,11 @@ if (!process.env.B_STUDIO_CLAUDE_CONFIG_DIR) {
   process.env.B_STUDIO_CLAUDE_CONFIG_DIR = dir;
   process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
 }
+
+// 모델 관측(라우터가 읽는 모델별 통과율, 기본은 ~/.cache/b-studio/model-observations.json)도 시험이 사용자의 실제 파일에 쓰지 않게 임시 폴더로 돌린다.
+// 터미널 실행은 텔레메트리가 온 실행이 끝날 때마다 관측을 남긴다(#1359). 경로를 직접 정하는 시험은 그대로 덮어쓴다
+if (!process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE) {
+  const dir = mkdtempSync(path.join(realpathSync(tmpdir()), 'b-studio-test-observations-'));
+  process.env.B_STUDIO_MODEL_OBSERVATIONS_FILE = path.join(dir, 'model-observations.json');
+  process.on('exit', () => rmSync(dir, { recursive: true, force: true }));
+}
