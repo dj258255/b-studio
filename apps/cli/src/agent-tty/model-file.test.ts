@@ -58,6 +58,8 @@ try { loadModelFile(${JSON.stringify(file)}); console.log('읽음'); } catch (er
   it('키 없는 anthropic 설정은 거절한다(SDK가 환경 변수의 키로 대신하지 않게)', () => {
     write({ profile: { ...profile, provider: 'anthropic', baseUrl: undefined } });
     expect(() => loadModelFile(file)).toThrow(/apiKey가 필요합니다/);
+    write({ profile: { ...profile, provider: 'anthropic', baseUrl: undefined }, apiKey: '  \n' });
+    expect(() => loadModelFile(file)).toThrow(/apiKey가 필요합니다/);
   });
 
   it('없으면 거절한다', () => {

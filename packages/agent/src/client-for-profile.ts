@@ -15,11 +15,15 @@ export function apiKeyEnvName(profile: ModelProfile): string {
 export function clientForProfile(profile: ModelProfile, options: { env: Record<string, string | undefined>; effort?: Effort }): ModelClient {
   if (profile.provider === 'anthropic') {
     const name = profile.apiKeyEnv ?? 'ANTHROPIC_API_KEY';
-    const credential = options.env[name]?.trim();
+    // 두 자격 증명을 모두 밝혀 넘긴다(고르지 않은 쪽과 빈 값은 null). undefined를 넘기면 SDK가 process.env의 키를 대신 읽어
+    // 이 설정의 baseUrl로 보낸다 — 넘겨 받은 env에서만 읽는다는 약속이 깨진다
+    const credential = options.env[name]?.trim() || null;
+    const token = name === 'ANTHROPIC_AUTH_TOKEN';
     return new AnthropicModelClient({
       model: profile.model,
       baseURL: profile.baseUrl,
-      ...(name === 'ANTHROPIC_AUTH_TOKEN' ? { authToken: credential } : { apiKey: credential }),
+      apiKey: token ? null : credential,
+      authToken: token ? credential : null,
       authLabel: name,
       ...(options.effort ? { effort: options.effort } : {}),
     });

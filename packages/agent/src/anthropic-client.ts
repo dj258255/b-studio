@@ -7,8 +7,10 @@ export interface AnthropicModelClientOptions {
   model?: string;
   effort?: Effort;
   maxTokens?: number;
-  apiKey?: string;
-  authToken?: string;
+  /** null이면 SDK가 환경 변수(ANTHROPIC_API_KEY)에서 대신 읽지 않는다. undefined면 읽는다 */
+  apiKey?: string | null;
+  /** null이면 SDK가 환경 변수(ANTHROPIC_AUTH_TOKEN)에서 대신 읽지 않는다 */
+  authToken?: string | null;
   baseURL?: string;
   authLabel?: string;
 }

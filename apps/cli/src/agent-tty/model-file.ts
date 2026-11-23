@@ -50,8 +50,10 @@ export function loadModelFile(file: string): LoadedModel {
     closeSync(fd);
   }
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) throw new ModelFileError('모델 파일은 {"profile": …} 꼴의 객체여야 합니다');
-  const { profile: rawProfile, apiKey } = raw as { profile?: unknown; apiKey?: unknown };
-  if (apiKey !== undefined && typeof apiKey !== 'string') throw new ModelFileError('모델 파일의 apiKey는 문자열이어야 합니다');
+  const { profile: rawProfile, apiKey: rawKey } = raw as { profile?: unknown; apiKey?: unknown };
+  if (rawKey !== undefined && typeof rawKey !== 'string') throw new ModelFileError('모델 파일의 apiKey는 문자열이어야 합니다');
+  // 클라이언트가 다듬어 읽으므로 같은 규칙으로 읽는다: 공백뿐인 키는 없는 키다
+  const apiKey = rawKey?.trim() || undefined;
   let profile: ModelProfile;
   try {
     const [validated] = validateModelProfiles([rawProfile]);

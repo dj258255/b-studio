@@ -39,4 +39,19 @@ describe('clientForProfile', () => {
     expect(seen[0]?.get('x-api-key')).toBeNull();
     expect(seen[1]?.get('x-api-key')).toBe('key-1');
   });
+
+  it('anthropic은 process.env의 키·토큰을 대신 읽지 않는다(고르지 않은 쪽, 빈 값 모두)', async () => {
+    const seen = stubFetch();
+    vi.stubEnv('ANTHROPIC_API_KEY', 'env-key');
+    vi.stubEnv('ANTHROPIC_AUTH_TOKEN', 'env-token');
+    const key: ModelProfile = { ...base, id: 'a', provider: 'anthropic', model: 'm', baseUrl: 'http://127.0.0.1:9' };
+    await clientForProfile(key, { env: { ANTHROPIC_API_KEY: 'key-1' } }).createMessage(request).catch(() => undefined);
+    await clientForProfile(key, { env: { ANTHROPIC_API_KEY: '  ' } }).createMessage(request).catch(() => undefined);
+    await clientForProfile({ ...key, apiKeyEnv: 'ANTHROPIC_AUTH_TOKEN' }, { env: { ANTHROPIC_AUTH_TOKEN: 'tok-1' } }).createMessage(request).catch(() => undefined);
+    vi.unstubAllEnvs();
+    const headers = seen.flatMap((h) => [h.get('authorization'), h.get('x-api-key')]).filter(Boolean);
+    expect(headers.join(' ')).not.toMatch(/env-key|env-token/);
+    expect(seen[0]?.get('x-api-key')).toBe('key-1');
+    expect(seen.at(-1)?.get('authorization')).toBe('Bearer tok-1');
+  });
 });
