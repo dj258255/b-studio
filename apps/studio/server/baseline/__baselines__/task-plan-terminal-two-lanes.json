@@ -1,0 +1,1312 @@
+{
+  "http": [
+    {
+      "step": "작업 카드로 계획 만들기",
+      "method": "POST",
+      "path": "/api/task-plans",
+      "status": 201,
+      "body": {
+        "id": "<plan>",
+        "owner": "local",
+        "projectId": "demo",
+        "request": "파일 둘을 만든다",
+        "modelId": "terminal",
+        "status": "planning",
+        "createdAt": "<createdAt>",
+        "lanes": [],
+        "source": "cards",
+        "runner": "terminal"
+      }
+    },
+    {
+      "step": "계획 끝난 뒤",
+      "method": "GET",
+      "path": "/api/task-plans/<plan>",
+      "status": 200,
+      "body": {
+        "id": "<plan>",
+        "owner": "local",
+        "projectId": "demo",
+        "request": "파일 둘을 만든다",
+        "modelId": "terminal",
+        "status": "done",
+        "createdAt": "<createdAt>",
+        "lanes": [
+          {
+            "id": "lane-1",
+            "paths": [
+              "app/a.txt"
+            ],
+            "status": "done",
+            "tasks": [
+              {
+                "id": "card-1",
+                "title": "파일 A",
+                "request": "카드 A: app/a.txt를 만들어 주세요",
+                "paths": [
+                  "app/a.txt"
+                ],
+                "dependsOn": [],
+                "doneCommand": "true",
+                "doneService": "app",
+                "status": "done",
+                "run": {
+                  "status": "done",
+                  "durationMs": "<durationMs>",
+                  "usage": {
+                    "inputTokens": 200,
+                    "outputTokens": 40,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0
+                  },
+                  "metrics": {
+                    "modelCalls": 1,
+                    "maxContextTokens": 0,
+                    "toolMs": "<toolMs>",
+                    "gateMs": "<gateMs>",
+                    "usageByModel": {
+                      "fake-model": {
+                        "inputTokens": 200,
+                        "outputTokens": 40,
+                        "cacheReadTokens": 0,
+                        "cacheWriteTokens": 0
+                      }
+                    }
+                  },
+                  "costUsd": 0.02
+                },
+                "summary": "카드 A를 끝냈습니다.",
+                "checkpoint": {
+                  "sha": "<sha:2>",
+                  "shortSha": "<sha:2>",
+                  "files": [
+                    "app/a.txt"
+                  ]
+                }
+              }
+            ],
+            "startedAt": "<startedAt>",
+            "sessionId": "<lane-a>",
+            "bootMs": "<bootMs>",
+            "bootRxBytes": 1000,
+            "workDir": "<root>/sessions/demo-<lane-a>",
+            "changedFiles": [
+              "app/a.txt"
+            ],
+            "checkpointSha": "<sha:2>",
+            "finishedAt": "<time>"
+          },
+          {
+            "id": "lane-2",
+            "paths": [
+              "app/b.txt"
+            ],
+            "status": "done",
+            "tasks": [
+              {
+                "id": "card-2",
+                "title": "파일 B",
+                "request": "카드 B: app/b.txt를 만들어 주세요",
+                "paths": [
+                  "app/b.txt"
+                ],
+                "dependsOn": [],
+                "doneCommand": "true",
+                "doneService": "app",
+                "status": "done",
+                "run": {
+                  "status": "done",
+                  "durationMs": "<durationMs>",
+                  "usage": {
+                    "inputTokens": 200,
+                    "outputTokens": 40,
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0
+                  },
+                  "metrics": {
+                    "modelCalls": 1,
+                    "maxContextTokens": 0,
+                    "toolMs": "<toolMs>",
+                    "gateMs": "<gateMs>",
+                    "usageByModel": {
+                      "fake-model": {
+                        "inputTokens": 200,
+                        "outputTokens": 40,
+                        "cacheReadTokens": 0,
+                        "cacheWriteTokens": 0
+                      }
+                    }
+                  },
+                  "costUsd": 0.02
+                },
+                "summary": "카드 B를 끝냈습니다.",
+                "checkpoint": {
+                  "sha": "<sha:3>",
+                  "shortSha": "<sha:3>",
+                  "files": [
+                    "app/b.txt"
+                  ]
+                }
+              }
+            ],
+            "startedAt": "<startedAt>",
+            "sessionId": "<lane-b>",
+            "bootMs": "<bootMs>",
+            "bootRxBytes": 1000,
+            "workDir": "<root>/sessions/demo-<lane-b>",
+            "changedFiles": [
+              "app/b.txt"
+            ],
+            "checkpointSha": "<sha:3>",
+            "finishedAt": "<time>"
+          }
+        ],
+        "source": "cards",
+        "runner": "terminal",
+        "approvedBy": "local",
+        "approvedAt": "<time>",
+        "integration": {
+          "status": "done",
+          "files": [
+            "app/a.txt",
+            "app/b.txt"
+          ],
+          "deleted": [],
+          "startedAt": "<startedAt>",
+          "sessionId": "<integration>",
+          "bootMs": "<bootMs>",
+          "bootRxBytes": 1000,
+          "run": {
+            "status": "done",
+            "durationMs": "<durationMs>"
+          },
+          "checkpoint": {
+            "sha": "<sha:4>",
+            "shortSha": "<sha:4>",
+            "files": [
+              "app/a.txt",
+              "app/b.txt"
+            ]
+          },
+          "finishedAt": "<time>"
+        },
+        "finishedAt": "<time>",
+        "metrics": {
+          "endToEndMs": "<endToEndMs>",
+          "usage": {
+            "inputTokens": 400,
+            "outputTokens": 80,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0
+          },
+          "usageByModel": {
+            "fake-model": {
+              "inputTokens": 400,
+              "outputTokens": 80,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            }
+          },
+          "modelCalls": 2,
+          "maxContextTokens": 0,
+          "bootMsTotal": "<bootMsTotal>",
+          "bootMsMax": "<bootMsMax>",
+          "bootRxBytesTotal": 3000,
+          "modelMs": "<modelMs>",
+          "toolMs": "<toolMs>",
+          "gateMs": "<gateMs>",
+          "integrationMs": "<integrationMs>",
+          "sessions": 3
+        }
+      }
+    },
+    {
+      "step": "레인 B의 작업 복사본",
+      "method": "OBSERVE",
+      "path": "disk",
+      "status": 0,
+      "body": {
+        "commits": [
+          "데모 프로젝트",
+          "feat: 카드 B: app/b.txt를 만든다\n\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료\n\n검사 동안 다른 프로세스의 쓰기를 막지 않았습니다(이 컴퓨터 방식 터미널. 컨테이너 방식은 검사 동안 에이전트 컨테이너를 멈춥니다)\n\n게이트가 확인함: [test] done-card-2(통과)\n\n에이전트 요약:\n카드 B를 끝냈습니다.\n\nWorkflow-Passed: run, contract_check, test, review"
+        ],
+        "status": [],
+        "files": {
+          "app/a.txt": null,
+          "app/b.txt": "레인 B의 파일\n"
+        }
+      }
+    }
+  ],
+  "events": {
+    "run": [
+      {
+        "type": "run_started",
+        "runId": "<run:1>",
+        "request": "카드 A: app/a.txt를 만들어 주세요\n\n[작업 분해] 전체 요청: 파일 둘을 만든다\n이 작업이 파일을 쓸 수 있는 경로: app/a.txt (그 밖의 쓰기는 실행기가 막습니다)\n완료 조건: 플랫폼이 턴의 끝에 `true`(app)을 돌려 통과해야 체크포인트를 남깁니다.",
+        "by": "local",
+        "via": "terminal",
+        "at": "<at>",
+        "backend": "claude-code",
+        "taskKind": {
+          "complexity": "simple",
+          "risk": "normal"
+        }
+      },
+      {
+        "type": "run_usage",
+        "runId": "<run:1>",
+        "model": "fake-model",
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        },
+        "costUsd": 0.02,
+        "durationMs": "<durationMs>"
+      },
+      {
+        "type": "tokens",
+        "runId": "<run:1>",
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        },
+        "sessionTokens": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "tool_call",
+          "name": "Write",
+          "input": {
+            "file_path": "<root>/sessions/demo-<lane-a>/app/a.txt",
+            "content": "레인 A의 파일\n"
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "text",
+          "text": "카드 A를 끝냈습니다."
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "run",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_start",
+          "files": [
+            "app/a.txt"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "contract_check",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "verify_result",
+          "report": {
+            "ok": true,
+            "sync": {
+              "elapsedMs": "<elapsedMs>"
+            },
+            "restarted": [
+              {
+                "service": "app",
+                "ready": true
+              }
+            ],
+            "contracts": [],
+            "unverifiedFiles": [],
+            "secretLeaks": [],
+            "skippedOff": []
+          },
+          "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+          "moreChecks": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "test",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "review",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "test",
+            "name": "done-card-1",
+            "ok": true,
+            "attempts": 1,
+            "evidence": [
+              "app에서 `sh -c true` 종료 코드 0",
+              "걸린 시간 <n>초"
+            ]
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "workflow_check",
+          "check": {
+            "stage": "review",
+            "name": "protected-paths",
+            "ok": true,
+            "attempts": 1
+          }
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "gate_done",
+          "ok": true
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "stage",
+          "stage": "checkpoint",
+          "source": "platform"
+        }
+      },
+      {
+        "type": "checkpoint",
+        "runId": "<run:1>",
+        "checkpoint": {
+          "sha": "<sha:2>",
+          "shortSha": "<sha:2>",
+          "message": "feat: 카드 A: app/a.txt를 만든다",
+          "createdAt": "<createdAt>",
+          "files": [
+            "app/a.txt"
+          ],
+          "passedStages": [
+            "run",
+            "contract_check",
+            "test",
+            "review"
+          ]
+        }
+      },
+      {
+        "type": "agent",
+        "runId": "<run:1>",
+        "event": {
+          "type": "done",
+          "result": {
+            "status": "done",
+            "summary": "카드 A를 끝냈습니다.",
+            "changedFiles": [
+              "app/a.txt"
+            ],
+            "report": {
+              "ok": true,
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "restarted": [
+                {
+                  "service": "app",
+                  "ready": true
+                }
+              ],
+              "contracts": [],
+              "unverifiedFiles": [],
+              "secretLeaks": [],
+              "skippedOff": []
+            },
+            "checks": [
+              {
+                "stage": "test",
+                "name": "done-card-1",
+                "ok": true,
+                "attempts": 1,
+                "evidence": [
+                  "app에서 `sh -c true` 종료 코드 0",
+                  "걸린 시간 <n>초"
+                ]
+              },
+              {
+                "stage": "review",
+                "name": "protected-paths",
+                "ok": true,
+                "attempts": 1
+              }
+            ],
+            "gateOutcome": "pass",
+            "passedStages": [
+              "run",
+              "contract_check",
+              "test",
+              "review"
+            ],
+            "verifyAttempts": 0,
+            "turns": 0,
+            "usage": {
+              "inputTokens": 200,
+              "outputTokens": 40,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            },
+            "metrics": {
+              "modelCalls": 1,
+              "maxContextTokens": 0,
+              "toolMs": "<toolMs>",
+              "gateMs": "<gateMs>",
+              "usageByModel": {
+                "fake-model": {
+                  "inputTokens": 200,
+                  "outputTokens": 40,
+                  "cacheReadTokens": 0,
+                  "cacheWriteTokens": 0
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        "type": "run_finished",
+        "runId": "<run:1>",
+        "status": "done",
+        "summary": "카드 A를 끝냈습니다.",
+        "unguardedWrites": true,
+        "usage": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        },
+        "metrics": {
+          "modelCalls": 1,
+          "maxContextTokens": 0,
+          "toolMs": "<toolMs>",
+          "gateMs": "<gateMs>",
+          "usageByModel": {
+            "fake-model": {
+              "inputTokens": 200,
+              "outputTokens": 40,
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0
+            }
+          }
+        },
+        "durationMs": "<durationMs>",
+        "sessionTokens": {
+          "inputTokens": 200,
+          "outputTokens": 40,
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0
+        }
+      }
+    ],
+    "platform": [
+      {
+        "type": "snapshot",
+        "snapshot": {
+          "id": "<lane-a>",
+          "projectId": "demo",
+          "projectName": "demo",
+          "workDir": "<root>/sessions/demo-<lane-a>",
+          "workspace": "copy",
+          "status": "stopped",
+          "mode": "claude-code",
+          "backend": "claude-code",
+          "running": false,
+          "owner": "local",
+          "experimental": true,
+          "terminal": true,
+          "terminalMode": "host",
+          "services": [
+            {
+              "name": "app",
+              "template": "nextjs",
+              "preview": "browser",
+              "state": "stopped",
+              "hasContract": false
+            }
+          ],
+          "externals": [],
+          "checkpoints": [
+            {
+              "sha": "<sha:2>",
+              "shortSha": "<sha:2>",
+              "message": "feat: 카드 A: app/a.txt를 만든다",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/a.txt"
+              ],
+              "passedStages": [
+                "run",
+                "contract_check",
+                "test",
+                "review"
+              ]
+            },
+            {
+              "sha": "<sha:1>",
+              "shortSha": "<sha:1>",
+              "message": "세션 시작 (main 브랜치)",
+              "createdAt": "<createdAt>",
+              "files": [
+                "app/hello.txt",
+                "app/readme.txt",
+                "compose.yaml",
+                "studio.yaml"
+              ]
+            }
+          ],
+          "repository": {
+            "remote": "<root>/projects/demo",
+            "kind": "local",
+            "base": "main",
+            "branch": "b-studio/demo-<lane-a>",
+            "sourceDirtyFiles": 0,
+            "canCreatePullRequest": false
+          },
+          "bootNetwork": [
+            {
+              "service": "app",
+              "rxBytes": 1000,
+              "txBytes": 2000
+            }
+          ],
+          "usage": {
+            "at": "<at>",
+            "services": [
+              {
+                "service": "app",
+                "containerName": "<sandbox>-app-1",
+                "role": "managed",
+                "state": "running",
+                "cpuPercent": 0.5,
+                "memoryBytes": 10485760,
+                "networkRxBytes": 1000,
+                "networkTxBytes": 2000,
+                "oomKilled": false
+              },
+              {
+                "service": "b-studio-edge",
+                "containerName": "<sandbox>-b-studio-edge-1",
+                "role": "platform",
+                "state": "running",
+                "cpuPercent": 0.5,
+                "memoryBytes": 10485760,
+                "networkRxBytes": 1000,
+                "networkTxBytes": 2000,
+                "oomKilled": false
+              }
+            ]
+          },
+          "tokens": {
+            "inputTokens": 200,
+            "outputTokens": 40,
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0
+          },
+          "fileRevision": "<fileRevision>"
+        }
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "boot_network",
+        "at": "<at>",
+        "network": [
+          {
+            "service": "app",
+            "rxBytes": 1000,
+            "txBytes": 2000
+          }
+        ]
+      },
+      {
+        "type": "status",
+        "status": "ready"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "starting",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "probing",
+        "url": "http://127.0.0.1:<port>",
+        "detail": "HTTP 200"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "ready",
+        "url": "http://127.0.0.1:<port>"
+      },
+      {
+        "type": "service",
+        "service": "app",
+        "state": "stopped"
+      },
+      {
+        "type": "status",
+        "status": "stopped"
+      },
+      {
+        "type": "snapshot_sync",
+        "repository": {
+          "remote": "<root>/projects/demo",
+          "kind": "local",
+          "base": "main",
+          "branch": "b-studio/demo-<lane-a>",
+          "sourceDirtyFiles": 0,
+          "canCreatePullRequest": false
+        },
+        "checkpoints": [
+          {
+            "sha": "<sha:2>",
+            "shortSha": "<sha:2>",
+            "message": "feat: 카드 A: app/a.txt를 만든다",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/a.txt"
+            ],
+            "passedStages": [
+              "run",
+              "contract_check",
+              "test",
+              "review"
+            ]
+          },
+          {
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>",
+            "message": "세션 시작 (main 브랜치)",
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ]
+          }
+        ]
+      }
+    ],
+    "files": []
+  },
+  "disk": {
+    "commits": [
+      {
+        "sha": "<sha:1>",
+        "message": "데모 프로젝트"
+      },
+      {
+        "sha": "<sha:2>",
+        "message": "feat: 카드 A: app/a.txt를 만든다\n\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료\n\n검사 동안 다른 프로세스의 쓰기를 막지 않았습니다(이 컴퓨터 방식 터미널. 컨테이너 방식은 검사 동안 에이전트 컨테이너를 멈춥니다)\n\n게이트가 확인함: [test] done-card-1(통과)\n\n에이전트 요약:\n카드 A를 끝냈습니다.\n\nWorkflow-Passed: run, contract_check, test, review"
+      }
+    ],
+    "refs": [
+      {
+        "name": "refs/heads/b-studio/demo-<lane-a>",
+        "sha": "<sha:2>"
+      },
+      {
+        "name": "refs/heads/main",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/HEAD",
+        "sha": "<sha:1>"
+      },
+      {
+        "name": "refs/remotes/origin/main",
+        "sha": "<sha:1>"
+      }
+    ],
+    "status": [],
+    "files": {
+      "app/a.txt": "레인 A의 파일\n",
+      "app/b.txt": null,
+      "app/hello.txt": "안녕\n"
+    },
+    "sessionJson": {
+      "agentLedger": {
+        "children": [],
+        "claude": [],
+        "conversations": [],
+        "main": {
+          "calls": 1,
+          "cliCostUsd": 0.02,
+          "lastUsageAt": "<lastUsageAt>",
+          "usageByModel": {
+            "fake-model": {
+              "cacheReadTokens": 0,
+              "cacheWriteTokens": 0,
+              "inputTokens": 200,
+              "outputTokens": 40
+            }
+          }
+        },
+        "pendingNames": [],
+        "version": 1
+      },
+      "claudeCode": {
+        "notes": [
+          "[b-studio] 사용자가 세션 터미널에서 작업해 체크포인트 <sha:2>를 남겼습니다(파일 1개: app/a.txt). 이 파일을 다루기 전에 다시 읽으세요."
+        ]
+      },
+      "codex": {
+        "notes": [],
+        "recent": []
+      },
+      "commandCode": {
+        "notes": []
+      },
+      "conversation": [],
+      "demoIndex": 0,
+      "gemini": {
+        "notes": []
+      },
+      "git": {
+        "branch": "b-studio/demo-<lane-a>",
+        "lastCheckpoint": "<sha:2>",
+        "originUrl": "<root>/projects/demo"
+      },
+      "history": [
+        {
+          "at": "<at>",
+          "network": [
+            {
+              "rxBytes": 1000,
+              "service": "app",
+              "txBytes": 2000
+            }
+          ],
+          "type": "boot_network"
+        },
+        {
+          "at": "<at>",
+          "backend": "claude-code",
+          "by": "local",
+          "request": "카드 A: app/a.txt를 만들어 주세요\n\n[작업 분해] 전체 요청: 파일 둘을 만든다\n이 작업이 파일을 쓸 수 있는 경로: app/a.txt (그 밖의 쓰기는 실행기가 막습니다)\n완료 조건: 플랫폼이 턴의 끝에 `true`(app)을 돌려 통과해야 체크포인트를 남깁니다.",
+          "runId": "<run:1>",
+          "taskKind": {
+            "complexity": "simple",
+            "risk": "normal"
+          },
+          "type": "run_started",
+          "via": "terminal"
+        },
+        {
+          "costUsd": 0.02,
+          "durationMs": "<durationMs>",
+          "model": "fake-model",
+          "runId": "<run:1>",
+          "type": "run_usage",
+          "usage": {
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "inputTokens": 200,
+            "outputTokens": 40
+          }
+        },
+        {
+          "runId": "<run:1>",
+          "sessionTokens": {
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "inputTokens": 200,
+            "outputTokens": 40
+          },
+          "type": "tokens",
+          "usage": {
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "inputTokens": 200,
+            "outputTokens": 40
+          }
+        },
+        {
+          "event": {
+            "input": {
+              "content": "레인 A의 파일\n",
+              "file_path": "<root>/sessions/demo-<lane-a>/app/a.txt"
+            },
+            "name": "Write",
+            "type": "tool_call"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "text": "카드 A를 끝냈습니다.",
+            "type": "text"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "run",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "files": [
+              "app/a.txt"
+            ],
+            "type": "verify_start"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "contract_check",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "moreChecks": true,
+            "report": {
+              "contracts": [],
+              "ok": true,
+              "restarted": [
+                {
+                  "ready": true,
+                  "service": "app"
+                }
+              ],
+              "secretLeaks": [],
+              "skippedOff": [],
+              "sync": {
+                "elapsedMs": "<elapsedMs>"
+              },
+              "unverifiedFiles": []
+            },
+            "text": "검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료",
+            "type": "verify_result"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "test",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "review",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "check": {
+              "attempts": 1,
+              "evidence": [
+                "app에서 `sh -c true` 종료 코드 0",
+                "걸린 시간 <n>초"
+              ],
+              "name": "done-card-1",
+              "ok": true,
+              "stage": "test"
+            },
+            "type": "workflow_check"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "check": {
+              "attempts": 1,
+              "name": "protected-paths",
+              "ok": true,
+              "stage": "review"
+            },
+            "type": "workflow_check"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "ok": true,
+            "type": "gate_done"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "event": {
+            "source": "platform",
+            "stage": "checkpoint",
+            "type": "stage"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "checkpoint": {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/a.txt"
+            ],
+            "message": "feat: 카드 A: app/a.txt를 만든다",
+            "passedStages": [
+              "run",
+              "contract_check",
+              "test",
+              "review"
+            ],
+            "sha": "<sha:2>",
+            "shortSha": "<sha:2>"
+          },
+          "runId": "<run:1>",
+          "type": "checkpoint"
+        },
+        {
+          "event": {
+            "result": {
+              "changedFiles": [
+                "app/a.txt"
+              ],
+              "checks": [
+                {
+                  "attempts": 1,
+                  "evidence": [
+                    "app에서 `sh -c true` 종료 코드 0",
+                    "걸린 시간 <n>초"
+                  ],
+                  "name": "done-card-1",
+                  "ok": true,
+                  "stage": "test"
+                },
+                {
+                  "attempts": 1,
+                  "name": "protected-paths",
+                  "ok": true,
+                  "stage": "review"
+                }
+              ],
+              "gateOutcome": "pass",
+              "metrics": {
+                "gateMs": "<gateMs>",
+                "maxContextTokens": 0,
+                "modelCalls": 1,
+                "toolMs": "<toolMs>",
+                "usageByModel": {
+                  "fake-model": {
+                    "cacheReadTokens": 0,
+                    "cacheWriteTokens": 0,
+                    "inputTokens": 200,
+                    "outputTokens": 40
+                  }
+                }
+              },
+              "passedStages": [
+                "run",
+                "contract_check",
+                "test",
+                "review"
+              ],
+              "report": {
+                "contracts": [],
+                "ok": true,
+                "restarted": [
+                  {
+                    "ready": true,
+                    "service": "app"
+                  }
+                ],
+                "secretLeaks": [],
+                "skippedOff": [],
+                "sync": {
+                  "elapsedMs": "<elapsedMs>"
+                },
+                "unverifiedFiles": []
+              },
+              "status": "done",
+              "summary": "카드 A를 끝냈습니다.",
+              "turns": 0,
+              "usage": {
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "inputTokens": 200,
+                "outputTokens": 40
+              },
+              "verifyAttempts": 0
+            },
+            "type": "done"
+          },
+          "runId": "<run:1>",
+          "type": "agent"
+        },
+        {
+          "durationMs": "<durationMs>",
+          "metrics": {
+            "gateMs": "<gateMs>",
+            "maxContextTokens": 0,
+            "modelCalls": 1,
+            "toolMs": "<toolMs>",
+            "usageByModel": {
+              "fake-model": {
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "inputTokens": 200,
+                "outputTokens": 40
+              }
+            }
+          },
+          "runId": "<run:1>",
+          "sessionTokens": {
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "inputTokens": 200,
+            "outputTokens": 40
+          },
+          "status": "done",
+          "summary": "카드 A를 끝냈습니다.",
+          "type": "run_finished",
+          "unguardedWrites": true,
+          "usage": {
+            "cacheReadTokens": 0,
+            "cacheWriteTokens": 0,
+            "inputTokens": 200,
+            "outputTokens": 40
+          }
+        }
+      ],
+      "openCode": {
+        "notes": []
+      },
+      "owner": {
+        "pid": "<pid>"
+      },
+      "previewToken": "<previewToken>",
+      "sandbox": {
+        "id": "<sandbox>",
+        "provider": "local-docker"
+      },
+      "savedAt": "<savedAt>",
+      "snapshot": {
+        "backend": "claude-code",
+        "bootNetwork": [
+          {
+            "rxBytes": 1000,
+            "service": "app",
+            "txBytes": 2000
+          }
+        ],
+        "checkpoints": [
+          {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/a.txt"
+            ],
+            "message": "feat: 카드 A: app/a.txt를 만든다",
+            "passedStages": [
+              "run",
+              "contract_check",
+              "test",
+              "review"
+            ],
+            "sha": "<sha:2>",
+            "shortSha": "<sha:2>"
+          },
+          {
+            "createdAt": "<createdAt>",
+            "files": [
+              "app/hello.txt",
+              "app/readme.txt",
+              "compose.yaml",
+              "studio.yaml"
+            ],
+            "message": "세션 시작 (main 브랜치)",
+            "sha": "<sha:1>",
+            "shortSha": "<sha:1>"
+          }
+        ],
+        "experimental": true,
+        "externals": [],
+        "fileRevision": "<fileRevision>",
+        "id": "<lane-a>",
+        "mode": "claude-code",
+        "owner": "local",
+        "projectId": "demo",
+        "projectName": "demo",
+        "repository": {
+          "base": "main",
+          "branch": "b-studio/demo-<lane-a>",
+          "canCreatePullRequest": false,
+          "kind": "local",
+          "remote": "<root>/projects/demo",
+          "sourceDirtyFiles": 0
+        },
+        "running": false,
+        "services": [
+          {
+            "hasContract": false,
+            "name": "app",
+            "preview": "browser",
+            "state": "stopped",
+            "template": "nextjs"
+          }
+        ],
+        "status": "stopped",
+        "terminal": true,
+        "terminalMode": "host",
+        "tokens": {
+          "cacheReadTokens": 0,
+          "cacheWriteTokens": 0,
+          "inputTokens": 200,
+          "outputTokens": 40
+        },
+        "workDir": "<root>/sessions/demo-<lane-a>",
+        "workspace": "copy"
+      },
+      "sourceDirtyFiles": 0,
+      "terminalConversation": {
+        "cli": "claude",
+        "id": "conversation-1"
+      },
+      "version": 1
+    }
+  },
+  "docker": {
+    "mutating": [
+      "compose build app",
+      "compose build app",
+      "compose build app",
+      "compose down --volumes --remove-orphans --rmi local",
+      "compose down --volumes --remove-orphans --rmi local",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:00627bf7>",
+      "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c true",
+      "compose exec -T app sh -c true",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "compose up --no-start --build --no-deps --force-recreate app",
+      "compose up --no-start --remove-orphans --no-deps app b-studio-edge",
+      "compose up --no-start --remove-orphans --no-deps app b-studio-edge",
+      "compose up --no-start --remove-orphans --no-deps app b-studio-edge",
+      "run --rm --network none --volume <root>/sessions/demo-<integration>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/a.txt app/b.txt",
+      "run --rm --network none --volume <root>/sessions/demo-<lane-a>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/a.txt",
+      "run --rm --network none --volume <root>/sessions/demo-<lane-b>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/b.txt",
+      "start <container>",
+      "start <container>",
+      "start <container>",
+      "start <container> <container>",
+      "start <container> <container>",
+      "start <container> <container>"
+    ],
+    "atShutdown": [
+      "compose down --volumes --remove-orphans --rmi local",
+      "rm --force <sandbox>-agent"
+    ],
+    "readKinds": [
+      "compose config",
+      "compose logs",
+      "compose port b-studio-edge",
+      "compose ps",
+      "image ls",
+      "inspect",
+      "stats"
+    ],
+    "unknown": []
+  }
+}

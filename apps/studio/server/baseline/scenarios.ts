@@ -19,6 +19,8 @@ export interface Scenario {
    * 어긋난 것을 사람이 읽을 글로 돌려준다(비면 통과)
    */
   check?: (snapshot: BaselineSnapshot) => string[];
+  /** true면 상태를 바꾸는 docker 호출의 순서를 사진에 남기지 않는다(이름순 집합). 세션이 동시에 도는 흐름(Fleet, 작업 분해 레인)은 호출이 서로 끼어든다 */
+  dockerUnordered?: boolean;
   /** `ignore`면 파일 변경 알림의 개수를 사진에 남기지 않는다(왔는지만). 이유는 `withoutFileRevisionCount` */
   fileRevisionCount?: 'ignore';
 }
@@ -53,6 +55,10 @@ export interface ScenarioContext {
   startRouted: (body: Record<string, unknown>, options?: { silent?: boolean }) => Promise<{ id: string; claude: FakeCli | undefined }>;
   /** 만든 세션의 작업 복사본(세션 폴더) 경로 */
   workDir: () => string;
+  /** 다른 흐름(Fleet, 작업 분해)이 만든 세션을 이 시나리오의 세션으로 삼는다: 그 세션의 이벤트를 구독하고, 사진의 디스크는 이 세션의 것을 남긴다 */
+  adopt: (sessionId: string) => Promise<void>;
+  /** 다른 세션의 작업 복사본(git 기록의 메시지·상태와 `files`의 내용)을 사진에 값으로 남긴다. 커밋 id는 남기지 않는다 */
+  observeDisk: (step: string, sessionId: string, files: string[]) => Promise<void>;
   /** 메시지를 보내고 그 실행이 끝날 때까지 기다린다. 끝난 `run_finished` 이벤트를 돌려준다 */
   send: (sessionId: string, text: string, extra?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 }
@@ -1021,3 +1027,166 @@ async function persistedLabel(sessionsDir: string): Promise<string | null> {
   }
   return null;
 }
+
+// ── 스스로 훅을 부르는 가짜 CLI로 서버가 모는 흐름(#1358): Fleet과 작업 분해의 터미널 레인 ──
+// 시험이 훅을 대신 부를 자리가 없다. 서버가 세션 터미널을 열고, 붙여 넣은 요청을 가짜 CLI(fake-claude-agent.mjs)가 받아 훅·텔레메트리를 스스로 부른다.
+// 훅 입력과 CLI 인자는 진짜 CLI를 흉내 낸 값이라 진짜와 같다는 보장은 없다(가짜의 단위 시험이 순서와 모양을 따로 고정한다)
+const agentOptions = (agentCli: NonNullable<WorldOptions['agentCli']>, more: WorldOptions = {}): WorldOptions => ({ agentCli, ...more });
+
+/** 조건이 참이 될 때까지 사진에 남기지 않고 되풀이해 읽는다(되풀이 횟수가 시각에 달려 있어 사진에 남기지 않는다) */
+// 상한은 시험 하나의 상한(240초) 안에서 넉넉히 둔다. 작업 분해는 레인 둘과 통합을 차례로 돌아, 사진 수십 개가 함께 도는 전체 시험에서 120초를 넘긴 적이 있다
+async function waitUntil<T>(label: string, read: () => Promise<T>, done: (value: T) => boolean, timeoutMs = 200_000): Promise<T> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const value = await read();
+    if (done(value)) return value;
+    if (Date.now() > deadline) throw new Error(`기다리다 시간이 지났습니다(${label}): ${JSON.stringify(value).slice(0, 600)}`);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+}
+
+const FLEET_SCRIPT: NonNullable<WorldOptions['agentCli']> = {
+  scripts: ['a', 'b'].map((who) => ({
+    // Fleet은 후보마다 같은 요청을 붙여 넣는다. 후보를 가르는 것은 CLI가 받은 --model뿐이다
+    match: { model: `fake-${who}` },
+    steps: [
+      { telemetry: { requestId: `req_fleet_${who}`, input: 100, output: 20, costUsd: 0.01 } },
+      { write: { path: `app/${who}.txt`, content: `후보 ${who.toUpperCase()}의 파일\n` } },
+      { stop: { text: `후보 ${who.toUpperCase()}가 고쳤습니다.` } },
+    ],
+  })),
+};
+
+/** 터미널 방식 Fleet의 옳은 동작: 후보마다 통과해 체크포인트가 남고, 후보의 파일이 서로 섞이지 않는다 */
+function fleetProblems(snapshot: BaselineSnapshot): string[] {
+  const problems: string[] = [];
+  const http = snapshot.http as Array<{ step: string; body: { members?: Array<{ status: string; modelId?: string; checkpoint?: { files: string[] }; usage?: { outputTokens?: number } }> } }>;
+  const members = http.find((exchange) => exchange.step === 'Fleet 끝난 뒤')?.body.members ?? [];
+  if (members.length !== 2) problems.push(`멤버가 둘이어야 합니다: ${members.length}`);
+  for (const [index, who] of ['a', 'b'].entries()) {
+    const member = members[index];
+    if (member?.status !== 'done') problems.push(`후보 ${who}가 통과하지 못했다: ${member?.status}`);
+    if (member?.modelId !== `fake-${who}`) problems.push(`후보 ${who}의 모델이 다르다: ${member?.modelId}`);
+    if (JSON.stringify(member?.checkpoint?.files) !== JSON.stringify([`app/${who}.txt`])) problems.push(`후보 ${who}의 체크포인트 파일이 자기 것 하나가 아니다: ${JSON.stringify(member?.checkpoint?.files)}`);
+    if (member?.usage?.outputTokens !== 20) problems.push(`후보 ${who}의 사용량이 텔레메트리와 다르다: ${JSON.stringify(member?.usage)}`);
+  }
+  // 한 후보의 파일이 다른 후보의 작업 복사본에 없다
+  const observed = snapshot.http as Array<{ method: string; path: string; body: { files?: Record<string, string | null> } }>;
+  const other = observed.find((exchange) => exchange.method === 'OBSERVE' && exchange.path === 'disk')?.body.files;
+  if (other?.['app/a.txt'] !== null || other?.['app/b.txt'] !== '후보 B의 파일\n') problems.push(`후보 B의 작업 복사본의 파일이 틀리다: ${JSON.stringify(other)}`);
+  const disk = snapshot.disk as DiskState;
+  if (disk.files['app/a.txt'] !== '후보 A의 파일\n' || disk.files['app/b.txt'] !== null) problems.push(`후보 A의 작업 복사본의 파일이 틀리다: ${JSON.stringify(disk.files)}`);
+  const run = (snapshot.events as { run: Array<{ type: string }> }).run;
+  if (run.filter((event) => event.type === 'checkpoint').length !== 1) problems.push('후보 A의 체크포인트 이벤트가 하나가 아니다');
+  return problems;
+}
+
+export const agentScenarios: Scenario[] = [
+  {
+    name: 'fleet-terminal-two-candidates',
+    covers: '터미널 방식 Fleet(같은 백엔드 후보 둘, 모델 이름만 다름): 서버가 후보마다 세션 터미널을 열어 같은 요청을 붙여 넣고, CLI가 스스로 훅·텔레메트리를 불러 두 후보가 각자 다른 파일을 쓰고 통과해 체크포인트를 남긴다',
+    options: agentOptions(FLEET_SCRIPT),
+    files: ['app/a.txt', 'app/b.txt', 'app/hello.txt'],
+    fileRevisionCount: 'ignore',
+    dockerUnordered: true,
+    check: fleetProblems,
+    run: async ({ driver, adopt, observeDisk }) => {
+      const created = await driver.call('Fleet 만들기', 'POST', '/api/fleets', {
+        projectId: driver.world.projectId,
+        request: '파일을 하나 만들어 주세요',
+        runner: 'terminal',
+        candidates: [
+          { backend: 'claude-code', model: 'fake-a' },
+          { backend: 'claude-code', model: 'fake-b' },
+        ],
+      });
+      if (created.status !== 201) throw new Error(`Fleet을 만들지 못했습니다: ${created.status} ${JSON.stringify(created.body)}`);
+      const fleetId = created.body.id as string;
+      const members = created.body.members as Array<{ sessionId: string }>;
+      driver.alias(fleetId, '<fleet>');
+      members.forEach((member, index) => driver.alias(member.sessionId, `<member-${'ab'[index]}>`));
+      await waitUntil(
+        'Fleet의 멤버가 모두 끝나기',
+        async () => (await driver.peek(`/api/fleets/${fleetId}`)).body.members as Array<{ status: string }>,
+        (list) => list.every((member) => !['booting', 'running', 'awaiting_input'].includes(member.status)),
+      );
+      await driver.call('Fleet 끝난 뒤', 'GET', `/api/fleets/${fleetId}`);
+      // 후보 A의 세션 이벤트(지금까지의 기록)와 디스크를 사진에 남기고, 후보 B는 디스크만 값으로 남긴다. 끝난 뒤에 붙어야 세션이 뜨는 도중의 상태가 사진에 섞이지 않는다
+      await adopt(members[0]!.sessionId);
+      await observeDisk('후보 B의 작업 복사본', members[1]!.sessionId, ['app/a.txt', 'app/b.txt']);
+    },
+  },
+];
+
+const PLAN_SCRIPT: NonNullable<WorldOptions['agentCli']> = {
+  scripts: ['a', 'b'].map((who) => ({
+    // 레인마다 붙여 넣는 요청의 첫 줄이 카드의 요청이다. 그 글로 대본을 고른다
+    match: { request: `카드 ${who.toUpperCase()}:` },
+    steps: [
+      { telemetry: { requestId: `req_plan_${who}`, input: 200, output: 40, costUsd: 0.02 } },
+      { write: { path: `app/${who}.txt`, content: `레인 ${who.toUpperCase()}의 파일\n` } },
+      { stop: { text: `카드 ${who.toUpperCase()}를 끝냈습니다.` } },
+    ],
+  })),
+};
+
+/** 작업 분해 터미널 레인의 옳은 동작: 레인마다 자기 카드의 파일만 써 통과하고, 통합이 두 레인의 파일을 합쳐 계획이 끝난다 */
+function taskPlanProblems(snapshot: BaselineSnapshot): string[] {
+  const problems: string[] = [];
+  const http = snapshot.http as Array<{ step: string; body: { status?: string; runner?: string; lanes?: Array<{ status: string; paths: string[]; changedFiles?: string[]; tasks: Array<{ status: string; run?: { status: string; costUsd?: number }; checkpoint?: unknown }> }>; integration?: { status: string; files: string[] } } }>;
+  const plan = http.find((exchange) => exchange.step === '계획 끝난 뒤')?.body;
+  if (plan?.status !== 'done') problems.push(`계획이 끝나지 못했다: ${plan?.status}`);
+  if (plan?.runner !== 'terminal') problems.push(`레인이 터미널로 돌지 않았다: ${plan?.runner}`);
+  if (plan?.lanes?.length !== 2) problems.push(`레인이 둘이어야 합니다: ${plan?.lanes?.length}`);
+  for (const [index, who] of ['a', 'b'].entries()) {
+    const lane = plan?.lanes?.[index];
+    const task = lane?.tasks[0];
+    if (lane?.status !== 'done' || task?.status !== 'done' || task.run?.status !== 'done' || !task.checkpoint) problems.push(`레인 ${who}의 작업이 통과해 체크포인트를 남기지 못했다: ${JSON.stringify(lane)?.slice(0, 300)}`);
+    if (JSON.stringify(lane?.changedFiles) !== JSON.stringify([`app/${who}.txt`])) problems.push(`레인 ${who}가 바꾼 파일이 자기 카드의 것 하나가 아니다: ${JSON.stringify(lane?.changedFiles)}`);
+    if (task?.run?.costUsd !== 0.02) problems.push(`레인 ${who}의 비용이 텔레메트리와 다르다: ${task?.run?.costUsd}`);
+  }
+  if (plan?.integration?.status !== 'done' || JSON.stringify(plan.integration.files) !== JSON.stringify(['app/a.txt', 'app/b.txt'])) problems.push(`통합이 두 레인의 파일을 합치지 못했다: ${JSON.stringify(plan?.integration)}`);
+  const observed = snapshot.http as Array<{ method: string; path: string; body: { files?: Record<string, string | null> } }>;
+  const other = observed.find((exchange) => exchange.method === 'OBSERVE' && exchange.path === 'disk')?.body.files;
+  if (other?.['app/a.txt'] !== null || other?.['app/b.txt'] !== '레인 B의 파일\n') problems.push(`레인 B의 작업 복사본의 파일이 틀리다: ${JSON.stringify(other)}`);
+  const disk = snapshot.disk as DiskState;
+  if (disk.files['app/a.txt'] !== '레인 A의 파일\n' || disk.files['app/b.txt'] !== null) problems.push(`레인 A의 작업 복사본의 파일이 틀리다: ${JSON.stringify(disk.files)}`);
+  return problems;
+}
+
+agentScenarios.push({
+  name: 'task-plan-terminal-two-lanes',
+  covers: '작업 분해의 터미널 레인(작업 카드 둘, 쓰기 범위가 겹치지 않아 레인 둘): 카드가 곧 승인이라 레인마다 세션 터미널에서 카드의 요청을 붙여 넣어 돌고, CLI가 스스로 훅·텔레메트리를 불러 통과한 뒤 통합이 두 파일을 합친다',
+  options: agentOptions(PLAN_SCRIPT),
+  files: ['app/a.txt', 'app/b.txt', 'app/hello.txt'],
+  fileRevisionCount: 'ignore',
+  dockerUnordered: true,
+  check: taskPlanProblems,
+  run: async ({ driver, adopt, observeDisk }) => {
+    const created = await driver.call('작업 카드로 계획 만들기', 'POST', '/api/task-plans', {
+      projectId: driver.world.projectId,
+      request: '파일 둘을 만든다',
+      cards: [
+        { title: '파일 A', request: '카드 A: app/a.txt를 만들어 주세요', paths: ['app/a.txt'], doneCommand: 'true' },
+        { title: '파일 B', request: '카드 B: app/b.txt를 만들어 주세요', paths: ['app/b.txt'], doneCommand: 'true' },
+      ],
+    });
+    if (created.status !== 201) throw new Error(`계획을 만들지 못했습니다: ${created.status} ${JSON.stringify(created.body)}`);
+    const planId = created.body.id as string;
+    driver.alias(planId, '<plan>');
+    const final = await waitUntil(
+      '계획이 끝나기',
+      async () => {
+        const plan = (await driver.peek(`/api/task-plans/${planId}`)).body as { status: string; lanes: Array<{ sessionId?: string }>; integration?: { sessionId?: string } };
+        plan.lanes.forEach((lane, index) => lane.sessionId && driver.alias(lane.sessionId, `<lane-${'ab'[index]}>`));
+        if (plan.integration?.sessionId) driver.alias(plan.integration.sessionId, '<integration>');
+        return plan;
+      },
+      (plan) => ['done', 'failed', 'interrupted', 'rejected'].includes(plan.status),
+    );
+    await driver.call('계획 끝난 뒤', 'GET', `/api/task-plans/${planId}`);
+    // 레인 A의 세션 이벤트(지금까지의 기록)와 디스크를 사진에 남긴다. 끝난 뒤에 붙어야 세션이 뜨는 도중의 상태가 사진에 섞이지 않는다
+    await adopt(final.lanes[0]!.sessionId!);
+    await observeDisk('레인 B의 작업 복사본', final.lanes[1]!.sessionId!, ['app/a.txt', 'app/b.txt']);
+  },
+});

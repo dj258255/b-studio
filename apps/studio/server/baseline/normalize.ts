@@ -19,6 +19,13 @@ const VOLATILE_KEYS = new Set([
   'runningForMs',
   'lastUsageAt',
   'gateMs',
+  // 작업 분해 계획의 시간 지표(세션 준비·통합·처음부터 끝까지)
+  'bootMs',
+  'bootMsTotal',
+  'bootMsMax',
+  'integrationMs',
+  'endToEndMs',
+  'modelMs',
   'toolMs',
   'latencyMs',
   'startedAt',
@@ -32,7 +39,9 @@ const VOLATILE_KEYS = new Set([
   'savedAt',
 ]);
 
-export function normalizer(world: World, sessionId: string): Normalizer {
+/** `aliases`: 시나리오가 알려 준, 실행마다 달라지는 id(Fleet·계획·멤버 세션) → 자리표시자. 가장 긴 id부터 바꾼다 */
+export function normalizer(world: World, sessionId: string, aliases: Record<string, string> = {}): Normalizer {
+  const aliasList = Object.entries(aliases).sort((a, b) => b[0].length - a[0].length);
   const shas = new Map<string, number>();
   const uuids = new Map<string, number>();
   const runs = new Map<string, number>();
@@ -47,7 +56,7 @@ export function normalizer(world: World, sessionId: string): Normalizer {
     return word;
   };
   const text = (input: string): string =>
-    [...runs].reduce((acc, [id, n]) => acc.replaceAll(id, `<run:${n}>`), input)
+    aliasList.reduce((acc, [id, label]) => acc.replaceAll(id, label), [...runs].reduce((acc, [id, n]) => acc.replaceAll(id, `<run:${n}>`), input))
       .replaceAll(world.root, '<root>')
       .replaceAll(sessionId, '<sid>')
       .replace(/studio-demo-[0-9a-f]{6}/g, '<sandbox>')

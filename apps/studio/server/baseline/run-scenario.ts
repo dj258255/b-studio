@@ -1,6 +1,6 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createWorld, Driver, snapshotOf, startFrontTarget, withoutFileRevisionCount, type BaselineSnapshot, type Target, type World } from './harness';
+import { createWorld, Driver, readDisk, snapshotOf, startFrontTarget, withoutFileRevisionCount, type BaselineSnapshot, type Target, type World } from './harness';
 import type { FakeCli, Scenario } from './scenarios';
 
 /**
@@ -52,6 +52,19 @@ export async function runScenario(scenario: Scenario, startTarget: (world: World
         await live.subscribe(session.id);
         return { id: session.id, claude: await handshake };
       },
+      adopt: async (sessionId: string) => {
+        const found = await live.peek(`/api/sessions/${sessionId}`);
+        if (found.status !== 200) throw new Error(`세션을 읽지 못했습니다: ${found.status} ${JSON.stringify(found.body)}`);
+        session = { id: sessionId, workDir: found.body.workDir as string, ...(found.body.stateDir ? { stateDir: found.body.stateDir as string } : {}) };
+        await live.subscribe(sessionId);
+      },
+      observeDisk: async (step: string, sessionId: string, files: string[]) => {
+        const found = await live.peek(`/api/sessions/${sessionId}`);
+        if (found.status !== 200) throw new Error(`세션을 읽지 못했습니다: ${found.status} ${JSON.stringify(found.body)}`);
+        const disk = await readDisk({ workDir: found.body.workDir as string, ...(found.body.stateDir ? { stateDir: found.body.stateDir as string } : {}) }, files);
+        // 커밋 id는 실행마다 달라 남기지 않는다(메시지와 개수만)
+        live.observe(step, 'disk', { commits: disk.commits.map((commit) => commit.message), status: disk.status, files: disk.files });
+      },
       send: async (sessionId: string, text: string, extra: Record<string, unknown> = {}) => {
         const sent = await live.call('메시지 보내기', 'POST', `/api/sessions/${sessionId}/messages`, { text, ...extra });
         if (sent.status !== 202) throw new Error(`메시지를 보내지 못했습니다: ${sent.status} ${JSON.stringify(sent.body)}`);
@@ -67,7 +80,7 @@ export async function runScenario(scenario: Scenario, startTarget: (world: World
     const beforeShutdown = (await world.dockerCalls()).length;
     await target.stop();
     target = undefined;
-    const snapshot = await snapshotOf(world, live, session, scenario.files ?? [], beforeShutdown);
+    const snapshot = await snapshotOf(world, live, session, scenario.files ?? [], beforeShutdown, { dockerUnordered: scenario.dockerUnordered === true });
     return scenario.fileRevisionCount === 'ignore' ? withoutFileRevisionCount(snapshot) : snapshot;
   } finally {
     await driver.close();
