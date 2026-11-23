@@ -1174,7 +1174,14 @@ mod tests {
         let port = fx.server.port;
         assert_eq!(status_of(&raw(port, &post("/stop", "", "{}")).await), 200);
         fx.server.close().await;
-        assert!(TcpStream::connect(("127.0.0.1", port)).await.is_err());
+        // 닫은 뒤 같은 번호로 접속이 되는 것만으로는 실패가 아니다: 동시에 도는 다른 시험이 포트 0으로 바인드해 방금 풀린 번호를 받을 수 있다(#1367).
+        // 접속이 되면 요청을 보내 보고, 그 요청이 이 서버의 콜백에 닿지 않았는지를 본다
+        if let Ok(mut stream) = TcpStream::connect(("127.0.0.1", port)).await {
+            let _ = stream.write_all(&post("/stop", "", "{}")).await;
+            let mut answer = Vec::new();
+            let _ = tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut answer)).await;
+        }
+        assert_eq!(fx.calls.load(Ordering::SeqCst), 1, "닫은 뒤의 요청이 이 서버의 콜백에 닿았습니다");
         // 두 번 불러도 된다
         fx.server.close().await;
     }
