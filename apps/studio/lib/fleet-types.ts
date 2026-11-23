@@ -34,6 +34,7 @@ export interface FleetMemberView {
   /** 실행 중 모델이 바뀌었으면(승격) 모델별 사용량. 토큰 탭과 같은 표기로 보여 준다 */
   usageByModel?: Record<string, AgentUsage>;
   costUsd?: number;
+  waiting?: string;
   checkpoint?: { sha: string; shortSha: string; files: string[] };
   startedAt?: string;
   finishedAt?: string;
@@ -46,6 +47,7 @@ export interface FleetView {
   projectName: string;
   request: string;
   allowBreaking: boolean;
+  runner?: 'chat' | 'terminal';
   createdAt: string;
   winnerSessionId?: string;
   members: FleetMemberView[];

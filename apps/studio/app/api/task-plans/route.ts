@@ -1,6 +1,7 @@
 import { requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { createTaskPlan, listTaskPlans } from '@/lib/server/task-plans';
+import { assertTerminalAccess } from '@/lib/server/terminal-access';
 
 export function GET(request: Request) {
   try {
@@ -13,7 +14,7 @@ export function GET(request: Request) {
 
 export async function POST(request: Request) {
   try {
-    const user = requireUser(request.headers);
+    requireUser(request.headers);
     const body = (await request.json().catch(() => ({}))) as {
       projectId?: unknown;
       request?: unknown;
@@ -24,6 +25,8 @@ export async function POST(request: Request) {
       cards?: unknown;
     };
     if (typeof body.projectId !== 'string') throw new StudioError(400, 'projectId가 필요합니다');
+    // 카드 계획은 레인을 세션 터미널에서 돌린다(그 안의 CLI를 몬다). 세션 터미널 통로와 같은 검사(이 컴퓨터 주소·로컬 토큰)를 거친다
+    const user = body.cards !== undefined ? await assertTerminalAccess(request.headers) : requireUser(request.headers);
     // request는 카드가 있으면 없어도 된다(계획 요청을 카드 제목으로 만든다). 그 밖의 계획에서는 필요하다
     if (body.cards === undefined && typeof body.request !== 'string') throw new StudioError(400, 'request가 필요합니다');
     if (body.request !== undefined && typeof body.request !== 'string') throw new StudioError(400, 'request는 문자열이어야 합니다');

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({
   createTaskPlan: vi.fn(async (input: Record<string, unknown>) => ({ id: 'plan-1', ...input })),
+  localToken: 'f'.repeat(64),
 }));
 
 vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim' }));
@@ -9,14 +10,24 @@ vi.mock('@/lib/server/task-plans', () => ({
   createTaskPlan: mocks.createTaskPlan,
   listTaskPlans: () => [],
 }));
+vi.mock('@/lib/server/sessions', () => ({ recoverSessions: async () => {} }));
+vi.mock('@/lib/server/local-token', () => ({
+  LOCAL_TOKEN_COOKIE: 'b_studio_local',
+  hasLocalToken: (cookie: string | undefined) => cookie === mocks.localToken,
+  localToken: () => mocks.localToken,
+  localTokenPath: () => '/tmp/b-studio-local-token',
+}));
 
 import { POST } from './route';
 
-function post(body: unknown): Promise<Response> {
+function post(body: unknown, headers: Record<string, string> = {}): Promise<Response> {
   return POST(
-    new Request('http://localhost/api/task-plans', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }),
+    new Request('http://localhost/api/task-plans', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }),
   );
 }
+
+/** 세션 터미널 통로와 같은 조건(이 컴퓨터 주소 + 로컬 토큰)을 갖춘 요청 머리 */
+const LOCAL = { host: '127.0.0.1:3000', cookie: `b_studio_local=${'f'.repeat(64)}` };
 
 beforeEach(() => {
   mocks.createTaskPlan.mockClear();
@@ -69,7 +80,7 @@ describe('POST /api/task-plans', () => {
   it('카드(cards)를 넘기면 그대로 createTaskPlan에 넘긴다', async () => {
     const cards = [{ title: 'A', request: 'A 작업', paths: ['web/a'], doneCommand: 'pnpm test', doneService: 'web' }];
 
-    const response = await post({ projectId: 'orders', request: '요청', owner: 'kim', cards });
+    const response = await post({ projectId: 'orders', request: '요청', owner: 'kim', cards }, LOCAL);
 
     expect(response.status).toBe(201);
     expect(mocks.createTaskPlan).toHaveBeenCalledWith({ projectId: 'orders', request: '요청', owner: 'kim', cards });
@@ -78,7 +89,7 @@ describe('POST /api/task-plans', () => {
   it('카드가 있으면 request 없이도 받아 그대로 createTaskPlan에 넘긴다 (수정 2-3)', async () => {
     const cards = [{ title: 'A', request: 'A 작업', paths: ['web/a'] }];
 
-    const response = await post({ projectId: 'orders', owner: 'kim', cards });
+    const response = await post({ projectId: 'orders', owner: 'kim', cards }, LOCAL);
 
     expect(response.status).toBe(201);
     expect(mocks.createTaskPlan).toHaveBeenCalledWith({ projectId: 'orders', owner: 'kim', cards });
@@ -88,6 +99,16 @@ describe('POST /api/task-plans', () => {
     const response = await post({ projectId: 'orders' });
 
     expect(response.status).toBe(400);
+    expect(mocks.createTaskPlan).not.toHaveBeenCalled();
+  });
+
+  it('카드 계획은 레인을 세션 터미널에서 돌리므로 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다', async () => {
+    const cards = [{ title: 'A', request: 'A 작업', paths: ['web/a'] }];
+    const refused: Record<string, string>[] = [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }];
+    for (const headers of refused) {
+      const response = await post({ projectId: 'orders', cards }, headers);
+      expect(response.status, JSON.stringify(headers)).toBe(403);
+    }
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
   });
 });
