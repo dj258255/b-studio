@@ -3,7 +3,7 @@ import { native, type NativeSessionState } from '@b-studio/sandbox';
 /**
  * 요청 실행(`execute`)의 끝 결정과 단계 순서(ADR-208, 4f B3b). 순서·판정·점유 단계 바꾸기와 풀기는 Rust `crates/bstudio-session`의 `outcome`이 하고,
  * 여기는 단계마다 부수 효과(앞 단계·계획 요약·러너·체크포인트 저장·되돌리기·알림·끝 알림)를 TS 콜백으로 잇는 껍데기다. 옛 `execute`의 판정은
- * `session-run-outcome-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 지웠다(#1347).
  *
  * 콜백은 던지지 않고 사실(`RunReply`)을 돌려준다(Rust가 부르는 콜백이 던지면 Node가 경고한다, 트러블슈팅 210). 던진 오류 객체는 `onError`로 받아 껍데기 쪽이 쥔다.
  * 어느 단계든 실패하면 코어는 이후 단계를 하지 않고 예외 경로로 간다.

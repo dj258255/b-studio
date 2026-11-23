@@ -7,7 +7,7 @@ import { periodKey, totalTokens, type UsageWindow } from '@/lib/usage';
 /**
  * 사람별 모델 토큰 사용량(`tokens.json`). 세션 파일은 세션 하나만 담으므로, 사람 단위 합계는 서버 파일 한 곳에 모은다.
  * **파일의 주인은 Rust 하나다**(ADR-209, 4f B3c: `crates/bstudio-session`의 `usage`). 읽기(바뀌었을 때만)·더하기(프로세스 안 차례 + 프로세스 사이 파일 잠금,
- * 임시 파일·rename)·오래된 기간 정리(40개)를 그쪽이 하고, 여기는 기간 이름(`periodKey`)을 정해 부르는 껍데기다. 옛 TS 구현은 `usage-state-legacy.ts`에
+ * 임시 파일·rename)·오래된 기간 정리(40개)를 그쪽이 하고, 여기는 기간 이름(`periodKey`)을 정해 부르는 껍데기다. 옛 TS 구현은 #1347에서 지웠다.
  * 차등 시험의 기준으로만 남아 있다. 읽을 수 없으면 던져 한도가 조용히 사라지지 않게 한다. 잠금을 얻지 못하면 쓰지 않고 던진다
  */
 

@@ -1,11 +1,10 @@
+import { readFileSync } from 'node:fs';
 import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
 import { describe, expect, it } from 'vitest';
 import { Gen, readEnvNumber } from './differential-kit';
 import { judge } from './explore-qa';
 import { containsApiValue, nextErrorMarker, usesInRunValue, viewportProblems } from './gate';
-import * as legacyGate from './gate-helpers-legacy';
 import { verifySpecQuote } from './requirements';
-import { verifySpecQuote as legacyVerifySpecQuote } from './requirements-legacy';
 
 /**
  * 짝 없는 서로게이트가 Rust 경계에서 모두 U+FFFD가 되는 문제(ADR-191 3p 검토): 부분 문자열 비교로 통과·실패를 가르는 두 자리(탐색 QA `judge`의 확인 문구,
@@ -14,9 +13,24 @@ import { verifySpecQuote as legacyVerifySpecQuote } from './requirements-legacy'
  * ADR-191 3r(게이트 보조 판정)에서 같은 성질을 세 자리 더 본다: `containsApiValue`(글자 값이 화면에 있으면 통과), `viewportProblems`(첫 화면 글자의 짝짓기), `usesInRunValue`(받아들인 값 사용 판정),
  * 그리고 표지가 ASCII라 단사로 보내지 않는 `nextErrorMarker`(표시가 있으면 실패)에서 옛 "표시 있음"이 새 "없음"으로 뒤집히지 않는다.
  * 크기는 SURROGATE_PAIRS 환경 변수로 바꾼다.
+ *
+ * 옛 TS(`gate-helpers-legacy.ts`, `requirements-legacy.ts`, #1347에서 지움)가 같은 시드(13·17·19·23·29)의 입력에 낸 값은 `surrogate-boundary-frozen.json`에 얼려 두었다.
+ * `specQuote`(옛 `verifySpecQuote`에 낱말 중간 규칙을 얹은 값)·`containsApi`·`usesInRun`은 입력마다 `1`/`0`을 이은 글자이고,
+ * `viewport`는 `viewportTable`의 번호(문구는 서로게이트를 U+FFFD로 바꾼 꼴)의 목록, `nextError`는 `nextErrorTable`의 번호를 이은 글자다.
  */
+const FROZEN = JSON.parse(readFileSync(new URL('./surrogate-boundary-frozen.json', import.meta.url), 'utf8')) as {
+  pairs: number;
+  specQuote: string;
+  containsApi: string;
+  usesInRun: string;
+  viewport: number[];
+  viewportTable: string[][];
+  nextError: string;
+  nextErrorTable: Array<string | null>;
+};
 const ALPHABET = ['\ud800', '\udbff', '\udc00', '\udfff', '😀', '\ud83d', '\ude00', '', '', '', '', '', '�', 'd', '8', '0', 'a', 'b', '1', 'f'];
 const PAIRS = readEnvNumber('SURROGATE_PAIRS', 30_000);
+if (PAIRS > FROZEN.pairs) throw new Error(`얼린 값은 ${FROZEN.pairs}개뿐입니다`);
 
 const isHigh = (u: number) => u >= 0xd800 && u <= 0xdbff;
 const isLow = (u: number) => u >= 0xdc00 && u <= 0xdfff;
@@ -45,22 +59,6 @@ function pairedUnits(text: string): Set<number> {
 }
 
 /** B의 짝 없는 서로게이트 단위가 A에서는 짝의 일부인가 — 단사 인코딩이 닫는 쪽으로만 달라지는 유일한 이유 */
-/**
- * 옛 `verifySpecQuote`에 "ASCII 낱말 중간을 자른 자리는 세지 않는다"(ADR-191 3ad, 트러블슈팅 179)만 얹은 기준.
- * 그 규칙으로 닫힌 쌍은 서로게이트와 상관없는 의도한 차이라, 이 기준과 견주어 남는 닫힘이 짝을 가르는 경우뿐인지 본다(`requirements-differential.test.ts`와 같은 기준)
- */
-function legacyVerifySpecQuoteWithoutWordCuts(quote: string, specText: string): boolean {
-  if (!legacyVerifySpecQuote(quote, specText)) return false;
-  const collapse = (text: string) => text.replace(/\s+/g, ' ').trim();
-  const q = collapse(quote);
-  const t = collapse(specText);
-  const word = (c: string | undefined) => c !== undefined && /[A-Za-z0-9_]/.test(c);
-  for (let at = t.indexOf(q); at !== -1; at = t.indexOf(q, at + 1)) {
-    if (!(word(q[0]) && word(t[at - 1])) && !(word(q[q.length - 1]) && word(t[at + q.length]))) return true;
-  }
-  return false;
-}
-
 function pairSplitReason(a: string, b: string): boolean {
   const paired = pairedUnits(a);
   for (const u of loneUnits(b)) if (paired.has(u)) return true;
@@ -156,7 +154,7 @@ describe('짝 없는 서로게이트·예약 글자의 단사 인코딩과 판�
     let closed = 0;
     for (let i = 0; i < PAIRS; i++) {
       const [spec, quote] = pairOf(g);
-      const old = legacyVerifySpecQuoteWithoutWordCuts(quote, spec);
+      const old = FROZEN.specQuote[i] === '1';
       const now = verifySpecQuote(quote, spec);
       if (!old && now) open += 1;
       if (old && !now) {
@@ -169,7 +167,6 @@ describe('짝 없는 서로게이트·예약 글자의 단사 인코딩과 판�
   });
 
   it('verifySpecQuote: 예전 인코딩(d800 꼴)이 겹치던 입력도 구별한다', () => {
-    expect(legacyVerifySpecQuote('d800', 'x\ud800y')).toBe(false);
     expect(verifySpecQuote('d800', 'x\ud800y')).toBe(false);
     expect(verifySpecQuote('x\ud800y', 'z x\ud800y z')).toBe(true);
   });
@@ -179,7 +176,6 @@ describe('게이트 보조 판정(3r)의 짝 없는 서로게이트 경계', () 
   it('경계를 그대로 넘기면 서로 다른 짝 없는 서로게이트가 같아진다(껍데기가 단사로 바꿔 보내는 까닭)', () => {
     expect(native.gateContainsApiText('a\ud800b', '\udc00')).toBe(true);
     expect(containsApiValue('a\ud800b', '\udc00')).toBe(false);
-    expect(legacyGate.containsApiValue('a\ud800b', '\udc00')).toBe(false);
   });
 
   it('containsApiValue(글자): 옛 "없다"가 "있다"로 뒤집힌 쌍은 0이고, 다른 쌍은 짝을 가르는 경우뿐이다', () => {
@@ -189,7 +185,7 @@ describe('게이트 보조 판정(3r)의 짝 없는 서로게이트 경계', () 
     let same = 0;
     for (let i = 0; i < PAIRS * 3; i++) {
       const [text, value] = pairOf(g);
-      const old = legacyGate.containsApiValue(text, value);
+      const old = FROZEN.containsApi[i] === '1';
       const now = containsApiValue(text, value);
       if (old === now) same += 1;
       else if (!old && now) open += 1;
@@ -219,10 +215,10 @@ describe('게이트 보조 판정(3r)의 짝 없는 서로게이트 경계', () 
     for (let i = 0; i < PAIRS; i++) {
       const [a, b] = pairOf(g);
       const report = { width: 1280, height: 800, findings: [{ text: a, visible: true }] };
-      const old = legacyGate.viewportProblems([b], report);
+      const old = FROZEN.viewportTable[FROZEN.viewport[i]!]!;
       const now = viewportProblems([b], report);
       if (old.length > 0 && now.length === 0) open += 1;
-      expect(now.map((m) => m.replace(/[\ud800-\udfff]/g, '\ufffd')), JSON.stringify([a, b])).toEqual(old.map((m) => m.replace(/[\ud800-\udfff]/g, '\ufffd')));
+      expect(now.map((m) => m.replace(/[\ud800-\udfff]/g, '\ufffd')), JSON.stringify([a, b])).toEqual(old);
       if (old.length === 0) found += 1;
       else missing += 1;
     }
@@ -247,7 +243,7 @@ describe('게이트 보조 판정(3r)의 짝 없는 서로게이트 경계', () 
       const key = g.pick(names);
       const route = { file: `app/[${name}]/page.tsx` };
       const latest = { config: {}, notes: [], inRunKeys: new Set([key]), inRunSampleIdFrom: false } as unknown as Parameters<typeof usesInRunValue>[1];
-      const old = legacyGate.usesInRunValue(route, latest);
+      const old = FROZEN.usesInRun[i] === '1';
       const now = usesInRunValue(route, latest);
       if (!old && now) open += 1;
       expect(now, JSON.stringify([name, key])).toBe(old);
@@ -268,7 +264,7 @@ describe('게이트 보조 판정(3r)의 짝 없는 서로게이트 경계', () 
     for (let i = 0; i < PAIRS * 2; i++) {
       const text = g.text(pieces, 1 + g.int(5));
       const status = g.pick([200, 404]);
-      const old = legacyGate.nextErrorMarker(text, status);
+      const old = FROZEN.nextErrorTable[Number(FROZEN.nextError[i])] ?? undefined;
       const now = nextErrorMarker(text, status);
       if (old !== undefined && now === undefined) open += 1;
       expect(now, JSON.stringify([text, status])).toBe(old);

@@ -9,7 +9,7 @@ import { encodeLoneSurrogates, native } from '@b-studio/sandbox';
  * 전송은 Rust가 한다(ADR-201, crates/bstudio-io/src/loopback_server.rs): 포트 열기, Host·토큰 확인, 메서드와 요청 대상 원문의 라우트 비교,
  * 본문 4MiB 상한, 닫기. 여기는 Rust가 넘긴 원래 바이트를 옛 서버와 똑같이 읽고(`JSON.parse`) 처리를 부른다. 값을 꺼내는 일은 `JSON.parse`에 남긴다.
  * `JSON.parse`와 받는 입력이 다르면(짝 없는 서로게이트 이스케이프, 중복 키, 큰 수) 입력의 값이 달라지기 때문이다. 읽혔는지의 종류는 ADR-219에서 코어가 가른다(`readHookBody`).
- * 옛 `node:http` 서버는 `hook-server-legacy.ts`에 있다(차등 시험의 기준값).
+ * 옛 `node:http` 서버는 지웠다(#1347).
  */
 
 /** CLI가 훅에 준 입력. 필드는 훅 종류마다 달라 쓰는 쪽이 꺼내 확인한다(바깥에서 온 값이다) */
@@ -27,7 +27,7 @@ export type HookHandler = (input: HookInput, meta?: HookMeta) => Promise<Record<
 /**
  * 훅 요청 본문(Rust가 4MiB 상한을 읽기 전에 건 뒤 넘긴 바이트)을 읽는다. 종류는 Rust 코어가 가르고(`terminal::watch::hook_body_kind`),
  * 값은 `JSON.parse`로 꺼낸다. 둘이 어긋나면(코어는 객체로 읽는데 `JSON.parse`가 던지거나, 코어가 읽지 못하는데 `JSON.parse`는 읽는다) 읽지 못한 것으로 둔다 — 거절하는 쪽이다.
- * 옛 구현은 `legacyHookInput`(`apps/studio/lib/server/session-terminal-watch-legacy.ts`)이다
+ * 옛 구현은 `legacyHookInput`(#1347에서 지움)이었다
  */
 export function readHookBody(body: Buffer): { input: HookInput; kind: HookBodyKind } {
   const named = native.terminalHookBodyKind(body);

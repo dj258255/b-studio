@@ -3,7 +3,7 @@ import { native } from '@b-studio/sandbox';
 /**
  * 세션 터미널의 사용량 귀속·정체 판정(ADR-213, 4f B4d). 판정은 Rust `crates/bstudio-session`의 `terminal::usage`가 한다(순수 함수).
  * 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다. 기억(Set)·저장·알림·글 조립은 `sessions.ts`가 한다.
- * 옛 판정은 `session-terminal-usage-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 옛 판정은 지웠다(#1347).
  *
  * 막는 검사다. 덜 세는 쪽이 여는 쪽이므로, 코어가 알아보지 못한 결정은 센다(귀속 없이 세션 합계와 한도에 더한다).
  */

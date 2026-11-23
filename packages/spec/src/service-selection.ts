@@ -7,7 +7,7 @@ import { encodeNative, native } from './native';
  * 서비스만 고를 수 있게, 기본값은 "managed 서비스 + 그 서비스가 기대는(depends_on) 서비스의 닫힘"이다 —
  * app이 쓰지 않는 부가 서비스는 기본으로 뜨지 않는다.
  *
- * 판정은 Rust(`crates/bstudio-guard/src/service_selection.rs`)가 한다. 옛 TS는 `service-selection-legacy.ts`로
+ * 판정은 Rust(`crates/bstudio-guard/src/service_selection.rs`)가 한다. 옛 TS는 #1347에서 지웠다.
  * 남겨 차등 시험만 그것을 import한다.
  */
 

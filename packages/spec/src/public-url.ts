@@ -10,7 +10,7 @@
  *
  * 자리 표시자 문법은 일부러 `${VAR}` / `${VAR:-default}`처럼 docker compose가 아는 모양이 아니게 골랐다.
  *
- * 찾기는 Rust(`crates/bstudio-guard/src/public_url.rs`의 `find_refs`)가 한다. 옛 TS는 `public-url-legacy.ts`로 남겨
+ * 찾기는 Rust(`crates/bstudio-guard/src/public_url.rs`의 `find_refs`)가 한다. 옛 TS는 #1347에서 지웠다.
  * 차등 시험만 그것을 import한다. 만들기·채우기는 지금처럼 TS에 둔다(채우기는 sandbox의 Rust와 차등 시험으로 묶여 있다).
  */
 import { decodeNative, encodeNative, native } from './native';

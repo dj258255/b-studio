@@ -16,7 +16,7 @@
  * 순수 판정(언급 id 찾기, 내용 해시·개정, 상태·검증 출처, 린트, 재추출 병합, 요약·입력창 글 등)은 Rust
  * (`crates/bstudio-guard/src/requirements.rs`, ADR-191 3단계 3j)가 한다. 마크다운 읽기·쓰기 규칙은 `requirements_markdown.rs`(3ab)가 한다.
  * 여기에는 zod 스키마·타입, 모델·파일을 부르는 함수, 마크다운 읽기의 zod 검증과 갈래(몸통 → JSON 블록), 테스트 파일 스캔(발견기 캐시), 추적 매트릭스 조립과,
- * 같은 이름·시그니처로 네이티브 모듈을 부르는 얇은 껍데기만 남았다. 옛 구현은 `requirements-legacy.ts`에 시험용으로만 남아 있다.
+ * 같은 이름·시그니처로 네이티브 모듈을 부르는 얇은 껍데기만 남았다. 옛 구현(`requirements-legacy.ts`)은 #1347에서 지웠다.
  */
 import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';

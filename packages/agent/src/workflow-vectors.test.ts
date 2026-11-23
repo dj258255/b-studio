@@ -19,22 +19,18 @@ import {
   workflowReleaseRequirements,
   workflowStages,
 } from './workflow';
-import { legacy } from './workflow-legacy';
 
 /**
- * 워크플로 판정 벡터(ADR-191 3v). 기대값은 옮기기 전 TS(`workflow-legacy.ts`)가 낸 값이다.
- * `WORKFLOW_VECTORS_IMPL=legacy`로 돌리면 같은 벡터를 옛 구현에 넣는다: `intended`로 표시한 벡터(의도한 차이)만 실패해야 한다.
+ * 워크플로 판정 벡터(ADR-191 3v). 기대값은 옮기기 전 TS(`workflow-legacy.ts`, #1347에서 지움)가 낸 값이다.
+ * `intended`로 표시한 벡터(의도한 차이)만 옛 구현과 달랐고, 그 기대값은 새 구현이 내는 값이다.
  * 경계(같음·±1), 빈 값, 공백 종류와 함께 인식하는 값마다 거의 같은 거부 입력(접두·덧붙임·대소문자·빈 글자·다른 구분자)을 넣었다.
  */
 
-const useLegacy = process.env.WORKFLOW_VECTORS_IMPL === 'legacy';
-const impl = useLegacy
-  ? legacy
-  : {
-      formatWorkflowTrailer, formatVerifyTrailer, formatIncompleteTrailer, parseWorkflowTrailerValues, parseVerifyTrailerValues, parseIncompleteTrailerValues, isDocCheckpointPath,
-      hasEmptyPassedTrailer, hasDocsVerifyTrailer, workflowStages, workflowReleaseRequirements, releaseBlockers, missingVerificationStages, reviewChanges, uncoveredChangeWarnings,
-      formatCheckedCoverage, maxTurnsFor, protectedPathsFor,
-    };
+const impl = {
+  formatWorkflowTrailer, formatVerifyTrailer, formatIncompleteTrailer, parseWorkflowTrailerValues, parseVerifyTrailerValues, parseIncompleteTrailerValues, isDocCheckpointPath,
+  hasEmptyPassedTrailer, hasDocsVerifyTrailer, workflowStages, workflowReleaseRequirements, releaseBlockers, missingVerificationStages, reviewChanges, uncoveredChangeWarnings,
+  formatCheckedCoverage, maxTurnsFor, protectedPathsFor,
+};
 
 interface Vector {
   name: string;

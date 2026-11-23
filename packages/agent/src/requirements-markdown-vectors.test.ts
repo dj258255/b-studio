@@ -1,11 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import * as oldGuard from './requirement-integrity-legacy';
 import * as curGuard from './requirement-integrity';
+import * as impl from './requirements';
 
 /**
- * 요구사항 문서 읽기·쓰기(ADR-191 3단계 3ab)의 벡터. 기대값은 옮기기 전 TS(`requirements-legacy.ts`의 `parseRequirementsMarkdown`·`serializeRequirementsMarkdown`)가 낸 JSON 글자다
- * (`requirements-markdown-vectors.json`). `VECTORS_AGAINST_LEGACY=1`로 돌리면 같은 벡터를 옛 TS에 넣는다(0건 실패해야 한다).
+ * 요구사항 문서 읽기·쓰기(ADR-191 3단계 3ab)의 벡터. 기대값은 옮기기 전 TS(`requirements-legacy.ts`의 `parseRequirementsMarkdown`·`serializeRequirementsMarkdown`, #1347에서 지움)가 낸 JSON 글자다
+ * (`requirements-markdown-vectors.json`). 아래 벡터는 옛 TS와 한 건도 다르지 않았다.
  * 인식하는 줄 꼴마다 거의 같은 거부 입력을 넣었다: 붙여 쓴 것, 탭, 앞 공백, 다른 글머리, 대소문자, 콜론 앞 공백, 빈 값, 숫자 꼴(0·거대한 수·2^53 앞뒤), 스키마 상한의 같음·±1(제목 200, 인수 조건 500, sha 4·40, 의존 20, 가정 300 등),
  * JSON 블록 꼴(표지 붙임·대문자·닫는 표시 없음·둘·`-->` 포함), 두 절의 머리 꼴, 줄 끝 글자(CR·U+2028·BOM).
  * 의도한 차이는 이 파일의 둘째 묶음(3x 읽기 대조)뿐이다. 옛 TS(옛 읽기 + 옛 3x)는 놓치고 새 구현은 잡는다.
@@ -17,7 +17,6 @@ interface Vector {
   out: string;
 }
 const { vectors } = JSON.parse(readFileSync(new URL('./requirements-markdown-vectors.json', import.meta.url), 'utf8')) as { vectors: Vector[] };
-const impl = (await import(process.env.VECTORS_AGAINST_LEGACY ? './requirements-legacy' : './requirements')) as typeof import('./requirements');
 
 function run(vector: Vector): string {
   try {
@@ -56,7 +55,7 @@ describe('3x 기록 읽기와 읽기의 대조', () => {
   const req = '## R1. 제목\n- 종류: api · 우선순위: must\n- 인수 조건:\n  - a\n- 상태: 미착수\n';
   const req2 = '## R2. 둘째\n- 종류: api · 우선순위: must\n- 인수 조건:\n  - b\n- 상태: 미착수\n';
 
-  it('옛 3x는 놓치고 새 3x는 잡는다: 첫 헤딩 앞의 기록을 `## 가정` 아래로 옮겨 R1에 붙인다', () => {
+  it('새 3x는 잡는다(옛 3x는 놓쳤다): 첫 헤딩 앞의 기록을 `## 가정` 아래로 옮겨 R1에 붙인다', () => {
     const before = `# 요구사항\n${rec}\n\n${req}`;
     const after = `# 요구사항\n\n${req}\n## 가정\n${rec}\n`;
     const read = (doc: string) => impl.parseRequirementsMarkdown(doc).requirements[0]?.manualVerification;
@@ -65,8 +64,7 @@ describe('3x 기록 읽기와 읽기의 대조', () => {
     const diff = curGuard.diffVerificationRecords(before, after);
     expect(diff.forged).toEqual([{ id: 'R1', source: '본문', kind: 'added', record: '범수 · 2026-10-01 · 체크포인트 abc1234 · 메모 x' }]);
     expect(curGuard.hasVerificationTamper(diff)).toBe(true);
-    // 옛 3x는 같은 글의 `(요구사항 밖)` 기록이 그대로라고 보았다
-    expect(oldGuard.hasVerificationTamper(oldGuard.diffVerificationRecords(before, after))).toBe(false);
+    // 옛 3x는 같은 글의 `(요구사항 밖)` 기록이 그대로라고 보아 잡지 못했다(옛 TS는 지웠다)
   });
 
   it('요구사항 헤딩을 옮겨 `## 가정` 아래의 같은 기록을 다른 요구사항에 붙인 것도 잡는다', () => {
@@ -76,7 +74,6 @@ describe('3x 기록 읽기와 읽기의 대조', () => {
     expect(read(before)).toEqual([['R1', '범수'], ['R2', undefined]]);
     expect(read(after)).toEqual([['R1', undefined], ['R2', '범수']]);
     expect(curGuard.diffVerificationRecords(before, after).forged.map((f) => f.id)).toEqual(['R2']);
-    expect(oldGuard.hasVerificationTamper(oldGuard.diffVerificationRecords(before, after))).toBe(false);
   });
 
   it('거부 입력: 읽기가 올리는 요구사항이 그대로면 잡지 않는다(같은 자리·같은 글)', () => {

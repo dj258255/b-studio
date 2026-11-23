@@ -2,7 +2,7 @@ import { native } from '@b-studio/sandbox';
 
 /**
  * 세션 터미널의 턴 끝(Stop 훅) 판정(ADR-212, 4f B4c). 판정은 Rust `crates/bstudio-session`의 `terminal::turn_end`가 한다(순수 함수).
- * 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다. 되돌리기·저장·알림·글 조립은 `sessions.ts`가 한다. 옛 판정은 `session-terminal-turn-end-legacy.ts`에 차등 시험의 기준으로만 남아 있다.
+ * 여기는 사실을 코어에 넘기고 결정을 TS 값으로 돌려주는 껍데기다. 되돌리기·저장·알림·글 조립은 `sessions.ts`가 한다. 옛 판정은 지웠다(#1347).
  *
  * 읽기가 부수 효과인 사실(Git 맞추기, 지문, 바뀐 파일 목록, 카드 범위)은 `unread`로 넘기고, 판정이 `need_*`를 돌려주면 읽어서 채운 뒤
  * **닫힘·미룬 위반·위반을 포함한 모든 사실을 그 순간 값으로 다시 읽어** 같은 판정을 다시 부른다. 모르는 결정은 닫는 쪽(`unknown`)이다.

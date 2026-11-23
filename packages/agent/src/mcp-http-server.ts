@@ -44,7 +44,7 @@ export interface ToolServerOptions {
  *
  * 전송과 프로토콜은 Rust가 한다(ADR-201, crates/bstudio-io/src/loopback_server.rs·mcp_server.rs): 포트 열기, Host·토큰 확인, streamable HTTP(stateless),
  * JSON-RPC 해석·분배, 도구 인자 검사(`zodShape` 규칙: 모르는 키를 지우고 정수는 JS 안전 정수만), SSE 쓰기, 닫기. 여기는 Rust가 부르는 두 가지만 맡는다:
- * 도구 목록 얻기(`specs`가 함수면 요청마다)와 도구 실행(`run`). 옛 `node:http` + `@modelcontextprotocol/sdk` 서버는 `mcp-http-server-legacy.ts`에 있다(차등 시험의 기준값).
+ * 도구 목록 얻기(`specs`가 함수면 요청마다)와 도구 실행(`run`). 옛 `node:http` + `@modelcontextprotocol/sdk` 서버는 지웠다(#1347).
  * 글자는 `encodeLoneSurrogates`한 꼴로 오간다(짝 없는 서로게이트가 경계에서 합쳐지지 않게).
  */
 export async function startToolServer({ specs, run, name = 'b-studio', allowedHosts = [], honorRequired = false, ledger }: ToolServerOptions): Promise<ToolServer> {
