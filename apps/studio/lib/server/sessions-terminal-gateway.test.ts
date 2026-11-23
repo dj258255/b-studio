@@ -5,6 +5,7 @@ import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
+import { Board, boardMcpToolSpecs, externalBoardAccess, failureNotesFromEvents, type BoardAccess } from '@b-studio/agent';
 import type { Sandbox } from '@b-studio/sandbox';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { StudioEvent } from '../studio-events';
@@ -147,7 +148,7 @@ vi.mock('./session-terminal', () => ({
 
 import { sessionFile, stateDirOf } from './session-store';
 import { agentRows, restoreAgentLedger } from './terminal-agents';
-import { cancelRun, createSession, getSnapshot, setTerminalCheckChanges, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { cancelRun, createSession, getSnapshot, setTerminalCheckChanges, rememberedGitForTest, restoreCheckpoint, resumeSession, sendMessage, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents, sessionTerminalTarget, setGitMemoryForTest, setTerminalBoard, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -2829,6 +2830,113 @@ describe('터미널 CLI가 지금 하는 일을 훅으로 모은다(#920)', () =
     const denied = await session.gateway.preTool({ tool_name: 'Bash', tool_use_id: 'u1', tool_input: { command: 'pnpm test' } });
     expect(denied.deny).toContain('읽기만 요청');
     expect(sessionTerminalActivity(session.id)?.now).toMatchObject({ tool: 'Bash', target: 'pnpm test', running: false, error: expect.stringContaining('거절됨: 읽기만 요청') });
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('작업 분해가 터미널 세션에 붙이는 조율 게시판 (이슈 #1346)', () => {
+  /** 레인 신원을 고정한 접근. current를 바꿔 "작업 사이"(undefined)를 흉내 낸다 */
+  function attach(session: Opened, board: Board, lane = 'lane-a') {
+    const state = { current: externalBoardAccess(board, { lane }) as BoardAccess | undefined };
+    setTerminalBoard(session.id, { specs: boardMcpToolSpecs({ modelWrites: board.modelWrites }), access: () => state.current });
+    return state;
+  }
+  const names = (session: Opened) => session.gateway.toolSpecs().map((spec) => spec.name);
+
+  it('붙인 세션의 관문 도구 목록에만 게시판 도구가 있고, post_note는 그 세션의 레인 이름으로 게시판에 쓰인다', async () => {
+    const attached = await open();
+    const plain = await open();
+    const board = new Board({ topology: 'mesh' });
+    attach(attached, board);
+    expect(names(attached)).toEqual(expect.arrayContaining(['run_in_service', 'post_note', 'read_notes']));
+    expect(names(plain)).not.toContain('post_note');
+    expect(names(plain)).not.toContain('read_notes');
+
+    const posted = await attached.gateway.runTool('post_note', { kind: 'fact', body: '포트는 8080', refs: [] });
+    expect(posted.ok).toBe(true);
+    expect(board.read({ lane: 'lane-a' }, {}).notes.map((note) => [note.author.lane, note.body])).toEqual([['lane-a', '포트는 8080']]);
+    const read = await attached.gateway.runTool('read_notes', { kinds: [] });
+    expect(read).toMatchObject({ ok: true, content: expect.stringContaining('포트는 8080') });
+    // 게시판 도구는 샌드박스 경로로 가지 않는다: 서비스 안에서 돈 명령도 실행 열기도 없다
+    expect(fake.execCalls).toEqual([]);
+    expect(attached.ofType('run_started')).toHaveLength(0);
+    await stopSession(attached.id);
+    await stopSession(plain.id);
+  }, 30_000);
+
+  it('작업 사이(access가 undefined)에는 실패하고, 다시 붙으면 쓸 수 있다. 신원은 인자로 바꿀 수 없다', async () => {
+    const session = await open();
+    const board = new Board({ topology: 'mesh' });
+    const state = attach(session, board);
+    const access = state.current;
+    state.current = undefined;
+    expect(await session.gateway.runTool('post_note', { kind: 'fact', body: 'x', refs: [] })).toEqual({ ok: false, content: '[b-studio] 지금 이 레인에서 도는 작업이 없어 게시판을 쓸 수 없습니다' });
+    expect(await session.gateway.runTool('read_notes', { kinds: [] })).toMatchObject({ ok: false });
+    expect(board.read({ lane: 'lane-a' }, {}).notes).toEqual([]);
+    state.current = access;
+    // 인자의 lane은 무시된다
+    expect((await session.gateway.runTool('post_note', { kind: 'fact', body: 'y', refs: [], lane: 'lane-b' })).ok).toBe(true);
+    expect(board.read({ lane: 'lane-a' }, {}).notes.map((note) => note.author.lane)).toEqual(['lane-a']);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('붙이지 않은 세션에서 post_note는 내주지 않는 도구이고, 떼면 목록에서 사라진다', async () => {
+    const session = await open();
+    expect(await session.gateway.runTool('post_note', { kind: 'fact', body: 'x', refs: [] })).toEqual({ ok: false, content: '[b-studio] post_note: 터미널에 내주지 않는 도구입니다' });
+    attach(session, new Board({ topology: 'mesh' }));
+    setTerminalBoard(session.id, undefined);
+    expect(names(session)).not.toContain('read_notes');
+    expect(await session.gateway.runTool('read_notes', { kinds: [] })).toMatchObject({ ok: false, content: expect.stringContaining('내주지 않는 도구') });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('modelWrites가 false면 목록에 read_notes만 있고 post_note는 실패한다', async () => {
+    const session = await open();
+    const board = new Board({ topology: 'mesh', modelWrites: false });
+    attach(session, board);
+    expect(names(session)).toContain('read_notes');
+    expect(names(session)).not.toContain('post_note');
+    expect((await session.gateway.runTool('post_note', { kind: 'fact', body: 'x', refs: [] })).ok).toBe(false);
+    expect(board.read({ lane: 'lane-a' }, {}).notes).toEqual([]);
+    expect((await session.gateway.runTool('read_notes', { kinds: [] })).ok).toBe(true);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('인자가 객체가 아니면 던지지 않고 실패로 돌려준다', async () => {
+    const session = await open();
+    attach(session, new Board({ topology: 'mesh' }));
+    for (const args of [null, 'x', 3, ['a'], undefined]) expect((await session.gateway.runTool('post_note', args)).ok).toBe(false);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('기본 도구와 이름이 겹치는 게시판 도구는 붙이지 않고 던진다', async () => {
+    const session = await open();
+    const spec = { ...boardMcpToolSpecs({ modelWrites: true })[0]!, name: 'run_in_service' as never };
+    expect(() => setTerminalBoard(session.id, { specs: [spec], access: () => undefined })).toThrow(/이미 쓰입니다/);
+    expect(names(session)).toEqual(expect.not.arrayContaining(['post_note']));
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('멈춘 세션에서는 게시판 도구도 실패한다', async () => {
+    const session = await open();
+    attach(session, new Board({ topology: 'mesh' }));
+    await stopSession(session.id);
+    expect((await session.gateway.runTool('read_notes', { kinds: [] })).ok).toBe(false);
+  }, 30_000);
+
+  it('터미널 게이트가 실패한 턴은 세션 기록에 검증 실패 이벤트가 남아, 작업 분해(S5)가 같은 함수로 실패 메모를 만든다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(session, 'api/src/Order.java', 'class Order { String memo }\n');
+    fake.failCommands = ['test'];
+    const failed = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(failed.feedback).toContain('[b-studio 검증 게이트]');
+    // task-plans의 readSessionEvents와 같이 subscribe가 다시 보내 주는 기록을 읽는다
+    const replay: StudioEvent[] = [];
+    subscribe(session.id, (event) => replay.push(event))();
+    const notes = failureNotesFromEvents(replay as never);
+    expect(notes.length).toBeGreaterThan(0);
+    expect(notes.every((note) => note.kind === 'failure')).toBe(true);
     await stopSession(session.id);
   }, 30_000);
 });

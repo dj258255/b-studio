@@ -124,6 +124,20 @@ const fake = vi.hoisted(() => ({
   terminalAllowed: true,
   /** runTerminalTask(터미널 레인의 한 작업)가 불린 기록(순서대로) */
   terminalSends: [] as Array<{ sessionId: string; request: string; options: { writableScope: readonly string[]; doneTests: readonly unknown[]; onWaiting?: (note?: string) => void } }>,
+  /** 세션에 붙은 게시판(setTerminalBoard가 붙인 것). 세션 id → 붙인 입력 */
+  terminalBoards: new Map<string, { specs: readonly { name: string }[]; access: () => { lane: string; task?: string; modelWrites?: boolean } | undefined }>(),
+  /** 터미널을 열 때(driver.open) 그 세션에 붙어 있던 게시판 도구 이름. 열기 전에 붙였는지 본다 */
+  openedWith: {} as Record<string, string[]>,
+  /** 터미널 작업이 시작할 때 본 게시판 접근(레인·작업·쓰기 여부). 게시판이 없으면 undefined */
+  taskAccess: [] as Array<{ sessionId: string; access: { lane: string; task?: string; modelWrites?: boolean } | undefined }>,
+  /** 게시판이 붙은 세션의 getSnapshot이 불릴 때 본 access() 값들 */
+  accessAtSnapshot: [] as unknown[],
+  /** 게시판을 뗄 때 그 직전의 access() 값. 작업이 끝나면 풀려 있어야 한다(undefined) */
+  accessAtDetach: {} as Record<string, unknown>,
+  /** setTerminalBoard가 던지게 한다 */
+  boardAttachFails: false,
+  /** runTerminalTask가 결과를 돌려주지 않고 던지게 한다(터미널이 끊긴 상황) */
+  terminalThrows: false,
   /** runTerminalTask가 결과에 실어 줄 비용(달러). undefined면 싣지 않는다(수정 6) */
   terminalCostUsd: undefined as number | undefined,
   /** 작업 id → 그 작업이 끝나 체크포인트를 남긴 직후 작업 폴더에서 바꿔치기할 파일과 링크 대상(레인 뒤 터미널이 링크로 바꾼 상황) */
@@ -225,6 +239,16 @@ vi.mock('./sessions', () => ({
   // 세션 만들기가 backend 없이 고르는 값(서버 모드). 실제 함수의 허용 목록 검사는 이 시험의 관심 밖이다
   resolveSessionBackend: (requested?: string) => requested ?? process.env.B_STUDIO_MODE ?? 'api',
   sessionTerminalAllowed: () => fake.terminalAllowed,
+  setTerminalBoard: (sessionId: string, board: { specs: readonly { name: string }[]; access: () => { lane: string; task?: string; modelWrites?: boolean } | undefined } | undefined) => {
+    if (board === undefined) {
+      const attached = fake.terminalBoards.get(sessionId);
+      if (attached) fake.accessAtDetach[sessionId] = attached.access();
+      fake.terminalBoards.delete(sessionId);
+      return;
+    }
+    if (fake.boardAttachFails) throw new Error('게시판 도구 이름이 이미 쓰입니다: post_note');
+    fake.terminalBoards.set(sessionId, board);
+  },
   commitPendingWorkingCopyDocs: async (sessionId: string, message: string) => {
     fake.docsCommitted.push({ sessionId, message });
     return undefined;
@@ -258,7 +282,12 @@ vi.mock('./sessions', () => ({
     });
     return { id };
   },
-  getSnapshot: (id: string) => fake.sessions.get(id),
+  getSnapshot: (id: string) => {
+    // 게시판이 붙은 세션의 스냅샷을 읽는 시점(작업이 끝난 뒤 체크포인트를 읽을 때 등)의 게시판 접근. 작업 밖이라 풀려 있어야 한다
+    const attached = fake.terminalBoards.get(id);
+    if (attached) fake.accessAtSnapshot.push(attached.access());
+    return fake.sessions.get(id);
+  },
   stopSession: async (id: string) => {
     fake.stopped.push(id);
   },
@@ -372,7 +401,9 @@ vi.mock('./sessions', () => ({
 // 그 작업이 쓸 파일을 작업 폴더에 쓰고 체크포인트를 남긴 뒤(레인 결과 기록), 결과를 돌려준다.
 vi.mock('./terminal-lane', () => ({
   terminalLaneDriver: {
-    open: async () => {},
+    open: async (sessionId: string) => {
+      fake.openedWith[sessionId] = (fake.terminalBoards.get(sessionId)?.specs ?? []).map((spec) => spec.name);
+    },
     cliAlive: () => true,
     write: () => {},
   },
@@ -382,12 +413,18 @@ vi.mock('./terminal-lane', () => ({
     options: { writableScope: readonly string[]; doneTests: readonly unknown[]; onWaiting?: (note?: string) => void },
   ) => {
     fake.terminalSends.push({ sessionId, request, options });
+    fake.taskAccess.push({ sessionId, access: fake.terminalBoards.get(sessionId)?.access() });
+    if (fake.terminalThrows) throw new Error('터미널이 끊겼습니다');
     const session = fake.sessions.get(sessionId)!;
     const taskId = /\[id:([a-z0-9-]+)\]/.exec(request)?.[1];
     const deleted = taskId ? (fake.deletes[taskId] ?? []) : [];
     const files = taskId ? fake.writes[taskId] : undefined;
     const runId = `terminal-${fake.terminalSends.length}`;
-    if (files === 'fail' || files === undefined) return { runId, status: 'failed', summary: '검증 게이트를 통과하지 못했습니다', ...fake.run };
+    if (files === 'fail' || files === undefined) {
+      // 실제 터미널 게이트는 실패한 턴의 검증 결과를 세션 이벤트로 남긴다(sessions-terminal-gateway.test.ts가 실제 코드로 확인한다). S5가 그것을 읽는다
+      fake.history.set(sessionId, [...(fake.history.get(sessionId) ?? []), failureEvent(runId)]);
+      return { runId, status: 'failed', summary: '검증 게이트를 통과하지 못했습니다', ...fake.run };
+    }
     const committed = (session.files ??= {});
     for (const [file, content] of Object.entries(files)) {
       mkdirSync(path.dirname(path.join(session.workDir, file)), { recursive: true });
@@ -470,6 +507,13 @@ beforeEach(() => {
   fake.allowedBackends = new Set(['api', 'claude-code', 'codex', 'commandcode', 'opencode']);
   fake.terminalAllowed = true;
   fake.terminalSends = [];
+  fake.terminalBoards = new Map();
+  fake.openedWith = {};
+  fake.taskAccess = [];
+  fake.accessAtDetach = {};
+  fake.accessAtSnapshot = [];
+  fake.boardAttachFails = false;
+  fake.terminalThrows = false;
   fake.terminalCostUsd = undefined;
   fake.relinkAfterLane = {};
   fake.linkFiles = {};
@@ -2640,7 +2684,6 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
   });
 
   it.each([
-    ['coordination', { coordination: { strategy: 'S2' as const, contracts: [] } }],
     ['verify light', { verify: 'light' as const }],
     ['pageChecks', { integrationChecks: { pageChecks: [{ service: 'web', path: '/orders' }] as never } }],
     ['effort', { effort: 'high' }],
@@ -2699,15 +2742,146 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
     expect(first?.modelId).toBe('opus');
   });
 
-  it('계약 설정이 켜져도 터미널 계획은 계약 모델을 부르지 않고 경고를 남긴다', async () => {
+
+  it.each(['S4', 'S6', 'S7'] as const)('%s 조율은 터미널 레인에 아직 못 붙여 전략 이름을 담아 400이고 만들지 않는다', async (strategy) => {
     process.env.B_STUDIO_MODE = 'claude-code';
-    process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
-    twoLanes();
-    const created = await createTaskPlan({ ...base, modelId: 'sonnet' });
-    const waiting = await awaiting(created.id);
-    expect(fake.contractCalls).toBe(0);
-    expect(waiting.contracts).toMatchObject({ source: 'model', count: 0 });
-    expect(waiting.contracts?.warning).toContain('터미널 레인은 아직 게시판을 읽지 못해');
-    expect(waiting.coordination).toBeUndefined();
+    const error = await statusOfError({ ...base, coordination: { strategy } });
+    expect(error.status).toBe(400);
+    expect(error.message).toContain(strategy);
+    nothingCreated();
+  });
+
+  it('고정 계획 + 터미널 + S4도 400이다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    expect((await statusOfError({ ...base, modelId: 'x', presetPlan: { tasks: [task('a', ['web/a'])] }, coordination: { strategy: 'S4' } })).status).toBe(400);
+    nothingCreated();
+  });
+
+  describe('조율 게시판을 터미널 레인에 붙인다(#1346)', () => {
+    const contract = { body: 'GET /api/orders → 200 JSON 배열', refs: ['api'] };
+
+    it('S2·S3 계획은 레인 둘을 끝까지 돌고, 터미널을 열기 전에 게시판 도구가 붙어 있으며, 작업 중에만 레인 신원의 접근이 있다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      const cases: Array<[Parameters<typeof createTaskPlan>[0]['coordination'] & { strategy: string }, string[], boolean]> = [
+        [{ strategy: 'S2', contracts: [contract] }, ['read_notes'], false],
+        [{ strategy: 'S3' }, ['post_note', 'read_notes'], true],
+      ];
+      for (const [coordination, tools, modelWrites] of cases) {
+        fake.terminalBoards = new Map();
+        fake.openedWith = {};
+        fake.taskAccess = [];
+        fake.accessAtDetach = {};
+        fake.terminalSends = [];
+        twoLanes();
+        const plan = await run({ ...base, modelId: 'sonnet', coordination });
+        expect(plan.status, coordination.strategy).toBe('done');
+        expect(fake.terminalSends).toHaveLength(2);
+        const laneSessions = plan.lanes.map((lane) => lane.sessionId!);
+        // 열기 전에 붙어 있었다(CLI는 열 때 도구 목록을 읽는다)
+        for (const id of laneSessions) expect(fake.openedWith[id], coordination.strategy).toEqual(tools);
+        // 작업 중 접근은 그 레인 이름과 작업 id, 전략이 정한 쓰기 여부다
+        for (const lane of plan.lanes) {
+          const seen = fake.taskAccess.find((entry) => entry.sessionId === lane.sessionId)!.access;
+          expect(seen, coordination.strategy).toMatchObject({ lane: lane.id, modelWrites });
+          expect(seen?.task).toBe(lane.tasks[0]!.id);
+        }
+        // 작업이 끝나면 풀리고, 레인이 끝나면 떼어 낸다
+        for (const id of laneSessions) expect(fake.accessAtDetach[id], coordination.strategy).toBeUndefined();
+        expect(fake.terminalBoards.size).toBe(0);
+        // 채팅 실행은 불리지 않는다
+        expect(fake.sends.filter((send) => laneSessions.includes(send.sessionId))).toEqual([]);
+      }
+    });
+
+    it('작업이 실패해도 access가 풀리고 게시판이 떼어진다. 한 레인에 작업이 둘이면 작업마다 그 작업 id로 바뀐다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      fake.plan = { tasks: [task('a', ['web/a']), { ...task('b', ['web/a']), dependsOn: ['a'] } as never] };
+      fake.writes = { a: { 'web/a/one.md': 'one' }, b: 'fail' };
+      fake.accessAtSnapshot = [];
+      const plan = await run({ ...base, modelId: 'sonnet', coordination: { strategy: 'S3' } });
+      expect(plan.status).toBe('failed');
+      const id = plan.lanes[0]!.sessionId!;
+      const seen = fake.taskAccess.filter((entry) => entry.sessionId === id).map((entry) => entry.access?.task);
+      expect(seen).toHaveLength(2);
+      expect(new Set(seen).size).toBe(2);
+      // 첫 작업이 끝난 뒤(둘째 작업 전) 체크포인트를 읽는 시점에는 이미 풀려 있다
+      expect(fake.accessAtSnapshot.length).toBeGreaterThan(0);
+      expect(fake.accessAtSnapshot.every((access) => access === undefined)).toBe(true);
+      expect(fake.accessAtDetach[id]).toBeUndefined();
+      expect(fake.terminalBoards.size).toBe(0);
+    });
+
+    it('터미널 실행이 결과 없이 던져도 access가 풀리고 게시판이 떼어진다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      fake.terminalThrows = true;
+      twoLanes();
+      const plan = await run({ ...base, modelId: 'sonnet', coordination: { strategy: 'S3' } });
+      expect(plan.status).toBe('failed');
+      expect(fake.taskAccess.length).toBeGreaterThan(0);
+      for (const lane of plan.lanes) expect(fake.accessAtDetach[lane.sessionId!], lane.id).toBeUndefined();
+      expect(Object.keys(fake.accessAtDetach)).toHaveLength(2);
+      expect(fake.terminalBoards.size).toBe(0);
+    });
+
+    it('S5는 터미널 레인에서도 받고, 터미널 게이트가 낸 검증 실패 서명을 플랫폼 이름으로 게시한다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      fake.plan = { tasks: [task('a', ['web/a'])] };
+      fake.writes = { a: 'fail' };
+      const plan = await run({ ...base, modelId: 'sonnet', coordination: { strategy: 'S5' } });
+      expect(plan.status).toBe('failed');
+      expect(fake.openedWith[plan.lanes[0]!.sessionId!]).toEqual(['read_notes']);
+      expect(plan.board?.notes.filter((note) => note.kind === 'failure')).toHaveLength(1);
+    });
+
+    it('S1(조율 없음)은 게시판을 붙이지 않는다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      twoLanes();
+      const plan = await run({ ...base, modelId: 'sonnet' });
+      expect(plan.status).toBe('done');
+      expect(fake.terminalBoards.size).toBe(0);
+      expect(Object.values(fake.openedWith).every((names) => names.length === 0)).toBe(true);
+      expect(fake.taskAccess.every((entry) => entry.access === undefined)).toBe(true);
+    });
+
+    it('게시판을 붙이지 못하면 터미널을 열지 않고 레인이 실패한다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      fake.boardAttachFails = true;
+      twoLanes();
+      const plan = await run({ ...base, modelId: 'sonnet', coordination: { strategy: 'S3' } });
+      expect(plan.status).toBe('failed');
+      expect(fake.terminalSends).toEqual([]);
+      expect(fake.openedWith).toEqual({});
+    });
+
+    it('카드 계획(만들기 검사를 거치지 않는다)에 S4가 와도 게시판 도구를 붙이지 않는다', async () => {
+      fake.writes = { 'card-1': { 'web/a/one.md': 'one' } };
+      const created = await createTaskPlan({
+        projectId: 'orders',
+        request: '카드 S4',
+        owner: 'kim',
+        coordination: { strategy: 'S4' },
+        cards: [{ title: 'card-1', request: '[id:card-1] card-1 작업', paths: ['web/a'] }],
+      });
+      await finished(created.id);
+      expect(fake.terminalBoards.size).toBe(0);
+      expect(Object.values(fake.openedWith).every((names) => names.length === 0)).toBe(true);
+      expect(fake.terminalSends.length).toBeGreaterThan(0);
+    });
+
+    it('계약 설정이 켜지면 터미널 계획도 계약을 받아 S2 게시판으로 레인에 붙는다', async () => {
+      process.env.B_STUDIO_MODE = 'claude-code';
+      process.env.B_STUDIO_PLAN_CONTRACTS = 'on';
+      twoLanes();
+      const created = await createTaskPlan({ ...base, modelId: 'sonnet' });
+      const waiting = await awaiting(created.id);
+      expect(fake.contractCalls).toBe(1);
+      expect(waiting.contracts).toMatchObject({ source: 'model', count: 1 });
+      expect(waiting.contracts?.warning).toBeUndefined();
+      expect(waiting.coordination).toMatchObject({ strategy: 'S2' });
+      approveTaskPlan(created.id, 'kim');
+      const plan = await finished(created.id);
+      expect(plan.status).toBe('done');
+      for (const lane of plan.lanes) expect(fake.openedWith[lane.sessionId!]).toEqual(['read_notes']);
+    });
   });
 });

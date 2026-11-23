@@ -129,6 +129,7 @@ import {
   executeTool,
   fetchContract,
   gatewayToolSpecs,
+  runBoardMcpTool,
   rejectedChangeFeedback,
   serialQueue,
   StagedMismatchError,
@@ -150,6 +151,7 @@ import {
   type AgentUsage,
   type BaseStatus,
   type BoardAccess,
+  type BoardMcpToolSpec,
   type CheckpointRef,
   type Checkpoint,
   type DatabaseState,
@@ -453,6 +455,11 @@ export type BootMode = 'eager' | 'on-demand';
 
 interface Session {
   snapshot: SessionSnapshot;
+  /**
+   * 작업 분해가 이 터미널 세션에 붙인 조율 게시판(#1346). 저장하지 않는다 — 서버가 다시 시작되면 사라지고 계획도 그때 interrupted가 된다.
+   * access가 undefined면 지금 이 레인에서 도는 작업이 없다(작업 사이). 신원은 access가 고정한다(레인 이름을 도구 인자로 받지 않는다)
+   */
+  terminalBoard?: TerminalBoard;
   /**
    * 이 세션을 실제로 만든 폴더(`startSession`의 `sessionDir`) 또는 읽어 온 폴더(`readStoredSessions`의 `home`). 지우기와 이어받기는
    * 저장 파일의 경로 글자(`snapshot.workDir`·`stateDir`)가 아니라 이 값으로 폴더를 정한다(ADR-204)
@@ -7696,6 +7703,32 @@ function terminalSession(id: string): Session {
   return session;
 }
 
+/** 터미널 세션에 붙는 조율 게시판: CLI에 내줄 도구 목록과, 도구를 부를 때마다 읽는 접근(작업 사이엔 undefined) */
+export interface TerminalBoard {
+  specs: readonly BoardMcpToolSpec[];
+  access: () => BoardAccess | undefined;
+}
+
+/**
+ * 터미널 세션에 조율 게시판 도구를 붙이거나(board) 뗀다(undefined). CLI는 터미널을 열 때 도구 목록을 읽으므로 터미널을 열기 전에 붙인다.
+ * 기본 도구와 이름이 겹치거나 목록 안에서 이름이 겹치면 붙이지 않고 던진다(게시판 도구가 기본 도구를 가리면 샌드박스 경로를 우회한다)
+ */
+export function setTerminalBoard(id: string, board: TerminalBoard | undefined): void {
+  if (board === undefined) {
+    // 뗄 때는 세션이 이미 없어도 된다(없으면 붙어 있던 것도 없다)
+    const existing = store.sessions.get(id);
+    if (existing) existing.terminalBoard = undefined;
+    return;
+  }
+  const session = requireSession(id);
+  const taken = new Set(gatewayToolSpecs(session.project).map((spec) => spec.name));
+  for (const spec of board.specs) {
+    if (taken.has(spec.name)) throw new Error(`게시판 도구 이름이 이미 쓰입니다: ${spec.name}`);
+    taken.add(spec.name);
+  }
+  session.terminalBoard = { specs: [...board.specs], access: board.access };
+}
+
 /** 세션 터미널 자리가 아직 살아 있는가. sessionTerminalTarget과 위반 처리기가 같은 기준을 쓴다 */
 /**
  * 터미널이 붙어 있어도 되는 세션인가: 멈추기 시작했거나 멈췄으면 아니다.
@@ -8857,6 +8890,14 @@ async function runTerminalTool(id: string, name: string, args: unknown): Promise
   } catch (error) {
     return { ok: false, content: describe(error) };
   }
+  // 계획이 붙인 게시판 도구는 샌드박스 경로(목록 검사·실행 열기·검증)로 가지 않는다. 게시판은 파일을 바꾸지 않고, 신원은 세션에 묶인 access가 정한다
+  const board = session.terminalBoard;
+  if (board?.specs.some((spec) => spec.name === name)) {
+    if (typeof args !== 'object' || args === null || Array.isArray(args)) return { ok: false, content: `[b-studio] ${name}: 입력이 객체가 아닙니다` };
+    const access = board.access();
+    if (!access) return { ok: false, content: '[b-studio] 지금 이 레인에서 도는 작업이 없어 게시판을 쓸 수 없습니다' };
+    return runBoardMcpTool(name, args as Record<string, unknown>, access);
+  }
   // 내주는 도구는 샌드박스가 있어야 도는 것뿐이다. 도구 서버가 이미 목록 밖의 이름을 받지 않지만 여기서도 본다
   // (파일 도구가 이 길로 불리면 변경 추적과 쓰기 직전의 훅을 건너뛴다)
   if (!gatewayToolSpecs(session.project).some((spec) => spec.name === name)) return { ok: false, content: `[b-studio] ${name}: 터미널에 내주지 않는 도구입니다` };
@@ -9897,7 +9938,10 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       await terminalTelemetry(id, body);
     },
     conversation: (conversation) => noteTerminalConversation(id, conversation),
-    toolSpecs: () => gatewayToolSpecs(terminalSession(id).project),
+    toolSpecs: () => {
+      const session = terminalSession(id);
+      return [...gatewayToolSpecs(session.project), ...(session.terminalBoard?.specs ?? [])] as ReturnType<typeof gatewayToolSpecs>;
+    },
     runTool: (name, args) => runTerminalTool(id, name, args),
   });
 }

@@ -16,6 +16,7 @@ import {
   planLanes,
   planLimitsFromEnv,
   PlanBackendSchema,
+  boardMcpToolSpecs,
   externalBoardAccess,
   readProjectFileSync,
   requestLaneContracts,
@@ -68,7 +69,7 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, setTerminalBoard, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 import { isTerminalRunnableBackend, sessionTerminalMode } from './session-terminal';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
@@ -373,13 +374,17 @@ export async function createTaskPlan(input: {
 
 /**
  * 카드가 아닌 계획을 터미널에서 돌려도 되는지 만들기 전에 본다(거절하는 쪽: 허용 목록이라 모르는 입력은 거절한다).
- * 터미널 레인은 아직 게시판·가벼운 확인·통합 페이지 확인·노력 단계를 CLI에 넘기지 못한다 —
+ * 터미널 레인은 아직 가벼운 확인·통합 페이지 확인·노력 단계를 CLI에 넘기지 못하고, 조율은 게시판 도구를 붙일 수 있는 S2·S3·S5만 받는다 —
  * 조용히 빠뜨리면 사람이 건 조건이 안 걸린 채 통과하므로 입력이 오면 거절한다.
  * 레인을 띄울 백엔드는 모델 계획이면 서버 기본(레인 작업의 backend는 버려진다), 고정 계획이면 레인이 고른 값(없으면 서버 기본)이다
  */
 function assertPlanTerminalRunnable(input: { presetPlan?: unknown; coordination?: CoordinationInput; verify?: VerifyMode; integrationChecks?: { pageChecks?: WorkflowPageCheck[] }; effort?: string }): void {
   if (!sessionTerminalAllowed()) throw new StudioError(409, '터미널 방식 작업 분해는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
-  if (input.coordination) throw new StudioError(400, '터미널 레인은 아직 게시판을 읽지 못해 조율(coordination)과 함께 쓸 수 없습니다');
+  // 허용 목록: 터미널 레인에 게시판 도구를 붙일 수 있는 전략만 받는다(모르는 전략도 거절). S4·S6·S7은 레인 밖 동작(통합 수리·트레이스·중계)이 터미널 경로에 없다
+  const strategy = input.coordination?.strategy;
+  if (input.coordination && !(strategy === 'S2' || strategy === 'S3' || strategy === 'S5')) {
+    throw new StudioError(400, `터미널 레인은 아직 조율 전략 ${String(strategy)}과(와) 함께 쓸 수 없습니다(S2·S3·S5만 받습니다)`);
+  }
   if (input.verify === 'light') throw new StudioError(400, '터미널 레인은 아직 가볍게 확인(verify: light)을 받지 못합니다');
   if (input.integrationChecks?.pageChecks?.length) throw new StudioError(400, '터미널 레인은 아직 통합 페이지 확인(pageChecks)을 받지 못합니다');
   if (asEffort(input.effort)) throw new StudioError(400, '터미널 레인은 아직 노력 단계(effort)를 CLI에 넘기지 못합니다');
@@ -913,14 +918,7 @@ async function execute(plan: TaskPlanView, preset?: unknown, cards?: ReturnType<
   // 레인을 만든 직후, 레인을 돌리기 전에 레인 사이 계약을 받아 S2로 게시한다.
   // 실패해도 계획은 계속 간다(계약 없이) — 경고 한 줄만 남긴다
   if (usedModel && lanes.length >= 2 && !plan.coordination && contractsSetting()) {
-    if (plan.runner === 'terminal') {
-      // 터미널 레인은 게시판을 읽지 못한다 — 계약을 받아도 레인에 닿지 않으므로 모델을 부르지 않고, 받지 않았다고 남긴다
-      const contracts: TaskPlanContractsView = { source: 'model', count: 0, warning: '터미널 레인은 아직 게시판을 읽지 못해 레인 사이 계약을 받지 않았습니다' };
-      plan.contracts = contracts;
-      console.warn(`[b-studio] 작업 분해 ${plan.id}: ${contracts.warning}`);
-    } else {
-      await askLaneContracts(plan, project, lanes);
-    }
+    await askLaneContracts(plan, project, lanes);
   }
   // 사람이 쓴 카드에서 "실행"을 누른 것이 승인이다(승인 함수가 남기는 것과 같은 필드). 모델 계획은 승인을 기다린다
   if (cards !== undefined) {
@@ -995,6 +993,9 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
   lane.startedAt = new Date().toISOString();
   persist(plan);
   const bootStarted = performance.now();
+  // 터미널 레인의 게시판 접근(#1346). 작업이 도는 동안에만 값이 있다 — 관문이 도구를 받을 때마다 이 값을 읽는다
+  let currentAccess: BoardAccess | undefined;
+  let boardAttachedTo: string | undefined;
   try {
     const snapshot = await createSession(plan.projectId, plan.owner, 'copy', { ...laneSessionOption(plan, lane), ...seedFromSessionOption(plan) });
     lane.sessionId = snapshot.id;
@@ -1002,6 +1003,12 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     await waitForReady(snapshot.id);
     lane.bootMs = Math.round(performance.now() - bootStarted);
     lane.bootRxBytes = bootRxBytes(snapshot.id);
+    const terminalBoard = plan.runner === 'terminal' ? terminalLaneBoard(plan) : undefined;
+    if (terminalBoard) {
+      // CLI는 터미널을 열 때 도구 목록을 읽는다 — 열기 전에 붙인다. 이름이 겹치면 던져 레인을 실패시킨다(게시판 없이 조용히 돌리지 않는다)
+      setTerminalBoard(snapshot.id, { specs: boardMcpToolSpecs({ modelWrites: terminalBoard.modelWrites }), access: () => currentAccess });
+      boardAttachedTo = snapshot.id;
+    }
     // 터미널 레인은 세션 터미널을 연다 — 그 안의 CLI에 요청을 붙여 넣어 돌린다(화면 없는 실행기 대신)
     if (plan.runner === 'terminal') await (terminalLaneDeps?.driver ?? terminalLaneDriver).open(snapshot.id);
     lane.status = 'running';
@@ -1014,6 +1021,7 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       // S6: 이 레인의 진행 트레이스를 턴마다 fact 메모로 게시해 다른 레인이 읽게 한다(Cognition의 전체 공유 처방)
       const stopTracePosting = plan.coordination?.strategy === 'S6' ? attachTracePoster(plan, lane, snapshot.id) : undefined;
       let outcome: Awaited<ReturnType<typeof runAndWait>> & { costUsd?: number };
+      if (boardAttachedTo) currentAccess = board;
       try {
         outcome =
           plan.runner === 'terminal'
@@ -1039,6 +1047,8 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
               });
       } finally {
         stopTracePosting?.();
+        // 성공·실패·던짐 모두 작업이 끝나면 접근을 푼다: 작업 사이에 CLI가 게시판을 부르면 실패한다
+        currentAccess = undefined;
       }
       // S5: 성공·실패와 무관하게 그 실행의 검증 실패 서명을 플랫폼이 게시해 다른 레인이 읽게 한다
       if (plan.coordination?.strategy === 'S5') postFailures(plan, lane, snapshot.id);
@@ -1080,9 +1090,22 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     persist(plan);
     throw error;
   } finally {
+    currentAccess = undefined;
+    if (boardAttachedTo) setTerminalBoard(boardAttachedTo, undefined);
     lane.finishedAt = new Date().toISOString();
     persist(plan);
   }
+}
+
+/**
+ * 터미널 레인에 게시판 도구를 붙일지(#1346). 게시판이 있고 전략이 S2·S3·S5일 때만 값이 있다.
+ * S4는 레인에 게시판을 주지 않고, S6·S7은 터미널 경로에 없는 동작(트레이스 게시·중계)이 필요해 만들기 단계에서 거절한다.
+ */
+function terminalLaneBoard(plan: TaskPlanView): { modelWrites: boolean } | undefined {
+  const strategy = plan.coordination?.strategy;
+  if (strategy !== 'S2' && strategy !== 'S3' && strategy !== 'S5') return undefined;
+  const board = boards.get(plan.id);
+  return board ? { modelWrites: board.modelWrites } : undefined;
 }
 
 /** 레인 세션들의 최종 파일을 새 세션에 같은 루프·게이트로 다시 적용한다. git 병합 없이 합친 결과를 한 번 더 검증하기 위해서다 */
