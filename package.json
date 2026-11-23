@@ -17,6 +17,7 @@
     "e2e:agent": "tsx packages/agent/e2e/scripted-orders.ts",
     "e2e:fleet": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/fleet-local.ts",
     "e2e:task-plan": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/task-plan-local.ts",
+    "e2e:terminal-orders": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/terminal-orders-local.ts",
     "e2e:two-sessions": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/two-sessions-local.ts",
     "bench:boot": "tsx packages/sandbox/bench/boot.ts",
     "bench:coordination": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/run.ts",
