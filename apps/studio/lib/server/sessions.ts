@@ -8524,6 +8524,7 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
   session.terminalRun = { runId: run.id, startedMs: Date.parse(run.startedAt), endedMs: Date.now() };
   // 세션이 멈추는 중이면 stopSession이 상태를 정리한다. 여기서는 끝났다는 알림만 건너뛴다
   if (session.stop.signal.aborted) return;
+  recordTerminalObservation(session, run, finished);
   session.settledConversation = session.conversation.length;
   emit(session, {
     type: 'run_finished',
@@ -8536,6 +8537,28 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
     nextDemoRequest: session.snapshot.nextDemoRequest,
     nextDemoQuestion: session.snapshot.nextDemoQuestion,
   });
+}
+
+/**
+ * 닫힌 터미널 실행을 모델 관측(라우터가 읽는 모델별 통과율·시간, ADR-221 덧붙임 4)으로 남긴다. 대화 창 요청의 기록과 같은 뜻만 남긴다:
+ *  - 게이트까지 간(파일을 바꾼) 실행만. 답만 한 턴과 읽기만 요청은 품질을 말하지 않는다(읽기만 요청은 파일이 바뀌어도 게이트 없이 되돌리므로 이 조건이 함께 거른다)
+ *  - 통과(done)는 passed, 실패(failed)는 바꾼 코드 탓일 때만 not passed. 샌드박스·도커 쪽 실패, 취소, 오류는 모델 품질과 무관해 남기지 않는다
+ *  - 모델은 b-studio가 이 세션에 정해 CLI에 넘긴 모델(`snapshot.modelId`)이다. 정하지 않았으면(CLI 기본 모델) 남기지 않는다.
+ *    텔레메트리의 모델 이름·토큰·비용은 쓰지 않는다: 세션 안의 CLI(에이전트가 다루는 쪽)가 보내는 값이라, 꾸며 보내면 모든 프로젝트가 함께 읽는 관측에
+ *    거짓 근거가 쌓여 다른 세션의 라우팅이 바뀐다(커밋 보안 검토). 통과 여부와 시간은 b-studio가 직접 잰 값이다
+ * 관측 파일 오류 때문에 이미 닫힌 실행의 결과를 바꾸지 않는다
+ */
+function recordTerminalObservation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'platformFailure'>): void {
+  if (run.terminal.gate === undefined) return;
+  const passed = finished.status === 'done' ? true : finished.status === 'failed' && !finished.platformFailure ? false : undefined;
+  if (passed === undefined) return;
+  const modelId = cliModelOverride(session.snapshot.modelId);
+  if (modelId === undefined) return;
+  try {
+    recordObservation({ modelId, passed, latencyMs: Math.round(performance.now() - run.terminal.startedMs) });
+  } catch (error) {
+    console.error('[b-studio] 모델 실측 기록을 남기지 못했습니다', error);
+  }
 }
 
 /** 작업(도구 호출)이 속할 실행. 열려 있으면 그것을, 없으면 새로 연다 — 요청의 시작을 알리는 훅 없이 이어진 턴도 실행으로 잡는다 */
