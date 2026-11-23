@@ -12199,6 +12199,20 @@ F0의 사진은 터미널 시나리오가 7개뿐이라, desk가 실제로 부�
 - 대가: 지운 다섯 기능의 실험 기록은 다시 돌릴 수 없다. 원격 서버에서 에이전트를 돌릴 일이 생기면 Kubernetes 제공자를 Rust로 새로 만들어야 한다.
 - 채팅식 경로를 지우기 전까지 기준 사진 17개는 Node 대상으로만 돈다.
 
+### 덧붙임(2026-11-23, 결정 3의 해석, 추적 [#1353](https://github.com/dj258255/b-studio/issues/1353))
+Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅식 경로를 지우기 전에 남은 것을 조사했고 사람이 넷을 정했다.
+
+1. **API 모드는 자체 CLI로 터미널에 띄운다.** 결정 2는 API 모드를 남기고 결정 3은 다른 백엔드를 각 CLI로 터미널에 띄운다고 했다. 그런데 API 모드는 띄울 CLI가 없다(b-studio 자체 루프 `runAgent`). 그래서 `apps/cli agent`를 대화형 CLI로 바꿔 세션 터미널에서 훅으로 띄운다. 모든 백엔드가 터미널 한 길로 모이고, ⑤는 그 한 길만 옮긴다. 그동안 채팅식 경로는 두고, 끝난 뒤 지운다.
+   - 고르지 않은 것: 라우트만 지우고 서버 안의 `runAgent` 길을 남기기(⑤에서 그 길도 옮겨야 함), API 모드 지우기(결정 2를 뒤집음).
+2. **기준 사진 17개는 "다시 쓰기"가 아니라 판정마다 나눈다.**
+   - 같은 판정을 터미널·desk 사진이 이미 지키는 5개는 채팅식 경로와 함께 지운다: pass-checkpoint, ask-no-change, gate-fail-then-pass, gate-exhausted-revert, cli-no-result.
+   - 터미널 경로에 그 판정 자체가 없는 4개도 함께 지운다: mcp-not-connected, question-stop, question-after-passing-edit, question-after-failing-edit. 모두 채팅 러너 전용 판정이다(init의 MCP 연결 상태, `ask_user` 도구).
+   - 나머지 7개는 `terminal-` 이름으로 새로 쓴다: cancel-revert, platform-failure, local-workspace-platform-failure, policy-violation-boot(#1354), protected-path, max-turns-pass, max-turns-fail.
+3. **staged-mismatch-revert는 사진으로 옮기지 않는다.** 터미널에서 게이트 통과와 저장 사이의 틈을 넓히려면 제품 코드에 시험용 지연을 넣어야 한다. 넣지 않고 단위 시험(`sessions-terminal-gateway.test.ts`)과 Rust 시험에 맡긴다.
+4. **터미널 실행도 모델 관측을 남긴다.** 지금은 채팅식 경로만 관측을 남겨서, 채팅식 경로를 지우면 라우터가 근거를 잃는다. 터미널 실행이 끝날 때 텔레메트리의 모델·비용과 게이트 결과로 관측을 남긴다.
+
+그 밖에 채팅식 경로를 지우는 것을 막는 `sendMessage` 사용처도 먼저 옮긴다: 경로를 고르는 세션의 터미널 아닌 길, AI 리뷰의 고침 요청, 작업 분해 통합의 옛 길(verify light·S4·컨테이너), Fleet의 채팅 러너, 데모 모드. 작업 순서는 #1353에 적었다.
+
 ## ADR-222 b-studio가 만든 세션 폴더는 claude 설정 파일의 폴더 신뢰에 미리 적고, 그 기록은 허용 목록이라 루트 안의 실제 폴더만 적으며 파일이 이상하면 쓰지 않는다
 
 상태: 채택(#1327 C2 첫 단계)
