@@ -46,8 +46,25 @@ export interface WorldOptions {
   docker?: DockerScenario;
   /** 세션 터미널(실험 기능) 경로: `claude`가 PTY 안에서 입력을 기다리는 가짜가 되고, 서버가 터미널을 열 수 있게 환경을 켠다 */
   terminal?: boolean;
+  /**
+   * 스스로 훅과 텔레메트리를 부르는 가짜 CLI(`fake-claude-agent.mjs`)의 대본(#1358). 주면 `terminal`도 켠 것으로 보고, `claude`가 이 대본을 따라 요청을 처리한다.
+   * 서버가 스스로 모는 흐름(Fleet, 작업 분해의 터미널 레인)용이다. 동작 기록은 bin 폴더의 `claude-agent.jsonl`(`Driver.agentLog`)
+   */
+  agentCli?: AgentCliScript;
   /** 서버에 더 줄 환경 변수 */
   env?: Record<string, string>;
+}
+
+/** `fake-claude-agent.mjs`의 대본. 형식은 그 파일 머리말에 있다 */
+export interface AgentCliScript {
+  scripts: Array<{
+    match?: { model?: string; request?: string };
+    steps: Array<
+      | { telemetry: { requestId: string; model?: string; input?: number; output?: number; cacheRead?: number; cacheCreation?: number; costUsd?: number } }
+      | { write: { path: string; content: string } }
+      | { stop: { text: string } }
+    >;
+  }>;
 }
 
 export interface World {
@@ -200,7 +217,10 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
     await chmod(file, 0o755);
   };
   await wrap('docker', path.join(import.meta.dirname, 'fake-docker.mjs'), [binDir], path.join(binDir, 'docker-spawned.log'));
-  if (options.terminal) await wrap('claude', path.join(import.meta.dirname, 'fake-claude-terminal.mjs'), [path.join(binDir, 'claude-terminal.jsonl')]);
+  if (options.agentCli) {
+    await writeFile(path.join(binDir, 'claude-agent-script.json'), JSON.stringify(options.agentCli));
+    await wrap('claude', path.join(import.meta.dirname, 'fake-claude-agent.mjs'), [path.join(binDir, 'claude-terminal.jsonl'), path.join(binDir, 'claude-agent.jsonl'), path.join(binDir, 'claude-agent-script.json')]);
+  } else if (options.terminal) await wrap('claude', path.join(import.meta.dirname, 'fake-claude-terminal.mjs'), [path.join(binDir, 'claude-terminal.jsonl')]);
   else await wrap('claude', path.join(FIXTURES, 'fake-claude-cli.mjs'), [path.join(binDir, 'claude-scenario.json'), path.join(binDir, 'claude-log')]);
   await writeFile(path.join(binDir, 'claude-scenario.json'), JSON.stringify(options.claude ?? {}));
 
@@ -223,7 +243,7 @@ export async function createWorld(options: WorldOptions = {}): Promise<World> {
     B_STUDIO_FLEETS_DIR: path.join(root, 'fleets'),
     B_STUDIO_MODEL_OBSERVATIONS_FILE: path.join(root, 'model-observations.json'),
     B_STUDIO_MODEL_DEFAULTS_FILE: path.join(root, 'model-defaults.json'),
-    ...(options.terminal ? { B_STUDIO_EXPERIMENTAL: '1', B_STUDIO_TERMINAL: 'host', B_STUDIO_AGENT_GATEWAY_DIR: path.join(root, 'gateway') } : {}),
+    ...(options.terminal || options.agentCli ? { B_STUDIO_EXPERIMENTAL: '1', B_STUDIO_TERMINAL: 'host', B_STUDIO_AGENT_GATEWAY_DIR: path.join(root, 'gateway') } : {}),
     B_STUDIO_GIT_AUTHOR_NAME: 'b-studio',
     B_STUDIO_GIT_AUTHOR_EMAIL: 'b-studio@example.invalid',
     ...options.env,
@@ -289,6 +309,8 @@ export interface SseEvent {
 export class Driver {
   readonly exchanges: Exchange[] = [];
   readonly events: SseEvent[] = [];
+  /** 실행마다 달라지는 id(Fleet·계획·멤버 세션) → 사진에 남길 자리표시자. 시나리오가 `alias`로 알려 준다 */
+  readonly aliases: Record<string, string> = {};
   #abort: AbortController | undefined;
   #reading: Promise<void> | undefined;
   readonly #streams: SseStream[] = [];
@@ -325,6 +347,30 @@ export class Driver {
     if (options.after) await options.after;
     this.exchanges.push({ step, method, path: pathname, status: response.status, body: parsed });
     return { status: response.status, body: parsed as Record<string, unknown> };
+  }
+
+  /** 이 id를 사진에서 `label`로 바꾼다(실행마다 달라지는 id). 사진에 남기기 전에 알려 줘야 한다 */
+  alias(id: string, label: string): void {
+    this.aliases[id] = label;
+  }
+
+  /** HTTP GET을 사진에 남기지 않고 읽는다(끝나기를 기다리는 되풀이 확인용 — 횟수가 시각에 달려 있어 사진에 남기지 않는다) */
+  async peek(pathname: string): Promise<{ status: number; body: Record<string, unknown> }> {
+    const response = await fetch(new URL(pathname, this.origin), { headers: { host: 'localhost:3000', ...(Driver.needsLocalToken(pathname) ? { cookie: `b_studio_local=${await this.#localToken()}` } : {}) } });
+    const text = await response.text();
+    let parsed: unknown = text;
+    try {
+      parsed = text === '' ? null : JSON.parse(text);
+    } catch {
+      // JSON이 아닌 본문은 글 그대로 둔다
+    }
+    return { status: response.status, body: parsed as Record<string, unknown> };
+  }
+
+  /** 가짜 CLI(`fake-claude-agent.mjs`)의 동작 기록(JSONL)을 읽는다. 기록이 없으면 빈 배열 */
+  async agentLog(): Promise<Array<Record<string, unknown>>> {
+    const text = await readFile(path.join(this.world.binDir, 'claude-agent.jsonl'), 'utf8').catch(() => '');
+    return text.split('\n').filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
   }
 
   /** 사진에 값 하나를 그대로 남긴다(HTTP·훅이 아닌 것을 프로세스 밖에서 읽은 값: 가짜 CLI가 받은 인자 등) */
@@ -644,8 +690,17 @@ export function withoutFileRevisionCount(snapshot: BaselineSnapshot): BaselineSn
   return mask({ ...snapshot, events: { ...events, files: files.length > 0 ? [{ type: 'files_changed', revision: '<fileRevision>' }] : [] } }) as BaselineSnapshot;
 }
 
-export async function snapshotOf(world: World, driver: Driver, session: { id: string; workDir: string; stateDir?: string }, files: string[] = [], shutdownFrom?: number): Promise<BaselineSnapshot> {
-  const n = normalizer(world, session.id);
+/**
+ * 세션이 동시에 도는 흐름(Fleet 멤버, 작업 분해 레인)은 docker 호출이 서로 끼어들어 순서가 일정하지 않다. 그때는 상태를 바꾸는 호출도 집합으로 남긴다:
+ * 컨테이너 id는 처음 본 순서로 번호가 매겨져 끼어드는 순서에 달려 있으므로 번호를 지우고, 이름순으로 센다. 호출의 종류와 횟수는 그대로 남는다
+ */
+function unorderedDocker(docker: ReturnType<typeof summarizeDocker>): ReturnType<typeof summarizeDocker> {
+  const bare = (calls: string[]) => calls.map((call) => call.replace(/<container:\d+>/g, '<container>')).sort();
+  return { ...docker, mutating: bare(docker.mutating), atShutdown: bare(docker.atShutdown) };
+}
+
+export async function snapshotOf(world: World, driver: Driver, session: { id: string; workDir: string; stateDir?: string }, files: string[] = [], shutdownFrom?: number, options: { dockerUnordered?: boolean } = {}): Promise<BaselineSnapshot> {
+  const n = normalizer(world, session.id, driver.aliases);
   const disk = await readDisk(session, files);
   n.learnShas([...disk.commits.map((commit) => commit.sha), ...disk.refs.map((ref) => ref.sha)]);
   n.learnRuns(driver.events.map((entry) => entry.event));
@@ -662,6 +717,6 @@ export async function snapshotOf(world: World, driver: Driver, session: { id: st
       // 저장된 세션 기록에도 같은 타이머 값이 실린다(저장 전에 타이머가 돌았는지에 따라 있고 없다, #1316)
       sessionJson: withoutTimerUsage(disk.sessionJson),
     }),
-    docker: summarizeDocker(await world.dockerCalls(), n, shutdownFrom),
+    docker: options.dockerUnordered ? unorderedDocker(summarizeDocker(await world.dockerCalls(), n, shutdownFrom)) : summarizeDocker(await world.dockerCalls(), n, shutdownFrom),
   };
 }
