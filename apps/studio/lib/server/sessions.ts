@@ -445,10 +445,9 @@ interface ActiveRun {
   terminal?: TerminalRunState;
   /**
    * 터미널 실행의 CLI가 텔레메트리로 알려 온 사용량 합계(#726). 열린 실행이면 여기에 더해
-   * 닫힐 때 run_finished.usage·metrics에 실린다. 열린 실행에 붙지 못한(늦게 온) 것은 run_usage 이벤트로만 남는다.
-   * `costUsd`는 CLI가 알린 비용의 합이다. 비용 없이 온 요청이 하나라도 있으면 `costMissing`이 서고, 그때 합은 쓰지 않는다(적게 센 값이 된다)
+   * 닫힐 때 run_finished.usage·metrics에 실린다. 열린 실행에 붙지 못한(늦게 온) 것은 run_usage 이벤트로만 남는다
    */
-  terminalUsage?: { usage: AgentUsage; usageByModel: Record<string, AgentUsage>; modelCalls: number; costUsd: number; costMissing: boolean };
+  terminalUsage?: { usage: AgentUsage; usageByModel: Record<string, AgentUsage>; modelCalls: number };
 }
 
 /** eager: 세션을 만들 때 샌드박스를 바로 켠다(레인·플릿·벤치·이어서 하기). on-demand: 첫 필요 때 켠다(사람이 만든 일반 세션) */
@@ -8171,10 +8170,8 @@ async function attributeRunUsage(session: Session, request: ModelCall): Promise<
     // 알림이 닫기를 건드렸을 수 있으니 열린 실행을 다시 읽는다. 열린 실행에 붙는 것은 그 실행의 합계에도 더해, 닫힐 때 run_finished.usage·metrics에 실리게 한다
     const stillOpenRun = openTerminalRun(session);
     if (step.countTurn && stillOpenRun && runId === stillOpenRun.id) {
-      const totals = (stillOpenRun.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0, costUsd: 0, costMissing: false });
+      const totals = (stillOpenRun.terminalUsage ??= { usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, usageByModel: {}, modelCalls: 0 });
       totals.usage = addTokens(totals.usage, usage);
-      if (request.costUsd === undefined) totals.costMissing = true;
-      else totals.costUsd += request.costUsd;
       totals.usageByModel[request.model] = addTokens(totals.usageByModel[request.model], usage);
       totals.modelCalls += 1;
       // 터미널 실행의 "턴"은 그 실행에 붙은 모델 호출 수다(#B5). 턴 상한과 정체 감시가 이 값을 본다
@@ -8527,7 +8524,7 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
   session.terminalRun = { runId: run.id, startedMs: Date.parse(run.startedAt), endedMs: Date.now() };
   // 세션이 멈추는 중이면 stopSession이 상태를 정리한다. 여기서는 끝났다는 알림만 건너뛴다
   if (session.stop.signal.aborted) return;
-  recordTerminalObservation(run, finished);
+  recordTerminalObservation(session, run, finished);
   session.settledConversation = session.conversation.length;
   emit(session, {
     type: 'run_finished',
@@ -8543,26 +8540,22 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
 }
 
 /**
- * 닫힌 터미널 실행을 모델 관측(라우터가 읽는 모델별 통과율·시간·비용, ADR-221 덧붙임 4)으로 남긴다. 대화 창 요청의 기록과 같은 뜻만 남긴다:
+ * 닫힌 터미널 실행을 모델 관측(라우터가 읽는 모델별 통과율·시간, ADR-221 덧붙임 4)으로 남긴다. 대화 창 요청의 기록과 같은 뜻만 남긴다:
  *  - 게이트까지 간(파일을 바꾼) 실행만. 답만 한 턴과 읽기만 요청은 품질을 말하지 않는다(읽기만 요청은 파일이 바뀌어도 게이트 없이 되돌리므로 이 조건이 함께 거른다)
  *  - 통과(done)는 passed, 실패(failed)는 바꾼 코드 탓일 때만 not passed. 샌드박스·도커 쪽 실패, 취소, 오류는 모델 품질과 무관해 남기지 않는다
- *  - 모델은 텔레메트리가 알린 모델 중 가장 많이 답한(출력 토큰) 것. 텔레메트리가 없어 모르면 남기지 않는다(짐작하지 않는다)
+ *  - 모델은 b-studio가 이 세션에 정해 CLI에 넘긴 모델(`snapshot.modelId`)이다. 정하지 않았으면(CLI 기본 모델) 남기지 않는다.
+ *    텔레메트리의 모델 이름·토큰·비용은 쓰지 않는다: 세션 안의 CLI(에이전트가 다루는 쪽)가 보내는 값이라, 꾸며 보내면 모든 프로젝트가 함께 읽는 관측에
+ *    거짓 근거가 쌓여 다른 세션의 라우팅이 바뀐다(커밋 보안 검토). 통과 여부와 시간은 b-studio가 직접 잰 값이다
  * 관측 파일 오류 때문에 이미 닫힌 실행의 결과를 바꾸지 않는다
  */
-function recordTerminalObservation(run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'platformFailure'>): void {
+function recordTerminalObservation(session: Session, run: ActiveRun & { terminal: TerminalRunState }, finished: Pick<Extract<StudioEvent, { type: 'run_finished' }>, 'status' | 'platformFailure'>): void {
   if (run.terminal.gate === undefined) return;
   const passed = finished.status === 'done' ? true : finished.status === 'failed' && !finished.platformFailure ? false : undefined;
   if (passed === undefined) return;
-  const totals = run.terminalUsage;
-  const modelId = Object.entries(totals?.usageByModel ?? {}).sort(([, a], [, b]) => b.outputTokens - a.outputTokens)[0]?.[0];
-  if (!totals || modelId === undefined) return;
+  const modelId = cliModelOverride(session.snapshot.modelId);
+  if (modelId === undefined) return;
   try {
-    recordObservation({
-      modelId,
-      passed,
-      latencyMs: Math.round(performance.now() - run.terminal.startedMs),
-      ...(totals.costMissing ? {} : { costUsd: totals.costUsd }),
-    });
+    recordObservation({ modelId, passed, latencyMs: Math.round(performance.now() - run.terminal.startedMs) });
   } catch (error) {
     console.error('[b-studio] 모델 실측 기록을 남기지 못했습니다', error);
   }
