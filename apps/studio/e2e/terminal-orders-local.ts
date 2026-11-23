@@ -110,13 +110,16 @@ async function main(): Promise<void> {
     const actions = (await readFile(actionLog, 'utf8').catch(() => '')).split('\n').filter(Boolean).map((line) => JSON.parse(line) as Action);
     const stops = actions.filter((action) => action.kind === 'hook' && action.event === 'Stop');
     const snapshot = sessions.getSnapshot(sessionId);
-    const checkpoint = snapshot?.checkpoints.at(-1);
+    // 이 실행이 남긴 체크포인트는 세션 기록의 checkpoint 이벤트(runId)로 고른다(목록 순서에 기대지 않는다)
+    const checkpointEvents = sessions.sessionHistory(sessionId).flatMap((event) => (event.type === 'checkpoint' && event.runId === result.runId ? [event.checkpoint] : []));
+    const checkpoint = checkpointEvents.at(-1);
     log('\n확인');
     check(result.status === 'done', `실행 done (실제: ${result.status})`);
     check(actions.filter((action) => action.kind === 'write' && action.denied).length === 0, '쓰기 직전 훅이 쓰기를 막지 않음');
     check(stops.length === 2, `턴 끝(Stop)을 두 번 부름 (실제: ${stops.length})`);
     check(stops[0]?.output?.decision === 'block' && /cannot find symbol|customerNam/.test(stops[0].output.reason ?? ''), `첫 턴 끝을 게이트가 api 컴파일 오류 로그와 함께 막음 (${(stops[0]?.output?.reason ?? '막지 않음').slice(0, 120).replaceAll('\n', ' ')})`);
     check(stops[1] !== undefined && stops[1].output?.decision !== 'block', '고친 뒤의 턴 끝은 막지 않음');
+    check(checkpointEvents.length === 1, `이 실행의 체크포인트가 하나 (실제: ${checkpointEvents.length})`);
     check(Boolean(checkpoint) && writes.every((call) => checkpoint!.files.includes(call.input.path)), `체크포인트에 다섯 파일 (${checkpoint?.shortSha} · ${checkpoint?.files.length ?? 0}개)`);
     check(['run', 'contract_check', 'browser_check', 'test', 'review'].every((stage) => checkpoint?.passedStages?.includes(stage as never)), `체크포인트가 게이트 단계를 통과 (${checkpoint?.passedStages?.join(', ')})`);
     check(result.costUsd !== undefined && result.costUsd > 0, `비용은 CLI 텔레메트리의 합 (${result.costUsd})`);
