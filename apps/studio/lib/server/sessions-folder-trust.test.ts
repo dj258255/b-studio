@@ -102,9 +102,10 @@ beforeEach(async () => {
   process.env.XDG_CONFIG_HOME = path.join(root, 'xdg');
   delete process.env.CLAUDE_CONFIG_DIR;
   delete process.env.B_STUDIO_CLAUDE_CONFIG_DIR;
-  process.env.B_STUDIO_MODE = 'api';
+  // 폴더 신뢰는 이 컴퓨터 방식 터미널이 claude를 띄우는 세션의 일이다. API 세션의 터미널은 자체 CLI를 띄워 적지 않는다(아래 시험)
+  process.env.B_STUDIO_MODE = 'claude-code';
   process.env.B_STUDIO_AUTH = 'none';
-  process.env.B_STUDIO_BACKENDS = 'claude-code';
+  process.env.B_STUDIO_BACKENDS = 'api';
   process.env.B_STUDIO_SESSIONS_DIR = path.join(root, 'sessions');
   delete process.env.B_STUDIO_TERMINAL;
   Object.assign(process.env, { GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@example.com', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@example.com' });
@@ -138,6 +139,13 @@ describe('복사 모드 세션의 폴더 신뢰', () => {
     config = await readJson(defaultConfig);
     expect(Object.keys(config.projects)).toEqual(['/elsewhere', sourceKey]);
     expect(config.numStartups).toBe(3);
+  });
+
+  it('API 세션은 적지 않는다(터미널이 claude가 아니라 자체 CLI를 띄운다)', async () => {
+    const before = await readFile(defaultConfig, 'utf8');
+    const created = await createSession('trustproj', 'kim', 'copy', { backend: 'api' });
+    expect(await readFile(defaultConfig, 'utf8')).toBe(before);
+    expect(sessionFolderTrustFailure(created.id)).toBeUndefined();
   });
 
   it('사용자가 연 로컬 폴더는 적지 않는다', async () => {

@@ -200,6 +200,8 @@ import {
   requirementIsReady,
   requirementsReadyBadge,
   type RequirementLintWarning,
+  apiKeyEnvName,
+  type ModelProfile,
 } from '@b-studio/agent';
 import {
   describeSnapshotEvent,
@@ -7389,6 +7391,7 @@ export function sessionTerminalTarget(id: string): {
   resumeConversation: () => string | undefined;
   accountDir: () => Promise<string | undefined>;
   model?: string;
+  selfAgent?: () => Promise<{ profile: Record<string, unknown>; apiKey: string }>;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
@@ -7417,12 +7420,39 @@ export function sessionTerminalTarget(id: string): {
       const live = store.sessions.get(id);
       const remembered = live?.terminalConversation;
       if (!live) return undefined;
+      // 자체 CLI는 이어 붙이기(--resume)를 받지 않는다
+      if (selfAgentTerminal(live)) return undefined;
       return remembered && remembered.cli === terminalCliKind(live) ? remembered.id : undefined;
     },
     // 세션의 AI 계정의 설정 폴더(#885). 열 때마다 목록에서 다시 찾는다. 계정이 목록에서 빠졌으면 다른 계정으로 띄우지 않고 던진다
     accountDir: async () => (await sessionAccount(session.snapshot)).configDir,
     ...terminalModel(session),
+    ...(selfAgentTerminal(session) ? { selfAgent: () => selfAgentModel(session) } : {}),
   };
+}
+
+/**
+ * API 모드 세션의 이 컴퓨터 방식 터미널은 claude가 아니라 b-studio의 자체 CLI를 띄운다(ADR-226). 컨테이너 방식(실험)은 컨테이너에 자체 CLI가 없어 옛 동작 그대로다
+ */
+function selfAgentTerminal(session: Session): boolean {
+  return sessionTerminalMode() === 'host' && sessionBackend(session.snapshot) === 'api';
+}
+
+/**
+ * 자체 CLI의 모델 파일에 쓸 모델과 키. 세션이 고른 모델(없으면 라우팅)을 쓰고, 키는 서버 환경에서만 읽는다.
+ * 키가 없으면 CLI가 시작하자마자 끝나므로 터미널을 열지 않고 사유를 화면에 올린다(빈 키로 대신하지 않는다)
+ */
+async function selfAgentModel(session: Session): Promise<{ profile: Record<string, unknown>; apiKey: string }> {
+  let profile: ModelProfile;
+  try {
+    profile = routingDecision('API 모드 터미널', 'build', session.snapshot.modelId).selected;
+  } catch (error) {
+    throw new StudioError(409, `API 모드 터미널에서 쓸 모델을 정하지 못했습니다: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const name = apiKeyEnvName(profile);
+  const apiKey = process.env[name]?.trim();
+  if (!apiKey) throw new StudioError(409, `API 모드 터미널에서 쓸 모델(${profile.id})의 키가 서버 환경에 없습니다. 환경 변수 ${name}을(를) 설정한 뒤 서버를 다시 띄우세요`);
+  return { profile: { ...profile }, apiKey };
 }
 
 /**
@@ -7442,7 +7472,7 @@ function terminalModel(session: Session): { model?: string } {
  */
 async function recordFolderTrust(session: Session, seeded: boolean, folders: readonly (readonly [work: string, source: string])[]): Promise<void> {
   try {
-    if (!sessionTerminalAllowed() || sessionTerminalMode() !== 'host' || terminalCliKind(session) !== 'claude') return;
+    if (!sessionTerminalAllowed() || sessionTerminalMode() !== 'host' || terminalCliKind(session) !== 'claude' || selfAgentTerminal(session)) return;
     // 다른 세션에서 이어받은 세션(작업 분해 레인·통합)의 내용에는 에이전트가 쓴 것이 섞여 있다. 훅이 부르는 스크립트처럼 설정 파일만 견줘서는
     // 알 수 없는 것이 있어, 사람이 믿은 원본의 내용이 아니므로 적지 않는다(신뢰 창이 뜬다)
     if (seeded) {
@@ -7549,6 +7579,8 @@ function restoreTerminalConversation(value: unknown): TerminalConversation | und
 function noteTerminalConversation(id: string, conversation: string): void {
   if (!isResumableConversation(conversation)) return;
   const session = terminalSession(id);
+  // 자체 CLI의 대화는 이어 붙이지 않으므로 기억하지 않는다(claude의 대화 id로 남지 않게)
+  if (selfAgentTerminal(session)) return;
   const cli = terminalCliKind(session);
   if (session.terminalConversation?.id === conversation && session.terminalConversation.cli === cli) return;
   session.terminalConversation = { cli, id: conversation };
@@ -7565,6 +7597,7 @@ function terminalCliKind(session: Session): HostCliKind {
 
 /** 터미널 실행을 실행 기록에 남길 때의 백엔드 이름 */
 function terminalRunBackend(session: Session): SessionMode {
+  if (selfAgentTerminal(session)) return 'api';
   return terminalCliKind(session) === 'codex' ? 'codex' : 'claude-code';
 }
 
