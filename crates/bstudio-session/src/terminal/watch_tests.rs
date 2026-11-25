@@ -410,3 +410,22 @@ fn self_agent_launcher_is_recognized_and_hook_is_checked() {
     let processes = [p(100, 1, "/bin/zsh"), p(101, 100, &bare)];
     assert_eq!(find_unhooked_cli(100, &processes, CliKind::Claude, &launcher, &marker), Some(vec![101]));
 }
+
+#[test]
+fn hooked_argv_accepts_the_self_agent_launcher_slot_only() {
+    let launcher = "/home/kim/.cache/b-studio/agent-gateway/studio-a/agent-tty";
+    let loader = "/repo/node_modules/tsx/dist/loader.mjs";
+    let entry = "/repo/apps/cli/src/agent-tty.ts";
+    assert!(hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS, "요청 글"]));
+    // 로더·진입점·`--import`가 아니면 자리 4를 인정하지 않는다
+    assert!(!hooked_a(&[launcher, "--import", "/evil/loader.mjs", entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_a(&[launcher, "--import", loader, "/evil/main.ts", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_a(&[launcher, "--require", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 자리 5 이상, 설정 덮어쓰기, 다른 설정 파일
+    assert!(!hooked_a(&[launcher, "--import", loader, entry, "-p", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS, "--settings", "/evil.json"]));
+    assert!(!hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", "/evil.json"]));
+    // 실행기 없이 설정 없이 띄운 자체 CLI는 붙지 않은 것이다
+    assert!(!hooked_a(&[launcher, "--import", loader, entry]));
+}

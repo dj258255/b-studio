@@ -1,4 +1,4 @@
-import { watch as watchFs } from 'node:fs';
+import { statSync, watch as watchFs } from 'node:fs';
 import path from 'node:path';
 import {
   checkHostGatewayConfig,
@@ -6,6 +6,7 @@ import {
   defaultAgentGatewayRoot,
   ensureAgentContainer,
   expectedHostGatewayFiles,
+  hostCliPath,
   ACCOUNT_DIR_ENV,
   findHostCli,
   findUnhookedCliByArgv,
@@ -28,6 +29,7 @@ import {
   type HostCli,
   type HostCliKind,
   type ProcessEntry,
+  type SelfAgent,
   type TerminalSize,
 } from '@b-studio/sandbox';
 import { notifyAgentsChanged } from './agents-pulse';
@@ -143,6 +145,11 @@ export interface TerminalTarget {
   gateway?: () => Promise<AgentGatewayAddress>;
   /** 이 컴퓨터 방식에서 띄울 CLI(#825). 없으면 claude다. 컨테이너 방식은 claude만 쓴다 */
   cli?: HostCliKind;
+  /**
+   * API 모드 세션이면 있다(ADR-226): 이 컴퓨터 방식에서 claude 대신 b-studio의 자체 CLI를 띄운다. 모델과 키를 돌려주고, 키가 없으면 던진다 —
+   * 곧바로 끝나는 CLI를 띄워 놓고 화면에 아무 말도 하지 않는 것보다 터미널을 열지 않고 이유를 알린다. 컨테이너 방식은 받지 않는다
+   */
+  selfAgent?: () => Promise<SelfAgent['model']>;
   /** 이어 붙일 지난 CLI 대화 id(#872). 훅으로 받아 세션 기록에 남긴 것이다. 터미널을 열 때 한 번 묻는다 */
   resumeConversation?: () => string | undefined;
   /**
@@ -250,17 +257,49 @@ function hostAccountEnv(cli: HostCli | undefined): Record<string, string> {
   return cli?.configDir ? { [ACCOUNT_DIR_ENV[cli.kind]]: cli.configDir } : {};
 }
 
+/**
+ * 자체 CLI의 진입점과 tsx 로더(저장소 체크아웃의 것). 스튜디오는 저장소의 `apps/studio`에서 돈다(projects.ts와 같은 기준).
+ * 둘 다 일반 파일이어야 한다 — 없으면 실행기가 뜨자마자 끝나므로 터미널을 열지 않고 어디를 봤는지 알린다
+ */
+export function resolveSelfAgentPaths(repoRoot: string = path.join(process.cwd(), '../..')): { entry: string; loader: string } {
+  const entry = path.resolve(repoRoot, 'apps/cli/src/agent-tty.ts');
+  const loader = path.resolve(repoRoot, 'node_modules/tsx/dist/loader.mjs');
+  for (const file of [entry, loader]) {
+    let isFile = false;
+    try {
+      isFile = statSync(file).isFile();
+    } catch {
+      // 없다
+    }
+    if (!isFile) throw new StudioError(409, `이 컴퓨터에서 b-studio 자체 CLI를 찾지 못했습니다. 저장소 체크아웃에서 스튜디오를 띄웠는지 확인하세요 (찾은 자리: ${file})`);
+  }
+  return { entry, loader };
+}
+
 const HOST_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
-    const configDir = await target.accountDir?.();
-    const found = await findHostCli(process.env, target.cli ?? 'claude');
-    // 사용자의 Claude 상태 줄은 b-studio 상태 줄이 이어 부른다(#920). 읽기만 한다
-    const statusLine = found.kind === 'claude' ? await userStatusLineCommand(configDir, undefined, target.root) : undefined;
-    const cli = { ...found, ...(configDir ? { configDir } : {}), ...(statusLine ? { statusLine } : {}) };
-    if (!gateway) return '';
+    // API 모드 세션은 이 컴퓨터에 깔린 CLI가 아니라 자체 CLI를 띄운다. 계정 폴더·사용자 상태 줄은 claude의 것이라 쓰지 않는다
+    const self = await target.selfAgent?.();
+    const configDir = self ? undefined : await target.accountDir?.();
+    let cli: HostCli;
+    if (self) {
+      // cliPath는 관문 폴더를 안 뒤에 실행기 경로로 정해진다(hostCliPath). 감시는 그 경로를 CLI의 이름으로 본다
+      cli = { kind: 'claude', cliPath: '', nodePath: process.execPath, selfAgent: { ...resolveSelfAgentPaths(), model: self } };
+    } else {
+      const found = await findHostCli(process.env, target.cli ?? 'claude');
+      // 사용자의 Claude 상태 줄은 b-studio 상태 줄이 이어 부른다(#920). 읽기만 한다
+      const statusLine = found.kind === 'claude' ? await userStatusLineCommand(configDir, undefined, target.root) : undefined;
+      cli = { ...found, ...(configDir ? { configDir } : {}), ...(statusLine ? { statusLine } : {}) };
+    }
+    if (!gateway) {
+      // 자체 CLI의 훅·모델 파일은 관문 폴더에 있다. 관문 없이는 띄울 수 없고, claude로 대신하지도 않는다
+      if (self) throw new StudioError(409, 'API 모드 터미널은 관문 없이 열 수 없습니다');
+      return '';
+    }
     const root = defaultAgentGatewayRoot();
     const dir = await writeHostGatewayConfig(target.sandboxId, gateway, cli, root);
+    if (cli.selfAgent) cli = { ...cli, cliPath: hostCliPath(dir, cli) };
     // 감시가 꺼내 쓸 것을 폴더 경로로 기억한다. 기대 파일(내용·권한의 근거)을 여기서 한 번 만들어 두고 검사·복구에 쓴다
     hostGateways.set(dir, { address: gateway, cli, root, expected: expectedHostGatewayFiles(gateway, dir, cli) });
     return dir;

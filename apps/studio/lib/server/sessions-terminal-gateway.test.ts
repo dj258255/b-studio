@@ -2685,6 +2685,55 @@ describe('Codex 터미널(#825)', () => {
     await stopSession(session.id);
   }, 30_000);
 
+  describe('API 모드 세션의 이 컴퓨터 방식 터미널은 자체 CLI를 띄운다', () => {
+    const KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_PROFILE'] as const;
+    const savedKeys = Object.fromEntries(KEYS.map((name) => [name, process.env[name]]));
+    afterEach(() => {
+      for (const name of KEYS) {
+        if (savedKeys[name] === undefined) delete process.env[name];
+        else process.env[name] = savedKeys[name];
+      }
+    });
+
+    it('대상에 자체 CLI의 모델·키가 있고, 실행 기록의 백엔드는 api이며, 대화 id를 기억하지 않는다', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-self-agent-test';
+      fake.terminalMode = 'host';
+      const session = await open();
+      const target = sessionTerminalTarget(session.id);
+      expect(target.cli).toBe('claude');
+      const model = await target.selfAgent!();
+      expect(model.apiKey).toBe('sk-self-agent-test');
+      expect(model.profile.id).toBe('anthropic-default');
+      await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '주문에 메모 필드 추가' });
+      expect(session.ofType('run_started').at(-1)).toMatchObject({ via: 'terminal', backend: 'api' });
+      // 자체 CLI는 이어 붙이지 않으므로 훅으로 온 대화 id를 기억하지 않는다
+      session.gateway.conversation?.('6f1c2b3a-4d5e-4f60-8a7b-9c0d1e2f3a4b');
+      expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBeUndefined();
+      const snapshot = getSnapshot(session.id)!;
+      setTerminalTaskContext(session.id, undefined);
+      await stopSession(session.id);
+      const savedSession = JSON.parse(await readFile(sessionFile(stateDirOf(snapshot)), 'utf8')) as { terminalConversation?: unknown };
+      expect(savedSession.terminalConversation).toBeUndefined();
+    }, 30_000);
+
+    it('키가 서버 환경에 없으면 대상을 만드는 쪽이 던져 터미널을 열지 않는다', async () => {
+      for (const name of KEYS) delete process.env[name];
+      fake.terminalMode = 'host';
+      const session = await open();
+      // 키 없이도 모델은 레지스트리에서 정해질 수 있다(홈의 인증 폴더). 그때는 키가 없다는 말이 나와야 한다
+      await expect(sessionTerminalTarget(session.id).selfAgent!()).rejects.toThrow(/ANTHROPIC_API_KEY|모델/);
+      await stopSession(session.id);
+    }, 30_000);
+
+    it('컨테이너 방식(실험)은 옛 동작 그대로라 자체 CLI 대상이 없다', async () => {
+      process.env.ANTHROPIC_API_KEY = 'sk-self-agent-test';
+      fake.terminalMode = 'container';
+      const session = await open();
+      expect(sessionTerminalTarget(session.id).selfAgent).toBeUndefined();
+      await stopSession(session.id);
+    }, 30_000);
+  });
+
   it('컨테이너 방식은 백엔드가 codex여도 claude를 띄운다(컨테이너에는 claude만 깐다)', async () => {
     process.env.B_STUDIO_BACKENDS = 'codex';
     const session = await open({ backend: 'codex' });
