@@ -393,3 +393,20 @@ fn cli_candidates_use_the_wide_ps_rule_and_unknown_root() {
     assert_eq!(cli_candidates(100, &processes, CliKind::Claude, CLI), Some(vec![101, 103]));
     assert_eq!(cli_candidates(0, &processes, CliKind::Claude, CLI), None);
 }
+
+#[test]
+fn self_agent_launcher_is_recognized_and_hook_is_checked() {
+    let dir = "/home/kim/.cache/b-studio/agent-gateway/studio-a";
+    let launcher = format!("{dir}/agent-tty");
+    let settings = format!("{dir}/settings.json");
+    let marker = format!("--settings {settings}");
+    let tail = "--import /x/loader.mjs /x/agent-tty.ts";
+    let hooked = format!("{launcher} {tail} --mcp-config {dir}/mcp.json --settings {settings}");
+    let bare = format!("{launcher} {tail}");
+    assert!(looks_like_agent_cli(&hooked, &launcher, CliKind::Claude));
+    assert!(looks_like_agent_cli(&bare, &launcher, CliKind::Claude));
+    let processes = [p(100, 1, "/bin/zsh"), p(101, 100, &hooked)];
+    assert_eq!(find_unhooked_cli(100, &processes, CliKind::Claude, &launcher, &marker), Some(vec![]));
+    let processes = [p(100, 1, "/bin/zsh"), p(101, 100, &bare)];
+    assert_eq!(find_unhooked_cli(100, &processes, CliKind::Claude, &launcher, &marker), Some(vec![101]));
+}

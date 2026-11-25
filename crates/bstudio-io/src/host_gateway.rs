@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 관문 폴더 안의 폴더 이름(폴더 기준). 지울 때는 역순이다
 pub const GATEWAY_DIRS: [&str; 3] = ["bin", "shell", "shell/zsh"];
 /// 관문 폴더 안에 쓰는 파일 이름(폴더 기준)
-pub const GATEWAY_FILE_NAMES: [&str; 13] = [
+pub const GATEWAY_FILE_NAMES: [&str; 15] = [
     "settings.json",
     "mcp.json",
     "b-studio-hook.mjs",
@@ -29,6 +29,9 @@ pub const GATEWAY_FILE_NAMES: [&str; 13] = [
     "codex.env",
     "bin/claude",
     "bin/codex",
+    // API 모드 세션의 자체 CLI 실행기와 모델 파일(키가 든다). 세션이 멈추면 함께 지운다
+    "agent-tty",
+    "agent-model.json",
     "shell/zsh/.zshenv",
     "shell/zsh/.zprofile",
     "shell/zsh/.zshrc",
@@ -393,5 +396,21 @@ mod tests {
         assert_eq!(gateway_dir_for(root, "a/b c").unwrap(), root.join("a-b-c"));
         assert!(gateway_dir_for(root, ".").is_err());
         assert!(gateway_dir_for(root, "").is_err());
+    }
+
+    #[test]
+    fn remove_deletes_self_agent_launcher_and_model_file() {
+        let root = std::env::temp_dir().join(format!("b-studio-gw-selfagent-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("studio-self-agent");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("agent-tty"), "#!/bin/bash\n").unwrap();
+        fs::write(dir.join("agent-model.json"), "{\"profile\":\"p\",\"apiKey\":\"k\"}").unwrap();
+        remove_gateway_config(&root, "studio-self-agent").unwrap();
+        assert!(!dir.join("agent-model.json").exists());
+        assert!(!dir.join("agent-tty").exists());
+        // 두 파일만 있던 폴더는 비어서 함께 지워진다
+        assert!(!dir.exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }
