@@ -568,8 +568,10 @@ describe('Rust 러너는 옛 러너와 같은 결과를 낸다 (ADR-199)', { tim
         setTimeout(() => controller.abort(), 700);
         const startedAt = Date.now();
         await expect(runner(`${base}/hanging-request`, { signal: controller.signal, allowedOrigins: [base] })).rejects.toThrow(/abort/i);
-        // 신호를 무시하면 이 화면은 networkidle 상한(5초)까지 간다. 취소는 그 전에 끝나야 한다
-        expect(Date.now() - startedAt).toBeLessThan(4000);
+        // 신호를 무시하면 이 화면은 networkidle 상한(5초)까지 간다. 취소는 그 전에 끝나야 한다. 시간은 Rust 러너(게이트의 기본 러너)만 잰다:
+        // 중단이면 브라우저의 정상 종료를 기다리지 않는다(#1361: Chrome 앱은 정상 종료에 2초 넘게 걸려, 고치기 전에는 중단 뒤 약 1.85초가 더 걸렸다).
+        // 옛 러너(기준값)는 같은 오류로 끝나는지만 본다 — macOS에서 첫 실행이 6.6~6.7초 걸리는 일이 되풀이됐다(옛 러너의 동작, 고치지 않는다)
+        if (runner === runInBrowserNative) expect(Date.now() - startedAt).toBeLessThan(2000);
         const already = new AbortController();
         already.abort();
         await expect(runner(`${base}/ok`, { signal: already.signal })).rejects.toThrow(/abort/i);
@@ -810,7 +812,8 @@ describe('Rust 러너의 단계(click·fill·press·waitFor)는 옛 러너와 �
       const startedAt = Date.now();
       // 없는 선택자를 5초까지 기다리는 도중에 중단한다
       await expect(runInBrowserNative(`${base}/steps`, { signal: controller.signal, allowedOrigins: [base], steps: [{ click: '#nope' }] })).rejects.toThrow(/abort/i);
-      expect(Date.now() - startedAt).toBeLessThan(4000);
+      // 중단(0.9초) 뒤 정상 종료를 기다리지 않고 끝난다(#1361: 고치기 전 macOS에서 5.5~6.7초)
+      expect(Date.now() - startedAt).toBeLessThan(2500);
       await new Promise((resolve) => setTimeout(resolve, 500));
       expect(tmpEntries().filter((name) => name.startsWith('b-studio-cdp-'))).toEqual([]);
     } finally {

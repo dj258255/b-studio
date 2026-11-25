@@ -8163,3 +8163,21 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 ### 해결
 
 - 자리 4는 자체 CLI 세션에서, `--import` 다음의 로더·진입점이 서버가 정한 절대 경로와 정확히 같을 때만 인정한다(그 밖은 붙지 않은 것). 끝 글자로 맞추면 아무 폴더의 같은 이름 파일이 통과한다. `--settings`가 하나뿐이어야 하는 규칙과 설정·MCP 파일 일치는 그대로다. Rust 시험(맞는 꼴, 로더·진입점·`--import`가 다른 꼴, 자리 5, 설정 덮어쓰기)과 진짜 PTY 시험이 고친 줄을 되돌리면 실패한다.
+
+## 278. 게이트의 화면 확인이 중단 신호를 받고도 2초 가까이 더 걸렸음(macOS) — 중단 경로가 브라우저의 정상 종료를 기다렸다
+
+### 증상
+
+- `browser-runner-differential.test.ts`의 중단 시험 두 개가 이 컴퓨터(macOS arm64)에서 자주 실패했다(`expected 6622 to be less than 4000`, `expected 6665 to be less than 4000`). CI(ubuntu)에서는 통과했다(#1361).
+
+### 원인
+
+- Rust 러너(`run_in_browser`)는 단계와 기다림을 중단 신호와 `select!`해서 바로 끊는다. 그런데 그 뒤의 `shutdown`이 중단일 때도 `Browser.close`를 보내고 프로세스가 끝나기를 최대 5초 기다렸다.
+- 이 컴퓨터에는 Playwright headless shell이 없어 러너가 Google Chrome 앱을 쓴다. Chrome 앱은 `Browser.close`에 14~42ms 만에 답하지만 프로세스가 끝나기까지 2085~2619ms가 걸렸다(3회). 시험 안에서 재 보니 중단(0.7초) 뒤 Rust 러너는 2548~2558ms에, 옛 Playwright 러너는 731~739ms에 끝났다. CI는 headless shell을 써서 정상 종료가 빨라 통과했다.
+- 한 시험의 실패(6.6~6.7초)는 Rust 러너가 아니라 차등 시험의 기준값인 옛 Playwright 러너의 첫 실행이었다(시간 출력으로 확인, 되풀이됨).
+
+### 해결
+
+- 중단이면 정상 종료를 건너뛰고 프로세스 그룹을 곧바로 죽인 뒤(`kill_now`, 거둘 때까지 기다린다) 프로필을 지운다. 정상 경로는 그대로 `Browser.close` 뒤 기다린다. 고친 뒤 Rust 러너는 중단 뒤 약 30ms에 끝났다(726~730ms).
+- 시험의 시간 상한을 Rust 러너에만, 좁게 걸었다(시작부터 2초, 단계 도중 중단은 2.5초). 고치기 전 코드로 돌리면 `expected 2542 to be less than 2000`으로 실패한다. 옛 러너는 같은 중단 오류로 끝나는지만 본다.
+
