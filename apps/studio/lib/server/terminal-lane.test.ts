@@ -18,7 +18,7 @@ vi.mock('./session-terminal', () => ({
   writeSessionTerminal: () => {},
 }));
 
-import { runTerminalTask, type TerminalTaskDeps, type TerminalTaskOptions } from './terminal-lane';
+import { runReviewFixOnTerminal, runTerminalTask, type TerminalTaskDeps, type TerminalTaskOptions } from './terminal-lane';
 
 const options = (overrides: Partial<TerminalTaskOptions> = {}): TerminalTaskOptions => ({ writableScope: ['api/src'], doneTests: [], ...overrides });
 
@@ -405,5 +405,43 @@ describe('Fleet이 쓰는 옵션: onStarted·범위 없는 실행', () => {
     empty.emit({ type: 'run_finished', runId: empty.startedRunId(), status: 'done', summary: '끝' });
     await second;
     expect(empty.contexts[0]).toEqual({ writableScope: [], doneTests: [] });
+  });
+});
+
+describe('AI 리뷰의 고침을 터미널에서 돌린다', () => {
+  const checkpoint = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa' };
+
+  it('쓰기 범위 없이 붙여 넣어 돌리고, done이면 가장 최근 체크포인트와 함께 ok를 돌려준다', async () => {
+    const h = harness();
+    const running = runReviewFixOnTerminal('s1', '리뷰 지적을 고치세요', { timeoutMs: 10_000, latestCheckpoint: () => ({ ...checkpoint, files: ['x'] } as typeof checkpoint) }, h.deps);
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+    expect(h.writes[0]).toBe('\x1b[200~리뷰 지적을 고치세요\x1b[201~');
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'done', summary: '고쳤습니다' });
+    // 체크포인트는 sha·shortSha만 돌려준다(채팅식 고침과 같은 꼴)
+    await expect(running).resolves.toEqual({ ok: true, checkpoint });
+    // 쓰기 범위를 걸지 않았다(맥락을 건 적이 없다)
+    expect(h.contexts.filter((context) => context !== undefined)).toEqual([]);
+  });
+
+  it('끝난 실행이 done이 아니면 그 요약을 오류로 돌려준다', async () => {
+    const h = harness();
+    const running = runReviewFixOnTerminal('s1', '고치세요', { timeoutMs: 10_000, latestCheckpoint: () => checkpoint }, h.deps);
+    await until(() => h.writes.length >= 2, '붙여 넣지 않았습니다');
+    h.emit({ type: 'run_finished', runId: h.startedRunId(), status: 'error', summary: '검증 실패: 테스트가 깨졌습니다' });
+    await expect(running).resolves.toEqual({ ok: false, error: '검증 실패: 테스트가 깨졌습니다' });
+  });
+
+  it('터미널을 열지 못하거나 실행이 던지면 던지지 않고 ok: false로 돌려주며, 시간 상한은 부르는 쪽이 정한다', async () => {
+    const h = harness();
+    const failing = await runReviewFixOnTerminal('s1', '고치세요', { timeoutMs: 10_000, latestCheckpoint: () => undefined }, { ...h.deps, driver: { ...h.deps.driver!, open: async () => { throw new Error('터미널을 열지 못했습니다'); } } });
+    expect(failing).toEqual({ ok: false, error: '터미널을 열지 못했습니다' });
+
+    // 상한(timeoutMs)이 터미널 실행의 상한으로 간다: 시작은 됐지만 끝나지 않으면 그 시간 뒤에 ok: false
+    const slow = harness();
+    const withoutTimeout: Partial<TerminalTaskDeps> = { ...slow.deps };
+    delete withoutTimeout.runTimeoutMs;
+    const timedOut = await runReviewFixOnTerminal('s1', '고치세요', { timeoutMs: 30, latestCheckpoint: () => undefined }, withoutTimeout);
+    expect(timedOut.ok).toBe(false);
+    expect(timedOut.ok === false && timedOut.error).toContain('터미널 실행이');
   });
 });

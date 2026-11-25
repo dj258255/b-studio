@@ -70,12 +70,22 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 }
 
 /**
- * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex도 띄운다
- * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex가 아니면 claude를 띄운다 — 컨테이너 방식 codex를 받으면 엉뚱한 CLI가 뜬다).
+ * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다
+ * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex·api가 아니면 claude를 띄운다 — 컨테이너 방식 codex·api를 받으면 엉뚱한 CLI가 뜬다).
  * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
  */
 export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
-  return backend === 'claude-code' || (backend === 'codex' && sessionTerminalMode(env) === 'host');
+  return backend === 'claude-code' || ((backend === 'codex' || backend === 'api') && sessionTerminalMode(env) === 'host');
+}
+
+/**
+ * AI 리뷰의 고침을 어디서 돌릴까. 세션 터미널을 쓸 수 있고(allowed) 그 백엔드의 터미널 CLI가 있으면 터미널, 아니면 채팅식이다.
+ * api는 자체 CLI의 키가 서버 환경에 있을 때만 터미널이다(키가 없으면 터미널이 열리지 않는다, ADR-226)
+ */
+export function reviewFixRunner(input: { allowed: boolean; backend: string; apiKeyReady: boolean }, env: Record<string, string | undefined> = process.env): 'terminal' | 'chat' {
+  if (!input.allowed || !isTerminalRunnableBackend(input.backend, env)) return 'chat';
+  if (input.backend === 'api' && !input.apiKeyReady) return 'chat';
+  return 'terminal';
 }
 
 export type TerminalMessage =

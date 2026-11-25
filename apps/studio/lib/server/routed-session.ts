@@ -67,14 +67,14 @@ const defaultTerminalDeps: RoutedTerminalDeps = {
 };
 
 /**
- * 터미널에서 띄울 수 있는 AI. 터미널 CLI는 세션 백엔드로 정해진다: 이 컴퓨터 방식이면 Claude Code·Codex, 컨테이너 방식이면 Claude Code뿐이다.
+ * 터미널에서 띄울 수 있는 AI. 터미널 CLI는 세션 백엔드로 정해진다: 이 컴퓨터 방식이면 Claude Code·Codex·API(자체 CLI), 컨테이너 방식이면 Claude Code뿐이다.
  * 그 밖의 백엔드로 세션을 만들면 터미널에는 claude가 떠서 고른 AI와 달라지므로 거른다
  */
 function terminalBackends(mode: TerminalMode): BackendFilter {
   return (backend) => {
     if (backend === 'claude-code') return undefined;
-    if (backend === 'codex') return mode === 'host' ? undefined : '컨테이너 방식 터미널은 Claude Code만 띄웁니다';
-    return '터미널에서 띄울 수 없는 AI입니다(Claude Code·Codex만)';
+    if (backend === 'codex' || backend === 'api') return mode === 'host' ? undefined : '컨테이너 방식 터미널은 Claude Code만 띄웁니다';
+    return '터미널에서 띄울 수 없는 AI입니다(Claude Code·Codex·API만)';
   };
 }
 

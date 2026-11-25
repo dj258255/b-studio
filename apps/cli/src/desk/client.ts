@@ -225,7 +225,8 @@ export class StudioClient {
 
   /** 같은 요청을 여러 AI에 보낸다. 참가자는 2~4이고, 스튜디오가 CLI 로그인을 먼저 확인한다(실패하면 비교를 만들지 않는다) */
   createFleet(input: { projectId: string; request: string; candidates: DeskFleetCandidate[] }): Promise<DeskFleet> {
-    return this.#request('POST', '/api/fleets', input);
+    // desk가 붙는 스튜디오는 이 컴퓨터 방식이라 참가자는 세션 터미널에서 돈다(새 요청의 terminal: true와 같다)
+    return this.#request('POST', '/api/fleets', { ...input, runner: 'terminal' });
   }
 
   /** 승자를 고른다. 검증을 통과한 참가자만 된다 */
@@ -254,7 +255,8 @@ export class StudioClient {
 
   /** 요청으로 새 계획을 만든다. 스튜디오가 레인으로 나누는 동안 계획은 planning이고, 다 나누면 승인 대기다 */
   createPlan(projectId: string, request: string): Promise<DeskPlan> {
-    return this.#request('POST', '/api/task-plans', { projectId, request });
+    // 레인은 세션 터미널에서 돈다(새 요청의 terminal: true와 같다)
+    return this.#request('POST', '/api/task-plans', { projectId, request, runner: 'terminal' });
   }
 
   approvePlan(id: string, publishIssues: boolean): Promise<DeskPlan> {

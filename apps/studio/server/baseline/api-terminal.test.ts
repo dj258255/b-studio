@@ -190,4 +190,47 @@ describe('API 모드 세션 터미널(이 컴퓨터 방식)의 자체 CLI', () =
       await world.cleanup();
     }
   }, 240_000);
+
+  // Fleet을 고른 까닭: 작업 분해 카드 계획은 계획 만들기·승인·통합 검증까지 거쳐 설정이 많고, Fleet은 같은 runTerminalTask(서버가 붙여 넣고 실행을 기다리는 길)를 한 요청으로 탄다.
+  // 작업 분해 레인이 api를 받는 판정은 Fleet과 같은 isTerminalRunnableBackend이고 단위 시험(task-plans.test.ts)이 따로 본다
+  it('API 후보 둘의 터미널 방식 Fleet이 진짜 PTY의 자체 CLI로 끝까지 돌아 멤버마다 체크포인트를 남긴다', async () => {
+    const provider = await fakeProvider('notes/api-fleet.txt', '플릿 멤버가 썼습니다\n');
+    const world = await apiWorld(provider, { [KEY_ENV]: KEY });
+    const target = await startNodeTarget(world);
+    const driver = new Driver(target.origin, world);
+    try {
+      const created = await driver.call('Fleet 만들기', 'POST', '/api/fleets', {
+        projectId: world.projectId,
+        request: 'notes/api-fleet.txt를 만들어 주세요',
+        runner: 'terminal',
+        candidates: [
+          { backend: 'api', model: 'api-term-fake' },
+          { backend: 'api', model: 'api-term-fake' },
+        ],
+      });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      expect(created.body.runner).toBe('terminal');
+      const fleetId = created.body.id as string;
+      type Member = { status: string; backend?: string; summary?: string; checkpoint?: { files: string[] } };
+      const members = await waitUntil(
+        'Fleet의 멤버가 모두 끝나기',
+        async () => (await driver.peek(`/api/fleets/${fleetId}`)).body.members as Member[],
+        (list) => list.length === 2 && list.every((member) => !['booting', 'running', 'awaiting_input'].includes(member.status)),
+        180_000,
+      );
+      expect(members.map((member) => `${member.backend}:${member.status}`), JSON.stringify(members)).toEqual(['api:done', 'api:done']);
+      for (const member of members) expect(member.checkpoint?.files).toEqual(['notes/api-fleet.txt']);
+      // 모델 호출에는 모델 파일의 키가 갔다
+      // 채팅식이 아니라 멤버마다 자체 CLI가 떴다는 증거: 멤버마다 관문 폴더가 있고 그 안에 모델 파일이 있다
+      const gateways = await readdir(path.join(world.root, 'gateway'));
+      expect(gateways).toHaveLength(2);
+      for (const name of gateways) expect(await readdir(path.join(world.root, 'gateway', name))).toContain('agent-model.json');
+      expect(new Set(provider.auth)).toEqual(new Set([`Bearer ${KEY}`]));
+    } finally {
+      await driver.close();
+      await target.stop();
+      await new Promise<void>((resolve) => provider.server.close(() => resolve()));
+      await world.cleanup();
+    }
+  }, 240_000);
 });

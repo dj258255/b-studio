@@ -54,7 +54,7 @@ const WORK_PASTE_WAIT_MS = 3_000;
 /** 창 크기를 끌어 바꾸는 동안 스튜디오에 알리는 것을 미루는 시간(칸 안 해석기는 바로 맞춘다) */
 const RESIZE_SETTLE_MS = 150;
 /** 터미널로 띄울 수 있는 AI. 스튜디오 routed-session.ts의 terminalBackends와 같은 기준이다(desk가 붙는 launch는 이 컴퓨터 방식) */
-const TERMINAL_BACKENDS: readonly string[] = ['claude-code', 'codex'];
+const TERMINAL_BACKENDS: readonly string[] = ['claude-code', 'codex', 'api'];
 
 /**
  * 새 요청에서 고를 것(#885). 규칙대로, 그리고 CLI마다 하나씩이다. 한 CLI에 계정이 둘 이상이면 그 CLI 대신 계정마다 하나씩 두고
@@ -1262,8 +1262,8 @@ export class DeskApp {
     try {
       const [projects, rules, accounts] = await Promise.all([this.#client.projects(), this.#client.rules(), this.#client.accounts().catch((): DeskAccount[] => this.#accounts)]);
       const usable = projects.filter((project) => !project.error).map(({ id, name }) => ({ id, name }));
-      // 데모는 비교할 후보가 아니다(스튜디오 FLEET_MODES와 같다)
-      const options = fleetOptions(rules.allowed.filter((backend) => backend !== 'demo'), accounts);
+      // 데모는 비교할 후보가 아니다(스튜디오 FLEET_MODES와 같다). 비교는 세션 터미널에서 돌므로 터미널로 띄울 수 있는 AI만 보인다
+      const options = fleetOptions(rules.allowed.filter((backend) => TERMINAL_BACKENDS.includes(backend)), accounts);
       const at = Math.max(0, usable.findIndex((project) => project.name === deskSessions(this.#state.items)[this.#state.selected]?.projectName));
       this.#patchFleets((fleets) =>
         fleets.form ? { ...fleets, form: { ...fleets.form, loading: false, projects: usable, projectIndex: at, options, ...(usable.length === 0 ? { error: '프로젝트가 없습니다' } : {}) } } : fleets,

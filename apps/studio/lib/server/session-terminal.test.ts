@@ -4,11 +4,13 @@ import {
   closeSessionTerminal,
   disposeSessionTerminal,
   interruptSessionTerminal,
+  isTerminalRunnableBackend,
   MAX_TERMINAL_INPUT,
   openSessionTerminal,
   removeContainerAndConfig,
   removeTerminalLeftovers,
   resizeSessionTerminal,
+  reviewFixRunner,
   noteSessionTerminalCli,
   sessionTerminalMode,
   sessionTerminalPresence,
@@ -635,5 +637,28 @@ describe('세션의 AI 계정으로 터미널 CLI를 띄운다(#885)', () => {
 
   it('컨테이너 방식은 기본 계정만 쓴다', async () => {
     await expect(terminalBackend('container').prepare({ ...target, accountDir: async () => '/home/kim/.claude-2' }, address)).rejects.toThrow('기본 계정');
+  });
+});
+
+describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', () => {
+  const host = { B_STUDIO_TERMINAL: 'host' };
+  const container = { B_STUDIO_TERMINAL: 'container' };
+
+  it('api는 이 컴퓨터 방식에서만 터미널로 돌릴 수 있다(컨테이너 방식은 claude를 띄운다)', () => {
+    expect(isTerminalRunnableBackend('api', host)).toBe(true);
+    expect(isTerminalRunnableBackend('api', container)).toBe(false);
+    expect(isTerminalRunnableBackend('codex', host)).toBe(true);
+    expect(isTerminalRunnableBackend('codex', container)).toBe(false);
+    expect(isTerminalRunnableBackend('claude-code', container)).toBe(true);
+    expect(isTerminalRunnableBackend('commandcode', host)).toBe(false);
+  });
+
+  it('AI 리뷰의 고침은 터미널을 쓸 수 있으면 터미널, 아니면 채팅식이다. api는 키가 있을 때만 터미널이다', () => {
+    expect(reviewFixRunner({ allowed: true, backend: 'claude-code', apiKeyReady: false }, host)).toBe('terminal');
+    expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: true }, host)).toBe('terminal');
+    expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: false }, host)).toBe('chat');
+    expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: true }, container)).toBe('chat');
+    expect(reviewFixRunner({ allowed: false, backend: 'claude-code', apiKeyReady: true }, host)).toBe('chat');
+    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, host)).toBe('chat');
   });
 });

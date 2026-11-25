@@ -2700,21 +2700,38 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
     nothingCreated();
   });
 
-  it('API 모드의 모델 계획은 레인이 서버 기본 백엔드(api)로 떠 400이다', async () => {
+  it('API 모드의 모델 계획은 이 컴퓨터 방식이면 레인이 서버 기본 백엔드(api)로 터미널에서 돈다', async () => {
+    twoLanes();
+    const created = await createTaskPlan({ ...base, modelId: 'model-a' });
+    expect(created.runner).toBe('terminal');
+    expect((await awaiting(created.id)).status).toBe('awaiting_approval');
+    approveTaskPlan(created.id, 'kim');
+    const plan = await finished(created.id);
+    expect(plan.status).toBe('done');
+    expect(fake.terminalSends).toHaveLength(2);
+    expect(plan.lanes.every((lane) => lane.tasks.every((entry) => (entry.backend ?? 'api') === 'api'))).toBe(true);
+    const laneSessions = new Set(plan.lanes.map((lane) => lane.sessionId));
+    expect(fake.sends.filter((send) => laneSessions.has(send.sessionId))).toEqual([]);
+  });
+
+  it('컨테이너 방식 터미널의 API 모델 계획은 레인이 api로 떠 400이다(컨테이너 터미널은 claude를 띄운다)', async () => {
+    process.env.B_STUDIO_TERMINAL = 'container';
     const error = await statusOfError({ ...base, modelId: 'model-a' });
     expect(error.status).toBe(400);
     expect(error.message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: api');
     nothingCreated();
   });
 
-  it('고정 계획은 레인의 backend가 터미널로 못 띄우는 것이면 400이고, 컨테이너 방식 codex도 400이다', async () => {
+  it('고정 계획은 레인의 backend가 터미널로 못 띄우는 것이면 400이고, 컨테이너 방식 codex·api도 400이다', async () => {
     process.env.B_STUDIO_MODE = 'claude-code';
     const withBackend = (backend: string) => ({ ...base, modelId: 'local-cli:preset', presetPlan: { tasks: [{ ...task('a', ['web/a']), backend }] } });
-    expect((await statusOfError(withBackend('api'))).message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: api');
+    expect((await statusOfError(withBackend('commandcode'))).message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: commandcode');
     process.env.B_STUDIO_TERMINAL = 'container';
-    const container = await statusOfError(withBackend('codex'));
-    expect(container.status).toBe(400);
-    expect(container.message).toContain('아직 터미널에서 띄우지 못하는 백엔드입니다: codex');
+    for (const backend of ['codex', 'api']) {
+      const container = await statusOfError(withBackend(backend));
+      expect(container.status).toBe(400);
+      expect(container.message).toContain(`아직 터미널에서 띄우지 못하는 백엔드입니다: ${backend}`);
+    }
     nothingCreated();
   });
 
@@ -2730,7 +2747,7 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
     const created = await createTaskPlan({ ...base, modelId: 'sonnet' });
     const waiting = await awaiting(created.id);
     const laneId = waiting.lanes[0]!.id;
-    expect(statusOf(() => setLaneBackend(created.id, 'kim', laneId, { backend: 'api' }))).toBe(400);
+    expect(statusOf(() => setLaneBackend(created.id, 'kim', laneId, { backend: 'commandcode' }))).toBe(400);
     expect(statusOf(() => setLaneBackend(created.id, 'kim', laneId, { backend: 'claude-code', effort: 'high' }))).toBe(400);
     expect(getTaskPlan(created.id, 'kim').lanes[0]!.backend).toBeUndefined();
     // 터미널로 띄울 수 있는 것은 받는다

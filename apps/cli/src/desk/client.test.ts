@@ -259,10 +259,19 @@ describe('스튜디오 손님', () => {
     expect(seen.map((entry) => `${entry.method} ${entry.url} ${entry.body}`)).toEqual([
       'GET /api/fleets ',
       'GET /api/fleets/f%201 ',
-      'POST /api/fleets {"projectId":"shop","request":"검색","candidates":[{"backend":"codex","accountId":"acct-pio"},{"backend":"claude-code","model":"sonnet"}]}',
+      'POST /api/fleets {"projectId":"shop","request":"검색","candidates":[{"backend":"codex","accountId":"acct-pio"},{"backend":"claude-code","model":"sonnet"}],"runner":"terminal"}',
       'POST /api/fleets/f1/winner {"sessionId":"s1"}',
       'POST /api/fleets/f1/delete ',
     ]);
+  });
+
+  it('작업 나누기 계획은 레인을 세션 터미널에서 돌리라고(runner: terminal) 보낸다', async () => {
+    handler = (_req, res) => res.end('{}');
+    const client = new StudioClient({ origin, token: 't' });
+    await client.createPlan('shop', '검색 추가');
+    expect(seen[0]!.method).toBe('POST');
+    expect(seen[0]!.url).toBe('/api/task-plans');
+    expect(JSON.parse(seen[0]!.body)).toEqual({ projectId: 'shop', request: '검색 추가', runner: 'terminal' });
   });
 
   it('요구사항·문서 화면이 세션의 요구사항·테스트·문서·현황 API를 부른다(#894)', async () => {
