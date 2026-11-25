@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { keylessLocal } from './model-key';
 import type Anthropic from '@anthropic-ai/sdk';
 import type { AgentRequest, ModelClient, ModelClientInfo, ModelPreflight } from './loop';
 import type { ModelProfile } from './model-router';
@@ -173,8 +174,7 @@ export class GoogleModelClient implements ModelClient {
 function apiKey(profile: ModelProfile, env: NodeJS.ProcessEnv): string | undefined {
   const name = profile.apiKeyEnv ?? (profile.provider === 'openai' ? 'OPENAI_API_KEY' : profile.provider === 'google' ? 'GOOGLE_API_KEY' : 'ANTHROPIC_API_KEY');
   const value = env[name]?.trim();
-  const local = profile.baseUrl && ['localhost', '127.0.0.1', '::1'].includes(new URL(profile.baseUrl).hostname);
-  if (!value && !local) throw new Error(`${profile.label}에 필요한 ${name} 환경 변수가 없습니다`);
+  if (!value && !keylessLocal(profile)) throw new Error(`${profile.label}에 필요한 ${name} 환경 변수가 없습니다`);
   return value;
 }
 

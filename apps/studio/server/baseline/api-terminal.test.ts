@@ -147,9 +147,9 @@ describe('API 모드 세션 터미널(이 컴퓨터 방식)의 자체 CLI', () =
     }
   }, 240_000);
 
-  it('모델의 키가 서버 환경에 없으면 터미널을 열지 않고 이유를 알린다', async () => {
-    const provider = await fakeProvider('notes/x.txt', 'x\n');
-    // 키 환경 변수를 주지 않는다(가짜 서버는 127.0.0.1이라 레지스트리는 키 없이도 모델로 인정한다)
+  it('키 없는 로컬 모델(이 컴퓨터의 OpenAI 호환 서버)은 키 없이 터미널을 열고, 모델 호출에 인증을 보내지 않는다', async () => {
+    const provider = await fakeProvider('notes/local.txt', '로컬 모델이 썼습니다\n');
+    // 키 환경 변수를 주지 않는다. 가짜 서버는 127.0.0.1이라 레지스트리·클라이언트·서버 모두 키 없이 되는 모델로 본다
     const world = await apiWorld(provider, {});
     const target = await startNodeTarget(world);
     const driver = new Driver(target.origin, world);
@@ -157,18 +157,37 @@ describe('API 모드 세션 터미널(이 컴퓨터 방식)의 자체 CLI', () =
       const created = await driver.call('세션 만들기', 'POST', '/api/sessions', { projectId: world.projectId, backend: 'api', workspace: 'copy' });
       expect(created.status, JSON.stringify(created.body)).toBe(201);
       const id = created.body.id as string;
+      const workDir = created.body.workDir as string;
+      await driver.subscribe(id);
       const opened = await driver.call('터미널 열기', 'POST', `/api/sessions/${id}/terminal`, { action: 'open', cols: 100, rows: 30 });
-      expect(opened.status).toBeGreaterThanOrEqual(400);
-      expect(JSON.stringify(opened.body)).toContain(KEY_ENV);
-      expect(JSON.stringify(opened.body)).not.toContain(KEY);
-      // 터미널이 열리지 않았으니 모델 파일도 없다
-      const files = await readdir(path.join(world.root, 'gateway')).catch(() => [] as string[]);
-      for (const name of files) expect(await readdir(path.join(world.root, 'gateway', name)).catch(() => [])).not.toContain('agent-model.json');
+      expect(opened.status, JSON.stringify(opened.body)).toBeLessThan(300);
+      const gateway = await driver.gatewayDir();
+      const model = JSON.parse(await readFile(path.join(gateway, 'agent-model.json'), 'utf8')) as { apiKey?: unknown; profile?: { id?: string } };
+      expect(model.profile?.id).toBe('api-term-fake');
+      expect(model).not.toHaveProperty('apiKey');
+
+      const paste = `\u001b[200~notes/local.txt를 만들어 주세요\u001b[201~\r`;
+      let started: Record<string, unknown> | undefined;
+      for (let attempt = 0; attempt < 40 && !started; attempt++) {
+        await driver.call('요청 붙여 넣기', 'POST', `/api/sessions/${id}/terminal`, { action: 'input', data: paste });
+        for (let wait = 0; wait < 30 && !started; wait++) {
+          started = driver.events.map((entry) => entry.event).find((event) => event.type === 'run_started');
+          if (!started) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (!started) throw new Error('붙여 넣은 요청으로 실행이 열리지 않았습니다');
+      expect(started.backend).toBe('api');
+      const finished = await driver.waitFor('run_finished', (event) => event.type === 'run_finished' && event.runId === started.runId, 120_000);
+      expect(finished.status, JSON.stringify(finished)).toBe('done');
+      expect(await readFile(path.join(workDir, 'notes/local.txt'), 'utf8')).toBe('로컬 모델이 썼습니다\n');
+      // 키가 없으니 인증 헤더를 보내지 않았다(가짜 서버는 없는 헤더를 'undefined'로 적는다)
+      expect(provider.auth.length).toBeGreaterThanOrEqual(2);
+      expect(new Set(provider.auth)).toEqual(new Set(['undefined']));
     } finally {
       await driver.close();
       await target.stop();
       await new Promise<void>((resolve) => provider.server.close(() => resolve()));
       await world.cleanup();
     }
-  }, 120_000);
+  }, 240_000);
 });

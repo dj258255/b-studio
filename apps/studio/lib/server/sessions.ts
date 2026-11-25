@@ -201,6 +201,7 @@ import {
   requirementsReadyBadge,
   type RequirementLintWarning,
   apiKeyEnvName,
+  keylessLocal,
   type ModelProfile,
 } from '@b-studio/agent';
 import {
@@ -7391,7 +7392,7 @@ export function sessionTerminalTarget(id: string): {
   resumeConversation: () => string | undefined;
   accountDir: () => Promise<string | undefined>;
   model?: string;
-  selfAgent?: () => Promise<{ profile: Record<string, unknown>; apiKey: string }>;
+  selfAgent?: () => Promise<{ profile: Record<string, unknown>; apiKey?: string }>;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
@@ -7442,7 +7443,7 @@ function selfAgentTerminal(session: Session): boolean {
  * 자체 CLI의 모델 파일에 쓸 모델과 키. 세션이 고른 모델(없으면 라우팅)을 쓰고, 키는 서버 환경에서만 읽는다.
  * 키가 없으면 CLI가 시작하자마자 끝나므로 터미널을 열지 않고 사유를 화면에 올린다(빈 키로 대신하지 않는다)
  */
-async function selfAgentModel(session: Session): Promise<{ profile: Record<string, unknown>; apiKey: string }> {
+async function selfAgentModel(session: Session): Promise<{ profile: Record<string, unknown>; apiKey?: string }> {
   let profile: ModelProfile;
   try {
     profile = routingDecision('API 모드 터미널', 'build', session.snapshot.modelId).selected;
@@ -7451,6 +7452,8 @@ async function selfAgentModel(session: Session): Promise<{ profile: Record<strin
   }
   const name = apiKeyEnvName(profile);
   const apiKey = process.env[name]?.trim();
+  // 이 컴퓨터의 OpenAI 호환·Google 서버(Ollama 등)는 키 없이 된다. 클라이언트·자체 CLI와 같은 규칙이다(keylessLocal)
+  if (!apiKey && keylessLocal(profile)) return { profile: { ...profile } };
   if (!apiKey) throw new StudioError(409, `API 모드 터미널에서 쓸 모델(${profile.id})의 키가 서버 환경에 없습니다. 환경 변수 ${name}을(를) 설정한 뒤 서버를 다시 띄우세요`);
   return { profile: { ...profile }, apiKey };
 }
