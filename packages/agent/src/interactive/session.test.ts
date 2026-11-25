@@ -227,6 +227,19 @@ describe('대화형 에이전트 코어(claude CLI와 같은 바깥 계약)', ()
     expect(file('app/a.txt')).toBe('쓴 내용\n');
   });
 
+  it('Bash: 훅은 claude와 같은 입력 모양으로 불리고, 허용하면 작업 폴더에서 실행하며, 거절하면 실행하지 않는다', async () => {
+    const turns: ScriptedTurn[] = [{ toolCalls: [{ name: 'Bash', input: { command: 'printf hi > bash.txt', timeout: 5000, description: '파일 만들기' } }] }, { text: '끝' }];
+    const first = await run({ turns, args: ['요청'] });
+    expect(first.lines.find((line) => line.event === 'pre-tool')!.input).toMatchObject({ hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: 'printf hi > bash.txt', timeout: 5000, description: '파일 만들기' } });
+    expect(file('bash.txt')).toBe('hi');
+    await rm(path.join(work, 'bash.txt'));
+    await reply({ 'pre-tool': [{ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: '명령 거절' } }] });
+    const client = new ScriptedModelClient(turns);
+    await run({ client, args: ['요청'] });
+    expect(() => file('bash.txt')).toThrow();
+    expect(client.requests[1]!.messages.at(-1)!.content).toEqual([{ type: 'tool_result', tool_use_id: expect.any(String), content: '명령 거절', is_error: true }]);
+  });
+
   it('matcher가 `*`이거나 비면 모든 도구에 맞고, 정규식은 도구 이름 전체에 맞춘다', async () => {
     const command = (event: string) => hook(event).hooks[0]!;
     await writeSettings({

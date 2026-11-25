@@ -27,12 +27,14 @@ export interface InteractiveSessionOptions {
   /** 훅 명령의 환경(기본은 process.env). 설정의 env가 위에 덮인다 */
   env?: NodeJS.ProcessEnv;
   maxModelCalls?: number;
+  /** Bash의 자식 환경에서 더 뺄 환경 변수 이름(모델 키의 이름). 기본 목록(ANTHROPIC_API_KEY 등)에 더한다 */
+  scrubEnvNames?: readonly string[];
 }
 
 export function defaultSystemPrompt(cwd: string): string {
   return [
     `당신은 터미널에서 코드를 고치는 에이전트입니다. 작업 폴더는 ${cwd} 입니다.`,
-    '도구(Read, Write, Edit, Glob, Grep)는 작업 폴더 안에서만 동작합니다. 밖의 경로나 링크로 나가는 경로는 거절됩니다.',
+    '파일 도구(Read, Write, Edit, Glob, Grep)는 작업 폴더 안에서만 동작합니다. 밖의 경로나 링크로 나가는 경로는 거절됩니다. Bash는 작업 폴더에서 셸 명령을 실행하며 사용자의 권한으로 돕니다. 필요한 명령만 쓰고 작업 폴더 밖은 건드리지 마세요.',
     '요청한 일을 끝내면 한 일을 짧게 알리고 도구 호출 없이 답하세요.',
   ].join('\n');
 }
@@ -55,7 +57,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
   const parsed = parseArgs(options.args);
   const settings: InteractiveSettings = loadSettings(parsed.settingsFile);
   const hooks: HookRunner = createHookRunner({ settings, cwd, sessionId: 'conversation-1', env: options.env });
-  const tools: InteractiveTools = createTools(cwd);
+  const tools: InteractiveTools = createTools(cwd, { scrubEnvNames: options.scrubEnvNames });
   const system = options.system ?? defaultSystemPrompt(cwd);
   const maxCalls = options.maxModelCalls ?? MAX_MODEL_CALLS_PER_REQUEST;
   const messages: BetaMessageParam[] = [];
@@ -116,8 +118,8 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
             continue;
           }
           // 훅에는 절대 경로로 풀어 알렸지만 실행은 모델이 준 입력을 작업 폴더 기준으로 다시 풀어 가둔다
-          const outcome = await tools.execute(use.name, toolInput);
-          print(`  ${use.name}${typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : ''}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`);
+          const outcome = await tools.execute(use.name, toolInput, options.signal);
+          print(`  ${use.name}${typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : use.name === 'Bash' && typeof toolInput.command === 'string' ? ` ${clip(toolInput.command.replace(/\s+/g, ' '), 80)}` : ''}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`);
           results.push({ type: 'tool_result', tool_use_id: use.id, content: outcome.text, is_error: outcome.isError || undefined });
         }
         messages.push({ role: 'user', content: results });

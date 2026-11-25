@@ -32,7 +32,7 @@ function send(response: ServerResponse, body: unknown): void {
 }
 
 /** 처음에는 Write 도구 호출을, 도구 결과가 오면 글로 답한다 */
-async function fakeProvider(file: string, content: string): Promise<FakeProvider> {
+async function fakeProvider(file: string, content: string, call?: { name: string; args: Record<string, unknown> }): Promise<FakeProvider> {
   const auth: string[] = [];
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/v1/models/')) return send(response, { id: 'api-term-fake', object: 'model' });
@@ -43,7 +43,7 @@ async function fakeProvider(file: string, content: string): Promise<FakeProvider
       return send(response, {
         id: 'm1',
         model: 'api-term-fake',
-        choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'Write', arguments: JSON.stringify({ file_path: file, content }) } }] } }],
+        choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: call?.name ?? 'Write', arguments: JSON.stringify(call?.args ?? { file_path: file, content }) } }] } }],
         usage: { prompt_tokens: 1000, completion_tokens: 100 },
       });
     }
@@ -139,6 +139,47 @@ describe('API 모드 세션 터미널(이 컴퓨터 방식)의 자체 CLI', () =
       const stopped = await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
       expect(stopped.status).toBeLessThan(300);
       await waitUntil('관문 폴더 정리', () => readdir(path.dirname(gateway)).catch(() => [] as string[]), (names) => !names.includes(path.basename(gateway)), 30_000);
+    } finally {
+      await driver.close();
+      await target.stop();
+      await new Promise<void>((resolve) => provider.server.close(() => resolve()));
+      await world.cleanup();
+    }
+  }, 240_000);
+
+  it('모델이 Bash로 명령을 실행하면 관문의 쓰기 직전 훅이 Bash로 보고, 바뀐 파일이 체크포인트에 든다', async () => {
+    const provider = await fakeProvider('', '', { name: 'Bash', args: { command: 'mkdir -p notes && printf hi > notes/bash.txt', description: '파일 만들기' } });
+    const world = await apiWorld(provider, { [KEY_ENV]: KEY });
+    const target = await startNodeTarget(world);
+    const driver = new Driver(target.origin, world);
+    try {
+      const created = await driver.call('세션 만들기', 'POST', '/api/sessions', { projectId: world.projectId, backend: 'api', workspace: 'copy' });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const id = created.body.id as string;
+      const workDir = created.body.workDir as string;
+      await driver.subscribe(id);
+      const opened = await driver.call('터미널 열기', 'POST', `/api/sessions/${id}/terminal`, { action: 'open', cols: 100, rows: 30 });
+      expect(opened.status, JSON.stringify(opened.body)).toBeLessThan(300);
+      const paste = `\u001b[200~notes/bash.txt를 만들어 주세요\u001b[201~\r`;
+      let started: Record<string, unknown> | undefined;
+      for (let attempt = 0; attempt < 40 && !started; attempt++) {
+        await driver.call('요청 붙여 넣기', 'POST', `/api/sessions/${id}/terminal`, { action: 'input', data: paste });
+        for (let wait = 0; wait < 30 && !started; wait++) {
+          started = driver.events.map((entry) => entry.event).find((event) => event.type === 'run_started');
+          if (!started) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (!started) throw new Error('붙여 넣은 요청으로 실행이 열리지 않았습니다');
+      const finished = await driver.waitFor('run_finished', (event) => event.type === 'run_finished' && event.runId === started.runId, 120_000);
+      expect(finished.status, JSON.stringify(finished)).toBe('done');
+      // 서버의 쓰기 직전 훅이 Bash 도구 호출로 봤다(claude의 Bash와 같은 이름이라 같은 분류를 거친다)
+      const toolCalls = driver.events.map((entry) => entry.event).filter((event) => event.type === 'agent' && (event.event as { type?: string }).type === 'tool_call') as Array<{ event: { name: string; input?: { command?: string } } }>;
+      expect(toolCalls.map((call) => call.event.name)).toContain('Bash');
+      expect(toolCalls.find((call) => call.event.name === 'Bash')?.event.input?.command).toContain('notes/bash.txt');
+      const checkpoint = driver.events.map((entry) => entry.event).find((event) => event.type === 'checkpoint') as { checkpoint?: { files?: string[] } } | undefined;
+      expect(checkpoint?.checkpoint?.files, JSON.stringify(driver.events.map((entry) => entry.event)).slice(0, 6000)).toContain('notes/bash.txt');
+      expect(await readFile(path.join(workDir, 'notes/bash.txt'), 'utf8')).toBe('hi');
+      await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
     } finally {
       await driver.close();
       await target.stop();
