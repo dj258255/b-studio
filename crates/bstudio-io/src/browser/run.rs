@@ -1138,12 +1138,18 @@ async fn record_step(shared: &Arc<Shared>, session: &str, input: &BrowserRunInpu
     StepRecord { label: label.to_owned(), ok, detail, screenshot }
 }
 
-async fn shutdown(shared: &Arc<Shared>, session: Session) {
+/// 브라우저를 닫고 프로필을 지운다. 중단(`aborted`)이면 정상 종료를 기다리지 않고 그룹째 곧바로 죽인다:
+/// Chrome 앱은 `Browser.close`에 바로 답해도 프로세스가 끝나기까지 2초 넘게 걸려(macOS에서 2.1~2.6초 실측) 중단이 그만큼 늦었다(#1361)
+async fn shutdown(shared: &Arc<Shared>, session: Session, aborted: bool) {
     let Session { mut process, profile } = session;
-    if let Some(cdp) = shared.cdp_if_any() {
-        let _ = tokio::time::timeout(Duration::from_secs(2), cdp.send(None, "Browser.close", json!({}))).await;
+    if aborted {
+        process.kill_now().await;
+    } else {
+        if let Some(cdp) = shared.cdp_if_any() {
+            let _ = tokio::time::timeout(Duration::from_secs(2), cdp.send(None, "Browser.close", json!({}))).await;
+        }
+        process.wait_or_kill(Duration::from_secs(5)).await;
     }
-    process.wait_or_kill(Duration::from_secs(5)).await;
     if let Some(cdp) = shared.cdp_if_any() {
         cdp.shutdown();
     }
@@ -1215,7 +1221,7 @@ pub async fn run_in_browser(input: &BrowserRunInput, cancel: &Cancel) -> Result<
         _ = cancel.cancelled() => Err(RunError::Aborted),
     };
     // 브라우저를 닫은 뒤에 프록시를 닫는다. 열려 있는 연결도 여기서 끊긴다
-    shutdown(&shared, session).await;
+    shutdown(&shared, session, cancel.is_cancelled()).await;
     if let Some(proxy) = &proxy {
         proxy.close();
     }
