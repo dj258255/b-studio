@@ -81,6 +81,39 @@ export interface HostCli {
    * 실행 인자의 설정이 사용자 설정의 상태 줄을 덮으므로, 이어 부르지 않으면 사용자의 상태 줄이 사라진다
    */
   statusLine?: string;
+  /**
+   * API 모드 세션의 자체 에이전트 CLI(ADR-226). 있으면 종류는 claude 그대로 두고 `cliPath`만 관문 폴더의 실행기(`agent-tty`)로 바꾼다.
+   * 그러면 감싸개·훅 설정·감시가 그대로 맞물린다. 실행기와 모델 파일(키가 든다)도 기대 파일이라 변조 감시·복구와 정리의 대상이다
+   */
+  selfAgent?: SelfAgent;
+}
+
+/** 자체 CLI를 띄우는 데 필요한 것. 경로는 모두 절대 경로다 */
+export interface SelfAgent {
+  /** `apps/cli/src/agent-tty.ts` */
+  entry: string;
+  /** tsx의 `dist/loader.mjs`. `node --import`로 불러 프로세스를 하나로 둔다 */
+  loader: string;
+  /** 모델 파일에 쓸 값. 모델 설정(검증은 CLI가 한다)과 키 */
+  model: { profile: Record<string, unknown>; apiKey?: string };
+}
+
+/** 관문 폴더 안의 자체 CLI 실행기와 모델 파일 이름. Rust 정리 목록(GATEWAY_FILE_NAMES)과 같아야 한다 */
+export const SELF_AGENT_LAUNCHER_FILE = 'agent-tty';
+export const SELF_AGENT_MODEL_FILE = 'agent-model.json';
+
+/** 이 관문 폴더에서 CLI로 부를 경로. 자체 CLI면 폴더의 실행기, 아니면 이 컴퓨터에 깔린 CLI다 */
+export function hostCliPath(dir: string, cli: Pick<HostCli, 'cliPath' | 'selfAgent'>): string {
+  return cli.selfAgent ? path.join(dir, SELF_AGENT_LAUNCHER_FILE) : cli.cliPath;
+}
+
+/**
+ * 자체 CLI 실행기. `exec -a`로 첫 낱말(`ps`가 보여 주는 argv[0])을 실행기 경로로 둬서 감시가 알아본다.
+ * 모든 값은 작은따옴표로 감싼다(경로에 빈칸·따옴표가 있어도 한 덩어리)
+ */
+export function selfAgentLauncher(dir: string, nodePath: string, agent: Pick<SelfAgent, 'entry' | 'loader'>): string {
+  const q = shellQuote;
+  return `#!/bin/bash\nexec -a ${q(path.join(dir, SELF_AGENT_LAUNCHER_FILE))} ${q(nodePath)} --import ${q(agent.loader)} ${q(agent.entry)} "$@"\n`;
 }
 
 /**
@@ -326,6 +359,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     ...Object.fromEntries(Object.entries(hostZshFiles(dir, cli.kind)).map(([name, content]) => [path.join(ZSH_DIR, name), file(content)])),
     [BASH_RC_FILE]: file(hostBashRc(dir, cli.kind)),
   };
+  const cliPath = hostCliPath(dir, cli);
   const addressFile = file(`${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`);
   if (cli.kind === 'codex') {
     return {
@@ -341,7 +375,13 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     [MCP_FILE]: file(`${JSON.stringify(agentManagedMcp(address), null, 2)}\n`),
     [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
     [GATEWAY_FILE_NAME]: addressFile,
-    [path.join(WRAPPER_DIR, 'claude')]: { content: hostCliWrapper(dir, cli.cliPath, cli.configDir), mode: 0o700 },
+    [path.join(WRAPPER_DIR, 'claude')]: { content: hostCliWrapper(dir, cliPath, cli.configDir), mode: 0o700 },
+    ...(cli.selfAgent
+      ? {
+          [SELF_AGENT_LAUNCHER_FILE]: { content: selfAgentLauncher(dir, cli.nodePath, cli.selfAgent), mode: 0o700 },
+          [SELF_AGENT_MODEL_FILE]: file(`${JSON.stringify({ profile: cli.selfAgent.model.profile, apiKey: cli.selfAgent.model.apiKey })}\n`),
+        }
+      : {}),
     // 사용자의 원래 상태 줄(#920). 훅 스크립트가 옆의 이 파일을 읽어 이어 부른다
     ...(cli.statusLine ? { [STATUSLINE_FILE]: file(`${JSON.stringify({ command: cli.statusLine })}\n`) } : {}),
     ...shell,
