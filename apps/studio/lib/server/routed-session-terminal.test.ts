@@ -20,7 +20,7 @@ const fake = vi.hoisted(() => ({
 vi.mock('./sessions', async () => {
   const { StudioError } = await import('./errors');
   return {
-    allowedBackends: () => new Set(['claude-code', 'codex', 'commandcode']),
+    allowedBackends: () => new Set(['claude-code', 'codex', 'commandcode', 'api']),
     resolveSessionBackend: () => 'claude-code',
     assertBackendReady: async (backend: string) => {
       if (fake.notReady[backend]) throw new StudioError(409, fake.notReady[backend]);
@@ -153,6 +153,26 @@ describe('startRoutedSession — 터미널로(#836)', () => {
     await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal().deps)).rejects.toMatchObject({ status: 400 });
     await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'codex' } }, terminal({ mode: 'container' }).deps)).rejects.toMatchObject({ status: 400 });
     expect(fake.created).toEqual([]);
+  });
+
+  it('API 모드(자체 CLI)는 이 컴퓨터 방식 터미널에서만 띄울 수 있다. 컨테이너 방식은 거른다', async () => {
+    // 직접 고르면 host에서는 세션이 api로 만들어진다
+    const host = await startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'api' } }, terminal({ startAfter: 1 }).deps);
+    expect(host.routing.backend).toBe('api');
+    expect(fake.created.at(-1)?.options.backend).toBe('api');
+
+    // 컨테이너 방식은 api 세션에도 claude를 띄우므로 직접 고르면 400, 세션을 만들지 않는다
+    const before = fake.created.length;
+    await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'api' } }, terminal({ mode: 'container' }).deps)).rejects.toMatchObject({ status: 400 });
+    expect(fake.created.length).toBe(before);
+
+    // 규칙으로 고를 때도 컨테이너 방식은 api를 건너뛴다
+    saveBackendRules({ rules: [{ when: {}, backend: 'api' }], fallback: { backend: 'claude-code' } });
+    const container = await startRoutedSession({ ...base, request: '고쳐 줘' }, terminal({ mode: 'container', startAfter: 1 }).deps);
+    expect(container.routing).toMatchObject({ backend: 'claude-code', rule: 'fallback' });
+    expect(container.routing.skipped.map((skip) => skip.backend)).toEqual(['api']);
+    const hostRule = await startRoutedSession({ ...base, request: '고쳐 줘' }, terminal({ startAfter: 1 }).deps);
+    expect(hostRule.routing).toMatchObject({ backend: 'api', rule: 0 });
   });
 
   it('정해진 시간 안에 실행이 시작되지 않으면 넘긴 사실과 함께, CLI가 묻는 창에 답하면 이어진다는 안내를 돌려준다(오래 붙잡지 않는다)', async () => {

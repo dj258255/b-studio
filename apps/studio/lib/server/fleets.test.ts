@@ -521,7 +521,7 @@ describe('터미널 Fleet', () => {
   });
 
   it.each([
-    ['api 후보', { backends: 'api', terminal: undefined, experimental: undefined, candidates: [{ backend: 'api' as const, model: 'model-a' }, { backend: 'api' as const, model: 'model-b' }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: api' }],
+    ['컨테이너 방식의 api 후보', { backends: 'api', terminal: 'container', experimental: '1', candidates: [{ backend: 'api' as const, model: 'model-a' }, { backend: 'api' as const, model: 'model-b' }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: api' }],
     ['컨테이너 방식의 codex', { backends: 'codex', terminal: 'container', experimental: '1', candidates: [{ backend: 'codex' as const }, { backend: 'codex' as const }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: codex' }],
     ['터미널을 쓸 수 없는 서버', { backends: 'claude-code', terminal: 'container', experimental: undefined, candidates: [{ backend: 'claude-code' as const }, { backend: 'claude-code' as const }], message: '세션 터미널' }],
   ])('%s는 400으로 거절하고 세션을 만들지 않는다', async (_name, setup) => {
@@ -545,6 +545,21 @@ describe('터미널 Fleet', () => {
     expect((error as StudioError).message).toContain(setup.message);
     expect(fake.createSession).not.toHaveBeenCalled();
     expect(listFleets('rejected-owner')).toEqual([]);
+  });
+
+  it('이 컴퓨터 방식이면 api 후보도 받는다(자체 CLI가 터미널에서 돈다)', async () => {
+    terminalHarness();
+    process.env.B_STUDIO_BACKENDS = 'api';
+    const fleet = await createFleet({
+      projectId: 'orders',
+      request: '요청',
+      candidates: [{ backend: 'api', model: 'model-a' }, { backend: 'api', model: 'model-b' }],
+      owner: 'tess',
+      runner: 'terminal',
+    });
+    expect(fleet.runner).toBe('terminal');
+    expect(fleet.members.map((member) => member.backend)).toEqual(['api', 'api']);
+    expect(fake.createSession).toHaveBeenCalledTimes(2);
   });
 
   it('이 컴퓨터 방식이면 codex 후보도 받는다', async () => {

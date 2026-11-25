@@ -236,6 +236,32 @@ export async function runTerminalTask(
   }
 }
 
+/** AI 리뷰의 고침 결과(review-round.ts의 ReviewFixResult와 같은 꼴) */
+export type TerminalReviewFixResult = { ok: true; checkpoint?: { sha: string; shortSha: string } } | { ok: false; error: string };
+
+/**
+ * AI 리뷰의 고침 요청을 세션 터미널에서 돌린다. 터미널을 열고 runTerminalTask로 붙여 넣어 그 실행의 끝을 기다린다.
+ * 쓰기 범위는 걸지 않는다(리뷰 고침은 지금도 쓰기 범위가 없다). 끝난 실행이 done이 아니거나 터미널 실행이 던지면 ok: false다.
+ * 체크포인트는 끝난 뒤 세션의 가장 최근 것을 읽는다(채팅식 고침과 같다)
+ */
+export async function runReviewFixOnTerminal(
+  sessionId: string,
+  request: string,
+  options: { timeoutMs: number; latestCheckpoint: () => { sha: string; shortSha: string } | undefined },
+  overrides?: Partial<TerminalTaskDeps>,
+): Promise<TerminalReviewFixResult> {
+  const driver = overrides?.driver ?? terminalLaneDriver;
+  try {
+    await driver.open(sessionId);
+    const result = await runTerminalTask(sessionId, request, { writableScope: undefined, doneTests: [] }, { runTimeoutMs: options.timeoutMs, ...overrides });
+    if (result.status !== 'done') return { ok: false, error: result.summary };
+    const checkpoint = options.latestCheckpoint();
+    return { ok: true, checkpoint: checkpoint ? { sha: checkpoint.sha, shortSha: checkpoint.shortSha } : undefined };
+  } catch (error) {
+    return { ok: false, error: errorMessage(error) };
+  }
+}
+
 /**
  * 붙여 넣기 전에 열린 터미널 실행이 없어질 때까지 기다린다(#B6a 수정 5). 열린 실행에 우리 글이 이어 붙으면
  * (terminal_prompt) 우리 run_started가 오지 않기 때문이다. 없어지면 참, 상한을 넘거나 세션이 멈추면 거짓
