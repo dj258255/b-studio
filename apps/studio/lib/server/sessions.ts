@@ -264,7 +264,7 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
@@ -4757,9 +4757,28 @@ async function reviewExternalContext(session: Session, diff: string): Promise<st
   return excerpts.length > 0 ? buildPrReviewExternalContext(excerpts) : undefined;
 }
 
-/** sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
+async function reviewFixOnTerminal(session: Session): Promise<boolean> {
+  const backend = sessionBackend(session.snapshot);
+  let apiKeyReady = false;
+  if (backend === 'api' && sessionTerminalAllowed() && sessionTerminalMode() === 'host') {
+    try {
+      await selfAgentModel(session);
+      apiKeyReady = true;
+    } catch {
+      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 채팅식으로 둔다
+    }
+  }
+  return reviewFixRunner({ allowed: sessionTerminalAllowed(), backend, apiKeyReady }) === 'terminal';
+}
+
+/** 터미널을 쓸 수 없으면 sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
 async function reviewRequestFix(session: Session, request: string): Promise<ReviewFixResult> {
   const id = session.snapshot.id;
+  // 세션 터미널을 쓸 수 있으면 터미널에서 돌린다(터미널이 열리지 않는 서버·키 없는 API 세션은 채팅식으로 둔다)
+  if (await reviewFixOnTerminal(session)) {
+    const { runReviewFixOnTerminal } = await import('./terminal-lane');
+    return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
+  }
   let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
   let runId: string | undefined;
   const unsubscribe = subscribe(id, (event) => {
