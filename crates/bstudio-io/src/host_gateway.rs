@@ -41,6 +41,8 @@ pub const GATEWAY_FILE_NAMES: [&str; 15] = [
 /// 권한을 700으로 유지해야 하는 폴더(폴더 기준 이름). 빈 이름은 관문 폴더 그 자체다
 pub const GATEWAY_FOLDER_NAMES: [&str; 4] = ["", "bin", "shell", "shell/zsh"];
 pub const STATUSLINE_FILE: &str = "statusline.json";
+/// 자체 CLI 세션만 쓰는 파일(실행기, 키가 든 모델 파일). 이번에 쓰는 목록에 없으면 지운다(지난 세션·비정상 종료가 남긴 키를 두지 않는다)
+pub const SELF_AGENT_FILE_NAMES: [&str; 2] = ["agent-tty", "agent-model.json"];
 
 /// 관문 폴더에 쓸 파일 하나
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,6 +246,12 @@ pub fn write_gateway_files(
     if !files.iter().any(|file| file.name == statusline_name) {
         let _ = fs::remove_file(dir.join(statusline_name));
     }
+    // 같은 폴더를 claude 방식으로 다시 쓰면 지난 자체 CLI의 모델 파일(키)이 기대 목록 밖에 남아 검사도 정리도 받지 않는다. 링크면 자리만 지운다
+    for name in SELF_AGENT_FILE_NAMES {
+        if !files.iter().any(|file| file.name == name) {
+            let _ = fs::remove_file(dir.join(name));
+        }
+    }
     for spec in files {
         let target = dir.join(&spec.name);
         let same = match fs::symlink_metadata(&target) {
@@ -412,5 +420,29 @@ mod tests {
         // 두 파일만 있던 폴더는 비어서 함께 지워진다
         assert!(!dir.exists());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn write_without_self_agent_removes_leftover_launcher_and_model_file() {
+        let dir = std::env::temp_dir().join(format!("b-studio-gw-leftover-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("agent-tty"), "#!/bin/bash\n").unwrap();
+        fs::write(dir.join("agent-model.json"), "{\"apiKey\":\"k\"}").unwrap();
+        let outside = dir.join("outside.json");
+        fs::write(&outside, "keep").unwrap();
+        // 남은 파일이 링크면 링크 자리만 지우고 너머는 두지 않는다
+        fs::remove_file(dir.join("agent-tty")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("agent-tty")).unwrap();
+        let files = [GatewayFile { name: "settings.json".to_owned(), content: "{}".to_owned(), mode: 0o600 }];
+        write_gateway_files(&dir, &files, STATUSLINE_FILE).unwrap();
+        assert!(fs::symlink_metadata(dir.join("agent-model.json")).is_err());
+        assert!(fs::symlink_metadata(dir.join("agent-tty")).is_err());
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "keep");
+        // 자체 CLI 세션이면 지우지 않고 쓴다
+        let files = [GatewayFile { name: "agent-model.json".to_owned(), content: "{}".to_owned(), mode: 0o600 }];
+        write_gateway_files(&dir, &files, STATUSLINE_FILE).unwrap();
+        assert_eq!(fs::read_to_string(dir.join("agent-model.json")).unwrap(), "{}");
+        let _ = fs::remove_dir_all(&dir);
     }
 }
