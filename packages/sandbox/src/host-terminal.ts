@@ -514,7 +514,8 @@ export function processArgv(pid: number): string[] | null {
 export function findUnhookedCliByArgv(
   root: number,
   processes: readonly ProcessEntry[],
-  expected: { settingsPath: string; cliPath: string; kind?: HostCliKind },
+  /** selfAgent: 자체 CLI 세션이면 실행기가 넘기는 로더·진입점의 절대 경로. 그 정확한 꼴만 붙은 것으로 본다 */
+  expected: { settingsPath: string; cliPath: string; kind?: HostCliKind; selfAgent?: Pick<SelfAgent, 'loader' | 'entry'> },
   readArgv: (pid: number) => string[] | null = processArgv,
 ): ProcessEntry[] | undefined {
   const kind = expected.kind ?? 'claude';
@@ -537,7 +538,7 @@ export function findUnhookedCliByArgv(
   for (const pid of pids) {
     const argv = readArgv(pid);
     if (argv === null) continue;
-    if (!native.terminalHookedArgv(argv, expected.settingsPath, mcpPath)) found.push(byPid.get(pid)!);
+    if (!native.terminalHookedArgv(argv, expected.settingsPath, mcpPath, expected.selfAgent?.loader ?? null, expected.selfAgent?.entry ?? null)) found.push(byPid.get(pid)!);
   }
   return found;
 }

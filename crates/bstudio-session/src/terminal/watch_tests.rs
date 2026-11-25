@@ -316,7 +316,14 @@ fn argv(items: &[&str]) -> Vec<String> {
 }
 
 fn hooked_a(items: &[&str]) -> bool {
-    hooked_argv(&argv(items), SETTINGS, MCP)
+    hooked_argv(&argv(items), SETTINGS, MCP, None)
+}
+
+const SELF_LOADER: &str = "/repo/node_modules/tsx/dist/loader.mjs";
+const SELF_ENTRY: &str = "/repo/apps/cli/src/agent-tty.ts";
+
+fn hooked_self(items: &[&str]) -> bool {
+    hooked_argv(&argv(items), SETTINGS, MCP, Some((SELF_LOADER, SELF_ENTRY)))
 }
 
 #[test]
@@ -414,18 +421,21 @@ fn self_agent_launcher_is_recognized_and_hook_is_checked() {
 #[test]
 fn hooked_argv_accepts_the_self_agent_launcher_slot_only() {
     let launcher = "/home/kim/.cache/b-studio/agent-gateway/studio-a/agent-tty";
-    let loader = "/repo/node_modules/tsx/dist/loader.mjs";
-    let entry = "/repo/apps/cli/src/agent-tty.ts";
-    assert!(hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
-    assert!(hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS, "요청 글"]));
-    // 로더·진입점·`--import`가 아니면 자리 4를 인정하지 않는다
-    assert!(!hooked_a(&[launcher, "--import", "/evil/loader.mjs", entry, "--mcp-config", MCP, "--settings", SETTINGS]));
-    assert!(!hooked_a(&[launcher, "--import", loader, "/evil/main.ts", "--mcp-config", MCP, "--settings", SETTINGS]));
-    assert!(!hooked_a(&[launcher, "--require", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    let (loader, entry) = (SELF_LOADER, SELF_ENTRY);
+    assert!(hooked_self(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(hooked_self(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS, "요청 글"]));
+    // 자체 CLI 세션이 아니면(claude 세션) 같은 꼴이어도 자리 4를 인정하지 않는다
+    assert!(!hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    // 끝 글자만 같은 다른 로더·진입점(아무 폴더에 만든 `…/tsx/dist/loader.mjs`)은 인정하지 않는다
+    assert!(!hooked_self(&[launcher, "--import", "/tmp/x/node_modules/tsx/dist/loader.mjs", entry, "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_self(&[launcher, "--import", loader, "/tmp/x/apps/cli/src/agent-tty.ts", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_self(&[launcher, "--require", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS]));
     // 자리 5 이상, 설정 덮어쓰기, 다른 설정 파일
-    assert!(!hooked_a(&[launcher, "--import", loader, entry, "-p", "--mcp-config", MCP, "--settings", SETTINGS]));
-    assert!(!hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS, "--settings", "/evil.json"]));
-    assert!(!hooked_a(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", "/evil.json"]));
-    // 실행기 없이 설정 없이 띄운 자체 CLI는 붙지 않은 것이다
-    assert!(!hooked_a(&[launcher, "--import", loader, entry]));
+    assert!(!hooked_self(&[launcher, "--import", loader, entry, "-p", "--mcp-config", MCP, "--settings", SETTINGS]));
+    assert!(!hooked_self(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", SETTINGS, "--settings", "/evil.json"]));
+    assert!(!hooked_self(&[launcher, "--import", loader, entry, "--mcp-config", MCP, "--settings", "/evil.json"]));
+    // 설정 없이 띄운 자체 CLI는 붙지 않은 것이다
+    assert!(!hooked_self(&[launcher, "--import", loader, entry]));
+    // 자체 CLI 세션이어도 claude의 원래 자리는 그대로다
+    assert!(hooked_self(&["claude", "--mcp-config", MCP, "--settings", SETTINGS]));
 }

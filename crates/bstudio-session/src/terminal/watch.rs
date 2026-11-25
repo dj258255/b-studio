@@ -33,9 +33,6 @@ pub const FAILURES_BEFORE_REPORT: u32 = 3;
 /// claude는 이 글이 인자에 있을 때(설치된 패키지 자리), codex는 이 글이 있을 때 CLI로 본다
 pub const CLAUDE_PACKAGE_MARK: &str = "/@anthropic-ai/claude-code/";
 pub const CODEX_PACKAGE_MARK: &str = "/@openai/codex";
-/// API 모드 세션의 자체 CLI 실행기(`exec -a <실행기> node --import <tsx 로더> <진입점> "$@"`)가 띄운 node의 argv에서 로더와 진입점의 꼴(ADR-226)
-const SELF_AGENT_LOADER_TAIL: &str = "/tsx/dist/loader.mjs";
-const SELF_AGENT_ENTRY_TAIL: &str = "/apps/cli/src/agent-tty.ts";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliKind {
@@ -137,20 +134,21 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
 /// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게 맞춘다). 감싸개는 늘 `exec <cli> --mcp-config <M> --settings <S> "$@"`로 부르므로 그 **정확한 자리**만 인정한다:
 /// - argv에서 `--mcp-config`가 처음 나오는 자리를 i라 할 때 `argv[i..i+4] == ["--mcp-config", M, "--settings", S]`(M은 관문 폴더의 mcp.json, S는 settings.json)
 /// - i는 1이거나, 2이면서 argv[1]이 CLI 스크립트(`/@anthropic-ai/claude-code/`가 든 경로. node가 띄운 꼴)일 때뿐이다.
-///   자체 CLI 실행기가 띄운 꼴(`[실행기, "--import", <…/tsx/dist/loader.mjs>, <…/apps/cli/src/agent-tty.ts>, "--mcp-config", …]`)이면 i는 4다
+///   자체 CLI 세션(`self_agent`에 서버가 정한 로더·진입점의 절대 경로를 준다)이면 실행기가 띄운 꼴 `[실행기, "--import", <로더>, <진입점>, "--mcp-config", …]`의
+///   i=4도 인정한다. 로더·진입점은 **정확히 같은 글**이어야 한다(끝 글자로 맞추면 아무 폴더의 `…/tsx/dist/loader.mjs`가 임의 코드를 "붙은 CLI"로 통과시킨다).
+///   `self_agent`가 없으면(claude 세션) 이 자리는 열리지 않는다
 /// - argv 전체에서 `--settings`·`--settings=…` 요소가 그 하나뿐이다(사용자가 덧붙인 덮어쓰기는 붙지 않은 것)
 ///
 /// 요청 글처럼 한 요소 안에 섞인 `--settings`는 세지 않는다(ps 한 줄은 따옴표를 잃어 가르지 못했다). `--`(그 뒤는 요청 글)나 값을 받는 다른 옵션(`--model --settings S`)이 `--settings`를 값으로
 /// 먹는 꼴은 자리가 맞지 않아 인정하지 않는다. `--settings=<S>` 꼴은 감싸개가 쓰지 않으므로 인정하지 않는다
-pub fn hooked_argv(argv: &[String], settings_path: &str, mcp_path: &str) -> bool {
+pub fn hooked_argv(argv: &[String], settings_path: &str, mcp_path: &str, self_agent: Option<(&str, &str)>) -> bool {
     if argv.iter().filter(|element| *element == "--settings" || element.starts_with("--settings=")).count() != 1 {
         return false;
     }
     let Some(at) = argv.iter().position(|element| element == "--mcp-config") else { return false };
-    let self_agent = at == 4
-        && argv.get(1).is_some_and(|flag| flag == "--import")
-        && argv.get(2).is_some_and(|loader| loader.ends_with(SELF_AGENT_LOADER_TAIL))
-        && argv.get(3).is_some_and(|entry| entry.ends_with(SELF_AGENT_ENTRY_TAIL));
+    let self_agent = self_agent.is_some_and(|(loader, entry)| {
+        at == 4 && argv.get(1).is_some_and(|flag| flag == "--import") && argv.get(2).is_some_and(|given| given == loader) && argv.get(3).is_some_and(|given| given == entry)
+    });
     let slot_ok = at == 1 || (at == 2 && argv.get(1).is_some_and(|script| script.contains(CLAUDE_PACKAGE_MARK))) || self_agent;
     slot_ok && argv.get(at..at + 4).is_some_and(|four| four[1] == mcp_path && four[2] == "--settings" && four[3] == settings_path)
 }
