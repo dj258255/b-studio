@@ -14,7 +14,7 @@
  */
 import { encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';
-import type { AgentUsage } from './loop';
+import type { AgentUsage } from './agent-types';
 import { AGENT_LANGUAGE_INSTRUCTION } from './prompts';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
 

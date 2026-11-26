@@ -1,6 +1,6 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it, vi } from 'vitest';
-import type { ModelClient } from './loop';
+import type { ModelClient } from './agent-types';
 import {
   backendSupportsBoard,
   BOARD_SUPPORTED_BACKENDS,

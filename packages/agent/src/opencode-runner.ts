@@ -1,14 +1,15 @@
-import { execFile, spawn, type ChildProcessByStdio } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
 import type { Effort } from './anthropic-client';
-import { serialQueue } from './claude-code-runner';
+import { serialQueue } from './tool-schema';
 import type { EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage } from './loop';
+import type { AgentEvent, AgentResult, AgentUsage, RunAgentOptions, RunMetrics } from './agent-types';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
@@ -16,7 +17,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, 
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
-import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
+import { COMMAND, OPENCODE_MODEL_REQUIRED } from './opencode-auth';
 
 /** MCP 서버 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: `opencode models`·`debug config`) */
 const SERVER = 'b_studio';
@@ -24,8 +25,6 @@ const SERVER = 'b_studio';
 const TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 /** 화면 표기. 제품 이름을 그대로 쓰지 않는다(로컬 Claude Agent·Codex 러너와 같은 규칙) */
 const BACKEND = '로컬 OpenCode Agent';
-/** 실제 실행할 CLI. 이 PC에 설치된 `opencode`를 그대로 쓴다 */
-const COMMAND = 'opencode';
 /** 실행마다 만드는 작업 폴더(cwd)의 접두어 */
 const WORKDIR_PREFIX = 'b-studio-opencode-';
 /** 실행마다 만드는 임시 HOME의 접두어. opencode가 사용자 설정 대신 이 폴더를 읽는다 */
@@ -43,10 +42,6 @@ const PROVIDER_GATE = /free tier can only be used from within opencode/i;
 /** 무료 Zen 거절을 사람에게 설명하는 요약(한국어). 이 오류는 재시도하지 않는다 */
 export const OPENCODE_PROVIDER_GATE_MESSAGE =
   'OpenCode 무료(Zen) 모델은 내장 도구를 끈 b-studio 구성에서 거절됩니다. `opencode auth login`으로 제공자에 로그인하고 그 제공자의 모델을 고르세요';
-/** `listOpenCodeModels`가 무료 Zen 모델에 붙이는 쓸 수 없음 이유 */
-export const OPENCODE_FREE_UNUSABLE_REASON = '무료 Zen 티어는 b-studio 구성(내장 도구 끔)을 거절합니다';
-/** 모델을 고르지 않았을 때의 오류. 기본 모델을 추측하지 않는다(무료 Zen 모델을 기본값으로 두지 않는다) */
-export const OPENCODE_MODEL_REQUIRED = 'OpenCode 모델을 골라야 합니다. -m <provider/model> 또는 B_STUDIO_OPENCODE_MODEL로 지정하세요';
 
 /** 사용 한도 문구 판정. 실패 분류 기준은 이 한 곳에만 둔다(0단계: 종료 코드는 0/1/130뿐이고 한도·인증은 문구로 구분) */
 const USAGE_LIMIT = /usage[ _]limit|rate[ _]limit|too many requests|\b429\b|사용 한도/i;
@@ -702,64 +697,6 @@ function classifyFailure({ exitCode, message }: { exitCode: number; message: str
   return `OpenCode가 종료 코드 ${exitCode}로 끝났습니다`;
 }
 
-/**
- * 샌드박스를 띄우기 전에 이 PC의 OpenCode CLI가 있는지 확인한다.
- * `opencode --version`만 부르므로 모델 호출도, 사용량도 쓰지 않는다. 토큰·계정 정보는 읽지 않는다.
- */
-export async function preflightOpenCode({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<{ ok: true } | CliPreflightFailure> {
-  try {
-    await run(command, ['--version'], timeoutMs);
-    return { ok: true };
-  } catch (error) {
-    return cliPreflightFailure(`OpenCode CLI를 찾지 못했습니다. 터미널에서 "${command}"가 실행되는지 확인하세요.`, error);
-  }
-}
-
-export interface OpenCodeModel {
-  /** `provider/model` 형식의 전체 id */
-  id: string;
-  /** 마지막 `/` 뒤의 짧은 이름 */
-  name: string;
-  /** 제공자(`opencode` 등) */
-  provider: string;
-  /** 이름에 `free`가 들어가는 무료 모델인지 */
-  free: boolean;
-  /** b-studio가 이 모델을 쓸 수 있는지. 무료 Zen(`opencode` 제공자 + free)은 내장 도구를 끈 구성에서 거절돼 false다(3단계 실측) */
-  usable: boolean;
-  /** 쓸 수 없을 때의 이유 */
-  reason?: string;
-}
-
-/**
- * `opencode models` 텍스트를 파싱한다(순수 함수). 한 줄에 `provider/model` 하나이고 설명·기본 표시는 없다.
- * 무료 여부는 이름에 `free`가 들어가는지로만 본다(0단계 근거). `--verbose`의 JSON은 쓰지 않는다.
- * `usable`은 지금까지 확인한 사실만 반영한다: `opencode` 제공자의 무료 모델은 b-studio 구성에서 거절된다(3단계).
- */
-export function parseOpenCodeModels(text: string): OpenCodeModel[] {
-  const models: OpenCodeModel[] = [];
-  const seen = new Set<string>();
-  for (const raw of text.split('\n')) {
-    const id = raw.trim();
-    if (!id || seen.has(id)) continue;
-    // `provider/model` 형식만 받는다. 경고·안내 줄은 버린다
-    const match = /^([a-z0-9][\w.-]*)\/([\w.:@+-]+)$/i.exec(id);
-    if (!match) continue;
-    seen.add(id);
-    const provider = match[1]!;
-    const name = match[2]!;
-    const free = /free/i.test(name);
-    // 무료 Zen 모델은 내장 도구를 끈 b-studio 구성에서 거절되므로 쓸 수 없다
-    const gated = provider === 'opencode' && free;
-    models.push(gated ? { id, name, provider, free, usable: false, reason: OPENCODE_FREE_UNUSABLE_REASON } : { id, name, provider, free, usable: true });
-  }
-  return models;
-}
-
-/** 이 PC에서 쓸 수 있는 OpenCode 모델 목록. `opencode models` 텍스트를 파싱한다(모델 호출 없음) */
-export async function listOpenCodeModels({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<OpenCodeModel[]> {
-  return parseOpenCodeModels(await run(command, ['models'], timeoutMs));
-}
-
 function processEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
@@ -800,14 +737,6 @@ async function exists(target: string): Promise<boolean> {
   );
 }
 
-function run(command: string, args: string[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout);
-    });
-  });
-}
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
