@@ -2032,13 +2032,13 @@ describe('쓰던 요청 글 임시 저장(#1380)', () => {
 
   it('상한을 넘는 글은 저장하지 않고 알린다. 앞에 남긴 짧은 글도 같이 지운다', async () => {
     const drafts = memoryDrafts();
-    const ctx = setup([item('a')], { draftStore: drafts.store, draftMaxBytes: 2048 });
+    const ctx = setup([item('a')], { draftStore: drafts.store });
     ctx.io.type('\x02n');
     await tick();
     ctx.io.type('짧은 글');
     await tick(400);
     expect(drafts.kept.get('prompt:p1')).toBe('짧은 글');
-    ctx.io.type(`\x1b[200~${'a'.repeat(3000)}\x1b[201~`);
+    ctx.io.type(`\x1b[200~${'a'.repeat(70_000)}\x1b[201~`);
     await tick(400);
     expect(drafts.kept.has('prompt:p1')).toBe(false);
     expect(ctx.app.state.message).toContain('임시 저장하지 않습니다');

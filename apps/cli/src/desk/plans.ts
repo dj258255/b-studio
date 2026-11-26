@@ -7,7 +7,7 @@
  * 여기는 상태와 받은 키로 다음 상태와 할 일(effects)을 돌려주는 순수 함수와 그리기뿐이다. 스튜디오 API는 desk.ts가 부른다
  */
 import type { DeskState } from './keys';
-import { fit, fitAnsi, osc8, stringWidth, type Rect } from './screen';
+import { fit, fitAnsi, osc8, stringWidth, tailFit, type Rect } from './screen';
 import { backendLabel, compactTokens, gateStatus, totalTokens, type StatusBadge } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET, type Theme } from './theme';
 import type { DeskAccount, DeskItem, DeskProject, DeskUsage } from './types';
@@ -530,8 +530,7 @@ function formScreen(plans: PlansState, rect: Rect, theme: Theme): string[] {
   lines.push(' '.repeat(rect.w));
   if (form.step === 'request') {
     const head = '  요청> ';
-    let text = form.text;
-    while (text && stringWidth(head + text) > rect.w - 2) text = [...text].slice(1).join('');
+    const text = tailFit(form.text, rect.w - 2 - stringWidth(head));
     lines.push(fitAnsi(`${head}${fg(theme, 'text')}${text}${RESET}${form.sending ? '' : `${fg(theme, 'accent')}▏${RESET}`}`, rect.w));
     if (form.sending) lines.push(fit('  계획을 만드는 중… 스튜디오가 레인을 나누면 이 화면에 보입니다', rect.w));
   }

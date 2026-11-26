@@ -8,7 +8,7 @@ import { sessionDetailLines } from './session-detail';
 import { tightestLine, usageScreen } from './usage';
 import { isShellId, type DeskState } from './keys';
 import { fitHint } from './hints';
-import { computeLayout, fit, fitAnsi, placePanes, stringWidth, type Rect } from './screen';
+import { computeLayout, fit, fitAnsi, placePanes, stringWidth, tailFit, type Rect } from './screen';
 import { renderRuntime, runtimeHint } from './runtime';
 import { fleetsHint, renderFleets } from './fleets';
 import { changesHint, renderChanges } from './changes';
@@ -402,16 +402,14 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       const tail = prompt.sending ? `  ${fg(theme, 'yellow')}… 보내는 중${RESET}` : '';
       const tailWidth = prompt.sending ? stringWidth('  … 보내는 중') : 0;
       // 길면 끝부분을 보인다(커서가 화면 밖으로 나가지 않게)
-      let text = prompt.text;
-      while (text && stringWidth(head + text) + tailWidth > cols - 1) text = [...text].slice(1).join('');
+      const text = tailFit(prompt.text, cols - 1 - tailWidth - stringWidth(head));
       lines[rows - 1] = fitAnsi(head + text + tail, cols);
       if (!prompt.sending) cursor = { x: stringWidth(head + text), y: rows - 1 };
     }
   } else if (state.rename) {
     // 이름 입력 줄: 길면 끝부분을 보인다(커서가 화면 밖으로 나가지 않게)
     const head = ' 세션 이름(Enter 저장 · 비우면 지움 · Esc 그만둠)> ';
-    let text = state.rename.text;
-    while (text && stringWidth(head + text) > cols - 1) text = [...text].slice(1).join('');
+    const text = tailFit(state.rename.text, cols - 1 - stringWidth(head));
     lines.push(fit(head + text, cols));
     cursor = { x: stringWidth(head + text), y: rows - 1 };
   } else if (state.confirm) {
