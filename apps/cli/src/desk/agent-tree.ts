@@ -6,7 +6,7 @@
  * 범위는 고른 세션이 든 스페이스이고 Tab으로 전체 스페이스로 바꾼다. 키를 받아 다음 상태와 고른 세션을 돌려주는 순수 함수다(고른 세션을 칸에 여는 일은 keys.ts가 한다).
  * 이 화면은 보기만 한다: 서브에이전트를 멈추거나 조종하지 않는다
  */
-import { agentQuiet, agoText, clipWords, forText, nowLine, oneLine, spaceItems, spanText, subagentsOf } from './cards';
+import { agentQuiet, agoText, clipWords, forText, nowLine, oneLine, spaceItems, spanText, subagentsOf, toolLineLabel } from './cards';
 import type { DeskState } from './keys';
 import { fitAnsi, stringWidth, stripAnsi, type Rect } from './screen';
 import { backendLabel, deskSessions, headStatus, subagentName } from './sidebar';
@@ -144,7 +144,7 @@ function childLine(row: TreeRow, selected: boolean, width: number, theme: Theme,
   const rightWidth = right && stringWidth(right.text) > 0 ? stringWidth(right.text) + 1 : 0;
   const prefixWidth = 2 + 4 + 2;
   const room = Math.max(1, width - prefixWidth - rightWidth);
-  const doing = agent.state === 'working' ? (agent.tool ?? agent.activity) : undefined;
+  const doing = agent.state === 'working' ? (agent.tool ? toolLineLabel(agent.tool) : agent.activity) : undefined;
   const result = agent.state === 'done' && agent.result ? oneLine(agent.result) : undefined;
   const name = subagentName(agent) || '서브에이전트';
   // 종류와 맡긴 일은 도구·결과보다 먼저 자리를 잡는다

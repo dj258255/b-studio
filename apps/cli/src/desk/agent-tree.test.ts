@@ -50,8 +50,8 @@ describe('에이전트 나무 목록: 그림', () => {
     expect(parent).toContain('Claude');
     expect(parent).toContain('실행 pnpm test');
     expect(parent).toMatch(/작업 23분째$/);
-    expect(text.find((line) => line.includes('결제 흐름 찾기'))).toMatch(/├ ◐ Explore 결제 흐름 찾기 · Grep order .*4분째/);
-    expect(text.find((line) => line.includes('문서 찾기'))).toMatch(/└ ✓ Explore 문서 찾기 · 결과 README에 세 곳이 있습니다/);
+    expect(text.find((line) => line.includes('결제 흐름 찾기'))).toMatch(/├ ◐ 탐색 결제 흐름 찾기 · 찾기 order .*4분째/);
+    expect(text.find((line) => line.includes('문서 찾기'))).toMatch(/└ ✓ 탐색 문서 찾기 · 결과 README에 세 곳이 있습니다/);
   });
 
   it('3분 넘게 소식이 없는 서브에이전트는 카드와 같은 규칙으로 "N분째 소식 없음"을 적는다', () => {

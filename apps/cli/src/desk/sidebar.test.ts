@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { stringWidth, stripAnsi } from './screen';
-import { agentStatus, byUrgency, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, keepOrder, sessionTag, shortElapsed, sidebarRows, urgencyRank } from './sidebar';
-import type { DeskItem } from './types';
+import { agentStatus, byUrgency, compactTokens, deskSessions, deskSpaces, detailLines, gateStatus, keepOrder, sessionTag, shortElapsed, sidebarRows, subagentName, urgencyRank } from './sidebar';
+import type { DeskAgent, DeskItem } from './types';
 
 const base: DeskItem = { kind: 'session', id: 's1', title: '주문 목록', projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-22T00:00:00Z' };
 
@@ -136,8 +136,8 @@ describe('에이전트 내역과 범위(#843)', () => {
   it('서브에이전트마다 한 줄과 범위 두 줄', () => {
     const texts = detailLines(detailed).map((line) => line.text);
     expect(texts).toEqual([
-      '↳ Explore 작업 중 · 토큰 2,000 · 모델 요청 2회',
-      '↳ Plan 끝남 · 토큰 345 · 끝남 · 도구 3회',
+      '↳ 탐색 작업 중 · 토큰 2,000 · 모델 요청 2회',
+      '↳ 계획 끝남 · 토큰 345 · 끝남 · 도구 3회',
       '쓸 수 있는 곳 세션 작업 복사본 전체',
       '지키는 것 쓰기 전 검사 · 끝나면 검증',
     ]);
@@ -253,5 +253,22 @@ describe('사이드바 세션 줄의 상태 글(#935)', () => {
     expect(rows.find((row) => row.includes('결제 테스트'))).toMatch(/결제 테스트\s+권한 2 $/);
     expect(rows.find((row) => row.includes('주문 리팩터링'))).toMatch(/주문 리팩터링\s+23분 $/);
     for (const row of rows) expect(stringWidth(row)).toBe(36);
+  });
+});
+
+describe('서브에이전트 종류 이름', () => {
+  const agent = (patch: Partial<DeskAgent>): DeskAgent => ({ id: 'a', name: 'x', kind: 'subagent', state: 'working', tokens: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, ...patch });
+
+  it('CLI에 들어 있는 종류는 한국어로 적는다', () => {
+    expect(subagentName(agent({ type: 'Explore', description: '주문 호출부 찾기' }))).toBe('탐색 주문 호출부 찾기');
+    expect(subagentName(agent({ type: 'general-purpose' }))).toBe('범용');
+    expect(subagentName(agent({ type: 'Plan' }))).toBe('계획');
+  });
+
+  it('사람이 만든 종류와 모르는 종류는 원래 이름 그대로 둔다(대소문자가 다른 이름도 바꾸지 않는다)', () => {
+    expect(subagentName(agent({ type: 'test-runner' }))).toBe('test-runner');
+    expect(subagentName(agent({ type: 'explore' }))).toBe('explore');
+    expect(subagentName(agent({ type: undefined, name: 'Explore' }))).toBe('탐색');
+    expect(subagentName(agent({ type: '__proto__' }))).toBe('__proto__');
   });
 });
