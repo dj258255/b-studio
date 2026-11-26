@@ -77,7 +77,8 @@ function defaultAnthropic(): ModelProfile {
 function credentialsConfigured(model: ModelProfile): boolean {
   if (model.baseUrl) {
     const host = new URL(model.baseUrl).hostname;
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+    // URL.hostname은 IPv6를 괄호째 돌려준다(`[::1]`)
+    if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return true;
   }
   const name = model.apiKeyEnv ?? (model.provider === 'anthropic' ? 'ANTHROPIC_API_KEY' : model.provider === 'openai' ? 'OPENAI_API_KEY' : 'GOOGLE_API_KEY');
   if (process.env[name]?.trim()) return true;
