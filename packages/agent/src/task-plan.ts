@@ -4,7 +4,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { jsonrepair } from 'jsonrepair';
 import { z } from 'zod';
 import { decodeLoneSurrogates } from './lone-surrogates';
-import type { AgentUsage, ModelClient } from './loop';
+import type { AgentUsage, ModelClient } from './agent-types';
 
 /** Windows면 역슬래시도 구분자다. 판정은 Rust가 하고 플랫폼 값만 여기서 넘긴다 */
 const BACKSLASH_SEP = path.sep === '\\';

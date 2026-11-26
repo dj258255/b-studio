@@ -3,7 +3,7 @@ import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-stu
 import type { WorkflowPageStep } from '@b-studio/spec';
 import type { Browser, Page } from 'playwright-core';
 import { launchBrowser, restrictPageToOrigins, type OriginBlockEvent } from './browser-check';
-import type { AgentUsage, ModelClient } from './loop';
+import type { AgentUsage, ModelClient } from './agent-types';
 import { trackPendingRequests, type PendingRequests } from './pending-requests';
 
 type BetaTool = Anthropic.Beta.BetaTool;

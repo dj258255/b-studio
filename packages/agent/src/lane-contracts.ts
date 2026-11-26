@@ -20,7 +20,7 @@
 import { encodeNative, native } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import { z } from 'zod';
-import type { AgentUsage, ModelClient } from './loop';
+import type { AgentUsage, ModelClient } from './agent-types';
 import { parsePlannerReply, TaskPlanError, usageFromMessage, type ModelAsk, type TaskLane } from './task-plan';
 
 /** 한 계획에 받는 계약 수 상한 */

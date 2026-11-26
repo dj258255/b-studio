@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { ModelClient } from '../loop';
+import type { ModelClient } from '../agent-types';
 import { createHookRunner, type HookRunner } from './hooks';
 import { InputParser } from './input';
 import { connectMcpServers, type McpTools } from './mcp';

@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest';
 import type { BrowserPageResult, BrowserRunner } from './browser-check';
 import { readJsonPath, VerificationGate, type PageFetcher, type ServiceRequest } from './gate';
 import { Gen } from './differential-kit';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { Workspace } from './workspace';
 

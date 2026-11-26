@@ -6,7 +6,7 @@ import { runInBrowserNative } from './browser-check-native';
 import { ChangeTracker, rejectedChangeFeedback, type Fingerprinter } from './change-tracker';
 import { browserPageEvidence, finishEvidence, httpPageEvidence, type PageEvidenceContext } from './check-evidence';
 import { DECLARED_CHECKS_CHECK, describeDeclaredCheckChange, diffDeclaredChecks, hasDeclaredCheckChange, weakenedDeclarations, withDeclaredChecks } from './declared-checks';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runGateCheck, type GateHost } from './gate-check';

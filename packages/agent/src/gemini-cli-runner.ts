@@ -1,13 +1,14 @@
-import { execFile, spawn, type ChildProcessByStdio } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import type { Effort } from './anthropic-client';
-import { serialQueue } from './claude-code-runner';
+import { serialQueue } from './tool-schema';
 import type { EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage } from './loop';
+import type { AgentEvent, AgentResult, AgentUsage, RunAgentOptions, RunMetrics } from './agent-types';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
@@ -15,7 +16,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, 
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
-import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
+import { COMMAND } from './gemini-auth';
 
 /**
  * Gemini CLI(`gemini`, `@google/gemini-cli`) 러너.
@@ -53,8 +54,6 @@ const SERVER = 'b_studio';
 const TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 /** 화면 표기. 제품 이름을 그대로 쓰지 않는다(다른 로컬 구독 CLI 러너와 같은 규칙) */
 const BACKEND = '로컬 Gemini Agent';
-/** 실제 실행할 CLI. 이 PC에 설치된 `gemini`를 그대로 쓴다 */
-const COMMAND = 'gemini';
 /** 실행마다 만드는 작업 폴더(cwd)의 접두어 */
 const WORKDIR_PREFIX = 'b-studio-gemini-';
 /** 실행마다 만드는 임시 HOME의 접두어. gemini가 사용자 설정 대신 이 폴더를 읽는다 */
@@ -513,20 +512,6 @@ function classifyFailure({ exitCode, displayMessage, matchText, raw, parsed }: {
   return `Gemini CLI가 종료 코드 ${exitCode}로 끝났습니다`;
 }
 
-/**
- * 샌드박스를 띄우기 전에 이 PC의 Gemini CLI가 있는지 확인한다. `gemini --version`만 부르므로 모델 호출도, 사용량도 쓰지 않는다.
- * 로그인 여부까지 확인하는 공식 명령을 찾지 못해(0단계 한계), CLI 존재만 확인한다 — 설치 안 됨과 로그인 안 됨을
- * 구분하지 못할 수 있다(opencode 러너의 preflight와 같은 한계).
- */
-export async function preflightGemini({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<{ ok: true } | CliPreflightFailure> {
-  try {
-    await run(command, ['--version'], timeoutMs);
-    return { ok: true };
-  } catch (error) {
-    return cliPreflightFailure(`Gemini CLI를 찾지 못했습니다. 터미널에서 "${command}"가 실행되는지, 로그인돼 있는지 확인하세요.`, error);
-  }
-}
-
 function processEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
@@ -564,13 +549,3 @@ async function exists(target: string): Promise<boolean> {
     () => false,
   );
 }
-
-function run(command: string, args: string[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout);
-    });
-  });
-}
-

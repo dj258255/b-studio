@@ -2,7 +2,7 @@ import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import { zodShape } from './claude-code-runner';
+import { zodShape } from './tool-schema';
 import { fakeClaudeCli, type FakeCliLog } from './fake-claude-cli';
 import { runClaudeCodeExploreQa } from './explore-qa-claude-code';
 import { buildQaTools, type QaActionRecord } from './explore-qa';
