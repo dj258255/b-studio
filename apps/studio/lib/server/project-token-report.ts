@@ -30,6 +30,7 @@ import {
   type ProjectSessionKind,
   type ProjectTokenReport,
 } from '../project-token-types';
+import { summarizeRequests, totalsOfOutcomes, type RequestTotals } from '../request-outcomes';
 import type { StudioEvent } from '../studio-events';
 import { estimateCostUsd, matchTokenPrices, type TokenPrices } from '../token-types';
 import { StudioError } from './errors';
@@ -164,6 +165,9 @@ export function buildProjectTokenReport(input: {
   let lightRuns = 0;
   let trimmedTokensEstimated = 0;
   let requestsWithoutTime = 0;
+  // 한 번에 끝난 요청 집계(ADR-171). 세지 못한 세션이 있으면 합계를 내지 않고(0으로 보이지 않게) 그 사실을 알린다
+  const outcomeTotals: RequestTotals = { total: 0, oneShot: 0, redone: 0, asked: 0, reverted: 0, gateFailedRuns: 0, gateFailures: 0, turnLimited: 0 };
+  let outcomesUnknownSessions = 0;
 
   for (const session of input.sessions) {
     kindSessions.set(session.kind, (kindSessions.get(session.kind) ?? 0) + 1);
@@ -176,6 +180,7 @@ export function buildProjectTokenReport(input: {
     const calls = modelCallsOf(events);
     const turns = turnsOf(events);
     const efforts = effortOf(events);
+    const includedRuns = new Set<string>();
 
     for (const report of reports) {
       const at = timestamps.get(report.runId);
@@ -189,6 +194,7 @@ export function buildProjectTokenReport(input: {
         if (bounds.to && at > bounds.to) continue;
       }
 
+      includedRuns.add(report.runId);
       addUsage(totals, report.totals);
       modelCalls += calls.get(report.runId) ?? 0;
       // 모델별 내역이 있으면 그대로, 없으면 "(모름)"으로 묶는다(구독 CLI 러너는 모델별 토큰을 남기지 않는다)
@@ -248,6 +254,15 @@ export function buildProjectTokenReport(input: {
         result,
       });
     }
+
+    // 다시 시킴은 세션 전체 순서로 판정하고, 기간 안의 요청만 합계에 넣는다
+    try {
+      const outcomes = summarizeRequests(events).outcomes.filter((outcome) => includedRuns.has(outcome.runId));
+      const sum = totalsOfOutcomes(outcomes);
+      for (const key of Object.keys(outcomeTotals) as Array<keyof RequestTotals>) outcomeTotals[key] += sum[key];
+    } catch {
+      outcomesUnknownSessions += 1;
+    }
   }
 
   // 단일 단가만 있고 모델별 내역이 없는 실행은 모델 표의 비용 칸이 비므로, 그 단가로 채워 준다
@@ -269,6 +284,7 @@ export function buildProjectTokenReport(input: {
     };
   });
 
+  if (outcomesUnknownSessions > 0) notes.push(`세션 ${outcomesUnknownSessions}개는 기록을 읽지 못해 한 번에 끝난 요청을 세지 못했습니다`);
   if (requestsWithoutTime > 0) notes.push(`시각을 남기지 않은 실행 ${requestsWithoutTime}개는 기간 필터에서 뺐습니다`);
   if (usageByModel[UNKNOWN_MODEL]) notes.push(`모델별 내역을 남기지 않는 러너(구독 CLI 등)의 토큰은 "${UNKNOWN_MODEL}"으로 묶었습니다`);
   if (pricing.error) notes.push(pricing.error);
@@ -309,6 +325,7 @@ export function buildProjectTokenReport(input: {
         ? { trimmedCostUsd: (trimmedTokensEstimated / 1_000_000) * cacheReadPrices.prices.cacheReadPerM, trimmedCostModel: cacheReadPrices.model }
         : {}),
     },
+    ...(outcomesUnknownSessions === 0 ? { requestOutcomes: outcomeTotals } : {}),
     notes,
   };
 }
@@ -462,6 +479,11 @@ export function projectTokenMarkdown(report: ProjectTokenReport, options: { requ
   lines.push(`| 출력 | ${formatTokens(report.totals.outputTokens)} |`);
   lines.push(`| 환산 비용 | ${formatCost(report.estimatedCostUsd)}${report.estimatedCostUsd === undefined ? '' : ` (${priceSourceLabel(report.priceSource)})`} |`);
   lines.push(`| 요청 수 | ${formatTokens(report.requests.length)} |`);
+  lines.push(
+    `| 한 번에 끝난 요청 | ${
+      report.requestOutcomes === undefined ? '모름' : report.requestOutcomes.total === 0 ? '끝난 요청 없음' : `${report.requestOutcomes.oneShot}/${report.requestOutcomes.total} (많아야 이만큼, 기록에 남은 사실만 센 값)`
+    } |`,
+  );
   lines.push(`| 모델 호출 수 | ${formatTokens(report.modelCalls)} |`);
   lines.push(`| 캐시 적중률 | ${formatRatio(report.cacheHitRatio)} |`);
   lines.push('');
