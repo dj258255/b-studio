@@ -74,8 +74,8 @@ async function fakeProvider(file: string, content: string, call?: FakeCall | Fak
   return { server, baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}/v1`, auth, toolResults };
 }
 
-async function apiWorld(provider: FakeProvider, env: Record<string, string>): Promise<World> {
-  const world = await createWorld({ terminal: true, env: { B_STUDIO_MODE: 'api', ...env } });
+async function apiWorld(provider: FakeProvider, env: Record<string, string>, docker?: { logs?: string[] }): Promise<World> {
+  const world = await createWorld({ terminal: true, env: { B_STUDIO_MODE: 'api', ...env }, ...(docker ? { docker } : {}) });
   const registry = [
     {
       id: 'api-term-fake',
@@ -262,6 +262,45 @@ describe('API 모드 세션 터미널(이 컴퓨터 방식)의 자체 CLI', () =
       await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
     } finally {
       await rm(outsideFile, { force: true });
+      await driver.close();
+      await target.stop();
+      await new Promise<void>((resolve) => provider.server.close(() => resolve()));
+      await world.cleanup();
+    }
+  }, 240_000);
+
+  it('모델이 관문의 b-studio 도구(MCP)를 mcp__b-studio__ 이름으로 부르면 서버가 실행하고 결과가 모델에 돌아온다', async () => {
+    const marker = 'api-terminal-mcp-marker-4417';
+    const provider = await fakeProvider('', '', { name: 'mcp__b-studio__service_logs', args: { service: 'app', lines: 10 } });
+    const world = await apiWorld(provider, { [KEY_ENV]: KEY }, { logs: [marker] });
+    const target = await startNodeTarget(world);
+    const driver = new Driver(target.origin, world);
+    try {
+      const created = await driver.call('세션 만들기', 'POST', '/api/sessions', { projectId: world.projectId, backend: 'api', workspace: 'copy' });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const id = created.body.id as string;
+      await driver.subscribe(id);
+      const opened = await driver.call('터미널 열기', 'POST', `/api/sessions/${id}/terminal`, { action: 'open', cols: 100, rows: 30 });
+      expect(opened.status, JSON.stringify(opened.body)).toBeLessThan(300);
+      // 관문 폴더의 mcp.json은 600이고 토큰이 든다(자체 CLI가 이 파일로 붙는다)
+      const gateway = await driver.gatewayDir();
+      expect((await stat(path.join(gateway, 'mcp.json'))).mode & 0o777).toBe(0o600);
+      const paste = `\u001b[200~app 로그를 보여 주세요\u001b[201~\r`;
+      let started: Record<string, unknown> | undefined;
+      for (let attempt = 0; attempt < 40 && !started; attempt++) {
+        await driver.call('요청 붙여 넣기', 'POST', `/api/sessions/${id}/terminal`, { action: 'input', data: paste });
+        for (let wait = 0; wait < 30 && !started; wait++) {
+          started = driver.events.map((entry) => entry.event).find((event) => event.type === 'run_started');
+          if (!started) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (!started) throw new Error('붙여 넣은 요청으로 실행이 열리지 않았습니다');
+      const finished = await driver.waitFor('run_finished', (event) => event.type === 'run_finished' && event.runId === started.runId, 120_000);
+      expect(finished.status, JSON.stringify(finished)).toBe('done');
+      // 가짜 모델이 받은 도구 결과에 서버가 실행한 도구의 출력이 들어 있다(모델 → 자체 CLI → 관문의 MCP 서버 → 도구 → 되돌아옴)
+      expect(provider.toolResults.join('\n')).toContain(marker);
+      await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
+    } finally {
       await driver.close();
       await target.stop();
       await new Promise<void>((resolve) => provider.server.close(() => resolve()));

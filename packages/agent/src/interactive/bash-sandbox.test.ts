@@ -1,10 +1,10 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { buildBwrapArgs, buildSeatbeltProfile, planSandbox, sbplString, type BashSandboxOptions } from './bash-sandbox';
+import { buildBwrapArgs, bwrapPlan, buildSeatbeltProfile, planSandbox, removeEmptyPlaceholders, sbplString, type BashSandboxOptions } from './bash-sandbox';
 import { createTools } from './tools';
 
 const mac = process.platform === 'darwin';
@@ -294,6 +294,8 @@ describe('프로필·인자 만들기(어느 플랫폼에서나)', () => {
     expect(args[at('--tmpfs', path.join(realWork, '.git')) + 2]).toBe('--remount-ro');
     expect(at('--tmpfs', path.join(realTmp, 'b-studio-gateway-later'))).toBeGreaterThan(0);
     expect(at('--ro-bind', path.join(realWork, '.git'))).toBe(-1);
+    // 호스트에 새로 생길 자리 폴더가 계획에 담긴다(명령이 끝난 뒤 치우려고)
+    expect(bwrapPlan(work, { tmpDirs: [tmp], denyWrite: [missingGateway] }).placeholders).toEqual(expect.arrayContaining([path.join(realWork, '.git'), path.join(realTmp, 'b-studio-gateway-later')]));
     // 위쪽 폴더도 없는 거부 경로: 막을 수 없다
     expect(() => buildBwrapArgs(work, { tmpDirs: [tmp], denyWrite: [path.join(tmp, 'none', 'gw')] })).toThrow(/막을 수 없습니다/);
     // 쓸 수 있는 구역 밖의 없는 경로는 쓰기 자체가 막혀 있어 따로 덮지 않는다
@@ -328,5 +330,42 @@ describe('프로필·인자 만들기(어느 플랫폼에서나)', () => {
     expect(unsupported.kind).toBe('unsandboxed');
     const refused = planSandbox('true', '/', sandbox({ platform: 'linux' }));
     expect(['refused', 'unsandboxed']).toContain(refused.kind);
+  });
+});
+
+describe('bwrap이 남긴 빈 자리 폴더 치우기(진짜 bwrap 없이, 계획을 직접 정해 시험)', () => {
+  const fake = (placeholders: string[]) => ({ planOverride: (command: string): ReturnType<typeof planSandbox> => ({ kind: 'wrapped', tool: 'bwrap', command: '/bin/bash', args: ['-c', command], placeholders }) });
+  const exec = (command: string, placeholders: string[]) => createTools(work, { killGraceMs: 200, sandbox: fake(placeholders) }).execute('Bash', { command });
+
+  it('명령이 끝난 뒤에도 비어 있는 진짜 폴더면 치운다', async () => {
+    const ph = path.join(work, '.git');
+    await mkdir(ph); // bwrap이 마운트 지점으로 만들어 둔 빈 폴더를 흉내 낸다
+    expect((await exec('true', [ph])).isError).toBe(false);
+    expect(existsSync(ph)).toBe(false);
+    // 실패한 명령 뒤에도 치운다
+    await mkdir(ph);
+    expect((await exec('exit 3', [ph])).isError).toBe(true);
+    expect(existsSync(ph)).toBe(false);
+  });
+
+  it('명령이 그 자리에 무언가를 만들었거나 링크로 바꿨으면 건드리지 않는다', async () => {
+    const filled = path.join(work, 'filled');
+    await mkdir(filled);
+    await exec(`echo x > ${filled}/keep.txt`, [filled]);
+    expect(await readFile(path.join(filled, 'keep.txt'), 'utf8')).toBe('x\n');
+    const swapped = path.join(work, 'swapped');
+    await mkdir(swapped);
+    await exec(`rmdir ${swapped} && ln -s ${outside} ${swapped}`, [swapped]);
+    expect((await lstat(swapped)).isSymbolicLink()).toBe(true);
+    expect(existsSync(path.join(outside, 'secret.txt'))).toBe(true);
+    // 일반 파일로 바뀐 것도 그대로 둔다
+    const asFile = path.join(work, 'asfile');
+    await mkdir(asFile);
+    await exec(`rmdir ${asFile} && echo f > ${asFile}`, [asFile]);
+    expect(await readFile(asFile, 'utf8')).toBe('f\n');
+  });
+
+  it('이미 없는 자리·존재하지 않는 경로는 조용히 넘어간다', () => {
+    expect(() => removeEmptyPlaceholders([path.join(work, 'none', 'x')])).not.toThrow();
   });
 });

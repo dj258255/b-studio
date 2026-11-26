@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readdirSync, realpathSync, rmdirSync } from 'node:fs';
 import { homedir, platform as osPlatform, tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -23,10 +23,12 @@ export interface BashSandboxOptions {
   platform?: NodeJS.Platform;
   /** 시험이 바꾼다: 샌드박스를 끄면 true. 운영 코드는 쓰지 않는다 */
   disabled?: boolean;
+  /** 시험이 바꾼다: 계획을 직접 정한다(진짜 bwrap 없이 정리 동작을 시험한다). 운영 코드는 쓰지 않는다 */
+  planOverride?: (command: string, cwd: string) => SandboxPlan;
 }
 
 export type SandboxPlan =
-  | { kind: 'wrapped'; command: string; args: string[]; tool: 'sandbox-exec' | 'bwrap' }
+  | { kind: 'wrapped'; command: string; args: string[]; tool: 'sandbox-exec' | 'bwrap'; placeholders?: string[] }
   /** 이 플랫폼에는 쓸 수 있는 도구가 없어 감싸지 않는다(Linux만). notice를 화면과 도구 결과에 알린다 */
   | { kind: 'unsandboxed'; notice: string }
   /** 감쌀 수 없고 감싸지 않고 돌려서도 안 된다(macOS). 명령을 실행하지 않는다 */
@@ -184,7 +186,13 @@ export function buildSeatbeltProfile(cwd: string, options: BashSandboxOptions = 
 
 /** bwrap 인자(작업 명령 앞부분). 읽기 전용 루트 위에 쓸 곳만 다시 연결한다. 읽기 전용으로 덮을 곳은 마지막에 둔다(나중 마운트가 이긴다) */
 export function buildBwrapArgs(cwd: string, options: BashSandboxOptions = {}): string[] {
+  return bwrapPlan(cwd, options).args;
+}
+
+/** bwrap 인자와, 이 명령을 위해 호스트에 새로 생길 빈 자리 폴더(없는 거부 경로의 tmpfs 마운트 지점) */
+export function bwrapPlan(cwd: string, options: BashSandboxOptions = {}): { args: string[]; placeholders: string[] } {
   const plan = resolvePlan(cwd, options);
+  const placeholders: string[] = [];
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--die-with-parent', '--new-session'];
   const writableRoots = [...new Set([...plan.work, ...plan.tmp, ...plan.caches].map((entry) => realOf(entry)))].filter((dir) => existsSync(dir));
   // 쓸 곳 사이의 위쪽 폴더(옮겨지면 거부가 비켜 가는 폴더)도 마운트 지점으로 만든다. 마운트 지점은 이름을 바꾸거나 지울 수 없다(EBUSY). 얕은 것부터 연결한다
@@ -207,9 +215,25 @@ export function buildBwrapArgs(cwd: string, options: BashSandboxOptions = {}): s
       // 위쪽 폴더도 없으면 `mkdir -p`로 만들 수 있어 막을 수 없다: 실행하지 않는다
       if (!existsSync(path.dirname(dir))) throw new SandboxError(`거부할 경로(${dir})의 위쪽 폴더가 없어 막을 수 없습니다`);
       args.push('--tmpfs', dir, '--remount-ro', dir);
+      placeholders.push(dir);
     }
   }
-  return args;
+  return { args, placeholders };
+}
+
+/**
+ * 명령이 끝난 뒤 bwrap이 호스트에 만들어 둔 자리 폴더를 치운다: 여전히 비어 있는 진짜 폴더(링크 아님)일 때만. rmdir은 안의 것을 지우지 않는다.
+ * 명령이 그 자리에 무언가를 만들었거나 링크로 바꿨으면 건드리지 않는다(없던 `.git` 폴더가 남아 git이 깨진 저장소로 보는 것을 막는다)
+ */
+export function removeEmptyPlaceholders(paths: readonly string[]): void {
+  for (const target of paths) {
+    try {
+      if (!lstatSync(target).isDirectory()) continue;
+      rmdirSync(target);
+    } catch {
+      // 이미 없거나(ENOENT), 비어 있지 않다(ENOTEMPTY)
+    }
+  }
 }
 
 let seatbeltProbe: string | null | undefined;
@@ -244,6 +268,7 @@ export const UNSANDBOXED_NOTICE = '이 컴퓨터에서는 명령의 쓰기를 �
  * 그 밖의 플랫폼도 같다
  */
 export function planSandbox(command: string, cwd: string, options: BashSandboxOptions = {}): SandboxPlan {
+  if (options.planOverride) return options.planOverride(command, cwd);
   const os = options.platform ?? osPlatform();
   if (options.disabled) return { kind: 'unsandboxed', notice: UNSANDBOXED_NOTICE };
   if (os === 'darwin') {
@@ -260,7 +285,8 @@ export function planSandbox(command: string, cwd: string, options: BashSandboxOp
   }
   if (os === 'linux' && probeBwrap()) {
     try {
-      return { kind: 'wrapped', tool: 'bwrap', command: 'bwrap', args: [...buildBwrapArgs(cwd, options), '/bin/bash', '-c', command] };
+      const { args, placeholders } = bwrapPlan(cwd, options);
+      return { kind: 'wrapped', tool: 'bwrap', command: 'bwrap', args: [...args, '/bin/bash', '-c', command], placeholders };
     } catch (error) {
       if (error instanceof SandboxError) return { kind: 'refused', reason: `${error.message}. 명령을 실행하지 않았습니다` };
       throw error;

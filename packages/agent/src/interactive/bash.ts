@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
-import { planSandbox, type BashSandboxOptions } from './bash-sandbox';
+import { planSandbox, removeEmptyPlaceholders, type BashSandboxOptions } from './bash-sandbox';
 import type { ToolOutcome } from './tools';
 
 /** 명령 하나의 시간 기본값·상한(밀리초), 모아 두는 출력의 글자 상한, 종료 신호를 보낸 뒤 강제로 끊기까지의 유예 */
@@ -129,6 +129,8 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
         killGroup(pid, 'SIGKILL');
         liveGroups.delete(pid);
       }
+      // bwrap이 호스트에 남긴 빈 자리 폴더를 치운다(비어 있는 진짜 폴더일 때만)
+      if (plan.kind === 'wrapped' && plan.placeholders) removeEmptyPlaceholders(plan.placeholders);
       resolve(outcome);
     };
     const render = (head: string, isError: boolean): ToolOutcome => {

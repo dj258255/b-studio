@@ -4,7 +4,7 @@ import { parseArgs } from './settings';
 
 describe('parseArgs', () => {
   it('서버가 주는 꼴(--mcp-config M --settings S [--model] 요청)에서 설정·모델·첫 요청을 읽는다', () => {
-    expect(parseArgs(['--mcp-config', 'm.json', '--settings', 's.json', '--model=m-1', '요청: 고쳐 주세요'])).toEqual({ settingsFile: 's.json', model: 'm-1', firstRequest: '요청: 고쳐 주세요' });
+    expect(parseArgs(['--mcp-config', 'm.json', '--settings', 's.json', '--model=m-1', '요청: 고쳐 주세요'])).toEqual({ settingsFile: 's.json', model: 'm-1', mcpConfigs: ['m.json'], firstRequest: '요청: 고쳐 주세요' });
     expect(parseArgs(['--model', 'm-2', '--settings', 's.json'])).toEqual({ settingsFile: 's.json', model: 'm-2', firstRequest: undefined });
   });
 
@@ -12,6 +12,8 @@ describe('parseArgs', () => {
     expect(parseArgs(['--mcp-config', 'a.json', 'b.json', '--settings', 's.json', '요청']).firstRequest).toBe('요청');
     expect(parseArgs(['--mcp-config', 'a.json', 'b.json', '--settings', 's.json']).firstRequest).toBeUndefined();
     expect(parseArgs(['--mcp-config=a.json', '요청']).firstRequest).toBe('요청');
+    expect(parseArgs(['--mcp-config', 'a.json', 'b.json', '--settings', 's.json']).mcpConfigs).toEqual(['a.json', 'b.json']);
+    expect(parseArgs(['--settings', 's.json']).mcpConfigs).toBeUndefined();
   });
 });
 
