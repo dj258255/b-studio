@@ -739,3 +739,4 @@ export { runClaudeGatewayAgent, type ClaudeGatewayRunOptions } from './claude-ga
 export { serialQueue } from './tool-schema';
 export { parseArgs as parseInteractiveArgs } from './interactive/settings';
 export { runInteractiveSession, defaultSystemPrompt, MAX_MODEL_CALLS_PER_REQUEST, type InteractiveSessionOptions } from './interactive/session';
+export { planSandbox, buildSeatbeltProfile, type BashSandboxOptions } from './interactive/bash-sandbox';

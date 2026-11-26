@@ -106,6 +106,8 @@ export {
   findUnhookedCliByArgv,
   findUnhookedCliOrUnknown,
   processArgv,
+  processEnv,
+  hookedLaunch,
   ptyPid,
   hostBashRc,
   hostCliWrapper,

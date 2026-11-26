@@ -1,8 +1,10 @@
-import { readdir, readFile, stat, writeFile } from 'node:fs/promises';
+import { readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { planSandbox } from '@b-studio/agent';
 import { createWorld, Driver, startNodeTarget, type World } from './harness';
 
 /**
@@ -10,6 +12,9 @@ import { createWorld, Driver, startNodeTarget, type World } from './harness';
  * 서버는 진짜 studio 서버(Node), 터미널은 진짜 PTY와 진짜 `agent-tty` 프로세스, 모델은 이 시험 안의 가짜 OpenAI 호환 서버다.
  * 진짜 모델·claude·Docker·3000번 포트는 쓰지 않는다. 가짜 docker는 harness의 것이다.
  */
+
+/** 이 환경에서 Bash의 쓰기를 실제로 가둘 수 있는지 */
+const sandboxed = planSandbox('true', os.tmpdir()).kind === 'wrapped';
 
 const KEY_ENV = 'B_STUDIO_FAKE_API_TERMINAL_KEY';
 const KEY = 'sk-fake-api-terminal-secret';
@@ -19,7 +24,7 @@ interface FakeProvider {
   baseUrl: string;
   /** 받은 요청의 Authorization 머리글 */
   auth: string[];
-  /** 받은 요청에 든 도구 결과(role: tool)의 내용 */
+  /** 모델이 받은 도구 결과의 글(도구 호출 순서대로) */
   toolResults: string[];
 }
 
@@ -34,20 +39,32 @@ function send(response: ServerResponse, body: unknown): void {
 }
 
 /** 처음에는 Write 도구 호출을, 도구 결과가 오면 글로 답한다 */
-async function fakeProvider(file: string, content: string, call?: { name: string; args: Record<string, unknown> }): Promise<FakeProvider> {
+type FakeCall = { name: string; args: Record<string, unknown> | (() => Record<string, unknown>) };
+
+/** call이 배열의 배열이면 요청(사용자 글)마다 한 줄씩이다. 배열 하나는 첫 요청의 도구 호출들이다 */
+async function fakeProvider(file: string, content: string, call?: FakeCall | FakeCall[] | FakeCall[][]): Promise<FakeProvider> {
   const auth: string[] = [];
   const toolResults: string[] = [];
+  const scripts: FakeCall[][] = call === undefined ? [] : Array.isArray(call) ? (Array.isArray(call[0]) ? (call as FakeCall[][]) : [call as FakeCall[]]) : [[call]];
   const server = createServer(async (request, response) => {
     if (request.method === 'GET' && request.url?.startsWith('/v1/models/')) return send(response, { id: 'api-term-fake', object: 'model' });
     if (request.method !== 'POST' || request.url !== '/v1/chat/completions') return void response.writeHead(404).end('{}');
     auth.push(String(request.headers.authorization));
     const body = JSON.parse(await readBody(request)) as { messages?: Array<{ role?: string; content?: unknown }> };
-    for (const message of body.messages ?? []) if (message.role === 'tool') toolResults.push(typeof message.content === 'string' ? message.content : JSON.stringify(message.content));
-    if (!body.messages?.some((message) => message.role === 'tool')) {
+    const messages = body.messages ?? [];
+    const toolMessages = messages.filter((message) => message.role === 'tool');
+    if (toolMessages.length > 0) toolResults[toolMessages.length - 1] = String(toolMessages.at(-1)!.content);
+    // 몇 번째 요청(사용자 글)의 몇 번째 호출인지 정한다. 마지막 호출 뒤에는 글로 답한다
+    const lastUser = messages.map((message) => message.role).lastIndexOf('user');
+    const requestIndex = messages.filter((message) => message.role === 'user').length - 1;
+    const toolsSince = messages.slice(lastUser + 1).filter((message) => message.role === 'tool').length;
+    const step = scripts.length > 0 ? scripts[requestIndex]?.[toolsSince] : toolMessages.length === 0 ? { name: 'Write', args: { file_path: file, content } } : undefined;
+    if (step) {
+      const args = typeof step.args === 'function' ? step.args() : step.args;
       return send(response, {
         id: 'm1',
         model: 'api-term-fake',
-        choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: 'call-1', type: 'function', function: { name: call?.name ?? 'Write', arguments: JSON.stringify(call?.args ?? { file_path: file, content }) } }] } }],
+        choices: [{ finish_reason: 'tool_calls', message: { content: null, tool_calls: [{ id: `call-${toolMessages.length + 1}`, type: 'function', function: { name: step.name, arguments: JSON.stringify(args) } }] } }],
         usage: { prompt_tokens: 1000, completion_tokens: 100 },
       });
     }
@@ -185,6 +202,66 @@ describe('API 모드 세션 터미널(이 컴퓨터 방식)의 자체 CLI', () =
       expect(await readFile(path.join(workDir, 'notes/bash.txt'), 'utf8')).toBe('hi');
       await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
     } finally {
+      await driver.close();
+      await target.stop();
+      await new Promise<void>((resolve) => provider.server.close(() => resolve()));
+      await world.cleanup();
+    }
+  }, 240_000);
+
+  // 쓰기를 가두는 도구가 있는 환경에서만 돈다(macOS의 sandbox-exec, 쓸 수 있는 Linux의 bwrap). 없는 환경에서는 Bash가 관문 폴더를 고칠 수 있다
+  it.skipIf(!sandboxed)('모델의 Bash가 관문 폴더의 훅 스크립트와 작업 폴더 밖에 쓰려 하면 거절되고, 이어지는 쓰기 도구는 여전히 관문에 막힌다', async () => {
+    let gateway = '';
+    let workDir = '';
+    const outsideFile = path.join(os.homedir(), `.b-studio-sbx-pty-probe-${process.pid}`);
+    const provider = await fakeProvider('', '', [
+      [{ name: 'Bash', args: () => ({ command: `echo EVIL > ${gateway}/b-studio-hook.mjs; echo hook-status=$?; echo x > ${outsideFile}; echo outside-status=$?`, description: '관문 폴더에 쓰기' }) }],
+      // 두 번째 요청([읽기만])의 쓰기: 관문(훅 스크립트)이 살아 있으면 거절한다
+      [{ name: 'Write', args: () => ({ file_path: path.join(workDir, 'notes/late.txt'), content: 'late\n' }) }],
+    ]);
+    const world = await apiWorld(provider, { [KEY_ENV]: KEY });
+    const target = await startNodeTarget(world);
+    const driver = new Driver(target.origin, world);
+    try {
+      const created = await driver.call('세션 만들기', 'POST', '/api/sessions', { projectId: world.projectId, backend: 'api', workspace: 'copy' });
+      expect(created.status, JSON.stringify(created.body)).toBe(201);
+      const id = created.body.id as string;
+      await driver.subscribe(id);
+      const opened = await driver.call('터미널 열기', 'POST', `/api/sessions/${id}/terminal`, { action: 'open', cols: 100, rows: 30 });
+      expect(opened.status, JSON.stringify(opened.body)).toBeLessThan(300);
+      workDir = created.body.workDir as string;
+      gateway = await driver.gatewayDir();
+      const hookFile = path.join(gateway, 'b-studio-hook.mjs');
+      const before = await readFile(hookFile, 'utf8');
+      const paste = `\u001b[200~관문 폴더를 시험해 주세요\u001b[201~\r`;
+      let started: Record<string, unknown> | undefined;
+      for (let attempt = 0; attempt < 40 && !started; attempt++) {
+        await driver.call('요청 붙여 넣기', 'POST', `/api/sessions/${id}/terminal`, { action: 'input', data: paste });
+        for (let wait = 0; wait < 30 && !started; wait++) {
+          started = driver.events.map((entry) => entry.event).find((event) => event.type === 'run_started');
+          if (!started) await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      if (!started) throw new Error('붙여 넣은 요청으로 실행이 열리지 않았습니다');
+      await driver.waitFor('run_finished', (event) => event.type === 'run_finished' && event.runId === started.runId, 120_000);
+      // 모델이 받은 Bash 결과: 두 쓰기 모두 실패했다(쉘이 낸 상태 줄은 0이 아니다)
+      const bashResult = provider.toolResults[0] ?? '';
+      expect(bashResult, bashResult).toMatch(/hook-status=1/);
+      expect(bashResult, bashResult).toMatch(/outside-status=1/);
+      expect(bashResult).toMatch(/Operation not permitted|Read-only file system|Permission denied/);
+      // 훅 스크립트는 그대로이고, 홈에는 파일이 생기지 않았다
+      expect(await readFile(hookFile, 'utf8')).toBe(before);
+      expect(before).not.toContain('EVIL');
+      expect(await stat(outsideFile).then(() => true, () => false)).toBe(false);
+      // 이어서 읽기만 요청에서 쓰기 도구를 부른다: 훅 스크립트가 그대로라 쓰기 직전 훅이 거절하고 파일은 생기지 않는다
+      const second = `\u001b[200~[읽기만] notes/late.txt를 설명해 주세요\u001b[201~\r`;
+      await driver.call('두 번째 요청', 'POST', `/api/sessions/${id}/terminal`, { action: 'input', data: second });
+      await waitUntil('훅의 거절', async () => provider.toolResults.length, (count) => count >= 2, 60_000);
+      expect(provider.toolResults[1], provider.toolResults[1]).toContain('[b-studio]');
+      expect(await stat(path.join(workDir, 'notes/late.txt')).then(() => true, () => false)).toBe(false);
+      await driver.call('멈추기', 'DELETE', `/api/sessions/${id}`);
+    } finally {
+      await rm(outsideFile, { force: true });
       await driver.close();
       await target.stop();
       await new Promise<void>((resolve) => provider.server.close(() => resolve()));
