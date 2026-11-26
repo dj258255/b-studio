@@ -144,4 +144,24 @@ describe('기록 화면 그리기', () => {
     // 끝보다 더 굴려도 마지막 쪽에 멈춘다
     expect(recordsScrollLimit(state, { theme: DEFAULT_THEME, width: 60, height: 6, now: NOW })).toBe(4);
   });
+
+  it('토큰 보고서에 한 번에 끝난 요청을 "n/m"으로 보이고, 한쪽으로 치우친 값이라는 것을 적는다', () => {
+    const withOutcomes: RecordsReport = { ...report, requestOutcomes: { total: 3, oneShot: 2, redone: 1, asked: 0, reverted: 0, gateFailedRuns: 0, gateFailures: 0, turnLimited: 0 } };
+    const out = text({ ...openRecords(projects), tab: 'tokens', loading: false, report: withOutcomes });
+    expect(out).toContain('한 번에 끝난 요청 2/3');
+    expect(out).toContain('다시 손댄 요청 1건');
+    expect(out).toMatch(/많아야/);
+  });
+
+  it('집계 값이 없으면(옛 서버 등) 0이 아니라 "모름"으로 보인다', () => {
+    const out = text({ ...openRecords(projects), tab: 'tokens', loading: false, report });
+    expect(out).toContain('한 번에 끝난 요청: 모름');
+    expect(out).not.toContain('한 번에 끝난 요청 0/');
+  });
+
+  it('끝난 요청이 하나도 없으면 0/0이라 적지 않고 없다고 적는다', () => {
+    const none: RecordsReport = { ...report, requestOutcomes: { total: 0, oneShot: 0, redone: 0, asked: 0, reverted: 0, gateFailedRuns: 0, gateFailures: 0, turnLimited: 0 } };
+    const out = text({ ...openRecords(projects), tab: 'tokens', loading: false, report: none });
+    expect(out).toContain('한 번에 끝난 요청: 끝난 요청 없음');
+  });
 });
