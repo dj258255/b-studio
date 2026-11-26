@@ -3,6 +3,7 @@ import { StudioError } from '@/lib/server/errors';
 
 const mocks = vi.hoisted(() => ({
   authorizeSession: vi.fn<(id: string) => Promise<void>>(async () => {}),
+  authorizeSessionOwner: vi.fn(async () => {}),
   sessionTerminalTarget: vi.fn((): { sandboxId: string; root: string; projectId: string } => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' })),
   subscribeSessionTerminal: vi.fn<(id: string, listener: (message: unknown) => void) => () => void>(() => () => {}),
   recoverSessions: vi.fn(async () => {}),
@@ -10,7 +11,7 @@ const mocks = vi.hoisted(() => ({
   localToken: 'f'.repeat(64),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession }));
+vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession, authorizeSessionOwner: mocks.authorizeSessionOwner }));
 vi.mock('@/lib/server/sessions', () => ({ sessionTerminalTarget: mocks.sessionTerminalTarget, recoverSessions: mocks.recoverSessions }));
 vi.mock('@/lib/server/session-terminal', () => ({ subscribeSessionTerminal: mocks.subscribeSessionTerminal }));
 vi.mock('@/lib/server/local-token', () => ({
@@ -184,5 +185,17 @@ describe('묶음 통로의 쓰기와 정리(B4)', () => {
     expect(unsubscribe).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
     expect(stream.closed()).toBe(true);
+  });
+});
+
+// 묶음 통로는 보기만 한다. 관리자가 남의 터미널을 볼 수 있어야 하므로 만든 사람 검사를 걸지 않는다(#1353)
+describe('묶음 통로는 보기라서 만든 사람 검사를 하지 않는다', () => {
+  it('넓은 검사만 부른다', async () => {
+    mocks.authorizeSessionOwner.mockClear();
+    const response = await get('s1');
+    expect(response.status).toBe(200);
+    await collect(response);
+    expect(mocks.authorizeSession).toHaveBeenCalledWith('s1', 'kim');
+    expect(mocks.authorizeSessionOwner).not.toHaveBeenCalled();
   });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { authorizeSession } from '@/lib/server/access';
+import { authorizeSession, authorizeSessionOwner } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { closeSessionTerminal, MAX_TERMINAL_INPUT, openSessionTerminal, resizeSessionTerminal, subscribeSessionTerminal, writeSessionTerminal, type TerminalMessage } from '@/lib/server/session-terminal';
 import { sessionTerminalTarget } from '@/lib/server/sessions';
@@ -105,6 +105,8 @@ export async function GET(request: Request, context: RouteContext<'/api/sessions
 
 /**
  * 터미널을 열고, 입력을 보내고, 크기를 바꾸고, 닫는다. 컨테이너 안의 셸에 닿는 일이라 세션을 바꿀 수 있는 사람만 쓴다.
+ * 서버 방식에서 관리자는 남의 터미널을 닫을 수만 있다(#1353). 열기·입력·크기는 만든 사람만 한다 — 터미널이 만든 사람의 구독 로그인이 든 컨테이너에서 돌기 때문이다.
+ * 닫기만 예외로 두고 나머지는 모두 만든 사람 검사를 거친다(닫기가 아닌 action은 기본이 "움직임"이다)
  * 다른 출처에서 온 쓰기 요청은 앞단(proxy)이 거절한다
  */
 export async function POST(request: Request, context: RouteContext<'/api/sessions/[id]/terminal'>) {
@@ -116,6 +118,8 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const parsed = requestSchema.safeParse(await request.json().catch(() => undefined));
     if (!parsed.success) throw new StudioError(400, `터미널 요청이 올바르지 않습니다: ${parsed.error.issues[0]?.message ?? '형식 오류'}`);
     const body = parsed.data;
+
+    if (body.action !== 'close') await authorizeSessionOwner(id, user);
 
     switch (body.action) {
       case 'open':

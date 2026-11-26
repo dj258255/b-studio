@@ -3,11 +3,12 @@ import { StudioError } from '@/lib/server/errors';
 
 const mocks = vi.hoisted(() => ({
   authorizeSession: vi.fn(async () => {}),
+  authorizeSessionOwner: vi.fn(async () => {}),
   setTerminalCheckChanges: vi.fn((_id: string, allow: boolean) => allow),
   localToken: 'e'.repeat(64),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession }));
+vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession, authorizeSessionOwner: mocks.authorizeSessionOwner }));
 vi.mock('@/lib/server/sessions', () => ({ recoverSessions: async () => {}, setTerminalCheckChanges: mocks.setTerminalCheckChanges }));
 vi.mock('@/lib/server/local-token', () => ({
   LOCAL_TOKEN_COOKIE: 'b_studio_local',
@@ -45,5 +46,25 @@ describe('POST /api/sessions/[id]/check-changes (#916, ADR-164)', () => {
       throw new StudioError(404, '세션을 찾을 수 없습니다');
     });
     expect((await post({ allow: true })).status).toBe(404);
+  });
+
+  // 확인 선언 변경 허용은 터미널을 움직이는 일이다. 서버 방식에서 관리자는 남의 세션에 켜지 못한다(#1353)
+  it('만든 사람이 아니면(관리자 포함) 403이고 켜지지 않는다', async () => {
+    mocks.setTerminalCheckChanges.mockClear();
+    mocks.authorizeSessionOwner.mockImplementationOnce(async () => {
+      throw new StudioError(403, '이 세션의 터미널은 kim님만 움직일 수 있습니다');
+    });
+    expect((await post({ allow: true })).status).toBe(403);
+    mocks.authorizeSessionOwner.mockImplementationOnce(async () => {
+      throw new StudioError(403, '이 세션의 터미널은 kim님만 움직일 수 있습니다');
+    });
+    expect((await post({ allow: false })).status).toBe(403);
+    expect(mocks.setTerminalCheckChanges).not.toHaveBeenCalled();
+  });
+
+  it('만든 사람이면 사용자 이름으로 검사한 뒤 켠다', async () => {
+    mocks.authorizeSessionOwner.mockClear();
+    expect((await post({ allow: true })).status).toBe(200);
+    expect(mocks.authorizeSessionOwner).toHaveBeenCalledWith('s1', 'kim');
   });
 });
