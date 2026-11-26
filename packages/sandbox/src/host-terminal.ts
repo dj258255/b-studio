@@ -1,7 +1,8 @@
-import { readFile } from 'node:fs/promises';
+import { readFile, realpath } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { native } from './native';
+import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 import {
   AGENT_HOOK_EVENTS,
   AGENT_HOOK_SCRIPT,
@@ -61,9 +62,12 @@ export function shellQuote(value: string): string {
   return native.terminalShellQuote(value);
 }
 
-/** 터미널에서 띄우는 에이전트 CLI. 세션의 백엔드가 codex면 codex, 그 밖에는 claude다(#825) */
-export type HostCliKind = 'claude' | 'codex';
-const CLI_BIN_ENV: Record<HostCliKind, string> = { claude: 'B_STUDIO_CLAUDE_BIN', codex: 'B_STUDIO_CODEX_BIN' };
+/**
+ * 터미널에서 띄우는 에이전트 CLI. 세션의 백엔드가 codex면 codex, commandcode면 commandcode(실험, ADR-233), 그 밖에는 claude다(#825)
+ * commandcode는 훅을 설정 파일이 아니라 mod 파일(`--mod`)로 붙인다
+ */
+export type HostCliKind = 'claude' | 'codex' | 'commandcode';
+const CLI_BIN_ENV: Record<HostCliKind, string> = { claude: 'B_STUDIO_CLAUDE_BIN', codex: 'B_STUDIO_CODEX_BIN', commandcode: 'B_STUDIO_COMMANDCODE_BIN' };
 
 export interface HostCli {
   kind: HostCliKind;
@@ -146,12 +150,18 @@ async function statusLineIn(file: string): Promise<string | undefined> {
   }
 }
 
-/** CLI마다 계정 설정 폴더를 받는 환경 변수(#885) */
-export const ACCOUNT_DIR_ENV: Record<HostCliKind, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' };
+/** CLI마다 계정 설정 폴더를 받는 환경 변수(#885). commandcode는 기본 계정만 쓴다(계정 폴더를 정하는 변수를 모르는 채 내보내지 않는다) */
+export const ACCOUNT_DIR_ENV: Record<Exclude<HostCliKind, 'commandcode'>, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' };
+
+/** 계정 폴더 변수의 이름. 기본 계정만 쓰는 CLI(commandcode)는 없다 */
+export function accountDirEnvName(kind: HostCliKind): string | undefined {
+  return kind === 'commandcode' ? undefined : ACCOUNT_DIR_ENV[kind];
+}
 
 /** 감싸개에서 계정 폴더를 내보내는 줄. 기본 계정이면 없다 */
 function accountExport(kind: HostCliKind, configDir: string | undefined): string[] {
-  return configDir ? [`export ${ACCOUNT_DIR_ENV[kind]}=${shellQuote(configDir)}`] : [];
+  const name = accountDirEnvName(kind);
+  return configDir && name ? [`export ${name}=${shellQuote(configDir)}`] : [];
 }
 
 /**
@@ -176,9 +186,14 @@ export async function findHostCli(env: Record<string, string | undefined> = proc
       `이 컴퓨터에서 ${kind} CLI를 찾지 못했습니다`,
       kind === 'claude'
         ? 'claude를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CLAUDE_BIN에 절대 경로를 적습니다. B_STUDIO_TERMINAL=container로 띄우면 컨테이너 안에 설치해 씁니다'
-        : 'codex를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CODEX_BIN에 절대 경로를 적습니다',
+        : kind === 'commandcode'
+          ? 'commandcode를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_COMMANDCODE_BIN에 절대 경로를 적습니다'
+          : 'codex를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CODEX_BIN에 절대 경로를 적습니다',
     );
   }
+  // commandcode는 링크를 푼 진짜 파일로 띄운다: 감시는 프로세스 인자에 설치된 패키지 자리(/command-code/dist/)가 있는 것을 그 CLI로 본다.
+  // 링크 이름(`…/bin/commandcode`)으로 띄우면 node의 인자에 패키지 자리가 없어 감시가 CLI로 알아보지 못한다. 풀지 못하면 그대로 둔다
+  if (kind === 'commandcode') cliPath = await realpath(cliPath).catch(() => cliPath!);
   return { kind, cliPath, nodePath: process.execPath };
 }
 
@@ -285,6 +300,27 @@ export function hostCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 
   ].join('\n');
 }
 
+/** Command Code 감싸개가 mod 파일의 자리로 넘기는 인자. 감시(`hooked_launch`)가 이 정확한 자리(`<cli> --mod <M>`)를 본다 */
+export function commandCodeModPath(dir: string): string {
+  return path.join(dir, COMMAND_CODE_MOD_NAME);
+}
+
+/**
+ * Command Code 감싸개(ADR-233, 실험). 세션의 관문 폴더를 환경 변수로 알리고 `commandcode --mod <관문 폴더>/b-studio-mod.ts`로 부른다. 사용자가 준 인자는 그대로 뒤에 붙인다.
+ * 모델 고르기(`-m`·`--model`)와 권한 방식(`--permission-mode`·`--yolo`)은 붙이지 않는다: 기본 모델로 뜨고, TUI의 권한 창은 Claude 터미널과 같이 사람이 답한다.
+ * `--mod`는 인자의 맨 앞에 둔다. 감시가 이 정확한 자리만 붙은 것으로 본다(사용자가 `--mod`를 더 주거나 `--safe-mode`를 주면 붙지 않은 것이다).
+ * 토큰은 여기 없다. mod가 관문 폴더의 주소 파일에서 읽는다
+ */
+export function hostCommandCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
+  return [
+    '#!/bin/sh',
+    '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
+    `export ${COMMAND_CODE_GATEWAY_DIR_ENV}=${shellQuote(dir)}`,
+    `exec ${shellQuote(cli.cliPath)} --mod ${shellQuote(commandCodeModPath(dir))} "$@"`,
+    '',
+  ].join('\n');
+}
+
 /**
  * 첫 요청(#836). 터미널을 열 때 받은 첫 요청 글을 CLI의 실행 인자로 넘긴다. 키 입력(붙여 넣기 + Enter)으로 넣지 않는다:
  * CLI가 시작하며 묻는 창(폴더 신뢰, 훅 신뢰, 업데이트)이 뜨면 그 글과 Enter가 사람 대신 그 창의 답이 된다.
@@ -361,6 +397,16 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
   };
   const cliPath = hostCliPath(dir, cli);
   const addressFile = file(`${JSON.stringify({ url: address.hookUrl, token: address.hookToken })}\n`);
+  if (cli.kind === 'commandcode') {
+    return {
+      // 훅은 mod 파일이 부른다. 훅 스크립트는 터미널을 열기 전에 관문에 닿는지 묻는 데만 쓴다(probeHostGateway)
+      [COMMAND_CODE_MOD_NAME]: file(COMMAND_CODE_MOD),
+      [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
+      [GATEWAY_FILE_NAME]: addressFile,
+      [path.join(WRAPPER_DIR, 'commandcode')]: { content: hostCommandCodeWrapper(dir, cli), mode: 0o700 },
+      ...shell,
+    };
+  }
   if (cli.kind === 'codex') {
     return {
       [CODEX_HOOK_SCRIPT_ENTRY]: file(CODEX_HOOK_SCRIPT),
@@ -547,10 +593,17 @@ export function findUnhookedCliByArgv(
   for (const entry of processes) if (!byPid.has(entry.pid)) byPid.set(entry.pid, entry);
   // 감싸개가 `--mcp-config <관문 폴더>/mcp.json --settings <관문 폴더>/settings.json`을 붙인다: 두 파일은 같은 폴더에 있다
   const mcpPath = path.join(path.dirname(expected.settingsPath), MCP_FILE);
+  // commandcode는 `--mod <관문 폴더>/b-studio-mod.ts`다. 같은 폴더의 mod 파일이 아니거나 `--safe-mode`가 있으면 붙지 않은 것이다(판정은 Rust 코어)
+  const modPath = commandCodeModPath(path.dirname(expected.settingsPath));
   const found: ProcessEntry[] = [];
   for (const pid of pids) {
     const argv = readArgv(pid);
     if (argv === null) continue;
+    if (kind === 'commandcode') {
+      // 환경은 읽지 않는다: 이 갈래는 인자만 본다(null은 "환경을 읽지 못함"이지만 commandcode의 판정은 환경을 쓰지 않는다)
+      if (!native.terminalHookedLaunch(kind, argv, null, modPath)) found.push(byPid.get(pid)!);
+      continue;
+    }
     if (!native.terminalHookedArgv(argv, expected.settingsPath, mcpPath, expected.selfAgent?.loader ?? null, expected.selfAgent?.entry ?? null)) found.push(byPid.get(pid)!);
   }
   return found;
@@ -693,6 +746,8 @@ export async function openHostTerminal({
   spawnPty?: SpawnHostPty;
 }): Promise<AgentTerminal & { pid: number | undefined }> {
   const { cols, rows } = clampTerminalSize(size);
+  // Command Code는 기본 모델로만 띄운다(모델 고르기 인자를 넘기지 않는다). 모델이 오면 조용히 무시하지 않고 거절한다
+  if (cli === 'commandcode' && model !== undefined) throw new SandboxError('Command Code 터미널은 모델을 고르지 않습니다', '기본 모델로만 띄웁니다(-m·--model을 넘기지 않는다)');
   const allowedAccountEnv = new Set(Object.values(ACCOUNT_DIR_ENV));
   for (const name of Object.keys(accountEnv)) {
     if (!allowedAccountEnv.has(name)) throw new SandboxError('계정 환경에 쓸 수 없는 이름이 있습니다', `${name} — ${[...allowedAccountEnv].join('·')}만 받습니다`);

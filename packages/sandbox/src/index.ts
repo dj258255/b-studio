@@ -1,4 +1,5 @@
 export * from './types';
+export { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 export * from './errors';
 export * from './readiness';
 export { stripAnsi } from './ansi';
@@ -115,6 +116,9 @@ export {
   hostBashRc,
   hostCliWrapper,
   hostCodexWrapper,
+  hostCommandCodeWrapper,
+  commandCodeModPath,
+  accountDirEnvName,
   hostGatewayFiles,
   hostGatewaySettings,
   hostShellLaunch,

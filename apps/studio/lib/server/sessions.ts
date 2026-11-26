@@ -309,7 +309,7 @@ import {
   type RestoreReason,
 } from './session-git-realign';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
-import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
+import { classifyPrompt, isReadOnlyPrompt, isReadToolFor, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
 import {
   decideAfterCheckpoint,
@@ -353,7 +353,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { walkFiles } from './code-files';
@@ -7422,6 +7422,11 @@ export function sessionTerminalTarget(id: string): {
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
+  // Command Code 세션은 이 컴퓨터 방식 + 실험 스위치에서만 띄운다. 아니면 claude를 대신 띄우지 않고 까닭을 알린다(ADR-233)
+  if (sessionBackend(session.snapshot) === 'commandcode') {
+    const refused = commandCodeTerminalReason(sessionTerminalMode());
+    if (refused) throw new StudioError(409, refused);
+  }
   // 서버가 작업 폴더에 쓰고 판정하는 동안에는 열지 않는다. 열면 CLI·사람이 같은 폴더에 쓰고, CLI의 훅이 서버가 연 실행에 붙는다(ADR-224)
   if (session.serverApplying === true) throw new StudioError(409, '서버가 이 세션에 변경을 쓰고 검증하는 중이라 터미널을 열 수 없습니다. 끝난 뒤 다시 여세요');
   // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
@@ -7624,13 +7629,19 @@ function noteTerminalConversation(id: string, conversation: string): void {
  * 컨테이너 방식은 컨테이너에 claude만 깐다
  */
 function terminalCliKind(session: Session): HostCliKind {
-  return sessionTerminalMode() === 'host' && sessionBackend(session.snapshot) === 'codex' ? 'codex' : 'claude';
+  if (sessionTerminalMode() !== 'host') return 'claude';
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'codex') return 'codex';
+  // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
+  if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';
+  return 'claude';
 }
 
 /** 터미널 실행을 실행 기록에 남길 때의 백엔드 이름 */
 function terminalRunBackend(session: Session): SessionMode {
   if (selfAgentTerminal(session)) return 'api';
-  return terminalCliKind(session) === 'codex' ? 'codex' : 'claude-code';
+  const cli = terminalCliKind(session);
+  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -8908,7 +8919,8 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
   noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now(), activityRedactor(session));
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`). 이름 대조는 코어가 한다(ADR-215)
-  const readTool = isReadTool(tool);
+  // 읽기 도구 표는 그 CLI의 것이다(Command Code의 `read_file`은 claude의 표에 없다). 모르는 이름은 바꾸는 도구다
+  const readTool = isReadToolFor(terminalCliKind(session), tool);
   if (readTool) return {};
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다

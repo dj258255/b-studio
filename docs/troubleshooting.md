@@ -8282,3 +8282,37 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - 고치기 전에는 고친 시험 넷이 실패했다(`expected undefined to match object [ { id: 'a1', state: 'done', … } ]` 등). 변이 일곱 가지(요청마다 지움, 영영 안 지움, 경계, 작업 중인 것도 지움, 밀어내지 않음, 가장 최근 것을 밀어냄, 밀어낼 때 기록을 남김)가 각각 시험을 실패시켰다.
 - 고친 뒤 같은 실측을 한 번 더 돌렸다. 서브에이전트의 기록이 끝난 뒤에도 세션을 멈출 때까지 남았다.
 - 10분은 재서 정한 값이 아니다. 방금 끝난 것을 들여다볼 시간으로 잡았다.
+
+
+## 285. Command Code 세션 터미널의 파일 도구가 경로를 꺼내지 못하면 카드의 쓰기 범위 검사를 지나갔음 — 허용 목록에서 모르는 값을 빈 목록으로 읽었다
+
+### 증상
+
+- Command Code를 이 컴퓨터 방식 터미널에서 돌리는 단계(#1424)에서 쓰기 직전 훅의 시험을 쓰다가 같은 시험을 공통 단계(#1393)의 경로 추출에 돌렸다. 작업 카드가 있는 세션에서 `write_file`·`edit_file`의 입력에 `file_path`·`filePath`·`path`가 하나도 없거나(글이 아닌 값, 빈 글, 배열) 입력 자체가 객체가 아니면, 경로 추출이 빈 목록을 돌려주어 도구가 통과했다. 트러블슈팅 283과 같은 모양이다. 그때는 패치 도구만 고쳤고 이 갈래의 파일 도구는 닿지 않았다(아직 세션 만들기에서 열리지 않았다).
+
+### 원인
+
+- 새 갈래(commandcode·gemini)의 경로 추출은 알려진 열쇠를 모두 모으고 하나도 없으면 빈 목록이었다. 빈 목록은 "바꾸는 파일 없음"이라 쓰기 범위(허용 목록)의 반복문이 한 번도 돌지 않았다. 셸 도구처럼 경로가 없는 도구와, 경로를 꺼내지 못한 파일 도구를 같은 값으로 읽었다.
+
+### 해결
+
+- Command Code의 파일 도구(`write_file`·`edit_file`, 설치된 v1.91.1의 도구 정의에서 이름을 확인했다)는 경로를 하나도 꺼내지 못하면, 입력이 객체가 아니어도, `null`(알 수 없음)이다. 쓰기 범위 검사는 `null`을 범위 밖으로 막는다. `shell_command`·`read_file`·`agent`처럼 경로가 없는 도구는 그대로 빈 목록이다(턴 끝 검사가 맡는다). gemini의 같은 이름 도구는 바꾸지 않았다(gemini는 이 단계에 없다).
+- 고치기 전에는 `session-terminal-tool-paths.test.ts`의 새 시험이 `expected [] to be null`로 실패했다. 해당 줄을 지우는 변이를 넣으면 그 시험과 `sessions-terminal-commandcode.test.ts`의 "경로를 꺼내지 못한 쓰기 도구" 시험이 다시 실패한다.
+- 다른 이름의 파일 도구(Command Code가 나중에 더하는 것)는 이 표에 없어 빈 목록으로 읽힌다. 새 파일 도구가 생기면 `COMMAND_CODE_FILE_TOOLS`에 더해야 한다. 이름 표에 없는 쓰기 도구를 자동으로 알아보는 길은 없다.
+
+
+## 286. 쓰기 직전 판정이 읽기 도구를 Claude Code의 표로만 읽었음 — Command Code의 읽기 도구가 모두 "바꾸는 도구"로 취급되어 실행을 열었다
+
+### 증상
+
+- Command Code 터미널의 쓰기 직전 훅을 잇다가 코드를 읽고 찾았다(실제 세션에서 본 것이 아니다). 판정이 Command Code의 읽기 도구(`read_file`·`read_directory`·`grep`)를 읽기 도구로 알아보지 못하면 읽기만 해도 실행을 열고 샌드박스를 켜고 변경 전 기준을 잡는다. 아래 변이로 그 동작을 시험에서 확인했다.
+
+### 원인
+
+- `terminalToolDecision`이 `isReadTool`(Claude와 Codex의 표)로만 읽기 도구를 가렸다. 공통 단계(#1393)가 갈래별 표(`isReadToolFor`, `COMMAND_CODE_READ_TOOLS`)를 만들었지만 이 자리는 쓰지 않았다. 갈래별 표 자체도 추정 이름(`read_multiple_files`·`list_dir`)이었고 실제 도구인 `read_directory`가 빠져 있었다.
+
+### 해결
+
+- 판정이 그 세션의 CLI 갈래의 표(`isReadToolFor(terminalCliKind(session), tool)`)를 읽는다. Command Code 표는 설치된 v1.91.1의 도구 정의에서 이름을 확인한 것만 둔다(`read_file`·`read_directory`·`grep`·`glob`·`web_search`·`web_fetch`·`todo_write`·`ask_user_question`). 표에 없는 이름은 바꾸는 도구라 닫는 쪽으로만 틀린다.
+- 고치기 전에는 Rust 시험(`command_code_read_tools_are_only_the_names_checked_in_the_installed_package`)이 `read_directory`에서 실패했다. 판정을 Claude의 표로 되돌리는 변이를 넣으면 `sessions-terminal-commandcode.test.ts`의 읽기 도구 시험(`run_started`가 열림)이 실패한다.
+- 확인하지 못한 것: 이 표의 도구가 모두 파일을 바꾸지 않는다는 것은 도구 설명과 이름으로만 봤다(`todo_write`는 세션의 할 일 목록을 바꾼다. 작업 폴더의 파일이 아니다). 실제 세션에서 도구마다 불러 보지 않았다.

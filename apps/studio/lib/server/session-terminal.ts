@@ -8,7 +8,7 @@ import {
   expectedHostGatewayFiles,
   firstPromptArg,
   hostCliPath,
-  ACCOUNT_DIR_ENV,
+  accountDirEnvName,
   findHostCli,
   findUnhookedCliByArgv,
   userStatusLineCommand,
@@ -36,7 +36,7 @@ import {
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
-import { resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { commandCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
 import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
 
 /**
@@ -73,11 +73,13 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 }
 
 /**
- * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다
+ * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다.
+ * Command Code는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다(ADR-233)
  * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex·api가 아니면 claude를 띄운다 — 컨테이너 방식 codex·api를 받으면 엉뚱한 CLI가 뜬다).
  * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
  */
 export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
+  if (backend === 'commandcode') return commandCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
   return backend === 'claude-code' || ((backend === 'codex' || backend === 'api') && sessionTerminalMode(env) === 'host');
 }
 
@@ -280,7 +282,8 @@ const hostGateways = (gatewayStore.__bStudioHostGateways ??= new Map());
 
 /** 관문을 쓸 때 기억한 계정 폴더를 PTY 환경에도 둔다(#885). 감싸개가 같은 값을 CLI에 넘긴다 */
 function hostAccountEnv(cli: HostCli | undefined): Record<string, string> {
-  return cli?.configDir ? { [ACCOUNT_DIR_ENV[cli.kind]]: cli.configDir } : {};
+  const name = cli ? accountDirEnvName(cli.kind) : undefined;
+  return cli?.configDir && name ? { [name]: cli.configDir } : {};
 }
 
 /**
@@ -310,6 +313,8 @@ const HOST_BACKEND: TerminalBackend = {
     // API 모드 세션은 이 컴퓨터에 깔린 CLI가 아니라 자체 CLI를 띄운다. 계정 폴더·사용자 상태 줄은 claude의 것이라 쓰지 않는다
     const self = await target.selfAgent?.();
     const configDir = self ? undefined : await target.accountDir?.();
+    // Command Code는 기본 계정만 쓴다. 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다
+    if (target.cli === 'commandcode' && configDir) throw new StudioError(409, 'Command Code 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
     let cli: HostCli;
     if (self) {
       // cliPath는 관문 폴더를 안 뒤에 실행기 경로로 정해진다(hostCliPath). 감시는 그 경로를 CLI의 이름으로 본다

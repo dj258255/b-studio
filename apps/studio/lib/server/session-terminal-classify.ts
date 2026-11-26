@@ -54,6 +54,8 @@ export type TerminalToolKind = 'claude' | 'codex' | 'commandcode' | 'opencode' |
 
 /** OpenCode가 파일을 바꾸는 도구: 입력에 `filePath`가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const OPENCODE_FILE_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'multiedit']);
+/** Command Code가 파일을 바꾸는 도구(설치된 v1.91.1의 도구 정의에서 확인, ADR-233): 입력에 경로(`file_path`·`filePath`·`path`)가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
+const COMMAND_CODE_FILE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file']);
 /** 패치 본문을 받는 도구 */
 const PATCH_TOOLS: ReadonlySet<string> = new Set(['apply_patch', 'patch']);
 /** 우리가 아는 패치 줄: 파일 머리글(경로를 낸다)과 그 밖의 표시 */
@@ -87,7 +89,8 @@ function strictPatchPaths(patch: unknown): string[] | null {
  * 허용 목록(카드의 쓰기 범위)에 넣을 값이라 null을 빈 목록처럼 통과시키지 않는다: 부르는 쪽이 범위 밖으로 막는다.
  * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(엄격하게 읽고 모르면 null)
  * - opencode: `filePath`(edit·write·multiedit은 없으면 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
- * - commandcode·gemini: 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null
+ * - commandcode·gemini: 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null.
+ *   commandcode의 파일 도구(`write_file`·`edit_file`)는 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 셸 도구처럼 경로가 없는 도구는 빈 목록이다
  */
 export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, input: unknown): string[] | null {
   if (kind === 'claude' || kind === 'codex') {
@@ -110,7 +113,7 @@ export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, inpu
     if (kind === 'opencode') return strictPatchPaths(record.patchText);
     return strictPatchPaths(record.patchText ?? record.command);
   }
-  if (!record) return OPENCODE_FILE_TOOLS.has(tool) && kind === 'opencode' ? null : [];
+  if (!record) return (OPENCODE_FILE_TOOLS.has(tool) && kind === 'opencode') || (COMMAND_CODE_FILE_TOOLS.has(tool) && kind === 'commandcode') ? null : [];
   if (kind === 'opencode') {
     const value = record.filePath;
     if (typeof value === 'string' && value.trim() !== '') return [value];
@@ -121,5 +124,7 @@ export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, inpu
     const value = record[key];
     if (typeof value === 'string' && value.trim() !== '') paths.push(value);
   }
+  // 경로를 하나도 꺼내지 못한 파일 도구는 어느 파일을 바꾸는지 알 수 없다. 빈 목록(바꾸는 파일 없음)으로 읽으면 허용 목록(카드의 쓰기 범위)이 열린다
+  if (paths.length === 0 && kind === 'commandcode' && COMMAND_CODE_FILE_TOOLS.has(tool)) return null;
   return paths;
 }

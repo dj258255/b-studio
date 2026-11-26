@@ -652,7 +652,25 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(isTerminalRunnableBackend('codex', host)).toBe(true);
     expect(isTerminalRunnableBackend('codex', container)).toBe(false);
     expect(isTerminalRunnableBackend('claude-code', container)).toBe(true);
+    // commandcode는 실험이라 스위치 없이는 터미널로 돌리지 않는다(ADR-233)
     expect(isTerminalRunnableBackend('commandcode', host)).toBe(false);
+  });
+
+  it('commandcode는 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 터미널로 돌릴 수 있다. 컨테이너 방식이면 스위치가 켜져도 거절한다', () => {
+    const on = { B_STUDIO_EXPERIMENTAL: '1' };
+    expect(isTerminalRunnableBackend('commandcode', { ...host, ...on })).toBe(true);
+    expect(isTerminalRunnableBackend('commandcode', { ...container, ...on })).toBe(false);
+    expect(isTerminalRunnableBackend('commandcode', { B_STUDIO_EXPERIMENTAL: '1' })).toBe(true);
+    expect(isTerminalRunnableBackend('commandcode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
+    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
+    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
+    // 다른 새 갈래는 열지 않는다
+    for (const backend of ['opencode', 'gemini']) expect(isTerminalRunnableBackend(backend, { ...host, ...on }), backend).toBe(false);
+  });
+
+  it('commandcode 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {
+    const address2: AgentGatewayAddress = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
+    await expect(terminalBackend('host').prepare({ ...target, cli: 'commandcode', accountDir: async () => '/home/kim/.commandcode-2' }, address2)).rejects.toThrow('기본 계정');
   });
 
   it('AI 리뷰의 고침은 터미널을 쓸 수 있으면 터미널, 아니면 채팅식이다. api는 키가 있을 때만 터미널이다', () => {

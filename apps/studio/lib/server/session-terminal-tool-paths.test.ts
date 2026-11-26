@@ -74,6 +74,26 @@ describe('terminalToolFilePaths', () => {
   });
 });
 
+describe('commandcode의 파일 도구는 경로를 꺼내지 못하면 알 수 없음(null)이다 (ADR-233)', () => {
+  it('write_file·edit_file에 경로 키가 없거나 글이 아니거나 비어 있으면 null이다. 모르는 값을 빈 목록(범위 안)으로 읽지 않는다', () => {
+    for (const tool of ['write_file', 'edit_file']) {
+      for (const input of [{ content: 'x' }, {}, { file_path: 5 }, { file_path: '' }, { file_path: '   ' }, { file_path: ['/w/a.ts'] }, { path: null }, null, 'text', undefined, [1]]) {
+        expect(terminalToolFilePaths('commandcode', tool, input), `${tool} ${JSON.stringify(input)}`).toBeNull();
+      }
+    }
+  });
+
+  it('대조: 경로를 꺼낼 수 있으면 그 경로를 내고, 파일 도구가 아닌 도구는 경로가 없어도 빈 목록이다(턴 끝 검사가 맡는다)', () => {
+    expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: '/w/a.ts', content: 'x' })).toEqual(['/w/a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { path: '/w/a.ts' })).toEqual(['/w/a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'shell_command', { command: 'ls' })).toEqual([]);
+    expect(terminalToolFilePaths('commandcode', 'read_file', {})).toEqual([]);
+    expect(terminalToolFilePaths('commandcode', 'agent', { prompt: 'x' })).toEqual([]);
+    // 다른 갈래의 같은 이름 도구는 이 규칙을 받지 않는다(gemini의 write_file은 지금 그대로다)
+    expect(terminalToolFilePaths('gemini', 'write_file', { content: 'x' })).toEqual([]);
+  });
+});
+
 describe('패치 도구는 갈래와 상관없이 같은 엄격한 읽기를 쓴다', () => {
   const wrap = (...lines: string[]): string => ['*** Begin Patch', ...lines, '*** End Patch', ''].join('\n');
   it('codex: 머리글 앞뒤 공백·CRLF도 같은 파일로 읽는다(CLI가 읽는 방식과 같게 줄을 다듬어 맞춘다)', () => {
