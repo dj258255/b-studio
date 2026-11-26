@@ -94,7 +94,11 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { createSession, getSnapshot, sendMessage, sessionHistory, stopSession, subscribe } from './sessions';
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
+import { createSession, getSnapshot, sendMessage, sessionHistory, setTerminalCheckChanges, stopSession, subscribe } from './sessions';
+import { completeTerminalRun, driveTerminalSteps, type TerminalStep } from './test-support/terminal-run';
+import type { StudioEvent } from '@/lib/studio-events';
 
 let root: string;
 const saved = {
@@ -155,6 +159,16 @@ afterAll(() => {
   }
 });
 
+async function waitForEvent<T extends StudioEvent>(events: StudioEvent[], from: number, match: (event: StudioEvent) => event is T, timeoutMs = 10_000): Promise<T> {
+  const started = Date.now();
+  for (;;) {
+    const found = events.slice(from).find(match);
+    if (found) return found;
+    if (Date.now() - started > timeoutMs) throw new Error('기다린 이벤트가 오지 않았습니다');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
 async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   const started = Date.now();
   for (;;) {
@@ -184,6 +198,13 @@ async function runWrite(id: string, verify: 'light' | undefined): Promise<void> 
   await finished;
 }
 
+/** 터미널 경로로 같은 변경을 하고 게이트를 통과시켜 체크포인트를 남긴다(채팅 경로 없이) */
+async function runWriteInTerminal(id: string): Promise<void> {
+  await completeTerminalRun(id, '주문에 메모 필드 추가', { 'api/src/Order.java': 'class Order { String memo; }\n' });
+}
+
+// `verify: 'light'`는 대화 창의 요청 옵션이고 세션 터미널 경로에는 없다(sessions.ts의 beginTerminalRun·게이트 생성은 verify를 받지 않는다).
+// 그래서 이 묶음은 채팅 경로와 함께 지워질 시험이다. 옮기면 light를 확인하지 못하고 전체 검증 대조만 남는다
 describe('가볍게 확인(verify light)', () => {
   it('테스트 단계를 건너뛰고 계약까지만 확인해 체크포인트를 만든다(트레일러 표기 포함)', async () => {
     const created = (await createSession('verifyproj', 'kim', 'copy')).id;
@@ -222,21 +243,22 @@ describe('가볍게 확인(verify light)', () => {
   });
 });
 
+/** 파일을 쓰고 끝냈다고 말한다. 게이트가 돌려보낼 때마다 다시 끝냈다고 말한다(통과하면 거기서 멈춘다) */
+const writeThenStops: TerminalStep[] = [
+  { write: { 'api/src/Order.java': 'class Order { String memo; }\n' } },
+  ...Array.from({ length: 6 }, () => ({ stop: '완료했습니다' })),
+];
+
 describe('샌드박스·도커 쪽 문제로 검증하지 못한 변경은 되돌리지 않는다 (트러블슈팅 117)', () => {
-  /** 요청을 보내고 그 실행의 이벤트만 모은다(구독은 지난 이벤트를 다시 보내므로 실행 id로 거른다) */
-  async function runAndCollect(id: string, turns: unknown[]) {
-    const events: Array<{ type: string; [key: string]: unknown }> = [];
-    const { runId } = sendMessage(id, '주문에 메모 필드 추가', { allowBreaking: false, scriptedTurns: turns as never });
-    let unsubscribe: () => void = () => {};
-    const finished = await new Promise<{ status: string; summary: string }>((resolve) => {
-      unsubscribe = subscribe(id, (event) => {
-        if ((event as { runId?: string }).runId !== undefined && (event as { runId?: string }).runId !== runId) return;
-        events.push(event as never);
-        if (event.type === 'run_finished' && event.runId === runId) resolve({ status: event.status, summary: event.summary });
-      });
-    });
+  /** 터미널 경로로 요청을 하고(파일 쓰기·Stop 훅) 그 실행이 닫히기를 기다려 이벤트를 모은다. 구독은 지난 이벤트를 다시 보내므로 구독 직후의 길이 뒤만 본다 */
+  async function runAndCollect(id: string, steps: TerminalStep[], prompt = '주문에 메모 필드 추가') {
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, (event) => events.push(event));
+    const before = events.length;
+    await driveTerminalSteps(id, prompt, steps);
+    const finished = await waitForEvent(events, before, (event): event is Extract<StudioEvent, { type: 'run_finished' }> => event.type === 'run_finished');
     unsubscribe();
-    return { finished, events };
+    return { finished, events: events.slice(before) };
   }
 
   it('플랫폼 쪽 실패면 실행은 실패로 끝나지만 변경이 작업 복사본에 남고, 다음 요청의 게이트가 그 변경을 검증해 체크포인트로 남긴다', async () => {
@@ -247,7 +269,7 @@ describe('샌드박스·도커 쪽 문제로 검증하지 못한 변경은 되�
 
     fake.restartFails = 'platform';
     fake.restarts = 0;
-    const first = await runAndCollect(created, writeTurns);
+    const first = await runAndCollect(created, writeThenStops);
     fake.restartFails = undefined;
 
     expect(first.finished.status).toBe('failed');
@@ -262,7 +284,7 @@ describe('샌드박스·도커 쪽 문제로 검증하지 못한 변경은 되�
     expect(fake.restarts).toBe(2);
 
     // 문제가 풀린 뒤의 다음 요청: 에이전트가 파일을 건드리지 않아도 남은 변경이 게이트를 거쳐 체크포인트가 된다
-    const second = await runAndCollect(created, [{ text: '앞의 변경을 그대로 마무리했습니다.' }]);
+    const second = await runAndCollect(created, [{ stop: '앞의 변경을 그대로 마무리했습니다.' }]);
     expect(second.finished.status).toBe('done');
     const head = getSnapshot(created)!.checkpoints[0]!;
     expect(getSnapshot(created)!.checkpoints.length).toBe(before + 1);
@@ -278,7 +300,7 @@ describe('샌드박스·도커 쪽 문제로 검증하지 못한 변경은 되�
     const workDir = getSnapshot(created)!.workDir;
 
     fake.restartFails = 'code';
-    const run = await runAndCollect(created, [...writeTurns, { text: '완료했습니다' }, { text: '완료했습니다' }, { text: '완료했습니다' }]);
+    const run = await runAndCollect(created, writeThenStops);
     fake.restartFails = undefined;
 
     expect(run.finished.status).toBe('failed');
@@ -304,24 +326,21 @@ workflow:
       command: [./gradlew, check]
 `;
   /** 선언을 고치고 파일 하나를 바꾼 뒤 턴을 끝낸다. 게이트가 되돌려 보낼 때마다 한 줄씩 더 말한다 */
-  const fixDeclarationTurns = [
-    { toolCalls: [{ name: 'write_file', input: { path: 'studio.yaml', content: FIXED_SPEC } }, { name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] },
-    { text: '선언을 고쳤습니다.' },
-    { text: '선언은 이미 고쳤습니다.' },
-    { text: '선언은 이미 고쳤습니다.' },
-    { text: '선언은 이미 고쳤습니다.' },
+  const fixDeclarationSteps: TerminalStep[] = [
+    { write: { 'studio.yaml': FIXED_SPEC, 'api/src/Order.java': 'class Order { String memo; }\n' } },
+    { stop: '선언을 고쳤습니다.' },
+    ...Array.from({ length: 5 }, () => ({ stop: '선언은 이미 고쳤습니다.' })),
   ];
 
   async function runFix(id: string, allowCheckChanges: boolean): Promise<{ status?: string; summary?: string }> {
-    const finished = new Promise<{ status?: string; summary?: string }>((resolve) => {
-      const unsubscribe = subscribe(id, (event) => {
-        if (event.type === 'run_finished') {
-          unsubscribe();
-          resolve(event as { status?: string; summary?: string });
-        }
-      });
-    });
-    sendMessage(id, '테스트 선언을 ./gradlew check로 바꿔 주세요', { allowBreaking: false, ...(allowCheckChanges ? { allowCheckChanges: true } : {}), scriptedTurns: fixDeclarationTurns });
+    // 터미널의 요청은 요청마다 옵션을 실을 자리가 없어, 사람이 미리 켜 두면 그 뒤 처음 시작되는 만들기 실행이 가져간다
+    if (allowCheckChanges) expect(setTerminalCheckChanges(id, true)).toBe(true);
+    const events: StudioEvent[] = [];
+    const unsubscribe = subscribe(id, (event) => events.push(event));
+    const before = events.length;
+    await driveTerminalSteps(id, '테스트 선언을 ./gradlew check로 바꿔 주세요', fixDeclarationSteps);
+    const finished = await waitForEvent(events, before, (event): event is Extract<StudioEvent, { type: 'run_finished' }> => event.type === 'run_finished');
+    unsubscribe();
     return finished;
   }
 
@@ -366,19 +385,7 @@ workflow:
 
     // 다음 요청은 허용 없이도 고친 선언으로 돈다
     fake.execCalls = [];
-    const { runId } = sendMessage(created, '주문에 메모 필드 하나 더', {
-      allowBreaking: false,
-      scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; String note; }\n' } }] }, { text: '추가했습니다.' }],
-    });
-    // 구독하면 지난 기록부터 다시 받으므로 이번 실행의 끝만 기다린다
-    await new Promise<void>((resolve) => {
-      const stop = subscribe(created, (event) => {
-        if (event.type !== 'run_finished' || (event as { runId?: string }).runId !== runId) return;
-        // 지난 기록을 다시 받는 동안에는 아직 stop이 없다. 다음 틱에 구독을 푼다
-        queueMicrotask(() => stop());
-        resolve();
-      });
-    });
+    await completeTerminalRun(created, '주문에 메모 필드 하나 더', { 'api/src/Order.java': 'class Order { String memo; String note; }\n' });
     expect(fake.execCalls).toEqual([['./gradlew', 'check']]);
 
     await stopSession(created).catch(() => {});
@@ -419,7 +426,7 @@ describe('평가 자산 복사본(#745)', () => {
 
     // 실행을 시작할 때도 같은 판을 넘긴다(작업 복사본의 지금 상태가 아니다)
     fake.evaluationSyncs = [];
-    await runWrite(created, 'light');
+    await runWriteInTerminal(created);
     expect(fake.evaluationSyncs.length).toBeGreaterThan(0);
     expect(fake.evaluationSyncs.at(-1)).toEqual(boot);
 

@@ -66,7 +66,7 @@ vi.mock('./projects', () => ({
 
 vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
 
-import { createSession, getSnapshot, restoreDiscardedBackup, sendMessage, stopSession, subscribe } from './sessions';
+import { createSession, getSnapshot, openTerminalRunId, restoreDiscardedBackup, stopSession, subscribe } from './sessions';
 import { failTerminalTurn, openTerminalRunWithFiles, stopTerminalTurn, terminalRunOf } from './test-support/terminal-run';
 
 let root: string;
@@ -269,7 +269,7 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
       return { id, events, backupId: reverted.backup!.id, unsubscribe };
     }
 
-    it('서비스 재시작이 끝나기 전에는 sendMessage를 409로 거절하고, backup_restored 뒤에는 받아들인다', async () => {
+    it('서비스 재시작이 끝나기 전에는 터미널의 새 요청(UserPromptSubmit)을 막고, backup_restored 뒤에는 받아들인다', async () => {
       const { id, events, backupId, unsubscribe } = await sessionWithBackup();
       let release!: () => void;
       fake.restartGate = new Promise<void>((resolve) => (release = resolve));
@@ -277,19 +277,20 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
         restoreDiscardedBackup(id, backupId);
         expect(getSnapshot(id)!.running).toBe(true);
         expect(events.some((event) => event.type === 'backup_restore_started')).toBe(true);
-        let rejected: unknown;
-        try {
-          sendMessage(id, '끼어드는 요청', { allowBreaking: false, scriptedTurns: [{ text: '완료' }] });
-        } catch (error) {
-          rejected = error;
-        }
-        expect(rejected).toMatchObject({ status: 409, message: '이전 요청을 처리하는 중입니다' });
+        // 터미널 경로에서는 같은 점유 때문에 요청 훅이 blocked로 답하고 실행을 열지 않는다
+        const rejected = await terminalRunOf(id).gateway.prompt({ prompt: '끼어드는 요청' });
+        expect(rejected.blocked).toBeTruthy();
+        expect(openTerminalRunId(id)).toBeUndefined();
         expect(events.some((event) => event.type === 'backup_restored')).toBe(false);
 
         release();
         await waitFor(() => events.find((event) => event.type === 'backup_restored'));
         expect(getSnapshot(id)!.running).toBe(false);
-        expect(() => sendMessage(id, '이어서 요청', { allowBreaking: false, scriptedTurns: [{ text: '완료' }] })).not.toThrow();
+        // 풀린 뒤에는 같은 요청 훅이 받아들이고 실행이 열린다
+        const accepted = await terminalRunOf(id).gateway.prompt({ prompt: '이어서 요청' });
+        expect(accepted.blocked).toBeUndefined();
+        expect(openTerminalRunId(id)).toBeDefined();
+        await stopTerminalTurn(terminalRunOf(id));
         await waitFor(() => events.filter((event) => event.type === 'run_finished').length >= 2 || undefined);
       } finally {
         release();
@@ -313,7 +314,10 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
         stop();
         expect(runningAtFailure).toBe(false);
         expect(getSnapshot(id)!.running).toBe(false);
-        expect(() => sendMessage(id, '이어서 요청', { allowBreaking: false, scriptedTurns: [{ text: '완료' }] })).not.toThrow();
+        const accepted = await terminalRunOf(id).gateway.prompt({ prompt: '이어서 요청' });
+        expect(accepted.blocked).toBeUndefined();
+        expect(openTerminalRunId(id)).toBeDefined();
+        await stopTerminalTurn(terminalRunOf(id));
         await waitFor(() => events.filter((event) => event.type === 'run_finished').length >= 2 || undefined);
       } finally {
         unsubscribe();
