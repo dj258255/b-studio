@@ -51,8 +51,7 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
 vi.mock('@b-studio/agent', async (importOriginal) => ({ ...(await importOriginal<typeof import('@b-studio/agent')>()), preflightCodex: async () => ({ ok: true }) }));
 
 vi.mock('./projects', () => ({ findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root) }));
-vi.mock('./session-terminal', async (importOriginal) => ({
-  terminalHomeUser: (await importOriginal<typeof import('./session-terminal')>()).terminalHomeUser,
+vi.mock('./session-terminal', () => ({
   disposeSessionTerminal: async (sessionId: string, sandboxId: string) => {
     fake.disposed.push([sessionId, sandboxId]);
   },

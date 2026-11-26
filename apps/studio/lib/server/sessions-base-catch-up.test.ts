@@ -74,7 +74,10 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   return { ...actual, createPullRequest: (...args: unknown[]) => (fake.createPullRequest as (...a: unknown[]) => unknown)(...args) };
 });
 
-import { baseStatus, createSession, exportSession, getSnapshot, sendMessage, stopSession, subscribe } from './sessions';
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
+import { baseStatus, createSession, exportSession, getSnapshot, stopSession } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -173,21 +176,9 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   }
 }
 
-/** 파일을 바꾸고 턴을 끝내는 대본으로 요청을 보내고, 그 실행이 끝나기를 기다린다 */
+/** 파일을 바꾸고 터미널 실행을 끝낸다(채팅 경로 없이 체크포인트를 만든다) */
 async function runWrite(id: string, content: string): Promise<void> {
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-  });
-  sendMessage(id, '주문에 메모 필드 추가', {
-    allowBreaking: false,
-    scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content } }] }, { text: '메모 필드를 추가했습니다.' }],
-  });
-  await finished;
+  await completeTerminalRun(id, '주문에 메모 필드 추가', { 'api/src/Order.java': content });
 }
 
 describe('main 따라잡기(ADR-076)', () => {

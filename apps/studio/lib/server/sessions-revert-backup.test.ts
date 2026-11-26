@@ -64,7 +64,10 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
 import { createSession, getSnapshot, restoreDiscardedBackup, sendMessage, stopSession, subscribe } from './sessions';
+import { failTerminalTurn, openTerminalRunWithFiles, stopTerminalTurn, terminalRunOf } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -135,16 +138,26 @@ async function waitFor<T>(predicate: () => T | undefined, timeoutMs = 10_000): P
   }
 }
 
-/** events는 이 세션을 구독한 배열이다(테스트가 미리 subscribe해 둔다). 새로 보낸 요청이 끝날 때까지 기다린다 */
-async function sendAndWaitFinished(
-  id: string,
-  text: string,
-  scriptedTurns: Array<{ toolCalls?: Array<{ name: string; input: Record<string, unknown> }>; text?: string }>,
-  events: StudioEvent[],
-): Promise<void> {
+/** 파일을 쓴 채 API 오류로 턴이 끝나(StopFailure 훅) 요청이 실패로 끝나기를 기다린다(채팅 경로 없이 세션 터미널 경로) */
+async function failWriteAndWaitFinished(id: string, text: string, files: Record<string, string>, events: StudioEvent[]): Promise<void> {
   const before = events.length;
-  sendMessage(id, text, { allowBreaking: false, scriptedTurns });
+  const run = await openTerminalRunWithFiles(id, text, files);
+  await failTerminalTurn(run);
   await waitFor(() => events.slice(before).find((event) => event.type === 'run_finished'));
+}
+
+/** 파일을 쓰지 않는 요청 하나를 터미널 경로로 하고(prompt → Stop) 닫히기를 기다린다. 마지막 Stop 훅의 답을 돌려준다 */
+async function readOnlyTurnAndWaitFinished(id: string, text: string, events: StudioEvent[]) {
+  const before = events.length;
+  const run = terminalRunOf(id);
+  await run.gateway.prompt({ prompt: text });
+  let answer = await stopTerminalTurn(run, '이미 반영돼 있어 추가로 바꿀 필요가 없습니다.');
+  // 게이트를 통과하지 못하면 터미널 경로는 피드백을 돌려 다시 시도하게 한다. 상한까지 돌려보낸 뒤에야 실패로 닫는다
+  for (let retry = 0; retry < 6 && answer.feedback && !events.slice(before).some((event) => event.type === 'run_finished'); retry += 1) {
+    answer = await stopTerminalTurn(run, '이미 반영돼 있어 추가로 바꿀 필요가 없습니다.');
+  }
+  await waitFor(() => events.slice(before).find((event) => event.type === 'run_finished'));
+  return answer;
 }
 
 describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하며, 되살리면 미검증 상태로 돌아온다', () => {
@@ -158,13 +171,8 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
     const events: StudioEvent[] = [];
     const unsubscribe = subscribe(id, (event) => events.push(event));
 
-    // 다음 턴 대본이 없어 모델 호출이 예외로 끝난다("모델/네트워크 오류로 끝난 실행"을 흉내 낸다)
-    await sendAndWaitFinished(
-      id,
-      '메모 필드 추가',
-      [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] }],
-      events,
-    );
+    // API 오류로 턴이 끝난다(StopFailure 훅, "모델/네트워크 오류로 끝난 실행")
+    await failWriteAndWaitFinished(id, '메모 필드 추가', { 'api/src/Order.java': 'class Order { String memo; }\n' }, events);
 
     // 체크포인트는 늘지 않았다(검증 게이트를 거치지 않았으므로 되돌렸다)
     expect(getSnapshot(id)!.checkpoints.length).toBe(startCheckpoints);
@@ -188,7 +196,7 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
     // 이번 요청은 모델이 파일을 하나도 쓰지 않는다(ADR-131 실측 재현: 세션 5b640fd3, 체크포인트 15ba740 —
     // 보관본을 되살린 뒤 파일을 쓰지 않는 요청이 게이트를 건너뛰고 Workflow-Passed: none 체크포인트를 남겼다).
     const beforeSecondRequest = events.length;
-    await sendAndWaitFinished(id, '컴파일 에러 확인', [{ text: '이미 반영돼 있어 추가로 바꿀 필요가 없습니다.' }], events);
+    await readOnlyTurnAndWaitFinished(id, '컴파일 에러 확인', events);
 
     // 게이트가 실제로 돌았다(되살린 파일을 workspace가 바뀐 파일로 보고 검증을 건너뛰지 않았다)
     const verifyStarted = events
@@ -217,12 +225,7 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
     const events: StudioEvent[] = [];
     const unsubscribe = subscribe(id, (event) => events.push(event));
 
-    await sendAndWaitFinished(
-      id,
-      '메모 필드 추가',
-      [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] }],
-      events,
-    );
+    await failWriteAndWaitFinished(id, '메모 필드 추가', { 'api/src/Order.java': 'class Order { String memo; }\n' }, events);
     const reverted = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'reverted' }> => event.type === 'reverted'));
     restoreDiscardedBackup(id, reverted.backup!.id);
     await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'backup_restored' }> => event.type === 'backup_restored'));
@@ -231,7 +234,7 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
     // 이번에는 되살린 변경이 검증 게이트(서비스 재시작)를 통과하지 못하게 한다. 모델은 여전히 파일을 하나도 쓰지 않는다
     fake.failRestart = true;
     const beforeSecondRequest = events.length;
-    await sendAndWaitFinished(id, '컴파일 에러 확인', [{ text: '이미 반영돼 있어 추가로 바꿀 필요가 없습니다.' }], events);
+    await readOnlyTurnAndWaitFinished(id, '컴파일 에러 확인', events);
     fake.failRestart = false;
 
     // 게이트가 실제로 돌았다(건너뛰지 않았다) — 통과하지 못해 체크포인트를 남기지 않았다
@@ -261,12 +264,7 @@ describe('실행 실패로 되돌릴 때 바꾼 파일을 보관하고 안내하
       expect(await waitForReady(id)).toBe('ready');
       const events: StudioEvent[] = [];
       const unsubscribe = subscribe(id, (event) => events.push(event));
-      await sendAndWaitFinished(
-        id,
-        '메모 필드 추가',
-        [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] }],
-        events,
-      );
+      await failWriteAndWaitFinished(id, '메모 필드 추가', { 'api/src/Order.java': 'class Order { String memo; }\n' }, events);
       const reverted = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'reverted' }> => event.type === 'reverted'));
       return { id, events, backupId: reverted.backup!.id, unsubscribe };
     }

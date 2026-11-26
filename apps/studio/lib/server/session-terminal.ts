@@ -241,17 +241,6 @@ export async function removeContainerAndConfig(
   }
 }
 
-/**
- * 컨테이너 홈 볼륨을 나눌 사용자. 인증을 끈 개인 PC 방식이면 없다(옛 볼륨 이름 유지, 다시 로그인하지 않는다).
- * 그 밖의 방식(token·proxy, 모르는 값 포함)이면 세션 주인이다 — 모르는 방식은 사용자별로 가르는 쪽으로 틀린다
- */
-export function terminalHomeUser(authMode: string, owner: string | undefined): string | undefined {
-  if (authMode === 'none') return undefined;
-  // 주인을 모르면 다른 사용자의 볼륨(또는 프로젝트 공용 볼륨)을 대신 쓰지 않고 연결하지 않는다
-  if (!owner) throw new StudioError(409, '세션 주인을 알 수 없어 컨테이너 터미널의 홈 볼륨을 정할 수 없습니다');
-  return owner;
-}
-
 /** 컨테이너 백엔드가 터미널을 열 때 openAgentTerminal에 넘길 값. 첫 요청은 호스트 방식과 같은 꼴(firstPromptArg)로 맞춘다 */
 export function containerOpenOptions(options: { id: string; size: TerminalSize; initialPrompt?: string }): { id: string; size: TerminalSize; firstPrompt?: string } {
   return { id: options.id, size: options.size, ...(options.initialPrompt !== undefined ? { firstPrompt: firstPromptArg(options.initialPrompt) } : {}) };

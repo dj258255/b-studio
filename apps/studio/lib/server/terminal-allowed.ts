@@ -4,6 +4,7 @@
  */
 import { experimentalEnabled } from '@b-studio/agent';
 import { authConfig } from './auth';
+import { StudioError } from './errors';
 
 export type TerminalMode = 'container' | 'host';
 
@@ -40,4 +41,16 @@ export function resolveTerminalMode(env: Record<string, string | undefined> = pr
 /** 세션 터미널을 열 수 있는 서버인가. 판정은 resolveTerminalMode 한 곳이다(막는 쪽 호출자들이 쓴다) */
 export function sessionTerminalAllowed(env: Record<string, string | undefined> = process.env): boolean {
   return resolveTerminalMode(env).allowed;
+}
+
+/**
+ * 컨테이너 홈 볼륨을 나눌 사용자. 인증을 끈 개인 PC 방식이면 없다(옛 볼륨 이름 유지, 다시 로그인하지 않는다).
+ * 그 밖의 방식(token·proxy, 모르는 값 포함)이면 세션 주인이다 — 모르는 방식은 사용자별로 가르는 쪽으로 틀린다.
+ * session-terminal.ts가 아니라 여기 두는 까닭: 시험 파일 여럿이 session-terminal을 통째로 가짜로 바꾸므로, sessions.ts가 쓰는 판정은 가짜로 바뀌지 않는 이 모듈에 둔다
+ */
+export function terminalHomeUser(authMode: string, owner: string | undefined): string | undefined {
+  if (authMode === 'none') return undefined;
+  // 주인을 모르면 다른 사용자의 볼륨(또는 프로젝트 공용 볼륨)을 대신 쓰지 않고 연결하지 않는다
+  if (!owner) throw new StudioError(409, '세션 주인을 알 수 없어 컨테이너 터미널의 홈 볼륨을 정할 수 없습니다');
+  return owner;
 }

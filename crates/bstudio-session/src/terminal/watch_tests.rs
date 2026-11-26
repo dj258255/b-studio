@@ -439,3 +439,151 @@ fn hooked_argv_accepts_the_self_agent_launcher_slot_only() {
     // 자체 CLI 세션이어도 claude의 원래 자리는 그대로다
     assert!(hooked_self(&["claude", "--mcp-config", MCP, "--settings", SETTINGS]));
 }
+
+// ── 새 갈래(Command Code·OpenCode·Gemini)의 hooked_launch ──
+// 여는 쪽(허용 목록)이라 좁게 맞춘다: 모르는 것은 붙지 않은 것이다
+
+const MOD: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/b-studio-mod.ts";
+const OPENCODE_CONFIG: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/opencode.json";
+const GEMINI_SETTINGS: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/gemini-settings.json";
+
+fn env_of(items: &[(&str, &str)]) -> Vec<(String, String)> {
+    items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+}
+
+fn launch_cc(items: &[&str]) -> bool {
+    hooked_launch(CliKind::CommandCode, &argv(items), None, MOD)
+}
+
+fn launch_oc(items: &[&str], env: Option<&[(&str, &str)]>) -> bool {
+    let env = env.map(env_of);
+    hooked_launch(CliKind::OpenCode, &argv(items), env.as_deref(), OPENCODE_CONFIG)
+}
+
+fn launch_gm(items: &[&str], env: Option<&[(&str, &str)]>) -> bool {
+    let env = env.map(env_of);
+    hooked_launch(CliKind::Gemini, &argv(items), env.as_deref(), GEMINI_SETTINGS)
+}
+
+#[test]
+fn command_code_needs_exactly_one_mod_in_the_wrapper_slot() {
+    let cc = "/usr/local/bin/commandcode";
+    assert!(launch_cc(&[cc, "--mod", MOD]));
+    assert!(launch_cc(&[cc, "--mod", MOD, "요청 글"]));
+    assert!(launch_cc(&["/usr/bin/node", "/x/node_modules/command-code/dist/index.js", "--mod", MOD, "--resume", "abc"]));
+    // 경로가 다르다: 대소문자·끝 슬래시·겹친 슬래시·점·링크처럼 보이는 글
+    for other in [
+        MOD.to_uppercase(),
+        format!("{MOD}/"),
+        format!("{MOD} "),
+        MOD.replace("/studio-a/", "//studio-a/"),
+        MOD.replace("/studio-a/", "/./studio-a/"),
+        MOD.replace("/studio-a/", "/studio-a/../studio-a/"),
+        "/tmp/link-to/b-studio-mod.ts".to_owned(),
+        String::new(),
+    ] {
+        assert!(!launch_cc(&[cc, "--mod", &other]), "{other:?}");
+    }
+    // `--mod=값` 꼴은 감싸개가 쓰지 않는다
+    assert!(!launch_cc(&[cc, &format!("--mod={MOD}")]));
+    // `--mod`가 둘이면(뒤가 앞을 덮을 수 있다) 붙지 않았다
+    assert!(!launch_cc(&[cc, "--mod", MOD, "--mod", "/evil.ts"]));
+    assert!(!launch_cc(&[cc, "--mod", "/evil.ts", "--mod", MOD]));
+    assert!(!launch_cc(&[cc, "--mod", MOD, "--mod=/evil.ts"]));
+    // `--safe-mode`가 있으면 붙지 않았다
+    assert!(!launch_cc(&[cc, "--mod", MOD, "--safe-mode"]));
+    assert!(!launch_cc(&[cc, "--safe-mode", "--mod", MOD]));
+    assert!(!launch_cc(&[cc, "--mod", MOD, "--safe-mode=true"]));
+    // 자리가 맞지 않다: 앞에 다른 인자, CLI 스크립트가 아닌 파일 뒤, 값이 없다
+    assert!(!launch_cc(&[cc, "-m", "x", "--mod", MOD]));
+    assert!(!launch_cc(&["/usr/bin/node", "/tmp/evil.js", "--mod", MOD]));
+    assert!(!launch_cc(&[cc, "--mod"]));
+    assert!(!launch_cc(&[cc]));
+    assert!(!launch_cc(&[]));
+    // 요청 글 한 요소 안의 글은 옵션이 아니다
+    assert!(launch_cc(&[cc, "--mod", MOD, "--safe-mode를 설명해 줘"]));
+}
+
+#[test]
+fn opencode_needs_the_config_env_and_no_pure() {
+    let oc = "/usr/local/bin/opencode";
+    let good: &[(&str, &str)] = &[("HOME", "/h"), ("OPENCODE_CONFIG", OPENCODE_CONFIG)];
+    assert!(launch_oc(&[oc], Some(good)));
+    assert!(launch_oc(&[oc, "--prompt", "요청"], Some(good)));
+    // 환경을 읽지 못했다: 붙지 않은 것
+    assert!(!launch_oc(&[oc], None));
+    // 환경에 없다·경로가 다르다
+    assert!(!launch_oc(&[oc], Some(&[("HOME", "/h")])));
+    assert!(!launch_oc(&[oc], Some(&[])));
+    for other in [OPENCODE_CONFIG.to_uppercase(), format!("{OPENCODE_CONFIG}/"), format!("{OPENCODE_CONFIG} "), OPENCODE_CONFIG.replace("/studio-a/", "//studio-a/"), "/tmp/link/opencode.json".to_owned(), String::new()] {
+        assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", &other)])), "{other:?}");
+    }
+    // 이름의 대소문자·앞뒤 글이 다른 변수는 다른 변수다
+    assert!(!launch_oc(&[oc], Some(&[("opencode_config", OPENCODE_CONFIG)])));
+    assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG_DIR", OPENCODE_CONFIG)])));
+    // 같은 이름이 둘이고 하나라도 다르면(어느 쪽이 이기는지 모른다) 붙지 않았다
+    assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("OPENCODE_CONFIG", "/evil.json")])));
+    assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", "/evil.json"), ("OPENCODE_CONFIG", OPENCODE_CONFIG)])));
+    assert!(launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("OPENCODE_CONFIG", OPENCODE_CONFIG)])));
+    // OPENCODE_PURE(값이 비었어도 있으면)와 --pure는 플러그인을 끈다
+    assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("OPENCODE_PURE", "1")])));
+    assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("OPENCODE_PURE", "")])));
+    assert!(!launch_oc(&[oc, "--pure"], Some(good)));
+    assert!(!launch_oc(&[oc, "--prompt", "x", "--pure"], Some(good)));
+    assert!(!launch_oc(&[oc, "--pure=true"], Some(good)));
+    // 요청 글 한 요소 안의 글은 옵션이 아니다
+    assert!(launch_oc(&[oc, "--prompt", "--pure를 설명해 줘"], Some(good)));
+}
+
+#[test]
+fn gemini_needs_the_system_settings_env() {
+    let gm = "/usr/local/bin/gemini";
+    let good: &[(&str, &str)] = &[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)];
+    assert!(launch_gm(&[gm], Some(good)));
+    assert!(launch_gm(&["/usr/bin/node", "/x/node_modules/@google/gemini-cli/dist/index.js", "-i", "요청"], Some(good)));
+    // 환경을 읽지 못했다: 붙지 않은 것
+    assert!(!launch_gm(&[gm], None));
+    assert!(!launch_gm(&[gm], Some(&[])));
+    for other in [GEMINI_SETTINGS.to_uppercase(), format!("{GEMINI_SETTINGS}/"), GEMINI_SETTINGS.replace("/studio-a/", "/studio-a/./"), "/tmp/link/gemini-settings.json".to_owned(), String::new()] {
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", &other)])), "{other:?}");
+    }
+    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS), ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", "/evil.json")])));
+    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", GEMINI_SETTINGS)])));
+}
+
+#[test]
+fn hooked_launch_never_crosses_kinds() {
+    // 다른 갈래의 증거로는 붙었다고 보지 않는다
+    let oc_env: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)];
+    assert!(!launch_gm(&["gemini"], Some(&[("OPENCODE_CONFIG", GEMINI_SETTINGS)])));
+    assert!(!launch_oc(&["opencode"], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", OPENCODE_CONFIG)])));
+    assert!(!launch_cc(&["commandcode", "--settings", SETTINGS]));
+    // claude·codex는 이 함수로 붙었다고 보지 않는다(claude는 hooked_argv, codex는 ps 한 줄)
+    for kind in [CliKind::Claude, CliKind::Codex] {
+        let env = env_of(oc_env);
+        assert!(!hooked_launch(kind, &argv(&["claude", "--mod", MOD]), Some(&env), MOD));
+        assert!(!hooked_launch(kind, &argv(&["claude", "--mcp-config", MCP, "--settings", SETTINGS]), Some(&env), SETTINGS));
+    }
+    // ps 한 줄 판정(`hooked`)도 새 갈래를 붙었다고 보지 않는다
+    for kind in [CliKind::CommandCode, CliKind::OpenCode, CliKind::Gemini] {
+        assert!(!hooked(&format!("{} --mod {MOD}", kind.as_str()), MOD, kind));
+    }
+}
+
+#[test]
+fn new_kinds_are_recognized_by_name_and_package() {
+    for (kind, name, package) in [
+        (CliKind::CommandCode, "commandcode", "/x/node_modules/command-code/dist/index.js"),
+        (CliKind::OpenCode, "opencode", "/x/node_modules/opencode-ai/bin/opencode.js"),
+        (CliKind::Gemini, "gemini", "/x/node_modules/@google/gemini-cli/dist/index.js"),
+    ] {
+        assert_eq!(CliKind::parse(name), Some(kind));
+        assert_eq!(kind.as_str(), name);
+        assert!(looks_like_agent_cli(&format!("/usr/local/bin/{name} --x"), "/other", kind));
+        assert!(looks_like_agent_cli(&format!("node {package}"), "/other", kind));
+        assert!(!looks_like_agent_cli("/usr/bin/vim notes.txt", "/other", kind));
+    }
+    // 패키지 자리는 갈래마다 다르다
+    assert!(!looks_like_agent_cli("node /x/node_modules/@google/gemini-cli/dist/index.js", "/other", CliKind::OpenCode));
+    assert!(!looks_like_agent_cli("node /x/node_modules/command-code/dist/index.js", "/other", CliKind::Claude));
+}

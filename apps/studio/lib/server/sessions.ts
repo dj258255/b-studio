@@ -265,7 +265,7 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalHomeUser, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
@@ -309,7 +309,7 @@ import {
   type RestoreReason,
 } from './session-git-realign';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
-import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork } from './session-terminal-classify';
+import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
 import {
   decideAfterCheckpoint,
@@ -343,7 +343,6 @@ import type { TaskCardDone } from './task-cards';
 import {
   AGENT_HOOK_EVENTS,
   agentCleanupCommand,
-  applyPatchPaths,
   isResumableConversation,
   type AgentGatewayAddress,
   type HostCliKind,
@@ -354,7 +353,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { sessionTerminalAllowed } from './terminal-allowed';
+import { sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { walkFiles } from './code-files';
@@ -7836,22 +7835,6 @@ function withDoneTests(workflow: LoadedProject['spec']['workflow'], doneTests: r
 }
 
 /**
- * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 없으면 빈 목록.
- * claude의 파일 도구는 file_path(Write·Edit 등)나 notebook_path(NotebookEdit)를 쓰고,
- * codex의 apply_patch는 패치 본문(command) 안에 바꾸는 파일을 모두 적는다(#825)
- */
-function terminalToolFilePaths(tool: string, input: unknown): string[] {
-  if (typeof input !== 'object' || input === null) return [];
-  const record = input as Record<string, unknown>;
-  if (tool === 'apply_patch') return typeof record.command === 'string' ? applyPatchPaths(record.command) : [];
-  for (const key of ['file_path', 'notebook_path']) {
-    const value = record[key];
-    if (typeof value === 'string' && value.trim() !== '') return [value];
-  }
-  return [];
-}
-
-/**
  * 터미널 도구가 준 파일 경로를 작업 복사본 기준 상대 경로로 바꾼다. 컨테이너 방식은 작업 복사본을 /workspace에
  * 붙이므로 그 아래 경로를 상대 경로로 본다. 이 컴퓨터 방식에서 /workspace/… 는 작업 복사본 밖이다(그대로 두면
  * 아래 isAbsolute 분기가 밖으로 판정해 undefined가 된다). 이 컴퓨터 방식은 작업 복사본의 절대 경로만 받는다.
@@ -8819,8 +8802,10 @@ async function terminalScopeDeny(session: Session, tool: string, toolInput: unkn
   // 읽기 도구는 앞에서 이미 통과했다(isReadTool). 경로가 없는 도구(Bash 등)는 턴 끝 검사가 맡는다
   const card = session.terminalTaskContext;
   if (!card) return undefined;
-  // 패치 하나가 여러 파일을 바꿀 수 있다. 하나라도 범위 밖이면 도구 전체를 막는다
-  for (const path0 of terminalToolFilePaths(tool, toolInput)) {
+  // 패치 하나가 여러 파일을 바꿀 수 있다. 하나라도 범위 밖이면 도구 전체를 막는다. 경로를 알 수 없으면(null) 범위 밖이다(허용 목록이라 모르는 값은 막는다)
+  const files = terminalToolFilePaths(terminalCliKind(session), tool, toolInput);
+  if (files === null) return `[b-studio] 이 카드가 쓸 수 있는 경로는 ${card.writableScope.join(', ')}입니다. ${tool}이(가) 바꾸는 파일을 알 수 없어 쓰지 않았습니다.`;
+  for (const path0 of files) {
     const relative = terminalRelativePath(path0, session);
     // 범위 안이어도 작업 복사본 밖을 가리키는 링크를 지나면 막는다(링크는 글자로는 안이지만 실제 파일은 밖이다)
     const confined = relative !== undefined && (await terminalPathConfined(session.snapshot.workDir, relative));
@@ -8948,7 +8933,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
     if (afterBoot) return afterBoot;
     // 이 도구가 바꿀 파일 중 보호 경로의 내용을 이 실행에서 처음 쓰기 직전에 고정한다(이슈 #992). 경로가 없는 도구(Bash 등)로 바뀐 파일은 고정값이 없어
     // 지금처럼 바뀐 것으로 남는다. 고정하지 못해도 도구를 막지 않는다(pinBeforeWrite는 던지지 않는다)
-    for (const path0 of terminalToolFilePaths(tool, input.tool_input)) {
+    for (const path0 of terminalToolFilePaths(terminalCliKind(session), tool, input.tool_input) ?? []) {
       const relative = terminalRelativePath(path0, session);
       if (relative !== undefined && relative !== '') await verification.workspace.pinBeforeWrite(relative);
     }

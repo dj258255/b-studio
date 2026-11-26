@@ -109,7 +109,8 @@ vi.mock('./model-registry', async (importOriginal) => {
   };
 });
 
-import { createSession, exportSession, getSnapshot, resolveReviewFinding, runReviewRound, sendMessage, stopSession, subscribe } from './sessions';
+import { createSession, exportSession, getSnapshot, resolveReviewFinding, runReviewRound, stopSession } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -216,21 +217,9 @@ async function waitForEvent(id: string, check: () => boolean, timeoutMs = 10_000
   }
 }
 
-/** 파일을 바꾸고 턴을 끝내는 대본으로 요청을 보내고, 그 실행이 끝나기를 기다린다 */
+/** 파일을 바꾸고 터미널 실행을 끝낸다(채팅 경로 없이 체크포인트를 만든다) */
 async function runWrite(id: string, content: string): Promise<void> {
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-  });
-  sendMessage(id, '주문에 메모 필드 추가', {
-    allowBreaking: false,
-    scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content } }] }, { text: '메모 필드를 추가했습니다.' }],
-  });
-  await finished;
+  await completeTerminalRun(id, '주문에 메모 필드 추가', { 'api/src/Order.java': content });
 }
 
 /** 첫 요청까지 마친 준비된 세션과, PR을 만들어 둔 상태를 만든다(review는 이 시점에 자동으로 돌리지 않는다) */

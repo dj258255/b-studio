@@ -136,11 +136,13 @@ fn classify_prompt_slash_and_unwrapped() {
 #[test]
 fn read_tool_table_is_exact() {
     for name in AGENT_READ_TOOLS.iter().chain(CODEX_READ_TOOLS.iter()) {
-        assert!(is_read_tool(name), "{name}");
+        assert!(is_read_tool(CliKind::Claude, name), "{name}");
+        assert!(is_read_tool(CliKind::Codex, name), "{name}");
     }
     // 바꾸는 도구와 모르는 이름은 읽기 도구가 아니다. 대소문자·빈칸·접두사도 다른 이름이다
     for name in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "BashOutput", "KillShell", "mcp__b-studio__run_in_service", "mcp__b-studio__read_file", "", "read", "READ", "Read ", " Read", "Read\u{200b}", "ReadFile", "Rea", "web_fetch", "exec_command", "apply_patch", "Glob\n"] {
-        assert!(!is_read_tool(name), "{name:?}");
+        assert!(!is_read_tool(CliKind::Claude, name), "{name:?}");
+        assert!(!is_read_tool(CliKind::Codex, name), "{name:?}");
     }
     // 두 표는 겹치지 않고 중복도 없다
     let mut all: Vec<&str> = AGENT_READ_TOOLS.iter().chain(CODEX_READ_TOOLS.iter()).copied().collect();
@@ -167,5 +169,62 @@ fn read_only_after_work_table() {
     ];
     for (already, verification, changed, want) in cases {
         assert_eq!(read_only_after_work(already, verification, changed), want, "{already} {verification} {changed:?}");
+    }
+}
+
+#[test]
+fn read_tool_tables_do_not_leak_across_kinds() {
+    let new_kinds = [CliKind::CommandCode, CliKind::OpenCode, CliKind::Gemini];
+    // 새 갈래는 자기 표만 읽는다. claude·codex의 읽기 도구는 새 갈래에서 읽기 도구가 아니다
+    for name in AGENT_READ_TOOLS.iter().chain(CODEX_READ_TOOLS.iter()) {
+        for kind in new_kinds {
+            assert!(!is_read_tool(kind, name) || own_table(kind).contains(name), "{kind:?} {name}");
+        }
+    }
+    for kind in new_kinds {
+        for name in own_table(kind) {
+            assert!(is_read_tool(kind, name), "{kind:?} {name}");
+            // 한 갈래의 읽기 도구는 다른 갈래에서 읽기 도구가 아니다(claude·codex 포함)
+            for other in new_kinds.into_iter().chain([CliKind::Claude, CliKind::Codex]) {
+                if other != kind && !own_table_or_legacy(other).contains(name) {
+                    assert!(!is_read_tool(other, name), "{name}는 {kind:?}의 읽기 도구인데 {other:?}에서도 읽기 도구다");
+                }
+            }
+        }
+        // 정확히 일치할 때만이다
+        for name in own_table(kind) {
+            assert!(!is_read_tool(kind, &name.to_uppercase()) || own_table(kind).contains(&name.to_uppercase().as_str()), "{name}");
+            assert!(!is_read_tool(kind, &format!("{name} ")), "{name}");
+            assert!(!is_read_tool(kind, &format!("mcp__x__{name}")), "{name}");
+        }
+    }
+    // 서브에이전트 도구는 새 갈래에서 쓰기 도구다(Claude의 `Agent`·`Task`는 읽기 도구로 남는다)
+    for name in ["agent", "task", "Agent", "Task", "subagent", "delegate_to_agent", "invoke_agent"] {
+        for kind in new_kinds {
+            assert!(!is_read_tool(kind, name), "{kind:?} {name}");
+        }
+    }
+    assert!(is_read_tool(CliKind::Claude, "Agent") && is_read_tool(CliKind::Claude, "Task"));
+    // 바꾸는 도구와 모르는 이름
+    for name in ["write", "edit", "bash", "patch", "apply_patch", "write_file", "replace", "run_shell_command", "shell", "", "webfetch "] {
+        for kind in new_kinds {
+            assert!(!is_read_tool(kind, name), "{kind:?} {name:?}");
+        }
+    }
+}
+
+fn own_table(kind: CliKind) -> &'static [&'static str] {
+    match kind {
+        CliKind::CommandCode => COMMAND_CODE_READ_TOOLS.as_slice(),
+        CliKind::OpenCode => OPENCODE_READ_TOOLS.as_slice(),
+        CliKind::Gemini => GEMINI_READ_TOOLS.as_slice(),
+        CliKind::Claude | CliKind::Codex => &[],
+    }
+}
+
+fn own_table_or_legacy(kind: CliKind) -> Vec<&'static str> {
+    match kind {
+        CliKind::Claude | CliKind::Codex => AGENT_READ_TOOLS.iter().chain(CODEX_READ_TOOLS.iter()).copied().collect(),
+        other => own_table(other).to_vec(),
     }
 }

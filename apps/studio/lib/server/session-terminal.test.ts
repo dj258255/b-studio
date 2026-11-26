@@ -17,12 +17,12 @@ import {
   sessionTerminalPresence,
   subscribeSessionTerminal,
   terminalBackend,
-  terminalHomeUser,
   writeSessionTerminal,
   type TerminalBackend,
   type TerminalMessage,
   type TerminalTarget,
 } from './session-terminal';
+import { terminalHomeUser } from './terminal-allowed';
 
 /** 도커 없이 도는 가짜. 자리를 준비한 횟수, 연 터미널, 쓴 입력, 지운 것을 기록한다 */
 const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:41001', hookToken: 'hook-token', mcpUrl: 'http://host.docker.internal:41002/mcp', mcpToken: 'mcp-token' };

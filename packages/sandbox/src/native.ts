@@ -318,6 +318,8 @@ interface NativeGuard {
   terminalClassifyPrompt(text: string): NativeTerminalPromptClass;
   /** 읽기 도구인가(ADR-215): Claude Code와 Codex의 표에 정확히 일치하는 이름만 참이다 */
   terminalIsReadTool(name: string): boolean;
+  /** 갈래별 읽기 도구(claude·codex·commandcode·opencode·gemini). 모르는 갈래는 false */
+  terminalIsReadToolFor(kind: string, name: string): boolean;
   /** 읽기만이 앞선 변경이 있는 실행에 이어 켜질 때 턴 끝에 표시하는가(ADR-215). `changedBefore`: 0 없음, 1 있음, 그 밖은 읽지 못함(있는 것으로 본다) */
   terminalReadOnlyAfterWork(alreadyReadOnly: boolean, verificationStarted: boolean, changedBefore: number): boolean;
   /** 터미널의 턴 끝 게이트 앞 판정(ADR-212). 읽지 않은 사실(`unread`)이 필요한 칸에 닿으면 `need_*`를 돌려준다 */
@@ -382,6 +384,10 @@ interface NativeGuard {
   terminalHookedArgv(argv: string[], settingsPath: string, mcpPath: string, selfAgentLoader?: string | null, selfAgentEntry?: string | null): boolean;
   /** 프로세스의 진짜 argv. 끝났으면 null, 읽지 못하면 던진다 */
   terminalProcessArgv(pid: number): string[] | null;
+  /** 프로세스의 환경(뜰 때의 것, 같은 계정만). 끝났으면 null, 읽지 못하면(가려져 비어 보이는 것 포함) 던진다 — 빈 환경이 아니라 "모른다" */
+  terminalProcessEnv(pid: number): Array<{ name: string; value: string }> | null;
+  /** 새 갈래(commandcode·opencode·gemini)가 우리 설정으로 떴는가. env가 null이면 환경이 필요한 갈래는 false. claude·codex·모르는 갈래는 false */
+  terminalHookedLaunch(kind: string, argv: string[], env: Array<{ name: string; value: string }> | null, expected: string): boolean;
   /** 훅 요청 본문 종류(ADR-219): `empty`·`object`·`not_object`·`invalid` */
   terminalHookBodyKind(body: Buffer): string;
   // ── 이 컴퓨터 방식 터미널의 관문 글과 폴더(4f C1 5단계). 검증 함수는 `{ok:true,value}` 또는 `{ok:false,title,detail}` 봉투(JSON)를 돌려준다 ──

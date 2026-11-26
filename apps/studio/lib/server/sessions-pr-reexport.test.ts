@@ -107,7 +107,10 @@ vi.mock('./model-registry', async (importOriginal) => {
   };
 });
 
-import { createSession, exportSession, getSnapshot, previewExport, sendMessage, stopSession, subscribe } from './sessions';
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
+import { createSession, exportSession, getSnapshot, previewExport, stopSession } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -220,18 +223,7 @@ async function settle(ms = 150): Promise<void> {
 }
 
 async function runWrite(id: string, request: string, content: string): Promise<void> {
-  let armed = false;
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (armed && event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-    armed = true;
-  });
-  sendMessage(id, request, { allowBreaking: false, scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content } }] }, { text: '완료했습니다.' }] });
-  await finished;
+  await completeTerminalRun(id, request, { 'api/src/Order.java': content });
 }
 
 const noFindings = () => JSON.stringify({ findings: [] });
