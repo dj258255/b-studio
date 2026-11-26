@@ -57,6 +57,27 @@ export function stringWidth(text: string): number {
   return width;
 }
 
+/**
+ * 글의 끝에서부터 폭 budget칸 안에 들어가는 가장 긴 뒷부분을 돌려준다(입력 줄이 길 때 커서가 있는 끝을 보이려고).
+ * 글자 폭은 글자마다 따로 더해지므로 끝에서 한 번만 훑으면 된다. 앞을 한 글자씩 자르며 폭을 다시 재면 글 길이의 제곱으로 느려진다(#1387).
+ */
+export function tailFit(text: string, budget: number): string {
+  let used = 0;
+  let start = text.length;
+  while (start > 0) {
+    let at = start - 1;
+    const low = text.charCodeAt(at);
+    if (low >= 0xdc00 && low <= 0xdfff && at > 0) {
+      const high = text.charCodeAt(at - 1);
+      if (high >= 0xd800 && high <= 0xdbff) at--;
+    }
+    used += charWidth(text.codePointAt(at)!);
+    if (used > budget) break;
+    start = at;
+  }
+  return text.slice(start);
+}
+
 /** 글을 정확히 width칸으로 맞춘다. 넘치면 끝을 말줄임표로 자르고, 모자라면 빈칸으로 채운다 */
 export function fit(text: string, width: number): string {
   if (width <= 0) return '';
