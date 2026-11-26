@@ -29,6 +29,7 @@ export const routes: RouteEntry[] = [
   { pattern: "/api/routing/stats", load: () => import("../app/api/routing/stats/route") },
   { pattern: "/api/sessions", load: () => import("../app/api/sessions/route") },
   { pattern: "/api/sessions/[id]", load: () => import("../app/api/sessions/[id]/route") },
+  { pattern: "/api/sessions/[id]/agents/activity", load: () => import("../app/api/sessions/[id]/agents/activity/route") },
   { pattern: "/api/sessions/[id]/artifacts/[...path]", load: () => import("../app/api/sessions/[id]/artifacts/[...path]/route") },
   { pattern: "/api/sessions/[id]/boot", load: () => import("../app/api/sessions/[id]/boot/route") },
   { pattern: "/api/sessions/[id]/changes", load: () => import("../app/api/sessions/[id]/changes/route") },
