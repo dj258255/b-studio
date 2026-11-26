@@ -2,6 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import type { ModelClient } from '../loop';
 import { createHookRunner, type HookRunner } from './hooks';
 import { InputParser } from './input';
+import { connectMcpServers, type McpTools } from './mcp';
 import { loadSettings, parseArgs, type InteractiveSettings } from './settings';
 import { computeCost, sendApiRequest, type Pricing } from './telemetry';
 import { createTools, type InteractiveTools } from './tools';
@@ -14,7 +15,7 @@ type BetaToolResultBlockParam = Anthropic.Beta.BetaToolResultBlockParam;
 export const MAX_MODEL_CALLS_PER_REQUEST = 50;
 
 export interface InteractiveSessionOptions {
-  /** claude CLI와 같은 인자: `--settings <파일>`, `--mcp-config <값…>`(지금은 무시), `--model <id>`, 마지막 위치 인자는 첫 요청 */
+  /** claude CLI와 같은 인자: `--settings <파일>`, `--mcp-config <파일…>`(http 서버의 도구를 `mcp__<서버>__<도구>`로 붙인다), `--model <id>`, 마지막 위치 인자는 첫 요청 */
   args: string[];
   cwd: string;
   client: ModelClient;
@@ -62,6 +63,8 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
   const settings: InteractiveSettings = loadSettings(parsed.settingsFile);
   const hooks: HookRunner = createHookRunner({ settings, cwd, sessionId: 'conversation-1', env: options.env });
   const tools: InteractiveTools = createTools(cwd, { scrubEnvNames: options.scrubEnvNames });
+  // MCP 도구는 세션을 시작하는 첫 작업에서 붙인다(요청은 차례로 처리하므로 첫 요청 전에 끝난다). 붙이지 못하면 그 도구 없이 계속한다
+  let mcp: McpTools | undefined;
   const system = options.system ?? defaultSystemPrompt(cwd);
   const maxCalls = options.maxModelCalls ?? MAX_MODEL_CALLS_PER_REQUEST;
   const messages: BetaMessageParam[] = [];
@@ -86,7 +89,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       const startedAt = Date.now();
       let message: BetaMessage;
       try {
-        message = await client.createMessage({ system, tools: tools.definitions, messages: [...messages] }, options.signal);
+        message = await client.createMessage({ system, tools: [...tools.definitions, ...(mcp?.definitions ?? [])], messages: [...messages] }, options.signal);
       } catch (error) {
         print(`모델 호출에 실패했습니다: ${error instanceof Error ? error.message : String(error)}`);
         return;
@@ -113,7 +116,9 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
         const results: BetaToolResultBlockParam[] = [];
         for (const use of toolUses) {
           const toolInput = (typeof use.input === 'object' && use.input !== null ? use.input : {}) as Record<string, unknown>;
-          const hookInput = tools.hookInput(use.name, toolInput);
+          // MCP 도구는 claude가 훅에 주는 것과 같이 이름 `mcp__서버__도구`와 모델이 준 입력 그대로를 알린다
+          const isMcp = mcp?.has(use.name) === true;
+          const hookInput = isMcp ? toolInput : tools.hookInput(use.name, toolInput);
           const answer = await hooks.call('PreToolUse', { tool_name: use.name, tool_input: hookInput, tool_use_id: `toolu_${++toolCount}` });
           if (answer.hookSpecificOutput?.permissionDecision === 'deny') {
             const reason = answer.hookSpecificOutput.permissionDecisionReason ?? '거절됨';
@@ -122,7 +127,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
             continue;
           }
           // 훅에는 절대 경로로 풀어 알렸지만 실행은 모델이 준 입력을 작업 폴더 기준으로 다시 풀어 가둔다
-          const outcome = await tools.execute(use.name, toolInput, options.signal);
+          const outcome = isMcp ? await mcp!.call(use.name, toolInput, options.signal) : await tools.execute(use.name, toolInput, options.signal);
           // Bash는 file_path를 함께 보내도 명령을 보인다(화면에 다른 것을 보이지 않게)
           const target = use.name === 'Bash' ? (typeof toolInput.command === 'string' ? ` ${clip(toolInput.command, 80)}` : '') : typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : '';
           print(`  ${printable(`${use.name}${target}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`)}`);
@@ -147,6 +152,12 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
   };
 
   print('대화형 에이전트가 준비됐습니다');
+  if (parsed.mcpConfigs?.length) {
+    const files = parsed.mcpConfigs;
+    queue(async () => {
+      mcp = await connectMcpServers(files, { notice: (line) => print(printable(line)), signal: options.signal });
+    });
+  }
   queue(async () => void (await hooks.call('SessionStart', { source: 'startup' })));
   if (parsed.firstRequest) {
     const first = parsed.firstRequest;
@@ -169,4 +180,5 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
     }
   });
   await chain;
+  await mcp?.close();
 }
