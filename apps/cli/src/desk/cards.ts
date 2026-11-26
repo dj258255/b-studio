@@ -57,7 +57,7 @@ export function resetText(iso: string | undefined, now: number): string {
 }
 
 /** 지난 때를 "13초 전", "3분 전", "2시간 전", "4일 전"으로 */
-function agoText(iso: string | undefined, now: number): string {
+export function agoText(iso: string | undefined, now: number): string {
   const gone = goneMs(iso, now);
   if (gone === undefined) return '';
   if (gone < 60_000) return `${Math.floor(gone / 1000)}초 전`;
@@ -67,7 +67,7 @@ function agoText(iso: string | undefined, now: number): string {
 }
 
 /** 이어진 시간을 "20초째", "23분째", "1시간 4분째"로 */
-function forText(iso: string | undefined, now: number): string {
+export function forText(iso: string | undefined, now: number): string {
   const gone = goneMs(iso, now);
   if (gone === undefined) return '';
   return `${spanText(gone)}째`;
@@ -86,7 +86,7 @@ function bootingLine(item: DeskItem, width: number, theme: Theme, now: number): 
   return compose([{ text: '› 샌드박스와 서비스를 띄우는 중', color: 'muted', flex: true }, ...when], width, theme);
 }
 
-function spanText(ms: number): string {
+export function spanText(ms: number): string {
   if (ms < 60_000) return `${Math.floor(ms / 1000)}초`;
   if (ms < 3_600_000) return `${Math.floor(ms / 60_000)}분`;
   const hours = Math.floor(ms / 3_600_000);
@@ -94,7 +94,7 @@ function spanText(ms: number): string {
   return minutes ? `${hours}시간 ${minutes}분` : `${hours}시간`;
 }
 
-function goneMs(iso: string | undefined, now: number): number | undefined {
+export function goneMs(iso: string | undefined, now: number): number | undefined {
   if (!iso) return undefined;
   const at = Date.parse(iso);
   return Number.isFinite(at) ? Math.max(0, now - at) : undefined;
@@ -147,7 +147,7 @@ export function clipWords(text: string, width: number): string {
 }
 
 /** 한 줄의 조각. flex인 조각은 넘칠 때 뒤에서부터 낱말 경계로 줄인다 */
-interface Seg {
+export interface Seg {
   text: string;
   color?: ColorToken;
   bold?: boolean;
@@ -155,7 +155,7 @@ interface Seg {
 }
 
 /** 조각을 width칸 한 줄로. 넘치면 flex 조각을 뒤에서부터 줄이고, 그래도 넘치면 끝을 자른다 */
-function compose(segs: readonly Seg[], width: number, theme: Theme): string {
+export function compose(segs: readonly Seg[], width: number, theme: Theme): string {
   const parts = segs.filter((seg) => seg.text).map((seg) => ({ ...seg }));
   let over = parts.reduce((sum, seg) => sum + stringWidth(seg.text), 0) - width;
   for (let at = parts.length - 1; at >= 0 && over > 0; at--) {
@@ -169,7 +169,7 @@ function compose(segs: readonly Seg[], width: number, theme: Theme): string {
   return fitAnsi(line, width);
 }
 
-const SEP: Seg = { text: ' · ', color: 'muted' };
+export const SEP: Seg = { text: ' · ', color: 'muted' };
 
 // 카드 머리의 상태는 칸 머리도 같이 쓴다(#959). sidebar.ts의 headStatus
 export { headStatus };
@@ -201,7 +201,7 @@ function lastSignal(item: DeskItem): number | undefined {
  * 지금 줄(#934). 기다리면 그 까닭, 검증에 실패했으면 그 까닭, 도구가 돌면 "실행 pnpm test · 6분째",
  * 끝난 도구면 "편집 a.ts · 13초 전". 작업 중인데 도구도 돌지 않고 3분 넘게 조용하면 "⚠ 4분째 소식 없음"
  */
-function nowLine(item: DeskItem, width: number, theme: Theme, now: number): string {
+export function nowLine(item: DeskItem, width: number, theme: Theme, now: number): string {
   const head = headStatus(item);
   const waiting = item.terminal?.waiting;
   // 기다림·실패는 머리에 이미 상태가 있으니 여기에는 까닭만 그 색으로 적는다
@@ -317,7 +317,7 @@ function lastLine(item: DeskItem, width: number, theme: Theme, continued = false
   return compose([{ text: '답 ', color: 'muted' }, { text: oneLine(item.lastMessage), flex: true }], width, theme);
 }
 
-function oneLine(text: string): string {
+export function oneLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
@@ -332,14 +332,24 @@ function lastMore(item: DeskItem, width: number): string[] {
   return lastWrapped(item, width).slice(1);
 }
 
-/** 카드 몸에 한 줄씩 보이는 작업 중 서브에이전트의 수 */
-const SUBAGENT_SHOWN = 2;
+/**
+ * 카드 몸에 한 줄씩 보이는 작업 중 서브에이전트의 수. 셋이면 그림이 큰 카드(7줄)에 머리·지금·서브에이전트 셋·할 일·답이 들어가고,
+ * 넷부터는 고른 카드의 펼침(detailLines)이 이어 받는다. 나머지는 "외 N개"다
+ */
+const SUBAGENT_SHOWN = 3;
 
-function subagentsOf(item: DeskItem): DeskAgent[] {
+/** 작업 중인 서브에이전트가 STALE_MS보다 오래 소식이 없으면 그 시간(ms). 아니면 없다. 카드와 나무 목록이 같은 규칙을 쓴다 */
+export function agentQuiet(agent: DeskAgent, now: number): number | undefined {
+  if (agent.state !== 'working') return undefined;
+  const quiet = goneMs(agent.lastAt, now);
+  return quiet !== undefined && quiet > STALE_MS ? quiet : undefined;
+}
+
+export function subagentsOf(item: DeskItem): DeskAgent[] {
   return (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
 }
 
-/** 서브에이전트 줄: 작업 중인 것을 둘까지 "↳ 종류 맡긴 일 · 도구 · 4분째"(멈춘 듯이면 그것), 나머지는 "외 N개", 다 끝났으면 한 줄 */
+/** 서브에이전트 줄: 작업 중인 것을 셋까지 "↳ 종류 맡긴 일 · 도구 · 4분째"(멈춘 듯이면 그것), 나머지는 "외 N개", 다 끝났으면 한 줄 */
 function subagentLines(item: DeskItem, width: number, theme: Theme, now: number, selected = false): string[] {
   const subagents = subagentsOf(item);
   if (subagents.length === 0) return [];
@@ -348,9 +358,9 @@ function subagentLines(item: DeskItem, width: number, theme: Theme, now: number,
   if (working.length === 0 && selected) return [];
   if (working.length === 0) return [compose([{ text: `↳ 서브에이전트 ${subagents.length}개 끝남`, color: 'muted' }], width, theme)];
   const lines = working.slice(0, SUBAGENT_SHOWN).map((agent) => {
-    const quiet = goneMs(agent.lastAt, now);
+    const quiet = agentQuiet(agent, now);
     const when: Seg | undefined =
-      quiet !== undefined && quiet > STALE_MS
+      quiet !== undefined
         ? { text: `⚠ ${spanText(quiet)}째 소식 없음`, color: 'yellow' }
         : agent.startedAt
           ? { text: forText(agent.startedAt, now), color: 'muted' }
@@ -362,7 +372,8 @@ function subagentLines(item: DeskItem, width: number, theme: Theme, now: number,
       theme,
     );
   });
-  if (working.length > SUBAGENT_SHOWN) lines.push(compose([{ text: `↳ 외 ${working.length - SUBAGENT_SHOWN}개 작업 중`, color: 'muted' }], width, theme));
+  // 고른 카드는 넷째부터를 펼친 줄로 하나씩 보이므로 묶음 줄을 두지 않는다(같은 것을 두 번 세지 않는다)
+  if (working.length > SUBAGENT_SHOWN && !selected) lines.push(compose([{ text: `↳ 외 ${working.length - SUBAGENT_SHOWN}개 작업 중`, color: 'muted' }], width, theme));
   return lines;
 }
 
@@ -376,7 +387,9 @@ function limitWarning(limits: DeskLimits | undefined, width: number, theme: Them
   const [label, window] = tight;
   const pct = Math.round(Math.min(100, window.usedPercent));
   const reset = resetText(window.resetsAt, now);
-  return compose([{ text: `⚠ 이 계정 ${label} ${pct}%`, color: pct >= 95 ? 'red' : 'yellow' }, ...(reset ? [SEP, { text: `${reset} 다시 참`, color: 'muted' as const, flex: true }] : [])], width, theme);
+  // "다시 참"으로 끝내면 다음 줄 맨 앞의 "답"과 이어 읽혔다("다시 참 / 답 …"). 명사로 끝낸다
+  const resetNote = reset === '곧 다시 참' ? '곧 초기화' : `${reset} 초기화`;
+  return compose([{ text: `⚠ 이 계정 ${label} ${pct}%`, color: pct >= 95 ? 'red' : 'yellow' }, ...(reset ? [SEP, { text: resetNote, color: 'muted' as const, flex: true }] : [])], width, theme);
 }
 
 /** 고른 카드에 펼치는 사실: 검증·체크포인트·토큰·비용 */
