@@ -1,4 +1,4 @@
-import { applyPatchPaths, native } from '@b-studio/sandbox';
+import { native } from '@b-studio/sandbox';
 
 /**
  * 세션 터미널의 요청·도구 입력 분류(ADR-215, 4f B5a). 판정은 Rust `crates/bstudio-session`의 `terminal::classify`가 한다(순수 함수).
@@ -62,12 +62,14 @@ const PATCH_MARKER = /^\*\*\* (?:Begin Patch|End Patch|End of File)$/;
 
 /**
  * 패치 본문에서 바꾸는 파일을 모두 꺼낸다. **알아보지 못하면 null이다**(경로가 하나도 없거나, 경로가 빈 머리글이 있거나, `***`로 시작하는데 아는 줄이 아닌 줄이 있다).
- * 놓친 파일이 있을 수 있는 패치를 "경로 없음"으로 읽으면 허용 목록이 열린다. codex의 `applyPatchPaths`보다 엄격하다(그쪽은 건드리지 않는다)
+ * 놓친 파일이 있을 수 있는 패치를 "경로 없음"으로 읽으면 허용 목록이 열린다. 모든 갈래의 패치 도구가 이 하나를 쓴다(옛 느슨한 `applyPatchPaths`는 앞뒤 공백이 있는 머리글을 놓쳤다)
  */
 function strictPatchPaths(patch: unknown): string[] | null {
   if (typeof patch !== 'string') return null;
   const paths: string[] = [];
-  for (const line of patch.split(/\r?\n/)) {
+  for (const raw of patch.split('\n')) {
+    // CLI의 패치 읽기처럼 줄 앞뒤 공백(`\r` 포함)을 다듬은 줄로 맞춘다. 우리가 덜 다듬으면 CLI는 바꾸는데 우리는 못 본 파일이 생긴다
+    const line = raw.trim();
     const header = PATCH_FILE_HEADER.exec(line);
     if (header) {
       const file = header[1]!.trim();
@@ -83,20 +85,19 @@ function strictPatchPaths(patch: unknown): string[] | null {
 /**
  * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 경로가 없는 도구면 빈 목록, **알 수 없으면 null**이다.
  * 허용 목록(카드의 쓰기 범위)에 넣을 값이라 null을 빈 목록처럼 통과시키지 않는다: 부르는 쪽이 범위 밖으로 막는다.
- * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(본문이 글이 아니면 null — 옛 코드는 빈 목록이었다)
+ * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(엄격하게 읽고 모르면 null)
  * - opencode: `filePath`(edit·write·multiedit은 없으면 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
  * - commandcode·gemini: 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null
  */
 export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, input: unknown): string[] | null {
   if (kind === 'claude' || kind === 'codex') {
-    // codex의 apply_patch는 본문을 읽지 못하면 바꾸는 파일을 알 수 없다(옛 코드는 빈 목록이라 쓰기 범위를 비켜 갔다)
-    if (kind === 'codex' && tool === 'apply_patch') {
-      const command = typeof input === 'object' && input !== null ? (input as Record<string, unknown>).command : undefined;
-      return typeof command === 'string' ? applyPatchPaths(command) : null;
+    // 패치 도구는 본문을 엄격하게 읽는다. 읽지 못하면 바꾸는 파일을 알 수 없다(옛 코드는 빈 목록이거나 느슨한 추출이라 쓰기 범위를 비켜 갔다)
+    if (PATCH_TOOLS.has(tool)) {
+      const body = typeof input === 'object' && input !== null ? (input as Record<string, unknown>).command : undefined;
+      return strictPatchPaths(body);
     }
     if (typeof input !== 'object' || input === null) return [];
     const record = input as Record<string, unknown>;
-    if (tool === 'apply_patch') return typeof record.command === 'string' ? applyPatchPaths(record.command) : [];
     for (const key of ['file_path', 'notebook_path']) {
       const value = record[key];
       if (typeof value === 'string' && value.trim() !== '') return [value];

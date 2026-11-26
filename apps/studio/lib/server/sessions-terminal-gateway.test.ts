@@ -2770,6 +2770,21 @@ describe('Codex 터미널(#825)', () => {
     await stopSession(session.id);
   }, 30_000);
 
+  it('apply_patch 본문을 우리가 다르게 읽을 수 있으면(들여쓴 머리글·알 수 없는 ***줄·경로 없음) 쓰기 범위 밖으로 막고, 옮길 곳이 범위 밖이어도 막는다', async () => {
+    const session = await openCodex();
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '주문에 메모 필드 추가' });
+    const wrap = (...lines: string[]): string => ['*** Begin Patch', ...lines, '*** End Patch', ''].join('\n');
+    for (const command of [wrap('*** Update File: api/src/A.java', '  *** Rename File: web/x.txt'), '*** Begin Patch\n*** End Patch', wrap('*** Update File: api/src/A.java').replace(/\n/g, '\r\n') + '\r\n  *** Update File: web/x.txt']) {
+      const answer = await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input: { command } });
+      expect(answer.deny, JSON.stringify(command)).toBeTruthy();
+    }
+    const moved = await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input: { command: wrap('*** Update File: api/src/A.java', '*** Move to: web/x.txt') } });
+    expect(moved.deny).toContain('web/x.txt');
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
   it('codex의 읽기 도구는 실행을 열거나 샌드박스를 기다리지 않고 바로 통과한다', async () => {
     const session = await openCodex();
     expect(await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'view_image', tool_input: { path: 'a.png' } })).toEqual({});

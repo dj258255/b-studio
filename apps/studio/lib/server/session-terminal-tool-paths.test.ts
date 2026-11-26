@@ -16,7 +16,7 @@ describe('terminalToolFilePaths', () => {
     expect(terminalToolFilePaths('claude', 'Write', null)).toEqual([]);
     // claude는 다른 갈래의 입력 모양(filePath·patchText)을 읽지 않는다
     expect(terminalToolFilePaths('claude', 'edit', { filePath: '/w/a.ts' })).toEqual([]);
-    expect(terminalToolFilePaths('claude', 'apply_patch', { patchText: '*** Update File: a.ts' })).toEqual([]);
+    expect(terminalToolFilePaths('claude', 'apply_patch', { patchText: '*** Update File: a.ts' })).toBeNull();
   });
 
   it('codex: apply_patch의 command 본문에서 경로를 꺼낸다', () => {
@@ -71,6 +71,27 @@ describe('terminalToolFilePaths', () => {
     // 패치 도구인데 본문을 읽지 못하면 알 수 없음
     expect(terminalToolFilePaths('gemini', 'apply_patch', { x: 1 })).toBeNull();
     expect(terminalToolFilePaths('commandcode', 'apply_patch', { command: '*** Begin Patch\n*** Add File: a.ts\n*** End Patch' })).toEqual(['a.ts']);
+  });
+});
+
+describe('패치 도구는 갈래와 상관없이 같은 엄격한 읽기를 쓴다', () => {
+  const wrap = (...lines: string[]): string => ['*** Begin Patch', ...lines, '*** End Patch', ''].join('\n');
+  it('codex: 머리글 앞뒤 공백·CRLF도 같은 파일로 읽는다(CLI가 읽는 방식과 같게 줄을 다듬어 맞춘다)', () => {
+    expect(terminalToolFilePaths('codex', 'apply_patch', { command: wrap('  *** Update File: a.ts', '\t*** Move to: b.ts  ') })).toEqual(['a.ts', 'b.ts']);
+    expect(terminalToolFilePaths('codex', 'apply_patch', { command: wrap('*** Add File: a.ts').replace(/\n/g, '\r\n') })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('codex', 'apply_patch', { command: wrap('*** Delete File: old/d.ts') })).toEqual(['old/d.ts']);
+  });
+  it('codex: 알아보지 못하는 ***줄·경로 없는 본문·빈 경로·글이 아닌 본문은 null이다', () => {
+    for (const command of [
+      wrap('*** Update File: a.ts', '  *** Rename File: b.ts'),
+      wrap('*** Update File: a.ts', '***Update File: b.ts'),
+      wrap('*** Update File: a.ts', '   *** update file: b.ts'),
+      wrap('*** Update File:    '),
+      '*** Begin Patch\n*** End Patch',
+      'ls -la',
+      '',
+    ]) expect(terminalToolFilePaths('codex', 'apply_patch', { command }), JSON.stringify(command)).toBeNull();
+    expect(terminalToolFilePaths('codex', 'apply_patch', { command: 7 })).toBeNull();
   });
 });
 
