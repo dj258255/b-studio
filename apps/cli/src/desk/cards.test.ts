@@ -314,3 +314,34 @@ describe('도구 이름을 우리말로', () => {
     expect(toolLineLabel('')).toBe('');
   });
 });
+
+describe('토큰 한도 표시(#1427)', () => {
+  const draw = (target: DeskItem, patch: Partial<Parameters<typeof cardLines>[0]> = {}) =>
+    cardLines({ item: target, selected: false, flagged: false, withLimits: true, sprite: defaultSprite('claude-code'), ...patch }, 84, DEFAULT_THEME, NOW).map(stripAnsi).join('\n');
+  const limited = (percent: number | undefined, kind: 'session' | 'user' = 'session') =>
+    item('a', { tokens: usage(1_000), tokenLimit: { kind, limit: 10_000, ...(percent !== undefined ? { used: percent * 100, percent } : {}) } });
+
+  it('80% 이상이면 구독 한도 경고와 같은 모양(⚠ 줄)으로 보이고, 80% 아래이면 줄이 비어 있다', () => {
+    expect(draw(limited(85))).toContain('⚠ 세션 토큰 한도 85%');
+    expect(draw(limited(85, 'user'))).toContain('⚠ 개인 토큰 한도 85%');
+    expect(draw(limited(100))).toContain('한도에 닿음');
+    expect(draw(limited(79))).not.toContain('⚠');
+    expect(draw(limited(85), { withLimits: false })).not.toContain('⚠');
+  });
+  it('구독 한도 경고가 있으면 그것이 먼저다', () => {
+    const text = draw(limited(85), { limits: { weekly: { usedPercent: 90 } } });
+    expect(text).toContain('이 계정 주간 90%');
+    expect(text).not.toContain('토큰 한도 85%');
+  });
+  it('고른 카드의 사실 줄에 한도 %를 보이고, 읽지 못했으면 0%가 아니라 ?로 보인다', () => {
+    expect(draw(limited(42), { selected: true })).toContain('세션 한도 42%');
+    const unknown = draw(limited(undefined, 'user'), { selected: true });
+    expect(unknown).toContain('개인 한도 ?');
+    expect(unknown).not.toContain('한도 0%');
+    expect(unknown).not.toContain('⚠');
+  });
+  it('한도가 없는 항목(옛 서버 포함)은 한도 글자를 내지 않는다', () => {
+    const text = draw(item('a', { tokens: usage(1_000) }), { selected: true });
+    expect(text).not.toContain('한도');
+  });
+});

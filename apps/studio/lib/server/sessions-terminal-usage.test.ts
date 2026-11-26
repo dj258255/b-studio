@@ -235,6 +235,7 @@ const rec = (id: string | undefined, { at = Date.now(), input = 10 }: { at?: num
 afterEach(() => {
   vi.useRealTimers();
   delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
+  delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
   delete process.env.B_STUDIO_TERMINAL_STALL_SECONDS;
 });
 
@@ -450,5 +451,71 @@ describe('U6: 정체 알림이 정체 시간의 두 배까지 늦지 않는다',
     vi.advanceTimersByTime(10_000);
     const warnings = session.events.filter((event) => event.type === 'agent' && event.event.type === 'warning');
     expect(warnings).toHaveLength(1);
+  }, 30_000);
+});
+
+describe('토큰 한도 단계 알림(#1427)', () => {
+  /** 한도 단계 알림(notice) 글만 */
+  const stageNotices = (session: Opened) => session.ofType('notice').filter((event) => event.text.includes('토큰 한도의'));
+
+  it('세션 한도의 50%·80%를 처음 넘을 때 한 번씩 알리고, 같은 단계는 다시 알리지 않는다', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([rec('r1', { input: 99 })])); // 100 = 10%
+    expect(stageNotices(session)).toEqual([]);
+    await session.gateway.telemetry(otlp([rec('r2', { input: 449 })])); // 550 = 55%
+    expect(stageNotices(session)).toHaveLength(1);
+    expect(stageNotices(session)[0]?.text).toContain('50%');
+    await session.gateway.telemetry(otlp([rec('r3', { input: 99 })])); // 650: 같은 단계
+    expect(stageNotices(session)).toHaveLength(1);
+    await session.gateway.telemetry(otlp([rec('r4', { input: 199 })])); // 850 = 85%
+    expect(stageNotices(session)).toHaveLength(2);
+    expect(stageNotices(session)[1]?.text).toContain('80%');
+    expect(session.ofType('run_cancelling')).toEqual([]);
+  }, 30_000);
+
+  it('한 번에 두 단계를 넘으면 높은 단계만 알린다', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([rec('r1', { input: 849 })]));
+    expect(stageNotices(session).map((event) => event.text.includes('80%'))).toEqual([true]);
+  }, 30_000);
+
+  it('한도를 넘는 요청은 알리지 않고 지금처럼 멈춘다(막는 판정은 그대로)', async () => {
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '1000';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([rec('r1', { input: 1199 })]));
+    expect(stageNotices(session)).toEqual([]);
+    expect(session.ofType('run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+  }, 30_000);
+
+  it('한도가 없으면 아무것도 알리지 않는다', async () => {
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([rec('r1', { input: 99999 })]));
+    expect(stageNotices(session)).toEqual([]);
+  }, 30_000);
+
+  it('사람 한도의 단계도 알린다. 사용량 파일을 읽지 못하면 알리지 않고, 막는 쪽은 그대로 멈춘다', async () => {
+    process.env.B_STUDIO_USER_TOKEN_LIMIT = '1000';
+    const session = await open();
+    await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await session.gateway.telemetry(otlp([rec('r1', { input: 599 })]));
+    expect(stageNotices(session)).toHaveLength(1);
+    expect(stageNotices(session)[0]?.text).toContain('50%');
+    // 사용량 폴더를 읽을 수 없는 쪽으로 돌린다: 알림은 0%로 읽지 않고 조용하며, 한도 판정은 실행을 멈춘다
+    const good = process.env.B_STUDIO_USAGE_DIR!;
+    await writeFile(path.join(path.dirname(good), 'blocker2'), 'x');
+    process.env.B_STUDIO_USAGE_DIR = path.join(path.dirname(good), 'blocker2', 'usage');
+    try {
+      await session.gateway.telemetry(otlp([rec('r2', { input: 299 })]));
+    } finally {
+      process.env.B_STUDIO_USAGE_DIR = good;
+    }
+    expect(stageNotices(session)).toHaveLength(1);
+    expect(session.ofType('run_cancelling')).toMatchObject([{ reason: 'budget' }]);
   }, 30_000);
 });

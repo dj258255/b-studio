@@ -358,8 +358,30 @@ function subagentLines(item: DeskItem, width: number, theme: Theme, now: number,
   return lines;
 }
 
-/** 이 계정의 한도가 80%를 넘었을 때만 한 줄 경고(#934). 막대는 사용량 화면에 둔다 */
-function limitWarning(limits: DeskLimits | undefined, width: number, theme: Theme, now: number): string {
+/** 세션·개인 토큰 한도 이름. 한도를 넘으면 쓰기를 막는 한도다(구독 5시간·주간 한도와 다르다) */
+const TOKEN_LIMIT_LABEL = { session: '세션', user: '개인' } as const;
+
+/** 토큰 한도 사용 %(0~100으로 자른 정수). 사용량을 읽지 못했으면(모름) undefined */
+function tokenLimitPercent(item: DeskItem): number | undefined {
+  const percent = item.tokenLimit?.percent;
+  return percent === undefined || !Number.isFinite(percent) ? undefined : Math.round(Math.max(0, Math.min(100, percent)));
+}
+
+/** 토큰 한도가 80%를 넘었을 때의 한 줄 경고. 구독 한도 경고와 같은 모양이다. 모르는 값(percent 없음)은 경고로 세지 않는다 */
+function tokenLimitWarning(item: DeskItem, width: number, theme: Theme): string {
+  const percent = tokenLimitPercent(item);
+  if (!item.tokenLimit || percent === undefined || percent < 80) return '';
+  const note = percent >= 100 ? '한도에 닿음' : '넘으면 쓰기를 막음';
+  return compose([{ text: `⚠ ${TOKEN_LIMIT_LABEL[item.tokenLimit.kind]} 토큰 한도 ${percent}%`, color: percent >= 95 ? 'red' : 'yellow' }, SEP, { text: note, color: 'muted' as const, flex: true }], width, theme);
+}
+
+/** 이 계정의 한도가 80%를 넘었을 때만 한 줄 경고(#934). 막대는 사용량 화면에 둔다. 구독 한도 경고가 없으면 토큰 한도 경고를 같은 자리에 보인다(#1427) */
+function limitWarning(limits: DeskLimits | undefined, item: DeskItem, width: number, theme: Theme, now: number): string {
+  return subscriptionWarning(limits, width, theme, now) || tokenLimitWarning(item, width, theme);
+}
+
+/** 이 계정의 구독 한도(5시간·주간)가 80%를 넘었을 때만 한 줄 경고(#934) */
+function subscriptionWarning(limits: DeskLimits | undefined, width: number, theme: Theme, now: number): string {
   const windows: Array<[string, DeskLimitWindow]> = [];
   if (limits?.fiveHour) windows.push(['5시간', limits.fiveHour]);
   if (limits?.weekly) windows.push(['주간', limits.weekly]);
@@ -379,6 +401,12 @@ function factsLine(item: DeskItem, width: number, theme: Theme): string {
   const gate = gateStatus(item);
   if (gate) parts.push([{ text: '검증 ', color: 'muted' }, { text: gate.label, color: TONE_COLOR[gate.tone] }]);
   if (item.tokens && totalTokens(item.tokens) > 0) parts.push([{ text: `토큰 ${compactTokens(totalTokens(item.tokens))}` }]);
+  if (item.tokenLimit) {
+    // 한도 사용 %. 읽지 못했으면 0%가 아니라 "한도 ?"(모름)로 보인다
+    const percent = tokenLimitPercent(item);
+    const name = TOKEN_LIMIT_LABEL[item.tokenLimit.kind];
+    parts.push([{ text: percent === undefined ? `${name} 한도 ?` : `${name} 한도 ${percent}%`, ...(percent === undefined ? { color: 'muted' as const } : percent >= 95 ? { color: 'red' as const } : percent >= 80 ? { color: 'yellow' as const } : {}) }]);
+  }
   if (item.costUsd !== undefined && item.costUsd > 0) parts.push([{ text: `$${item.costUsd.toFixed(2)}` }]);
   if (item.gate && item.gate.checkpoints > 0) parts.push([{ text: `체크포인트 ${item.gate.checkpoints}` }]);
   // 넘치면 뒤의 것부터 통째로 뺀다(숫자를 반쯤 자르지 않는다)
@@ -433,7 +461,7 @@ export function cardLines(card: CardInput, width: number, theme: Theme = DEFAULT
   if (withProgress) body.push(progressLine(item, text, theme, now));
   const subagents = subagentLines(item, text, theme, now, card.selected);
   body.push(...subagents);
-  if (card.withLimits) body.push(limitWarning(card.limits, text, theme, now));
+  if (card.withLimits) body.push(limitWarning(card.limits, item, text, theme, now));
   // 마지막 답은 맨 끝: 고른 카드에서 펼친 답이 바로 이어진다
   if (withLast) body.push(lastLine(item, text, theme, card.selected));
   if (card.selected) {
@@ -574,7 +602,7 @@ export function spaceScreen(state: DeskState, rect: Rect, now = Date.now()): Spa
   const cardWidth = Math.min(CARD_MAX, Math.max(ART_NARROW.cols + 8, Math.floor((rect.w - 2 - (columns - 1)) / columns)));
   // 줄 자리는 스페이스의 카드 하나라도 그 값이 있으면 모든 카드에 둔다(높이를 맞춘다)
   let slots: LineSlots = {
-    limits: spaceSessions.some((item) => limitWarning(state.limits?.[item.id], 80, theme, now) !== ''),
+    limits: spaceSessions.some((item) => limitWarning(state.limits?.[item.id], item, 80, theme, now) !== ''),
     progress: spaceSessions.some((item) => Boolean((item.todos && item.todos.total > 0) || item.context)),
     last: spaceSessions.some((item) => Boolean(item.lastMessage)),
   };

@@ -360,6 +360,8 @@ import { walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { spendStore } from './spend-state';
+import { userTokens } from './usage-state';
+import { advanceStage, userUsedTokens, type StageMemory } from './token-limit-stages';
 import { chargeUserUsage, judgeLimits, judgeRunLimits, newLedger, retryUserUsage, userLimitSetting, type RunLedger } from './session-limits';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -462,6 +464,11 @@ interface Session {
    * access가 undefined면 지금 이 레인에서 도는 작업이 없다(작업 사이). 신원은 access가 고정한다(레인 이름을 도구 인자로 받지 않는다)
    */
   terminalBoard?: TerminalBoard;
+  /**
+   * 한도 단계 알림(50%·80%)에서 이미 알린 단계의 기억(#1427). 저장하지 않는다 — 서버가 다시 시작되면 비고, 그때는 다음 사용량 소식에서 지금 단계를 한 번 다시 알린다.
+   * 알리는 쪽만 읽고 쓴다. 한도를 막는 판정은 이 값을 보지 않는다
+   */
+  limitStages?: { session?: StageMemory; user?: StageMemory };
   /**
    * 이 세션을 실제로 만든 폴더(`startSession`의 `sessionDir`) 또는 읽어 온 폴더(`readStoredSessions`의 `home`). 지우기와 이어받기는
    * 저장 파일의 경로 글자(`snapshot.workDir`·`stateDir`)가 아니라 이 값으로 폴더를 정한다(ADR-204)
@@ -2904,6 +2911,38 @@ function startLimitMessage(session: Session, by: string | undefined): string | u
 }
 
 /**
+ * 한도에 다가가는 단계(50%·80%)를 처음 넘을 때 한 번씩 알린다(#1427). **알리기만 한다** — 한도를 넘었는지는 `judgeRunLimits`가 따로 판정하고 이 함수는 그 결과를 읽지도 바꾸지도 않는다.
+ * 여기서 던져도 한도 확인이 건너뛰어지지 않도록 모든 오류를 삼켜 로그로 남긴다(알림이 없는 쪽이 막는 쪽이 없는 것보다 낫다). 사용량을 읽지 못한 한도는 0%로 읽지 않고 알리지 않는다.
+ * extra는 아직 세션 합계에 들어오지 않은 잠정 추가분(대화 실행), ledger는 사람 몫을 셀 이 실행의 원장이다
+ */
+function noteLimitStages(session: Session, by: string | undefined, ledger: RunLedger | undefined, extra = 0): void {
+  try {
+    const memory = (session.limitStages ??= {});
+    const limit = session.snapshot.tokenLimit;
+    if (limit !== undefined) {
+      const step = advanceStage(memory.session, `session:${limit}`, totalTokens(session.snapshot.tokens) + extra, limit);
+      memory.session = step.memory;
+      if (step.alert) emit(session, { type: 'notice', text: `이 세션이 토큰 한도의 ${step.alert}%에 다다랐습니다(한도 ${formatTokenCount(limit)}). 한도를 넘으면 쓰기를 막고 실행을 멈춥니다`, at: new Date().toISOString() });
+    }
+    const setting = userLimitSetting(by);
+    if (setting && by) {
+      let used: number | undefined;
+      try {
+        used = userUsedTokens(userTokens(by, setting.window), ledger ? { accum: ledger.accum + extra, saved: ledger.saved } : extra > 0 ? { accum: extra, saved: 0 } : undefined);
+      } catch {
+        // 사용량 파일을 읽지 못했다: 모름이다(알리지 않는다). 막는 쪽은 judgeRunLimits가 따로 멈춘다
+        used = undefined;
+      }
+      const step = advanceStage(memory.user, `user:${by}:${setting.window}:${setting.limit}`, used, setting.limit);
+      memory.user = step.memory;
+      if (step.alert) emit(session, { type: 'notice', text: `${describeWindow(setting.window)} 쓸 수 있는 개인 토큰 한도의 ${step.alert}%에 다다랐습니다(한도 ${formatTokenCount(setting.limit)}). 한도를 넘으면 쓰기를 막고 실행을 멈춥니다`, at: new Date().toISOString() });
+    }
+  } catch (error) {
+    console.error('[b-studio] 토큰 한도 단계 알림을 내지 못했습니다', describe(error));
+  }
+}
+
+/**
  * 대화 실행의 한도 판정과 멈춤(`tokens` 이벤트와 `turn_usage` 이벤트가 같은 길로 부른다). 막는 쪽이다: 한도에 닿으면 실행을 멈추고 되돌린다.
  * extra는 아직 기록에 들어오지 않은 잠정 추가분이다. 판정에만 더하고 원장·세션 합계 자체는 바꾸지 않는다(복사본을 넘긴다)
  */
@@ -2969,6 +3008,7 @@ function judgeTurnUsageLimit(session: Session, run: ActiveRun, event: Parameters
   const extra = Math.max(0, totalTokens(run.turnUsage) - totalTokens(run.tokens));
   if (extra === 0) return;
   stopIfOverLimit(session, run, extra);
+  noteLimitStages(session, run.by, run.userLedger, extra);
 }
 
 /** 사람 몫에 늘어난 만큼만 더한다. 기록을 쓰지 못해도 요청은 계속한다(못 쓴 양은 이 실행의 원장에 남아 한도 판정이 센다) */
@@ -3172,6 +3212,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       }
       if (!recordRunTokens(session, run, event.usage)) return;
       stopIfOverLimit(session, run, 0);
+      noteLimitStages(session, run.by, run.userLedger);
     },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
   };
@@ -8239,6 +8280,8 @@ async function attributeRunUsage(session: Session, request: ModelCall): Promise<
   // 사람 몫을 쓰는 사이와 알림 뒤에 실행이 닫혔을 수 있어 열린 실행을 다시 읽는다
   const stillOpen = openTerminalRun(session);
   if (step.checkLimits && stillOpen) checkTerminalLimits(session, stillOpen);
+  // 한도 확인 뒤에 단계만 알린다(#1427). 알림이 던져도 위의 확인은 이미 끝났다. 열린 실행이 없으면 사용량은 세션 주인 몫이다
+  noteLimitStages(session, stillOpen?.by ?? session.snapshot.owner, stillOpen?.userLedger);
 }
 
 /** 터미널 실행의 합계를 run_finished.metrics에 실을 꼴로 만든다. 매 호출은 모델 이름별로만 세고 툴 시간은 재지 않는다 */
