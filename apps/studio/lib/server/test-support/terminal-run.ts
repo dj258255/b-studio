@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect } from 'vitest';
-import { openTerminalRunId, sessionTerminalTarget, terminalGatewayHandlersForTest } from '../sessions';
+import { getSnapshot, openTerminalRunId, sessionTerminalTarget, terminalGatewayHandlersForTest } from '../sessions';
 
 /**
  * 채팅 경로(`sendMessage`)를 쓰지 않고 체크포인트·실행 결과를 만드는 시험 도우미(이슈 #1392).
@@ -49,4 +49,18 @@ export function stopTerminalTurn(run: TerminalRunHandle, lastMessage = '끝났�
 /** API 오류로 턴이 끝났다(StopFailure 훅): 열린 실행을 실패로 닫고 되돌린다 */
 export function failTerminalTurn(run: TerminalRunHandle, error = 'rate_limit'): Promise<void> {
   return run.gateway.stopFailure({ hook_event_name: 'StopFailure', error, last_assistant_message: 'API Error: usage limit reached' });
+}
+
+/**
+ * 요청 하나를 터미널 경로로 끝까지 한다: 파일을 쓰고 턴을 끝내 게이트를 통과시킨다. 체크포인트가 하나 늘었는지까지 확인한다.
+ * 게이트를 통과하지 못하면(feedback이 돌아오면) 시험이 잘못 짜인 것이므로 던진다
+ */
+export async function completeTerminalRun(id: string, prompt: string, files: Record<string, string>): Promise<{ run: TerminalRunHandle; answer: Awaited<ReturnType<typeof stopTerminalTurn>> }> {
+  const before = getSnapshot(id)!.checkpoints.length;
+  const run = await openTerminalRunWithFiles(id, prompt, files);
+  const answer = await stopTerminalTurn(run);
+  if (answer.feedback) throw new Error(`게이트가 통과하지 못했습니다: ${answer.feedback}`);
+  const after = getSnapshot(id)!.checkpoints.length;
+  if (after !== before + 1) throw new Error(`체크포인트가 하나 늘어야 합니다(${before} → ${after})`);
+  return { run, answer };
 }

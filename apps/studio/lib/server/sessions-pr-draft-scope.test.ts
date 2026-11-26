@@ -72,8 +72,10 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   const actual = await importOriginal<typeof import('@b-studio/agent')>();
   return { ...actual, listIssues: (...args: unknown[]) => (fake.listIssues as (...a: unknown[]) => unknown)(...args) };
 });
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
 
-import { createSession, getSnapshot, previewExport, sendMessage, sessionRequirementIssueNumbers, stopSession, subscribe } from './sessions';
+import { createSession, getSnapshot, previewExport, sessionRequirementIssueNumbers, stopSession } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -197,25 +199,9 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   }
 }
 
-/**
- * 파일을 바꾸고 턴을 끝내는 대본으로 요청을 보내고, 그 실행이 끝나기를 기다린다(한 번에 체크포인트 하나).
- * subscribe는 구독 시점에 지금까지의 기록을 먼저 동기로 재생한다 — 같은 세션에서 두 번째로 부르면 앞선
- * run_finished가 바로 재생돼 버려, 구독 해지 함수가 아직 할당되기 전에 불리는 경합이 생긴다. `armed`로
- * subscribe가 끝난 뒤(재생이 끝난 뒤)부터만 진짜 끝남으로 본다
- */
+/** 파일 하나를 바꾸는 요청을 세션 터미널 경로로 끝까지 한다(한 번에 체크포인트 하나, 채팅 경로 없이) */
 async function runWrite(id: string, request: string, file: string, content: string): Promise<void> {
-  let armed = false;
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (armed && event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-    armed = true;
-  });
-  sendMessage(id, request, { allowBreaking: false, scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: file, content } }] }, { text: '완료했습니다.' }] });
-  await finished;
+  await completeTerminalRun(id, request, { [file]: content });
 }
 
 /** 세션의 원격 주소를 github.com 모양으로 바꿔 둔다 — lookupIssues가 listIssues(가짜)를 쓰게 하려면 remote.kind가 github이어야 한다.
