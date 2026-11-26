@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
+import { ACTIVITY_LIMITS, activityLog, activityView, clearActivityLog, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
 
 // 에이전트가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 훅 입력에서 만든다
 
@@ -335,5 +335,369 @@ describe('toolTarget 경로 줄이기: ..로 시작하는 이름 (#1004)', () =>
     expect(toolTarget('Edit', { file_path: '/work/..docs/a.md' }, '/work')).toBe('..docs/a.md');
     expect(toolTarget('Read', { file_path: '/other/a.ts' }, '/work')).toBe('/other/a.ts');
     expect(toolTarget('Read', { file_path: '/a.ts' }, '/work')).toBe('/a.ts');
+  });
+});
+
+// 에이전트별 최근 활동 기록(#1411). 메인과 서브에이전트마다 최근 도구 호출과 코드 조각을 기억에만 남긴다
+describe('에이전트별 활동 기록(activityLog)', () => {
+  const L = ACTIVITY_LIMITS;
+  const SECRET = 'zq9-very-secret-value-4711';
+  const known = (text: string): string => text.split(SECRET).join('[가림]');
+  const mainLog = (state: ReturnType<typeof newTerminalActivity>) => activityLog(state)?.agents.find((agent) => agent.main);
+  const start = (state: ReturnType<typeof newTerminalActivity>, tool: string, tool_input: unknown, extra: Record<string, unknown> = {}, at = AT, redact?: (text: string) => string) =>
+    noteToolUse(state, { tool_name: tool, tool_input, ...extra }, at, redact);
+
+  it('Edit은 old/new를 고치기 항목으로 남기고, 끝 훅이 같은 호출(tool_use_id)을 닫는다', () => {
+    const state = newTerminalActivity();
+    start(state, 'Edit', { file_path: '/work/src/a.ts', old_string: 'const a = 1;', new_string: 'const a = 2;\nconst b = 3;' }, { tool_use_id: 't1', cwd: '/work' });
+    start(state, 'Read', { file_path: '/work/src/b.ts' }, { tool_use_id: 't2', cwd: '/work' }, AT + 1);
+    expect(mainLog(state)?.entries.map((entry) => [entry.tool, entry.state])).toEqual([['Edit', 'running'], ['Read', 'running']]);
+    // 먼저 시작한 Edit을 id로 닫는다(마지막 열린 항목인 Read가 아니라)
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Edit', tool_use_id: 't1' }, AT + 2);
+    const [edit, read] = mainLog(state)!.entries;
+    expect(edit).toMatchObject({ id: 't1', at: '2026-10-26T10:00:00.000Z', tool: 'Edit', kind: 'edit', target: 'src/a.ts', state: 'done', changes: [{ file: 'src/a.ts', removed: 'const a = 1;', added: 'const a = 2;\nconst b = 3;' }] });
+    expect(read).toMatchObject({ tool: 'Read', kind: 'read', state: 'running' });
+    expect(read!.changes).toBeUndefined();
+  });
+
+  it('id가 없는 훅은 그 에이전트의 마지막 열린 같은 도구 항목을 닫는다', () => {
+    const state = newTerminalActivity();
+    start(state, 'Bash', { command: 'echo 1' });
+    start(state, 'Bash', { command: 'echo 2' }, {}, AT + 1);
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_response: { stdout: 'two' } }, AT + 2);
+    expect(mainLog(state)!.entries.map((entry) => [entry.command, entry.state, entry.output])).toEqual([['echo 1', 'running', undefined], ['echo 2', 'done', 'two']]);
+  });
+
+  it('서브에이전트 안의 도구는 그 서브에이전트의 기록에 들어가고 메인의 기록에는 들어가지 않는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
+    start(state, 'Grep', { pattern: 'TODO' }, { agent_id: 'a1', tool_use_id: 'g1' }, AT + 1);
+    start(state, 'Write', { file_path: 'x.ts', content: 'export {};' }, { tool_use_id: 'w1' }, AT + 2);
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Grep', agent_id: 'a1', tool_use_id: 'g1' }, AT + 3);
+    const log = activityLog(state)!;
+    expect(log.agents.map((agent) => [agent.id, agent.main === true, agent.type, agent.entries.map((entry) => `${entry.tool}:${entry.state}`)])).toEqual([
+      ['main', true, undefined, ['Write:running']],
+      ['a1', false, 'Explore', ['Grep:done']],
+    ]);
+    // 에이전트 하나만 달라고 할 수 있다
+    expect(activityLog(state, { agent: 'a1' })!.agents.map((agent) => agent.id)).toEqual(['a1']);
+    expect(activityLog(state, { agent: 'main' })!.agents.map((agent) => agent.id)).toEqual(['main']);
+    expect(activityLog(state, { agent: 'nobody' })!.agents).toEqual([]);
+  });
+
+  it('끝난 서브에이전트의 기록은 새 요청에서 서브에이전트와 함께 사라지고, 메인의 기록은 남는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
+    start(state, 'Grep', { pattern: 'x' }, { agent_id: 'a1' }, AT + 1);
+    start(state, 'Read', { file_path: 'a.ts' }, {}, AT + 2);
+    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1' }, AT + 3);
+    // 멈춘 서브에이전트의 열린 항목은 끝 훅을 못 받은 채로 닫는다
+    expect(activityLog(state, { agent: 'a1' })!.agents[0]!.entries[0]!.state).toBe('unknown');
+    noteTurnStarted(state, AT + 4);
+    expect(activityLog(state)!.agents.map((agent) => agent.id)).toEqual(['main']);
+  });
+
+  it('쓰기 직전 훅이 거절하면 그 항목에 거절 까닭을 남긴다', () => {
+    const state = newTerminalActivity();
+    start(state, 'Edit', { file_path: 'a.ts', old_string: 'a', new_string: 'b' }, { tool_use_id: 'e1' });
+    noteToolDenied(state, { tool_name: 'Edit', tool_use_id: 'e1' }, '[b-studio] 쓰기 범위 밖입니다', AT + 1);
+    expect(mainLog(state)!.entries[0]).toMatchObject({ state: 'denied', error: '거절됨: 쓰기 범위 밖입니다' });
+  });
+
+  it('도구가 실패하면 까닭 한 줄을 남기고, 중단은 중단됨이다', () => {
+    const state = newTerminalActivity();
+    start(state, 'Bash', { command: 'false' }, { tool_use_id: 'b1' });
+    noteActivityHook(state, { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'b1', error: 'Exit code 1\nboom' }, AT + 1);
+    start(state, 'Bash', { command: 'sleep 99' }, { tool_use_id: 'b2' }, AT + 2);
+    noteActivityHook(state, { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'b2', is_interrupt: true }, AT + 3);
+    expect(mainLog(state)!.entries.map((entry) => [entry.state, entry.error])).toEqual([['failed', 'Exit code 1'], ['failed', '중단됨']]);
+  });
+
+  it('턴이 끝나거나 CLI가 끝나면 끝 훅을 못 받은 항목은 unknown으로 닫는다', () => {
+    const state = newTerminalActivity();
+    start(state, 'Bash', { command: 'a' });
+    noteTurnEnded(state, {}, AT + 1);
+    start(state, 'Bash', { command: 'b' }, {}, AT + 2);
+    noteCliEnded(state);
+    expect(mainLog(state)!.entries.map((entry) => entry.state)).toEqual(['unknown', 'unknown']);
+  });
+
+  it('끝 훅이 시작 훅보다 먼저 와도 열린 채 남지 않는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'late', tool_input: { command: 'ls' }, tool_response: { stdout: 'a' } }, AT);
+    start(state, 'Bash', { command: 'ls' }, { tool_use_id: 'late' }, AT + 1);
+    expect(mainLog(state)!.entries.map((entry) => [entry.id, entry.state])).toEqual([['late', 'done']]);
+  });
+
+  it('같은 tool_use_id의 시작 훅이 두 번 와도 항목은 하나다', () => {
+    const state = newTerminalActivity();
+    start(state, 'Bash', { command: 'ls' }, { tool_use_id: 'dup' });
+    start(state, 'Bash', { command: 'ls' }, { tool_use_id: 'dup' }, AT + 1);
+    expect(mainLog(state)!.entries).toHaveLength(1);
+  });
+
+  describe('코드 조각', () => {
+    it('Write는 내용의 앞부분을 쓰기 항목으로 남기고, 줄 수·줄 길이 상한을 넘으면 잘렸다고 표시한다', () => {
+      const state = newTerminalActivity();
+      const lines = Array.from({ length: L.codeLines + 10 }, (_, index) => `line ${index} ${'x'.repeat(L.lineChars + 50)}`);
+      start(state, 'Write', { file_path: 'big.ts', content: lines.join('\n') });
+      const entry = mainLog(state)!.entries[0]!;
+      expect(entry.kind).toBe('write');
+      const added = entry.changes![0]!.added!.split('\n');
+      expect(added).toHaveLength(L.codeLines);
+      expect(added.every((line) => line.length <= L.lineChars)).toBe(true);
+      expect(added[0]).toMatch(/^line 0 x+…$/);
+      expect(entry.changes![0]!.truncated).toBe(true);
+      expect(entry.truncated).toBe(true);
+    });
+
+    it('MultiEdit은 편집마다 한 조각, 개수 상한을 넘으면 앞의 것만 남기고 잘렸다고 표시한다', () => {
+      const state = newTerminalActivity();
+      const edits = Array.from({ length: L.changes + 3 }, (_, index) => ({ old_string: `o${index}`, new_string: `n${index}` }));
+      start(state, 'MultiEdit', { file_path: 'm.ts', edits });
+      const entry = mainLog(state)!.entries[0]!;
+      expect(entry.kind).toBe('edit');
+      expect(entry.changes).toHaveLength(L.changes);
+      expect(entry.changes![1]).toMatchObject({ file: 'm.ts', removed: 'o1', added: 'n1' });
+      expect(entry.truncated).toBe(true);
+    });
+
+    it('apply_patch는 패치 본문 줄을 남긴다(Codex의 명령 배열 모양도 읽는다)', () => {
+      const state = newTerminalActivity();
+      const patch = '*** Begin Patch\n*** Update File: src/a.ts\n@@\n-old\n+new\n*** End Patch';
+      start(state, 'apply_patch', { command: patch });
+      start(state, 'apply_patch', { command: ['apply_patch', patch] }, {}, AT + 1);
+      const [one, two] = mainLog(state)!.entries;
+      for (const entry of [one, two]) expect(entry).toMatchObject({ kind: 'edit', target: 'src/a.ts', changes: [{ file: 'src/a.ts', patch: expect.stringContaining('+new') }] });
+    });
+
+    it('apply_patch의 어느 파일이든 비밀 파일이면 조각 전체를 남기지 않는다', () => {
+      const state = newTerminalActivity();
+      start(state, 'apply_patch', { command: '*** Begin Patch\n*** Update File: src/a.ts\n@@\n-a\n+b\n*** Add File: deploy/.env\n+KEY=1\n*** End Patch' });
+      start(state, 'apply_patch', { command: '*** Begin Patch\n+no header\n*** End Patch' }, {}, AT + 1);
+      const [secret, unknown] = mainLog(state)!.entries;
+      expect(secret).toMatchObject({ withheld: 'secret' });
+      expect(unknown).toMatchObject({ withheld: 'unknown' });
+      expect(JSON.stringify(mainLog(state))).not.toContain('KEY=1');
+    });
+
+    it('비밀 파일의 Edit·Write·MultiEdit·NotebookEdit는 대상 이름만 남기고 조각은 남기지 않는다(꼴은 거부 목록이라 넓게 맞춘다)', () => {
+      for (const file of ['.env', 'config/.env.production', 'a\\.env', '.ENV', 'apps/web/.Env.Local', 'deploy/id_rsa', 'cert/server.pem', '/home/u/.ssh/config', '.npmrc', 'aws/credentials']) {
+        const state = newTerminalActivity();
+        start(state, 'Write', { file_path: file, content: `TOKEN=${SECRET}` });
+        start(state, 'Edit', { file_path: file, old_string: `A=${SECRET}`, new_string: 'A=2' }, {}, AT + 1);
+        start(state, 'MultiEdit', { file_path: file, edits: [{ old_string: SECRET, new_string: 'x' }] }, {}, AT + 2);
+        start(state, 'NotebookEdit', { notebook_path: file, new_source: SECRET }, {}, AT + 3);
+        const entries = mainLog(state)!.entries;
+        expect(entries, file).toHaveLength(4);
+        for (const entry of entries) {
+          expect(entry.withheld, file).toBe('secret');
+          expect(entry.changes, file).toBeUndefined();
+          expect(entry.target, file).toBeTruthy();
+        }
+        expect(JSON.stringify(activityLog(state)), file).not.toContain(SECRET);
+      }
+    });
+
+    it('예시 파일(.env.example)은 비밀 파일이 아니라 조각을 남긴다', () => {
+      const state = newTerminalActivity();
+      start(state, 'Write', { file_path: '.env.example', content: 'API_URL=http://localhost' });
+      expect(mainLog(state)!.entries[0]!.changes![0]!.added).toBe('API_URL=http://localhost');
+    });
+
+    it('모르는 입력(경로가 없거나 글이 아닌 값)은 던지지 않고 도구 이름만 남긴다', () => {
+      const state = newTerminalActivity();
+      for (const input of [undefined, null, 'x', 7, [], { file_path: 3, content: 'x' }, { content: 'x' }, { file_path: 'a.ts', content: 5 }, { file_path: 'a.ts', old_string: {}, new_string: [] }, { file_path: 'a.ts', edits: 'no' }, { file_path: 'a.ts', edits: [null, 3, { old_string: 1 }] }]) {
+        expect(() => start(state, 'Write', input), JSON.stringify(input)).not.toThrow();
+        expect(() => start(state, 'Edit', input), JSON.stringify(input)).not.toThrow();
+        expect(() => start(state, 'MultiEdit', input), JSON.stringify(input)).not.toThrow();
+      }
+      for (const entry of mainLog(state)!.entries) {
+        expect(entry.tool).toBeTruthy();
+        // 조각이 있다면 글이었던 값에서만 나온다
+        for (const change of entry.changes ?? []) for (const value of [change.added, change.removed, change.patch]) expect(value === undefined || typeof value === 'string').toBe(true);
+      }
+      expect(mainLog(state)!.entries.filter((entry) => entry.changes === undefined).length).toBeGreaterThan(10);
+    });
+
+    it('경로를 알 수 없는 쓰기(경로 없음)는 조각을 남기지 않고 unknown으로 표시한다', () => {
+      const state = newTerminalActivity();
+      start(state, 'Write', { content: `TOKEN=${SECRET}` });
+      expect(mainLog(state)!.entries[0]).toMatchObject({ withheld: 'unknown' });
+      expect(mainLog(state)!.entries[0]!.changes).toBeUndefined();
+    });
+
+    it('상한을 넘는 원문은 가림이 끝까지 읽지 못하므로 조각을 남기지 않는다', () => {
+      const state = newTerminalActivity();
+      start(state, 'Write', { file_path: 'huge.ts', content: `${'a\n'.repeat(L.rawChars)}${SECRET}` });
+      const entry = mainLog(state)!.entries[0]!;
+      expect(entry).toMatchObject({ withheld: 'large', truncated: true });
+      expect(entry.changes).toBeUndefined();
+    });
+  });
+
+  describe('Bash 명령과 결과', () => {
+    it('명령(여러 줄 상한)과 PostToolUse 결과의 끝 몇 줄을 남긴다', () => {
+      const state = newTerminalActivity();
+      start(state, 'Bash', { command: Array.from({ length: L.commandLines + 4 }, (_, index) => `echo ${index}`).join('\n') }, { tool_use_id: 'b1' });
+      const stdout = Array.from({ length: L.outputLines + 20 }, (_, index) => `out ${index}`).join('\n');
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b1', tool_response: { stdout, stderr: 'warn: x' } }, AT + 1);
+      const entry = mainLog(state)!.entries[0]!;
+      expect(entry.kind).toBe('run');
+      expect(entry.command!.split('\n')).toHaveLength(L.commandLines);
+      const output = entry.output!.split('\n');
+      expect(output).toHaveLength(L.outputLines);
+      // 끝 줄을 남긴다(stderr가 stdout 뒤에 붙는다)
+      expect(output.at(-1)).toBe('warn: x');
+      expect(output.at(-2)).toBe(`out ${L.outputLines + 19}`);
+      expect(entry.truncated).toBe(true);
+    });
+
+    it('결과가 글 하나이거나 모르는 모양이면 글만 읽고, 모르는 모양은 결과 없이 둔다', () => {
+      const state = newTerminalActivity();
+      start(state, 'Bash', { command: 'a' }, { tool_use_id: '1' });
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: '1', tool_response: 'plain text' }, AT + 1);
+      start(state, 'Bash', { command: 'b' }, { tool_use_id: '2' }, AT + 2);
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: '2', tool_response: { stdout: 5, weird: [1] } }, AT + 3);
+      start(state, 'Bash', { command: 'c' }, { tool_use_id: '3' }, AT + 4);
+      expect(() => noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: '3', tool_response: null }, AT + 5)).not.toThrow();
+      expect(mainLog(state)!.entries.map((entry) => entry.output)).toEqual(['plain text', undefined, undefined]);
+    });
+
+    it('비밀 파일을 읽는 명령이나 환경을 찍는 명령은 결과를 남기지 않는다', () => {
+      for (const command of ['cat .env', 'cat apps/web/.env.local | head', 'grep KEY "config/.ENV"', 'env', 'printenv', 'FOO=1 printenv HOME', 'set', 'export', 'echo hi && env', 'cat .ssh/id_rsa', 'cat server.pem', 'type .env']) {
+        const state = newTerminalActivity();
+        start(state, 'Bash', { command }, { tool_use_id: 'b' });
+        noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b', tool_response: { stdout: `TOKEN=${SECRET}\nHOME=/root` } }, AT + 1);
+        const entry = mainLog(state)!.entries[0]!;
+        expect(entry.output, command).toBeUndefined();
+        expect(entry.withheld, command).toBe('secret');
+        expect(JSON.stringify(activityLog(state)), command).not.toContain(SECRET);
+      }
+    });
+
+    it('평범한 명령의 결과는 남긴다(env로 시작하는 낱말이나 .env 모양이 아닌 이름은 거르지 않는다)', () => {
+      const state = newTerminalActivity();
+      start(state, 'Bash', { command: 'cat environment.md && echo setup' }, { tool_use_id: 'b' });
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b', tool_response: { stdout: 'ok' } }, AT + 1);
+      expect(mainLog(state)!.entries[0]).toMatchObject({ output: 'ok' });
+    });
+  });
+
+  describe('가림', () => {
+    it('조각·명령·결과·대상·오류에서 알려진 비밀 값(세션이 아는 값)과 자격 증명 모양을 가린다', () => {
+      const state = newTerminalActivity();
+      const redact = known;
+      start(state, 'Edit', { file_path: 'a.ts', old_string: `const k = '${SECRET}';`, new_string: "const k = process.env.K;\nconst url = 'https://user:hunter2@host.example/x';" }, { tool_use_id: 'e' }, AT, redact);
+      start(state, 'Bash', { command: `curl -H "Authorization: Bearer abcdef1234567890" -u me:${SECRET} https://api.example` }, { tool_use_id: 'b' }, AT + 1, redact);
+      noteActivityHook(
+        state,
+        { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b', tool_response: { stdout: `ok ${SECRET}\nghp_abcdefghijklmnopqrstuvwxyz0123456789\nsk-ant-api03-abcdefghijklmnopqrstuvwx\nAPI_KEY=hunter2hunter2\nAKIAIOSFODNN7EXAMPLE` } },
+        AT + 2,
+        redact,
+      );
+      start(state, 'Bash', { command: 'false' }, { tool_use_id: 'f' }, AT + 3, redact);
+      noteActivityHook(state, { hook_event_name: 'PostToolUseFailure', tool_name: 'Bash', tool_use_id: 'f', error: `failed with ${SECRET}` }, AT + 4, redact);
+      const text = JSON.stringify(activityLog(state));
+      for (const leak of [SECRET, 'hunter2', 'abcdef1234567890', 'ghp_abcdefghijklmnopqrstuvwxyz0123456789', 'sk-ant-api03-abcdefghijklmnopqrstuvwx', 'AKIAIOSFODNN7EXAMPLE']) expect(text, leak).not.toContain(leak);
+      expect(text).toContain('process.env.K');
+    });
+
+    it('개인 키 블록은 통째로 가리고, 끝 표시만 남은(잘린) 키 조각이 보이면 결과를 남기지 않는다', () => {
+      const state = newTerminalActivity();
+      start(state, 'Bash', { command: 'cat key' }, { tool_use_id: 'b' });
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b', tool_response: { stdout: '-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3NzaC1\n-----END OPENSSH PRIVATE KEY-----\ndone' } }, AT + 1);
+      start(state, 'Bash', { command: 'cat key2' }, { tool_use_id: 'c' }, AT + 2);
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'c', tool_response: { stdout: 'AAAAB3NzaC1kc3MAAACB\n-----END RSA PRIVATE KEY-----' } }, AT + 3);
+      const [whole, tail] = mainLog(state)!.entries;
+      expect(whole!.output).not.toContain('AAAAB3NzaC1');
+      expect(tail!.output).toBeUndefined();
+      expect(tail!.withheld).toBe('secret');
+    });
+
+    it('가림은 자르기 전에 한다: 줄 길이 상한에 걸쳐 잘리는 자리에 비밀 값이 있어도 앞 조각이 남지 않는다', () => {
+      const state = newTerminalActivity();
+      const line = `${'x'.repeat(L.lineChars - 10)}${SECRET}`;
+      start(state, 'Write', { file_path: 'a.ts', content: line }, {}, AT, known);
+      start(state, 'Bash', { command: 'cat a' }, { tool_use_id: 'b' }, AT + 1, known);
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b', tool_response: { stdout: line } }, AT + 2, known);
+      // 줄 수 상한에 걸쳐 앞 줄이 잘리는 자리도 같다
+      const many = [`${SECRET}`, ...Array.from({ length: L.outputLines }, (_, index) => `l${index}`)].join('\n');
+      start(state, 'Bash', { command: 'cat b' }, { tool_use_id: 'c' }, AT + 3, known);
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'c', tool_response: { stdout: many } }, AT + 4, known);
+      const text = JSON.stringify(activityLog(state));
+      expect(text).not.toContain(SECRET.slice(0, 6));
+      expect(text).toContain('[가림]');
+    });
+
+    it('가림 함수가 던지면 조각과 결과를 남기지 않는다(모르면 통과가 아니다)', () => {
+      const state = newTerminalActivity();
+      const broken = (): string => {
+        throw new Error('redactor down');
+      };
+      start(state, 'Edit', { file_path: 'a.ts', old_string: SECRET, new_string: 'b' }, { tool_use_id: 'e' }, AT, broken);
+      start(state, 'Bash', { command: `echo ${SECRET}` }, { tool_use_id: 'b' }, AT + 1, broken);
+      noteActivityHook(state, { hook_event_name: 'PostToolUse', tool_name: 'Bash', tool_use_id: 'b', tool_response: { stdout: SECRET } }, AT + 2, broken);
+      const [edit, bash] = mainLog(state)!.entries;
+      expect(edit!.changes).toBeUndefined();
+      expect(edit!.withheld).toBe('unknown');
+      expect(bash!.command).toBeUndefined();
+      expect(bash!.output).toBeUndefined();
+      expect(JSON.stringify(activityLog(state))).not.toContain(SECRET);
+    });
+  });
+
+  describe('상한', () => {
+    it('에이전트당 항목 수를 넘으면 오래된 것부터 버린다', () => {
+      const state = newTerminalActivity();
+      for (let index = 0; index < L.entriesPerAgent + 7; index += 1) start(state, 'Read', { file_path: `f${index}.ts` }, { tool_use_id: `t${index}` }, AT + index);
+      const entries = mainLog(state)!.entries;
+      expect(entries).toHaveLength(L.entriesPerAgent);
+      expect(entries[0]!.target).toBe('f7.ts');
+      expect(entries.at(-1)!.target).toBe(`f${L.entriesPerAgent + 6}.ts`);
+    });
+
+    it('기록을 갖는 에이전트 수는 서브에이전트 상한을 넘지 않는다', () => {
+      const state = newTerminalActivity();
+      for (let index = 0; index < L.agents + 10; index += 1) start(state, 'Read', { file_path: 'a.ts' }, { agent_id: `a${index}` }, AT + index);
+      start(state, 'Read', { file_path: 'main.ts' }, {}, AT + 1000);
+      const agents = activityLog(state)!.agents;
+      expect(agents.filter((agent) => !agent.main)).toHaveLength(L.agents);
+      // 메인은 서브에이전트가 가득 차도 기록한다
+      expect(agents.find((agent) => agent.main)!.entries).toHaveLength(1);
+    });
+
+    it('세션 전체 크기 어림을 넘으면 가장 오래된 항목부터 버린다', () => {
+      const state = newTerminalActivity();
+      const line = 'y'.repeat(L.lineChars);
+      const big = Array.from({ length: L.codeLines }, () => line).join('\n');
+      for (let index = 0; index < 400; index += 1) start(state, 'Write', { file_path: `f${index}.ts`, content: big }, { agent_id: `a${index % 20}`, tool_use_id: `t${index}` }, AT + index);
+      const view = activityLog(state)!;
+      const bytes = Buffer.byteLength(JSON.stringify(view));
+      expect(bytes).toBeLessThanOrEqual(L.totalBytes + 20_000);
+      // 가장 새 항목은 남고 가장 오래된 항목은 없다
+      const targets = view.agents.flatMap((agent) => agent.entries.map((entry) => entry.target));
+      expect(targets).toContain('f399.ts');
+      expect(targets).not.toContain('f0.ts');
+    });
+
+    it('내놓는 응답에 총 크기 상한이 있다(요청한 에이전트 하나만 달라고 해도 같다)', () => {
+      const state = newTerminalActivity();
+      const big = Array.from({ length: L.codeLines }, () => 'z'.repeat(L.lineChars)).join('\n');
+      for (let index = 0; index < 100; index += 1) start(state, 'Write', { file_path: `f${index}.ts`, content: big }, { tool_use_id: `t${index}` }, AT + index);
+      expect(Buffer.byteLength(JSON.stringify(activityLog(state, { agent: 'main' })))).toBeLessThanOrEqual(L.totalBytes + 20_000);
+    });
+  });
+
+  it('기록이 없으면 undefined, 지우면 비운다. 화면용 보기(activityView)에는 조각을 싣지 않는다', () => {
+    const state = newTerminalActivity();
+    expect(activityLog(state)).toBeUndefined();
+    expect(activityLog(undefined)).toBeUndefined();
+    start(state, 'Edit', { file_path: 'a.ts', old_string: 'CODE_MARKER_OLD', new_string: 'CODE_MARKER_NEW' });
+    expect(JSON.stringify(activityView(state))).not.toContain('CODE_MARKER');
+    clearActivityLog(state);
+    expect(activityLog(state)).toBeUndefined();
+    // 지운 뒤에도 화면용 보기는 그대로다
+    expect(activityView(state)?.now?.tool).toBe('Edit');
   });
 });

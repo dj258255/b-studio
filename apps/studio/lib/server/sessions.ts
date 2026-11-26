@@ -335,7 +335,7 @@ import {
 } from './session-terminal-turn-end-rest';
 import { decideSilence, decideStall, decideUsage, EARLY_USAGE_MS, LATE_USAGE_MS, stallIntervalMs } from './session-terminal-usage';
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, turnFailed, violationRoute, type CloseActions } from './session-terminal-close';
-import { activityView, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
+import { activityLog, activityView, clearActivityLog, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type ActivityLogView, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { decideTurnLimit, modelCallsFromOtlp, usageUnverifiable, type ModelCall } from './session-terminal-telemetry';
 import { agentSignalsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
@@ -1507,7 +1507,14 @@ export async function stopSession(id: string): Promise<SessionSnapshot> {
     // 세션 터미널의 컨테이너는 compose 밖에서 띄운 것이라 따로 지운다(#673)
     dispose_terminal: () => disposeSessionTerminal(id, session.sandbox.id),
     // 터미널이 부르던 관문도 닫는다. 그 뒤에 늦게 온 훅은 닿지 못하고, CLI는 막히지 않은 채 끝난다
-    close_gateway: () => closeSessionGateway(id),
+    close_gateway: () => {
+      // 멈춘 세션에는 활동 기록(코드 조각·명령 결과)을 남기지 않는다(#1411). 관문이 닫힌 뒤라 늦은 훅이 다시 채우지 못한다
+      try {
+        return closeSessionGateway(id);
+      } finally {
+        if (session.terminalActivity) clearActivityLog(session.terminalActivity);
+      }
+    },
     destroy_sandbox: () => session.sandbox.destroy(),
     // 로컬 미리보기 프록시(ADR-113)도 가리키던 서비스가 없어지므로 함께 닫는다
     close_preview_proxies: () => closeServicePreviewProxies(id),
@@ -8899,7 +8906,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const running = openTerminalRun(session);
   if (running) noteTerminalActivity(session, running, { settled: true });
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
-  noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
+  noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now(), activityRedactor(session));
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`). 이름 대조는 코어가 한다(ADR-215)
   const readTool = isReadTool(tool);
   if (readTool) return {};
@@ -9959,13 +9966,35 @@ function terminalNotification(id: string, input: HookInput): void {
  */
 function terminalActivityHook(id: string, input: HookInput): void {
   const session = terminalSession(id);
-  noteActivityHook((session.terminalActivity ??= newTerminalActivity()), input, Date.now());
+  noteActivityHook((session.terminalActivity ??= newTerminalActivity()), input, Date.now(), activityRedactor(session));
   const event = input.hook_event_name;
   if (typeof input.agent_id === 'string' && input.agent_id) return;
   if (event !== 'PostToolUse' && event !== 'PostToolUseFailure' && event !== 'PreToolUse') return;
   const run = openTerminalRun(session);
   if (run) noteTerminalActivity(session, run, { settled: true });
   else clearSettledTerminalAttention(session);
+}
+
+/**
+ * 활동 기록(#1411)에 넣는 글의 가림: 이 세션의 샌드박스가 아는 비밀 값을 가린다(코드 탭 diff와 같은 수단, `sandbox.redact`).
+ * 세션이 바뀌어도 부를 때마다 지금 샌드박스로 읽는다. 샌드박스가 가림을 못 하면 던지고, 활동 기록은 그 글을 남기지 않는다
+ */
+function activityRedactor(session: Session): (text: string) => string {
+  return (text) => session.sandbox.redact(text);
+}
+
+/**
+ * 세션 터미널의 에이전트별 최근 활동 기록(#1411, ADR-232). 기억에만 있다(세션 기록에 저장하지 않는다). 세션이 없으면 404,
+ * 중지된 세션이거나 받은 것이 없으면 빈 목록이다. 쓸 수 없는 서버에서는 터미널 출력 통로와 같은 말로 거절한다(터미널 화면에 이미 보이는 내용이라 같은 서버 조건을 쓴다)
+ */
+export function sessionTerminalActivityLog(id: string, agent?: string): ActivityLogView {
+  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
+  const session = store.sessions.get(id);
+  if (!session) {
+    if (archived.has(id)) return { agents: [] };
+    throw new StudioError(404, '세션을 찾을 수 없습니다');
+  }
+  return activityLog(session.terminalActivity, agent === undefined ? {} : { agent }) ?? { agents: [] };
 }
 
 /** 화면에 싣는 터미널 CLI의 활동(#920). 기억에 없는 세션이거나 받은 것이 없으면 없다 */
