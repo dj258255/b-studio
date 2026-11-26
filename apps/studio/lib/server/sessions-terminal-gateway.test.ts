@@ -2758,6 +2758,18 @@ describe('Codex 터미널(#825)', () => {
     await stopSession(session.id);
   }, 30_000);
 
+  it('apply_patch가 바꾸는 파일을 알 수 없으면(패치 본문이 글이 아니다) 카드의 쓰기 범위 밖으로 보고 막는다', async () => {
+    const session = await openCodex();
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await session.gateway.prompt({ hook_event_name: 'UserPromptSubmit', prompt: '주문에 메모 필드 추가' });
+    for (const tool_input of [{ command: 42 }, { patch: '*** Add File: web/x.txt' }, 'text', null]) {
+      const answer = await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'apply_patch', tool_input });
+      expect(answer.deny, JSON.stringify(tool_input)).toContain('알 수 없어');
+    }
+    setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
   it('codex의 읽기 도구는 실행을 열거나 샌드박스를 기다리지 않고 바로 통과한다', async () => {
     const session = await openCodex();
     expect(await session.gateway.preTool({ hook_event_name: 'PreToolUse', tool_name: 'view_image', tool_input: { path: 'a.png' } })).toEqual({});

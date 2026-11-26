@@ -33,11 +33,18 @@ pub const FAILURES_BEFORE_REPORT: u32 = 3;
 /// claude는 이 글이 인자에 있을 때(설치된 패키지 자리), codex는 이 글이 있을 때 CLI로 본다
 pub const CLAUDE_PACKAGE_MARK: &str = "/@anthropic-ai/claude-code/";
 pub const CODEX_PACKAGE_MARK: &str = "/@openai/codex";
+/// 새 갈래(실험, 아직 세션 만들기에서 닿지 않는다)의 설치된 패키지 자리. 바이너리 이름(`commandcode`·`opencode`·`gemini`)은 `as_str`로 따로 본다
+pub const COMMAND_CODE_PACKAGE_MARK: &str = "/command-code/dist/";
+pub const OPENCODE_PACKAGE_MARK: &str = "/opencode-ai/";
+pub const GEMINI_PACKAGE_MARK: &str = "/@google/gemini-cli/";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CliKind {
     Claude,
     Codex,
+    CommandCode,
+    OpenCode,
+    Gemini,
 }
 
 impl CliKind {
@@ -45,6 +52,9 @@ impl CliKind {
         match text {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "commandcode" => Some(Self::CommandCode),
+            "opencode" => Some(Self::OpenCode),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -53,6 +63,9 @@ impl CliKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::CommandCode => "commandcode",
+            Self::OpenCode => "opencode",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -60,6 +73,9 @@ impl CliKind {
         match self {
             Self::Claude => CLAUDE_PACKAGE_MARK,
             Self::Codex => CODEX_PACKAGE_MARK,
+            Self::CommandCode => COMMAND_CODE_PACKAGE_MARK,
+            Self::OpenCode => OPENCODE_PACKAGE_MARK,
+            Self::Gemini => GEMINI_PACKAGE_MARK,
         }
     }
 }
@@ -128,7 +144,66 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
     match kind {
         CliKind::Claude => contains_at_boundary(args, marker) && settings_option_count(args) == 1,
         CliKind::Codex => args.contains(marker),
+        // 새 갈래는 ps 한 줄로 붙었다고 보지 않는다(환경이 줄에 없다). 붙었는지는 `hooked_launch`가 argv와 환경으로 본다
+        CliKind::CommandCode | CliKind::OpenCode | CliKind::Gemini => false,
     }
+}
+
+/// 새 갈래(Command Code·OpenCode·Gemini)가 우리 설정으로 떴는가. **여는 쪽(허용 목록)이라 좁게 맞춘다. 모르는 것은 붙지 않은 것이다**:
+/// - Command Code: 감싸개가 `<cli> --mod <M>`으로 부른다. `--mod`는 argv의 1번 자리(node가 띄운 꼴은 `/command-code/dist/`가 든 스크립트 뒤의 2번 자리)에 정확히 하나, 값은 `expected`와 **같은 글**이어야 하고
+///   `--mod=…`·두 번째 `--mod`(뒤가 앞을 덮을 수 있다)·`--safe-mode`가 있으면 붙지 않았다
+/// - OpenCode: 환경의 `OPENCODE_CONFIG`가 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), `OPENCODE_PURE`가 없고(값이 비었어도 있으면 안 된다), argv에 `--pure`가 없다. 환경을 읽지 못했으면(`None`) 붙지 않았다
+/// - Gemini: 환경의 `GEMINI_CLI_SYSTEM_SETTINGS_PATH`가 `expected`와 같은 글이다(같은 이름이 여럿이면 모두). 환경을 읽지 못했으면 붙지 않았다
+/// - claude·codex는 이 판정으로 붙었다고 보지 않는다(claude는 `hooked_argv`, codex는 `hooked`)
+///
+/// 경로는 글 그대로 견준다(대소문자·끝 슬래시·`.`·`..`·겹친 슬래시·링크처럼 보이는 글은 다른 글이다). 정규화해서 견주면 다른 파일이 같은 파일이 된다
+pub fn hooked_launch(kind: CliKind, argv: &[String], env: Option<&[(String, String)]>, expected: &str) -> bool {
+    if expected.is_empty() {
+        return false;
+    }
+    match kind {
+        CliKind::Claude | CliKind::Codex => false,
+        CliKind::CommandCode => {
+            let is_mod = |element: &String| element == "--mod" || element.starts_with("--mod=");
+            if argv.iter().filter(|element| is_mod(element)).count() != 1 {
+                return false;
+            }
+            if argv.iter().any(|element| element == "--safe-mode" || element.starts_with("--safe-mode=")) {
+                return false;
+            }
+            let Some(at) = argv.iter().position(|element| element == "--mod") else { return false };
+            let slot_ok = at == 1 || (at == 2 && argv.get(1).is_some_and(|script| script.contains(COMMAND_CODE_PACKAGE_MARK)));
+            slot_ok && argv.get(at + 1).is_some_and(|value| value == expected)
+        }
+        CliKind::OpenCode => {
+            let Some(env) = env else { return false };
+            if env.iter().any(|(name, _)| name == "OPENCODE_PURE") {
+                return false;
+            }
+            if argv.iter().any(|element| element == "--pure" || element.starts_with("--pure=")) {
+                return false;
+            }
+            env_all_equal(env, "OPENCODE_CONFIG", expected)
+        }
+        CliKind::Gemini => {
+            let Some(env) = env else { return false };
+            env_all_equal(env, "GEMINI_CLI_SYSTEM_SETTINGS_PATH", expected)
+        }
+    }
+}
+
+/// `name`이 환경에 있고 모든 줄의 값이 `expected`와 같은가(같은 이름이 여럿이면 프로그램마다 이기는 쪽이 달라 하나라도 다르면 거짓)
+fn env_all_equal(env: &[(String, String)], name: &str, expected: &str) -> bool {
+    let mut found = false;
+    for (key, value) in env {
+        if key == name {
+            if value != expected {
+                return false;
+            }
+            found = true;
+        }
+    }
+    found
 }
 
 /// 진짜 argv로 본 "우리 설정이 붙었는가"(여는 쪽이라 좁게 맞춘다). 감싸개는 늘 `exec <cli> --mcp-config <M> --settings <S> "$@"`로 부르므로 그 **정확한 자리**만 인정한다:

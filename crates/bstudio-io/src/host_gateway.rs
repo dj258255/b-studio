@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 /// 관문 폴더 안의 폴더 이름(폴더 기준). 지울 때는 역순이다
 pub const GATEWAY_DIRS: [&str; 3] = ["bin", "shell", "shell/zsh"];
 /// 관문 폴더 안에 쓰는 파일 이름(폴더 기준)
-pub const GATEWAY_FILE_NAMES: [&str; 15] = [
+pub const GATEWAY_FILE_NAMES: [&str; 23] = [
     "settings.json",
     "mcp.json",
     "b-studio-hook.mjs",
@@ -29,6 +29,15 @@ pub const GATEWAY_FILE_NAMES: [&str; 15] = [
     "codex.env",
     "bin/claude",
     "bin/codex",
+    // 새 CLI 갈래(Command Code·OpenCode·Gemini)의 감싸개와 설정. 지우는 목록이라 빠진 이름은 토큰이 든 파일을 남긴다
+    "bin/commandcode",
+    "bin/opencode",
+    "bin/gemini",
+    "cli.env",
+    "b-studio-mod.ts",
+    "b-studio-opencode-plugin.js",
+    "opencode.json",
+    "gemini-settings.json",
     // API 모드 세션의 자체 CLI 실행기와 모델 파일(키가 든다). 세션이 멈추면 함께 지운다
     "agent-tty",
     "agent-model.json",
@@ -444,5 +453,23 @@ mod tests {
         write_gateway_files(&dir, &files, STATUSLINE_FILE).unwrap();
         assert_eq!(fs::read_to_string(dir.join("agent-model.json")).unwrap(), "{}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remove_deletes_every_file_the_new_cli_kinds_write() {
+        let root = std::env::temp_dir().join(format!("b-studio-gw-clikinds-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dir = root.join("studio-cli-kinds");
+        fs::create_dir_all(dir.join("bin")).unwrap();
+        let names = ["bin/commandcode", "bin/opencode", "bin/gemini", "cli.env", "b-studio-mod.ts", "b-studio-opencode-plugin.js", "opencode.json", "gemini-settings.json"];
+        for name in names {
+            fs::write(dir.join(name), "token").unwrap();
+        }
+        remove_gateway_config(&root, "studio-cli-kinds").unwrap();
+        for name in names {
+            assert!(fs::symlink_metadata(dir.join(name)).is_err(), "{name}이 남았다");
+        }
+        assert!(!dir.exists());
+        let _ = fs::remove_dir_all(&root);
     }
 }

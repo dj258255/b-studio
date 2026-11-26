@@ -24,6 +24,12 @@ use std::path::Path;
 pub enum CliKind {
     Claude,
     Codex,
+    /** 실험(아직 세션 만들기에서 닿지 않는다). 첫 요청은 위치 인자, 이어 붙이기는 `--resume` */
+    CommandCode,
+    /** 실험(아직 닿지 않는다). 첫 요청은 `--prompt`(위치 인자는 프로젝트 경로다), 이어 붙이기는 `--session ses_…` */
+    OpenCode,
+    /** 실험(아직 닿지 않는다). 첫 요청은 `-i`, 이어 붙이기는 `--resume <uuid>` */
+    Gemini,
 }
 
 impl CliKind {
@@ -31,6 +37,9 @@ impl CliKind {
         match text {
             "claude" => Some(Self::Claude),
             "codex" => Some(Self::Codex),
+            "commandcode" => Some(Self::CommandCode),
+            "opencode" => Some(Self::OpenCode),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -39,6 +48,9 @@ impl CliKind {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::CommandCode => "commandcode",
+            Self::OpenCode => "opencode",
+            Self::Gemini => "gemini",
         }
     }
 }
@@ -481,6 +493,8 @@ fn account_export(kind: CliKind, config_dir: Option<&str>) -> Vec<String> {
             let name = match kind {
                 CliKind::Claude => ACCOUNT_DIR_ENV_CLAUDE,
                 CliKind::Codex => ACCOUNT_DIR_ENV_CODEX,
+                // 새 갈래는 처음에는 기본 계정만 쓴다. 계정 폴더를 정하는 변수를 모르는 채 내보내지 않는다
+                CliKind::CommandCode | CliKind::OpenCode | CliKind::Gemini => return Vec::new(),
             };
             vec![format!("export {name}={}", shell_quote(dir))]
         }
@@ -557,11 +571,20 @@ fn first_launch(command: &str, kind: CliKind, indent: &str) -> Vec<String> {
     let model = cli_model_expression();
     let resume = match kind {
         CliKind::Codex => format!("{command} resume {model} \"${RESUME_CONVERSATION_VAR}\""),
-        CliKind::Claude => format!("{command} {model} --resume \"${RESUME_CONVERSATION_VAR}\""),
+        CliKind::Claude | CliKind::CommandCode | CliKind::Gemini => {
+            format!("{command} {model} --resume \"${RESUME_CONVERSATION_VAR}\"")
+        }
+        CliKind::OpenCode => format!("{command} {model} --session \"${RESUME_CONVERSATION_VAR}\""),
+    };
+    // 첫 요청을 넘기는 자리. OpenCode의 위치 인자는 프로젝트 경로라 `--prompt`로, Gemini는 대화형으로 남는 `-i`로 준다
+    let first = match kind {
+        CliKind::Claude | CliKind::Codex | CliKind::CommandCode => format!("{command} {model} \"${FIRST_PROMPT_VAR}\""),
+        CliKind::OpenCode => format!("{command} {model} --prompt \"${FIRST_PROMPT_VAR}\""),
+        CliKind::Gemini => format!("{command} {model} -i \"${FIRST_PROMPT_VAR}\""),
     };
     let lines = vec![
         format!("if [ -n \"${{{FIRST_PROMPT_VAR}+x}}\" ]; then"),
-        format!("  {command} {model} \"${FIRST_PROMPT_VAR}\""),
+        format!("  {first}"),
         format!("elif [ -n \"${{{RESUME_CONVERSATION_VAR}+x}}\" ]; then"),
         format!(
             "  {resume} || printf '%s\\n' {}",
@@ -829,5 +852,77 @@ mod tests {
             hook_response("block", Some("x")),
             "{\"decision\":\"block\",\"reason\":\"x\"}"
         );
+    }
+
+    /// (kind, 이름, 첫 요청 줄, 이어 붙이기 줄) — 새 갈래의 첫 실행 꼴. 모델은 한 낱말(`--model=값`)로 붙여 셸이 둘로 쪼개는 일이 없게 한다
+    fn launch_vectors() -> Vec<(CliKind, &'static str, &'static str, &'static str)> {
+        vec![
+            (
+                CliKind::CommandCode,
+                "commandcode",
+                "    commandcode ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} \"$BSTUDIO_FIRST_PROMPT_VALUE\"",
+                "    commandcode ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} --resume \"$BSTUDIO_RESUME_ID_VALUE\" || printf",
+            ),
+            (
+                CliKind::OpenCode,
+                "opencode",
+                "    opencode ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} --prompt \"$BSTUDIO_FIRST_PROMPT_VALUE\"",
+                "    opencode ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} --session \"$BSTUDIO_RESUME_ID_VALUE\" || printf",
+            ),
+            (
+                CliKind::Gemini,
+                "gemini",
+                "    gemini ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} -i \"$BSTUDIO_FIRST_PROMPT_VALUE\"",
+                "    gemini ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} --resume \"$BSTUDIO_RESUME_ID_VALUE\" || printf",
+            ),
+        ]
+    }
+
+    #[test]
+    fn new_cli_kinds_parse_and_name_their_wrapper() {
+        for (kind, name, _, _) in launch_vectors() {
+            assert_eq!(CliKind::parse(name), Some(kind));
+            assert_eq!(kind.as_str(), name);
+            assert!(wrapper_path("/gw", kind).ends_with(&format!("/bin/{name}")));
+        }
+        assert_eq!(CliKind::parse("Opencode"), None);
+        assert_eq!(CliKind::parse("cmd"), None);
+    }
+
+    #[test]
+    fn new_cli_kinds_launch_with_their_own_flags() {
+        for (kind, name, first, resume) in launch_vectors() {
+            let lines = first_launch(name, kind, "  ");
+            let joined = lines.join("\n");
+            assert!(lines.contains(&first.to_owned()), "{name} 첫 요청: {joined}");
+            assert!(lines.iter().any(|line| line.starts_with(resume)), "{name} 이어 붙이기: {joined}");
+            assert!(lines.iter().any(|line| *line == format!("    {name} ${{BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"}}")), "{name} 새 대화: {joined}");
+            // 이 CLI의 인자가 다른 CLI의 줄에 섞이지 않는다
+            for flag in ["--prompt", "--session", " -i ", "--resume"] {
+                let wanted = match kind {
+                    CliKind::OpenCode => ["--prompt", "--session"].contains(&flag),
+                    CliKind::Gemini => [" -i ", "--resume"].contains(&flag),
+                    _ => flag == "--resume",
+                };
+                assert_eq!(joined.contains(flag), wanted, "{name} {flag}: {joined}");
+            }
+        }
+    }
+
+    #[test]
+    fn new_cli_kinds_keep_claude_and_codex_output_unchanged() {
+        let claude = first_launch("claude", CliKind::Claude, "").join("\n");
+        assert!(claude.contains("claude ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} --resume \"$BSTUDIO_RESUME_ID_VALUE\" || printf"));
+        assert!(claude.contains("claude ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} \"$BSTUDIO_FIRST_PROMPT_VALUE\""));
+        let codex = first_launch("codex", CliKind::Codex, "").join("\n");
+        assert!(codex.contains("codex resume ${BSTUDIO_CLI_MODEL_VALUE:+\"--model=$BSTUDIO_CLI_MODEL_VALUE\"} \"$BSTUDIO_RESUME_ID_VALUE\" || printf"));
+    }
+
+    #[test]
+    fn new_cli_kinds_use_the_default_account_only() {
+        for (kind, _, _, _) in launch_vectors() {
+            assert!(account_export(kind, Some("/acct")).is_empty());
+        }
+        assert_eq!(account_export(CliKind::Claude, Some("/acct")), vec!["export CLAUDE_CONFIG_DIR='/acct'".to_owned()]);
     }
 }
