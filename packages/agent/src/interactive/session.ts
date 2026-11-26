@@ -46,6 +46,10 @@ const textOf = (message: BetaMessage): string =>
     .join('');
 
 const clip = (value: string, max = 120): string => (value.length > max ? `${value.slice(0, max)}…` : value);
+/** 화면(PTY)에 쓰기 전에 제어 문자(C0·DEL·C1, 이스케이프 시퀀스의 시작)를 지운다. 도구 입력과 출력은 모델·저장소에서 온 값이라 터미널을 조작할 수 있다 */
+const printable = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+/** 모델의 글은 줄바꿈·탭은 두고 나머지 제어 문자를 지운다 */
+const printableText = (value: string): string => value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
 
 /**
  * 대화형 에이전트 한 세션. 서버에는 claude CLI처럼 보인다: 같은 설정 파일의 훅을 같은 입력 모양으로 부르고,
@@ -102,7 +106,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       }).catch(() => undefined);
       messages.push({ role: 'assistant', content: message.content as BetaMessageParam['content'] });
       const text = textOf(message);
-      if (text) print(text);
+      if (text) print(printableText(text));
 
       const toolUses = message.content.filter((block): block is Anthropic.Beta.BetaToolUseBlock => block.type === 'tool_use');
       if (toolUses.length > 0) {
@@ -113,13 +117,15 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           const answer = await hooks.call('PreToolUse', { tool_name: use.name, tool_input: hookInput, tool_use_id: `toolu_${++toolCount}` });
           if (answer.hookSpecificOutput?.permissionDecision === 'deny') {
             const reason = answer.hookSpecificOutput.permissionDecisionReason ?? '거절됨';
-            print(`  ${use.name} 거절: ${clip(reason)}`);
+            print(`  ${printable(`${use.name} 거절: ${clip(reason)}`)}`);
             results.push({ type: 'tool_result', tool_use_id: use.id, content: reason, is_error: true });
             continue;
           }
           // 훅에는 절대 경로로 풀어 알렸지만 실행은 모델이 준 입력을 작업 폴더 기준으로 다시 풀어 가둔다
           const outcome = await tools.execute(use.name, toolInput, options.signal);
-          print(`  ${use.name}${typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : use.name === 'Bash' && typeof toolInput.command === 'string' ? ` ${clip(toolInput.command.replace(/\s+/g, ' '), 80)}` : ''}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`);
+          // Bash는 file_path를 함께 보내도 명령을 보인다(화면에 다른 것을 보이지 않게)
+          const target = use.name === 'Bash' ? (typeof toolInput.command === 'string' ? ` ${clip(toolInput.command, 80)}` : '') : typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : '';
+          print(`  ${printable(`${use.name}${target}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`)}`);
           results.push({ type: 'tool_result', tool_use_id: use.id, content: outcome.text, is_error: outcome.isError || undefined });
         }
         messages.push({ role: 'user', content: results });

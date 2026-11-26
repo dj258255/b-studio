@@ -24,12 +24,29 @@ export interface BashOptions {
   /** 시험이 줄이는 값 */
   killGraceMs?: number;
   maxOutputChars?: number;
+  /** 우두머리가 끝난 뒤 남은 출력을 더 받는 시간(기본 200ms) */
+  exitDrainMs?: number;
 }
 
 export function scrubbedEnv(base: NodeJS.ProcessEnv, extra: readonly string[] = []): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = { ...base };
   for (const name of [...SCRUBBED_ENV_NAMES, ...extra]) delete out[name];
   return out;
+}
+
+/**
+ * 아직 정리하지 않은 명령의 프로세스 그룹. 명령이 어떻게 끝나든 그룹째 끊고 여기서 뺀다.
+ * CLI가 끝날 때(정상 종료·SIGTERM·SIGHUP 뒤의 exit) 남은 그룹을 끊는다. SIGKILL로 죽은 CLI는 정리하지 못한다(새 그룹이라 PTY의 SIGHUP도 받지 않는다)
+ */
+const liveGroups = new Set<number>();
+let exitHookInstalled = false;
+function trackGroup(pid: number): void {
+  liveGroups.add(pid);
+  if (exitHookInstalled) return;
+  exitHookInstalled = true;
+  process.on('exit', () => {
+    for (const group of liveGroups) killGroup(group, 'SIGKILL');
+  });
 }
 
 const killGroup = (pid: number, signal: NodeJS.Signals) => {
@@ -68,10 +85,13 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
       stdio: ['ignore', 'pipe', 'pipe'],
     });
     const pid = child.pid;
+    if (pid !== undefined) trackGroup(pid);
     let collected = '';
     let totalBytes = 0;
     let keptBytes = 0;
     let reason: 'timeout' | 'abort' | undefined;
+    // 우두머리가 끝났다. 그 뒤의 시간 초과·중단은 결과를 바꾸지 않는다(이미 끝난 명령을 끊었다고 보고하지 않는다)
+    let exited = false;
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
     let killTimer: NodeJS.Timeout | undefined;
@@ -94,6 +114,11 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
       clearTimeout(timer);
       clearTimeout(killTimer);
       signal?.removeEventListener('abort', onAbort);
+      // 명령이 끝났으면 그룹에 남은 것(백그라운드로 보낸 하위 프로세스)도 끊는다. 이 도구는 백그라운드 작업을 되찾을 길이 없다
+      if (pid !== undefined) {
+        killGroup(pid, 'SIGKILL');
+        liveGroups.delete(pid);
+      }
       resolve(outcome);
     };
     const render = (head: string, isError: boolean): ToolOutcome => {
@@ -105,7 +130,7 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
 
     // 그룹을 끊는다: 종료 신호를 보내고, 유예 뒤에는 우두머리가 이미 끝났어도 그룹에 남은 것을 강제로 끊은 다음에야 결과를 낸다
     const terminate = (why: 'timeout' | 'abort') => {
-      if (reason !== undefined || settled || pid === undefined) return;
+      if (reason !== undefined || settled || exited || pid === undefined) return;
       reason = why;
       killGroup(pid, 'SIGTERM');
       killTimer = setTimeout(() => {
@@ -131,13 +156,14 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
       finish(exitCode === 0 ? render('종료 코드: 0', false) : render(exitCode === null ? `종료 신호: ${exitSignal ?? '알 수 없음'}` : `종료 코드: ${exitCode}`, true));
     };
     child.on('exit', (code, sig) => {
+      exited = true;
       exitCode = code;
       exitSignal = sig;
       setTimeout(() => {
         child.stdout.destroy();
         child.stderr.destroy();
         done();
-      }, 200).unref();
+      }, options.exitDrainMs ?? 200).unref();
     });
     child.on('close', done);
   });

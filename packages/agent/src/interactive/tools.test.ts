@@ -225,6 +225,22 @@ describe('Bash 도구', () => {
     await waitFor(() => !alive(grandchild));
   });
 
+  it('명령이 정상으로 끝나도 백그라운드로 남긴 하위 프로세스는 그룹째 끊는다', async () => {
+    const result = await bashTools().execute('Bash', { command: 'sleep 300 & echo $! > leftover.pid; echo started' });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain('종료 코드: 0');
+    const pid = await pidOf('leftover.pid');
+    await waitFor(() => !alive(pid));
+  });
+
+  it('우두머리가 끝난 뒤 남은 출력을 받는 동안 시간이 다 돼도 종료 코드를 그대로 알린다(끊었다고 하지 않는다)', async () => {
+    // 백그라운드 프로세스가 출력 파이프를 쥐고 있어 close가 오지 않는 동안(끝난 뒤 남은 출력을 받는 시간)에 시간 상한이 반드시 지나가게 한다
+    const result = await bashTools({ exitDrainMs: 1500 }).execute('Bash', { command: 'sleep 5 & echo done-now', timeout: 600 });
+    expect(result.text).toContain('종료 코드: 0');
+    expect(result.text).not.toContain('시간 초과');
+    expect(result.isError).toBe(false);
+  });
+
   it('종료 신호를 무시하는 손자도 유예 뒤에는 강제로 끊는다', async () => {
     const result = await bashTools().execute('Bash', { command: "(trap '' TERM; sleep 300) & echo $! > stubborn.pid; sleep 300", timeout: 300 });
     expect(result.text).toContain('시간 초과');

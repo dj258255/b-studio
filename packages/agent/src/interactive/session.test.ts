@@ -240,6 +240,19 @@ describe('대화형 에이전트 코어(claude CLI와 같은 바깥 계약)', ()
     expect(client.requests[1]!.messages.at(-1)!.content).toEqual([{ type: 'tool_result', tool_use_id: expect.any(String), content: '명령 거절', is_error: true }]);
   });
 
+  it('화면에는 제어 문자를 지운 글만 쓴다(도구 입력·출력과 모델의 글). Bash는 file_path를 함께 보내도 명령을 보인다', async () => {
+    const turns: ScriptedTurn[] = [
+      { toolCalls: [{ name: 'Bash', input: { command: 'printf "\\033]52;c;aGk=\\007\\033[2J"; exit 4', file_path: 'docs/ok.md' } }] },
+      { text: '끝\u001b[2J\u009b31m 줄\n다음 줄' },
+    ];
+    await reply({ 'pre-tool': [{ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow' } }] });
+    const { stdout } = await run({ turns, args: ['요청'] });
+    expect(stdout).not.toMatch(/[\u001b\u009b\u0007]/);
+    expect(stdout).toContain('Bash printf');
+    expect(stdout).not.toContain('Bash docs/ok.md');
+    expect(stdout).toContain('끝[2J31m 줄\n다음 줄');
+  });
+
   it('matcher가 `*`이거나 비면 모든 도구에 맞고, 정규식은 도구 이름 전체에 맞춘다', async () => {
     const command = (event: string) => hook(event).hooks[0]!;
     await writeSettings({
