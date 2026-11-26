@@ -844,6 +844,8 @@ export class DeskApp {
   }
 
   #send(id: string, data: string): void {
+    // 활동 기록 칸은 터미널이 아니다. 키 처리 쪽이 이미 거르지만, 보내는 자리 한 곳에서도 막는다
+    if (isPinId(id)) return;
     if (isShellId(id)) {
       const shell = this.#shells.get(id);
       if (shell?.pty && !shell.ended) shell.pty.write(data);
