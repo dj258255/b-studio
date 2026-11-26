@@ -7,7 +7,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Board } from './coordination';
 import { GEMINI_MODEL_REQUIRED, geminiSettingsJson, runGeminiAgent, type GeminiProcess } from './gemini-cli-runner';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
 /** 테스트가 쓰는 모델. 러너는 모델을 추측하지 않고 항상 명시받는다 */

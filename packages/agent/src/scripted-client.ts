@@ -1,5 +1,5 @@
 import type Anthropic from '@anthropic-ai/sdk';
-import type { AgentRequest, ModelClient, ModelClientInfo } from './loop';
+import type { AgentRequest, ModelClient, ModelClientInfo } from './agent-types';
 
 export interface ScriptedTurn {
   text?: string;

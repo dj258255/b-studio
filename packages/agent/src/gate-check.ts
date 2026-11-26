@@ -3,7 +3,7 @@ import { decodeNative, encodeNative, native, type LoadRequest, type Sandbox } fr
 import { SPEC_FILE, type LoadedProject, type WorkflowPageCheck, type WorkflowStage } from '@b-studio/spec';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import { TEST_TIMEOUT_MS, type GateOutcome, type PageFetcher, type ServiceRequest } from './gate';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { autoHandlers, autoInput } from './gate-auto';
 import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
 import { TaskGraphError } from './task-graph';

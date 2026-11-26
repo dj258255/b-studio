@@ -4,7 +4,7 @@ import { type Sandbox } from '@b-studio/sandbox';
 import { SPEC_FILE, SpecError, type AutoPageChecks, type LoadedProject, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { VerificationGate, type PageFetcher } from './gate';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { StaticShadowUnknownError } from './next-static-shadow';
 import { Workspace } from './workspace';

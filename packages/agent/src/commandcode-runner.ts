@@ -1,14 +1,15 @@
-import { execFile, spawn, type ChildProcessByStdio } from 'node:child_process';
+import { spawn, type ChildProcessByStdio } from 'node:child_process';
 import { access, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import readline from 'node:readline';
 import type { Readable } from 'node:stream';
 import type { Effort } from './anthropic-client';
-import { serialQueue } from './claude-code-runner';
+import { serialQueue } from './tool-schema';
 import type { EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
-import { emptyUsage, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage } from './loop';
+import type { AgentEvent, AgentResult, AgentUsage, RunAgentOptions, RunMetrics } from './agent-types';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
@@ -16,7 +17,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type ToolContext, 
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
-import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
+import { COMMAND } from './commandcode-auth';
 
 /** MCP 서버 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: `cmd mcp list`·명령 문서) */
 const SERVER = 'b_studio';
@@ -24,9 +25,6 @@ const SERVER = 'b_studio';
 const TOKEN_ENV = 'B_STUDIO_MCP_TOKEN';
 /** 화면 표기. 제품 이름을 그대로 쓰지 않는다(로컬 Claude Agent·ChatGPT 러너와 같은 규칙) */
 const BACKEND = '로컬 Command Code Agent';
-/** 실제 실행할 CLI. 이 PC에 로그인돼 있는 `cmd`를 그대로 쓴다 */
-const COMMAND = 'cmd';
-
 /** 실행마다 만드는 작업 폴더(cwd)의 접두어 */
 const WORKDIR_PREFIX = 'b-studio-commandcode-';
 /** 실행마다 만드는 임시 HOME의 접두어. cmd가 사용자 설정 대신 이 폴더를 읽는다 */
@@ -606,63 +604,6 @@ function classifyFailure({ exitCode, message, maxTurns }: { exitCode: number; me
   return `Command Code가 종료 코드 ${exitCode}로 끝났습니다`;
 }
 
-/**
- * 샌드박스를 띄우기 전에 이 PC의 Command Code CLI가 로그인돼 있는지 확인한다.
- * `cmd status`만 부르므로 모델 호출도, 사용량도 쓰지 않는다. 토큰·계정 정보는 읽지 않는다.
- * (0단계 실측: 로그인 상태면 종료 코드 0, 아니면 1)
- */
-export async function preflightCommandCode(
-  { command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {},
-): Promise<{ ok: true } | CliPreflightFailure> {
-  try {
-    await run(command, ['status'], timeoutMs);
-    return { ok: true };
-  } catch (error) {
-    return cliPreflightFailure(`Command Code CLI에 로그인돼 있지 않습니다. 터미널에서 "${command}"를 실행해 로그인하세요.`, error);
-  }
-}
-
-export interface CommandCodeModel {
-  id: string;
-  description: string;
-  group: string;
-  free: boolean;
-  isDefault: boolean;
-}
-
-/** `cmd --list-models` 텍스트를 파싱한다. 그룹 헤더와 `id  설명` 줄만 골라낸다(순수 함수). 같은 id가 여러 그룹에 나오면 첫 줄을 남기고, Decision models 그룹은 뺀다 */
-export function parseCommandCodeModels(text: string): CommandCodeModel[] {
-  const models = new Map<string, CommandCodeModel>();
-  let group = '';
-  for (const raw of text.split('\n')) {
-    const line = raw.replace(/\s+$/, '');
-    if (!line.trim()) continue;
-    // 첫 줄·꼬리말·사용 예시는 모델이 아니다
-    if (line.startsWith('Available models')) continue;
-    if (line.startsWith('Docs:')) continue;
-    if (line.startsWith('cmd ')) continue;
-    if (line.includes('Pass the full id')) continue;
-    const match = /^(\S+)\s{2,}(.+)$/.exec(line);
-    if (!match) {
-      group = line.trim();
-      continue;
-    }
-    const id = match[1]!;
-    const description = match[2]!.trim();
-    // Decision models(예: typesafe/jev)은 채팅·도구 호출 모델이 아니라 헤드리스 전용이라 목록에서 뺀다
-    if (group.startsWith('Decision models')) continue;
-    if (!models.has(id)) {
-      models.set(id, { id, description, group, free: description.startsWith('FREE') || id.includes(':free') || group === 'Stealth', isDefault: /\(default\)$/.test(description) });
-    }
-  }
-  return [...models.values()];
-}
-
-/** 이 PC에서 쓸 수 있는 모델 목록. `cmd --list-models` 텍스트를 파싱한다(모델 호출 없음) */
-export async function listCommandCodeModels({ command = COMMAND, timeoutMs = 60_000 }: { command?: string; timeoutMs?: number } = {}): Promise<CommandCodeModel[]> {
-  return parseCommandCodeModels(await run(command, ['--list-models'], timeoutMs));
-}
-
 function processEnv(): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
@@ -702,13 +643,3 @@ async function exists(target: string): Promise<boolean> {
     () => false,
   );
 }
-
-function run(command: string, args: string[], timeoutMs: number): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: timeoutMs, windowsHide: true, maxBuffer: 16 * 1024 * 1024 }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout);
-    });
-  });
-}
-

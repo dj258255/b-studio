@@ -1,6 +1,6 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
-import type { AgentUsage } from './loop';
+import type { AgentUsage } from './agent-types';
 import {
   appendPlanToRequest,
   buildPlanBriefSystem,

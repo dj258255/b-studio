@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { keylessLocal } from './model-key';
 import type Anthropic from '@anthropic-ai/sdk';
-import type { AgentRequest, ModelClient, ModelClientInfo, ModelPreflight } from './loop';
+import type { AgentRequest, ModelClient, ModelClientInfo, ModelPreflight } from './agent-types';
 import type { ModelProfile } from './model-router';
 
 type BetaMessage = Anthropic.Beta.BetaMessage;

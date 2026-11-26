@@ -7,7 +7,7 @@ import path from 'node:path';
 import { PassThrough, Writable } from 'node:stream';
 import type Anthropic from '@anthropic-ai/sdk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { AgentRequest, ModelClient } from '../loop';
+import type { AgentRequest, ModelClient } from '../agent-types';
 import { ScriptedModelClient, type ScriptedTurn } from '../scripted-client';
 import { runInteractiveSession } from './session';
 
