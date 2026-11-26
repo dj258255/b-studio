@@ -729,6 +729,39 @@ describe('가림이 긴 글에서 서버를 세우지 않는다(#1411)', () => {
   });
 });
 
+describe('대입 꼴 가림에 길이로 비켜 갈 틈이 없다(#1411)', () => {
+  const addedOf = (content: string): string => {
+    const state = newTerminalActivity();
+    noteToolUse(state, { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 't1', tool_input: { file_path: '/w/a.txt', content } }, AT, (value) => value);
+    return activityLog(state)!.agents[0]!.entries[0]!.changes![0]!.added!;
+  };
+
+  it('구분자 둘레의 빈칸이 길어도, 열쇠말 뒤 이름이 길어도 값을 가린다', () => {
+    expect(addedOf(`token${' '.repeat(40)}=${' '.repeat(40)}LEAK_ONE`)).not.toContain('LEAK_ONE');
+    expect(addedOf(`token\t\t\t\t\t\t\t\t\t\t:\tLEAK_TWO`)).not.toContain('LEAK_TWO');
+    expect(addedOf(`secret_${'x'.repeat(100)}=LEAK_THREE`)).not.toContain('LEAK_THREE');
+    expect(addedOf(`${'x'.repeat(100)}_password = "LEAK FOUR"`)).not.toContain('LEAK FOUR');
+  });
+
+  it('값 자리에 다시 대입이 와도 안쪽 값을 가린다', () => {
+    expect(addedOf('x=token=LEAK_FIVE')).not.toContain('LEAK_FIVE');
+    expect(addedOf('url: password=LEAK_SIX')).not.toContain('LEAK_SIX');
+  });
+
+  it('열쇠말이 없는 대입과 보통 코드는 그대로 둔다', () => {
+    expect(addedOf('const value = compute(input);\nname: "kim"')).toBe('const value = compute(input);\nname: "kim"');
+  });
+
+  it('상한 크기의 글에서도 오래 걸리지 않는다', () => {
+    const size = ACTIVITY_LIMITS.rawChars - 10;
+    for (const content of ['a'.repeat(size), 'a='.repeat(size / 2), 'token '.repeat(Math.floor(size / 6)), `token${' '.repeat(size - 5)}`, 'token='.repeat(Math.floor(size / 6))]) {
+      const started = performance.now();
+      addedOf(content);
+      expect(performance.now() - started).toBeLessThan(5_000);
+    }
+  }, 120_000);
+});
+
 describe('지금 하는 일 한 줄도 가린다(#1411)', () => {
   it('명령 첫 줄의 자격 증명과 세션이 아는 비밀 값이 카드에 그대로 나가지 않는다', () => {
     const state = newTerminalActivity();

@@ -671,11 +671,34 @@ const CREDENTIAL_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, '***'],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer ***'],
   [/\b(authorization|x-api-key|api-key|proxy-authorization)(\s*[:=]\s*)[^\r\n]+/gi, '$1$2***'],
-  // password: "값"·API_KEY=값 같은 대입. 이름에 비밀을 뜻하는 낱말이 든 것만(넓게 맞춘다).
-  // 열쇠말에서 시작하고(앞 글자는 맞추지 않아도 그대로 남는다) 뒤 이름·빈칸의 길이에 상한을 둔다: 길이 제한 없는 되풀이를 앞뒤에 두면
-  // 열쇠말이 되풀이되는 글에서 세제곱 시간이 걸려, 파일 하나를 쓰는 것으로 서버가 멈춘다
-  [/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8})("[^"\n]*"|'[^'\n]*'|[^\s,;&)"']+)/gi, '$1***'],
 ];
+
+/** 비밀을 뜻하는 낱말이 든 이름(넓게 맞춘다) */
+const SECRET_NAME = /password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth/i;
+/** 이름 하나와 구분자. 이름의 첫 글자에서만 시작한다(뒤돌아보기) — 이름 한가운데에서 다시 시작하면 긴 이름에서 제곱 시간이 된다 */
+const ASSIGN_HEAD = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)["']?[ \t]*[:=][ \t]*/g;
+const ASSIGN_VALUE = /"[^"\n]*"|'[^'\n]*'|[^\s,;&)"']+/y;
+
+/**
+ * password: "값"·API_KEY=값 같은 대입의 값을 가린다. 이름과 빈칸의 길이에 상한이 없다(상한은 그 길이를 넘겨 쓰는 것으로 비켜 갈 수 있다).
+ * 정규식 하나로 하지 않고 "이름+구분자"를 차례로 찾아 이름에 비밀 낱말이 있을 때만 값을 읽는다: 글자마다 한 번씩만 읽어 글 길이에 비례한다.
+ * 비밀 이름이 아닌 대입은 값을 건너뛰지 않으므로 `x=token=값`의 안쪽 대입도 본다
+ */
+function redactAssignments(value: string): string {
+  let out = '';
+  let from = 0;
+  ASSIGN_HEAD.lastIndex = 0;
+  for (let head = ASSIGN_HEAD.exec(value); head; head = ASSIGN_HEAD.exec(value)) {
+    if (!SECRET_NAME.test(head[1]!)) continue;
+    ASSIGN_VALUE.lastIndex = ASSIGN_HEAD.lastIndex;
+    const found = ASSIGN_VALUE.exec(value);
+    if (!found) continue;
+    out += `${value.slice(from, ASSIGN_HEAD.lastIndex)}***`;
+    from = ASSIGN_VALUE.lastIndex;
+    ASSIGN_HEAD.lastIndex = from;
+  }
+  return out + value.slice(from);
+}
 
 /**
  * 글 한 덩어리를 가린다(자르기 전에). 순서: 색 코드·제어 글자 → 세션이 아는 비밀 값 → 주소 속 계정 정보(저장소의 기본 가림) → 모양으로 아는 자격 증명.
@@ -690,6 +713,7 @@ function scrub(raw: string, redact: Redact | undefined): string {
     throw new Withhold('unknown');
   }
   for (const [pattern, replacement] of CREDENTIAL_PATTERNS) result = result.replace(pattern, replacement);
+  result = redactAssignments(result);
   // 앞이 잘려 끝 표시만 남은 키 본문은 모양으로 가릴 수 없다
   if (/PRIVATE KEY-----/.test(result)) throw new Withhold('secret');
   return result;
