@@ -161,3 +161,118 @@ describe('작업 폴더 가둠(막는 검사)', () => {
     expect((await run('Nope', {})).isError).toBe(true);
   });
 });
+
+describe('Bash 도구', () => {
+  const alive = (pid: number) => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  const waitFor = async (check: () => boolean | Promise<boolean>, ms = 5000) => {
+    const deadline = Date.now() + ms;
+    while (!(await check())) {
+      if (Date.now() > deadline) throw new Error('기다리다 시간이 지났습니다');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  };
+  const bashTools = (extra: Parameters<typeof createTools>[1] = {}) => createTools(work, { killGraceMs: 200, ...extra });
+  const pidOf = async (name: string) => Number((await readFile(path.join(work, name), 'utf8')).trim());
+
+  it('작업 폴더에서 실행하고 종료 코드 0과 출력을 돌려준다. stdin은 닫혀 있다', async () => {
+    const result = await bashTools().execute('Bash', { command: 'pwd; echo err >&2; cat; echo after-cat' });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain('종료 코드: 0');
+    expect(result.text).toContain(await (await import('node:fs/promises')).realpath(work));
+    expect(result.text).toContain('err');
+    expect(result.text).toContain('after-cat');
+  });
+
+  it('0이 아닌 종료 코드는 던지지 않고 실패한 도구 결과로 돌려준다', async () => {
+    const result = await bashTools().execute('Bash', { command: 'echo out; exit 3' });
+    expect(result).toMatchObject({ isError: true });
+    expect(result.text).toContain('종료 코드: 3');
+    expect(result.text).toContain('out');
+  });
+
+  it('입력 검사: command가 없거나 timeout이 틀리면 실행하지 않는다', async () => {
+    expect((await bashTools().execute('Bash', {})).isError).toBe(true);
+    expect((await bashTools().execute('Bash', { command: '   ' })).isError).toBe(true);
+    expect((await bashTools().execute('Bash', { command: 'touch nope', timeout: -1 })).isError).toBe(true);
+    expect((await bashTools().execute('Bash', { command: 'touch nope', timeout: '5' })).isError).toBe(true);
+    expect(() => lstatSync(path.join(work, 'nope'))).toThrow();
+  });
+
+  it('출력은 읽는 동안 상한까지만 모으고 버린 바이트 수를 알린다', async () => {
+    const result = await bashTools({ maxOutputChars: 1000 }).execute('Bash', { command: "head -c 2000000 /dev/zero | tr '\\0' 'a'; echo; echo tail-marker" });
+    expect(result.isError).toBe(false);
+    expect(result.text.length).toBeLessThan(1400);
+    expect(result.text).toMatch(/\(출력이 길어 \d{6,}바이트를 버렸습니다/);
+    expect(result.text).toContain('앞 1000바이트만 남겼습니다');
+    expect(result.text).not.toContain('tail-marker');
+  });
+
+  it('시간 초과면 명령과 손자 프로세스를 그룹째 끊는다', async () => {
+    const started = Date.now();
+    const result = await bashTools().execute('Bash', { command: '(sleep 300 & echo $! > grandchild.pid; wait) & echo $! > child.pid; wait', timeout: 400 });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('시간 초과(400ms)');
+    const grandchild = await pidOf('grandchild.pid');
+    expect(alive(grandchild) && alive(await pidOf('child.pid'))).toBe(false);
+    await waitFor(() => !alive(grandchild));
+  });
+
+  it('명령이 정상으로 끝나도 백그라운드로 남긴 하위 프로세스는 그룹째 끊는다', async () => {
+    const result = await bashTools().execute('Bash', { command: 'sleep 300 & echo $! > leftover.pid; echo started' });
+    expect(result.isError).toBe(false);
+    expect(result.text).toContain('종료 코드: 0');
+    const pid = await pidOf('leftover.pid');
+    await waitFor(() => !alive(pid));
+  });
+
+  it('우두머리가 끝난 뒤 남은 출력을 받는 동안 시간이 다 돼도 종료 코드를 그대로 알린다(끊었다고 하지 않는다)', async () => {
+    // 백그라운드 프로세스가 출력 파이프를 쥐고 있어 close가 오지 않는 동안(끝난 뒤 남은 출력을 받는 시간)에 시간 상한이 반드시 지나가게 한다
+    const result = await bashTools({ exitDrainMs: 1500 }).execute('Bash', { command: 'sleep 5 & echo done-now', timeout: 600 });
+    expect(result.text).toContain('종료 코드: 0');
+    expect(result.text).not.toContain('시간 초과');
+    expect(result.isError).toBe(false);
+  });
+
+  it('종료 신호를 무시하는 손자도 유예 뒤에는 강제로 끊는다', async () => {
+    const result = await bashTools().execute('Bash', { command: "(trap '' TERM; sleep 300) & echo $! > stubborn.pid; sleep 300", timeout: 300 });
+    expect(result.text).toContain('시간 초과');
+    const pid = await pidOf('stubborn.pid');
+    await waitFor(() => !alive(pid));
+  });
+
+  it('중단 신호(abort)도 그룹을 끊고 알린다. 이미 끊긴 신호면 실행하지 않는다', async () => {
+    const controller = new AbortController();
+    const pending = bashTools().execute('Bash', { command: 'sleep 300 & echo $! > abort.pid; wait' }, controller.signal);
+    await waitFor(async () => (await readFile(path.join(work, 'abort.pid'), 'utf8').catch(() => '')).trim() !== '');
+    controller.abort();
+    const result = await pending;
+    expect(result).toMatchObject({ isError: true });
+    expect(result.text).toContain('중단');
+    const pid = await pidOf('abort.pid');
+    await waitFor(() => !alive(pid));
+    const before = new AbortController();
+    before.abort();
+    expect((await bashTools().execute('Bash', { command: 'touch late' }, before.signal)).isError).toBe(true);
+    expect(() => lstatSync(path.join(work, 'late'))).toThrow();
+  });
+
+  it('자식 환경에서 모델 키 변수를 뺀다(프로필의 이름 포함). 관계없는 변수는 남는다', async () => {
+    const env = { PATH: process.env.PATH, ANTHROPIC_API_KEY: 'k1', ANTHROPIC_AUTH_TOKEN: 'k2', OPENAI_API_KEY: 'k3', GOOGLE_API_KEY: 'k4', MY_PROFILE_KEY: 'k5', KEEP_ME: 'kept' };
+    const result = await bashTools({ env, scrubEnvNames: ['MY_PROFILE_KEY'] }).execute('Bash', { command: 'env | sort' });
+    for (const name of ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'OPENAI_API_KEY', 'GOOGLE_API_KEY', 'MY_PROFILE_KEY']) expect(result.text).not.toContain(`${name}=`);
+    expect(result.text).toContain('KEEP_ME=kept');
+  });
+
+  it('훅에는 모델이 준 입력 그대로 알린다(claude의 Bash 입력 모양)', () => {
+    const input = { command: 'ls -la', timeout: 5000, description: '목록' };
+    expect(tools.hookInput('Bash', input)).toEqual(input);
+  });
+});

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { clientForProfile, parseInteractiveArgs, runInteractiveSession } from '@b-studio/agent';
+import { apiKeyEnvName, clientForProfile, parseInteractiveArgs, runInteractiveSession } from '@b-studio/agent';
 import { loadModelFile, modelFilePath, ModelFileError } from './agent-tty/model-file';
 
 /**
@@ -36,6 +36,7 @@ async function main(): Promise<number> {
     stdout: process.stdout,
     pricing: loaded.profile.pricing,
     signal: abort.signal,
+    scrubEnvNames: [apiKeyEnvName(loaded.profile)],
   });
   return 0;
 }

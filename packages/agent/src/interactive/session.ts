@@ -27,12 +27,14 @@ export interface InteractiveSessionOptions {
   /** 훅 명령의 환경(기본은 process.env). 설정의 env가 위에 덮인다 */
   env?: NodeJS.ProcessEnv;
   maxModelCalls?: number;
+  /** Bash의 자식 환경에서 더 뺄 환경 변수 이름(모델 키의 이름). 기본 목록(ANTHROPIC_API_KEY 등)에 더한다 */
+  scrubEnvNames?: readonly string[];
 }
 
 export function defaultSystemPrompt(cwd: string): string {
   return [
     `당신은 터미널에서 코드를 고치는 에이전트입니다. 작업 폴더는 ${cwd} 입니다.`,
-    '도구(Read, Write, Edit, Glob, Grep)는 작업 폴더 안에서만 동작합니다. 밖의 경로나 링크로 나가는 경로는 거절됩니다.',
+    '파일 도구(Read, Write, Edit, Glob, Grep)는 작업 폴더 안에서만 동작합니다. 밖의 경로나 링크로 나가는 경로는 거절됩니다. Bash는 작업 폴더에서 셸 명령을 실행하며 사용자의 권한으로 돕니다. 필요한 명령만 쓰고 작업 폴더 밖은 건드리지 마세요.',
     '요청한 일을 끝내면 한 일을 짧게 알리고 도구 호출 없이 답하세요.',
   ].join('\n');
 }
@@ -44,6 +46,10 @@ const textOf = (message: BetaMessage): string =>
     .join('');
 
 const clip = (value: string, max = 120): string => (value.length > max ? `${value.slice(0, max)}…` : value);
+/** 화면(PTY)에 쓰기 전에 제어 문자(C0·DEL·C1, 이스케이프 시퀀스의 시작)를 지운다. 도구 입력과 출력은 모델·저장소에서 온 값이라 터미널을 조작할 수 있다 */
+const printable = (value: string): string => value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+/** 모델의 글은 줄바꿈·탭은 두고 나머지 제어 문자를 지운다 */
+const printableText = (value: string): string => value.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '');
 
 /**
  * 대화형 에이전트 한 세션. 서버에는 claude CLI처럼 보인다: 같은 설정 파일의 훅을 같은 입력 모양으로 부르고,
@@ -55,7 +61,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
   const parsed = parseArgs(options.args);
   const settings: InteractiveSettings = loadSettings(parsed.settingsFile);
   const hooks: HookRunner = createHookRunner({ settings, cwd, sessionId: 'conversation-1', env: options.env });
-  const tools: InteractiveTools = createTools(cwd);
+  const tools: InteractiveTools = createTools(cwd, { scrubEnvNames: options.scrubEnvNames });
   const system = options.system ?? defaultSystemPrompt(cwd);
   const maxCalls = options.maxModelCalls ?? MAX_MODEL_CALLS_PER_REQUEST;
   const messages: BetaMessageParam[] = [];
@@ -100,7 +106,7 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
       }).catch(() => undefined);
       messages.push({ role: 'assistant', content: message.content as BetaMessageParam['content'] });
       const text = textOf(message);
-      if (text) print(text);
+      if (text) print(printableText(text));
 
       const toolUses = message.content.filter((block): block is Anthropic.Beta.BetaToolUseBlock => block.type === 'tool_use');
       if (toolUses.length > 0) {
@@ -111,13 +117,15 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
           const answer = await hooks.call('PreToolUse', { tool_name: use.name, tool_input: hookInput, tool_use_id: `toolu_${++toolCount}` });
           if (answer.hookSpecificOutput?.permissionDecision === 'deny') {
             const reason = answer.hookSpecificOutput.permissionDecisionReason ?? '거절됨';
-            print(`  ${use.name} 거절: ${clip(reason)}`);
+            print(`  ${printable(`${use.name} 거절: ${clip(reason)}`)}`);
             results.push({ type: 'tool_result', tool_use_id: use.id, content: reason, is_error: true });
             continue;
           }
           // 훅에는 절대 경로로 풀어 알렸지만 실행은 모델이 준 입력을 작업 폴더 기준으로 다시 풀어 가둔다
-          const outcome = await tools.execute(use.name, toolInput);
-          print(`  ${use.name}${typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : ''}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`);
+          const outcome = await tools.execute(use.name, toolInput, options.signal);
+          // Bash는 file_path를 함께 보내도 명령을 보인다(화면에 다른 것을 보이지 않게)
+          const target = use.name === 'Bash' ? (typeof toolInput.command === 'string' ? ` ${clip(toolInput.command, 80)}` : '') : typeof toolInput.file_path === 'string' ? ` ${toolInput.file_path}` : '';
+          print(`  ${printable(`${use.name}${target}${outcome.isError ? ` 실패: ${clip(outcome.text)}` : ''}`)}`);
           results.push({ type: 'tool_result', tool_use_id: use.id, content: outcome.text, is_error: outcome.isError || undefined });
         }
         messages.push({ role: 'user', content: results });

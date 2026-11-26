@@ -2,6 +2,7 @@ import { constants } from 'node:fs';
 import { lstat, mkdir, open, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import type Anthropic from '@anthropic-ai/sdk';
+import { BASH_DEFAULT_TIMEOUT_MS, BASH_MAX_OUTPUT_CHARS, BASH_MAX_TIMEOUT_MS, runBash, type BashOptions } from './bash';
 
 type BetaTool = Anthropic.Beta.BetaTool;
 
@@ -34,6 +35,11 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
     name: 'Grep',
     description: '작업 폴더 안의 파일에서 정규식에 맞는 줄을 찾는다. glob으로 파일을 좁힐 수 있다. .git·node_modules와 링크는 건너뛴다.',
     input_schema: { type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' }, glob: { type: 'string' } }, required: ['pattern'] },
+  },
+  {
+    name: 'Bash',
+    description: `작업 폴더에서 셸 명령(bash -c)을 실행하고 종료 코드와 출력(stdout·stderr)을 돌려준다. 입력(stdin)은 닫혀 있어 대화형 명령은 쓸 수 없다. 기본 ${BASH_DEFAULT_TIMEOUT_MS}ms, 최대 ${BASH_MAX_TIMEOUT_MS}ms(timeout)를 넘기면 명령과 하위 프로세스를 끊는다. 명령이 끝나면 남은 하위 프로세스(백그라운드로 보낸 것 포함)도 끊는다. 출력은 앞 ${BASH_MAX_OUTPUT_CHARS}자만 남는다. 작업 폴더 밖 경로 제한은 이 도구에 없다.`,
+    input_schema: { type: 'object', properties: { command: { type: 'string' }, timeout: { type: 'number', description: '밀리초' }, description: { type: 'string' } }, required: ['command'] },
   },
 ];
 
@@ -213,10 +219,11 @@ export interface InteractiveTools {
   definitions: BetaTool[];
   /** 훅에 알릴 입력: 파일 경로 칸을 작업 폴더 기준 절대 경로로 풀어 준다(서버가 작업 폴더와 견주는 값) */
   hookInput(name: string, input: Record<string, unknown>): Record<string, unknown>;
-  execute(name: string, input: Record<string, unknown>): Promise<ToolOutcome>;
+  /** signal이 끊기면 실행 중인 명령을 끊는다 */
+  execute(name: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<ToolOutcome>;
 }
 
-export function createTools(cwd: string): InteractiveTools {
+export function createTools(cwd: string, bash: Omit<BashOptions, 'cwd'> = {}): InteractiveTools {
   const resolveField = (input: Record<string, unknown>, key: string) => (typeof input[key] === 'string' && input[key] !== '' ? { [key]: path.resolve(cwd, input[key] as string) } : {});
   return {
     definitions: TOOL_DEFINITIONS,
@@ -225,8 +232,10 @@ export function createTools(cwd: string): InteractiveTools {
       if (name === 'Glob' || name === 'Grep') return { ...input, ...resolveField(input, 'path') };
       return input;
     },
-    async execute(name, input) {
+    async execute(name, input, signal) {
       switch (name) {
+        case 'Bash':
+          return runBash(input, { ...bash, cwd }, signal);
         case 'Read': {
           const file = str(input.file_path);
           if (file === undefined) return fail('file_path가 필요합니다');
