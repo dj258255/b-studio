@@ -235,7 +235,7 @@ export function usageAccounts(accounts: readonly DeskAccountLimits[]): DeskAccou
   return byTightness(accounts.filter((account) => account.status !== 'unsupported'));
 }
 
-/** 사이드바 맨 아래 한 줄: " 한도 Claude 5시간 82% · 13:50". 읽은 한도가 없으면 없다 */
+/** 사이드바 맨 아래 한 줄: " 한도 Claude 피오 5시간 82% · 13:50". 읽은 한도가 없으면 없다 */
 export function tightestLine(accounts: readonly DeskAccountLimits[], width: number, theme: Theme = DEFAULT_THEME, now = Date.now()): string | undefined {
   const account = byTightness(accounts)[0];
   if (!account || tightness(account) < 0) return undefined;
@@ -244,10 +244,13 @@ export function tightestLine(accounts: readonly DeskAccountLimits[], width: numb
   const reset = window.resetsAt ? Date.parse(window.resetsAt) : NaN;
   const when = Number.isFinite(reset) && reset > now ? ` · ${reset - now < 86_400_000 ? whenText(reset, now) : `${new Date(reset).getMonth() + 1}/${new Date(reset).getDate()}`}` : '';
   const color = fg(theme, limitStatus(account).color);
-  // 좁으면 다시 차는 때, AI 이름, "한도" 차례로 뺀다(#944). "주간 10"처럼 숫자를 반쯤 자르지 않는다
+  // 좁으면 다시 차는 때, 계정 이름, AI 이름, "한도" 차례로 뺀다(#944). "주간 10"처럼 숫자를 반쯤 자르지 않는다
   const percent = `${label} ${Math.round(window.usedPercent)}%`;
+  // 어느 계정인지 이름을 적는다. 카드의 "이 계정 주간 90%"가 같은 계정인지 알 수 있어야 한다(가장 많이 쓴 계정이 사이드바에 보인다)
+  const who = account.name ? `${backendLabel(account.backend)} ${account.name}` : backendLabel(account.backend);
   const variants: Array<[string, string, string]> = [
-    ['한도 ', `${backendLabel(account.backend)} ${percent}`, when],
+    ['한도 ', `${who} ${percent}`, when],
+    ['한도 ', `${who} ${percent}`, ''],
     ['한도 ', `${backendLabel(account.backend)} ${percent}`, ''],
     ['한도 ', percent, ''],
     ['', percent, ''],
