@@ -701,3 +701,50 @@ describe('에이전트별 활동 기록(activityLog)', () => {
     expect(activityView(state)?.now?.tool).toBe('Edit');
   });
 });
+
+describe('가림이 긴 글에서 서버를 세우지 않는다(#1411)', () => {
+  // 고치기 전 대입 꼴 정규식은 열쇠말이 되풀이되는 글에서 세제곱 시간이었다(6천 자에 십여 초, 상한인 10만 자면 끝나지 않는다)
+  const timed = (content: string): number => {
+    const state = newTerminalActivity();
+    const started = performance.now();
+    noteToolUse(state, { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 't1', tool_input: { file_path: '/w/a.txt', content } }, AT, (value) => value);
+    return performance.now() - started;
+  };
+
+  it('열쇠말이 되풀이되는 글·끊김 없는 글·열쇠말 뒤가 긴 글', () => {
+    expect(timed('token'.repeat(1_200))).toBeLessThan(2_000);
+    expect(timed('a'.repeat(6_000))).toBeLessThan(2_000);
+    expect(timed(`secret${'_x'.repeat(3_000)}`)).toBeLessThan(2_000);
+    expect(timed('token'.repeat(Math.floor(ACTIVITY_LIMITS.rawChars / 5) - 1))).toBeLessThan(5_000);
+  }, 120_000);
+
+  it('대입 꼴은 그대로 가린다(이름 앞뒤에 글자가 붙어도, 따옴표 값도)', () => {
+    const state = newTerminalActivity();
+    const content = ['MY_API_KEY=abcd1234efgh', 'db.password: "p@ss w0rd"', "const authToken = 'zzz999'", 'plain = keep'].join('\n');
+    noteToolUse(state, { hook_event_name: 'PreToolUse', tool_name: 'Write', tool_use_id: 't1', tool_input: { file_path: '/w/a.txt', content } }, AT, (value) => value);
+    const added = activityLog(state)!.agents[0]!.entries[0]!.changes![0]!.added!;
+    expect(added).not.toMatch(/abcd1234efgh|p@ss|zzz999/);
+    expect(added).toContain('MY_API_KEY=***');
+    expect(added).toContain('plain = keep');
+  });
+});
+
+describe('지금 하는 일 한 줄도 가린다(#1411)', () => {
+  it('명령 첫 줄의 자격 증명과 세션이 아는 비밀 값이 카드에 그대로 나가지 않는다', () => {
+    const state = newTerminalActivity();
+    noteToolUse(state, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 't1', tool_input: { command: 'curl -H "Authorization: Bearer abcdefgh12345678" https://x.test/KNOWN_SECRET_VALUE' } }, AT, (value) => value.replaceAll('KNOWN_SECRET_VALUE', '***'));
+    const target = activityView(state)?.now?.target ?? '';
+    expect(target).toContain('curl');
+    expect(target).not.toContain('abcdefgh12345678');
+    expect(target).not.toContain('KNOWN_SECRET_VALUE');
+  });
+
+  it('가림 함수가 던지면 대상을 비운다(도구 이름은 남는다)', () => {
+    const state = newTerminalActivity();
+    noteToolUse(state, { hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_use_id: 't1', tool_input: { command: 'echo hi' } }, AT, () => {
+      throw new Error('가림 실패');
+    });
+    expect(activityView(state)?.now).toMatchObject({ tool: 'Bash' });
+    expect(activityView(state)?.now?.target).toBeUndefined();
+  });
+});

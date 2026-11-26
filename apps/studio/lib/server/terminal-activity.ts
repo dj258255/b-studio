@@ -281,7 +281,8 @@ export function noteToolUse(state: TerminalActivity, input: Input, at: number, r
     }
     return;
   }
-  const target = toolTarget(tool, input.tool_input, text(input.cwd));
+  // 카드에 보이는 한 줄도 활동 기록과 같은 가림을 거친다. 가리지 못하면 대상 없이 도구 이름만 남긴다
+  const target = logTarget(tool, input.tool_input, text(input.cwd), redact);
   const id = text(input.tool_use_id);
   // 비동기 훅은 끝이 시작보다 먼저 닿을 수 있다(#955). 이미 끝난 도구는 도는 중으로 두지 않는다
   const over = id !== undefined && (state.ended ?? []).includes(id);
@@ -670,8 +671,10 @@ const CREDENTIAL_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, '***'],
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer ***'],
   [/\b(authorization|x-api-key|api-key|proxy-authorization)(\s*[:=]\s*)[^\r\n]+/gi, '$1$2***'],
-  // password: "값"·API_KEY=값 같은 대입. 이름에 비밀을 뜻하는 낱말이 든 것만(넓게 맞춘다)
-  [/([A-Za-z0-9_.-]*(?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)[A-Za-z0-9_.-]*["']?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,;&)"']+)/gi, '$1***'],
+  // password: "값"·API_KEY=값 같은 대입. 이름에 비밀을 뜻하는 낱말이 든 것만(넓게 맞춘다).
+  // 열쇠말에서 시작하고(앞 글자는 맞추지 않아도 그대로 남는다) 뒤 이름·빈칸의 길이에 상한을 둔다: 길이 제한 없는 되풀이를 앞뒤에 두면
+  // 열쇠말이 되풀이되는 글에서 세제곱 시간이 걸려, 파일 하나를 쓰는 것으로 서버가 멈춘다
+  [/((?:password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth)[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8})("[^"\n]*"|'[^'\n]*'|[^\s,;&)"']+)/gi, '$1***'],
 ];
 
 /**
