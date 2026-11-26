@@ -4,7 +4,7 @@ import path from 'node:path';
 import type { ContainerState, LogLine, Sandbox, ServiceEndpoint } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
 import type { OpenApiDocument } from './contract-diff';
-import type { Steering } from './loop';
+import type { Steering } from './agent-types';
 
 /** 단위 테스트 전용. 서비스 하나(api)짜리 주문 프로젝트를 임시 폴더에 만든다 */
 export async function createOrdersProject(prefix: string): Promise<LoadedProject> {

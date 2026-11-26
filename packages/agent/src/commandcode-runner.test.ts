@@ -5,9 +5,10 @@ import type { LoadedProject } from '@b-studio/spec';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { parseCommandCodeModels, runCommandCodeAgent, type CommandCodeProcess } from './commandcode-runner';
+import { parseCommandCodeModels } from './commandcode-auth';
+import { runCommandCodeAgent, type CommandCodeProcess } from './commandcode-runner';
 import { Board } from './coordination';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;

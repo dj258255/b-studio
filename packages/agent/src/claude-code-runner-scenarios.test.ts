@@ -2,7 +2,7 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runClaudeCodeAgent, type ClaudeCodeResult, type ClaudeCodeRunOptions } from './claude-code-runner';
 import { fakeClaudeCli, type FakeCliScenario, type FakeInvocation, type FakeStep } from './fake-claude-cli';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 
 /**

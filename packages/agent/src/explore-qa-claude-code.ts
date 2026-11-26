@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnClaudeCli, type ClaudeCliProcess, type CliStopOptions } from './claude-cli-process';
-import { ClaudeCodeUsageTracker, mcpSetupFailure, noResultMessage } from './claude-code-runner';
+import { ClaudeCodeUsageTracker, mcpSetupFailure, noResultMessage } from './claude-code-shared';
 import {
   buildExploreQaResult,
   buildQaSystemPrompt,
@@ -22,7 +22,7 @@ import {
   type QaViewport,
   type RunExploreQaOptions,
 } from './explore-qa';
-import type { AgentUsage } from './loop';
+import type { AgentUsage } from './agent-types';
 import { startToolServer, type ToolServer } from './mcp-http-server';
 import { serialQueue } from './tool-schema';
 import type { ToolOutcome } from './tools';

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { AgentRequest } from './loop';
+import type { AgentRequest } from './agent-types';
 import type { ModelProfile } from './model-router';
 import { GoogleModelClient, OpenAICompatibleModelClient } from './provider-clients';
 
