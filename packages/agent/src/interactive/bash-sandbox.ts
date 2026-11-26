@@ -65,11 +65,13 @@ const SHARED_TMP = ['/tmp', '/var/tmp'];
 /** 그 폴더 안의 관문 폴더는 세션마다 만들어지는 이름이라 이름 꼴로 막는다(다른 세션의 관문 폴더를 고치지 못하게) */
 export const GATEWAY_DIR_PREFIX = 'b-studio-gateway-';
 
+/** realpath. 없는 경로는 있는 가장 가까운 위쪽 폴더를 풀고 나머지를 붙인다(아직 없는 거부 경로도 링크를 푼 꼴로 맞추려고) */
 const realOf = (target: string): string => {
   try {
     return realpathSync.native(target);
   } catch {
-    return target;
+    const parent = path.dirname(target);
+    return parent === target ? target : path.join(realOf(parent), path.basename(target));
   }
 };
 
@@ -92,12 +94,31 @@ function variants(target: string): string[] {
   return real === given ? [given] : [given, real];
 }
 
+const inside = (target: string, root: string): boolean => target === root || target.startsWith(root === '/' ? '/' : `${root}/`);
+
+/**
+ * 막은 경로(deny)와 작업 폴더의 위쪽 폴더 가운데 **쓸 수 있는 구역 안에 있어 이름을 바꿀 수 있는 것**.
+ * 경로로 적은 거부는 위쪽 폴더가 옮겨지면 비켜 간다(`mv $작업폴더 $작업폴더.old; mkdir -p $작업폴더/.git/hooks`로 서버의 git이 쓰는 `.git`을 에이전트가 만든 것으로 바꾼다).
+ * 구역 밖의 폴더는 에이전트가 옮길 수 없다. 구역 자체(허용 뿌리)와 구역 안의 위쪽 폴더는 옮길 수 있으므로 모두 센다
+ */
+function renamableAncestors(targets: readonly string[], writableRoots: readonly string[]): string[] {
+  const found = new Set<string>();
+  for (const target of targets) {
+    for (let dir = path.dirname(target); dir !== '/' && dir !== path.dirname(dir); dir = path.dirname(dir)) {
+      if (writableRoots.some((root) => inside(dir, root))) found.add(dir);
+    }
+  }
+  return [...found];
+}
+
 interface ResolvedPlan {
   work: string[];
   tmp: string[];
   caches: string[];
   deny: string[];
   gatewayParents: string[];
+  /** 이름을 바꿀 수 있는 위쪽 폴더(작업 폴더 자신 포함). 폴더 자체의 이름·삭제·권한만 막고 안의 쓰기는 막지 않는다 */
+  pinned: string[];
 }
 
 function resolvePlan(cwd: string, options: BashSandboxOptions): ResolvedPlan {
@@ -119,8 +140,23 @@ function resolvePlan(cwd: string, options: BashSandboxOptions): ResolvedPlan {
   const deny = (options.denyWrite ?? []).flatMap((dir) => variants(dir));
   // 작업 폴더의 .git: 서버의 git(체크포인트)이 이 폴더에서 돌아 훅·설정(core.fsmonitor 등)을 서버 권한으로 실행한다
   for (const entry of work) deny.push(path.join(entry, '.git'));
-  return { work, tmp, caches, deny: [...new Set(deny)], gatewayParents: tmp };
+  const writableRoots = [...work, ...tmp, ...caches];
+  const denied = [...new Set(deny)];
+  // 작업 폴더 자신도 옮길 수 없게 한다(옮기면 그 자리에 새 .git을 만들 수 있다)
+  const pinned = [...new Set([...work.filter((entry) => writableRoots.some((root) => inside(entry, root))), ...renamableAncestors([...denied, ...work], writableRoots)])];
+  return { work, tmp, caches, deny: denied, gatewayParents: tmp, pinned };
 }
+
+/**
+ * `(allow default)`를 쓰면 실행·IPC가 열려 있어, 샌드박스 안의 프로세스가 샌드박스 밖 프로세스에게 일을 시킬 수 있다.
+ * 둘로 막는다. (1) 시키는 도구의 실행(경로는 이 macOS에서 확인). (2) 도구를 복사해 와도 막히도록 IPC 자체: Apple Events 보내기와 LaunchServices·Apple Events 서비스 조회.
+ * launchd에 일을 맡기는 길(launchctl)은 도구의 실행만 막는다(복사한 launchctl은 서명 때문에 죽는 것을 확인했지만, XPC로 직접 말하는 프로그램은 막지 못한다. ADR-229의 남은 한계)
+ */
+export const IPC_ESCAPE_DENIES = [
+  '(deny process-exec (literal "/usr/bin/open") (literal "/usr/bin/osascript") (literal "/usr/bin/osacompile") (literal "/usr/bin/shortcuts") (literal "/bin/launchctl") (literal "/usr/bin/at") (literal "/usr/bin/atq") (literal "/usr/bin/atrm") (literal "/usr/bin/batch") (literal "/usr/bin/crontab"))',
+  '(deny appleevent-send)',
+  '(deny mach-lookup (global-name "com.apple.coreservices.launchservicesd") (global-name "com.apple.coreservices.appleevents") (global-name-regex #"^com\\.apple\\.lsd\\."))',
+];
 
 /**
  * sandbox-exec 프로필 글. 마지막으로 맞은 규칙이 이긴다(실측): 허용 뒤에 거부를 적어 허용 폴더 안의 관문·.git을 다시 막는다.
@@ -139,6 +175,10 @@ export function buildSeatbeltProfile(cwd: string, options: BashSandboxOptions = 
   // 임시 폴더 안의 다른 세션 관문 폴더(이름 꼴로 막는다. 정규식에는 경로를 넣지 않고 고정 글만 쓴다)
   lines.push(`(deny file-write* (require-all (require-any ${sub(plan.gatewayParents)}) (regex #"/${GATEWAY_DIR_PREFIX}[^/]*(/|$)")))`);
   if (plan.deny.length > 0) lines.push(`(deny file-write* ${sub(plan.deny)})`);
+  // 막은 경로의 위쪽 폴더는 그 폴더 자체만(literal) 막는다: 옮기거나 지우면 그 자리에 새로 만든 .git·관문 폴더가 거부 규칙을 비켜 간다
+  if (plan.pinned.length > 0) lines.push(`(deny file-write* ${plan.pinned.map((entry) => `(literal ${sbplString(entry)})`).join(' ')})`);
+  // 프로필을 쓴 프로세스가 launchd·LaunchServices·Apple Events로 샌드박스 밖에서 일을 시키는 길(open, osascript, launchctl, at 등)
+  lines.push(...IPC_ESCAPE_DENIES);
   return `${lines.join('\n')}\n`;
 }
 
@@ -146,8 +186,10 @@ export function buildSeatbeltProfile(cwd: string, options: BashSandboxOptions = 
 export function buildBwrapArgs(cwd: string, options: BashSandboxOptions = {}): string[] {
   const plan = resolvePlan(cwd, options);
   const args = ['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--die-with-parent', '--new-session'];
-  const writable = [...plan.work, ...plan.tmp, ...plan.caches];
-  for (const dir of [...new Set(writable.map((entry) => realOf(entry)))]) if (existsSync(dir)) args.push('--bind', dir, dir);
+  const writableRoots = [...new Set([...plan.work, ...plan.tmp, ...plan.caches].map((entry) => realOf(entry)))].filter((dir) => existsSync(dir));
+  // 쓸 곳 사이의 위쪽 폴더(옮겨지면 거부가 비켜 가는 폴더)도 마운트 지점으로 만든다. 마운트 지점은 이름을 바꾸거나 지울 수 없다(EBUSY). 얕은 것부터 연결한다
+  const pinned = [...new Set(plan.pinned.map((entry) => realOf(entry)))].filter((dir) => existsSync(dir) && !writableRoots.includes(dir));
+  for (const dir of [...writableRoots, ...pinned].sort((x, y) => x.length - y.length)) args.push('--bind', dir, dir);
   // bwrap은 이름 꼴로 막지 못한다. 지금 있는 다른 세션의 관문 폴더를 읽기 전용으로 덮는다(시작 뒤에 생기는 폴더는 덮지 못한다)
   const gateways: string[] = [];
   for (const parent of plan.gatewayParents) {
@@ -157,7 +199,16 @@ export function buildBwrapArgs(cwd: string, options: BashSandboxOptions = {}): s
       // 없는 폴더
     }
   }
-  for (const dir of [...new Set([...plan.deny, ...gateways].map((entry) => realOf(entry)))]) if (existsSync(dir)) args.push('--ro-bind', dir, dir);
+  for (const dir of [...new Set([...plan.deny, ...gateways].map((entry) => realOf(entry)))]) {
+    if (existsSync(dir)) {
+      args.push('--ro-bind', dir, dir);
+    } else if (writableRoots.some((root) => inside(dir, root))) {
+      // 아직 없는 거부 경로는 쓸 수 있는 구역 안에서 새로 만들 수 있다: 빈 읽기 전용 tmpfs로 그 자리를 막는다.
+      // 위쪽 폴더도 없으면 `mkdir -p`로 만들 수 있어 막을 수 없다: 실행하지 않는다
+      if (!existsSync(path.dirname(dir))) throw new SandboxError(`거부할 경로(${dir})의 위쪽 폴더가 없어 막을 수 없습니다`);
+      args.push('--tmpfs', dir, '--remount-ro', dir);
+    }
+  }
   return args;
 }
 

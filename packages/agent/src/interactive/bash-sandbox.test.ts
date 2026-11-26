@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -151,6 +151,60 @@ sandboxedOnly('Bash 쓰기 샌드박스(macOS sandbox-exec, Linux bwrap)', () =>
     }
   });
 
+
+  it('샌드박스 밖에 일을 시키는 길(open, osascript, launchctl)은 실패하고 밖에 파일이 생기지 않는다', async () => {
+    const probe = path.join(outside, 'ipc');
+    await mkdir(probe);
+    await writeFile(path.join(work, 'x.command'), `#!/bin/sh\ntouch ${probe}/open\n`, { mode: 0o755 });
+    const label = `b-studio-sbx-test-${process.pid}`;
+    try {
+      const cases = [
+        `open -a Terminal ${work}/x.command`,
+        `osascript -e 'do shell script "touch ${probe}/osa"'`,
+        `launchctl submit -l ${label} -- /usr/bin/touch ${probe}/lc`,
+        `echo 'touch ${probe}/at' | at now`,
+        // 도구를 복사해 와도(경로 거부를 비켜 가도) IPC 자체가 막힌다
+        `cp /usr/bin/osascript ./osa-copy && ./osa-copy -e 'do shell script "touch ${probe}/osa2"'`,
+        `cp /usr/bin/open ./open-copy && ./open-copy -a Terminal ${work}/x.command`,
+      ];
+      for (const command of cases) {
+        const result = await bash(command);
+        expect(result.isError, command + '\n' + result.text).toBe(true);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+      expect(await readdir(probe)).toEqual([]);
+    } finally {
+      try {
+        execFileSync('launchctl', ['remove', label], { stdio: 'ignore' });
+      } catch {
+        // 만들어지지 않았다
+      }
+    }
+  }, 30_000);
+
+  it('쓸 수 있는 구역 안의 작업 폴더·관문 폴더의 위쪽 폴더는 옮기거나 지우지 못한다(옮긴 자리에 새 .git을 만들어 거부를 비켜 가는 길)', async () => {
+    const nested = path.join(tmp, 'a', 'work');
+    const nestedGateway = path.join(tmp, 'sub', 'gw');
+    await mkdir(nested, { recursive: true });
+    await mkdir(nestedGateway, { recursive: true });
+    await mkdir(path.join(nested, '.git'));
+    await writeFile(path.join(nestedGateway, 'b-studio-hook.mjs'), 'ORIGINAL\n');
+    const run = (command: string, cwd = nested) => createTools(cwd, { killGraceMs: 200, sandbox: { tmpDirs: [tmp], denyWrite: [nestedGateway] } }).execute('Bash', { command });
+    // 작업 폴더 안 쓰기는 그대로 된다
+    expect((await run('mkdir -p src && echo ok > src/a.txt')).isError).toBe(false);
+    for (const command of [`mv ${nested} ${nested}.old`, `mv ${path.dirname(nested)} ${path.dirname(nested)}.old`, `rm -rf ${nested}`, `rmdir ${path.dirname(nested)}`]) {
+      const result = await run(command);
+      expect(result.isError, command).toBe(true);
+    }
+    for (const command of [`mv ${nestedGateway} ${nestedGateway}.old`, `mv ${path.dirname(nestedGateway)} ${path.dirname(nestedGateway)}.old`, `rm -rf ${path.dirname(nestedGateway)}`]) {
+      expect((await run(command)).isError, command).toBe(true);
+    }
+    expect(existsSync(path.join(nested, '.git'))).toBe(true);
+    expect(await readFile(path.join(nestedGateway, 'b-studio-hook.mjs'), 'utf8')).toBe('ORIGINAL\n');
+    expect(existsSync(`${nested}.old`)).toBe(false);
+    expect(existsSync(`${path.dirname(nestedGateway)}.old`)).toBe(false);
+  });
+
   it('쓰기를 막아도 프로세스 그룹 kill·시간 초과는 그대로다', async () => {
     const result = await createTools(work, { killGraceMs: 200, sandbox: sandbox() }).execute('Bash', { command: '(sleep 300 & echo $! > gc.pid; wait) & echo $! > c.pid; wait', timeout: 400 });
     expect(result.isError).toBe(true);
@@ -226,6 +280,43 @@ describe('프로필·인자 만들기(어느 플랫폼에서나)', () => {
     const roGateway = args.findIndex((arg, i) => arg === '--ro-bind' && args[i + 1] === realGateway);
     expect(roGateway).toBeGreaterThan(bindWork);
     expect(args).toContain(path.join(realWork, '.git'));
+  });
+
+
+  it('Linux: 아직 없는 거부 경로(.git·관문 폴더)는 읽기 전용 tmpfs로 막아 새로 만들지 못하게 하고, 위쪽 폴더도 없으면 실행하지 않는다', async () => {
+    const realWork = await realpath(work);
+    const realTmp = await realpath(tmp);
+    // work/.git은 없고, 관문 폴더는 쓸 수 있는 임시 폴더 안에 아직 없다
+    const missingGateway = path.join(tmp, 'b-studio-gateway-later');
+    const args = buildBwrapArgs(work, { tmpDirs: [tmp], denyWrite: [missingGateway] });
+    const at = (flag: string, dir: string) => args.findIndex((arg, i) => arg === flag && args[i + 1] === dir);
+    expect(at('--tmpfs', path.join(realWork, '.git'))).toBeGreaterThan(0);
+    expect(args[at('--tmpfs', path.join(realWork, '.git')) + 2]).toBe('--remount-ro');
+    expect(at('--tmpfs', path.join(realTmp, 'b-studio-gateway-later'))).toBeGreaterThan(0);
+    expect(at('--ro-bind', path.join(realWork, '.git'))).toBe(-1);
+    // 위쪽 폴더도 없는 거부 경로: 막을 수 없다
+    expect(() => buildBwrapArgs(work, { tmpDirs: [tmp], denyWrite: [path.join(tmp, 'none', 'gw')] })).toThrow(/막을 수 없습니다/);
+    // 쓸 수 있는 구역 밖의 없는 경로는 쓰기 자체가 막혀 있어 따로 덮지 않는다
+    const outsideArgs = buildBwrapArgs(work, { tmpDirs: [tmp], denyWrite: [path.join(outside, 'none', 'gw')] });
+    expect(outsideArgs.includes(path.join(outside, 'none', 'gw'))).toBe(false);
+    // 있는 거부 경로는 읽기 전용으로 덮는다
+    await mkdir(path.join(work, '.git'));
+    expect(at('--ro-bind', path.join(realWork, '.git'))).toBe(-1);
+    const withGit = buildBwrapArgs(work, { tmpDirs: [tmp], denyWrite: [gateway] });
+    expect(withGit.findIndex((arg, i) => arg === '--ro-bind' && withGit[i + 1] === path.join(realWork, '.git'))).toBeGreaterThan(0);
+  });
+
+  it('Linux: 쓸 수 있는 구역 안에서 거부 경로의 위쪽 폴더도 마운트 지점으로 만들어(이름을 바꿀 수 없게) 얕은 것부터 연결한다', async () => {
+    const nested = path.join(tmp, 'a', 'work');
+    await mkdir(nested, { recursive: true });
+    const nestedGateway = path.join(tmp, 'sub', 'gw');
+    await mkdir(nestedGateway, { recursive: true });
+    const args = buildBwrapArgs(nested, { tmpDirs: [tmp], denyWrite: [nestedGateway] });
+    const binds = args.flatMap((arg, i) => (arg === '--bind' ? [args[i + 1]!] : []));
+    const realTmp = await realpath(tmp);
+    for (const dir of [path.join(realTmp, 'a'), path.join(realTmp, 'a', 'work'), path.join(realTmp, 'sub')]) expect(binds, dir).toContain(dir);
+    expect(binds.indexOf(realTmp)).toBeLessThan(binds.indexOf(path.join(realTmp, 'a')));
+    expect(binds.indexOf(path.join(realTmp, 'a'))).toBeLessThan(binds.indexOf(path.join(realTmp, 'a', 'work')));
   });
 
   it('Linux에서 bwrap이 없으면(또는 못 쓰면) 감싸지 않고 알림을 낸다. macOS에서 못 감싸면 실행을 거절한다', () => {
