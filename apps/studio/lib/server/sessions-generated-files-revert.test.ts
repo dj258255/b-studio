@@ -70,7 +70,10 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
 import { createSession, getSnapshot, restoreDiscardedBackup, sendMessage, stopSession, subscribe } from './sessions';
+import { failTerminalTurn, openTerminalRunWithFiles, stopTerminalTurn } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -156,20 +159,20 @@ async function waitFor<T>(predicate: () => T | undefined, timeoutMs = 10_000): P
   }
 }
 
-/** 파일을 바꾸고 다음 턴 대본 없이 끝나(모델/네트워크 오류를 흉내 낸다) 요청이 실패로 끝나기를 기다린다 */
+/** 파일을 바꾼 채 API 오류로 턴이 끝나(StopFailure 훅) 요청이 실패로 끝나기를 기다린다. 채팅 경로 없이 세션 터미널 경로로 만든다 */
 async function sendFailingWrites(id: string, request: string, writes: Array<{ path: string; content: string }>, events: StudioEvent[]): Promise<void> {
   const before = events.length;
-  sendMessage(id, request, { allowBreaking: false, scriptedTurns: [{ toolCalls: writes.map((w) => ({ name: 'write_file', input: w })) }] });
+  const run = await openTerminalRunWithFiles(id, request, Object.fromEntries(writes.map((w) => [w.path, w.content])));
+  await failTerminalTurn(run);
   await waitFor(() => events.slice(before).find((event) => event.type === 'run_finished'));
 }
 
-/** 파일을 바꾸고 다음 턴에서 "완료했습니다"로 끝나(검증 게이트를 통과하는 성공한 실행) 요청이 끝나기를 기다린다 */
+/** 파일을 바꾸고 턴을 끝내(Stop 훅) 검증 게이트를 통과하는 성공한 실행을 하고 끝나기를 기다린다 */
 async function sendSuccessfulWrite(id: string, request: string, file: string, content: string, events: StudioEvent[]): Promise<void> {
   const before = events.length;
-  sendMessage(id, request, {
-    allowBreaking: false,
-    scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: file, content } }] }, { text: '완료했습니다.' }],
-  });
+  const run = await openTerminalRunWithFiles(id, request, { [file]: content });
+  const answer = await stopTerminalTurn(run);
+  expect(answer.feedback).toBeUndefined();
   await waitFor(() => events.slice(before).find((event) => event.type === 'run_finished'));
 }
 

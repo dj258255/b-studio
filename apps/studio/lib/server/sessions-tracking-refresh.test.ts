@@ -94,7 +94,10 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   };
 });
 
-import { createSession, exportSession, getSnapshot, previewExport, sendMessage, stopSession, subscribe } from './sessions';
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
+import { createSession, exportSession, getSnapshot, previewExport, stopSession } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -219,18 +222,7 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
  * exportSession이 "올릴 체크포인트가 없습니다"로 막히지 않으려면 세션 시작점 위에 커밋이 최소 하나 있어야 한다
  */
 async function runWrite(id: string, request: string, file: string, content: string): Promise<void> {
-  let armed = false;
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (armed && event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-    armed = true;
-  });
-  sendMessage(id, request, { allowBreaking: false, scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: file, content } }] }, { text: '완료했습니다.' }] });
-  await finished;
+  await completeTerminalRun(id, request, { [file]: content });
 }
 
 async function readySession(): Promise<string> {

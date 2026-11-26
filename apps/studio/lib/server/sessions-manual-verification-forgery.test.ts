@@ -56,6 +56,8 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
   return { ...actual, providerFromEnv: () => ({ name: 'fake', isolation: undefined, create: async () => sandbox }) };
 });
 
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
 vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
@@ -74,6 +76,7 @@ import {
   subscribe,
   writeSessionDoc,
 } from './sessions';
+import { driveTerminalSteps, type TerminalStep } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -146,7 +149,29 @@ async function waitFor<T>(predicate: () => T | undefined, timeoutMs = 10_000): P
 
 type Turn = { toolCalls?: Array<{ name: string; input: Record<string, unknown> }>; text?: string };
 
+/**
+ * 채팅 대본과 같은 모양의 걸음(파일 쓰기·"완료" 말하기)을 세션 터미널 경로로 한다: 쓰기는 CLI의 쓰기 훅을, "완료"는 Stop 훅을 거친다.
+ * 게이트가 돌려보내면(피드백) 다음 걸음으로 다시 고친다. 채팅 경로(`sendMessage`)를 쓰지 않는다
+ */
 async function sendAndWaitFinished(id: string, text: string, scriptedTurns: Turn[], events: StudioEvent[]): Promise<Extract<StudioEvent, { type: 'run_finished' }>> {
+  const before = events.length;
+  const steps: TerminalStep[] = [];
+  for (const turn of scriptedTurns) {
+    if (turn.toolCalls) {
+      const write: Record<string, string> = {};
+      for (const call of turn.toolCalls) {
+        if (call.name !== 'write_file') throw new Error(`터미널 대본이 모르는 도구입니다: ${call.name}`);
+        write[call.input.path as string] = call.input.content as string;
+      }
+      steps.push({ write });
+    } else steps.push({ stop: turn.text ?? '' });
+  }
+  await driveTerminalSteps(id, text, steps);
+  return waitFor(() => events.slice(before).find((event): event is Extract<StudioEvent, { type: 'run_finished' }> => event.type === 'run_finished'));
+}
+
+/** 채팅 경로(`sendMessage`)로 대본을 보낸다. ask_user·질문 뒤 이어진 실행처럼 채팅 러너만의 동작을 보는 시험만 쓴다 */
+async function sendChatAndWaitFinished(id: string, text: string, scriptedTurns: Turn[], events: StudioEvent[]): Promise<Extract<StudioEvent, { type: 'run_finished' }>> {
   const before = events.length;
   sendMessage(id, text, { allowBreaking: false, scriptedTurns });
   return waitFor(() => events.slice(before).find((event): event is Extract<StudioEvent, { type: 'run_finished' }> => event.type === 'run_finished'));
@@ -265,7 +290,7 @@ describe('에이전트 실행이 사람 확인 기록을 써넣는 위조', () =
 
     // 코드를 고치고 사람 확인을 써넣은 다음, 끝냈다고 하지 않고 질문을 남기고 멈춘다. 질문 직전에 게이트가 한 번 돌고
     // manual-verification 검사가 실패하지만, 재시작·계약 검증(report.ok)은 통과한 상태다
-    const finished = await sendAndWaitFinished(
+    const finished = await sendChatAndWaitFinished(
       id,
       '로그인 구현',
       [
@@ -611,7 +636,7 @@ describe('질문에 대한 답으로 이어진 실행의 체크포인트 제목(
     const { id, events, unsubscribe } = await startedSession();
 
     // 첫 실행은 아무것도 고치지 않고 질문만 남긴다
-    const asked = await sendAndWaitFinished(
+    const asked = await sendChatAndWaitFinished(
       id,
       '주문에 메모를 넣어 주세요',
       [{ toolCalls: [{ name: 'ask_user', input: { question: '어느 방식으로 할까요?', options: ['첫 번째', '두 번째', '세 번째'], allowOther: false } }] }],
@@ -622,7 +647,7 @@ describe('질문에 대한 답으로 이어진 실행의 체크포인트 제목(
     const before = getSnapshot(id)!.checkpoints.length;
 
     // 답은 선택지를 고르는 말로 시작한다. 문장 꼴만 보면 "무엇을 한다"는 서술문이라 전에는 그대로 제목이 됐다
-    const finished = await sendAndWaitFinished(id, '세 번째로 갑니다. 메모 필드만 더해 주세요.', [orderTurn(), { text: '주문에 메모 필드를 더했습니다' }], events);
+    const finished = await sendChatAndWaitFinished(id, '세 번째로 갑니다. 메모 필드만 더해 주세요.', [orderTurn(), { text: '주문에 메모 필드를 더했습니다' }], events);
     expect(finished.status).toBe('done');
     expect(getSnapshot(id)!.checkpoints.length).toBe(before + 1);
     const message = getSnapshot(id)!.checkpoints[0]!.message;
@@ -630,7 +655,7 @@ describe('질문에 대한 답으로 이어진 실행의 체크포인트 제목(
     expect(message).toMatch(/주문에 메모 필드를 더했습니다$/);
 
     // 질문이 걸려 있지 않을 때 온 요청은 전처럼 요청 글의 첫 문장이 제목이 된다
-    await sendAndWaitFinished(id, '주문 메모에 길이 제한을 둔다', [orderTurn('class Order { String memo; int max = 200; }\n'), { text: '끝났습니다' }], events);
+    await sendChatAndWaitFinished(id, '주문 메모에 길이 제한을 둔다', [orderTurn('class Order { String memo; int max = 200; }\n'), { text: '끝났습니다' }], events);
     expect(getSnapshot(id)!.checkpoints[0]!.message).toMatch(/주문 메모에 길이 제한을 둔다$/);
 
     unsubscribe();

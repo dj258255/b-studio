@@ -69,8 +69,10 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
 vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
 
-import { createSession, getSnapshot, restoreCheckpoint, sendMessage, stopSession, subscribe } from './sessions';
+import { createSession, getSnapshot, restoreCheckpoint, stopSession, subscribe } from './sessions';
+import { failTerminalTurn, openTerminalRunWithFiles } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -176,7 +178,7 @@ describe('실행 실패로 되돌릴 때 DB도 체크포인트 시점으로 되�
     // 세 번째 값은 뒤이어 "지금 체크포인트로 되돌리기"를 다시 불러도 이미 맞는 상태(unchanged)인지 보는 데 쓴다
     fake.dumps = [MIGRATED_DUMP, BASELINE_DUMP, BASELINE_DUMP];
 
-    // 실패한 요청: 문서(requirements.md)와 코드를 함께 바꾸고, 마이그레이션을 적용한 뒤(가짜 DB 변화) 모델이 다음 턴 없이 끝나 예외로 끝난다
+    // 실패한 요청: 문서(requirements.md)와 코드를 함께 바꾸고, 마이그레이션을 적용한 뒤(가짜 DB 변화) API 오류로 턴이 끝난다(StopFailure 훅)
     const finished = new Promise<void>((resolve) => {
       const unsub = subscribe(id, (event) => {
         if (event.type === 'run_finished') {
@@ -185,18 +187,11 @@ describe('실행 실패로 되돌릴 때 DB도 체크포인트 시점으로 되�
         }
       });
     });
-    sendMessage(id, '숏폼 작업', {
-      allowBreaking: false,
-      scriptedTurns: [
-        {
-          toolCalls: [
-            { name: 'write_file', input: { path: 'docs/requirements.md', content: '# 요구사항\n\n- R21 숏폼\n' } },
-            { name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'class Order {}', new_text: 'class Order { String memo; }' } },
-          ],
-        },
-        // 다음 턴 대본이 없어 모델 호출이 예외로 끝난다("모델/네트워크 오류로 끝난 실행"을 흉내 낸다)
-      ],
+    const run = await openTerminalRunWithFiles(id, '숏폼 작업', {
+      'docs/requirements.md': '# 요구사항\n\n- R21 숏폼\n',
+      'api/src/Order.java': 'class Order { String memo; }\n',
     });
+    await failTerminalTurn(run);
     await finished;
 
     // 1) 문서는 사라지지 않고 체크포인트로 남았다(그래서 session.snapshot.checkpoints[0]이 바뀐다)
@@ -240,10 +235,8 @@ describe('실행 실패로 되돌릴 때 DB도 체크포인트 시점으로 되�
         }
       });
     });
-    sendMessage(id, '코드만 바꾸는 작업', {
-      allowBreaking: false,
-      scriptedTurns: [{ toolCalls: [{ name: 'edit_file', input: { path: 'api/src/Order.java', old_text: 'class Order {}', new_text: 'class Order { String memo; }' } }] }],
-    });
+    const run = await openTerminalRunWithFiles(id, '코드만 바꾸는 작업', { 'api/src/Order.java': 'class Order { String memo; }\n' });
+    await failTerminalTurn(run);
     await finished;
 
     const reverted = await waitFor(() => events.find((event): event is Extract<StudioEvent, { type: 'reverted' }> => event.type === 'reverted'));
