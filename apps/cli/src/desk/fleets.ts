@@ -8,7 +8,7 @@
 import { artSize } from './cards';
 import { isShellId } from './keys';
 import type { KittyImages } from './kitty';
-import { fit, fitAnsi, stringWidth } from './screen';
+import { fit, fitAnsi, stringWidth, tailFit } from './screen';
 import type { PaneLayout } from './screen';
 import { backendLabel, compactTokens, totalTokens, type StatusBadge } from './sidebar';
 import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
@@ -475,9 +475,8 @@ function formLines(state: FleetsState, theme: Theme, width: number): { lines: st
   lines.push(head('project', '프로젝트') + (project ? `‹${project.name}›` : `${muted}프로젝트가 없습니다${RESET}`) + (form.field === 'project' ? `  ${muted}↑↓ 고르기${RESET}` : ''));
   const textRow = (field: 'request' | 'model', name: string, hint: string) => {
     const prefix = head(field, name);
-    let value = form[field];
     const room = Math.max(1, width - stringWidth(prefix) - 1);
-    while (value && stringWidth(value) > room) value = [...value].slice(1).join('');
+    const value = tailFit(form[field], room);
     if (form.field === field) cursor = { x: stringWidth(prefix) + stringWidth(value), y: lines.length };
     lines.push(prefix + (value || (form.field === field ? '' : `${muted}${hint}${RESET}`)));
   };

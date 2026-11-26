@@ -1,6 +1,10 @@
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError, type StartInput } from './client';
 import type { DeskLayout } from './config';
+import { createDraftStore, type DeskDraftStore } from './drafts';
 import { DeskApp, type DeskClient, type DeskIo, type DeskAppOptions, type DeskLayoutStore, type ShellPty, type SpawnShell, type SpriteCatalog } from './desk';
 import { spaceScreen } from './cards';
 import { spaceRect } from './render';
@@ -52,8 +56,10 @@ class FakeClient implements DeskClient {
   async preview() {
     return { backend: 'claude-code', rule: 'default' as const, matched: '' };
   }
+  startError: string | undefined;
   async start(input: StartInput) {
     this.started.push(input);
+    if (this.startError) throw new Error(this.startError);
     return this.startResult;
   }
   async accounts() {
@@ -1659,6 +1665,36 @@ describe('desk 작업대: 여러 AI 비교(#892)', () => {
     expect(ctx.app.state.fleets).toMatchObject({ mode: 'detail', detail: 'f2' });
   });
 
+  it('새 비교에 쓰던 요청은 desk를 다시 띄워도 남고, 만들면 지운다(#1380)', async () => {
+    const drafts = memoryDrafts();
+    const first = fleetSetup(undefined, { draftStore: drafts.store });
+    first.io.type('\x02f');
+    await tick();
+    first.io.type('n');
+    await tick();
+    first.io.type('\t검색 개선');
+    await tick(400);
+    expect(drafts.kept.get('fleet')).toBe('검색 개선');
+    first.io.type('\x1b');
+    await tick();
+    first.io.type('\x1b');
+    await tick();
+    first.io.type('\x02q');
+    await first.done;
+
+    const second = fleetSetup(undefined, { draftStore: drafts.store });
+    second.client.allowed = ['claude-code', 'codex'];
+    second.io.type('\x02f');
+    await tick();
+    second.io.type('n');
+    await tick();
+    expect(second.app.state.fleets?.form?.request).toBe('검색 개선');
+    second.io.type('\t\t\r\x1b[B\x1b[B\r\t\t\t\r');
+    await tick(400);
+    expect(second.client.created).toHaveLength(1);
+    expect(drafts.kept.has('fleet')).toBe(false);
+  });
+
   it('스튜디오가 비교를 만들지 못하면 입력을 그대로 두고 까닭을 보인다', async () => {
     const ctx = fleetSetup();
     ctx.client.createError = '로컬 Codex를 쓸 수 없습니다: 로그인이 필요합니다';
@@ -1894,5 +1930,146 @@ describe('desk 작업대: 실험 기능을 끈 스튜디오(ADR-200)', () => {
     await tick();
     // 가짜 손님에는 작업 나누기 API가 없어 "지원하지 않습니다"로 닫힌다. 실험 기능 알림이 아닌 것만 본다
     expect(unknown.app.state.message ?? '').not.toContain('실험 기능');
+  });
+});
+
+/** 쓰던 요청 글 임시 저장(#1380): 메모리 저장소로 저장 횟수를 센다 */
+function memoryDrafts(initial: Array<[string, string]> = []) {
+  const kept = new Map<string, string>(initial);
+  const saves: Array<Array<[string, string]>> = [];
+  const store: DeskDraftStore = {
+    load: () => ({ drafts: new Map(kept) }),
+    save: (drafts) => {
+      saves.push([...drafts]);
+      kept.clear();
+      for (const [key, text] of drafts) kept.set(key, text);
+    },
+  };
+  return { store, kept, saves };
+}
+
+describe('쓰던 요청 글 임시 저장(#1380)', () => {
+  it('쓰던 글은 desk를 닫았다 다시 띄워도 같은 프로젝트의 새 요청 칸에 남아 있고 커서는 끝에 있다', async () => {
+    const drafts = memoryDrafts();
+    const first = setup([item('a')], { draftStore: drafts.store });
+    first.io.type('\x02n');
+    await tick();
+    first.io.type('로그인 오류를 고쳐 줘');
+    // Esc로 실수로 닫아도 글은 남는다
+    first.io.type('\x1b');
+    await tick(400);
+    first.io.type('\x02q');
+    await first.done;
+    expect(drafts.kept.get('prompt:p1')).toBe('로그인 오류를 고쳐 줘');
+
+    const second = setup([item('a')], { draftStore: drafts.store });
+    second.io.type('\x02n');
+    await tick();
+    expect(second.app.state.prompt?.text).toBe('로그인 오류를 고쳐 줘');
+    // 이어서 쓰면 끝에 붙는다
+    second.io.type('!');
+    expect(second.app.state.prompt?.text).toBe('로그인 오류를 고쳐 줘!');
+    second.io.type('\x1b');
+    await tick();
+    second.io.type('\x02q');
+    await second.done;
+  });
+
+  it('저장은 300ms 미루고, 그 안에 나가도 나갈 때 쓴다', async () => {
+    const drafts = memoryDrafts();
+    const ctx = setup([item('a')], { draftStore: drafts.store });
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('가');
+    await tick(100);
+    ctx.io.type('나');
+    await tick(100);
+    expect(drafts.saves).toHaveLength(0);
+    await tick(250);
+    // 두 글자가 한 번에 저장된다
+    expect(drafts.saves).toEqual([[['prompt:p1', '가나']]]);
+    ctx.io.type('다');
+    await tick(10);
+    expect(drafts.saves).toHaveLength(1);
+    ctx.io.type('\x1b');
+    await tick();
+    ctx.io.type('\x02q');
+    await ctx.done;
+    expect(drafts.saves.at(-1)).toEqual([['prompt:p1', '가나다']]);
+  });
+
+  it('보내면 지운다. 보내지 못하면 남는다', async () => {
+    const drafts = memoryDrafts();
+    const ctx = setup([item('a')], { draftStore: drafts.store });
+    ctx.client.startError = '샌드박스를 못 켰습니다';
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('고쳐 줘\r');
+    await tick(400);
+    expect(drafts.kept.get('prompt:p1')).toBe('고쳐 줘');
+    ctx.client.startError = undefined;
+    ctx.io.type('\r');
+    await tick(400);
+    expect(ctx.app.state.prompt).toBeUndefined();
+    expect(drafts.kept.has('prompt:p1')).toBe(false);
+  });
+
+  it('Ctrl-u로 비우면 글도 지운다', async () => {
+    const drafts = memoryDrafts([['prompt:p1', '쓰던 글']]);
+    const ctx = setup([item('a')], { draftStore: drafts.store });
+    ctx.io.type('\x02n');
+    await tick();
+    expect(ctx.app.state.prompt?.text).toBe('쓰던 글');
+    ctx.io.type('\x15');
+    await tick(400);
+    expect(drafts.kept.has('prompt:p1')).toBe(false);
+    ctx.io.type('\x1b');
+    await tick();
+    ctx.io.type('\x02n');
+    await tick();
+    expect(ctx.app.state.prompt?.text).toBe('');
+  });
+
+  it('상한을 넘는 글은 저장하지 않고 알린다. 앞에 남긴 짧은 글도 같이 지운다', async () => {
+    const drafts = memoryDrafts();
+    const ctx = setup([item('a')], { draftStore: drafts.store });
+    ctx.io.type('\x02n');
+    await tick();
+    ctx.io.type('짧은 글');
+    await tick(400);
+    expect(drafts.kept.get('prompt:p1')).toBe('짧은 글');
+    ctx.io.type(`\x1b[200~${'a'.repeat(70_000)}\x1b[201~`);
+    await tick(400);
+    expect(drafts.kept.has('prompt:p1')).toBe(false);
+    expect(ctx.app.state.message).toContain('임시 저장하지 않습니다');
+  });
+
+  it('다른 프로젝트의 글을 채우지 않는다', async () => {
+    const drafts = memoryDrafts([['prompt:other', '다른 곳의 글']]);
+    const ctx = setup([item('a')], { draftStore: drafts.store });
+    ctx.io.type('\x02n');
+    await tick();
+    expect(ctx.app.state.prompt?.text).toBe('');
+  });
+
+  it('권한이 넓은 파일은 읽지 않고 알리며 desk는 멈추지 않는다', async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'desk-drafts-app-'));
+    try {
+      const file = path.join(dir, 'desk-drafts.json');
+      writeFileSync(file, JSON.stringify({ version: 1, drafts: { 'prompt:p1': '남이 심은 글' } }));
+      chmodSync(file, 0o644);
+      const ctx = setup([item('a')], { draftStore: createDraftStore(dir) });
+      expect(ctx.app.state.message).toContain('권한이 600이 아닙니다');
+      ctx.io.type('\x02n');
+      await tick();
+      expect(ctx.app.state.prompt?.text).toBe('');
+      ctx.io.type('내 글');
+      ctx.io.type('\x1b');
+      await tick();
+      ctx.io.type('\x02q');
+      await ctx.done;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
