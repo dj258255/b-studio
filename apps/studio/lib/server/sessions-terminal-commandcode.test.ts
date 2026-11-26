@@ -310,7 +310,7 @@ describe('Command Code 터미널: 진짜 mod → 진짜 훅 서버 → 진짜 �
     // 대조: 모르는 이름(바꾸는 도구로 본다)은 실행을 연다
     await toolCall(session, cli, 'shell_command', { command: 'ls' });
     expect(session.ofType('run_started')).toHaveLength(1);
-    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'interrupted' } });
+    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'max_turns' } });
     await stopSession(session.id);
   }, 30_000);
 
@@ -331,6 +331,21 @@ describe('Command Code 터미널: 진짜 mod → 진짜 훅 서버 → 진짜 �
     }
     expect((await writeFileTool(session, cli, 'api/src/Order.java', 'class Order { String memo; }\n')).blocked).toBeUndefined();
     setTerminalTaskContext(session.id, undefined);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('카드의 쓰기 범위가 걸린 세션에서는 서브에이전트 도구를 막는다(그 안의 쓰기를 쓰기 직전에 볼 수 없다). 카드가 없으면 통과한다(대조)', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await cli.hooks.transformInput!({ text: '주문에 메모 필드 추가' });
+    for (const tool of ['agent', 'task']) {
+      const denied = await toolCall(session, cli, tool, { prompt: 'api/src/Order.java에 메모 필드를 더해 줘', subagent_type: 'general' });
+      expect(denied.blocked, tool).toContain('바꾸는 파일을 알 수 없어 쓰지 않았습니다');
+    }
+    setTerminalTaskContext(session.id, undefined);
+    expect((await toolCall(session, cli, 'agent', { prompt: '고쳐 줘', subagent_type: 'general' })).blocked).toBeUndefined();
+    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'max_turns' } });
     await stopSession(session.id);
   }, 30_000);
 

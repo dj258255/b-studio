@@ -326,19 +326,40 @@ describe('afterToolCall·onRunEnd·서브에이전트·세션', () => {
     expect(await hooks.afterToolCall!({ toolCallId: 'c3', toolName: 'write_file', input: {}, result: [], isError: false, state: {} })).toBeUndefined();
   });
 
-  it('훅 없이 끝난 실행(턴 상한·중단·권한 거절)은 StopFailure로 알린다. 자연스럽게 끝난 실행은 알리지 않는다', async () => {
+  it('훅 없이 끝난 실행(턴 상한·권한 거절)은 StopFailure로 알린다. 자연스럽게 끝난 실행과 사람이 누른 중단은 알리지 않는다', async () => {
     const server = await gateway({ 'stop-failure': { body: {} } });
     const { hooks } = await loadMod(await gatewayDir({ url: server.url }));
     await hooks.onRunEnd!({ state: {}, result: { stopReason: 'end_turn', turnCount: 3, finalText: 'x' } });
+    // 중단(Esc)은 실패가 아니다: 실행을 열어 두고 다음 요청이 이어 간다
+    await hooks.onRunEnd!({ state: {}, result: { stopReason: 'interrupted', turnCount: 3, finalText: '' } });
     expect(server.seen).toEqual([]);
-    for (const stopReason of ['max_turns', 'interrupted', 'permission_denied']) {
+    for (const stopReason of ['max_turns', 'permission_denied']) {
       await hooks.onRunEnd!({ state: {}, result: { stopReason, turnCount: 3, finalText: '' } });
     }
-    expect(server.seen.map((entry) => entry.event)).toEqual(['stop-failure', 'stop-failure', 'stop-failure']);
-    expect(server.seen.map((entry) => entry.body.error)).toEqual([expect.stringContaining('max_turns'), expect.stringContaining('interrupted'), expect.stringContaining('permission_denied')]);
+    expect(server.seen.map((entry) => entry.event)).toEqual(['stop-failure', 'stop-failure']);
+    expect(server.seen.map((entry) => entry.body.error)).toEqual([expect.stringContaining('max_turns'), expect.stringContaining('permission_denied')]);
     // 알 수 없는 끝 사유는 자연스러운 끝이 아니다
     await hooks.onRunEnd!({ state: {}, result: {} });
-    expect(server.seen).toHaveLength(4);
+    expect(server.seen).toHaveLength(3);
+  });
+
+  it('턴 끝 확인이 관문에 닿지 못한 채 끝난 실행은 StopFailure(stop_unverified)로 알린다. 확인이 닿아 통과한 실행은 알리지 않는다', async () => {
+    let stops = 0;
+    const server = await gateway({
+      // 처음 두 번은 이상한 응답(검증하지 못함), 그 뒤는 통과
+      stop: () => (stops++ < 2 ? { body: { nope: true } } : { body: {} }),
+      'stop-failure': { body: {} },
+    });
+    const { hooks } = await loadMod(await gatewayDir({ url: server.url }));
+    expect(await hooks.onStop!({ state: {}, stopReason: 'end_turn', turnNumber: 1, lastAssistantText: '' })).toMatchObject({ continue: true });
+    expect(await hooks.onStop!({ state: {}, stopReason: 'end_turn', turnNumber: 2, lastAssistantText: '' })).toEqual({ continue: false });
+    await hooks.onRunEnd!({ state: {}, result: { stopReason: 'end_turn' } });
+    const failures = () => server.seen.filter((entry) => entry.event === 'stop-failure');
+    expect(failures().map((entry) => entry.body.error)).toEqual(['stop_unverified']);
+    // 대조: 확인이 닿아 통과한 실행의 끝은 알리지 않는다
+    expect(await hooks.onStop!({ state: {}, stopReason: 'end_turn', turnNumber: 1, lastAssistantText: '' })).toEqual({ continue: false });
+    await hooks.onRunEnd!({ state: {}, result: { stopReason: 'end_turn' } });
+    expect(failures()).toHaveLength(1);
   });
 
   it('게이트가 실패해 이어가게 했는데 이어갈 수 없어 끝난 실행(end_turn)도 StopFailure로 알린다. 통과한 뒤의 끝은 알리지 않는다', async () => {

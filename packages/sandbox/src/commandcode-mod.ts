@@ -43,6 +43,8 @@ const nonEmpty = (value) => typeof value === 'string' && value.trim() !== '';
 // 이 글이 한 번 불린 동안의 상태. 둘 다 닫는 쪽으로만 쓰인다
 let stopUnreachable = 0;
 let stopBlocked = false;
+// 마지막 턴 끝 확인이 관문에 닿지 못했다(검증되지 않은 채 끝날 수 있다)
+let stopUnverified = false;
 
 // 관문의 주소와 토큰. 부를 때마다 읽는다(글에 박지 않는다). 루프백 http가 아니면 받지 않는다
 function readAddress() {
@@ -178,6 +180,7 @@ export default function (cmd) {
       try {
         stopUnreachable = 0;
         stopBlocked = false;
+        stopUnverified = false;
         const text = input.text;
         const answer = readPrompt(await post('prompt', { hook_event_name: 'UserPromptSubmit', prompt: text, ...(cwd ? { cwd } : {}) }));
         if (answer.blocked) return { action: 'handled', message: answer.blocked };
@@ -218,6 +221,7 @@ export default function (cmd) {
         const last = info && typeof info.lastAssistantText === 'string' ? info.lastAssistantText : '';
         const answer = readStop(await post('stop', { hook_event_name: 'Stop', last_assistant_message: last, ...(cwd ? { cwd } : {}) }));
         stopUnreachable = 0;
+        stopUnverified = false;
         if (answer.feedback) {
           stopBlocked = true;
           return { continue: true, reason: answer.feedback };
@@ -229,6 +233,7 @@ export default function (cmd) {
         // 검증이 돌지 않았다. 체크포인트는 생기지 않는다. 한 번은 에이전트에게 알려 다시 끝내게 하고(관문이 돌아올 수 있다), 연달아 닿지 못하면 멈추되 사용자에게 알린다.
         // CLI는 이어가기를 8번까지만 받으므로 끝없이 돌지 않는다
         stopBlocked = false;
+        stopUnverified = true;
         stopUnreachable += 1;
         const text = '[b-studio] 관문에 닿지 못해(' + why(error) + ') 이번 변경을 검증하지 못했습니다. 체크포인트가 생기지 않았습니다.';
         if (stopUnreachable <= 1) return { continue: true, reason: text + ' 같은 변경을 다시 보여 주며 턴을 끝내세요.' };
@@ -237,17 +242,23 @@ export default function (cmd) {
       }
     },
 
-    // 훅 없이 끝난 실행(턴 상한·중단·권한 거절은 onStop이 불리지 않는다). 열린 실행을 실패로 닫고 되돌리게 한다(StopFailure). 던지지 않는다
+    // 훅 없이 끝난 실행(턴 상한·권한 거절은 onStop이 불리지 않는다). 열린 실행을 실패로 닫고 되돌리게 한다(StopFailure). 던지지 않는다
     onRunEnd: async (info) => {
       try {
         const reason = info && isPlain(info.result) && typeof info.result.stopReason === 'string' ? info.result.stopReason : '';
         const natural = reason === 'end_turn';
         // 게이트가 실패해 이어가게 했는데 끝난 실행은 통과하지 못한 채 끝난 것이다
         const gaveUp = natural && stopBlocked;
+        // 턴 끝 확인이 관문에 닿지 못한 채 끝난 실행도 검증되지 않았다. 관문이 그 사이 돌아왔으면 실패로 닫게 알린다
+        const unverified = natural && stopUnverified;
         stopBlocked = false;
+        stopUnverified = false;
         stopUnreachable = 0;
-        if (natural && !gaveUp) return;
-        await post('stop-failure', { hook_event_name: 'StopFailure', error: gaveUp ? 'stop_gate_not_passed' : 'run_end:' + (reason || 'unknown'), ...(cwd ? { cwd } : {}) });
+        if (natural && !gaveUp && !unverified) return;
+        // 사람이 누른 중단(Esc)은 실패가 아니다. 실행을 열어 두고 다음 요청이 이어 간다(Claude Code 터미널에서 중단하면 훅이 오지 않는 것과 같다).
+        // 서버가 건 취소는 서버가 스스로 닫는다
+        if (reason === 'interrupted') return;
+        await post('stop-failure', { hook_event_name: 'StopFailure', error: gaveUp ? 'stop_gate_not_passed' : unverified ? 'stop_unverified' : 'run_end:' + (reason || 'unknown'), ...(cwd ? { cwd } : {}) });
       } catch {
         // 알리지 못했다. 실행은 열린 채 남고 체크포인트는 생기지 않는다
       }

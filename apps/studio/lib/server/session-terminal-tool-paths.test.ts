@@ -87,8 +87,18 @@ describe('commandcode의 파일 도구는 경로를 꺼내지 못하면 알 수 
     expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: '/w/a.ts', content: 'x' })).toEqual(['/w/a.ts']);
     expect(terminalToolFilePaths('commandcode', 'edit_file', { path: '/w/a.ts' })).toEqual(['/w/a.ts']);
     expect(terminalToolFilePaths('commandcode', 'shell_command', { command: 'ls' })).toEqual([]);
+  });
+
+  it('commandcode의 서브에이전트 도구는 입력과 상관없이 알 수 없음(null)이다: 그 안의 쓰기는 쓰기 직전 훅을 거치지 않는다', () => {
+    for (const tool of ['agent', 'task']) {
+      for (const input of [{ prompt: '고쳐 줘', subagent_type: 'general' }, { file_path: '/w/api/src/a.ts' }, {}, null, 'x']) {
+        expect(terminalToolFilePaths('commandcode', tool, input), `${tool} ${JSON.stringify(input)}`).toBeNull();
+      }
+    }
+    // 대조: 다른 갈래의 같은 이름은 이 규칙을 타지 않는다(claude의 서브에이전트 안 도구는 훅을 거친다)
+    expect(terminalToolFilePaths('claude', 'Agent', { prompt: 'x' })).toEqual([]);
+    expect(terminalToolFilePaths('claude', 'agent', { prompt: 'x' })).toEqual([]);
     expect(terminalToolFilePaths('commandcode', 'read_file', {})).toEqual([]);
-    expect(terminalToolFilePaths('commandcode', 'agent', { prompt: 'x' })).toEqual([]);
     // 다른 갈래의 같은 이름 도구는 이 규칙을 받지 않는다(gemini의 write_file은 지금 그대로다)
     expect(terminalToolFilePaths('gemini', 'write_file', { content: 'x' })).toEqual([]);
   });

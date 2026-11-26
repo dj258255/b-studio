@@ -56,6 +56,11 @@ export type TerminalToolKind = 'claude' | 'codex' | 'commandcode' | 'opencode' |
 const OPENCODE_FILE_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'multiedit']);
 /** Command Code가 파일을 바꾸는 도구(설치된 v1.91.1의 도구 정의에서 확인, ADR-233): 입력에 경로(`file_path`·`filePath`·`path`)가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const COMMAND_CODE_FILE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file']);
+/**
+ * Command Code가 서브에이전트를 띄우는 도구. 서브에이전트 안의 도구 호출은 mod의 쓰기 직전 훅을 거치지 않으므로(ADR-233) 이 도구가 바꿀 파일은 알 수 없다.
+ * 문서가 두 이름을 쓴다(`agent`, `task`): 더 맞추면 더 막을 뿐이다
+ */
+const COMMAND_CODE_NESTED_TOOLS: ReadonlySet<string> = new Set(['agent', 'task']);
 /** 패치 본문을 받는 도구 */
 const PATCH_TOOLS: ReadonlySet<string> = new Set(['apply_patch', 'patch']);
 /** 우리가 아는 패치 줄: 파일 머리글(경로를 낸다)과 그 밖의 표시 */
@@ -90,9 +95,12 @@ function strictPatchPaths(patch: unknown): string[] | null {
  * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(엄격하게 읽고 모르면 null)
  * - opencode: `filePath`(edit·write·multiedit은 없으면 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
  * - commandcode·gemini: 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null.
- *   commandcode의 파일 도구(`write_file`·`edit_file`)는 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 셸 도구처럼 경로가 없는 도구는 빈 목록이다
+ *   commandcode의 파일 도구(`write_file`·`edit_file`)는 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 서브에이전트 도구(`agent`·`task`)는 늘 null이다.
+ *   셸 도구처럼 경로가 없는 도구는 빈 목록이다
  */
 export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, input: unknown): string[] | null {
+  // 서브에이전트 도구는 입력과 상관없이 바꾸는 파일을 알 수 없다. 빈 목록으로 읽으면 카드의 쓰기 범위가 그 안의 쓰기에 열린다
+  if (kind === 'commandcode' && COMMAND_CODE_NESTED_TOOLS.has(tool)) return null;
   if (kind === 'claude' || kind === 'codex') {
     // 패치 도구는 본문을 엄격하게 읽는다. 읽지 못하면 바꾸는 파일을 알 수 없다(옛 코드는 빈 목록이거나 느슨한 추출이라 쓰기 범위를 비켜 갔다)
     if (PATCH_TOOLS.has(tool)) {
