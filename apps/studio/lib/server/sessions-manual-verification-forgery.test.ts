@@ -76,7 +76,7 @@ import {
   subscribe,
   writeSessionDoc,
 } from './sessions';
-import { driveTerminalSteps, type TerminalStep } from './test-support/terminal-run';
+import { driveTerminalSteps, openTerminalRunWithFiles, stopTerminalTurn, type TerminalStep } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -410,7 +410,8 @@ describe('에이전트 실행이 사람 확인 기록을 써넣는 위조', () =
     const { id, events, unsubscribe } = await startedSession();
     await markRequirementManualVerification(id, 'R1', { note: '화면을 직접 눌러 확인했습니다' }, 'kim');
 
-    sendMessage(id, '로그인 구현', { allowBreaking: false, scriptedTurns: [orderTurn(), { text: '완료했습니다' }] });
+    // 터미널 실행을 연 채(요청 훅 + 파일 쓰기) 둔다. 열린 실행이 점유하는 동안이 이 시험이 보는 구간이다
+    const run = await openTerminalRunWithFiles(id, '로그인 구현', { 'api/src/Order.java': 'class Order { String memo; }\n' });
     expect(getSnapshot(id)!.running).toBe(true);
     await expect(markRequirementManualVerification(id, 'R2', { note: '실행 중에 누름' }, 'kim')).rejects.toMatchObject({ status: 409 });
     await expect(clearRequirementManualVerification(id, 'R1')).rejects.toMatchObject({ status: 409 });
@@ -419,6 +420,9 @@ describe('에이전트 실행이 사람 확인 기록을 써넣는 위조', () =
     await expect(applySessionRequirements(id, { requirements: [] })).rejects.toMatchObject({ status: 409 });
     await expect(writeSessionDoc(id, 'docs/requirements.md', '# 요구사항\n')).rejects.toMatchObject({ status: 409 });
     await expect(writeSessionDoc(id, 'README.md', '# 메모\n')).resolves.toMatchObject({ path: 'README.md' });
+    // 턴을 끝내(Stop 훅) 게이트를 통과시키면 실행이 닫힌다
+    const answer = await stopTerminalTurn(run, '완료했습니다');
+    expect(answer.feedback).toBeUndefined();
     await waitFor(() => events.find((event) => event.type === 'run_finished'));
 
     // 실행이 끝난 뒤에는 다시 받는다
