@@ -5,7 +5,7 @@
  * 무엇을 할지 제안하고(`POST /api/projects/open`), 한 번 더 답하면 파일을 쓰고 등록한다(`apply: true`). desk와 스튜디오는 같은 컴퓨터라
  * `~`는 스튜디오가 펼친다. 키(folderKey)는 화면 상태만 바꾸고 할 일(FolderEffect)을 돌려준다. 스튜디오를 부르는 일은 desk.ts가 한다
  */
-import { fit, fitAnsi, stringWidth } from './screen';
+import { fit, fitAnsi, stringWidth, tailFit } from './screen';
 import { BOLD, fg, RESET, type Theme } from './theme';
 import { box } from './widgets';
 
@@ -299,8 +299,7 @@ const HINT_LABEL: Record<string, string> = {
 function browsePane(state: FolderState, width: number, height: number, theme: Theme): { lines: string[]; cursor?: { x: number; y: number } } {
   const muted = fg(theme, 'muted');
   const head = ' 경로> ';
-  let text = state.text;
-  while (text && stringWidth(head + text) > width - 1) text = Array.from(text).slice(1).join('');
+  const text = tailFit(state.text, width - 1 - stringWidth(head));
   const lines: string[] = [fitAnsi(`${BOLD}${head}${RESET}${text}`, width), ''];
   const cursor = { x: stringWidth(head + text), y: 0 };
   if (state.error) lines.push(fitAnsi(`${fg(theme, 'red')} ${state.error}${RESET}`, width));

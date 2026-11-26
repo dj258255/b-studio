@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
+import { createDraftStore, draftFits, MAX_DRAFT_BYTES, MAX_DRAFTS, type DeskDraftStore } from './drafts';
 import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
 import { changesFailed, changesLoaded, openChanges, type ChangesEffect, type ChangesState, type DeskComment } from './changes';
 import { loadComments, saveComments } from './comments-store';
@@ -277,6 +278,12 @@ export interface DeskLayoutStore {
 }
 
 export interface DeskAppOptions {
+  /** 쓰던 요청 글을 남기는 곳(실제로는 desk-drafts.json). 없으면 남기지 않는다 */
+  draftStore?: DeskDraftStore;
+  /** 쓰던 글 저장을 미루는 시간(ms). 기본 300 */
+  draftDebounceMs?: number;
+  /** 글 하나를 남기는 상한(바이트). 기본 64KiB. 테스트가 작게 줄인다 */
+  draftMaxBytes?: number;
   notify?: boolean;
   /** 서버가 실험 기능을 켜고 떴는가(ADR-200). false면 작업 나누기·여러 AI 비교를 열지 않는다. 모르면 숨기지 않는다 */
   experimental?: boolean;
@@ -491,6 +498,7 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
     graphics: graphicsMode(env, config.graphics),
     ...(config.prefix ? { prefix: config.prefix } : {}),
     layoutStore: { load: () => loadDeskLayout(dir), save: (layout) => saveDeskLayout(dir, layout) },
+    draftStore: createDraftStore(dir),
     commentStore: { load: (id) => loadComments(dir, id), save: (id, comments) => saveComments(dir, id, comments) },
     warnings,
   });
@@ -558,6 +566,16 @@ export class DeskApp {
   #lastPress: { slot: number; id: string; at: number } | undefined;
   readonly #truecolor: boolean;
   readonly #layoutStore: DeskLayoutStore | undefined;
+  /** 쓰던 요청 글(#1380): 이름 → 글. 나중에 고친 것이 뒤에 온다 */
+  readonly #drafts = new Map<string, string>();
+  readonly #draftStore: DeskDraftStore | undefined;
+  readonly #draftDebounceMs: number;
+  readonly #draftMaxBytes: number;
+  #draftTimer: NodeJS.Timeout | undefined;
+  #draftDirty = false;
+  #draftWarned = false;
+  /** 칸 종류마다 지금 열린 입력이 어느 글에 붙었는가(붙을 때 한 번만 저장한 글로 채운다) */
+  readonly #draftApplied = new Map<string, string>();
   readonly #commentStore: DeskCommentStore;
   /** 배치를 저장하지 못한 것을 이미 알렸다(같은 알림을 되풀이하지 않는다) */
   #layoutWarned = false;
@@ -611,6 +629,9 @@ export class DeskApp {
     this.#copyOnSelect = options.copyOnSelect !== false;
     this.#truecolor = options.truecolor !== false;
     this.#layoutStore = options.layoutStore;
+    this.#draftStore = options.draftStore;
+    this.#draftDebounceMs = options.draftDebounceMs ?? 300;
+    this.#draftMaxBytes = options.draftMaxBytes ?? MAX_DRAFT_BYTES;
     this.#commentStore = options.commentStore ?? memoryComments();
     this.#spawnShell = options.spawnShell ?? spawnWithNodePty;
     this.#shellEnv = options.shellEnv ?? process.env;
@@ -631,6 +652,11 @@ export class DeskApp {
     const ordered = byUrgency(items, new Set(restored.unseenDone ?? []));
     this.#state = { ...initialState(), items: ordered, ...(options.experimental === false ? { experimental: false } : {}), theme, sprites: options.sprites ?? {}, ...kitty, ...prefix, ...warnings, ...restored, ...(open ? {} : { view: 'space' as const }) };
     for (const item of items) this.#last.set(item.id, statusOf(item));
+    if (this.#draftStore) {
+      const loaded = this.#draftStore.load();
+      for (const [key, text] of loaded.drafts) this.#drafts.set(key, text);
+      if (loaded.warning) this.#state = { ...this.#state, message: [this.#state.message, loaded.warning].filter(Boolean).join(' / ') };
+    }
   }
 
   /** 나갈 때 배치를 저장하지 못했으면 그 알림(desk가 화면을 되돌린 뒤 보인다) */
@@ -1293,6 +1319,7 @@ export class DeskApp {
       case 'create': {
         try {
           const made = await this.#call('createFleet')({ projectId: effect.projectId, request: effect.request, candidates: effect.candidates });
+          this.#discardDraft('fleet');
           this.#patchFleets((fleets) => ({ ...fleets, mode: 'detail', detail: made.id, member: 0, form: undefined, fleets: [made, ...fleets.fleets.filter((fleet) => fleet.id !== made.id)], note: `참가자 ${made.members.length}명에게 보냈습니다` }));
           // 참가자 세션이 카드·사이드바에 바로 보이게 목록을 다시 받는다
           void this.#poll();
@@ -1592,6 +1619,7 @@ export class DeskApp {
         case 'create': {
           try {
             const plan = await this.#call('createPlan')(effect.projectId, effect.request);
+            this.#discardDraft(`plan:${effect.projectId}`);
             this.#patchPlans((plans) => ({ ...plans, mode: 'detail', form: undefined, detail: plan, lane: 0, list: [plan, ...(plans.list ?? []).filter((entry) => entry.id !== plan.id)] }));
           } catch (error) {
             this.#patchPlans((plans) => ({ ...plans, ...(plans.form ? { form: { ...plans.form, sending: false } } : {}), note: `계획을 만들지 못했습니다: ${messageOf(error)}` }));
@@ -3001,6 +3029,7 @@ export class DeskApp {
         : result.terminal
           ? `${target}로 보냈습니다`
           : `${target} 세션을 만들었습니다(이 스튜디오는 아직 터미널로 첫 요청을 넣지 않습니다)`;
+      this.#discardDraft(`prompt:${projectId}`);
       this.#state = { ...this.#state, prompt: undefined, slots, message: shellTaken ? `${message} · 고른 칸에 셸이 있어 칸에는 열지 않았습니다(사이드바에서 Ctrl-b Enter로 엽니다)` : message };
       this.#slotsChanged();
       this.#saveLayout();
@@ -3012,7 +3041,91 @@ export class DeskApp {
     this.#scheduleRender();
   }
 
+  /**
+   * 쓰던 요청 글(#1380)을 입력 칸과 맞춘다. 상태가 바뀔 때마다(#scheduleRender) 부른다.
+   * 열린 칸이 처음 어느 글에 붙으면 비어 있을 때 저장한 글로 채운다. 그다음부터는 칸의 글을 저장한다(비우면 지운다).
+   * Esc로 닫아도 글은 남긴다(실수로 닫은 것과 버리려는 것을 칸이 구별하지 못한다). 지우려면 Ctrl-u로 비우고, 보내면 지운다
+   */
+  #syncDrafts(): void {
+    if (!this.#draftStore) return;
+    const { prompt, plans, fleets } = this.#state;
+    const promptProject = prompt?.step === 'request' ? prompt.projects[prompt.projectIndex] : undefined;
+    const planForm = plans?.mode === 'new' && plans.form?.step === 'request' ? plans.form : undefined;
+    const planProject = planForm?.projects[planForm.projectIndex];
+    const fleetForm = fleets?.mode === 'new' && fleets.form && !fleets.form.loading ? fleets.form : undefined;
+    this.#syncDraft('prompt', prompt && promptProject ? (prompt.sending ? 'hold' : { key: `prompt:${promptProject.id}`, text: prompt.text }) : undefined, (text) => {
+      this.#state = { ...this.#state, message: '쓰던 글을 불러왔습니다(Ctrl-u로 지웁니다)', prompt: { ...prompt!, text } };
+      this.#schedulePreview(text);
+    });
+    this.#syncDraft('plan', planForm && planProject ? (planForm.sending ? 'hold' : { key: `plan:${planProject.id}`, text: planForm.text }) : undefined, (text) => {
+      this.#state = { ...this.#state, plans: { ...plans!, form: { ...planForm!, text }, note: '쓰던 글을 불러왔습니다(Ctrl-u로 지웁니다)' } };
+    });
+    this.#syncDraft('fleet', fleetForm ? (fleetForm.sending ? 'hold' : { key: 'fleet', text: fleetForm.request }) : undefined, (text) => {
+      this.#state = { ...this.#state, fleets: { ...fleets!, form: { ...fleetForm!, request: text }, note: '쓰던 글을 불러왔습니다(Ctrl-u로 지웁니다)' } };
+    });
+  }
+
+  #syncDraft(kind: string, current: { key: string; text: string } | 'hold' | undefined, restore: (text: string) => void): void {
+    if (current === 'hold') return;
+    if (!current) {
+      this.#draftApplied.delete(kind);
+      return;
+    }
+    if (this.#draftApplied.get(kind) !== current.key) {
+      this.#draftApplied.set(kind, current.key);
+      const saved = this.#drafts.get(current.key);
+      if (current.text === '' && saved) {
+        restore(saved);
+        return;
+      }
+    }
+    if (current.text !== (this.#drafts.get(current.key) ?? '')) this.#setDraft(current.key, current.text);
+  }
+
+  #setDraft(key: string, text: string): void {
+    this.#drafts.delete(key);
+    if (text !== '') {
+      if (draftFits(text, this.#draftMaxBytes)) {
+        this.#drafts.set(key, text);
+        while (this.#drafts.size > MAX_DRAFTS) this.#drafts.delete(this.#drafts.keys().next().value as string);
+      } else if (!this.#draftWarned) {
+        // 너무 긴 글은 남기지 않는다. 앞에 남긴 글이 이 글과 다르니 같이 지웠다
+        this.#draftWarned = true;
+        this.#state = { ...this.#state, message: `쓴 글이 ${Math.round(this.#draftMaxBytes / 1024)}KiB를 넘어 임시 저장하지 않습니다` };
+      }
+    }
+    this.#draftDirty = true;
+    if (this.#draftTimer) return;
+    this.#draftTimer = setTimeout(() => {
+      this.#draftTimer = undefined;
+      this.#flushDrafts();
+    }, this.#draftDebounceMs);
+  }
+
+  /** 보냈거나 만든 글은 지운다 */
+  #discardDraft(key: string): void {
+    if (!this.#draftStore || !this.#drafts.has(key)) return;
+    this.#setDraft(key, '');
+  }
+
+  #flushDrafts(): void {
+    clearTimeout(this.#draftTimer);
+    this.#draftTimer = undefined;
+    if (!this.#draftStore || !this.#draftDirty) return;
+    this.#draftDirty = false;
+    try {
+      this.#draftStore.save(this.#drafts);
+    } catch (error) {
+      if (this.#draftWarned) return;
+      this.#draftWarned = true;
+      const text = `쓰던 글을 저장하지 못했습니다: ${messageOf(error)}`;
+      if (this.#restored) this.#exitWarning ??= text;
+      else this.#say(text);
+    }
+  }
+
   #scheduleRender(): void {
+    if (!this.#restored) this.#syncDrafts();
     if (this.#frameTimer || this.#restored) return;
     this.#frameTimer = setTimeout(() => {
       this.#frameTimer = undefined;
@@ -3169,6 +3282,8 @@ export class DeskApp {
   #restore(): void {
     if (this.#restored) return;
     this.#restored = true;
+    // 정상 종료·SIGTERM·SIGHUP·치명 오류 모두 여기를 지난다: 미룬 저장을 지금 쓴다
+    this.#flushDrafts();
     clearInterval(this.#pollTimer);
     clearInterval(this.#clockTimer);
     clearTimeout(this.#agentsRetry);
