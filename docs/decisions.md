@@ -12521,3 +12521,37 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 - 시작 비용(macOS 26.3.1, 20회 평균·중앙값, `bash -c true`): 샌드박스 없이 2.9ms·2.8ms, 생성한 프로필로 `sandbox-exec` 12.1ms·11.8ms(약 +9ms). 같은 기기에서 파이썬으로 잰 다른 회차는 8.0ms → 22.6ms(약 +14ms)였다. `runBash` 전체(프로세스 첫 사용 때 한 번 하는 적용 확인 포함 첫 호출 포함): 12.7ms 대 2.6ms. 프로필 만들기 0.7ms, 1.8KB. 한 번씩 잰 값이다.
 - 2차 수정(커밋 보안 검토 지적 셋): IPC 거부(시험: `open`·`osascript`·`launchctl submit`·`at`과 복사한 `osascript`·`open`이 실패하고 2.5초 뒤에도 밖에 파일이 없음), 위쪽 폴더의 이름 바꾸기·지우기 거부(시험: 임시 폴더 아래의 작업 폴더·관문 폴더와 그 위쪽 폴더의 `mv`·`rm -rf`·`rmdir`이 실패하고 `.git`·훅 파일이 그대로, 작업 폴더 안 쓰기는 됨), bwrap 인자(없는 `.git`·관문 폴더는 tmpfs, 위쪽 폴더도 없으면 거절, 위쪽 폴더는 얕은 것부터 `--bind`). 변이: IPC 거부를 모두 지우면 시험이 실패하고(실행 거부만, IPC 거부만 지우면 통과 — 서로 겹치는 두 층), 위쪽 폴더 거부를 지우면 이름 바꾸기 시험이, tmpfs 막기를 지우면 bwrap 없는 경로 시험이, 위쪽 폴더 마운트를 지우면 마운트 시험이 실패한다. 새 프로필에서도 `pnpm install --offline --frozen-lockfile`·`cargo build --offline --locked`·spec typecheck·`pnpm vitest`가 돈다(트러블슈팅 281).
 - 재지 않은 것: **Linux `bwrap`**(이 기기에 없다. 인자 만들기만 시험했고 진짜 bwrap 시험은 bwrap이 동작하는 환경에서만 돌게 해 두었다. GitHub의 ubuntu-24.04 러너는 비특권 사용자 이름 공간을 제한해 bwrap이 동작하지 않을 수 있어, CI에서 도는지는 첫 실행으로 확인한다. 설치를 CI에 더하지 않았다), 다른 macOS 버전, gradle·yarn·pip 같은 다른 도구의 캐시, 컨테이너 방식.
+## ADR-230 서버 방식에서 관리자는 남의 세션 터미널을 보고 닫을 수만 있고, 열기·입력·크기·확인 선언 변경 허용은 만든 사람만 한다
+
+상태: 채택(#1400)
+관련: 결정 [#1353](https://github.com/dj258255/b-studio/issues/1353), 이슈 #1400, ADR-173(로컬 토큰), ADR-200(지원 경로), ADR-223(터미널 통로 검사)
+
+### 맥락
+- 세션 터미널의 통로(`/api/sessions/[id]/terminal`, 묶음 `/api/terminals/stream`, `/api/sessions/[id]/check-changes`)는 `authorizeSession`으로 세션을 만든 사람과 관리자(`canManage`)를 같게 받았다. 서버 방식에서 터미널은 만든 사람의 구독 로그인이 든 컨테이너 안의 셸이다. 관리자가 입력을 보낼 수 있으면 그 로그인으로 명령을 돌릴 수 있다.
+- 2026-11-26 사람의 결정(#1353): 서버 방식에서 관리자는 남의 터미널을 보고 닫기만 한다. 입력·열기·크기·확인 선언 변경 허용은 만든 사람만 한다.
+
+### 선택지
+1. `authorizeSession`에 `action` 인자를 더한다. 기존 호출 서른 곳 가까이가 같은 함수를 부르므로 인자를 빼먹은 호출이 조용히 넓은 쪽이 된다.
+2. 좁은 검사 함수를 따로 둔다(채택). 터미널을 움직이는 자리에서만 부르고, 기본 함수는 그대로 둔다.
+
+### 결정
+- `authorizeSessionOwner(id, user)`: 인증이 없으면(개인 PC 모드) 통과. 켜져 있으면 세션 복구 뒤 `snapshot.owner === user`일 때만 통과한다(저장된 문자열과 정확히 같아야 하고 안정 값인 로그인 이름으로만 비교한다). 없는 세션은 404, 만든 사람이 기록되지 않은 세션은 관리자도 403. 허용 목록이라 모르는 입력은 범위 밖으로 처리한다.
+- 터미널 POST는 `authorizeSession` 뒤 본문을 읽고, `close`가 아니면 모두 `authorizeSessionOwner`를 거친다. 예외를 `close` 하나로 적어, 나중에 action이 늘면 기본이 "움직임"이다. 모르는 action은 본문 검사에서 400이다(보기로 취급하지 않는다).
+- check-changes는 `authorizeSession` 뒤 `authorizeSessionOwner`를 거친다(켜고 끄는 것 모두. 터미널의 다음 요청을 바꾸는 일이라서).
+
+### 호출하는 자리(막는 쪽 / 여는 쪽)
+| 자리 | 검사 | 방향 |
+|---|---|---|
+| 터미널 GET(출력 스트림) | `authorizeSession` | 보기. 만든 사람·관리자 허용 |
+| 묶음 스트림 `/api/terminals/stream` | `authorizeSession`(id마다) | 보기. 만든 사람·관리자 허용 |
+| 터미널 POST `close` | `authorizeSession` | 닫기. 만든 사람·관리자 허용 |
+| 터미널 POST `open`·`input`·`resize` | `authorizeSession` + `authorizeSessionOwner` | 막는 쪽: 만든 사람만(허용 목록) |
+| 터미널 POST 모르는 action | 본문 검사 400 | 막는 쪽 |
+| `check-changes` POST | `authorizeSession` + `authorizeSessionOwner` | 막는 쪽: 만든 사람만 |
+| 세션 만들기(`terminal: true`)·Fleet·작업 분해 | 만든 사람 = 요청한 사용자 | 새 세션이라 해당 없음 |
+| `messages`(`allowCheckChanges`) | 채팅식 경로(터미널을 움직이지 않음) | 이 결정 밖. 기존 `authorizeSession` |
+
+### 결과
+- 시험: `lib/server/access.test.ts`(만든 사람만 통과, 관리자·다른 사용자 403, 기록 없는 세션, 대소문자·공백이 다른 이름, 없는 세션 404, 개인 PC 모드), 터미널·check-changes 라우트(open·input·resize·check-changes는 만든 사람이 아니면 403이고 터미널에 닿지 않음, close·GET은 검사하지 않음, 모르는 action 400, 넓은 검사에서 막힌 사용자는 모두 403), 묶음 스트림은 만든 사람 검사를 부르지 않음.
+- 고치기 전에는 라우트 시험 8개와 access 시험 6개가 실패했다. 검사를 하나씩 끄는 변이 9개(POST 검사 제거, open만, resize 빠짐, close도 검사, check-changes 제거, 없는 세션 통과, 관리자 허용, 개인 PC 예외 제거, 복구 호출 제거)가 모두 시험을 실패시켰다.
+- 재지 않은 것: 실제 서버 방식 서버에서 관리자 계정으로 부른 요청, 실제 컨테이너 터미널.

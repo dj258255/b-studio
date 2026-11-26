@@ -1,4 +1,4 @@
-import { authorizeSession } from '@/lib/server/access';
+import { authorizeSession, authorizeSessionOwner } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { setTerminalCheckChanges } from '@/lib/server/sessions';
 import { assertTerminalAccess } from '@/lib/server/terminal-access';
@@ -13,6 +13,8 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const user = await assertTerminalAccess(request.headers);
     const { id } = await context.params;
     await authorizeSession(id, user);
+    // 켜는 것은 터미널의 다음 요청을 바꾸는 일이라 서버 방식에서 관리자도 남의 세션에는 못 한다(#1353)
+    await authorizeSessionOwner(id, user);
     const body = (await request.json().catch(() => ({}))) as { allow?: unknown };
     if (typeof body.allow !== 'boolean') throw new StudioError(400, 'allow는 true나 false여야 합니다');
     return Response.json({ armed: setTerminalCheckChanges(id, body.allow) });

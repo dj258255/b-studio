@@ -3,6 +3,7 @@ import { StudioError } from '@/lib/server/errors';
 
 const mocks = vi.hoisted(() => ({
   authorizeSession: vi.fn(async () => {}),
+  authorizeSessionOwner: vi.fn(async () => {}),
   sessionTerminalTarget: vi.fn((): { sandboxId: string; root: string; projectId: string } => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' })),
   openSessionTerminal: vi.fn(async () => {}),
   writeSessionTerminal: vi.fn(),
@@ -13,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   localToken: 'f'.repeat(64),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession }));
+vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession, authorizeSessionOwner: mocks.authorizeSessionOwner }));
 vi.mock('@/lib/server/sessions', () => ({ recoverSessions: async () => {}, sessionTerminalTarget: mocks.sessionTerminalTarget }));
 vi.mock('@/lib/server/session-terminal', () => ({
   MAX_TERMINAL_INPUT: 256 * 1024,
@@ -48,6 +49,7 @@ const get = (host = '127.0.0.1:3000', options: { cookie?: string | null; signal?
 beforeEach(() => {
   for (const mock of Object.values(mocks)) if (typeof mock === 'function') mock.mockClear();
   mocks.authorizeSession.mockImplementation(async () => {});
+  mocks.authorizeSessionOwner.mockImplementation(async () => {});
   mocks.sessionTerminalTarget.mockImplementation(() => ({ sandboxId: 'studio-orders-abc123', root: '/work/orders', projectId: 'orders' }));
 });
 
@@ -198,5 +200,69 @@ describe('단일 터미널 통로의 쓰기와 정리(B4 2차)', () => {
     expect(unsubscribe).toHaveBeenCalledTimes(1);
     expect(close).toHaveBeenCalledTimes(1);
     expect(stream.closed()).toBe(true);
+  });
+});
+
+// 서버 방식에서 관리자는 남의 터미널을 보고 닫을 수만 있다(#1353). 여기서는 관리자가 "넓은 검사는 통과, 만든 사람 검사는 거절"인 경우를 흉내 낸다
+describe('터미널을 움직이는 요청은 만든 사람 검사를 거친다(#1353)', () => {
+  const notOwner = async (): Promise<void> => {
+    throw new StudioError(403, '이 세션의 터미널은 kim님만 움직일 수 있습니다. 관리자는 보고 닫을 수만 있습니다');
+  };
+
+  it.each([
+    ['open', { action: 'open', cols: 80, rows: 24 }],
+    ['input', { action: 'input', data: 'ls\r' }],
+    ['resize', { action: 'resize', cols: 80, rows: 24 }],
+  ])('%s: 만든 사람이 아니면 403이고 터미널에 아무것도 닿지 않는다', async (_name, body) => {
+    mocks.authorizeSessionOwner.mockImplementation(notOwner);
+    expect((await post(body)).status).toBe(403);
+    expect(mocks.openSessionTerminal).not.toHaveBeenCalled();
+    expect(mocks.writeSessionTerminal).not.toHaveBeenCalled();
+    expect(mocks.resizeSessionTerminal).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['open', { action: 'open', cols: 80, rows: 24 }],
+    ['input', { action: 'input', data: 'ls\r' }],
+    ['resize', { action: 'resize', cols: 80, rows: 24 }],
+  ])('%s: 만든 사람이면 통과한다', async (_name, body) => {
+    expect((await post(body)).status).toBe(200);
+    expect(mocks.authorizeSessionOwner).toHaveBeenCalledWith('s1', 'kim');
+  });
+
+  it('닫기는 만든 사람이 아니어도 된다(관리자가 남의 터미널을 닫는다)', async () => {
+    mocks.authorizeSessionOwner.mockImplementation(notOwner);
+    expect((await post({ action: 'close' })).status).toBe(200);
+    expect(mocks.closeSessionTerminal).toHaveBeenCalledWith('s1');
+    expect(mocks.authorizeSessionOwner).not.toHaveBeenCalled();
+  });
+
+  it('보기(GET 스트림)는 만든 사람이 아니어도 된다', async () => {
+    mocks.authorizeSessionOwner.mockImplementation(notOwner);
+    const response = await get();
+    expect(response.status).toBe(200);
+    await response.body!.cancel();
+    expect(mocks.authorizeSessionOwner).not.toHaveBeenCalled();
+    expect(mocks.subscribeSessionTerminal).toHaveBeenCalled();
+  });
+
+  it('모르는 action은 거절하고(보기로 취급하지 않는다) 아무것도 움직이지 않는다', async () => {
+    for (const body of [{ action: 'view' }, { action: 'OPEN', cols: 80, rows: 24 }, { action: 'exec', command: 'id' }, { action: ['close'] }, {}]) {
+      expect((await post(body)).status, JSON.stringify(body)).toBe(400);
+    }
+    expect(mocks.openSessionTerminal).not.toHaveBeenCalled();
+    expect(mocks.writeSessionTerminal).not.toHaveBeenCalled();
+    expect(mocks.closeSessionTerminal).not.toHaveBeenCalled();
+  });
+
+  it('만든 사람도 관리자도 아닌 사용자는 넓은 검사에서 막혀 모든 요청이 403이다', async () => {
+    mocks.authorizeSession.mockImplementation(async () => {
+      throw new StudioError(403, '이 세션은 kim님이 만들었습니다');
+    });
+    for (const body of [{ action: 'open', cols: 80, rows: 24 }, { action: 'input', data: 'x' }, { action: 'resize', cols: 80, rows: 24 }, { action: 'close' }]) {
+      expect((await post(body)).status, JSON.stringify(body)).toBe(403);
+    }
+    expect((await get()).status).toBe(403);
+    expect(mocks.closeSessionTerminal).not.toHaveBeenCalled();
   });
 });
