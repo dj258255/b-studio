@@ -81,7 +81,10 @@ vi.mock('@b-studio/agent', async (importOriginal) => {
   return { ...actual, canCreatePullRequest: () => fake.canCreatePullRequest };
 });
 
-import { createSession, exportSession, getSnapshot, rememberedGitForTest, resumeSession, sendMessage, sessionHistory, setGitMemoryForTest, stopSession, subscribe, syncRemote } from './sessions';
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
+import { createSession, exportSession, getSnapshot, rememberedGitForTest, resumeSession, sessionHistory, setGitMemoryForTest, stopSession, subscribe, syncRemote } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -165,21 +168,9 @@ async function waitForReady(id: string, timeoutMs = 10_000): Promise<string> {
   }
 }
 
-/** 파일을 바꾸고 턴을 끝내는 대본으로 요청을 보내고, 그 실행이 끝나기를 기다린다(올릴 체크포인트를 만든다) */
+/** 파일을 바꾸고 턴을 끝내는 터미널 실행을 하고(올릴 체크포인트를 만든다), 채팅 경로는 쓰지 않는다 */
 async function runWrite(id: string, content: string): Promise<void> {
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-  });
-  sendMessage(id, '주문에 메모 필드 추가', {
-    allowBreaking: false,
-    scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content } }] }, { text: '메모 필드를 추가했습니다.' }],
-  });
-  await finished;
+  await completeTerminalRun(id, '주문에 메모 필드 추가', { 'api/src/Order.java': content });
 }
 
 describe('재연결 replay 순서(59번 버그: 기록 재생이 지금 스냅샷을 덮어쓰지 않는다)', () => {

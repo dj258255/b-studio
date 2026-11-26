@@ -73,7 +73,10 @@ vi.mock('./projects', () => ({
   findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root),
 }));
 
-import { createSession, getSnapshot, reverifySession, sendMessage, stopSession, subscribe } from './sessions';
+vi.mock('./session-terminal', async () => (await import('./test-support/session-terminal-stub')).sessionTerminalStub());
+
+import { createSession, getSnapshot, reverifySession, stopSession, subscribe } from './sessions';
+import { completeTerminalRun } from './test-support/terminal-run';
 import type { StudioEvent } from '@/lib/studio-events';
 
 let root: string;
@@ -152,20 +155,8 @@ async function readySession(): Promise<string> {
   await setupRepo();
   const id = (await createSession('verifyproj', 'kim', 'copy')).id;
   await waitFor(() => getSnapshot(id)?.status === 'ready');
-  // 에이전트 실행 하나로 게이트를 통과한 체크포인트를 남긴다
-  const finished = new Promise<void>((resolve) => {
-    const unsubscribe = subscribe(id, (event) => {
-      if (event.type === 'run_finished') {
-        unsubscribe();
-        resolve();
-      }
-    });
-  });
-  sendMessage(id, '주문에 메모 필드 추가', {
-    allowBreaking: false,
-    scriptedTurns: [{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; }\n' } }] }, { text: '추가했습니다.' }],
-  });
-  await finished;
+  // 터미널 실행 하나로 게이트를 통과한 체크포인트를 남긴다
+  await completeTerminalRun(id, '주문에 메모 필드 추가', { 'api/src/Order.java': 'class Order { String memo; }\n' });
   expect(getSnapshot(id)!.checkpoints[0]!.passedStages).toContain('test');
   return id;
 }
