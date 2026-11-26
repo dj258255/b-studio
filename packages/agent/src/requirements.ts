@@ -21,7 +21,7 @@
 import { decodeNative, encodeLoneSurrogates, encodeNative, native } from '@b-studio/sandbox';
 import { z } from 'zod';
 import { summarizeJsonContent, summarizeLargeJsonFile } from './json-summary';
-import type { AgentUsage } from './loop';
+import type { AgentUsage } from './agent-types';
 import { parsePlannerReply, type ModelAsk } from './task-plan';
 import { decodeLoneSurrogates } from './lone-surrogates';
 import { Workspace, WorkspaceError } from './workspace';

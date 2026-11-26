@@ -9,7 +9,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Board } from './coordination';
 import { checkCodexFeatures, codexFeatureConfig, DEFAULT_SDK, runCodexAgent, type CodexConfig, type CodexSdk, type CodexThread } from './codex-runner';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;

@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { AgentUsage } from './loop';
+import type { AgentUsage } from './agent-types';
 import type { ModelAsk } from './task-plan';
 import {
   buildAllMustHavesPrefill,
