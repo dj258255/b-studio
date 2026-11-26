@@ -28,6 +28,11 @@ const LABEL_CHARS = 80;
 const TODO_LIMIT = 100;
 /** 기억하는 서브에이전트 수의 상한(terminal-agents.ts의 장부와 같다) */
 const SUBAGENT_LIMIT = 30;
+/**
+ * 끝난 서브에이전트를 남겨 두는 시간(#1421). 백그라운드 서브에이전트가 끝났다는 알림은 새 요청처럼 들어와서,
+ * 요청이 올 때마다 끝난 것을 지우면 무엇을 했는지 볼 틈이 없다. 수는 SUBAGENT_LIMIT이 따로 막는다
+ */
+export const DONE_SUBAGENT_KEEP_MS = 10 * 60_000;
 /** Agent 도구 호출에서 받아 두는 설명의 상한 */
 const PENDING_LIMIT = 30;
 /** 끝 훅을 먼저 받은 도구 호출 id를 기억하는 수(#955). 비동기 훅은 끝이 시작보다 먼저 닿을 수 있다 */
@@ -361,7 +366,9 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
     }
     case 'SubagentStart': {
       const id = clean(text(input.agent_id), LABEL_CHARS);
-      if (!id || state.subagents.has(id) || state.subagents.size >= SUBAGENT_LIMIT) return;
+      if (!id || state.subagents.has(id)) return;
+      // 자리가 없으면 가장 오래전에 끝난 것을 밀어낸다. 모두 작업 중이면 새 것을 받지 않는다
+      if (state.subagents.size >= SUBAGENT_LIMIT && !evictOldestDone(state)) return;
       const type = clean(text(input.agent_type), LABEL_CHARS) ?? 'subagent';
       const index = state.pending.findIndex((entry) => entry.type === type);
       const description = index >= 0 ? state.pending.splice(index, 1)[0]!.description : undefined;
@@ -427,7 +434,12 @@ export function noteTurnStarted(state: TerminalActivity, at: number = Date.now()
   state.turnDenied = 0;
   state.ended = [];
   if (state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')) state.todos = [];
-  for (const [id, subagent] of state.subagents) if (subagent.state === 'done') state.subagents.delete(id);
+  for (const [id, subagent] of state.subagents) {
+    if (subagent.state !== 'done') continue;
+    // 끝난 시각을 읽지 못하면 오래된 것으로 본다(남겨 둘 까닭을 확인하지 못했다)
+    const endedAt = Date.parse(subagent.lastAt ?? '');
+    if (!(at - endedAt <= DONE_SUBAGENT_KEEP_MS)) state.subagents.delete(id);
+  }
   state.pending = [];
   pruneSubagentLogs(state);
 }
@@ -1070,7 +1082,20 @@ function closeOpenEntries(state: TerminalActivity, agentId?: string): void {
   }
 }
 
-/** 새 요청이 왔다: 끝난 서브에이전트와 서브에이전트 목록에 없는 기록을 지운다(메인의 기록은 남긴다) */
+/** 끝난 서브에이전트 가운데 가장 오래전에 끝난 것 하나를 기록과 함께 지운다. 끝난 것이 없으면 false */
+function evictOldestDone(state: TerminalActivity): boolean {
+  let oldest: ActivitySubagent | undefined;
+  for (const subagent of state.subagents.values()) {
+    if (subagent.state !== 'done') continue;
+    if (!oldest || (subagent.lastAt ?? '') < (oldest.lastAt ?? '')) oldest = subagent;
+  }
+  if (!oldest) return false;
+  state.subagents.delete(oldest.id);
+  pruneSubagentLogs(state);
+  return true;
+}
+
+/** 서브에이전트 목록에 없는 기록을 지운다(메인의 기록은 남긴다). 서브에이전트를 지운 자리에서 부른다 */
 function pruneSubagentLogs(state: TerminalActivity): void {
   const log = state.log;
   if (!log) return;

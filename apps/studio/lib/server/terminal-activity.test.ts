@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ACTIVITY_LIMITS, activityLog, activityView, clearActivityLog, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
+import { ACTIVITY_LIMITS, DONE_SUBAGENT_KEEP_MS, activityLog, activityView, clearActivityLog, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, toolTarget } from './terminal-activity';
 
 // 에이전트가 지금 하는 일·할 일·문맥 창·마지막 답·서브에이전트(#920). 훅 입력에서 만든다
 
@@ -132,12 +132,44 @@ describe('서브에이전트', () => {
     ]);
   });
 
-  it('새 요청이 오면 끝난 서브에이전트는 지운다', () => {
+  it('끝난 서브에이전트는 새 요청이 와도 한동안 남고, 끝난 지 오래된 것만 지운다(#1421)', () => {
     const state = newTerminalActivity();
     noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
-    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1' }, AT);
-    noteTurnStarted(state);
+    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a1', last_assistant_message: '세 곳' }, AT + 1_000);
+    // 백그라운드 서브에이전트가 끝났다는 알림은 새 요청처럼 들어온다. 그때 지우면 무엇을 했는지 볼 틈이 없다
+    noteTurnStarted(state, AT + 2_000);
+    expect(activityView(state)?.subagents).toMatchObject([{ id: 'a1', state: 'done', result: '세 곳' }]);
+    noteTurnStarted(state, AT + 1_000 + DONE_SUBAGENT_KEEP_MS);
+    expect(activityView(state)?.subagents).toHaveLength(1);
+    noteTurnStarted(state, AT + 1_000 + DONE_SUBAGENT_KEEP_MS + 1);
     expect(activityView(state)?.subagents).toBeUndefined();
+  });
+
+  it('작업 중인 서브에이전트는 아무리 오래돼도 새 요청에서 지우지 않는다', () => {
+    const state = newTerminalActivity();
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
+    noteTurnStarted(state, AT + DONE_SUBAGENT_KEEP_MS * 10);
+    expect(activityView(state)?.subagents).toHaveLength(1);
+  });
+
+  it('30개가 찼을 때 새 서브에이전트가 오면 가장 오래전에 끝난 것을 밀어내고, 모두 작업 중이면 받지 않는다', () => {
+    const state = newTerminalActivity();
+    for (let i = 0; i < 30; i += 1) noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: `a${i}`, agent_type: 'Explore' }, AT + i);
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'full', agent_type: 'Explore' }, AT + 100);
+    expect(activityView(state)?.subagents?.some((agent) => agent.id === 'full')).toBe(false);
+    noteToolUse(state, { tool_name: 'Grep', tool_input: { pattern: 'x' }, agent_id: 'a7' }, AT + 150);
+    expect(activityLog(state, { agent: 'a7' })!.agents).toHaveLength(1);
+    // a7이 먼저, a3이 나중에 끝났다: 밀려나는 것은 a7
+    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a7' }, AT + 200);
+    noteActivityHook(state, { hook_event_name: 'SubagentStop', agent_id: 'a3' }, AT + 300);
+    noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'new1', agent_type: 'Plan' }, AT + 400);
+    const ids = activityView(state)!.subagents!.map((agent) => agent.id);
+    expect(ids).toHaveLength(30);
+    expect(ids).toContain('new1');
+    expect(ids).not.toContain('a7');
+    expect(ids).toContain('a3');
+    // 밀려난 서브에이전트의 활동 기록도 함께 없어진다
+    expect(activityLog(state, { agent: 'a7' })?.agents ?? []).toEqual([]);
   });
 
   it('30개를 넘으면 더 기억하지 않는다', () => {
@@ -385,7 +417,7 @@ describe('에이전트별 활동 기록(activityLog)', () => {
     expect(activityLog(state, { agent: 'nobody' })!.agents).toEqual([]);
   });
 
-  it('끝난 서브에이전트의 기록은 새 요청에서 서브에이전트와 함께 사라지고, 메인의 기록은 남는다', () => {
+  it('끝난 서브에이전트의 기록은 새 요청이 와도 한동안 남고, 서브에이전트가 지워질 때 함께 사라진다. 메인의 기록은 남는다(#1421)', () => {
     const state = newTerminalActivity();
     noteActivityHook(state, { hook_event_name: 'SubagentStart', agent_id: 'a1', agent_type: 'Explore' }, AT);
     start(state, 'Grep', { pattern: 'x' }, { agent_id: 'a1' }, AT + 1);
@@ -394,6 +426,8 @@ describe('에이전트별 활동 기록(activityLog)', () => {
     // 멈춘 서브에이전트의 열린 항목은 끝 훅을 못 받은 채로 닫는다
     expect(activityLog(state, { agent: 'a1' })!.agents[0]!.entries[0]!.state).toBe('unknown');
     noteTurnStarted(state, AT + 4);
+    expect(activityLog(state)!.agents.map((agent) => [agent.id, agent.state])).toEqual([['main', undefined], ['a1', 'done']]);
+    noteTurnStarted(state, AT + 4 + DONE_SUBAGENT_KEEP_MS);
     expect(activityLog(state)!.agents.map((agent) => agent.id)).toEqual(['main']);
   });
 
