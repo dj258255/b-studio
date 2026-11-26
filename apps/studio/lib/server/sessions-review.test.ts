@@ -22,6 +22,9 @@ const fake = vi.hoisted(() => ({
   execExitCode: 0,
   execCalls: [] as string[][],
   modelQueue: [] as ModelClient[],
+  /** AI 리뷰의 고침 요청을 받은 터미널의 CLI가 할 일(파일 쓰기·"끝났다" 말하기). 요청을 받으면 이 걸음을 훅으로 한다 */
+  fixSteps: [] as TerminalStep[],
+  fixRequests: [] as string[],
   createPullRequest: vi.fn(async () => ({ url: 'https://github.com/acme/verifyproj/pull/1', number: 1, created: true })),
   postComment: vi.fn(async (): Promise<{ url?: string }> => ({ url: 'https://github.com/acme/verifyproj/pull/1#issuecomment-1' })),
 }));
@@ -109,8 +112,21 @@ vi.mock('./model-registry', async (importOriginal) => {
   };
 });
 
+// 고침 요청은 세션 터미널에서 돌리는 경로로 보낸다(채팅 경로 없이). 터미널을 여는 쪽(terminal-lane)만 훅 호출로 바꾸고 나머지는 실제 코드다
+vi.mock('./session-terminal', async () => ({ ...(await import('./test-support/session-terminal-stub')).sessionTerminalStub(), reviewFixRunner: () => 'terminal' }));
+vi.mock('./terminal-lane', () => ({
+  terminalLaneDriver: {},
+  runTerminalTask: async () => {
+    throw new Error('이 시험은 runTerminalTask를 쓰지 않습니다');
+  },
+  runReviewFixOnTerminal: async (id: string, request: string, options: { latestCheckpoint: () => { sha: string; shortSha: string } | undefined }) => {
+    fake.fixRequests.push(request);
+    return (await import('./test-support/terminal-run')).reviewFixViaTerminalHooks(id, request, fake.fixSteps, options);
+  },
+}));
+
 import { createSession, exportSession, getSnapshot, resolveReviewFinding, runReviewRound, stopSession } from './sessions';
-import { completeTerminalRun } from './test-support/terminal-run';
+import { completeTerminalRun, type TerminalStep } from './test-support/terminal-run';
 
 let root: string;
 const saved = {
@@ -152,6 +168,8 @@ beforeEach(async () => {
   fake.execCalls = [];
   fake.execExitCode = 0;
   fake.modelQueue = [];
+  fake.fixSteps = [];
+  fake.fixRequests = [];
   fake.createPullRequest.mockClear();
   fake.postComment.mockClear();
   fake.postComment.mockImplementation(async () => ({ url: 'https://github.com/acme/verifyproj/pull/1#issuecomment-1' }));
@@ -256,11 +274,9 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
   it('차단 지적이 있으면 고침을 요청해 검증을 통과시키고, 다음 라운드에서 통과로 끝난다', async () => {
     const id = await setupSessionWithPullRequest();
     // 리뷰어를 부르는 방법(ask)은 runReviewRound가 한 번만 만들어 라운드마다 다시 쓴다 — 그래서 리뷰어 응답은
-    // 라운드 수만큼(1·2라운드 두 번) 한 client에 순서대로 담는다. 고침 요청은 sendMessage의 보통 경로라 따로 client를 쓴다
-    fake.modelQueue.push(
-      new ScriptedModelClient([{ text: blockerFinding() }, { text: noFindings() }]),
-      new ScriptedModelClient([{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; String note; }\n' } }] }, { text: '고쳤습니다.' }]),
-    );
+    // 라운드 수만큼(1·2라운드 두 번) 한 client에 순서대로 담는다. 고침 요청은 세션 터미널의 CLI가 하므로 모델 대신 걸음(fixSteps)을 훅으로 한다
+    fake.modelQueue.push(new ScriptedModelClient([{ text: blockerFinding() }, { text: noFindings() }]));
+    fake.fixSteps = [{ write: { 'api/src/Order.java': 'class Order { String memo; String note; }\n' } }, { stop: '고쳤습니다.' }];
 
     await runReviewRound(id);
     await waitForEvent(id, () => getSnapshot(id)?.review !== undefined && getSnapshot(id)!.review!.state !== 'running', 45_000);
@@ -271,6 +287,8 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     expect(review.rounds[0]!.fixCheckpoint).toBeDefined();
     // 고침이 검증을 통과해 새 체크포인트로 남았다 — 요청 글의 공통 문구가 아니라 지적 제목("문제")으로 커밋 제목을 만든다(과제 66)
     expect(getSnapshot(id)!.checkpoints[0]!.message).toBe('fix: 리뷰 지적 1건 반영 — 문제');
+    // 고침은 터미널 경로로 한 번 요청됐다(채팅 경로였다면 모델 큐에서 꺼내려다 던졌을 것이다)
+    expect(fake.fixRequests).toHaveLength(1);
 
     await stopSession(id).catch(() => {});
   }, 50_000);
@@ -288,16 +306,16 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     expect(review.rounds[0]!.status).toBe('blocked_capped');
     // 상한이라 고침을 요청하지 않는다 — 고침을 시도했다면 준비해 둔 모델 응답이 없어 clientForModel이 던지고 라운드가 error로 끝났을 것이다
     expect(fake.modelQueue).toHaveLength(0);
+    // 대조: 고침이 요청될 수 있었다면(위 두 시험처럼) 터미널에 요청이 갔을 것이다
+    expect(fake.fixRequests).toHaveLength(0);
 
     await stopSession(id).catch(() => {});
   }, 20_000);
 
   it('고침 요청이 검증 게이트를 통과하지 못하면 멈추고(stopped) 사람에게 넘긴다', async () => {
     const id = await setupSessionWithPullRequest();
-    fake.modelQueue.push(
-      new ScriptedModelClient([{ text: blockerFinding() }]),
-      new ScriptedModelClient([{ toolCalls: [{ name: 'write_file', input: { path: 'api/src/Order.java', content: 'class Order { String memo; String broken; }\n' } }] }, { text: '고쳤습니다.' }]),
-    );
+    fake.modelQueue.push(new ScriptedModelClient([{ text: blockerFinding() }]));
+    fake.fixSteps = [{ write: { 'api/src/Order.java': 'class Order { String memo; String broken; }\n' } }, ...Array.from({ length: 6 }, () => ({ stop: '고쳤습니다.' }))];
     fake.execExitCode = 1; // 이 라운드의 고침 요청부터 테스트 단계가 실패하게 한다
 
     await runReviewRound(id);
@@ -306,6 +324,7 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     const review = getSnapshot(id)!.review!;
     expect(review.rounds.map((round) => round.status)).toEqual(['fix_failed']);
     expect(review.rounds[0]!.error).toBeTruthy();
+    expect(fake.fixRequests).toHaveLength(1);
 
     await stopSession(id).catch(() => {});
   }, 20_000);

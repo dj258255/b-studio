@@ -1,7 +1,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { expect } from 'vitest';
-import { getSnapshot, openTerminalRunId, sessionTerminalTarget, terminalGatewayHandlersForTest } from '../sessions';
+import { getSnapshot, openTerminalRunId, sessionTerminalTarget, subscribe, terminalGatewayHandlersForTest } from '../sessions';
 
 /**
  * 채팅 경로(`sendMessage`)를 쓰지 않고 체크포인트·실행 결과를 만드는 시험 도우미(이슈 #1392).
@@ -88,4 +88,37 @@ export async function driveTerminalSteps(id: string, prompt: string, steps: Term
     if (!answer.feedback) break;
   }
   return { run, answers };
+}
+
+/**
+ * AI 리뷰의 고침 요청(`runReviewFixOnTerminal`)이 하는 일을 훅으로 한다: 요청을 CLI에 보내고(prompt) 걸음을 하고, 그 실행이 닫히기를 기다려
+ * 끝난 상태가 done이 아니면 실패로, done이면 가장 최근 체크포인트와 함께 성공으로 돌려준다. 진짜 터미널을 여는 쪽(`terminal-lane.ts`)은 `terminal-lane.test.ts`가 따로 본다.
+ * 시험 파일은 `./terminal-lane`을 이 함수를 부르는 가짜로 바꾸고, `./session-terminal`의 `reviewFixRunner`가 'terminal'을 돌려주게 해야 한다
+ */
+export async function reviewFixViaTerminalHooks(
+  id: string,
+  request: string,
+  steps: TerminalStep[],
+  options: { latestCheckpoint: () => { sha: string; shortSha: string } | undefined },
+): Promise<{ ok: true; checkpoint?: { sha: string; shortSha: string } } | { ok: false; error: string }> {
+  const finishedEvents: Array<{ status: string; summary: string }> = [];
+  const unsubscribe = subscribe(id, (event) => {
+    if (event.type === 'run_finished') finishedEvents.push({ status: event.status, summary: event.summary });
+  });
+  try {
+    // 구독은 지난 기록을 다시 보내므로 지금까지 온 것의 수를 기준으로 삼는다
+    const before = finishedEvents.length;
+    await driveTerminalSteps(id, request, steps);
+    const started = Date.now();
+    while (finishedEvents.length === before) {
+      if (Date.now() - started > 10_000) return { ok: false, error: '고침 실행이 닫히지 않았습니다' };
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    const finished = finishedEvents[finishedEvents.length - 1]!;
+    if (finished.status !== 'done') return { ok: false, error: finished.summary };
+    const checkpoint = options.latestCheckpoint();
+    return { ok: true, checkpoint: checkpoint ? { sha: checkpoint.sha, shortSha: checkpoint.shortSha } : undefined };
+  } finally {
+    unsubscribe();
+  }
 }
