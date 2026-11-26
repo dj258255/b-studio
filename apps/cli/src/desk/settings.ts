@@ -6,7 +6,7 @@
  * 계정과 규칙은 스튜디오가 검사한다(이름 길이, 설정 폴더가 홈 아래인지, 규칙 꼴). 여기서는 빈 이름처럼 보내 볼 필요가 없는 것만 거른다
  */
 import { parsePrefix, type DeskConfig, type DeskPrefix } from './config';
-import { fit, fitAnsi, osc8, stringWidth } from './screen';
+import { fit, fitAnsi, osc8, stringWidth, tailFit } from './screen';
 import { backendLabel } from './sidebar';
 import { spriteLines, type Sprite } from './sprite';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
@@ -883,8 +883,7 @@ function formPane(state: SettingsState, form: FormState, width: number, theme: T
     let value: string;
     if (field.kind === 'text') {
       // 길면 끝부분을 보인다(커서가 칸 밖으로 나가지 않게)
-      let shown = field.value;
-      while (shown && stringWidth(shown) > width - headWidth - 1) shown = [...shown].slice(1).join('');
+      const shown = tailFit(field.value, width - headWidth - 1);
       value = shown || (field.hint ? `${muted}${field.hint}${RESET}` : '');
       if (focused) cursor = { x: headWidth + stringWidth(shown), y: lines.length };
     } else if (field.kind === 'choice') {
