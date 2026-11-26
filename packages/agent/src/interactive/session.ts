@@ -4,6 +4,7 @@ import { createHookRunner, type HookRunner } from './hooks';
 import { InputParser } from './input';
 import { loadSettings, parseArgs, type InteractiveSettings } from './settings';
 import { computeCost, sendApiRequest, type Pricing } from './telemetry';
+import { sandboxStartupNotice, type BashSandboxOptions } from './bash-sandbox';
 import { createTools, type InteractiveTools } from './tools';
 
 type BetaMessage = Anthropic.Beta.BetaMessage;
@@ -29,12 +30,14 @@ export interface InteractiveSessionOptions {
   maxModelCalls?: number;
   /** Bash의 자식 환경에서 더 뺄 환경 변수 이름(모델 키의 이름). 기본 목록(ANTHROPIC_API_KEY 등)에 더한다 */
   scrubEnvNames?: readonly string[];
+  /** Bash 자식의 쓰기 샌드박스 설정(쓰지 못하게 할 관문 폴더 등) */
+  sandbox?: BashSandboxOptions;
 }
 
 export function defaultSystemPrompt(cwd: string): string {
   return [
     `당신은 터미널에서 코드를 고치는 에이전트입니다. 작업 폴더는 ${cwd} 입니다.`,
-    '파일 도구(Read, Write, Edit, Glob, Grep)는 작업 폴더 안에서만 동작합니다. 밖의 경로나 링크로 나가는 경로는 거절됩니다. Bash는 작업 폴더에서 셸 명령을 실행하며 사용자의 권한으로 돕니다. 필요한 명령만 쓰고 작업 폴더 밖은 건드리지 마세요.',
+    '파일 도구(Read, Write, Edit, Glob, Grep)는 작업 폴더 안에서만 동작합니다. 밖의 경로나 링크로 나가는 경로는 거절됩니다. Bash는 작업 폴더에서 셸 명령을 실행합니다. 쓰기는 작업 폴더와 임시 폴더, 패키지 관리자 캐시에만 할 수 있고 그 밖에 쓰면 거절됩니다(읽기는 어디든 됩니다). 필요한 명령만 쓰세요.',
     '요청한 일을 끝내면 한 일을 짧게 알리고 도구 호출 없이 답하세요.',
   ].join('\n');
 }
@@ -61,13 +64,16 @@ export async function runInteractiveSession(options: InteractiveSessionOptions):
   const parsed = parseArgs(options.args);
   const settings: InteractiveSettings = loadSettings(parsed.settingsFile);
   const hooks: HookRunner = createHookRunner({ settings, cwd, sessionId: 'conversation-1', env: options.env });
-  const tools: InteractiveTools = createTools(cwd, { scrubEnvNames: options.scrubEnvNames });
+  const tools: InteractiveTools = createTools(cwd, { scrubEnvNames: options.scrubEnvNames, sandbox: options.sandbox });
   const system = options.system ?? defaultSystemPrompt(cwd);
   const maxCalls = options.maxModelCalls ?? MAX_MODEL_CALLS_PER_REQUEST;
   const messages: BetaMessageParam[] = [];
   let toolCount = 0;
   const print = (text: string) => void stdout.write(`${text}\n`);
   const aborted = () => options.signal?.aborted === true;
+  // 명령의 쓰기를 가둘 수 없는 환경이면 시작할 때 화면에 알린다(명령 결과에도 같은 알림이 붙는다)
+  const sandboxNotice = sandboxStartupNotice(cwd, options.sandbox);
+  if (sandboxNotice) print(printable(`알림: ${sandboxNotice}`));
 
   async function handleRequest(prompt: string): Promise<void> {
     const submit = await hooks.call('UserPromptSubmit', { prompt });

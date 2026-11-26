@@ -737,3 +737,4 @@ export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, runClaudeGatewayAgent, termina
 export { serialQueue } from './claude-code-runner';
 export { parseArgs as parseInteractiveArgs } from './interactive/settings';
 export { runInteractiveSession, defaultSystemPrompt, MAX_MODEL_CALLS_PER_REQUEST, type InteractiveSessionOptions } from './interactive/session';
+export { planSandbox, buildSeatbeltProfile, type BashSandboxOptions } from './interactive/bash-sandbox';
