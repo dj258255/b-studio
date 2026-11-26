@@ -352,6 +352,34 @@ describe('applyServerChanges: 서버가 쓴 레인 결과를 터미널 턴 끝�
     expect(await apply(session)).toMatchObject({ status: 'done' });
   }, 60_000);
 
+  describe('레인의 완료 검사(doneTests)를 합친 결과에서 다시 돈다(#1426)', () => {
+    const done = [{ name: 'done-card-1', service: 'api', command: ['sh', '-c', 'verify-done'] }];
+    const doneRuns = () => fake.execCalls.filter((command) => command[2] === 'verify-done').length;
+
+    it('완료 검사가 통과하면 통합도 통과하고 검사는 한 번 돈다(대조)', async () => {
+      const session = await open();
+      expect(await apply(session, { doneTests: done })).toMatchObject({ status: 'done' });
+      expect(doneRuns()).toBe(1);
+    }, 30_000);
+
+    it('게이트의 다른 검사는 통과해도 완료 검사 하나가 실패하면 실패로 닫고 쓴 파일을 되돌린다', async () => {
+      const session = await open();
+      const before = getSnapshot(session.id)!.checkpoints.length;
+      fake.failCommands = ['verify-done'];
+      const result = await apply(session, { doneTests: done });
+      expect(result.status).toBe('failed');
+      expect(result.checkpoint).toBeUndefined();
+      expect(doneRuns()).toBe(1);
+      expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
+      expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+      // 같은 변경이라도 완료 검사를 넘기지 않으면 지금까지처럼 통과한다(검사 없음은 달라지지 않는다)
+      expect(await apply(session)).toMatchObject({ status: 'done' });
+      // 맥락이 풀려 다음 호출이 "이미 쓰기 범위가 걸린 세션"으로 거절되지 않는다
+      fake.failCommands = [];
+      expect(await apply(session, { doneTests: done, writes: [{ path: 'api/src/Order.java', content: 'class Order { int n; }\n' }] })).toMatchObject({ status: 'done' });
+    }, 60_000);
+  });
+
   it('게이트가 정체 감시 시간보다 오래 돌아도 "터미널이 움직이지 않는다"는 경고를 내지 않는다(서버가 쓰는 실행에는 CLI가 없다)', async () => {
     const saved = process.env.B_STUDIO_TERMINAL_STALL_SECONDS;
     process.env.B_STUDIO_TERMINAL_STALL_SECONDS = '1';

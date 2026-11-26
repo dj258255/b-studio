@@ -9069,6 +9069,8 @@ export async function applyServerChanges(
     deletes: readonly string[];
     /** 허용 목록. 빈 목록이면 어디에도 쓰지 못한다 */
     writableScope: readonly string[];
+    /** 합친 결과에서 다시 돌릴 완료 검사(레인 카드의 doneCommand). 게이트의 test 단계에 더해지고 하나라도 실패하면 실패로 닫는다. 없으면 빈 목록 */
+    doneTests?: readonly TaskCardDone[];
   },
 ): Promise<ServerChangesResult> {
   const session = requireSession(id);
@@ -9108,7 +9110,7 @@ export async function applyServerChanges(
     };
     try {
       // 쓰기 범위(허용 목록)를 건다. 턴 끝의 카드 범위 검사(`need_card_scope`)가 도구 밖 변경도 이 범위로 본다. 끝나면 아래 finally가 푼다
-      setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: [] });
+      setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: input.doneTests ?? [] });
       await opening.terminal.serial(async () => {
         const problem = await writeServerChanges(session, opening, input);
         if (problem !== undefined) {
