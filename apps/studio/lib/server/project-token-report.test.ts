@@ -305,6 +305,7 @@ describe('buildProjectTokenReport', () => {
 | 출력 | 110 |
 | 환산 비용 | $0.0178 (모델별 단가) |
 | 요청 수 | 1 |
+| 한 번에 끝난 요청 | 1/1 (많아야 이만큼, 기록에 남은 사실만 센 값) |
 | 모델 호출 수 | 2 |
 | 캐시 적중률 | 90.6% |
 
@@ -390,5 +391,31 @@ describe('runTimestamps', () => {
     ]);
 
     expect(times.get('a')).toBe('2026-09-01T09:59:58.000Z');
+  });
+});
+
+describe('프로젝트 보고서의 한 번에 끝난 요청 집계(#1428)', () => {
+  it('세션마다 센 집계를 합친다: 완료한 두 요청은 한 번에, 실패한 요청은 아니다. 진행 중인 요청은 세지 않는다', () => {
+    const report = build();
+    expect(report.requestOutcomes).toMatchObject({ total: 3, oneShot: 2, redone: 0 });
+  });
+
+  it('기간을 주면 기간 안의 요청만 센다. 시각이 없는 요청은 기간 필터가 뺀다', () => {
+    const report = build({ range: { from: '2026-09-02', to: '2026-09-02' } });
+    expect(report.requestOutcomes).toMatchObject({ total: 1, oneShot: 1 });
+  });
+
+  it('앞 요청이 실패로 끝났으면 그 뒤 요청은 다시 시킨 것이고, 같은 세션 안에서만 이어서 본다', () => {
+    const run = (runId: string, status: 'done' | 'failed'): StudioEvent[] => [
+      { type: 'run_started', runId, request: `요청 ${runId}`, at: '2026-09-02T09:00:00.000Z' },
+      { type: 'run_finished', runId, status, summary: status === 'done' ? '끝' : '못 끝냄' },
+    ];
+    const report = build({
+      sessions: [
+        { sessionId: 'a', kind: 'normal', events: [...run('a1', 'failed'), ...run('a2', 'done')] },
+        { sessionId: 'b', kind: 'normal', events: run('b1', 'done') },
+      ],
+    });
+    expect(report.requestOutcomes).toMatchObject({ total: 3, oneShot: 1, redone: 1 });
   });
 });
