@@ -6795,7 +6795,13 @@ pub fn terminal_classify_prompt(text: String) -> TerminalPromptClassJs {
 /// 읽기 도구인가(Claude Code와 Codex의 표를 함께 본다). 열린 것은 정확히 일치하는 이름뿐이다
 #[napi]
 pub fn terminal_is_read_tool(name: String) -> bool {
-    session_terminal::classify::is_read_tool(&name)
+    session_terminal::classify::is_read_tool(session_terminal::watch::CliKind::Claude, &name)
+}
+
+/// 갈래별 읽기 도구인가. 모르는 갈래 이름은 거짓이다(여는 쪽이라 좁게)
+#[napi]
+pub fn terminal_is_read_tool_for(kind: String, name: String) -> bool {
+    session_terminal::watch::CliKind::parse(&kind).is_some_and(|kind| session_terminal::classify::is_read_tool(kind, &name))
 }
 
 /// 읽기만이 앞선 변경이 있는 실행에 이어 켜질 때 턴 끝에 표시하는가. `changed_before`: 0 없음·1 있음·그 밖(읽지 못함)은 있는 것으로 본다
@@ -7628,6 +7634,31 @@ pub fn terminal_hooked_argv(argv: Vec<String>, settings_path: String, mcp_path: 
 #[napi]
 pub fn terminal_process_argv(pid: i64) -> Result<Option<Vec<String>>> {
     bstudio_io::process_argv::process_argv(pid).map_err(|error| Error::from_reason(format!("프로세스 {pid}의 argv를 읽지 못했습니다: {error}")))
+}
+
+#[napi(object)]
+pub struct TerminalEnvEntryJs {
+    pub name: String,
+    pub value: String,
+}
+
+/// 프로세스의 환경(뜰 때의 `NAME=값`). **같은 계정의 프로세스만** 읽는다. 이미 끝났으면 null, 읽지 못하면(권한·root·지원하지 않는 OS·모양이 틀림·가려져 비어 보임) 던진다 —
+/// 부른 쪽은 빈 환경이 아니라 "모른다"로 읽는다(붙지 않은 것으로 다룬다)
+#[napi]
+pub fn terminal_process_env(pid: i64) -> Result<Option<Vec<TerminalEnvEntryJs>>> {
+    bstudio_io::process_argv::process_env(pid)
+        .map(|env| env.map(|pairs| pairs.into_iter().map(|(name, value)| TerminalEnvEntryJs { name, value }).collect()))
+        .map_err(|error| Error::from_reason(format!("프로세스 {pid}의 환경을 읽지 못했습니다: {error}")))
+}
+
+/// 새 갈래(commandcode·opencode·gemini)가 우리 설정으로 떴는가(여는 쪽이라 좁게). `env`가 null이면(읽지 못함) 환경이 필요한 갈래는 붙지 않은 것이다.
+/// 모르는 갈래 이름·claude·codex는 거짓이다
+#[napi]
+pub fn terminal_hooked_launch(kind: String, argv: Vec<String>, env: Option<Vec<TerminalEnvEntryJs>>, expected: String) -> bool {
+    use session_terminal::watch::{hooked_launch, CliKind};
+    let Some(kind) = CliKind::parse(&kind) else { return false };
+    let env: Option<Vec<(String, String)>> = env.map(|entries| entries.into_iter().map(|entry| (entry.name, entry.value)).collect());
+    hooked_launch(kind, &argv, env.as_deref(), &expected)
 }
 
 /// 훅 요청 본문 종류: `empty`·`object`·`not_object`·`invalid`

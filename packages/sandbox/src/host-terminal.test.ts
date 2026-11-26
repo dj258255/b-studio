@@ -17,6 +17,8 @@ import {
   firstPromptArg,
   findHostCli,
   findUnhookedCli,
+  hookedLaunch,
+  processEnv,
   hostBashRc,
   hostCliWrapper,
   hostGatewaySettings,
@@ -1301,5 +1303,24 @@ describe('사용자의 상태 줄을 이어 부른다(#920)', () => {
     expect(JSON.parse(await readFile(path.join(dir, STATUSLINE_FILE), 'utf8'))).toEqual({ command: 'my-line' });
     await removeHostGatewayConfig('studio-orders-line', root);
     expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe('프로세스 환경 읽기와 새 갈래의 훅 판정(네이티브 껍데기)', () => {
+  it('processEnv: 자기 자신의 환경에서 뜰 때의 변수를 읽고, 끝난 프로세스는 null이다', () => {
+    const env = processEnv(process.pid);
+    expect(env).not.toBeNull();
+    expect(env!.some((entry) => entry.name === 'PATH' && entry.value === (process.env.PATH ?? ''))).toBe(true);
+  });
+
+  it('hookedLaunch: 환경을 읽지 못했거나(null) 경로가 다르면 붙지 않은 것이다', () => {
+    const config = '/g/studio-a/opencode.json';
+    expect(hookedLaunch('opencode', ['opencode'], [{ name: 'OPENCODE_CONFIG', value: config }], config)).toBe(true);
+    expect(hookedLaunch('opencode', ['opencode'], null, config)).toBe(false);
+    expect(hookedLaunch('opencode', ['opencode'], [{ name: 'OPENCODE_CONFIG', value: `${config}/` }], config)).toBe(false);
+    expect(hookedLaunch('opencode', ['opencode', '--pure'], [{ name: 'OPENCODE_CONFIG', value: config }], config)).toBe(false);
+    expect(hookedLaunch('commandcode', ['commandcode', '--mod', '/g/m.ts'], null, '/g/m.ts')).toBe(true);
+    expect(hookedLaunch('claude', ['claude', '--mod', '/g/m.ts'], null, '/g/m.ts')).toBe(false);
+    expect(hookedLaunch('unknown', ['x'], [], '/g/m.ts')).toBe(false);
   });
 });

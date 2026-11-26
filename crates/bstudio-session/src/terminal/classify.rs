@@ -15,6 +15,7 @@
 //!
 //! 고정한 칸(셋이 같게 읽고, 그래서 읽기만이 **아닌** 것으로 둔다. 시험이 목록으로 고정한다): 전각 대괄호(`［읽기만］`)·표시 안의 공백·영문 표시·대소문자 변형·`/` 앞의 보이지 않는 글자.
 
+use super::watch::CliKind;
 use unicode_normalization::UnicodeNormalization;
 
 /// 읽기만 요청의 표시. 요청 글이 이것으로 시작하면 그 실행에서는 파일을 바꾸거나 명령을 돌리는 도구를 모두 거절한다(이슈 #689)
@@ -187,9 +188,26 @@ pub const CODEX_READ_TOOLS: [&str; 11] = [
     "read_mcp_resource",
 ];
 
-/// 읽기 도구인가: 두 표의 이름과 정확히 일치할 때만이다(대소문자·빈칸·접두사는 다른 도구다). 열린 것은 이 칸뿐이다. 모르는 이름은 바꾸는 도구로 본다
-pub fn is_read_tool(name: &str) -> bool {
-    AGENT_READ_TOOLS.contains(&name) || CODEX_READ_TOOLS.contains(&name)
+/// Command Code의 읽기 도구. **도구 이름은 이 CLI의 문서·소스로 확인하지 못한 추정이다**(실험, 아직 닿지 않는다). 틀리거나 빠져도 닫는 쪽이다: 표에 없는 이름은 바꾸는 도구라 쓰기 직전 훅을 한 번 더 거칠 뿐이다.
+/// 서브에이전트 도구(`agent`)는 일부러 뺐다(쓰기 도구)
+pub const COMMAND_CODE_READ_TOOLS: [&str; 9] = ["read_file", "read_multiple_files", "grep", "glob", "list_dir", "web_search", "web_fetch", "todo_write", "ask_user_question"];
+
+/// OpenCode의 읽기 도구(이름은 소문자). 서브에이전트 도구(`task`)·`skill`·`bash`·`edit`·`write`·`patch`·`apply_patch`는 쓰기 도구다
+pub const OPENCODE_READ_TOOLS: [&str; 10] = ["read", "list", "glob", "grep", "webfetch", "websearch", "codesearch", "todoread", "todowrite", "question"];
+
+/// Gemini CLI의 읽기 도구. `save_memory`·`replace`·`write_file`·`run_shell_command`와 서브에이전트 도구는 쓰기 도구다
+pub const GEMINI_READ_TOOLS: [&str; 9] = ["read_file", "read_many_files", "list_directory", "glob", "grep_search", "search_file_content", "google_web_search", "web_fetch", "write_todos"];
+
+/// 읽기 도구인가: **그 CLI의 표**에 있는 이름과 정확히 일치할 때만이다(대소문자·빈칸·접두사는 다른 도구다). 열린 것은 이 칸뿐이다. 모르는 이름은 바꾸는 도구로 본다.
+/// claude와 codex는 옛 판정대로 두 표를 함께 본다(결과가 바뀌지 않게 한다). 새 갈래는 **자기 표만** 본다: 다른 CLI에서 읽기 도구인 이름이 이 CLI에서 같은 뜻이라는 보장이 없다
+/// (예: `glob`은 셋 모두 읽기지만 `Task`·`Agent`는 claude에서만 읽기이고 `task`는 OpenCode의 서브에이전트다)
+pub fn is_read_tool(kind: CliKind, name: &str) -> bool {
+    match kind {
+        CliKind::Claude | CliKind::Codex => AGENT_READ_TOOLS.contains(&name) || CODEX_READ_TOOLS.contains(&name),
+        CliKind::CommandCode => COMMAND_CODE_READ_TOOLS.contains(&name),
+        CliKind::OpenCode => OPENCODE_READ_TOOLS.contains(&name),
+        CliKind::Gemini => GEMINI_READ_TOOLS.contains(&name),
+    }
 }
 
 /// 읽기만이 앞선 변경이 있는 실행에 이어 켜질 때 턴 끝이 읽기만 지름길을 타지 않게 표시하는가(S6, ADR-212).

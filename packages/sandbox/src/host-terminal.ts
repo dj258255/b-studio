@@ -506,6 +506,19 @@ export function processArgv(pid: number): string[] | null {
 }
 
 /**
+ * 프로세스의 환경(뜰 때의 `NAME=값`, 같은 계정의 프로세스만). 끝났으면 null, 읽지 못하면 던진다. 가려져 비어 보이는 것(macOS의 SIP 프로그램)도 던진다 —
+ * 빈 환경으로 돌려주지 않는다. 부른 쪽은 던진 것을 "모른다"(붙지 않은 것)로 읽는다
+ */
+export function processEnv(pid: number): Array<{ name: string; value: string }> | null {
+  return native.terminalProcessEnv(pid);
+}
+
+/** 새 갈래(commandcode·opencode·gemini)가 우리 설정으로 떴는가(여는 쪽이라 좁게). `env`가 null이면(읽지 못함) 환경이 필요한 갈래는 붙지 않은 것이다 */
+export function hookedLaunch(kind: string, argv: string[], env: Array<{ name: string; value: string }> | null, expected: string): boolean {
+  return native.terminalHookedLaunch(kind, argv, env, expected);
+}
+
+/**
  * 감시가 쓰는 판정(ADR-219 후속): claude는 ps 한 줄이 아니라 **진짜 argv**로 훅이 붙었는지 본다. `ps`의 인자 한 줄은 낱말마다 따옴표를 잃어
  * 첫 요청 글(실행 인자로 실린다)에 든 `--settings`가 진짜 옵션과 구별되지 않았다. 후보(ps 한 줄로 CLI로 보이는 것, 넓게)마다 argv를 읽어
  * 감싸개가 붙이는 정확한 자리(`--mcp-config <M> --settings <S>`, `--settings`는 하나뿐)인지 본다(여는 쪽이라 좁게). argv가 없으면(그 사이 끝났다) 건너뛰고, 읽지 못하면 던진다 — 부른 쪽은 이것을 프로세스 검사의 실패(믿을 수 없음)로 읽는다.
