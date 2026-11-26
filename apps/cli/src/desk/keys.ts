@@ -25,6 +25,8 @@
  * 그 화면이 받고(folder.ts), 앞글쇠 다음 다른 화면 키는 폴더 열기를 닫고 그 일을 한다
  * 에이전트 나무 목록(앞글쇠 다음 m, 카드 화면에서는 m만)은 빠른 전환처럼 본문 자리에 열린다. 앞글쇠가 아닌 키는 그 화면이 받고(agent-tree.ts, ↑↓ 고르기, Enter 칸에 열기,
  * Tab 스페이스/전체, Esc·m 닫기), 앞글쇠 다음 다른 화면 키는 목록을 닫고 그 일을 한다
+ * 사이드바는 세션 줄 아래에 서브에이전트를 한 줄씩 편다(#1411): 작업 중인 것이 있는 세션은 자동으로, 앞글쇠 다음 →로 모두(←로 접기). ↑↓가 그 줄도 지나고 Enter는 그 서브에이전트의 활동 기록이다.
+ * 에이전트 안 화면의 p는 활동 기록을 칸 하나에 고정한다(pinned.ts). 그 칸에는 키와 붙여넣기를 터미널로 보내지 않는다
  * 지금 변경 화면(#924, 앞글쇠 다음 d, 스페이스 화면에서는 d만)도 같은 덮는 화면이다. 앞글쇠가 아닌 키(c 의견, x 해결, S 묶어 넣기 …)와 붙여넣기는
  * 그 화면이 받고(changes.ts), 앞글쇠 다음 다른 화면 키는 지금 변경을 닫고 그 일을 한다. 앞글쇠 다음 d는 닫는다
  */
@@ -34,6 +36,7 @@ import { changesKey, changesPaste, type ChangesEffect, type ChangesState } from 
 import { fleetsKey, fleetsPaste, openFleets, type FleetsEffect, type FleetsState } from './fleets';
 import { folderKey, folderPaste, openFolder, type FolderEffect, type FolderState } from './folder';
 import { insideKey, openInside, type InsideState } from './inside';
+import { isPinId, openPin, pinId, pinKey, type PinState } from './pinned';
 import type { KittyImages } from './kitty';
 import { openPlans, plansKey, plansPaste, type PlansEffect, type PlansState } from './plans';
 import { openRecords, recordsKey, type RecordsLoad, type RecordsState } from './records';
@@ -42,7 +45,7 @@ import type { PaneLayout } from './screen';
 import { openRuntime, runtimeKey, runtimePaste, type RuntimeEffect, type RuntimeState } from './runtime';
 import { requirementsKey, requirementsPaste, type RequirementsEffect, type RequirementsState } from './requirements';
 import { openSettings, settingsKey, settingsPaste, type SettingsEffect, type SettingsState } from './settings';
-import { byUrgency, deskSessions, deskSpaces, urgencyRank } from './sidebar';
+import { byUrgency, deskSessions, deskSpaces, sideAgents, sideTargets, urgencyRank, type SideFold } from './sidebar';
 import { openSwitcher, switcherKey, switcherPaste, type SwitcherState } from './switcher';
 import type { Sprite } from './sprite';
 import type { Theme } from './theme';
@@ -107,7 +110,7 @@ export function promptProjects<T extends { id: string; name: string; folder?: st
 export const SHELL_TAKEN = '이 칸에는 셸이 돌고 있습니다. 다른 칸을 고르거나 Ctrl-b x로 셸을 끝낸 뒤 엽니다';
 
 /** 사이드바를 고르는 중의 안내 */
-export const BROWSING = '사이드바 고르는 중: ↑↓로 옮기고 Enter로 칸에 엽니다. 다른 글쇠는 Ctrl-b 다음과 같습니다';
+export const BROWSING = '사이드바 고르는 중: ↑↓ 옮기기 · →← 서브에이전트 펴고 접기 · Enter 열기(서브에이전트 줄은 활동 기록) · 다른 글쇠는 Ctrl-b 다음과 같습니다';
 
 export interface PromptState {
   step: 'project' | 'request';
@@ -156,6 +159,13 @@ export interface DeskState {
   prefix: boolean;
   /** 앞글쇠 뒤 ↑↓로 사이드바를 고르는 중. 이때 다시 누른 Ctrl-b는 칸으로 보내지 않고 새 앞글쇠로 본다(#855) */
   browsing?: boolean;
+  /** 사이드바에서 →로 모두 편 세션과 ←로 접은 세션 id(#1411). 둘 다 아니면 작업 중인 서브에이전트가 있을 때만 자동으로 펴진다 */
+  sideOpen?: string[];
+  sideClosed?: string[];
+  /** 사이드바에서 고른 서브에이전트 줄(그 줄이 보이는 동안만 쓴다). 고른 세션 id와 DeskAgent.id */
+  sideAgent?: { session: string; agent: string };
+  /** 칸에 고정한 활동 기록(#1411). 칸 id(pin:…)마다. 칸에서 빠지면 지운다. 저장하지 않는다 */
+  pins?: Record<string, PinState>;
   prompt?: PromptState;
   message?: string;
   /** 붙여넣기 표지 사이에 있다. sent는 이 붙여넣기의 앞부분을 이미 칸에 보냈는가 */
@@ -482,7 +492,9 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       const key = nextKey(input, at);
       at += key.length;
       const result = insideKey(state, key);
-      state = { ...state, inside: result.state, ...(result.help ? { help: true } : {}) };
+      // 방금 한 일의 알림(칸에 고정했다 등)은 다음 키에 지운다
+      state = { ...state, inside: result.state ? { ...result.state, note: undefined } : undefined, ...(result.help ? { help: true } : {}) };
+      if (result.pin) state = pinActivity(state, result.state!.id, result.pin, effects);
       // 메인 카드에서 Enter: 카드 화면에서 Enter한 것과 같다(고른 칸에 그 세션의 터미널을 연다)
       if (result.terminal) {
         const index = deskSessions(state.items).findIndex((item) => item.id === result.state?.id);
@@ -553,6 +565,15 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       state = usageKey(state, key, effects);
       continue;
     }
+    if (isPinId(state.slots[state.focus]) && input[at] !== prefixOf(state)) {
+      // 활동 기록을 고정한 칸(#1411): 굴리는 키만 받고, 키는 터미널로 보내지 않는다. 앞글쇠 다음 키는 commandKey가 받는다
+      const key = nextKey(input, at);
+      at += key.length;
+      const id = state.slots[state.focus]!;
+      const pin = state.pins?.[id];
+      if (pin) state = { ...state, pins: { ...state.pins, [id]: pinKey(pin, key) } };
+      continue;
+    }
     const char = input[at]!;
     if (char === prefixOf(state)) {
       flush();
@@ -564,7 +585,16 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
     at += 1;
   }
   flush();
-  return { state, effects };
+  return { state: prunePins(state), effects };
+}
+
+/** 칸에서 빠진 활동 기록 칸의 상태를 지운다 */
+function prunePins(state: DeskState): DeskState {
+  const pins = state.pins;
+  if (!pins) return state;
+  const kept = Object.entries(pins).filter(([id]) => state.slots.includes(id));
+  if (kept.length === Object.keys(pins).length) return state;
+  return { ...state, pins: kept.length ? Object.fromEntries(kept) : undefined };
 }
 
 /** 기다리던 글(pending)을 더 기다리지 않고 처리한다: 혼자 온 Esc는 Esc다 */
@@ -630,6 +660,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   }
   const id = state.slots[state.focus];
   if (!id) return next;
+  // 활동 기록 칸에는 터미널이 없다(#1411)
+  if (isPinId(id)) return next;
   const part = pasting.sent ? (ended ? 'end' : 'middle') : ended ? undefined : 'start';
   if (content || part === 'end') effects.push({ type: 'paste', id, data: content, ...(part ? { part } : {}) });
   return next;
@@ -756,6 +788,7 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
     // 사이드바를 고르다가 습관대로 다시 누른 Ctrl-b는 새 앞글쇠다. 칸으로 보내면 다음 글자가 CLI 입력이 된다
     if (state.browsing) return { ...state, prefix: true, browsing: false, message: undefined };
     const id = state.slots[state.focus];
+    if (isPinId(id)) return { ...done, message: '활동 기록 칸에는 글쇠를 보내지 않습니다' };
     if (id) effects.push({ type: 'input', id, data: key });
     return done;
   }
@@ -848,14 +881,20 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
   if (key === '[') {
     const id = state.slots[state.focus];
     if (!id) return { ...done, message: '빈 칸에는 복사 모드가 없습니다' };
+    if (isPinId(id)) return { ...done, message: '활동 기록 칸에는 복사 모드가 없습니다(↑↓로 굴립니다)' };
     effects.push({ type: 'copy', id, action: 'enter' });
     return { ...done, copy: {} };
   }
-  if (key === UP || key === UP_APP) return { ...state, browsing: true, message: BROWSING, selected: Math.max(0, state.selected - 1) };
-  if (key === DOWN || key === DOWN_APP) return { ...state, browsing: true, message: BROWSING, selected: Math.max(0, Math.min(sessions.length - 1, state.selected + 1)) };
+  if (key === UP || key === UP_APP) return sideMove(state, -1);
+  if (key === DOWN || key === DOWN_APP) return sideMove(state, 1);
+  if (key === RIGHT || key === RIGHT_APP) return sideFold(state, true);
+  if (key === LEFT || key === LEFT_APP) return sideFold(state, false);
   if (key === '\r' || key === '\n') {
     const item = sessions[state.selected];
     if (!item) return done;
+    // 사이드바에서 서브에이전트 줄을 골랐으면 그 활동 기록으로 간다. 세션 줄의 Enter는 그대로 칸에 연다
+    const agent = sideAgentOf(state);
+    if (agent) return openInsideAt(done, item.id, agent, effects);
     const already = state.slots.findIndex((id, slot) => id === item.id && slot < state.layout);
     if (already >= 0) {
       effects.push({ type: 'reopen', id: item.id });
@@ -925,6 +964,80 @@ function nextWaiting(state: DeskState): string | undefined {
   const current = state.focus < state.layout ? state.slots[state.focus] : undefined;
   const at = candidates.findIndex((item) => item.id === current);
   return candidates[(at + 1) % candidates.length]!.id;
+}
+
+/** 사이드바가 펴고 접는 상태 */
+export function sideFoldOf(state: Pick<DeskState, 'sideOpen' | 'sideClosed'>): SideFold {
+  return { ...(state.sideOpen ? { open: state.sideOpen } : {}), ...(state.sideClosed ? { closed: state.sideClosed } : {}) };
+}
+
+/** 사이드바에서 고른 서브에이전트 줄의 id. 고른 세션 아래에 지금 그 줄이 보일 때만 있다 */
+export function sideAgentOf(state: Pick<DeskState, 'items' | 'selected' | 'sideAgent' | 'sideOpen' | 'sideClosed'>): string | undefined {
+  const picked = state.sideAgent;
+  const item = deskSessions(state.items)[state.selected];
+  if (!picked || !item || picked.session !== item.id) return undefined;
+  return sideAgents(item, sideFoldOf(state))?.agents.some((agent) => agent.id === picked.agent) ? picked.agent : undefined;
+}
+
+/** 사이드바 ↑↓(앞글쇠 다음): 세션 줄과 펴진 서브에이전트 줄을 차례로 지난다 */
+function sideMove(state: DeskState, by: -1 | 1): DeskState {
+  const sessions = deskSessions(state.items);
+  const targets = sideTargets(state.items, state.selected, sideFoldOf(state));
+  const agent = sideAgentOf(state);
+  const at = Math.max(0, targets.findIndex((target) => target.index === state.selected && target.agent === agent));
+  const to = targets[Math.max(0, Math.min(targets.length - 1, at + by))];
+  const base: DeskState = { ...state, browsing: true, message: BROWSING };
+  if (!to) return { ...base, selected: 0, sideAgent: undefined };
+  const session = sessions[to.index];
+  return { ...base, selected: to.index, sideAgent: to.agent && session ? { session: session.id, agent: to.agent } : undefined };
+}
+
+/** 사이드바 →(앞글쇠 다음): 세션의 서브에이전트를 모두 펴고, 이미 폈으면 첫 줄로 들어간다. ←: 서브에이전트 줄이면 세션 줄로, 세션 줄이면 접는다 */
+function sideFold(state: DeskState, right: boolean): DeskState {
+  const item = deskSessions(state.items)[state.selected];
+  const base: DeskState = { ...state, browsing: true, message: BROWSING };
+  if (!item) return base;
+  const fold = sideFoldOf(state);
+  const open = state.sideOpen ?? [];
+  const closed = state.sideClosed ?? [];
+  const without = (list: readonly string[]) => list.filter((id) => id !== item.id);
+  const shown = sideAgents(item, fold);
+  if (!right) {
+    if (sideAgentOf(state)) return { ...base, sideAgent: undefined };
+    if (!shown) return base;
+    return { ...base, sideOpen: without(open), sideClosed: [...without(closed), item.id] };
+  }
+  if (sideAgentOf(state)) return base;
+  if ((item.agents ?? []).every((agent) => agent.kind !== 'subagent')) return { ...base, message: '이 세션에는 서브에이전트가 없습니다' };
+  if (!open.includes(item.id) || !shown) return { ...base, sideOpen: [...without(open), item.id], sideClosed: without(closed) };
+  const first = shown.agents[0];
+  return first ? { ...base, sideAgent: { session: item.id, agent: first.id } } : base;
+}
+
+/**
+ * 활동 기록을 칸 하나에 고정한다(#1411). 빈 칸에 놓고, 빈 칸이 없으면 칸 수를 늘려 놓는다. 이미 고정했으면 그 칸을 알린다.
+ * 터미널이 든 칸은 덮어쓰지 않는다(빈 칸이 없으면 이유를 알리고 그만둔다). 고른 칸은 그대로다
+ */
+function pinActivity(start: DeskState, session: string, agent: string, effects: Effect[]): DeskState {
+  const id = pinId(session, agent);
+  const inside = start.inside;
+  const say = (text: string): Partial<DeskState> => (inside ? { inside: { ...inside, note: text } } : { message: text });
+  const existing = start.slots.findIndex((slot, at) => slot === id && at < start.layout);
+  if (existing >= 0) return { ...start, ...say(`이미 ${existing + 1}번 칸에 고정되어 있습니다`) };
+  let layout = start.layout;
+  const empty = (): number => start.slots.findIndex((slot, at) => slot === undefined && at < layout);
+  let target = empty();
+  if (target < 0 && layout < 4) {
+    layout = LAYOUTS[LAYOUTS.indexOf(layout) + 1]!;
+    target = empty();
+  }
+  if (target < 0) return { ...start, ...say('빈 칸이 없습니다. Ctrl-b x로 칸을 비운 뒤 다시 고정합니다') };
+  const slots = [...start.slots];
+  slots[target] = id;
+  effects.push({ type: 'layout' });
+  const data = inside?.id === session ? inside.data : undefined;
+  // 고정한 칸이 보이게 칸 화면으로 돌아가 둔다(에이전트 안 화면은 Esc로 닫는다)
+  return { ...start, layout, slots, zoom: false, view: undefined, usageBack: undefined, pins: { ...start.pins, [id]: openPin(session, agent, data) }, ...say(`활동 기록을 ${target + 1}번 칸에 고정했습니다. Esc로 닫으면 칸 화면입니다`) };
 }
 
 /** 세션 하나로 간다(#922): 칸 화면으로 돌아와 그 세션을 고르고, 이미 칸에 있으면 그 칸을, 아니면 고른 칸에 연다 */

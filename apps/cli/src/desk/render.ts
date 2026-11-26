@@ -6,7 +6,8 @@ import { clipWords, spaceScreen } from './cards';
 import { RECORDS_HINT, recordsLines } from './records';
 import { sessionDetailLines } from './session-detail';
 import { tightestLine, usageScreen } from './usage';
-import { isShellId, type DeskState } from './keys';
+import { isShellId, sideAgentOf, sideFoldOf, type DeskState } from './keys';
+import { isPinId, PIN_HINT } from './pinned';
 import { fitHint } from './hints';
 import { computeLayout, fit, fitAnsi, placePanes, stringWidth, tailFit, type Rect } from './screen';
 import { renderRuntime, runtimeHint } from './runtime';
@@ -81,13 +82,14 @@ export const COPY_HINT = ' 복사 모드 · ↑↓ 옮기기 · v 고르기 · y
 export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['1 2 3 4', '그 칸 고르기'],
   ['o', '다음 칸'],
-  ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter)'],
+  ['↑ ↓', '사이드바에서 세션 고르기(이어서 ↑↓, Enter). 펴진 서브에이전트 줄도 지나고, 그 줄에서 Enter는 서브에이전트의 활동 기록'],
+  ['→ ←', '사이드바에서 고른 세션의 서브에이전트 펴고 접기. 작업 중인 서브에이전트가 있는 세션은 자동으로 펴지고(끝난 것은 "끝남 N"), →로 끝난 것까지 모두 펴고, 서브에이전트 줄에서 ←는 세션 줄로. 세션당 넷까지 보이고 나머지는 "외 N개"'],
   ['Enter', '고른 세션을 고른 칸에 열기(끝난 터미널은 다시 열기)'],
   ['j', '다음 확인: 손댈 것(권한·질문·입력) > 오류 > 안 본 끝남 > 알림 차례로 그 세션 칸을 고르거나 고른 칸에 엶. 다시 누르면 다음 것'],
   ['Space', '빠른 전환: 모든 세션을 급한 순으로, 글자로 거르고 ↑↓ Enter로 칸에 엶. Esc나 Ctrl-b Space로 닫기'],
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 맨 위 확인 필요 줄은 숫자로 고르기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
   ['m', '에이전트 나무 목록: 세션마다 부모 줄, 그 세션이 띄운 서브에이전트마다 자식 줄(종류·맡긴 일·지금 도구·경과·"N분째 소식 없음"·끝난 결과). ↑↓ 고르기, Enter 부모 줄은 그 세션을 칸에 열기, 자식 줄은 그 서브에이전트의 활동 기록, Tab 스페이스/전체, Esc 닫기. 카드 화면에서는 m만'],
-  ['s', '에이전트 안(카드 화면에서는 s만, 앞글쇠 다음 s는 사이드바): 고른 세션의 메인 카드와 서브에이전트 카드에 코드 조각(고친 파일의 -/+ 줄, 실행한 명령과 결과 끝 줄, 읽은 대상). ←→ 고르기, Enter 메인 카드는 고른 칸에 터미널 열기, 서브에이전트 카드는 활동 기록(시각·도구·대상·상태·걸린 시간, diff 전체, 실행 결과). 활동 기록에서 ↑↓ PgUp PgDn 굴리기, g G 처음과 맨 아래(맨 아래에 있을 때만 새 항목을 따라감). Esc는 한 단계 위로'],
+  ['s', '에이전트 안(카드 화면에서는 s만, 앞글쇠 다음 s는 사이드바): 고른 세션의 메인 카드와 서브에이전트 카드에 코드 조각(고친 파일의 -/+ 줄, 실행한 명령과 결과 끝 줄, 읽은 대상). ←→ 고르기, Enter 메인 카드는 고른 칸에 터미널 열기, 서브에이전트 카드는 활동 기록(시각·도구·대상·상태·걸린 시간, diff 전체, 실행 결과). 활동 기록에서 ↑↓ PgUp PgDn 굴리기, g G 처음과 맨 아래(맨 아래에 있을 때만 새 항목을 따라감). Esc는 한 단계 위로. p는 고른 카드(활동 기록 화면에서는 보던 에이전트)의 활동 기록을 칸 하나에 고정: 빈 칸이 없으면 칸 수를 늘려 놓고, 그 칸에는 터미널 대신 활동 기록이 계속 갱신되며 보입니다(↑↓ PgUp PgDn g G 굴리기, 맨 아래에 있을 때만 새 항목을 따라감, Ctrl-b x로 비우기). 그 칸에는 키와 붙여넣기를 터미널로 보내지 않고, 끝난 서브에이전트는 마지막으로 받은 기록을 둡니다'],
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기). 프로젝트 고르기 끝 줄의 "+ 폴더 열기"로 내 폴더를 바로 등록, Ctrl-t로 이 요청의 확인 선언 변경 허용'],
   ['a', '폴더 열기: 내 폴더를 프로젝트로 등록(경로 쓰기, Tab 채우기, ↑↓ 하위 폴더, Enter 살펴보고 y로 등록). 스페이스 화면에서는 a만'],
@@ -215,9 +217,10 @@ export function sidebarView(state: DeskState, size: { cols: number; rows: number
   state.slots.forEach((id, slot) => {
     if (id && slot < state.layout) slotOf.set(id, slot + 1);
   });
-  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, rect.w, new Set(state.flagged ?? []), state.theme ?? DEFAULT_THEME, new Set(state.unseenDone ?? []));
+  const side = state.sidebarHidden ? [] : sidebarRows(state.items, state.selected, slotOf, rect.w, new Set(state.flagged ?? []), state.theme ?? DEFAULT_THEME, new Set(state.unseenDone ?? []), Date.now(), { fold: sideFoldOf(state), agent: sideAgentOf(state) });
   const space = deskSessions(state.items)[state.selected]?.projectName;
   const first = side.findIndex((row) => row.space !== undefined && row.space === space);
+  // 고른 세션의 줄과 그 아래 서브에이전트 줄들(같은 item 번호)이 끝까지 보이게
   const last = side.reduce((at, row, index) => (row.item === state.selected ? index : at), first);
   const offset = first < 0 ? 0 : Math.max(0, Math.min(first, side.length - rect.h, last + 1 - rect.h));
   return { rows: side, offset, rect };
@@ -461,7 +464,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
               : SPACE_EMPTY_HINT
             : state.view === 'usage'
               ? USAGE_HINT
-              : IDLE_HINT;
+              : isPinId(state.slots[state.focus])
+                ? PIN_HINT
+                : IDLE_HINT;
     lines.push(fitHint(relabel(state, hint), cols));
     const rect = placed.find((entry) => entry.slot === state.focus)?.rect;
     const view = panes[state.focus];

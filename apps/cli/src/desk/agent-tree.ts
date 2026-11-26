@@ -6,10 +6,11 @@
  * 범위는 고른 세션이 든 스페이스이고 Tab으로 전체 스페이스로 바꾼다. 키를 받아 다음 상태와 고른 세션을 돌려주는 순수 함수다(고른 세션을 칸에 여는 일은 keys.ts가 한다).
  * 이 화면은 보기만 한다: 서브에이전트를 멈추거나 조종하지 않는다
  */
-import { agentQuiet, agoText, clipWords, forText, nowLine, oneLine, spaceItems, spanText, subagentsOf, toolLineLabel } from './cards';
+import { agentLine } from './agent-line';
+import { agoText, clipWords, forText, nowLine, oneLine, spaceItems, subagentsOf } from './cards';
 import type { DeskState } from './keys';
 import { fitAnsi, stringWidth, stripAnsi, type Rect } from './screen';
-import { backendLabel, deskSessions, headStatus, subagentName } from './sidebar';
+import { backendLabel, deskSessions, headStatus } from './sidebar';
 import { BOLD, DEFAULT_THEME, fg, RESET, type Theme } from './theme';
 import type { DeskAgent, DeskItem } from './types';
 import { badge, statusColor, statusMark } from './widgets';
@@ -125,37 +126,8 @@ function parentLine(row: TreeRow, selected: boolean, width: number, theme: Theme
 }
 
 function childLine(row: TreeRow, selected: boolean, width: number, theme: Theme, now: number): string {
-  const agent = row.agent!;
   const cursor = selected ? `${fg(theme, 'accent')}›${RESET} ` : '  ';
-  const branch = `${fg(theme, 'border')}  ${row.last ? '└' : '├'} ${RESET}`;
-  const quiet = agentQuiet(agent, now);
-  const mark =
-    agent.state === 'done' ? `${fg(theme, 'teal')}✓${RESET}` : agent.state === 'working' ? `${fg(theme, quiet !== undefined ? 'yellow' : 'accent')}◐${RESET}` : `${fg(theme, 'muted')}○${RESET}`;
-  const right: Right | undefined =
-    quiet !== undefined
-      ? { text: `⚠ ${spanText(quiet)}째 소식 없음`, color: 'yellow' }
-      : agent.state === 'working' && agent.startedAt
-        ? { text: forText(agent.startedAt, now), color: 'accent' }
-        : agent.state === 'done' && agent.startedAt && agent.lastAt
-          ? { text: spanText(Math.max(0, Date.parse(agent.lastAt) - Date.parse(agent.startedAt))), color: 'muted' }
-          : agent.state === 'idle'
-            ? { text: '대기', color: 'muted' }
-            : undefined;
-  const rightWidth = right && stringWidth(right.text) > 0 ? stringWidth(right.text) + 1 : 0;
-  const prefixWidth = 2 + 4 + 2;
-  const room = Math.max(1, width - prefixWidth - rightWidth);
-  const doing = agent.state === 'working' ? (agent.tool ? toolLineLabel(agent.tool) : agent.activity) : undefined;
-  const result = agent.state === 'done' && agent.result ? oneLine(agent.result) : undefined;
-  const name = subagentName(agent) || '서브에이전트';
-  // 종류와 맡긴 일은 도구·결과보다 먼저 자리를 잡는다
-  const tail = doing ? oneLine(doing) : result ? `결과 ${result}` : '';
-  const nameMax = tail ? Math.max(8, Math.min(stringWidth(name), Math.floor(room * 0.6))) : room;
-  const nameText = clip(name, nameMax);
-  const tailRoom = room - stringWidth(nameText) - 3;
-  const tailText = tail && tailRoom >= 6 ? clip(tail, tailRoom) : '';
-  const body = `${nameText}${tailText ? `${fg(theme, 'muted')} · ${RESET}${tailText}` : ''}`;
-  const left = `${cursor}${branch}${mark} ${fitAnsi(body, room)}`;
-  return right && rightWidth ? fitAnsi(`${left} ${fg(theme, right.color)}${right.text}${RESET}`, width) : fitAnsi(left, width);
+  return agentLine(row.agent!, { width, theme, now, lead: cursor, indent: 2, last: row.last === true });
 }
 
 /** 넘치는 글을 폭에 맞게 낱말 사이에서 …로 줄인다(한글은 두 칸) */

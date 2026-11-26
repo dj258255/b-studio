@@ -75,6 +75,8 @@ export interface InsideState {
   error?: string;
   /** 스튜디오가 이 API를 모른다(옛 판) */
   gone?: true;
+  /** 방금 한 일의 알림 한 줄(칸에 고정했다 등). 다음 키에 지운다 */
+  note?: string;
 }
 
 /** 이 화면이 읽는 desk 상태 */
@@ -96,7 +98,7 @@ export function cleanText(text: unknown): string {
 }
 
 /** 한 줄 글: 정리하고 길이를 자른다 */
-function safeLine(text: unknown, max = MAX_LINE_CHARS): string {
+export function safeLine(text: unknown, max = MAX_LINE_CHARS): string {
   const clean = cleanText(typeof text === 'string' ? text.slice(0, max * 4) : '').replace(/\n/g, ' ');
   const chars = [...clean];
   return chars.length > max ? `${chars.slice(0, max).join('')}…` : clean;
@@ -143,7 +145,7 @@ export interface InsideCard {
 }
 
 /** 목록의 서브에이전트 id에서 기록의 id로: 스튜디오가 `claude:agent:` 머리를 붙여 보낸다 */
-function logIdOf(agent: DeskAgent): string {
+export function logIdOf(agent: DeskAgent): string {
   return agent.id.startsWith('claude:agent:') ? agent.id.slice('claude:agent:'.length) : agent.id;
 }
 
@@ -163,7 +165,7 @@ export function insideCards(item: DeskItem, data: ActivityLogView | undefined): 
   return cards.slice(0, MAX_CARDS);
 }
 
-function cardName(card: InsideCard, item: DeskItem): string {
+export function cardName(card: InsideCard, item: DeskItem): string {
   if (card.main) return safeLine(item.title);
   if (card.agent) return safeLine(subagentName(card.agent) || '서브에이전트');
   const log = card.log;
@@ -216,7 +218,7 @@ export function insideFailed(inside: InsideState, failure: { status?: number; me
 // ─── 키 ───
 
 /** 키 하나. 닫으면 state가 없다. terminal이면 메인 카드를 골라 Enter한 것이라 부르는 쪽이 그 세션의 터미널을 연다 */
-export function insideKey(source: InsideSource, key: string): { state?: InsideState; terminal?: true; help?: true } {
+export function insideKey(source: InsideSource, key: string): { state?: InsideState; terminal?: true; help?: true; pin?: string } {
   const inside = source.inside!;
   if (key === '\x03') return {};
   if (key === '?') return { state: inside, help: true };
@@ -224,6 +226,8 @@ export function insideKey(source: InsideSource, key: string): { state?: InsideSt
   if (key === ESC || key === 's') return {};
   const cards = cardsOf(source);
   const at = cursorAt(inside, cards);
+  // 고른 카드의 활동 기록을 칸에 고정한다(부르는 쪽이 칸을 고른다)
+  if (key === 'p') return cards[at] ? { state: inside, pin: logKeyOf(cards[at]!) } : { state: inside };
   const move = (to: number) => {
     const index = Math.max(0, Math.min(cards.length - 1, to));
     return { state: { ...inside, cursor: Math.max(0, index), ...(cards[index] ? { agent: cards[index]!.id } : {}) } };
@@ -243,8 +247,17 @@ export function insideKey(source: InsideSource, key: string): { state?: InsideSt
   return { state: inside };
 }
 
-function depthTwoKey(source: InsideSource, inside: InsideState, key: string): { state?: InsideState } {
+/** 카드의 기록 id: 메인은 'main', 서브에이전트는 `claude:agent:` 머리를 뗀 id */
+export function logKeyOf(card: InsideCard): string {
+  return card.main ? 'main' : card.agent ? logIdOf(card.agent) : card.id;
+}
+
+function depthTwoKey(source: InsideSource, inside: InsideState, key: string): { state?: InsideState; pin?: string } {
   if (key === ESC) return { state: { ...inside, depth: 1, up: 0 } };
+  if (key === 'p') {
+    const card = cardsOf(source).find((entry) => entry.id === inside.agent);
+    return { state: inside, ...(card ? { pin: logKeyOf(card) } : {}) };
+  }
   const log = logOf(inside, inside.data);
   const total = log ? activityLines(log, DEFAULT_THEME, 0).length : 0;
   const scroll = (to: number) => ({ state: { ...inside, up: Math.max(0, Math.min(Math.max(0, total - 1), to)) } });
@@ -260,8 +273,8 @@ function depthTwoKey(source: InsideSource, inside: InsideState, key: string): { 
 
 export function insideHint(inside: InsideState): string {
   return inside.depth === 2
-    ? ' 활동 기록 · ↑↓ PgUp PgDn 굴리기 · g G 처음과 맨 아래 · Esc 한 단계 위로 · ? 모든 키'
-    : ' 에이전트 안 · ←→ 고르기 · Enter 열기 · Esc 닫기 · ? 모든 키';
+    ? ' 활동 기록 · ↑↓ PgUp PgDn 굴리기 · g G 처음과 맨 아래 · p 칸에 고정 · Esc 한 단계 위로 · ? 모든 키'
+    : ' 에이전트 안 · ←→ 고르기 · Enter 열기 · p 칸에 고정 · Esc 닫기 · ? 모든 키';
 }
 
 // ─── 항목 → 줄 ───
@@ -549,6 +562,7 @@ function noteLines(inside: InsideState, item: DeskItem, cards: readonly InsideCa
     if (missing) notes.push(muted(item.backend === 'codex' ? '이 CLI는 서브에이전트의 코드를 보내지 않습니다' : '기록이 아직 없는 서브에이전트는 한 줄만 보입니다'));
   }
   if (inside.error && !inside.gone) notes.push(c(theme, 'yellow', `⚠ 활동 기록을 받지 못했습니다: ${inside.error}${inside.data ? '(마지막으로 받은 자료를 보입니다)' : ''}`));
+  if (inside.note) notes.push(c(theme, 'accent', safeLine(inside.note, 200)));
   return notes;
 }
 
@@ -625,19 +639,28 @@ function renderActivity(inside: InsideState, item: DeskItem, cards: readonly Ins
   const muted = fg(theme, 'muted');
   const card = cards.find((entry) => entry.id === inside.agent);
   if (!card) return [`${muted}  이 에이전트를 찾지 못했습니다. Esc로 돌아갑니다${RESET}`];
-  const all = card.log ? activityLines(card.log, theme, now) : [];
-  const room = Math.max(0, rect.h - 1 - notes.length);
+  const why = inside.gone ? '이 스튜디오는 활동 기록을 보내지 않습니다' : inside.data === undefined ? (inside.loading ? '활동 기록을 받는 중…' : '활동 기록이 없습니다') : card.main || item.backend !== 'codex' ? '아직 기록된 활동이 없습니다' : '이 CLI는 서브에이전트의 코드를 보내지 않습니다';
+  return activityPanel({ name: cardName(card, item), log: card.log, up: inside.up, rows: rect.h, notes, empty: why, theme, now });
+}
+
+/**
+ * 활동 기록 한 장(깊이 2와 칸에 고정한 기록이 함께 쓴다): 머리 한 줄, 항목 줄들(맨 아래에서 up줄 올라간 자리), 아래 알림.
+ * 줄은 폭에 맞추지 않은 것이다(부르는 쪽이 맞춘다). 줄 수는 늘 rows다
+ */
+export function activityPanel(options: { name: string; log: AgentActivityLogView | undefined; up: number; rows: number; notes: readonly string[]; empty: string; theme: Theme; now: number; /** 이름은 칸 머리에 이미 있다: 머리 줄에 쓰지 않는다 */ bare?: boolean }): string[] {
+  const { log, theme, now, notes } = options;
+  const muted = fg(theme, 'muted');
+  const all = log ? activityLines(log, theme, now) : [];
+  const room = Math.max(0, options.rows - 1 - notes.length);
   const maxUp = Math.max(0, all.length - room);
-  const up = Math.min(inside.up, maxUp);
+  const up = Math.min(options.up, maxUp);
   const start = Math.max(0, all.length - room - up);
-  const entries = card.log ? list(card.log.entries).length : 0;
+  const entries = log ? list(log.entries).length : 0;
   const follow = up === 0 ? (all.length > room ? '맨 아래를 따라가는 중' : '') : `위로 ${up}줄 · G 맨 아래로`;
-  const name = cardName(card, item);
-  const lines = [` ${BOLD}${fg(theme, 'text')}${name}${RESET} ${muted}활동 기록 · 항목 ${entries}${follow ? ` · ${follow}` : ''}${RESET}`];
-  if (all.length === 0) {
-    const why = inside.gone ? '이 스튜디오는 활동 기록을 보내지 않습니다' : inside.data === undefined ? (inside.loading ? '활동 기록을 받는 중…' : '활동 기록이 없습니다') : card.main || item.backend !== 'codex' ? '아직 기록된 활동이 없습니다' : '이 CLI는 서브에이전트의 코드를 보내지 않습니다';
-    lines.push(`${muted}  ${why}${RESET}`);
-  } else for (const line of all.slice(start, start + room)) lines.push(` ${line}`);
+  const head = `항목 ${entries}${follow ? ` · ${follow}` : ''}`;
+  const lines = [options.bare ? ` ${muted}${head}${RESET}` : ` ${BOLD}${fg(theme, 'text')}${options.name}${RESET} ${muted}활동 기록 · ${head}${RESET}`];
+  if (all.length === 0) lines.push(`${muted}  ${options.empty}${RESET}`);
+  else for (const line of all.slice(start, start + room)) lines.push(` ${line}`);
   while (lines.length < 1 + room) lines.push('');
   lines.length = Math.min(lines.length, 1 + room);
   lines.push(...notes.map((note) => ` ${note}`));

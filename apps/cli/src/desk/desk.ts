@@ -12,8 +12,9 @@ import { basename, join } from 'node:path';
 import { StudioClient, StudioRequestError, findStudio, splitChoice } from './client';
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
 import { createDraftStore, draftFits, MAX_DRAFT_BYTES, MAX_DRAFTS, type DeskDraftStore } from './drafts';
-import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
+import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, sideAgentOf, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
 import { insideFailed, insideLoaded, type InsideState } from './inside';
+import { isPinId, pinFailed, pinLoaded, pinTitle, renderPin, scrollPin, type PinState } from './pinned';
 import { changesFailed, changesLoaded, openChanges, type ChangesEffect, type ChangesState, type DeskComment } from './changes';
 import { loadComments, saveComments } from './comments-store';
 import { applyListing, listingFailed, type FolderEffect, type FolderState } from './folder';
@@ -622,9 +623,12 @@ export class DeskApp {
   /** 탐색형 QA가 도는 동안 상태를 다시 받는 시계(#916) */
   #qaTimer: ReturnType<typeof setTimeout> | undefined;
   #plansTimer: NodeJS.Timeout | undefined;
-  #insideTimer: NodeJS.Timeout | undefined;
-  /** 활동 기록을 받는 중인 세션 id(겹친 요청을 막는다) */
-  #insideFetching: string | undefined;
+  /** 활동 기록을 받는 시계: 에이전트 안 화면이나 칸에 고정한 기록이 하나라도 있는 동안만 돈다(#1411) */
+  #activityTimer: NodeJS.Timeout | undefined;
+  /** 활동 기록을 받는 중인 세션 id(세션마다 겹친 요청을 막는다) */
+  readonly #activityFetching = new Set<string>();
+  /** 지난번에 받기로 한 세션 id. 새로 들어온 세션은 바로 받는다 */
+  #activityPolled = new Set<string>();
   /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
   #plansFetching = false;
 
@@ -692,7 +696,7 @@ export class DeskApp {
       // 셸 칸은 남기지 않는다: desk를 나가면 셸이 끝나고, 다음에 같은 자리에 새 셸을 띄우면 전과 다른 셸인데 이어진 것처럼 보인다
       this.#layoutStore.save({
         layout,
-        slots: slots.map((id, slot) => (slot < layout && !isShellId(id) ? id : undefined)),
+        slots: slots.map((id, slot) => (slot < layout && !isShellId(id) && !isPinId(id) ? id : undefined)),
         focus,
         zoom: zoom === true,
         sidebarHidden: sidebarHidden === true,
@@ -840,6 +844,8 @@ export class DeskApp {
   }
 
   #send(id: string, data: string): void {
+    // 활동 기록 칸은 터미널이 아니다. 키 처리 쪽이 이미 거르지만, 보내는 자리 한 곳에서도 막는다
+    if (isPinId(id)) return;
     if (isShellId(id)) {
       const shell = this.#shells.get(id);
       if (shell?.pty && !shell.ended) shell.pty.write(data);
@@ -963,56 +969,98 @@ export class DeskApp {
         void this.#changesEffect(effect.effect);
         return;
       case 'inside-open':
-        this.#openInside(effect.id);
+        this.#syncActivity(effect.id);
         return;
     }
   }
 
-  // ─── 에이전트 안(#1411) ───
+  // ─── 활동 기록 받기(#1411) ───
 
-  /** 열려 있는 동안만 활동 기록을 INSIDE_POLL_MS마다 받는다. 닫으면(state.inside가 없으면) 다음 때에 멈춘다 */
-  #openInside(id: string): void {
-    clearInterval(this.#insideTimer);
-    this.#insideTimer = undefined;
-    if (!this.#client.agentActivity) {
-      this.#patchInside(id, (inside) => insideFailed(inside, { status: 404, message: '이 스튜디오는 활동 기록을 지원하지 않습니다' }));
+  /** 활동 기록이 필요한 세션: 에이전트 안 화면이 보는 세션과, 보이는 칸에 기록을 고정한 세션 */
+  #wantedActivity(): Set<string> {
+    const wanted = new Set<string>();
+    if (this.#state.inside) wanted.add(this.#state.inside.id);
+    this.#state.slots.forEach((id, slot) => {
+      const pin = slot < this.#state.layout && isPinId(id) ? this.#state.pins?.[id] : undefined;
+      if (pin) wanted.add(pin.session);
+    });
+    return wanted;
+  }
+
+  /**
+   * 활동 기록 받기를 한 군데로 모은다: 세션마다 요청 하나를 INSIDE_POLL_MS마다 보내고, 받은 것을 그 세션을 보는 모든 곳(에이전트 안 화면, 고정한 칸들)에 나눠 준다.
+   * 필요한 세션이 없으면 시계를 끈다. force는 이미 받던 세션이어도 지금 한 번 받는다(에이전트 안 화면을 다시 열었을 때)
+   */
+  #syncActivity(force?: string): void {
+    const wanted = this.#wantedActivity();
+    if (wanted.size === 0) {
+      clearInterval(this.#activityTimer);
+      this.#activityTimer = undefined;
+      this.#activityPolled = wanted;
       return;
     }
-    void this.#loadInside();
-    this.#insideTimer = setInterval(() => {
-      if (!this.#state.inside) {
-        clearInterval(this.#insideTimer);
-        this.#insideTimer = undefined;
-        return;
-      }
-      void this.#loadInside();
-    }, INSIDE_POLL_MS);
-    this.#insideTimer.unref?.();
+    if (!this.#client.agentActivity) {
+      const failure = { status: 404, message: '이 스튜디오는 활동 기록을 지원하지 않습니다' };
+      for (const id of wanted) this.#patchActivity(id, (inside) => insideFailed(inside, failure), (pin) => pinFailed(pin, { ...failure, old: true }));
+      this.#activityPolled = wanted;
+      return;
+    }
+    if (!this.#activityTimer) {
+      this.#activityTimer = setInterval(() => this.#activityTick(), INSIDE_POLL_MS);
+      this.#activityTimer.unref?.();
+    }
+    for (const id of wanted) if (force === id || !this.#activityPolled.has(id)) void this.#loadActivity(id);
+    this.#activityPolled = wanted;
   }
 
-  #patchInside(id: string, change: (state: InsideState) => InsideState): void {
-    const inside = this.#state.inside;
-    if (!inside || inside.id !== id) return;
-    this.#state = { ...this.#state, inside: change(inside) };
+  #activityTick(): void {
+    const wanted = this.#wantedActivity();
+    this.#activityPolled = wanted;
+    if (wanted.size === 0) {
+      clearInterval(this.#activityTimer);
+      this.#activityTimer = undefined;
+      return;
+    }
+    for (const id of wanted) void this.#loadActivity(id);
+  }
+
+  /** 받은 것(또는 실패)을 그 세션을 보는 에이전트 안 화면과 고정한 칸들에 넣는다 */
+  #patchActivity(id: string, inside: (state: InsideState) => InsideState, pin: (state: PinState) => PinState): void {
+    let state = this.#state;
+    let changed = false;
+    if (state.inside?.id === id) {
+      state = { ...state, inside: inside(state.inside) };
+      changed = true;
+    }
+    if (state.pins) {
+      const pins = { ...state.pins };
+      for (const [key, entry] of Object.entries(pins)) {
+        if (entry.session !== id) continue;
+        pins[key] = pin(entry);
+        changed = true;
+      }
+      state = { ...state, pins };
+    }
+    if (!changed) return;
+    this.#state = state;
     this.#scheduleRender();
   }
 
-  async #loadInside(): Promise<void> {
-    const inside = this.#state.inside;
+  async #loadActivity(id: string): Promise<void> {
     const load = this.#client.agentActivity;
-    if (!inside || !load || this.#insideFetching === inside.id) return;
-    const id = inside.id;
-    this.#insideFetching = id;
+    if (!load || this.#activityFetching.has(id)) return;
+    this.#activityFetching.add(id);
     try {
       const data = await load.call(this.#client, id);
       if (this.#restored) return;
-      this.#patchInside(id, (current) => insideLoaded(current, data));
+      this.#patchActivity(id, (current) => insideLoaded(current, data), (current) => pinLoaded(current, data));
     } catch (error) {
       if (this.#restored) return;
       const status = error instanceof StudioRequestError ? error.status : undefined;
-      this.#patchInside(id, (current) => insideFailed(current, { ...(status !== undefined ? { status } : {}), message: messageOf(error) }));
+      const failure = { ...(status !== undefined ? { status } : {}), message: messageOf(error) };
+      this.#patchActivity(id, (current) => insideFailed(current, failure), (current) => pinFailed(current, failure));
     } finally {
-      if (this.#insideFetching === id) this.#insideFetching = undefined;
+      this.#activityFetching.delete(id);
     }
   }
 
@@ -2391,7 +2439,7 @@ export class DeskApp {
       if (!press) return;
       const sessions = deskSessions(this.#state.items);
       if (wheel) {
-        this.#state = { ...this.#state, selected: Math.max(0, Math.min(sessions.length - 1, this.#state.selected + wheel)) };
+        this.#state = { ...this.#state, selected: Math.max(0, Math.min(sessions.length - 1, this.#state.selected + wheel)), sideAgent: undefined };
       } else {
         const row = side.rows[side.offset + (y - side.rect.y)];
         if (row?.action === 'folder') {
@@ -2408,13 +2456,14 @@ export class DeskApp {
           return;
         }
         if (row?.item === undefined) return;
-        if (row.item === this.#state.selected) {
-          // 고른 세션을 한 번 더 누르면 Ctrl-b Enter와 같다
+        if (row.item === this.#state.selected && row.agent === sideAgentOf(this.#state)) {
+          // 고른 줄을 한 번 더 누르면 Ctrl-b Enter와 같다(서브에이전트 줄이면 그 활동 기록)
           this.#take(handleInput({ ...this.#state, prefix: true }, '\r'));
           return;
         }
         // 고르기만 한다. 이어서 Enter를 누르면 연다(Ctrl-b ↑↓로 고를 때와 같다)
-        this.#state = { ...this.#state, selected: row.item, prefix: true, browsing: true, message: BROWSING };
+        const picked = row.agent !== undefined ? sessions[row.item] : undefined;
+        this.#state = { ...this.#state, selected: row.item, sideAgent: picked && row.agent !== undefined ? { session: picked.id, agent: row.agent } : undefined, prefix: true, browsing: true, message: BROWSING };
       }
       this.#clearSeen();
       this.#scheduleRender();
@@ -2473,7 +2522,11 @@ export class DeskApp {
       if (this.#state.copy) this.#endCopy();
       this.#state = { ...this.#state, focus: slot };
     }
-    if (wheel && id && pane) this.#wheel(id, pane, wheel);
+    if (wheel && id && isPinId(id)) {
+      // 활동 기록 칸(#1411): 휠로 굴린다(위로 굴리면 지난 기록)
+      const pin = this.#state.pins?.[id];
+      if (pin) this.#state = { ...this.#state, pins: { ...this.#state.pins, [id]: scrollPin(pin, -wheel * WHEEL_LINES) } };
+    } else if (wheel && id && pane) this.#wheel(id, pane, wheel);
     // 왼쪽 단추: CLI가 마우스를 요청하지 않은 칸의 몸에서는 글을 고른다(칸 머리와 복사 모드는 제외)
     else if (this.#copyOnSelect && id && pane && !modes?.mouse && !pane.inCopy && y > rect.y && (button & 67) === 0) this.#beginSelect(slot, id, pane, rect, x, y);
     this.#clearSeen();
@@ -2672,7 +2725,8 @@ export class DeskApp {
   }
 
   #visible(): string[] {
-    return this.#state.slots.slice(0, this.#state.layout).filter((id): id is string => Boolean(id));
+    // 활동 기록 칸(#1411)은 터미널이 없으니 해석기도 통로도 만들지 않는다
+    return this.#state.slots.slice(0, this.#state.layout).filter((id): id is string => Boolean(id) && !isPinId(id));
   }
 
   /** 칸 구성이 바뀌었다: 새 칸의 통로를 먼저 열고(늦게 붙은 칸이 출력을 놓치지 않게) 칸 크기에 맞춰 터미널을 연다 */
@@ -2695,6 +2749,8 @@ export class DeskApp {
       this.#closed.delete(id);
     }
     this.#prevFrame = [];
+    // 칸에 고정한 활동 기록(#1411)이 늘거나 줄었으면 받기도 맞춘다
+    this.#syncActivity();
     // 해석기를 먼저 만들어 둔다: 통로가 열리자마자 오는 최근 출력을 받을 자리가 있어야 한다
     this.#ensurePanes();
     this.#syncStreams();
@@ -2711,7 +2767,7 @@ export class DeskApp {
     const base = placePanes(cols, rows, { ...this.#state, zoom: false }).panes;
     const placed: Array<{ id: string; size: { cols: number; rows: number } }> = [];
     this.#state.slots.forEach((id, slot) => {
-      if (!id || slot >= this.#state.layout) return;
+      if (!id || slot >= this.#state.layout || isPinId(id)) return;
       const rect = shown.find((entry) => entry.slot === slot)?.rect;
       let pane = this.#panes.get(id);
       if (!pane) {
@@ -3307,7 +3363,8 @@ export class DeskApp {
   #render(): void {
     if (this.#restored) return;
     this.#ensureSprites();
-    const views: PaneView[] = this.#state.slots.map((id) => {
+    const placed = placePanes(this.#size().cols, this.#size().rows, this.#state).panes;
+    const views: PaneView[] = this.#state.slots.map((id, slot) => {
       const pane = id ? this.#panes.get(id) : undefined;
       const note = id ? this.#notes.get(id) : undefined;
       // CLI가 커서를 숨겼으면 desk도 그리지 않는다(제 커서를 그리는 TUI에서 엉뚱한 자리에 보이지 않게). 복사 모드에서도 그리지 않는다
@@ -3317,6 +3374,11 @@ export class DeskApp {
       const bell = id && this.#bells.has(id) ? { bell: true } : {};
       const shell = id && isShellId(id) ? this.#shells.get(id) : undefined;
       const title = shell ? { title: `셸 · 검증 밖 · ${basename(shell.dir) || shell.dir}` } : {};
+      if (id && isPinId(id)) {
+        // 활동 기록 칸(#1411): 터미널 대신 그 에이전트의 활동 기록을 칸 크기에 맞춰 그린다
+        const rect = placed.find((entry) => entry.slot === slot)?.rect;
+        return { lines: rect ? renderPin(this.#state, id, terminalSize(rect)) : [], title: pinTitle(this.#state, id) };
+      }
       return { lines: pane ? pane.lines() : [], ...(pane ? { cols: pane.viewCols } : {}), ...cursor, ...mode, ...bell, ...title, ...(note ? { note } : {}) };
     });
     const frame = renderScreen(this.#state, this.#size(), views);
@@ -3349,8 +3411,8 @@ export class DeskApp {
     clearTimeout(this.#agentsRetry);
     this.#agentsAbort?.abort();
     clearInterval(this.#usageTimer);
-    clearInterval(this.#insideTimer);
-    this.#insideTimer = undefined;
+    clearInterval(this.#activityTimer);
+    this.#activityTimer = undefined;
     clearInterval(this.#plansTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);

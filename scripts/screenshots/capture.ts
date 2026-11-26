@@ -18,7 +18,9 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openInside } from '../../apps/cli/src/desk/inside';
 import { initialState, type DeskState } from '../../apps/cli/src/desk/keys';
+import { openPin, pinId, pinLoaded, pinTitle, renderPin } from '../../apps/cli/src/desk/pinned';
 import { renderScreen, type PaneView } from '../../apps/cli/src/desk/render';
+import { placePanes, terminalSize } from '../../apps/cli/src/desk/screen';
 import { openSettings } from '../../apps/cli/src/desk/settings';
 import type { ActivityLogView, DeskItem } from '../../apps/cli/src/desk/types';
 import { sessionLimits, usageAccounts } from '../../apps/cli/src/desk/usage';
@@ -130,6 +132,26 @@ const activity: ActivityLogView = {
   ],
 };
 
+/** 깊이 2·칸 고정 사진용: sub-4(테스트 실행)의 기록을 더 길게 둔 활동 기록 */
+const testerActivity: ActivityLogView = {
+  agents: [
+    ...activity.agents.filter((agent) => agent.id !== 'sub-4'),
+    {
+      id: 'sub-4',
+      type: 'test-runner',
+      description: '주문 단위 테스트',
+      state: 'working',
+      entries: [
+        { at: tAt(160), endedAt: tAt(158), tool: 'Read', kind: 'read', state: 'done', target: 'apps/shop/order.test.ts' },
+        { at: tAt(120), endedAt: tAt(119), tool: 'Edit', kind: 'edit', state: 'done', target: 'apps/shop/order.test.ts', changes: [{ file: 'apps/shop/order.test.ts', removed: "expect(next('paid')).toBe('paid');", added: "expect(next('paid')).toBe('shipped');" }] },
+        { at: tAt(90), endedAt: tAt(60), tool: 'Bash', kind: 'run', state: 'done', command: 'pnpm test order', output: ' ✓ order-create.test.ts (4)\n ✗ order-state.test.ts (2)\n   AssertionError: expected paid to equal shipped\n Tests  1 failed | 4 passed' },
+        { at: tAt(50), tool: 'Write', kind: 'write', state: 'denied', target: 'infra/prod.yaml', error: '쓰기 범위 밖입니다' },
+        { at: tAt(20), tool: 'Bash', kind: 'run', state: 'running', command: 'pnpm test order' },
+      ],
+    },
+  ],
+};
+
 const claude = (id: string, name: string, status: string, five: number | undefined, week: number | undefined, extra: Record<string, unknown> = {}) => ({
   id,
   backend: 'claude-code',
@@ -223,7 +245,20 @@ interface Shot {
   cols: number;
   rows: number;
   state: () => DeskState;
-  panes?: PaneView[];
+  panes?: PaneView[] | ((state: DeskState, size: { cols: number; rows: number }) => PaneView[]);
+}
+
+/** 칸에 고정한 상태: 1번 칸 터미널, 2번·4번 칸에 서브에이전트 활동 기록, 3번 칸에 다른 세션 터미널 */
+function pinnedState(): DeskState {
+  const tester = pinId('s-order', 'sub-4');
+  const events = pinId('s-order', 'sub-2');
+  return {
+    ...base(),
+    layout: 4,
+    slots: ['s-order', tester, 's-pay', events],
+    focus: 0,
+    pins: { [tester]: pinLoaded(openPin('s-order', 'sub-4'), testerActivity), [events]: pinLoaded(openPin('s-order', 'sub-2'), testerActivity) },
+  } as DeskState;
 }
 
 const shots: Shot[] = [
@@ -244,32 +279,21 @@ const shots: Shot[] = [
     name: 'desk-activity',
     cols: 160,
     rows: 30,
-    state: () =>
-      ({
-        ...base(),
-        inside: {
-          ...openInside('s-order', '주문 모듈 리팩터링', { depth: 2, agent: 'sub-4' }),
-          data: {
-            agents: [
-              ...activity.agents.filter((agent) => agent.id !== 'sub-4'),
-              {
-                id: 'sub-4',
-                type: 'test-runner',
-                description: '주문 단위 테스트',
-                state: 'working',
-                entries: [
-                  { at: tAt(160), endedAt: tAt(158), tool: 'Read', kind: 'read', state: 'done', target: 'apps/shop/order.test.ts' },
-                  { at: tAt(120), endedAt: tAt(119), tool: 'Edit', kind: 'edit', state: 'done', target: 'apps/shop/order.test.ts', changes: [{ file: 'apps/shop/order.test.ts', removed: "expect(next('paid')).toBe('paid');", added: "expect(next('paid')).toBe('shipped');" }] },
-                  { at: tAt(90), endedAt: tAt(60), tool: 'Bash', kind: 'run', state: 'done', command: 'pnpm test order', output: ' ✓ order-create.test.ts (4)\n ✗ order-state.test.ts (2)\n   AssertionError: expected paid to equal shipped\n Tests  1 failed | 4 passed' },
-                  { at: tAt(50), tool: 'Write', kind: 'write', state: 'denied', target: 'infra/prod.yaml', error: '쓰기 범위 밖입니다' },
-                  { at: tAt(20), tool: 'Bash', kind: 'run', state: 'running', command: 'pnpm test order' },
-                ],
-              },
-            ],
-          },
-          loading: false,
-        },
-      }) as DeskState,
+    state: () => ({ ...base(), inside: { ...openInside('s-order', '주문 모듈 리팩터링', { depth: 2, agent: 'sub-4' }), data: testerActivity, loading: false } }) as DeskState,
+  },
+  // 칸에 고정(#1411): 왼쪽 칸은 세션 터미널, 오른쪽 칸 둘은 서브에이전트의 활동 기록. 사이드바에는 서브에이전트가 펼쳐진다
+  {
+    name: 'desk-pinned',
+    cols: 160,
+    rows: 34,
+    state: () => pinnedState(),
+    panes: (state, size) =>
+      state.slots.map((id, slot) => {
+        if (id === 's-order') return claudePane;
+        if (id === 's-pay') return codexPane;
+        const rect = placePanes(size.cols, size.rows, state).panes.find((entry) => entry.slot === slot)?.rect;
+        return id && rect ? { lines: renderPin(state, id, terminalSize(rect), now), title: pinTitle(state, id) } : { lines: [] };
+      }),
   },
   { name: 'desk-usage', cols: 140, rows: 34, state: () => ({ ...base(), view: 'usage', usageSelected: 1 }) as unknown as DeskState },
   {
@@ -303,7 +327,9 @@ async function main(): Promise<void> {
   const browser = await chromium.launch({ channel: 'chrome' });
   try {
     for (const shot of chosen) {
-      const frame = renderScreen(shot.state(), { cols: shot.cols, rows: shot.rows }, shot.panes ?? []);
+      const state = shot.state();
+      const size = { cols: shot.cols, rows: shot.rows };
+      const frame = renderScreen(state, size, typeof shot.panes === 'function' ? shot.panes(state, size) : (shot.panes ?? []));
       const text = frame.lines.join('\r\n');
       const html = [
         '<!doctype html><meta charset="utf-8">',
