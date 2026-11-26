@@ -64,3 +64,28 @@ export async function completeTerminalRun(id: string, prompt: string, files: Rec
   if (after !== before + 1) throw new Error(`체크포인트가 하나 늘어야 합니다(${before} → ${after})`);
   return { run, answer };
 }
+
+/** 대본의 한 걸음: 파일을 쓰거나(CLI의 도구 호출), 턴을 끝낸다(Stop 훅) */
+export type TerminalStep = { write: Record<string, string> } | { stop: string };
+
+/**
+ * 채팅 대본(`scriptedTurns`)이 하던 "파일을 쓰고, 끝냈다고 말하고, 게이트가 돌려보내면 다시 고친다"를 터미널 경로로 한다.
+ * 요청을 보내고(prompt) 걸음을 차례로 한다. `stop` 걸음의 Stop 훅이 피드백 없이 답하면(통과) 실행이 끝난 것이므로 남은 걸음은 하지 않는다.
+ * 쓰기는 PreToolUse 훅을 거친다(훅이 막은 쓰기는 시험이 잘못 짜인 것이므로 던진다)
+ */
+export async function driveTerminalSteps(id: string, prompt: string, steps: TerminalStep[]): Promise<{ run: TerminalRunHandle; answers: Array<Awaited<ReturnType<typeof stopTerminalTurn>>> }> {
+  const run = terminalRunOf(id);
+  const first = await run.gateway.prompt({ prompt });
+  if (first.blocked) throw new Error(`요청이 막혔습니다: ${first.blocked}`);
+  const answers: Array<Awaited<ReturnType<typeof stopTerminalTurn>>> = [];
+  for (const step of steps) {
+    if ('write' in step) {
+      for (const [file, content] of Object.entries(step.write)) await cliWrite(run, file, content);
+      continue;
+    }
+    const answer = await stopTerminalTurn(run, step.stop);
+    answers.push(answer);
+    if (!answer.feedback) break;
+  }
+  return { run, answers };
+}
