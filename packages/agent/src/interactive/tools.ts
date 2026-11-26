@@ -38,7 +38,7 @@ export const TOOL_DEFINITIONS: BetaTool[] = [
   },
   {
     name: 'Bash',
-    description: `작업 폴더에서 셸 명령(bash -c)을 실행하고 종료 코드와 출력(stdout·stderr)을 돌려준다. 입력(stdin)은 닫혀 있어 대화형 명령은 쓸 수 없다. 기본 ${BASH_DEFAULT_TIMEOUT_MS}ms, 최대 ${BASH_MAX_TIMEOUT_MS}ms(timeout)를 넘기면 명령과 하위 프로세스를 끊는다. 명령이 끝나면 남은 하위 프로세스(백그라운드로 보낸 것 포함)도 끊는다. 출력은 앞 ${BASH_MAX_OUTPUT_CHARS}자만 남는다. 작업 폴더 밖 경로 제한은 이 도구에 없다.`,
+    description: `작업 폴더에서 셸 명령(bash -c)을 실행하고 종료 코드와 출력(stdout·stderr)을 돌려준다. 입력(stdin)은 닫혀 있어 대화형 명령은 쓸 수 없다. 기본 ${BASH_DEFAULT_TIMEOUT_MS}ms, 최대 ${BASH_MAX_TIMEOUT_MS}ms(timeout)를 넘기면 명령과 하위 프로세스를 끊는다. 명령이 끝나면 남은 하위 프로세스(백그라운드로 보낸 것 포함)도 끊는다. 출력은 앞 ${BASH_MAX_OUTPUT_CHARS}자만 남는다. 쓰기는 작업 폴더·임시 폴더·패키지 관리자 캐시에만 할 수 있고, 그 밖(작업 폴더 밖, 관문 폴더, 작업 폴더의 .git)에 쓰면 거절된다(읽기는 제한이 없다).`,
     input_schema: { type: 'object', properties: { command: { type: 'string' }, timeout: { type: 'number', description: '밀리초' }, description: { type: 'string' } }, required: ['command'] },
   },
 ];

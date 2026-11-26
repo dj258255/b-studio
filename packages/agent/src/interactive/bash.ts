@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
+import { planSandbox, removeEmptyPlaceholders, type BashSandboxOptions } from './bash-sandbox';
 import type { ToolOutcome } from './tools';
 
 /** 명령 하나의 시간 기본값·상한(밀리초), 모아 두는 출력의 글자 상한, 종료 신호를 보낸 뒤 강제로 끊기까지의 유예 */
@@ -26,6 +27,8 @@ export interface BashOptions {
   maxOutputChars?: number;
   /** 우두머리가 끝난 뒤 남은 출력을 더 받는 시간(기본 200ms) */
   exitDrainMs?: number;
+  /** 쓰기를 가두는 OS 샌드박스의 설정(관문 폴더 등). 샌드박스는 늘 켜져 있다: 만들 수 없으면(macOS) 실행하지 않는다 */
+  sandbox?: BashSandboxOptions;
 }
 
 export function scrubbedEnv(base: NodeJS.ProcessEnv, extra: readonly string[] = []): NodeJS.ProcessEnv {
@@ -59,7 +62,7 @@ const killGroup = (pid: number, signal: NodeJS.Signals) => {
 };
 
 /**
- * 셸 명령을 작업 폴더에서 `/bin/bash -c`로 실행한다. 명령은 인자 배열의 한 칸이라 다른 값과 문자열로 이어 붙이지 않는다.
+ * 셸 명령을 작업 폴더에서 `/bin/bash -c`로 실행한다. 쓰기는 OS 샌드박스가 작업 폴더·임시 폴더·빌드 캐시로 가둔다(bash-sandbox.ts). 명령은 인자 배열의 한 칸이라 다른 값과 문자열로 이어 붙이지 않는다.
  * 자식은 새 프로세스 그룹이라 시간 초과·중단 때 손자까지 그룹째 끊는다(SIGTERM, 유예 뒤 SIGKILL). stdin은 닫는다.
  * 출력은 읽는 동안 상한까지만 모으고 나머지는 세기만 한다(끝없는 출력이 메모리를 채우지 않는다).
  * 종료 코드가 0이 아닌 것은 실패한 도구 결과일 뿐 던지지 않는다
@@ -77,8 +80,15 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
   const graceMs = options.killGraceMs ?? BASH_KILL_GRACE_MS;
   const maxChars = options.maxOutputChars ?? BASH_MAX_OUTPUT_CHARS;
 
+  // 샌드박스를 만들 수 없으면 실행하지 않는다(macOS). Linux에서 도구가 없으면 감싸지 않고 결과에 알린다
+  const plan = planSandbox(command, options.cwd, options.sandbox);
+  if (plan.kind === 'refused') return { text: `명령을 실행하지 않았습니다: ${plan.reason}`, isError: true };
+  const spawnCommand = plan.kind === 'wrapped' ? plan.command : '/bin/bash';
+  const spawnArgs = plan.kind === 'wrapped' ? plan.args : ['-c', command];
+  const notice = plan.kind === 'unsandboxed' ? plan.notice : undefined;
+
   return new Promise<ToolOutcome>((resolve) => {
-    const child = spawn('/bin/bash', ['-c', command], {
+    const child = spawn(spawnCommand, spawnArgs, {
       cwd: options.cwd,
       env: scrubbedEnv(options.env ?? process.env, options.scrubEnvNames),
       detached: true,
@@ -119,13 +129,16 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
         killGroup(pid, 'SIGKILL');
         liveGroups.delete(pid);
       }
+      // bwrap이 호스트에 남긴 빈 자리 폴더를 치운다(비어 있는 진짜 폴더일 때만)
+      if (plan.kind === 'wrapped' && plan.placeholders) removeEmptyPlaceholders(plan.placeholders);
       resolve(outcome);
     };
     const render = (head: string, isError: boolean): ToolOutcome => {
       const dropped = totalBytes - keptBytes;
       const body = collected === '' ? '(출력 없음)' : collected;
       const note = dropped > 0 ? `\n(출력이 길어 ${dropped}바이트를 버렸습니다. 앞 ${keptBytes}바이트만 남겼습니다)` : '';
-      return { text: `${head}\n${body}${note}`, isError };
+      const warning = notice === undefined ? '' : `\n(알림: ${notice})`;
+      return { text: `${head}\n${body}${note}${warning}`, isError };
     };
 
     // 그룹을 끊는다: 종료 신호를 보내고, 유예 뒤에는 우두머리가 이미 끝났어도 그룹에 남은 것을 강제로 끊은 다음에야 결과를 낸다
@@ -147,7 +160,7 @@ export async function runBash(input: Record<string, unknown>, options: BashOptio
     timer = setTimeout(() => terminate('timeout'), timeoutMs);
     signal?.addEventListener('abort', onAbort, { once: true });
 
-    child.on('error', (error) => finish({ text: `명령을 시작하지 못했습니다: ${(error as NodeJS.ErrnoException).code ?? error.message}`, isError: true }));
+    child.on('error', (error) => finish({ text: `명령을 시작하지 못했습니다${plan.kind === 'wrapped' ? `(${plan.tool})` : ''}: ${(error as NodeJS.ErrnoException).code ?? error.message}`, isError: true }));
     // 우두머리가 끝나면 남은 출력을 잠깐 더 받고 끝낸다. 백그라운드로 보낸 하위 프로세스가 파이프를 쥐고 있어도 기다리지 않는다
     let exitCode: number | null = null;
     let exitSignal: NodeJS.Signals | null = null;

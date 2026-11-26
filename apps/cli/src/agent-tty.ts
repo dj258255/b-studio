@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { apiKeyEnvName, clientForProfile, parseInteractiveArgs, runInteractiveSession } from '@b-studio/agent';
 import { loadModelFile, modelFilePath, ModelFileError } from './agent-tty/model-file';
 
@@ -37,6 +38,8 @@ async function main(): Promise<number> {
     pricing: loaded.profile.pricing,
     signal: abort.signal,
     scrubEnvNames: [apiKeyEnvName(loaded.profile)],
+    // 관문 폴더(훅 스크립트·주소·설정·모델 파일)는 Bash가 쓰지 못한다
+    sandbox: { denyWrite: [path.resolve(path.dirname(settingsFile))] },
   });
   return 0;
 }
