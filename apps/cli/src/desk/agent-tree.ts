@@ -58,8 +58,8 @@ function cursorAt(tree: AgentTreeState, rows: readonly TreeRow[]): number {
   return found >= 0 ? found : Math.max(0, Math.min(rows.length - 1, tree.index));
 }
 
-/** 키 하나. 닫으면 state가 없고, Enter로 고르면 chosen이 그 세션 id(자식 줄이면 그 서브에이전트를 띄운 세션)다 */
-export function treeKey(source: TreeSource, key: string): { state?: AgentTreeState; chosen?: string; help?: true } {
+/** 키 하나. 닫으면 state가 없고, Enter로 고르면 chosen이 그 세션 id다. 자식 줄이면 agent가 그 서브에이전트 id다(활동 기록으로 들어간다) */
+export function treeKey(source: TreeSource, key: string): { state?: AgentTreeState; chosen?: string; agent?: string; help?: true } {
   const tree = source.tree!;
   const rows = treeRows(source);
   const at = cursorAt(tree, rows);
@@ -71,7 +71,7 @@ export function treeKey(source: TreeSource, key: string): { state?: AgentTreeSta
   if (key === ESC || key === '\x03' || key === 'm') return {};
   if (key === '\r' || key === '\n') {
     const row = rows[at];
-    return row ? { chosen: row.item.id } : { state: tree };
+    return row ? { chosen: row.item.id, ...(row.agent ? { agent: row.agent.id } : {}) } : { state: tree };
   }
   if (key === '\x1b[A' || key === '\x1bOA' || key === 'k' || key === '\x10') return move(at - 1);
   if (key === '\x1b[B' || key === '\x1bOB' || key === 'j' || key === '\x0e') return move(at + 1);
@@ -85,7 +85,7 @@ export function treeKey(source: TreeSource, key: string): { state?: AgentTreeSta
   return { state: tree };
 }
 
-export const TREE_HINT = ' 에이전트 나무 · ↑↓ 고르기 · Enter 칸에 열기 · Tab 범위 · Esc 닫기 · ? 모든 키';
+export const TREE_HINT = ' 에이전트 나무 · ↑↓ 고르기 · Enter 세션은 칸에, 서브에이전트는 활동 기록 · Tab 범위 · Esc 닫기 · ? 모든 키';
 
 /** 줄 오른쪽에 두는 글과 그 폭 */
 interface Right {

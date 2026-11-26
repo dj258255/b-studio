@@ -8,7 +8,7 @@
 import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import type { DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
+import type { ActivityLogView, DeskQaRun, DeskQaStart, DeskRepoList, DeskService, DeskSessionEvent, DeskSubmission } from './types';
 import type { LiveChangesView } from './changes';
 import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
@@ -380,6 +380,14 @@ export class StudioClient {
   /** 마지막 체크포인트 뒤의 지금 변경(#924). 시크릿 값과 비밀 파일은 서버가 가리고 뺀다 */
   liveChanges(id: string): Promise<LiveChangesView> {
     return this.#request('GET', `${sessionPath(id)}/changes`);
+  }
+
+  /**
+   * 에이전트별 최근 활동 기록(#1411). 메인과 서브에이전트마다 도구 호출과 코드 조각을 준다. 비밀 값과 비밀 파일은 서버가 가리고 뺀다.
+   * 옛 스튜디오는 이 경로가 없어 404로 답한다(부르는 쪽이 화면에 까닭을 적는다)
+   */
+  agentActivity(id: string): Promise<ActivityLogView> {
+    return this.#request('GET', `${sessionPath(id)}/agents/activity`);
   }
 
   /** 체크포인트로 되돌린다. 시작만 하고 돌아온다(진행은 세션 이벤트로 온다) */

@@ -13,6 +13,7 @@ import { StudioClient, StudioRequestError, findStudio, splitChoice } from './cli
 import { colorDepth, deskConfigDir, loadDeskConfig, loadDeskLayout, saveDeskConfig, saveDeskLayout, type DeskConfig, type DeskLayout, type DeskPrefix } from './config';
 import { createDraftStore, draftFits, MAX_DRAFT_BYTES, MAX_DRAFTS, type DeskDraftStore } from './drafts';
 import { BROWSING, SHELL_ID, SHELL_TAKEN, flushPending, handleInput, initialState, isShellId, openFolderScreen, pasteFor, promptProjects, reselect, toInnerKeys, type DeskState, type Effect, type SessionAction } from './keys';
+import { insideFailed, insideLoaded, type InsideState } from './inside';
 import { changesFailed, changesLoaded, openChanges, type ChangesEffect, type ChangesState, type DeskComment } from './changes';
 import { loadComments, saveComments } from './comments-store';
 import { applyListing, listingFailed, type FolderEffect, type FolderState } from './folder';
@@ -185,6 +186,8 @@ const QA_POLL_MS = 1_200;
 
 /** 작업 나누기 화면이 열려 있는 동안 계획을 다시 받는 주기 */
 const PLANS_POLL_MS = 2_000;
+/** 에이전트 안(#1411)이 열려 있는 동안 활동 기록을 다시 받는 간격 */
+export const INSIDE_POLL_MS = 1_500;
 
 /** 요구사항·문서 화면이 부르는 스튜디오 API(#894). DeskClient에 없으면(옛 손님) 부를 때 실패로 알린다 */
 type RequirementsCall = 'requirements' | 'tests' | 'docs' | 'doc' | 'saveDoc' | 'projectStatus' | 'verifyRequirement' | 'clearVerification' | 'applyRequirements';
@@ -352,6 +355,8 @@ export type DeskClient = Pick<StudioClient, 'agents' | 'projects' | 'accounts' |
   Partial<Pick<StudioClient, FolderCall>> &
   /** 지금 변경(#924). 없으면 그 화면에서 할 수 없다고 알린다 */
   Partial<Pick<StudioClient, ChangesCall>> &
+  /** 에이전트 안의 활동 기록(#1411). 없으면(옛 손님) 그 화면이 까닭을 적는다 */
+  Partial<Pick<StudioClient, 'agentActivity'>> &
   /** 목록 통로(#923). 없으면 지금처럼 POLL_MS마다 묻는다 */
   Partial<Pick<StudioClient, 'agentsStream'>>;
 
@@ -455,7 +460,8 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   const spriteSetting = config.sprites ?? 'random';
   const sprites: Record<string, Sprite> = {};
   if (spriteSetting !== 'off') {
-    for (const name of ['claude-code', 'codex', 'gemini', 'default']) {
+    // `subagent`는 서브에이전트 카드의 그림(에이전트 안 화면)
+    for (const name of ['claude-code', 'codex', 'gemini', 'default', 'subagent']) {
       const sprite = loadSprite(spriteDir(dir), [name], warnings);
       if (sprite) sprites[name] = sprite;
     }
@@ -616,6 +622,9 @@ export class DeskApp {
   /** 탐색형 QA가 도는 동안 상태를 다시 받는 시계(#916) */
   #qaTimer: ReturnType<typeof setTimeout> | undefined;
   #plansTimer: NodeJS.Timeout | undefined;
+  #insideTimer: NodeJS.Timeout | undefined;
+  /** 활동 기록을 받는 중인 세션 id(겹친 요청을 막는다) */
+  #insideFetching: string | undefined;
   /** 작업 나누기 화면의 계획을 받는 중(앞 요청이 끝나기 전에 또 받지 않는다) */
   #plansFetching = false;
 
@@ -827,7 +836,7 @@ export class DeskApp {
   #seeing(id: string): boolean {
     const state = this.#state;
     if (state.view !== undefined || this.#focused() !== id || !this.#windowFocused) return false;
-    return !(state.help || state.settings || state.records || state.detail || state.requirements || state.runtime || state.fleets || state.plans || state.folder || state.switcher || state.tree);
+    return !(state.help || state.settings || state.records || state.detail || state.requirements || state.runtime || state.fleets || state.plans || state.folder || state.switcher || state.tree || state.inside);
   }
 
   #send(id: string, data: string): void {
@@ -953,6 +962,57 @@ export class DeskApp {
       case 'changes':
         void this.#changesEffect(effect.effect);
         return;
+      case 'inside-open':
+        this.#openInside(effect.id);
+        return;
+    }
+  }
+
+  // ─── 에이전트 안(#1411) ───
+
+  /** 열려 있는 동안만 활동 기록을 INSIDE_POLL_MS마다 받는다. 닫으면(state.inside가 없으면) 다음 때에 멈춘다 */
+  #openInside(id: string): void {
+    clearInterval(this.#insideTimer);
+    this.#insideTimer = undefined;
+    if (!this.#client.agentActivity) {
+      this.#patchInside(id, (inside) => insideFailed(inside, { status: 404, message: '이 스튜디오는 활동 기록을 지원하지 않습니다' }));
+      return;
+    }
+    void this.#loadInside();
+    this.#insideTimer = setInterval(() => {
+      if (!this.#state.inside) {
+        clearInterval(this.#insideTimer);
+        this.#insideTimer = undefined;
+        return;
+      }
+      void this.#loadInside();
+    }, INSIDE_POLL_MS);
+    this.#insideTimer.unref?.();
+  }
+
+  #patchInside(id: string, change: (state: InsideState) => InsideState): void {
+    const inside = this.#state.inside;
+    if (!inside || inside.id !== id) return;
+    this.#state = { ...this.#state, inside: change(inside) };
+    this.#scheduleRender();
+  }
+
+  async #loadInside(): Promise<void> {
+    const inside = this.#state.inside;
+    const load = this.#client.agentActivity;
+    if (!inside || !load || this.#insideFetching === inside.id) return;
+    const id = inside.id;
+    this.#insideFetching = id;
+    try {
+      const data = await load.call(this.#client, id);
+      if (this.#restored) return;
+      this.#patchInside(id, (current) => insideLoaded(current, data));
+    } catch (error) {
+      if (this.#restored) return;
+      const status = error instanceof StudioRequestError ? error.status : undefined;
+      this.#patchInside(id, (current) => insideFailed(current, { ...(status !== undefined ? { status } : {}), message: messageOf(error) }));
+    } finally {
+      if (this.#insideFetching === id) this.#insideFetching = undefined;
     }
   }
 
@@ -1821,7 +1881,7 @@ export class DeskApp {
     const slots = [...state.slots];
     slots[slot] = sessionId;
     // 요구사항(#894)·지금 변경(#924) 화면을 닫고 그 칸을 보인다
-    this.#state = { ...state, requirements: undefined, changes: undefined, slots, focus: slot, view: undefined, zoom: state.zoom && slot === state.focus };
+    this.#state = { ...state, requirements: undefined, changes: undefined, inside: undefined, slots, focus: slot, view: undefined, zoom: state.zoom && slot === state.focus };
     // 끝났거나 열지 못한 터미널이면 다시 연다
     if (this.#closed.delete(sessionId)) this.#sizes.delete(sessionId);
     this.#slotsChanged();
@@ -3289,6 +3349,8 @@ export class DeskApp {
     clearTimeout(this.#agentsRetry);
     this.#agentsAbort?.abort();
     clearInterval(this.#usageTimer);
+    clearInterval(this.#insideTimer);
+    this.#insideTimer = undefined;
     clearInterval(this.#plansTimer);
     clearTimeout(this.#frameTimer);
     clearTimeout(this.#previewTimer);

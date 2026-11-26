@@ -33,6 +33,7 @@ import { needsYou } from './cards';
 import { changesKey, changesPaste, type ChangesEffect, type ChangesState } from './changes';
 import { fleetsKey, fleetsPaste, openFleets, type FleetsEffect, type FleetsState } from './fleets';
 import { folderKey, folderPaste, openFolder, type FolderEffect, type FolderState } from './folder';
+import { insideKey, openInside, type InsideState } from './inside';
 import type { KittyImages } from './kitty';
 import { openPlans, plansKey, plansPaste, type PlansEffect, type PlansState } from './plans';
 import { openRecords, recordsKey, type RecordsLoad, type RecordsState } from './records';
@@ -182,6 +183,8 @@ export interface DeskState {
   switcher?: SwitcherState;
   /** 에이전트 나무 목록(앞글쇠 다음 m). 있으면 본문 자리가 이 목록이다 */
   tree?: AgentTreeState;
+  /** 에이전트 안(#1411, 카드 화면에서 s, 나무에서 서브에이전트 줄 Enter). 있으면 본문 자리가 이 화면이다. 깊이 1은 메인·서브에이전트 카드, 깊이 2는 에이전트 하나의 활동 기록 */
+  inside?: InsideState;
   /** 설정한 앞글쇠(없으면 Ctrl-b)와 화면에 보일 이름(#874) */
   prefixKey?: string;
   prefixLabel?: string;
@@ -293,7 +296,9 @@ export type Effect =
   /** 지금 변경 화면을 연다(#924). 의견은 desk가 읽어 채우고 변경을 받는다 */
   | { type: 'changes-open'; id: string; title: string }
   /** 지금 변경 화면이 낸 할 일 */
-  | { type: 'changes'; effect: ChangesEffect };
+  | { type: 'changes'; effect: ChangesEffect }
+  /** 에이전트 안 화면을 열었다(#1411). desk가 그 세션의 활동 기록을 열려 있는 동안 받는다 */
+  | { type: 'inside-open'; id: string };
 
 /** 실험 기능을 끈 서버에서 실험 화면 키를 눌렀을 때의 알림(ADR-166·200) */
 function experimentalNote(screen: string): string {
@@ -365,7 +370,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정·요구사항·기록·세션 자세히·작업 나누기·여러 AI 비교·실행)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans || state.fleets || state.runtime || state.folder || state.changes || state.switcher || state.tree) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans || state.fleets || state.runtime || state.folder || state.changes || state.switcher || state.tree || state.inside) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -472,13 +477,27 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       if (result.chosen) state = jumpTo(state, result.chosen, effects);
       continue;
     }
+    if (state.inside && !state.prefix && input[at] !== prefixOf(state)) {
+      // 에이전트 안(#1411): 앞글쇠가 아닌 키는 모두 그 화면이 받는다. 앞글쇠 다음 키는 commandKey가 받는다
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = insideKey(state, key);
+      state = { ...state, inside: result.state, ...(result.help ? { help: true } : {}) };
+      // 메인 카드에서 Enter: 카드 화면에서 Enter한 것과 같다(고른 칸에 그 세션의 터미널을 연다)
+      if (result.terminal) {
+        const index = deskSessions(state.items).findIndex((item) => item.id === result.state?.id);
+        state = commandKey({ ...state, inside: undefined, ...(index >= 0 ? { selected: index } : {}) }, '\r', effects);
+      }
+      continue;
+    }
     if (state.tree && !state.prefix && input[at] !== prefixOf(state)) {
       // 에이전트 나무 목록: 앞글쇠가 아닌 키는 모두 고르기다. 앞글쇠 다음 키는 commandKey가 받는다
       const key = nextKey(input, at);
       at += key.length;
       const result = treeKey(state, key);
       state = { ...state, tree: result.state, ...(result.help ? { help: true } : {}) };
-      if (result.chosen) state = jumpTo(state, result.chosen, effects);
+      if (result.agent && result.chosen) state = openInsideAt(state, result.chosen, result.agent, effects);
+      else if (result.chosen) state = jumpTo(state, result.chosen, effects);
       continue;
     }
     if (state.folder && !state.prefix && input[at] !== prefixOf(state)) {
@@ -567,8 +586,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
   // 빠른 전환 목록이면 거르기에 넣는다(#922)
   if (state.switcher) return { ...next, switcher: switcherPaste(state.switcher, content) };
-  // 에이전트 나무 목록은 글을 받지 않는다(칸으로도 가지 않는다)
-  if (state.tree) return next;
+  // 에이전트 나무 목록과 에이전트 안은 글을 받지 않는다(칸으로도 가지 않는다)
+  if (state.tree || state.inside) return next;
   // 설정 화면이 열려 있으면 그 입력 칸에 넣는다(#890)
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
   // 비교 화면이 열려 있으면 새 비교의 입력 칸에 넣는다(#892)
@@ -668,6 +687,10 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
   if (state.switcher && key !== ' ' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
     // 다른 화면이나 칸을 다루는 키는 빠른 전환을 닫고 한다(#922)
     state = { ...state, switcher: undefined };
+  }
+  if (state.inside && key !== '?' && key !== ESC && key !== prefixOf(state)) {
+    // 다른 화면이나 칸을 다루는 키는 에이전트 안을 닫고 한다(#1411)
+    state = { ...state, inside: undefined };
   }
   if (state.tree && key !== 'm' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
     // 다른 화면이나 칸을 다루는 키는 에이전트 나무 목록을 닫고 한다
@@ -907,7 +930,7 @@ function nextWaiting(state: DeskState): string | undefined {
 /** 세션 하나로 간다(#922): 칸 화면으로 돌아와 그 세션을 고르고, 이미 칸에 있으면 그 칸을, 아니면 고른 칸에 연다 */
 function jumpTo(start: DeskState, id: string, effects: Effect[]): DeskState {
   const index = deskSessions(start.items).findIndex((item) => item.id === id);
-  const state: DeskState = { ...start, view: undefined, usageBack: undefined, switcher: undefined, tree: undefined, ...(index >= 0 ? { selected: index } : {}) };
+  const state: DeskState = { ...start, view: undefined, usageBack: undefined, switcher: undefined, tree: undefined, inside: undefined, ...(index >= 0 ? { selected: index } : {}) };
   const already = state.slots.findIndex((slot, at) => slot === id && at < state.layout);
   if (already >= 0) {
     if (state.zoom && already !== state.focus) effects.push({ type: 'layout' });
@@ -922,6 +945,18 @@ function jumpTo(start: DeskState, id: string, effects: Effect[]): DeskState {
   slots[target] = id;
   effects.push({ type: 'open', slot: target, id });
   return { ...state, slots, focus: target };
+}
+
+/** 에이전트 안(#1411)을 연다. agent가 있으면 그 서브에이전트의 활동 기록(깊이 2)으로 바로 들어간다. 나무 목록은 닫는다 */
+function openInsideAt(state: DeskState, id: string, agent: string | undefined, effects: Effect[]): DeskState {
+  const item = deskSessions(state.items).find((entry) => entry.id === id);
+  if (!item) return { ...state, tree: undefined, message: '에이전트 안을 볼 세션이 없습니다' };
+  // 덮는 화면은 하나만 둔다
+  if (state.plans) effects.push({ type: 'plans', effect: { type: 'close' } });
+  if (state.fleets) effects.push({ type: 'fleets', effect: { type: 'close' } });
+  if (state.runtime) effects.push({ type: 'runtime', effect: { type: 'close' } });
+  effects.push({ type: 'inside-open', id });
+  return { ...state, tree: undefined, switcher: undefined, prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined, fleets: undefined, runtime: undefined, folder: undefined, changes: undefined, inside: openInside(id, item.title, agent ? { depth: 2, agent } : {}) };
 }
 
 /** 스페이스 화면의 키(#887): 앞글쇠 없이 카드를 고르고 연다. 칸으로 보낼 글자는 없다 */
@@ -940,6 +975,11 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     return { ...base, selected: next.sessions[0]! };
   }
   if (key === ESC || key === 'w') return { ...base, view: undefined };
+  // 에이전트 안(#1411): 고른 세션의 메인·서브에이전트 카드와 코드 조각. Enter(칸에 열기)는 그대로 두고 s로 들어간다
+  if (key === 's') {
+    const item = sessions[state.selected];
+    return item ? openInsideAt(base, item.id, undefined, effects) : base;
+  }
   // 확인 필요 줄의 번호(#934): 그 세션을 고른다. 여는 것은 Enter다(CLI에는 아무 키도 보내지 않는다)
   if (/^[1-9]$/.test(key)) {
     const entry = needsYou(state)[Number(key) - 1];

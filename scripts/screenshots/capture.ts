@@ -16,10 +16,11 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { openInside } from '../../apps/cli/src/desk/inside';
 import { initialState, type DeskState } from '../../apps/cli/src/desk/keys';
 import { renderScreen, type PaneView } from '../../apps/cli/src/desk/render';
 import { openSettings } from '../../apps/cli/src/desk/settings';
-import type { DeskItem } from '../../apps/cli/src/desk/types';
+import type { ActivityLogView, DeskItem } from '../../apps/cli/src/desk/types';
 import { sessionLimits, usageAccounts } from '../../apps/cli/src/desk/usage';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -68,6 +69,66 @@ const items: DeskItem[] = [
   { kind: 'session', id: 's-login', title: '로그인 오류 고치기', projectName: 'shop', state: 'idle', backend: 'codex', accountId: 'codex', lastActivityAt: at(-7), terminal: { cli: 'up' }, gate: { state: 'failed', checkpoints: 2 }, reason: '로그인 API 계약 테스트 2개 실패', tokens: usage(20_000, 3_000) },
   { kind: 'session', id: 's-blog', title: '글 목록 페이지', projectName: 'blog', state: 'stopped', backend: 'claude-code', lastActivityAt: at(-300) },
 ];
+
+/** 에이전트 안(#1411) 사진용 활동 기록(가짜). 에이전트마다 다른 코드 조각을 둔다 */
+const tAt = (seconds: number) => new Date(now - seconds * 1000).toISOString();
+const activity: ActivityLogView = {
+  agents: [
+    {
+      id: 'main',
+      main: true,
+      entries: [
+        { at: tAt(60), endedAt: tAt(58), tool: 'Read', kind: 'read', state: 'done', target: 'apps/shop/order.ts' },
+        {
+          at: tAt(14),
+          endedAt: tAt(13),
+          tool: 'Edit',
+          kind: 'edit',
+          state: 'done',
+          target: 'apps/shop/order.ts',
+          changes: [{ file: 'apps/shop/order.ts', removed: 'export function createOrder(input) {\n  return repo.save(input);', added: 'export class OrderService {\n  constructor(private readonly repo: OrderRepo) {}' }],
+        },
+      ],
+    },
+    { id: 'sub-1', type: 'Explore', description: '주문 호출부 찾기', state: 'working', entries: [{ at: tAt(40), endedAt: tAt(39), tool: 'Grep', kind: 'search', state: 'done', target: 'updateOrder' }, { at: tAt(20), endedAt: tAt(19), tool: 'Read', kind: 'read', state: 'done', target: 'apps/shop/cart.ts' }, { at: tAt(6), tool: 'Read', kind: 'read', state: 'running', target: 'apps/shop/checkout.ts' }] },
+    {
+      id: 'sub-2',
+      type: 'general-purpose',
+      description: '결제 이벤트 정리',
+      state: 'working',
+      entries: [
+        {
+          at: tAt(420),
+          endedAt: tAt(418),
+          tool: 'Edit',
+          kind: 'edit',
+          state: 'done',
+          target: 'apps/shop/payment/events.ts',
+          changes: [{ file: 'apps/shop/payment/events.ts', removed: "export const PAID = 'paid';\nexport const FAIL = 'fail';", added: "export const PAYMENT_PAID = 'payment.paid';\nexport const PAYMENT_FAILED = 'payment.failed';" }],
+        },
+      ],
+    },
+    {
+      id: 'sub-3',
+      type: 'Explore',
+      description: '상태 전이 타입 확인',
+      state: 'working',
+      entries: [
+        {
+          at: tAt(30),
+          endedAt: tAt(29),
+          tool: 'Write',
+          kind: 'write',
+          state: 'done',
+          target: 'apps/shop/order-state.ts',
+          changes: [{ file: 'apps/shop/order-state.ts', added: "export type OrderState = 'created' | 'paid' | 'shipped';\nexport const NEXT: Record<OrderState, OrderState[]> = {\n  created: ['paid'],\n  paid: ['shipped'],\n  shipped: [],\n};", truncated: true }],
+        },
+      ],
+    },
+    { id: 'sub-4', type: 'test-runner', description: '주문 단위 테스트', state: 'working', entries: [{ at: tAt(50), endedAt: tAt(20), tool: 'Bash', kind: 'run', state: 'failed', command: 'pnpm test order', output: ' ✓ order-create.test.ts (4)\n ✗ order-state.test.ts (2)\n   AssertionError: expected shipped to equal paid\n Tests  1 failed | 4 passed', error: '종료 코드 1' }] },
+    { id: 'sub-5', type: 'Explore', description: '환불 흐름 읽기', state: 'done', entries: [{ at: tAt(900), endedAt: tAt(899), tool: 'Write', kind: 'write', state: 'done', target: '.env.local', withheld: 'secret', changes: [{ file: '.env.local' }] }] },
+  ],
+};
 
 const claude = (id: string, name: string, status: string, five: number | undefined, week: number | undefined, extra: Record<string, unknown> = {}) => ({
   id,
@@ -176,6 +237,40 @@ const shots: Shot[] = [
   },
   // 에이전트 나무 목록: 세션마다 부모 줄, 서브에이전트마다 자식 줄(작업 중·소식 없음·끝남이 섞인다)
   { name: 'desk-agents', cols: 160, rows: 30, state: () => ({ ...base(), tree: { index: 2, session: 's-order', agent: 'sub-2', all: false } }) as DeskState },
+  // 에이전트 안 깊이 1(#1411): 메인과 서브에이전트마다 카드, 각자 다른 코드 조각. 비밀 파일은 내용을 보이지 않는다
+  { name: 'desk-inside', cols: 160, rows: 34, state: () => ({ ...base(), inside: { ...openInside('s-order', '주문 모듈 리팩터링'), agent: 'sub-2', cursor: 2, data: activity, loading: false } }) as DeskState },
+  // 깊이 2: 서브에이전트 하나의 활동 기록(시각·도구·대상·상태·걸린 시간, diff, 명령과 결과)
+  {
+    name: 'desk-activity',
+    cols: 160,
+    rows: 30,
+    state: () =>
+      ({
+        ...base(),
+        inside: {
+          ...openInside('s-order', '주문 모듈 리팩터링', { depth: 2, agent: 'sub-4' }),
+          data: {
+            agents: [
+              ...activity.agents.filter((agent) => agent.id !== 'sub-4'),
+              {
+                id: 'sub-4',
+                type: 'test-runner',
+                description: '주문 단위 테스트',
+                state: 'working',
+                entries: [
+                  { at: tAt(160), endedAt: tAt(158), tool: 'Read', kind: 'read', state: 'done', target: 'apps/shop/order.test.ts' },
+                  { at: tAt(120), endedAt: tAt(119), tool: 'Edit', kind: 'edit', state: 'done', target: 'apps/shop/order.test.ts', changes: [{ file: 'apps/shop/order.test.ts', removed: "expect(next('paid')).toBe('paid');", added: "expect(next('paid')).toBe('shipped');" }] },
+                  { at: tAt(90), endedAt: tAt(60), tool: 'Bash', kind: 'run', state: 'done', command: 'pnpm test order', output: ' ✓ order-create.test.ts (4)\n ✗ order-state.test.ts (2)\n   AssertionError: expected paid to equal shipped\n Tests  1 failed | 4 passed' },
+                  { at: tAt(50), tool: 'Write', kind: 'write', state: 'denied', target: 'infra/prod.yaml', error: '쓰기 범위 밖입니다' },
+                  { at: tAt(20), tool: 'Bash', kind: 'run', state: 'running', command: 'pnpm test order' },
+                ],
+              },
+            ],
+          },
+          loading: false,
+        },
+      }) as DeskState,
+  },
   { name: 'desk-usage', cols: 140, rows: 34, state: () => ({ ...base(), view: 'usage', usageSelected: 1 }) as unknown as DeskState },
   {
     name: 'desk-settings',
