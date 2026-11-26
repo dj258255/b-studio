@@ -595,3 +595,50 @@ export interface DeskQaStart {
   startPath: string;
   confirmText?: string;
 }
+
+/**
+ * 에이전트별 활동 기록(#1411, 스튜디오의 `GET /api/sessions/:id/agents/activity`). 스튜디오의 모듈을 가져오지 않고 같은 모양을 따로 둔다.
+ * 글은 모두 서버가 준 것이라 화면에 그리기 전에 제어 글자와 ANSI를 지운다(inside.ts의 cleanText)
+ */
+export type ActivityKindView = 'read' | 'search' | 'edit' | 'write' | 'run' | 'other';
+export type ActivityStateView = 'running' | 'done' | 'failed' | 'denied' | 'unknown';
+/** 코드 조각을 남기지 않은 까닭: secret 비밀 파일, unknown 판정 못 함, large 원문이 상한을 넘음 */
+export type ActivityWithheldView = 'secret' | 'unknown' | 'large';
+
+export interface ActivityChangeView {
+  file?: string;
+  removed?: string;
+  added?: string;
+  patch?: string;
+  truncated?: true;
+}
+
+export interface ActivityEntryView {
+  id?: string;
+  at: string;
+  endedAt?: string;
+  tool: string;
+  kind: ActivityKindView;
+  state: ActivityStateView;
+  target?: string;
+  changes?: ActivityChangeView[];
+  command?: string;
+  output?: string;
+  error?: string;
+  withheld?: ActivityWithheldView;
+  truncated?: true;
+}
+
+export interface AgentActivityLogView {
+  /** 메인은 'main', 서브에이전트는 인스턴스 id */
+  id: string;
+  main?: true;
+  type?: string;
+  description?: string;
+  state?: 'working' | 'done';
+  entries: ActivityEntryView[];
+}
+
+export interface ActivityLogView {
+  agents: AgentActivityLogView[];
+}

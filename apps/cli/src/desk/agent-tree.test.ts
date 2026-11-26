@@ -126,8 +126,9 @@ describe('에이전트 나무 목록: 키', () => {
     expect(treeKey(reordered, '\x1b[B').state).toMatchObject({ session: 'a', agent: 'a2' });
   });
 
-  it('Enter는 고른 줄의 세션을 고르고(자식 줄도 그 세션), Esc와 m은 닫고, Tab은 범위를 바꾼다', () => {
-    expect(treeKey({ ...state(), tree: { index: 2, all: false } }, '\r').chosen).toBe('a');
+  it('Enter는 부모 줄이면 그 세션을, 자식 줄이면 그 세션과 서브에이전트(활동 기록으로 들어간다)를 고르고, Esc와 m은 닫고, Tab은 범위를 바꾼다', () => {
+    expect(treeKey({ ...state(), tree: { index: 0, all: false } }, '\r')).toEqual({ chosen: 'a' });
+    expect(treeKey({ ...state(), tree: { index: 2, all: false } }, '\r')).toEqual({ chosen: 'a', agent: 'a2' });
     expect(treeKey(state(), '\x1b')).toEqual({});
     expect(treeKey(state(), 'm')).toEqual({});
     expect(treeKey(state(), '\t').state?.all).toBe(true);
