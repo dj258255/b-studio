@@ -460,7 +460,8 @@ export async function desk(options: DeskOptions, env: NodeJS.ProcessEnv = proces
   const spriteSetting = config.sprites ?? 'random';
   const sprites: Record<string, Sprite> = {};
   if (spriteSetting !== 'off') {
-    for (const name of ['claude-code', 'codex', 'gemini', 'default']) {
+    // `subagent`는 서브에이전트 카드의 그림(에이전트 안 화면)
+    for (const name of ['claude-code', 'codex', 'gemini', 'default', 'subagent']) {
       const sprite = loadSprite(spriteDir(dir), [name], warnings);
       if (sprite) sprites[name] = sprite;
     }

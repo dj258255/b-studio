@@ -378,6 +378,49 @@ export function defaultSprite(backend: string | undefined): Sprite {
   return spriteFromRows(ROBOT, { a: '#f9e2af', b: body, c: '#6c7086', w: '#eff1f5', k: '#1e1e2e' });
 }
 
+/** 서브에이전트의 기본 그림: 프로펠러와 어두운 눈가리개가 있는 도우미 로봇. 메인의 로봇(안테나, 흰 얼굴)과 윤곽부터 다르다 */
+const HELPER = [
+  ' cccccccc ',
+  '    cc    ',
+  '  bbbbbb  ',
+  ' bbbbbbbb ',
+  ' bkkkkkkb ',
+  ' bkwkkwkb ',
+  ' bbbbbbbb ',
+  '  bbbbbb  ',
+  '  c    c  ',
+  ' cc    cc ',
+];
+/** CLI에 들어 있는 종류의 몸 색. 메인의 몸 색(주황·청회색·청록·회색)과 겹치지 않게 골랐다 */
+const KIND_BODY = new Map<string, string>([
+  ['Explore', '#89b4fa'],
+  ['Plan', '#a6e3a1'],
+  ['general-purpose', '#cba6f7'],
+]);
+/** 사람이 만든 종류의 몸 색: 이름으로 하나를 고른다(같은 종류는 늘 같은 색) */
+const CUSTOM_BODY = ['#f5c2e7', '#f9e2af', '#94e2d5', '#f38ba8', '#74c7ec'];
+const helperSprites = new Map<string, Sprite>();
+
+/**
+ * 서브에이전트 카드의 그림. 메인과 모양이 다르고, 종류마다 몸 색이 다르다.
+ * 같은 색이면 같은 객체를 돌려준다(Kitty 경로가 그림을 객체로 기억하므로 매번 새로 만들면 그림을 다시 보낸다). 만드는 그림 수는 색 수를 넘지 않는다
+ */
+export function subagentSprite(type: string | undefined): Sprite {
+  let body = type === undefined ? undefined : KIND_BODY.get(type);
+  if (!body) {
+    let hash = 0;
+    // 이름이 길어도 앞 64자만 읽는다
+    for (const char of (type ?? '').slice(0, 64)) hash = (hash * 31 + char.codePointAt(0)!) >>> 0;
+    body = CUSTOM_BODY[hash % CUSTOM_BODY.length]!;
+  }
+  let sprite = helperSprites.get(body);
+  if (!sprite) {
+    sprite = spriteFromRows(HELPER, { b: body, c: '#6c7086', w: '#eff1f5', k: '#1e1e2e' });
+    helperSprites.set(body, sprite);
+  }
+  return sprite;
+}
+
 export function spriteDir(configDir: string): string {
   return join(configDir, 'sprites');
 }

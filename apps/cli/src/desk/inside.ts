@@ -9,7 +9,7 @@
  * 기록의 글은 모두 서버가 준 것(CLI가 훅으로 보낸 코드와 명령 결과)이라 그리기 전에 cleanText로 제어 글자와 ANSI를 지운다.
  * 그릴 줄 수에는 상한이 있다(항목 수, 항목마다의 변경·줄 수, 한 에이전트의 총 줄 수). 키와 그림은 순수 함수다
  */
-import { agentQuiet, artSize, clipWords, compose, forText, nowLine, oneLine, spanText, spriteFor, subagentsOf, type Seg } from './cards';
+import { agentQuiet, artSize, clipWords, compose, forText, nowLine, oneLine, spanText, spriteFor, subagentSpriteFor, subagentsOf, type Seg } from './cards';
 import type { DeskState } from './keys';
 import type { KittyImages } from './kitty';
 import { fitAnsi, stringWidth, type Rect } from './screen';
@@ -520,7 +520,8 @@ function innerRows(built: BuiltCard, width: number): number {
 /** 카드 하나의 줄(테두리 포함). 안쪽 줄 수는 rows로 맞춘다 */
 function cardBox(built: BuiltCard, item: DeskItem, source: InsideSource, theme: Theme, width: number, selected: boolean, rows: number): string[] {
   const art = width >= ART_MIN_CARD ? ART : { cols: 0, rows: 0 };
-  const sprite = spriteFor(item, source.sprites);
+  // 메인은 세션의 그림, 서브에이전트는 종류마다 색이 다른 도우미 그림(한눈에 가른다)
+  const sprite = built.card.main ? spriteFor(item, source.sprites) : subagentSpriteFor(built.card.agent?.type ?? built.card.log?.type, source.sprites);
   const frame = frameAt(sprite, source.spriteClock ?? 0);
   const kitty: KittyImages | undefined = source.kitty;
   const picture = art.cols ? (kitty ? kitty.art(sprite, frame, art.cols, art.rows) : spriteLines(sprite, art.cols, art.rows, theme, frame)) : [];

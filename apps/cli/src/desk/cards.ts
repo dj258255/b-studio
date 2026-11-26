@@ -10,7 +10,7 @@ import type { DeskState } from './keys';
 import { fit, fitAnsi, stringWidth, type Rect } from './screen';
 import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, headStatus, subagentName, toolLabel, toolLineLabel, totalTokens, type StatusBadge } from './sidebar';
 import type { KittyImages } from './kitty';
-import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
+import { defaultSprite, frameAt, spriteLines, subagentSprite, type Sprite } from './sprite';
 import { BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
 import type { DeskAgent, DeskItem, DeskLimits, DeskLimitWindow } from './types';
 import { badge, bar, box, contextColor, spread, statusColor, statusText, TONE_COLOR, wrapWords } from './widgets';
@@ -37,6 +37,11 @@ const WEEKDAY = ['일', '월', '화', '수', '목', '금', '토'];
 /** 카드의 그림: 세션 id, AI 이름, default 차례로 찾고, 없으면 desk의 기본 그림 */
 export function spriteFor(item: DeskItem, sprites: Readonly<Record<string, Sprite>> = {}): Sprite {
   return sprites[item.id] ?? (item.backend ? sprites[item.backend] : undefined) ?? sprites.default ?? defaultSprite(item.backend);
+}
+
+/** 서브에이전트 카드의 그림: 그림 폴더의 `subagent` 그림, 없으면 종류마다 색이 다른 도우미 로봇. 메인의 그림과 늘 다르다 */
+export function subagentSpriteFor(type: string | undefined, sprites: Readonly<Record<string, Sprite>> = {}): Sprite {
+  return sprites.subagent ?? subagentSprite(type);
 }
 
 /** 다시 차는 때: 하루 안이면 "1시간 50분 뒤", 아니면 "10/26(월) 02:00"(이 컴퓨터 시각) */

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { activityLines, MAX_ACTIVITY_LINES, MAX_ENTRIES, cleanText, insideCards, insideFailed, insideKey, insideLoaded, openInside, renderInside, type InsideState } from './inside';
 import { flushPending, handleInput, initialState, type DeskState } from './keys';
 import { stringWidth, stripAnsi } from './screen';
+import { defaultSprite, spriteLines, subagentSprite, type Sprite } from './sprite';
 import { DEFAULT_THEME } from './theme';
 import type { ActivityEntryView, ActivityLogView, DeskAgent, DeskItem } from './types';
 
@@ -327,5 +328,32 @@ describe('에이전트 안: desk 키 처리', () => {
     const opened = handleInput(desk(), 's').state;
     const next = handleInput(opened, '\x02w').state;
     expect(next.inside).toBeUndefined();
+  });
+});
+
+describe('메인과 서브에이전트의 그림이 다르다', () => {
+  // 카드의 그림 자리는 12칸×5줄이다. 그림의 둘째 줄(몸이 나오는 줄)이 어느 카드에 들어갔는지로 본다
+  const row = (sprite: Sprite) => spriteLines(sprite, 12, 5, DEFAULT_THEME, 0)[1]!;
+  const mainArt = row(defaultSprite('claude-code'));
+  const exploreArt = row(subagentSprite('Explore'));
+  const item = { ...session, backend: 'claude-code' };
+
+  it('메인 카드는 세션의 그림, 서브에이전트 카드는 도우미 그림이다(서브에이전트 카드에 메인의 그림이 없다)', () => {
+    expect(mainArt).not.toBe(exploreArt);
+    const lines = renderInside(state(base(), { items: [item] }), { w: 80, h: 40 }, NOW).lines;
+    const withMain = lines.filter((line) => line.includes(mainArt));
+    const withSub = lines.filter((line) => line.includes(exploreArt));
+    // 메인은 한 장, 서브에이전트(탐색)는 한 장 이상
+    expect(withMain).toHaveLength(1);
+    expect(withSub.length).toBeGreaterThanOrEqual(1);
+    expect(withMain[0]).not.toBe(withSub[0]);
+  });
+
+  it('그림 폴더에 subagent 그림이 있으면 서브에이전트 카드가 그것을 쓴다(메인은 그대로)', () => {
+    const custom: Sprite = { width: 1, height: 1, pixels: new Uint8Array([1, 2, 3, 255]) };
+    const lines = renderInside(state(base(), { items: [item], sprites: { subagent: custom } }), { w: 80, h: 40 }, NOW).lines;
+    expect(lines.filter((line) => line.includes(mainArt))).toHaveLength(1);
+    expect(lines.some((line) => line.includes(exploreArt))).toBe(false);
+    expect(lines.some((line) => line.includes(row(custom)))).toBe(true);
   });
 });

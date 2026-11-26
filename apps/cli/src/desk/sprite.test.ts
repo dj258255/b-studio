@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { crc32, deflateSync } from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 import { stringWidth, stripAnsi } from './screen';
-import { decodePng, decodeSprite, defaultSprite, encodePng, frameAt, frameDelay, loadSprite, pickSprite, scalePixels, scanSprites, shortestFrame, shrinkPixels, spriteFromRows, spriteLines, trimSprite, type Sprite } from './sprite';
+import { decodePng, decodeSprite, defaultSprite, subagentSprite, encodePng, frameAt, frameDelay, loadSprite, pickSprite, scalePixels, scanSprites, shortestFrame, shrinkPixels, spriteFromRows, spriteLines, trimSprite, type Sprite } from './sprite';
 import { DEFAULT_THEME } from './theme';
 
 function chunk(kind: string, body: Buffer): Buffer {
@@ -250,5 +250,44 @@ describe('그림 폴더에서 무작위로 고르기(#902)', () => {
     writeFileSync(join(dir, 'codex.gif'), tinyGif(4, 5, 6));
     const sprite = loadSprite(dir, ['codex']);
     expect(sprite && rgba(sprite, 0, 0)).toEqual([4, 5, 6, 255]);
+  });
+});
+
+describe('서브에이전트 그림', () => {
+  const colorsOf = (sprite: { pixels: Uint8Array }): Set<string> => {
+    const seen = new Set<string>();
+    for (let at = 0; at < sprite.pixels.length; at += 4) if (sprite.pixels[at + 3]) seen.add([sprite.pixels[at], sprite.pixels[at + 1], sprite.pixels[at + 2]].join(','));
+    return seen;
+  };
+  const same = (a: { pixels: Uint8Array }, b: { pixels: Uint8Array }): boolean => Buffer.from(a.pixels).equals(Buffer.from(b.pixels));
+
+  it('메인의 기본 그림과 모양이 다르다(어느 AI의 기본 그림과도 같지 않다)', () => {
+    for (const backend of ['claude-code', 'codex', 'gemini', undefined]) {
+      for (const type of ['Explore', 'Plan', 'general-purpose', 'test-runner', undefined]) expect(same(subagentSprite(type), defaultSprite(backend))).toBe(false);
+    }
+    // 색만 바꾼 같은 모양이 아니다: 불투명한 자리 자체가 다르다
+    const opaque = (sprite: { pixels: Uint8Array }) => Array.from({ length: sprite.pixels.length / 4 }, (_, index) => (sprite.pixels[index * 4 + 3] ? '1' : '0')).join('');
+    expect(opaque(subagentSprite('Explore'))).not.toBe(opaque(defaultSprite('claude-code')));
+  });
+
+  it('CLI에 들어 있는 종류마다 몸 색이 다르고, 메인의 몸 색과 겹치지 않는다', () => {
+    const body = (type: string | undefined) => [...colorsOf(subagentSprite(type))].sort().join(' ');
+    const kinds = ['Explore', 'Plan', 'general-purpose'].map(body);
+    expect(new Set(kinds).size).toBe(3);
+    // 메인의 몸 색(AI별 셋과 모르는 AI의 회색)은 서브에이전트 그림에 쓰지 않는다
+    const mainBodies = ['232,149,107', '138,164,200', '127,183,164', '166,173,200'];
+    for (const type of ['Explore', 'Plan', 'general-purpose', 'test-runner', 'reviewer', undefined]) {
+      for (const color of mainBodies) expect(colorsOf(subagentSprite(type)).has(color)).toBe(false);
+    }
+  });
+
+  it('같은 종류는 같은 그림 객체다(Kitty가 그림을 객체로 기억한다). 사람이 만든 종류와 이상한 이름도 던지지 않는다', () => {
+    expect(subagentSprite('Explore')).toBe(subagentSprite('Explore'));
+    expect(subagentSprite('test-runner')).toBe(subagentSprite('test-runner'));
+    for (const type of ['__proto__', 'constructor', '', 'x'.repeat(10_000)]) expect(subagentSprite(type).width).toBeGreaterThan(0);
+    // 종류가 아무리 많아도 만드는 그림 수는 색 수를 넘지 않는다
+    const made = new Set(Array.from({ length: 500 }, (_, index) => subagentSprite(`custom-${index}`)));
+    expect(made.size).toBeLessThanOrEqual(8);
+    expect(made.size).toBeGreaterThan(1);
   });
 });
