@@ -6,6 +6,7 @@ import {
   defaultAgentGatewayRoot,
   ensureAgentContainer,
   expectedHostGatewayFiles,
+  firstPromptArg,
   hostCliPath,
   ACCOUNT_DIR_ENV,
   findHostCli,
@@ -141,6 +142,11 @@ export interface TerminalTarget {
   /** CLI의 홈 볼륨을 나누는 단위 */
   projectId: string;
   /**
+   * 홈 볼륨을 사용자별로 가르는 사용자 id(terminalHomeUser). 인증을 켠 서버 방식에서만 있다 — 사람마다 자기 구독으로 컨테이너 안에서 로그인하므로
+   * 같은 프로젝트라도 사용자마다 홈 볼륨이 다르다. 개인 PC 방식(인증 없음)은 없고, 옛 볼륨 이름을 그대로 쓴다
+   */
+  homeUser?: string;
+  /**
    * 세션 프로젝트가 선언한 평가 자산(studio.yaml workflow.evaluationAssets). 컨테이너 방식이면 작업 복사본 위에 읽기 전용으로 덮는다.
    * 이 컴퓨터 방식은 마운트가 없어 게이트의 지문 견줌에만 기댄다
    */
@@ -188,7 +194,7 @@ export interface TerminalBackend {
   prepare(target: TerminalTarget, gateway?: AgentGatewayAddress): Promise<string>;
   open(place: string, options: { id: string; size: TerminalSize; target: TerminalTarget; initialPrompt?: string; resumeConversation?: string }): AgentTerminal | Promise<AgentTerminal>;
   /**
-   * 터미널을 열 때 첫 요청을 CLI 실행 인자로 넘길 수 있는가(#836). 이 컴퓨터 방식만 받는다. 받지 않는 백엔드에는 넘기지 않는다
+   * 터미널을 열 때 첫 요청을 CLI 실행 인자로 넘길 수 있는가(#836). 이 컴퓨터 방식과 컨테이너 방식이 받는다. 받지 않는 백엔드에는 넘기지 않는다
    */
   readonly acceptsInitialPrompt?: boolean;
   /**
@@ -235,17 +241,25 @@ export async function removeContainerAndConfig(
   }
 }
 
+/** 컨테이너 백엔드가 터미널을 열 때 openAgentTerminal에 넘길 값. 첫 요청은 호스트 방식과 같은 꼴(firstPromptArg)로 맞춘다 */
+export function containerOpenOptions(options: { id: string; size: TerminalSize; initialPrompt?: string }): { id: string; size: TerminalSize; firstPrompt?: string } {
+  return { id: options.id, size: options.size, ...(options.initialPrompt !== undefined ? { firstPrompt: firstPromptArg(options.initialPrompt) } : {}) };
+}
+
 const DOCKER_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // 컨테이너의 CLI 로그인은 컨테이너 홈 볼륨에 있다. 이 컴퓨터의 계정 폴더를 붙이지 않는다
     if (await target.accountDir?.()) throw new Error('컨테이너 방식 터미널은 기본 계정만 씁니다. 다른 계정은 이 컴퓨터 방식(B_STUDIO_TERMINAL=host)에서 씁니다');
     return ensureAgentContainer(target.sandboxId, target.root, {
       projectId: target.projectId,
+      ...(target.homeUser !== undefined ? { userId: target.homeUser } : {}),
       ...(target.evaluationAssets ? { evaluationAssets: target.evaluationAssets } : {}),
       ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}),
     });
   },
-  open: (place, options) => openAgentTerminal(place, options),
+  // 첫 요청은 호스트 방식과 같은 꼴(firstPromptArg)로 맞춰 환경 변수로만 넘긴다. 컨테이너의 CLI 실행 인자로 쓰이지만 호스트의 인자 배열에는 들어가지 않는다
+  open: (place, options) => openAgentTerminal(place, containerOpenOptions(options)),
+  acceptsInitialPrompt: true,
   remove: (sandboxId) => removeContainerAndConfig(sandboxId),
   reachable: (place) => probeAgentGateway(place),
   unreachable: '컨테이너에서 b-studio에 닿지 못합니다. 이 도커 환경에서는 컨테이너가 이 컴퓨터의 루프백 주소(host.docker.internal)에 닿아야 세션 터미널을 쓸 수 있습니다',

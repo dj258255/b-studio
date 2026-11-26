@@ -112,6 +112,8 @@ describe('세션 터미널을 열 수 있는 자리 (이슈 #673)', () => {
     const target = sessionTerminalTarget(id);
     expect(target.sandboxId).toBe('studio-terminal-fake');
     expect(target.projectId).toBe('termproj');
+    // 인증을 끈 개인 PC 방식은 홈 볼륨을 사용자별로 가르지 않는다(옛 이름 유지, #1401)
+    expect(target.homeUser).toBeUndefined();
     // 붙이는 폴더는 원본이 아니라 세션의 작업 복사본이다
     expect(target.root).not.toBe(fake.root);
     expect(target.root).toContain(process.env.B_STUDIO_SESSIONS_DIR!);

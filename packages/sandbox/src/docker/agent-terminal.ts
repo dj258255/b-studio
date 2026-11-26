@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { mkdir, readFile, realpath, rename, rm, rmdir, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -32,19 +33,42 @@ export const AGENT_WORKSPACE = '/workspace';
  * CLI의 홈 폴더를 두는 볼륨. 세션이 바뀌어도 로그인과 설치한 CLI가 남게 하되, **프로젝트마다 따로** 둔다.
  * 홈 폴더에는 로그인 정보와 CLI의 설정(훅), 셸 설정, 설치한 실행 파일이 있다. 모든 세션이 하나를 같이 쓰면 한 프로젝트의
  * 터미널에서 바꿔 둔 것이 다른 프로젝트의 세션에 그대로 따라간다. 대가는 프로젝트마다 로그인을 한 번씩 하는 것이다.
+ *
+ * 서버 방식(인증을 켠 방식)에서는 **사용자 × 프로젝트마다 따로** 둔다(`userId`를 준다). 사람마다 자기 구독으로 컨테이너 안에서
+ * 로그인하므로, 같은 프로젝트의 다른 사용자가 로그인과 설치한 실행 파일을 같이 쓰면 안 된다. 개인 PC 방식(`userId`가 없다)은
+ * 옛 이름을 그대로 쓴다 — 이름이 바뀌면 이미 해 둔 로그인이 사라진다.
+ * 사용자 id는 이름에 그대로 넣지 않고 해시로만 넣는다(도커 이름에 쓸 수 없는 글자, 길이, 다른 id와 겹침). 옛 이름은 모두
+ * `b-studio-agent-home-`으로 시작하고 사용자별 이름은 `b-studio-agent-uhome-`으로 시작해, 두 꼴이 서로 같은 이름이 될 수 없다.
  */
 export const AGENT_HOME_VOLUME_PREFIX = 'b-studio-agent-home';
-export function agentHomeVolume(projectId: string): string {
+export const AGENT_USER_HOME_VOLUME_PREFIX = 'b-studio-agent-uhome';
+export function agentHomeVolume(projectId: string, userId?: string): string {
   // 볼륨 이름에 쓸 수 있는 글자만 남긴다. 서로 다른 id가 같은 이름이 되지 않게 걸러 낸 글자가 있으면 길이를 덧붙인다
   const safe = projectId.replace(/[^A-Za-z0-9_.-]/g, '-').slice(0, 80);
   if (!safe) throw new SandboxError('프로젝트 id가 비어 있어 에이전트 홈 볼륨을 정할 수 없습니다');
-  return `${AGENT_HOME_VOLUME_PREFIX}-${safe}${safe === projectId ? '' : `-${projectId.length}`}`;
+  const project = `${safe}${safe === projectId ? '' : `-${projectId.length}`}`;
+  if (userId === undefined) return `${AGENT_HOME_VOLUME_PREFIX}-${project}`;
+  if (typeof userId !== 'string' || userId.length === 0) throw new SandboxError('사용자 id가 비어 있어 에이전트 홈 볼륨을 정할 수 없습니다');
+  // 128비트. 같은 사용자 id는 늘 같은 이름이고, 다른 사용자 id가 같은 이름이 되려면 해시가 겹쳐야 한다
+  const user = createHash('sha256').update(userId, 'utf8').digest('hex').slice(0, 32);
+  return `${AGENT_USER_HOME_VOLUME_PREFIX}-${user}-${project}`;
 }
 /** 컨테이너에 설치할 CLI의 판. 고정해 둔다 — 터미널을 열 때마다 "지금 최신"을 받으면 무엇이 깔리는지 알 수 없다. 올릴 때는 가두기를 다시 확인한다(ADR-168) */
 export const AGENT_CLI_PACKAGE = '@anthropic-ai/claude-code@2.1.296';
 const AGENT_HOME = '/home/node';
 const NPM_PREFIX = `${AGENT_HOME}/.npm-global`;
-const AGENT_PATH = `${NPM_PREFIX}/bin:${AGENT_HOME}/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`;
+/**
+ * 터미널의 PATH. 이미지의 시스템 폴더가 **앞**이고 홈 볼륨의 실행 파일 자리가 **뒤**다. 홈 폴더는 에이전트가 쓸 수 있으므로,
+ * 앞에 두면 에이전트가 `node`·`npm`·`bash`·`git` 같은 이름의 실행 파일을 거기에 두어 그 터미널을 쓰는 다음 세션의 도구를 바꿔 낼 수 있다.
+ * `claude`는 이미지에 없고 홈 볼륨에 설치되므로 시스템 폴더에서 못 찾고 뒤의 홈 폴더에서 찾는다. 남는 위험: `claude` 실행 파일 자체는 여전히
+ * 홈 볼륨에 있어 에이전트가 바꿀 수 있다. 서버 방식에서 홈 볼륨은 사용자 × 프로젝트마다 따로라 그 사용자 자신에게만 닿는다(다른 사람에게 번지지 않는다).
+ * CLI를 이미지에 넣어 에이전트가 쓸 수 없는 자리에 두는 것은 다음 단계다
+ */
+export const AGENT_PATH = `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:${NPM_PREFIX}/bin:${AGENT_HOME}/.local/bin`;
+/** 첫 요청을 컨테이너 안으로 넘기는 환경 변수. 호스트 방식과 같은 이름이다(host-terminal의 FIRST_PROMPT_ENV) */
+export const AGENT_FIRST_PROMPT_ENV = 'B_STUDIO_FIRST_PROMPT';
+/** 셸이 환경 변수에서 옮겨 담는 셸 변수(내보내지 않는다) */
+const FIRST_PROMPT_VAR = 'BSTUDIO_FIRST_PROMPT_VALUE';
 
 /**
  * 관문 설정(이슈 #673 2단계): 컨테이너 안의 CLI가 요청의 시작·쓰기 직전·턴의 끝에 호스트의 b-studio를 부르게 한다.
@@ -469,11 +493,18 @@ const MAX_ROWS = 200;
 export const AGENT_TERMINAL_COMMAND = [
   // Ctrl-C는 앞에서 도는 프로그램(CLI)과 이 셸에 함께 간다. 셸이 죽으면 터미널이 통째로 끝나므로 받아서 넘긴다
   'trap : INT',
+  // 첫 요청(있으면)은 환경 변수로만 온다. 무엇이든 띄우기 전에 셸 변수(내보내지 않는다)로 옮기고 환경에서 지운다 — 설치하는 npm이나 CLI의 하위 프로세스에 내려가지 않는다
+  `if [ -n "\${${AGENT_FIRST_PROMPT_ENV}+x}" ]; then`,
+  `  ${FIRST_PROMPT_VAR}="\$${AGENT_FIRST_PROMPT_ENV}"`,
+  `  unset ${AGENT_FIRST_PROMPT_ENV}`,
+  'fi',
   'if ! command -v claude >/dev/null 2>&1; then',
   '  printf "%s\\n" "[b-studio] 이 컨테이너에 claude CLI를 설치합니다(처음 한 번)."',
   `  npm install --global --no-fund --no-audit ${AGENT_CLI_PACKAGE} || printf "%s\\n" "[b-studio] 설치하지 못했습니다. 네트워크를 확인하고 npm install -g ${AGENT_CLI_PACKAGE} 를 다시 실행하세요."`,
   'fi',
-  'if command -v claude >/dev/null 2>&1; then claude; fi',
+  // 첫 실행에서만 첫 요청을 인자로 넘기고, 쓰고 나면 지운다(셸에서 다시 claude를 부를 때 되풀이하지 않는다)
+  `if command -v claude >/dev/null 2>&1; then if [ -n "\${${FIRST_PROMPT_VAR}+x}" ]; then claude "\$${FIRST_PROMPT_VAR}"; else claude; fi; fi`,
+  `unset ${FIRST_PROMPT_VAR}`,
   'printf "%s\\n" "[b-studio] claude에서 나왔습니다. 다시 띄우려면 claude 를 입력하세요."',
   // 로그인 셸(-l)로 띄우지 않는다. 로그인 셸은 /etc/profile을 읽어 PATH를 기본값으로 되돌리고, 그러면 홈 볼륨에 설치한
   // claude를 찾지 못한다(안내대로 claude를 치면 "command not found"였다)
@@ -569,7 +600,10 @@ const ttyFile = (id: string): string => `/tmp/b-studio-tty-${id}`;
  * `script`가 가상 터미널을 만들고 표준 입출력(파이프)과 잇는다. 터미널의 장치 이름을 파일에 적어 두어 크기를 바꿀 때 쓴다.
  * 명령과 크기는 환경 변수로 넘긴다(인자의 글에 끼워 넣지 않는다)
  */
-export function agentTerminalArgs(name: string, { id, size, command = AGENT_TERMINAL_COMMAND }: { id: string; size: TerminalSize; command?: string }): string[] {
+export function agentTerminalArgs(
+  name: string,
+  { id, size, command = AGENT_TERMINAL_COMMAND, firstPrompt = false }: { id: string; size: TerminalSize; command?: string; firstPrompt?: boolean },
+): string[] {
   assertTerminalId(id);
   const { cols, rows } = clampTerminalSize(size);
   return [
@@ -581,6 +615,8 @@ export function agentTerminalArgs(name: string, { id, size, command = AGENT_TERM
     '--env', `B_STUDIO_TTY_FILE=${ttyFile(id)}`,
     '--env', `B_STUDIO_TTY_SIZE=rows ${rows} cols ${cols}`,
     '--env', `B_STUDIO_TERMINAL_COMMAND=${command}`,
+    // 첫 요청은 이름만 적는다(`--env NAME`). 값은 이 인자 배열이 아니라 docker 프로세스의 환경에서 가져간다 — 호스트의 `ps`에 요청 글이 보이지 않는다
+    ...(firstPrompt ? ['--env', AGENT_FIRST_PROMPT_ENV] : []),
     name,
     'script', '--quiet', '--flush', '--command', 'stty $B_STUDIO_TTY_SIZE; tty > "$B_STUDIO_TTY_FILE"; exec sh -c "$B_STUDIO_TERMINAL_COMMAND"', '/dev/null',
   ];
@@ -596,6 +632,8 @@ export function agentResizeArgs(name: string, id: string, size: TerminalSize): s
 export interface AgentContainerOptions {
   /** 홈 볼륨을 나누는 단위(프로젝트 id) */
   projectId: string;
+  /** 서버 방식(인증을 켠 방식)이면 사용자 id. 홈 볼륨이 사용자 × 프로젝트마다 갈린다. 개인 PC 방식은 주지 않는다(옛 이름) */
+  userId?: string;
   /** 관문 설정을 둔 호스트 폴더. 주면 CLI의 관리 설정 자리에 붙이고, 붙었는지를 띄운 뒤에 확인한다 */
   gatewayDir?: string;
   /**
@@ -619,7 +657,7 @@ export interface AgentContainerOptions {
 export async function ensureAgentContainer(
   sandboxId: string,
   projectRoot: string,
-  { projectId, gatewayDir, evaluationAssets, evaluationAssetRoot, dockerBin = 'docker', image }: AgentContainerOptions,
+  { projectId, userId, gatewayDir, evaluationAssets, evaluationAssetRoot, dockerBin = 'docker', image }: AgentContainerOptions,
 ): Promise<string> {
   const name = agentContainerName(sandboxId);
   const docker = (args: string[]) => execChecked(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
@@ -647,7 +685,7 @@ export async function ensureAgentContainer(
   if (existing) await docker(['rm', '--force', name]).catch(() => {});
 
   try {
-    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId), gatewayDir, image }));
+    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId, userId), gatewayDir, image }));
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 띄우지 못했습니다', describe(error), { platform: true });
   }
@@ -756,7 +794,8 @@ export interface AgentTerminal {
 }
 
 /** 프로세스를 띄우는 자리(테스트가 가짜를 끼운다) */
-export type SpawnTerminal = (command: string, args: string[]) => ChildProcessWithoutNullStreams;
+/** `env`를 주면 상속한 환경에 덧붙여 그 프로세스에만 둔다(첫 요청처럼 인자로 넘기면 안 되는 값) */
+export type SpawnTerminal = (command: string, args: string[], env?: Record<string, string>) => ChildProcessWithoutNullStreams;
 
 /**
  * 파이프가 늦게 붙어도 앞서 온 것을 잃지 않는 이미터. 첫 `listenerEvent` 리스너가 붙을 때(마이크로태스크 뒤) 쌓아 둔 것을 쏟는다.
@@ -789,7 +828,7 @@ class HeldEmitter extends EventEmitter {
  * `openAgentTerminal`은 stdin.write/end/writable, stdout·stderr의 'data', 'close', kill만 쓴다 — 그 부분만 흉내 낸다.
  * Rust는 stdout·stderr를 한 흐름으로 순서대로 주므로 stderr 이미터는 쓰이지 않는다(stdout 이미터가 둘을 합쳐 준다).
  */
-export const spawnNativeTerminal: SpawnTerminal = (bin, args) => {
+export const spawnNativeTerminal: SpawnTerminal = (bin, args, env) => {
   const stdout = new HeldEmitter('data');
   const stderr = new EventEmitter();
   const child = new HeldEmitter('close');
@@ -805,6 +844,7 @@ export const spawnNativeTerminal: SpawnTerminal = (bin, args) => {
   });
   const session = openExecSession(bin, args, {
     cwd: tmpdir(),
+    ...(env ? { env: { ...process.env, ...env } } : {}),
     onData: (chunk) => stdout.deliver(chunk),
     onExit: (code) => {
       stdin.writable = false;
@@ -825,9 +865,29 @@ export const spawnNativeTerminal: SpawnTerminal = (bin, args) => {
 /** 컨테이너 안에 가상 터미널을 열고 기본 명령(CLI)을 띄운다. 컨테이너는 ensureAgentContainer가 확인한 것이어야 한다 */
 export function openAgentTerminal(
   name: string,
-  { id, size, command, dockerBin = 'docker', spawnProcess = spawnNativeTerminal }: { id: string; size: TerminalSize; command?: string; dockerBin?: string; spawnProcess?: SpawnTerminal },
+  {
+    id,
+    size,
+    command,
+    firstPrompt,
+    dockerBin = 'docker',
+    spawnProcess = spawnNativeTerminal,
+  }: {
+    id: string;
+    size: TerminalSize;
+    command?: string;
+    /** 첫 요청(호스트 방식과 같이 firstPromptArg로 꼴을 맞춘 글). 프로세스의 환경 변수로만 넘기고 인자에는 넣지 않는다 */
+    firstPrompt?: string;
+    dockerBin?: string;
+    spawnProcess?: SpawnTerminal;
+  },
 ): AgentTerminal {
-  const child = spawnProcess(dockerBin, agentTerminalArgs(name, { id, size, command }));
+  if (firstPrompt !== undefined && (firstPrompt.length === 0 || firstPrompt.includes('\0'))) throw new SandboxError('첫 요청 글이 올바르지 않습니다');
+  const child = spawnProcess(
+    dockerBin,
+    agentTerminalArgs(name, { id, size, command, firstPrompt: firstPrompt !== undefined }),
+    firstPrompt !== undefined ? { [AGENT_FIRST_PROMPT_ENV]: firstPrompt } : undefined,
+  );
   // 닫힌 뒤에 들어온 입력으로 프로세스 전체가 죽지 않게 한다
   child.stdin.on('error', () => {});
   return {

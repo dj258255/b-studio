@@ -1,6 +1,6 @@
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, stat, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,6 +10,9 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { evaluationAssetCopies } from './evaluation-assets';
 import {
   AGENT_CLI_PACKAGE,
+  AGENT_FIRST_PROMPT_ENV,
+  AGENT_PATH,
+  AGENT_USER_HOME_VOLUME_PREFIX,
   AGENT_GATEWAY_TARGET,
   AGENT_HOOK_EVENTS,
   AGENT_IMAGE,
@@ -775,5 +778,131 @@ describe('컨테이너를 띄운 뒤의 확인 (관문 설정)', { timeout: 30_0
     await writeFile(docker.bin, '#!/bin/sh\nexit 1\n');
     expect(await probeAgentGateway('sb-agent', { dockerBin: docker.bin })).toBe(false);
     expect(await probeAgentGateway('sb-agent', { dockerBin: path.join(docker.dir, 'no-such-docker') })).toBe(false);
+  });
+});
+
+describe('컨테이너 터미널의 첫 요청 (#1401)', () => {
+  const prompt = '주문 목록 화면의 \'정렬\' 버그를 고쳐 줘 $(touch /tmp/pwned) `id` "x"';
+  const size = { cols: 80, rows: 24 };
+
+  it('인자에는 변수 이름만 있고 요청 글은 없다. 글은 프로세스의 환경으로만 간다', () => {
+    const args = agentTerminalArgs('c-agent', { id: 'main', size, firstPrompt: true });
+    expect(args).toContain(AGENT_FIRST_PROMPT_ENV);
+    expect(args[args.indexOf(AGENT_FIRST_PROMPT_ENV) - 1]).toBe('--env');
+    // 이름 뒤에 `=값`이 붙지 않는다(붙으면 호스트의 ps에 보인다)
+    expect(args.some((arg) => arg.startsWith(`${AGENT_FIRST_PROMPT_ENV}=`))).toBe(false);
+    expect(agentTerminalArgs('c-agent', { id: 'main', size })).not.toContain(AGENT_FIRST_PROMPT_ENV);
+
+    const spawned: Array<{ args: string[]; env?: Record<string, string> }> = [];
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
+    openAgentTerminal('c-agent', {
+      id: 'main',
+      size,
+      firstPrompt: prompt,
+      spawnProcess: (_command, spawnArgs, env) => {
+        spawned.push({ args: spawnArgs, env });
+        return child as unknown as ChildProcessWithoutNullStreams;
+      },
+    });
+    expect(spawned[0]!.env).toEqual({ [AGENT_FIRST_PROMPT_ENV]: prompt });
+    // 요청 글의 어떤 조각도 인자 배열에 없다
+    expect(spawned[0]!.args.join('\n')).not.toContain('주문 목록');
+    expect(spawned[0]!.args.some((arg) => arg.includes(prompt) || arg.includes('pwned'))).toBe(false);
+    // 첫 요청이 없으면 환경도 넘기지 않는다
+    openAgentTerminal('c-agent', { id: 'main', size, spawnProcess: (_c, a, env) => { spawned.push({ args: a, env }); return child as unknown as ChildProcessWithoutNullStreams; } });
+    expect(spawned[1]!.env).toBeUndefined();
+    expect(() => openAgentTerminal('c', { id: 'main', size, firstPrompt: '', spawnProcess: () => child as never })).toThrow('첫 요청');
+    expect(() => openAgentTerminal('c', { id: 'main', size, firstPrompt: 'a\0b', spawnProcess: () => child as never })).toThrow('첫 요청');
+  });
+
+  it('호스트 방식과 같은 환경 변수 이름을 쓴다', async () => {
+    const { FIRST_PROMPT_ENV } = await import('../host-terminal');
+    expect(AGENT_FIRST_PROMPT_ENV).toBe(FIRST_PROMPT_ENV);
+  });
+
+  // 실제 sh로 돌린다: 가짜 claude가 받은 인자와 환경을 적는다
+  const runCommand = async (env: Record<string, string>): Promise<string> => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-agent-cmd-'));
+    const bin = path.join(dir, 'bin');
+    await mkdir(bin);
+    await writeFile(path.join(bin, 'claude'), '#!/bin/sh\nprintf \'ARGC=%s ARG1=[%s] ENV=[%s] VAR=[%s]\\n\' "$#" "$1" "${B_STUDIO_FIRST_PROMPT-none}" "${BSTUDIO_FIRST_PROMPT_VALUE-none}"\n');
+    await chmod(path.join(bin, 'claude'), 0o755);
+    try {
+      return execFileSync('/bin/sh', ['-c', AGENT_TERMINAL_COMMAND], {
+        env: { PATH: `${bin}:/usr/bin:/bin`, HOME: dir, ...env },
+        input: '',
+        encoding: 'utf8',
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+
+  it('컨테이너 안의 명령은 요청 글을 claude의 인자 하나로 넘기고, 환경에서 지운다(셸이 글을 해석하지 않는다)', async () => {
+    const out = await runCommand({ [AGENT_FIRST_PROMPT_ENV]: prompt });
+    expect(out).toContain(`ARGC=1 ARG1=[${prompt}] ENV=[none] VAR=[none]`);
+    // 요청이 없으면 인자 없이 띄운다
+    expect(await runCommand({})).toContain('ARGC=0 ARG1=[] ENV=[none] VAR=[none]');
+    // `-`로 시작하는 값도 하나의 인자다(옵션으로 읽히지 않게 꼴을 맞추는 일은 호스트의 firstPromptArg가 앞에서 한다)
+    expect(await runCommand({ [AGENT_FIRST_PROMPT_ENV]: '-x' })).toContain('ARGC=1 ARG1=[-x]');
+  });
+});
+
+describe('에이전트 홈 볼륨 이름 (#1401)', () => {
+  it('개인 PC 방식(사용자 없음)은 옛 이름 그대로다 — 이름이 바뀌면 이미 해 둔 로그인이 사라진다', () => {
+    expect(agentHomeVolume('orders')).toBe('b-studio-agent-home-orders');
+    expect(agentHomeVolume('a/b')).toBe(`b-studio-agent-home-a-b-3`);
+    expect(agentHomeVolume('x'.repeat(100))).toBe(`b-studio-agent-home-${'x'.repeat(80)}-100`);
+  });
+
+  it('서버 방식은 사용자마다 다르고, 같은 사용자는 늘 같다. 옛 이름과 겹치지 않는다', () => {
+    const a = agentHomeVolume('orders', 'alice');
+    const b = agentHomeVolume('orders', 'bob');
+    expect(a).not.toBe(b);
+    expect(agentHomeVolume('orders', 'alice')).toBe(a);
+    expect(a).not.toBe(agentHomeVolume('orders'));
+    expect(a.startsWith(`${AGENT_USER_HOME_VOLUME_PREFIX}-`)).toBe(true);
+    // 같은 사용자의 다른 프로젝트는 다르다
+    expect(agentHomeVolume('pay', 'alice')).not.toBe(a);
+    // 고정된 값(해시가 바뀌면 사용자의 로그인이 사라진다)
+    expect(a).toBe('b-studio-agent-uhome-2bd806c97f0e00af1a1fc3328fa763a9-orders');
+  });
+
+  it('이상한 사용자 id도 도커가 받는 이름이 된다. 원문이 이름에 들어가지 않는다', () => {
+    const odd = ['a/b', 'A/B', '../../etc', 'x y', '사용자', 'a'.repeat(5000), 'a,target=/etc', 'a\0b', '😀', ' ', 'local', 'LOCAL'];
+    const names = odd.map((user) => agentHomeVolume('orders', user));
+    for (const name of names) {
+      expect(name).toMatch(/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/);
+      expect(name.length).toBeLessThanOrEqual(200);
+      expect(name).not.toContain('etc');
+    }
+    expect(new Set(names).size).toBe(odd.length);
+    // 대소문자·정규화만 다른 id도 다른 이름이다(파일 시스템 규칙으로 합치지 않는다)
+    expect(agentHomeVolume('o', 'Alice')).not.toBe(agentHomeVolume('o', 'alice'));
+    expect(agentHomeVolume('o', '\u00e9')).not.toBe(agentHomeVolume('o', 'e\u0301'));
+    expect(() => agentHomeVolume('orders', '')).toThrow('사용자 id');
+  });
+
+  it('서버 방식의 홈 볼륨이 컨테이너 마운트 원본이 된다', () => {
+    const volume = agentHomeVolume('orders', 'alice');
+    const mounts = agentRunArgs({ ...plan, homeVolume: volume }).flatMap((arg, index, all) => (arg === '--mount' ? [all[index + 1]!] : []));
+    expect(mounts).toContain(`type=volume,source=${volume},target=/home/node`);
+  });
+});
+
+describe('터미널의 PATH (#1401)', () => {
+  const dirs = AGENT_PATH.split(':');
+
+  it('홈 볼륨의 실행 파일 자리는 시스템 폴더 뒤에 있다 — 에이전트가 쓸 수 있는 자리가 node·npm·bash보다 앞서지 않는다', () => {
+    const lastSystem = Math.max(...dirs.map((dir, index) => (dir.startsWith('/home/') ? -1 : index)));
+    const firstHome = dirs.findIndex((dir) => dir.startsWith('/home/'));
+    expect(firstHome).toBeGreaterThan(lastSystem);
+    expect(dirs.slice(0, 3)).toEqual(['/usr/local/sbin', '/usr/local/bin', '/usr/sbin']);
+    expect(dirs.at(-2)).toBe('/home/node/.npm-global/bin');
+  });
+
+  it('컨테이너의 PATH 환경 변수가 이 값이고, 훅은 이름이 아니라 절대 경로의 node로 돈다', () => {
+    expect(agentRunArgs(plan)).toContain(`PATH=${AGENT_PATH}`);
+    expect(AGENT_HOOK_EVENTS).toBeDefined();
   });
 });
