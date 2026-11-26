@@ -66,7 +66,7 @@ export function detailLines(item: DeskItem): DetailLine[] {
     const tokens = totalTokens(agent.tokens);
     // 서버가 모른다고 한 토큰(tokensUnknown, #953)은 값이 와도 적지 않는다
     const parts = [
-      ...(agent.tool ? [agent.tool] : []),
+      ...(agent.tool ? [toolLineLabel(agent.tool)] : []),
       ...(tokens > 0 && !agent.tokensUnknown ? [`토큰 ${tokens.toLocaleString('ko-KR')}`] : []),
       ...(agent.activity ? [agent.activity] : []),
       // 끝난 서브에이전트가 남긴 마지막 답(#953)
@@ -93,8 +93,60 @@ const PERMISSION_WORDS: Record<string, string> = {
 };
 
 /** 서브에이전트를 부르는 말: 종류와 맡긴 일(#921). 옛 서버는 이름만 준다 */
+/** CLI 도구 이름을 우리말로. 모르는 도구(MCP 등)는 그대로 둔다 */
+const TOOL_LABEL: Record<string, string> = {
+  Edit: '편집',
+  MultiEdit: '편집',
+  NotebookEdit: '편집',
+  apply_patch: '편집',
+  Write: '쓰기',
+  Read: '읽기',
+  Bash: '실행',
+  shell: '실행',
+  exec_command: '실행',
+  Grep: '찾기',
+  Glob: '찾기',
+  WebFetch: '웹',
+  WebSearch: '웹',
+  Agent: '맡김',
+  Task: '맡김',
+  TodoWrite: '할 일',
+  TaskCreate: '할 일',
+  TaskUpdate: '할 일',
+};
+
+export function toolLabel(tool: string): string {
+  // 도구 이름은 CLI가 보낸 글이다. 표에 직접 적은 이름만 바꾼다(`constructor`처럼 객체가 물려받은 이름은 글자 그대로 둔다)
+  return Object.hasOwn(TOOL_LABEL, tool) ? TOOL_LABEL[tool]! : tool;
+}
+
+/** 서브에이전트의 "도구 대상" 한 줄(예: "Grep updateOrder")에서 첫 낱말인 도구 이름만 우리말로 바꾼다 */
+export function toolLineLabel(line: string): string {
+  const space = line.indexOf(' ');
+  const tool = space < 0 ? line : line.slice(0, space);
+  return `${toolLabel(tool)}${space < 0 ? '' : line.slice(space)}`;
+}
+
+/**
+ * CLI에 들어 있는 서브에이전트 종류의 한국어 이름. 사람이 만든 종류는 알 수 없으니 원래 이름 그대로 둔다.
+ * Map으로 둔다: 종류 이름은 CLI가 보낸 글이라 객체의 물려받은 키(`__proto__` 등)와 맞으면 안 된다
+ */
+const SUBAGENT_TYPE_LABEL = new Map<string, string>([
+  ['Explore', '탐색'],
+  ['Plan', '계획'],
+  ['general-purpose', '범용'],
+  ['statusline-setup', '상태 줄 설정'],
+  ['output-style-setup', '출력 방식 설정'],
+]);
+
+/** 서브에이전트 종류의 화면 이름. 아는 종류는 한국어, 그 밖에는 받은 이름 그대로 */
+export function subagentTypeLabel(type: string): string {
+  return SUBAGENT_TYPE_LABEL.get(type) ?? type;
+}
+
 export function subagentName(agent: DeskAgent): string {
-  return [agent.type ?? agent.name, agent.description].filter(Boolean).join(' ');
+  const type = agent.type ?? agent.name;
+  return [type ? subagentTypeLabel(type) : type, agent.description].filter(Boolean).join(' ');
 }
 
 const BACKEND_LABEL: Record<string, string> = {

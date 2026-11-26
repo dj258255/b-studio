@@ -63,7 +63,7 @@ describe('서브에이전트와 토큰', () => {
   it('고른 카드에서 끝난 서브에이전트를 두 번 그리지 않는다', () => {
     const plain = draw(done, { selected: true }, 84).join('\n');
     expect(plain).not.toContain('서브에이전트 1개 끝남');
-    expect(plain.match(/↳ Explore/g)).toHaveLength(1);
+    expect(plain.match(/↳ 탐색/g)).toHaveLength(1);
   });
 
   it('토큰을 모르면(0) "토큰 0"을 쓰지 않는다', () => {

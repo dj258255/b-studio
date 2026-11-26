@@ -64,7 +64,7 @@ describe('서버 응답 모양 그대로 카드를 그린다', () => {
     });
     const plain = cardLines({ item, selected: true, flagged: false, withLimits: false, sprite: defaultSprite('claude-code') }, 100, DEFAULT_THEME, NOW).map(stripAnsi).join('\n');
     expect(plain).toContain('Bash 실행 권한을 묻습니다');
-    expect(plain).toContain('↳ Explore 훅 찾기 · Grep');
+    expect(plain).toContain('↳ 탐색 훅 찾기 · 찾기');
   });
 
   it('요청을 시작한 때와 도는 도구, 서브에이전트 시작 때가 카드의 "작업 N분째"·"N분째"로 나온다(#933·#934)', () => {
@@ -84,6 +84,6 @@ describe('서버 응답 모양 그대로 카드를 그린다', () => {
     // 도구가 6분째 돌고 있으니 소식이 없어도 멈춘 듯이 아니다
     expect(plain).toContain('실행 pnpm test · 6분째');
     expect(plain).not.toContain('소식 없음');
-    expect(plain).toContain('↳ Explore 훅 찾기 · Grep · 4분째');
+    expect(plain).toContain('↳ 탐색 훅 찾기 · 찾기 · 4분째');
   });
 });

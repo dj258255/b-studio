@@ -8,7 +8,7 @@
  */
 import type { DeskState } from './keys';
 import { fit, fitAnsi, stringWidth, type Rect } from './screen';
-import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, headStatus, subagentName, totalTokens, type StatusBadge } from './sidebar';
+import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, headStatus, subagentName, toolLabel, toolLineLabel, totalTokens, type StatusBadge } from './sidebar';
 import type { KittyImages } from './kitty';
 import { defaultSprite, frameAt, spriteLines, type Sprite } from './sprite';
 import { BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
@@ -103,31 +103,7 @@ export function goneMs(iso: string | undefined, now: number): number | undefined
 /** 작업 중인데 이만큼 소식이 없으면 멈춘 듯으로 본다(도구가 도는 동안은 제외) */
 export const STALE_MS = 3 * 60_000;
 
-/** CLI 도구 이름을 우리말로. 모르는 도구(MCP 등)는 그대로 둔다 */
-const TOOL_LABEL: Record<string, string> = {
-  Edit: '편집',
-  MultiEdit: '편집',
-  NotebookEdit: '편집',
-  apply_patch: '편집',
-  Write: '쓰기',
-  Read: '읽기',
-  Bash: '실행',
-  shell: '실행',
-  exec_command: '실행',
-  Grep: '찾기',
-  Glob: '찾기',
-  WebFetch: '웹',
-  WebSearch: '웹',
-  Agent: '맡김',
-  Task: '맡김',
-  TodoWrite: '할 일',
-  TaskCreate: '할 일',
-  TaskUpdate: '할 일',
-};
-
-export function toolLabel(tool: string): string {
-  return TOOL_LABEL[tool] ?? tool;
-}
+export { toolLabel, toolLineLabel };
 
 /**
  * 넘치는 글을 낱말 사이에서 자르고 …를 붙인다. 보이는 폭(넓은 글자는 두 칸)이 width를 넘지 않는다.
@@ -365,7 +341,7 @@ function subagentLines(item: DeskItem, width: number, theme: Theme, now: number,
         : agent.startedAt
           ? { text: forText(agent.startedAt, now), color: 'muted' }
           : undefined;
-    const doing = agent.tool ?? agent.activity;
+    const doing = agent.tool ? toolLineLabel(agent.tool) : agent.activity;
     return compose(
       [{ text: '↳ ', color: 'accent' }, { text: subagentName(agent), flex: true }, ...(doing ? [SEP, { text: oneLine(doing), flex: true }] : []), ...(when ? [SEP, when] : [])],
       width,
