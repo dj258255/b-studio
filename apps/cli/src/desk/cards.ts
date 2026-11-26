@@ -372,7 +372,8 @@ function subagentLines(item: DeskItem, width: number, theme: Theme, now: number,
       theme,
     );
   });
-  if (working.length > SUBAGENT_SHOWN) lines.push(compose([{ text: `↳ 외 ${working.length - SUBAGENT_SHOWN}개 작업 중`, color: 'muted' }], width, theme));
+  // 고른 카드는 넷째부터를 펼친 줄로 하나씩 보이므로 묶음 줄을 두지 않는다(같은 것을 두 번 세지 않는다)
+  if (working.length > SUBAGENT_SHOWN && !selected) lines.push(compose([{ text: `↳ 외 ${working.length - SUBAGENT_SHOWN}개 작업 중`, color: 'muted' }], width, theme));
   return lines;
 }
 

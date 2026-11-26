@@ -105,6 +105,8 @@ describe('서브에이전트 줄', () => {
     // 카드 몸에 없는 넷째부터 펼친다
     expect(plain.filter((line) => line.includes('타입 찾기')).length).toBe(1);
     expect(plain.filter((line) => line.includes('설정 찾기')).length).toBe(1);
+    // 펼친 줄이 나머지를 하나씩 보이므로 "외 N개" 묶음 줄을 함께 두지 않는다(같은 것을 두 번 세지 않는다)
+    expect(plain.some((line) => line.includes('외 2개 작업 중'))).toBe(false);
   });
 });
 
