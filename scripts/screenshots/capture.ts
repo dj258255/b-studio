@@ -50,6 +50,9 @@ const items: DeskItem[] = [
       { id: 'main', name: 'Claude Code', kind: 'main', state: 'working', activity: 'Edit apps/shop/order.ts', tokens: usage(129_000, 25_000) },
       { id: 'sub-1', name: 'Explore', type: 'Explore', description: '주문 호출부 찾기', tool: 'Grep updateOrder', kind: 'subagent', state: 'working', activity: '파일 12개 읽음', startedAt: at(-4), lastAt: new Date(now - 5_000).toISOString(), tokens: usage(20_000, 3_000) },
       { id: 'sub-2', name: 'general-purpose', type: 'general-purpose', description: '결제 이벤트 정리', kind: 'subagent', state: 'working', startedAt: at(-11), lastAt: at(-6), tokens: usage(8_000, 1_000) },
+      { id: 'sub-3', name: 'Explore', type: 'Explore', description: '상태 전이 타입 확인', tool: 'Read order-state.ts', kind: 'subagent', state: 'working', startedAt: at(-2), lastAt: new Date(now - 20_000).toISOString(), tokens: usage(6_000, 800) },
+      { id: 'sub-4', name: 'test-runner', type: 'test-runner', description: '주문 단위 테스트', tool: 'Bash pnpm test order', kind: 'subagent', state: 'working', startedAt: at(-1), lastAt: new Date(now - 8_000).toISOString(), tokens: usage(3_000, 400) },
+      { id: 'sub-5', name: 'Explore', type: 'Explore', description: '환불 흐름 읽기', kind: 'subagent', state: 'done', startedAt: at(-16), lastAt: at(-9), result: '환불은 payment/refund.ts 한 곳에서만 상태를 바꿉니다', tokens: usage(12_000, 2_000) },
     ],
   },
   {
@@ -61,7 +64,7 @@ const items: DeskItem[] = [
     now: { tool: 'Edit', target: 'infra/prod.yaml', at: new Date(now - 40_000).toISOString(), running: false, error: '거절됨: 쓰기 범위 밖입니다' },
     agents: [{ id: 'main', name: 'Codex', kind: 'main', state: 'working', activity: 'pnpm test 실행 권한을 묻는 중', tokens: usage(55_000, 9_000) }],
   },
-  { kind: 'session', id: 's-readme', title: 'README 사진 다시 찍기', projectName: 'shop', state: 'done', backend: 'claude-code', accountId: 'acct-eri', lastActivityAt: at(-48), terminal: { cli: 'down' }, gate: { state: 'passed', checkpoints: 2 }, tokens: usage(36_000, 5_000), lastMessage: '사진 네 장을 다시 찍어 docs/images에 넣었습니다.' },
+  { kind: 'session', id: 's-readme', title: 'README 사진 다시 찍기', projectName: 'shop', state: 'done', backend: 'claude-code', accountId: 'acct-eri', lastActivityAt: at(-48), terminal: { cli: 'down' }, gate: { state: 'passed', checkpoints: 2 }, tokens: usage(36_000, 5_000), lastMessage: '사진 네 장을 다시 찍어 docs/images에 넣었습니다.', agents: [{ id: 'main', name: 'Claude Code', kind: 'main', state: 'idle', tokens: usage(30_000, 4_000) }, { id: 'sub-r1', name: 'Explore', type: 'Explore', description: '문서의 옛 사진 이름 찾기', kind: 'subagent', state: 'done', startedAt: at(-60), lastAt: at(-58), result: 'README와 getting-started에 네 곳', tokens: usage(5_000, 700) }] },
   { kind: 'session', id: 's-login', title: '로그인 오류 고치기', projectName: 'shop', state: 'idle', backend: 'codex', accountId: 'codex', lastActivityAt: at(-7), terminal: { cli: 'up' }, gate: { state: 'failed', checkpoints: 2 }, reason: '로그인 API 계약 테스트 2개 실패', tokens: usage(20_000, 3_000) },
   { kind: 'session', id: 's-blog', title: '글 목록 페이지', projectName: 'blog', state: 'stopped', backend: 'claude-code', lastActivityAt: at(-300) },
 ];
@@ -171,6 +174,8 @@ const shots: Shot[] = [
     state: () => ({ ...base(), layout: 2, slots: ['s-order', 's-pay', undefined, undefined], focus: 0 }) as DeskState,
     panes: [claudePane, codexPane],
   },
+  // 에이전트 나무 목록: 세션마다 부모 줄, 서브에이전트마다 자식 줄(작업 중·소식 없음·끝남이 섞인다)
+  { name: 'desk-agents', cols: 160, rows: 30, state: () => ({ ...base(), tree: { index: 2, session: 's-order', agent: 'sub-2', all: false } }) as DeskState },
   { name: 'desk-usage', cols: 140, rows: 34, state: () => ({ ...base(), view: 'usage', usageSelected: 1 }) as unknown as DeskState },
   {
     name: 'desk-settings',

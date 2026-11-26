@@ -827,7 +827,7 @@ export class DeskApp {
   #seeing(id: string): boolean {
     const state = this.#state;
     if (state.view !== undefined || this.#focused() !== id || !this.#windowFocused) return false;
-    return !(state.help || state.settings || state.records || state.detail || state.requirements || state.runtime || state.fleets || state.plans || state.folder || state.switcher);
+    return !(state.help || state.settings || state.records || state.detail || state.requirements || state.runtime || state.fleets || state.plans || state.folder || state.switcher || state.tree);
   }
 
   #send(id: string, data: string): void {
@@ -2924,7 +2924,7 @@ export class DeskApp {
   /** 사람이 목록을 고르는 중이다: 사이드바 고르기, 빠른 전환, 카드 화면에서 방금 키를 누름 */
   #holdOrder(): boolean {
     const state = this.#state;
-    return state.browsing === true || state.switcher !== undefined || (state.view === 'space' && Date.now() - this.#lastKeyAt < HOLD_ORDER_MS);
+    return state.browsing === true || state.switcher !== undefined || state.tree !== undefined || (state.view === 'space' && Date.now() - this.#lastKeyAt < HOLD_ORDER_MS);
   }
 
   /** 이어서 작업한 세션이 켜졌으면 칸을 다시 연다. 켜지 못했으면 그만 기다린다 */

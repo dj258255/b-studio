@@ -244,10 +244,15 @@ describe('가장 빠듯한 한도(#925)', () => {
   });
 
   it('사이드바 한 줄: 가장 빠듯한 계정의 창, %, 다시 차는 시각', () => {
-    const line = tightestLine([marco, account(), gemini], 30, DEFAULT_THEME, NOW)!;
-    expect(stringWidth(stripAnsi(line))).toBe(30);
-    expect(stripAnsi(line)).toMatch(/^ 한도 Claude 주간 90% · \d+\/\d+ *$/);
-    expect(stripAnsi(tightestLine([account({ windows: [{ kind: 'five_hour', usedPercent: 85, resetsAt: later(110) }] })], 30, DEFAULT_THEME, NOW)!)).toContain(`5시간 85% · ${clock(later(110))}`);
+    const line = tightestLine([marco, account(), gemini], 40, DEFAULT_THEME, NOW)!;
+    expect(stringWidth(stripAnsi(line))).toBe(40);
+    // 어느 계정인지 이름을 적는다(카드의 "이 계정 주간 90%"와 같은 계정임을 알 수 있게)
+    expect(stripAnsi(line)).toMatch(/^ 한도 Claude 피오 주간 90% · \d+\/\d+ *$/);
+    expect(stripAnsi(tightestLine([account({ windows: [{ kind: 'five_hour', usedPercent: 85, resetsAt: later(110) }] })], 40, DEFAULT_THEME, NOW)!)).toContain(`피오 5시간 85% · ${clock(later(110))}`);
+    // 좁으면 다시 차는 때를 먼저 빼고 이름은 남기며, 이름까지 못 넣으면 이름을 뺀다
+    expect(stripAnsi(tightestLine([account()], 30, DEFAULT_THEME, NOW)!).trimEnd()).toBe(' 한도 Claude 피오 주간 90%');
+    expect(stripAnsi(tightestLine([account()], 22, DEFAULT_THEME, NOW)!).trimEnd()).toBe(' 한도 Claude 주간 90%');
+    expect(stripAnsi(tightestLine([account({ name: undefined })], 40, DEFAULT_THEME, NOW)!)).toMatch(/^ 한도 Claude 주간 90%/);
     expect(line).toContain(fg(DEFAULT_THEME, 'yellow'));
     expect(tightestLine([gemini], 30, DEFAULT_THEME, NOW)).toBeUndefined();
   });

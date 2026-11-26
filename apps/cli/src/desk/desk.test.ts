@@ -1544,7 +1544,7 @@ describe('desk 작업대: 사용량(#889)', () => {
     expect(ctx.app.state.usage?.accounts.map((entry) => entry.id)).toEqual(['acct-1', 'codex']);
     expect(ctx.client.spendCalls).toBe(1);
     expect(ctx.app.state.usage?.spend?.today.tokens).toBe(3_000_000);
-    expect(stripAnsi(ctx.io.all)).toContain('한도 Claude 주간 90%');
+    expect(stripAnsi(ctx.io.all)).toContain('한도 Claude 피오 주간 90%');
     ctx.io.type('\x02u');
     await tick();
     expect(stripAnsi(ctx.io.all)).toContain('300만 토큰');

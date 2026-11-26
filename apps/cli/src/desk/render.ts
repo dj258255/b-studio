@@ -16,6 +16,7 @@ import { folderHint, renderFolder } from './folder';
 import { plansHint, plansScreen } from './plans';
 import { renderRequirements, requirementsHint } from './requirements';
 import { renderSettings, settingsHint } from './settings';
+import { renderAgentTree, TREE_HINT } from './agent-tree';
 import { renderSwitcher, SWITCHER_HINT } from './switcher';
 import { agentStatus, backendLabel, deskSessions, gateStatus, headStatus, sidebarRows, type SidebarRow } from './sidebar';
 import { bg, BOLD, DEFAULT_THEME, fg, RESET } from './theme';
@@ -66,10 +67,10 @@ export function previewLine(preview: DeskPreview): string {
  * 폭이 모자라면 fitHint가 뒤 항목부터 통째로 뺀다. 나머지 키는 도움말(?)에 있다
  */
 /** 칸 화면: 그 밖의 키는 고른 칸의 CLI로 간다 */
-const IDLE_HINT = ' Ctrl-b 누르고 › j 다음 확인 · w 카드 · n 새 요청 · Space 빠른 전환 · ? 모든 키';
+const IDLE_HINT = ' Ctrl-b 누르고 › j 다음 확인 · w 카드 · m 에이전트 · n 새 요청 · Space 빠른 전환 · ? 모든 키';
 /** 앞글쇠를 누른 뒤 */
-export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · Enter 열기 · j 다음 확인 · w 카드 · u 사용량 · n 새 요청 · ? 모든 키';
-const SPACE_HINT = ' 카드 화면 · ←→ 고르기 · Enter 칸에 열기 · i 자세히 · d 지금 변경 · Esc 칸 화면 · ? 모든 키';
+export const KEY_HINT = ' Ctrl-b › 숫자·o 칸 · Enter 열기 · j 다음 확인 · w 카드 · m 에이전트 · u 사용량 · n 새 요청 · ? 모든 키';
+const SPACE_HINT = ' 카드 화면 · ←→ 고르기 · Enter 칸에 열기 · i 자세히 · m 에이전트 · d 지금 변경 · Esc 칸 화면 · ? 모든 키';
 /** 세션이 하나도 없을 때의 카드 화면: 고를 카드가 없으니 쓸 수 있는 키만(#944) */
 const SPACE_EMPTY_HINT = ' 카드 화면 · a 폴더 열기 · n 새 요청 · g 설정 · Esc 칸 화면 · ? 모든 키';
 const USAGE_HINT = ' 사용량 · ↑↓ 계정 고르기 · r 다시 읽기 · g 계정 설정 · Esc 닫기 · ? 모든 키';
@@ -84,6 +85,7 @@ export const HELP: ReadonlyArray<readonly [string, string]> = [
   ['j', '다음 확인: 손댈 것(권한·질문·입력) > 오류 > 안 본 끝남 > 알림 차례로 그 세션 칸을 고르거나 고른 칸에 엶. 다시 누르면 다음 것'],
   ['Space', '빠른 전환: 모든 세션을 급한 순으로, 글자로 거르고 ↑↓ Enter로 칸에 엶. Esc나 Ctrl-b Space로 닫기'],
   ['w', '스페이스 화면(세션 카드) 켜고 끄기. 맨 위 확인 필요 줄은 숫자로 고르기. 그 안에서는 앞글쇠 없이 ←→ 고르기, Enter 고른 칸에 열기, Tab 다음 스페이스, Esc 칸 화면'],
+  ['m', '에이전트 나무 목록: 세션마다 부모 줄, 그 세션이 띄운 서브에이전트마다 자식 줄(종류·맡긴 일·지금 도구·경과·"N분째 소식 없음"·끝난 결과). ↑↓ 고르기, Enter 고른 세션을 칸에 열기, Tab 스페이스/전체, Esc 닫기. 카드 화면에서는 m만'],
   ['u', '사용량 화면(계정마다 5시간·주간 한도) 켜고 끄기. 그 안에서는 앞글쇠 없이 ↑↓ 고르기, r 다시 읽기, Esc 닫기'],
   ['n', '새 요청(규칙대로 AI를 골라 터미널로 보내기). 프로젝트 고르기 끝 줄의 "+ 폴더 열기"로 내 폴더를 바로 등록, Ctrl-t로 이 요청의 확인 선언 변경 허용'],
   ['a', '폴더 열기: 내 폴더를 프로젝트로 등록(경로 쓰기, Tab 채우기, ↑↓ 하위 폴더, Enter 살펴보고 y로 등록). 스페이스 화면에서는 a만'],
@@ -249,7 +251,7 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   const shells = state.slots.filter((id) => isShellId(id)).length;
   const hiddenShells = state.slots.filter((id, slot) => slot >= state.layout && isShellId(id)).length;
   const shellNote = shells ? ` · 셸 ${shells}(검증 밖${hiddenShells ? `, ${hiddenShells}개 가려짐 · Ctrl-b l로 칸 수를 늘리면 보입니다` : ''})` : '';
-  const view = state.switcher ? '빠른 전환' : state.changes ? '지금 변경' : state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
+  const view = state.tree ? '에이전트 나무' : state.switcher ? '빠른 전환' : state.changes ? '지금 변경' : state.folder ? '폴더 열기' : state.plans ? '작업 나누기' : state.fleets ? '여러 AI 비교' : state.view === 'space' ? '스페이스 화면' : state.view === 'usage' ? '사용량' : `칸 ${state.layout}${state.zoom ? '(크게 보기)' : ''}`;
   const where = sessions[state.selected]?.projectName;
   lines.push(
     onBackground(
@@ -351,7 +353,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
   // 빠른 전환(#922)과 작업 나누기 화면(#893)은 사이드바를 둔 채 본문 자리에 그린다
   const switcherRect = state.switcher ? spaceRect(state, size) : undefined;
   const switcher = state.switcher && switcherRect ? renderSwitcher(state, switcherRect, theme) : undefined;
-  const space = switcher
+  const space = state.tree
+    ? renderAgentTree(state, spaceRect(state, size))
+    : switcher
     ? switcher
     : state.plans
     ? plansScreen(state, spaceRect(state, size))
@@ -429,7 +433,9 @@ export function renderScreen(state: DeskState, size: { cols: number; rows: numbe
       ),
     );
   } else {
-    const hint = state.switcher && !state.prefix
+    const hint = state.tree && !state.prefix
+      ? TREE_HINT
+      : state.switcher && !state.prefix
       ? SWITCHER_HINT
       : state.plans && !state.prefix
       ? plansHint(state.plans)

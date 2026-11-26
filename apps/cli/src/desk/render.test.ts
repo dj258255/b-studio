@@ -259,3 +259,26 @@ describe('좁은 도움말과 보내는 중(#945)', () => {
     expect(frame.cursor).toBeUndefined();
   });
 });
+
+describe('에이전트 나무 목록 화면', () => {
+  const sub = (id: string, description: string) => ({ id, name: 'Explore', type: 'Explore', kind: 'subagent' as const, state: 'working' as const, description, tokens: { inputTokens: 1, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 } });
+  const items = [item('a', { state: 'working', agents: [sub('a1', '결제 흐름 찾기'), sub('a2', '테스트 찾기')] }), item('b')];
+
+  it('본문 자리에 나무를 그리고 머리와 아래 안내에 그 사실을 적는다. 80칸에서 모든 줄 폭이 맞는다', () => {
+    const small = { cols: 80, rows: 16 };
+    const { lines, cursor } = renderScreen(state({ items, tree: { index: 1, all: false } }), small, []);
+    const plain = lines.map(stripAnsi);
+    expect(lines).toHaveLength(small.rows);
+    for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(small.cols);
+    expect(plain[0]).toContain('에이전트 나무');
+    expect(plain.join('\n')).toContain('├ ◐ Explore 결제 흐름 찾기');
+    expect(plain.join('\n')).toContain('└ ◐ Explore 테스트 찾기');
+    expect(plain.at(-1)).toContain('에이전트 나무');
+    expect(cursor).toBeUndefined();
+  });
+
+  it('앞글쇠를 누르면 안내가 앞글쇠 안내로 바뀌고, 도움말과 안내에 m이 있다', () => {
+    expect(renderScreen(state({ items, tree: { index: 0, all: false }, prefix: true }), size, []).lines.map(stripAnsi).at(-1)).toContain('m 에이전트');
+    expect(renderScreen(state({ help: true }), { cols: 160, rows: 60 }, []).lines.map(stripAnsi).join('\n')).toMatch(/m\s+에이전트 나무 목록/);
+  });
+});

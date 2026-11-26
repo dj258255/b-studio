@@ -79,7 +79,8 @@ describe('카드 한 장', () => {
     expect(plain).toHaveLength(ART_WIDE.rows + 2);
     const warn = plain.find((line) => line.includes('⚠ 이 계정'))!;
     expect(warn).toContain('⚠ 이 계정 주간 90%');
-    expect(warn).toMatch(/\d+\/\d+\([일월화수목금토]\) \d\d:\d\d 다시 참/);
+    expect(warn).toMatch(/\d+\/\d+\([일월화수목금토]\) \d\d:\d\d 초기화/);
+    expect(warn).not.toContain('다시 참');
     expect(card({ withLimits: true }).map(stripAnsi).join('\n')).not.toContain('⚠ 이 계정');
   });
 });
@@ -275,5 +276,20 @@ describe('스페이스 화면', () => {
     expect(text).toContain('a 를 눌러 내 폴더를 프로젝트로 등록');
     expect(text).toContain('n 으로 새 요청');
     expect(screen.cards).toEqual([]);
+  });
+});
+
+describe('한도 경고 줄과 마지막 답 줄', () => {
+  it('경고가 "다시 참"으로 끝나 다음 줄의 "답"과 이어 읽히지 않는다("곧"일 때도)', () => {
+    const rich = item('r', { lastMessage: '끝났습니다' });
+    const at = (resetsAt: string) => {
+      const plain = cardLines({ item: rich, selected: false, flagged: false, withLimits: true, limits: { weekly: { usedPercent: 91, resetsAt } }, sprite: defaultSprite('claude-code') }, 84, DEFAULT_THEME, NOW).map(stripAnsi);
+      const warn = plain.findIndex((line) => line.includes('⚠ 이 계정'));
+      return { warn: plain[warn]!, next: plain[warn + 1]! };
+    };
+    const soon = at(new Date(NOW + 30_000).toISOString());
+    expect(soon.warn).toContain('곧 초기화');
+    expect(soon.next).toContain('답 끝났습니다');
+    expect(at(new Date(NOW + 110 * 60_000).toISOString()).warn).toContain('1시간 50분 뒤 초기화');
   });
 });
