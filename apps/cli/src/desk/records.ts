@@ -48,6 +48,41 @@ export interface RecordsReport {
   estimatedCostUsd?: number;
   usageByModel: Record<string, DeskUsage>;
   modelCosts: Record<string, number>;
+  /** 한 번에 끝난 요청 집계. 서버가 세지 못했거나 옛 서버면 없다 */
+  requestOutcomes?: RecordsOutcomes;
+}
+
+/** 스튜디오 request-outcomes.ts의 RequestTotals */
+export interface RecordsOutcomes {
+  total: number;
+  oneShot: number;
+  redone: number;
+  asked: number;
+  reverted: number;
+  gateFailedRuns: number;
+  gateFailures: number;
+  turnLimited: number;
+}
+
+function count(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0;
+}
+
+/**
+ * 한 번에 끝난 요청 줄. 보여 주기만 한다. 값이 없거나 모양이 틀리면 0이 아니라 "모름"이고,
+ * 끝난 요청이 없으면 0/0 대신 그렇게 적는다. 기록에 남은 사실만 센 값이라 한 번에 끝난 수는 많아야, 다시 손댄 수는 적어도 그만큼이다
+ */
+export function outcomesLines(outcomes: unknown, muted: string): string[] {
+  const value = outcomes as Partial<RecordsOutcomes> | undefined;
+  if (!value || !count(value.total) || !count(value.oneShot) || value.oneShot > value.total) return [` 한 번에 끝난 요청: 모름`];
+  if (value.total === 0) return [` 한 번에 끝난 요청: 끝난 요청 없음`];
+  const parts = [`한 번에 끝난 요청 ${value.oneShot}/${value.total}`];
+  if (count(value.redone) && value.redone > 0) parts.push(`다시 손댄 요청 ${value.redone}건`);
+  if (count(value.asked) && value.asked > 0) parts.push(`되묻기 ${value.asked}건`);
+  if (count(value.reverted) && value.reverted > 0) parts.push(`되돌림 ${value.reverted}건`);
+  if (count(value.gateFailures) && count(value.gateFailedRuns) && value.gateFailures > 0) parts.push(`게이트 실패 ${value.gateFailures}회(${value.gateFailedRuns}건)`);
+  if (count(value.turnLimited) && value.turnLimited > 0) parts.push(`턴 상한 ${value.turnLimited}건`);
+  return [` ${parts.join(' · ')}`, ` ${muted}기록에 남은 사실만 센 값입니다. 끝났다고 해 놓고 결과가 틀려 다시 시킨 것은 잡지 못해${RESET}`, ` ${muted}한 번에 끝난 수는 많아야 이만큼, 다시 손댄 수는 적어도 이만큼입니다${RESET}`];
 }
 
 export type RecordsRange = 'all' | '7d' | '30d';
@@ -237,7 +272,7 @@ function tokenLines(state: RecordsState, theme: Theme, width: number, titles: Re
   const report = state.report;
   if (!report) return [head, '', ` ${muted}불러오는 중…${RESET}`];
   const total = totalTokens(report.totals);
-  const lines = [head, '', ` ${BOLD}합계 ${compactTokens(total)} 토큰 · ${cost(report.estimatedCostUsd)} · 세션 ${report.sessions} · 요청 ${report.requests.length}${RESET}`];
+  const lines = [head, '', ` ${BOLD}합계 ${compactTokens(total)} 토큰 · ${cost(report.estimatedCostUsd)} · 세션 ${report.sessions} · 요청 ${report.requests.length}${RESET}`, ...outcomesLines(report.requestOutcomes, muted)];
   if (report.requests.length === 0) return [...lines, '', ` ${muted}이 기간에 요청이 없습니다${RESET}`];
 
   // 세션별: 요청을 세션마다 모은다. 제목은 desk가 아는 세션 이름, 모르면 그 세션의 첫 요청 글
