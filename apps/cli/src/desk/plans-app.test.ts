@@ -3,6 +3,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { StudioRequestError } from './client';
+import type { DeskDraftStore } from './drafts';
 import { DeskApp, type DeskClient, type DeskIo } from './desk';
 import type { DeskPlan } from './plans';
 import { stripAnsi } from './screen';
@@ -136,11 +137,11 @@ class FakeClient implements DeskClient {
   }
 }
 
-function setup(items: DeskItem[] = [item('a')]) {
+function setup(items: DeskItem[] = [item('a')], draftStore?: DeskDraftStore) {
   const client = new FakeClient(items);
   const io = new FakeIo();
   const opened: string[] = [];
-  const app = new DeskApp(client, items, io, { openUrl: (url) => opened.push(url), accounts: client.accountList });
+  const app = new DeskApp(client, items, io, { openUrl: (url) => opened.push(url), accounts: client.accountList, ...(draftStore ? { draftStore } : {}) });
   const done = app.run();
   return { client, io, app, done, opened };
 }
@@ -237,6 +238,45 @@ describe('작업 나누기 화면(#893)', () => {
     expect(ctx.app.state.plans?.mode).toBe('detail');
     expect(ctx.app.state.plans?.detail?.id).toBe('p9');
     expect(screenText(ctx.io)).toContain('레인으로 나누는 중');
+  });
+
+  it('새 계획에 쓰던 글은 desk를 다시 띄워도 남고, 만들면 지운다(#1380)', async () => {
+    const kept = new Map<string, string>();
+    const store: DeskDraftStore = {
+      load: () => ({ drafts: new Map(kept) }),
+      save: (drafts) => {
+        kept.clear();
+        for (const [key, text] of drafts) kept.set(key, text);
+      },
+    };
+    const first = setup([item('a')], store);
+    first.io.type('\x02t');
+    await tick();
+    first.io.type('n');
+    await tick();
+    first.io.type('\r');
+    first.io.type('문서 정리');
+    await tick(400);
+    expect(kept.get('plan:shop')).toBe('문서 정리');
+    first.io.type('\x1b');
+    await tick();
+    first.io.type('\x1b');
+    await tick();
+    first.io.type('\x02q');
+    await first.done;
+
+    const second = setup([item('a')], store);
+    second.io.type('\x02t');
+    await tick();
+    second.io.type('n');
+    await tick();
+    second.io.type('\r');
+    await tick();
+    expect(second.app.state.plans?.form?.text).toBe('문서 정리');
+    second.io.type('\r');
+    await tick(400);
+    expect(second.client.calls).toContain('create shop 문서 정리');
+    expect(kept.has('plan:shop')).toBe(false);
   });
 
   it('Enter는 레인 세션을 고른 칸에 열고, g는 세션 있는 레인을 칸에 나란히 연다', async () => {
