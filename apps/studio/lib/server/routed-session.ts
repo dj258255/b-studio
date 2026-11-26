@@ -144,7 +144,7 @@ async function openWithFirstRequest(sessionId: string, request: string, intent: 
   try {
     const { initialPromptUsed } = await deps.driver.open(sessionId, text);
     if (!initialPromptUsed) {
-      return { opened: true, pasted: false, pasteError: '터미널이 이미 열려 있었거나 이 방식은 첫 요청을 넘기지 못합니다. 그 터미널에서 요청을 직접 넣으세요' };
+      return { opened: true, pasted: false, pasteError: '터미널이 이미 열려 있었거나 다른 부름이 여는 중이어서 첫 요청을 넘기지 못했습니다. 그 터미널에서 요청을 직접 넣으세요' };
     }
     if (!(await waitUntil(deps, deps.startTimeoutMs, () => started))) {
       return {

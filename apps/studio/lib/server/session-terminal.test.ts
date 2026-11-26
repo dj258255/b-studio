@@ -2,6 +2,7 @@ import type { AgentGatewayAddress, AgentTerminal, TerminalSize } from '@b-studio
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
   closeSessionTerminal,
+  containerOpenOptions,
   disposeSessionTerminal,
   interruptSessionTerminal,
   isTerminalRunnableBackend,
@@ -16,6 +17,7 @@ import {
   sessionTerminalPresence,
   subscribeSessionTerminal,
   terminalBackend,
+  terminalHomeUser,
   writeSessionTerminal,
   type TerminalBackend,
   type TerminalMessage,
@@ -660,5 +662,42 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: true }, container)).toBe('chat');
     expect(reviewFixRunner({ allowed: false, backend: 'claude-code', apiKeyReady: true }, host)).toBe('chat');
     expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, host)).toBe('chat');
+  });
+});
+
+describe('컨테이너 터미널의 첫 요청과 사용자별 홈 (#1401)', () => {
+  it('컨테이너 백엔드도 첫 요청을 받는다. 받는 백엔드면 openSessionTerminal이 첫 요청을 넘기고 썼다고 돌려준다', async () => {
+    expect(terminalBackend('container').acceptsInitialPrompt).toBe(true);
+    expect(terminalBackend('host').acceptsInitialPrompt).toBe(true);
+    const { backend } = fakeBackend();
+    const accepting: TerminalBackend = { ...backend, acceptsInitialPrompt: terminalBackend('container').acceptsInitialPrompt };
+    const result = await openSessionTerminal('s-1401', target, {}, accepting, { initialPrompt: '주문 화면 고쳐 줘' });
+    expect(result.initialPromptUsed).toBe(true);
+    await disposeSessionTerminal('s-1401', target.sandboxId, backend);
+  });
+
+  it('openAgentTerminal에 넘기는 값은 호스트 방식과 같은 꼴로 맞춘 첫 요청이다', () => {
+    const size = { cols: 80, rows: 24 };
+    expect(containerOpenOptions({ id: 'main', size, initialPrompt: '주문 화면 고쳐 줘' })).toEqual({ id: 'main', size, firstPrompt: '주문 화면 고쳐 줘' });
+    // 옵션이나 하위 명령으로 읽힐 글에는 앞말이 붙는다
+    expect(containerOpenOptions({ id: 'main', size, initialPrompt: '-x' }).firstPrompt).toBe('요청: -x');
+    expect(containerOpenOptions({ id: 'main', size, initialPrompt: 'update' }).firstPrompt).toBe('요청: update');
+    expect('firstPrompt' in containerOpenOptions({ id: 'main', size })).toBe(false);
+    // 너무 길거나 비었으면 호스트 방식과 같이 던진다
+    expect(() => containerOpenOptions({ id: 'main', size, initialPrompt: 'a '.repeat(6000) })).toThrow('너무 깁니다');
+    expect(() => containerOpenOptions({ id: 'main', size, initialPrompt: '   ' })).toThrow('비어');
+  });
+
+  it('인증을 끈 개인 PC 방식은 사용자별로 가르지 않는다. 그 밖의 방식은 세션 주인으로 가른다(모르는 값도)', () => {
+    expect(terminalHomeUser('none', 'local')).toBeUndefined();
+    expect(terminalHomeUser('token', 'alice')).toBe('alice');
+    expect(terminalHomeUser('proxy', 'bob')).toBe('bob');
+    expect(terminalHomeUser('모르는-방식', 'alice')).toBe('alice');
+    // 인증을 켠 서버에 'local'이라는 사용자가 있어도 개인 PC의 볼륨을 같이 쓰지 않는다
+    expect(terminalHomeUser('token', 'local')).toBe('local');
+    // 인증을 켰는데 주인을 모르면 공용 볼륨으로 떨어지지 않고 던진다
+    expect(() => terminalHomeUser('token', undefined)).toThrow('세션 주인');
+    expect(() => terminalHomeUser('token', '')).toThrow('세션 주인');
+    expect(terminalHomeUser('none', undefined)).toBeUndefined();
   });
 });

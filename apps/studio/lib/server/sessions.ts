@@ -265,7 +265,7 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalHomeUser, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
@@ -7403,6 +7403,7 @@ export function sessionTerminalTarget(id: string): {
   sandboxId: string;
   root: string;
   projectId: string;
+  homeUser?: string;
   evaluationAssets?: readonly string[];
   alive: () => boolean;
   onViolation: (reason: string) => void;
@@ -7422,11 +7423,14 @@ export function sessionTerminalTarget(id: string): {
   // 멈추기 시작한 순간부터 받지 않는다. 상태는 정리가 다 끝나야 stopped로 바뀌므로(몇 초), 상태만 보면 그 사이에 열린 터미널의
   // 컨테이너가 정리 뒤에 남는다. 중지 신호는 stopSession이 맨 먼저 올린다
   const alive = (): boolean => terminalSessionAlive(session);
+  const homeUser = terminalHomeUser(authConfig().mode, session.snapshot.owner);
   if (!alive()) throw new StudioError(409, '멈춘 세션에서는 터미널을 열 수 없습니다. 이어서 작업(Ctrl-b r)한 뒤 다시 여세요');
   return {
     sandboxId: session.sandbox.id,
     root: session.project.root,
     projectId: session.snapshot.projectId,
+    // 인증을 켠 서버 방식이면 컨테이너 홈 볼륨(로그인·설치한 CLI)을 세션 주인별로 가른다. 개인 PC 방식은 옛 이름 그대로
+    ...(homeUser !== undefined ? { homeUser } : {}),
     evaluationAssets: session.project.spec.workflow?.evaluationAssets,
     alive,
     // 감시가 찾은 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 세션 쪽에서 처리한다
