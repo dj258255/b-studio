@@ -6,7 +6,7 @@
  * 고치기·더하기 글 넣기. 문서: 목록과 터미널에 맞춘 마크다운 읽기, 편집기로 고치기. 현황: 지금 하는 일·목적·산출물·위험·검증.
  * 여기는 상태와 받은 키로 다음 상태와 할 일(effects)을 돌려주는 순수 함수와 그리기뿐이다. 스튜디오 API와 편집기는 desk.ts가 다룬다
  */
-import { fit, fitAnsi, osc8, stringWidth } from './screen';
+import { fit, fitAnsi, osc8, stringWidth, tailFit } from './screen';
 import { bg, BOLD, fg, RESET, type ColorToken, type Theme } from './theme';
 import { box } from './widgets';
 import type { DeskDocEntry, DeskProjectStatus, DeskRequirement, DeskRequirements, DeskRequirementStatus, DeskTestRow, DeskTests } from './types';
@@ -567,8 +567,7 @@ function specPane(state: RequirementsState, width: number, height: number, theme
   let cursor: Pane['cursor'];
   if (state.verify) {
     const prompt = `${state.verify.requirementId} 확인 메모> `;
-    let shown = state.verify.text;
-    while (shown && stringWidth(prompt) + stringWidth(shown) > width - 1) shown = [...shown].slice(1).join('');
+    const shown = tailFit(state.verify.text, width - 1 - stringWidth(prompt));
     const at = Math.min(lines.length, height - (state.verify.error ? 3 : 2));
     lines.length = Math.max(0, at);
     lines.push('', `${fg(theme, 'accent')}${prompt}${RESET}${shown}`);
