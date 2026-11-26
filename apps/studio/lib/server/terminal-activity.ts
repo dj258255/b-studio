@@ -676,7 +676,7 @@ const CREDENTIAL_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
 /** 비밀을 뜻하는 낱말이 든 이름(넓게 맞춘다) */
 const SECRET_NAME = /password|passwd|pwd|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|credential|auth/i;
 /** 이름 하나와 구분자. 이름의 첫 글자에서만 시작한다(뒤돌아보기) — 이름 한가운데에서 다시 시작하면 긴 이름에서 제곱 시간이 된다 */
-const ASSIGN_HEAD = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)["']?[ \t]*[:=][ \t]*/g;
+const ASSIGN_HEAD = /(?<![A-Za-z0-9_.-])([A-Za-z0-9_.-]+)["']?\s*[:=]\s*/g;
 const ASSIGN_VALUE = /"[^"\n]*"|'[^'\n]*'|[^\s,;&)"']+/y;
 
 /**

@@ -743,6 +743,14 @@ describe('대입 꼴 가림에 길이로 비켜 갈 틈이 없다(#1411)', () =>
     expect(addedOf(`${'x'.repeat(100)}_password = "LEAK FOUR"`)).not.toContain('LEAK FOUR');
   });
 
+  it('구분자 둘레에 줄바꿈·CR·NBSP·전각 빈칸이 있어도 값을 가린다', () => {
+    expect(addedOf('"password":\n  "LEAK_NL"')).not.toContain('LEAK_NL');
+    expect(addedOf('token\n=\nLEAK_NL2')).not.toContain('LEAK_NL2');
+    expect(addedOf('token =\r\nLEAK_CR')).not.toContain('LEAK_CR');
+    expect(addedOf('token\u00a0=\u00a0LEAK_NBSP')).not.toContain('LEAK_NBSP');
+    expect(addedOf('token\u3000:\u3000LEAK_WIDE')).not.toContain('LEAK_WIDE');
+  });
+
   it('값 자리에 다시 대입이 와도 안쪽 값을 가린다', () => {
     expect(addedOf('x=token=LEAK_FIVE')).not.toContain('LEAK_FIVE');
     expect(addedOf('url: password=LEAK_SIX')).not.toContain('LEAK_SIX');
@@ -754,7 +762,7 @@ describe('대입 꼴 가림에 길이로 비켜 갈 틈이 없다(#1411)', () =>
 
   it('상한 크기의 글에서도 오래 걸리지 않는다', () => {
     const size = ACTIVITY_LIMITS.rawChars - 10;
-    for (const content of ['a'.repeat(size), 'a='.repeat(size / 2), 'token '.repeat(Math.floor(size / 6)), `token${' '.repeat(size - 5)}`, 'token='.repeat(Math.floor(size / 6))]) {
+    for (const content of ['a'.repeat(size), 'a='.repeat(size / 2), 'token '.repeat(Math.floor(size / 6)), `token${' '.repeat(size - 5)}`, `token${'\n'.repeat(size - 5)}`, 'token\n'.repeat(Math.floor(size / 6)), 'token='.repeat(Math.floor(size / 6))]) {
       const started = performance.now();
       addedOf(content);
       expect(performance.now() - started).toBeLessThan(5_000);
