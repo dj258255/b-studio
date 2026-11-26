@@ -271,8 +271,8 @@ describe('에이전트 나무 목록 화면', () => {
     expect(lines).toHaveLength(small.rows);
     for (const line of lines) expect(stringWidth(stripAnsi(line))).toBe(small.cols);
     expect(plain[0]).toContain('에이전트 나무');
-    expect(plain.join('\n')).toContain('├ ◐ Explore 결제 흐름 찾기');
-    expect(plain.join('\n')).toContain('└ ◐ Explore 테스트 찾기');
+    expect(plain.join('\n')).toContain('├ ◐ 탐색 결제 흐름 찾기');
+    expect(plain.join('\n')).toContain('└ ◐ 탐색 테스트 찾기');
     expect(plain.at(-1)).toContain('에이전트 나무');
     expect(cursor).toBeUndefined();
   });

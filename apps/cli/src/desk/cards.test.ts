@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ART_WIDE, cardLines, resetText, spaceScreen, spriteFor } from './cards';
+import { ART_WIDE, cardLines, resetText, spaceScreen, spriteFor, toolLabel, toolLineLabel } from './cards';
 import { initialState, type DeskState } from './keys';
 import { stringWidth, stripAnsi } from './screen';
 import { KittyImages } from './kitty';
@@ -35,7 +35,7 @@ describe('카드 한 장', () => {
     expect(plain[0]!.startsWith('╭')).toBe(true);
     expect(plain[1]).toMatch(/│ .{14} {2}주문 모듈 +Claude +칸1 +◐ 작업 중 │/);
     expect(plain[2]).toContain('Edit src/order.ts');
-    expect(plain[3]).toContain('↳ Explore · 모델 요청 2회');
+    expect(plain[3]).toContain('↳ 탐색 · 모델 요청 2회');
     expect(plain.join('\n')).not.toContain('토큰');
     expect(card({ selected: true }).map(stripAnsi).join('\n')).toContain('검증 통과 · 토큰 1.2만 · $0.42 · 체크포인트 2');
     // 그림 자리에 반칸 블록이 있다
@@ -134,8 +134,8 @@ describe('카드가 보이는 지금 하는 일·할 일·문맥·마지막 답(
       { id: 'a2', name: 'Explore', type: 'Explore', description: '테스트 찾기', kind: 'subagent' as const, state: 'working' as const, tokens: usage(10) },
     ];
     const plain = card(item('s', { agents }));
-    expect(plain[3]).toContain('↳ Explore 결제 흐름 찾기 · Grep order');
-    expect(plain[4]).toContain('↳ Explore 테스트 찾기');
+    expect(plain[3]).toContain('↳ 탐색 결제 흐름 찾기 · 찾기 order');
+    expect(plain[4]).toContain('↳ 탐색 테스트 찾기');
   });
 
   it('고른 카드는 마지막 답을 두 줄까지 펼친다', () => {
@@ -291,5 +291,26 @@ describe('한도 경고 줄과 마지막 답 줄', () => {
     expect(soon.warn).toContain('곧 초기화');
     expect(soon.next).toContain('답 끝났습니다');
     expect(at(new Date(NOW + 110 * 60_000).toISOString()).warn).toContain('1시간 50분 뒤 초기화');
+  });
+});
+
+describe('도구 이름을 우리말로', () => {
+  it('아는 도구는 우리말, 모르는 도구는 그대로', () => {
+    expect(toolLabel('Grep')).toBe('찾기');
+    expect(toolLabel('mcp__b-studio__verify')).toBe('mcp__b-studio__verify');
+  });
+
+  it('객체가 물려받은 이름과 같은 도구 이름도 글자 그대로 둔다', () => {
+    expect(toolLabel('constructor')).toBe('constructor');
+    expect(toolLabel('__proto__')).toBe('__proto__');
+    expect(toolLabel('toString')).toBe('toString');
+  });
+
+  it('서브에이전트의 "도구 대상" 한 줄은 첫 낱말(도구)만 바꾼다', () => {
+    expect(toolLineLabel('Grep updateOrder')).toBe('찾기 updateOrder');
+    expect(toolLineLabel('Bash pnpm test order')).toBe('실행 pnpm test order');
+    expect(toolLineLabel('Read')).toBe('읽기');
+    expect(toolLineLabel('파일 12개 읽음')).toBe('파일 12개 읽음');
+    expect(toolLineLabel('')).toBe('');
   });
 });

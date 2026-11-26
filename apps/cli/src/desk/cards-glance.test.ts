@@ -82,8 +82,8 @@ describe('서브에이전트 줄', () => {
 
   it('작업 중인 것을 셋까지 한 줄씩 "4분째"로, 나머지는 "외 N개"', () => {
     const plain = draw(item('m', { state: 'working', agents })).join('\n');
-    expect(plain).toContain('↳ Explore 주문 호출부 찾기 · Grep · 4분째');
-    expect(plain).toContain('↳ Explore 문서 찾기 · 1분째');
+    expect(plain).toContain('↳ 탐색 주문 호출부 찾기 · 찾기 · 4분째');
+    expect(plain).toContain('↳ 탐색 문서 찾기 · 1분째');
     expect(plain).not.toContain('타입 찾기');
     expect(plain).toContain('↳ 외 2개 작업 중');
   });
