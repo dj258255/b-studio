@@ -76,12 +76,22 @@ describe('서브에이전트 줄', () => {
     sub('a1', { description: '주문 호출부 찾기', tool: 'Grep', startedAt: ago(4 * 60), lastAt: ago(10) }),
     sub('a2', { type: 'test-runner', name: 'test-runner', description: 'pnpm test', startedAt: ago(9 * 60), lastAt: ago(6 * 60) }),
     sub('a3', { description: '문서 찾기', startedAt: ago(60) }),
+    sub('a4', { description: '타입 찾기', startedAt: ago(30) }),
+    sub('a5', { description: '설정 찾기', startedAt: ago(20) }),
   ];
 
-  it('작업 중인 것을 둘까지 한 줄씩 "4분째"로, 나머지는 "외 N개"', () => {
+  it('작업 중인 것을 셋까지 한 줄씩 "4분째"로, 나머지는 "외 N개"', () => {
     const plain = draw(item('m', { state: 'working', agents })).join('\n');
     expect(plain).toContain('↳ Explore 주문 호출부 찾기 · Grep · 4분째');
-    expect(plain).toContain('↳ 외 1개 작업 중');
+    expect(plain).toContain('↳ Explore 문서 찾기 · 1분째');
+    expect(plain).not.toContain('타입 찾기');
+    expect(plain).toContain('↳ 외 2개 작업 중');
+  });
+
+  it('작업 중이 셋이면 "외 N개" 줄 없이 셋 모두 보인다', () => {
+    const plain = draw(item('m', { state: 'working', agents: agents.slice(0, 4) })).join('\n');
+    expect(plain).toContain('문서 찾기');
+    expect(plain).not.toContain('외 ');
   });
 
   it('서브에이전트가 3분 넘게 소식이 없으면 그 줄에 멈춘 듯을 적는다', () => {
@@ -91,7 +101,10 @@ describe('서브에이전트 줄', () => {
   it('고른 카드를 펼쳐도 이미 보인 서브에이전트를 다시 그리지 않는다', () => {
     const plain = draw(item('m', { state: 'working', agents }), { selected: true });
     expect(plain.filter((line) => line.includes('주문 호출부 찾기')).length).toBe(1);
-    expect(plain.some((line) => line.includes('문서 찾기'))).toBe(true);
+    expect(plain.filter((line) => line.includes('문서 찾기')).length).toBe(1);
+    // 카드 몸에 없는 넷째부터 펼친다
+    expect(plain.filter((line) => line.includes('타입 찾기')).length).toBe(1);
+    expect(plain.filter((line) => line.includes('설정 찾기')).length).toBe(1);
   });
 });
 

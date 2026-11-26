@@ -23,9 +23,12 @@
  * 앞글쇠 다음 다른 화면 키는 실행 화면을 닫고 그 일을 한다. 앞글쇠 다음 v는 닫는다
  * 폴더 열기 화면(#916, 앞글쇠 다음 a, 스페이스 화면에서는 a만, 새 요청의 프로젝트 고르기 끝 줄)도 같은 덮는 화면이다. 경로 입력이라 앞글쇠가 아닌 키와 붙여넣기는
  * 그 화면이 받고(folder.ts), 앞글쇠 다음 다른 화면 키는 폴더 열기를 닫고 그 일을 한다
+ * 에이전트 나무 목록(앞글쇠 다음 m, 카드 화면에서는 m만)은 빠른 전환처럼 본문 자리에 열린다. 앞글쇠가 아닌 키는 그 화면이 받고(agent-tree.ts, ↑↓ 고르기, Enter 칸에 열기,
+ * Tab 스페이스/전체, Esc·m 닫기), 앞글쇠 다음 다른 화면 키는 목록을 닫고 그 일을 한다
  * 지금 변경 화면(#924, 앞글쇠 다음 d, 스페이스 화면에서는 d만)도 같은 덮는 화면이다. 앞글쇠가 아닌 키(c 의견, x 해결, S 묶어 넣기 …)와 붙여넣기는
  * 그 화면이 받고(changes.ts), 앞글쇠 다음 다른 화면 키는 지금 변경을 닫고 그 일을 한다. 앞글쇠 다음 d는 닫는다
  */
+import { openAgentTree, treeKey, type AgentTreeState } from './agent-tree';
 import { needsYou } from './cards';
 import { changesKey, changesPaste, type ChangesEffect, type ChangesState } from './changes';
 import { fleetsKey, fleetsPaste, openFleets, type FleetsEffect, type FleetsState } from './fleets';
@@ -177,6 +180,8 @@ export interface DeskState {
   unseenDone?: string[];
   /** 빠른 전환 목록(#922, 앞글쇠 다음 Space). 있으면 본문 자리가 이 목록이다 */
   switcher?: SwitcherState;
+  /** 에이전트 나무 목록(앞글쇠 다음 m). 있으면 본문 자리가 이 목록이다 */
+  tree?: AgentTreeState;
   /** 설정한 앞글쇠(없으면 Ctrl-b)와 화면에 보일 이름(#874) */
   prefixKey?: string;
   prefixLabel?: string;
@@ -360,7 +365,7 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       flush();
       at += mouse[0].length;
       // 묻거나 쓰는 중(도움말·확인·이름·새 요청·설정·요구사항·기록·세션 자세히·작업 나누기·여러 AI 비교·실행)의 마우스는 버린다. 앞글쇠 뒤의 마우스는 앞글쇠를 푼다
-      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans || state.fleets || state.runtime || state.folder || state.changes || state.switcher) continue;
+      if (state.help || state.confirm || state.rename || state.prompt || state.settings || state.requirements || state.records || state.detail || state.plans || state.fleets || state.runtime || state.folder || state.changes || state.switcher || state.tree) continue;
       if (state.prefix) state = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
       effects.push({ type: 'mouse', button: Number(mouse[1]), x: Number(mouse[2]) - 1, y: Number(mouse[3]) - 1, release: mouse[4] === 'm' });
       continue;
@@ -467,6 +472,15 @@ export function handleInput(start: DeskState, chunk: string, final = false): { s
       if (result.chosen) state = jumpTo(state, result.chosen, effects);
       continue;
     }
+    if (state.tree && !state.prefix && input[at] !== prefixOf(state)) {
+      // 에이전트 나무 목록: 앞글쇠가 아닌 키는 모두 고르기다. 앞글쇠 다음 키는 commandKey가 받는다
+      const key = nextKey(input, at);
+      at += key.length;
+      const result = treeKey(state, key);
+      state = { ...state, tree: result.state, ...(result.help ? { help: true } : {}) };
+      if (result.chosen) state = jumpTo(state, result.chosen, effects);
+      continue;
+    }
     if (state.folder && !state.prefix && input[at] !== prefixOf(state)) {
       // 폴더 열기(#916): 앞글쇠가 아닌 키는 모두 경로 입력이다. 앞글쇠 다음 키는 commandKey가 받는다
       const key = nextKey(input, at);
@@ -553,6 +567,8 @@ function pasteContent(state: DeskState, content: string, ended: boolean, effects
   const next: DeskState = ended ? { ...state, pasting: undefined } : { ...state, pasting: { sent: pasting.sent || content.length > 0 } };
   // 빠른 전환 목록이면 거르기에 넣는다(#922)
   if (state.switcher) return { ...next, switcher: switcherPaste(state.switcher, content) };
+  // 에이전트 나무 목록은 글을 받지 않는다(칸으로도 가지 않는다)
+  if (state.tree) return next;
   // 설정 화면이 열려 있으면 그 입력 칸에 넣는다(#890)
   if (state.settings) return { ...next, settings: settingsPaste(state.settings, content) };
   // 비교 화면이 열려 있으면 새 비교의 입력 칸에 넣는다(#892)
@@ -652,6 +668,20 @@ function commandKey(start: DeskState, key: string, effects: Effect[]): DeskState
   if (state.switcher && key !== ' ' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
     // 다른 화면이나 칸을 다루는 키는 빠른 전환을 닫고 한다(#922)
     state = { ...state, switcher: undefined };
+  }
+  if (state.tree && key !== 'm' && key !== '?' && key !== ESC && key !== prefixOf(state)) {
+    // 다른 화면이나 칸을 다루는 키는 에이전트 나무 목록을 닫고 한다
+    state = { ...state, tree: undefined };
+  }
+  if (key === 'm') {
+    const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
+    // 같은 키는 닫는다
+    if (state.tree) return { ...done, tree: undefined };
+    // 덮는 화면은 하나만 둔다
+    if (state.plans) effects.push({ type: 'plans', effect: { type: 'close' } });
+    if (state.fleets) effects.push({ type: 'fleets', effect: { type: 'close' } });
+    if (state.runtime) effects.push({ type: 'runtime', effect: { type: 'close' } });
+    return { ...done, tree: openAgentTree(), switcher: undefined, prompt: undefined, settings: undefined, records: undefined, detail: undefined, requirements: undefined, plans: undefined, fleets: undefined, runtime: undefined, folder: undefined, changes: undefined };
   }
   if (key === ' ') {
     const done = { ...state, prefix: false, browsing: false, ...(state.message === BROWSING ? { message: undefined } : {}) };
@@ -877,7 +907,7 @@ function nextWaiting(state: DeskState): string | undefined {
 /** 세션 하나로 간다(#922): 칸 화면으로 돌아와 그 세션을 고르고, 이미 칸에 있으면 그 칸을, 아니면 고른 칸에 연다 */
 function jumpTo(start: DeskState, id: string, effects: Effect[]): DeskState {
   const index = deskSessions(start.items).findIndex((item) => item.id === id);
-  const state: DeskState = { ...start, view: undefined, usageBack: undefined, switcher: undefined, ...(index >= 0 ? { selected: index } : {}) };
+  const state: DeskState = { ...start, view: undefined, usageBack: undefined, switcher: undefined, tree: undefined, ...(index >= 0 ? { selected: index } : {}) };
   const already = state.slots.findIndex((slot, at) => slot === id && at < state.layout);
   if (already >= 0) {
     if (state.zoom && already !== state.focus) effects.push({ type: 'layout' });
@@ -915,7 +945,7 @@ function spaceKey(state: DeskState, key: string, effects: Effect[]): DeskState {
     const entry = needsYou(state)[Number(key) - 1];
     return entry ? { ...base, selected: entry.index } : base;
   }
-  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i' || key === 'e' || key === 'f' || key === 'v' || key === 'a' || key === 'd') return commandKey(base, key, effects);
+  if (key === '\r' || key === '\n' || key === 'n' || key === 'p' || key === 'r' || key === ',' || key === '?' || key === 'c' || key === 'g' || key === 'i' || key === 'e' || key === 'f' || key === 'v' || key === 'a' || key === 'd' || key === 'm') return commandKey(base, key, effects);
   return base;
 }
 
