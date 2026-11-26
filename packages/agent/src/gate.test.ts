@@ -7,7 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as declaredChecks from './declared-checks';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, type PageFetcher, type ServiceRequest } from './gate';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { signatureFromCheck, signatureKey } from './coordination/signature';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { clearTestReportsCommand } from './test-run';

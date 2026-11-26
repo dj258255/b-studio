@@ -1,5 +1,5 @@
 import { AnthropicModelClient, type Effort } from './anthropic-client';
-import type { ModelClient } from './loop';
+import type { ModelClient } from './agent-types';
 import type { ModelProfile } from './model-router';
 import { createProviderClient } from './provider-clients';
 

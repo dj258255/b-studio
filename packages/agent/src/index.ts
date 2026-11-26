@@ -1,16 +1,16 @@
-export {
-  runAgent,
-  type AgentEvent,
-  type AgentRequest,
-  type AgentResult,
-  type AgentUsage,
-  type ModelClient,
-  type ModelClientInfo,
-  type ModelPreflight,
-  type RunAgentOptions,
-  type RunMetrics,
-  type Steering,
-} from './loop';
+export { runAgent } from './loop';
+export type {
+  AgentEvent,
+  AgentRequest,
+  AgentResult,
+  AgentUsage,
+  ModelClient,
+  ModelClientInfo,
+  ModelPreflight,
+  RunAgentOptions,
+  RunMetrics,
+  Steering,
+} from './agent-types';
 export { apiKeyEnvName, clientForProfile } from './client-for-profile';
 export { keylessLocal } from './model-key';
 export { AnthropicModelClient, DEFAULT_MODEL, type AnthropicModelClientOptions, type Effort } from './anthropic-client';
@@ -18,22 +18,24 @@ export { DEFAULT_SAME_SIGNATURE_TIMES, shouldEscalate, signatureSetKey, type Esc
 export {
   ClaudeCodeUsageTracker,
   CLAUDE_CODE_MODELS_UNSUPPORTED,
-  DEFAULT_CLAUDE_CODE_EFFORT,
   describeAccount,
   describeResultFailure,
   fetchClaudeCodeModels,
   noResultMessage,
   preflightClaudeCode,
-  runClaudeCodeAgent,
   type ClaudeCodeAccount,
+  type ModelInfo,
+} from './claude-code-shared';
+export {
+  DEFAULT_CLAUDE_CODE_EFFORT,
+  runClaudeCodeAgent,
   type ClaudeCodeResult,
   type ClaudeCodeRunOptions,
-  type ModelInfo,
 } from './claude-code-runner';
 export { spawnClaudeCli, type CliMessage, type CliStopOptions, type ClaudeCliProcess } from './claude-cli-process';
 export { cliPreflightFailure, describeCliError, type CliPreflightFailure } from './cli-failure';
+export { preflightCodex } from './codex-auth';
 export {
-  preflightCodex,
   runCodexAgent,
   type CodexConfig,
   type CodexRunOptions,
@@ -41,12 +43,9 @@ export {
   type CodexSdk,
   type CodexThread,
 } from './codex-runner';
+export { listCommandCodeModels, parseCommandCodeModels, preflightCommandCode, type CommandCodeModel } from './commandcode-auth';
 export {
-  listCommandCodeModels,
-  parseCommandCodeModels,
-  preflightCommandCode,
   runCommandCodeAgent,
-  type CommandCodeModel,
   type CommandCodeProcess,
   type CommandCodeProcessResult,
   type CommandCodeRunOptions,
@@ -56,11 +55,13 @@ export {
   listOpenCodeModels,
   OPENCODE_FREE_UNUSABLE_REASON,
   OPENCODE_MODEL_REQUIRED,
-  OPENCODE_PROVIDER_GATE_MESSAGE,
   parseOpenCodeModels,
   preflightOpenCode,
-  runOpenCodeAgent,
   type OpenCodeModel,
+} from './opencode-auth';
+export {
+  OPENCODE_PROVIDER_GATE_MESSAGE,
+  runOpenCodeAgent,
   type OpenCodeProcess,
   type OpenCodeProcessResult,
   type OpenCodeRunOptions,
@@ -69,13 +70,13 @@ export {
 export {
   GEMINI_MODEL_REQUIRED,
   geminiSettingsJson,
-  preflightGemini,
   runGeminiAgent,
   type GeminiProcess,
   type GeminiProcessResult,
   type GeminiRunOptions,
   type GeminiRunResult,
 } from './gemini-cli-runner';
+export { preflightGemini } from './gemini-auth';
 export { hostAllowed, startToolServer, tokenMatches, type ToolServer, type ToolServerOptions } from './mcp-http-server';
 export { readHookBody, startHookServer, type HookBodyKind, type HookHandler, type HookInput, type HookMeta, type HookServer, type HookServerOptions } from './hook-server';
 export { ChangeTracker, rejectedChangeFeedback, type ChangeTrackerOptions, type Fingerprinter } from './change-tracker';
@@ -416,7 +417,7 @@ export { runTaskGraph, TaskGraphError, type TaskEvent, type TaskGraphOptions, ty
 export { AGENT_LANGUAGE_INSTRUCTION, AGENT_LANGUAGE_REMINDER, buildAskRequest, buildSystemPrompt, withLanguageReminder } from './prompts';
 export { readProjectFileSync, readRegularFileSync, Workspace, WorkspaceError, type RegularFileRead } from './workspace';
 // CLI의 내장 파일 도구를 프로젝트 안으로 가두는 경로 검사. 벤치의 기준선 팔(P0)도 같은 규칙을 쓴다(#671)
-export { guardBuiltinTool } from './claude-gateway-runner';
+export { guardBuiltinTool } from './gateway-tools';
 export {
   aggregateModelStats,
   classifyComplexity,
@@ -733,7 +734,8 @@ export {
   type TestTarget,
 } from './test-run';
 export { experimentalEnabled, gatewayEnabled } from './experimental';
-export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, runClaudeGatewayAgent, terminalGatewayNote, type ClaudeGatewayRunOptions } from './claude-gateway-runner';
-export { serialQueue } from './claude-code-runner';
+export { GATEWAY_BUILTIN_TOOLS, gatewayToolSpecs, terminalGatewayNote } from './gateway-tools';
+export { runClaudeGatewayAgent, type ClaudeGatewayRunOptions } from './claude-gateway-runner';
+export { serialQueue } from './tool-schema';
 export { parseArgs as parseInteractiveArgs } from './interactive/settings';
 export { runInteractiveSession, defaultSystemPrompt, MAX_MODEL_CALLS_PER_REQUEST, type InteractiveSessionOptions } from './interactive/session';

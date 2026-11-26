@@ -8213,3 +8213,20 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 
 - 서버 연결마다 지금 기다리는 호출의 AbortController를 모아 두고, 클라이언트의 `onerror`에서 모두 끊는다. 호출은 그 오류 글(토큰은 가린다)로 실패 결과가 되어 모델에 돌아간다.
 - 고치기 전에는 위 시험이 15초 상한에 걸려 실패했고, `onerror`에서 끊는 줄을 비우면(변이) 같은 시험이 다시 실패한다.
+
+
+## 282. 세션 터미널의 "열 수 있는가"와 "어느 방식으로 여는가"를 두 함수가 따로 읽었음 — 모르는 B_STUDIO_TERMINAL이 허용으로 보였다
+
+### 증상
+
+- 인증을 끄고 `B_STUDIO_EXPERIMENTAL=1`을 켠 채 `B_STUDIO_TERMINAL=hosts`(오타)를 넣으면 `/api/health`의 `terminal`과 `sessionTerminalAllowed()`는 참이었지만, 실제로 터미널을 여는 `sessionTerminalMode()`는 500으로 던졌다(#1391).
+
+### 원인
+
+- 허용 판정(`terminal-allowed.ts`)과 방식 판정(`session-terminal.ts`)이 같은 환경 변수를 각각 읽었다. 허용 쪽은 "모르는 값도 실험 기능이 켜져 있으면 참"으로 두었고, 인증 방식은 `process.env`만 읽어 넘겨 준 env를 무시했다.
+
+### 해결
+
+- `resolveTerminalMode(env)` 하나가 인증 방식, `B_STUDIO_TERMINAL`, 실험 스위치를 한 번 읽어 `{ allowed, mode }` 또는 `{ allowed: false, reason }`을 돌려준다. 허용 판정, 방식 판정, 백엔드 선택, 관문 바인딩이 모두 이 함수를 거친다. 모르는 값은 실험 기능과 상관없이 닫힌다.
+- 이 컴퓨터 방식 백엔드의 `prepare`도 인증을 켠 서버면 거절한다(판정을 거치지 않은 직접 호출 방어).
+- 고치기 전에는 `인증 none · B_STUDIO_TERMINAL=hosts · 실험 켬` 조합이 `expected true to be false`로 실패했다. 모르는 값 분기, 인증 확인, 준비의 방어선을 하나씩 부수면 표 시험이 각각 실패한다(변이 3종).

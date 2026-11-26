@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import { buildContractSystem, buildContractUser, contractAskFromClient, MAX_LANE_CONTRACTS, requestLaneContracts } from './lane-contracts';
-import type { ModelClient } from './loop';
+import type { ModelClient } from './agent-types';
 import { buildPlannerSystem, TaskPlanError, type TaskLane } from './task-plan';
 
 const project = {

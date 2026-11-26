@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { childEnv, resolveCliCommand, spawnClaudeCli } from './claude-cli-process';
-import { preflightClaudeCode } from './claude-code-runner';
+import { preflightClaudeCode } from './claude-code-shared';
 
 /**
  * CLI 실행 파일을 PATH에서 찾을 때 프로젝트 폴더(에이전트가 파일을 쓰는 곳) 안의 실행 파일이 잡히지 않게 한다.

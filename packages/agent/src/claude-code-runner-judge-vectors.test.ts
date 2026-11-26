@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
-import { ClaudeCodeUsageTracker, describeResultFailure, isTransientNetworkFailure, mcpSetupFailure, noResultMessage, resolveCompactWindow } from './claude-code-runner';
+import { isTransientNetworkFailure, resolveCompactWindow } from './claude-code-runner';
+import { ClaudeCodeUsageTracker, describeResultFailure, mcpSetupFailure, noResultMessage } from './claude-code-shared';
 import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 
 /**

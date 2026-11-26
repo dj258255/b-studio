@@ -18,7 +18,7 @@
  */
 import { encodeNative, native } from '@b-studio/sandbox';
 import type { LoadedProject } from '@b-studio/spec';
-import type { AgentUsage } from './loop';
+import type { AgentUsage } from './agent-types';
 import type { ModelAsk } from './task-plan';
 
 /** 짧은 요청(문장 2개 이하)의 계획 글 길이 상한(단어 수) */
