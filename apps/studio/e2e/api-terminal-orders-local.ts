@@ -174,6 +174,7 @@ async function main(): Promise<void> {
     const memoGates = gateReports(memoResult.runId);
     const memoChanges = memoGates.at(-1)?.contracts[0]?.changes ?? [];
     const memoCheckpoints = checkpointsOf(memoResult.runId);
+    const memoDoneChecks = eventsOf(memoResult.runId).flatMap((event) => (event.type === 'done' ? (event.result.checks ?? []) : []));
     const memoSnapshot = sessions.getSnapshot(sessionId);
     const memoWeb = memoSnapshot?.services.find((service) => service.name === 'web')?.url;
     const memoWebBody = memoWeb ? await fetchText(`${memoWeb}/orders`) : '(web 주소 없음)';
@@ -206,6 +207,8 @@ async function main(): Promise<void> {
     check(dropGates.length >= 1 && dropGates.every((gate) => !gate.ok), `drop-memo: 게이트가 통과시키지 않음 (게이트 ${dropGates.length}번: ${dropGates.map((gate) => gate.ok).join(', ')})`);
     check(dropBreaking.some((change) => change.kind === 'property-removed' && change.target === 'OrderResponse.memo'), `drop-memo: 호환 깨짐으로 OrderResponse.memo 삭제를 감지 (${dropBreaking.map((change) => `${change.kind}:${change.target}`).join(', ') || '없음'})`);
     check(dropReport !== undefined && dropReport.restarted.length > 0 && dropReport.restarted.every((service) => service.ready), `drop-memo: api 재시작 자체는 성공 (${dropReport?.restarted.map((service) => `${service.service}:${service.ready}`).join(', ') || '재시작 기록 없음'})`);
+    // 대조: 같은 세션에서 통과한 order-memo의 결과에는 test 단계의 검사가 실려 있었다(돌면 실린다). 그래서 여기에 없다는 것이 "돌리지 않았다"는 뜻이 된다
+    check(memoDoneChecks.some((one) => one.stage === 'test'), `drop-memo의 대조: 통과한 order-memo 결과에는 test 검사가 실림 (${memoDoneChecks.map((one) => one.stage).join(', ') || '없음'})`);
     check(!passedStages.has('test' as never) && !dropChecks.some((one) => one.stage === 'test'), `drop-memo: 계약 실패 뒤에는 test 단계를 실행하지 않음 (통과한 단계: ${[...passedStages].join(', ') || '없음'})`);
     check(checkpointsOf(dropResult.runId).length === 0 && checkpointCount() === beforeDrop, `drop-memo: 체크포인트가 늘지 않음 (${beforeDrop} → ${checkpointCount()})`);
     // 터미널 경로의 닫힘: 게이트가 막는 사유를 모델에 돌려주고(고치지 않으면 반복), 재시도 상한(3번)에 닿으면 실행을 실패로 닫고 마지막 체크포인트로 되돌린다
