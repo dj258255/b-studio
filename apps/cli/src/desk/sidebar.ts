@@ -2,6 +2,7 @@
  * desk 사이드바(#887): 스페이스(프로젝트) 목록이 중심이다. 스페이스마다 소속 세션 가운데 가장 급한 상태를 점 하나로 보이고,
  * 고른 세션이 든 스페이스 아래에만 그 세션들을 한 줄씩 짧게 편다. 세션의 자세한 내용(지금 하는 일, 서브에이전트, 게이트, 토큰)은 스페이스 화면의 카드에 있다
  */
+import { agentLine } from './agent-line';
 import { fit, fitAnsi, stringWidth } from './screen';
 import { fg, RESET, DEFAULT_THEME, type ColorToken, type Theme } from './theme';
 import type { DeskAgent, DeskItem, DeskUsage } from './types';
@@ -21,8 +22,10 @@ export interface SidebarRow {
   text: string;
   /** 고른 세션의 줄이면 true(바탕색으로 그린다) */
   selected: boolean;
-  /** 세션 줄이면 그 세션의 순서(deskSessions 순서). 사이드바를 내릴 때와 마우스로 누를 때 쓴다 */
+  /** 세션 줄(과 그 아래 서브에이전트 줄)이면 그 세션의 순서(deskSessions 순서). 사이드바를 내릴 때와 마우스로 누를 때 쓴다 */
   item?: number;
+  /** 서브에이전트 줄이면 그 서브에이전트 id(DeskAgent.id). 고르고 Enter하면 활동 기록으로 간다 */
+  agent?: string;
   /** 스페이스 줄이면 그 스페이스 이름. 누르면 그 스페이스 화면을 연다 */
   space?: string;
   /** "+ 폴더 열기" 줄(#916). 누르면 폴더 열기 화면을 연다 */
@@ -352,6 +355,57 @@ export function sessionTag(item: DeskItem, unseen: boolean, now: number): { text
   return undefined;
 }
 
+/** 사이드바에서 세션 아래에 펴는 서브에이전트 줄 수의 상한(넘으면 "외 N개"). 세션 하나가 사이드바를 다 차지하지 않게 한다 */
+export const SIDE_AGENT_MAX = 4;
+
+/** 사람이 세션마다 펴거나 접은 것. 둘 다 없으면 작업 중인 서브에이전트가 있는 세션만 편다 */
+export interface SideFold {
+  open?: readonly string[];
+  closed?: readonly string[];
+}
+
+/** 사이드바 세션 아래에 보이는 서브에이전트: 줄로 그릴 것, 줄에 못 올린 수(more), 접어 둔 끝남 수(finished) */
+export interface SideAgents {
+  agents: DeskAgent[];
+  more: number;
+  finished: number;
+}
+
+/**
+ * 세션 아래에 펼칠 서브에이전트. 접은 세션이나, 펴지 않았고 작업 중인 것이 없는 세션은 없다(undefined).
+ * 자동으로 펴면 작업 중인 것만 줄로 보이고 끝난 것은 "끝남 N"으로 접힌다. →로 편 세션은 모두 줄로 보인다
+ */
+export function sideAgents(item: DeskItem, fold: SideFold = {}): SideAgents | undefined {
+  const subs = (item.agents ?? []).filter((agent) => agent.kind === 'subagent');
+  if (subs.length === 0 || fold.closed?.includes(item.id)) return undefined;
+  const open = fold.open?.includes(item.id) === true;
+  const working = subs.filter((agent) => agent.state === 'working');
+  if (!open && working.length === 0) return undefined;
+  const pool = open ? subs : working;
+  const agents = pool.slice(0, SIDE_AGENT_MAX);
+  const finished = open ? 0 : subs.filter((agent) => agent.state === 'done').length;
+  // 자동으로 편 세션에서 줄에 올리지 않은 것: 상한을 넘은 작업 중 + 끝남도 작업 중도 아닌 것(대기)
+  const more = pool.length - agents.length + (open ? 0 : subs.length - working.length - finished);
+  return { agents, more, finished };
+}
+
+/** 사이드바에서 고를 수 있는 줄: 세션, 그리고 고른 세션이 든 스페이스의 세션 아래에 펴진 서브에이전트 */
+export interface SideTarget {
+  /** deskSessions 순서 */
+  index: number;
+  /** 서브에이전트 줄이면 그 id */
+  agent?: string;
+}
+
+export function sideTargets(items: readonly DeskItem[], selected: number, fold: SideFold = {}): SideTarget[] {
+  const sessions = deskSessions(items);
+  const current = sessions[selected]?.projectName;
+  return sessions.flatMap((item, index) => [
+    { index },
+    ...(item.projectName === current ? (sideAgents(item, fold)?.agents ?? []).map((agent) => ({ index, agent: agent.id })) : []),
+  ]);
+}
+
 /**
  * 사이드바 줄. 스페이스마다 한 줄(가장 급한 상태 점, 이름, 세션 수)이고, 고른 세션이 든 스페이스 아래에만 세션을 한 줄씩 편다.
  * slots는 세션 id → 열린 칸 번호(1부터), flagged는 알린 뒤 아직 보지 않은 세션(!로 보인다, #864), unseen은 끝났지만 아직 보지 않은 세션(#922)
@@ -365,6 +419,7 @@ export function sidebarRows(
   theme: Theme = DEFAULT_THEME,
   unseen: ReadonlySet<string> = new Set(),
   now: number = Date.now(),
+  side: { fold?: SideFold; agent?: string } = {},
 ): SidebarRow[] {
   const sessions = deskSessions(items);
   const muted = fg(theme, 'muted');
@@ -397,7 +452,17 @@ export function sidebarRows(
       // 좁으면 제목 끝에 …를 붙여 잘렸다는 것을 보인다(#944)
       const room = (marksWidth && marksWidth + 3 < width ? width - marksWidth - 2 : width) - 5;
       const line = `   ${statusMark(agentStatus(item, { unseen: unseen.has(item.id) }), theme)} ${ellipsize(item.title, room)}`;
-      rows.push({ text: spreadPlain(line, marks, marksWidth, width), selected: index === selected, item: index });
+      const shown = sideAgents(item, side.fold);
+      // 고른 서브에이전트 줄이 지금 보이면 그 줄이 고른 줄이다(세션 줄은 고른 줄이 아니다)
+      const picked = index === selected && side.agent !== undefined && shown?.agents.some((agent) => agent.id === side.agent) ? side.agent : undefined;
+      rows.push({ text: spreadPlain(line, marks, marksWidth, width), selected: index === selected && picked === undefined, item: index });
+      if (!shown) continue;
+      const summary = [shown.more > 0 ? `외 ${shown.more}개` : '', shown.finished > 0 ? `끝남 ${shown.finished}` : ''].filter(Boolean).join(' · ');
+      shown.agents.forEach((agent, at) => {
+        const last = !summary && at === shown.agents.length - 1;
+        rows.push({ text: agentLine(agent, { width, theme, now, lead: '  ', indent: 1, last, compact: true }), selected: agent.id === picked, item: index, agent: agent.id });
+      });
+      if (summary) rows.push({ text: fitAnsi(`   ${fg(theme, 'border')}└ ${RESET}${muted}${summary}${RESET}`, width), selected: false, item: index });
     }
   }
   rows.push(folder);
