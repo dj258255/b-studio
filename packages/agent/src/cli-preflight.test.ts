@@ -2,10 +2,10 @@ import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { preflightCodex } from './codex-runner';
-import { preflightCommandCode } from './commandcode-runner';
-import { preflightGemini } from './gemini-cli-runner';
-import { preflightOpenCode } from './opencode-runner';
+import { preflightCodex } from './codex-auth';
+import { preflightCommandCode } from './commandcode-auth';
+import { preflightGemini } from './gemini-auth';
+import { preflightOpenCode } from './opencode-auth';
 
 /**
  * 로그인 확인 명령이 실패하면 CLI의 오류 출력이 화면(계정 연결)으로 간다. CLI는 색 코드를 붙여 찍으므로

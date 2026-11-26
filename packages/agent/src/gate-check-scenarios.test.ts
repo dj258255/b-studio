@@ -5,7 +5,7 @@ import { SPEC_FILE, type LoadedProject, type WorkflowLoadCheck, type WorkflowSpe
 import { describe, expect, it } from 'vitest';
 import type { OpenApiDocument } from './contract-diff';
 import { VerificationGate } from './gate';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { Workspace } from './workspace';
 

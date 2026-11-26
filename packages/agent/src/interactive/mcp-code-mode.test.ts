@@ -1,7 +1,7 @@
 import type { LoadedProject } from '@b-studio/spec';
 import { describe, expect, it } from 'vitest';
 import { boardMcpToolSpecs } from '../board-mcp';
-import { gatewayToolSpecs } from '../claude-gateway-runner';
+import { gatewayToolSpecs } from '../gateway-tools';
 import { createOrdersProject } from '../test-helpers';
 import { mcpToolName } from './mcp';
 

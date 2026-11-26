@@ -2,7 +2,7 @@ import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { DEFAULT_COMPACT_WINDOW, resolveCompactWindow, runClaudeCodeAgent } from './claude-code-runner';
 import { fakeClaudeCli, type FakeInvocation } from './fake-claude-cli';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT as contract } from './test-helpers';
 
 let project: LoadedProject;

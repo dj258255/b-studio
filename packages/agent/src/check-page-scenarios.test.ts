@@ -6,7 +6,7 @@ import type { LoadedProject, WorkflowPageCheck, WorkflowSpec } from '@b-studio/s
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageResult, type BrowserPageStep, type BrowserRunner } from './browser-check';
 import { VerificationGate, type PageFetcher } from './gate';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
 import { Workspace } from './workspace';
 

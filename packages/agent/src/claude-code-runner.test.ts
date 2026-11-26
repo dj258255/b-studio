@@ -4,15 +4,10 @@ import path from 'node:path';
 import type { LoadedProject } from '@b-studio/spec';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { z } from 'zod';
-import {
-  describeAccount,
-  fetchClaudeCodeModels,
-  preflightClaudeCode,
-  runClaudeCodeAgent,
-  zodShape,
-} from './claude-code-runner';
+import { describeAccount, fetchClaudeCodeModels, preflightClaudeCode } from './claude-code-shared';
+import { runClaudeCodeAgent, zodShape } from './claude-code-runner';
 import { FAKE_FORKED_SESSION, FAKE_NEW_SESSION, FAKE_PREVIOUS_SESSION, fakeClaudeCli, type FakeCliLog, type FakeCliScenario, type FakeInvocation, type FakeStep } from './fake-claude-cli';
-import type { AgentEvent } from './loop';
+import type { AgentEvent } from './agent-types';
 import { AGENT_LANGUAGE_REMINDER } from './prompts';
 import { createOrdersProject, fakeSandbox, fakeSteering, ORDERS_CONTRACT as contract } from './test-helpers';
 import { buildTools } from './tools';

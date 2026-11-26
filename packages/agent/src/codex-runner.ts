@@ -1,13 +1,13 @@
-import { execFile } from 'node:child_process';
 import { access, mkdtemp, rm, symlink } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import type { Thread, ThreadEvent, ThreadOptions, Usage } from '@openai/codex-sdk';
 import type { Effort } from './anthropic-client';
-import { serialQueue } from './claude-code-runner';
+import { serialQueue } from './tool-schema';
 import type { EscalationPolicy } from './escalation';
 import { recheckGateOnMaxTurns, VerificationGate } from './gate';
-import { emptyUsage, formatSteering, takeSteering, type AgentEvent, type AgentResult, type AgentUsage, type RunAgentOptions, type RunMetrics } from './loop';
+import { emptyUsage, formatSteering, takeSteering } from './loop';
+import type { AgentEvent, AgentResult, AgentUsage, RunAgentOptions, RunMetrics } from './agent-types';
 import { startToolServer } from './mcp-http-server';
 import { loadProjectGuide } from './project-guide';
 import { buildAskRequest, buildSystemPrompt, projectGuideSection } from './prompts';
@@ -16,7 +16,7 @@ import { buildTools, executeTool, SANDBOX_TOOLS, WRITE_TOOLS, type AskUserQuesti
 import { fetchContract } from './verify';
 import { executionPolicyFor, workflowContext } from './workflow';
 import { syncExternalChanges, Workspace } from './workspace';
-import { cliPreflightFailure, type CliPreflightFailure } from './cli-failure';
+import { run } from './codex-auth';
 
 /** Codex 설정에서 MCP 서버를 부르는 이름. 모델에게 보이는 도구 이름이 `mcp__b_studio__<도구>`가 된다(0단계 근거: 바이너리 문자열) */
 const SERVER = 'b_studio';
@@ -556,21 +556,6 @@ export async function runCodexAgent(options: CodexRunOptions): Promise<CodexRunR
 }
 
 /**
- * 샌드박스를 띄우기 전에 이 PC의 Codex CLI가 로그인돼 있는지 확인한다.
- * `codex login status`만 부르므로 모델 호출도, 사용량도 쓰지 않는다. 토큰·계정 정보는 읽지 않는다.
- */
-export async function preflightCodex(
-  { command = 'codex', timeoutMs = 60_000, env }: { command?: string; timeoutMs?: number; /** 계정마다 CODEX_HOME을 따로 둘 때 준다(#885). 없으면 process.env */ env?: NodeJS.ProcessEnv } = {},
-): Promise<{ ok: true } | CliPreflightFailure> {
-  try {
-    await run(command, ['login', 'status'], timeoutMs, env);
-    return { ok: true };
-  } catch (error) {
-    return cliPreflightFailure(`Codex CLI에 로그인돼 있지 않습니다. 터미널에서 "codex"를 실행해 "Sign in with ChatGPT"로 로그인하세요.`, error);
-  }
-}
-
-/**
  * 한 턴의 사용량을 b-studio 규칙(입력은 캐시 제외)으로 옮긴다(#977). 실측(Codex 0.157.0, 2026-10-28):
  *  - 같은 스레드를 이어 가면(SDK가 턴마다 `codex exec resume`) turn.completed.usage는 스레드 누적값이다.
  *    첫 턴 input 17,280, 둘째 턴 29,759이고 세션 기록의 둘째 턴 호출은 12,479였다. 그래서 앞 턴 값과의 차이를 쓴다.
@@ -624,13 +609,3 @@ async function exists(target: string): Promise<boolean> {
     () => false,
   );
 }
-
-function run(command: string, args: string[], timeoutMs: number, env?: NodeJS.ProcessEnv): Promise<string> {
-  return new Promise((resolve, reject) => {
-    execFile(command, args, { timeout: timeoutMs, windowsHide: true, ...(env ? { env } : {}) }, (error, stdout) => {
-      if (error) reject(error);
-      else resolve(stdout);
-    });
-  });
-}
-

@@ -34,7 +34,8 @@ import {
 } from '@b-studio/sandbox';
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
-import { terminalModeSetting } from './terminal-allowed';
+import { localFolderAllowed } from './repo-token';
+import { resolveTerminalMode, type TerminalMode } from './terminal-allowed';
 import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
 
 /**
@@ -56,7 +57,7 @@ const HOST_WATCH_INTERVAL_MS = 3_000;
 /** fs.watch가 준 신호를 검사 한 번으로 모으는 시간 */
 const HOST_WATCH_DEBOUNCE_MS = 250;
 
-export type TerminalMode = 'container' | 'host';
+export type { TerminalMode };
 
 /**
  * 터미널을 여는 방식(B_STUDIO_TERMINAL): 컨테이너 안의 CLI를 붙이거나, 이 컴퓨터의 CLI를 세션의 작업 복사본에서 띄운다.
@@ -64,9 +65,10 @@ export type TerminalMode = 'container' | 'host';
  * 오타가 조용히 다른 방식으로 떨어지지 않는다
  */
 export function sessionTerminalMode(env: Record<string, string | undefined> = process.env): TerminalMode {
-  const mode = terminalModeSetting(env);
-  if (mode) return mode;
-  throw new StudioError(500, `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${env.B_STUDIO_TERMINAL?.trim()})`);
+  // 방식은 열 수 있는지와 같은 판정(resolveTerminalMode)에서 읽는다. 닫힌 서버에서도 올바르게 설정된 방식은 돌려준다 — 정리·관문 주소가 쓴다
+  const resolved = resolveTerminalMode(env);
+  if (resolved.mode) return resolved.mode;
+  throw new StudioError(500, (resolved as { reason: string }).reason);
 }
 
 /**
@@ -288,6 +290,8 @@ export function resolveSelfAgentPaths(repoRoot: string = path.join(process.cwd()
 
 const HOST_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
+    // 방어선: 이 컴퓨터 방식은 서버 컴퓨터에서 에이전트 CLI를 띄운다. 호출한 쪽의 판정이 어긋나도 인증을 켠 서버에서는 여기서 거절한다
+    if (!localFolderAllowed()) throw new StudioError(403, '이 컴퓨터 방식 세션 터미널은 인증을 끈 개인 PC 모드에서만 준비할 수 있습니다');
     // CLI를 먼저 찾는다. 못 찾으면 그 오류가 그대로 화면에 간다(터미널을 열어 놓고 "명령을 찾을 수 없음"을 보이지 않는다)
     // API 모드 세션은 이 컴퓨터에 깔린 CLI가 아니라 자체 CLI를 띄운다. 계정 폴더·사용자 상태 줄은 claude의 것이라 쓰지 않는다
     const self = await target.selfAgent?.();
