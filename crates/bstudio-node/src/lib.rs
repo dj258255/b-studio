@@ -2604,7 +2604,7 @@ pub fn checkpoint_author_is_ours(git_email: String, our_email: String) -> bool {
     cg::author_is_ours(&git_email, &our_email)
 }
 
-/// `[{sha, shortSha, subject, body, ours, trailers, verifyTrailers, incompleteTrailers}]` JSON
+/// `[{sha, shortSha, subject, body, ours, trailers, verifyTrailers, incompleteTrailers, impactTrailers}]` JSON
 #[napi]
 pub fn checkpoint_session_records(output: String, our_email: String) -> String {
     out(&cg::session_records(&output, &our_email))
@@ -8265,6 +8265,12 @@ pub fn session_checkpoint_body(
 #[napi]
 pub fn session_checkpoint_trailers(passed_stages: Option<Vec<String>>, verify: Option<String>, incomplete: Option<String>) -> Vec<String> {
     terminal_text::checkpoint_trailers(passed_stages.as_deref(), verify.as_deref(), incomplete.as_deref())
+}
+
+/// 영향 범위 트레일러 한 줄(`Workflow-Impact: {...}`). 기록할 것이 없으면 null
+#[napi]
+pub fn session_impact_trailer(report_json: Option<String>, checks_json: String) -> Result<Option<String>> {
+    fail(terminal_text::impact_trailer(report_json.as_deref(), &checks_json))
 }
 
 #[napi]

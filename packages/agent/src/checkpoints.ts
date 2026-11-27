@@ -10,6 +10,7 @@ import {
   parseIncompleteTrailerValues,
   parseVerifyTrailerValues,
   parseWorkflowTrailerValues,
+  WORKFLOW_IMPACT_TRAILER,
   WORKFLOW_INCOMPLETE_TRAILER,
   WORKFLOW_TRAILER,
   WORKFLOW_VERIFY_TRAILER,
@@ -90,6 +91,8 @@ export interface SessionCommit {
   verify?: VerifyTrailer;
   /** 커밋 본문의 Workflow-Incomplete 트레일러. 턴 상한에 닿은 실행이 게이트만 통과해 남긴 체크포인트면 'max_turns' */
   incomplete?: 'max_turns';
+  /** 커밋의 Workflow-Impact 트레일러 값(한 줄 JSON). 스튜디오가 만든 커밋에서만 읽는다. PR 초안이 서버가 게이트를 거쳐 남긴 체크포인트인지 따로 확인한 뒤에만 쓴다 */
+  impactRecord?: string;
 }
 
 export interface PushResult {
@@ -293,6 +296,7 @@ interface ParsedLogRecord {
   trailers: string[];
   verifyTrailers: string[];
   incompleteTrailers: string[];
+  impactTrailers: string[];
 }
 const MAX_PATCH_CHARS = 200_000;
 const MAX_BODY_CHARS = 8_000;
@@ -1128,7 +1132,7 @@ export class CheckpointStore {
       native.checkpointSessionRecords(
         await this.#git([
           'log', '--first-parent', '--reverse',
-          `--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_INCOMPLETE_TRAILER},valueonly,separator=%x1f)%x1e`,
+          `--format=%H%x00%h%x00%s%x00%b%x00%ae%x00%(trailers:key=${WORKFLOW_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_VERIFY_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_INCOMPLETE_TRAILER},valueonly,separator=%x1f)%x00%(trailers:key=${WORKFLOW_IMPACT_TRAILER},valueonly,separator=%x1f)%x1e`,
           `${start}..HEAD`,
         ]),
         encodeLoneSurrogates(this.#author.email),
@@ -1140,6 +1144,8 @@ export class CheckpointStore {
         const passedStages = record.ours ? parseWorkflowTrailerValues(record.trailers) : undefined;
         const verify = record.ours ? parseVerifyTrailerValues(record.verifyTrailers) : undefined;
         const incomplete = record.ours ? parseIncompleteTrailerValues(record.incompleteTrailers) : undefined;
+        // 영향 범위 기록(계약 차이·허용한 확인 선언 변경). 마지막 값 하나만 읽고, 해석은 PR 초안(Rust)이 한다
+        const impactRecord = record.ours ? record.impactTrailers.filter((value) => value.trim() !== '').at(-1) : undefined;
         return {
           sha: record.sha,
           shortSha: record.shortSha,
@@ -1150,6 +1156,7 @@ export class CheckpointStore {
           ...(passedStages ? { passedStages } : {}),
           ...(verify ? { verify } : {}),
           ...(incomplete ? { incomplete } : {}),
+          ...(impactRecord ? { impactRecord } : {}),
         };
       }),
     );

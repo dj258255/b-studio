@@ -119,6 +119,12 @@ export function formatVerifyTrailer(mode: VerifyTrailer): string {
  */
 export const WORKFLOW_INCOMPLETE_TRAILER = 'Workflow-Incomplete';
 
+/**
+ * 게이트가 본 계약 차이와 사람이 허용한 확인 선언 변경을 한 줄 JSON으로 남기는 트레일러. PR 초안의 영향 범위가 읽는다.
+ * 커밋 본문(검증 보고서·에이전트 요약)은 자유 글이라 기록처럼 보이는 줄을 흉내 낼 수 있어서 따로 둔다
+ */
+export const WORKFLOW_IMPACT_TRAILER = 'Workflow-Impact';
+
 export function formatIncompleteTrailer(reason: 'max_turns'): string {
   return native.workflowFormatIncompleteTrailer(reason);
 }

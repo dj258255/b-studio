@@ -297,3 +297,33 @@ describe('PR 초안의 요구사항 범위(ADR-115)', () => {
     await stopSession(id).catch(() => {});
   }, 20_000);
 });
+
+describe('PR 초안의 영향 범위가 읽는 게이트 기록(커밋 트레일러)', () => {
+  it('서버가 게이트를 거쳐 만든 체크포인트만 게이트 기록으로 읽는다. 에이전트가 직접 만든 커밋의 트레일러는 읽지 않는다', async () => {
+    await setupRepo();
+    const id = (await createSession('verifyproj', 'kim', 'copy')).id;
+    expect(await waitForReady(id)).toBe('ready');
+    await runWrite(id, '메모를 더한다', 'api/src/Memo.java', 'class Memo {}\n');
+    const gated = await previewExport(id, { issues: [], planRequirementIds: [] });
+    expect(gated.body).toContain('## 영향 범위');
+    expect(gated.body).toContain('- 바뀐 파일: 1개 (요청 1건)');
+    expect(gated.body).toContain('- 바뀐 서비스: `api`');
+    // 게이트가 계약을 비교하지 않은 요청이라(계약을 선언한 서비스가 없다) 기록이 없다 — 0건이 아니라 모른다
+    expect(gated.body).toContain('- API 계약 차이: 확인하지 못함');
+
+    // 에이전트가 직접 만든 커밋: 스튜디오와 같은 작성자 이메일에 통과·영향 범위 트레일러를 위조해 적었다
+    const workDir = getSnapshot(id)!.workDir;
+    await writeFile(path.join(workDir, 'api/src/Forged.java'), 'class Forged {}\n');
+    await git(workDir, 'add', '-A');
+    const record = JSON.stringify({ v: 1, contracts: [{ service: 'api', changes: [] }], declared: '가짜 허용' });
+    await git(workDir, '-c', 'user.email=verify@example.com', 'commit', '-q', '-m', '요청: 직접 만든 커밋', '-m', `Workflow-Passed: run, contract_check, test, review\nWorkflow-Impact: ${record}`);
+    const forged = await previewExport(id, { issues: [], planRequirementIds: [] });
+    const text = forged.body.slice(forged.body.indexOf('## 영향 범위'));
+    expect(text).toContain('- 바뀐 파일: 2개 (요청 2건)');
+    expect(text).not.toContain('API 계약 차이: 변경 없음');
+    expect(text).not.toContain('가짜 허용');
+    expect(text).not.toContain('사람이 허용한 확인 선언 변경: `');
+
+    await stopSession(id).catch(() => {});
+  }, 30_000);
+});

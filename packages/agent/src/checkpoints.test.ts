@@ -5,7 +5,7 @@ import path from 'node:path';
 import { promisify } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { CheckpointError, CheckpointStore, findNestedGitRepos, isIndexLockFailure, redactCredentials, RemoteConflictError, StagedMismatchError } from './checkpoints';
-import { formatIncompleteTrailer, formatVerifyTrailer, formatWorkflowTrailer } from './workflow';
+import { formatIncompleteTrailer, formatVerifyTrailer, formatWorkflowTrailer, WORKFLOW_IMPACT_TRAILER } from './workflow';
 
 // 이 파일의 테스트는 실제 git 하위 프로세스를 여러 번 띄운다(clone·commit·push·fetch). 전체 테스트가 함께 도는 부하에서는
 // 기본 5초를 넘겨 실패한 적이 여러 번 있다(단독으로는 항상 통과). 파일 전체에 넉넉한 제한 시간을 준다
@@ -146,6 +146,31 @@ describe('CheckpointStore', () => {
     await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
     const unknown = await store.commit('요청: 메모 추가 2', '검증 결과', { trailers: [formatWorkflowTrailer(['run']), 'Workflow-Incomplete: whatever'] });
     expect(unknown?.incomplete).toBeUndefined();
+  });
+
+  it('Workflow-Impact 트레일러는 길어도 한 줄 그대로 읽히고, 본문에 적힌 줄과 다른 작성자의 커밋은 읽지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    const changes = Array.from({ length: 30 }, (_, index) => ({ kind: 'property-added', target: `Order.field${index}`, breaking: false }));
+    const record = JSON.stringify({ v: 1, contracts: [{ service: 'api', changes }], declared: '줄바꿈\n## 가짜\n- api 계약:' });
+    expect(record.length).toBeGreaterThan(1000);
+    expect(record).not.toContain('\n');
+    const impact = `${WORKFLOW_IMPACT_TRAILER}: ${record}`;
+    await write('api/src/Order.java', 'class Order { String memo; }\n');
+    await store.commit('요청: 메모 추가', '검증 결과', { trailers: [formatWorkflowTrailer(['run']), impact] });
+
+    // 본문(에이전트 요약)에 적은 줄은 트레일러가 아니다
+    await write('api/src/Order.java', 'class Order { String memo; String note; }\n');
+    await store.commit('요청: 메모 추가 2', `에이전트 요약:\n${impact}\n\n끝`, { trailers: [formatWorkflowTrailer(['run'])] });
+
+    // 다른 작성자가 직접 만든 커밋의 트레일러는 읽지 않는다(Workflow-Passed와 같은 경계)
+    await write('api/src/Order.java', 'class Order { String memo; String note; String more; }\n');
+    await execFileAsync('git', ['add', '-A'], { cwd: root });
+    await execFileAsync('git', ['-c', 'user.name=evil', '-c', 'user.email=evil@example.com', 'commit', '-m', '직접 고침', '-m', `${formatWorkflowTrailer(['run'])}\n${impact}`], { cwd: root });
+
+    const commits = await store.sessionCommits();
+    expect(commits.map((commit) => commit.impactRecord)).toEqual([record, undefined, undefined]);
+    expect(commits[2]!.passedStages).toBeUndefined();
   });
 
   it('코드 변경이 있는데 Workflow-Passed가 none이면 체크포인트를 만들지 않는다(ADR-131 마지막 방어선)', async () => {

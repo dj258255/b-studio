@@ -1,3 +1,4 @@
+import { sep as pathSep } from 'node:path';
 import { decodeNative, encodeNative, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
 import type { SessionCommit } from './checkpoints';
@@ -1184,6 +1185,24 @@ export function managedBodySqueezedOut(body: string, managedBody: string): boole
   return native.repoManagedBodySqueezedOut(body, managedBody);
 }
 
+/**
+ * PR 초안의 "영향 범위"·"중점 리뷰 항목" 절에 필요한, 커밋만으로는 알 수 없는 프로젝트 선언의 사실.
+ * 이 값을 주지 않으면 두 절을 만들지 않는다(pr-impact.ts의 pullRequestImpactFor가 만든다)
+ */
+export interface PullRequestImpact {
+  /** 바뀐 파일이 속한 managed 서비스. 판정하지 못했으면 null(빈 목록은 "속한 서비스 없음"이다) */
+  services: string[] | null;
+  /** 어느 서비스에도 속하지 않은 파일 수. 판정하지 못했으면 null */
+  unmatchedFiles: number | null;
+  /** 보호 경로와 평가 자산 규칙(protectedPathsFor). 파일을 거절하는 데가 아니라 리뷰어에게 알리는 데 쓴다 */
+  protectedPaths: string[];
+  /**
+   * 서버가 게이트를 거쳐 만든 체크포인트의 sha들(세션 상태에 남긴 값). 커밋의 Workflow-Passed·Workflow-Impact 트레일러는 에이전트가
+   * 직접 만든 커밋에도 적힐 수 있어서, 이 목록에 있는 커밋의 기록만 게이트 기록으로 읽는다. 목록에 없으면 "확인하지 못함"이다
+   */
+  gateCheckpoints: string[];
+}
+
 /** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
 export interface PullRequestDraft {
   title: string;
@@ -1207,6 +1226,7 @@ export function buildPullRequest({
   requirementIds = [],
   requiredStages = [],
   appendix = '',
+  impact,
 }: {
   projectName: string;
   /** PR의 대상 브랜치 */
@@ -1225,9 +1245,12 @@ export function buildPullRequest({
   requiredStages?: readonly WorkflowStage[];
   /** 본문 끝에 그대로 붙일 글(요구사항 줄·점검표 등). 길이 예산에 함께 넣어 본문을 줄일 때도 잘리지 않게 한다 */
   appendix?: string;
+  /** 주면 "돌리지 않은 검증" 뒤에 "영향 범위"와 "중점 리뷰 항목" 절을 더한다. 모델을 부르지 않고 커밋 파일·본문 기록에서 기계적으로 만든다 */
+  impact?: PullRequestImpact;
 }): PullRequestDraft {
   // 문서 체크포인트인가(Workflow-Verify: docs이면서 실제로 문서 경로만 바꿨는가)와 검증 단계만 남긴 필수 단계는 workflow.ts가 알아 껍데기가 미리 계산해 넘긴다
   // (workflow는 policy의 NFKD에 의존해 옮기지 않는다). 트레일러만 믿지 않고 경로를 다시 확인하는 규칙은 그대로다
+  const gated = new Set(impact?.gateCheckpoints ?? []);
   const input = {
     projectName,
     base,
@@ -1240,6 +1263,9 @@ export function buildPullRequest({
       files: commit.files,
       stat: commit.stat ? { insertions: commit.stat.insertions, deletions: commit.stat.deletions } : null,
       passedStages: commit.passedStages ?? [],
+      // 서버가 게이트를 거쳐 남긴 체크포인트(impact.gateCheckpoints)의 기록만 읽는다. 트레일러만 있는 커밋(에이전트가 직접 만든 커밋 포함)은 읽지 않는다
+      gateRecorded: gated.has(commit.sha) && commit.passedStages !== undefined,
+      impactRecord: gated.has(commit.sha) && commit.passedStages !== undefined ? (commit.impactRecord ?? null) : null,
       docsExempt: commit.verify === 'docs' && commit.files.length > 0 && commit.files.every(isDocCheckpointPath),
       maxTurns: commit.incomplete === 'max_turns',
     })),
@@ -1248,6 +1274,7 @@ export function buildPullRequest({
     requirementIds,
     requiredStages: requiredStages.filter((stage) => VERIFICATION_STAGES.includes(stage)),
     appendix,
+    impact: impact ? { services: impact.services, unmatchedFiles: impact.unmatchedFiles, protectedPaths: impact.protectedPaths, backslashSep: pathSep === '\\' } : null,
   };
   return decodeNative<PullRequestDraft>(native.repoBuildPullRequest(encodeNative(input)));
 }

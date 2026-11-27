@@ -97,6 +97,7 @@ import {
   preflightCommandCode,
   preflightOpenCode,
   preflightGemini,
+  pullRequestImpactFor,
   RemoteConflictError,
   reviewIndependence,
   scopedExecutionPolicy,
@@ -122,6 +123,7 @@ import {
   type CliTier,
   verifyChanges,
   workflowStages,
+  WORKFLOW_TRAILER,
   readProjectFileSync,
   Workspace,
   baselineFromCheckpoints,
@@ -676,6 +678,8 @@ interface Session {
    * 다음 요청이 이 파일을 "직접 수정"으로 커밋하지 않고 변경으로 남겨 다음 게이트가 검증한다. 게이트를 지나 체크포인트가 되거나 되돌려지면 지운다. `..`는 모든 파일(읽지 못했거나 실행 도중 멈춤)
    */
   keptAgentChanges?: string[];
+  /** 서버가 게이트를 거쳐(Workflow-Passed 트레일러를 남기며) 만든 체크포인트의 커밋 sha들. PR 초안이 이 커밋의 게이트 기록만 읽는다(저장한다) */
+  gatedCheckpoints?: string[];
 }
 
 /** 서비스 하나의 마지막 테스트 실행 결과 */
@@ -1756,6 +1760,8 @@ export async function resumeSession(id: string): Promise<SessionSnapshot> {
     // 움직였으면(문서·직접 수정 체크포인트) 지금 값을 그 시점의 것으로 믿고 채운다
     session.git = data.git && !localEdits && !resumeDocsCheckpoint ? data.git : await initialGitMemory(checkpoints);
     if (resumedKept.length > 0) session.keptAgentChanges = resumedKept;
+    // 게이트를 거쳐 만든 체크포인트 목록을 이어 간다. 모양이 틀리면 아무것도 믿지 않는다
+    if (Array.isArray(data.gatedCheckpoints)) session.gatedCheckpoints = data.gatedCheckpoints.filter((sha): sha is string => typeof sha === 'string');
 
     // 샌드박스가 바뀌었다는 사실과 버린 변경을 다음 요청에서 알 수 있게 대화에 남긴다
     const note = [
@@ -3609,6 +3615,8 @@ async function saveCheckpoint(
   }
   await saveDatabases(session, checkpoint.sha);
   session.snapshot.checkpoints = [checkpoint, ...session.snapshot.checkpoints];
+  // 게이트 기록(Workflow-Passed)을 남긴 체크포인트만 PR 초안이 게이트 기록으로 읽는다. 트레일러는 서버가 방금 만든 것이다
+  if (trailers.some((trailer) => trailer.startsWith(`${WORKFLOW_TRAILER}:`))) session.gatedCheckpoints = [...(session.gatedCheckpoints ?? []), checkpoint.sha];
   await rememberGit(session, checkpoint.sha);
   // 게이트를 지나 체크포인트가 됐다. 남긴 에이전트 변경은 이제 검증된 내용이다(ADR-218)
   session.keptAgentChanges = undefined;
@@ -4463,6 +4471,8 @@ async function pullRequestDraft(
     requirementIds: refs.map((ref) => ref.id),
     requiredStages: workflowStages(session.project),
     appendix: `${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}`,
+    // 영향 범위·중점 리뷰 항목 절: 모델을 부르지 않고 커밋의 파일·본문 기록과 서비스·보호 경로 선언에서 만든다(미리보기와 실제 생성이 같은 본문을 쓴다)
+    impact: pullRequestImpactFor(session.project, commits, session.gatedCheckpoints ?? []),
   });
   return { info, target, targetError, commits, ...draft };
 }
@@ -7319,6 +7329,7 @@ function persistedBody(session: Session): PersistedBody {
     git: session.git,
     // 키를 더하지 않으면 저장 파일의 바이트가 그대로다(옛 파일과 같다)
     ...(session.keptAgentChanges && session.keptAgentChanges.length > 0 ? { keptAgentChanges: session.keptAgentChanges } : {}),
+    ...(session.gatedCheckpoints && session.gatedCheckpoints.length > 0 ? { gatedCheckpoints: session.gatedCheckpoints } : {}),
   };
 }
 
