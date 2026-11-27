@@ -46,6 +46,42 @@ function text(state: RecordsState, extra: Partial<Parameters<typeof recordsLines
     .join('\n');
 }
 
+describe('모델별 결과 표', () => {
+  const withModels: RecordsStats = {
+    ...stats,
+    byModel: [
+      { backend: 'claude-code', model: 'claude-sonnet-5', runs: 8, oneShot: 5, passed: 7, failed: 1, reverted: 1, judged: 8, retries: 6, averageRetries: 0.75 },
+      { backend: 'codex', model: '(모름)', runs: 2, oneShot: 0, passed: 1, failed: 1, reverted: 0, judged: 2, retries: 0, averageRetries: 0 },
+      { backend: 'claude-code', model: 'claude-opus-5', effort: 'high', runs: 1, oneShot: 1, passed: 1, failed: 0, reverted: 0, judged: 1, retries: 0, averageRetries: 0 },
+    ],
+  };
+  const open = (value: RecordsStats): RecordsState => ({ ...openRecords(projects), loading: false, stats: value });
+
+  it('모델마다 실행 수·한 번에 통과·평균 재시도·실패/되돌림을 한 줄로 보인다', () => {
+    const out = text(open(withModels), { height: 60 });
+    expect(out).toContain('모델별');
+    const sonnet = out.split('\n').find((line) => line.includes('claude-sonnet-5'))!;
+    expect(sonnet).toMatch(/Claude/);
+    expect(sonnet).toMatch(/\b8\b.*5\/8.*0\.8.*1\/1/);
+    expect(out.split('\n').find((line) => line.includes('claude-opus-5'))).toContain('high');
+  });
+  it('모델을 알리지 않은 실행은 (모름)으로 보이고, 읽기만 하는 표라는 것과 값의 출처를 적는다', () => {
+    const out = text(open(withModels), { height: 60 });
+    expect(out.split('\n').find((line) => line.includes('(모름)'))).toContain('Codex');
+    expect(out).toContain('CLI가 알린 값');
+  });
+  it('옛 서버(byModel 없음)나 빈 표면 절을 그리지 않는다', () => {
+    expect(text(open(stats), { height: 60 })).not.toContain('모델별');
+    expect(text(open({ ...stats, byModel: [] }), { height: 60 })).not.toContain('모델별');
+  });
+  it('모양이 틀린 값은 0으로 꾸미지 않고 줄을 건너뛴다', () => {
+    const bad = { ...withModels, byModel: [{ backend: 'claude-code', model: 'x', runs: 'many' }, ...withModels.byModel!] } as unknown as RecordsStats;
+    const out = text(open(bad), { height: 60 });
+    expect(out).toContain('claude-sonnet-5');
+    expect(out).not.toContain('many');
+  });
+});
+
 describe('기록 화면 키', () => {
   it('열면 AI별 결과 탭이고, 고른 세션의 프로젝트를 토큰 보고서의 프로젝트로 고른다', () => {
     const state = openRecords(projects, 'blog');

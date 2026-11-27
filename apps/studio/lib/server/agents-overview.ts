@@ -78,6 +78,10 @@ export interface AgentItem {
   checkChangesArmed?: true;
   /** 터미널 CLI가 지금(또는 방금) 쓰는 도구와 대상(#920). 턴이 끝나면 없다 */
   now?: ActivityNow;
+  /** 터미널 CLI가 알린 지금의 모델 이름(#1439). 알리지 않았으면 없다(모름) */
+  model?: string;
+  /** 같은 세션에서 모델이 바뀐 것을 보았다(#1439). desk가 "캐시를 처음부터 다시 계산합니다" 한 줄을 보인다 */
+  modelChange?: { from: string; to: string };
   /** 에이전트의 할 일 목록 진행(#920) */
   todos?: ActivityTodos;
   /** 문맥 창을 얼마나 썼는가(#920). Claude는 상태 줄, Codex는 그 대화의 세션 기록 숫자(#978)에서 온다 */
@@ -457,6 +461,8 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.workingSince ? { workingSince: row.live.workingSince } : {}),
     ...(state === 'booting' && row.bootingSince ? { bootingSince: row.bootingSince } : {}),
     ...(row.live?.turnDenied ? { turnDenied: row.live.turnDenied } : {}),
+    ...(row.live?.model ? { model: row.live.model } : {}),
+    ...(row.live?.modelChange ? { modelChange: row.live.modelChange } : {}),
     ...(row.tokenLimit ? { tokenLimit: row.tokenLimit } : {}),
   };
 }
