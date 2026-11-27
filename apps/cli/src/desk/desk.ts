@@ -31,6 +31,7 @@ import { defaultSprite, loadSprite, MIN_FRAME_MS, pickSprite, readSprite, scanSp
 import { applyRuntimeEvent, type RuntimeEffect } from './runtime';
 import { fleetOptions, placeMembers, type FleetsEffect, type FleetsState } from './fleets';
 import { loaded, openRequirements, REQUIREMENTS_FILE, REQUIREMENTS_TEMPLATE, type RequirementsEffect, type RequirementsState, type RequirementsTab } from './requirements';
+import { qrLines } from './qr';
 import { openSettings, type SettingsAccount, type SettingsEffect, type SettingsState } from './settings';
 import { DEFAULT_THEME, type ThemeName } from './theme';
 import type { DeskAccount, DeskItem, DeskLoginProgress, DeskTerminalMessage } from './types';
@@ -166,7 +167,7 @@ export function folderCatalog(dir: string, options: { random: boolean }): Sprite
 }
 
 /** 설정 화면이 부르는 스튜디오 API(#890) */
-export type SettingsClient = Pick<StudioClient, 'accounts' | 'rules' | 'preview' | 'addAccount' | 'updateAccount' | 'removeAccount' | 'accountStatus' | 'startLogin' | 'loginProgress' | 'cancelLogin' | 'saveRules'>;
+export type SettingsClient = Pick<StudioClient, 'accounts' | 'rules' | 'preview' | 'addAccount' | 'updateAccount' | 'removeAccount' | 'accountStatus' | 'startLogin' | 'loginProgress' | 'cancelLogin' | 'saveRules' | 'phone' | 'setPhoneEnabled' | 'phonePairing' | 'cancelPhonePairing' | 'revokePhone'>;
 
 /** 설정 화면이 쓰는 바깥(#890): 스튜디오 API, desk.json, 그림 폴더, 브라우저. 테스트에서는 가짜를 넣는다 */
 export interface SettingsHost {
@@ -615,6 +616,8 @@ export class DeskApp {
   readonly #assignedSprites = new Set<string>();
   #loginTimer: NodeJS.Timeout | undefined;
   #loginPolling = false;
+  /** 휴대폰 짝 맺기 QR이 떠 있는 동안 기기가 더해졌는지 보는 시계 */
+  #phoneTimer: NodeJS.Timeout | undefined;
   /** 여러 AI 비교를 다시 받는 시계(#892). 진행 중인 참가자가 있을 때만 건다 */
   #fleetTimer: NodeJS.Timeout | undefined;
   readonly #openUrl: ((url: string) => void) | undefined;
@@ -2238,6 +2241,35 @@ export class DeskApp {
         case 'config':
           this.#saveConfig(host, effect.config);
           return;
+        case 'phone-load':
+          await this.#phoneLoad(host);
+          return;
+        case 'phone-toggle': {
+          try {
+            const view = await host.client.setPhoneEnabled(effect.enabled);
+            this.#patchSettings((settings) => ({ ...settings, phone: { view, loading: false }, note: view.enabled ? `휴대폰 연결을 켰습니다: ${view.addresses.join(' · ')}` : '휴대폰 연결을 껐습니다. 열린 연결을 모두 닫았습니다' }));
+          } catch (error) {
+            this.#patchSettings((settings) => ({ ...settings, phone: { ...settings.phone, loading: false }, note: `바꾸지 못했습니다: ${messageOf(error)}` }));
+          }
+          return;
+        }
+        case 'phone-pair': {
+          const before = this.#state.settings?.phone?.view?.devices.length ?? 0;
+          const pairing = await host.client.phonePairing();
+          this.#patchSettings((settings) => ({ ...settings, note: undefined, phone: { ...settings.phone, pairing: { ...pairing, lines: qrLines(pairing.payload) } } }));
+          this.#startPhonePoll(host, before);
+          return;
+        }
+        case 'phone-pair-cancel':
+          this.#stopPhonePoll();
+          await host.client.cancelPhonePairing().catch(() => undefined);
+          await this.#phoneLoad(host);
+          return;
+        case 'phone-revoke':
+          await host.client.revokePhone(effect.id);
+          await this.#phoneLoad(host);
+          note('기기를 끊었습니다. 열린 연결을 닫았습니다');
+          return;
         case 'sprite-preview': {
           let preview: NonNullable<SettingsState['previewSprite']>;
           try {
@@ -2329,6 +2361,43 @@ export class DeskApp {
           this.#loginPolling = false;
         });
     }, LOGIN_POLL_MS);
+  }
+
+  async #phoneLoad(host: SettingsHost): Promise<void> {
+    try {
+      const view = await host.client.phone();
+      this.#patchSettings((settings) => ({ ...settings, phone: { ...settings.phone, view, loading: false, error: undefined } }));
+    } catch (error) {
+      this.#patchSettings((settings) => ({ ...settings, phone: { ...settings.phone, loading: false, error: `휴대폰 연결 상태를 받지 못했습니다: ${messageOf(error)}` } }));
+    }
+  }
+
+  /** QR을 보이는 동안 2초마다 상태를 묻는다. 기기가 더해지면 연결된 것이고, 코드가 사라지면(만료·소진) QR을 거둔다 */
+  #startPhonePoll(host: SettingsHost, before: number): void {
+    this.#stopPhonePoll();
+    this.#phoneTimer = setInterval(() => {
+      if (!this.#state.settings?.phone?.pairing || this.#restored) {
+        this.#stopPhonePoll();
+        return;
+      }
+      host.client
+        .phone()
+        .then((view) => {
+          const done = view.devices.length > before;
+          this.#patchSettings((settings) => {
+            if (!settings.phone?.pairing) return settings;
+            if (!done && view.pairing) return { ...settings, phone: { ...settings.phone, view } };
+            return { ...settings, phone: { ...settings.phone, view, pairing: undefined }, note: done ? '휴대폰이 연결됐습니다' : '짝 코드 시간이 지났습니다. n으로 다시 만드세요' };
+          });
+          if (done || !view.pairing) this.#stopPhonePoll();
+        })
+        .catch(() => undefined);
+    }, 2000);
+  }
+
+  #stopPhonePoll(): void {
+    clearInterval(this.#phoneTimer);
+    this.#phoneTimer = undefined;
   }
 
   #stopLoginPoll(): void {
@@ -3425,6 +3494,7 @@ export class DeskApp {
     clearTimeout(this.#animTimer);
     clearTimeout(this.#fleetTimer);
     this.#stopLoginPoll();
+    this.#stopPhonePoll();
     this.#runtimeStream?.abort();
     for (const entry of this.#streams.values()) {
       entry.controller.abort();

@@ -9,7 +9,7 @@
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
-import { createStudioHandler } from './app';
+import { createRouteDispatcher, createStudioHandler } from './app';
 import { routes } from './routes.gen';
 
 function argValue(args: readonly string[], name: string): string | undefined {
@@ -56,11 +56,21 @@ async function main(): Promise<void> {
     console.log(`b-studio 서버가 소켓에서 듣습니다: ${socketPath}`);
   }
 
+  // 휴대폰 통로(lib/server/phone): 부를 라우트 표를 넘기고, 짝짓기 스위치가 켜져 있으면 사설 주소에 귀를 연다. 본 서버의 주소는 그대로다
+  try {
+    const phone = await import('@/lib/server/phone/listener');
+    phone.setPhoneDispatcher(createRouteDispatcher(routes));
+    await phone.resumePhoneListener();
+  } catch (error) {
+    console.error('[b-studio] 휴대폰 통로를 준비하지 못했습니다:', error instanceof Error ? error.message : String(error));
+  }
+
   let closing = false;
   const shutdown = (signal: string) => {
     if (closing) return;
     closing = true;
     console.log(`[b-studio] ${signal} 신호를 받아 서버를 닫습니다`);
+    void import('@/lib/server/phone/listener').then((phone) => phone.stopPhoneListener()).catch(() => undefined);
     server.close(() => process.exit(0));
     // 열린 SSE 연결이 닫기를 붙잡지 않게 남은 연결을 끊는다
     server.closeAllConnections();

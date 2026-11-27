@@ -7,7 +7,7 @@ import type { DeskConfig } from './config';
 import { DeskApp, type DeskClient, type DeskIo, type SettingsHost, type SpriteCatalog } from './desk';
 import { stripAnsi } from './screen';
 import { spriteFromRows, type Sprite } from './sprite';
-import type { DeskAccount, DeskAccountStatus, DeskItem, DeskLoginProgress, DeskLoginStart, DeskRules } from './types';
+import type { DeskAccount, DeskAccountStatus, DeskItem, DeskLoginProgress, DeskLoginStart, DeskPhoneView, DeskRules } from './types';
 
 const item = (id: string, patch: Partial<DeskItem> = {}): DeskItem => ({ kind: 'session', id, title: `요청 ${id}`, projectName: 'shop', state: 'idle', backend: 'claude-code', lastActivityAt: '2026-10-23T00:00:00Z', ...patch });
 
@@ -120,6 +120,30 @@ class FakeClient implements DeskClient {
   async cancelLogin(id: string): Promise<DeskLoginProgress> {
     this.calls.push(`cancel ${id}`);
     return { state: 'cancelled', lines: [] };
+  }
+  phoneView: DeskPhoneView = { allowed: true, enabled: false, addresses: [], devices: [] };
+  phonePending = false;
+  async phone(): Promise<DeskPhoneView> {
+    this.calls.push('phone');
+    return { ...this.phoneView, ...(this.phonePending ? { pairing: { expiresAt: Date.now() + 100_000 } } : {}) };
+  }
+  async setPhoneEnabled(enabled: boolean): Promise<DeskPhoneView> {
+    this.calls.push(`phone-enabled ${enabled}`);
+    this.phoneView = { ...this.phoneView, enabled, addresses: enabled ? ['192.168.0.5:38917'] : [] };
+    return this.phoneView;
+  }
+  async phonePairing() {
+    this.calls.push('phone-pairing');
+    this.phonePending = true;
+    return { payload: JSON.stringify({ t: 'b-studio-pair', v: 1, k: 'A'.repeat(44), c: 'ABCDEFGHJK', a: ['192.168.0.5:38917'], n: 'mac' }), expiresAt: Date.now() + 120_000 };
+  }
+  async cancelPhonePairing() {
+    this.calls.push('phone-cancel');
+    this.phonePending = false;
+  }
+  async revokePhone(id: string) {
+    this.calls.push(`phone-revoke ${id}`);
+    this.phoneView = { ...this.phoneView, devices: this.phoneView.devices.filter((device) => device.id !== id) };
   }
   async saveRules(rules: DeskRules): Promise<DeskRules> {
     this.calls.push(`save ${JSON.stringify(rules)}`);
@@ -368,5 +392,123 @@ describe('라우팅 규칙', () => {
     await tick(400);
     expect(ctx.client.calls).toContain('preview 결제 테스트');
     expect(ctx.app.state.settings?.preview?.result).toContain('Codex');
+  });
+});
+
+describe('휴대폰 탭: 연결 켜기, QR로 짝 맺기, 기기 끊기', () => {
+  const device = { id: 'd'.repeat(32), name: '내 폰', createdAt: Date.now() - 60_000, lastSeenAt: Date.now() - 5000, connected: true, user: 'local' };
+
+  async function openPhone(ctx: ReturnType<typeof setup>) {
+    ctx.io.type('\x02g');
+    await tick();
+    ctx.io.type('\x1b[Z');
+    await tick();
+  }
+
+  it('탭에 들어가면 상태를 받고, 꺼져 있으면 어떤 주소도 열지 않는다고 알린다', async () => {
+    const ctx = setup();
+    await openPhone(ctx);
+    expect(ctx.client.calls).toContain('phone');
+    const text = screenText(ctx.io);
+    expect(text).toContain('휴대폰 연결');
+    expect(text).toContain('꺼짐');
+    expect(text).toContain('꺼져 있으면 어떤 주소도 열지 않습니다');
+  });
+
+  it('꺼진 채 n을 누르면 QR을 만들지 않고 먼저 켜라고 알린다', async () => {
+    const ctx = setup();
+    await openPhone(ctx);
+    ctx.io.type('n');
+    await tick();
+    expect(ctx.client.calls).not.toContain('phone-pairing');
+    expect(ctx.app.state.settings?.note).toContain('먼저 휴대폰 연결을 켜세요');
+  });
+
+  it('Enter로 켜면 열린 주소가 보이고, n으로 QR을 그린다. 아무 키나 누르면 거두고 코드도 취소한다', async () => {
+    const ctx = setup();
+    await openPhone(ctx);
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.client.calls).toContain('phone-enabled true');
+    expect(screenText(ctx.io)).toContain('192.168.0.5:38917');
+    ctx.io.type('n');
+    await tick();
+    expect(ctx.client.calls).toContain('phone-pairing');
+    expect(ctx.app.state.settings?.phone?.pairing?.lines.length).toBeGreaterThan(10);
+    expect(screenText(ctx.io)).toContain('휴대폰 짝 맺기');
+    expect(screenText(ctx.io)).toContain('▀');
+    ctx.io.type('z');
+    await tick();
+    expect(ctx.client.calls).toContain('phone-cancel');
+    expect(ctx.app.state.settings?.phone?.pairing).toBeUndefined();
+    // QR이 떠 있던 동안 친 글자는 설정을 닫지 않는다
+    expect(ctx.app.state.settings).toBeDefined();
+  });
+
+  it('QR이 떠 있는 동안 기기가 더해지면 연결됐다고 알리고 QR을 거둔다', async () => {
+    const ctx = setup();
+    await openPhone(ctx);
+    ctx.io.type('\r');
+    await tick();
+    ctx.io.type('n');
+    await tick();
+    ctx.client.phoneView = { ...ctx.client.phoneView, devices: [device] };
+    ctx.client.phonePending = false;
+    await tick(2100);
+    expect(ctx.app.state.settings?.phone?.pairing).toBeUndefined();
+    expect(ctx.app.state.settings?.note).toContain('연결됐습니다');
+    expect(screenText(ctx.io)).toContain('내 폰');
+  });
+
+  it('코드 시간이 지나 사라지면 알리고 QR을 거둔다', async () => {
+    const ctx = setup();
+    await openPhone(ctx);
+    ctx.io.type('\r');
+    await tick();
+    ctx.io.type('n');
+    await tick();
+    ctx.client.phonePending = false;
+    await tick(2100);
+    expect(ctx.app.state.settings?.phone?.pairing).toBeUndefined();
+    expect(ctx.app.state.settings?.note).toContain('시간이 지났습니다');
+  });
+
+  it('기기 줄에서 x는 확인을 묻고, y로 끊으면 서버에 끊기를 보낸다', async () => {
+    const ctx = setup();
+    ctx.client.phoneView = { allowed: true, enabled: true, addresses: ['192.168.0.5:38917'], devices: [device] };
+    await openPhone(ctx);
+    ctx.io.type('\x1b[B');
+    await tick();
+    ctx.io.type('x');
+    await tick();
+    expect(ctx.app.state.settings?.confirm).toMatchObject({ kind: 'remove-phone', id: device.id });
+    ctx.io.type('q');
+    await tick();
+    expect(ctx.client.calls.some((call) => call.startsWith('phone-revoke'))).toBe(false);
+    ctx.io.type('x');
+    await tick();
+    ctx.io.type('y');
+    await tick();
+    expect(ctx.client.calls).toContain(`phone-revoke ${device.id}`);
+    expect(ctx.app.state.settings?.phone?.view?.devices).toEqual([]);
+  });
+
+  it('이 서버가 허용하지 않으면 스위치를 보내지 않고 까닭을 알린다', async () => {
+    const ctx = setup();
+    ctx.client.phoneView = { allowed: false, enabled: false, addresses: [], devices: [] };
+    await openPhone(ctx);
+    ctx.io.type('\r');
+    await tick();
+    expect(ctx.client.calls.some((call) => call.startsWith('phone-enabled'))).toBe(false);
+    expect(ctx.app.state.settings?.note).toContain('B_STUDIO_PHONE=1');
+  });
+
+  it('상태를 받지 못하면 까닭이 보이고 r로 다시 받는다', async () => {
+    const ctx = setup();
+    ctx.client.phone = async () => {
+      throw new Error('스튜디오가 닫혔습니다');
+    };
+    await openPhone(ctx);
+    expect(screenText(ctx.io)).toContain('휴대폰 연결 상태를 받지 못했습니다: 스튜디오가 닫혔습니다');
   });
 });
