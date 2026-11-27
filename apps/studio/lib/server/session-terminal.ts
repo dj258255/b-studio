@@ -1,4 +1,6 @@
 import { statSync, watch as watchFs } from 'node:fs';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
   AGENT_CODEX_IMAGE,
@@ -8,6 +10,10 @@ import {
   checkHostGatewayConfig,
   clampTerminalSize,
   commandCodeModLoadRefusal,
+  execChecked,
+  geminiConfigRefusal,
+  geminiUserAuthType,
+  geminiVersionRefusal,
   openCodeConfigRefusal,
   defaultAgentGatewayRoot,
   ensureAgentContainer,
@@ -42,7 +48,7 @@ import {
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
-import { commandCodeTerminalReason, containerRunnableBackend, openCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { commandCodeTerminalReason, containerRunnableBackend, geminiTerminalReason, openCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
 import { DraftKeeper, readDraftFile, settleDraftStops, writeDraftFile } from './session-terminal-draft';
 import { draftSealFor } from './session-terminal-draft-key';
 import { armModClock, disarmModClock } from './session-terminal-mod';
@@ -84,12 +90,13 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 /**
  * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code와 codex를 띄운다(컨테이너 방식의 codex는 에이전트 이미지에 넣은 것, ADR-245).
  * b-studio의 자체 CLI(api, ADR-226)는 이 컴퓨터 방식에서만 띄운다 — 컨테이너에서는 모델 키를 에이전트가 읽을 수 있는 자리에 둘 수밖에 없고 OS 샌드박스도 없어 닫는다(ADR-245).
- * Command Code(ADR-233)와 OpenCode(ADR-241)는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다
+ * Command Code(ADR-233)와 OpenCode(ADR-241)는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다. Gemini도 같다(ADR-242)
  * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex·api가 아니면 claude를 띄운다 — 컨테이너 방식 codex·api를 받으면 엉뚱한 CLI가 뜬다).
  * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
  */
 export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
   if (backend === 'commandcode') return commandCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
+  if (backend === 'gemini') return geminiTerminalReason(sessionTerminalMode(env), env) === undefined;
   if (backend === 'opencode') return openCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
   return containerRunnableBackend(backend) || (backend === 'api' && sessionTerminalMode(env) === 'host');
 }
@@ -381,6 +388,7 @@ const HOST_BACKEND: TerminalBackend = {
     const configDir = self ? undefined : await target.accountDir?.();
     // Command Code는 기본 계정만 쓴다. 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다
     if (target.cli === 'commandcode' && configDir) throw new StudioError(409, 'Command Code 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
+    if (target.cli === 'gemini' && configDir) throw new StudioError(409, 'Gemini 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
     if (target.cli === 'opencode' && configDir) throw new StudioError(409, 'OpenCode 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
     let cli: HostCli;
     if (self) {
@@ -390,7 +398,9 @@ const HOST_BACKEND: TerminalBackend = {
       const found = await findHostCli(process.env, target.cli ?? 'claude');
       // 사용자의 Claude 상태 줄은 b-studio 상태 줄이 이어 부른다(#920). 읽기만 한다
       const statusLine = found.kind === 'claude' ? await userStatusLineCommand(configDir, undefined, target.root) : undefined;
-      cli = { ...found, ...(configDir ? { configDir } : {}), ...(statusLine ? { statusLine } : {}) };
+      // Gemini는 사용자가 쓰던 로그인 방식만 읽어 우리 설정에 옮긴다(읽기만 한다). 없으면 CLI가 처음에 묻는다
+      const geminiAuthType = found.kind === 'gemini' ? await geminiUserAuthType(process.env.HOME ?? process.env.USERPROFILE) : undefined;
+      cli = { ...found, ...(configDir ? { configDir } : {}), ...(statusLine ? { statusLine } : {}), ...(geminiAuthType ? { geminiAuthType } : {}) };
     }
     if (!gateway) {
       // 자체 CLI의 훅·모델 파일은 관문 폴더에 있다. 관문 없이는 띄울 수 없고, claude로 대신하지도 않는다
@@ -422,6 +432,22 @@ const HOST_BACKEND: TerminalBackend = {
   // 터미널 환경이 CLI에 내려주는 HOME으로 같은 자리를 읽는다. 읽다 던지면 열지 않는다(통과로 읽지 않는다)
   // OpenCode(ADR-241)는 설정 어디에서든 다른 플러그인이 붙으면 우리 훅 뒤에 도구 입력을 바꿔 쓸 수 있다. 같은 자리에서 전역·작업 폴더·`.opencode`·관리형 설정과 플러그인 폴더를 읽는다
   preflight: async (target) => {
+    // Gemini(ADR-242): 훅이 있는 판인지, 설정이 우리 훅을 끄거나 다른 훅을 더하지 않는지. 확인하지 못하면 열지 않는다
+    if (target.cli === 'gemini') {
+      try {
+        const found = await findHostCli(process.env, 'gemini');
+        // 판을 읽는 `--version`이 사용자의 ~/.gemini에 쓰지 않게 홈을 임시 폴더로 바꿔 부른다
+        const scratch = await mkdtemp(path.join(tmpdir(), 'b-studio-gemini-version-'));
+        try {
+          const refusal = await geminiVersionRefusal(found.cliPath, (file, args) => execChecked(file, args, { timeoutMs: 15_000, env: { PATH: process.env.PATH ?? '', HOME: scratch, GEMINI_CLI_HOME: scratch } as NodeJS.ProcessEnv }));
+          return refusal ?? (await geminiConfigRefusal({ cwd: target.root }));
+        } finally {
+          await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
+        }
+      } catch (error) {
+        return `Gemini의 판과 설정을 확인하지 못해 터미널을 열지 않았습니다: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
     if (target.cli === 'opencode') {
       try {
         return await openCodeConfigRefusal({ cwd: target.root, home: process.env.HOME ?? process.env.USERPROFILE, xdgConfigHome: process.env.XDG_CONFIG_HOME });
@@ -743,8 +769,8 @@ export async function openSessionTerminal(
       }
       // Command Code는 mod가 불러와져야 훅이 있다. 설정이 mod를 끈 채로 CLI가 도는 경우(검사 뒤에 설정이 바뀌었다, 셸로 쓴 설정)는
       // 신호(session-start)가 오지 않는 것으로만 보인다. 시간 안에 오지 않으면 훅 없이 뜬 것으로 보고 감시가 찾은 위반과 같은 길로 처리한 뒤 터미널을 닫는다
-      // OpenCode도 같다: 플러그인이 불러와져야 훅이 있다(ADR-241)
-      if (target.cli === 'commandcode' || target.cli === 'opencode') {
+      // Gemini(ADR-242)·OpenCode(ADR-241)도 같다: 설정의 훅·플러그인이 불러와져야 훅이 있다. 믿지 않는 폴더면 Gemini의 설정 훅이 하나도 등록되지 않는다
+      if (target.cli === 'commandcode' || target.cli === 'gemini' || target.cli === 'opencode') {
         armModClock(
           sessionId,
           (reason) => {

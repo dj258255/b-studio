@@ -14,7 +14,7 @@ import { StudioError } from './errors';
 import { newSessionModel } from './new-session';
 import { findProject } from './projects';
 import { openSessionTerminal, sessionTerminalMode, type TerminalMode } from './session-terminal';
-import { commandCodeTerminalReason, openCodeTerminalReason, terminalClosedMessage } from './terminal-allowed';
+import { commandCodeTerminalReason, geminiTerminalReason, openCodeTerminalReason, terminalClosedMessage } from './terminal-allowed';
 import { createSession, sessionTerminalAllowed, sessionTerminalTarget, setTerminalCheckChanges, subscribe } from './sessions';
 
 export interface RoutedTerminal {
@@ -68,7 +68,7 @@ const defaultTerminalDeps: RoutedTerminalDeps = {
 
 /**
  * 터미널에서 띄울 수 있는 AI. 터미널 CLI는 세션 백엔드로 정해진다: 이 컴퓨터 방식이면 Claude Code·Codex·API(자체 CLI), 컨테이너 방식이면 Claude Code·Codex(API는 안 된다)다.
- * Command Code·OpenCode는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만이다.
+ * Command Code·OpenCode·Gemini는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만이다.
  * 그 밖의 백엔드로 세션을 만들면 터미널에는 claude가 떠서 고른 AI와 달라지므로 거른다
  */
 function terminalBackends(mode: TerminalMode): BackendFilter {
@@ -79,9 +79,10 @@ function terminalBackends(mode: TerminalMode): BackendFilter {
     if (backend === 'api') return mode === 'host' ? undefined : '컨테이너 방식 터미널은 API 모드(자체 CLI)를 띄우지 않습니다. Claude Code나 Codex를 고르세요';
     // Command Code(실험): 터미널을 여는 쪽과 같은 판정을 쓴다. 여기서만 따로 거르면 열 수 있는 세션을 만들지 못한다
     if (backend === 'commandcode') return commandCodeTerminalReason(mode);
-    // OpenCode(실험, ADR-241): 같은 판정
+    // OpenCode(실험, ADR-241)·Gemini(실험, ADR-242): 같은 판정
     if (backend === 'opencode') return openCodeTerminalReason(mode);
-    return '터미널에서 띄울 수 없는 AI입니다(Claude Code·Codex·Command Code·OpenCode·API만)';
+    if (backend === 'gemini') return geminiTerminalReason(mode);
+    return '터미널에서 띄울 수 없는 AI입니다(Claude Code·Codex·Command Code·OpenCode·Gemini·API만)';
   };
 }
 

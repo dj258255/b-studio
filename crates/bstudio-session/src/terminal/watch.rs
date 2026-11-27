@@ -154,7 +154,8 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
 ///   `--mod=…`·두 번째 `--mod`(뒤가 앞을 덮을 수 있다)·`--safe-mode`가 있으면 붙지 않았다
 /// - OpenCode: 환경의 `OPENCODE_CONFIG`가 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), `OPENCODE_PURE`와 플러그인을 더하는 변수(`OPENCODE_CONFIG_CONTENT`·`OPENCODE_CONFIG_DIR`·`OPENCODE_TUI_CONFIG`)가 없고(값이 비었어도 있으면 안 된다),
 ///   argv에 `--pure`가 없고 첫 위치 인자가 `attach`(다른 서버에 붙는 클라이언트)가 아니다. 환경을 읽지 못했으면(`None`) 붙지 않았다
-/// - Gemini: 환경의 `GEMINI_CLI_SYSTEM_SETTINGS_PATH`가 `expected`와 같은 글이다(같은 이름이 여럿이면 모두). 환경을 읽지 못했으면 붙지 않았다
+/// - Gemini: 환경의 `GEMINI_CLI_HOME`(관문 폴더 안의 홈)이 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), 시스템 설정 자리·믿음을 정하는 변수가 없고, 샌드박스 인자가 없다. 환경을 읽지 못했으면 붙지 않았다
+///   (시스템 설정은 root 소유여야 읽혀서 사용자 폴더의 파일로는 훅을 붙일 수 없다 — ADR-242)
 /// - claude·codex는 이 판정으로 붙었다고 보지 않는다(claude는 `hooked_argv`, codex는 `hooked`)
 ///
 /// 경로는 글 그대로 견준다(대소문자·끝 슬래시·`.`·`..`·겹친 슬래시·링크처럼 보이는 글은 다른 글이다). 정규화해서 견주면 다른 파일이 같은 파일이 된다
@@ -189,41 +190,155 @@ pub fn hooked_launch(kind: CliKind, argv: &[String], env: Option<&[(String, Stri
             if argv.iter().any(|element| element == "--pure" || element.starts_with("--pure=")) {
                 return false;
             }
-            // `attach`는 실행 중인 서버에 붙는 클라이언트다. 도구는 그 서버 프로세스에서 돌아 이 프로세스에 붙은 플러그인은 소용이 없다
-            if opencode_first_positional(argv) == Some("attach") {
+            // 인자는 허용 목록으로 본다(`opencode_args_allowed`): `attach`·`run --attach`·`serve` 같은 하위 명령과 서버·설정을 바꾸는 옵션은 모두 붙지 않은 것이다
+            if !opencode_args_allowed(argv) {
                 return false;
             }
             env_all_equal(env, "OPENCODE_CONFIG", expected)
         }
         CliKind::Gemini => {
             let Some(env) = env else { return false };
-            env_all_equal(env, "GEMINI_CLI_SYSTEM_SETTINGS_PATH", expected)
+            // 시스템 설정 자리·시스템 기본값·믿음을 정하는 변수는 하나라도 있으면(값이 비었어도) 붙지 않은 것이다: 훅을 끄거나 더할 수 있다(감싸개는 이 변수들을 지우고 띄운다)
+            if env.iter().any(|(name, _)| GEMINI_SETTINGS_ENVS.contains(&name.as_str())) {
+                return false;
+            }
+            // 인자도 허용 목록으로 본다(`gemini_args_allowed`): 샌드박스·하위 명령·다른 방식으로 뜨는 옵션은 붙지 않은 것이다
+            if !gemini_args_allowed(argv) {
+                return false;
+            }
+            env_all_equal(env, "GEMINI_CLI_HOME", expected)
         }
     }
 }
 
+/// Gemini의 설정·믿음을 바꾸거나 샌드박스를 켜는 환경 변수(0.71.1 소스에서 읽은 것). 하나라도 있으면(값이 비었어도) 붙지 않은 것이다.
+/// 샌드박스(`GEMINI_SANDBOX`·`SANDBOX`·이미지·프록시·마운트·포트·프로필)는 CLI를 다른 프로세스에서 다시 띄워 우리 훅이 붙었는지 알 수 없다.
+/// 감싸개가 지우는 목록(`GEMINI_UNSET_ENVS`)과 같아야 한다(TS 시험이 두 목록을 견준다)
+const GEMINI_SETTINGS_ENVS: [&str; 14] = [
+    "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+    "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    "GEMINI_RESTRICTED_MODE",
+    "GEMINI_CLI_TRUST_WORKSPACE",
+    "GEMINI_SANDBOX",
+    "SANDBOX",
+    "GEMINI_SANDBOX_IMAGE",
+    "GEMINI_SANDBOX_PROXY_COMMAND",
+    "SANDBOX_ENV",
+    "SANDBOX_FLAGS",
+    "SANDBOX_MOUNTS",
+    "SANDBOX_PORTS",
+    "SANDBOX_SET_UID_GID",
+    "SEATBELT_PROFILE",
+];
+/// Gemini의 하위 명령(0.71.1 `gemini-*.js`의 `commandModules`와 `aliases`). 첫 위치 인자가 이 이름이면 에이전트를 띄우지 않는 명령이다
+const GEMINI_SUBCOMMANDS: [&str; 9] = ["mcp", "extensions", "extension", "skills", "skill", "hooks", "hook", "gemma", "models"];
+
+/// Gemini의 인자가 우리가 아는 꼴뿐인가(여는 쪽이라 허용 목록이다). 허용: 값을 받는 `-i`·`--prompt-interactive`·`-m`·`--model`, 값이 있어도 없어도 되는 `-r`·`--resume`, `--screen-reader`,
+/// `--옵션=값` 꼴(허용한 긴 옵션만), 첫 위치 인자가 하위 명령이 아닌 질문 낱말. 그 밖의 옵션(`-s`·`--sandbox`·`--acp`·`--policy`·`-e` 등)·`--`는 붙지 않은 것이다.
+/// 값 자리에 `-`로 시작하는 글이 오면 yargs가 다음 옵션으로 읽을 수 있어 값으로 인정하지 않는다(첫 요청은 앞에 "요청: "이 붙는다)
+fn gemini_args_allowed(argv: &[String]) -> bool {
+    const VALUE: [&str; 6] = ["-i", "--prompt-interactive", "-m", "--model", "-r", "--resume"];
+    let mut positionals = 0;
+    let mut i = 1;
+    while i < argv.len() {
+        let element = argv[i].as_str();
+        i += 1;
+        if element == "--" {
+            return false;
+        }
+        if let Some(rest) = element.strip_prefix("--") {
+            if let Some((name, _)) = rest.split_once('=') {
+                if !VALUE.contains(&format!("--{name}").as_str()) {
+                    return false;
+                }
+            } else if element == "--screen-reader" {
+            } else if VALUE.contains(&element) {
+                // `--resume`은 값이 없어도 된다. 나머지는 값이 있어야 한다
+                match argv.get(i) {
+                    Some(value) if !value.starts_with('-') => i += 1,
+                    _ if element == "--resume" => {}
+                    _ => return false,
+                }
+            } else {
+                return false;
+            }
+        } else if element.starts_with('-') && element.len() > 1 {
+            if !VALUE.contains(&element) {
+                return false;
+            }
+            match argv.get(i) {
+                Some(value) if !value.starts_with('-') => i += 1,
+                _ if element == "-r" => {}
+                _ => return false,
+            }
+        } else {
+            positionals += 1;
+            if positionals == 1 && GEMINI_SUBCOMMANDS.contains(&element) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// OpenCode의 설정에 플러그인을 더할 수 있는 환경 변수. 하나라도 있으면 붙지 않은 것이다
 const OPENCODE_PLUGIN_ENVS: [&str; 3] = ["OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG"];
-/// 값을 따로 받는 OpenCode의 옵션(설치된 1.18.33의 `--help`와 옵션 정의에서). 값 자리의 글이 서브명령으로 읽히지 않게 건너뛴다. 모르는 옵션의 값은 낱말로 읽혀 더 막을 뿐이다
-const OPENCODE_VALUE_OPTIONS: [&str; 11] = ["--log-level", "--prompt", "--session", "-s", "--model", "-m", "--agent", "--port", "--hostname", "--cors", "--mdns-domain"];
+/// OpenCode 1.18.33의 하위 명령 이름과 별칭(yargs 정의에서 읽은 것). 위치 인자가 이 이름이면 에이전트 TUI가 아니다
+const OPENCODE_SUBCOMMANDS: [&str; 46] = [
+    "acp", "attach", "run", "serve", "web", "mcp", "plugin", "plug", "providers", "auth", "models", "export", "import", "github", "pr", "session", "stats", "db", "debug", "agent", "upgrade",
+    "uninstall", "completion", "console", "generate", "login", "logout", "list", "ls", "add", "remove", "create", "config", "paths", "info", "lsp", "file", "files", "search", "diff", "patch",
+    "delete", "open", "orgs", "path", "diagnostics",
+];
 
-/// argv[0] 뒤의 첫 위치 인자(서브명령이거나 프로젝트 경로). 옵션과 그 값은 건너뛴다
-fn opencode_first_positional(argv: &[String]) -> Option<&str> {
-    let mut skip_value = false;
-    for element in argv.iter().skip(1) {
-        if skip_value {
-            skip_value = false;
-            continue;
+/// OpenCode의 인자가 우리가 아는 꼴뿐인가(여는 쪽이라 허용 목록이다). 근거는 설치된 1.18.33 바이너리 안 평문 JS의 yargs 정의다:
+/// 기본 명령 `$0 [project]`(TUI)의 옵션 중 `--model`·`-m`·`--session`·`-s`·`--prompt`·`--agent`·`--log-level`(값을 받음)과 `--continue`·`-c`·`--fork`·`--print-logs`(값 없음)만 허용한다.
+/// 그 밖의 옵션(`--attach`·`--dir`·`--port`·`--hostname`·`--mini`·`--auto`·`--pure` 등)과 하위 명령(`attach`·`run`·`serve`·`web`·`acp`·`mcp`·`plugin`·`auth` 등)은 모두 붙지 않은 것이다.
+/// 위치 인자는 `project`(시작할 경로) 하나뿐이고 `.`일 때만 받는다(그 밖의 글은 하위 명령 이름일 수 있다. 환경의 `PWD`는 상대가 정할 수 있어 쓰지 않는다). `--`와 값 자리의 `-`로 시작하는 글은 받지 않는다
+/// (`--prompt --attach url`은 yargs가 `--prompt`를 비우고 `--attach`를 읽는다). `--옵션=값` 꼴은 값을 받는 긴 옵션만 받는다
+fn opencode_args_allowed(argv: &[String]) -> bool {
+    const VALUE_LONG: [&str; 5] = ["--model", "--session", "--prompt", "--agent", "--log-level"];
+    const VALUE_SHORT: [&str; 2] = ["-m", "-s"];
+    const FLAGS: [&str; 4] = ["--continue", "-c", "--fork", "--print-logs"];
+    let mut positionals = 0;
+    let mut i = 1;
+    while i < argv.len() {
+        let element = argv[i].as_str();
+        i += 1;
+        if element == "--" {
+            return false;
         }
-        if element.starts_with('-') && element.len() > 1 {
-            if !element.contains('=') && OPENCODE_VALUE_OPTIONS.contains(&element.as_str()) {
-                skip_value = true;
+        if element.starts_with("--") {
+            if let Some((name, _)) = element.split_once('=') {
+                if !VALUE_LONG.contains(&name) {
+                    return false;
+                }
+            } else if VALUE_LONG.contains(&element) {
+                match argv.get(i) {
+                    Some(value) if !value.starts_with('-') => i += 1,
+                    _ => return false,
+                }
+            } else if !FLAGS.contains(&element) {
+                return false;
             }
-            continue;
+        } else if element.starts_with('-') && element.len() > 1 {
+            if VALUE_SHORT.contains(&element) {
+                match argv.get(i) {
+                    Some(value) if !value.starts_with('-') => i += 1,
+                    _ => return false,
+                }
+            } else if !FLAGS.contains(&element) {
+                return false;
+            }
+        } else {
+            positionals += 1;
+            // 환경(PWD)은 상대가 정할 수 있는 값이라 예외의 근거로 쓰지 않는다. 감싸개는 위치 인자를 넘기지 않으므로 없음 또는 `.`만 받는다.
+            // 하위 명령 이름은 `.`과 같을 수 없지만 이중 장치로 먼저 거절한다
+            if positionals > 1 || OPENCODE_SUBCOMMANDS.contains(&element) || element != "." {
+                return false;
+            }
         }
-        return Some(element.as_str());
     }
-    None
+    true
 }
 
 /// `name`이 환경에 있고 모든 줄의 값이 `expected`와 같은가(같은 이름이 여럿이면 프로그램마다 이기는 쪽이 달라 하나라도 다르면 거짓)
