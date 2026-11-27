@@ -4892,6 +4892,7 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
       const head = await sessionHeadSha(session);
       return head ? { head } : undefined;
     },
+    diffSince: (sha) => session.checkpoints.diffSince(sha),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -4975,6 +4976,7 @@ export async function continueReviewAfterNewCommits(id: string): Promise<void> {
       const head = await sessionHeadSha(session);
       return head ? { since: sinceSha, head } : undefined;
     },
+    diffSince: (sha) => session.checkpoints.diffSince(sha),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {

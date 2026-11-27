@@ -206,6 +206,33 @@ describe('세션 자세히 그리기', () => {
     expect(out).toMatch(/major\s+a\.ts:3\s+널 확인 빠짐/);
   });
 
+  it('리뷰 탭은 diff에 없는 지적·확인 못 한 지적·반영된 지적에 표시를 붙이고 처리율을 한 줄로 보인다(이슈 #1440)', () => {
+    const review = {
+      state: 'capped',
+      maxRounds: 2,
+      rounds: [
+        {
+          round: 1,
+          status: 'blocked_continue',
+          findings: [
+            { severity: 'major', file: 'a.ts', line: 3, title: '널 확인 빠짐', detail: 'd' },
+            { severity: 'minor', file: 'ghost.ts', title: '없는 파일', detail: 'd' },
+            { severity: 'nit', file: 'big.ts', title: '못 본 파일', detail: 'd' },
+          ],
+          findingChecks: [{ status: 'in_diff' }, { status: 'not_in_diff', reason: 'file_missing' }, { status: 'unverified', reason: 'file_omitted' }],
+          addressed: ['addressed', 'unknown', 'unknown'],
+          startedAt: '2026-10-23T05:00:00.000Z',
+        },
+      ],
+    } as const;
+    const out = text({ ...loaded(), tab: 'review', snapshot: { ...snapshot, review: structuredClone(review) as never } });
+    expect(out).toMatch(/major\s+a\.ts:3\s+널 확인 빠짐\s+\[반영됨\]/);
+    expect(out).toMatch(/minor\s+ghost\.ts\s+없는 파일\s+\[diff에 없음\]/);
+    expect(out).toMatch(/nit\s+big\.ts\s+못 본 파일\s+\[확인 못 함\]/);
+    expect(out).toContain('지적 처리율: 1/1 (100%) · 모름 2');
+    expect(out).not.toContain('ADR');
+  });
+
   it('올리기 탭은 점검 결과와 이미 열린 PR을, 올린 뒤에는 결과 주소를 링크(OSC 8)로 보인다', () => {
     const preview = { title: '주문 모듈', canCreate: true, issues: [12], checks: [{ id: 'stages_passed', ok: true, detail: '검증 통과' }, { id: 'issue_linked', ok: false, detail: '이슈를 잇지 않았습니다' }] };
     const out = text({ ...loaded(), tab: 'export', preview });

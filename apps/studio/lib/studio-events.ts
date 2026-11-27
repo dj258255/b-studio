@@ -1,5 +1,5 @@
 import type { SandboxLink } from './sandbox-link';
-import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, GitHostKind, PrReviewFinding, RequestMismatch, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
+import type { AgentEvent, AgentUsage, Checkpoint, DatabaseState, DiscardBackup, Effort, FindingAddressStatus, FindingLocationCheck, GitHostKind, PrReviewFinding, RequestMismatch, RunMetrics, ServiceCheck, VerificationReport } from '@b-studio/agent';
 import type { WorkflowStage } from '@b-studio/spec';
 import type { BootNetwork, ServiceUsage } from '@b-studio/sandbox';
 import type { TaskKind } from './routing-types';
@@ -206,6 +206,16 @@ export interface ReviewRoundView {
   finishedAt?: string;
   /** 사람이 오탐으로 닫은 지적들. findings 배열 인덱스 → 결정(과제 67-b) */
   humanResolutions?: Record<number, ReviewFindingResolution>;
+  /**
+   * findings와 같은 순서로, 지적한 파일·줄을 이 라운드가 리뷰한(잘린 뒤의) diff와 기계로 맞춘 결과(이슈 #1440).
+   * in_diff·not_in_diff("diff에 없음")·unverified("확인 못 함"). 표시와 기록만이며 라운드의 판정은 바꾸지 않는다. 옛 기록에는 없다
+   */
+  findingChecks?: FindingLocationCheck[];
+  /**
+   * findings와 같은 순서로, 이 라운드 리뷰 이후(이 라운드가 본 끝 커밋 headSha부터 지금 HEAD까지)의 diff에서 지적한 줄이 바뀌었는지.
+   * 반영됨·반영 안 됨·모름. 정의는 packages/agent/src/review-finding-check.ts 머리 주석. 이후 diff를 아직 못 봤으면 없다
+   */
+  addressed?: FindingAddressStatus[];
   /**
    * 이 라운드가 리뷰한 diff의 시작·끝 커밋(전체 sha). 이미 열린 PR에 새 커밋이 쌓여 그 범위만 다시 본
    * 라운드에만 있다(continueReviewAfterNewCommits) — 처음 PR을 열 때의 리뷰는 base...head 전체라 없다.
