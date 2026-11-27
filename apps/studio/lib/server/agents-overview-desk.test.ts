@@ -210,6 +210,14 @@ describe('시각(#933)', () => {
     expect(got.lastActivityAt).toBe('2026-10-26T06:07:49.000Z');
   });
 
+  it('터미널 CLI가 알린 모델과 바뀜을 싣고, 모르면 필드를 두지 않는다', () => {
+    const got = item(source({ live: { model: 'claude-opus-5', modelChange: { from: 'claude-sonnet-5', to: 'claude-opus-5' } } }));
+    expect(got.model).toBe('claude-opus-5');
+    expect(got.modelChange).toEqual({ from: 'claude-sonnet-5', to: 'claude-opus-5' });
+    expect(item(source())).not.toHaveProperty('model');
+    expect(item(source())).not.toHaveProperty('modelChange');
+  });
+
   it('턴에서 거절된 쓰기 수(turnDenied)를 싣는다(#955)', () => {
     expect(item(source({ live: { turnDenied: 3 } })).turnDenied).toBe(3);
     expect(item(source())).not.toHaveProperty('turnDenied');
