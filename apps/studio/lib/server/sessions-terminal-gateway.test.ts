@@ -1751,6 +1751,22 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     expect(telemetryOnly.ofType('run_finished')[0]).toMatchObject({ model: 'claude-sonnet-5' });
     await stopSession(telemetryOnly.id);
 
+    // 상태 줄이 없고 텔레메트리의 모델이 둘이다(서브에이전트·보조 호출): 어느 것이 메인인지 몰라 비운다
+    const mixed = await open();
+    await mixed.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(mixed, 'api/src/Order.java', 'class Order { String memo; }\n');
+    const otherModel = (event: Record<string, unknown>): Record<string, unknown> => ({
+      ...event,
+      attributes: (event.attributes as Array<{ key: string }>).map((attribute) =>
+        attribute.key === 'model' ? { key: 'model', value: { stringValue: 'claude-haiku-5' } } : attribute,
+      ),
+    });
+    await mixed.gateway.telemetry(otlp([req(1000, 100), otherModel(req(200, 20))]));
+    await mixed.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(mixed.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    expect(mixed.ofType('run_finished')[0]).not.toHaveProperty('model');
+    await stopSession(mixed.id);
+
     // 아무것도 모른다: 필드가 없다(세션에 정한 모델을 대신 쓰지 않는다)
     const unknown = await open({ modelId: 'claude-haiku-5' });
     await unknown.gateway.prompt({ prompt: '주문에 메모 필드 추가' });

@@ -49,8 +49,6 @@ const items: DeskItem[] = [
     now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 13_000).toISOString() },
     todos: { done: 3, total: 7, current: '주문 상태 전이 테스트' },
     context: { usedPct: 41, used: 82_000, size: 200_000 },
-    // 같은 세션에서 모델이 바뀐 것을 보았다(#1439). 사진용 가짜 값
-    model: 'claude-opus-5', modelChange: { from: 'claude-sonnet-5', to: 'claude-opus-5' },
     lastMessage: '주문 상태를 한 곳에서 바꾸게 묶었습니다. 이제 전이 테스트를 씁니다.',
     agents: [
       { id: 'main', name: 'Claude Code', kind: 'main', state: 'working', activity: 'Edit apps/shop/order.ts', tokens: usage(129_000, 25_000) },
