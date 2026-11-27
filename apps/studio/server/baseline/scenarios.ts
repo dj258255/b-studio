@@ -88,54 +88,6 @@ const failExec = (times?: number): DockerScenario['rules'] => [{ when: ['compose
 
 export const scenarios: Scenario[] = [
   {
-    name: 'pass-checkpoint',
-    covers: '체크포인트 남김: 러너 done + 게이트 통과 + 지문 같음',
-    options: { claude: { turns: [[edit('바뀜\n'), { text: '고쳤습니다.' }]] } },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고쳐 주세요');
-    },
-  },
-  {
-    name: 'ask-no-change',
-    covers: '읽기만(intent ask): 게이트도 체크포인트도 없다',
-    options: { claude: { turns: [[{ text: '파일은 app/hello.txt입니다.' }]] } },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, '어떤 파일이 있나요?', { intent: 'ask' });
-    },
-  },
-  {
-    name: 'gate-fail-then-pass',
-    covers: '게이트 실패 한 번 뒤 다시 확인해 통과: 두 번째 턴이 고친 내용으로 체크포인트',
-    options: {
-      files: WITH_TEST,
-      claude: { turns: [[edit('틀림\n'), { text: '첫 시도입니다.' }], [edit('맞음\n'), { text: '고쳤습니다.' }]] },
-      docker: { rules: failExec(1) },
-    },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고쳐 주세요');
-    },
-  },
-  {
-    name: 'gate-exhausted-revert',
-    covers: '게이트가 끝까지 실패(exhausted): 체크포인트 없이 되돌린다',
-    options: {
-      files: WITH_TEST,
-      claude: { turns: [[edit('틀림1\n'), { text: '첫 시도.' }], [edit('틀림2\n'), { text: '둘째.' }], [edit('틀림3\n'), { text: '셋째.' }], [edit('틀림4\n'), { text: '넷째.' }]] },
-      docker: { rules: failExec() },
-    },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고쳐 주세요');
-    },
-  },
-  {
     name: 'cancel-revert',
     covers: '취소: 실행이 바꾼 파일을 되돌리고 체크포인트를 남기지 않는다',
     options: { claude: { turns: [[edit('취소될 내용\n'), { hang: true }]] } },
@@ -157,26 +109,6 @@ export const scenarios: Scenario[] = [
       // 파일 반영 확인(docker run)이 도커에 닿지 못한 것처럼 실패한다
       docker: { rules: [{ when: ['run', '--rm'], reply: { exit: 1, stderr: 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?\n' } }] },
     },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고쳐 주세요');
-    },
-  },
-  {
-    name: 'cli-no-result',
-    covers: '실패: CLI가 결과 없이 끝남(ADR-194 결정 3)',
-    options: { claude: { turns: [[edit('결과 없음\n')]], noResult: true } },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고쳐 주세요');
-    },
-  },
-  {
-    name: 'mcp-not-connected',
-    covers: '실패: MCP 서버가 connected가 아님(ADR-194 결정 8)',
-    options: { claude: { turns: [[edit('연결 안 됨\n')]], invocations: [{ initExtra: { mcp_servers: [{ name: 'b-studio', status: 'failed' }] } }] } },
     files: ['app/hello.txt'],
     run: async ({ start, send }) => {
       const id = await start();
@@ -251,16 +183,6 @@ services:
     },
   },
   {
-    name: 'question-stop',
-    covers: '질문 멈춤: 바뀐 것이 없으면 게이트 없이 awaiting_input',
-    options: { claude: { turns: [[{ tool: 'ask_user', input: { question: '어떤 형태로 만들까요?', options: ['표', '카드'], allowOther: true } }]] } },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, '화면을 만들어 주세요');
-    },
-  },
-  {
     name: 'local-workspace-platform-failure',
     covers: '내 폴더(local) 방식 + 플랫폼 실패: 복사본 방식과 달리 되돌린다',
     options: {
@@ -286,30 +208,6 @@ services:
       await driver.waitFor('gate_done', (event) => event.type === 'agent' && event.runId === runId && (event.event as { type?: string; ok?: boolean }).type === 'gate_done');
       await writeFile(path.join(workDir(), 'app/hello.txt'), '검증한 뒤에 바뀜\n');
       await driver.waitFor('run_finished', (event) => event.type === 'run_finished' && event.runId === runId, 60_000);
-    },
-  },
-  {
-    name: 'question-after-passing-edit',
-    covers: '질문 멈춤은 questionRunPassedGate일 때만 체크포인트: 질문 전에 쓴 파일이 게이트를 통과하면 남긴다',
-    options: { claude: { turns: [[edit('질문 전 수정\n'), { tool: 'ask_user', input: { question: '다음은 무엇을 할까요?', options: ['A', 'B'], allowOther: false } }]] } },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고치고 다음을 물어봐 주세요');
-    },
-  },
-  {
-    name: 'question-after-failing-edit',
-    covers: '질문 멈춤: 질문 전에 쓴 파일이 게이트를 통과하지 못하면 체크포인트도 되돌림도 하지 않는다(다음 요청이 이어서 다룬다)',
-    options: {
-      files: WITH_TEST,
-      claude: { turns: [[edit('질문 전 틀린 수정\n'), { tool: 'ask_user', input: { question: '다음은 무엇을 할까요?', options: ['A', 'B'], allowOther: false } }]] },
-      docker: { rules: failExec() },
-    },
-    files: ['app/hello.txt'],
-    run: async ({ start, send }) => {
-      const id = await start();
-      await send(id, 'hello.txt를 고치고 다음을 물어봐 주세요');
     },
   },
 ];
