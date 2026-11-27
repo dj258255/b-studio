@@ -16,12 +16,13 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { changesLoaded, openChanges, type DeskComment, type LiveChangesView } from '../../apps/cli/src/desk/changes';
 import { openInside } from '../../apps/cli/src/desk/inside';
 import { openRecords, type RecordsStats } from '../../apps/cli/src/desk/records';
 import { initialState, type DeskState } from '../../apps/cli/src/desk/keys';
 import { openPin, pinId, pinLoaded, pinTitle, renderPin } from '../../apps/cli/src/desk/pinned';
 import { renderScreen, type PaneView } from '../../apps/cli/src/desk/render';
-import { placePanes, terminalSize } from '../../apps/cli/src/desk/screen';
+import { placePanes, stringWidth, terminalSize } from '../../apps/cli/src/desk/screen';
 import { openSettings } from '../../apps/cli/src/desk/settings';
 import type { ActivityLogView, DeskItem } from '../../apps/cli/src/desk/types';
 import { sessionLimits, usageAccounts } from '../../apps/cli/src/desk/usage';
@@ -257,6 +258,93 @@ const recordsStats: RecordsStats = {
   recentFailures: [{ sessionId: 's-login', backend: 'codex', accountId: 'codex', request: '로그인 API 계약 테스트 고치기', at: at(-70), outcome: 'failed' }],
 };
 
+/** 크게 보기(z)용: 터미널 하나가 화면을 채우고, 아래 입력란에 다음 요청을 치는 중이다. 실제 CLI 화면을 흉내만 낸다 */
+const box = (width: number, text: string): string[] => [`╭${'─'.repeat(width - 2)}╮`, `│ ${text}${' '.repeat(Math.max(0, width - 4 - stringWidth(text)))} │`, `╰${'─'.repeat(width - 2)}╯`];
+const claudeWidePane: PaneView = {
+  lines: [
+    `${yellow('✻')} Claude Code`,
+    '',
+    dim('> 주문 모듈을 서비스 계층으로 나눠 줘. 기존 호출부는 깨지지 않게'),
+    '',
+    '● 주문 모듈과 호출부를 먼저 살펴보겠습니다.',
+    '',
+    `${green('●')} Read(apps/shop/order.ts)`,
+    '  └ 248줄 읽음',
+    `${green('●')} Grep(createOrder)`,
+    '  └ 호출부 3곳: checkout.ts, admin/orders.ts, order.test.ts',
+    '',
+    `${green('●')} Edit(apps/shop/order.ts)`,
+    `  └ ${red('- export function createOrder(input) {')}`,
+    `    ${red('-   return repo.save(input);')}`,
+    `    ${green('+ export class OrderService {')}`,
+    `    ${green('+   constructor(private readonly repo: OrderRepo) {}')}`,
+    `    ${green('+   create(input: OrderInput) {')}`,
+    `    ${green('+     return this.repo.save(validate(input));')}`,
+    `    ${green('+   }')}`,
+    `    ${green('+ }')}`,
+    `    ${green('+ export const createOrder = (input: OrderInput) => new OrderService(repo).create(input);')}`,
+    '',
+    `${green('●')} Bash(pnpm test order)`,
+    `  └ ${green('✓')} 주문 단위 테스트 18개 통과 ${dim('(2.4s)')}`,
+    '',
+    '● 서비스 계층으로 나눴고, 기존 createOrder는 얇은 함수로 남겨 호출부 3곳이 그대로 동작합니다.',
+    '  b-studio 검증 게이트를 통과해 체크포인트를 남겼습니다.',
+    '',
+    ...box(96, '결제 실패 경로 테스트도 같이 보강해 줘▌'),
+    dim('  ? 단축키 · esc 멈춤 · Enter 보내기'),
+  ],
+};
+
+/** 지금 변경 화면(앞글쇠 다음 d)용 가짜 변경: 파일 셋, 줄 의견 둘 */
+const changesData: LiveChangesView = {
+  branch: 'b-studio/s-order',
+  base: 'main',
+  ahead: 2,
+  behind: 0,
+  truncated: false,
+  files: [
+    {
+      file: 'apps/shop/order.ts',
+      change: 'modified',
+      added: 9,
+      removed: 2,
+      patch: [
+        '@@ -1,12 +1,19 @@',
+        " import { repo } from './repo';",
+        " import { validate } from './validate';",
+        ' ',
+        '-export function createOrder(input) {',
+        '-  return repo.save(input);',
+        '+export class OrderService {',
+        '+  constructor(private readonly repo: OrderRepo) {}',
+        '+',
+        '+  create(input: OrderInput) {',
+        '+    return this.repo.save(validate(input));',
+        '+  }',
+        ' }',
+        '+',
+        '+export const createOrder = (input: OrderInput) => new OrderService(repo).create(input);',
+        ' ',
+        ' export function cancelOrder(id: string) {',
+        '   return repo.update(id, { state: \'cancelled\' });',
+        ' }',
+      ].join('\n'),
+    },
+    {
+      file: 'apps/shop/order.test.ts',
+      change: 'modified',
+      added: 6,
+      removed: 1,
+      patch: ['@@ -20,6 +20,11 @@', " describe('주문', () => {", "-  it('만든다', () => expect(createOrder(sample)).toBeDefined());", "+  it('서비스로 만든다', () => {", '+    const service = new OrderService(fakeRepo());', '+    expect(service.create(sample).state).toBe(\'created\');', '+  });', "+  it('옛 함수도 그대로 쓴다', () => expect(createOrder(sample)).toBeDefined());", ' });'].join('\n'),
+    },
+    { file: 'apps/shop/order-service.md', change: 'added', added: 12, removed: 0, patch: ['@@ -0,0 +1,3 @@', '+# 주문 서비스', '+', '+주문은 OrderService.create로 만든다.'].join('\n') },
+  ],
+};
+const changesComments: DeskComment[] = [
+  { id: 'c1', file: 'apps/shop/order.ts', line: 8, side: 'new', code: '    return this.repo.save(validate(input));', text: '검증 실패일 때 어떤 오류를 던지는지 테스트도 넣어 줘', createdAt: at(-3) },
+  { id: 'c2', file: 'apps/shop/order.ts', line: 12, side: 'new', code: 'export const createOrder = (input: OrderInput) => new OrderService(repo).create(input);', text: '이건 다음 판에서 지울 예정이라고 주석 달기', createdAt: at(-2) },
+];
+
 interface Shot {
   name: string;
   cols: number;
@@ -286,6 +374,21 @@ const shots: Shot[] = [
     rows: 30,
     state: () => ({ ...base(), layout: 2, slots: ['s-order', 's-pay', undefined, undefined], focus: 0 }) as DeskState,
     panes: [claudePane, codexPane],
+  },
+  // 크게 보기(z): 터미널 칸 하나가 화면을 채운다. AI가 고친 코드와 테스트 결과를 넓게 보고, 아래 입력란에 다음 요청을 친다
+  {
+    name: 'desk-zoom',
+    cols: 160,
+    rows: 40,
+    state: () => ({ ...base(), layout: 2, slots: ['s-order', 's-pay', undefined, undefined], focus: 0, zoom: true }) as DeskState,
+    panes: [claudeWidePane, codexPane],
+  },
+  // 지금 변경(앞글쇠 다음 d): 왼쪽 파일 목록, 오른쪽 diff. 줄마다 의견을 달고 S로 묶어 그 세션의 입력란에 붙인다
+  {
+    name: 'desk-changes',
+    cols: 160,
+    rows: 36,
+    state: () => ({ ...base(), changes: { ...changesLoaded(openChanges('s-order', '주문 모듈 리팩터링', changesComments).state, changesData), focus: 'diff', row: 9 } }) as unknown as DeskState,
   },
   // 에이전트 나무 목록: 세션마다 부모 줄, 서브에이전트마다 자식 줄(작업 중·소식 없음·끝남이 섞인다)
   { name: 'desk-agents', cols: 160, rows: 30, state: () => ({ ...base(), tree: { index: 2, session: 's-order', agent: 'sub-2', all: false } }) as DeskState },
@@ -354,7 +457,7 @@ async function main(): Promise<void> {
       const state = shot.state();
       const size = { cols: shot.cols, rows: shot.rows };
       const frame = renderScreen(state, size, typeof shot.panes === 'function' ? shot.panes(state, size) : (shot.panes ?? []));
-      const text = frame.lines.join('\r\n');
+      const text = `${frame.lines.join('\r\n')}\x1b[?25l`;
       const html = [
         '<!doctype html><meta charset="utf-8">',
         `<link rel="stylesheet" href="file://${xterm}/css/xterm.css">`,
