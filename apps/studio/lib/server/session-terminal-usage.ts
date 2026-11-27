@@ -63,14 +63,22 @@ export interface StallFacts {
   /** 마지막 활동 뒤 흐른 시간(ms). 시계가 거꾸로 갔으면 음수다 */
   idleMs: number;
   stallMs: number;
+  /** 한 실행에 보낼 재촉의 상한. 없거나 0이면 꺼짐(기본) */
+  nudgeMax?: number;
+  /** 이 실행에 이미 보낸 재촉 수 */
+  nudgesSent?: number;
+  /** 사람 차례(권한 요청·질문)다 */
+  humanTurn?: boolean;
+  /** CLI가 입력창에 있다는 긍정 신호가 마지막 사건이다. 없으면(모르면) 재촉하지 않는다 */
+  cliAtInput?: boolean;
 }
 
-export type StallStep = 'stop' | 'nothing' | 'notify';
+export type StallStep = 'stop' | 'nothing' | 'notify' | 'nudge';
 
-/** 정체 감시 한 회차. 알리기만 하는 판정이라 알아보지 못한 결정은 알린다 */
+/** 정체 감시 한 회차. 재촉은 여는 쪽이라 알아보지 못한 결정은 재촉이 아니라 알림이다 */
 export function decideStall(facts: StallFacts): StallStep {
   const step = native.terminalDecideStall(facts);
-  return step === 'stop' || step === 'nothing' ? step : 'notify';
+  return step === 'stop' || step === 'nothing' || step === 'nudge' ? step : 'notify';
 }
 
 /** 정체 감시 주기(ms): 정체 시간의 1/4, 최소 1초 */

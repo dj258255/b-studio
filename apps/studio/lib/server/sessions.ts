@@ -270,7 +270,8 @@ import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { settleDraftStops } from './session-terminal-draft';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
+import { terminalPasteText } from '../terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
@@ -7765,6 +7766,11 @@ const TERMINAL_REQUEST_LIMIT = 8000;
 const TERMINAL_SEEN_USAGE_LIMIT = 2_000;
 /** 터미널 실행의 정체로 보는 기본 시간(초). 열린 실행에 이만큼 훅도 텔레메트리도 없으면 한 번 알린다(#B5) */
 const TERMINAL_STALL_DEFAULT_SECONDS = 120;
+const TERMINAL_STALL_NUDGE_DEFAULT_MAX = 1;
+/** 재촉 상한의 위쪽 한계. 사람 몰래 반복하지 않는 것이 이 기능의 뜻이라 크게 열어 두지 않는다 */
+const TERMINAL_STALL_NUDGE_LIMIT = 5;
+/** 정체가 이어질 때 CLI 입력창에 보내는 재촉 글 */
+const TERMINAL_STALL_NUDGE_TEXT = '멈춘 것 같습니다. 진행 상황을 확인하고 이어서 하거나, 막혔으면 이유를 알려 주세요.';
 
 interface TerminalVerification {
   workspace: Workspace;
@@ -7836,6 +7842,25 @@ interface TerminalRunState {
   lastActivityMs: number;
   /** 이 실행에서 정체 경고를 이미 한 번 보냈는가. 움직임이 다시 생기면 거짓으로 돌려 다음 정체에 다시 알린다 */
   stallNotified: boolean;
+  /** 이 실행에 보낼 수 있는 정체 재촉의 상한(B_STUDIO_TERMINAL_STALL_NUDGE_MAX). 0이면 꺼짐(기본). 실행을 열 때 읽어 이 실행에만 적용한다 */
+  stallNudgeMax: number;
+  /** 이 실행에 이미 보낸 정체 재촉 수. 움직임이 다시 생겨도 되돌리지 않는다(상한은 실행마다 센다) */
+  stallNudgesSent: number;
+  /** 재촉을 보내기 전 화면 확인이 진행 중이다(같은 재촉을 겹쳐 시작하지 않는다) */
+  stallNudgeBusy?: boolean;
+  /**
+   * CLI가 입력창에 있다는 긍정 신호가 이 실행의 마지막 사건인가(입력 대기 알림 뒤 다른 훅·텔레메트리·요청이 없다). 실행을 열 때 거짓이고,
+   * 입력 대기 알림만 참으로 세우며 다른 모든 훅·텔레메트리·요청이 거짓으로 되돌린다. 재촉은 이 값이 참일 때만 보낸다.
+   * 스냅샷의 `terminalAttention`은 비춘 값이라 다른 이유로 지워질 수 있어 판단에 쓰지 않는다(권한 창이 떠 있는데 Enter를 보내면 기본 선택이 눌린다)
+   */
+  cliAtInput: boolean;
+  /**
+   * 사람의 답을 기다리는 창(권한 확인·되묻기·입력 필요)이 열린 시각(Date.now(), 없으면 열려 있지 않다). 화면의 기다림 표시(`terminalAttention`)와 따로 기록한다:
+   * 표시는 다른 알림이 덮거나 훅이 지울 수 있지만 창은 그대로 떠 있을 수 있고, 그 창에 Enter를 보내면 기본 선택(승인)이 눌린다.
+   * 풀리는 것은 창이 닫혔다는 확실한 사건뿐이다: 메인 에이전트의 도구 끝 훅(허락받아 돌았거나 거절됨, 열린 지 `TERMINAL_ATTENTION_SETTLE_MS`가 지난 것만),
+   * 턴 끝·턴 실패, 사람의 요청. 다른 알림·텔레메트리·입력 대기 알림으로는 풀리지 않는다. 열려 있는 동안 입력 대기 알림은 입력창 신호를 세우지 않는다
+   */
+  humanPromptAt?: number;
   /** 이 실행을 요청 훅이 아니라 도구 호출이 열었다. 그 도구를 정한 모델 요청은 열린 시각보다 앞서 끝났을 수 있다(ADR-213, U5) */
   openedByTool: boolean;
   /** 이 실행이 열린 시각(Date.now()). 사용량 소식이 끊겼는지 보는 기준이다 */
@@ -8049,6 +8074,22 @@ function terminalStallMs(): number {
   return Number(value) * 1000;
 }
 
+/**
+ * B_STUDIO_TERMINAL_STALL_NUDGE=1(기본 꺼짐)과 B_STUDIO_TERMINAL_STALL_NUDGE_MAX(기본 1). 켜면 정체가 이어질 때 CLI 입력창에 재촉 글을
+ * 한 실행에 이 수만큼만 보낸다. 돌려주는 값이 0이면 꺼진 것이다. 모르는 값은 던진다(오타가 조용히 켜지거나 꺼지지 않게)
+ */
+function terminalStallNudgeMax(): number {
+  const on = process.env.B_STUDIO_TERMINAL_STALL_NUDGE?.trim();
+  if (!on || on === '0') return 0;
+  if (on !== '1') throw new StudioError(500, `B_STUDIO_TERMINAL_STALL_NUDGE는 1(켬) 또는 0(끔)이어야 합니다 (지금 값: ${on})`);
+  const max = process.env.B_STUDIO_TERMINAL_STALL_NUDGE_MAX?.trim();
+  if (!max) return TERMINAL_STALL_NUDGE_DEFAULT_MAX;
+  if (!/^\d+$/.test(max) || Number(max) <= 0 || Number(max) > TERMINAL_STALL_NUDGE_LIMIT) {
+    throw new StudioError(500, `B_STUDIO_TERMINAL_STALL_NUDGE_MAX는 1 이상 ${TERMINAL_STALL_NUDGE_LIMIT} 이하의 정수여야 합니다 (지금 값: ${max})`);
+  }
+  return Number(max);
+}
+
 /** 정체 감시 타이머를 세션마다 하나 띄운다. 이미 돌면 그대로 둔다 — 실행이 바뀌어도 하나만 돈다 */
 function startTerminalStallWatch(session: Session, stallMs: number): void {
   if (session.terminalStallTimer) return;
@@ -8071,17 +8112,97 @@ function stopTerminalStallWatch(session: Session): void {
  */
 function checkTerminalStall(session: Session, stallMs: number): void {
   const run = openTerminalRun(session);
-  // 알릴지는 코어가 정한다(ADR-213). 알리기만 하는 판정이다
-  const step = decideStall({ openRun: run !== undefined, notified: run?.terminal.stallNotified ?? false, idleMs: run ? Date.now() - run.terminal.lastActivityMs : 0, stallMs });
+  // 알릴지·재촉할지는 코어가 정한다(ADR-213, ADR-239). 사람 차례(권한 요청·질문·입력 대기)는 재촉하지 않는 사실로 넘긴다
+  const step = decideStall({
+    openRun: run !== undefined,
+    notified: run?.terminal.stallNotified ?? false,
+    idleMs: run ? Date.now() - run.terminal.lastActivityMs : 0,
+    stallMs,
+    nudgeMax: run?.terminal.stallNudgeMax ?? 0,
+    nudgesSent: run?.terminal.stallNudgesSent ?? 0,
+    // 사람 차례(권한·질문)는 비춘 값으로도 한 번 더 막는다. 입력 대기(idle_prompt)는 재촉이 겨냥하는 상태라 막지 않는다(입력창 신호는 cliAtInput)
+    humanTurn: run?.terminal.humanPromptAt !== undefined || (session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt'),
+    cliAtInput: run?.terminal.cliAtInput === true,
+  });
   if (step === 'stop') {
     stopTerminalStallWatch(session);
     return;
   }
   if (step === 'nothing' || !run) return;
+  if (step === 'nudge') {
+    // 화면을 읽는 사이(await) 다음 회차가 같은 재촉을 다시 시작하지 않게 한다
+    if (run.terminal.stallNudgeBusy) return;
+    run.terminal.stallNudgeBusy = true;
+    void sendStallNudge(session, run).then(
+      (sent) => {
+        run.terminal.stallNudgeBusy = false;
+        // 재촉을 보내지 못했으면(CLI가 없다·입력창을 확인하지 못했다·쓰기 실패) 알리기만 하는 길로 간다
+        if (!sent) notifyStall(session, run, stallMs);
+      },
+      () => {
+        run.terminal.stallNudgeBusy = false;
+        notifyStall(session, run, stallMs);
+      },
+    );
+    return;
+  }
+  notifyStall(session, run, stallMs);
+}
+
+/** 정체를 알리기만 한다(활동 기록과 터미널 경고 줄). 실행이 그 사이 닫혔으면 알리지 않는다 */
+function notifyStall(session: Session, run: ActiveRun & { terminal: TerminalRunState }, stallMs: number): void {
+  if (openTerminalRun(session) !== run) return;
   run.terminal.stallNotified = true;
   const message = terminalStallMessage(stallMs);
   emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
   warnSessionTerminal(session.snapshot.id, message);
+}
+
+/**
+ * 입력창 신호를 거둔다: 입력 대기 알림 말고 다른 무엇이 왔다(도구 훅·권한 요청·질문·텔레메트리·요청·턴 끝·도구 호출). CLI가 다시 움직였거나 창이 떴을 수 있다.
+ * 실행이 없으면 아무 일도 하지 않는다. 막는 쪽이라 넓게 부른다
+ */
+function closeHumanPrompt(id: string, { settled = false }: { settled?: boolean } = {}): void {
+  const session = store.sessions.get(id);
+  const run = session ? openTerminalRun(session) : undefined;
+  if (!run || run.terminal.humanPromptAt === undefined) return;
+  // 도구 끝 훅은 창이 뜨기 앞서 시작한 다른 도구의 것일 수 있다(#955와 같다): 연 지 조금 지난 것만 닫힌 것으로 본다
+  if (settled && Date.now() - run.terminal.humanPromptAt < TERMINAL_ATTENTION_SETTLE_MS) return;
+  run.terminal.humanPromptAt = undefined;
+}
+
+function noteTerminalBusy(id: string): void {
+  const session = store.sessions.get(id);
+  const run = session ? openTerminalRun(session) : undefined;
+  if (run) run.terminal.cliAtInput = false;
+}
+
+/**
+ * 정체한 실행의 CLI 입력창에 재촉 글을 한 번 보낸다(ADR-239). 사람이 desk에서 요청을 보내는 길(writeSessionTerminal)과 같다:
+ * CLI가 이 글을 받으면 요청 훅(terminalPromptSubmitted)을 거쳐 열린 실행에 이어 붙는다. 보낸 글과 시각은 그 실행의 기록에 남긴다.
+ * 보냈으면 참. CLI가 떠 있지 않으면(셸에 글이 들어가면 명령으로 돈다) 보내지 않고 거짓이다. 시도한 것은 쓰기가 실패해도 센다(같은 실패를 되풀이하지 않게)
+ */
+async function sendStallNudge(session: Session, run: ActiveRun & { terminal: TerminalRunState }): Promise<boolean> {
+  run.terminal.stallNudgesSent += 1;
+  const text = terminalPasteText(TERMINAL_STALL_NUDGE_TEXT);
+  try {
+    if (!text || !sessionTerminalCliAlive(session.snapshot.id)) return false;
+    // 화면에서 Claude 입력창이 보이고 비어 있을 때만 보낸다(권한·질문 창은 입력창 모양이 없고, 쓰다 만 글은 비어 있지 않다). 읽을 수 없으면(claude가 아닌 CLI·화면 없음) 모른다
+    if ((await sessionTerminalInputState(session.snapshot.id)) !== 'empty') return false;
+    // 화면을 읽는 사이 상황이 바뀌었을 수 있다: 같은 열린 실행이고 입력창 신호가 그대로이며 사람의 창이 없을 때만 쓴다(쓰기는 이 확인 바로 뒤에 같은 틱에서 한다)
+    if (openTerminalRun(session) !== run || !run.terminal.cliAtInput || run.terminal.humanPromptAt !== undefined || (session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt')) return false;
+    writeSessionTerminal(session.snapshot.id, `\x1b[200~${text}\x1b[201~`);
+    writeSessionTerminal(session.snapshot.id, '\r');
+  } catch {
+    return false;
+  }
+  // 재촉에 CLI가 답하지 않아도 정체 시간만큼은 더 기다린 뒤 알린다(바로 뒤 회차가 알림을 내지 않게)
+  run.terminal.lastActivityMs = Date.now();
+  const at = new Date().toISOString();
+  const message = `정체가 이어져 CLI에 재촉 글을 보냈습니다(${at}, ${run.terminal.stallNudgesSent}/${run.terminal.stallNudgeMax}): ${text}`;
+  emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
+  warnSessionTerminal(session.snapshot.id, message);
+  return true;
 }
 
 /**
@@ -8091,6 +8212,7 @@ function checkTerminalStall(session: Session, stallMs: number): void {
 function noteTerminalActivity(session: Session, run: ActiveRun & { terminal: TerminalRunState }, { settled = false }: { settled?: boolean } = {}): void {
   run.terminal.lastActivityMs = Date.now();
   run.terminal.stallNotified = false;
+  run.terminal.cliAtInput = false;
   if (settled) clearSettledTerminalAttention(session);
   else clearTerminalAttention(session);
 }
@@ -8443,6 +8565,7 @@ async function beginTerminalRun(
     }
     // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
     const stallMs = terminalStallMs();
+    const stallNudgeMax = terminalStallNudgeMax();
     // 켜 둔 확인 선언 변경 허용은 사람의 요청이 연 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 두고, 도구 호출이 연 실행은 가져가지 않는다(ADR-164, ADR-211)
     // 허용은 여기서 가져가기만 하고 지우지 않는다: 실행이 열린 뒤에 지운다(N2, ADR-215). 열기 전에 지우면 세션이 멈춰 열지 못할 때 허용이 쓰이지 않은 채 사라진다
     const allowCheckChanges = takesCheckChanges(fromPrompt, readOnly, session.snapshot.allowCheckChangesNext === true);
@@ -8462,6 +8585,9 @@ async function beginTerminalRun(
       modelCalls: 0,
       lastActivityMs: Date.now(),
       stallNotified: false,
+      stallNudgeMax,
+      stallNudgesSent: 0,
+      cliAtInput: false,
       openedByTool: !fromPrompt,
       openedMs: Date.now(),
       telemetrySeen: false,
@@ -10105,10 +10231,22 @@ function terminalNotification(id: string, input: HookInput): void {
   const kind = input.hook_event_name === 'PermissionRequest' ? 'permission_prompt' : typeof input.notification_type === 'string' ? input.notification_type : '';
   if (!kind) return;
   if (kind === 'idle_prompt') {
-    if (!openTerminalRun(session)) return;
+    const open = openTerminalRun(session);
+    if (!open) return;
+    // 사람의 답을 기다리는 창이 떠 있는 동안의 입력 대기 알림은 입력창 신호가 아니다(그 창에 Enter가 가면 승인이 눌린다). 표시도 덮지 않는다
+    if (open.terminal.humanPromptAt !== undefined) return;
+    // 입력창에 있다는 긍정 신호는 이 알림뿐이다. 이 알림 뒤에 오는 다른 훅·텔레메트리는 모두 거둔다(noteTerminalBusy)
+    open.terminal.cliAtInput = true;
+    // 화면에 이미 권한·되묻기 표시가 걸려 있으면 입력 대기가 덮지 않는다
+    const shown = session.snapshot.terminalAttention;
+    if (shown && TERMINAL_ATTENTION_ALWAYS.has(shown.kind)) return;
   } else if (!TERMINAL_ATTENTION_ALWAYS.has(kind)) {
     // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
     return;
+  } else {
+    // 사람의 답을 기다리는 창이 열렸다. 표시와 따로 기록한다(재촉이 이 창에 Enter를 보내지 않게). 이미 열려 있으면 처음 시각을 지킨다
+    const open = openTerminalRun(session);
+    if (open) open.terminal.humanPromptAt ??= Date.now();
   }
   // 무엇을 묻는지는 PermissionRequest가 안다(도구와 대상, #942). 같은 권한 창을 몇 초 뒤 알리는 Notification의 일반 문구로 덮지 않는다
   if (input.hook_event_name === 'PermissionRequest') {
@@ -10174,14 +10312,24 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       return note;
     },
     prompt: (input) => {
+      noteTerminalBusy(id);
+      closeHumanPrompt(id);
       // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
       // 요청을 보냈으니 desk에 보이던 "쓰다 만 글"은 넘어갔다(promptSubmitted)
       noteSessionTerminalCli(id, true, { promptSubmitted: true });
       return terminalPromptSubmitted(id, input);
     },
-    preTool: (input) => terminalToolStarting(id, input),
-    stop: (input) => terminalTurnEnded(id, input),
+    preTool: (input) => {
+      noteTerminalBusy(id);
+      return terminalToolStarting(id, input);
+    },
+    stop: (input) => {
+      noteTerminalBusy(id);
+      closeHumanPrompt(id);
+      return terminalTurnEnded(id, input);
+    },
     sessionEnd: async (input) => {
+      noteTerminalBusy(id);
       // mod만 다시 불러오는 것(reload)은 CLI의 끝이 아니다. 새 mod의 session-start가 시간 안에 오는지 시계로 본다(설정이 reload 뒤 mod를 껐을 수 있다)
       if (input.reason === 'reload' && terminalCliKind(terminalSession(id)) === 'commandcode') {
         noteModReloading(id);
@@ -10190,15 +10338,26 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
     },
-    stopFailure: (input) => terminalTurnFailed(id, input),
+    stopFailure: (input) => {
+      noteTerminalBusy(id);
+      closeHumanPrompt(id);
+      return terminalTurnFailed(id, input);
+    },
     notification: async (input) => {
+      noteTerminalBusy(id);
       terminalNotification(id, input);
     },
-    activity: async (input) => terminalActivityHook(id, input),
+    activity: async (input) => {
+      noteTerminalBusy(id);
+      // 메인 에이전트의 도구 끝 훅만 창이 닫혔다는 사건이다(서브에이전트의 도구는 메인의 창을 닫지 않는다)
+      if ((input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') && !(typeof input.agent_id === 'string' && input.agent_id)) closeHumanPrompt(id, { settled: true });
+      return terminalActivityHook(id, input);
+    },
     statusline: async (input) => {
       noteStatusline((terminalSession(id).terminalActivity ??= newTerminalActivity()), input);
     },
     telemetry: async (body) => {
+      noteTerminalBusy(id);
       await terminalTelemetry(id, body);
     },
     conversation: (conversation) => noteTerminalConversation(id, conversation),
@@ -10206,7 +10365,10 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       const session = terminalSession(id);
       return [...gatewayToolSpecs(session.project), ...(session.terminalBoard?.specs ?? [])] as ReturnType<typeof gatewayToolSpecs>;
     },
-    runTool: (name, args) => runTerminalTool(id, name, args),
+    runTool: (name, args) => {
+      noteTerminalBusy(id);
+      return runTerminalTool(id, name, args);
+    },
   });
 }
 
