@@ -12762,3 +12762,86 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 ### 결과
 - 시험: Rust(`gate_declared.rs`) 라벨 세 개·모름 사유·알 수 없는 응답·치명적 응답·통과/환경 문제/알 수 없는 종료 코드에서 기준 안 돌림·판정 불변. TS(`test-baseline.test.ts`) 실제 `sh`로 작업 복사본 무변경·임시 폴더 정리·링크(파일·폴더)·`..`·절대 경로·인자 주입·표시 위조·126/127·시간 초과·취소, 체크포인트에서 기준 모으기. `gate.test.ts` 게이트 수준 세 라벨·모름 여섯 경우·통과한 시험은 안 읽음·판정 불변.
 - 재지 않은 것: 실제 도커 컨테이너 안에서의 복사 시간과 `cp -a`·`base64 -d`·`mktemp`(busybox·debian·alpine 이미지)의 동작, 큰 `node_modules`를 복사하는 시간, 실제 Gradle·Jest 시험, 실제 세션.
+
+
+## ADR-241 OpenCode 세션은 플러그인 파일의 훅으로 이 컴퓨터 방식 세션 터미널에서 돌리고(실험), 턴 끝을 막는 훅이 없어 게이트의 사유를 다음 요청으로 보내며, 설정에 다른 플러그인이 있으면 모든 도구를 막는다
+
+상태: 채택(실험, #1353의 한 갈래)
+관련: ADR-170(훅 관문), ADR-173(이 컴퓨터 방식), ADR-180(codex가 두 번째 갈래), ADR-200(지원 범위와 실험), ADR-214(StopFailure), ADR-219(감시), ADR-233(Command Code — 같은 일의 앞선 사례), 트러블슈팅 294~297
+
+### 맥락
+- 채팅식 경로를 지우려면(#1353) OpenCode 백엔드도 세션 터미널에서 돌아야 한다. 공통 단계(#1393)가 CLI 종류, 붙은 실행 판정(`hooked_launch`: OpenCode는 환경의 `OPENCODE_CONFIG`가 우리 설정 파일이고 `OPENCODE_PURE`·`--pure`가 없을 때), 읽기 도구 표, 관문 파일 이름(`b-studio-opencode-plugin.js`·`opencode.json`·`bin/opencode`)을 이미 넣었다. 이 ADR은 파일을 쓰고, 플러그인을 만들고, 열고 닫는 판정을 잇는다.
+- Command Code(ADR-233)와 가장 다른 점이 둘이다. ① 훅이 던지면 Command Code는 그 훅을 건너뛰지만(열리는 쪽으로 실패) OpenCode는 도구를 실행하지 않는다(아래 근거 2). 그래서 "모든 실패를 막는 쪽으로"가 던지기 하나로 된다. ② OpenCode에는 턴 끝을 막고 이어가게 하는 훅이 없다. 게이트의 실패를 CLI에 돌려보내는 길을 따로 정해야 했다.
+
+### 확인한 판과 근거
+설치된 판은 `opencode --version` 1.18.33이다(`~/.nvm/versions/node/v22.17.0/lib/node_modules/opencode-ai`, 실제 실행 파일은 `node_modules/opencode-darwin-arm64/bin/opencode`). Bun으로 묶은 실행 파일이라 JS 소스가 글자 그대로 들어 있어 `strings`로 읽었다(minify된 한 줄이라 줄 번호 대신 **함수·소식 이름**으로 가리킨다). 훅 타입은 설치된 `@opencode-ai/plugin` 1.18.33의 `dist/index.d.ts`(`~/.config/opencode/node_modules`, 읽기만 했다)와 `@opencode-ai/sdk`의 `types.gen.d.ts`다.
+**공식 문서(opencode.ai/docs/plugins·/docs/build/plugins·/docs/build/plugins/server)는 이 판과 다른 새 API(`Plugin.define`·`ctx.tool.hook("execute.before")`·`plugins` 배열)를 설명했고, 훅이 던졌을 때의 동작과 도구를 막는 방법은 적지 않았다**("문서가 말하지 않는다"). 그래서 설치된 판의 소스를 기준으로 했고, 설치된 판의 내장 안내(`customize-opencode` 스킬 글)와 `Plugin` 타입이 말하는 옛 꼴(`plugin` 배열, 함수 내보내기, `tool.execute.before`)을 썼다. 더 새 판에서 같은지는 보지 않았다.
+
+| # | 확인한 것 | 소스에서 읽은 자리 |
+|---|---|---|
+| 1 | 도구는 실행 **전에** `tool.execute.before`를 순서대로 기다리며 부르고, 그다음 `execute`한다. 같은 호출이 MCP 도구, MCP 자원 도구, 하위 에이전트(`task`) 호출, 코드 모드의 자식 도구에도 있다. 하위 에이전트의 도구 호출은 자기 세션 id로 같은 훅을 거친다 | `SessionTools.resolve`의 도구 래퍼(`i.trigger("tool.execute.before",{tool,sessionID,callID},{args}); k.execute(b,H)`), MCP 래퍼, `CodeMode.invokeChildTool` |
+| 2 | **훅이 던지면 그 도구는 실행되지 않는다.** `trigger`는 훅을 하나씩 `await`하고 거절을 삼키지 않는다. 던진 글이 모델의 도구 오류로 가는지, 화면에 어떻게 보이는지는 소스만으로 확정하지 못했다(실행하지 않았다) | `Plugin.trigger`(`for hook of hooks: yield* v.promise(async()=>M(K,U))`, `catch` 없음) |
+| 3 | 플러그인 모듈의 내보내기는 **모두 함수(또는 `{server}`)**여야 한다. 아니면 `Plugin export is not a function`으로 그 플러그인을 불러오지 않는다. 불러오지 못해도 OpenCode는 오류 소식만 내고 그대로 뜬다 | `Wy`·`Gy`, `Plugin.state`의 `failed to load plugin` |
+| 4 | 설정은 전역 `~/.config/opencode/{config.json,opencode.json,opencode.jsonc}` → `OPENCODE_CONFIG` → 작업 폴더에서 위로 찾은 `opencode.json(c)`(`OPENCODE_DISABLE_PROJECT_CONFIG`가 없을 때) → `.opencode` 폴더·`OPENCODE_CONFIG_DIR`의 `opencode.json(c)`와 `plugin/`·`plugins/`의 `*.ts`·`*.js` → `OPENCODE_CONFIG_CONTENT` → 활성 조직 설정·원격 설정 → 관리형 설정 순으로 읽고 **`plugin` 목록을 이어 붙인다**(`deduplicatePluginOrigins`). 뒤에 붙은 플러그인의 훅이 뒤에 돈다 | `Config.loadInstanceState` |
+| 5 | **`$schema`가 없는 설정 파일은 OpenCode가 다시 쓴다.** 우리 설정 파일에 `$schema`가 있어야 관문 파일 감시가 OpenCode 때문에 변조로 잡히지 않는다 | 설정 읽기 함수 `F`(`if(!b.$schema){… writeFileString(X.path,v)}`) |
+| 6 | 플러그인이 모두 불러와진 뒤 각 플러그인의 `config(합친 설정)` 훅이 한 번 불린다(던져도 무시). 합친 설정에 `plugin`(이름 목록)과 `plugin_origins`가 있다 | `Plugin.state`(`N.config?.(w)`), `Config.loadInstanceState`(`B.plugin`·`B.plugin_origins`) |
+| 7 | `event` 훅은 기다려 주지 않고(`V.event?.(…)`) 그 인스턴스의 소식만 받는다. 세션이 쉬면 `session.status(idle)`와 `session.idle`이 나간다. 사람이 중단하면 `session.error`(`MessageAbortedError`)가 먼저 온다 | `Plugin.state`의 `$.listen`, `SessionStatus.set`, SDK `EventSessionError` |
+| 8 | 요청은 저장되기 **전에** `chat.message`를 거친다(`parts`를 고칠 수 있고, 던지면 저장되지 않는다). 훅이 보내는 `client`는 같은 프로세스의 SDK(`session.promptAsync` → `POST /session/{id}/prompt_async`, `session.get`, `tui.showToast`)다 | `createUserMessage`의 `d.trigger("chat.message")`, `Plugin.state`의 `client`, SDK `SessionPromptAsyncData` |
+| 9 | 파일 도구: `edit` {filePath, oldString, newString, replaceAll?}, `write` {filePath, content}, `apply_patch` {patchText}. 경로 열쇠는 `filePath` 하나이고 별칭이 없다. 상대 경로는 작업 폴더에 붙고 `~`는 펴지 않는다. 이름 목록에서 gpt-* 모델(`oss`·`gpt-4` 제외)에는 `apply_patch`만, 그 밖에는 `edit`·`write`를 준다. 이 판에서 `multiedit`·`patch`·`list`·`codesearch`·`todoread`의 도구 정의는 찾지 못했다(공통 단계의 표에는 남아 있고 그대로 둔다) | 도구 정의 `ls`(edit)·`en`(write)·`ln`(apply_patch), `ToolRegistry.tools` |
+| 10 | 패치 파서는 줄 머리가 `*** Add File:`·`*** Delete File:`·`*** Update File:`(바로 뒤의 `*** Move to:`)인 줄에서 경로를 `trim()`해 읽고, 그 밖의 `***` 줄은 건너뛴다. 우리 읽기(`strictPatchPaths`)는 들여쓴 머리글도 읽고 모르는 `***` 줄이면 null이라 OpenCode가 바꾸는 파일을 놓치지 않는다 | `parsePatch`(`sr`), `pn`·`wn` |
+| 11 | 환경·인자: `OPENCODE_CONFIG`·`OPENCODE_CONFIG_CONTENT`·`OPENCODE_CONFIG_DIR`·`OPENCODE_TUI_CONFIG`·`OPENCODE_PURE`·`OPENCODE_DISABLE_PROJECT_CONFIG`·`OPENCODE_PERMISSION`. `--pure`는 시작 뒤에 `OPENCODE_PURE`를 정한다(환경으로는 안 보이고 인자로 본다). `attach <url>`은 실행 중인 서버에 붙는 클라이언트다(도구가 다른 프로세스에서 돈다). TUI 설정(`tui.json(c)`)도 `plugin` 목록을 따로 가진다 | 전역 옵션 정의, `attach` 명령 정의, `TuiConfig.loadState` |
+| 12 | 권한 확인을 건너뛰는 인자(`opencode run`의 `--dangerously-skip-permissions` 등)와 모델 고르기(`-m`·`--model`)는 쓰지 않는다. 기본 권한은 사람이 답한다 | 감싸개가 붙이지 않는다(시험) |
+
+### 선택지
+- 훅을 붙이는 길: (a) `OPENCODE_CONFIG`가 가리키는 우리 설정 파일의 `plugin`에 플러그인을 적는다. (b) `OPENCODE_CONFIG_CONTENT`에 설정을 실어 보낸다. (c) 작업 폴더의 `.opencode/plugins/`에 플러그인을 쓴다. (c)는 작업 복사본에 파일이 생겨 게이트의 변경에 섞이고 에이전트가 고칠 수 있다. (b)는 플러그인 목록이 환경 변수에만 있어 관문 파일 감시·복구의 대상이 되지 못하고, 사용자의 셸 시작 파일이 같은 변수를 먼저 정해도 알 수 없다. **(a).** 설정 파일은 관문 폴더에 있어 변조 감시와 복구 대상이다.
+- 플러그인이 관문을 부르는 방식: Command Code와 같다. node 내장 `http`로 훅 서버를 직접 부르고, 주소와 토큰은 관문 폴더의 주소 파일에서 부를 때마다 읽는다(폴더는 감싸개가 `B_STUDIO_GATEWAY_DIR`로 알린다). 응답은 허용 목록으로 읽는다. 훅 스크립트는 터미널을 열기 전 닿는지 확인(`ping`)에만 쓴다.
+- **턴 끝(OpenCode에 막는 훅이 없다)**: (a) `session.idle` 소식에서 `/stop`을 부르고, 실패하면 사유를 같은 세션의 **다음 요청**(`client.session.promptAsync`)으로 보낸다. (b) 사유를 시스템 프롬프트나 다음 사용자 요청에 덧붙여 두기만 한다(턴이 이어지지 않는다). (c) 게이트를 돌리지 않고 실패를 "모름"으로 처리한다. **(a)**, 보내지 못하면 (c)로 떨어진다.
+- 설정이 플러그인을 더하는 길(결정 6): 띄우기 전 검사만으로는 원격·조직 설정과 띄운 뒤의 변경을 못 본다. 그래서 플러그인 자신이 `config` 훅에서 합친 설정을 보고 확인하는 방식을 마지막 방어선으로 둔다.
+
+### 결정
+1. 이 컴퓨터 방식이고 `B_STUDIO_EXPERIMENTAL`이 켜졌을 때만 열린다(`openCodeTerminalReason`). 컨테이너 방식이나 스위치가 꺼진 서버에서 OpenCode 세션의 터미널을 열면 claude를 대신 띄우지 않고 까닭을 적어 409로 거절한다. 세션 만들기(`routed-session.ts`)와 Fleet·작업 분해·AI 리뷰 고침이 쓰는 `isTerminalRunnableBackend`도 같은 판정이다.
+2. 관문 폴더에 `b-studio-opencode-plugin.js`(의존성 없는 한 파일, node 내장만, **내보내기는 기본 함수 하나뿐**), `opencode.json`(`$schema`와 플러그인 하나의 file URL), 주소 파일, 핑용 훅 스크립트, `bin/opencode` 감싸개를 쓴다. 감싸개는 `export B_STUDIO_GATEWAY_DIR=…`, `unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE`, `export OPENCODE_CONFIG=<관문 폴더>/opencode.json`, `exec <opencode 경로> "$@"`다. 모델·권한 인자는 붙이지 않는다. 계정은 기본만 쓴다(다른 계정을 고른 세션은 409). 모델이 넘어오면 `openHostTerminal`이 거절한다.
+3. 감시는 후보(패키지 자리 `/opencode-ai/`나 이름 `opencode`)마다 **진짜 argv와 환경**을 읽어 `hooked_launch('opencode', argv, env, <우리 설정 경로>)`로 본다: 환경의 `OPENCODE_CONFIG`가 우리 파일과 같은 글(같은 이름이 여럿이면 모두), `OPENCODE_PURE`·`OPENCODE_CONFIG_CONTENT`·`OPENCODE_CONFIG_DIR`·`OPENCODE_TUI_CONFIG`가 없고(값이 비었어도), `--pure`가 없고, 첫 위치 인자가 `attach`가 아니다. 환경을 읽지 못하면 붙지 않은 것이다(끝난 프로세스만 건너뛴다). 뒤의 세 변수와 `attach`는 이 ADR이 더했다.
+4. 플러그인의 훅(허용 목록으로 읽고, 정상 경로가 아니면 던진다):
+
+| 훅 | 부르는 곳 | 실패하면 |
+|---|---|---|
+| `config` | (설정 확인) | 합친 설정의 `plugin`·`plugin_origins`가 **우리 플러그인뿐**이면 `/session-start`를 보낸다. 다른 이름이 하나라도 있거나 읽을 수 없으면 신호를 보내지 않고 이후 모든 도구·요청을 막는다. 확인이 돌기 전에도 막는다 |
+| `tool.execute.before` | `/pre-tool`(모든 도구를 묻는다. 읽기 도구는 서버의 표가 거른다) | 닿지 못함·HTTP 오류·JSON 아님·모르는 필드·`deny` 아닌 결정·직렬화 실패·훅 인자 이상·시간 초과 모두 **던진다**. 서버가 거절하면 그 사유로 던진다 |
+| `tool.execute.after` | `/activity`(PostToolUse) | 지켜보기만 한다. 기다리지 않고 던지지 않는다. 도구 출력은 보내지 않는다 |
+| `chat.message` | `/prompt`(UserPromptSubmit) | 닿지 못함·이상한 응답·시간 초과면 던진다(요청이 저장되지 않는다). 서버가 막으면 그 글로 던진다. 맥락 글이 오면 요청 글 뒤에 덧붙인다. **우리가 보낸 돌려보내기 글(10분 안에 한 번)과 하위 에이전트 세션의 요청, 사용자의 글이 없는 요청(자동으로 끼운 글뿐)은 거치지 않는다**(실행은 첫 쓰기 직전 훅이 연다) |
+| `event` `session.idle` | `/stop`(Stop) | 아래 결정 5. 이 처리가 예상 밖의 오류로 끝나도 통과로 읽지 않고 `stop-failure`(`stop_unverified`)로 알린다 |
+| `event` `session.error` | `/stop-failure`(StopFailure) | 중단(`MessageAbortedError`)은 알리지 않는다. 그 밖의 오류로 끝난 턴은 게이트 없이 `run_end:error:<이름>`으로 알려 실패로 닫고 되돌린다 |
+| `dispose`·`server.instance.disposed` | `/session-end`(`reason: dispose`) | 알리기만 한다. 서버는 CLI 표시만 내리고 **열린 실행을 닫지 않는다**(결정 7) |
+| `experimental.chat.system.transform` | — | 고정된 안내 글(커밋하지 않음, 설정을 바꾸지 않음 등) |
+
+5. **턴 끝.** `session.idle`은 기다려 주지 않는 소식이다. 플러그인이 루트 세션(`parentID`가 없다. 모르면 `session.get`으로 묻고, 그래도 모르면 루트로 본다 — 게이트를 건너뛰는 쪽으로 틀리지 않는다)의 끝에서 `/stop`을 부른다. 사유가 오면 `client.session.promptAsync`로 같은 세션의 다음 요청으로 보낸다(그 요청이 `chat.message`로 돌아오면 사용자의 새 요청으로 알리지 않는다: 한 번만 건너뛴다). 이어가기는 8번까지다(Command Code와 같다). 서버가 3번째 실패에서 피드백 대신 실패로 닫으므로 3번에서 끝난다. 처리 못 하는 길은 모두 통과가 아니다:
+   - 사유를 보내지 못함(응답 오류·던짐·`client` 없음) → `stop-failure`(`stop_feedback_not_delivered`)로 실패로 닫고 되돌린다.
+   - `/stop`에 닿지 못함·이상한 응답 → 한 번은 "검증하지 못했습니다"를 다음 요청으로 보내 다시 끝내게 하고, 연달아 닿지 못하면 알림을 내고 `stop-failure`(`stop_unverified`)를 시도한다. 체크포인트는 어느 쪽이든 생기지 않는다.
+   - 8번을 넘음 → `stop-failure`(`stop_gate_not_passed`).
+6. **설정이 플러그인을 더하는 길(세 겹, 모두 닫히는 쪽).**
+   - **띄우기 전 검사**(`openCodeConfigRefusal`, 이 컴퓨터 방식 백엔드의 `preflight`): 전역 설정 폴더(`XDG_CONFIG_HOME` 또는 `~/.config/opencode`), `~/.opencode`, 작업 폴더와 그 위 모든 폴더(파일 시스템 루트까지)의 `opencode.json(c)`·`tui.json(c)`·`.opencode` 폴더, 관리형 설정 폴더(`/Library/Application Support/opencode`·`/etc/opencode`)를 읽는다. 읽지 못함·JSON(주석·끝의 쉼표는 받는다)이 아님·`{file:…}`로 다른 파일을 끼워 넣음·`plugin`이 목록이 아니거나 비어 있지 않음·`plugin/`·`plugins/` 폴더에 점으로 시작하지 않는 항목이 있음·옛 전역 설정 `config`가 있음이면 관문도 터미널도 만들지 않고 409로 거절한다.
+   - **설정 쓰기 막기**(`terminalOpenCodeDeny`): `edit`·`write`·`multiedit`·`apply_patch`·`patch`의 대상이 OpenCode의 설정·플러그인 자리(경로에 `.opencode` 칸, 이름이 `opencode.json(c)`·`tui.json(c)`, 전역 설정 폴더 아래)면 **카드 유무와 상관없이** 막는다. 거부 목록이라 넓게 맞춘다(대소문자·전각·보이지 않는 글자·끝의 점·`..`를 풀기 전후 둘 다·링크를 푼 실제 경로·이미 있는 조상의 inode). 파일 도구인데 바꿀 파일을 알 수 없으면(모르는 열쇠, 읽을 수 없는 패치) 막는다. `edit`·`write`는 입력의 모든 열쇠가 도구 정의(결정 근거 9)에 있을 때만 경로를 꺼내고, 모르는 열쇠가 있으면 null이다.
+   - **플러그인의 설정 확인과 신호 시계**: 위 결정 4의 `config` 훅이 원격·조직 설정·띄운 뒤의 변경까지 합친 설정으로 확인한다. 신호(`/session-start`)가 터미널을 연 뒤 90초(`B_STUDIO_OPENCODE_MOD_TIMEOUT_MS`로 낮출 수만 있다) 안에 오지 않으면 플러그인이 없거나 다른 플러그인이 있는 채로 뜬 것으로 보고 감시가 찾은 위반과 같은 길(`onViolation`: 열린 실행은 실패로 닫고 되돌림)로 처리한 뒤 터미널을 닫는다. 시계는 Command Code의 것(`session-terminal-mod.ts`)을 CLI 이름만 달리해 쓴다.
+7. **끝 알림(`dispose`)은 열린 실행을 닫지 않는다.** `dispose`는 CLI가 끝날 때와 설정을 다시 읽어 인스턴스를 다시 만들 때(플러그인이 새로 뜬다) 똑같이 불릴 것으로 보인다. 둘을 가를 수 없는데, 틀리게 "CLI가 끝났다"로 읽으면 열린 실행이 닫히며 지금까지의 변경이 되돌려진다. 그래서 서버는 `reason: dispose`에 CLI 표시만 내리고 실행은 닫지 않는다. 다시 뜬 플러그인의 `/session-start`가 표시를 올린다. CLI를 끝내도 열린 실행이 남고 다음 요청이 이어 받는 것은 Claude Code 터미널에서 사람이 중단했을 때와 같은 모양이다.
+8. **OpenCode가 일하는 폴더**(`opencode <프로젝트 경로>`·`--dir`)가 세션의 작업 복사본이 아니면 쓰기 도구를 막는다(`terminalOpenCodeCwdDeny`): 플러그인이 훅 입력의 `cwd`(플러그인이 받은 `directory`)를 보내고, 서버가 링크를 푼 실제 경로로 작업 복사본과 견준다. 폴더가 없거나 읽을 수 없어도 막는다. 읽기 도구는 거치지 않는다. 관문의 응답은 4MB, 설정 파일은 1MB를 읽기 전에 센다(넘으면 이상한 응답·거절).
+9. 쓰기 직전 판정이 읽기 도구를 그 CLI의 표로 읽는다(공통 단계의 `isReadToolFor`). 1.18.33에서 `read`·`glob`·`grep`·`webfetch`·`websearch`·`todowrite`·`question`은 읽기이고, `skill`·`lsp`·`plan_exit`·`invalid`·`task`·`bash`·MCP 도구는 바꾸는 도구로 본다(모르는 이름은 바꾸는 도구다). 서브에이전트(`task`) 안의 도구 호출은 자기 세션 id로 같은 훅을 거치므로 Command Code처럼 `task`를 "바꾸는 파일을 알 수 없음"으로 막지 않는다(소스로 본 것, 실행으로 확인하지 않았다).
+
+### 하지 않는 것·남는 위험
+- **실제 OpenCode를 한 번도 띄우지 않았다.** 이 컴퓨터는 `/dev` 목록 읽기가 멈춰 PTY를 열면 멈추고, 로그인한 제공자도 없다. 아래는 모두 소스를 읽은 것이거나 가짜 훅 호출로 본 것이다: 훅이 던지면 도구가 실행되지 않는다는 것과 그 글이 모델·화면에 어떻게 닿는지, `config` 훅이 받는 설정이 정말 `plugin`·`plugin_origins`를 싣는지, `session.idle`이 오는 때와 `promptAsync`가 턴을 실제로 이어 가는지(같은 세션이 아직 바쁘면 거절될 수 있다), `OPENCODE_CONFIG`의 `file://` 플러그인이 불러와지는지, 환경을 읽어 붙은 것으로 보는 판정(macOS), `chat.message`가 던졌을 때 TUI가 보이는 모양, 하위 에이전트의 세션이 정말 `parentID`를 갖는지, 첫 요청(`--prompt`)이 `chat.message`를 지나는지. 실제 환경에서 돌린 기록이 생기기 전에는 `docs/status.md`를 고치지 않는다.
+- 훅 밖의 길: 사람이 TUI에서 `!`로 치는 셸 명령과 사용자 정의 명령의 셸 치환은 도구 훅을 거치지 않는다(사람이 시킨 일이다). 에이전트가 셸로 `.opencode`·설정을 쓰는 것은 쓰기 직전에 막지 못한다. 설정은 OpenCode가 뜰 때 읽으므로 그 뒤의 변경은 다시 띄운 CLI의 플러그인 설정 확인(다른 플러그인이 있으면 모든 도구를 막고 신호를 보내지 않는다)과 다음 열기의 띄우기 전 검사가 잡는다. 다만 다시 띄운 CLI에는 신호 시계가 걸리지 않는다(ADR-233의 틈 ②와 같다). 그 CLI에서는 도구가 모두 막혀 쓰기는 일어나지 않지만, 다른 플러그인의 `event`·`config` 훅이 도는 것은 막지 못한다.
+- 플러그인의 설정 확인은 `plugin`·`plugin_origins`를 읽는 것이라, 설정이 플러그인이 아닌 길(예: 설정의 `experimental` 훅 명령)로 코드를 돌리는 것은 보지 않는다. 그 설정도 같은 파일들에 있어 띄우기 전 검사가 `plugin` 말고는 보지 않는다는 점이 한계다.
+- 원격 설정·조직 설정이 추가한 플러그인은 띄우기 전 검사가 못 본다. 플러그인의 설정 확인이 잡는다.
+- 토큰을 가진 쪽이 `/session-start`를 직접 보내면 시계를 속인다(ADR-233 틈 ③과 같다).
+- 사용량(텔레메트리)을 보내지 않아 토큰 한도·턴 상한은 이 CLI에서 걸리지 않는다(Codex·Command Code와 같다).
+- `dispose` 알림을 CLI의 끝으로 읽지 않으므로 OpenCode를 끝내도 열린 실행이 닫히지 않는다(결정 7).
+- 서버가 사유를 다음 요청으로 보내므로 모델이 그 요청을 사용자의 새 요청처럼 받는다(앞머리 `[b-studio 검증 게이트]`로 구분한다). Claude Code의 훅이 같은 턴 안에서 이어 가게 하는 것과 이력의 모양이 다르다.
+- OpenCode가 자기 파일을 작업 폴더에 쓰는지(스냅샷·`.opencode/` 폴더 만들기)는 보지 않았다. 쓰면 Command Code의 `.commandcode/taste`처럼 턴 끝의 변경에 잡히고, `.opencode`는 쓰기 막기에 걸리는 이름이라 에이전트가 만든 것인지 CLI가 만든 것인지 구분되지 않는다.
+- `OPENCODE_DISABLE_PROJECT_CONFIG`·`OPENCODE_PERMISSION`은 지우지 않는다(플러그인을 더하지 못한다).
+- 사용자가 셸 시작 파일로 `OPENCODE_CONFIG`를 정해 두었으면 감싸개가 덮어써서 그 파일의 설정(공급자 등)이 빠진다. 전역 설정 폴더(`~/.config/opencode`)의 설정은 그대로 읽힌다.
+- `opencode run`·`serve`·`web`처럼 인자로 부르는 다른 서브명령은 감싸개를 거치면 같은 설정으로 뜨고 감시도 붙은 것으로 본다(막는 것은 `attach`뿐이다). 이 서브명령들의 훅 동작은 보지 않았다.
+- 감시가 환경을 읽을 수 없는 운영체제(Windows)와 리눅스는 시험하지 않았다.
+
+### 결과
+- 시험(임시 폴더·가짜 훅 호출·로컬 훅 서버만, 모델 호출 없음, 실제 opencode 없음): 플러그인 단위 58개(`opencode-plugin.test.ts`: 내보내기 하나·훅 이름, 설정 확인 다섯 경우, 도구 막기 모든 실패 경로와 열린 서버 대조, 요청 받기, 하위 에이전트 건너뛰기, 턴 끝 통과·돌려보내기·보내지 못함·닿지 못함·8번 상한·중단·오류·하위 에이전트, 소식 훅이 던지지 않음), 설정 읽기·쓰기 막기 46개(`opencode-config.test.ts`), 진짜 플러그인 → 진짜 훅 서버 → 진짜 판정 17개(`sessions-terminal-opencode.test.ts`), 감싸개를 진짜 셸로 돌려 환경·인자(`host-terminal.test.ts`), 감시 판정(`host-terminal.test.ts`·`watch_tests.rs`), 허용 판정·계정·시계·띄우기 전 검사(`session-terminal.test.ts`), 경로 추출(`session-terminal-tool-paths.test.ts`), 세션 만들기(`routed-session-terminal.test.ts`).
+- 변이 결과는 PR 설명에 적는다.

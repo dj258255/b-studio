@@ -790,8 +790,34 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(isTerminalRunnableBackend('commandcode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
     expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
     expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
-    // 다른 새 갈래는 열지 않는다
-    for (const backend of ['opencode', 'gemini']) expect(isTerminalRunnableBackend(backend, { ...host, ...on }), backend).toBe(false);
+    // 아직 열지 않는 새 갈래
+    expect(isTerminalRunnableBackend('gemini', { ...host, ...on })).toBe(false);
+  });
+
+  it('opencode도 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 터미널로 돌릴 수 있다. 컨테이너 방식이면 스위치가 켜져도 거절한다(ADR-241)', () => {
+    const on = { B_STUDIO_EXPERIMENTAL: '1' };
+    expect(isTerminalRunnableBackend('opencode', host)).toBe(false);
+    expect(isTerminalRunnableBackend('opencode', { ...host, ...on })).toBe(true);
+    expect(isTerminalRunnableBackend('opencode', { ...container, ...on })).toBe(false);
+    expect(isTerminalRunnableBackend('opencode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
+    expect(reviewFixRunner({ allowed: true, backend: 'opencode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
+    expect(reviewFixRunner({ allowed: true, backend: 'opencode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
+    expect(reviewFixRunner({ allowed: true, backend: 'opencode', apiKeyReady: true }, host)).toBe('chat');
+  });
+
+  it('opencode 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {
+    const address2: AgentGatewayAddress = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
+    // 거절하지 않고 준비까지 가더라도 관문 폴더는 임시 폴더에만 쓴다(이 시험은 PTY를 열지 않는다)
+    const tmp = await mkdtemp(path.join(tmpdir(), 'b-studio-ocacct-'));
+    const saved = process.env.B_STUDIO_AGENT_GATEWAY_DIR;
+    process.env.B_STUDIO_AGENT_GATEWAY_DIR = tmp;
+    try {
+      await expect(terminalBackend('host').prepare({ ...target, cli: 'opencode', accountDir: async () => '/home/kim/.opencode-2' }, address2)).rejects.toThrow('기본 계정');
+    } finally {
+      if (saved === undefined) delete process.env.B_STUDIO_AGENT_GATEWAY_DIR;
+      else process.env.B_STUDIO_AGENT_GATEWAY_DIR = saved;
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 
   it('commandcode 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {
@@ -843,5 +869,124 @@ describe('컨테이너 터미널의 첫 요청과 사용자별 홈 (#1401)', () 
     expect(() => terminalHomeUser('token', undefined)).toThrow('세션 주인');
     expect(() => terminalHomeUser('token', '')).toThrow('세션 주인');
     expect(terminalHomeUser('none', undefined)).toBeUndefined();
+  });
+});
+
+describe('OpenCode 터미널: 플러그인이 불러와졌다는 신호를 기다린다(ADR-241)', () => {
+  const savedEnv = { timeout: process.env.B_STUDIO_OPENCODE_MOD_TIMEOUT_MS };
+  const ocTarget = { ...target, cli: 'opencode' as const };
+  afterEach(() => {
+    if (savedEnv.timeout === undefined) delete process.env.B_STUDIO_OPENCODE_MOD_TIMEOUT_MS;
+    else process.env.B_STUDIO_OPENCODE_MOD_TIMEOUT_MS = savedEnv.timeout;
+  });
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('session-start가 시간 안에 오지 않으면 플러그인 없이 뜬 것으로 본다: 경고를 보내고, 위반으로 알리고, 터미널을 닫는다. 사유는 OpenCode의 플러그인을 말한다', async () => {
+    process.env.B_STUDIO_OPENCODE_MOD_TIMEOUT_MS = '40';
+    const { backend, record } = fakeBackend();
+    const messages: TerminalMessage[] = [];
+    const violations: string[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await openSessionTerminal(id, { ...ocTarget, onViolation: (reason) => violations.push(reason) }, {}, backend);
+    expect(record.terminals[0]!.closed).toBe(false);
+    await wait(150);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('OpenCode');
+    expect(violations[0]).toContain('플러그인');
+    expect(violations[0]).toContain('session-start');
+    expect(violations[0]).not.toMatch(/ADR|mod/);
+    expect(messages.some((message) => message.kind === 'warning' && message.message.includes('session-start'))).toBe(true);
+    expect(record.terminals[0]!.closed).toBe(true);
+    await disposeSessionTerminal(id, ocTarget.sandboxId, backend);
+  });
+
+  it('session-start가 시간 안에 오면 아무 일도 없다(대조). Command Code의 시험 환경 변수는 OpenCode의 시계를 바꾸지 않는다', async () => {
+    process.env.B_STUDIO_OPENCODE_MOD_TIMEOUT_MS = '60';
+    const savedCc = process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS;
+    process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS = '1';
+    try {
+      const { backend, record } = fakeBackend();
+      const violations: string[] = [];
+      await openSessionTerminal(id, { ...ocTarget, onViolation: (reason) => violations.push(reason) }, {}, backend);
+      await wait(20);
+      noteModStarted(id);
+      await wait(150);
+      expect(violations).toEqual([]);
+      expect(record.terminals[0]!.closed).toBe(false);
+      await disposeSessionTerminal(id, ocTarget.sandboxId, backend);
+    } finally {
+      if (savedCc === undefined) delete process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS;
+      else process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS = savedCc;
+    }
+  });
+});
+
+describe('OpenCode 터미널: 띄우기 전에 설정이 다른 플러그인을 붙이는지 본다(ADR-241)', () => {
+  const dirs: string[] = [];
+  const savedHome = process.env.HOME;
+  const savedXdg = process.env.XDG_CONFIG_HOME;
+  afterEach(async () => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    if (savedXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdg;
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function fixture(): Promise<{ home: string; work: string }> {
+    const base = await mkdtemp(path.join(tmpdir(), 'b-studio-ocpre-'));
+    dirs.push(base);
+    const home = path.join(base, 'home');
+    const work = path.join(base, 'work');
+    await mkdir(home, { recursive: true });
+    await mkdir(work, { recursive: true });
+    process.env.HOME = home;
+    delete process.env.XDG_CONFIG_HOME;
+    return { home, work };
+  }
+
+  /** 진짜 이 컴퓨터 방식의 띄우기 전 검사만 쓰고 나머지는 가짜 백엔드다: 이 시험은 PTY도 CLI도 띄우지 않는다 */
+  const withRealPreflight = () => {
+    const fake = fakeBackend();
+    return { ...fake, backend: { ...fake.backend, preflight: terminalBackend('host').preflight } as TerminalBackend };
+  };
+
+  it('작업 폴더의 설정이 플러그인을 더하면 409로 거절하고 터미널도 관문도 만들지 않는다', async () => {
+    const { work } = await fixture();
+    await writeFile(path.join(work, 'opencode.json'), JSON.stringify({ plugin: ['opencode-evil@1.0.0'] }));
+    const { backend, record } = withRealPreflight();
+    let gatewayCalls = 0;
+    await expect(
+      openSessionTerminal(id, { ...target, root: work, cli: 'opencode', gateway: async () => { gatewayCalls += 1; return address; } }, {}, backend),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('다른 플러그인') });
+    expect(gatewayCalls).toBe(0);
+    expect(record.terminals).toEqual([]);
+    expect(sessionTerminalPresence(id)?.cliAlive ?? false).toBe(false);
+  });
+
+  it('.opencode/plugins에 파일이 있어도, 설정을 읽지 못해도 409다. 한국어 사유에 ADR 번호는 없다', async () => {
+    const { work } = await fixture();
+    await mkdir(path.join(work, '.opencode/plugins'), { recursive: true });
+    await writeFile(path.join(work, '.opencode/plugins/x.js'), 'export default async () => ({})');
+    const { backend, record } = withRealPreflight();
+    const refused = await openSessionTerminal(id, { ...target, root: work, cli: 'opencode' }, {}, backend).catch((error: unknown) => error as { status: number; message: string });
+    expect(refused).toMatchObject({ status: 409 });
+    expect((refused as { message: string }).message).toContain('플러그인');
+    expect((refused as { message: string }).message).not.toMatch(/ADR/);
+    await rm(path.join(work, '.opencode'), { recursive: true, force: true });
+    await writeFile(path.join(work, 'opencode.jsonc'), '{ not json');
+    const unreadable = await openSessionTerminal(`${id}-b`, { ...target, root: work, cli: 'opencode' }, {}, backend).catch((error: unknown) => error as { status: number });
+    expect(unreadable).toMatchObject({ status: 409 });
+    expect(record.terminals).toEqual([]);
+  });
+
+  it('claude·commandcode 터미널은 이 검사를 받지 않는다. 설정이 깨끗하면 opencode도 통과한다', async () => {
+    const { work } = await fixture();
+    await writeFile(path.join(work, 'opencode.json'), JSON.stringify({ plugin: ['opencode-evil@1.0.0'] }));
+    const host = terminalBackend('host');
+    expect(await host.preflight!({ ...target, root: work, cli: 'claude' })).toBeUndefined();
+    expect(await host.preflight!({ ...target, root: work, cli: 'opencode' })).toContain('다른 플러그인');
+    await writeFile(path.join(work, 'opencode.json'), JSON.stringify({ model: 'a/b' }));
+    expect(await host.preflight!({ ...target, root: work, cli: 'opencode' })).toBeUndefined();
   });
 });
