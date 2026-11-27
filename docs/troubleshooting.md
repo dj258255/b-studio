@@ -8370,3 +8370,19 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
   2. 옮긴 곳이 시험 파일인지 보는 판정을 지운 시험을 찾는 넓은 판정과 같게 쓰면, `tests/helper.ts`·`A.TEST.TS`처럼 실행기가 집지 않는 이름으로 옮겨도 "시험 파일 사이의 이동"이 되어 통과한다(막는 검사를 여는 쪽에 넓은 맞춤을 쓴 것). 도착지는 실행기가 이름으로 집는 좁은 판정(`is_runner_test_path`)으로 본다.
   3. 작업 폴더의 `.gitattributes`에 `*.test.ts -diff`를 두면 git이 패치를 "이진 파일"로만 보여 더해진 줄이 비었다. `git diff --text`로 읽는다.
 - 임시 인덱스에 `add`를 하면 새 객체가 진짜 저장소에 남고 읽기 전용 `.git`에서는 실패하므로, 새 객체는 임시 폴더에만 쓴다(`GIT_OBJECT_DIRECTORY`). 시험은 전후의 `git count-objects`가 같은지 본다.
+
+## 291. skip-worktree·assume-unchanged 표시를 건 파일을 고치거나 지워도 바뀐 파일 목록과 체크포인트가 보지 못했음
+
+### 증상
+
+- 에이전트가 셸에서 `git update-index --skip-worktree`(또는 `--assume-unchanged`)를 건 뒤 파일을 고치거나 지우면 `pendingFiles`·`pendingChanges`는 빈 목록을, `commit`은 "바뀐 파일 없음"으로 체크포인트 없음을 돌려줬다. 게이트의 `ChangeTracker`가 `pendingFiles`를 읽으므로 보호 경로 확인·검증 대상 고르기도 그 파일을 못 봤는데, 게이트가 시험을 돌리는 작업 복사본에는 변경이 있었다.
+
+### 원인
+
+- `git status`·`git add -A`는 표시가 걸린 경로의 작업 폴더를 읽지 않는다. 확인하는 쪽(바뀐 파일 목록·체크포인트)과 실제로 동작하는 쪽(작업 복사본)이 다른 것을 봤다. ADR-234의 시험 약화 검사는 임시 인덱스로 이미 우회했지만(트러블슈팅 289) 나머지 경로는 진짜 인덱스를 썼다. #1443이 `index-flag-bypass.test.ts`로 현재 동작을 시험으로 고정했다.
+
+### 해결
+
+- 표시가 걸린 경로의 내용이 HEAD와 다르면 목록·커밋이 "확인하지 못함"으로 던진다(ADR-236). 사용자의 인덱스는 고치지 않는다. 표시만 걸고 고치지 않은 파일, sparse-checkout으로 작업 폴더에서 빠진 skip-worktree 파일은 막지 않는다.
+- 고치기 전에는 `index-flag-bypass.test.ts`의 새 기대값 6건(두 표시 × 목록·커밋 4건, sparse 안에서 고친 것·assume-unchanged를 지운 것 2건)이 실패했다. 변이 결과는 PR 설명에 적는다.
+- 남은 틈: sparse-checkout 저장소에서 sparse 범위 안의 skip-worktree 파일을 지우는 것, 검사와 커밋 사이에 표시를 거는 경합.

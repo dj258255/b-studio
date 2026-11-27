@@ -10,10 +10,9 @@ vi.setConfig({ testTimeout: 30_000 });
 const execFileAsync = promisify(execFile);
 
 /**
- * 이슈 #1436 보강 점검(고치지 않고 확인만 한다): 에이전트가 셸에서 진짜 인덱스에 건 `skip-worktree`·`assume-unchanged` 표시를
- * 기존 체크포인트 코드(pendingFiles·pendingChanges·commit)가 어떻게 읽는지 본다. 이 시험이 적은 기대값은 **지금 코드의 동작**이다 —
- * 표시를 건 파일의 변경을 이 함수들이 보지 못하면 게이트의 바뀐 파일 목록(ChangeTracker)과 보호 경로 확인도 그 파일을 보지 못한다.
- * 기대값이 바뀌면(고치면) 이 시험을 뒤집는다.
+ * 이슈 #1444: 에이전트가 셸에서 진짜 인덱스에 건 `skip-worktree`·`assume-unchanged` 표시는 git status·add가 그 파일을 읽지 않게 만든다.
+ * 표시를 건 파일의 변경을 못 본 채 빈 목록·체크포인트 없음으로 답하면 게이트의 바뀐 파일 목록과 보호 경로 확인이 그 파일을 놓친다.
+ * 그래서 pendingFiles·pendingChanges·commit은 표시를 건 경로의 변경을 보면 \"확인하지 못함\"으로 던진다(사용자 인덱스는 고치지 않는다).
  */
 let root: string;
 const saved = { global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM };
@@ -48,21 +47,64 @@ describe.each(['--skip-worktree', '--assume-unchanged'])('인덱스 표시 %s를
     return store;
   }
 
-  it('pendingFiles·pendingChanges는 표시를 건 파일의 변경·삭제를 보지 못한다', async () => {
+  it('pendingFiles·pendingChanges는 표시를 건 파일의 변경·삭제를 못 본 채 비어 돌려주지 않고 던진다(확인하지 못함)', async () => {
     const store = await setup();
-    expect(await store.pendingFiles()).toEqual([]);
-    expect(await store.pendingChanges()).toEqual([]);
+    await expect(store.pendingFiles()).rejects.toThrow(/인덱스 표시/);
+    await expect(store.pendingChanges()).rejects.toThrow(/인덱스 표시/);
+    await expect(store.pendingFingerprint()).rejects.toThrow(/인덱스 표시/);
   });
 
-  it('commit은 표시를 건 파일의 변경을 담지 않는다(바뀐 파일이 없다고 본다)', async () => {
+  it('commit·commitPaths는 표시를 건 파일의 변경이 있으면 체크포인트를 만들지 않고 던진다', async () => {
     const store = await setup();
-    const checkpoint = await store.commit('요청: 시험 건너뛰기');
-    expect(checkpoint).toBeUndefined();
+    await expect(store.commit('요청: 시험 건너뛰기')).rejects.toThrow(/인덱스 표시/);
+    await expect(store.commitPaths(['web/a.test.ts'], '시험')).rejects.toThrow(/인덱스 표시/);
   });
 
   it('pendingTestChanges(새 코드)는 둘 다 본다', async () => {
     const store = await setup();
     const entries = await store.pendingTestChanges();
     expect(entries.map((entry) => `${entry.status} ${entry.path}`).sort()).toEqual(['D web/b.ts', 'M web/a.test.ts']);
+  });
+});
+
+describe('인덱스 표시가 걸려 있어도 바뀌지 않았거나 sparse로 빠진 파일은 막지 않는다', () => {
+  it('표시만 걸고 파일을 고치지 않았으면 평소처럼 동작한다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await execFileAsync('git', ['-C', root, 'update-index', '--skip-worktree', '--assume-unchanged', 'web/a.test.ts']);
+    await writeFile(path.join(root, 'web/c.ts'), 'z\n');
+    expect(await store.pendingFiles()).toEqual(['web/c.ts']);
+    expect(await store.commit('요청: c')).toBeDefined();
+  });
+
+  it('sparse-checkout으로 작업 폴더에서 빠진 skip-worktree 파일은 삭제로 보지 않는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await execFileAsync('git', ['-C', root, 'config', 'core.sparseCheckout', 'true']);
+    await execFileAsync('git', ['-C', root, 'update-index', '--skip-worktree', 'web/b.ts']);
+    await rm(path.join(root, 'web/b.ts'));
+    await writeFile(path.join(root, 'web/c.ts'), 'z\n');
+    expect(await store.pendingFiles()).toEqual(['web/c.ts']);
+    expect(await store.commit('요청: c')).toBeDefined();
+  });
+
+  it('sparse여도 작업 폴더에 있는 skip-worktree 파일을 고치면 막는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await execFileAsync('git', ['-C', root, 'config', 'core.sparseCheckout', 'true']);
+    await execFileAsync('git', ['-C', root, 'update-index', '--skip-worktree', 'web/b.ts']);
+    await writeFile(path.join(root, 'web/b.ts'), 'changed\n');
+    // git이 이 설정에서 변경을 직접 보여 주면 그대로 목록에 있고, 못 보여 주면 던진다. 어느 쪽이든 조용히 빠지지는 않는다
+    const seen = await store.pendingFiles().then((files) => files.includes('web/b.ts'), (error: Error) => /인덱스 표시/.test(error.message));
+    expect(seen).toBe(true);
+  });
+
+  it('assume-unchanged 파일은 sparse여도 지워지면 막는다', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await execFileAsync('git', ['-C', root, 'config', 'core.sparseCheckout', 'true']);
+    await execFileAsync('git', ['-C', root, 'update-index', '--assume-unchanged', 'web/b.ts']);
+    await rm(path.join(root, 'web/b.ts'));
+    await expect(store.pendingFiles()).rejects.toThrow(/인덱스 표시/);
   });
 });

@@ -465,6 +465,7 @@ export class CheckpointStore {
   /** 마지막 체크포인트 이후 바뀐 파일 (새 파일과 삭제 포함) */
   async pendingFiles(): Promise<string[]> {
     await this.#assertNoNestedRepos();
+    await this.#assertNoHiddenIndexChanges();
     const output = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(await this.#scope())]);
     return native.checkpointPendingFiles(output, await this.#subdir()).sort();
   }
@@ -488,6 +489,7 @@ export class CheckpointStore {
   /** 마지막 체크포인트 이후 바뀐 파일과 바뀐 종류. 코드 화면이 추가·수정·삭제를 구분해 보여 줄 때 쓴다 */
   async pendingChanges(): Promise<PendingChange[]> {
     await this.#assertNoNestedRepos();
+    await this.#assertNoHiddenIndexChanges();
     const subdir = await this.#subdir();
     const output = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all', ...(await this.#scope())]);
     // 저장소 루트 기준 경로를 프로젝트 기준으로 바꾸고, 프로젝트 밖 경로는 뺀다(Rust가 한다). 정렬은 여기서 한다
@@ -609,6 +611,7 @@ export class CheckpointStore {
       onCommitted?: (sha: string) => void;
     } = {},
   ): Promise<Checkpoint | undefined> {
+    await this.#assertNoHiddenIndexChanges();
     // 기대 지문은 옛 `stagedMismatchOf`와 같이 단사로 바꿔 보낸다
     const staged = expectStaged ? [...expectStaged].map(([file, print]) => [encodeLoneSurrogates(file), encodeLoneSurrogates(print)] as [string, string]) : null;
     const hooks: Record<string, (request: Record<string, unknown>) => Promise<unknown>> = {};
@@ -677,6 +680,7 @@ export class CheckpointStore {
       expectedHead,
     }: { findSecrets?: (text: string) => string[]; trailers?: readonly string[]; expectedHead?: string } = {},
   ): Promise<Checkpoint | undefined> {
+    await this.#assertNoHiddenIndexChanges();
     const hooks: Record<string, (request: Record<string, unknown>) => Promise<unknown>> = {};
     if (findSecrets) hooks.findSecrets = async (request) => ({ secrets: findSecrets(String(request.text ?? '')) });
     const checkpoint = await this.#remote<Checkpoint | null>(
@@ -1316,6 +1320,66 @@ export class CheckpointStore {
    * 완전한 방어는 아니다: 이 검사와 다음 git 작업 사이에 생긴 저장소는 잡지 못하고(시점 차이), 생성 파일 스냅샷처럼 무시되는
    * 경로를 따로 읽는 다른 경로(#775)는 덮지 않는다. 근본적인 구조 수정은 #1033에서 다룬다
    */
+  /**
+   * 진짜 인덱스에 `skip-worktree`·`assume-unchanged` 표시가 걸린 경로의 변경이 있으면 던진다(이슈 #1444, ADR-236).
+   * 표시가 걸린 경로는 `git status`·`git add -A`가 작업 폴더를 읽지 않아, 에이전트가 표시를 건 뒤 고치거나 지운 파일을
+   * 바뀐 파일 목록(게이트·보호 경로 확인)과 체크포인트가 함께 놓친다. 변경을 "바뀐 것"으로 끼워 넣으려면 사용자의 인덱스를 고치거나(이 컴퓨터 방식에서는 사용자 저장소를 건드린다)
+   * 표시를 지워야 하므로, 대신 "확인하지 못함"으로 막는다. 인덱스·작업 트리는 건드리지 않는다.
+   *
+   * 판정: 표시가 걸린 경로 중 작업 폴더의 내용이 HEAD와 다른 것. 비교는 HEAD에서 새로 만든 임시 인덱스(표시·stat 캐시가 없다)에 `add -A`를 해 `diff --cached`로 한다(pendingTestChanges와 같은 방식).
+   * sparse-checkout(`core.sparseCheckout`)은 정상적으로 skip-worktree를 쓰므로, 그때 작업 폴더에 **없는** skip-worktree 경로는 빠진 것으로 보고 건너뛴다.
+   * 같은 조건의 assume-unchanged 경로, 그리고 작업 폴더에 **있는** skip-worktree 경로는 건너뛰지 않는다.
+   */
+  async #assertNoHiddenIndexChanges(): Promise<void> {
+    const listing = await this.#git(['ls-files', '-v', '-z', ...(await this.#scope())]);
+    // 태그: `H`는 보통, `S`는 skip-worktree, 소문자는 assume-unchanged(`s`는 둘 다). 그 밖의 태그(M·R·C·K·?)는 표시가 아니다
+    const flagged: Array<{ file: string; skipWorktree: boolean }> = [];
+    for (const record of listing.split('\0')) {
+      if (record.length < 3) continue;
+      const tag = record[0]!;
+      if (tag === 'S' || tag === 's' || (tag >= 'a' && tag <= 'z')) flagged.push({ file: record.slice(2), skipWorktree: tag === 'S' || tag === 's' });
+    }
+    if (flagged.length === 0) return;
+    // 같은 이름을 다른 파일 시스템 규칙으로 읽지 않도록 실제 작업 폴더의 항목으로 있는지 본다(lstat: 링크는 따라가지 않는다)
+    const sparse = await this.#git(['config', '--type=bool', '--get', 'core.sparseCheckout']).then((out) => out.trim() === 'true', () => false);
+    const hidden: string[] = [];
+    const present: string[] = [];
+    for (const { file, skipWorktree } of flagged) {
+      const exists = await lstat(path.join(this.root, file)).then(() => true, (error: NodeJS.ErrnoException) => {
+        // 없다는 답(ENOENT·ENOTDIR)만 "없음"이다. 그 밖의 오류는 읽지 못한 것이므로 있는 것처럼 두어 아래 비교가 던지게 한다
+        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
+        return true;
+      });
+      if (exists) present.push(file);
+      else if (!(sparse && skipWorktree)) hidden.push(file);
+    }
+    if (present.length > 0) {
+      const scratch = await mkdtemp(path.join(tmpdir(), 'b-studio-index-flag-'));
+      try {
+        const gitPath = async (name: string): Promise<string> => path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', name])).trim());
+        const objects = path.join(scratch, 'objects');
+        await mkdir(objects);
+        const env = { GIT_INDEX_FILE: path.join(scratch, 'index'), GIT_LITERAL_PATHSPECS: '1', GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: await gitPath('objects') };
+        await this.#assertSafeLocalGit();
+        await this.#git(['read-tree', 'HEAD'], { env });
+        for (let index = 0; index < present.length; index += 200) {
+          const chunk = present.slice(index, index + 200);
+          await this.#git(['add', '-A', '--', ...chunk], { env });
+          const changed = (await this.#git(['diff', '--cached', '--name-only', '-z', 'HEAD', '--', ...chunk], { env })).split('\0').filter((file) => file !== '');
+          hidden.push(...changed);
+        }
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    }
+    if (hidden.length > 0) {
+      const shown = [...new Set(hidden)].sort().slice(0, 5).join(', ');
+      throw new CheckpointError(
+        `인덱스 표시(skip-worktree·assume-unchanged)가 걸린 파일이 바뀌어 있어 변경을 끝까지 확인하지 못합니다(${shown}${new Set(hidden).size > 5 ? ' 등' : ''}). 표시를 지운 뒤 다시 시도하세요: git update-index --no-skip-worktree --no-assume-unchanged -- <파일>`,
+      );
+    }
+  }
+
   async #assertNoNestedRepos(): Promise<void> {
     await this.#remote('assertNoNestedRepos');
   }
