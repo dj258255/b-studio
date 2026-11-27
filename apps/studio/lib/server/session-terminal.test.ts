@@ -13,6 +13,7 @@ import {
   resizeSessionTerminal,
   reviewFixRunner,
   noteSessionTerminalCli,
+  sessionTerminalInputState,
   sessionTerminalMode,
   sessionTerminalPresence,
   subscribeSessionTerminal,
@@ -843,5 +844,11 @@ describe('컨테이너 터미널의 첫 요청과 사용자별 홈 (#1401)', () 
     expect(() => terminalHomeUser('token', undefined)).toThrow('세션 주인');
     expect(() => terminalHomeUser('token', '')).toThrow('세션 주인');
     expect(terminalHomeUser('none', undefined)).toBeUndefined();
+  });
+});
+
+describe('입력창 상태(정체 재촉의 확인)', () => {
+  it('터미널이 없거나 화면을 유지하지 않는 터미널(claude가 아닌 CLI 등)이면 unknown이다', async () => {
+    expect(await sessionTerminalInputState('no-such-session')).toBe('unknown');
   });
 });

@@ -270,7 +270,7 @@ import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { settleDraftStops } from './session-terminal-draft';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalCliAlive, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
 import { terminalPasteText } from '../terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -7846,6 +7846,8 @@ interface TerminalRunState {
   stallNudgeMax: number;
   /** 이 실행에 이미 보낸 정체 재촉 수. 움직임이 다시 생겨도 되돌리지 않는다(상한은 실행마다 센다) */
   stallNudgesSent: number;
+  /** 재촉을 보내기 전 화면 확인이 진행 중이다(같은 재촉을 겹쳐 시작하지 않는다) */
+  stallNudgeBusy?: boolean;
   /**
    * CLI가 입력창에 있다는 긍정 신호가 이 실행의 마지막 사건인가(입력 대기 알림 뒤 다른 훅·텔레메트리·요청이 없다). 실행을 열 때 거짓이고,
    * 입력 대기 알림만 참으로 세우며 다른 모든 훅·텔레메트리·요청이 거짓으로 되돌린다. 재촉은 이 값이 참일 때만 보낸다.
@@ -8127,8 +8129,29 @@ function checkTerminalStall(session: Session, stallMs: number): void {
     return;
   }
   if (step === 'nothing' || !run) return;
-  // 재촉을 보내지 못했으면(CLI가 없다·쓰기 실패) 알리기만 하는 길로 간다
-  if (step === 'nudge' && sendStallNudge(session, run)) return;
+  if (step === 'nudge') {
+    // 화면을 읽는 사이(await) 다음 회차가 같은 재촉을 다시 시작하지 않게 한다
+    if (run.terminal.stallNudgeBusy) return;
+    run.terminal.stallNudgeBusy = true;
+    void sendStallNudge(session, run).then(
+      (sent) => {
+        run.terminal.stallNudgeBusy = false;
+        // 재촉을 보내지 못했으면(CLI가 없다·입력창을 확인하지 못했다·쓰기 실패) 알리기만 하는 길로 간다
+        if (!sent) notifyStall(session, run, stallMs);
+      },
+      () => {
+        run.terminal.stallNudgeBusy = false;
+        notifyStall(session, run, stallMs);
+      },
+    );
+    return;
+  }
+  notifyStall(session, run, stallMs);
+}
+
+/** 정체를 알리기만 한다(활동 기록과 터미널 경고 줄). 실행이 그 사이 닫혔으면 알리지 않는다 */
+function notifyStall(session: Session, run: ActiveRun & { terminal: TerminalRunState }, stallMs: number): void {
+  if (openTerminalRun(session) !== run) return;
   run.terminal.stallNotified = true;
   const message = terminalStallMessage(stallMs);
   emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
@@ -8159,11 +8182,15 @@ function noteTerminalBusy(id: string): void {
  * CLI가 이 글을 받으면 요청 훅(terminalPromptSubmitted)을 거쳐 열린 실행에 이어 붙는다. 보낸 글과 시각은 그 실행의 기록에 남긴다.
  * 보냈으면 참. CLI가 떠 있지 않으면(셸에 글이 들어가면 명령으로 돈다) 보내지 않고 거짓이다. 시도한 것은 쓰기가 실패해도 센다(같은 실패를 되풀이하지 않게)
  */
-function sendStallNudge(session: Session, run: ActiveRun & { terminal: TerminalRunState }): boolean {
+async function sendStallNudge(session: Session, run: ActiveRun & { terminal: TerminalRunState }): Promise<boolean> {
   run.terminal.stallNudgesSent += 1;
   const text = terminalPasteText(TERMINAL_STALL_NUDGE_TEXT);
   try {
     if (!text || !sessionTerminalCliAlive(session.snapshot.id)) return false;
+    // 화면에서 Claude 입력창이 보이고 비어 있을 때만 보낸다(권한·질문 창은 입력창 모양이 없고, 쓰다 만 글은 비어 있지 않다). 읽을 수 없으면(claude가 아닌 CLI·화면 없음) 모른다
+    if ((await sessionTerminalInputState(session.snapshot.id)) !== 'empty') return false;
+    // 화면을 읽는 사이 상황이 바뀌었을 수 있다: 같은 열린 실행이고 입력창 신호가 그대로이며 사람의 창이 없을 때만 쓴다(쓰기는 이 확인 바로 뒤에 같은 틱에서 한다)
+    if (openTerminalRun(session) !== run || !run.terminal.cliAtInput || run.terminal.humanPromptAt !== undefined || (session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt')) return false;
     writeSessionTerminal(session.snapshot.id, `\x1b[200~${text}\x1b[201~`);
     writeSessionTerminal(session.snapshot.id, '\r');
   } catch {

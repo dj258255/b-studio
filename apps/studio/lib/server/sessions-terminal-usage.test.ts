@@ -29,6 +29,8 @@ const fake = vi.hoisted(() => ({
   /** 세션 터미널에 쓴 바이트의 기록과 CLI가 떠 있는가(정체 재촉 시험) */
   writes: [] as string[],
   cliAlive: true as boolean,
+  /** 화면에서 읽은 Claude 입력창 상태(정체 재촉이 보내기 직전에 묻는다) */
+  inputState: 'empty' as 'empty' | 'typed' | 'unknown',
   writeFails: false as boolean,
   /** 서비스가 떠 있는 주소(시험마다 계약을 내놓는 작은 서버) */
   serviceUrl: 'http://127.0.0.1:1',
@@ -99,6 +101,7 @@ vi.mock('./session-terminal', () => ({
   sessionTerminalMode: () => fake.terminalMode,
   warnSessionTerminal: () => {},
   sessionTerminalCliAlive: () => fake.cliAlive,
+  sessionTerminalInputState: async () => fake.inputState,
   writeSessionTerminal: (_sessionId: string, data: string) => {
     if (fake.writeFails) throw new Error('터미널이 열려 있지 않습니다');
     fake.writes.push(data);
@@ -142,6 +145,7 @@ beforeEach(async () => {
   fake.interrupts = [];
   fake.writes = [];
   fake.cliAlive = true;
+  fake.inputState = 'empty';
   fake.writeFails = false;
   await serveContract();
   process.env.B_STUDIO_MODE = 'api';
@@ -486,14 +490,14 @@ describe('정체 재촉(#1454)', () => {
 
   it('꺼짐이 기본이다: 정체해도 글을 보내지 않고 알리기만 한다', async () => {
     const session = await stalled({});
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
   }, 30_000);
 
   it('켜면 정체가 이어질 때 재촉 글을 입력창에 한 번 보내고(붙여 넣기 + Enter), 보낸 글과 시각을 실행의 기록에 남긴다', async () => {
     const session = await stalled();
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toEqual([NUDGE, '\r']);
     const sent = warnings(session);
     expect(sent).toHaveLength(1);
@@ -502,11 +506,11 @@ describe('정체 재촉(#1454)', () => {
 
   it('재촉 뒤에도 멈춰 있으면 정체 시간을 더 기다린 뒤 알리기만 하고 더 보내지 않는다', async () => {
     const session = await stalled();
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(2);
-    vi.advanceTimersByTime(2_000); // 재촉(8초 지점) 뒤 6초라 정체 시간(8초) 전이다
+    await vi.advanceTimersByTimeAsync(2_000); // 재촉(8초 지점) 뒤 6초라 정체 시간(8초) 전이다
     expect(warnings(session)).toHaveLength(1);
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toHaveLength(2);
     expect(warnings(session)).toHaveLength(2);
     expect(JSON.stringify(warnings(session)[1])).not.toContain('재촉 글을 보냈습니다');
@@ -514,22 +518,22 @@ describe('정체 재촉(#1454)', () => {
 
   it('상한을 올리면 그 수만큼만 보낸다. 움직임이 다시 생겨도 이 실행의 센 수는 되돌리지 않는다', async () => {
     const session = await stalled({ nudge: '1', max: '2' });
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(2);
     await session.gateway.preTool({ tool_name: 'Read', tool_input: {} }); // 움직임
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(4);
     await session.gateway.preTool({ tool_name: 'Read', tool_input: {} });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(4);
   }, 30_000);
 
   it('사람 차례(권한 요청)에는 보내지 않고 지금처럼 알리기만 한다', async () => {
     const session = await stalled();
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
   }, 30_000);
@@ -537,10 +541,10 @@ describe('정체 재촉(#1454)', () => {
   it('권한 요청이 열렸는데 화면의 기다림 표시가 다른 이유로 치워져도 보내지 않는다(비춘 값이 아니라 입력창 신호로 판단한다)', async () => {
     const session = await stalled();
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
-    vi.advanceTimersByTime(2_000); // 기다림 표시를 훅으로 풀 수 있는 시간이 지났다
+    await vi.advanceTimersByTimeAsync(2_000); // 기다림 표시를 훅으로 풀 수 있는 시간이 지났다
     await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
     expect(getSnapshot(session.id)?.terminalAttention).toBeUndefined();
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session).length).toBeGreaterThan(0);
   }, 30_000);
@@ -550,7 +554,7 @@ describe('정체 재촉(#1454)', () => {
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
     expect(getSnapshot(session.id)?.terminalAttention?.kind).toBe('permission_prompt');
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
   }, 30_000);
@@ -558,10 +562,10 @@ describe('정체 재촉(#1454)', () => {
   it('권한 창이 닫힌 뒤(도구 끝 훅)의 입력 대기 알림에는 보낸다', async () => {
     const session = await stalled({ nudge: '1', idle: false });
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
-    vi.advanceTimersByTime(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(2);
   }, 30_000);
 
@@ -569,7 +573,7 @@ describe('정체 재촉(#1454)', () => {
     const session = await stalled({ nudge: '1', idle: false });
     await session.gateway.notification({ notification_type: 'elicitation_dialog', message: '질문' });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
@@ -579,41 +583,41 @@ describe('정체 재촉(#1454)', () => {
     await session.gateway.notification({ notification_type: 'auth_success', message: '다른 알림' });
     await session.gateway.telemetry(otlp([rec('r1')]));
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
   it('권한 창이 떠 있는데 화면의 기다림 표시가 훅으로 치워진 뒤 입력 대기 알림이 와도 보내지 않는다(창은 따로 기록한 상태로 본다)', async () => {
     const session = await stalled({ nudge: '1', idle: false });
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
-    vi.advanceTimersByTime(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     await session.gateway.activity?.({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: {} });
     expect(getSnapshot(session.id)?.terminalAttention).toBeUndefined();
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
   it('되묻기 창의 표시가 치워진 뒤 입력 대기 알림이 와도 보내지 않는다', async () => {
     const session = await stalled({ nudge: '1', idle: false });
     await session.gateway.notification({ notification_type: 'elicitation_dialog', message: '질문' });
-    vi.advanceTimersByTime(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     await session.gateway.activity?.({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: {} });
     expect(getSnapshot(session.id)?.terminalAttention).toBeUndefined();
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
   it('권한 창이 떠 있는 채 다른 알림·텔레메트리가 와 표시가 치워져도 입력 대기 알림에는 보내지 않는다', async () => {
     const session = await stalled({ nudge: '1', idle: false });
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
-    vi.advanceTimersByTime(2_000);
+    await vi.advanceTimersByTimeAsync(2_000);
     await session.gateway.notification({ notification_type: 'auth_success', message: '다른 알림' });
     await session.gateway.telemetry(otlp([rec('r1')]));
     await session.gateway.activity?.({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: {} });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
@@ -622,21 +626,37 @@ describe('정체 재촉(#1454)', () => {
     await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
     await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('화면에 입력창이 비어 있지 않으면(쓰다 만 글) 보내지 않고 알리기만 한다', async () => {
+    fake.inputState = 'typed';
+    const session = await stalled();
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('입력창 모양을 알 수 없으면(권한 창 화면·화면 없음·claude가 아닌 CLI) 보내지 않고 알리기만 한다', async () => {
+    fake.inputState = 'unknown';
+    const session = await stalled();
+    await vi.advanceTimersByTimeAsync(12_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
   }, 30_000);
 
   it('도구가 도는 중(PreToolUse만 있고 끝 훅이 없다)이면 보내지 않는다', async () => {
     const session = await stalled();
     await session.gateway.preTool({ tool_name: 'Read', tool_input: {} });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
   }, 30_000);
 
   it('입력창에 있다는 신호가 없으면(요청만 받았다) 보내지 않고 알리기만 한다', async () => {
     const session = await stalled({ nudge: '1', idle: false });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
   }, 30_000);
@@ -644,7 +664,7 @@ describe('정체 재촉(#1454)', () => {
   it('입력 대기 알림 뒤에 텔레메트리나 다른 훅이 오면 신호가 거두어져 보내지 않는다', async () => {
     const session = await stalled();
     await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
@@ -652,14 +672,14 @@ describe('정체 재촉(#1454)', () => {
     const session = await stalled();
     await session.gateway.prompt({ prompt: '/clear' });
     await session.gateway.stop({});
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
   it('CLI가 떠 있지 않으면(셸일 수 있다) 글을 보내지 않고 알리기만 한다', async () => {
     fake.cliAlive = false;
     const session = await stalled();
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
   }, 30_000);
@@ -667,21 +687,21 @@ describe('정체 재촉(#1454)', () => {
   it('쓰기가 실패해도 알리기로 돌아가고 같은 실패를 되풀이하지 않는다', async () => {
     fake.writeFails = true;
     const session = await stalled();
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(warnings(session)).toHaveLength(1);
     fake.writeFails = false;
-    vi.advanceTimersByTime(30_000);
+    await vi.advanceTimersByTimeAsync(30_000);
     expect(fake.writes).toEqual([]);
   }, 30_000);
 
   it('재촉 상한은 실행마다 센다: 다음 실행은 다시 한 번 보낸다', async () => {
     const session = await stalled();
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(2);
     await session.gateway.stop({});
     await session.gateway.prompt({ prompt: '[읽기만] 다른 설명' });
     await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
-    vi.advanceTimersByTime(12_000);
+    await vi.advanceTimersByTimeAsync(12_000);
     expect(fake.writes).toHaveLength(4);
   }, 30_000);
 
