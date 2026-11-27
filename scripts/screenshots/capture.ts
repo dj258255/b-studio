@@ -17,6 +17,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openInside } from '../../apps/cli/src/desk/inside';
+import { openRecords, type RecordsStats } from '../../apps/cli/src/desk/records';
 import { initialState, type DeskState } from '../../apps/cli/src/desk/keys';
 import { openPin, pinId, pinLoaded, pinTitle, renderPin } from '../../apps/cli/src/desk/pinned';
 import { renderScreen, type PaneView } from '../../apps/cli/src/desk/render';
@@ -48,6 +49,8 @@ const items: DeskItem[] = [
     now: { tool: 'Edit', target: 'apps/shop/order.ts', at: new Date(now - 13_000).toISOString() },
     todos: { done: 3, total: 7, current: '주문 상태 전이 테스트' },
     context: { usedPct: 41, used: 82_000, size: 200_000 },
+    // 같은 세션에서 모델이 바뀐 것을 보았다(#1439). 사진용 가짜 값
+    model: 'claude-opus-5', modelChange: { from: 'claude-sonnet-5', to: 'claude-opus-5' },
     lastMessage: '주문 상태를 한 곳에서 바꾸게 묶었습니다. 이제 전이 테스트를 씁니다.',
     agents: [
       { id: 'main', name: 'Claude Code', kind: 'main', state: 'working', activity: 'Edit apps/shop/order.ts', tokens: usage(129_000, 25_000) },
@@ -240,6 +243,22 @@ const codexPane: PaneView = {
   ],
 };
 
+/** 기록 화면 사진용 가짜 결과표. 모델 이름·숫자는 모두 사진용 값이다 */
+const recordsStats: RecordsStats = {
+  rows: [],
+  excluded: { asks: 3, unfinished: 1 },
+  byAccount: [
+    { backend: 'claude-code', accountId: 'acct-pio', runs: 12, passed: 10, failed: 1, errors: 1, passRate: 10 / 12, averageTokens: 123_000, averageCostUsd: 0.41 },
+    { backend: 'codex', accountId: 'codex', runs: 5, passed: 3, failed: 2, errors: 0, passRate: 3 / 5, averageTokens: 48_000 },
+  ],
+  byModel: [
+    { backend: 'claude-code', model: 'claude-sonnet-5', runs: 8, oneShot: 5, passed: 7, failed: 1, reverted: 1, judged: 8, retries: 6, averageRetries: 0.75 },
+    { backend: 'claude-code', model: 'claude-opus-5', runs: 4, oneShot: 4, passed: 4, failed: 0, reverted: 0, judged: 4, retries: 0, averageRetries: 0 },
+    { backend: 'codex', model: '(모름)', runs: 5, oneShot: 2, passed: 3, failed: 2, reverted: 1, judged: 5, retries: 4, averageRetries: 0.8 },
+  ],
+  recentFailures: [{ sessionId: 's-login', backend: 'codex', accountId: 'codex', request: '로그인 API 계약 테스트 고치기', at: at(-70), outcome: 'failed' }],
+};
+
 interface Shot {
   name: string;
   cols: number;
@@ -294,6 +313,13 @@ const shots: Shot[] = [
         const rect = placePanes(size.cols, size.rows, state).panes.find((entry) => entry.slot === slot)?.rect;
         return id && rect ? { lines: renderPin(state, id, terminalSize(rect), now), title: pinTitle(state, id) } : { lines: [] };
       }),
+  },
+  // 기록 화면(#891, #1439): AI별 결과 탭의 계정별 표 아래에 모델별 표가 있다. 모델을 알리지 않은 CLI는 (모름)이다
+  {
+    name: 'desk-records',
+    cols: 140,
+    rows: 34,
+    state: () => ({ ...base(), records: { ...openRecords([{ id: 'p-shop', name: 'shop' }], 'shop'), loading: false, stats: recordsStats, names: { 'acct-pio': '피오', 'acct-eri': '에리', codex: '마르코' } } }) as unknown as DeskState,
   },
   { name: 'desk-usage', cols: 140, rows: 34, state: () => ({ ...base(), view: 'usage', usageSelected: 1 }) as unknown as DeskState },
   {

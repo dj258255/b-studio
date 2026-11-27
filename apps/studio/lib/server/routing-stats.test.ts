@@ -247,4 +247,86 @@ describe('buildRoutingStats 계정별 묶음과 최근 실패(#891)', () => {
     expect(stats.recentFailures?.[0]).toEqual({ sessionId: 's9', backend: 'codex', accountId: 'marco', request: '요청 f6', at: '2026-10-26T00:00:00.000Z', outcome: 'errors' });
     expect(stats.recentFailures?.[1]?.outcome).toBe('failed');
   });
+  describe('모델별(byModel)', () => {
+    const reverted = (runId: string): StudioEvent => ({ type: 'reverted', runId, files: ['a.ts'], patch: '', restarted: [], databases: [] }) as StudioEvent;
+    const sessionEffort = (runId: string, effort: string): StudioEvent => ({ type: 'agent', runId, event: { type: 'session', effort } }) as unknown as StudioEvent;
+    const terminalFinished = (runId: string, status: 'done' | 'failed' | 'error', model?: string): StudioEvent => ({ type: 'run_finished', runId, status, summary: '', usage, durationMs: 1_000, ...(model ? { model } : {}) }) as StudioEvent;
+    const via = { via: 'terminal' as const, backend: 'claude-code' as const };
+
+    it('터미널 실행의 모델은 run_finished에서 읽고, 실행 수·한 번에 통과·평균 재시도·실패·되돌림을 센다', () => {
+      const stats = buildRoutingStats({
+        sessions: [
+          {
+            sessionId: 's1',
+            backend: 'claude-code',
+            events: [
+              // 한 번에 통과
+              started('a', via), checkpoint('a'), terminalFinished('a', 'done', 'claude-sonnet-5'),
+              // 게이트 두 번 실패 뒤 통과: 재시도 2
+              started('b', via), verifyResult('b', false), verifyResult('b', false), verifyResult('b', true), checkpoint('b'), terminalFinished('b', 'done', 'claude-sonnet-5'),
+              // 실패하고 되돌림: 재시도 1
+              started('c', via), verifyResult('c', false), reverted('c'), terminalFinished('c', 'failed', 'claude-sonnet-5'),
+              // 다른 모델
+              started('d', via), checkpoint('d'), terminalFinished('d', 'done', 'claude-opus-5'),
+            ],
+          },
+        ],
+      });
+      expect(stats.byModel).toEqual([
+        { backend: 'claude-code', model: 'claude-sonnet-5', runs: 3, oneShot: 1, passed: 2, failed: 1, reverted: 1, judged: 3, retries: 3, averageRetries: 1 },
+        { backend: 'claude-code', model: 'claude-opus-5', runs: 1, oneShot: 1, passed: 1, failed: 0, reverted: 0, judged: 1, retries: 0, averageRetries: 0 },
+      ]);
+    });
+
+    it('모델을 알리지 않은 실행은 (모름)으로 묶고 추정하지 않는다. 모델 이름을 모르는 옛 기록도 깨지지 않는다', () => {
+      const stats = buildRoutingStats({
+        sessions: [
+          { sessionId: 's1', backend: 'codex', events: [started('a', { backend: 'codex', via: 'terminal' }), checkpoint('a'), terminalFinished('a', 'done')] },
+          { sessionId: 's2', backend: 'claude-code', events: [started('b', { backend: 'claude-code' }), checkpoint('b'), finished('b', 'done')] },
+        ],
+      });
+      expect(stats.byModel?.map((row) => [row.backend, row.model, row.runs])).toEqual([
+        ['claude-code', UNKNOWN_MODEL_LABEL, 1],
+        ['codex', UNKNOWN_MODEL_LABEL, 1],
+      ]);
+    });
+
+    it('run_started의 모델이 있으면(대화 창 요청) 그것을, 노력은 그 실행의 session 이벤트에서 읽어 모델과 함께 묶는다', () => {
+      const stats = buildRoutingStats({
+        sessions: [
+          {
+            sessionId: 's1',
+            backend: 'claude-code',
+            events: [
+              started('a', { backend: 'claude-code', model: 'sonnet' }), sessionEffort('a', 'high'), checkpoint('a'), finished('a', 'done'),
+              started('b', { backend: 'claude-code', model: 'sonnet' }), sessionEffort('b', 'low'), checkpoint('b'), finished('b', 'done'),
+            ],
+          },
+        ],
+      });
+      expect(stats.byModel?.map((row) => [row.model, row.effort, row.runs])).toEqual([
+        ['sonnet', 'high', 1],
+        ['sonnet', 'low', 1],
+      ]);
+    });
+
+    it('질문·플랫폼 실패·진행 중은 넣지 않고, 플랫폼 실패는 실패로 세지 않는다', () => {
+      const stats = buildRoutingStats({
+        sessions: [
+          {
+            sessionId: 's1',
+            backend: 'claude-code',
+            events: [
+              started('a', { ...via, intent: 'ask' }), terminalFinished('a', 'done', 'm'),
+              started('b', via), verifyResult('b', false, 'docker 없음'), terminalFinished('b', 'failed', 'm'),
+              started('c', via),
+              started('d', via), checkpoint('d'), terminalFinished('d', 'done', 'm'),
+            ],
+          },
+        ],
+      });
+      // b는 플랫폼 실패라 실행 수에는 들지만 실패·재시도에는 넣지 않는다
+      expect(stats.byModel).toEqual([{ backend: 'claude-code', model: 'm', runs: 2, oneShot: 1, passed: 1, failed: 0, reverted: 0, judged: 1, retries: 0, averageRetries: 0 }]);
+    });
+  });
 });

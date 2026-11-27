@@ -1731,6 +1731,36 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     await stopSession(session.id);
   }, 30_000);
 
+  it('실행이 닫힐 때 CLI가 알린 모델을 run_finished.model에 남긴다: 상태 줄이 먼저, 없으면 텔레메트리의 모델이 하나일 때만, 아니면 비운다', async () => {
+    // 상태 줄이 알린 모델
+    const withStatusline = await open();
+    await withStatusline.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(withStatusline, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await withStatusline.gateway.statusline!({ model: { id: 'claude-opus-5' }, context_window: { used_percentage: 10 } });
+    await withStatusline.gateway.telemetry(otlp([req(1000, 100)]));
+    await withStatusline.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(withStatusline.ofType('run_finished')[0]).toMatchObject({ status: 'done', model: 'claude-opus-5' });
+    await stopSession(withStatusline.id);
+
+    // 상태 줄이 없고 텔레메트리의 모델이 하나다
+    const telemetryOnly = await open();
+    await telemetryOnly.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(telemetryOnly, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await telemetryOnly.gateway.telemetry(otlp([req(1000, 100)]));
+    await telemetryOnly.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(telemetryOnly.ofType('run_finished')[0]).toMatchObject({ model: 'claude-sonnet-5' });
+    await stopSession(telemetryOnly.id);
+
+    // 아무것도 모른다: 필드가 없다(세션에 정한 모델을 대신 쓰지 않는다)
+    const unknown = await open({ modelId: 'claude-haiku-5' });
+    await unknown.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(unknown, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await unknown.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(unknown.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    expect(unknown.ofType('run_finished')[0]).not.toHaveProperty('model');
+    await stopSession(unknown.id);
+  }, 60_000);
+
   it('실행이 닫힌 뒤 5초 안에 온 것도 그 실행에 붙는다(내보내기 주기)', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });

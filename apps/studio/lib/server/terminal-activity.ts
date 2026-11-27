@@ -114,6 +114,15 @@ export interface TerminalActivityView {
   lastAt?: string;
   /** 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 없으면 0번 */
   turnDenied?: number;
+  /** CLI가 상태 줄로 알린 지금의 메인 모델 이름. 알리지 않았으면 없다(모름). CLI가 보낸 값이라 보여 주는 데만 쓴다 */
+  model?: string;
+  /** 같은 세션에서 모델이 바뀐 것을 보았다. 바뀐 뒤 처음 끝나는 턴까지만 있다 */
+  modelChange?: ModelChange;
+}
+
+export interface ModelChange {
+  from: string;
+  to: string;
 }
 
 type TodoStatus = 'pending' | 'in_progress' | 'completed';
@@ -145,6 +154,19 @@ export interface TerminalActivity {
   turnDenied: number;
   /** 에이전트별 최근 활동 기록(#1411). 기억에만 둔다. 화면용 보기(activityView)에는 싣지 않는다 */
   log?: ActivityLogState;
+  /** 상태 줄이 마지막으로 알린 메인 모델 이름(모델별 기록·바뀜 알림의 근거) */
+  model?: string;
+  modelChange?: ModelChange;
+  /** modelChange를 다음 턴 끝에서 지운다. 바뀜을 본 뒤 턴이 시작됐거나 턴 도중에 바뀌었으면 선다 */
+  modelChangeEndsAtTurnEnd?: boolean;
+}
+
+/** 모델 이름의 길이 상한. CLI가 보낸 값이라 줄여서 받는다 */
+const MODEL_NAME_CHARS = 80;
+
+/** CLI가 알린 모델 이름을 한 줄·80자 안으로 다듬는다. 비면 없다 */
+export function cleanModelName(value: string | undefined): string | undefined {
+  return clean(value, MODEL_NAME_CHARS);
 }
 
 export function newTerminalActivity(): TerminalActivity {
@@ -410,6 +432,7 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
 
 /** 상태 줄 입력(Claude statusLine). 문맥 창만 꺼낸다. 퍼센트가 없거나 범위 밖이면 앞 값을 그대로 둔다 */
 export function noteStatusline(state: TerminalActivity, input: Input): void {
+  noteStatuslineModel(state, input);
   const window = isObject(input.context_window) ? input.context_window : undefined;
   const usedPct = number(window?.used_percentage);
   if (usedPct === undefined || usedPct > 100) return;
@@ -418,6 +441,21 @@ export function noteStatusline(state: TerminalActivity, input: Input): void {
   const parts = current ? [current.input_tokens, current.cache_creation_input_tokens, current.cache_read_input_tokens].map(number) : [];
   const used = parts.length > 0 && parts.every((part) => part !== undefined) ? parts.reduce((sum: number, part) => sum + part!, 0) : undefined;
   state.context = { usedPct, ...(used !== undefined ? { used } : {}), ...(size !== undefined ? { size } : {}) };
+}
+
+/**
+ * 상태 줄 입력의 model.id를 읽는다. 없거나 글이 아니면 앞 값을 그대로 둔다(모름을 다른 모델로 보지 않는다).
+ * 앞에 본 모델과 다르면 같은 세션에서 모델이 바뀐 것이다(처음 보는 것은 바뀜이 아니다)
+ */
+function noteStatuslineModel(state: TerminalActivity, input: Input): void {
+  const model = isObject(input.model) ? cleanModelName(text(input.model.id)) : undefined;
+  if (!model) return;
+  if (state.model !== undefined && state.model !== model) {
+    state.modelChange = { from: state.model, to: model };
+    // 턴 도중에 바뀌었으면 그 턴이 끝날 때, 턴 사이에 바뀌었으면 다음 턴이 끝날 때 지운다
+    state.modelChangeEndsAtTurnEnd = state.workingSince !== undefined;
+  }
+  state.model = model;
 }
 
 /** CLI가 모델에 요청했다(텔레메트리, #955). 도구 훅이 없는 긴 생각도 CLI의 소식이다 — 마지막 소식 시각만 옮긴다 */
@@ -432,6 +470,8 @@ export function noteTurnStarted(state: TerminalActivity, at: number = Date.now()
   state.workingSince = new Date(at).toISOString();
   state.lastAt = state.workingSince;
   state.turnDenied = 0;
+  // 바뀐 모델로 처음 시작하는 턴이다. 이 턴이 끝나면 알림을 지운다
+  if (state.modelChange) state.modelChangeEndsAtTurnEnd = true;
   state.ended = [];
   if (state.todos.length > 0 && state.todos.every((todo) => todo.status === 'completed')) state.todos = [];
   for (const [id, subagent] of state.subagents) {
@@ -450,6 +490,10 @@ export function noteTurnEnded(state: TerminalActivity, input: Input, at: number 
   delete state.now;
   delete state.nowId;
   delete state.workingSince;
+  if (state.modelChangeEndsAtTurnEnd) {
+    delete state.modelChange;
+    delete state.modelChangeEndsAtTurnEnd;
+  }
   state.lastAt = new Date(at).toISOString();
   const message = clean(text(input.last_assistant_message), MESSAGE_CHARS);
   if (message) state.lastMessage = message;
@@ -478,6 +522,8 @@ export function activityView(state: TerminalActivity | undefined): TerminalActiv
     ...(state.workingSince ? { workingSince: state.workingSince } : {}),
     ...(state.lastAt ? { lastAt: state.lastAt } : {}),
     ...(state.turnDenied ? { turnDenied: state.turnDenied } : {}),
+    ...(state.model ? { model: state.model } : {}),
+    ...(state.modelChange ? { modelChange: { ...state.modelChange } } : {}),
   };
   return Object.keys(view).length > 0 ? view : undefined;
 }

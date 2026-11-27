@@ -48,6 +48,10 @@ export interface DeskItem {
   todos?: DeskTodos;
   /** 문맥 창이 찬 정도(#920) */
   context?: DeskContext;
+  /** 터미널 CLI가 알린 지금의 모델 이름(#1439). 알리지 않았거나 옛 서버면 없다(모름) */
+  model?: string;
+  /** 같은 세션에서 모델이 바뀐 것을 보았다(#1439). 옛 서버는 주지 않는다 */
+  modelChange?: { from: string; to: string };
   /** 마지막 답의 앞부분(200자 안, #920) */
   lastMessage?: string;
   /**
