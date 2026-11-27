@@ -12,7 +12,7 @@
 import type { Dirent } from 'node:fs';
 import { open as openFile, readdir as readDir } from 'node:fs/promises';
 import path from 'node:path';
-import type { ActivityContext } from './terminal-activity';
+import { limitWindowOf, type ActivityContext, type ActivityUsage } from './terminal-activity';
 
 export interface CodexRolloutFile {
   stat(): Promise<{ size: number }>;
@@ -39,24 +39,32 @@ const MAX_SCAN = 4 * 1024 * 1024;
 /** 거슬러 훑는 날짜 폴더 수. 그보다 오래된 대화를 이어 쓰면 문맥을 비운다 */
 const MAX_DAYS = 60;
 
+/** 마지막 token_count 줄에서 읽은 것. 문맥이 없으면 줄 전체를 읽지 못한 것이다(usage도 없다) */
+export interface CodexRolloutRead {
+  context: ActivityContext;
+  /** 5시간·주간 한도(rate_limits, 창 길이로 가름)와 캐시 적중률(cached_input_tokens / input_tokens). 읽은 것만 있고 없으면 undefined */
+  usage?: ActivityUsage;
+}
+
 export interface CodexRolloutReader {
   /** 그 대화의 마지막 문맥. 모르면 undefined */
   read(codexHome: string, thread: string): Promise<ActivityContext | undefined>;
+  /** 문맥과 같은 줄의 한도·캐시. 모르면 undefined */
+  readAll(codexHome: string, thread: string): Promise<CodexRolloutRead | undefined>;
 }
 
 export function createCodexRolloutReader(fs: CodexRolloutFs = nodeFs): CodexRolloutReader {
   // 찾은 파일 자리. 대화 id마다 하나다(다른 세션의 기록과 섞이지 않는다)
   const found = new Map<string, string>();
-  return {
-    async read(codexHome, thread) {
-      if (!THREAD_ID.test(thread)) return undefined;
-      const key = `${codexHome}\0${thread}`;
-      const file = found.get(key) ?? (await findRollout(fs, codexHome, thread));
-      if (!file) return undefined;
-      found.set(key, file);
-      return lastContext(fs, file).catch(() => undefined);
-    },
+  const readAll: CodexRolloutReader['readAll'] = async (codexHome, thread) => {
+    if (!THREAD_ID.test(thread)) return undefined;
+    const key = `${codexHome}\0${thread}`;
+    const file = found.get(key) ?? (await findRollout(fs, codexHome, thread));
+    if (!file) return undefined;
+    found.set(key, file);
+    return lastContext(fs, file).catch(() => undefined);
   };
+  return { readAll, read: async (codexHome, thread) => (await readAll(codexHome, thread))?.context };
 }
 
 /** 날짜 폴더를 새것부터 이름만 훑어 `-<대화 id>.jsonl`로 끝나는 파일을 찾는다. 파일은 열지 않는다 */
@@ -79,7 +87,7 @@ async function findRollout(fs: CodexRolloutFs, codexHome: string, thread: string
 }
 
 /** 끝에서부터 줄을 거슬러 읽어 첫 `token_count`의 숫자를 문맥으로 바꾼다 */
-async function lastContext(fs: CodexRolloutFs, file: string): Promise<ActivityContext | undefined> {
+async function lastContext(fs: CodexRolloutFs, file: string): Promise<CodexRolloutRead | undefined> {
   const handle = await fs.open(file);
   try {
     const { size } = await handle.stat();
@@ -111,7 +119,7 @@ async function lastContext(fs: CodexRolloutFs, file: string): Promise<ActivityCo
 }
 
 /** 한 줄이 token_count면 숫자만 꺼낸다. 다른 줄은 해석하지 않는다 */
-function contextOf(line: Buffer): ActivityContext | undefined {
+function contextOf(line: Buffer): CodexRolloutRead | undefined {
   if (line.length === 0 || line.indexOf('"token_count"') < 0) return undefined;
   let event: unknown;
   try {
@@ -119,16 +127,40 @@ function contextOf(line: Buffer): ActivityContext | undefined {
   } catch {
     return undefined;
   }
-  const payload = (event as { payload?: { type?: unknown; info?: unknown } } | null)?.payload;
+  const payload = (event as { payload?: { type?: unknown; info?: unknown; rate_limits?: unknown } } | null)?.payload;
   if (payload?.type !== 'token_count' || !payload.info || typeof payload.info !== 'object') return undefined;
-  const info = payload.info as { model_context_window?: unknown; last_token_usage?: { total_tokens?: unknown; input_tokens?: unknown; output_tokens?: unknown } };
+  const info = payload.info as { model_context_window?: unknown; total_token_usage?: { input_tokens?: unknown; cached_input_tokens?: unknown }; last_token_usage?: { total_tokens?: unknown; input_tokens?: unknown; output_tokens?: unknown } };
   const size = info.model_context_window;
   const last = info.last_token_usage;
   if (!isCount(size) || size <= 0 || !last) return undefined;
   // 다음 요청이 들고 갈 문맥은 마지막 요청의 입력(캐시 포함)과 그 답이다
   const used = isCount(last.total_tokens) ? last.total_tokens : isCount(last.input_tokens) && isCount(last.output_tokens) ? last.input_tokens + last.output_tokens : undefined;
   if (used === undefined || used > size) return undefined;
-  return { usedPct: Math.round((used / size) * 100), used, size };
+  const usage = usageOf(payload.rate_limits, info.total_token_usage);
+  return { context: { usedPct: Math.round((used / size) * 100), used, size }, ...(usage ? { usage } : {}) };
+}
+
+/** 한도 창의 길이(분): 슬롯 이름(primary·secondary)이 아니라 길이로 5시간과 주간을 가른다(usage-limits.ts와 같다) */
+const FIVE_HOUR_MINUTES = 300;
+const WEEK_MINUTES = 10_080;
+
+function usageOf(limits: unknown, total: { input_tokens?: unknown; cached_input_tokens?: unknown } | undefined): ActivityUsage | undefined {
+  const usage: ActivityUsage = {};
+  if (limits && typeof limits === 'object') {
+    for (const slot of [(limits as Record<string, unknown>).primary, (limits as Record<string, unknown>).secondary]) {
+      if (!slot || typeof slot !== 'object') continue;
+      const window = slot as { used_percent?: unknown; window_minutes?: unknown; resets_at?: unknown };
+      const read = limitWindowOf(window.used_percent, window.resets_at);
+      if (!read) continue;
+      if (window.window_minutes === FIVE_HOUR_MINUTES) usage.fiveHour = read;
+      else if (window.window_minutes === WEEK_MINUTES) usage.sevenDay = read;
+    }
+  }
+  // 캐시 적중률: 입력(캐시 읽기를 포함한 수)에서 캐시 읽기가 차지하는 비율. 입력이 0이면 모른다
+  if (isCount(total?.input_tokens) && isCount(total?.cached_input_tokens) && total.input_tokens > 0 && total.cached_input_tokens <= total.input_tokens) {
+    usage.cacheHitRatio = total.cached_input_tokens / total.input_tokens;
+  }
+  return Object.keys(usage).length > 0 ? usage : undefined;
 }
 
 function isCount(value: unknown): value is number {
