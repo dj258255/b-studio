@@ -179,7 +179,7 @@ async function pluginDirRefusal(dir: string): Promise<Refusal> {
 }
 
 /** Bun이 시작할 때 읽는 파일의 크기 상한. 넘으면 읽지 않고 거절한다(에이전트가 쓸 수 있는 자리라 상한이 없으면 읽는 쪽을 멈출 수 있다) */
-const MAX_STARTUP_FILE_BYTES = 1024 * 1024;
+export const MAX_STARTUP_FILE_BYTES = 1024 * 1024;
 /** Bun의 `.env` 계열(`.env`·`.env.local`·`.env.<NODE_ENV>`·`.env.<NODE_ENV>.local`). 읽는 쪽은 이름을 넓게 맞춘다(`NODE_ENV`가 무엇이든 `.env.<이름>`을 읽는다) */
 const BUN_ENV_FILE = /^\.env(\..*)?$/u;
 /** 쓰기를 막는 `.env` 이름(명시한 목록). 거부 목록이라 하위 폴더와 `.env.example` 같은 이름은 막지 않는다 */
@@ -262,7 +262,7 @@ export async function openCodeConfigRefusal(check: OpenCodeLoadCheck): Promise<R
 }
 
 /** 이름 비교용: 대소문자·전각·호환 글자를 접고 보이지 않는 글자와 끝의 점·빈칸을 뗀다. 접는 쪽이 넓게 맞아 거부 목록에는 더 막을 뿐이다 */
-const INVISIBLE = /[­​-‏‪-‮⁠-⁤﻿]/g;
+export const INVISIBLE = /[­​-‏‪-‮⁠-⁤﻿]/g;
 function fold(name: string): string {
   return name.normalize('NFKC').replace(INVISIBLE, '').toLowerCase().replace(/[. ]+$/u, '');
 }

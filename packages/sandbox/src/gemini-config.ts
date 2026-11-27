@@ -89,7 +89,7 @@ export async function geminiUserAuthType(home: string | undefined): Promise<stri
 }
 
 /** 설정 파일 하나의 크기 상한. 넘으면 읽지 않고 거절한다(에이전트가 쓸 수 있는 자리라 상한이 없으면 읽는 쪽을 멈출 수 있다) */
-const MAX_CONFIG_BYTES = 1024 * 1024;
+export const MAX_CONFIG_BYTES = 1024 * 1024;
 /**
  * Gemini의 설정 자리·믿음을 바꾸는 환경 변수. 감싸개가 지우고(`unset`), Rust 감시(`GEMINI_SETTINGS_ENVS`)가 있으면 붙지 않은 것으로 보고, `.env`가 정하면 거절한다.
  * 근거는 0.71.1: `GEMINI_CLI_HOME`(`Storage`)·`GEMINI_CLI_SYSTEM_SETTINGS_PATH`·`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`(`settings`)·`GEMINI_RESTRICTED_MODE`·`GEMINI_CLI_TRUST_WORKSPACE`(`trustedFolders`)
@@ -117,13 +117,13 @@ export const GEMINI_UNSET_ENVS: readonly string[] = [...GEMINI_SETTINGS_ENVS, ..
 /** 코드 적재·실행 경로 변수(공통 목록은 `env-risk.ts`). 감싸개가 지우고(`unset`, `DYLD_*`는 이름으로 찾아 지운다), `.env`가 정하면 거절한다 */
 export const GEMINI_CODE_LOAD_ENVS: readonly string[] = CODE_LOAD_ENVS;
 /** `.env`가 정하면 거절하는 이름(대소문자를 접어 견준다) */
-const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMINI_UNSET_ENVS].map((name) => name.toUpperCase()));
+export const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMINI_UNSET_ENVS].map((name) => name.toUpperCase()));
 /**
  * `GEMINI_`로 시작하지만 `.env`에 있어도 되는 열쇠(0.71.1에서 읽어 본 것): 로그인 열쇠·모델·로그인 방식·헤더 시간 상한.
  * 이 밖의 `GEMINI_` 열쇠는 모르는 것이라 거절한다(거부 목록이라 넓게 맞춘다: 판이 오르며 새로 생기는 스위치도 걸린다)
  */
-const ENV_SAFE_GEMINI_NAMES: ReadonlySet<string> = new Set(['GEMINI_API_KEY', 'GEMINI_MODEL', 'GEMINI_DEFAULT_AUTH_TYPE', 'GEMINI_API_KEY_AUTH_MECHANISM', 'GEMINI_API_HEADERS_TIMEOUT_MS']);
-const MAX_LEVELS = 64;
+export const ENV_SAFE_GEMINI_NAMES: ReadonlySet<string> = new Set(['GEMINI_API_KEY', 'GEMINI_MODEL', 'GEMINI_DEFAULT_AUTH_TYPE', 'GEMINI_API_KEY_AUTH_MECHANISM', 'GEMINI_API_HEADERS_TIMEOUT_MS']);
+export const MAX_LEVELS = 64;
 
 export interface GeminiLoadCheck {
   /** Gemini가 뜰 작업 폴더 */

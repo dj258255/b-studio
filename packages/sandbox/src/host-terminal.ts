@@ -4,6 +4,7 @@ import path from 'node:path';
 import { native } from './native';
 import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 import { GEMINI_CODE_LOAD_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
+import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
 import { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
 import { openCodeConfigContent } from './opencode-config';
 import { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
@@ -350,7 +351,7 @@ export function geminiHomePath(dir: string): string {
  * 사용자가 준 인자는 그대로 뒤에 붙인다. 모델 고르기(`-m`·`--model`)와 권한을 건너뛰는 인자(`--yolo`·`--approval-mode`)는 붙이지 않는다: 기본 모델로 뜨고, 권한 확인은 사람이 답한다.
  * `B_STUDIO_GEMINI_USER_HOME`은 진짜 홈을 기억한다(감싸개를 안쪽에서 다시 불러도 우리 홈을 진짜 홈으로 읽지 않게)
  */
-export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
+export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
   const q = shellQuote;
   return [
     '#!/bin/sh',
@@ -378,6 +379,7 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
     `unset ${GEMINI_CODE_LOAD_ENVS.join(' ')}`,
     'for v in $(env | sed -n "s/^\\(DYLD_[A-Za-z0-9_]*\\)=.*/\\1/p"); do unset "$v"; done',
     'export GEMINI_CLI_HOME="$home"',
+    ...startupCheckLines(dir, cli.nodePath, 'gemini'),
     `exec ${q(cli.cliPath)} "$@"`,
     '',
   ].join('\n');
@@ -391,6 +393,21 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
  */
 export function openCodeConfigPath(dir: string): string {
   return path.join(dir, OPENCODE_CONFIG_NAME);
+}
+
+/**
+ * 감싸개가 `exec` 직전에 부르는 시작 파일 검사(#1475). 열린 셸에서 CLI를 다시 띄우면 띄우기 전 검사가 돌지 않으므로 같은 판정(`startup-check.ts`)을 관문 폴더의 스크립트로 다시 돌린다.
+ * 빈 환경에서 절대 경로의 node로 부르고, 0이 아니면 띄우지 않는다. 스크립트가 거절하면 종료 코드 2와 이유를 내고, node·env가 없거나 스크립트가 죽거나 없으면 다른 종료 코드라
+ * 아래의 일반 문구를 찍는다(fail-closed). 거치지 않고 진짜 바이너리를 바로 부르는 길은 이 검사 몫이 아니라 감시(`hooked_launch`)의 몫이다
+ */
+function startupCheckLines(dir: string, nodePath: string, cli: 'opencode' | 'gemini'): string[] {
+  const q = shellQuote;
+  return [
+    `${q(HOOK_ENV_BIN)} -i ${q(nodePath)} ${q(path.join(dir, STARTUP_CHECK_NAME))} ${cli} "$(pwd -P)" || {`,
+    `  [ "$?" -eq 2 ] || printf '%s\\n' '[b-studio] 시작 파일 검사를 하지 못해 ${cli}을(를) 띄우지 않았습니다' >&2`,
+    '  exit 1',
+    '}',
+  ];
 }
 
 /**
@@ -409,13 +426,14 @@ export const OPENCODE_UNSET_ENVS: readonly string[] = [
   'OPENCODE_PERMISSION',
 ];
 
-export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
+export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
   return [
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
     `export ${OPENCODE_GATEWAY_DIR_ENV}=${shellQuote(dir)}`,
     `unset ${OPENCODE_UNSET_ENVS.join(' ')}`,
     `export OPENCODE_CONFIG=${shellQuote(openCodeConfigPath(dir))}`,
+    ...startupCheckLines(dir, cli.nodePath, 'opencode'),
     `exec ${shellQuote(cli.cliPath)} "$@"`,
     '',
   ].join('\n');
@@ -511,6 +529,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     return {
       // 훅은 설정이 부르는 명령 파일이다. 감싸개가 설정을 홈으로 복사한다. 훅 스크립트(Claude의 것)는 터미널을 열기 전에 관문에 닿는지 묻는 데만 쓴다(probeHostGateway)
       [GEMINI_HOOK_NAME]: file(GEMINI_HOOK),
+      [STARTUP_CHECK_NAME]: file(STARTUP_CHECK),
       [GEMINI_SETTINGS_NAME]: file(geminiSettingsContent(dir, cli.nodePath, cli.geminiAuthType)),
       [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
       [GATEWAY_FILE_NAME]: addressFile,
@@ -522,6 +541,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     return {
       // 훅은 플러그인 파일이 부른다. 훅 스크립트는 터미널을 열기 전에 관문에 닿는지 묻는 데만 쓴다(probeHostGateway)
       [OPENCODE_PLUGIN_NAME]: file(OPENCODE_PLUGIN),
+      [STARTUP_CHECK_NAME]: file(STARTUP_CHECK),
       [OPENCODE_CONFIG_NAME]: file(openCodeConfigContent(dir)),
       [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
       [GATEWAY_FILE_NAME]: addressFile,

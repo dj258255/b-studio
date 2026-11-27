@@ -1,3 +1,4 @@
+import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -1461,7 +1462,7 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
 
   it('관문 파일: 플러그인·설정·주소 파일·핑용 훅 스크립트·감싸개가 있고 권한이 맞다. 글은 모듈의 상수와 같고 토큰은 주소 파일에만 있다', () => {
     const files = expectedHostGatewayFiles(address, dir, cli);
-    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'b-studio-opencode-plugin.js', 'bin/opencode', 'opencode.json', 'shell/bashrc', 'shell/zsh/.zlogin', 'shell/zsh/.zprofile', 'shell/zsh/.zshenv', 'shell/zsh/.zshrc']);
+    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'b-studio-opencode-plugin.js', 'b-studio-startup-check.mjs', 'bin/opencode', 'opencode.json', 'shell/bashrc', 'shell/zsh/.zlogin', 'shell/zsh/.zprofile', 'shell/zsh/.zshenv', 'shell/zsh/.zshrc']);
     expect(files['b-studio-opencode-plugin.js']).toEqual({ content: OPENCODE_PLUGIN, mode: 0o600 });
     expect(files['opencode.json']).toEqual({ content: openCodeConfigContent(dir), mode: 0o600 });
     expect(files['bin/opencode']!.mode).toBe(0o700);
@@ -1526,7 +1527,8 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
     );
     await chmod(fake, 0o755);
     const wrapper = path.join(gateway, 'bin/opencode');
-    await writeFile(wrapper, hostOpenCodeWrapper(gateway, { cliPath: fake }));
+    await writeFile(path.join(gateway, STARTUP_CHECK_NAME), STARTUP_CHECK);
+    await writeFile(wrapper, hostOpenCodeWrapper(gateway, { cliPath: fake, nodePath: process.execPath }));
     await chmod(wrapper, 0o755);
     const stdout = await new Promise<string>((resolve, reject) =>
       execFile(

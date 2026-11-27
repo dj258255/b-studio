@@ -204,7 +204,7 @@ describe('OpenCode 환경 변수(#1475)', () => {
         'OPENCODE_TUI_CONFIG',
       ].sort(),
     );
-    const wrapper = hostOpenCodeWrapper('/gw', { cliPath: '/x' });
+    const wrapper = hostOpenCodeWrapper('/gw', { cliPath: '/x', nodePath: '/n/node' });
     const line = wrapper.split('\n').find((value) => value.startsWith('unset '));
     expect(line?.slice('unset '.length).split(' ')).toEqual([...OPENCODE_UNSET_ENVS]);
   });
