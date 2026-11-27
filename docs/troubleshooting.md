@@ -8318,7 +8318,7 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - 확인하지 못한 것: 이 표의 도구가 모두 파일을 바꾸지 않는다는 것은 도구 설명과 이름으로만 봤다(`todo_write`는 세션의 할 일 목록을 바꾼다. 작업 폴더의 파일이 아니다). 실제 세션에서 도구마다 불러 보지 않았다.
 
 
-## 289. Command Code 세션 터미널의 파일 도구가 경로 별칭으로 쓰기 범위를 비켜 갔음 — 확인하는 쪽은 열쇠 셋만 보고, 실제로 쓰는 쪽은 별칭 열한 개를 읽었다
+## 287. Command Code 세션 터미널의 파일 도구가 경로 별칭으로 쓰기 범위를 비켜 갔음 — 확인하는 쪽은 열쇠 셋만 보고, 실제로 쓰는 쪽은 별칭 열한 개를 읽었다
 
 ### 증상
 
@@ -8333,10 +8333,10 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - `write_file`·`edit_file`은 **입력의 모든 열쇠가 표(정식 이름 + 별칭, 내용·`old`·`new` 쪽 별칭 포함)에 있을 때만** 경로를 꺼내고, 모르는 열쇠가 하나라도 있으면 `null`(막힘)이다(`?`가 붙은 열쇠도 표에 없으니 막힌다). 경로 열쇠는 모두 꺼내고 값이 달라도 그대로 모두 낸다: 어느 것을 쓰는지는 열쇠 순서와 판에 달려 있어 우리가 따라 맞추면 틀리고, 모두 범위 안이어야 통과시키면 어느 쪽이 쓰여도 범위 안이다. 값이 글이 아니면 `null`, 빈 글은 CLI도 건너뛰는 자리라 건너뛴다. 마크다운 링크 꼴은 글 그대로와 벗긴 값을 둘 다 낸다.
 - 고치기 전에는 `session-terminal-tool-paths.test.ts`의 새 시험 여섯 개(별칭 열두 개, 비켜 가기 시나리오, 여러 열쇠, 글이 아닌 값, 모르는 열쇠, 마크다운 링크)가 실패했다. 아래 변이를 넣으면 같은 시험과 `sessions-terminal-commandcode.test.ts`의 별칭 시험이 다시 실패한다.
 - 지적받은 결함은 같은 시험을 기존 코드에 돌려 봤다: 다른 갈래(gemini)의 `write_file`은 알려진 열쇠만 꺼내는 옛 방식 그대로다(gemini는 이 단계에 없다). 읽기 도구는 막는 대상이 아니라 확인하지 않았다.
-- 훑어본 다른 도구: cli.mjs의 도구 스키마 중 경로를 받는 것은 `read_file`·`read_directory`·`grep`·`glob`·`get_diagnostics`(읽기)와 `write_file`·`edit_file`뿐이다. 쓰는 도구는 이 둘과 셸(`shell_command`·`powershell`·`monitor_command`)과 슬래시 명령(`run_command`, 트러블슈팅 290에서 막음)이다. `taste`는 CLI가 스스로 `.commandcode/taste`를 쓰는 것이라 경로를 받지 않는다. 우리가 모르는 쓰기 도구는 없었다.
+- 훑어본 다른 도구: cli.mjs의 도구 스키마 중 경로를 받는 것은 `read_file`·`read_directory`·`grep`·`glob`·`get_diagnostics`(읽기)와 `write_file`·`edit_file`뿐이다. 쓰는 도구는 이 둘과 셸(`shell_command`·`powershell`·`monitor_command`)과 슬래시 명령(`run_command`, 트러블슈팅 288에서 막음)이다. `taste`는 CLI가 스스로 `.commandcode/taste`를 쓰는 것이라 경로를 받지 않는다. 우리가 모르는 쓰기 도구는 없었다.
 
 
-## 290. 설정의 `mods.disableAll`·`mods.disabled`가 `--mod`로 준 mod를 껐음 — 감시는 argv만 보고 붙은 것으로 판정했다
+## 288. 설정의 `mods.disableAll`·`mods.disabled`가 `--mod`로 준 mod를 껐음 — 감시는 argv만 보고 붙은 것으로 판정했다
 
 ### 증상
 
