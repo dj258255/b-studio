@@ -12,7 +12,7 @@ import { detectStuckLoading } from './stuck-loading';
 import { runGateCheck, type GateHost } from './gate-check';
 import type { BaselineSource } from './test-baseline';
 import { captureBaselines, serviceUrl, type ContractFetcher, type VerificationReport } from './verify';
-import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowStepCheck } from './workflow';
+import { missingVerificationStages, protectedPathsFor, reviewChanges, type TestChangeEntry, type TestChangeInput, type WorkflowCheck, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
 import { REQUIREMENTS_FILE } from './requirements';
 import type { Workspace } from './workspace';
@@ -168,7 +168,15 @@ export interface GateOptions {
   outsideChanges?: {
     pendingFiles: () => Promise<readonly string[]>;
     fingerprint?: Fingerprinter;
+    /** `testChanges`와 같다. 도구 밖 변경을 받는 호출부가 한 곳에서 같이 주게 한다 */
+    testChanges?: () => Promise<readonly TestChangeEntry[]>;
   };
+  /**
+   * 마지막 체크포인트와 지금 작업 복사본의 차이에서 읽은 시험 파일 변경(지운 파일, 옮긴 파일, 더해진 줄. `CheckpointStore.pendingTestChanges`).
+   * 주면 리뷰 단계가 허용 없이 시험 파일을 지우거나 건너뛰기 표시를 더한 변경을 돌려보낸다. 던지면 끝까지 읽지 못한 것이라 통과가 아니라
+   * "확인하지 못함"으로 실패한다. 주지 않으면(git 기준이 없는 호출부) 이 검사는 하지 않는다
+   */
+  testChanges?: () => Promise<readonly TestChangeEntry[]>;
   /**
    * 에이전트 실행 없이 지금 작업 복사본을 처음부터 다시 확인한다(세션의 "다시 검증", #798·ADR-181). 바뀐 파일이 없어도
    * 검증을 건너뛰지 않고, studio.yaml이 바뀐 것처럼 관리 서비스를 모두 다시 띄운 뒤 선언한 확인을 모두 돌린다.
@@ -515,13 +523,31 @@ export class VerificationGate {
       },
       recheckEvaluationAssets: (recordChecks) => this.#recheckEvaluationAssets(recordChecks),
       recheckOutsideChanges: (recordChecks) => this.#recheckOutsideChanges(recordChecks),
-      reviewChecks: () => {
+      reviewChecks: async () => {
         // 쓰기 직전 고정값과 바이트까지 같은 보호 경로 파일은 "쓰고 되돌린 것"이라 보호 경로 확인에서 뺀다(이슈 #992). 고정값이 없으면 바뀐 것으로 본다
         const changed = this.#options.recheck === true ? [] : workspace.changedFiles();
-        return reviewChanges(this.#project, changed, workspace.restoredProtectedFiles(changed));
+        const testChanges = this.#options.recheck === true ? undefined : await this.#testChanges();
+        return reviewChanges(this.#project, changed, workspace.restoredProtectedFiles(changed), testChanges);
       },
       missingStages: (passed) => missingVerificationStages(this.#project, passed),
     };
+  }
+
+  /**
+   * 시험 약화 검사(지운 시험 파일, 더해진 건너뛰기 표시)의 입력을 만든다. 변경은 hook이 아니라 턴 끝의 작업 복사본 차이로 읽으므로 셸로 고친 것도 잡힌다.
+   * 사람이 이번 요청에 확인 변경을 허용했으면(allowCheckChanges) 판정이 통과로 바뀐다. 읽지 못하면 사유를 담아 끝까지 읽지 못했다고 알린다(조용히 건너뛰지 않는다).
+   * 읽는 곳을 받지 못한 호출부는 undefined(검사 없음)다
+   */
+  async #testChanges(): Promise<TestChangeInput | undefined> {
+    const read = this.#options.testChanges ?? this.#options.outsideChanges?.testChanges;
+    if (!read) return undefined;
+    const allowed = this.#options.allowCheckChanges === true;
+    try {
+      return { entries: await read(), allowed };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return { entries: [], allowed, incomplete: this.#options.sandbox.redact(reason) };
+    }
   }
 
   /**

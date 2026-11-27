@@ -472,7 +472,8 @@ fn restored_positions(value: Option<&JsValue>, len: usize) -> Result<Vec<usize>,
     }
 }
 
-/// 입력: 위 입력에 `{files, protectedPaths, backslashSep, maxChangedFiles?, restoredPositions?}`(`files`·`protectedPaths`는 원래 글자)를 더한 것.
+/// 입력: 위 입력에 `{files, protectedPaths, backslashSep, maxChangedFiles?, restoredPositions?, testChanges?}`(`files`·`protectedPaths`는 원래 글자)를 더한 것.
+/// `testChanges`(`test_weakening::review_from_value`)가 있으면 시험 파일 삭제·건너뛰기 표시 검사(`test-weakening`)가 보호 경로·변경 크기 다음에 붙는다.
 /// `restoredPositions`는 보호 경로 확인에서만 빼 준다(파일 수 상한·덮이지 않은 변경 경고는 모든 파일을 센다)
 pub fn review_changes_json(input_json: &str) -> Result<String, String> {
     let value = parse_input(input_json)?;
@@ -485,6 +486,11 @@ pub fn review_changes_json(input_json: &str) -> Result<String, String> {
         None => {}
         Some(JsValue::Num(max)) => checks.push(change_size_check(files.len(), *max)),
         Some(_) => return Err("maxChangedFiles는 수여야 합니다".to_owned()),
+    }
+    // 시험을 약하게 만든 변경(지운 시험 파일, 더해진 건너뛰기 표시). 입력이 없으면(git 기준이 없는 호출부) 이 검사는 없다
+    match value.prop("testChanges") {
+        None | Some(JsValue::Null) => {}
+        Some(changes) => checks.extend(crate::test_weakening::review_from_value(changes)?),
     }
     checks.extend(uncovered_change_warnings(&cover_input(&value)?));
     Ok(js_json::to_native(&checks_value(&checks)))

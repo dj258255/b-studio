@@ -122,8 +122,8 @@ export interface GateHost {
   /** 배열을 그 자리에서 바꾼다 */
   recheckEvaluationAssets(recordChecks: WorkflowCheck[]): Promise<void>;
   recheckOutsideChanges(recordChecks: WorkflowCheck[]): Promise<void>;
-  /** 변경 리뷰(보호 경로·변경 크기 등) */
-  reviewChecks(): WorkflowCheck[];
+  /** 변경 리뷰(보호 경로·변경 크기·시험 약화 등). 시험 파일 변경은 작업 복사본의 git 차이를 읽어 오므로 기다린다 */
+  reviewChecks(): WorkflowCheck[] | Promise<WorkflowCheck[]>;
   /** 통과한 단계를 뺀 필수 단계 */
   missingStages(passed: ReadonlySet<WorkflowStage>): WorkflowStage[];
 }
@@ -420,7 +420,7 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
       await host.recheckOutsideChanges(checks);
       return { ok: true, checks };
     },
-    reviewChecks: () => ({ ok: true, checks: host.reviewChecks() }),
+    reviewChecks: async () => ({ ok: true, checks: await host.reviewChecks() }),
     missingStages: ({ passed }) => ({ ok: true, missing: host.missingStages(new Set(stages(passed))) }),
   };
 

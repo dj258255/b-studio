@@ -74,6 +74,7 @@ pub mod task_plan;
 pub mod test_discovery;
 pub mod test_results;
 pub mod test_run;
+pub mod test_weakening;
 pub mod tool_input;
 pub mod tool_output;
 pub mod up_loop;
