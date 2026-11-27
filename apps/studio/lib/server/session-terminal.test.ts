@@ -138,7 +138,7 @@ describe('세션 터미널 (이슈 #673)', () => {
     const late: TerminalMessage[] = [];
     const stopLate = subscribeSessionTerminal(id, (message) => late.push(message));
     expect(decode(late)).toBe('\u001b[2J한글 출력\r\n');
-    expect(late.at(-2)).toEqual({ kind: 'status', state: 'open' });
+    expect(late.at(-2)).toEqual({ kind: 'status', state: 'open', size: { cols: 100, rows: 30 } });
     expect(late.at(-1)).toEqual({ kind: 'cli', alive: false });
 
     stop();

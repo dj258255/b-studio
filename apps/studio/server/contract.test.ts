@@ -236,7 +236,7 @@ const startResultSchema = looseObject({
 
 const terminalMessageSchema = z.discriminatedUnion('kind', [
   looseObject({ kind: z.literal('data'), data: z.string() }),
-  looseObject({ kind: z.literal('status'), state: z.enum(['closed', 'opening', 'open']), message: z.string().optional() }),
+  looseObject({ kind: z.literal('status'), state: z.enum(['closed', 'opening', 'open']), message: z.string().optional(), size: looseObject({ cols: z.number().int(), rows: z.number().int() }).optional() }),
   looseObject({ kind: z.literal('exit'), code: z.number().nullable() }),
   looseObject({ kind: z.literal('cli'), alive: z.boolean() }),
   looseObject({ kind: z.literal('warning'), message: z.string() }),
@@ -666,6 +666,8 @@ describe('계약: GET /api/terminals/stream?ids= (SSE)', () => {
         return parsed.success && parsed.data.id === directSessionId && parsed.data.message.kind === 'cli' ? true : undefined;
       });
       expect(messages().some((entry) => entry.id === directSessionId && entry.message.kind === 'status' && entry.message.state === 'open')).toBe(true);
+      // 열린 터미널의 상태에는 지금 크기가 실린다(studio read가 최근 출력을 그 크기로 해석한다)
+      expect(messages().find((entry) => entry.id === directSessionId && entry.message.kind === 'status' && entry.message.state === 'open')?.message).toMatchObject({ size: { cols: expect.any(Number), rows: expect.any(Number) } });
 
       const terminal = fake.terminals.find((entry) => entry.written.length > 0)!;
       terminal.emit('hello');

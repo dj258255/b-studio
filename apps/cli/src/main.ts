@@ -12,6 +12,7 @@ import { stop } from './commands/stop';
 import { up } from './commands/up';
 import { verify } from './commands/verify';
 import { workflow } from './commands/workflow';
+import { CTL_COMMANDS, CTL_USAGE, ctlMain } from './ctl/main';
 
 const EFFORTS: readonly Effort[] = ['low', 'medium', 'high', 'xhigh', 'max'];
 
@@ -20,6 +21,7 @@ const USAGE = `사용법:
   studio up <프로젝트 경로> [--keep]
   studio launch [--mode local|demo|commandcode|codex] [--port <n>]
   studio stop [--json]
+  studio ls|new|send|keys|wait|read|status|events ... · studio stop --session <세션>  (스크립트로 세션 제어, 아래)
   studio desk [--port <n>] [--no-notify] [--no-mouse]
   studio boot-probe <프로젝트 경로> [--json]
   studio agent <프로젝트 경로> "<요청>" [옵션]
@@ -100,7 +102,9 @@ agent 옵션:
   --effort <level>   low | medium | high | xhigh | max (기본: high)
   --model <id>       api 기본: claude-opus-5, claude-code·codex·commandcode 기본: 로그인한 계정의 기본 모델, opencode 필수: 로그인한 제공자의 모델('opencode models'로 확인)
   --free-only        commandcode·opencode에서 무료 모델만 쓴다. 무료가 아니거나 쓸 수 없는 --model이면 오류
-  --logs             서비스 로그를 함께 출력한다`;
+  --logs             서비스 로그를 함께 출력한다
+
+${CTL_USAGE}`;
 
 /** --mode·--port를 검사한다. 잘못됐으면 안내를 찍고 종료 코드 2 */
 function modeAndPort(modeValue: string | undefined, portValue: string | undefined): { mode: LaunchMode; port: number } | number {
@@ -118,6 +122,17 @@ function modeAndPort(modeValue: string | undefined, portValue: string | undefine
 }
 
 async function main(argv: string[]): Promise<number> {
+  // 스크립트 제어 명령(ls·new·send …)은 자기 옵션을 따로 읽는다. `stop`은 --session이 있을 때만 세션 멈추기다(옵션 없는 stop은 스튜디오 끄기 그대로)
+  const first = argv[0];
+  if (first !== undefined && (CTL_COMMANDS.includes(first) || (first === 'stop' && argv.some((arg) => arg === '--session' || arg.startsWith('--session='))))) {
+    const controller = new AbortController();
+    process.once('SIGINT', () => controller.abort());
+    process.once('SIGTERM', () => controller.abort());
+    const code = await ctlMain(argv, { env: process.env, out: (line) => console.log(line), err: (line) => console.error(line), signal: controller.signal });
+    // 끝난 뒤 남은 연결이 프로세스를 붙잡지 않게 한다(출력이 다 나간 뒤에 끝난다)
+    setTimeout(() => process.exit(code), 2_000).unref();
+    return code;
+  }
   const { positionals, values } = parseArgs({
     args: argv,
     allowPositionals: true,

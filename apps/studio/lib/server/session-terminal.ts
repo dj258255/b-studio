@@ -123,7 +123,8 @@ export function reviewFixBlockReason(
 
 export type TerminalMessage =
   | { kind: 'data'; data: string }
-  | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string }
+  /** size: 구독하자마자 받는 상태에서만, 터미널이 열려 있을 때 지금 크기다(받은 최근 출력이 그 크기로 그려졌다고 보고 화면을 되살리는 데 쓴다) */
+  | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string; size?: { cols: number; rows: number } }
   | { kind: 'exit'; code: number | null }
   /**
    * 터미널 안에 에이전트 CLI가 떠 있는가(CLI의 세션 시작·끝 훅으로 안다). 화면은 떠 있을 때만 다른 패널의 글을 붙여 넣는다 —
@@ -805,7 +806,8 @@ export function subscribeSessionTerminal(sessionId: string, listener: Listener):
   const state = stateFor(sessionId);
   state.listeners.add(listener);
   if (state.chunks.length > 0) listener({ kind: 'data', data: Buffer.concat(state.chunks).toString('base64') });
-  listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed' });
+  // 받는 쪽이 최근 출력을 그 크기로 해석해 화면을 되살릴 수 있게 열린 터미널의 크기를 함께 싣는다
+  listener({ kind: 'status', state: state.terminal ? 'open' : state.opening ? 'opening' : 'closed', ...(state.terminal ? { size: { cols: state.size.cols, rows: state.size.rows } } : {}) });
   listener({ kind: 'cli', alive: state.cli });
   return () => unsubscribe(sessionId, state, listener);
 }

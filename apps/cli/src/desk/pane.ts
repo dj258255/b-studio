@@ -200,6 +200,25 @@ export class PaneTerminal {
     return out;
   }
 
+  /**
+   * 지난 줄과 지금 화면의 글(서식 없음). 줄 끝 빈칸은 지우고, 칸 폭 때문에 이어진 줄은 한 줄로 잇는다.
+   * viewportStart는 그 가운데 지금 화면이 시작하는 줄이다. 스크립트용 읽기(studio read)가 쓴다
+   */
+  plainText(): { lines: string[]; viewportStart: number } {
+    const buffer = this.#term.buffer.active;
+    const lines: string[] = [];
+    let viewportStart = 0;
+    for (let at = 0; at < buffer.length; at++) {
+      const line = buffer.getLine(at);
+      if (at === buffer.viewportY) viewportStart = lines.length;
+      if (!line) continue;
+      const text = line.translateToString(true);
+      if (line.isWrapped && lines.length > 0) lines[lines.length - 1] += text;
+      else lines.push(text);
+    }
+    return { lines, viewportStart };
+  }
+
   /** lines()의 폭. 복사 모드면 들어갈 때 떠 둔 폭이다 */
   get viewCols(): number {
     return this.#copy?.cols ?? this.#term.cols;
