@@ -126,6 +126,7 @@ import {
   WORKFLOW_TRAILER,
   readProjectFileSync,
   Workspace,
+  baselineFromCheckpoints,
   ChangeTracker,
   createToolResultCache,
   executeTool,
@@ -3189,6 +3190,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       testChanges: () => session.checkpoints.pendingTestChanges(),
     },
     requirementsBaseline,
+    // 선언한 시험이 실패하면 마지막 체크포인트 기준으로 같은 시험을 다시 돌려 "변경 전에도 실패인지" 피드백에 라벨을 붙인다(#1435). 라벨은 글에만 쓰이고 판정은 그대로다
+    baseline: baselineFromCheckpoints(session.checkpoints, () => session.snapshot.checkpoints[0]?.sha),
     allowBreaking: plan.allowBreaking,
     intent: plan.intent,
     // "조사" 모드(ADR-094): 질문(ask)에서 웹으로 찾아 답하라는 뜻. claude-code 러너만 실제로 WebSearch·WebFetch를 연다
@@ -8762,6 +8765,7 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
       ...(declarationBaseline ? { declarationBaseline } : {}),
       // 사람이 켜 둔 확인 선언 변경 허용(#916, ADR-164). 켜면 게이트가 시도마다 studio.yaml의 선언을 다시 읽고, 시험 파일의 삭제·건너뛰기 표시도 받아들인다
       ...(state.allowCheckChanges ? { allowCheckChanges: true } : {}),
+      baseline: baselineFromCheckpoints(session.checkpoints, () => session.snapshot.checkpoints[0]?.sha),
       // 셸이든 CLI의 내장 도구든 턴 끝의 작업 복사본 차이로 본다(훅을 거치지 않은 변경도 잡힌다)
       testChanges: () => session.checkpoints.pendingTestChanges(),
       fetcher: fetchContract,

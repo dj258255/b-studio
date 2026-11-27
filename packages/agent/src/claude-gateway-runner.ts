@@ -182,6 +182,7 @@ export async function runClaudeGatewayAgent(options: ClaudeGatewayRunOptions): P
     maxVerifyAttempts,
     verify: options.verify,
     allowCheckChanges: options.allowCheckChanges,
+    baseline: options.baseline,
     fetcher,
     pageFetcher: options.pageFetcher,
     browserRunner: options.browserRunner,
