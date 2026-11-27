@@ -64,7 +64,7 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sessionTerminalAllowed, setTerminalBoard, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { allowedBackends, applyServerChanges, seedServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sessionTerminalAllowed, setTerminalBoard, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 import { isTerminalRunnableBackend, sessionTerminalMode } from './session-terminal';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
@@ -1195,18 +1195,31 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     let settled: { status: string; summary: string } =
       applied.status === 'done' && applied.checkpoint === undefined ? { status: 'failed', summary: '검증은 통과했지만 합친 결과가 체크포인트로 남지 않았습니다(바뀐 파일이 없었습니다)' } : applied;
     // S4: 통합 게이트가 실패하면 통합 세션의 터미널에 수리 요청을 한 번만 보내 끝을 기다린다(공유 없이 실패 뒤에만 비용을 내는 대조군).
-    // 서버가 쓰는 길은 실패하면 되돌리고 끝나므로 이 시점에 통합 세션 터미널은 열려 있지 않다
+    // 서버가 쓰는 길은 실패하면 작업 폴더를 되돌리므로, 수리 전에 레인 결과를 미확정 변경으로 다시 써 수리 CLI가 합친(실패한) 상태에서 시작하게 한다.
+    // 그 변경은 수리 실행의 턴 끝 게이트(완료 검사 포함)가 검증한다(seedServerChanges). 통과는 수리 전에 없던 새 체크포인트가 있을 때만이다
     let repairedCheckpoint: Checkpoint | undefined;
     if (applied.status !== 'done' && plan.coordination?.strategy === 'S4') {
+      const before = new Set((getSnapshot(snapshot.id)?.checkpoints ?? []).map((checkpoint) => checkpoint.sha));
+      await seedServerChanges(snapshot.id, { writes, deletes: removable, writableScope });
       await (terminalLaneDeps?.driver ?? terminalLaneDriver).open(snapshot.id);
       const repair = await runTerminalTask(snapshot.id, repairRequest(plan, applied.summary), { writableScope, doneTests }, terminalLaneDeps);
-      integration.repair = { attempted: true, status: repair.status, run: { status: repair.status, durationMs: repair.durationMs, usage: repair.usage, metrics: repair.metrics } };
-      settled = repair;
-      if (repair.status === 'done') repairedCheckpoint = getSnapshot(snapshot.id)?.checkpoints[0];
+      let repairStatus = repair.status;
+      let repairSummary = repair.summary;
+      if (repair.status === 'done') {
+        // 수리 전 체크포인트 집합과 견준다. 새 체크포인트가 없거나 읽지 못하면 통과가 아니다(빈 턴·옛 체크포인트를 합친 결과로 적지 않는다)
+        const fresh = (getSnapshot(snapshot.id)?.checkpoints ?? []).find((checkpoint) => !before.has(checkpoint.sha));
+        if (fresh) repairedCheckpoint = fresh;
+        else {
+          repairStatus = 'failed';
+          repairSummary = '수리가 통과로 끝났지만 수리 전에 없던 새 체크포인트가 남지 않았습니다(바뀐 것이 없거나 읽지 못했습니다)';
+        }
+      }
+      integration.repair = { attempted: true, status: repairStatus, run: { status: repairStatus, durationMs: repair.durationMs, usage: repair.usage, metrics: repair.metrics } };
+      settled = { status: repairStatus, summary: repairSummary };
     }
     if (settled.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${settled.status} ${settled.summary}`);
     // 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다). 수리가 통과시켰으면 수리가 남긴 체크포인트다
-    Object.assign(integration, { status: 'done', checkpoint: checkpointView(repairedCheckpoint ?? appliedCheckpoint) });
+    Object.assign(integration, { status: 'done', checkpoint: checkpointView(repairedCheckpoint ?? (applied.status === 'done' ? appliedCheckpoint : undefined)) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
     recordMetrics(plan);

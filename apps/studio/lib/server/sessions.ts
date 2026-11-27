@@ -9410,6 +9410,64 @@ export async function applyServerChanges(
 }
 
 /**
+ * 통합 S4 수리 전에, 레인 결과를 이 세션의 작업 폴더에 **확정하지 않은 변경**으로 다시 쓴다(ADR-243). 서버가 쓰는 통합 길(`applyServerChanges`)은
+ * 게이트가 실패하면 작업 폴더를 되돌리므로, 수리 CLI는 그냥 열면 "합친 결과가 실패했다"는 요청과 맞지 않는 되돌려진 상태에서 시작한다.
+ *
+ * 이 함수는 게이트를 거치지 않지만 변경을 통과시키지 않는다: 쓴 파일은 체크포인트가 아니라 작업 복사본의 미확정 변경으로 남고,
+ * 그 뒤 수리 실행의 턴 끝 판정(`finishTerminalTurn`)이 **실행 전부터 있던 변경도 검증 대상으로** 본다(`terminalVerification`의 `tolerateExisting: false`, ADR-131).
+ * 변경 전 기준도 작업 폴더가 아니라 마지막 체크포인트에서 잡는다(`baselineFromCheckpoints`). 그래서 합친 상태가 기준이 되어 계약 깨짐이 가려지지 않고,
+ * 쓰기 범위·완료 검사도 그 판정이 건다. 수리가 이 변경을 되돌려 빈 턴으로 끝나면 체크포인트가 새로 남지 않아 부르는 쪽이 통과로 읽지 않는다.
+ * 쓰기 전 거름은 `applyServerChanges`와 같다(경로 모양·중복·쓰기 범위·링크·숨긴 이름). 같은 전제(터미널을 연 적이 없는 세션 등)가 아니면 거절한다.
+ */
+export async function seedServerChanges(
+  id: string,
+  input: { writes: ReadonlyArray<{ path: string; content: string }>; deletes: readonly string[]; writableScope: readonly string[] },
+): Promise<void> {
+  const session = requireSession(id);
+  if (!terminalSessionAlive(session)) throw new StudioError(409, '멈춘 세션입니다');
+  if (sessionTerminalMode() === 'container') throw new StudioError(409, '컨테이너 방식에서는 서버가 변경을 쓰지 못합니다');
+  if (session.terminalOpened === true || hasWatch(id) || openTerminalRun(session) !== undefined) {
+    throw new StudioError(409, '터미널을 연 적이 있는 세션에는 서버가 변경을 쓰지 않습니다(같은 작업 폴더에 다른 쪽이 쓸 수 있습니다)');
+  }
+  if (session.terminalTaskContext !== undefined) throw new StudioError(409, '이미 쓰기 범위가 걸린 세션입니다');
+  if (session.serverApplying === true) throw new StudioError(409, '서버가 이미 이 세션에 변경을 쓰고 있습니다');
+  session.serverApplying = true;
+  try {
+    // 범위 확인(terminalScopeDeny)이 읽는 맥락을 이 함수 동안만 건다
+    setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: [] });
+    try {
+      const workspace = new Workspace(session.project.root);
+      const paths = [...input.writes.map((write) => write.path), ...input.deletes];
+      const seen = new Set<string>();
+      for (const file of paths) {
+        const bad = serverChangePathProblem(file);
+        if (bad) throw new StudioError(400, `${file}: ${bad}`);
+        const key = file.normalize('NFC').toLowerCase();
+        if (seen.has(key)) throw new StudioError(400, `${file}: 같은 경로가 두 번 있습니다`);
+        seen.add(key);
+        const scope = await terminalScopeDeny(session, 'Write', { file_path: file });
+        if (scope) throw new StudioError(400, scope);
+        try {
+          await workspace.assertToolPath(file);
+        } catch (error) {
+          throw new StudioError(400, `${file}: ${describe(error)}`);
+        }
+      }
+      for (const file of input.deletes) {
+        const info = await lstat(path.join(workspace.root, file)).catch(() => undefined);
+        if (!info?.isFile()) throw new StudioError(400, `${file}: 일반 파일만 지울 수 있습니다`);
+      }
+      for (const write of input.writes) await workspace.write(write.path, write.content);
+      for (const file of input.deletes) await workspace.remove(file);
+    } finally {
+      setTerminalTaskContext(id, undefined);
+    }
+  } finally {
+    session.serverApplying = undefined;
+  }
+}
+
+/**
  * 서버가 쓸 파일을 하나도 쓰기 전에 전부 거르고, 모두 통과하면 쓴다. 거른 사유가 있으면 그 글을(아무것도 쓰지 않았다), 없으면 undefined.
  * 쓰는 도중 던지면 이미 쓴 것은 실행을 실패로 닫는 쪽(`abandonTerminalRun`)이 되돌린다.
  *

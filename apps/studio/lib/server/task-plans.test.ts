@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -117,8 +117,12 @@ const fake = vi.hoisted(() => ({
   contractUsage: { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
   /** 통합 스크립트 턴의 게이트 결과. S4 수리를 부르려면 'failed'로 둔다 */
   integration: 'done' as 'done' | 'failed',
-  /** S4 수리 요청의 게이트 결과 */
-  repair: 'done' as 'done' | 'failed',
+  /** S4 수리 요청의 게이트 결과. 'empty'는 수리 CLI가 아무것도 안 하고 done을 돌려주는 경우(새 체크포인트가 없다) */
+  repair: 'done' as 'done' | 'failed' | 'empty',
+  /** seedServerChanges(수리 전에 합친 결과를 작업 폴더에 다시 쓰는 길)를 부른 기록 */
+  seeds: [] as Array<{ sessionId: string; writes: string[]; deletes: string[]; writableScope: string[] }>,
+  /** 수리 요청이 시작될 때 통합 작업 폴더에 레인 결과 파일이 있었는가(파일 이름 → 있었는가) */
+  repairSaw: {} as Record<string, boolean>,
   /** 모든 run_finished에 붙이는 실행 지표. 계획 기록에 그대로 옮겨지는지 확인한다 */
   run: {
     usage: { inputTokens: 1, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 4 },
@@ -310,6 +314,14 @@ vi.mock('./sessions', () => ({
     fake.listeners.set(id, set);
     return () => set.delete(listener);
   },
+  seedServerChanges: async (sessionId: string, input: { writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[] }) => {
+    fake.seeds.push({ sessionId, writes: input.writes.map((write) => write.path), deletes: [...input.deletes], writableScope: [...input.writableScope] });
+    const session = fake.sessions.get(sessionId)!;
+    for (const write of input.writes) {
+      mkdirSync(path.dirname(path.join(session.workDir, write.path)), { recursive: true });
+      writeFileSync(path.join(session.workDir, write.path), write.content);
+    }
+  },
   applyServerChanges: async (sessionId: string, input: { request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[]; doneTests?: unknown[] }) => {
     fake.serverChanges.push({ sessionId, request: input.request, writes: [...input.writes], deletes: [...input.deletes], writableScope: [...input.writableScope], doneTests: [...(input.doneTests ?? [])] });
     const session = fake.sessions.get(sessionId)!;
@@ -360,7 +372,7 @@ vi.mock('./sessions', () => ({
     }
     // S4 수리: 모델 경로로 보낸 요청. 게이트 결과는 fake.repair가 정한다
     if (isRepair(request)) {
-      finish(fake.repair, fake.repair === 'done' ? '수리 완료' : '검증 게이트를 통과하지 못했습니다');
+      finish(fake.repair === 'failed' ? 'failed' : 'done', fake.repair === 'done' ? '수리 완료' : '검증 게이트를 통과하지 못했습니다');
       return { runId };
     }
     // 레인 작업
@@ -429,6 +441,8 @@ vi.mock('./terminal-lane', () => ({
     const runId = `terminal-${fake.terminalSends.length}`;
     // S4 수리: 통합 세션 터미널에 보낸 수리 요청. 게이트 결과는 fake.repair가 정한다
     if (isRepair(request)) {
+      for (const file of ['web/a/one.md', 'web/b/one.md']) fake.repairSaw[file] = existsSync(path.join(session.workDir, file));
+      if (fake.repair === 'empty') return { runId, status: 'done', summary: '바꾼 파일 없이 끝났습니다.', ...fake.run };
       if (fake.repair === 'done') session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: ['web/a/one.md'] });
       return { runId, status: fake.repair, summary: fake.repair === 'done' ? '수리 완료' : '검증 게이트를 통과하지 못했습니다', ...fake.run };
     }
@@ -515,6 +529,8 @@ beforeEach(() => {
   fake.sends = [];
   fake.serverChanges = [];
   fake.serverNoCheckpoint = false;
+  fake.seeds = [];
+  fake.repairSaw = {};
   fake.stopped = [];
   fake.stopAndDeleted = [];
   fake.stopOrder.integrationCreatedAfterStops = false;
@@ -2818,9 +2834,33 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
       expect(repairs[0]!.sessionId).toBe(plan.integration?.sessionId);
       expect(repairs[0]!.options.writableScope).toEqual(['web/a', 'web/b']);
       expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'done' });
-      expect(plan.integration?.checkpoint?.sha).toBe(repairs[0] ? 'terminal-3' : '');
+      // 수리가 남긴 새 체크포인트가 통합 기록이다(수리 전에 없던 것)
+      expect(plan.integration?.checkpoint?.sha).toMatch(/^terminal-/);
       expect(fake.sends).toEqual([]);
       expect(fake.taskAccess.every((entry) => entry.access === undefined)).toBe(true);
+    });
+
+    it('S4: 수리는 합친(실패한) 상태에서 시작한다. 수리 전에 레인 결과를 통합 작업 폴더에 다시 쓰고(쓰기 범위 안에서), 그 변경이 수리 턴의 게이트를 거친다', async () => {
+      twoLanesPlan();
+      fake.integration = 'failed';
+      const plan = await run({ projectId: 'orders', request: 'S4 시작 상태', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+      expect(plan.status).toBe('done');
+      expect(fake.seeds).toHaveLength(1);
+      expect(fake.seeds[0]).toMatchObject({ sessionId: plan.integration?.sessionId, writableScope: ['web/a', 'web/b'] });
+      expect(fake.seeds[0]!.writes.sort()).toEqual(['web/a/one.md', 'web/b/one.md']);
+      // 수리 요청이 시작될 때 작업 폴더에 레인 결과가 이미 있었다
+      expect(fake.repairSaw).toEqual({ 'web/a/one.md': true, 'web/b/one.md': true });
+    });
+
+    it('S4: 수리 CLI가 아무것도 안 하고 끝나(새 체크포인트가 없는 done) 통합 체크포인트로 오래된 것을 적지 않고 실패로 닫는다', async () => {
+      twoLanesPlan();
+      fake.integration = 'failed';
+      fake.repair = 'empty';
+      const plan = await run({ projectId: 'orders', request: 'S4 빈 수리', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+      expect(plan.status).toBe('failed');
+      expect(plan.integration?.status).toBe('failed');
+      expect(plan.integration?.checkpoint).toBeUndefined();
+      expect(plan.integration?.error).toContain('새 체크포인트');
     });
 
     it('S4: 통합이 처음에 통과하면 수리를 보내지 않는다. 수리도 실패하면 통합이 실패한다', async () => {
