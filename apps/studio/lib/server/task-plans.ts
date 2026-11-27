@@ -375,13 +375,13 @@ export async function createTaskPlan(input: {
  */
 function assertPlanTerminalRunnable(input: { presetPlan?: unknown; coordination?: CoordinationInput; verify?: VerifyMode; integrationChecks?: { pageChecks?: WorkflowPageCheck[] }; effort?: string }): void {
   if (!sessionTerminalAllowed()) throw new StudioError(409, '터미널 방식 작업 분해는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
-  // 허용 목록: 터미널 레인에 게시판 도구를 붙일 수 있는 전략만 받는다(모르는 전략도 거절). S4·S6·S7은 레인 밖 동작(통합 수리·트레이스·중계)이 터미널 경로에 없다
+  // 허용 목록(모르는 전략도 거절). S2·S3·S5·S7은 게시판 도구를 레인 터미널에 붙이고(S7의 중계는 레인 실행기와 무관), S4는 통합 세션 터미널에 수리를 보낸다.
+  // S6은 트레이스가 모델 글·도구 결과·턴 경계로 만들어지는데 터미널 훅에는 도구 호출뿐이라, 줄인 트레이스로 돌리면 벤치 비교가 달라져 받지 않는다
   const strategy = input.coordination?.strategy;
-  if (input.coordination && !(strategy === 'S2' || strategy === 'S3' || strategy === 'S5')) {
-    throw new StudioError(400, `터미널 레인은 아직 조율 전략 ${String(strategy)}과(와) 함께 쓸 수 없습니다(S2·S3·S5만 받습니다)`);
+  if (input.coordination && !(strategy === 'S2' || strategy === 'S3' || strategy === 'S4' || strategy === 'S5' || strategy === 'S7')) {
+    throw new StudioError(400, `터미널 레인은 아직 조율 전략 ${String(strategy)}과(와) 함께 쓸 수 없습니다(S2·S3·S4·S5·S7만 받습니다)`);
   }
   if (input.verify === 'light') throw new StudioError(400, '터미널 레인은 아직 가볍게 확인(verify: light)을 받지 못합니다');
-  if (input.integrationChecks?.pageChecks?.length) throw new StudioError(400, '터미널 레인은 아직 통합 페이지 확인(pageChecks)을 받지 못합니다');
   if (asEffort(input.effort)) throw new StudioError(400, '터미널 레인은 아직 노력 단계(effort)를 CLI에 넘기지 못합니다');
   const serverDefault = resolveSessionBackend(undefined);
   const backends = new Set<string>();
@@ -409,15 +409,14 @@ function assertPlanTerminalRunnable(input: { presetPlan?: unknown; coordination?
  * 그 길에 실을 수 없는 입력은 만들기 전에 거절한다(거절하는 쪽: 모르는 입력은 거절한다). 가벼운 확인은 터미널 판정이 같은 뜻으로 받는지 모르고,
  * S4 수리는 모델 호출이 필요하며, 컨테이너 방식은 터미널 판정이 검사 동안 멈출 에이전트 컨테이너가 통합 세션에 없다
  */
-function assertIntegrationRunnable(input: { verify?: VerifyMode; coordination?: CoordinationInput }): void {
-  const reason = integrationBlockReason(input.verify, input.coordination?.strategy);
+function assertIntegrationRunnable(input: { verify?: VerifyMode }): void {
+  const reason = integrationBlockReason(input.verify);
   if (reason) throw new StudioError(reason.status, reason.message);
 }
 
 /** 통합을 서버가 쓰는 길로 할 수 없는 까닭. 할 수 있으면 undefined. 새 계획의 만들기 검사와 옛 계획의 통합 재시도가 같은 판정을 쓴다 */
-function integrationBlockReason(verify: VerifyMode | undefined, strategy: string | undefined): { status: number; message: string } | undefined {
+function integrationBlockReason(verify: VerifyMode | undefined): { status: number; message: string } | undefined {
   if (verify === 'light') return { status: 400, message: '가볍게 확인(verify: light)은 통합을 서버가 쓰는 길로 닫을 수 없어 받지 못합니다(채팅식 통합은 없습니다)' };
-  if (strategy === 'S4') return { status: 400, message: '조율 전략 S4는 통합 실패를 모델에 되돌려 수리하는 채팅식 길이라 받지 못합니다' };
   if (sessionTerminalMode() === 'container') {
     return { status: 409, message: '컨테이너 방식 터미널에서는 레인 결과를 합치는 통합을 아직 지원하지 않아 작업 분해를 쓸 수 없습니다(이 컴퓨터 방식에서 쓰세요)' };
   }
@@ -1107,12 +1106,12 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
 }
 
 /**
- * 터미널 레인에 게시판 도구를 붙일지(#1346). 게시판이 있고 전략이 S2·S3·S5일 때만 값이 있다.
- * S4는 레인에 게시판을 주지 않고, S6·S7은 터미널 경로에 없는 동작(트레이스 게시·중계)이 필요해 만들기 단계에서 거절한다.
+ * 터미널 레인에 게시판 도구를 붙일지(#1346). 게시판이 있고 전략이 S2·S3·S5·S7일 때만 값이 있다(S7은 레인이 쓰고 조정자 중계가 읽는다).
+ * S4는 레인에 게시판을 주지 않고, S6은 만들기 단계에서 거절한다.
  */
 function terminalLaneBoard(plan: TaskPlanView): { modelWrites: boolean } | undefined {
   const strategy = plan.coordination?.strategy;
-  if (strategy !== 'S2' && strategy !== 'S3' && strategy !== 'S5') return undefined;
+  if (strategy !== 'S2' && strategy !== 'S3' && strategy !== 'S5' && strategy !== 'S7') return undefined;
   const board = boards.get(plan.id);
   return board ? { modelWrites: board.modelWrites } : undefined;
 }
@@ -1127,7 +1126,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
   const deletes: string[] = [];
   try {
     // 옛 계획의 통합 재시도(재시작 뒤)도 채팅식 통합으로 돌아가지 않는다. 서버가 쓰는 길로 닫을 수 없는 계획은 까닭을 적어 멈춘다
-    const blocked = integrationBlockReason(plan.verify, plan.coordination?.strategy);
+    const blocked = integrationBlockReason(plan.verify);
     if (blocked) throw new Error(blocked.message);
     for (const lane of plan.lanes) {
       // 재시작 뒤에는 레인 세션이 없어도 남겨 둔 기록으로 통합한다. 기록이 없으면 합칠 근거가 없으므로 멈춘다
@@ -1193,11 +1192,21 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     // 모델을 부르지 않으므로 usage·metrics는 없다
     integration.run = { status: applied.status, durationMs: applied.durationMs };
     // 통과했는데 체크포인트가 남지 않았으면 합친 결과의 근거가 없다
-    const settled: { status: string; summary: string } =
+    let settled: { status: string; summary: string } =
       applied.status === 'done' && applied.checkpoint === undefined ? { status: 'failed', summary: '검증은 통과했지만 합친 결과가 체크포인트로 남지 않았습니다(바뀐 파일이 없었습니다)' } : applied;
+    // S4: 통합 게이트가 실패하면 통합 세션의 터미널에 수리 요청을 한 번만 보내 끝을 기다린다(공유 없이 실패 뒤에만 비용을 내는 대조군).
+    // 서버가 쓰는 길은 실패하면 되돌리고 끝나므로 이 시점에 통합 세션 터미널은 열려 있지 않다
+    let repairedCheckpoint: Checkpoint | undefined;
+    if (applied.status !== 'done' && plan.coordination?.strategy === 'S4') {
+      await (terminalLaneDeps?.driver ?? terminalLaneDriver).open(snapshot.id);
+      const repair = await runTerminalTask(snapshot.id, repairRequest(plan, applied.summary), { writableScope, doneTests }, terminalLaneDeps);
+      integration.repair = { attempted: true, status: repair.status, run: { status: repair.status, durationMs: repair.durationMs, usage: repair.usage, metrics: repair.metrics } };
+      settled = repair;
+      if (repair.status === 'done') repairedCheckpoint = getSnapshot(snapshot.id)?.checkpoints[0];
+    }
     if (settled.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${settled.status} ${settled.summary}`);
-    // 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다)
-    Object.assign(integration, { status: 'done', checkpoint: checkpointView(appliedCheckpoint) });
+    // 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다). 수리가 통과시켰으면 수리가 남긴 체크포인트다
+    Object.assign(integration, { status: 'done', checkpoint: checkpointView(repairedCheckpoint ?? appliedCheckpoint) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
     recordMetrics(plan);
@@ -1599,6 +1608,14 @@ function waitForReady(sessionId: string): Promise<void> {
     },
     BOOT_TIMEOUT_MS,
   );
+}
+
+/** S4: 통합 게이트 실패를 통합 세션의 CLI에 되돌려 준다. 원래 요청 + 실패 요약 + 쓰기 범위 안에서 고치라는 지시 */
+function repairRequest(plan: TaskPlanView, summary: string): string {
+  return `${plan.request}
+
+[조율] 레인 ${plan.lanes.length}개의 결과를 합친 뒤 검증이 실패했습니다: ${summary}
+쓰기 범위 안에서 고쳐 검증을 다시 통과시키세요.`;
 }
 
 async function waitForEvent(sessionId: string, check: () => { done: boolean; error?: string }, timeoutMs: number): Promise<void> {

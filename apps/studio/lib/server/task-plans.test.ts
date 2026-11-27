@@ -427,6 +427,11 @@ vi.mock('./terminal-lane', () => ({
     const deleted = taskId ? (fake.deletes[taskId] ?? []) : [];
     const files = taskId ? fake.writes[taskId] : undefined;
     const runId = `terminal-${fake.terminalSends.length}`;
+    // S4 수리: 통합 세션 터미널에 보낸 수리 요청. 게이트 결과는 fake.repair가 정한다
+    if (isRepair(request)) {
+      if (fake.repair === 'done') session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: ['web/a/one.md'] });
+      return { runId, status: fake.repair, summary: fake.repair === 'done' ? '수리 완료' : '검증 게이트를 통과하지 못했습니다', ...fake.run };
+    }
     if (files === 'fail' || files === undefined) {
       // 실제 터미널 게이트는 실패한 턴의 검증 결과를 세션 이벤트로 남긴다(sessions-terminal-gateway.test.ts가 실제 코드로 확인한다). S5가 그것을 읽는다
       fake.history.set(sessionId, [...(fake.history.get(sessionId) ?? []), failureEvent(runId)]);
@@ -2644,14 +2649,11 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
     expect(fake.sends).toEqual([]);
   });
 
-  it('카드 계획도 가볍게 확인(verify: light)과 조율 S4는 400이다: 통합이 채팅식 실행으로 돌아가지 않는다', async () => {
+  it('카드 계획도 가볍게 확인(verify: light)은 400이다: 터미널 게이트는 가벼운 확인을 받지 않는다(게이트를 약하게 하는 방향이라 옮기지 않았다)', async () => {
     const cards = [{ title: 'a', request: 'a', paths: ['web/a'] }];
     const withLight = await statusOfError({ projectId: 'orders', owner: 'kim', cards, verify: 'light' });
     expect(withLight.status).toBe(400);
     expect(withLight.message).toContain('light');
-    const withS4 = await statusOfError({ projectId: 'orders', owner: 'kim', cards, coordination: { strategy: 'S4' } });
-    expect(withS4.status).toBe(400);
-    expect(withS4.message).toContain('S4');
     nothingCreated();
   });
 
@@ -2711,7 +2713,6 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
 
   it.each([
     ['verify light', { verify: 'light' as const }],
-    ['pageChecks', { integrationChecks: { pageChecks: [{ service: 'web', path: '/orders' }] as never } }],
     ['effort', { effort: 'high' }],
   ])('%s를 함께 주면 400이고 조용히 빠뜨리지 않는다', async (_name, extra) => {
     process.env.B_STUDIO_MODE = 'claude-code';
@@ -2786,7 +2787,7 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
   });
 
 
-  it.each(['S4', 'S6', 'S7'] as const)('%s 조율은 터미널 레인에 아직 못 붙여 전략 이름을 담아 400이고 만들지 않는다', async (strategy) => {
+  it.each(['S6'] as const)('%s 조율은 터미널 레인에 아직 못 붙여(트레이스가 모델 글·도구 결과·턴 경계로 만들어지는데 터미널 훅에 없다) 전략 이름을 담아 400이고 만들지 않는다', async (strategy) => {
     process.env.B_STUDIO_MODE = 'claude-code';
     const error = await statusOfError({ ...base, coordination: { strategy } });
     expect(error.status).toBe(400);
@@ -2794,10 +2795,78 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
     nothingCreated();
   });
 
-  it('고정 계획 + 터미널 + S4도 400이다', async () => {
+  it('고정 계획 + 터미널 + S6도 400이다', async () => {
     process.env.B_STUDIO_MODE = 'claude-code';
-    expect((await statusOfError({ ...base, modelId: 'x', presetPlan: { tasks: [task('a', ['web/a'])] }, coordination: { strategy: 'S4' } })).status).toBe(400);
+    expect((await statusOfError({ ...base, modelId: 'x', presetPlan: { tasks: [task('a', ['web/a'])] }, coordination: { strategy: 'S6' } })).status).toBe(400);
     nothingCreated();
+  });
+
+  describe('벤치가 쓰는 옵션을 터미널 레인·서버 통합 길로 옮겼다', () => {
+    const twoLanesPlan = () => {
+      fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
+      fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
+    };
+
+    it('S4: 통합 게이트가 실패하면 통합 세션 터미널에 수리 요청을 한 번 보내 끝을 기다리고, 채팅식 실행은 부르지 않으며 레인에는 게시판을 붙이지 않는다', async () => {
+      twoLanesPlan();
+      fake.integration = 'failed';
+      const plan = await run({ projectId: 'orders', request: 'S4 수리', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+
+      expect(plan.status).toBe('done');
+      const repairs = fake.terminalSends.filter((send) => isRepair(send.request));
+      expect(repairs).toHaveLength(1);
+      expect(repairs[0]!.sessionId).toBe(plan.integration?.sessionId);
+      expect(repairs[0]!.options.writableScope).toEqual(['web/a', 'web/b']);
+      expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'done' });
+      expect(plan.integration?.checkpoint?.sha).toBe(repairs[0] ? 'terminal-3' : '');
+      expect(fake.sends).toEqual([]);
+      expect(fake.taskAccess.every((entry) => entry.access === undefined)).toBe(true);
+    });
+
+    it('S4: 통합이 처음에 통과하면 수리를 보내지 않는다. 수리도 실패하면 통합이 실패한다', async () => {
+      twoLanesPlan();
+      const passed = await run({ projectId: 'orders', request: 'S4 통과', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+      expect(passed.status).toBe('done');
+      expect(passed.integration?.repair).toBeUndefined();
+      expect(fake.terminalSends.filter((send) => isRepair(send.request))).toHaveLength(0);
+
+      fake.integration = 'failed';
+      fake.repair = 'failed';
+      const failed = await run({ projectId: 'orders', request: 'S4 수리 실패', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
+      expect(failed.status).toBe('failed');
+      expect(failed.integration?.repair).toMatchObject({ attempted: true, status: 'failed' });
+    });
+
+    it('S7: 레인이 게시판에 쓸 수 있게 붙고(star), 계획이 끝까지 돈다', async () => {
+      twoLanesPlan();
+      // 조정자 중계는 레인이 끝나도 한 주기(8초)를 더 기다렸다 멈추므로 기다림을 늘린다
+      const created = await createTaskPlan({ projectId: 'orders', request: 'S7 중계', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S7' } });
+      await awaiting(created.id);
+      approveTaskPlan(created.id, 'kim');
+      let plan = getTaskPlan(created.id, 'kim');
+      for (let i = 0; i < 2000 && plan.status !== 'done' && plan.status !== 'failed'; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        plan = getTaskPlan(created.id, 'kim');
+      }
+      expect(plan.status).toBe('done');
+      expect(plan.coordination).toEqual({ strategy: 'S7', topology: 'star' });
+      const sends = laneBoardSends();
+      expect(sends).toHaveLength(2);
+      expect(sends.every((send) => send.board.modelWrites === true)).toBe(true);
+      expect(sends[0]!.request).toContain('조정자가 요약해 중계합니다');
+    }, 30_000);
+
+    it('integrationChecks(pageChecks)는 통합 세션에만 덧붙는다', async () => {
+      twoLanesPlan();
+      const pageChecks: WorkflowPageCheck[] = [
+        { service: 'web', path: '/orders', mode: 'http', expectStatus: 200, allowConsoleErrors: false, noHorizontalScroll: false },
+      ];
+      const plan = await run({ projectId: 'orders', request: '통합 확인', modelId: 'model-a', owner: 'kim', integrationChecks: { pageChecks } });
+      expect(plan.status).toBe('done');
+      expect(fake.sessionOptions).toHaveLength(3);
+      expect(fake.sessionOptions.slice(0, 2).every((options) => options.extraPageChecks === undefined)).toBe(true);
+      expect(fake.sessionOptions[2]!.extraPageChecks).toEqual(pageChecks);
+    });
   });
 
   describe('조율 게시판을 터미널 레인에 붙인다(#1346)', () => {
