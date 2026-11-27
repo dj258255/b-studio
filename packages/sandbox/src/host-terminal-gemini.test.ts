@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
-import { GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
+import { GEMINI_CODE_LOAD_ENVS, GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
 import {
   expectedHostGatewayFiles,
   findHostCli,
@@ -22,6 +22,8 @@ import {
  * Gemini 터미널(실험, ADR-242)의 감싸개·관문 파일·감시. 진짜 gemini도 PTY도 띄우지 않는다:
  * 감싸개는 진짜 `/bin/sh`로 돌리되 CLI 자리에 환경을 찍는 가짜 스크립트를 둔다. 관문 폴더·홈은 모두 임시 폴더다.
  */
+/** 감싸개가 지워야 하는 코드 적재·실행 경로 변수(가짜 CLI가 찍는 목록과 같다). `DYLD_*`는 이름 패턴으로 지운다 */
+const CODE_LOAD_NAMES = [...GEMINI_CODE_LOAD_ENVS, 'DYLD_INSERT_LIBRARIES', 'DYLD_LIBRARY_PATH'];
 const dirs: string[] = [];
 afterEach(async () => {
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
@@ -57,7 +59,8 @@ describe('Gemini 관문 파일', () => {
       const hook = definitions[0]!.hooks[0]!;
       expect(hook.type).toBe('command');
       expect(hook.command).toContain(shellQuote(path.join(dir, GEMINI_HOOK_NAME)));
-      expect(hook.command.startsWith(shellQuote(cli.nodePath))).toBe(true);
+      // 빈 환경으로 절대 경로의 node를 띄운다
+      expect(hook.command.startsWith(`${shellQuote('/usr/bin/env')} -i ${shellQuote(cli.nodePath)} `)).toBe(true);
     }
     expect(settings.hooks.BeforeTool![0]!.hooks[0]).toMatchObject({ timeout: 1_800_000, command: expect.stringContaining('pre-tool || {') });
     expect(settings.hooks.BeforeAgent![0]!.hooks[0]!.command).toContain('prompt || {');
@@ -101,6 +104,7 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
         'printf "SYS=%s|%s|%s|%s\\n" "${GEMINI_CLI_SYSTEM_SETTINGS_PATH-unset}" "${GEMINI_CLI_SYSTEM_DEFAULTS_PATH-unset}" "${GEMINI_RESTRICTED_MODE-unset}" "${GEMINI_CLI_TRUST_WORKSPACE-unset}"',
         'printf "USER_HOME=%s\\n" "$B_STUDIO_GEMINI_USER_HOME"',
         `for v in ${sandboxNames}; do if env | grep -q "^$v="; then printf "SBX_%s=set\\n" "$v"; else printf "SBX_%s=unset\\n" "$v"; fi; done`,
+        'for v in NODE_OPTIONS NODE_PATH NODE_EXTRA_CA_CERTS BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT OPENSSL_CONF OPENSSL_MODULES PS4 PROMPT_COMMAND DYLD_INSERT_LIBRARIES DYLD_LIBRARY_PATH; do if env | grep -q "^$v="; then printf "CODE_%s=set\\n" "$v"; else printf "CODE_%s=unset\\n" "$v"; fi; done',
         'for a in "$@"; do printf "ARG=%s\\n" "$a"; done',
         '',
       ].join('\n'),
@@ -118,13 +122,14 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
   it('홈을 관문 폴더 안의 홈으로 바꾸고, 설정을 복사하고, 시스템 설정·믿음 변수를 지우고, 사용자의 인자와 첫 요청을 그대로 뒤에 넘긴다. 모델·권한 인자는 붙이지 않는다', async () => {
     const { gateway, real, wrapper } = await setup();
     const sandboxEnv = Object.fromEntries(GEMINI_SANDBOX_ENVS.map((name) => [name, 'x']));
-    const ran = await exec(wrapper, ['-i', '요청 글 "따옴표" $HOME'], { HOME: real, GEMINI_CLI_SYSTEM_SETTINGS_PATH: '/evil.json', GEMINI_CLI_SYSTEM_DEFAULTS_PATH: '/evil2.json', GEMINI_RESTRICTED_MODE: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'false', ...sandboxEnv });
+    const ran = await exec(wrapper, ['-i', '요청 글 "따옴표" $HOME'], { HOME: real, GEMINI_CLI_SYSTEM_SETTINGS_PATH: '/evil.json', GEMINI_CLI_SYSTEM_DEFAULTS_PATH: '/evil2.json', GEMINI_RESTRICTED_MODE: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'false', ...sandboxEnv, ...Object.fromEntries(CODE_LOAD_NAMES.map((name) => [name, 'x'])) });
     expect(ran.code).toBe(0);
     expect(ran.stdout.trim().split('\n')).toEqual([
       `HOME_ENV=${geminiHomePath(gateway)}`,
       'SYS=unset|unset|unset|unset',
       `USER_HOME=${real}`,
       ...GEMINI_SANDBOX_ENVS.map((name) => `SBX_${name}=unset`),
+      ...CODE_LOAD_NAMES.map((name) => `CODE_${name}=unset`),
       'ARG=-i',
       'ARG=요청 글 "따옴표" $HOME',
     ]);

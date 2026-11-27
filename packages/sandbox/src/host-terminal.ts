@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { native } from './native';
 import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
-import { GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
+import { GEMINI_CODE_LOAD_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
 import { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
 import { openCodeConfigContent } from './opencode-config';
 import { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
@@ -370,6 +370,9 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
     'done',
     // 시스템 설정 자리·믿음 변수와 샌드박스를 켜는 변수(`GEMINI_SANDBOX`·`SANDBOX`·`GEMINI_SANDBOX_IMAGE` 등). 샌드박스는 CLI를 다른 프로세스에서 다시 띄워 우리 훅이 붙었는지 알 수 없다
     `unset ${GEMINI_UNSET_ENVS.join(' ')}`,
+    // 코드 적재·실행 경로 변수(`NODE_OPTIONS`·`BASH_ENV`·`LD_PRELOAD` 등)도 지운다. 훅 명령을 띄우는 셸과 node가 물려받는다. `DYLD_*`는 이름으로 찾아 지운다(셸에는 이름 패턴 `unset`이 없다)
+    `unset ${GEMINI_CODE_LOAD_ENVS.join(' ')}`,
+    'for v in $(env | sed -n "s/^\\(DYLD_[A-Za-z0-9_]*\\)=.*/\\1/p"); do unset "$v"; done',
     'export GEMINI_CLI_HOME="$home"',
     `exec ${q(cli.cliPath)} "$@"`,
     '',

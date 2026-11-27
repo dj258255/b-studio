@@ -8570,3 +8570,35 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 ### 해결
 
 - 0.71.1 소스에서 읽은 열 개(`GEMINI_SANDBOX`·`SANDBOX`·`GEMINI_SANDBOX_IMAGE`·`GEMINI_SANDBOX_PROXY_COMMAND`·`SANDBOX_ENV`·`SANDBOX_FLAGS`·`SANDBOX_MOUNTS`·`SANDBOX_PORTS`·`SANDBOX_SET_UID_GID`·`SEATBELT_PROFILE`)를 감싸개의 `unset`(`GEMINI_UNSET_ENVS`), Rust 감시(`GEMINI_SETTINGS_ENVS`), `.env` 거절에 더했다. 두 목록이 같은지 TS 시험이 Rust 소스를 읽어 견준다. 설정은 작업 폴더·시스템 설정·시스템 기본값에서 `tools.sandbox`가 정확히 `false`가 아니면(문자열 `"false"`·`{enabled:false}`·null·0 포함), `tools.sandboxAllowedPaths`·`tools.sandboxNetworkAccess`가 있으면, `security.toolSandboxing`이 `false`가 아니면, 맨 위 `sandbox`가 있으면 거절한다. 열린 쪽은 "없거나 정확히 false"뿐이다. 감싸개 시험은 대조군(감싸개 없이 가짜 CLI를 바로 부르면 값이 보임)과 함께 돌았고, 고치기 전에는 열 개가 그대로 내려갔다.
+
+## 304. Gemini의 훅이 Gemini의 환경(`.env`·셸이 정한 `NODE_OPTIONS` 등)을 그대로 물려받아 훅 안에서 다른 코드가 돌 수 있었다
+
+### 증상
+
+- 0.71.1은 `.env`의 값을 `process.env`에 넣고(제외 목록은 넷뿐), 훅 명령을 그 환경(가리지 않음) 위에서 `bash -c`로 띄운다. `.env`나 사용자의 셸이 `NODE_OPTIONS=--require …`·`NODE_PATH`·`LD_PRELOAD`·`DYLD_INSERT_LIBRARIES`를 주면 훅의 node 안에서 그 코드가 돌아 deny를 막거나 응답을 바꿀 수 있다. `PATH`로 `bash`·`node`를, `BASH_ENV`로 셸 시작 코드를 바꾸는 길도 같다. 고치기 전 `.env` 검사는 이 이름들을 보지 않았다.
+
+### 원인
+
+- "훅이 필요로 하는 환경"과 "훅이 물려받는 환경"을 같은 것으로 읽었다. 훅은 관문 폴더의 주소 파일만 있으면 되는데 Gemini의 환경 전체를 받았다. 이 CLI는 훅이 실패하면 도구가 열리므로(트러블슈팅 299) 훅 안의 코드 실행은 곧 막는 검사를 건너뛰는 길이다.
+
+### 해결
+
+- 설정의 훅 명령을 `/usr/bin/env -i <node 절대 경로> <훅 파일> <이벤트>`로 바꿨다(시험은 `NODE_OPTIONS=--require …`를 준 환경에서 명령을 진짜 `bash -c`로 돌려 훅이 빈 환경을 받고 적재 파일이 만들어지지 않음을 본다). 감싸개는 `NODE_OPTIONS`·`NODE_PATH`·`NODE_EXTRA_CA_CERTS`·`BASH_ENV`·`ENV`·`LD_*`·`OPENSSL_*`·`DYLD_*` 등을 띄우기 전에 지운다. `.env`는 `PATH`·`BASH_ENV`(셸이 `env`보다 먼저 떠 `env -i`가 막지 못한다)·`NODE_*`(`NODE_ENV` 제외)·`LD_*`·`DYLD_*`·`PYTHON*` 등을 정하면 거절한다. 허용 목록으로 읽으면 평범한 `.env`가 거의 다 거절되어 접두사 거부 목록으로 두었다(ADR-242 10).
+- 다른 CLI: Command Code의 mod와 OpenCode의 플러그인은 CLI 안에서 도는 코드라 자식 프로세스가 없어 같은 길이 없다. **Claude 터미널의 훅**은 `node <스크립트> <이벤트>` 명령으로 CLI의 환경을 물려받는다. 공통 Rust 설정 코드·텍스트 벡터·컨테이너 방식이 함께 걸려 이번에는 고치지 않았고 보고만 한다(Claude Code는 프로젝트 `.env`를 자기 환경에 넣지 않지만 사용자의 셸 환경은 물려받는다).
+- 고치기 전 실패: `.env` 거절 시험 14건과 훅 환경 시험 1건, 설정 명령 모양·감싸개 시험 2건.
+
+## 305. OpenCode 감시가 `attach`만 거절했고 Gemini 감시는 샌드박스 인자만 봤다
+
+### 증상
+
+- OpenCode 1.18.33에는 서버에 붙거나(`attach`, `run --attach`) 서버·다른 설정으로 뜨는 하위 명령과 옵션이 많다. 감시는 첫 위치 인자가 `attach`인 것만 붙지 않은 것으로 봤다. `--attach`·`--port`·`--hostname`·`--mini`·`--dir`·`serve`·`run` 등과, 값 자리에 옵션을 숨기는 꼴(`--prompt --attach url`)은 붙은 것으로 읽혔다. Gemini도 샌드박스 인자만 보고 하위 명령·다른 방식으로 뜨는 옵션은 보지 않았다.
+
+### 원인
+
+- 여는 쪽(붙었다고 인정하는 판정)을 거부 목록으로 썼다. 모르는 인자는 "붙지 않은 것"이어야 한다. 그리고 값 자리의 `-`로 시작하는 글을 값으로 건너뛰면 yargs와 다르게 읽는다.
+
+### 해결
+
+- 두 갈래 모두 인자를 허용 목록으로 읽는다(ADR-241 덧붙임, ADR-242 11). OpenCode는 옵션 일곱 개와 `.`·`PWD`와 같은 위치 인자 하나만, Gemini는 옵션 몇 개와 하위 명령이 아닌 질문 낱말만 받는다. 시험은 하위 명령 이름 25개·옵션 24개(OpenCode)와 하위 명령 9개·옵션 33개(Gemini)를 각각 거절하고, 변이(값의 `-` 검사 제거·`PWD` 조건 제거·모르는 긴 옵션 허용·Gemini 하위 명령·허용 밖 옵션 허용)가 시험을 실패시켰다. `--`만 막는 줄을 빼도 시험이 통과한다(알 수 없는 긴 옵션 거절이 같은 것을 막는 겹침이다). 고치기 전 `opencode_accepts_only_known_args`는 `/work/b`를 받아들여 실패했고, `gemini_accepts_only_known_args`는 하위 명령 `mcp`를 받아들여 실패했다.
+- 하지 않은 것: OpenCode의 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION` 환경 변수(바이너리 문자열로만 확인, 효과 미확인).
+

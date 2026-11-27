@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
@@ -260,6 +261,28 @@ describe('Gemini 훅 명령: 알리기만 하는 통로', () => {
 });
 
 describe('Gemini 설정 파일의 훅 명령(bash가 실행한다)', () => {
+  it('훅 명령은 빈 환경에서 절대 경로의 node로 돈다: NODE_OPTIONS·NODE_PATH·LD_PRELOAD 등 Gemini의 환경이 훅 안으로 들어가지 않는다', async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-gmenv-'));
+    dirs.push(dir);
+    const marker = path.join(dir, 'preloaded.txt');
+    await writeFile(path.join(dir, 'preload.cjs'), `require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'loaded');\n`);
+    // 진짜 훅 파일 대신 환경을 찍는 파일을 둔다(설정의 명령이 부르는 이름과 같다)
+    await writeFile(path.join(dir, GEMINI_HOOK_NAME), "process.stdout.write(JSON.stringify(Object.keys(process.env).sort()));\n");
+    const settings = JSON.parse(geminiSettingsContent(dir, process.execPath)) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+    const command = settings.hooks.SessionStart![0]!.hooks[0]!.command;
+    const child = spawn('/bin/bash', ['-c', command], {
+      env: { PATH: process.env.PATH ?? '', NODE_OPTIONS: `--require ${path.join(dir, 'preload.cjs')}`, NODE_PATH: '/evil', NODE_EXTRA_CA_CERTS: '/evil.pem', LD_PRELOAD: '/evil.so', DYLD_INSERT_LIBRARIES: '/evil.dylib', FOO: '1' },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    child.stdout.on('data', (part: Buffer) => (stdout += part.toString('utf8')));
+    child.stdin.end('{}');
+    await new Promise<number | null>((resolve) => child.on('close', resolve));
+    const names = (JSON.parse(stdout) as string[]).filter((name) => !['PWD', 'SHLVL', '_', 'OLDPWD', '__CF_USER_TEXT_ENCODING'].includes(name));
+    expect(names).toEqual([]);
+    expect(existsSync(marker)).toBe(false);
+  });
+
   it('설정의 명령은 막는 훅(요청 받기·쓰기 직전)에 실패 꼬리를 붙이고, 훅 파일이 실행되지 못하면 종료 코드 2와 표준 오류의 글을 낸다', async () => {
     const dir = await mkdtemp(path.join(tmpdir(), 'b-studio-gmcmd-'));
     dirs.push(dir);
