@@ -261,7 +261,7 @@ describe('테스트', () => {
 
   it('종료 코드가 0이 아니면 출력이 비어 있어도 실패다', async () => {
     const out = await compare(() => ({ workflow: { tests: [unit()] }, exec: () => ({ exitCode: 1, stdout: '', stderr: '' }) }));
-    expect(byName(out.traces[0]!, 'unit')).toMatchObject({ ok: false, detail: '종료 코드 1\n' });
+    expect(byName(out.traces[0]!, 'unit')).toMatchObject({ ok: false, detail: expect.stringMatching(/^종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — [^\n]+\n$/) });
   });
 
   it('재시도해 통과하면 시도 횟수를 남기고 실패 사유는 남기지 않는다', async () => {

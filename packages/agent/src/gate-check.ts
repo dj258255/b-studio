@@ -6,6 +6,7 @@ import { TEST_TIMEOUT_MS, type GateOutcome, type PageFetcher, type ServiceReques
 import type { AgentEvent } from './agent-types';
 import { autoHandlers, autoInput } from './gate-auto';
 import { MANUAL_VERIFICATION_CHECK } from './requirement-integrity';
+import { runAtBaseline, type BaselineLabel, type BaselineSource } from './test-baseline';
 import { TaskGraphError } from './task-graph';
 import { clearTestReportsCommand, reportRootsForIncludes } from './test-run';
 import { decodeStrings, encodeStrings, failure, serviceUrl, verifyChangesSetup, type HookHandler, type HookRequest, type VerificationReport, type VerifyOptions } from './verify';
@@ -66,6 +67,8 @@ export interface DeclaredHost {
   /** 이번 검증에 쓰는 프로젝트(부르는 때의 것) */
   readonly project: LoadedProject;
   readonly requestService: ServiceRequest;
+  /** 실패한 시험을 변경 전 기준에서 다시 돌릴 때 쓰는 기준(이슈 #1435). 없으면 라벨은 "모름"이다. 라벨은 피드백 글에만 쓰이고 판정은 바꾸지 않는다 */
+  readonly baseline?: BaselineSource | undefined;
   /** 자동 화면 고르기(ADR-195 4f A5c-2)가 읽는 바깥 값. 고르는 규칙·막는 규칙·글 조립은 Rust(`gate_auto.rs`)가 한다 */
   readonly auto: AutoOps;
   /** 화면 확인이 부르는 바깥 동작(브라우저 러너·페이지 요청·스크린샷 저장·경고). 판정과 순서는 Rust(`gate_page.rs`, ADR-195 4f A5c-1)가 한다 */
@@ -140,6 +143,18 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
   let thrown: { error: unknown } | undefined;
   /** 서비스 확인(`verifyChanges`) 한 번의 콜백 처리기. Rust가 `verifyBegin`을 부를 때마다 새로 만든다 */
   let verifyHandlers: Handlers = {};
+
+  /** 이 검사 안에서 이미 정한 변경 전 기준 라벨(시험 하나 = 서비스와 명령) */
+  const baselineLabels = new Map<string, BaselineLabel>();
+  const baselineLabel = async (service: string, command: string[]): Promise<BaselineLabel> => {
+    if (!declared.baseline) return { label: 'unknown', reason: 'no-baseline' };
+    try {
+      const snapshot = await declared.baseline.load();
+      return await runAtBaseline(declared.sandbox, service, command, snapshot, { signal, timeoutMs: TEST_TIMEOUT_MS });
+    } catch {
+      return { label: 'unknown', reason: 'setup-failed' };
+    }
+  };
 
   const handlers: Handlers = {
     outsideSync: async () => ({ ok: true, rejected: [...(await host.outsideSync())] }),
@@ -306,6 +321,17 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
       } catch (error) {
         return failure(error);
       }
+    },
+    // 실패한 시험의 변경 전 기준 라벨. 어떤 실패도 던지지 않고 "모름"으로 돌려준다(던지면 검사 전체가 멈춘다). 이 응답은 피드백 글에만 들어가고 판정에는 닿지 않는다.
+    // 같은 검사 안에서 같은 시험은 한 번만 돌린다(재시도마다 다시 돌리지 않는다). "모름"은 담지 않는다 — 다음 시도에 다시 해 본다
+    declaredBaseline: async ({ service, command }) => {
+      const key = JSON.stringify([service, command]);
+      let found = baselineLabels.get(key);
+      if (!found) {
+        found = await baselineLabel(String(service), command as string[]);
+        if (found.label !== 'unknown') baselineLabels.set(key, found);
+      }
+      return { ok: true, ...found };
     },
     declaredStats: async () => {
       try {

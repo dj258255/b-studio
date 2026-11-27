@@ -134,6 +134,7 @@ async function run(options: RunAgentOptions, messages: BetaMessageParam[]): Prom
       verify: options.verify,
       allowCheckChanges: options.allowCheckChanges,
       outsideChanges: options.outsideChanges,
+      baseline: options.baseline,
       fetcher,
       pageFetcher,
       browserRunner,

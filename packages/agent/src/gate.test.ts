@@ -10,6 +10,7 @@ import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, typ
 import type { AgentEvent } from './agent-types';
 import { signatureFromCheck, signatureKey } from './coordination/signature';
 import { createOrdersProject, fakeSandbox, ORDERS_CONTRACT } from './test-helpers';
+import { BASELINE_READY_MARK, BASELINE_SCRIPT, type BaselineSnapshot, type BaselineSource } from './test-baseline';
 import { clearTestReportsCommand } from './test-run';
 import type { WorkflowCheck } from './workflow';
 import { Workspace } from './workspace';
@@ -58,6 +59,9 @@ async function setup(
     allowCheckChanges?: boolean;
     outsideChanges?: GateOptions['outsideChanges'];
     signal?: AbortSignal;
+    /** 변경 전 기준(이슈 #1435). 기준 스크립트로 부른 exec는 `baselineRuns`에 따로 모으고 `baselineExec`가 답한다(없으면 표시와 종료 코드 0) */
+    baseline?: BaselineSource;
+    baselineExec?: (command: string[]) => ExecResult | Promise<ExecResult>;
   } = {},
 ) {
   const sandbox = fakeSandbox(target, options.restarts ?? [true, true, true]);
@@ -65,7 +69,12 @@ async function setup(
   // 테스트 전에 보고서 자리를 비우는 명령(#756)은 따로 모아, 테스트 명령만 세는 확인을 흐리지 않게 한다
   const cleared: string[][] = [];
   const sequence: string[] = [];
+  const baselineRuns: string[][] = [];
   sandbox.exec = async (_service, command) => {
+    if (command[0] === 'sh' && command[2] === BASELINE_SCRIPT) {
+      baselineRuns.push(command.slice(4));
+      return options.baselineExec?.(command.slice(4)) ?? { exitCode: 0, stdout: `${BASELINE_READY_MARK}\n`, stderr: '' };
+    }
     if (isClearReports(command)) {
       cleared.push(command);
       sequence.push('clear');
@@ -89,12 +98,13 @@ async function setup(
     ...(options.allowCheckChanges ? { allowCheckChanges: true } : {}),
     ...(options.outsideChanges ? { outsideChanges: options.outsideChanges } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.baseline ? { baseline: options.baseline } : {}),
     fetcher: async () => ORDERS_CONTRACT,
     pageFetcher: options.page ?? (async () => ({ status: 200, text: '<h1>주문 목록</h1>' })),
     ...(options.browser ? { browserRunner: options.browser } : {}),
     onEvent: (event) => events.push(event),
   });
-  return { gate, workspace, events, commands, cleared, sequence };
+  return { gate, workspace, events, commands, cleared, sequence, baselineRuns };
 }
 
 const isClearReports = (command: string[]) => command[0] === 'sh' && command[2]?.startsWith(clearTestReportsCommand()[2]!.split(' build/')[0]!) === true;
@@ -574,6 +584,96 @@ describe('VerificationGate 워크플로 단계', () => {
     expect(gate.verified).toBe(false);
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('[test] unit (시도 2회)');
     expect(outcome.kind === 'retry' && outcome.feedback).toContain('OrderTest > memo FAILED');
+  });
+
+  describe('실패한 시험의 변경 전 기준 라벨(이슈 #1435)', () => {
+    const FAILED = { exitCode: 1, stdout: 'OrderTest > memo FAILED', stderr: 'expected memo' };
+    const ok = (files: BaselineSnapshot = { kind: 'ok', files: [] }): BaselineSource & { loads: number } => {
+      const source = { loads: 0, load: async () => (source.loads++, files) };
+      return source;
+    };
+    const unit = () => withWorkflow({ tests: [{ name: 'unit', service: 'api', command: ['./gradlew', 'test'], maxAttempts: 2 }] });
+    const marked = (exitCode: number): ExecResult => ({ exitCode, stdout: `${BASELINE_READY_MARK}\nfrom baseline`, stderr: '' });
+
+    async function failWith(options: Parameters<typeof setup>[1]) {
+      const target = unit();
+      const made = await setup(target, { exec: () => FAILED, ...options });
+      await made.workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      const outcome = await made.gate.check();
+      return { ...made, outcome, feedback: outcome.kind === 'retry' ? outcome.feedback : '' };
+    }
+
+    it('변경 전에도 실패하면 그 라벨이 피드백에 붙는다', async () => {
+      const { feedback, baselineRuns } = await failWith({ baseline: ok(), baselineExec: () => marked(1) });
+      expect(feedback).toContain('변경 전 기준: 변경 전에도 실패');
+      expect(feedback).toContain('OrderTest > memo FAILED');
+      // 같은 시험은 한 검사 안에서 한 번만 변경 전에 돌린다(재시도 두 번째 시도는 캐시)
+      expect(baselineRuns).toEqual([['./gradlew', 'test']]);
+    });
+
+    it('변경 전에는 통과했으면 이번 변경으로 실패라고 붙는다', async () => {
+      const { feedback } = await failWith({ baseline: ok(), baselineExec: () => marked(0) });
+      expect(feedback).toContain('변경 전 기준: 이번 변경으로 실패');
+      expect(feedback).not.toContain('변경 전에도 실패');
+    });
+
+    it('기준이 없으면 모름이다(변경 전부터 실패로 추정하지 않는다)', async () => {
+      const { feedback, baselineRuns } = await failWith({});
+      expect(feedback).toContain('변경 전 기준: 변경 전 결과 모름');
+      expect(feedback).not.toContain('변경 전에도 실패');
+      expect(baselineRuns).toEqual([]);
+    });
+
+    it('변경 전 나무를 못 만들거나 시험이 돌았다는 표시가 없거나 실행이 실패하면 모름이다', async () => {
+      const cases: Array<[string, Parameters<typeof setup>[1]]> = [
+        ['기준을 못 읽음', { baseline: { load: async () => ({ kind: 'unknown', reason: 'untracked-changes' }) } }],
+        ['기준을 읽다 던짐', { baseline: { load: async () => Promise.reject(new Error('git 실패')) } }],
+        ['표시 없음(복사 실패)', { baseline: ok(), baselineExec: () => ({ exitCode: 71, stdout: '', stderr: 'cp 실패' }) }],
+        ['표시를 흉내 낸 중간 출력', { baseline: ok(), baselineExec: () => ({ exitCode: 1, stdout: `먼저 나온 글\n${BASELINE_READY_MARK}\n`, stderr: '' }) }],
+        ['명령을 찾지 못함(127)', { baseline: ok(), baselineExec: () => marked(127) }],
+        ['변경 전 실행이 시간 초과', { baseline: ok(), baselineExec: () => Promise.reject(new SandboxError('시간 초과')) }],
+      ];
+      for (const [name, options] of cases) {
+        const { feedback } = await failWith(options);
+        expect(feedback, name).toContain('변경 전 기준: 변경 전 결과 모름');
+        expect(feedback, name).not.toContain('변경 전에도 실패');
+        expect(feedback, name).not.toContain('이번 변경으로 실패');
+      }
+    });
+
+    it('통과한 시험은 변경 전 기준을 읽지도 돌리지도 않는다', async () => {
+      const baseline = ok();
+      const { gate, workspace, baselineRuns } = await setup(unit(), { baseline });
+      await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(baseline.loads).toBe(0);
+      expect(baselineRuns).toEqual([]);
+    });
+
+    it('라벨은 판정을 바꾸지 않는다: 어떤 라벨이든 같은 결과·시도 횟수·시험 실행 횟수·검사 목록이다', async () => {
+      const variants: Array<Parameters<typeof setup>[1]> = [
+        {},
+        { baseline: ok(), baselineExec: () => marked(1) },
+        { baseline: ok(), baselineExec: () => marked(0) },
+        { baseline: ok(), baselineExec: () => marked(127) },
+        { baseline: ok(), baselineExec: () => Promise.reject(new Error('깨짐')) },
+        { baseline: { load: async () => Promise.reject(new Error('깨짐')) } },
+      ];
+      const results = [];
+      for (const options of variants) {
+        const { outcome, gate, commands } = await failWith(options);
+        results.push({
+          kind: outcome.kind,
+          attempts: gate.attempts,
+          testRuns: commands.length,
+          verified: gate.verified,
+          passed: [...gate.passedStages],
+          checks: gate.checks.map((check) => ({ stage: check.stage, name: check.name, ok: check.ok, attempts: check.attempts })),
+        });
+      }
+      expect(results[0]).toMatchObject({ kind: 'retry', testRuns: 2, verified: false });
+      for (const result of results) expect(result).toEqual(results[0]);
+    });
   });
 
   it('테스트 중 서비스가 메모리 한도를 넘어 종료되면 코드 문제로 보지 않고 되살린 뒤 다음 시도에서 통과한다(트러블슈팅 116)', async () => {
