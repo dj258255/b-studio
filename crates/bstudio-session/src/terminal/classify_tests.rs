@@ -228,3 +228,15 @@ fn own_table_or_legacy(kind: CliKind) -> Vec<&'static str> {
         other => own_table(other).to_vec(),
     }
 }
+
+#[test]
+fn command_code_read_tools_are_only_the_names_checked_in_the_installed_package() {
+    // 설치된 v1.91.1의 도구 정의에서 확인한 읽기 도구(ADR-233). 디렉터리 읽기는 `read_directory`다
+    for name in ["read_file", "read_directory", "grep", "glob", "web_search", "web_fetch", "todo_write", "ask_user_question"] {
+        assert!(is_read_tool(CliKind::CommandCode, name), "{name}");
+    }
+    // 파일·셸·서브에이전트 도구와, 판에 없던 앞 단계의 추정 이름은 바꾸는 도구로 본다(열린 것은 이 표뿐이다)
+    for name in ["write_file", "edit_file", "shell_command", "monitor_command", "kill_shell", "agent", "run_command", "read_multiple_files", "list_dir", "READ_FILE"] {
+        assert!(!is_read_tool(CliKind::CommandCode, name), "{name}");
+    }
+}

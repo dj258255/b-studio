@@ -206,6 +206,7 @@ import {
   type ModelProfile,
 } from '@b-studio/agent';
 import {
+  commandCodeConfigPathBlocked,
   describeSnapshotEvent,
   providerFromEnv,
   Redactor,
@@ -310,7 +311,7 @@ import {
   type RestoreReason,
 } from './session-git-realign';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
-import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
+import { classifyPrompt, isReadOnlyPrompt, isReadToolFor, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
 import {
   decideAfterCheckpoint,
@@ -354,7 +355,8 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { walkFiles } from './code-files';
@@ -4893,6 +4895,7 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
       const head = await sessionHeadSha(session);
       return head ? { head } : undefined;
     },
+    diffSince: (sha) => session.checkpoints.diffSince(sha),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -4976,6 +4979,7 @@ export async function continueReviewAfterNewCommits(id: string): Promise<void> {
       const head = await sessionHeadSha(session);
       return head ? { since: sinceSha, head } : undefined;
     },
+    diffSince: (sha) => session.checkpoints.diffSince(sha),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -7466,6 +7470,11 @@ export function sessionTerminalTarget(id: string): {
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
+  // Command Code 세션은 이 컴퓨터 방식 + 실험 스위치에서만 띄운다. 아니면 claude를 대신 띄우지 않고 까닭을 알린다(ADR-233)
+  if (sessionBackend(session.snapshot) === 'commandcode') {
+    const refused = commandCodeTerminalReason(sessionTerminalMode());
+    if (refused) throw new StudioError(409, refused);
+  }
   // 서버가 작업 폴더에 쓰고 판정하는 동안에는 열지 않는다. 열면 CLI·사람이 같은 폴더에 쓰고, CLI의 훅이 서버가 연 실행에 붙는다(ADR-224)
   if (session.serverApplying === true) throw new StudioError(409, '서버가 이 세션에 변경을 쓰고 검증하는 중이라 터미널을 열 수 없습니다. 끝난 뒤 다시 여세요');
   // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
@@ -7668,13 +7677,19 @@ function noteTerminalConversation(id: string, conversation: string): void {
  * 컨테이너 방식은 컨테이너에 claude만 깐다
  */
 function terminalCliKind(session: Session): HostCliKind {
-  return sessionTerminalMode() === 'host' && sessionBackend(session.snapshot) === 'codex' ? 'codex' : 'claude';
+  if (sessionTerminalMode() !== 'host') return 'claude';
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'codex') return 'codex';
+  // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
+  if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';
+  return 'claude';
 }
 
 /** 터미널 실행을 실행 기록에 남길 때의 백엔드 이름 */
 function terminalRunBackend(session: Session): SessionMode {
   if (selfAgentTerminal(session)) return 'api';
-  return terminalCliKind(session) === 'codex' ? 'codex' : 'claude-code';
+  const cli = terminalCliKind(session);
+  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -8850,6 +8865,35 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   return result;
 }
 
+/**
+ * Command Code 세션의 쓰기 직전 막기(보안 검토, ADR-233). **카드가 없어도** 막는다. 막는 쪽이다(거부 목록):
+ * - 슬래시 명령을 실행하는 `run_command`: 턴이 끝나면 사용자가 친 것처럼 `/reload`를 돌려 mod를 다시 불러오게 할 수 있다(설정이 mod를 끈 채로)
+ * - `write_file`·`edit_file`·패치로 Command Code의 설정과 mod 자리(`.commandcode`: 작업 폴더·프로젝트 루트·사용자 홈)를 바꾸는 것: `mods.disableAll`·`mods.disabled`로 우리 mod를 끄거나 뒤에 다른 mod를 붙인다.
+ *   비교는 파일 시스템 규칙으로 한다(`commandCodeConfigPathBlocked`: 대소문자·유니코드·`..`·겹친 구분자·링크). 파일 도구인데 바꾸는 파일을 알 수 없으면(모르는 열쇠 등) 이 자리를 건드리지 않는다고 말할 수 없어 막는다
+ * 셸로 쓰는 경우는 여기서 막지 못한다: mod가 불러와졌다는 신호(session-start)가 시간 안에 오지 않으면 위반으로 닫는 쪽(session-terminal-mod)이 맡는다
+ */
+async function terminalCommandCodeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'commandcode') return undefined;
+  if (tool.trim().toLowerCase() === 'run_command') {
+    return '[b-studio] run_command(슬래시 명령 실행)는 이 세션에서 쓰지 않습니다. /reload 같은 명령이 b-studio의 훅을 다시 불러오다 빼먹게 할 수 있어 막았습니다. 필요한 명령은 사용자가 터미널에 직접 입력합니다.';
+  }
+  const files = terminalToolFilePaths('commandcode', tool, toolInput);
+  if (files === null) {
+    return tool === 'write_file' || tool === 'edit_file' ? `[b-studio] ${tool}이(가) 바꾸는 파일을 알 수 없어 Command Code의 설정(.commandcode)을 건드리지 않는다고 확인하지 못했습니다. 쓰지 않았습니다.` : undefined;
+  }
+  for (const file of files) {
+    if (await commandCodeConfigPathBlocked({ cwd: session.snapshot.workDir, home: process.env.HOME ?? process.env.USERPROFILE, file })) {
+      return `[b-studio] ${file}은(는) Command Code의 설정·mod 자리(.commandcode)라 쓰지 않았습니다. 설정이 b-studio의 훅을 끌 수 있어 에이전트는 이 자리를 바꾸지 않습니다.`;
+    }
+  }
+  return undefined;
+}
+
+/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
+async function terminalWriteScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
+}
+
 /** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
 async function terminalScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
   // 카드 실행 맥락이 있으면 쓰기 범위를 건다(#B6a). 도구 입력의 파일 경로를 작업 복사본 기준 상대 경로로 바꿔 본다.
@@ -8955,8 +8999,12 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
   noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now(), activityRedactor(session));
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`). 이름 대조는 코어가 한다(ADR-215)
-  const readTool = isReadTool(tool);
+  // 읽기 도구 표는 그 CLI의 것이다(Command Code의 `read_file`은 claude의 표에 없다). 모르는 이름은 바꾸는 도구다
+  const readTool = isReadToolFor(terminalCliKind(session), tool);
   if (readTool) return {};
+  // Command Code의 설정 쓰기와 run_command는 카드가 없어도, 실행을 열기 전에 막는다(보안 검토)
+  const configDeny = await terminalCommandCodeDeny(session, tool, input.tool_input);
+  if (configDeny) return { deny: configDeny };
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다
   const budgetText = terminalBudgetMessage(session);
@@ -8966,7 +9014,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 쓰기 훅을 센다(ADR-213, U2). 사용량 소식 없이 이어지는지 보는 값이다
   if (!('busy' in run)) run.terminal.writeHooks += 1;
   // 앞의 판정(샌드박스를 켤지 말지): 실행을 얻었는가·읽기만·실행 한도·카드 범위를 그 순간의 사실로 본다. 이 판정의 허용은 최종이 아니다
-  const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalScopeDeny(session, tool, input.tool_input) });
+  const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalWriteScopeDeny(session, tool, input.tool_input) });
   const first = decidePreTool(before.facts);
   if (!first.allow) return { deny: pretoolDenyText(first.deny, before.texts) };
   if ('busy' in run) return { deny: run.busy };
@@ -8976,7 +9024,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 기다림 뒤의 판정: 그 순간의 사실로 다시 읽어 부르고 이 답이 최종이다. 기다리는 사이 [읽기만] 요청이 이어 왔거나 턴 상한에 닿았거나
   // 실행이 닫혔으면(위반·취소·CLI 종료·세션 멈춤) 허용하지 않는다. 닫힌 실행의 쓰기는 되돌린 뒤에 파일을 바꾸는 쓰기다
   const finalDecision = async (): Promise<{ deny: string } | undefined> => {
-    const after = terminalPreToolFacts(session, run, { readTool, scope: await terminalScopeDeny(session, tool, input.tool_input), signal });
+    const after = terminalPreToolFacts(session, run, { readTool, scope: await terminalWriteScopeDeny(session, tool, input.tool_input), signal });
     const answer = decidePreTool(after.facts);
     return answer.allow ? undefined : { deny: pretoolDenyText(answer.deny, after.texts) };
   };
@@ -10057,6 +10105,8 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     // 세션 시작 훅이 이 안내를 받아 간다. CLI가 떴다는 뜻이기도 하다 — 화면은 그때부터 다른 패널의 글을 터미널에 붙여 넣는다
     note: async () => {
       const note = terminalGatewayNote(terminalSession(id).project, sessionTerminalMode());
+      // mod가 불러와졌다는 신호다(Command Code, 보안 검토). 기다리던 시계를 세운다. reload 뒤 새로 뜬 것도 같다
+      noteModStarted(id);
       noteSessionTerminalCli(id, true);
       return note;
     },
@@ -10067,7 +10117,12 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     preTool: (input) => terminalToolStarting(id, input),
     stop: (input) => terminalTurnEnded(id, input),
-    sessionEnd: async () => {
+    sessionEnd: async (input) => {
+      // mod만 다시 불러오는 것(reload)은 CLI의 끝이 아니다. 새 mod의 session-start가 시간 안에 오는지 시계로 본다(설정이 reload 뒤 mod를 껐을 수 있다)
+      if (input.reason === 'reload' && terminalCliKind(terminalSession(id)) === 'commandcode') {
+        noteModReloading(id);
+        return;
+      }
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
     },

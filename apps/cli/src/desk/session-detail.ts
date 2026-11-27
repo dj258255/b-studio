@@ -7,6 +7,7 @@
  *  - 올리기: 올리기 전 점검과 이미 열린 PR. p로 PR까지, b로 브랜치만 올린다(묻는다). 결과 주소는 링크(OSC 8)로 보인다.
  * D는 세션 기록을 지운다(두 번 묻는다, 되돌릴 수 없다). 키는 순수 함수(detailKey)이고 서버 호출은 desk가 한다(action)
  */
+import { describeLocationCheck, summarizeAddressRate, type FindingAddressStatus, type FindingLocationCheck } from '@b-studio/agent';
 import { fitHint } from './hints';
 import { backendLabel } from './sidebar';
 import { fit, fitAnsi, osc8 } from './screen';
@@ -46,7 +47,18 @@ export interface DetailFinding {
 export interface DetailReview {
   state: string;
   maxRounds: number;
-  rounds: Array<{ round: number; status: string; findings?: DetailFinding[]; humanResolutions?: Record<number, { reason: string; at: string }>; startedAt: string; error?: string }>;
+  rounds: Array<{
+    round: number;
+    status: string;
+    findings?: DetailFinding[];
+    humanResolutions?: Record<number, { reason: string; at: string }>;
+    /** findings와 같은 순서. 리뷰한 diff와 기계로 맞춘 위치 대조(없으면 옛 기록) */
+    findingChecks?: FindingLocationCheck[];
+    /** findings와 같은 순서. 이후 변경에서 그 줄이 바뀌었는지(없으면 아직 못 봄 = 모름) */
+    addressed?: FindingAddressStatus[];
+    startedAt: string;
+    error?: string;
+  }>;
 }
 
 /** 올리기 전 점검(ExportPreview) */
@@ -399,6 +411,25 @@ const ROUND_LABEL: Record<string, string> = {
   error: '오류',
 };
 
+/** 지적 한 줄 끝에 붙는 표시: 리뷰한 diff와 맞지 않거나 못 맞춘 것, 이후 변경에서 바뀐 것. 표시일 뿐 막는지 여부와 무관하다 */
+function findingMarks(check: FindingLocationCheck | undefined, addressed: FindingAddressStatus | undefined, theme: Theme): string {
+  const parts: string[] = [];
+  if (check?.status === 'not_in_diff') parts.push(`${fg(theme, 'yellow')}[diff에 없음]${RESET}`);
+  else if (check?.status === 'unverified') parts.push(`${fg(theme, 'muted')}[확인 못 함]${RESET}`);
+  if (addressed === 'addressed') parts.push(`${fg(theme, 'green')}[반영됨]${RESET}`);
+  else if (addressed === 'not_addressed') parts.push(`${fg(theme, 'muted')}[반영 안 됨]${RESET}`);
+  return parts.length ? ` ${parts.join(' ')}` : '';
+}
+
+/** 지적 처리율 한 줄. 정의는 packages/agent/src/review-finding-check.ts: 지적한 줄이 리뷰 이후 변경에서 바뀐 비율이고, 모름은 분모에서 뺀다 */
+function addressRateText(rounds: DetailReview['rounds']): string {
+  const rate = summarizeAddressRate(rounds);
+  if (rate.addressed + rate.notAddressed + rate.unknown === 0) return '지적 처리율: 지적이 없습니다';
+  const counted = rate.addressed + rate.notAddressed;
+  if (counted === 0) return `지적 처리율: 모름 (센 수 없음 ${rate.unknown}건)`;
+  return `지적 처리율: ${rate.addressed}/${counted} (${Math.round((rate.addressed / counted) * 100)}%)${rate.unknown ? ` · 모름 ${rate.unknown}` : ''} · 지적한 줄이 이후 바뀐 비율`;
+}
+
 function reviewBody(state: DetailState, theme: Theme): { lines: string[]; focus: number } {
   const muted = fg(theme, 'muted');
   const lines: string[] = [];
@@ -421,6 +452,7 @@ function reviewBody(state: DetailState, theme: Theme): { lines: string[]; focus:
     return { lines, focus: 0 };
   }
   lines.push(` ${BOLD}AI 리뷰${RESET} · ${STATE_LABEL[review.state] ?? review.state} · 라운드 ${review.rounds.length}/${review.maxRounds}`);
+  lines.push(` ${muted}${addressRateText(review.rounds)}${RESET}`);
   const open = openFindings(review);
   const chosen = open[state.selected];
   let focus = 0;
@@ -435,11 +467,15 @@ function reviewBody(state: DetailState, theme: Theme): { lines: string[]; focus:
       const blocking = BLOCKING.has(finding.severity);
       const severity = `${fg(theme, closed ? 'muted' : blocking ? 'red' : 'muted')}${finding.severity}${RESET}`;
       const where = `${finding.file}${finding.line ? `:${finding.line}` : ''}`;
-      const tail = closed ? ` ${muted}· 오탐으로 닫음: ${closed.reason}${RESET}` : '';
+      const tail = (closed ? ` ${muted}· 오탐으로 닫음: ${closed.reason}${RESET}` : '') + findingMarks(round.findingChecks?.[index], round.addressed?.[index], theme);
       const isChosen = chosen?.round === round.round && chosen.findingIndex === index;
       if (isChosen) focus = lines.length;
       lines.push(` ${pick(isChosen, `${severity}  ${where}  ${finding.title}${tail}`, theme)}`);
-      if (isChosen) lines.push(`      ${muted}${finding.detail.replace(/\s+/g, ' ')}${RESET}`);
+      if (isChosen) {
+        lines.push(`      ${muted}${finding.detail.replace(/\s+/g, ' ')}${RESET}`);
+        const check = round.findingChecks?.[index];
+        if (check && check.status !== 'in_diff') lines.push(`      ${muted}위치 대조: ${describeLocationCheck(check)}${RESET}`);
+      }
     });
   }
   return { lines, focus };

@@ -14,6 +14,10 @@
  */
 import {
   buildPrReviewComment,
+  buildReviewCheckNote,
+  checkFindingLocations,
+  checkFindingsAddressed,
+  type FindingLocationCheck,
   buildPrReviewFixRequest,
   nextPrReviewStep,
   prReviewMarker,
@@ -68,6 +72,11 @@ export interface ReviewRoundDeps {
    * 따로 표시하지 않는다(undefined). 매 라운드 다시 불러 고침 커밋이 쌓여도 head가 그만큼 따라온다
    */
   commitRange?: () => Promise<PrReviewCommitRange | undefined>;
+  /**
+   * sha부터 지금 HEAD까지의 diff(이슈 #1440). 이전 라운드 지적이 그 뒤 변경에서 바뀌었는지 세는 데 쓴다.
+   * 없거나 읽기에 실패하면 그 라운드의 처리 여부는 모름이다
+   */
+  diffSince?: (sha: string) => Promise<string>;
   /** PR에 댓글 하나를 남긴다. 실패하면 던진다 — 이 모듈이 잡아 commentError로만 남기고 라운드는 계속한다 */
   postComment: (body: string) => Promise<{ url?: string }>;
   /** 같은 세션에 고침을 요청하고 검증 게이트를 통과한 체크포인트까지 기다린다 */
@@ -76,6 +85,40 @@ export interface ReviewRoundDeps {
   push: () => Promise<void>;
   /** 라운드 시각을 넣을 시계. 테스트가 결정적인 값을 주입한다. 기본은 실제 시각 */
   now?: () => string;
+}
+
+/**
+ * 지적이 있고 리뷰한 끝 커밋(headSha)을 아는 라운드마다, 그 커밋 이후의 diff에서 지적한 줄이 바뀌었는지 센다(rounds[index].addressed).
+ * 이후 diff를 읽지 못하면 그 라운드는 모름으로 둔다(실패를 반영 안 됨으로도 반영됨으로도 세지 않는다). 막는 판정과는 무관하다
+ */
+async function refreshAddressed(rounds: ReviewRoundView[], upTo: number, deps: ReviewRoundDeps): Promise<void> {
+  for (let index = 0; index < upTo; index++) {
+    const round = rounds[index];
+    if (!round?.findings?.length || !round.headSha) continue;
+    let later: string | undefined;
+    try {
+      later = deps.diffSince ? await deps.diffSince(round.headSha) : undefined;
+    } catch {
+      later = undefined;
+    }
+    rounds[index] = { ...round, addressed: checkFindingsAddressed(round.findings, round.findingChecks ?? [], later) };
+  }
+}
+
+/** 지적 위치 대조. 대조 코드가 예기치 않게 실패해도 리뷰는 계속하고, 그 지적들은 확인 못 함으로 남긴다 */
+function locateFindings(findings: readonly PrReviewFinding[], reviewed: { diff: string; truncated: boolean; omittedFiles: string[] }): FindingLocationCheck[] {
+  try {
+    return checkFindingLocations(findings, reviewed);
+  } catch {
+    return findings.map((): FindingLocationCheck => ({ status: 'unverified', reason: 'bad_location' }));
+  }
+}
+
+/** 코멘트의 숨은 표시 앞에 위치 대조 절을 끼운다(표시가 맨 끝에 있어야 알아볼 수 있다). 절이 비었으면 그대로 */
+function withReviewCheckNote(comment: string, marker: string, note: string): string {
+  if (!note) return comment;
+  const at = comment.lastIndexOf(marker);
+  return at < 0 ? `${comment}\n\n${note}` : `${comment.slice(0, at)}${note}\n\n${comment.slice(at)}`;
 }
 
 function describeError(error: unknown): string {
@@ -149,10 +192,14 @@ export async function runReviewRounds(
     let findings: PrReviewFinding[];
     let tokens: AgentUsage | undefined;
     let omittedFiles: string[] = [];
+    let findingChecks: FindingLocationCheck[] = [];
+    // 이전 라운드 지적이 그 뒤 변경(고침 커밋 포함)에서 바뀌었는지 먼저 센다. 새 라운드가 이미 push돼 있어 rounds 끝은 이번 라운드다
+    await refreshAddressed(rounds, rounds.length - 1, deps);
     try {
       const diff = await deps.diff();
       const truncated = truncateDiff(diff);
       omittedFiles = [...truncated.omittedFiles];
+      const reviewedDiff = { diff: truncated.diff, truncated: truncated.truncated, omittedFiles };
       // 바깥 참고 파일(과제 67-a)은 원본 diff로 고른다 — 생략한 파일의 import·식별자도 놓치지 않는다
       const externalContext = await deps.externalContext?.(diff);
       const result = await requestPrReview(deps.ask, {
@@ -166,6 +213,7 @@ export async function runReviewRounds(
       });
       findings = result.findings;
       tokens = result.usage;
+      findingChecks = locateFindings(findings, reviewedDiff);
     } catch (error) {
       // 형식 오류로 리뷰가 실패해도 그때까지 쓴 토큰은 잃지 않는다(PrReviewError가 들고 있다)
       const usage = error instanceof PrReviewError ? error.usage : undefined;
@@ -175,7 +223,8 @@ export async function runReviewRounds(
     }
 
     const outcome = nextPrReviewStep(findings, round, maxRounds);
-    const comment = buildPrReviewComment({ round, maxRounds, findings, outcome, omittedFiles, commitRange: range });
+    const baseComment = buildPrReviewComment({ round, maxRounds, findings, outcome, omittedFiles, commitRange: range });
+    const comment = withReviewCheckNote(baseComment, prReviewMarker(round), buildReviewCheckNote({ findings, checks: findingChecks, previousRounds: rounds.slice(0, -1) }));
     let commentUrl: string | undefined;
     let commentError: string | undefined;
     try {
@@ -190,6 +239,7 @@ export async function runReviewRounds(
         round,
         status: outcome === 'pass' ? 'passed' : 'blocked_capped',
         findings,
+        findingChecks,
         tokens,
         commentUrl,
         commentError,
@@ -202,7 +252,7 @@ export async function runReviewRounds(
     }
 
     // outcome === 'fix': 차단·주요 지적을 같은 세션의 정상 요청 경로로 보낸다(검증 게이트·체크포인트를 그대로 거친다)
-    setRound({ round, status: 'fixing', findings, tokens, commentUrl, commentError, startedAt, ...(range ? { sinceSha: range.since, headSha: range.head } : {}) });
+    setRound({ round, status: 'fixing', findings, findingChecks, tokens, commentUrl, commentError, startedAt, ...(range ? { sinceSha: range.since, headSha: range.head } : {}) });
     publish('running');
 
     const fix = await deps.requestFix(buildPrReviewFixRequest(findings));
@@ -211,6 +261,7 @@ export async function runReviewRounds(
         round,
         status: 'fix_failed',
         findings,
+        findingChecks,
         tokens,
         commentUrl,
         commentError,
@@ -230,6 +281,7 @@ export async function runReviewRounds(
         round,
         status: 'error',
         findings,
+        findingChecks,
         tokens,
         commentUrl,
         commentError,
@@ -246,6 +298,7 @@ export async function runReviewRounds(
       round,
       status: 'blocked_continue',
       findings,
+      findingChecks,
       tokens,
       commentUrl,
       commentError,

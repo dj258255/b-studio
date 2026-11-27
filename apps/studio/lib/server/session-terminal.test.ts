@@ -1,5 +1,5 @@
 import type { AgentGatewayAddress, AgentTerminal, TerminalSize } from '@b-studio/sandbox';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   closeSessionTerminal,
   containerOpenOptions,
@@ -22,6 +22,10 @@ import {
   type TerminalMessage,
   type TerminalTarget,
 } from './session-terminal';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
+import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { terminalHomeUser } from './terminal-allowed';
 
 /** 도커 없이 도는 가짜. 자리를 준비한 횟수, 연 터미널, 쓴 입력, 지운 것을 기록한다 */
@@ -599,6 +603,128 @@ describe('터미널 감시(백엔드의 watch, 이슈 #695)', () => {
   });
 });
 
+describe('Command Code 터미널: mod가 불러와졌다는 신호를 기다린다(보안 검토, ADR-233)', () => {
+  const savedEnv = { timeout: process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS };
+  const ccTarget = { ...target, cli: 'commandcode' as const };
+  afterEach(() => {
+    if (savedEnv.timeout === undefined) delete process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS;
+    else process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS = savedEnv.timeout;
+  });
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('session-start가 시간 안에 오지 않으면 훅 없이 뜬 것으로 본다: 경고를 보내고, 위반으로 알리고, 터미널을 닫는다', async () => {
+    process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS = '40';
+    const { backend, record } = fakeBackend();
+    const messages: TerminalMessage[] = [];
+    const violations: string[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await openSessionTerminal(id, { ...ccTarget, onViolation: (reason) => violations.push(reason) }, {}, backend);
+    expect(record.terminals[0]!.closed).toBe(false);
+    await wait(150);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('session-start');
+    expect(messages.some((message) => message.kind === 'warning' && message.message.includes('session-start'))).toBe(true);
+    expect(record.terminals[0]!.closed).toBe(true);
+    expect(messages.at(-1)).toEqual({ kind: 'status', state: 'closed' });
+    await disposeSessionTerminal(id, ccTarget.sandboxId, backend);
+  });
+
+  it('session-start가 시간 안에 오면 아무 일도 없다(대조). reload로 끝난 뒤 새 session-start가 오지 않으면 위반이고, 오면 아니다', async () => {
+    process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS = '60';
+    const { backend, record } = fakeBackend();
+    const violations: string[] = [];
+    await openSessionTerminal(id, { ...ccTarget, onViolation: (reason) => violations.push(reason) }, {}, backend);
+    await wait(20);
+    noteModStarted(id);
+    await wait(150);
+    expect(violations).toEqual([]);
+    expect(record.terminals[0]!.closed).toBe(false);
+    // reload 뒤 새 session-start가 온다
+    noteModReloading(id);
+    await wait(20);
+    noteModStarted(id);
+    await wait(150);
+    expect(violations).toEqual([]);
+    // reload 뒤 오지 않는다
+    noteModReloading(id);
+    await wait(150);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('reload');
+    expect(record.terminals[0]!.closed).toBe(true);
+    await disposeSessionTerminal(id, ccTarget.sandboxId, backend);
+  });
+
+  it('터미널을 닫으면 시계가 선다. commandcode가 아닌 CLI에는 걸지 않는다', async () => {
+    process.env.B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS = '40';
+    const { backend } = fakeBackend();
+    const violations: string[] = [];
+    await openSessionTerminal(id, { ...ccTarget, onViolation: (reason) => violations.push(reason) }, {}, backend);
+    closeSessionTerminal(id);
+    const other = `${id}-claude`;
+    await openSessionTerminal(other, { ...target, sandboxId: 'studio-other', onViolation: (reason) => violations.push(reason) }, {}, backend);
+    await wait(150);
+    expect(violations).toEqual([]);
+    await disposeSessionTerminal(id, ccTarget.sandboxId, backend);
+    await disposeSessionTerminal(other, 'studio-other', backend);
+  });
+});
+
+describe('Command Code 터미널: 띄우기 전에 설정이 b-studio의 mod를 끄는지 본다(보안 검토, ADR-233)', () => {
+  const dirs: string[] = [];
+  const savedHome = process.env.HOME;
+  afterEach(async () => {
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  async function fixture(): Promise<{ home: string; work: string }> {
+    const base = await mkdtemp(path.join(tmpdir(), 'b-studio-ccpre-'));
+    dirs.push(base);
+    const home = path.join(base, 'home');
+    const work = path.join(base, 'work');
+    await mkdir(path.join(home, '.commandcode'), { recursive: true });
+    await mkdir(work, { recursive: true });
+    process.env.HOME = home;
+    return { home, work };
+  }
+
+  it('이 컴퓨터 방식 백엔드는 commandcode 터미널을 열기 전에 설정을 읽는다. 끄는 설정이면 409로 거절하고 터미널도 관문도 만들지 않는다', async () => {
+    const { work } = await fixture();
+    await mkdir(path.join(work, '.commandcode'), { recursive: true });
+    await writeFile(path.join(work, '.commandcode/settings.local.json'), JSON.stringify({ mods: { disableAll: true } }));
+    const host = terminalBackend('host');
+    let gatewayCalls = 0;
+    await expect(
+      openSessionTerminal(id, { ...target, root: work, cli: 'commandcode', gateway: async () => { gatewayCalls += 1; return address; } }, {}, host),
+    ).rejects.toMatchObject({ status: 409, message: expect.stringContaining('mods.disableAll') });
+    expect(gatewayCalls).toBe(0);
+    expect(sessionTerminalPresence(id)?.cliAlive ?? false).toBe(false);
+  });
+
+  it('우리 mod 이름이 mods.disabled에 있어도, 설정을 읽지 못해도 409다. 한국어 사유에 ADR 번호는 없다', async () => {
+    const { home, work } = await fixture();
+    await writeFile(path.join(home, '.commandcode/settings.json'), JSON.stringify({ mods: { disabled: ['B-Studio-Mod'] } }));
+    const host = terminalBackend('host');
+    const refused = await openSessionTerminal(id, { ...target, root: work, cli: 'commandcode' }, {}, host).catch((error: unknown) => error as { status: number; message: string });
+    expect(refused).toMatchObject({ status: 409 });
+    expect((refused as { message: string }).message).toContain('mods.disabled');
+    expect((refused as { message: string }).message).not.toMatch(/ADR/);
+    await writeFile(path.join(home, '.commandcode/settings.json'), '{ not json');
+    const unreadable = await openSessionTerminal(`${id}-b`, { ...target, root: work, cli: 'commandcode' }, {}, host).catch((error: unknown) => error as { status: number });
+    expect(unreadable).toMatchObject({ status: 409 });
+  });
+
+  it('claude 터미널은 이 검사를 받지 않는다(같은 설정이 있어도 열린다 — 대조는 백엔드 점검 없이 가짜 백엔드로)', async () => {
+    const { home } = await fixture();
+    await writeFile(path.join(home, '.commandcode/settings.json'), JSON.stringify({ mods: { disableAll: true } }));
+    const host = terminalBackend('host');
+    expect(typeof host.preflight).toBe('function');
+    expect(await host.preflight!({ ...target, cli: 'claude' })).toBeUndefined();
+    expect(await host.preflight!({ ...target, cli: 'commandcode' })).toContain('mods.disableAll');
+  });
+});
+
 describe('세션의 AI 계정으로 터미널 CLI를 띄운다(#885)', () => {
   const address: AgentGatewayAddress = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
 
@@ -652,7 +778,25 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(isTerminalRunnableBackend('codex', host)).toBe(true);
     expect(isTerminalRunnableBackend('codex', container)).toBe(false);
     expect(isTerminalRunnableBackend('claude-code', container)).toBe(true);
+    // commandcode는 실험이라 스위치 없이는 터미널로 돌리지 않는다(ADR-233)
     expect(isTerminalRunnableBackend('commandcode', host)).toBe(false);
+  });
+
+  it('commandcode는 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 터미널로 돌릴 수 있다. 컨테이너 방식이면 스위치가 켜져도 거절한다', () => {
+    const on = { B_STUDIO_EXPERIMENTAL: '1' };
+    expect(isTerminalRunnableBackend('commandcode', { ...host, ...on })).toBe(true);
+    expect(isTerminalRunnableBackend('commandcode', { ...container, ...on })).toBe(false);
+    expect(isTerminalRunnableBackend('commandcode', { B_STUDIO_EXPERIMENTAL: '1' })).toBe(true);
+    expect(isTerminalRunnableBackend('commandcode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
+    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
+    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
+    // 다른 새 갈래는 열지 않는다
+    for (const backend of ['opencode', 'gemini']) expect(isTerminalRunnableBackend(backend, { ...host, ...on }), backend).toBe(false);
+  });
+
+  it('commandcode 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {
+    const address2: AgentGatewayAddress = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
+    await expect(terminalBackend('host').prepare({ ...target, cli: 'commandcode', accountDir: async () => '/home/kim/.commandcode-2' }, address2)).rejects.toThrow('기본 계정');
   });
 
   it('AI 리뷰의 고침은 터미널을 쓸 수 있으면 터미널, 아니면 채팅식이다. api는 키가 있을 때만 터미널이다', () => {

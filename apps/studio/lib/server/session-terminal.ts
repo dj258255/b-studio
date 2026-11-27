@@ -3,12 +3,13 @@ import path from 'node:path';
 import {
   checkHostGatewayConfig,
   clampTerminalSize,
+  commandCodeModLoadRefusal,
   defaultAgentGatewayRoot,
   ensureAgentContainer,
   expectedHostGatewayFiles,
   firstPromptArg,
   hostCliPath,
-  ACCOUNT_DIR_ENV,
+  accountDirEnvName,
   findHostCli,
   findUnhookedCliByArgv,
   userStatusLineCommand,
@@ -36,7 +37,8 @@ import {
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
-import { resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { commandCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { armModClock, disarmModClock } from './session-terminal-mod';
 import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
 
 /**
@@ -73,11 +75,13 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 }
 
 /**
- * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다
+ * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다.
+ * Command Code는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다(ADR-233)
  * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex·api가 아니면 claude를 띄운다 — 컨테이너 방식 codex·api를 받으면 엉뚱한 CLI가 뜬다).
  * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
  */
 export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
+  if (backend === 'commandcode') return commandCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
   return backend === 'claude-code' || ((backend === 'codex' || backend === 'api') && sessionTerminalMode(env) === 'host');
 }
 
@@ -127,6 +131,8 @@ interface TerminalState {
   watchStop?: () => void;
   /** 그 감시가 밖(실행의 열기·턴 끝)에 내주는 자리. 감시를 멈추면 등록을 지운다 */
   watchControl?: WatchControl;
+  /** Command Code의 mod가 불러와졌다는 신호를 기다리는 시계를 푸는 함수(보안 검토, ADR-233). 감시를 멈출 때 같이 푼다 */
+  modClockStop?: () => void;
   /**
    * 이 스튜디오 프로세스에서 지금 샌드박스의 터미널을 연 적이 있는가(#872). 처음 열 때만 지난 CLI 대화를 이어 붙인다.
    * 같은 프로세스에서 다시 여는 것은 CLI·셸이 끝났거나 사람이 닫은 뒤라, 일부러 끝낸 대화를 되살리지 않는다
@@ -206,6 +212,11 @@ export interface TerminalBackend {
   remove(sandboxId: string): Promise<void>;
   /** 그 자리에서 관문에 닿는가 */
   reachable(place: string): Promise<boolean>;
+  /**
+   * 터미널을 열기 전에 이 CLI를 띄워도 되는지 본다(보안 검토, ADR-233). 띄울 수 없으면 사용자에게 보일 까닭을, 괜찮으면 undefined를 돌려준다.
+   * 까닭이 있으면 관문도 터미널도 만들지 않고 409로 거절한다. 읽지 못한 것은 괜찮다고 말하지 않는다(던지면 거절이다). 두지 않은 백엔드는 이 검사를 받지 않는다
+   */
+  preflight?(target: TerminalTarget): Promise<string | undefined>;
   /** 닿지 못할 때 사용자에게 보일 글 */
   readonly unreachable: string;
   /**
@@ -280,7 +291,8 @@ const hostGateways = (gatewayStore.__bStudioHostGateways ??= new Map());
 
 /** 관문을 쓸 때 기억한 계정 폴더를 PTY 환경에도 둔다(#885). 감싸개가 같은 값을 CLI에 넘긴다 */
 function hostAccountEnv(cli: HostCli | undefined): Record<string, string> {
-  return cli?.configDir ? { [ACCOUNT_DIR_ENV[cli.kind]]: cli.configDir } : {};
+  const name = cli ? accountDirEnvName(cli.kind) : undefined;
+  return cli?.configDir && name ? { [name]: cli.configDir } : {};
 }
 
 /**
@@ -310,6 +322,8 @@ const HOST_BACKEND: TerminalBackend = {
     // API 모드 세션은 이 컴퓨터에 깔린 CLI가 아니라 자체 CLI를 띄운다. 계정 폴더·사용자 상태 줄은 claude의 것이라 쓰지 않는다
     const self = await target.selfAgent?.();
     const configDir = self ? undefined : await target.accountDir?.();
+    // Command Code는 기본 계정만 쓴다. 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다
+    if (target.cli === 'commandcode' && configDir) throw new StudioError(409, 'Command Code 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
     let cli: HostCli;
     if (self) {
       // cliPath는 관문 폴더를 안 뒤에 실행기 경로로 정해진다(hostCliPath). 감시는 그 경로를 CLI의 이름으로 본다
@@ -346,6 +360,16 @@ const HOST_BACKEND: TerminalBackend = {
     }),
   acceptsInitialPrompt: true,
   acceptsResume: true,
+  // Command Code는 설정(`mods.disableAll`·`mods.disabled`)이 `--mod`로 준 mod를 끌 수 있고 작업 폴더·사용자 설정과 mods 폴더가 다른 mod를 붙일 수 있다.
+  // 터미널 환경이 CLI에 내려주는 HOME으로 같은 자리를 읽는다. 읽다 던지면 열지 않는다(통과로 읽지 않는다)
+  preflight: async (target) => {
+    if ((target.cli ?? 'claude') !== 'commandcode') return undefined;
+    try {
+      return await commandCodeModLoadRefusal({ cwd: target.root, home: process.env.HOME ?? process.env.USERPROFILE });
+    } catch (error) {
+      return `Command Code의 설정을 확인하지 못해 터미널을 열지 않았습니다: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  },
   remove: (sandboxId) => removeHostGatewayConfig(sandboxId),
   reachable: (place) => probeHostGateway(place, process.execPath, hostGateways.get(place)?.cli.kind ?? 'claude'),
   unreachable: '이 컴퓨터에서 b-studio의 관문에 닿지 못합니다. 스튜디오를 다시 띄운 뒤 터미널을 다시 여세요',
@@ -567,8 +591,12 @@ export async function openSessionTerminal(
   const resumeConversation = backend.acceptsResume === true && initialPrompt === undefined && !current.opened ? target.resumeConversation?.() : undefined;
   current.opening = (async () => {
     emit(current, { kind: 'status', state: 'opening' });
+    let refused: string | undefined;
     try {
       if (target.alive && !target.alive()) throw new Error('세션이 멈췄습니다');
+      // 띄우기 전 검사(보안 검토). 거절하면 관문도 터미널도 만들지 않고 409로 알린다. 기다림은 열기 약속 안에 있다(동시에 여러 번 불려도 하나만 연다)
+      refused = await backend.preflight?.(target);
+      if (refused) throw new Error(refused);
       // 관문을 먼저 띄운다. 터미널 안의 CLI는 뜨자마자 훅을 부른다
       const gateway = target.gateway ? await target.gateway() : undefined;
       const place = await backend.prepare(target, gateway);
@@ -621,10 +649,23 @@ export async function openSessionTerminal(
           registerWatch(sessionId, stop.watchControl);
         }
       }
+      // Command Code는 mod가 불러와져야 훅이 있다. 설정이 mod를 끈 채로 CLI가 도는 경우(검사 뒤에 설정이 바뀌었다, 셸로 쓴 설정)는
+      // 신호(session-start)가 오지 않는 것으로만 보인다. 시간 안에 오지 않으면 훅 없이 뜬 것으로 보고 감시가 찾은 위반과 같은 길로 처리한 뒤 터미널을 닫는다
+      if (target.cli === 'commandcode') {
+        armModClock(sessionId, (reason) => {
+          // 닫고 새로 연 뒤에 옛 터미널의 시계가 새것을 닫지 않게 한다
+          if (current.terminal !== terminal) return;
+          emit(current, { kind: 'warning', message: reason });
+          target.onViolation?.(reason);
+          closeSessionTerminal(sessionId);
+        });
+        current.modClockStop = () => disarmModClock(sessionId);
+      }
       emit(current, { kind: 'status', state: 'open' });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit(current, { kind: 'status', state: 'closed', message });
+      if (refused !== undefined && message === refused) throw new StudioError(409, refused);
       throw new StudioError(502, `터미널을 열지 못했습니다: ${message}`);
     } finally {
       current.opening = undefined;
@@ -716,6 +757,10 @@ export async function resizeSessionTerminal(sessionId: string, size: { cols?: un
 
 /** 열려 있는 터미널의 감시를 멈춘다. 여러 번 불려도 안전하다(멈춤 함수를 한 번만 부른다) */
 function stopWatching(state: TerminalState): void {
+  // mod 신호를 기다리는 시계도 같이 푼다(터미널이 닫히거나 끝나면 기다릴 것이 없다)
+  const stopClock = state.modClockStop;
+  state.modClockStop = undefined;
+  stopClock?.();
   const stop = state.watchStop;
   state.watchStop = undefined;
   // 멈춘 감시는 묻지 않는다(세션이 터미널 없이 남아도 옛 감시의 상태가 판정에 남지 않게 한다)

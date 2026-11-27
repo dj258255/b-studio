@@ -489,6 +489,21 @@ export {
   type TruncatedDiff,
 } from './pr-review';
 export {
+  buildReviewCheckNote,
+  checkFindingLocations,
+  checkFindingsAddressed,
+  describeLocationCheck,
+  escapeMarkdownText,
+  FINDING_LINE_CONTEXT,
+  inlineCodeSpan,
+  summarizeAddressRate,
+  type AddressRate,
+  type FindingAddressStatus,
+  type FindingLocationCheck,
+  type FindingLocationReason,
+  type FindingLocationStatus,
+} from './review-finding-check';
+export {
   alignScenarioIds,
   AssumptionSchema,
   buildAllMustHavesPrefill,
