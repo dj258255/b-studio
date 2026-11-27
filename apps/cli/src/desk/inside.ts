@@ -12,7 +12,7 @@
 import { agentQuiet, artSize, clipWords, compose, forText, nowLine, oneLine, spanText, spriteFor, subagentSpriteFor, subagentsOf, type Seg } from './cards';
 import type { DeskState } from './keys';
 import type { KittyImages } from './kitty';
-import { fitAnsi, stringWidth, type Rect } from './screen';
+import { cleanText, fitAnsi, stringWidth, type Rect } from './screen';
 import { backendLabel, headStatus, subagentName, toolLabel, toolLineLabel, type StatusBadge } from './sidebar';
 import { frameAt, spriteLines } from './sprite';
 import { BOLD, DEFAULT_THEME, fg, RESET, type ColorToken, type Theme } from './theme';
@@ -88,14 +88,8 @@ export function openInside(id: string, title: string, options: { depth?: 1 | 2; 
 
 // ─── 서버 글 다루기 ───
 
-/** 서버가 준 글에서 지울 것: OSC·CSI·그 밖의 ESC 열, 제어 글자(줄바꿈 제외), 보이지 않게 글을 꾸미는 문자 */
-const UNSAFE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]?|\x1b[@-Z\\-_]?|\x9b[0-?]*[ -/]*[@-~]?|[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f​-‏‪-‮⁦-⁩﻿]/g;
-
-/** 서버가 준 글을 화면에 낼 꼴로: 탭은 빈칸 넷, 제어 글자·ANSI는 지운다(줄바꿈은 남는다) */
-export function cleanText(text: unknown): string {
-  if (typeof text !== 'string') return '';
-  return text.replace(/\t/g, '    ').replace(UNSAFE, '');
-}
+// cleanText(서버가 준 글에서 제어 글자·ANSI·글 방향을 뒤집는 문자를 지움)는 카드·세션 자세히도 쓰므로 screen.ts에 있다
+export { cleanText };
 
 /** 한 줄 글: 정리하고 길이를 자른다 */
 export function safeLine(text: unknown, max = MAX_LINE_CHARS): string {

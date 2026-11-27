@@ -10,7 +10,7 @@
 import { describeLocationCheck, summarizeAddressRate, type FindingAddressStatus, type FindingLocationCheck } from '@b-studio/agent';
 import { fitHint } from './hints';
 import { backendLabel } from './sidebar';
-import { fit, fitAnsi, osc8 } from './screen';
+import { cleanText, fit, fitAnsi, osc8 } from './screen';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
 import type { DeskItem } from './types';
 
@@ -126,9 +126,13 @@ export interface DetailState {
   message?: string;
   /** 다음 요청에 확인 선언 변경 허용이 켜져 있다(#916, ADR-164) */
   checkChangesArmed?: boolean;
+  /** 입력창에 되살리지 못한 "쓰다 만 글"(ADR-237). C로 복사한다 */
+  draft?: string;
 }
 
 export type DetailAction =
+  /** 쓰다 만 글을 밖 터미널의 클립보드로 보낸다(서버에 보내는 것이 아니다) */
+  | { kind: 'copyDraft'; text: string }
   | { kind: 'load' }
   | { kind: 'patch'; sha: string }
   | { kind: 'restore'; sha: string }
@@ -180,6 +184,7 @@ export function openDetail(item: DeskItem): DetailState {
     // 개입 사유 문자열만 옮긴다. 터미널 CLI의 주의 객체(#926)는 자세히 화면이 쓰지 않는다
     ...(typeof item.attention === 'string' ? { attention: item.attention } : {}),
     ...(item.checkChangesArmed ? { checkChangesArmed: true } : {}),
+    ...(item.terminal?.draft && cleanText(item.terminal.draft) ? { draft: cleanText(item.terminal.draft) } : {}),
     tab: 'checkpoints',
     selected: 0,
     scroll: 0,
@@ -276,6 +281,12 @@ export function detailKey(state: DetailState, key: string): { detail?: DetailSta
   if (key === 'r') return { detail: { ...base, loading: true }, action: { kind: 'load' } };
   if (UP.includes(key)) return { detail: { ...base, selected: Math.max(0, state.selected - 1) } };
   if (DOWN.includes(key)) return { detail: { ...base, selected: Math.max(0, Math.min(rows(state) - 1, state.selected + 1)) } };
+
+  // 쓰다 만 글 복사: 서버에 보내지 않고 클립보드로만 보낸다. 글이 없으면 아무 일도 없다
+  if (key === 'C') {
+    if (!state.draft) return { detail: { ...base, message: '복사할 쓰다 만 글이 없습니다' } };
+    return { detail: { ...base, message: `쓰다 만 글 ${[...state.draft].length}자를 클립보드로 보냈습니다(터미널이 OSC 52를 받아야 붙여 넣을 수 있습니다)` }, action: { kind: 'copyDraft', text: state.draft } };
+  }
 
   // 여기부터는 서버에 무언가를 보내는 키다. 앞서 보낸 것의 답을 기다리는 중이면 받지 않는다
   const acting = ['\r', '\n', 'u', 'v', 'D', 'x', 'a', 'p', 'b', 'c'].includes(key);
@@ -433,6 +444,14 @@ function addressRateText(rounds: DetailReview['rounds']): string {
 function reviewBody(state: DetailState, theme: Theme): { lines: string[]; focus: number } {
   const muted = fg(theme, 'muted');
   const lines: string[] = [];
+  // 입력창에 되살리지 못한 글(ADR-237). 복사해서 다시 붙여 넣는다
+  if (state.draft) {
+    lines.push(` ${fg(theme, 'yellow')}쓰다 만 글${RESET} ${muted}· 입력창에 되살리지 못했습니다 · C 복사${RESET}`);
+    const shown = cleanText(state.draft).split('\n');
+    for (const line of shown.slice(0, 8)) lines.push(`   ${line}`);
+    if (shown.length > 8) lines.push(`   ${muted}…(복사하면 전체가 갑니다)${RESET}`);
+    lines.push('');
+  }
   if (state.attention === 'needs_review' && state.reason) {
     lines.push(` ${fg(theme, 'yellow')}확인 필요: ${state.reason}${RESET}`);
     lines.push(` ${muted}게이트는 통과했지만 요청과 확인(테스트)이 어긋난다고 알렸습니다. 어느 쪽이 맞는지 정해 요청이나 테스트를 고칩니다${RESET}`, '');
@@ -514,7 +533,7 @@ function exportBody(state: DetailState, theme: Theme): string[] {
 
 const HINTS: Record<DetailTab, string> = {
   checkpoints: ' 체크포인트 · ↑↓ 고르기 · Enter 바뀐 파일 · u 되돌리기 · v 다시 검증 · Tab 다음 탭 · r 다시 부르기 · D 세션 지우기 · Esc 닫기',
-  review: ' 확인·리뷰 · ↑↓ 막는 지적 고르기 · x 오탐으로 닫기 · a AI 리뷰 (다시) 돌리기 · c 확인 선언 변경 허용 · Tab 다음 탭 · D 세션 지우기 · Esc 닫기',
+  review: ' 확인·리뷰 · ↑↓ 막는 지적 고르기 · x 오탐으로 닫기 · a AI 리뷰 (다시) 돌리기 · c 확인 선언 변경 허용 · C 쓰다 만 글 복사 · Tab 다음 탭 · D 세션 지우기 · Esc 닫기',
   export: ' 올리기 · p PR까지 올리기 · b 브랜치만 올리기 · Tab 다음 탭 · r 다시 부르기 · D 세션 지우기 · Esc 닫기',
 };
 

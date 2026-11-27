@@ -23,6 +23,7 @@ import {
   parseIssueList,
   planBriefBackend,
   planExecuteConfig,
+  reviewerChoice,
   planKindForBackend,
   resolveSessionBackend,
   selfCheckMode,
@@ -410,6 +411,34 @@ describe('계획-실행 분리(ADR-075) 설정', () => {
 
   it('둘 다 없으면 빈 객체를 돌려준다(계획 호출을 하지 않는, 지금과 같은 동작)', () => {
     expect(planExecuteConfig(fakeProject(), {})).toEqual({});
+  });
+});
+
+describe('AI 리뷰 모델 고르기(#1452)', () => {
+  const fakeProject = (models?: { review?: string }): LoadedProject => ({ spec: { name: 'orders', models } }) as unknown as LoadedProject;
+
+  it('리뷰마다 고른 리뷰어(모델 레지스트리 id)가 설정보다 먼저다', () => {
+    expect(reviewerChoice(fakeProject({ review: 'opus' }), 'claude-code', 'gpt-5', { B_STUDIO_REVIEW_MODEL: 'haiku' })).toEqual({ via: 'registry', model: 'gpt-5' });
+  });
+
+  it('studio.yaml의 models.review가 환경 변수보다 먼저고, 세션 백엔드의 뜻으로 넘긴다', () => {
+    const env = { B_STUDIO_REVIEW_MODEL: 'haiku' };
+    expect(reviewerChoice(fakeProject({ review: ' opus ' }), 'claude-code', undefined, env)).toEqual({ via: 'claude-code', model: 'opus' });
+    expect(reviewerChoice(fakeProject({ review: 'claude-opus-5' }), 'api', undefined, env)).toEqual({ via: 'registry', model: 'claude-opus-5' });
+  });
+
+  it('studio.yaml에 없으면 환경 변수를 쓴다', () => {
+    expect(reviewerChoice(fakeProject(), 'claude-code', undefined, { B_STUDIO_REVIEW_MODEL: 'haiku' })).toEqual({ via: 'claude-code', model: 'haiku' });
+  });
+
+  it('아무것도 없으면 지금과 같다(claude-code는 CLI 기본 모델, api는 라우터, 그 밖은 리뷰 경로 없음)', () => {
+    expect(reviewerChoice(fakeProject(), 'claude-code', undefined, {})).toEqual({ via: 'claude-code' });
+    expect(reviewerChoice(fakeProject(), 'api', undefined, {})).toEqual({ via: 'api-route' });
+    expect(reviewerChoice(fakeProject(), 'codex', undefined, {})).toBeUndefined();
+  });
+
+  it('한 번만 묻는 경로가 없는 백엔드에서는 설정이 있어도 리뷰 경로를 만들지 않는다(지금과 같음)', () => {
+    expect(reviewerChoice(fakeProject({ review: 'opus' }), 'codex', undefined, {})).toBeUndefined();
   });
 });
 

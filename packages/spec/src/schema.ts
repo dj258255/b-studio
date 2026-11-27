@@ -684,6 +684,8 @@ export const ModelsSchema = z.object({
   plan: z.string().min(1).max(120).optional(),
   /** 실행을 맡는 모델(보통 작고 싼 모델) */
   execute: z.string().min(1).max(120).optional(),
+  /** AI 리뷰를 맡는 모델(#1452). 리뷰마다 고른 리뷰어가 먼저다 */
+  review: z.string().min(1).max(120).optional(),
 });
 
 export const StudioSpecSchema = z.object({
