@@ -15,6 +15,7 @@ import type { SessionMode, SessionSnapshot, StudioEvent } from '@/lib/studio-eve
 import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
 import { sessionTerminalPresence } from './session-terminal';
+import { cleanDraftText } from './session-terminal-draft';
 import type { ActivityContext, ActivityNow, ActivitySubagent, ActivityTodos, TerminalActivityView } from './terminal-activity';
 import type { AgentCapabilities, TerminalAgentRow } from './terminal-agents';
 import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents } from './sessions';
@@ -111,6 +112,8 @@ export interface AgentTerminalStatus {
   waiting?: AgentWaitingKind;
   /** 기다리는 까닭 한 줄(CLI가 보인 문구, #920). 없으면 없다 */
   message?: string;
+  /** 입력창에 되살리지 못한 "쓰다 만 글"(ADR-237). 복사할 수 있게 desk가 보인다. 없으면 없다 */
+  draft?: string;
 }
 
 export type AgentWaitingKind = 'permission' | 'question' | 'input' | 'idle';
@@ -521,22 +524,30 @@ export interface TerminalPresence {
   cliAlive: boolean;
   /** 첫 요청을 CLI 실행 인자로 넘겨 연 시각(ms, #966). CLI가 뜨면 없다 */
   startPendingSince?: number;
+  /** 입력창에 되살리지 못한 "쓰다 만 글"(ADR-237) */
+  draft?: string;
 }
 
 /** 첫 요청을 넘긴 뒤 이만큼 지나도 CLI가 뜨지 않으면 시작 창에서 멈춘 것으로 본다(#966). 보통은 몇 초 안에 뜬다 */
 const START_PENDING_MS = 8_000;
 const START_PENDING_MESSAGE = '그 칸에서 폴더 신뢰 등 CLI 시작 창에 답하세요';
 
+/** 내보낼 "쓰다 만 글": 제어 문자·방향 문자를 뺀다(desk가 화면 줄에 그대로 그리므로 서버도 거른다) */
+function draftOf(text: string | undefined): string | undefined {
+  const clean = text ? cleanDraftText(text) : '';
+  return clean.trim() === '' ? undefined : clean;
+}
+
 /** CLI가 떠 있고 사람을 기다리면 그 까닭과 문구(#920). 모르는 알림 종류는 기다림으로 보지 않는다 */
 export function terminalStatusOf(terminal: TerminalPresence, snapshot: SessionSnapshot | undefined, now: number = Date.now()): AgentTerminalStatus {
   // 첫 요청을 넘겼는데 CLI가 뜨지 않았다(#966): 시작하며 묻는 창(폴더 신뢰 등)에서 사람을 기다린다. 막 연 터미널은 CLI가 뜨는 중이다
   if (!terminal.cliAlive && terminal.startPendingSince !== undefined && now - terminal.startPendingSince >= START_PENDING_MS) {
-    return { cli: 'down', waiting: 'input', message: START_PENDING_MESSAGE };
+    return { cli: 'down', waiting: 'input', message: START_PENDING_MESSAGE, ...(draftOf(terminal.draft) ? { draft: draftOf(terminal.draft) } : {}) };
   }
   const attention = terminal.cliAlive ? snapshot?.terminalAttention : undefined;
   const waiting = attention ? WAITING_KIND[attention.kind] : undefined;
   const message = waiting && attention?.message ? oneLine(attention.message) : undefined;
-  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting } : {}), ...(message ? { message } : {}) };
+  return { cli: terminal.cliAlive ? 'up' : 'down', ...(waiting ? { waiting } : {}), ...(message ? { message } : {}), ...(draftOf(terminal.draft) ? { draft: draftOf(terminal.draft) } : {}) };
 }
 
 /**
