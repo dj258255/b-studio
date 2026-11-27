@@ -187,3 +187,12 @@ export function fitAnsi(line: string, width: number, fill = ''): string {
   const pad = Math.max(0, width - used);
   return fill && pad ? `${out}${RESET}${fill}${' '.repeat(pad)}${RESET}` : `${out}${RESET}${' '.repeat(pad)}`;
 }
+
+/** 서버가 준 글에서 지울 것: OSC·CSI·그 밖의 ESC 열, 제어 글자(줄바꿈 제외), 보이지 않게 글을 꾸미는 문자 */
+const UNSAFE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?|\x1b\[[0-?]*[ -/]*[@-~]?|\x1b[@-Z\\-_]?|\x9b[0-?]*[ -/]*[@-~]?|[\x00-\x08\x0b-\x1f\x7f\u0080-\u009f​-‏‪-‮⁦-⁩﻿]/g;
+
+/** 서버가 준 글을 화면에 낼 꼴로: 탭은 빈칸 넷, 제어 글자·ANSI는 지운다(줄바꿈은 남는다) */
+export function cleanText(text: unknown): string {
+  if (typeof text !== 'string') return '';
+  return text.replace(/\t/g, '    ').replace(UNSAFE, '');
+}

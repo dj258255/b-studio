@@ -10,7 +10,7 @@
 import { describeLocationCheck, summarizeAddressRate, type FindingAddressStatus, type FindingLocationCheck } from '@b-studio/agent';
 import { fitHint } from './hints';
 import { backendLabel } from './sidebar';
-import { fit, fitAnsi, osc8 } from './screen';
+import { cleanText, fit, fitAnsi, osc8 } from './screen';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
 import type { DeskItem } from './types';
 
@@ -184,7 +184,7 @@ export function openDetail(item: DeskItem): DetailState {
     // 개입 사유 문자열만 옮긴다. 터미널 CLI의 주의 객체(#926)는 자세히 화면이 쓰지 않는다
     ...(typeof item.attention === 'string' ? { attention: item.attention } : {}),
     ...(item.checkChangesArmed ? { checkChangesArmed: true } : {}),
-    ...(item.terminal?.draft ? { draft: item.terminal.draft } : {}),
+    ...(item.terminal?.draft && cleanText(item.terminal.draft) ? { draft: cleanText(item.terminal.draft) } : {}),
     tab: 'checkpoints',
     selected: 0,
     scroll: 0,
@@ -447,8 +447,9 @@ function reviewBody(state: DetailState, theme: Theme): { lines: string[]; focus:
   // 입력창에 되살리지 못한 글(ADR-237). 복사해서 다시 붙여 넣는다
   if (state.draft) {
     lines.push(` ${fg(theme, 'yellow')}쓰다 만 글${RESET} ${muted}· 입력창에 되살리지 못했습니다 · C 복사${RESET}`);
-    for (const line of state.draft.split('\n').slice(0, 8)) lines.push(`   ${line}`);
-    if (state.draft.split('\n').length > 8) lines.push(`   ${muted}…(복사하면 전체가 갑니다)${RESET}`);
+    const shown = cleanText(state.draft).split('\n');
+    for (const line of shown.slice(0, 8)) lines.push(`   ${line}`);
+    if (shown.length > 8) lines.push(`   ${muted}…(복사하면 전체가 갑니다)${RESET}`);
     lines.push('');
   }
   if (state.attention === 'needs_review' && state.reason) {

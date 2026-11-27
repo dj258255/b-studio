@@ -39,6 +39,7 @@ import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
 import { commandCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
 import { DraftKeeper, readDraftFile, writeDraftFile } from './session-terminal-draft';
+import { draftSealFor } from './session-terminal-draft-key';
 import { armModClock, disarmModClock } from './session-terminal-mod';
 import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
 
@@ -642,6 +643,7 @@ export async function openSessionTerminal(
         target.draftFile && backend.acceptsResume === true
           ? new DraftKeeper({
               file: target.draftFile,
+              seal: draftSealFor(target.draftFile),
               size: wanted,
               resumed: resumeConversation !== undefined,
               write: (data) => {
@@ -765,9 +767,9 @@ export async function clearSessionTerminalDraftLeftover(sessionId: string): Prom
     if (state.draft) {
       await state.draft.clearLeftover();
     } else if (state.draftFile) {
-      const data = await readDraftFile(state.draftFile);
+      const data = await readDraftFile(state.draftFile, draftSealFor(state.draftFile));
       delete data.leftover;
-      await writeDraftFile(state.draftFile, data);
+      await writeDraftFile(state.draftFile, data, draftSealFor(state.draftFile));
     }
   } catch (error) {
     console.error('[b-studio] 쓰다 만 글을 치우지 못했습니다', error instanceof Error ? error.message : String(error));

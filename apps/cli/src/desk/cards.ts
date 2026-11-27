@@ -7,7 +7,7 @@
  * 화면 폭에 따라 1~2열이고, 높이가 모자라면 마지막 답, 할 일·문맥, 한도 경고 차례로 줄을 뺀다
  */
 import type { DeskState } from './keys';
-import { fit, fitAnsi, stringWidth, type Rect } from './screen';
+import { cleanText, fit, fitAnsi, stringWidth, type Rect } from './screen';
 import { agentStatus, attentionKind, backendLabel, compactTokens, deniedWrites, deskSessions, deskSpaces, detailLines, gateStatus, headStatus, subagentName, toolLabel, toolLineLabel, totalTokens, type StatusBadge } from './sidebar';
 import type { KittyImages } from './kitty';
 import { defaultSprite, frameAt, spriteLines, subagentSprite, type Sprite } from './sprite';
@@ -203,7 +203,7 @@ export function nowLine(item: DeskItem, width: number, theme: Theme, now: number
   }
   // 입력창에 되살리지 못한 글이 있으면 알린다. 전체 글은 세션 자세히에서 복사한다
   if (item.terminal?.draft && item.state !== 'working') {
-    return compose([{ text: '› ', color: 'yellow' }, { text: `쓰다 만 글: ${oneLine(item.terminal.draft)}`, flex: true }, SEP, { text: 'i → C 복사', color: 'muted' }], width, theme);
+    return compose([{ text: '› ', color: 'yellow' }, { text: `쓰다 만 글: ${oneLine(cleanText(item.terminal.draft))}`, flex: true }, SEP, { text: 'i → C 복사', color: 'muted' }], width, theme);
   }
   if (item.state === 'booting') return bootingLine(item, width, theme, now);
   const quiet = lastSignal(item);

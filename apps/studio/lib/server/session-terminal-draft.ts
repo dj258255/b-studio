@@ -1,5 +1,6 @@
 import { createRequire } from 'node:module';
-import { chmod, mkdir, rename, rm, stat, writeFile, readFile } from 'node:fs/promises';
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
+import { lstat, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
 import path from 'node:path';
 import type { Unicode11Addon as Unicode11AddonType } from '@xterm/addon-unicode11';
 import type { Terminal as HeadlessTerminal } from '@xterm/headless';
@@ -106,6 +107,14 @@ export function restoreRefusal(text: string): string | undefined {
   return undefined;
 }
 
+/** 저장·표시하는 글에서 뺄 것: ESC를 포함한 제어 문자(줄바꿈은 남긴다), DEL, C1, 글 방향을 뒤집는 문자와 보이지 않는 문자, 줄·문단 구분자 */
+const UNSAFE_KEEP_NEWLINE = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u200b-\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069\ufeff]/gu;
+
+/** 저장하거나 화면·API에 내보낼 글: 제어 문자·방향 문자를 뺀다(줄바꿈은 남는다) */
+export function cleanDraftText(text: string): string {
+  return text.replace(UNSAFE_KEEP_NEWLINE, '');
+}
+
 export interface DraftFile {
   version: 1;
   /** 마지막으로 읽은 입력창의 글. 입력창이 비면 없다 */
@@ -114,44 +123,102 @@ export interface DraftFile {
   leftover?: { text: string; savedAt: string; reason: string };
 }
 
-function validEntry<T extends { text: string; savedAt: string }>(value: unknown, extra: (v: Record<string, unknown>) => Partial<T> | undefined): T | undefined {
+/**
+ * 저장 파일의 도장. 저장 파일은 작업 복사본 안(`.git/b-studio`)이라 에이전트가 쓸 수 있다 — 세션 상태 폴더 중 작업 복사본 밖의 보호된 자리가 없다
+ * (복사본 세션은 상태 폴더가 작업 복사본 자체이고 `session.json`도 거기 있다). 그래서 글을 믿는 근거를 파일 밖에 둔다:
+ * studio만 아는 열쇠(작업 복사본 밖, 0600)로 `HMAC(열쇠, 파일 경로·종류·글)`을 파일에 함께 적고, 읽을 때 도장이 맞지 않으면 버린다.
+ * 에이전트가 글을 심거나 다른 세션의 파일을 옮겨 놓아도 도장이 맞지 않는다
+ */
+export interface DraftSeal {
+  key: Buffer;
+  /** 이 파일이 속한 자리(파일 경로). 다른 세션의 파일을 옮겨 놓은 것을 가린다 */
+  context: string;
+}
+
+function macOf(seal: DraftSeal, kind: 'live' | 'leftover', text: string): string {
+  return createHmac('sha256', seal.key).update(`${seal.context}\0${kind}\0${text}`).digest('hex');
+}
+
+function macMatches(seal: DraftSeal, kind: 'live' | 'leftover', text: string, mac: unknown): boolean {
+  if (typeof mac !== 'string' || !/^[0-9a-f]{64}$/.test(mac)) return false;
+  return timingSafeEqual(Buffer.from(mac, 'hex'), Buffer.from(macOf(seal, kind, text), 'hex'));
+}
+
+/** 저장 자리(파일과 그 폴더 둘)가 링크가 아닌지 본다. 링크면 던진다 — 에이전트가 자리를 링크로 바꿔 studio가 다른 파일을 쓰게 하지 못하게 한다 */
+async function assertPlainPlace(file: string): Promise<void> {
+  const dir = path.dirname(file);
+  for (const place of [path.dirname(dir), dir]) {
+    const info = await lstat(place).catch(() => undefined);
+    if (info && !info.isDirectory()) throw new Error(`쓰다 만 글의 저장 자리가 폴더가 아니거나 링크입니다: ${place}`);
+  }
+  const info = await lstat(file).catch(() => undefined);
+  if (info && !info.isFile()) throw new Error(`쓰다 만 글의 저장 파일이 일반 파일이 아닙니다: ${file}`);
+}
+
+function validEntry(value: unknown, kind: 'live' | 'leftover', seal: DraftSeal): { text: string; savedAt: string; reason?: string } | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   const record = value as Record<string, unknown>;
   if (typeof record.text !== 'string' || typeof record.savedAt !== 'string') return undefined;
   if (record.text === '' || [...record.text].length > MAX_DRAFT_CHARS) return undefined;
-  const more = extra(record);
-  if (more === undefined) return undefined;
-  return { text: record.text, savedAt: record.savedAt, ...more } as T;
+  // 제어 문자·방향 문자가 든 글은 읽지 않는다(우리가 쓴 글에는 없다)
+  if (cleanDraftText(record.text) !== record.text) return undefined;
+  if (!macMatches(seal, kind, record.text, record.mac)) return undefined;
+  if (kind === 'leftover') return typeof record.reason === 'string' ? { text: record.text, savedAt: record.savedAt, reason: record.reason } : undefined;
+  return { text: record.text, savedAt: record.savedAt };
 }
 
-/** 저장 파일을 읽는다. 없거나, 크거나, 모양이 틀리면 없는 것으로 본다(믿을 수 없는 것을 입력창에 넣지 않는다). 크기는 읽기 전에 본다 */
-export async function readDraftFile(file: string): Promise<DraftFile> {
+/** 저장 파일을 읽는다. 없거나, 링크거나, 크거나, 모양·도장이 틀리면 없는 것으로 본다(믿을 수 없는 것을 입력창에 넣지 않는다). 크기는 읽기 전에 본다 */
+export async function readDraftFile(file: string, seal: DraftSeal): Promise<DraftFile> {
   const empty: DraftFile = { version: FILE_VERSION };
   try {
-    const info = await stat(file);
+    await assertPlainPlace(file);
+    const info = await lstat(file);
     if (!info.isFile() || info.size > MAX_FILE_BYTES) return empty;
     const parsed = JSON.parse(await readFile(file, 'utf8')) as unknown;
     if (typeof parsed !== 'object' || parsed === null || (parsed as { version?: unknown }).version !== FILE_VERSION) return empty;
     const body = parsed as Record<string, unknown>;
-    const live = validEntry<NonNullable<DraftFile['live']>>(body.live, () => ({}));
-    const leftover = validEntry<NonNullable<DraftFile['leftover']>>(body.leftover, (v) => (typeof v.reason === 'string' ? { reason: v.reason } : undefined));
-    return { version: FILE_VERSION, ...(live ? { live } : {}), ...(leftover ? { leftover } : {}) };
+    const live = validEntry(body.live, 'live', seal);
+    const leftover = validEntry(body.leftover, 'leftover', seal);
+    return {
+      version: FILE_VERSION,
+      ...(live ? { live: { text: live.text, savedAt: live.savedAt } } : {}),
+      ...(leftover ? { leftover: { text: leftover.text, savedAt: leftover.savedAt, reason: leftover.reason ?? '' } } : {}),
+    };
   } catch {
     return empty;
   }
 }
 
-/** 저장 파일을 쓴다(600, 임시 파일 → 이름 바꾸기). 둘 다 비면 파일을 지운다 */
-export async function writeDraftFile(file: string, data: DraftFile): Promise<void> {
+/**
+ * 저장 파일을 쓴다(600, 예측할 수 없는 이름의 임시 파일을 `wx`로 새로 만들고 rename). 둘 다 비면 지운다.
+ * 자리(파일·폴더)가 링크면 쓰지 않고 던진다. 경로로 chmod하지 않는다 — 링크를 따라가 다른 파일의 권한을 바꾸지 않게
+ */
+export async function writeDraftFile(file: string, data: DraftFile, seal: DraftSeal): Promise<void> {
+  await assertPlainPlace(file);
   if (!data.live && !data.leftover) {
     await rm(file, { force: true });
     return;
   }
   await mkdir(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  await writeFile(temp, `${JSON.stringify(data)}\n`, { mode: 0o600 });
-  await chmod(temp, 0o600);
-  await rename(temp, file);
+  await assertPlainPlace(file);
+  const body = {
+    version: FILE_VERSION,
+    ...(data.live ? { live: { ...data.live, mac: macOf(seal, 'live', data.live.text) } } : {}),
+    ...(data.leftover ? { leftover: { ...data.leftover, mac: macOf(seal, 'leftover', data.leftover.text) } } : {}),
+  };
+  const temp = `${file}.${randomBytes(8).toString('hex')}.tmp`;
+  const handle = await open(temp, 'wx', 0o600);
+  try {
+    await handle.writeFile(`${JSON.stringify(body)}\n`);
+  } finally {
+    await handle.close();
+  }
+  try {
+    await rename(temp, file);
+  } catch (error) {
+    await rm(temp, { force: true });
+    throw error;
+  }
 }
 
 /** 터미널 출력을 먹여 화면을 유지하는 헤드리스 터미널. 입력창을 읽는 데만 쓴다 */
@@ -218,6 +285,8 @@ export class DraftScreen {
 
 export interface DraftKeeperOptions {
   file: string;
+  /** 저장 파일의 도장(열쇠는 작업 복사본 밖). 도장이 맞지 않는 글은 읽지 않는다 */
+  seal: DraftSeal;
   size: { cols: number; rows: number };
   /** 터미널에 쓴다(복원이 입력창에 붙여 넣을 때만 쓴다) */
   write: (data: string) => void;
@@ -269,7 +338,7 @@ export class DraftKeeper {
   }
 
   async #load(): Promise<void> {
-    this.#data = await readDraftFile(this.#options.file);
+    this.#data = await readDraftFile(this.#options.file, this.#options.seal);
     this.#written = JSON.stringify(this.#data);
     if (this.#data.leftover) this.#options.onLeftover?.(this.#data.leftover.text);
     const saved = this.#data.live;
@@ -421,7 +490,7 @@ export class DraftKeeper {
     const serialized = JSON.stringify(data);
     this.#data = data;
     if (serialized === this.#written) return;
-    await writeDraftFile(this.#options.file, data);
+    await writeDraftFile(this.#options.file, data, this.#options.seal);
     this.#written = serialized;
   }
 }
