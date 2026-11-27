@@ -230,6 +230,13 @@ export async function runGateCheck(host: GateHost): Promise<GateOutcome> {
         tests: tests.map((test) => ({ name: test.name, service: test.service, command: test.command, ...(test.maxAttempts !== undefined ? { maxAttempts: test.maxAttempts } : {}) })),
         concurrency,
         loads,
+        // 속성 시험(알림 전용, ADR-240): 켠 서비스의 문서 경로와 상한만 넘긴다. 기본값과 상한 적용은 Rust가 한다
+        property: declared.project.managed.flatMap(([service, spec]) => {
+          const checks = spec.contract?.propertyChecks;
+          if (!spec.contract || !checks?.enabled) return [];
+          const { enabled: _enabled, ...limits } = checks;
+          return [{ service, extract: spec.contract.extract, ...limits }];
+        }),
       };
     },
     // Rust가 자동 화면을 골랐다(열 화면이나 건너뜀이 있을 때만 부른다): 자동 페이지의 확인 선언을 들고, 이름별 부산물을 비운다

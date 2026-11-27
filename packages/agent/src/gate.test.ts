@@ -1,9 +1,11 @@
 import { writeFileSync } from 'node:fs';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { SandboxError, type ExecResult, type LoadRequest, type LoadResult, type Sandbox, type ServiceUsage } from '@b-studio/sandbox';
 import { SpecError, SPEC_FILE, type LoadedProject, type WorkflowConcurrencyCheck, type WorkflowLoadCheck, type WorkflowPageCheck, type WorkflowSpec } from '@b-studio/spec';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as declaredChecks from './declared-checks';
 import { BrowserUnavailableError, StepFailedError, type BrowserPageOptions, type BrowserPageResult, type BrowserRunner } from './browser-check';
 import { autoPageCheck, nextErrorMarker, VerificationGate, type GateOptions, type PageFetcher, type ServiceRequest } from './gate';
@@ -1643,6 +1645,104 @@ describe('VerificationGate 동시 요청 확인', () => {
     expect(outcome.kind).toBe('retry');
     expect(outcome.kind === 'retry' && outcome.feedback).toMatch(/timeout/i);
     expect(gate.passedStages.has('concurrency_check')).toBe(false);
+  });
+});
+
+describe('VerificationGate 속성 시험(알림)', () => {
+  const OPENAPI = {
+    openapi: '3.0.0',
+    paths: {
+      '/pets/{id}': {
+        get: {
+          parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'integer', minimum: 1, maximum: 1000 } }],
+          responses: { '200': { content: { 'application/json': { schema: { type: 'object', required: ['name'], properties: { name: { type: 'string' } } } } } } },
+        },
+        post: { responses: { '200': { description: 'ok' } } },
+      },
+      '/secure': { get: { security: [{ key: [] }], responses: { '200': { description: 'ok' } } } },
+    },
+  };
+
+  let server: Server | undefined;
+  const seen: string[] = [];
+
+  async function serve(handler: (path: string) => { status: number; body: string }): Promise<string> {
+    seen.length = 0;
+    server = createServer((request, response) => {
+      seen.push(`${request.method} ${request.url}`);
+      const url = request.url ?? '/';
+      const reply = url === '/v3/api-docs' ? { status: 200, body: JSON.stringify(OPENAPI) } : handler(url);
+      response.writeHead(reply.status, { 'content-type': 'application/json' });
+      response.end(reply.body);
+    });
+    await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  }
+
+  afterEach(async () => {
+    const closing = server;
+    server = undefined;
+    await new Promise<void>((resolve) => (closing ? closing.close(() => resolve()) : resolve()));
+  });
+
+  function propertyProject(propertyChecks: Record<string, unknown> | undefined): LoadedProject {
+    return {
+      ...project,
+      managed: project.managed.map(([name, service]) =>
+        name === 'api' ? [name, { ...service, contract: { extract: '/v3/api-docs', ...(propertyChecks ? { propertyChecks } : {}) } }] : [name, service],
+      ),
+    } as LoadedProject;
+  }
+
+  async function propertyGate(target: LoadedProject, url: string) {
+    const workspace = new Workspace(target.root);
+    const sandbox = { ...fakeSandbox(target, [true]), endpoint: async (service: string) => ({ service, containerPort: 8080, url }) };
+    const gate = await VerificationGate.create({ project: target, sandbox, workspace, allowBreaking: false, maxVerifyAttempts: 3, fetcher: async () => ORDERS_CONTRACT, onEvent: () => {} });
+    await workspace.write('api/src/Order.java', 'class Order { String memo; }\n');
+    return gate;
+  }
+
+  it('켜면 실제 로컬 서버의 5xx와 응답 형 위반을 알림으로 남기고 판정은 통과로 둔다', async () => {
+    const url = await serve((path) => (Number(path.split('/')[2]) % 2 === 0 ? { status: 500, body: 'boom' } : { status: 200, body: JSON.stringify({ name: 7 }) }));
+    const gate = await propertyGate(propertyProject({ enabled: true, seed: 11 }), url);
+
+    expect(await gate.check()).toEqual({ kind: 'pass' });
+    const note = gate.checks.find((entry) => entry.name === 'property-check: api');
+    expect(note).toMatchObject({ stage: 'contract_check', ok: true });
+    expect(note?.detail).toContain('통과·실패 판정에 영향 없음');
+    expect(note?.detail).toMatch(/\$\.name: string이어야 하는데 number입니다|5xx 응답/);
+    expect(note?.detail).toContain('건너뜀 1개 연산(이유): 보안 요구(인증) 1');
+    // 상태를 바꾸는 메서드는 보내지 않는다
+    expect(seen.filter((entry) => !entry.startsWith('GET '))).toEqual([]);
+    expect(seen.some((entry) => entry.startsWith('GET /secure'))).toBe(false);
+  });
+
+  it('같은 시드면 같은 요청을 보낸다', async () => {
+    const url = await serve(() => ({ status: 200, body: JSON.stringify({ name: 'ok' }) }));
+    await (await propertyGate(propertyProject({ enabled: true, seed: 5 }), url)).check();
+    const first = seen.filter((entry) => entry.startsWith('GET /pets'));
+    const url2 = await serve(() => ({ status: 200, body: JSON.stringify({ name: 'ok' }) }));
+    await (await propertyGate(propertyProject({ enabled: true, seed: 5 }), url2)).check();
+    expect(seen.filter((entry) => entry.startsWith('GET /pets'))).toEqual(first);
+    expect(first.length).toBeGreaterThan(0);
+  });
+
+  it('요청 수 상한에 걸리면 보지 못한 것을 알림에 적는다', async () => {
+    const url = await serve(() => ({ status: 200, body: JSON.stringify({ name: 'ok' }) }));
+    const gate = await propertyGate(propertyProject({ enabled: true, maxRequests: 1 }), url);
+    await gate.check();
+    expect(seen.filter((entry) => entry.startsWith('GET /pets'))).toHaveLength(1);
+    expect(gate.checks.find((entry) => entry.name === 'property-check: api')?.detail).toContain('끝까지 보지 못함(상한): 요청 수 상한 1건');
+  });
+
+  it('꺼져 있거나 선언이 없으면 문서도 요청하지 않는다', async () => {
+    const url = await serve(() => ({ status: 500, body: 'boom' }));
+    for (const target of [propertyProject(undefined), propertyProject({ enabled: false })]) {
+      const gate = await propertyGate(target, url);
+      expect(await gate.check()).toEqual({ kind: 'pass' });
+      expect(gate.checks.some((entry) => entry.name.startsWith('property-check'))).toBe(false);
+    }
+    expect(seen).toEqual([]);
   });
 });
 
