@@ -19,6 +19,10 @@ import type { ActivityContext, ActivityNow, ActivitySubagent, ActivityTodos, Ter
 import type { AgentCapabilities, TerminalAgentRow } from './terminal-agents';
 import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents } from './sessions';
 import { listTaskPlans } from './task-plans';
+import { totalTokens } from '@/lib/usage';
+import { userLimitSetting } from './session-limits';
+import { pickTokenLimitView, tokenLimitView, type TokenLimitView } from './token-limit-stages';
+import { userTokens } from './usage-state';
 import { buildTokenReports, tokenPricing, type TokenPricing } from './token-report';
 
 export type AgentKind = 'session' | 'lane' | 'fleet';
@@ -86,6 +90,11 @@ export interface AgentItem {
   bootingSince?: string;
   /** 이번(끝났으면 마지막) 요청에서 관문이 거절한 쓰기 수(#955). 거절이 없었으면 없다 */
   turnDenied?: number;
+  /**
+   * 세션·사람 토큰 한도에 대한 사용 비율(#1427). 두 한도가 모두 걸려 있으면 더 빠듯한 쪽이다. 한도가 없으면 없다.
+   * percent·used가 없으면 사용량을 읽지 못한 것(모름)이지 0%가 아니다
+   */
+  tokenLimit?: TokenLimitView;
 }
 
 /** 에이전트 내역 한 행(#843). studio desk와 작업 화면이 그대로 그린다 */
@@ -156,6 +165,8 @@ export interface SessionOverviewSource {
   capabilities?: AgentCapabilities;
   /** 터미널 CLI의 활동(withDeskFacts가 붙인다, #920) */
   live?: TerminalActivityView;
+  /** 토큰 한도 사용 비율(withDeskFacts가 붙인다, #1427) */
+  tokenLimit?: TokenLimitView;
 }
 
 /** studio desk 사이드바의 사실을 모으는 곳. 테스트가 바꿔 끼운다 */
@@ -168,6 +179,8 @@ export interface DeskFactDeps {
   capabilities?: (sessionId: string) => AgentCapabilities | undefined;
   /** 터미널 CLI의 활동(#920). 주지 않으면 붙이지 않는다 */
   live?: (sessionId: string) => TerminalActivityView | undefined;
+  /** 토큰 한도 사용 비율(#1427). 주지 않으면 붙이지 않는다 */
+  tokenLimit?: (snapshot: SessionSnapshot) => TokenLimitView | undefined;
 }
 
 /** 수집한 세션에 터미널 CLI 상태와 비용을 붙인다(#835). 모르는 값은 붙이지 않는다 */
@@ -178,6 +191,7 @@ export function withDeskFacts(sessions: readonly SessionOverviewSource[], deps: 
     const agents = deps.agents?.(source.snapshot.id);
     const capabilities = deps.capabilities?.(source.snapshot.id);
     const live = deps.live?.(source.snapshot.id);
+    const tokenLimit = deps.tokenLimit?.(source.snapshot);
     return {
       ...source,
       ...(terminal ? { terminal } : {}),
@@ -185,6 +199,7 @@ export function withDeskFacts(sessions: readonly SessionOverviewSource[], deps: 
       ...(agents && agents.length > 0 ? { agents } : {}),
       ...(capabilities ? { capabilities } : {}),
       ...(live ? { live } : {}),
+      ...(tokenLimit ? { tokenLimit } : {}),
     };
   });
 }
@@ -229,6 +244,7 @@ interface AgentRow {
   agents?: readonly TerminalAgentRow[];
   capabilities?: AgentCapabilities;
   live?: TerminalActivityView;
+  tokenLimit?: TokenLimitView;
 }
 
 function emptyUsage(): AgentUsage {
@@ -330,13 +346,14 @@ export function buildAgentOverview(input: AgentOverviewInput): { items: AgentIte
   return { items, totals: totalsOf(items) };
 }
 
-function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities' | 'live'> {
+function deskFactsOf(source: SessionOverviewSource): Pick<AgentRow, 'terminal' | 'costUsd' | 'agents' | 'capabilities' | 'live' | 'tokenLimit'> {
   return {
     ...(source.live ? { live: source.live } : {}),
     ...(source.terminal ? { terminal: source.terminal } : {}),
     ...(source.costUsd !== undefined ? { costUsd: source.costUsd } : {}),
     ...(source.agents ? { agents: source.agents } : {}),
     ...(source.capabilities ? { capabilities: source.capabilities } : {}),
+    ...(source.tokenLimit ? { tokenLimit: source.tokenLimit } : {}),
   };
 }
 
@@ -360,8 +377,33 @@ export async function listAgentOverview(user: string): Promise<{ items: AgentIte
     agents: (id) => sessionTerminalAgents(id, pricing),
     capabilities: (id) => sessionCapabilities(id),
     live: (id) => sessionTerminalActivity(id),
+    tokenLimit: (snapshot) => sessionTokenLimitView(snapshot),
   });
   return buildAgentOverview({ sessions, plans: listTaskPlans(user), fleets: listFleets(user) });
+}
+
+/**
+ * 세션의 토큰 한도 사용 비율(#1427). 세션 한도는 스냅샷의 합계로, 사람 한도는 세션 주인의 사용량 파일로 센다(사용량 API를 더 부르지 않는다).
+ * 사람 사용량 파일을 읽지 못하면 그 한도는 %를 싣지 않는다(모름). 한도 설정이 잘못돼 던지면 사람 한도는 싣지 않는다(막는 쪽이 따로 알린다)
+ */
+export function sessionTokenLimitView(snapshot: SessionSnapshot, at = new Date()): TokenLimitView | undefined {
+  const session = snapshot.tokenLimit !== undefined ? tokenLimitView('session', snapshot.tokenLimit, totalTokens(snapshot.tokens)) : undefined;
+  let user: TokenLimitView | undefined;
+  try {
+    const setting = userLimitSetting(snapshot.owner);
+    if (setting && snapshot.owner) {
+      let used: number | undefined;
+      try {
+        used = userTokens(snapshot.owner, setting.window, at);
+      } catch {
+        used = undefined;
+      }
+      user = tokenLimitView('user', setting.limit, used);
+    }
+  } catch {
+    user = undefined;
+  }
+  return pickTokenLimitView([session, user]);
 }
 
 /** 세션 기록의 실행별 추정 비용 합. 비용을 아는 실행이 하나도 없으면 없다 */
@@ -415,6 +457,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.workingSince ? { workingSince: row.live.workingSince } : {}),
     ...(state === 'booting' && row.bootingSince ? { bootingSince: row.bootingSince } : {}),
     ...(row.live?.turnDenied ? { turnDenied: row.live.turnDenied } : {}),
+    ...(row.tokenLimit ? { tokenLimit: row.tokenLimit } : {}),
   };
 }
 

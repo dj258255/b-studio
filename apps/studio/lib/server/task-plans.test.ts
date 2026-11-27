@@ -78,7 +78,7 @@ const fake = vi.hoisted(() => ({
   subdir: '',
   sends: [] as Array<{ sessionId: string; request: string; options: SendOptions }>,
   /** applyServerChanges(서버가 레인 결과를 써서 터미널 판정으로 닫는 통합 길)를 부른 기록(순서대로) */
-  serverChanges: [] as Array<{ sessionId: string; request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[] }>,
+  serverChanges: [] as Array<{ sessionId: string; request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[]; doneTests: unknown[] }>,
   /** applyServerChanges가 돌려줄 체크포인트를 남기지 않는다(바뀐 파일이 없어 통과한 경우) */
   serverNoCheckpoint: false,
   stopped: [] as string[],
@@ -303,8 +303,8 @@ vi.mock('./sessions', () => ({
     fake.listeners.set(id, set);
     return () => set.delete(listener);
   },
-  applyServerChanges: async (sessionId: string, input: { request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[] }) => {
-    fake.serverChanges.push({ sessionId, request: input.request, writes: [...input.writes], deletes: [...input.deletes], writableScope: [...input.writableScope] });
+  applyServerChanges: async (sessionId: string, input: { request: string; writes: Array<{ path: string; content: string }>; deletes: string[]; writableScope: string[]; doneTests?: unknown[] }) => {
+    fake.serverChanges.push({ sessionId, request: input.request, writes: [...input.writes], deletes: [...input.deletes], writableScope: [...input.writableScope], doneTests: [...(input.doneTests ?? [])] });
     const session = fake.sessions.get(sessionId)!;
     const runId = `server-run-${fake.serverChanges.length}`;
     // 통합: 서버가 쓴 파일을 적용하고 게이트 결과는 fake.integration이 정한다
@@ -1265,6 +1265,34 @@ describe('서버 재시작 뒤 이어서 하기', () => {
 
     expect(plan.status).toBe('failed');
     expect(plan.error).toContain('스튜디오가 다시 시작돼');
+  });
+
+  it.each([
+    ['서비스 없이 명령만', { doneCommand: 'pnpm test' }],
+    ['명령 없이 서비스만', { doneService: 'web' }],
+    ['빈 명령', { doneCommand: ' ', doneService: 'web' }],
+  ])('레인 작업의 완료 검사를 읽을 수 없으면(%s) "검사 없음"으로 넘기지 않고 통합을 실패로 닫는다(#1426)', async (_name, broken) => {
+    const laneA = path.join(fake.root, 'lane-a');
+    const laneB = path.join(fake.root, 'lane-b');
+    mkdirSync(path.join(laneA, 'web/a'), { recursive: true });
+    mkdirSync(path.join(laneB, 'web/b'), { recursive: true });
+    writeFileSync(path.join(laneA, 'web/a/one.md'), 'one');
+    writeFileSync(path.join(laneB, 'web/b/one.md'), 'b');
+    writePlan({
+      id: 'plan-broken-done',
+      owner: 'kim',
+      lanes: [
+        laneView('lane-1', 'done', { sessionId: 'session-lane-1', workDir: laneA, changedFiles: ['web/a/one.md'], paths: ['web/a'] }),
+        laneView('lane-2', 'done', { sessionId: 'session-lane-2', workDir: laneB, changedFiles: ['web/b/one.md'], paths: ['web/b'], tasks: [{ id: 'card-2', title: 'c', request: 'r', paths: ['web/b'], dependsOn: [], status: 'done', ...broken }] }),
+      ],
+    });
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    resumeTaskPlan('plan-broken-done', 'kim');
+    const plan = await settled(() => reloaded('plan-broken-done', 'kim'));
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('완료 검사를 읽을 수 없어');
+    // 게이트까지 가지 않았다
+    expect(fake.serverChanges).toEqual([]);
   });
 
   it('resumeTaskPlan은 레인을 다시 돌리지 않고 통합만 다시 한다', async () => {
@@ -2496,6 +2524,40 @@ describe('사람이 쓴 작업 카드(#B6a)', () => {
     // 레인·통합 세션에는 모델 옵션을 넘기지 않는다(터미널 레인은 CLI가, 통합은 스크립트 턴이 돈다)
     expect(fake.sessionOptions.every((options) => options.modelId === undefined && options.backend === undefined)).toBe(true);
     expect(plan.integration?.status).toBe('done');
+  });
+
+  it('통합 게이트에 모든 레인의 완료 검사가 넘어간다: 같은 검사는 한 번, 명령이 다르면 따로(#1426)', async () => {
+    fake.writes = { 'card-1': { 'web/a/one.md': 'one' }, 'card-2': { 'web/b/one.md': 'b' }, 'card-3': { 'web/b/two.md': 'c' }, 'card-4': { 'web/c/one.md': 'd' }, 'card-5': { 'web/c/two.md': 'e' } };
+    const created = await createTaskPlan({
+      projectId: 'orders',
+      request: '완료 검사 통합',
+      owner: 'kim',
+      cards: [
+        card('card-1', ['web/a'], { doneCommand: 'pnpm test', doneService: 'web' }),
+        // 서비스·명령이 모두 같다(같은 레인): 한 번만
+        card('card-2', ['web/b'], { doneCommand: 'pnpm test', doneService: 'web' }),
+        // 명령이 조금이라도 다르면 합치지 않는다
+        card('card-3', ['web/b'], { doneCommand: 'pnpm lint', doneService: 'web' }),
+        card('card-4', ['web/c'], { doneCommand: 'pnpm test --silent', doneService: 'web' }),
+        card('card-5', ['web/c']),
+      ],
+    });
+    const plan = await finished(created.id);
+    expect(plan.status).toBe('done');
+    expect(fake.serverChanges).toHaveLength(1);
+    expect(fake.serverChanges[0]!.doneTests).toEqual([
+      { name: 'done-card-1', service: 'web', command: ['sh', '-c', 'pnpm test'] },
+      { name: 'done-card-3', service: 'web', command: ['sh', '-c', 'pnpm lint'] },
+      { name: 'done-card-4', service: 'web', command: ['sh', '-c', 'pnpm test --silent'] },
+    ]);
+  });
+
+  it('완료 검사가 없는 카드뿐이면 통합 게이트에 넘기는 검사도 없다(지금과 같다)', async () => {
+    fake.writes = { 'card-1': { 'web/a/one.md': 'one' } };
+    const created = await createTaskPlan({ projectId: 'orders', request: '검사 없음', owner: 'kim', cards: [card('card-1', ['web/a'])] });
+    const plan = await finished(created.id);
+    expect(plan.status).toBe('done');
+    expect(fake.serverChanges[0]!.doneTests).toEqual([]);
   });
 
   it('겹치는 쓰기 범위의 카드는 한 레인에서 순서대로, 겹치지 않으면 다른 레인으로 돈다', async () => {
