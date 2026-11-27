@@ -832,6 +832,9 @@
       },
       "conversation": [],
       "demoIndex": 0,
+      "gatedCheckpoints": [
+        "<sha:2>"
+      ],
       "gemini": {
         "notes": []
       },

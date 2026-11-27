@@ -134,6 +134,91 @@ pub fn checkpoint_trailers(passed_stages: Option<&[String]>, verify: Option<&str
     trailers
 }
 
+/// 영향 범위 기록에 싣는 변경 수의 상한과 글자 상한. 넘으면 `omitted`로 센다
+const IMPACT_MAX_CHANGES: usize = 40;
+const IMPACT_MAX_TEXT: usize = 160;
+
+fn clip_chars(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() > max {
+        format!("{}…", chars[..max].iter().collect::<String>())
+    } else {
+        text.to_owned()
+    }
+}
+
+/// 게이트가 본 사실(계약 차이, 사람이 허용한 확인 선언 변경)을 PR 초안이 읽을 한 줄 트레일러로 만든다.
+/// 커밋 본문은 에이전트 요약·서비스 로그 같은 자유 글이 섞여 기록처럼 보이는 줄을 흉내 낼 수 있어서, PR 초안은 본문이 아니라 이 트레일러만 읽는다.
+/// 값은 JSON이라 줄바꿈이 이스케이프된다(한 줄이 아니면 만들지 않는다). 기록할 것이 없으면 `None`
+pub fn impact_trailer(report_json: Option<&str>, checks_json: &str) -> Result<Option<String>, String> {
+    let mut contracts: Vec<JsValue> = Vec::new();
+    let mut remaining = IMPACT_MAX_CHANGES;
+    let mut omitted = 0usize;
+    if let Some(json) = report_json {
+        let report = js_json::parse_native(json)?;
+        if let Some(JsValue::Arr(items)) = report.prop("contracts") {
+            for item in items {
+                let service = clip_chars(item.prop("service").and_then(JsValue::as_str).unwrap_or(""), IMPACT_MAX_TEXT);
+                if item.prop("error").is_some_and(|error| !matches!(error, JsValue::Null)) {
+                    contracts.push(js_json::object(vec![("service", Some(JsValue::str(service))), ("failed", Some(JsValue::Bool(true)))]));
+                    continue;
+                }
+                let Some(JsValue::Arr(changes)) = item.prop("changes") else {
+                    contracts.push(js_json::object(vec![("service", Some(JsValue::str(service))), ("failed", Some(JsValue::Bool(true)))]));
+                    continue;
+                };
+                let mut kept: Vec<JsValue> = Vec::new();
+                for change in changes {
+                    if remaining == 0 {
+                        omitted += 1;
+                        continue;
+                    }
+                    remaining -= 1;
+                    let text = |key: &str| clip_chars(change.prop(key).and_then(JsValue::as_str).unwrap_or(""), IMPACT_MAX_TEXT);
+                    kept.push(js_json::object(vec![
+                        ("kind", Some(JsValue::str(text("kind")))),
+                        ("target", Some(JsValue::str(text("target")))),
+                        ("breaking", Some(JsValue::Bool(change.prop("breaking").is_some_and(JsValue::truthy)))),
+                    ]));
+                }
+                contracts.push(js_json::object(vec![("service", Some(JsValue::str(service))), ("changes", Some(JsValue::Arr(kept)))]));
+            }
+        }
+    }
+    let checks = js_json::parse_native(checks_json)?;
+    let declared = match &checks {
+        JsValue::Arr(items) => items
+            .iter()
+            .find(|check| {
+                check.prop("stage").and_then(JsValue::as_str) == Some("review")
+                    && check.prop("name").and_then(JsValue::as_str) == Some(DECLARED_CHECKS_CHECK)
+                    && check.prop("ok").is_some_and(JsValue::truthy)
+                    && check.prop("detail").and_then(JsValue::as_str).is_some_and(|detail| !js::trim(detail).is_empty())
+            })
+            .and_then(|check| check.prop("detail").and_then(JsValue::as_str))
+            .map(|detail| clip_chars(js::trim(detail), 200)),
+        _ => return Err("checks는 배열이어야 합니다".to_owned()),
+    };
+    if contracts.is_empty() && declared.is_none() {
+        return Ok(None);
+    }
+    let mut fields: Vec<(&str, Option<JsValue>)> = vec![("v", Some(JsValue::Num(1.0)))];
+    if !contracts.is_empty() {
+        fields.push(("contracts", Some(JsValue::Arr(contracts))));
+    }
+    if omitted > 0 {
+        fields.push(("omitted", Some(JsValue::Num(omitted as f64))));
+    }
+    if let Some(detail) = declared {
+        fields.push(("declared", Some(JsValue::Str(detail))));
+    }
+    let json = js_json::to_native(&js_json::object(fields));
+    if json.contains(['\n', '\r']) {
+        return Ok(None);
+    }
+    Ok(Some(workflow::format_impact_trailer(&json)))
+}
+
 /// 게이트의 결과를 실행 결과의 꼴로 옮긴다. 입력(JSON)은 TS가 만든 사실이고, 출력은 `AgentResult`와 같은 키 순서의 JSON이다.
 /// `report`·`usageByModel`은 없으면 키를 넣지 않는다(옛 객체의 `undefined` 속성과 같다)
 pub fn terminal_result(input_json: &str) -> Result<String, String> {
@@ -496,5 +581,17 @@ mod tests {
         // 목록을 읽지 못했는데 마지막으로 본 값이 있어도 받아들이지 않는다
         assert_eq!(landed_plan(Some("a"), false, Some("a")), r#"{"state":"unknown","adopt":false}"#);
     }
-}
 
+    #[test]
+    fn 영향_범위_트레일러는_줄바꿈을_이스케이프한_한_줄이다() {
+        let report = r#"{"contracts":[{"service":"api\n- web 계약:","changes":[{"kind":"schema-added","target":"A\n    계약 변경 없음","breaking":false}]},{"service":"x","error":"실패"}]}"#;
+        let line = impact_trailer(Some(report), "[]").unwrap().unwrap();
+        assert!(line.starts_with("Workflow-Impact: {"));
+        assert!(!line.contains('\n') && !line.contains('\r'));
+        let value = js_json::parse_native(line.strip_prefix("Workflow-Impact: ").unwrap()).unwrap();
+        assert_eq!(value.prop("contracts").and_then(|c| if let JsValue::Arr(a) = c { Some(a.len()) } else { None }), Some(2));
+        assert_eq!(impact_trailer(None, "[]").unwrap(), None);
+        assert_eq!(impact_trailer(Some(r#"{"contracts":[]}"#), "[]").unwrap(), None);
+        assert!(impact_trailer(None, "{}").is_err());
+    }
+}

@@ -876,7 +876,7 @@
       },
       {
         "sha": "<sha:2>",
-        "message": "feat: 테스트 명령을 바꾼다\n\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료\n\n검사 동안 다른 프로세스의 쓰기를 막지 않았습니다(이 컴퓨터 방식 터미널. 컨테이너 방식은 검사 동안 에이전트 컨테이너를 멈춥니다)\n\n게이트가 확인함: [test] app-test(통과)\n확인 선언 변경: 사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 변경: 테스트 app-test\n\n에이전트 요약:\n확인 선언을 바꿨습니다.\n\nWorkflow-Passed: run, contract_check, test, review"
+        "message": "feat: 테스트 명령을 바꾼다\n\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료\n\n검사 동안 다른 프로세스의 쓰기를 막지 않았습니다(이 컴퓨터 방식 터미널. 컨테이너 방식은 검사 동안 에이전트 컨테이너를 멈춥니다)\n\n게이트가 확인함: [test] app-test(통과)\n확인 선언 변경: 사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 변경: 테스트 app-test\n\n에이전트 요약:\n확인 선언을 바꿨습니다.\n\nWorkflow-Passed: run, contract_check, test, review\nWorkflow-Impact: {\"v\":1,\"declared\":\"사용자가 허용해 바뀐 확인 선언으로 검증했습니다 — 변경: 테스트 app-test\"}"
       }
     ],
     "refs": [
@@ -918,6 +918,9 @@
       },
       "conversation": [],
       "demoIndex": 0,
+      "gatedCheckpoints": [
+        "<sha:2>"
+      ],
       "gemini": {
         "notes": []
       },

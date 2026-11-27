@@ -488,6 +488,10 @@ struct Commit {
     passed_stages: Vec<String>,
     docs_exempt: bool,
     max_turns: bool,
+    /// 스튜디오가 게이트를 거쳐 남긴 체크포인트인가(Workflow-Passed 트레일러가 있다). 아니면 본문은 사람이 쓴 글이라 게이트 기록으로 읽지 않는다
+    gate_recorded: bool,
+    /// 커밋의 `Workflow-Impact` 트레일러 값(한 줄 JSON). `gate_recorded`일 때만 읽는다
+    impact_record: Option<String>,
 }
 
 struct PullRequestInput {
@@ -501,6 +505,17 @@ struct PullRequestInput {
     requirement_ids: Vec<String>,
     required_stages: Vec<String>,
     appendix: String,
+    /// 있으면 "영향 범위"·"중점 리뷰 항목" 절을 더한다. 없으면(옛 호출) 두 절이 없다
+    impact: Option<Impact>,
+}
+
+/// 커밋만으로는 알 수 없는, 프로젝트 선언에서 온 사실(껍데기가 넘긴다)
+struct Impact {
+    /// 바뀐 파일이 속한 managed 서비스. `None`이면 판정하지 못한 것이다(빈 목록은 "속한 서비스 없음")
+    services: Option<Vec<String>>,
+    unmatched_files: Option<f64>,
+    protected_paths: Vec<String>,
+    backslash_sep: bool,
 }
 
 /// 체크포인트 커밋 제목에서 "요청: " 접두사를 뺀 사람이 읽는 이름(`/^요청:\s*/`)
@@ -559,12 +574,12 @@ fn build_pull_request_title(project_name: &str, commits: &[Commit], requirement_
 
 /// 요청 하나의 절. `with_details`가 거짓이면 접어 둔 상세(게이트 결과·에이전트 요약)를 뺀다
 fn section(commit: &Commit, request: &str, index: usize, with_details: bool) -> String {
-    let shown: Vec<String> = commit.files.iter().take(10).map(|file| format!("`{file}`")).collect();
+    let shown: Vec<String> = commit.files.iter().take(10).map(|file| code(file)).collect();
     let more = if commit.files.len() > shown.len() { format!(" 외 {}개", commit.files.len() - shown.len()) } else { String::new() };
     let mut lines = vec![
         format!("### {}. {request}", index + 1),
         String::new(),
-        format!("커밋 `{}`, 파일 {}개: {}{more}", commit.short_sha, commit.files.len(), shown.join(", ")),
+        format!("커밋 {}, 파일 {}개: {}{more}", code(&commit.short_sha), commit.files.len(), shown.join(", ")),
     ];
     if !commit.body.is_empty() && with_details {
         for line in ["", "<details>", "<summary>검증 게이트 결과와 에이전트 요약</summary>", "", "~~~text"] {
@@ -576,6 +591,278 @@ fn section(commit: &Commit, request: &str, index: usize, with_details: bool) -> 
         }
     }
     lines.join("\n")
+}
+
+// ---------------------------------------------------------------------------
+// 영향 범위·중점 리뷰 항목(모델을 부르지 않고 파일 목록과 게이트가 남긴 트레일러 기록에서 기계적으로 만든다)
+// ---------------------------------------------------------------------------
+
+/// 게이트가 커밋에 남기는 영향 범위 트레일러(`Workflow-Impact`)의 값을 읽는다. 커밋 본문(검증 보고서·에이전트 요약)은 읽지 않는다:
+/// 본문에는 서비스 로그·오류 문구·모델이 쓴 글이 줄바꿈과 함께 섞여 들어가 기록처럼 보이는 줄을 흉내 낼 수 있다.
+/// 트레일러 값은 한 줄 JSON이라 그 값들의 줄바꿈이 이스케이프된다. 모양이 조금이라도 다르면 읽지 못한 것으로 센다(0건이 아니다)
+const CONTRACT_KINDS: [&str; 8] = [
+    "operation-added",
+    "operation-removed",
+    "schema-added",
+    "schema-removed",
+    "property-added",
+    "property-removed",
+    "property-type-changed",
+    "property-became-required",
+];
+const IMPACT_FILE_LIST_MAX: usize = 8;
+const IMPACT_ITEM_MAX: usize = 5;
+const DECLARED_CHANGE_DETAIL_MAX: usize = 200;
+
+struct ContractLine {
+    kind: String,
+    target: String,
+    breaking: bool,
+}
+
+/// 커밋 하나의 영향 범위 기록
+#[derive(Default)]
+struct ImpactRecord {
+    /// 계약 비교 기록이 있다(서비스 하나 이상)
+    recorded: bool,
+    /// 계약 추출에 실패한 서비스가 있거나, 트레일러를 읽지 못했다
+    failed: bool,
+    changes: Vec<ContractLine>,
+    /// 기록에 담지 못하고 센 변경 수
+    omitted: usize,
+    /// 사람이 허용해 바뀐 확인 선언 변경의 요약
+    declared: Option<String>,
+}
+
+fn parse_impact_record(raw: &str) -> ImpactRecord {
+    let unreadable = ImpactRecord { failed: true, ..ImpactRecord::default() };
+    let Ok(JsValue::Obj(object)) = js_json::parse_native(raw) else { return unreadable };
+    if !matches!(object.get("v"), Some(JsValue::Num(v)) if *v == 1.0) {
+        return unreadable;
+    }
+    let mut record = ImpactRecord::default();
+    match object.get("contracts") {
+        None => {}
+        Some(JsValue::Arr(items)) => {
+            for item in items {
+                let JsValue::Obj(entry) = item else { return unreadable };
+                if !matches!(entry.get("service"), Some(JsValue::Str(_))) {
+                    return unreadable;
+                }
+                record.recorded = true;
+                if matches!(entry.get("failed"), Some(JsValue::Bool(true))) {
+                    record.failed = true;
+                    continue;
+                }
+                let Some(JsValue::Arr(changes)) = entry.get("changes") else { return unreadable };
+                for change in changes {
+                    let JsValue::Obj(change) = change else { return unreadable };
+                    let (Some(JsValue::Str(kind)), Some(JsValue::Str(target)), Some(JsValue::Bool(breaking))) = (change.get("kind"), change.get("target"), change.get("breaking")) else {
+                        return unreadable;
+                    };
+                    if !CONTRACT_KINDS.contains(&kind.as_str()) || target.is_empty() {
+                        return unreadable;
+                    }
+                    record.changes.push(ContractLine { kind: kind.clone(), target: target.clone(), breaking: *breaking });
+                }
+            }
+        }
+        Some(_) => return unreadable,
+    }
+    match object.get("omitted") {
+        None => {}
+        Some(JsValue::Num(n)) if *n >= 0.0 && n.fract() == 0.0 => record.omitted = *n as usize,
+        Some(_) => return unreadable,
+    }
+    match object.get("declared") {
+        None => {}
+        Some(JsValue::Str(detail)) => {
+            let detail = js::trim(detail);
+            if !detail.is_empty() {
+                let chars: Vec<char> = detail.chars().collect();
+                record.declared = Some(if chars.len() > DECLARED_CHANGE_DETAIL_MAX { format!("{}…", chars[..DECLARED_CHANGE_DETAIL_MAX].iter().collect::<String>()) } else { detail.to_owned() });
+            }
+        }
+        Some(_) => return unreadable,
+    }
+    record
+}
+
+/// 마크다운에 값을 그대로 끼워 넣어도 구조가 깨지거나 링크·멘션이 생기지 않게 하는 코드 범위.
+/// 줄바꿈·제어 문자·줄 구분 문자는 공백 하나로 줄이고, 값 안의 가장 긴 백틱 묶음보다 긴 울타리로 감싼다(코드 범위 안에서는 `@`·`#`·`[]()`가 글자일 뿐이다)
+fn code(value: &str) -> String {
+    let mut flat = String::with_capacity(value.len());
+    let mut in_space = false;
+    for c in value.chars() {
+        if is_js_whitespace(c) || c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{85}') {
+            if !in_space {
+                flat.push(' ');
+            }
+            in_space = true;
+        } else {
+            flat.push(c);
+            in_space = false;
+        }
+    }
+    let flat = flat.trim_matches(' ');
+    if flat.is_empty() {
+        return "(빈 값)".to_owned();
+    }
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for c in flat.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat(longest + 1);
+    // 값이 백틱으로 시작하거나 끝나면 울타리와 붙지 않게 한 칸씩 띄운다(CommonMark는 양쪽 한 칸을 지운다)
+    let pad = if flat.starts_with('`') || flat.ends_with('`') { " " } else { "" };
+    format!("{fence}{pad}{flat}{pad}{fence}")
+}
+
+/// DB 마이그레이션으로 "보이는" 파일. 이름만 보는 추정이고 리뷰어에게 알리는 데만 쓴다(막는 검사가 아니다)
+fn looks_like_migration(file: &str) -> bool {
+    let lower = file.to_lowercase();
+    let segments: Vec<&str> = lower.split('/').collect();
+    let Some((name, dirs)) = segments.split_last() else { return false };
+    if dirs.iter().any(|dir| matches!(*dir, "migrations" | "migration" | "migrate")) {
+        return true;
+    }
+    if dirs.windows(2).any(|pair| pair[0] == "alembic" && pair[1] == "versions") {
+        return true;
+    }
+    // Flyway: V2__add_memo.sql, U2__undo.sql, R__views.sql
+    let bytes = name.as_bytes();
+    name.ends_with(".sql") && name.contains("__") && ((matches!(bytes.first(), Some(b'v' | b'u')) && bytes.get(1).is_some_and(u8::is_ascii_digit)) || name.starts_with("r__"))
+}
+
+fn file_list(files: &[&String]) -> String {
+    let shown: Vec<String> = files.iter().take(IMPACT_FILE_LIST_MAX).map(|file| code(file)).collect();
+    let more = if files.len() > shown.len() { format!(" 외 {}개", files.len() - shown.len()) } else { String::new() };
+    format!("{}{more}", shown.join(", "))
+}
+
+fn sha_list(commits: &[&Commit]) -> String {
+    let shown: Vec<String> = commits.iter().take(IMPACT_ITEM_MAX).map(|commit| code(&commit.short_sha)).collect();
+    let more = if commits.len() > shown.len() { format!(" 외 {}건", commits.len() - shown.len()) } else { String::new() };
+    format!("{}{more}", shown.join(", "))
+}
+
+/// "영향 범위"와 "중점 리뷰 항목" 절(제목 줄 포함). 근거를 얻지 못한 항목은 지어내지 않고 "확인하지 못함"으로 적는다
+fn impact_section_lines(commits: &[Commit], impact: &Impact) -> Vec<String> {
+    let mut files: Vec<&String> = Vec::new();
+    for commit in commits {
+        for file in &commit.files {
+            if !files.contains(&file) {
+                files.push(file);
+            }
+        }
+    }
+
+    let mut lines: Vec<String> = vec!["## 영향 범위".to_owned(), String::new()];
+    lines.push(format!("- 바뀐 파일: {}개 (요청 {}건)", files.len(), commits.len()));
+    match &impact.services {
+        None => lines.push("- 바뀐 서비스: 확인하지 못함(서비스 선언으로 파일이 속한 서비스를 판정하지 못했습니다)".to_owned()),
+        Some(services) if services.is_empty() => lines.push("- 바뀐 서비스: 없음(서비스에 속한 파일이 바뀌지 않았습니다)".to_owned()),
+        Some(services) => {
+            let names: Vec<String> = services.iter().map(|service| code(service)).collect();
+            let outside = match impact.unmatched_files {
+                Some(count) if count > 0.0 => format!(" · 서비스에 속하지 않은 파일 {}개", js::number_to_string(count)),
+                _ => String::new(),
+            };
+            lines.push(format!("- 바뀐 서비스: {}{outside}", names.join(", ")));
+        }
+    }
+
+    // 계약 차이: 요청마다 게이트가 커밋의 Workflow-Impact 트레일러에 남긴 기록만 읽는다. 기록이 없으면 0건이 아니라 "확인하지 못함"이다
+    let checked: Vec<&Commit> = commits.iter().filter(|commit| !commit.docs_exempt).collect();
+    if !checked.is_empty() {
+        let records: Vec<(&Commit, ImpactRecord)> = checked
+            .iter()
+            .map(|commit| (*commit, if commit.gate_recorded { commit.impact_record.as_deref().map(parse_impact_record).unwrap_or_default() } else { ImpactRecord::default() }))
+            .collect();
+        let recorded: Vec<&(&Commit, ImpactRecord)> = records.iter().filter(|(_, record)| record.recorded).collect();
+        let unknown: Vec<&Commit> = records.iter().filter(|(_, record)| !record.recorded && !record.failed).map(|(commit, _)| *commit).collect();
+        let failed: Vec<&Commit> = records.iter().filter(|(_, record)| record.failed).map(|(commit, _)| *commit).collect();
+        if recorded.is_empty() {
+            lines.push("- API 계약 차이: 확인하지 못함(게이트가 남긴 계약 비교 기록이 없습니다. 계약을 선언한 서비스가 없거나 기록이 남지 않은 요청입니다)".to_owned());
+        } else {
+            let all: Vec<(&Commit, &ContractLine)> = recorded.iter().flat_map(|(commit, record)| record.changes.iter().map(move |change| (*commit, change))).collect();
+            let added = all.iter().filter(|(_, change)| change.kind.ends_with("-added")).count();
+            let removed = all.iter().filter(|(_, change)| change.kind.ends_with("-removed")).count();
+            let changed = all.len() - added - removed;
+            let breaking: Vec<&(&Commit, &ContractLine)> = all.iter().filter(|(_, change)| change.breaking).collect();
+            if all.is_empty() {
+                lines.push(format!("- API 계약 차이: 변경 없음 — 계약 비교 기록이 있는 요청 {}건", recorded.len()));
+            } else {
+                lines.push(format!("- API 계약 차이: 추가 {added} · 삭제 {removed} · 변경 {changed} (그중 호환 깨짐 {}) — 계약 비교 기록이 있는 요청 {}건", breaking.len(), recorded.len()));
+            }
+            for (commit, change) in breaking.iter().take(IMPACT_ITEM_MAX).map(|pair| **pair) {
+                lines.push(format!("  - 호환 깨짐: {} ({})", code(&format!("{} {}", change.kind, change.target)), code(&commit.short_sha)));
+            }
+            if breaking.len() > IMPACT_ITEM_MAX {
+                lines.push(format!("  - 호환 깨짐 {}건이 더 있습니다", breaking.len() - IMPACT_ITEM_MAX));
+            }
+            if !unknown.is_empty() {
+                lines.push(format!("  - 계약 비교 기록이 없어 확인하지 못한 요청 {}건: {}", unknown.len(), sha_list(&unknown)));
+            }
+            let omitted: usize = recorded.iter().map(|(_, record)| record.omitted).sum();
+            if omitted > 0 {
+                lines.push(format!("  - 기록에 담지 못한 계약 변경 {omitted}건은 위 수에 들어 있지 않습니다"));
+            }
+            lines.push("  - 요청마다 그 요청을 시작할 때의 계약과 견준 기록을 합친 값입니다. 세션 전체를 한 번에 견준 값이 아닙니다".to_owned());
+        }
+        if !failed.is_empty() {
+            lines.push(format!("  - 계약 추출에 실패했거나 기록을 읽지 못한 요청 {}건: {}", failed.len(), sha_list(&failed)));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## 중점 리뷰 항목".to_owned());
+    lines.push(String::new());
+    let mut focus: Vec<String> = Vec::new();
+    // 보호 경로 규칙은 거부 목록이라 넓게 맞춘다(꼴을 맞출 수 없으면 걸린 것으로 본다). 여기서는 리뷰어에게 알리는 데만 쓴다
+    let protected: Vec<&String> = files
+        .iter()
+        .copied()
+        .filter(|file| impact.protected_paths.iter().any(|rule| crate::path_policy::is_protected_path(file, rule, impact.backslash_sep)))
+        .collect();
+    if !protected.is_empty() {
+        focus.push(format!("- 보호 경로를 건드린 파일: {}", file_list(&protected)));
+    }
+    let spec_files: Vec<&String> =
+        files.iter().copied().filter(|file| crate::path_policy::canonical_project_path(file, false, impact.backslash_sep).as_deref() == Some(crate::services::SPEC_FILE)).collect();
+    if !spec_files.is_empty() {
+        focus.push(format!("- 확인 선언 파일 변경: {}이 바뀌었습니다. 확인 선언(workflow)이 바뀌었는지는 diff로 확인하세요", file_list(&spec_files)));
+    }
+    let tests: Vec<&String> = files.iter().copied().filter(|file| crate::test_discovery::is_test_file_path(file)).collect();
+    if !tests.is_empty() {
+        focus.push(format!("- 시험 파일 변경: {}", file_list(&tests)));
+    }
+    let allowed: Vec<(&Commit, String)> = checked
+        .iter()
+        .filter(|commit| commit.gate_recorded)
+        .filter_map(|commit| commit.impact_record.as_deref().map(parse_impact_record).and_then(|record| record.declared).map(|detail| (*commit, detail)))
+        .collect();
+    for (commit, detail) in allowed.iter().take(IMPACT_ITEM_MAX) {
+        focus.push(format!("- 사람이 허용한 확인 선언 변경: {} — {}", code(&commit.short_sha), code(&detail)));
+    }
+    if allowed.len() > IMPACT_ITEM_MAX {
+        focus.push(format!("- 사람이 허용한 확인 선언 변경이 {}건 더 있습니다", allowed.len() - IMPACT_ITEM_MAX));
+    }
+    let migrations: Vec<&String> = files.iter().copied().filter(|file| looks_like_migration(file)).collect();
+    if !migrations.is_empty() {
+        focus.push(format!("- DB 마이그레이션으로 보이는 파일: {}", file_list(&migrations)));
+    }
+    if focus.is_empty() {
+        focus.push("- 해당하는 항목이 없습니다(보호 경로·확인 선언 파일·시험 파일·마이그레이션으로 보이는 파일을 건드리지 않았고, 사람이 허용한 확인 선언 변경 기록도 없습니다)".to_owned());
+    }
+    lines.extend(focus);
+    lines
 }
 
 /// 세션 커밋만으로 PR 제목과 본문을 만든다. `{title, body, missing:[{shortSha, subject, stages}]}`
@@ -617,6 +904,9 @@ fn build_pull_request_draft(input: &PullRequestInput) -> JsValue {
     if unverified.is_empty() {
         unverified.push("모든 커밋이 필수 단계를 통과했습니다".to_owned());
     }
+
+    // 영향 범위·중점 리뷰 항목(껍데기가 선언에서 온 사실을 넘겼을 때만)
+    let impact_lines: Vec<String> = input.impact.as_ref().map(|impact| impact_section_lines(commits, impact)).unwrap_or_default();
 
     // 연결할 이슈 번호(SameValueZero로 중복을 없앤다)
     let mut linked: Vec<f64> = Vec::new();
@@ -661,6 +951,10 @@ fn build_pull_request_draft(input: &PullRequestInput) -> JsValue {
         lines.push("## 돌리지 않은 검증".to_owned());
         lines.push(String::new());
         lines.push(unverified.join("\n"));
+        if !impact_lines.is_empty() {
+            lines.push(String::new());
+            lines.extend(impact_lines.iter().cloned());
+        }
         format!("{}{}", lines.join("\n"), input.appendix)
     };
 
@@ -749,6 +1043,13 @@ fn parse_commit(value: &JsValue) -> Result<Commit, String> {
         passed_stages: string_list(object, "passedStages", "커밋")?,
         docs_exempt: flag("docsExempt")?,
         max_turns: flag("maxTurns")?,
+        // 옛 호출에는 없다. 없으면 기록으로 읽지 않는 쪽이다
+        gate_recorded: match object.get("gateRecorded") {
+            None | Some(JsValue::Null) => false,
+            Some(JsValue::Bool(b)) => *b,
+            _ => return Err("커밋의 gateRecorded는 참·거짓이어야 합니다".to_owned()),
+        },
+        impact_record: optional_string_field(object, "impactRecord", "커밋")?,
     })
 }
 
@@ -787,7 +1088,31 @@ fn parse_input(json: &str) -> Result<PullRequestInput, String> {
         requirement_ids: string_list(&object, "requirementIds", "PR 입력")?,
         required_stages: string_list(&object, "requiredStages", "PR 입력")?,
         appendix: string_field(&object, "appendix", "PR 입력")?,
+        impact: parse_impact(object.get("impact"))?,
     })
+}
+
+fn parse_impact(value: Option<&JsValue>) -> Result<Option<Impact>, String> {
+    let object = match value {
+        None | Some(JsValue::Null) => return Ok(None),
+        Some(JsValue::Obj(object)) => object,
+        _ => return Err("PR 입력의 impact는 객체여야 합니다".to_owned()),
+    };
+    let services = match object.get("services") {
+        Some(JsValue::Null) => None,
+        Some(JsValue::Arr(_)) => Some(string_list(object, "services", "impact")?),
+        _ => return Err("impact의 services는 글자 목록이거나 null이어야 합니다".to_owned()),
+    };
+    let unmatched_files = match object.get("unmatchedFiles") {
+        Some(JsValue::Null) => None,
+        Some(JsValue::Num(n)) => Some(*n),
+        _ => return Err("impact의 unmatchedFiles는 수이거나 null이어야 합니다".to_owned()),
+    };
+    let backslash_sep = match object.get("backslashSep") {
+        Some(JsValue::Bool(b)) => *b,
+        _ => return Err("impact의 backslashSep은 참·거짓이어야 합니다".to_owned()),
+    };
+    Ok(Some(Impact { services, unmatched_files, protected_paths: string_list(object, "protectedPaths", "impact")?, backslash_sep }))
 }
 
 /// 입력은 껍데기가 미리 계산한 값(문서 체크포인트 여부·검증 단계만 남긴 필수 단계)을 담은 JSON이다. 모양이 어긋나면 던진다
@@ -891,5 +1216,60 @@ mod tests {
         assert_eq!(merged, format!("사람 글\n\n{PR_MANAGED_BODY_BEGIN}\n관리\n{PR_MANAGED_BODY_END}"));
         assert_eq!(merge_managed_pull_request_body(Some(&merged), "새 글"), format!("사람 글\n\n{PR_MANAGED_BODY_BEGIN}\n새 글\n{PR_MANAGED_BODY_END}"));
         assert!(merge_managed_pull_request_body(None, &"가".repeat(70_000)).ends_with(PR_MANAGED_BODY_END));
+    }
+
+    #[test]
+    fn 영향_범위_트레일러를_읽는다() {
+        let raw = r#"{"v":1,"contracts":[{"service":"api","changes":[{"kind":"operation-added","target":"GET /api/orders/{id}","breaking":false},{"kind":"property-removed","target":"Order.total","breaking":true}]},{"service":"web","changes":[]}],"omitted":2,"declared":"삭제: tests.slow"}"#;
+        let record = parse_impact_record(raw);
+        assert!(record.recorded && !record.failed);
+        let seen: Vec<(&str, &str, bool)> = record.changes.iter().map(|c| (c.kind.as_str(), c.target.as_str(), c.breaking)).collect();
+        assert_eq!(seen, vec![("operation-added", "GET /api/orders/{id}", false), ("property-removed", "Order.total", true)]);
+        assert_eq!((record.omitted, record.declared.as_deref()), (2, Some("삭제: tests.slow")));
+    }
+
+    #[test]
+    fn 모르는_모양의_기록과_추출_실패는_모름이다() {
+        for raw in [
+            "계약 변경 없음",
+            "{",
+            r#"{"v":2,"contracts":[]}"#,
+            r#"{"v":1,"contracts":[{"service":"api","changes":[{"kind":"처음_보는_종류","target":"x","breaking":false}]}]}"#,
+            r#"{"v":1,"contracts":[{"service":"api","changes":[{"kind":"schema-added","target":"","breaking":false}]}]}"#,
+            r#"{"v":1,"contracts":[{"service":"api"}]}"#,
+            r#"{"v":1,"contracts":"x"}"#,
+            r#"{"v":1,"omitted":-1}"#,
+            r#"{"v":1,"declared":5}"#,
+        ] {
+            let record = parse_impact_record(raw);
+            assert!(record.failed && !record.recorded && record.changes.is_empty(), "{raw}");
+        }
+        let extract_failed = parse_impact_record(r#"{"v":1,"contracts":[{"service":"api","failed":true}]}"#);
+        assert!(extract_failed.recorded && extract_failed.failed);
+        let clean = parse_impact_record(r#"{"v":1,"contracts":[{"service":"api","changes":[]}]}"#);
+        assert!(clean.recorded && !clean.failed && clean.changes.is_empty());
+        let declared_only = parse_impact_record(r#"{"v":1,"declared":"  "}"#);
+        assert!(!declared_only.recorded && !declared_only.failed && declared_only.declared.is_none());
+    }
+
+    #[test]
+    fn 코드_범위는_백틱과_줄바꿈을_가둔다() {
+        assert_eq!(code("a.ts"), "`a.ts`");
+        assert_eq!(code("a`b"), "``a`b``");
+        assert_eq!(code("a``b"), "```a``b```");
+        assert_eq!(code("`a"), "`` `a ``");
+        assert_eq!(code("a\nb\r\n  c\u{2028}d"), "`a b c d`");
+        assert_eq!(code("[x](http://e) @user #12"), "`[x](http://e) @user #12`");
+        assert_eq!(code(" \n "), "(빈 값)");
+    }
+
+    #[test]
+    fn 마이그레이션으로_보이는_파일() {
+        for file in ["api/src/main/resources/db/migration/V2__memo.sql", "prisma/migrations/2024_init/migration.sql", "db/migrate/20240101_add.rb", "alembic/versions/ab12_add.py", "sql/V10__x.sql", "sql/R__views.sql", "DB/Migrations/x.cs"] {
+            assert!(looks_like_migration(file), "{file}");
+        }
+        for file in ["api/src/Order.java", "db/schema.sql", "docs/migration-guide.md", "src/versions/x.py", "sql/Vx__y.sql", "sql/report.sql"] {
+            assert!(!looks_like_migration(file), "{file}");
+        }
     }
 }
