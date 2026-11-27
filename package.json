@@ -9,6 +9,8 @@
   },
   "scripts": {
     "studio": "tsx apps/cli/src/main.ts",
+    "cli:install": "node scripts/install-cli.mjs",
+    "cli:uninstall": "node scripts/install-cli.mjs --uninstall",
     "studio:demo": "B_STUDIO_MODE=demo pnpm --filter @b-studio/studio dev",
     "studio:local": "B_STUDIO_MODE=claude-code pnpm --filter @b-studio/studio dev",
     "studio:codex": "B_STUDIO_MODE=codex pnpm --filter @b-studio/studio dev",

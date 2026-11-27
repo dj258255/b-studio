@@ -55,6 +55,21 @@ pnpm studio --mode demo     # 모델 없이 흐름만
 pnpm studio stop            # 뒤에서 도는 서버 끄기
 ```
 
+### 어느 폴더에서든 `b-studio`로 띄우기
+
+저장소 밖에서도 한 단어로 띄우려면 `b-studio` 명령을 설치합니다. `~/.local/bin/b-studio`에 이 저장소의 `bin/b-studio.mjs`로 가는 링크를 만듭니다.
+
+```bash
+pnpm cli:install            # ~/.local/bin/b-studio를 만든다(--dir로 다른 폴더)
+b-studio                    # 어느 폴더에서든 pnpm studio와 같다. desk의 셸은 친 폴더에서 열린다
+b-studio stop               # 하위 명령도 그대로
+pnpm cli:uninstall          # 지우기
+```
+
+- 같은 이름의 다른 파일이 있으면 덮어쓰지 않고 멈춥니다. 다른 체크아웃의 `b-studio` 링크만 지금 체크아웃으로 바꿉니다.
+- 셸 설정(PATH)은 고치지 않습니다. `~/.local/bin`이 PATH에 없으면 더하는 방법을 알려 줍니다.
+- 저장소 폴더를 옮기면 다시 설치합니다. 설치·의존성 확인(`pnpm install`)·빌드는 친 폴더가 아니라 저장소에서 돕니다.
+
 - `claude-code`(기본 `local`) 모드는 로그인된 개인 PC에서만 쓰세요. 여러 사람이 접속하는 서버에서는 API 모드와 인증을 구성해야 합니다([운영](operations.md)).
 - 구독 CLI의 로그인 상태 확인과 로그인 시작, 계정 더하기는 desk의 설정 화면(`Ctrl-b g`, 계정 탭)에서 합니다. 개인 PC 모드에서만 됩니다.
 - Claude Code·Codex 계정을 여럿 쓰려면 계정마다 설정 폴더를 따로 둡니다. 목록은 `~/.config/b-studio/accounts.json`에 남고, 세션과 라우팅 규칙이 계정까지 고릅니다. 자세한 것은 [설정의 여러 AI 계정](configuration.md#여러-ai-계정)에 있습니다.
