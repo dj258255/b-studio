@@ -510,7 +510,7 @@ export class CheckpointStore {
 
   /**
    * 마지막 체크포인트(HEAD)와 지금 작업 복사본의 차이에서 시험을 약하게 만들 수 있는 변경을 읽는다(이슈 #1436): 파일마다 바뀐 종류(`A M D R T`…)와,
-   * 시험 파일·Rust 파일은 이번 변경에서 **더해진 줄**. 도구를 거치지 않은 셸 변경도 작업 복사본의 차이이므로 같이 잡힌다.
+   * 시험 파일·Rust 파일·시험 설정 파일은 이번 변경에서 **더해진 줄**(시험 파일은 지운 단언 수, 시험 설정 파일은 바뀐 뒤 내용과 `package.json`의 바뀌기 전 내용도). 도구를 거치지 않은 셸 변경도 작업 복사본의 차이이므로 같이 잡힌다.
    *
    * 이름 바꾸기는 git에게 맡긴다. 작업 복사본의 `git status`는 스테이징하지 않은 이름 바꾸기를 삭제+추가로만 보여서, 커밋이 스테이징할 때와 같은 방식으로
    * **임시 인덱스**(HEAD에서 새로 만든 것, 진짜 인덱스를 복사하지 않는다)에 `add -A`를 하고 `diff --cached -M`으로 짝을 찾는다. 진짜 인덱스·작업 트리는 건드리지 않는다.
@@ -553,27 +553,47 @@ export class CheckpointStore {
       const subdir = await this.#subdir();
       const listed = JSON.parse(
         native.workflowTestChangeEntries(await this.#git(['diff', '--cached', '-M', '--name-status', '-z', ...relative, 'HEAD'], { env })),
-      ) as { entries: Array<{ status: string; path: string; from?: string; scan: boolean }> };
+      ) as { entries: Array<{ status: string; path: string; from?: string; scan: boolean; needsAfter?: boolean; needsBefore?: boolean }> };
       const toRead = listed.entries.filter((entry) => entry.scan);
       if (toRead.length > MAX_TEST_CHANGE_FILES) {
         throw new CheckpointError(`읽어야 할 시험 파일·Rust 파일이 ${toRead.length}개로 너무 많습니다(상한 ${MAX_TEST_CHANGE_FILES})`);
       }
-      let added: string[][] = [];
+      let patches: Array<{ added: string[]; at: number[]; assertionsAdded: number; assertionsRemoved: number }> = [];
       if (toRead.length > 0) {
         // --text: 작업 폴더의 .gitattributes(`-diff`·`binary`)로 파일을 이진으로 표시해 줄이 안 보이게 하는 길을 막는다
         // 이름을 바꾼 짝은 옛 경로도 함께 주어야 git이 짝으로 읽는다. 경로는 저장소 루트 기준이다(--relative와 별개)
         const prefix = subdir ? `${subdir}/` : '';
         const pathspecs = [...new Set(toRead.flatMap((entry) => [entry.path, ...(entry.from === undefined ? [] : [entry.from])]))].map((file) => `${prefix}${file}`);
         const patch = await this.#git(['diff', '--cached', '-M', '-U0', '--no-color', '--text', ...relative, 'HEAD', '--', ...pathspecs], { env });
-        added = JSON.parse(native.workflowTestChangeAddedLines(patch, toRead.length)) as string[][];
+        patches = JSON.parse(native.workflowTestChangeAddedLines(patch, toRead.length)) as typeof patches;
       }
-      const lines = new Map(toRead.map((entry, index) => [entry, added[index]!]));
-      return listed.entries.map((entry) => ({
-        status: entry.status,
-        path: entry.path,
-        ...(entry.from === undefined ? {} : { from: entry.from }),
-        ...(entry.scan ? { added: lines.get(entry)! } : {}),
-      }));
+      const patchOf = new Map(toRead.map((entry, index) => [entry, patches[index]!]));
+      // 시험 설정 파일은 바뀐 뒤 내용(배열 안의 줄, package.json의 스크립트)과 package.json은 바뀌기 전 내용도 읽는다.
+      // 바뀐 뒤 내용은 패치를 읽은 같은 임시 인덱스에서, 바뀌기 전 내용은 HEAD에서 꺼낸다(확인하는 집합과 커밋이 담는 집합이 같다)
+      const prefix = subdir ? `${subdir}/` : '';
+      const readBlob = async (spec: string): Promise<string> => {
+        // 상한은 읽기 전에 본다(크기만 먼저 묻는다)
+        const size = Number((await this.#git(['cat-file', '-s', spec], { env })).trim());
+        if (!Number.isInteger(size) || size > MAX_CONFIG_FILE_BYTES) throw new CheckpointError(`시험 설정 파일이 너무 커서 끝까지 읽지 못했습니다(상한 ${MAX_CONFIG_FILE_BYTES}바이트): ${spec.replace(/^[^:]*:/, '')}`);
+        return this.#git(['show', spec], { env });
+      };
+      // 하나씩 읽는다(git 프로세스를 한꺼번에 띄우지 않는다)
+      const result: TestChangeEntry[] = [];
+      for (const entry of listed.entries) {
+        const patch = patchOf.get(entry);
+        const extra: Partial<TestChangeEntry> = {};
+        if (patch) {
+          extra.added = patch.added;
+          if (patch.assertionsRemoved > 0) extra.assertions = { added: patch.assertionsAdded, removed: patch.assertionsRemoved };
+        }
+        if (entry.needsAfter) {
+          extra.addedAt = patch?.at ?? [];
+          extra.after = await readBlob(`:0:${prefix}${entry.path}`);
+        }
+        if (entry.needsBefore) extra.before = entry.status === 'A' ? null : await readBlob(`HEAD:${prefix}${entry.from ?? entry.path}`);
+        result.push({ status: entry.status, path: entry.path, ...(entry.from === undefined ? {} : { from: entry.from }), ...extra });
+      }
+      return result;
     } finally {
       await rm(scratch, { recursive: true, force: true });
     }
@@ -1372,6 +1392,8 @@ export async function findNestedGitRepos(
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
 /** pendingTestChanges가 더해진 줄을 읽는 시험 파일·Rust 파일 수의 상한. 넘으면 끝까지 읽지 못한 것으로 던진다 */
 const MAX_TEST_CHANGE_FILES = 300;
+/** pendingTestChanges가 읽는 시험 설정 파일(바뀐 뒤·바뀌기 전) 하나의 바이트 상한. 넘으면 끝까지 읽지 못한 것으로 던진다 */
+const MAX_CONFIG_FILE_BYTES = 1_000_000;
 
 /**
  * 인덱스 잠금(`.git/index.lock`)을 다른 git이 쥐고 있어 실패했을 때 다시 해 보는 간격(ms). 합쳐서 약 3초.

@@ -9,6 +9,10 @@
 //! - 끝까지 읽지 못했거나(`incomplete`) 줄을 받지 못한 변경은 통과가 아니라 "확인하지 못함"이다.
 //! - 사람이 이번 요청에 확인 변경을 허용했으면(`allowed`) 통과로 바뀐다(성공한 검사로 무엇을 받아들였는지만 남긴다).
 //!
+//! 이슈 #1451에서 넓힌 네 길: (1) 시험 설정 파일(vitest·jest·playwright 설정, pytest 설정·conftest.py, pom.xml, build.gradle)의 더해진 줄에서 시험을 빼는 표시,
+//! (2) `package.json`의 `scripts.test`·`test:*`를 비우거나 `|| true`·`--passWithNoTests`·echo만 남기게 바꾼 것(전후 JSON을 견준다), (3) 스냅샷 파일 삭제(시험 삭제와 같게),
+//! (4) 시험 파일에서 지운 단언 수가 더한 단언 수보다 많은 것(바꾸는 것은 통과).
+//!
 //! 잡지 못하는 것: 아래 표시 말고 다른 언어·다른 꼴(Ruby·PHP·C#·Swift의 건너뛰기, 줄을 나눠 쓴 `it\n.skip(`, 대괄호 접근 `it['skip']`),
 //! 단언을 비우거나 약하게 바꾸는 것(이슈의 "하지 않는 것"), 시험이 아닌 이름으로 둔 시험.
 
@@ -28,6 +32,20 @@ pub struct Change {
     pub from: Option<String>,
     /// 이번 변경에서 더해진 줄. 줄을 받지 못했으면 `None`
     pub added: Option<Vec<String>>,
+    /// 더해진 줄 각각의 (바뀐 뒤 파일에서의) 1부터 센 줄 번호. 시험 설정 파일의 배열 안 줄을 알아보는 데 쓴다
+    pub added_at: Option<Vec<usize>>,
+    /// (더해진 단언 수, 지운 단언 수). 지운 단언이 있을 때만 받는다
+    pub assertions: Option<(usize, usize)>,
+    /// 시험 설정 파일의 바뀐 뒤 내용(배열 안 줄 확인, `package.json` 스크립트 읽기)과 `package.json`의 바뀌기 전 내용
+    pub after: Option<String>,
+    pub before: Option<String>,
+}
+
+impl Change {
+    /// 줄·내용을 받지 못한 변경
+    pub fn bare(status: char, path: &str) -> Change {
+        Change { status, path: path.to_owned(), from: None, added: None, added_at: None, assertions: None, after: None, before: None }
+    }
 }
 
 /// 줄 내용을 읽어야 하는 코드 파일 확장자(폴더 이름으로 시험 파일을 알아볼 때도 이 확장자만 본다)
@@ -80,7 +98,66 @@ pub fn is_runner_test_path(path: &str) -> bool {
 
 /// 더해진 줄을 읽어야 하는 경로: 시험 파일, 그리고 시험이 같은 파일 안에 있는 Rust 파일(`#[ignore]`)
 pub fn needs_added_lines(path: &str) -> bool {
-    is_reviewed_test_path(path) || extension(path) == "rs"
+    is_reviewed_test_path(path) || extension(path) == "rs" || config_kind(path).is_some()
+}
+
+/// 건너뛰기 표시를 찾는 경로: 시험 파일, Rust 파일, 시험 설정을 담는 `conftest.py`
+fn scans_skip_markers(path: &str) -> bool {
+    is_reviewed_test_path(path) || extension(path) == "rs" || config_kind(path) == Some(ConfigKind::Python) && file_name(path).eq_ignore_ascii_case("conftest.py")
+}
+
+/// 스냅샷 파일(거부 목록 쪽 맞춤: 넓게 맞는다): `.snap`·`.ambr` 파일이거나 `__snapshots__` 폴더 아래의 파일. 대소문자를 접고 구분자는 `/`와 `\` 모두 본다
+pub fn is_snapshot_path(path: &str) -> bool {
+    let lower = path.to_lowercase().replace('\\', "/");
+    let mut segments: Vec<&str> = lower.split('/').collect();
+    let name = segments.pop().unwrap_or("");
+    name.ends_with(".snap") || name.ends_with(".ambr") || segments.contains(&"__snapshots__")
+}
+
+// ── 시험 설정 파일 ────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigKind {
+    /// vitest·jest·playwright·vite 설정
+    Js,
+    /// pytest.ini·pyproject.toml·setup.cfg·tox.ini·conftest.py
+    Python,
+    Maven,
+    Gradle,
+    Package,
+}
+
+impl ConfigKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ConfigKind::Js => "js",
+            ConfigKind::Python => "python",
+            ConfigKind::Maven => "maven",
+            ConfigKind::Gradle => "gradle",
+            ConfigKind::Package => "package",
+        }
+    }
+
+    /// 바뀐 뒤의 파일 내용이 있어야 읽을 수 있는 종류(배열 안의 줄, `package.json`의 스크립트)
+    pub fn needs_after(self) -> bool {
+        matches!(self, ConfigKind::Js | ConfigKind::Python | ConfigKind::Package)
+    }
+}
+
+static JS_CONFIG_NAME: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(?:(?:vitest|jest|playwright|vite)(?:\.[a-z0-9_-]+)*\.(?:config|workspace)\.(?:[cm]?[jt]s|json)|\.?jestrc(?:\.json|\.js)?)$").expect("정규식"));
+
+/// 시험을 고르는 설정을 담는 파일. 이름만 본다(대소문자를 접고 `\`도 구분자로 본다)
+pub fn config_kind(path: &str) -> Option<ConfigKind> {
+    let name = file_name(path).to_lowercase();
+    match name.as_str() {
+        "package.json" => Some(ConfigKind::Package),
+        "pytest.ini" | "pyproject.toml" | "setup.cfg" | "tox.ini" | "conftest.py" => Some(ConfigKind::Python),
+        "pom.xml" => Some(ConfigKind::Maven),
+        "build.gradle" | "build.gradle.kts" => Some(ConfigKind::Gradle),
+        _ if JS_CONFIG_NAME.is_match(&name) => Some(ConfigKind::Js),
+        _ => None,
+    }
 }
 
 // ── 건너뛰기 표시 ────────────────────────────────────────────────────
@@ -88,10 +165,18 @@ pub fn needs_added_lines(path: &str) -> bool {
 struct Marker {
     label: &'static str,
     pattern: Regex,
+    /// 이 모양이면 표시가 아니다(예: Gradle 의존성의 `exclude group:`)
+    unless: Option<Regex>,
+}
+
+impl Marker {
+    fn matches(&self, line: &str) -> bool {
+        self.pattern.is_match(line) && !self.unless.as_ref().is_some_and(|unless| unless.is_match(line))
+    }
 }
 
 fn markers(list: &[(&'static str, &str)]) -> Vec<Marker> {
-    list.iter().map(|(label, pattern)| Marker { label, pattern: Regex::new(pattern).expect("정규식") }).collect()
+    list.iter().map(|(label, pattern)| Marker { label, pattern: Regex::new(pattern).expect("정규식"), unless: None }).collect()
 }
 
 static JS_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
@@ -140,12 +225,278 @@ pub fn skip_markers_in(path: &str, added: &[String]) -> Vec<&'static str> {
     let mut found: Vec<&'static str> = Vec::new();
     for line in added {
         for marker in set {
-            if !found.contains(&marker.label) && marker.pattern.is_match(line) {
+            if !found.contains(&marker.label) && marker.matches(line) {
                 found.push(marker.label);
             }
         }
     }
     found
+}
+
+// ── 시험 설정 표시 ────────────────────────────────────────────────────
+
+static JS_CONFIG_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
+    markers(&[
+        ("exclude", r"(?-u:\b)exclude[\x22']?[ \t]*[:=]"),
+        ("testPathIgnorePatterns", r"(?-u:\b)testPathIgnorePatterns(?-u:\b)"),
+        ("modulePathIgnorePatterns", r"(?-u:\b)modulePathIgnorePatterns(?-u:\b)"),
+        ("testIgnore", r"(?-u:\b)testIgnore(?-u:\b)"),
+        ("grepInvert", r"(?-u:\b)grepInvert(?-u:\b)"),
+        ("passWithNoTests", r"(?-u:\b)passWithNoTests(?-u:\b)"),
+    ])
+});
+static PACKAGE_CONFIG_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
+    markers(&[
+        ("testPathIgnorePatterns", r"(?-u:\b)testPathIgnorePatterns(?-u:\b)"),
+        ("modulePathIgnorePatterns", r"(?-u:\b)modulePathIgnorePatterns(?-u:\b)"),
+    ])
+});
+static PY_CONFIG_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
+    markers(&[
+        ("--ignore", r"--ignore(?:-glob)?(?-u:\b)"),
+        ("--deselect", r"--deselect(?-u:\b)"),
+        ("-k \"not …\"", r"(?:^|[ \t=\x22'])-k[ \t=]*[\x22']?[ \t]*not(?-u:\b)"),
+        ("collect_ignore", r"(?-u:\b)collect_ignore(?:_glob)?(?-u:\b)"),
+        ("pytest_deselected", r"(?-u:\b)pytest_deselected(?-u:\b)"),
+        ("items 비우기", r"(?-u:\b)items[ \t]*\[[ \t]*:[ \t]*\][ \t]*=|(?-u:\b)items\.(?:remove|clear|pop)[ \t]*\(|(?-u:\b)del[ \t]+items(?-u:\b)"),
+    ])
+});
+static MAVEN_CONFIG_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
+    markers(&[
+        ("<exclude>", r"<exclude(?-u:\b)"),
+        ("<excludedGroups>", r"<excludedGroups(?-u:\b)"),
+        ("<skipTests>", r"<skipTests(?-u:\b)|<skipITs(?-u:\b)|<skipExec(?-u:\b)"),
+        ("<skip>true", r"<skip>[ \t]*true"),
+        ("<testFailureIgnore>", r"<testFailureIgnore>[ \t]*true|maven\.test\.failure\.ignore|maven\.test\.skip"),
+        ("-DskipTests", r"-Dskip(?:Tests|ITs)(?-u:\b)"),
+    ])
+});
+static GRADLE_CONFIG_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
+    let mut list = markers(&[
+        ("enabled = false", r"(?-u:\b)enabled[ \t]*=?[ \t]*false(?-u:\b)"),
+        ("excludeTestsMatching", r"(?-u:\b)excludeTestsMatching(?-u:\b)"),
+        ("ignoreFailures", r"(?-u:\b)ignoreFailures[ \t]*=?[ \t]*true"),
+        ("onlyIf { false }", r"(?-u:\b)onlyIf[ \t]*\{[ \t]*false"),
+        ("-x test", r"(?:^|[ \t])-x[ \t]+test(?-u:\b)"),
+    ]);
+    list.push(Marker {
+        label: "exclude",
+        pattern: Regex::new(r"(?-u:\b)exclude(?-u:\b)").expect("정규식"),
+        // 의존성의 exclude(`exclude group: 'x'`, `exclude(group = "x")`, `exclude module:`)는 시험을 빼는 것이 아니다
+        unless: Some(Regex::new(r"(?-u:\b)exclude[ \t]*\(?[ \t]*(?:group|module)[ \t]*[:=]").expect("정규식")),
+    });
+    list
+});
+static MODIFYITEMS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)pytest_collection_modifyitems(?-u:\b)").expect("정규식"));
+static MODIFYITEMS_DROP: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)skip|deselect|\.remove[ \t]*\(|(?-u:\b)del(?-u:\b)|\.clear[ \t]*\(|\.pop[ \t]*\(|items[ \t]*\[").expect("정규식"));
+
+fn config_marker_set(kind: ConfigKind) -> &'static [Marker] {
+    match kind {
+        ConfigKind::Js => &JS_CONFIG_MARKERS,
+        ConfigKind::Package => &PACKAGE_CONFIG_MARKERS,
+        ConfigKind::Python => &PY_CONFIG_MARKERS,
+        ConfigKind::Maven => &MAVEN_CONFIG_MARKERS,
+        ConfigKind::Gradle => &GRADLE_CONFIG_MARKERS,
+    }
+}
+
+fn push_label(found: &mut Vec<&'static str>, label: &'static str) {
+    if !found.contains(&label) {
+        found.push(label);
+    }
+}
+
+/// 바뀐 뒤 파일의 줄마다, 그 줄을 감싸는 `[`·`{`·`(`가 열린 줄의 번호(0부터)를 구한다. 한 번 훑는다.
+/// 따옴표·주석은 가리지 않는다(괄호가 맞지 않게 세면 감싸는 줄을 놓칠 수 있다)
+fn enclosing_openers(after: &str, targets: &[usize]) -> Result<std::collections::HashMap<usize, Vec<usize>>, String> {
+    let wanted: std::collections::HashSet<usize> = targets.iter().copied().collect();
+    let mut stack: Vec<usize> = Vec::new();
+    let mut result = std::collections::HashMap::new();
+    for (index, line) in after.split('\n').enumerate() {
+        if wanted.contains(&(index + 1)) {
+            result.insert(index + 1, stack.clone());
+        }
+        for ch in line.chars() {
+            match ch {
+                '[' | '{' | '(' => stack.push(index),
+                ']' | '}' | ')' => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(missing) = targets.iter().find(|target| !result.contains_key(target)) {
+        return Err(format!("변경 내용의 줄 번호 {missing}가 바뀐 뒤 파일에 없습니다"));
+    }
+    Ok(result)
+}
+
+/// 시험 설정 파일의 더해진 줄에서 시험을 빼는 표시를 찾는다(중복 없이, 찾은 순서).
+/// 줄 자체에 표시가 없어도 표시가 붙은 배열·블록(`exclude: [`) 안에 더해진 줄이면 같게 센다. 그러려면 바뀐 뒤 파일(`after`)과 줄 번호가 있어야 한다.
+/// 줄 번호가 파일과 맞지 않으면 던진다(모르면 통과가 아니다)
+pub fn config_markers_in(kind: ConfigKind, added: &[String], at: Option<&[usize]>, after: Option<&str>) -> Result<Vec<&'static str>, String> {
+    let set = config_marker_set(kind);
+    let mut found: Vec<&'static str> = Vec::new();
+    let mut inside: Vec<usize> = Vec::new();
+    for (position, line) in added.iter().enumerate() {
+        let mut hit = false;
+        for marker in set {
+            if marker.matches(line) {
+                push_label(&mut found, marker.label);
+                hit = true;
+            }
+        }
+        if !hit && matches!(kind, ConfigKind::Js | ConfigKind::Package | ConfigKind::Python) {
+            inside.push(position);
+        }
+    }
+    if kind == ConfigKind::Python && added.iter().any(|line| MODIFYITEMS.is_match(line)) && added.iter().any(|line| MODIFYITEMS_DROP.is_match(line)) {
+        push_label(&mut found, "pytest_collection_modifyitems");
+    }
+    if inside.is_empty() {
+        return Ok(found);
+    }
+    let (Some(at), Some(after)) = (at, after) else { return Err("배열 안의 줄인지 확인할 바뀐 뒤 파일이나 줄 번호가 없습니다".to_owned()) };
+    if at.len() != added.len() {
+        return Err("더해진 줄과 줄 번호의 개수가 다릅니다".to_owned());
+    }
+    let lines: Vec<&str> = after.split('\n').collect();
+    let targets: Vec<usize> = inside.iter().map(|position| at[*position]).collect();
+    let openers = enclosing_openers(after, &targets)?;
+    for position in inside {
+        let number = at[position];
+        // 패치의 줄과 바뀐 뒤 파일의 줄이 같은지 본다(어긋나면 줄 번호를 믿을 수 없다)
+        if lines.get(number - 1).map(|line| line.trim_end_matches('\r')) != Some(added[position].as_str()) {
+            return Err(format!("변경 내용의 줄 {number}가 바뀐 뒤 파일과 맞지 않습니다"));
+        }
+        for opener in &openers[&number] {
+            for marker in set {
+                if marker.matches(lines[*opener]) {
+                    push_label(&mut found, marker.label);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+// ── package.json의 test 스크립트 ───────────────────────────────────────
+
+static SCRIPT_RULES: LazyLock<Vec<Marker>> = LazyLock::new(|| {
+    markers(&[
+        ("|| true 꼴(실패를 삼킴)", r"\|\|[ \t]*(?:true(?-u:\b)|:|exit[ \t]+0(?-u:\b)|echo(?-u:\b))"),
+        ("; exit 0 꼴(실패를 삼킴)", r";[ \t]*(?:exit[ \t]+0(?-u:\b)|true(?-u:\b)|:[ \t]*$)"),
+        ("시험이 없어도 통과(--passWithNoTests)", r"--(?:passWithNoTests|pass-with-no-tests|allow-no-tests)(?-u:\b)"),
+        ("시험 제외 옵션", r"(?:^|[ \t])--(?:exclude|testPathIgnorePatterns|modulePathIgnorePatterns|ignore|ignore-glob|ignore-pattern|deselect|grep-invert|no-run)(?-u:\b)"),
+        ("-k \"not …\"", r"(?:^|[ \t])-k[ \t=]*[\x22']?[ \t]*not(?-u:\b)"),
+        ("시험 건너뛰기 옵션", r"-Dskip(?:Tests|ITs)(?-u:\b)|-Dmaven\.test\.skip|(?:^|[ \t])-x[ \t]+test(?-u:\b)"),
+    ])
+});
+
+/// 따옴표 밖의 `&&`·`||`·`;`·`|`로 나눈 명령 조각
+fn command_segments(script: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut quote: Option<char> = None;
+    let chars: Vec<char> = script.chars().collect();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if let Some(open) = quote {
+            current.push(ch);
+            if ch == open {
+                quote = None;
+            }
+        } else if ch == '\'' || ch == '"' {
+            quote = Some(ch);
+            current.push(ch);
+        } else if matches!(ch, ';' | '|' | '&') {
+            segments.push(std::mem::take(&mut current));
+            // `&&`·`||`는 두 글자를 한 구분자로 읽는다
+            if matches!(ch, '|' | '&') && chars.get(index + 1) == Some(&ch) {
+                index += 1;
+            }
+        } else {
+            current.push(ch);
+        }
+        index += 1;
+    }
+    segments.push(current);
+    segments.into_iter().map(|segment| segment.trim().to_owned()).filter(|segment| !segment.is_empty()).collect()
+}
+
+/// 아무것도 돌리지 않고 끝나는 명령 조각(`echo …`, `true`, `:`, `exit`·`exit 0`)
+fn is_noop_segment(segment: &str) -> bool {
+    let mut words = segment.split_whitespace();
+    match words.next() {
+        Some("echo" | "printf" | "true" | ":") => true,
+        Some("exit") => matches!(words.next(), None | Some("0")),
+        _ => false,
+    }
+}
+
+/// 시험 스크립트 한 줄이 약해 보이는 모양(찾은 모양의 이름들)
+pub fn weak_script_labels(script: &str) -> Vec<&'static str> {
+    let mut found = Vec::new();
+    let segments = command_segments(script);
+    if segments.is_empty() {
+        found.push("비어 있음");
+    } else if segments.iter().all(|segment| is_noop_segment(segment)) {
+        found.push("아무것도 돌리지 않음");
+    }
+    for rule in SCRIPT_RULES.iter() {
+        if rule.matches(script) {
+            found.push(rule.label);
+        }
+    }
+    found
+}
+
+fn is_test_script_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    lower == "test" || lower.starts_with("test:")
+}
+
+/// `scripts`에서 이름이 `test`·`test:*`인 것(문자열이 아닌 값은 빈 스크립트와 같이 다룬다)
+fn test_scripts(root: &JsValue) -> Vec<(String, Option<String>)> {
+    match root.prop("scripts") {
+        Some(JsValue::Obj(scripts)) => scripts
+            .entries()
+            .iter()
+            .filter(|(name, _)| is_test_script_name(name))
+            .map(|(name, value)| (name.clone(), value.as_str().map(str::to_owned)))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// `package.json`의 바뀌기 전·후 내용을 견줘 시험 스크립트가 약해졌는지 본다(줄 단위가 아니라 JSON을 읽어 견준다: 한 줄로 이어 쓴 파일이나 줄 순서가 바뀐 파일에서도 같다).
+/// 새로 생긴 약한 모양(바뀌기 전 스크립트에 없던 것)과 지워진 test 스크립트를 돌려준다. 원래 약했고 그대로인 스크립트는 세지 않는다.
+/// 바뀐 뒤 내용을 읽지 못하면 던진다(모르면 통과가 아니다). 바뀌기 전 내용을 읽지 못하면 기준이 없는 것으로 본다
+pub fn weak_test_scripts(before: Option<&str>, after: &str) -> Result<Vec<String>, String> {
+    let after_value = js_json::parse(after).map_err(|error| format!("package.json을 읽지 못했습니다({error})"))?;
+    if !matches!(after_value, JsValue::Obj(_)) {
+        return Err("package.json의 최상위가 객체가 아닙니다".to_owned());
+    }
+    let before_scripts = before.and_then(|text| js_json::parse(text).ok()).map(|value| test_scripts(&value)).unwrap_or_default();
+    let after_scripts = test_scripts(&after_value);
+    let mut found = Vec::new();
+    for (name, old) in &before_scripts {
+        if old.is_some() && !after_scripts.iter().any(|(candidate, _)| candidate == name) {
+            found.push(format!("scripts.{name}(지움)"));
+        }
+    }
+    for (name, new) in &after_scripts {
+        let old_labels = before_scripts.iter().find(|(candidate, _)| candidate == name).and_then(|(_, old)| old.as_deref()).map(weak_script_labels).unwrap_or_default();
+        let new_labels = weak_script_labels(new.as_deref().unwrap_or(""));
+        let added: Vec<&str> = new_labels.into_iter().filter(|label| !old_labels.contains(label)).collect();
+        if !added.is_empty() {
+            found.push(format!("scripts.{name}({})", added.join(", ")));
+        }
+    }
+    Ok(found)
 }
 
 // ── git 출력 읽기 ─────────────────────────────────────────────────────
@@ -167,34 +518,75 @@ pub fn parse_name_status(output: &str) -> Result<Vec<Change>, String> {
         let first = iter.next().ok_or_else(|| "변경 목록이 경로 없이 끝났습니다".to_owned())?;
         if letter == 'R' || letter == 'C' {
             let second = iter.next().ok_or_else(|| "변경 목록이 이름 바꾸기의 새 경로 없이 끝났습니다".to_owned())?;
-            changes.push(Change { status: letter, path: second.to_owned(), from: Some(first.to_owned()), added: None });
+            changes.push(Change { status: letter, path: second.to_owned(), from: Some(first.to_owned()), ..Change::bare(letter, second) });
         } else {
-            changes.push(Change { status: letter, path: first.to_owned(), from: None, added: None });
+            changes.push(Change::bare(letter, first));
         }
     }
     Ok(changes)
 }
 
-/// `git diff -U0`의 출력을 파일별로 나눠 더해진 줄을 돌려준다. 파일 머리는 줄 맨 앞의 `diff --git `이다
+/// 패치에서 읽은 파일 하나: 더해진 줄과 그 줄 번호, 그리고 단언 수(주석 줄은 세지 않는다)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct FilePatch {
+    pub added: Vec<String>,
+    pub at: Vec<usize>,
+    pub assertions_added: usize,
+    pub assertions_removed: usize,
+}
+
+static ASSERTION: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?-u:\b)(?:expect\w*[ \t]*\(|assert\w*[ \t]*[(!]|require\.\w+[ \t]*\(|t\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)[ \t]*\(|pytest\.raises[ \t]*\()|^[ \t]*assert[ \t]+",
+    )
+    .expect("정규식")
+});
+
+/// 한 줄의 단언 수. 주석으로 시작하는 줄은 세지 않는다(단언을 주석으로 바꿔 둔 것을 "더했다"로 세지 않으려는 것이다)
+pub fn assertions_in(line: &str) -> usize {
+    let trimmed = line.trim_start();
+    if trimmed.starts_with("//") || trimmed.starts_with("/*") || trimmed.starts_with('*') || trimmed.starts_with('#') {
+        return 0;
+    }
+    ASSERTION.find_iter(line).count()
+}
+
+/// `@@ -a,b +c,d @@`에서 c(바뀐 뒤 파일의 시작 줄)
+fn hunk_new_start(header: &str) -> Option<usize> {
+    let plus = header.split(' ').find(|token| token.starts_with('+'))?;
+    plus[1..].split(',').next()?.parse().ok()
+}
+
+/// `git diff -U0`의 출력을 파일별로 나눠 더해진 줄(과 줄 번호), 단언 수를 돌려준다. 파일 머리는 줄 맨 앞의 `diff --git `이다
 /// (내용 줄은 항상 ` `·`+`·`-`·`\`로 시작하므로 맨 앞의 이 글자 모양은 머리뿐이다). 첫 `@@` 앞은 머리라서 `+++ `를 줄로 세지 않는다.
 /// 파일 수가 기대와 다르면 던진다(어느 파일의 줄인지 모르면 통과가 아니다)
-pub fn added_lines_by_file(patch: &str, expected: usize) -> Result<Vec<Vec<String>>, String> {
-    let mut files: Vec<Vec<String>> = Vec::new();
+pub fn patches_by_file(patch: &str, expected: usize) -> Result<Vec<FilePatch>, String> {
+    let mut files: Vec<FilePatch> = Vec::new();
     let mut in_hunk = false;
+    let mut next_new = 0usize;
     for line in patch.split('\n') {
         if line.starts_with("diff --git ") {
-            files.push(Vec::new());
+            files.push(FilePatch::default());
             in_hunk = false;
             continue;
         }
         let Some(current) = files.last_mut() else { continue };
         if line.starts_with("@@") {
             in_hunk = true;
+            next_new = hunk_new_start(line).ok_or_else(|| format!("변경 내용의 구간 머리를 읽지 못했습니다: {line}"))?;
             continue;
         }
         if in_hunk {
             if let Some(content) = line.strip_prefix('+') {
-                current.push(content.trim_end_matches('\r').to_owned());
+                let content = content.trim_end_matches('\r');
+                current.assertions_added += assertions_in(content);
+                current.added.push(content.to_owned());
+                current.at.push(next_new);
+                next_new += 1;
+            } else if let Some(content) = line.strip_prefix('-') {
+                current.assertions_removed += assertions_in(content.trim_end_matches('\r'));
+            } else if line.starts_with(' ') {
+                next_new += 1;
             }
         }
     }
@@ -231,82 +623,156 @@ pub fn review_test_changes(changes: &[Change], allowed: bool, incomplete: Option
             name: CHECK_NAME.to_owned(),
             ok: false,
             detail: Some(format!(
-                "시험 파일이 지워졌거나 건너뛰기 표시가 더해졌는지 끝까지 확인하지 못했습니다({}). 확인하지 못한 변경은 통과로 보지 않습니다. 다시 턴을 끝내 보세요.",
+                "시험을 약하게 만든 변경(시험 파일·스냅샷 삭제, 건너뛰기 표시, 시험 설정, test 스크립트, 단언 삭제)이 있는지 끝까지 확인하지 못했습니다({}). 확인하지 못한 변경은 통과로 보지 않습니다. 다시 턴을 끝내 보세요.",
                 shown(reason)
             )),
         });
     }
-    let mut deleted: Vec<String> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-    let mut unknown: Vec<String> = Vec::new();
+    let mut found = Findings::default();
     for change in changes {
-        let from_reviewed = change.from.as_deref().is_some_and(is_reviewed_test_path);
-        match change.status {
-            'D' => {
-                if is_reviewed_test_path(&change.path) {
-                    deleted.push(shown(&change.path));
-                }
-            }
-            // 일반 파일이던 시험이 링크 등으로 바뀌었다: 시험으로 돌아가는 파일이 아니다
-            'T' => {
-                if is_reviewed_test_path(&change.path) {
-                    deleted.push(format!("{} (파일 종류가 바뀜)", shown(&change.path)));
-                }
-            }
-            'A' | 'M' | 'C' | 'R' => {
-                // 옮긴 곳이 실행기가 집는 시험 파일이 아니면 지운 것이다(도착지는 좁은 판정, 출발지는 넓은 판정)
-                if change.status == 'R' && from_reviewed && !is_runner_test_path(&change.path) {
-                    deleted.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
-                }
-                if needs_added_lines(&change.path) {
-                    match &change.added {
-                        None => unknown.push(shown(&change.path)),
-                        Some(lines) => {
-                            let found = skip_markers_in(&change.path, lines);
-                            if !found.is_empty() {
-                                skipped.push(format!("{}({})", shown(&change.path), found.join(", ")));
-                            }
-                        }
-                    }
-                }
-            }
-            // 합치지 못한 변경이나 모르는 상태: 시험 파일이면 읽지 못한 것이다
-            _ => {
-                if is_reviewed_test_path(&change.path) || from_reviewed {
-                    unknown.push(shown(&change.path));
-                }
-            }
-        }
+        review_change(change, &mut found);
     }
     if allowed {
-        if deleted.is_empty() && skipped.is_empty() {
+        if found.is_clean() {
             return None;
         }
-        return Some(Check { name: CHECK_NAME.to_owned(), ok: true, detail: Some(format!("사용자가 허용해 시험을 약하게 만든 변경을 받아들였습니다: {}", summary(&deleted, &skipped, &[]))) });
+        return Some(Check { name: CHECK_NAME.to_owned(), ok: true, detail: Some(format!("사용자가 허용해 시험을 약하게 만든 변경을 받아들였습니다: {}", summary(&found, false))) });
     }
-    if deleted.is_empty() && skipped.is_empty() && unknown.is_empty() {
+    if found.is_clean() && found.unknown.is_empty() {
         return None;
     }
     Some(Check {
         name: CHECK_NAME.to_owned(),
         ok: false,
         detail: Some(format!(
-            "시험을 약하게 만드는 변경이 있습니다: {}. 되돌리세요. 바꾸는 것이 사용자의 요청이면 되묻기 도구(ask_user)로 '확인 선언 변경 허용'을 켜고 답해 달라고 알리세요(그 허용은 시험 파일의 삭제·건너뛰기 표시도 받아들입니다).",
-            summary(&deleted, &skipped, &unknown)
+            "시험을 약하게 만드는 변경이 있습니다: {}. 되돌리세요. 바꾸는 것이 사용자의 요청이면 되묻기 도구(ask_user)로 '확인 선언 변경 허용'을 켜고 답해 달라고 알리세요(그 허용은 시험 파일의 삭제·건너뛰기 표시, 시험 설정·test 스크립트·단언의 변경도 받아들입니다).",
+            summary(&found, true)
         )),
     })
 }
 
-fn summary(deleted: &[String], skipped: &[String], unknown: &[String]) -> String {
+#[derive(Default)]
+struct Findings {
+    deleted: Vec<String>,
+    snapshots: Vec<String>,
+    skipped: Vec<String>,
+    excluded: Vec<String>,
+    scripts: Vec<String>,
+    assertions: Vec<String>,
+    unknown: Vec<String>,
+}
+
+impl Findings {
+    fn is_clean(&self) -> bool {
+        self.deleted.is_empty() && self.snapshots.is_empty() && self.skipped.is_empty() && self.excluded.is_empty() && self.scripts.is_empty() && self.assertions.is_empty()
+    }
+}
+
+fn review_change(change: &Change, found: &mut Findings) {
+    let from_reviewed = change.from.as_deref().is_some_and(is_reviewed_test_path);
+    let from_snapshot = change.from.as_deref().is_some_and(is_snapshot_path);
+    match change.status {
+        'D' => {
+            if is_reviewed_test_path(&change.path) {
+                found.deleted.push(shown(&change.path));
+            }
+            if is_snapshot_path(&change.path) {
+                found.snapshots.push(shown(&change.path));
+            }
+        }
+        // 일반 파일이던 시험이 링크 등으로 바뀌었다: 시험으로 돌아가는 파일이 아니다
+        'T' => {
+            if is_reviewed_test_path(&change.path) {
+                found.deleted.push(format!("{} (파일 종류가 바뀜)", shown(&change.path)));
+            }
+            if is_snapshot_path(&change.path) {
+                found.snapshots.push(format!("{} (파일 종류가 바뀜)", shown(&change.path)));
+            }
+        }
+        'A' | 'M' | 'C' | 'R' => {
+            // 옮긴 곳이 실행기가 집는 시험 파일이 아니면 지운 것이다(도착지는 좁은 판정, 출발지는 넓은 판정)
+            if change.status == 'R' && from_reviewed && !is_runner_test_path(&change.path) {
+                found.deleted.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
+            }
+            // 스냅샷은 스냅샷 이름으로만 옮길 수 있다. 다른 이름으로 옮기면 더는 읽히지 않는다
+            if change.status == 'R' && from_snapshot && !is_snapshot_path(&change.path) {
+                found.snapshots.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
+            }
+            let reviewed = is_reviewed_test_path(&change.path);
+            if needs_added_lines(&change.path) {
+                match &change.added {
+                    None => found.unknown.push(shown(&change.path)),
+                    Some(lines) => {
+                        if scans_skip_markers(&change.path) {
+                            let markers = skip_markers_in(&change.path, lines);
+                            if !markers.is_empty() {
+                                found.skipped.push(format!("{}({})", shown(&change.path), markers.join(", ")));
+                            }
+                        }
+                        if let Some(kind) = config_kind(&change.path) {
+                            review_config(change, kind, lines, found);
+                        }
+                    }
+                }
+            }
+            if reviewed {
+                if let Some((added, removed)) = change.assertions {
+                    if removed > added {
+                        found.assertions.push(format!("{}(지움 {removed} · 더함 {added})", shown(&change.path)));
+                    }
+                }
+            }
+        }
+        // 합치지 못한 변경이나 모르는 상태: 시험 파일이면 읽지 못한 것이다
+        _ => {
+            if is_reviewed_test_path(&change.path) || from_reviewed || is_snapshot_path(&change.path) || from_snapshot {
+                found.unknown.push(shown(&change.path));
+            }
+        }
+    }
+}
+
+fn review_config(change: &Change, kind: ConfigKind, lines: &[String], found: &mut Findings) {
+    let name = shown(&change.path);
+    match config_markers_in(kind, lines, change.added_at.as_deref(), change.after.as_deref()) {
+        Ok(labels) if !labels.is_empty() => found.excluded.push(format!("{name}({})", labels.join(", "))),
+        Ok(_) => {}
+        Err(reason) => found.unknown.push(format!("{name}: {}", shown(&reason))),
+    }
+    if kind == ConfigKind::Package {
+        match change.after.as_deref() {
+            None => found.unknown.push(format!("{name}: 바뀐 뒤 내용을 받지 못했습니다")),
+            Some(after) => match weak_test_scripts(change.before.as_deref(), after) {
+                Ok(weak) if !weak.is_empty() => found.scripts.push(format!("{name}({})", weak.join(", "))),
+                Ok(_) => {}
+                Err(reason) => found.unknown.push(format!("{name}: {}", shown(&reason))),
+            },
+        }
+    }
+}
+
+fn summary(found: &Findings, with_unknown: bool) -> String {
     let mut parts = Vec::new();
-    if !deleted.is_empty() {
-        parts.push(format!("지운 시험 파일: {}", listed(deleted)));
+    if !found.deleted.is_empty() {
+        parts.push(format!("지운 시험 파일: {}", listed(&found.deleted)));
     }
-    if !skipped.is_empty() {
-        parts.push(format!("새로 더한 건너뛰기 표시: {}", listed(skipped)));
+    if !found.snapshots.is_empty() {
+        parts.push(format!("지운 스냅샷 파일: {}", listed(&found.snapshots)));
     }
-    if !unknown.is_empty() {
-        parts.push(format!("변경 내용을 읽지 못해 확인하지 못함: {}", listed(unknown)));
+    if !found.skipped.is_empty() {
+        parts.push(format!("새로 더한 건너뛰기 표시: {}", listed(&found.skipped)));
+    }
+    if !found.excluded.is_empty() {
+        parts.push(format!("시험 설정에 더한 시험 제외 표시: {}", listed(&found.excluded)));
+    }
+    if !found.scripts.is_empty() {
+        parts.push(format!("약하게 바꾼 test 스크립트: {}", listed(&found.scripts)));
+    }
+    if !found.assertions.is_empty() {
+        parts.push(format!("지운 단언이 더한 단언보다 많은 시험 파일: {}", listed(&found.assertions)));
+    }
+    if with_unknown && !found.unknown.is_empty() {
+        parts.push(format!("변경 내용을 읽지 못해 확인하지 못함: {}", listed(&found.unknown)));
     }
     parts.join(" · ")
 }
@@ -354,7 +820,34 @@ pub fn review_from_value(value: &JsValue) -> Result<Option<Check>, String> {
             ),
             Some(_) => return Err("testChanges의 added는 배열이어야 합니다".to_owned()),
         };
-        changes.push(Change { status: letter, path: string_of(item, "path")?, from, added });
+        let added_at = match item.prop("addedAt") {
+            None | Some(JsValue::Null) => None,
+            Some(JsValue::Arr(numbers)) => Some(
+                numbers
+                    .iter()
+                    .map(|number| match number {
+                        JsValue::Num(n) if n.fract() == 0.0 && *n >= 1.0 => Ok(*n as usize),
+                        _ => Err("testChanges의 addedAt 항목은 1 이상의 정수여야 합니다".to_owned()),
+                    })
+                    .collect::<Result<Vec<_>, String>>()?,
+            ),
+            Some(_) => return Err("testChanges의 addedAt은 배열이어야 합니다".to_owned()),
+        };
+        let assertions = match item.prop("assertions") {
+            None | Some(JsValue::Null) => None,
+            Some(counts) => match (counts.prop("added"), counts.prop("removed")) {
+                (Some(JsValue::Num(added)), Some(JsValue::Num(removed))) if added.fract() == 0.0 && removed.fract() == 0.0 && *added >= 0.0 && *removed >= 0.0 => Some((*added as usize, *removed as usize)),
+                _ => return Err("testChanges의 assertions는 {added, removed}(0 이상의 정수)여야 합니다".to_owned()),
+            },
+        };
+        let text = |key: &str| -> Result<Option<String>, String> {
+            match item.prop(key) {
+                None | Some(JsValue::Null) => Ok(None),
+                Some(JsValue::Str(text)) => Ok(Some(text.clone())),
+                Some(_) => Err(format!("testChanges의 {key}는 문자열이어야 합니다")),
+            }
+        };
+        changes.push(Change { status: letter, path: string_of(item, "path")?, from, added, added_at, assertions, after: text("after")?, before: text("before")? });
     }
     Ok(review_test_changes(&changes, allowed, incomplete.as_deref()))
 }
@@ -366,21 +859,38 @@ pub fn parse_name_status_json(output: &str) -> Result<String, String> {
         .iter()
         .map(|change| {
             let scan = matches!(change.status, 'A' | 'M' | 'C' | 'R') && needs_added_lines(&change.path);
+            // 설정 파일은 종류를 함께 알린다: 바뀐 뒤 내용(`package.json`은 바뀌기 전 내용도)을 읽어야 하는 종류가 있다
+            let kind = if scan { config_kind(&change.path) } else { None };
             js_json::object(vec![
                 ("status", Some(JsValue::str(change.status.to_string()))),
                 ("path", Some(JsValue::str(&change.path))),
                 ("from", change.from.as_ref().map(JsValue::str)),
                 ("scan", Some(JsValue::Bool(scan))),
+                ("config", kind.map(|kind| JsValue::str(kind.name()))),
+                ("needsAfter", Some(JsValue::Bool(kind.is_some_and(ConfigKind::needs_after)))),
+                ("needsBefore", Some(JsValue::Bool(kind == Some(ConfigKind::Package)))),
             ])
         })
         .collect();
     Ok(js_json::to_native(&js_json::object(vec![("entries", Some(JsValue::Arr(entries)))])))
 }
 
-/// 패치 출력 → 파일별로 더해진 줄(`string[][]`)
+/// 패치 출력 → 파일별 `{added: string[], at: number[], assertionsAdded, assertionsRemoved}`
 pub fn added_lines_json(patch: &str, expected: usize) -> Result<String, String> {
-    let files = added_lines_by_file(patch, expected)?;
-    let value = JsValue::Arr(files.into_iter().map(|lines| JsValue::Arr(lines.into_iter().map(JsValue::Str).collect())).collect());
+    let files = patches_by_file(patch, expected)?;
+    let value = JsValue::Arr(
+        files
+            .into_iter()
+            .map(|file| {
+                js_json::object(vec![
+                    ("added", Some(JsValue::Arr(file.added.into_iter().map(JsValue::Str).collect()))),
+                    ("at", Some(JsValue::Arr(file.at.into_iter().map(|line| JsValue::Num(line as f64)).collect()))),
+                    ("assertionsAdded", Some(JsValue::Num(file.assertions_added as f64))),
+                    ("assertionsRemoved", Some(JsValue::Num(file.assertions_removed as f64))),
+                ])
+            })
+            .collect(),
+    );
     Ok(js_json::to_native(&value))
 }
 
@@ -389,7 +899,7 @@ mod tests {
     use super::*;
 
     fn change(status: char, path: &str, from: Option<&str>, added: Option<&[&str]>) -> Change {
-        Change { status, path: path.to_owned(), from: from.map(str::to_owned), added: added.map(|lines| lines.iter().map(|l| (*l).to_owned()).collect()) }
+        Change { from: from.map(str::to_owned), added: added.map(|lines| lines.iter().map(|l| (*l).to_owned()).collect()), ..Change::bare(status, path) }
     }
 
     fn lines(items: &[&str]) -> Vec<String> {
@@ -479,13 +989,15 @@ mod tests {
     #[test]
     fn 패치에서_더해진_줄만_파일별로_읽는다() {
         let patch = "diff --git a/a.ts b/a.ts\nindex 1..2 100644\n--- a/a.ts\n+++ b/a.ts\n@@ -1,0 +2,2 @@\n+one\n+++ two\n-gone\n\\ No newline at end of file\ndiff --git a/b.ts b/c.ts\nsimilarity index 100%\nrename from b.ts\nrename to c.ts\ndiff --git a/d.ts b/d.ts\nnew file mode 100644\n--- /dev/null\n+++ b/d.ts\n@@ -0,0 +1 @@\n+it.skip('x')\r\n";
-        let files = added_lines_by_file(patch, 3).unwrap();
+        let files = patches_by_file(patch, 3).unwrap();
         // 내용이 `++ two`인 줄(패치에는 `+++ two`)도 더해진 줄이다
-        assert_eq!(files[0], vec!["one".to_owned(), "++ two".to_owned()]);
-        assert!(files[1].is_empty());
-        assert_eq!(files[2], vec!["it.skip('x')".to_owned()]);
-        assert!(added_lines_by_file(patch, 2).is_err());
-        assert!(added_lines_by_file(patch, 4).is_err());
+        assert_eq!(files[0].added, vec!["one".to_owned(), "++ two".to_owned()]);
+        assert_eq!(files[0].at, vec![2, 3]);
+        assert!(files[1].added.is_empty());
+        assert_eq!(files[2].added, vec!["it.skip('x')".to_owned()]);
+        assert_eq!(files[2].at, vec![1]);
+        assert!(patches_by_file(patch, 2).is_err());
+        assert!(patches_by_file(patch, 4).is_err());
     }
 
     #[test]
@@ -588,6 +1100,338 @@ mod tests {
         let ok = js_json::parse_native("{\"entries\":[{\"status\":\"D\",\"path\":\"a.test.ts\"}]}").unwrap();
         assert!(review_from_value(&ok).unwrap().is_some());
         for bad in ["{}", "{\"entries\":{}}", "{\"entries\":[{\"status\":\"\",\"path\":\"a\"}]}", "{\"entries\":[{\"status\":\"D\"}]}", "{\"entries\":[],\"incomplete\":3}", "{\"entries\":[{\"status\":\"M\",\"path\":\"a\",\"added\":[1]}]}"] {
+            assert!(review_from_value(&js_json::parse_native(bad).unwrap()).is_err(), "{bad}");
+        }
+    }
+
+    // ── 이슈 #1451: 설정·스크립트·스냅샷·단언 ───────────────────────────────
+
+    fn config_hits(path: &str, line: &str) -> Vec<&'static str> {
+        let kind = config_kind(path).unwrap_or_else(|| panic!("설정 파일이 아님: {path}"));
+        config_markers_in(kind, &lines(&[line]), None, None).unwrap_or_default()
+    }
+
+    #[test]
+    fn 시험_설정_파일의_이름을_알아본다() {
+        for (path, kind) in [
+            ("vitest.config.ts", ConfigKind::Js),
+            ("web/vitest.workspace.mts", ConfigKind::Js),
+            ("jest.config.cjs", ConfigKind::Js),
+            ("JEST.CONFIG.JS", ConfigKind::Js),
+            ("jest.e2e.config.json", ConfigKind::Js),
+            ("playwright.config.ts", ConfigKind::Js),
+            ("vite.config.mjs", ConfigKind::Js),
+            ("package.json", ConfigKind::Package),
+            ("web\\package.json", ConfigKind::Package),
+            ("pytest.ini", ConfigKind::Python),
+            ("pyproject.toml", ConfigKind::Python),
+            ("setup.cfg", ConfigKind::Python),
+            ("tox.ini", ConfigKind::Python),
+            ("tests/conftest.py", ConfigKind::Python),
+            ("pom.xml", ConfigKind::Maven),
+            ("build.gradle", ConfigKind::Gradle),
+            ("app/build.gradle.kts", ConfigKind::Gradle),
+        ] {
+            assert_eq!(config_kind(path), Some(kind), "{path}");
+        }
+        for path in ["tsconfig.json", "package-lock.json", "src/config.ts", "vitest.config.ts.bak", "settings.gradle", "notes.md", "pom.xml.orig", "x-package.json"] {
+            assert_eq!(config_kind(path), None, "{path}");
+        }
+    }
+
+    #[test]
+    fn 시험_설정의_표시는_줄마다_걸리는_줄과_안_걸리는_줄이_있다() {
+        let hits: [(&str, &str); 30] = [
+            ("vitest.config.ts", "    exclude: ['src/a.test.ts'],"),
+            ("vitest.config.ts", "  exclude: ["),
+            ("vitest.config.ts", "config.test.exclude = ['a']"),
+            ("vitest.config.ts", "\"exclude\": [\"a\"]"),
+            ("jest.config.js", "  testPathIgnorePatterns: ['/cart/'],"),
+            ("jest.config.js", "  modulePathIgnorePatterns: ['<rootDir>/x'],"),
+            ("playwright.config.ts", "  testIgnore: '**/cart.spec.ts',"),
+            ("playwright.config.ts", "  grepInvert: /@slow/,"),
+            ("vitest.config.ts", "    passWithNoTests: true,"),
+            ("package.json", "  \"testPathIgnorePatterns\": [\"/cart/\"]"),
+            ("package.json", "    \"modulePathIgnorePatterns\": []"),
+            ("pytest.ini", "addopts = -q --ignore=tests/test_a.py"),
+            ("pytest.ini", "addopts = --ignore-glob=tests/slow*"),
+            ("pytest.ini", "addopts = --deselect tests/test_a.py::t"),
+            ("tox.ini", "commands = pytest -k \"not cart\""),
+            ("tox.ini", "commands = pytest -k 'not cart'"),
+            ("setup.cfg", "addopts = -knot cart"),
+            ("conftest.py", "collect_ignore = ['a.py']"),
+            ("conftest.py", "collect_ignore_glob = ['x*']"),
+            ("conftest.py", "    items[:] = [i for i in items if ok(i)]"),
+            ("conftest.py", "    items.remove(item)"),
+            ("pom.xml", "<exclude>**/Cart*</exclude>"),
+            ("pom.xml", "<skipTests>true</skipTests>"),
+            ("pom.xml", "<skip>true</skip>"),
+            ("pom.xml", "<testFailureIgnore>true</testFailureIgnore>"),
+            ("pom.xml", "mvn test -DskipTests"),
+            ("build.gradle", "    exclude '**/Cart*'"),
+            ("build.gradle.kts", "    exclude(\"**/Cart*\")"),
+            ("build.gradle", "    enabled = false"),
+            ("build.gradle.kts", "    filter { excludeTestsMatching(\"CartTest\") }"),
+        ];
+        for (path, line) in hits {
+            assert!(!config_hits(path, line).is_empty(), "{path}: {line}");
+        }
+        let misses: [(&str, &str); 14] = [
+            ("vitest.config.ts", "  resolve: { alias: { '@': '/src' } },"),
+            ("vitest.config.ts", "  plugins: [react()],"),
+            ("vitest.config.ts", "    environment: 'jsdom',"),
+            ("jest.config.js", "  moduleNameMapper: { '^@/(.*)$': '<rootDir>/src/$1' },"),
+            ("package.json", "  \"exclude\": [\"dist\"]"),
+            ("package.json", "  \"lint\": \"eslint --ignore-pattern dist\""),
+            ("pytest.ini", "addopts = -q --maxfail=2"),
+            ("pytest.ini", "addopts = --keep-duplicates"),
+            ("tox.ini", "commands = pytest -x -k smoke"),
+            ("conftest.py", "@pytest.fixture"),
+            ("pom.xml", "<excludes>"),
+            ("pom.xml", "<dependency><artifactId>junit</artifactId></dependency>"),
+            ("build.gradle", "    implementation('x:y:1') { exclude group: 'org.slf4j' }"),
+            ("build.gradle.kts", "    implementation(\"x:y:1\") { exclude(group = \"org.slf4j\", module = \"a\") }"),
+        ];
+        for (path, line) in misses {
+            assert!(config_hits(path, line).is_empty(), "{path}: {line}");
+        }
+    }
+
+    #[test]
+    fn pytest_collection_modifyitems는_건너뛰기와_함께_올_때만_센다() {
+        // 파일 전체를 더한 것으로 둔다(줄 번호와 바뀐 뒤 파일이 맞는다)
+        let hits = |items: &[&str]| {
+            let added = lines(items);
+            let at: Vec<usize> = (1..=added.len()).collect();
+            config_markers_in(ConfigKind::Python, &added, Some(&at), Some(&items.join("\n"))).unwrap()
+        };
+        assert!(hits(&["def pytest_collection_modifyitems(config, items):", "    for item in items:", "        item.add_marker(skip)"]).contains(&"pytest_collection_modifyitems"));
+        assert!(!hits(&["def pytest_collection_modifyitems(items):", "    config.hook.pytest_deselected(items=drop)"]).is_empty());
+        assert!(hits(&["def pytest_collection_modifyitems(items):", "    items.sort(key=lambda i: i.name)"]).is_empty());
+        // 건너뛰기만 있고 훅이 없으면 설정 표시로는 세지 않는다(conftest.py의 건너뛰기 표시는 따로 센다)
+        assert!(hits(&["    pytest.skip('x')"]).is_empty());
+        assert!(!skip_markers_in("conftest.py", &lines(&["    pytest.skip('x')"])).is_empty());
+    }
+
+    #[test]
+    fn 표시가_붙은_배열_안에_더해진_줄도_센다() {
+        let after = "export default {\n  test: {\n    exclude: [\n      'node_modules',\n      'src/cart.test.ts',\n    ],\n    setupFiles: [\n      'a.ts',\n    ],\n  },\n};\n";
+        // 5번째 줄만 더했다(exclude 배열 안)
+        let hit = config_markers_in(ConfigKind::Js, &lines(&["      'src/cart.test.ts',"]), Some(&[5]), Some(after)).unwrap();
+        assert_eq!(hit, vec!["exclude"]);
+        // 8번째 줄(setupFiles 배열 안)은 걸리지 않는다
+        assert!(config_markers_in(ConfigKind::Js, &lines(&["      'a.ts',"]), Some(&[8]), Some(after)).unwrap().is_empty());
+        // 파일과 줄 번호가 맞지 않으면 통과가 아니라 던진다
+        assert!(config_markers_in(ConfigKind::Js, &lines(&["      'zzz',"]), Some(&[5]), Some(after)).is_err());
+        assert!(config_markers_in(ConfigKind::Js, &lines(&["      'a.ts',"]), Some(&[99]), Some(after)).is_err());
+        // 바뀐 뒤 파일이나 줄 번호가 없으면 던진다
+        assert!(config_markers_in(ConfigKind::Js, &lines(&["      'a.ts',"]), None, None).is_err());
+        // TOML·conftest의 배열
+        let toml = "[tool.pytest.ini_options]\naddopts = \"-q\"\n[tool.x]\ncollect_ignore = [\n  \"a.py\",\n  \"b.py\",\n]\n";
+        assert_eq!(config_markers_in(ConfigKind::Python, &lines(&["  \"b.py\","]), Some(&[6]), Some(toml)).unwrap(), vec!["collect_ignore"]);
+        // CRLF 파일
+        let crlf = "a: {\r\n  exclude: [\r\n    'x',\r\n  ],\r\n}\r\n";
+        assert_eq!(config_markers_in(ConfigKind::Js, &lines(&["    'x',"]), Some(&[3]), Some(crlf)).unwrap(), vec!["exclude"]);
+    }
+
+    #[test]
+    fn 스크립트의_약한_모양을_가른다() {
+        for script in [
+            "",
+            "   ",
+            "vitest run || true",
+            "vitest run ||true",
+            "jest || exit 0",
+            "jest || :",
+            "jest || echo ok",
+            "vitest run; exit 0",
+            "vitest run ; true",
+            "vitest run --passWithNoTests",
+            "jest --pass-with-no-tests",
+            "echo \"skipped\"",
+            "echo skipped && exit 0",
+            "true",
+            ":",
+            "exit 0",
+            "echo \"a && b\"",
+            "vitest run --exclude src/a.test.ts",
+            "jest --testPathIgnorePatterns cart",
+            "pytest --ignore=tests/a",
+            "pytest --deselect tests/a::t",
+            "pytest -k \"not cart\"",
+            "mvn test -DskipTests",
+            "cargo test --no-run",
+        ] {
+            assert!(!weak_script_labels(script).is_empty(), "{script:?}");
+        }
+        for script in [
+            "vitest run",
+            "vitest run --coverage",
+            "echo \"Error: no test specified\" && exit 1",
+            "echo x; exit 1",
+            "jest --ci && echo done",
+            "node scripts/check.js || exit 1",
+            "pytest -k smoke",
+            "pytest -x --maxfail=2",
+            "turbo run test",
+            "vitest run && echo true",
+        ] {
+            assert!(weak_script_labels(script).is_empty(), "{script:?}: {:?}", weak_script_labels(script));
+        }
+    }
+
+    #[test]
+    fn package_json은_전후를_견줘_새로_약해진_것만_센다() {
+        let before = r#"{"name":"x","scripts":{"test":"vitest run","test:e2e":"playwright test","lint":"eslint ."}}"#;
+        // 새로 약해짐
+        assert_eq!(weak_test_scripts(Some(before), r#"{"scripts":{"test":"vitest run || true","test:e2e":"playwright test","lint":"eslint ."}}"#).unwrap(), vec!["scripts.test(|| true 꼴(실패를 삼킴))"]);
+        // 한 줄로 이어 쓴 파일, 줄 순서가 바뀐 파일도 같다
+        assert!(!weak_test_scripts(Some(before), r#"{"scripts":{"lint":"eslint .","test:e2e":"playwright test","test":""}}"#).unwrap().is_empty());
+        // 지움
+        assert_eq!(weak_test_scripts(Some(before), r#"{"scripts":{"test":"vitest run","lint":"eslint ."}}"#).unwrap(), vec!["scripts.test:e2e(지움)"]);
+        assert_eq!(weak_test_scripts(Some(before), r#"{"name":"x"}"#).unwrap().len(), 2);
+        // 새 파일의 약한 스크립트(기준 없음)
+        assert!(!weak_test_scripts(None, r#"{"scripts":{"test":"echo ok"}}"#).unwrap().is_empty());
+        // 원래 약했고 그대로: 세지 않는다. 다른 약한 모양을 더하면 센다
+        let weak = r#"{"scripts":{"test":"vitest run --passWithNoTests"}}"#;
+        assert!(weak_test_scripts(Some(weak), weak).unwrap().is_empty());
+        assert!(weak_test_scripts(Some(weak), r#"{"scripts":{"test":"vitest run --passWithNoTests || true"}}"#).unwrap().len() == 1);
+        // test가 아닌 스크립트나 scripts 밖의 변경은 보지 않는다
+        assert!(weak_test_scripts(Some(before), r#"{"scripts":{"test":"vitest run","test:e2e":"playwright test","lint":"eslint . || true"},"version":"2"}"#).unwrap().is_empty());
+        // 읽지 못하면 던진다. 바뀌기 전을 읽지 못하면 기준이 없는 것이다
+        assert!(weak_test_scripts(Some(before), "{ \"scripts\": ").is_err());
+        assert!(weak_test_scripts(Some(before), "[1]").is_err());
+        assert!(!weak_test_scripts(Some("{broken"), r#"{"scripts":{"test":"true"}}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn 스냅샷_파일_모양을_넓게_맞춘다() {
+        for path in ["a.test.ts.snap", "src/__snapshots__/a.test.ts.snap", "src/__snapshots__/anything.txt", "tests/__snapshots__/test_a.ambr", "SRC/__SNAPSHOTS__/A.SNAP", "x\\__snapshots__\\a.txt", "a.ambr"] {
+            assert!(is_snapshot_path(path), "{path}");
+        }
+        for path in ["src/a.test.ts", "snapshots/a.txt", "src/__snapshot__/a.txt", "notes/snap.md", "a.snapshot"] {
+            assert!(!is_snapshot_path(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn 스냅샷을_지우거나_다른_이름으로_옮기면_걸린다() {
+        let deleted = review_test_changes(&[change('D', "src/__snapshots__/a.test.ts.snap", None, None)], false, None).unwrap();
+        assert!(!deleted.ok);
+        assert!(deleted.detail.unwrap().contains("지운 스냅샷 파일: src/__snapshots__/a.test.ts.snap"));
+        let moved_away = review_test_changes(&[change('R', "a.bak", Some("src/__snapshots__/a.snap"), None)], false, None).unwrap();
+        assert!(!moved_away.ok);
+        // 스냅샷 이름 사이의 이동, 고치기, 새로 만들기는 통과
+        assert!(review_test_changes(&[change('R', "src/__snapshots__/old/a.snap", Some("src/__snapshots__/a.snap"), None)], false, None).is_none());
+        assert!(review_test_changes(&[change('M', "src/__snapshots__/a.snap", None, None), change('A', "b.snap", None, None)], false, None).is_none());
+        // 허용이 있으면 통과하고 남긴다
+        let allowed = review_test_changes(&[change('D', "a.snap", None, None)], true, None).unwrap();
+        assert!(allowed.ok && allowed.detail.unwrap().contains("a.snap"));
+    }
+
+    #[test]
+    fn 단언_수를_센다() {
+        for (line, count) in [
+            ("expect(a).toBe(1);", 1),
+            ("expect(a).toBe(1); expect(b).toBe(2);", 2),
+            ("  assert a == 1", 1),
+            ("self.assertEqual(a, 1)", 1),
+            ("assertEquals(1, a);", 1),
+            ("assertThat(a).isEqualTo(1);", 1),
+            ("Assertions.assertTrue(x);", 1),
+            ("t.Errorf(\"x\")", 1),
+            ("require.Equal(t, 1, a)", 1),
+            ("assert_eq!(a, 1);", 1),
+            ("assert!(ok);", 1),
+            ("with pytest.raises(ValueError):", 1),
+            ("const x = 1;", 0),
+            ("// expect(a).toBe(1);", 0),
+            ("  /* expect(a) */", 0),
+            ("  * assertEquals(1, 1)", 0),
+            ("# assert x", 0),
+            ("const inspect = a;", 0),
+        ] {
+            assert_eq!(assertions_in(line), count, "{line}");
+        }
+    }
+
+    #[test]
+    fn 지운_단언이_더한_단언보다_많은_시험_파일만_걸린다() {
+        let mut fewer = change('M', "a.test.ts", None, Some(&[]));
+        fewer.assertions = Some((1, 3));
+        let check = review_test_changes(&[fewer.clone()], false, None).unwrap();
+        assert!(!check.ok);
+        assert!(check.detail.unwrap().contains("지운 단언이 더한 단언보다 많은 시험 파일: a.test.ts(지움 3 · 더함 1)"));
+        // 같거나 더 많이 더했으면(바꾸기) 통과
+        for counts in [(3, 3), (1, 1), (5, 3), (0, 0)] {
+            let mut same = fewer.clone();
+            same.assertions = Some(counts);
+            assert!(review_test_changes(&[same], false, None).is_none(), "{counts:?}");
+        }
+        // 지운 단언이 없으면 수를 받지 않는다(None)
+        assert!(review_test_changes(&[change('M', "a.test.ts", None, Some(&[]))], false, None).is_none());
+        // 시험 파일이 아니면 보지 않는다. Rust 소스 파일도 시험 파일 모양이 아니면 보지 않는다
+        for path in ["src/app.ts", "src/lib.rs"] {
+            let mut other = change('M', path, None, Some(&[]));
+            other.assertions = Some((0, 5));
+            assert!(review_test_changes(&[other], false, None).is_none(), "{path}");
+        }
+        // 이름 바꾸기 도중의 줄임도 센다
+        let mut renamed = change('R', "b.test.ts", Some("a.test.ts"), Some(&[]));
+        renamed.assertions = Some((0, 2));
+        assert!(review_test_changes(&[renamed], false, None).is_some());
+        // 허용이 있으면 통과하고 남긴다
+        let allowed = review_test_changes(&[fewer], true, None).unwrap();
+        assert!(allowed.ok && allowed.detail.unwrap().contains("a.test.ts"));
+    }
+
+    #[test]
+    fn 패치에서_단언_수와_줄_번호를_읽는다() {
+        let patch = "diff --git a/a.test.ts b/a.test.ts\n--- a/a.test.ts\n+++ b/a.test.ts\n@@ -3,2 +3,1 @@\n-  expect(a).toBe(1);\n-  expect(b).toBe(2);\n+  expect(c).toBe(3);\n@@ -9 +8,2 @@\n-  assert x\n+  // expect(x)\n+  y = 1\n";
+        let file = &patches_by_file(patch, 1).unwrap()[0];
+        assert_eq!((file.assertions_removed, file.assertions_added), (3, 1));
+        assert_eq!(file.at, vec![3, 8, 9]);
+        assert!(patches_by_file("diff --git a/a b/a\n@@ garbage @@\n+x\n", 1).is_err());
+    }
+
+    #[test]
+    fn 설정_파일은_읽지_못했으면_확인하지_못함이다() {
+        // 줄을 받지 못함
+        let check = review_test_changes(&[change('M', "vitest.config.ts", None, None)], false, None).unwrap();
+        assert!(!check.ok && check.detail.unwrap().contains("확인하지 못함: vitest.config.ts"));
+        // 줄은 있지만 바뀐 뒤 파일이 없어 배열 안의 줄인지 모른다
+        let check = review_test_changes(&[change('M', "vitest.config.ts", None, Some(&["  alias: 1,"]))], false, None).unwrap();
+        assert!(!check.ok && check.detail.unwrap().contains("확인하지 못함: vitest.config.ts"));
+        // package.json은 바뀐 뒤 내용이 있어야 한다
+        let check = review_test_changes(&[change('M', "package.json", None, Some(&[]))], false, None).unwrap();
+        assert!(!check.ok && check.detail.unwrap().contains("바뀐 뒤 내용을 받지 못했습니다"));
+        // 깨진 package.json
+        let mut broken = change('M', "package.json", None, Some(&[]));
+        broken.after = Some("{ \"scripts\": ".to_owned());
+        broken.added_at = Some(vec![]);
+        let check = review_test_changes(&[broken], false, None).unwrap();
+        assert!(!check.ok && check.detail.unwrap().contains("package.json을 읽지 못했습니다"));
+        // 허용이 있으면 읽지 못한 것은 막지 않는다
+        assert!(review_test_changes(&[change('M', "vitest.config.ts", None, None)], true, None).is_none());
+        // Maven·Gradle은 바뀐 뒤 파일 없이 줄만으로 본다
+        let maven = review_test_changes(&[change('M', "pom.xml", None, Some(&["<skipTests>true</skipTests>"]))], false, None).unwrap();
+        assert!(!maven.ok && maven.detail.unwrap().contains("pom.xml(<skipTests>)"));
+    }
+
+    #[test]
+    fn 설정_변경의_json_입력을_읽는다() {
+        let input = js_json::parse_native(
+            "{\"entries\":[{\"status\":\"M\",\"path\":\"package.json\",\"added\":[\"  \\\"test\\\": \\\"x || true\\\"\"],\"addedAt\":[3],\"after\":\"{\\n\\\"scripts\\\":{\\n  \\\"test\\\": \\\"x || true\\\"\\n}}\",\"before\":\"{\\\"scripts\\\":{\\\"test\\\":\\\"x\\\"}}\"}]}",
+        )
+        .unwrap();
+        let check = review_from_value(&input).unwrap().unwrap();
+        assert!(!check.ok && check.detail.unwrap().contains("약하게 바꾼 test 스크립트: package.json(scripts.test("));
+        for bad in [
+            "{\"entries\":[{\"status\":\"M\",\"path\":\"a\",\"addedAt\":[0]}]}",
+            "{\"entries\":[{\"status\":\"M\",\"path\":\"a\",\"addedAt\":{}}]}",
+            "{\"entries\":[{\"status\":\"M\",\"path\":\"a\",\"assertions\":{\"added\":1}}]}",
+            "{\"entries\":[{\"status\":\"M\",\"path\":\"a\",\"after\":3}]}",
+        ] {
             assert!(review_from_value(&js_json::parse_native(bad).unwrap()).is_err(), "{bad}");
         }
     }
