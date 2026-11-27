@@ -447,6 +447,24 @@ const AGENT_READ_TOOL_MATCHER: &str = concat!(
     ")$"
 );
 
+/// 훅 명령을 빈 환경으로 띄우는 `env`의 절대 경로(macOS·Linux 공통). Windows는 이 컴퓨터 방식 터미널이 없다
+const HOOK_ENV_BIN: &str = "/usr/bin/env";
+/// 상태 줄 훅이 사용자의 원래 상태 줄 명령에 넘기는 환경 변수. 코드를 적재하는 변수(`NODE_*`·`BASH_ENV`·`LD_*` 등)는 넣지 않는다.
+/// 훅 설정은 셸이 푸는 `NAME="$NAME"` 꼴이라 값에 쓰인 글은 셸 글이 되지 않는다(큰따옴표 안의 확장은 한 번만 일어난다)
+const STATUSLINE_PASSTHROUGH_ENVS: [&str; 11] = [
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "LANG",
+    "LC_ALL",
+    "TERM",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "CLAUDE_CONFIG_DIR",
+];
+
 /// 이 컴퓨터용 CLI 설정 JSON(`settings.json`의 내용). `JSON.stringify(settings, null, 2)`와 같은 글자다(끝의 줄바꿈은 부르는 쪽이 붙인다)
 pub fn host_gateway_settings_json(
     dir: &str,
@@ -458,9 +476,20 @@ pub fn host_gateway_settings_json(
         .join(HOOK_SCRIPT_NAME)
         .to_string_lossy()
         .into_owned();
+    // 훅은 빈 환경(`env -i`)에서 절대 경로의 node로 띄운다(#1475): CLI의 환경(사용자의 셸이 정한 `NODE_OPTIONS`·`NODE_PATH` 등)이 훅 안에서 코드를 돌리지 못한다.
+    // 훅 스크립트는 환경에서 읽는 것이 없다(관문 주소·토큰은 스크립트 옆의 주소 파일, 이벤트는 인자). 상태 줄만 사용자의 원래 상태 줄을 이어 부르므로 평범한 변수 몇 개를 넘긴다
     let hook_command = |event: &str| {
+        let passthrough = if event == "statusline" {
+            STATUSLINE_PASSTHROUGH_ENVS
+                .iter()
+                .map(|name| format!("{name}=\"${name}\" "))
+                .collect::<String>()
+        } else {
+            String::new()
+        };
         format!(
-            "{} {} {event}",
+            "{} -i {passthrough}{} {} {event}",
+            shell_quote(HOOK_ENV_BIN),
             shell_quote(node_path),
             shell_quote(&script)
         )
@@ -839,6 +868,53 @@ mod tests {
         assert_eq!(first_prompt_arg("--x y").unwrap(), "요청: --x y");
         assert!(first_prompt_arg("   ").is_err());
         assert!(first_prompt_arg("a\0b c").is_err());
+    }
+
+    /// 훅·상태 줄 명령을 모두 꺼낸다(설정 JSON의 `"command": "…"` 값. 따옴표 앞의 역슬래시만 푼다)
+    fn settings_commands(json: &str) -> Vec<String> {
+        let key = "\"command\": \"";
+        let mut commands = Vec::new();
+        let mut rest = json;
+        while let Some(at) = rest.find(key) {
+            let tail = &rest[at + key.len()..];
+            let mut value = String::new();
+            let mut chars = tail.char_indices();
+            let mut end = tail.len();
+            while let Some((index, c)) = chars.next() {
+                match c {
+                    '\\' => {
+                        if let Some((_, escaped)) = chars.next() {
+                            value.push(escaped);
+                        }
+                    }
+                    '"' => {
+                        end = index;
+                        break;
+                    }
+                    other => value.push(other),
+                }
+            }
+            commands.push(value);
+            rest = &tail[end..];
+        }
+        commands
+    }
+
+    #[test]
+    fn host_hook_commands_start_in_an_empty_environment() {
+        let json = host_gateway_settings_json("/gw", "/n/bin/node", "http://127.0.0.1:1", "t");
+        let commands = settings_commands(&json);
+        assert!(commands.len() > 15, "{commands:?}");
+        for command in &commands {
+            let after_env = command.strip_prefix("'/usr/bin/env' -i ").unwrap_or_else(|| panic!("환경을 비우지 않음: {command}"));
+            if command.ends_with(" statusline") {
+                // 상태 줄만 평범한 변수를 `NAME="$NAME"`로 넘긴다
+                assert!(after_env.starts_with("PATH=\"$PATH\" HOME=\"$HOME\" "), "{command}");
+                assert!(!after_env.contains("NODE_") && !after_env.contains("BASH_ENV") && !after_env.contains("LD_"), "{command}");
+            } else {
+                assert!(after_env.starts_with("'/n/bin/node' '/gw/b-studio-hook.mjs' "), "{command}");
+            }
+        }
     }
 
     #[test]

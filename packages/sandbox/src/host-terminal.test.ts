@@ -715,7 +715,7 @@ describe('Codex 터미널(#825)', () => {
     const args = codexGatewayArgs(address, '/root/gw', '/usr/local/bin/node');
     expect(args.filter((_, index) => index % 2 === 0).every((flag) => flag === '-c')).toBe(true);
     const values = args.filter((_, index) => index % 2 === 1);
-    const command = (event: string) => JSON.stringify(`'/usr/local/bin/node' '/root/gw/${CODEX_HOOK_SCRIPT_NAME}' ${event}`);
+    const command = (event: string) => JSON.stringify(`'/usr/bin/env' -i B_STUDIO_GATEWAY_DIR="$B_STUDIO_GATEWAY_DIR" '/usr/local/bin/node' '/root/gw/${CODEX_HOOK_SCRIPT_NAME}' ${event}`);
     expect(values).toEqual([
       'features.hooks=true',
       `hooks.SessionStart=[{hooks=[{type="command",command=${command('session-start')},timeout=15}]}]`,
@@ -1454,7 +1454,7 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
     expect(wrapper).toContain(`export OPENCODE_CONFIG=${shellQuote(config)}`);
     expect(wrapper).toContain(`exec ${shellQuote(cli.cliPath)} "$@"`);
     // 지우는 줄이 내보내는 줄보다 앞이다
-    expect(wrapper).toMatch(/unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE\n/);
+    expect(wrapper).toMatch(/unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE OPENCODE_TEST_MANAGED_CONFIG_DIR OPENCODE_TEST_HOME OPENCODE_DISABLE_DEFAULT_PLUGINS OPENCODE_PERMISSION\n/);
     expect(wrapper).not.toMatch(/--model|-m |--dangerously|--skip|--pure|--yolo/);
     expect(wrapper).not.toContain('token');
   });
@@ -1522,7 +1522,7 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
     const fake = path.join(root, 'fake-oc.sh');
     await writeFile(
       fake,
-      '#!/bin/sh\nprintf "%s\\n" "GW=$B_STUDIO_GATEWAY_DIR" "CFG=$OPENCODE_CONFIG" "CONTENT=${OPENCODE_CONFIG_CONTENT-unset}" "DIR=${OPENCODE_CONFIG_DIR-unset}" "TUI=${OPENCODE_TUI_CONFIG-unset}" "PURE=${OPENCODE_PURE-unset}" "KEEP=$OPENCODE_DISABLE_PROJECT_CONFIG"\nfor a in "$@"; do printf "ARG=%s\\n" "$a"; done\n',
+      '#!/bin/sh\nprintf "%s\\n" "GW=$B_STUDIO_GATEWAY_DIR" "CFG=$OPENCODE_CONFIG" "CONTENT=${OPENCODE_CONFIG_CONTENT-unset}" "DIR=${OPENCODE_CONFIG_DIR-unset}" "TUI=${OPENCODE_TUI_CONFIG-unset}" "PURE=${OPENCODE_PURE-unset}" "MANAGED=${OPENCODE_TEST_MANAGED_CONFIG_DIR-unset}" "THOME=${OPENCODE_TEST_HOME-unset}" "DEFPLUG=${OPENCODE_DISABLE_DEFAULT_PLUGINS-unset}" "PERM=${OPENCODE_PERMISSION-unset}" "KEEP=$OPENCODE_DISABLE_PROJECT_CONFIG"\nfor a in "$@"; do printf "ARG=%s\\n" "$a"; done\n',
     );
     await chmod(fake, 0o755);
     const wrapper = path.join(gateway, 'bin/opencode');
@@ -1532,11 +1532,11 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
       execFile(
         wrapper,
         ['--prompt', '요청 글 "따옴표" $HOME'],
-        { env: { PATH: process.env.PATH ?? '', OPENCODE_CONFIG: '/evil.json', OPENCODE_CONFIG_CONTENT: '{"plugin":["x"]}', OPENCODE_CONFIG_DIR: '/evil', OPENCODE_TUI_CONFIG: '/evil/tui.json', OPENCODE_PURE: '1', OPENCODE_DISABLE_PROJECT_CONFIG: '1' }, encoding: 'utf8', timeout: 20_000 },
+        { env: { PATH: process.env.PATH ?? '', OPENCODE_CONFIG: '/evil.json', OPENCODE_CONFIG_CONTENT: '{"plugin":["x"]}', OPENCODE_CONFIG_DIR: '/evil', OPENCODE_TUI_CONFIG: '/evil/tui.json', OPENCODE_PURE: '1', OPENCODE_TEST_MANAGED_CONFIG_DIR: '/evil/managed', OPENCODE_TEST_HOME: '/evil/home', OPENCODE_DISABLE_DEFAULT_PLUGINS: '1', OPENCODE_PERMISSION: '{"bash":"allow"}', OPENCODE_DISABLE_PROJECT_CONFIG: '1' }, encoding: 'utf8', timeout: 20_000 },
         (error, out) => (error ? reject(error) : resolve(out)),
       ),
     );
-    expect(stdout.trim().split('\n')).toEqual([`GW=${gateway}`, `CFG=${path.join(gateway, 'opencode.json')}`, 'CONTENT=unset', 'DIR=unset', 'TUI=unset', 'PURE=unset', 'KEEP=1', 'ARG=--prompt', 'ARG=요청 글 "따옴표" $HOME']);
+    expect(stdout.trim().split('\n')).toEqual([`GW=${gateway}`, `CFG=${path.join(gateway, 'opencode.json')}`, 'CONTENT=unset', 'DIR=unset', 'TUI=unset', 'PURE=unset', 'MANAGED=unset', 'THOME=unset', 'DEFPLUG=unset', 'PERM=unset', 'KEEP=1', 'ARG=--prompt', 'ARG=요청 글 "따옴표" $HOME']);
   });
 
   describe('감시: 설정 없이 뜬 opencode를 잡는다(진짜 argv와 환경으로 본다)', () => {
@@ -1571,8 +1571,8 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
       expect(found([script], null)).toEqual([]);
     });
 
-    it('플러그인을 더하는 환경 변수(OPENCODE_CONFIG_CONTENT·OPENCODE_CONFIG_DIR·OPENCODE_TUI_CONFIG)가 있거나 attach 클라이언트면 붙지 않은 것이다', () => {
-      for (const name of ['OPENCODE_CONFIG_CONTENT', 'OPENCODE_CONFIG_DIR', 'OPENCODE_TUI_CONFIG']) {
+    it('설정·플러그인·권한·홈을 바꾸는 환경 변수(OPENCODE_CONFIG_CONTENT·OPENCODE_CONFIG_DIR·OPENCODE_TUI_CONFIG와 OPENCODE_TEST_MANAGED_CONFIG_DIR·OPENCODE_TEST_HOME·OPENCODE_DISABLE_DEFAULT_PLUGINS·OPENCODE_PERMISSION)가 있거나 attach 클라이언트면 붙지 않은 것이다', () => {
+      for (const name of ['OPENCODE_CONFIG_CONTENT', 'OPENCODE_CONFIG_DIR', 'OPENCODE_TUI_CONFIG', 'OPENCODE_TEST_MANAGED_CONFIG_DIR', 'OPENCODE_TEST_HOME', 'OPENCODE_DISABLE_DEFAULT_PLUGINS', 'OPENCODE_PERMISSION']) {
         expect(found([script], env([['OPENCODE_CONFIG', config], [name, 'x']])), name).toEqual([101]);
       }
       expect(found([script, 'attach', 'http://localhost:4096'], env([['OPENCODE_CONFIG', config]]))).toEqual([101]);

@@ -45,6 +45,8 @@ import { execChecked } from './exec-checked';
 /** 이 컴퓨터의 CLI가 b-studio의 훅 서버·도구 서버를 부르는 주소의 호스트 */
 export const HOST_GATEWAY_HOST = '127.0.0.1';
 export { STATUSLINE_FILE };
+/** 훅 명령을 빈 환경으로 띄우는 `env`의 절대 경로(macOS·Linux 공통. 이 컴퓨터 방식 터미널은 Windows를 지원하지 않는다) */
+const HOOK_ENV_BIN = '/usr/bin/env';
 const SETTINGS_FILE = 'settings.json';
 const MCP_FILE = 'mcp.json';
 const WRAPPER_DIR = 'bin';
@@ -235,7 +237,9 @@ function tomlString(value: string): string {
  * 세션의 관문 폴더는 감싸개가 환경 변수로 넘긴다
  */
 export function codexHookCommand(root: string, nodePath: string, event: AgentHookEvent): string {
-  return `${shellQuote(nodePath)} ${shellQuote(path.join(root, CODEX_HOOK_SCRIPT_NAME))} ${event}`;
+  // 빈 환경(`env -i`)에서 절대 경로의 node로 띄운다(#1475): Codex의 환경(사용자의 셸이 정한 `NODE_OPTIONS` 등)이 훅 안에서 코드를 돌리지 못한다.
+  // 훅 스크립트가 환경에서 읽는 것은 세션의 관문 폴더 하나뿐이라 그것만 셸이 풀어 넘긴다(글은 세션과 무관하게 같다). Codex는 훅을 `$SHELL -lc`로 돌린다(0.160.1 바이너리의 command_runner)
+  return `${shellQuote(HOOK_ENV_BIN)} -i ${CODEX_GATEWAY_DIR_ENV}="$${CODEX_GATEWAY_DIR_ENV}" ${shellQuote(nodePath)} ${shellQuote(path.join(root, CODEX_HOOK_SCRIPT_NAME))} ${event}`;
 }
 
 /**
@@ -382,19 +386,35 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
 /**
  * OpenCode 감싸개(ADR-241, 실험). 세션의 관문 폴더를 환경 변수로 알리고 `OPENCODE_CONFIG`로 우리 설정 파일(`<관문 폴더>/opencode.json`, 플러그인 하나)을 붙여 CLI를 부른다.
  * 사용자가 준 인자는 그대로 뒤에 붙인다. 모델 고르기(`-m`·`--model`)와 권한을 건너뛰는 인자는 붙이지 않는다: 기본 모델로 뜨고, 권한 확인은 사람이 답한다.
- * 설정을 바꾸는 환경 변수는 먼저 지운다: `OPENCODE_CONFIG_CONTENT`(마지막에 합쳐지는 설정)·`OPENCODE_CONFIG_DIR`(폴더의 plugins를 자동으로 불러온다)·`OPENCODE_TUI_CONFIG`·`OPENCODE_PURE`(외부 플러그인을 모두 끈다).
+ * 설정·플러그인·권한·홈을 바꾸는 환경 변수는 먼저 지운다(`OPENCODE_UNSET_ENVS`): `OPENCODE_CONFIG_CONTENT`(마지막에 합쳐지는 설정)·`OPENCODE_CONFIG_DIR`(폴더의 plugins를 자동으로 불러온다)·`OPENCODE_TUI_CONFIG`·`OPENCODE_PURE`(외부 플러그인을 모두 끈다)와 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`(#1475).
  * 감시가 이 환경(`OPENCODE_CONFIG`가 우리 파일이고 위 변수가 없음)과 `--pure` 인자 없음을 본다. 토큰은 여기 없다. 플러그인이 관문 폴더의 주소 파일에서 읽는다
  */
 export function openCodeConfigPath(dir: string): string {
   return path.join(dir, OPENCODE_CONFIG_NAME);
 }
 
+/**
+ * OpenCode의 설정·플러그인·권한·홈을 바꾸는 환경 변수. 감싸개가 띄우기 전에 지우고, Rust 감시(`OPENCODE_PLUGIN_ENVS` + `OPENCODE_PURE`)가 있으면 붙지 않은 것으로 본다(시험이 두 목록을 견준다).
+ * 근거는 1.18.33 바이너리의 평문 JS다: `OPENCODE_TEST_MANAGED_CONFIG_DIR`은 관리형 설정 폴더(그 안의 `opencode.json(c)`가 마지막에 합쳐진다), `OPENCODE_TEST_HOME`은 `.opencode` 폴더를 찾는 홈,
+ * `OPENCODE_PERMISSION`은 `permission`에 합쳐지는 JSON, `OPENCODE_DISABLE_DEFAULT_PLUGINS`는 내장 플러그인을 건너뛴다(우리 플러그인은 설정의 플러그인이라 직접 영향은 없지만 거부 목록이라 넓게 잡는다)
+ */
+export const OPENCODE_UNSET_ENVS: readonly string[] = [
+  'OPENCODE_CONFIG_CONTENT',
+  'OPENCODE_CONFIG_DIR',
+  'OPENCODE_TUI_CONFIG',
+  'OPENCODE_PURE',
+  'OPENCODE_TEST_MANAGED_CONFIG_DIR',
+  'OPENCODE_TEST_HOME',
+  'OPENCODE_DISABLE_DEFAULT_PLUGINS',
+  'OPENCODE_PERMISSION',
+];
+
 export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
   return [
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
     `export ${OPENCODE_GATEWAY_DIR_ENV}=${shellQuote(dir)}`,
-    'unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE',
+    `unset ${OPENCODE_UNSET_ENVS.join(' ')}`,
     `export OPENCODE_CONFIG=${shellQuote(openCodeConfigPath(dir))}`,
     `exec ${shellQuote(cli.cliPath)} "$@"`,
     '',

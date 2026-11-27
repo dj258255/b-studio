@@ -8602,3 +8602,41 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - 두 갈래 모두 인자를 허용 목록으로 읽는다(ADR-241 덧붙임, ADR-242 11). OpenCode는 옵션 일곱 개와 없거나 `.`인 위치 인자만(처음에는 환경 `PWD`와 같은 글도 받았는데, `PWD`는 상대가 정할 수 있는 값이라 `PWD=serve opencode serve`가 하위 명령을 통과시켰다. 감싸개는 위치 인자를 넘기지 않으므로 예외를 없앴다. 고치기 전 `opencode_accepts_only_known_args`가 `PWD=/work/a`와 `/work/a`로 실패했다. 변이: `.`만 받는 조건 제거·모든 경로 허용은 시험이 실패했고, 하위 명령 이름 목록만 빼는 변이는 `.`만 받는 조건과 겹쳐 시험을 통과한다), Gemini는 옵션 몇 개와 하위 명령이 아닌 질문 낱말만 받는다. 시험은 하위 명령 이름 25개·옵션 24개(OpenCode)와 하위 명령 9개·옵션 33개(Gemini)를 각각 거절하고, 변이(값의 `-` 검사 제거·`PWD` 조건 제거·모르는 긴 옵션 허용·Gemini 하위 명령·허용 밖 옵션 허용)가 시험을 실패시켰다. `--`만 막는 줄을 빼도 시험이 통과한다(알 수 없는 긴 옵션 거절이 같은 것을 막는 겹침이다). 고치기 전 `opencode_accepts_only_known_args`는 `/work/b`를 받아들여 실패했고, `gemini_accepts_only_known_args`는 하위 명령 `mcp`를 받아들여 실패했다.
 - 하지 않은 것: OpenCode의 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION` 환경 변수(바이너리 문자열로만 확인, 효과 미확인).
 
+
+## 311. OpenCode의 설정·홈·권한을 바꾸는 환경 변수 넷을 감싸개가 지우지도 감시가 거절하지도 않았다
+
+### 증상
+
+- `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`이 사용자의 셸에 있으면 감싸개가 그대로 CLI에 넘겼고 감시는 "붙은 것"으로 읽었다(#1475). 실제로 띄워 보지 않았고 1.18.33 바이너리의 평문 JS(`strings -a`)를 읽은 것이다.
+
+### 원인
+
+- `OPENCODE_TEST_MANAGED_CONFIG_DIR`: 관리형 설정 폴더(`m0()`)를 바꾼다. 그 안의 `opencode.json(c)`가 설정 순서의 맨 뒤에서 합쳐져 `plugin`·`permission`을 더한다. 띄우기 전 검사는 진짜 관리형 폴더를 읽으므로 확인하는 쪽과 동작하는 쪽이 다른 폴더를 본다.
+- `OPENCODE_TEST_HOME`: `Global.Path.home`을 바꾼다. 설정 폴더 목록이 거기서 위로 `.opencode`를 찾아 그 설정과 plugins를 불러온다.
+- `OPENCODE_PERMISSION`: 값(JSON)이 `permission`에 합쳐진다.
+- `OPENCODE_DISABLE_DEFAULT_PLUGINS`: 내장 플러그인(`Yy` 목록)을 건너뛴다. 설정의 플러그인(우리 것)은 따로 불러와 직접 영향은 없지만 플러그인 구성이 달라진다. 거부 목록이라 넓게 잡았다.
+
+### 해결
+
+- 감싸개의 unset을 한 목록(`OPENCODE_UNSET_ENVS`)으로 모아 넷을 더했고, Rust 감시(`OPENCODE_PLUGIN_ENVS`, 일곱 개 + `OPENCODE_PURE`)가 있으면 붙지 않은 것으로 본다. TS 시험이 두 목록을 견준다(Gemini의 `GEMINI_UNSET_ENVS`와 같은 방식).
+- 고치기 전 실패: `watch_tests.rs`의 `opencode_rejects_envs_that_add_plugins_and_the_attach_client`가 `OPENCODE_TEST_MANAGED_CONFIG_DIR`에서 실패, TS 목록 시험은 `OPENCODE_UNSET_ENVS`가 없어 실패. 감시 목록에서 한 이름을 바꾸는 변이로 같은 시험이 다시 실패함을 확인했다.
+- 하지 않은 것: `OPENCODE_DISABLE_PROJECT_CONFIG`(프로젝트 설정을 덜 읽을 뿐이라 열지 않는다, 시험이 지켜 둔다). Bun으로 컴파일된 opencode가 작업 폴더의 `.env`를 시작 때 환경에 넣는지는 확인하지 못했다(감싸개의 unset은 그 앞에서 돈다).
+
+## 312. Claude·Codex 훅이 CLI의 환경을 그대로 물려받아 훅 안에서 다른 코드가 돌 수 있었다(컨테이너 방식 포함)
+
+### 증상
+
+- 훅 명령이 `node <스크립트> <이벤트>`라 사용자의 셸이 정한 `NODE_OPTIONS=--require …`·`NODE_PATH`가 훅의 node 안에서 코드를 돌렸다(#1475, 트러블슈팅 304에서 남긴 것). Claude는 프로젝트 `.env`를 환경에 넣지 않으므로 들어오는 길은 셸 환경이다.
+
+### 원인
+
+- 훅이 필요로 하는 환경과 물려받는 환경을 같은 것으로 읽었다. Claude 훅 스크립트는 환경에서 읽는 것이 없다(주소·토큰은 스크립트 옆 주소 파일, 이벤트는 인자, `CLAUDE_PROJECT_DIR` 등도 쓰지 않는다). Codex 훅 스크립트는 `B_STUDIO_GATEWAY_DIR` 하나만 읽는다.
+
+### 해결
+
+- 훅·상태 줄 명령을 `/usr/bin/env -i <node 절대 경로> <스크립트> <이벤트>`로 바꿨다: Claude 이 컴퓨터 방식(Rust `host_gateway_settings_json`, 텍스트 벡터 7개 갱신), 컨테이너 방식(`agentManagedSettings`, `/usr/bin/env -i /usr/local/bin/node …`), Codex(`codexHookCommand`는 `B_STUDIO_GATEWAY_DIR="$B_STUDIO_GATEWAY_DIR"`만 셸이 풀어 넘긴다. 명령 글은 세션과 무관하게 같다). Codex는 훅을 `$SHELL -lc`로 돌린다(0.160.1 바이너리의 `command_runner`).
+- 상태 줄만 사용자의 원래 상태 줄을 이어 부르므로 `PATH`·`HOME`·`USER`·`LOGNAME`·`SHELL`·`LANG`·`LC_ALL`·`TERM`·`TMPDIR`·`XDG_CONFIG_HOME`·`CLAUDE_CONFIG_DIR`을 `NAME="$NAME"`로 넘긴다(코드 적재 변수는 넘기지 않는다). 그 밖의 변수에 기대던 원래 상태 줄은 달라질 수 있다.
+- 실패 꼬리: 훅 스크립트가 스스로 막는 쪽으로 답한다(주소 파일이 없으면 쓰기 직전 훅이 deny, 시험이 환경 없이 확인한다). 다만 `env`나 node 자체가 없어 exit 127이면 Claude는 막지 않는 오류로 읽는다. 이것은 이번 변경 전의 node 없음과 같다(바꾸지 않았다).
+- Codex 훅 명령 글이 바뀌어 Codex가 처음 한 번 훅을 다시 믿으라고 물을 수 있다. Windows는 이 컴퓨터 방식 터미널이 없어 바꾸지 않았다.
+- 고치기 전 실패: 새 시험 10건(훅 환경이 비어 있지 않음·NODE_OPTIONS 코드가 돎·명령 모양·목록). `env -i`를 지우는 변이로 Rust·TS 시험이 다시 실패함을 확인했다.
+- 감싸개가 `NODE_OPTIONS` 등을 지우는 것(Gemini)은 claude·codex·opencode에는 적용하지 않았다: 훅은 `env -i`로 막혔고, CLI 자체의 `NODE_OPTIONS`는 사용자의 정당한 설정(메모리 상한)일 수 있다. `BASH_ENV`처럼 훅 셸이 먼저 읽는 변수는 `env -i`가 막지 못하지만 Claude·Codex가 어느 셸로 훅을 돌리는지 실행으로 확인하지 못했다.

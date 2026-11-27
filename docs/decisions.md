@@ -13021,6 +13021,9 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 - 남는 위험: 위 환경 변수 중 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`은 감싸개가 지우지도 감시가 보지도 않는다(바이너리의 문자열로만 확인했고 효과는 실행해 보지 않았다). 보고만 하고 고치지 않았다.
 
 
+### 덧붙임 (#1475, 트러블슈팅 311)
+- 결정 11의 환경 변수에 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`을 더했다(근거는 1.18.33 바이너리의 평문 JS). 감싸개가 지우고(`OPENCODE_UNSET_ENVS`), 감시가 하나라도 있으면 붙지 않은 것으로 본다. 실제 opencode는 띄우지 않았다.
+
 ## ADR-242 Gemini CLI 세션은 설정 훅으로 이 컴퓨터 방식 세션 터미널에서 돌리되(실험), 훅은 root 소유가 아니면 읽히지 않는 시스템 설정 대신 홈을 바꾼 사용자 설정으로 붙이고 모든 실패를 막는 쪽으로 답한다
 
 상태: 채택(실험, #1467)
@@ -13064,7 +13067,7 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 10. **훅 명령은 빈 환경에서 절대 경로의 node로 띄우고, `.env`의 코드 적재·실행 경로 변수를 거절한다**(보안 검토 뒤). 0.71.1에서 `.env`의 값은 `loadEnvironment`가 `process.env`에 그대로 넣고(제외 목록은 `DEBUG`·`DEBUG_MODE`·IDE 변수 둘뿐), 훅 명령은 `executeCommandHook`이 `sanitizeEnvironment(process.env)`(기본값 `enableEnvironmentVariableRedaction`이 꺼져 가리지 않음)에 몇 개를 얹어 `bash -c`로 띄운다. 그래서 `NODE_OPTIONS`·`NODE_PATH`·`NODE_EXTRA_CA_CERTS`·`LD_PRELOAD`·`DYLD_*` 같은 값은 훅의 node 안에서 코드를 돌리고(훅이 deny하지 못하게 만들 수 있다), 셸 이름 `bash`는 `PATH`로 찾고 비대화형 `bash -c`도 `BASH_ENV`를 읽는다.
     - (a) 설정의 훅 명령은 `/usr/bin/env -i <node 절대 경로> <훅 파일> <이벤트>`다. 훅이 쓰는 주소·토큰은 관문 폴더의 주소 파일에서 읽으므로 환경이 필요 없다. 훅 파일이 읽던 시험용 환경 변수(`B_STUDIO_HOOK_TIMEOUT_MS`)는 이 경로에서는 안 닿는다(낮추기만 하는 변수라 안전하다). `env`가 없거나 죽으면 막는 훅은 설정의 실패 꼬리가 거절로 바꾼다. 감싸개도 띄우기 전에 `NODE_OPTIONS`·`NODE_PATH`·`NODE_EXTRA_CA_CERTS`·`BASH_ENV`·`ENV`·`LD_*`·`OPENSSL_*`·`PS4`·`PROMPT_COMMAND`와 `DYLD_*`(이름으로 찾아)를 지운다(`NODE_EXTRA_CA_CERTS`를 지우므로 사설 인증서를 쓰는 환경은 Gemini의 TLS 설정을 따로 해야 한다). `SHELLOPTS`·`BASHOPTS`는 셸이 읽기 전용으로 쥐고 있어 지울 수 없다.
     - (b) `.env`가 `PATH`·`BASH_ENV`·`ENV`·`NODE_*`(`NODE_ENV`만 뺀다)·`LD_*`·`DYLD_*`·`PYTHON*`·`OPENSSL_*`·`SSL_CERT_*`·`SHELLOPTS`·`BASHOPTS`·`IFS`·`CDPATH`·`GLOBIGNORE`·`BASH_FUNC_*`·`PS4`·`PROMPT_COMMAND`를 정하면 거절한다. `PATH`·`BASH_ENV`는 `env -i`가 막지 못한다(셸이 `env`보다 먼저 뜬다). **허용 목록으로 바꾸지 않았다**: `.env`는 보통 프로젝트가 쓰는 임의의 이름(DB 주소·키 등)을 담아 허용 목록으로 읽으면 평범한 프로젝트의 `.env`가 거의 다 거절된다. 대신 코드를 적재·실행하는 이름 계열만 넓게(접두사로) 막는다. 남는 틈: 사용자의 셸이 훅 셸의 `PATH`를 이미 바꿔 둔 경우.
-    - 다른 CLI: Command Code의 mod와 OpenCode의 플러그인은 CLI 프로세스 안에서 도는 코드라(`child_process`를 쓰지 않는다) 훅을 위해 따로 띄우는 자식이 없다. Claude(터미널)의 훅은 설정의 `node <스크립트> <이벤트>` 명령으로 환경을 물려받는다(공통 Rust 코드와 벡터가 얽혀 이번에는 고치지 않았다, 트러블슈팅 304).
+    - 다른 CLI: Command Code의 mod와 OpenCode의 플러그인은 CLI 프로세스 안에서 도는 코드라(`child_process`를 쓰지 않는다) 훅을 위해 따로 띄우는 자식이 없다. Claude(터미널)의 훅은 설정의 `node <스크립트> <이벤트>` 명령으로 환경을 물려받는다(공통 Rust 코드와 벡터가 얽혀 이번에는 고치지 않았다, 트러블슈팅 304). **고쳤다(#1475, 트러블슈팅 312)**: Claude(이 컴퓨터·컨테이너)와 Codex 훅도 `/usr/bin/env -i <node 절대 경로> …`로 띄운다. Codex는 세션의 관문 폴더 변수만 넘기고, 상태 줄만 `PATH`·`HOME` 등 평범한 변수를 넘긴다.
 11. **OpenCode와 Gemini의 인자는 허용 목록으로 본다**(감시, Rust). OpenCode는 `attach`만 거절하던 것을 1.18.33의 yargs 정의에 맞춰 바꿨다(ADR-241). Gemini는 샌드박스 인자만 보던 것을 허용 목록으로 바꿨다: 값을 받는 `-i`·`--prompt-interactive`·`-m`·`--model`, 값이 있어도 없어도 되는 `-r`·`--resume`, `--screen-reader`, 허용한 긴 옵션의 `--옵션=값` 꼴, 첫 위치 인자가 하위 명령(`mcp`·`extensions`·`skills`·`hooks`·`gemma`·`models`와 별칭)이 아닌 질문 낱말. 그 밖의 옵션(`-s`·`--sandbox`·`-p`·`--acp`·`--policy`·`-e`·`--list-*`·`--skip-trust` 등)과 `--`는 붙지 않은 것이다. 값 자리에 `-`로 시작하는 글이 오면 값으로 인정하지 않는다(yargs가 다음 옵션으로 읽을 수 있다). 첫 요청은 앞에 "요청: "이 붙어 영향이 없다.
 
 ### 하지 않는 것·남는 위험

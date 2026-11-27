@@ -145,6 +145,8 @@ export const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
 export const GATEWAY_FILE_NAME = 'b-studio-gateway.json';
 /** 훅을 돌릴 node. 이름으로 찾지 않는다 — 터미널의 PATH는 홈 폴더의 실행 파일 자리가 앞에 있어, 거기에 같은 이름을 두면 훅이 바뀐다 */
 const HOOK_NODE = '/usr/local/bin/node';
+/** 훅을 빈 환경으로 띄우는 `env`. 컨테이너 이미지(Debian·busybox 계열)에 모두 있는 절대 경로다 */
+const HOOK_ENV = '/usr/bin/env';
 const MCP_SERVER = 'b-studio';
 
 /**
@@ -378,7 +380,8 @@ export function agentTelemetryEnv(address: Pick<AgentGatewayAddress, 'hookUrl' |
 
 /** CLI의 관리 설정. 훅과 b-studio 도구의 사용 허락, 그 밖에 텔레메트리 설정을 적는다 */
 export function agentManagedSettings(address: Pick<AgentGatewayAddress, 'hookUrl' | 'hookToken'>): Record<string, unknown> {
-  return gatewaySettings((event) => `${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, address);
+  // 빈 환경(`env -i`)에서 띄운다(#1475): 컨테이너 안의 CLI 환경(에이전트가 셸 시작 파일로 정한 `NODE_OPTIONS` 등)이 훅 안에서 코드를 돌리지 못한다. 훅 스크립트는 환경에서 읽는 것이 없다
+  return gatewaySettings((event) => `${HOOK_ENV} -i ${HOOK_NODE} ${AGENT_GATEWAY_TARGET}/${HOOK_SCRIPT_NAME} ${event}`, address);
 }
 
 /**
