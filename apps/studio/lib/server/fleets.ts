@@ -112,7 +112,8 @@ export async function createFleet(input: {
     projectId: input.projectId,
     projectName: input.projectId,
     request,
-    allowBreaking: input.allowBreaking === true,
+    // 터미널 실행은 호환성을 깨는 변경 허용을 실을 길이 없어 위에서 true를 거절했다
+    allowBreaking: false,
     runner,
     createdAt: new Date().toISOString(),
     members: [],

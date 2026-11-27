@@ -25,17 +25,12 @@ import {
   TaskPlanError,
   tokenMatches,
   type PlanLimits,
-  type AgentUsage,
   type BoardAccess,
   type Effort,
-  type ModelClientInfo,
   type Note,
   type PlanAsk,
   type PlanBackend,
   type RemoteLocation,
-  type RequestMismatch,
-  type RunMetrics,
-  type ScriptedTurn,
   type TaskLane,
   type Topology,
   type VerifyMode,
@@ -69,7 +64,7 @@ import { StudioError } from './errors';
 import { clientForModel, listModelOptions, modelById } from './model-registry';
 import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
-import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, setTerminalBoard, stopAndDeleteSession, stopSession, subscribe } from './sessions';
+import { allowedBackends, applyServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sessionTerminalAllowed, setTerminalBoard, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 import { isTerminalRunnableBackend, sessionTerminalMode } from './session-terminal';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
@@ -86,7 +81,6 @@ import { findAiAccount } from './ai-accounts';
  */
 const MAX_REQUEST = 20_000;
 const BOOT_TIMEOUT_MS = 20 * 60_000;
-const RUN_TIMEOUT_MS = 30 * 60_000;
 /** 통합 세션에 다시 쓸 파일 하나의 상한. 생성물이나 바이너리가 레인 결과에 섞였을 때 통합을 멈춘다 */
 const MAX_INTEGRATION_FILE_BYTES = 256 * 1024;
 
@@ -246,20 +240,17 @@ export async function createTaskPlan(input: {
    */
   sourceSessionId?: string;
   /**
-   * 레인을 돌리는 방식. 'terminal'이면 레인마다 세션 터미널을 열어 그 안의 CLI에 요청을 붙여 넣는다. HTTP 라우트도 받는다.
-   * 카드 계획(cards)은 늘 terminal이다(cards와 'chat'을 함께 주면 400). 없으면 카드는 terminal, 나머지는 chat이다
+   * 레인을 돌리는 방식. 레인마다 세션 터미널을 열어 그 안의 CLI에 요청을 붙여 넣는 terminal 하나뿐이고, 없으면 terminal이다(ADR-221).
+   * 'chat'(채팅식 실행)과 모르는 값은 세션도 계획도 만들기 전에 400으로 거절한다. HTTP 라우트도 받는다
    */
-  runner?: 'chat' | 'terminal';
+  runner?: string;
 }): Promise<TaskPlanView> {
   const mode = process.env.B_STUDIO_MODE?.trim() || 'api';
   const preset = input.presetPlan;
   const cards = input.cards;
   if (cards !== undefined && preset !== undefined) throw new StudioError(400, '작업 카드(cards)와 고정 계획(presetPlan)을 함께 넘길 수 없습니다');
-  if (input.runner !== undefined && input.runner !== 'chat' && input.runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
-  if (cards !== undefined && input.runner === 'chat') throw new StudioError(400, '작업 카드는 터미널에서만 돌립니다(runner: chat과 함께 줄 수 없습니다)');
-  const terminal = cards !== undefined || input.runner === 'terminal';
-  // 카드가 아닌 터미널 계획의 거절은 모델을 부르거나 세션·계획을 만들기 전에 동기로 한다(조용히 빠뜨리지 않는다)
-  if (terminal && cards === undefined) assertPlanTerminalRunnable(input);
+  if (input.runner === 'chat') throw new StudioError(400, '채팅식 작업 분해는 더 이상 지원하지 않습니다. 레인은 세션 터미널에서 돌립니다(runner를 빼거나 terminal로 보내세요)');
+  if (input.runner !== undefined && input.runner !== 'terminal') throw new StudioError(400, 'runner는 terminal이어야 합니다');
   // 카드 계획은 모델을 부르지 않으므로 B_STUDIO_MODE 검사(PLANNER_MODES)를 하지 않는다. 세션 터미널 확인은 아래에서 한다
   if (cards === undefined) {
     if (preset === undefined) {
@@ -274,6 +265,8 @@ export async function createTaskPlan(input: {
       // 고정 계획은 모델을 부르지 않으므로 claude-code·codex·commandcode·opencode 모드에서도 쓴다. demo는 지금처럼 거부한다
       throw new StudioError(409, '고정 계획은 B_STUDIO_MODE=api, claude-code, codex, commandcode 또는 opencode에서만 사용할 수 있습니다');
     }
+    // 카드가 아닌 계획의 거절은 모델을 부르거나 세션·계획을 만들기 전에 동기로 한다(조용히 빠뜨리지 않는다). 모드 검사 다음에 해서 모드의 안내가 먼저 나온다
+    assertPlanTerminalRunnable(input);
   }
   const requestText = (input.request ?? '').trim();
   // 요청 글은 카드 계획이면 없어도 된다(카드 제목으로 만든다). 그 밖의 계획에서는 필수다
@@ -284,6 +277,8 @@ export async function createTaskPlan(input: {
   if (cards !== undefined) {
     // 카드 계획은 모델을 부르지 않는다. 세션 터미널을 쓸 수 있을 때만 만들고, 기록용 모델 id는 'terminal'이다
     if (!sessionTerminalAllowed()) throw new StudioError(409, '작업 카드는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
+    // 카드 계획도 통합이 서버가 쓰는 길 하나뿐이다. 그 길에 못 싣는 확인·조율·방식은 만들기 전에 거절한다
+    assertIntegrationRunnable(input);
     modelId = 'terminal';
   } else if (preset === undefined) {
     if (mode === 'claude-code') {
@@ -357,8 +352,8 @@ export async function createTaskPlan(input: {
     ...(preset === undefined ? {} : { preset: true as const }),
     // 사람이 쓴 작업 카드로 만든 계획. 레인은 세션 터미널에서 돈다
     ...(cardData !== undefined ? { source: 'cards' as const } : {}),
-    // 카드 계획은 늘, 모델·고정 계획은 runner: 'terminal'을 줬을 때만 레인을 세션 터미널에서 돌린다(채팅이면 필드 없음 — 옛 기록과 같다)
-    ...(terminal ? { runner: 'terminal' as const } : {}),
+    // 레인은 늘 세션 터미널에서 돈다. 이 필드가 없는 기록은 채팅식이던 옛 계획이라 실행하지 않는다
+    runner: 'terminal' as const,
     // 가볍게 확인은 레인·통합 실행에 그대로 넘긴다. 없으면(full) 지금과 한 글자도 다르지 않다
     ...(input.verify === 'light' ? { verify: 'light' as const } : {}),
     ...(input.sourceSessionId !== undefined ? { sourceSessionId: input.sourceSessionId } : {}),
@@ -406,6 +401,27 @@ function assertPlanTerminalRunnable(input: { presetPlan?: unknown; coordination?
   for (const backend of backends) {
     if (!isTerminalRunnableBackend(backend)) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${backend}`);
   }
+  assertIntegrationRunnable(input);
+}
+
+/**
+ * 레인 결과를 합치는 통합은 서버가 파일을 쓰고 터미널 턴 끝과 같은 판정으로 닫는 길 하나뿐이다(ADR-224, 채팅식 통합은 없다).
+ * 그 길에 실을 수 없는 입력은 만들기 전에 거절한다(거절하는 쪽: 모르는 입력은 거절한다). 가벼운 확인은 터미널 판정이 같은 뜻으로 받는지 모르고,
+ * S4 수리는 모델 호출이 필요하며, 컨테이너 방식은 터미널 판정이 검사 동안 멈출 에이전트 컨테이너가 통합 세션에 없다
+ */
+function assertIntegrationRunnable(input: { verify?: VerifyMode; coordination?: CoordinationInput }): void {
+  const reason = integrationBlockReason(input.verify, input.coordination?.strategy);
+  if (reason) throw new StudioError(reason.status, reason.message);
+}
+
+/** 통합을 서버가 쓰는 길로 할 수 없는 까닭. 할 수 있으면 undefined. 새 계획의 만들기 검사와 옛 계획의 통합 재시도가 같은 판정을 쓴다 */
+function integrationBlockReason(verify: VerifyMode | undefined, strategy: string | undefined): { status: number; message: string } | undefined {
+  if (verify === 'light') return { status: 400, message: '가볍게 확인(verify: light)은 통합을 서버가 쓰는 길로 닫을 수 없어 받지 못합니다(채팅식 통합은 없습니다)' };
+  if (strategy === 'S4') return { status: 400, message: '조율 전략 S4는 통합 실패를 모델에 되돌려 수리하는 채팅식 길이라 받지 못합니다' };
+  if (sessionTerminalMode() === 'container') {
+    return { status: 409, message: '컨테이너 방식 터미널에서는 레인 결과를 합치는 통합을 아직 지원하지 않아 작업 분해를 쓸 수 없습니다(이 컴퓨터 방식에서 쓰세요)' };
+  }
+  return undefined;
 }
 
 /**
@@ -593,6 +609,8 @@ function findPlan(id: string, owner: string): TaskPlanView {
 export function approveTaskPlan(id: string, owner: string, { publishIssues = false }: { publishIssues?: boolean } = {}): TaskPlanView {
   const plan = findPlan(id, owner);
   if (plan.status !== 'awaiting_approval') throw new StudioError(409, '승인을 기다리는 계획이 아닙니다');
+  // 채팅식으로 만든 옛 계획(runner 없음)은 레인을 돌릴 길이 없다
+  if (plan.runner !== 'terminal') throw new StudioError(409, '채팅식으로 만든 옛 계획은 더 이상 실행할 수 없습니다. 새로 만드세요');
   plan.approvedBy = owner;
   plan.approvedAt = new Date().toISOString();
   persist(plan);
@@ -1003,14 +1021,14 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
     await waitForReady(snapshot.id);
     lane.bootMs = Math.round(performance.now() - bootStarted);
     lane.bootRxBytes = bootRxBytes(snapshot.id);
-    const terminalBoard = plan.runner === 'terminal' ? terminalLaneBoard(plan) : undefined;
+    const terminalBoard = terminalLaneBoard(plan);
     if (terminalBoard) {
       // CLI는 터미널을 열 때 도구 목록을 읽는다 — 열기 전에 붙인다. 이름이 겹치면 던져 레인을 실패시킨다(게시판 없이 조용히 돌리지 않는다)
       setTerminalBoard(snapshot.id, { specs: boardMcpToolSpecs({ modelWrites: terminalBoard.modelWrites }), access: () => currentAccess });
       boardAttachedTo = snapshot.id;
     }
     // 터미널 레인은 세션 터미널을 연다 — 그 안의 CLI에 요청을 붙여 넣어 돌린다(화면 없는 실행기 대신)
-    if (plan.runner === 'terminal') await (terminalLaneDeps?.driver ?? terminalLaneDriver).open(snapshot.id);
+    await (terminalLaneDeps?.driver ?? terminalLaneDriver).open(snapshot.id);
     lane.status = 'running';
     persist(plan);
 
@@ -1020,31 +1038,23 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
       const board = laneBoard(plan, lane, task.id);
       // S6: 이 레인의 진행 트레이스를 턴마다 fact 메모로 게시해 다른 레인이 읽게 한다(Cognition의 전체 공유 처방)
       const stopTracePosting = plan.coordination?.strategy === 'S6' ? attachTracePoster(plan, lane, snapshot.id) : undefined;
-      let outcome: Awaited<ReturnType<typeof runAndWait>> & { costUsd?: number };
+      let outcome: Awaited<ReturnType<typeof runTerminalTask>>;
       if (boardAttachedTo) currentAccess = board;
       try {
-        outcome =
-          plan.runner === 'terminal'
-            ? await runTerminalTask(
-                snapshot.id,
-                taskRequest(plan, lane, index),
-                {
-                  // 카드의 쓰기 범위와 완료 검사를 그 작업의 실행 동안만 건다
-                  writableScope: task.paths,
-                  doneTests: taskDoneTests(task),
-                  onWaiting: (note) => {
-                    lane.waiting = note;
-                    persist(plan);
-                  },
-                },
-                terminalLaneDeps,
-              )
-            : await runAndWait(snapshot.id, taskRequest(plan, lane, index), {
-                by: plan.owner,
-                writableScope: task.paths,
-                ...(board ? { board } : {}),
-                ...(plan.verify ? { verify: plan.verify } : {}),
-              });
+        outcome = await runTerminalTask(
+          snapshot.id,
+          taskRequest(plan, lane, index),
+          {
+            // 카드의 쓰기 범위와 완료 검사를 그 작업의 실행 동안만 건다
+            writableScope: task.paths,
+            doneTests: taskDoneTests(task),
+            onWaiting: (note) => {
+              lane.waiting = note;
+              persist(plan);
+            },
+          },
+          terminalLaneDeps,
+        );
       } finally {
         stopTracePosting?.();
         // 성공·실패·던짐 모두 작업이 끝나면 접근을 푼다: 작업 사이에 CLI가 게시판을 부르면 실패한다
@@ -1061,9 +1071,8 @@ async function runLane(plan: TaskPlanView, lane: TaskPlanLaneView): Promise<void
         ...(outcome.costUsd !== undefined ? { costUsd: outcome.costUsd } : {}),
       };
       task.summary = outcome.summary;
-      // 에이전트가 알린 요청과 확인의 어긋남(#666). 작업은 done으로 이어 가되 계획 화면이 "확인 필요"로 보인다
-      if ('mismatches' in outcome && outcome.mismatches?.length) task.mismatches = outcome.mismatches;
-      else delete task.mismatches;
+      // 요청과 확인의 어긋남(#666)은 채팅식 실행의 알림으로만 왔다. 터미널 실행에는 그 길이 없어 새로 남기지 않는다
+      delete task.mismatches;
       if (outcome.status !== 'done') {
         task.status = 'failed';
         for (const rest of lane.tasks.slice(index + 1)) rest.status = 'skipped';
@@ -1117,6 +1126,9 @@ async function integrate(plan: TaskPlanView): Promise<void> {
   const writes: Array<{ path: string; content: string }> = [];
   const deletes: string[] = [];
   try {
+    // 옛 계획의 통합 재시도(재시작 뒤)도 채팅식 통합으로 돌아가지 않는다. 서버가 쓰는 길로 닫을 수 없는 계획은 까닭을 적어 멈춘다
+    const blocked = integrationBlockReason(plan.verify, plan.coordination?.strategy);
+    if (blocked) throw new Error(blocked.message);
     for (const lane of plan.lanes) {
       // 재시작 뒤에는 레인 세션이 없어도 남겨 둔 기록으로 통합한다. 기록이 없으면 합칠 근거가 없으므로 멈춘다
       if (!lane.workDir || !lane.changedFiles) throw new Error(`${lane.id} 의 결과 기록이 없어 통합할 수 없습니다`);
@@ -1174,52 +1186,18 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     // 레인마다 통과했던 완료 검사를 합친 결과에서 다시 돌린다. 읽지 못하면 "검사 없음"으로 넘기지 않고 통합을 멈춘다(위 try의 catch가 실패로 닫는다)
     const doneTests = integrationDoneTests(plan);
     const request = `작업 분해 통합: ${plan.request}`;
-    let settled: { status: string; summary: string };
-    let appliedCheckpoint: Checkpoint | undefined;
-    // 옛 길(채팅식 실행에 대본 턴으로 싣는다)을 타는 경우. 터미널 턴 끝 판정으로 가지 않는다:
-    //  - verify가 'light': 가벼운 검증을 터미널 판정이 같은 뜻으로 받는지 아직 모른다
-    //  - S4: 게이트가 실패하면 모델에 수리를 요청하는 길이라 모델 호출이 필요하다(#1327의 다른 항목)
-    //  - 컨테이너 방식: 터미널 판정이 검사 동안 에이전트 컨테이너를 멈추는데 통합 세션에는 그 컨테이너가 없다(실험 경로, 확인하지 않는다)
-    if (plan.verify === 'light' || plan.coordination?.strategy === 'S4' || sessionTerminalMode() === 'container') {
-      const turns: ScriptedTurn[] = [
-        {
-          toolCalls: [
-            ...writes.map((write) => ({ name: 'write_file', input: { path: write.path, content: write.content } })),
-            ...removable.map((file) => ({ name: 'delete_file', input: { path: file } })),
-          ],
-        },
-        { text: `레인 ${plan.lanes.length}개의 결과(파일 ${writes.length}개, 삭제 ${removable.length}개)를 합쳤습니다.` },
-      ];
-      const outcome = await runAndWait(snapshot.id, request, {
-        by: plan.owner,
-        scriptedTurns: turns,
-        // 모델을 부르지 않고 레인 결과를 합칠 뿐이라, 채팅의 "backend" 카드가 ScriptedModelClient의 기본값
-        // ("데모 스크립트에서 scripted 모델로 실행합니다")으로 보이지 않고 실제 쓰임을 보여주게 덮어쓴다(버그 리포트)
-        scriptedInfo: { backend: '레인 결과 합치기', model: '모델 호출 없음' },
-        writableScope,
-        ...(plan.verify ? { verify: plan.verify } : {}),
-      });
-      integration.run = runView(outcome);
-      settled = outcome;
-      // S4: 통합 게이트가 실패하면 한 번만 통합 세션에 모델 수리를 요청한다(공유 없이 실패 뒤에만 비용을 내는 대조군).
-      // scriptedTurns 없이 보내므로 세션의 기본 모델 경로(API 모드는 계획의 모델, 로컬 CLI는 그 러너)로 실제 호출된다
-      if (outcome.status !== 'done' && plan.coordination?.strategy === 'S4') {
-        const repair = await runAndWait(snapshot.id, repairRequest(plan, outcome.summary), { by: plan.owner, writableScope, ...(plan.verify ? { verify: plan.verify } : {}) });
-        integration.repair = { attempted: true, status: repair.status, run: runView(repair) };
-        settled = repair;
-      }
-    } else {
-      // 서버가 레인 결과를 작업 폴더에 쓰고 터미널 턴 끝과 같은 판정으로 닫는다(ADR-224). 채팅식 실행도 모델 호출도 없다
-      const applied = await applyServerChanges(snapshot.id, { request, writes, deletes: removable, writableScope, doneTests });
-      appliedCheckpoint = applied.checkpoint;
-      // 모델을 부르지 않으므로 usage·metrics는 없다
-      integration.run = { status: applied.status, durationMs: applied.durationMs };
-      // 통과했는데 체크포인트가 남지 않았으면 합친 결과의 근거가 없다. 옛 길은 세션 시작 체크포인트를 합친 결과로 적었다
-      settled = applied.status === 'done' && applied.checkpoint === undefined ? { status: 'failed', summary: '검증은 통과했지만 합친 결과가 체크포인트로 남지 않았습니다(바뀐 파일이 없었습니다)' } : applied;
-    }
+    // 서버가 레인 결과를 작업 폴더에 쓰고 터미널 턴 끝과 같은 판정으로 닫는다(ADR-224). 채팅식 실행도 모델 호출도 없다.
+    // 가벼운 확인·S4·컨테이너 방식은 이 길에 실을 수 없어 위에서 멈췄다(integrationBlockReason)
+    const applied = await applyServerChanges(snapshot.id, { request, writes, deletes: removable, writableScope, doneTests });
+    const appliedCheckpoint: Checkpoint | undefined = applied.checkpoint;
+    // 모델을 부르지 않으므로 usage·metrics는 없다
+    integration.run = { status: applied.status, durationMs: applied.durationMs };
+    // 통과했는데 체크포인트가 남지 않았으면 합친 결과의 근거가 없다
+    const settled: { status: string; summary: string } =
+      applied.status === 'done' && applied.checkpoint === undefined ? { status: 'failed', summary: '검증은 통과했지만 합친 결과가 체크포인트로 남지 않았습니다(바뀐 파일이 없었습니다)' } : applied;
     if (settled.status !== 'done') throw new Error(`합친 결과가 게이트를 통과하지 못했습니다: ${settled.status} ${settled.summary}`);
-    // 새 길은 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다). 옛 길은 세션의 최신 체크포인트다
-    Object.assign(integration, { status: 'done', checkpoint: checkpointView(appliedCheckpoint ?? getSnapshot(snapshot.id)?.checkpoints[0]) });
+    // 판정이 남긴 체크포인트를 그대로 적는다(다시 읽지 않는다)
+    Object.assign(integration, { status: 'done', checkpoint: checkpointView(appliedCheckpoint) });
     plan.status = 'done';
     plan.finishedAt = new Date().toISOString();
     recordMetrics(plan);
@@ -1623,51 +1601,6 @@ function waitForReady(sessionId: string): Promise<void> {
   );
 }
 
-async function runAndWait(
-  sessionId: string,
-  request: string,
-  options: {
-    by: string;
-    writableScope?: readonly string[];
-    scriptedTurns?: ScriptedTurn[];
-    scriptedInfo?: Partial<ModelClientInfo>;
-    board?: BoardAccess;
-    verify?: VerifyMode;
-  },
-): Promise<{ status: string; summary: string; usage?: AgentUsage; metrics?: RunMetrics; durationMs?: number; mismatches?: RequestMismatch[] }> {
-  let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
-  let runId: string | undefined;
-  const unsubscribe = subscribe(sessionId, (event) => {
-    if (event.type === 'run_finished' && (runId === undefined || event.runId === runId)) finished = event;
-  });
-  try {
-    ({ runId } = sendMessage(sessionId, request, { allowBreaking: false, ...options }));
-    await waitForEvent(sessionId, () => ({ done: finished?.runId === runId }), RUN_TIMEOUT_MS);
-    return {
-      status: finished!.status,
-      summary: finished!.summary,
-      usage: finished!.usage,
-      metrics: finished!.metrics,
-      durationMs: finished!.durationMs,
-      ...(finished!.mismatches?.length ? { mismatches: finished!.mismatches } : {}),
-    };
-  } finally {
-    unsubscribe();
-  }
-}
-
-function runView(outcome: { status: string; durationMs?: number; usage?: AgentUsage; metrics?: RunMetrics }) {
-  return { status: outcome.status, durationMs: outcome.durationMs, usage: outcome.usage, metrics: outcome.metrics };
-}
-
-/** S4: 통합 게이트 실패를 모델에 되돌려 준다. 원래 요청 + 실패 요약 + 쓰기 범위 안에서 고치라는 지시 */
-function repairRequest(plan: TaskPlanView, summary: string): string {
-  return `${plan.request}
-
-[조율] 레인 ${plan.lanes.length}개의 결과를 합친 뒤 검증이 실패했습니다: ${summary}
-쓰기 범위 안에서 고쳐 검증을 다시 통과시키세요.`;
-}
-
 async function waitForEvent(sessionId: string, check: () => { done: boolean; error?: string }, timeoutMs: number): Promise<void> {
   const started = Date.now();
   for (;;) {
@@ -1737,6 +1670,11 @@ function ensureLoaded(): void {
             parsed.status = 'failed';
             parsed.error = '스튜디오가 다시 시작돼 진행 중이던 작업 계획을 멈췄습니다';
           }
+        }
+        // 채팅식으로 만든 옛 계획(runner 없음)은 승인을 기다리던 것도 레인을 돌릴 길이 없다. 기록으로만 남기고 닫는다
+        if (parsed.status === 'awaiting_approval' && parsed.runner !== 'terminal') {
+          parsed.status = 'failed';
+          parsed.error = '채팅식으로 만든 옛 계획은 더 이상 실행할 수 없어 닫았습니다. 새로 만드세요';
         }
         plans.set(parsed.id, parsed);
       } catch {

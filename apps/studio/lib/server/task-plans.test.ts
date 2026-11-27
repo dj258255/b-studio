@@ -47,6 +47,13 @@ function failureEvent(runId: string): StudioEvent {
 /** 통합이 시도됐는가: 옛 길(대본 턴)이든 새 길(서버가 쓰기)이든 */
 const integrationAttempted = (): boolean => fake.sends.some((send) => send.options.scriptedTurns) || fake.serverChanges.length > 0;
 
+/** 레인 작업마다 터미널 실행이 시작될 때 본 게시판 접근(BoardAccess)과 그 요청(터미널 실행 순서대로). 게시판이 없으면 뺀다 */
+const laneBoardSends = (): Array<{ sessionId: string; request: string; board: BoardAccess }> =>
+  fake.terminalSends.flatMap((send, index) => {
+    const board = fake.taskAccess[index]?.access as BoardAccess | undefined;
+    return board ? [{ sessionId: send.sessionId, request: send.request, board }] : [];
+  });
+
 /** S4 수리 요청인지: 원래 요청 + 통합 게이트 실패 문구 */
 function isRepair(request: string): boolean {
   return request.includes('[조율] 레인') && request.includes('검증이 실패했습니다');
@@ -435,7 +442,22 @@ vi.mock('./terminal-lane', () => ({
       rmSync(path.join(session.workDir, file), { force: true });
       delete committed[file];
     }
-    session.checkpoints.unshift({ sha: runId, shortSha: runId, message: request, createdAt: '', files: [...new Set([...Object.keys(files), ...deleted])], contents: { ...committed } });
+    const links = taskId ? (fake.linkFiles[taskId] ?? []) : [];
+    session.checkpoints.unshift({
+      sha: runId,
+      shortSha: runId,
+      message: request,
+      createdAt: '',
+      files: [...new Set([...Object.keys(files), ...deleted])],
+      contents: { ...committed },
+      ...(links.length > 0 ? { links } : {}),
+    });
+    // 레인이 끝난 뒤에도 그 칸의 터미널이 살아 있어 작업 폴더의 파일을 바깥을 가리키는 링크로 바꿀 수 있다(이슈 #744)
+    if (taskId && fake.relinkAfterLane[taskId]) {
+      const { file, target } = fake.relinkAfterLane[taskId]!;
+      rmSync(path.join(session.workDir, file), { force: true });
+      symlinkSync(target, path.join(session.workDir, file));
+    }
     return { runId, status: 'done', summary: '완료', ...fake.run, ...(fake.terminalCostUsd !== undefined ? { costUsd: fake.terminalCostUsd } : {}) };
   },
 }));
@@ -518,6 +540,7 @@ beforeEach(() => {
   fake.relinkAfterLane = {};
   fake.linkFiles = {};
   delete process.env.B_STUDIO_TERMINAL;
+  delete process.env.B_STUDIO_EXPERIMENTAL;
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_TASK_PLANS_DIR = path.join(directory, 'plans');
   // 계약 수신은 기본 꺼짐이다. 켜는 테스트만 직접 세운다
@@ -628,16 +651,14 @@ describe('작업 분해 실행', () => {
     expect(plan.status).toBe('done');
     const laneA = plan.lanes.find((lane) => lane.tasks.length === 2)!;
     const laneB = plan.lanes.find((lane) => lane.tasks.length === 1)!;
-    const sendsA = fake.sends.filter((send) => send.sessionId === laneA.sessionId);
+    const sendsA = fake.terminalSends.filter((send) => send.sessionId === laneA.sessionId);
     expect(sendsA.map((send) => send.options.writableScope)).toEqual([['web/a'], ['web/a']]);
     expect(sendsA[1]!.request).toContain('같은 작업 공간에서 먼저 끝난 작업:\n- a1');
-    // 레인·통합 실행에는 실행 중 지시(steering)를 켜지 않는다(사람이 보는 단일 세션만)
-    expect(fake.sends.every((send) => send.options.steering === undefined)).toBe(true);
+    // 레인은 터미널에서 돌고 채팅식 실행(sendMessage)은 레인에서도 통합에서도 한 번도 불리지 않는다
+    expect(fake.sends).toEqual([]);
     expect(laneB.sessionId).not.toBe(laneA.sessionId);
 
     // 통합은 채팅식 실행(대본 턴)이 아니라 서버가 쓰는 길로 간다
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(false);
-    expect(fake.sends.some((send) => send.sessionId === plan.integration?.sessionId)).toBe(false);
     expect(fake.serverChanges).toHaveLength(1);
     const integration = fake.serverChanges[0]!;
     expect(integration.sessionId).toBe(plan.integration?.sessionId);
@@ -724,21 +745,6 @@ describe('작업 분해 실행', () => {
     expect(plan).toMatchObject({ status: 'failed', lanes: [] });
     expect(plan.error).toContain('쓰기 범위가 겹칩니다');
     expect(fake.sessions.size).toBe(0);
-  });
-
-  it('레인 작업이 요청과 확인의 어긋남을 알렸으면 작업은 done으로 이어 가고 그 작업에 어긋남을 남긴다 (#666)', async () => {
-    const mismatch = { requestValue: '200자', checkValue: '테스트는 100자', followed: 'check', note: '테스트를 따랐습니다' };
-    const saved = fake.run;
-    fake.run = { ...saved, mismatches: [mismatch] } as typeof saved;
-    try {
-      fake.plan = { tasks: [task('a1', ['web/a'])] };
-      fake.writes = { a1: { 'web/a/one.md': 'one' } };
-      const plan = await run({ projectId: 'orders', request: '메모 추가', modelId: 'model-a', owner: 'kim' });
-      expect(plan.status).toBe('done');
-      expect(plan.lanes[0]!.tasks[0]).toMatchObject({ status: 'done', mismatches: [mismatch] });
-    } finally {
-      fake.run = saved;
-    }
   });
 
   it('레인 하나가 실패하면 뒤 작업은 건너뛰고 통합하지 않는다', async () => {
@@ -876,67 +882,6 @@ describe('작업 분해 실행', () => {
     expect(saved.integration?.status).toBe('done');
   });
 
-  // integrationChecks는 통합 게이트에만 덧붙인다. 레인 세션에는 넘기지 않아 레인 게이트는 그대로다
-  it('integrationChecks는 통합 게이트에만 덧붙인다', async () => {
-    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
-    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
-    const pageChecks: WorkflowPageCheck[] = [
-      {
-        service: 'web',
-        path: '/orders',
-        mode: 'http',
-        expectStatus: 200,
-        expectFromApi: { service: 'api', path: '/api/orders', jsonPath: '$[0].customerName' },
-        allowConsoleErrors: false,
-        noHorizontalScroll: false,
-      },
-    ];
-
-    const plan = await run({ projectId: 'orders', request: '통합 확인', modelId: 'model-a', owner: 'kim', integrationChecks: { pageChecks } });
-
-    expect(plan.status).toBe('done');
-    // 세션은 레인 2개 + 통합 1개 순서로 만들어지고, 통합 세션에만 덧붙인다
-    expect(fake.sessionOptions).toHaveLength(3);
-    expect(fake.sessionOptions.slice(0, 2).every((options) => options.extraPageChecks === undefined)).toBe(true);
-    expect(fake.sessionOptions[2]!.extraPageChecks).toEqual(pageChecks);
-  });
-
-  // verify light는 레인·통합 실행에 그대로 넘긴다. S4 수리도 같은 verify로 돈다
-  it('verify light면 레인·통합·S4 수리 실행에 가볍게 확인을 넘긴다', async () => {
-    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
-    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
-    fake.integration = 'failed';
-
-    const plan = await run({
-      projectId: 'orders',
-      request: '가볍게 확인',
-      modelId: 'model-a',
-      owner: 'kim',
-      verify: 'light',
-      coordination: { strategy: 'S4' },
-    });
-
-    expect(plan.status).toBe('done');
-    // 계획이 기억해 레인·통합 실행이 같은 값을 쓴다
-    expect(plan.verify).toBe('light');
-    const laneSends = fake.sends.filter((send) => !send.options.scriptedTurns && !isRepair(send.request));
-    expect(laneSends.length).toBeGreaterThan(0);
-    expect(laneSends.every((send) => send.options.verify === 'light')).toBe(true);
-    // 통합 실행과 S4 수리도 같은 값을 받는다
-    expect(fake.sends.find((send) => send.options.scriptedTurns)!.options.verify).toBe('light');
-    expect(fake.sends.find((send) => isRepair(send.request))!.options.verify).toBe('light');
-  });
-
-  it('기본(full)은 verify를 넘기지 않는다(지금과 같다)', async () => {
-    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
-    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
-
-    const plan = await run({ projectId: 'orders', request: '전체 검증', modelId: 'model-a', owner: 'kim' });
-
-    expect(plan.verify).toBeUndefined();
-    expect(fake.sends.every((send) => send.options.verify === undefined)).toBe(true);
-  });
-
   it('고정 계획의 레인 backend·model로 레인 세션을 만들고, 레인 뷰에 남긴다', async () => {
     const lane = (id: string, paths: string[], backend: string, model?: string) => ({ ...task(id, paths), backend, ...(model ? { model } : {}) });
     fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' }, c: { 'web/c/one.md': 'c' } };
@@ -947,22 +892,21 @@ describe('작업 분해 실행', () => {
       modelId: 'model-a',
       owner: 'kim',
       presetPlan: {
-        tasks: [lane('a', ['web/a'], 'claude-code', 'sonnet'), lane('b', ['web/b'], 'commandcode'), lane('c', ['web/c'], 'opencode', 'opencode/mimo-v2.6-flash-free')],
+        tasks: [lane('a', ['web/a'], 'claude-code', 'sonnet'), lane('b', ['web/b'], 'codex'), lane('c', ['web/c'], 'codex', 'gpt-x')],
       },
     });
 
     expect(plan.status).toBe('done');
     // 레인 세션은 그 레인의 backend로 만들고, 모델을 고른 CLI 레인은 그 모델을 세션에 싣는다(modelId)
     expect(fake.sessionOptions.find((options) => options.backend === 'claude-code')?.modelId).toBe('sonnet');
-    expect(fake.sessionOptions.find((options) => options.backend === 'commandcode')?.modelId).toBeUndefined();
-    expect(fake.sessionOptions.find((options) => options.backend === 'opencode')?.modelId).toBe('opencode/mimo-v2.6-flash-free');
+    expect(fake.sessionOptions.filter((options) => options.backend === 'codex').map((options) => options.modelId)).toEqual([undefined, 'gpt-x']);
     // 통합 세션은 계획 기본(서버 모드)이라 backend가 없다
     expect(fake.sessionOptions[3]!.backend).toBeUndefined();
     // 레인 뷰에 backend·model이 남아 화면·서버 기록에서 볼 수 있다
     expect(plan.lanes.map((item) => [item.backend, item.model])).toEqual([
       ['claude-code', 'sonnet'],
-      ['commandcode', undefined],
-      ['opencode', 'opencode/mimo-v2.6-flash-free'],
+      ['codex', undefined],
+      ['codex', 'gpt-x'],
     ]);
   });
 
@@ -1034,39 +978,11 @@ describe('통합이 가는 길: 서버가 쓰고 터미널 판정으로 닫는�
     expect(plan.integration?.error).toContain('체크포인트로 남지 않았습니다');
   });
 
-  it('verify light는 옛 길(채팅식 대본 턴)을 탄다', async () => {
-    twoLanes();
-    const plan = await run({ projectId: 'orders', request: '가볍게', modelId: 'model-a', owner: 'kim', verify: 'light' });
-    expect(plan.status).toBe('done');
-    expect(fake.serverChanges).toEqual([]);
-    expect(fake.sends.find((send) => send.options.scriptedTurns)!.options.verify).toBe('light');
-  });
-
-  it('S4는 옛 길을 탄다(수리가 모델 호출이다)', async () => {
-    twoLanes();
-    const plan = await run({ projectId: 'orders', request: 'S4 통합', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
-    expect(plan.status).toBe('done');
-    expect(fake.serverChanges).toEqual([]);
-    expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(true);
-  });
-
-  it('컨테이너 방식은 옛 길을 탄다(통합 세션에는 검사 동안 멈출 에이전트 컨테이너가 없다)', async () => {
-    twoLanes();
-    process.env.B_STUDIO_TERMINAL = 'container';
-    try {
-      const plan = await run({ projectId: 'orders', request: '컨테이너 통합', modelId: 'model-a', owner: 'kim' });
-      expect(plan.status).toBe('done');
-      expect(fake.serverChanges).toEqual([]);
-      expect(fake.sends.some((send) => send.options.scriptedTurns)).toBe(true);
-    } finally {
-      delete process.env.B_STUDIO_TERMINAL;
-    }
-  });
 });
 
 describe('고정 계획(presetPlan)', () => {
-  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex·commandcode·opencode 모드 포함)', async () => {
-    for (const mode of ['claude-code', 'codex', 'commandcode', 'opencode']) {
+  it('presetPlan이 있으면 모델을 부르지 않고 검증해 승인을 기다린다 (claude-code·codex 모드 포함)', async () => {
+    for (const mode of ['claude-code', 'codex']) {
       process.env.B_STUDIO_MODE = mode;
       const created = await createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: mode, owner: 'kim', presetPlan: { tasks: [task('a1', ['web/a']), task('b', ['web/b'])] } });
       const waiting = await awaiting(created.id);
@@ -1085,6 +1001,18 @@ describe('고정 계획(presetPlan)', () => {
       expect(fake.sessions.size, mode).toBe(0);
     }
     expect(fake.modelCalls).toBe(0);
+  });
+
+  it('레인을 터미널로 띄울 수 없는 모드(opencode, 스위치 없는 commandcode)의 고정 계획은 채팅식으로 돌아가지 않고 400으로 거절한다', async () => {
+    for (const mode of ['commandcode', 'opencode']) {
+      process.env.B_STUDIO_MODE = mode;
+      await expect(
+        createTaskPlan({ projectId: 'orders', request: '고정 계획', modelId: mode, owner: 'kim', presetPlan: { tasks: [task('a1', ['web/a'])] } }),
+        mode,
+      ).rejects.toMatchObject({ status: 400, message: expect.stringContaining(`아직 터미널에서 띄우지 못하는 백엔드입니다: ${mode}`) });
+    }
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.sends).toEqual([]);
   });
 
   it('presetPlan도 승인 뒤 레인·통합이 그대로 돈다', async () => {
@@ -1123,12 +1051,8 @@ describe('고정 계획(presetPlan)', () => {
     ).rejects.toThrow('api, claude-code, codex, commandcode 또는 opencode');
   });
 
-  it('presetPlan이 규칙을 어기면 세션을 만들지 않고 실패한다', async () => {
-    const created = await createTaskPlan({ projectId: 'orders', request: '나쁜 계획', modelId: 'model-a', owner: 'kim', presetPlan: { tasks: [] } });
-    const plan = await awaiting(created.id);
-
-    expect(plan.status).toBe('failed');
-    expect(plan.error).toContain('작업 계획을 만들지 못했습니다');
+  it('presetPlan이 규칙을 어기면 계획도 세션도 만들지 않고 만들기 전에 400으로 거절한다', async () => {
+    await expect(createTaskPlan({ projectId: 'orders', request: '나쁜 계획', modelId: 'model-a', owner: 'kim', presetPlan: { tasks: [] } })).rejects.toMatchObject({ status: 400 });
     expect(fake.sessions.size).toBe(0);
   });
 
@@ -1444,8 +1368,8 @@ describe('레인 조율 전략', () => {
     expect(plan.coordination).toBeUndefined();
     expect(plan.board).toBeUndefined();
     expect(plan.metrics?.coordination).toBeUndefined();
-    expect(fake.sends.every((send) => send.options.board === undefined)).toBe(true);
-    expect(fake.sends.some((send) => send.request.includes('[조율]'))).toBe(false);
+    expect(laneBoardSends()).toEqual([]);
+    expect(fake.terminalSends.some((send) => send.request.includes('[조율]'))).toBe(false);
   });
 
   it('S2는 계약을 레인 시작 전에 플랫폼이 게시하고, 레인은 읽기만 한다', async () => {
@@ -1470,10 +1394,10 @@ describe('레인 조율 전략', () => {
     const plan = await finished(created.id);
 
     expect(plan.status).toBe('done');
-    const laneSends = fake.sends.filter((send) => send.options.board);
+    const laneSends = laneBoardSends();
     expect(laneSends).toHaveLength(2);
     // S2는 레인 읽기 전용이라 모델 쓰기가 꺼져 있다
-    expect(laneSends.every((send) => send.options.board!.modelWrites === false)).toBe(true);
+    expect(laneSends.every((send) => send.board.modelWrites === false)).toBe(true);
     expect(laneSends.every((send) => send.request.includes('[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요'))).toBe(true);
     expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S2', topology: 'mesh', posts: 1 });
   });
@@ -1492,9 +1416,9 @@ describe('레인 조율 전략', () => {
 
     expect(plan.status).toBe('done');
     expect(plan.coordination).toEqual({ strategy: 'S3', topology: 'star' });
-    const laneSends = fake.sends.filter((send) => send.options.board);
+    const laneSends = laneBoardSends();
     expect(laneSends).toHaveLength(2);
-    expect(laneSends.every((send) => send.options.board!.modelWrites === true)).toBe(true);
+    expect(laneSends.every((send) => send.board.modelWrites === true)).toBe(true);
     expect(laneSends[0]!.request).toContain('post_note(contract)');
     expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S3', topology: 'star' });
   });
@@ -1506,7 +1430,7 @@ describe('레인 조율 전략', () => {
     const plan = await run({ projectId: 'orders', request: 'S3 안내 순서', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S3' } });
 
     expect(plan.status).toBe('done');
-    const laneSend = fake.sends.find((send) => send.options.board)!;
+    const laneSend = laneBoardSends()[0]!;
     expect(laneSend.request).toContain('read_notes보다 먼저 post_note(contract)로 게시하세요');
   });
 
@@ -1524,9 +1448,9 @@ describe('레인 조율 전략', () => {
     expect(plan.status).toBe('done');
 
     // 레인에 실제로 넘긴 게시판 래퍼로 각 레인의 read_notes를 흉내 낸다(시크릿 가림 테스트와 같은 방식)
-    const laneSends = fake.sends.filter((send) => send.options.board);
-    const lane1 = laneSends.find((send) => send.options.board!.lane === 'lane-1')!.options.board!;
-    const lane2 = laneSends.find((send) => send.options.board!.lane === 'lane-2')!.options.board!;
+    const laneSends = laneBoardSends();
+    const lane1 = laneSends.find((send) => send.board.lane === 'lane-1')!.board;
+    const lane2 = laneSends.find((send) => send.board.lane === 'lane-2')!.board;
 
     // lane-2가 아직 아무 계약도 안 냈으면 lane-1의 읽기에 안내가 붙는다
     const before = lane1.read({});
@@ -1553,9 +1477,9 @@ describe('레인 조율 전략', () => {
     });
     expect(plan.status).toBe('done');
 
-    const laneSends = fake.sends.filter((send) => send.options.board);
-    const lane1 = laneSends.find((send) => send.options.board!.lane === 'lane-1')!.options.board!;
-    const lane2 = laneSends.find((send) => send.options.board!.lane === 'lane-2')!.options.board!;
+    const laneSends = laneBoardSends();
+    const lane1 = laneSends.find((send) => send.board.lane === 'lane-1')!.board;
+    const lane2 = laneSends.find((send) => send.board.lane === 'lane-2')!.board;
 
     // lane-2가 계약을 내도 star에서는 lane-1이 그 메모를 직접 읽지 못한다(topology가 가린다)
     lane2.post({ kind: 'contract', body: 'GET /orders', refs: ['api/Orders.java'] });
@@ -1579,7 +1503,7 @@ describe('레인 조율 전략', () => {
     });
     expect(plan.status).toBe('done');
 
-    const laneSend = fake.sends.find((send) => send.options.board)!.options.board!;
+    const laneSend = laneBoardSends()[0]!.board;
     expect(laneSend.read({}).notice).toBeUndefined();
   });
 
@@ -1590,7 +1514,7 @@ describe('레인 조율 전략', () => {
     const plan = await run({ projectId: 'orders', request: 'S5 안내 없음', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S5' } });
 
     expect(plan.status).toBe('done');
-    const laneSend = fake.sends.find((send) => send.options.board)!.options.board!;
+    const laneSend = laneBoardSends()[0]!.board;
     expect(laneSend.read({}).notice).toBeUndefined();
   });
 
@@ -1613,41 +1537,10 @@ describe('레인 조율 전략', () => {
     expect(failures[0]!.body).toContain('[run web]');
     expect(failures[0]!.body).toContain('cannot find symbol at line N');
 
-    const laneSend = fake.sends.find((send) => send.options.board)!;
-    expect(laneSend.options.board!.modelWrites).toBe(false);
+    const laneSend = laneBoardSends()[0]!;
+    expect(laneSend.board.modelWrites).toBe(false);
     expect(laneSend.request).toContain('[조율] 시작 전에 read_notes로 다른 레인의 검증 실패를 확인하세요');
     expect(plan.metrics?.coordination).toMatchObject({ strategy: 'S5', byKind: { failure: 1 } });
-  });
-
-  it('S4는 통합 게이트가 실패하면 한 번만 모델 수리를 요청하고, 레인에는 게시판을 넘기지 않는다', async () => {
-    fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
-    fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
-    fake.integration = 'failed';
-
-    const plan = await run({ projectId: 'orders', request: 'S4 수리', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
-
-    expect(plan.status).toBe('done');
-    const repairs = fake.sends.filter((send) => isRepair(send.request));
-    expect(repairs).toHaveLength(1);
-    // 수리 요청은 스크립트 턴이 아니라 세션의 기본 모델 경로로 보낸다
-    expect(repairs[0]!.options.scriptedTurns).toBeUndefined();
-    expect(repairs[0]!.options.writableScope).toEqual(['web/a', 'web/b']);
-    expect(repairs[0]!.request).toContain('검증이 실패했습니다');
-    expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'done' });
-    expect(fake.sends.filter((send) => send.options.board)).toHaveLength(0);
-  });
-
-  it('S4의 수리도 실패하면 통합이 실패한다', async () => {
-    fake.plan = { tasks: [task('a', ['web/a'])] };
-    fake.writes = { a: { 'web/a/one.md': 'one' } };
-    fake.integration = 'failed';
-    fake.repair = 'failed';
-
-    const plan = await run({ projectId: 'orders', request: 'S4 수리 실패', modelId: 'model-a', owner: 'kim', coordination: { strategy: 'S4' } });
-
-    expect(plan.status).toBe('failed');
-    expect(plan.integration?.repair).toMatchObject({ attempted: true, status: 'failed' });
-    expect(fake.sends.filter((send) => isRepair(send.request))).toHaveLength(1);
   });
 
   it('S3에서 모델이 시크릿 값을 담아 게시하면 기록·화면에 남기 전에 가린다', async () => {
@@ -1665,7 +1558,7 @@ describe('레인 조율 전략', () => {
       expect(plan.status).toBe('done');
 
       // 레인에 실제로 넘긴 게시판 래퍼로 모델의 post_note를 흉내 낸다
-      const board = fake.sends.find((send) => send.options.board)!.options.board!;
+      const board = laneBoardSends()[0]!.board;
       const posted = board.post({ kind: 'fact', body: `배포 키는 ${secret} 입니다`, refs: [`config/${secret}.env`] });
       expect(posted.ok).toBe(true);
 
@@ -1726,10 +1619,10 @@ describe('레인 사이 계약 (B_STUDIO_PLAN_CONTRACTS)', () => {
     const plan = await finished(created.id);
 
     expect(plan.status).toBe('done');
-    const laneSends = fake.sends.filter((send) => send.options.board);
+    const laneSends = laneBoardSends();
     expect(laneSends).toHaveLength(2);
     // S2는 레인 읽기 전용이다(계약을 읽고 자기 몫만 만든다)
-    expect(laneSends.every((send) => send.options.board!.modelWrites === false)).toBe(true);
+    expect(laneSends.every((send) => send.board.modelWrites === false)).toBe(true);
     expect(laneSends.every((send) => send.request.includes('[조율] 시작 전에 read_notes로 공유된 계약을 확인하세요'))).toBe(true);
     // 계약 호출의 usage·시간을 따로 남기고, 호출 수·토큰 합계에도 넣는다(계획 1 + 계약 1 + 레인 2×2)
     expect(plan.metrics?.contracts).toEqual({
@@ -1761,7 +1654,7 @@ describe('레인 사이 계약 (B_STUDIO_PLAN_CONTRACTS)', () => {
     // 계약이 없으므로 S2 게시판도 붙지 않고, 레인은 조율 없이 그대로 돈다
     expect(plan.coordination).toBeUndefined();
     expect(plan.board).toBeUndefined();
-    expect(fake.sends.filter((send) => send.options.board)).toHaveLength(0);
+    expect(laneBoardSends()).toHaveLength(0);
   });
 
   it('레인이 하나면 계약을 받지 않는다', async () => {
@@ -1835,7 +1728,7 @@ describe('레인 사이 계약 (B_STUDIO_PLAN_CONTRACTS)', () => {
 function writePlan(plan: Pick<TaskPlanView, 'id' | 'owner' | 'lanes'> & Partial<TaskPlanView>): void {
   const file = path.join(process.env.B_STUDIO_TASK_PLANS_DIR!, `${plan.id}.json`);
   mkdirSync(path.dirname(file), { recursive: true });
-  writeFileSync(file, JSON.stringify({ projectId: 'orders', request: '재시작', modelId: 'model-a', status: 'running', createdAt: new Date().toISOString(), ...plan }));
+  writeFileSync(file, JSON.stringify({ projectId: 'orders', request: '재시작', modelId: 'model-a', status: 'running', runner: 'terminal', createdAt: new Date().toISOString(), ...plan }));
 }
 
 function laneView(
@@ -2029,26 +1922,30 @@ describe('로컬 Claude Code로 계획 받기', () => {
     expect(fake.claudeCodeAsks[0]?.model).toBeUndefined();
   });
 
-  it('세션에서 이어받은 모델·노력 단계를 계획 호출과 레인·통합 세션에 그대로 넘긴다', async () => {
+  it('세션에서 이어받은 모델을 계획 호출과 레인·통합 세션에 그대로 넘긴다(노력 단계는 터미널 레인이 CLI에 넘기지 못해 받지 않는다)', async () => {
     process.env.B_STUDIO_MODE = 'claude-code';
     // 서버 기본 환경 변수는 다른 모델을 가리키지만, 넘긴 modelId가 이긴다(세션에서 이어받은 값이 우선이어야 한다)
     process.env.B_STUDIO_CLAUDE_CODE_MODEL = 'haiku';
     fake.plan = { tasks: [task('a', ['web/a'])] };
     fake.writes = { a: { 'web/a/one.md': 'one' } };
 
-    const plan = await run({ projectId: 'orders', request: '세션 모델 이어받기', owner: 'kim', modelId: 'sonnet', effort: 'medium' });
+    // 노력 단계가 오면 조용히 빠뜨리지 않고 만들기 전에 거절한다
+    await expect(createTaskPlan({ projectId: 'orders', request: '세션 모델 이어받기', owner: 'kim', modelId: 'sonnet', effort: 'medium' })).rejects.toMatchObject({ status: 400 });
+    expect(fake.sessions.size).toBe(0);
+
+    const plan = await run({ projectId: 'orders', request: '세션 모델 이어받기', owner: 'kim', modelId: 'sonnet' });
 
     expect(plan.status).toBe('done');
-    // 기록에는 접두어가 붙지만(local-cli:sonnet), 계획 호출에는 별칭과 노력 단계를 그대로 넘긴다
+    // 기록에는 접두어가 붙지만(local-cli:sonnet), 계획 호출에는 별칭을 그대로 넘긴다
     expect(plan.modelId).toBe('local-cli:sonnet');
-    expect(plan.effort).toBe('medium');
-    expect(fake.claudeCodeAsks[0]).toMatchObject({ model: 'sonnet', effort: 'medium' });
-    // 레인·통합 세션에는 기록용 접두어(local-cli:)를 뗀 실제 별칭만 넘긴다 — 접두어가 그대로 가면 세션이 서버 기본으로 떨어진다(버그였다)
-    expect(fake.sessionOptions.length).toBeGreaterThan(0);
-    for (const options of fake.sessionOptions) {
-      expect(options.modelId).toBe('sonnet');
-      expect(options.effort).toBe('medium');
-    }
+    expect(plan.effort).toBeUndefined();
+    expect(fake.claudeCodeAsks[0]).toMatchObject({ model: 'sonnet' });
+    // 레인 세션에는 기록용 접두어(local-cli:)를 뗀 실제 별칭만 넘긴다 — 접두어가 그대로 가면 세션이 서버 기본으로 떨어진다(버그였다).
+    // 통합은 모델을 부르지 않는 서버 길이라 통합 세션에는 모델 옵션이 없다
+    expect(fake.sessionOptions).toHaveLength(2);
+    expect(fake.sessionOptions[0]!.modelId).toBe('sonnet');
+    expect(fake.sessionOptions[0]!.effort).toBeUndefined();
+    expect(fake.sessionOptions[1]!.modelId).toBeUndefined();
   });
 
   it('세션에서 "기본"을 이어받으면(빈 문자열) 레인·통합 세션에 모델을 강제하지 않는다', async () => {
@@ -2139,7 +2036,7 @@ describe('deleteTaskPlan', () => {
 });
 
 describe('레인 백엔드 고르기 (이슈 #398)', () => {
-  it('승인 대기 중에 레인마다 다른 백엔드·모델·노력을 고르면 그 레인 세션만 그 백엔드로 뜨고 통합은 그대로 간다', async () => {
+  it('승인 대기 중에 레인마다 다른 백엔드·모델을 고르면 그 레인 세션만 그 백엔드로 뜨고 통합은 그대로 간다', async () => {
     fake.plan = { tasks: [task('a', ['web/a']), task('b', ['web/b'])] };
     fake.writes = { a: { 'web/a/one.md': 'one' }, b: { 'web/b/one.md': 'b' } };
 
@@ -2150,23 +2047,23 @@ describe('레인 백엔드 고르기 (이슈 #398)', () => {
     // 모델이 만든 계획은 승인 전까지 레인에 backend가 없다(세션과 같음 — 상속, 지금까지의 동작)
     expect(waiting.lanes.every((lane) => lane.backend === undefined)).toBe(true);
 
-    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet', effort: 'high' });
-    setLaneBackend(created.id, 'kim', 'lane-2', { backend: 'commandcode' });
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet' });
+    setLaneBackend(created.id, 'kim', 'lane-2', { backend: 'codex' });
 
     approveTaskPlan(created.id, 'kim');
     const plan = await finished(created.id);
 
     expect(plan.status).toBe('done');
-    // 레인 뷰에 고른 backend·model·effort가 남는다(화면·토큰 보고서가 이 값을 그대로 보여준다)
+    // 레인 뷰에 고른 backend·model이 남는다(화면·토큰 보고서가 이 값을 그대로 보여준다). 노력 단계는 터미널 레인이 CLI에 넘기지 못해 없다
     expect(plan.lanes.map((lane) => [lane.id, lane.backend, lane.model, lane.effort])).toEqual([
-      ['lane-1', 'claude-code', 'sonnet', 'high'],
-      ['lane-2', 'commandcode', undefined, undefined],
+      ['lane-1', 'claude-code', 'sonnet', undefined],
+      ['lane-2', 'codex', undefined, undefined],
     ]);
-    // 레인 세션은 그 레인의 backend·model·effort로 떴다
+    // 레인 세션은 그 레인의 backend·model로 떴다
     const laneA = fake.sessionOptions.find((options) => options.backend === 'claude-code');
     expect(laneA?.modelId).toBe('sonnet');
-    expect(laneA?.effort).toBe('high');
-    expect(fake.sessionOptions.find((options) => options.backend === 'commandcode')).toBeDefined();
+    expect(laneA?.effort).toBeUndefined();
+    expect(fake.sessionOptions.find((options) => options.backend === 'codex')).toBeDefined();
     // 통합 세션은 계획 기본(서버 모드)이라 backend가 없다 — 레인 2개 + 통합 1개, 통합이 마지막
     expect(fake.sessionOptions).toHaveLength(3);
     expect(fake.sessionOptions[2]!.backend).toBeUndefined();
@@ -2225,12 +2122,12 @@ describe('레인 백엔드 고르기 (이슈 #398)', () => {
     expect(plan.lanes[0]!.effort).toBeUndefined();
   });
 
-  it('backend를 비우면(세션과 같음) 레인·작업의 backend·model·effort를 모두 지운다', async () => {
+  it('backend를 비우면(세션과 같음) 레인·작업의 backend·model을 지운다', async () => {
     fake.plan = { tasks: [task('a', ['web/a'])] };
     const created = await createTaskPlan({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
     await awaiting(created.id);
 
-    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet', effort: 'high' });
+    setLaneBackend(created.id, 'kim', 'lane-1', { backend: 'claude-code', model: 'sonnet' });
     const reverted = setLaneBackend(created.id, 'kim', 'lane-1', { backend: '' });
 
     expect(reverted.lanes[0]).toMatchObject({ backend: undefined, model: undefined, effort: undefined });
@@ -2723,19 +2620,86 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
     expect(fake.sessionOptions[0]).toMatchObject({ backend: 'codex', modelId: 'gpt-x' });
   });
 
-  it('runner를 주지 않으면 지금 그대로다(채팅 방식, plan.runner 없음)', async () => {
+  it('runner를 주지 않으면 terminal이다: 채팅 레인으로 돌지 않고 터미널 레인으로 돈다', async () => {
     twoLanes();
     const plan = await run({ projectId: 'orders', request: '요청', modelId: 'model-a', owner: 'kim' });
-    expect(plan.runner).toBeUndefined();
-    expect(fake.terminalSends).toEqual([]);
-    expect(fake.sends.some((send) => plan.lanes.some((lane) => lane.sessionId === send.sessionId))).toBe(true);
+    expect(plan.status).toBe('done');
+    expect(plan.runner).toBe('terminal');
+    expect(fake.terminalSends).toHaveLength(2);
+    // 채팅 sendMessage는 레인에서도 통합에서도 한 번도 불리지 않는다
+    expect(fake.sends).toEqual([]);
   });
 
-  it('모르는 runner 값과 cards + runner chat은 400이다', async () => {
+  it('runner: chat은 모델·고정·카드 계획 모두 세션도 계획도 만들기 전에 400이고, 모르는 runner 값도 400이다', async () => {
     process.env.B_STUDIO_MODE = 'claude-code';
-    expect((await statusOfError({ ...base, runner: 'pty' as never })).status).toBe(400);
-    expect((await statusOfError({ projectId: 'orders', owner: 'kim', runner: 'chat', cards: [{ title: 'a', request: 'a', paths: ['web/a'] }] })).status).toBe(400);
+    for (const input of [
+      { ...base, runner: 'chat' as never },
+      { ...base, runner: 'chat' as never, modelId: 'x', presetPlan: { tasks: [task('a', ['web/a'])] } },
+      { projectId: 'orders', owner: 'kim', runner: 'chat' as never, cards: [{ title: 'a', request: 'a', paths: ['web/a'] }] },
+      { ...base, runner: 'pty' as never },
+    ]) {
+      expect((await statusOfError(input)).status).toBe(400);
+    }
     nothingCreated();
+    expect(fake.sends).toEqual([]);
+  });
+
+  it('카드 계획도 가볍게 확인(verify: light)과 조율 S4는 400이다: 통합이 채팅식 실행으로 돌아가지 않는다', async () => {
+    const cards = [{ title: 'a', request: 'a', paths: ['web/a'] }];
+    const withLight = await statusOfError({ projectId: 'orders', owner: 'kim', cards, verify: 'light' });
+    expect(withLight.status).toBe(400);
+    expect(withLight.message).toContain('light');
+    const withS4 = await statusOfError({ projectId: 'orders', owner: 'kim', cards, coordination: { strategy: 'S4' } });
+    expect(withS4.status).toBe(400);
+    expect(withS4.message).toContain('S4');
+    nothingCreated();
+  });
+
+  it('컨테이너 방식 터미널은 레인 결과를 합치는 통합을 아직 못 해서(채팅식 통합으로 돌아가지 않는다) 계획을 만들기 전에 409로 거절한다', async () => {
+    process.env.B_STUDIO_MODE = 'claude-code';
+    process.env.B_STUDIO_TERMINAL = 'container';
+    process.env.B_STUDIO_EXPERIMENTAL = '1';
+    try {
+      twoLanes();
+      for (const input of [{ ...base, modelId: 'sonnet' }, { projectId: 'orders', owner: 'kim', cards: [{ title: 'a', request: 'a', paths: ['web/a'] }] }]) {
+        const error = await statusOfError(input);
+        expect(error.status).toBe(409);
+        expect(error.message).toContain('컨테이너');
+      }
+      nothingCreated();
+    } finally {
+      delete process.env.B_STUDIO_EXPERIMENTAL;
+    }
+  });
+
+  it('옛 채팅식 계획(runner 없음)은 재시작 뒤 승인 대기였어도 실행하지 않고 닫는다. 승인도 거절한다', async () => {
+    writePlan({ id: 'plan-chat-old', owner: 'kim', status: 'awaiting_approval', runner: undefined, lanes: [laneView('lane-1', 'queued')] });
+    const reloaded = await restart();
+    const plan = reloaded.getTaskPlan('plan-chat-old', 'kim');
+    expect(plan.status).toBe('failed');
+    expect(plan.error).toContain('채팅식');
+    expect(resumeStatus(() => reloaded.approveTaskPlan('plan-chat-old', 'kim'))).toBe(409);
+    expect(fake.sessions.size).toBe(0);
+    expect(fake.sends).toEqual([]);
+  });
+
+  it('옛 계획이 가볍게 확인·S4·컨테이너 방식이었으면 재시작 뒤 통합을 다시 해도 채팅식 통합으로 가지 않고 까닭을 적어 실패로 닫는다', async () => {
+    const laneA = path.join(fake.root, 'lane-a');
+    mkdirSync(path.join(laneA, 'web/a'), { recursive: true });
+    writeFileSync(path.join(laneA, 'web/a/one.md'), 'one');
+    writePlan({
+      id: 'plan-old-light',
+      owner: 'kim',
+      verify: 'light',
+      lanes: [laneView('lane-1', 'done', { sessionId: 'session-lane-1', workDir: laneA, changedFiles: ['web/a/one.md'], paths: ['web/a'] })],
+    });
+    const { getTaskPlan: reloaded, resumeTaskPlan } = await restart();
+    resumeTaskPlan('plan-old-light', 'kim');
+    const plan = await settled(() => reloaded('plan-old-light', 'kim'));
+    expect(plan.status).toBe('failed');
+    expect(plan.integration?.error).toContain('light');
+    expect(fake.sends).toEqual([]);
+    expect(fake.serverChanges).toEqual([]);
   });
 
   it('세션 터미널을 쓸 수 없으면 409이고 만들지 않는다', async () => {
@@ -2930,21 +2894,6 @@ describe('모델·고정 계획을 터미널에서 돌린다(#1337)', () => {
       expect(plan.status).toBe('failed');
       expect(fake.terminalSends).toEqual([]);
       expect(fake.openedWith).toEqual({});
-    });
-
-    it('카드 계획(만들기 검사를 거치지 않는다)에 S4가 와도 게시판 도구를 붙이지 않는다', async () => {
-      fake.writes = { 'card-1': { 'web/a/one.md': 'one' } };
-      const created = await createTaskPlan({
-        projectId: 'orders',
-        request: '카드 S4',
-        owner: 'kim',
-        coordination: { strategy: 'S4' },
-        cards: [{ title: 'card-1', request: '[id:card-1] card-1 작업', paths: ['web/a'] }],
-      });
-      await finished(created.id);
-      expect(fake.terminalBoards.size).toBe(0);
-      expect(Object.values(fake.openedWith).every((names) => names.length === 0)).toBe(true);
-      expect(fake.terminalSends.length).toBeGreaterThan(0);
     });
 
     it('계약 설정이 켜지면 터미널 계획도 계약을 받아 S2 게시판으로 레인에 붙는다', async () => {

@@ -20,7 +20,7 @@ vi.mock('@/lib/server/local-token', () => ({
 
 import { POST } from './route';
 
-function post(body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+function post(body: unknown, headers: Record<string, string> = LOCAL): Promise<Response> {
   return POST(
     new Request('http://localhost/api/task-plans', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }),
   );
@@ -112,27 +112,29 @@ describe('POST /api/task-plans', () => {
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
   });
 
-  it('runner(chat·terminal)를 그대로 넘기고, 다른 값은 400으로 거절한다', async () => {
+  it('runner는 문자열이면 그대로 넘기고(chat·모르는 값은 createTaskPlan이 만들기 전에 거절한다), 문자열이 아니면 400으로 거절한다', async () => {
     const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal' }, LOCAL);
     expect(response.status).toBe(201);
     expect(mocks.createTaskPlan).toHaveBeenCalledWith({ projectId: 'orders', request: '요청', owner: 'kim', runner: 'terminal' });
 
     mocks.createTaskPlan.mockClear();
-    for (const runner of ['pty', 3, null]) {
+    for (const runner of [3, null, ['terminal']]) {
       const wrong = await post({ projectId: 'orders', request: '요청', runner }, LOCAL);
       expect(wrong.status, JSON.stringify(runner)).toBe(400);
     }
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
   });
 
-  it('터미널 방식 계획은 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다', async () => {
+  it('작업 분해는 세션 터미널 통로와 같은 조건(이 컴퓨터 주소·로컬 토큰)을 갖춘 요청만 받는다', async () => {
     const refused: Record<string, string>[] = [{}, { host: '127.0.0.1:3000' }, { host: '127.0.0.1:3000', cookie: 'b_studio_local=wrong' }, { host: 'evil.example:3000', cookie: LOCAL.cookie }];
     for (const headers of refused) {
       const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal' }, headers);
       expect(response.status, JSON.stringify(headers)).toBe(403);
     }
     expect(mocks.createTaskPlan).not.toHaveBeenCalled();
-    // 채팅 방식은 지금처럼 로그인만 본다
+    // runner를 빼도 같다: 레인은 늘 세션 터미널에서 돌므로 로그인만으로는 열지 못한다
+    expect((await post({ projectId: 'orders', request: '요청' }, {})).status).toBe(403);
+    // chat은 접근 검사를 거친 뒤 createTaskPlan이 거절한다(여기서는 createTaskPlan을 가짜로 바꿨으므로 넘어간다)
     expect((await post({ projectId: 'orders', request: '요청', runner: 'chat' })).status).toBe(201);
   });
 });
