@@ -5685,6 +5685,13 @@ export interface PersistedRequirementsExtractionDraft extends RequirementsExtrac
   recommendationSource?: 'web' | 'model';
 }
 
+const TERMINAL_DRAFT_FILE = path.join('.git', 'b-studio', 'terminal-draft.json');
+
+/** 터미널 CLI 입력창에 쓰다 만 글의 저장 파일(ADR-237). 세션 상태 폴더 안이라 세션을 지우면 같이 지워진다 */
+function terminalDraftFile(session: Session): string {
+  return path.join(stateDirOf(session.snapshot), TERMINAL_DRAFT_FILE);
+}
+
 function requirementsDraftFile(session: Session): string {
   return path.join(stateDirOf(session.snapshot), REQUIREMENTS_DRAFT_FILE);
 }
@@ -7479,6 +7486,7 @@ export function sessionTerminalTarget(id: string): {
   resumeConversation: () => string | undefined;
   accountDir: () => Promise<string | undefined>;
   model?: string;
+  draftFile?: string;
   selfAgent?: () => Promise<{ profile: Record<string, unknown>; apiKey?: string }>;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
@@ -7524,6 +7532,8 @@ export function sessionTerminalTarget(id: string): {
     accountDir: async () => (await sessionAccount(session.snapshot)).configDir,
     ...terminalModel(session),
     ...(selfAgentTerminal(session) ? { selfAgent: () => selfAgentModel(session) } : {}),
+    // 입력창에 쓰다 만 글을 저장·복원한다(ADR-237). 입력창 모양을 확인한 claude만. 자체 CLI·codex는 모양을 확인하지 못해 읽지 않는다
+    ...(terminalCliKind(session) === 'claude' && !selfAgentTerminal(session) ? { draftFile: terminalDraftFile(session) } : {}),
   };
 }
 
@@ -10127,7 +10137,8 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     prompt: (input) => {
       // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
-      noteSessionTerminalCli(id, true);
+      // 요청을 보냈으니 desk에 보이던 "쓰다 만 글"은 넘어갔다(promptSubmitted)
+      noteSessionTerminalCli(id, true, { promptSubmitted: true });
       return terminalPromptSubmitted(id, input);
     },
     preTool: (input) => terminalToolStarting(id, input),

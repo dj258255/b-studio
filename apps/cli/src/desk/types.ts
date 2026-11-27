@@ -27,7 +27,7 @@ export interface DeskItem {
    * 터미널 세션일 때: CLI가 떠 있는가, 무엇을 기다리는가(권한·질문·입력 필요·쉬며 기다림), 그 까닭 한 줄(#920).
    * 옛 서버는 권한만 준다
    */
-  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' | 'question' | 'input' | 'idle'; message?: string };
+  terminal?: { cli: 'up' | 'down'; waiting?: 'permission' | 'question' | 'input' | 'idle'; message?: string; draft?: string };
   /** 게이트: 지금 검증 중인가, 마지막 판정, 체크포인트 수 */
   gate?: { state: 'verifying' | 'passed' | 'failed' | 'none'; checkpoints: number };
   /** 세션 누적 비용(달러) */

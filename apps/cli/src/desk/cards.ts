@@ -201,6 +201,10 @@ export function nowLine(item: DeskItem, width: number, theme: Theme, now: number
   if (head.tone === 'fail' || head.label === '확인 필요') {
     return compose([{ text: '› ', color: statusColor(head) }, { text: item.reason ? oneLine(item.reason) : '세션 자세히(i)에서 까닭을 봅니다', color: statusColor(head), flex: true }], width, theme);
   }
+  // 입력창에 되살리지 못한 글이 있으면 알린다. 전체 글은 세션 자세히에서 복사한다
+  if (item.terminal?.draft && item.state !== 'working') {
+    return compose([{ text: '› ', color: 'yellow' }, { text: `쓰다 만 글: ${oneLine(item.terminal.draft)}`, flex: true }, SEP, { text: 'i → C 복사', color: 'muted' }], width, theme);
+  }
   if (item.state === 'booting') return bootingLine(item, width, theme, now);
   const quiet = lastSignal(item);
   const stale = isStale(item, now);
