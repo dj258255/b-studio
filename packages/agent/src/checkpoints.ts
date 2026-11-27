@@ -1308,6 +1308,70 @@ export class CheckpointStore {
   }
 
   /**
+   * 진짜 인덱스에 `skip-worktree`·`assume-unchanged` 표시가 걸린 경로의 변경이 있으면 던진다(이슈 #1444, ADR-236). 막는 검사다(거부 목록): 확인하지 못하면 통과가 아니다.
+   * 표시가 걸린 경로는 `git status`·`git add -A`가 작업 폴더를 읽지 않아, 에이전트가 표시를 건 뒤 고치거나 지운 파일을
+   * 바뀐 파일 목록(게이트·보호 경로 확인)과 체크포인트가 함께 놓친다. 변경을 "바뀐 것"으로 끼워 넣으려면 사용자의 인덱스를 고쳐야 하므로(이 컴퓨터 방식에서는 사용자 저장소다),
+   * 대신 "확인하지 못함"으로 막는다. 인덱스·작업 트리는 건드리지 않는다.
+   *
+   * 표시가 걸린 경로마다 둘 다 HEAD와 같아야 한다.
+   * - **진짜 인덱스 항목**(`diff-index --cached HEAD`): 체크포인트 커밋은 진짜 인덱스의 blob을 쓴다. 고친 내용을 `git add`하고 표시를 건 뒤 작업 폴더만 되돌리면 작업 폴더만 보는 비교는 놓친다.
+   * - **작업 폴더**: HEAD에서 `read-tree`로 새로 만든 임시 인덱스(표시·stat 캐시가 없다)에 `add -A`를 해 `diff --cached`로 견준다(pendingTestChanges와 같은 방식). 없는 파일은 지운 것이다.
+   *
+   * sparse-checkout의 예외는 두지 않는다. `core.sparseCheckout`은 에이전트가 셸에서 켤 수 있는 설정이고, 세션 시작 때의 값을 믿을 수 있게 남겨 둘 자리(저장소 밖)가 지금 구조에 없다.
+   * 그래서 sparse-checkout으로 작업 폴더에서 빠진 skip-worktree 파일이 있는 저장소는 체크포인트·바뀐 파일 목록이 모두 "확인하지 못함"이 된다(ADR-236).
+   * 이 검사와 커밋 사이의 시점 차이는 Rust 커밋이 add 뒤에 같은 검사를 다시 해 닫는다.
+   */
+  async #assertNoHiddenIndexChanges(): Promise<void> {
+    const listing = await this.#git(['ls-files', '-v', '-z', ...(await this.#scope())]);
+    // 태그: `H`는 보통, `S`는 skip-worktree, 소문자는 assume-unchanged(`s`는 둘 다). 그 밖의 태그(M·R·C·K·?)는 표시가 아니다
+    const flagged: string[] = [];
+    for (const record of listing.split('\0')) {
+      if (record.length < 3) continue;
+      const tag = record[0]!;
+      if (tag === 'S' || (tag >= 'a' && tag <= 'z')) flagged.push(record.slice(2));
+    }
+    if (flagged.length === 0) return;
+    const hidden = new Set<string>();
+    // 경로를 패턴으로 읽지 않는다
+    const literal = { GIT_LITERAL_PATHSPECS: '1' };
+    for (let index = 0; index < flagged.length; index += 200) {
+      const chunk = flagged.slice(index, index + 200);
+      for (const file of (await this.#git(['diff-index', '--cached', '--name-only', '-z', 'HEAD', '--', ...chunk], { env: literal })).split('\0')) if (file !== '') hidden.add(file);
+    }
+    const present: string[] = [];
+    for (const file of flagged) {
+      // lstat이 없다는 답(ENOENT·ENOTDIR)만 "없음"이다. 그 밖의 오류는 읽지 못한 것이므로 있는 것으로 두어 아래 비교가 던지게 한다
+      const exists = await lstat(path.join(this.root, file)).then(() => true, (error: NodeJS.ErrnoException) => error.code !== 'ENOENT' && error.code !== 'ENOTDIR');
+      if (exists) present.push(file);
+      else hidden.add(file);
+    }
+    if (present.length > 0) {
+      const scratch = await mkdtemp(path.join(tmpdir(), 'b-studio-index-flag-'));
+      try {
+        const objects = path.join(scratch, 'objects');
+        await mkdir(objects);
+        const realObjects = path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', 'objects'])).trim());
+        const env = { GIT_INDEX_FILE: path.join(scratch, 'index'), GIT_LITERAL_PATHSPECS: '1', GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: realObjects };
+        await this.#assertSafeLocalGit();
+        await this.#git(['read-tree', 'HEAD'], { env });
+        for (let index = 0; index < present.length; index += 200) {
+          const chunk = present.slice(index, index + 200);
+          await this.#git(['add', '-A', '--', ...chunk], { env });
+          for (const file of (await this.#git(['diff', '--cached', '--name-only', '-z', 'HEAD', '--', ...chunk], { env })).split('\0')) if (file !== '') hidden.add(file);
+        }
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
+    }
+    if (hidden.size > 0) {
+      const shown = [...hidden].sort().slice(0, 5).join(', ');
+      throw new CheckpointError(
+        `인덱스 표시(skip-worktree·assume-unchanged)가 걸린 파일이 HEAD와 달라 변경을 끝까지 확인하지 못합니다(${shown}${hidden.size > 5 ? ' 등' : ''}). sparse-checkout으로 작업 폴더에서 뺀 파일도 같습니다. 표시를 지운 뒤 다시 시도하세요: git update-index --no-skip-worktree --no-assume-unchanged -- <파일>`,
+      );
+    }
+  }
+
+  /**
    * 작업 폴더 안에 최상위 체크포인트 저장소가 아닌 다른 git 저장소(중첩된 `.git` 디렉터리나 파일)가, 그것도 호스트 git이
    * 무시하지 않는 자리에 있으면 던진다. 호스트 git은 작업 폴더를 다룰 때 그런 저장소를 스캔하며 그 저장소의 설정을 적용할 수
    * 있는데, 호스트 git 하드닝과 설정 검사는 최상위 저장소에만 적용된다. 그래서 체크포인트를 만들기 전에 막는다.
@@ -1320,66 +1384,6 @@ export class CheckpointStore {
    * 완전한 방어는 아니다: 이 검사와 다음 git 작업 사이에 생긴 저장소는 잡지 못하고(시점 차이), 생성 파일 스냅샷처럼 무시되는
    * 경로를 따로 읽는 다른 경로(#775)는 덮지 않는다. 근본적인 구조 수정은 #1033에서 다룬다
    */
-  /**
-   * 진짜 인덱스에 `skip-worktree`·`assume-unchanged` 표시가 걸린 경로의 변경이 있으면 던진다(이슈 #1444, ADR-236).
-   * 표시가 걸린 경로는 `git status`·`git add -A`가 작업 폴더를 읽지 않아, 에이전트가 표시를 건 뒤 고치거나 지운 파일을
-   * 바뀐 파일 목록(게이트·보호 경로 확인)과 체크포인트가 함께 놓친다. 변경을 "바뀐 것"으로 끼워 넣으려면 사용자의 인덱스를 고치거나(이 컴퓨터 방식에서는 사용자 저장소를 건드린다)
-   * 표시를 지워야 하므로, 대신 "확인하지 못함"으로 막는다. 인덱스·작업 트리는 건드리지 않는다.
-   *
-   * 판정: 표시가 걸린 경로 중 작업 폴더의 내용이 HEAD와 다른 것. 비교는 HEAD에서 새로 만든 임시 인덱스(표시·stat 캐시가 없다)에 `add -A`를 해 `diff --cached`로 한다(pendingTestChanges와 같은 방식).
-   * sparse-checkout(`core.sparseCheckout`)은 정상적으로 skip-worktree를 쓰므로, 그때 작업 폴더에 **없는** skip-worktree 경로는 빠진 것으로 보고 건너뛴다.
-   * 같은 조건의 assume-unchanged 경로, 그리고 작업 폴더에 **있는** skip-worktree 경로는 건너뛰지 않는다.
-   */
-  async #assertNoHiddenIndexChanges(): Promise<void> {
-    const listing = await this.#git(['ls-files', '-v', '-z', ...(await this.#scope())]);
-    // 태그: `H`는 보통, `S`는 skip-worktree, 소문자는 assume-unchanged(`s`는 둘 다). 그 밖의 태그(M·R·C·K·?)는 표시가 아니다
-    const flagged: Array<{ file: string; skipWorktree: boolean }> = [];
-    for (const record of listing.split('\0')) {
-      if (record.length < 3) continue;
-      const tag = record[0]!;
-      if (tag === 'S' || tag === 's' || (tag >= 'a' && tag <= 'z')) flagged.push({ file: record.slice(2), skipWorktree: tag === 'S' || tag === 's' });
-    }
-    if (flagged.length === 0) return;
-    // 같은 이름을 다른 파일 시스템 규칙으로 읽지 않도록 실제 작업 폴더의 항목으로 있는지 본다(lstat: 링크는 따라가지 않는다)
-    const sparse = await this.#git(['config', '--type=bool', '--get', 'core.sparseCheckout']).then((out) => out.trim() === 'true', () => false);
-    const hidden: string[] = [];
-    const present: string[] = [];
-    for (const { file, skipWorktree } of flagged) {
-      const exists = await lstat(path.join(this.root, file)).then(() => true, (error: NodeJS.ErrnoException) => {
-        // 없다는 답(ENOENT·ENOTDIR)만 "없음"이다. 그 밖의 오류는 읽지 못한 것이므로 있는 것처럼 두어 아래 비교가 던지게 한다
-        if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
-        return true;
-      });
-      if (exists) present.push(file);
-      else if (!(sparse && skipWorktree)) hidden.push(file);
-    }
-    if (present.length > 0) {
-      const scratch = await mkdtemp(path.join(tmpdir(), 'b-studio-index-flag-'));
-      try {
-        const gitPath = async (name: string): Promise<string> => path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', name])).trim());
-        const objects = path.join(scratch, 'objects');
-        await mkdir(objects);
-        const env = { GIT_INDEX_FILE: path.join(scratch, 'index'), GIT_LITERAL_PATHSPECS: '1', GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: await gitPath('objects') };
-        await this.#assertSafeLocalGit();
-        await this.#git(['read-tree', 'HEAD'], { env });
-        for (let index = 0; index < present.length; index += 200) {
-          const chunk = present.slice(index, index + 200);
-          await this.#git(['add', '-A', '--', ...chunk], { env });
-          const changed = (await this.#git(['diff', '--cached', '--name-only', '-z', 'HEAD', '--', ...chunk], { env })).split('\0').filter((file) => file !== '');
-          hidden.push(...changed);
-        }
-      } finally {
-        await rm(scratch, { recursive: true, force: true });
-      }
-    }
-    if (hidden.length > 0) {
-      const shown = [...new Set(hidden)].sort().slice(0, 5).join(', ');
-      throw new CheckpointError(
-        `인덱스 표시(skip-worktree·assume-unchanged)가 걸린 파일이 바뀌어 있어 변경을 끝까지 확인하지 못합니다(${shown}${new Set(hidden).size > 5 ? ' 등' : ''}). 표시를 지운 뒤 다시 시도하세요: git update-index --no-skip-worktree --no-assume-unchanged -- <파일>`,
-      );
-    }
-  }
-
   async #assertNoNestedRepos(): Promise<void> {
     await this.#remote('assertNoNestedRepos');
   }

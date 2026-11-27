@@ -12730,29 +12730,32 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 - **같은 표시를 기존 코드에 돌려 본 결과**(고치지 않고 시험으로만, `index-flag-bypass.test.ts`): `skip-worktree`·`assume-unchanged`를 건 파일의 수정·삭제를 `pendingFiles`·`pendingChanges`(`git status`)가 보지 못하고, `commit`은 바뀐 파일이 없다고 보고 체크포인트를 만들지 않는다. 게이트의 바뀐 파일 목록(`ChangeTracker`는 `pendingFiles`를 읽는다)과 그것을 쓰는 보호 경로 확인·검증 대상 고르기도 같은 눈으로 본다. 따로 이슈로 다룬다.
 
 
-## ADR-236 인덱스에 skip-worktree·assume-unchanged 표시가 걸린 파일이 바뀌어 있으면 바뀐 파일 목록·체크포인트는 "확인하지 못함"으로 던진다
+## ADR-236 인덱스에 skip-worktree·assume-unchanged 표시가 걸린 파일이 HEAD와 다르면 바뀐 파일 목록·체크포인트는 "확인하지 못함"으로 던진다
 
 상태: 채택(#1444)
 관련: ADR-234(시험 약화 검사의 임시 인덱스), ADR-096(체크포인트), 트러블슈팅 124~126(막는 검사), 트러블슈팅 289, 트러블슈팅 291
 
 ### 맥락
 - `git status`와 `git add -A`는 인덱스에 `skip-worktree`·`assume-unchanged` 표시가 걸린 경로의 작업 폴더를 읽지 않는다. 에이전트가 셸에서 표시를 건 뒤 파일을 고치거나 지우면 `pendingFiles`·`pendingChanges`(→ 게이트의 `ChangeTracker`, 보호 경로 확인, 검증 대상 고르기)와 `commit`(체크포인트)이 그 변경을 보지 못했다. 게이트는 고친 작업 복사본으로 시험을 돌리는데 확인하는 쪽과 내보내는 쪽에는 그 변경이 없었다. ADR-234의 시험 약화 검사는 HEAD에서 새로 만든 임시 인덱스로 이미 막았다.
+- 반대 방향도 있다. 고친 내용을 `git add`하고 표시를 건 뒤 작업 폴더만 HEAD 내용으로 되돌리면, 작업 폴더만 보는 비교는 "변경 없음"인데 체크포인트 커밋은 진짜 인덱스의 blob을 내보낸다(커밋 보안 검토 지적).
 
 ### 선택지
 | 방식 | 판단 |
 |---|---|
-| ① 진짜 인덱스의 표시를 지운다(`update-index --no-skip-worktree`) | 이 컴퓨터 방식에서는 사용자의 저장소 인덱스를 고친다. sparse-checkout의 표시까지 지워 작업 폴더가 바뀐다. 버림 |
-| ② 임시 인덱스로 바뀐 파일 목록을 다시 만들고 커밋도 임시 인덱스로 한다 | 커밋은 진짜 인덱스를 쓰고 Rust 쪽 커밋 경로가 넓다. 확인하는 쪽과 내보내는 쪽을 다시 갈라놓을 위험. 버림 |
-| **③ 표시가 걸린 경로의 변경이 있으면 목록·커밋이 던진다** | 채택. 인덱스·작업 트리를 건드리지 않고, 목록과 체크포인트가 같은 집합을 보게 되거나(변경 없음) 둘 다 멈춘다. 표시만 걸고 고치지 않은 파일, sparse로 빠진 파일은 막지 않는다 |
+| ① 진짜 인덱스의 표시를 지운다(`update-index --no-skip-worktree`) | 이 컴퓨터 방식에서는 사용자의 저장소 인덱스를 고친다. 버림 |
+| ② 임시 인덱스로 목록과 커밋을 모두 다시 만든다 | Rust 커밋 경로가 넓고 확인하는 쪽과 내보내는 쪽이 다시 갈라질 위험. 버림 |
+| ③ 표시가 걸린 경로가 바뀌어 있으면 sparse-checkout이면 건너뛴다 | `core.sparseCheckout`은 에이전트가 셸에서 켤 수 있는 설정이다(`git config core.sparseCheckout true` → 표시 → `rm`으로 지운 파일이 예외로 빠졌다, 검토 지적). 세션 시작 때의 값을 저장소 밖(호스트 쪽)에 믿을 수 있게 남겨 둘 자리가 지금 구조에 없다(`#setMeta`는 저장소의 git config라 에이전트가 쓴다). 버림 |
+| **④ 표시가 걸린 경로가 HEAD와 다르면 목록·커밋이 던진다. sparse 예외 없음** | 채택. 인덱스·작업 트리를 건드리지 않고, 허용 쪽 판단을 에이전트가 쓸 수 있는 값에 걸지 않는다 |
 
 ### 결정
-1. `CheckpointStore.#assertNoHiddenIndexChanges`가 `pendingFiles`·`pendingChanges`(`pendingFingerprint` 포함)·`commit`·`commitPaths` 앞에서 돈다. 막는 쪽이다(거부 목록): 표시를 확인하지 못하면 통과가 아니라 던진다.
-2. `git ls-files -v -z`로 표시가 걸린 경로를 모은다(`S`·`s`는 skip-worktree, 소문자는 assume-unchanged). 표시가 하나도 없으면 비용이 없다.
-3. 작업 폴더에 **있는** 표시 경로는 HEAD에서 `read-tree`로 새로 만든 임시 인덱스(표시·stat 캐시 없음, 새 객체는 임시 폴더에만)에 `add -A`를 하고 `diff --cached`로 HEAD와 견준다. 다르면 던진다.
-4. 작업 폴더에 **없는** 표시 경로는 지운 것으로 본다. 단 `core.sparseCheckout`이 켜져 있고 표시가 skip-worktree인 경로는 sparse로 빠진 것이라 건너뛴다(허용 쪽의 예외라 좁게 둔다: assume-unchanged, sparse가 아닌 저장소의 skip-worktree는 건너뛰지 않는다). `lstat`이 ENOENT·ENOTDIR가 아닌 오류를 내면 없는 것이 아니라 있는 것으로 두어 비교가 하게 한다.
-5. 던지는 글은 변경된 경로 최대 5개와 "표시를 지운 뒤 다시 시도" 안내를 적는다. 표시를 지우는 일은 사람이 한다.
+1. `CheckpointStore.#assertNoHiddenIndexChanges`가 `pendingFiles`·`pendingChanges`(`pendingFingerprint` 포함)·`commit`·`commitPaths` 앞에서 돈다. 막는 쪽이다(거부 목록): 확인하지 못하면 통과가 아니라 던진다.
+2. `git ls-files -v -z`로 표시가 걸린 경로를 모은다(`S`·`s`는 skip-worktree, 소문자는 assume-unchanged). 표시가 없으면 추가 비용이 없다.
+3. 표시가 걸린 경로는 **둘 다** HEAD와 같아야 한다. (가) 진짜 인덱스 항목: `diff-index --cached HEAD`(체크포인트 커밋이 쓰는 것). (나) 작업 폴더: HEAD에서 `read-tree`로 새로 만든 임시 인덱스(표시·stat 캐시 없음, 새 객체는 임시 폴더에만)에 `add -A`를 하고 `diff --cached`로 견준다. 작업 폴더에 없으면 지운 것이다. `lstat`이 ENOENT·ENOTDIR가 아닌 오류를 내면 있는 것으로 두어 비교가 하게 한다. 경로는 `GIT_LITERAL_PATHSPECS`로 읽는다.
+4. **Rust 커밋이 add 뒤에 같은 것을 다시 본다**(`assert_no_hidden_index_entries`, `checkpoint_local.rs`). 실제로 커밋되는 인덱스를 기준으로 표시가 걸린 항목이 (가) HEAD와 다르거나 (나) 작업 폴더의 내용·실행 비트가 인덱스와 다르거나 없거나 일반 파일이 아니면 add를 되돌리고(`reset -q`) 멈춘다. TS 사전 검사와 커밋 사이에 표시를 걸거나 인덱스를 바꾸는 시점 차이를 여기서 닫는다. 이전에는 `expectStaged`(staged mismatch)를 주는 호출만 스테이징된 변경의 내용을 견주었고, 주지 않는 호출과 표시 때문에 add가 읽지 않은 작업 폴더 변경은 막지 못했다. `commitPaths`는 부모에서 새로 만든 임시 인덱스(표시 없음)에 경로를 add하므로 작업 폴더를 직접 읽어 해당하지 않는다.
+5. **sparse-checkout 저장소.** 예외를 두지 않으므로 sparse-checkout으로 작업 폴더에서 뺀 skip-worktree 파일이 있는 저장소는 이 검사에서 "확인하지 못함"이 되어 체크포인트와 바뀐 파일 목록이 막힌다. 안내 문구에 sparse-checkout도 같다고 적고 표시를 지우는 방법(`git update-index --no-skip-worktree`)을 알린다. 지원 경로의 사용자는 이 컴퓨터 방식에서 자기 저장소를 쓰므로 sparse-checkout을 쓰면 이 변경 뒤로는 b-studio가 그 저장소의 체크포인트를 남기지 못한다. 나중에 세션 시작 때의 sparse 상태를 저장소 밖에 기록할 수 있게 되면 그 값과 같을 때만 예외를 둔다.
+6. 표시를 지우는 일은 사람이 한다(b-studio는 사용자의 인덱스를 고치지 않는다).
 
 ### 하지 않는 것·남는 위험
-- **sparse-checkout 저장소에서 작업 폴더 안의(sparse 범위 안의) skip-worktree 파일을 에이전트가 표시를 걸고 지우는 것**은 잡지 못한다. 범위 안인지 밖인지 판정하려면 sparse 패턴을 git처럼 읽어야 하는데 읽는 규칙이 달라지면 막는 검사가 열리는 쪽으로 틀린다. 범위 밖 파일을 만들어(작업 폴더에 있는 채) 고치는 것은 잡는다.
-- 판정은 TS(`checkpoints.ts`)에 있고 Rust의 체크포인트 커밋은 따로 검사하지 않는다. 커밋 직전의 검사와 실제 커밋 사이에 표시를 거는 경합은 닫지 않았다.
+- Rust 커밋의 검사와 `write-tree` 사이의 아주 짧은 틈(다른 프로세스가 인덱스를 바꾸는 경우)은 닫지 않았다. 표시된 항목의 변경이 아니라 일반 인덱스 경합과 같은 종류다.
 - 목록·커밋이 던지므로 이 상태의 저장소에서는 화면의 바뀐 파일 목록도 오류가 난다. 표시를 지우면 풀린다.
+- 사용자가 평소 쓰던 `assume-unchanged`(큰 설정 파일을 일시적으로 빼는 용도)가 걸린 채로 파일을 고친 경우도 막힌다. 막는 쪽이라 받아들인다.

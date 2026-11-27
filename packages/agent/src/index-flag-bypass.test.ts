@@ -60,6 +60,17 @@ describe.each(['--skip-worktree', '--assume-unchanged'])('인덱스 표시 %s를
     await expect(store.commitPaths(['web/a.test.ts'], '시험')).rejects.toThrow(/인덱스 표시/);
   });
 
+  it('진짜 인덱스에 고친 내용을 add하고 표시를 건 뒤 작업 폴더만 HEAD로 되돌려도 막는다(커밋은 인덱스의 blob을 쓴다)', async () => {
+    const store = new CheckpointStore(root);
+    await store.init();
+    await writeFile(path.join(root, 'web/b.ts'), 'evil\n');
+    await execFileAsync('git', ['-C', root, 'add', 'web/b.ts']);
+    await execFileAsync('git', ['-C', root, 'update-index', flag, 'web/b.ts']);
+    await writeFile(path.join(root, 'web/b.ts'), 'y\n');
+    await expect(store.commit('요청: 숨김')).rejects.toThrow(/인덱스 표시/);
+    await expect(store.pendingFiles()).rejects.toThrow(/인덱스 표시/);
+  });
+
   it('pendingTestChanges(새 코드)는 둘 다 본다', async () => {
     const store = await setup();
     const entries = await store.pendingTestChanges();
@@ -67,7 +78,7 @@ describe.each(['--skip-worktree', '--assume-unchanged'])('인덱스 표시 %s를
   });
 });
 
-describe('인덱스 표시가 걸려 있어도 바뀌지 않았거나 sparse로 빠진 파일은 막지 않는다', () => {
+describe('인덱스 표시가 걸려 있어도 바뀌지 않은 파일은 막지 않는다', () => {
   it('표시만 걸고 파일을 고치지 않았으면 평소처럼 동작한다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
@@ -77,18 +88,17 @@ describe('인덱스 표시가 걸려 있어도 바뀌지 않았거나 sparse로 
     expect(await store.commit('요청: c')).toBeDefined();
   });
 
-  it('sparse-checkout으로 작업 폴더에서 빠진 skip-worktree 파일은 삭제로 보지 않는다', async () => {
+  it('sparse 설정은 에이전트가 켤 수 있어 예외가 아니다: 설정을 켜고 표시를 건 뒤 지워도 막는다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
     await execFileAsync('git', ['-C', root, 'config', 'core.sparseCheckout', 'true']);
     await execFileAsync('git', ['-C', root, 'update-index', '--skip-worktree', 'web/b.ts']);
     await rm(path.join(root, 'web/b.ts'));
-    await writeFile(path.join(root, 'web/c.ts'), 'z\n');
-    expect(await store.pendingFiles()).toEqual(['web/c.ts']);
-    expect(await store.commit('요청: c')).toBeDefined();
+    await expect(store.pendingFiles()).rejects.toThrow(/인덱스 표시/);
+    await expect(store.commit('요청: 지움')).rejects.toThrow(/인덱스 표시/);
   });
 
-  it('sparse여도 작업 폴더에 있는 skip-worktree 파일을 고치면 막는다', async () => {
+  it('작업 폴더에 있는 skip-worktree 파일을 고치면 막는다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
     await execFileAsync('git', ['-C', root, 'config', 'core.sparseCheckout', 'true']);
@@ -99,7 +109,7 @@ describe('인덱스 표시가 걸려 있어도 바뀌지 않았거나 sparse로 
     expect(seen).toBe(true);
   });
 
-  it('assume-unchanged 파일은 sparse여도 지워지면 막는다', async () => {
+  it('assume-unchanged 파일을 지우면 막는다', async () => {
     const store = new CheckpointStore(root);
     await store.init();
     await execFileAsync('git', ['-C', root, 'config', 'core.sparseCheckout', 'true']);
