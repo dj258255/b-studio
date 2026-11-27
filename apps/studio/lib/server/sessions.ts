@@ -7818,6 +7818,13 @@ interface TerminalRunState {
    * 스냅샷의 `terminalAttention`은 비춘 값이라 다른 이유로 지워질 수 있어 판단에 쓰지 않는다(권한 창이 떠 있는데 Enter를 보내면 기본 선택이 눌린다)
    */
   cliAtInput: boolean;
+  /**
+   * 사람의 답을 기다리는 창(권한 확인·되묻기·입력 필요)이 열린 시각(Date.now(), 없으면 열려 있지 않다). 화면의 기다림 표시(`terminalAttention`)와 따로 기록한다:
+   * 표시는 다른 알림이 덮거나 훅이 지울 수 있지만 창은 그대로 떠 있을 수 있고, 그 창에 Enter를 보내면 기본 선택(승인)이 눌린다.
+   * 풀리는 것은 창이 닫혔다는 확실한 사건뿐이다: 메인 에이전트의 도구 끝 훅(허락받아 돌았거나 거절됨, 열린 지 `TERMINAL_ATTENTION_SETTLE_MS`가 지난 것만),
+   * 턴 끝·턴 실패, 사람의 요청. 다른 알림·텔레메트리·입력 대기 알림으로는 풀리지 않는다. 열려 있는 동안 입력 대기 알림은 입력창 신호를 세우지 않는다
+   */
+  humanPromptAt?: number;
   /** 이 실행을 요청 훅이 아니라 도구 호출이 열었다. 그 도구를 정한 모델 요청은 열린 시각보다 앞서 끝났을 수 있다(ADR-213, U5) */
   openedByTool: boolean;
   /** 이 실행이 열린 시각(Date.now()). 사용량 소식이 끊겼는지 보는 기준이다 */
@@ -8078,7 +8085,7 @@ function checkTerminalStall(session: Session, stallMs: number): void {
     nudgeMax: run?.terminal.stallNudgeMax ?? 0,
     nudgesSent: run?.terminal.stallNudgesSent ?? 0,
     // 사람 차례(권한·질문)는 비춘 값으로도 한 번 더 막는다. 입력 대기(idle_prompt)는 재촉이 겨냥하는 상태라 막지 않는다(입력창 신호는 cliAtInput)
-    humanTurn: session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt',
+    humanTurn: run?.terminal.humanPromptAt !== undefined || (session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt'),
     cliAtInput: run?.terminal.cliAtInput === true,
   });
   if (step === 'stop') {
@@ -8098,6 +8105,15 @@ function checkTerminalStall(session: Session, stallMs: number): void {
  * 입력창 신호를 거둔다: 입력 대기 알림 말고 다른 무엇이 왔다(도구 훅·권한 요청·질문·텔레메트리·요청·턴 끝·도구 호출). CLI가 다시 움직였거나 창이 떴을 수 있다.
  * 실행이 없으면 아무 일도 하지 않는다. 막는 쪽이라 넓게 부른다
  */
+function closeHumanPrompt(id: string, { settled = false }: { settled?: boolean } = {}): void {
+  const session = store.sessions.get(id);
+  const run = session ? openTerminalRun(session) : undefined;
+  if (!run || run.terminal.humanPromptAt === undefined) return;
+  // 도구 끝 훅은 창이 뜨기 앞서 시작한 다른 도구의 것일 수 있다(#955와 같다): 연 지 조금 지난 것만 닫힌 것으로 본다
+  if (settled && Date.now() - run.terminal.humanPromptAt < TERMINAL_ATTENTION_SETTLE_MS) return;
+  run.terminal.humanPromptAt = undefined;
+}
+
 function noteTerminalBusy(id: string): void {
   const session = store.sessions.get(id);
   const run = session ? openTerminalRun(session) : undefined;
@@ -10156,11 +10172,20 @@ function terminalNotification(id: string, input: HookInput): void {
   if (kind === 'idle_prompt') {
     const open = openTerminalRun(session);
     if (!open) return;
+    // 사람의 답을 기다리는 창이 떠 있는 동안의 입력 대기 알림은 입력창 신호가 아니다(그 창에 Enter가 가면 승인이 눌린다). 표시도 덮지 않는다
+    if (open.terminal.humanPromptAt !== undefined) return;
     // 입력창에 있다는 긍정 신호는 이 알림뿐이다. 이 알림 뒤에 오는 다른 훅·텔레메트리는 모두 거둔다(noteTerminalBusy)
     open.terminal.cliAtInput = true;
+    // 화면에 이미 권한·되묻기 표시가 걸려 있으면 입력 대기가 덮지 않는다
+    const shown = session.snapshot.terminalAttention;
+    if (shown && TERMINAL_ATTENTION_ALWAYS.has(shown.kind)) return;
   } else if (!TERMINAL_ATTENTION_ALWAYS.has(kind)) {
     // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
     return;
+  } else {
+    // 사람의 답을 기다리는 창이 열렸다. 표시와 따로 기록한다(재촉이 이 창에 Enter를 보내지 않게). 이미 열려 있으면 처음 시각을 지킨다
+    const open = openTerminalRun(session);
+    if (open) open.terminal.humanPromptAt ??= Date.now();
   }
   // 무엇을 묻는지는 PermissionRequest가 안다(도구와 대상, #942). 같은 권한 창을 몇 초 뒤 알리는 Notification의 일반 문구로 덮지 않는다
   if (input.hook_event_name === 'PermissionRequest') {
@@ -10227,6 +10252,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     prompt: (input) => {
       noteTerminalBusy(id);
+      closeHumanPrompt(id);
       // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
       noteSessionTerminalCli(id, true);
       return terminalPromptSubmitted(id, input);
@@ -10237,6 +10263,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     stop: (input) => {
       noteTerminalBusy(id);
+      closeHumanPrompt(id);
       return terminalTurnEnded(id, input);
     },
     sessionEnd: async (input) => {
@@ -10251,6 +10278,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     stopFailure: (input) => {
       noteTerminalBusy(id);
+      closeHumanPrompt(id);
       return terminalTurnFailed(id, input);
     },
     notification: async (input) => {
@@ -10259,6 +10287,8 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     activity: async (input) => {
       noteTerminalBusy(id);
+      // 메인 에이전트의 도구 끝 훅만 창이 닫혔다는 사건이다(서브에이전트의 도구는 메인의 창을 닫지 않는다)
+      if ((input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') && !(typeof input.agent_id === 'string' && input.agent_id)) closeHumanPrompt(id, { settled: true });
       return terminalActivityHook(id, input);
     },
     statusline: async (input) => {

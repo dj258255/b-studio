@@ -545,6 +545,87 @@ describe('정체 재촉(#1454)', () => {
     expect(warnings(session).length).toBeGreaterThan(0);
   }, 30_000);
 
+  it('권한 창이 떠 있는 채 입력 대기 알림이 와도 보내지 않고 화면의 권한 표시도 덮지 않는다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    expect(getSnapshot(session.id)?.terminalAttention?.kind).toBe('permission_prompt');
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('권한 창이 닫힌 뒤(도구 끝 훅)의 입력 대기 알림에는 보낸다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    vi.advanceTimersByTime(2_000);
+    await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(2);
+  }, 30_000);
+
+  it('되묻기 창이 떠 있는 채 입력 대기 알림이 와도 보내지 않는다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'elicitation_dialog', message: '질문' });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('권한 창이 떠 있는 채 다른 알림이나 텔레메트리, 입력 대기 알림이 와도 풀리지 않아 보내지 않는다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    await session.gateway.notification({ notification_type: 'auth_success', message: '다른 알림' });
+    await session.gateway.telemetry(otlp([rec('r1')]));
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('권한 창이 떠 있는데 화면의 기다림 표시가 훅으로 치워진 뒤 입력 대기 알림이 와도 보내지 않는다(창은 따로 기록한 상태로 본다)', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    vi.advanceTimersByTime(2_000);
+    await session.gateway.activity?.({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: {} });
+    expect(getSnapshot(session.id)?.terminalAttention).toBeUndefined();
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('되묻기 창의 표시가 치워진 뒤 입력 대기 알림이 와도 보내지 않는다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'elicitation_dialog', message: '질문' });
+    vi.advanceTimersByTime(2_000);
+    await session.gateway.activity?.({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: {} });
+    expect(getSnapshot(session.id)?.terminalAttention).toBeUndefined();
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('권한 창이 떠 있는 채 다른 알림·텔레메트리가 와 표시가 치워져도 입력 대기 알림에는 보내지 않는다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    vi.advanceTimersByTime(2_000);
+    await session.gateway.notification({ notification_type: 'auth_success', message: '다른 알림' });
+    await session.gateway.telemetry(otlp([rec('r1')]));
+    await session.gateway.activity?.({ hook_event_name: 'PreToolUse', tool_name: 'Read', tool_input: {} });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('권한 창이 뜬 직후(앞서 시작한 다른 도구의 끝 훅일 수 있다)의 도구 끝 훅은 창이 닫혔다는 사건으로 세지 않는다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
   it('도구가 도는 중(PreToolUse만 있고 끝 훅이 없다)이면 보내지 않는다', async () => {
     const session = await stalled();
     await session.gateway.preTool({ tool_name: 'Read', tool_input: {} });
