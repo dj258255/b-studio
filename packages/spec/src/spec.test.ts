@@ -536,6 +536,36 @@ services:
     expect(() => parseSpec(source)).toThrow(SpecError);
   });
 
+  it('contract.propertyChecks를 읽고 기본은 꺼짐(없음)이다', () => {
+    const base = `
+version: 1
+name: x
+services:
+  api: { source: managed, template: fastapi, path: api, port: 8000, preview: openapi, contract: { extract: /openapi.json%PROPS% } }
+`;
+    expect((parseSpec(base.replace('%PROPS%', '')).services.api as { contract?: Record<string, unknown> }).contract).toEqual({ extract: '/openapi.json' });
+    const on = parseSpec(base.replace('%PROPS%', ', propertyChecks: { enabled: true, maxOperations: 30, maxRequests: 100, timeoutMs: 20000, seed: 42 }'));
+    expect((on.services.api as { contract?: Record<string, unknown> }).contract).toEqual({
+      extract: '/openapi.json',
+      propertyChecks: { enabled: true, maxOperations: 30, maxRequests: 100, timeoutMs: 20000, seed: 42 },
+    });
+    const minimal = parseSpec(base.replace('%PROPS%', ', propertyChecks: { enabled: true }'));
+    expect((minimal.services.api as { contract?: Record<string, unknown> }).contract).toEqual({ extract: '/openapi.json', propertyChecks: { enabled: true } });
+  });
+
+  it('propertyChecks의 상한을 넘기거나 형이 틀리면 거부한다', () => {
+    const base = `
+version: 1
+name: x
+services:
+  api: { source: managed, template: fastapi, path: api, port: 8000, preview: openapi, contract: { extract: /openapi.json, propertyChecks: %PROPS% } }
+`;
+    for (const props of ['{ enabled: true, maxOperations: 101 }', '{ enabled: true, maxRequests: 501 }', '{ enabled: true, maxOperations: 0 }', '{ enabled: true, timeoutMs: 100 }', '{ enabled: true, seed: -1 }', '{ enabled: "yes" }']) {
+      const error = captureError(() => parseSpec(base.replace('%PROPS%', props)));
+      expect(error.issues.some((issue) => issue.startsWith('services.api.contract.propertyChecks')), props).toBe(true);
+    }
+  });
+
   it('다른 호스트를 가리킬 수 있는 "//" 경로를 거부한다', () => {
     const source = `
 version: 1

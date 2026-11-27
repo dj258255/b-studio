@@ -279,6 +279,21 @@ pub fn managed_service(input: Option<&JsValue>) -> Outcome {
 fn contract_schema(input: Option<&JsValue>) -> Outcome {
     let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
     obj.set("extract", service_path(obj.field("extract")));
+    if let Some(value) = obj.field("propertyChecks") {
+        obj.set("propertyChecks", property_checks(Some(value)));
+    }
+    obj.finish()
+}
+
+/// `PropertyChecksSchema`(schema.ts). enabled만 필수이고 나머지는 없으면 없는 채로 둔다(기본값은 `openapi_property.rs`)
+fn property_checks(input: Option<&JsValue>) -> Outcome {
+    let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
+    obj.set("enabled", boolean(obj.field("enabled")));
+    for (key, min, max) in [("maxOperations", 1.0, 100.0), ("maxRequests", 1.0, 500.0), ("timeoutMs", 1000.0, 300000.0), ("seed", 0.0, 4294967295.0)] {
+        if let Some(value) = obj.field(key) {
+            obj.set(key, validate_number(Some(value), &[NumberCheck::Int, NumberCheck::Min(min, true), NumberCheck::Max(max, true)]));
+        }
+    }
     obj.finish()
 }
 
