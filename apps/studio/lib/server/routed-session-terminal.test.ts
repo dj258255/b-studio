@@ -103,6 +103,13 @@ afterEach(() => {
 const base = { projectId: 'orders', user: 'kim', workspace: 'copy' as const, intent: 'build' as const, terminal: true as const };
 
 describe('startRoutedSession — 터미널로(#836)', () => {
+  it('terminal을 주지 않으면(채팅식) 세션을 만들기 전에 400으로 거절하고 sendMessage를 부르지 않는다', async () => {
+    saveBackendRules({ rules: [{ when: {}, backend: 'codex' }] });
+    await expect(startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', intent: 'build', request: '주문 목록 화면을 고쳐 줘' })).rejects.toMatchObject({ status: 400, message: expect.stringContaining('터미널') });
+    expect(fake.created).toEqual([]);
+    expect(fake.sent).toEqual([]);
+  });
+
   it('고른 AI로 세션을 만들고, 첫 요청을 CLI 실행 인자로 넘겨 터미널을 연다. 키 입력을 보내지 않고 대화 러너로도 보내지 않는다', async () => {
     saveBackendRules({ rules: [{ when: {}, backend: 'codex' }] });
     const t = terminal({ startAfter: 2 });
@@ -113,7 +120,6 @@ describe('startRoutedSession — 터미널로(#836)', () => {
     expect(fake.sent).toEqual([]);
     expect(result).toMatchObject({ session: { id: 's1' }, routing: { backend: 'codex', rule: 0 }, terminal: { opened: true, pasted: true } });
     expect(result.terminal?.pasteError).toBeUndefined();
-    expect(result.runId).toBeUndefined();
   });
 
   it('확인 선언 변경 허용(#916)을 실으면 터미널을 열기 전에 그 세션의 다음 요청에 켜 둔다. 싣지 않으면 켜지 않는다', async () => {

@@ -206,6 +206,7 @@ import {
   apiKeyEnvName,
   keylessLocal,
   type ModelProfile,
+  isProtectedPath,
 } from '@b-studio/agent';
 import {
   commandCodeConfigPathBlocked,
@@ -271,7 +272,7 @@ import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { settleDraftStops } from './session-terminal-draft';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixBlockReason, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
 import { terminalPasteText } from '../terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -4846,48 +4847,30 @@ async function reviewExternalContext(session: Session, diff: string): Promise<st
   return excerpts.length > 0 ? buildPrReviewExternalContext(excerpts) : undefined;
 }
 
-async function reviewFixOnTerminal(session: Session): Promise<boolean> {
+/** 고침을 세션 터미널로 보낼 수 없는 까닭. 보낼 수 있으면 undefined(reviewFixBlockReason이 정한다) */
+async function reviewFixBlock(session: Session): Promise<string | undefined> {
   const backend = sessionBackend(session.snapshot);
   let apiKeyReady = false;
+  let apiKeyError: string | undefined;
   if (backend === 'api' && sessionTerminalAllowed() && sessionTerminalMode() === 'host') {
     try {
       await selfAgentModel(session);
       apiKeyReady = true;
-    } catch {
-      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 채팅식으로 둔다
+    } catch (error) {
+      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 까닭을 적어 고침 실패로 닫는다(채팅식으로 돌아가지 않는다)
+      apiKeyError = describe(error);
     }
   }
-  return reviewFixRunner({ allowed: sessionTerminalAllowed(), backend, apiKeyReady }) === 'terminal';
+  return reviewFixBlockReason({ allowed: sessionTerminalAllowed(), backend, apiKeyReady, ...(apiKeyError ? { apiKeyError } : {}) });
 }
 
-/** 터미널을 쓸 수 없으면 sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
+/** AI 리뷰의 고침을 세션 터미널로 보내고 그 실행이 닫히기를 기다린다. 터미널로 보낼 수 없으면 채팅식으로 돌아가지 않고 까닭을 적어 고침 실패로 돌려준다 */
 async function reviewRequestFix(session: Session, request: string): Promise<ReviewFixResult> {
   const id = session.snapshot.id;
-  // 세션 터미널을 쓸 수 있으면 터미널에서 돌린다(터미널이 열리지 않는 서버·키 없는 API 세션은 채팅식으로 둔다)
-  if (await reviewFixOnTerminal(session)) {
-    const { runReviewFixOnTerminal } = await import('./terminal-lane');
-    return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
-  }
-  let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
-  let runId: string | undefined;
-  const unsubscribe = subscribe(id, (event) => {
-    if (event.type === 'run_finished' && (runId === undefined || event.runId === runId)) finished = event;
-  });
-  try {
-    ({ runId } = sendMessage(id, request, { allowBreaking: false, by: 'ai-review' }));
-    const started = Date.now();
-    while (finished?.runId !== runId) {
-      if (Date.now() - started > REVIEW_FIX_TIMEOUT_MS) {
-        return { ok: false, error: `AI 리뷰의 고침 요청이 ${Math.round(REVIEW_FIX_TIMEOUT_MS / 60_000)}분 안에 끝나지 않았습니다` };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-    if (finished.status !== 'done') return { ok: false, error: finished.summary };
-    const checkpoint = session.snapshot.checkpoints[0];
-    return { ok: true, checkpoint: checkpoint ? { sha: checkpoint.sha, shortSha: checkpoint.shortSha } : undefined };
-  } finally {
-    unsubscribe();
-  }
+  const blocked = await reviewFixBlock(session);
+  if (blocked) return { ok: false, error: blocked };
+  const { runReviewFixOnTerminal } = await import('./terminal-lane');
+  return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
 }
 
 /**
@@ -9477,6 +9460,86 @@ export async function applyServerChanges(
   if (!finished) return { ...base, status: 'cancelled', summary: '세션이 멈춰 서버가 쓴 변경의 결과를 알 수 없습니다' };
   const checkpoint = finished.status === 'done' && saved !== undefined && saved.sha !== head ? saved : undefined;
   return { ...base, status: finished.status, summary: finished.summary, ...(checkpoint ? { checkpoint } : {}) };
+}
+
+/**
+ * 통합 S4 수리 전에, 레인 결과를 이 세션의 작업 폴더에 **확정하지 않은 변경**으로 다시 쓴다(ADR-243). 서버가 쓰는 통합 길(`applyServerChanges`)은
+ * 게이트가 실패하면 작업 폴더를 되돌리므로, 수리 CLI는 그냥 열면 "합친 결과가 실패했다"는 요청과 맞지 않는 되돌려진 상태에서 시작한다.
+ *
+ * 이 함수는 게이트를 거치지 않지만 변경을 통과시키지 않는다: 쓴 파일은 체크포인트가 아니라 작업 복사본의 미확정 변경으로 남고,
+ * 그 뒤 수리 실행의 턴 끝 판정(`finishTerminalTurn`)이 **실행 전부터 있던 변경도 검증 대상으로** 본다(`terminalVerification`의 `tolerateExisting: false`, ADR-131).
+ * 변경 전 기준도 작업 폴더가 아니라 마지막 체크포인트에서 잡는다(`baselineFromCheckpoints`). 그래서 합친 상태가 기준이 되어 계약 깨짐이 가려지지 않고,
+ * 쓰기 범위·완료 검사도 그 판정이 건다. 수리가 이 변경을 되돌려 빈 턴으로 끝나면 체크포인트가 새로 남지 않아 부르는 쪽이 통과로 읽지 않는다.
+ * 쓰기 전 거름은 `applyServerChanges`와 같다(경로 모양·중복·쓰기 범위·링크·숨긴 이름). 같은 전제(터미널을 연 적이 없는 세션 등)가 아니면 거절한다.
+ */
+/**
+ * 수리 실행의 검증 기준이 작업 폴더에서 읽히는 파일인가(거부 목록). 읽히면 까닭을, 아니면 undefined.
+ * 선언 파일(studio.yaml·studio.yml), 보호 경로, 평가 자산(게이트의 `protectedPathsFor`와 같은 두 선언). 이름은 대소문자·유니코드 정규화를 접어 넓게 맞춘다 —
+ * 넓게 맞아도 시드가 더 막힐 뿐이다. 프로젝트 하위 폴더 이름이 달라도 걸리도록 파일 이름만 같아도 선언 파일로 본다
+ */
+function seedBaselineFile(session: Session, file: string): string | undefined {
+  const folded = file.normalize('NFC').toLowerCase();
+  const base = folded.split('/').pop() ?? folded;
+  if (base === 'studio.yaml' || base === 'studio.yml') return '선언 파일(studio.yaml)은 수리 전에 다시 쓰지 않습니다(검증 기준이 작업 폴더에서 읽힙니다)';
+  // 게이트의 protectedPathsFor와 같은 두 선언(보호 경로 + 평가 자산)을 합친다
+  const workflow = session.project.spec.workflow;
+  for (const rule of [...(workflow?.protectedPaths ?? []), ...(workflow?.evaluationAssets ?? [])]) {
+    const foldedRule = rule.normalize('NFC').toLowerCase();
+    if (isProtectedPath(file, rule) || isProtectedPath(folded, foldedRule)) return `보호 경로·평가 자산(${rule})은 수리 전에 다시 쓰지 않습니다(검증 기준이 작업 폴더에서 읽힙니다)`;
+  }
+  return undefined;
+}
+
+export async function seedServerChanges(
+  id: string,
+  input: { writes: ReadonlyArray<{ path: string; content: string }>; deletes: readonly string[]; writableScope: readonly string[] },
+): Promise<void> {
+  const session = requireSession(id);
+  if (!terminalSessionAlive(session)) throw new StudioError(409, '멈춘 세션입니다');
+  if (sessionTerminalMode() === 'container') throw new StudioError(409, '컨테이너 방식에서는 서버가 변경을 쓰지 못합니다');
+  if (session.terminalOpened === true || hasWatch(id) || openTerminalRun(session) !== undefined) {
+    throw new StudioError(409, '터미널을 연 적이 있는 세션에는 서버가 변경을 쓰지 않습니다(같은 작업 폴더에 다른 쪽이 쓸 수 있습니다)');
+  }
+  if (session.terminalTaskContext !== undefined) throw new StudioError(409, '이미 쓰기 범위가 걸린 세션입니다');
+  if (session.serverApplying === true) throw new StudioError(409, '서버가 이미 이 세션에 변경을 쓰고 있습니다');
+  session.serverApplying = true;
+  try {
+    // 범위 확인(terminalScopeDeny)이 읽는 맥락을 이 함수 동안만 건다
+    setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: [] });
+    try {
+      const workspace = new Workspace(session.project.root);
+      const paths = [...input.writes.map((write) => write.path), ...input.deletes];
+      const seen = new Set<string>();
+      for (const file of paths) {
+        const bad = serverChangePathProblem(file);
+        if (bad) throw new StudioError(400, `${file}: ${bad}`);
+        const key = file.normalize('NFC').toLowerCase();
+        if (seen.has(key)) throw new StudioError(400, `${file}: 같은 경로가 두 번 있습니다`);
+        seen.add(key);
+        // 작업 폴더에서 기준을 읽는 파일은 시드하지 않는다(거부 목록: 모르면 걸린 것으로, 대소문자·정규화는 넓게 본다). 수리 실행의 게이트가
+        // 선언(studio.yaml)·보호 경로(쓰기 직전 고정)·평가 자산(게이트를 만들 때의 지문)의 기준을 작업 폴더에서 잡으므로, 먼저 쓰면 그 값이 "원래 그랬던 것"이 된다
+        const blocked = seedBaselineFile(session, file);
+        if (blocked) throw new StudioError(400, `${file}: ${blocked}`);
+        const scope = await terminalScopeDeny(session, 'Write', { file_path: file });
+        if (scope) throw new StudioError(400, scope);
+        try {
+          await workspace.assertToolPath(file);
+        } catch (error) {
+          throw new StudioError(400, `${file}: ${describe(error)}`);
+        }
+      }
+      for (const file of input.deletes) {
+        const info = await lstat(path.join(workspace.root, file)).catch(() => undefined);
+        if (!info?.isFile()) throw new StudioError(400, `${file}: 일반 파일만 지울 수 있습니다`);
+      }
+      for (const write of input.writes) await workspace.write(write.path, write.content);
+      for (const file of input.deletes) await workspace.remove(file);
+    } finally {
+      setTerminalTaskContext(id, undefined);
+    }
+  } finally {
+    session.serverApplying = undefined;
+  }
 }
 
 /**

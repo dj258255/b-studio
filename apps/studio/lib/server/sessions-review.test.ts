@@ -25,6 +25,8 @@ const fake = vi.hoisted(() => ({
   /** AI 리뷰의 고침 요청을 받은 터미널의 CLI가 할 일(파일 쓰기·"끝났다" 말하기). 요청을 받으면 이 걸음을 훅으로 한다 */
   fixSteps: [] as TerminalStep[],
   fixRequests: [] as string[],
+  /** 값이 있으면 세션 터미널로 고침을 보낼 수 없는 것이다(reviewFixBlockReason의 답) */
+  fixBlock: undefined as string | undefined,
   createPullRequest: vi.fn(async () => ({ url: 'https://github.com/acme/verifyproj/pull/1', number: 1, created: true })),
   postComment: vi.fn(async (): Promise<{ url?: string }> => ({ url: 'https://github.com/acme/verifyproj/pull/1#issuecomment-1' })),
 }));
@@ -113,7 +115,7 @@ vi.mock('./model-registry', async (importOriginal) => {
 });
 
 // 고침 요청은 세션 터미널에서 돌리는 경로로 보낸다(채팅 경로 없이). 터미널을 여는 쪽(terminal-lane)만 훅 호출로 바꾸고 나머지는 실제 코드다
-vi.mock('./session-terminal', async () => ({ ...(await import('./test-support/session-terminal-stub')).sessionTerminalStub(), reviewFixRunner: () => 'terminal' }));
+vi.mock('./session-terminal', async () => ({ ...(await import('./test-support/session-terminal-stub')).sessionTerminalStub(), reviewFixBlockReason: () => fake.fixBlock }));
 vi.mock('./terminal-lane', () => ({
   terminalLaneDriver: {},
   runTerminalTask: async () => {
@@ -170,6 +172,7 @@ beforeEach(async () => {
   fake.modelQueue = [];
   fake.fixSteps = [];
   fake.fixRequests = [];
+  fake.fixBlock = undefined;
   fake.createPullRequest.mockClear();
   fake.postComment.mockClear();
   fake.postComment.mockImplementation(async () => ({ url: 'https://github.com/acme/verifyproj/pull/1#issuecomment-1' }));
@@ -325,6 +328,23 @@ describe('PR 자동 리뷰 라운드(ADR-074)', () => {
     expect(review.rounds.map((round) => round.status)).toEqual(['fix_failed']);
     expect(review.rounds[0]!.error).toBeTruthy();
     expect(fake.fixRequests).toHaveLength(1);
+
+    await stopSession(id).catch(() => {});
+  }, 20_000);
+
+  it('고침을 세션 터미널로 보낼 수 없으면 채팅식으로 돌아가지 않고 까닭을 적어 고침 실패(stopped)로 닫는다', async () => {
+    const id = await setupSessionWithPullRequest();
+    fake.modelQueue.push(new ScriptedModelClient([{ text: blockerFinding() }]));
+    fake.fixBlock = '이 서버에서는 세션 터미널을 쓸 수 없어 AI 리뷰의 고침을 보낼 곳이 없습니다';
+
+    await runReviewRound(id);
+    await waitForEvent(id, () => getSnapshot(id)?.review?.state === 'stopped', 20_000);
+
+    const review = getSnapshot(id)!.review!;
+    expect(review.rounds.map((round) => round.status)).toEqual(['fix_failed']);
+    expect(review.rounds[0]!.error).toBe(fake.fixBlock);
+    // 터미널로 보내지 않았고, 채팅식 sendMessage 길도 없다
+    expect(fake.fixRequests).toHaveLength(0);
 
     await stopSession(id).catch(() => {});
   }, 20_000);

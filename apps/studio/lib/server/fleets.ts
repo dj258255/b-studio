@@ -2,15 +2,14 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { estimateCost } from '@b-studio/agent';
 import type { FleetCandidate, FleetMemberStatus, FleetMemberView, FleetView } from '@/lib/fleet-types';
 import type { SessionMode, StudioEvent } from '@/lib/studio-events';
 import { accountProcessEnv, resolveSessionAccount, type AiAccount } from './ai-accounts';
 import { StudioError } from './errors';
-import { listModelOptions, modelById } from './model-registry';
+import { listModelOptions } from './model-registry';
 import { findProject } from './projects';
 import { isTerminalRunnableBackend } from './session-terminal';
-import { allowedBackends, assertBackendReady, createSession, getSnapshot, resolveSessionBackend, sendMessage, sessionTerminalAllowed, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
+import { allowedBackends, assertBackendReady, createSession, resolveSessionBackend, sessionTerminalAllowed, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 
 const MAX_MEMBERS = 4;
@@ -69,8 +68,11 @@ export async function createFleet(input: {
   modelIds?: readonly string[];
   owner: string;
   allowBreaking?: boolean;
-  /** 멤버를 돌리는 방식. 없으면 chat(채팅식 실행). terminal이면 세션 터미널의 CLI에 요청을 붙여 넣어 돌린다 */
-  runner?: 'chat' | 'terminal';
+  /**
+   * 멤버를 돌리는 방식. 세션 터미널의 CLI로 돌리는 terminal 하나뿐이고 없으면 terminal이다(ADR-221).
+   * 'chat'(채팅식 실행)과 모르는 값은 세션을 만들기 전에 400으로 거절한다(조용히 terminal로 바꾸지 않는다)
+   */
+  runner?: string;
   /** 서버 안에서만 넘긴다(테스트). CLI 로그인 확인을 바꿔 끼운다 */
   preflights?: BackendPreflights;
 }): Promise<FleetView> {
@@ -80,19 +82,18 @@ export async function createFleet(input: {
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
   if (request.length > MAX_REQUEST) throw new StudioError(400, `요청은 ${MAX_REQUEST.toLocaleString()}자까지 입력할 수 있습니다`);
 
-  const runner = input.runner ?? 'chat';
-  if (runner !== 'chat' && runner !== 'terminal') throw new StudioError(400, 'runner는 chat 또는 terminal이어야 합니다');
+  const runner = input.runner ?? 'terminal';
+  if (runner === 'chat') throw new StudioError(400, '채팅식 Fleet은 더 이상 지원하지 않습니다. 멤버는 세션 터미널에서 돌립니다(runner를 빼거나 terminal로 보내세요)');
+  if (runner !== 'terminal') throw new StudioError(400, 'runner는 terminal이어야 합니다');
 
   const candidates = candidatesOf(input);
   if (candidates.length < 2 || candidates.length > MAX_MEMBERS) throw new StudioError(400, `비교할 후보를 2~${MAX_MEMBERS}개 고르세요`);
   const selected: ValidatedCandidate[] = [];
   for (const candidate of candidates) selected.push(await validateCandidate(candidate));
   // 터미널로 못 띄우는 후보는 세션을 하나도 만들기 전에 거절한다(조용히 다른 백엔드로 바꾸지 않는다)
-  if (runner === 'terminal') {
-    // 터미널 실행은 호환성을 깨는 변경 허용을 실을 길이 없다(터미널 실행은 늘 false). 다른 뜻의 허용(확인 선언 변경)으로 바꿔 켜지 않고 거절한다
-    if (input.allowBreaking === true) throw new StudioError(400, '터미널 방식 Fleet은 아직 호환성을 깨는 변경 허용을 받지 못합니다');
-    assertTerminalRunnable(selected);
-  }
+  // 터미널 실행은 호환성을 깨는 변경 허용을 실을 길이 없다(터미널 실행은 늘 false). 다른 뜻의 허용(확인 선언 변경)으로 바꿔 켜지 않고 거절한다
+  if (input.allowBreaking === true) throw new StudioError(400, '터미널 방식 Fleet은 아직 호환성을 깨는 변경 허용을 받지 못합니다');
+  assertTerminalRunnable(selected);
 
   // CLI 백엔드는 멤버를 만들기 전에 로그인을 확인한다. 실패하면 Fleet을 만들지 않고 이유를 알린다
   // (멤버를 몇 개 만들다 실패하면 절반만 뜬 비교가 남는다). 계정을 고른 후보는 그 계정의 설정 폴더로 확인한다(#892)
@@ -111,7 +112,8 @@ export async function createFleet(input: {
     projectId: input.projectId,
     projectName: input.projectId,
     request,
-    allowBreaking: input.allowBreaking === true,
+    // 터미널 실행은 호환성을 깨는 변경 허용을 실을 길이 없어 위에서 true를 거절했다
+    allowBreaking: false,
     runner,
     createdAt: new Date().toISOString(),
     members: [],
@@ -307,25 +309,7 @@ function updateMember(fleet: FleetView, member: FleetMemberView, event: StudioEv
     persist(fleet);
     return;
   }
-  // 터미널 Fleet의 끝은 runTerminalTask가 돌려준 값으로만 쓴다(늦게 오는 텔레메트리까지 더한 값이라, 여기서 쓰면 두 번 쓴다)
-  if (event.type === 'run_finished' && event.runId === member.runId && fleet.runner !== 'terminal') {
-    member.status = event.status;
-    member.summary = event.summary;
-    member.turns = event.turns;
-    member.usage = event.usage;
-    // 실행 중 모델이 바뀌었으면(승격) 모델별 사용량을 남긴다 — 화면이 토큰 탭과 같은 표기로 보여 준다
-    member.usageByModel = event.metrics?.usageByModel;
-    member.finishedAt = new Date().toISOString();
-    try {
-      // 비용은 모델 레지스트리에 단가가 있는 api 후보만 계산한다(CLI 구독은 청구가 없어 의미가 없다)
-      const model = member.backend === 'api' && member.modelId ? modelById(member.modelId) : undefined;
-      member.costUsd = model && event.usage ? estimateCost(model, event.usage) : undefined;
-    } catch {
-      // 실행 중 레지스트리에서 모델을 지웠어도 세션 결과 자체는 보존한다
-      member.costUsd = undefined;
-    }
-    persist(fleet);
-  }
+  // 끝은 runTerminalTask가 돌려준 값으로만 쓴다(늦게 오는 텔레메트리까지 더한 값이라, 여기서 run_finished로 쓰면 두 번 쓴다)
 }
 
 /** 테스트가 터미널 실행의 driver·이벤트 통로·시계를 바꿔 끼우는 자리. undefined면 실제 값(terminal-lane.ts)을 쓴다 */
@@ -337,21 +321,7 @@ export function setFleetTerminalDepsForTest(deps: Partial<TerminalTaskDeps> | un
 function startMember(fleet: FleetView, member: FleetMemberView): void {
   // 같은 ready 이벤트가 재생돼도 runId를 먼저 넣어 한 번만 보낸다
   member.runId = 'starting';
-  if (fleet.runner === 'terminal') {
-    void runTerminalMember(fleet, member);
-    return;
-  }
-  try {
-    const { runId } = sendMessage(member.sessionId, fleet.request, { allowBreaking: fleet.allowBreaking, by: fleet.owner });
-    member.runId = runId;
-    member.status = 'running';
-    member.startedAt = new Date().toISOString();
-  } catch (error) {
-    member.status = 'error';
-    member.summary = describe(error);
-    member.finishedAt = new Date().toISOString();
-  }
-  persist(fleet);
+  void runTerminalMember(fleet, member);
 }
 
 /**
@@ -430,25 +400,18 @@ function ensureLoaded(): void {
       try {
         const parsed = JSON.parse(readFileSync(path.join(root(), name), 'utf8')) as FleetView;
         if (!parsed?.id || !Array.isArray(parsed.members)) continue;
-        // runner 필드가 생기기 전 기록은 채팅식뿐이었다
+        // runner 필드가 생기기 전 기록은 채팅식뿐이었다(기록으로만 보인다)
         parsed.runner ??= 'chat';
         // 프로세스가 바뀌면 진행 중 실행을 그대로 이어받을 수 없다. 세션 기록은 각 링크에서 확인할 수 있다
         for (const member of parsed.members) {
           // backend 필드가 생기기 전 기록은 api 모드뿐이었다
           member.backend ??= 'api';
-          if (!terminal(member.status) && parsed.runner === 'terminal') {
-            // 실행을 몰던 runTerminalTask는 프로세스와 함께 사라졌다. 세션이 살아 있어도 이어받을 수 없다
+          if (!terminal(member.status)) {
+            // 실행을 몰던 runTerminalTask는 프로세스와 함께 사라졌다. 세션이 살아 있어도 이어받을 수 없다.
+            // 옛 채팅식 기록도 같다: 채팅식 실행이 없어졌으므로 세션이 살아 있어도 이어받지 않고 닫는다
             member.status = 'error';
             member.summary = 'Studio가 다시 시작되어 진행 상태를 이어받지 못했습니다. 세션을 열어 기록을 확인하세요.';
             member.finishedAt = new Date().toISOString();
-          } else if (!terminal(member.status)) {
-            const snapshot = getSnapshot(member.sessionId);
-            if (snapshot?.status === 'ready') watchMember(parsed, member);
-            else {
-              member.status = 'error';
-              member.summary = 'Studio가 다시 시작되어 진행 상태를 이어받지 못했습니다. 세션을 열어 기록을 확인하세요.';
-              member.finishedAt = new Date().toISOString();
-            }
           }
         }
         fleets.set(parsed.id, parsed);

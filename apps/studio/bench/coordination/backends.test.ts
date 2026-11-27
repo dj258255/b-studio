@@ -3,6 +3,9 @@ import {
   assertContractsBackend,
   assertContractsStrategy,
   assertCoordinationBackend,
+  assertTerminalBench,
+  type BenchLaneGroup,
+  type LaneBackendChoice,
   assertPlainBaselineBackend,
   cliBackendsInUse,
   parseLaneBackend,
@@ -309,5 +312,22 @@ describe('레인 백엔드(--lane-backend)', () => {
   it('claude-code 레인이 하나라도 있으면 --escalate-to를 허용한다', () => {
     expect(resolveEscalation({ backend: 'openai', laneBackends: ['claude-code'], escalateTo: 'sonnet' })).toEqual({ to: 'sonnet', after: 2, retryBudget: 2 });
     expect(() => resolveEscalation({ backend: 'openai', laneBackends: ['codex'], escalateTo: 'sonnet' })).toThrow(/claude-code/);
+  });
+});
+
+describe('벤치는 레인을 세션 터미널에서 돌린다(assertTerminalBench)', () => {
+  const none = new Map<BenchLaneGroup, LaneBackendChoice>();
+  it('터미널로 띄울 수 있는 백엔드·전략·검증 범위는 통과한다', () => {
+    expect(() => assertTerminalBench({ backend: 'openai', laneBackends: none, strategies: ['S0', 'S1', 'S2', 'S3', 'S4', 'S5', 'S7'], verify: 'full' })).not.toThrow();
+    expect(() => assertTerminalBench({ backend: 'claude-code', laneBackends: new Map([['api', { group: 'api', backend: 'codex' }]]), strategies: ['P0'], verify: 'full' })).not.toThrow();
+    expect(() => assertTerminalBench({ backend: 'commandcode', laneBackends: none, strategies: ['S1'], verify: 'full' })).not.toThrow();
+  });
+  it('opencode·gemini는 터미널 CLI가 없어 계획 기본이든 레인이든 거절한다', () => {
+    expect(() => assertTerminalBench({ backend: 'opencode', laneBackends: none, strategies: ['S1'], verify: 'full' })).toThrow(/opencode.*터미널/);
+    expect(() => assertTerminalBench({ backend: 'claude-code', laneBackends: new Map([['web', { group: 'web', backend: 'gemini' }]]), strategies: ['S1'], verify: 'full' })).toThrow(/gemini.*터미널/);
+  });
+  it('S6과 --verify light는 터미널 레인이 받지 않아 거절한다', () => {
+    expect(() => assertTerminalBench({ backend: 'claude-code', laneBackends: none, strategies: ['S1', 'S6'], verify: 'full' })).toThrow(/S6/);
+    expect(() => assertTerminalBench({ backend: 'claude-code', laneBackends: none, strategies: ['S1'], verify: 'light' })).toThrow(/light/);
   });
 });

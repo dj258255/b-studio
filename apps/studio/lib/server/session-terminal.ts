@@ -90,13 +90,23 @@ export function isTerminalRunnableBackend(backend: string, env: Record<string, s
 }
 
 /**
- * AI 리뷰의 고침을 어디서 돌릴까. 세션 터미널을 쓸 수 있고(allowed) 그 백엔드의 터미널 CLI가 있으면 터미널, 아니면 채팅식이다.
- * api는 자체 CLI의 키가 서버 환경에 있을 때만 터미널이다(키가 없으면 터미널이 열리지 않는다, ADR-226)
+ * AI 리뷰의 고침을 세션 터미널로 보낼 수 없는 까닭. 보낼 수 있으면 undefined다(막는 쪽: 모르는 입력은 까닭을 돌려준다).
+ * 채팅식으로 돌아가지 않는다(ADR-221): 까닭을 돌려주면 호출한 쪽이 고침 실패로 닫는다.
+ * 세션 터미널을 쓸 수 있어야 하고(allowed) 그 백엔드의 터미널 CLI가 있어야 한다. api는 자체 CLI의 키·모델이 정해졌을 때만이다(ADR-226)
  */
-export function reviewFixRunner(input: { allowed: boolean; backend: string; apiKeyReady: boolean }, env: Record<string, string | undefined> = process.env): 'terminal' | 'chat' {
-  if (!input.allowed || !isTerminalRunnableBackend(input.backend, env)) return 'chat';
-  if (input.backend === 'api' && !input.apiKeyReady) return 'chat';
-  return 'terminal';
+export function reviewFixBlockReason(
+  input: { allowed: boolean; backend: string; apiKeyReady: boolean; apiKeyError?: string },
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  if (!input.allowed) return '이 서버에서는 세션 터미널을 쓸 수 없어 AI 리뷰의 고침을 보낼 곳이 없습니다(개인 PC 모드가 필요하고, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도 필요합니다)';
+  if (!isTerminalRunnableBackend(input.backend, env)) {
+    if (input.backend === 'api' || input.backend === 'codex') return `컨테이너 방식 터미널은 ${input.backend} 세션을 띄우지 못해 AI 리뷰의 고침을 보낼 수 없습니다`;
+    return `${input.backend} 세션은 이 서버의 터미널에서 띄울 수 없어 AI 리뷰의 고침을 보낼 수 없습니다`;
+  }
+  if (input.backend === 'api' && !input.apiKeyReady) {
+    return `API 세션의 자체 CLI가 쓸 키·모델을 정하지 못해 터미널이 열리지 않아 AI 리뷰의 고침을 보낼 수 없습니다${input.apiKeyError ? `: ${input.apiKeyError}` : ' (키를 확인하세요)'}`;
+  }
+  return undefined;
 }
 
 export type TerminalMessage =

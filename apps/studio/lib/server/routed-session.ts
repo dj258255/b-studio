@@ -1,7 +1,7 @@
 /**
  * 규칙으로 고른 AI로 새 세션을 만들고 첫 요청을 보낸다(#822). 플릿(fleets.ts)과 같은 순서다: 세션을 만들고 → 요청을 보낸다.
  * 세션은 사람이 만든 일반 세션처럼 샌드박스를 지연 기동한다(첫 만들기 요청이 켠다).
- * terminal이면(#836) 대화 러너 대신 고른 AI의 CLI 터미널을 열고, 첫 요청을 CLI 실행 인자로 넘긴다. 키 입력(붙여 넣기 + Enter)으로
+ * 고른 AI의 CLI 터미널을 열고(#836, 채팅식 실행은 없다 — ADR-221), 첫 요청을 CLI 실행 인자로 넘긴다. 키 입력(붙여 넣기 + Enter)으로
  * 넣지 않는다: CLI가 시작하며 묻는 창(폴더 신뢰, 훅 신뢰, 업데이트)이 뜨면 그 글과 Enter가 사람 대신 그 창의 답이 된다.
  * 게이트·체크포인트는 터미널 실행의 관문이 그대로 맡는다.
  */
@@ -15,7 +15,7 @@ import { newSessionModel } from './new-session';
 import { findProject } from './projects';
 import { openSessionTerminal, sessionTerminalMode, type TerminalMode } from './session-terminal';
 import { commandCodeTerminalReason, openCodeTerminalReason } from './terminal-allowed';
-import { createSession, sendMessage, sessionTerminalAllowed, sessionTerminalTarget, setTerminalCheckChanges, subscribe } from './sessions';
+import { createSession, sessionTerminalAllowed, sessionTerminalTarget, setTerminalCheckChanges, subscribe } from './sessions';
 
 export interface RoutedTerminal {
   opened: true;
@@ -28,10 +28,9 @@ export interface RoutedTerminal {
 export interface RoutedSession {
   session: SessionSnapshot;
   routing: RoutingDecision;
-  /** 보낸 요청의 실행. 세션은 만들었는데 보내지 못했으면 없고 sendError에 까닭이 있다. 터미널로 보냈으면 없다 */
-  runId?: string;
+  /** 세션은 만들었는데 터미널로 보내지 못한 까닭. 이때 terminal은 없다 */
   sendError?: string;
-  /** 터미널로 보냈을 때만 있다(#836) */
+  /** 터미널로 보냈을 때 있다(#836) */
   terminal?: RoutedTerminal;
 }
 
@@ -100,15 +99,17 @@ export async function startRoutedSession(
 ): Promise<RoutedSession> {
   const request = input.request.trim();
   if (!request) throw new StudioError(400, '요청 내용을 입력하세요');
-  const terminalDeps = input.terminal ? { ...defaultTerminalDeps, ...terminalOverrides } : undefined;
-  if (terminalDeps && !terminalDeps.allowed()) throw new StudioError(400, '터미널로 보내려면 개인 PC 모드여야 합니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
+  // 첫 요청은 세션 터미널로만 보낸다(ADR-221). 채팅식(sendMessage)으로 돌아가지 않고, 세션을 만들기 전에 거절한다
+  if (!input.terminal) throw new StudioError(400, '첫 요청은 세션 터미널로만 보냅니다(terminal: true를 함께 보내세요). 채팅식 실행은 지원하지 않습니다');
+  const terminalDeps = { ...defaultTerminalDeps, ...terminalOverrides };
+  if (!terminalDeps.allowed()) throw new StudioError(400, '터미널로 보내려면 개인 PC 모드여야 합니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
-  const only = terminalDeps ? terminalBackends(terminalDeps.mode()) : undefined;
+  const only = terminalBackends(terminalDeps.mode());
   // 직접 고른 AI(#827)는 규칙을 건너뛴다. 그 AI를 쓸 수 없으면 세션을 만들기 전에 거절한다
   const routing = input.direct
-    ? await chooseDirect({ ...input.direct, request, intent: input.intent, cwd: project.root, ...(only ? { only } : {}) })
-    : await chooseBackend({ request, intent: input.intent, cwd: project.root, ...(only ? { only } : {}) });
+    ? await chooseDirect({ ...input.direct, request, intent: input.intent, cwd: project.root, only })
+    : await chooseBackend({ request, intent: input.intent, cwd: project.root, only });
   const backend = routing.backend as SessionMode;
   const { modelId, effort } = await newSessionModel(input.projectId, backend, routing.model);
   // 고른 계정(#885)으로 세션을 만든다. 터미널과 러너가 그 계정의 설정 폴더로 CLI를 띄운다
@@ -123,13 +124,9 @@ export async function startRoutedSession(
     // 대화 창에서 보낸 요청과 같은 조건이다(messages 라우트). 설계 승인은 만들기 요청만 본다
     if (input.intent === 'build') await assertDesignApprovedForRequest(session.id, request);
     const allowCheckChanges = input.allowCheckChanges === true && input.intent === 'build';
-    if (terminalDeps) {
-      // 터미널의 첫 요청은 CLI가 훅으로 알려 온다. 그 실행이 가져가게 터미널을 열기 전에 켜 둔다
-      if (allowCheckChanges) setTerminalCheckChanges(session.id, true);
-      return { session, routing, terminal: await openWithFirstRequest(session.id, request, input.intent, terminalDeps) };
-    }
-    const { runId } = sendMessage(session.id, request, { allowBreaking: false, by: input.user, intent: input.intent, interactive: true, steering: true, ...(allowCheckChanges ? { allowCheckChanges: true } : {}) });
-    return { session, routing, runId };
+    // 터미널의 첫 요청은 CLI가 훅으로 알려 온다. 그 실행이 가져가게 터미널을 열기 전에 켜 둔다
+    if (allowCheckChanges) setTerminalCheckChanges(session.id, true);
+    return { session, routing, terminal: await openWithFirstRequest(session.id, request, input.intent, terminalDeps) };
   } catch (error) {
     // 세션은 이미 만들어졌다. 지우지 않고 돌려줘 화면이 그 세션을 열고 까닭을 보이게 한다
     return { session, routing, sendError: error instanceof Error ? error.message : String(error) };

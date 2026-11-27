@@ -11,7 +11,7 @@ import {
   removeContainerAndConfig,
   removeTerminalLeftovers,
   resizeSessionTerminal,
-  reviewFixRunner,
+  reviewFixBlockReason,
   noteSessionTerminalCli,
   sessionTerminalInputState,
   sessionTerminalMode,
@@ -789,8 +789,8 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(isTerminalRunnableBackend('commandcode', { ...container, ...on })).toBe(false);
     expect(isTerminalRunnableBackend('commandcode', { B_STUDIO_EXPERIMENTAL: '1' })).toBe(true);
     expect(isTerminalRunnableBackend('commandcode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
-    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
-    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
+    expect(reviewFixBlockReason({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...host, ...on })).toBeUndefined();
+    expect(reviewFixBlockReason({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...container, ...on })).toContain('commandcode');
     // 아직 열지 않는 새 갈래
     expect(isTerminalRunnableBackend('gemini', { ...host, ...on })).toBe(false);
   });
@@ -801,9 +801,9 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(isTerminalRunnableBackend('opencode', { ...host, ...on })).toBe(true);
     expect(isTerminalRunnableBackend('opencode', { ...container, ...on })).toBe(false);
     expect(isTerminalRunnableBackend('opencode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
-    expect(reviewFixRunner({ allowed: true, backend: 'opencode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
-    expect(reviewFixRunner({ allowed: true, backend: 'opencode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
-    expect(reviewFixRunner({ allowed: true, backend: 'opencode', apiKeyReady: true }, host)).toBe('chat');
+    expect(reviewFixBlockReason({ allowed: true, backend: 'opencode', apiKeyReady: true }, { ...host, ...on })).toBeUndefined();
+    expect(reviewFixBlockReason({ allowed: true, backend: 'opencode', apiKeyReady: true }, { ...container, ...on })).toEqual(expect.any(String));
+    expect(reviewFixBlockReason({ allowed: true, backend: 'opencode', apiKeyReady: true }, host)).toEqual(expect.any(String));
   });
 
   it('opencode 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {
@@ -826,13 +826,15 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     await expect(terminalBackend('host').prepare({ ...target, cli: 'commandcode', accountDir: async () => '/home/kim/.commandcode-2' }, address2)).rejects.toThrow('기본 계정');
   });
 
-  it('AI 리뷰의 고침은 터미널을 쓸 수 있으면 터미널, 아니면 채팅식이다. api는 키가 있을 때만 터미널이다', () => {
-    expect(reviewFixRunner({ allowed: true, backend: 'claude-code', apiKeyReady: false }, host)).toBe('terminal');
-    expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: true }, host)).toBe('terminal');
-    expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: false }, host)).toBe('chat');
-    expect(reviewFixRunner({ allowed: true, backend: 'api', apiKeyReady: true }, container)).toBe('chat');
-    expect(reviewFixRunner({ allowed: false, backend: 'claude-code', apiKeyReady: true }, host)).toBe('chat');
-    expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, host)).toBe('chat');
+  it('AI 리뷰의 고침은 터미널을 쓸 수 있고 그 백엔드의 터미널 CLI가 있을 때만 보낸다. 아니면 채팅식으로 돌아가지 않고 까닭을 돌려준다(api는 키가 있을 때만)', () => {
+    expect(reviewFixBlockReason({ allowed: true, backend: 'claude-code', apiKeyReady: false }, host)).toBeUndefined();
+    expect(reviewFixBlockReason({ allowed: true, backend: 'claude-code', apiKeyReady: false }, container)).toBeUndefined();
+    expect(reviewFixBlockReason({ allowed: true, backend: 'api', apiKeyReady: true }, host)).toBeUndefined();
+    expect(reviewFixBlockReason({ allowed: true, backend: 'api', apiKeyReady: false, apiKeyError: 'API 키 없음' }, host)).toContain('API 키 없음');
+    expect(reviewFixBlockReason({ allowed: true, backend: 'api', apiKeyReady: false }, host)).toContain('키');
+    expect(reviewFixBlockReason({ allowed: true, backend: 'api', apiKeyReady: true }, container)).toContain('컨테이너');
+    expect(reviewFixBlockReason({ allowed: false, backend: 'claude-code', apiKeyReady: true }, host)).toContain('세션 터미널');
+    expect(reviewFixBlockReason({ allowed: true, backend: 'commandcode', apiKeyReady: true }, host)).toContain('commandcode');
   });
 });
 

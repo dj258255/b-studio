@@ -30,6 +30,7 @@ import {
   assertContractsBackend,
   assertContractsStrategy,
   assertCoordinationBackend,
+  assertTerminalBench,
   assertPlainBaselineBackend,
   cliBackendsInUse,
   parseLaneBackends,
@@ -356,6 +357,8 @@ async function runOnce(context: RunContext, task: BenchTask, strategy: Strategy,
       request: task.request,
       modelId: context.planModelId,
       owner: localUser,
+      // 레인은 세션 터미널에서 돈다(ADR-243). 벤치 서버 프로세스는 이 컴퓨터 방식 터미널을 쓰도록 환경을 맞췄다(benchEnv)
+      runner: 'terminal',
       ...(context.backend === 'openai' ? {} : { presetPlan: planJson }),
       // S2~S5의 조율 설정은 서버 안에서만 넘긴다. S0·S1은 없다
       ...(coordination ? { coordination } : {}),
@@ -982,6 +985,8 @@ async function main(): Promise<void> {
   assertPlainBaselineBackend(backend, strategies);
   // 조율 전략(S2·S3·S5·S6·S7)은 게시판(post_note·read_notes)을 지원하는 백엔드에서만 쓴다. 지원 표는 한 곳(backendSupportsBoard)에서만 본다
   assertCoordinationBackend(strategies, backend, laneBackendChoices);
+  // 레인은 세션 터미널에서 돈다(채팅식 실행은 없다). 터미널로 못 띄우는 백엔드·전략·검증 범위는 여기서 막는다
+  assertTerminalBench({ backend, laneBackends: laneBackendChoices, strategies, verify });
   // P0는 b-studio 게이트를 쓰지 않아 verify가 적용되지 않는다. light와 함께 주면 무시하고 한 줄 알린다
   const verifyWarning = verifyNotice(verify, strategies);
   if (verifyWarning) console.warn(verifyWarning);
@@ -1117,6 +1122,9 @@ async function main(): Promise<void> {
       B_STUDIO_SESSIONS_DIR: path.join(workRoot, 'sessions'),
       B_STUDIO_TASK_PLANS_DIR: path.join(workRoot, 'task-plans'),
       B_STUDIO_MODEL_OBSERVATIONS_FILE: path.join(workRoot, 'model-observations.json'),
+      // 레인은 이 컴퓨터 방식 세션 터미널에서 돈다. Command Code 터미널은 실험 스위치가 필요하다
+      B_STUDIO_TERMINAL: 'host',
+      ...(backend === 'commandcode' || [...laneBackendChoices.values()].some((lane) => lane.backend === 'commandcode') ? { B_STUDIO_EXPERIMENTAL: '1' } : {}),
     };
     if (backend === 'openai') {
       const registryFile = path.join(workRoot, 'models.json');
