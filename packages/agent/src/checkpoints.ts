@@ -533,6 +533,17 @@ export class CheckpointStore {
       // 옛 stat 캐시(같은 크기·시각으로 되돌린 파일)가 있어, 복사하면 `add -A`가 그 파일을 읽지 않고 시험 파일의 삭제·건너뛰기를 놓친다.
       // 새 인덱스에는 표시도 캐시도 없어 추적하는 파일을 모두 내용으로 다시 읽는다(큰 저장소에서는 그만큼 느리다)
       await this.#git(['read-tree', 'HEAD'], { env });
+      // 체크포인트 커밋은 진짜 인덱스를 쓴다. 진짜 인덱스에는 있고 HEAD에는 없는 경로(`git add -f`로 올린 무시 대상 파일 등)는 `add -A`가 다시 만들지 못하므로
+      // (게이트와 커밋이 다른 집합을 보게 된다) 그 경로만 강제로 더한다. 표시·stat 캐시는 가져오지 않는다(내용은 작업 트리에서 다시 읽는다).
+      // 목록을 읽지 못하면 던진다. 작업 트리에서 지워진 것은 바뀐 것이 없으므로 건너뛴다(없는 경로에 add -f는 실패한다)
+      const stagedOnly = (await this.#git(['diff', '--cached', '--name-only', '-z', '--diff-filter=A', 'HEAD', ...(await this.#scope())]))
+        .split('\0')
+        .filter((file) => file !== '');
+      const present: string[] = [];
+      for (const file of stagedOnly) if (await lstat(path.join(this.root, file)).then(() => true, () => false)) present.push(file);
+      for (let index = 0; index < present.length; index += 200) {
+        await this.#git(['add', '-f', '--', ...present.slice(index, index + 200)], { env });
+      }
       await this.#git(['add', '-A', ...(await this.#scope())], { env });
       const relative = await this.#relative();
       const subdir = await this.#subdir();

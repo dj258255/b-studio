@@ -323,6 +323,20 @@ describe('작업 복사본의 변경 목록(CheckpointStore.pendingTestChanges)'
     expect(byPath(entries, 'web/b.test.ts')).toEqual({ status: 'D', path: 'web/b.test.ts' });
   });
 
+  it('진짜 인덱스에만 있고 HEAD에는 없는 경로(무시 목록에 든 파일을 add -f로 올린 것)도 읽는다', async () => {
+    const store = await started({ '.gitignore': 'gen/\n' });
+    await write('gen/x.test.ts', 'a\n');
+    await execFileAsync('git', ['-C', root, 'add', '-f', 'gen/x.test.ts']);
+    await write('gen/x.test.ts', "a\nit.skip('x', f);\n");
+    // 올려 두었다가 지운 것은 바뀐 것이 없다
+    await write('gen/y.test.ts', 'b\n');
+    await execFileAsync('git', ['-C', root, 'add', '-f', 'gen/y.test.ts']);
+    await rm(path.join(root, 'gen/y.test.ts'));
+    const entries = await store.pendingTestChanges();
+    expect(entries).toEqual([{ status: 'A', path: 'gen/x.test.ts', added: ['a', "it.skip('x', f);"] }]);
+    expect(review(entries)?.ok).toBe(false);
+  });
+
   it('git 읽기가 실패하면 던진다', async () => {
     const store = await started();
     await rm(path.join(root, '.git/HEAD'));
