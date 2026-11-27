@@ -170,9 +170,24 @@ struct Marker {
 }
 
 impl Marker {
+    /// `unless`가 있으면 줄 끝의 `//` 주석을 떼고, 패턴이 맞는 자리마다 그 자리부터가 `unless` 모양(줄머리 고정)인지 본다.
+    /// 예외가 아닌 자리가 하나라도 있으면 표시다: 같은 줄에 의존성 모양을 덧붙여 시험 제외를 가리는 길을 막는다
     fn matches(&self, line: &str) -> bool {
-        self.pattern.is_match(line) && !self.unless.as_ref().is_some_and(|unless| unless.is_match(line))
+        let Some(unless) = &self.unless else { return self.pattern.is_match(line) };
+        let code = strip_line_comment(line);
+        self.pattern.find_iter(code).any(|found| !unless.is_match(&code[found.start()..]))
     }
+}
+
+/// 줄 끝의 `//` 주석(앞이 공백이거나 줄 머리인 것)을 뗀다
+fn strip_line_comment(line: &str) -> &str {
+    let bytes = line.as_bytes();
+    for index in 0..bytes.len().saturating_sub(1) {
+        if bytes[index] == b'/' && bytes[index + 1] == b'/' && (index == 0 || bytes[index - 1].is_ascii_whitespace()) {
+            return &line[..index];
+        }
+    }
+    line
 }
 
 fn markers(list: &[(&'static str, &str)]) -> Vec<Marker> {
@@ -283,10 +298,28 @@ static GRADLE_CONFIG_MARKERS: LazyLock<Vec<Marker>> = LazyLock::new(|| {
         label: "exclude",
         pattern: Regex::new(r"(?-u:\b)exclude(?-u:\b)").expect("정규식"),
         // 의존성의 exclude(`exclude group: 'x'`, `exclude(group = "x")`, `exclude module:`)는 시험을 빼는 것이 아니다
-        unless: Some(Regex::new(r"(?-u:\b)exclude[ \t]*\(?[ \t]*(?:group|module)[ \t]*[:=]").expect("정규식")),
+        unless: Some(Regex::new(r"^exclude[ \t]*\(?[ \t]*(?:group|module)[ \t]*[:=]").expect("정규식")),
     });
     list
 });
+static ADDOPTS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^[ \t]*addopts[ \t]*[=:]").expect("정규식"));
+
+/// 이 줄이 ini 꼴 `addopts =` 값에 이어진 줄(들여쓴 줄, 사이의 빈 줄 허용)인지
+fn continues_addopts(lines: &[&str], index: usize) -> bool {
+    if !lines[index].starts_with([' ', '\t']) {
+        return false;
+    }
+    for line in lines[..index].iter().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with([' ', '\t']) {
+            return ADDOPTS.is_match(line);
+        }
+    }
+    false
+}
+
 static MODIFYITEMS: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?-u:\b)pytest_collection_modifyitems(?-u:\b)").expect("정규식"));
 static MODIFYITEMS_DROP: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)skip|deselect|\.remove[ \t]*\(|(?-u:\b)del(?-u:\b)|\.clear[ \t]*\(|\.pop[ \t]*\(|items[ \t]*\[").expect("정규식"));
@@ -342,8 +375,10 @@ pub fn config_markers_in(kind: ConfigKind, added: &[String], at: Option<&[usize]
     let mut inside: Vec<usize> = Vec::new();
     for (position, line) in added.iter().enumerate() {
         let mut hit = false;
+        // 인자를 따옴표·쉼표로 나눠 쓴 배열(`["-k", "not slow"]`)도 찾도록 Python 설정은 구분 글자를 공백으로 바꾼 줄도 본다
+        let spread: String = if kind == ConfigKind::Python { line.chars().map(|c| if matches!(c, '"' | '\'' | ',' | '[' | ']') { ' ' } else { c }).collect() } else { String::new() };
         for marker in set {
-            if marker.matches(line) {
+            if marker.matches(line) || (kind == ConfigKind::Python && marker.matches(&spread)) {
                 push_label(&mut found, marker.label);
                 hit = true;
             }
@@ -377,6 +412,14 @@ pub fn config_markers_in(kind: ConfigKind, added: &[String], at: Option<&[usize]
                     push_label(&mut found, marker.label);
                 }
             }
+            // `addopts = [` 배열 안에 더한 줄은 모두 검토 대상이다(인자를 줄마다 나눠 쓸 수 있다)
+            if kind == ConfigKind::Python && ADDOPTS.is_match(lines[*opener]) {
+                push_label(&mut found, "addopts 안의 줄");
+            }
+        }
+        // ini의 `addopts =` 뒤에 이어진(들여쓴) 줄도 같다
+        if kind == ConfigKind::Python && continues_addopts(&lines, number - 1) {
+            push_label(&mut found, "addopts 안의 줄");
         }
     }
     Ok(found)
@@ -655,6 +698,7 @@ pub fn review_test_changes(changes: &[Change], allowed: bool, incomplete: Option
 struct Findings {
     deleted: Vec<String>,
     snapshots: Vec<String>,
+    configs: Vec<String>,
     skipped: Vec<String>,
     excluded: Vec<String>,
     scripts: Vec<String>,
@@ -664,7 +708,7 @@ struct Findings {
 
 impl Findings {
     fn is_clean(&self) -> bool {
-        self.deleted.is_empty() && self.snapshots.is_empty() && self.skipped.is_empty() && self.excluded.is_empty() && self.scripts.is_empty() && self.assertions.is_empty()
+        self.deleted.is_empty() && self.snapshots.is_empty() && self.configs.is_empty() && self.skipped.is_empty() && self.excluded.is_empty() && self.scripts.is_empty() && self.assertions.is_empty()
     }
 }
 
@@ -679,6 +723,10 @@ fn review_change(change: &Change, found: &mut Findings) {
             if is_snapshot_path(&change.path) {
                 found.snapshots.push(shown(&change.path));
             }
+            // 시험 설정 파일을 지우면 `package.json`의 test 스크립트·설정의 시험 선택이 함께 사라진다(바뀐 뒤를 빈 집합으로 본 것과 같다)
+            if config_kind(&change.path).is_some() {
+                found.configs.push(shown(&change.path));
+            }
         }
         // 일반 파일이던 시험이 링크 등으로 바뀌었다: 시험으로 돌아가는 파일이 아니다
         'T' => {
@@ -687,6 +735,9 @@ fn review_change(change: &Change, found: &mut Findings) {
             }
             if is_snapshot_path(&change.path) {
                 found.snapshots.push(format!("{} (파일 종류가 바뀜)", shown(&change.path)));
+            }
+            if config_kind(&change.path).is_some() {
+                found.configs.push(format!("{} (파일 종류가 바뀜)", shown(&change.path)));
             }
         }
         'A' | 'M' | 'C' | 'R' => {
@@ -697,6 +748,13 @@ fn review_change(change: &Change, found: &mut Findings) {
             // 스냅샷은 스냅샷 이름으로만 옮길 수 있다. 다른 이름으로 옮기면 더는 읽히지 않는다
             if change.status == 'R' && from_snapshot && !is_snapshot_path(&change.path) {
                 found.snapshots.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
+            }
+            // 설정 파일을 같은 종류가 아닌 이름으로 옮기면 더는 읽히지 않는다(옮긴 곳의 내용은 따로 본다)
+            if change.status == 'R' {
+                let from_kind = change.from.as_deref().and_then(config_kind);
+                if from_kind.is_some() && from_kind != config_kind(&change.path) {
+                    found.configs.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
+                }
             }
             let reviewed = is_reviewed_test_path(&change.path);
             if needs_added_lines(&change.path) {
@@ -725,7 +783,7 @@ fn review_change(change: &Change, found: &mut Findings) {
         }
         // 합치지 못한 변경이나 모르는 상태: 시험 파일이면 읽지 못한 것이다
         _ => {
-            if is_reviewed_test_path(&change.path) || from_reviewed || is_snapshot_path(&change.path) || from_snapshot {
+            if is_reviewed_test_path(&change.path) || from_reviewed || is_snapshot_path(&change.path) || from_snapshot || config_kind(&change.path).is_some() {
                 found.unknown.push(shown(&change.path));
             }
         }
@@ -758,6 +816,9 @@ fn summary(found: &Findings, with_unknown: bool) -> String {
     }
     if !found.snapshots.is_empty() {
         parts.push(format!("지운 스냅샷 파일: {}", listed(&found.snapshots)));
+    }
+    if !found.configs.is_empty() {
+        parts.push(format!("지운 시험 설정 파일: {}", listed(&found.configs)));
     }
     if !found.skipped.is_empty() {
         parts.push(format!("새로 더한 건너뛰기 표시: {}", listed(&found.skipped)));
@@ -1434,5 +1495,73 @@ mod tests {
         ] {
             assert!(review_from_value(&js_json::parse_native(bad).unwrap()).is_err(), "{bad}");
         }
+    }
+
+    // ── 커밋 보안 검토 지적 ──────────────────────────────────────────────
+
+    #[test]
+    fn gradle의_의존성_예외는_줄_전체가_의존성_exclude_문일_때만_적용한다() {
+        for line in [
+            "    exclude '**/OrderTest*'  // exclude group: 'x'",
+            "test { exclude '**/Slow*' }; exclude(group = \"a\")",
+            "    exclude '**/Slow*'; exclude group: 'a'",
+            "    exclude(\"**/Slow*\") /* exclude group: 'x' */ ; exclude module: 'y'",
+        ] {
+            assert!(!config_hits("build.gradle", line).is_empty(), "{line}");
+        }
+        for line in [
+            "    exclude group: 'org.slf4j'",
+            "    implementation('x:y:1') { exclude group: 'org.slf4j' }",
+            "    implementation(\"x:y:1\") { exclude(group = \"a\", module = \"b\") }  // exclude 'x' 설명",
+        ] {
+            assert!(config_hits("build.gradle.kts", line).is_empty(), "{line}");
+        }
+    }
+
+    fn py_hits_in(path: &str, after: &str, numbers: &[usize]) -> Vec<&'static str> {
+        let all: Vec<&str> = after.split('\n').collect();
+        let added: Vec<String> = numbers.iter().map(|n| all[n - 1].to_owned()).collect();
+        config_markers_in(config_kind(path).unwrap(), &added, Some(numbers), Some(after)).unwrap()
+    }
+
+    #[test]
+    fn pytest_addopts의_나눠_쓴_인자도_걸린다() {
+        // pyproject의 배열: 인자를 다른 줄에 둔다
+        let toml = "[tool.pytest.ini_options]\naddopts = [\n  \"-q\",\n  \"-k\",\n  \"not slow\",\n]\n";
+        assert!(!py_hits_in("pyproject.toml", toml, &[4, 5]).is_empty());
+        assert!(!py_hits_in("pyproject.toml", toml, &[5]).is_empty());
+        // 들여쓰지 않은 배열 항목(이어진 줄 규칙이 아니라 배열 안의 줄 규칙으로 걸린다)
+        let flat = "[tool.pytest.ini_options]\naddopts = [\n\"-q\",\n\"-k\",\n\"not slow\",\n]\n";
+        assert!(!py_hits_in("pyproject.toml", flat, &[4]).is_empty());
+        // 한 줄 배열
+        assert!(!py_hits_in("pyproject.toml", "addopts = [\"-k\", \"not slow\"]\n", &[1]).is_empty());
+        assert!(!py_hits_in("pyproject.toml", "addopts = [\"--deselect\", \"tests/a.py::t\"]\n", &[1]).is_empty());
+        // ini의 이어진 줄
+        let ini = "[pytest]\naddopts =\n    -q\n    --deselect\n    tests/a.py::t\n";
+        assert!(!py_hits_in("pytest.ini", ini, &[5]).is_empty());
+        let cfg = "[tool:pytest]\naddopts = -q\n    -k\n    not slow\n[other]\nx = 1\n    y\n";
+        assert!(!py_hits_in("setup.cfg", cfg, &[4]).is_empty());
+        // addopts가 아닌 이어진 줄이나 다른 절의 줄은 걸리지 않는다
+        assert!(py_hits_in("setup.cfg", cfg, &[7]).is_empty());
+        assert!(py_hits_in("pyproject.toml", "[tool.x]\nitems = [\n  \"-q\",\n]\n", &[3]).is_empty());
+    }
+
+    #[test]
+    fn 시험_설정_파일을_지우거나_종류를_바꾸거나_설정이_아닌_이름으로_옮기면_걸린다() {
+        for path in ["package.json", "pytest.ini", "conftest.py", "jest.config.ts", "pom.xml", "build.gradle", "web/vitest.config.mts"] {
+            let check = review_test_changes(&[change('D', path, None, None)], false, None).unwrap();
+            assert!(!check.ok, "{path}");
+            assert!(check.detail.unwrap().contains(&format!("지운 시험 설정 파일: {path}")));
+            assert!(review_test_changes(&[change('T', path, None, None)], false, None).is_some(), "T {path}");
+        }
+        let moved = review_test_changes(&[change('R', "package.json.bak", Some("package.json"), Some(&[]))], false, None).unwrap();
+        assert!(!moved.ok && moved.detail.unwrap().contains("package.json → package.json.bak"));
+        assert!(review_test_changes(&[change('R', "x/old.ini", Some("pytest.ini"), Some(&[]))], false, None).is_some());
+        // 같은 종류로 옮기는 것은 지운 것이 아니다(내용은 따로 본다)
+        assert!(review_test_changes(&[change('R', "pyproject.toml", Some("pytest.ini"), Some(&[]))], false, None).is_none());
+        // 설정이 아닌 파일의 삭제, 허용이 있는 삭제
+        assert!(review_test_changes(&[change('D', "src/app.ts", None, None)], false, None).is_none());
+        let allowed = review_test_changes(&[change('D', "package.json", None, None)], true, None).unwrap();
+        assert!(allowed.ok && allowed.detail.unwrap().contains("package.json"));
     }
 }

@@ -336,6 +336,44 @@ describe('시험 약화 검사: 설정·스크립트·스냅샷·단언', () => 
     });
   });
 
+
+  describe('커밋 보안 검토 지적', () => {
+    it('Gradle: 시험 제외 줄에 의존성 exclude 모양을 덧붙여도 가려지지 않는다', async () => {
+      for (const snippet of ["test {\n    exclude '**/OrderTest*'  // exclude group: 'x'\n}", "test { exclude '**/Slow*' }; exclude(group = \"a\")"]) {
+        const store = await started({ 'build.gradle': 'plugins { id "java" }\n' });
+        await write('build.gradle', `plugins { id "java" }\n${snippet}\n`);
+        expect((await verdict(store))?.ok, snippet).toBe(false);
+        await rm(path.join(root, '.git'), { recursive: true, force: true });
+      }
+    });
+
+    it('pytest: addopts의 인자를 다른 줄에 나눠 써도 걸린다(pyproject 배열, ini 이어진 줄)', async () => {
+      const store = await started({ 'pyproject.toml': '[tool.pytest.ini_options]\naddopts = [\n  "-q",\n]\n', 'pytest.ini': '[pytest]\naddopts = -q\n' });
+      await write('pyproject.toml', '[tool.pytest.ini_options]\naddopts = [\n  "-q",\n  "-k",\n  "not slow",\n]\n');
+      expect((await verdict(store))?.ok).toBe(false);
+      await write('pyproject.toml', '[tool.pytest.ini_options]\naddopts = [\n  "-q",\n]\n');
+      expect(await verdict(store)).toBeUndefined();
+      await write('pytest.ini', '[pytest]\naddopts = -q\n    --deselect\n    tests/test_a.py::t\n');
+      expect((await verdict(store))?.ok).toBe(false);
+    });
+
+    it.each(['package.json', 'pytest.ini', 'conftest.py', 'jest.config.js', 'pom.xml'])('시험 설정 파일 %s를 지우면 돌려보낸다', async (file) => {
+      const store = await started({ [file]: file === 'package.json' ? '{"scripts":{"test":"vitest run"}}\n' : 'x\n' });
+      await rm(path.join(root, file));
+      const check = await verdict(store);
+      expect(check?.ok).toBe(false);
+      expect(check?.detail).toContain(`지운 시험 설정 파일: ${file}`);
+    });
+
+    it('package.json을 설정이 아닌 이름으로 옮기면 돌려보내고, 같은 이름으로 하위 폴더에 옮기면 통과한다', async () => {
+      const store = await started({ 'package.json': '{"name":"x","scripts":{"test":"vitest run"}}\n' });
+      await rename(path.join(root, 'package.json'), path.join(root, 'package.json.bak'));
+      expect((await verdict(store))?.ok).toBe(false);
+      await rename(path.join(root, 'package.json.bak'), path.join(root, 'package.json'));
+      expect(await verdict(store)).toBeUndefined();
+    });
+  });
+
   describe('끝까지 읽지 못하는 경우', () => {
     it('설정 파일이 너무 커서 읽지 못하면 던진다(통과로 읽지 않는다)', async () => {
       const store = await started({ 'vitest.config.ts': 'export default {};\n' });
