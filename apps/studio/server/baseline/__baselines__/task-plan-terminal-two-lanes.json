@@ -542,6 +542,7 @@
             }
           }
         },
+        "model": "fake-model",
         "durationMs": "<durationMs>",
         "sessionTokens": {
           "inputTokens": 200,
@@ -1146,6 +1147,7 @@
               }
             }
           },
+          "model": "fake-model",
           "runId": "<run:1>",
           "sessionTokens": {
             "cacheReadTokens": 0,

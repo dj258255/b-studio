@@ -496,6 +496,7 @@
             }
           }
         },
+        "model": "claude-sonnet-4-5",
         "durationMs": "<durationMs>",
         "sessionTokens": {
           "inputTokens": 100,
@@ -1001,6 +1002,7 @@
               }
             }
           },
+          "model": "claude-sonnet-4-5",
           "runId": "<run:1>",
           "sessionTokens": {
             "cacheReadTokens": 0,
