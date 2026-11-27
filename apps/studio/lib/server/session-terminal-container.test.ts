@@ -97,15 +97,18 @@ describe('컨테이너 방식 prepare: 어떤 이미지와 관문 파일로 띄�
   it('codex는 에이전트 이미지로 띄우고 관문 폴더에 codex 파일을 더한다. 서버 방식의 홈 사용자를 넘긴다', async () => {
     const { options, files } = await prepare({ cli: 'codex', homeUser: 'kim' });
     expect(options.image).toBe(AGENT_CODEX_IMAGE);
+    // /etc/codex의 관리 요구사항(훅)을 붙이라는 뜻이다. 감싸개 없이 직접 실행해도 훅이 적용되게 한다
+    expect(options.codexEtc).toBe(true);
     expect(options.userId).toBe('kim');
     expect(options.projectId).toBe('orders');
-    expect(files).toEqual(expect.arrayContaining(['codex-wrapper', 'codex.env', 'codex-rc', 'b-studio-codex-hook.mjs', 'managed-settings.json']));
+    expect(files).toEqual(expect.arrayContaining(['codex-wrapper', 'codex.env', 'codex-rc', 'b-studio-codex-hook.mjs', 'managed-settings.json', 'codex-etc']));
   });
 
   it('claude는 기본 이미지(image 옵션 없음)와 기본 관문 파일만 쓴다. 개인 PC는 홈 사용자가 없다', async () => {
     const { options, files } = await prepare({ cli: 'claude' });
     expect(options).not.toHaveProperty('image');
     expect(options).not.toHaveProperty('userId');
+    expect(options).not.toHaveProperty('codexEtc');
     expect(files).not.toContain('codex-wrapper');
     expect(files).toContain('managed-settings.json');
   });

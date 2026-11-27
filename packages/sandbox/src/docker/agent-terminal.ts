@@ -148,6 +148,13 @@ export const GATEWAY_FILE_NAME = 'b-studio-gateway.json';
 export const CODEX_CONTAINER_ENV_FILE = 'codex.env';
 export const CODEX_CONTAINER_WRAPPER_FILE = 'codex-wrapper';
 export const CODEX_CONTAINER_RC_FILE = 'codex-rc';
+/**
+ * codex가 **늘 읽는** 관리 설정 자리(ADR-245): 컨테이너의 `/etc/codex/requirements.toml`(관리자가 정하는 요구사항, 사용자 설정·`-c`보다 앞서고 에이전트가 끌 수 없는 훅)이다.
+ * 호스트의 관문 폴더 아래 `codex-etc` 폴더를 읽기 전용으로 붙인다(세션마다 따로, 토큰 없음). claude의 `/etc/claude-code`와 같은 방식이다
+ */
+export const AGENT_CODEX_ETC_TARGET = '/etc/codex';
+export const CODEX_CONTAINER_ETC_DIR = 'codex-etc';
+export const CODEX_CONTAINER_REQUIREMENTS_FILE = `${CODEX_CONTAINER_ETC_DIR}/requirements.toml`;
 /** 훅을 돌릴 node. 이름으로 찾지 않는다 — 터미널의 PATH는 홈 폴더의 실행 파일 자리가 앞에 있어, 거기에 같은 이름을 두면 훅이 바뀐다 */
 const HOOK_NODE = '/usr/local/bin/node';
 /** 컨테이너 안의 node(훅·codex 감싸개가 쓴다). HOOK_NODE와 같은 값이다 */
@@ -451,7 +458,7 @@ export function agentGatewayFiles(address: AgentGatewayAddress): Record<string, 
 }
 
 /** 기본 파일 말고 관문 폴더에 둘 수 있는 이름(codex). 쓰기와 정리가 같은 목록을 쓴다 */
-const GATEWAY_EXTRA_NAMES: ReadonlySet<string> = new Set([CODEX_HOOK_SCRIPT_NAME, CODEX_CONTAINER_ENV_FILE, CODEX_CONTAINER_WRAPPER_FILE, CODEX_CONTAINER_RC_FILE]);
+const GATEWAY_EXTRA_NAMES: ReadonlySet<string> = new Set([CODEX_HOOK_SCRIPT_NAME, CODEX_CONTAINER_ENV_FILE, CODEX_CONTAINER_WRAPPER_FILE, CODEX_CONTAINER_RC_FILE, CODEX_CONTAINER_REQUIREMENTS_FILE]);
 
 /** 관문 설정을 두는 호스트 폴더의 상위 폴더. 기본 ~/.cache/b-studio/agent-gateway */
 export function defaultAgentGatewayRoot(): string {
@@ -481,6 +488,8 @@ export async function writeAgentGatewayConfig(
   for (const name of Object.keys(extraFiles)) if (!GATEWAY_EXTRA_NAMES.has(name)) throw new SandboxError('관문 폴더에 둘 수 없는 파일 이름입니다', name);
   for (const [name, content] of Object.entries({ ...agentGatewayFiles(address), ...extraFiles })) {
     const target = path.join(dir, name);
+    // 하위 폴더(codex-etc)가 필요한 이름만 폴더를 만든다(이름은 위에서 정해 둔 것만 받았다)
+    if (name.includes('/')) await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
     if ((await readFile(target, 'utf8').catch(() => undefined)) === content) continue;
     // 같은 폴더에 임시 이름으로 쓰고 옮긴다. 읽는 쪽(컨테이너 안의 CLI)이 반쯤 쓰인 파일을 보지 않는다
     const staged = `${target}.${process.pid}.tmp`;
@@ -494,6 +503,8 @@ export async function writeAgentGatewayConfig(
 export async function removeAgentGatewayConfig(sandboxId: string, root: string = defaultAgentGatewayRoot()): Promise<void> {
   const dir = gatewayDirFor(sandboxId, root);
   for (const name of ['managed-settings.json', 'managed-mcp.json', HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, ...GATEWAY_EXTRA_NAMES]) await rm(path.join(dir, name), { force: true }).catch(() => {});
+  // 하위 폴더는 비었을 때만 지운다(이 코드가 쓴 파일을 지운 뒤)
+  await rmdir(path.join(dir, CODEX_CONTAINER_ETC_DIR)).catch(() => {});
   await rmdir(dir).catch(() => {});
 }
 
@@ -541,6 +552,8 @@ export interface AgentContainerPlan {
   homeVolume: string;
   /** 관문 설정을 둔 호스트 폴더(writeAgentGatewayConfig). 주면 CLI의 관리 설정 자리에 읽기 전용으로 붙인다 */
   gatewayDir?: string;
+  /** codex의 `/etc/codex`에 읽기 전용으로 붙일 호스트 폴더(관문 폴더 아래 `codex-etc`). codex 세션에만 준다 */
+  codexEtcDir?: string;
   image?: string;
 }
 
@@ -558,7 +571,7 @@ export function agentContainerName(sandboxId: string): string {
  */
 export function agentRunArgs(plan: AgentContainerPlan): string[] {
   const mount = (volume: MaskVolume): string => `type=bind,source=${volume.source},target=${volume.target},readonly`;
-  for (const value of [plan.projectRoot, plan.homeVolume, ...(plan.gatewayDir ? [plan.gatewayDir] : []), ...plan.masks.flatMap((volume) => [volume.source, volume.target])]) {
+  for (const value of [plan.projectRoot, plan.homeVolume, ...(plan.gatewayDir ? [plan.gatewayDir] : []), ...(plan.codexEtcDir ? [plan.codexEtcDir] : []), ...plan.masks.flatMap((volume) => [volume.source, volume.target])]) {
     // --mount의 값은 쉼표로 나뉜다. 쉼표가 든 경로를 그대로 넣으면 다른 옵션으로 읽힌다
     if (value.includes(',')) throw new SandboxError('경로에 쉼표가 있어 에이전트 컨테이너에 연결할 수 없습니다', value);
   }
@@ -582,6 +595,7 @@ export function agentRunArgs(plan: AgentContainerPlan): string[] {
     ...plan.masks.flatMap((volume) => ['--mount', mount(volume)]),
     '--mount', `type=volume,source=${plan.homeVolume},target=${AGENT_HOME}`,
     ...(plan.gatewayDir ? ['--mount', `type=bind,source=${plan.gatewayDir},target=${AGENT_GATEWAY_TARGET},readonly`] : []),
+    ...(plan.codexEtcDir ? ['--mount', `type=bind,source=${plan.codexEtcDir},target=${AGENT_CODEX_ETC_TARGET},readonly`] : []),
     '--env', `HOME=${AGENT_HOME}`,
     '--env', `NPM_CONFIG_PREFIX=${NPM_PREFIX}`,
     '--env', `PATH=${AGENT_PATH}`,
@@ -653,6 +667,8 @@ export interface AgentContainerOptions {
   userId?: string;
   /** 관문 설정을 둔 호스트 폴더. 주면 CLI의 관리 설정 자리에 붙이고, 붙었는지를 띄운 뒤에 확인한다 */
   gatewayDir?: string;
+  /** codex 세션이면 true: 관문 폴더 아래 `codex-etc`를 `/etc/codex`에 읽기 전용으로 붙이고, 붙었는지를 띄운 뒤에 확인한다. gatewayDir가 있어야 한다 */
+  codexEtc?: boolean;
   /**
    * 세션 프로젝트가 선언한 평가 자산(studio.yaml workflow.evaluationAssets). 작업 복사본이 아니라 b-studio가 가진 복사본(#745)을
    * 작업 복사본 위에 읽기 전용으로 덮는다. 선언이 바뀌면 다음에 컨테이너를 만들 때부터 반영된다 — 떠 있는 컨테이너의 마운트가
@@ -674,8 +690,10 @@ export interface AgentContainerOptions {
 export async function ensureAgentContainer(
   sandboxId: string,
   projectRoot: string,
-  { projectId, userId, gatewayDir, evaluationAssets, evaluationAssetRoot, dockerBin = 'docker', image }: AgentContainerOptions,
+  { projectId, userId, gatewayDir, codexEtc = false, evaluationAssets, evaluationAssetRoot, dockerBin = 'docker', image }: AgentContainerOptions,
 ): Promise<string> {
+  if (codexEtc && !gatewayDir) throw new SandboxError('codex의 관리 설정은 관문 폴더 없이 붙일 수 없습니다');
+  const codexEtcDir = codexEtc && gatewayDir ? path.join(gatewayDir, CODEX_CONTAINER_ETC_DIR) : undefined;
   const name = agentContainerName(sandboxId);
   const docker = (args: string[]) => execChecked(dockerBin, args, { cwd: tmpdir(), maxBuffer: 16 * 1024 * 1024 });
   const root = await realpath(projectRoot);
@@ -687,7 +705,7 @@ export async function ensureAgentContainer(
 
   // 설정이 다른 컨테이너(관문 없이 띄운 것, 다른 판의 설정을 붙인 것)는 다시 쓰지 않고 새로 띄운다
   const ready = async ({ mounts, tmpfs }: InspectedContainer): Promise<boolean> =>
-    (await masksInPlace(root, mounts, tmpfs, evaluationAssetPlan)) && gatewayInPlace(gatewayDir, mounts);
+    (await masksInPlace(root, mounts, tmpfs, evaluationAssetPlan)) && gatewayInPlace(gatewayDir, mounts) && codexEtcInPlace(codexEtcDir, mounts);
   const existing = await inspect(dockerBin, name);
   // 스튜디오가 검사 도중에 죽었다 다시 뜨면 컨테이너가 멈춘 채(State.Paused) 남아 있다. 그대로 내주면 아무 명령도 돌지 않는다
   if (existing?.paused) {
@@ -702,7 +720,7 @@ export async function ensureAgentContainer(
   if (existing) await docker(['rm', '--force', name]).catch(() => {});
 
   try {
-    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId, userId), gatewayDir, image }));
+    await docker(agentRunArgs({ name, sandboxId, projectRoot: root, masks, homeVolume: agentHomeVolume(projectId, userId), gatewayDir, codexEtcDir, image }));
   } catch (error) {
     throw new SandboxError('에이전트 컨테이너를 띄우지 못했습니다', describe(error), { platform: true });
   }
@@ -788,6 +806,14 @@ function gatewayInPlace(gatewayDir: string | undefined, mounts: readonly Inspect
   // 그래서 끝이 같은지로 본다. 폴더는 세션마다 따로라 다른 세션의 설정과는 끝이 다르다
   const source = mounted[0]?.Source ?? '';
   return mounted.length === 1 && (source === gatewayDir || source.endsWith(gatewayDir)) && mounted[0]!.RW === false;
+}
+
+/** codex의 관리 설정이 정한 대로 붙어 있는가: 주었으면 그 폴더가 읽기 전용으로, 주지 않았으면 그 자리에 아무것도 없어야 한다(gatewayInPlace와 같다) */
+export function codexEtcInPlace(codexEtcDir: string | undefined, mounts: readonly InspectedMount[]): boolean {
+  const mounted = mounts.filter((mount) => mount.Destination === AGENT_CODEX_ETC_TARGET);
+  if (codexEtcDir === undefined) return mounted.length === 0;
+  const source = mounted[0]?.Source ?? '';
+  return mounted.length === 1 && (source === codexEtcDir || source.endsWith(codexEtcDir)) && mounted[0]!.RW === false;
 }
 
 async function inspect(dockerBin: string, name: string): Promise<InspectedContainer | undefined> {

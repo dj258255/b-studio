@@ -54,7 +54,7 @@ describe('세션 터미널 방식 판정 표', () => {
       expect(isTerminalRunnableBackend('codex')).toBe(true);
       expect(isTerminalRunnableBackend('api')).toBe(resolved.mode === 'host');
       expect(isTerminalRunnableBackend('claude-code')).toBe(true);
-      for (const unknown of ['gemini', 'demo', '', 'CODEX']) expect(isTerminalRunnableBackend(unknown), unknown).toBe(false);
+      for (const unknown of ['gemini-pro', 'demo', '', 'CODEX']) expect(isTerminalRunnableBackend(unknown), unknown).toBe(false);
     }
     if (row.mode === 'throws') expect(() => sessionTerminalMode()).toThrow('B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다');
     else expect(sessionTerminalMode()).toBe(row.mode);

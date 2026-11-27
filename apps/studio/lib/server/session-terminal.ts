@@ -327,7 +327,7 @@ const DOCKER_BACKEND: TerminalBackend = {
       projectId: target.projectId,
       ...(target.homeUser !== undefined ? { userId: target.homeUser } : {}),
       ...(target.evaluationAssets ? { evaluationAssets: target.evaluationAssets } : {}),
-      ...(codex ? { image: AGENT_CODEX_IMAGE } : {}),
+      ...(codex ? { image: AGENT_CODEX_IMAGE, codexEtc: true } : {}),
       ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway, defaultAgentGatewayRoot(), codex ? agentCodexFiles(gateway) : {}) } : {}),
     });
   },

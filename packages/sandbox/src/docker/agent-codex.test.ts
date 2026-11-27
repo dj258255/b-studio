@@ -5,15 +5,18 @@ import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { codexGatewayArgs, shellQuote } from '../host-terminal';
 import { EDGE_IMAGE } from '../edge-config';
-import { AGENT_CODEX_TERMINAL_COMMAND, AGENT_CODEX_WRAPPER_PATH, agentCodexFiles, agentCodexWrapper } from './agent-codex';
+import { AGENT_CODEX_TERMINAL_COMMAND, AGENT_CODEX_WRAPPER_PATH, agentCodexFiles, agentCodexRequirements, agentCodexWrapper, codexWrapperArgs } from './agent-codex';
 import { AGENT_CODEX_BIN, AGENT_CODEX_IMAGE, agentImageExists } from './agent-image';
 import {
+  AGENT_CODEX_ETC_TARGET,
   AGENT_GATEWAY_TARGET,
+  AGENT_HOOK_EVENTS,
   AGENT_HOOK_SCRIPT,
   AGENT_HOME_VOLUME_PREFIX,
   AGENT_NODE,
   CODEX_HOOK_SCRIPT_NAME,
   agentRunArgs,
+  codexEtcInPlace,
   removeAgentGatewayConfig,
   writeAgentGatewayConfig,
   type AgentGatewayAddress,
@@ -24,11 +27,18 @@ const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:410
 describe('컨테이너 방식 codex 감싸개(ADR-245)', () => {
   const wrapper = agentCodexWrapper(address);
 
-  it('호스트(이 컴퓨터 방식)의 설정 덮어쓰기를 그대로 쓴다 — 훅 명령은 컨테이너의 관문 폴더 스크립트를 가리킨다', () => {
+  it('감싸개의 -c는 호스트와 같은 목록에서 훅만 뺀 것이다: 도구 서버·텔레메트리·업데이트 확인 끄기만 남는다', () => {
     const hostArgs = codexGatewayArgs(address, AGENT_GATEWAY_TARGET, AGENT_NODE);
-    // 훅 명령 글이 세션마다 같다(Codex는 명령 글의 해시로 신뢰를 기억한다)
-    expect(hostArgs.some((arg) => arg.includes(`${AGENT_GATEWAY_TARGET}/${CODEX_HOOK_SCRIPT_NAME}`))).toBe(true);
-    for (const arg of hostArgs) expect(wrapper, arg).toContain(shellQuote(arg));
+    const values = codexWrapperArgs(address).filter((value) => value !== '-c');
+    expect(values.some((value) => value.startsWith('hooks.') || value.startsWith('features.hooks'))).toBe(false);
+    expect(values.some((value) => value.startsWith('mcp_servers.b-studio='))).toBe(true);
+    expect(values.some((value) => value.startsWith('otel.exporter='))).toBe(true);
+    // 호스트 목록에서 훅이 아닌 것은 하나도 빠지지 않았다
+    const hostNonHook = hostArgs.filter((value) => value !== '-c' && !value.startsWith('hooks.') && !value.startsWith('features.hooks'));
+    expect(values).toEqual(hostNonHook);
+    for (const arg of values) expect(wrapper, arg).toContain(shellQuote(arg));
+    // 훅을 -c로도 붙이면 같은 훅이 두 번 돈다
+    expect(wrapper).not.toContain('hooks.PreToolUse');
     expect(wrapper).toContain(shellQuote(AGENT_CODEX_BIN));
   });
 
@@ -46,7 +56,7 @@ describe('컨테이너 방식 codex 감싸개(ADR-245)', () => {
   it('훅 스크립트는 claude와 같은 것이고 이름은 호스트 codex와 같다', () => {
     const files = agentCodexFiles(address);
     expect(files[CODEX_HOOK_SCRIPT_NAME]).toBe(AGENT_HOOK_SCRIPT);
-    expect(Object.keys(files).sort()).toEqual(['codex-rc', 'codex-wrapper', 'codex.env', CODEX_HOOK_SCRIPT_NAME].sort());
+    expect(Object.keys(files).sort()).toEqual(['codex-etc/requirements.toml', 'codex-rc', 'codex-wrapper', 'codex.env', CODEX_HOOK_SCRIPT_NAME].sort());
   });
 
   it('대화형일 때만 세션 시작·끝을 알리고, 하위 명령·도움말은 알리지 않는다', () => {
@@ -68,6 +78,79 @@ describe('컨테이너 방식 codex 감싸개(ADR-245)', () => {
     expect(args).toContain(AGENT_CODEX_IMAGE);
     // tmpfs도 /opt가 아니다
     expect(args.filter((value) => value.startsWith('/tmp:')).length).toBe(1);
+  });
+});
+
+describe('훅은 codex가 늘 읽는 관리 요구사항으로 붙는다(직접 실행해도 적용)', () => {
+  const requirements = agentCodexRequirements();
+
+  it('호스트의 훅 설정과 같은 이벤트·명령·시간이 요구사항에 있다', () => {
+    const hostArgs = codexGatewayArgs(address, AGENT_GATEWAY_TARGET, AGENT_NODE).filter((value) => value !== '-c' && value.startsWith('hooks.'));
+    expect(hostArgs).toHaveLength(6);
+    for (const arg of hostArgs) {
+      const event = /^hooks\.(\w+)=/.exec(arg)![1]!;
+      const command = JSON.parse(/command=("(?:[^"\\]|\\.)*")/.exec(arg)![1]!) as string;
+      const timeout = /timeout=(\d+)/.exec(arg)![1]!;
+      expect(requirements, event).toContain(`[[hooks.${event}]]`);
+      expect(requirements, event).toContain(`command = ${JSON.stringify(command)}\ntimeout = ${timeout}`);
+    }
+  });
+
+  it('훅 기능을 못 끄게 고정하고 사용자·프로젝트 훅은 돌지 않게 한다', () => {
+    expect(requirements).toContain('allow_managed_hooks_only = true');
+    expect(requirements).toMatch(/\[features\]\nhooks = true\n/);
+    // 전체 훅 시간은 관문의 훅 목록과 같은 출처(AGENT_HOOK_EVENTS)다
+    expect(requirements).toContain(`timeout = ${AGENT_HOOK_EVENTS.stop}`);
+  });
+
+  it('훅 명령은 이미지의 node와 읽기 전용 관문 마운트의 스크립트만 가리킨다(홈·작업 폴더·tmp가 아니다)', () => {
+    const commands = [...requirements.matchAll(/^command = (".*")$/gm)].map((match) => JSON.parse(match[1]!) as string);
+    expect(commands).toHaveLength(6);
+    for (const command of commands) expect(command.startsWith(`'${AGENT_NODE}' '${AGENT_GATEWAY_TARGET}/${CODEX_HOOK_SCRIPT_NAME}' `), command).toBe(true);
+  });
+
+  it('요구사항에는 토큰·주소가 없다(훅 스크립트가 옆의 주소 파일에서 읽는다)', () => {
+    expect(requirements).not.toMatch(/token|bearer|http:\/\//i);
+  });
+
+  it('감싸개가 없어도 적용되는 자리다: /etc/codex에 읽기 전용으로 붙고, 홈 볼륨·작업 폴더 마운트와 겹치지 않는다', () => {
+    const base = { name: 'n', sandboxId: 's', projectRoot: '/tmp/p', masks: [], homeVolume: `${AGENT_HOME_VOLUME_PREFIX}-p`, image: AGENT_CODEX_IMAGE, gatewayDir: '/g/s1' };
+    const withEtc = agentRunArgs({ ...base, codexEtcDir: '/g/s1/codex-etc' });
+    expect(withEtc).toContain(`type=bind,source=/g/s1/codex-etc,target=${AGENT_CODEX_ETC_TARGET},readonly`);
+    expect(AGENT_CODEX_ETC_TARGET).toBe('/etc/codex');
+    // codex가 아닌 세션에는 붙지 않는다
+    expect(agentRunArgs(base).join(' ')).not.toContain(AGENT_CODEX_ETC_TARGET);
+    // 같은 마운트 목적지는 하나뿐이다(홈 볼륨이 /etc/codex를 덮지 못한다)
+    const targets = withEtc.filter((value) => value.startsWith('type=')).map((value) => /target=([^,]+)/.exec(value)![1]!);
+    expect(new Set(targets).size).toBe(targets.length);
+    expect(() => agentRunArgs({ ...base, codexEtcDir: '/g/s1/codex,etc' })).toThrow();
+  });
+
+  it('떠 있는 컨테이너를 다시 쓰기 전에 /etc/codex 마운트를 본다: 없거나 쓰기 가능하거나 다른 세션의 폴더면 다시 만든다', () => {
+    const want = '/g/s1/codex-etc';
+    const mount = (over: Record<string, unknown> = {}) => ({ Type: 'bind', Source: want, Destination: AGENT_CODEX_ETC_TARGET, RW: false, ...over });
+    expect(codexEtcInPlace(want, [mount()])).toBe(true);
+    // Docker Desktop이 접두어를 붙여 알려 줘도 끝이 같으면 같은 폴더다
+    expect(codexEtcInPlace(want, [mount({ Source: `/host_mnt${want}` })])).toBe(true);
+    expect(codexEtcInPlace(want, [])).toBe(false);
+    expect(codexEtcInPlace(want, [mount({ RW: true })])).toBe(false);
+    expect(codexEtcInPlace(want, [mount({ Source: '/g/s2/codex-etc' })])).toBe(false);
+    expect(codexEtcInPlace(want, [mount(), mount()])).toBe(false);
+    // codex가 아닌 세션(폴더를 주지 않음)에는 그 자리에 아무것도 없어야 한다
+    expect(codexEtcInPlace(undefined, [])).toBe(true);
+    expect(codexEtcInPlace(undefined, [mount()])).toBe(false);
+  });
+
+  it('요구사항 파일은 관문 폴더 아래 codex-etc에 쓰이고 세션이 멈추면 지워진다', async () => {
+    const root = await tmp2();
+    try {
+      const dir = await writeAgentGatewayConfig('studio-z-abc', address, root, agentCodexFiles(address));
+      expect(await readFile(path.join(dir, 'codex-etc/requirements.toml'), 'utf8')).toBe(requirements);
+      await removeAgentGatewayConfig('studio-z-abc', root);
+      expect(await readdir(root)).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
   });
 });
 

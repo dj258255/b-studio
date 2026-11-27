@@ -8662,3 +8662,19 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 ### 해결
 
 - 터미널을 건드리는 변경의 시험은 파일마다 무엇을 여는지 보고 지정한다(`baseline`·`host-pty`·`e2e`는 이 컴퓨터에서 돌리지 않는다). 서버 방식의 시험은 진짜 접근·권한 코드에 세션 표와 터미널 동작만 가짜로 끼운 시험(`server-mode.test.ts`, `side-routes.test.ts`)으로 쓴다.
+
+## 310. codex의 훅이 감싸개 안의 `-c`로만 붙어, 에이전트가 이미지의 codex를 직접 부르면 훅 없이 도는 틈이 있었음 — 훅은 codex가 늘 읽는 관리 요구사항으로
+
+### 증상
+
+- 커밋 보안 검토(MEDIUM)가 짚었다: 컨테이너 방식 codex의 훅·b-studio 도구·텔레메트리는 `/etc/claude-code/codex-wrapper`가 `codex`에 붙이는 `-c` 덮어쓰기뿐이다. 에이전트가 컨테이너 안에서 `/opt/b-studio/codex/bin/codex`(또는 node로 그 JS)를 직접 부르면 훅이 하나도 붙지 않고 codex가 변경을 쓰고 끝낸다(읽어서 알았다, 실행으로 확인하지 않았다). 훅이 불리지 않으면 검증이 돌지 않고 체크포인트가 생기지 않는다.
+
+### 원인
+
+- 훅을 "부르는 쪽(감싸개)"에만 두고 "실행하는 쪽(codex)"의 설정에는 두지 않았다. claude는 `/etc/claude-code`의 관리 설정을 claude가 늘 읽지만 codex에는 같은 자리를 쓰지 않았다.
+
+### 해결
+
+- codex 0.160.1 소스로 늘 읽는 관리자 설정을 찾았다: `/etc/codex/requirements.toml`. 사용자 설정·`-c`와 무관한 절대 경로이고 `[hooks]`는 항상 켜져 있고 신뢰 확인이 없으며 끌 수 없다(근거 소스 위치는 ADR-245 결정 5). 관문 폴더 아래 `codex-etc`를 `/etc/codex`에 읽기 전용으로 붙이고(`agentRunArgs`의 `codexEtcDir`), 재사용할 컨테이너는 그 마운트가 읽기 전용으로 있는지 보고 아니면 다시 만든다(`codexEtcInPlace`). 감싸개의 `-c`에서는 훅을 뺐다(두 번 도는 것을 막는다).
+- 고치기 전: 새 시험이 요구사항 모듈·마운트 함수가 없어 `agent-codex.test.ts`가 불러지지 않았고 `session-terminal-container.test.ts`의 prepare 시험이 실패했다(`Tests 1 failed | 9 passed`). 변이 9개 중 8개(요구사항 안 씀, 감싸개에 훅 되붙임, 마운트 제거·읽기 전용 해제, prepare가 마운트 안 넘김, 훅 고정 제거, 관리 훅만 제거, Stop 훅 빠짐)를 시험이 잡았다. 재사용 컨테이너의 마운트 확인을 빼는 변이는 도커를 부르는 자리라 못 잡는다.
+- 남은 틈: 실제 codex가 이 파일을 읽어 훅을 부르는지는 실행하지 않았다. 이 컴퓨터 방식 codex도 훅이 `-c`뿐이다 — 셸 함수·관문 파일 감시·Rust 감시(`find_unhooked_cli`)가 감지하지만 예방이 아니고, codex는 표식 글 포함이라는 옛 규칙이다(ADR-245).
