@@ -313,6 +313,16 @@ describe('작업 복사본의 변경 목록(CheckpointStore.pendingTestChanges)'
     expect(byPath(entries, 'web/a.test.ts')?.added).toEqual(["it.skip('a', f);"]);
   });
 
+  it.each(['--skip-worktree', '--assume-unchanged'])('인덱스에 %s 표시를 건 시험 파일의 건너뛰기 추가·삭제도 놓치지 않는다', async (flag) => {
+    const store = await started({ 'web/a.test.ts': 'x\n', 'web/b.test.ts': 'y\n' });
+    await execFileAsync('git', ['-C', root, 'update-index', flag, 'web/a.test.ts', 'web/b.test.ts']);
+    await write('web/a.test.ts', "x\nit.skip('a', f);\n");
+    await rm(path.join(root, 'web/b.test.ts'));
+    const entries = await store.pendingTestChanges();
+    expect(byPath(entries, 'web/a.test.ts')?.added).toEqual(["it.skip('a', f);"]);
+    expect(byPath(entries, 'web/b.test.ts')).toEqual({ status: 'D', path: 'web/b.test.ts' });
+  });
+
   it('git 읽기가 실패하면 던진다', async () => {
     const store = await started();
     await rm(path.join(root, '.git/HEAD'));

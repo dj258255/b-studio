@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { copyFile, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, execBytes, native } from '@b-studio/sandbox';
@@ -509,7 +509,7 @@ export class CheckpointStore {
    * 시험 파일·Rust 파일은 이번 변경에서 **더해진 줄**. 도구를 거치지 않은 셸 변경도 작업 복사본의 차이이므로 같이 잡힌다.
    *
    * 이름 바꾸기는 git에게 맡긴다. 작업 복사본의 `git status`는 스테이징하지 않은 이름 바꾸기를 삭제+추가로만 보여서, 커밋이 스테이징할 때와 같은 방식으로
-   * **임시 인덱스**(진짜 인덱스를 복사한 것)에 `add -A`를 하고 `diff --cached -M`으로 짝을 찾는다. 진짜 인덱스·작업 트리는 건드리지 않는다.
+   * **임시 인덱스**(HEAD에서 새로 만든 것, 진짜 인덱스를 복사하지 않는다)에 `add -A`를 하고 `diff --cached -M`으로 짝을 찾는다. 진짜 인덱스·작업 트리는 건드리지 않는다.
    * 새 객체는 임시 폴더에만 쓴다(GIT_OBJECT_DIRECTORY). 경로는 이름 문자열로 견주지 않는다(대소문자·유니코드 정규화가 다른 볼륨에서 비켜 갈 길이 생기므로): 이름 바꾸기 짝은 내용으로 git이 찾고,
    * 시험 파일인지는 Rust 판정(`test_weakening`)이 이름 모양으로 본다.
    *
@@ -525,23 +525,14 @@ export class CheckpointStore {
       // 새로 만드는 객체(add가 쓰는 blob)는 임시 폴더에 두고 진짜 객체 폴더는 읽기만 한다: 진짜 저장소에 검증 전의 내용이 객체로 남지 않고,
       // 읽기 전용으로 붙인 `.git`(컨테이너 방식)에서도 돈다
       const gitPath = async (name: string): Promise<string> => path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', name])).trim());
-      const realIndex = await gitPath('index');
       const realObjects = await gitPath('objects');
       const objects = path.join(scratch, 'objects');
       await mkdir(objects);
       const env = { GIT_INDEX_FILE: path.join(scratch, 'index'), GIT_LITERAL_PATHSPECS: '1', GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: realObjects };
-      // 복사본의 수정 시각을 진짜 인덱스의 것으로 맞춘다. git은 "인덱스를 쓴 때와 같은 초에 바뀐 파일"을 내용으로 다시 확인하는데(racy),
-      // 복사한 시각이 더 늦으면 같은 초에 같은 크기로 고친 파일이 안 바뀐 것으로 읽혀 변경을 놓친다
-      await copyFile(realIndex, env.GIT_INDEX_FILE).then(
-        async () => {
-          const info = await stat(realIndex);
-          await utimes(env.GIT_INDEX_FILE, info.atime, info.mtime);
-        },
-        async (error: NodeJS.ErrnoException) => {
-          if (error.code !== 'ENOENT') throw error;
-          await this.#git(['read-tree', 'HEAD'], { env });
-        },
-      );
+      // 임시 인덱스는 진짜 인덱스를 복사하지 않고 HEAD에서 새로 만든다. 진짜 인덱스에는 에이전트가 셸에서 건 `skip-worktree`·`assume-unchanged` 표시와
+      // 옛 stat 캐시(같은 크기·시각으로 되돌린 파일)가 있어, 복사하면 `add -A`가 그 파일을 읽지 않고 시험 파일의 삭제·건너뛰기를 놓친다.
+      // 새 인덱스에는 표시도 캐시도 없어 추적하는 파일을 모두 내용으로 다시 읽는다(큰 저장소에서는 그만큼 느리다)
+      await this.#git(['read-tree', 'HEAD'], { env });
       await this.#git(['add', '-A', ...(await this.#scope())], { env });
       const relative = await this.#relative();
       const subdir = await this.#subdir();
