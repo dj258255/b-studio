@@ -114,7 +114,8 @@ beforeEach(() => {
   fake.stopAndDeleted = [];
   fake.calls = [];
   fake.setTerminalCheckChanges.mockClear();
-  setFleetTerminalDepsForTest(undefined);
+  // Fleet은 늘 세션 터미널에서 돈다. 진짜 터미널(PTY)을 열지 않게 모든 시험이 가짜 터미널로 시작한다(필요한 시험이 harness를 다시 만든다)
+  terminalHarness();
   delete process.env.B_STUDIO_TERMINAL;
   delete process.env.B_STUDIO_EXPERIMENTAL;
   process.env.B_STUDIO_MODE = 'api';
@@ -147,37 +148,34 @@ describe('defaultFleetCandidates', () => {
 });
 
 describe('Agent Fleet', () => {
-  it('모델마다 독립 복사본 세션을 만들고 같은 요청을 한 번씩 보낸다', async () => {
+  it('모델마다 독립 복사본 세션을 만들고 각 세션 터미널에 같은 요청을 한 번씩 보낸다(채팅 sendMessage는 부르지 않는다)', async () => {
     const fleet = await createFleet({ projectId: 'orders', request: '주문 검색을 추가해줘', modelIds: ['model-a', 'model-b'], owner: 'alice' });
 
     expect(fleet.members).toHaveLength(2);
-    expect(fleet.members.every((member) => member.status === 'running')).toBe(true);
+    await until(() => getFleet(fleet.id, 'alice').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
     // 기존 API 입력(모델 id 목록)은 {backend:'api', model:<id>} 후보와 같다
     expect(fake.createSession.mock.calls.map((call) => call[3])).toEqual([{ backend: 'api', modelId: 'model-a' }, { backend: 'api', modelId: 'model-b' }]);
     expect(fleet.members.map((member) => [member.backend, member.modelId, member.label])).toEqual([
       ['api', 'model-a', 'Model A'],
       ['api', 'model-b', 'Model B'],
     ]);
-    expect(fake.sendMessage.mock.calls.map((call) => [call[0], call[1]])).toEqual(
-      fleet.members.map((member) => [member.sessionId, '주문 검색을 추가해줘']),
-    );
+    expect(fake.calls.filter((call) => call.startsWith('paste:')).sort()).toEqual(fleet.members.map((member) => `paste:${member.sessionId}`).sort());
+    expect(fake.sendMessage).not.toHaveBeenCalled();
   });
 
   it('게이트를 통과한 후보만 선택하고 실행이 끝나면 구독을 해제한다', async () => {
+    const harness = terminalHarness();
     const fleet = await createFleet({ projectId: 'orders', request: '검색을 추가해줘', modelIds: ['model-a', 'model-b'], owner: 'bob' });
     const member = fleet.members[0]!;
-    fake.listeners.get(member.sessionId)?.({
-      type: 'run_finished',
-      runId: member.runId!,
-      status: 'done',
-      summary: '검증 통과',
-      turns: 2,
-      usage: { inputTokens: 1_000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    });
+    await until(() => getFleet(fleet.id, 'bob').members.every((entry) => entry.status === 'running'), '멤버가 running이 되지 않았습니다');
+    // 비용은 CLI 텔레메트리가 알려 온 값만 쓴다(레지스트리 단가로 추정하지 않는다)
+    harness.emit(member.sessionId, { type: 'run_usage', runId: `trun-${member.sessionId}`, usage: USAGE, costUsd: 0.002 } as StudioEvent);
+    harness.emit(member.sessionId, { type: 'run_finished', runId: `trun-${member.sessionId}`, status: 'done', summary: '검증 통과', turns: 2, usage: USAGE } as StudioEvent);
+    await until(() => getFleet(fleet.id, 'bob').members[0]!.status === 'done', '멤버가 끝나지 않았습니다');
 
     const chosen = chooseFleetWinner(fleet.id, member.sessionId, 'bob');
     expect(chosen.winnerSessionId).toBe(member.sessionId);
-    expect(chosen.members[0]).toMatchObject({ status: 'done', turns: 2, costUsd: 0.002 });
+    expect(chosen.members[0]).toMatchObject({ status: 'done', costUsd: 0.002 });
     expect(fake.listeners.has(member.sessionId)).toBe(false);
     expect(() => chooseFleetWinner(fleet.id, fleet.members[1]!.sessionId, 'bob')).toThrow('검증을 통과한 결과만');
     expect(() => getFleet(fleet.id, 'mallory')).toThrow('볼 수 없습니다');
@@ -305,45 +303,19 @@ describe('Agent Fleet', () => {
     expect(fake.createSession).not.toHaveBeenCalled();
   });
 
-  it('실행이 모델을 바꿔 돌았으면 모델별 사용량을 멤버에 남긴다', async () => {
-    const fleet = await createFleet({ projectId: 'orders', request: '승격 실행', modelIds: ['model-a', 'model-b'], owner: 'hana' });
-    const member = fleet.members[0]!;
-    const usageByModel = {
-      'model-a': { inputTokens: 10, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      'model-b': { inputTokens: 20, outputTokens: 2, cacheReadTokens: 0, cacheWriteTokens: 0 },
-    };
-
-    fake.listeners.get(member.sessionId)?.({
-      type: 'run_finished',
-      runId: member.runId!,
-      status: 'done',
-      summary: '검증 통과',
-      turns: 2,
-      usage: { inputTokens: 30, outputTokens: 3, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      metrics: { modelCalls: 3, maxContextTokens: 100, modelMs: 1, toolMs: 1, gateMs: 1, usageByModel },
-    });
-
-    expect(getFleet(fleet.id, 'hana').members[0]!.usageByModel).toEqual(usageByModel);
-  });
-
   // Fleet은 메모리의 객체가 원본이고 persist는 그 객체 전체를 쓴다. 두 멤버가 동시에 끝나도 한쪽 결과가 저장에서 빠지면 안 된다
   it('여러 멤버의 결과가 동시에 들어와도 저장 파일에 모두 남는다', async () => {
+    const harness = terminalHarness();
     const fleet = await createFleet({ projectId: 'orders', request: '검색을 추가해줘', modelIds: ['model-a', 'model-b'], owner: 'carol' });
-    const [first, second] = fleet.members;
-    const finish = (member: typeof first) =>
-      fake.listeners.get(member.sessionId)!({
-        type: 'run_finished',
-        runId: member.runId!,
-        status: 'done',
-        summary: `${member.label} 완료`,
-        turns: 3,
-        usage: { inputTokens: 1_000, outputTokens: 500, cacheReadTokens: 0, cacheWriteTokens: 0 },
-      });
-    await Promise.all([Promise.resolve().then(() => finish(first!)), Promise.resolve().then(() => finish(second!))]);
+    await until(() => getFleet(fleet.id, 'carol').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
+    const finish = (member: (typeof fleet.members)[number]) =>
+      harness.emit(member.sessionId, { type: 'run_finished', runId: `trun-${member.sessionId}`, status: 'done', summary: `${member.label} 완료`, turns: 3, usage: USAGE } as StudioEvent);
+    await Promise.all(fleet.members.map((member) => Promise.resolve().then(() => finish(member))));
+    await until(() => getFleet(fleet.id, 'carol').members.every((member) => member.status === 'done'), '멤버가 끝나지 않았습니다');
 
-    const saved = JSON.parse(readFileSync(path.join(directory, `${fleet.id}.json`), 'utf8')) as { members: Array<{ status: string; turns?: number }> };
+    const saved = JSON.parse(readFileSync(path.join(directory, `${fleet.id}.json`), 'utf8')) as { members: Array<{ status: string; summary?: string }> };
     expect(saved.members.map((member) => member.status)).toEqual(['done', 'done']);
-    expect(saved.members.map((member) => member.turns)).toEqual([3, 3]);
+    expect(saved.members.map((member) => member.summary)).toEqual(['Model A 완료', 'Model B 완료']);
   });
 });
 
@@ -368,10 +340,13 @@ describe('deleteFleet', () => {
   });
 
   it('모든 참가자가 끝나면 지우고, 끝난 참가자의 세션도 함께 지운다', async () => {
+    const harness = terminalHarness();
     const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'kay' });
+    await until(() => getFleet(fleet.id, 'kay').members.every((member) => member.status === 'running'), '멤버가 running이 되지 않았습니다');
     for (const member of fleet.members) {
-      fake.listeners.get(member.sessionId)?.({ type: 'run_finished', runId: member.runId!, status: 'done', summary: '끝', turns: 1 });
+      harness.emit(member.sessionId, { type: 'run_finished', runId: `trun-${member.sessionId}`, status: 'done', summary: '끝', turns: 1, usage: USAGE } as StudioEvent);
     }
+    await until(() => getFleet(fleet.id, 'kay').members.every((member) => member.status === 'done'), '멤버가 끝나지 않았습니다');
 
     await deleteFleet(fleet.id, 'kay');
 
@@ -382,12 +357,15 @@ describe('deleteFleet', () => {
   });
 
   it('세션을 만들지 못해 실패한 참가자(`failed-`)는 지우기를 부르지 않는다', async () => {
+    const harness = terminalHarness();
     fake.createSession.mockImplementationOnce(async () => {
       throw new Error('샌드박스를 켜지 못했습니다');
     });
     const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'kay' });
     expect(fleet.members[0]!.status).toBe('error');
-    fake.listeners.get(fleet.members[1]!.sessionId)?.({ type: 'run_finished', runId: fleet.members[1]!.runId!, status: 'done', summary: '끝', turns: 1 });
+    await until(() => getFleet(fleet.id, 'kay').members[1]!.status === 'running', '멤버가 running이 되지 않았습니다');
+    harness.emit(fleet.members[1]!.sessionId, { type: 'run_finished', runId: `trun-${fleet.members[1]!.sessionId}`, status: 'done', summary: '끝', turns: 1, usage: USAGE } as StudioEvent);
+    await until(() => getFleet(fleet.id, 'kay').members[1]!.status === 'done', '멤버가 끝나지 않았습니다');
 
     await deleteFleet(fleet.id, 'kay');
 
@@ -511,13 +489,17 @@ describe('터미널 Fleet', () => {
     expect(saved.members.map((member) => member.status)).toEqual(['done', 'done']);
   });
 
-  it('runner를 주지 않으면 chat이고, 모르는 값은 세션을 만들기 전에 거절한다', async () => {
+  it('runner를 주지 않으면 terminal이고(채팅식 실행은 없다), chat과 모르는 값은 세션을 만들기 전에 400으로 거절한다', async () => {
+    terminalHarness();
     const fleet = await createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'tess' });
-    expect(fleet.runner).toBe('chat');
-    expect(fake.sendMessage).toHaveBeenCalledTimes(2);
+    expect(fleet.runner).toBe('terminal');
+    expect(fake.sendMessage).not.toHaveBeenCalled();
     fake.createSession.mockClear();
-    await expect(createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'tess', runner: 'pty' as never })).rejects.toMatchObject({ status: 400 });
+    for (const runner of ['chat', 'pty']) {
+      await expect(createFleet({ projectId: 'orders', request: '요청', modelIds: ['model-a', 'model-b'], owner: 'tess', runner: runner as never })).rejects.toMatchObject({ status: 400 });
+    }
     expect(fake.createSession).not.toHaveBeenCalled();
+    expect(fake.sendMessage).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -641,7 +623,7 @@ describe('터미널 Fleet', () => {
     expect(getFleet(created.id, 'tess').members.every((member) => member.waiting === undefined)).toBe(true);
   });
 
-  it('서버를 다시 켜면 끝나지 않은 터미널 멤버는 세션이 살아 있어도 이어받지 못함으로 닫고, 채팅 멤버는 이어받는다', async () => {
+  it('서버를 다시 켜면 끝나지 않은 멤버는 세션이 살아 있어도 이어받지 못함으로 닫는다(옛 채팅식 기록도 이어받지 않는다)', async () => {
     const globals = globalThis as typeof globalThis & { __bStudioFleets?: { fleets: Map<string, unknown>; subscribed: Set<string>; loaded: boolean } };
     const store = globals.__bStudioFleets!;
     const restartDir = mkdtempSync(path.join(tmpdir(), 'b-studio-fleets-restart-'));
@@ -658,9 +640,10 @@ describe('터미널 Fleet', () => {
       store.loaded = false;
 
       expect(getFleet('term0001', 'tess').members[0]).toMatchObject({ status: 'error', summary: 'Studio가 다시 시작되어 진행 상태를 이어받지 못했습니다. 세션을 열어 기록을 확인하세요.' });
-      // 옛 기록(runner 없음)은 chat이고, 세션이 살아 있으면 지금처럼 이어받는다
+      // 옛 기록(runner 없음)은 chat으로 읽어 기록으로만 보인다. 채팅식 실행은 없으므로 세션이 살아 있어도 이어받지 않고 닫는다
       expect(getFleet('chat0001', 'tess')).toMatchObject({ runner: 'chat' });
-      expect(getFleet('chat0001', 'tess').members[0]!.status).toBe('running');
+      expect(getFleet('chat0001', 'tess').members[0]).toMatchObject({ status: 'error', summary: 'Studio가 다시 시작되어 진행 상태를 이어받지 못했습니다. 세션을 열어 기록을 확인하세요.' });
+      expect(store.subscribed.has('s-chat')).toBe(false);
     } finally {
       fake.getSnapshot.mockImplementation((() => undefined) as never);
       store.fleets.clear();

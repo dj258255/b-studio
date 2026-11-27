@@ -18,7 +18,7 @@ vi.mock('@/lib/server/local-token', () => ({
 
 import { POST } from './route';
 
-function post(body: unknown, headers: Record<string, string> = {}): Promise<Response> {
+function post(body: unknown, headers: Record<string, string> = LOCAL): Promise<Response> {
   return POST(new Request('http://localhost/api/fleets', { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) }));
 }
 
@@ -90,13 +90,13 @@ describe('POST /api/fleets', () => {
     expect(mocks.createFleet).not.toHaveBeenCalled();
   });
 
-  it('runner(chat·terminal)를 그대로 넘기고, 다른 값은 400으로 거절한다', async () => {
+  it('runner는 문자열이면 그대로 넘기고(chat·모르는 값은 createFleet이 세션 전에 거절한다), 문자열이 아니면 400으로 거절한다', async () => {
     const response = await post({ projectId: 'orders', request: '요청', runner: 'terminal' }, LOCAL);
     expect(response.status).toBe(201);
     expect(mocks.createFleet).toHaveBeenCalledWith({ projectId: 'orders', request: '요청', owner: 'kim', allowBreaking: false, runner: 'terminal' });
 
     mocks.createFleet.mockClear();
-    for (const runner of ['pty', 3, null]) {
+    for (const runner of [3, null, ['terminal']]) {
       const wrong = await post({ projectId: 'orders', request: '요청', runner });
       expect(wrong.status, JSON.stringify(runner)).toBe(400);
     }
@@ -110,7 +110,9 @@ describe('POST /api/fleets', () => {
       expect(response.status, JSON.stringify(headers)).toBe(403);
     }
     expect(mocks.createFleet).not.toHaveBeenCalled();
-    // 채팅 방식은 지금처럼 로그인만 본다
+    // runner를 빼도 같다: 이제 Fleet은 늘 세션 터미널에서 돌므로 로그인만으로는 열지 못한다
+    expect((await post({ projectId: 'orders', request: '요청' }, {})).status).toBe(403);
+    // chat은 접근 검사를 거친 뒤 createFleet이 400으로 거절한다(여기서는 createFleet을 가짜로 바꿨으므로 넘어간다)
     expect((await post({ projectId: 'orders', request: '요청', runner: 'chat' })).status).toBe(201);
   });
 });
