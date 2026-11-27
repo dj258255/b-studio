@@ -67,6 +67,11 @@ export interface PersistedSession {
    * 이 필드가 생기기 전 기록에는 없다. 모양이 틀리면 모든 파일로 읽는다
    */
   keptAgentChanges?: string[];
+  /**
+   * 서버가 게이트를 거쳐 만든 체크포인트의 커밋 sha들(PR 초안의 영향 범위가 이 커밋의 게이트 기록만 읽는다).
+   * 커밋의 트레일러는 에이전트가 직접 만든 커밋에도 적힐 수 있어서 따로 기억한다. 이 필드가 생기기 전 기록에는 없다 — 그때는 아무것도 믿지 않는다
+   */
+  gatedCheckpoints?: string[];
 }
 
 export function sessionFile(stateDir: string): string {

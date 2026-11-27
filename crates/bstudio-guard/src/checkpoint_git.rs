@@ -369,7 +369,7 @@ pub fn session_records(output: &str, our_email: &str) -> JsValue {
             .map(|record| {
                 let mut fields = record.split('\0');
                 let mut next = || fields.next().unwrap_or("");
-                let (sha, short_sha, subject, body, author_email, trailers, verify, incomplete) = (next(), next(), next(), next(), next(), next(), next(), next());
+                let (sha, short_sha, subject, body, author_email, trailers, verify, incomplete, impact) = (next(), next(), next(), next(), next(), next(), next(), next(), next());
                 object(vec![
                     ("sha", Some(JsValue::str(sha))),
                     ("shortSha", Some(JsValue::str(short_sha))),
@@ -379,6 +379,7 @@ pub fn session_records(output: &str, our_email: &str) -> JsValue {
                     ("trailers", Some(string_list(trailers))),
                     ("verifyTrailers", Some(string_list(verify))),
                     ("incompleteTrailers", Some(string_list(incomplete))),
+                    ("impactTrailers", Some(string_list(impact))),
                 ])
             })
             .collect(),
@@ -406,6 +407,13 @@ pub fn show_record(output: &str, our_email: &str) -> JsValue {
 
 /// 공백 덩어리를 한 칸으로 줄이고 앞뒤를 다듬어 120자(UTF-16)까지만 둔다. 비면 "체크포인트"
 pub fn one_line(message: &str) -> String {
+    one_line_max(message, ONE_LINE_MAX)
+}
+
+/// 영향 범위 트레일러(한 줄 JSON)의 길이 상한. 다른 트레일러보다 길다 — 중간에서 잘리면 JSON이 깨져 기록을 읽지 못한다(읽는 쪽은 "모름"으로 센다)
+const IMPACT_TRAILER_MAX: usize = 16_000;
+
+fn one_line_max(message: &str, max: usize) -> String {
     let mut collapsed = String::with_capacity(message.len());
     let mut in_space = false;
     for c in message.chars() {
@@ -419,7 +427,7 @@ pub fn one_line(message: &str) -> String {
             in_space = false;
         }
     }
-    let cut = js::truncate_utf16(js::trim(&collapsed), ONE_LINE_MAX);
+    let cut = js::truncate_utf16(js::trim(&collapsed), max);
     if cut.is_empty() {
         "체크포인트".to_owned()
     } else {
@@ -459,7 +467,8 @@ pub fn commit_message(subject: &str, body: Option<&str>, trailers: &[String]) ->
         paragraphs.push(cap_text(body, MAX_BODY_CHARS));
     }
     if !trailers.is_empty() {
-        paragraphs.push(trailers.iter().map(|t| one_line(t)).collect::<Vec<_>>().join("\n"));
+        let impact_prefix = format!("{}:", crate::workflow::WORKFLOW_IMPACT_TRAILER);
+        paragraphs.push(trailers.iter().map(|t| one_line_max(t, if t.starts_with(&impact_prefix) { IMPACT_TRAILER_MAX } else { ONE_LINE_MAX })).collect::<Vec<_>>().join("\n"));
     }
     strip_space(&paragraphs.join("\n\n"))
 }
@@ -782,6 +791,11 @@ mod tests {
         assert_eq!(commit_message("  제목  \n둘째 ", Some("본문\n\n\n  끝  "), &s(&["Workflow-Passed: a, b"])), "제목 둘째\n\n본문\n\n  끝\n\nWorkflow-Passed: a, b");
         assert_eq!(commit_message("", None, &[]), "체크포인트");
         assert_eq!(commit_message("x", Some(""), &[]), "x");
+        // 영향 범위 트레일러는 120자를 넘어도 자르지 않는다(자르면 JSON이 깨진다). 다른 트레일러는 120자에서 자른다
+        let long = format!("{{\"v\":1,\"x\":\"{}\"}}", "가".repeat(500));
+        let message = commit_message("x", None, &[format!("Workflow-Impact: {long}"), format!("Workflow-Other: {}", "가".repeat(500))]);
+        assert!(message.contains(&format!("Workflow-Impact: {long}")));
+        assert!(message.lines().last().unwrap().chars().count() <= 120);
         assert_eq!(one_line(&"가".repeat(121)).chars().count(), 120);
         assert_eq!(strip_space("\n\na  \n\n\n\nb\t\n\n"), "a\n\nb");
     }

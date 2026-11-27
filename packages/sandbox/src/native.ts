@@ -888,6 +888,10 @@ interface NativeGuard {
   workflowProtectedPaths(protectedPaths: string[] | undefined, evaluationAssets: string[] | undefined): string[];
   workflowMaxTurns(json: string): string;
   workflowReviewChanges(json: string): string;
+  /** git diff --name-status -z -M 출력 → { entries: [{ status, path, from?, scan }] }. 어긋나면 던진다 */
+  workflowTestChangeEntries(output: string): string;
+  /** git diff -U0 출력 → 파일별로 더해진 줄(string[][]). 파일 수가 expected와 다르면 던진다 */
+  workflowTestChangeAddedLines(patch: string, expected: number): string;
   workflowUncoveredChangeWarnings(json: string): string;
   workflowFormatCheckedCoverage(json: string, declaredCheckName: string): string;
   // ── agent: 작업 계획·요구사항 검증 기록 무결성(3단계 3x). 막는 판정이다. 글자는 모두 encodeLoneSurrogates해서 보내고 결과의 글자는 decodeLoneSurrogates로 푼다(짝 없는 서로게이트가 경계에서 U+FFFD로 합쳐져 다른 글자가 같아지는 것을 막는다).
@@ -994,6 +998,7 @@ interface NativeGuard {
     unguardedWrites: boolean,
   ): string;
   sessionCheckpointTrailers(passedStages: string[] | null | undefined, verify: string | null | undefined, incomplete: string | null | undefined): string[];
+  sessionImpactTrailer(reportJson: string | null | undefined, checksJson: string): string | null;
   sessionTerminalResult(inputJson: string): string;
   sessionHookMessage(summary: string): string;
   sessionDoneTestsFeedback(failuresJson: string): string;

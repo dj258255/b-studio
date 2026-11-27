@@ -21,6 +21,8 @@ use crate::{next_routes, path_policy, services};
 pub const WORKFLOW_TRAILER: &str = "Workflow-Passed";
 pub const WORKFLOW_VERIFY_TRAILER: &str = "Workflow-Verify";
 pub const WORKFLOW_INCOMPLETE_TRAILER: &str = "Workflow-Incomplete";
+/// 게이트가 남긴 영향 범위 기록(계약 차이·허용한 확인 선언 변경)을 담는 트레일러. 값은 한 줄 JSON이다
+pub const WORKFLOW_IMPACT_TRAILER: &str = "Workflow-Impact";
 pub const COVERAGE_GAP_PREFIX: &str = "coverage-gap";
 
 pub const VERIFICATION_STAGES: [&str; 7] = ["run", "browser_check", "contract_check", "test", "concurrency_check", "load_check", "review"];
@@ -38,6 +40,10 @@ pub fn format_workflow_trailer(stages: &[String]) -> String {
 
 pub fn format_verify_trailer(mode: &str) -> String {
     format!("{WORKFLOW_VERIFY_TRAILER}: {mode}")
+}
+
+pub fn format_impact_trailer(json: &str) -> String {
+    format!("{WORKFLOW_IMPACT_TRAILER}: {json}")
 }
 
 pub fn format_incomplete_trailer(reason: &str) -> String {
@@ -472,7 +478,8 @@ fn restored_positions(value: Option<&JsValue>, len: usize) -> Result<Vec<usize>,
     }
 }
 
-/// 입력: 위 입력에 `{files, protectedPaths, backslashSep, maxChangedFiles?, restoredPositions?}`(`files`·`protectedPaths`는 원래 글자)를 더한 것.
+/// 입력: 위 입력에 `{files, protectedPaths, backslashSep, maxChangedFiles?, restoredPositions?, testChanges?}`(`files`·`protectedPaths`는 원래 글자)를 더한 것.
+/// `testChanges`(`test_weakening::review_from_value`)가 있으면 시험 파일 삭제·건너뛰기 표시 검사(`test-weakening`)가 보호 경로·변경 크기 다음에 붙는다.
 /// `restoredPositions`는 보호 경로 확인에서만 빼 준다(파일 수 상한·덮이지 않은 변경 경고는 모든 파일을 센다)
 pub fn review_changes_json(input_json: &str) -> Result<String, String> {
     let value = parse_input(input_json)?;
@@ -485,6 +492,11 @@ pub fn review_changes_json(input_json: &str) -> Result<String, String> {
         None => {}
         Some(JsValue::Num(max)) => checks.push(change_size_check(files.len(), *max)),
         Some(_) => return Err("maxChangedFiles는 수여야 합니다".to_owned()),
+    }
+    // 시험을 약하게 만든 변경(지운 시험 파일, 더해진 건너뛰기 표시). 입력이 없으면(git 기준이 없는 호출부) 이 검사는 없다
+    match value.prop("testChanges") {
+        None | Some(JsValue::Null) => {}
+        Some(changes) => checks.extend(crate::test_weakening::review_from_value(changes)?),
     }
     checks.extend(uncovered_change_warnings(&cover_input(&value)?));
     Ok(js_json::to_native(&checks_value(&checks)))

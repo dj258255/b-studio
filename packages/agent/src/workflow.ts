@@ -119,6 +119,12 @@ export function formatVerifyTrailer(mode: VerifyTrailer): string {
  */
 export const WORKFLOW_INCOMPLETE_TRAILER = 'Workflow-Incomplete';
 
+/**
+ * 게이트가 본 계약 차이와 사람이 허용한 확인 선언 변경을 한 줄 JSON으로 남기는 트레일러. PR 초안의 영향 범위가 읽는다.
+ * 커밋 본문(검증 보고서·에이전트 요약)은 자유 글이라 기록처럼 보이는 줄을 흉내 낼 수 있어서 따로 둔다
+ */
+export const WORKFLOW_IMPACT_TRAILER = 'Workflow-Impact';
+
 export function formatIncompleteTrailer(reason: 'max_turns'): string {
   return native.workflowFormatIncompleteTrailer(reason);
 }
@@ -163,7 +169,12 @@ export function missingVerificationStages(project: LoadedProject, passed: Readon
  * review 단계의 플랫폼 검토. 도구 게이트를 거치지 않은 하네스(로컬 CLI, Pi 등)가 바꾼 파일도
  * 체크포인트 직전에 같은 규칙으로 다시 본다.
  */
-export function reviewChanges(project: LoadedProject, changedFiles: readonly string[], restoredProtected: readonly string[] = []): WorkflowCheck[] {
+export function reviewChanges(
+  project: LoadedProject,
+  changedFiles: readonly string[],
+  restoredProtected: readonly string[] = [],
+  testChanges?: TestChangeInput,
+): WorkflowCheck[] {
   const workflow = project.spec.workflow;
   // 쓰기 직전 고정값과 바이트까지 같다고 확인된 파일(Workspace.restoredProtectedFiles)은 보호 경로 확인에서만 뺀다. 이름이 아니라 위치로 넘긴다:
   // 바뀐 파일 목록에 없는 이름은 빼 주지 않는다(이름이 목록과 정확히 같을 때만). 파일 수 상한·덮이지 않은 변경 경고는 이 파일도 센다
@@ -179,8 +190,28 @@ export function reviewChanges(project: LoadedProject, changedFiles: readonly str
     protectedPaths: protectedPathsFor(workflow),
     backslashSep: BACKSLASH_SEP,
     maxChangedFiles: workflow?.maxChangedFiles,
+    // 시험을 약하게 만든 변경(지운 시험 파일, 더해진 건너뛰기 표시) 판정도 Rust가 한다. 입력이 없으면 이 검사는 없다
+    ...(testChanges ? { testChanges: { entries: testChanges.entries, allowed: testChanges.allowed === true, incomplete: testChanges.incomplete ?? null } } : {}),
   };
   return decodeNative<WorkflowCheck[]>(native.workflowReviewChanges(encodeNative(input)));
+}
+
+/**
+ * 작업 복사본이 마지막 체크포인트에서 바뀐 파일 하나(git `--name-status`의 첫 글자와 경로). `from`은 이름을 바꾼 짝의 옛 경로다.
+ * `added`는 이번 변경에서 더해진 줄이다 — 시험 파일(과 Rust 파일)만 읽고, 읽지 않은 파일은 없다
+ */
+export interface TestChangeEntry {
+  status: string;
+  path: string;
+  from?: string;
+  added?: string[];
+}
+
+/** 시험 약화 검사의 입력. `allowed`는 사람이 이번 요청에 확인 변경을 허용했는지, `incomplete`는 변경 목록을 끝까지 읽지 못한 사유다 */
+export interface TestChangeInput {
+  entries: readonly TestChangeEntry[];
+  allowed?: boolean;
+  incomplete?: string;
 }
 
 /** coverage-gap 체크 이름에 붙는 접두사. 체크포인트 본문이 이 접두사로 "확인 안 됨" 항목만 따로 묶어 보여준다(ADR-135) */

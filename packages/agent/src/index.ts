@@ -252,6 +252,7 @@ export {
   type PullDetail,
   type PullFile,
   type PullRequestDraft,
+  type PullRequestImpact,
   type PullRequestResult,
   type PullRequestSummary,
   type PullReview,
@@ -263,6 +264,7 @@ export {
   type TaskListItem,
   type TaskListProgress,
 } from './repository';
+export { pullRequestImpactFor } from './pr-impact';
 export {
   assertAllowedRequirementEndpoint,
   buildManagedRegion,
@@ -405,6 +407,7 @@ export {
   uncoveredChangeWarnings,
   VERIFICATION_STAGES,
   WORKFLOW_TRAILER,
+  WORKFLOW_IMPACT_TRAILER,
   WORKFLOW_INCOMPLETE_TRAILER,
   WORKFLOW_VERIFY_TRAILER,
   type VerifyTrailer,
