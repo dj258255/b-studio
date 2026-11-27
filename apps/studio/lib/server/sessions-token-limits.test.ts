@@ -426,3 +426,46 @@ describe('tokens가 끝내 오지 않는 실행도 쓴 양은 기록에 남는�
     expect(await storedTotal()).toBe(400);
   });
 });
+
+describe('한도 단계 알림(#1427): 대화 경로도 50%·80%를 처음 넘을 때 한 번씩 알린다', () => {
+  const stageNotices = (events: StudioEvent[]) => events.filter((event): event is Extract<StudioEvent, { type: 'notice' }> => event.type === 'notice' && event.text.includes('토큰 한도의'));
+
+  it('사람 한도(1000): tokens 누적이 늘어도 같은 단계는 다시 알리지 않고, 한도에 닿으면 알리지 않고 멈춘다', async () => {
+    const { id, events } = await open();
+    ask(id);
+    await until(() => fake.runs.length === 1, '러너 시작');
+    const run = fake.runs[0]!;
+    run.emit(tokens(400));
+    await until(async () => (await storedInput()) === 400, '첫 몫 저장');
+    expect(stageNotices(events)).toEqual([]);
+    run.emit(tokens(550));
+    await until(async () => (await storedInput()) === 550, '둘째 몫 저장');
+    run.emit(tokens(700));
+    await until(async () => (await storedInput()) === 700, '셋째 몫 저장');
+    expect(stageNotices(events).map((event) => event.text.includes('50%'))).toEqual([true]);
+    run.emit(tokens(900));
+    await until(async () => (await storedInput()) === 900, '넷째 몫 저장');
+    expect(stageNotices(events).map((event) => (event.text.includes('50%') ? 50 : event.text.includes('80%') ? 80 : 0))).toEqual([50, 80]);
+    run.emit(tokens(1000));
+    await until(() => run.signal.aborted, '한도에서 멈춤');
+    expect(stageNotices(events)).toHaveLength(2);
+    expect(events.filter((event) => event.type === 'run_cancelling')).toMatchObject([{ reason: 'budget' }]);
+  });
+
+  it('세션 한도(500): 턴 사용량의 잠정 합계로도 알린다', async () => {
+    delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
+    process.env.B_STUDIO_SESSION_TOKEN_LIMIT = '500';
+    try {
+      const { id, events } = await open();
+      ask(id);
+      await until(() => fake.runs.length === 1, '러너 시작');
+      const run = fake.runs[0]!;
+      run.emit(turnUsage(450, 1));
+      await settle();
+      expect(stageNotices(events).map((event) => event.text.includes('80%'))).toEqual([true]);
+      expect(run.signal.aborted).toBe(false);
+    } finally {
+      delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
+    }
+  });
+});

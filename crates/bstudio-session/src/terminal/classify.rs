@@ -188,9 +188,10 @@ pub const CODEX_READ_TOOLS: [&str; 11] = [
     "read_mcp_resource",
 ];
 
-/// Command Code의 읽기 도구. **도구 이름은 이 CLI의 문서·소스로 확인하지 못한 추정이다**(실험, 아직 닿지 않는다). 틀리거나 빠져도 닫는 쪽이다: 표에 없는 이름은 바꾸는 도구라 쓰기 직전 훅을 한 번 더 거칠 뿐이다.
+/// Command Code의 읽기 도구. 설치된 v1.91.1의 도구 정의에서 이름을 확인한 것만 둔다(ADR-233): `read_file`·`read_directory`·`grep`·`glob`·`web_search`·`web_fetch`·`todo_write`·`ask_user_question`.
+/// 앞 단계의 추정이던 `read_multiple_files`·`list_dir`은 그 판에 도구로 없어 뺐다. 열린 것은 이 표뿐이라 이름이 빠지면 닫는 쪽이다: 표에 없는 이름은 바꾸는 도구라 쓰기 직전 훅을 한 번 더 거칠 뿐이다.
 /// 서브에이전트 도구(`agent`)는 일부러 뺐다(쓰기 도구)
-pub const COMMAND_CODE_READ_TOOLS: [&str; 9] = ["read_file", "read_multiple_files", "grep", "glob", "list_dir", "web_search", "web_fetch", "todo_write", "ask_user_question"];
+pub const COMMAND_CODE_READ_TOOLS: [&str; 8] = ["read_file", "read_directory", "grep", "glob", "web_search", "web_fetch", "todo_write", "ask_user_question"];
 
 /// OpenCode의 읽기 도구(이름은 소문자). 서브에이전트 도구(`task`)·`skill`·`bash`·`edit`·`write`·`patch`·`apply_patch`는 쓰기 도구다
 pub const OPENCODE_READ_TOOLS: [&str; 10] = ["read", "list", "glob", "grep", "webfetch", "websearch", "codesearch", "todoread", "todowrite", "question"];

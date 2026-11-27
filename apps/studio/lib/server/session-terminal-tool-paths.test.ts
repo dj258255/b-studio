@@ -74,6 +74,96 @@ describe('terminalToolFilePaths', () => {
   });
 });
 
+describe('commandcode의 파일 도구는 경로 별칭을 모두 꺼내고 모르는 열쇠가 있으면 알 수 없음(null)이다 (ADR-233, 보안 검토)', () => {
+  // cli.mjs(v1.93.4)의 별칭 표. CLI는 file_path가 비었으면 입력 객체에서 먼저 나온 별칭을 경로로 쓴다
+  const PATH_ALIASES = ['file_path', 'path', 'absolutePath', 'absolute_path', 'filePath', 'filepath', 'pathname', 'target_file', 'targetFile', 'fileName', 'file_name', 'filename'];
+
+  it('별칭 하나만 써도 그 경로가 나온다(옛 코드는 file_path·filePath·path만 보았다)', () => {
+    for (const tool of ['write_file', 'edit_file']) {
+      for (const key of PATH_ALIASES) {
+        expect(terminalToolFilePaths('commandcode', tool, { [key]: 'lib/forbidden.ts', ...(tool === 'write_file' ? { content: 'x' } : { old_string: 'a', new_string: 'b' }) }), `${tool} ${key}`).toEqual(['lib/forbidden.ts']);
+      }
+    }
+  });
+
+  it('쓰기 범위를 비켜 가는 시나리오: path는 범위 안, target_file은 범위 밖이면 둘 다 나온다(둘 다 범위 안이어야 통과한다)', () => {
+    const paths = terminalToolFilePaths('commandcode', 'write_file', { target_file: 'lib/forbidden.ts', path: 'src/ok.ts', content: 'x' });
+    expect(paths).toEqual(expect.arrayContaining(['lib/forbidden.ts', 'src/ok.ts']));
+    expect(paths).toHaveLength(2);
+  });
+
+  it('경로 열쇠가 여럿이고 값이 다르면 그대로 모두 낸다. 같은 값은 한 번만 낸다. 빈 글은 CLI가 건너뛰는 별칭 자리라 건너뛴다', () => {
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { file_path: 'a.ts', filename: 'b.ts', absolute_path: '/w/c.ts', old_string: 'x', new_string: 'y' })).toEqual(['a.ts', 'b.ts', '/w/c.ts']);
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { file_path: 'a.ts', path: 'a.ts' })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: '', path: 'src/ok.ts', content: 'x' })).toEqual(['src/ok.ts']);
+  });
+
+  it('경로 열쇠의 값이 글이 아니면(숫자·배열·객체·null) 다른 열쇠가 멀쩡해도 알 수 없음(null)이다', () => {
+    for (const bad of [5, ['a.ts'], { a: 1 }, null, true]) {
+      expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: 'src/ok.ts', target_file: bad, content: 'x' }), JSON.stringify(bad)).toBeNull();
+    }
+  });
+
+  it('표에 없는 열쇠가 하나라도 있으면 알 수 없음(null)이다: 판이 바뀌어 별칭이 늘면 막히는 쪽으로 틀린다', () => {
+    for (const input of [
+      { file_path: 'src/ok.ts', content: 'x', destination: 'lib/forbidden.ts' },
+      { file_path: 'src/ok.ts', content: 'x', 'target_file?': 'lib/forbidden.ts' },
+      { file_path: 'src/ok.ts', content: 'x', FILE_PATH: 'lib/forbidden.ts' },
+      { file_path: 'src/ok.ts', content: 'x', mode: '755' },
+    ]) {
+      expect(terminalToolFilePaths('commandcode', 'write_file', input), JSON.stringify(input)).toBeNull();
+    }
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { file_path: 'src/ok.ts', old_string: 'a', new_string: 'b', surprise: 1 })).toBeNull();
+    // write_file의 별칭이 edit_file에서도 같은 표지만, 도구마다 자기 표만 본다(edit_file의 내용 별칭은 write_file에 없다)
+    expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: 'src/ok.ts', content: 'x', oldValue: 'a' })).toBeNull();
+  });
+
+  it('내용 쪽 별칭과 정식 이름은 표 안이다(edit_file의 old·new·replace_all·replacement_count 별칭 포함)', () => {
+    expect(terminalToolFilePaths('commandcode', 'write_file', { path: 'a.ts', text: 'x' })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'write_file', { path: 'a.ts', fileContent: 'x' })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { path: 'a.ts', oldValue: 'a', newValue: 'b', replaceAll: true, count: 2 })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { file_path: 'a.ts', old_string: 'a', new_string: 'b', replace_all: true, replacement_count: 1 })).toEqual(['a.ts']);
+  });
+
+  it('CLI가 경로 값에서 벗겨 내는 마크다운 링크는 글 그대로와 벗긴 값 둘 다 낸다', () => {
+    expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: '[src/ok.ts](lib/forbidden.ts)', content: 'x' })).toEqual(['[src/ok.ts](lib/forbidden.ts)', 'lib/forbidden.ts']);
+  });
+
+  it('다른 갈래는 그대로다(gemini는 알려진 키를 모두 꺼낸다, 모르는 열쇠로 막지 않는다)', () => {
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: '/w/a.ts', content: 'x', other: 1 })).toEqual(['/w/a.ts']);
+  });
+});
+
+describe('commandcode의 파일 도구는 경로를 꺼내지 못하면 알 수 없음(null)이다 (ADR-233)', () => {
+  it('write_file·edit_file에 경로 키가 없거나 글이 아니거나 비어 있으면 null이다. 모르는 값을 빈 목록(범위 안)으로 읽지 않는다', () => {
+    for (const tool of ['write_file', 'edit_file']) {
+      for (const input of [{ content: 'x' }, {}, { file_path: 5 }, { file_path: '' }, { file_path: '   ' }, { file_path: ['/w/a.ts'] }, { path: null }, null, 'text', undefined, [1]]) {
+        expect(terminalToolFilePaths('commandcode', tool, input), `${tool} ${JSON.stringify(input)}`).toBeNull();
+      }
+    }
+  });
+
+  it('대조: 경로를 꺼낼 수 있으면 그 경로를 내고, 파일 도구가 아닌 도구는 경로가 없어도 빈 목록이다(턴 끝 검사가 맡는다)', () => {
+    expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: '/w/a.ts', content: 'x' })).toEqual(['/w/a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'edit_file', { path: '/w/a.ts' })).toEqual(['/w/a.ts']);
+    expect(terminalToolFilePaths('commandcode', 'shell_command', { command: 'ls' })).toEqual([]);
+  });
+
+  it('commandcode의 서브에이전트 도구는 입력과 상관없이 알 수 없음(null)이다: 그 안의 쓰기는 쓰기 직전 훅을 거치지 않는다', () => {
+    for (const tool of ['agent', 'task']) {
+      for (const input of [{ prompt: '고쳐 줘', subagent_type: 'general' }, { file_path: '/w/api/src/a.ts' }, {}, null, 'x']) {
+        expect(terminalToolFilePaths('commandcode', tool, input), `${tool} ${JSON.stringify(input)}`).toBeNull();
+      }
+    }
+    // 대조: 다른 갈래의 같은 이름은 이 규칙을 타지 않는다(claude의 서브에이전트 안 도구는 훅을 거친다)
+    expect(terminalToolFilePaths('claude', 'Agent', { prompt: 'x' })).toEqual([]);
+    expect(terminalToolFilePaths('claude', 'agent', { prompt: 'x' })).toEqual([]);
+    expect(terminalToolFilePaths('commandcode', 'read_file', {})).toEqual([]);
+    // 다른 갈래의 같은 이름 도구는 이 규칙을 받지 않는다(gemini의 write_file은 지금 그대로다)
+    expect(terminalToolFilePaths('gemini', 'write_file', { content: 'x' })).toEqual([]);
+  });
+});
+
 describe('패치 도구는 갈래와 상관없이 같은 엄격한 읽기를 쓴다', () => {
   const wrap = (...lines: string[]): string => ['*** Begin Patch', ...lines, '*** End Patch', ''].join('\n');
   it('codex: 머리글 앞뒤 공백·CRLF도 같은 파일로 읽는다(CLI가 읽는 방식과 같게 줄을 다듬어 맞춘다)', () => {

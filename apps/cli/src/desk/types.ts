@@ -50,6 +50,10 @@ export interface DeskItem {
   context?: DeskContext;
   /** 마지막 답의 앞부분(200자 안, #920) */
   lastMessage?: string;
+  /**
+   * 세션·사람 토큰 한도에 대한 사용 비율(#1427). percent가 없으면 사용량을 읽지 못한 것(모름)이다. 한도가 없거나 옛 서버면 없다
+   */
+  tokenLimit?: { kind: 'session' | 'user'; limit: number; used?: number; percent?: number };
 }
 
 export interface DeskNow {
