@@ -155,8 +155,8 @@ describe('commandcode의 파일 도구는 경로 별칭을 모두 꺼내고 모�
     expect(terminalToolFilePaths('commandcode', 'write_file', { file_path: '[src/ok.ts](lib/forbidden.ts)', content: 'x' })).toEqual(['[src/ok.ts](lib/forbidden.ts)', 'lib/forbidden.ts']);
   });
 
-  it('다른 갈래는 그대로다(gemini는 알려진 키를 모두 꺼낸다, 모르는 열쇠로 막지 않는다)', () => {
-    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: '/w/a.ts', content: 'x', other: 1 })).toEqual(['/w/a.ts']);
+  it('gemini의 셸 도구처럼 파일 도구가 아닌 것은 알려진 키를 모두 꺼낸다(ADR-242 전과 같다)', () => {
+    expect(terminalToolFilePaths('gemini', 'run_shell_command', { command: 'cat a', path: '/w/a.ts' })).toEqual(['/w/a.ts']);
   });
 });
 
@@ -185,8 +185,8 @@ describe('commandcode의 파일 도구는 경로를 꺼내지 못하면 알 수 
     expect(terminalToolFilePaths('claude', 'Agent', { prompt: 'x' })).toEqual([]);
     expect(terminalToolFilePaths('claude', 'agent', { prompt: 'x' })).toEqual([]);
     expect(terminalToolFilePaths('commandcode', 'read_file', {})).toEqual([]);
-    // 다른 갈래의 같은 이름 도구는 이 규칙을 받지 않는다(gemini의 write_file은 지금 그대로다)
-    expect(terminalToolFilePaths('gemini', 'write_file', { content: 'x' })).toEqual([]);
+    // gemini의 write_file은 경로가 없으면 어느 파일인지 알 수 없다(ADR-242, 아래 시험)
+    expect(terminalToolFilePaths('gemini', 'write_file', { content: 'x' })).toBeNull();
   });
 });
 
@@ -222,5 +222,38 @@ describe('isReadToolFor', () => {
     expect(isReadToolFor('opencode', 'read_file')).toBe(false);
     expect(isReadToolFor('commandcode', 'agent')).toBe(false);
     expect(isReadToolFor('nope', 'read')).toBe(false);
+  });
+});
+
+describe('Gemini 파일 도구의 경로(0.71.1 도구 정의, ADR-242)', () => {
+  it('write_file·replace는 file_path 하나만 꺼낸다', () => {
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: 'src/a.ts', content: 'x' })).toEqual(['src/a.ts']);
+    expect(terminalToolFilePaths('gemini', 'replace', { file_path: '/w/a.ts', instruction: 'i', old_string: 'a', new_string: 'b', allow_multiple: true })).toEqual(['/w/a.ts']);
+  });
+
+  it('표에 없는 열쇠가 끼거나 경로가 없거나 글이 아니거나 비어 있으면 null이다(어느 파일인지 알 수 없다)', () => {
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: 'a.ts', content: 'x', path: 'b.ts' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: 'a.ts', content: 'x', other: 1 })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'write_file', { content: 'x' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'replace', { file_path: ['a.ts'], old_string: 'a', new_string: 'b' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'replace', { file_path: '   ', old_string: 'a', new_string: 'b' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'write_file', 'a.ts')).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'write_file', [])).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'replace', undefined)).toBeNull();
+  });
+
+  it('도구가 다시 고쳐 읽는 모양(NUL을 지움, 앞의 @를 뗌)은 알 수 없는 것이다: 우리가 본 경로와 도구가 쓰는 경로가 달라지기 때문이다', () => {
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: 'src/a\0/../../lib/x.ts', content: 'x' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: '@lib/x.ts', content: 'x' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'replace', { file_path: ' @/etc/x', old_string: 'a', new_string: 'b' })).toBeNull();
+    // 대조: 가운데의 @는 평범한 글자다
+    expect(terminalToolFilePaths('gemini', 'write_file', { file_path: 'lib/@x.ts', content: 'x' })).toEqual(['lib/@x.ts']);
+  });
+
+  it('서브에이전트 도구(invoke_agent)는 늘 null이다. 셸 도구는 빈 목록이다', () => {
+    expect(terminalToolFilePaths('gemini', 'invoke_agent', { agent_name: 'a', prompt: 'p' })).toBeNull();
+    expect(terminalToolFilePaths('gemini', 'run_shell_command', { command: 'ls' })).toEqual([]);
+    // 다른 갈래의 같은 이름은 이 규칙을 받지 않는다
+    expect(terminalToolFilePaths('commandcode', 'invoke_agent', { prompt: 'p' })).toEqual([]);
   });
 });

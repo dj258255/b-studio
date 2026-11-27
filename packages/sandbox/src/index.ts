@@ -1,6 +1,9 @@
 export * from './types';
 export { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 export { commandCodeConfigPathBlocked, commandCodeModLoadRefusal, commandCodeModName, type CommandCodeConfigWrite, type CommandCodeModLoadCheck } from './commandcode-config';
+export { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_EVENTS, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME, geminiHookSeconds, type GeminiHookEvent } from './gemini-hook';
+export { GEMINI_MIN_VERSION, geminiConfigPathBlocked, geminiConfigRefusal, geminiSettingsContent, geminiUserAuthType, geminiVersionRefusal, parseGeminiVersion, type GeminiConfigWrite, type GeminiLoadCheck } from './gemini-config';
+export { execChecked } from './exec-checked';
 export { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
 export { openCodeConfigContent, openCodeConfigPathBlocked, openCodeConfigRefusal, openCodeGlobalConfigDir, type OpenCodeConfigWrite, type OpenCodeLoadCheck } from './opencode-config';
 export * from './errors';
@@ -120,6 +123,8 @@ export {
   hostCliWrapper,
   hostCodexWrapper,
   hostCommandCodeWrapper,
+  hostGeminiWrapper,
+  geminiHomePath,
   commandCodeModPath,
   hostOpenCodeWrapper,
   openCodeConfigPath,

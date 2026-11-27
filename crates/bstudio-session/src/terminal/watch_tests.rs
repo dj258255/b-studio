@@ -445,7 +445,7 @@ fn hooked_argv_accepts_the_self_agent_launcher_slot_only() {
 
 const MOD: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/b-studio-mod.ts";
 const OPENCODE_CONFIG: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/opencode.json";
-const GEMINI_SETTINGS: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/gemini-settings.json";
+const GEMINI_SETTINGS: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/gemini-home";
 
 fn env_of(items: &[(&str, &str)]) -> Vec<(String, String)> {
     items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
@@ -531,8 +531,9 @@ fn opencode_needs_the_config_env_and_no_pure() {
     assert!(!launch_oc(&[oc, "--pure"], Some(good)));
     assert!(!launch_oc(&[oc, "--prompt", "x", "--pure"], Some(good)));
     assert!(!launch_oc(&[oc, "--pure=true"], Some(good)));
-    // 요청 글 한 요소 안의 글은 옵션이 아니다
-    assert!(launch_oc(&[oc, "--prompt", "--pure를 설명해 줘"], Some(good)));
+    // 요청 글 한 요소 안의 글은 옵션이 아니다(첫 요청은 앞에 "요청: "이 붙어 `-`로 시작하지 않는다). `-`로 시작하는 값은 다음 옵션으로 읽힐 수 있어 받지 않는다
+    assert!(launch_oc(&[oc, "--prompt", "요청: --pure를 설명해 줘"], Some(good)));
+    assert!(!launch_oc(&[oc, "--prompt", "--pure를 설명해 줘"], Some(good)));
 }
 
 #[test]
@@ -560,27 +561,131 @@ fn opencode_rejects_envs_that_add_plugins_and_the_attach_client() {
 }
 
 #[test]
-fn gemini_needs_the_system_settings_env() {
+fn gemini_needs_the_home_env_and_no_settings_overrides() {
     let gm = "/usr/local/bin/gemini";
-    let good: &[(&str, &str)] = &[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)];
+    let good: &[(&str, &str)] = &[("GEMINI_CLI_HOME", GEMINI_SETTINGS)];
     assert!(launch_gm(&[gm], Some(good)));
-    assert!(launch_gm(&["/usr/bin/node", "/x/node_modules/@google/gemini-cli/dist/index.js", "-i", "요청"], Some(good)));
+    assert!(launch_gm(&["/usr/bin/node", "/x/node_modules/@google/gemini-cli/bundle/gemini.js", "-i", "요청"], Some(good)));
     // 환경을 읽지 못했다: 붙지 않은 것
     assert!(!launch_gm(&[gm], None));
     assert!(!launch_gm(&[gm], Some(&[])));
-    for other in [GEMINI_SETTINGS.to_uppercase(), format!("{GEMINI_SETTINGS}/"), GEMINI_SETTINGS.replace("/studio-a/", "/studio-a/./"), "/tmp/link/gemini-settings.json".to_owned(), String::new()] {
-        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", &other)])), "{other:?}");
+    for other in [GEMINI_SETTINGS.to_uppercase(), format!("{GEMINI_SETTINGS}/"), GEMINI_SETTINGS.replace("/studio-a/", "/studio-a/./"), "/tmp/link/gemini-home".to_owned(), String::new()] {
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", &other)])), "{other:?}");
     }
-    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS), ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", "/evil.json")])));
-    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", GEMINI_SETTINGS)])));
+    // 같은 이름이 여럿이면 하나라도 다를 때 붙지 않은 것
+    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), ("GEMINI_CLI_HOME", "/evil")])));
+    // 예전 증거(시스템 설정 경로)로는 붙었다고 보지 않는다: 시스템 설정은 root 소유여야 읽혀 우리 파일이 붙지 않는다
+    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)])));
+    // 시스템 설정 자리·믿음을 바꾸는 변수는 하나라도 있으면(값이 비었어도) 붙지 않은 것이다: 훅을 끄거나 더할 수 있다
+    for name in [
+        "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+        "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+        "GEMINI_RESTRICTED_MODE",
+        "GEMINI_CLI_TRUST_WORKSPACE",
+        // 샌드박스를 켜거나 꾸미는 변수(0.71.1): CLI를 다른 프로세스에서 다시 띄운다
+        "GEMINI_SANDBOX",
+        "SANDBOX",
+        "GEMINI_SANDBOX_IMAGE",
+        "GEMINI_SANDBOX_PROXY_COMMAND",
+        "SANDBOX_ENV",
+        "SANDBOX_FLAGS",
+        "SANDBOX_MOUNTS",
+        "SANDBOX_PORTS",
+        "SANDBOX_SET_UID_GID",
+        "SEATBELT_PROFILE",
+    ] {
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), (name, "x")])), "{name}");
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), (name, "")])), "{name} 빈 값");
+    }
+    // 샌드박스 인자는 CLI를 다른 프로세스에서 다시 띄운다: 붙었는지 알 수 없다
+    for flag in ["-s", "--sandbox", "--sandbox=true", "--sandbox-image"] {
+        assert!(!launch_gm(&[gm, flag], Some(good)), "{flag}");
+    }
+    // 첫 요청 글은 앞에 "요청: "이 붙어 `-`로 시작하지 않는다. `-`로 시작하는 값은 다음 옵션으로 읽힐 수 있어 붙지 않은 것이다
+    assert!(launch_gm(&[gm, "-i", "요청: --sandbox를 설명해 줘"], Some(good)));
+    assert!(!launch_gm(&[gm, "-i", "--sandbox를 설명해 줘"], Some(good)));
+}
+
+#[test]
+fn opencode_accepts_only_known_args() {
+    let oc = "/usr/local/bin/opencode";
+    let env: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("PWD", "/work/a")];
+    let ok = |args: &[&str]| launch_oc(args, Some(env));
+    // 우리가 쓰는 꼴과 사용자가 흔히 치는 옵션
+    assert!(ok(&[oc]));
+    assert!(ok(&[oc, "--model=anthropic/x", "--prompt", "요청: 고쳐 줘"]));
+    assert!(ok(&[oc, "--session", "ses_1"]));
+    assert!(ok(&[oc, "-m", "p/m", "-c", "--fork", "--agent", "build", "--log-level", "INFO", "--print-logs"]));
+    assert!(ok(&[oc, "--prompt=요청"]));
+    // 프로젝트 경로: `.`만(작업 폴더는 cwd가 정한다). 환경(PWD)은 상대가 정할 수 있는 값이라 예외의 근거로 쓰지 않는다
+    assert!(ok(&[oc, "."]));
+    assert!(!ok(&[oc, "/work/a"]));
+    assert!(!ok(&[oc, "/work/b"]));
+    assert!(!ok(&[oc, "src"]));
+    assert!(!ok(&[oc, ".", "."]));
+    // 서버에 붙거나 다른 설정·서버로 뜨는 길: 하위 명령(1.18.33의 yargs 정의)과 옵션은 모두 붙지 않은 것
+    for command in ["attach", "run", "serve", "web", "acp", "mcp", "plugin", "plug", "auth", "providers", "models", "export", "import", "github", "pr", "session", "stats", "db", "debug", "agent", "upgrade", "uninstall", "completion", "console", "generate"] {
+        assert!(!ok(&[oc, command]), "{command}");
+        assert!(!ok(&[oc, command, "http://localhost:4096"]), "{command} url");
+        assert!(!ok(&[oc, "--log-level", "DEBUG", command]), "{command} 옵션 뒤");
+    }
+    for flag in ["--attach", "--attach=http://localhost:4096", "--port", "--hostname", "--mdns", "--cors", "--dir", "--cwd", "--mini", "--auto", "--yolo", "--dangerously-skip-permissions", "--pure", "--pure=true", "-p", "-u", "--password", "--username", "--url", "--demo", "--replay", "--no-replay", "--config", "-x"] {
+        assert!(!ok(&[oc, flag]), "{flag}");
+        assert!(!ok(&[oc, flag, "x"]), "{flag} x");
+    }
+    // 값 자리에 옵션이 오면 값이 아니라 다음 옵션이다(`--prompt --attach url`은 --prompt가 비고 --attach가 붙는다)
+    assert!(!ok(&[oc, "--prompt", "--attach", "http://localhost:4096"]));
+    assert!(!ok(&[oc, "--session", "-c"]));
+    assert!(!ok(&[oc, "--prompt"]));
+    // `--` 뒤는 모두 위치 인자
+    assert!(!ok(&[oc, "--", "attach"]));
+    // PWD가 무엇이든 위치 인자는 `.`만 받는다: `PWD=serve opencode serve`처럼 하위 명령 이름을 PWD에 두어도 소용없다
+    assert!(launch_oc(&[oc, "."], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG)])));
+    assert!(!launch_oc(&[oc, "/work/a"], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG)])));
+    for command in ["serve", "attach", "run", "web", "acp", "mcp", "plug", "auth", "/work", "src"] {
+        let pwd: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("PWD", command)];
+        assert!(!launch_oc(&[oc, command], Some(pwd)), "PWD={command}");
+        assert!(!launch_oc(&[oc, "--prompt", "x", command], Some(pwd)), "PWD={command} 뒤");
+    }
+    // 같은 PWD가 둘이어도 마찬가지다
+    assert!(!launch_oc(&[oc, "serve"], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("PWD", "serve"), ("PWD", "serve")])));
+}
+
+#[test]
+fn gemini_accepts_only_known_args() {
+    let gm = "/usr/local/bin/gemini";
+    let good: &[(&str, &str)] = &[("GEMINI_CLI_HOME", GEMINI_SETTINGS)];
+    let ok = |args: &[&str]| launch_gm(args, Some(good));
+    assert!(ok(&[gm]));
+    assert!(ok(&[gm, "-i", "요청: 고쳐 줘"]));
+    assert!(ok(&[gm, "--prompt-interactive=요청", "-m", "gemini-x", "--model=y", "--screen-reader"]));
+    assert!(ok(&[gm, "-r", "latest"]));
+    assert!(ok(&[gm, "--resume"]));
+    assert!(ok(&[gm, "고쳐", "줘"]));
+    // 하위 명령은 에이전트를 띄우지 않는다(0.71.1의 mcp·extensions·skills·hooks·gemma·models와 별칭): 붙지 않은 것
+    for command in ["mcp", "extensions", "extension", "skills", "skill", "hooks", "hook", "gemma", "models"] {
+        assert!(!ok(&[gm, command]), "{command}");
+        assert!(!ok(&[gm, "-m", "x", command, "list"]), "{command} 옵션 뒤");
+    }
+    // 허용 목록 밖의 옵션: 샌드박스·다른 방식으로 뜨는 길·설정을 바꾸는 길
+    for flag in ["-s", "--sandbox", "--sandbox=true", "--sandbox-image", "-p", "--prompt", "-y", "--yolo", "--approval-mode", "--policy", "--admin-policy", "--acp", "--experimental-acp", "-e", "--extensions", "-l", "--list-extensions", "--list-models", "--list-sessions", "--delete-session", "--skip-trust", "-w", "--worktree", "--include-directories", "--session-file", "--session-id", "-o", "--output-format", "--fake-responses", "--record-responses", "--allowed-tools", "--allowed-mcp-server-names", "-x"] {
+        assert!(!ok(&[gm, flag]), "{flag}");
+        assert!(!ok(&[gm, "-i", "요청", flag, "x"]), "{flag} 뒤");
+    }
+    // 환경으로 정하는 예외는 없다: PWD·다른 변수가 하위 명령 이름이어도 거절은 그대로다
+    let tricky: &[(&str, &str)] = &[("GEMINI_CLI_HOME", GEMINI_SETTINGS), ("PWD", "mcp"), ("OLDPWD", "mcp")];
+    assert!(!launch_gm(&[gm, "mcp"], Some(tricky)));
+    assert!(!ok(&[gm, "-i", "--sandbox"]));
+    assert!(!ok(&[gm, "-i"]));
+    assert!(!ok(&[gm, "--", "x"]));
 }
 
 #[test]
 fn hooked_launch_never_crosses_kinds() {
     // 다른 갈래의 증거로는 붙었다고 보지 않는다
-    let oc_env: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)];
+    let oc_env: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("GEMINI_CLI_HOME", GEMINI_SETTINGS)];
     assert!(!launch_gm(&["gemini"], Some(&[("OPENCODE_CONFIG", GEMINI_SETTINGS)])));
-    assert!(!launch_oc(&["opencode"], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", OPENCODE_CONFIG)])));
+    assert!(!launch_oc(&["opencode"], Some(&[("GEMINI_CLI_HOME", OPENCODE_CONFIG)])));
     assert!(!launch_cc(&["commandcode", "--settings", SETTINGS]));
     // claude·codex는 이 함수로 붙었다고 보지 않는다(claude는 hooked_argv, codex는 ps 한 줄)
     for kind in [CliKind::Claude, CliKind::Codex] {

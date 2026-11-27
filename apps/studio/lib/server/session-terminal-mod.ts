@@ -15,10 +15,10 @@
 const DEFAULT_TIMEOUT_MS = 90_000;
 
 /**
- * 이 시계를 거는 CLI. Command Code는 mod 파일, OpenCode(ADR-241)는 플러그인 파일이 훅을 붙인다. 같은 시계와 같은 신호(`/session-start`)를 쓴다.
+ * 이 시계를 거는 CLI. Command Code는 mod 파일, OpenCode(ADR-241)는 플러그인 파일, Gemini(ADR-242)는 설정의 훅이 붙는다. 같은 시계와 같은 신호(`/session-start`)를 쓴다.
  * 시험이 시간을 낮추는 환경 변수와 위반 글의 낱말만 CLI마다 다르다
  */
-export type ModClockCli = 'commandcode' | 'opencode';
+export type ModClockCli = 'commandcode' | 'opencode' | 'gemini';
 const LABELS: Record<ModClockCli, { timeoutEnv: string; subject: string; loaded: string; failure: string }> = {
   commandcode: {
     timeoutEnv: 'B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS',
@@ -31,6 +31,12 @@ const LABELS: Record<ModClockCli, { timeoutEnv: string; subject: string; loaded:
     subject: 'OpenCode가',
     loaded: 'b-studio의 플러그인이 불러와졌다는',
     failure: '설정이 플러그인을 껐거나 플러그인을 읽지 못하거나 다른 플러그인이 있어',
+  },
+  gemini: {
+    timeoutEnv: 'B_STUDIO_GEMINI_MOD_TIMEOUT_MS',
+    subject: 'Gemini가',
+    loaded: 'b-studio의 훅이 불러와졌다는',
+    failure: '믿지 않는 폴더라서 설정의 훅이 하나도 등록되지 않았거나 설정이 훅을 껐거나 훅 명령이 실행되지 못해',
   },
 };
 
