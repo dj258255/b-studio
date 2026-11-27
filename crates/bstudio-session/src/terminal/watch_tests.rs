@@ -445,7 +445,7 @@ fn hooked_argv_accepts_the_self_agent_launcher_slot_only() {
 
 const MOD: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/b-studio-mod.ts";
 const OPENCODE_CONFIG: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/opencode.json";
-const GEMINI_SETTINGS: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/gemini-settings.json";
+const GEMINI_SETTINGS: &str = "/home/kim/.cache/b-studio/agent-gateway/studio-a/gemini-home";
 
 fn env_of(items: &[(&str, &str)]) -> Vec<(String, String)> {
     items.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
@@ -536,27 +536,40 @@ fn opencode_needs_the_config_env_and_no_pure() {
 }
 
 #[test]
-fn gemini_needs_the_system_settings_env() {
+fn gemini_needs_the_home_env_and_no_settings_overrides() {
     let gm = "/usr/local/bin/gemini";
-    let good: &[(&str, &str)] = &[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)];
+    let good: &[(&str, &str)] = &[("GEMINI_CLI_HOME", GEMINI_SETTINGS)];
     assert!(launch_gm(&[gm], Some(good)));
-    assert!(launch_gm(&["/usr/bin/node", "/x/node_modules/@google/gemini-cli/dist/index.js", "-i", "요청"], Some(good)));
+    assert!(launch_gm(&["/usr/bin/node", "/x/node_modules/@google/gemini-cli/bundle/gemini.js", "-i", "요청"], Some(good)));
     // 환경을 읽지 못했다: 붙지 않은 것
     assert!(!launch_gm(&[gm], None));
     assert!(!launch_gm(&[gm], Some(&[])));
-    for other in [GEMINI_SETTINGS.to_uppercase(), format!("{GEMINI_SETTINGS}/"), GEMINI_SETTINGS.replace("/studio-a/", "/studio-a/./"), "/tmp/link/gemini-settings.json".to_owned(), String::new()] {
-        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", &other)])), "{other:?}");
+    for other in [GEMINI_SETTINGS.to_uppercase(), format!("{GEMINI_SETTINGS}/"), GEMINI_SETTINGS.replace("/studio-a/", "/studio-a/./"), "/tmp/link/gemini-home".to_owned(), String::new()] {
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", &other)])), "{other:?}");
     }
-    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS), ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", "/evil.json")])));
-    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_DEFAULTS_PATH", GEMINI_SETTINGS)])));
+    // 같은 이름이 여럿이면 하나라도 다를 때 붙지 않은 것
+    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), ("GEMINI_CLI_HOME", "/evil")])));
+    // 예전 증거(시스템 설정 경로)로는 붙었다고 보지 않는다: 시스템 설정은 root 소유여야 읽혀 우리 파일이 붙지 않는다
+    assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)])));
+    // 시스템 설정 자리·믿음을 바꾸는 변수는 하나라도 있으면(값이 비었어도) 붙지 않은 것이다: 훅을 끄거나 더할 수 있다
+    for name in ["GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH", "GEMINI_RESTRICTED_MODE", "GEMINI_CLI_TRUST_WORKSPACE"] {
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), (name, "x")])), "{name}");
+        assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), (name, "")])), "{name} 빈 값");
+    }
+    // 샌드박스 인자는 CLI를 다른 프로세스에서 다시 띄운다: 붙었는지 알 수 없다
+    for flag in ["-s", "--sandbox", "--sandbox=true", "--sandbox-image"] {
+        assert!(!launch_gm(&[gm, flag], Some(good)), "{flag}");
+    }
+    // 첫 요청 글에 든 낱말은 옵션이 아니다
+    assert!(launch_gm(&[gm, "-i", "--sandbox를 설명해 줘"], Some(good)));
 }
 
 #[test]
 fn hooked_launch_never_crosses_kinds() {
     // 다른 갈래의 증거로는 붙었다고 보지 않는다
-    let oc_env: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)];
+    let oc_env: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("GEMINI_CLI_HOME", GEMINI_SETTINGS)];
     assert!(!launch_gm(&["gemini"], Some(&[("OPENCODE_CONFIG", GEMINI_SETTINGS)])));
-    assert!(!launch_oc(&["opencode"], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", OPENCODE_CONFIG)])));
+    assert!(!launch_oc(&["opencode"], Some(&[("GEMINI_CLI_HOME", OPENCODE_CONFIG)])));
     assert!(!launch_cc(&["commandcode", "--settings", SETTINGS]));
     // claude·codex는 이 함수로 붙었다고 보지 않는다(claude는 hooked_argv, codex는 ps 한 줄)
     for kind in [CliKind::Claude, CliKind::Codex] {

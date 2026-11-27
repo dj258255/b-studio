@@ -209,6 +209,7 @@ import {
 } from '@b-studio/agent';
 import {
   commandCodeConfigPathBlocked,
+  geminiConfigPathBlocked,
   describeSnapshotEvent,
   providerFromEnv,
   Redactor,
@@ -358,7 +359,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { commandCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, geminiTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
 import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
@@ -7520,6 +7521,11 @@ export function sessionTerminalTarget(id: string): {
     const refused = commandCodeTerminalReason(sessionTerminalMode());
     if (refused) throw new StudioError(409, refused);
   }
+  // Gemini 세션도 같다(ADR-242)
+  if (sessionBackend(session.snapshot) === 'gemini') {
+    const refused = geminiTerminalReason(sessionTerminalMode());
+    if (refused) throw new StudioError(409, refused);
+  }
   // 서버가 작업 폴더에 쓰고 판정하는 동안에는 열지 않는다. 열면 CLI·사람이 같은 폴더에 쓰고, CLI의 훅이 서버가 연 실행에 붙는다(ADR-224)
   if (session.serverApplying === true) throw new StudioError(409, '서버가 이 세션에 변경을 쓰고 검증하는 중이라 터미널을 열 수 없습니다. 끝난 뒤 다시 여세요');
   // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
@@ -7729,6 +7735,8 @@ function terminalCliKind(session: Session): HostCliKind {
   if (backend === 'codex') return 'codex';
   // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
   if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';
+  // Gemini(실험, ADR-242)도 같다
+  if (backend === 'gemini' && experimentalEnabled()) return 'gemini';
   return 'claude';
 }
 
@@ -7736,7 +7744,7 @@ function terminalCliKind(session: Session): HostCliKind {
 function terminalRunBackend(session: Session): SessionMode {
   if (selfAgentTerminal(session)) return 'api';
   const cli = terminalCliKind(session);
-  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : 'claude-code';
+  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : cli === 'gemini' ? 'gemini' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -8952,9 +8960,59 @@ async function terminalCommandCodeDeny(session: Session, tool: string, toolInput
   return undefined;
 }
 
-/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
+/**
+ * Gemini 세션의 쓰기 직전 막기(ADR-242). **카드가 없어도** 막는다. 막는 쪽이다(거부 목록):
+ * - `write_file`·`replace`가 Gemini의 설정 자리(`.gemini`: 작업 폴더·위 폴더·사용자 홈)를 바꾸는 것: 작업 폴더의 설정이 `hooksConfig`로 우리 훅을 끄거나 `hooks`로 다른 훅을 더한다.
+ *   비교는 파일 시스템 규칙으로 한다(`geminiConfigPathBlocked`: 대소문자·유니코드·`..`·겹친 구분자·링크). 파일 도구인데 바꾸는 파일을 알 수 없으면(모르는 열쇠·NUL·앞의 `@`) 이 자리를 건드리지 않는다고 말할 수 없어 막는다
+ * - `replace`가 **글자 그대로의 경로에 없는 상대 경로**를 받은 것: 도구는 그 이름으로 끝나는 파일을 작업 폴더에서 찾아 대신 고친다(`correctPath`). 우리가 본 경로와 고쳐지는 파일이 달라져
+ *   쓰기 범위·설정 자리 검사를 비켜 갈 수 있다. 새 파일을 만드는 `replace`(old_string이 빈 글)는 그 길을 타지 않으므로 막지 않는다
+ * 셸로 쓰는 경우는 여기서 막지 못한다: 설정은 Gemini가 뜰 때 읽으므로 그 뒤의 변경은 다음에 띄울 때 띄우기 전 검사가 잡고, 훅이 불러와지지 않으면 세션 시작 신호가 오지 않아 시계가 잡는다
+ */
+async function terminalGeminiDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'gemini') return undefined;
+  const files = terminalToolFilePaths('gemini', tool, toolInput);
+  if (files === null) {
+    return tool === 'write_file' || tool === 'replace' ? `[b-studio] ${tool}이(가) 바꾸는 파일을 알 수 없어 Gemini의 설정(.gemini)을 건드리지 않는다고 확인하지 못했습니다. 쓰지 않았습니다. file_path만 쓰고 앞에 @를 붙이지 마세요.` : undefined;
+  }
+  for (const file of files) {
+    if (await geminiConfigPathBlocked({ cwd: session.snapshot.workDir, home: process.env.HOME ?? process.env.USERPROFILE, file })) {
+      return `[b-studio] ${file}은(는) Gemini의 설정 자리(.gemini)라 쓰지 않았습니다. 설정이 b-studio의 훅을 끄거나 다른 훅을 더할 수 있어 에이전트는 이 자리를 바꾸지 않습니다.`;
+    }
+  }
+  if (tool === 'replace' && files.length === 1) {
+    const oldString = typeof toolInput === 'object' && toolInput !== null ? (toolInput as Record<string, unknown>).old_string : undefined;
+    const file = files[0]!;
+    if (oldString !== '' && !path.isAbsolute(file)) {
+      const exists = await stat(path.resolve(session.project.root, file)).then(
+        () => true,
+        () => false,
+      );
+      if (!exists) return `[b-studio] ${file}은(는) 작업 폴더에 그 이름의 파일이 없습니다. Gemini가 같은 이름으로 끝나는 다른 파일을 대신 고칠 수 있어 쓰지 않았습니다. 파일의 정확한 경로를 쓰세요.`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Gemini가 일하는 폴더가 세션의 작업 복사본이 아니면 막는다(ADR-242). 훅 입력의 `cwd`는 Gemini가 뜬 폴더다. 다른 폴더에서 띄우면 상대 경로가 우리가 따진 폴더와 다른 곳에 닿고,
+ * 카드의 쓰기 범위도 작업 복사본 기준이라 의미가 없다. 막는 쪽이다: 폴더가 없거나 글이 아니거나 읽을 수 없으면(링크를 풀지 못함 등) 같다고 말할 수 없어 막는다.
+ * 링크를 푼 실제 경로로 견준다(macOS의 `/tmp`와 `/private/tmp`처럼 글이 달라도 같은 폴더인 경우를 통과시키고, 글이 같아 보여도 다른 폴더인 경우를 막는다)
+ */
+async function terminalGeminiCwdDeny(session: Session, cwd: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'gemini') return undefined;
+  const refusal = '[b-studio] Gemini가 세션의 작업 복사본이 아닌 폴더에서 일하고 있어 쓰지 않았습니다. 터미널을 연 폴더에서 `gemini`를 다시 띄우세요.';
+  if (typeof cwd !== 'string' || cwd.trim() === '') return refusal;
+  try {
+    const [given, expected] = await Promise.all([realpath(cwd), realpath(session.project.root)]);
+    return given === expected ? undefined : refusal;
+  } catch {
+    return refusal;
+  }
+}
+
+/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code·Gemini의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
 async function terminalWriteScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
-  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
+  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalGeminiDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
 }
 
 /** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
@@ -9066,7 +9124,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const readTool = isReadToolFor(terminalCliKind(session), tool);
   if (readTool) return {};
   // Command Code의 설정 쓰기와 run_command는 카드가 없어도, 실행을 열기 전에 막는다(보안 검토)
-  const configDeny = await terminalCommandCodeDeny(session, tool, input.tool_input);
+  const configDeny = (await terminalCommandCodeDeny(session, tool, input.tool_input)) ?? (await terminalGeminiCwdDeny(session, input.cwd)) ?? (await terminalGeminiDeny(session, tool, input.tool_input));
   if (configDeny) return { deny: configDeny };
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다

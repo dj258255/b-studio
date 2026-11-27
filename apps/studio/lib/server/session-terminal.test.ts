@@ -22,11 +22,11 @@ import {
   type TerminalMessage,
   type TerminalTarget,
 } from './session-terminal';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { noteModReloading, noteModStarted } from './session-terminal-mod';
-import { terminalHomeUser } from './terminal-allowed';
+import { geminiTerminalReason, terminalHomeUser } from './terminal-allowed';
 
 /** 도커 없이 도는 가짜. 자리를 준비한 횟수, 연 터미널, 쓴 입력, 지운 것을 기록한다 */
 const address: AgentGatewayAddress = { hookUrl: 'http://host.docker.internal:41001', hookToken: 'hook-token', mcpUrl: 'http://host.docker.internal:41002/mcp', mcpToken: 'mcp-token' };
@@ -725,6 +725,115 @@ describe('Command Code 터미널: 띄우기 전에 설정이 b-studio의 mod를 
   });
 });
 
+describe('Gemini 터미널: 훅이 불러와졌다는 신호를 기다린다(ADR-242)', () => {
+  const savedEnv = { timeout: process.env.B_STUDIO_GEMINI_MOD_TIMEOUT_MS };
+  const gmTarget = { ...target, cli: 'gemini' as const };
+  afterEach(() => {
+    if (savedEnv.timeout === undefined) delete process.env.B_STUDIO_GEMINI_MOD_TIMEOUT_MS;
+    else process.env.B_STUDIO_GEMINI_MOD_TIMEOUT_MS = savedEnv.timeout;
+  });
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('session-start가 시간 안에 오지 않으면 훅 없이 뜬 것으로 본다: Gemini의 환경 변수로 줄인 시간 뒤 경고·위반·터미널 닫기. 오면 아무 일도 없다(대조)', async () => {
+    process.env.B_STUDIO_GEMINI_MOD_TIMEOUT_MS = '40';
+    const { backend, record } = fakeBackend();
+    const messages: TerminalMessage[] = [];
+    const violations: string[] = [];
+    subscribeSessionTerminal(id, (message) => messages.push(message));
+    await openSessionTerminal(id, { ...gmTarget, onViolation: (reason) => violations.push(reason) }, {}, backend);
+    await wait(150);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('Gemini가');
+    expect(messages.some((message) => message.kind === 'warning' && message.message.includes('session-start'))).toBe(true);
+    expect(record.terminals[0]!.closed).toBe(true);
+    await disposeSessionTerminal(id, gmTarget.sandboxId, backend);
+
+    const other = `${id}-ok`;
+    const second = fakeBackend();
+    const okViolations: string[] = [];
+    await openSessionTerminal(other, { ...gmTarget, sandboxId: 'studio-gm-ok', onViolation: (reason) => okViolations.push(reason) }, {}, second.backend);
+    noteModStarted(other);
+    await wait(150);
+    expect(okViolations).toEqual([]);
+    expect(second.record.terminals[0]!.closed).toBe(false);
+    await disposeSessionTerminal(other, 'studio-gm-ok', second.backend);
+  });
+});
+
+describe('Gemini 터미널: 띄우기 전에 판과 설정을 본다(ADR-242)', () => {
+  const dirs: string[] = [];
+  const saved = { bin: process.env.B_STUDIO_GEMINI_BIN, home: process.env.HOME };
+  afterEach(async () => {
+    for (const [key, value] of [
+      ['B_STUDIO_GEMINI_BIN', saved.bin],
+      ['HOME', saved.home],
+    ] as const) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+  });
+
+  /** `--version`에 판을 답하는 가짜 gemini. 부를 때의 GEMINI_CLI_HOME을 파일에 적는다(진짜 홈에 쓰지 않는지 본다) */
+  async function fixture(version: string): Promise<{ work: string; home: string; seen: string }> {
+    const base = await mkdtemp(path.join(tmpdir(), 'b-studio-gmpre-'));
+    dirs.push(base);
+    const home = path.join(base, 'home');
+    const work = path.join(base, 'work');
+    const seen = path.join(base, 'seen-home.txt');
+    await mkdir(home, { recursive: true });
+    await mkdir(work, { recursive: true });
+    const bin = path.join(base, 'fake-gemini.sh');
+    await writeFile(bin, `#!/bin/sh\nprintf '%s' "$GEMINI_CLI_HOME" > ${JSON.stringify(seen)}\nprintf '%s\\n' ${JSON.stringify(version)}\n`);
+    await chmod(bin, 0o755);
+    process.env.B_STUDIO_GEMINI_BIN = bin;
+    process.env.HOME = home;
+    return { work, home, seen };
+  }
+
+  it('훅이 없는 옛 판(0.1.22)은 까닭을 적어 409로 거절하고 터미널도 관문도 만들지 않는다. 진짜 홈에는 쓰지 않는다', async () => {
+    const { work, home, seen } = await fixture('0.1.22');
+    const host = terminalBackend('host');
+    let gatewayCalls = 0;
+    const refused = await openSessionTerminal(id, { ...target, root: work, cli: 'gemini', gateway: async () => { gatewayCalls += 1; return address; } }, {}, host).catch((error: unknown) => error as { status: number; message: string });
+    expect(refused).toMatchObject({ status: 409 });
+    expect((refused as { message: string }).message).toContain('0.1.22');
+    expect((refused as { message: string }).message).toContain('0.71.1');
+    expect((refused as { message: string }).message).not.toMatch(/ADR/);
+    expect(gatewayCalls).toBe(0);
+    // 판을 읽는 gemini는 임시 홈으로 불렸고 그 폴더는 치워졌다
+    const usedHome = await readFile(seen, 'utf8');
+    expect(usedHome).not.toBe(home);
+    expect(usedHome).toContain('b-studio-gemini-version-');
+    await expect(stat(usedHome)).rejects.toThrow();
+    expect(await readdir(home)).toEqual([]);
+  });
+
+  it('읽어 본 판이면 설정을 본다: 작업 폴더 설정의 hooks·hooksConfig는 거절하고 깨끗하면 연다(대조). claude는 이 검사를 받지 않는다', async () => {
+    const { work } = await fixture('0.71.1');
+    const host = terminalBackend('host');
+    expect(await host.preflight!({ ...target, root: work, cli: 'gemini' })).toBeUndefined();
+    expect(await host.preflight!({ ...target, root: work, cli: 'claude' })).toBeUndefined();
+    await mkdir(path.join(work, '.gemini'), { recursive: true });
+    await writeFile(path.join(work, '.gemini/settings.json'), JSON.stringify({ hooksConfig: { enabled: false } }));
+    expect(await host.preflight!({ ...target, root: work, cli: 'gemini' })).toContain('hooksConfig');
+    await writeFile(path.join(work, '.gemini/settings.json'), JSON.stringify({ hooks: { BeforeTool: [{ hooks: [{ type: 'command', command: 'x' }] }] } }));
+    expect(await host.preflight!({ ...target, root: work, cli: 'gemini' })).toContain('hooks');
+  });
+
+  it('판을 읽지 못하거나(실행 실패·모르는 출력) gemini가 없으면 열지 않는다', async () => {
+    const { work } = await fixture('판 모름');
+    const host = terminalBackend('host');
+    expect(await host.preflight!({ ...target, root: work, cli: 'gemini' })).toContain('읽지 못해');
+    process.env.B_STUDIO_GEMINI_BIN = '/nonexistent/gemini';
+    expect(await host.preflight!({ ...target, root: work, cli: 'gemini' })).toBeDefined();
+  });
+
+  it('gemini 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {
+    await expect(terminalBackend('host').prepare({ ...target, cli: 'gemini', accountDir: async () => '/home/kim/.gemini-2' }, address)).rejects.toThrow('기본 계정');
+  });
+});
+
 describe('세션의 AI 계정으로 터미널 CLI를 띄운다(#885)', () => {
   const address: AgentGatewayAddress = { hookUrl: 'http://127.0.0.1:41234', hookToken: 'hook-token', mcpUrl: 'http://127.0.0.1:41235/mcp', mcpToken: 'mcp-token' };
 
@@ -790,8 +899,21 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
     expect(isTerminalRunnableBackend('commandcode', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
     expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
     expect(reviewFixRunner({ allowed: true, backend: 'commandcode', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
-    // 다른 새 갈래는 열지 않는다
-    for (const backend of ['opencode', 'gemini']) expect(isTerminalRunnableBackend(backend, { ...host, ...on }), backend).toBe(false);
+    // 아직 열지 않은 새 갈래는 열지 않는다
+    for (const backend of ['opencode']) expect(isTerminalRunnableBackend(backend, { ...host, ...on }), backend).toBe(false);
+  });
+
+  it('gemini도 같다(ADR-242): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 터미널로 돌릴 수 있다. 모르는 방식 값·컨테이너 방식·스위치 꺼짐은 거절한다', () => {
+    const on = { B_STUDIO_EXPERIMENTAL: '1' };
+    expect(isTerminalRunnableBackend('gemini', host)).toBe(false);
+    expect(isTerminalRunnableBackend('gemini', { ...host, ...on })).toBe(true);
+    expect(isTerminalRunnableBackend('gemini', { ...container, ...on })).toBe(false);
+    expect(isTerminalRunnableBackend('gemini', { ...host, B_STUDIO_EXPERIMENTAL: '0' })).toBe(false);
+    expect(reviewFixRunner({ allowed: true, backend: 'gemini', apiKeyReady: true }, { ...host, ...on })).toBe('terminal');
+    expect(reviewFixRunner({ allowed: true, backend: 'gemini', apiKeyReady: true }, { ...container, ...on })).toBe('chat');
+    expect(geminiTerminalReason('container', on)).toContain('이 컴퓨터 방식');
+    expect(geminiTerminalReason('host', {})).toContain('B_STUDIO_EXPERIMENTAL=1');
+    expect(geminiTerminalReason('host', on)).toBeUndefined();
   });
 
   it('commandcode 터미널은 기본 계정만 쓴다: 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다', async () => {

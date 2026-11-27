@@ -54,6 +54,16 @@ export type TerminalToolKind = 'claude' | 'codex' | 'commandcode' | 'opencode' |
 
 /** OpenCode가 파일을 바꾸는 도구: 입력에 `filePath`가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const OPENCODE_FILE_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'multiedit']);
+/**
+ * Gemini CLI가 파일을 바꾸는 도구와 받는 열쇠 표(0.71.1의 도구 정의, ADR-242): `write_file`은 {file_path, content}, `replace`는 {file_path, instruction, old_string, new_string, allow_multiple}다.
+ * 경로 열쇠는 `file_path` 하나이고 별칭이 없다. 표에 없는 열쇠가 하나라도 있으면 도구 쪽이 그것을 어떻게 읽는지 알 수 없으므로 null이다(허용 목록에 넣을 값이라 모르는 값은 막는다)
+ */
+const GEMINI_FILE_INPUT_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  write_file: new Set(['file_path', 'content']),
+  replace: new Set(['file_path', 'instruction', 'old_string', 'new_string', 'allow_multiple']),
+};
+/** Gemini의 서브에이전트 도구(`invoke_agent`). 안의 도구 호출이 훅을 거치는지는 소스로만 읽었다(실행으로 확인하지 못했다): 바꾸는 파일을 알 수 없는 것으로 본다 */
+const GEMINI_NESTED_TOOLS: ReadonlySet<string> = new Set(['invoke_agent']);
 /** Command Code가 파일을 바꾸는 도구(설치된 v1.93.4의 도구 정의와 별칭 표에서 확인, ADR-233): 입력에 경로(정식 이름 `file_path`나 별칭)가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const COMMAND_CODE_FILE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file']);
 /**
@@ -137,11 +147,27 @@ function strictPatchPaths(patch: unknown): string[] | null {
 }
 
 /**
+ * Gemini의 파일 도구(`write_file`·`replace`)가 바꿀 경로. 도구는 경로를 `resolveDefensiveToolPath`로 한 번 더 고쳐 쓴다: NUL을 지우고,
+ * 글자 그대로의 파일이 없으면 앞의 `@`를 떼어 낸다. 우리가 본 글과 도구가 쓰는 곳이 달라지는 모양(NUL·앞의 `@`)은 어느 파일인지 알 수 없는 것(null)으로 본다.
+ * 입력이 객체가 아니거나 열쇠 표에 없는 열쇠가 있거나 경로가 글이 아니거나 비어 있어도 null이다
+ */
+function geminiFilePaths(tool: string, input: unknown): string[] | null {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
+  const record = input as Record<string, unknown>;
+  const known = GEMINI_FILE_INPUT_KEYS[tool]!;
+  if (Object.keys(record).some((key) => !known.has(key))) return null;
+  const value = record.file_path;
+  if (typeof value !== 'string' || value.trim() === '' || value.includes('\0') || value.trimStart().startsWith('@')) return null;
+  return [value];
+}
+
+/**
  * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 경로가 없는 도구면 빈 목록, **알 수 없으면 null**이다.
  * 허용 목록(카드의 쓰기 범위)에 넣을 값이라 null을 빈 목록처럼 통과시키지 않는다: 부르는 쪽이 범위 밖으로 막는다.
  * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(엄격하게 읽고 모르면 null)
  * - opencode: `filePath`(edit·write·multiedit은 없으면 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
- * - commandcode·gemini: 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null.
+ * - gemini: 파일 도구(`write_file`·`replace`)는 `file_path`만 꺼내고(`geminiFilePaths`: 모르는 열쇠·NUL·앞의 `@`면 null), 서브에이전트 도구(`invoke_agent`)는 늘 null이다
+ * - commandcode·gemini(그 밖의 도구): 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null.
  *   commandcode의 파일 도구(`write_file`·`edit_file`)는 정식 이름과 별칭 열쇠를 모두 꺼내고(`commandCodeFilePaths`), 표에 없는 열쇠가 있거나 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 서브에이전트 도구(`agent`·`task`)는 늘 null이다.
  *   셸 도구처럼 경로가 없는 도구는 빈 목록이다
  */
@@ -150,6 +176,8 @@ export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, inpu
   if (kind === 'commandcode' && COMMAND_CODE_NESTED_TOOLS.has(tool)) return null;
   // 파일 도구는 정식 이름과 별칭 열쇠를 모두 읽는다(아래 표). 모르는 열쇠가 있으면 null
   if (kind === 'commandcode' && COMMAND_CODE_FILE_TOOLS.has(tool)) return commandCodeFilePaths(tool, input);
+  if (kind === 'gemini' && GEMINI_NESTED_TOOLS.has(tool)) return null;
+  if (kind === 'gemini' && Object.hasOwn(GEMINI_FILE_INPUT_KEYS, tool)) return geminiFilePaths(tool, input);
   if (kind === 'claude' || kind === 'codex') {
     // 패치 도구는 본문을 엄격하게 읽는다. 읽지 못하면 바꾸는 파일을 알 수 없다(옛 코드는 빈 목록이거나 느슨한 추출이라 쓰기 범위를 비켜 갔다)
     if (PATCH_TOOLS.has(tool)) {

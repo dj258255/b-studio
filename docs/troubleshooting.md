@@ -8422,3 +8422,62 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 
 ### 고치기 전 후
 - 고치기 전: 새 TS 시험 43건 중 36건 실패. 고친 뒤: 전부 통과. 변이는 ADR-238의 "결과"에 적었다.
+
+## 298. Gemini CLI의 훅을 시스템 설정 경로 환경 변수로 붙이려던 가정이 틀렸다: 사용자 폴더의 파일은 시스템 설정으로 읽히지 않는다
+
+### 증상
+
+- 공통 단계(#1393)는 Gemini를 `GEMINI_CLI_SYSTEM_SETTINGS_PATH=<관문 폴더>/gemini-settings.json`으로 붙인다고 가정하고 감시 판정(`hooked_launch`)까지 그 환경 변수를 증거로 썼다. 이대로 띄우면 훅이 하나도 붙지 않은 gemini가 "붙은 것"으로 보인다. (실제로 띄운 것이 아니라 0.71.1 번들 소스를 읽어 알아냈다.)
+
+### 원인
+
+- 0.71.1의 `_doLoadSettings`는 시스템 설정을 `loadSystemFile` → `isFileAndDirectorySecureSync`로 읽는다. 파일과 **모든 상위 폴더**가 uid 0 소유이고 그룹·다른 사용자가 쓸 수 없지 않으면 "Security Warning: Skipping system settings file"로 건너뛴다. 사용자 폴더의 파일은 이 검사를 통과할 수 없다. 환경 변수로 경로만 바꿔도 같다.
+
+### 해결
+
+- 훅을 `GEMINI_CLI_HOME`을 바꾼 **사용자 설정**으로 붙인다(ADR-242). 감시는 환경의 `GEMINI_CLI_HOME`이 우리 홈과 같은 글인지, 시스템 설정 자리·믿음 변수·샌드박스 인자가 없는지를 본다. 옛 증거(시스템 설정 경로)는 붙은 것으로 읽지 않는 시험(Rust `gemini_needs_the_home_env_and_no_settings_overrides`)을 더했다. 고치기 전에는 이 시험이 `assertion failed: launch_gm(&[gm], Some(good))`로 실패했다.
+- 남은 틈: 실제 gemini로 띄워 확인하지 못했다.
+
+## 299. Gemini의 훅은 실패하면 도구를 열고, 종료 코드 2도 표준 오류의 글이 없으면 거절이 되지 않는다
+
+### 증상
+
+- 훅 명령이 시간 초과·실행 오류·신호로 죽음이면 도구가 그대로 실행된다. 종료 코드 2로 끝나도 표준 출력·표준 오류가 모두 비어 있으면 출력이 없는 것으로 읽혀 허용이다. node를 찾지 못하는 경우(종료 코드 127, 표준 오류에 글이 있다)는 우연히 거절이 되지만 `exit 2`만 쓰는 훅은 거절이 되지 않는다.
+
+### 원인
+
+- `HookRunner.executeCommandHook`은 글이 있을 때만 `convertPlainTextToHookOutput`으로 종료 코드를 읽고(`exitCode >= 2`면 deny), `HookSystem.fireBeforeToolEvent`의 `catch`와 `finalOutput` 없음은 도구 실행으로 이어진다.
+
+### 해결
+
+- 훅 명령 파일은 어떤 예외에서도 종료 코드 0과 `decision: deny` JSON을 낸다. 설정의 명령(요청 받기·쓰기 직전)에는 `|| { echo '[b-studio] …' >&2; exit 2; }`를 붙여 파일이 실행되지 못해도 표준 오류의 글이 있는 종료 코드 2가 되게 했다(bash로 실제로 돌려 확인하는 시험이 있다). 이 꼬리를 빼면 시험이 실패한다.
+- 남는 틈: 훅이 신호로 죽으면(`SIGKILL`) 종료 코드가 비어 열린다. 훅이 불리지 않는 경우(믿지 않는 폴더 등)는 세션 시작 신호의 시계가 잡는다.
+
+## 300. Gemini의 `replace`가 쓰는 파일이 훅이 본 경로와 달라질 수 있다
+
+### 증상
+
+- 쓰기 직전 훅은 `file_path`의 글을 본다. 도구는 그 글을 다시 고쳐 쓴다: NUL을 지우고, 글자 그대로의 파일이 없으면 앞의 `@`를 떼며(`resolveDefensiveToolPath`), `replace`는 상대 경로의 파일이 없으면 작업 폴더에서 **그 이름으로 끝나는 파일**을 찾아 대신 고친다(`correctPath`). 카드의 쓰기 범위·`.gemini` 쓰기 막기를 글자로만 비교하면 허용된 경로를 말해 놓고 범위 밖 파일을 고치게 할 수 있다. (소스를 읽어 알아냈고 실제로 돌려 재현하지는 않았다.)
+
+### 원인
+
+- 확인하는 쪽(서버의 경로 비교)과 동작하는 쪽(도구의 경로 풀이)이 같은 입력을 다르게 읽는다. 허용 목록(카드의 쓰기 범위)에 넣을 값이라 모르는 입력은 범위 밖이어야 한다.
+
+### 해결
+
+- `terminalToolFilePaths('gemini', …)`는 `write_file`·`replace`의 열쇠 표(`file_path` 하나)에 없는 열쇠·NUL·앞의 `@`면 null(알 수 없음)을 돌려주고, 부르는 쪽이 범위 밖으로 막는다. 서버는 `replace`가 글자 그대로의 경로에 없는 상대 경로를 받으면 카드가 없어도 막는다(새 파일 만들기는 제외). 시험(`session-terminal-tool-paths.test.ts`, `sessions-terminal-gemini.test.ts`)이 해당 변이(`@` 검사·NUL 검사·열쇠 표·없는 경로 검사 제거)를 모두 잡는다.
+
+## 301. 사고: `packages/sandbox` 전체를 vitest로 돌려 PTY 시험이 열리고 프로세스가 멈췄으며 사용자 캐시에 시험 폴더가 생겼다
+
+### 증상
+
+- Gemini 작업 중 공통 파일을 고친 뒤 `pnpm exec vitest run packages/sandbox`로 패키지 전체를 돌렸다. 이 컴퓨터는 `/dev` 목록을 읽다 PTY를 열면 멈춘다는 것을 지시에서 알고 있었는데도 `host-pty.test.ts`가 함께 돌았다. vitest 작업자 프로세스 하나(pid 69231)가 `U`(커널 대기) 상태로 남아 `kill -9`에도 죽지 않았다. 같은 실행 뒤 `~/.cache/b-studio/agent-gateway/studio-orders-abc123`이 생겨 있었다(내용은 시험용 가짜 토큰뿐이다).
+- 같은 시간대에 `cargo test --workspace`를 함께 돌려 시험이 시간 초과로 여럿 실패했다(AGENTS.md가 적은 "동시에 돌리지 않는다"). `bstudio-io`의 시험 하나가 끝나지 않아(다른 worktree에도 같은 멈춤이 2시간 넘게 남아 있다) 워크스페이스 전체 Rust 시험은 끝까지 보지 못했다.
+
+### 원인
+
+- 파일을 지정하지 않고 디렉터리를 통째로 넘겨 PTY 시험을 걸러내지 못했다. 사용자 캐시에 쓰는 시험은 이름으로 확인해 내가 만든 폴더 하나만 지웠다(`docker * prune`류 광범위한 삭제는 없다).
+
+### 해결
+
+- 이후에는 시험 파일을 하나씩 지정했다(PTY·사용자 캐시를 쓰는 파일 제외). 멈춘 프로세스는 내가 끝내지 못했으므로 사람이 처리해야 한다. Rust는 `cargo test -p bstudio-session --locked`(323건)와 `-p bstudio-io host_gateway`(4건)만 돌렸다.

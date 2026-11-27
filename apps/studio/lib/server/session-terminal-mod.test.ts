@@ -23,6 +23,21 @@ describe('mod 시계', () => {
     for (const value of ['999999999', '0', '-5', 'abc', '', 'NaN', 'Infinity']) expect(modLoadTimeoutMs({ B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS: value }), value).toBe(90_000);
   });
 
+  it('Gemini(ADR-242)는 자기 환경 변수와 자기 이름으로 같은 시계를 쓴다. Command Code의 환경 변수는 Gemini에 닿지 않는다', () => {
+    expect(modLoadTimeoutMs({ B_STUDIO_GEMINI_MOD_TIMEOUT_MS: '250' }, 'gemini')).toBe(250);
+    expect(modLoadTimeoutMs({ B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS: '250' }, 'gemini')).toBe(90_000);
+    expect(modLoadTimeoutMs({ B_STUDIO_GEMINI_MOD_TIMEOUT_MS: '250' })).toBe(90_000);
+    const calls: string[] = [];
+    armModClock('s1', (reason) => calls.push(reason), 1000, 'gemini');
+    vi.advanceTimersByTime(1000);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('Gemini가');
+    expect(calls[0]).toContain('훅이 불러와졌다는 신호(session-start)');
+    expect(calls[0]).not.toContain('Command Code');
+    // reload 뒤의 시계도 같은 이름이다(Gemini는 reload 신호를 보내지 않지만 시계는 같은 모듈이다)
+    noteModStarted('s1');
+  });
+
   it('session-start가 시간 안에 오지 않으면 부른다. 한 번만 부른다', () => {
     const calls: string[] = [];
     armModClock('s1', (reason) => calls.push(reason), 1000);
