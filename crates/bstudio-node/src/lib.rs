@@ -3054,6 +3054,18 @@ pub fn workflow_review_changes(json: String) -> Result<String> {
     fail(wf::review_changes_json(&json))
 }
 
+/// `git diff --name-status -z -M` 출력 → `{entries:[{status,path,from?,scan}]}`. 어긋난 출력은 던진다(이슈 #1436)
+#[napi]
+pub fn workflow_test_change_entries(output: String) -> Result<String> {
+    fail(bstudio_guard::test_weakening::parse_name_status_json(&output))
+}
+
+/// `git diff -U0` 출력 → 파일별로 더해진 줄(`string[][]`). 파일 수가 `expected`와 다르면 던진다(이슈 #1436)
+#[napi]
+pub fn workflow_test_change_added_lines(patch: String, expected: u32) -> Result<String> {
+    fail(bstudio_guard::test_weakening::added_lines_json(&patch, expected as usize))
+}
+
 #[napi]
 pub fn workflow_uncovered_change_warnings(json: String) -> Result<String> {
     fail(wf::uncovered_change_warnings_json(&json))
