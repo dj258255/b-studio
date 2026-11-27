@@ -323,3 +323,61 @@ describe('requestPrReview', () => {
     await expect(requestPrReview(ask, { diff: 'd', requests: [], round: 1 })).rejects.toMatchObject({ usage, durationMs: expect.any(Number) });
   });
 });
+
+describe('리뷰 코멘트에 끼워 넣는 모델의 값 (#1442)', () => {
+  it('표의 제목·설명·제안은 멘션·이슈 참조·링크·강조·HTML이 살아나지 않게 막고 한 줄로 편다', () => {
+    const comment = buildPrReviewComment({
+      round: 1,
+      maxRounds: 2,
+      outcome: 'fix',
+      findings: [
+        finding('blocker', {
+          title: '@someone 확인 | [링크](https://example.com) #12',
+          detail: '둘째 줄\n| 가짜 | 칸 |‮<img src=x>',
+          suggestion: '**굵게** _기울임_ `코드`',
+        }),
+      ],
+    });
+    const row = comment.split('\n').find((line) => line.startsWith('| 차단'))!;
+    expect(row).toBeDefined();
+    // 표의 칸 경계는 우리가 만든 다섯 개뿐이다(값 속 |는 \|)
+    expect(row.replace(/\\\|/g, '').split('|').length - 1).toBe(5);
+    expect(row).not.toContain('@someone');
+    expect(row).toContain('&#64;someone');
+    expect(row).toContain('&#35;12');
+    expect(row).not.toMatch(/(^|[^\\])\[링크\]/);
+    expect(row).toContain('\\[링크\\]\\(https://example.com\\)');
+    expect(row).not.toContain('<img');
+    expect(row).not.toContain('‮');
+    expect(row).toContain('\\*\\*굵게\\*\\* \\_기울임\\_ &#96;코드&#96;');
+    // 우리 템플릿의 괄호는 그대로다
+    expect(row).toContain(' (제안: ');
+    // 숨은 표시는 끝에 그대로 하나다
+    expect(comment.match(/<!-- b-studio-review round=1 -->/g)).toHaveLength(1);
+    expect(comment.endsWith('<!-- b-studio-review round=1 -->')).toBe(true);
+  });
+
+  it('위치는 값 속 백틱보다 긴 울타리의 코드 조각으로 감싸 칸을 닫지 못한다', () => {
+    const comment = buildPrReviewComment({ round: 1, maxRounds: 2, outcome: 'fix', findings: [finding('major', { file: 'a`b|c\n.ts', line: 3 })] });
+    const row = comment.split('\n').find((line) => line.startsWith('| 주요'))!;
+    expect(row).toContain('| ``a`b\\|c .ts:3`` |');
+  });
+
+  it('생략한 파일 이름도 코드 조각으로 감싼다', () => {
+    const comment = buildPrReviewComment({ round: 1, maxRounds: 2, outcome: 'pass', findings: [], omittedFiles: ['@team/x.ts', 'y`.ts'] });
+    expect(comment).toContain('생략하고 리뷰했습니다: `@team/x.ts`, ``y`.ts``)');
+  });
+
+  it('사람이 닫을 때 남기는 코멘트도 모델이 쓴 제목·위치를 막아 인용 한 줄을 지킨다', () => {
+    const comment = buildReviewResolutionComment(finding('minor', { title: '첫 줄\n> 가짜 인용 @owner', file: 'x`.ts' }), '실제로 확인함');
+    const quote = comment.split('\n').find((line) => line.startsWith('> '))!;
+    expect(quote).toContain('``x`.ts``');
+    expect(quote).toContain('첫 줄 &gt; 가짜 인용 &#64;owner');
+    expect(comment.split('\n').filter((line) => line.startsWith('>'))).toHaveLength(1);
+  });
+
+  it('평범한 값은 바뀌지 않는다', () => {
+    const comment = buildPrReviewComment({ round: 1, maxRounds: 3, outcome: 'fix', findings: [{ severity: 'blocker', file: 'a.ts', line: 12, title: '제목', detail: '설명', suggestion: '제안' }] });
+    expect(comment).toContain('| 차단 | `a.ts:12` | 제목 | 설명 (제안: 제안) |');
+  });
+});

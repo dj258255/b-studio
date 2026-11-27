@@ -242,7 +242,7 @@
             "name": "app-test",
             "ok": false,
             "attempts": 1,
-            "detail": "종료 코드 1\nFAIL app-test"
+            "detail": "종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test"
           }
         }
       },
@@ -300,7 +300,7 @@
                 "name": "app-test",
                 "ok": false,
                 "attempts": 1,
-                "detail": "종료 코드 1\nFAIL app-test"
+                "detail": "종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test"
               },
               {
                 "stage": "review",
@@ -808,7 +808,7 @@
           "event": {
             "check": {
               "attempts": 1,
-              "detail": "종료 코드 1\nFAIL app-test",
+              "detail": "종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test",
               "name": "app-test",
               "ok": false,
               "stage": "test"
@@ -848,7 +848,7 @@
               "checks": [
                 {
                   "attempts": 1,
-                  "detail": "종료 코드 1\nFAIL app-test",
+                  "detail": "종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test",
                   "name": "app-test",
                   "ok": false,
                   "stage": "test"
@@ -1065,6 +1065,7 @@
       "compose exec -T app sh -c <script:00627bf7>",
       "compose exec -T app sh -c <script:65689138>",
       "compose exec -T app sh -c true",
+      "compose exec -T app sh -c <script:04fa4a2d> sh sh -c true",
       "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
       "compose up --no-start --build --no-deps --force-recreate app",
       "start <container:1>",
