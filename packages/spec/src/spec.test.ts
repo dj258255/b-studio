@@ -72,6 +72,9 @@ describe('parseSpec', () => {
     expect(parseSpec(ORDERS_SPEC).models).toBeUndefined();
     expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n  execute: sonnet\n`).models).toEqual({ plan: 'opus', execute: 'sonnet' });
     expect(parseSpec(`${ORDERS_SPEC}models:\n  plan: opus\n`).models).toEqual({ plan: 'opus' });
+    // 역할별 리뷰 모델(#1452)
+    expect(parseSpec(`${ORDERS_SPEC}models:\n  review: opus\n`).models).toEqual({ review: 'opus' });
+    expect(() => parseSpec(`${ORDERS_SPEC}models:\n  review: ""\n`)).toThrow(SpecError);
     expect(() => parseSpec(`${ORDERS_SPEC}models:\n  plan: ""\n`)).toThrow(SpecError);
   });
 

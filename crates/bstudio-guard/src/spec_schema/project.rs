@@ -506,7 +506,7 @@ pub fn checkpoints(input: Option<&JsValue>) -> Outcome {
 
 pub fn models(input: Option<&JsValue>) -> Outcome {
     let Ok(mut obj) = object_start(input) else { return Outcome::failed(input.cloned(), invalid_type(input, "object")) };
-    for key in ["plan", "execute"] {
+    for key in ["plan", "execute", "review"] {
         if let Some(value) = obj.field(key) {
             obj.set(key, string_schema(Some(value), &[LengthCheck::Min(1, None), LengthCheck::Max(120, None)], |_, _| {}));
         }

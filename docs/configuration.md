@@ -35,7 +35,7 @@ checkpoints: {}
 | `repository` | 아니요 | 모노레포 하위 프로젝트 처리(`monorepo`, 기본 `false`)와 main 따라잡기(`autoCatchUp`, 기본 `true`, 뒤처진 세션 브랜치를 올리기 전·리뷰 라운드 전에 조용히 따라잡고 충돌하면 건드리지 않음, ADR-076) |
 | `review` | 아니요 | PR 자동 리뷰 라운드(ADR-074). `auto`(기본 `true`)와 `maxRounds`(1~3, 기본 2). 절을 적지 않아도 기본값이 채워져 켜져 있습니다. 지적이 심각(blocker·major)할 때만 같은 세션에 고침을 요청하고 다시 리뷰하며, 머지는 사람이 합니다 |
 | `guide` | 아니요 | 프로젝트 지침 파일(ADR-077). `file`(기본 `AGENTS.md`, 없으면 `CLAUDE.md`를 대신 찾음), `maxChars`(기본 8000), `enabled`(기본 `true`). 매 실행 시작마다 세션 작업 복사본에서 읽어 모델에게 넘깁니다. 끄면 파일이 있어도 읽지 않습니다 |
-| `models` | 아니요 | 계획-실행 분리에 쓸 모델(`plan`·`execute`, [아래](#계획-실행-분리-adr-075)) |
+| `models` | 아니요 | 역할별로 고정할 모델(`plan`·`execute`·`review`, [아래](#계획-실행-분리-adr-075)) |
 | `checkpoints` | 아니요 | 체크포인트 커밋 제목 규칙(`conventionalCommits`, 기본 `true`, [아래](#체크포인트-커밋-제목-adr-080)) |
 
 `deploy` 절은 더는 지원하지 않습니다. 남아 있으면 "`deploy`는 더는 지원하지 않습니다. 이 항목을 지우세요"로 거절합니다(ADR-221).
@@ -695,12 +695,14 @@ pageChecks:
 models:
   plan: opus
   execute: sonnet
+  review: opus
 ```
 
 | 필드 | 설명 |
 |---|---|
 | `models.plan` | 계획을 쓰는 모델. claude-code 백엔드는 Claude Code에 넘기는 모델 이름(예: `opus`), api 백엔드는 모델 레지스트리 id입니다 |
 | `models.execute` | 실행을 맡는 모델(뜻은 `plan`과 같은 규칙). 생략하면 세션이 원래 쓰던 모델을 그대로 씁니다 |
+| `models.review` | AI 리뷰를 맡는 모델(뜻은 `plan`과 같은 규칙). 생략하면 `B_STUDIO_REVIEW_MODEL`을 보고, 그것도 없으면 지금처럼 Claude Code는 CLI 기본 모델, API 모드는 라우터가 고릅니다. 리뷰를 돌릴 때 따로 고른 리뷰어가 이 값보다 먼저입니다. Claude Code·API 모드에서만 씁니다(다른 백엔드는 AI 리뷰 경로가 없습니다) |
 
 절 자체를 생략하거나 두 필드를 모두 비우면 환경 변수(`B_STUDIO_PLAN_MODEL`·`B_STUDIO_EXECUTE_MODEL`)를 보고, 그것도 없으면 계획 호출 없이 지금과 같이 실행만 합니다. 이 절이 있으면 환경 변수보다 우선합니다. 자세한 동작은 [운영 문서](operations.md)의 "계획-실행 분리"를 보세요.
 
