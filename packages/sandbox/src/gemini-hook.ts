@@ -1,5 +1,6 @@
 import { AGENT_HOOK_EVENTS, GATEWAY_FILE_NAME } from './docker/agent-terminal';
-import { GEMINI_ENV_BASELINE_ENV, GEMINI_ENV_NAMES_ENV, GEMINI_UNSET_ENVS } from './gemini-envs';
+import { envCodeLoadRules } from './env-risk';
+import { GEMINI_ENV_BASELINE_ENV, GEMINI_ENV_NAMES_ENV, GEMINI_SELF_SET_ENVS, GEMINI_UNSET_ENVS } from './gemini-envs';
 
 /**
  * Gemini CLI의 설정 훅(`GEMINI_CLI_HOME/.gemini/settings.json`의 `hooks`)이 부르는 명령 파일(ADR-242, 실험).
@@ -184,6 +185,14 @@ function readSessionStart(answer) {
 const withMessage = (message) => (nonEmpty(message) ? { systemMessage: message } : {});
 const cwdOf = (input) => (nonEmpty(input.cwd) ? { cwd: input.cwd } : {});
 
+// 환경 이름이 설정·믿음·샌드박스 변수이거나 코드 적재·설정 자리 변수(공통 목록 env-risk.ts)인가. 대소문자를 접어 견준다. Gemini가 스스로 다시 띄우며 정하는 이름은 정확한 이름으로만 뺀다
+function riskyEnvName(name) {
+  const upper = name.toUpperCase();
+  if (ENV_RISKY.own.includes(upper)) return true;
+  if (ENV_RISKY.selfSet.includes(upper) || ENV_RISKY.allowed.includes(upper)) return false;
+  return ENV_RISKY.exact.includes(upper) || ENV_RISKY.prefixes.some((prefix) => upper.startsWith(prefix)) || ENV_RISKY.suffixes.some((suffix) => upper.endsWith(suffix));
+}
+
 // CLI 프로세스 안의 환경 다시 확인(#1475). 설정의 훅 명령이 bash로 Gemini의 환경 **이름만**(값이 아니다)을 넘기고(ENV_NAMES_ENV), 감싸개가 띄우기 직전에 남긴 이름 목록(ENV_BASELINE_ENV)과 견준다.
 // 기준에 없는 설정·믿음·샌드박스 변수(Gemini가 시작할 때 작업 폴더의 .env에서 넣은 것)가 있으면 그 이름을 돌려준다. 어느 쪽 목록이든 없으면 모르는 것이라 그 변수의 이름을 돌려준다(막는다)
 function introducedRiskyEnv() {
@@ -192,7 +201,7 @@ function introducedRiskyEnv() {
   if (typeof baseline !== 'string' || baseline.trim() === '') return ENV_BASELINE_ENV;
   if (typeof names !== 'string' || names.trim() === '') return ENV_NAMES_ENV;
   const known = new Set(baseline.split(/\s+/).filter((name) => name !== ''));
-  for (const name of names.split(/\s+/)) if (name !== '' && !known.has(name) && ENV_RISKY.includes(name.toUpperCase())) return name;
+  for (const name of names.split(/\s+/)) if (name !== '' && !known.has(name) && riskyEnvName(name)) return name;
   return undefined;
 }
 const ENV_REASON_HEAD = '[b-studio] Gemini의 환경에 시작한 뒤 새로 생긴 설정·샌드박스 변수(';
@@ -285,6 +294,6 @@ try {
 `
   .replace('__B_STUDIO_TIMEOUTS__', () => JSON.stringify({ ...AGENT_HOOK_EVENTS, 'post-tool': AGENT_HOOK_EVENTS.activity }))
   .replace('__B_STUDIO_ADDRESS_FILE__', () => JSON.stringify(GATEWAY_FILE_NAME))
-  .replace('__B_STUDIO_ENV_RISKY__', () => JSON.stringify([...GEMINI_UNSET_ENVS, 'GEMINI_CLI_HOME'].map((name) => name.toUpperCase())))
+  .replace('__B_STUDIO_ENV_RISKY__', () => JSON.stringify({ ...envCodeLoadRules(), own: [...GEMINI_UNSET_ENVS, 'GEMINI_CLI_HOME'].map((name) => name.toUpperCase()), selfSet: GEMINI_SELF_SET_ENVS }))
   .replace('__B_STUDIO_ENV_BASELINE_ENV__', () => JSON.stringify(GEMINI_ENV_BASELINE_ENV))
   .replace('__B_STUDIO_ENV_NAMES_ENV__', () => JSON.stringify(GEMINI_ENV_NAMES_ENV));

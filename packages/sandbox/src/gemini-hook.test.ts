@@ -314,7 +314,8 @@ describe('CLI 프로세스 안에서 환경 다시 확인(#1475): 설정의 명�
     const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
     return { code, out };
   }
-  const baselineOf = (env: Record<string, string>) => Object.keys(env).join(' ');
+  // bash의 환경에는 PATH가 늘 있다(시험이 넘긴다). 기준에 PATH를 넣어 두고, PATH가 "새로 생긴" 경우만 따로 본다
+  const baselineOf = (env: Record<string, string>, withPath = true) => [...Object.keys(env), ...(withPath ? ['PATH'] : [])].join(' ');
 
   it('기준에 없는 위험 이름(.env가 넣은 설정·샌드박스 변수)이 훅 시점의 환경에 있으면 요청 받기·쓰기 직전을 막고 세션 시작 신호를 보내지 않는다(이름만 쓴다)', async () => {
     const gw = await gateway({ prompt: { body: {} }, 'pre-tool': { body: {} }, 'session-start': { body: {} } });
@@ -328,6 +329,19 @@ describe('CLI 프로세스 안에서 환경 다시 확인(#1475): 설정의 명�
       const tool = await viaSettings(dir, 'pre-tool', env, { tool_name: 'write_file', tool_input: {} });
       expect(JSON.parse(tool.out), name).toMatchObject({ decision: 'deny' });
       expect((await viaSettings(dir, 'session-start', env)).code).toBe(0);
+    }
+    expect(gw.seen).toEqual([]);
+  });
+
+  it('.env가 들여온 코드 적재·설정 자리 변수(env-risk.ts의 규칙)도 기준에 없으면 막는다: 정확한 이름·접두사·접미사(macOS는 DYLD_*를 시스템 bash에 넘기지 않아 시험에서 뺀다)', async () => {
+    const gw = await gateway({ prompt: { body: {} }, 'pre-tool': { body: {} }, 'session-start': { body: {} } });
+    const dir = await hookDir(gw);
+    const clean = { FOO: '1' };
+    for (const name of ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'PATH', 'BASH_ENV', 'GIT_SSH_COMMAND', 'HOME', 'XDG_CONFIG_HOME', 'HTTPS_PROXY', 'NODE_PATH', 'SHELL', 'PERL5OPT']) {
+      const env = { ...clean, [name]: name === 'PATH' ? (process.env.PATH ?? '/usr/bin') : 'x', B_STUDIO_ENV_BASELINE: baselineOf(clean, name !== 'PATH') };
+      const prompt = await viaSettings(dir, 'prompt', env, { prompt: '요청' });
+      expect(JSON.parse(prompt.out), name).toMatchObject({ decision: 'deny', reason: expect.stringContaining(name) });
+      expect(JSON.parse((await viaSettings(dir, 'pre-tool', env, { tool_name: 'write_file', tool_input: {} })).out), name).toMatchObject({ decision: 'deny' });
     }
     expect(gw.seen).toEqual([]);
   });

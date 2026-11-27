@@ -26,3 +26,9 @@ export const GEMINI_UNSET_ENVS: readonly string[] = [...GEMINI_SETTINGS_ENVS, ..
 /** 감싸개가 훅 명령 줄에 넘기는 환경 이름 기준(띄우기 직전의 이름 목록)과 훅 시점의 이름 목록을 담는 환경 변수. 훅 스크립트가 CLI 프로세스 안에서 새로 생긴 위험 이름을 가린다(#1475) */
 export const GEMINI_ENV_BASELINE_ENV = 'B_STUDIO_ENV_BASELINE';
 export const GEMINI_ENV_NAMES_ENV = 'B_STUDIO_ENV_NAMES';
+/**
+ * Gemini가 스스로 다시 띄우며 자식의 환경에 정하는 위험 이름(**정확한 이름**만). 0.71.1 번들의 `getSpawnConfig`: 자식 환경은 `{...process.env, GEMINI_CLI_NO_RELAUNCH: "true"}`이고,
+ * 실행 파일(SEA) 판이면 `NODE_OPTIONS`에 메모리 인자를 덧붙인다. 그래서 `NODE_OPTIONS`가 기준에 없이 나타나도 `.env`가 넣은 것이라 단정할 수 없다. 훅은 `env -i`라 이 값이 훅 안에서 돌지 않고,
+ * `.env` 파일에 `NODE_OPTIONS`가 있으면 파일 검사(`env-risk.ts`)가 따로 거절한다. 그 밖의 이름은 하나도 빼지 않는다
+ */
+export const GEMINI_SELF_SET_ENVS: readonly string[] = ['NODE_OPTIONS'];
