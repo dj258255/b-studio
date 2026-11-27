@@ -418,6 +418,39 @@ function memberBody(member: DeskFleetMember, item: DeskItem | undefined, winner:
   return [spread(title, statusText(status, theme), width, stringWidth(status.label) + 2), doing, facts.length ? facts.join(`${muted} · ${RESET}`) : `${muted}아직 결과 없음${RESET}`, files];
 }
 
+/** 끝난 상태(더 바뀌지 않는다). awaiting_input은 사람이 답하면 다시 돈다 */
+const SETTLED: ReadonlySet<DeskFleetMember['status']> = new Set(['done', 'failed', 'error', 'cancelled']);
+
+/**
+ * 검증을 통과한 후보가 여럿일 때 먼저 볼 후보 하나(#1456). 승자를 정하지도 병합하지도 않는다 — 고르기는 사람이 w로 한다(ADR-048).
+ * 결과가 바뀔 수 있으면(끝나지 않은 참가자) 추천하지 않고, 승자를 이미 골랐으면 보이지 않는다. 기준은 화면에 그대로 적는다:
+ * 검증 통과(체크포인트가 있음) → 바뀐 파일이 적은 순 → 토큰이 적은 순 → 먼저 끝난 순
+ */
+export function recommendFleetMember(fleet: DeskFleet): { sessionId: string; label: string; reason: string } | undefined {
+  if (fleet.winnerSessionId) return undefined;
+  if (fleet.members.some((member) => !SETTLED.has(member.status))) return undefined;
+  const passed = fleet.members.filter((member) => member.status === 'done' && member.checkpoint);
+  if (passed.length === 0) return undefined;
+  if (passed.length === 1) return { sessionId: passed[0]!.sessionId, label: passed[0]!.label, reason: '검증을 통과한 유일한 후보' };
+  const files = (member: DeskFleetMember) => member.checkpoint!.files.length;
+  const tokens = (member: DeskFleetMember) => (member.usage ? totalTokens(member.usage) : Number.POSITIVE_INFINITY);
+  const finished = (member: DeskFleetMember) => {
+    const at = member.finishedAt ? Date.parse(member.finishedAt) : Number.NaN;
+    return Number.isFinite(at) ? at : Number.POSITIVE_INFINITY;
+  };
+  const sorted = [...passed].sort((a, b) => files(a) - files(b) || tokens(a) - tokens(b) || finished(a) - finished(b));
+  const best = sorted[0]!;
+  const runner = sorted[1]!;
+  const head = `검증 통과 ${passed.length}개 중`;
+  const reason =
+    files(best) !== files(runner)
+      ? `${head} 바뀐 파일이 가장 적음`
+      : tokens(best) !== tokens(runner)
+        ? `${head} 바뀐 파일이 같고 토큰이 가장 적음`
+        : `${head} 바뀐 파일·토큰이 같고 가장 먼저 끝남`;
+  return { sessionId: best.sessionId, label: best.label, reason };
+}
+
 function detailLines(state: FleetsState, context: FleetsContext, size: { w: number; h: number }): string[] {
   const { theme } = context;
   const muted = fg(theme, 'muted');
@@ -429,6 +462,9 @@ function detailLines(state: FleetsState, context: FleetsContext, size: { w: numb
     `  ${muted}${fleet.projectName} · 참가자 ${fleet.members.length} · ${shortDate(fleet.createdAt)}${RESET}${winner ? `  ${fg(theme, 'yellow')}★ 승자 ${winner.label}${RESET}` : ''}`,
     '',
   ];
+  const recommended = recommendFleetMember(fleet);
+  // 추천은 참고다: 기준을 그대로 적고, 고르기는 사람에게 남긴다
+  if (recommended) lines.splice(2, 0, `  ${fg(theme, 'accent')}☆ 추천 ${recommended.label}${RESET}  ${muted}${recommended.reason} · 참고일 뿐이며 w로 승자를 고릅니다${RESET}`);
   const now = context.now ?? Date.now();
   const columns = size.w - 2 >= CARD_MIN * 2 + 1 ? 2 : 1;
   const cardWidth = Math.min(CARD_MAX, Math.max(30, Math.floor((size.w - 2 - (columns - 1)) / columns)));
