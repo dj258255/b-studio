@@ -97,6 +97,7 @@ import {
   preflightCommandCode,
   preflightOpenCode,
   preflightGemini,
+  pullRequestImpactFor,
   RemoteConflictError,
   reviewIndependence,
   scopedExecutionPolicy,
@@ -4415,6 +4416,8 @@ async function pullRequestDraft(
     requirementIds: refs.map((ref) => ref.id),
     requiredStages: workflowStages(session.project),
     appendix: `${requirementsAddendum}${relatedAddendum}${trackingClosesAddendum}${checklistAddendum}`,
+    // 영향 범위·중점 리뷰 항목 절: 모델을 부르지 않고 커밋의 파일·본문 기록과 서비스·보호 경로 선언에서 만든다(미리보기와 실제 생성이 같은 본문을 쓴다)
+    impact: pullRequestImpactFor(session.project, commits),
   });
   return { info, target, targetError, commits, ...draft };
 }

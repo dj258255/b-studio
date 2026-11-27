@@ -252,6 +252,7 @@ export {
   type PullDetail,
   type PullFile,
   type PullRequestDraft,
+  type PullRequestImpact,
   type PullRequestResult,
   type PullRequestSummary,
   type PullReview,
@@ -263,6 +264,7 @@ export {
   type TaskListItem,
   type TaskListProgress,
 } from './repository';
+export { pullRequestImpactFor } from './pr-impact';
 export {
   assertAllowedRequirementEndpoint,
   buildManagedRegion,
