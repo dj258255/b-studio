@@ -1354,15 +1354,7 @@ impl Repo {
     async fn assert_no_hidden_index_entries(&mut self) -> Res<()> {
         let scope = self.scope().await;
         let listing = dec(&self.git(cat(vec![g!["ls-files", "-v", "-z"], scope])).await?);
-        let mut flagged: Vec<String> = Vec::new();
-        for record in listing.split('\0') {
-            let mut chars = record.chars();
-            let Some(tag) = chars.next() else { continue };
-            if tag == 'S' || tag.is_ascii_lowercase() {
-                // `T path`: 태그 한 글자와 공백 뒤가 경로다
-                flagged.push(chars.as_str().strip_prefix(' ').unwrap_or(chars.as_str()).to_owned());
-            }
-        }
+        let flagged = parse_flagged_entries(&listing)?;
         if flagged.is_empty() {
             return Ok(());
         }
@@ -1374,6 +1366,8 @@ impl Repo {
             // 인덱스 항목(add가 방금 다시 읽지 않았다)의 blob과 작업 폴더의 파일을 견준다. 없는 것·일반 파일이 아닌 것은 지운/바꾼 것으로 센다
             let staged = dec(&self.run_git_env(cat(vec![g!["ls-files", "--stage", "-z", "--"], chunk.to_vec()]), &literal).await?);
             let mut regular: Vec<(String, String, bool)> = Vec::new();
+            // 표시가 걸린 경로마다 인덱스 항목이 돌아왔는지 본다. 항목 수·이름이 맞지 않으면 어느 것도 믿지 않는다(파서 불일치로 열리지 않게)
+            check_stage_covers(chunk, &staged)?;
             for entry in staged.split('\0').filter(|part| !part.is_empty()) {
                 let Some((head, file)) = entry.split_once('\t') else { return fail("인덱스 항목을 읽지 못해 표시가 걸린 파일을 확인하지 못했습니다") };
                 let mut fields = head.split(' ');
@@ -1691,6 +1685,41 @@ impl Repo {
     }
 }
 
+/// `ls-files -v -z` 출력에서 표시(skip-worktree·assume-unchanged)가 걸린 경로를 모은다. git 출력은 UTF-8로 바꾸면서 UTF-8이 아닌 바이트가 U+FFFD가 되므로,
+/// 표시가 걸린 경로에 U+FFFD가 있으면 그 경로를 다시 찾을 수 없다 — 통과가 아니라 "확인하지 못함"으로 던진다(fail-closed)
+fn parse_flagged_entries(listing: &str) -> Res<Vec<String>> {
+    let mut flagged: Vec<String> = Vec::new();
+    for record in listing.split('\0') {
+        let mut chars = record.chars();
+        let Some(tag) = chars.next() else { continue };
+        if tag == 'S' || tag.is_ascii_lowercase() {
+            // `T path`: 태그 한 글자와 공백 뒤가 경로다
+            let file = chars.as_str().strip_prefix(' ').unwrap_or(chars.as_str());
+            if file.contains('\u{FFFD}') {
+                return fail("인덱스 표시가 걸린 파일의 이름이 UTF-8이 아니어서 끝까지 확인하지 못했습니다. 표시를 지우거나 파일 이름을 바꾼 뒤 다시 시도하세요");
+            }
+            flagged.push(file.to_owned());
+        }
+    }
+    Ok(flagged)
+}
+
+/// `ls-files --stage -z -- <chunk>` 출력이 chunk의 경로를 하나도 빠짐없이 한 번씩 담았는지 본다. 아니면 던진다
+fn check_stage_covers(chunk: &[String], staged: &str) -> Res<()> {
+    let mut seen: Vec<&str> = Vec::new();
+    for entry in staged.split('\0').filter(|part| !part.is_empty()) {
+        let Some((_, file)) = entry.split_once('\t') else { return fail("인덱스 항목을 읽지 못해 표시가 걸린 파일을 확인하지 못했습니다") };
+        seen.push(file);
+    }
+    let mut want: Vec<&str> = chunk.iter().map(String::as_str).collect();
+    want.sort_unstable();
+    seen.sort_unstable();
+    if want != seen {
+        return fail(format!("표시가 걸린 파일 {}개 중 {}개의 인덱스 항목만 돌아와 끝까지 확인하지 못했습니다", want.len(), seen.len()));
+    }
+    Ok(())
+}
+
 /// `findNestedGitRepos` op. 훅으로 `partitionIgnored`를 부른다
 async fn find_nested_git_repos(repo: &Repo, input: &Value) -> Res<Value> {
     let root = text(input, "root");
@@ -1845,6 +1874,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn 표시가_걸린_경로가_utf8이_아니거나_인덱스_항목이_모자라면_던진다() {
+        // 0xff가 든 이름은 lossy 변환에서 U+FFFD가 된다(git 출력을 그렇게 읽는다)
+        let lossy = String::from_utf8_lossy(b"S web/bad\xff.ts\0H web/ok.ts\0");
+        let error = format!("{:?}", parse_flagged_entries(&lossy).expect_err("던져야 한다"));
+        assert!(error.contains("UTF-8"), "{error}");
+        // 표시가 걸리지 않은 항목의 이름은 상관없다
+        let unflagged = String::from_utf8_lossy(b"H web/bad\xff.ts\0s web/ok.ts\0");
+        assert_eq!(parse_flagged_entries(&unflagged).unwrap(), vec!["web/ok.ts".to_owned()]);
+        // 인덱스 항목이 하나 빠지거나 이름이 다르면 던지고, 맞으면 통과한다
+        let chunk = vec!["a".to_owned(), "b".to_owned()];
+        assert!(check_stage_covers(&chunk, "100644 abc 0\ta\0").is_err());
+        assert!(check_stage_covers(&chunk, "100644 abc 0\ta\0100644 abc 0\tc\0").is_err());
+        assert!(check_stage_covers(&chunk, "100644 abc 0\ta\0100644 abc 0\tb\0").is_ok());
+    }
+
+    /// UTF-8이 아닌 이름의 파일(리눅스에서는 만들 수 있다, macOS APFS는 거절할 수 있어 그때는 건너뛴다)에 표시를 걸고 고쳐도 커밋이 멈춘다
+    #[tokio::test]
+    async fn utf8이_아닌_이름에_표시를_걸고_고쳐도_커밋은_멈춘다() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        init(dir.path());
+        let name = std::ffi::OsStr::from_bytes(b"bad\xff.txt");
+        if std::fs::write(dir.path().join(name), "x\n").is_err() {
+            return;
+        }
+        sh(dir.path(), &["add", "-A"]);
+        sh(dir.path(), &["commit", "-q", "-m", "bad"]);
+        let flagged = std::process::Command::new("git").arg("-C").arg(dir.path()).args(["update-index", "--skip-worktree", "--"]).arg(name).output().unwrap();
+        assert!(flagged.status.success());
+        std::fs::write(dir.path().join(name), "evil\n").unwrap();
+        std::fs::write(dir.path().join("other.txt"), "o\n").unwrap();
+        let mut repo = repo(dir.path());
+        let error = format!("{:?}", repo.commit(&json!({ "message": "m", "trailers": [] })).await.expect_err("멈춰야 한다"));
+        assert!(error.contains("UTF-8") || error.contains("인덱스 표시"), "{error}");
     }
 
     /// Node `readdir`은 libuv가 바이트 이름순으로 정렬해 돌려준다. 한도로 자르는 걷기와 폴더 이름 목록이
