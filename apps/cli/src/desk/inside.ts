@@ -9,7 +9,7 @@
  * 기록의 글은 모두 서버가 준 것(CLI가 훅으로 보낸 코드와 명령 결과)이라 그리기 전에 cleanText로 제어 글자와 ANSI를 지운다.
  * 그릴 줄 수에는 상한이 있다(항목 수, 항목마다의 변경·줄 수, 한 에이전트의 총 줄 수). 키와 그림은 순수 함수다
  */
-import { agentQuiet, artSize, clipWords, compose, forText, nowLine, oneLine, spanText, spriteFor, subagentSpriteFor, subagentsOf, type Seg } from './cards';
+import { agentQuiet, artSize, clipWords, compose, forText, nowLine, oneLine, spanText, spriteFor, subagentSpriteFor, subagentsOf, usageLine, type Seg } from './cards';
 import type { DeskState } from './keys';
 import type { KittyImages } from './kitty';
 import { cleanText, fitAnsi, stringWidth, type Rect } from './screen';
@@ -579,7 +579,10 @@ export function renderInside(source: InsideSource, rect: Pick<Rect, 'w' | 'h'> &
   if (inside.depth === 2) return finish(renderActivity(inside, item, cards, notes, rect, theme, now));
 
   const header = ` ${BOLD}${fg(theme, 'text')}${safeLine(item.title)}${RESET} ${muted}에이전트 안 · 서브에이전트 ${subs}${working ? ` · 작업 중 ${working}` : ''}${RESET}`;
-  const room = Math.max(0, rect.h - 1 - notes.length);
+  // 머리 아래에 사용량 한 줄(한도·캐시·비용·effort). 알린 것이 없으면 줄을 더하지 않는다
+  const usage = usageLine(item, Math.max(1, rect.w - 2), theme, now);
+  const top = usage ? 2 : 1;
+  const room = Math.max(0, rect.h - top - notes.length);
   const columns = Math.max(1, Math.min(3, Math.floor((rect.w - 2 + 1) / (CARD_MIN + 1))));
   const cardWidth = Math.max(4, Math.min(CARD_MAX, Math.floor((rect.w - 2 - (columns - 1)) / columns)));
   const at = cursorAt(inside, cards);
@@ -607,18 +610,18 @@ export function renderInside(source: InsideSource, rect: Pick<Rect, 'w' | 'h'> &
   let first = 0;
   const span = (from: number, to: number) => heights.slice(from, to + 1).reduce((sum, height) => sum + height, 0);
   while (first < target && span(first, target) > gridRoom) first++;
-  const lines: string[] = [fitAnsi(header, rect.w)];
+  const lines: string[] = [fitAnsi(header, rect.w), ...(usage ? [` ${usage}`] : [])];
   let drawn = 0;
   for (let row = first; row < gridRows.length; row++) {
-    const used = lines.length - 1;
+    const used = lines.length - top;
     if (drawn > 0 && used + heights[row]! > gridRoom) break;
     const inner = heights[row]! - 2;
     const parts = gridRows[row]!.map((built) => cardBox(built, item, source, theme, cardWidth, built.card.id === cards[at]?.id, inner));
     for (let y = 0; y < heights[row]!; y++) lines.push(fitAnsi(` ${parts.map((part) => part[y] ?? ' '.repeat(cardWidth)).join(' ')}`, rect.w));
     drawn++;
   }
-  if (lines.length - 1 > gridRoom) lines.length = gridRoom + 1;
-  while (lines.length - 1 < gridRoom) lines.push('');
+  if (lines.length - top > gridRoom) lines.length = gridRoom + top;
+  while (lines.length - top < gridRoom) lines.push('');
   if (overflow) {
     const above = gridRows.slice(0, first).reduce((sum, row) => sum + row.length, 0);
     const below = gridRows.slice(first + drawn).reduce((sum, row) => sum + row.length, 0);

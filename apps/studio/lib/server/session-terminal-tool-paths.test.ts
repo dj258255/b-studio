@@ -64,6 +64,32 @@ describe('terminalToolFilePaths', () => {
     expect(terminalToolFilePaths('opencode', 'write', { filePath: 5 })).toBeNull();
   });
 
+  it('opencode: edit·write·multiedit은 입력의 모든 열쇠가 설치된 1.18.33의 도구 정의에 있을 때만 경로를 꺼낸다. 모르는 열쇠(별칭 포함)가 있으면 null이다(ADR-241)', () => {
+    // 도구 정의(바이너리의 소스): edit {filePath, oldString, newString, replaceAll?}, write {filePath, content}
+    expect(terminalToolFilePaths('opencode', 'edit', { filePath: 'a.ts', oldString: 'a', newString: 'b', replaceAll: true })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('opencode', 'write', { filePath: 'a.ts', content: 'x' })).toEqual(['a.ts']);
+    expect(terminalToolFilePaths('opencode', 'multiedit', { filePath: 'a.ts', edits: [] })).toEqual(['a.ts']);
+    for (const alias of ['file_path', 'path', 'target_file', 'absolutePath', 'filepath', 'fileName', 'surprise']) {
+      expect(terminalToolFilePaths('opencode', 'write', { filePath: 'src/ok.ts', content: 'x', [alias]: 'lib/forbidden.ts' }), alias).toBeNull();
+      expect(terminalToolFilePaths('opencode', 'edit', { filePath: 'src/ok.ts', oldString: 'a', newString: 'b', [alias]: 'lib/forbidden.ts' }), alias).toBeNull();
+    }
+    // 경로가 별칭 열쇠로만 왔다면 어느 파일인지 모른다
+    expect(terminalToolFilePaths('opencode', 'write', { file_path: 'a.ts', content: 'x' })).toBeNull();
+    // 입력이 배열이거나 글이다
+    expect(terminalToolFilePaths('opencode', 'edit', ['a.ts'])).toBeNull();
+    expect(terminalToolFilePaths('opencode', 'write', 'a.ts')).toBeNull();
+    // 도구 이름이 객체의 기본 속성 이름이어도 던지지 않는다
+    for (const tool of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) expect(terminalToolFilePaths('opencode', tool, { filePath: 'a.ts', x: 1 }), tool).toEqual(['a.ts']);
+    // 파일 도구가 아닌 도구는 열쇠를 따지지 않는다(셸·읽기)
+    expect(terminalToolFilePaths('opencode', 'bash', { command: 'ls', description: 'x', timeout: 5 })).toEqual([]);
+    expect(terminalToolFilePaths('opencode', 'read', { filePath: 'a.ts', offset: 2 })).toEqual(['a.ts']);
+  });
+
+  it('opencode: 선언한 도구 표는 1.18.33의 도구 이름과 맞는다(read·glob·grep·webfetch·websearch·todowrite·question은 읽기, 그 밖의 skill·lsp·task·bash는 바꾸는 도구로 본다)', () => {
+    for (const tool of ['read', 'glob', 'grep', 'webfetch', 'websearch', 'todowrite', 'question']) expect(isReadToolFor('opencode', tool), tool).toBe(true);
+    for (const tool of ['edit', 'write', 'apply_patch', 'bash', 'task', 'skill', 'lsp', 'plan_exit', 'invalid', 'execute', 'github_create_issue']) expect(isReadToolFor('opencode', tool), tool).toBe(false);
+  });
+
   it('commandcode·gemini: 알려진 경로 키를 모두 꺼낸다(더 많이 꺼내면 더 막을 뿐이다)', () => {
     expect(terminalToolFilePaths('gemini', 'write_file', { file_path: '/w/a.ts', content: 'x' })).toEqual(['/w/a.ts']);
     expect(terminalToolFilePaths('commandcode', 'edit_file', { file_path: '/w/a.ts', filePath: '/w/b.ts', path: '/w/c.ts' })).toEqual(['/w/a.ts', '/w/b.ts', '/w/c.ts']);

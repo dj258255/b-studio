@@ -1510,6 +1510,10 @@ export interface NativeTerminalStallFacts {
   notified: boolean;
   idleMs: number;
   stallMs: number;
+  nudgeMax?: number;
+  nudgesSent?: number;
+  humanTurn?: boolean;
+  cliAtInput?: boolean;
 }
 
 export interface NativeTerminalSilenceFacts {

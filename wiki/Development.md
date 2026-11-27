@@ -11,7 +11,7 @@ pnpm --filter @b-studio/studio lint
 pnpm --filter @b-studio/studio build
 ```
 
-Docker 관련 변경은 `pnpm studio up examples/orders`, 에이전트 게이트는 `pnpm e2e:agent`, Fleet는 `pnpm e2e:fleet`로 관련 흐름을 확인합니다.
+Docker 관련 변경은 `pnpm studio up examples/orders`, 에이전트 게이트는 `pnpm e2e:agent`, Fleet는 `pnpm e2e:fleet-terminal`로 관련 흐름을 확인합니다.
 
 ## 코드 경계
 

@@ -536,6 +536,30 @@ fn opencode_needs_the_config_env_and_no_pure() {
 }
 
 #[test]
+fn opencode_rejects_envs_that_add_plugins_and_the_attach_client() {
+    let oc = "/usr/local/bin/opencode";
+    let good: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG)];
+    assert!(launch_oc(&[oc], Some(good)));
+    // 설정을 더하는 환경 변수는 하나라도 있으면(값이 비었어도) 붙지 않은 것이다: 마지막에 합쳐지는 설정·자동으로 불러오는 폴더·TUI 설정
+    for name in ["OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG"] {
+        assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), (name, "x")])), "{name}");
+        assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), (name, "")])), "{name} 빈 값");
+    }
+    // 플러그인을 건드리지 않는 변수는 상관없다
+    assert!(launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("OPENCODE_DISABLE_PROJECT_CONFIG", "1")])));
+    // 실행 중인 서버에 붙는 클라이언트(attach)는 도구가 다른 프로세스에서 돈다: 이 프로세스의 플러그인은 소용이 없다
+    assert!(!launch_oc(&[oc, "attach", "http://localhost:4096"], Some(good)));
+    assert!(!launch_oc(&[oc, "--log-level", "DEBUG", "attach", "http://localhost:4096"], Some(good)));
+    assert!(!launch_oc(&[oc, "--print-logs", "attach"], Some(good)));
+    // 첫 요청·대화 id 같은 옵션 값이 낱말 attach여도 서브명령이 아니다
+    assert!(launch_oc(&[oc, "--prompt", "attach"], Some(good)));
+    assert!(launch_oc(&[oc, "--session", "attach"], Some(good)));
+    assert!(launch_oc(&[oc, "--prompt", "요청", "--log-level", "INFO"], Some(good)));
+    // 프로젝트 경로 자리의 낱말 attach는 서브명령이다(모르면 막는 쪽)
+    assert!(!launch_oc(&[oc, "attach"], Some(good)));
+}
+
+#[test]
 fn gemini_needs_the_home_env_and_no_settings_overrides() {
     let gm = "/usr/local/bin/gemini";
     let good: &[(&str, &str)] = &[("GEMINI_CLI_HOME", GEMINI_SETTINGS)];

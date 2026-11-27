@@ -43,6 +43,7 @@ pub mod load_check;
 pub mod load_runner;
 pub mod model_router;
 pub mod next_routes;
+pub mod openapi_property;
 pub mod node_path;
 pub mod path_policy;
 pub mod plan_brief;

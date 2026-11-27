@@ -320,3 +320,12 @@ describe('CLI가 시작 창에서 멈춘 세션(#966)', () => {
     expect(items[0]!.terminal).toMatchObject({ cli: 'down', waiting: 'input' });
   });
 });
+
+describe('상태 줄 사용량(usage)', () => {
+  it('세션의 활동 보기에 있는 사용량을 항목에 그대로 싣고, 없으면 키를 만들지 않는다', () => {
+    const usage = { fiveHour: { usedPct: 30, resetsAt: '2026-11-27T05:00:00.000Z' }, cacheHitRatio: 0.9, effort: 'high' };
+    const { items } = overview({ sessions: [source({ live: { usage } }), source({ snapshot: snapshot({ id: 's2' }), live: { lastAt: '2026-09-29T11:00:00.000Z' } })] });
+    expect(items[0]!.usage).toEqual(usage);
+    expect('usage' in items[1]!).toBe(false);
+  });
+});

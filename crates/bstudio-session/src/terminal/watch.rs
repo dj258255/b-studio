@@ -152,7 +152,8 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
 /// 새 갈래(Command Code·OpenCode·Gemini)가 우리 설정으로 떴는가. **여는 쪽(허용 목록)이라 좁게 맞춘다. 모르는 것은 붙지 않은 것이다**:
 /// - Command Code: 감싸개가 `<cli> --mod <M>`으로 부른다. `--mod`는 argv의 1번 자리(node가 띄운 꼴은 `/command-code/dist/`가 든 스크립트 뒤의 2번 자리)에 정확히 하나, 값은 `expected`와 **같은 글**이어야 하고
 ///   `--mod=…`·두 번째 `--mod`(뒤가 앞을 덮을 수 있다)·`--safe-mode`가 있으면 붙지 않았다
-/// - OpenCode: 환경의 `OPENCODE_CONFIG`가 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), `OPENCODE_PURE`가 없고(값이 비었어도 있으면 안 된다), argv에 `--pure`가 없다. 환경을 읽지 못했으면(`None`) 붙지 않았다
+/// - OpenCode: 환경의 `OPENCODE_CONFIG`가 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), `OPENCODE_PURE`와 플러그인을 더하는 변수(`OPENCODE_CONFIG_CONTENT`·`OPENCODE_CONFIG_DIR`·`OPENCODE_TUI_CONFIG`)가 없고(값이 비었어도 있으면 안 된다),
+///   argv에 `--pure`가 없고 첫 위치 인자가 `attach`(다른 서버에 붙는 클라이언트)가 아니다. 환경을 읽지 못했으면(`None`) 붙지 않았다
 /// - Gemini: 환경의 `GEMINI_CLI_HOME`(관문 폴더 안의 홈)이 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), 시스템 설정 자리·믿음을 정하는 변수가 없고, 샌드박스 인자가 없다. 환경을 읽지 못했으면 붙지 않았다
 ///   (시스템 설정은 root 소유여야 읽혀서 사용자 폴더의 파일로는 훅을 붙일 수 없다 — ADR-242)
 /// - claude·codex는 이 판정으로 붙었다고 보지 않는다(claude는 `hooked_argv`, codex는 `hooked`)
@@ -181,7 +182,16 @@ pub fn hooked_launch(kind: CliKind, argv: &[String], env: Option<&[(String, Stri
             if env.iter().any(|(name, _)| name == "OPENCODE_PURE") {
                 return false;
             }
+            // 설정을 더하는 환경 변수: 마지막에 합쳐지는 설정(`OPENCODE_CONFIG_CONTENT`)·자동으로 불러오는 폴더(`OPENCODE_CONFIG_DIR`)·TUI 설정(`OPENCODE_TUI_CONFIG`)이
+            // 하나라도 있으면(값이 비었어도) 우리 플러그인 말고 다른 플러그인이 붙을 수 있다. 감싸개는 이 변수들을 지우고 띄운다
+            if env.iter().any(|(name, _)| OPENCODE_PLUGIN_ENVS.contains(&name.as_str())) {
+                return false;
+            }
             if argv.iter().any(|element| element == "--pure" || element.starts_with("--pure=")) {
+                return false;
+            }
+            // `attach`는 실행 중인 서버에 붙는 클라이언트다. 도구는 그 서버 프로세스에서 돌아 이 프로세스에 붙은 플러그인은 소용이 없다
+            if opencode_first_positional(argv) == Some("attach") {
                 return false;
             }
             env_all_equal(env, "OPENCODE_CONFIG", expected)
@@ -237,6 +247,30 @@ fn gemini_uses_sandbox(argv: &[String]) -> bool {
         }
     }
     false
+}
+
+/// OpenCode의 설정에 플러그인을 더할 수 있는 환경 변수. 하나라도 있으면 붙지 않은 것이다
+const OPENCODE_PLUGIN_ENVS: [&str; 3] = ["OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG"];
+/// 값을 따로 받는 OpenCode의 옵션(설치된 1.18.33의 `--help`와 옵션 정의에서). 값 자리의 글이 서브명령으로 읽히지 않게 건너뛴다. 모르는 옵션의 값은 낱말로 읽혀 더 막을 뿐이다
+const OPENCODE_VALUE_OPTIONS: [&str; 11] = ["--log-level", "--prompt", "--session", "-s", "--model", "-m", "--agent", "--port", "--hostname", "--cors", "--mdns-domain"];
+
+/// argv[0] 뒤의 첫 위치 인자(서브명령이거나 프로젝트 경로). 옵션과 그 값은 건너뛴다
+fn opencode_first_positional(argv: &[String]) -> Option<&str> {
+    let mut skip_value = false;
+    for element in argv.iter().skip(1) {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if element.starts_with('-') && element.len() > 1 {
+            if !element.contains('=') && OPENCODE_VALUE_OPTIONS.contains(&element.as_str()) {
+                skip_value = true;
+            }
+            continue;
+        }
+        return Some(element.as_str());
+    }
+    None
 }
 
 /// `name`이 환경에 있고 모든 줄의 값이 `expected`와 같은가(같은 이름이 여럿이면 프로그램마다 이기는 쪽이 달라 하나라도 다르면 거짓)

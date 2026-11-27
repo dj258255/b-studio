@@ -206,10 +206,12 @@ import {
   apiKeyEnvName,
   keylessLocal,
   type ModelProfile,
+  isProtectedPath,
 } from '@b-studio/agent';
 import {
   commandCodeConfigPathBlocked,
   geminiConfigPathBlocked,
+  openCodeConfigPathBlocked,
   describeSnapshotEvent,
   providerFromEnv,
   Redactor,
@@ -271,7 +273,8 @@ import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { settleDraftStops } from './session-terminal-draft';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixBlockReason, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
+import { terminalPasteText } from '../terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
 import { createCodexRolloutReader } from './codex-rollout-context';
@@ -359,7 +362,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { commandCodeTerminalReason, geminiTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, geminiTerminalReason, openCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
 import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
@@ -4845,48 +4848,30 @@ async function reviewExternalContext(session: Session, diff: string): Promise<st
   return excerpts.length > 0 ? buildPrReviewExternalContext(excerpts) : undefined;
 }
 
-async function reviewFixOnTerminal(session: Session): Promise<boolean> {
+/** 고침을 세션 터미널로 보낼 수 없는 까닭. 보낼 수 있으면 undefined(reviewFixBlockReason이 정한다) */
+async function reviewFixBlock(session: Session): Promise<string | undefined> {
   const backend = sessionBackend(session.snapshot);
   let apiKeyReady = false;
+  let apiKeyError: string | undefined;
   if (backend === 'api' && sessionTerminalAllowed() && sessionTerminalMode() === 'host') {
     try {
       await selfAgentModel(session);
       apiKeyReady = true;
-    } catch {
-      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 채팅식으로 둔다
+    } catch (error) {
+      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 까닭을 적어 고침 실패로 닫는다(채팅식으로 돌아가지 않는다)
+      apiKeyError = describe(error);
     }
   }
-  return reviewFixRunner({ allowed: sessionTerminalAllowed(), backend, apiKeyReady }) === 'terminal';
+  return reviewFixBlockReason({ allowed: sessionTerminalAllowed(), backend, apiKeyReady, ...(apiKeyError ? { apiKeyError } : {}) });
 }
 
-/** 터미널을 쓸 수 없으면 sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
+/** AI 리뷰의 고침을 세션 터미널로 보내고 그 실행이 닫히기를 기다린다. 터미널로 보낼 수 없으면 채팅식으로 돌아가지 않고 까닭을 적어 고침 실패로 돌려준다 */
 async function reviewRequestFix(session: Session, request: string): Promise<ReviewFixResult> {
   const id = session.snapshot.id;
-  // 세션 터미널을 쓸 수 있으면 터미널에서 돌린다(터미널이 열리지 않는 서버·키 없는 API 세션은 채팅식으로 둔다)
-  if (await reviewFixOnTerminal(session)) {
-    const { runReviewFixOnTerminal } = await import('./terminal-lane');
-    return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
-  }
-  let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
-  let runId: string | undefined;
-  const unsubscribe = subscribe(id, (event) => {
-    if (event.type === 'run_finished' && (runId === undefined || event.runId === runId)) finished = event;
-  });
-  try {
-    ({ runId } = sendMessage(id, request, { allowBreaking: false, by: 'ai-review' }));
-    const started = Date.now();
-    while (finished?.runId !== runId) {
-      if (Date.now() - started > REVIEW_FIX_TIMEOUT_MS) {
-        return { ok: false, error: `AI 리뷰의 고침 요청이 ${Math.round(REVIEW_FIX_TIMEOUT_MS / 60_000)}분 안에 끝나지 않았습니다` };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-    if (finished.status !== 'done') return { ok: false, error: finished.summary };
-    const checkpoint = session.snapshot.checkpoints[0];
-    return { ok: true, checkpoint: checkpoint ? { sha: checkpoint.sha, shortSha: checkpoint.shortSha } : undefined };
-  } finally {
-    unsubscribe();
-  }
+  const blocked = await reviewFixBlock(session);
+  if (blocked) return { ok: false, error: blocked };
+  const { runReviewFixOnTerminal } = await import('./terminal-lane');
+  return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
 }
 
 /**
@@ -7521,6 +7506,11 @@ export function sessionTerminalTarget(id: string): {
     const refused = commandCodeTerminalReason(sessionTerminalMode());
     if (refused) throw new StudioError(409, refused);
   }
+  // OpenCode 세션도 같다(ADR-241)
+  if (sessionBackend(session.snapshot) === 'opencode') {
+    const refused = openCodeTerminalReason(sessionTerminalMode());
+    if (refused) throw new StudioError(409, refused);
+  }
   // Gemini 세션도 같다(ADR-242)
   if (sessionBackend(session.snapshot) === 'gemini') {
     const refused = geminiTerminalReason(sessionTerminalMode());
@@ -7735,7 +7725,8 @@ function terminalCliKind(session: Session): HostCliKind {
   if (backend === 'codex') return 'codex';
   // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
   if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';
-  // Gemini(실험, ADR-242)도 같다
+  // OpenCode(실험, ADR-241)·Gemini(실험, ADR-242)도 같다
+  if (backend === 'opencode' && experimentalEnabled()) return 'opencode';
   if (backend === 'gemini' && experimentalEnabled()) return 'gemini';
   return 'claude';
 }
@@ -7744,7 +7735,7 @@ function terminalCliKind(session: Session): HostCliKind {
 function terminalRunBackend(session: Session): SessionMode {
   if (selfAgentTerminal(session)) return 'api';
   const cli = terminalCliKind(session);
-  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : cli === 'gemini' ? 'gemini' : 'claude-code';
+  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : cli === 'opencode' ? 'opencode' : cli === 'gemini' ? 'gemini' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -7773,6 +7764,11 @@ const TERMINAL_REQUEST_LIMIT = 8000;
 const TERMINAL_SEEN_USAGE_LIMIT = 2_000;
 /** 터미널 실행의 정체로 보는 기본 시간(초). 열린 실행에 이만큼 훅도 텔레메트리도 없으면 한 번 알린다(#B5) */
 const TERMINAL_STALL_DEFAULT_SECONDS = 120;
+const TERMINAL_STALL_NUDGE_DEFAULT_MAX = 1;
+/** 재촉 상한의 위쪽 한계. 사람 몰래 반복하지 않는 것이 이 기능의 뜻이라 크게 열어 두지 않는다 */
+const TERMINAL_STALL_NUDGE_LIMIT = 5;
+/** 정체가 이어질 때 CLI 입력창에 보내는 재촉 글 */
+const TERMINAL_STALL_NUDGE_TEXT = '멈춘 것 같습니다. 진행 상황을 확인하고 이어서 하거나, 막혔으면 이유를 알려 주세요.';
 
 interface TerminalVerification {
   workspace: Workspace;
@@ -7844,6 +7840,25 @@ interface TerminalRunState {
   lastActivityMs: number;
   /** 이 실행에서 정체 경고를 이미 한 번 보냈는가. 움직임이 다시 생기면 거짓으로 돌려 다음 정체에 다시 알린다 */
   stallNotified: boolean;
+  /** 이 실행에 보낼 수 있는 정체 재촉의 상한(B_STUDIO_TERMINAL_STALL_NUDGE_MAX). 0이면 꺼짐(기본). 실행을 열 때 읽어 이 실행에만 적용한다 */
+  stallNudgeMax: number;
+  /** 이 실행에 이미 보낸 정체 재촉 수. 움직임이 다시 생겨도 되돌리지 않는다(상한은 실행마다 센다) */
+  stallNudgesSent: number;
+  /** 재촉을 보내기 전 화면 확인이 진행 중이다(같은 재촉을 겹쳐 시작하지 않는다) */
+  stallNudgeBusy?: boolean;
+  /**
+   * CLI가 입력창에 있다는 긍정 신호가 이 실행의 마지막 사건인가(입력 대기 알림 뒤 다른 훅·텔레메트리·요청이 없다). 실행을 열 때 거짓이고,
+   * 입력 대기 알림만 참으로 세우며 다른 모든 훅·텔레메트리·요청이 거짓으로 되돌린다. 재촉은 이 값이 참일 때만 보낸다.
+   * 스냅샷의 `terminalAttention`은 비춘 값이라 다른 이유로 지워질 수 있어 판단에 쓰지 않는다(권한 창이 떠 있는데 Enter를 보내면 기본 선택이 눌린다)
+   */
+  cliAtInput: boolean;
+  /**
+   * 사람의 답을 기다리는 창(권한 확인·되묻기·입력 필요)이 열린 시각(Date.now(), 없으면 열려 있지 않다). 화면의 기다림 표시(`terminalAttention`)와 따로 기록한다:
+   * 표시는 다른 알림이 덮거나 훅이 지울 수 있지만 창은 그대로 떠 있을 수 있고, 그 창에 Enter를 보내면 기본 선택(승인)이 눌린다.
+   * 풀리는 것은 창이 닫혔다는 확실한 사건뿐이다: 메인 에이전트의 도구 끝 훅(허락받아 돌았거나 거절됨, 열린 지 `TERMINAL_ATTENTION_SETTLE_MS`가 지난 것만),
+   * 턴 끝·턴 실패, 사람의 요청. 다른 알림·텔레메트리·입력 대기 알림으로는 풀리지 않는다. 열려 있는 동안 입력 대기 알림은 입력창 신호를 세우지 않는다
+   */
+  humanPromptAt?: number;
   /** 이 실행을 요청 훅이 아니라 도구 호출이 열었다. 그 도구를 정한 모델 요청은 열린 시각보다 앞서 끝났을 수 있다(ADR-213, U5) */
   openedByTool: boolean;
   /** 이 실행이 열린 시각(Date.now()). 사용량 소식이 끊겼는지 보는 기준이다 */
@@ -8057,6 +8072,22 @@ function terminalStallMs(): number {
   return Number(value) * 1000;
 }
 
+/**
+ * B_STUDIO_TERMINAL_STALL_NUDGE=1(기본 꺼짐)과 B_STUDIO_TERMINAL_STALL_NUDGE_MAX(기본 1). 켜면 정체가 이어질 때 CLI 입력창에 재촉 글을
+ * 한 실행에 이 수만큼만 보낸다. 돌려주는 값이 0이면 꺼진 것이다. 모르는 값은 던진다(오타가 조용히 켜지거나 꺼지지 않게)
+ */
+function terminalStallNudgeMax(): number {
+  const on = process.env.B_STUDIO_TERMINAL_STALL_NUDGE?.trim();
+  if (!on || on === '0') return 0;
+  if (on !== '1') throw new StudioError(500, `B_STUDIO_TERMINAL_STALL_NUDGE는 1(켬) 또는 0(끔)이어야 합니다 (지금 값: ${on})`);
+  const max = process.env.B_STUDIO_TERMINAL_STALL_NUDGE_MAX?.trim();
+  if (!max) return TERMINAL_STALL_NUDGE_DEFAULT_MAX;
+  if (!/^\d+$/.test(max) || Number(max) <= 0 || Number(max) > TERMINAL_STALL_NUDGE_LIMIT) {
+    throw new StudioError(500, `B_STUDIO_TERMINAL_STALL_NUDGE_MAX는 1 이상 ${TERMINAL_STALL_NUDGE_LIMIT} 이하의 정수여야 합니다 (지금 값: ${max})`);
+  }
+  return Number(max);
+}
+
 /** 정체 감시 타이머를 세션마다 하나 띄운다. 이미 돌면 그대로 둔다 — 실행이 바뀌어도 하나만 돈다 */
 function startTerminalStallWatch(session: Session, stallMs: number): void {
   if (session.terminalStallTimer) return;
@@ -8079,17 +8110,97 @@ function stopTerminalStallWatch(session: Session): void {
  */
 function checkTerminalStall(session: Session, stallMs: number): void {
   const run = openTerminalRun(session);
-  // 알릴지는 코어가 정한다(ADR-213). 알리기만 하는 판정이다
-  const step = decideStall({ openRun: run !== undefined, notified: run?.terminal.stallNotified ?? false, idleMs: run ? Date.now() - run.terminal.lastActivityMs : 0, stallMs });
+  // 알릴지·재촉할지는 코어가 정한다(ADR-213, ADR-239). 사람 차례(권한 요청·질문·입력 대기)는 재촉하지 않는 사실로 넘긴다
+  const step = decideStall({
+    openRun: run !== undefined,
+    notified: run?.terminal.stallNotified ?? false,
+    idleMs: run ? Date.now() - run.terminal.lastActivityMs : 0,
+    stallMs,
+    nudgeMax: run?.terminal.stallNudgeMax ?? 0,
+    nudgesSent: run?.terminal.stallNudgesSent ?? 0,
+    // 사람 차례(권한·질문)는 비춘 값으로도 한 번 더 막는다. 입력 대기(idle_prompt)는 재촉이 겨냥하는 상태라 막지 않는다(입력창 신호는 cliAtInput)
+    humanTurn: run?.terminal.humanPromptAt !== undefined || (session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt'),
+    cliAtInput: run?.terminal.cliAtInput === true,
+  });
   if (step === 'stop') {
     stopTerminalStallWatch(session);
     return;
   }
   if (step === 'nothing' || !run) return;
+  if (step === 'nudge') {
+    // 화면을 읽는 사이(await) 다음 회차가 같은 재촉을 다시 시작하지 않게 한다
+    if (run.terminal.stallNudgeBusy) return;
+    run.terminal.stallNudgeBusy = true;
+    void sendStallNudge(session, run).then(
+      (sent) => {
+        run.terminal.stallNudgeBusy = false;
+        // 재촉을 보내지 못했으면(CLI가 없다·입력창을 확인하지 못했다·쓰기 실패) 알리기만 하는 길로 간다
+        if (!sent) notifyStall(session, run, stallMs);
+      },
+      () => {
+        run.terminal.stallNudgeBusy = false;
+        notifyStall(session, run, stallMs);
+      },
+    );
+    return;
+  }
+  notifyStall(session, run, stallMs);
+}
+
+/** 정체를 알리기만 한다(활동 기록과 터미널 경고 줄). 실행이 그 사이 닫혔으면 알리지 않는다 */
+function notifyStall(session: Session, run: ActiveRun & { terminal: TerminalRunState }, stallMs: number): void {
+  if (openTerminalRun(session) !== run) return;
   run.terminal.stallNotified = true;
   const message = terminalStallMessage(stallMs);
   emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
   warnSessionTerminal(session.snapshot.id, message);
+}
+
+/**
+ * 입력창 신호를 거둔다: 입력 대기 알림 말고 다른 무엇이 왔다(도구 훅·권한 요청·질문·텔레메트리·요청·턴 끝·도구 호출). CLI가 다시 움직였거나 창이 떴을 수 있다.
+ * 실행이 없으면 아무 일도 하지 않는다. 막는 쪽이라 넓게 부른다
+ */
+function closeHumanPrompt(id: string, { settled = false }: { settled?: boolean } = {}): void {
+  const session = store.sessions.get(id);
+  const run = session ? openTerminalRun(session) : undefined;
+  if (!run || run.terminal.humanPromptAt === undefined) return;
+  // 도구 끝 훅은 창이 뜨기 앞서 시작한 다른 도구의 것일 수 있다(#955와 같다): 연 지 조금 지난 것만 닫힌 것으로 본다
+  if (settled && Date.now() - run.terminal.humanPromptAt < TERMINAL_ATTENTION_SETTLE_MS) return;
+  run.terminal.humanPromptAt = undefined;
+}
+
+function noteTerminalBusy(id: string): void {
+  const session = store.sessions.get(id);
+  const run = session ? openTerminalRun(session) : undefined;
+  if (run) run.terminal.cliAtInput = false;
+}
+
+/**
+ * 정체한 실행의 CLI 입력창에 재촉 글을 한 번 보낸다(ADR-239). 사람이 desk에서 요청을 보내는 길(writeSessionTerminal)과 같다:
+ * CLI가 이 글을 받으면 요청 훅(terminalPromptSubmitted)을 거쳐 열린 실행에 이어 붙는다. 보낸 글과 시각은 그 실행의 기록에 남긴다.
+ * 보냈으면 참. CLI가 떠 있지 않으면(셸에 글이 들어가면 명령으로 돈다) 보내지 않고 거짓이다. 시도한 것은 쓰기가 실패해도 센다(같은 실패를 되풀이하지 않게)
+ */
+async function sendStallNudge(session: Session, run: ActiveRun & { terminal: TerminalRunState }): Promise<boolean> {
+  run.terminal.stallNudgesSent += 1;
+  const text = terminalPasteText(TERMINAL_STALL_NUDGE_TEXT);
+  try {
+    if (!text || !sessionTerminalCliAlive(session.snapshot.id)) return false;
+    // 화면에서 Claude 입력창이 보이고 비어 있을 때만 보낸다(권한·질문 창은 입력창 모양이 없고, 쓰다 만 글은 비어 있지 않다). 읽을 수 없으면(claude가 아닌 CLI·화면 없음) 모른다
+    if ((await sessionTerminalInputState(session.snapshot.id)) !== 'empty') return false;
+    // 화면을 읽는 사이 상황이 바뀌었을 수 있다: 같은 열린 실행이고 입력창 신호가 그대로이며 사람의 창이 없을 때만 쓴다(쓰기는 이 확인 바로 뒤에 같은 틱에서 한다)
+    if (openTerminalRun(session) !== run || !run.terminal.cliAtInput || run.terminal.humanPromptAt !== undefined || (session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt')) return false;
+    writeSessionTerminal(session.snapshot.id, `\x1b[200~${text}\x1b[201~`);
+    writeSessionTerminal(session.snapshot.id, '\r');
+  } catch {
+    return false;
+  }
+  // 재촉에 CLI가 답하지 않아도 정체 시간만큼은 더 기다린 뒤 알린다(바로 뒤 회차가 알림을 내지 않게)
+  run.terminal.lastActivityMs = Date.now();
+  const at = new Date().toISOString();
+  const message = `정체가 이어져 CLI에 재촉 글을 보냈습니다(${at}, ${run.terminal.stallNudgesSent}/${run.terminal.stallNudgeMax}): ${text}`;
+  emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
+  warnSessionTerminal(session.snapshot.id, message);
+  return true;
 }
 
 /**
@@ -8099,6 +8210,7 @@ function checkTerminalStall(session: Session, stallMs: number): void {
 function noteTerminalActivity(session: Session, run: ActiveRun & { terminal: TerminalRunState }, { settled = false }: { settled?: boolean } = {}): void {
   run.terminal.lastActivityMs = Date.now();
   run.terminal.stallNotified = false;
+  run.terminal.cliAtInput = false;
   if (settled) clearSettledTerminalAttention(session);
   else clearTerminalAttention(session);
 }
@@ -8228,9 +8340,12 @@ async function refreshCodexContext(session: Session, requests: readonly ApiReque
   const thread = requests.findLast((request) => request.sessionId)?.sessionId ?? remembered;
   const activity = (session.terminalActivity ??= newTerminalActivity());
   const home = (await sessionAccount(session.snapshot).catch(() => undefined))?.configDir ?? process.env.CODEX_HOME ?? path.join(homedir(), '.codex');
-  const context = thread ? await codexRollouts.read(home, thread).catch(() => undefined) : undefined;
-  if (context) activity.context = context;
+  const read = thread ? await codexRollouts.readAll(home, thread).catch(() => undefined) : undefined;
+  if (read) activity.context = read.context;
   else delete activity.context;
+  // 같은 줄의 5시간·주간 한도와 캐시 적중률(#1468). 보여 주는 값이라 읽지 못하면 비운다
+  if (read?.usage) activity.usage = read.usage;
+  else delete activity.usage;
 }
 
 /**
@@ -8451,6 +8566,7 @@ async function beginTerminalRun(
     }
     // 정체 감시 주기를 실행을 열기 전에 읽는다(#B5). 값이 잘못됐으면(오타) 실행을 반쯤 열기 전에 던진다
     const stallMs = terminalStallMs();
+    const stallNudgeMax = terminalStallNudgeMax();
     // 켜 둔 확인 선언 변경 허용은 사람의 요청이 연 만들기 실행 하나가 가져간다. 읽기만은 게이트를 돌리지 않으므로 남겨 두고, 도구 호출이 연 실행은 가져가지 않는다(ADR-164, ADR-211)
     // 허용은 여기서 가져가기만 하고 지우지 않는다: 실행이 열린 뒤에 지운다(N2, ADR-215). 열기 전에 지우면 세션이 멈춰 열지 못할 때 허용이 쓰이지 않은 채 사라진다
     const allowCheckChanges = takesCheckChanges(fromPrompt, readOnly, session.snapshot.allowCheckChangesNext === true);
@@ -8470,6 +8586,9 @@ async function beginTerminalRun(
       modelCalls: 0,
       lastActivityMs: Date.now(),
       stallNotified: false,
+      stallNudgeMax,
+      stallNudgesSent: 0,
+      cliAtInput: false,
       openedByTool: !fromPrompt,
       openedMs: Date.now(),
       telemetrySeen: false,
@@ -8960,6 +9079,30 @@ async function terminalCommandCodeDeny(session: Session, tool: string, toolInput
   return undefined;
 }
 
+/** OpenCode의 파일 도구(설치된 1.18.33에서 확인, ADR-241). 파일을 바꾸는 도구인데 바꾸는 파일을 알 수 없으면 설정을 건드리지 않는다고 말할 수 없다 */
+const OPENCODE_CONFIG_GUARDED_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'multiedit', 'apply_patch', 'patch']);
+
+/**
+ * OpenCode 세션의 쓰기 직전 막기(ADR-241). **카드가 없어도** 막는다. 막는 쪽이다(거부 목록):
+ * `edit`·`write`·패치로 OpenCode의 설정·플러그인 자리(`.opencode` 폴더, `opencode.json(c)`·`tui.json(c)`, 전역 설정 폴더)를 바꾸는 것: 설정이 다른 플러그인을 붙이면 그 플러그인이
+ * 우리 훅 뒤에 도구 입력을 바꿔 쓸 수 있다. 비교는 파일 시스템 규칙으로 한다(`openCodeConfigPathBlocked`: 대소문자·유니코드·`..`·겹친 구분자·링크).
+ * 파일 도구인데 바꾸는 파일을 알 수 없으면(모르는 열쇠 등) 이 자리를 건드리지 않는다고 말할 수 없어 막는다.
+ * 셸로 쓰는 경우는 여기서 막지 못한다: 설정은 OpenCode가 뜰 때 읽으므로 그 뒤의 변경은 다음에 띄울 때 띄우기 전 검사와 플러그인의 설정 확인이 잡는다
+ */
+async function terminalOpenCodeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'opencode') return undefined;
+  const files = terminalToolFilePaths('opencode', tool, toolInput);
+  if (files === null) {
+    return OPENCODE_CONFIG_GUARDED_TOOLS.has(tool) ? `[b-studio] ${tool}이(가) 바꾸는 파일을 알 수 없어 OpenCode의 설정(.opencode·opencode.json)을 건드리지 않는다고 확인하지 못했습니다. 쓰지 않았습니다.` : undefined;
+  }
+  for (const file of files) {
+    if (await openCodeConfigPathBlocked({ cwd: session.snapshot.workDir, home: process.env.HOME ?? process.env.USERPROFILE, xdgConfigHome: process.env.XDG_CONFIG_HOME, file })) {
+      return `[b-studio] ${file}은(는) OpenCode의 설정·플러그인 자리라 쓰지 않았습니다. 설정이 다른 플러그인을 붙여 b-studio의 훅을 비켜 갈 수 있어 에이전트는 이 자리를 바꾸지 않습니다.`;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Gemini 세션의 쓰기 직전 막기(ADR-242). **카드가 없어도** 막는다. 막는 쪽이다(거부 목록):
  * - `write_file`·`replace`가 Gemini의 설정 자리(`.gemini`: 작업 폴더·위 폴더·사용자 홈)를 바꾸는 것: 작업 폴더의 설정이 `hooksConfig`로 우리 훅을 끄거나 `hooks`로 다른 훅을 더한다.
@@ -9010,9 +9153,26 @@ async function terminalGeminiCwdDeny(session: Session, cwd: unknown): Promise<st
   }
 }
 
-/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code·Gemini의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
+/**
+ * OpenCode가 일하는 폴더가 세션의 작업 복사본이 아니면 막는다(ADR-241). `opencode <프로젝트 경로>`나 `--dir`로 다른 폴더에서 일하면 상대 경로가 우리가 따진 폴더와 다른 곳에 닿고,
+ * 카드의 쓰기 범위도 작업 복사본 기준이라 의미가 없다. 막는 쪽이다: 플러그인이 보낸 폴더가 없거나 글이 아니거나 읽을 수 없으면(링크를 풀지 못함 등) 같다고 말할 수 없어 막는다.
+ * 링크를 푼 실제 경로로 견준다(macOS의 `/tmp`와 `/private/tmp`처럼 글이 달라도 같은 폴더인 경우를 통과시키고, 글이 같아 보여도 다른 폴더인 경우를 막는다)
+ */
+async function terminalOpenCodeCwdDeny(session: Session, cwd: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'opencode') return undefined;
+  const refusal = '[b-studio] OpenCode가 세션의 작업 복사본이 아닌 폴더에서 일하고 있어 쓰지 않았습니다. 터미널을 연 폴더에서 `opencode`를 인자 없이(프로젝트 경로·--dir 없이) 다시 띄우세요.';
+  if (typeof cwd !== 'string' || cwd.trim() === '') return refusal;
+  try {
+    const [given, expected] = await Promise.all([realpath(cwd), realpath(session.project.root)]);
+    return given === expected ? undefined : refusal;
+  } catch {
+    return refusal;
+  }
+}
+
+/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code·OpenCode·Gemini의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
 async function terminalWriteScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
-  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalGeminiDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
+  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalOpenCodeDeny(session, tool, toolInput)) ?? (await terminalGeminiDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
 }
 
 /** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
@@ -9124,7 +9284,12 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const readTool = isReadToolFor(terminalCliKind(session), tool);
   if (readTool) return {};
   // Command Code의 설정 쓰기와 run_command는 카드가 없어도, 실행을 열기 전에 막는다(보안 검토)
-  const configDeny = (await terminalCommandCodeDeny(session, tool, input.tool_input)) ?? (await terminalGeminiCwdDeny(session, input.cwd)) ?? (await terminalGeminiDeny(session, tool, input.tool_input));
+  const configDeny =
+    (await terminalCommandCodeDeny(session, tool, input.tool_input)) ??
+    (await terminalOpenCodeCwdDeny(session, input.cwd)) ??
+    (await terminalOpenCodeDeny(session, tool, input.tool_input)) ??
+    (await terminalGeminiCwdDeny(session, input.cwd)) ??
+    (await terminalGeminiDeny(session, tool, input.tool_input));
   if (configDeny) return { deny: configDeny };
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다
@@ -9357,6 +9522,86 @@ export async function applyServerChanges(
   if (!finished) return { ...base, status: 'cancelled', summary: '세션이 멈춰 서버가 쓴 변경의 결과를 알 수 없습니다' };
   const checkpoint = finished.status === 'done' && saved !== undefined && saved.sha !== head ? saved : undefined;
   return { ...base, status: finished.status, summary: finished.summary, ...(checkpoint ? { checkpoint } : {}) };
+}
+
+/**
+ * 통합 S4 수리 전에, 레인 결과를 이 세션의 작업 폴더에 **확정하지 않은 변경**으로 다시 쓴다(ADR-243). 서버가 쓰는 통합 길(`applyServerChanges`)은
+ * 게이트가 실패하면 작업 폴더를 되돌리므로, 수리 CLI는 그냥 열면 "합친 결과가 실패했다"는 요청과 맞지 않는 되돌려진 상태에서 시작한다.
+ *
+ * 이 함수는 게이트를 거치지 않지만 변경을 통과시키지 않는다: 쓴 파일은 체크포인트가 아니라 작업 복사본의 미확정 변경으로 남고,
+ * 그 뒤 수리 실행의 턴 끝 판정(`finishTerminalTurn`)이 **실행 전부터 있던 변경도 검증 대상으로** 본다(`terminalVerification`의 `tolerateExisting: false`, ADR-131).
+ * 변경 전 기준도 작업 폴더가 아니라 마지막 체크포인트에서 잡는다(`baselineFromCheckpoints`). 그래서 합친 상태가 기준이 되어 계약 깨짐이 가려지지 않고,
+ * 쓰기 범위·완료 검사도 그 판정이 건다. 수리가 이 변경을 되돌려 빈 턴으로 끝나면 체크포인트가 새로 남지 않아 부르는 쪽이 통과로 읽지 않는다.
+ * 쓰기 전 거름은 `applyServerChanges`와 같다(경로 모양·중복·쓰기 범위·링크·숨긴 이름). 같은 전제(터미널을 연 적이 없는 세션 등)가 아니면 거절한다.
+ */
+/**
+ * 수리 실행의 검증 기준이 작업 폴더에서 읽히는 파일인가(거부 목록). 읽히면 까닭을, 아니면 undefined.
+ * 선언 파일(studio.yaml·studio.yml), 보호 경로, 평가 자산(게이트의 `protectedPathsFor`와 같은 두 선언). 이름은 대소문자·유니코드 정규화를 접어 넓게 맞춘다 —
+ * 넓게 맞아도 시드가 더 막힐 뿐이다. 프로젝트 하위 폴더 이름이 달라도 걸리도록 파일 이름만 같아도 선언 파일로 본다
+ */
+function seedBaselineFile(session: Session, file: string): string | undefined {
+  const folded = file.normalize('NFC').toLowerCase();
+  const base = folded.split('/').pop() ?? folded;
+  if (base === 'studio.yaml' || base === 'studio.yml') return '선언 파일(studio.yaml)은 수리 전에 다시 쓰지 않습니다(검증 기준이 작업 폴더에서 읽힙니다)';
+  // 게이트의 protectedPathsFor와 같은 두 선언(보호 경로 + 평가 자산)을 합친다
+  const workflow = session.project.spec.workflow;
+  for (const rule of [...(workflow?.protectedPaths ?? []), ...(workflow?.evaluationAssets ?? [])]) {
+    const foldedRule = rule.normalize('NFC').toLowerCase();
+    if (isProtectedPath(file, rule) || isProtectedPath(folded, foldedRule)) return `보호 경로·평가 자산(${rule})은 수리 전에 다시 쓰지 않습니다(검증 기준이 작업 폴더에서 읽힙니다)`;
+  }
+  return undefined;
+}
+
+export async function seedServerChanges(
+  id: string,
+  input: { writes: ReadonlyArray<{ path: string; content: string }>; deletes: readonly string[]; writableScope: readonly string[] },
+): Promise<void> {
+  const session = requireSession(id);
+  if (!terminalSessionAlive(session)) throw new StudioError(409, '멈춘 세션입니다');
+  if (sessionTerminalMode() === 'container') throw new StudioError(409, '컨테이너 방식에서는 서버가 변경을 쓰지 못합니다');
+  if (session.terminalOpened === true || hasWatch(id) || openTerminalRun(session) !== undefined) {
+    throw new StudioError(409, '터미널을 연 적이 있는 세션에는 서버가 변경을 쓰지 않습니다(같은 작업 폴더에 다른 쪽이 쓸 수 있습니다)');
+  }
+  if (session.terminalTaskContext !== undefined) throw new StudioError(409, '이미 쓰기 범위가 걸린 세션입니다');
+  if (session.serverApplying === true) throw new StudioError(409, '서버가 이미 이 세션에 변경을 쓰고 있습니다');
+  session.serverApplying = true;
+  try {
+    // 범위 확인(terminalScopeDeny)이 읽는 맥락을 이 함수 동안만 건다
+    setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: [] });
+    try {
+      const workspace = new Workspace(session.project.root);
+      const paths = [...input.writes.map((write) => write.path), ...input.deletes];
+      const seen = new Set<string>();
+      for (const file of paths) {
+        const bad = serverChangePathProblem(file);
+        if (bad) throw new StudioError(400, `${file}: ${bad}`);
+        const key = file.normalize('NFC').toLowerCase();
+        if (seen.has(key)) throw new StudioError(400, `${file}: 같은 경로가 두 번 있습니다`);
+        seen.add(key);
+        // 작업 폴더에서 기준을 읽는 파일은 시드하지 않는다(거부 목록: 모르면 걸린 것으로, 대소문자·정규화는 넓게 본다). 수리 실행의 게이트가
+        // 선언(studio.yaml)·보호 경로(쓰기 직전 고정)·평가 자산(게이트를 만들 때의 지문)의 기준을 작업 폴더에서 잡으므로, 먼저 쓰면 그 값이 "원래 그랬던 것"이 된다
+        const blocked = seedBaselineFile(session, file);
+        if (blocked) throw new StudioError(400, `${file}: ${blocked}`);
+        const scope = await terminalScopeDeny(session, 'Write', { file_path: file });
+        if (scope) throw new StudioError(400, scope);
+        try {
+          await workspace.assertToolPath(file);
+        } catch (error) {
+          throw new StudioError(400, `${file}: ${describe(error)}`);
+        }
+      }
+      for (const file of input.deletes) {
+        const info = await lstat(path.join(workspace.root, file)).catch(() => undefined);
+        if (!info?.isFile()) throw new StudioError(400, `${file}: 일반 파일만 지울 수 있습니다`);
+      }
+      for (const write of input.writes) await workspace.write(write.path, write.content);
+      for (const file of input.deletes) await workspace.remove(file);
+    } finally {
+      setTerminalTaskContext(id, undefined);
+    }
+  } finally {
+    session.serverApplying = undefined;
+  }
 }
 
 /**
@@ -10163,10 +10408,22 @@ function terminalNotification(id: string, input: HookInput): void {
   const kind = input.hook_event_name === 'PermissionRequest' ? 'permission_prompt' : typeof input.notification_type === 'string' ? input.notification_type : '';
   if (!kind) return;
   if (kind === 'idle_prompt') {
-    if (!openTerminalRun(session)) return;
+    const open = openTerminalRun(session);
+    if (!open) return;
+    // 사람의 답을 기다리는 창이 떠 있는 동안의 입력 대기 알림은 입력창 신호가 아니다(그 창에 Enter가 가면 승인이 눌린다). 표시도 덮지 않는다
+    if (open.terminal.humanPromptAt !== undefined) return;
+    // 입력창에 있다는 긍정 신호는 이 알림뿐이다. 이 알림 뒤에 오는 다른 훅·텔레메트리는 모두 거둔다(noteTerminalBusy)
+    open.terminal.cliAtInput = true;
+    // 화면에 이미 권한·되묻기 표시가 걸려 있으면 입력 대기가 덮지 않는다
+    const shown = session.snapshot.terminalAttention;
+    if (shown && TERMINAL_ATTENTION_ALWAYS.has(shown.kind)) return;
   } else if (!TERMINAL_ATTENTION_ALWAYS.has(kind)) {
     // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
     return;
+  } else {
+    // 사람의 답을 기다리는 창이 열렸다. 표시와 따로 기록한다(재촉이 이 창에 Enter를 보내지 않게). 이미 열려 있으면 처음 시각을 지킨다
+    const open = openTerminalRun(session);
+    if (open) open.terminal.humanPromptAt ??= Date.now();
   }
   // 무엇을 묻는지는 PermissionRequest가 안다(도구와 대상, #942). 같은 권한 창을 몇 초 뒤 알리는 Notification의 일반 문구로 덮지 않는다
   if (input.hook_event_name === 'PermissionRequest') {
@@ -10232,31 +10489,58 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       return note;
     },
     prompt: (input) => {
+      noteTerminalBusy(id);
+      closeHumanPrompt(id);
       // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
       // 요청을 보냈으니 desk에 보이던 "쓰다 만 글"은 넘어갔다(promptSubmitted)
       noteSessionTerminalCli(id, true, { promptSubmitted: true });
       return terminalPromptSubmitted(id, input);
     },
-    preTool: (input) => terminalToolStarting(id, input),
-    stop: (input) => terminalTurnEnded(id, input),
+    preTool: (input) => {
+      noteTerminalBusy(id);
+      return terminalToolStarting(id, input);
+    },
+    stop: (input) => {
+      noteTerminalBusy(id);
+      closeHumanPrompt(id);
+      return terminalTurnEnded(id, input);
+    },
     sessionEnd: async (input) => {
+      noteTerminalBusy(id);
       // mod만 다시 불러오는 것(reload)은 CLI의 끝이 아니다. 새 mod의 session-start가 시간 안에 오는지 시계로 본다(설정이 reload 뒤 mod를 껐을 수 있다)
       if (input.reason === 'reload' && terminalCliKind(terminalSession(id)) === 'commandcode') {
         noteModReloading(id);
         return;
       }
+      // OpenCode의 플러그인은 인스턴스가 다시 만들어질 때(설정 다시 읽기)와 CLI가 끝날 때 똑같이 끝을 알린다(ADR-241). 구별할 수 없으므로 열린 실행을 닫지 않는다:
+      // 닫으면 다시 만들어진 것일 때 지금까지의 변경이 되돌려진다. CLI 표시만 내리고, 다시 뜬 플러그인의 session-start가 올리고, 열린 실행은 다음 요청이 이어 간다
+      if (input.reason === 'dispose' && terminalCliKind(terminalSession(id)) === 'opencode') {
+        noteSessionTerminalCli(id, false);
+        return;
+      }
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
     },
-    stopFailure: (input) => terminalTurnFailed(id, input),
+    stopFailure: (input) => {
+      noteTerminalBusy(id);
+      closeHumanPrompt(id);
+      return terminalTurnFailed(id, input);
+    },
     notification: async (input) => {
+      noteTerminalBusy(id);
       terminalNotification(id, input);
     },
-    activity: async (input) => terminalActivityHook(id, input),
+    activity: async (input) => {
+      noteTerminalBusy(id);
+      // 메인 에이전트의 도구 끝 훅만 창이 닫혔다는 사건이다(서브에이전트의 도구는 메인의 창을 닫지 않는다)
+      if ((input.hook_event_name === 'PostToolUse' || input.hook_event_name === 'PostToolUseFailure') && !(typeof input.agent_id === 'string' && input.agent_id)) closeHumanPrompt(id, { settled: true });
+      return terminalActivityHook(id, input);
+    },
     statusline: async (input) => {
       noteStatusline((terminalSession(id).terminalActivity ??= newTerminalActivity()), input);
     },
     telemetry: async (body) => {
+      noteTerminalBusy(id);
       await terminalTelemetry(id, body);
     },
     conversation: (conversation) => noteTerminalConversation(id, conversation),
@@ -10264,7 +10548,10 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       const session = terminalSession(id);
       return [...gatewayToolSpecs(session.project), ...(session.terminalBoard?.specs ?? [])] as ReturnType<typeof gatewayToolSpecs>;
     },
-    runTool: (name, args) => runTerminalTool(id, name, args),
+    runTool: (name, args) => {
+      noteTerminalBusy(id);
+      return runTerminalTool(id, name, args);
+    },
   });
 }
 

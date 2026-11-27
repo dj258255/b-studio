@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const fake = vi.hoisted(() => ({
   notReady: {} as Record<string, string>,
   created: [] as Array<{ projectId: string; owner: string; workspace: string; options: Record<string, unknown> }>,
-  sent: [] as Array<{ id: string; text: string; options: Record<string, unknown> }>,
+  opened: [] as Array<{ id: string; initialPrompt: string }>,
   designError: undefined as string | undefined,
 }));
 
@@ -25,10 +25,7 @@ vi.mock('./sessions', async () => {
       fake.created.push({ projectId, owner, workspace, options });
       return { id: `s${fake.created.length}`, projectId, backend: options.backend };
     },
-    sendMessage: (id: string, text: string, options: Record<string, unknown>) => {
-      fake.sent.push({ id, text, options });
-      return { runId: `r-${id}` };
-    },
+    setTerminalCheckChanges: () => true,
   };
 });
 
@@ -41,7 +38,27 @@ vi.mock('./design-pipeline', () => ({
 
 import { resetBackendRulesCache, saveBackendRules } from './backend-rules';
 import { resetProjectModelDefaultsCache } from './model-defaults';
-import { startRoutedSession } from './routed-session';
+import { startRoutedSession as startRouted, type RoutedTerminalDeps } from './routed-session';
+
+/** 가짜 터미널: 열자마자 실행이 시작된 것으로 본다. 진짜 터미널·PTY는 열지 않는다 */
+const terminalDeps: Partial<RoutedTerminalDeps> = {
+  allowed: () => true,
+  mode: () => 'host',
+  driver: {
+    open: async (id, initialPrompt) => {
+      fake.opened.push({ id, initialPrompt });
+      return { initialPromptUsed: true };
+    },
+  },
+  subscribe: (_id, listener) => {
+    listener({ type: 'run_started', runId: 'run-t', via: 'terminal', request: 'x' } as never);
+    return () => {};
+  },
+  startTimeoutMs: 40,
+  pollMs: 1,
+  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+};
+const startRoutedSession = (input: Parameters<typeof startRouted>[0]) => startRouted({ ...input, terminal: true }, terminalDeps);
 
 const saved = { rules: process.env.B_STUDIO_BACKEND_RULES_FILE, models: process.env.B_STUDIO_MODEL_DEFAULTS_FILE };
 
@@ -53,7 +70,7 @@ beforeEach(async () => {
   resetProjectModelDefaultsCache();
   fake.notReady = {};
   fake.created = [];
-  fake.sent = [];
+  fake.opened = [];
   fake.designError = undefined;
 });
 
@@ -75,9 +92,9 @@ describe('startRoutedSession', () => {
       ['claude-code', 'opus', 'on-demand'],
       ['codex', undefined, 'on-demand'],
     ]);
-    expect(risky).toMatchObject({ runId: 'r-s1', routing: { backend: 'claude-code', rule: 0, matched: '위험' } });
-    expect(plain).toMatchObject({ runId: 'r-s2', routing: { backend: 'codex', rule: 'fallback' } });
-    expect(fake.sent[0]).toMatchObject({ id: 's1', text: '결제 완료 화면을 만들어 줘', options: { by: 'kim', intent: 'build', interactive: true, steering: true, allowBreaking: false } });
+    expect(risky).toMatchObject({ terminal: { opened: true, pasted: true }, routing: { backend: 'claude-code', rule: 0, matched: '위험' } });
+    expect(plain).toMatchObject({ terminal: { opened: true, pasted: true }, routing: { backend: 'codex', rule: 'fallback' } });
+    expect(fake.opened[0]).toMatchObject({ id: 's1', initialPrompt: '결제 완료 화면을 만들어 줘' });
   });
 
   it('로그인 전인 백엔드는 건너뛰고 다음 후보로 만든다', async () => {
@@ -96,16 +113,16 @@ describe('startRoutedSession', () => {
     fake.designError = '승인되지 않은 설계가 다루는 요구사항입니다';
     const result = await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: 'R3 구현', intent: 'build' });
     expect(result.session).toMatchObject({ id: 's1' });
-    expect(result.runId).toBeUndefined();
+    expect(result.terminal).toBeUndefined();
     expect(result.sendError).toBe('승인되지 않은 설계가 다루는 요구사항입니다');
-    expect(fake.sent).toEqual([]);
+    expect(fake.opened).toEqual([]);
   });
 
   it('직접 고른 AI로 만들고 첫 요청을 보낸다. 그 AI가 로그인 전이면 세션을 만들지 않는다', async () => {
     saveBackendRules({ rules: [{ when: {}, backend: 'claude-code' }] });
     const result = await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '결제 화면 고쳐 줘', intent: 'build', direct: { backend: 'codex', model: 'gpt-5.5' } });
     expect(fake.created[0]?.options).toMatchObject({ backend: 'codex', modelId: 'gpt-5.5' });
-    expect(result).toMatchObject({ runId: 'r-s1', routing: { backend: 'codex', rule: 'direct' } });
+    expect(result).toMatchObject({ terminal: { opened: true }, routing: { backend: 'codex', rule: 'direct' } });
 
     fake.notReady = { codex: 'Codex 로그인 필요' };
     await expect(startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '고쳐 줘', intent: 'build', direct: { backend: 'codex' } })).rejects.toMatchObject({ status: 409 });
@@ -115,8 +132,9 @@ describe('startRoutedSession', () => {
   it('질문은 설계 승인을 보지 않고 보낸다', async () => {
     fake.designError = '막힘';
     const result = await startRoutedSession({ projectId: 'orders', user: 'kim', workspace: 'copy', request: '구조를 설명해 줘', intent: 'ask' });
-    expect(result.runId).toBe('r-s1');
-    expect(fake.sent[0]?.options).toMatchObject({ intent: 'ask' });
+    expect(result.terminal).toMatchObject({ opened: true });
+    // 읽기만 표시가 붙은 글이 넘어간다
+    expect(fake.opened[0]?.initialPrompt).toContain('구조를 설명해 줘');
   });
 });
 

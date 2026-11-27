@@ -16,7 +16,7 @@ import type { TaskPlanView } from '@/lib/task-plan-types';
 import { listFleets } from './fleets';
 import { sessionTerminalPresence } from './session-terminal';
 import { cleanDraftText } from './session-terminal-draft';
-import type { ActivityContext, ActivityNow, ActivitySubagent, ActivityTodos, TerminalActivityView } from './terminal-activity';
+import type { ActivityContext, ActivityNow, ActivitySubagent, ActivityTodos, ActivityUsage, TerminalActivityView } from './terminal-activity';
 import type { AgentCapabilities, TerminalAgentRow } from './terminal-agents';
 import { overviewSessions, sessionBackend, sessionCapabilities, sessionHistory, sessionTerminalActivity, sessionTerminalAgents } from './sessions';
 import { listTaskPlans } from './task-plans';
@@ -87,6 +87,8 @@ export interface AgentItem {
   todos?: ActivityTodos;
   /** 문맥 창을 얼마나 썼는가(#920). Claude는 상태 줄, Codex는 그 대화의 세션 기록 숫자(#978)에서 온다 */
   context?: ActivityContext;
+  /** 상태 줄이 알린 5시간·주간 한도·캐시 적중률·비용·effort(#1468). 알린 것만 있다. 보여 주는 데만 쓴다(판정에 쓰지 않는다) */
+  usage?: ActivityUsage;
   /** 턴 끝의 마지막 답 한 줄(#920, 200자 안) */
   lastMessage?: string;
   /** 터미널 CLI가 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만. desk가 "몇 분째"를 센다 */
@@ -460,6 +462,7 @@ function evaluate(row: AgentRow, now: number): AgentItem {
     ...(row.live?.now ? { now: row.live.now } : {}),
     ...(row.live?.todos ? { todos: row.live.todos } : {}),
     ...(row.live?.context ? { context: row.live.context } : {}),
+    ...(row.live?.usage ? { usage: row.live.usage } : {}),
     ...(row.live?.lastMessage ? { lastMessage: row.live.lastMessage } : {}),
     ...(row.live?.workingSince ? { workingSince: row.live.workingSince } : {}),
     ...(state === 'booting' && row.bootingSince ? { bootingSince: row.bootingSince } : {}),

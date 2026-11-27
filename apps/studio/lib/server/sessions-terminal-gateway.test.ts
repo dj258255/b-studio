@@ -2698,7 +2698,7 @@ describe('Codex 터미널(#825)', () => {
       const day = path.join(home, 'sessions', '2026', '10', '28');
       await mkdir(day, { recursive: true });
       const count = (input: number) =>
-        JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: input, output_tokens: 0, total_tokens: input }, model_context_window: 400_000 } } });
+        JSON.stringify({ type: 'event_msg', payload: { type: 'token_count', info: { last_token_usage: { input_tokens: input, output_tokens: 0, total_tokens: input }, model_context_window: 400_000 }, rate_limits: { primary: { used_percent: 12, window_minutes: 300, resets_at: 4_000_000_000 } } } });
       await writeFile(path.join(day, `rollout-2026-10-28T10-00-00-${thread}.jsonl`), `${JSON.stringify({ type: 'session_meta', payload: { id: thread } })}\n${count(100_000)}\n`);
       await writeFile(path.join(day, 'rollout-2026-10-28T09-00-00-01a18039-0b6b-7c73-8e06-67e9c5029a41.jsonl'), `${count(390_000)}\n`);
       const session = await openCodex();
@@ -2722,6 +2722,8 @@ describe('Codex 터미널(#825)', () => {
         ]),
       );
       expect(sessionTerminalActivity(session.id)?.context).toEqual({ usedPct: 25, used: 100_000, size: 400_000 });
+      // 같은 줄의 5시간 한도도 싣는다(#1468)
+      expect(sessionTerminalActivity(session.id)?.usage).toEqual({ fiveHour: { usedPct: 12, resetsAt: new Date(4_000_000_000_000).toISOString() } });
       await stopSession(session.id);
     } finally {
       if (before === undefined) delete process.env.CODEX_HOME;
@@ -2947,6 +2949,9 @@ describe('터미널 CLI가 지금 하는 일을 훅으로 모은다(#920)', () =
     expect(sessionTerminalActivity(session.id)?.now).toMatchObject({ tool: 'Bash', target: 'ls' });
     await session.gateway.statusline!({ context_window: { used_percentage: 30 } });
     expect(sessionTerminalActivity(session.id)?.context).toEqual({ usedPct: 30 });
+    // 상태 줄의 한도·캐시·비용·effort도 활동 보기에 실린다(#1468)
+    await session.gateway.statusline!({ rate_limits: { five_hour: { used_percentage: 20, resets_at: 4_000_000_000 } }, prompt_cache: { hit_ratio: 0.5 }, cost: { total_cost_usd: 0.5 }, effort: { level: 'max' } });
+    expect(sessionTerminalActivity(session.id)?.usage).toEqual({ fiveHour: { usedPct: 20, resetsAt: new Date(4_000_000_000_000).toISOString() }, cacheHitRatio: 0.5, costUsd: 0.5, effort: 'max' });
     await session.gateway.activity!({ hook_event_name: 'TaskCreated', task_id: '1', task_subject: '메모 필드' });
     expect(sessionTerminalActivity(session.id)?.todos).toEqual({ done: 0, total: 1 });
     await session.gateway.stop({ last_assistant_message: '바꾼 것이 없습니다.' });

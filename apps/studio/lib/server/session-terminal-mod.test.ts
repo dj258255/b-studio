@@ -99,3 +99,44 @@ describe('mod 시계', () => {
     expect(second).toHaveLength(1);
   });
 });
+
+describe('OpenCode의 플러그인 시계(ADR-241)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+  afterEach(() => {
+    disarmModClock('s1');
+    vi.useRealTimers();
+  });
+
+  it('시험이 상한을 낮추는 환경 변수는 CLI마다 따로다. 기본은 90초이고 높이거나 이상한 값은 무시한다', () => {
+    expect(modLoadTimeoutMs({}, 'opencode')).toBe(90_000);
+    expect(modLoadTimeoutMs({ B_STUDIO_OPENCODE_MOD_TIMEOUT_MS: '250' }, 'opencode')).toBe(250);
+    expect(modLoadTimeoutMs({ B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS: '250' }, 'opencode')).toBe(90_000);
+    expect(modLoadTimeoutMs({ B_STUDIO_OPENCODE_MOD_TIMEOUT_MS: '250' })).toBe(90_000);
+    for (const value of ['999999999', '0', '-5', 'abc', '', 'NaN', 'Infinity']) expect(modLoadTimeoutMs({ B_STUDIO_OPENCODE_MOD_TIMEOUT_MS: value }, 'opencode'), value).toBe(90_000);
+  });
+
+  it('신호가 오지 않으면 OpenCode의 플러그인이 불러와지지 않았다고 알린다. Command Code의 글은 그대로다', () => {
+    const calls: string[] = [];
+    armModClock('s1', (reason) => calls.push(reason), 1000, 'opencode');
+    vi.advanceTimersByTime(1000);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain('OpenCode가 뜬 뒤 1초 안에 b-studio의 플러그인이 불러와졌다는 신호(session-start)가 오지 않았습니다');
+    expect(calls[0]).toContain('다른 플러그인이 있어');
+    expect(calls[0]).not.toMatch(/ADR|mod/);
+    const cc: string[] = [];
+    armModClock('s1', (reason) => cc.push(reason), 1000);
+    vi.advanceTimersByTime(1000);
+    expect(cc[0]).toContain('Command Code가 뜬 뒤 1초 안에 b-studio의 mod가 불러와졌다는 신호');
+  });
+
+  it('신호가 오면 선다(대조)', () => {
+    const calls: string[] = [];
+    armModClock('s1', (reason) => calls.push(reason), 1000, 'opencode');
+    vi.advanceTimersByTime(500);
+    noteModStarted('s1');
+    vi.advanceTimersByTime(5000);
+    expect(calls).toEqual([]);
+  });
+});

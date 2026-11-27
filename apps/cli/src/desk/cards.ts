@@ -411,6 +411,69 @@ function subscriptionWarning(limits: DeskLimits | undefined, width: number, them
   return compose([{ text: `⚠ 이 계정 ${label} ${pct}%`, color: pct >= 95 ? 'red' : 'yellow' }, ...(reset ? [SEP, { text: resetNote, color: 'muted' as const, flex: true }] : [])], width, theme);
 }
 
+/**
+ * 캐시 적중률(0~1). 상태 줄이 알린 값(메인 대화)이 있으면 그것, 없으면 세션 토큰으로 cache read / (입력 + cache read + cache write)를 계산한다.
+ * 분모가 0이면 모른다(undefined) — 0%로 보이지 않는다
+ */
+function cacheHitRatio(item: DeskItem): number | undefined {
+  const reported = item.usage?.cacheHitRatio;
+  if (reported !== undefined && reported >= 0 && reported <= 1) return reported;
+  const tokens = item.tokens;
+  if (!tokens) return undefined;
+  const denominator = tokens.inputTokens + tokens.cacheReadTokens + tokens.cacheWriteTokens;
+  return denominator > 0 ? tokens.cacheReadTokens / denominator : undefined;
+}
+
+/** 한도 %의 색: 80 넘으면 노랑, 95 넘으면 빨강, 그 밑은 칠하지 않는다(글이 같은 뜻을 말한다) */
+function limitColor(pct: number): ColorToken | undefined {
+  return pct >= 95 ? 'red' : pct >= 80 ? 'yellow' : undefined;
+}
+
+/** 세션 사용량 한 줄에 놓을 한도 창: 초기화 시각이 지났거나 읽을 수 없으면 없다 */
+function liveWindow(window: { usedPct: number; resetsAt: string } | undefined, now: number): { pct: number; reset: string } | undefined {
+  if (!window || !(window.usedPct >= 0)) return undefined;
+  const at = Date.parse(window.resetsAt);
+  if (!Number.isFinite(at) || at <= now) return undefined;
+  const reset = resetText(window.resetsAt, now);
+  return { pct: Math.round(Math.min(100, window.usedPct)), reset: reset === '곧 다시 참' ? '곧' : reset };
+}
+
+/**
+ * 세션 사용량 한 줄(5시간·주간 한도와 초기화까지, 캐시 적중률, 비용, 세션 시간, effort). 상태 줄이 알린 것만 보이고 없는 값은 생략한다(빈칸·0 없음).
+ * 보이기만 한다 — 이 값으로 아무것도 막지 않는다. 좁으면 먼저 주간, 다음 5시간의 초기화 시각을 빼고, 그래도 넘치면 뒤에서부터 통째로 뺀다
+ * (effort, 시간, 비용, 캐시, 주간 순). 5시간 한도가 마지막까지 남는다. withCost가 false면 비용을 적지 않는다(이미 다른 줄에 있다)
+ */
+export function usageLine(item: DeskItem, width: number, theme: Theme, now: number, options: { withCost?: boolean } = {}): string {
+  const usage = item.usage;
+  const five = liveWindow(usage?.fiveHour, now);
+  const week = liveWindow(usage?.sevenDay, now);
+  const cache = cacheHitRatio(item);
+  const make = (resets: { five: boolean; week: boolean }): Seg[][] => {
+    const parts: Seg[][] = [];
+    const windowPart = (label: string, value: { pct: number; reset: string } | undefined, withReset: boolean) => {
+      if (!value) return;
+      const color = limitColor(value.pct);
+      parts.push([{ text: `${label} ${value.pct}%`, ...(color ? { color } : {}) }, ...(withReset && value.reset ? [{ text: ` (${value.reset})`, color: 'muted' as const }] : [])]);
+    };
+    windowPart('5시간', five, resets.five);
+    windowPart('주간', week, resets.week);
+    if (cache !== undefined) parts.push([{ text: `캐시 ${Math.round(cache * 100)}%` }]);
+    if (options.withCost !== false && usage?.costUsd !== undefined && usage.costUsd > 0) parts.push([{ text: `$${usage.costUsd.toFixed(2)}` }]);
+    if (usage?.durationMs !== undefined && usage.durationMs >= 60_000) parts.push([{ text: `세션 ${Math.floor(usage.durationMs / 60_000)}분` }]);
+    if (usage?.effort) parts.push([{ text: `추론 강도 ${usage.effort}` }]);
+    return parts;
+  };
+  const widthOf = (parts: Seg[][]) => parts.flat().reduce((sum, seg) => sum + stringWidth(seg.text), 0) + 3 * Math.max(0, parts.length - 1);
+  let parts = make({ five: true, week: true });
+  if (parts.length === 0) return '';
+  for (const resets of [{ five: true, week: false }, { five: false, week: false }]) {
+    if (widthOf(parts) <= width) break;
+    parts = make(resets);
+  }
+  while (parts.length > 1 && widthOf(parts) > width) parts.pop();
+  return compose(parts.flatMap((segs, index) => (index ? [SEP, ...segs] : segs)), width, theme);
+}
+
 /** 고른 카드에 펼치는 사실: 검증·체크포인트·토큰·비용 */
 function factsLine(item: DeskItem, width: number, theme: Theme): string {
   const parts: Seg[][] = [];
@@ -493,6 +556,9 @@ export function cardLines(card: CardInput, width: number, theme: Theme = DEFAULT
     }
     const facts = factsLine(item, text, theme);
     if (facts) body.push(facts);
+    // 비용은 위 사실 줄에 이미 있으면 다시 적지 않는다(둘은 출처가 달라 값이 다를 수 있다)
+    const usage = usageLine(item, text, theme, now, { withCost: !(item.costUsd !== undefined && item.costUsd > 0) });
+    if (usage) body.push(usage);
   }
   const rows = Math.max(body.length, art.rows, card.minRows ?? 0);
   while (body.length < rows) body.push('');

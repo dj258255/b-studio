@@ -64,6 +64,16 @@ const GEMINI_FILE_INPUT_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
 };
 /** Gemini의 서브에이전트 도구(`invoke_agent`). 안의 도구 호출이 훅을 거치는지는 소스로만 읽었다(실행으로 확인하지 못했다): 바꾸는 파일을 알 수 없는 것으로 본다 */
 const GEMINI_NESTED_TOOLS: ReadonlySet<string> = new Set(['invoke_agent']);
+/**
+ * OpenCode 파일 도구가 받는 열쇠 표(설치된 1.18.33의 도구 정의, ADR-241): `edit`는 {filePath, oldString, newString, replaceAll?}, `write`는 {filePath, content}다.
+ * 경로 열쇠는 `filePath` 하나뿐이고 별칭이 없다. 그래도 표에 없는 열쇠가 하나라도 있으면 도구 쪽이 그것을 어떻게 읽는지 알 수 없으므로 null이다(허용 목록에 넣을 값이라 모르는 값은 막는다).
+ * `multiedit`은 1.18.33에 없다(옛 판의 {filePath, edits}). 있어도 같은 규칙이다
+ */
+const OPENCODE_FILE_INPUT_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  edit: new Set(['filePath', 'oldString', 'newString', 'replaceAll']),
+  write: new Set(['filePath', 'content']),
+  multiedit: new Set(['filePath', 'edits']),
+};
 /** Command Code가 파일을 바꾸는 도구(설치된 v1.93.4의 도구 정의와 별칭 표에서 확인, ADR-233): 입력에 경로(정식 이름 `file_path`나 별칭)가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const COMMAND_CODE_FILE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file']);
 /**
@@ -165,7 +175,7 @@ function geminiFilePaths(tool: string, input: unknown): string[] | null {
  * 터미널 도구 입력에서 파일 경로를 꺼낸다(쓰기 직전의 훅). 경로가 없는 도구면 빈 목록, **알 수 없으면 null**이다.
  * 허용 목록(카드의 쓰기 범위)에 넣을 값이라 null을 빈 목록처럼 통과시키지 않는다: 부르는 쪽이 범위 밖으로 막는다.
  * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(엄격하게 읽고 모르면 null)
- * - opencode: `filePath`(edit·write·multiedit은 없으면 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
+ * - opencode: `filePath`(edit·write·multiedit은 없으면 null, 도구 정의에 없는 열쇠가 하나라도 있어도 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
  * - gemini: 파일 도구(`write_file`·`replace`)는 `file_path`만 꺼내고(`geminiFilePaths`: 모르는 열쇠·NUL·앞의 `@`면 null), 서브에이전트 도구(`invoke_agent`)는 늘 null이다
  * - commandcode·gemini(그 밖의 도구): 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null.
  *   commandcode의 파일 도구(`write_file`·`edit_file`)는 정식 이름과 별칭 열쇠를 모두 꺼내고(`commandCodeFilePaths`), 표에 없는 열쇠가 있거나 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 서브에이전트 도구(`agent`·`task`)는 늘 null이다.
@@ -200,6 +210,8 @@ export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, inpu
   }
   if (!record) return OPENCODE_FILE_TOOLS.has(tool) && kind === 'opencode' ? null : [];
   if (kind === 'opencode') {
+    const known = Object.hasOwn(OPENCODE_FILE_INPUT_KEYS, tool) ? OPENCODE_FILE_INPUT_KEYS[tool] : undefined;
+    if (known && Object.keys(record).some((key) => !known.has(key))) return null;
     const value = record.filePath;
     if (typeof value === 'string' && value.trim() !== '') return [value];
     return OPENCODE_FILE_TOOLS.has(tool) ? null : [];

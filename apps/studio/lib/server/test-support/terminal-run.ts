@@ -93,7 +93,7 @@ export async function driveTerminalSteps(id: string, prompt: string, steps: Term
 /**
  * AI 리뷰의 고침 요청(`runReviewFixOnTerminal`)이 하는 일을 훅으로 한다: 요청을 CLI에 보내고(prompt) 걸음을 하고, 그 실행이 닫히기를 기다려
  * 끝난 상태가 done이 아니면 실패로, done이면 가장 최근 체크포인트와 함께 성공으로 돌려준다. 진짜 터미널을 여는 쪽(`terminal-lane.ts`)은 `terminal-lane.test.ts`가 따로 본다.
- * 시험 파일은 `./terminal-lane`을 이 함수를 부르는 가짜로 바꾸고, `./session-terminal`의 `reviewFixRunner`가 'terminal'을 돌려주게 해야 한다
+ * 시험 파일은 `./terminal-lane`을 이 함수를 부르는 가짜로 바꾸고, `./session-terminal`의 `reviewFixBlockReason`이 undefined를 돌려주게 해야 한다
  */
 export async function reviewFixViaTerminalHooks(
   id: string,

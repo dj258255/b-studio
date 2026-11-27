@@ -5,6 +5,8 @@ import { native } from './native';
 import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 import { geminiSettingsContent } from './gemini-config';
 import { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
+import { openCodeConfigContent } from './opencode-config';
+import { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
 import {
   AGENT_HOOK_EVENTS,
   AGENT_HOOK_SCRIPT,
@@ -65,11 +67,12 @@ export function shellQuote(value: string): string {
 }
 
 /**
- * 터미널에서 띄우는 에이전트 CLI. 세션의 백엔드가 codex면 codex, commandcode면 commandcode(실험, ADR-233), 그 밖에는 claude다(#825)
- * commandcode는 훅을 설정 파일이 아니라 mod 파일(`--mod`)로 붙인다. gemini(실험, ADR-242)는 `GEMINI_CLI_HOME`을 관문 폴더 안의 홈으로 바꿔 그 사용자 설정의 훅으로 붙인다
+ * 터미널에서 띄우는 에이전트 CLI. 세션의 백엔드가 codex면 codex, commandcode면 commandcode(실험, ADR-233), opencode면 opencode(실험, ADR-241), gemini면 gemini(실험, ADR-242), 그 밖에는 claude다(#825)
+ * commandcode는 훅을 설정 파일이 아니라 mod 파일(`--mod`)로, opencode는 플러그인 파일(`OPENCODE_CONFIG`가 가리키는 설정의 `plugin`)로 붙인다.
+ * gemini는 `GEMINI_CLI_HOME`을 관문 폴더 안의 홈으로 바꿔 그 사용자 설정의 훅으로 붙인다
  */
-export type HostCliKind = 'claude' | 'codex' | 'commandcode' | 'gemini';
-const CLI_BIN_ENV: Record<HostCliKind, string> = { claude: 'B_STUDIO_CLAUDE_BIN', codex: 'B_STUDIO_CODEX_BIN', commandcode: 'B_STUDIO_COMMANDCODE_BIN', gemini: 'B_STUDIO_GEMINI_BIN' };
+export type HostCliKind = 'claude' | 'codex' | 'commandcode' | 'opencode' | 'gemini';
+const CLI_BIN_ENV: Record<HostCliKind, string> = { claude: 'B_STUDIO_CLAUDE_BIN', codex: 'B_STUDIO_CODEX_BIN', commandcode: 'B_STUDIO_COMMANDCODE_BIN', opencode: 'B_STUDIO_OPENCODE_BIN', gemini: 'B_STUDIO_GEMINI_BIN' };
 
 export interface HostCli {
   kind: HostCliKind;
@@ -154,12 +157,12 @@ async function statusLineIn(file: string): Promise<string | undefined> {
   }
 }
 
-/** CLI마다 계정 설정 폴더를 받는 환경 변수(#885). commandcode는 기본 계정만 쓴다(계정 폴더를 정하는 변수를 모르는 채 내보내지 않는다) */
-export const ACCOUNT_DIR_ENV: Record<Exclude<HostCliKind, 'commandcode' | 'gemini'>, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' };
+/** CLI마다 계정 설정 폴더를 받는 환경 변수(#885). commandcode·opencode·gemini는 기본 계정만 쓴다(계정 폴더를 정하는 변수를 모르는 채 내보내지 않는다) */
+export const ACCOUNT_DIR_ENV: Record<Exclude<HostCliKind, 'commandcode' | 'opencode' | 'gemini'>, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME' };
 
-/** 계정 폴더 변수의 이름. 기본 계정만 쓰는 CLI(commandcode·gemini)는 없다 */
+/** 계정 폴더 변수의 이름. 기본 계정만 쓰는 CLI(commandcode·opencode·gemini)는 없다 */
 export function accountDirEnvName(kind: HostCliKind): string | undefined {
-  return kind === 'commandcode' || kind === 'gemini' ? undefined : ACCOUNT_DIR_ENV[kind];
+  return kind === 'commandcode' || kind === 'opencode' || kind === 'gemini' ? undefined : ACCOUNT_DIR_ENV[kind];
 }
 
 /** 감싸개에서 계정 폴더를 내보내는 줄. 기본 계정이면 없다 */
@@ -192,8 +195,10 @@ export async function findHostCli(env: Record<string, string | undefined> = proc
         ? 'claude를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CLAUDE_BIN에 절대 경로를 적습니다. B_STUDIO_TERMINAL=container로 띄우면 컨테이너 안에 설치해 씁니다'
         : kind === 'commandcode'
           ? 'commandcode를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_COMMANDCODE_BIN에 절대 경로를 적습니다'
-          : kind === 'gemini'
-            ? 'gemini(0.71.1 이상)를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_GEMINI_BIN에 절대 경로를 적습니다'
+          : kind === 'opencode'
+            ? 'opencode를 설치하고 제공자에 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_OPENCODE_BIN에 절대 경로를 적습니다'
+            : kind === 'gemini'
+              ? 'gemini(0.71.1 이상)를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_GEMINI_BIN에 절대 경로를 적습니다'
             : 'codex를 설치하고 로그인한 뒤 다시 여세요. 다른 자리에 있으면 B_STUDIO_CODEX_BIN에 절대 경로를 적습니다',
     );
   }
@@ -371,6 +376,28 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
 }
 
 /**
+ * OpenCode 감싸개(ADR-241, 실험). 세션의 관문 폴더를 환경 변수로 알리고 `OPENCODE_CONFIG`로 우리 설정 파일(`<관문 폴더>/opencode.json`, 플러그인 하나)을 붙여 CLI를 부른다.
+ * 사용자가 준 인자는 그대로 뒤에 붙인다. 모델 고르기(`-m`·`--model`)와 권한을 건너뛰는 인자는 붙이지 않는다: 기본 모델로 뜨고, 권한 확인은 사람이 답한다.
+ * 설정을 바꾸는 환경 변수는 먼저 지운다: `OPENCODE_CONFIG_CONTENT`(마지막에 합쳐지는 설정)·`OPENCODE_CONFIG_DIR`(폴더의 plugins를 자동으로 불러온다)·`OPENCODE_TUI_CONFIG`·`OPENCODE_PURE`(외부 플러그인을 모두 끈다).
+ * 감시가 이 환경(`OPENCODE_CONFIG`가 우리 파일이고 위 변수가 없음)과 `--pure` 인자 없음을 본다. 토큰은 여기 없다. 플러그인이 관문 폴더의 주소 파일에서 읽는다
+ */
+export function openCodeConfigPath(dir: string): string {
+  return path.join(dir, OPENCODE_CONFIG_NAME);
+}
+
+export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
+  return [
+    '#!/bin/sh',
+    '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
+    `export ${OPENCODE_GATEWAY_DIR_ENV}=${shellQuote(dir)}`,
+    'unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE',
+    `export OPENCODE_CONFIG=${shellQuote(openCodeConfigPath(dir))}`,
+    `exec ${shellQuote(cli.cliPath)} "$@"`,
+    '',
+  ].join('\n');
+}
+
+/**
  * 첫 요청(#836). 터미널을 열 때 받은 첫 요청 글을 CLI의 실행 인자로 넘긴다. 키 입력(붙여 넣기 + Enter)으로 넣지 않는다:
  * CLI가 시작하며 묻는 창(폴더 신뢰, 훅 신뢰, 업데이트)이 뜨면 그 글과 Enter가 사람 대신 그 창의 답이 된다.
  * 글은 PTY의 환경 변수로만 받고(셸 글에 잇지 않는다), 셸이 시작 파일을 읽기 전에 셸 변수로 옮기고 환경에서 지운다.
@@ -464,6 +491,17 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
       [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
       [GATEWAY_FILE_NAME]: addressFile,
       [path.join(WRAPPER_DIR, 'gemini')]: { content: hostGeminiWrapper(dir, cli), mode: 0o700 },
+      ...shell,
+    };
+  }
+  if (cli.kind === 'opencode') {
+    return {
+      // 훅은 플러그인 파일이 부른다. 훅 스크립트는 터미널을 열기 전에 관문에 닿는지 묻는 데만 쓴다(probeHostGateway)
+      [OPENCODE_PLUGIN_NAME]: file(OPENCODE_PLUGIN),
+      [OPENCODE_CONFIG_NAME]: file(openCodeConfigContent(dir)),
+      [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
+      [GATEWAY_FILE_NAME]: addressFile,
+      [path.join(WRAPPER_DIR, 'opencode')]: { content: hostOpenCodeWrapper(dir, cli), mode: 0o700 },
       ...shell,
     };
   }
@@ -665,16 +703,18 @@ export function findUnhookedCliByArgv(
       if (!native.terminalHookedLaunch(kind, argv, null, modPath)) found.push(byPid.get(pid)!);
       continue;
     }
-    if (kind === 'gemini') {
-      // gemini는 홈을 환경(`GEMINI_CLI_HOME`)으로 바꿔 훅을 붙인다. 환경을 읽어 판정한다: 끝났으면(null) 건너뛰고, 읽지 못하면 붙었는지 알 수 없으므로 붙지 않은 것이다
+    if (kind === 'gemini' || kind === 'opencode') {
+      // gemini는 홈을 환경(`GEMINI_CLI_HOME`)으로, opencode는 설정 파일을 환경(`OPENCODE_CONFIG`)으로 붙인다. 환경을 읽어 판정한다: 끝났으면(null) 건너뛰고, 읽지 못하면 붙었는지 알 수 없으므로 붙지 않은 것이다(코어가 null을 그렇게 읽는다)
       let env: Array<{ name: string; value: string }> | null | undefined;
       try {
         env = readEnv(pid);
       } catch {
         env = undefined;
       }
+      // 끝난 프로세스(null)는 건너뛴다. 읽지 못한 것(undefined)은 코어에 null로 넘겨 붙지 않은 것으로 읽게 한다
       if (env === null) continue;
-      if (!native.terminalHookedLaunch(kind, argv, env ?? null, geminiHomePath(path.dirname(expected.settingsPath)))) found.push(byPid.get(pid)!);
+      const expectedPath = kind === 'gemini' ? geminiHomePath(path.dirname(expected.settingsPath)) : openCodeConfigPath(path.dirname(expected.settingsPath));
+      if (!native.terminalHookedLaunch(kind, argv, env ?? null, expectedPath)) found.push(byPid.get(pid)!);
       continue;
     }
     if (!native.terminalHookedArgv(argv, expected.settingsPath, mcpPath, expected.selfAgent?.loader ?? null, expected.selfAgent?.entry ?? null)) found.push(byPid.get(pid)!);
@@ -821,6 +861,7 @@ export async function openHostTerminal({
   const { cols, rows } = clampTerminalSize(size);
   // Command Code는 기본 모델로만 띄운다(모델 고르기 인자를 넘기지 않는다). 모델이 오면 조용히 무시하지 않고 거절한다
   if (cli === 'commandcode' && model !== undefined) throw new SandboxError('Command Code 터미널은 모델을 고르지 않습니다', '기본 모델로만 띄웁니다(-m·--model을 넘기지 않는다)');
+  if (cli === 'opencode' && model !== undefined) throw new SandboxError('OpenCode 터미널은 모델을 고르지 않습니다', '기본 모델로만 띄웁니다(-m·--model을 넘기지 않는다)');
   if (cli === 'gemini' && model !== undefined) throw new SandboxError('Gemini 터미널은 모델을 고르지 않습니다', '기본 모델로만 띄웁니다(-m·--model을 넘기지 않는다)');
   const allowedAccountEnv = new Set(Object.values(ACCOUNT_DIR_ENV));
   for (const name of Object.keys(accountEnv)) {

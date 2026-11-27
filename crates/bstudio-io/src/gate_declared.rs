@@ -28,7 +28,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bstudio_guard::check_evidence;
 use bstudio_guard::checkpoint_git as cg;
@@ -36,6 +36,7 @@ use bstudio_guard::gate_helpers;
 use bstudio_guard::js;
 use bstudio_guard::js_json::{self, JsValue};
 use bstudio_guard::load_check;
+use bstudio_guard::openapi_property as property;
 use bstudio_guard::review_input::template;
 use bstudio_guard::task_graph;
 use bstudio_guard::usage;
@@ -126,6 +127,8 @@ struct Plan {
     test_values: Vec<JsValue>,
     concurrency: Vec<JsValue>,
     loads: Vec<JsValue>,
+    /// 속성 시험(알림 전용, ADR-240) 선언. 켠 서비스만 TS가 보낸다. 없으면 빈 목록이다
+    property: Vec<JsValue>,
     auto_names: Vec<String>,
     auto_skipped: Vec<JsValue>,
 }
@@ -164,6 +167,11 @@ fn read_plan(begin: &JsValue, auto: AutoPlan) -> Res<Plan> {
         test_values: tests_raw.to_vec(),
         concurrency: list_of(begin, "concurrency")?.to_vec(),
         loads: list_of(begin, "loads")?.to_vec(),
+        property: match begin.prop("property") {
+            Some(JsValue::Arr(items)) => items.clone(),
+            None => Vec::new(),
+            Some(_) => return Err(Fail::Hook),
+        },
         auto_names: auto.names,
         auto_skipped: auto.skipped,
     })
@@ -650,6 +658,141 @@ async fn run_concurrency(ctx: &Arc<Ctx>, node: &NodeSpec, index: usize) -> Res<R
     Ok(Ok(None))
 }
 
+// ── 속성 시험(알림 전용, ADR-240) ────────────────────────────────────────
+
+/// 연속으로 이만큼 요청이 실패하면 서버가 죽은 것으로 보고 멈춘다
+const PROPERTY_MAX_CONSECUTIVE_FAILURES: usize = 3;
+const PROPERTY_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const PROPERTY_MAX_TIMEOUT_MS: u64 = 300_000;
+
+fn property_note(service: &str, ok_detail: String) -> JsValue {
+    // 판정과 무관한 알림이다: 늘 ok. 단계는 계약 확인(contract_check) 뒤의 알림이라 contract_check로 둔다
+    obj(vec![
+        ("stage", Some(s("contract_check"))),
+        ("name", Some(s(format!("property-check: {service}")))),
+        ("ok", Some(JsValue::Bool(true))),
+        ("attempts", Some(JsValue::Num(1.0))),
+        ("detail", Some(s(ok_detail))),
+    ])
+}
+
+fn limit_of(value: Option<&JsValue>, default: usize, max: usize) -> usize {
+    match value {
+        Some(JsValue::Num(n)) if *n >= 1.0 && n.fract() == 0.0 => (*n as usize).min(max),
+        _ => default,
+    }
+}
+
+/// 문서에서 GET 연산의 요청을 만들어 보내고 알림을 모은다. 콜백의 일반 실패(`Stop::Message`)는 알림("확인하지 못함")이 되고,
+/// 콜백이 응답하지 않거나 알아볼 수 없는 모양이면(`Stop::Fail`) 다른 확인처럼 검사 전체의 실패다
+async fn run_property_check(hook: &Hook, config: &JsValue) -> Res<JsValue> {
+    let service = text_field(config, "service")?;
+    let extract = text_field(config, "extract")?;
+    let unchecked = |why: &str| property_note(&service, format!("속성 시험(알림): 확인하지 못함 — {why}"));
+    let limits = property::Limits {
+        max_operations: limit_of(config.prop("maxOperations"), property::DEFAULT_MAX_OPERATIONS, property::MAX_OPERATIONS),
+        max_requests: limit_of(config.prop("maxRequests"), property::DEFAULT_MAX_REQUESTS, property::MAX_REQUESTS),
+        seed: match config.prop("seed") {
+            Some(JsValue::Num(n)) if *n >= 0.0 && n.fract() == 0.0 => *n as u64,
+            _ => property::DEFAULT_SEED,
+        },
+    };
+    let timeout_ms = match config.prop("timeoutMs") {
+        Some(JsValue::Num(n)) if *n >= 0.0 && n.fract() == 0.0 => (*n as u64).min(PROPERTY_MAX_TIMEOUT_MS),
+        _ => PROPERTY_DEFAULT_TIMEOUT_MS,
+    };
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+
+    let base = match request_op(hook, req("declaredEndpoint", vec![("service", s(service.clone()))])).await {
+        Ok(value) => text_field(&value, "url")?,
+        Err(Stop::Fail(fail)) => return Err(fail),
+        Err(Stop::Message(message)) => return Ok(unchecked(&format!("서비스 주소를 얻지 못했습니다({})", first_line(&message)))),
+    };
+    // 출처 제한: 확인하는 해석과 요청하는 해석이 같은 값(href)에서 나온다. 경로가 서비스 밖을 가리키면 요청하지 않는다
+    let resolve = |path: String| req("declaredResolveUrl", vec![("base", s(base.clone())), ("path", s(path))]);
+    let same_origin_href = |value: &JsValue| -> Res<Option<String>> {
+        let href = text_field(value, "href")?;
+        Ok(matches!(value.prop("sameOrigin"), Some(JsValue::Bool(true))).then_some(href))
+    };
+    let doc_href = match request_op(hook, resolve(extract.clone())).await {
+        Ok(value) => same_origin_href(&value)?,
+        Err(Stop::Fail(fail)) => return Err(fail),
+        Err(Stop::Message(message)) => return Ok(unchecked(&format!("문서 주소를 만들지 못했습니다({})", first_line(&message)))),
+    };
+    let Some(doc_href) = doc_href else { return Ok(unchecked("문서 경로가 서비스 밖을 가리켜 요청하지 않았습니다")) };
+    let json_headers = || JsValue::Obj({
+        let mut headers = js_json::JsObject::new();
+        headers.set("accept", s("application/json"));
+        headers
+    });
+    let get = |href: String| req("declaredRequest", vec![("href", s(href)), ("method", s("GET")), ("headers", json_headers())]);
+    let document = match request_op(hook, get(doc_href)).await.and_then(|value| response_of(&value)) {
+        // 크기는 파싱하기 전에 본다(문서는 에이전트가 고칠 수 있는 서비스 코드에서 나온다)
+        Ok((status, text)) if status == 200.0 && text.len() > property::MAX_DOC_BYTES => return Ok(unchecked(&format!("문서가 큼({}바이트 초과)", property::MAX_DOC_BYTES))),
+        Ok((status, text)) if status == 200.0 => match js_json::parse(&text) {
+            Ok(document) => document,
+            Err(_) => return Ok(unchecked("OpenAPI 문서가 JSON이 아닙니다")),
+        },
+        Ok((status, _)) => return Ok(unchecked(&format!("OpenAPI 문서를 받지 못했습니다(HTTP {})", num(status)))),
+        Err(Stop::Fail(fail)) => return Err(fail),
+        Err(Stop::Message(message)) => return Ok(unchecked(&format!("OpenAPI 문서를 받지 못했습니다({})", first_line(&message)))),
+    };
+
+    let mut planned = property::plan(&document, &limits);
+    let mut tally = property::Tally::default();
+    let mut stopped: Option<String> = None;
+    let mut consecutive_failures = 0usize;
+    let requests = std::mem::take(&mut planned.requests);
+    let mut sent_requests = Vec::new();
+    for request in requests {
+        if Instant::now() >= deadline {
+            stopped = Some(format!("시간 상한 {timeout_ms}ms"));
+            break;
+        }
+        let href = match request_op(hook, resolve(request.target.clone())).await {
+            Ok(value) => same_origin_href(&value)?,
+            Err(Stop::Fail(fail)) => return Err(fail),
+            Err(Stop::Message(message)) => {
+                planned.skipped.push(property::Skip { label: request.label.clone(), reason: format!("주소를 만들지 못함({})", first_line(&message)) });
+                continue;
+            }
+        };
+        let Some(href) = href else {
+            planned.skipped.push(property::Skip { label: request.label.clone(), reason: "서비스 밖을 가리키는 경로".to_owned() });
+            continue;
+        };
+        match request_op(hook, get(href)).await.and_then(|value| response_of(&value)) {
+            Ok((status, text)) => {
+                consecutive_failures = 0;
+                tally.record(&document, &request, status, &text);
+            }
+            Err(Stop::Fail(fail)) => return Err(fail),
+            Err(Stop::Message(message)) => {
+                tally.record_failure(&request, &message);
+                consecutive_failures += 1;
+                if consecutive_failures >= PROPERTY_MAX_CONSECUTIVE_FAILURES {
+                    stopped = Some(format!("연속 요청 실패 {consecutive_failures}건으로 멈춤"));
+                    sent_requests.push(request);
+                    break;
+                }
+            }
+        }
+        sent_requests.push(request);
+    }
+    planned.requests = sent_requests;
+    let text = tally.report(&planned, &limits, stopped.as_deref());
+    // 알림 글에 응답 값은 싣지 않지만, 실패 사유(오류 글)가 값을 담을 수 있어 다른 확인처럼 가린다
+    let detail = match redact_soft(hook, &enc(&text)).await? {
+        Ok(redacted) => redacted,
+        Err((message, _)) => message,
+    };
+    Ok(property_note(&service, detail))
+}
+
+fn first_line(message: &str) -> String {
+    message.lines().next().unwrap_or("").to_owned()
+}
+
 // ── 테스트 보고서 비우기 ─────────────────────────────────────────────────
 
 /// `#clearTestReports`. 서비스마다 한 번(처음 나온 순서), 모두 먼저 시작한다. 실패는 삼킨다 — 테스트 판정은 종료 코드로 하고 보고서는 근거로만 쓴다
@@ -792,7 +935,7 @@ pub(crate) async fn run(hook: &Hook) -> Res<Declared> {
         call_done(hook, req("declaredAutoReady", vec![("pages", pages)])).await?;
     }
     let plan = read_plan(&begin, auto)?;
-    if plan.pages.is_empty() && plan.tests.is_empty() && plan.concurrency.is_empty() && plan.loads.is_empty() && plan.auto_names.is_empty() && plan.auto_skipped.is_empty() {
+    if plan.pages.is_empty() && plan.tests.is_empty() && plan.concurrency.is_empty() && plan.loads.is_empty() && plan.property.is_empty() && plan.auto_names.is_empty() && plan.auto_skipped.is_empty() {
         return Ok(Declared { checks: Vec::new(), load_failure: None });
     }
 
@@ -888,6 +1031,10 @@ pub(crate) async fn run(hook: &Hook) -> Res<Declared> {
     // 건너뛴 라우트도 check로 남긴다(ok). 조용히 사라지면 "확인했다"처럼 보인다
     checks.extend(load_checks);
     checks.extend(ctx.plan.auto_skipped.iter().cloned());
+    // 속성 시험은 알림만 남긴다(ok: true). 어떤 결과도 통과·실패 판정을 바꾸지 않는다. 다른 확인이 모두 끝난 뒤에 하나씩 돌린다
+    for config in &ctx.plan.property {
+        checks.push(run_property_check(hook, config).await?);
+    }
     Ok(Declared { checks, load_failure })
 }
 
@@ -1290,6 +1437,140 @@ mod tests {
         let base = concurrency_reply("", &[201]);
         let reply = Box::new(move |op: &str, request: &JsValue| if op == "declaredRequest" { Some(r#"{"ok":true,"status":"201","text":"{}"}"#.to_owned()) } else { base(op, request) });
         assert_eq!(run_sync(hook(fresh(), 0, reply)).err(), Some(Fail::Hook));
+    }
+
+    // ── 속성 시험(알림 전용) ────────────────────────────────────────────
+
+    const PROP_DOC: &str = r#"{"openapi":"3.0.0","paths":{"/pets/{id}":{"get":{"parameters":[{"name":"id","in":"path","required":true,"schema":{"type":"integer","minimum":1,"maximum":1000}}],"responses":{"200":{"content":{"application/json":{"schema":{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}}}}}}}}}"#;
+
+    fn property_plan(config: &str) -> String {
+        format!(r#"{{"ok":true,"pages":[],"tests":[],"concurrency":[],"loads":[],"auto":null,"property":[{config}]}}"#)
+    }
+
+    /// 문서 요청(/openapi.json)에는 `PROP_DOC`을, 그 밖의 요청에는 `statuses`를 차례로 돌려주는 가짜 서비스
+    fn property_reply(config: &str, statuses: &'static [(u32, &'static str)]) -> Reply {
+        let base = with_items(basic(property_plan(config)), 0);
+        let index = Arc::new(AtomicUsize::new(0));
+        Box::new(move |op, request| match op {
+            "declaredEndpoint" => Some(r#"{"ok":true,"url":"http://127.0.0.1:1"}"#.to_owned()),
+            // 가리지 않고 그대로 돌려준다(글을 확인하려고)
+            "declaredRedact" => Some(format!(r#"{{"ok":true,"text":{}}}"#, js_json::stringify(request.prop("text").unwrap_or(&JsValue::Null)))),
+            "declaredResolveUrl" => {
+                let path = request.prop("path").and_then(JsValue::as_str).unwrap_or("");
+                let same = !path.starts_with("//");
+                Some(format!(r#"{{"ok":true,"href":"http://127.0.0.1:1{path}","sameOrigin":{same}}}"#))
+            }
+            "declaredRequest" => {
+                let href = request.prop("href").and_then(JsValue::as_str).unwrap_or("");
+                if href.ends_with("/openapi.json") {
+                    return Some(format!(r#"{{"ok":true,"status":200,"text":{}}}"#, js_json::stringify(&JsValue::Str(PROP_DOC.to_owned()))));
+                }
+                let (status, text) = statuses[index.fetch_add(1, Ordering::SeqCst) % statuses.len()];
+                Some(format!(r#"{{"ok":true,"status":{status},"text":{}}}"#, js_json::stringify(&JsValue::Str(text.to_owned()))))
+            }
+            _ => base(op, request),
+        })
+    }
+
+    fn detail_of_first(declared: &Declared) -> String {
+        declared.checks[0].prop("detail").and_then(JsValue::as_str).unwrap_or("").to_owned()
+    }
+
+    #[test]
+    fn 속성_시험은_오백대와_형_위반을_알림으로_남기고_판정은_통과로_둔다() {
+        let log = fresh();
+        let config = r#"{"service":"api","extract":"/openapi.json","seed":3}"#;
+        let declared = run_sync(hook(log.clone(), 0, property_reply(config, &[(500, "boom"), (200, r#"{"name": 5}"#), (200, r#"{"name":"tom"}"#)]))).ok().unwrap();
+        assert_eq!(declared.checks.len(), 1);
+        let check = &declared.checks[0];
+        assert_eq!(check.prop("stage").and_then(JsValue::as_str), Some("contract_check"));
+        assert_eq!(check.prop("name").and_then(JsValue::as_str), Some("property-check: api"));
+        assert_eq!(check.prop("ok"), Some(&JsValue::Bool(true)), "알림은 판정을 바꾸지 않는다");
+        let detail = detail_of_first(&declared);
+        assert!(detail.contains("5xx 응답: GET /pets/{id} → 500"), "{detail}");
+        assert!(detail.contains("$.name: string이어야 하는데 number입니다"), "{detail}");
+        assert!(detail.contains("시드 3"), "{detail}");
+        assert!(declared.load_failure.is_none());
+    }
+
+    #[test]
+    fn 속성_시험은_요청_수_상한에서_멈추고_상한을_알린다() {
+        let log = fresh();
+        let config = r#"{"service":"api","extract":"/openapi.json","maxRequests":2}"#;
+        let declared = run_sync(hook(log.clone(), 0, property_reply(config, &[(200, r#"{"name":"a"}"#)]))).ok().unwrap();
+        let sent = calls(&log).iter().filter(|call| call.starts_with("declaredRequest")).count();
+        assert_eq!(sent, 1 + 2, "문서 1건 + 요청 2건");
+        assert!(detail_of_first(&declared).contains("요청 수 상한 2건"), "{}", detail_of_first(&declared));
+    }
+
+    #[test]
+    fn 속성_시험은_시간_상한에_걸리면_멈추고_알린다() {
+        let config = r#"{"service":"api","extract":"/openapi.json","timeoutMs":0}"#;
+        let declared = run_sync(hook(fresh(), 0, property_reply(config, &[(200, r#"{"name":"a"}"#)]))).ok().unwrap();
+        assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
+        assert!(detail_of_first(&declared).contains("끝까지 보지 못함(상한): 시간 상한"), "{}", detail_of_first(&declared));
+    }
+
+    #[test]
+    fn 속성_시험은_문서를_받지_못하면_확인하지_못함으로_남기고_요청을_보내지_않는다() {
+        let log = fresh();
+        let base = property_reply(r#"{"service":"api","extract":"/openapi.json"}"#, &[(200, "{}")]);
+        let broken = Box::new(move |op: &str, request: &JsValue| if op == "declaredRequest" { Some(r#"{"ok":true,"status":404,"text":""}"#.to_owned()) } else { base(op, request) });
+        let declared = run_sync(hook(log.clone(), 0, broken)).ok().unwrap();
+        assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
+        assert!(detail_of_first(&declared).contains("확인하지 못함"), "{}", detail_of_first(&declared));
+        assert_eq!(calls(&log).iter().filter(|call| call.starts_with("declaredRequest")).count(), 1);
+    }
+
+    #[test]
+    fn 속성_시험은_크기_상한을_넘는_문서를_파싱하지_않고_확인하지_못함으로_남긴다() {
+        let log = fresh();
+        let base = property_reply(r#"{"service":"api","extract":"/openapi.json"}"#, &[(200, "{}")]);
+        let huge = format!(r#"{{"openapi":"3.0.0","paths":{{}},"x":"{}"}}"#, "a".repeat(property::MAX_DOC_BYTES));
+        let big = Box::new(move |op: &str, request: &JsValue| {
+            let href = request.prop("href").and_then(JsValue::as_str).unwrap_or("");
+            if op == "declaredRequest" && href.ends_with("/openapi.json") {
+                return Some(format!(r#"{{"ok":true,"status":200,"text":{}}}"#, js_json::stringify(&JsValue::Str(huge.clone()))));
+            }
+            base(op, request)
+        });
+        let declared = run_sync(hook(log.clone(), 0, big)).ok().unwrap();
+        assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
+        assert!(detail_of_first(&declared).contains("확인하지 못함") && detail_of_first(&declared).contains("문서가 큼"), "{}", detail_of_first(&declared));
+        assert_eq!(calls(&log).iter().filter(|call| call.starts_with("declaredRequest")).count(), 1);
+    }
+
+    #[test]
+    fn 속성_시험은_서비스_밖을_가리키는_문서_경로로는_요청하지_않는다() {
+        let log = fresh();
+        let declared = run_sync(hook(log.clone(), 0, property_reply(r#"{"service":"api","extract":"//evil.example/openapi.json"}"#, &[(200, "{}")]))).ok().unwrap();
+        assert!(detail_of_first(&declared).contains("확인하지 못함"), "{}", detail_of_first(&declared));
+        assert!(!calls(&log).iter().any(|call| call.starts_with("declaredRequest")));
+    }
+
+    #[test]
+    fn 속성_시험_선언이_없으면_아무_요청도_보내지_않는다() {
+        let log = fresh();
+        let declared = run_sync(hook(log.clone(), 0, basic(property_plan("")))).ok().unwrap();
+        assert!(declared.checks.is_empty());
+        assert!(!calls(&log).iter().any(|call| call.starts_with("declaredRequest") || call.starts_with("declaredEndpoint")));
+    }
+
+    #[test]
+    fn 속성_시험은_연속_요청_실패에서_멈춘다() {
+        let log = fresh();
+        let base = property_reply(r#"{"service":"api","extract":"/openapi.json"}"#, &[(200, "{}")]);
+        let dead = Box::new(move |op: &str, request: &JsValue| {
+            let href = request.prop("href").and_then(JsValue::as_str).unwrap_or("");
+            if op == "declaredRequest" && !href.ends_with("/openapi.json") {
+                return Some(r#"{"ok":false,"error":{"message":"connect ECONNREFUSED"}}"#.to_owned());
+            }
+            base(op, request)
+        });
+        let declared = run_sync(hook(log.clone(), 0, dead)).ok().unwrap();
+        let detail = detail_of_first(&declared);
+        assert!(detail.contains("요청 실패") && detail.contains("연속 요청 실패"), "{detail}");
+        assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
     }
 
     fn load_case() -> String {

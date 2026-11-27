@@ -10,6 +10,7 @@ import {
   geminiConfigRefusal,
   geminiUserAuthType,
   geminiVersionRefusal,
+  openCodeConfigRefusal,
   defaultAgentGatewayRoot,
   ensureAgentContainer,
   expectedHostGatewayFiles,
@@ -43,7 +44,7 @@ import {
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
-import { commandCodeTerminalReason, geminiTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { commandCodeTerminalReason, geminiTerminalReason, openCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
 import { DraftKeeper, readDraftFile, settleDraftStops, writeDraftFile } from './session-terminal-draft';
 import { draftSealFor } from './session-terminal-draft-key';
 import { armModClock, disarmModClock } from './session-terminal-mod';
@@ -84,24 +85,35 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 
 /**
  * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다.
- * Command Code는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다(ADR-233). Gemini도 같다(ADR-242)
+ * Command Code(ADR-233)와 OpenCode(ADR-241)는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다. Gemini도 같다(ADR-242)
  * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex·api가 아니면 claude를 띄운다 — 컨테이너 방식 codex·api를 받으면 엉뚱한 CLI가 뜬다).
  * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
  */
 export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
   if (backend === 'commandcode') return commandCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
   if (backend === 'gemini') return geminiTerminalReason(sessionTerminalMode(env), env) === undefined;
+  if (backend === 'opencode') return openCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
   return backend === 'claude-code' || ((backend === 'codex' || backend === 'api') && sessionTerminalMode(env) === 'host');
 }
 
 /**
- * AI 리뷰의 고침을 어디서 돌릴까. 세션 터미널을 쓸 수 있고(allowed) 그 백엔드의 터미널 CLI가 있으면 터미널, 아니면 채팅식이다.
- * api는 자체 CLI의 키가 서버 환경에 있을 때만 터미널이다(키가 없으면 터미널이 열리지 않는다, ADR-226)
+ * AI 리뷰의 고침을 세션 터미널로 보낼 수 없는 까닭. 보낼 수 있으면 undefined다(막는 쪽: 모르는 입력은 까닭을 돌려준다).
+ * 채팅식으로 돌아가지 않는다(ADR-221): 까닭을 돌려주면 호출한 쪽이 고침 실패로 닫는다.
+ * 세션 터미널을 쓸 수 있어야 하고(allowed) 그 백엔드의 터미널 CLI가 있어야 한다. api는 자체 CLI의 키·모델이 정해졌을 때만이다(ADR-226)
  */
-export function reviewFixRunner(input: { allowed: boolean; backend: string; apiKeyReady: boolean }, env: Record<string, string | undefined> = process.env): 'terminal' | 'chat' {
-  if (!input.allowed || !isTerminalRunnableBackend(input.backend, env)) return 'chat';
-  if (input.backend === 'api' && !input.apiKeyReady) return 'chat';
-  return 'terminal';
+export function reviewFixBlockReason(
+  input: { allowed: boolean; backend: string; apiKeyReady: boolean; apiKeyError?: string },
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  if (!input.allowed) return '이 서버에서는 세션 터미널을 쓸 수 없어 AI 리뷰의 고침을 보낼 곳이 없습니다(개인 PC 모드가 필요하고, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도 필요합니다)';
+  if (!isTerminalRunnableBackend(input.backend, env)) {
+    if (input.backend === 'api' || input.backend === 'codex') return `컨테이너 방식 터미널은 ${input.backend} 세션을 띄우지 못해 AI 리뷰의 고침을 보낼 수 없습니다`;
+    return `${input.backend} 세션은 이 서버의 터미널에서 띄울 수 없어 AI 리뷰의 고침을 보낼 수 없습니다`;
+  }
+  if (input.backend === 'api' && !input.apiKeyReady) {
+    return `API 세션의 자체 CLI가 쓸 키·모델을 정하지 못해 터미널이 열리지 않아 AI 리뷰의 고침을 보낼 수 없습니다${input.apiKeyError ? `: ${input.apiKeyError}` : ' (키를 확인하세요)'}`;
+  }
+  return undefined;
 }
 
 export type TerminalMessage =
@@ -345,6 +357,7 @@ const HOST_BACKEND: TerminalBackend = {
     // Command Code는 기본 계정만 쓴다. 다른 계정을 고른 세션을 기본 계정으로 조용히 띄우지 않는다
     if (target.cli === 'commandcode' && configDir) throw new StudioError(409, 'Command Code 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
     if (target.cli === 'gemini' && configDir) throw new StudioError(409, 'Gemini 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
+    if (target.cli === 'opencode' && configDir) throw new StudioError(409, 'OpenCode 터미널은 기본 계정만 씁니다. 세션의 AI 계정을 기본으로 바꾸세요');
     let cli: HostCli;
     if (self) {
       // cliPath는 관문 폴더를 안 뒤에 실행기 경로로 정해진다(hostCliPath). 감시는 그 경로를 CLI의 이름으로 본다
@@ -385,6 +398,7 @@ const HOST_BACKEND: TerminalBackend = {
   acceptsResume: true,
   // Command Code는 설정(`mods.disableAll`·`mods.disabled`)이 `--mod`로 준 mod를 끌 수 있고 작업 폴더·사용자 설정과 mods 폴더가 다른 mod를 붙일 수 있다.
   // 터미널 환경이 CLI에 내려주는 HOME으로 같은 자리를 읽는다. 읽다 던지면 열지 않는다(통과로 읽지 않는다)
+  // OpenCode(ADR-241)는 설정 어디에서든 다른 플러그인이 붙으면 우리 훅 뒤에 도구 입력을 바꿔 쓸 수 있다. 같은 자리에서 전역·작업 폴더·`.opencode`·관리형 설정과 플러그인 폴더를 읽는다
   preflight: async (target) => {
     // Gemini(ADR-242): 훅이 있는 판인지, 설정이 우리 훅을 끄거나 다른 훅을 더하지 않는지. 확인하지 못하면 열지 않는다
     if (target.cli === 'gemini') {
@@ -400,6 +414,13 @@ const HOST_BACKEND: TerminalBackend = {
         }
       } catch (error) {
         return `Gemini의 판과 설정을 확인하지 못해 터미널을 열지 않았습니다: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    }
+    if (target.cli === 'opencode') {
+      try {
+        return await openCodeConfigRefusal({ cwd: target.root, home: process.env.HOME ?? process.env.USERPROFILE, xdgConfigHome: process.env.XDG_CONFIG_HOME });
+      } catch (error) {
+        return `OpenCode의 설정을 확인하지 못해 터미널을 열지 않았습니다: ${error instanceof Error ? error.message : String(error)}`;
       }
     }
     if ((target.cli ?? 'claude') !== 'commandcode') return undefined;
@@ -716,8 +737,8 @@ export async function openSessionTerminal(
       }
       // Command Code는 mod가 불러와져야 훅이 있다. 설정이 mod를 끈 채로 CLI가 도는 경우(검사 뒤에 설정이 바뀌었다, 셸로 쓴 설정)는
       // 신호(session-start)가 오지 않는 것으로만 보인다. 시간 안에 오지 않으면 훅 없이 뜬 것으로 보고 감시가 찾은 위반과 같은 길로 처리한 뒤 터미널을 닫는다
-      // Gemini도 같다: 설정의 훅이 불러와져야 훅이 있다(ADR-242). 믿지 않는 폴더면 설정 훅이 하나도 등록되지 않는다
-      if (target.cli === 'commandcode' || target.cli === 'gemini') {
+      // Gemini(ADR-242)·OpenCode(ADR-241)도 같다: 설정의 훅·플러그인이 불러와져야 훅이 있다. 믿지 않는 폴더면 Gemini의 설정 훅이 하나도 등록되지 않는다
+      if (target.cli === 'commandcode' || target.cli === 'gemini' || target.cli === 'opencode') {
         armModClock(
           sessionId,
           (reason) => {
@@ -787,6 +808,15 @@ export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean;
   return state
     ? { cliAlive: state.cli, ...(state.startPendingSince !== undefined ? { startPendingSince: state.startPendingSince } : {}), ...(state.draftLeftover !== undefined ? { draft: state.draftLeftover } : {}) }
     : undefined;
+}
+
+/**
+ * 그 세션 터미널의 Claude 입력창이 지금 화면에서 보이고 비어 있는가(정체 재촉의 확인, ADR-239). 화면을 유지하는 터미널(이 컴퓨터 방식의 claude)만 읽을 수 있다 —
+ * 터미널이 없거나 화면을 유지하지 않거나(다른 CLI·자체 CLI·컨테이너 방식) 입력창 모양이 보이지 않으면(권한·질문 창) `unknown`이다. 모르면 보내지 않는다
+ */
+export async function sessionTerminalInputState(sessionId: string): Promise<'empty' | 'typed' | 'unknown'> {
+  const keeper = terminals.get(sessionId)?.draft;
+  return keeper ? keeper.inputState() : 'unknown';
 }
 
 /**

@@ -97,7 +97,7 @@ vi.mock('./session-terminal', () => ({
 
 import { StudioError } from './errors';
 import { registerWatch, unregisterWatch } from './session-terminal-watch';
-import { applyServerChanges, createSession, getSnapshot, openTerminalRunId, sessionTerminalTarget, setTerminalCheckChanges, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { applyServerChanges, createSession, seedServerChanges, getSnapshot, openTerminalRunId, sessionTerminalTarget, setTerminalCheckChanges, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR };
 
@@ -499,4 +499,59 @@ describe('applyServerChanges: 서버가 쓴 레인 결과를 터미널 턴 끝�
       expect(getSnapshot(session.id)!.allowCheckChangesNext).toBe(true);
     }, 60_000);
   });
+});
+
+describe('seedServerChanges: S4 수리 전에 레인 결과를 확정하지 않은 변경으로 다시 쓴다', () => {
+  const seed = (session: Opened, input: Partial<Parameters<typeof seedServerChanges>[1]> = {}) => seedServerChanges(session.id, { writes: [GOOD], deletes: [], writableScope: ['api'], ...input });
+
+  it('범위 안 파일을 작업 폴더에 쓰되 체크포인트는 만들지 않고(게이트를 통과한 것으로 남지 않는다), 쓰기 범위 맥락과 표를 풀어 그 뒤 판정이 돈다', async () => {
+    const session = await open();
+    const before = getSnapshot(session.id)!.checkpoints.length;
+    await seed(session);
+    expect(await read(session, 'api/src/Order.java')).toBe(CHANGED);
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
+    expect(gradleTests()).toBe(0);
+    // 쓴 변경은 다음 서버 실행(터미널 턴 끝과 같은 판정)이 실행 전부터 있던 변경으로 검증해 체크포인트로 남긴다
+    expect(await apply(session, { writes: [], deletes: [] })).toMatchObject({ status: 'done' });
+    expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before + 1);
+    expect(getSnapshot(session.id)!.checkpoints[0]!.files).toContain('api/src/Order.java');
+  }, 30_000);
+
+  it('범위 밖·숨긴 이름·절대 경로·중복 경로는 하나도 쓰지 않고 거절한다', async () => {
+    const session = await open();
+    for (const bad of [{ path: 'web/x.txt', content: 'x' }, { path: '.git/config', content: 'x' }, { path: '/etc/x', content: 'x' }, { path: '../x', content: 'x' }]) {
+      await expect(seed(session, { writes: [GOOD, bad] })).rejects.toBeInstanceOf(StudioError);
+      expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
+    }
+    await expect(seed(session, { writes: [GOOD, { path: 'API/src/order.java', content: 'x' }] })).rejects.toBeInstanceOf(StudioError);
+    expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
+  }, 30_000);
+
+  it('작업 폴더에서 기준을 읽는 파일은 시드하지 않는다: studio.yaml(선언), 보호 경로, 평가 자산(거부 목록이라 대소문자·정규화가 달라도 걸린다)', async () => {
+    await writeFile(path.join(fake.root, 'studio.yaml'), STUDIO_YAML.replace('workflow:\n', 'workflow:\n  protectedPaths: [api/secret]\n  evaluationAssets: [api/src/test]\n'));
+    await mkdir(path.join(fake.root, 'api/secret'), { recursive: true });
+    await mkdir(path.join(fake.root, 'api/src/test'), { recursive: true });
+    await writeFile(path.join(fake.root, 'api/secret/key.txt'), 'k\n');
+    await writeFile(path.join(fake.root, 'api/src/test/OrderTest.java'), 'class OrderTest {}\n');
+    const session = await open();
+    const scope = ['api', 'studio.yaml'];
+    for (const file of ['studio.yaml', 'STUDIO.yaml', 'api/secret/key.txt', 'API/Secret/key.txt', 'api/src/test/OrderTest.java', 'api/src/test/New.java']) {
+      await expect(seed(session, { writes: [GOOD, { path: file, content: 'x' }], writableScope: scope }), file).rejects.toBeInstanceOf(StudioError);
+    }
+    await expect(seed(session, { writes: [GOOD], deletes: ['api/src/test/OrderTest.java'], writableScope: scope })).rejects.toBeInstanceOf(StudioError);
+    // 하나도 쓰지 않았다
+    expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
+    expect(await read(session, 'studio.yaml')).toContain('evaluationAssets');
+    expect(await read(session, 'api/src/test/OrderTest.java')).toBe('class OrderTest {}\n');
+  }, 30_000);
+
+  it('멈춘 세션·컨테이너 방식은 받지 않는다', async () => {
+    const stopped = await open();
+    await stopSession(stopped.id);
+    await expect(seed(stopped)).rejects.toBeInstanceOf(StudioError);
+    const session = await open();
+    fake.terminalMode = 'container';
+    await expect(seed(session)).rejects.toBeInstanceOf(StudioError);
+    expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
+  }, 30_000);
 });

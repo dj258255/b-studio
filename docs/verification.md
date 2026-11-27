@@ -150,8 +150,8 @@ pnpm e2e:two-sessions
 pnpm test
 pnpm typecheck
 pnpm e2e:agent
-pnpm e2e:fleet
-pnpm e2e:task-plan
+pnpm e2e:fleet-terminal
+pnpm e2e:task-plan-terminal
 pnpm e2e:two-sessions
 pnpm bench:boot examples/orders 3
 pnpm bench:studio-load
