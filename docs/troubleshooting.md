@@ -8640,3 +8640,20 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - Codex 훅 명령 글이 바뀌어 Codex가 처음 한 번 훅을 다시 믿으라고 물을 수 있다. Windows는 이 컴퓨터 방식 터미널이 없어 바꾸지 않았다.
 - 고치기 전 실패: 새 시험 10건(훅 환경이 비어 있지 않음·NODE_OPTIONS 코드가 돎·명령 모양·목록). `env -i`를 지우는 변이로 Rust·TS 시험이 다시 실패함을 확인했다.
 - 감싸개가 `NODE_OPTIONS` 등을 지우는 것(Gemini)은 claude·codex·opencode에는 적용하지 않았다: 훅은 `env -i`로 막혔고, CLI 자체의 `NODE_OPTIONS`는 사용자의 정당한 설정(메모리 상한)일 수 있다. `BASH_ENV`처럼 훅 셸이 먼저 읽는 변수는 `env -i`가 막지 못하지만 Claude·Codex가 어느 셸로 훅을 돌리는지 실행으로 확인하지 못했다.
+
+## 313. Bun으로 컴파일된 opencode가 작업 폴더의 `.env`와 `bunfig.toml`을 시작할 때 읽을 수 있는데 보지 않았다
+
+### 증상
+
+- 감싸개가 `OPENCODE_*` 환경 변수를 지워도, 작업 폴더의 `.env`가 `OPENCODE_CONFIG_CONTENT`·`OPENCODE_PERMISSION`·`NODE_OPTIONS` 등을 정하면 CLI가 시작하며 환경에 넣을 수 있다(#1475). 감시는 시작 때의 환경만 읽어 이것을 보지 못한다. `bunfig.toml`의 `preload`는 코드를 실행한다. 실행해 확인하지는 않았다.
+
+### 원인
+
+- 바이너리에 `Bun v1.3.14`가 들어 있고 그 판의 `bun build --compile` 도움말이 `--compile-autoload-dotenv`·`--compile-autoload-bunfig`를 `default: true`로 적는다. opencode가 껐는지는 바이너리 문자열로 알 수 없다. 모르면 막힌 쪽으로 본다.
+
+### 해결
+
+- 띄우기 전 검사가 작업 폴더의 `.env*`와 `bunfig.toml`을 본다(ADR-241 덧붙임). 거절 열쇠는 `OPENCODE_*`·`BUN_*`와 Gemini와 공통인 코드 적재 변수 목록이다(`env-risk.ts`로 묶었다).
+- 도구로 이 파일들을 쓰는 것은 쓰기 직전에 막는다(셸 쓰기는 못 막는다).
+- 고치기 전 실패: `opencode-env-files.test.ts` 11건. 변이(거절 한 줄과 쓰기 막기를 끔)로 다시 실패함을 확인했다.
+- 하지 않은 것: 실제 opencode로 자동 적재를 확인하지 않았다. 위쪽 폴더의 `.env`는 Bun이 읽지 않는 것으로 보고 보지 않는다(확인하지 못함).

@@ -1,6 +1,7 @@
-import { access, readdir, readFile, realpath, stat } from 'node:fs/promises';
+import { access, lstat, readdir, readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { envCodeLoadKey, envRiskKeyIn } from './env-risk';
 import { OPENCODE_PLUGIN_NAME } from './opencode-plugin';
 
 /**
@@ -177,12 +178,63 @@ async function pluginDirRefusal(dir: string): Promise<Refusal> {
   return undefined;
 }
 
+/** Bun이 시작할 때 읽는 파일의 크기 상한. 넘으면 읽지 않고 거절한다(에이전트가 쓸 수 있는 자리라 상한이 없으면 읽는 쪽을 멈출 수 있다) */
+const MAX_STARTUP_FILE_BYTES = 1024 * 1024;
+/** Bun의 `.env` 계열(`.env`·`.env.local`·`.env.<NODE_ENV>`·`.env.<NODE_ENV>.local`). 읽는 쪽은 이름을 넓게 맞춘다(`NODE_ENV`가 무엇이든 `.env.<이름>`을 읽는다) */
+const BUN_ENV_FILE = /^\.env(\..*)?$/u;
+/** 쓰기를 막는 `.env` 이름(명시한 목록). 거부 목록이라 하위 폴더와 `.env.example` 같은 이름은 막지 않는다 */
+const BUN_ENV_WRITE_NAMES: ReadonlySet<string> = new Set(['.env', '.env.local', '.env.development', '.env.production', '.env.test', '.env.development.local', '.env.production.local', '.env.test.local']);
+const BUNFIG_NAMES: ReadonlySet<string> = new Set(['bunfig.toml', '.bunfig.toml']);
+
+/** `.env`가 OpenCode의 설정·플러그인·권한·홈을 바꾸거나 코드를 적재·실행하게 하는 열쇠를 정하는가(`OPENCODE_`·`BUN_` 열쇠는 모두, 코드 적재 변수는 Gemini와 같은 공통 목록) */
+function startupEnvKeyRisky(key: string): boolean {
+  const upper = key.toUpperCase();
+  return upper.startsWith('OPENCODE_') || upper.startsWith('BUN_') || envCodeLoadKey(key);
+}
+
+/**
+ * OpenCode는 Bun으로 컴파일된 실행 파일이다(바이너리에 `Bun v1.3.14`). 그 판의 `bun build --compile`은 작업 폴더의 `.env` 계열과 `bunfig.toml`을 실행 파일에서 기본으로 읽는다
+ * (바이너리의 도움말 `--compile-autoload-dotenv`·`--compile-autoload-bunfig`가 둘 다 `default: true`). opencode가 껐는지는 실행 없이 알 수 없어 읽는 것으로 본다.
+ * `.env`의 값은 감싸개가 환경을 지운 뒤에 환경에 들어가고 감시도 못 보며, `bunfig.toml`의 `preload`는 코드를 실행한다. 작업 폴더만 본다(Bun은 위 폴더를 찾지 않는다).
+ * 열린 쪽은 "해당 파일이 없거나 모두 읽었고 위험한 열쇠가 없다"뿐이다: 링크·폴더·읽지 못함·너무 큼은 거절이다
+ */
+async function startupFilesRefusal(cwd: string): Promise<Refusal> {
+  let names: string[];
+  try {
+    names = await readdir(cwd);
+  } catch (error) {
+    return `작업 폴더 ${cwd}을(를) 읽지 못해 터미널을 열지 않았습니다(${(error as Error).message}). OpenCode가 시작할 때 읽는 .env·bunfig.toml을 확인할 수 없습니다`;
+  }
+  for (const name of names) {
+    const folded = fold(name);
+    const isEnv = BUN_ENV_FILE.test(folded);
+    const isBunfig = BUNFIG_NAMES.has(folded);
+    if (!isEnv && !isBunfig) continue;
+    const file = path.join(cwd, name);
+    if (isBunfig) return `${file}이(가) 있습니다. OpenCode는 시작할 때 작업 폴더의 bunfig.toml을 읽고 그 preload가 코드를 실행해 b-studio의 플러그인이 붙었는지 알 수 없어 터미널을 열지 않았습니다. 그 파일을 지우거나 옮긴 뒤 다시 여세요`;
+    let text: string;
+    try {
+      const link = await lstat(file);
+      if (!link.isFile()) return `${file}이(가) 일반 파일이 아니라(링크이거나 폴더) 읽지 않았습니다. OpenCode가 시작할 때 읽는 .env일 수 있어 터미널을 열지 않았습니다`;
+      if (link.size > MAX_STARTUP_FILE_BYTES) return `${file}이(가) 너무 커서(${link.size}바이트) 읽지 않았습니다. OpenCode의 설정을 바꾸는지 알 수 없어 터미널을 열지 않았습니다`;
+      text = await readFile(file, 'utf8');
+    } catch (error) {
+      return `${file}을(를) 읽지 못해 터미널을 열지 않았습니다(${(error as Error).message}). OpenCode의 설정을 바꾸는지 알 수 없습니다`;
+    }
+    const risky = envRiskKeyIn(text, startupEnvKeyRisky);
+    if (risky) return `${file}이(가) ${risky}을(를) 정합니다. OpenCode는 시작할 때 작업 폴더의 .env를 환경에 넣어 설정·플러그인·권한을 바꾸거나 코드를 실행할 수 있어 터미널을 열지 않았습니다. 그 줄을 지운 뒤 다시 여세요`;
+  }
+  return undefined;
+}
+
 /**
  * 터미널을 열기 전에 OpenCode가 읽을 설정이 b-studio의 플러그인 말고 다른 플러그인을 붙이지 않는지 본다. 거절하는 글을 돌려주고, 열어도 되면 undefined다.
  * 보는 자리: 전역 설정 폴더, `<HOME>/.opencode`, 작업 폴더와 그 위 모든 폴더의 `opencode.json(c)`·`tui.json(c)`와 `.opencode` 폴더, 관리형 설정 폴더.
  * (OpenCode는 `.git`이 있는 작업 트리 루트에서 위로 찾기를 멈추지만 우리는 파일 시스템 루트까지 본다: 넓게 보면 더 거절할 뿐이다)
  */
 export async function openCodeConfigRefusal(check: OpenCodeLoadCheck): Promise<Refusal> {
+  const startup = await startupFilesRefusal(check.cwd);
+  if (startup) return startup;
   const home = check.home ?? '';
   const globalDir = openCodeGlobalConfigDir(home, check.xdgConfigHome);
   const levels = ancestors(check.cwd);
@@ -225,6 +277,20 @@ export interface OpenCodeConfigWrite {
   file: string;
 }
 
+/** 작업 폴더 바로 아래의 `.env` 계열·`bunfig.toml`을 쓰는 것인가(다음에 CLI를 다시 띄우면 Bun이 읽는다). 폴더는 이름과 inode 둘 다로 견준다(링크·대소문자 무시 볼륨) */
+async function startupFileWrite(cwd: string, target: string): Promise<boolean> {
+  const name = fold(path.basename(target));
+  if (!BUN_ENV_WRITE_NAMES.has(name) && !BUNFIG_NAMES.has(name)) return false;
+  const parent = path.dirname(target);
+  if (fold(path.resolve(parent)) === fold(path.resolve(cwd))) return true;
+  try {
+    const [a, b] = await Promise.all([stat(parent), stat(cwd)]);
+    return a.dev === b.dev && a.ino === b.ino;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 그 경로의 쓰기가 OpenCode의 설정·플러그인 자리를 건드리는가. 거부 목록이라 넓게 맞춘다:
  * ① 경로 어디에든 이름이 `.opencode`인 칸이 있음(대소문자·전각·보이지 않는 글자·끝의 점과 빈칸을 접어서, `..`를 풀기 전의 글과 푼 글 둘 다)
@@ -259,6 +325,7 @@ export async function openCodeConfigPathBlocked(write: OpenCodeConfigWrite): Pro
     const absolute = path.resolve(write.cwd, candidate);
     if (nameHit(absolute.split(path.sep).filter((segment) => segment !== ''))) return true;
     if (underGlobal(absolute)) return true;
+    if (await startupFileWrite(write.cwd, absolute)) return true;
     // 이미 있는 가장 가까운 조상을 링크까지 풀고, 남은 칸을 붙인다
     let existing = absolute;
     const rest: string[] = [];
@@ -278,6 +345,7 @@ export async function openCodeConfigPathBlocked(write: OpenCodeConfigWrite): Pro
     const resolved = path.join(real, ...rest);
     if (nameHit(resolved.split(path.sep).filter((segment) => segment !== ''))) return true;
     if (underGlobal(resolved)) return true;
+    if (await startupFileWrite(write.cwd, resolved)) return true;
     // 전역 설정 폴더 자체가 링크일 수 있다: 풀린 전역 폴더 아래인가
     const realGlobal = await realpath(globalDir).catch(() => undefined);
     if (realGlobal !== undefined) {

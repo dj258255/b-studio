@@ -13023,6 +13023,9 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 
 ### 덧붙임 (#1475, 트러블슈팅 311)
 - 결정 11의 환경 변수에 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`을 더했다(근거는 1.18.33 바이너리의 평문 JS). 감싸개가 지우고(`OPENCODE_UNSET_ENVS`), 감시가 하나라도 있으면 붙지 않은 것으로 본다. 실제 opencode는 띄우지 않았다.
+- **작업 폴더의 `.env`·`bunfig.toml`**(#1475, 트러블슈팅 313): opencode는 Bun으로 컴파일된 실행 파일이다(바이너리에 `Bun v1.3.14`). 그 판의 `bun build --compile` 도움말은 `.env` 자동 적재와 `bunfig.toml` 자동 적재가 모두 기본 켜짐(`default: true`)이라고 적는다. opencode가 껐는지는 실행 없이 알 수 없어 **읽는 것으로 본다**. `.env`의 값은 감싸개가 환경을 지운 뒤에 환경에 들어가 감싸개의 `unset`과 감시가 못 막고, `bunfig.toml`의 `preload`는 코드를 실행한다.
+  - 띄우기 전 검사(`openCodeConfigRefusal`)가 작업 폴더(Bun은 위 폴더를 찾지 않는다)의 `.env`로 시작하는 파일(`.env`·`.env.local`·`.env.<이름>`·`.local`, 대소문자·전각 등을 접어서)을 읽어 `OPENCODE_`·`BUN_` 열쇠나 코드 적재·실행 경로 변수(Gemini와 같은 공통 목록 `env-risk.ts`: `NODE_*`·`LD_*`·`DYLD_*`·`PATH`·`BASH_ENV` 등)가 있으면 거절한다. 읽는 법은 Gemini와 같다(`dotenv.parse` + 줄 머리 느슨하게 읽기). 링크·폴더·읽지 못함·1MiB 초과(읽기 전에 크기를 본다)는 거절, `bunfig.toml`·`.bunfig.toml`이 있으면 거절이다.
+  - 세션 중의 쓰기: 이어서 하기(`--session`)로 터미널을 다시 열 때도 같은 띄우기 전 검사를 지난다. 그러나 터미널의 셸에서 CLI를 다시 띄울 때는 검사가 돌지 않으므로, `edit`·`write`·패치가 작업 폴더 바로 아래의 `.env`·`.env.local`·`.env.development`·`.env.production`·`.env.test`(와 각 `.local`)·`bunfig.toml`·`.bunfig.toml`을 쓰는 것을 쓰기 직전에 막는다(`openCodeConfigPathBlocked`). 그 때문에 opencode 세션에서는 에이전트가 이 파일들을 도구로 고칠 수 없다(사람이 고친다). 셸 명령으로 쓰는 것은 막지 못한다(남은 틈).
 
 ## ADR-242 Gemini CLI 세션은 설정 훅으로 이 컴퓨터 방식 세션 터미널에서 돌리되(실험), 훅은 root 소유가 아니면 읽히지 않는 시스템 설정 대신 홈을 바꾼 사용자 설정으로 붙이고 모든 실패를 막는 쪽으로 답한다
 
