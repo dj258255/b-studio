@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import type { AgentTerminal, TerminalSize } from '@b-studio/sandbox';
+import { settleDraftStops } from './session-terminal-draft';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   closeSessionTerminal,
@@ -85,6 +86,8 @@ beforeEach(async () => {
   id = `draft-flow-${++counter}`;
 });
 afterEach(async () => {
+  // 닫는 중인 쓰다 만 글 저장이 끝난 뒤에 임시 폴더를 지운다
+  await settleDraftStops();
   delete process.env.B_STUDIO_LOCAL_TOKEN_FILE;
   await rm(dir, { recursive: true, force: true });
 });

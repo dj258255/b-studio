@@ -11,6 +11,7 @@ import {
   pasteBytes,
   readClaudeInput,
   readDraftFile,
+  settleDraftStops,
   restoreRefusal,
   sanitizePasteText,
   writeDraftFile,
@@ -266,6 +267,68 @@ function harness(options: { resumed?: boolean; echo?: boolean; first?: string[] 
   });
   return { keeper, file, written, leftovers };
 }
+
+describe('닫기와 쓰기의 경합', () => {
+  /** 쓰기를 문 앞에서 붙잡는 열쇠: open()을 부를 때까지 저장 파일을 쓰지 못한다 */
+  function gated() {
+    const file = path.join(dir, '.git', 'b-studio', 'terminal-draft.json');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    let entered!: () => void;
+    const inside = new Promise<void>((resolve) => (entered = resolve));
+    const keeper = new DraftKeeper({
+      file,
+      seal: sealFor(file),
+      size: { cols: 100, rows: 12 },
+      resumed: false,
+      write: () => {},
+      saveEveryMs: 60_000,
+      beforeWrite: async () => {
+        entered();
+        await gate;
+      },
+    });
+    return { keeper, file, release, inside };
+  }
+  const exists = (file: string) => stat(file).then(() => true, () => false);
+
+  it('닫으면 진행 중인 쓰기가 끝난 뒤에야 닫기가 끝난다(두 번째 닫기도, 지우기 전의 기다림도 마찬가지다)', async () => {
+    const { keeper, file, release, inside } = gated();
+    await keeper.start();
+    keeper.feed(Buffer.from(bytes(realScreen([`❯ ${DRAFT}`]))));
+    void keeper.saveNow(); // 쓰기가 문 앞에서 멈춘다
+    await inside;
+    let first = false;
+    let second = false;
+    let settled = false;
+    const a = keeper.stop().then(() => (first = true));
+    const b = keeper.stop().then(() => (second = true));
+    const c = settleDraftStops().then(() => (settled = true));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect([first, second, settled]).toEqual([false, false, false]);
+    expect(await exists(file)).toBe(false);
+    release();
+    await Promise.all([a, b, c]);
+    // 모두 끝난 뒤에는 폴더를 지워도 겹치는 쓰기가 없다
+    expect(await exists(file)).toBe(true);
+    await rm(path.join(dir, '.git'), { recursive: true });
+  });
+
+  it('닫은 뒤에는 새 쓰기가 시작되지 않고 타이머도 돈다는 흔적이 없다', async () => {
+    const { keeper, file, release } = gated();
+    release();
+    await keeper.start();
+    keeper.feed(Buffer.from(bytes(realScreen([`❯ ${DRAFT}`]))));
+    await keeper.stop();
+    expect(await exists(file)).toBe(true);
+    await rm(path.join(dir, '.git'), { recursive: true });
+    keeper.feed(Buffer.from(bytes(realScreen(['❯ 닫은 뒤에 온 글']))));
+    await keeper.saveNow();
+    await keeper.clearLeftover();
+    await keeper.onCliUp();
+    expect(await exists(path.join(dir, '.git'))).toBe(false);
+  });
+});
 
 describe('저장(DraftKeeper.saveNow)', () => {
   it('입력창의 글을 600 권한으로 저장하고, 비면 지운다', async () => {

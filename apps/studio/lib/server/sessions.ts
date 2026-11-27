@@ -269,6 +269,7 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
+import { settleDraftStops } from './session-terminal-draft';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -1594,6 +1595,8 @@ export async function deleteSession(id: string): Promise<void> {
 
   // 복사 모드 세션이면 claude의 폴더 신뢰 기록도 지운다(ADR-222). 폴더가 있을 때 지워야 실제 경로로 맞출 수 있어 폴더보다 먼저 한다
   await forgetFolderTrust(snapshot, home);
+  // 닫는 중인 터미널의 쓰다 만 글 저장이 끝난 뒤에 지운다(늦게 끝난 쓰기가 지운 폴더를 되살리거나 지우기와 겹치지 않게, ADR-237)
+  await settleDraftStops();
   // 내 폴더 세션이어도 사용자 폴더는 지우지 않는다: 세션 폴더(상태 폴더)만 지운다. Rust가 지우기 직전에 다시 확인한다
   await removeSessionHome(root, home, snapshot);
 }

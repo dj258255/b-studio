@@ -294,6 +294,8 @@ export interface DraftKeeperOptions {
   resumed: boolean;
   /** 보여 줄 "쓰다 만 글"이 바뀔 때(없어지면 undefined) */
   onLeftover?: (text: string | undefined) => void;
+  /** 저장 파일을 쓰기 직전에 부른다(시험이 쓰기를 늦춰 닫기와의 경합을 재현한다) */
+  beforeWrite?: () => Promise<void>;
   /** 몇 ms마다 바뀐 화면을 저장하나 */
   saveEveryMs?: number;
   /** CLI가 떴다는 신호가 오지 않으면 포기하는 시간 */
@@ -301,6 +303,14 @@ export interface DraftKeeperOptions {
   /** 입력창이 비어 보일 때까지 기다리는 시간과 확인 간격 */
   boxWaitMs?: number;
   pollMs?: number;
+}
+
+/** 닫는 중인 지킴이들의 마지막 저장. 세션 폴더를 지우기 전에 모두 끝나기를 기다린다(settleDraftStops) */
+const inflightStops = new Set<Promise<void>>();
+
+/** 닫는 중인 모든 지킴이의 마지막 저장이 끝나기를 기다린다. 세션 지우기가 폴더를 지우기 전에 부른다 */
+export async function settleDraftStops(): Promise<void> {
+  while (inflightStops.size > 0) await Promise.allSettled([...inflightStops]);
 }
 
 export type RestoreOutcome = 'none' | 'restored' | 'left';
@@ -323,6 +333,7 @@ export class DraftKeeper {
   #giveUp: NodeJS.Timeout | undefined;
   #chain: Promise<unknown> = Promise.resolve();
   #ready: Promise<void> | undefined;
+  #stopping: Promise<void> | undefined;
   #written = '';
 
   constructor(options: DraftKeeperOptions) {
@@ -353,7 +364,7 @@ export class DraftKeeper {
       }
     }
     this.#timer = setInterval(() => {
-      if (this.#dirty) void this.saveNow().catch(() => {});
+      if (this.#dirty && !this.#closing) void this.saveNow().catch(() => {});
     }, this.#options.saveEveryMs);
     this.#timer.unref();
   }
@@ -407,15 +418,35 @@ export class DraftKeeper {
     return this.#serial(() => this.#restore(text));
   }
 
-  /** 터미널이 닫히거나 끝났다. 마지막으로 한 번 저장하고 화면을 놓는다 */
-  async stop(): Promise<void> {
-    if (this.#stopped || this.#closing) return;
+  /**
+   * 터미널이 닫히거나 끝났다. 타이머를 멈추고, 마지막으로 한 번 저장하고, 진행 중이던 쓰기가 모두 끝나면 화면을 놓는다. 돌려주는 약속은 그때 끝난다.
+   * 여러 번 불려도 같은 약속을 돌려준다. 닫은 뒤에는 새 쓰기가 시작되지 않는다(주기 저장·치우기·되살리기가 모두 건너뛴다)
+   */
+  stop(): Promise<void> {
+    this.#stopping ??= this.#doStop();
+    return this.#stopping;
+  }
+
+  async #doStop(): Promise<void> {
     this.#closing = true;
     if (this.#timer) clearInterval(this.#timer);
+    this.#timer = undefined;
     if (this.#giveUp) clearTimeout(this.#giveUp);
-    await this.saveNow().catch(() => {});
-    this.#stopped = true;
-    this.#screen.dispose();
+    this.#giveUp = undefined;
+    const finished = (async () => {
+      await this.#ready?.catch(() => {});
+      await this.saveNow().catch(() => {});
+      this.#stopped = true;
+      // 앞서 줄 선 쓰기까지 모두 끝난 뒤에 놓는다
+      await this.#chain;
+      this.#screen.dispose();
+    })();
+    inflightStops.add(finished);
+    try {
+      await finished;
+    } finally {
+      inflightStops.delete(finished);
+    }
   }
 
   #serial<T>(task: () => Promise<T>): Promise<T> {
@@ -487,9 +518,12 @@ export class DraftKeeper {
   }
 
   async #persist(data: DraftFile): Promise<void> {
+    // 닫은 뒤에는 새 쓰기를 시작하지 않는다(세션 폴더가 지워지는 중일 수 있다)
+    if (this.#stopped) return;
     const serialized = JSON.stringify(data);
     this.#data = data;
     if (serialized === this.#written) return;
+    await this.#options.beforeWrite?.();
     await writeDraftFile(this.#options.file, data, this.#options.seal);
     this.#written = serialized;
   }

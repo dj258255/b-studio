@@ -38,7 +38,7 @@ import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
 import { commandCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
-import { DraftKeeper, readDraftFile, writeDraftFile } from './session-terminal-draft';
+import { DraftKeeper, readDraftFile, settleDraftStops, writeDraftFile } from './session-terminal-draft';
 import { draftSealFor } from './session-terminal-draft-key';
 import { armModClock, disarmModClock } from './session-terminal-mod';
 import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
@@ -826,7 +826,9 @@ export async function resizeSessionTerminal(sessionId: string, size: { cols?: un
 function stopDraft(state: TerminalState): void {
   const keeper = state.draft;
   state.draft = undefined;
-  void keeper?.stop().catch((error: unknown) => console.error('[b-studio] 쓰다 만 글을 저장하지 못했습니다', error instanceof Error ? error.message : String(error)));
+  if (!keeper) return;
+  // 닫는 쓰기가 끝나기를 기다리는 길은 settleDraftStops다(disposeSessionTerminal·세션 지우기가 부른다)
+  void keeper.stop().catch((error: unknown) => console.error('[b-studio] 쓰다 만 글을 저장하지 못했습니다', error instanceof Error ? error.message : String(error)));
 }
 
 /** 열려 있는 터미널의 감시를 멈춘다. 여러 번 불려도 안전하다(멈춤 함수를 한 번만 부른다) */
@@ -870,5 +872,7 @@ export async function disposeSessionTerminal(sessionId: string, sandboxId: strin
   if (state) stopWatching(state);
   closeSessionTerminal(sessionId);
   terminals.delete(sessionId);
+  // 쓰다 만 글의 마지막 저장이 끝난 뒤에 돌려준다(그 뒤에 세션 폴더가 지워질 수 있다)
+  await settleDraftStops();
   await backend.remove(sandboxId).catch(() => {});
 }
