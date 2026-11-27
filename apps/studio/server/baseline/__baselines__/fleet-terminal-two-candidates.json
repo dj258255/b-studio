@@ -404,6 +404,7 @@
             }
           }
         },
+        "model": "fake-a",
         "durationMs": "<durationMs>",
         "sessionTokens": {
           "inputTokens": 100,
@@ -958,6 +959,7 @@
               }
             }
           },
+          "model": "fake-a",
           "runId": "<run:1>",
           "sessionTokens": {
             "cacheReadTokens": 0,
