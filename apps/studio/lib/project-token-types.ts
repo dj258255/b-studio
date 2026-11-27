@@ -4,6 +4,7 @@
  * 여기 있는 문구·숫자 표기를 서버와 화면이 같이 쓰는 이유는, 화면과 내려받는 마크다운이 다른 말을 하지 않게 하기 위해서다.
  */
 import type { AgentUsage, Effort } from '@b-studio/agent';
+import type { RequestTotals } from './request-outcomes';
 
 /** 이 세션이 무엇으로 만들어졌는가. 레인·통합·플릿 멤버는 계획·플릿 기록에서 찾는다 */
 export type ProjectSessionKind = 'normal' | 'lane' | 'integration' | 'fleet';
@@ -100,6 +101,11 @@ export interface ProjectTokenReport {
   cacheHitRatio: number;
   kinds: ProjectKindTotals[];
   saved: ProjectSavedTotals;
+  /**
+   * 한 번에 끝난 요청 집계(ADR-171). 기록에 남은 사실로만 센 값이라 한 번에 끝난 수는 "많아야", 다시 손댄 수는 "적어도"다.
+   * 보여 주기만 하고 게이트·판정에는 쓰지 않는다. 세지 못했으면 없다(화면은 0이 아니라 "모름"으로 보인다)
+   */
+  requestOutcomes?: RequestTotals;
   /** 값을 만들면서 알아낸 한계·사실(마크다운에도 적는다) */
   notes: string[];
 }

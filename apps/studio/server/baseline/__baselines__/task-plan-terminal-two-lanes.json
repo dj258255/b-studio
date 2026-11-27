@@ -1276,6 +1276,8 @@
       "compose exec -T app sh -c <script:00627bf7>",
       "compose exec -T app sh -c <script:65689138>",
       "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c <script:65689138>",
+      "compose exec -T app sh -c true",
       "compose exec -T app sh -c true",
       "compose exec -T app sh -c true",
       "compose up --no-start --build --no-deps --force-recreate app",
