@@ -24,6 +24,8 @@ pub const WORKFLOW_INCOMPLETE_TRAILER: &str = "Workflow-Incomplete";
 /// 게이트가 남긴 영향 범위 기록(계약 차이·허용한 확인 선언 변경)을 담는 트레일러. 값은 한 줄 JSON이다
 pub const WORKFLOW_IMPACT_TRAILER: &str = "Workflow-Impact";
 pub const COVERAGE_GAP_PREFIX: &str = "coverage-gap";
+/// 속성 시험 알림 체크의 이름 접두사(`property-check: <서비스>`, ADR-240)
+pub const PROPERTY_CHECK_PREFIX: &str = "property-check:";
 
 pub const VERIFICATION_STAGES: [&str; 7] = ["run", "browser_check", "contract_check", "test", "concurrency_check", "load_check", "review"];
 pub const DEFAULT_WORKFLOW: [&str; 6] = ["plan", "implement", "run", "contract_check", "review", "checkpoint"];
@@ -370,6 +372,12 @@ pub fn format_checked_coverage(checks: &[CoverageCheck], declared_check_name: &s
     if !gaps.is_empty() {
         let items: Vec<String> = gaps.iter().map(|check| format!("- {}", check.detail.as_deref().unwrap_or(&check.name))).collect();
         lines.push(format!("확인 안 됨:\n{}", items.join("\n")));
+    }
+    // 속성 시험(ADR-240)은 알림 전용이다. 통과·실패와 무관하게 알림 글을 그대로 보인다
+    for check in checks.iter().filter(|check| check.stage.as_deref() == Some("contract_check") && check.name.starts_with(PROPERTY_CHECK_PREFIX)) {
+        if let Some(detail) = check.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            lines.push(format!("{}:\n{detail}", check.name));
+        }
     }
     let declared = checks
         .iter()
@@ -740,6 +748,10 @@ mod tests {
         assert_eq!(format_checked_coverage(&[c("review", "d", true, Some("바뀜"))], "d"), "확인 선언 변경: 바뀜");
         assert_eq!(format_checked_coverage(&[c("review", "d", true, Some(""))], "d"), "");
         assert_eq!(format_checked_coverage(&[c("review", "d", false, Some("바뀜"))], "d"), "");
+        // 속성 시험 알림(ADR-240): 계약 확인 단계의 알림 글만 그대로 보이고, "게이트가 확인함"에는 들지 않는다
+        assert_eq!(format_checked_coverage(&[c("contract_check", "property-check: api", true, Some("알림 1건"))], "d"), "property-check: api:\n알림 1건");
+        assert_eq!(format_checked_coverage(&[c("contract_check", "property-check: api", true, Some(""))], "d"), "");
+        assert_eq!(format_checked_coverage(&[c("review", "property-check: api", true, Some("알림"))], "d"), "");
     }
 
     #[test]

@@ -210,6 +210,7 @@ import {
 } from '@b-studio/agent';
 import {
   commandCodeConfigPathBlocked,
+  openCodeConfigPathBlocked,
   describeSnapshotEvent,
   providerFromEnv,
   Redactor,
@@ -360,7 +361,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { commandCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, openCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
 import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
@@ -7504,6 +7505,11 @@ export function sessionTerminalTarget(id: string): {
     const refused = commandCodeTerminalReason(sessionTerminalMode());
     if (refused) throw new StudioError(409, refused);
   }
+  // OpenCode 세션도 같다(ADR-241)
+  if (sessionBackend(session.snapshot) === 'opencode') {
+    const refused = openCodeTerminalReason(sessionTerminalMode());
+    if (refused) throw new StudioError(409, refused);
+  }
   // 서버가 작업 폴더에 쓰고 판정하는 동안에는 열지 않는다. 열면 CLI·사람이 같은 폴더에 쓰고, CLI의 훅이 서버가 연 실행에 붙는다(ADR-224)
   if (session.serverApplying === true) throw new StudioError(409, '서버가 이 세션에 변경을 쓰고 검증하는 중이라 터미널을 열 수 없습니다. 끝난 뒤 다시 여세요');
   // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
@@ -7713,6 +7719,8 @@ function terminalCliKind(session: Session): HostCliKind {
   if (backend === 'codex') return 'codex';
   // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
   if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';
+  // OpenCode(실험, ADR-241)도 같다
+  if (backend === 'opencode' && experimentalEnabled()) return 'opencode';
   return 'claude';
 }
 
@@ -7720,7 +7728,7 @@ function terminalCliKind(session: Session): HostCliKind {
 function terminalRunBackend(session: Session): SessionMode {
   if (selfAgentTerminal(session)) return 'api';
   const cli = terminalCliKind(session);
-  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : 'claude-code';
+  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : cli === 'opencode' ? 'opencode' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -9061,9 +9069,50 @@ async function terminalCommandCodeDeny(session: Session, tool: string, toolInput
   return undefined;
 }
 
-/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
+/** OpenCode의 파일 도구(설치된 1.18.33에서 확인, ADR-241). 파일을 바꾸는 도구인데 바꾸는 파일을 알 수 없으면 설정을 건드리지 않는다고 말할 수 없다 */
+const OPENCODE_CONFIG_GUARDED_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'multiedit', 'apply_patch', 'patch']);
+
+/**
+ * OpenCode 세션의 쓰기 직전 막기(ADR-241). **카드가 없어도** 막는다. 막는 쪽이다(거부 목록):
+ * `edit`·`write`·패치로 OpenCode의 설정·플러그인 자리(`.opencode` 폴더, `opencode.json(c)`·`tui.json(c)`, 전역 설정 폴더)를 바꾸는 것: 설정이 다른 플러그인을 붙이면 그 플러그인이
+ * 우리 훅 뒤에 도구 입력을 바꿔 쓸 수 있다. 비교는 파일 시스템 규칙으로 한다(`openCodeConfigPathBlocked`: 대소문자·유니코드·`..`·겹친 구분자·링크).
+ * 파일 도구인데 바꾸는 파일을 알 수 없으면(모르는 열쇠 등) 이 자리를 건드리지 않는다고 말할 수 없어 막는다.
+ * 셸로 쓰는 경우는 여기서 막지 못한다: 설정은 OpenCode가 뜰 때 읽으므로 그 뒤의 변경은 다음에 띄울 때 띄우기 전 검사와 플러그인의 설정 확인이 잡는다
+ */
+async function terminalOpenCodeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'opencode') return undefined;
+  const files = terminalToolFilePaths('opencode', tool, toolInput);
+  if (files === null) {
+    return OPENCODE_CONFIG_GUARDED_TOOLS.has(tool) ? `[b-studio] ${tool}이(가) 바꾸는 파일을 알 수 없어 OpenCode의 설정(.opencode·opencode.json)을 건드리지 않는다고 확인하지 못했습니다. 쓰지 않았습니다.` : undefined;
+  }
+  for (const file of files) {
+    if (await openCodeConfigPathBlocked({ cwd: session.snapshot.workDir, home: process.env.HOME ?? process.env.USERPROFILE, xdgConfigHome: process.env.XDG_CONFIG_HOME, file })) {
+      return `[b-studio] ${file}은(는) OpenCode의 설정·플러그인 자리라 쓰지 않았습니다. 설정이 다른 플러그인을 붙여 b-studio의 훅을 비켜 갈 수 있어 에이전트는 이 자리를 바꾸지 않습니다.`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * OpenCode가 일하는 폴더가 세션의 작업 복사본이 아니면 막는다(ADR-241). `opencode <프로젝트 경로>`나 `--dir`로 다른 폴더에서 일하면 상대 경로가 우리가 따진 폴더와 다른 곳에 닿고,
+ * 카드의 쓰기 범위도 작업 복사본 기준이라 의미가 없다. 막는 쪽이다: 플러그인이 보낸 폴더가 없거나 글이 아니거나 읽을 수 없으면(링크를 풀지 못함 등) 같다고 말할 수 없어 막는다.
+ * 링크를 푼 실제 경로로 견준다(macOS의 `/tmp`와 `/private/tmp`처럼 글이 달라도 같은 폴더인 경우를 통과시키고, 글이 같아 보여도 다른 폴더인 경우를 막는다)
+ */
+async function terminalOpenCodeCwdDeny(session: Session, cwd: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'opencode') return undefined;
+  const refusal = '[b-studio] OpenCode가 세션의 작업 복사본이 아닌 폴더에서 일하고 있어 쓰지 않았습니다. 터미널을 연 폴더에서 `opencode`를 인자 없이(프로젝트 경로·--dir 없이) 다시 띄우세요.';
+  if (typeof cwd !== 'string' || cwd.trim() === '') return refusal;
+  try {
+    const [given, expected] = await Promise.all([realpath(cwd), realpath(session.project.root)]);
+    return given === expected ? undefined : refusal;
+  } catch {
+    return refusal;
+  }
+}
+
+/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code·OpenCode의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
 async function terminalWriteScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
-  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
+  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalOpenCodeDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
 }
 
 /** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
@@ -9175,7 +9224,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   const readTool = isReadToolFor(terminalCliKind(session), tool);
   if (readTool) return {};
   // Command Code의 설정 쓰기와 run_command는 카드가 없어도, 실행을 열기 전에 막는다(보안 검토)
-  const configDeny = await terminalCommandCodeDeny(session, tool, input.tool_input);
+  const configDeny = (await terminalCommandCodeDeny(session, tool, input.tool_input)) ?? (await terminalOpenCodeCwdDeny(session, input.cwd)) ?? (await terminalOpenCodeDeny(session, tool, input.tool_input));
   if (configDeny) return { deny: configDeny };
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다
@@ -10396,6 +10445,12 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       // mod만 다시 불러오는 것(reload)은 CLI의 끝이 아니다. 새 mod의 session-start가 시간 안에 오는지 시계로 본다(설정이 reload 뒤 mod를 껐을 수 있다)
       if (input.reason === 'reload' && terminalCliKind(terminalSession(id)) === 'commandcode') {
         noteModReloading(id);
+        return;
+      }
+      // OpenCode의 플러그인은 인스턴스가 다시 만들어질 때(설정 다시 읽기)와 CLI가 끝날 때 똑같이 끝을 알린다(ADR-241). 구별할 수 없으므로 열린 실행을 닫지 않는다:
+      // 닫으면 다시 만들어진 것일 때 지금까지의 변경이 되돌려진다. CLI 표시만 내리고, 다시 뜬 플러그인의 session-start가 올리고, 열린 실행은 다음 요청이 이어 간다
+      if (input.reason === 'dispose' && terminalCliKind(terminalSession(id)) === 'opencode') {
+        noteSessionTerminalCli(id, false);
         return;
       }
       noteSessionTerminalCli(id, false);
