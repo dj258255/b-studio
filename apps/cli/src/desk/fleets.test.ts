@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fleetOptions, fleetsHint, fleetsKey, fleetsPaste, openFleets, openableMembers, placeMembers, renderFleets, type FleetsState } from './fleets';
+import { fleetOptions, fleetsHint, fleetsKey, fleetsPaste, openFleets, openableMembers, placeMembers, recommendFleetMember, renderFleets, type FleetsState } from './fleets';
 import { stringWidth, stripAnsi } from './screen';
 import { DEFAULT_THEME } from './theme';
 import type { DeskFleet, DeskItem } from './types';
@@ -254,5 +254,55 @@ describe('renderFleets', () => {
   it('아래 줄 안내는 화면마다 다르다', () => {
     expect(fleetsHint(listed())).toContain('n 새 비교');
     expect(fleetsHint({ ...listed(), mode: 'detail', detail: 'f1' })).toContain('w 승자');
+  });
+});
+
+describe('검증을 통과한 후보 추천(#1456)', () => {
+  const usage = (total: number) => ({ inputTokens: total, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 });
+  const done = (id: string, files: number, tokens: number, finishedAt = '2026-10-23T00:10:00Z'): DeskFleet['members'][number] => ({
+    sessionId: id,
+    backend: 'claude-code',
+    label: `후보 ${id}`,
+    provider: 'claude-code',
+    status: 'done',
+    checkpoint: { sha: id, shortSha: id, files: Array.from({ length: files }, (_, n) => `f${n}.ts`) },
+    usage: usage(tokens),
+    finishedAt,
+  });
+  const failed = (id: string): DeskFleet['members'][number] => ({ sessionId: id, backend: 'codex', label: `후보 ${id}`, provider: 'codex', status: 'failed', summary: '게이트 실패' });
+  const of = (members: DeskFleet['members'], patch: Partial<DeskFleet> = {}): DeskFleet => fleet('r', { members, ...patch });
+
+  it('진행 중인 참가자가 있으면 추천하지 않는다(결과가 바뀔 수 있다)', () => {
+    expect(recommendFleetMember(of([done('a', 1, 10), { ...done('b', 1, 10), status: 'running', checkpoint: undefined }]))).toBeUndefined();
+    expect(recommendFleetMember(of([done('a', 1, 10), { ...done('b', 1, 10), status: 'awaiting_input', checkpoint: undefined }]))).toBeUndefined();
+    expect(recommendFleetMember(of([done('a', 1, 10), { ...done('b', 1, 10), status: 'booting', checkpoint: undefined }]))).toBeUndefined();
+  });
+
+  it('통과한 후보가 없으면 추천하지 않고, 하나면 그것을 "유일하게 통과"로 추천한다', () => {
+    expect(recommendFleetMember(of([failed('a'), failed('b')]))).toBeUndefined();
+    expect(recommendFleetMember(of([failed('a'), done('b', 3, 100)]))).toEqual({ sessionId: 'b', label: '후보 b', reason: '검증을 통과한 유일한 후보' });
+  });
+
+  it('체크포인트가 없는 통과 후보(바뀐 것 없음)는 고르지 않는다', () => {
+    expect(recommendFleetMember(of([{ ...done('a', 1, 10), checkpoint: undefined }, failed('b')]))).toBeUndefined();
+  });
+
+  it('여럿이면 바뀐 파일이 적은 순, 같으면 토큰이 적은 순, 같으면 먼저 끝난 순으로 고르고 기준을 적는다', () => {
+    expect(recommendFleetMember(of([done('a', 3, 10), done('b', 1, 999), failed('c')]))).toEqual({ sessionId: 'b', label: '후보 b', reason: '검증 통과 2개 중 바뀐 파일이 가장 적음' });
+    expect(recommendFleetMember(of([done('a', 2, 500), done('b', 2, 100)]))).toEqual({ sessionId: 'b', label: '후보 b', reason: '검증 통과 2개 중 바뀐 파일이 같고 토큰이 가장 적음' });
+    expect(recommendFleetMember(of([done('a', 2, 100, '2026-10-23T00:20:00Z'), done('b', 2, 100, '2026-10-23T00:05:00Z')]))).toEqual({ sessionId: 'b', label: '후보 b', reason: '검증 통과 2개 중 바뀐 파일·토큰이 같고 가장 먼저 끝남' });
+  });
+
+  it('승자를 이미 골랐으면 추천하지 않는다', () => {
+    expect(recommendFleetMember(of([done('a', 3, 10), done('b', 1, 10)], { winnerSessionId: 'a' }))).toBeUndefined();
+  });
+
+  it('보기 머리에 추천과 기준, 고르는 키를 적는다', () => {
+    const state: FleetsState = { ...listed([of([done('a', 3, 10), done('b', 1, 10)])]), mode: 'detail', detail: 'r', member: 0 };
+    const { lines } = renderFleets(state, { items: [], theme: DEFAULT_THEME, sprites: {}, spriteClock: 0 }, { w: 120, h: 40 });
+    const text = lines.map(stripAnsi).join('\n');
+    expect(text).toContain('추천 후보 b');
+    expect(text).toContain('검증 통과 2개 중 바뀐 파일이 가장 적음');
+    expect(text).toContain('w로 승자를 고릅니다');
   });
 });

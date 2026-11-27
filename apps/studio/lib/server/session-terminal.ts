@@ -39,6 +39,8 @@ import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
 import { commandCodeTerminalReason, openCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { DraftKeeper, readDraftFile, settleDraftStops, writeDraftFile } from './session-terminal-draft';
+import { draftSealFor } from './session-terminal-draft-key';
 import { armModClock, disarmModClock } from './session-terminal-mod';
 import { newWatchState, registerWatch, unregisterWatch, watchRound, watchView, type WatchControl, type WatchFileCheck, type WatchPsCheck } from './session-terminal-watch';
 
@@ -140,6 +142,12 @@ interface TerminalState {
    * 같은 프로세스에서 다시 여는 것은 CLI·셸이 끝났거나 사람이 닫은 뒤라, 일부러 끝낸 대화를 되살리지 않는다
    */
   opened?: boolean;
+  /** 입력창에 쓰다 만 글을 지키는 것(ADR-237). 터미널이 열려 있는 동안만 있다 */
+  draft?: DraftKeeper;
+  /** 쓰다 만 글을 둔 파일(세션 상태 폴더). 터미널이 닫혀도 "쓰다 만 글"을 치우려고 기억한다 */
+  draftFile?: string;
+  /** 입력창에 되살리지 못해 desk에 보이는 "쓰다 만 글" */
+  draftLeftover?: string;
 }
 
 export interface TerminalTarget {
@@ -185,6 +193,11 @@ export interface TerminalTarget {
   accountDir?: () => Promise<string | undefined>;
   /** CLI를 처음 띄울 때 넘길 모델(#988). 세션에 고른 모델이 있을 때만 있다. 없으면 CLI 기본 모델이다 */
   model?: string;
+  /**
+   * 입력창에 쓰다 만 글을 저장·복원할 파일(세션 상태 폴더, ADR-237). 입력창 모양을 확인한 CLI(claude)일 때만 준다.
+   * 이어 붙이기를 받는 백엔드(이 컴퓨터 방식)에서만 쓴다. 주지 않으면 화면을 읽지도 저장하지도 않는다
+   */
+  draftFile?: string;
   /**
    * 감시가 위반(관문 파일 변조, 훅 없이 뜬 CLI)을 찾았을 때 부른다. 세션은 이 실행을 실패로 닫고 되돌린다(이슈 #695)
    */
@@ -590,6 +603,7 @@ export async function openSessionTerminal(
   if (state.terminal) {
     state.size = wanted;
     await state.terminal.resize(wanted);
+    state.draft?.resize(wanted);
     return { initialPromptUsed: false };
   }
   const current = state;
@@ -635,18 +649,43 @@ export async function openSessionTerminal(
       current.size = wanted;
       current.chunks = [];
       current.bytes = 0;
+      // 입력창에 쓰다 만 글을 지킨다(ADR-237). 이어 붙이기를 받는 방식(이 컴퓨터)에서 파일을 받았을 때만. 출력을 놓치지 않게 구독보다 먼저 만든다
+      const keeper =
+        target.draftFile && backend.acceptsResume === true
+          ? new DraftKeeper({
+              file: target.draftFile,
+              seal: draftSealFor(target.draftFile),
+              size: wanted,
+              resumed: resumeConversation !== undefined,
+              write: (data) => {
+                // 되살리는 사이에 터미널이 바뀌었으면 쓰지 않는다
+                if (current.terminal === terminal) terminal.write(data);
+              },
+              onLeftover: (text) => {
+                if (text === current.draftLeftover) return;
+                current.draftLeftover = text;
+                notifyAgentsChanged();
+              },
+            })
+          : undefined;
+      current.draft = keeper;
+      current.draftFile = keeper ? target.draftFile : undefined;
       terminal.onData((chunk) => {
         remember(current, chunk);
+        keeper?.feed(chunk);
         emit(current, { kind: 'data', data: chunk.toString('base64') });
       });
       terminal.onExit((code) => {
         // 닫고 새로 연 뒤에 옛 프로세스의 종료가 늦게 와도 새 터미널을 지우지 않는다
         if (current.terminal !== terminal) return;
         current.terminal = undefined;
+        stopDraft(current);
         stopWatching(current);
         setCli(current, false);
         emit(current, { kind: 'exit', code });
       });
+      // 저장해 둔 글을 읽는다. CLI가 뜬다는 신호(훅)보다 먼저 끝나야 되살릴 글을 알 수 있다 — 신호는 CLI가 뜬 뒤에야 오므로 이 파일 읽기가 먼저다
+      if (keeper) await keeper.start().catch((error: unknown) => console.error('[b-studio] 쓰다 만 글을 읽지 못했습니다', error instanceof Error ? error.message : String(error)));
       // 관문 파일 변조와 훅 없이 뜬 CLI를 감시한다. 찾으면 화면에 경고를 보내고 세션에 알린다(이슈 #695)
       if (backend.watch) {
         const stop = backend.watch(place, terminal, target, (reason) => {
@@ -709,6 +748,8 @@ function setCli(state: TerminalState, alive: boolean): void {
   if (state.cli === alive) return;
   state.cli = alive;
   emit(state, { kind: 'cli', alive });
+  // CLI가 떴다: 저장해 둔 쓰다 만 글을 입력창에 되살린다(Enter는 보내지 않는다). 확신이 없으면 넣지 않고 desk에 보인다
+  if (alive) void state.draft?.onCliUp().catch((error: unknown) => console.error('[b-studio] 쓰다 만 글을 되살리지 못했습니다', error instanceof Error ? error.message : String(error)));
   // desk 사이드바의 CLI 표시가 바로 바뀌게 목록 통로(#923)에 알린다
   notifyAgentsChanged();
 }
@@ -717,16 +758,41 @@ function setCli(state: TerminalState, alive: boolean): void {
  * 에이전트 CLI가 떴다·끝났다(관문의 세션 시작·끝 훅이 부른다). 터미널이 열려 있지 않으면 떴다는 알림은 받지 않는다 —
  * 닫힌 터미널에 "떠 있음"이 남으면 다음에 연 터미널(셸)에 글이 붙는다
  */
-export function noteSessionTerminalCli(sessionId: string, alive: boolean): void {
+export function noteSessionTerminalCli(sessionId: string, alive: boolean, options: { promptSubmitted?: boolean } = {}): void {
   const state = terminals.get(sessionId);
   if (!state) return;
   setCli(state, alive && state.terminal !== undefined);
+  // 사용자가 요청을 보냈다: desk에 보이던 "쓰다 만 글"은 넘어갔다
+  if (alive && options.promptSubmitted === true) void clearSessionTerminalDraftLeftover(sessionId);
 }
 
 /** 이 프로세스에서 세션 터미널을 연 적이 있으면 그 CLI가 떠 있는지(studio desk 사이드바, #835). 연 적이 없으면 없다 */
-export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean; startPendingSince?: number } | undefined {
+export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean; startPendingSince?: number; draft?: string } | undefined {
   const state = terminals.get(sessionId);
-  return state ? { cliAlive: state.cli, ...(state.startPendingSince !== undefined ? { startPendingSince: state.startPendingSince } : {}) } : undefined;
+  return state
+    ? { cliAlive: state.cli, ...(state.startPendingSince !== undefined ? { startPendingSince: state.startPendingSince } : {}), ...(state.draftLeftover !== undefined ? { draft: state.draftLeftover } : {}) }
+    : undefined;
+}
+
+/**
+ * desk에 보이는 "쓰다 만 글"을 치운다(사용자가 요청을 보냈다 = 앞의 글은 넘어갔다). 터미널이 닫혀 있어도 파일에서 치운다. 실패해도 던지지 않는다
+ */
+export async function clearSessionTerminalDraftLeftover(sessionId: string): Promise<void> {
+  const state = terminals.get(sessionId);
+  if (!state || state.draftLeftover === undefined) return;
+  try {
+    if (state.draft) {
+      await state.draft.clearLeftover();
+    } else if (state.draftFile) {
+      const data = await readDraftFile(state.draftFile, draftSealFor(state.draftFile));
+      delete data.leftover;
+      await writeDraftFile(state.draftFile, data, draftSealFor(state.draftFile));
+    }
+  } catch (error) {
+    console.error('[b-studio] 쓰다 만 글을 치우지 못했습니다', error instanceof Error ? error.message : String(error));
+  }
+  state.draftLeftover = undefined;
+  notifyAgentsChanged();
 }
 
 /** 터미널 안에 에이전트 CLI가 떠 있는가. 열린 적 없는 세션이면 없다(거짓) */
@@ -770,6 +836,16 @@ export async function resizeSessionTerminal(sessionId: string, size: { cols?: un
   if (!state?.terminal) return;
   state.size = clampTerminalSize(size);
   await state.terminal.resize(state.size);
+  state.draft?.resize(state.size);
+}
+
+/** 쓰다 만 글 지킴이를 멈춘다(마지막으로 한 번 저장한다). 터미널이 닫히거나 끝날 때 부른다. 여러 번 불려도 안전하다 */
+function stopDraft(state: TerminalState): void {
+  const keeper = state.draft;
+  state.draft = undefined;
+  if (!keeper) return;
+  // 닫는 쓰기가 끝나기를 기다리는 길은 settleDraftStops다(disposeSessionTerminal·세션 지우기가 부른다)
+  void keeper.stop().catch((error: unknown) => console.error('[b-studio] 쓰다 만 글을 저장하지 못했습니다', error instanceof Error ? error.message : String(error)));
 }
 
 /** 열려 있는 터미널의 감시를 멈춘다. 여러 번 불려도 안전하다(멈춤 함수를 한 번만 부른다) */
@@ -797,6 +873,7 @@ export function closeSessionTerminal(sessionId: string): void {
   if (!state?.terminal) return;
   const terminal = state.terminal;
   state.terminal = undefined;
+  stopDraft(state);
   stopWatching(state);
   terminal.close();
   setCli(state, false);
@@ -812,5 +889,7 @@ export async function disposeSessionTerminal(sessionId: string, sandboxId: strin
   if (state) stopWatching(state);
   closeSessionTerminal(sessionId);
   terminals.delete(sessionId);
+  // 쓰다 만 글의 마지막 저장이 끝난 뒤에 돌려준다(그 뒤에 세션 폴더가 지워질 수 있다)
+  await settleDraftStops();
   await backend.remove(sandboxId).catch(() => {});
 }

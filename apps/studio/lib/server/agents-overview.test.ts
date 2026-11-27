@@ -297,6 +297,13 @@ describe('띄우는 중인 세션의 시작 시각(#961)', () => {
   });
 });
 
+describe('쓰다 만 글(ADR-237)', () => {
+  it('내보내는 글에서 ESC·제어·글 방향 문자를 뺀다(desk가 화면 줄에 그대로 그린다)', () => {
+    expect(terminalStatusOf({ cliAlive: true, draft: '앞\x1b[2J\x1b]0;x\x07뒤\u202e끝\n둘째' }, snapshot(), NOW).draft).toBe('앞[2J]0;x뒤끝\n둘째');
+    expect(terminalStatusOf({ cliAlive: true, draft: '\x1b\u202e' }, snapshot(), NOW)).toEqual({ cli: 'up' });
+  });
+});
+
 describe('CLI가 시작 창에서 멈춘 세션(#966)', () => {
   it('첫 요청을 넘긴 지 몇 초가 지나도 CLI가 뜨지 않으면 입력을 기다린다고 알린다', () => {
     const status = terminalStatusOf({ cliAlive: false, startPendingSince: NOW - 10_000 }, snapshot(), NOW);
