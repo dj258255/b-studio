@@ -128,3 +128,48 @@ describe('Codex 세션 기록에서 문맥 숫자만 읽는다(#978)', () => {
     expect(await createCodexRolloutReader().read(home, THREAD)).toBeUndefined();
   });
 });
+
+describe('Codex 세션 기록의 한도·캐시(#1468): 같은 token_count 줄에서 숫자만 읽는다', () => {
+  const RESET_5H = 1_795_000_000;
+  const RESET_WEEK = 1_795_500_000;
+  /** 현재 codex(0.162)의 token_count 꼴: rate_limits.primary·secondary의 used_percent·window_minutes·resets_at(epoch 초) */
+  const withLimits = (limits: unknown, total = { input_tokens: 1_000, cached_input_tokens: 750 }) =>
+    JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: { total_token_usage: { ...total, output_tokens: 10, total_tokens: 1_010 }, last_token_usage: { input_tokens: 100, output_tokens: 10, total_tokens: 110 }, model_context_window: 400_000 },
+        rate_limits: limits,
+      },
+    });
+  const both = { primary: { used_percent: 12.5, window_minutes: 300, resets_at: RESET_5H }, secondary: { used_percent: 40, window_minutes: 10_080, resets_at: RESET_WEEK } };
+
+  it('창은 슬롯 이름이 아니라 창 길이(300분·10080분)로 가른다. resets_at은 ISO로 바꾼다', async () => {
+    await rollout('2026-11-27', THREAD, [meta, withLimits(both)]);
+    const read = await createCodexRolloutReader().readAll(home, THREAD);
+    expect(read?.usage).toEqual({
+      fiveHour: { usedPct: 12.5, resetsAt: new Date(RESET_5H * 1000).toISOString() },
+      sevenDay: { usedPct: 40, resetsAt: new Date(RESET_WEEK * 1000).toISOString() },
+      cacheHitRatio: 0.75,
+    });
+    // 슬롯이 바뀌어도(주간이 primary) 길이로 가른다
+    await rollout('2026-11-28', OTHER, [withLimits({ primary: both.secondary, secondary: both.primary })]);
+    expect((await createCodexRolloutReader().readAll(home, OTHER))?.usage?.fiveHour?.usedPct).toBe(12.5);
+  });
+
+  it('모르는 창 길이·범위 밖 값·resets_at이 없는 창은 싣지 않고, 입력이 0이면 캐시도 싣지 않는다', async () => {
+    await rollout('2026-11-27', THREAD, [
+      withLimits({ primary: { used_percent: 12, window_minutes: 60, resets_at: RESET_5H }, secondary: { used_percent: 250, window_minutes: 10_080, resets_at: RESET_WEEK } }, { input_tokens: 0, cached_input_tokens: 0 }),
+    ]);
+    const read = await createCodexRolloutReader().readAll(home, THREAD);
+    expect(read?.usage).toBeUndefined();
+    expect(read?.context).toEqual({ usedPct: 0, used: 110, size: 400_000 });
+    await rollout('2026-11-28', OTHER, [withLimits({ primary: { used_percent: 12, window_minutes: 300 } })]);
+    expect((await createCodexRolloutReader().readAll(home, OTHER))?.usage).toEqual({ cacheHitRatio: 0.75 });
+  });
+
+  it('결과에 대화 내용이 새지 않는다', async () => {
+    await rollout('2026-11-27', THREAD, [meta, message(SECRET), withLimits(both)]);
+    expect(JSON.stringify(await createCodexRolloutReader().readAll(home, THREAD))).not.toContain('비밀');
+  });
+});

@@ -8350,9 +8350,12 @@ async function refreshCodexContext(session: Session, requests: readonly ApiReque
   const thread = requests.findLast((request) => request.sessionId)?.sessionId ?? remembered;
   const activity = (session.terminalActivity ??= newTerminalActivity());
   const home = (await sessionAccount(session.snapshot).catch(() => undefined))?.configDir ?? process.env.CODEX_HOME ?? path.join(homedir(), '.codex');
-  const context = thread ? await codexRollouts.read(home, thread).catch(() => undefined) : undefined;
-  if (context) activity.context = context;
+  const read = thread ? await codexRollouts.readAll(home, thread).catch(() => undefined) : undefined;
+  if (read) activity.context = read.context;
   else delete activity.context;
+  // 같은 줄의 5시간·주간 한도와 캐시 적중률(#1468). 보여 주는 값이라 읽지 못하면 비운다
+  if (read?.usage) activity.usage = read.usage;
+  else delete activity.usage;
 }
 
 /**

@@ -88,6 +88,31 @@ export interface ActivityContext {
   used?: number;
   size?: number;
 }
+/** 상태 줄의 한도 창 하나. 공식 문서: used_percentage는 0~100, resets_at은 epoch 초 */
+export interface ActivityLimitWindow {
+  /** 0~100 */
+  usedPct: number;
+  /** 초기화 시각(ISO) */
+  resetsAt: string;
+}
+/**
+ * 상태 줄 입력에서 읽은 사용량(Claude statusLine 문서에 있는 필드만). 값이 없으면 키가 없다(모름 — 0이 아니다).
+ * CLI가 보낸 값이라 보여 주는 데만 쓴다. 토큰 한도·게이트 판정에 쓰지 않는다
+ */
+export interface ActivityUsage {
+  /** rate_limits.five_hour. 구독 로그인이고 첫 응답을 받은 뒤에만 온다 */
+  fiveHour?: ActivityLimitWindow;
+  /** rate_limits.seven_day */
+  sevenDay?: ActivityLimitWindow;
+  /** prompt_cache.hit_ratio: 이 세션 메인 대화의 캐시 읽기 비율(0~1). 서브에이전트 요청은 세지 않는다 */
+  cacheHitRatio?: number;
+  /** cost.total_cost_usd: CLI가 정가로 어림한 세션 비용(청구액과 다를 수 있다) */
+  costUsd?: number;
+  /** cost.total_duration_ms: 세션이 돈 시간 */
+  durationMs?: number;
+  /** effort.level */
+  effort?: string;
+}
 export interface ActivitySubagent {
   id: string;
   type: string;
@@ -106,6 +131,8 @@ export interface TerminalActivityView {
   now?: ActivityNow;
   todos?: ActivityTodos;
   context?: ActivityContext;
+  /** 상태 줄이 알린 한도·캐시·비용·effort. 알린 것이 없으면 없다. 초기화 시각이 지난 한도 창은 싣지 않는다 */
+  usage?: ActivityUsage;
   lastMessage?: string;
   subagents?: ActivitySubagent[];
   /** 지금 요청(턴)을 시작한 시각(#933). 작업 중일 때만 */
@@ -140,6 +167,8 @@ export interface TerminalActivity {
   nowId?: string;
   todos: TodoItem[];
   context?: ActivityContext;
+  /** 상태 줄이 알린 사용량(화면용) */
+  usage?: ActivityUsage;
   lastMessage?: string;
   subagents: Map<string, ActivitySubagent>;
   /** 메인이 Agent 도구로 띄운 서브에이전트의 설명. SubagentStart가 같은 종류의 것을 앞에서부터 가져간다 */
@@ -430,9 +459,13 @@ export function noteActivityHook(state: TerminalActivity, input: Input, at: numb
   }
 }
 
-/** 상태 줄 입력(Claude statusLine). 문맥 창만 꺼낸다. 퍼센트가 없거나 범위 밖이면 앞 값을 그대로 둔다 */
+/**
+ * 상태 줄 입력(Claude statusLine). 문맥 창과 사용량(한도·캐시·비용·effort)을 꺼낸다. 문서에 있는 필드만 읽는다.
+ * 값이 없거나 범위 밖·형식 이상이면 앞 값을 그대로 둔다
+ */
 export function noteStatusline(state: TerminalActivity, input: Input): void {
   noteStatuslineModel(state, input);
+  noteStatuslineUsage(state, input);
   const window = isObject(input.context_window) ? input.context_window : undefined;
   const usedPct = number(window?.used_percentage);
   if (usedPct === undefined || usedPct > 100) return;
@@ -441,6 +474,53 @@ export function noteStatusline(state: TerminalActivity, input: Input): void {
   const parts = current ? [current.input_tokens, current.cache_creation_input_tokens, current.cache_read_input_tokens].map(number) : [];
   const used = parts.length > 0 && parts.every((part) => part !== undefined) ? parts.reduce((sum: number, part) => sum + part!, 0) : undefined;
   state.context = { usedPct, ...(used !== undefined ? { used } : {}), ...(size !== undefined ? { size } : {}) };
+}
+
+const EFFORT_LEVELS = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+
+/**
+ * 한도 창 하나: 퍼센트가 0~100이고 초기화 시각이 epoch 초(양의 유한수)여야 한다. 아니면 undefined(= 읽지 못함).
+ * Claude 상태 줄과 Codex 세션 기록(codex-rollout-context.ts)이 함께 쓴다
+ */
+export function limitWindowOf(usedPct: unknown, resetsAtSec: unknown): ActivityLimitWindow | undefined {
+  const pct = number(usedPct);
+  const resets = number(resetsAtSec);
+  // 밀리초로 보이는 값(1e11 이상)은 단위를 추측하지 않고 버린다
+  if (pct === undefined || pct > 100 || resets === undefined || resets <= 0 || resets >= 1e11) return undefined;
+  return { usedPct: pct, resetsAt: new Date(resets * 1000).toISOString() };
+}
+
+function limitWindow(value: unknown): ActivityLimitWindow | undefined {
+  return isObject(value) ? limitWindowOf(value.used_percentage, value.resets_at) : undefined;
+}
+
+function noteStatuslineUsage(state: TerminalActivity, input: Input): void {
+  const usage: ActivityUsage = { ...state.usage };
+  // rate_limits가 있으면 창마다 갈아 끼운다: 읽을 수 있으면 새 값, 창이 빠졌으면(CLI는 초기화 시각이 지난 창을 뺀다) 지운다, 창은 있는데 읽지 못하면 앞 값
+  if (isObject(input.rate_limits)) {
+    for (const [from, to] of [['five_hour', 'fiveHour'], ['seven_day', 'sevenDay']] as const) {
+      const raw = input.rate_limits[from];
+      if (raw === undefined || raw === null) delete usage[to];
+      else {
+        const window = limitWindow(raw);
+        if (window) usage[to] = window;
+      }
+    }
+  }
+  const cache = isObject(input.prompt_cache) ? input.prompt_cache : undefined;
+  const hit = number(cache?.hit_ratio);
+  if (hit !== undefined && hit <= 1) usage.cacheHitRatio = hit;
+  const cost = isObject(input.cost) ? input.cost : undefined;
+  const costUsd = number(cost?.total_cost_usd);
+  if (costUsd !== undefined) usage.costUsd = costUsd;
+  const durationMs = number(cost?.total_duration_ms);
+  if (durationMs !== undefined) usage.durationMs = durationMs;
+  // effort는 모델이 지원할 때만 입력에 있다. 모델이 알려졌는데 effort가 없으면 지원하지 않는 모델로 바뀐 것이다
+  const level = isObject(input.effort) ? input.effort.level : undefined;
+  if (typeof level === 'string' && EFFORT_LEVELS.has(level)) usage.effort = level;
+  else if (isObject(input.model) && input.effort === undefined) delete usage.effort;
+  if (Object.keys(usage).length > 0) state.usage = usage;
+  else delete state.usage;
 }
 
 /**
@@ -509,14 +589,16 @@ export function noteCliEnded(state: TerminalActivity): void {
 }
 
 /** 화면에 싣는 꼴. 실을 것이 하나도 없으면 undefined */
-export function activityView(state: TerminalActivity | undefined): TerminalActivityView | undefined {
+export function activityView(state: TerminalActivity | undefined, now: number = Date.now()): TerminalActivityView | undefined {
   if (!state) return undefined;
+  const usage = usageView(state.usage, now);
   const todos = state.todos.length > 0 ? todoSummary(state.todos) : undefined;
   const subagents = [...state.subagents.values()].map((subagent) => ({ ...subagent }));
   const view: TerminalActivityView = {
     ...(state.now ? { now: nowView(state.now, state.seesToolEnd === true) } : {}),
     ...(todos ? { todos } : {}),
     ...(state.context ? { context: { ...state.context } } : {}),
+    ...(usage ? { usage } : {}),
     ...(state.lastMessage ? { lastMessage: state.lastMessage } : {}),
     ...(subagents.length > 0 ? { subagents } : {}),
     ...(state.workingSince ? { workingSince: state.workingSince } : {}),
@@ -525,6 +607,18 @@ export function activityView(state: TerminalActivity | undefined): TerminalActiv
     ...(state.model ? { model: state.model } : {}),
     ...(state.modelChange ? { modelChange: { ...state.modelChange } } : {}),
   };
+  return Object.keys(view).length > 0 ? view : undefined;
+}
+
+/** 초기화 시각이 지난 한도 창은 싣지 않는다(상태 줄이 더 오지 않아도 낡은 %를 보이지 않는다). 싣을 것이 없으면 undefined */
+function usageView(usage: ActivityUsage | undefined, now: number): ActivityUsage | undefined {
+  if (!usage) return undefined;
+  const view: ActivityUsage = { ...usage };
+  for (const key of ['fiveHour', 'sevenDay'] as const) {
+    const window = view[key];
+    if (window && !(Date.parse(window.resetsAt) > now)) delete view[key];
+    else if (window) view[key] = { ...window };
+  }
   return Object.keys(view).length > 0 ? view : undefined;
 }
 
