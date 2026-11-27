@@ -7,6 +7,8 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AGENT_HOOK_SCRIPT, AGENT_NOTIFICATION_MATCHER, applyPatchPaths, CODEX_HOOK_SCRIPT, CODEX_HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
 import { COMMAND_CODE_MOD } from './commandcode-mod';
+import { openCodeConfigContent } from './opencode-config';
+import { OPENCODE_PLUGIN } from './opencode-plugin';
 import { SandboxError } from './errors';
 import {
   checkHostGatewayConfig,
@@ -20,6 +22,7 @@ import {
   findUnhookedCli,
   findUnhookedCliByArgv,
   hostCommandCodeWrapper,
+  hostOpenCodeWrapper,
   hookedLaunch,
   processEnv,
   hostBashRc,
@@ -1436,6 +1439,148 @@ describe('Command Code 터미널(실험, ADR-233)', () => {
 
     it('commandcode가 아닌 프로세스는 후보가 아니다', () => {
       expect(findUnhookedCliByArgv(100, [{ pid: 100, ppid: 1, args: 'zsh' }, { pid: 102, ppid: 100, args: 'vim a.ts' }], expected, () => ['vim'])).toEqual([]);
+    });
+  });
+});
+
+describe('OpenCode 터미널(실험, ADR-241)', () => {
+  const dir = '/gateway/studio-oc';
+  const config = path.join(dir, 'opencode.json');
+  const cli = { kind: 'opencode' as const, cliPath: '/opt/oc/lib/node_modules/opencode-ai/bin/opencode.exe', nodePath: '/usr/bin/node' };
+
+  it('감싸개는 관문 폴더와 설정 파일을 환경 변수로 알리고, 설정을 바꾸는 변수를 먼저 지우며, 사용자의 인자를 그대로 뒤에 넘긴다. 모델·권한 인자는 붙이지 않는다', () => {
+    const wrapper = hostOpenCodeWrapper(dir, cli);
+    expect(wrapper).toContain(`export B_STUDIO_GATEWAY_DIR=${shellQuote(dir)}`);
+    expect(wrapper).toContain(`export OPENCODE_CONFIG=${shellQuote(config)}`);
+    expect(wrapper).toContain(`exec ${shellQuote(cli.cliPath)} "$@"`);
+    // 지우는 줄이 내보내는 줄보다 앞이다
+    expect(wrapper).toMatch(/unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE\n/);
+    expect(wrapper).not.toMatch(/--model|-m |--dangerously|--skip|--pure|--yolo/);
+    expect(wrapper).not.toContain('token');
+  });
+
+  it('관문 파일: 플러그인·설정·주소 파일·핑용 훅 스크립트·감싸개가 있고 권한이 맞다. 글은 모듈의 상수와 같고 토큰은 주소 파일에만 있다', () => {
+    const files = expectedHostGatewayFiles(address, dir, cli);
+    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'b-studio-opencode-plugin.js', 'bin/opencode', 'opencode.json', 'shell/bashrc', 'shell/zsh/.zlogin', 'shell/zsh/.zprofile', 'shell/zsh/.zshenv', 'shell/zsh/.zshrc']);
+    expect(files['b-studio-opencode-plugin.js']).toEqual({ content: OPENCODE_PLUGIN, mode: 0o600 });
+    expect(files['opencode.json']).toEqual({ content: openCodeConfigContent(dir), mode: 0o600 });
+    expect(files['bin/opencode']!.mode).toBe(0o700);
+    expect(JSON.parse(files['b-studio-gateway.json']!.content)).toEqual({ url: address.hookUrl, token: address.hookToken });
+    for (const [name, spec] of Object.entries(files)) if (name !== 'b-studio-gateway.json') expect(spec.content, name).not.toContain(address.hookToken);
+  });
+
+  it('셸 시작 파일은 `opencode` 함수를 감싸개로 정의하고, 첫 요청은 --prompt로, 모델 변수가 없으면 모델 인자를 붙이지 않는다', () => {
+    const zshrc = hostZshFiles(dir, 'opencode')['.zshrc'];
+    expect(zshrc).toContain(`function opencode { ${shellQuote(path.join(dir, 'bin/opencode'))} "$@"; }`);
+    const bash = hostBashRc(dir, 'opencode');
+    expect(bash).toContain('function opencode');
+    expect(bash).toContain('opencode ${BSTUDIO_CLI_MODEL_VALUE:+"--model=$BSTUDIO_CLI_MODEL_VALUE"} --prompt "$BSTUDIO_FIRST_PROMPT_VALUE"');
+  });
+
+  it('openHostTerminal은 opencode에 모델이 오면 거절한다(기본 모델로만 띄운다). 다른 CLI의 모델 넘기기는 그대로다', async () => {
+    const pty: HostPty = { pid: 1, write: () => {}, resize: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} };
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'opencode', model: 'anthropic/x', spawnPty: () => pty })).rejects.toThrow('모델을 고르지 않습니다');
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'opencode', spawnPty: () => pty })).resolves.toBeDefined();
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'claude', model: 'sonnet', spawnPty: () => pty })).resolves.toBeDefined();
+    // 계정 폴더 변수는 받지 않는다(기본 계정만 쓴다)
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'opencode', accountEnv: { OPENCODE_CONFIG_DIR: '/x' }, spawnPty: () => pty })).rejects.toThrow('계정 환경에 쓸 수 없는 이름');
+  });
+
+  it('진짜 관문 폴더 쓰기·검사·지우기(코어): 플러그인·설정·감싸개가 쓰이고, 바꾸면 위반으로 잡히고, 지우면 모두 사라진다', async () => {
+    const root = await tempDir('b-studio-oc-gateway-');
+    const dirOnDisk = await writeHostGatewayConfig('studio-oc-abc', address, cli, root);
+    const expected = expectedHostGatewayFiles(address, dirOnDisk, cli);
+    for (const name of ['b-studio-opencode-plugin.js', 'opencode.json', 'bin/opencode']) expect(await exists(path.join(dirOnDisk, name)), name).toBe(true);
+    expect((await stat(path.join(dirOnDisk, 'b-studio-opencode-plugin.js'))).mode & 0o777).toBe(0o600);
+    expect((await stat(path.join(dirOnDisk, 'bin/opencode'))).mode & 0o777).toBe(0o700);
+    // OpenCode는 `$schema`가 없는 설정 파일을 다시 쓴다. 우리 파일에는 이미 있어 다시 쓰이지 않는다
+    expect(JSON.parse(await readFile(path.join(dirOnDisk, 'opencode.json'), 'utf8'))).toMatchObject({ $schema: 'https://opencode.ai/config.json', plugin: [expect.stringContaining('/b-studio-opencode-plugin.js')] });
+    expect(await checkHostGatewayConfig(dirOnDisk, expected)).toEqual([]);
+    // 다른 플러그인을 더하는 변조
+    await writeFile(path.join(dirOnDisk, 'opencode.json'), JSON.stringify({ $schema: 'https://opencode.ai/config.json', plugin: ['opencode-evil@1.0.0'] }));
+    await writeFile(path.join(dirOnDisk, 'b-studio-opencode-plugin.js'), 'export default async () => ({})');
+    expect((await checkHostGatewayConfig(dirOnDisk, expected)).sort()).toEqual(['b-studio-opencode-plugin.js', 'opencode.json']);
+    await removeHostGatewayConfig('studio-oc-abc', root);
+    expect(await exists(dirOnDisk)).toBe(false);
+  });
+
+  it('findHostCli: B_STUDIO_OPENCODE_BIN 또는 PATH에서 찾는다. 못 찾으면 어떻게 하라고 알린다', async () => {
+    const root = await tempDir('b-studio-oc-bin-');
+    await mkdir(path.join(root, 'bin'));
+    const bin = path.join(root, 'bin/opencode');
+    await writeFile(bin, '#!/bin/sh\n');
+    await chmod(bin, 0o755);
+    expect((await findHostCli({ PATH: path.join(root, 'bin') }, 'opencode')).cliPath).toBe(bin);
+    expect((await findHostCli({ B_STUDIO_OPENCODE_BIN: '/opt/tools/opencode', PATH: '/nonexistent' }, 'opencode')).cliPath).toBe('/opt/tools/opencode');
+    await expect(findHostCli({ PATH: '/nonexistent' }, 'opencode')).rejects.toThrow('B_STUDIO_OPENCODE_BIN');
+  });
+
+  it('감싸개를 진짜 셸로 돌리면 설정 파일이 환경으로 붙고, 미리 있던 설정 변수는 지워지며, 사용자의 인자와 첫 요청은 그대로 뒤에 간다', async () => {
+    const root = await tempDir('b-studio-oc-wrap-');
+    const gateway = path.join(root, 'gw dir');
+    await mkdir(path.join(gateway, 'bin'), { recursive: true });
+    const fake = path.join(root, 'fake-oc.sh');
+    await writeFile(
+      fake,
+      '#!/bin/sh\nprintf "%s\\n" "GW=$B_STUDIO_GATEWAY_DIR" "CFG=$OPENCODE_CONFIG" "CONTENT=${OPENCODE_CONFIG_CONTENT-unset}" "DIR=${OPENCODE_CONFIG_DIR-unset}" "TUI=${OPENCODE_TUI_CONFIG-unset}" "PURE=${OPENCODE_PURE-unset}" "KEEP=$OPENCODE_DISABLE_PROJECT_CONFIG"\nfor a in "$@"; do printf "ARG=%s\\n" "$a"; done\n',
+    );
+    await chmod(fake, 0o755);
+    const wrapper = path.join(gateway, 'bin/opencode');
+    await writeFile(wrapper, hostOpenCodeWrapper(gateway, { cliPath: fake }));
+    await chmod(wrapper, 0o755);
+    const stdout = await new Promise<string>((resolve, reject) =>
+      execFile(
+        wrapper,
+        ['--prompt', '요청 글 "따옴표" $HOME'],
+        { env: { PATH: process.env.PATH ?? '', OPENCODE_CONFIG: '/evil.json', OPENCODE_CONFIG_CONTENT: '{"plugin":["x"]}', OPENCODE_CONFIG_DIR: '/evil', OPENCODE_TUI_CONFIG: '/evil/tui.json', OPENCODE_PURE: '1', OPENCODE_DISABLE_PROJECT_CONFIG: '1' }, encoding: 'utf8', timeout: 20_000 },
+        (error, out) => (error ? reject(error) : resolve(out)),
+      ),
+    );
+    expect(stdout.trim().split('\n')).toEqual([`GW=${gateway}`, `CFG=${path.join(gateway, 'opencode.json')}`, 'CONTENT=unset', 'DIR=unset', 'TUI=unset', 'PURE=unset', 'KEEP=1', 'ARG=--prompt', 'ARG=요청 글 "따옴표" $HOME']);
+  });
+
+  describe('감시: 설정 없이 뜬 opencode를 잡는다(진짜 argv와 환경으로 본다)', () => {
+    const script = cli.cliPath;
+    const processes = (args: string) => [
+      { pid: 100, ppid: 1, args: '/bin/zsh -l -i' },
+      { pid: 101, ppid: 100, args },
+    ];
+    const expected = { settingsPath: path.join(dir, 'settings.json'), cliPath: script, kind: 'opencode' as const };
+    const env = (pairs: Array<[string, string]>) => pairs.map(([name, value]) => ({ name, value }));
+    const found = (argv: string[], environment: Array<{ name: string; value: string }> | null | 'throw') =>
+      findUnhookedCliByArgv(100, processes(argv.join(' ')), expected, () => argv, () => {
+        if (environment === 'throw') throw new Error('권한 없음');
+        return environment;
+      })?.map((entry) => entry.pid);
+
+    it('환경의 OPENCODE_CONFIG가 우리 설정 파일이면 붙은 것이다', () => {
+      expect(found([script], env([['OPENCODE_CONFIG', config]]))).toEqual([]);
+      expect(found([script, '--prompt', '요청'], env([['HOME', '/h'], ['OPENCODE_CONFIG', config]]))).toEqual([]);
+    });
+
+    it('설정이 없거나 다른 파일이거나 --pure·OPENCODE_PURE가 있으면 붙지 않은 것이다', () => {
+      expect(found([script], env([]))).toEqual([101]);
+      expect(found([script], env([['OPENCODE_CONFIG', '/tmp/evil.json']]))).toEqual([101]);
+      expect(found([script], env([['OPENCODE_CONFIG', `${config}/`]]))).toEqual([101]);
+      expect(found([script, '--pure'], env([['OPENCODE_CONFIG', config]]))).toEqual([101]);
+      expect(found([script], env([['OPENCODE_CONFIG', config], ['OPENCODE_PURE', '']]))).toEqual([101]);
+    });
+
+    it('환경을 읽지 못하면 붙었는지 알 수 없어 붙지 않은 것이다. 끝난 프로세스(null)는 건너뛴다', () => {
+      expect(found([script], 'throw')).toEqual([101]);
+      expect(found([script], null)).toEqual([]);
+    });
+
+    it('플러그인을 더하는 환경 변수(OPENCODE_CONFIG_CONTENT·OPENCODE_CONFIG_DIR·OPENCODE_TUI_CONFIG)가 있거나 attach 클라이언트면 붙지 않은 것이다', () => {
+      for (const name of ['OPENCODE_CONFIG_CONTENT', 'OPENCODE_CONFIG_DIR', 'OPENCODE_TUI_CONFIG']) {
+        expect(found([script], env([['OPENCODE_CONFIG', config], [name, 'x']])), name).toEqual([101]);
+      }
+      expect(found([script, 'attach', 'http://localhost:4096'], env([['OPENCODE_CONFIG', config]]))).toEqual([101]);
+      expect(found([script, '--prompt', 'attach'], env([['OPENCODE_CONFIG', config]]))).toEqual([]);
+    });
+
+    it('opencode가 아닌 프로세스는 후보가 아니다', () => {
+      expect(findUnhookedCliByArgv(100, [{ pid: 100, ppid: 1, args: 'zsh' }, { pid: 102, ppid: 100, args: 'vim a.ts' }], expected, () => ['vim'], () => env([]))).toEqual([]);
     });
   });
 });

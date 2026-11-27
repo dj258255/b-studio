@@ -1,6 +1,8 @@
 export * from './types';
 export { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 export { commandCodeConfigPathBlocked, commandCodeModLoadRefusal, commandCodeModName, type CommandCodeConfigWrite, type CommandCodeModLoadCheck } from './commandcode-config';
+export { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
+export { openCodeConfigContent, openCodeConfigPathBlocked, openCodeConfigRefusal, openCodeGlobalConfigDir, type OpenCodeConfigWrite, type OpenCodeLoadCheck } from './opencode-config';
 export * from './errors';
 export * from './readiness';
 export { stripAnsi } from './ansi';
@@ -119,6 +121,8 @@ export {
   hostCodexWrapper,
   hostCommandCodeWrapper,
   commandCodeModPath,
+  hostOpenCodeWrapper,
+  openCodeConfigPath,
   accountDirEnvName,
   hostGatewayFiles,
   hostGatewaySettings,

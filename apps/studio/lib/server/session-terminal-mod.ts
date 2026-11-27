@@ -13,17 +13,36 @@
 
 /** 기본 상한(밀리초). 폴더 신뢰 창에서 사람이 답하는 시간을 포함한다: 그 창이 떠 있는 동안에는 mod가 불러와지지 않는다(2026-11-27 실측) */
 const DEFAULT_TIMEOUT_MS = 90_000;
-/** 시험이 낮추는 환경 변수 */
-const TIMEOUT_ENV = 'B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS';
+
+/**
+ * 이 시계를 거는 CLI. Command Code는 mod 파일, OpenCode(ADR-241)는 플러그인 파일이 훅을 붙인다. 같은 시계와 같은 신호(`/session-start`)를 쓴다.
+ * 시험이 시간을 낮추는 환경 변수와 위반 글의 낱말만 CLI마다 다르다
+ */
+export type ModClockCli = 'commandcode' | 'opencode';
+const LABELS: Record<ModClockCli, { timeoutEnv: string; subject: string; loaded: string; failure: string }> = {
+  commandcode: {
+    timeoutEnv: 'B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS',
+    subject: 'Command Code가',
+    loaded: 'b-studio의 mod가 불러와졌다는',
+    failure: '설정이 mod를 껐거나 mod를 읽지 못해',
+  },
+  opencode: {
+    timeoutEnv: 'B_STUDIO_OPENCODE_MOD_TIMEOUT_MS',
+    subject: 'OpenCode가',
+    loaded: 'b-studio의 플러그인이 불러와졌다는',
+    failure: '설정이 플러그인을 껐거나 플러그인을 읽지 못하거나 다른 플러그인이 있어',
+  },
+};
 
 /** 상한. 환경 변수는 낮추기만 한다(높이면 더 늦게 막을 뿐이라 받지 않는다). 양수가 아닌 값·글자·무한대는 무시한다 */
-export function modLoadTimeoutMs(env: Record<string, string | undefined> = process.env): number {
-  const wanted = Number(env[TIMEOUT_ENV]);
+export function modLoadTimeoutMs(env: Record<string, string | undefined> = process.env, cli: ModClockCli = 'commandcode'): number {
+  const wanted = Number(env[LABELS[cli].timeoutEnv]);
   return Number.isFinite(wanted) && wanted > 0 && wanted < DEFAULT_TIMEOUT_MS ? wanted : DEFAULT_TIMEOUT_MS;
 }
 
 interface ModClock {
   ms: number;
+  cli: ModClockCli;
   onTimeout: (reason: string) => void;
   timer?: NodeJS.Timeout;
 }
@@ -35,18 +54,19 @@ const clocks = (globalStore.__bStudioModClocks ??= new Map());
 function start(clock: ModClock, why: string): void {
   if (clock.timer) clearTimeout(clock.timer);
   const seconds = Math.max(1, Math.round(clock.ms / 1000));
+  const label = LABELS[clock.cli];
   clock.timer = setTimeout(() => {
     clock.timer = undefined;
-    clock.onTimeout(`Command Code가 ${why} ${seconds}초 안에 b-studio의 mod가 불러와졌다는 신호(session-start)가 오지 않았습니다. 설정이 mod를 껐거나 mod를 읽지 못해 훅 없이 뜬 것으로 보고 터미널을 닫습니다`);
+    clock.onTimeout(`${label.subject} ${why} ${seconds}초 안에 ${label.loaded} 신호(session-start)가 오지 않았습니다. ${label.failure} 훅 없이 뜬 것으로 보고 터미널을 닫습니다`);
   }, clock.ms);
   // 시계가 스튜디오 프로세스를 붙들지 않는다
   clock.timer.unref?.();
 }
 
 /** 터미널을 연 직후 건다. 같은 세션에 이미 걸려 있으면(터미널을 다시 열었다) 앞의 것을 세운다 */
-export function armModClock(sessionId: string, onTimeout: (reason: string) => void, ms: number = modLoadTimeoutMs()): void {
+export function armModClock(sessionId: string, onTimeout: (reason: string) => void, ms?: number, cli: ModClockCli = 'commandcode'): void {
   disarmModClock(sessionId);
-  const clock: ModClock = { ms, onTimeout };
+  const clock: ModClock = { ms: ms ?? modLoadTimeoutMs(process.env, cli), cli, onTimeout };
   clocks.set(sessionId, clock);
   start(clock, '뜬 뒤');
 }

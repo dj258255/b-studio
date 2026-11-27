@@ -49,6 +49,17 @@ export function commandCodeTerminalReason(mode: TerminalMode, env: Record<string
   return undefined;
 }
 
+/**
+ * OpenCode 세션을 터미널로 띄울 수 없는 까닭(실험, ADR-241). 띄울 수 있으면 undefined다. 열린 것은 둘이 모두 맞을 때뿐이다:
+ * 이 컴퓨터 방식(컨테이너에는 opencode가 없고 플러그인을 붙이는 길도 없다)이고 실험 기능 스위치(B_STUDIO_EXPERIMENTAL)가 켜져 있다.
+ * 방식은 부르는 쪽이 정한 값을 받는다(`sessionTerminalMode`가 모르는 방식은 던진다) — 이 판정은 그 값을 다시 읽지 않는다
+ */
+export function openCodeTerminalReason(mode: TerminalMode, env: Record<string, string | undefined> = process.env): string | undefined {
+  if (mode !== 'host') return 'OpenCode 세션은 이 컴퓨터 방식 터미널(B_STUDIO_TERMINAL=host)에서만 띄웁니다. 컨테이너 방식은 지원하지 않습니다';
+  if (!experimentalEnabled(env)) return 'OpenCode 세션 터미널은 실험 기능이라 B_STUDIO_EXPERIMENTAL=1이 필요합니다';
+  return undefined;
+}
+
 /** 세션 터미널을 열 수 있는 서버인가. 판정은 resolveTerminalMode 한 곳이다(막는 쪽 호출자들이 쓴다) */
 export function sessionTerminalAllowed(env: Record<string, string | undefined> = process.env): boolean {
   return resolveTerminalMode(env).allowed;
