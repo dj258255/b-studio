@@ -994,6 +994,7 @@ interface NativeGuard {
     unguardedWrites: boolean,
   ): string;
   sessionCheckpointTrailers(passedStages: string[] | null | undefined, verify: string | null | undefined, incomplete: string | null | undefined): string[];
+  sessionImpactTrailer(reportJson: string | null | undefined, checksJson: string): string | null;
   sessionTerminalResult(inputJson: string): string;
   sessionHookMessage(summary: string): string;
   sessionDoneTestsFeedback(failuresJson: string): string;

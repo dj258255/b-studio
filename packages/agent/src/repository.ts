@@ -1196,6 +1196,11 @@ export interface PullRequestImpact {
   unmatchedFiles: number | null;
   /** 보호 경로와 평가 자산 규칙(protectedPathsFor). 파일을 거절하는 데가 아니라 리뷰어에게 알리는 데 쓴다 */
   protectedPaths: string[];
+  /**
+   * 서버가 게이트를 거쳐 만든 체크포인트의 sha들(세션 상태에 남긴 값). 커밋의 Workflow-Passed·Workflow-Impact 트레일러는 에이전트가
+   * 직접 만든 커밋에도 적힐 수 있어서, 이 목록에 있는 커밋의 기록만 게이트 기록으로 읽는다. 목록에 없으면 "확인하지 못함"이다
+   */
+  gateCheckpoints: string[];
 }
 
 /** buildPullRequest가 돌려주는 PR 초안과, 필수 단계 기록이 없는 커밋 */
@@ -1245,6 +1250,7 @@ export function buildPullRequest({
 }): PullRequestDraft {
   // 문서 체크포인트인가(Workflow-Verify: docs이면서 실제로 문서 경로만 바꿨는가)와 검증 단계만 남긴 필수 단계는 workflow.ts가 알아 껍데기가 미리 계산해 넘긴다
   // (workflow는 policy의 NFKD에 의존해 옮기지 않는다). 트레일러만 믿지 않고 경로를 다시 확인하는 규칙은 그대로다
+  const gated = new Set(impact?.gateCheckpoints ?? []);
   const input = {
     projectName,
     base,
@@ -1257,8 +1263,9 @@ export function buildPullRequest({
       files: commit.files,
       stat: commit.stat ? { insertions: commit.stat.insertions, deletions: commit.stat.deletions } : null,
       passedStages: commit.passedStages ?? [],
-      // Workflow-Passed 트레일러는 스튜디오가 만든 체크포인트에서만 읽는다(checkpoints.ts의 sessionCommits). 사람이 쓴 커밋 본문은 게이트 기록으로 읽지 않는다
-      gateRecorded: commit.passedStages !== undefined,
+      // 서버가 게이트를 거쳐 남긴 체크포인트(impact.gateCheckpoints)의 기록만 읽는다. 트레일러만 있는 커밋(에이전트가 직접 만든 커밋 포함)은 읽지 않는다
+      gateRecorded: gated.has(commit.sha) && commit.passedStages !== undefined,
+      impactRecord: gated.has(commit.sha) && commit.passedStages !== undefined ? (commit.impactRecord ?? null) : null,
       docsExempt: commit.verify === 'docs' && commit.files.length > 0 && commit.files.every(isDocCheckpointPath),
       maxTurns: commit.incomplete === 'max_turns',
     })),
@@ -1267,7 +1274,7 @@ export function buildPullRequest({
     requirementIds,
     requiredStages: requiredStages.filter((stage) => VERIFICATION_STAGES.includes(stage)),
     appendix,
-    impact: impact ? { ...impact, backslashSep: pathSep === '\\' } : null,
+    impact: impact ? { services: impact.services, unmatchedFiles: impact.unmatchedFiles, protectedPaths: impact.protectedPaths, backslashSep: pathSep === '\\' } : null,
   };
   return decodeNative<PullRequestDraft>(native.repoBuildPullRequest(encodeNative(input)));
 }

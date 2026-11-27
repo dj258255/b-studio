@@ -22,25 +22,36 @@ export interface TerminalTexts {
 
 export const TERMINAL_TEXTS: TerminalTexts = decodeNative<TerminalTexts>(native.sessionTerminalTexts(SPEC_FILE));
 
-/** PR 리뷰어가 요청마다 무엇을 확인했는지 볼 수 있도록 검증 결과와 에이전트 요약을 커밋 본문에 남긴다 */
-export function checkpointBody(result: AgentResult, allowBreaking: boolean, { unguardedWrites = false }: { unguardedWrites?: boolean } = {}): string {
-  let reportJson: string | null = null;
-  let reportUnserializable = false;
-  if (result.report) {
-    try {
-      reportJson = encodeNative(result.report);
-    } catch {
-      reportUnserializable = true;
-    }
+/** 검증 보고서를 JSON 글로 만든다. 보고서가 없으면 null, 글로 만들 수 없으면 `unserializable` */
+function reportJsonOf(result: AgentResult): { json: string | null; unserializable: boolean } {
+  if (!result.report) return { json: null, unserializable: false };
+  try {
+    return { json: encodeNative(result.report), unserializable: false };
+  } catch {
+    return { json: null, unserializable: true };
   }
-  // 옛 `formatCheckedCoverage`와 같은 모양만 넘긴다(모양이 어긋나면 그 자리에서 던진다)
-  const checks = (result.checks ?? []).map((check) => ({ stage: check.stage, name: check.name, ok: check.ok, detail: check.detail }));
-  return native.sessionCheckpointBody(reportJson, reportUnserializable, allowBreaking, encodeNative(checks), result.verifyAttempts, result.summary, unguardedWrites);
 }
 
-/** 체크포인트에 남길 통과 단계. 게이트 기록이 없는 실행이면 트레일러를 남기지 않는다 */
+// 옛 `formatCheckedCoverage`와 같은 모양만 넘긴다(모양이 어긋나면 그 자리에서 던진다)
+function checksOf(result: AgentResult): string {
+  return encodeNative((result.checks ?? []).map((check) => ({ stage: check.stage, name: check.name, ok: check.ok, detail: check.detail })));
+}
+
+/** PR 리뷰어가 요청마다 무엇을 확인했는지 볼 수 있도록 검증 결과와 에이전트 요약을 커밋 본문에 남긴다 */
+export function checkpointBody(result: AgentResult, allowBreaking: boolean, { unguardedWrites = false }: { unguardedWrites?: boolean } = {}): string {
+  const report = reportJsonOf(result);
+  return native.sessionCheckpointBody(report.json, report.unserializable, allowBreaking, checksOf(result), result.verifyAttempts, result.summary, unguardedWrites);
+}
+
+/**
+ * 체크포인트에 남길 트레일러. 통과 단계 트레일러는 게이트 기록이 없는 실행이면 남기지 않는다.
+ * 게이트 기록이 있으면 계약 차이와 허용한 확인 선언 변경을 `Workflow-Impact` 한 줄로 따로 남긴다(PR 초안은 본문이 아니라 이 줄만 읽는다)
+ */
 export function checkpointTrailers(result: AgentResult): string[] {
-  return native.sessionCheckpointTrailers(result.passedStages ? [...result.passedStages] : null, result.verify ?? null, result.incomplete ?? null);
+  const trailers = native.sessionCheckpointTrailers(result.passedStages ? [...result.passedStages] : null, result.verify ?? null, result.incomplete ?? null);
+  if (!result.passedStages) return trailers;
+  const impact = native.sessionImpactTrailer(reportJsonOf(result).json, checksOf(result));
+  return impact ? [...trailers, impact] : trailers;
 }
 
 export interface TerminalResultFacts {

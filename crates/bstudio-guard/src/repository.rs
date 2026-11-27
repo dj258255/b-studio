@@ -490,6 +490,8 @@ struct Commit {
     max_turns: bool,
     /// 스튜디오가 게이트를 거쳐 남긴 체크포인트인가(Workflow-Passed 트레일러가 있다). 아니면 본문은 사람이 쓴 글이라 게이트 기록으로 읽지 않는다
     gate_recorded: bool,
+    /// 커밋의 `Workflow-Impact` 트레일러 값(한 줄 JSON). `gate_recorded`일 때만 읽는다
+    impact_record: Option<String>,
 }
 
 struct PullRequestInput {
@@ -572,12 +574,12 @@ fn build_pull_request_title(project_name: &str, commits: &[Commit], requirement_
 
 /// 요청 하나의 절. `with_details`가 거짓이면 접어 둔 상세(게이트 결과·에이전트 요약)를 뺀다
 fn section(commit: &Commit, request: &str, index: usize, with_details: bool) -> String {
-    let shown: Vec<String> = commit.files.iter().take(10).map(|file| format!("`{file}`")).collect();
+    let shown: Vec<String> = commit.files.iter().take(10).map(|file| code(file)).collect();
     let more = if commit.files.len() > shown.len() { format!(" 외 {}개", commit.files.len() - shown.len()) } else { String::new() };
     let mut lines = vec![
         format!("### {}. {request}", index + 1),
         String::new(),
-        format!("커밋 `{}`, 파일 {}개: {}{more}", commit.short_sha, commit.files.len(), shown.join(", ")),
+        format!("커밋 {}, 파일 {}개: {}{more}", code(&commit.short_sha), commit.files.len(), shown.join(", ")),
     ];
     if !commit.body.is_empty() && with_details {
         for line in ["", "<details>", "<summary>검증 게이트 결과와 에이전트 요약</summary>", "", "~~~text"] {
@@ -592,15 +594,12 @@ fn section(commit: &Commit, request: &str, index: usize, with_details: bool) -> 
 }
 
 // ---------------------------------------------------------------------------
-// 영향 범위·중점 리뷰 항목(모델을 부르지 않고 파일 목록과 커밋 본문 기록에서 기계적으로 만든다)
+// 영향 범위·중점 리뷰 항목(모델을 부르지 않고 파일 목록과 게이트가 남긴 트레일러 기록에서 기계적으로 만든다)
 // ---------------------------------------------------------------------------
 
-/// 체크포인트 본문(`checkpoint_body`)에서 검증 보고서·확인 범위 절은 맨 앞에, 에이전트 요약은 맨 뒤에 온다.
-/// 요약은 모델이 쓴 글이라 기록처럼 보이는 줄을 흉내 낼 수 있으므로, 이 표지 줄 앞까지만 기록으로 읽는다
-const AGENT_SUMMARY_MARK: &str = "에이전트 요약:";
-const CONTRACT_HEADER_SUFFIX: &str = " 계약:";
-const CONTRACT_EXTRACT_FAILED: &str = " 계약 추출 실패: ";
-const DECLARED_CHANGE_PREFIX: &str = "확인 선언 변경: ";
+/// 게이트가 커밋에 남기는 영향 범위 트레일러(`Workflow-Impact`)의 값을 읽는다. 커밋 본문(검증 보고서·에이전트 요약)은 읽지 않는다:
+/// 본문에는 서비스 로그·오류 문구·모델이 쓴 글이 줄바꿈과 함께 섞여 들어가 기록처럼 보이는 줄을 흉내 낼 수 있다.
+/// 트레일러 값은 한 줄 JSON이라 그 값들의 줄바꿈이 이스케이프된다. 모양이 조금이라도 다르면 읽지 못한 것으로 센다(0건이 아니다)
 const CONTRACT_KINDS: [&str; 8] = [
     "operation-added",
     "operation-removed",
@@ -621,78 +620,108 @@ struct ContractLine {
     breaking: bool,
 }
 
-/// 커밋 하나의 본문에서 읽은 계약 비교 기록
+/// 커밋 하나의 영향 범위 기록
 #[derive(Default)]
-struct ContractRecord {
-    /// `- 서비스 계약:` 머리와 그 아래 변경 줄(또는 "계약 변경 없음")을 읽었다
+struct ImpactRecord {
+    /// 계약 비교 기록이 있다(서비스 하나 이상)
     recorded: bool,
-    /// 계약 추출 실패 줄이 있거나, 계약 머리 아래에 모르는 모양의 줄이 있어 읽지 못했다
+    /// 계약 추출에 실패한 서비스가 있거나, 트레일러를 읽지 못했다
     failed: bool,
     changes: Vec<ContractLine>,
+    /// 기록에 담지 못하고 센 변경 수
+    omitted: usize,
+    /// 사람이 허용해 바뀐 확인 선언 변경의 요약
+    declared: Option<String>,
 }
 
-/// 기록으로 읽을 줄들(에이전트 요약 앞까지)
-fn record_lines(body: &str) -> impl Iterator<Item = &str> {
-    body.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line)).take_while(|line| *line != AGENT_SUMMARY_MARK)
-}
-
-/// `verify_judge::format_verification_report`가 쓴 계약 절(`- 서비스 계약:` 아래 네 칸 들여 쓴 `＋ 종류 대상` 또는 `⚠️ 호환 깨짐 종류 대상`)을 읽는다.
-/// 모양이 다른 줄은 "읽지 못함"(failed)이다: 0건으로 세지 않는다
-fn parse_contract_record(body: &str) -> ContractRecord {
-    let mut record = ContractRecord::default();
-    let mut in_contract = false;
-    for line in record_lines(body) {
-        if let Some(rest) = line.strip_prefix("- ") {
-            in_contract = false;
-            if rest.len() > CONTRACT_HEADER_SUFFIX.len() && rest.ends_with(CONTRACT_HEADER_SUFFIX) {
-                in_contract = true;
+fn parse_impact_record(raw: &str) -> ImpactRecord {
+    let unreadable = ImpactRecord { failed: true, ..ImpactRecord::default() };
+    let Ok(JsValue::Obj(object)) = js_json::parse_native(raw) else { return unreadable };
+    if !matches!(object.get("v"), Some(JsValue::Num(v)) if *v == 1.0) {
+        return unreadable;
+    }
+    let mut record = ImpactRecord::default();
+    match object.get("contracts") {
+        None => {}
+        Some(JsValue::Arr(items)) => {
+            for item in items {
+                let JsValue::Obj(entry) = item else { return unreadable };
+                if !matches!(entry.get("service"), Some(JsValue::Str(_))) {
+                    return unreadable;
+                }
                 record.recorded = true;
-            } else if rest.contains(CONTRACT_EXTRACT_FAILED) {
-                record.failed = true;
+                if matches!(entry.get("failed"), Some(JsValue::Bool(true))) {
+                    record.failed = true;
+                    continue;
+                }
+                let Some(JsValue::Arr(changes)) = entry.get("changes") else { return unreadable };
+                for change in changes {
+                    let JsValue::Obj(change) = change else { return unreadable };
+                    let (Some(JsValue::Str(kind)), Some(JsValue::Str(target)), Some(JsValue::Bool(breaking))) = (change.get("kind"), change.get("target"), change.get("breaking")) else {
+                        return unreadable;
+                    };
+                    if !CONTRACT_KINDS.contains(&kind.as_str()) || target.is_empty() {
+                        return unreadable;
+                    }
+                    record.changes.push(ContractLine { kind: kind.clone(), target: target.clone(), breaking: *breaking });
+                }
             }
-            continue;
         }
-        if !in_contract {
-            continue;
+        Some(_) => return unreadable,
+    }
+    match object.get("omitted") {
+        None => {}
+        Some(JsValue::Num(n)) if *n >= 0.0 && n.fract() == 0.0 => record.omitted = *n as usize,
+        Some(_) => return unreadable,
+    }
+    match object.get("declared") {
+        None => {}
+        Some(JsValue::Str(detail)) => {
+            let detail = js::trim(detail);
+            if !detail.is_empty() {
+                let chars: Vec<char> = detail.chars().collect();
+                record.declared = Some(if chars.len() > DECLARED_CHANGE_DETAIL_MAX { format!("{}…", chars[..DECLARED_CHANGE_DETAIL_MAX].iter().collect::<String>()) } else { detail.to_owned() });
+            }
         }
-        let Some(item) = line.strip_prefix("    ") else {
-            in_contract = false;
-            continue;
-        };
-        if item == "계약 변경 없음" {
-            continue;
-        }
-        if item.starts_with("이 요청은 호환을 깨는 변경을 허용하지 않았습니다") {
-            continue;
-        }
-        let (breaking, rest) = if let Some(rest) = item.strip_prefix("⚠️ 호환 깨짐 ") {
-            (true, rest)
-        } else if let Some(rest) = item.strip_prefix("＋ ") {
-            (false, rest)
-        } else {
-            record.failed = true;
-            continue;
-        };
-        let (kind, tail) = rest.split_once(' ').unwrap_or((rest, ""));
-        let target = tail.split_once(" (").map_or(tail, |(target, _)| target);
-        if !CONTRACT_KINDS.contains(&kind) || target.is_empty() {
-            record.failed = true;
-            continue;
-        }
-        record.changes.push(ContractLine { kind: kind.to_owned(), target: target.to_owned(), breaking });
+        Some(_) => return unreadable,
     }
     record
 }
 
-/// 게이트가 사람이 허용한 확인 선언 변경으로 검증했다고 남긴 줄(`확인 선언 변경: …`)의 내용. 없으면 `None`
-fn parse_declared_change(body: &str) -> Option<String> {
-    let detail = record_lines(body).find_map(|line| line.strip_prefix(DECLARED_CHANGE_PREFIX))?;
-    let detail = js::trim(detail);
-    if detail.is_empty() {
-        return None;
+/// 마크다운에 값을 그대로 끼워 넣어도 구조가 깨지거나 링크·멘션이 생기지 않게 하는 코드 범위.
+/// 줄바꿈·제어 문자·줄 구분 문자는 공백 하나로 줄이고, 값 안의 가장 긴 백틱 묶음보다 긴 울타리로 감싼다(코드 범위 안에서는 `@`·`#`·`[]()`가 글자일 뿐이다)
+fn code(value: &str) -> String {
+    let mut flat = String::with_capacity(value.len());
+    let mut in_space = false;
+    for c in value.chars() {
+        if is_js_whitespace(c) || c.is_control() || matches!(c, '\u{2028}' | '\u{2029}' | '\u{85}') {
+            if !in_space {
+                flat.push(' ');
+            }
+            in_space = true;
+        } else {
+            flat.push(c);
+            in_space = false;
+        }
     }
-    let chars: Vec<char> = detail.chars().collect();
-    Some(if chars.len() > DECLARED_CHANGE_DETAIL_MAX { format!("{}…", chars[..DECLARED_CHANGE_DETAIL_MAX].iter().collect::<String>()) } else { detail.to_owned() })
+    let flat = flat.trim_matches(' ');
+    if flat.is_empty() {
+        return "(빈 값)".to_owned();
+    }
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for c in flat.chars() {
+        if c == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    let fence = "`".repeat(longest + 1);
+    // 값이 백틱으로 시작하거나 끝나면 울타리와 붙지 않게 한 칸씩 띄운다(CommonMark는 양쪽 한 칸을 지운다)
+    let pad = if flat.starts_with('`') || flat.ends_with('`') { " " } else { "" };
+    format!("{fence}{pad}{flat}{pad}{fence}")
 }
 
 /// DB 마이그레이션으로 "보이는" 파일. 이름만 보는 추정이고 리뷰어에게 알리는 데만 쓴다(막는 검사가 아니다)
@@ -712,13 +741,13 @@ fn looks_like_migration(file: &str) -> bool {
 }
 
 fn file_list(files: &[&String]) -> String {
-    let shown: Vec<String> = files.iter().take(IMPACT_FILE_LIST_MAX).map(|file| format!("`{file}`")).collect();
+    let shown: Vec<String> = files.iter().take(IMPACT_FILE_LIST_MAX).map(|file| code(file)).collect();
     let more = if files.len() > shown.len() { format!(" 외 {}개", files.len() - shown.len()) } else { String::new() };
     format!("{}{more}", shown.join(", "))
 }
 
 fn sha_list(commits: &[&Commit]) -> String {
-    let shown: Vec<String> = commits.iter().take(IMPACT_ITEM_MAX).map(|commit| format!("`{}`", commit.short_sha)).collect();
+    let shown: Vec<String> = commits.iter().take(IMPACT_ITEM_MAX).map(|commit| code(&commit.short_sha)).collect();
     let more = if commits.len() > shown.len() { format!(" 외 {}건", commits.len() - shown.len()) } else { String::new() };
     format!("{}{more}", shown.join(", "))
 }
@@ -740,7 +769,7 @@ fn impact_section_lines(commits: &[Commit], impact: &Impact) -> Vec<String> {
         None => lines.push("- 바뀐 서비스: 확인하지 못함(서비스 선언으로 파일이 속한 서비스를 판정하지 못했습니다)".to_owned()),
         Some(services) if services.is_empty() => lines.push("- 바뀐 서비스: 없음(서비스에 속한 파일이 바뀌지 않았습니다)".to_owned()),
         Some(services) => {
-            let names: Vec<String> = services.iter().map(|service| format!("`{service}`")).collect();
+            let names: Vec<String> = services.iter().map(|service| code(service)).collect();
             let outside = match impact.unmatched_files {
                 Some(count) if count > 0.0 => format!(" · 서비스에 속하지 않은 파일 {}개", js::number_to_string(count)),
                 _ => String::new(),
@@ -749,15 +778,18 @@ fn impact_section_lines(commits: &[Commit], impact: &Impact) -> Vec<String> {
         }
     }
 
-    // 계약 차이: 요청마다 커밋 본문에 남은 게이트 기록을 읽는다. 기록이 없으면 0건이 아니라 "확인하지 못함"이다
+    // 계약 차이: 요청마다 게이트가 커밋의 Workflow-Impact 트레일러에 남긴 기록만 읽는다. 기록이 없으면 0건이 아니라 "확인하지 못함"이다
     let checked: Vec<&Commit> = commits.iter().filter(|commit| !commit.docs_exempt).collect();
     if !checked.is_empty() {
-        let records: Vec<(&Commit, ContractRecord)> = checked.iter().map(|commit| (*commit, if commit.gate_recorded { parse_contract_record(&commit.body) } else { ContractRecord::default() })).collect();
-        let recorded: Vec<&(&Commit, ContractRecord)> = records.iter().filter(|(_, record)| record.recorded).collect();
+        let records: Vec<(&Commit, ImpactRecord)> = checked
+            .iter()
+            .map(|commit| (*commit, if commit.gate_recorded { commit.impact_record.as_deref().map(parse_impact_record).unwrap_or_default() } else { ImpactRecord::default() }))
+            .collect();
+        let recorded: Vec<&(&Commit, ImpactRecord)> = records.iter().filter(|(_, record)| record.recorded).collect();
         let unknown: Vec<&Commit> = records.iter().filter(|(_, record)| !record.recorded && !record.failed).map(|(commit, _)| *commit).collect();
         let failed: Vec<&Commit> = records.iter().filter(|(_, record)| record.failed).map(|(commit, _)| *commit).collect();
         if recorded.is_empty() {
-            lines.push("- API 계약 차이: 확인하지 못함(커밋 본문에 계약 비교 기록이 없습니다. 계약을 선언한 서비스가 없거나 게이트 기록이 남지 않은 요청입니다)".to_owned());
+            lines.push("- API 계약 차이: 확인하지 못함(게이트가 남긴 계약 비교 기록이 없습니다. 계약을 선언한 서비스가 없거나 기록이 남지 않은 요청입니다)".to_owned());
         } else {
             let all: Vec<(&Commit, &ContractLine)> = recorded.iter().flat_map(|(commit, record)| record.changes.iter().map(move |change| (*commit, change))).collect();
             let added = all.iter().filter(|(_, change)| change.kind.ends_with("-added")).count();
@@ -770,13 +802,17 @@ fn impact_section_lines(commits: &[Commit], impact: &Impact) -> Vec<String> {
                 lines.push(format!("- API 계약 차이: 추가 {added} · 삭제 {removed} · 변경 {changed} (그중 호환 깨짐 {}) — 계약 비교 기록이 있는 요청 {}건", breaking.len(), recorded.len()));
             }
             for (commit, change) in breaking.iter().take(IMPACT_ITEM_MAX).map(|pair| **pair) {
-                lines.push(format!("  - 호환 깨짐: `{} {}` (`{}`)", change.kind, change.target, commit.short_sha));
+                lines.push(format!("  - 호환 깨짐: {} ({})", code(&format!("{} {}", change.kind, change.target)), code(&commit.short_sha)));
             }
             if breaking.len() > IMPACT_ITEM_MAX {
                 lines.push(format!("  - 호환 깨짐 {}건이 더 있습니다", breaking.len() - IMPACT_ITEM_MAX));
             }
             if !unknown.is_empty() {
                 lines.push(format!("  - 계약 비교 기록이 없어 확인하지 못한 요청 {}건: {}", unknown.len(), sha_list(&unknown)));
+            }
+            let omitted: usize = recorded.iter().map(|(_, record)| record.omitted).sum();
+            if omitted > 0 {
+                lines.push(format!("  - 기록에 담지 못한 계약 변경 {omitted}건은 위 수에 들어 있지 않습니다"));
             }
             lines.push("  - 요청마다 그 요청을 시작할 때의 계약과 견준 기록을 합친 값입니다. 세션 전체를 한 번에 견준 값이 아닙니다".to_owned());
         }
@@ -807,9 +843,13 @@ fn impact_section_lines(commits: &[Commit], impact: &Impact) -> Vec<String> {
     if !tests.is_empty() {
         focus.push(format!("- 시험 파일 변경: {}", file_list(&tests)));
     }
-    let allowed: Vec<(&Commit, String)> = checked.iter().filter(|commit| commit.gate_recorded).filter_map(|commit| parse_declared_change(&commit.body).map(|detail| (*commit, detail))).collect();
+    let allowed: Vec<(&Commit, String)> = checked
+        .iter()
+        .filter(|commit| commit.gate_recorded)
+        .filter_map(|commit| commit.impact_record.as_deref().map(parse_impact_record).and_then(|record| record.declared).map(|detail| (*commit, detail)))
+        .collect();
     for (commit, detail) in allowed.iter().take(IMPACT_ITEM_MAX) {
-        focus.push(format!("- 사람이 허용한 확인 선언 변경: `{}` — {detail}", commit.short_sha));
+        focus.push(format!("- 사람이 허용한 확인 선언 변경: {} — {}", code(&commit.short_sha), code(&detail)));
     }
     if allowed.len() > IMPACT_ITEM_MAX {
         focus.push(format!("- 사람이 허용한 확인 선언 변경이 {}건 더 있습니다", allowed.len() - IMPACT_ITEM_MAX));
@@ -1009,6 +1049,7 @@ fn parse_commit(value: &JsValue) -> Result<Commit, String> {
             Some(JsValue::Bool(b)) => *b,
             _ => return Err("커밋의 gateRecorded는 참·거짓이어야 합니다".to_owned()),
         },
+        impact_record: optional_string_field(object, "impactRecord", "커밋")?,
     })
 }
 
@@ -1178,35 +1219,48 @@ mod tests {
     }
 
     #[test]
-    fn 계약_기록은_요약_앞의_보고서_줄만_읽는다() {
-        let body = "검증 통과\n- api 계약:\n    ＋ operation-added GET /api/orders/{id}\n    ⚠️ 호환 깨짐 property-removed Order.total (기존 필드 삭제)\n- web: 재시작 후 준비 완료\n\n에이전트 요약:\n- api 계약:\n    ⚠️ 호환 깨짐 property-removed X.y";
-        let record = parse_contract_record(body);
+    fn 영향_범위_트레일러를_읽는다() {
+        let raw = r#"{"v":1,"contracts":[{"service":"api","changes":[{"kind":"operation-added","target":"GET /api/orders/{id}","breaking":false},{"kind":"property-removed","target":"Order.total","breaking":true}]},{"service":"web","changes":[]}],"omitted":2,"declared":"삭제: tests.slow"}"#;
+        let record = parse_impact_record(raw);
         assert!(record.recorded && !record.failed);
         let seen: Vec<(&str, &str, bool)> = record.changes.iter().map(|c| (c.kind.as_str(), c.target.as_str(), c.breaking)).collect();
         assert_eq!(seen, vec![("operation-added", "GET /api/orders/{id}", false), ("property-removed", "Order.total", true)]);
+        assert_eq!((record.omitted, record.declared.as_deref()), (2, Some("삭제: tests.slow")));
     }
 
     #[test]
-    fn 모르는_모양의_계약_줄과_추출_실패는_모름이다() {
-        let unknown_kind = parse_contract_record("- api 계약:\n    ＋ 처음_보는_종류 Order.x");
-        assert!(unknown_kind.recorded && unknown_kind.failed && unknown_kind.changes.is_empty());
-        let free_text = parse_contract_record("- api 계약:\n    뭔가 바뀜");
-        assert!(free_text.failed);
-        let extract_failed = parse_contract_record("- api 계약 추출 실패: 연결 거부");
-        assert!(!extract_failed.recorded && extract_failed.failed);
-        let none = parse_contract_record("- api: 재시작 후 준비 완료\n    마지막 로그");
-        assert!(!none.recorded && !none.failed);
-        let clean = parse_contract_record("- api 계약:\n    계약 변경 없음\n- web 계약:\n    계약 변경 없음");
+    fn 모르는_모양의_기록과_추출_실패는_모름이다() {
+        for raw in [
+            "계약 변경 없음",
+            "{",
+            r#"{"v":2,"contracts":[]}"#,
+            r#"{"v":1,"contracts":[{"service":"api","changes":[{"kind":"처음_보는_종류","target":"x","breaking":false}]}]}"#,
+            r#"{"v":1,"contracts":[{"service":"api","changes":[{"kind":"schema-added","target":"","breaking":false}]}]}"#,
+            r#"{"v":1,"contracts":[{"service":"api"}]}"#,
+            r#"{"v":1,"contracts":"x"}"#,
+            r#"{"v":1,"omitted":-1}"#,
+            r#"{"v":1,"declared":5}"#,
+        ] {
+            let record = parse_impact_record(raw);
+            assert!(record.failed && !record.recorded && record.changes.is_empty(), "{raw}");
+        }
+        let extract_failed = parse_impact_record(r#"{"v":1,"contracts":[{"service":"api","failed":true}]}"#);
+        assert!(extract_failed.recorded && extract_failed.failed);
+        let clean = parse_impact_record(r#"{"v":1,"contracts":[{"service":"api","changes":[]}]}"#);
         assert!(clean.recorded && !clean.failed && clean.changes.is_empty());
+        let declared_only = parse_impact_record(r#"{"v":1,"declared":"  "}"#);
+        assert!(!declared_only.recorded && !declared_only.failed && declared_only.declared.is_none());
     }
 
     #[test]
-    fn 허용한_확인_선언_변경_줄은_요약_앞에서만_읽고_길이를_자른다() {
-        assert_eq!(parse_declared_change("확인 선언 변경: 삭제: tests.slow\n\n에이전트 요약:\n확인 선언 변경: 가짜").as_deref(), Some("삭제: tests.slow"));
-        assert_eq!(parse_declared_change("에이전트 요약:\n확인 선언 변경: 가짜"), None);
-        assert_eq!(parse_declared_change("확인 선언 변경:   "), None);
-        let long = parse_declared_change(&format!("확인 선언 변경: {}", "가".repeat(300))).unwrap();
-        assert_eq!(long.chars().count(), DECLARED_CHANGE_DETAIL_MAX + 1);
+    fn 코드_범위는_백틱과_줄바꿈을_가둔다() {
+        assert_eq!(code("a.ts"), "`a.ts`");
+        assert_eq!(code("a`b"), "``a`b``");
+        assert_eq!(code("a``b"), "```a``b```");
+        assert_eq!(code("`a"), "`` `a ``");
+        assert_eq!(code("a\nb\r\n  c\u{2028}d"), "`a b c d`");
+        assert_eq!(code("[x](http://e) @user #12"), "`[x](http://e) @user #12`");
+        assert_eq!(code(" \n "), "(빈 값)");
     }
 
     #[test]

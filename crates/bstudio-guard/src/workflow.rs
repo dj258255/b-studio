@@ -21,6 +21,8 @@ use crate::{next_routes, path_policy, services};
 pub const WORKFLOW_TRAILER: &str = "Workflow-Passed";
 pub const WORKFLOW_VERIFY_TRAILER: &str = "Workflow-Verify";
 pub const WORKFLOW_INCOMPLETE_TRAILER: &str = "Workflow-Incomplete";
+/// 게이트가 남긴 영향 범위 기록(계약 차이·허용한 확인 선언 변경)을 담는 트레일러. 값은 한 줄 JSON이다
+pub const WORKFLOW_IMPACT_TRAILER: &str = "Workflow-Impact";
 pub const COVERAGE_GAP_PREFIX: &str = "coverage-gap";
 
 pub const VERIFICATION_STAGES: [&str; 7] = ["run", "browser_check", "contract_check", "test", "concurrency_check", "load_check", "review"];
@@ -38,6 +40,10 @@ pub fn format_workflow_trailer(stages: &[String]) -> String {
 
 pub fn format_verify_trailer(mode: &str) -> String {
     format!("{WORKFLOW_VERIFY_TRAILER}: {mode}")
+}
+
+pub fn format_impact_trailer(json: &str) -> String {
+    format!("{WORKFLOW_IMPACT_TRAILER}: {json}")
 }
 
 pub fn format_incomplete_trailer(reason: &str) -> String {
