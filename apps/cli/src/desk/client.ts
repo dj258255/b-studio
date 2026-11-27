@@ -12,7 +12,7 @@ import type { ActivityLogView, DeskQaRun, DeskQaStart, DeskRepoList, DeskService
 import type { LiveChangesView } from './changes';
 import type { FolderListingView, FolderProposalView } from './folder';
 import type { DeskPlan } from './plans';
-import type { DeskAccount, DeskAccountLimits, DeskItem, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskSpend, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
+import type { DeskAccount, DeskAccountLimits, DeskItem, DeskAccountStatus, DeskDocEntry, DeskFleet, DeskFleetCandidate, DeskLoginProgress, DeskLoginStart, DeskOverview, DeskPhonePairing, DeskPhoneView, DeskPreview, DeskProject, DeskProjectStatus, DeskRequirements, DeskRequirementsDraft, DeskRules, DeskRulesView, DeskSpend, DeskStartResult, DeskTerminalMessage, DeskTests } from './types';
 import type { RecordsReport, RecordsStats } from './records';
 import type { DetailExportPreview, DetailExportResult, DetailSnapshot } from './session-detail';
 
@@ -143,6 +143,29 @@ export class StudioClient {
       throw new StudioRequestError(typeof message === 'string' ? message : `스튜디오가 ${response.status}로 답했습니다 (${pathname})`, response.status);
     }
     return parsed as T;
+  }
+
+  /** 휴대폰 연결의 상태(켜짐, 귀가 열린 주소, 짝 맺은 기기) */
+  phone(): Promise<DeskPhoneView> {
+    return this.#request('GET', '/api/phone');
+  }
+
+  /** 짝짓기 스위치. 켜면 사설 네트워크 주소에 귀를 열고, 끄면 닫는다 */
+  setPhoneEnabled(enabled: boolean): Promise<DeskPhoneView> {
+    return this.#request('POST', '/api/phone', { enabled });
+  }
+
+  /** 새 짝 코드와 QR에 담을 내용 */
+  phonePairing(): Promise<DeskPhonePairing> {
+    return this.#request('POST', '/api/phone/pairing');
+  }
+
+  async cancelPhonePairing(): Promise<void> {
+    await this.#request('DELETE', '/api/phone/pairing');
+  }
+
+  async revokePhone(id: string): Promise<void> {
+    await this.#request('DELETE', `/api/phone/devices/${encodeURIComponent(id)}`);
   }
 
   agents(): Promise<DeskOverview> {

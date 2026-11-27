@@ -44,6 +44,7 @@ ADR을 더 읽고 싶다면 [ADR 지도](adr-map.md)에서 시작합니다. 200�
 - [도메인 범위와 ML·데이터 검증 조사](research/2026-10-16-domain-scope-and-ml-verification.md) — 다른 에이전트 도구의 도메인 범위와 완료 전 검증, ML·데이터 작업의 거짓 성공 사례와 종료 코드로 잡는 검사(ADR-175)
 - [문서 관리 실무 조사](research/2026-10-12-bigtech-doc-management-practice.md) — 빅테크가 사내 문서를 관리하는 규칙(문서를 코드처럼, owner·신선도, 타입 분리), 문서 관련 결정에 참고할 후보
 - [설계 결정 기록](decisions.md) — ADR-001부터 이어지는 선택과 트레이드오프. 길잡이는 [ADR 지도](adr-map.md). 지워진 화면의 옛 결정 본문은 [지난 ADR 보관 문서](decisions-archive.md)
+- [휴대폰 암호 통로 프로토콜](phone-protocol.md) — 휴대폰 앱이 짝을 맺고 세션 터미널을 비추는 QR 형식·메시지 틀·번호 규칙·오류 표(ADR-249)
 - [검증 기록과 한계](verification.md) — 자동 검사, 실제 환경 검증, 확인하지 못한 범위
 
 ## 문서 관리 원칙

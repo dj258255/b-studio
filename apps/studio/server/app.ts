@@ -45,12 +45,13 @@ function pickHandler(module: RouteModule, method: string): Handler | undefined {
   return undefined;
 }
 
-export function createStudioHandler(options: StudioHandlerOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
-  const routes = compileRoutes(options.routes);
+/**
+ * 라우트 맞추기와 메서드 핸들러 부르기(앞단의 인증 판단은 하지 않는다). 스튜디오 서버가 인증을 마친 요청을 넘기고,
+ * 휴대폰 암호 통로(lib/server/phone)가 자기 인증을 마친 안쪽 요청을 넘긴다. 어느 쪽이든 라우트 핸들러의 검사는 그대로 지난다
+ */
+export function createRouteDispatcher(entries: readonly RouteEntry[]): (request: Request) => Promise<Response> {
+  const routes = compileRoutes(entries);
   const modules = new Map<string, Promise<RouteModule>>();
-  const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
-  const env = options.env ?? process.env;
-  const now = options.now ?? Date.now;
 
   const loadModule = (route: RouteEntry): Promise<RouteModule> => {
     let loaded = modules.get(route.pattern);
@@ -62,6 +63,33 @@ export function createStudioHandler(options: StudioHandlerOptions): (req: Incomi
     }
     return loaded;
   };
+
+  return async (request) => {
+    const url = new URL(request.url);
+    const match = matchRoute(routes, url.pathname);
+    if (!match) {
+      if (url.pathname === '/') return json(200, { app: 'b-studio', message: '화면은 터미널 작업대입니다. pnpm studio로 여세요' });
+      return json(404, { error: '없는 경로입니다' });
+    }
+    const routeModule = await loadModule(match.route);
+    const method = request.method.toUpperCase();
+    const handler = pickHandler(routeModule, method);
+    if (!handler) {
+      const allow = allowedMethods(routeModule).join(', ');
+      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: { allow } });
+      return json(405, { error: '이 경로는 그 메서드를 받지 않습니다' }, { allow });
+    }
+
+    // 핸들러. params는 Promise로 넘긴다(라우트의 RouteContext 타입, route-context.d.ts)
+    return await handler(request, { params: Promise.resolve(match.params) });
+  };
+}
+
+export function createStudioHandler(options: StudioHandlerOptions): (req: IncomingMessage, res: ServerResponse) => Promise<void> {
+  const dispatch = createRouteDispatcher(options.routes);
+  const maxBodyBytes = options.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const env = options.env ?? process.env;
+  const now = options.now ?? Date.now;
 
   const respond = async (req: IncomingMessage, signal: AbortSignal): Promise<Response> => {
     let request: Request;
@@ -90,23 +118,8 @@ export function createStudioHandler(options: StudioHandlerOptions): (req: Incomi
     request.headers.delete(PROXY_SECRET_HEADER);
     if (decision.kind === 'allow') request.headers.set(USER_HEADER, decision.user);
 
-    // 2. 라우트
-    const match = matchRoute(routes, url.pathname);
-    if (!match) {
-      if (url.pathname === '/') return json(200, { app: 'b-studio', message: '화면은 터미널 작업대입니다. pnpm studio로 여세요' });
-      return json(404, { error: '없는 경로입니다' });
-    }
-    const routeModule = await loadModule(match.route);
-    const method = request.method.toUpperCase();
-    const handler = pickHandler(routeModule, method);
-    if (!handler) {
-      const allow = allowedMethods(routeModule).join(', ');
-      if (method === 'OPTIONS') return new Response(null, { status: 204, headers: { allow } });
-      return json(405, { error: '이 경로는 그 메서드를 받지 않습니다' }, { allow });
-    }
-
-    // 3. 핸들러. params는 Promise로 넘긴다(라우트의 RouteContext 타입, route-context.d.ts)
-    return await handler(request, { params: Promise.resolve(match.params) });
+    // 2~3. 라우트와 메서드 핸들러
+    return await dispatch(request);
   };
 
   return async (req, res) => {

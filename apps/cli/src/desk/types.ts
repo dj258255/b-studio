@@ -664,3 +664,30 @@ export interface AgentActivityLogView {
 export interface ActivityLogView {
   agents: AgentActivityLogView[];
 }
+
+/** 휴대폰 연결의 상태(스튜디오 GET /api/phone). 짝 맺은 기기와 귀가 열린 주소 */
+export interface DeskPhoneView {
+  /** 이 서버가 짝짓기를 허용하는가 */
+  allowed: boolean;
+  enabled: boolean;
+  addresses: string[];
+  pairing?: { expiresAt: number };
+  devices: DeskPhoneDevice[];
+  /** 이 컴퓨터 이름 */
+  host?: string;
+}
+
+export interface DeskPhoneDevice {
+  id: string;
+  name: string;
+  createdAt: number;
+  lastSeenAt: number;
+  connected: boolean;
+  user: string;
+}
+
+/** 새 짝 코드와 QR에 담을 내용(POST /api/phone/pairing) */
+export interface DeskPhonePairing {
+  payload: string;
+  expiresAt: number;
+}

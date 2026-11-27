@@ -71,9 +71,9 @@ describe('설정 화면 이동', () => {
     let { state } = press(loaded({ row: 1 }), '\t');
     expect(state?.tab).toBe('rules');
     expect(state?.row).toBe(0);
-    state = press(state!, '\t', '\t', '\t').state;
+    state = press(state!, '\t', '\t', '\t', '\t').state;
     expect(state?.tab).toBe('accounts');
-    expect(press(state!, SHIFT_TAB).state?.tab).toBe('keys');
+    expect(press(state!, SHIFT_TAB).state?.tab).toBe('phone');
   });
 
   it('↑↓는 그 탭의 줄 안에서만 움직인다', () => {

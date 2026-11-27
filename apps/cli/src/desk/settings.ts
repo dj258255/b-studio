@@ -10,16 +10,18 @@ import { fit, fitAnsi, osc8, stringWidth, tailFit } from './screen';
 import { backendLabel } from './sidebar';
 import { spriteLines, type Sprite } from './sprite';
 import { bg, BOLD, fg, RESET, type Theme } from './theme';
+import { qrWidth } from './qr';
 import { badge, box } from './widgets';
-import type { DeskAccount, DeskAccountStatus, DeskRule, DeskRules, DeskRuleTarget, DeskRuleWhen } from './types';
+import type { DeskAccount, DeskAccountStatus, DeskPhonePairing, DeskPhoneView, DeskRule, DeskRules, DeskRuleTarget, DeskRuleWhen } from './types';
 
-export type SettingsTab = 'accounts' | 'rules' | 'screen' | 'keys';
+export type SettingsTab = 'accounts' | 'rules' | 'screen' | 'keys' | 'phone';
 
 export const SETTINGS_TABS: ReadonlyArray<{ tab: SettingsTab; label: string }> = [
   { tab: 'accounts', label: '계정' },
   { tab: 'rules', label: '라우팅 규칙' },
   { tab: 'screen', label: '화면' },
   { tab: 'keys', label: '키·알림' },
+  { tab: 'phone', label: '휴대폰' },
 ];
 
 export type RulesView = DeskRules;
@@ -76,7 +78,7 @@ export interface PickerState {
   index: number;
 }
 
-export type SettingsConfirm = { kind: 'remove-account'; id: string; name: string } | { kind: 'remove-rule'; index: number } | { kind: 'discard-rules' };
+export type SettingsConfirm = { kind: 'remove-account'; id: string; name: string } | { kind: 'remove-phone'; id: string; name: string } | { kind: 'remove-rule'; index: number } | { kind: 'discard-rules' };
 
 export interface SettingsState {
   tab: SettingsTab;
@@ -105,8 +107,19 @@ export interface SettingsState {
   login?: LoginView;
   /** 규칙 미리보기: 쓴 요청과 결과 한 줄 */
   preview?: { text: string; pending?: boolean; result?: string };
+  /** 휴대폰 탭: 서버가 알려 준 상태와 보이는 QR */
+  phone?: PhoneState;
   /** 아래 줄 알림(다음 키에서 지운다) */
   note?: string;
+}
+
+export interface PhoneState {
+  view?: DeskPhoneView;
+  error?: string;
+  /** 받는 중 */
+  loading?: boolean;
+  /** 보이는 짝짓기 QR. 있으면 QR 화면이 모든 키를 받는다 */
+  pairing?: DeskPhonePairing & { lines: string[] };
 }
 
 export type SettingsEffect =
@@ -122,7 +135,12 @@ export type SettingsEffect =
   | { type: 'rules-reload' }
   | { type: 'preview'; text: string }
   | { type: 'config'; config: DeskConfig }
-  | { type: 'sprite-preview'; file: string };
+  | { type: 'sprite-preview'; file: string }
+  | { type: 'phone-load' }
+  | { type: 'phone-toggle'; enabled: boolean }
+  | { type: 'phone-pair' }
+  | { type: 'phone-pair-cancel' }
+  | { type: 'phone-revoke'; id: string };
 
 const ESC = '\x1b';
 const UP = ['\x1b[A', '\x1bOA'];
@@ -327,6 +345,7 @@ export function openSettings(input: { config: DeskConfig; sprites: string[] }): 
 function rowCount(state: SettingsState): number {
   if (state.tab === 'accounts') return state.accounts.length;
   if (state.tab === 'rules') return state.rules ? state.rules.rules.length + 1 : 0;
+  if (state.tab === 'phone') return 1 + (state.phone?.view?.devices.length ?? 0);
   return optionRows(state.tab).length;
 }
 
@@ -461,6 +480,7 @@ export function settingsKey(start: SettingsState, key: string): { state: Setting
   if (state.form) return { state: formKey(state, key, effects), effects };
   if (state.picker) return { state: pickerKey(state, key, effects), effects };
   if (state.login) return { state: loginKey(state, key, effects), effects };
+  if (state.phone?.pairing) return { state: pairingKey(state, effects), effects };
 
   if (key === ESC || key === 'q' || key === CTRL_C) {
     if (state.rulesDirty) return { state: { ...state, confirm: { kind: 'discard-rules' } }, effects };
@@ -470,16 +490,47 @@ export function settingsKey(start: SettingsState, key: string): { state: Setting
   if (key === '\t' || key === SHIFT_TAB) {
     const at = SETTINGS_TABS.findIndex((entry) => entry.tab === state.tab);
     const next = SETTINGS_TABS[(at + (key === '\t' ? 1 : SETTINGS_TABS.length - 1)) % SETTINGS_TABS.length]!;
-    return { state: { ...state, tab: next.tab, row: 0 }, effects };
+    // 휴대폰 탭에 들어가면 상태를 받는다(받지 못하면 탭에 까닭이 보인다)
+    if (next.tab === 'phone') effects.push({ type: 'phone-load' });
+    return { state: { ...state, tab: next.tab, row: 0, ...(next.tab === 'phone' ? { phone: { ...state.phone, loading: true } } : {}) }, effects };
   }
   const count = rowCount(state);
   if (UP.includes(key)) return { state: { ...state, row: Math.max(0, state.row - 1) }, effects };
   if (DOWN.includes(key)) return { state: { ...state, row: Math.max(0, Math.min(count - 1, state.row + 1)) }, effects };
   if (state.tab === 'screen' || state.tab === 'keys') return { state: optionKey(state, key, effects), effects };
+  if (state.tab === 'phone') return { state: phoneKey(state, key, effects), effects };
   // 계정과 규칙은 받은 뒤에 다룬다
   if (state.loading) return { state, effects };
   if (state.tab === 'accounts') return { state: accountsKey(state, key, effects), effects };
   return { state: rulesKey(state, key, effects), effects };
+}
+
+function phoneKey(state: SettingsState, key: string, effects: SettingsEffect[]): SettingsState {
+  const view = state.phone?.view;
+  if (key === 'r') {
+    effects.push({ type: 'phone-load' });
+    return { ...state, phone: { ...state.phone, loading: true } };
+  }
+  if (!view) return state;
+  if (state.row === 0 && (ENTER.includes(key) || key === ' ' || LEFT.includes(key) || RIGHT.includes(key))) {
+    if (!view.allowed) return { ...state, note: '이 서버는 휴대폰 연결을 허용하지 않습니다(운영자가 B_STUDIO_PHONE=1을 적어야 합니다)' };
+    effects.push({ type: 'phone-toggle', enabled: !view.enabled });
+    return { ...state, phone: { ...state.phone, loading: true }, note: view.enabled ? '휴대폰 연결을 끄는 중…' : '휴대폰 연결을 켜는 중…' };
+  }
+  if (key === 'n') {
+    if (!view.enabled) return { ...state, note: '먼저 휴대폰 연결을 켜세요(맨 윗줄에서 Enter)' };
+    effects.push({ type: 'phone-pair' });
+    return { ...state, note: '짝 코드를 만드는 중…' };
+  }
+  const device = view.devices[state.row - 1];
+  if (device && (key === 'x' || key === '\x7f' || key === '\x1b[3~')) return { ...state, confirm: { kind: 'remove-phone', id: device.id, name: device.name } };
+  return state;
+}
+
+/** QR 화면: 어떤 키든 QR을 거두고 코드도 못 쓰게 한다 */
+function pairingKey(state: SettingsState, effects: SettingsEffect[]): SettingsState {
+  effects.push({ type: 'phone-pair-cancel' });
+  return { ...state, phone: { ...state.phone, pairing: undefined }, note: '짝 코드를 거두었습니다' };
 }
 
 function accountsKey(state: SettingsState, key: string, effects: SettingsEffect[]): SettingsState {
@@ -593,6 +644,10 @@ function confirmKey(state: SettingsState, key: string, effects: SettingsEffect[]
   }
   if (confirm.kind === 'remove-account') {
     effects.push({ type: 'account-remove', id: confirm.id });
+    return base;
+  }
+  if (confirm.kind === 'remove-phone') {
+    effects.push({ type: 'phone-revoke', id: confirm.id });
     return base;
   }
   const rules = state.rules;
@@ -765,6 +820,7 @@ export function settingsHint(state: SettingsState): string {
   if (state.confirm) {
     const confirm = state.confirm;
     if (confirm.kind === 'remove-account') return ` ‹${confirm.name}› 계정을 목록에서 뺄까요? 설정 폴더(로그인·대화 기록)는 지우지 않습니다 · y 빼기 · 다른 키 그만두기`;
+    if (confirm.kind === 'remove-phone') return ` ‹${confirm.name}› 기기를 끊을까요? 열린 연결이 바로 닫히고, 다시 쓰려면 새로 짝을 맺어야 합니다 · y 끊기 · 다른 키 그만두기`;
     if (confirm.kind === 'remove-rule') return ` 규칙 ${confirm.index + 1}을 지울까요? s로 저장해야 반영됩니다 · y 지우기 · 다른 키 그만두기`;
     return ' 저장하지 않은 규칙 변경이 있습니다. 버리고 닫을까요? · y 버리고 닫기 · 다른 키 돌아가기';
   }
@@ -772,9 +828,11 @@ export function settingsHint(state: SettingsState): string {
   if (state.form) return ' ↑↓ Tab 칸 옮기기 · ←→ 고르기 · Space 켜고 끄기 · Enter 저장 · Esc 그만두기';
   if (state.picker) return ' 글자로 거르기 · ↑↓ PgUp PgDn 고르기 · Enter 이 그림으로 · Esc 그만두기';
   if (state.login) return ' o 브라우저로 열기 · c 로그인 취소 · Esc 창 닫기(로그인은 뒤에서 계속)';
-  if (state.loading) return ' 설정 불러오는 중… · Esc 닫기';
+  if (state.phone?.pairing) return ' 휴대폰 앱의 "짝 맺기"로 이 QR을 비추세요 · 아무 키나 누르면 QR을 거둡니다(코드도 못 씁니다)';
+  if (state.loading && state.tab !== 'phone') return ' 설정 불러오는 중… · Esc 닫기';
   if (state.tab === 'accounts') return ' 계정 · ↑↓ 고르기 · l 로그인 · a 더하기 · p 그림 · Enter 이름 · x 빼기 · r 상태 다시 확인 · Tab 탭 · u 사용량 · w 카드 · Esc 닫기';
   if (state.tab === 'rules') return ' 규칙 · ↑↓ 고르기 · Enter 고치기 · a 더하기 · s 저장 · t 미리보기 · x 지우기 · K J 옮기기 · R 되돌리기 · Tab 탭 · u 사용량 · w 카드 · Esc 닫기';
+  if (state.tab === 'phone') return ' 휴대폰 · ↑↓ 고르기 · Enter 켜고 끄기 · n 짝 맺기(QR) · x 기기 끊기 · r 새로 받기 · Tab 탭 · Esc 닫기';
   return ' 설정 · ↑↓ 고르기 · ←→ Enter 값 바꾸기(바로 저장) · Tab 탭 · u 사용량 · w 카드 · Esc 닫기';
 }
 
@@ -870,6 +928,48 @@ function optionsPane(state: SettingsState, width: number, height: number, theme:
   const row = rows[state.row];
   if (row) lines.push('', `${muted}${row.help}${RESET}`);
   return { lines: lines.slice(0, height) };
+}
+
+function ago(ms: number, now: number): string {
+  const seconds = Math.max(0, Math.round((now - ms) / 1000));
+  if (seconds < 60) return '방금';
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
+  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}시간 전`;
+  return `${Math.floor(seconds / 86_400)}일 전`;
+}
+
+function phonePane(state: SettingsState, width: number, height: number, theme: Theme, now = Date.now()): Pane {
+  const muted = fg(theme, 'muted');
+  const phone = state.phone;
+  const view = phone?.view;
+  const lines: string[] = [];
+  if (phone?.error) lines.push(`${fg(theme, 'red')}${phone.error}${RESET}`, '');
+  if (!view) {
+    lines.push(phone?.loading ? `${muted}불러오는 중…${RESET}` : `${muted}상태를 받지 못했습니다. r로 다시 받습니다${RESET}`);
+    return { lines: lines.slice(0, height) };
+  }
+  lines.push(`${muted}휴대폰은 같은 와이파이에서 암호화된 연결로 이 컴퓨터의 세션 터미널을 비춥니다. 켜 둘 때만 이 컴퓨터 밖의 주소를 받습니다${RESET}`, '');
+  const selected = state.row === 0;
+  const value = !view.allowed ? `${fg(theme, 'yellow')}이 서버는 허용하지 않음${RESET}` : view.enabled ? `${fg(theme, 'green')}켜짐${RESET}` : `${muted}꺼짐${RESET}`;
+  lines.push(rowLine(`${selected ? `${fg(theme, 'accent')}▸${RESET}` : ' '} ${fit('휴대폰 연결', LABEL_WIDTH)} ${selected ? fg(theme, 'accent') : ''}‹ ${RESET}${value}${selected ? fg(theme, 'accent') : ''} ›${RESET}${phone?.loading ? `  ${muted}…${RESET}` : ''}`, width, selected, theme));
+  lines.push(`${' '.repeat(LABEL_WIDTH + 3)}${muted}${view.enabled ? `주소 ${view.addresses.join(' · ')}` : '꺼져 있으면 어떤 주소도 열지 않습니다'}${RESET}`, '');
+  lines.push(`${muted}짝 맺은 기기 ${view.devices.length}대 · n으로 새 기기를 짝 맺습니다 · 밖에서 쓰려면 Tailscale 같은 사설망을 따로 설치합니다${RESET}`);
+  view.devices.forEach((device, index) => {
+    const on = state.row === index + 1;
+    const status = device.connected ? `${fg(theme, 'green')}● 연결됨${RESET}` : `${muted}○ ${ago(device.lastSeenAt, now)}${RESET}`;
+    lines.push(rowLine(`${on ? `${fg(theme, 'accent')}▸${RESET}` : ' '} ${BOLD}${fit(device.name, 20)}${RESET} ${status}  ${muted}짝 맺음 ${ago(device.createdAt, now)}${RESET}`, width, on, theme));
+  });
+  if (view.devices.length === 0) lines.push(`${muted}  기기가 없습니다${RESET}`);
+  return { lines: lines.slice(0, height) };
+}
+
+function pairingPane(pairing: NonNullable<PhoneState['pairing']>, width: number, height: number, theme: Theme): Pane {
+  const muted = fg(theme, 'muted');
+  const left = Math.max(0, Math.round((pairing.expiresAt - Date.now()) / 1000));
+  const head = [`${BOLD}휴대폰 짝 맺기${RESET}  ${muted}${left > 0 ? `${left}초 안에, 한 번만 씁니다` : '시간이 지났습니다. 아무 키나 누르고 n으로 다시 만드세요'}${RESET}`, ''];
+  if (qrWidth(pairing.payload) > width || pairing.lines.length + head.length > height) return { lines: [...head, `${fg(theme, 'yellow')}터미널이 좁아 QR이 들어가지 않습니다(필요한 너비 ${qrWidth(pairing.payload)}칸, 높이 ${Math.ceil(qrWidth(pairing.payload) / 2) + 3}줄). 창을 키운 뒤 다시 하세요${RESET}`] };
+  const pad = Math.max(0, Math.floor((width - qrWidth(pairing.payload)) / 2));
+  return { lines: [...head, ...pairing.lines.map((line) => `${' '.repeat(pad)}${line}`)] };
 }
 
 function formPane(state: SettingsState, form: FormState, width: number, theme: Theme): Pane {
@@ -969,12 +1069,14 @@ export function renderSettings(state: SettingsState, size: { w: number; h: numbe
   const contentWidth = Math.max(0, inner.w - TAB_WIDTH - 3);
   const muted = fg(theme, 'muted');
   let pane: Pane;
-  if (state.loading) pane = { lines: [`${muted}불러오는 중…${RESET}`] };
+  if (state.phone?.pairing) pane = pairingPane(state.phone.pairing, contentWidth, inner.h, theme);
+  else if (state.loading && state.tab !== 'phone') pane = { lines: [`${muted}불러오는 중…${RESET}`] };
   else if (state.form) pane = formPane(state, state.form, contentWidth, theme);
   else if (state.picker) pane = pickerPane(state, state.picker, contentWidth, inner.h, theme);
   else if (state.login) pane = loginPane(state.login, contentWidth, theme);
   else if (state.tab === 'accounts') pane = accountsPane(state, contentWidth, inner.h, theme);
   else if (state.tab === 'rules') pane = rulesPane(state, contentWidth, inner.h, theme);
+  else if (state.tab === 'phone') pane = phonePane(state, contentWidth, inner.h, theme);
   else pane = optionsPane(state, contentWidth, inner.h, theme);
 
   const rows: string[] = [];
