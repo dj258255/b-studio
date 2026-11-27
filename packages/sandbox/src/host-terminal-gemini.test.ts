@@ -1,4 +1,4 @@
-import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
+import { STARTUP_CHECK_NAME } from './startup-check';
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -60,8 +60,8 @@ describe('Gemini 관문 파일', () => {
       const hook = definitions[0]!.hooks[0]!;
       expect(hook.type).toBe('command');
       expect(hook.command).toContain(shellQuote(path.join(dir, GEMINI_HOOK_NAME)));
-      // 빈 환경으로 절대 경로의 node를 띄운다
-      expect(hook.command.startsWith(`${shellQuote('/usr/bin/env')} -i ${shellQuote(cli.nodePath)} `)).toBe(true);
+      // 빈 환경으로 절대 경로의 node를 띄운다. 넘기는 것은 환경 이름 목록 둘뿐이다(CLI 프로세스 안의 환경 확인, 값이 아니라 이름)
+      expect(hook.command.startsWith(`${shellQuote('/usr/bin/env')} -i B_STUDIO_ENV_NAMES="$(compgen -e | tr '\\n' ' ')" B_STUDIO_ENV_BASELINE="$B_STUDIO_ENV_BASELINE" ${shellQuote(cli.nodePath)} `)).toBe(true);
     }
     expect(settings.hooks.BeforeTool![0]!.hooks[0]).toMatchObject({ timeout: 1_800_000, command: expect.stringContaining('pre-tool || {') });
     expect(settings.hooks.BeforeAgent![0]!.hooks[0]!.command).toContain('prompt || {');
@@ -112,7 +112,7 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
     );
     await chmod(fake, 0o755);
     const wrapper = path.join(gateway, 'bin/gemini');
-    await writeFile(path.join(gateway, STARTUP_CHECK_NAME), STARTUP_CHECK);
+    await writeFile(path.join(gateway, STARTUP_CHECK_NAME), 'process.exit(0);\n'); // 검사 자체는 startup-check.test.ts가 본다
     await writeFile(wrapper, hostGeminiWrapper(gateway, { cliPath: fake, nodePath: process.execPath }));
     await chmod(wrapper, 0o755);
     await writeFile(path.join(gateway, GEMINI_SETTINGS_NAME), geminiSettingsContent(gateway, cli.nodePath));

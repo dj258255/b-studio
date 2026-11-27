@@ -78,7 +78,7 @@ export function envCodeLoadKey(key: string): boolean {
   return !ENV_CODE_LOAD_ALLOWED.has(upper) && (ENV_CODE_LOAD_EXACT.has(upper) || ENV_CODE_LOAD_PREFIXES.some((prefix) => upper.startsWith(prefix)) || ENV_CODE_LOAD_SUFFIXES.some((suffix) => upper.endsWith(suffix)));
 }
 
-/** 코드 적재 변수 규칙을 JSON으로 낸다. 관문 폴더의 검사 스크립트(`startup-check.ts`)가 같은 목록을 쓴다(목록은 한 곳이다) */
+/** 코드 적재·설정 자리 규칙을 JSON으로 낸다. OpenCode 플러그인(의존성 없는 한 파일)이 CLI 프로세스 안에서 같은 목록으로 환경 이름을 본다(목록은 한 곳이다) */
 export function envCodeLoadRules(): { exact: string[]; prefixes: string[]; suffixes: string[]; allowed: string[] } {
   return { exact: [...ENV_CODE_LOAD_EXACT], prefixes: [...ENV_CODE_LOAD_PREFIXES], suffixes: [...ENV_CODE_LOAD_SUFFIXES], allowed: [...ENV_CODE_LOAD_ALLOWED] };
 }
@@ -86,7 +86,7 @@ export function envCodeLoadRules(): { exact: string[]; prefixes: string[]; suffi
 /**
  * `.env` 글에서 `risky`가 참인 첫 열쇠를 찾는다. 줄 머리의 열쇠를 느슨하게 읽은 것(줄 끝을 `\n`으로 맞춘 뒤, `=`나 `:`가 따르는 열쇠)을 먼저 보고, 그다음에 `dotenv.parse`(Gemini가 쓰는 17.1.0과 같은 판)의 열쇠를 본다.
  * 느슨한 읽기가 `dotenv.parse`의 열쇠를 모두 포함한다: dotenv의 줄 문법은 줄 머리에서 `export`를 뗀 `[\w.-]+` 뒤에 `=`(앞뒤 빈칸 허용)나 `:`+빈칸이 오는 것이고, dotenv도 `\r\n`·`\r`을 `\n`으로 맞춘 뒤 읽는다.
- * 그래서 관문 폴더의 검사 스크립트는 `dotenv` 없이 느슨한 읽기만 써도 같은 답을 낸다(시험이 두 쪽을 견준다). 따옴표 안의 줄까지 보는 것은 더 막을 뿐이다
+ * 따옴표 안의 줄까지 보는 것은 더 막을 뿐이다
  */
 export function envRiskKeyIn(text: string, risky: (key: string) => boolean): string | undefined {
   for (const match of text.replace(/\r\n?/gu, '\n').matchAll(ENV_LOOSE_KEY)) if (risky(match[1]!)) return match[1];

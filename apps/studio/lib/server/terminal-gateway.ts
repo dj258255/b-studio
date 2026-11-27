@@ -39,6 +39,11 @@ export interface TerminalGatewayHandlers {
    * 화면의 "지금 하는 일"에만 쓴다. 던져도 빈 답이 간다
    */
   activity?(input: HookInput): Promise<void>;
+  /**
+   * 감싸개가 CLI를 exec하기 직전에 묻는다(#1475): 이 폴더에서 이 CLI를 띄워도 되는가. 거절하는 글을 돌려주고 열어도 되면 undefined다.
+   * 터미널을 열기 전 검사와 같은 코드를 쓴다(`startupConfigRefusal`). 없거나 던지면 감싸개는 띄우지 않는다
+   */
+  startupCheck?(input: HookInput): Promise<string | undefined>;
   /** 상태 줄 입력(#920). 문맥 창을 얼마나 썼는지 알 수 있다. 던져도 빈 답이 간다 */
   statusline?(input: HookInput): Promise<void>;
   /**
@@ -77,7 +82,7 @@ export const UNREADABLE_PROMPT_BLOCK = '[b-studio] 요청의 본문을 읽지 �
 const readable = (meta: HookMeta | undefined): boolean => meta === undefined || meta.body === 'object';
 
 /** 훅 종류 → 처리. 핸들러가 던지면 훅 서버가 5xx로 답하고, 훅 스크립트는 CLI를 막지 않는다(판정은 호스트의 게이트가 한다) */
-export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput, meta?: HookMeta) => Promise<Record<string, unknown>>> {
+export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs' | '/startup-check', (input: HookInput, meta?: HookMeta) => Promise<Record<string, unknown>>> {
   const routes = hookRoutes(handlers);
   // CLI의 훅 입력에는 대화 id(session_id)가 실린다(Claude Code는 모든 훅, Codex도 같은 이름). 텔레메트리와 ping은 훅 입력이 아니다
   for (const name of ['/session-start', '/prompt', '/pre-tool', '/stop', '/notification', '/session-end', '/stop-failure', '/activity'] as const) {
@@ -96,7 +101,7 @@ export function terminalHookRoutes(handlers: TerminalGatewayHandlers): Record<`/
   return routes;
 }
 
-function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs', (input: HookInput, meta?: HookMeta) => Promise<Record<string, unknown>>> {
+function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEvent | 'ping'}` | '/v1/logs' | '/startup-check', (input: HookInput, meta?: HookMeta) => Promise<Record<string, unknown>>> {
   return {
     // CLI의 텔레메트리 로그(OTLP/HTTP JSON). 받아서 실행에 붙이고 빈 답(200)을 준다
     '/v1/logs': async (input, meta) => {
@@ -151,6 +156,12 @@ function hookRoutes(handlers: TerminalGatewayHandlers): Record<`/${AgentHookEven
     '/statusline': async (input) => {
       await handlers.statusline?.(input).catch(() => {});
       return answer('none');
+    },
+    // 감싸개의 exec 직전 검사. 핸들러가 없으면 거절이다(열린 쪽은 "확인했고 문제가 없다"뿐). 던지면 5xx이고 감싸개는 띄우지 않는다
+    '/startup-check': async (input) => {
+      if (!handlers.startupCheck) return { refusal: '시작 파일을 검사할 수 없어 띄우지 않았습니다' };
+      const refusal = await handlers.startupCheck(input);
+      return refusal ? { refusal } : { ok: true };
     },
   };
 }

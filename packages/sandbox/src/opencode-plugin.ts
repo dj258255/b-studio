@@ -1,4 +1,6 @@
 import { AGENT_HOOK_EVENTS, GATEWAY_FILE_NAME } from './docker/agent-terminal';
+import { envCodeLoadRules } from './env-risk';
+import { OPENCODE_ENV_BASELINE_ENV, OPENCODE_UNSET_ENVS } from './opencode-envs';
 
 /**
  * OpenCode(`OPENCODE_CONFIG=<관문 폴더>/opencode.json`의 `plugin`에 적힌 이 파일)의 훅을 관문의 훅 통로에 잇는 플러그인(ADR-241, 실험).
@@ -37,6 +39,8 @@ const TIMEOUT_SECONDS = __B_STUDIO_TIMEOUTS__;
 const ADDRESS_FILE = __B_STUDIO_ADDRESS_FILE__;
 const GATEWAY_DIR_ENV = __B_STUDIO_GATEWAY_DIR_ENV__;
 const PLUGIN_FILE = __B_STUDIO_PLUGIN_FILE__;
+const ENV_RULES = __B_STUDIO_ENV_RULES__;
+const ENV_BASELINE_ENV = __B_STUDIO_ENV_BASELINE_ENV__;
 // 시간 상한은 낮추기만 할 수 있다(시험이 쓴다). 낮추면 더 막을 뿐이다
 const TIMEOUT_CAP_MS = Number(process.env.B_STUDIO_MOD_TIMEOUT_MS);
 // 게이트가 돌려보낸 뒤 이어서 받는 횟수. Claude Code·Command Code의 이어가기 상한과 같다
@@ -48,6 +52,7 @@ const MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const OWN_FEEDBACK_MS = 10 * 60 * 1000;
 const BEFORE_TOOL_TEXT = '[b-studio] 관문에 닿지 못해(';
 const PLUGIN_TEXT = '[b-studio] OpenCode의 설정에 b-studio의 플러그인 말고 다른 플러그인이 있거나 설정을 읽지 못해 모든 도구를 막았습니다. 다른 플러그인은 b-studio의 확인 뒤에 도구 입력을 바꿀 수 있습니다. 그 플러그인을 지운 뒤 터미널을 다시 여세요.';
+const ENV_TEXT = '[b-studio] OpenCode의 환경에 시작한 뒤 새로 생긴 설정·코드 실행 경로 변수(';
 const NOTE =
   '# b-studio\n' +
   '이 작업 폴더는 b-studio 세션의 작업 복사본이다. 커밋하지 않는다: git commit·git push·git reset·git checkout·git stash로 기록이나 브랜치를 바꾸지 않는다. 체크포인트(커밋)는 턴이 끝난 뒤 b-studio가 검증을 통과시켜 남긴다.\n' +
@@ -207,11 +212,31 @@ function configuredSpecs(config) {
   return specs;
 }
 
+// 환경 이름이 설정 자리·권한·코드 실행 경로를 바꾸는 것인가(공통 목록 env-risk.ts와 OpenCode의 설정 변수). 대소문자를 접어 견준다
+function riskyEnvName(name) {
+  const upper = name.toUpperCase();
+  if (ENV_RULES.allowed.includes(upper)) return false;
+  return ENV_RULES.exact.includes(upper) || ENV_RULES.config.includes(upper) || ENV_RULES.prefixes.some((prefix) => upper.startsWith(prefix)) || ENV_RULES.suffixes.some((suffix) => upper.endsWith(suffix));
+}
+
+// CLI가 시작한 뒤 환경에 새로 생긴 위험 이름(Bun이 시작할 때 작업 폴더의 .env를 환경에 넣는다)을 찾는다. 기준은 감싸개가 띄우기 직전에 남긴 이름 목록이다(HOME·PATH 같은 원래 있던 것은 기준에 있다).
+// 이름만 본다(값은 보지 않는다). 기준이 없으면(감싸개를 거치지 않음) 모르는 것이라 기준 변수의 이름을 돌려준다
+function introducedRiskyEnv() {
+  const raw = process.env[ENV_BASELINE_ENV];
+  if (typeof raw !== 'string') return ENV_BASELINE_ENV;
+  const baseline = new Set(raw.split(' ').filter((name) => name !== ''));
+  for (const name of Object.keys(process.env)) if (!baseline.has(name) && riskyEnvName(name)) return name;
+  return undefined;
+}
+
 export default async function bStudioPlugin(input) {
   const cwd = isPlain(input) && typeof input.directory === 'string' ? input.directory : undefined;
   const client = isPlain(input) && isPlain(input.client) ? input.client : undefined;
   // 설정 확인이 끝나 우리 플러그인 하나뿐임을 본 뒤에만 도구를 관문에 묻는다. 그 전과 확인에 실패한 뒤에는 모든 도구를 막는다
   let configOk = false;
+  // 환경 확인에서 걸린 이름(있으면 모든 도구를 막고 세션 시작 신호를 보내지 않는다)
+  let envBad;
+  const blockText = () => (envBad === undefined ? PLUGIN_TEXT : ENV_TEXT + envBad + ')가 있어 모든 도구를 막았습니다. 작업 폴더의 .env나 셸 환경에서 그 변수를 지운 뒤 터미널을 다시 여세요.');
   let ended = false;
   const sessions = new Map();
   // 우리가 보낸 돌려보내기 글({text, at}). 요청 받기 훅이 이 글을 다시 받으면 사용자의 새 요청이 아니다. 오래된 글은 잊는다
@@ -425,7 +450,8 @@ export default async function bStudioPlugin(input) {
       try {
         const specs = configuredSpecs(config);
         const ours = ownSpec();
-        configOk = specs !== undefined && ours !== undefined && specs.length > 0 && specs.every((spec) => spec === ours);
+        envBad = introducedRiskyEnv();
+        configOk = envBad === undefined && specs !== undefined && ours !== undefined && specs.length > 0 && specs.every((spec) => spec === ours);
       } catch {
         configOk = false;
       }
@@ -434,7 +460,7 @@ export default async function bStudioPlugin(input) {
 
     // 요청 받기(UserPromptSubmit). 관문에 닿지 못하거나 응답이 이상하면 던져 요청을 받지 않는다. 우리가 보낸 돌려보내기 글과 하위 에이전트의 요청은 사용자의 요청이 아니다
     'chat.message': async (hookInput, output) => {
-      if (!configOk) throw new Error(PLUGIN_TEXT);
+      if (!configOk) throw new Error(blockText());
       const id = sessionIdOf(hookInput);
       const parts = isPlain(output) && Array.isArray(output.parts) ? output.parts : undefined;
       if (id === undefined || parts === undefined) throw new Error(BEFORE_TOOL_TEXT + '요청을 읽지 못해) 요청을 보내지 않았습니다. 다시 보내 주세요.');
@@ -460,7 +486,7 @@ export default async function bStudioPlugin(input) {
 
     // 쓰기 직전(PreToolUse). 모든 도구를 관문에 묻는다: 읽기 도구를 거르는 표는 서버에 한 곳뿐이다. 정상 경로가 아니면 모두 던진다(던지면 도구는 실행되지 않는다)
     'tool.execute.before': async (hookInput, output) => {
-      if (!configOk) throw new Error(PLUGIN_TEXT);
+      if (!configOk) throw new Error(blockText());
       if (!isPlain(hookInput) || !isPlain(output) || !nonEmpty(hookInput.tool)) throw new Error(BEFORE_TOOL_TEXT + '훅 인자를 읽지 못해) 파일을 바꿀 수 있는 도구를 막았습니다.');
       let answer;
       try {
@@ -514,4 +540,6 @@ export default async function bStudioPlugin(input) {
   .replace('__B_STUDIO_TIMEOUTS__', () => JSON.stringify({ ...AGENT_HOOK_EVENTS }))
   .replace('__B_STUDIO_ADDRESS_FILE__', () => JSON.stringify(GATEWAY_FILE_NAME))
   .replace('__B_STUDIO_GATEWAY_DIR_ENV__', () => JSON.stringify(OPENCODE_GATEWAY_DIR_ENV))
-  .replace('__B_STUDIO_PLUGIN_FILE__', () => JSON.stringify(OPENCODE_PLUGIN_NAME));
+  .replace('__B_STUDIO_PLUGIN_FILE__', () => JSON.stringify(OPENCODE_PLUGIN_NAME))
+  .replace('__B_STUDIO_ENV_RULES__', () => JSON.stringify({ ...envCodeLoadRules(), config: OPENCODE_UNSET_ENVS.map((name) => name.toUpperCase()) }))
+  .replace('__B_STUDIO_ENV_BASELINE_ENV__', () => JSON.stringify(OPENCODE_ENV_BASELINE_ENV));

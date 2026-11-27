@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { createServer, type Server } from 'node:http';
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -10,26 +11,54 @@ import { openCodeConfigRefusal } from './opencode-config';
 import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
 
 /**
- * 감싸개가 exec 직전에 돌리는 검사 스크립트(#1475)와 띄우기 전 검사(TS)가 같은 입력에 같은 답(거절 글까지)을 내는지, 그리고 진짜 `/bin/sh`로 돌린 감싸개가 거절·검사 실패에서 CLI를 띄우지 않는지 본다.
- * 진짜 opencode·gemini는 띄우지 않는다(CLI 자리에는 "RAN"을 찍는 가짜 스크립트). 임시 폴더만 쓴다.
+ * 감싸개가 exec 직전에 돌리는 검사 스크립트(#1475)는 판정 코드가 없고 관문의 `/startup-check`에 묻는다. 여기서는 스튜디오 대신 임시 루프백 서버(임의 포트)가
+ * 같은 TS 판정(`openCodeConfigRefusal`·`geminiConfigRefusal`)으로 답한다(스튜디오 쪽 연결은 `apps/studio/lib/server/terminal-gateway-startup-check.test.ts`).
+ * 진짜 `/bin/sh`로 감싸개를 돌려, 거절·검사 실패에서 CLI를 띄우지 않는지 본다. 진짜 opencode·gemini는 띄우지 않는다(CLI 자리에는 "RAN"을 찍는 가짜 스크립트). 임시 폴더만 쓴다.
  */
 let root = '';
 let work = '';
 let gateway = '';
 let home = '';
+let server: Server | undefined;
+let behavior: 'judge' | 'error' | 'garbage' | 'extra' = 'judge';
+const asked: Array<{ cli: string; cwd: string; authorization: string | undefined }> = [];
+
+const tsOpencode = (cwd: string) => openCodeConfigRefusal({ cwd, home, managedDirs: [path.join(root, 'managed')] });
+const tsGemini = (cwd: string) => geminiConfigRefusal({ cwd, systemSettingsDir: path.join(root, 'sys') });
+
 beforeEach(async () => {
   root = await mkdtemp(path.join(tmpdir(), 'b-studio-startchk-'));
   work = path.join(root, 'work', 'project');
   gateway = path.join(root, 'gw');
   home = path.join(root, 'home');
+  behavior = 'judge';
+  asked.length = 0;
   await mkdir(work, { recursive: true });
   await mkdir(path.join(gateway, 'bin'), { recursive: true });
   await mkdir(home, { recursive: true });
   await writeFile(path.join(gateway, STARTUP_CHECK_NAME), STARTUP_CHECK);
+  server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', async () => {
+      const input = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { cli: 'opencode' | 'gemini'; cwd: string };
+      asked.push({ cli: input.cli, cwd: input.cwd, authorization: request.headers.authorization });
+      if (request.url !== '/startup-check') return void response.writeHead(404).end();
+      if (behavior === 'error') return void response.writeHead(500).end('{}');
+      if (behavior === 'garbage') return void response.writeHead(200).end('not json');
+      if (behavior === 'extra') return void response.writeHead(200).end(JSON.stringify({ ok: true, more: 1 }));
+      const refusal = input.cli === 'gemini' ? await tsGemini(input.cwd) : await tsOpencode(input.cwd);
+      response.writeHead(200).end(JSON.stringify(refusal ? { refusal } : { ok: true }));
+    });
+  });
+  await new Promise<void>((resolve) => server!.listen(0, '127.0.0.1', resolve));
+  await writeAddress(`http://127.0.0.1:${(server.address() as { port: number }).port}`);
 });
 afterEach(async () => {
+  await new Promise((resolve) => (server ? server.close(resolve) : resolve(undefined)));
   await rm(root, { recursive: true, force: true });
 });
+const writeAddress = (url: string) => writeFile(path.join(gateway, 'b-studio-gateway.json'), JSON.stringify({ url, token: 'tok' }));
 
 const run = (file: string, args: string[], options: { cwd: string; env?: Record<string, string> }): Promise<{ code: number; stdout: string; stderr: string }> =>
   new Promise((resolve) =>
@@ -37,55 +66,41 @@ const run = (file: string, args: string[], options: { cwd: string; env?: Record<
       resolve({ code: error ? ((error as { code?: number }).code ?? 1) : 0, stdout, stderr }),
     ),
   );
+const script = (cli: string, cwd: string) => run(process.execPath, [path.join(gateway, STARTUP_CHECK_NAME), cli, cwd], { cwd });
 
-/** 스크립트가 낸 거절 글(없으면 undefined). 종료 코드 2가 거절이다 */
-async function scriptRefusal(cli: 'opencode' | 'gemini', cwd: string): Promise<string | undefined> {
-  const result = await run(process.execPath, [path.join(gateway, STARTUP_CHECK_NAME), cli, cwd], { cwd });
+describe('검사 스크립트: 판정은 관문이 하고, 답이 없거나 낯설면 띄우지 않는다', () => {
+  it('열어도 되면 0, 관문의 거절이면 2와 그 글, 관문이 받은 것은 CLI와 작업 폴더와 토큰이다', async () => {
+    expect((await script('opencode', work)).code).toBe(0);
+    expect(asked[0]).toEqual({ cli: 'opencode', cwd: work, authorization: 'Bearer tok' });
+    await writeFile(path.join(work, '.env'), 'OPENCODE_PERMISSION={}\n');
+    const refused = await script('opencode', work);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toContain(`${path.join(work, '.env')}이(가) OPENCODE_PERMISSION`);
+  });
+
+  it('관문의 오류·이상한 답·여분의 열쇠가 든 답·닿지 못함·주소 파일 없음·루프백이 아닌 주소는 모두 3이다(통과가 아니다)', async () => {
+    for (const mode of ['error', 'garbage', 'extra'] as const) {
+      behavior = mode;
+      expect((await script('gemini', work)).code, mode).toBe(3);
+    }
+    behavior = 'judge';
+    await writeAddress('http://127.0.0.1:1');
+    expect((await script('gemini', work)).code, '닿지 못함').toBe(3);
+    await writeAddress('http://example.com:80');
+    expect((await script('gemini', work)).code, '다른 주소').toBe(3);
+    await rm(path.join(gateway, 'b-studio-gateway.json'));
+    expect((await script('gemini', work)).code, '주소 파일 없음').toBe(3);
+    expect((await script('', '')).code).toBe(3);
+  });
+});
+
+/** 스크립트를 거쳐 받은 거절 글(없으면 undefined) */
+async function refusalVia(cli: 'opencode' | 'gemini'): Promise<string | undefined> {
+  const result = await script(cli, work);
   if (result.code === 0) return undefined;
   expect(result.code, result.stderr).toBe(2);
   return result.stderr.trim().replace(/^\[b-studio\] /u, '');
 }
-const tsOpencode = (cwd: string) => openCodeConfigRefusal({ cwd, home, managedDirs: [path.join(root, 'managed')] });
-const tsGemini = (cwd: string) => geminiConfigRefusal({ cwd, systemSettingsDir: path.join(root, 'sys') });
-
-/** [이름, 내용]. 같은 입력을 두 쪽에 넣는다 */
-const FIXTURES: Array<[string, string, string]> = [
-  ['평범한 .env', '.env', 'DATABASE_URL=postgres://x\nNODE_ENV=production\nPORT=3000\nGITHUB_TOKEN=x\n'],
-  ['OPENCODE_ 열쇠', '.env', 'A=1\nOPENCODE_CONFIG_CONTENT={"plugin":["x"]}\n'],
-  ['소문자 열쇠와 export', '.env.local', 'export opencode_permission: {}\n'],
-  ['코드 적재', '.env.production', 'NODE_OPTIONS=--require /x.js\n'],
-  ['캐리지 리턴만으로 나뉜 줄', '.env', 'A=1\rNODE_PATH=/x\r'],
-  ['CRLF', '.env.test', 'A=1\r\nBASH_ENV=/x\r\n'],
-  ['따옴표 안의 줄', '.env', 'A="x\nOPENCODE_PURE=1\n"\n'],
-  ['GEMINI_ 모르는 열쇠', '.env', 'GEMINI_SANDBOX=docker\n'],
-  ['GEMINI_ 안전한 열쇠', '.env', 'GEMINI_API_KEY=x\n'],
-  ['bunfig', 'bunfig.toml', 'preload = ["./x.ts"]\n'],
-  ['전각 이름', '．ｅｎｖ', 'OPENCODE_PERMISSION={}\n'],
-  ['큰 파일', '.env', `A=${'x'.repeat(1024 * 1024 + 1)}\n`],
-];
-
-describe('검사 스크립트와 TS 판정이 같은 답을 낸다', () => {
-  it.each(FIXTURES)('%s', async (_name, file, content) => {
-    await writeFile(path.join(work, file), content);
-    expect(await scriptRefusal('opencode', work)).toBe(await tsOpencode(work));
-    expect(await scriptRefusal('gemini', work)).toBe(await tsGemini(work));
-  });
-
-  it('위 폴더의 .env: Gemini는 거절하고(위로 올라가며 본다) OpenCode는 작업 폴더만 본다. 두 쪽이 같다', async () => {
-    await writeFile(path.join(root, 'work', '.env'), 'GEMINI_SANDBOX=1\nOPENCODE_PERMISSION={}\n');
-    expect(await scriptRefusal('gemini', work)).toBe(await tsGemini(work));
-    expect(await scriptRefusal('gemini', work)).toContain('GEMINI_SANDBOX');
-    expect(await scriptRefusal('opencode', work)).toBe(await tsOpencode(work));
-    expect(await scriptRefusal('opencode', work)).toBeUndefined();
-  });
-
-  it('모르는 CLI나 작업 폴더가 없으면 거절이다', async () => {
-    const result = await run(process.execPath, [path.join(gateway, STARTUP_CHECK_NAME), 'claude', work], { cwd: work });
-    expect(result.code).toBe(2);
-    const none = await run(process.execPath, [path.join(gateway, STARTUP_CHECK_NAME), 'opencode'], { cwd: work });
-    expect(none.code).toBe(2);
-  });
-});
 
 /** 설정 자리·홈·셸·플러그인·통신 경로를 바꾸는 변수(커밋 보안 검토): 각각 거절이어야 한다 */
 const NEW_RISKY = [
@@ -101,7 +116,7 @@ const NEW_RISKY = [
 describe('설정 자리·코드 실행 경로를 바꾸는 변수는 .env에서 거절한다(OpenCode·Gemini 공통)', () => {
   it.each(NEW_RISKY)('%s', async (key) => {
     await writeFile(path.join(work, '.env'), `A=1\n${key}=x\n`);
-    for (const message of [await tsOpencode(work), await tsGemini(work), await scriptRefusal('opencode', work), await scriptRefusal('gemini', work)]) {
+    for (const message of [await tsOpencode(work), await tsGemini(work), await refusalVia('opencode'), await refusalVia('gemini')]) {
       expect(message, key).toContain(key);
     }
   });
@@ -110,8 +125,8 @@ describe('설정 자리·코드 실행 경로를 바꾸는 변수는 .env에서 
     await writeFile(path.join(work, '.env'), 'DATABASE_URL=x\nGITHUB_TOKEN=x\nHOMEPAGE=x\nSHELLCHECK=1\nPROXYLESS=1\nNODE_ENV=test\nSECRET_KEY=x\nAWS_REGION=x\nPORT=1\n');
     expect(await tsOpencode(work)).toBeUndefined();
     expect(await tsGemini(work)).toBeUndefined();
-    expect(await scriptRefusal('opencode', work)).toBeUndefined();
-    expect(await scriptRefusal('gemini', work)).toBeUndefined();
+    expect(await refusalVia('opencode')).toBeUndefined();
+    expect(await refusalVia('gemini')).toBeUndefined();
   });
 });
 
@@ -165,6 +180,29 @@ describe('감싸개: exec 직전에 같은 검사를 돌린다(진짜 /bin/sh)',
       const noNode = await run(await install(kind, '/nonexistent/node'), [], { cwd: work, env: env() });
       expect(noNode.stdout).not.toContain('RAN');
       expect(noNode.code).toBe(1);
+    });
+
+
+    it('설정 JSON·플러그인 설정도 같은 판정으로 막는다(.env만이 아니다): 셸로 쓴 hooks·plugin을 다시 띄울 때 잡는다', async () => {
+      const wrapper = await install(kind);
+      if (kind === 'gemini') {
+        await mkdir(path.join(work, '.gemini'), { recursive: true });
+        await writeFile(path.join(work, '.gemini', 'settings.json'), JSON.stringify({ hooks: { BeforeTool: [{ hooks: [{ type: 'command', command: 'x' }] }] } }));
+      } else {
+        await writeFile(path.join(root, 'work', 'opencode.json'), JSON.stringify({ plugin: ['evil'] }));
+      }
+      const result = await run(wrapper, [], { cwd: work, env: env() });
+      expect(result.stdout).not.toContain('RAN');
+      expect(result.code).toBe(1);
+      expect(result.stderr).toMatch(kind === 'gemini' ? /hooks/ : /플러그인|plugin/);
+    });
+
+    it('관문이 오류로 답하면 띄우지 않는다', async () => {
+      const wrapper = await install(kind);
+      behavior = 'error';
+      const result = await run(wrapper, [], { cwd: work, env: env() });
+      expect(result.stdout).not.toContain('RAN');
+      expect(result.code).toBe(1);
     });
 
     it('검사는 빈 환경에서 돈다: 사용자 셸의 NODE_OPTIONS 코드는 검사 스크립트 안에서 돌지 않는다', async () => {

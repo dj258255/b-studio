@@ -1,4 +1,4 @@
-import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
+import { STARTUP_CHECK_NAME } from './startup-check';
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
@@ -1527,7 +1527,7 @@ describe('OpenCode 터미널(실험, ADR-241)', () => {
     );
     await chmod(fake, 0o755);
     const wrapper = path.join(gateway, 'bin/opencode');
-    await writeFile(path.join(gateway, STARTUP_CHECK_NAME), STARTUP_CHECK);
+    await writeFile(path.join(gateway, STARTUP_CHECK_NAME), 'process.exit(0);\n'); // 검사 자체는 startup-check.test.ts가 본다
     await writeFile(wrapper, hostOpenCodeWrapper(gateway, { cliPath: fake, nodePath: process.execPath }));
     await chmod(wrapper, 0o755);
     const stdout = await new Promise<string>((resolve, reject) =>

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { native } from './native';
 import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 import { GEMINI_CODE_LOAD_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
+import { OPENCODE_ENV_BASELINE_ENV, OPENCODE_UNSET_ENVS } from './opencode-envs';
 import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
 import { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
 import { openCodeConfigContent } from './opencode-config';
@@ -237,10 +238,12 @@ function tomlString(value: string): string {
  * 글이 바뀌면 다시 검토하라고 묻는다(0.160.1에서 실측). 그래서 세션의 관문 폴더가 아니라 관문 루트의 스크립트를 가리키고,
  * 세션의 관문 폴더는 감싸개가 환경 변수로 넘긴다
  */
-export function codexHookCommand(root: string, nodePath: string, event: AgentHookEvent): string {
+export function codexHookCommand(root: string, nodePath: string, event: AgentHookEvent, options: { gatewayDirEnv?: boolean } = {}): string {
+  // 컨테이너 방식(`gatewayDirEnv: false`)의 훅 스크립트는 자기 옆의 주소 파일을 읽어 환경 변수가 필요 없다: 감싸개 없이 이미지의 codex를 직접 불러도 같은 명령이 돈다(ADR-245)
+  const gatewayDir = options.gatewayDirEnv === false ? '' : `${CODEX_GATEWAY_DIR_ENV}="$${CODEX_GATEWAY_DIR_ENV}" `;
   // 빈 환경(`env -i`)에서 절대 경로의 node로 띄운다(#1475): Codex의 환경(사용자의 셸이 정한 `NODE_OPTIONS` 등)이 훅 안에서 코드를 돌리지 못한다.
   // 훅 스크립트가 환경에서 읽는 것은 세션의 관문 폴더 하나뿐이라 그것만 셸이 풀어 넘긴다(글은 세션과 무관하게 같다). Codex는 훅을 `$SHELL -lc`로 돌린다(0.160.1 바이너리의 command_runner)
-  return `${shellQuote(HOOK_ENV_BIN)} -i ${CODEX_GATEWAY_DIR_ENV}="$${CODEX_GATEWAY_DIR_ENV}" ${shellQuote(nodePath)} ${shellQuote(path.join(root, CODEX_HOOK_SCRIPT_NAME))} ${event}`;
+  return `${shellQuote(HOOK_ENV_BIN)} -i ${gatewayDir}${shellQuote(nodePath)} ${shellQuote(path.join(root, CODEX_HOOK_SCRIPT_NAME))} ${event}`;
 }
 
 /**
@@ -379,6 +382,7 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 'n
     `unset ${GEMINI_CODE_LOAD_ENVS.join(' ')}`,
     'for v in $(env | sed -n "s/^\\(DYLD_[A-Za-z0-9_]*\\)=.*/\\1/p"); do unset "$v"; done',
     'export GEMINI_CLI_HOME="$home"',
+    ...envBaselineLines(),
     ...startupCheckLines(dir, cli.nodePath, 'gemini'),
     `exec ${q(cli.cliPath)} "$@"`,
     '',
@@ -396,6 +400,17 @@ export function openCodeConfigPath(dir: string): string {
 }
 
 /**
+ * 띄우기 직전의 환경 **이름** 목록을 환경 변수(`B_STUDIO_ENV_BASELINE`)에 담는다(값은 담지 않는다). CLI 프로세스 안(OpenCode의 플러그인, Gemini의 훅)이 "그 뒤에 새로 생긴" 위험 이름
+ * (CLI가 시작할 때 작업 폴더의 `.env`에서 넣은 것)을 가리는 기준이다. 값에 줄바꿈이 있으면 `이름=` 꼴의 줄이 가짜 이름으로 들어갈 수 있으나, 그 값을 정하는 것은 이미 셸 환경을 쥔 쪽이다
+ */
+function envBaselineLines(): string[] {
+  return [
+    `${OPENCODE_ENV_BASELINE_ENV}="$(env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p' | tr '\\n' ' ')"`,
+    `export ${OPENCODE_ENV_BASELINE_ENV}`,
+  ];
+}
+
+/**
  * 감싸개가 `exec` 직전에 부르는 시작 파일 검사(#1475). 열린 셸에서 CLI를 다시 띄우면 띄우기 전 검사가 돌지 않으므로 같은 판정(`startup-check.ts`)을 관문 폴더의 스크립트로 다시 돌린다.
  * 빈 환경에서 절대 경로의 node로 부르고, 0이 아니면 띄우지 않는다. 스크립트가 거절하면 종료 코드 2와 이유를 내고, node·env가 없거나 스크립트가 죽거나 없으면 다른 종료 코드라
  * 아래의 일반 문구를 찍는다(fail-closed). 거치지 않고 진짜 바이너리를 바로 부르는 길은 이 검사 몫이 아니라 감시(`hooked_launch`)의 몫이다
@@ -410,22 +425,7 @@ function startupCheckLines(dir: string, nodePath: string, cli: 'opencode' | 'gem
   ];
 }
 
-/**
- * OpenCode의 설정·플러그인·권한·홈을 바꾸는 환경 변수. 감싸개가 띄우기 전에 지우고, Rust 감시(`OPENCODE_PLUGIN_ENVS` + `OPENCODE_PURE`)가 있으면 붙지 않은 것으로 본다(시험이 두 목록을 견준다).
- * 근거는 1.18.33 바이너리의 평문 JS다: `OPENCODE_TEST_MANAGED_CONFIG_DIR`은 관리형 설정 폴더(그 안의 `opencode.json(c)`가 마지막에 합쳐진다), `OPENCODE_TEST_HOME`은 `.opencode` 폴더를 찾는 홈,
- * `OPENCODE_PERMISSION`은 `permission`에 합쳐지는 JSON, `OPENCODE_DISABLE_DEFAULT_PLUGINS`는 내장 플러그인을 건너뛴다(우리 플러그인은 설정의 플러그인이라 직접 영향은 없지만 거부 목록이라 넓게 잡는다)
- */
-export const OPENCODE_UNSET_ENVS: readonly string[] = [
-  'OPENCODE_CONFIG_CONTENT',
-  'OPENCODE_CONFIG_DIR',
-  'OPENCODE_TUI_CONFIG',
-  'OPENCODE_PURE',
-  'OPENCODE_TEST_MANAGED_CONFIG_DIR',
-  'OPENCODE_TEST_HOME',
-  'OPENCODE_DISABLE_DEFAULT_PLUGINS',
-  'OPENCODE_PERMISSION',
-];
-
+export { OPENCODE_UNSET_ENVS };
 export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
   return [
     '#!/bin/sh',
@@ -433,6 +433,7 @@ export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 
     `export ${OPENCODE_GATEWAY_DIR_ENV}=${shellQuote(dir)}`,
     `unset ${OPENCODE_UNSET_ENVS.join(' ')}`,
     `export OPENCODE_CONFIG=${shellQuote(openCodeConfigPath(dir))}`,
+    ...envBaselineLines(),
     ...startupCheckLines(dir, cli.nodePath, 'opencode'),
     `exec ${shellQuote(cli.cliPath)} "$@"`,
     '',

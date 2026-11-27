@@ -84,7 +84,7 @@ export function agentCodexRequirements(): string {
     '',
   ];
   for (const [event, hook, seconds] of REQUIRED_HOOKS) {
-    lines.push(`[[hooks.${event}]]`, '', `[[hooks.${event}.hooks]]`, 'type = "command"', `command = ${toml(codexHookCommand(AGENT_GATEWAY_TARGET, AGENT_NODE, hook))}`, `timeout = ${seconds}`, '');
+    lines.push(`[[hooks.${event}]]`, '', `[[hooks.${event}.hooks]]`, 'type = "command"', `command = ${toml(codexHookCommand(AGENT_GATEWAY_TARGET, AGENT_NODE, hook, { gatewayDirEnv: false }))}`, `timeout = ${seconds}`, '');
   }
   return lines.join('\n');
 }
@@ -106,7 +106,7 @@ export function agentCodexFiles(address: AgentGatewayAddress): Record<string, st
  */
 export function agentCodexWrapper(address: Pick<AgentGatewayAddress, 'hookUrl' | 'mcpUrl'>): string {
   const args = codexWrapperArgs(address).map(shellQuote).join(' ');
-  const notify = (event: 'session-start' | 'session-end') => `printf '{}' | ${codexHookCommand(AGENT_GATEWAY_TARGET, AGENT_NODE, event)} >/dev/null 2>&1`;
+  const notify = (event: 'session-start' | 'session-end') => `printf '{}' | ${codexHookCommand(AGENT_GATEWAY_TARGET, AGENT_NODE, event, { gatewayDirEnv: false })} >/dev/null 2>&1`;
   const codex = shellQuote(AGENT_CODEX_BIN);
   return [
     '#!/bin/sh',

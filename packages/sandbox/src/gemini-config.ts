@@ -1,5 +1,6 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import { GEMINI_ENV_BASELINE_ENV, GEMINI_ENV_NAMES_ENV, GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS } from './gemini-envs';
 import { CODE_LOAD_ENVS, envCodeLoadKey, envRiskKeyIn } from './env-risk';
 import { geminiHookSeconds, GEMINI_HOOK_NAME, type GeminiHookEvent } from './gemini-hook';
 import { parseJsonc } from './gemini-jsonc';
@@ -60,7 +61,9 @@ export function geminiSettingsContent(dir: string, nodePath: string, authType?: 
   const hooks: Record<string, unknown> = {};
   for (const hook of HOOKS) {
     // 훅 명령은 빈 환경(`env -i`)에서 절대 경로의 node로 띄운다: Gemini의 환경(`.env`·사용자의 셸이 정한 `NODE_OPTIONS` 등)이 훅 안에서 코드를 돌리지 못한다. 훅이 필요한 주소·토큰은 관문 폴더의 파일에서 읽는다
-    const command = `${quote(ENV_BIN)} -i ${quote(nodePath)} ${quote(path.join(dir, GEMINI_HOOK_NAME))} ${hook.event}${hook.blocking ? ` ${FAIL_CLOSED}` : ''}`;
+    // 환경 이름 목록(값이 아니라 이름)을 넘긴다: 훅 안의 node가 Gemini의 환경에 새로 생긴 위험 이름을 본다(CLI 프로세스 안의 확인, #1475). `compgen`은 bash의 내장이고 Gemini는 훅을 `bash -c`로 돌린다. 없으면 빈 목록이 되어 훅이 막는다.
+    // 이 명령을 띄우는 bash 자신이 `BASH_ENV`를 먼저 읽는 것은 막지 못한다: `.env`의 `BASH_ENV` 거절이 막는다
+    const command = `${quote(ENV_BIN)} -i ${GEMINI_ENV_NAMES_ENV}="$(compgen -e | tr '\\n' ' ')" ${GEMINI_ENV_BASELINE_ENV}="$${GEMINI_ENV_BASELINE_ENV}" ${quote(nodePath)} ${quote(path.join(dir, GEMINI_HOOK_NAME))} ${hook.event}${hook.blocking ? ` ${FAIL_CLOSED}` : ''}`;
     hooks[hook.gemini] = [{ hooks: [{ type: 'command', name: hook.name, command, timeout: geminiHookSeconds(hook.event) * 1000 }] }];
   }
   const settings: Record<string, unknown> = {
@@ -89,41 +92,18 @@ export async function geminiUserAuthType(home: string | undefined): Promise<stri
 }
 
 /** 설정 파일 하나의 크기 상한. 넘으면 읽지 않고 거절한다(에이전트가 쓸 수 있는 자리라 상한이 없으면 읽는 쪽을 멈출 수 있다) */
-export const MAX_CONFIG_BYTES = 1024 * 1024;
-/**
- * Gemini의 설정 자리·믿음을 바꾸는 환경 변수. 감싸개가 지우고(`unset`), Rust 감시(`GEMINI_SETTINGS_ENVS`)가 있으면 붙지 않은 것으로 보고, `.env`가 정하면 거절한다.
- * 근거는 0.71.1: `GEMINI_CLI_HOME`(`Storage`)·`GEMINI_CLI_SYSTEM_SETTINGS_PATH`·`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`(`settings`)·`GEMINI_RESTRICTED_MODE`·`GEMINI_CLI_TRUST_WORKSPACE`(`trustedFolders`)
- */
-export const GEMINI_SETTINGS_ENVS: readonly string[] = ['GEMINI_CLI_SYSTEM_SETTINGS_PATH', 'GEMINI_CLI_SYSTEM_DEFAULTS_PATH', 'GEMINI_RESTRICTED_MODE', 'GEMINI_CLI_TRUST_WORKSPACE'];
-/**
- * 샌드박스를 켜거나 꾸미는 환경 변수(0.71.1의 `loadSandboxConfig`·`getSandboxCommand`·샌드박스 시작 코드). 샌드박스는 CLI를 다른 프로세스에서 다시 띄워(docker·podman·sandbox-exec 등)
- * 우리 훅이 붙었는지 알 수 없다. `GEMINI_SANDBOX`는 설정·인자보다 먼저 읽히고(비어 있지 않으면 이긴다), `GEMINI_SANDBOX_IMAGE`는 이미지를, 나머지는 샌드박스 안의 마운트·포트·프로필·프록시를 정한다.
- * `SANDBOX`는 "이미 샌드박스 안"이라는 표식이라 설정돼 있으면 CLI가 샌드박스 시작을 건너뛰고 안쪽으로 행동한다
- */
-export const GEMINI_SANDBOX_ENVS: readonly string[] = [
-  'GEMINI_SANDBOX',
-  'SANDBOX',
-  'GEMINI_SANDBOX_IMAGE',
-  'GEMINI_SANDBOX_PROXY_COMMAND',
-  'SANDBOX_ENV',
-  'SANDBOX_FLAGS',
-  'SANDBOX_MOUNTS',
-  'SANDBOX_PORTS',
-  'SANDBOX_SET_UID_GID',
-  'SEATBELT_PROFILE',
-];
-/** 감싸개가 띄우기 전에 지우는 환경 변수 전부(설정 자리·믿음 + 샌드박스). 홈(`GEMINI_CLI_HOME`)은 따로 우리 홈으로 정한다 */
-export const GEMINI_UNSET_ENVS: readonly string[] = [...GEMINI_SETTINGS_ENVS, ...GEMINI_SANDBOX_ENVS];
+const MAX_CONFIG_BYTES = 1024 * 1024;
+export { GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS };
 /** 코드 적재·실행 경로 변수(공통 목록은 `env-risk.ts`). 감싸개가 지우고(`unset`, `DYLD_*`는 이름으로 찾아 지운다), `.env`가 정하면 거절한다 */
 export const GEMINI_CODE_LOAD_ENVS: readonly string[] = CODE_LOAD_ENVS;
 /** `.env`가 정하면 거절하는 이름(대소문자를 접어 견준다) */
-export const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMINI_UNSET_ENVS].map((name) => name.toUpperCase()));
+const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMINI_UNSET_ENVS].map((name) => name.toUpperCase()));
 /**
  * `GEMINI_`로 시작하지만 `.env`에 있어도 되는 열쇠(0.71.1에서 읽어 본 것): 로그인 열쇠·모델·로그인 방식·헤더 시간 상한.
  * 이 밖의 `GEMINI_` 열쇠는 모르는 것이라 거절한다(거부 목록이라 넓게 맞춘다: 판이 오르며 새로 생기는 스위치도 걸린다)
  */
-export const ENV_SAFE_GEMINI_NAMES: ReadonlySet<string> = new Set(['GEMINI_API_KEY', 'GEMINI_MODEL', 'GEMINI_DEFAULT_AUTH_TYPE', 'GEMINI_API_KEY_AUTH_MECHANISM', 'GEMINI_API_HEADERS_TIMEOUT_MS']);
-export const MAX_LEVELS = 64;
+const ENV_SAFE_GEMINI_NAMES: ReadonlySet<string> = new Set(['GEMINI_API_KEY', 'GEMINI_MODEL', 'GEMINI_DEFAULT_AUTH_TYPE', 'GEMINI_API_KEY_AUTH_MECHANISM', 'GEMINI_API_HEADERS_TIMEOUT_MS']);
+const MAX_LEVELS = 64;
 
 export interface GeminiLoadCheck {
   /** Gemini가 뜰 작업 폴더 */
