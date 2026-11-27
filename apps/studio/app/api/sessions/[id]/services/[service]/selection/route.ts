@@ -1,4 +1,4 @@
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSessionTerminalDriver, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { setSessionServiceSelection } from '@/lib/server/sessions';
 
@@ -10,7 +10,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
   try {
     const user = requireUser(request.headers);
     const { id, service } = await context.params;
-    await authorizeSession(id, user);
+    await authorizeSessionTerminalDriver(id, user);
     const input = (await request.json().catch(() => ({}))) as { on?: unknown };
     if (typeof input.on !== 'boolean') throw new StudioError(400, 'on(불리언)이 필요합니다');
     return Response.json(await setSessionServiceSelection(id, service, input.on));

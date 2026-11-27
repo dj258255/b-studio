@@ -1,4 +1,4 @@
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSessionTerminalDriver, requireUser } from '@/lib/server/access';
 import { errorResponse } from '@/lib/server/errors';
 import { runReviewRound } from '@/lib/server/sessions';
 
@@ -10,7 +10,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
   try {
     const user = requireUser(request.headers);
     const { id } = await context.params;
-    await authorizeSession(id, user);
+    await authorizeSessionTerminalDriver(id, user);
     const body = (await request.json().catch(() => ({}))) as { restart?: unknown; reviewerModelId?: unknown };
     // 설계 파이프라인(ADR-100): 구현과 다른 모델 계열로 검토하고 싶을 때 리뷰어 모델을 명시적으로 고를 수 있다(선택)
     await runReviewRound(id, { restart: body.restart === true, reviewerModelId: typeof body.reviewerModelId === 'string' ? body.reviewerModelId : undefined });

@@ -6,7 +6,7 @@ const mocks = vi.hoisted(() => ({
   assertDesignApprovedForRequest: vi.fn(async () => {}),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession }));
+vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession, authorizeSessionTerminalDriver: mocks.authorizeSession, authorizeSessionOwner: async () => {} }));
 vi.mock('@/lib/server/sessions', () => ({ sendMessage: mocks.sendMessage }));
 vi.mock('@/lib/server/design-pipeline', () => ({ assertDesignApprovedForRequest: mocks.assertDesignApprovedForRequest }));
 

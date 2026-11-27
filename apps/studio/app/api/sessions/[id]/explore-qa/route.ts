@@ -1,4 +1,4 @@
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSession, authorizeSessionTerminalDriver, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { parseExploreQaRequest } from '@/lib/server/explore-qa-request';
 import { ExploreQaError, loadExploreQaRun, saveExploreQaRun, startExploreQa, stopExploreQa } from '@/lib/server/explore-qa-runs';
@@ -10,7 +10,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await recoverSessions();
-    await authorizeSession(id, user);
+    await authorizeSessionTerminalDriver(id, user);
     const parsed = parseExploreQaRequest(await request.json().catch(() => undefined));
     if (!parsed.ok) throw new StudioError(400, parsed.message);
     const body = parsed.data;

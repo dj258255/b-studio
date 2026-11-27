@@ -66,6 +66,7 @@ import { findProject } from './projects';
 import { cachedRepositoryToken, localFolderAllowed } from './repo-token';
 import { allowedBackends, applyServerChanges, seedServerChanges, commitPendingWorkingCopyDocs, createSession, getSnapshot, resolveSessionBackend, sessionTerminalAllowed, setTerminalBoard, stopAndDeleteSession, stopSession, subscribe } from './sessions';
 import { isTerminalRunnableBackend, sessionTerminalMode } from './session-terminal';
+import { terminalClosedMessage } from './terminal-allowed';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 import { cardsToPlan, type TaskCardDone } from './task-cards';
 import { findAiAccount } from './ai-accounts';
@@ -276,7 +277,7 @@ export async function createTaskPlan(input: {
   let modelId = input.modelId?.trim() ?? '';
   if (cards !== undefined) {
     // 카드 계획은 모델을 부르지 않는다. 세션 터미널을 쓸 수 있을 때만 만들고, 기록용 모델 id는 'terminal'이다
-    if (!sessionTerminalAllowed()) throw new StudioError(409, '작업 카드는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
+    if (!sessionTerminalAllowed()) throw new StudioError(409, `작업 카드는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다. ${terminalClosedMessage()}`);
     // 카드 계획도 통합이 서버가 쓰는 길 하나뿐이다. 그 길에 못 싣는 확인·조율·방식은 만들기 전에 거절한다
     assertIntegrationRunnable(input);
     modelId = 'terminal';
@@ -374,7 +375,7 @@ export async function createTaskPlan(input: {
  * 레인을 띄울 백엔드는 모델 계획이면 서버 기본(레인 작업의 backend는 버려진다), 고정 계획이면 레인이 고른 값(없으면 서버 기본)이다
  */
 function assertPlanTerminalRunnable(input: { presetPlan?: unknown; coordination?: CoordinationInput; verify?: VerifyMode; integrationChecks?: { pageChecks?: WorkflowPageCheck[] }; effort?: string }): void {
-  if (!sessionTerminalAllowed()) throw new StudioError(409, '터미널 방식 작업 분해는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다');
+  if (!sessionTerminalAllowed()) throw new StudioError(409, `터미널 방식 작업 분해는 세션 터미널을 쓸 수 있을 때(개인 PC 모드, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도) 씁니다. ${terminalClosedMessage()}`);
   // 허용 목록(모르는 전략도 거절). S2·S3·S5·S7은 게시판 도구를 레인 터미널에 붙이고(S7의 중계는 레인 실행기와 무관), S4는 통합 세션 터미널에 수리를 보낸다.
   // S6은 트레이스가 모델 글·도구 결과·턴 경계로 만들어지는데 터미널 훅에는 도구 호출뿐이라, 줄인 트레이스로 돌리면 벤치 비교가 달라져 받지 않는다
   const strategy = input.coordination?.strategy;

@@ -1,4 +1,4 @@
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSessionTerminalDriver, requireUser } from '@/lib/server/access';
 import { errorResponse } from '@/lib/server/errors';
 import { cancelRun } from '@/lib/server/sessions';
 
@@ -7,7 +7,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
   try {
     const user = requireUser(request.headers);
     const { id, runId } = await context.params;
-    await authorizeSession(id, user);
+    await authorizeSessionTerminalDriver(id, user);
     cancelRun(id, runId);
     return Response.json({ runId }, { status: 202 });
   } catch (error) {

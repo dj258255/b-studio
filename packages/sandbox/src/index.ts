@@ -98,6 +98,8 @@ export {
   type AgentTerminal,
   type TerminalSize,
 } from './docker/agent-terminal';
+export { AGENT_CODEX_IMAGE, AGENT_CODEX_BIN, agentImageExists } from './docker/agent-image';
+export { AGENT_CODEX_TERMINAL_COMMAND, AGENT_CODEX_WRAPPER_PATH, agentCodexFiles, agentCodexRequirements, agentCodexWrapper, codexWrapperArgs } from './docker/agent-codex';
 export {
   checkHostGatewayConfig,
   codexEnvFile,

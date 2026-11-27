@@ -2736,10 +2736,10 @@ describe('Codex 터미널(#825)', () => {
     const session = await openCodex();
     session.gateway.conversation?.('019a2b3c-0000-7000-8000-000000000001');
     expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBe('019a2b3c-0000-7000-8000-000000000001');
-    // 컨테이너 방식으로 바뀌면 claude가 뜬다. codex의 대화를 claude에 넘기지 않는다
+    // 컨테이너 방식도 codex 세션이면 codex가 뜬다(ADR-245). 다른 CLI의 대화는 이어 붙이지 않는다: 기억한 것이 claude의 것이면 codex에 넘기지 않는다
     fake.terminalMode = 'container';
-    expect(sessionTerminalTarget(session.id).cli).toBe('claude');
-    expect(sessionTerminalTarget(session.id).resumeConversation?.()).toBeUndefined();
+    expect(sessionTerminalTarget(session.id).cli).toBe('codex');
+    expect(sessionTerminalTarget(session.id).backend).toBe('codex');
     await stopSession(session.id);
   }, 30_000);
 
@@ -2792,10 +2792,10 @@ describe('Codex 터미널(#825)', () => {
     }, 30_000);
   });
 
-  it('컨테이너 방식은 백엔드가 codex여도 claude를 띄운다(컨테이너에는 claude만 깐다)', async () => {
+  it('컨테이너 방식은 백엔드가 codex면 codex를 띄우고(이미지의 codex, ADR-245), api 세션은 claude로 보이되 컨테이너 백엔드가 띄우기 전에 거절한다', async () => {
     process.env.B_STUDIO_BACKENDS = 'codex';
     const session = await open({ backend: 'codex' });
-    expect(sessionTerminalTarget(session.id).cli).toBe('claude');
+    expect(sessionTerminalTarget(session.id).cli).toBe('codex');
     await stopSession(session.id);
   }, 30_000);
 

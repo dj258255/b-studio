@@ -882,11 +882,11 @@ describe('터미널로 돌릴 수 있는 백엔드와 AI 리뷰 고침의 길', 
   const host = { B_STUDIO_TERMINAL: 'host' };
   const container = { B_STUDIO_TERMINAL: 'container' };
 
-  it('api는 이 컴퓨터 방식에서만 터미널로 돌릴 수 있다(컨테이너 방식은 claude를 띄운다)', () => {
+  it('api는 이 컴퓨터 방식에서만 터미널로 돌릴 수 있다(컨테이너 방식은 api를 띄우지 않는다). codex는 두 방식 모두 돌린다(ADR-245)', () => {
     expect(isTerminalRunnableBackend('api', host)).toBe(true);
     expect(isTerminalRunnableBackend('api', container)).toBe(false);
     expect(isTerminalRunnableBackend('codex', host)).toBe(true);
-    expect(isTerminalRunnableBackend('codex', container)).toBe(false);
+    expect(isTerminalRunnableBackend('codex', container)).toBe(true);
     expect(isTerminalRunnableBackend('claude-code', container)).toBe(true);
     // commandcode는 실험이라 스위치 없이는 터미널로 돌리지 않는다(ADR-233)
     expect(isTerminalRunnableBackend('commandcode', host)).toBe(false);

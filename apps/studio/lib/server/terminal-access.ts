@@ -4,6 +4,7 @@ import { cookieValue } from './cookies';
 import { StudioError } from './errors';
 import { hasLocalToken, LOCAL_TOKEN_COOKIE } from './local-token';
 import { recoverSessions } from './sessions';
+import { resolveTerminalMode } from './terminal-allowed';
 
 /**
  * 세션 터미널 통로의 공통 검사(#673, B4). 터미널 통로가 둘(한 세션용, 나란히 보기의 묶음용)이라
@@ -25,10 +26,31 @@ export async function assertTerminalAccess(headers: Headers): Promise<string> {
 
 /**
  * 터미널은 컨테이너 안의 셸에 닿는 통로다. 이 컴퓨터의 주소로 들어온 요청만 받는다.
- * 개인 PC 모드에는 인증이 없어서, 다른 사이트가 자기 도메인을 127.0.0.1로 풀리게 하면(DNS 리바인딩) 같은 출처로 보인다
+ * 개인 PC 모드에는 인증이 없어서, 다른 사이트가 자기 도메인을 127.0.0.1로 풀리게 하면(DNS 리바인딩) 같은 출처로 보인다.
+ *
+ * 예외는 하나다: 인증을 켠 서버 방식이고 운영자가 서버 방식 세션 터미널을 켜 둔 서버(`resolveTerminalMode`가 허용)에서는 다른 주소로 온 요청도 받는다.
+ * 사용자가 서버에 원격으로 붙는 것이 그 방식의 뜻이고, 그 요청의 근거는 주소가 아니라 로그인이다(이어지는 `requireUser`가 로그인 헤더를 요구하고,
+ * 터미널을 움직이는 쓰기는 `authorizeSessionOwner`가 만든 사람만 받는다). 허용 목록이라 이 예외는 판정이 "열림"이라고 답한 때만 적용된다 —
+ * 인증 설정을 읽지 못하거나 스위치가 꺼졌거나 이 컴퓨터 방식이면 옛 규칙(이 컴퓨터의 주소만)을 그대로 쓴다.
+ * 인증을 켠 서버가 닫혀 있는데 다른 주소로 온 요청이면, 이 컴퓨터 주소 안내 대신 닫힌 까닭을 적어 거절한다
  */
 export function assertLocalRequest(headers: Headers): void {
+  const resolved = resolveTerminalMode();
+  if (authMode() !== 'none' && authMode() !== undefined) {
+    if (resolved.allowed) return;
+    if (!isLoopbackHost(headers)) throw new StudioError(403, resolved.reason);
+    return;
+  }
   if (!isLoopbackHost(headers)) throw new StudioError(403, '세션 터미널은 이 컴퓨터의 주소(127.0.0.1 · localhost)로 연 화면에서만 씁니다');
+}
+
+/** 인증 방식. 설정이 틀려 읽지 못하면 undefined다(호출한 쪽은 "인증을 켠 서버"로 세지 않는다) */
+function authMode(): string | undefined {
+  try {
+    return authConfig().mode;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

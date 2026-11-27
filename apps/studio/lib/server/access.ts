@@ -1,6 +1,7 @@
 import { authConfig, canManage, LOCAL_USER, USER_HEADER } from './auth';
 import { StudioError } from './errors';
 import { getSnapshot, recoverSessions } from './sessions';
+import { sessionTerminalAllowed } from './terminal-allowed';
 
 /**
  * 앞단(스튜디오 서버의 인증 판단, server/app.ts)이 확인해 넣은 사용자. 인증을 켰는데 없으면 앞단을 거치지 않은 요청이므로 거부한다.
@@ -40,4 +41,15 @@ export async function authorizeSessionOwner(id: string, user: string): Promise<v
     403,
     snapshot.owner ? `이 세션의 터미널은 ${snapshot.owner}님만 움직일 수 있습니다. 관리자는 보고 닫을 수만 있습니다` : '만든 사람이 기록되지 않은 세션이라 터미널을 움직일 수 없습니다',
   );
+}
+
+/**
+ * 터미널의 CLI를 움직이는 세션 변경 요청(AI 리뷰 돌리기: 고침 요청이 터미널로 들어간다, 실행 중단: CLI에 Esc를 보낸다)의 권한.
+ * 세션을 바꿀 수 있는 사람(`authorizeSession`)이어야 하고, 서버 방식에서 세션 터미널을 쓸 수 있으면(운영자가 켠 서버) 만든 사람만 통과한다.
+ * 관리자라도 남의 CLI에 입력을 만들어 넣을 수 없다(#1353). 터미널을 쓸 수 없는 서버(채팅식만 쓰는 서버, 개인 PC)는 `authorizeSession`과 같다 —
+ * 그 요청들은 터미널을 움직이지 않으므로 옛 규칙을 바꾸지 않는다. 허용 목록(만든 사람)이라 모르는 입력은 범위 밖이다
+ */
+export async function authorizeSessionTerminalDriver(id: string, user: string): Promise<void> {
+  await authorizeSession(id, user);
+  if (authConfig().mode !== 'none' && sessionTerminalAllowed()) await authorizeSessionOwner(id, user);
 }
