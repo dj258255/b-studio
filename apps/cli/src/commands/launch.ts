@@ -319,9 +319,13 @@ async function realProbe(url: string): Promise<ProbeResult> {
   }
 }
 
-function realExec(command: string, args: readonly string[]): Promise<ExecResult> {
+/**
+ * 외부 명령(docker·colima·pnpm install·cargo)을 저장소 루트에서 돌린다. 작업 폴더를 정하지 않으면 사용자가 `b-studio`를 친 폴더에서 돌아
+ * `pnpm install`이 남의 프로젝트에 설치될 수 있다(#1448). `pnpm studio`는 pnpm이 저장소 루트에서 돌려서 드러나지 않았다
+ */
+function realExec(command: string, args: readonly string[], cwd: string): Promise<ExecResult> {
   return new Promise((resolve) => {
-    execFile(command, [...args], { maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
+    execFile(command, [...args], { cwd, maxBuffer: 8 * 1024 * 1024 }, (error, stdout, stderr) => {
       const code = error ? (typeof (error as { code?: unknown }).code === 'number' ? (error as { code: number }).code : 1) : 0;
       resolve({ code, stdout: stdout ?? '', stderr: stderr ?? '' });
     });
@@ -389,7 +393,7 @@ export function createLaunchDeps(env: NodeJS.ProcessEnv = process.env, platform:
     paths: { log: path.join(launchDir, 'studio.log'), pid: path.join(launchDir, 'studio.pid'), run: path.join(launchDir, 'run') },
     probe: realProbe,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    exec: realExec,
+    exec: (command, args) => realExec(command, args, repoRoot),
     spawn: realSpawn,
     fileExists: (file) => access(file).then(() => true, () => false),
     lockfileHash: () => realLockfileHash(repoRoot),

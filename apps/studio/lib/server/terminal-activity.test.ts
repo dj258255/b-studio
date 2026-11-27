@@ -108,6 +108,59 @@ describe('문맥 창(context)', () => {
   });
 });
 
+describe('모델(model)과 모델 바뀜(modelChange)', () => {
+  it('상태 줄 입력의 model.id를 읽고, 없거나 모양이 틀리면 모름(없음)으로 둔다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, {});
+    noteStatusline(state, { model: { id: 7 } });
+    noteStatusline(state, { model: { id: '' } });
+    noteStatusline(state, { model: 'sonnet' });
+    expect(activityView(state)?.model).toBeUndefined();
+    noteStatusline(state, { model: { id: 'claude-sonnet-5', display_name: 'Sonnet' } });
+    expect(activityView(state)?.model).toBe('claude-sonnet-5');
+    expect(activityView(state)?.modelChange).toBeUndefined();
+  });
+
+  it('같은 모델이 다시 오면 바뀜이 아니고, 첫 관측도 바뀜이 아니다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { model: { id: 'claude-sonnet-5' } });
+    noteStatusline(state, { model: { id: 'claude-sonnet-5' } });
+    expect(activityView(state)?.modelChange).toBeUndefined();
+  });
+
+  it('앞에 본 모델과 다른 모델이 오면 바뀜을 남기고, 이어지는 턴이 끝나면 지운다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { model: { id: 'claude-sonnet-5' } });
+    noteStatusline(state, { model: { id: 'claude-opus-5' } });
+    expect(activityView(state)?.model).toBe('claude-opus-5');
+    expect(activityView(state)?.modelChange).toEqual({ from: 'claude-sonnet-5', to: 'claude-opus-5' });
+    // 모델을 바꾼 뒤 처음 시작한 턴이 끝나야 지운다(턴이 끝나기 전에는 새 모델로 캐시를 다시 계산하는 중이다)
+    noteTurnStarted(state, 1_000);
+    expect(activityView(state)?.modelChange).toBeDefined();
+    noteTurnEnded(state, {}, 2_000);
+    expect(activityView(state)?.modelChange).toBeUndefined();
+    expect(activityView(state)?.model).toBe('claude-opus-5');
+  });
+
+  it('턴 도중에 바뀌었으면 그 턴이 끝날 때 지운다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { model: { id: 'claude-sonnet-5' } });
+    noteTurnStarted(state, 1_000);
+    noteStatusline(state, { model: { id: 'claude-haiku-5' } });
+    expect(activityView(state)?.modelChange).toEqual({ from: 'claude-sonnet-5', to: 'claude-haiku-5' });
+    noteTurnEnded(state, {}, 2_000);
+    expect(activityView(state)?.modelChange).toBeUndefined();
+  });
+
+  it('제어 글자를 지우고 길이를 줄인다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { model: { id: `x\u001b[31m${'y'.repeat(300)}` } });
+    const model = activityView(state)!.model!;
+    expect(model.length).toBeLessThanOrEqual(80);
+    expect(model).not.toContain('\u001b');
+  });
+});
+
 describe('마지막 답(lastMessage)', () => {
   it('턴 끝의 last_assistant_message를 한 줄로 200자 안에', () => {
     const state = newTerminalActivity();

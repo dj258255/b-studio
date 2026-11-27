@@ -339,7 +339,7 @@ import {
 } from './session-terminal-turn-end-rest';
 import { decideSilence, decideStall, decideUsage, EARLY_USAGE_MS, LATE_USAGE_MS, stallIntervalMs } from './session-terminal-usage';
 import { beginTerminalClose, cliEnded, retryRoute, runTerminalClose, terminalRunClosed, terminalRunOpen, turnFailed, violationRoute, type CloseActions } from './session-terminal-close';
-import { activityLog, activityView, clearActivityLog, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type ActivityLogView, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
+import { activityLog, activityView, cleanModelName, clearActivityLog, newTerminalActivity, noteActivityHook, noteActivityPing, noteCliEnded, noteStatusline, noteToolDenied, noteToolUse, noteTurnEnded, noteTurnStarted, notificationMessage, permissionMessage, type ActivityLogView, type TerminalActivity, type TerminalActivityView } from './terminal-activity';
 import { agentRows, capabilitiesOf, newAgentLedger, noteAgentSignal, noteAgentUsage, restoreAgentLedger, serializeAgentLedger, type AgentCapabilities, type TerminalAgentLedger, type TerminalAgentRow, type TerminalAgentState } from './terminal-agents';
 import { decideTurnLimit, modelCallsFromOtlp, usageUnverifiable, type ModelCall } from './session-terminal-telemetry';
 import { agentSignalsFromOtlp, type ApiRequestUsage } from './terminal-telemetry';
@@ -8676,11 +8676,25 @@ function announceTerminalRun(session: Session, run: ActiveRun & { terminal: Term
     ...finished,
     // CLI가 알려 온 사용량이 있으면 실행 지표와 함께 싣는다(텔레메트리를 못 받았으면 지금처럼 없다)
     ...(run.terminalUsage ? { usage: run.terminalUsage.usage, metrics: terminalRunMetrics(run) } : {}),
+    ...observedRunModel(session, run),
     durationMs: Math.round(performance.now() - run.terminal.startedMs),
     sessionTokens: session.snapshot.tokens,
     nextDemoRequest: session.snapshot.nextDemoRequest,
     nextDemoQuestion: session.snapshot.nextDemoQuestion,
   });
+}
+
+/**
+ * 터미널 실행을 한 모델을 CLI가 알린 값에서 읽는다(#1439). 상태 줄이 알린 메인 모델이 먼저고, 없으면 텔레메트리에 모델이 하나뿐일 때 그것이다.
+ * 텔레메트리에 모델이 둘 이상이면(서브에이전트·보조 호출이 섞인다) 어느 것이 메인인지 알 수 없어 비운다. 세션에 정해 둔 모델(`snapshot.modelId`)은
+ * CLI에 넘긴 요청일 뿐 실제로 쓴 모델이 아니라서(터미널에서 `/model`로 바꿀 수 있다) 쓰지 않는다. CLI가 보낸 값이라 표시에만 쓴다
+ */
+function observedRunModel(session: Session, run: ActiveRun): { model?: string } {
+  const reported = session.terminalActivity?.model;
+  if (reported) return { model: reported };
+  const names = Object.keys(run.terminalUsage?.usageByModel ?? {});
+  const only = names.length === 1 ? cleanModelName(names[0]) : undefined;
+  return only ? { model: only } : {};
 }
 
 /**
