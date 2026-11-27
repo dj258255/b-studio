@@ -4,7 +4,7 @@
  * CLI는 스스로 훅·텔레메트리를 부르는 가짜(`server/baseline/fake-claude-agent.mjs`)라 로그인·모델 호출이 없다.
  * 훅 → 쓰기 직전 기준 → 파일 → 턴 끝 게이트(실제 서비스 재시작·준비 판정) → 체크포인트 → 승자 선택 → 모델 관측을 한 번에 지난다.
  *
- * API 모드의 제공자 어댑터는 e2e:fleet(fleet-local.ts)가 확인한다. 이 파일은 터미널 경로만 본다.
+ * 채팅식 e2e(fleet-local.ts)는 채팅식 경로와 함께 지웠다. 이 파일이 Fleet의 e2e다.
  *
  *   pnpm e2e:fleet-terminal
  */

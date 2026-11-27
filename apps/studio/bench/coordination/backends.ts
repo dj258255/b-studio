@@ -297,3 +297,18 @@ export function resolveRateLimitPolicy(onRateLimit: string | undefined, waitMinu
   if (!Number.isFinite(minutes) || minutes <= 0) throw new Error(`--rate-limit-wait-minutes는 0보다 큰 숫자여야 합니다 (지금 값: ${waitMinutes})`);
   return { policy: value, waitMinutes: minutes };
 }
+
+/**
+ * 벤치는 레인을 세션 터미널에서 돌린다(`runner: 'terminal'`, ADR-243). 터미널로 못 띄우는 것은 Docker·모델을 건드리기 전에 막는다:
+ * opencode·gemini는 터미널 CLI가 없고, S6은 트레이스가 모델 글·도구 결과·턴 경계로 만들어지는데 터미널 훅에는 도구 호출뿐이라 받지 않으며,
+ * `--verify light`는 터미널 턴 끝 게이트가 가벼운 확인을 받지 않는다(게이트를 약하게 하는 방향이라 옮기지 않았다).
+ * 백엔드 판정은 서버의 isTerminalRunnableBackend와 같은 표다(commandcode는 실험 스위치가 필요해 벤치가 켠다)
+ */
+export function assertTerminalBench(input: { backend: Backend; laneBackends: ReadonlyMap<BenchLaneGroup, LaneBackendChoice>; strategies: readonly Strategy[]; verify: BenchVerify }): void {
+  const backends = new Set<Backend>([input.backend, ...[...input.laneBackends.values()].map((choice) => choice.backend)]);
+  for (const candidate of backends) {
+    if (candidate === 'opencode' || candidate === 'gemini') throw new Error(`${candidate} 백엔드는 세션 터미널로 띄울 수 없어 벤치의 터미널 레인으로 돌릴 수 없습니다`);
+  }
+  if (input.strategies.includes('S6')) throw new Error('S6은 터미널 레인이 받지 않아 벤치에서 돌릴 수 없습니다(트레이스를 만들 모델 글·도구 결과·턴 경계가 터미널 훅에 없습니다)');
+  if (input.verify === 'light') throw new Error('--verify light는 터미널 레인의 턴 끝 게이트가 받지 않아 벤치에서 쓸 수 없습니다');
+}
