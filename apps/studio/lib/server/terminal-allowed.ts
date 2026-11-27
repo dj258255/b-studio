@@ -12,30 +12,68 @@ export type TerminalMode = 'container' | 'host';
  * 세션 터미널 판정의 결과. 열 수 있는지(허용)와 어느 방식으로 여는지(방식)를 한 번에 읽어 돌려준다.
  * 닫힌 결과에도 방식(설정이 올바를 때만)이 실린다 — 열지 못하는 서버에서도 방식을 보는 자리(정리, 관문 주소)가 있다
  */
-export type TerminalModeResolution = { allowed: true; mode: TerminalMode } | { allowed: false; reason: string; mode?: TerminalMode };
+export type TerminalModeResolution = { allowed: true; mode: TerminalMode } | { allowed: false; reason: string; mode?: TerminalMode; server?: true };
 
 /**
- * 세션 터미널 판정의 유일한 자리. 인증 방식, B_STUDIO_TERMINAL, 실험 기능 스위치를 여기서 한 번만 읽는다.
+ * 인증을 켠 서버 방식(token·proxy)에서 세션 터미널을 열어도 된다고 운영자가 따로 적는 스위치(#1473). 정확히 `1`일 때만 켠다.
+ * 서버 방식 터미널은 실제 환경에서 재 본 기록이 아직 없어서(AGENTS.md "지원 범위와 실험 기능") 기본이 꺼짐이다.
+ * 인증을 끈 개인 PC는 이 값을 보지 않는다
+ */
+export const SERVER_TERMINAL_ENV = 'B_STUDIO_SERVER_TERMINAL';
+
+/**
+ * 세션 터미널 판정의 유일한 자리. 인증 방식, B_STUDIO_TERMINAL, 실험 기능 스위치, 서버 방식 스위치를 여기서 한 번만 읽는다.
  * "열 수 있는가"(sessionTerminalAllowed)와 "어느 방식으로 여는가"(sessionTerminalMode, 백엔드 선택, 관문 바인딩)가 같은 입력을 다르게 읽지 않도록 모두 이 함수에서 나온다.
  *
- * - 인증을 끈 개인 PC(none)에서만 연다. 인증을 켰거나(token·proxy) 인증 설정이 틀리면 닫는다.
- * - B_STUDIO_TERMINAL이 비었거나 host면 이 컴퓨터 방식(지원 경로, 실험 기능 없이 연다, ADR-200·ADR-173 덧붙임).
- * - container는 실험이라 B_STUDIO_EXPERIMENTAL을 켰을 때만 연다.
- * - 그 밖의 값(오타)은 닫는다. 조용히 이 컴퓨터 방식으로 떨어지지 않고, 실험 기능을 켜도 열지 않는다
+ * 허용 목록이다 — 아래에 적은 조합만 열고, 모르는 값·망가진 설정은 모두 닫는다.
+ * - 인증을 끈 개인 PC(none):
+ *   - B_STUDIO_TERMINAL이 비었거나 host면 이 컴퓨터 방식(지원 경로, 실험 기능 없이 연다, ADR-200·ADR-173 덧붙임).
+ *   - container는 실험이라 B_STUDIO_EXPERIMENTAL을 켰을 때만 연다.
+ * - 인증을 켠 서버 방식(token·proxy): 셋이 모두 맞을 때만 연다. 이 컴퓨터 방식(host)은 서버 컴퓨터에서 사용자의 CLI를 돌리게 되므로 어떤 경우에도 닫는다.
+ *   1. 운영자가 B_STUDIO_SERVER_TERMINAL=1을 적었다.
+ *   2. B_STUDIO_TERMINAL=container를 **적었다**(비어 있어서 host로 읽히는 것을 컨테이너로 바꿔 읽지 않는다).
+ *   3. B_STUDIO_EXPERIMENTAL=1(컨테이너 방식은 실험이다).
+ * - 인증 설정이 틀리면(authConfig가 던짐) 닫는다. B_STUDIO_TERMINAL의 오타도 닫는다: 조용히 이 컴퓨터 방식으로 떨어지지 않고, 실험 기능을 켜도 열지 않는다
  */
 export function resolveTerminalMode(env: Record<string, string | undefined> = process.env): TerminalModeResolution {
   const value = env.B_STUDIO_TERMINAL?.trim();
   const mode: TerminalMode | undefined = !value || value === 'host' ? 'host' : value === 'container' ? 'container' : undefined;
   if (!mode) return { allowed: false, reason: `B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다 (지금 값: ${value})` };
-  let authOff = false;
+  let authMode: string | undefined;
   try {
-    authOff = authConfig(env).mode === 'none';
+    authMode = authConfig(env).mode;
   } catch {
-    authOff = false;
+    authMode = undefined;
   }
-  if (!authOff) return { allowed: false, reason: '세션 터미널은 인증을 끈 개인 PC 모드에서만 씁니다', mode };
-  if (mode === 'container' && !experimentalEnabled(env)) return { allowed: false, reason: '컨테이너 방식 세션 터미널은 B_STUDIO_EXPERIMENTAL=1이 필요합니다', mode };
-  return { allowed: true, mode };
+  if (authMode === 'none') {
+    if (mode === 'container' && !experimentalEnabled(env)) return { allowed: false, reason: '컨테이너 방식 세션 터미널은 B_STUDIO_EXPERIMENTAL=1이 필요합니다', mode };
+    return { allowed: true, mode };
+  }
+  if (authMode !== 'token' && authMode !== 'proxy') return { allowed: false, reason: '세션 터미널은 개인 PC 모드에서만 씁니다(인증 설정을 읽지 못했습니다)', mode };
+  // 인증을 켠 서버 방식. 앞 순서에서 틀린 쪽의 까닭부터 알린다
+  if (!serverTerminalEnabled(env)) {
+    return { allowed: false, reason: `세션 터미널은 개인 PC 모드에서만 씁니다. 인증을 켠 서버 방식에서는 운영자가 ${SERVER_TERMINAL_ENV}=1로 켜야 합니다(컨테이너 방식, B_STUDIO_TERMINAL=container, B_STUDIO_EXPERIMENTAL=1도 필요합니다)`, mode, server: true };
+  }
+  if (!value || value !== 'container') {
+    return { allowed: false, reason: '인증을 켠 서버 방식의 세션 터미널은 컨테이너 안에서만 돕니다. B_STUDIO_TERMINAL=container를 적으세요(이 컴퓨터 방식은 서버 방식에서 쓰지 않습니다)', mode, server: true };
+  }
+  if (!experimentalEnabled(env)) return { allowed: false, reason: '서버 방식의 컨테이너 세션 터미널은 B_STUDIO_EXPERIMENTAL=1이 필요합니다', mode, server: true };
+  return { allowed: true, mode: 'container' };
+}
+
+/** 운영자가 서버 방식 세션 터미널을 켰는가. 정확히 `1`만 켠다(true·yes·0은 켜지 않는다) */
+export function serverTerminalEnabled(env: Record<string, string | undefined> = process.env): boolean {
+  return env[SERVER_TERMINAL_ENV]?.trim() === '1';
+}
+
+/**
+ * 세션 터미널을 쓸 수 없을 때 사용자에게 보일 글. 개인 PC에서 컨테이너 방식이 실험 기능 때문에 닫힌 것은 옛 문구를 그대로 쓰고,
+ * 인증을 켠 서버 방식이면 판정이 적은 까닭(스위치·방식·실험 기능 중 틀린 것)을 보인다. 열 수 있는 서버에서 부르면 옛 문구다
+ */
+export function terminalClosedMessage(env: Record<string, string | undefined> = process.env): string {
+  const resolved = resolveTerminalMode(env);
+  if (!resolved.allowed && resolved.server) return resolved.reason;
+  return '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)';
 }
 
 /**

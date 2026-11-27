@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { USER_HEADER } from './auth';
 import { StudioError } from './errors';
 
 // 로컬 토큰은 파일을 만지지 않게 가짜로 끼운다(진짜는 local-token.test.ts가 본다)
@@ -41,6 +42,50 @@ describe('assertLocalRequest', () => {
   });
 });
 
+/** 인증을 켠 서버 방식의 환경. switchOn이 꺼져 있으면 운영자가 서버 방식 터미널을 켜지 않은 서버다 */
+function serverEnv(options: { switchOn: boolean; terminal?: string; experimental?: boolean; auth?: string } = { switchOn: true }): void {
+  vi.stubEnv('B_STUDIO_AUTH', options.auth ?? 'token');
+  vi.stubEnv('B_STUDIO_AUTH_SECRET', 's'.repeat(40));
+  vi.stubEnv('B_STUDIO_AUTH_TOKENS', `kim:${'k'.repeat(32)}`);
+  vi.stubEnv('B_STUDIO_SERVER_TERMINAL', options.switchOn ? '1' : '');
+  vi.stubEnv('B_STUDIO_TERMINAL', options.terminal ?? 'container');
+  vi.stubEnv('B_STUDIO_EXPERIMENTAL', options.experimental === false ? '' : '1');
+}
+
+describe('assertLocalRequest: 인증을 켠 서버 방식', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('운영자가 서버 방식 터미널을 켠 서버(컨테이너 방식)에서는 이 컴퓨터가 아닌 주소로 온 요청도 받는다 — 로그인이 근거다', () => {
+    serverEnv();
+    for (const host of ['studio.example.com', 'studio.example.com:8443', '10.0.0.5:3000', '127.0.0.1:3000']) expect(() => assertLocalRequest(headers({ host })), host).not.toThrow();
+  });
+
+  it('스위치가 꺼져 있으면 다른 주소의 요청은 까닭을 적어 403으로 막는다(이 컴퓨터 주소는 라우트가 까닭을 적어 거절한다)', () => {
+    serverEnv({ switchOn: false });
+    expect(status(() => assertLocalRequest(headers({ host: 'studio.example.com' })))).toBe(403);
+    try {
+      assertLocalRequest(headers({ host: 'studio.example.com' }));
+    } catch (error) {
+      expect((error as Error).message).toContain('B_STUDIO_SERVER_TERMINAL=1');
+    }
+    expect(() => assertLocalRequest(headers({ host: '127.0.0.1:3000' }))).not.toThrow();
+  });
+
+  it('스위치를 켜도 이 컴퓨터 방식·실험 기능 없음·틀린 인증 설정·인증 없음이면 다른 주소는 막는다', () => {
+    serverEnv({ switchOn: true, terminal: 'host' });
+    expect(status(() => assertLocalRequest(headers({ host: 'studio.example.com' })))).toBe(403);
+    serverEnv({ switchOn: true, terminal: '' });
+    expect(status(() => assertLocalRequest(headers({ host: 'studio.example.com' })))).toBe(403);
+    serverEnv({ switchOn: true, experimental: false });
+    expect(status(() => assertLocalRequest(headers({ host: 'studio.example.com' })))).toBe(403);
+    serverEnv({ switchOn: true, auth: 'bogus' });
+    expect(status(() => assertLocalRequest(headers({ host: 'studio.example.com' })))).toBe(403);
+    // 인증이 없으면 스위치를 켜도 달라지지 않는다(DNS 리바인딩 방어)
+    serverEnv({ switchOn: true, auth: 'none' });
+    expect(status(() => assertLocalRequest(headers({ host: 'studio.example.com' })))).toBe(403);
+  });
+});
+
 describe('assertLocalToken', () => {
   afterEach(() => vi.unstubAllEnvs());
 
@@ -78,6 +123,31 @@ describe('assertTerminalAccess', () => {
     // 로컬 토큰이 없어도 복구 전에 막는다
     vi.mocked(recoverSessions).mockClear();
     await expect(assertTerminalAccess(headers({ host: '127.0.0.1:3000' }))).rejects.toBeInstanceOf(StudioError);
+    expect(recoverSessions).not.toHaveBeenCalled();
+  });
+});
+
+describe('assertTerminalAccess: 인증을 켠 서버 방식', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it('스위치를 켠 서버에서 로그인한 사용자는 다른 주소로도 지나가고 사용자 이름을 돌려받는다(로컬 토큰 쿠키는 요구하지 않는다)', async () => {
+    serverEnv();
+    vi.mocked(recoverSessions).mockClear();
+    expect(await assertTerminalAccess(headers({ host: 'studio.example.com', [USER_HEADER]: 'kim' }))).toBe('kim');
+    expect(recoverSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it('로그인한 사용자 헤더가 없으면(앞단을 거치지 않았거나 로그인이 만료됨) 세션 복구 전에 401로 막는다', async () => {
+    serverEnv();
+    vi.mocked(recoverSessions).mockClear();
+    await expect(assertTerminalAccess(headers({ host: 'studio.example.com' }))).rejects.toMatchObject({ status: 401 });
+    expect(recoverSessions).not.toHaveBeenCalled();
+  });
+
+  it('스위치가 꺼진 서버에서는 로그인한 사용자도 다른 주소로는 지나가지 못한다', async () => {
+    serverEnv({ switchOn: false });
+    vi.mocked(recoverSessions).mockClear();
+    await expect(assertTerminalAccess(headers({ host: 'studio.example.com', [USER_HEADER]: 'kim' }))).rejects.toMatchObject({ status: 403 });
     expect(recoverSessions).not.toHaveBeenCalled();
   });
 });

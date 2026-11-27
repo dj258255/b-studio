@@ -361,7 +361,7 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { commandCodeTerminalReason, openCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, openCodeTerminalReason, sessionTerminalAllowed, terminalClosedMessage, terminalHomeUser } from './terminal-allowed';
 import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
@@ -7498,7 +7498,7 @@ export function sessionTerminalTarget(id: string): {
   draftFile?: string;
   selfAgent?: () => Promise<{ profile: Record<string, unknown>; apiKey?: string }>;
 } {
-  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
+  if (!sessionTerminalAllowed()) throw new StudioError(403, terminalClosedMessage());
   const session = requireSession(id);
   // Command Code 세션은 이 컴퓨터 방식 + 실험 스위치에서만 띄운다. 아니면 claude를 대신 띄우지 않고 까닭을 알린다(ADR-233)
   if (sessionBackend(session.snapshot) === 'commandcode') {
@@ -7884,7 +7884,7 @@ function clipToolInput(input: unknown): Record<string, unknown> {
 
 /** 관문의 훅이 가리키는 세션. 멈춘 세션은 받지 않는다(켜다 실패한 세션은 받는다 — 열려 있는 터미널에서 고치는 중일 수 있다) */
 function terminalSession(id: string): Session {
-  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
+  if (!sessionTerminalAllowed()) throw new StudioError(403, terminalClosedMessage());
   const session = requireSession(id);
   if (session.stop.signal.aborted || session.snapshot.status === 'stopped') throw new StudioError(409, '멈춘 세션입니다');
   return session;
@@ -10401,7 +10401,7 @@ function activityRedactor(session: Session): (text: string) => string {
  * 중지된 세션이거나 받은 것이 없으면 빈 목록이다. 쓸 수 없는 서버에서는 터미널 출력 통로와 같은 말로 거절한다(터미널 화면에 이미 보이는 내용이라 같은 서버 조건을 쓴다)
  */
 export function sessionTerminalActivityLog(id: string, agent?: string): ActivityLogView {
-  if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
+  if (!sessionTerminalAllowed()) throw new StudioError(403, terminalClosedMessage());
   const session = store.sessions.get(id);
   if (!session) {
     if (archived.has(id)) return { agents: [] };

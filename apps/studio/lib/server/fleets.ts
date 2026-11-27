@@ -9,6 +9,7 @@ import { StudioError } from './errors';
 import { listModelOptions } from './model-registry';
 import { findProject } from './projects';
 import { isTerminalRunnableBackend } from './session-terminal';
+import { terminalClosedMessage } from './terminal-allowed';
 import { allowedBackends, assertBackendReady, createSession, resolveSessionBackend, sessionTerminalAllowed, stopAndDeleteSession, subscribe, type BackendPreflights } from './sessions';
 import { runTerminalTask, terminalLaneDriver, type TerminalTaskDeps } from './terminal-lane';
 
@@ -165,7 +166,7 @@ export async function createFleet(input: {
  * **허용 목록이라 모르는 백엔드는 거절한다**
  */
 function assertTerminalRunnable(selected: readonly ValidatedCandidate[]): void {
-  if (!sessionTerminalAllowed()) throw new StudioError(400, '이 서버에서는 세션 터미널을 쓸 수 없어 터미널 방식 Fleet을 만들 수 없습니다');
+  if (!sessionTerminalAllowed()) throw new StudioError(400, `이 서버에서는 세션 터미널을 쓸 수 없어 터미널 방식 Fleet을 만들 수 없습니다. ${terminalClosedMessage()}`);
   for (const candidate of selected) {
     if (!isTerminalRunnableBackend(candidate.backend)) throw new StudioError(400, `아직 터미널에서 띄우지 못하는 백엔드입니다: ${candidate.backend}`);
   }
