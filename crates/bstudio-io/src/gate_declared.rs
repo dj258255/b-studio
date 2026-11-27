@@ -727,6 +727,8 @@ async fn run_property_check(hook: &Hook, config: &JsValue) -> Res<JsValue> {
     });
     let get = |href: String| req("declaredRequest", vec![("href", s(href)), ("method", s("GET")), ("headers", json_headers())]);
     let document = match request_op(hook, get(doc_href)).await.and_then(|value| response_of(&value)) {
+        // 크기는 파싱하기 전에 본다(문서는 에이전트가 고칠 수 있는 서비스 코드에서 나온다)
+        Ok((status, text)) if status == 200.0 && text.len() > property::MAX_DOC_BYTES => return Ok(unchecked(&format!("문서가 큼({}바이트 초과)", property::MAX_DOC_BYTES))),
         Ok((status, text)) if status == 200.0 => match js_json::parse(&text) {
             Ok(document) => document,
             Err(_) => return Ok(unchecked("OpenAPI 문서가 JSON이 아닙니다")),
@@ -1517,6 +1519,24 @@ mod tests {
         let declared = run_sync(hook(log.clone(), 0, broken)).ok().unwrap();
         assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
         assert!(detail_of_first(&declared).contains("확인하지 못함"), "{}", detail_of_first(&declared));
+        assert_eq!(calls(&log).iter().filter(|call| call.starts_with("declaredRequest")).count(), 1);
+    }
+
+    #[test]
+    fn 속성_시험은_크기_상한을_넘는_문서를_파싱하지_않고_확인하지_못함으로_남긴다() {
+        let log = fresh();
+        let base = property_reply(r#"{"service":"api","extract":"/openapi.json"}"#, &[(200, "{}")]);
+        let huge = format!(r#"{{"openapi":"3.0.0","paths":{{}},"x":"{}"}}"#, "a".repeat(property::MAX_DOC_BYTES));
+        let big = Box::new(move |op: &str, request: &JsValue| {
+            let href = request.prop("href").and_then(JsValue::as_str).unwrap_or("");
+            if op == "declaredRequest" && href.ends_with("/openapi.json") {
+                return Some(format!(r#"{{"ok":true,"status":200,"text":{}}}"#, js_json::stringify(&JsValue::Str(huge.clone()))));
+            }
+            base(op, request)
+        });
+        let declared = run_sync(hook(log.clone(), 0, big)).ok().unwrap();
+        assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
+        assert!(detail_of_first(&declared).contains("확인하지 못함") && detail_of_first(&declared).contains("문서가 큼"), "{}", detail_of_first(&declared));
         assert_eq!(calls(&log).iter().filter(|call| call.starts_with("declaredRequest")).count(), 1);
     }
 

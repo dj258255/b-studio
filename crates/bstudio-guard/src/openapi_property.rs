@@ -26,6 +26,15 @@ const MAX_GEN_DEPTH: usize = 4;
 const MAX_VALIDATE_DEPTH: usize = 8;
 const MAX_ARRAY_CHECK: usize = 20;
 const MAX_LISTED: usize = 10;
+/// 응답 하나를 견주는 동안 방문하는 스키마 노드 수(`oneOf` 겹침으로 작업량이 지수로 늘지 않게 호출 전체가 함께 쓴다)
+const VALIDATE_BUDGET: usize = 10_000;
+/// `oneOf`/`anyOf`에서 살펴보는 선택지 수. 넘으면 앞의 것만 보고 끝까지 보지 못한 것으로 센다
+const MAX_CHOICES: usize = 16;
+/// 문서 하나에서 값을 만들 때 걷는 스키마 노드 수(`allOf`를 합치는 걸음은 `ALL_OF_COST`로 센다)
+const PLAN_BUDGET: usize = 5_000;
+const ALL_OF_COST: usize = 50;
+/// 받은 OpenAPI 문서 본문의 크기 상한. 파싱하기 전에 본다
+pub const MAX_DOC_BYTES: usize = 2_000_000;
 /// 이보다 큰 응답 본문은 읽지 않고 "확인하지 못함"으로 센다
 const MAX_BODY_BYTES: usize = 1_000_000;
 
@@ -212,11 +221,25 @@ fn random_text(rng: &mut Rng, len: usize) -> String {
     (0..len).map(|_| ALPHABET[rng.below(ALPHABET.len() as u64) as usize] as char).collect()
 }
 
-fn gen_scalar(doc: &JsValue, raw: &JsValue, rng: &mut Rng, depth: usize, min_len_floor: usize) -> Result<String, String> {
+fn spend(budget: &mut usize, cost: usize) -> Result<(), String> {
+    if *budget < cost {
+        *budget = 0;
+        return Err("스키마 걷기 상한".to_owned());
+    }
+    *budget -= cost;
+    Ok(())
+}
+
+fn gen_scalar(doc: &JsValue, raw: &JsValue, rng: &mut Rng, depth: usize, min_len_floor: usize, budget: &mut usize) -> Result<String, String> {
+    spend(budget, 1)?;
     if depth > MAX_GEN_DEPTH {
         return Err("스키마가 너무 깊습니다".to_owned());
     }
     let resolved = resolve(doc, raw)?;
+    if resolved.prop("allOf").is_some() {
+        // 합치기는 값을 복사한다. 문서 크기만큼 비싸므로 걸음을 더 크게 센다
+        spend(budget, ALL_OF_COST)?;
+    }
     let schema = merged(doc, resolved)?;
     if schema.prop("not").is_some() {
         return Err("not 스키마".to_owned());
@@ -233,7 +256,7 @@ fn gen_scalar(doc: &JsValue, raw: &JsValue, rng: &mut Rng, depth: usize, min_len
             if chosen.prop("oneOf").is_some() || chosen.prop("anyOf").is_some() {
                 return Err("깊은 oneOf/anyOf".to_owned());
             }
-            return gen_scalar(doc, chosen, rng, depth + 1, min_len_floor);
+            return gen_scalar(doc, chosen, rng, depth + 1, min_len_floor, budget);
         }
     }
     if let Some(constant) = schema.prop("const") {
@@ -543,7 +566,7 @@ fn safe_target(path: &str) -> bool {
         && !path.split(['?', '#']).next().unwrap_or("").split('/').any(|segment| segment == "." || segment == "..")
 }
 
-fn build_target(doc: &JsValue, path_key: &str, params: &[Param<'_>], rng: &mut Rng) -> Result<String, String> {
+fn build_target(doc: &JsValue, path_key: &str, params: &[Param<'_>], rng: &mut Rng, budget: &mut usize) -> Result<String, String> {
     let mut path = String::new();
     let mut rest = path_key;
     while let Some(open) = rest.find('{') {
@@ -557,7 +580,7 @@ fn build_target(doc: &JsValue, path_key: &str, params: &[Param<'_>], rng: &mut R
                 return Err(format!("경로 매개변수 style({style})"));
             }
         }
-        let value = gen_scalar(doc, schema, rng, 0, 1)?;
+        let value = gen_scalar(doc, schema, rng, 0, 1, budget)?;
         if value.chars().all(|c| c == '.') {
             return Err("점 경로를 뜻하는 경로 값".to_owned());
         }
@@ -588,7 +611,7 @@ fn build_target(doc: &JsValue, path_key: &str, params: &[Param<'_>], rng: &mut R
             let count = min + rng.below((max - min + 1) as u64) as usize;
             let mut values = Vec::new();
             for _ in 0..count {
-                values.push(gen_scalar(doc, items, rng, 1, 0)?);
+                values.push(gen_scalar(doc, items, rng, 1, 0, budget)?);
             }
             let explode = !matches!(param.node.prop("explode"), Some(JsValue::Bool(false)));
             if explode {
@@ -597,7 +620,7 @@ fn build_target(doc: &JsValue, path_key: &str, params: &[Param<'_>], rng: &mut R
                 query.push(format!("{name}={}", values.iter().map(|value| percent_encode(value)).collect::<Vec<_>>().join(",")));
             }
         } else {
-            query.push(format!("{name}={}", percent_encode(&gen_scalar(doc, schema, rng, 0, 0)?)));
+            query.push(format!("{name}={}", percent_encode(&gen_scalar(doc, schema, rng, 0, 0, budget)?)));
         }
     }
     let target = if query.is_empty() { path } else { format!("{path}?{}", query.join("&")) };
@@ -605,7 +628,8 @@ fn build_target(doc: &JsValue, path_key: &str, params: &[Param<'_>], rng: &mut R
     if safe_target(&target) { Ok(target) } else { Err("안전하지 않은 경로".to_owned()) }
 }
 
-fn plan_operation(doc: &JsValue, path_key: &str, path_item: &JsValue, operation: &JsValue, seed: u64, want: usize) -> Result<Vec<String>, String> {
+fn plan_operation(doc: &JsValue, path_key: &str, path_item: &JsValue, operation: &JsValue, seed: u64, want: usize, budget: &mut usize) -> Result<Vec<String>, String> {
+    spend(budget, 1)?;
     if requires_auth(doc, operation) {
         return Err("보안 요구(인증)".to_owned());
     }
@@ -632,7 +656,7 @@ fn plan_operation(doc: &JsValue, path_key: &str, path_item: &JsValue, operation:
     let mut rng = Rng(seed ^ fnv1a(&format!("GET {path_key}")));
     let mut targets: Vec<String> = Vec::new();
     for _ in 0..want {
-        let target = build_target(doc, path_key, &params, &mut rng)?;
+        let target = build_target(doc, path_key, &params, &mut rng, budget)?;
         if !targets.contains(&target) {
             targets.push(target);
         }
@@ -663,6 +687,8 @@ pub fn plan(doc: &JsValue, limits: &Limits) -> Planned {
         .collect();
     planned.operations_total = operations.len();
     let eligible_budget = limits.max_requests;
+    // 문서 전체가 함께 쓰는 걷기 예산. 다하면 남은 연산은 건너뜀으로 센다
+    let mut budget = PLAN_BUDGET;
     for (key, item, operation) in operations.into_iter().take(limits.max_operations) {
         planned.operations_seen += 1;
         let label = format!("GET {key}");
@@ -677,7 +703,7 @@ pub fn plan(doc: &JsValue, limits: &Limits) -> Planned {
                 continue;
             }
         };
-        match plan_operation(doc, key, item, operation, limits.seed, REQUESTS_PER_OPERATION) {
+        match plan_operation(doc, key, item, operation, limits.seed, REQUESTS_PER_OPERATION, &mut budget) {
             Ok(targets) => {
                 for target in targets {
                     if planned.requests.len() >= eligible_budget {
@@ -724,21 +750,37 @@ fn type_matches(name: &str, value: &JsValue) -> bool {
     }
 }
 
-fn validate(doc: &JsValue, raw: &JsValue, value: &JsValue, depth: usize, at: &str) -> Result<(), Mismatch> {
+/// `budget`은 응답 하나를 견주는 호출 전체가 함께 쓴다(노드마다 1). `oneOf`가 겹쳐도 작업량이 이 값을 넘지 않는다
+fn validate(doc: &JsValue, raw: &JsValue, value: &JsValue, depth: usize, at: &str, budget: &mut usize) -> Result<(), Mismatch> {
+    if *budget == 0 {
+        return Err(Mismatch::Unchecked("견주기 상한".to_owned()));
+    }
+    *budget -= 1;
     if depth > MAX_VALIDATE_DEPTH {
         return Err(Mismatch::Unchecked("깊이 상한".to_owned()));
     }
-    let resolved = resolve(doc, raw).map_err(Mismatch::Unchecked)?;
-    let schema = merged(doc, resolved).map_err(Mismatch::Unchecked)?;
+    let schema = resolve(doc, raw).map_err(Mismatch::Unchecked)?;
+    // allOf는 합쳐 복사하지 않고 부분마다 견준다(모두 맞아야 한다)
+    if let Some(JsValue::Arr(parts)) = schema.prop("allOf") {
+        for part in parts.iter().take(MAX_CHOICES) {
+            validate(doc, part, value, depth + 1, at, budget)?;
+        }
+        if parts.len() > MAX_CHOICES {
+            return Err(Mismatch::Unchecked("선택지 상한".to_owned()));
+        }
+    }
     for key in ["oneOf", "anyOf"] {
         if let Some(JsValue::Arr(options)) = schema.prop(key) {
             let mut unchecked: Option<String> = None;
-            for option in options {
-                match validate(doc, option, value, depth + 1, at) {
+            for option in options.iter().take(MAX_CHOICES) {
+                match validate(doc, option, value, depth + 1, at, budget) {
                     Ok(()) => return Ok(()),
                     Err(Mismatch::Unchecked(reason)) => unchecked = Some(reason),
                     Err(Mismatch::Differs(_)) => {}
                 }
+            }
+            if options.len() > MAX_CHOICES {
+                unchecked = Some("선택지 상한".to_owned());
             }
             return Err(match unchecked {
                 Some(reason) => Mismatch::Unchecked(reason),
@@ -773,14 +815,14 @@ fn validate(doc: &JsValue, raw: &JsValue, value: &JsValue, depth: usize, at: &st
         if let Some(JsValue::Obj(properties)) = schema.prop("properties") {
             for (name, property) in properties.entries() {
                 if let Some(item) = object.get(name) {
-                    validate(doc, property, item, depth + 1, &format!("{at}.{name}"))?;
+                    validate(doc, property, item, depth + 1, &format!("{at}.{name}"), budget)?;
                 }
             }
         }
     }
     if let (JsValue::Arr(items), Some(item_schema)) = (value, schema.prop("items")) {
         for (index, item) in items.iter().take(MAX_ARRAY_CHECK).enumerate() {
-            validate(doc, item_schema, item, depth + 1, &format!("{at}[{index}]"))?;
+            validate(doc, item_schema, item, depth + 1, &format!("{at}[{index}]"), budget)?;
         }
     }
     Ok(())
@@ -869,7 +911,8 @@ impl Tally {
                 return;
             }
         };
-        match validate(doc, schema, &value, 0, "$") {
+        let mut budget = VALIDATE_BUDGET;
+        match validate(doc, schema, &value, 0, "$", &mut budget) {
             Ok(()) => {}
             Err(Mismatch::Differs(text)) => self.mismatches.push(format!("{at}: {text}")),
             Err(Mismatch::Unchecked(reason)) => bump(&mut self.unchecked, &reason),
@@ -1216,6 +1259,63 @@ mod tests {
         tally.record(&document, &request("/pets/{id}"), 200.0, &"x".repeat(MAX_BODY_BYTES + 1));
         assert_eq!(tally.alert_count(), 0);
         assert!(lines_of(&tally).contains("본문이 너무 큼 1"));
+    }
+
+    /// 시간 안에 끝나지 않으면 실패로 본다(끝나지 않는 작업은 스레드째 남겨 두고 시험 프로세스가 끝날 때 버린다)
+    fn within<T: Send + 'static>(seconds: u64, work: impl FnOnce() -> T + Send + 'static) -> T {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(work());
+        });
+        receiver.recv_timeout(std::time::Duration::from_secs(seconds)).expect("시간 안에 끝나지 않았습니다")
+    }
+
+    #[test]
+    fn 깊게_겹친_oneof는_견주기_상한에서_끝나고_확인하지_못함으로_센다() {
+        // 깊이 7까지 겹치고 층마다 선택지 16개(상한과 같은 수)가 다음 층을 가리킨다. 값은 어느 선택지와도 맞지 않아 예산이 없으면 16^7번 걷는다
+        let mut schemas = String::new();
+        for level in 0..8 {
+            let next = if level == 7 { r#"{"type":"string"}"#.to_owned() } else { format!(r##"{{"$ref":"#/components/schemas/L{}"}}"##, level + 1) };
+            let options = vec![next; 16].join(",");
+            schemas.push_str(&format!(r#""L{level}":{{"oneOf":[{options}]}},"#));
+        }
+        let text = format!(
+            r##"{{"openapi":"3.0.0","components":{{"schemas":{{{schemas}"Z":{{}}}}}},"paths":{{"/x":{{"get":{{"responses":{{"200":{{"content":{{"application/json":{{"schema":{{"$ref":"#/components/schemas/L0"}}}}}}}}}}}}}}}}}}"##
+        );
+        let report = within(10, move || {
+            let document = doc(&text);
+            let mut tally = Tally::default();
+            tally.record(&document, &request("/x"), 200.0, "5");
+            (tally.alert_count(), lines_of(&tally))
+        });
+        assert_eq!(report.0, 0, "{}", report.1);
+        assert!(report.1.contains("응답 형을 확인하지 못한 응답: 견주기 상한 1"), "{}", report.1);
+    }
+
+    #[test]
+    fn 선택지가_상한보다_많으면_끝까지_보지_못한_것으로_센다() {
+        let options = vec![r#"{"type":"string"}"#; 17].join(",");
+        let text = format!(r##"{{"openapi":"3.0.0","paths":{{"/x":{{"get":{{"responses":{{"200":{{"content":{{"application/json":{{"schema":{{"anyOf":[{options}]}}}}}}}}}}}}}}}}}}"##);
+        let document = doc(&text);
+        let mut tally = Tally::default();
+        tally.record(&document, &request("/x"), 200.0, "5");
+        assert_eq!(tally.alert_count(), 0, "{}", lines_of(&tally));
+        assert!(lines_of(&tally).contains("선택지 상한 1"), "{}", lines_of(&tally));
+        // 상한 안의 선택지에 맞으면 상한과 상관없이 통과다
+        let mut tally = Tally::default();
+        tally.record(&document, &request("/x"), 200.0, r#""text""#);
+        assert!(lines_of(&tally).find("확인하지 못한").is_none(), "{}", lines_of(&tally));
+    }
+
+    #[test]
+    fn 문서_전체의_스키마_걷기_예산이_다하면_남은_연산은_건너뜀으로_센다() {
+        let params: Vec<String> = (0..40).map(|n| format!(r#"{{"name":"q{n}","in":"query","required":true,"schema":{{"type":"integer"}}}}"#)).collect();
+        let params = params.join(",");
+        let paths: Vec<String> = (0..60).map(|n| format!(r#""/p{n}":{{"get":{{"parameters":[{params}],"responses":{{"200":{{"description":"ok"}}}}}}}}"#)).collect();
+        let text = format!(r#"{{"openapi":"3.0.0","paths":{{{}}}}}"#, paths.join(","));
+        let planned = within(10, move || plan(&doc(&text), &Limits { max_operations: 60, max_requests: 500, seed: 1 }));
+        assert!(!planned.requests.is_empty());
+        assert!(planned.skipped.iter().any(|skip| skip.reason == "스키마 걷기 상한"), "{:?}", planned.skipped.iter().map(|s| &s.reason).collect::<Vec<_>>());
     }
 
     #[test]
