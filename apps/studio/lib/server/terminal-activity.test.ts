@@ -108,6 +108,82 @@ describe('문맥 창(context)', () => {
   });
 });
 
+describe('사용량(usage): 상태 줄 입력의 한도·캐시·비용·effort', () => {
+  const NOW = Date.parse('2026-11-27T00:00:00Z');
+  const FIVE = Math.floor(NOW / 1000) + 3600;
+  const WEEK = Math.floor(NOW / 1000) + 3 * 86400;
+  const full = {
+    rate_limits: { five_hour: { used_percentage: 23.5, resets_at: FIVE }, seven_day: { used_percentage: 41.2, resets_at: WEEK } },
+    prompt_cache: { hit_ratio: 0.875, warm: true },
+    cost: { total_cost_usd: 1.2345, total_duration_ms: 90_000 },
+    effort: { level: 'high' },
+  };
+
+  it('문서에 있는 필드를 읽는다: 한도 %·초기화 시각(epoch 초 → ISO), 캐시 적중률(0~1), 비용·시간, effort', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, full);
+    expect(activityView(state, NOW)?.usage).toEqual({
+      fiveHour: { usedPct: 23.5, resetsAt: new Date(FIVE * 1000).toISOString() },
+      sevenDay: { usedPct: 41.2, resetsAt: new Date(WEEK * 1000).toISOString() },
+      cacheHitRatio: 0.875,
+      costUsd: 1.2345,
+      durationMs: 90_000,
+      effort: 'high',
+    });
+  });
+
+  it('없는 값은 지어내지 않는다: 입력에 없으면 usage가 없다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { context_window: { used_percentage: 5 }, model: { id: 'claude-sonnet-5' } });
+    expect(activityView(state, NOW)?.usage).toBeUndefined();
+  });
+
+  it('범위 밖·형식 이상은 앞 값을 둔다(퍼센트 0~100, 적중률 0~1, 시각은 epoch 초, 비용·시간은 0 이상 유한수)', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, full);
+    noteStatusline(state, {
+      rate_limits: { five_hour: { used_percentage: 250, resets_at: FIVE }, seven_day: { used_percentage: 'x', resets_at: WEEK } },
+      prompt_cache: { hit_ratio: 87.5 },
+      cost: { total_cost_usd: -1, total_duration_ms: 'x' },
+      effort: { level: 'turbo' },
+    });
+    expect(activityView(state, NOW)?.usage).toMatchObject({ fiveHour: { usedPct: 23.5 }, sevenDay: { usedPct: 41.2 }, cacheHitRatio: 0.875, costUsd: 1.2345, durationMs: 90_000, effort: 'high' });
+    // 시각이 밀리초 단위로 오면(초가 아니면) 그 창은 갱신하지 않는다
+    noteStatusline(state, { rate_limits: { five_hour: { used_percentage: 50, resets_at: FIVE * 1000 } } });
+    expect(activityView(state, NOW)?.usage?.fiveHour).toEqual({ usedPct: 23.5, resetsAt: new Date(FIVE * 1000).toISOString() });
+  });
+
+  it('CLI가 창을 빼면(초기화 시각이 지나 버린 창) 그 창을 지우고, rate_limits가 통째로 없으면 앞 값을 둔다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, full);
+    noteStatusline(state, { context_window: { used_percentage: 5 } });
+    expect(activityView(state, NOW)?.usage?.fiveHour?.usedPct).toBe(23.5);
+    noteStatusline(state, { rate_limits: { seven_day: { used_percentage: 42, resets_at: WEEK } } });
+    expect(activityView(state, NOW)?.usage?.fiveHour).toBeUndefined();
+    expect(activityView(state, NOW)?.usage?.sevenDay?.usedPct).toBe(42);
+  });
+
+  it('초기화 시각이 지난 창은 보기에서 뺀다(상태 줄이 더 오지 않아도 낡은 %를 보이지 않는다)', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, full);
+    expect(activityView(state, (FIVE + 1) * 1000)?.usage?.fiveHour).toBeUndefined();
+    expect(activityView(state, (FIVE + 1) * 1000)?.usage?.sevenDay?.usedPct).toBe(41.2);
+  });
+
+  it('effort는 모델이 지원하지 않으면 입력에서 빠진다: 모델이 있는데 effort가 없으면 지운다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { ...full, model: { id: 'claude-sonnet-5' } });
+    noteStatusline(state, { model: { id: 'claude-haiku-5' } });
+    expect(activityView(state, NOW)?.usage?.effort).toBeUndefined();
+  });
+
+  it('캐시 적중률이 null이면(분모 0) 싣지 않는다', () => {
+    const state = newTerminalActivity();
+    noteStatusline(state, { prompt_cache: { hit_ratio: null } });
+    expect(activityView(state, NOW)?.usage).toBeUndefined();
+  });
+});
+
 describe('모델(model)과 모델 바뀜(modelChange)', () => {
   it('상태 줄 입력의 model.id를 읽고, 없거나 모양이 틀리면 모름(없음)으로 둔다', () => {
     const state = newTerminalActivity();

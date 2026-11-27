@@ -13076,3 +13076,54 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 ### 결과
 - 시험: 첫 요청(`terminal` 없음 400), 고침(터미널로 보낼 수 없으면 `fix_failed`, `reviewFixBlockReason` 표), Fleet(runner 기본·chat 400·옛 기록 닫기), 작업 분해(runner 기본·chat 400·카드의 light 400·S4 수리·S7·통합 페이지 확인·컨테이너 409·옛 계획 승인 거절·옛 계획 통합 재시도 거절·채팅식 `sendMessage` 호출 없음). 채팅식을 기대하던 시험은 터미널 경로나 거절을 기대하도록 바꿨다.
 - 돌리지 않은 것: 실제 터미널(PTY)·실제 Docker·실제 모델로 Fleet·작업 분해·AI 리뷰 고침을 돌려 본 실측(이 컴퓨터는 `/dev` 목록 읽기가 멈춰 PTY를 열 수 없다), 기준 사진(채팅식을 기대하던 사진은 이 변경의 호출자를 지나지 않는다).
+## ADR-244 desk는 상태 줄 공식 입력의 한도·캐시·비용·effort를 한 줄로 보여 주기만 하고, 필드는 문서에 있는 것만 읽는다
+
+상태: 채택(#1468)
+관련: 추적 #1317, ADR-189(훅·상태 줄만 신호로 쓴다), ADR-187(계정 구독 한도), ADR-176(캐시 토큰 세기), ADR-200(지원 범위), ADR-209·213(토큰 한도·사용량 귀속)
+
+### 맥락
+- 세션 터미널의 Claude Code는 관문의 상태 줄 명령으로 공식 입력 JSON을 보낸다(ADR-189). 서버의 `noteStatusline`은 그중 문맥 창과 모델만 읽었다. 사람은 구독 한도가 얼마나 남았는지, 캐시가 깨졌는지를 desk에서 볼 수 없었다.
+- #1317은 한도 값의 출처로 (a) 상태 줄 공식 입력, (b) 문서에 없는 사용량 엔드포인트를 OAuth 토큰으로 부르기를 놓고 (a)만 쓰기로 했다.
+
+### 확인한 필드(공식 문서)
+근거: <https://code.claude.com/docs/en/statusline> 의 "Available data" 표와 예시 JSON, "Context window fields"·"Prompt cache fields" 절. 2026-11-27에 WebFetch로 읽었다. 이 컴퓨터의 Claude Code는 2.1.332다(문서가 말하는 `prompt_cache`는 2.1.251부터).
+
+| 값 | 필드 | 단위·형식 | 없을 때 |
+|---|---|---|---|
+| 5시간 한도 | `rate_limits.five_hour.used_percentage`, `.resets_at` | 0~100, Unix epoch **초** | claude.ai Pro·Max·Ultra 구독이고 세션의 첫 응답 뒤에만 온다. 창마다 따로 빠질 수 있고, CLI는 `resets_at`이 지난 창을 뺀다 |
+| 주간 한도 | `rate_limits.seven_day.*` | 같음 | 같음 |
+| 캐시 적중률 | `prompt_cache.hit_ratio` | 0~1(캐시 읽기 / 읽기+쓰기+캐시 안 된 입력), 서브에이전트 요청 제외 | 첫 응답 전에는 `prompt_cache`가 없고, 세 수가 모두 0이면 `null` |
+| 비용 | `cost.total_cost_usd` | 달러. 정가로 어림한 값이라 청구액과 다를 수 있다 | `/clear`하면 0으로 돌아간다 |
+| 세션 시간 | `cost.total_duration_ms` | 밀리초(이어 열기까지 누적) | |
+| effort | `effort.level` | `low`·`medium`·`high`·`xhigh`·`max` | 모델이 effort를 지원하지 않으면 필드가 없다 |
+| 문맥 창 | `context_window.used_percentage` 등 | 이미 읽고 있었다 | 초반에는 `null` |
+
+문서에 **없어서 읽지 않는 것**: 권한 모드(auto mode 등)는 입력 필드로 문서에 없다(문서에서 "permission mode"는 상태 줄이 다시 그려지는 계기로만 나온다). 출력 스타일(`output_style.name`)은 문서에 있지만 기본값이 늘 "default"에 가까워 화면에 두지 않았다. `rate_limits.spend_limit`(Claude 앱 게이트웨이의 지출 한도)는 구독 한도가 아니라 읽지 않았다. 이 필드들은 지어내지 않고 생략한다.
+
+### 결정
+1. **읽는 곳**: `noteStatusline`이 문맥 창·모델에 더해 위 표의 값을 활동 상태 `usage`에 담는다. 검사는 문맥 창과 같은 방식이다: 퍼센트는 0~100, 적중률은 0~1, 시각은 epoch 초(1e11 이상은 밀리초로 보이므로 단위를 추측하지 않고 버린다), 비용·시간은 0 이상 유한수, effort는 알려진 다섯 값. 범위 밖·형식 이상은 앞 값을 둔다.
+2. **창은 CLI가 빼면 지운다**: `rate_limits`가 있는데 그 안에 창이 없으면 그 창은 초기화되어 CLI가 뺀 것이라 지운다. `rate_limits`가 통째로 없으면 앞 값을 둔다. 읽는 쪽(활동 보기)은 초기화 시각이 지난 창을 싣지 않는다(상태 줄이 더 오지 않아도 낡은 %를 보이지 않는다). 모델이 알려졌는데 `effort`가 없으면 지원하지 않는 모델로 바뀐 것이라 effort를 지운다.
+3. **싣는 길**: 서버의 활동 보기(`TerminalActivityView.usage`) → 에이전트 개요 항목(`AgentRow.usage`) → desk 타입(`DeskItem.usage`). 옛 서버는 주지 않으면 없다.
+4. **캐시 적중률**: 상태 줄의 `prompt_cache.hit_ratio`를 우선하고, 없으면 세션 토큰(텔레메트리에서 이미 세는 `cacheReadTokens`·`cacheWriteTokens`·`inputTokens`, ADR-176)으로 `읽기 / (입력 + 읽기 + 쓰기)`를 desk에서 계산한다. 분모가 0이면 표시하지 않는다(0%가 아니라 생략). 두 값은 범위가 다르다(앞은 메인 대화만, 뒤는 서브에이전트 포함 세션 합).
+5. **표시**: 고른 카드의 펼침(사실 줄 아래)과 에이전트 안(깊이 1)의 머리 아래에 한 줄. 예: `5시간 24% (1시간 50분 뒤) · 주간 41% (23시간 0분 뒤) · 캐시 88% · $1.23 · 세션 42분 · 추론 강도 high`. 좁으면 먼저 주간, 다음 5시간의 초기화 시각을 빼고, 그래도 넘치면 뒤에서부터 통째로 뺀다(추론 강도, 세션 시간, 비용, 캐시, 주간 순). 5시간 한도가 마지막까지 남는다. 카드에 이미 세션 비용(기록에서 어림한 값)이 있으면 상태 줄의 비용은 적지 않는다(둘은 출처가 달라 값이 다르다). 한도 %가 80을 넘으면 노랑, 95를 넘으면 빨강으로 칠한다. 사이드바의 세션 줄(한 줄에 제목·상태만 있다)에는 두지 않았다.
+6. **표시만 한다**: 이 값은 토큰 한도(ADR-209)·턴 상한·게이트·쓰기 판정 어디에도 들어가지 않는다. CLI가 보낸 값이라 보여 주는 데만 쓴다.
+7. **Codex는 같은 표시에 붙인다**: Codex는 이미 문맥 %를 세션 기록(rollout)의 `token_count`에서 읽는다(#978). 같은 줄에 `rate_limits.primary·secondary`(`used_percent`, `window_minutes`, `resets_at` epoch 초)가 있어, 창 길이로 5시간(300분)·주간(10080분)을 가르고(슬롯 이름이 아니다, ADR-187과 같다) `total_token_usage.cached_input_tokens / input_tokens`로 캐시 적중률을 계산해 같은 `usage`에 담는다. 이 길은 ADR-189가 "기록 파싱 금지"의 예외로 둔 그 파일이고(범수 님 결정 2026-10-28), 한도 필드는 설치된 판(codex-cli 0.162.1)의 기록 모양과 실행 파일의 `TokenCountEvent`·`RateLimitSnapshot` 정의로 확인했다(실제 값은 옮기지 않았다).
+
+### 다른 CLI에서 같은 값의 공식 출처(2026-11-27 조사)
+조사한 판: codex-cli 0.162.1, OpenCode 1.18.33, Gemini CLI 0.71.1(`~/.cache/b-studio-ship`), Command Code 1.93.4. 공식 문서·`--help`·설치된 판의 문서와 소스 읽기만 했고 실제 모델 호출·로그인 계정의 사용량 조회는 하지 않았다. 문서에 없는 사용량 엔드포인트는 부르지 않았다.
+
+| CLI | 5시간·주간 한도 | 비용 | 문맥 창 | 캐시 | 붙인 곳 |
+|---|---|---|---|---|---|
+| Claude Code | 상태 줄 입력 `rate_limits`(구독, 첫 응답 뒤) | `cost.total_cost_usd`(정가 어림) | `context_window.*` | `prompt_cache.hit_ratio` | 위 결정 1~5 |
+| Codex | ① 세션 기록 `token_count`의 `rate_limits.primary·secondary`, ② app-server `account/rateLimits/read`·`account/rateLimits/updated`(`codex app-server generate-json-schema`가 내는 프로토콜의 `RateLimitSnapshot`; ADR-187이 이미 계정 단위로 읽는다), ③ TUI 푸터 `tui.status_line`의 "rate limits" 항목(화면용, 외부 입력 아님) | 문서에서 비용 필드를 찾지 못했다 | 세션 기록의 `model_context_window`(이미 읽는다, #978) | 세션 기록의 `cached_input_tokens`(계산) | ①을 같은 표시에 붙였다(결정 7). ②는 계정 화면(ADR-187)이 쓴다 |
+| OpenCode | 한도 창은 문서에서 못 찾았다. 서버 문서에 실험 경로 `GET /api/experimental/usage/limits`("OpenCode Go allowance and Console budgets", 로그인한 작업공간)가 있으나 응답 모양을 읽지 못했다 | `opencode stats`(토큰·비용 집계)와 서버 `GET /api/experimental/session/stats`, 이벤트 `session.usage.updated`; 모델 단가는 설정 `cost`에 있다 | 문서에서 못 찾았다(모델 목록에는 있을 수 있다) | 응답 모양을 읽지 못했다 | 붙이지 않았다(실험 백엔드, 응답 모양 미확인) |
+| Gemini CLI | 5시간·주간 한도는 없다(ADR-187). 쿼터는 내부 `retrieveUserQuota` 호출(`remainingFraction`·`resetTime`)이지만 문서에 없는 길이라 부르지 않는다 | 문서의 텔레메트리에 비용 필드가 없다 | 텔레메트리 문서에 없다 | OpenTelemetry `gemini_cli.token.usage`(`type`: input·output·thought·cache·tool), 로그 `gemini_cli.api_response`의 `cached_content_token_count` | 붙이지 않았다(실험 백엔드, OTLP 수신 길이 따로 없다) |
+| Command Code | 문서에서 못 찾았다. 대화형 `/usage`가 크레딧·요금제·사용량을 화면에 보이지만 외부로 내보내는 길은 문서에 없다 | 같음 | mod API `cmd.getContextUsage()`(`tokens`·`contextWindow`·`percent`)와 mod 훅 `turn_end`·`model_request_end`의 `usage`가 있다 | `usage`의 모양을 읽지 못했다 | 붙이지 않았다(실험, ADR-233의 mod 훅에 더하는 일은 따로 정한다) |
+
+### 감수한 것
+- 실제 세션으로 재지 못했다(이 컴퓨터는 터미널 PTY를 열면 멈춰 실제 CLI·desk를 띄우지 않았다). 상태 줄이 얼마나 자주 오는지, `rate_limits`가 첫 응답 뒤 언제 오는지는 문서 기준이다. 시험은 함수 단위(상태 줄 입력 → 활동 보기 → 개요 항목 → 줄 그리기)와 가짜 관문 입력까지다. 실제 세션 실측은 다시 시작한 뒤로 남긴다.
+- 구독이 아닌 로그인(API 키)에서는 `rate_limits`가 오지 않아 한도는 생략된다.
+- 상태 줄 값은 CLI가 상태 줄을 다시 그릴 때만 갱신된다. 쉬는 세션의 한도 %는 마지막으로 받은 값이다(초기화 시각이 지나면 뺀다).
+- 사이드바의 세션 줄에는 두지 않았다(한 줄에 제목·상태·칸 번호만 있다). 한도 경고는 카드의 계정 한도 경고(80% 이상, #934)가 이미 있다.
+- ADR-187의 Claude 한도 읽기(키체인 OAuth 토큰으로 문서에 없는 `api/oauth/usage` 호출)는 #1317의 "하지 않는 것"과 맞지 않는다. 이 ADR은 그 코드를 건드리지 않았고, 상태 줄 공식 입력으로 대신할 수 있는지는 사람이 정한다(계정 단위 화면은 세션이 없어도 값이 필요해 같은 값이 아니다).
+- OpenCode·Gemini CLI·Command Code는 표시를 붙이지 않았고 따로 확인하지 않았다(실험, ADR-200).

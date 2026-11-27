@@ -48,6 +48,8 @@ export interface DeskItem {
   todos?: DeskTodos;
   /** 문맥 창이 찬 정도(#920) */
   context?: DeskContext;
+  /** 상태 줄이 알린 한도·캐시 적중률·비용·effort(#1468). 알린 것만 있다. 옛 서버는 주지 않는다 */
+  usage?: DeskSessionUsage;
   /** 터미널 CLI가 알린 지금의 모델 이름(#1439). 알리지 않았거나 옛 서버면 없다(모름) */
   model?: string;
   /** 같은 세션에서 모델이 바뀐 것을 보았다(#1439). 옛 서버는 주지 않는다 */
@@ -83,6 +85,18 @@ export interface DeskContext {
   usedPct: number;
   used?: number;
   size?: number;
+}
+
+/** 세션 CLI의 상태 줄이 알린 사용량(스튜디오 terminal-activity.ts의 ActivityUsage와 같은 꼴). 보이는 데만 쓴다 */
+export interface DeskSessionUsage {
+  /** 5시간 한도: usedPct는 0~100, resetsAt은 ISO */
+  fiveHour?: { usedPct: number; resetsAt: string };
+  sevenDay?: { usedPct: number; resetsAt: string };
+  /** 캐시 읽기 비율(0~1) */
+  cacheHitRatio?: number;
+  costUsd?: number;
+  durationMs?: number;
+  effort?: string;
 }
 
 export interface DeskUsage {
