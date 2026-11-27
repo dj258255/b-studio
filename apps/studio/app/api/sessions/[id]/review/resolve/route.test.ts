@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   authorizeSession: vi.fn(async () => {}),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession }));
+vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession, authorizeSessionTerminalDriver: mocks.authorizeSession, authorizeSessionOwner: async () => {} }));
 vi.mock('@/lib/server/sessions', () => ({ resolveReviewFinding: mocks.resolveReviewFinding }));
 
 import { StudioError } from '@/lib/server/errors';
