@@ -7361,18 +7361,27 @@ pub struct TerminalStallFactsJs {
     pub notified: bool,
     pub idle_ms: i64,
     pub stall_ms: i64,
+    /// 재촉 상한(없거나 0이면 꺼짐)
+    pub nudge_max: Option<u32>,
+    /// 이 실행에 이미 보낸 재촉 수(없으면 0)
+    pub nudges_sent: Option<u32>,
+    /// 사람 차례다(없으면 아니다)
+    pub human_turn: Option<bool>,
+    /// CLI가 입력창에 있다는 긍정 신호(없으면 거짓: 재촉하지 않는다)
+    pub cli_at_input: Option<bool>,
 }
 
-/// 정체 감시 한 회차: `stop`·`nothing`·`notify`
+/// 정체 감시 한 회차: `stop`·`nothing`·`notify`·`nudge`
 #[napi]
 pub fn terminal_decide_stall(facts: TerminalStallFactsJs) -> String {
     use session_terminal::usage::{decide_stall, StallFacts, StallStep};
     // 음수 정체 시간은 알아볼 수 없는 값이라 0으로 읽는다(알리기만 하는 판정)
-    let step = decide_stall(&StallFacts { open_run: facts.open_run, notified: facts.notified, idle_ms: facts.idle_ms, stall_ms: facts.stall_ms.max(0) as u64 });
+    let step = decide_stall(&StallFacts { open_run: facts.open_run, notified: facts.notified, idle_ms: facts.idle_ms, stall_ms: facts.stall_ms.max(0) as u64, nudge_max: facts.nudge_max.unwrap_or(0), nudges_sent: facts.nudges_sent.unwrap_or(0), human_turn: facts.human_turn.unwrap_or(false), cli_at_input: facts.cli_at_input.unwrap_or(false) });
     match step {
         StallStep::Stop => "stop",
         StallStep::Nothing => "nothing",
         StallStep::Notify => "notify",
+        StallStep::Nudge => "nudge",
     }
     .to_owned()
 }

@@ -455,6 +455,22 @@ export class DraftKeeper {
     return next;
   }
 
+  /**
+   * 지금 화면의 Claude 입력창이 보이고 비어 있는가(정체 재촉이 보내기 직전에 묻는다, ADR-239). `empty`는 입력창 모양이 화면에 있고 글이 없으며 붙여 넣기를 받는 상태일 때뿐이다.
+   * 쓰다 만 글이 있으면 `typed`, 입력창 모양이 없거나(권한·질문 창, 전체 화면, 아직 안 그려짐) 모르는 모양이거나 붙여 넣기를 받지 않으면 `unknown`이다. 모르면 보내지 않는다
+   */
+  async inputState(): Promise<'empty' | 'typed' | 'unknown'> {
+    if (this.#stopped || this.#closing) return 'unknown';
+    try {
+      const read = await this.#read();
+      if (read.kind === 'text') return 'typed';
+      if (read.kind === 'unknown') return 'unknown';
+      return this.#screen.bracketedPaste() ? 'empty' : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
   async #read(): Promise<InputRead> {
     if (!this.#screen.isNormalScreen()) return { kind: 'unknown', reason: '전체 화면이다' };
     return readClaudeInput(await this.#screen.lines());
