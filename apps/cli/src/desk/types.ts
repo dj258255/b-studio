@@ -154,7 +154,7 @@ export interface DeskProject {
 /** 세션 터미널 통로의 메시지(session-terminal.ts의 TerminalMessage와 같은 꼴) */
 export type DeskTerminalMessage =
   | { kind: 'data'; data: string }
-  | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string }
+  | { kind: 'status'; state: 'closed' | 'opening' | 'open'; message?: string; size?: { cols: number; rows: number } }
   | { kind: 'exit'; code: number | null }
   | { kind: 'cli'; alive: boolean }
   | { kind: 'warning'; message: string };

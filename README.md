@@ -125,6 +125,14 @@ pnpm studio         # Ctrl-b n 새 요청, Ctrl-b q 나가기
 pnpm studio stop    # 뒤에서 도는 스튜디오 끄기
 ```
 
+스크립트에서는 같은 세션을 명령으로 다룹니다(`studio ls·new·send·keys·wait·read·status·events`, 세션 멈추기는 `studio stop --session <id>`). 모두 `--json`을 받고, `wait`는 상태를 종료 코드로 알립니다. 게이트·권한·소유자 검사는 서버가 그대로 하고 이 명령들은 서버 API를 부르기만 합니다. 예제와 종료 코드 표는 [시작하기의 "스크립트로 제어하기"](docs/getting-started.md#스크립트로-제어하기)에 있습니다.
+
+```bash
+id=$(pnpm studio new orders "주문 목록에 페이지네이션을 넣어 줘")   # 규칙으로 AI를 골라 터미널로 보낸다
+pnpm studio wait "$id" --for idle --timeout 900               # 0이면 쉬는 중이고 게이트 통과, 1이면 게이트 실패
+pnpm studio read "$id" --lines 40                             # 터미널 화면의 마지막 40줄
+```
+
 모델 호출 없이 둘러보려면 `pnpm studio --mode demo`로 띄웁니다. CLI로 바로 요청하려면 `pnpm studio agent examples/orders "<요청>"`을 씁니다.
 
 계약을 깨는 요청(`--allow-breaking`)과 인증 방식은 [시작하기](docs/getting-started.md)에 정리했습니다.
@@ -177,6 +185,8 @@ flowchart LR
 | `pnpm studio` | 스튜디오를 뒤에서 띄우고 바로 터미널 작업대를 연다(실험) |
 | `pnpm studio launch` · `pnpm studio stop` | 스튜디오를 화면 없이 백그라운드로 켠다 · 끈다 |
 | `pnpm studio desk` | 띄워 둔 스튜디오의 세션 터미널을 터미널 하나에서 나란히 쓴다 |
+| `pnpm studio ls` · `new` · `send` · `keys` · `wait` · `read` · `status` · `events` | 스크립트에서 세션을 만들고 보내고 기다리고 읽는다(`--json`, 종료 코드) |
+| `pnpm studio stop --session <id>` | 세션 하나를 멈춘다(옵션 없는 `stop`은 스튜디오 끄기) |
 | `pnpm studio agent <path> "<request>"` | 에이전트에게 변경 요청 |
 | `pnpm studio verify <path>` | 편집기로 바꾼 지금 변경을 같은 게이트로 확인(체크포인트는 만들지 않음) |
 | `pnpm studio workflow <path>` | `studio.yaml`이 강제하는 단계·테스트·화면 확인·보호 경로를 보여 준다 |

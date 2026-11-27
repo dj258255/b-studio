@@ -32,6 +32,8 @@ export class StudioRequestError extends Error {
 export interface StudioConnection {
   origin: string;
   token: string;
+  /** 인증을 켠 서버에 로그인해 받은 세션 쿠키(`이름=값`). 있으면 로컬 토큰 쿠키 대신 싣는다 */
+  cookie?: string;
 }
 
 function launchDir(env: Record<string, string | undefined>): string {
@@ -97,6 +99,8 @@ export interface StartInput {
   request: string;
   /** 'rules'면 규칙대로, 아니면 그 백엔드로 직접. `백엔드@계정id`면 그 계정으로(#885) */
   choice: string;
+  /** 직접 고른 AI에서 쓸 모델. 규칙으로 고를 때는 보내지 않는다(스튜디오가 거절한다) */
+  model?: string;
   /** 이 요청의 검증에서 확인 선언(studio.yaml의 tests·pageChecks …)의 변경을 받아들인다(#916, ADR-164). 켰을 때만 싣는다 */
   allowCheckChanges?: boolean;
 }
@@ -124,10 +128,15 @@ export class StudioClient {
     return this.#connection.origin;
   }
 
+  /** 요청에 싣는 쿠키. 로그인한 세션 쿠키가 있으면 그것, 없으면 이 컴퓨터의 로컬 토큰이다 */
+  get #cookie(): string {
+    return this.#connection.cookie ?? `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`;
+  }
+
   async #request<T>(method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE', pathname: string, body?: unknown, signal?: AbortSignal): Promise<T> {
     const response = await fetch(`${this.#connection.origin}${pathname}`, {
       method,
-      headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+      headers: { cookie: this.#cookie, ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       ...(signal ? { signal } : {}),
     });
@@ -293,7 +302,7 @@ export class StudioClient {
   /** 새 요청을 터미널로 보낸다(#836): 규칙(또는 직접 고른 AI)으로 세션을 만들고 터미널을 열어 첫 요청을 CLI에 넣는다 */
   start(input: StartInput): Promise<DeskStartResult> {
     const picked = splitChoice(input.choice);
-    const route = input.choice === 'rules' ? { route: 'rules' } : { route: 'direct', backend: picked.backend, ...(picked.accountId ? { accountId: picked.accountId } : {}) };
+    const route = input.choice === 'rules' ? { route: 'rules' } : { route: 'direct', backend: picked.backend, ...(picked.accountId ? { accountId: picked.accountId } : {}), ...(input.model ? { model: input.model } : {}) };
     return this.#request('POST', '/api/sessions', {
       projectId: input.projectId,
       ...route,
@@ -463,7 +472,7 @@ export class StudioClient {
     let response: Response;
     try {
       response = await fetch(`${this.#connection.origin}/api/agents/stream`, {
-        headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, accept: 'text/event-stream' },
+        headers: { cookie: this.#cookie, accept: 'text/event-stream' },
         signal,
       });
     } catch (error) {
@@ -512,7 +521,7 @@ export class StudioClient {
     let response: Response;
     try {
       response = await fetch(`${this.#connection.origin}/api/terminals/stream?${new URLSearchParams({ ids: ids.join(',') })}`, {
-        headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, accept: 'text/event-stream' },
+        headers: { cookie: this.#cookie, accept: 'text/event-stream' },
         signal,
       });
     } catch (error) {
@@ -557,7 +566,7 @@ export class StudioClient {
     let response: Response;
     try {
       response = await fetch(`${this.#connection.origin}/api/sessions/${encodeURIComponent(id)}/events`, {
-        headers: { cookie: `${LOCAL_TOKEN_COOKIE}=${this.#connection.token}`, accept: 'text/event-stream' },
+        headers: { cookie: this.#cookie, accept: 'text/event-stream' },
         signal,
       });
     } catch (error) {

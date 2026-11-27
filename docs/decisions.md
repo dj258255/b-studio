@@ -13248,3 +13248,40 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 ### 결과
 - 시험: 요구사항 파일(여섯 훅이 호스트의 `-c`와 같은 명령·시간, 훅 고정·관리 훅만, 토큰 없음)·`/etc/codex` 읽기 전용 마운트·재사용 컨테이너의 마운트 확인, 판정 표(인증 4 × 방식 6 × 실험 2 × 스위치 2), 접근 검사(스위치 켬·끔·host·실험 꺼짐·틀린 인증·인증 없음, 로그인 없음·로그인 있음), 쓰기 동작 15개를 만든 사람·관리자·다른 사용자·로그인 없음·다른 프로젝트의 세션·만든 사람 없는 세션·없는 세션·대소문자만 다른 이름으로 각각(`terminal/server-mode.test.ts`, `side-routes.test.ts`), 터미널이 닫힌 서버방식의 게이트 완화 허용, 세션 터미널 대상의 홈 사용자·codex CLI 선택·api 거절, 컨테이너 prepare가 codex 이미지·파일을 쓰는지, codex 감싸개·명령(진짜 `sh`로 첫 요청 한 번만 인자로, 환경에서 지움), 이미지 파일의 정적 검사(고정한 판, root 소유, 마지막 `USER node`, 받아서 바로 실행하는 설치 없음), 관문 폴더 쓰기·정리.
 - 변이 확인 23개(요구사항 파일 안 씀·감싸개에 훅 -c 되붙임·마운트 제거·읽기 전용 해제·prepare가 마운트 안 넘김·훅 고정 제거·관리 훅만 제거·Stop 훅 빠짐, 그리고 주소 검사 항상 건너뜀, 스위치 없이 허용, host 허용, 실험 검사 제거, 만든 사람 검사 제거 3곳, cancel 옛 검사, codex 이미지·파일·명령·이미지 확인 제거, api 컨테이너 허용, codex를 claude로, 컨테이너 api 거절 제거)가 모두 시험을 실패시켰다. 재사용하는 컨테이너의 `/etc/codex` 마운트 확인(`ensureAgentContainer` 안)을 빼는 변이 하나는 도커를 부르는 자리라 시험이 잡지 못한다(확인 함수 자체는 시험한다).
+
+## ADR-248 스크립트 제어 명령은 서버 API를 부르기만 하고, 세션 멈추기는 `studio stop --session`으로 두며, 화면은 새 라우트 없이 터미널 통로의 최근 출력으로 되살리고, 보낸 글은 CLI가 받은 흔적을 확인한다
+
+상태: 채택(#1482, 추적 #1481)
+관련: ADR-173(로컬 토큰), ADR-183(desk는 API만 부른다), ADR-230·245(터미널을 움직이는 일은 만든 사람만), 이슈 #1484(휴대폰 앱이 같은 API를 쓴다)
+
+### 맥락
+b-studio를 사람이 desk(TUI)로만 쓸 수 있었다. 스크립트가 세션을 만들고, 보내고, 기다리고, 읽을 길이 없었다. 사람 결정(2026-11-28): "관문이나 스크립트단에서 제어하는 것은 다 있어야 한다". 새 판정을 만들면 확인하는 쪽과 동작하는 쪽이 갈리므로, 명령은 desk가 쓰는 서버 API를 그대로 부르기만 한다.
+
+### 결정
+1. **명령은 서버 API의 얇은 겉이다.** `apps/cli/src/ctl/`에 있고 desk의 `StudioClient`를 그대로 쓴다. 터미널 입력도 desk와 같은 길(`POST /api/sessions/:id/terminal`의 `input`)이다. 새 라우트는 없다. 세션 만들기는 desk의 `n`과 같은 `POST /api/sessions`(`terminal: true`, 규칙이면 `route: rules`, `--backend`면 `direct`)다.
+2. **이름.** `ls`·`new`·`send`·`keys`·`wait`·`read`·`status`·`events`는 기존 명령과 겹치지 않아 맨 위에 둔다. 세션 멈추기는 `studio stop --session <id>`다. `studio stop`은 스튜디오 끄기라 이미 있고, `studio stop $ID`로 하면 `ID`가 빈 변수일 때 스튜디오가 꺼진다. 그래서 위치 인자를 받지 않고 `--session`을 꼭 주게 했다(빈 값은 사용법 오류). 옵션 없는 `studio stop`은 그대로다. `studio session <동사>` 묶음은 모든 호출이 한 단어 길어져 스크립트에서 불편해 두지 않았다.
+3. **`wait`는 목록 이벤트 통로(`/api/agents/stream`)를 쓴다.** 통로가 없는 옛 스튜디오(404)면 1초 간격으로 목록을 읽고, 통로가 끊기면 다시 붙고 연달아 실패하면 던진다. 쉬는 상태의 판정(`idle`·`gate`·`any`)은 1.5초 그대로일 때만 확정한다. 게이트가 검증 중이면 쉬는 것으로 치지 않고, 게이트가 실패했으면 `idle`을 기다렸어도 종료 코드 1이고, `gate`를 기다렸는데 판정이 없으면 0이 아니라 10이다. 권한 대기(4)·질문(5)·오류(1)·끝남(6)은 어떤 조건을 기다려도 바로 알린다. 서버의 `state`·`terminal.waiting`·`gate`를 이름만 붙여 가르고 새 판정은 없다.
+4. **`send`의 Enter 확인.** 붙여넣기 표지(`ESC[200~ … ESC[201~`)로 글을 보내고 Enter를 따로 보낸다(서버가 CLI에 요청을 넣는 길과 같다). 5초 동안 세션 상태에 CLI가 받은 흔적이 생기는지 본다: 작업 시작 시각(`workingSince`)이 새로 찍힘, 마지막 활동 시각이 앞섬, 권한·질문 창으로 넘어감(이미 작업 중이었다면 앞의 두 가지만). 없으면 Enter를 한 번 더 보내고 다시 확인한다. 그래도 없으면 화면 끝 8줄과 함께 종료 코드 9다. 글 안의 붙여넣기 표지와 제어 글자는 지운다. CLI가 안 떠 있을 때(글이 셸에서 명령으로 실행된다), 권한 창이 떠 있을 때(글 뒤의 Enter가 그 창의 기본 선택이 된다), 질문·입력 요구 창이 떠 있을 때는 보내지 않는다. `keys`는 CLI가 안 떠 있을 때만 거절하고, 권한 창에 답하는 것이 쓰임이다.
+5. **`read`는 새 라우트 없이 터미널 통로의 최근 출력을 desk와 같은 해석기로 되살린다.** 통로는 구독하자마자 최근 출력(최대 512KiB)과 상태를 준다. 어느 크기로 그려진 출력인지 알아야 해서, 열린 터미널의 `status` 메시지에만 `size: {cols, rows}`를 더했다(구독 직후 상태만, 선택 필드라 옛 desk는 무시한다). 이 통로는 이미 `assertTerminalAccess`(이 컴퓨터 주소·로컬 토큰·로그인)와 `authorizeSession`을 거친다.
+6. **인증.** 개인 PC는 desk와 같은 로컬 토큰 파일이다. 인증을 켠 서버(token 방식)는 `B_STUDIO_URL`·`B_STUDIO_USER`·`B_STUDIO_TOKEN`(`studio auth token`이 내준 토큰)으로 `POST /api/auth/login`을 불러 받은 세션 쿠키를 싣는다. 토큰은 옵션으로도 받지만 프로세스 목록에 보이지 않게 환경 변수를 권한다. 서버가 터미널 접근을 열어 둔 서버인지, 만든 사람인지는 서버가 판정한다.
+
+### 호출하는 서버 라우트와 권한(새 라우트 없음)
+| 명령 | 라우트 | 서버의 검사 |
+|---|---|---|
+| ls·status·wait·events·send·keys(세션 찾기) | `GET /api/agents`, `GET /api/agents/stream`, `GET /api/projects` | 로그인(`requireUser`). 목록은 그 사용자에게 보이는 것만 |
+| new | `POST /api/sessions`(`terminal: true`) | `assertTerminalAccess`(이 컴퓨터 주소·로컬 토큰·로그인) 뒤 규칙·AI 선택·세션 만들기. 서버 방식에서는 만든 사람이 호출한 사람이다 |
+| send·keys | `POST /api/sessions/:id/terminal`(`input`) | `assertTerminalAccess` + `authorizeSession` + `authorizeSessionOwner`(서버 방식에서는 만든 사람만, 관리자도 안 됨) |
+| read | `GET /api/terminals/stream?ids=` | `assertTerminalAccess` + 세션마다 `authorizeSession`(만든 사람이나 관리자, 보기만). 권한이 없으면 닫힘 상태와 까닭 |
+| status | `GET /api/sessions/:id`, `GET /api/sessions/:id/changes` | 앞은 `requireUser`(기존 desk와 같다), 뒤는 `requireUser` + `authorizeSession` |
+| stop --session | `DELETE /api/sessions/:id` | `requireUser` + `authorizeSession`(desk의 `p`와 같다) |
+| 바뀐 곳 | `GET /api/terminals/stream`·`GET /api/sessions/:id/terminal`의 첫 `status`(open) 메시지에 `size` 추가 | 검사는 그대로 |
+
+### 하지 않는 것·남는 것
+- 실제 claude·codex·PTY·스튜디오로 돌려 보지 않았다. 시험은 같은 HTTP 모양을 내는 가짜 스튜디오와 가짜 터미널(진짜 `StudioClient`·해석기를 지난다)이다. `send`가 이미 작업 중인 세션에 보낼 때의 확인은 더 약하다("작업 중"이 증거가 못 된다).
+- `read`의 화면은 최근 출력이 512KiB를 넘어 앞이 잘렸거나 CLI가 화면을 다시 그리지 않았으면 어긋날 수 있다. 크기를 알리지 않는 옛 스튜디오에서는 120×32로 해석한다.
+- `new`는 desk의 새 요청과 같이 확인 선언 변경 허용(`allowCheckChanges`)을 켜지 않는다. 스크립트가 게이트를 푸는 허용은 이번 단위에 넣지 않았다.
+- 평문 http로 인증을 켠 서버에 붙으면 토큰이 평문으로 간다. 신뢰하는 사설망이나 터널 안에서만 쓴다.
+
+### 결과
+- 시험: 종료 코드 판정표 19개, 키 이름 12개, 가짜 스튜디오 흐름(만들기→기다리기→읽기→상태→목록→멈추기, Enter 재시도·실패, 권한·질문·CLI 없음·끝난 세션 거절, 키로 권한 답, 시간 초과, 게이트 실패·판정 없음, 쉬는 상태 스침, 이벤트, 붙지 못함·인증 거절·로그인, 사용법).
+- 변이 확인 8개(재시도 제거, 권한 창 거절 제거, 게이트 실패를 0으로, 크기 무시, `--session` 필수 검사 제거, 쉬는 상태 확정 대기 제거, CLI 없음 거절 제거, 붙여넣기 표지 지우기 제거)를 모두 시험이 잡았다. 크기 필드는 이전 코드에서 시험 둘이 실패했다.

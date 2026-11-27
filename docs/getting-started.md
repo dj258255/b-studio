@@ -338,6 +338,89 @@ desk 기록 화면(`Ctrl-b h`)의 **AI별 결과**는 모든 세션의 만들기
 
 <img src="images/desk-settings.png" width="760" alt="설정 화면. 왼쪽에 탭 넷(계정, 라우팅 규칙, 화면, 키·알림)이 있고, 계정 탭에 계정 넷(트레버·피오·에리 Claude, 마르코 Codex)마다 로그인 상태와 그림이 보인다. 고른 계정 아래에 설정 폴더, 상태, 그림이 있다. 사진의 계정은 가짜 값이다">
 
+### 스크립트로 제어하기
+
+desk에서 하던 일을 셸 스크립트에서 합니다. 띄워 둔 스튜디오(`studio launch` 또는 `studio`)의 API를 부르기만 하는 명령이라, 게이트·권한·소유자 검사는 desk와 똑같이 서버가 합니다(새 판정도 우회도 없습니다). 세션을 만들 때 터미널 통로와 같은 검사(이 컴퓨터 주소·로컬 토큰)를 거칩니다.
+
+| 명령 | 하는 일 |
+|---|---|
+| `studio ls [--project p] [--json]` | 세션 목록: id, 상태(작업 중·쉼·권한 대기·질문·입력 필요·끝남·오류), 게이트, 프로젝트, AI, 제목, 마지막 활동 |
+| `studio new <프로젝트> "<요청>" [--backend b] [--account a] [--model m]` | desk의 `n`과 같은 길로 세션을 만들고 첫 요청을 터미널로 보낸다. `--backend`가 없으면 라우팅 규칙이 고른다. 성공하면 세션 id 한 줄만 stdout에 쓴다 |
+| `studio send <세션> "<글>"` | 그 세션 터미널에 글을 붙여 넣고 Enter. CLI가 받았는지 확인하고, 아니면 Enter를 한 번 더 보낸다 |
+| `studio keys <세션> <키...>` | `Enter Esc Tab S-Tab Space BSpace Delete Up Down Left Right Home End PgUp PgDn C-<글자> M-<글자>`나 글자 하나(`1`·`y`). 권한 창에 답할 때 쓴다 |
+| `studio wait <세션> [--for idle\|input\|permission\|done\|gate\|any] [--timeout 초]` | 조건이 될 때까지 기다린다(스튜디오의 목록 이벤트 통로, 없는 옛 스튜디오면 1초 간격으로 읽는다). 기본 `any`, 기본 시간 1800초(0이면 끝없이) |
+| `studio read <세션> [--lines N] [--raw]` | 터미널 화면의 글. 기본은 지금 화면, `--lines N`은 지난 줄까지 합친 마지막 N줄, `--raw`는 색 같은 서식 제어 문자를 남긴 지금 화면 |
+| `studio status <세션> [--json]` | 게이트 결과, 체크포인트, 바뀐 파일, 토큰, 확인 필요 항목 |
+| `studio stop --session <세션>` | 세션을 멈춘다(기록과 작업 복사본은 남는다) |
+| `studio events [--session s] [--json]` | 세션 상태가 바뀔 때마다 한 줄. 처음에 지금 세션을 `snapshot`으로 낸다. Ctrl-c로 끝낸다 |
+
+모든 명령이 `--json`(결과·오류가 한 줄 JSON)과 `--port`를 받습니다. `<세션>`은 id 전체나 겹치지 않는 앞부분이고 `<프로젝트>`는 id나 이름입니다. 세션 멈추기를 `studio stop --session <id>`로 정한 까닭: `studio stop`은 이미 스튜디오 끄기이고, `studio stop $ID`로 만들면 `ID`가 비었을 때 스튜디오가 꺼집니다. 그래서 `--session`을 꼭 주게 했고 값이 비어도 사용법 오류(2)로 끝납니다. 나머지 명령은 겹치는 이름이 없어 맨 위에 둡니다.
+
+`wait`의 `--for`:
+
+- `idle`: 요청이 끝나 쉬는 중이고 게이트가 끝났다. 게이트가 검증 중이면 아직이고, 실패했으면 종료 코드 1이다. 쉬는 상태가 1.5초 그대로일 때만 확정한다(게이트가 시작하거나 다음 작업이 막 시작하는 사이를 건너뛰지 않으려고)
+- `input`·`permission`: CLI가 질문·입력을 기다린다·권한 확인을 기다린다
+- `done`: 세션이 끝났다(멈춤)
+- `gate`: 게이트 판정이 나왔다. 통과 0, 실패 1, 판정이 없으면(질문이거나 바뀐 것이 없는 요청) 10
+- `any`: 위 가운데 먼저 오는 것
+
+권한 대기·질문·오류·끝남은 어떤 `--for`를 줘도 바로 알립니다(조용히 계속 기다리지 않습니다).
+
+종료 코드:
+
+| 코드 | 뜻 |
+|---|---|
+| 0 | 성공. `wait`는 조건이 맞았다(게이트를 기다렸다면 통과) |
+| 1 | 게이트 실패, 세션 오류, 스튜디오가 요청을 거절함(만든 사람이 아님 등. 거절 이유를 stderr에 적는다) |
+| 2 | 사용법이 틀렸다(스튜디오에 붙기 전에 검사한다) |
+| 3 | `wait`가 시간 안에 조건을 보지 못했다 |
+| 4 | 권한 확인 창에서 기다린다. `studio keys`로 답한다 |
+| 5 | 질문이나 입력 요구에서 기다린다 |
+| 6 | 세션이 끝났는데 기다리던 조건이 아니다 |
+| 7 | 스튜디오에 붙지 못했거나 인증이 거절됐다 |
+| 8 | 세션·프로젝트가 없다(앞부분이 여럿에 맞는 경우 포함) |
+| 9 | `send`: 보냈지만 CLI가 받았다는 확인을 하지 못했다 |
+| 10 | `wait --for gate`: 쉬는 중인데 게이트 판정이 없다 |
+
+`send`가 Enter를 확인하는 방법: 글을 붙여넣기 표지로 보내고 Enter를 따로 보낸 뒤, 5초 동안 스튜디오의 세션 상태에 CLI가 받은 흔적이 생기는지 봅니다(작업 시작 시각이 새로 찍힘, 마지막 활동 시각이 앞섬, 권한·질문 창으로 넘어감). 없으면 Enter를 한 번만 더 보내고 같은 확인을 합니다. 그래도 없으면 입력줄을 보라는 메시지와 화면 끝 8줄을 stderr에 적고 9로 끝납니다. 이미 작업 중인 세션에는 "작업 중"이 증거가 되지 못해 앞의 두 가지만 보므로 확인이 더 약합니다. 다음은 보내지 않고 거절합니다: CLI가 안 떠 있을 때(글이 셸에 들어가 명령으로 실행됩니다), 권한 창이 떠 있을 때(글 뒤의 Enter가 그 창의 기본 선택이 됩니다), 질문·입력 요구 창이 떠 있을 때. 권한·질문에는 `studio keys`로 답합니다. `keys`도 CLI가 안 떠 있으면 보내지 않습니다.
+
+`read`는 새 화면 API를 쓰지 않고 desk 칸이 쓰는 터미널 통로를 잠깐 열어 받은 최근 출력(최대 512KiB)을 desk와 같은 해석기로 되살립니다. 통로가 열린 터미널의 크기를 알려 주므로 그 크기로 해석합니다. 출력이 512KiB를 넘어 앞이 잘렸거나 CLI가 그 뒤 화면을 다시 그리지 않았으면 화면이 어긋날 수 있습니다. 읽는 일뿐이라 입력도 크기 변경도 하지 않습니다.
+
+인증:
+
+- 개인 PC: desk와 같은 로컬 토큰 파일(`~/.cache/b-studio/launch/local-token`)을 읽습니다. 포트는 `--port`, 없으면 `launch`가 남긴 포트, 없으면 3000입니다.
+- 인증을 켠 서버(token 방식): `B_STUDIO_URL=http://서버:포트`, `B_STUDIO_USER=이름`, `B_STUDIO_TOKEN=토큰`(`studio auth token <이름>`이 내준 것)을 주면 로그인해 받은 세션 쿠키로 요청합니다(`--url`·`--user`·`--token` 옵션도 같습니다. 토큰은 프로세스 목록에 보이지 않게 환경 변수가 낫습니다). 평문 http로 서버에 붙으면 토큰이 평문으로 갑니다. 신뢰하는 사설망이나 터널 안에서만 쓰세요. 서버 방식에서 `send`·`keys`는 세션을 만든 사람만 됩니다(서버가 판정합니다).
+
+두 AI에 같은 일을 보내고 기다렸다가 결과를 읽는 예시입니다.
+
+```bash
+#!/usr/bin/env bash
+# 같은 요청을 Claude Code와 Codex에 보내고, 끝나기를 기다렸다가 게이트 결과와 화면 끝을 모은다
+set -u
+project=orders
+request="주문 목록 API에 페이지네이션을 넣어 줘"
+
+claude_id=$(studio new "$project" "$request" --backend claude-code) || exit 1
+codex_id=$(studio new "$project" "$request" --backend codex) || exit 1
+
+for id in "$claude_id" "$codex_id"; do
+  studio wait "$id" --for any --timeout 900 --json > "/tmp/wait-$id.json"
+  code=$?
+  case $code in
+    0) echo "$id: 쉬는 중, 게이트 통과" ;;
+    1) echo "$id: 게이트 실패 또는 오류" ;;
+    3) echo "$id: 15분 안에 안 끝남" ;;
+    4) echo "$id: 권한 확인에서 기다림 (studio keys $id 1 Enter 로 허락할 수 있음)" ;;
+    5) echo "$id: 질문에서 기다림 (studio read $id 로 확인)" ;;
+    *) echo "$id: 종료 코드 $code" ;;
+  esac
+  studio status "$id"
+  studio read "$id" --lines 30
+done
+```
+
+`new`가 쓰는 라우팅 규칙·계정은 [터미널 작업대](#터미널-작업대studio-desk)의 설정과 같습니다. 계정은 `--backend codex --account <id>`로 고릅니다.
+
 ## 9. 탐색형 QA
 
 터미널 작업대의 실행 화면(`Ctrl-b v`) QA 탭(`6`)에서 시작합니다([터미널 작업대](#터미널-작업대studio-desk)). 세션 API `POST /api/sessions/<id>/explore-qa`(`action`: `start`·`stop`·`save`)로 다루고 `GET`으로 결과를 받을 수도 있습니다.
