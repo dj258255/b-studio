@@ -136,7 +136,7 @@
         },
         "output": {
           "decision": "block",
-          "reason": "[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n워크플로 검사 실패:\n- [test] app-test (시도 1회)\n종료 코드 1\nFAIL app-test\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료"
+          "reason": "[b-studio 검증 게이트] 변경 사항이 검증을 통과하지 못했습니다. 아래 결과를 보고 고친 뒤 턴을 끝내세요.\n\n워크플로 검사 실패:\n- [test] app-test (시도 1회)\n종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과\n- 샌드박스 파일 반영 확인: <n>초\n- app: 재시작 후 준비 완료"
         }
       }
     },
@@ -297,7 +297,7 @@
             "name": "app-test",
             "ok": false,
             "attempts": 1,
-            "detail": "종료 코드 1\nFAIL app-test"
+            "detail": "종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test"
           }
         }
       },
@@ -905,7 +905,7 @@
           "event": {
             "check": {
               "attempts": 1,
-              "detail": "종료 코드 1\nFAIL app-test",
+              "detail": "종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 변경 전 나무를 만들지 못해 결과를 알 수 없습니다\nFAIL app-test",
               "name": "app-test",
               "ok": false,
               "stage": "test"
@@ -1275,6 +1275,7 @@
       "compose exec -T app sh -c <script:00627bf7>",
       "compose exec -T app sh -c <script:65689138>",
       "compose exec -T app sh -c true",
+      "compose exec -T app sh -c <script:04fa4a2d> sh sh -c true",
       "compose exec -T app sh -c <script:00627bf7>",
       "run --rm --network none --volume <root>/sessions/demo-<sid>:/project:ro busybox:1.37 sh -c <script:55f3555d> sh app/hello.txt",
       "compose up --no-start --build --no-deps --force-recreate app",
