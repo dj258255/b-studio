@@ -48,7 +48,10 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
 });
 
 // 계정 테스트(#885)가 codex 세션을 만든다. 진짜 codex CLI를 부르지 않게 로그인 확인만 바꾼다
-vi.mock('@b-studio/agent', async (importOriginal) => ({ ...(await importOriginal<typeof import('@b-studio/agent')>()), preflightCodex: async () => ({ ok: true }) }));
+vi.mock('@b-studio/agent', async (importOriginal) => ({ ...(await importOriginal<typeof import('@b-studio/agent')>()), preflightCodex: async () => ({ ok: true }),
+  // 진짜 claude가 없는 기계(CI)에서도 claude-code 세션을 만든다. 시험이 보는 것은 대상이지 CLI 설치가 아니다
+  preflightClaudeCode: async () => ({ ok: true }),
+}));
 
 vi.mock('./projects', () => ({ findProject: async () => (await import('@b-studio/spec')).loadProject(fake.root) }));
 vi.mock('./session-terminal', () => ({
