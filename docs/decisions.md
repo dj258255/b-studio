@@ -12624,6 +12624,66 @@ Fleet(#1336)과 작업 분해(#1351·#1352)를 터미널로 옮긴 뒤, 채팅�
 - 실제 세션 실측(2026-11-26, Claude Code 2.1.332, 이 컴퓨터 방식 터미널, 세 번): 서브에이전트(Explore)의 기록이 메인과 나뉘어 왔고, 목록의 id(`claude:agent:<id>`)에서 머리를 뗀 값이 기록의 id와 같았다. Bash의 결과(`ls -la`의 출력)와 Edit의 바뀐 줄이 실렸고, `echo TOKEN=…`은 명령·대상·결과 세 자리 모두 `TOKEN=***`로 왔다. 이 CLI는 Agent 도구를 백그라운드로 띄우고 끝 알림을 새 요청처럼 보내서, 끝난 서브에이전트의 기록이 곧바로 지워졌다. 끝난 뒤 10분 남기도록 고친 뒤 다시 재서 세션이 멈출 때까지 남는 것을 봤다(#1421, 트러블슈팅 284).
 - 재지 않은 것: 실제 desk 화면에서 이 기록을 여는 것(키를 눌러 보지 않았다). 실패한 명령의 `tool_response` 모양.
 
+
+## ADR-233 Command Code 세션은 mod 파일의 훅으로 이 컴퓨터 방식 세션 터미널에서 돌리고(실험), 훅이 던지면 건너뛰는 CLI라서 모든 실패를 막는 쪽으로 답한다
+
+상태: 채택(실험, #1424)
+관련: ADR-170(훅 관문), ADR-173(이 컴퓨터 방식), ADR-180(codex가 두 번째 갈래), ADR-200(지원 범위와 실험), ADR-214(StopFailure), ADR-219(감시), 트러블슈팅 283·285·286·289·290
+
+### 맥락
+- 채팅식 경로를 지우려면(#1353) Command Code 백엔드도 세션 터미널에서 돌아야 한다. 공통 단계(#1393, 커밋 73acd509)가 CLI 종류, 붙은 실행 판정(`hooked_launch`), 읽기 도구 표, 관문 파일 목록을 넣었고 새 CLI를 여는 일만 남았다. Command Code는 Claude Code와 훅 모양이 가장 가깝다(쓰기 직전 막기, 쓰기 뒤, 턴 끝 이어가기, 요청 받기).
+- Command Code의 훅은 설정 파일이 아니라 **mod 파일**(`commandcode --mod <파일>`)에 쓴다. 문서와 소스로 확인한 것(v1.91.1): 훅이 던지면 그 훅만 건너뛰고(도구는 그대로 실행) `mod_error` 이벤트만 남는다. `beforeToolCall`은 시간 상한 없이 기다린다. `transformInput`은 직접 친 요청만 거치고(이미지가 붙은 요청·자동 요청·슬래시 명령은 거치지 않는다) 던지면 요청이 그대로 간다. `onStop`은 자연스럽게 끝나려는 턴에서만 불리고 이어가기는 8번까지다. 턴 상한·중단·권한 거절은 `onStop` 없이 `onRunEnd`로 끝난다. `--safe-mode`는 `--mod`로 준 mod도 건너뛴다. 서브에이전트 안의 도구 호출에는 mod의 훅이 붙지 않는 것으로 소스에서 보인다(서브에이전트 훅 목록은 설정 파일의 사용자 훅뿐이다).
+
+### 선택지
+- (a) **mod 파일로 훅을 붙인다.** (b) `-p --output-format json`으로 돌리고 서버가 이벤트를 읽는다 — 지우려는 채팅 러너를 다시 만드는 셈이다. **(a).**
+- mod가 관문을 부르는 방식: (a) Claude의 훅 스크립트를 자식 프로세스로 띄운다 — 호출마다 프로세스가 뜨고 응답 꼴이 Claude의 훅 출력이다. (b) mod가 node 내장 `http`로 훅 서버를 직접 부른다. **(b).** 서버가 내는 답은 같은 꼴(`terminalHookResponse`)을 mod가 허용 목록으로 읽는다. 훅 스크립트는 터미널을 열기 전의 닿는지 확인(`ping`)에만 쓴다.
+- 주소와 토큰: (a) mod 글에 박는다. (b) **관문 폴더의 주소 파일**(`b-studio-gateway.json`, 600)을 부를 때마다 읽는다. 폴더는 감싸개가 환경 변수 `B_STUDIO_GATEWAY_DIR`로 알린다. `import.meta`는 쓰지 않았다(jiti 판이 지원하지 않으면 mod가 통째로 불러와지지 않고, 그러면 훅이 하나도 없다). **(b).**
+- 권한 창: `--permission-mode`·`--yolo` 같은 인자를 **붙이지 않는다.** `--yolo`는 문서상 "모든 권한 확인을 건너뜀(`--dangerously-skip-permissions`의 별칭)"이라 훅 뒤의 안전장치까지 끈다. Claude 터미널의 감싸개도 권한 인자를 붙이지 않고 사람이 권한 창에 답한다. 같은 뜻으로 맞췄다.
+- 모델: `-m`·`--model`은 감싸개에도 시험에도 없다. 기본 모델로만 띄운다. 모델이 넘어오면 `openHostTerminal`이 거절한다.
+
+### 결정
+1. 이 컴퓨터 방식이고 `B_STUDIO_EXPERIMENTAL`이 켜졌을 때만 열린다(`commandCodeTerminalReason`). 컨테이너 방식이나 스위치가 꺼진 서버에서 Command Code 세션의 터미널을 열면 claude를 대신 띄우지 않고 까닭을 적어 409로 거절한다. Fleet·작업 분해·AI 리뷰 고침이 쓰는 `isTerminalRunnableBackend`도 같은 판정이다.
+2. 관문 폴더에 `b-studio-mod.ts`(의존성 없는 한 파일, node 내장만), 주소 파일, 핑용 훅 스크립트, `bin/commandcode` 감싸개를 쓴다. 감싸개는 `export B_STUDIO_GATEWAY_DIR=…; exec <commandcode의 진짜 경로> --mod <mod> "$@"`다. 링크를 푼 진짜 경로로 띄운다: 감시가 프로세스 인자에서 패키지 자리(`/command-code/dist/`)로 CLI를 알아보는데, 링크 이름으로 띄우면 node의 인자에 그 자리가 없다. mod 파일은 관문 파일 목록에 있어 변조 감시와 복구 대상이다.
+3. 감시는 후보(패키지 자리가 인자에 있는 프로세스)마다 **진짜 argv**를 읽어 `hooked_launch('commandcode', argv, null, <mod 경로>)`로 본다: `--mod`가 1번(node 스크립트 뒤면 2번) 자리에 정확히 하나, 값이 우리 mod와 같은 글, `--safe-mode`·`--mod=`·두 번째 `--mod` 없음. 아니면 붙지 않은 CLI다. argv를 읽지 못하면 던져 검사 실패(믿을 수 없음)가 된다.
+4. mod의 훅(허용 목록으로 읽고, 어떤 예외든 던지지 않는다):
+
+| 훅 | 부르는 곳 | 실패하면 |
+|---|---|---|
+| `transformInput` | `/prompt`(UserPromptSubmit) | 닿지 못함·이상한 응답·시간 초과면 요청을 삼킨다(`handled`, 까닭을 보인다). 서버가 막으면 그 글로 삼킨다. 맥락 글이 오면 요청 뒤에 덧붙인다 |
+| `beforeToolCall` | `/pre-tool`(모든 도구를 묻는다. 읽기 도구는 서버의 표가 거른다) | 닿지 못함·HTTP 오류·JSON 아님·모르는 필드·`deny` 아닌 결정·직렬화 실패·훅 인자 이상·시간 초과 모두 `{block: true, additionalContext}` |
+| `afterToolCall` | `/activity`(PostToolUse·PostToolUseFailure) | 지켜보기만 한다. 기다리지 않고 던지지 않는다. 도구 출력은 보내지 않는다 |
+| `onStop` | `/stop`(Stop) | 실패 사유는 `{continue: true, reason}`. 닿지 못하면 통과로 읽지 않는다: 한 번은 검증하지 못했다고 알리며 이어가게 하고(`continue: true`), 연달아 닿지 못하면 멈추되 알림을 낸다. 체크포인트는 어느 쪽이든 생기지 않는다 |
+| `onRunEnd` | `/stop-failure`(StopFailure) | `end_turn`이 아닌 끝(턴 상한·권한 거절·모르는 사유)과, 게이트 실패로 이어가게 했는데 끝난 `end_turn`, 턴 끝 확인이 관문에 닿지 못한 채 끝난 `end_turn`(`stop_unverified`)을 실패로 닫고 되돌린다. 사람이 누른 중단(`interrupted`)은 알리지 않는다(실행을 열어 두고 다음 요청이 이어 간다). 알리지 못하면 실행은 열린 채 남고 체크포인트는 없다 |
+| `subagent_start`·`subagent_stop`(`cmd.on`) | `/activity`(SubagentStart·SubagentStop) | 지켜보기만 한다 |
+| `onSessionStart`·`onSessionEnd` | `/session-start`·`/session-end` | `reload`는 알리지 않는다. 알리기만 한다 |
+| `appendSystemPrompt` | — | 고정된 안내 글(커밋하지 않음 등. b-studio 도구 이름은 쓰지 않는다: 이 CLI에는 도구 서버를 붙이지 않았다) |
+
+5. 서버 쪽은 두 곳을 고쳤다. 쓰기 직전 판정이 읽기 도구를 Claude의 표가 아니라 그 세션 CLI의 표로 읽는다(트러블슈팅 286). Command Code의 파일 도구가 경로를 꺼내지 못하면 카드의 쓰기 범위 밖으로 막는다(트러블슈팅 285). 도구 이름과 입력 열쇠(`write_file`·`edit_file`, `file_path`·`filePath`·`path`)는 설치된 `cli.mjs`의 도구 정의와 `resolveFilePathParam`에서 확인했다.
+6. 이어 붙이기(`--resume`)는 하지 않는다: mod가 대화 id를 보내지 않으므로 서버는 기억하지 않는다.
+7. **파일 도구의 경로 별칭(커밋 보안 검토).** CLI는 `beforeToolCall`에 별칭을 고치기 **전** 입력을 넘기고, `file_path`가 비었으면 입력 객체에서 먼저 나온 별칭(`path`·`absolutePath`·`absolute_path`·`filePath`·`filepath`·`pathname`·`target_file`·`targetFile`·`fileName`·`file_name`·`filename`, v1.93.4의 `yv` 표)을 경로로 쓴다. 옛 추출은 `file_path`·`filePath`·`path`만 보아서 `{"target_file":"lib/x.ts","path":"src/ok.ts"}`가 `src/ok.ts`만 본 채 허용되고 CLI는 `lib/x.ts`를 썼다(트러블슈팅 287). 이제 `write_file`·`edit_file`은 **입력의 모든 열쇠가 표(정식 이름 + 별칭, 내용·`old`·`new`·`replace_all` 쪽 별칭 포함)에 있을 때만** 경로를 꺼내고, 모르는 열쇠가 하나라도 있으면 `null`(막힘)이다. 경로 열쇠는 **모두** 꺼내 값이 달라도 그대로 모두 낸다(하나로 고르지 않는다): 어느 것을 쓰는지는 객체의 열쇠 순서와 판에 달려 있어 우리가 따라 맞추면 틀리고, 모두 범위 안이어야 통과시키면 어느 쪽을 써도 범위 안이다. 값이 글이 아니면 `null`, 빈 글은 CLI도 건너뛰는 자리라 건너뛴다. CLI가 경로에서 벗겨 내는 마크다운 링크(`[글](경로)`)는 글 그대로와 벗긴 값을 둘 다 낸다. 쓰기 직전에 보호 경로를 고정하는 자리(`pinBeforeWrite`)는 같은 추출(`terminalToolFilePaths`)을 쓴다.
+8. **설정이 mod를 끄는 길(커밋 보안 검토, 트러블슈팅 288).** 설치된 cli.mjs(v1.93.4)의 `loadMods`는 `if(e.builtinsOnly||o.disableAll)return;`으로 `--mod`로 준 mod까지 건너뛰고, 이름이 `mods.disabled`에 있으면 그것을 건너뛴다. 설정은 `~/.commandcode/settings.json`, 프로젝트 루트의 `.commandcode/settings.json`·`settings.local.json`에서 읽고(`resolveModSettings`, 프로젝트 루트는 `resolveProjectRoot`: 작업 폴더에서 위로 최대 10칸, `.git`이 있는 폴더, 없으면 `.commandcode`가 있는 폴더) 에이전트가 쓸 수 있는 자리다. 프로젝트 mod(`.commandcode/mods/`, `mods.paths`·`mods.sources`)는 `--mod`로 준 것 **뒤에** 등록되어 우리가 허용한 입력을 바꿔 쓸 수 있다(`discoverMods`). 감시는 argv만 보므로 이 경우를 붙은 것으로 판정했다. 세 겹으로 닫는다(모두 닫히는 쪽):
+   - **띄우기 전 검사**(`commandCodeModLoadRefusal`, 이 컴퓨터 방식 백엔드의 `preflight`): 세 설정 파일을 읽어 파일이 있는데 읽지 못함(JSON 아님 포함)·`mods.disableAll`이 참·`mods.disabled`에 우리 mod 이름(`modNameFromPath` 규칙으로 `b-studio-mod`, 대소문자·확장자 무시)·`mods.paths`나 `mods.sources`가 하나라도 있음·프로젝트(작업 폴더와 프로젝트 루트)나 사용자 mods 폴더에 점으로 시작하지 않는 항목이 있음(`scanModsDir`)이면 관문도 터미널도 만들지 않고 409로 거절한다. 모르는 출처는 막는 쪽이다.
+   - **설정 쓰기 막기**(`terminalCommandCodeDeny`): commandcode 세션의 `write_file`·`edit_file`·패치 대상이 `.commandcode`(작업 폴더·프로젝트 루트·사용자 홈, `~/` 표기 포함)면 **카드 유무와 상관없이** 막는다. 경로 비교는 거부 목록이라 넓게 맞춘다: 이름이 `.commandcode`인 칸이 깊이와 상관없이 있으면 막고(대소문자·전각·보이지 않는 글자·끝의 점과 빈칸을 접고, `..`를 풀기 전후 둘 다), 링크를 푼 실제 경로와 이미 있는 조상의 inode도 본다. 파일 도구인데 바꿀 파일을 알 수 없으면 막는다. 턴이 끝나면 사용자가 친 것처럼 `/reload` 등을 돌리는 `run_command`는 commandcode 세션에서 늘 막는다.
+   - **mod가 불러와졌다는 신호**(`session-terminal-mod.ts`): mod는 불러와지면 `/session-start`를 보낸다. 터미널을 연 뒤 90초(폴더 신뢰 창에서 사람이 답하는 시간을 포함한다. `B_STUDIO_COMMANDCODE_MOD_TIMEOUT_MS`로 낮출 수만 있다) 안에 오지 않으면 훅 없이 뜬 것으로 보고 감시가 찾은 위반과 같은 길(`onViolation` → `terminalViolation`: 열린 실행은 실패로 닫고 되돌림, 없으면 다음에 끝나는 실행에서 처리)로 처리한 뒤 세션 터미널을 닫는다. mod의 `onSessionEnd`가 `reload`일 때도 서버에 알리고(`reason`), 그 뒤 같은 시간 안에 새 session-start(`source: reload`)가 오지 않으면 위반이다(reload 뒤 설정이 mod를 껐을 수 있다). reload는 CLI의 끝이 아니라서 CLI 표시는 끄지 않는다. 셸로 설정을 쓰는 경우는 이 겹이 맡는다.
+
+### 하지 않는 것·남는 위험
+- **서브에이전트 안의 도구 호출은 mod의 쓰기 직전 훅을 거치지 않는다**(소스로 본 것, 실행으로 확인하지 않았다). `agent` 도구 자체는 읽기 표에 없어 쓰기 직전 훅을 거치므로 그 시점에 실행이 열리고 변경 전 기준이 잡힌다. 서브에이전트가 바꾼 파일은 턴 끝 게이트가 작업 복사본의 차이로 잡는다(범위 밖 변경은 게이트에서 돌려보낸다). 그 안의 쓰기를 쓰기 직전에 막지는 못한다. 그래서 **카드의 쓰기 범위가 걸린 세션에서는 서브에이전트 도구(`agent`·`task`)를 막는다**: 경로 추출이 이 도구를 "바꾸는 파일을 알 수 없음"(null)으로 돌려주고, 허용 목록은 모르는 값을 범위 밖으로 읽는다(커밋 보안 검토의 지적). 카드가 없는 세션에서는 Bash처럼 턴 끝 게이트가 맡는다.
+- `transformInput`은 이미지가 붙은 요청과 자동 요청을 거치지 않는다. 그 요청은 `[읽기만]` 표시가 서버에 닿지 않고, 실행은 첫 쓰기 직전 훅이 연다. 첫 요청을 실행 인자로 넘기면 `transformInput`을 지난다(2026-11-27 실측: 실행 인자의 요청으로 실행이 열렸다).
+- **설정의 `mods.disableAll`·`mods.disabled`는 `--mod`로 준 mod를 끈다**(cli.mjs v1.93.4의 `loadMods`를 읽어 확인했다. 실제 CLI를 돌려 끄는 것까지는 보지 않았다). 위 결정 8의 세 겹이 닫는다. 남는 틈: ① 띄우기 전 검사는 사용자 수준 설정(`~/.commandcode`)을 사람이 바꾼 경우도 열 때마다 새로 읽지만, 연 **뒤** 사람이 바꾼 것은 세 번째 겹(신호 시계)이 reload나 다음 열기에서만 본다. ② 시계는 터미널을 열 때와 reload 뒤에만 걸린다. CLI를 끝내고 셸에서 다시 띄운 CLI의 mod가 꺼져 있으면 시계가 걸리지 않는다(그 경우는 띄우기 전 검사가 지난 시점의 설정이라 이 겹들이 놓칠 수 있다). ③ `session-start`는 관문 토큰을 가진 쪽이 직접 보낼 수 있다(토큰은 관문 폴더의 주소 파일에 있다): mod가 꺼진 채 토큰을 읽은 에이전트가 신호를 위조하면 시계를 속인다. ④ 환경 변수·`--config` 같은 CLI 인자로 설정 자리를 바꾸는 길은 보지 않았다(감시가 `--mod` 말고 붙은 인자를 막는 것은 `--safe-mode`·두 번째 `--mod`뿐이다). ⑤ mod가 불러와지지 않는 다른 경우(jiti 오류)도 같은 신호 시계가 잡는다: 훅이 하나도 없고 CLI는 돈다.
+- `onSessionEnd`는 CLI가 기다려 주지 않을 수 있다(문서는 fire-and-forget). 그때는 PTY 종료로 닫힌다.
+- 사용량(텔레메트리)을 보내지 않아 토큰 한도·턴 상한은 이 CLI에서 걸리지 않는다(Codex와 같다).
+- `interrupted`(Esc)는 실패로 닫지 않는다. Claude Code 터미널에서 사람이 중단하면 훅이 오지 않아 실행이 열린 채 남고 다음 요청이 이어 가는 것과 같게 했다. 서버가 건 취소는 서버가 스스로 닫는다.
+- 이어가기 8번과 서버의 재시도 3번: 서버가 3번째 실패에서 피드백 대신 실패로 닫으므로 3번에서 끝난다(8번에 닿지 않는다).
+- Command Code가 파일 도구를 더하면 `COMMAND_CODE_FILE_TOOLS`와 읽기 표를 손으로 고쳐야 한다.
+- **CLI가 작업 폴더에 자기 파일을 쓴다.** 실측에서 Command Code가 요청마다 `.commandcode/taste/taste.md`(빈 파일)를 작업 복사본에 만들었다. 훅을 거치지 않는 쓰기라 턴 끝의 차이에 "바뀐 파일"로 잡힌다. 실패로 닫힌 실행에서는 되돌려졌다. 통과한 실행에서는 체크포인트에 들어가고, 카드의 쓰기 범위가 걸린 세션에서는 범위 밖 변경으로 잡힐 것이다(이 두 경우는 돌려 보지 못했다). 이 폴더를 변경에서 빼면 게이트가 보지 않는 자리가 생기므로 빼지 않았다. 사람이 정할 일이다.
+- 모델이 실제로 답하는 실행은 돌리지 못했다(아래 실측).
+
+### 결과
+- 시험(임시 폴더·가짜 ModApi·로컬 훅 서버만, 모델 호출 없음): mod 단위 26개(`commandcode-mod.test.ts`: 닿지 못함·오류 상태·JSON 아님·모르는 필드·시간 초과·직렬화 실패·훅 인자 이상·루프백 아닌 주소 모두 막음과 열린 서버에서는 통과하는 대조, 요청 받기·턴 끝·StopFailure·서브에이전트), 진짜 mod → 진짜 훅 서버 → 진짜 판정 14개(`sessions-terminal-commandcode.test.ts`: 요청 → 읽기 → 쓰기 → 게이트 → 체크포인트, 범위 밖·링크를 지나는 쓰기·경로 없는 쓰기 막힘, 게이트 실패 사유가 `reason`으로 돌아옴, 관문을 닫으면 막음, 틀린 토큰, 읽기만 요청, 턴 상한 뒤 되돌림, 서브에이전트, 실험 스위치·컨테이너 거절, 모델 없음), 감싸개·관문 파일·진짜 셸로 돌린 감싸개 인자·링크 풀기·감시 판정(`host-terminal.test.ts`), 허용 판정과 계정(`session-terminal.test.ts`), 경로 추출(`session-terminal-tool-paths.test.ts`), Rust 읽기 표(`classify_tests.rs`).
+- 변이 21개(mod의 막는 분기·응답 검사·사유 돌리기·StopFailure·주소 검사, 경로 null, 읽기 표, 거절 세 곳, 감시 보고, 모델·계정 거절, `--mod` 붙이기, 관문 파일 목록, 링크 풀기)가 각각 시험을 실패시켰다.
+- 실제 Command Code 실측(2026-11-27, 한 번, macOS, 설치된 판은 v1.93.4 — 도구 이름과 훅 계약을 읽은 판 v1.91.1과 다르다): 실험 스위치를 켠 별도 studio에서 Command Code 세션을 만들고 터미널을 열었다. 감싸개가 `--mod`를 붙여 CLI가 떴고, 폴더 신뢰 창에 답하자 mod가 불러와져(`session-start`로 "CLI가 떴다" 표시가 섰다) 실행 인자의 첫 요청과 그 뒤 직접 친 요청이 각각 실행을 열었다(`run_started`, 백엔드 `commandcode`). **계정의 크레딧이 없어 모델 호출이 거절됐고**("Insufficient credits"), 두 실행 모두 `onRunEnd`가 자연스러운 끝이 아닌 사유로 불려 실패로 닫히고 변경(`.commandcode/taste/taste.md`)이 되돌려졌다. 체크포인트는 생기지 않았다. 그래서 확인한 것은 띄우기·mod 불러오기·요청 받기·훅 없이 끝난 실행의 닫기와 되돌리기까지이고, **읽기·쓰기 직전 막기·턴 끝 게이트·체크포인트·서브에이전트·`onStop`의 사유가 다음 턴으로 돌아오는지는 실제 CLI로 보지 못했다.** 이 실측에서 세션 만들기가 Command Code를 따로 거르던 것(`routed-session.ts`)을 찾아 터미널을 여는 쪽과 같은 판정으로 고쳤다.
+- 재지 않은 것: 모델이 답하는 실행 전부(크레딧이 필요하다), v1.93.4의 도구 이름이 v1.91.1과 같은지, `mods.disabled` 설정, Linux, `commandcode`가 `node` 래퍼 없이 단일 실행 파일로 설치된 경우의 감시 판정, 설정이 실제 CLI에서 `--mod`로 준 mod를 끄는 동작(소스로만 읽었다), 폴더 신뢰 창이 떠 있는 동안의 시계(90초가 실제 사람의 응답에 충분한지).
+
 ## ADR-234 시험 파일을 지우거나 건너뛰기 표시를 더하면 턴 끝 게이트가 허용 없이는 돌려보낸다
 
 상태: 채택(#1436)

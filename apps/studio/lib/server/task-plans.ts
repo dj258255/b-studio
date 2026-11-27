@@ -1171,6 +1171,8 @@ async function integrate(plan: TaskPlanView): Promise<void> {
     persist(plan);
 
     const writableScope = [...new Set(plan.lanes.flatMap((lane) => lane.paths))];
+    // 레인마다 통과했던 완료 검사를 합친 결과에서 다시 돌린다. 읽지 못하면 "검사 없음"으로 넘기지 않고 통합을 멈춘다(위 try의 catch가 실패로 닫는다)
+    const doneTests = integrationDoneTests(plan);
     const request = `작업 분해 통합: ${plan.request}`;
     let settled: { status: string; summary: string };
     let appliedCheckpoint: Checkpoint | undefined;
@@ -1208,7 +1210,7 @@ async function integrate(plan: TaskPlanView): Promise<void> {
       }
     } else {
       // 서버가 레인 결과를 작업 폴더에 쓰고 터미널 턴 끝과 같은 판정으로 닫는다(ADR-224). 채팅식 실행도 모델 호출도 없다
-      const applied = await applyServerChanges(snapshot.id, { request, writes, deletes: removable, writableScope });
+      const applied = await applyServerChanges(snapshot.id, { request, writes, deletes: removable, writableScope, doneTests });
       appliedCheckpoint = applied.checkpoint;
       // 모델을 부르지 않으므로 usage·metrics는 없다
       integration.run = { status: applied.status, durationMs: applied.durationMs };
@@ -1347,6 +1349,34 @@ function taskRequest(plan: TaskPlanView, lane: TaskPlanLaneView, index: number):
 /** 이 작업에 걸 완료 검사(gate의 workflow.tests에 넣을 꼴). 카드에 완료 명령이 없으면 빈 배열 */
 function taskDoneTests(task: TaskPlanTaskView): TaskCardDone[] {
   return task.doneCommand && task.doneService ? [{ name: `done-${task.id}`, service: task.doneService, command: ['sh', '-c', task.doneCommand] }] : [];
+}
+
+/**
+ * 통합 게이트에 넘길 완료 검사: 모든 레인·작업의 완료 검사를 모은다. 같은 검사(서비스와 명령이 모두 같은 것)는 한 번만 남긴다 —
+ * 이름(`done-작업id`)은 작업마다 달라 비교에 쓰지 않는다. 명령 한 글자라도 다르면 다른 검사다.
+ * 작업에 완료 명령과 서비스 중 한쪽만 있거나 명령이 비어 있으면 읽지 못한 것이다: 건너뛰면 레인에서 통과한 검사가 통합에서 조용히 빠지므로 던진다
+ */
+function integrationDoneTests(plan: TaskPlanView): TaskCardDone[] {
+  const seen = new Set<string>();
+  const tests: TaskCardDone[] = [];
+  for (const lane of plan.lanes) {
+    if (!Array.isArray(lane.tasks)) throw new Error(`${lane.id}의 작업 기록이 없어 완료 검사를 모을 수 없습니다`);
+    for (const task of lane.tasks) {
+      const hasCommand = task.doneCommand !== undefined;
+      const hasService = task.doneService !== undefined;
+      if (!hasCommand && !hasService) continue;
+      if (!hasCommand || !hasService || task.doneCommand!.trim() === '' || task.doneService!.trim() === '') {
+        throw new Error(`${lane.id}의 작업 ${task.id}는 완료 검사를 읽을 수 없어(명령 또는 서비스가 비어 있습니다) 통합 검증에서 다시 돌릴 수 없습니다`);
+      }
+      for (const test of taskDoneTests(task)) {
+        const key = JSON.stringify([test.service, test.command]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        tests.push(test);
+      }
+    }
+  }
+  return tests;
 }
 
 /** 카드 계획에 요청 글이 없을 때 쓸 한 줄(#B6a 수정 2-3). 카드 제목들을 · 로 잇고, 200자를 넘으면 자르고 …를 붙인다 */

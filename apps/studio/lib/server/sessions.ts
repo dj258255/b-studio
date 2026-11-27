@@ -205,6 +205,7 @@ import {
   type ModelProfile,
 } from '@b-studio/agent';
 import {
+  commandCodeConfigPathBlocked,
   describeSnapshotEvent,
   providerFromEnv,
   Redactor,
@@ -309,7 +310,7 @@ import {
   type RestoreReason,
 } from './session-git-realign';
 import { runRequest, type RunActions, type RunSummary } from './session-run';
-import { classifyPrompt, isReadOnlyPrompt, isReadTool, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
+import { classifyPrompt, isReadOnlyPrompt, isReadToolFor, readOnlyAfterWork, terminalToolFilePaths } from './session-terminal-classify';
 import { decidePreTool, decidePrompt, takesCheckChanges, type PreToolDeny, type PreToolFacts, type TerminalLimit } from './session-terminal-prompt';
 import {
   decideAfterCheckpoint,
@@ -353,13 +354,16 @@ import { resolveCommandCodeModel } from './commandcode-models';
 import { resolveOpenCodeModel } from './opencode-models';
 import { resolveGeminiModel } from './gemini-models';
 import { cachedRepositoryToken, localFolderAllowed, resolveRepositoryToken } from './repo-token';
-import { sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { commandCodeTerminalReason, sessionTerminalAllowed, terminalHomeUser } from './terminal-allowed';
+import { noteModReloading, noteModStarted } from './session-terminal-mod';
 import { collectHumanResolvedFindings, runReviewRounds, type ReviewFixResult, type ReviewRoundDeps } from './review-round';
 import { SteeringQueue } from './steering';
 import { walkFiles } from './code-files';
 import { readServicePackageJson, serviceHasPomXml, walkServiceAndIncludedTestFiles } from './test-files';
 import { CONTAINER_WORKSPACE_ROOT } from './project-detect';
 import { spendStore } from './spend-state';
+import { userTokens } from './usage-state';
+import { advanceStage, userUsedTokens, type StageMemory } from './token-limit-stages';
 import { chargeUserUsage, judgeLimits, judgeRunLimits, newLedger, retryUserUsage, userLimitSetting, type RunLedger } from './session-limits';
 import { clientForModel, modelById, routingDecision } from './model-registry';
 import { recordObservation } from './model-observations';
@@ -462,6 +466,11 @@ interface Session {
    * access가 undefined면 지금 이 레인에서 도는 작업이 없다(작업 사이). 신원은 access가 고정한다(레인 이름을 도구 인자로 받지 않는다)
    */
   terminalBoard?: TerminalBoard;
+  /**
+   * 한도 단계 알림(50%·80%)에서 이미 알린 단계의 기억(#1427). 저장하지 않는다 — 서버가 다시 시작되면 비고, 그때는 다음 사용량 소식에서 지금 단계를 한 번 다시 알린다.
+   * 알리는 쪽만 읽고 쓴다. 한도를 막는 판정은 이 값을 보지 않는다
+   */
+  limitStages?: { session?: StageMemory; user?: StageMemory };
   /**
    * 이 세션을 실제로 만든 폴더(`startSession`의 `sessionDir`) 또는 읽어 온 폴더(`readStoredSessions`의 `home`). 지우기와 이어받기는
    * 저장 파일의 경로 글자(`snapshot.workDir`·`stateDir`)가 아니라 이 값으로 폴더를 정한다(ADR-204)
@@ -2904,6 +2913,38 @@ function startLimitMessage(session: Session, by: string | undefined): string | u
 }
 
 /**
+ * 한도에 다가가는 단계(50%·80%)를 처음 넘을 때 한 번씩 알린다(#1427). **알리기만 한다** — 한도를 넘었는지는 `judgeRunLimits`가 따로 판정하고 이 함수는 그 결과를 읽지도 바꾸지도 않는다.
+ * 여기서 던져도 한도 확인이 건너뛰어지지 않도록 모든 오류를 삼켜 로그로 남긴다(알림이 없는 쪽이 막는 쪽이 없는 것보다 낫다). 사용량을 읽지 못한 한도는 0%로 읽지 않고 알리지 않는다.
+ * extra는 아직 세션 합계에 들어오지 않은 잠정 추가분(대화 실행), ledger는 사람 몫을 셀 이 실행의 원장이다
+ */
+function noteLimitStages(session: Session, by: string | undefined, ledger: RunLedger | undefined, extra = 0): void {
+  try {
+    const memory = (session.limitStages ??= {});
+    const limit = session.snapshot.tokenLimit;
+    if (limit !== undefined) {
+      const step = advanceStage(memory.session, `session:${limit}`, totalTokens(session.snapshot.tokens) + extra, limit);
+      memory.session = step.memory;
+      if (step.alert) emit(session, { type: 'notice', text: `이 세션이 토큰 한도의 ${step.alert}%에 다다랐습니다(한도 ${formatTokenCount(limit)}). 한도를 넘으면 쓰기를 막고 실행을 멈춥니다`, at: new Date().toISOString() });
+    }
+    const setting = userLimitSetting(by);
+    if (setting && by) {
+      let used: number | undefined;
+      try {
+        used = userUsedTokens(userTokens(by, setting.window), ledger ? { accum: ledger.accum + extra, saved: ledger.saved } : extra > 0 ? { accum: extra, saved: 0 } : undefined);
+      } catch {
+        // 사용량 파일을 읽지 못했다: 모름이다(알리지 않는다). 막는 쪽은 judgeRunLimits가 따로 멈춘다
+        used = undefined;
+      }
+      const step = advanceStage(memory.user, `user:${by}:${setting.window}:${setting.limit}`, used, setting.limit);
+      memory.user = step.memory;
+      if (step.alert) emit(session, { type: 'notice', text: `${describeWindow(setting.window)} 쓸 수 있는 개인 토큰 한도의 ${step.alert}%에 다다랐습니다(한도 ${formatTokenCount(setting.limit)}). 한도를 넘으면 쓰기를 막고 실행을 멈춥니다`, at: new Date().toISOString() });
+    }
+  } catch (error) {
+    console.error('[b-studio] 토큰 한도 단계 알림을 내지 못했습니다', describe(error));
+  }
+}
+
+/**
  * 대화 실행의 한도 판정과 멈춤(`tokens` 이벤트와 `turn_usage` 이벤트가 같은 길로 부른다). 막는 쪽이다: 한도에 닿으면 실행을 멈추고 되돌린다.
  * extra는 아직 기록에 들어오지 않은 잠정 추가분이다. 판정에만 더하고 원장·세션 합계 자체는 바꾸지 않는다(복사본을 넘긴다)
  */
@@ -2969,6 +3010,7 @@ function judgeTurnUsageLimit(session: Session, run: ActiveRun, event: Parameters
   const extra = Math.max(0, totalTokens(run.turnUsage) - totalTokens(run.tokens));
   if (extra === 0) return;
   stopIfOverLimit(session, run, extra);
+  noteLimitStages(session, run.by, run.userLedger, extra);
 }
 
 /** 사람 몫에 늘어난 만큼만 더한다. 기록을 쓰지 못해도 요청은 계속한다(못 쓴 양은 이 실행의 원장에 남아 한도 판정이 센다) */
@@ -3174,6 +3216,7 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
       }
       if (!recordRunTokens(session, run, event.usage)) return;
       stopIfOverLimit(session, run, 0);
+      noteLimitStages(session, run.by, run.userLedger);
     },
     onServiceStatus: (event: ServiceStatusEvent) => onServiceStatus(session, event),
   };
@@ -7424,6 +7467,11 @@ export function sessionTerminalTarget(id: string): {
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
   const session = requireSession(id);
+  // Command Code 세션은 이 컴퓨터 방식 + 실험 스위치에서만 띄운다. 아니면 claude를 대신 띄우지 않고 까닭을 알린다(ADR-233)
+  if (sessionBackend(session.snapshot) === 'commandcode') {
+    const refused = commandCodeTerminalReason(sessionTerminalMode());
+    if (refused) throw new StudioError(409, refused);
+  }
   // 서버가 작업 폴더에 쓰고 판정하는 동안에는 열지 않는다. 열면 CLI·사람이 같은 폴더에 쓰고, CLI의 훅이 서버가 연 실행에 붙는다(ADR-224)
   if (session.serverApplying === true) throw new StudioError(409, '서버가 이 세션에 변경을 쓰고 검증하는 중이라 터미널을 열 수 없습니다. 끝난 뒤 다시 여세요');
   // 열려는 시도부터 센다(열다 실패해도 감시·관문이 붙었을 수 있다). 서버가 쓰는 길(applyServerChanges)이 이 표를 본다
@@ -7626,13 +7674,19 @@ function noteTerminalConversation(id: string, conversation: string): void {
  * 컨테이너 방식은 컨테이너에 claude만 깐다
  */
 function terminalCliKind(session: Session): HostCliKind {
-  return sessionTerminalMode() === 'host' && sessionBackend(session.snapshot) === 'codex' ? 'codex' : 'claude';
+  if (sessionTerminalMode() !== 'host') return 'claude';
+  const backend = sessionBackend(session.snapshot);
+  if (backend === 'codex') return 'codex';
+  // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
+  if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';
+  return 'claude';
 }
 
 /** 터미널 실행을 실행 기록에 남길 때의 백엔드 이름 */
 function terminalRunBackend(session: Session): SessionMode {
   if (selfAgentTerminal(session)) return 'api';
-  return terminalCliKind(session) === 'codex' ? 'codex' : 'claude-code';
+  const cli = terminalCliKind(session);
+  return cli === 'codex' ? 'codex' : cli === 'commandcode' ? 'commandcode' : 'claude-code';
 }
 
 // ─── 세션 터미널의 관문(#673 2단계) ───────────────────────────────────────────────────────────────
@@ -8241,6 +8295,8 @@ async function attributeRunUsage(session: Session, request: ModelCall): Promise<
   // 사람 몫을 쓰는 사이와 알림 뒤에 실행이 닫혔을 수 있어 열린 실행을 다시 읽는다
   const stillOpen = openTerminalRun(session);
   if (step.checkLimits && stillOpen) checkTerminalLimits(session, stillOpen);
+  // 한도 확인 뒤에 단계만 알린다(#1427). 알림이 던져도 위의 확인은 이미 끝났다. 열린 실행이 없으면 사용량은 세션 주인 몫이다
+  noteLimitStages(session, stillOpen?.by ?? session.snapshot.owner, stillOpen?.userLedger);
 }
 
 /** 터미널 실행의 합계를 run_finished.metrics에 실을 꼴로 만든다. 매 호출은 모델 이름별로만 세고 툴 시간은 재지 않는다 */
@@ -8807,6 +8863,35 @@ async function terminalToolStarting(id: string, input: HookInput): Promise<{ den
   return result;
 }
 
+/**
+ * Command Code 세션의 쓰기 직전 막기(보안 검토, ADR-233). **카드가 없어도** 막는다. 막는 쪽이다(거부 목록):
+ * - 슬래시 명령을 실행하는 `run_command`: 턴이 끝나면 사용자가 친 것처럼 `/reload`를 돌려 mod를 다시 불러오게 할 수 있다(설정이 mod를 끈 채로)
+ * - `write_file`·`edit_file`·패치로 Command Code의 설정과 mod 자리(`.commandcode`: 작업 폴더·프로젝트 루트·사용자 홈)를 바꾸는 것: `mods.disableAll`·`mods.disabled`로 우리 mod를 끄거나 뒤에 다른 mod를 붙인다.
+ *   비교는 파일 시스템 규칙으로 한다(`commandCodeConfigPathBlocked`: 대소문자·유니코드·`..`·겹친 구분자·링크). 파일 도구인데 바꾸는 파일을 알 수 없으면(모르는 열쇠 등) 이 자리를 건드리지 않는다고 말할 수 없어 막는다
+ * 셸로 쓰는 경우는 여기서 막지 못한다: mod가 불러와졌다는 신호(session-start)가 시간 안에 오지 않으면 위반으로 닫는 쪽(session-terminal-mod)이 맡는다
+ */
+async function terminalCommandCodeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  if (terminalCliKind(session) !== 'commandcode') return undefined;
+  if (tool.trim().toLowerCase() === 'run_command') {
+    return '[b-studio] run_command(슬래시 명령 실행)는 이 세션에서 쓰지 않습니다. /reload 같은 명령이 b-studio의 훅을 다시 불러오다 빼먹게 할 수 있어 막았습니다. 필요한 명령은 사용자가 터미널에 직접 입력합니다.';
+  }
+  const files = terminalToolFilePaths('commandcode', tool, toolInput);
+  if (files === null) {
+    return tool === 'write_file' || tool === 'edit_file' ? `[b-studio] ${tool}이(가) 바꾸는 파일을 알 수 없어 Command Code의 설정(.commandcode)을 건드리지 않는다고 확인하지 못했습니다. 쓰지 않았습니다.` : undefined;
+  }
+  for (const file of files) {
+    if (await commandCodeConfigPathBlocked({ cwd: session.snapshot.workDir, home: process.env.HOME ?? process.env.USERPROFILE, file })) {
+      return `[b-studio] ${file}은(는) Command Code의 설정·mod 자리(.commandcode)라 쓰지 않았습니다. 설정이 b-studio의 훅을 끌 수 있어 에이전트는 이 자리를 바꾸지 않습니다.`;
+    }
+  }
+  return undefined;
+}
+
+/** 쓰기 직전 판정에 넘길 "범위 밖" 사유: Command Code의 설정 쓰기 막기, 그다음 카드의 쓰기 범위 */
+async function terminalWriteScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
+  return (await terminalCommandCodeDeny(session, tool, toolInput)) ?? (await terminalScopeDeny(session, tool, toolInput));
+}
+
 /** 카드 실행 맥락의 쓰기 범위를 도구 입력이 벗어나면 그 사유, 아니면 undefined(카드 맥락이 없으면 undefined). 확인하지 못한 경로도 범위 밖이다(허용 목록이라 모르는 값은 막는다) */
 async function terminalScopeDeny(session: Session, tool: string, toolInput: unknown): Promise<string | undefined> {
   // 카드 실행 맥락이 있으면 쓰기 범위를 건다(#B6a). 도구 입력의 파일 경로를 작업 복사본 기준 상대 경로로 바꿔 본다.
@@ -8912,8 +8997,12 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 화면의 "지금 하는 일"(#920). Codex는 읽기 도구도 이 훅으로 온다(할 일 목록 update_plan 포함)
   noteToolUse((session.terminalActivity ??= newTerminalActivity()), input, Date.now(), activityRedactor(session));
   // 파일을 바꾸지 않는 도구는 기다릴 것이 없다(설정이 걸러 보내지만 여기서도 본다). 열린 것은 이 칸뿐이고 코어도 같은 칸을 허용으로 둔다(`read_tool`). 이름 대조는 코어가 한다(ADR-215)
-  const readTool = isReadTool(tool);
+  // 읽기 도구 표는 그 CLI의 것이다(Command Code의 `read_file`은 claude의 표에 없다). 모르는 이름은 바꾸는 도구다
+  const readTool = isReadToolFor(terminalCliKind(session), tool);
   if (readTool) return {};
+  // Command Code의 설정 쓰기와 run_command는 카드가 없어도, 실행을 열기 전에 막는다(보안 검토)
+  const configDeny = await terminalCommandCodeDeny(session, tool, input.tool_input);
+  if (configDeny) return { deny: configDeny };
   // 토큰 한도를 이미 넘었으면 새 실행을 열지 않고 막는다(#B5). 실행이 열려 있으면 아래에서 그 실행의 한도로도 막는다.
   // 이 판정은 실행을 열기 전이라 한도 말고는 모르는 사실이 없다(나머지는 허용 쪽 값). 거절만 최종이고 허용은 아래에서 다시 판정한다
   const budgetText = terminalBudgetMessage(session);
@@ -8923,7 +9012,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 쓰기 훅을 센다(ADR-213, U2). 사용량 소식 없이 이어지는지 보는 값이다
   if (!('busy' in run)) run.terminal.writeHooks += 1;
   // 앞의 판정(샌드박스를 켤지 말지): 실행을 얻었는가·읽기만·실행 한도·카드 범위를 그 순간의 사실로 본다. 이 판정의 허용은 최종이 아니다
-  const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalScopeDeny(session, tool, input.tool_input) });
+  const before = terminalPreToolFacts(session, run, { readTool, scope: 'busy' in run ? undefined : await terminalWriteScopeDeny(session, tool, input.tool_input) });
   const first = decidePreTool(before.facts);
   if (!first.allow) return { deny: pretoolDenyText(first.deny, before.texts) };
   if ('busy' in run) return { deny: run.busy };
@@ -8933,7 +9022,7 @@ async function terminalToolDecision(id: string, input: HookInput): Promise<{ den
   // 기다림 뒤의 판정: 그 순간의 사실로 다시 읽어 부르고 이 답이 최종이다. 기다리는 사이 [읽기만] 요청이 이어 왔거나 턴 상한에 닿았거나
   // 실행이 닫혔으면(위반·취소·CLI 종료·세션 멈춤) 허용하지 않는다. 닫힌 실행의 쓰기는 되돌린 뒤에 파일을 바꾸는 쓰기다
   const finalDecision = async (): Promise<{ deny: string } | undefined> => {
-    const after = terminalPreToolFacts(session, run, { readTool, scope: await terminalScopeDeny(session, tool, input.tool_input), signal });
+    const after = terminalPreToolFacts(session, run, { readTool, scope: await terminalWriteScopeDeny(session, tool, input.tool_input), signal });
     const answer = decidePreTool(after.facts);
     return answer.allow ? undefined : { deny: pretoolDenyText(answer.deny, after.texts) };
   };
@@ -9073,6 +9162,8 @@ export async function applyServerChanges(
     deletes: readonly string[];
     /** 허용 목록. 빈 목록이면 어디에도 쓰지 못한다 */
     writableScope: readonly string[];
+    /** 합친 결과에서 다시 돌릴 완료 검사(레인 카드의 doneCommand). 게이트의 test 단계에 더해지고 하나라도 실패하면 실패로 닫는다. 없으면 빈 목록 */
+    doneTests?: readonly TaskCardDone[];
   },
 ): Promise<ServerChangesResult> {
   const session = requireSession(id);
@@ -9112,7 +9203,7 @@ export async function applyServerChanges(
     };
     try {
       // 쓰기 범위(허용 목록)를 건다. 턴 끝의 카드 범위 검사(`need_card_scope`)가 도구 밖 변경도 이 범위로 본다. 끝나면 아래 finally가 푼다
-      setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: [] });
+      setTerminalTaskContext(id, { writableScope: input.writableScope, doneTests: input.doneTests ?? [] });
       await opening.terminal.serial(async () => {
         const problem = await writeServerChanges(session, opening, input);
         if (problem !== undefined) {
@@ -10012,6 +10103,8 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     // 세션 시작 훅이 이 안내를 받아 간다. CLI가 떴다는 뜻이기도 하다 — 화면은 그때부터 다른 패널의 글을 터미널에 붙여 넣는다
     note: async () => {
       const note = terminalGatewayNote(terminalSession(id).project, sessionTerminalMode());
+      // mod가 불러와졌다는 신호다(Command Code, 보안 검토). 기다리던 시계를 세운다. reload 뒤 새로 뜬 것도 같다
+      noteModStarted(id);
       noteSessionTerminalCli(id, true);
       return note;
     },
@@ -10022,7 +10115,12 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     preTool: (input) => terminalToolStarting(id, input),
     stop: (input) => terminalTurnEnded(id, input),
-    sessionEnd: async () => {
+    sessionEnd: async (input) => {
+      // mod만 다시 불러오는 것(reload)은 CLI의 끝이 아니다. 새 mod의 session-start가 시간 안에 오는지 시계로 본다(설정이 reload 뒤 mod를 껐을 수 있다)
+      if (input.reason === 'reload' && terminalCliKind(terminalSession(id)) === 'commandcode') {
+        noteModReloading(id);
+        return;
+      }
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
     },

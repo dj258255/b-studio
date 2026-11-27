@@ -1,11 +1,12 @@
 import { execFile, execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, writeFile } from 'node:fs/promises';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { AGENT_HOOK_SCRIPT, AGENT_NOTIFICATION_MATCHER, applyPatchPaths, CODEX_HOOK_SCRIPT, CODEX_HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, HOOK_SCRIPT_NAME } from './docker/agent-terminal';
+import { COMMAND_CODE_MOD } from './commandcode-mod';
 import { SandboxError } from './errors';
 import {
   checkHostGatewayConfig,
@@ -17,6 +18,8 @@ import {
   firstPromptArg,
   findHostCli,
   findUnhookedCli,
+  findUnhookedCliByArgv,
+  hostCommandCodeWrapper,
   hookedLaunch,
   processEnv,
   hostBashRc,
@@ -1322,5 +1325,117 @@ describe('프로세스 환경 읽기와 새 갈래의 훅 판정(네이티브 �
     expect(hookedLaunch('commandcode', ['commandcode', '--mod', '/g/m.ts'], null, '/g/m.ts')).toBe(true);
     expect(hookedLaunch('claude', ['claude', '--mod', '/g/m.ts'], null, '/g/m.ts')).toBe(false);
     expect(hookedLaunch('unknown', ['x'], [], '/g/m.ts')).toBe(false);
+  });
+});
+
+describe('Command Code 터미널(실험, ADR-233)', () => {
+  const dir = '/gateway/studio-cc';
+  const mod = path.join(dir, 'b-studio-mod.ts');
+  const cli = { kind: 'commandcode' as const, cliPath: '/opt/cc/command-code/dist/index.mjs', nodePath: '/usr/bin/node' };
+
+  it('감싸개는 관문 폴더를 환경 변수로 알리고 `--mod <관문 폴더의 mod>`를 맨 앞에 붙여 사용자의 인자를 그대로 뒤에 넘긴다. 모델·권한 인자는 붙이지 않는다', () => {
+    const wrapper = hostCommandCodeWrapper(dir, cli);
+    expect(wrapper).toContain(`export B_STUDIO_GATEWAY_DIR=${shellQuote(dir)}`);
+    expect(wrapper).toContain(`exec ${shellQuote(cli.cliPath)} --mod ${shellQuote(mod)} "$@"`);
+    expect(wrapper).not.toMatch(/--model|-m |--yolo|--permission-mode|--dangerously|--skip|--trust/);
+    // 토큰은 감싸개에 없다
+    expect(wrapper).not.toContain('token');
+  });
+
+  it('관문 파일: mod·주소 파일·핑용 훅 스크립트·감싸개가 있고 권한이 맞다. settings.json·mcp.json은 두지 않는다. mod 글은 모듈의 상수와 같다', () => {
+    const files = expectedHostGatewayFiles(address, dir, cli);
+    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-hook.mjs', 'b-studio-mod.ts', 'bin/commandcode', 'shell/bashrc', 'shell/zsh/.zlogin', 'shell/zsh/.zprofile', 'shell/zsh/.zshenv', 'shell/zsh/.zshrc']);
+    expect(files['b-studio-mod.ts']).toEqual({ content: COMMAND_CODE_MOD, mode: 0o600 });
+    expect(files['bin/commandcode']!.mode).toBe(0o700);
+    expect(JSON.parse(files['b-studio-gateway.json']!.content)).toEqual({ url: address.hookUrl, token: address.hookToken });
+    // 토큰은 주소 파일에만 있다(mod·감싸개·셸 시작 파일에는 없다)
+    for (const [name, spec] of Object.entries(files)) if (name !== 'b-studio-gateway.json') expect(spec.content, name).not.toContain(address.hookToken);
+  });
+
+  it('셸 시작 파일은 `commandcode` 함수를 감싸개로 정의하고, 모델 변수가 없으면 모델 인자를 붙이지 않는다', () => {
+    const zshrc = hostZshFiles(dir, 'commandcode')['.zshrc'];
+    expect(zshrc).toContain(`function commandcode { ${shellQuote(path.join(dir, 'bin/commandcode'))} "$@"; }`);
+    const bash = hostBashRc(dir, 'commandcode');
+    expect(bash).toContain('function commandcode');
+    // 모델 변수는 있을 때만 붙는 꼴이다(commandcode 세션은 모델을 넘기지 않으므로 값이 없다)
+    expect(bash).toContain('commandcode ${BSTUDIO_CLI_MODEL_VALUE:+"--model=$BSTUDIO_CLI_MODEL_VALUE"}');
+  });
+
+  it('openHostTerminal은 commandcode에 모델이 오면 거절한다(기본 모델로만 띄운다)', async () => {
+    const pty: HostPty = { pid: 1, write: () => {}, resize: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} };
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'commandcode', model: 'deepseek/x', spawnPty: () => pty })).rejects.toThrow('모델을 고르지 않습니다');
+    // 대조: 모델이 없으면 열린다
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'commandcode', spawnPty: () => pty })).resolves.toBeDefined();
+    // 같은 모델을 claude에는 넘길 수 있다(막는 것은 commandcode뿐이다)
+    await expect(openHostTerminal({ id: 'main', size: { cols: 80, rows: 24 }, cwd: '/w', gatewayDir: dir, cli: 'claude', model: 'sonnet', spawnPty: () => pty })).resolves.toBeDefined();
+  });
+
+  it('findHostCli: B_STUDIO_COMMANDCODE_BIN 또는 PATH에서 찾고, 링크는 풀어 진짜 파일 경로로 띄운다(감시가 패키지 자리로 CLI를 알아본다)', async () => {
+    const root = await tempDir('b-studio-cc-bin-');
+    const real = path.join(root, 'lib/node_modules/command-code/dist/index.mjs');
+    await mkdir(path.dirname(real), { recursive: true });
+    await writeFile(real, '#!/usr/bin/env node\n');
+    await chmod(real, 0o755);
+    await mkdir(path.join(root, 'bin'));
+    const link = path.join(root, 'bin/commandcode');
+    await symlink(real, link);
+    const viaPath = await findHostCli({ PATH: path.join(root, 'bin') }, 'commandcode');
+    expect(viaPath.cliPath).toBe(await realpath(real));
+    expect(viaPath.cliPath).toContain('/command-code/dist/');
+    expect((await findHostCli({ B_STUDIO_COMMANDCODE_BIN: link, PATH: '/nonexistent' }, 'commandcode')).cliPath).toBe(await realpath(real));
+    // 링크가 아닌 경로는 그대로다
+    expect((await findHostCli({ B_STUDIO_COMMANDCODE_BIN: '/opt/tools/commandcode', PATH: '/nonexistent' }, 'commandcode')).cliPath).toBe('/opt/tools/commandcode');
+    await expect(findHostCli({ PATH: '/nonexistent' }, 'commandcode')).rejects.toThrow('commandcode');
+  });
+
+  it('감싸개를 진짜 셸로 돌리면 `--mod`가 맨 앞에 붙고, 환경에 관문 폴더가 있으며, 사용자의 인자와 첫 요청은 그대로 뒤에 간다', async () => {
+    const root = await tempDir('b-studio-cc-wrap-');
+    const gateway = path.join(root, 'gw');
+    await mkdir(path.join(gateway, 'bin'), { recursive: true });
+    const fake = path.join(root, 'fake-cc.sh');
+    await writeFile(fake, '#!/bin/sh\nprintf "%s\\n" "GW=$B_STUDIO_GATEWAY_DIR"\nfor a in "$@"; do printf "ARG=%s\\n" "$a"; done\n');
+    await chmod(fake, 0o755);
+    const wrapper = path.join(gateway, 'bin/commandcode');
+    await writeFile(wrapper, hostCommandCodeWrapper(gateway, { cliPath: fake }));
+    await chmod(wrapper, 0o755);
+    const stdout = await new Promise<string>((resolve, reject) =>
+      execFile(wrapper, ['--resume', '요청 글 "따옴표" $HOME'], { env: { PATH: process.env.PATH ?? '' }, encoding: 'utf8', timeout: 20_000 }, (error, out) => (error ? reject(error) : resolve(out))),
+    );
+    expect(stdout.trim().split('\n')).toEqual([`GW=${gateway}`, `ARG=--mod`, `ARG=${path.join(gateway, 'b-studio-mod.ts')}`, 'ARG=--resume', 'ARG=요청 글 "따옴표" $HOME']);
+  });
+
+  describe('감시: 훅이 붙지 않은 commandcode를 잡는다(진짜 argv로 본다)', () => {
+    const script = '/opt/cc/lib/node_modules/command-code/dist/index.mjs';
+    const processes = (args: string) => [
+      { pid: 100, ppid: 1, args: '/bin/zsh -l -i' },
+      { pid: 101, ppid: 100, args },
+    ];
+    const expected = { settingsPath: path.join(dir, 'settings.json'), cliPath: script, kind: 'commandcode' as const };
+    const found = (argv: string[]) => findUnhookedCliByArgv(100, processes(argv.join(' ')), expected, () => argv)?.map((entry) => entry.pid);
+
+    it('감싸개가 붙인 정확한 꼴(`node <패키지 스크립트> --mod <우리 mod> …`, 또는 `commandcode --mod <우리 mod>`)은 붙은 것이다', () => {
+      expect(found(['node', script, '--mod', mod, '요청'])).toEqual([]);
+      expect(found(['/usr/local/bin/commandcode', '--mod', mod])).toEqual([]);
+    });
+
+    it('mod 없이 뜬 것, --safe-mode, 다른 mod 파일, 두 번째 --mod, --mod=값, 자리가 다른 --mod는 붙지 않은 것이다', () => {
+      expect(found(['node', script])).toEqual([101]);
+      expect(found(['node', script, '--safe-mode', '--mod', mod])).toEqual([101]);
+      expect(found(['node', script, '--mod', mod, '--safe-mode'])).toEqual([101]);
+      expect(found(['node', script, '--mod', '/tmp/evil.ts'])).toEqual([101]);
+      expect(found(['node', script, '--mod', mod, '--mod', '/tmp/evil.ts'])).toEqual([101]);
+      expect(found(['node', script, `--mod=${mod}`])).toEqual([101]);
+      expect(found(['node', script, '--model', 'x', '--mod', mod])).toEqual([101]);
+      expect(found(['node', script, '--mod', `${mod}/`])).toEqual([101]);
+    });
+
+    it('argv를 읽지 못하면 던진다(통과로 읽지 않는다). 끝난 프로세스(null)는 건너뛴다', () => {
+      expect(() => findUnhookedCliByArgv(100, processes(`node ${script}`), expected, () => { throw new Error('권한 없음'); })).toThrow('권한 없음');
+      expect(findUnhookedCliByArgv(100, processes(`node ${script}`), expected, () => null)).toEqual([]);
+    });
+
+    it('commandcode가 아닌 프로세스는 후보가 아니다', () => {
+      expect(findUnhookedCliByArgv(100, [{ pid: 100, ppid: 1, args: 'zsh' }, { pid: 102, ppid: 100, args: 'vim a.ts' }], expected, () => ['vim'])).toEqual([]);
+    });
   });
 });

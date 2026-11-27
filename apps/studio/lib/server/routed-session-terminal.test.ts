@@ -149,6 +149,24 @@ describe('startRoutedSession — 터미널로(#836)', () => {
     expect(container.routing.skipped.map((skip) => skip.backend)).toEqual(['commandcode', 'codex']);
   });
 
+  it('Command Code는 실험 스위치가 켜진 이 컴퓨터 방식에서만 터미널 세션으로 만든다. 꺼져 있거나 컨테이너 방식이면 400', async () => {
+    const before = process.env.B_STUDIO_EXPERIMENTAL;
+    try {
+      delete process.env.B_STUDIO_EXPERIMENTAL;
+      await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal().deps)).rejects.toMatchObject({ status: 400 });
+      process.env.B_STUDIO_EXPERIMENTAL = '1';
+      await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal({ mode: 'container' }).deps)).rejects.toMatchObject({ status: 400 });
+      const made = fake.created.length;
+      const host = await startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal({ startAfter: 1 }).deps);
+      expect(host.routing.backend).toBe('commandcode');
+      expect(fake.created.length).toBe(made + 1);
+      expect(fake.created.at(-1)?.options.backend).toBe('commandcode');
+    } finally {
+      if (before === undefined) delete process.env.B_STUDIO_EXPERIMENTAL;
+      else process.env.B_STUDIO_EXPERIMENTAL = before;
+    }
+  });
+
   it('직접 고른 AI가 터미널에서 띄울 수 없으면 400, 세션을 만들지 않는다', async () => {
     await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal().deps)).rejects.toMatchObject({ status: 400 });
     await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'codex' } }, terminal({ mode: 'container' }).deps)).rejects.toMatchObject({ status: 400 });
