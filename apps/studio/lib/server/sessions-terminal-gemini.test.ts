@@ -214,7 +214,8 @@ async function launchCli(session: Opened, override?: (real: { url: string; token
     gateway,
     cwd,
     hook: async (event, input) => {
-      const child = spawn(process.execPath, [path.join(dir, GEMINI_HOOK_NAME), event], { env: { PATH: process.env.PATH ?? '' }, stdio: ['pipe', 'pipe', 'pipe'] });
+      // 감싸개가 남기는 환경 이름 기준과 설정의 훅 명령이 넘기는 이름 목록(진짜 감싸개처럼). 없으면 훅이 막는다
+      const child = spawn(process.execPath, [path.join(dir, GEMINI_HOOK_NAME), event], { env: { PATH: process.env.PATH ?? '', B_STUDIO_ENV_NAMES: 'PATH', B_STUDIO_ENV_BASELINE: 'PATH' }, stdio: ['pipe', 'pipe', 'pipe'] });
       let stdout = '';
       child.stdout.on('data', (part: Buffer) => (stdout += part.toString('utf8')));
       child.stdin.end(JSON.stringify({ session_id: 'gm-1', transcript_path: '', cwd, timestamp: new Date().toISOString(), ...input }));

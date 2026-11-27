@@ -89,7 +89,8 @@ describe('훅은 codex가 늘 읽는 관리 요구사항으로 붙는다(직접 
     expect(hostArgs).toHaveLength(6);
     for (const arg of hostArgs) {
       const event = /^hooks\.(\w+)=/.exec(arg)![1]!;
-      const command = JSON.parse(/command=("(?:[^"\\]|\\.)*")/.exec(arg)![1]!) as string;
+      // 이 컴퓨터 방식의 명령은 세션의 관문 폴더 변수를 넘기고, 컨테이너의 명령은 옆의 주소 파일을 읽어 넘기지 않는다. 그 밖에는 같다
+      const command = (JSON.parse(/command=("(?:[^"\\]|\\.)*")/.exec(arg)![1]!) as string).replace('B_STUDIO_GATEWAY_DIR="$B_STUDIO_GATEWAY_DIR" ', '');
       const timeout = /timeout=(\d+)/.exec(arg)![1]!;
       expect(requirements, event).toContain(`[[hooks.${event}]]`);
       expect(requirements, event).toContain(`command = ${JSON.stringify(command)}\ntimeout = ${timeout}`);
@@ -106,7 +107,7 @@ describe('훅은 codex가 늘 읽는 관리 요구사항으로 붙는다(직접 
   it('훅 명령은 이미지의 node와 읽기 전용 관문 마운트의 스크립트만 가리킨다(홈·작업 폴더·tmp가 아니다)', () => {
     const commands = [...requirements.matchAll(/^command = (".*")$/gm)].map((match) => JSON.parse(match[1]!) as string);
     expect(commands).toHaveLength(6);
-    for (const command of commands) expect(command.startsWith(`'${AGENT_NODE}' '${AGENT_GATEWAY_TARGET}/${CODEX_HOOK_SCRIPT_NAME}' `), command).toBe(true);
+    for (const command of commands) expect(command.startsWith(`'/usr/bin/env' -i '${AGENT_NODE}' '${AGENT_GATEWAY_TARGET}/${CODEX_HOOK_SCRIPT_NAME}' `), command).toBe(true);
   });
 
   it('요구사항에는 토큰·주소가 없다(훅 스크립트가 옆의 주소 파일에서 읽는다)', () => {

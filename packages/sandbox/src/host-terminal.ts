@@ -4,6 +4,8 @@ import path from 'node:path';
 import { native } from './native';
 import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
 import { GEMINI_CODE_LOAD_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
+import { OPENCODE_ENV_BASELINE_ENV, OPENCODE_UNSET_ENVS } from './opencode-envs';
+import { STARTUP_CHECK, STARTUP_CHECK_NAME } from './startup-check';
 import { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
 import { openCodeConfigContent } from './opencode-config';
 import { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
@@ -45,6 +47,8 @@ import { execChecked } from './exec-checked';
 /** 이 컴퓨터의 CLI가 b-studio의 훅 서버·도구 서버를 부르는 주소의 호스트 */
 export const HOST_GATEWAY_HOST = '127.0.0.1';
 export { STATUSLINE_FILE };
+/** 훅 명령을 빈 환경으로 띄우는 `env`의 절대 경로(macOS·Linux 공통. 이 컴퓨터 방식 터미널은 Windows를 지원하지 않는다) */
+const HOOK_ENV_BIN = '/usr/bin/env';
 const SETTINGS_FILE = 'settings.json';
 const MCP_FILE = 'mcp.json';
 const WRAPPER_DIR = 'bin';
@@ -234,8 +238,12 @@ function tomlString(value: string): string {
  * 글이 바뀌면 다시 검토하라고 묻는다(0.160.1에서 실측). 그래서 세션의 관문 폴더가 아니라 관문 루트의 스크립트를 가리키고,
  * 세션의 관문 폴더는 감싸개가 환경 변수로 넘긴다
  */
-export function codexHookCommand(root: string, nodePath: string, event: AgentHookEvent): string {
-  return `${shellQuote(nodePath)} ${shellQuote(path.join(root, CODEX_HOOK_SCRIPT_NAME))} ${event}`;
+export function codexHookCommand(root: string, nodePath: string, event: AgentHookEvent, options: { gatewayDirEnv?: boolean } = {}): string {
+  // 컨테이너 방식(`gatewayDirEnv: false`)의 훅 스크립트는 자기 옆의 주소 파일을 읽어 환경 변수가 필요 없다: 감싸개 없이 이미지의 codex를 직접 불러도 같은 명령이 돈다(ADR-245)
+  const gatewayDir = options.gatewayDirEnv === false ? '' : `${CODEX_GATEWAY_DIR_ENV}="$${CODEX_GATEWAY_DIR_ENV}" `;
+  // 빈 환경(`env -i`)에서 절대 경로의 node로 띄운다(#1475): Codex의 환경(사용자의 셸이 정한 `NODE_OPTIONS` 등)이 훅 안에서 코드를 돌리지 못한다.
+  // 훅 스크립트가 환경에서 읽는 것은 세션의 관문 폴더 하나뿐이라 그것만 셸이 풀어 넘긴다(글은 세션과 무관하게 같다). Codex는 훅을 `$SHELL -lc`로 돌린다(0.160.1 바이너리의 command_runner)
+  return `${shellQuote(HOOK_ENV_BIN)} -i ${gatewayDir}${shellQuote(nodePath)} ${shellQuote(path.join(root, CODEX_HOOK_SCRIPT_NAME))} ${event}`;
 }
 
 /**
@@ -346,7 +354,7 @@ export function geminiHomePath(dir: string): string {
  * 사용자가 준 인자는 그대로 뒤에 붙인다. 모델 고르기(`-m`·`--model`)와 권한을 건너뛰는 인자(`--yolo`·`--approval-mode`)는 붙이지 않는다: 기본 모델로 뜨고, 권한 확인은 사람이 답한다.
  * `B_STUDIO_GEMINI_USER_HOME`은 진짜 홈을 기억한다(감싸개를 안쪽에서 다시 불러도 우리 홈을 진짜 홈으로 읽지 않게)
  */
-export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
+export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
   const q = shellQuote;
   return [
     '#!/bin/sh',
@@ -374,6 +382,8 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
     `unset ${GEMINI_CODE_LOAD_ENVS.join(' ')}`,
     'for v in $(env | sed -n "s/^\\(DYLD_[A-Za-z0-9_]*\\)=.*/\\1/p"); do unset "$v"; done',
     'export GEMINI_CLI_HOME="$home"',
+    ...envBaselineLines(),
+    ...startupCheckLines(dir, cli.nodePath, 'gemini'),
     `exec ${q(cli.cliPath)} "$@"`,
     '',
   ].join('\n');
@@ -382,20 +392,49 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
 /**
  * OpenCode 감싸개(ADR-241, 실험). 세션의 관문 폴더를 환경 변수로 알리고 `OPENCODE_CONFIG`로 우리 설정 파일(`<관문 폴더>/opencode.json`, 플러그인 하나)을 붙여 CLI를 부른다.
  * 사용자가 준 인자는 그대로 뒤에 붙인다. 모델 고르기(`-m`·`--model`)와 권한을 건너뛰는 인자는 붙이지 않는다: 기본 모델로 뜨고, 권한 확인은 사람이 답한다.
- * 설정을 바꾸는 환경 변수는 먼저 지운다: `OPENCODE_CONFIG_CONTENT`(마지막에 합쳐지는 설정)·`OPENCODE_CONFIG_DIR`(폴더의 plugins를 자동으로 불러온다)·`OPENCODE_TUI_CONFIG`·`OPENCODE_PURE`(외부 플러그인을 모두 끈다).
+ * 설정·플러그인·권한·홈을 바꾸는 환경 변수는 먼저 지운다(`OPENCODE_UNSET_ENVS`): `OPENCODE_CONFIG_CONTENT`(마지막에 합쳐지는 설정)·`OPENCODE_CONFIG_DIR`(폴더의 plugins를 자동으로 불러온다)·`OPENCODE_TUI_CONFIG`·`OPENCODE_PURE`(외부 플러그인을 모두 끈다)와 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`(#1475).
  * 감시가 이 환경(`OPENCODE_CONFIG`가 우리 파일이고 위 변수가 없음)과 `--pure` 인자 없음을 본다. 토큰은 여기 없다. 플러그인이 관문 폴더의 주소 파일에서 읽는다
  */
 export function openCodeConfigPath(dir: string): string {
   return path.join(dir, OPENCODE_CONFIG_NAME);
 }
 
-export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): string {
+/**
+ * 띄우기 직전의 환경 **이름** 목록을 환경 변수(`B_STUDIO_ENV_BASELINE`)에 담는다(값은 담지 않는다). CLI 프로세스 안(OpenCode의 플러그인, Gemini의 훅)이 "그 뒤에 새로 생긴" 위험 이름
+ * (CLI가 시작할 때 작업 폴더의 `.env`에서 넣은 것)을 가리는 기준이다. 값에 줄바꿈이 있으면 `이름=` 꼴의 줄이 가짜 이름으로 들어갈 수 있으나, 그 값을 정하는 것은 이미 셸 환경을 쥔 쪽이다
+ */
+function envBaselineLines(): string[] {
+  return [
+    `${OPENCODE_ENV_BASELINE_ENV}="$(env | sed -n 's/^\\([A-Za-z_][A-Za-z0-9_]*\\)=.*/\\1/p' | tr '\\n' ' ')"`,
+    `export ${OPENCODE_ENV_BASELINE_ENV}`,
+  ];
+}
+
+/**
+ * 감싸개가 `exec` 직전에 부르는 시작 파일 검사(#1475). 열린 셸에서 CLI를 다시 띄우면 띄우기 전 검사가 돌지 않으므로 같은 판정(`startup-check.ts`)을 관문 폴더의 스크립트로 다시 돌린다.
+ * 빈 환경에서 절대 경로의 node로 부르고, 0이 아니면 띄우지 않는다. 스크립트가 거절하면 종료 코드 2와 이유를 내고, node·env가 없거나 스크립트가 죽거나 없으면 다른 종료 코드라
+ * 아래의 일반 문구를 찍는다(fail-closed). 거치지 않고 진짜 바이너리를 바로 부르는 길은 이 검사 몫이 아니라 감시(`hooked_launch`)의 몫이다
+ */
+function startupCheckLines(dir: string, nodePath: string, cli: 'opencode' | 'gemini'): string[] {
+  const q = shellQuote;
+  return [
+    `${q(HOOK_ENV_BIN)} -i ${q(nodePath)} ${q(path.join(dir, STARTUP_CHECK_NAME))} ${cli} "$(pwd -P)" || {`,
+    `  [ "$?" -eq 2 ] || printf '%s\\n' '[b-studio] 시작 파일 검사를 하지 못해 ${cli}을(를) 띄우지 않았습니다' >&2`,
+    '  exit 1',
+    '}',
+  ];
+}
+
+export { OPENCODE_UNSET_ENVS };
+export function hostOpenCodeWrapper(dir: string, cli: Pick<HostCli, 'cliPath' | 'nodePath'>): string {
   return [
     '#!/bin/sh',
     '# b-studio가 만든 파일입니다. 고쳐도 다음에 터미널을 열 때 다시 쓰입니다.',
     `export ${OPENCODE_GATEWAY_DIR_ENV}=${shellQuote(dir)}`,
-    'unset OPENCODE_CONFIG_CONTENT OPENCODE_CONFIG_DIR OPENCODE_TUI_CONFIG OPENCODE_PURE',
+    `unset ${OPENCODE_UNSET_ENVS.join(' ')}`,
     `export OPENCODE_CONFIG=${shellQuote(openCodeConfigPath(dir))}`,
+    ...envBaselineLines(),
+    ...startupCheckLines(dir, cli.nodePath, 'opencode'),
     `exec ${shellQuote(cli.cliPath)} "$@"`,
     '',
   ].join('\n');
@@ -491,6 +530,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     return {
       // 훅은 설정이 부르는 명령 파일이다. 감싸개가 설정을 홈으로 복사한다. 훅 스크립트(Claude의 것)는 터미널을 열기 전에 관문에 닿는지 묻는 데만 쓴다(probeHostGateway)
       [GEMINI_HOOK_NAME]: file(GEMINI_HOOK),
+      [STARTUP_CHECK_NAME]: file(STARTUP_CHECK),
       [GEMINI_SETTINGS_NAME]: file(geminiSettingsContent(dir, cli.nodePath, cli.geminiAuthType)),
       [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
       [GATEWAY_FILE_NAME]: addressFile,
@@ -502,6 +542,7 @@ export function expectedHostGatewayFiles(address: AgentGatewayAddress, dir: stri
     return {
       // 훅은 플러그인 파일이 부른다. 훅 스크립트는 터미널을 열기 전에 관문에 닿는지 묻는 데만 쓴다(probeHostGateway)
       [OPENCODE_PLUGIN_NAME]: file(OPENCODE_PLUGIN),
+      [STARTUP_CHECK_NAME]: file(STARTUP_CHECK),
       [OPENCODE_CONFIG_NAME]: file(openCodeConfigContent(dir)),
       [HOOK_SCRIPT_NAME]: file(AGENT_HOOK_SCRIPT),
       [GATEWAY_FILE_NAME]: addressFile,

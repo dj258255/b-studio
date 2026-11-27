@@ -273,7 +273,7 @@ import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { settleDraftStops } from './session-terminal-draft';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixBlockReason, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixBlockReason, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, startupCheckAnswer, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
 import { terminalPasteText } from '../terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -10548,6 +10548,7 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       await terminalTelemetry(id, body);
     },
     conversation: (conversation) => noteTerminalConversation(id, conversation),
+    startupCheck: (input) => startupCheckAnswer(terminalSession(id).snapshot.workDir, input),
     toolSpecs: () => {
       const session = terminalSession(id);
       return [...gatewayToolSpecs(session.project), ...(session.terminalBoard?.specs ?? [])] as ReturnType<typeof gatewayToolSpecs>;

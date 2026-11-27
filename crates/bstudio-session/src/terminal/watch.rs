@@ -152,7 +152,7 @@ pub fn hooked(args: &str, marker: &str, kind: CliKind) -> bool {
 /// 새 갈래(Command Code·OpenCode·Gemini)가 우리 설정으로 떴는가. **여는 쪽(허용 목록)이라 좁게 맞춘다. 모르는 것은 붙지 않은 것이다**:
 /// - Command Code: 감싸개가 `<cli> --mod <M>`으로 부른다. `--mod`는 argv의 1번 자리(node가 띄운 꼴은 `/command-code/dist/`가 든 스크립트 뒤의 2번 자리)에 정확히 하나, 값은 `expected`와 **같은 글**이어야 하고
 ///   `--mod=…`·두 번째 `--mod`(뒤가 앞을 덮을 수 있다)·`--safe-mode`가 있으면 붙지 않았다
-/// - OpenCode: 환경의 `OPENCODE_CONFIG`가 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), `OPENCODE_PURE`와 플러그인을 더하는 변수(`OPENCODE_CONFIG_CONTENT`·`OPENCODE_CONFIG_DIR`·`OPENCODE_TUI_CONFIG`)가 없고(값이 비었어도 있으면 안 된다),
+/// - OpenCode: 환경의 `OPENCODE_CONFIG`가 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), `OPENCODE_PURE`와 설정·플러그인·권한·홈을 바꾸는 변수(`OPENCODE_PLUGIN_ENVS` 일곱)가 없고(값이 비었어도 있으면 안 된다),
 ///   argv에 `--pure`가 없고 첫 위치 인자가 `attach`(다른 서버에 붙는 클라이언트)가 아니다. 환경을 읽지 못했으면(`None`) 붙지 않았다
 /// - Gemini: 환경의 `GEMINI_CLI_HOME`(관문 폴더 안의 홈)이 `expected`와 같은 글이고(같은 이름이 여럿이면 모두), 시스템 설정 자리·믿음을 정하는 변수가 없고, 샌드박스 인자가 없다. 환경을 읽지 못했으면 붙지 않았다
 ///   (시스템 설정은 root 소유여야 읽혀서 사용자 폴더의 파일로는 훅을 붙일 수 없다 — ADR-242)
@@ -182,8 +182,8 @@ pub fn hooked_launch(kind: CliKind, argv: &[String], env: Option<&[(String, Stri
             if env.iter().any(|(name, _)| name == "OPENCODE_PURE") {
                 return false;
             }
-            // 설정을 더하는 환경 변수: 마지막에 합쳐지는 설정(`OPENCODE_CONFIG_CONTENT`)·자동으로 불러오는 폴더(`OPENCODE_CONFIG_DIR`)·TUI 설정(`OPENCODE_TUI_CONFIG`)이
-            // 하나라도 있으면(값이 비었어도) 우리 플러그인 말고 다른 플러그인이 붙을 수 있다. 감싸개는 이 변수들을 지우고 띄운다
+            // 설정·플러그인·권한·홈을 바꾸는 환경 변수(`OPENCODE_PLUGIN_ENVS`)가 하나라도 있으면(값이 비었어도) 우리 플러그인 말고 다른 플러그인이 붙거나
+            // 권한·관리형 설정이 달라질 수 있다. 감싸개는 이 변수들을 지우고 띄운다
             if env.iter().any(|(name, _)| OPENCODE_PLUGIN_ENVS.contains(&name.as_str())) {
                 return false;
             }
@@ -281,8 +281,21 @@ fn gemini_args_allowed(argv: &[String]) -> bool {
     true
 }
 
-/// OpenCode의 설정에 플러그인을 더할 수 있는 환경 변수. 하나라도 있으면 붙지 않은 것이다
-const OPENCODE_PLUGIN_ENVS: [&str; 3] = ["OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG"];
+/// OpenCode의 설정·플러그인·권한·홈을 바꾸는 환경 변수(`OPENCODE_PURE`는 따로 본다). 하나라도 있으면(값이 비었어도) 붙지 않은 것이다. 거부 목록이라 넓게 잡는다.
+/// 근거는 1.18.33 바이너리의 평문 JS: `OPENCODE_CONFIG_CONTENT`(마지막에 합쳐지는 설정)·`OPENCODE_CONFIG_DIR`(폴더의 `opencode.json(c)`와 plugins)·`OPENCODE_TUI_CONFIG`,
+/// `OPENCODE_TEST_MANAGED_CONFIG_DIR`(관리형 설정 폴더 `m0()` — 그 안의 `opencode.json(c)`가 마지막에 합쳐져 `plugin`·`permission`을 더한다),
+/// `OPENCODE_TEST_HOME`(`Global.Path.home` — 거기서 위로 찾는 `.opencode` 폴더의 설정과 plugins), `OPENCODE_PERMISSION`(JSON이 `permission`에 합쳐진다),
+/// `OPENCODE_DISABLE_DEFAULT_PLUGINS`(내장 플러그인을 건너뛴다. 설정의 플러그인(우리 것)은 따로 불러와 직접 영향은 없지만 플러그인 구성이 달라진다).
+/// 감싸개가 지우는 목록(`OPENCODE_UNSET_ENVS`)과 같아야 한다(TS 시험이 두 목록을 견준다)
+const OPENCODE_PLUGIN_ENVS: [&str; 7] = [
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_TUI_CONFIG",
+    "OPENCODE_TEST_MANAGED_CONFIG_DIR",
+    "OPENCODE_TEST_HOME",
+    "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+    "OPENCODE_PERMISSION",
+];
 /// OpenCode 1.18.33의 하위 명령 이름과 별칭(yargs 정의에서 읽은 것). 위치 인자가 이 이름이면 에이전트 TUI가 아니다
 const OPENCODE_SUBCOMMANDS: [&str; 46] = [
     "acp", "attach", "run", "serve", "web", "mcp", "plugin", "plug", "providers", "auth", "models", "export", "import", "github", "pr", "session", "stats", "db", "debug", "agent", "upgrade",

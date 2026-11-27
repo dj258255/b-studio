@@ -76,8 +76,8 @@ describe('관문 훅 답: 옛 TS가 낸 값과 키 순서까지 같다', () => {
         }
       }
     }
-    // 경로 표의 이름과 순서
-    expect(Object.keys(terminalHookRoutes(handlers({})))).toEqual(OLD.get('route names'));
+    // 경로 표의 이름과 순서. 고정한 벡터 뒤에 감싸개의 exec 직전 검사 경로(`/startup-check`, #1475)가 더해졌다(옛 TS에는 없던 경로라 판정 벡터에는 없다)
+    expect(Object.keys(terminalHookRoutes(handlers({})))).toEqual([...(OLD.get('route names') as string[]), '/startup-check']);
     expect(compared).toBe(outcomeSets.length * ROUTES.length * META.length);
   });
 

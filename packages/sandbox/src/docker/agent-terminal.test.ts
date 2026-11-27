@@ -257,16 +257,16 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     ]);
     const command = (name: string) => settings.hooks[name]![0]!.hooks[0]!;
     // node는 이름이 아니라 자리로 부른다. 터미널의 PATH 앞쪽(홈 폴더)에 같은 이름을 두어 훅을 바꿔치기하지 못한다
-    expect(command('UserPromptSubmit').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs prompt');
-    expect(command('Stop').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop');
-    expect(command('SessionStart').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-start');
-    expect(command('SessionEnd').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-end');
+    expect(command('UserPromptSubmit').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs prompt');
+    expect(command('Stop').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop');
+    expect(command('SessionStart').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-start');
+    expect(command('SessionEnd').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs session-end');
     // 사용 한도 같은 API 오류로 턴이 끝나면 CLI는 Stop 대신 이 훅을 부른다(#1284). 빠지면 실행이 열린 채 남는다. 답을 읽지 않는 훅이다
-    expect(command('StopFailure').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop-failure');
+    expect(command('StopFailure').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs stop-failure');
     expect(command('StopFailure').timeout).toBe(AGENT_HOOK_EVENTS['stop-failure']);
-    expect(command('PreToolUse').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs pre-tool');
+    expect(command('PreToolUse').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs pre-tool');
     // B7: 사람을 기다리는 창(권한 확인·되묻기·입력 필요·입력 대기)에서 알림 훅이 온다
-    expect(command('Notification').command).toBe('/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification');
+    expect(command('Notification').command).toBe('/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification');
     expect(settings.hooks.Notification![0]!.matcher).toBe(AGENT_NOTIFICATION_MATCHER);
     expect(AGENT_NOTIFICATION_MATCHER).toBe('permission_prompt|elicitation_dialog|agent_needs_input|idle_prompt');
     for (const kind of ['permission_prompt', 'elicitation_dialog', 'agent_needs_input', 'idle_prompt']) expect(new RegExp(AGENT_NOTIFICATION_MATCHER).test(kind), kind).toBe(true);
@@ -286,7 +286,7 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
 
   it('지켜보기만 하는 훅(#920)은 따로 돌아 CLI를 기다리게 하지 않는다: 읽기 도구의 쓰기 직전, 도구의 끝, 서브에이전트, 할 일, 권한 확인 창', () => {
     const settings = agentManagedSettings(address) as { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ type: string; command: string; timeout: number; async?: boolean }> }>> };
-    const observe = '/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs activity';
+    const observe = '/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs activity';
     for (const name of ['PostToolUse', 'PostToolUseFailure', 'SubagentStart', 'SubagentStop', 'TaskCreated', 'TaskCompleted']) {
       expect(settings.hooks[name], name).toEqual([{ hooks: [{ type: 'command', command: observe, timeout: AGENT_HOOK_EVENTS.activity, async: true }] }]);
     }
@@ -301,13 +301,13 @@ describe('관문 설정 (이슈 #673 2단계)', () => {
     }
     for (const tool of ['Bash', 'Write', 'XRead', 'ReadAndWrite']) expect(new RegExp(read!.matcher!).test(tool), tool).toBe(false);
     // 권한 확인 창은 Notification(몇 초 늦게 온다)보다 먼저 알리는 PermissionRequest로도 받는다. 답은 주지 않는다
-    expect(settings.hooks.PermissionRequest).toEqual([{ hooks: [{ type: 'command', command: '/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification', timeout: AGENT_HOOK_EVENTS.notification, async: true }] }]);
+    expect(settings.hooks.PermissionRequest).toEqual([{ hooks: [{ type: 'command', command: '/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs notification', timeout: AGENT_HOOK_EVENTS.notification, async: true }] }]);
     expect(AGENT_HOOK_EVENTS.activity).toBeLessThanOrEqual(10);
   });
 
   it('상태 줄(statusLine)은 훅 스크립트를 부른다. 문맥 창을 관문에 알리고 사용자의 원래 상태 줄을 이어 부른다(#920)', () => {
     const settings = agentManagedSettings(address) as { statusLine: { type: string; command: string } };
-    expect(settings.statusLine).toEqual({ type: 'command', command: '/usr/local/bin/node /etc/claude-code/b-studio-hook.mjs statusline' });
+    expect(settings.statusLine).toEqual({ type: 'command', command: '/usr/bin/env -i /usr/local/bin/node /etc/claude-code/b-studio-hook.mjs statusline' });
   });
 
   it('관리 설정의 env가 CLI의 텔레메트리를 관문으로 보내게 한다(요청 글·도구 내용을 싣는 설정은 켜지 않는다)', () => {

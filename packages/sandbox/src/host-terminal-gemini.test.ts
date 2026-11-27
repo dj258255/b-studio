@@ -1,3 +1,4 @@
+import { STARTUP_CHECK_NAME } from './startup-check';
 import { execFile } from 'node:child_process';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -41,7 +42,7 @@ const cli = { kind: 'gemini' as const, cliPath: '/opt/gm/lib/node_modules/@googl
 describe('Gemini 관문 파일', () => {
   it('훅 파일·설정·핑용 훅 스크립트·주소 파일·감싸개가 있고 권한이 맞다. 토큰은 주소 파일에만 있다', () => {
     const files = expectedHostGatewayFiles(address, dir, cli);
-    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-gemini-hook.mjs', 'b-studio-hook.mjs', 'bin/gemini', 'gemini-settings.json', 'shell/bashrc', 'shell/zsh/.zlogin', 'shell/zsh/.zprofile', 'shell/zsh/.zshenv', 'shell/zsh/.zshrc']);
+    expect(Object.keys(files).sort()).toEqual(['b-studio-gateway.json', 'b-studio-gemini-hook.mjs', 'b-studio-hook.mjs', 'b-studio-startup-check.mjs', 'bin/gemini', 'gemini-settings.json', 'shell/bashrc', 'shell/zsh/.zlogin', 'shell/zsh/.zprofile', 'shell/zsh/.zshenv', 'shell/zsh/.zshrc']);
     expect(files[GEMINI_HOOK_NAME]).toEqual({ content: GEMINI_HOOK, mode: 0o600 });
     expect(files[GEMINI_SETTINGS_NAME]).toEqual({ content: geminiSettingsContent(dir, cli.nodePath), mode: 0o600 });
     expect(files['bin/gemini']!.mode).toBe(0o700);
@@ -59,8 +60,8 @@ describe('Gemini 관문 파일', () => {
       const hook = definitions[0]!.hooks[0]!;
       expect(hook.type).toBe('command');
       expect(hook.command).toContain(shellQuote(path.join(dir, GEMINI_HOOK_NAME)));
-      // 빈 환경으로 절대 경로의 node를 띄운다
-      expect(hook.command.startsWith(`${shellQuote('/usr/bin/env')} -i ${shellQuote(cli.nodePath)} `)).toBe(true);
+      // 빈 환경으로 절대 경로의 node를 띄운다. 넘기는 것은 환경 이름 목록 둘뿐이다(CLI 프로세스 안의 환경 확인, 값이 아니라 이름)
+      expect(hook.command.startsWith(`${shellQuote('/usr/bin/env')} -i B_STUDIO_ENV_NAMES="$(compgen -e | tr '\\n' ' ')" B_STUDIO_ENV_BASELINE="$B_STUDIO_ENV_BASELINE" ${shellQuote(cli.nodePath)} `)).toBe(true);
     }
     expect(settings.hooks.BeforeTool![0]!.hooks[0]).toMatchObject({ timeout: 1_800_000, command: expect.stringContaining('pre-tool || {') });
     expect(settings.hooks.BeforeAgent![0]!.hooks[0]!.command).toContain('prompt || {');
@@ -111,7 +112,8 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
     );
     await chmod(fake, 0o755);
     const wrapper = path.join(gateway, 'bin/gemini');
-    await writeFile(wrapper, hostGeminiWrapper(gateway, { cliPath: fake }));
+    await writeFile(path.join(gateway, STARTUP_CHECK_NAME), 'process.exit(0);\n'); // 검사 자체는 startup-check.test.ts가 본다
+    await writeFile(wrapper, hostGeminiWrapper(gateway, { cliPath: fake, nodePath: process.execPath }));
     await chmod(wrapper, 0o755);
     await writeFile(path.join(gateway, GEMINI_SETTINGS_NAME), geminiSettingsContent(gateway, cli.nodePath));
     return { root, gateway, real, wrapper, fake };
@@ -134,18 +136,18 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
       'ARG=요청 글 "따옴표" $HOME',
     ]);
     expect(await readFile(path.join(geminiHomePath(gateway), '.gemini/settings.json'), 'utf8')).toBe(geminiSettingsContent(gateway, cli.nodePath));
-    const execLine = hostGeminiWrapper(gateway, { cliPath: '/x' }).split('\n').find((line) => line.startsWith('exec '));
+    const execLine = hostGeminiWrapper(gateway, { cliPath: '/x', nodePath: '/n/node' }).split('\n').find((line) => line.startsWith('exec '));
     expect(execLine).toBe("exec '/x' \"$@\"");
-    expect(hostGeminiWrapper(gateway, { cliPath: '/x' })).not.toMatch(/--model|--yolo|--approval-mode|--sandbox|--trust/);
+    expect(hostGeminiWrapper(gateway, { cliPath: '/x', nodePath: '/n/node' })).not.toMatch(/--model|--yolo|--approval-mode|--sandbox|--trust/);
     // 토큰은 감싸개에 없다
-    expect(hostGeminiWrapper(gateway, { cliPath: '/x' })).not.toContain('token');
+    expect(hostGeminiWrapper(gateway, { cliPath: '/x', nodePath: '/n/node' })).not.toContain('token');
   });
 
   it('샌드박스를 켜는 환경 변수(0.71.1 소스에서 읽은 열 개)는 설정·믿음 변수와 함께 지운다. 대조: 지우지 않고 가짜 CLI를 바로 부르면 보인다', async () => {
     const { root, fake, wrapper } = await setup();
     expect([...GEMINI_SANDBOX_ENVS].sort()).toEqual(['GEMINI_SANDBOX', 'GEMINI_SANDBOX_IMAGE', 'GEMINI_SANDBOX_PROXY_COMMAND', 'SANDBOX', 'SANDBOX_ENV', 'SANDBOX_FLAGS', 'SANDBOX_MOUNTS', 'SANDBOX_PORTS', 'SANDBOX_SET_UID_GID', 'SEATBELT_PROFILE']);
     expect(GEMINI_UNSET_ENVS).toEqual([...GEMINI_SETTINGS_ENVS, ...GEMINI_SANDBOX_ENVS]);
-    const script = hostGeminiWrapper('/gw', { cliPath: '/x' });
+    const script = hostGeminiWrapper('/gw', { cliPath: '/x', nodePath: '/n/node' });
     const unsetLine = script.split('\n').find((line) => line.startsWith('unset '));
     expect(unsetLine?.slice('unset '.length).split(' ')).toEqual([...GEMINI_UNSET_ENVS]);
     // 대조군: 감싸개를 거치지 않으면 같은 환경이 그대로 보인다(시험이 값을 볼 수 있다는 증거)

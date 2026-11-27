@@ -151,6 +151,7 @@ afterAll(() => {
     ['B_STUDIO_BACKENDS', saved.backends],
     ['B_STUDIO_TERMINAL', saved.terminal],
     ['B_STUDIO_GATEWAY_DIR', saved.gatewayDir],
+    ['B_STUDIO_ENV_BASELINE', undefined],
   ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -211,6 +212,8 @@ async function launchCli(session: Opened, override?: (real: { url: string; token
   const real = { url: gateway.address.hookUrl, token: gateway.address.hookToken };
   await writeFile(path.join(dir, 'b-studio-gateway.json'), `${JSON.stringify(override ? override(real) : real)}\n`);
   process.env.B_STUDIO_GATEWAY_DIR = dir;
+  // 감싸개가 띄우기 직전에 남기는 환경 이름 목록(플러그인의 환경 확인 기준). 시험의 환경 그대로를 기준으로 삼는다
+  process.env.B_STUDIO_ENV_BASELINE = Object.keys(process.env).join(' ');
   const copy = path.join(dir, `${OPENCODE_PLUGIN_NAME}.loaded.mjs`);
   await writeFile(copy, OPENCODE_PLUGIN);
   await writeFile(path.join(dir, OPENCODE_PLUGIN_NAME), OPENCODE_PLUGIN);

@@ -1,6 +1,7 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
-import dotenv from 'dotenv';
+import { GEMINI_ENV_BASELINE_ENV, GEMINI_ENV_NAMES_ENV, GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS } from './gemini-envs';
+import { CODE_LOAD_ENVS, envCodeLoadKey, envRiskKeyIn } from './env-risk';
 import { geminiHookSeconds, GEMINI_HOOK_NAME, type GeminiHookEvent } from './gemini-hook';
 import { parseJsonc } from './gemini-jsonc';
 
@@ -60,7 +61,9 @@ export function geminiSettingsContent(dir: string, nodePath: string, authType?: 
   const hooks: Record<string, unknown> = {};
   for (const hook of HOOKS) {
     // 훅 명령은 빈 환경(`env -i`)에서 절대 경로의 node로 띄운다: Gemini의 환경(`.env`·사용자의 셸이 정한 `NODE_OPTIONS` 등)이 훅 안에서 코드를 돌리지 못한다. 훅이 필요한 주소·토큰은 관문 폴더의 파일에서 읽는다
-    const command = `${quote(ENV_BIN)} -i ${quote(nodePath)} ${quote(path.join(dir, GEMINI_HOOK_NAME))} ${hook.event}${hook.blocking ? ` ${FAIL_CLOSED}` : ''}`;
+    // 환경 이름 목록(값이 아니라 이름)을 넘긴다: 훅 안의 node가 Gemini의 환경에 새로 생긴 위험 이름을 본다(CLI 프로세스 안의 확인, #1475). `compgen`은 bash의 내장이고 Gemini는 훅을 `bash -c`로 돌린다. 없으면 빈 목록이 되어 훅이 막는다.
+    // 이 명령을 띄우는 bash 자신이 `BASH_ENV`를 먼저 읽는 것은 막지 못한다: `.env`의 `BASH_ENV` 거절이 막는다
+    const command = `${quote(ENV_BIN)} -i ${GEMINI_ENV_NAMES_ENV}="$(compgen -e | tr '\\n' ' ')" ${GEMINI_ENV_BASELINE_ENV}="$${GEMINI_ENV_BASELINE_ENV}" ${quote(nodePath)} ${quote(path.join(dir, GEMINI_HOOK_NAME))} ${hook.event}${hook.blocking ? ` ${FAIL_CLOSED}` : ''}`;
     hooks[hook.gemini] = [{ hooks: [{ type: 'command', name: hook.name, command, timeout: geminiHookSeconds(hook.event) * 1000 }] }];
   }
   const settings: Record<string, unknown> = {
@@ -90,53 +93,9 @@ export async function geminiUserAuthType(home: string | undefined): Promise<stri
 
 /** 설정 파일 하나의 크기 상한. 넘으면 읽지 않고 거절한다(에이전트가 쓸 수 있는 자리라 상한이 없으면 읽는 쪽을 멈출 수 있다) */
 const MAX_CONFIG_BYTES = 1024 * 1024;
-/**
- * Gemini의 설정 자리·믿음을 바꾸는 환경 변수. 감싸개가 지우고(`unset`), Rust 감시(`GEMINI_SETTINGS_ENVS`)가 있으면 붙지 않은 것으로 보고, `.env`가 정하면 거절한다.
- * 근거는 0.71.1: `GEMINI_CLI_HOME`(`Storage`)·`GEMINI_CLI_SYSTEM_SETTINGS_PATH`·`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`(`settings`)·`GEMINI_RESTRICTED_MODE`·`GEMINI_CLI_TRUST_WORKSPACE`(`trustedFolders`)
- */
-export const GEMINI_SETTINGS_ENVS: readonly string[] = ['GEMINI_CLI_SYSTEM_SETTINGS_PATH', 'GEMINI_CLI_SYSTEM_DEFAULTS_PATH', 'GEMINI_RESTRICTED_MODE', 'GEMINI_CLI_TRUST_WORKSPACE'];
-/**
- * 샌드박스를 켜거나 꾸미는 환경 변수(0.71.1의 `loadSandboxConfig`·`getSandboxCommand`·샌드박스 시작 코드). 샌드박스는 CLI를 다른 프로세스에서 다시 띄워(docker·podman·sandbox-exec 등)
- * 우리 훅이 붙었는지 알 수 없다. `GEMINI_SANDBOX`는 설정·인자보다 먼저 읽히고(비어 있지 않으면 이긴다), `GEMINI_SANDBOX_IMAGE`는 이미지를, 나머지는 샌드박스 안의 마운트·포트·프로필·프록시를 정한다.
- * `SANDBOX`는 "이미 샌드박스 안"이라는 표식이라 설정돼 있으면 CLI가 샌드박스 시작을 건너뛰고 안쪽으로 행동한다
- */
-export const GEMINI_SANDBOX_ENVS: readonly string[] = [
-  'GEMINI_SANDBOX',
-  'SANDBOX',
-  'GEMINI_SANDBOX_IMAGE',
-  'GEMINI_SANDBOX_PROXY_COMMAND',
-  'SANDBOX_ENV',
-  'SANDBOX_FLAGS',
-  'SANDBOX_MOUNTS',
-  'SANDBOX_PORTS',
-  'SANDBOX_SET_UID_GID',
-  'SEATBELT_PROFILE',
-];
-/** 감싸개가 띄우기 전에 지우는 환경 변수 전부(설정 자리·믿음 + 샌드박스). 홈(`GEMINI_CLI_HOME`)은 따로 우리 홈으로 정한다 */
-export const GEMINI_UNSET_ENVS: readonly string[] = [...GEMINI_SETTINGS_ENVS, ...GEMINI_SANDBOX_ENVS];
-/**
- * 프로세스 전체(훅 명령을 실행하는 셸과 node 포함)에 코드를 적재·실행시키는 환경 변수. 감싸개가 지우고(`unset`, `DYLD_*`는 이름으로 찾아 지운다), `.env`가 정하면 거절한다.
- * 근거(0.71.1): `.env`의 값은 `loadEnvironment`가 `process.env`에 그대로 넣고(제외 목록은 `DEBUG` 등 넷뿐), 훅 명령은 `executeCommandHook`이 `sanitizeEnvironment(process.env)`(기본값은 가리지 않음)에
- * 얹어 `bash -c`로 띄운다. 셸 이름 `bash`는 `PATH`로 찾고, 비대화형 `bash -c`도 `BASH_ENV`를 읽는다. `SHELLOPTS`·`BASHOPTS`는 셸이 읽기 전용으로 쥐고 있어 감싸개가 지우지 못하므로 `.env` 거절에만 둔다. 그래서 훅 명령 줄의 `env -i`만으로는 `PATH`·`BASH_ENV`를 막지 못해 둘 다 `.env`에서 거절한다
- */
-export const GEMINI_CODE_LOAD_ENVS: readonly string[] = [
-  'NODE_OPTIONS',
-  'NODE_PATH',
-  'NODE_EXTRA_CA_CERTS',
-  'BASH_ENV',
-  'ENV',
-  'LD_PRELOAD',
-  'LD_LIBRARY_PATH',
-  'LD_AUDIT',
-  'OPENSSL_CONF',
-  'OPENSSL_MODULES',
-  'PS4',
-  'PROMPT_COMMAND',
-];
-/** `.env`가 정하면 거절하는 코드 적재·실행 경로 변수(거부 목록이라 넓게). `NODE_ENV`는 흔한 평범한 값이라 뺀다(Node 자체는 읽지 않는다) */
-const ENV_CODE_LOAD_EXACT: ReadonlySet<string> = new Set(['PATH', 'SHELLOPTS', 'BASHOPTS', 'IFS', 'CDPATH', 'GLOBIGNORE', 'SSL_CERT_FILE', 'SSL_CERT_DIR', ...GEMINI_CODE_LOAD_ENVS]);
-const ENV_CODE_LOAD_PREFIXES: readonly string[] = ['NODE_', 'LD_', 'DYLD_', 'PYTHON', 'OPENSSL_', 'BASH_FUNC_'];
-const ENV_CODE_LOAD_ALLOWED: ReadonlySet<string> = new Set(['NODE_ENV']);
+export { GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS };
+/** 코드 적재·실행 경로 변수(공통 목록은 `env-risk.ts`). 감싸개가 지우고(`unset`, `DYLD_*`는 이름으로 찾아 지운다), `.env`가 정하면 거절한다 */
+export const GEMINI_CODE_LOAD_ENVS: readonly string[] = CODE_LOAD_ENVS;
 /** `.env`가 정하면 거절하는 이름(대소문자를 접어 견준다) */
 const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMINI_UNSET_ENVS].map((name) => name.toUpperCase()));
 /**
@@ -144,8 +103,6 @@ const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMIN
  * 이 밖의 `GEMINI_` 열쇠는 모르는 것이라 거절한다(거부 목록이라 넓게 맞춘다: 판이 오르며 새로 생기는 스위치도 걸린다)
  */
 const ENV_SAFE_GEMINI_NAMES: ReadonlySet<string> = new Set(['GEMINI_API_KEY', 'GEMINI_MODEL', 'GEMINI_DEFAULT_AUTH_TYPE', 'GEMINI_API_KEY_AUTH_MECHANISM', 'GEMINI_API_HEADERS_TIMEOUT_MS']);
-/** dotenv의 줄 문법보다 느슨하게 줄 머리의 열쇠를 읽는다(`=`나 `:`가 따르면 열쇠로 본다). dotenv가 읽지 않는 줄까지 잡을 뿐이다 */
-const ENV_LOOSE_KEY = /^[\s]*(?:export\s+)?([\w.-]+)\s*[=:]/gmu;
 const MAX_LEVELS = 64;
 
 export interface GeminiLoadCheck {
@@ -231,15 +188,13 @@ function sandboxSettingKey(record: Record<string, unknown>): string | undefined 
 function envKeyRisky(key: string): boolean {
   const upper = key.toUpperCase();
   if (ENV_RISK_NAMES.has(upper)) return true;
-  if (!ENV_CODE_LOAD_ALLOWED.has(upper) && (ENV_CODE_LOAD_EXACT.has(upper) || ENV_CODE_LOAD_PREFIXES.some((prefix) => upper.startsWith(prefix)))) return true;
+  if (envCodeLoadKey(key)) return true;
   return upper.startsWith('GEMINI_') && !ENV_SAFE_GEMINI_NAMES.has(upper);
 }
 
 /** `.env` 글에서 거절할 열쇠를 찾는다. Gemini와 같은 `dotenv.parse`(0.71.1에 든 17.1.0)가 읽는 열쇠에, 줄 머리의 열쇠를 느슨하게 읽은 것을 더한다(따옴표 안의 줄까지 보는 것은 더 막을 뿐이다) */
 function envRiskKey(text: string): string | undefined {
-  for (const key of Object.keys(dotenv.parse(text))) if (envKeyRisky(key)) return key;
-  for (const match of text.matchAll(ENV_LOOSE_KEY)) if (envKeyRisky(match[1]!)) return match[1];
-  return undefined;
+  return envRiskKeyIn(text, envKeyRisky);
 }
 
 /** `.env`가 믿음·설정 자리·샌드박스를 바꾸는 변수를 정하는가(Gemini와 같은 dotenv 문법으로 읽는다). 읽지 못하면 거절 */

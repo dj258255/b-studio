@@ -67,7 +67,7 @@ interface Ran {
 }
 
 async function run(dir: string, event: string, input: unknown, env: Record<string, string> = {}): Promise<Ran> {
-  const child = spawn(process.execPath, [path.join(dir, GEMINI_HOOK_NAME), event], { env: { PATH: process.env.PATH ?? '', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, [path.join(dir, GEMINI_HOOK_NAME), event], { env: { PATH: process.env.PATH ?? '', B_STUDIO_ENV_NAMES: 'PATH', B_STUDIO_ENV_BASELINE: 'PATH', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   child.stdout.on('data', (part: Buffer) => (stdout += part.toString('utf8')));
   child.stdin.end(typeof input === 'string' ? input : JSON.stringify(input));
@@ -279,7 +279,8 @@ describe('Gemini 설정 파일의 훅 명령(bash가 실행한다)', () => {
     child.stdin.end('{}');
     await new Promise<number | null>((resolve) => child.on('close', resolve));
     const names = (JSON.parse(stdout) as string[]).filter((name) => !['PWD', 'SHLVL', '_', 'OLDPWD', '__CF_USER_TEXT_ENCODING'].includes(name));
-    expect(names).toEqual([]);
+    // 설정의 명령이 넘기는 것은 환경 이름 목록 둘뿐이다(값이 아니라 이름 — CLI 프로세스 안의 환경 확인, #1475). 코드 적재 변수는 들어가지 않는다
+    expect(names).toEqual(['B_STUDIO_ENV_BASELINE', 'B_STUDIO_ENV_NAMES']);
     expect(existsSync(marker)).toBe(false);
   });
 
@@ -297,5 +298,76 @@ describe('Gemini 설정 파일의 훅 명령(bash가 실행한다)', () => {
     expect(code).toBe(2);
     // Gemini는 표준 오류의 글이 있어야 거절로 읽는다(글이 비면 출력이 없는 것으로 읽혀 허용)
     expect(stderr).toContain('[b-studio]');
+  });
+});
+
+describe('CLI 프로세스 안에서 환경 다시 확인(#1475): 설정의 명령이 bash로 환경 이름을 넘긴다', () => {
+  /** Gemini가 하는 것처럼 설정의 훅 명령을 진짜 bash로 돌린다. env는 "Gemini의 환경"이고 baseline은 감싸개가 띄우기 직전에 남긴 이름 목록이다 */
+  async function viaSettings(dir: string, event: 'prompt' | 'pre-tool' | 'session-start', env: Record<string, string>, input: unknown = {}): Promise<{ code: number | null; out: string }> {
+    const settings = JSON.parse(geminiSettingsContent(dir, process.execPath)) as { hooks: Record<string, Array<{ hooks: Array<{ command: string }> }>> };
+    const key = { prompt: 'BeforeAgent', 'pre-tool': 'BeforeTool', 'session-start': 'SessionStart' }[event];
+    const command = settings.hooks[key]![0]!.hooks[0]!.command;
+    const child = spawn('/bin/bash', ['-c', command], { env: { PATH: process.env.PATH ?? '', ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '';
+    child.stdout.on('data', (part: Buffer) => (out += part.toString('utf8')));
+    child.stdin.end(JSON.stringify(input));
+    const code = await new Promise<number | null>((resolve) => child.on('close', resolve));
+    return { code, out };
+  }
+  // bash의 환경에는 PATH가 늘 있다(시험이 넘긴다). 기준에 PATH를 넣어 두고, PATH가 "새로 생긴" 경우만 따로 본다
+  const baselineOf = (env: Record<string, string>, withPath = true) => [...Object.keys(env), ...(withPath ? ['PATH'] : [])].join(' ');
+
+  it('기준에 없는 위험 이름(.env가 넣은 설정·샌드박스 변수)이 훅 시점의 환경에 있으면 요청 받기·쓰기 직전을 막고 세션 시작 신호를 보내지 않는다(이름만 쓴다)', async () => {
+    const gw = await gateway({ prompt: { body: {} }, 'pre-tool': { body: {} }, 'session-start': { body: {} } });
+    const dir = await hookDir(gw);
+    const clean = { HOME: '/h', FOO: '1' };
+    const baseline = baselineOf(clean);
+    for (const name of ['GEMINI_SANDBOX', 'GEMINI_CLI_SYSTEM_SETTINGS_PATH', 'GEMINI_CLI_TRUST_WORKSPACE', 'SANDBOX', 'GEMINI_CLI_HOME']) {
+      const env = { ...clean, [name]: 'x', B_STUDIO_ENV_BASELINE: baseline };
+      const prompt = await viaSettings(dir, 'prompt', env, { prompt: '요청' });
+      expect(JSON.parse(prompt.out), name).toMatchObject({ decision: 'deny', reason: expect.stringContaining(name) });
+      const tool = await viaSettings(dir, 'pre-tool', env, { tool_name: 'write_file', tool_input: {} });
+      expect(JSON.parse(tool.out), name).toMatchObject({ decision: 'deny' });
+      expect((await viaSettings(dir, 'session-start', env)).code).toBe(0);
+    }
+    expect(gw.seen).toEqual([]);
+  });
+
+  it('.env가 들여온 코드 적재·설정 자리 변수(env-risk.ts의 규칙)도 기준에 없으면 막는다: 정확한 이름·접두사·접미사(macOS는 DYLD_*를 시스템 bash에 넘기지 않아 시험에서 뺀다)', async () => {
+    const gw = await gateway({ prompt: { body: {} }, 'pre-tool': { body: {} }, 'session-start': { body: {} } });
+    const dir = await hookDir(gw);
+    const clean = { FOO: '1' };
+    for (const name of ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'PATH', 'BASH_ENV', 'GIT_SSH_COMMAND', 'HOME', 'XDG_CONFIG_HOME', 'HTTPS_PROXY', 'NODE_PATH', 'SHELL', 'PERL5OPT']) {
+      const env = { ...clean, [name]: name === 'PATH' ? (process.env.PATH ?? '/usr/bin') : 'x', B_STUDIO_ENV_BASELINE: baselineOf(clean, name !== 'PATH') };
+      const prompt = await viaSettings(dir, 'prompt', env, { prompt: '요청' });
+      expect(JSON.parse(prompt.out), name).toMatchObject({ decision: 'deny', reason: expect.stringContaining(name) });
+      expect(JSON.parse((await viaSettings(dir, 'pre-tool', env, { tool_name: 'write_file', tool_input: {} })).out), name).toMatchObject({ decision: 'deny' });
+    }
+    expect(gw.seen).toEqual([]);
+  });
+
+  it('원래 있던 이름·평범한 새 이름·NODE_OPTIONS(Gemini가 스스로 다시 띄우며 정한다)는 통과해 관문에 닿는다', async () => {
+    const gw = await gateway({ prompt: { body: {} }, 'session-start': { body: {} } });
+    const dir = await hookDir(gw);
+    const clean = { HOME: '/h', GEMINI_SANDBOX_X: '1' };
+    const env = { ...clean, DATABASE_URL: 'x', NODE_OPTIONS: '--max-old-space-size=4096', B_STUDIO_ENV_BASELINE: baselineOf(clean) };
+    expect(JSON.parse((await viaSettings(dir, 'prompt', env, { prompt: '요청' })).out)).toEqual({});
+    await viaSettings(dir, 'session-start', env);
+    expect(gw.seen.map((entry) => entry.route)).toEqual(['prompt', 'session-start']);
+    // 이미 기준에 있는 위험 이름은 새로 생긴 것이 아니다(.env는 있는 이름을 덮지 않는다)
+    const withSandboxBefore = { ...clean, GEMINI_SANDBOX: 'docker' };
+    const again = await viaSettings(dir, 'prompt', { ...withSandboxBefore, B_STUDIO_ENV_BASELINE: baselineOf(withSandboxBefore) }, { prompt: '요청' });
+    expect(JSON.parse(again.out)).toEqual({});
+  });
+
+  it('기준 목록이 없으면 막는다(감싸개를 거치지 않음 = 모르는 것). 훅 시점의 이름 목록을 못 만들어도 막는다', async () => {
+    const gw = await gateway({ prompt: { body: {} } });
+    const dir = await hookDir(gw);
+    const missing = await viaSettings(dir, 'prompt', { HOME: '/h' }, { prompt: '요청' });
+    expect(JSON.parse(missing.out)).toMatchObject({ decision: 'deny', reason: expect.stringContaining('B_STUDIO_ENV_BASELINE') });
+    // 직접 실행(설정의 명령을 거치지 않음)은 이름 목록이 없다
+    const direct = await run(dir, 'prompt', { prompt: '요청' }, { B_STUDIO_ENV_NAMES: '', B_STUDIO_ENV_BASELINE: 'HOME' });
+    expect(direct.out).toMatchObject({ decision: 'deny', reason: expect.stringContaining('B_STUDIO_ENV_NAMES') });
+    expect(gw.seen).toEqual([]);
   });
 });

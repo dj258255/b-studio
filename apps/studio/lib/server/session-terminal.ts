@@ -1,5 +1,5 @@
 import { statSync, watch as watchFs } from 'node:fs';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, realpath, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
@@ -440,7 +440,7 @@ const HOST_BACKEND: TerminalBackend = {
         const scratch = await mkdtemp(path.join(tmpdir(), 'b-studio-gemini-version-'));
         try {
           const refusal = await geminiVersionRefusal(found.cliPath, (file, args) => execChecked(file, args, { timeoutMs: 15_000, env: { PATH: process.env.PATH ?? '', HOME: scratch, GEMINI_CLI_HOME: scratch } as NodeJS.ProcessEnv }));
-          return refusal ?? (await geminiConfigRefusal({ cwd: target.root }));
+          return refusal ?? (await startupConfigRefusal('gemini', target.root));
         } finally {
           await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
         }
@@ -450,7 +450,7 @@ const HOST_BACKEND: TerminalBackend = {
     }
     if (target.cli === 'opencode') {
       try {
-        return await openCodeConfigRefusal({ cwd: target.root, home: process.env.HOME ?? process.env.USERPROFILE, xdgConfigHome: process.env.XDG_CONFIG_HOME });
+        return await startupConfigRefusal('opencode', target.root);
       } catch (error) {
         return `OpenCode의 설정을 확인하지 못해 터미널을 열지 않았습니다: ${error instanceof Error ? error.message : String(error)}`;
       }
@@ -590,6 +590,33 @@ const HOST_BACKEND: TerminalBackend = {
     return stop;
   },
 };
+
+/**
+ * 이 폴더에서 이 CLI를 띄워도 되는가(설정이 우리 훅·플러그인을 끄거나 다른 것을 더하지 않는가). 터미널을 열기 전 검사(`preflight`)와
+ * 감싸개의 exec 직전 검사(관문의 `/startup-check`)가 **같은 코드**를 쓴다(#1475): 열린 셸에서 CLI를 다시 띄울 때 두 판정이 갈라지지 않게 한다. 거절하는 글을 돌려주고 열어도 되면 undefined다
+ */
+export async function startupConfigRefusal(cli: 'opencode' | 'gemini', cwd: string): Promise<string | undefined> {
+  if (cli === 'gemini') return geminiConfigRefusal({ cwd });
+  return openCodeConfigRefusal({ cwd, home: process.env.HOME ?? process.env.USERPROFILE, xdgConfigHome: process.env.XDG_CONFIG_HOME });
+}
+
+/**
+ * 관문의 `/startup-check` 답. 감싸개가 보낸 CLI 이름과 작업 폴더를 받아 세션의 작업 복사본 안인지 보고(링크를 푼 경로로 견준다, 밖이면 거절)
+ * `startupConfigRefusal`을 돌린다. 모르는 CLI·꼴이 다른 입력·폴더를 확인하지 못함은 모두 거절이다(열린 쪽은 "확인했고 문제가 없다"뿐)
+ */
+export async function startupCheckAnswer(workDir: string, input: Readonly<Record<string, unknown>>): Promise<string | undefined> {
+  const { cli, cwd } = input;
+  if (cli !== 'opencode' && cli !== 'gemini') return '모르는 CLI라 시작 파일을 검사하지 못해 띄우지 않았습니다';
+  if (typeof cwd !== 'string' || cwd === '' || !path.isAbsolute(cwd)) return '작업 폴더를 알 수 없어 시작 파일을 검사하지 못해 띄우지 않았습니다';
+  try {
+    const [realCwd, realRoot] = await Promise.all([realpath(cwd), realpath(workDir)]);
+    const relative = path.relative(realRoot, realCwd);
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return `${cwd}은(는) 세션의 작업 폴더 밖이라 띄우지 않았습니다`;
+    return await startupConfigRefusal(cli, realCwd);
+  } catch (error) {
+    return `시작 파일을 검사하지 못해 띄우지 않았습니다(${error instanceof Error ? error.message : String(error)})`;
+  }
+}
 
 /** 지금 방식에 맞는 백엔드. 부를 때 정해진다 — 스튜디오를 다른 방식으로 띄우면 그 방식으로 연다 */
 export function terminalBackend(mode: TerminalMode = sessionTerminalMode()): TerminalBackend {

@@ -542,7 +542,16 @@ fn opencode_rejects_envs_that_add_plugins_and_the_attach_client() {
     let good: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG)];
     assert!(launch_oc(&[oc], Some(good)));
     // 설정을 더하는 환경 변수는 하나라도 있으면(값이 비었어도) 붙지 않은 것이다: 마지막에 합쳐지는 설정·자동으로 불러오는 폴더·TUI 설정
-    for name in ["OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG"] {
+    for name in [
+        "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_CONFIG_DIR",
+        "OPENCODE_TUI_CONFIG",
+        // 관리형 설정 폴더·홈(`.opencode`의 설정과 플러그인 폴더)·내장 플러그인·권한을 바꾸는 변수(1.18.33 바이너리에서 읽은 것, #1475)
+        "OPENCODE_TEST_MANAGED_CONFIG_DIR",
+        "OPENCODE_TEST_HOME",
+        "OPENCODE_DISABLE_DEFAULT_PLUGINS",
+        "OPENCODE_PERMISSION",
+    ] {
         assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), (name, "x")])), "{name}");
         assert!(!launch_oc(&[oc], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), (name, "")])), "{name} 빈 값");
     }

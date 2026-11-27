@@ -1,4 +1,6 @@
 import { AGENT_HOOK_EVENTS, GATEWAY_FILE_NAME } from './docker/agent-terminal';
+import { envCodeLoadRules } from './env-risk';
+import { GEMINI_ENV_BASELINE_ENV, GEMINI_ENV_NAMES_ENV, GEMINI_SELF_SET_ENVS, GEMINI_UNSET_ENVS } from './gemini-envs';
 
 /**
  * Gemini CLI의 설정 훅(`GEMINI_CLI_HOME/.gemini/settings.json`의 `hooks`)이 부르는 명령 파일(ADR-242, 실험).
@@ -46,6 +48,9 @@ import { fileURLToPath } from 'node:url';
 
 const TIMEOUT_SECONDS = __B_STUDIO_TIMEOUTS__;
 const ADDRESS_FILE = __B_STUDIO_ADDRESS_FILE__;
+const ENV_RISKY = __B_STUDIO_ENV_RISKY__;
+const ENV_BASELINE_ENV = __B_STUDIO_ENV_BASELINE_ENV__;
+const ENV_NAMES_ENV = __B_STUDIO_ENV_NAMES_ENV__;
 // 시간 상한은 낮추기만 할 수 있다(시험이 쓴다). 낮추면 더 막을 뿐이다
 const TIMEOUT_CAP_MS = Number(process.env.B_STUDIO_HOOK_TIMEOUT_MS);
 const event = process.argv[2] ?? '';
@@ -180,6 +185,27 @@ function readSessionStart(answer) {
 const withMessage = (message) => (nonEmpty(message) ? { systemMessage: message } : {});
 const cwdOf = (input) => (nonEmpty(input.cwd) ? { cwd: input.cwd } : {});
 
+// 환경 이름이 설정·믿음·샌드박스 변수이거나 코드 적재·설정 자리 변수(공통 목록 env-risk.ts)인가. 대소문자를 접어 견준다. Gemini가 스스로 다시 띄우며 정하는 이름은 정확한 이름으로만 뺀다
+function riskyEnvName(name) {
+  const upper = name.toUpperCase();
+  if (ENV_RISKY.own.includes(upper)) return true;
+  if (ENV_RISKY.selfSet.includes(upper) || ENV_RISKY.allowed.includes(upper)) return false;
+  return ENV_RISKY.exact.includes(upper) || ENV_RISKY.prefixes.some((prefix) => upper.startsWith(prefix)) || ENV_RISKY.suffixes.some((suffix) => upper.endsWith(suffix));
+}
+
+// CLI 프로세스 안의 환경 다시 확인(#1475). 설정의 훅 명령이 bash로 Gemini의 환경 **이름만**(값이 아니다)을 넘기고(ENV_NAMES_ENV), 감싸개가 띄우기 직전에 남긴 이름 목록(ENV_BASELINE_ENV)과 견준다.
+// 기준에 없는 설정·믿음·샌드박스 변수(Gemini가 시작할 때 작업 폴더의 .env에서 넣은 것)가 있으면 그 이름을 돌려준다. 어느 쪽 목록이든 없으면 모르는 것이라 그 변수의 이름을 돌려준다(막는다)
+function introducedRiskyEnv() {
+  const baseline = process.env[ENV_BASELINE_ENV];
+  const names = process.env[ENV_NAMES_ENV];
+  if (typeof baseline !== 'string' || baseline.trim() === '') return ENV_BASELINE_ENV;
+  if (typeof names !== 'string' || names.trim() === '') return ENV_NAMES_ENV;
+  const known = new Set(baseline.split(/\s+/).filter((name) => name !== ''));
+  for (const name of names.split(/\s+/)) if (name !== '' && !known.has(name) && riskyEnvName(name)) return name;
+  return undefined;
+}
+const ENV_REASON_HEAD = '[b-studio] Gemini의 환경에 시작한 뒤 새로 생긴 설정·샌드박스 변수(';
+
 async function main() {
   const chunks = [];
   for await (const chunk of process.stdin) chunks.push(chunk);
@@ -191,6 +217,11 @@ async function main() {
   }
   const readable = isPlain(input);
   if (!readable) input = {};
+  // 환경을 확인하지 못했거나 위험한 이름이 새로 생겼다. 막는 훅은 막고, 세션 시작 신호는 보내지 않는다(신호가 없으면 서버가 훅이 붙지 않은 것으로 보고 터미널을 닫는다)
+  const envBad = introducedRiskyEnv();
+  const envReason = envBad === undefined ? undefined : ENV_REASON_HEAD + envBad + ')가 있어 막았습니다. 작업 폴더의 .env나 셸 환경에서 지운 뒤 터미널을 다시 여세요.';
+  if (envReason !== undefined && event === 'session-start') return finish({});
+  if (envReason !== undefined && (event === 'pre-tool' || event === 'prompt')) return deny(envReason);
 
   if (event === 'pre-tool') {
     // 본문을 읽지 못하면 도구 이름 없이 판정하게 되므로 막는다
@@ -262,4 +293,7 @@ try {
 }
 `
   .replace('__B_STUDIO_TIMEOUTS__', () => JSON.stringify({ ...AGENT_HOOK_EVENTS, 'post-tool': AGENT_HOOK_EVENTS.activity }))
-  .replace('__B_STUDIO_ADDRESS_FILE__', () => JSON.stringify(GATEWAY_FILE_NAME));
+  .replace('__B_STUDIO_ADDRESS_FILE__', () => JSON.stringify(GATEWAY_FILE_NAME))
+  .replace('__B_STUDIO_ENV_RISKY__', () => JSON.stringify({ ...envCodeLoadRules(), own: [...GEMINI_UNSET_ENVS, 'GEMINI_CLI_HOME'].map((name) => name.toUpperCase()), selfSet: GEMINI_SELF_SET_ENVS }))
+  .replace('__B_STUDIO_ENV_BASELINE_ENV__', () => JSON.stringify(GEMINI_ENV_BASELINE_ENV))
+  .replace('__B_STUDIO_ENV_NAMES_ENV__', () => JSON.stringify(GEMINI_ENV_NAMES_ENV));

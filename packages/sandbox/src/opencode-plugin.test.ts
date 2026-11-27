@@ -16,17 +16,22 @@ import { OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
 const TOKEN = 'test-token-0123456789';
 const dirs: string[] = [];
 const servers: Server[] = [];
-const envBefore = { gateway: process.env.B_STUDIO_GATEWAY_DIR, timeout: process.env.B_STUDIO_MOD_TIMEOUT_MS };
+const envBefore = { gateway: process.env.B_STUDIO_GATEWAY_DIR, timeout: process.env.B_STUDIO_MOD_TIMEOUT_MS, baseline: process.env.B_STUDIO_ENV_BASELINE };
+const injected: string[] = [];
 
 beforeEach(() => {
   delete process.env.B_STUDIO_MOD_TIMEOUT_MS;
+  // 감싸개가 띄우기 전에 남기는 환경 이름 목록(시험의 환경 그대로를 기준으로 삼는다)
+  process.env.B_STUDIO_ENV_BASELINE = Object.keys(process.env).join(' ');
 });
 afterEach(async () => {
   for (const server of servers.splice(0)) if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+  for (const name of injected.splice(0)) delete process.env[name];
   await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   for (const [key, value] of [
     ['B_STUDIO_GATEWAY_DIR', envBefore.gateway],
     ['B_STUDIO_MOD_TIMEOUT_MS', envBefore.timeout],
+    ['B_STUDIO_ENV_BASELINE', envBefore.baseline],
   ] as const) {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
@@ -621,5 +626,49 @@ describe('빈틈을 막는 마무리', () => {
     await hooks.event!({ event: { type: 'session.idle', properties: { sessionID: 'ses_1' } } });
     expect(broken.seen.find((request) => request.event === 'stop-failure')?.body).toMatchObject({ error: 'stop_unverified' });
     expect(server.seen.filter((request) => request.event === 'stop-failure')).toEqual([]);
+  });
+});
+
+describe('CLI 프로세스 안에서 환경 다시 확인(#1475)', () => {
+  const inject = (name: string, value = 'x') => {
+    process.env[name] = value;
+    injected.push(name);
+  };
+
+  it('띄운 뒤 환경에 새로 생긴 위험 이름(Bun이 .env를 넣은 것)이 있으면 신호를 보내지 않고 모든 도구를 막는다. 이름을 알려 준다', async () => {
+    const server = await gateway({ 'pre-tool': { body: {} }, 'session-start': { body: {} } });
+    const dir = await gatewayDir(server);
+    for (const name of ['NODE_OPTIONS', 'OPENCODE_PERMISSION', 'OPENCODE_TEST_HOME', 'XDG_CONFIG_HOME', 'HTTPS_PROXY', 'GIT_SSH_COMMAND']) {
+      // 시험 환경에 이미 있는 이름은 기준에 들어 있어 새로 생긴 것이 아니다. 기준에서 뺀 뒤 새로 넣는다
+      delete process.env[name];
+      process.env.B_STUDIO_ENV_BASELINE = Object.keys(process.env).join(' ');
+      inject(name);
+      const plugin = await load(dir);
+      await plugin.configure();
+      await expect(plugin.hooks['tool.execute.before']!(...before('read', { filePath: 'a' })), name).rejects.toThrow(new RegExp(name));
+      delete process.env[name];
+    }
+    expect(server.seen.filter((request) => request.event === 'session-start' || request.event === 'pre-tool')).toEqual([]);
+  });
+
+  it('기준에 있던 이름이거나 위험하지 않은 새 이름이면 통과한다(HOME·PATH는 터미널 환경에 원래 있다)', async () => {
+    const server = await gateway({ 'session-start': { body: {} }, 'pre-tool': { body: {} } });
+    const dir = await gatewayDir(server);
+    inject('DATABASE_URL');
+    inject('OPENCODE_PID');
+    const plugin = await load(dir);
+    await plugin.configure();
+    await eventually(() => server.seen.some((request) => request.event === 'session-start'));
+    await plugin.hooks['tool.execute.before']!(...before('read', { filePath: 'a' }));
+  });
+
+  it('기준 목록이 없으면(감싸개를 거치지 않음) 모르는 것이라 막는다', async () => {
+    const server = await gateway({ 'session-start': { body: {} } });
+    const dir = await gatewayDir(server);
+    delete process.env.B_STUDIO_ENV_BASELINE;
+    const plugin = await load(dir);
+    await plugin.configure();
+    await expect(plugin.hooks['tool.execute.before']!(...before('read', { filePath: 'a' }))).rejects.toThrow(/B_STUDIO_ENV_BASELINE/);
+    expect(server.seen.filter((request) => request.event === 'session-start')).toEqual([]);
   });
 });

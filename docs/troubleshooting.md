@@ -8678,3 +8678,79 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - codex 0.160.1 소스로 늘 읽는 관리자 설정을 찾았다: `/etc/codex/requirements.toml`. 사용자 설정·`-c`와 무관한 절대 경로이고 `[hooks]`는 항상 켜져 있고 신뢰 확인이 없으며 끌 수 없다(근거 소스 위치는 ADR-245 결정 5). 관문 폴더 아래 `codex-etc`를 `/etc/codex`에 읽기 전용으로 붙이고(`agentRunArgs`의 `codexEtcDir`), 재사용할 컨테이너는 그 마운트가 읽기 전용으로 있는지 보고 아니면 다시 만든다(`codexEtcInPlace`). 감싸개의 `-c`에서는 훅을 뺐다(두 번 도는 것을 막는다).
 - 고치기 전: 새 시험이 요구사항 모듈·마운트 함수가 없어 `agent-codex.test.ts`가 불러지지 않았고 `session-terminal-container.test.ts`의 prepare 시험이 실패했다(`Tests 1 failed | 9 passed`). 변이 9개 중 8개(요구사항 안 씀, 감싸개에 훅 되붙임, 마운트 제거·읽기 전용 해제, prepare가 마운트 안 넘김, 훅 고정 제거, 관리 훅만 제거, Stop 훅 빠짐)를 시험이 잡았다. 재사용 컨테이너의 마운트 확인을 빼는 변이는 도커를 부르는 자리라 못 잡는다.
 - 남은 틈: 실제 codex가 이 파일을 읽어 훅을 부르는지는 실행하지 않았다. 이 컴퓨터 방식 codex도 훅이 `-c`뿐이다 — 셸 함수·관문 파일 감시·Rust 감시(`find_unhooked_cli`)가 감지하지만 예방이 아니고, codex는 표식 글 포함이라는 옛 규칙이다(ADR-245).
+
+## 311. OpenCode의 설정·홈·권한을 바꾸는 환경 변수 넷을 감싸개가 지우지도 감시가 거절하지도 않았다
+
+### 증상
+
+- `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION`이 사용자의 셸에 있으면 감싸개가 그대로 CLI에 넘겼고 감시는 "붙은 것"으로 읽었다(#1475). 실제로 띄워 보지 않았고 1.18.33 바이너리의 평문 JS(`strings -a`)를 읽은 것이다.
+
+### 원인
+
+- `OPENCODE_TEST_MANAGED_CONFIG_DIR`: 관리형 설정 폴더(`m0()`)를 바꾼다. 그 안의 `opencode.json(c)`가 설정 순서의 맨 뒤에서 합쳐져 `plugin`·`permission`을 더한다. 띄우기 전 검사는 진짜 관리형 폴더를 읽으므로 확인하는 쪽과 동작하는 쪽이 다른 폴더를 본다.
+- `OPENCODE_TEST_HOME`: `Global.Path.home`을 바꾼다. 설정 폴더 목록이 거기서 위로 `.opencode`를 찾아 그 설정과 plugins를 불러온다.
+- `OPENCODE_PERMISSION`: 값(JSON)이 `permission`에 합쳐진다.
+- `OPENCODE_DISABLE_DEFAULT_PLUGINS`: 내장 플러그인(`Yy` 목록)을 건너뛴다. 설정의 플러그인(우리 것)은 따로 불러와 직접 영향은 없지만 플러그인 구성이 달라진다. 거부 목록이라 넓게 잡았다.
+
+### 해결
+
+- 감싸개의 unset을 한 목록(`OPENCODE_UNSET_ENVS`)으로 모아 넷을 더했고, Rust 감시(`OPENCODE_PLUGIN_ENVS`, 일곱 개 + `OPENCODE_PURE`)가 있으면 붙지 않은 것으로 본다. TS 시험이 두 목록을 견준다(Gemini의 `GEMINI_UNSET_ENVS`와 같은 방식).
+- 고치기 전 실패: `watch_tests.rs`의 `opencode_rejects_envs_that_add_plugins_and_the_attach_client`가 `OPENCODE_TEST_MANAGED_CONFIG_DIR`에서 실패, TS 목록 시험은 `OPENCODE_UNSET_ENVS`가 없어 실패. 감시 목록에서 한 이름을 바꾸는 변이로 같은 시험이 다시 실패함을 확인했다.
+- 하지 않은 것: `OPENCODE_DISABLE_PROJECT_CONFIG`(프로젝트 설정을 덜 읽을 뿐이라 열지 않는다, 시험이 지켜 둔다). Bun으로 컴파일된 opencode가 작업 폴더의 `.env`를 시작 때 환경에 넣는지는 확인하지 못했다(감싸개의 unset은 그 앞에서 돈다).
+
+## 312. Claude·Codex 훅이 CLI의 환경을 그대로 물려받아 훅 안에서 다른 코드가 돌 수 있었다(컨테이너 방식 포함)
+
+### 증상
+
+- 훅 명령이 `node <스크립트> <이벤트>`라 사용자의 셸이 정한 `NODE_OPTIONS=--require …`·`NODE_PATH`가 훅의 node 안에서 코드를 돌렸다(#1475, 트러블슈팅 304에서 남긴 것). Claude는 프로젝트 `.env`를 환경에 넣지 않으므로 들어오는 길은 셸 환경이다.
+
+### 원인
+
+- 훅이 필요로 하는 환경과 물려받는 환경을 같은 것으로 읽었다. Claude 훅 스크립트는 환경에서 읽는 것이 없다(주소·토큰은 스크립트 옆 주소 파일, 이벤트는 인자, `CLAUDE_PROJECT_DIR` 등도 쓰지 않는다). Codex 훅 스크립트는 `B_STUDIO_GATEWAY_DIR` 하나만 읽는다.
+
+### 해결
+
+- 훅·상태 줄 명령을 `/usr/bin/env -i <node 절대 경로> <스크립트> <이벤트>`로 바꿨다: Claude 이 컴퓨터 방식(Rust `host_gateway_settings_json`, 텍스트 벡터 7개 갱신), 컨테이너 방식(`agentManagedSettings`, `/usr/bin/env -i /usr/local/bin/node …`), Codex(`codexHookCommand`는 `B_STUDIO_GATEWAY_DIR="$B_STUDIO_GATEWAY_DIR"`만 셸이 풀어 넘긴다. 명령 글은 세션과 무관하게 같다). Codex는 훅을 `$SHELL -lc`로 돌린다(0.160.1 바이너리의 `command_runner`).
+- 상태 줄만 사용자의 원래 상태 줄을 이어 부르므로 `PATH`·`HOME`·`USER`·`LOGNAME`·`SHELL`·`LANG`·`LC_ALL`·`TERM`·`TMPDIR`·`XDG_CONFIG_HOME`·`CLAUDE_CONFIG_DIR`을 `NAME="$NAME"`로 넘긴다(코드 적재 변수는 넘기지 않는다). 그 밖의 변수에 기대던 원래 상태 줄은 달라질 수 있다.
+- 실패 꼬리: 훅 스크립트가 스스로 막는 쪽으로 답한다(주소 파일이 없으면 쓰기 직전 훅이 deny, 시험이 환경 없이 확인한다). 다만 `env`나 node 자체가 없어 exit 127이면 Claude는 막지 않는 오류로 읽는다. 이것은 이번 변경 전의 node 없음과 같다(바꾸지 않았다).
+- Codex 훅 명령 글이 바뀌어 Codex가 처음 한 번 훅을 다시 믿으라고 물을 수 있다. Windows는 이 컴퓨터 방식 터미널이 없어 바꾸지 않았다.
+- 고치기 전 실패: 새 시험 10건(훅 환경이 비어 있지 않음·NODE_OPTIONS 코드가 돎·명령 모양·목록). `env -i`를 지우는 변이로 Rust·TS 시험이 다시 실패함을 확인했다.
+- 감싸개가 `NODE_OPTIONS` 등을 지우는 것(Gemini)은 claude·codex·opencode에는 적용하지 않았다: 훅은 `env -i`로 막혔고, CLI 자체의 `NODE_OPTIONS`는 사용자의 정당한 설정(메모리 상한)일 수 있다. `BASH_ENV`처럼 훅 셸이 먼저 읽는 변수는 `env -i`가 막지 못하지만 Claude·Codex가 어느 셸로 훅을 돌리는지 실행으로 확인하지 못했다.
+
+## 313. Bun으로 컴파일된 opencode가 작업 폴더의 `.env`와 `bunfig.toml`을 시작할 때 읽을 수 있는데 보지 않았다
+
+### 증상
+
+- 감싸개가 `OPENCODE_*` 환경 변수를 지워도, 작업 폴더의 `.env`가 `OPENCODE_CONFIG_CONTENT`·`OPENCODE_PERMISSION`·`NODE_OPTIONS` 등을 정하면 CLI가 시작하며 환경에 넣을 수 있다(#1475). 감시는 시작 때의 환경만 읽어 이것을 보지 못한다. `bunfig.toml`의 `preload`는 코드를 실행한다. 실행해 확인하지는 않았다.
+
+### 원인
+
+- 바이너리에 `Bun v1.3.14`가 들어 있고 그 판의 `bun build --compile` 도움말이 `--compile-autoload-dotenv`·`--compile-autoload-bunfig`를 `default: true`로 적는다. opencode가 껐는지는 바이너리 문자열로 알 수 없다. 모르면 막힌 쪽으로 본다.
+
+### 해결
+
+- 띄우기 전 검사가 작업 폴더의 `.env*`와 `bunfig.toml`을 본다(ADR-241 덧붙임). 거절 열쇠는 `OPENCODE_*`·`BUN_*`와 Gemini와 공통인 코드 적재 변수 목록이다(`env-risk.ts`로 묶었다).
+- 도구로 이 파일들을 쓰는 것은 쓰기 직전에 막는다(셸 쓰기는 못 막는다).
+- 고치기 전 실패: `opencode-env-files.test.ts` 11건. 변이(거절 한 줄과 쓰기 막기를 끔)로 다시 실패함을 확인했다.
+- 하지 않은 것: 실제 opencode로 자동 적재를 확인하지 않았다. 위쪽 폴더의 `.env`는 Bun이 읽지 않는 것으로 보고 보지 않는다(확인하지 못함).
+- 커밋 보안 검토 [HIGH] 둘(#1475): `.env` 거절에 설정·홈 자리를 옮기는 변수(`HOME`·`USERPROFILE`·`XDG_*`·`TMPDIR`·`APPDATA`·`LOCALAPPDATA` 등)와 코드 실행·통신 경로 변수(`SHELL`·`COMSPEC`·`EDITOR`·`VISUAL`·`PAGER`·`GIT_*`·`*_PROXY`·`SSL_*`·`CURL_*`·`PERL*`·`RUBY*`·`GEM_*`·`JAVA_TOOL_OPTIONS`·`NPM_CONFIG_*`·`YARN_*`·`PNPM_*` 등)가 없었다. Bun이 `.env`를 넣으면 `Global.Path`가 바뀌어 띄우기 전 검사가 본 폴더와 실제로 읽는 폴더가 달라진다. 공통 목록(`env-risk.ts`)에 더해 Gemini `.env` 거절에도 적용했다(변수마다 TS 판정·스크립트 판정 모두 거절하는 시험 51건, 고치기 전에는 50건 안팎이 실패). 허용 목록으로 바꾸지 않는 이유와 "감싸개가 적재 뒤 값을 강제"가 불가능한 이유(CLI 프로세스 안에서 채워진다)는 ADR-241 덧붙임에 있다.
+
+## 314. 열린 셸에서 opencode·gemini를 다시 띄우면 띄우기 전 검사가 돌지 않아, 셸로 쓴 `.env`·bunfig가 그대로 읽혔다
+
+### 증상
+
+- 에이전트가 셸로 작업 폴더의 `.env`·`bunfig.toml`을 쓴 뒤 같은 터미널에서 `opencode`를 다시 치면, 도구 쓰기 차단(트러블슈팅 313)도 띄우기 전 검사도 지나지 않고 CLI가 그 파일을 읽었다(Gemini의 `.env`도 같다).
+
+### 원인
+
+- 띄우기 전 검사(`preflight`)는 터미널을 열 때 한 번만 돈다. 셸에서 다시 띄우는 길은 터미널 셸의 PATH 맨 앞 감싸개를 지나지만 감싸개는 검사하지 않았다.
+
+### 해결
+
+- 감싸개가 `exec` 직전에 `/usr/bin/env -i <node> <관문 폴더>/b-studio-startup-check.mjs <cli> "$(pwd -P)"`를 부르고 0이 아니면 띄우지 않는다(스크립트 거절은 종료 코드 2와 이유, 그 밖의 실패는 일반 문구, 모두 fail-closed). 처음에는 판정을 JS로 옮긴 사본을 두었는데 `.env`·bunfig만 보고 설정 JSON·플러그인 설정은 보지 않아 두 판정이 갈라졌다(커밋 보안 검토). 지금은 스크립트에 판정이 없고 관문의 `/startup-check`가 띄우기 전 검사와 같은 TS 함수로 답한다(ADR-241 덧붙임).
+- 고치기 전 실패: 감싸개 검사 없이는 시험 4건(거절 시 띄우지 않음·검사 실패 시 띄우지 않음, 두 CLI)이 실패. 변이: 스크립트의 거절 종료 코드를 0으로 바꾸면 65건 실패, 감싸개의 검사 줄을 지우면 4건 실패, 목록을 옛 것으로 되돌리면 50건 실패.
+- 검사와 exec 사이에 파일이 바뀌는 틈(TOCTOU)은 CLI 프로세스 안에서 다시 본다: OpenCode 플러그인이 설정 훅에서 "감싸개가 남긴 이름 기준(`B_STUDIO_ENV_BASELINE`)에 없는 새 위험 이름"을 찾아 있으면 신호를 보내지 않고 모든 도구를 막고, Gemini의 훅이 설정 명령으로 넘겨받은 환경 이름 목록으로 같은 확인을 한다(요청 받기·쓰기 직전 deny, 세션 시작 신호 생략). 이름만 본다.
+- 고치기 전 실패(이번 보강): 플러그인 시험 2건·Gemini 훅 시험 3건이 실패(새 확인이 없어 도구가 열리거나 훅이 환경 이름 변수를 받지 않음). 변이: 관문 답을 무시하면 1건, 플러그인·훅의 환경 확인을 끄면 각 2건, 스크립트가 낯선 답을 통과시키면 1건 실패.
+- 컨테이너 방식 codex(ADR-245)의 요구사항 훅은 `/usr/bin/env -i <이미지 node> <관문 마운트의 스크립트> <이벤트>`다: 그 훅 스크립트는 옆의 주소 파일을 읽어 `B_STUDIO_GATEWAY_DIR`가 필요 없고, 감싸개 없이 이미지의 codex를 직접 불러도 같은 명령이 돈다(`codexHookCommand`의 `gatewayDirEnv: false`).
+- 남은 틈: 감싸개를 거치지 않고 진짜 바이너리를 바로 부르는 길은 감시의 몫이다. Bun의 자동 적재를 끄는 런타임 옵션(`--no-env-file`)이 컴파일된 opencode에 먹는지는 문자열로 확인하지 못해 쓰지 않았다. 프로세스 안 확인은 실제 opencode·gemini로 돌려 보지 못했다(CLI가 스스로 더하는 이름이 있으면 오탐으로 도구가 막힌다).
+- 커밋 보안 검토 [MEDIUM] (#1475): Gemini 훅의 프로세스 안 확인이 `GEMINI_UNSET_ENVS`와 `GEMINI_CLI_HOME`만 봐서 `.env`가 들여온 코드 적재·설정 자리 변수(`LD_PRELOAD`·`PATH`·`BASH_ENV`·`GIT_*`·`HOME`·`XDG_*` 등)를 놓쳤다. 공통 규칙(`env-risk.ts`)을 훅에도 끼웠다. 뺀 것은 Gemini가 다시 띄우며 정하는 `NODE_OPTIONS` 하나(0.71.1 `getSpawnConfig`). 고치기 전 실패 1건(열한 이름 중 첫 이름부터 deny가 없음), 규칙 비교를 끄는 변이에서 다시 실패.
