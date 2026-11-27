@@ -49,7 +49,13 @@ describe('세션 터미널 방식 판정 표', () => {
     expect(resolved.allowed).toBe(row.allowed);
     expect(resolved.mode).toBe(row.mode === 'throws' ? undefined : row.mode);
     if (!resolved.allowed) expect(resolved.reason.length).toBeGreaterThan(0);
-    if (resolved.allowed) expect(isTerminalRunnableBackend('codex')).toBe(resolved.mode === 'host');
+    // codex는 두 방식 모두 띄운다(컨테이너는 이미지에 넣은 codex). API 모드(자체 CLI)는 이 컴퓨터 방식에서만 — 컨테이너에서는 키를 에이전트가 읽을 수 있어 닫는다(ADR-245)
+    if (resolved.allowed) {
+      expect(isTerminalRunnableBackend('codex')).toBe(true);
+      expect(isTerminalRunnableBackend('api')).toBe(resolved.mode === 'host');
+      expect(isTerminalRunnableBackend('claude-code')).toBe(true);
+      for (const unknown of ['gemini', 'demo', '', 'CODEX']) expect(isTerminalRunnableBackend(unknown), unknown).toBe(false);
+    }
     if (row.mode === 'throws') expect(() => sessionTerminalMode()).toThrow('B_STUDIO_TERMINAL은 container, host 중 하나여야 합니다');
     else expect(sessionTerminalMode()).toBe(row.mode);
   });

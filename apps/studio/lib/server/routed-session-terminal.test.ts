@@ -145,14 +145,14 @@ describe('startRoutedSession — 터미널로(#836)', () => {
     expect(fake.created).toEqual([]);
   });
 
-  it('터미널에서 띄울 수 없는 AI는 다음 후보로 넘어간다. 컨테이너 방식에서는 Codex도 건너뛴다', async () => {
+  it('터미널에서 띄울 수 없는 AI는 다음 후보로 넘어간다. 컨테이너 방식도 Codex는 띄운다(ADR-245), Command Code는 건너뛴다', async () => {
     saveBackendRules({ rules: [{ when: {}, backend: 'commandcode' }, { when: {}, backend: 'codex' }], fallback: { backend: 'claude-code' } });
     const host = await startRoutedSession({ ...base, request: '고쳐 줘' }, terminal({ startAfter: 1 }).deps);
     expect(host.routing).toMatchObject({ backend: 'codex', rule: 1, skipped: [{ backend: 'commandcode' }] });
 
     const container = await startRoutedSession({ ...base, request: '고쳐 줘' }, terminal({ mode: 'container', startAfter: 1 }).deps);
-    expect(container.routing).toMatchObject({ backend: 'claude-code', rule: 'fallback' });
-    expect(container.routing.skipped.map((skip) => skip.backend)).toEqual(['commandcode', 'codex']);
+    expect(container.routing).toMatchObject({ backend: 'codex', rule: 1 });
+    expect(container.routing.skipped.map((skip) => skip.backend)).toEqual(['commandcode']);
   });
 
   it('Command Code는 실험 스위치가 켜진 이 컴퓨터 방식에서만 터미널 세션으로 만든다. 꺼져 있거나 컨테이너 방식이면 400', async () => {
@@ -193,7 +193,7 @@ describe('startRoutedSession — 터미널로(#836)', () => {
 
   it('직접 고른 AI가 터미널에서 띄울 수 없으면 400, 세션을 만들지 않는다', async () => {
     await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal().deps)).rejects.toMatchObject({ status: 400 });
-    await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'codex' } }, terminal({ mode: 'container' }).deps)).rejects.toMatchObject({ status: 400 });
+    await expect(startRoutedSession({ ...base, request: '고쳐 줘', direct: { backend: 'commandcode' } }, terminal({ mode: 'container' }).deps)).rejects.toMatchObject({ status: 400 });
     expect(fake.created).toEqual([]);
   });
 

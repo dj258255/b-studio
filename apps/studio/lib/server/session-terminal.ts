@@ -1,6 +1,10 @@
 import { statSync, watch as watchFs } from 'node:fs';
 import path from 'node:path';
 import {
+  AGENT_CODEX_IMAGE,
+  AGENT_CODEX_TERMINAL_COMMAND,
+  agentCodexFiles,
+  agentImageExists,
   checkHostGatewayConfig,
   clampTerminalSize,
   commandCodeModLoadRefusal,
@@ -38,7 +42,7 @@ import {
 import { notifyAgentsChanged } from './agents-pulse';
 import { StudioError } from './errors';
 import { localFolderAllowed } from './repo-token';
-import { commandCodeTerminalReason, openCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
+import { commandCodeTerminalReason, containerRunnableBackend, openCodeTerminalReason, resolveTerminalMode, type TerminalMode } from './terminal-allowed';
 import { DraftKeeper, readDraftFile, settleDraftStops, writeDraftFile } from './session-terminal-draft';
 import { draftSealFor } from './session-terminal-draft-key';
 import { armModClock, disarmModClock } from './session-terminal-mod';
@@ -78,7 +82,8 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 }
 
 /**
- * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code를 띄우고, 이 컴퓨터 방식에서만 codex와 b-studio의 자체 CLI(api, ADR-226)도 띄운다.
+ * 세션 터미널이 띄울 수 있는 백엔드인가. 세션 터미널은 claude-code와 codex를 띄운다(컨테이너 방식의 codex는 에이전트 이미지에 넣은 것, ADR-245).
+ * b-studio의 자체 CLI(api, ADR-226)는 이 컴퓨터 방식에서만 띄운다 — 컨테이너에서는 모델 키를 에이전트가 읽을 수 있는 자리에 둘 수밖에 없고 OS 샌드박스도 없어 닫는다(ADR-245).
  * Command Code(ADR-233)와 OpenCode(ADR-241)는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만 띄운다
  * (sessions.ts의 terminalCliKind는 이 컴퓨터 방식의 codex·api가 아니면 claude를 띄운다 — 컨테이너 방식 codex·api를 받으면 엉뚱한 CLI가 뜬다).
  * 이 함수는 터미널 방식 실행을 **받아 주는** 허용 목록이라 모르는 백엔드는 거짓이다. Fleet과 작업 분해가 같은 판정을 쓴다
@@ -86,7 +91,7 @@ export function sessionTerminalMode(env: Record<string, string | undefined> = pr
 export function isTerminalRunnableBackend(backend: string, env: Record<string, string | undefined> = process.env): boolean {
   if (backend === 'commandcode') return commandCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
   if (backend === 'opencode') return openCodeTerminalReason(sessionTerminalMode(env), env) === undefined;
-  return backend === 'claude-code' || ((backend === 'codex' || backend === 'api') && sessionTerminalMode(env) === 'host');
+  return containerRunnableBackend(backend) || (backend === 'api' && sessionTerminalMode(env) === 'host');
 }
 
 /**
@@ -100,7 +105,7 @@ export function reviewFixBlockReason(
 ): string | undefined {
   if (!input.allowed) return '이 서버에서는 세션 터미널을 쓸 수 없어 AI 리뷰의 고침을 보낼 곳이 없습니다(개인 PC 모드가 필요하고, 컨테이너 방식이면 B_STUDIO_EXPERIMENTAL=1도 필요합니다)';
   if (!isTerminalRunnableBackend(input.backend, env)) {
-    if (input.backend === 'api' || input.backend === 'codex') return `컨테이너 방식 터미널은 ${input.backend} 세션을 띄우지 못해 AI 리뷰의 고침을 보낼 수 없습니다`;
+    if (input.backend === 'api') return '컨테이너 방식 터미널은 api 세션을 띄우지 못해 AI 리뷰의 고침을 보낼 수 없습니다';
     return `${input.backend} 세션은 이 서버의 터미널에서 띄울 수 없어 AI 리뷰의 고침을 보낼 수 없습니다`;
   }
   if (input.backend === 'api' && !input.apiKeyReady) {
@@ -187,8 +192,10 @@ export interface TerminalTarget {
    * 컨테이너에서 관문에 닿는 것을 확인한 뒤에야 터미널을 연다. 주지 않으면 관문 없는 터미널이다(테스트와 옛 호출자)
    */
   gateway?: () => Promise<AgentGatewayAddress>;
-  /** 이 컴퓨터 방식에서 띄울 CLI(#825). 없으면 claude다. 컨테이너 방식은 claude만 쓴다 */
+  /** 이 컴퓨터 방식에서 띄울 CLI(#825). 없으면 claude다. 컨테이너 방식은 claude와 codex만 쓴다 */
   cli?: HostCliKind;
+  /** 세션의 백엔드. 컨테이너 방식은 허용 목록(claude-code·codex)에 없거나 모르면 띄우지 않는다(ADR-245). sessionTerminalTarget이 늘 채운다 */
+  backend?: string;
   /**
    * API 모드 세션이면 있다(ADR-226): 이 컴퓨터 방식에서 claude 대신 b-studio의 자체 CLI를 띄운다. 모델과 키를 돌려주고, 키가 없으면 던진다 —
    * 곧바로 끝나는 CLI를 띄워 놓고 화면에 아무 말도 하지 않는 것보다 터미널을 열지 않고 이유를 알린다. 컨테이너 방식은 받지 않는다
@@ -278,23 +285,48 @@ export async function removeContainerAndConfig(
 }
 
 /** 컨테이너 백엔드가 터미널을 열 때 openAgentTerminal에 넘길 값. 첫 요청은 호스트 방식과 같은 꼴(firstPromptArg)로 맞춘다 */
-export function containerOpenOptions(options: { id: string; size: TerminalSize; initialPrompt?: string }): { id: string; size: TerminalSize; firstPrompt?: string } {
-  return { id: options.id, size: options.size, ...(options.initialPrompt !== undefined ? { firstPrompt: firstPromptArg(options.initialPrompt) } : {}) };
+export function containerOpenOptions(options: { id: string; size: TerminalSize; initialPrompt?: string }, cli?: HostCliKind): { id: string; size: TerminalSize; firstPrompt?: string; command?: string } {
+  return {
+    id: options.id,
+    size: options.size,
+    ...(options.initialPrompt !== undefined ? { firstPrompt: firstPromptArg(options.initialPrompt) } : {}),
+    // codex는 이미지의 codex를 감싸개로 띄우는 명령을 쓴다. 그 밖(claude)은 기본 명령이다
+    ...(cli === 'codex' ? { command: AGENT_CODEX_TERMINAL_COMMAND } : {}),
+  };
+}
+
+/**
+ * 컨테이너 방식에서 띄우기 전에 볼 것(ADR-245). codex는 이미지에 든 CLI를 쓰므로 그 이미지가 이 도커에 있어야 한다 — 없으면 `docker run`이 이름을 레지스트리에서 찾다가 알아보기 어려운 오류로 끝난다.
+ * 까닭이 있으면 거절하고(409), 이미지 확인이 답하지 못한 것도 없는 것으로 본다(`agentImageExists`). claude는 이미지 확인이 없다(기본 이미지에 홈 볼륨 설치). 먼저 백엔드가 컨테이너가 띄울 수 있는 것인지 본다
+ */
+export async function containerPreflight(target: Pick<TerminalTarget, 'cli' | 'backend'>, imageExists: (image: string) => Promise<boolean> = agentImageExists): Promise<string | undefined> {
+  // 허용 목록: 백엔드를 모르거나 컨테이너가 띄울 수 없으면(api 등) claude로 대신 띄우지 않고 거절한다
+  if (target.backend === undefined || !containerRunnableBackend(target.backend)) {
+    return `컨테이너 방식 터미널은 ${target.backend ?? '알 수 없는'} 세션을 띄우지 못합니다(claude-code와 codex만 띄웁니다)`;
+  }
+  if (target.cli !== 'codex') return undefined;
+  if (await imageExists(AGENT_CODEX_IMAGE)) return undefined;
+  return `codex용 에이전트 이미지(${AGENT_CODEX_IMAGE})가 이 도커에 없습니다. 운영자가 \`pnpm agent-image:build\`로 만든 뒤 다시 여세요`;
 }
 
 const DOCKER_BACKEND: TerminalBackend = {
   prepare: async (target, gateway) => {
     // 컨테이너의 CLI 로그인은 컨테이너 홈 볼륨에 있다. 이 컴퓨터의 계정 폴더를 붙이지 않는다
     if (await target.accountDir?.()) throw new Error('컨테이너 방식 터미널은 기본 계정만 씁니다. 다른 계정은 이 컴퓨터 방식(B_STUDIO_TERMINAL=host)에서 씁니다');
+    const codex = target.cli === 'codex';
+    // codex의 훅·도구·텔레메트리는 관문 폴더의 감싸개가 붙인다. 관문 없이는 띄우지 않고 claude로 대신하지도 않는다
+    if (codex && !gateway) throw new StudioError(409, '컨테이너 방식 codex 터미널은 관문 없이 열 수 없습니다');
     return ensureAgentContainer(target.sandboxId, target.root, {
       projectId: target.projectId,
       ...(target.homeUser !== undefined ? { userId: target.homeUser } : {}),
       ...(target.evaluationAssets ? { evaluationAssets: target.evaluationAssets } : {}),
-      ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway) } : {}),
+      ...(codex ? { image: AGENT_CODEX_IMAGE } : {}),
+      ...(gateway ? { gatewayDir: await writeAgentGatewayConfig(target.sandboxId, gateway, defaultAgentGatewayRoot(), codex ? agentCodexFiles(gateway) : {}) } : {}),
     });
   },
+  preflight: (target) => containerPreflight(target),
   // 첫 요청은 호스트 방식과 같은 꼴(firstPromptArg)로 맞춰 환경 변수로만 넘긴다. 컨테이너의 CLI 실행 인자로 쓰이지만 호스트의 인자 배열에는 들어가지 않는다
-  open: (place, options) => openAgentTerminal(place, containerOpenOptions(options)),
+  open: (place, options) => openAgentTerminal(place, containerOpenOptions(options, options.target.cli)),
   acceptsInitialPrompt: true,
   remove: (sandboxId) => removeContainerAndConfig(sandboxId),
   reachable: (place) => probeAgentGateway(place),

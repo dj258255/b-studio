@@ -14,7 +14,7 @@ import { StudioError } from './errors';
 import { newSessionModel } from './new-session';
 import { findProject } from './projects';
 import { openSessionTerminal, sessionTerminalMode, type TerminalMode } from './session-terminal';
-import { commandCodeTerminalReason, openCodeTerminalReason } from './terminal-allowed';
+import { commandCodeTerminalReason, openCodeTerminalReason, terminalClosedMessage } from './terminal-allowed';
 import { createSession, sessionTerminalAllowed, sessionTerminalTarget, setTerminalCheckChanges, subscribe } from './sessions';
 
 export interface RoutedTerminal {
@@ -67,14 +67,16 @@ const defaultTerminalDeps: RoutedTerminalDeps = {
 };
 
 /**
- * 터미널에서 띄울 수 있는 AI. 터미널 CLI는 세션 백엔드로 정해진다: 이 컴퓨터 방식이면 Claude Code·Codex·API(자체 CLI), 컨테이너 방식이면 Claude Code뿐이다.
+ * 터미널에서 띄울 수 있는 AI. 터미널 CLI는 세션 백엔드로 정해진다: 이 컴퓨터 방식이면 Claude Code·Codex·API(자체 CLI), 컨테이너 방식이면 Claude Code·Codex(API는 안 된다)다.
  * Command Code·OpenCode는 이 컴퓨터 방식이고 실험 기능 스위치가 켜졌을 때만이다.
  * 그 밖의 백엔드로 세션을 만들면 터미널에는 claude가 떠서 고른 AI와 달라지므로 거른다
  */
 function terminalBackends(mode: TerminalMode): BackendFilter {
   return (backend) => {
     if (backend === 'claude-code') return undefined;
-    if (backend === 'codex' || backend === 'api') return mode === 'host' ? undefined : '컨테이너 방식 터미널은 Claude Code만 띄웁니다';
+    if (backend === 'codex') return undefined;
+    // API(자체 CLI)는 이 컴퓨터 방식만(ADR-245): 컨테이너에서는 모델 키를 에이전트가 읽을 수 있는 자리에 둘 수밖에 없다
+    if (backend === 'api') return mode === 'host' ? undefined : '컨테이너 방식 터미널은 API 모드(자체 CLI)를 띄우지 않습니다. Claude Code나 Codex를 고르세요';
     // Command Code(실험): 터미널을 여는 쪽과 같은 판정을 쓴다. 여기서만 따로 거르면 열 수 있는 세션을 만들지 못한다
     if (backend === 'commandcode') return commandCodeTerminalReason(mode);
     // OpenCode(실험, ADR-241): 같은 판정
@@ -102,7 +104,7 @@ export async function startRoutedSession(
   // 첫 요청은 세션 터미널로만 보낸다(ADR-221). 채팅식(sendMessage)으로 돌아가지 않고, 세션을 만들기 전에 거절한다
   if (!input.terminal) throw new StudioError(400, '첫 요청은 세션 터미널로만 보냅니다(terminal: true를 함께 보내세요). 채팅식 실행은 지원하지 않습니다');
   const terminalDeps = { ...defaultTerminalDeps, ...terminalOverrides };
-  if (!terminalDeps.allowed()) throw new StudioError(400, '터미널로 보내려면 개인 PC 모드여야 합니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
+  if (!terminalDeps.allowed()) throw new StudioError(400, `터미널로 보낼 수 없는 서버입니다. ${terminalClosedMessage()}`);
   const project = await findProject(input.projectId);
   if (!project) throw new StudioError(404, '프로젝트를 찾을 수 없습니다');
   const only = terminalBackends(terminalDeps.mode());

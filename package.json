@@ -22,6 +22,7 @@
     "e2e:api-terminal-orders": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/api-terminal-orders-local.ts",
     "e2e:terminal-orders": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/terminal-orders-local.ts",
     "e2e:two-sessions": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/e2e/two-sessions-local.ts",
+    "agent-image:build": "sh packages/sandbox/agent-image/build.sh",
     "bench:boot": "tsx packages/sandbox/bench/boot.ts",
     "bench:coordination": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/run.ts",
     "bench:coordination:tokens": "tsx --tsconfig apps/studio/tsconfig.json apps/studio/bench/coordination/breakdown-cli.ts",

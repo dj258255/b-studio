@@ -77,6 +77,14 @@ export function terminalClosedMessage(env: Record<string, string | undefined> = 
 }
 
 /**
+ * 컨테이너 방식 터미널이 띄울 수 있는 백엔드(허용 목록, ADR-245): claude-code(홈 볼륨에 설치)와 codex(에이전트 이미지)뿐이다.
+ * api(자체 CLI)는 모델 키를 에이전트가 읽을 수 있는 자리에 둘 수밖에 없어 닫고, 모르는 이름도 거짓이다. 시험이 session-terminal을 통째로 가짜로 바꾸므로 이 모듈에 둔다
+ */
+export function containerRunnableBackend(backend: string): boolean {
+  return backend === 'claude-code' || backend === 'codex';
+}
+
+/**
  * Command Code 세션을 터미널로 띄울 수 없는 까닭(실험, ADR-233). 띄울 수 있으면 undefined다. 열린 것은 둘이 모두 맞을 때뿐이다:
  * 이 컴퓨터 방식(컨테이너에는 commandcode가 없고 mod를 붙이는 길도 없다)이고 실험 기능 스위치(B_STUDIO_EXPERIMENTAL)가 켜져 있다.
  * 방식은 부르는 쪽이 정한 값을 받는다(`sessionTerminalMode`가 모르는 방식은 던진다) — 이 판정은 그 값을 다시 읽지 않는다

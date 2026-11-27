@@ -7492,6 +7492,8 @@ export function sessionTerminalTarget(id: string): {
   onViolation: (reason: string) => void;
   gateway: () => Promise<AgentGatewayAddress>;
   cli: HostCliKind;
+  /** 세션의 백엔드. 컨테이너 방식이 띄울 수 있는지(허용 목록) 띄우기 전에 본다(ADR-245) */
+  backend: string;
   resumeConversation: () => string | undefined;
   accountDir: () => Promise<string | undefined>;
   model?: string;
@@ -7532,6 +7534,7 @@ export function sessionTerminalTarget(id: string): {
     // 관문은 세션에 하나다. 터미널을 다시 열어도 같은 것을 쓴다
     gateway: () => ensureSessionGateway(id, () => terminalGatewayHandlers(id)),
     cli: terminalCliKind(session),
+    backend: sessionBackend(session.snapshot),
     // 기억한 대화가 지금 띄울 CLI의 것일 때만 이어 붙인다(#872). 열 때마다 새로 묻는다
     resumeConversation: () => {
       // 멈춘 세션이어도 던지지 않는다(여는 쪽이 세션 상태를 따로 본다)
@@ -7710,12 +7713,13 @@ function noteTerminalConversation(id: string, conversation: string): void {
 }
 
 /**
- * 세션 터미널에서 띄울 CLI(#825). 이 컴퓨터 방식에서 세션의 백엔드가 codex면 codex, 그 밖에는 claude다.
- * 컨테이너 방식은 컨테이너에 claude만 깐다
+ * 세션 터미널에서 띄울 CLI(#825). 세션의 백엔드가 codex면 codex, 그 밖에는 claude다(Command Code·OpenCode는 이 컴퓨터 방식 + 실험 스위치).
+ * 컨테이너 방식은 claude(홈 볼륨에 설치)와 codex(에이전트 이미지)만 띄운다
  */
 function terminalCliKind(session: Session): HostCliKind {
-  if (sessionTerminalMode() !== 'host') return 'claude';
   const backend = sessionBackend(session.snapshot);
+  // 컨테이너 방식은 claude와 codex만 띄운다(이미지에 넣은 codex, ADR-245). 그 밖의 백엔드(api 등)는 컨테이너 백엔드의 띄우기 전 검사(containerPreflight)가 거절하므로 claude로 대신 뜨지 않는다
+  if (sessionTerminalMode() !== 'host') return backend === 'codex' ? 'codex' : 'claude';
   if (backend === 'codex') return 'codex';
   // Command Code(실험, ADR-233): 이 컴퓨터 방식이고 실험 스위치가 켜졌을 때만 띄운다. 아니면 sessionTerminalTarget이 열기 전에 거절하므로 여기서는 claude로 두지 않을 일이 없다
   if (backend === 'commandcode' && experimentalEnabled()) return 'commandcode';

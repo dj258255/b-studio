@@ -68,7 +68,8 @@ export const AGENT_PATH = `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sb
 /** 첫 요청을 컨테이너 안으로 넘기는 환경 변수. 호스트 방식과 같은 이름이다(host-terminal의 FIRST_PROMPT_ENV) */
 export const AGENT_FIRST_PROMPT_ENV = 'B_STUDIO_FIRST_PROMPT';
 /** 셸이 환경 변수에서 옮겨 담는 셸 변수(내보내지 않는다) */
-const FIRST_PROMPT_VAR = 'BSTUDIO_FIRST_PROMPT_VALUE';
+export const AGENT_FIRST_PROMPT_VAR = 'BSTUDIO_FIRST_PROMPT_VALUE';
+const FIRST_PROMPT_VAR = AGENT_FIRST_PROMPT_VAR;
 
 /**
  * 관문 설정(이슈 #673 2단계): 컨테이너 안의 CLI가 요청의 시작·쓰기 직전·턴의 끝에 호스트의 b-studio를 부르게 한다.
@@ -143,8 +144,14 @@ export const AGENT_READ_TOOL_MATCHER = `^(?:${AGENT_READ_TOOLS.join('|')})$`;
 export const STATUSLINE_FILE = 'statusline.json';
 export const HOOK_SCRIPT_NAME = 'b-studio-hook.mjs';
 export const GATEWAY_FILE_NAME = 'b-studio-gateway.json';
+/** 컨테이너 방식 codex(ADR-245)가 관문 폴더에 더 두는 파일 이름. 내용은 agent-codex.ts가 만든다. 정리(removeAgentGatewayConfig)가 이 이름만 지운다 */
+export const CODEX_CONTAINER_ENV_FILE = 'codex.env';
+export const CODEX_CONTAINER_WRAPPER_FILE = 'codex-wrapper';
+export const CODEX_CONTAINER_RC_FILE = 'codex-rc';
 /** 훅을 돌릴 node. 이름으로 찾지 않는다 — 터미널의 PATH는 홈 폴더의 실행 파일 자리가 앞에 있어, 거기에 같은 이름을 두면 훅이 바뀐다 */
 const HOOK_NODE = '/usr/local/bin/node';
+/** 컨테이너 안의 node(훅·codex 감싸개가 쓴다). HOOK_NODE와 같은 값이다 */
+export const AGENT_NODE = HOOK_NODE;
 const MCP_SERVER = 'b-studio';
 
 /**
@@ -443,6 +450,9 @@ export function agentGatewayFiles(address: AgentGatewayAddress): Record<string, 
   };
 }
 
+/** 기본 파일 말고 관문 폴더에 둘 수 있는 이름(codex). 쓰기와 정리가 같은 목록을 쓴다 */
+const GATEWAY_EXTRA_NAMES: ReadonlySet<string> = new Set([CODEX_HOOK_SCRIPT_NAME, CODEX_CONTAINER_ENV_FILE, CODEX_CONTAINER_WRAPPER_FILE, CODEX_CONTAINER_RC_FILE]);
+
 /** 관문 설정을 두는 호스트 폴더의 상위 폴더. 기본 ~/.cache/b-studio/agent-gateway */
 export function defaultAgentGatewayRoot(): string {
   return path.resolve(process.env.B_STUDIO_AGENT_GATEWAY_DIR ?? path.join(homedir(), '.cache/b-studio/agent-gateway'));
@@ -458,11 +468,18 @@ export function gatewayDirFor(sandboxId: string, root: string): string {
  * 세션의 관문 설정 파일을 호스트에 쓰고 그 폴더를 돌려준다. 토큰이 들어 있으므로 이 사용자만 읽을 수 있게 둔다.
  * 부를 때마다 다시 쓴다 — 스튜디오를 다시 띄우면 주소와 토큰이 바뀌고, 떠 있는 컨테이너는 같은 폴더를 붙인 채다
  */
-export async function writeAgentGatewayConfig(sandboxId: string, address: AgentGatewayAddress, root: string = defaultAgentGatewayRoot()): Promise<string> {
+export async function writeAgentGatewayConfig(
+  sandboxId: string,
+  address: AgentGatewayAddress,
+  root: string = defaultAgentGatewayRoot(),
+  extraFiles: Readonly<Record<string, string>> = {},
+): Promise<string> {
   const dir = gatewayDirFor(sandboxId, root);
   await mkdir(root, { recursive: true, mode: 0o700 });
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  for (const [name, content] of Object.entries(agentGatewayFiles(address))) {
+  // 더할 파일은 정해 둔 이름만 받는다(이름이 정리 목록 밖이면 세션이 멈춰도 남는다)
+  for (const name of Object.keys(extraFiles)) if (!GATEWAY_EXTRA_NAMES.has(name)) throw new SandboxError('관문 폴더에 둘 수 없는 파일 이름입니다', name);
+  for (const [name, content] of Object.entries({ ...agentGatewayFiles(address), ...extraFiles })) {
     const target = path.join(dir, name);
     if ((await readFile(target, 'utf8').catch(() => undefined)) === content) continue;
     // 같은 폴더에 임시 이름으로 쓰고 옮긴다. 읽는 쪽(컨테이너 안의 CLI)이 반쯤 쓰인 파일을 보지 않는다
@@ -476,7 +493,7 @@ export async function writeAgentGatewayConfig(sandboxId: string, address: AgentG
 /** 세션이 멈출 때 그 세션의 관문 설정을 지운다. 이 코드가 쓴 파일만 지우고, 폴더는 비었을 때만 지운다 */
 export async function removeAgentGatewayConfig(sandboxId: string, root: string = defaultAgentGatewayRoot()): Promise<void> {
   const dir = gatewayDirFor(sandboxId, root);
-  for (const name of ['managed-settings.json', 'managed-mcp.json', HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME]) await rm(path.join(dir, name), { force: true }).catch(() => {});
+  for (const name of ['managed-settings.json', 'managed-mcp.json', HOOK_SCRIPT_NAME, GATEWAY_FILE_NAME, ...GATEWAY_EXTRA_NAMES]) await rm(path.join(dir, name), { force: true }).catch(() => {});
   await rmdir(dir).catch(() => {});
 }
 

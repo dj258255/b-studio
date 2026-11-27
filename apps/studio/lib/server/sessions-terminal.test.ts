@@ -227,7 +227,7 @@ describe('라우팅이 고른 모델을 터미널 CLI에 넘긴다(#988)', () =>
       expect(sessionTerminalTarget(plain).model).toBeUndefined();
       await stopSession(plain);
 
-      // API 세션의 터미널은 claude를 띄운다. API 모델 id(레지스트리)는 claude가 모르는 이름이라 넘기지 않는다
+      // API 세션의 터미널은 claude를 띄운다(컨테이너 방식). API 모델 id(레지스트리)는 claude가 모르는 이름이라 넘기지 않는다
       const api = (await createSession('termproj', 'kim', 'copy', { modelId: 'anthropic-default' })).id;
       await waitFor(api, 'ready');
       expect(sessionTerminalTarget(api).model).toBeUndefined();
@@ -235,6 +235,92 @@ describe('라우팅이 고른 모델을 터미널 CLI에 넘긴다(#988)', () =>
     } finally {
       if (saved === undefined) delete process.env.B_STUDIO_BACKENDS;
       else process.env.B_STUDIO_BACKENDS = saved;
+    }
+  }, 30_000);
+});
+
+describe('서버 방식(인증을 켠 방식)의 세션 터미널 대상 (#1473)', () => {
+  const serverEnv = (): void => {
+    process.env.B_STUDIO_AUTH = 'token';
+    process.env.B_STUDIO_AUTH_SECRET = 's'.repeat(40);
+    process.env.B_STUDIO_AUTH_TOKENS = `kim:${'k'.repeat(32)},lee:${'l'.repeat(32)}`;
+    process.env.B_STUDIO_SERVER_TERMINAL = '1';
+    process.env.B_STUDIO_TERMINAL = 'container';
+    process.env.B_STUDIO_EXPERIMENTAL = '1';
+  };
+  const reset = (): void => {
+    for (const key of ['B_STUDIO_BACKENDS', 'B_STUDIO_AUTH_SECRET', 'B_STUDIO_AUTH_TOKENS', 'B_STUDIO_SERVER_TERMINAL', 'B_STUDIO_TERMINAL']) delete process.env[key];
+    process.env.B_STUDIO_AUTH = 'none';
+  };
+
+  it('홈 볼륨을 가르는 사용자는 세션을 만든 사람이고, 같은 프로젝트라도 사람마다 다르다. 개인 PC와 다른 값이다', async () => {
+    await setup();
+    serverEnv();
+    try {
+      const kim = (await createSession('termproj', 'kim', 'copy')).id;
+      await waitFor(kim, 'ready');
+      const lee = (await createSession('termproj', 'lee', 'copy')).id;
+      await waitFor(lee, 'ready');
+      expect(sessionTerminalAllowed()).toBe(true);
+      expect(sessionTerminalTarget(kim)).toMatchObject({ homeUser: 'kim', projectId: 'termproj' });
+      expect(sessionTerminalTarget(lee)).toMatchObject({ homeUser: 'lee', projectId: 'termproj' });
+      await stopSession(kim);
+      await stopSession(lee);
+    } finally {
+      reset();
+    }
+  }, 20_000);
+
+  it('스위치가 꺼지면 열지 않고 까닭(스위치 이름)을 적어 거절한다. 채팅식으로 돌아가는 길이 없다', async () => {
+    await setup();
+    serverEnv();
+    try {
+      const id = (await createSession('termproj', 'kim', 'copy')).id;
+      await waitFor(id, 'ready');
+      delete process.env.B_STUDIO_SERVER_TERMINAL;
+      expect(sessionTerminalAllowed()).toBe(false);
+      expect(() => sessionTerminalTarget(id)).toThrow('B_STUDIO_SERVER_TERMINAL=1');
+      process.env.B_STUDIO_SERVER_TERMINAL = '1';
+      // 이 컴퓨터 방식은 서버 방식에서 열리지 않는다
+      process.env.B_STUDIO_TERMINAL = 'host';
+      expect(() => sessionTerminalTarget(id)).toThrow('컨테이너');
+      await stopSession(id);
+    } finally {
+      reset();
+    }
+  }, 20_000);
+
+  it('컨테이너 방식에서 codex 세션은 codex를 띄우고(claude로 대신하지 않는다), claude 세션은 claude를 띄운다', async () => {
+    await setup();
+    try {
+      process.env.B_STUDIO_EXPERIMENTAL = '1';
+      process.env.B_STUDIO_TERMINAL = 'container';
+      process.env.B_STUDIO_BACKENDS = 'api,codex,claude-code';
+      const codex = (await createSession('termproj', 'kim', 'copy', { backend: 'codex' })).id;
+      await waitFor(codex, 'ready');
+      expect(sessionTerminalTarget(codex).cli).toBe('codex');
+      const claude = (await createSession('termproj', 'kim', 'copy', { backend: 'claude-code' })).id;
+      await waitFor(claude, 'ready');
+      expect(sessionTerminalTarget(claude).cli).toBe('claude');
+      await stopSession(codex);
+      await stopSession(claude);
+    } finally {
+      reset();
+    }
+  }, 20_000);
+
+  it('대상에 세션의 백엔드가 실린다(컨테이너 방식이 띄울 수 있는지 띄우기 전에 보는 근거)', async () => {
+    await setup();
+    process.env.B_STUDIO_BACKENDS = 'api,codex,claude-code';
+    try {
+      for (const backend of ['api', 'codex', 'claude-code'] as const) {
+        const id = (await createSession('termproj', 'kim', 'copy', { backend })).id;
+        await waitFor(id, 'ready');
+        expect(sessionTerminalTarget(id).backend).toBe(backend);
+        await stopSession(id);
+      }
+    } finally {
+      reset();
     }
   }, 30_000);
 });

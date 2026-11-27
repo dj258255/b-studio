@@ -504,7 +504,6 @@ describe('터미널 Fleet', () => {
 
   it.each([
     ['컨테이너 방식의 api 후보', { backends: 'api', terminal: 'container', experimental: '1', candidates: [{ backend: 'api' as const, model: 'model-a' }, { backend: 'api' as const, model: 'model-b' }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: api' }],
-    ['컨테이너 방식의 codex', { backends: 'codex', terminal: 'container', experimental: '1', candidates: [{ backend: 'codex' as const }, { backend: 'codex' as const }], message: '아직 터미널에서 띄우지 못하는 백엔드입니다: codex' }],
     ['터미널을 쓸 수 없는 서버', { backends: 'claude-code', terminal: 'container', experimental: undefined, candidates: [{ backend: 'claude-code' as const }, { backend: 'claude-code' as const }], message: '세션 터미널' }],
   ])('%s는 400으로 거절하고 세션을 만들지 않는다', async (_name, setup) => {
     process.env.B_STUDIO_BACKENDS = setup.backends;
@@ -542,6 +541,22 @@ describe('터미널 Fleet', () => {
     expect(fleet.runner).toBe('terminal');
     expect(fleet.members.map((member) => member.backend)).toEqual(['api', 'api']);
     expect(fake.createSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('컨테이너 방식(실험)도 codex 후보를 받는다(에이전트 이미지의 codex, ADR-245)', async () => {
+    terminalHarness();
+    process.env.B_STUDIO_TERMINAL = 'container';
+    process.env.B_STUDIO_EXPERIMENTAL = '1';
+    process.env.B_STUDIO_BACKENDS = 'codex';
+    const fleet = await createFleet({
+      projectId: 'orders',
+      request: '요청',
+      candidates: [{ backend: 'codex' }, { backend: 'codex' }],
+      owner: 'tess',
+      runner: 'terminal',
+      preflights: { codex: async () => ({ ok: true as const }) },
+    });
+    expect(fleet.members).toHaveLength(2);
   });
 
   it('이 컴퓨터 방식이면 codex 후보도 받는다', async () => {
