@@ -54,8 +54,55 @@ export type TerminalToolKind = 'claude' | 'codex' | 'commandcode' | 'opencode' |
 
 /** OpenCode가 파일을 바꾸는 도구: 입력에 `filePath`가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const OPENCODE_FILE_TOOLS: ReadonlySet<string> = new Set(['edit', 'write', 'multiedit']);
-/** Command Code가 파일을 바꾸는 도구(설치된 v1.91.1의 도구 정의에서 확인, ADR-233): 입력에 경로(`file_path`·`filePath`·`path`)가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
+/** Command Code가 파일을 바꾸는 도구(설치된 v1.93.4의 도구 정의와 별칭 표에서 확인, ADR-233): 입력에 경로(정식 이름 `file_path`나 별칭)가 있어야 한다. 없으면 어느 파일인지 알 수 없다 */
 const COMMAND_CODE_FILE_TOOLS: ReadonlySet<string> = new Set(['write_file', 'edit_file']);
+/**
+ * Command Code의 파일 도구가 받는 열쇠 표(설치된 v1.93.4의 `yv` 별칭 표와 두 도구의 입력 스키마, ADR-233).
+ * CLI는 도구를 부르기 전에 입력의 별칭을 정식 이름으로 고쳐 쓰는데(`renameAliasedField`: 정식 이름이 비었으면 입력 객체에서 먼저 나온 별칭을 쓴다),
+ * mod의 `beforeToolCall`에는 **고치기 전 원본 입력**이 온다. 그래서 우리는 정식 이름과 별칭을 모두 본다. 표에 없는 열쇠가 하나라도 있으면 판이 바뀐 것이라 경로를 알 수 없다(null).
+ */
+const COMMAND_CODE_PATH_KEYS: readonly string[] = ['file_path', 'path', 'absolutePath', 'absolute_path', 'filePath', 'filepath', 'pathname', 'target_file', 'targetFile', 'fileName', 'file_name', 'filename'];
+const PATH_KEY_SET: ReadonlySet<string> = new Set(COMMAND_CODE_PATH_KEYS);
+const COMMAND_CODE_FILE_INPUT_KEYS: Readonly<Record<string, ReadonlySet<string>>> = {
+  write_file: new Set([...COMMAND_CODE_PATH_KEYS, 'content', 'text', 'body', 'data', 'contents', 'fileContent']),
+  edit_file: new Set([
+    ...COMMAND_CODE_PATH_KEYS,
+    ...['old_string', 'oldValue', 'oldString', 'old', 'old_str', 'oldStr', 'from', 'old_value', 'oldText', 'old_text', 'oldContent', 'old_content'],
+    ...['new_string', 'newValue', 'newString', 'new', 'new_str', 'newStr', 'to', 'new_value', 'newText', 'new_text', 'newContent', 'new_content'],
+    ...['replace_all', 'replaceAll', 'replaceall', 'all', 'replacement_count', 'replacementCount', 'count'],
+  ]),
+};
+/** CLI가 경로 값에서 벗겨 내는 마크다운 링크(`[글](경로)`, cli.mjs `stripMarkdownLinkFromPath`) */
+const MARKDOWN_LINK = /^\[[^\]]*\]\(([^)]+)\)$/;
+
+/**
+ * commandcode의 `write_file`·`edit_file` 입력에서 바꿀 파일을 **모두** 꺼낸다. 허용 목록(카드의 쓰기 범위)에 넣을 값이라 모르는 값은 null이다:
+ * 입력이 객체가 아님, 표에 없는 열쇠가 있음, 경로 열쇠의 값이 글이 아님, 경로가 하나도 없음.
+ * 경로 열쇠가 둘 이상이고 값이 달라도 하나로 고르지 않고 모두 낸다 — CLI가 어느 것을 쓰는지는 객체의 열쇠 순서와 판에 달려 있어 우리가 따라 맞추면 틀린다.
+ * 부르는 쪽이 모두 범위 안일 때만 통과시킨다(어느 것을 써도 범위 안). 빈 글(`""`)은 CLI도 건너뛰는 자리라 건너뛴다
+ */
+function commandCodeFilePaths(tool: string, input: unknown): string[] | null {
+  if (typeof input !== 'object' || input === null || Array.isArray(input)) return null;
+  const record = input as Record<string, unknown>;
+  const known = COMMAND_CODE_FILE_INPUT_KEYS[tool];
+  if (!known) return null;
+  for (const key of Object.keys(record)) if (!known.has(key)) return null;
+  const paths: string[] = [];
+  const add = (value: string): void => {
+    if (!paths.includes(value)) paths.push(value);
+  };
+  for (const key of Object.keys(record)) {
+    if (!PATH_KEY_SET.has(key)) continue;
+    const value = record[key];
+    if (typeof value !== 'string') return null;
+    if (value.trim() === '') continue;
+    add(value);
+    const unwrapped = MARKDOWN_LINK.exec(value.trim())?.[1];
+    if (unwrapped !== undefined && unwrapped.trim() !== '') add(unwrapped);
+  }
+  return paths.length > 0 ? paths : null;
+}
+
 /**
  * Command Code가 서브에이전트를 띄우는 도구. 서브에이전트 안의 도구 호출은 mod의 쓰기 직전 훅을 거치지 않으므로(ADR-233) 이 도구가 바꿀 파일은 알 수 없다.
  * 문서가 두 이름을 쓴다(`agent`, `task`): 더 맞추면 더 막을 뿐이다
@@ -95,12 +142,14 @@ function strictPatchPaths(patch: unknown): string[] | null {
  * - claude: `file_path`·`notebook_path`의 첫 값. codex: `apply_patch`의 `command` 본문(엄격하게 읽고 모르면 null)
  * - opencode: `filePath`(edit·write·multiedit은 없으면 null), `apply_patch`·`patch`는 `patchText`를 엄격하게 읽는다
  * - commandcode·gemini: 알려진 경로 키(`file_path`·`filePath`·`path`·`notebook_path`)를 모두 낸다(더 꺼내면 더 막는다). 패치 도구는 본문을 읽지 못하면 null.
- *   commandcode의 파일 도구(`write_file`·`edit_file`)는 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 서브에이전트 도구(`agent`·`task`)는 늘 null이다.
+ *   commandcode의 파일 도구(`write_file`·`edit_file`)는 정식 이름과 별칭 열쇠를 모두 꺼내고(`commandCodeFilePaths`), 표에 없는 열쇠가 있거나 경로를 하나도 꺼내지 못해도 null이다(입력이 객체가 아니어도). 서브에이전트 도구(`agent`·`task`)는 늘 null이다.
  *   셸 도구처럼 경로가 없는 도구는 빈 목록이다
  */
 export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, input: unknown): string[] | null {
   // 서브에이전트 도구는 입력과 상관없이 바꾸는 파일을 알 수 없다. 빈 목록으로 읽으면 카드의 쓰기 범위가 그 안의 쓰기에 열린다
   if (kind === 'commandcode' && COMMAND_CODE_NESTED_TOOLS.has(tool)) return null;
+  // 파일 도구는 정식 이름과 별칭 열쇠를 모두 읽는다(아래 표). 모르는 열쇠가 있으면 null
+  if (kind === 'commandcode' && COMMAND_CODE_FILE_TOOLS.has(tool)) return commandCodeFilePaths(tool, input);
   if (kind === 'claude' || kind === 'codex') {
     // 패치 도구는 본문을 엄격하게 읽는다. 읽지 못하면 바꾸는 파일을 알 수 없다(옛 코드는 빈 목록이거나 느슨한 추출이라 쓰기 범위를 비켜 갔다)
     if (PATCH_TOOLS.has(tool)) {
@@ -121,7 +170,7 @@ export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, inpu
     if (kind === 'opencode') return strictPatchPaths(record.patchText);
     return strictPatchPaths(record.patchText ?? record.command);
   }
-  if (!record) return (OPENCODE_FILE_TOOLS.has(tool) && kind === 'opencode') || (COMMAND_CODE_FILE_TOOLS.has(tool) && kind === 'commandcode') ? null : [];
+  if (!record) return OPENCODE_FILE_TOOLS.has(tool) && kind === 'opencode' ? null : [];
   if (kind === 'opencode') {
     const value = record.filePath;
     if (typeof value === 'string' && value.trim() !== '') return [value];
@@ -132,7 +181,5 @@ export function terminalToolFilePaths(kind: TerminalToolKind, tool: string, inpu
     const value = record[key];
     if (typeof value === 'string' && value.trim() !== '') paths.push(value);
   }
-  // 경로를 하나도 꺼내지 못한 파일 도구는 어느 파일을 바꾸는지 알 수 없다. 빈 목록(바꾸는 파일 없음)으로 읽으면 허용 목록(카드의 쓰기 범위)이 열린다
-  if (paths.length === 0 && kind === 'commandcode' && COMMAND_CODE_FILE_TOOLS.has(tool)) return null;
   return paths;
 }

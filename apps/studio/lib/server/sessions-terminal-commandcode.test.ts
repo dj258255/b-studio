@@ -82,6 +82,7 @@ vi.mock('./session-terminal', () => ({
 }));
 
 import { createSession, getSnapshot, sessionTerminalActivity, sessionTerminalTarget, setTerminalTaskContext, stopSession, subscribe, terminalGatewayHandlersForTest } from './sessions';
+import { armModClock, disarmModClock } from './session-terminal-mod';
 import { startTerminalGateway, type TerminalGateway } from './terminal-gateway';
 
 const saved = { mode: process.env.B_STUDIO_MODE, auth: process.env.B_STUDIO_AUTH, sessions: process.env.B_STUDIO_SESSIONS_DIR, experimental: process.env.B_STUDIO_EXPERIMENTAL, usage: process.env.B_STUDIO_USAGE_DIR, backends: process.env.B_STUDIO_BACKENDS, terminal: process.env.B_STUDIO_TERMINAL, gatewayDir: process.env.B_STUDIO_GATEWAY_DIR };
@@ -480,6 +481,120 @@ describe('Command Code 터미널: 진짜 mod → 진짜 훅 서버 → 진짜 �
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
     await cli.hooks.onStop!({ state: {}, stopReason: 'end_turn', turnNumber: 1, lastAssistantText: '' });
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('Command Code 터미널: 보안 검토의 지적 둘(경로 별칭, 설정으로 mod 끄기)', () => {
+  it('경로 별칭으로 쓰기 범위를 비켜 가지 못한다: path는 범위 안, target_file은 범위 밖인 입력은 막히고 파일이 만들어지지 않는다', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    setTerminalTaskContext(session.id, { writableScope: ['api/src'], doneTests: [] });
+    await cli.hooks.transformInput!({ text: '주문에 메모 필드 추가' });
+    const input = { target_file: path.join(session.work, 'web/forbidden.txt'), path: path.join(session.work, 'api/src/ok.txt'), content: 'x' };
+    const denied = await toolCall(session, cli, 'write_file', input, () => writeFile(path.join(session.work, 'web/forbidden.txt'), 'x'));
+    expect(denied.blocked).toContain('web/forbidden.txt');
+    await expect(fileOf(session, 'web/forbidden.txt')).rejects.toThrow();
+    // 모르는 열쇠가 끼어도 막힌다(판이 바뀌어 별칭이 늘어난 경우)
+    const unknown = await toolCall(session, cli, 'write_file', { file_path: path.join(session.work, 'api/src/ok.txt'), destination: path.join(session.work, 'web/forbidden.txt'), content: 'x' });
+    expect(unknown.blocked).toContain('알 수 없어');
+    // 대조: 별칭 하나만 쓰고 범위 안이면 통과한다
+    expect((await toolCall(session, cli, 'write_file', { target_file: path.join(session.work, 'api/src/ok.txt'), text: 'x' })).blocked).toBeUndefined();
+    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'max_turns' } });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('작업 폴더의 .commandcode 설정·mods 쓰기는 카드가 없어도 막힌다: 대소문자 섞인 경로·~/·.. 표기도 막고, 관계없는 파일은 통과한다(대조)', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    await cli.hooks.transformInput!({ text: '설정 정리' });
+    const targets = [
+      path.join(session.work, '.commandcode/settings.json'),
+      path.join(session.work, '.commandcode/settings.local.json'),
+      path.join(session.work, '.commandcode/mods/evil.ts'),
+      path.join(session.work, '.CommandCode/Settings.JSON'),
+      path.join(session.work, 'api/../.commandcode/settings.json'),
+      '~/.commandcode/settings.json',
+    ];
+    for (const file of targets) {
+      for (const tool of ['write_file', 'edit_file']) {
+        const input = tool === 'write_file' ? { file_path: file, content: '{}' } : { path: file, old_string: 'a', new_string: 'b' };
+        const outcome = await toolCall(session, cli, tool, input);
+        expect(outcome.blocked, `${tool} ${file}`).toContain('.commandcode');
+      }
+    }
+    await expect(readFile(path.join(session.work, '.commandcode/settings.json'), 'utf8')).rejects.toThrow();
+    // 대조: 관계없는 파일은 통과한다
+    expect((await writeFileTool(session, cli, 'api/src/Order.java', 'class Order { int a; }\n')).blocked).toBeUndefined();
+    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'max_turns' } });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('카드가 없어도 바꿀 파일을 알 수 없는 파일 도구는 막는다(모르는 열쇠로 .commandcode를 건드리지 못했다고 확인할 수 없다). 셸 도구는 그대로다(대조)', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    const denied = await toolCall(session, cli, 'write_file', { file_path: path.join(session.work, 'api/src/Order.java'), destination: path.join(session.work, '.commandcode/settings.json'), content: '{}' });
+    expect(denied.blocked).toContain('알 수 없어');
+    await expect(readFile(path.join(session.work, '.commandcode/settings.json'), 'utf8')).rejects.toThrow();
+    expect((await toolCall(session, cli, 'shell_command', { command: 'ls' })).blocked).toBeUndefined();
+    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'max_turns' } });
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('슬래시 명령을 실행하는 run_command 도구는 commandcode 세션에서 늘 막힌다(/reload로 mod를 다시 불러오게 하지 못한다). 실행도 열지 않는다', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    const outcome = await toolCall(session, cli, 'run_command', { command: '/reload' });
+    expect(outcome.blocked).toContain('run_command');
+    expect(session.ofType('run_started')).toEqual([]);
+    // 대조: 같은 세션의 셸 도구는 막지 않는다(턴 끝 검사가 맡는다)
+    expect((await toolCall(session, cli, 'shell_command', { command: 'ls' })).blocked).toBeUndefined();
+    await cli.hooks.onRunEnd!({ state: {}, result: { stopReason: 'max_turns' } });
+    await stopSession(session.id);
+  }, 30_000);
+});
+
+describe('Command Code 터미널: mod가 불러와졌다는 신호는 진짜 mod와 훅 서버를 거쳐 시계에 닿는다(보안 검토)', () => {
+  const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('session-start가 오면 시계가 선다. mod가 reload로 끝나면 시계를 다시 걸고, 새 session-start가 오면 다시 선다. CLI가 끝난 것으로 알리지 않는다', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    const violations: string[] = [];
+    armModClock(session.id, (reason) => violations.push(reason), 120);
+    await cli.hooks.onSessionStart!({ source: 'startup' });
+    await wait(200);
+    expect(violations).toEqual([]);
+    fake.cli = [];
+    // reload로 끝났고 새 mod가 다시 떴다
+    await cli.hooks.onSessionEnd!({ reason: 'reload' });
+    await wait(40);
+    await cli.hooks.onSessionStart!({ source: 'reload' });
+    await wait(200);
+    expect(violations).toEqual([]);
+    // reload로 끝났는데 새 mod가 뜨지 않았다(설정이 mod를 껐다)
+    await cli.hooks.onSessionEnd!({ reason: 'reload' });
+    await wait(250);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('reload');
+    // reload는 CLI의 끝이 아니다: 끝으로 알리지 않았다(CLI 표시를 끄지 않는다)
+    expect(fake.cli).not.toContain(false);
+    disarmModClock(session.id);
+    await stopSession(session.id);
+  }, 30_000);
+
+  it('진짜 종료(reason이 reload가 아님)는 CLI가 끝났다고 알리고 시계는 건드리지 않는다', async () => {
+    const session = await open();
+    const { cli } = await launchCli(session);
+    const violations: string[] = [];
+    armModClock(session.id, (reason) => violations.push(reason), 80);
+    await cli.hooks.onSessionStart!({ source: 'startup' });
+    fake.cli = [];
+    await cli.hooks.onSessionEnd!({ reason: 'shutdown' });
+    expect(fake.cli).toContain(false);
+    await wait(200);
+    expect(violations).toEqual([]);
+    disarmModClock(session.id);
     await stopSession(session.id);
   }, 30_000);
 });

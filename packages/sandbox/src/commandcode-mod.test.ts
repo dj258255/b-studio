@@ -397,15 +397,30 @@ describe('afterToolCall·onRunEnd·서브에이전트·세션', () => {
     expect(bodies).toContainEqual(expect.objectContaining({ hook_event_name: 'SubagentStop', agent_id: 'agent-1', agent_type: 'general' }));
   });
 
-  it('세션이 시작되면 CLI가 떴다고 알리고, 끝나면 알린다. 같은 세션에서 mod만 다시 불러온 것(reload)은 알리지 않는다', async () => {
+  it('세션이 시작되면 CLI가 떴다고 알리고, 끝나면 알린다', async () => {
     const server = await gateway({ 'session-start': { body: {} }, 'session-end': { body: {} } });
     const { hooks } = await loadMod(await gatewayDir({ url: server.url }));
-    await hooks.onSessionStart!({ source: 'reload' });
-    await hooks.onSessionEnd!({ reason: 'reload' });
-    expect(server.seen).toEqual([]);
     await hooks.onSessionStart!({ source: 'startup' });
     await hooks.onSessionEnd!({ reason: 'shutdown' });
     expect(server.seen.map((entry) => entry.event)).toEqual(['session-start', 'session-end']);
+    expect(server.seen[0]!.body).toMatchObject({ hook_event_name: 'SessionStart', source: 'startup' });
+    expect(server.seen[1]!.body).toMatchObject({ hook_event_name: 'SessionEnd', reason: 'shutdown' });
+  });
+
+  it('mod만 다시 불러온 것(reload)도 서버에 알린다: 끝날 때 reason=reload, 다시 뜰 때 source=reload. reload 뒤 설정이 mod를 껐다면 뒤의 알림이 오지 않는 것으로 서버가 안다(보안 검토)', async () => {
+    const server = await gateway({ 'session-start': { body: {} }, 'session-end': { body: {} } });
+    const { hooks } = await loadMod(await gatewayDir({ url: server.url }));
+    await hooks.onSessionEnd!({ reason: 'reload' });
+    await hooks.onSessionStart!({ source: 'reload' });
+    expect(server.seen.map((entry) => entry.event)).toEqual(['session-end', 'session-start']);
+    expect(server.seen[0]!.body).toMatchObject({ hook_event_name: 'SessionEnd', reason: 'reload' });
+    expect(server.seen[1]!.body).toMatchObject({ hook_event_name: 'SessionStart', source: 'reload' });
+  });
+
+  it('알림이 닿지 못해도 던지지 않는다(알리기만 한다)', async () => {
+    const { hooks } = await loadMod(await gatewayDir(undefined));
+    await expect(hooks.onSessionEnd!({ reason: 'reload' })).resolves.toBeUndefined();
+    await expect(hooks.onSessionStart!({ source: 'reload' })).resolves.toBeUndefined();
   });
 
   it('시스템 프롬프트에 덧붙이는 글은 매번 같다(캐시를 깨지 않는다)', async () => {

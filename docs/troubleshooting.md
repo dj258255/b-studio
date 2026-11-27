@@ -8316,3 +8316,39 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 - 판정이 그 세션의 CLI 갈래의 표(`isReadToolFor(terminalCliKind(session), tool)`)를 읽는다. Command Code 표는 설치된 v1.91.1의 도구 정의에서 이름을 확인한 것만 둔다(`read_file`·`read_directory`·`grep`·`glob`·`web_search`·`web_fetch`·`todo_write`·`ask_user_question`). 표에 없는 이름은 바꾸는 도구라 닫는 쪽으로만 틀린다.
 - 고치기 전에는 Rust 시험(`command_code_read_tools_are_only_the_names_checked_in_the_installed_package`)이 `read_directory`에서 실패했다. 판정을 Claude의 표로 되돌리는 변이를 넣으면 `sessions-terminal-commandcode.test.ts`의 읽기 도구 시험(`run_started`가 열림)이 실패한다.
 - 확인하지 못한 것: 이 표의 도구가 모두 파일을 바꾸지 않는다는 것은 도구 설명과 이름으로만 봤다(`todo_write`는 세션의 할 일 목록을 바꾼다. 작업 폴더의 파일이 아니다). 실제 세션에서 도구마다 불러 보지 않았다.
+
+
+## 289. Command Code 세션 터미널의 파일 도구가 경로 별칭으로 쓰기 범위를 비켜 갔음 — 확인하는 쪽은 열쇠 셋만 보고, 실제로 쓰는 쪽은 별칭 열한 개를 읽었다
+
+### 증상
+
+- 커밋 보안 검토가 지적했고 고치기 전 코드에서 확인했다. 쓰기 범위가 `src/**`인 카드에서 입력 `{"target_file":"lib/forbidden.ts","path":"src/ok.ts","content":"x"}`를 보내면 서버는 `src/ok.ts`만 보고 허용하고, CLI는 `lib/forbidden.ts`를 썼다. 보호 경로를 쓰기 직전에 고정하는 자리(`pinBeforeWrite`)도 같은 추출을 쓰므로 같은 방식으로 비켜 갔다.
+
+### 원인
+
+- CLI는 mod의 `beforeToolCall`에 별칭을 고치기 **전** 원본 입력을 넘기고, 그 뒤 `file_path`가 비었으면 입력 객체에서 먼저 나온 별칭을 경로로 쓴다(`renameAliasedField`, v1.93.4). 별칭은 `write_file`·`edit_file` 모두 `path`·`absolutePath`·`absolute_path`·`filePath`·`filepath`·`pathname`·`target_file`·`targetFile`·`fileName`·`file_name`·`filename`이다. 우리 추출은 `file_path`·`filePath`·`path`·`notebook_path`만 꺼냈다. 확인하는 쪽과 실제로 동작하는 쪽이 같은 입력을 다르게 읽었다. 또 열쇠 끝의 `?`·`*`를 떼는 규칙(`stripOptionalMarkerFromKey`)과 경로 값의 마크다운 링크 벗기기(`stripMarkdownLinkFromPath`)도 CLI가 고친 뒤의 값을 바꾼다.
+
+### 해결
+
+- `write_file`·`edit_file`은 **입력의 모든 열쇠가 표(정식 이름 + 별칭, 내용·`old`·`new` 쪽 별칭 포함)에 있을 때만** 경로를 꺼내고, 모르는 열쇠가 하나라도 있으면 `null`(막힘)이다(`?`가 붙은 열쇠도 표에 없으니 막힌다). 경로 열쇠는 모두 꺼내고 값이 달라도 그대로 모두 낸다: 어느 것을 쓰는지는 열쇠 순서와 판에 달려 있어 우리가 따라 맞추면 틀리고, 모두 범위 안이어야 통과시키면 어느 쪽이 쓰여도 범위 안이다. 값이 글이 아니면 `null`, 빈 글은 CLI도 건너뛰는 자리라 건너뛴다. 마크다운 링크 꼴은 글 그대로와 벗긴 값을 둘 다 낸다.
+- 고치기 전에는 `session-terminal-tool-paths.test.ts`의 새 시험 여섯 개(별칭 열두 개, 비켜 가기 시나리오, 여러 열쇠, 글이 아닌 값, 모르는 열쇠, 마크다운 링크)가 실패했다. 아래 변이를 넣으면 같은 시험과 `sessions-terminal-commandcode.test.ts`의 별칭 시험이 다시 실패한다.
+- 지적받은 결함은 같은 시험을 기존 코드에 돌려 봤다: 다른 갈래(gemini)의 `write_file`은 알려진 열쇠만 꺼내는 옛 방식 그대로다(gemini는 이 단계에 없다). 읽기 도구는 막는 대상이 아니라 확인하지 않았다.
+- 훑어본 다른 도구: cli.mjs의 도구 스키마 중 경로를 받는 것은 `read_file`·`read_directory`·`grep`·`glob`·`get_diagnostics`(읽기)와 `write_file`·`edit_file`뿐이다. 쓰는 도구는 이 둘과 셸(`shell_command`·`powershell`·`monitor_command`)과 슬래시 명령(`run_command`, 트러블슈팅 290에서 막음)이다. `taste`는 CLI가 스스로 `.commandcode/taste`를 쓰는 것이라 경로를 받지 않는다. 우리가 모르는 쓰기 도구는 없었다.
+
+
+## 290. 설정의 `mods.disableAll`·`mods.disabled`가 `--mod`로 준 mod를 껐음 — 감시는 argv만 보고 붙은 것으로 판정했다
+
+### 증상
+
+- 커밋 보안 검토가 지적했고 cli.mjs를 읽어 확인했다(실제 CLI는 돌리지 않았다). `loadMods`는 `if(e.builtinsOnly||o.disableAll)return;`으로 `--mod`로 준 mod까지 건너뛰고, 이름이 `mods.disabled`에 있으면 그 mod만 건너뛴다. 설정은 `~/.commandcode/settings.json`과 작업 폴더(프로젝트 루트)의 `.commandcode/settings.json`·`settings.local.json`에서 읽는데 뒤의 둘은 에이전트가 쓸 수 있다. 프로젝트 mod(`.commandcode/mods/`, `mods.paths`·`mods.sources`)는 우리 mod **뒤에** 등록되어 우리가 허용한 입력을 바꿔 쓸 수 있다. 감시는 argv만 보므로 이때 CLI를 훅이 붙은 것으로 판정했고, 훅이 하나도 없는 채로 쓰기가 일어났다.
+
+### 원인
+
+- 훅이 붙었는지를 argv(`--mod <우리 mod>`)로만 판정했다. "이 mod가 실제로 불러와졌는가"는 설정이 정한다. 확인하는 쪽(argv)과 실제로 동작하는 쪽(CLI의 mod 불러오기)이 다른 입력을 읽었다. Claude 쪽은 같은 문제(트러블슈팅 145, `disableAllHooks`)를 `--settings`로 덮어 막았지만 Command Code에는 설정을 덮어쓰는 인자가 없다.
+
+### 해결
+
+- 세 겹으로 닫는다(ADR-233 결정 8): ① 띄우기 전에 세 설정 파일과 mods 폴더를 읽어 읽지 못함·`disableAll`·`disabled`에 우리 mod 이름(대소문자·확장자 무시)·다른 mod 출처(`mods.paths`·`mods.sources`·mods 폴더의 항목)가 있으면 409로 열지 않는다. 읽는 자리는 cli.mjs의 `discoverMods`·`resolveModSettings`·`resolveProjectRoot`·`scanModsDir`·`modNameFromPath`를 따랐다. ② commandcode 세션에서 `.commandcode` 아래(작업 폴더·프로젝트 루트·사용자 홈)를 쓰는 파일 도구와, 슬래시 명령을 돌리는 `run_command`를 카드 없이도 막는다. ③ mod가 불러와졌다는 신호(`session-start`)가 터미널을 연 뒤 90초 안에 오지 않으면, 그리고 mod가 `reload`로 끝난 뒤 같은 시간 안에 새 신호가 오지 않으면 훅 없이 뜬 것으로 보고 감시가 찾은 위반과 같은 길로 처리한다(실행은 실패로 닫고 되돌림, 세션 터미널을 닫음).
+- 고치기 전에는 `commandcode-config.test.ts`·`session-terminal-mod.test.ts`가 모듈이 없어 실패했고, `session-terminal.test.ts`의 새 시험(신호 시계 두 개, 열기 전 검사 세 개)과 `sessions-terminal-commandcode.test.ts`의 설정 쓰기·`run_command` 시험(`outcome.blocked`가 `undefined`)과 reload 시험(`expected [Array(1)] to deeply equal []`)이 실패했다. 변이 결과는 PR 설명에 적는다.
+- 남은 틈: 사람이 연 뒤에 사용자 수준 설정을 바꾼 경우, CLI를 끝내고 셸에서 다시 띄운 경우(시계는 열 때와 reload 뒤에만 건다), 관문 토큰을 읽은 에이전트가 `session-start`를 직접 보내는 경우, `--config` 같은 인자·환경 변수로 설정 자리를 바꾸는 경우는 닫지 못했다.
+

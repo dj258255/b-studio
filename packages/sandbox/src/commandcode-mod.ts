@@ -264,19 +264,20 @@ export default function (cmd) {
       }
     },
 
-    // CLI가 떴다/끝났다. mod만 다시 불러온 것(reload)은 CLI의 시작·끝이 아니다
+    // CLI가 떴다/끝났다. mod만 다시 불러온 것(reload)도 알린다(보안 검토): 서버는 "reload로 끝났다"를 받은 뒤 정해진 시간 안에 새 session-start가 오지 않으면
+    // 설정이 mod를 끈 것으로 본다. reload는 CLI의 시작·끝이 아니라서 서버는 이 알림으로 "CLI가 떴다/끝났다"를 바꾸지 않고 시계만 다룬다
     onSessionStart: async (info) => {
       try {
-        if (info && info.source === 'reload') return;
-        await post('session-start', { hook_event_name: 'SessionStart', ...(cwd ? { cwd } : {}) });
+        const source = info && typeof info.source === 'string' ? info.source : undefined;
+        await post('session-start', { hook_event_name: 'SessionStart', ...(source ? { source } : {}), ...(cwd ? { cwd } : {}) });
       } catch {
         // 알리기만 한다
       }
     },
     onSessionEnd: async (info) => {
       try {
-        if (info && info.reason === 'reload') return;
-        await post('session-end', { hook_event_name: 'SessionEnd', ...(cwd ? { cwd } : {}) });
+        const reason = info && typeof info.reason === 'string' ? info.reason : undefined;
+        await post('session-end', { hook_event_name: 'SessionEnd', ...(reason ? { reason } : {}), ...(cwd ? { cwd } : {}) });
       } catch {
         // 알리기만 한다
       }
