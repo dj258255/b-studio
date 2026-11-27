@@ -269,6 +269,7 @@ import { servicesWithPassedGateTests, type DeclaredGateTest } from './gate-test-
 import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
+import { settleDraftStops } from './session-terminal-draft';
 import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalMode, terminalPause, warnSessionTerminal, type TerminalPause } from './session-terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -1594,6 +1595,8 @@ export async function deleteSession(id: string): Promise<void> {
 
   // 복사 모드 세션이면 claude의 폴더 신뢰 기록도 지운다(ADR-222). 폴더가 있을 때 지워야 실제 경로로 맞출 수 있어 폴더보다 먼저 한다
   await forgetFolderTrust(snapshot, home);
+  // 닫는 중인 터미널의 쓰다 만 글 저장이 끝난 뒤에 지운다(늦게 끝난 쓰기가 지운 폴더를 되살리거나 지우기와 겹치지 않게, ADR-237)
+  await settleDraftStops();
   // 내 폴더 세션이어도 사용자 폴더는 지우지 않는다: 세션 폴더(상태 폴더)만 지운다. Rust가 지우기 직전에 다시 확인한다
   await removeSessionHome(root, home, snapshot);
 }
@@ -5706,6 +5709,13 @@ export interface PersistedRequirementsExtractionDraft extends RequirementsExtrac
   recommendationSource?: 'web' | 'model';
 }
 
+const TERMINAL_DRAFT_FILE = path.join('.git', 'b-studio', 'terminal-draft.json');
+
+/** 터미널 CLI 입력창에 쓰다 만 글의 저장 파일(ADR-237). 세션 상태 폴더 안이라 세션을 지우면 같이 지워진다 */
+function terminalDraftFile(session: Session): string {
+  return path.join(stateDirOf(session.snapshot), TERMINAL_DRAFT_FILE);
+}
+
 function requirementsDraftFile(session: Session): string {
   return path.join(stateDirOf(session.snapshot), REQUIREMENTS_DRAFT_FILE);
 }
@@ -7500,6 +7510,7 @@ export function sessionTerminalTarget(id: string): {
   resumeConversation: () => string | undefined;
   accountDir: () => Promise<string | undefined>;
   model?: string;
+  draftFile?: string;
   selfAgent?: () => Promise<{ profile: Record<string, unknown>; apiKey?: string }>;
 } {
   if (!sessionTerminalAllowed()) throw new StudioError(403, '세션 터미널은 개인 PC 모드에서만 씁니다(컨테이너 방식은 B_STUDIO_EXPERIMENTAL=1도 필요합니다)');
@@ -7545,6 +7556,8 @@ export function sessionTerminalTarget(id: string): {
     accountDir: async () => (await sessionAccount(session.snapshot)).configDir,
     ...terminalModel(session),
     ...(selfAgentTerminal(session) ? { selfAgent: () => selfAgentModel(session) } : {}),
+    // 입력창에 쓰다 만 글을 저장·복원한다(ADR-237). 입력창 모양을 확인한 claude만. 자체 CLI·codex는 모양을 확인하지 못해 읽지 않는다
+    ...(terminalCliKind(session) === 'claude' && !selfAgentTerminal(session) ? { draftFile: terminalDraftFile(session) } : {}),
   };
 }
 
@@ -10162,7 +10175,8 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
     },
     prompt: (input) => {
       // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
-      noteSessionTerminalCli(id, true);
+      // 요청을 보냈으니 desk에 보이던 "쓰다 만 글"은 넘어갔다(promptSubmitted)
+      noteSessionTerminalCli(id, true, { promptSubmitted: true });
       return terminalPromptSubmitted(id, input);
     },
     preTool: (input) => terminalToolStarting(id, input),
