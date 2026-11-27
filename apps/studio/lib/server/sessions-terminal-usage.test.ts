@@ -472,13 +472,15 @@ describe('정체 재촉(#1454)', () => {
   const NUDGE = '\x1b[200~멈춘 것 같습니다. 진행 상황을 확인하고 이어서 하거나, 막혔으면 이유를 알려 주세요.\x1b[201~';
   const warnings = (session: Opened) => session.events.filter((event) => event.type === 'agent' && event.event.type === 'warning');
   /** 정체 시간 8초, 켠 세션에서 요청을 열고 가짜 시계로 간다 */
-  async function stalled(env: { nudge?: string; max?: string } = { nudge: '1' }): Promise<Opened> {
+  async function stalled(env: { nudge?: string; max?: string; idle?: boolean } = { nudge: '1' }): Promise<Opened> {
     process.env.B_STUDIO_TERMINAL_STALL_SECONDS = '8';
     if (env.nudge !== undefined) process.env.B_STUDIO_TERMINAL_STALL_NUDGE = env.nudge;
     if (env.max !== undefined) process.env.B_STUDIO_TERMINAL_STALL_NUDGE_MAX = env.max;
     const session = await open();
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
     await session.gateway.prompt({ prompt: '[읽기만] 설명해줘' });
+    // CLI가 입력창에 있다는 긍정 신호(입력 대기 알림). 이것이 있을 때만 재촉한다
+    if (env.idle !== false) await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
     return session;
   }
 
@@ -515,9 +517,11 @@ describe('정체 재촉(#1454)', () => {
     vi.advanceTimersByTime(12_000);
     expect(fake.writes).toHaveLength(2);
     await session.gateway.preTool({ tool_name: 'Read', tool_input: {} }); // 움직임
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
     vi.advanceTimersByTime(12_000);
     expect(fake.writes).toHaveLength(4);
     await session.gateway.preTool({ tool_name: 'Read', tool_input: {} });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
     vi.advanceTimersByTime(12_000);
     expect(fake.writes).toHaveLength(4);
   }, 30_000);
@@ -528,6 +532,39 @@ describe('정체 재촉(#1454)', () => {
     vi.advanceTimersByTime(12_000);
     expect(fake.writes).toEqual([]);
     expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('권한 요청이 열렸는데 화면의 기다림 표시가 다른 이유로 치워져도 보내지 않는다(비춘 값이 아니라 입력창 신호로 판단한다)', async () => {
+    const session = await stalled();
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    vi.advanceTimersByTime(2_000); // 기다림 표시를 훅으로 풀 수 있는 시간이 지났다
+    await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
+    expect(getSnapshot(session.id)?.terminalAttention).toBeUndefined();
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session).length).toBeGreaterThan(0);
+  }, 30_000);
+
+  it('도구가 도는 중(PreToolUse만 있고 끝 훅이 없다)이면 보내지 않는다', async () => {
+    const session = await stalled();
+    await session.gateway.preTool({ tool_name: 'Read', tool_input: {} });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('입력창에 있다는 신호가 없으면(요청만 받았다) 보내지 않고 알리기만 한다', async () => {
+    const session = await stalled({ nudge: '1', idle: false });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('입력 대기 알림 뒤에 텔레메트리나 다른 훅이 오면 신호가 거두어져 보내지 않는다', async () => {
+    const session = await stalled();
+    await session.gateway.activity?.({ hook_event_name: 'PostToolUse', tool_name: 'Read', tool_input: {} });
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
   }, 30_000);
 
   it('요청이 끝나 열린 실행이 없으면 보내지 않는다', async () => {
@@ -562,6 +599,7 @@ describe('정체 재촉(#1454)', () => {
     expect(fake.writes).toHaveLength(2);
     await session.gateway.stop({});
     await session.gateway.prompt({ prompt: '[읽기만] 다른 설명' });
+    await session.gateway.notification({ notification_type: 'idle_prompt', message: '입력 대기' });
     vi.advanceTimersByTime(12_000);
     expect(fake.writes).toHaveLength(4);
   }, 30_000);

@@ -67,7 +67,7 @@ fn early_slack_attaches_only_to_a_tool_opened_run() {
 
 #[test]
 fn stall_table() {
-    let open = StallFacts { open_run: true, notified: false, idle_ms: 10_000, stall_ms: 8_000, nudge_max: 0, nudges_sent: 0, human_turn: false };
+    let open = StallFacts { open_run: true, notified: false, idle_ms: 10_000, stall_ms: 8_000, nudge_max: 0, nudges_sent: 0, human_turn: false, cli_at_input: false };
     assert_eq!(decide_stall(&StallFacts { open_run: false, ..open }), StallStep::Stop);
     assert_eq!(decide_stall(&StallFacts { notified: true, ..open }), StallStep::Nothing);
     assert_eq!(decide_stall(&StallFacts { idle_ms: 7_999, ..open }), StallStep::Nothing);
@@ -137,7 +137,7 @@ fn only_a_request_attached_to_the_open_run_marks_telemetry_seen() {
 
 #[test]
 fn stall_nudge_table() {
-    let on = StallFacts { open_run: true, notified: false, idle_ms: 10_000, stall_ms: 8_000, nudge_max: 1, nudges_sent: 0, human_turn: false };
+    let on = StallFacts { open_run: true, notified: false, idle_ms: 10_000, stall_ms: 8_000, nudge_max: 1, nudges_sent: 0, human_turn: false, cli_at_input: true };
     // 꺼짐(상한 0)이 기본: 정체해도 알리기만 한다
     assert_eq!(decide_stall(&StallFacts { nudge_max: 0, ..on }), StallStep::Notify);
     // 켜면 정체 시간에 닿았을 때 한 번 재촉한다
@@ -151,6 +151,8 @@ fn stall_nudge_table() {
     assert_eq!(decide_stall(&StallFacts { nudge_max: 3, nudges_sent: 9, ..on }), StallStep::Notify);
     // 사람 차례(권한 요청·질문·입력 대기)에는 보내지 않고 알리기만 한다
     assert_eq!(decide_stall(&StallFacts { human_turn: true, ..on }), StallStep::Notify);
+    // 입력창에 있다는 긍정 신호가 없으면(도구 실행 중·권한 창·모름) 보내지 않고 알리기만 한다
+    assert_eq!(decide_stall(&StallFacts { cli_at_input: false, ..on }), StallStep::Notify);
     // 열린 실행이 없으면 보내지 않고 감시를 멈춘다
     assert_eq!(decide_stall(&StallFacts { open_run: false, ..on }), StallStep::Stop);
     // 이미 알렸으면 더 하지 않는다

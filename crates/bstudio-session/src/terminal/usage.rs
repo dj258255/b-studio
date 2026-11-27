@@ -120,8 +120,10 @@ pub struct StallFacts {
     pub nudge_max: u32,
     /// 이 실행에 이미 보낸 재촉 수(실행마다 센다)
     pub nudges_sent: u32,
-    /// 사람 차례다: 권한 요청·질문·입력 대기로 CLI가 사람을 기다린다
+    /// 사람 차례다: 권한 요청·질문으로 CLI가 사람을 기다린다(비춘 값이라 이것이 없다고 사람 차례가 아닌 것은 아니다)
     pub human_turn: bool,
+    /// CLI가 입력창에 있다는 **긍정 신호**가 이 실행의 마지막 사건이다(입력 대기 알림 뒤 다른 훅·텔레메트리가 없다). 모르면 거짓이다
+    pub cli_at_input: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,8 +148,9 @@ pub fn decide_stall(facts: &StallFacts) -> StallStep {
     if facts.idle_ms < 0 || (facts.idle_ms as u64) < facts.stall_ms {
         return StallStep::Nothing;
     }
-    // 재촉은 여는 쪽이라 모든 조건이 맞을 때만 보낸다: 켰고(상한 > 0), 상한 안이고, 사람 차례가 아니다. 어느 하나라도 아니면 알리기만 한다
-    if facts.nudge_max > 0 && facts.nudges_sent < facts.nudge_max && !facts.human_turn {
+    // 재촉은 여는 쪽이라 모든 조건이 맞을 때만 보낸다: 켰고(상한 > 0), 상한 안이고, 사람 차례가 아니고, CLI가 입력창에 있다는 신호가 있다.
+    // 도구가 도는 중이거나 권한 창이 떠 있을 수 있는 모르는 상태에서는 Enter가 그 창의 기본 선택을 누를 수 있어 보내지 않는다. 어느 하나라도 아니면 알리기만 한다
+    if facts.nudge_max > 0 && facts.nudges_sent < facts.nudge_max && !facts.human_turn && facts.cli_at_input {
         return StallStep::Nudge;
     }
     StallStep::Notify

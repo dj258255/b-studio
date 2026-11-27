@@ -7812,6 +7812,12 @@ interface TerminalRunState {
   stallNudgeMax: number;
   /** 이 실행에 이미 보낸 정체 재촉 수. 움직임이 다시 생겨도 되돌리지 않는다(상한은 실행마다 센다) */
   stallNudgesSent: number;
+  /**
+   * CLI가 입력창에 있다는 긍정 신호가 이 실행의 마지막 사건인가(입력 대기 알림 뒤 다른 훅·텔레메트리·요청이 없다). 실행을 열 때 거짓이고,
+   * 입력 대기 알림만 참으로 세우며 다른 모든 훅·텔레메트리·요청이 거짓으로 되돌린다. 재촉은 이 값이 참일 때만 보낸다.
+   * 스냅샷의 `terminalAttention`은 비춘 값이라 다른 이유로 지워질 수 있어 판단에 쓰지 않는다(권한 창이 떠 있는데 Enter를 보내면 기본 선택이 눌린다)
+   */
+  cliAtInput: boolean;
   /** 이 실행을 요청 훅이 아니라 도구 호출이 열었다. 그 도구를 정한 모델 요청은 열린 시각보다 앞서 끝났을 수 있다(ADR-213, U5) */
   openedByTool: boolean;
   /** 이 실행이 열린 시각(Date.now()). 사용량 소식이 끊겼는지 보는 기준이다 */
@@ -8071,7 +8077,9 @@ function checkTerminalStall(session: Session, stallMs: number): void {
     stallMs,
     nudgeMax: run?.terminal.stallNudgeMax ?? 0,
     nudgesSent: run?.terminal.stallNudgesSent ?? 0,
-    humanTurn: session.snapshot.terminalAttention !== undefined,
+    // 사람 차례(권한·질문)는 비춘 값으로도 한 번 더 막는다. 입력 대기(idle_prompt)는 재촉이 겨냥하는 상태라 막지 않는다(입력창 신호는 cliAtInput)
+    humanTurn: session.snapshot.terminalAttention !== undefined && session.snapshot.terminalAttention.kind !== 'idle_prompt',
+    cliAtInput: run?.terminal.cliAtInput === true,
   });
   if (step === 'stop') {
     stopTerminalStallWatch(session);
@@ -8084,6 +8092,16 @@ function checkTerminalStall(session: Session, stallMs: number): void {
   const message = terminalStallMessage(stallMs);
   emit(session, { type: 'agent', runId: run.id, event: { type: 'warning', message } });
   warnSessionTerminal(session.snapshot.id, message);
+}
+
+/**
+ * 입력창 신호를 거둔다: 입력 대기 알림 말고 다른 무엇이 왔다(도구 훅·권한 요청·질문·텔레메트리·요청·턴 끝·도구 호출). CLI가 다시 움직였거나 창이 떴을 수 있다.
+ * 실행이 없으면 아무 일도 하지 않는다. 막는 쪽이라 넓게 부른다
+ */
+function noteTerminalBusy(id: string): void {
+  const session = store.sessions.get(id);
+  const run = session ? openTerminalRun(session) : undefined;
+  if (run) run.terminal.cliAtInput = false;
 }
 
 /**
@@ -8117,6 +8135,7 @@ function sendStallNudge(session: Session, run: ActiveRun & { terminal: TerminalR
 function noteTerminalActivity(session: Session, run: ActiveRun & { terminal: TerminalRunState }, { settled = false }: { settled?: boolean } = {}): void {
   run.terminal.lastActivityMs = Date.now();
   run.terminal.stallNotified = false;
+  run.terminal.cliAtInput = false;
   if (settled) clearSettledTerminalAttention(session);
   else clearTerminalAttention(session);
 }
@@ -8491,6 +8510,7 @@ async function beginTerminalRun(
       stallNotified: false,
       stallNudgeMax,
       stallNudgesSent: 0,
+      cliAtInput: false,
       openedByTool: !fromPrompt,
       openedMs: Date.now(),
       telemetrySeen: false,
@@ -10120,7 +10140,10 @@ function terminalNotification(id: string, input: HookInput): void {
   const kind = input.hook_event_name === 'PermissionRequest' ? 'permission_prompt' : typeof input.notification_type === 'string' ? input.notification_type : '';
   if (!kind) return;
   if (kind === 'idle_prompt') {
-    if (!openTerminalRun(session)) return;
+    const open = openTerminalRun(session);
+    if (!open) return;
+    // 입력창에 있다는 긍정 신호는 이 알림뿐이다. 이 알림 뒤에 오는 다른 훅·텔레메트리는 모두 거둔다(noteTerminalBusy)
+    open.terminal.cliAtInput = true;
   } else if (!TERMINAL_ATTENTION_ALWAYS.has(kind)) {
     // 모르는 종류는 건지 않는다(설정의 matcher가 거르지만 여기서도 본다)
     return;
@@ -10189,13 +10212,21 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       return note;
     },
     prompt: (input) => {
+      noteTerminalBusy(id);
       // 요청을 보냈다는 것은 CLI가 떠 있다는 뜻이다. 세션 시작 훅을 놓친 경우(스튜디오가 다시 읽힌 뒤)에도 여기서 바로잡는다
       noteSessionTerminalCli(id, true);
       return terminalPromptSubmitted(id, input);
     },
-    preTool: (input) => terminalToolStarting(id, input),
-    stop: (input) => terminalTurnEnded(id, input),
+    preTool: (input) => {
+      noteTerminalBusy(id);
+      return terminalToolStarting(id, input);
+    },
+    stop: (input) => {
+      noteTerminalBusy(id);
+      return terminalTurnEnded(id, input);
+    },
     sessionEnd: async (input) => {
+      noteTerminalBusy(id);
       // mod만 다시 불러오는 것(reload)은 CLI의 끝이 아니다. 새 mod의 session-start가 시간 안에 오는지 시계로 본다(설정이 reload 뒤 mod를 껐을 수 있다)
       if (input.reason === 'reload' && terminalCliKind(terminalSession(id)) === 'commandcode') {
         noteModReloading(id);
@@ -10204,15 +10235,23 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       noteSessionTerminalCli(id, false);
       await terminalCliEnded(id);
     },
-    stopFailure: (input) => terminalTurnFailed(id, input),
+    stopFailure: (input) => {
+      noteTerminalBusy(id);
+      return terminalTurnFailed(id, input);
+    },
     notification: async (input) => {
+      noteTerminalBusy(id);
       terminalNotification(id, input);
     },
-    activity: async (input) => terminalActivityHook(id, input),
+    activity: async (input) => {
+      noteTerminalBusy(id);
+      return terminalActivityHook(id, input);
+    },
     statusline: async (input) => {
       noteStatusline((terminalSession(id).terminalActivity ??= newTerminalActivity()), input);
     },
     telemetry: async (body) => {
+      noteTerminalBusy(id);
       await terminalTelemetry(id, body);
     },
     conversation: (conversation) => noteTerminalConversation(id, conversation),
@@ -10220,7 +10259,10 @@ function terminalGatewayHandlers(id: string): TerminalGatewayHandlers {
       const session = terminalSession(id);
       return [...gatewayToolSpecs(session.project), ...(session.terminalBoard?.specs ?? [])] as ReturnType<typeof gatewayToolSpecs>;
     },
-    runTool: (name, args) => runTerminalTool(id, name, args),
+    runTool: (name, args) => {
+      noteTerminalBusy(id);
+      return runTerminalTool(id, name, args);
+    },
   });
 }
 

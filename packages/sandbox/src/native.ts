@@ -1513,6 +1513,7 @@ export interface NativeTerminalStallFacts {
   nudgeMax?: number;
   nudgesSent?: number;
   humanTurn?: boolean;
+  cliAtInput?: boolean;
 }
 
 export interface NativeTerminalSilenceFacts {

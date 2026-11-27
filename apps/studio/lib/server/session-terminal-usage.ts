@@ -67,8 +67,10 @@ export interface StallFacts {
   nudgeMax?: number;
   /** 이 실행에 이미 보낸 재촉 수 */
   nudgesSent?: number;
-  /** 사람 차례(권한 요청·질문·입력 대기)다 */
+  /** 사람 차례(권한 요청·질문)다 */
   humanTurn?: boolean;
+  /** CLI가 입력창에 있다는 긍정 신호가 마지막 사건이다. 없으면(모르면) 재촉하지 않는다 */
+  cliAtInput?: boolean;
 }
 
 export type StallStep = 'stop' | 'nothing' | 'notify' | 'nudge';
