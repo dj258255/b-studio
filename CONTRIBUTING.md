@@ -96,7 +96,7 @@ CI도 이 순서로 돌립니다(`.github/workflows/ci.yml`의 `check`). `pnpm -
 |---|---|
 | `packages/spec` | 관련 단위 테스트, `pnpm typecheck` |
 | `packages/sandbox` | 단위 테스트, 가능하면 실제 Docker 재현 |
-| `packages/agent` | 단위 테스트, 게이트 변경은 `pnpm e2e:agent`. e2e 다섯 개는 main에 들어간 뒤와 매일 밤 `e2e` 워크플로가 돌린다(Actions에서 손으로도 돌릴 수 있다) |
+| `packages/agent` | 단위 테스트, 게이트 변경은 `pnpm e2e:terminal-orders`. e2e 다섯 개는 main에 들어간 뒤와 매일 밤 `e2e` 워크플로가 돌린다(Actions에서 손으로도 돌릴 수 있다) |
 | `crates/*` | `cargo test --workspace --locked`. 판정을 옮겼으면 옛 TS 구현과 같은 입력의 차등 시험. 막는 검사는 커밋 보안 검토 뒤 병합 |
 | `apps/studio` | 타입 검사, lint, `pnpm --filter @b-studio/studio build`(라우트 코드젠 확인), 관련 서버 계약 시험(`apps/studio/server`) |
 | `apps/cli` | 관련 단위 테스트, `pnpm typecheck`. `desk`처럼 화면을 그리는 명령은 확인용 스튜디오에 붙여 실제 터미널(또는 node-pty)에서 |

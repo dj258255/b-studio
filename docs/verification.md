@@ -31,9 +31,9 @@ CI는 [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)의 `check` 작�
 | gVisor | 격리된 Docker-in-Docker | runtime 적용과 서비스 통신 확인 |
 | 멀티 모델 라우터 | 로컬 호환 공급자 + Docker | 공통 도구 계약, 선택 설명, 관측 저장 확인 |
 | Agent Fleet | 2개 독립 후보 E2E | 분리된 브랜치·샌드박스, 결과 비교와 선택 확인 |
-| 워크플로 강제 | `pnpm e2e:agent` 3개 시나리오, 실제 Docker | 통과 시나리오 2개에서 web 컨테이너 `pnpm lint`와 `/` 화면 확인을 게이트가 실행하고 5개 검증 단계 통과 기록. 계약이 깨진 시나리오는 test 단계를 실행하지 않고 failed |
-| 헤드리스 브라우저 화면 확인 | Chromium 실제 실행 단위 테스트 + `pnpm e2e:agent`(web `/`를 390x844로 렌더링) | 클라이언트가 만든 문구 읽기, 스크립트 예외·`console.error`·404 리소스 수집, 모바일 가로 넘침 510px 측정. 실제 Next 개발 서버에서 3개 시나리오 통과 |
-| 예제 api 테스트 | `pnpm e2e:agent`(개발 서버가 도는 api 컨테이너) + 같은 명령을 컨테이너에서 직접 실행 | `bootRun` 중에도 Gradle 잠금 충돌 없이 `api-unit` 통과. 단언을 일부러 틀리게 바꾸면 `1 test completed, 1 failed`로 실제 실패하는 것까지 확인 |
+| 워크플로 강제 | `pnpm e2e:agent`(채팅식 경로와 함께 지움, 같은 단계는 지금 `pnpm e2e:terminal-orders`가 확인. 아래 값은 지우기 전에 잰 것) 3개 시나리오, 실제 Docker | 통과 시나리오 2개에서 web 컨테이너 `pnpm lint`와 `/` 화면 확인을 게이트가 실행하고 5개 검증 단계 통과 기록. 계약이 깨진 시나리오는 test 단계를 실행하지 않고 failed |
+| 헤드리스 브라우저 화면 확인 | Chromium 실제 실행 단위 테스트 + `pnpm e2e:agent`(채팅식 경로와 함께 지움, 같은 단계는 지금 `pnpm e2e:terminal-orders`가 확인. 아래 값은 지우기 전에 잰 것)(web `/`를 390x844로 렌더링) | 클라이언트가 만든 문구 읽기, 스크립트 예외·`console.error`·404 리소스 수집, 모바일 가로 넘침 510px 측정. 실제 Next 개발 서버에서 3개 시나리오 통과 |
+| 예제 api 테스트 | `pnpm e2e:agent`(채팅식 경로와 함께 지움, 같은 단계는 지금 `pnpm e2e:terminal-orders`가 확인. 아래 값은 지우기 전에 잰 것)(개발 서버가 도는 api 컨테이너) + 같은 명령을 컨테이너에서 직접 실행 | `bootRun` 중에도 Gradle 잠금 충돌 없이 `api-unit` 통과. 단언을 일부러 틀리게 바꾸면 `1 test completed, 1 failed`로 실제 실패하는 것까지 확인 |
 | 작업 분해 | `pnpm e2e:task-plan`, 실제 Docker 세션 3개 | 레인 2개 동시 실행, 같은 레인의 a2가 a1 파일을 읽음, 다른 레인의 범위 밖 쓰기 차단, 통합 세션에서 파일 3개 재적용 뒤 5개 검증 단계 재통과 (98.1초) |
 | 샌드박스 이미지 정리 | 실제 Docker에서 세션 종료 뒤 이미지 확인 | 수정 전 세션마다 `studio-<프로젝트>-<id>-*` 이미지가 남아 디스크를 채웠고, 수정 뒤 세션 종료 시 남은 샌드박스 이미지 0개 |
 | Pi 정책 확장 | 단위 테스트 + Pi 0.73.1의 `loadExtensions`·`ExtensionRunner`로 실제 로드 | 로드 오류 없음. 보호 경로·프로젝트 밖 쓰기, `&&` 뒤 `git push`, `.env` 읽기 차단과 일반 읽기·쓰기 허용, 시스템 프롬프트 안내까지 10개 확인. 모델을 붙인 전체 세션은 아님 |
@@ -149,7 +149,8 @@ pnpm e2e:two-sessions
 ```bash
 pnpm test
 pnpm typecheck
-pnpm e2e:agent
+pnpm e2e:terminal-orders
+pnpm e2e:api-terminal-orders
 pnpm e2e:fleet-terminal
 pnpm e2e:task-plan-terminal
 pnpm e2e:two-sessions
