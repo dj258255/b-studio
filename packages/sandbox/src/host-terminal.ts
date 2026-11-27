@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 import { native } from './native';
 import { COMMAND_CODE_GATEWAY_DIR_ENV, COMMAND_CODE_MOD, COMMAND_CODE_MOD_NAME } from './commandcode-mod';
-import { geminiSettingsContent } from './gemini-config';
+import { GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
 import { GEMINI_HOME_DIR, GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
 import { openCodeConfigContent } from './opencode-config';
 import { OPENCODE_CONFIG_NAME, OPENCODE_GATEWAY_DIR_ENV, OPENCODE_PLUGIN, OPENCODE_PLUGIN_NAME } from './opencode-plugin';
@@ -342,7 +342,7 @@ export function geminiHomePath(dir: string): string {
  * Gemini 감싸개(ADR-242, 실험). Gemini는 훅을 설정(`settings.json`)에서 읽고, 시스템 설정은 root 소유일 때만 읽으므로 사용자 설정으로 붙인다:
  * `GEMINI_CLI_HOME`을 관문 폴더 안의 홈으로 바꾸고, 그 안의 `.gemini/settings.json`에 관문 폴더의 `gemini-settings.json`(내용을 검사하는 기대 파일)을 **띄울 때마다 새로 복사한다**.
  * 사용자의 진짜 `~/.gemini`는 읽지 않는다(그 설정의 훅·확장이 붙지 않는다). 로그인 파일(`oauth_creds.json` 등 넷)만 링크로 이어 로그인이 따라오게 한다.
- * 홈 안에 확장·정책·`.env`가 있거나 홈이 링크이면 띄우지 않는다(훅을 더하거나 믿음 설정을 바꿀 수 있다). 시스템 설정 자리와 믿음을 정하는 환경 변수는 지운다.
+ * 홈 안에 확장·정책·`.env`가 있거나 홈이 링크이면 띄우지 않는다(훅을 더하거나 믿음 설정을 바꿀 수 있다). 시스템 설정 자리·믿음을 정하는 환경 변수와 샌드박스를 켜는 환경 변수는 지운다.
  * 사용자가 준 인자는 그대로 뒤에 붙인다. 모델 고르기(`-m`·`--model`)와 권한을 건너뛰는 인자(`--yolo`·`--approval-mode`)는 붙이지 않는다: 기본 모델로 뜨고, 권한 확인은 사람이 답한다.
  * `B_STUDIO_GEMINI_USER_HOME`은 진짜 홈을 기억한다(감싸개를 안쪽에서 다시 불러도 우리 홈을 진짜 홈으로 읽지 않게)
  */
@@ -368,7 +368,8 @@ export function hostGeminiWrapper(dir: string, cli: Pick<HostCli, 'cliPath'>): s
     '    ln -s "$real/.gemini/$name" "$home/.gemini/$name"',
     '  fi',
     'done',
-    'unset GEMINI_CLI_SYSTEM_SETTINGS_PATH GEMINI_CLI_SYSTEM_DEFAULTS_PATH GEMINI_RESTRICTED_MODE GEMINI_CLI_TRUST_WORKSPACE',
+    // 시스템 설정 자리·믿음 변수와 샌드박스를 켜는 변수(`GEMINI_SANDBOX`·`SANDBOX`·`GEMINI_SANDBOX_IMAGE` 등). 샌드박스는 CLI를 다른 프로세스에서 다시 띄워 우리 훅이 붙었는지 알 수 없다
+    `unset ${GEMINI_UNSET_ENVS.join(' ')}`,
     'export GEMINI_CLI_HOME="$home"',
     `exec ${q(cli.cliPath)} "$@"`,
     '',

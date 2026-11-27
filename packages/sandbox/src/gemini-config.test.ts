@@ -70,6 +70,76 @@ describe('geminiConfigRefusal: 터미널을 열기 전에 훅을 끄거나 더�
   it('무관한 .env 변수는 연다', async () => {
     expect(await check({ 'work/.env': 'GEMINI_API_KEY=x\nFOO=1\n' })).toBeUndefined();
   });
+
+  // Gemini 0.71.1은 .env를 dotenv 17.1.0의 parse로 읽는다(`loadEnvironment`). 같은 문법으로 읽어야 한다
+  it.each([
+    ['`:` 구분자(뒤에 빈칸)', 'GEMINI_CLI_TRUST_WORKSPACE: true\n', 'GEMINI_CLI_TRUST_WORKSPACE'],
+    ['export 뒤 `:` 구분자', 'export GEMINI_RESTRICTED_MODE: 1\n', 'GEMINI_RESTRICTED_MODE'],
+    ['따옴표 값', 'GEMINI_CLI_HOME="/x"\n', 'GEMINI_CLI_HOME'],
+    ['작은따옴표·역따옴표 값', "GEMINI_CLI_SYSTEM_SETTINGS_PATH='/x'\nFOO=`y`\n", 'GEMINI_CLI_SYSTEM_SETTINGS_PATH'],
+    ['export 뒤 여러 칸·탭', 'export\t  GEMINI_CLI_SYSTEM_DEFAULTS_PATH\t=\t/x\n', 'GEMINI_CLI_SYSTEM_DEFAULTS_PATH'],
+    ['여러 줄 값 다음 줄의 열쇠', 'NOTE="첫 줄\n둘째 줄"\nGEMINI_CLI_TRUST_WORKSPACE=true\n', 'GEMINI_CLI_TRUST_WORKSPACE'],
+    ['줄 끝에 주석이 붙은 줄', 'GEMINI_CLI_TRUST_WORKSPACE=true # 믿는다\n', 'GEMINI_CLI_TRUST_WORKSPACE'],
+    ['CRLF 줄바꿈', 'FOO=1\r\nGEMINI_CLI_HOME=/x\r\n', 'GEMINI_CLI_HOME'],
+    ['CR만 있는 줄바꿈', 'FOO=1\rGEMINI_CLI_HOME=/x\r', 'GEMINI_CLI_HOME'],
+    ['샌드박스를 켜는 GEMINI_SANDBOX', 'GEMINI_SANDBOX=docker\n', 'GEMINI_SANDBOX'],
+    ['샌드박스를 켜는 GEMINI_SANDBOX(`:` 구분자)', 'GEMINI_SANDBOX: true\n', 'GEMINI_SANDBOX'],
+    ['`:` 뒤에 빈칸이 없는 줄(dotenv는 읽지 않지만 다른 판이 읽을 수 있어 더 막는다)', 'GEMINI_SANDBOX:docker\n', 'GEMINI_SANDBOX'],
+    ['SANDBOX', 'SANDBOX=sandbox-exec\n', 'SANDBOX'],
+    ['샌드박스 이미지', 'GEMINI_SANDBOX_IMAGE=evil:latest\n', 'GEMINI_SANDBOX_IMAGE'],
+    ['샌드박스 프록시 명령', 'GEMINI_SANDBOX_PROXY_COMMAND=x\n', 'GEMINI_SANDBOX_PROXY_COMMAND'],
+    ['seatbelt 프로필', 'SEATBELT_PROFILE=permissive-open\n', 'SEATBELT_PROFILE'],
+    ['모르는 GEMINI_ 열쇠', 'GEMINI_SOME_NEW_SWITCH=1\n', 'GEMINI_SOME_NEW_SWITCH'],
+    ['모르는 GEMINI_CLI_ 열쇠(소문자로 쓴 것도)', 'gemini_cli_future_flag=1\n', 'gemini_cli_future_flag'],
+  ])('.env 거절: %s', async (_name, text, hint) => {
+    for (const file of ['work/.env', 'work/.gemini/.env', '.env']) {
+      const refusal = await check({ [file]: text });
+      expect(refusal, file).toBeDefined();
+      expect(refusal, file).toContain(hint);
+    }
+  });
+
+  it('.env의 무관한 줄은 연다: 알려진 안전한 GEMINI_ 열쇠, 주석 처리된 줄, 다른 이름', async () => {
+    const text = [
+      'GEMINI_API_KEY="abc"',
+      'GEMINI_MODEL: gemini-2.5-pro',
+      "# GEMINI_CLI_HOME=/x",
+      '  # export GEMINI_SANDBOX=docker',
+      'MY_GEMINI_SANDBOX=1',
+      'GEMINI_CLI_HOME_NOT=1'.replace('GEMINI_CLI_HOME_NOT', 'SOMETHING'),
+      'NOT_SANDBOX=1',
+      'EMPTY=',
+      '',
+    ].join('\n');
+    expect(await check({ 'work/.env': text })).toBeUndefined();
+  });
+
+  it('작업 폴더 설정의 샌드박스 열쇠(tools.sandbox 등)가 false가 아니면 거절한다. false이거나 없으면 연다', async () => {
+    for (const where of ['work/.gemini/settings.json', 'system/settings.json', 'system/system-defaults.json']) {
+      for (const body of [
+        '{"tools":{"sandbox":true}}',
+        '{"tools":{"sandbox":"docker"}}',
+        '{"tools":{"sandbox":"false"}}',
+        '{"tools":{"sandbox":0}}',
+        '{"tools":{"sandbox":null}}',
+        '{"tools":{"sandbox":{"enabled":true,"command":"docker"}}}',
+        '{"tools":{"sandbox":{"enabled":false}}}',
+        '{"tools":{"sandbox":[]}}',
+        '{"tools":{"sandboxAllowedPaths":["/"]}}',
+        '{"tools":{"sandboxNetworkAccess":true}}',
+        '{"security":{"toolSandboxing":true}}',
+        '{"sandbox":true}',
+        '// 주석\n{"tools":{"sandbox":true,},}',
+      ]) {
+        const refusal = await check({ [where]: body });
+        expect(refusal, `${where} ${body}`).toBeDefined();
+        expect(refusal, `${where} ${body}`).toContain('샌드박스');
+      }
+      for (const body of ['{"tools":{"sandbox":false}}', '{"tools":{}}', '{"security":{"toolSandboxing":false}}', '{"tools":{"shell":{"enableInteractiveShell":true}}}']) {
+        expect(await check({ [where]: body }), `${where} ${body}`).toBeUndefined();
+      }
+    }
+  });
 });
 
 describe('geminiVersionRefusal: 훅이 있는 판만 연다', () => {

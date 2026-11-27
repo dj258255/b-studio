@@ -1,5 +1,6 @@
 import { readFile, realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
+import dotenv from 'dotenv';
 import { geminiHookSeconds, GEMINI_HOOK_NAME, type GeminiHookEvent } from './gemini-hook';
 import { parseJsonc } from './gemini-jsonc';
 
@@ -12,6 +13,7 @@ import { parseJsonc } from './gemini-jsonc';
  *   그러므로 작업 폴더 설정이 `hooks`를 더하면 다른 훅이 우리 훅과 나란히 돌며 `tool_input`을 바꿔 쓸 수 있고(훅 출력의 `hookSpecificOutput.tool_input`), `hooksConfig`를 두면 우리 훅을 끌 수 있다.
  * - 믿지 않는 폴더에서는 설정 훅이 **하나도 등록되지 않는다**(`HookRegistry.processHooksFromConfig`). 시스템 설정의 훅도 그렇다. 그 경우는 세션 시작 신호가 오지 않는 것으로 잡는다.
  * - 확장(extensions)은 `<홈>/.gemini/extensions`에서만 불러온다. 홈이 우리 폴더라 비어 있다.
+ * - 샌드박스(인자·`GEMINI_SANDBOX`·`tools.sandbox` 등)가 켜지면 CLI를 다른 프로세스에서 다시 띄워(`loadSandboxConfig`) 우리 훅이 붙었는지 알 수 없다. `.env`는 `loadEnvironment`가 `dotenv.parse`로 읽어 환경에 넣는다(이미 있는 이름은 덮지 않는다).
  *
  * 부르는 자리마다 막는 쪽인지 여는 쪽인지:
  * - `geminiConfigRefusal`: 터미널을 여는 것을 허락하는 판정이라 열린 쪽은 "모두 읽었고 훅을 바꾸는 것이 없다"뿐이다. 읽지 못한 것·모르는 모양은 거절이다
@@ -84,8 +86,39 @@ export async function geminiUserAuthType(home: string | undefined): Promise<stri
 
 /** 설정 파일 하나의 크기 상한. 넘으면 읽지 않고 거절한다(에이전트가 쓸 수 있는 자리라 상한이 없으면 읽는 쪽을 멈출 수 있다) */
 const MAX_CONFIG_BYTES = 1024 * 1024;
-/** `.env`에서 믿음·설정 자리를 바꾸는 변수 */
-const ENV_RISK = /^\s*(?:export\s+)?(GEMINI_RESTRICTED_MODE|GEMINI_CLI_TRUST_WORKSPACE|GEMINI_CLI_HOME|GEMINI_CLI_SYSTEM_SETTINGS_PATH|GEMINI_CLI_SYSTEM_DEFAULTS_PATH)\s*=/mu;
+/**
+ * Gemini의 설정 자리·믿음을 바꾸는 환경 변수. 감싸개가 지우고(`unset`), Rust 감시(`GEMINI_SETTINGS_ENVS`)가 있으면 붙지 않은 것으로 보고, `.env`가 정하면 거절한다.
+ * 근거는 0.71.1: `GEMINI_CLI_HOME`(`Storage`)·`GEMINI_CLI_SYSTEM_SETTINGS_PATH`·`GEMINI_CLI_SYSTEM_DEFAULTS_PATH`(`settings`)·`GEMINI_RESTRICTED_MODE`·`GEMINI_CLI_TRUST_WORKSPACE`(`trustedFolders`)
+ */
+export const GEMINI_SETTINGS_ENVS: readonly string[] = ['GEMINI_CLI_SYSTEM_SETTINGS_PATH', 'GEMINI_CLI_SYSTEM_DEFAULTS_PATH', 'GEMINI_RESTRICTED_MODE', 'GEMINI_CLI_TRUST_WORKSPACE'];
+/**
+ * 샌드박스를 켜거나 꾸미는 환경 변수(0.71.1의 `loadSandboxConfig`·`getSandboxCommand`·샌드박스 시작 코드). 샌드박스는 CLI를 다른 프로세스에서 다시 띄워(docker·podman·sandbox-exec 등)
+ * 우리 훅이 붙었는지 알 수 없다. `GEMINI_SANDBOX`는 설정·인자보다 먼저 읽히고(비어 있지 않으면 이긴다), `GEMINI_SANDBOX_IMAGE`는 이미지를, 나머지는 샌드박스 안의 마운트·포트·프로필·프록시를 정한다.
+ * `SANDBOX`는 "이미 샌드박스 안"이라는 표식이라 설정돼 있으면 CLI가 샌드박스 시작을 건너뛰고 안쪽으로 행동한다
+ */
+export const GEMINI_SANDBOX_ENVS: readonly string[] = [
+  'GEMINI_SANDBOX',
+  'SANDBOX',
+  'GEMINI_SANDBOX_IMAGE',
+  'GEMINI_SANDBOX_PROXY_COMMAND',
+  'SANDBOX_ENV',
+  'SANDBOX_FLAGS',
+  'SANDBOX_MOUNTS',
+  'SANDBOX_PORTS',
+  'SANDBOX_SET_UID_GID',
+  'SEATBELT_PROFILE',
+];
+/** 감싸개가 띄우기 전에 지우는 환경 변수 전부(설정 자리·믿음 + 샌드박스). 홈(`GEMINI_CLI_HOME`)은 따로 우리 홈으로 정한다 */
+export const GEMINI_UNSET_ENVS: readonly string[] = [...GEMINI_SETTINGS_ENVS, ...GEMINI_SANDBOX_ENVS];
+/** `.env`가 정하면 거절하는 이름(대소문자를 접어 견준다) */
+const ENV_RISK_NAMES: ReadonlySet<string> = new Set(['GEMINI_CLI_HOME', ...GEMINI_UNSET_ENVS].map((name) => name.toUpperCase()));
+/**
+ * `GEMINI_`로 시작하지만 `.env`에 있어도 되는 열쇠(0.71.1에서 읽어 본 것): 로그인 열쇠·모델·로그인 방식·헤더 시간 상한.
+ * 이 밖의 `GEMINI_` 열쇠는 모르는 것이라 거절한다(거부 목록이라 넓게 맞춘다: 판이 오르며 새로 생기는 스위치도 걸린다)
+ */
+const ENV_SAFE_GEMINI_NAMES: ReadonlySet<string> = new Set(['GEMINI_API_KEY', 'GEMINI_MODEL', 'GEMINI_DEFAULT_AUTH_TYPE', 'GEMINI_API_KEY_AUTH_MECHANISM', 'GEMINI_API_HEADERS_TIMEOUT_MS']);
+/** dotenv의 줄 문법보다 느슨하게 줄 머리의 열쇠를 읽는다(`=`나 `:`가 따르면 열쇠로 본다). dotenv가 읽지 않는 줄까지 잡을 뿐이다 */
+const ENV_LOOSE_KEY = /^[\s]*(?:export\s+)?([\w.-]+)\s*[=:]/gmu;
 const MAX_LEVELS = 64;
 
 export interface GeminiLoadCheck {
@@ -139,10 +172,49 @@ async function settingsFileRefusal(file: string, label: string): Promise<Refusal
     return `Gemini ${label} ${file}에 hooks가 있습니다. 다른 훅이 우리 훅과 나란히 돌며 도구 입력을 바꿀 수 있습니다. ${HINT}`;
   }
   if (record.hooksConfig !== undefined) return `Gemini ${label} ${file}에 hooksConfig가 있습니다. 훅을 끄거나 우리 훅을 이름으로 끌 수 있습니다. ${HINT}`;
+  const sandbox = sandboxSettingKey(record);
+  if (sandbox) return `Gemini ${label} ${file}에 샌드박스 설정(${sandbox})이 있습니다. 샌드박스는 CLI를 다른 프로세스에서 다시 띄워 우리 훅이 붙었는지 알 수 없습니다. 그 설정을 지우거나 false로 둔 뒤 다시 여세요`;
   return undefined;
 }
 
-/** `.env`가 믿음·설정 자리를 바꾸는 변수를 정하는가. 읽지 못하면 거절 */
+const hasOwn = (value: object, key: string): boolean => Object.hasOwn(value, key);
+const isPlainObject = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/**
+ * 샌드박스를 켜거나 꾸미는 설정 열쇠(0.71.1의 `loadSandboxConfig`·`security.toolSandboxing`)를 찾는다. 열린 것은 "없거나 `tools.sandbox`가 정확히 false"뿐이다(열어도 되는 쪽이라 좁게).
+ * 불리언이 아닌 값(문자열 "false"·객체 `{enabled:false}`·null·0)과 모르는 모양은 샌드박스일 수 있어 거절한다. 거절할 열쇠 이름을 돌려주고, 없으면 undefined
+ */
+function sandboxSettingKey(record: Record<string, unknown>): string | undefined {
+  if (hasOwn(record, 'sandbox')) return 'sandbox';
+  if (hasOwn(record, 'tools')) {
+    const tools = record.tools;
+    if (!isPlainObject(tools)) return 'tools';
+    if (hasOwn(tools, 'sandbox') && tools.sandbox !== false) return 'tools.sandbox';
+    for (const key of ['sandboxAllowedPaths', 'sandboxNetworkAccess']) if (hasOwn(tools, key)) return `tools.${key}`;
+  }
+  if (hasOwn(record, 'security')) {
+    const security = record.security;
+    if (!isPlainObject(security)) return 'security';
+    if (hasOwn(security, 'toolSandboxing') && security.toolSandboxing !== false) return 'security.toolSandboxing';
+  }
+  return undefined;
+}
+
+/** `.env` 한 이름이 거절 대상인가: 설정 자리·믿음·샌드박스 변수이거나, 알려진 안전한 열쇠가 아닌 `GEMINI_` 열쇠 */
+function envKeyRisky(key: string): boolean {
+  const upper = key.toUpperCase();
+  if (ENV_RISK_NAMES.has(upper)) return true;
+  return upper.startsWith('GEMINI_') && !ENV_SAFE_GEMINI_NAMES.has(upper);
+}
+
+/** `.env` 글에서 거절할 열쇠를 찾는다. Gemini와 같은 `dotenv.parse`(0.71.1에 든 17.1.0)가 읽는 열쇠에, 줄 머리의 열쇠를 느슨하게 읽은 것을 더한다(따옴표 안의 줄까지 보는 것은 더 막을 뿐이다) */
+function envRiskKey(text: string): string | undefined {
+  for (const key of Object.keys(dotenv.parse(text))) if (envKeyRisky(key)) return key;
+  for (const match of text.matchAll(ENV_LOOSE_KEY)) if (envKeyRisky(match[1]!)) return match[1];
+  return undefined;
+}
+
+/** `.env`가 믿음·설정 자리·샌드박스를 바꾸는 변수를 정하는가(Gemini와 같은 dotenv 문법으로 읽는다). 읽지 못하면 거절 */
 async function envFileRefusal(file: string): Promise<Refusal> {
   let text: string;
   try {
@@ -154,8 +226,8 @@ async function envFileRefusal(file: string): Promise<Refusal> {
     if (code === 'ENOENT' || code === 'ENOTDIR' || code === 'EISDIR') return undefined;
     return `${file}을(를) 읽지 못해 터미널을 열지 않았습니다(${(error as Error).message}). Gemini의 믿음 설정을 바꾸는지 알 수 없습니다`;
   }
-  const hit = ENV_RISK.exec(text);
-  if (hit) return `${file}이(가) ${hit[1]}을(를) 정합니다. 훅이 불러와지지 않게 할 수 있어 터미널을 열지 않았습니다. 그 줄을 지운 뒤 다시 여세요`;
+  const risky = envRiskKey(text);
+  if (risky) return `${file}이(가) ${risky}을(를) 정합니다. 훅이 불러와지지 않게 하거나 CLI를 샌드박스에서 다시 띄울 수 있어 터미널을 열지 않았습니다. 그 줄을 지운 뒤 다시 여세요`;
   return undefined;
 }
 

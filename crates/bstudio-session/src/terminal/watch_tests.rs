@@ -576,7 +576,23 @@ fn gemini_needs_the_home_env_and_no_settings_overrides() {
     // 예전 증거(시스템 설정 경로)로는 붙었다고 보지 않는다: 시스템 설정은 root 소유여야 읽혀 우리 파일이 붙지 않는다
     assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_SYSTEM_SETTINGS_PATH", GEMINI_SETTINGS)])));
     // 시스템 설정 자리·믿음을 바꾸는 변수는 하나라도 있으면(값이 비었어도) 붙지 않은 것이다: 훅을 끄거나 더할 수 있다
-    for name in ["GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH", "GEMINI_RESTRICTED_MODE", "GEMINI_CLI_TRUST_WORKSPACE"] {
+    for name in [
+        "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+        "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+        "GEMINI_RESTRICTED_MODE",
+        "GEMINI_CLI_TRUST_WORKSPACE",
+        // 샌드박스를 켜거나 꾸미는 변수(0.71.1): CLI를 다른 프로세스에서 다시 띄운다
+        "GEMINI_SANDBOX",
+        "SANDBOX",
+        "GEMINI_SANDBOX_IMAGE",
+        "GEMINI_SANDBOX_PROXY_COMMAND",
+        "SANDBOX_ENV",
+        "SANDBOX_FLAGS",
+        "SANDBOX_MOUNTS",
+        "SANDBOX_PORTS",
+        "SANDBOX_SET_UID_GID",
+        "SEATBELT_PROFILE",
+    ] {
         assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), (name, "x")])), "{name}");
         assert!(!launch_gm(&[gm], Some(&[("GEMINI_CLI_HOME", GEMINI_SETTINGS), (name, "")])), "{name} 빈 값");
     }

@@ -8542,3 +8542,31 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 ### 해결
 
 - 이후에는 시험 파일을 하나씩 지정했다(PTY·사용자 캐시를 쓰는 파일 제외). 멈춘 프로세스는 내가 끝내지 못했으므로 사람이 처리해야 한다. Rust는 `cargo test -p bstudio-session --locked`(323건)와 `-p bstudio-io host_gateway`(4건)만 돌렸다.
+
+## 302. Gemini의 `.env` 검사가 dotenv와 다르게 읽었다: `:` 구분자와 모르는 `GEMINI_` 열쇠
+
+### 증상
+
+- 믿음·설정 자리를 바꾸는 변수가 `.env`에 있는지 `^\s*(export\s+)?이름\s*=` 정규식으로 찾았다. Gemini는 `.env`를 `dotenv.parse`(0.71.1에 든 17.1.0)로 읽는데, 그 문법은 구분자로 `=`뿐 아니라 `:` 뒤에 빈칸이 오는 꼴(`GEMINI_CLI_TRUST_WORKSPACE: true`)도 받는다. 우리 검사는 그 줄을 지나쳤고, Gemini는 그 값을 환경에 넣었다. 목록에 없는 변수(샌드박스를 켜는 `GEMINI_SANDBOX` 등)는 아예 찾지 않았다.
+
+### 원인
+
+- 확인하는 쪽(우리 정규식)과 읽는 쪽(Gemini의 dotenv)이 같은 입력을 다르게 읽었다. 이름 목록도 알려진 것만 적은 허용 모양의 거부 목록이라, 판이 오르며 생기는 `GEMINI_` 스위치와 샌드박스 변수가 빠졌다.
+
+### 해결
+
+- `.env`는 같은 `dotenv.parse`(`packages/sandbox`의 의존성으로 17.1.0을 정확히 고정)로 읽고, 줄 머리의 `이름=`·`이름:`을 느슨하게 읽은 것을 더해 둘 중 하나가 걸리면 거절한다. 이름은 대소문자를 접어 견준다. 설정 자리·믿음·샌드박스 변수 목록에 더해, 알려진 안전한 다섯 개(`GEMINI_API_KEY`·`GEMINI_MODEL`·`GEMINI_DEFAULT_AUTH_TYPE`·`GEMINI_API_KEY_AUTH_MECHANISM`·`GEMINI_API_HEADERS_TIMEOUT_MS`) 말고 `GEMINI_`로 시작하는 열쇠는 모두 거절한다. 시험은 `:` 구분자·`export` 뒤 탭·따옴표 값·여러 줄 값 뒤의 열쇠·줄 끝 주석·CRLF·CR만 있는 줄바꿈·주석 처리된 줄(허용)을 세 위치(`work/.env`·`work/.gemini/.env`·위 폴더 `.env`)에서 본다. 고치기 전에는 `:` 구분자·샌드박스 변수·모르는 `GEMINI_` 열쇠를 다루는 `.env` 시험 열 건이 실패했다(설정의 샌드박스 열쇠 시험은 303).
+
+## 303. Gemini의 샌드박스를 켜는 환경 변수와 설정 열쇠를 지우지도 거절하지도 않았다
+
+### 증상
+
+- 샌드박스(docker·podman·sandbox-exec 등)가 켜지면 Gemini는 CLI를 다른 프로세스에서 다시 띄운다. 그 안에서 우리 훅이 붙었는지는 알 수 없다. 켜는 길은 인자(`-s`·`--sandbox`), 환경 변수(`GEMINI_SANDBOX`가 설정보다 먼저 이긴다), 설정(`tools.sandbox`, 객체꼴 `{enabled, command, …}` 포함)이다. 감시는 인자만 보았고, 감싸개는 `GEMINI_SANDBOX`·`SANDBOX`·`GEMINI_SANDBOX_IMAGE`를 지우지 않았으며, 띄우기 전 검사는 설정의 샌드박스 열쇠를 보지 않았다.
+
+### 원인
+
+- 0.71.1에서 "샌드박스를 켜는 길"을 인자 하나로만 읽었다. 같은 동작을 켜는 환경 변수와 설정 열쇠가 따로 있다.
+
+### 해결
+
+- 0.71.1 소스에서 읽은 열 개(`GEMINI_SANDBOX`·`SANDBOX`·`GEMINI_SANDBOX_IMAGE`·`GEMINI_SANDBOX_PROXY_COMMAND`·`SANDBOX_ENV`·`SANDBOX_FLAGS`·`SANDBOX_MOUNTS`·`SANDBOX_PORTS`·`SANDBOX_SET_UID_GID`·`SEATBELT_PROFILE`)를 감싸개의 `unset`(`GEMINI_UNSET_ENVS`), Rust 감시(`GEMINI_SETTINGS_ENVS`), `.env` 거절에 더했다. 두 목록이 같은지 TS 시험이 Rust 소스를 읽어 견준다. 설정은 작업 폴더·시스템 설정·시스템 기본값에서 `tools.sandbox`가 정확히 `false`가 아니면(문자열 `"false"`·`{enabled:false}`·null·0 포함), `tools.sandboxAllowedPaths`·`tools.sandboxNetworkAccess`가 있으면, `security.toolSandboxing`이 `false`가 아니면, 맨 위 `sandbox`가 있으면 거절한다. 열린 쪽은 "없거나 정확히 false"뿐이다. 감싸개 시험은 대조군(감싸개 없이 가짜 CLI를 바로 부르면 값이 보임)과 함께 돌았고, 고치기 전에는 열 개가 그대로 내려갔다.

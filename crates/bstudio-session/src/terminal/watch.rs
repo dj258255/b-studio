@@ -210,8 +210,25 @@ pub fn hooked_launch(kind: CliKind, argv: &[String], env: Option<&[(String, Stri
     }
 }
 
-/// Gemini의 설정·믿음을 바꾸는 환경 변수. 하나라도 있으면 붙지 않은 것이다
-const GEMINI_SETTINGS_ENVS: [&str; 4] = ["GEMINI_CLI_SYSTEM_SETTINGS_PATH", "GEMINI_CLI_SYSTEM_DEFAULTS_PATH", "GEMINI_RESTRICTED_MODE", "GEMINI_CLI_TRUST_WORKSPACE"];
+/// Gemini의 설정·믿음을 바꾸거나 샌드박스를 켜는 환경 변수(0.71.1 소스에서 읽은 것). 하나라도 있으면(값이 비었어도) 붙지 않은 것이다.
+/// 샌드박스(`GEMINI_SANDBOX`·`SANDBOX`·이미지·프록시·마운트·포트·프로필)는 CLI를 다른 프로세스에서 다시 띄워 우리 훅이 붙었는지 알 수 없다.
+/// 감싸개가 지우는 목록(`GEMINI_UNSET_ENVS`)과 같아야 한다(TS 시험이 두 목록을 견준다)
+const GEMINI_SETTINGS_ENVS: [&str; 14] = [
+    "GEMINI_CLI_SYSTEM_SETTINGS_PATH",
+    "GEMINI_CLI_SYSTEM_DEFAULTS_PATH",
+    "GEMINI_RESTRICTED_MODE",
+    "GEMINI_CLI_TRUST_WORKSPACE",
+    "GEMINI_SANDBOX",
+    "SANDBOX",
+    "GEMINI_SANDBOX_IMAGE",
+    "GEMINI_SANDBOX_PROXY_COMMAND",
+    "SANDBOX_ENV",
+    "SANDBOX_FLAGS",
+    "SANDBOX_MOUNTS",
+    "SANDBOX_PORTS",
+    "SANDBOX_SET_UID_GID",
+    "SEATBELT_PROFILE",
+];
 /// 값을 따로 받는 Gemini의 옵션(0.71.1의 옵션 표). 값 자리의 글(첫 요청 등)이 옵션으로 읽히지 않게 건너뛴다. 모르는 옵션의 값은 옵션으로 읽혀 더 막을 뿐이다
 const GEMINI_VALUE_OPTIONS: [&str; 24] = [
     "-m", "--model", "-p", "--prompt", "-i", "--prompt-interactive", "-w", "--worktree", "--approval-mode", "--policy", "--admin-policy", "--allowed-mcp-server-names",

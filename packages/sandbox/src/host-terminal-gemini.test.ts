@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { GEMINI_HOOK, GEMINI_HOOK_NAME, GEMINI_SETTINGS_NAME } from './gemini-hook';
-import { geminiSettingsContent } from './gemini-config';
+import { GEMINI_SANDBOX_ENVS, GEMINI_SETTINGS_ENVS, GEMINI_UNSET_ENVS, geminiSettingsContent } from './gemini-config';
 import {
   expectedHostGatewayFiles,
   findHostCli,
@@ -92,7 +92,19 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
     const real = path.join(root, 'user-home');
     await mkdir(path.join(real, '.gemini'), { recursive: true });
     const fake = path.join(root, 'fake-gemini.sh');
-    await writeFile(fake, '#!/bin/sh\nprintf "HOME_ENV=%s\\n" "$GEMINI_CLI_HOME"\nprintf "SYS=%s|%s|%s|%s\\n" "${GEMINI_CLI_SYSTEM_SETTINGS_PATH-unset}" "${GEMINI_CLI_SYSTEM_DEFAULTS_PATH-unset}" "${GEMINI_RESTRICTED_MODE-unset}" "${GEMINI_CLI_TRUST_WORKSPACE-unset}"\nprintf "USER_HOME=%s\\n" "$B_STUDIO_GEMINI_USER_HOME"\nfor a in "$@"; do printf "ARG=%s\\n" "$a"; done\n');
+    const sandboxNames = 'GEMINI_SANDBOX SANDBOX GEMINI_SANDBOX_IMAGE GEMINI_SANDBOX_PROXY_COMMAND SANDBOX_ENV SANDBOX_FLAGS SANDBOX_MOUNTS SANDBOX_PORTS SANDBOX_SET_UID_GID SEATBELT_PROFILE';
+    await writeFile(
+      fake,
+      [
+        '#!/bin/sh',
+        'printf "HOME_ENV=%s\\n" "$GEMINI_CLI_HOME"',
+        'printf "SYS=%s|%s|%s|%s\\n" "${GEMINI_CLI_SYSTEM_SETTINGS_PATH-unset}" "${GEMINI_CLI_SYSTEM_DEFAULTS_PATH-unset}" "${GEMINI_RESTRICTED_MODE-unset}" "${GEMINI_CLI_TRUST_WORKSPACE-unset}"',
+        'printf "USER_HOME=%s\\n" "$B_STUDIO_GEMINI_USER_HOME"',
+        `for v in ${sandboxNames}; do if env | grep -q "^$v="; then printf "SBX_%s=set\\n" "$v"; else printf "SBX_%s=unset\\n" "$v"; fi; done`,
+        'for a in "$@"; do printf "ARG=%s\\n" "$a"; done',
+        '',
+      ].join('\n'),
+    );
     await chmod(fake, 0o755);
     const wrapper = path.join(gateway, 'bin/gemini');
     await writeFile(wrapper, hostGeminiWrapper(gateway, { cliPath: fake }));
@@ -105,15 +117,39 @@ describe('Gemini 감싸개(진짜 셸로 돌린다)', () => {
 
   it('홈을 관문 폴더 안의 홈으로 바꾸고, 설정을 복사하고, 시스템 설정·믿음 변수를 지우고, 사용자의 인자와 첫 요청을 그대로 뒤에 넘긴다. 모델·권한 인자는 붙이지 않는다', async () => {
     const { gateway, real, wrapper } = await setup();
-    const ran = await exec(wrapper, ['-i', '요청 글 "따옴표" $HOME'], { HOME: real, GEMINI_CLI_SYSTEM_SETTINGS_PATH: '/evil.json', GEMINI_CLI_SYSTEM_DEFAULTS_PATH: '/evil2.json', GEMINI_RESTRICTED_MODE: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'false' });
+    const sandboxEnv = Object.fromEntries(GEMINI_SANDBOX_ENVS.map((name) => [name, 'x']));
+    const ran = await exec(wrapper, ['-i', '요청 글 "따옴표" $HOME'], { HOME: real, GEMINI_CLI_SYSTEM_SETTINGS_PATH: '/evil.json', GEMINI_CLI_SYSTEM_DEFAULTS_PATH: '/evil2.json', GEMINI_RESTRICTED_MODE: 'true', GEMINI_CLI_TRUST_WORKSPACE: 'false', ...sandboxEnv });
     expect(ran.code).toBe(0);
-    expect(ran.stdout.trim().split('\n')).toEqual([`HOME_ENV=${geminiHomePath(gateway)}`, 'SYS=unset|unset|unset|unset', `USER_HOME=${real}`, 'ARG=-i', 'ARG=요청 글 "따옴표" $HOME']);
+    expect(ran.stdout.trim().split('\n')).toEqual([
+      `HOME_ENV=${geminiHomePath(gateway)}`,
+      'SYS=unset|unset|unset|unset',
+      `USER_HOME=${real}`,
+      ...GEMINI_SANDBOX_ENVS.map((name) => `SBX_${name}=unset`),
+      'ARG=-i',
+      'ARG=요청 글 "따옴표" $HOME',
+    ]);
     expect(await readFile(path.join(geminiHomePath(gateway), '.gemini/settings.json'), 'utf8')).toBe(geminiSettingsContent(gateway, cli.nodePath));
     const execLine = hostGeminiWrapper(gateway, { cliPath: '/x' }).split('\n').find((line) => line.startsWith('exec '));
     expect(execLine).toBe("exec '/x' \"$@\"");
     expect(hostGeminiWrapper(gateway, { cliPath: '/x' })).not.toMatch(/--model|--yolo|--approval-mode|--sandbox|--trust/);
     // 토큰은 감싸개에 없다
     expect(hostGeminiWrapper(gateway, { cliPath: '/x' })).not.toContain('token');
+  });
+
+  it('샌드박스를 켜는 환경 변수(0.71.1 소스에서 읽은 열 개)는 설정·믿음 변수와 함께 지운다. 대조: 지우지 않고 가짜 CLI를 바로 부르면 보인다', async () => {
+    const { root, fake, wrapper } = await setup();
+    expect([...GEMINI_SANDBOX_ENVS].sort()).toEqual(['GEMINI_SANDBOX', 'GEMINI_SANDBOX_IMAGE', 'GEMINI_SANDBOX_PROXY_COMMAND', 'SANDBOX', 'SANDBOX_ENV', 'SANDBOX_FLAGS', 'SANDBOX_MOUNTS', 'SANDBOX_PORTS', 'SANDBOX_SET_UID_GID', 'SEATBELT_PROFILE']);
+    expect(GEMINI_UNSET_ENVS).toEqual([...GEMINI_SETTINGS_ENVS, ...GEMINI_SANDBOX_ENVS]);
+    const script = hostGeminiWrapper('/gw', { cliPath: '/x' });
+    const unsetLine = script.split('\n').find((line) => line.startsWith('unset '));
+    expect(unsetLine?.slice('unset '.length).split(' ')).toEqual([...GEMINI_UNSET_ENVS]);
+    // 대조군: 감싸개를 거치지 않으면 같은 환경이 그대로 보인다(시험이 값을 볼 수 있다는 증거)
+    const direct = await exec(fake, [], { HOME: root, GEMINI_SANDBOX: 'docker', SANDBOX: '1', SEATBELT_PROFILE: 'p' });
+    expect(direct.stdout).toContain('SBX_GEMINI_SANDBOX=set');
+    expect(direct.stdout).toContain('SBX_SANDBOX=set');
+    expect(direct.stdout).toContain('SBX_SEATBELT_PROFILE=set');
+    const wrapped = await exec(wrapper, [], { HOME: root, GEMINI_SANDBOX: 'docker', SANDBOX: '1', SEATBELT_PROFILE: 'p', GEMINI_SANDBOX_IMAGE: 'evil' });
+    expect(wrapped.stdout).not.toMatch(/SBX_\w+=set/);
   });
 
   it('로그인 파일만 사용자의 홈에서 링크로 잇는다. 사용자의 settings.json·확장은 잇지 않는다', async () => {
@@ -225,6 +261,18 @@ describe('Gemini 감시: 훅이 붙지 않은 gemini를 잡는다(진짜 argv·�
     expect(found(['node', script], [ok, { name: 'GEMINI_CLI_TRUST_WORKSPACE', value: 'false' }])).toEqual([101]);
     expect(found(['node', script], [ok, { name: 'GEMINI_CLI_SYSTEM_SETTINGS_PATH', value: '/x' }])).toEqual([101]);
     expect(found(['node', script, '--sandbox'], [ok])).toEqual([101]);
+    // 샌드박스를 켜는 환경 변수(값이 비었어도 있으면)도 붙지 않은 것이다
+    for (const name of GEMINI_SANDBOX_ENVS) {
+      expect(found(['node', script], [ok, { name, value: 'x' }]), name).toEqual([101]);
+      expect(found(['node', script], [ok, { name, value: '' }]), `${name} 빈 값`).toEqual([101]);
+    }
+  });
+
+  it('Rust 감시가 보는 환경 변수 이름 목록은 TS의 지우는 목록과 같다(두 곳이 어긋나면 한쪽만 닫힌다)', async () => {
+    const source = await readFile(path.join(__dirname, '../../../crates/bstudio-session/src/terminal/watch.rs'), 'utf8');
+    const body = /const GEMINI_SETTINGS_ENVS: \[&str; \d+\] = \[([^\]]*)\];/u.exec(source)?.[1] ?? '';
+    const names = [...body.matchAll(/"([A-Z0-9_]+)"/gu)].map((match) => match[1]);
+    expect(names.sort()).toEqual([...GEMINI_UNSET_ENVS].sort());
   });
 
   it('환경을 읽지 못하면 붙지 않은 것으로 본다. 끝난 프로세스(null)는 건너뛴다', () => {
