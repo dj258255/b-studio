@@ -3185,6 +3185,8 @@ async function runPlan(session: Session, run: ActiveRun, request: string, plan: 
     outsideChanges: {
       pendingFiles: () => changesOutsideTools(session),
       fingerprint: (files: readonly string[]) => session.checkpoints.stagedFingerprints(files),
+      // 허용 없이 시험 파일을 지우거나 건너뛰기 표시를 더하면 리뷰 단계가 돌려보낸다(마지막 체크포인트와 작업 복사본의 차이로 본다)
+      testChanges: () => session.checkpoints.pendingTestChanges(),
     },
     requirementsBaseline,
     allowBreaking: plan.allowBreaking,
@@ -4902,6 +4904,7 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
       const head = await sessionHeadSha(session);
       return head ? { head } : undefined;
     },
+    diffSince: (sha) => session.checkpoints.diffSince(sha),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -4985,6 +4988,7 @@ export async function continueReviewAfterNewCommits(id: string): Promise<void> {
       const head = await sessionHeadSha(session);
       return head ? { since: sinceSha, head } : undefined;
     },
+    diffSince: (sha) => session.checkpoints.diffSince(sha),
     postComment: (body) => reviewPostComment(session, body),
     requestFix: (text) => reviewRequestFix(session, text),
     push: async () => {
@@ -8742,8 +8746,10 @@ function terminalVerification(session: Session, run: ActiveRun & { terminal: Ter
       allowBreaking: false,
       maxVerifyAttempts: TERMINAL_MAX_VERIFY_ATTEMPTS,
       ...(declarationBaseline ? { declarationBaseline } : {}),
-      // 사람이 켜 둔 확인 선언 변경 허용(#916, ADR-164). 켜면 게이트가 시도마다 studio.yaml의 선언을 다시 읽는다
+      // 사람이 켜 둔 확인 선언 변경 허용(#916, ADR-164). 켜면 게이트가 시도마다 studio.yaml의 선언을 다시 읽고, 시험 파일의 삭제·건너뛰기 표시도 받아들인다
       ...(state.allowCheckChanges ? { allowCheckChanges: true } : {}),
+      // 셸이든 CLI의 내장 도구든 턴 끝의 작업 복사본 차이로 본다(훅을 거치지 않은 변경도 잡힌다)
+      testChanges: () => session.checkpoints.pendingTestChanges(),
       fetcher: fetchContract,
       signal,
       onServiceStatus: serviceStatus,

@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import { lstat, mkdir, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { decodeNative, encodeLoneSurrogates, execBytes, native } from '@b-studio/sandbox';
 import type { WorkflowStage } from '@b-studio/spec';
@@ -13,6 +14,7 @@ import {
   WORKFLOW_INCOMPLETE_TRAILER,
   WORKFLOW_TRAILER,
   WORKFLOW_VERIFY_TRAILER,
+  type TestChangeEntry,
   type VerifyTrailer,
 } from './workflow';
 
@@ -504,6 +506,77 @@ export class CheckpointStore {
     const subdir = await this.#subdir();
     const target = subdir ? `${subdir}/${file}` : file;
     return capText(redact(await this.#git(['diff', '--no-color', ...(await this.#relative()), 'HEAD', '--', target])), MAX_PATCH_CHARS);
+  }
+
+  /**
+   * 마지막 체크포인트(HEAD)와 지금 작업 복사본의 차이에서 시험을 약하게 만들 수 있는 변경을 읽는다(이슈 #1436): 파일마다 바뀐 종류(`A M D R T`…)와,
+   * 시험 파일·Rust 파일은 이번 변경에서 **더해진 줄**. 도구를 거치지 않은 셸 변경도 작업 복사본의 차이이므로 같이 잡힌다.
+   *
+   * 이름 바꾸기는 git에게 맡긴다. 작업 복사본의 `git status`는 스테이징하지 않은 이름 바꾸기를 삭제+추가로만 보여서, 커밋이 스테이징할 때와 같은 방식으로
+   * **임시 인덱스**(HEAD에서 새로 만든 것, 진짜 인덱스를 복사하지 않는다)에 `add -A`를 하고 `diff --cached -M`으로 짝을 찾는다. 진짜 인덱스·작업 트리는 건드리지 않는다.
+   * 새 객체는 임시 폴더에만 쓴다(GIT_OBJECT_DIRECTORY). 경로는 이름 문자열로 견주지 않는다(대소문자·유니코드 정규화가 다른 볼륨에서 비켜 갈 길이 생기므로): 이름 바꾸기 짝은 내용으로 git이 찾고,
+   * 시험 파일인지는 Rust 판정(`test_weakening`)이 이름 모양으로 본다.
+   *
+   * 끝까지 읽지 못하면 던진다 — 부르는 쪽이 통과가 아니라 "확인하지 못함"으로 다룬다(git 실패, 중첩 저장소, 시험 파일이 너무 많음, 변경 내용을 파일에 맞추지 못함).
+   */
+  async pendingTestChanges(): Promise<TestChangeEntry[]> {
+    await this.#assertNoNestedRepos();
+    // add는 저장소 설정에 따라 필터(프로그램)를 부를 수 있다. 커밋 앞과 같은 확인을 먼저 한다(이슈 #706)
+    await this.#assertSafeLocalGit();
+    const scratch = await mkdtemp(path.join(tmpdir(), 'b-studio-test-diff-'));
+    try {
+      // GIT_LITERAL_PATHSPECS: 경로가 `*`·`:(`로 시작해도 패턴으로 읽지 않는다
+      // 새로 만드는 객체(add가 쓰는 blob)는 임시 폴더에 두고 진짜 객체 폴더는 읽기만 한다: 진짜 저장소에 검증 전의 내용이 객체로 남지 않고,
+      // 읽기 전용으로 붙인 `.git`(컨테이너 방식)에서도 돈다
+      const gitPath = async (name: string): Promise<string> => path.resolve(this.root, (await this.#git(['rev-parse', '--git-path', name])).trim());
+      const realObjects = await gitPath('objects');
+      const objects = path.join(scratch, 'objects');
+      await mkdir(objects);
+      const env = { GIT_INDEX_FILE: path.join(scratch, 'index'), GIT_LITERAL_PATHSPECS: '1', GIT_OBJECT_DIRECTORY: objects, GIT_ALTERNATE_OBJECT_DIRECTORIES: realObjects };
+      // 임시 인덱스는 진짜 인덱스를 복사하지 않고 HEAD에서 새로 만든다. 진짜 인덱스에는 에이전트가 셸에서 건 `skip-worktree`·`assume-unchanged` 표시와
+      // 옛 stat 캐시(같은 크기·시각으로 되돌린 파일)가 있어, 복사하면 `add -A`가 그 파일을 읽지 않고 시험 파일의 삭제·건너뛰기를 놓친다.
+      // 새 인덱스에는 표시도 캐시도 없어 추적하는 파일을 모두 내용으로 다시 읽는다(큰 저장소에서는 그만큼 느리다)
+      await this.#git(['read-tree', 'HEAD'], { env });
+      // 체크포인트 커밋은 진짜 인덱스를 쓴다. 진짜 인덱스에는 있고 HEAD에는 없는 경로(`git add -f`로 올린 무시 대상 파일 등)는 `add -A`가 다시 만들지 못하므로
+      // (게이트와 커밋이 다른 집합을 보게 된다) 그 경로만 강제로 더한다. 표시·stat 캐시는 가져오지 않는다(내용은 작업 트리에서 다시 읽는다).
+      // 목록을 읽지 못하면 던진다. 작업 트리에서 지워진 것은 바뀐 것이 없으므로 건너뛴다(없는 경로에 add -f는 실패한다)
+      const stagedOnly = (await this.#git(['diff', '--cached', '--name-only', '-z', '--diff-filter=A', 'HEAD', ...(await this.#scope())]))
+        .split('\0')
+        .filter((file) => file !== '');
+      const present: string[] = [];
+      for (const file of stagedOnly) if (await lstat(path.join(this.root, file)).then(() => true, () => false)) present.push(file);
+      for (let index = 0; index < present.length; index += 200) {
+        await this.#git(['add', '-f', '--', ...present.slice(index, index + 200)], { env });
+      }
+      await this.#git(['add', '-A', ...(await this.#scope())], { env });
+      const relative = await this.#relative();
+      const subdir = await this.#subdir();
+      const listed = JSON.parse(
+        native.workflowTestChangeEntries(await this.#git(['diff', '--cached', '-M', '--name-status', '-z', ...relative, 'HEAD'], { env })),
+      ) as { entries: Array<{ status: string; path: string; from?: string; scan: boolean }> };
+      const toRead = listed.entries.filter((entry) => entry.scan);
+      if (toRead.length > MAX_TEST_CHANGE_FILES) {
+        throw new CheckpointError(`읽어야 할 시험 파일·Rust 파일이 ${toRead.length}개로 너무 많습니다(상한 ${MAX_TEST_CHANGE_FILES})`);
+      }
+      let added: string[][] = [];
+      if (toRead.length > 0) {
+        // --text: 작업 폴더의 .gitattributes(`-diff`·`binary`)로 파일을 이진으로 표시해 줄이 안 보이게 하는 길을 막는다
+        // 이름을 바꾼 짝은 옛 경로도 함께 주어야 git이 짝으로 읽는다. 경로는 저장소 루트 기준이다(--relative와 별개)
+        const prefix = subdir ? `${subdir}/` : '';
+        const pathspecs = [...new Set(toRead.flatMap((entry) => [entry.path, ...(entry.from === undefined ? [] : [entry.from])]))].map((file) => `${prefix}${file}`);
+        const patch = await this.#git(['diff', '--cached', '-M', '-U0', '--no-color', '--text', ...relative, 'HEAD', '--', ...pathspecs], { env });
+        added = JSON.parse(native.workflowTestChangeAddedLines(patch, toRead.length)) as string[][];
+      }
+      const lines = new Map(toRead.map((entry, index) => [entry, added[index]!]));
+      return listed.entries.map((entry) => ({
+        status: entry.status,
+        path: entry.path,
+        ...(entry.from === undefined ? {} : { from: entry.from }),
+        ...(entry.scan ? { added: lines.get(entry)! } : {}),
+      }));
+    } finally {
+      await rm(scratch, { recursive: true, force: true });
+    }
   }
 
   /**
@@ -1297,6 +1370,8 @@ export async function findNestedGitRepos(
 
 /** git 한 번의 stdout·stderr 상한(바이트). 넘으면 멈추고 던진다 */
 const GIT_MAX_BUFFER = 64 * 1024 * 1024;
+/** pendingTestChanges가 더해진 줄을 읽는 시험 파일·Rust 파일 수의 상한. 넘으면 끝까지 읽지 못한 것으로 던진다 */
+const MAX_TEST_CHANGE_FILES = 300;
 
 /**
  * 인덱스 잠금(`.git/index.lock`)을 다른 git이 쥐고 있어 실패했을 때 다시 해 보는 간격(ms). 합쳐서 약 3초.

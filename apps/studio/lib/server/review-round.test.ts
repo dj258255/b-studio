@@ -224,3 +224,72 @@ describe('collectHumanResolvedFindings', () => {
     expect(resolved).toEqual([{ severity: 'blocker', file: 'api/Seed.java', line: undefined, title: '시퀀스 미복원', reason: '실제 PostgreSQL에서 새 글 id 43·44 확인' }]);
   });
 });
+
+describe('지적 위치 대조와 처리율(이슈 #1440)', () => {
+  const REVIEWED = ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -1,3 +1,4 @@', ' c1', ' c2', '+add3', ' c4'].join('\n');
+  const LATER = ['diff --git a/a.ts b/a.ts', '--- a/a.ts', '+++ b/a.ts', '@@ -2,3 +2,2 @@', ' c2', '-add3', ' c4'].join('\n');
+  const reply = (file: string, line: number, severity = 'blocker') => `{"findings":[{"severity":"${severity}","file":"${file}","line":${line},"title":"제목 @octo","detail":"설명"}]}`;
+  const sha = 'd'.repeat(40);
+
+  it('diff에 없는 지적에 표시를 붙이고 코멘트에 적지만 판정(고치러 보내기)은 그대로다', async () => {
+    const comments: string[] = [];
+    const requestFix = vi.fn(async (): Promise<ReviewFixResult> => ({ ok: true }));
+    const deps = baseDeps({
+      ask: askReturning(reply('nope.ts', 9), '{"findings":[]}'),
+      diff: async () => REVIEWED,
+      requestFix,
+      postComment: async (body) => (comments.push(body), { url: 'u' }),
+    });
+    const last = (await collect(deps, 2)).at(-1)!;
+    expect(last.rounds[0]!.findingChecks).toEqual([{ status: 'not_in_diff', reason: 'file_missing' }]);
+    expect(requestFix).toHaveBeenCalledTimes(1);
+    expect(comments[0]).toContain('### 지적 위치 대조');
+    expect(comments[0]).toContain('diff에 없음');
+    // 기존 표(Rust)의 제목은 손대지 않는다. 새로 붙인 절만 이스케이프를 확인한다
+    expect(comments[0]!.slice(comments[0]!.indexOf('### 지적 위치 대조'))).not.toContain('@octo');
+    expect(comments[0]!.trimEnd().endsWith('<!-- b-studio-review round=1 -->')).toBe(true);
+  });
+
+  it('diff 안을 가리키면 코멘트에 위치 대조 절이 없다', async () => {
+    const comments: string[] = [];
+    const deps = baseDeps({ ask: askReturning(reply('a.ts', 3, 'minor')), diff: async () => REVIEWED, postComment: async (body) => (comments.push(body), { url: 'u' }) });
+    const last = (await collect(deps, 1)).at(-1)!;
+    expect(last.rounds[0]!.findingChecks).toEqual([{ status: 'in_diff' }]);
+    expect(comments[0]).not.toContain('지적 위치 대조');
+  });
+
+  it('고친 뒤 다음 라운드가 시작될 때 이전 라운드 지적이 반영됐는지 세고, 다음 코멘트에 처리율을 적는다', async () => {
+    const comments: string[] = [];
+    const diffSince = vi.fn(async () => LATER);
+    const deps = baseDeps({
+      ask: askReturning(reply('a.ts', 3), '{"findings":[]}'),
+      diff: async () => REVIEWED,
+      commitRange: async () => ({ head: sha }),
+      diffSince,
+      postComment: async (body) => (comments.push(body), { url: 'u' }),
+    });
+    const last = (await collect(deps, 2)).at(-1)!;
+    expect(diffSince).toHaveBeenCalledWith(sha);
+    expect(last.rounds[0]!.addressed).toEqual(['addressed']);
+    expect(comments[1]).toContain('이전 라운드 지적 처리율: 1/1');
+  });
+
+  it('지적한 줄이 안 바뀌었으면 반영 안 됨, 이후 diff를 못 읽거나 끝 커밋을 모르면 모름이고 리뷰는 계속된다', async () => {
+    const run = async (extra: Partial<ReviewRoundDeps>) => {
+      const deps = baseDeps({ ask: askReturning(reply('a.ts', 3), '{"findings":[]}'), diff: async () => REVIEWED, ...extra });
+      return (await collect(deps, 2)).at(-1)!;
+    };
+    const untouched = await run({ commitRange: async () => ({ head: sha }), diffSince: async () => 'diff --git a/z.ts b/z.ts\n--- a/z.ts\n+++ b/z.ts\n@@ -1,1 +1,1 @@\n-a\n+b' });
+    expect(untouched.rounds[0]!.addressed).toEqual(['not_addressed']);
+    const broken = await run({
+      commitRange: async () => ({ head: sha }),
+      diffSince: async () => {
+        throw new Error('git 실패');
+      },
+    });
+    expect(broken.state).toBe('passed');
+    expect(broken.rounds[0]!.addressed).toEqual(['unknown']);
+    const noHead = await run({ diffSince: async () => LATER });
+    expect(noHead.rounds[0]!.addressed).toBeUndefined();
+  });
+});
