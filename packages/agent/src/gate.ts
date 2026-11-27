@@ -10,6 +10,7 @@ import type { AgentEvent } from './agent-types';
 import { servicesForFiles } from './services';
 import { detectStuckLoading } from './stuck-loading';
 import { runGateCheck, type GateHost } from './gate-check';
+import type { BaselineSource } from './test-baseline';
 import { captureBaselines, serviceUrl, type ContractFetcher, type VerificationReport } from './verify';
 import { missingVerificationStages, protectedPathsFor, reviewChanges, type WorkflowCheck, type WorkflowStepCheck } from './workflow';
 import type { OpenApiDocument } from './contract-diff';
@@ -175,6 +176,11 @@ export interface GateOptions {
    * 체크포인트와 같은지 앞뒤로 견줘야 한다 — 게이트는 디스크에 있는 것을 확인할 뿐이다
    */
   recheck?: true;
+  /**
+   * 선언한 시험이 실패했을 때 변경 전 기준(마지막 체크포인트)에서 같은 시험을 다시 돌려 "변경 전에도 실패 / 이번 변경으로 실패 / 변경 전 결과 모름" 라벨을
+   * 피드백에 붙이는 기준(이슈 #1435, `test-baseline.ts`). 없으면 라벨은 "모름"이다. 통과·실패 판정과 재시도 횟수는 이 값과 무관하다
+   */
+  baseline?: BaselineSource;
 }
 
 /**
@@ -478,6 +484,9 @@ export class VerificationGate {
         },
         get requestService() {
           return gate.#options.requestService ?? requestService;
+        },
+        get baseline() {
+          return gate.#options.baseline;
         },
         auto: {
           workspace,

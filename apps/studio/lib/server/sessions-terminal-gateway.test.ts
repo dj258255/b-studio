@@ -20,6 +20,7 @@ const execFileAsync = promisify(execFile);
 const fake = vi.hoisted(() => ({
   root: '',
   execCalls: [] as string[][],
+  baselineCalls: [] as string[][],
   /** 이 낱말이 든 명령은 종료 코드 1로 끝난다(선언한 테스트를 실패시킬 때 쓴다) */
   failCommands: [] as string[],
   /** 켜면 서비스 재시작이 샌드박스 쪽 문제로 실패한다. 'code'는 코드가 원인일 수 있는 실패(서비스가 준비되지 않음, #943) */
@@ -87,6 +88,11 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async exec(_service: string, command: string[]) {
       // 게이트가 테스트 전에 보고서 자리를 비우는 명령(#756)은 테스트 명령으로 세지 않는다
       if (command[0] === 'sh' && command[2]?.startsWith('rm -f /tmp/b-studio-test-report.json ')) return { exitCode: 0, stdout: '', stderr: '' };
+      // 실패한 시험을 변경 전 기준에서 다시 돌리는 명령(#1435)은 시험 명령으로 세지 않는다. 변경 전에는 통과했다고 답한다
+      if (command[0] === 'sh' && command[2]?.includes('b-studio-baseline.')) {
+        fake.baselineCalls.push(command.slice(4));
+        return { exitCode: 0, stdout: '__B_STUDIO_BASELINE_READY__\n', stderr: '' };
+      }
       if (fake.pauses.length > fake.unpauses.length) fake.execsWhilePaused += 1;
       fake.execCalls.push(command);
       if (fake.holdWord && command.includes(fake.holdWord)) await fake.hold;
@@ -224,6 +230,7 @@ beforeEach(async () => {
   await writeFile(path.join(project, 'api/src/Order.java'), 'class Order {}\n');
   fake.root = project;
   fake.execCalls = [];
+  fake.baselineCalls = [];
   fake.failCommands = [];
   fake.startFails = false;
   fake.starts = 0;
@@ -2252,6 +2259,9 @@ describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린
     const failed = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
     expect(failed.feedback).toContain('[b-studio 검증 게이트]');
     expect(failed.feedback).toContain('done-card-1');
+    // 실제 체크포인트 저장소에서 기준을 모아 변경 전(통과)으로 답한 라벨이 붙는다. 판정은 그대로 실패다
+    expect(failed.feedback).toContain('변경 전 기준: 이번 변경으로 실패');
+    expect(fake.baselineCalls).toEqual([['sh', '-c', 'echo done']]);
     expect(fake.execCalls).toEqual([['./gradlew', 'test'], ['sh', '-c', 'echo done']]);
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
 

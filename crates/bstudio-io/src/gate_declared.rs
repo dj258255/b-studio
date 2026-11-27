@@ -352,6 +352,58 @@ async fn revive_if_oom_killed(hook: &Hook, service: &str) -> Res<Option<String>>
     Ok(Some(format!("메모리 한도{limit}를 넘어")))
 }
 
+/// 변경 전 기준에서 같은 시험을 다시 돌린 결과(이슈 #1435). **피드백 글에만 쓴다** — 통과·실패 판정과 재시도 횟수는 이 값을 읽지 않는다.
+/// 모르는 라벨·실패 응답·알 수 없는 사유는 모두 `Unknown`이다. "변경 전에도 실패"는 TS가 변경 전 나무를 만들고 시험이 실제로 돈 뒤 0이 아닌 코드로 끝났다고 말했을 때만 나온다
+enum Baseline {
+    /// 변경 전에도 실패했다
+    Before,
+    /// 변경 전에는 통과했다(이번 변경으로 실패)
+    Now,
+    Unknown(&'static str),
+}
+
+/// `declaredBaseline` 사유 코드를 글로 바꾼다. 글은 이 표에 있는 것만 낸다(TS가 보낸 글을 그대로 피드백에 싣지 않는다)
+fn baseline_reason(code: Option<&str>) -> &'static str {
+    match code {
+        Some("no-baseline") => "기준이 될 체크포인트가 없어",
+        Some("timeout") => "변경 전 시험이 정해진 시간 안에 끝나지 않아",
+        Some("too-large") => "기준과 다른 파일이 너무 많거나 커서 변경 전 나무를 만들지 않아",
+        Some("untracked-changes") => "체크포인트가 추적하지 않는 생성 파일이 바뀌어 변경 전 나무를 정확히 만들 수 없어",
+        Some("unsupported-file") => "링크처럼 되돌릴 수 없는 종류의 파일이 바뀌어",
+        Some("setup-failed") => "변경 전 나무를 만들지 못해",
+        Some("platform") => "변경 전 시험을 돌리는 중 샌드박스 쪽 문제가 생겨",
+        Some("environment") => "환경 문제로 실패해 변경 전과 견주지 않아",
+        Some("exit-unknown") => "종료 코드를 알 수 없어",
+        Some("aborted") => "실행이 취소돼",
+        _ => "알 수 없는 이유로",
+    }
+}
+
+fn baseline_line(baseline: &Baseline) -> String {
+    const SCOPE: &str = " (마지막 체크포인트의 추적 파일로 되돌린 복사본에서 같은 명령을 돌린 결과입니다. git이 무시하는 파일과 실행 중인 서비스는 지금 그대로이고, 실패 내용이 같은지는 견주지 않았습니다)";
+    match baseline {
+        Baseline::Before => format!("변경 전 기준: 변경 전에도 실패{SCOPE}"),
+        Baseline::Now => format!("변경 전 기준: 이번 변경으로 실패 — 변경 전에는 같은 시험이 통과했습니다{SCOPE}"),
+        Baseline::Unknown(why) => format!("변경 전 기준: 변경 전 결과 모름 — {why} 결과를 알 수 없습니다"),
+    }
+}
+
+/// 실패한 시험을 변경 전 기준에서 다시 돌려 달라고 TS에 묻는다. 응답이 `ok: false`이거나 알아볼 수 없는 라벨이면 `Unknown`이다(`Before`로 추정하지 않는다).
+/// 콜백이 치명적으로 끝났거나 응답이 없으면(`Fail::Hook`) 다른 콜백처럼 검사 전체를 멈춘다
+async fn run_baseline(hook: &Hook, test: &TestCase) -> Res<Baseline> {
+    let request = req("declaredBaseline", vec![("service", s(test.service.clone())), ("command", strings(&test.command))]);
+    let value = match call(hook, request).await? {
+        Answer::Done(value) => value,
+        Answer::Failed { .. } => return Ok(Baseline::Unknown(baseline_reason(Some("platform")))),
+    };
+    Ok(match value.prop("label").and_then(JsValue::as_str) {
+        Some("before") => Baseline::Before,
+        Some("now") => Baseline::Now,
+        Some("unknown") => Baseline::Unknown(baseline_reason(value.prop("reason").and_then(JsValue::as_str))),
+        _ => Baseline::Unknown(baseline_reason(None)),
+    })
+}
+
 async fn run_test(ctx: &Arc<Ctx>, index: usize) -> Res<Result<Option<Vec<String>>, String>> {
     let hook = &ctx.hook;
     let test = &ctx.plan.tests[index];
@@ -366,10 +418,18 @@ async fn run_test(ctx: &Arc<Ctx>, index: usize) -> Res<Result<Option<Vec<String>
         let joined = format!("{}\n{}", template(result.prop("stdout")), template(result.prop("stderr")));
         let lines: Vec<&str> = js::trim(&joined).split('\n').collect();
         let output = lines[lines.len().saturating_sub(OUTPUT_TAIL_LINES)..].join("\n");
+        // 변경 전 기준과 견주는 것은 "시험이 0이 아닌 코드로 끝났다"고 알아볼 수 있을 때, 환경 문제가 아닐 때뿐이다. 이 줄은 글에만 들어가고 판정은 아래 `Err`가 그대로 정한다
+        let baseline = if revived.is_some() {
+            Baseline::Unknown(baseline_reason(Some("environment")))
+        } else if !matches!(result.prop("exitCode"), Some(JsValue::Num(_))) {
+            Baseline::Unknown(baseline_reason(Some("exit-unknown")))
+        } else {
+            run_baseline(hook, test).await?
+        };
         let environment = revived.map_or_else(String::new, |why| {
             format!("\n환경 문제: {} 컨테이너가 {why} 종료됐습니다. 코드 문제가 아닐 수 있습니다 — 서비스를 다시 띄웠습니다(다음 시도에서 이어집니다)", test.service)
         });
-        return Ok(Err(format!("종료 코드 {}{environment}\n{output}", template(result.prop("exitCode")))));
+        return Ok(Err(format!("종료 코드 {}\n{}{environment}\n{output}", template(result.prop("exitCode")), baseline_line(&baseline))));
     }
     let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
     let command: Vec<String> = test.command.iter().map(|part| lossy_str(part)).collect();
@@ -892,6 +952,7 @@ mod tests {
                 "declaredPageData" => r#"{"ok":true,"items":[]}"#.to_owned(),
                 "declaredExec" => r#"{"ok":true,"exitCode":0,"stdout":"","stderr":""}"#.to_owned(),
                 "declaredRedact" => r#"{"ok":true,"text":"가림"}"#.to_owned(),
+                "declaredBaseline" => r#"{"ok":true,"label":"unknown","reason":"none"}"#.to_owned(),
                 "emit" | "throwIfAborted" | "declaredClearReports" => r#"{"ok":true}"#.to_owned(),
                 _ => return None,
             })
@@ -985,6 +1046,138 @@ mod tests {
         let declared = run_sync(hook(fresh(), 0, broken)).ok().unwrap();
         assert_eq!(declared.checks[0].prop("ok"), Some(&JsValue::Bool(true)));
         assert!(declared.checks[0].prop("evidence").is_none());
+    }
+
+    // ── 변경 전 기준 라벨(이슈 #1435) ───────────────────────────────────────
+
+    /// 실패하는 테스트 하나(`maxAttempts` 2)를 돌리고, `declaredBaseline`에는 `baseline`을 답한다. `Some`이 아니면 응답 없음이다
+    fn failing_with_baseline(baseline: Option<&'static str>, extra: Option<&'static str>) -> (Declared, Arc<Log>) {
+        let log = fresh();
+        let base = basic(plan(&test_case("unit", Some(2)), "", "", ""));
+        let reply = with_items(
+            Box::new(move |op, request| match op {
+                "declaredExec" => Some(r#"{"ok":true,"exitCode":1,"stdout":"","stderr":"expected memo"}"#.to_owned()),
+                "declaredStats" => Some(extra.unwrap_or(r#"{"ok":true,"usage":[]}"#).to_owned()),
+                "declaredRestart" => Some(r#"{"ok":true}"#.to_owned()),
+                "declaredBaseline" => baseline.map(str::to_owned),
+                _ => base(op, request),
+            }),
+            1,
+        );
+        let declared = run_sync(hook(log.clone(), 0, reply)).ok().unwrap();
+        (declared, log)
+    }
+
+    fn detail_of(declared: &Declared) -> String {
+        declared.checks[0].prop("detail").and_then(JsValue::as_str).unwrap().to_owned()
+    }
+
+    #[test]
+    fn 변경_전에도_실패하면_그_라벨을_종료_코드_다음_줄에_붙인다() {
+        let (declared, log) = failing_with_baseline(Some(r#"{"ok":true,"label":"before"}"#), None);
+        let detail = detail_of(&declared);
+        assert!(detail.starts_with("종료 코드 1\n변경 전 기준: 변경 전에도 실패"), "{detail}");
+        assert!(detail.ends_with("expected memo"), "{detail}");
+        // 같은 시험을 시도마다 다시 묻는다(캐시는 TS가 한다). 실패한 시도에서만 부른다
+        assert_eq!(calls(&log).iter().filter(|call| call.starts_with("declaredBaseline:")).count(), 2);
+    }
+
+    #[test]
+    fn 변경_전에는_통과했으면_이번_변경으로_실패라고_붙인다() {
+        let (declared, _) = failing_with_baseline(Some(r#"{"ok":true,"label":"now"}"#), None);
+        assert!(detail_of(&declared).starts_with("종료 코드 1\n변경 전 기준: 이번 변경으로 실패"), "{}", detail_of(&declared));
+    }
+
+    #[test]
+    fn 변경_전_결과를_모르면_모름이고_사유_코드를_글로_바꾼다() {
+        for (answer, expect) in [
+            (r#"{"ok":true,"label":"unknown","reason":"no-baseline"}"#, "기준이 될 체크포인트가 없어"),
+            (r#"{"ok":true,"label":"unknown","reason":"timeout"}"#, "시간 안에"),
+            (r#"{"ok":true,"label":"unknown","reason":"zzz"}"#, "알 수 없는 이유"),
+            (r#"{"ok":true,"label":"unknown"}"#, "알 수 없는 이유"),
+        ] {
+            let (declared, _) = failing_with_baseline(Some(answer), None);
+            let detail = detail_of(&declared);
+            assert!(detail.starts_with("종료 코드 1\n변경 전 기준: 변경 전 결과 모름"), "{answer}: {detail}");
+            assert!(detail.lines().nth(1).unwrap().contains(expect), "{answer}: {detail}");
+            assert!(!detail.contains("변경 전에도 실패") && !detail.contains("이번 변경으로 실패"), "{answer}: {detail}");
+        }
+    }
+
+    #[test]
+    fn 알아볼_수_없는_라벨이나_실패_응답은_모름이지_변경_전에도_실패가_아니다() {
+        for answer in [
+            r#"{"ok":true,"label":"BEFORE"}"#,
+            r#"{"ok":true,"label":"pre-existing"}"#,
+            r#"{"ok":true,"label":5}"#,
+            r#"{"ok":true}"#,
+            r#"{"ok":false,"error":{"message":"변경 전 시험을 돌리지 못했습니다"}}"#,
+        ] {
+            let (declared, _) = failing_with_baseline(Some(answer), None);
+            let detail = detail_of(&declared);
+            assert!(detail.starts_with("종료 코드 1\n변경 전 기준: 변경 전 결과 모름"), "{answer}: {detail}");
+            assert!(!detail.contains("변경 전에도 실패"), "{answer}: {detail}");
+        }
+    }
+
+    #[test]
+    fn 라벨은_판정을_바꾸지_않는다_어느_라벨이든_실패이고_시도_횟수와_실행_횟수가_같다() {
+        let mut seen = Vec::new();
+        for baseline in [
+            Some(r#"{"ok":true,"label":"before"}"#),
+            Some(r#"{"ok":true,"label":"now"}"#),
+            Some(r#"{"ok":true,"label":"unknown","reason":"timeout"}"#),
+            Some(r#"{"ok":false,"error":{"message":"x"}}"#),
+            Some(r#"{"ok":true,"label":"zzz"}"#),
+        ] {
+            let (declared, log) = failing_with_baseline(baseline, None);
+            let check = &declared.checks[0];
+            assert_eq!(check.prop("ok"), Some(&JsValue::Bool(false)), "{baseline:?}");
+            assert_eq!(check.prop("attempts"), Some(&JsValue::Num(2.0)), "{baseline:?}");
+            assert!(check.prop("evidence").is_none());
+            seen.push(calls(&log).iter().filter(|call| call.starts_with("declaredExec:")).count());
+        }
+        assert_eq!(seen, [2, 2, 2, 2, 2]);
+    }
+
+    #[test]
+    fn 기준_콜백이_치명적으로_끝나면_검사_전체를_멈춘다_조용히_삼키지_않는다() {
+        let log = fresh();
+        let base = basic(plan(&test_case("unit", None), "", "", ""));
+        let reply = with_items(
+            Box::new(move |op, request| match op {
+                "declaredExec" => Some(r#"{"ok":true,"exitCode":1,"stdout":"","stderr":"x"}"#.to_owned()),
+                "declaredStats" => Some(r#"{"ok":true,"usage":[]}"#.to_owned()),
+                "declaredBaseline" => Some(r#"{"fatal":true}"#.to_owned()),
+                _ => base(op, request),
+            }),
+            1,
+        );
+        assert_eq!(run_sync(hook(log, 0, reply)).err(), Some(Fail::Hook));
+    }
+
+    #[test]
+    fn 통과한_테스트와_환경_문제와_알아볼_수_없는_종료_코드는_기준을_돌리지_않는다() {
+        // 통과
+        let log = fresh();
+        run_sync(hook(log.clone(), 0, with_items(basic(plan(&test_case("unit", None), "", "", "")), 1))).ok().unwrap();
+        assert!(!calls(&log).iter().any(|call| call.starts_with("declaredBaseline")));
+        // 메모리 한도로 죽어 서비스를 되살렸다: 코드 문제가 아닐 수 있어 기준과 견주지 않는다
+        let oom = r#"{"ok":true,"usage":[{"service":"api","oomKilled":true,"memoryLimitBytes":2147483648}]}"#;
+        let (declared, log) = failing_with_baseline(Some(r#"{"ok":true,"label":"before"}"#), Some(oom));
+        assert!(!calls(&log).iter().any(|call| call.starts_with("declaredBaseline")));
+        let detail = detail_of(&declared);
+        assert!(detail.contains("환경 문제") && detail.contains("변경 전 기준: 변경 전 결과 모름"), "{detail}");
+        assert!(!detail.contains("변경 전에도 실패"), "{detail}");
+        // 종료 코드를 알 수 없다: 시험이 실패한 것이 아니라 실행 자체를 알 수 없는 응답이다
+        for exec in [r#"{"ok":true,"stdout":"a"}"#, r#"{"ok":true,"exitCode":"1"}"#, r#"{"ok":true,"exitCode":null}"#] {
+            let log = fresh();
+            let base = basic(plan(&test_case("unit", None), "", "", ""));
+            let reply = with_items(Box::new(move |op, request| if op == "declaredExec" { Some(exec.to_owned()) } else if op == "declaredStats" { Some(r#"{"ok":true,"usage":[]}"#.to_owned()) } else { base(op, request) }), 1);
+            let declared = run_sync(hook(log.clone(), 0, reply)).ok().unwrap();
+            assert!(!calls(&log).iter().any(|call| call.starts_with("declaredBaseline")), "{exec}");
+            assert!(detail_of(&declared).contains("변경 전 기준: 변경 전 결과 모름"), "{exec}");
+        }
     }
 
     #[test]

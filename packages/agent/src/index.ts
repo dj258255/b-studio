@@ -82,6 +82,7 @@ export { readHookBody, startHookServer, type HookBodyKind, type HookHandler, typ
 export { ChangeTracker, rejectedChangeFeedback, type ChangeTrackerOptions, type Fingerprinter } from './change-tracker';
 export { boardMcpToolSpecs, externalBoardAccess, runBoardMcpTool, type BoardMcpToolSpec } from './board-mcp';
 export { handleBoardMcpRequest } from './board-mcp-server';
+export { baselineFromCheckpoints, type BaselineSource } from './test-baseline';
 export { fetchPage, recheckGateOnMaxTurns, VerificationGate, type GateOutcome, type MaxTurnsRecheck, type PageFetcher, type ServiceRequest, type VerifyMode } from './gate';
 export {
   BrowserUnavailableError,

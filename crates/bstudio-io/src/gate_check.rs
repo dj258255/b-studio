@@ -601,6 +601,7 @@ mod tests {
             "declaredRedact" => Some(Some(js_json::to_native(&obj(vec![("ok", Some(JsValue::Bool(true))), ("text", request.prop("text").cloned())])))),
             "declaredClearReports" => Some(Some(r#"{"ok":true}"#.to_owned())),
             "declaredStats" => Some(Some(r#"{"ok":true,"usage":[]}"#.to_owned())),
+            "declaredBaseline" => Some(Some(r#"{"ok":true,"label":"unknown","reason":"no-baseline"}"#.to_owned())),
             _ => None,
         })
     }
@@ -766,7 +767,7 @@ mod tests {
         assert_eq!(kind(&result), "retry");
         let feedback = result.prop("value").and_then(|v| v.prop("feedback")).and_then(JsValue::as_str).unwrap().to_owned();
         let body = feedback.split("\n\n").skip(1).collect::<Vec<_>>().join("\n\n");
-        assert!(body.starts_with("워크플로 검사 실패:\n- [test] unit (시도 1회)\n종료 코드 1\n출력\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과"), "{body}");
+        assert!(body.starts_with("워크플로 검사 실패:\n- [test] unit (시도 1회)\n종료 코드 1\n변경 전 기준: 변경 전 결과 모름 — 기준이 될 체크포인트가 없어 결과를 알 수 없습니다\n출력\n\n[참고] 서비스 재시작·계약 확인은 통과했습니다.\n검증 통과"), "{body}");
         // 보고서가 통과여도 뒤 검사가 실패하면 gate_done은 ok: false다
         let log = log.lock().unwrap();
         assert_eq!(log.events.last().unwrap().prop("ok"), Some(&JsValue::Bool(false)));

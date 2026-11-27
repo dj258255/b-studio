@@ -252,7 +252,7 @@ export async function runGeminiAgent(options: GeminiRunOptions): Promise<GeminiR
   let gate: VerificationGate | undefined;
   let gatePromise: Promise<VerificationGate> | undefined;
   const gateFor = (): Promise<VerificationGate> =>
-    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, allowCheckChanges: options.allowCheckChanges, outsideChanges: options.outsideChanges, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
+    (gatePromise ??= VerificationGate.create({ project, sandbox, workspace, allowBreaking, maxVerifyAttempts, verify: options.verify, allowCheckChanges: options.allowCheckChanges, outsideChanges: options.outsideChanges, baseline: options.baseline, fetcher, pageFetcher, browserRunner, signal, onServiceStatus, onEvent }));
   if (!ask && !options.ensureSandbox) gate = await gateFor();
   const guide = await loadProjectGuide(project);
   const context: ToolContext = {
