@@ -42,7 +42,7 @@ export function phoneView(user: string): PhoneView {
   const settings = readSettings();
   const listening = phoneListening();
   const connected = phoneGateway()?.connectedDevices() ?? new Set<string>();
-  const pairing = pendingPairing(Date.now());
+  const pairing = pendingPairing(user, Date.now());
   return {
     allowed: phoneAllowed(),
     enabled: settings.enabled && listening !== undefined,
@@ -58,7 +58,13 @@ export function phoneView(user: string): PhoneView {
 export function newPairingPayload(user: string, hostname: string): { payload: string; expiresAt: number } {
   const listening = phoneListening();
   if (!listening || !readSettings().enabled) throw new StudioError(409, '휴대폰 연결이 꺼져 있습니다. 먼저 켜세요');
-  const { code, expiresAt } = createPairingCode(user, Date.now());
+  let created: { code: string; expiresAt: number };
+  try {
+    created = createPairingCode(user, Date.now());
+  } catch (error) {
+    throw new StudioError(429, error instanceof Error ? error.message : String(error));
+  }
+  const { code, expiresAt } = created;
   const payload = JSON.stringify({ t: 'b-studio-pair', v: 1, k: toBase64(serverKeys().publicKey), c: code, a: listening.hosts.map((host) => `${host}:${listening.port}`), n: hostname.slice(0, 40) });
   return { payload, expiresAt };
 }

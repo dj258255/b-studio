@@ -39,7 +39,6 @@ interface PairingCode {
   code: string;
   user: string;
   expiresAt: number;
-  wrong: number;
 }
 
 interface Store {
@@ -48,7 +47,9 @@ interface Store {
   publicKey?: Uint8Array;
   devices?: Map<string, PhoneDevice>;
   settings?: PhoneSettings;
-  pairing?: PairingCode;
+  pairings?: Map<string, PairingCode>;
+  /** 대기 코드 전체에서 센 틀린 횟수 */
+  wrongGuesses?: number;
 }
 
 const holder = globalThis as typeof globalThis & { __bStudioPhone?: Store };
@@ -244,46 +245,60 @@ function newCode(): string {
   return [...bytes].map((byte) => CODE_ALPHABET[byte & 31]).join('');
 }
 
-/** 새 짝 코드. 한 번에 하나만 있고, 새로 만들면 앞의 것은 못 쓴다 */
+/** 대기 중인 짝 코드의 전체 상한(사용자당 하나). 넘으면 새로 만들지 못한다 */
+export const MAX_PENDING_PAIRINGS = 8;
+
+function pendingMap(now: number): Map<string, PairingCode> {
+  const s = store();
+  const map = (s.pairings ??= new Map());
+  for (const [user, entry] of map) if (entry.expiresAt <= now) map.delete(user);
+  return map;
+}
+
+/** 새 짝 코드. 사용자마다 하나이고, 새로 만들면 **그 사용자의** 앞 코드만 못 쓴다. 다른 사용자의 코드는 건드리지 않는다 */
 export function createPairingCode(user: string, now: number): { code: string; expiresAt: number } {
-  const pairing: PairingCode = { code: newCode(), user, expiresAt: now + PAIRING_TTL_MS, wrong: 0 };
-  store().pairing = pairing;
+  const map = pendingMap(now);
+  if (!map.has(user) && map.size >= MAX_PENDING_PAIRINGS) throw new Error('대기 중인 짝 코드가 너무 많습니다. 잠시 뒤에 다시 하세요');
+  const pairing: PairingCode = { code: newCode(), user, expiresAt: now + PAIRING_TTL_MS };
+  map.set(user, pairing);
   return { code: pairing.code, expiresAt: pairing.expiresAt };
 }
 
-export function cancelPairing(): void {
-  store().pairing = undefined;
+/** 그 사용자의 대기 코드만 거둔다 */
+export function cancelPairing(user: string): void {
+  store().pairings?.delete(user);
 }
 
-export function pendingPairing(now: number): { expiresAt: number } | undefined {
-  const pairing = store().pairing;
-  if (!pairing) return undefined;
-  if (pairing.expiresAt <= now) {
-    store().pairing = undefined;
-    return undefined;
-  }
-  return { expiresAt: pairing.expiresAt };
+/** 그 사용자의 대기 코드(남의 것은 보이지 않는다) */
+export function pendingPairing(user: string, now: number): { expiresAt: number } | undefined {
+  const entry = pendingMap(now).get(user);
+  return entry ? { expiresAt: entry.expiresAt } : undefined;
 }
 
 export type PairingCheck = { ok: true; user: string } | { ok: false; reason: 'none' | 'expired' | 'wrong' };
 
 /**
- * 짝 코드 확인. 맞으면 그 자리에서 코드를 지운다(한 번만). 틀리면 횟수를 세고, 상한에 닿으면 코드를 지운다.
- * 만료·소진·없음은 같은 거절이다(호출한 쪽이 까닭을 손님에게 나눠 말하지 않는다)
+ * 짝 코드 확인. 사용자 이름은 손님이 정하지 못한다: 손님이 보낸 코드로 대기 코드 전체를 견주어 맞는 항목의 사용자를 얻는다
+ * (일찍 멈추지 않고 모두 상수 시간 비교). 맞으면 그 코드만 지운다(한 번만). 틀린 횟수는 **전체**에서 센다 —
+ * 사용자 수만큼 추측 기회가 늘지 않게, 5번 틀리면 대기 중인 모든 코드를 지운다. 없음·만료·틀림은 같은 거절이다
  */
 export function checkPairingCode(given: string, now: number): PairingCheck {
   const s = store();
-  const pairing = s.pairing;
-  if (!pairing) return { ok: false, reason: 'none' };
-  if (pairing.expiresAt <= now) {
-    s.pairing = undefined;
-    return { ok: false, reason: 'expired' };
+  const map = pendingMap(now);
+  if (map.size === 0) {
+    s.wrongGuesses = 0;
+    return { ok: false, reason: 'none' };
   }
-  if (!safeEqual(given, pairing.code)) {
-    pairing.wrong += 1;
-    if (pairing.wrong >= PAIRING_MAX_WRONG) s.pairing = undefined;
+  let hit: PairingCode | undefined;
+  for (const entry of map.values()) if (safeEqual(given, entry.code)) hit = entry;
+  if (!hit) {
+    s.wrongGuesses = (s.wrongGuesses ?? 0) + 1;
+    if (s.wrongGuesses >= PAIRING_MAX_WRONG) {
+      map.clear();
+      s.wrongGuesses = 0;
+    }
     return { ok: false, reason: 'wrong' };
   }
-  s.pairing = undefined;
-  return { ok: true, user: pairing.user };
+  map.delete(hit.user);
+  return { ok: true, user: hit.user };
 }

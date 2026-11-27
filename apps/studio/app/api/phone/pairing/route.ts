@@ -16,8 +16,7 @@ export async function POST(request: Request) {
 /** 보이던 QR을 거두면 코드도 그 자리에서 못 쓰게 한다 */
 export async function DELETE(request: Request) {
   try {
-    assertPhoneManager(request.headers);
-    cancelPairing();
+    cancelPairing(assertPhoneManager(request.headers));
     return Response.json({ ok: true });
   } catch (error) {
     return errorResponse(error);

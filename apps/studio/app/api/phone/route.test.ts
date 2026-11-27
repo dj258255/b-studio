@@ -113,6 +113,23 @@ describe('/api/phone: 인증을 켠 서버', () => {
     expect((await toggle(true)).status).toBe(401);
   });
 
+  it('짝 코드는 사용자별: 남의 대기가 보이지 않고, 남이 취소해도 내 코드는 남는다', async () => {
+    serverMode({ B_STUDIO_PHONE: '1' });
+    expect((await toggle(true, { user: 'root' })).status).toBe(200);
+    const mine = await newPairing(local({ method: 'POST', user: 'kim' }));
+    expect(mine.status).toBe(200);
+    const pending = async (user: string) => ((await (await GET(local({ user }))).json()) as { pairing?: unknown }).pairing;
+    expect(await pending('kim')).toBeDefined();
+    expect(await pending('lee')).toBeUndefined();
+    expect((await cancelPairing(local({ method: 'DELETE', user: 'lee' }))).status).toBe(200);
+    expect(await pending('kim')).toBeDefined();
+    expect((await newPairing(local({ method: 'POST', user: 'lee' }))).status).toBe(200);
+    expect(await pending('kim')).toBeDefined();
+    expect((await cancelPairing(local({ method: 'DELETE', user: 'kim' }))).status).toBe(200);
+    expect(await pending('kim')).toBeUndefined();
+    expect(await pending('lee')).toBeDefined();
+  });
+
   it('기기는 짝 맺은 사람과 관리자만 보고 끊는다', async () => {
     serverMode({ B_STUDIO_PHONE: '1' });
     const device = addDevice({ name: '킴의 폰', publicKey: Buffer.alloc(32, 2).toString('base64'), tokenHash: 'b'.repeat(64), user: 'kim' }, Date.now());

@@ -46,7 +46,7 @@ import { fromBase64, messageNonce, NonceKind, openBox, openSecret, sealBox, seal
 import { isPhoneHttpRoute, isPhoneStreamRoute, PhoneGateway, defaultUserValid } from './gateway';
 import { createPhoneHttpHandler, isPrivateIPv4, isPrivatePeer, phoneGateway, phoneHosts, phoneListening, setPhoneDispatcher, setPhoneEnabled, startPhoneListener, stopPhoneListener } from './listener';
 import { assertPhoneManager } from './manage';
-import { addDevice, removeDevice, checkPairingCode, createPairingCode, listDevices, pendingPairing, readSettings, resetPhoneState, serverKeys, writeSettings } from './state';
+import { cancelPairing, MAX_PENDING_PAIRINGS, addDevice, removeDevice, checkPairingCode, createPairingCode, listDevices, pendingPairing, readSettings, resetPhoneState, serverKeys, writeSettings } from './state';
 
 let dir: string;
 const SECRET = 's'.repeat(40);
@@ -321,9 +321,9 @@ describe('짝 코드: 한 번만, 짧은 시간, 틀린 횟수 제한', () => {
 
   it('만료된 코드는 거절하고 지운다', () => {
     const { code } = createPairingCode('kim', 1000);
-    expect(checkPairingCode(code, 1000 + 120_000)).toEqual({ ok: false, reason: 'expired' });
+    expect(checkPairingCode(code, 1000 + 120_000)).toEqual({ ok: false, reason: 'none' });
     expect(checkPairingCode(code, 1001)).toEqual({ ok: false, reason: 'none' });
-    expect(pendingPairing(1001)).toBeUndefined();
+    expect(pendingPairing('kim', 1001)).toBeUndefined();
   });
 
   it('틀린 횟수가 5번이면 맞는 코드도 쓸 수 없다', () => {
@@ -334,7 +334,7 @@ describe('짝 코드: 한 번만, 짧은 시간, 틀린 횟수 제한', () => {
 
   it('새 코드를 만들면 앞의 코드는 못 쓰고, 코드는 10자 알파벳이다', () => {
     const first = createPairingCode('kim', 1000);
-    const second = createPairingCode('lee', 1000);
+    const second = createPairingCode('kim', 1000);
     expect(first.code).not.toBe(second.code);
     expect(second.code).toMatch(/^[A-HJ-NP-Z2-9]{10}$/);
     expect(checkPairingCode(first.code, 1001).ok).toBe(false);
@@ -822,5 +822,58 @@ describe('고정 벡터: docs/phone-protocol.md의 값과 서버 부품이 같�
     expect(toBase64(response)).toBe('PtU4m1XHJB41nW++2G7Z+FzToetcJ8M8RFApZFrv53fZgJY=');
     expect(openSecret(b64('nlWYw+CgdPlpPXqFLjyyoZM8u9kUnR4OjRkGXgo='), messageNonce(NonceKind.response, 7), key)).toBeUndefined();
     expect(openSecret(request, messageNonce(NonceKind.request, 8), key)).toBeUndefined();
+  });
+});
+
+describe('짝 코드는 사용자별이다(서버 방식에서 남의 코드를 지우거나 덮어쓰지 못한다)', () => {
+  it('B가 코드를 만들거나 취소해도 A의 코드는 그대로 쓸 수 있다', () => {
+    const a = createPairingCode('kim', 1000);
+    const b = createPairingCode('lee', 1000);
+    expect(a.code).not.toBe(b.code);
+    cancelPairing('lee');
+    expect(pendingPairing('kim', 1001)).toEqual({ expiresAt: a.expiresAt });
+    expect(checkPairingCode(a.code, 1001)).toEqual({ ok: true, user: 'kim' });
+  });
+
+  it('A의 화면(보기)에 B의 대기가 보이지 않는다', () => {
+    createPairingCode('lee', 1000);
+    expect(pendingPairing('kim', 1001)).toBeUndefined();
+    expect(pendingPairing('lee', 1001)).toBeDefined();
+  });
+
+  it('같은 사용자가 다시 만들면 그 사용자의 앞 코드만 못 쓴다', () => {
+    const first = createPairingCode('kim', 1000);
+    const other = createPairingCode('lee', 1000);
+    const second = createPairingCode('kim', 1001);
+    expect(checkPairingCode(first.code, 1002).ok).toBe(false);
+    expect(checkPairingCode(other.code, 1002)).toEqual({ ok: true, user: 'lee' });
+    expect(checkPairingCode(second.code, 1002)).toEqual({ ok: true, user: 'kim' });
+  });
+
+  it('각자 코드로 각자 사용자의 기기가 된다(사용자 이름은 손님이 정하지 못한다)', async () => {
+    personalPc();
+    const side = await startPhoneSide();
+    const kim = createPairingCode('kim', Date.now()).code;
+    const lee = createPairingCode('lee', Date.now()).code;
+    const phoneLee = new FakePhone(side.base, serverKeys().publicKey);
+    expect((await phoneLee.pair(lee)).status).toBe(200);
+    expect((await side.phone.pair(kim)).status).toBe(200);
+    const users = Object.fromEntries(listDevices().map((device) => [device.id, device.user]));
+    expect(users[phoneLee.deviceId]).toBe('lee');
+    expect(users[side.phone.deviceId]).toBe('kim');
+  });
+
+  it('틀린 횟수는 전체에서 센다: 사용자가 여럿이어도 5번이면 대기 코드가 모두 죽는다', () => {
+    const codes = ['kim', 'lee', 'park'].map((user) => createPairingCode(user, 1000).code);
+    for (let i = 0; i < 5; i++) expect(checkPairingCode('WRONGWRONG', 1100).ok).toBe(false);
+    for (const code of codes) expect(checkPairingCode(code, 1200).ok).toBe(false);
+  });
+
+  it('대기 코드는 전체 상한까지만, 같은 사용자의 다시 만들기는 상한과 무관하다', () => {
+    for (let i = 0; i < MAX_PENDING_PAIRINGS; i++) createPairingCode(`u${i}`, 1000);
+    expect(() => createPairingCode('late', 1000)).toThrow('너무 많습니다');
+    expect(() => createPairingCode('u0', 1001)).not.toThrow();
+    // 만료되면 자리가 난다
+    expect(() => createPairingCode('late', 1000 + 121_000)).not.toThrow();
   });
 });
