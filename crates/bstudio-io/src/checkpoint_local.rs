@@ -1821,6 +1821,9 @@ mod tests {
 
     fn init(dir: &std::path::Path) {
         sh(dir, &["init", "-q", "-b", "main"]);
+        // 체크포인트 커밋(commit-tree)이 쓸 작성자. 실제 저장소는 configure가 넣는다. 전역 작성자가 없는 CI에서도 돌게 한다
+        sh(dir, &["config", "user.name", "t"]);
+        sh(dir, &["config", "user.email", "t@e"]);
         std::fs::write(dir.join("a.txt"), "a\n").unwrap();
         sh(dir, &["add", "-A"]);
         sh(dir, &["commit", "-q", "-m", "init"]);
