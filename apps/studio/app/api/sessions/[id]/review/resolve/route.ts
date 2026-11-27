@@ -1,4 +1,4 @@
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSession, authorizeSessionOwner, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { resolveReviewFinding } from '@/lib/server/sessions';
 
@@ -12,6 +12,8 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await authorizeSession(id, user);
+    // 막는 지적을 닫으면 그 라운드를 통과로 읽는다(게이트 완화). 서버 방식에서 관리자도 남의 지적은 닫지 못한다(#1338)
+    await authorizeSessionOwner(id, user);
     const body = (await request.json().catch(() => ({}))) as { round?: unknown; findingIndex?: unknown; reason?: unknown };
     if (typeof body.round !== 'number' || typeof body.findingIndex !== 'number' || typeof body.reason !== 'string') {
       throw new StudioError(400, 'round·findingIndex·reason을 모두 보내세요');

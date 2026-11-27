@@ -10,9 +10,9 @@ import { StudioError } from '@/lib/server/errors';
 const mocks = vi.hoisted(() => ({
   sessions: new Map<string, { owner?: string; projectId: string }>(),
   sessionTerminalTarget: vi.fn((id: string) => ({ sandboxId: `studio-${id}`, root: `/work/${id}`, projectId: 'orders' })),
-  setTerminalCheckChanges: vi.fn((_id: string, allow: boolean) => allow),
-  runReviewRound: vi.fn(async (_id: string) => {}),
-  cancelRun: vi.fn((_id: string) => {}),
+  setTerminalCheckChanges: vi.fn((...args: unknown[]) => args[1] === true),
+  runReviewRound: vi.fn(async (...args: unknown[]): Promise<void> => void args),
+  cancelRun: vi.fn((...args: unknown[]): void => void args),
   openSessionTerminal: vi.fn(async () => ({ initialPromptUsed: false })),
   writeSessionTerminal: vi.fn(),
   resizeSessionTerminal: vi.fn(async () => {}),
@@ -110,12 +110,13 @@ beforeEach(() => {
     missingIsNotFound(id);
     return { sandboxId: `studio-${id}`, root: `/work/${id}`, projectId: 'orders' };
   });
-  mocks.setTerminalCheckChanges.mockImplementation((id: string, allow: boolean) => {
+  mocks.setTerminalCheckChanges.mockImplementation((...args: unknown[]) => {
+    const [id, allow] = args as [string, boolean];
     missingIsNotFound(id);
     return allow;
   });
-  mocks.runReviewRound.mockImplementation(async (id: string) => missingIsNotFound(id));
-  mocks.cancelRun.mockImplementation((id: string) => missingIsNotFound(id));
+  mocks.runReviewRound.mockImplementation(async (...args: unknown[]) => missingIsNotFound(args[0] as string));
+  mocks.cancelRun.mockImplementation((...args: unknown[]) => missingIsNotFound(args[0] as string));
   mocks.sessions.clear();
   // s1: kim의 orders 세션, s2: lee의 billing 세션(다른 프로젝트·다른 사용자), s3: 만든 사람이 기록되지 않은 세션
   mocks.sessions.set('s1', { owner: 'kim', projectId: 'orders' });

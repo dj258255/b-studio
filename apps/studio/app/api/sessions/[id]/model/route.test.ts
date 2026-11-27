@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   setSessionModel: vi.fn(),
 }));
 
-vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession }));
+vi.mock('@/lib/server/access', () => ({ requireUser: () => 'kim', authorizeSession: mocks.authorizeSession, authorizeSessionTerminalDriver: mocks.authorizeSession, authorizeSessionOwner: async () => {} }));
 vi.mock('@/lib/server/sessions', () => ({
   recoverSessions: mocks.recoverSessions,
   sessionModelPicker: mocks.sessionModelPicker,

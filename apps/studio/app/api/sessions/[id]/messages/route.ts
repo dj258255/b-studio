@@ -1,4 +1,4 @@
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSessionOwner, authorizeSessionTerminalDriver, requireUser } from '@/lib/server/access';
 import { assertDesignApprovedForRequest } from '@/lib/server/design-pipeline';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { sendMessage } from '@/lib/server/sessions';
@@ -7,9 +7,11 @@ export async function POST(request: Request, context: RouteContext<'/api/session
   try {
     const user = requireUser(request.headers);
     const { id } = await context.params;
-    await authorizeSession(id, user);
+    await authorizeSessionTerminalDriver(id, user);
     const body = (await request.json().catch(() => ({}))) as { text?: unknown; allowBreaking?: unknown; allowCheckChanges?: unknown; intent?: unknown; verify?: unknown; research?: unknown; maxTurns?: unknown };
     if (typeof body.text !== 'string') throw new StudioError(400, 'text가 필요합니다');
+    // 게이트를 푸는 허용(호환 깨짐·확인 선언 변경)은 만든 사람만 켠다. 관리자도 남의 세션에는 못 켠다(#1338, 서버 방식)
+    if (body.allowBreaking === true || body.allowCheckChanges === true) await authorizeSessionOwner(id, user);
     const intent = body.intent ?? 'build';
     if (intent !== 'build' && intent !== 'ask') throw new StudioError(400, 'intent는 build나 ask여야 합니다');
     if (body.verify !== undefined && body.verify !== 'full' && body.verify !== 'light') throw new StudioError(400, 'verify는 full이나 light여야 합니다');

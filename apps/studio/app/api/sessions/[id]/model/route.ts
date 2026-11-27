@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { authorizeSession, requireUser } from '@/lib/server/access';
+import { authorizeSession, authorizeSessionTerminalDriver, requireUser } from '@/lib/server/access';
 import { errorResponse, StudioError } from '@/lib/server/errors';
 import { recoverSessions, sessionModelPicker, setSessionModel } from '@/lib/server/sessions';
 
@@ -28,7 +28,7 @@ export async function POST(request: Request, context: RouteContext<'/api/session
     const user = requireUser(request.headers);
     const { id } = await context.params;
     await recoverSessions();
-    await authorizeSession(id, user);
+    await authorizeSessionTerminalDriver(id, user);
     const parsed = bodySchema.safeParse(await request.json().catch(() => ({})));
     if (!parsed.success) throw new StudioError(400, 'modelId·effort는 문자열이어야 합니다');
     return Response.json(await setSessionModel(id, parsed.data.modelId, parsed.data.effort));
