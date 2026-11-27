@@ -489,3 +489,34 @@ describe('되살리기(DraftKeeper.onCliUp)', () => {
     await slow.stop();
   });
 });
+
+describe('입력창 상태(inputState, 정체 재촉의 확인)', () => {
+  async function stateOf(screen: string[], options: { paste?: boolean } = {}) {
+    const { keeper } = harness({ resumed: false });
+    await keeper.start();
+    keeper.feed(Buffer.from(bytes(screen, options)));
+    const state = await keeper.inputState();
+    await keeper.stop();
+    return state;
+  }
+
+  it('빈 입력창이 보이고 붙여 넣기를 받으면 empty다', async () => {
+    expect(await stateOf(realScreen(['❯']))).toBe('empty');
+  });
+
+  it('쓰다 만 글이 있으면 typed다', async () => {
+    expect(await stateOf(realScreen([`❯ ${DRAFT}`]))).toBe('typed');
+  });
+
+  it('권한 창 화면(입력창 모양이 없다)이면 unknown이다', async () => {
+    const permission = ['● Write(api/src/Order.java)', '', '  Do you want to create Order.java?', '  ❯ 1. Yes', '    2. Yes, allow all edits', '    3. No', ''];
+    expect(await stateOf(permission)).toBe('unknown');
+    // 입력창 모양이 위에 남아 있어도 번호 선택지는 입력창이 아니다
+    expect(await stateOf(realScreen(['❯ 1. Yes']))).toBe('unknown');
+  });
+
+  it('붙여 넣기를 받지 않는 화면이거나 화면이 비어 있으면 unknown이다', async () => {
+    expect(await stateOf(realScreen(['❯']), { paste: false })).toBe('unknown');
+    expect(await stateOf([])).toBe('unknown');
+  });
+});

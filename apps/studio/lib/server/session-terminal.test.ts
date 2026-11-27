@@ -13,6 +13,7 @@ import {
   resizeSessionTerminal,
   reviewFixRunner,
   noteSessionTerminalCli,
+  sessionTerminalInputState,
   sessionTerminalMode,
   sessionTerminalPresence,
   subscribeSessionTerminal,
@@ -988,5 +989,11 @@ describe('OpenCode 터미널: 띄우기 전에 설정이 다른 플러그인을 
     expect(await host.preflight!({ ...target, root: work, cli: 'opencode' })).toContain('다른 플러그인');
     await writeFile(path.join(work, 'opencode.json'), JSON.stringify({ model: 'a/b' }));
     expect(await host.preflight!({ ...target, root: work, cli: 'opencode' })).toBeUndefined();
+  });
+});
+
+describe('입력창 상태(정체 재촉의 확인)', () => {
+  it('터미널이 없거나 화면을 유지하지 않는 터미널(claude가 아닌 CLI 등)이면 unknown이다', async () => {
+    expect(await sessionTerminalInputState('no-such-session')).toBe('unknown');
   });
 });

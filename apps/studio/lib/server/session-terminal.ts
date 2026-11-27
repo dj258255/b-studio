@@ -775,6 +775,15 @@ export function sessionTerminalPresence(sessionId: string): { cliAlive: boolean;
 }
 
 /**
+ * 그 세션 터미널의 Claude 입력창이 지금 화면에서 보이고 비어 있는가(정체 재촉의 확인, ADR-239). 화면을 유지하는 터미널(이 컴퓨터 방식의 claude)만 읽을 수 있다 —
+ * 터미널이 없거나 화면을 유지하지 않거나(다른 CLI·자체 CLI·컨테이너 방식) 입력창 모양이 보이지 않으면(권한·질문 창) `unknown`이다. 모르면 보내지 않는다
+ */
+export async function sessionTerminalInputState(sessionId: string): Promise<'empty' | 'typed' | 'unknown'> {
+  const keeper = terminals.get(sessionId)?.draft;
+  return keeper ? keeper.inputState() : 'unknown';
+}
+
+/**
  * desk에 보이는 "쓰다 만 글"을 치운다(사용자가 요청을 보냈다 = 앞의 글은 넘어갔다). 터미널이 닫혀 있어도 파일에서 치운다. 실패해도 던지지 않는다
  */
 export async function clearSessionTerminalDraftLeftover(sessionId: string): Promise<void> {
