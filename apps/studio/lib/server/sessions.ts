@@ -206,6 +206,7 @@ import {
   apiKeyEnvName,
   keylessLocal,
   type ModelProfile,
+  isProtectedPath,
 } from '@b-studio/agent';
 import {
   commandCodeConfigPathBlocked,
@@ -9419,6 +9420,24 @@ export async function applyServerChanges(
  * 쓰기 범위·완료 검사도 그 판정이 건다. 수리가 이 변경을 되돌려 빈 턴으로 끝나면 체크포인트가 새로 남지 않아 부르는 쪽이 통과로 읽지 않는다.
  * 쓰기 전 거름은 `applyServerChanges`와 같다(경로 모양·중복·쓰기 범위·링크·숨긴 이름). 같은 전제(터미널을 연 적이 없는 세션 등)가 아니면 거절한다.
  */
+/**
+ * 수리 실행의 검증 기준이 작업 폴더에서 읽히는 파일인가(거부 목록). 읽히면 까닭을, 아니면 undefined.
+ * 선언 파일(studio.yaml·studio.yml), 보호 경로, 평가 자산(게이트의 `protectedPathsFor`와 같은 두 선언). 이름은 대소문자·유니코드 정규화를 접어 넓게 맞춘다 —
+ * 넓게 맞아도 시드가 더 막힐 뿐이다. 프로젝트 하위 폴더 이름이 달라도 걸리도록 파일 이름만 같아도 선언 파일로 본다
+ */
+function seedBaselineFile(session: Session, file: string): string | undefined {
+  const folded = file.normalize('NFC').toLowerCase();
+  const base = folded.split('/').pop() ?? folded;
+  if (base === 'studio.yaml' || base === 'studio.yml') return '선언 파일(studio.yaml)은 수리 전에 다시 쓰지 않습니다(검증 기준이 작업 폴더에서 읽힙니다)';
+  // 게이트의 protectedPathsFor와 같은 두 선언(보호 경로 + 평가 자산)을 합친다
+  const workflow = session.project.spec.workflow;
+  for (const rule of [...(workflow?.protectedPaths ?? []), ...(workflow?.evaluationAssets ?? [])]) {
+    const foldedRule = rule.normalize('NFC').toLowerCase();
+    if (isProtectedPath(file, rule) || isProtectedPath(folded, foldedRule)) return `보호 경로·평가 자산(${rule})은 수리 전에 다시 쓰지 않습니다(검증 기준이 작업 폴더에서 읽힙니다)`;
+  }
+  return undefined;
+}
+
 export async function seedServerChanges(
   id: string,
   input: { writes: ReadonlyArray<{ path: string; content: string }>; deletes: readonly string[]; writableScope: readonly string[] },
@@ -9445,6 +9464,10 @@ export async function seedServerChanges(
         const key = file.normalize('NFC').toLowerCase();
         if (seen.has(key)) throw new StudioError(400, `${file}: 같은 경로가 두 번 있습니다`);
         seen.add(key);
+        // 작업 폴더에서 기준을 읽는 파일은 시드하지 않는다(거부 목록: 모르면 걸린 것으로, 대소문자·정규화는 넓게 본다). 수리 실행의 게이트가
+        // 선언(studio.yaml)·보호 경로(쓰기 직전 고정)·평가 자산(게이트를 만들 때의 지문)의 기준을 작업 폴더에서 잡으므로, 먼저 쓰면 그 값이 "원래 그랬던 것"이 된다
+        const blocked = seedBaselineFile(session, file);
+        if (blocked) throw new StudioError(400, `${file}: ${blocked}`);
         const scope = await terminalScopeDeny(session, 'Write', { file_path: file });
         if (scope) throw new StudioError(400, scope);
         try {

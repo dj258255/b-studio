@@ -527,6 +527,24 @@ describe('seedServerChanges: S4 수리 전에 레인 결과를 확정하지 않�
     expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
   }, 30_000);
 
+  it('작업 폴더에서 기준을 읽는 파일은 시드하지 않는다: studio.yaml(선언), 보호 경로, 평가 자산(거부 목록이라 대소문자·정규화가 달라도 걸린다)', async () => {
+    await writeFile(path.join(fake.root, 'studio.yaml'), STUDIO_YAML.replace('workflow:\n', 'workflow:\n  protectedPaths: [api/secret]\n  evaluationAssets: [api/src/test]\n'));
+    await mkdir(path.join(fake.root, 'api/secret'), { recursive: true });
+    await mkdir(path.join(fake.root, 'api/src/test'), { recursive: true });
+    await writeFile(path.join(fake.root, 'api/secret/key.txt'), 'k\n');
+    await writeFile(path.join(fake.root, 'api/src/test/OrderTest.java'), 'class OrderTest {}\n');
+    const session = await open();
+    const scope = ['api', 'studio.yaml'];
+    for (const file of ['studio.yaml', 'STUDIO.yaml', 'api/secret/key.txt', 'API/Secret/key.txt', 'api/src/test/OrderTest.java', 'api/src/test/New.java']) {
+      await expect(seed(session, { writes: [GOOD, { path: file, content: 'x' }], writableScope: scope }), file).rejects.toBeInstanceOf(StudioError);
+    }
+    await expect(seed(session, { writes: [GOOD], deletes: ['api/src/test/OrderTest.java'], writableScope: scope })).rejects.toBeInstanceOf(StudioError);
+    // 하나도 쓰지 않았다
+    expect(await read(session, 'api/src/Order.java')).toBe(ORIGINAL);
+    expect(await read(session, 'studio.yaml')).toContain('evaluationAssets');
+    expect(await read(session, 'api/src/test/OrderTest.java')).toBe('class OrderTest {}\n');
+  }, 30_000);
+
   it('멈춘 세션·컨테이너 방식은 받지 않는다', async () => {
     const stopped = await open();
     await stopSession(stopped.id);
