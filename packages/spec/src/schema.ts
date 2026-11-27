@@ -79,6 +79,18 @@ export const SnapshotSchema = z.object({
   key: z.array(RELATIVE_PATH).min(1),
 });
 
+/**
+ * 문서(contract.extract)의 GET 연산으로 만든 속성 시험(알림 전용, ADR-240). 기본 꺼짐. 통과·실패 판정을 바꾸지 않는다.
+ * 상한(연산 수·요청 수·시간) 중 하나에 걸리면 멈추고 "끝까지 보지 못함"을 알림에 적는다. 기본값은 Rust(`openapi_property.rs`)가 채운다
+ */
+export const PropertyChecksSchema = z.object({
+  enabled: z.boolean(),
+  maxOperations: z.number().int().min(1).max(100).optional(),
+  maxRequests: z.number().int().min(1).max(500).optional(),
+  timeoutMs: z.number().int().min(1000).max(300000).optional(),
+  seed: z.number().int().min(0).max(4294967295).optional(),
+});
+
 /** 스튜디오가 코드를 만들고 샌드박스에서 실행하는 서비스 */
 export const ManagedServiceSchema = z.object({
   source: z.literal('managed'),
@@ -90,7 +102,7 @@ export const ManagedServiceSchema = z.object({
   preview: PreviewKindSchema,
   ready: HttpProbeSchema.optional(),
   /** 실행 중인 서버에서 OpenAPI 문서를 뽑아낼 경로 (코드 우선 방식) */
-  contract: z.object({ extract: SERVICE_PATH }).optional(),
+  contract: z.object({ extract: SERVICE_PATH, propertyChecks: PropertyChecksSchema.optional() }).optional(),
   snapshots: z.array(SnapshotSchema).optional(),
   /**
    * 생성 Dockerfile(Dockerfile.b-studio)이 빌드 때 설치할 OS 패키지(도그푸딩 마찰 113). 예: `[ffmpeg]`.

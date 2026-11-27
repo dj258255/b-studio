@@ -32,7 +32,8 @@ export interface WorkflowStepCheck {
 }
 
 export interface WorkflowCheck {
-  stage: 'browser_check' | 'test' | 'concurrency_check' | 'load_check' | 'review';
+  /** contract_check는 속성 시험 알림(`property-check: <서비스>`, ADR-240)에만 쓴다. 항상 ok라 판정을 바꾸지 않는다 */
+  stage: 'browser_check' | 'test' | 'concurrency_check' | 'load_check' | 'review' | 'contract_check';
   name: string;
   ok: boolean;
   attempts: number;

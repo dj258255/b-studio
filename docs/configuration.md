@@ -68,11 +68,33 @@ services:
 | `preview` | `browser`, `openapi`, `logs` 중 하나 |
 | `ready` | 재시작 후 준비 완료를 판정할 HTTP 요청 |
 | `contract.extract` | 실행 중인 서비스에서 OpenAPI를 읽을 경로 |
+| `contract.propertyChecks` | 그 문서로 만든 속성 시험(알림 전용, 기본 꺼짐). 아래 "속성 시험" 참고 |
 | `snapshots` | 입력 파일 해시로 재사용할 compose 볼륨 |
 | `systemPackages` | 생성 Dockerfile이 빌드 때 설치할 OS 패키지 |
 | `includes` | 서비스 폴더 밖이지만 같은 빌드에 포함되는 경로(프로젝트 루트 기준) |
 
 `ready.path`와 `contract.extract`는 `/`로 시작해야 하며 `//`로 시작할 수 없습니다.
+
+### 속성 시험(알림 전용)
+
+`contract.extract`가 있는 서비스에서 켭니다. 게이트가 선언한 검사를 모두 돌린 뒤, 그 서비스의 OpenAPI 문서에서 **GET 연산만** 골라 경로·쿼리 매개변수를 스키마에 맞게 만들어 보내고, 5xx 응답과 문서의 응답 스키마(`application/json`)와 형이 다른 응답을 알립니다. **통과·실패 판정은 바꾸지 않습니다.** 알림은 게이트 기록의 `property-check: <서비스>` 항목(항상 통과)과 체크포인트 본문의 확인 요약에 남습니다.
+
+    services:
+      api:
+        contract:
+          extract: /openapi.json
+          propertyChecks:
+            enabled: true      # 기본 꺼짐. 이 필드만 있으면 아래는 기본값
+            maxOperations: 20  # 1~100, 기본 20. 한 번에 볼 GET 연산 수
+            maxRequests: 50    # 1~500, 기본 50
+            timeoutMs: 30000   # 1000~300000, 기본 30000. 요청 사이에 확인합니다
+            seed: 1            # 0 이상 정수, 기본 1. 같은 문서·같은 시드면 같은 요청입니다
+
+- 보내는 것은 세션 서비스의 출처(서비스 주소)로 보내는 GET뿐입니다. POST·PUT·PATCH·DELETE는 보내지 않습니다.
+- 다루지 못하는 연산은 건너뛰고 알림에 이유별 개수를 적습니다: 보안 요구(인증), 필수 헤더·쿠키 매개변수, 본문을 요구하는 GET, 문서 밖 `$ref`·순환 `$ref`, 깊은 `oneOf`, 단순하지 않은 `pattern`, 객체 매개변수.
+- 상한(연산 수·요청 수·시간)에 걸리면 알림에 "끝까지 보지 못함(상한)"과 못 본 만큼을 적습니다. 요청이 연속 3번 실패하면 멈추고 그렇게 적습니다.
+- 4xx는 알림이 아닙니다(서버가 입력을 검증한 것일 수 있습니다). 문서에 없는 4xx는 개수만 적습니다.
+- OpenAPI 3.x 문서만 읽습니다. Swagger 2.0은 "확인하지 못함"으로 적습니다.
 
 ### 시스템 패키지
 
