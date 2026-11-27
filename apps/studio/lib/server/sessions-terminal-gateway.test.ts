@@ -20,6 +20,7 @@ const execFileAsync = promisify(execFile);
 const fake = vi.hoisted(() => ({
   root: '',
   execCalls: [] as string[][],
+  baselineCalls: [] as string[][],
   /** 이 낱말이 든 명령은 종료 코드 1로 끝난다(선언한 테스트를 실패시킬 때 쓴다) */
   failCommands: [] as string[],
   /** 켜면 서비스 재시작이 샌드박스 쪽 문제로 실패한다. 'code'는 코드가 원인일 수 있는 실패(서비스가 준비되지 않음, #943) */
@@ -87,6 +88,11 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async exec(_service: string, command: string[]) {
       // 게이트가 테스트 전에 보고서 자리를 비우는 명령(#756)은 테스트 명령으로 세지 않는다
       if (command[0] === 'sh' && command[2]?.startsWith('rm -f /tmp/b-studio-test-report.json ')) return { exitCode: 0, stdout: '', stderr: '' };
+      // 실패한 시험을 변경 전 기준에서 다시 돌리는 명령(#1435)은 시험 명령으로 세지 않는다. 변경 전에는 통과했다고 답한다
+      if (command[0] === 'sh' && command[2]?.includes('b-studio-baseline.')) {
+        fake.baselineCalls.push(command.slice(4));
+        return { exitCode: 0, stdout: '__B_STUDIO_BASELINE_READY__\n', stderr: '' };
+      }
       if (fake.pauses.length > fake.unpauses.length) fake.execsWhilePaused += 1;
       fake.execCalls.push(command);
       if (fake.holdWord && command.includes(fake.holdWord)) await fake.hold;
@@ -224,6 +230,7 @@ beforeEach(async () => {
   await writeFile(path.join(project, 'api/src/Order.java'), 'class Order {}\n');
   fake.root = project;
   fake.execCalls = [];
+  fake.baselineCalls = [];
   fake.failCommands = [];
   fake.startFails = false;
   fake.starts = 0;
@@ -1731,6 +1738,52 @@ describe('CLI의 텔레메트리가 실행의 사용량이 된다 (이슈 #726)'
     await stopSession(session.id);
   }, 30_000);
 
+  it('실행이 닫힐 때 CLI가 알린 모델을 run_finished.model에 남긴다: 상태 줄이 먼저, 없으면 텔레메트리의 모델이 하나일 때만, 아니면 비운다', async () => {
+    // 상태 줄이 알린 모델
+    const withStatusline = await open();
+    await withStatusline.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(withStatusline, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await withStatusline.gateway.statusline!({ model: { id: 'claude-opus-5' }, context_window: { used_percentage: 10 } });
+    await withStatusline.gateway.telemetry(otlp([req(1000, 100)]));
+    await withStatusline.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(withStatusline.ofType('run_finished')[0]).toMatchObject({ status: 'done', model: 'claude-opus-5' });
+    await stopSession(withStatusline.id);
+
+    // 상태 줄이 없고 텔레메트리의 모델이 하나다
+    const telemetryOnly = await open();
+    await telemetryOnly.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(telemetryOnly, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await telemetryOnly.gateway.telemetry(otlp([req(1000, 100)]));
+    await telemetryOnly.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(telemetryOnly.ofType('run_finished')[0]).toMatchObject({ model: 'claude-sonnet-5' });
+    await stopSession(telemetryOnly.id);
+
+    // 상태 줄이 없고 텔레메트리의 모델이 둘이다(서브에이전트·보조 호출): 어느 것이 메인인지 몰라 비운다
+    const mixed = await open();
+    await mixed.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(mixed, 'api/src/Order.java', 'class Order { String memo; }\n');
+    const otherModel = (event: Record<string, unknown>): Record<string, unknown> => ({
+      ...event,
+      attributes: (event.attributes as Array<{ key: string }>).map((attribute) =>
+        attribute.key === 'model' ? { key: 'model', value: { stringValue: 'claude-haiku-5' } } : attribute,
+      ),
+    });
+    await mixed.gateway.telemetry(otlp([req(1000, 100), otherModel(req(200, 20))]));
+    await mixed.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(mixed.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    expect(mixed.ofType('run_finished')[0]).not.toHaveProperty('model');
+    await stopSession(mixed.id);
+
+    // 아무것도 모른다: 필드가 없다(세션에 정한 모델을 대신 쓰지 않는다)
+    const unknown = await open({ modelId: 'claude-haiku-5' });
+    await unknown.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
+    await write(unknown, 'api/src/Order.java', 'class Order { String memo; }\n');
+    await unknown.gateway.stop({ last_assistant_message: '추가했습니다.' });
+    expect(unknown.ofType('run_finished')[0]).toMatchObject({ status: 'done' });
+    expect(unknown.ofType('run_finished')[0]).not.toHaveProperty('model');
+    await stopSession(unknown.id);
+  }, 60_000);
+
   it('실행이 닫힌 뒤 5초 안에 온 것도 그 실행에 붙는다(내보내기 주기)', async () => {
     const session = await open();
     await session.gateway.prompt({ prompt: '주문에 메모 필드 추가' });
@@ -2252,6 +2305,9 @@ describe('카드의 쓰기 범위와 완료 검사가 터미널 실행에 걸린
     const failed = await session.gateway.stop({ last_assistant_message: '추가했습니다.' });
     expect(failed.feedback).toContain('[b-studio 검증 게이트]');
     expect(failed.feedback).toContain('done-card-1');
+    // 실제 체크포인트 저장소에서 기준을 모아 변경 전(통과)으로 답한 라벨이 붙는다. 판정은 그대로 실패다
+    expect(failed.feedback).toContain('변경 전 기준: 이번 변경으로 실패');
+    expect(fake.baselineCalls).toEqual([['sh', '-c', 'echo done']]);
     expect(fake.execCalls).toEqual([['./gradlew', 'test'], ['sh', '-c', 'echo done']]);
     expect(getSnapshot(session.id)!.checkpoints).toHaveLength(before);
 

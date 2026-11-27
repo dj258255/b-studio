@@ -41,6 +41,33 @@ export interface RoutingStatsRow {
   medianDurationMs?: number;
 }
 
+/**
+ * 모델별 한 줄(#1439): 터미널·대화 창을 가리지 않고 백엔드 × 모델 × 노력 단계로 묶는다. 읽기만 하는 표다.
+ * 모델·노력을 모르는 실행은 모델 "(모름)"·노력 없음으로 묶는다(세션에 정해 둔 값으로 채우지 않는다)
+ */
+export interface RoutingModelRow {
+  backend: string;
+  model: string;
+  /** 노력 단계. 알리지 않은 실행(터미널 CLI 포함)은 없다 */
+  effort?: string;
+  /** 끝까지 간 만들기 요청 수(질문·취소·진행 중은 뺀다). 플랫폼 실패·바꾼 것 없음도 들어간다 */
+  runs: number;
+  /** 게이트를 한 번도 실패하지 않고 통과했고 되돌려지지 않은 실행 */
+  oneShot: number;
+  /** 게이트를 통과해 체크포인트로 남은 실행 */
+  passed: number;
+  /** 게이트 실패 또는 오류로 끝난 실행(플랫폼 실패는 넣지 않는다) */
+  failed: number;
+  /** 변경이 되돌려진 실행 */
+  reverted: number;
+  /** 평균 재시도의 분모: 게이트를 거친 실행(통과·실패·오류·확인 필요) */
+  judged: number;
+  /** 게이트 실패 회차의 합(플랫폼 실패는 넣지 않는다) */
+  retries: number;
+  /** retries ÷ judged. 거친 실행이 없으면 없다 */
+  averageRetries?: number;
+}
+
 /** AI × 계정 한 줄(#891, 터미널 기록 화면). 계정이 없는 세션은 그 CLI의 기본 계정이라 accountId가 없다 */
 export interface RoutingAccountRow {
   backend: string;
@@ -71,6 +98,8 @@ export interface RoutingStats {
   rows: RoutingStatsRow[];
   /** 표에 넣지 않은 실행. asks: 질문, unfinished: 취소·되묻기·진행 중 */
   excluded: { asks: number; unfinished: number };
+  /** 모델별 묶음(#1439). 옛 서버는 주지 않는다 */
+  byModel?: RoutingModelRow[];
   /** AI × 계정별 묶음(#891). 옛 서버는 주지 않는다 */
   byAccount?: RoutingAccountRow[];
   /** 최근 실패 다섯 개, 새것부터(#891) */

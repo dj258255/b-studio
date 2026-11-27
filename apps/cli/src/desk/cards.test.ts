@@ -315,6 +315,26 @@ describe('도구 이름을 우리말로', () => {
   });
 });
 
+describe('모델 바뀜 알림', () => {
+  const draw = (target: DeskItem, patch: Partial<Parameters<typeof cardLines>[0]> = {}) =>
+    cardLines({ item: target, selected: false, flagged: false, withLimits: true, sprite: defaultSprite('claude-code'), ...patch }, 84, DEFAULT_THEME, NOW).map(stripAnsi).join('\n');
+  const changed = item('a', { model: 'claude-opus-5', modelChange: { from: 'claude-sonnet-5', to: 'claude-opus-5' } });
+
+  it('같은 세션에서 모델이 바뀐 것을 보았으면 한 줄로 알리고, 한도에 미치는 영향은 말하지 않는다', () => {
+    const text = draw(changed);
+    expect(text).toContain('모델이 바뀌어 캐시를 처음부터 다시 계산합니다');
+    expect(text).not.toMatch(/한도/);
+  });
+  it('바뀜이 없거나(같은 모델, 옛 서버) 줄 자리를 두지 않는 화면이면 알리지 않는다', () => {
+    expect(draw(item('a', { model: 'claude-opus-5' }))).not.toContain('모델이 바뀌어');
+    expect(draw(item('a'))).not.toContain('모델이 바뀌어');
+    expect(draw(changed, { withLimits: false })).not.toContain('모델이 바뀌어');
+  });
+  it('구독 한도 경고가 있으면 그것이 먼저다', () => {
+    expect(draw(changed, { limits: { weekly: { usedPercent: 90 } } })).not.toContain('모델이 바뀌어');
+  });
+});
+
 describe('토큰 한도 표시(#1427)', () => {
   const draw = (target: DeskItem, patch: Partial<Parameters<typeof cardLines>[0]> = {}) =>
     cardLines({ item: target, selected: false, flagged: false, withLimits: true, sprite: defaultSprite('claude-code'), ...patch }, 84, DEFAULT_THEME, NOW).map(stripAnsi).join('\n');

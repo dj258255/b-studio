@@ -405,11 +405,60 @@ pub fn pr_review_marker(round: f64) -> String {
     format!("<!-- b-studio-review round={} -->", js::number_to_string(round))
 }
 
-/// 표 칸 하나: `|`를 이스케이프하고 줄바꿈을 공백으로 바꾼 뒤 500자(UTF-16)까지만
-fn escape_cell(text: &str) -> String {
-    let piped = text.replace('|', "\\|");
-    let flat = piped.replace("\r\n", " ").replace('\n', " ");
-    slice_head(&flat, 500.0)
+/// 코멘트에 끼우는 값의 길이 상한(UTF-16)
+const COMMENT_VALUE_UNITS: f64 = 500.0;
+
+/// 줄을 나누거나 보이지 않게 글을 바꾸는 글자(제어·서식·줄/문단 구분·양방향 표시)인가
+fn is_hidden_or_break(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+            '\u{00AD}' | '\u{061C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}')
+}
+
+/// 값을 한 줄로 편다: 숨은 글자·줄바꿈을 공백으로, 겹친 공백을 하나로, 앞뒤 공백을 지우고 상한까지만
+fn flatten_value(text: &str) -> String {
+    let spaced: String = text.chars().map(|c| if is_hidden_or_break(c) { ' ' } else { c }).collect();
+    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    slice_head(&joined, COMMENT_VALUE_UNITS)
+}
+
+/// 모델이 쓴 글(제목·설명·제안)을 마크다운 글로 끼운다(#1442): 한 줄로 펴고, HTML·멘션(@)·이슈 참조(#)·백틱은 엔티티로,
+/// 강조·링크·표 칸 글자는 역슬래시로 막는다. 끼운 값이 링크·멘션·코드·표 칸이 되지 않는다
+fn md_text(text: &str) -> String {
+    let mut out = String::new();
+    for c in flatten_value(text).chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '#' => out.push_str("&#35;"),
+            '@' => out.push_str("&#64;"),
+            '`' => out.push_str("&#96;"),
+            '\\' | '*' | '_' | '[' | ']' | '(' | ')' | '|' | '~' | '!' => {
+                out.push('\\');
+                out.push(c);
+            }
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// 파일 이름 같은 값을 코드 조각으로 끼운다(#1442): 값 속 가장 긴 백틱 묶음보다 긴 울타리를 써서 조각을 닫지 못하게 한다.
+/// 코드 조각 안에서는 링크·멘션이 동작하지 않는다. 표 칸 안이면 `|`도 `\|`로 막는다(GFM은 표를 먼저 나눈다)
+fn md_code(text: &str, in_table: bool) -> String {
+    let flat = flatten_value(text);
+    let flat = if in_table { flat.replace('|', "\\|") } else { flat };
+    let mut longest = 0;
+    let mut run = 0;
+    for c in flat.chars() {
+        run = if c == '`' { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    let fence = "`".repeat(longest + 1);
+    let pad = if flat.starts_with('`') || flat.ends_with('`') { " " } else { "" };
+    format!("{fence}{pad}{flat}{pad}{fence}")
 }
 
 fn finding_object<'a>(v: &'a JsValue, what: &str) -> Result<&'a JsValue, String> {
@@ -468,12 +517,12 @@ pub fn build_pr_review_comment(input: &JsValue) -> Result<String, String> {
             let location = finding_location(f);
             let suggestion = f.prop("suggestion");
             let detail = if truthy(suggestion) {
-                format!("{} (제안: {})", tpl(f.prop("detail")), tpl(suggestion))
+                format!("{} (제안: {})", md_text(&tpl(f.prop("detail"))), md_text(&tpl(suggestion)))
             } else {
-                need_str(f.prop("detail"), "detail")?.to_owned()
+                md_text(need_str(f.prop("detail"), "detail")?)
             };
             let title = need_str(f.prop("title"), "title")?;
-            rows.push(format!("| {} | `{}` | {} | {} |", severity_label(f.prop("severity")), escape_cell(&location), escape_cell(title), escape_cell(&detail)));
+            rows.push(format!("| {} | {} | {} | {} |", severity_label(f.prop("severity")), md_code(&location, true), md_text(title), detail));
         }
         rows.join("\n")
     };
@@ -483,7 +532,7 @@ pub fn build_pr_review_comment(input: &JsValue) -> Result<String, String> {
         Some("cap") => format!("라운드 상한({max_rounds})에 도달해 남은 지적은 사람이 검토합니다."),
         _ => "차단·주요 지적을 고치도록 세션에 요청한 뒤 다시 리뷰합니다.".to_owned(),
     };
-    let omitted_note = if omitted.is_empty() { String::new() } else { format!("\n\n(참고: 크기 제한으로 다음 파일은 생략하고 리뷰했습니다: {})", join_js(omitted, ", ")) };
+    let omitted_note = if omitted.is_empty() { String::new() } else { format!("\n\n(참고: 크기 제한으로 다음 파일은 생략하고 리뷰했습니다: {})", omitted.iter().map(|file| md_code(&tpl(Some(file)), false)).collect::<Vec<_>>().join(", ")) };
     let marker = format!("<!-- b-studio-review round={round} -->");
     Ok(format!("{header}\n\n{table}\n\n{footer}{omitted_note}\n\n{marker}"))
 }
@@ -513,10 +562,10 @@ pub fn build_pr_review_resolved_context(resolved: &JsValue) -> Result<String, St
 pub fn build_review_resolution_comment(finding: &JsValue, reason: Option<&JsValue>) -> Result<String, String> {
     let f = finding_object(finding, "지적")?;
     Ok(format!(
-        "## 🙋 사람이 리뷰 지적을 확인했습니다\n\n> [{}] `{}` — {}\n\n오탐으로 닫습니다: {}",
+        "## 🙋 사람이 리뷰 지적을 확인했습니다\n\n> [{}] {} — {}\n\n오탐으로 닫습니다: {}",
         severity_label(f.prop("severity")),
-        finding_location(f),
-        tpl(f.prop("title")),
+        md_code(&finding_location(f), false),
+        md_text(&tpl(f.prop("title"))),
         tpl(reason)
     ))
 }

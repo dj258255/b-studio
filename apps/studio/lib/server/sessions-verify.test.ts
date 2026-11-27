@@ -8,6 +8,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const fake = vi.hoisted(() => ({
   root: '',
   execCalls: [] as string[][],
+  baselineCalls: [] as string[][],
   /** 재시작을 실패시킨다: 'platform'은 샌드박스 쪽 오류(SandboxError.platform), 'code'는 서비스가 뜨지 않음 */
   restartFails: undefined as undefined | 'platform' | 'code',
   restarts: 0,
@@ -59,6 +60,11 @@ vi.mock('@b-studio/sandbox', async (importOriginal) => {
     async exec(_service: string, command: string[]) {
       // 게이트가 테스트 전에 보고서 자리를 비우는 명령(#756)은 테스트 명령으로 세지 않는다
       if (command[0] === 'sh' && command[2]?.startsWith('rm -f /tmp/b-studio-test-report.json ')) return { exitCode: 0, stdout: '', stderr: '' };
+      // 실패한 시험을 변경 전 기준에서 다시 돌리는 명령(#1435)은 시험 명령으로 세지 않는다. 변경 전에는 통과했다고 답한다
+      if (command[0] === 'sh' && command[2]?.includes('b-studio-baseline.')) {
+        fake.baselineCalls.push(command.slice(4));
+        return { exitCode: 0, stdout: '__B_STUDIO_BASELINE_READY__\n', stderr: '' };
+      }
       fake.execCalls.push(command);
       if (fake.failCommands.some((word) => command.includes(word))) return { exitCode: 1, stdout: '', stderr: 'FAILED' };
       return { exitCode: 0, stdout: '', stderr: '' };
