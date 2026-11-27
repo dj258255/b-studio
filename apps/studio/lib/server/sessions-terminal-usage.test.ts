@@ -26,6 +26,10 @@ const fake = vi.hoisted(() => ({
   hold: undefined as Promise<void> | undefined,
   /** 세션 터미널(CLI)에 보낸 Esc의 기록 */
   interrupts: [] as string[],
+  /** 세션 터미널에 쓴 바이트의 기록과 CLI가 떠 있는가(정체 재촉 시험) */
+  writes: [] as string[],
+  cliAlive: true as boolean,
+  writeFails: false as boolean,
   /** 서비스가 떠 있는 주소(시험마다 계약을 내놓는 작은 서버) */
   serviceUrl: 'http://127.0.0.1:1',
   /** 세션 터미널 방식. 'host'(이 컴퓨터 방식)면 작업 복사본의 Git을 더 의심한다(이슈 #706) */
@@ -94,6 +98,11 @@ vi.mock('./session-terminal', () => ({
   noteSessionTerminalCli: () => {},
   sessionTerminalMode: () => fake.terminalMode,
   warnSessionTerminal: () => {},
+  sessionTerminalCliAlive: () => fake.cliAlive,
+  writeSessionTerminal: (_sessionId: string, data: string) => {
+    if (fake.writeFails) throw new Error('터미널이 열려 있지 않습니다');
+    fake.writes.push(data);
+  },
   terminalPause: () => undefined,
 }));
 
@@ -131,6 +140,9 @@ beforeEach(async () => {
   fake.holdWord = undefined;
   fake.hold = undefined;
   fake.interrupts = [];
+  fake.writes = [];
+  fake.cliAlive = true;
+  fake.writeFails = false;
   await serveContract();
   process.env.B_STUDIO_MODE = 'api';
   process.env.B_STUDIO_AUTH = 'none';
@@ -237,6 +249,8 @@ afterEach(() => {
   delete process.env.B_STUDIO_USER_TOKEN_LIMIT;
   delete process.env.B_STUDIO_SESSION_TOKEN_LIMIT;
   delete process.env.B_STUDIO_TERMINAL_STALL_SECONDS;
+  delete process.env.B_STUDIO_TERMINAL_STALL_NUDGE;
+  delete process.env.B_STUDIO_TERMINAL_STALL_NUDGE_MAX;
 });
 
 describe('U1: 사람 몫을 기록하지 못한 요청이 끝내 세지지 않는다', () => {
@@ -451,6 +465,114 @@ describe('U6: 정체 알림이 정체 시간의 두 배까지 늦지 않는다',
     vi.advanceTimersByTime(10_000);
     const warnings = session.events.filter((event) => event.type === 'agent' && event.event.type === 'warning');
     expect(warnings).toHaveLength(1);
+  }, 30_000);
+});
+
+describe('정체 재촉(#1454)', () => {
+  const NUDGE = '\x1b[200~멈춘 것 같습니다. 진행 상황을 확인하고 이어서 하거나, 막혔으면 이유를 알려 주세요.\x1b[201~';
+  const warnings = (session: Opened) => session.events.filter((event) => event.type === 'agent' && event.event.type === 'warning');
+  /** 정체 시간 8초, 켠 세션에서 요청을 열고 가짜 시계로 간다 */
+  async function stalled(env: { nudge?: string; max?: string } = { nudge: '1' }): Promise<Opened> {
+    process.env.B_STUDIO_TERMINAL_STALL_SECONDS = '8';
+    if (env.nudge !== undefined) process.env.B_STUDIO_TERMINAL_STALL_NUDGE = env.nudge;
+    if (env.max !== undefined) process.env.B_STUDIO_TERMINAL_STALL_NUDGE_MAX = env.max;
+    const session = await open();
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    await session.gateway.prompt({ prompt: '[읽기만] 설명해줘' });
+    return session;
+  }
+
+  it('꺼짐이 기본이다: 정체해도 글을 보내지 않고 알리기만 한다', async () => {
+    const session = await stalled({});
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('켜면 정체가 이어질 때 재촉 글을 입력창에 한 번 보내고(붙여 넣기 + Enter), 보낸 글과 시각을 실행의 기록에 남긴다', async () => {
+    const session = await stalled();
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toEqual([NUDGE, '\r']);
+    const sent = warnings(session);
+    expect(sent).toHaveLength(1);
+    expect(JSON.stringify(sent[0])).toMatch(/재촉 글을 보냈습니다\(\d{4}-\d\d-\d\dT[\d:.]+Z, 1\/1\).*멈춘 것 같습니다/);
+  }, 30_000);
+
+  it('재촉 뒤에도 멈춰 있으면 정체 시간을 더 기다린 뒤 알리기만 하고 더 보내지 않는다', async () => {
+    const session = await stalled();
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(2);
+    vi.advanceTimersByTime(2_000); // 재촉(8초 지점) 뒤 6초라 정체 시간(8초) 전이다
+    expect(warnings(session)).toHaveLength(1);
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toHaveLength(2);
+    expect(warnings(session)).toHaveLength(2);
+    expect(JSON.stringify(warnings(session)[1])).not.toContain('재촉 글을 보냈습니다');
+  }, 30_000);
+
+  it('상한을 올리면 그 수만큼만 보낸다. 움직임이 다시 생겨도 이 실행의 센 수는 되돌리지 않는다', async () => {
+    const session = await stalled({ nudge: '1', max: '2' });
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(2);
+    await session.gateway.preTool({ tool_name: 'Read', tool_input: {} }); // 움직임
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(4);
+    await session.gateway.preTool({ tool_name: 'Read', tool_input: {} });
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(4);
+  }, 30_000);
+
+  it('사람 차례(권한 요청)에는 보내지 않고 지금처럼 알리기만 한다', async () => {
+    const session = await stalled();
+    await session.gateway.notification({ notification_type: 'permission_prompt', message: '권한' });
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('요청이 끝나 열린 실행이 없으면 보내지 않는다', async () => {
+    const session = await stalled();
+    await session.gateway.prompt({ prompt: '/clear' });
+    await session.gateway.stop({});
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('CLI가 떠 있지 않으면(셸일 수 있다) 글을 보내지 않고 알리기만 한다', async () => {
+    fake.cliAlive = false;
+    const session = await stalled();
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toEqual([]);
+    expect(warnings(session)).toHaveLength(1);
+  }, 30_000);
+
+  it('쓰기가 실패해도 알리기로 돌아가고 같은 실패를 되풀이하지 않는다', async () => {
+    fake.writeFails = true;
+    const session = await stalled();
+    vi.advanceTimersByTime(30_000);
+    expect(warnings(session)).toHaveLength(1);
+    fake.writeFails = false;
+    vi.advanceTimersByTime(30_000);
+    expect(fake.writes).toEqual([]);
+  }, 30_000);
+
+  it('재촉 상한은 실행마다 센다: 다음 실행은 다시 한 번 보낸다', async () => {
+    const session = await stalled();
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(2);
+    await session.gateway.stop({});
+    await session.gateway.prompt({ prompt: '[읽기만] 다른 설명' });
+    vi.advanceTimersByTime(12_000);
+    expect(fake.writes).toHaveLength(4);
+  }, 30_000);
+
+  it('잘못된 값은 조용히 넘기지 않고 실행을 열 때 던진다', async () => {
+    process.env.B_STUDIO_TERMINAL_STALL_NUDGE = 'yes';
+    const session = await open();
+    await expect(session.gateway.prompt({ prompt: '설명해줘' })).rejects.toThrow(/B_STUDIO_TERMINAL_STALL_NUDGE는 1/);
+    process.env.B_STUDIO_TERMINAL_STALL_NUDGE = '1';
+    process.env.B_STUDIO_TERMINAL_STALL_NUDGE_MAX = '0';
+    await expect(session.gateway.prompt({ prompt: '설명해줘' })).rejects.toThrow(/NUDGE_MAX/);
   }, 30_000);
 });
 
