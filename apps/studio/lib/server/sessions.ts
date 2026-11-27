@@ -4765,18 +4765,37 @@ async function sessionHeadSha(session: Session): Promise<string | undefined> {
  * review-round.ts의 runReviewRounds가 이를 보고 라운드를 시작하기 전에 바로 멈춘다(stopped)
  */
 function reviewAsk(session: Session, reviewerModelId?: string): ModelAsk | undefined {
-  // 설계 파이프라인(ADR-100): 사람이 리뷰어 모델을 명시적으로 고르면(구현과 다른 계열을 고르는 용도) 세션 백엔드와 무관하게
-  // 모델 레지스트리(api 호출 경로)로 그 모델을 부른다. api는 공급자가 여러 개라 레지스트리만으로도 다른 계열 리뷰어를 둘 수 있다
-  if (reviewerModelId) {
+  const backend = sessionBackend(session.snapshot);
+  const choice = reviewerChoice(session.project, backend, reviewerModelId);
+  // 설계 파이프라인(ADR-100): 사람이 리뷰마다 리뷰어 모델을 고르면(구현과 다른 계열을 고르는 용도) 세션 백엔드와 무관하게
+  // 모델 레지스트리(api 호출 경로)로 그 모델을 부른다. 못 쓰면 리뷰마다 고른 것만 버리고 설정·평소 경로로 돌아간다
+  if (choice?.via === 'registry' && reviewerModelId) {
     try {
       return planAskFromClient(clientForModel(modelById(reviewerModelId)));
     } catch (error) {
       console.error(`[b-studio] 리뷰어 모델 ${reviewerModelId}을 쓸 수 없어 세션의 평소 리뷰 경로로 돌아갑니다`, describe(error));
+      return reviewAsk(session);
     }
   }
-  const backend = sessionBackend(session.snapshot);
-  if (backend === 'claude-code') return claudeCodeAsk({ cwd: session.project.root });
-  if (backend === 'api') return planAskFromClient(clientForModel(routingDecision('AI 리뷰', 'build', session.snapshot.modelId).selected));
+  if (choice?.via === 'registry') return planAskFromClient(clientForModel(modelById(choice.model)));
+  if (choice?.via === 'claude-code') return claudeCodeAsk({ cwd: session.project.root, ...(choice.model ? { model: choice.model } : {}) });
+  if (choice?.via === 'api-route') return planAskFromClient(clientForModel(routingDecision('AI 리뷰', 'build', session.snapshot.modelId).selected));
+  return undefined;
+}
+
+/** 리뷰어를 부르는 길. registry: 모델 레지스트리 id로, claude-code: Claude Code에(model이 없으면 CLI 기본), api-route: 세션의 라우터로 */
+export type ReviewerChoice = { via: 'registry'; model: string } | { via: 'claude-code'; model?: string } | { via: 'api-route' };
+
+/**
+ * AI 리뷰를 어느 모델로 부를지(#1452). 리뷰마다 고른 리뷰어(레지스트리 id) → studio.yaml의 `models.review` → `B_STUDIO_REVIEW_MODEL`
+ * → 세션의 평소 경로 순서다. 설정 값의 뜻은 계획 모델(ADR-075)과 같다 — claude-code는 Claude Code에 넘기는 모델 이름, api는 레지스트리 id.
+ * 한 번만 묻는 호출 경로가 claude-code·api에만 있어(계획 호출과 같은 제약) 그 밖의 백엔드는 설정이 있어도 undefined다(지금과 같음)
+ */
+export function reviewerChoice(project: LoadedProject, backend: SessionMode, reviewerModelId?: string, env: Record<string, string | undefined> = process.env): ReviewerChoice | undefined {
+  if (reviewerModelId) return { via: 'registry', model: reviewerModelId };
+  const configured = project.spec.models?.review?.trim() || env.B_STUDIO_REVIEW_MODEL?.trim() || undefined;
+  if (backend === 'claude-code') return configured ? { via: 'claude-code', model: configured } : { via: 'claude-code' };
+  if (backend === 'api') return configured ? { via: 'registry', model: configured } : { via: 'api-route' };
   return undefined;
 }
 
@@ -4920,7 +4939,9 @@ export async function runReviewRound(id: string, { restart = false, reviewerMode
   // 파이프라인의 "성공" 판정에는 세지 않는다(reviewIndependence). 리뷰어를 따로 고르지 않으면 이 세션의 평소 경로를
   // 그대로 쓰므로(reviewAsk) 구현과 같은 계열이다
   const implementerFamily = modelFamily(sessionBackend(session.snapshot), session.snapshot.modelId);
-  const reviewerFamily = reviewerModelId ? modelFamily('api', reviewerModelId) : implementerFamily;
+  // 설정으로 고정한 리뷰 모델도 실제로 부르는 모델의 계열로 센다(#1452). claude-code는 어느 모델이든 같은 계열이다
+  const choice = reviewerChoice(session.project, sessionBackend(session.snapshot), reviewerModelId);
+  const reviewerFamily = choice?.via === 'registry' ? modelFamily('api', choice.model) : implementerFamily;
   const independence = reviewIndependence(implementerFamily, reviewerFamily);
 
   session.snapshot.review = { state: 'running', maxRounds: cfg.maxRounds, rounds: [], ...(reviewerModelId ? { reviewerModelId } : {}), independence };
