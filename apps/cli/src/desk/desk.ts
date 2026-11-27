@@ -1539,6 +1539,10 @@ export class DeskApp {
       }
     };
     switch (action.kind) {
+      case 'copyDraft':
+        // 밖 터미널의 클립보드로 보낸다(OSC 52). 서버는 부르지 않는다
+        this.#io.write(`\x1b]52;c;${Buffer.from(action.text).toString('base64')}\x07`);
+        return;
       case 'load':
         await reload();
         return;

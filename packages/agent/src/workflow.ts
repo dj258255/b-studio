@@ -205,6 +205,12 @@ export interface TestChangeEntry {
   path: string;
   from?: string;
   added?: string[];
+  /** 시험 설정 파일만: `added`의 줄 번호(바뀐 뒤 파일 기준, 1부터)와 바뀐 뒤 파일 내용. `package.json`은 바뀌기 전 내용(`before`, 새 파일이면 null)도 */
+  addedAt?: number[];
+  after?: string;
+  before?: string | null;
+  /** 시험 파일만: 이번 변경에서 지운 단언이 있을 때의 (더한 단언 수, 지운 단언 수) */
+  assertions?: { added: number; removed: number };
 }
 
 /** 시험 약화 검사의 입력. `allowed`는 사람이 이번 요청에 확인 변경을 허용했는지, `incomplete`는 변경 목록을 끝까지 읽지 못한 사유다 */
