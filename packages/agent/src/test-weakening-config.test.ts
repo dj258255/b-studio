@@ -339,7 +339,7 @@ describe('시험 약화 검사: 설정·스크립트·스냅샷·단언', () => 
 
   describe('커밋 보안 검토 지적', () => {
     it('Gradle: 시험 제외 줄에 의존성 exclude 모양을 덧붙여도 가려지지 않는다', async () => {
-      for (const snippet of ["test {\n    exclude '**/OrderTest*'  // exclude group: 'x'\n}", "test { exclude '**/Slow*' }; exclude(group = \"a\")"]) {
+      for (const snippet of ["test {\n    exclude '**/OrderTest*'  // exclude group: 'x'\n}", "test { exclude '**/Slow*' }; exclude(group = \"a\")", "test {\n    exclude '**/ //x/*Test*'\n}", "test {\n    exclude group: 'a'; label = ' //'; exclude '**/Slow*'\n}"]) {
         const store = await started({ 'build.gradle': 'plugins { id "java" }\n' });
         await write('build.gradle', `plugins { id "java" }\n${snippet}\n`);
         expect((await verdict(store))?.ok, snippet).toBe(false);
@@ -363,6 +363,15 @@ describe('시험 약화 검사: 설정·스크립트·스냅샷·단언', () => 
       const check = await verdict(store);
       expect(check?.ok).toBe(false);
       expect(check?.detail).toContain(`지운 시험 설정 파일: ${file}`);
+    });
+
+    it('설정 파일을 하위 폴더로 옮기면(같은 이름이어도) 돌려보낸다', async () => {
+      const store = await started({ 'pytest.ini': '[pytest]\naddopts = -q\n' });
+      await mkdir(path.join(root, 'sub'), { recursive: true });
+      await rename(path.join(root, 'pytest.ini'), path.join(root, 'sub/pytest.ini'));
+      const check = await verdict(store);
+      expect(check?.ok).toBe(false);
+      expect(check?.detail).toContain('pytest.ini → sub/pytest.ini');
     });
 
     it('package.json을 설정이 아닌 이름으로 옮기면 돌려보내고, 같은 이름으로 하위 폴더에 옮기면 통과한다', async () => {

@@ -174,8 +174,9 @@ impl Marker {
     /// 예외가 아닌 자리가 하나라도 있으면 표시다: 같은 줄에 의존성 모양을 덧붙여 시험 제외를 가리는 길을 막는다
     fn matches(&self, line: &str) -> bool {
         let Some(unless) = &self.unless else { return self.pattern.is_match(line) };
+        // 주석을 뗀 줄과 원래 줄 둘 다 본다: 따옴표 안의 ` //`가 뒤를 잘라 표시를 가리는 길을 막는다(어느 한쪽이라도 의존성이 아닌 exclude가 있으면 표시)
         let code = strip_line_comment(line);
-        self.pattern.find_iter(code).any(|found| !unless.is_match(&code[found.start()..]))
+        [code, line].iter().any(|text| self.pattern.find_iter(text).any(|found| !unless.is_match(&text[found.start()..])))
     }
 }
 
@@ -749,10 +750,10 @@ fn review_change(change: &Change, found: &mut Findings) {
             if change.status == 'R' && from_snapshot && !is_snapshot_path(&change.path) {
                 found.snapshots.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
             }
-            // 설정 파일을 같은 종류가 아닌 이름으로 옮기면 더는 읽히지 않는다(옮긴 곳의 내용은 따로 본다)
+            // 설정 파일은 어디로 옮기든 원래 프로젝트에 더는 적용되지 않는다(같은 종류의 이름이나 대소문자만 바뀐 이름도 건다. 옮긴 곳의 내용은 따로 본다)
             if change.status == 'R' {
                 let from_kind = change.from.as_deref().and_then(config_kind);
-                if from_kind.is_some() && from_kind != config_kind(&change.path) {
+                if from_kind.is_some() {
                     found.configs.push(format!("{} → {}", shown(change.from.as_deref().unwrap_or("")), shown(&change.path)));
                 }
             }
@@ -1502,6 +1503,11 @@ mod tests {
     #[test]
     fn gradle의_의존성_예외는_줄_전체가_의존성_exclude_문일_때만_적용한다() {
         for line in [
+            "    exclude '**/ //x/*Test*'",
+            "    exclude group: 'a'; label = ' //'; exclude '**/Slow*'",
+            "    exclude(group = \"a\"); println(\"x //\"); exclude(\"**/Slow*\")",
+            "    exclude \"a\" // 설명 exclude group: 'x'",
+            "    exclude '**/ //Slow*'; exclude group: 'a'",
             "    exclude '**/OrderTest*'  // exclude group: 'x'",
             "test { exclude '**/Slow*' }; exclude(group = \"a\")",
             "    exclude '**/Slow*'; exclude group: 'a'",
@@ -1509,10 +1515,12 @@ mod tests {
         ] {
             assert!(!config_hits("build.gradle", line).is_empty(), "{line}");
         }
+        // 주석 안에 따로 `exclude '…'`가 있으면 원래 줄에서 걸린다(넓은 쪽: 주석인지 문자열인지 따옴표를 추적하지 않는다)
+        assert!(!config_hits("build.gradle", "    exclude group: 'a'  // exclude 'x' 설명").is_empty());
         for line in [
             "    exclude group: 'org.slf4j'",
             "    implementation('x:y:1') { exclude group: 'org.slf4j' }",
-            "    implementation(\"x:y:1\") { exclude(group = \"a\", module = \"b\") }  // exclude 'x' 설명",
+            "    implementation(\"x:y:1\") { exclude(group = \"a\", module = \"b\") }  // 설명",
         ] {
             assert!(config_hits("build.gradle.kts", line).is_empty(), "{line}");
         }
@@ -1557,8 +1565,11 @@ mod tests {
         let moved = review_test_changes(&[change('R', "package.json.bak", Some("package.json"), Some(&[]))], false, None).unwrap();
         assert!(!moved.ok && moved.detail.unwrap().contains("package.json → package.json.bak"));
         assert!(review_test_changes(&[change('R', "x/old.ini", Some("pytest.ini"), Some(&[]))], false, None).is_some());
-        // 같은 종류로 옮기는 것은 지운 것이 아니다(내용은 따로 본다)
-        assert!(review_test_changes(&[change('R', "pyproject.toml", Some("pytest.ini"), Some(&[]))], false, None).is_none());
+        // 설정 파일을 어디로 옮기든(같은 종류의 이름, 다른 폴더, 대소문자만 다른 이름) 원래 프로젝트에는 더는 적용되지 않는다
+        for (to, from) in [("pyproject.toml", "pytest.ini"), ("sub/pytest.ini", "pytest.ini"), ("web/jest.config.js", "jest.config.js"), ("PYTEST.INI", "pytest.ini")] {
+            let check = review_test_changes(&[change('R', to, Some(from), Some(&[]))], false, None).unwrap();
+            assert!(check.detail.unwrap().contains(&format!("{from} → {to}")), "{from} → {to}");
+        }
         // 설정이 아닌 파일의 삭제, 허용이 있는 삭제
         assert!(review_test_changes(&[change('D', "src/app.ts", None, None)], false, None).is_none());
         let allowed = review_test_changes(&[change('D', "package.json", None, None)], true, None).unwrap();
