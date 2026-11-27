@@ -191,7 +191,7 @@ pub fn hooked_launch(kind: CliKind, argv: &[String], env: Option<&[(String, Stri
                 return false;
             }
             // 인자는 허용 목록으로 본다(`opencode_args_allowed`): `attach`·`run --attach`·`serve` 같은 하위 명령과 서버·설정을 바꾸는 옵션은 모두 붙지 않은 것이다
-            if !opencode_args_allowed(argv, env) {
+            if !opencode_args_allowed(argv) {
                 return false;
             }
             env_all_equal(env, "OPENCODE_CONFIG", expected)
@@ -283,12 +283,19 @@ fn gemini_args_allowed(argv: &[String]) -> bool {
 
 /// OpenCode의 설정에 플러그인을 더할 수 있는 환경 변수. 하나라도 있으면 붙지 않은 것이다
 const OPENCODE_PLUGIN_ENVS: [&str; 3] = ["OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_TUI_CONFIG"];
+/// OpenCode 1.18.33의 하위 명령 이름과 별칭(yargs 정의에서 읽은 것). 위치 인자가 이 이름이면 에이전트 TUI가 아니다
+const OPENCODE_SUBCOMMANDS: [&str; 46] = [
+    "acp", "attach", "run", "serve", "web", "mcp", "plugin", "plug", "providers", "auth", "models", "export", "import", "github", "pr", "session", "stats", "db", "debug", "agent", "upgrade",
+    "uninstall", "completion", "console", "generate", "login", "logout", "list", "ls", "add", "remove", "create", "config", "paths", "info", "lsp", "file", "files", "search", "diff", "patch",
+    "delete", "open", "orgs", "path", "diagnostics",
+];
+
 /// OpenCode의 인자가 우리가 아는 꼴뿐인가(여는 쪽이라 허용 목록이다). 근거는 설치된 1.18.33 바이너리 안 평문 JS의 yargs 정의다:
 /// 기본 명령 `$0 [project]`(TUI)의 옵션 중 `--model`·`-m`·`--session`·`-s`·`--prompt`·`--agent`·`--log-level`(값을 받음)과 `--continue`·`-c`·`--fork`·`--print-logs`(값 없음)만 허용한다.
 /// 그 밖의 옵션(`--attach`·`--dir`·`--port`·`--hostname`·`--mini`·`--auto`·`--pure` 등)과 하위 명령(`attach`·`run`·`serve`·`web`·`acp`·`mcp`·`plugin`·`auth` 등)은 모두 붙지 않은 것이다.
-/// 위치 인자는 `project`(시작할 경로) 하나뿐이고 `.`이거나 환경의 `PWD`와 같은 글일 때만 받는다(그 밖의 글은 하위 명령 이름일 수 있다). `--`와 값 자리의 `-`로 시작하는 글은 받지 않는다
+/// 위치 인자는 `project`(시작할 경로) 하나뿐이고 `.`일 때만 받는다(그 밖의 글은 하위 명령 이름일 수 있다. 환경의 `PWD`는 상대가 정할 수 있어 쓰지 않는다). `--`와 값 자리의 `-`로 시작하는 글은 받지 않는다
 /// (`--prompt --attach url`은 yargs가 `--prompt`를 비우고 `--attach`를 읽는다). `--옵션=값` 꼴은 값을 받는 긴 옵션만 받는다
-fn opencode_args_allowed(argv: &[String], env: &[(String, String)]) -> bool {
+fn opencode_args_allowed(argv: &[String]) -> bool {
     const VALUE_LONG: [&str; 5] = ["--model", "--session", "--prompt", "--agent", "--log-level"];
     const VALUE_SHORT: [&str; 2] = ["-m", "-s"];
     const FLAGS: [&str; 4] = ["--continue", "-c", "--fork", "--print-logs"];
@@ -324,7 +331,9 @@ fn opencode_args_allowed(argv: &[String], env: &[(String, String)]) -> bool {
             }
         } else {
             positionals += 1;
-            if positionals > 1 || !(element == "." || env_all_equal(env, "PWD", element)) {
+            // 환경(PWD)은 상대가 정할 수 있는 값이라 예외의 근거로 쓰지 않는다. 감싸개는 위치 인자를 넘기지 않으므로 없음 또는 `.`만 받는다.
+            // 하위 명령 이름은 `.`과 같을 수 없지만 이중 장치로 먼저 거절한다
+            if positionals > 1 || OPENCODE_SUBCOMMANDS.contains(&element) || element != "." {
                 return false;
             }
         }

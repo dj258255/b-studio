@@ -617,9 +617,9 @@ fn opencode_accepts_only_known_args() {
     assert!(ok(&[oc, "--session", "ses_1"]));
     assert!(ok(&[oc, "-m", "p/m", "-c", "--fork", "--agent", "build", "--log-level", "INFO", "--print-logs"]));
     assert!(ok(&[oc, "--prompt=요청"]));
-    // 프로젝트 경로: `.`이거나 PWD와 같은 글만
+    // 프로젝트 경로: `.`만(작업 폴더는 cwd가 정한다). 환경(PWD)은 상대가 정할 수 있는 값이라 예외의 근거로 쓰지 않는다
     assert!(ok(&[oc, "."]));
-    assert!(ok(&[oc, "/work/a"]));
+    assert!(!ok(&[oc, "/work/a"]));
     assert!(!ok(&[oc, "/work/b"]));
     assert!(!ok(&[oc, "src"]));
     assert!(!ok(&[oc, ".", "."]));
@@ -639,9 +639,16 @@ fn opencode_accepts_only_known_args() {
     assert!(!ok(&[oc, "--prompt"]));
     // `--` 뒤는 모두 위치 인자
     assert!(!ok(&[oc, "--", "attach"]));
-    // PWD를 읽지 못해도(없어도) 경로 인자는 `.`만 받는다
+    // PWD가 무엇이든 위치 인자는 `.`만 받는다: `PWD=serve opencode serve`처럼 하위 명령 이름을 PWD에 두어도 소용없다
     assert!(launch_oc(&[oc, "."], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG)])));
     assert!(!launch_oc(&[oc, "/work/a"], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG)])));
+    for command in ["serve", "attach", "run", "web", "acp", "mcp", "plug", "auth", "/work", "src"] {
+        let pwd: &[(&str, &str)] = &[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("PWD", command)];
+        assert!(!launch_oc(&[oc, command], Some(pwd)), "PWD={command}");
+        assert!(!launch_oc(&[oc, "--prompt", "x", command], Some(pwd)), "PWD={command} 뒤");
+    }
+    // 같은 PWD가 둘이어도 마찬가지다
+    assert!(!launch_oc(&[oc, "serve"], Some(&[("OPENCODE_CONFIG", OPENCODE_CONFIG), ("PWD", "serve"), ("PWD", "serve")])));
 }
 
 #[test]
@@ -665,6 +672,9 @@ fn gemini_accepts_only_known_args() {
         assert!(!ok(&[gm, flag]), "{flag}");
         assert!(!ok(&[gm, "-i", "요청", flag, "x"]), "{flag} 뒤");
     }
+    // 환경으로 정하는 예외는 없다: PWD·다른 변수가 하위 명령 이름이어도 거절은 그대로다
+    let tricky: &[(&str, &str)] = &[("GEMINI_CLI_HOME", GEMINI_SETTINGS), ("PWD", "mcp"), ("OLDPWD", "mcp")];
+    assert!(!launch_gm(&[gm, "mcp"], Some(tricky)));
     assert!(!ok(&[gm, "-i", "--sandbox"]));
     assert!(!ok(&[gm, "-i"]));
     assert!(!ok(&[gm, "--", "x"]));

@@ -8599,6 +8599,6 @@ SIGTERM을 무시하는 가짜 CLI(`ignoreSigterm`, 취소 신호가 CLI에 가�
 
 ### 해결
 
-- 두 갈래 모두 인자를 허용 목록으로 읽는다(ADR-241 덧붙임, ADR-242 11). OpenCode는 옵션 일곱 개와 `.`·`PWD`와 같은 위치 인자 하나만, Gemini는 옵션 몇 개와 하위 명령이 아닌 질문 낱말만 받는다. 시험은 하위 명령 이름 25개·옵션 24개(OpenCode)와 하위 명령 9개·옵션 33개(Gemini)를 각각 거절하고, 변이(값의 `-` 검사 제거·`PWD` 조건 제거·모르는 긴 옵션 허용·Gemini 하위 명령·허용 밖 옵션 허용)가 시험을 실패시켰다. `--`만 막는 줄을 빼도 시험이 통과한다(알 수 없는 긴 옵션 거절이 같은 것을 막는 겹침이다). 고치기 전 `opencode_accepts_only_known_args`는 `/work/b`를 받아들여 실패했고, `gemini_accepts_only_known_args`는 하위 명령 `mcp`를 받아들여 실패했다.
+- 두 갈래 모두 인자를 허용 목록으로 읽는다(ADR-241 덧붙임, ADR-242 11). OpenCode는 옵션 일곱 개와 없거나 `.`인 위치 인자만(처음에는 환경 `PWD`와 같은 글도 받았는데, `PWD`는 상대가 정할 수 있는 값이라 `PWD=serve opencode serve`가 하위 명령을 통과시켰다. 감싸개는 위치 인자를 넘기지 않으므로 예외를 없앴다. 고치기 전 `opencode_accepts_only_known_args`가 `PWD=/work/a`와 `/work/a`로 실패했다. 변이: `.`만 받는 조건 제거·모든 경로 허용은 시험이 실패했고, 하위 명령 이름 목록만 빼는 변이는 `.`만 받는 조건과 겹쳐 시험을 통과한다), Gemini는 옵션 몇 개와 하위 명령이 아닌 질문 낱말만 받는다. 시험은 하위 명령 이름 25개·옵션 24개(OpenCode)와 하위 명령 9개·옵션 33개(Gemini)를 각각 거절하고, 변이(값의 `-` 검사 제거·`PWD` 조건 제거·모르는 긴 옵션 허용·Gemini 하위 명령·허용 밖 옵션 허용)가 시험을 실패시켰다. `--`만 막는 줄을 빼도 시험이 통과한다(알 수 없는 긴 옵션 거절이 같은 것을 막는 겹침이다). 고치기 전 `opencode_accepts_only_known_args`는 `/work/b`를 받아들여 실패했고, `gemini_accepts_only_known_args`는 하위 명령 `mcp`를 받아들여 실패했다.
 - 하지 않은 것: OpenCode의 `OPENCODE_TEST_MANAGED_CONFIG_DIR`·`OPENCODE_TEST_HOME`·`OPENCODE_DISABLE_DEFAULT_PLUGINS`·`OPENCODE_PERMISSION` 환경 변수(바이너리 문자열로만 확인, 효과 미확인).
 
