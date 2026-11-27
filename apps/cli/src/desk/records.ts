@@ -12,6 +12,8 @@ import type { DeskUsage } from './types';
 export interface RecordsStats {
   rows: Array<{ backend: string; model: string; runs: number; passed: number; failed: number; errors: number; passRate?: number; medianCostUsd?: number }>;
   excluded: { asks: number; unfinished: number };
+  /** 모델별 묶음(#1439). 옛 서버는 주지 않는다 */
+  byModel?: RecordsModelRow[];
   byAccount?: RecordsAccountRow[];
   recentFailures?: RecordsFailure[];
 }
@@ -26,6 +28,21 @@ export interface RecordsAccountRow {
   passRate?: number;
   averageTokens?: number;
   averageCostUsd?: number;
+}
+
+/** 스튜디오 routing-types.ts의 RoutingModelRow */
+export interface RecordsModelRow {
+  backend: string;
+  model: string;
+  effort?: string;
+  runs: number;
+  oneShot: number;
+  passed: number;
+  failed: number;
+  reverted: number;
+  judged: number;
+  retries: number;
+  averageRetries?: number;
 }
 
 export interface RecordsFailure {
@@ -249,6 +266,7 @@ function aiLines(state: RecordsState, theme: Theme, width: number, names: Readon
       ` ${cell(label, nameWidth)} ${rightCell(String(row.runs), 5)}  ${meter}  ${rightCell(row.averageTokens === undefined ? '-' : compactTokens(row.averageTokens), 9)}  ${rightCell(cost(row.averageCostUsd), 9)}`,
     );
   }
+  lines.push(...modelLines(state.stats, theme, width));
   const failures = state.stats.recentFailures ?? [];
   if (failures.length > 0) {
     lines.push('', ` ${BOLD}${fg(theme, 'text')}최근 실패${RESET}`);
@@ -260,6 +278,45 @@ function aiLines(state: RecordsState, theme: Theme, width: number, names: Readon
   }
   const { asks, unfinished } = state.stats.excluded;
   if (asks || unfinished) lines.push('', ` ${muted}질문 ${asks}건과 끝나지 않은 실행 ${unfinished}건은 넣지 않았습니다. 플랫폼(도커·샌드박스) 실패도 AI 성적에 넣지 않습니다${RESET}`);
+  return lines;
+}
+
+/** 모양이 맞는 모델 줄만 남긴다. 서버가 잘못 준 값을 0으로 꾸며 보이지 않는다 */
+function validModelRows(rows: unknown): RecordsModelRow[] {
+  if (!Array.isArray(rows)) return [];
+  return rows.filter((row): row is RecordsModelRow => {
+    const value = row as Partial<RecordsModelRow> | null;
+    return (
+      typeof value === 'object' &&
+      value !== null &&
+      typeof value.backend === 'string' &&
+      typeof value.model === 'string' &&
+      count(value.runs) &&
+      count(value.oneShot) &&
+      count(value.failed) &&
+      count(value.reverted) &&
+      count(value.judged) &&
+      value.oneShot <= value.judged
+    );
+  });
+}
+
+/**
+ * 모델별 결과 표(#1439): 읽기만 한다. 모델 이름은 CLI가 알린 값이고, 알리지 않은 실행은 (모름)이다.
+ * 한 번에 통과는 게이트를 거친 실행 가운데 한 번도 실패하지 않고 통과해 되돌려지지 않은 수, 실패/되돌림은 실패·오류 수와 되돌려진 수다
+ */
+function modelLines(stats: RecordsStats, theme: Theme, width: number): string[] {
+  const rows = validModelRows(stats.byModel);
+  if (rows.length === 0) return [];
+  const muted = fg(theme, 'muted');
+  const nameWidth = Math.max(18, Math.min(34, Math.floor(width * 0.34)));
+  const lines = ['', ` ${BOLD}${fg(theme, 'text')}모델별${RESET}`, ` ${muted}${cell('AI · 모델', nameWidth)} ${rightCell('실행', 5)}  ${rightCell('한 번에 통과', 12)}  ${rightCell('평균 재시도', 11)}  ${rightCell('실패/되돌림', 11)}${RESET}`];
+  for (const row of rows) {
+    const label = `${backendLabel(row.backend)} · ${row.model}${row.effort ? ` (${row.effort})` : ''}`;
+    const retries = typeof row.averageRetries === 'number' && Number.isFinite(row.averageRetries) && row.averageRetries >= 0 ? row.averageRetries.toFixed(1) : '-';
+    lines.push(` ${cell(label, nameWidth)} ${rightCell(String(row.runs), 5)}  ${rightCell(`${row.oneShot}/${row.judged}`, 12)}  ${rightCell(retries, 11)}  ${rightCell(`${row.failed}/${row.reverted}`, 11)}`);
+  }
+  lines.push(` ${muted}모델 이름은 CLI가 알린 값이고, 알리지 않으면 (모름)입니다${RESET}`, ` ${muted}읽기만 하는 표입니다. 모델을 고르거나 바꾸지 않습니다${RESET}`);
   return lines;
 }
 

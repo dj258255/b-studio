@@ -379,9 +379,21 @@ function tokenLimitWarning(item: DeskItem, width: number, theme: Theme): string 
   return compose([{ text: `⚠ ${TOKEN_LIMIT_LABEL[item.tokenLimit.kind]} 토큰 한도 ${percent}%`, color: percent >= 95 ? 'red' : 'yellow' }, SEP, { text: note, color: 'muted' as const, flex: true }], width, theme);
 }
 
-/** 이 계정의 한도가 80%를 넘었을 때만 한 줄 경고(#934). 막대는 사용량 화면에 둔다. 구독 한도 경고가 없으면 토큰 한도 경고를 같은 자리에 보인다(#1427) */
+/**
+ * 같은 세션에서 모델이 바뀐 것을 보았을 때의 한 줄(#1439). 바뀐 뒤 캐시를 처음부터 다시 계산한다는 사실만 적는다 —
+ * 한도에 얼마나 영향을 주는지는 재지 않았으므로 말하지 않는다
+ */
+function modelChangeNotice(item: DeskItem, width: number, theme: Theme): string {
+  if (!item.modelChange) return '';
+  return compose([{ text: '모델이 바뀌어 캐시를 처음부터 다시 계산합니다', color: 'yellow', flex: true }], width, theme);
+}
+
+/**
+ * 이 계정의 한도가 80%를 넘었을 때만 한 줄 경고(#934). 막대는 사용량 화면에 둔다. 구독 한도 경고가 없으면 토큰 한도 경고를 같은 자리에 보이고(#1427),
+ * 그것도 없으면 모델이 바뀐 알림을 보인다(#1439)
+ */
 function limitWarning(limits: DeskLimits | undefined, item: DeskItem, width: number, theme: Theme, now: number): string {
-  return subscriptionWarning(limits, width, theme, now) || tokenLimitWarning(item, width, theme);
+  return subscriptionWarning(limits, width, theme, now) || tokenLimitWarning(item, width, theme) || modelChangeNotice(item, width, theme);
 }
 
 /** 이 계정의 구독 한도(5시간·주간)가 80%를 넘었을 때만 한 줄 경고(#934) */
