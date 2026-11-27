@@ -270,7 +270,7 @@ import { claudeCodeAsk } from './claude-code-ask';
 import { modelFamily } from './model-family';
 import { hasWatch, liveWatchViolation, verifyWatch } from './session-terminal-watch';
 import { settleDraftStops } from './session-terminal-draft';
-import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixRunner, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
+import { disposeSessionTerminal, interruptSessionTerminal, noteSessionTerminalCli, removeTerminalLeftovers, reviewFixBlockReason, sessionTerminalCliAlive, sessionTerminalInputState, sessionTerminalMode, terminalPause, warnSessionTerminal, writeSessionTerminal, type TerminalPause } from './session-terminal';
 import { terminalPasteText } from '../terminal';
 import { closeSessionGateway, ensureSessionGateway, type TerminalGatewayHandlers } from './terminal-gateway';
 import type { TokenPricing } from './token-report';
@@ -4845,48 +4845,30 @@ async function reviewExternalContext(session: Session, diff: string): Promise<st
   return excerpts.length > 0 ? buildPrReviewExternalContext(excerpts) : undefined;
 }
 
-async function reviewFixOnTerminal(session: Session): Promise<boolean> {
+/** 고침을 세션 터미널로 보낼 수 없는 까닭. 보낼 수 있으면 undefined(reviewFixBlockReason이 정한다) */
+async function reviewFixBlock(session: Session): Promise<string | undefined> {
   const backend = sessionBackend(session.snapshot);
   let apiKeyReady = false;
+  let apiKeyError: string | undefined;
   if (backend === 'api' && sessionTerminalAllowed() && sessionTerminalMode() === 'host') {
     try {
       await selfAgentModel(session);
       apiKeyReady = true;
-    } catch {
-      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 채팅식으로 둔다
+    } catch (error) {
+      // 키·모델을 정하지 못하면 터미널이 열리지 않는다 — 까닭을 적어 고침 실패로 닫는다(채팅식으로 돌아가지 않는다)
+      apiKeyError = describe(error);
     }
   }
-  return reviewFixRunner({ allowed: sessionTerminalAllowed(), backend, apiKeyReady }) === 'terminal';
+  return reviewFixBlockReason({ allowed: sessionTerminalAllowed(), backend, apiKeyReady, ...(apiKeyError ? { apiKeyError } : {}) });
 }
 
-/** 터미널을 쓸 수 없으면 sendMessage로 고침을 보내고 이 요청의 run_finished를 기다린다(task-plans.ts의 runAndWait·waitForEvent와 같은 방법) */
+/** AI 리뷰의 고침을 세션 터미널로 보내고 그 실행이 닫히기를 기다린다. 터미널로 보낼 수 없으면 채팅식으로 돌아가지 않고 까닭을 적어 고침 실패로 돌려준다 */
 async function reviewRequestFix(session: Session, request: string): Promise<ReviewFixResult> {
   const id = session.snapshot.id;
-  // 세션 터미널을 쓸 수 있으면 터미널에서 돌린다(터미널이 열리지 않는 서버·키 없는 API 세션은 채팅식으로 둔다)
-  if (await reviewFixOnTerminal(session)) {
-    const { runReviewFixOnTerminal } = await import('./terminal-lane');
-    return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
-  }
-  let finished: Extract<StudioEvent, { type: 'run_finished' }> | undefined;
-  let runId: string | undefined;
-  const unsubscribe = subscribe(id, (event) => {
-    if (event.type === 'run_finished' && (runId === undefined || event.runId === runId)) finished = event;
-  });
-  try {
-    ({ runId } = sendMessage(id, request, { allowBreaking: false, by: 'ai-review' }));
-    const started = Date.now();
-    while (finished?.runId !== runId) {
-      if (Date.now() - started > REVIEW_FIX_TIMEOUT_MS) {
-        return { ok: false, error: `AI 리뷰의 고침 요청이 ${Math.round(REVIEW_FIX_TIMEOUT_MS / 60_000)}분 안에 끝나지 않았습니다` };
-      }
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
-    }
-    if (finished.status !== 'done') return { ok: false, error: finished.summary };
-    const checkpoint = session.snapshot.checkpoints[0];
-    return { ok: true, checkpoint: checkpoint ? { sha: checkpoint.sha, shortSha: checkpoint.shortSha } : undefined };
-  } finally {
-    unsubscribe();
-  }
+  const blocked = await reviewFixBlock(session);
+  if (blocked) return { ok: false, error: blocked };
+  const { runReviewFixOnTerminal } = await import('./terminal-lane');
+  return runReviewFixOnTerminal(id, request, { timeoutMs: REVIEW_FIX_TIMEOUT_MS, latestCheckpoint: () => session.snapshot.checkpoints[0] });
 }
 
 /**
